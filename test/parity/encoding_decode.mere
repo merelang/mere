@@ -96,6 +96,68 @@ let _ = cp "ff";
 let _ = cp "808182838485868788898a8b8c8d8e8f";
 let _ = cp "909192939495969798999a9b9c9d9e9f";
 
+let sj = fn (hex: str) ->
+  print (hex ++ "  -> " ++ cps (Jis.decode_shift_jis (bytes_of_hex hex)));
+let ej = fn (hex: str) ->
+  print (hex ++ "  -> " ++ cps (Jis.decode_euc_jp (bytes_of_hex hex)));
+
+let _ = print "=== Shift_JIS ===";
+let _ = sj "41";
+let _ = sj "7f";
+let _ = sj "80";
+let _ = sj "a1";
+let _ = sj "b1";
+let _ = sj "df";
+let _ = sj "a0";
+let _ = sj "fd";
+let _ = sj "8140";
+let _ = sj "82a0";
+let _ = sj "93fa967b8cea";
+let _ = sj "eaa4";
+let _ = sj "81";
+let _ = sj "8120";
+let _ = sj "81fd";
+
+let _ = print "=== Shift_JIS: the lead offset is two numbers, not one ===";
+let _ = sj "9ffc";
+let _ = sj "e040";
+let _ = sj "817e";
+let _ = sj "8180";
+
+let _ = print "=== Shift_JIS: the private-use window past the table ===";
+let _ = sj "f040";
+let _ = sj "f9fc";
+let _ = sj "fcfc";
+
+let _ = print "=== Shift_JIS: an unmapped pair puts an ASCII trail back ===";
+let _ = sj "8240";
+let _ = sj "8241";
+
+let _ = print "=== EUC-JP ===";
+let _ = ej "41";
+let _ = ej "a1a1";
+let _ = ej "a4a2";
+let _ = ej "c6fc";
+let _ = ej "a1";
+let _ = ej "ff";
+let _ = ej "80";
+let _ = ej "a1ff";
+
+let _ = print "=== EUC-JP: 0x8E is katakana in two bytes ===";
+let _ = ej "8ea1";
+let _ = ej "8ec1";
+let _ = ej "8edf";
+let _ = ej "8e41";
+let _ = ej "8e";
+
+let _ = print "=== EUC-JP: 0x8F selects the other table, in three ===";
+let _ = ej "8fa2af";
+let _ = ej "8fa1a1";
+let _ = ej "8ffefe";
+let _ = ej "8f41";
+let _ = ej "8fa1";
+let _ = ej "8fa1ff";
+
 let _ = print "=== labels ===";
 let l = fn (s: str) ->
   match Encoding.label_of s with
@@ -122,9 +184,12 @@ let _ = d "utf-8" "e38182";
 let _ = d "windows-1252" "8082";
 let _ = d "shift_jis" "82a0";
 let _ = d "euc-jp" "a4a2";
+let _ = d "iso-2022-jp" "82a0";
 
-let _ = print "=== decode_labelled falls back to UTF-8 ===";
+let _ = print "=== decode_labelled: every label in the table now has a decoder ===";
 let _ = print (cps (Encoding.decode_labelled "utf-8" (bytes_of_hex "e38182")));
 let _ = print (cps (Encoding.decode_labelled "nonsense" (bytes_of_hex "e38182")));
-let _ = print (cps (Encoding.decode_labelled "shift_jis" (bytes_of_hex "e38182")));
+let _ = print (cps (Encoding.decode_labelled "shift_jis" (bytes_of_hex "82a0")));
+let _ = print (cps (Encoding.decode_labelled "  X-SJIS " (bytes_of_hex "82a0")));
+let _ = print (cps (Encoding.decode_labelled "euc-jp" (bytes_of_hex "a4a2")));
 0

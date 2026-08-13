@@ -1,0 +1,150 @@
+// contrib/encoding/jis.mere — Shift_JIS and EUC-JP.
+//
+// Both are the same shape: mostly ASCII, a single-byte range for half-width
+// katakana, and a two-byte range whose pair becomes a "pointer" into a table.
+// The tables are in jis_index.mere, generated rather than transcribed.
+//
+// What is worth knowing before reading the code:
+//
+//   * **Shift_JIS's lead offset is not one number.** A lead below 0xA0 subtracts
+//     0x81, one above subtracts 0xC1, because 0xA1..0xDF is the single-byte
+//     katakana range sitting in the middle of what would otherwise be a
+//     contiguous lead range. The trail skips 0x7F the same way.
+//   * **Shift_JIS has a private-use window.** Pointers 8836..10715 — reachable
+//     from leads 0xF0..0xFC, past the end of the table — are U+E000 onwards
+//     rather than errors. Those are the vendor extensions the encoding grew.
+//   * **An unmapped pair puts its trail byte back.** If the pair is not a
+//     character and the trail was ASCII, the trail is reconsidered on its own:
+//     `81 41` is U+FFFD then `A`, not one error swallowing two bytes. The same
+//     rule as UTF-8's, for the same reason — a byte that could still start
+//     something is not spent.
+//   * **EUC-JP has two tables and a three-byte form.** A 0x8F lead selects JIS X
+//     0212 for the pair that follows it, so the sequence is three bytes long.
+//     0x8E selects half-width katakana instead, in two.
+
+import "jis_index.mere";
+
+module Jis {
+
+  let _replacement = 65533;   // U+FFFD
+
+  let _emit = fn buf -> fn (cp: int) -> strbuf_push buf (str_of_codepoint cp);
+  let _err = fn buf -> _emit buf _replacement;
+
+  // --- Shift_JIS ---------------------------------------------------------
+
+  let _sj_lead_offset = fn (lead: int) -> if lead < 0xA0 then 0x81 else 0xC1;
+  let _sj_trail_offset = fn (b: int) -> if b < 0x7F then 0x40 else 0x41;
+
+  let _sj_is_lead = fn (b: int) ->
+    (b >= 0x81 && b <= 0x9F) || (b >= 0xE0 && b <= 0xFC);
+
+  let _sj_is_trail = fn (b: int) ->
+    (b >= 0x40 && b <= 0x7E) || (b >= 0x80 && b <= 0xFC);
+
+  // `lead` is 0 when there is no pending byte, which is safe because 0x00 is
+  // never a lead.
+  let rec _sj = fn (b: bytes) -> fn (i: int) -> fn (n: int) -> fn buf ->
+               fn (lead: int) ->
+    if i >= n then
+      // A lead left pending at the end of the stream is one error.
+      let _ = if lead == 0 then () else _err buf in
+      strbuf_to_str buf
+    else
+      let x = bytes_get b i in
+      if lead == 0 then
+        if x <= 0x80 then
+          // 0x80 included: Shift_JIS maps it to U+0080 rather than rejecting it.
+          let _ = _emit buf x in
+          _sj b (i + 1) n buf 0
+        else if x >= 0xA1 && x <= 0xDF then
+          let _ = _emit buf (0xFF61 + x - 0xA1) in
+          _sj b (i + 1) n buf 0
+        else if _sj_is_lead x then _sj b (i + 1) n buf x
+        else
+          // 0xA0 and 0xFD..0xFF are nothing at all.
+          let _ = _err buf in
+          _sj b (i + 1) n buf 0
+      else if _sj_is_trail x then
+        let p = (lead - _sj_lead_offset lead) * 188 + x - _sj_trail_offset x in
+        if p >= 8836 && p <= 10715 then
+          // The private-use window, which is a range rather than a table.
+          let _ = _emit buf (0xE000 + p - 8836) in
+          _sj b (i + 1) n buf 0
+        else
+          let cp = JisIndex.code_point_208 p in
+          if cp >= 0 then
+            let _ = _emit buf cp in
+            _sj b (i + 1) n buf 0
+          else if x <= 0x7F then
+            // Not a character, and the trail could still be one on its own — so
+            // the error is emitted and the byte is reconsidered, not consumed.
+            let _ = _err buf in
+            _sj b i n buf 0
+          else
+            let _ = _err buf in
+            _sj b (i + 1) n buf 0
+      else if x <= 0x7F then
+        let _ = _err buf in
+        _sj b i n buf 0
+      else
+        let _ = _err buf in
+        _sj b (i + 1) n buf 0;
+
+  let decode_shift_jis = fn (b: bytes) ->
+    _sj b 0 (bytes_len b) (strbuf_new ()) 0;
+
+  // --- EUC-JP ------------------------------------------------------------
+  //
+  // Three states rather than two: `lead` is the pending byte and `x0212` says
+  // which table the pending pair belongs to, set when a 0x8F was accepted. The
+  // 0x8F case is the only three-byte form.
+
+  let rec _ej = fn (b: bytes) -> fn (i: int) -> fn (n: int) -> fn buf ->
+               fn (lead: int) -> fn (x0212: bool) ->
+    if i >= n then
+      let _ = if lead == 0 then () else _err buf in
+      strbuf_to_str buf
+    else
+      let x = bytes_get b i in
+      if lead == 0x8E && x >= 0xA1 && x <= 0xDF then
+        let _ = _emit buf (0xFF61 + x - 0xA1) in
+        _ej b (i + 1) n buf 0 false
+      else if lead == 0x8F && x >= 0xA1 && x <= 0xFE then
+        // Not a character yet: 0x8F only chose the table, and this byte becomes
+        // the lead of the pair that follows.
+        _ej b (i + 1) n buf x true
+      else if lead == 0 then
+        if x <= 0x7F then
+          let _ = _emit buf x in
+          _ej b (i + 1) n buf 0 false
+        else if x == 0x8E || x == 0x8F || (x >= 0xA1 && x <= 0xFE) then
+          _ej b (i + 1) n buf x false
+        else
+          let _ = _err buf in
+          _ej b (i + 1) n buf 0 false
+      else
+        // A pending lead. Both bytes must be in 0xA1..0xFE to be a pair at all,
+        // which is why 0x8E and 0x8F reach here only when their own byte was out
+        // of range — and then fail, as they should.
+        let cp =
+          if lead >= 0xA1 && lead <= 0xFE && x >= 0xA1 && x <= 0xFE then
+            let p = (lead - 0xA1) * 94 + x - 0xA1 in
+            (if x0212 then JisIndex.code_point_212 p
+             else JisIndex.code_point_208 p)
+          else 0 - 1 in
+        if cp >= 0 then
+          let _ = _emit buf cp in
+          _ej b (i + 1) n buf 0 false
+        else if x < 0xA1 || x > 0xFE then
+          // The trail was never part of a pair, so it goes back.
+          let _ = _err buf in
+          _ej b i n buf 0 false
+        else
+          let _ = _err buf in
+          _ej b (i + 1) n buf 0 false;
+
+  let decode_euc_jp = fn (b: bytes) ->
+    _ej b 0 (bytes_len b) (strbuf_new ()) 0 false;
+
+}
