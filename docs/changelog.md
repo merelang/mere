@@ -4,6 +4,62 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.239 — 2026-08-13
+
+_A grapheme cluster is what a reader calls a character, and it is what a renderer has to
+advance by. Four of UAX #29's rules are not local, and those four are the whole difficulty._
+
+```
+  contrib/unicode/grapheme.mere   UAX #29 extended grapheme clusters
+  contrib/unicode/gcb_table.mere  generated: 1,631 ranges, three UCD properties folded into one
+  scripts/gen_unicode_tables.sh   derives the table from the UCD
+  scripts/unicode_parity.sh       8,509 inputs against node's Intl.Segmenter
+```
+
+**`Grapheme.clusters`.** `á` is one cluster, `👩‍👩‍👦` is one, `🇯🇵` is one, `\r\n` is one. Code
+points are not the unit and neither are bytes — cursor movement, selection and glyph advance
+all break visibly when the wrong one is used.
+
+Most of UAX #29 is local: read the class of the code points on either side of a position and
+decide. **Four rules are not, and the walk carries exactly four pieces of state, one per
+rule.** GB12/13 needs how many regional indicators precede rather than whether one does
+(`🇯🇵` is one cluster, `🇯🇵🇯` is two). GB11 needs whether the ZWJ was itself preceded by
+`ExtPict Extend*` — the ZWJ alone does not say. GB9c needs whether a Linker appeared between
+two Consonants, which is why the InCB property is in the table at all. And GB9b is decided by
+the **left** character, the only rule that looks that way. `breaks_between` is written in the
+standard's own order so it can be checked against it line by line.
+
+**Three UCD properties folded into one class per code point**, from three different files
+because that is how the UCD is arranged — and the folding is only sound because of three
+facts the generator **asserts** rather than trusts: every `Extended_Pictographic` code point
+has `Grapheme_Cluster_Break=Other` (all 2,848), `InCB=Consonant` is disjoint from the
+non-Other breaks, and `InCB=Linker`/`Extend` live inside `Extend` or `ZWJ`.
+
+**The table shape carried over unchanged from the JIS slice**, which is the point of having
+settled it: 1,631 ranges as a fixed-width hexadecimal literal, fourteen characters each, with
+`Other` as the unstored default. A lookup is a binary search rather than an index this time,
+and nothing else about the decision changed — including the reason for hex, which is still
+that a `str` is `strlen`-based on the LLVM backend.
+
+**The Unicode version is pinned to the oracle's, before being bitten rather than after.**
+`Intl.Segmenter` follows whatever node's ICU implements; a table of a different vintage would
+differ from it for reasons that are neither a bug nor interesting. Both the generator and the
+harness assert `process.versions.unicode`, so a node upgrade fails with one line instead of a
+page of diffs. That is the node 22/24 lesson from `url_parity` applied in advance.
+
+**The oracle here is worth more than the others in this repository.** It is not a second
+reading of a specification this code also reads — it is ICU, which is what browsers ship.
+8,509 inputs, none hand-picked: every ordered pair from 22 class representatives, every triple
+from 8, every quadruple from 7 (which is what reaches `ExtPict Extend ZWJ ExtPict`), runs of
+1..8 regional indicators and 1..5 of each repeating shape, and **both ends of every one of the
+1,631 ranges in the generated table** — so a shifted range shows up as a segmentation
+difference rather than waiting for a character nobody tested. All agreeing.
+
+The corpus is generated once and written to a file both sides read, because writing the same
+list of code points twice in two languages is how the two lists come to disagree.
+
+---
+
 ## v0.1.238 — 2026-08-13
 
 _The first table in this project too large to write as code — so it is generated, and the

@@ -1,0 +1,88 @@
+// contrib/unicode's grapheme clustering, held to one output on every backend.
+// Correctness against UAX #29 is scripts/unicode_parity.sh's job (8,509 inputs
+// against node's Intl.Segmenter, including both ends of all 1,631 table ranges);
+// this file is about the four backends agreeing.
+//
+// The two questions are not the same one, and this arc has already shown why:
+// the table is a 22,834-character string literal read with char_at, and a
+// backend whose strings behaved differently would produce a different table
+// rather than a different algorithm.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+import "../../contrib/unicode/grapheme.mere";
+
+let show1 = fn (label: str) -> fn (s: str) ->
+  let cs = Grapheme.clusters s in
+  print (label ++ "  " ++ show (list_len cs) ++ "  [" ++ str_join "|" cs ++ "]");
+
+// Built from code points rather than written as literals where the character is
+// invisible or would not survive a copy — a combining mark on its own, a ZWJ.
+let cp = fn (n: int) -> str_of_codepoint n;
+
+let _ = print "=== the classes, one code point each ===";
+let _ = show1 "ascii      " "A";
+let _ = show1 "cjk        " "日";
+let _ = show1 "extend     " (cp 0x0300);
+let _ = show1 "zwj        " (cp 0x200D);
+let _ = show1 "ri         " (cp 0x1F1EF);
+let _ = show1 "extpict    " (cp 0x1F600);
+let _ = show1 "linker     " (cp 0x094D);
+let _ = show1 "consonant  " (cp 0x0915);
+
+let _ = print "=== GB3/4/5: CR LF and controls ===";
+let _ = show1 "crlf       " (cp 0x0D ++ cp 0x0A);
+let _ = show1 "lfcr       " (cp 0x0A ++ cp 0x0D);
+let _ = show1 "a crlf b   " ("a" ++ cp 0x0D ++ cp 0x0A ++ "b");
+let _ = show1 "tab extend " (cp 0x09 ++ cp 0x0300);
+let _ = show1 "a tab      " ("a" ++ cp 0x09);
+
+let _ = print "=== GB6/7/8: Hangul ===";
+let _ = show1 "L V T      " (cp 0x1100 ++ cp 0x1161 ++ cp 0x11A8);
+let _ = show1 "LV T       " (cp 0xAC00 ++ cp 0x11A8);
+let _ = show1 "LVT T      " (cp 0xAC01 ++ cp 0x11A8);
+let _ = show1 "T V        " (cp 0x11A8 ++ cp 0x1161);
+let _ = show1 "L L V T    " (cp 0x1100 ++ cp 0x1100 ++ cp 0x1161 ++ cp 0x11A8);
+
+let _ = print "=== GB9/9a/9b: extend, spacing mark, prepend ===";
+let _ = show1 "a + acute  " ("a" ++ cp 0x0300);
+let _ = show1 "two marks  " ("e" ++ cp 0x0301 ++ cp 0x0327);
+let _ = show1 "spacingmark" ("a" ++ cp 0x0903);
+let _ = show1 "prepend a  " (cp 0x0600 ++ "a");
+let _ = show1 "a prepend  " ("a" ++ cp 0x0600);
+let _ = show1 "vs16       " (cp 0x1F600 ++ cp 0xFE0F);
+
+let _ = print "=== GB9c: Indic conjuncts, and where the run stops ===";
+let _ = show1 "C L C      " (cp 0x0915 ++ cp 0x094D ++ cp 0x0915);
+let _ = show1 "C L C L C  " (cp 0x0915 ++ cp 0x094D ++ cp 0x0915 ++ cp 0x094D ++ cp 0x0915);
+let _ = show1 "C C        " (cp 0x0915 ++ cp 0x0915);
+let _ = show1 "C L a      " (cp 0x0915 ++ cp 0x094D ++ "a");
+let _ = show1 "C E L C    " (cp 0x0915 ++ cp 0x0300 ++ cp 0x094D ++ cp 0x0915);
+let _ = show1 "C a L C    " (cp 0x0915 ++ "a" ++ cp 0x094D ++ cp 0x0915);
+
+let _ = print "=== GB11: emoji ZWJ, with and without an Extend ===";
+let _ = show1 "P ZWJ P    " (cp 0x1F600 ++ cp 0x200D ++ cp 0x1F600);
+let _ = show1 "P E ZWJ P  " (cp 0x1F600 ++ cp 0x0300 ++ cp 0x200D ++ cp 0x1F600);
+let _ = show1 "P ZWJ a    " (cp 0x1F600 ++ cp 0x200D ++ "a");
+let _ = show1 "a ZWJ P    " ("a" ++ cp 0x200D ++ cp 0x1F600);
+let _ = show1 "P ZWJ P ZWJ P" (cp 0x1F600 ++ cp 0x200D ++ cp 0x1F600 ++ cp 0x200D ++ cp 0x1F600);
+let _ = show1 "family     " "👩‍👩‍👦";
+let _ = show1 "skin tone  " "👍🏽";
+
+let _ = print "=== GB12/13: regional indicators pair up ===";
+let _ = show1 "RI         " (cp 0x1F1EF);
+let _ = show1 "RI RI      " (cp 0x1F1EF ++ cp 0x1F1F5);
+let _ = show1 "RI x3      " (cp 0x1F1EF ++ cp 0x1F1F5 ++ cp 0x1F1EF);
+let _ = show1 "RI x4      " (cp 0x1F1EF ++ cp 0x1F1F5 ++ cp 0x1F1FA ++ cp 0x1F1F8);
+let _ = show1 "RI x5      " (cp 0x1F1EF ++ cp 0x1F1F5 ++ cp 0x1F1FA ++ cp 0x1F1F8 ++ cp 0x1F1EF);
+let _ = show1 "a RI RI    " ("a" ++ cp 0x1F1EF ++ cp 0x1F1F5);
+let _ = show1 "RI a RI    " (cp 0x1F1EF ++ "a" ++ cp 0x1F1F5);
+
+let _ = print "=== text ===";
+let _ = show1 "abc        " "abc";
+let _ = show1 "japanese   " "日本語";
+let _ = show1 "thai       " "กำ";
+let _ = show1 "devanagari " "क्ष";
+let _ = show1 "empty      " "";
+let _ = show1 "count only " (show (Grapheme.count "🇯🇵á👩‍👩‍👦"));
+0
