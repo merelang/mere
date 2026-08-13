@@ -3355,6 +3355,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       || name = "str_of_float" || name = "float_of_str"
       || name = "f_neg" || name = "f_abs"
       || name = "sqrt" || name = "sin" || name = "cos" || name = "tan"
+      || name = "floor" || name = "ceil" || name = "round"
       || name = "print" || name = "fail"
       || name = "fst" || name = "snd"
     in
@@ -4225,12 +4226,18 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     r
   (* Phase 34.4: libm functions (intrinsics where available) *)
   | Ast.App ({ node = Ast.Var fname; _ }, a_e)
-    when fname = "sqrt" || fname = "sin" || fname = "cos" || fname = "tan" ->
+    when fname = "sqrt" || fname = "sin" || fname = "cos" || fname = "tan"
+         || fname = "floor" || fname = "ceil" || fname = "round" ->
     let llvm_fn = match fname with
       | "sqrt" -> "@llvm.sqrt.f64"
       | "sin" -> "@llvm.sin.f64"
       | "cos" -> "@llvm.cos.f64"
       | "tan" -> "@tan"  (* tan has no LLVM intrinsic, so use libm *)
+      | "floor" -> "@llvm.floor.f64"
+      | "ceil" -> "@llvm.ceil.f64"
+      (* llvm.round is half-away-from-zero, which is what C's round() and the
+         interpreter both do — llvm.roundeven would be the other one. *)
+      | "round" -> "@llvm.round.f64"
       | _ -> "@sqrt"
     in
     let av = emit_expr env a_e in

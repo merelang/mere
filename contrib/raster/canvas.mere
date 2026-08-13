@@ -1,0 +1,207 @@
+// contrib/raster/canvas.mere — a pixel buffer and the operations that write to it.
+//
+// Pure in the sense that matters: nothing here opens a window. A canvas is bytes,
+// and what a browser needs first is to draw a page into bytes and compare them
+// with a reference — which needs no display at all. The window comes later and
+// only for interaction.
+//
+// **Premultiplied alpha**, and that is a decision rather than a detail. With
+// straight alpha, source-over needs a division per channel and stops being
+// associative once you composite twice; premultiplied makes it
+//
+//     out = src + dst * (255 - src_alpha) / 255
+//
+// on every channel including alpha, with no division by the result and no special
+// case for a transparent destination. The cost is that `rgba` multiplies on the
+// way in and `to_ppm` divides on the way out, both in one place.
+//
+// Coverage is separate from alpha and multiplies it: the rasterizer says "this
+// pixel is 40% inside the shape", the colour says "and the shape is 50% opaque",
+// and the two compose. Keeping them apart is what lets the same blend serve both
+// antialiasing and translucency.
+//
+// Usage:
+//   import "contrib/raster/canvas.mere";
+//   let c = Canvas.new_ 64 48;
+//   let _ = Canvas.clear c (Canvas.rgba 255 255 255 255);
+//   let _ = Canvas.fill_rect c (Canvas.full_clip c) 8 8 16 12 (Canvas.rgba 255 0 0 255);
+//   write_bytes "out.ppm" (Canvas.to_ppm c (Canvas.rgba 255 255 255 255))
+
+type canvas = { w: int, h: int, px: ByteBuf[R] };
+
+// Half-open: x0 <= x < x1, y0 <= y < y1. Half-open because every clip
+// intersection and every span end is then a max/min with no fencepost.
+type clip = { x0: int, y0: int, x1: int, y1: int };
+
+module Canvas {
+
+  // --- colours -----------------------------------------------------------
+  // A colour is one int, 0xRRGGBBAA, premultiplied. `rgba` takes the straight
+  // values a caller thinks in and does the multiply.
+
+  // a*b/255, rounded, and exact at both ends: 255*255 must give 255 and not 256.
+  // The obvious `(t + t/255)/255` gives 256 there, which overflows the byte into
+  // the next channel of the packed colour and corrupts everything downstream —
+  // the first smoke test drew an opaque black canvas instead of a white one. The
+  // shift-by-256 form is the standard one and is what actually rounds.
+  let _mul255 = fn (a: int) -> fn (b: int) ->
+    let t = a * b + 128 in (t + t / 256) / 256;
+
+  let rgba = fn (r: int) -> fn (g: int) -> fn (b: int) -> fn (a: int) ->
+    let rp = _mul255 r a in
+    let gp = _mul255 g a in
+    let bp = _mul255 b a in
+    rp * 16777216 + gp * 65536 + bp * 256 + a;
+
+  let red_of = fn (c: int) -> (c / 16777216) % 256;
+  let green_of = fn (c: int) -> (c / 65536) % 256;
+  let blue_of = fn (c: int) -> (c / 256) % 256;
+  let alpha_of = fn (c: int) -> c % 256;
+
+  // --- canvas ------------------------------------------------------------
+
+  let new_ = fn (w: int) -> fn (h: int) ->
+    canvas { w = w, h = h, px = bytebuf_new (w * h * 4) };
+
+  let full_clip = fn (c: canvas) -> clip { x0 = 0, y0 = 0, x1 = c.w, y1 = c.h };
+
+  let clip_of = fn (x0: int) -> fn (y0: int) -> fn (x1: int) -> fn (y1: int) ->
+    clip { x0 = x0, y0 = y0, x1 = x1, y1 = y1 };
+
+  let clip_intersect = fn (a: clip) -> fn (b: clip) ->
+    clip { x0 = max a.x0 b.x0, y0 = max a.y0 b.y0,
+           x1 = min a.x1 b.x1, y1 = min a.y1 b.y1 };
+
+  let clip_is_empty = fn (a: clip) -> a.x1 <= a.x0 || a.y1 <= a.y0;
+
+  let _idx = fn (c: canvas) -> fn (x: int) -> fn (y: int) -> (y * c.w + x) * 4;
+
+  // The stored, premultiplied pixel.
+  let get = fn (c: canvas) -> fn (x: int) -> fn (y: int) ->
+    let i = _idx c x y in
+    bytebuf_get c.px i * 16777216 + bytebuf_get c.px (i + 1) * 65536
+    + bytebuf_get c.px (i + 2) * 256 + bytebuf_get c.px (i + 3);
+
+  let set = fn (c: canvas) -> fn (x: int) -> fn (y: int) -> fn (col: int) ->
+    let i = _idx c x y in
+    let _ = bytebuf_set c.px i (red_of col) in
+    let _ = bytebuf_set c.px (i + 1) (green_of col) in
+    let _ = bytebuf_set c.px (i + 2) (blue_of col) in
+    bytebuf_set c.px (i + 3) (alpha_of col);
+
+  // --- the one blend -----------------------------------------------------
+  // Source-over, premultiplied, with coverage folded into the source. Everything
+  // that draws goes through here, so there is one place where the arithmetic can
+  // be wrong.
+
+  let blend = fn (c: canvas) -> fn (cl: clip) -> fn (x: int) -> fn (y: int) ->
+              fn (col: int) -> fn (cov: int) ->
+    if x < cl.x0 || x >= cl.x1 || y < cl.y0 || y >= cl.y1 then ()
+    else if cov <= 0 then ()
+    else
+      let sr = _mul255 (red_of col) cov in
+      let sg = _mul255 (green_of col) cov in
+      let sb = _mul255 (blue_of col) cov in
+      let sa = _mul255 (alpha_of col) cov in
+      if sa >= 255 then set c x y (sr * 16777216 + sg * 65536 + sb * 256 + sa)
+      else
+        let inv = 255 - sa in
+        let i = _idx c x y in
+        let dr = bytebuf_get c.px i in
+        let dg = bytebuf_get c.px (i + 1) in
+        let db = bytebuf_get c.px (i + 2) in
+        let da = bytebuf_get c.px (i + 3) in
+        let _ = bytebuf_set c.px i (sr + _mul255 dr inv) in
+        let _ = bytebuf_set c.px (i + 1) (sg + _mul255 dg inv) in
+        let _ = bytebuf_set c.px (i + 2) (sb + _mul255 db inv) in
+        bytebuf_set c.px (i + 3) (sa + _mul255 da inv);
+
+  // --- shapes that need no path ------------------------------------------
+
+  let clear = fn (c: canvas) -> fn (col: int) ->
+    let rec go = fn (i: int) ->
+      if i >= c.w * c.h then ()
+      else
+        let _ = set c (i % c.w) (i / c.w) col in
+        go (i + 1) in
+    go 0;
+
+  // Integer rectangle, no antialiasing: the common case, and the one a border or
+  // a background wants to be exact rather than soft.
+  let fill_rect = fn (c: canvas) -> fn (cl: clip) -> fn (x: int) -> fn (y: int) ->
+                  fn (w: int) -> fn (h: int) -> fn (col: int) ->
+    let r = clip_intersect cl (clip_of x y (x + w) (y + h)) in
+    if clip_is_empty r then ()
+    else
+      let rec row = fn (yy: int) ->
+        if yy >= r.y1 then ()
+        else
+          let rec col_ = fn (xx: int) ->
+            if xx >= r.x1 then ()
+            else let _ = blend c r xx yy col 255 in col_ (xx + 1) in
+          let _ = col_ r.x0 in
+          row (yy + 1) in
+      row r.y0;
+
+  // --- getting the pixels back out ---------------------------------------
+
+  // Composited over a background and un-premultiplied, which is what any format
+  // without an alpha channel needs. P6 because it is four lines of header and no
+  // compression — the point here is to have something to compare, and
+  // contrib/raster does not depend on a PNG encoder to be testable.
+  let to_ppm = fn (c: canvas) -> fn (bg: int) ->
+    let out = bytebuf_new 0 in
+    let push_str = fn (s: str) ->
+      let rec go = fn (i: int) ->
+        if i >= str_len s then ()
+        else let _ = bytebuf_push out (ord (char_at s i)) in go (i + 1) in
+      go 0 in
+    let _ = push_str ("P6\n" ++ show c.w ++ " " ++ show c.h ++ "\n255\n") in
+    let br = red_of bg in
+    let bgg = green_of bg in
+    let bb = blue_of bg in
+    let rec go = fn (i: int) ->
+      if i >= c.w * c.h then bytes_of_bytebuf out
+      else
+        let j = i * 4 in
+        let a = bytebuf_get c.px (j + 3) in
+        let inv = 255 - a in
+        let _ = bytebuf_push out (bytebuf_get c.px j + _mul255 br inv) in
+        let _ = bytebuf_push out (bytebuf_get c.px (j + 1) + _mul255 bgg inv) in
+        let _ = bytebuf_push out (bytebuf_get c.px (j + 2) + _mul255 bb inv) in
+        go (i + 1) in
+    go 0;
+
+  // One character per pixel from a ramp, rows separated by newlines. This is what
+  // the cross-backend gate compares: a difference is visible as a shape rather
+  // than as a byte offset, and antialiasing shows up as the ramp it is.
+  let ramp = " .:-=+*#%@";
+
+  let to_ascii = fn (c: canvas) -> fn (bg: int) ->
+    let buf = strbuf_new () in
+    let br = red_of bg in
+    let bgg = green_of bg in
+    let bb = blue_of bg in
+    let rec row = fn (y: int) ->
+      if y >= c.h then strbuf_to_str buf
+      else
+        let rec col_ = fn (x: int) ->
+          if x >= c.w then ()
+          else
+            let j = _idx c x y in
+            let a = bytebuf_get c.px (j + 3) in
+            let inv = 255 - a in
+            let r = bytebuf_get c.px j + _mul255 br inv in
+            let g = bytebuf_get c.px (j + 1) + _mul255 bgg inv in
+            let b = bytebuf_get c.px (j + 2) + _mul255 bb inv in
+            // Rec. 601 luma, then inverted so ink is dark and paper is blank.
+            let luma = (r * 299 + g * 587 + b * 114) / 1000 in
+            let k = (255 - luma) * 9 / 255 in
+            let _ = strbuf_push buf (char_at ramp k) in
+            col_ (x + 1) in
+        let _ = col_ 0 in
+        let _ = strbuf_push buf "\n" in
+        row (y + 1) in
+    row 0;
+
+}

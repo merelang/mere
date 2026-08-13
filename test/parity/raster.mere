@@ -1,0 +1,168 @@
+// contrib/raster, held to one output on every backend.
+//
+// The comparison is an ASCII rendering of the canvas — one character per pixel
+// from a ramp — rather than a hash, so a difference reads as a shape. Coverage
+// shows up as the gradient it is, and a one-pixel shift is visible rather than
+// being a changed digest.
+//
+// This is also where float determinism gets checked in anger: the geometry is
+// double arithmetic and the coverage is integer, so a backend that rounded
+// differently anywhere would move the edge of a shape.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+import "../../contrib/raster/path.mere";
+
+let white = Canvas.rgba 255 255 255 255;
+let black = Canvas.rgba 0 0 0 255;
+let grey = Canvas.rgba 128 128 128 255;
+let half_black = Canvas.rgba 0 0 0 128;
+
+let show_ = fn (label: str) -> fn (c: canvas) ->
+  let _ = print ("--- " ++ label ++ " ---") in
+  print (Canvas.to_ascii c white);
+
+let fresh = fn (w: int) -> fn (h: int) ->
+  let c = Canvas.new_ w h in
+  let _ = Canvas.clear c white in
+  c;
+
+// --- the blend, before any geometry ---------------------------------------
+
+let _ = print "=== premultiplied source-over ===";
+let _ = print ("rgba 255 255 255 255 = " ++ show white);
+let _ = print ("rgba 255 0 0 255     = " ++ show (Canvas.rgba 255 0 0 255));
+let _ = print ("rgba 255 0 0 128     = " ++ show (Canvas.rgba 255 0 0 128));
+let _ = print ("rgba 0 0 0 0         = " ++ show (Canvas.rgba 0 0 0 0));
+
+let b = fresh 4 1;
+let _ = Canvas.blend b (Canvas.full_clip b) 0 0 black 255;
+let _ = Canvas.blend b (Canvas.full_clip b) 1 0 black 128;
+let _ = Canvas.blend b (Canvas.full_clip b) 2 0 half_black 255;
+let _ = Canvas.blend b (Canvas.full_clip b) 3 0 black 0;
+let _ = print ("full/half-coverage/half-alpha/zero: "
+               ++ show (Canvas.get b 0 0) ++ " " ++ show (Canvas.get b 1 0)
+               ++ " " ++ show (Canvas.get b 2 0) ++ " " ++ show (Canvas.get b 3 0));
+
+// Coverage and alpha are separate inputs that must compose to the same thing.
+let d1 = fresh 1 1;
+let _ = Canvas.blend d1 (Canvas.full_clip d1) 0 0 black 128;
+let d2 = fresh 1 1;
+let _ = Canvas.blend d2 (Canvas.full_clip d2) 0 0 half_black 255;
+let _ = print ("coverage 128 vs alpha 128: " ++ show (Canvas.get d1 0 0)
+               ++ " " ++ show (Canvas.get d2 0 0));
+
+// --- rectangles and clipping ----------------------------------------------
+
+let r1 = fresh 20 6;
+let _ = Canvas.fill_rect r1 (Canvas.full_clip r1) 2 1 6 3 black;
+let _ = Canvas.fill_rect r1 (Canvas.full_clip r1) 10 2 6 3 grey;
+let _ = show_ "rects" r1;
+
+let r2 = fresh 20 6;
+let _ = Canvas.fill_rect r2 (Canvas.clip_of 4 2 12 5) 0 0 20 6 black;
+let _ = show_ "rect clipped to 4,2..12,5" r2;
+
+let r3 = fresh 20 6;
+let _ = Canvas.fill_rect r3 (Canvas.full_clip r3) (0 - 4) (0 - 2) 8 5 black;
+let _ = show_ "rect starting off-canvas" r3;
+
+// --- antialiased polygons -------------------------------------------------
+
+let t1 = fresh 28 12;
+let tri = Cons (Path.pt 2.0 1.0, Cons (Path.pt 25.0 3.0, Cons (Path.pt 6.0 10.0, Nil)));
+let _ = Path.fill t1 (Canvas.full_clip t1) (Cons (tri, Nil)) black false;
+let _ = show_ "triangle" t1;
+
+// A rectangle on fractional coordinates: the edges land inside pixels, which is
+// the whole point of coverage.
+let f1 = fresh 12 6;
+let frect = Cons (Path.pt 2.25 1.5, Cons (Path.pt 9.75 1.5,
+            Cons (Path.pt 9.75 4.25, Cons (Path.pt 2.25 4.25, Nil))));
+let _ = Path.fill f1 (Canvas.full_clip f1) (Cons (frect, Nil)) black false;
+let _ = show_ "rect on quarter-pixel bounds" f1;
+
+// Winding: the same five-pointed star, filled both ways. Non-zero fills the
+// middle, even-odd leaves it hollow.
+let star = Cons (Path.pt 14.0 1.0, Cons (Path.pt 17.0 10.0,
+           Cons (Path.pt 9.0 4.5, Cons (Path.pt 19.0 4.5,
+           Cons (Path.pt 11.0 10.0, Nil)))));
+let s1 = fresh 28 12;
+let _ = Path.fill s1 (Canvas.full_clip s1) (Cons (star, Nil)) black false;
+let _ = show_ "star, non-zero" s1;
+let s2 = fresh 28 12;
+let _ = Path.fill s2 (Canvas.full_clip s2) (Cons (star, Nil)) black true;
+let _ = show_ "star, even-odd" s2;
+
+// Two rings: a square with a square hole, which needs the inner contour wound
+// the other way for non-zero and either way for even-odd.
+let outer = Cons (Path.pt 2.0 1.0, Cons (Path.pt 14.0 1.0,
+            Cons (Path.pt 14.0 9.0, Cons (Path.pt 2.0 9.0, Nil))));
+let inner = Cons (Path.pt 5.0 3.0, Cons (Path.pt 5.0 7.0,
+            Cons (Path.pt 11.0 7.0, Cons (Path.pt 11.0 3.0, Nil))));
+let h1 = fresh 18 11;
+let _ = Path.fill h1 (Canvas.full_clip h1) (Cons (outer, Cons (inner, Nil))) black false;
+let _ = show_ "square with a hole, non-zero" h1;
+
+// --- curves ---------------------------------------------------------------
+
+let q1 = fresh 26 10;
+let qpath =
+  list_rev (Path.quad_to (Path.pt 2.0 8.0) (Path.pt 12.0 (0.0 - 3.0)) (Path.pt 23.0 8.0)
+              (Cons (Path.pt 2.0 8.0, Nil))) in
+let _ = Path.fill q1 (Canvas.full_clip q1) (Cons (qpath, Nil)) black false;
+let _ = show_ "quadratic arch" q1;
+
+let c1 = fresh 26 12;
+let cpath =
+  list_rev (Path.cubic_to (Path.pt 2.0 10.0) (Path.pt 2.0 0.0)
+              (Path.pt 23.0 0.0) (Path.pt 23.0 10.0)
+              (Cons (Path.pt 2.0 10.0, Nil))) in
+let _ = Path.fill c1 (Canvas.full_clip c1) (Cons (cpath, Nil)) black false;
+let _ = show_ "cubic arch" c1;
+
+// --- strokes --------------------------------------------------------------
+
+let k1 = fresh 24 10;
+let line = Cons (Path.pt 2.0 2.0, Cons (Path.pt 21.0 7.0, Nil));
+let _ = Path.stroke k1 (Canvas.full_clip k1) line 1.5 black;
+let _ = show_ "stroked segment, width 1.5" k1;
+
+let k2 = fresh 24 10;
+let zig = Cons (Path.pt 2.0 8.0, Cons (Path.pt 8.0 2.0,
+          Cons (Path.pt 14.0 8.0, Cons (Path.pt 20.0 2.0, Nil))));
+let _ = Path.stroke k2 (Canvas.full_clip k2) zig 1.0 black;
+let _ = show_ "stroked polyline, width 1" k2;
+
+// --- degenerate input, which a layout engine will produce -----------------
+
+let e1 = fresh 8 3;
+let _ = Path.fill e1 (Canvas.full_clip e1) Nil black false;
+let _ = Path.fill e1 (Canvas.full_clip e1) (Cons (Nil, Nil)) black false;
+let _ = Path.fill e1 (Canvas.full_clip e1)
+          (Cons (Cons (Path.pt 1.0 1.0, Cons (Path.pt 5.0 1.0, Nil)), Nil)) black false;
+let _ = Path.stroke e1 (Canvas.full_clip e1)
+          (Cons (Path.pt 2.0 1.0, Cons (Path.pt 2.0 1.0, Nil))) 1.0 black;
+let _ = show_ "empty, degenerate, and zero-length" e1;
+
+// Entirely outside the clip, and entirely outside the canvas.
+let e2 = fresh 8 3;
+let far = Cons (Path.pt 20.0 20.0, Cons (Path.pt 30.0 20.0, Cons (Path.pt 25.0 30.0, Nil)));
+let _ = Path.fill e2 (Canvas.full_clip e2) (Cons (far, Nil)) black false;
+let neg = Cons (Path.pt (0.0 - 9.0) (0.0 - 9.0), Cons (Path.pt (0.0 - 2.0) (0.0 - 9.0),
+          Cons (Path.pt (0.0 - 5.0) (0.0 - 2.0), Nil)));
+let _ = Path.fill e2 (Canvas.full_clip e2) (Cons (neg, Nil)) black false;
+let _ = show_ "shapes wholly off-canvas" e2;
+
+// --- the bytes ------------------------------------------------------------
+
+let p1 = fresh 3 2;
+let _ = Canvas.fill_rect p1 (Canvas.full_clip p1) 1 0 1 2 black;
+let ppm = Canvas.to_ppm p1 white;
+let _ = print ("ppm length = " ++ show (bytes_len ppm));
+let _ = print ("ppm header = " ++ str_of_bytes (bytes_slice ppm 0 11));
+let rec dump = fn (i: int) -> fn (acc: str) ->
+  if i >= bytes_len ppm then acc
+  else dump (i + 1) (acc ++ (if acc == "" then "" else " ") ++ show (bytes_get ppm i));
+let _ = print ("ppm pixels = " ++ dump 11 "");
+0

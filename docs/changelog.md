@@ -4,6 +4,69 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.243 — 2026-08-13
+
+_A rasterizer, and the three math builtins it turned out no compiled backend had._
+
+```
+  contrib/raster/canvas.mere   premultiplied pixels, one blend, rects and clips
+  contrib/raster/path.mere     antialiased polygon fill, curves, strokes
+  lib/codegen_c.ml             floor / ceil / round
+  lib/codegen_llvm.ml          floor / ceil / round
+  lib/codegen_wasm.ml          the same three, refused loudly
+```
+
+**`contrib/raster`.** A pixel buffer, source-over compositing, and one antialiased
+polygon fill that rectangles, glyph outlines, borders and strokes are all expressed in
+terms of. Nothing here opens a window, and that is the point: turning a document into
+pixels is checkable by comparing pixels, which needs no display.
+
+**Premultiplied alpha**, so source-over is `src + dst*(255-sa)/255` on every channel with
+no division by the result and no special case for a transparent destination. And `a*b/255`
+is exact at both ends — the obvious `(t + t/255)/255` returns **256** for `255*255`, which
+overflows the byte into the next channel of the packed colour. The first smoke test drew an
+opaque black canvas instead of a white one, which is a good way for that to be found.
+
+**Coverage is separate from alpha and multiplies it**, and the parity test asserts it:
+coverage 128 with a solid colour and coverage 255 with a half-alpha colour must land on
+the same pixel.
+
+**Coverage, not sampling.** Each pixel row is cut into slices; per slice the edges are
+intersected, the crossings sorted, and the spans added to a per-pixel accumulator
+**exactly in x** — an edge at x = 3.25 puts 75% into pixel 3. Only y is quantized. Geometry
+is float and coverage is integer, both measured rather than assumed: doubles print
+identically across backends, and an integer accumulator cannot drift.
+
+**And then: `floor`, `ceil` and `round` did not exist on any compiled backend.** Emission
+*succeeded* and the C compiler then failed on an undeclared `mu_floor`, so nothing short of
+a program that used them could notice — and nothing did, for as long as they had been in
+`Typer.initial_env`. `sqrt`, `sin`, `cos` and `tan` were all handled; these three were
+simply never added. Now on C and LLVM, verified identical to the interpreter including the
+negative half-way cases (`round (-2.5)` is -3 on all three).
+
+The Wasm backend **refuses all three, deliberately.** `f64.floor` and `f64.ceil` are
+instructions and looked like a five-line addition — but putting the names in that backend's
+eta-expansion list sent it into an infinite expansion, and a bare `floor` call never
+finished emitting. `round` is worse than absent there: `f64.nearest` rounds half to even
+where C and the interpreter round half away from zero, and doing it properly needs a scratch
+`f64` local, which that backend declares per function. A backend that says "no" is one a
+caller can work around; one that hangs, or that quietly rounds differently, is not.
+
+**A survey, since one missing builtin implies others.** Fifteen names in
+`Typer.initial_env` emit as undeclared identifiers on the C backend: `ceil cube decr exp
+floor id incr int_max lcm log pow round sign square sum_range`. Three are fixed here. The
+rest are recorded rather than fixed, because `scripts/host_matrix.sh` — the harness whose
+entire job is to ask which backend has which builtin — has a **hand-written** case list and
+covers none of them. Generating that list from the typer's environment is the actual fix and
+is its own change.
+
+`contrib/raster` runs on interp and C. The framebuffer is a `ByteBuf`, which the LLVM and
+Wasm backends do not have, so they refuse at emit time and the harness records `UNSUP`
+rather than a failure — C is what a native renderer targets and the interpreter is an
+independent second implementation, so the gate still compares two.
+
+---
+
 ## v0.1.242 — 2026-08-13
 
 _A bug both hosts had, in a place the gate was only compile-checking. Backend parity could
