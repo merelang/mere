@@ -124,6 +124,12 @@ jobs:
             || echo "qemu-system-riscv32 absent: qemu_virt will skip"
           echo "lldb is deliberately not installed: debug_info will skip"
 
+      # The build matrix runs this too, but without wat2wasm and node it skips
+      # the self-host codegen cross-validation — 2,225 cases there against 2,430
+      # here. Those 205 only run in this job, which has the toolchain.
+      - name: Run tests (full, with the wasm toolchain present)
+        run: opam exec -- dune runtest
+
       - name: parity (interp / C / LLVM / wasm agree)
         run: sh scripts/parity.sh
 
