@@ -221,21 +221,49 @@ module Url {
 
   // --- host --------------------------------------------------------------
 
-  let _lower_domain = fn (h: str) -> to_lower h;
+  // The Standard's forbidden host code points. Most of them are delimiters that
+  // never reach here — the authority ends at `/`, `?` and `#`, userinfo splits
+  // at `@`, the port at `:` — but they are all listed anyway, because after
+  // percent-decoding a domain any of them can appear where no delimiter was.
+  let _forbidden_host_byte = fn (b: int) ->
+    b == 0x00 || b == 0x09 || b == 0x0A || b == 0x0D || b == 0x20
+    || b == 0x23 || b == 0x2F || b == 0x3A || b == 0x3C || b == 0x3E
+    || b == 0x3F || b == 0x40 || b == 0x5B || b == 0x5C || b == 0x5D
+    || b == 0x5E || b == 0x7C;
+
+  let rec _has_forbidden = fn (h: str) -> fn (i: int) -> fn (n: int) ->
+    if i >= n then false
+    else if _forbidden_host_byte (ord (char_at h i)) then true
+    else _has_forbidden h (i + 1) n;
 
   // An IPv6 literal is carried through in its brackets: parsing and
-  // re-serialising one is its own job and this slice does not need it.
+  // re-serialising one is its own job and this slice does not need it. The
+  // brackets are the one place they are allowed.
   let parse_host = fn (h: str) -> fn (special: bool) ->
     if str_len h == 0 then Some ""
     else if str_starts_with h "[" then
       (if str_ends_with h "]" then Some h else None)
-    else if not special then Some h        // opaque: no case folding, no IPv4
+    else if not special then
+      // Opaque: no case folding, no IPv4, and no decoding — but the forbidden
+      // code points still are forbidden.
+      (if _has_forbidden h 0 (str_len h) then None else Some h)
     else
-      let lowered = _lower_domain h in
-      if ends_in_number lowered then
-        let v4 = try_ipv4 lowered in
-        if v4 == "" then None else Some v4
-      else Some lowered;
+      // A domain is percent-decoded before anything else looks at it, so `%41`
+      // is `a` and `%2e` is a label separator: `http://0x7f%2e1` is
+      // `127.0.0.1`. An allowlist that skips this step sees an opaque name
+      // where there is an address. A malformed escape is not a domain at all.
+      match Percent.decode_strict h with
+      | None -> None
+      | Some decoded ->
+        // Checked after decoding, which is the whole point: `http://a%2fb` has
+        // a `/` in its host and is not a URL.
+        if _has_forbidden decoded 0 (str_len decoded) then None
+        else
+          let lowered = to_lower decoded in
+          if ends_in_number lowered then
+            let v4 = try_ipv4 lowered in
+            if v4 == "" then None else Some v4
+          else Some lowered;
 
   // --- port --------------------------------------------------------------
   // Digits only. An empty port after the colon is not an error, it is no port.
@@ -379,6 +407,98 @@ module Url {
         // `\` is not an authority marker for a non-special scheme: `foo:\\h` is
         // an opaque path.
         _no_authority scheme after (not (str_starts_with after "/"));
+
+  // --- resolution against a base -----------------------------------------
+  // What every link in a page needs. `resolve base input` is `new URL(input,
+  // base)`: the input wins wherever it says anything, and the base fills in the
+  // rest.
+
+  // A path is opaque when there is no authority and it does not start with `/`.
+  // There is nothing to resolve a reference against in that case — `mailto:x@y`
+  // has no directory — so only a fragment may be attached to one.
+  let has_opaque_path = fn (u: url_parts) ->
+    not u.has_authority && not (str_starts_with u.path "/");
+
+  // Everything up to and including the base's last `/`. A relative path
+  // replaces the last segment, so `d` against `/a/b/c` is `/a/b/d`, and against
+  // `/a/b/` it is `/a/b/d` as well. An empty base path merges as if it were `/`.
+  let _strip_last = fn (p: str) ->
+    let i = last_index_of p "/" in
+    if i < 0 then "/" else substring p 0 (i + 1);
+
+  let _sep = fn (special: bool) -> fn (c: str) ->
+    c == "/" || (special && c == "\\");
+
+  // Two or more separators start an authority for a special scheme — and any
+  // number beyond two is still one authority, so `\\\h2/d` is `//h2/d`. For
+  // anything else only a literal `//` does, and a backslash is an ordinary
+  // path character.
+  let _starts_authority = fn (rem: str) -> fn (special: bool) ->
+    if special then
+      str_len rem >= 2 && _sep true (char_at rem 0) && _sep true (char_at rem 1)
+    else str_starts_with rem "//";
+
+  // Everything but the fragment, kept from the base. The one resolution an
+  // opaque base admits.
+  let _base_plus_fragment = fn (base: url_parts) -> fn (raw_frag: str) ->
+    Some (url_parts {
+      scheme = base.scheme, username = base.username, password = base.password,
+      host = base.host, port = base.port, has_authority = base.has_authority,
+      path = base.path, query = base.query, has_query = base.has_query,
+      fragment = Path.encode_fragment raw_frag, has_fragment = true,
+      special = base.special });
+
+  let _relative = fn (base: url_parts) -> fn (rem: str) ->
+    let special = base.special in
+    // An opaque base has no directory to resolve against, so the Standard
+    // admits exactly one reference: one whose FIRST code point is `#`. Not a
+    // reference that merely contains one, and not the empty reference. This is
+    // checked before anything else because `//h/d` against `mailto:x@y` must
+    // fail rather than invent an authority under `mailto`.
+    if has_opaque_path base then
+      (if str_starts_with rem "#"
+       then _base_plus_fragment base (substring rem 1 (str_len rem))
+       else None)
+    else if _starts_authority rem special then
+      // A new authority under the base's scheme.
+      let start = if special then _skip_slashes rem 0 (str_len rem) else 2 in
+      _with_authority base.scheme special (substring rem start (str_len rem))
+    else
+      let (nofrag, raw_frag, has_frag) = Path.split_fragment rem in
+      let (raw_path, raw_query, has_q) = Path.split_query nofrag in
+      // A reference that says nothing about the path keeps the base's, and with
+      // it the base's query. One that says anything about the path drops the
+      // base's query — `d` against `...?bq` has no query at all.
+      let path =
+        if raw_path == "" then base.path
+        else if _sep special (char_at raw_path 0) then
+          Path.normalize raw_path special
+        else Path.normalize (_strip_last base.path ++ raw_path) special in
+      Some (url_parts {
+        scheme = base.scheme, username = base.username,
+        password = base.password, host = base.host, port = base.port,
+        has_authority = base.has_authority, path = path,
+        query = if has_q then Path.encode_query raw_query special
+                else if raw_path == "" then base.query else "",
+        has_query = if has_q then true
+                    else raw_path == "" && base.has_query,
+        fragment = Path.encode_fragment raw_frag, has_fragment = has_frag,
+        special = special });
+
+  // A reference with a scheme is absolute — except that a special scheme naming
+  // the base's own scheme is not. `http:d` against `http://h/a/b/c` is
+  // `http://h/a/b/d`, not a host called `d`; `https:d` against the same base IS
+  // `https://d/`. Getting this backwards turns a same-origin relative link into
+  // a request to a host the page named.
+  let resolve = fn (base: url_parts) -> fn (input: str) ->
+    let s = clean input in
+    let slen = scheme_len s in
+    if slen <= 0 then _relative base s
+    else
+      let sc = to_lower (substring s 0 slen) in
+      if is_special sc && sc == base.scheme then
+        _relative base (substring s (slen + 1) (str_len s))
+      else parse s;
 
   // --- serialisation -----------------------------------------------------
 

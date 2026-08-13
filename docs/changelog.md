@@ -4,6 +4,60 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.235 — 2026-08-13
+
+_Resolution against a base, hosts checked one byte at a time — and the first place the
+oracle turned out to be wrong, which the harness now says out loud._
+
+```
+  contrib/url/host.mere    resolve; forbidden host code points; domains decoded
+  contrib/url/percent.mere decode_strict
+  scripts/url_parity.sh    + 272 resolve pairs, + 190 single-byte hosts, + DIVERGE
+```
+
+**`Url.resolve base input`.** What every link in a page needs: the reference wins wherever
+it says anything and the base fills in the rest. A relative path replaces the base's last
+segment and is then normalised, so `../d` against `/a/b/c` is `/a/d`; a reference that says
+anything at all about the path drops the base's query, and one that says nothing keeps it.
+
+The rule worth stating separately: **a reference carrying a special scheme that names the
+base's own scheme is relative, not absolute.** `http:d` against `http://h/a/b/c` is
+`http://h/a/b/d`; `https:d` against the same base is `https://d/`. Getting that backwards
+turns a same-origin relative link into a request to a host the page named.
+
+**Forbidden host code points, and domains are decoded.** A domain is percent-decoded before
+anything else looks at it, so `%41` is `a` and `%2e` is a **label separator** —
+`http://0x7f%2e1` is `127.0.0.1`. An allowlist that inspects the host before decoding sees
+an opaque name where there is an address. A malformed escape means it is not a domain
+(`http://a%b/` is not a URL, hence `Percent.decode_strict`), and the forbidden code points
+are checked **after** decoding, so `http://a%2fb` has a `/` in its host and is rejected. An
+opaque host is neither decoded nor folded, but the forbidden points still apply to it.
+
+**Two new derived gates.** Resolution is checked as a **cross product** — 8 bases × 34
+references = 272 pairs, each compared as `href` — because the interesting cases are
+combinations, and picking pairs by hand is picking the ones already thought of. Hosts are
+checked **one byte at a time**: `http://aXb/` and `foo://aXb/` for every X in 0x20..0x7E,
+190 comparisons, with neither side building the string as a literal (both loop over the
+byte, so there is no escaping layer to get wrong). That is the component where being too
+permissive is worst, and it caught the missing forbidden-code-point check and the missing
+domain decode together.
+
+**And the oracle was wrong once.** The Standard's *no scheme state* admits a reference
+against an opaque base only when the reference's **first** code point is `#`. node v24
+accepts any reference that merely contains one — `new URL("?q#f", "mailto:x@y")` is
+`mailto:x@y?q#f`, and `new URL("e?q2#f2", "mailto:x@y")` invents a path segment and gives
+`mailto:x@y/e?q2#f2`. We follow the Standard, and the harness prints these as `DIVERGE`
+lines with the count and both answers rather than dropping them from the corpus.
+
+Overruling the oracle here and not elsewhere is a judgement, so the reasoning is recorded
+next to it: the spec text is explicit (unlike the `^` in the path set, where the prose did
+not name it and the implementation did), and the divergence is in the **permissive**
+direction — accepting more than you should is the failure mode this gate exists to find. A
+gate needs somewhere to say "the oracle is wrong here" or the first time it happens the
+answer is to quietly delete the test.
+
+---
+
 ## v0.1.234 — 2026-08-13
 
 _The rest of the URL, and two places where the previous slice's simplifications

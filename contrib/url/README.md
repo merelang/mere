@@ -1,16 +1,15 @@
 # contrib/url — URL handling (Mere implementation)
 
-A WHATWG URL parser: cleaning, scheme, authority, path, query, fragment, and
-serialisation back out. Absolute URLs only — resolving a relative reference
-against a base is not here yet.
+A WHATWG URL parser: cleaning, scheme, authority, path, query, fragment,
+resolution against a base, and serialisation back out.
 
 ## Files
 
 | file | exports | lines |
 |---|---|---|
-| `percent.mere` | `module Percent { c0_control, fragment, query, special_query, path, userinfo, component, encode, decode }` | ~120 |
+| `percent.mere` | `module Percent { c0_control, fragment, query, special_query, path, userinfo, component, encode, decode, decode_strict }` | ~140 |
 | `path.mere` | `module Path { split_fragment, split_query, is_single_dot, is_double_dot, normalize, opaque, encode_query, encode_fragment }` | ~110 |
-| `host.mere` | `type url_parts`, `module Url { parse, href, origin, is_special, default_port, clean, scheme_len, parse_host, parse_port, try_ipv4, ends_in_number, last_index_of }` | ~400 |
+| `host.mere` | `type url_parts`, `module Url { parse, resolve, href, origin, has_opaque_path, is_special, default_port, clean, scheme_len, parse_host, parse_port, try_ipv4, ends_in_number, last_index_of }` | ~500 |
 
 ## Usage
 
@@ -20,6 +19,14 @@ import "contrib/url/host.mere";
 match Url.parse "http://EXAMPLE.com:80/a/../b" with
 | Some u -> Url.href u            // "http://example.com/b"
 | None -> "invalid"
+
+// Every link in a page: resolve base "../d" is new URL("../d", base)
+match Url.parse "http://h/a/b/c" with
+| Some base ->
+  (match Url.resolve base "../d" with
+   | Some u -> Url.href u         // "http://h/a/d"
+   | None -> "invalid")
+| None -> "bad base"
 
 Percent.encode Percent.path "a b#c"      // "a%20b%23c"
 Percent.decode "%E3%81%82"               // "あ"
@@ -61,6 +68,20 @@ property of the special schemes, not of hosts.
 keys on `"//"` being present sees a relative reference where there is in fact a
 host. And a backslash *ends* the authority: `http://u\p@h/` has host `u`, not
 `h`, because the `\` comes before the `@` ever does.
+
+**A domain *is* percent-decoded — before anything else looks at it.** `%41` is
+`a`, and `%2e` is a **label separator**: `http://0x7f%2e1` is `127.0.0.1`. An
+allowlist that checks the host before decoding sees an opaque name where there is
+an address. A malformed escape means it is not a domain at all
+(`http://a%b/` is not a URL), and the Standard's forbidden host code points are
+checked **after** decoding, so `http://a%2fb` has a `/` in its host and is
+rejected. An opaque host is not decoded and not folded, but the forbidden points
+still apply to it.
+
+**Resolution against an opaque base takes a leading `#` and nothing else.** Not a
+reference that merely contains one. This is the one place where this
+implementation deliberately differs from the oracle it is checked against — see
+below.
 
 **The path is never decoded.** `%2f` stays `%2f` in whatever case it arrived in,
 so it is not a separator; `%41` stays `%41`. Decoding either would turn an
@@ -105,12 +126,40 @@ of the same specification that nobody here wrote. Two ways:
   `href` is in there because it is the only field that pins state the other
   eight cannot show. It is also what catches a dropped field or an invented
   delimiter, which a per-field check on its own will miss.
+* **Resolution, as a cross product.** 8 bases × 34 references = 272 pairs, each
+  compared as `href`. A cross product rather than a hand-picked list, because the
+  interesting cases are combinations — a `..` that runs off the top of the path,
+  a reference carrying the base's own scheme, a fragment against an opaque base —
+  and picking pairs by hand is picking the ones already thought of.
+* **Hosts, one byte at a time.** `http://aXb/` and `foo://aXb/` for every X in
+  0x20..0x7E, compared as `href` or `INVALID`. Neither side builds these as
+  string literals — both loop over the byte, so there is no escaping layer to get
+  wrong. This is the component where being too permissive is worst, since a host
+  is what a request is actually sent to, and a hand-written list of forbidden
+  code points is a list somebody transcribed.
 
-Some bytes cannot be probed by derivation and the harness prints them as SKIP
-rather than passing them silently: a byte that delimits the component under test
-ends it instead of being escaped in it (`#` and `?` in a path), a lone space is
-stripped before escaping happens, `.` in a path is resolved away, and `\` is
-normalised to `/` for the special schemes.
+### Where this deliberately differs from node
+
+The Standard's *no scheme state* admits a reference against an opaque base only
+when the reference's **first** code point is U+0023 (`#`). node v24 accepts any
+reference that merely *contains* one: `new URL("?q#f", "mailto:x@y")` gives
+`mailto:x@y?q#f`, and `new URL("e?q2#f2", "mailto:x@y")` invents a path segment
+and gives `mailto:x@y/e?q2#f2`.
+
+We follow the Standard, and `url_parity.sh` prints these as `DIVERGE` lines with
+the count and both answers rather than excluding them quietly. The reason to
+overrule the oracle here and not elsewhere: the spec text is explicit (unlike the
+`^` in the path set, where the prose did not name it and the implementation did),
+and the divergence is in the **permissive** direction — a parser that accepts
+more than it should is exactly the failure mode this whole gate exists to catch.
+
+### What the derivation cannot reach
+
+Some bytes cannot be probed by putting them in a component, and the harness
+prints those as SKIP rather than passing them silently: a byte that delimits the
+component under test ends it instead of being escaped in it (`#` and `?` in a
+path), a lone space is stripped before escaping happens, `.` in a path is
+resolved away, and `\` is normalised to `/` for the special schemes.
 
 `test/parity/url_percent.mere` and `test/parity/url_host.mere` additionally hold
 all four backends to the same output. That is a separate question from
@@ -120,10 +169,12 @@ every URL was rejected — with node agreeing with the interpreter the whole tim
 
 ## Not here yet
 
-- Resolution against a base URL. Absolute URLs only.
 - IPv6 parsing and re-serialisation. A literal is carried through in its
   brackets, and only checked for a closing one.
-- IDNA / punycode for non-ASCII hosts.
+- IDNA / punycode for non-ASCII hosts. A domain is percent-decoded and
+  lowercased, but not mapped or normalised, so a non-ASCII host stays as its
+  UTF-8 bytes instead of becoming `xn--`.
+- `file:` URLs, which have their own host and drive-letter rules.
 - `decode` into `bytes`. A decoded value is bytes, and a `str` holding a NUL is
   not representable on the LLVM backend, whose `str` is `strlen`-based — so
   `Percent.decode "%00"` differs by backend. Callers that can receive `%00`

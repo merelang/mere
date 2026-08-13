@@ -320,5 +320,211 @@ else
   fail=1
 fi
 
+# --- resolution against a base, as a cross product -------------------------
+#
+# `Url.resolve base input` against `new URL(input, base)`, for every pair of a
+# base and a reference. A cross product rather than a hand-picked list because
+# the interesting cases are combinations — a `..` that runs off the top of the
+# path, a reference with the base's own scheme, a fragment against an opaque
+# base — and picking pairs by hand is picking the ones already thought of.
+#
+# `@EMPTY@` stands for the empty reference, which is a real case (it drops the
+# base's fragment and keeps everything else) but cannot survive a line-based
+# corpus.
+
+cat > "$TMP/bases.txt" <<'BASES'
+http://h/a/b/c?bq#bf
+http://h/a/b/
+http://h/
+http://h
+foo://h/a/b
+foo://h
+foo:/a/b
+mailto:x@y
+BASES
+
+cat > "$TMP/refs.txt" <<'REFS'
+@EMPTY@
+#f
+#
+?q
+?
+?q#f
+d
+./d
+../d
+../../../d
+/d
+//h2/d
+//h2
+http://h2/d
+https://h2
+http:d
+http:/d
+http://d
+http:
+mailto:x
+.
+..
+./
+../
+d/
+/
+e?q2#f2
+..?q2
+\d
+d\e
+//h2\d
+\\h2/d
+1:2
+a:b
+REFS
+
+# The one place the oracle is overruled, and it is written down rather than
+# excluded. The Standard's "no scheme state" says an opaque base admits a
+# reference only when its FIRST code point is U+0023 (#) — not one that merely
+# contains one. node v24 accepts `?q#f` against `mailto:x@y`, and for `e?q2#f2`
+# it invents a path segment (`mailto:x@y/e?q2#f2`). We follow the Standard,
+# because the divergence is in the permissive direction and a URL parser that
+# accepts more than it should is the failure mode that matters here.
+cat > "$TMP/resolve.js" <<'NODE'
+const fs = require("fs");
+const rd = (p) => fs.readFileSync(p, "utf8").split("\n").filter((l) => l !== "");
+const bases = rd(process.argv[2]), refs = rd(process.argv[3]);
+const notes = [];
+// A base has an opaque path when what follows its scheme does not start with a
+// slash. node exposes no field for this, so it is read off the serialisation.
+const isOpaque = (b) => {
+  try { const u = new URL(b); return !u.href.slice(u.protocol.length).startsWith("/"); }
+  catch (e) { return false; }
+};
+for (const b of bases) {
+  const opaque = isOpaque(b);
+  for (const r of refs) {
+    const ref = r === "@EMPTY@" ? "" : r;
+    let out;
+    try { out = new URL(ref, b).href; } catch (e) { out = "INVALID"; }
+    // Only a reference with no scheme of its own goes through "no scheme
+    // state"; one that has a scheme is absolute and the base is irrelevant. An
+    // opaque base is never special, so the same-scheme rule cannot apply here.
+    const hasScheme = /^[A-Za-z][A-Za-z0-9+\-.]*:/.test(ref);
+    if (opaque && !hasScheme && !ref.startsWith("#") && out !== "INVALID") {
+      notes.push(b + "  +  " + JSON.stringify(ref) + "   node=" + out + "   spec=failure");
+      out = "INVALID";
+    }
+    console.log(out);
+  }
+}
+fs.writeFileSync(process.argv[4], notes.map((n) => n + "\n").join(""));
+NODE
+node "$TMP/resolve.js" "$TMP/bases.txt" "$TMP/refs.txt" "$TMP/res_notes.txt" \
+  > "$TMP/res_want.txt"
+
+{
+  echo 'import "../contrib/url/host.mere";'
+  echo 'let r = fn (b: str) -> fn (i: str) ->'
+  echo '  match Url.parse b with'
+  echo '  | None -> print "BASE-INVALID"'
+  echo '  | Some bp ->'
+  echo '    match Url.resolve bp i with'
+  echo '    | None -> print "INVALID"'
+  echo '    | Some u -> print (Url.href u);'
+  while IFS= read -r b; do
+    [ -z "$b" ] && continue
+    besc=$(printf '%s' "$b" | sed 's/\\/\\\\/g; s/"/\\"/g; s/{/\\{/g')
+    while IFS= read -r ref; do
+      [ -z "$ref" ] && continue
+      [ "$ref" = "@EMPTY@" ] && ref=""
+      resc=$(printf '%s' "$ref" | sed 's/\\/\\\\/g; s/"/\\"/g; s/{/\\{/g')
+      printf 'let _ = r "%s" "%s";\n' "$besc" "$resc"
+    done < "$TMP/refs.txt"
+  done < "$TMP/bases.txt"
+  echo '0'
+} > "$ROOT/examples/.url_res_tmp.mere"
+( ulimit -t 120; "$MERE" "$ROOT/examples/.url_res_tmp.mere" ) | sed '$d' > "$TMP/res_ours.txt"
+rm -f "$ROOT/examples/.url_res_tmp.mere"
+
+if diff -q "$TMP/res_want.txt" "$TMP/res_ours.txt" >/dev/null; then
+  nb=$(grep -c . "$TMP/bases.txt"); nr=$(grep -c . "$TMP/refs.txt")
+  echo "  ok    resolve  ($nb bases x $nr references = $((nb * nr)) pairs agree on href)"
+  if [ -s "$TMP/res_notes.txt" ]; then
+    echo "        DIVERGE  $(grep -c . "$TMP/res_notes.txt") pairs where node accepts a reference the Standard rejects:"
+    sed 's/^/          /' "$TMP/res_notes.txt"
+    echo "          (no scheme state: an opaque base admits a reference only when"
+    echo "           its FIRST code point is #. We follow the Standard.)"
+  fi
+else
+  echo "  FAIL  resolve"
+  # Rebuild the pair labels in the same order so a mismatch names both sides.
+  : > "$TMP/pairs.txt"
+  while IFS= read -r b; do
+    [ -z "$b" ] && continue
+    while IFS= read -r ref; do
+      [ -z "$ref" ] && continue
+      printf '%s + %s\n' "$b" "$ref" >> "$TMP/pairs.txt"
+    done < "$TMP/refs.txt"
+  done < "$TMP/bases.txt"
+  paste -d'\t' "$TMP/pairs.txt" "$TMP/res_want.txt" "$TMP/res_ours.txt" \
+    | awk -F'\t' '$2 != $3 { printf "        %-34s node=%-28s ours=%s\n", $1, $2, $3 }' \
+    | head -25
+  fail=1
+fi
+
+# --- hosts, one byte at a time ---------------------------------------------
+#
+# `http://aXb/` and `foo://aXb/` for every X in 0x20..0x7E, compared as href or
+# INVALID. Derived rather than asserted, for the same reason the encode sets are:
+# a hand-written list of forbidden host code points is a list somebody
+# transcribed, and this is the component where being too permissive is worst —
+# a host is what a request is actually sent to.
+#
+# Neither side builds these strings as literals: both loop over the byte, so
+# there is no escaping layer to get wrong. It also covers what the forbidden
+# list does not: `%` decoding in a domain (`http://a%2eb/` is `a.b`, and
+# `http://0x7f%2e1/` is `127.0.0.1`, so a decoded dot really is a separator),
+# case folding, and which bytes merely end the host instead of poisoning it.
+
+cat > "$TMP/hosts.js" <<'NODE'
+for (const prefix of ["http://", "foo://"]) {
+  for (let b = 0x20; b <= 0x7e; b++) {
+    const s = prefix + "a" + String.fromCharCode(b) + "b/";
+    let out;
+    try { out = new URL(s).href; } catch (e) { out = "INVALID"; }
+    console.log(out);
+  }
+}
+NODE
+node "$TMP/hosts.js" > "$TMP/hosts_want.txt"
+
+cat > "$ROOT/examples/.url_hosts_tmp.mere" <<'MERE'
+import "../contrib/url/host.mere";
+
+let rec probe = fn (prefix: str) -> fn (b: int) ->
+  if b > 0x7E then 0
+  else
+    let _ =
+      match Url.parse (prefix ++ "a" ++ chr b ++ "b/") with
+      | None -> print "INVALID"
+      | Some u -> print (Url.href u) in
+    probe prefix (b + 1);
+
+let _ = probe "http://" 0x20;
+let _ = probe "foo://" 0x20;
+0
+MERE
+( ulimit -t 120; "$MERE" "$ROOT/examples/.url_hosts_tmp.mere" ) | sed '$d' > "$TMP/hosts_ours.txt"
+rm -f "$ROOT/examples/.url_hosts_tmp.mere"
+
+if diff -q "$TMP/hosts_want.txt" "$TMP/hosts_ours.txt" >/dev/null; then
+  echo "  ok    hosts  ($(grep -c . "$TMP/hosts_want.txt") single-byte hosts agree, special and not)"
+else
+  echo "  FAIL  hosts"
+  paste -d'\t' "$TMP/hosts_want.txt" "$TMP/hosts_ours.txt" \
+    | awk -F'\t' 'BEGIN { b = 32; scheme = "http" }
+        { if ($1 != $2) printf "        %s  0x%02x  node=%-30s ours=%s\n", scheme, b, $1, $2
+          b++; if (b > 126) { b = 32; scheme = "foo" } }' | head -20
+  fail=1
+fi
+
 [ "$fail" = 0 ] && echo "url_parity: ok" || echo "url_parity: FAILED"
 [ "$fail" = 0 ]

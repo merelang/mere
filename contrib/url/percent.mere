@@ -113,6 +113,25 @@ module Percent {
 
   let decode = fn (s: str) -> _dec s (strbuf_new ()) 0 (str_len s);
 
+  // --- decode, strictly --------------------------------------------------
+  //
+  // `None` when any `%` is not followed by two hex digits, instead of passing
+  // it through. A host needs this and a path must not have it: `http://a%b/` is
+  // not a URL, but a path may contain a literal percent sign. Two callers, two
+  // requirements, so they are two functions rather than one with a flag.
+
+  let rec _bad_escape = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+    if i >= n then false
+    else if ord (char_at s i) == 0x25 then
+      if i + 2 >= n then true
+      else if _hex_val (ord (char_at s (i + 1))) < 0
+              || _hex_val (ord (char_at s (i + 2))) < 0 then true
+      else _bad_escape s (i + 3) n
+    else _bad_escape s (i + 1) n;
+
+  let decode_strict = fn (s: str) ->
+    if _bad_escape s 0 (str_len s) then None else Some (decode s);
+
 }
 
 // Caveat, and the reason there is no `decode_to_bytes` here yet: a decoded
