@@ -156,12 +156,17 @@ else
   fail=1
 fi
 
-# --- authority: scheme / userinfo / host / port, against node --------------
+# --- every field of the parse, against node --------------------------------
 #
-# One line per input, five fields, so a mismatch names the field rather than
+# One line per input, nine fields, so a mismatch names the field rather than
 # just the URL. Inputs node rejects are expected to come back INVALID from us
 # too — a parser that accepts more than the oracle is the failure mode that
 # matters for anything that then makes a request.
+#
+# `href` is in there because it is the only field that pins the state the other
+# eight cannot show: `http://h/?` has an empty query that still serialises its
+# `?`, and `foo://` and `foo:` have the same empty host but only one has an
+# authority. A round-trip catches a dropped field or an invented delimiter.
 
 CORPUS="$TMP/corpus.txt"
 cat > "$CORPUS" <<'URLS'
@@ -189,6 +194,77 @@ mailto:x@y
 http://
 not a url
 http://h/p?q#f
+http://h/a/b/..
+http://h/a/b/.
+http://h/a/./b
+http://h/a/%2e%2e/b
+http://h/a/%2E/b
+http://h/%2E%2E/a
+http://h/a/.%2e/b
+http://h/..
+http://h/../..
+http://h//
+http://h/a//b
+http://h/a/b/../../../c
+http://h/.../a
+http://h/a/..%2f
+http://h/a%2fb
+http://h/%41
+http://h/a b
+http://h/a?b#c
+http://h/?
+http://h/#
+http://h/?a
+http://h/?a#
+http://h/#f
+http://h/?#
+http://h/?a=1&b=2#f/g?h
+http://h/?a?b
+http://h/#a#b
+http://h/#a?b
+http://h/a?<>
+http://h/a#<>`
+http://h/a'b?c'd
+http://h/a?b%20c
+http://h/a#b c
+foo://h/a/../b
+foo://h/a b
+foo://h/?a'b
+foo://h
+foo://h/
+foo://
+foo://?q
+foo://#f
+foo://h?#
+foo:
+foo:?q
+foo:#f
+foo:/
+foo:/#f
+foo:/a/../b
+foo:a/../b
+mailto:a/../b
+mailto:a b
+mailto:a"b
+mailto:a<b
+mailto:a`b
+mailto:a{b
+mailto:x?q'r#f g
+foo:a b?c'd#e f
+http:h
+http:/h
+http:///h
+http://h
+http://h?q
+http://h#f
+http://h\a
+http://h\a?b
+http://u\p@h/
+http://h/a\b
+http://h/a\b?c\d#e\f
+http://h/a\..\b
+foo://h/a\b
+foo:\\h
 URLS
 
 cat > "$TMP/auth.js" <<'NODE'
@@ -199,23 +275,36 @@ for (const line of fs.readFileSync(process.argv[2], "utf8").split("\n")) {
   try {
     const u = new URL(line);
     out = [u.protocol.replace(/:$/, ""), u.username, u.password,
-           u.hostname, u.port].join("|");
+           u.hostname, u.port, u.pathname, u.search, u.hash, u.href].join("|");
   } catch (e) { out = "INVALID"; }
   console.log(out);
 }
 NODE
 node "$TMP/auth.js" "$CORPUS" > "$TMP/auth_want.txt"
 
+# node's `search` and `hash` carry their delimiter when non-empty and are empty
+# when the component is present but empty, so they are derived from our two
+# bools rather than printed directly. `href` is what checks the bools.
 {
   echo 'import "../contrib/url/host.mere";'
   echo 'let p = fn (s: str) ->'
   echo '  match Url.parse s with'
   echo '  | None -> print "INVALID"'
-  echo '  | Some u -> print (u.scheme ++ "|" ++ u.username ++ "|" ++ u.password'
-  echo '                     ++ "|" ++ u.host ++ "|" ++ u.port);'
+  echo '  | Some u ->'
+  echo '    let search = if u.has_query && not (u.query == "")'
+  echo '                 then "?" ++ u.query else "" in'
+  echo '    let hash = if u.has_fragment && not (u.fragment == "")'
+  echo '               then "#" ++ u.fragment else "" in'
+  echo '    print (u.scheme ++ "|" ++ u.username ++ "|" ++ u.password ++ "|"'
+  echo '           ++ u.host ++ "|" ++ u.port ++ "|" ++ u.path ++ "|" ++ search'
+  echo '           ++ "|" ++ hash ++ "|" ++ Url.href u);'
   while IFS= read -r line; do
     [ -z "$line" ] && continue
-    printf 'let _ = p "%s";\n' "$line"
+    # Escape for a Mere string literal: backslash first, then quote, then `{`
+    # last — a `{` in a string opens interpolation, and `\{` is the literal.
+    # (Adding a backslash last is safe because nothing re-doubles it.)
+    esc=$(printf '%s' "$line" | sed 's/\\/\\\\/g; s/"/\\"/g; s/{/\\{/g')
+    printf 'let _ = p "%s";\n' "$esc"
   done < "$CORPUS"
   echo '0'
 } > "$ROOT/examples/.url_auth_tmp.mere"
@@ -223,11 +312,11 @@ node "$TMP/auth.js" "$CORPUS" > "$TMP/auth_want.txt"
 rm -f "$ROOT/examples/.url_auth_tmp.mere"
 
 if diff -q "$TMP/auth_want.txt" "$TMP/auth_ours.txt" >/dev/null; then
-  echo "  ok    authority  ($(grep -c . "$CORPUS") inputs agree on scheme|user|pass|host|port)"
+  echo "  ok    fields  ($(grep -c . "$CORPUS") inputs agree on scheme|user|pass|host|port|path|search|hash|href)"
 else
-  echo "  FAIL  authority"
+  echo "  FAIL  fields"
   paste -d'\t' "$CORPUS" "$TMP/auth_want.txt" "$TMP/auth_ours.txt" \
-    | awk -F'\t' '$2 != $3 { printf "        %-24s node=%-34s ours=%s\n", $1, $2, $3 }'
+    | awk -F'\t' '$2 != $3 { printf "        %-26s\n          node=%s\n          ours=%s\n", $1, $2, $3 }'
   fail=1
 fi
 

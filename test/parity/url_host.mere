@@ -1,6 +1,11 @@
-// The scheme and authority half of contrib/url, held to one output on every
-// backend. Correctness against the Standard is scripts/url_parity.sh's job
-// (it diffs against node); this file is about the four backends agreeing.
+// contrib/url's parser, held to one output on every backend. Correctness
+// against the Standard is scripts/url_parity.sh's job (it diffs 95 inputs
+// against node, field by field); this file is about the four backends agreeing.
+//
+// The two are not the same question, and this file is why: str_replace returned
+// a buffer with no length header on the C backend, so `Url.clean` came back
+// empty there and every URL was rejected — while node and the interpreter
+// agreed with each other the whole time.
 //
 // Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
@@ -9,7 +14,7 @@ import "../../contrib/url/host.mere";
 let p = fn (s: str) ->
   match Url.parse s with
   | None -> print (s ++ "  -> INVALID")
-  | Some u -> print (s ++ "  -> " ++ Url.origin u ++ "  rest=[" ++ u.rest ++ "]");
+  | Some u -> print (s ++ "  -> " ++ Url.href u);
 
 let _ = print "=== scheme and case folding ===";
 let _ = p "HTTP://EXAMPLE.com/a";
@@ -48,5 +53,51 @@ let _ = p "not a url";
 let _ = print "=== cleaning: surrounding space out, tabs and newlines out ===";
 let _ = p "  http://h/a  ";
 let _ = p "ht\ttp://h/a";
+
+let _ = print "=== dot segments, and what is not one ===";
+let _ = p "http://h/a/b/..";
+let _ = p "http://h/a/b/.";
+let _ = p "http://h/a/./b";
+let _ = p "http://h/a/%2e%2e/b";
+let _ = p "http://h/%2E%2E/a";
+let _ = p "http://h/..";
+let _ = p "http://h/a/b/../../../c";
+let _ = p "http://h/.../a";
+let _ = p "http://h/a/..%2f";
+let _ = p "http://h//";
+let _ = p "http://h/a//b";
+
+let _ = print "=== the path is never decoded ===";
+let _ = p "http://h/a%2fb";
+let _ = p "http://h/%41";
+
+let _ = print "=== query and fragment: presence is not content ===";
+let _ = p "http://h/?";
+let _ = p "http://h/#";
+let _ = p "http://h/?#";
+let _ = p "http://h/?a#";
+let _ = p "http://h/?a=1&b=2#f/g?h";
+let _ = p "http://h/#a?b";
+let _ = p "http://h/a'b?c'd";
+let _ = p "foo://h/?a'b";
+
+let _ = print "=== a special scheme's slashes are optional; a backslash is one ===";
+let _ = p "http:h";
+let _ = p "http:/h";
+let _ = p "http:///h";
 let _ = p "http://h\\a\\b";
+let _ = p "http://u\\p@h/";
+let _ = p "http://h/a\\b?c\\d#e\\f";
+let _ = p "foo://h/a\\b";
+let _ = p "foo:\\\\h";
+
+let _ = print "=== no authority: opaque only when it does not start with / ===";
+let _ = p "foo:/a/../b";
+let _ = p "foo:a/../b";
+let _ = p "mailto:a/../b";
+let _ = p "mailto:a b";
+let _ = p "foo:";
+let _ = p "foo://";
+let _ = p "foo:?q";
+let _ = p "foo:#f";
 0
