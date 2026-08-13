@@ -36,12 +36,25 @@
 # Usage:
 #   sh scripts/encoding_parity.sh
 
+# The oracle is a dependency with a version. Nothing checked here is known to
+# have changed between node versions — unlike scripts/url_parity.sh, where two
+# answers did — but the same floor is required and the version is printed, so a
+# disagreement is diagnosed by reading one line instead of a page of diffs.
+NODE_MIN=24
+
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
 
 command -v node >/dev/null 2>&1 || { echo "encoding_parity: node absent, skipping"; exit 0; }
 [ -x "$MERE" ] || { echo "encoding_parity: $MERE not found — run 'dune build'" >&2; exit 1; }
+
+NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
+if [ "$NODE_MAJOR" -lt "$NODE_MIN" ]; then
+  echo "encoding_parity: node $(node -v) is below the v${NODE_MIN} floor, skipping"
+  exit 0
+fi
+echo "encoding_parity: oracle is node $(node -v)"
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT

@@ -63,6 +63,18 @@ jobs:
         with:
           ocaml-compiler: "5.4"
 
+      # The oracle for url_parity and encoding_parity is node's URL and
+      # TextDecoder, so node is a pinned dependency and not whatever the image
+      # happens to ship. The runner's default was v22, which predates two
+      # changes to the URL Standard — `^` in the path percent-encode set, and
+      # `..` resolved against an empty path — and reported our spec-correct
+      # answers as failures. An unpinned oracle makes the result depend on the
+      # machine, which is the thing a differential gate exists to avoid.
+      - name: Set up Node (the differential oracle)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
       # clang, because the LLVM backend's output is LLVM IR and gcc cannot
       # compile it — parity.sh would report MISCOMPILE for every case rather
       # than skipping. wabt for the wasm backend.
@@ -99,6 +111,11 @@ jobs:
             wat2wasm --help 2>&1 | grep -q -- "$f" \
               || { echo "wat2wasm does not support $f"; exit 1; }
           done
+          # The two node-oracle harnesses skip below this floor rather than
+          # reporting phantom failures, so the floor is asserted here — a gate
+          # that silently skips in CI is a gate that passes without running.
+          node -e 'if (+process.versions.node.split(".")[0] < 24)
+                     { console.error("node " + process.version + " is below the v24 oracle floor"); process.exit(1); }'
           clang --version | head -1
           node --version
           wat2wasm --version

@@ -153,6 +153,27 @@ of the same specification that nobody here wrote. Two ways:
   is where an implementation can be plausibly wrong and still look right
   on `[::1]`.
 
+### The oracle has a version
+
+`url_parity.sh` requires **node ≥ 24** and prints which version it compared
+against. That floor is not decoration: node 22 and node 24 give different answers
+to two of the questions here, in both cases because the older one predates a
+change to the Standard.
+
+* **`^` (U+005E) in a path.** The path percent-encode set is the query set plus
+  `?`, `^`, `` ` ``, `{`, `}`. node 24 encodes `^`; node 22 does not.
+* **`..` against a base whose path is empty**, e.g. `foo://h`. Path state shortens
+  the path and then, because the input ended, appends the empty string — so the
+  answer is `foo://h/`. node 24 agrees; node 22 answers `foo://h`.
+
+Both were found by running this harness on a machine with a different node than
+the one it was written against. It is the useful kind of embarrassment: **a
+differential gate's oracle is a dependency with a version**, and an unpinned
+oracle makes the result depend on the machine — which is the thing the gate
+exists to rule out. CI pins node and asserts the floor, so it cannot silently
+skip; a local run below the floor skips with the reason rather than reporting a
+page of phantom failures.
+
 ### Where this deliberately differs from node
 
 The Standard's *no scheme state* admits a reference against an opaque base only
