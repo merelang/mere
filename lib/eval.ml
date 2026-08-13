@@ -1997,8 +1997,118 @@ let builtin_char_at =
    goes through this mock at eval time to maintain 4-backend parity.
    Unknown extern names are rejected by lookup_extern with a helpful
    error. *)
+(* The flat byte arena, mirroring the one codegen_c emits: a bump allocator over
+   a fixed buffer, addressed by offsets, with the low bytes left as a null-ish
+   guard. Without this the interpreter could not run a program that touches the
+   arena at all, which meant scripts/ctest.sh compile-checked those programs and
+   never compared their answers — and that is where `mem_get_u32be` sign-extending
+   0x80000000 hid. Same capacity and same first offset, so the two agree on
+   arithmetic as well as on values. *)
+let arena_cap = 16 * 1024 * 1024
+let arena = Bytes.make arena_cap '\000'
+let arena_top = ref 8
+let arena_lock = Mutex.create ()
+
+let arena_bump (n : int) : int =
+  Mutex.lock arena_lock;
+  let p = !arena_top in
+  let n = if n <= 0 then 1 else n in
+  if p + n > arena_cap then begin
+    Mutex.unlock arena_lock;
+    failwith
+      (Printf.sprintf
+         "mem_alloc: byte arena exhausted (%d bytes requested; the arena is a \
+          bump allocator with no free — reuse buffers instead of allocating per \
+          request)" n)
+  end else begin
+    arena_top := p + n;
+    Mutex.unlock arena_lock;
+    p
+  end
+
+let arena_get (i : int) : int = Char.code (Bytes.get arena i)
+let arena_set (i : int) (b : int) : unit =
+  Bytes.set arena i (Char.chr (b land 0xff))
+
+(* Two- and three-argument externs, spelled out because the mock table is
+   curried builtins rather than a table of arities. *)
+let extern2 name f =
+  V_builtin (name, fun a ->
+    V_builtin (name ^ "1", fun b -> f a b))
+
+let extern3 name f =
+  V_builtin (name, fun a ->
+    V_builtin (name ^ "1", fun b ->
+      V_builtin (name ^ "2", fun c -> f a b c)))
+
+let want_int who = function
+  | V_int i -> i
+  | _ -> failwith (who ^ ": expected int")
+
 let lookup_extern (name : string) (_ty : Ast.ty) : value =
   match name with
+  | "mem_alloc" ->
+    V_builtin ("mem_alloc", fun v -> V_int (arena_bump (want_int "mem_alloc" v)))
+  | "mem_set_u8" ->
+    extern3 "mem_set_u8" (fun p off b ->
+      arena_set (want_int "mem_set_u8" p + want_int "mem_set_u8" off)
+        (want_int "mem_set_u8" b);
+      V_int 0)
+  | "mem_get_u8" ->
+    extern2 "mem_get_u8" (fun p off ->
+      V_int (arena_get (want_int "mem_get_u8" p + want_int "mem_get_u8" off)))
+  | "mem_set_u16be" ->
+    extern3 "mem_set_u16be" (fun p off v ->
+      let i = want_int "mem_set_u16be" p + want_int "mem_set_u16be" off in
+      let v = want_int "mem_set_u16be" v in
+      arena_set i (v lsr 8); arena_set (i + 1) v;
+      V_int 0)
+  | "mem_get_u16be" ->
+    extern2 "mem_get_u16be" (fun p off ->
+      let i = want_int "mem_get_u16be" p + want_int "mem_get_u16be" off in
+      V_int ((arena_get i lsl 8) lor arena_get (i + 1)))
+  | "mem_set_u32be" ->
+    extern3 "mem_set_u32be" (fun p off v ->
+      let i = want_int "mem_set_u32be" p + want_int "mem_set_u32be" off in
+      let v = want_int "mem_set_u32be" v in
+      arena_set i (v lsr 24); arena_set (i + 1) (v lsr 16);
+      arena_set (i + 2) (v lsr 8); arena_set (i + 3) v;
+      V_int 0)
+  | "mem_get_u32be" ->
+    (* Unsigned, which is the whole point: 0xFF008080 is an opaque pixel, not a
+       negative number. *)
+    extern2 "mem_get_u32be" (fun p off ->
+      let i = want_int "mem_get_u32be" p + want_int "mem_get_u32be" off in
+      V_int ((arena_get i lsl 24) lor (arena_get (i + 1) lsl 16)
+             lor (arena_get (i + 2) lsl 8) lor arena_get (i + 3)))
+  | "str_ptr" ->
+    V_builtin ("str_ptr", fun v ->
+      match v with
+      | V_str s ->
+        let n = String.length s in
+        let p = arena_bump (n + 1) in
+        Bytes.blit_string s 0 arena p n;
+        arena_set (p + n) 0;
+        V_int p
+      | _ -> failwith "str_ptr: expected str")
+  | "mem_copy_str" ->
+    extern3 "mem_copy_str" (fun dst off s ->
+      match s with
+      | V_str s ->
+        let d = want_int "mem_copy_str" dst + want_int "mem_copy_str" off in
+        (* Stops at the first NUL, as the C one does — the count it returns is
+           what the caller writes a length field from. *)
+        let n =
+          match String.index_opt s '\000' with
+          | Some i -> i
+          | None -> String.length s in
+        Bytes.blit_string s 0 arena d n;
+        V_int n
+      | _ -> failwith "mem_copy_str: 3rd arg expected str")
+  | "mem_to_str" ->
+    extern2 "mem_to_str" (fun p len ->
+      let p = want_int "mem_to_str" p and len = want_int "mem_to_str" len in
+      V_str (Bytes.sub_string arena p len))
   | "getpid" ->
     V_builtin ("getpid", fun v ->
       match v with

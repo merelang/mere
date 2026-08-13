@@ -133,7 +133,10 @@ function makePgEnv({ getMemory, bumpAlloc }) {
       return 0;
     },
     mem_get_u32be: (ptr, off) => {
-      return new DataView(getMemory()).getInt32((ptr | 0) + (off | 0), false);
+      // getUint32, not getInt32: a signed read makes 0x80000000 and above
+      // negative, and every opaque pixel has alpha 0xFF. The C host had the same
+      // bug, which is why backend parity never saw it.
+      return new DataView(getMemory()).getUint32((ptr | 0) + (off | 0), false);
     },
     mem_set_u16be: (ptr, off, val) => {
       new DataView(getMemory()).setUint16((ptr | 0) + (off | 0), val & 0xffff, false);

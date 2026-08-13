@@ -64,10 +64,36 @@ for f in $FILES; do
     fail=$((fail + 1))
     continue
   fi
+  # An FFI declaration used to mean compile-check only, on the grounds that a
+  # bare extern has no linkable symbol. That is true of an arbitrary name and
+  # false of the native FFI set — mem_*, tcp_*, str_ptr and the rest get `static`
+  # definitions emitted, so those programs link and run. Compile-checking them
+  # meant their ANSWERS were never compared, and that is exactly where
+  # mem_get_u32be sign-extending 0x80000000 hid.
+  #
+  # So the rule is now: compare when both sides can run, and compile-check when
+  # they cannot. Requiring the interpreter to run it too is what keeps this from
+  # firing on a program that would open a socket — an extern the interpreter mocks
+  # is an extern somebody thought about.
+  bin="$TMP/$name.bin"
   if grep -q '^extern ' "$f" 2>/dev/null || grep -q '[^_]extern fn' "$f" 2>/dev/null; then
-    # FFI declaration present: compile-check only (no linkable symbol).
+    if "$CC" -O0 -w "$cfile" -o "$bin" -lm 2>"$TMP/cc.err" \
+       && "$MERE" "$f" > "$TMP/i.out" 2>"$TMP/i.err"; then
+      native="$("$bin" 2>/dev/null || true)"
+      interp="$(cat "$TMP/i.out")"
+      if [ "$native" != "$interp" ]; then
+        echo "FAIL $name: native/interp mismatch (extern)"
+        echo "    interp: [$interp]"
+        echo "    native: [$native]"
+        fail=$((fail + 1))
+      else
+        echo "PASS $name (extern, ran on both)"
+        pass=$((pass + 1))
+      fi
+      continue
+    fi
     if "$CC" -fsyntax-only -w "$cfile" 2>"$TMP/cc.err"; then
-      echo "PASS $name (syntax-only, extern)"
+      echo "PASS $name (syntax-only, extern: not runnable on both sides)"
       pass=$((pass + 1))
     else
       echo "FAIL $name: emitted C does not compile"
@@ -76,7 +102,6 @@ for f in $FILES; do
     fi
     continue
   fi
-  bin="$TMP/$name.bin"
   if ! "$CC" -O0 -w "$cfile" -o "$bin" -lm 2>"$TMP/cc.err"; then
     echo "FAIL $name: emitted C does not compile"
     sed 's/^/    /' "$TMP/cc.err" | head -12
