@@ -4,6 +4,44 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.236 — 2026-08-13
+
+_An IPv6 address has many spellings and exactly one canonical form, so the serialiser is as
+much of the answer as the parser._
+
+```
+  contrib/url/ipv6.mere    eight 16-bit pieces, in and back out
+  scripts/url_parity.sh    + 53 IPv6 literals
+```
+
+**`contrib/url/ipv6.mere`.** `[0:0:0:0:0:0:0:1]` and `[::1]` are the same host, and until
+now the host field carried whichever one was typed — a comparison on the text would have
+called them different origins. Both now parse to the same eight pieces and serialise to
+`[::1]`.
+
+The serialiser's rules are narrow enough to get plausibly wrong while still looking right on
+`[::1]`, which is what the corpus is weighted towards: the **longest** run of zero pieces is
+compressed, ties go to the **first** run (`[1:0:0:1:0:0:1:1]` is `[1::1:0:0:1:1]`), and a
+run of exactly **one** zero is left alone (`[1:0:2:3:4:5:6:7]` keeps it). `::` may stand for
+a single piece on the way in — `[1:2:3:4:5:6:7::]` is `1:2:3:4:5:6:7:0`, which then
+serialises without any `::` at all.
+
+A trailing dotted quad occupies the last two pieces and is **strict** dotted decimal: four
+parts, no leading zeros, no hex. That is deliberately *not* the multi-base parser a bare
+host uses, so `[::0x7f.1]` and `[::01.2.3.4]` are not addresses while `http://0x7f.1` is
+`127.0.0.1`. Two IPv4 parsers in one file looks like duplication and is not — they are
+answering different questions, and the comment says so at both.
+
+**Implementation note worth keeping.** The Standard's IPv6 parser is a pointer-walking state
+machine over a mutable eight-slot array. This is the same algorithm expressed by splitting:
+once on `::` (three parts means two of them, which is one too many), then each side on `:`,
+with the zero fill computed from the two lengths. A trailing quad is folded into two hex
+groups *before* the split, so nothing downstream has to know about dots — and anything else
+containing one fails on its own, because `.` is not a hex digit. No mutation, and the
+failure cases fall out rather than being enumerated.
+
+---
+
 ## v0.1.235 — 2026-08-13
 
 _Resolution against a base, hosts checked one byte at a time — and the first place the

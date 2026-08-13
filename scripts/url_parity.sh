@@ -526,5 +526,106 @@ else
   fail=1
 fi
 
+# --- IPv6 literals ---------------------------------------------------------
+#
+# An IPv6 address has many spellings and exactly one canonical form, so the
+# serialiser is as much of the answer as the parser: `[0:0:0:0:0:0:0:1]` and
+# `[::1]` are the same host, and a comparison on the text would call them
+# different origins. The corpus is weighted towards the compression rules —
+# which run is chosen, what a tie does, when a single zero is left alone —
+# because that is where an implementation can be plausibly wrong and still look
+# right on `[::1]`.
+
+cat > "$TMP/v6.txt" <<'V6'
+[::1]
+[::]
+[0:0:0:0:0:0:0:1]
+[0:0:0:0:0:0:0:0]
+[1:2:3:4:5:6:7:8]
+[1::8]
+[1:2::7:8]
+[2001:db8::1]
+[2001:0db8:0000:0000:0000:0000:0000:0001]
+[FF01::101]
+[fF01::101]
+[ffff::1]
+[::ffff]
+[1:2:3:4:5:6:7::]
+[::1:2:3:4:5:6:7]
+[1::2:3:4:5:6:7]
+[1:0:0:2:0:0:0:3]
+[1:0:0:0:2:0:0:3]
+[0:1:0:0:0:0:0:0]
+[1:0:0:1:0:0:1:1]
+[0:0:1:1:0:0:1:1]
+[1:0:2:3:4:5:6:7]
+[0:1:2:3:4:5:6:7]
+[1:2:3:4:5:6:7:0]
+[::ffff:1.2.3.4]
+[::1.2.3.4]
+[1:2:3:4:5:6:1.2.3.4]
+[64:ff9b::1.2.3.4]
+[::ffff:0.0.0.0]
+[::0.0.0.0]
+[1:2:3:4:5:6:7:8:9]
+[1:2:3:4:5:6:7]
+[1::2::3]
+[:::]
+[1:::2]
+[:1]
+[1:]
+[::1:2:3:4:5:6:7:8]
+[1.2.3.4]
+[::ffff:1.2.3.4.5]
+[::ffff:256.1.1.1]
+[::1.2.3]
+[::1.2.3.4.]
+[::.1.2.3]
+[::01.2.3.4]
+[::1.2.3.04]
+[::0x7f.1]
+[12345::]
+[fffff::1]
+[g::1]
+[]
+[::1]:8080
+[::1]:80
+V6
+
+cat > "$TMP/v6.js" <<'NODE'
+const fs = require("fs");
+for (const line of fs.readFileSync(process.argv[2], "utf8").split("\n")) {
+  if (!line) continue;
+  let out;
+  try { out = new URL("http://" + line + "/").href; } catch (e) { out = "INVALID"; }
+  console.log(out);
+}
+NODE
+node "$TMP/v6.js" "$TMP/v6.txt" > "$TMP/v6_want.txt"
+
+{
+  echo 'import "../contrib/url/host.mere";'
+  echo 'let p = fn (s: str) ->'
+  echo '  match Url.parse ("http://" ++ s ++ "/") with'
+  echo '  | None -> print "INVALID"'
+  echo '  | Some u -> print (Url.href u);'
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    printf 'let _ = p "%s";\n' "$line"
+  done < "$TMP/v6.txt"
+  echo '0'
+} > "$ROOT/examples/.url_v6_tmp.mere"
+( ulimit -t 120; "$MERE" "$ROOT/examples/.url_v6_tmp.mere" ) | sed '$d' > "$TMP/v6_ours.txt"
+rm -f "$ROOT/examples/.url_v6_tmp.mere"
+
+if diff -q "$TMP/v6_want.txt" "$TMP/v6_ours.txt" >/dev/null; then
+  echo "  ok    ipv6  ($(grep -c . "$TMP/v6.txt") literals agree on href, canonical form included)"
+else
+  echo "  FAIL  ipv6"
+  paste -d'\t' "$TMP/v6.txt" "$TMP/v6_want.txt" "$TMP/v6_ours.txt" \
+    | awk -F'\t' '$2 != $3 { printf "        %-30s node=%-34s ours=%s\n", $1, $2, $3 }' | head -20
+  fail=1
+fi
+
 [ "$fail" = 0 ] && echo "url_parity: ok" || echo "url_parity: FAILED"
 [ "$fail" = 0 ]

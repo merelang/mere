@@ -35,6 +35,7 @@
 
 import "percent.mere";
 import "path.mere";
+import "ipv6.mere";
 
 type url_parts = {
   scheme: str,        // lowercased, no trailing colon
@@ -236,13 +237,16 @@ module Url {
     else if _forbidden_host_byte (ord (char_at h i)) then true
     else _has_forbidden h (i + 1) n;
 
-  // An IPv6 literal is carried through in its brackets: parsing and
-  // re-serialising one is its own job and this slice does not need it. The
-  // brackets are the one place they are allowed.
+  // An IPv6 literal is parsed and re-serialised into its canonical form, so
+  // `[0:0:0:0:0:0:0:1]` and `[::1]` come out as the same host. Comparing the
+  // text instead would call them different origins. The brackets are the one
+  // place `[` and `]` are allowed.
   let parse_host = fn (h: str) -> fn (special: bool) ->
     if str_len h == 0 then Some ""
     else if str_starts_with h "[" then
-      (if str_ends_with h "]" then Some h else None)
+      (if str_ends_with h "]"
+       then Ipv6.canonical (substring h 1 (str_len h - 1))
+       else None)
     else if not special then
       // Opaque: no case folding, no IPv4, and no decoding — but the forbidden
       // code points still are forbidden.
