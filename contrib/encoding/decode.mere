@@ -1,0 +1,218 @@
+// contrib/encoding/decode.mere — bytes off a wire into a Mere `str`.
+//
+// A page arrives as bytes and a label. Neither is trustworthy on its own: the
+// label may be a lie, an alias, or absent, and the bytes may be malformed. The
+// Encoding Standard's answer is that decoding never fails — every malformed
+// sequence becomes U+FFFD — so this module returns a `str`, not an `?str`. The
+// only thing that can fail here is recognising the label.
+//
+// Two facts about this area are counter-intuitive enough to be worth stating
+// before any code:
+//
+//   * **`ascii` means windows-1252.** So do `latin1`, `iso-8859-1` and
+//     `us-ascii`. The Standard folds them all into one encoding on purpose,
+//     because that is what the deployed web already did. A page that calls
+//     itself `ascii` and contains byte 0x80 has a euro sign in it, not an error.
+//   * **How many U+FFFD a bad UTF-8 sequence produces is specified, and it is
+//     not one per byte.** `F1 80 80 41` is ONE replacement then `A`, because the
+//     three bytes were a valid *prefix* and are one error together. But
+//     `E0 80 80` is THREE, because 0x80 is out of range for a sequence starting
+//     `E0` — so the sequence is one error and each remaining byte is then
+//     reconsidered on its own and fails on its own. Getting this wrong changes
+//     how many characters a page has, which changes every offset after it.
+//
+// Usage:
+//   import "contrib/encoding/decode.mere";
+//   match Encoding.label_of " UTF-8 " with
+//   | Some name -> Encoding.decode name (read_bytes "page.html")
+//   | None -> ""
+
+module Encoding {
+
+  let replacement = 65533;   // U+FFFD
+
+  // --- labels ------------------------------------------------------------
+  // "Get an encoding": strip leading and trailing ASCII whitespace, lowercase,
+  // then look the result up. ASCII whitespace is exactly TAB LF FF CR SPACE —
+  // narrower than "anything <= 0x20", which is why this does not use str_trim.
+
+  let _is_ws = fn (b: int) ->
+    b == 0x09 || b == 0x0A || b == 0x0C || b == 0x0D || b == 0x20;
+
+  let rec _ltrim = fn (s: str) -> fn (i: int) -> fn (n: int) ->
+    if i >= n then ""
+    else if _is_ws (ord (char_at s i)) then _ltrim s (i + 1) n
+    else substring s i n;
+
+  let rec _rtrim = fn (s: str) -> fn (n: int) ->
+    if n <= 0 then ""
+    else if _is_ws (ord (char_at s (n - 1))) then _rtrim s (n - 1)
+    else substring s 0 n;
+
+  let normalize_label = fn (s: str) ->
+    let a = _ltrim s 0 (str_len s) in
+    to_lower (_rtrim a (str_len a));
+
+  // The Standard's label lists for the encodings this directory cares about.
+  // Every label claimed here is checked against another implementation by
+  // scripts/encoding_parity.sh — but note what that can and cannot do: it
+  // confirms each label maps where we say it does, and it cannot discover a
+  // label we forgot to list. That gap is real and is recorded rather than
+  // implied.
+  let label_of = fn (raw: str) ->
+    let s = normalize_label raw in
+    if s == "utf-8" || s == "utf8" || s == "unicode-1-1-utf-8"
+       || s == "unicode11utf8" || s == "unicode20utf8" || s == "x-unicode20utf8"
+    then Some "utf-8"
+    else if s == "windows-1252" || s == "ascii" || s == "us-ascii"
+            || s == "latin1" || s == "l1" || s == "cp1252" || s == "x-cp1252"
+            || s == "cp819" || s == "ibm819" || s == "csisolatin1"
+            || s == "iso-8859-1" || s == "iso8859-1" || s == "iso88591"
+            || s == "iso_8859-1" || s == "iso_8859-1:1987" || s == "iso-ir-100"
+            || s == "ansi_x3.4-1968"
+    then Some "windows-1252"
+    else if s == "shift_jis" || s == "shift-jis" || s == "sjis" || s == "x-sjis"
+            || s == "ms932" || s == "ms_kanji" || s == "windows-31j"
+            || s == "csshiftjis"
+    then Some "shift_jis"
+    else if s == "euc-jp" || s == "x-euc-jp" || s == "cseucpkdfmtjapanese"
+    then Some "euc-jp"
+    else None;
+
+  // --- UTF-8 -------------------------------------------------------------
+  //
+  // The Standard's decoder, which is a state machine and not a loop over
+  // sequence lengths. The state is (needed, code point so far, and the range
+  // the NEXT byte must fall in) — that last part is what rejects an overlong
+  // form and a surrogate without a separate check afterwards:
+  //
+  //   E0 needs its first continuation in A0..BF, not 80..BF, so E0 80 ..
+  //      cannot express a value that a two-byte sequence could have held
+  //   ED needs its first continuation in 80..9F, which is exactly the bound
+  //      that keeps D800..DFFF unrepresentable
+  //   F0 needs 90..BF and F4 needs 80..8F, bounding the range at both ends
+  //
+  // 0x80..0xC1 and 0xF5..0xFF are never a lead byte, so they are one error each.
+
+  let rec _utf8 = fn (b: bytes) -> fn (i: int) -> fn (n: int) -> fn buf ->
+                 fn (needed: int) -> fn (cp: int) ->
+                 fn (lo: int) -> fn (hi: int) ->
+    if i >= n then
+      // A sequence left unfinished at the end of the stream is one error.
+      let _ = if needed > 0 then strbuf_push buf (str_of_codepoint replacement)
+              else () in
+      strbuf_to_str buf
+    else
+      let x = bytes_get b i in
+      if needed == 0 then
+        if x <= 0x7F then
+          let _ = strbuf_push buf (str_of_codepoint x) in
+          _utf8 b (i + 1) n buf 0 0 0x80 0xBF
+        else if x >= 0xC2 && x <= 0xDF then
+          _utf8 b (i + 1) n buf 1 (bit_and x 0x1F) 0x80 0xBF
+        else if x == 0xE0 then _utf8 b (i + 1) n buf 2 (bit_and x 0x0F) 0xA0 0xBF
+        else if x == 0xED then _utf8 b (i + 1) n buf 2 (bit_and x 0x0F) 0x80 0x9F
+        else if x >= 0xE1 && x <= 0xEF then
+          _utf8 b (i + 1) n buf 2 (bit_and x 0x0F) 0x80 0xBF
+        else if x == 0xF0 then _utf8 b (i + 1) n buf 3 (bit_and x 0x07) 0x90 0xBF
+        else if x == 0xF4 then _utf8 b (i + 1) n buf 3 (bit_and x 0x07) 0x80 0x8F
+        else if x >= 0xF1 && x <= 0xF3 then
+          _utf8 b (i + 1) n buf 3 (bit_and x 0x07) 0x80 0xBF
+        else
+          let _ = strbuf_push buf (str_of_codepoint replacement) in
+          _utf8 b (i + 1) n buf 0 0 0x80 0xBF
+      else if x < lo || x > hi then
+        // The byte does not belong to this sequence. The sequence is one error,
+        // and the byte is then reconsidered as a lead — so `i` does not advance.
+        // This terminates because a lead byte always consumes itself.
+        let _ = strbuf_push buf (str_of_codepoint replacement) in
+        _utf8 b i n buf 0 0 0x80 0xBF
+      else
+        let acc = cp * 64 + (bit_and x 0x3F) in
+        if needed == 1 then
+          let _ = strbuf_push buf (str_of_codepoint acc) in
+          _utf8 b (i + 1) n buf 0 0 0x80 0xBF
+        else
+          // Only the first continuation has a narrowed range.
+          _utf8 b (i + 1) n buf (needed - 1) acc 0x80 0xBF;
+
+  // A leading BOM is removed, which is what a browser does and what the
+  // oracle this is checked against does. It is stripped here rather than by the
+  // caller because a BOM is a property of the byte stream, not of the text.
+  let _has_bom = fn (b: bytes) ->
+    bytes_len b >= 3 && bytes_get b 0 == 0xEF && bytes_get b 1 == 0xBB
+    && bytes_get b 2 == 0xBF;
+
+  let decode_utf8 = fn (b: bytes) ->
+    let start = if _has_bom b then 3 else 0 in
+    _utf8 b start (bytes_len b) (strbuf_new ()) 0 0 0x80 0xBF;
+
+  // --- windows-1252 ------------------------------------------------------
+  //
+  // Identity everywhere except 0x80..0x9F, and not even all of that range: 0x81,
+  // 0x8D, 0x8F, 0x90 and 0x9D map to themselves, so there is no unmapped byte
+  // and therefore no error case in this encoding at all. The 27 values below
+  // were read off the oracle one byte at a time, not transcribed.
+
+  let _cp1252 = fn (b: int) ->
+    if b == 0x80 then 0x20AC
+    else if b == 0x82 then 0x201A
+    else if b == 0x83 then 0x0192
+    else if b == 0x84 then 0x201E
+    else if b == 0x85 then 0x2026
+    else if b == 0x86 then 0x2020
+    else if b == 0x87 then 0x2021
+    else if b == 0x88 then 0x02C6
+    else if b == 0x89 then 0x2030
+    else if b == 0x8A then 0x0160
+    else if b == 0x8B then 0x2039
+    else if b == 0x8C then 0x0152
+    else if b == 0x8E then 0x017D
+    else if b == 0x91 then 0x2018
+    else if b == 0x92 then 0x2019
+    else if b == 0x93 then 0x201C
+    else if b == 0x94 then 0x201D
+    else if b == 0x95 then 0x2022
+    else if b == 0x96 then 0x2013
+    else if b == 0x97 then 0x2014
+    else if b == 0x98 then 0x02DC
+    else if b == 0x99 then 0x2122
+    else if b == 0x9A then 0x0161
+    else if b == 0x9B then 0x203A
+    else if b == 0x9C then 0x0153
+    else if b == 0x9E then 0x017E
+    else if b == 0x9F then 0x0178
+    else b;
+
+  let rec _sb = fn (b: bytes) -> fn (i: int) -> fn (n: int) -> fn buf ->
+    if i >= n then strbuf_to_str buf
+    else
+      let _ = strbuf_push buf (str_of_codepoint (_cp1252 (bytes_get b i))) in
+      _sb b (i + 1) n buf;
+
+  let decode_windows_1252 = fn (b: bytes) ->
+    _sb b 0 (bytes_len b) (strbuf_new ());
+
+  // --- dispatch ----------------------------------------------------------
+  // `None` for a name this slice does not implement yet, which is a different
+  // answer from `label_of` returning `None` for a label nobody recognises. A
+  // caller that gets `None` here knows the page named a real encoding and
+  // should say so rather than guess.
+
+  let decode = fn (name: str) -> fn (b: bytes) ->
+    if name == "utf-8" then Some (decode_utf8 b)
+    else if name == "windows-1252" then Some (decode_windows_1252 b)
+    else None;
+
+  // The whole job in one call: a label off a page and its bytes. Falls back to
+  // UTF-8 when the label is absent or unrecognised, which is what the HTML
+  // spec's default is for a page with no declaration.
+  let decode_labelled = fn (raw_label: str) -> fn (b: bytes) ->
+    match label_of raw_label with
+    | None -> decode_utf8 b
+    | Some name ->
+      match decode name b with
+      | None -> decode_utf8 b
+      | Some s -> s;
+
+}
