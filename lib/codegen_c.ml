@@ -498,6 +498,60 @@ let current_expected_ty : Ast.ty option ref = ref None
    emit_expr Let (binding the let's name). *)
 let current_var_types : (string * Ast.ty) list ref = ref []
 
+(* Q-029: a self tail call becomes a loop on the C backend.
+   `while cond do body` desugars in the parser to a tail-recursive `let rec`,
+   so no backend ever sees a loop; C got a self-recursive function and left
+   the tail call to clang. That made the iteration bound depend on the
+   optimizer — -O0 died with no diagnostic at ~200k, which is precisely the
+   build `scripts/debug_info.sh` prescribes for debugging. The Wasm backend
+   already tracks tail position (`wasm_tail_pos`); this is the same idea
+   lowered to a goto.
+
+   `c_tail_pos` is consumed on entry to emit_expr and re-granted only by the
+   cases where a subexpression genuinely is in tail position, so a call
+   sitting anywhere else cannot be mistaken for one. `c_tail_used` is what
+   keeps the change invisible: a function that emits no goto is emitted
+   byte-for-byte as it was before. *)
+let c_tail_pos = ref false
+let c_self : (string * string list) option ref = ref None
+let c_tail_used = ref false
+
+(* The replacement for a saturated self call in tail position. Arguments are
+   read into temporaries first because they reference the parameters we are
+   about to overwrite. `__mere_ret` is never evaluated; it is there to give
+   the statement expression the function's return type. *)
+(* An escape hatch while the transform is young: with MERE_NO_TAIL_LOOP set,
+   nothing is rewritten and the backend emits exactly what it emitted before.
+   That makes "is this the loop transform?" a one-variable question. *)
+let no_tail_loop = (try Sys.getenv "MERE_NO_TAIL_LOOP" <> "" with Not_found -> false)
+
+(* Bisecting aid: restrict the rewrite to callees whose name contains this. *)
+let tail_only = (try Some (Sys.getenv "MERE_TAIL_ONLY") with Not_found -> None)
+let contains_sub (hay : string) (needle : string) : bool =
+  let nh = String.length hay and nn = String.length needle in
+  let rec go i = i + nn <= nh && (String.sub hay i nn = needle || go (i + 1)) in
+  nn = 0 || go 0
+
+let self_tail_goto (callee : string) (args_c : string list) : string option =
+  if no_tail_loop then None else
+  if (match tail_only with Some sub -> not (contains_sub callee sub) | None -> false)
+  then None else
+  match !c_self with
+  | Some (name, params)
+    when name = callee && List.length params = List.length args_c ->
+    c_tail_used := true;
+    let tmps =
+      List.mapi (fun i a -> Printf.sprintf "__auto_type __mt%d = %s;" i a) args_c in
+    let asgn =
+      (* Through the entry aliases, not by name: a `let j = ...` in the body
+         shadows the parameter `j`, and assigning by name would write the
+         shadow and jump with the parameter unchanged — an infinite loop.
+         Json.parse_object does exactly that, five times over. *)
+      List.mapi (fun i _ -> Printf.sprintf "*__mere_a%d = __mt%d;" i i) params in
+    Some (Printf.sprintf "({ %s %s goto __mere_tail; __mere_ret; })"
+            (String.concat " " tmps) (String.concat " " asgn))
+  | _ -> None
+
 (* T-1 (reserved-name hygiene): a user-defined name — a local, a captured env
    field, a lifted inner fn, or a top-level fn — must shadow a same-named
    builtin at call sites. The builtin App-arms below guard on `not
@@ -1247,6 +1301,10 @@ let channel_elem_tag (t : Ast.ty option) : string =
 
 (* Translate one Lang expression to a C expression string. *)
 let rec emit_expr (e : Ast.expr) : string =
+  (* Q-029: tail position belongs to where this expression sits, so take it
+     and hand it on only where it still holds. *)
+  let __in_tail = !c_tail_pos in
+  c_tail_pos := false;
   match e.node with
   | Ast.Int_lit n -> string_of_int n ^ "LL"
     (* v0.1.41: the LL suffix keeps literal arithmetic 64-bit. Without it,
@@ -1510,7 +1568,7 @@ let rec emit_expr (e : Ast.expr) : string =
               ("extern `" ^ name ^ "` used as a value must have a simple `A -> B` \
                 type; wrap a curried or higher-order extern as `fn x -> " ^ name ^ " x`"))
        else c_safe_name name))
-  | Ast.Annot (inner, _) -> emit_expr inner
+  | Ast.Annot (inner, _) -> c_tail_pos := __in_tail; emit_expr inner
   | Ast.Neg a -> "(-" ^ emit_expr a ^ ")"
   | Ast.Bin (Ast.Concat, a, b) ->
     "__lang_str_concat(" ^ emit_expr a ^ ", " ^ emit_expr b ^ ")"
@@ -1547,7 +1605,17 @@ let rec emit_expr (e : Ast.expr) : string =
   | Ast.Logic (op, a, b) ->
     "(" ^ emit_expr a ^ " " ^ logicop_to_c op ^ " " ^ emit_expr b ^ ")"
   | Ast.If (cond, then_, else_) ->
-    "(" ^ emit_expr cond ^ " ? " ^ emit_expr then_ ^ " : " ^ emit_expr else_ ^ ")"
+    (* The operands are emitted else / then / cond, which is the order the
+       original `^` chain evaluated them in (OCaml takes the right argument
+       first). emit_expr interns strings and numbers closures as it goes, so
+       reordering it changes the generated program — schema_reflect built and
+       then printed nothing. *)
+    c_tail_pos := __in_tail;
+    let else_c = emit_expr else_ in
+    c_tail_pos := __in_tail;
+    let then_c = emit_expr then_ in
+    let cond_c = emit_expr cond in
+    "(" ^ cond_c ^ " ? " ^ then_c ^ " : " ^ else_c ^ ")"
   | Ast.Let (pat, value, body) ->
     (match pat.pnode with
      | Ast.P_var name when
@@ -1555,6 +1623,7 @@ let rec emit_expr (e : Ast.expr) : string =
          && Hashtbl.mem inner_lifts name ->
        (* This inner-fn binding has been lifted out during the pre-pass.
           The lifted definition lives at top level; just emit the body. *)
+       c_tail_pos := __in_tail;
        emit_expr body
      | Ast.P_var name ->
        (* GCC/Clang statement expression so the whole let stays a C
@@ -1586,6 +1655,7 @@ let rec emit_expr (e : Ast.expr) : string =
        current_var_types := (name, bind_ty) :: prev_types;
        current_env_subst := List.filter (fun (n, _) -> n <> name) prev_subst;
        let body_c =
+         c_tail_pos := __in_tail;
          try let r = emit_expr body in
              current_var_types := prev_types;
              current_env_subst := prev_subst; r
@@ -1660,6 +1730,7 @@ let rec emit_expr (e : Ast.expr) : string =
           `{ a; b }` parses to `let _ = a in b`, so this also unblocks
           stmt-sequence form in arms / fn bodies. *)
        let value_c = emit_expr value in
+       c_tail_pos := __in_tail;
        let body_c = emit_expr body in
        Printf.sprintf "({ (void)(%s); %s; })" value_c body_c
      | Ast.P_tuple ps ->
@@ -1708,6 +1779,7 @@ let rec emit_expr (e : Ast.expr) : string =
        current_env_subst :=
          List.filter (fun (n, _) -> not (List.mem n shadow_names)) prev_subst;
        let body_c =
+         c_tail_pos := __in_tail;
          try let r = emit_expr body in
              current_var_types := prev_types;
              current_env_subst := prev_subst; r
@@ -1745,7 +1817,7 @@ let rec emit_expr (e : Ast.expr) : string =
        all of the bindings here in inner_lifts, the lifted definitions
        live at top level (with captures prepended) — just emit body. *)
     if List.for_all (fun (n, _) -> Hashtbl.mem inner_lifts n) bindings then
-      emit_expr body
+      (c_tail_pos := __in_tail; emit_expr body)
     else
       unsupported e.loc "let rec inside an expression (only allowed at top level)"
   | Ast.With (name, value, body) ->
@@ -1956,14 +2028,19 @@ let rec emit_expr (e : Ast.expr) : string =
      | Some (n, args) ->
        (* Statement-expr temporaries pin the interpreter's left-to-right
           argument evaluation order (C argument order is unspecified). *)
-       let tmps =
-         List.mapi (fun i a ->
-           Printf.sprintf "__auto_type __da%d = %s;" i (emit_expr a)) args
-       in
-       Printf.sprintf "({ %s %s__direct(%s); })"
-         (String.concat " " tmps) (c_safe_name n)
-         (String.concat ", "
-            (List.mapi (fun i _ -> Printf.sprintf "__da%d" i) args))
+       let args_c = List.map emit_expr args in
+       let callee = c_safe_name n ^ "__direct" in
+       (match (if __in_tail then self_tail_goto callee args_c else None) with
+        | Some g -> g
+        | None ->
+          let tmps =
+            List.mapi (fun i a ->
+              Printf.sprintf "__auto_type __da%d = %s;" i a) args_c
+          in
+          Printf.sprintf "({ %s %s(%s); })"
+            (String.concat " " tmps) callee
+            (String.concat ", "
+               (List.mapi (fun i _ -> Printf.sprintf "__da%d" i) args)))
      | None ->
     (match collect_inner_direct (Ast.{ node = Ast.App (f, arg); ty = e.ty; loc = e.loc }) with
      | Some (n, args) ->
@@ -1971,14 +2048,19 @@ let rec emit_expr (e : Ast.expr) : string =
        let cap_args = List.map (fun (cn, _) ->
          match List.assoc_opt cn !current_env_subst with
          | Some s -> s | None -> c_safe_name cn) li.captures in
-       let tmps =
-         List.mapi (fun i a ->
-           Printf.sprintf "__auto_type __ia%d = %s;" i (emit_expr a)) args
-       in
-       Printf.sprintf "({ %s %s__direct(%s); })"
-         (String.concat " " tmps) li.lifted_name
-         (String.concat ", "
-            (cap_args @ List.mapi (fun i _ -> Printf.sprintf "__ia%d" i) args))
+       let args_c = List.map emit_expr args in
+       let callee = li.lifted_name ^ "__direct" in
+       (match (if __in_tail then self_tail_goto callee (cap_args @ args_c) else None) with
+        | Some g -> g
+        | None ->
+          let tmps =
+            List.mapi (fun i a ->
+              Printf.sprintf "__auto_type __ia%d = %s;" i a) args_c
+          in
+          Printf.sprintf "({ %s %s(%s); })"
+            (String.concat " " tmps) callee
+            (String.concat ", "
+               (cap_args @ List.mapi (fun i _ -> Printf.sprintf "__ia%d" i) args)))
      | None ->
     (* v0.1.172: a name the user bound is the user's, not the builtin's.
        The arms below dispatch on builtin names, and 56 of the 95 asked
@@ -2005,8 +2087,10 @@ let rec emit_expr (e : Ast.expr) : string =
          | Some s -> s
          | None -> c_safe_name n
        ) li.captures in
-       li.lifted_name ^ "(" ^
-       String.concat ", " (cap_args @ [emit_expr arg]) ^ ")"
+       let args_c = cap_args @ [emit_expr arg] in
+       (match (if __in_tail then self_tail_goto li.lifted_name args_c else None) with
+        | Some g -> g
+        | None -> li.lifted_name ^ "(" ^ String.concat ", " args_c ^ ")")
     in
     let emit_toplevel_call name =
        (* Direct call to a known top-level fn — fast path, no closure.
@@ -3316,7 +3400,8 @@ let rec emit_expr (e : Ast.expr) : string =
           current_var_types := prev;
           r
         in
-        let body_c = with_pat (fun () -> emit_expr body) in
+        let body_c =
+          with_pat (fun () -> c_tail_pos := __in_tail; emit_expr body) in
         let bound =
           match guard with
           | None ->
@@ -4650,6 +4735,36 @@ let format_param (n, ty) =
      inflate probe's `fn (index: int) -> ...`. *)
   Printf.sprintf "%s %s" (c_type_of ty) (c_safe_name n)
 
+(* Q-029: emit a function body with tail position granted, and report whether
+   a self tail call turned into a goto. Only then is the scaffolding added, so
+   every non-looping function keeps its previous output exactly. *)
+let with_self_tail (cname : string) (params : (string * Ast.ty) list)
+    (emit : unit -> string) : string * bool =
+  let saved_self = !c_self and saved_used = !c_tail_used in
+  c_self := Some (cname, List.map (fun (n, _) -> c_safe_name n) params);
+  c_tail_used := false;
+  let restore () =
+    let used = !c_tail_used in
+    c_self := saved_self; c_tail_used := saved_used; c_tail_pos := false; used
+  in
+  match (c_tail_pos := true; emit ()) with
+  | body -> let used = restore () in (body, used)
+  | exception ex -> ignore (restore ()); raise ex
+
+let tail_prologue (used : bool) (ret_ty : Ast.ty)
+    (params : (string * Ast.ty) list) : string =
+  if not used then ""
+  else
+    (* The aliases are taken before the body runs, so they always name the
+       parameters themselves however the body rebinds those names. *)
+    let aliases =
+      List.mapi (fun i (n, _) ->
+        Printf.sprintf "  __auto_type __mere_a%d = &%s;\n" i (c_safe_name n))
+        params
+    in
+    Printf.sprintf "  %s __mere_ret;\n%s  __mere_tail: ;\n"
+      (c_type_of ret_ty) (String.concat "" aliases)
+
 let with_expected_ty (t : Ast.ty) (f : unit -> 'a) : 'a =
   let prev = !current_expected_ty in
   current_expected_ty := Some t;
@@ -4700,12 +4815,14 @@ let emit_lifted_fn (f : lifted_fn) : string =
       (List.map format_param (f.l_captures @ [(f.l_param, f.l_param_ty)]))
   in
   let all_bindings = f.l_captures @ [(f.l_param, f.l_param_ty)] in
-  let body_c =
-    with_var_types all_bindings (fun () ->
-      with_expected_ty f.l_return_ty (fun () -> emit_expr f.l_body))
+  let body_c, tail_used =
+    with_self_tail f.l_name all_bindings (fun () ->
+      with_var_types all_bindings (fun () ->
+        with_expected_ty f.l_return_ty (fun () -> emit_expr f.l_body)))
   in
-  Printf.sprintf "%s %s(%s) {\n%s  return %s;\n}\n%s"
+  Printf.sprintf "%s %s(%s) {\n%s%s  return %s;\n}\n%s"
     (c_type_of f.l_return_ty) f.l_name params
+    (tail_prologue tail_used f.l_return_ty all_bindings)
     (line_directive f.l_body.Ast.loc) body_c
     (line_directive_end ())
 
@@ -4717,12 +4834,14 @@ let emit_lifted_fn (f : lifted_fn) : string =
 let emit_direct_fn (name : string) (info : direct_fn_info) : string =
   set_inner_lifts_for_host name;
   let params_c = String.concat ", " (List.map format_param info.d_params) in
-  let body_c =
-    with_var_types info.d_params (fun () ->
-      with_expected_ty info.d_ret (fun () -> emit_expr info.d_body))
+  let body_c, tail_used =
+    with_self_tail (c_safe_name name ^ "__direct") info.d_params (fun () ->
+      with_var_types info.d_params (fun () ->
+        with_expected_ty info.d_ret (fun () -> emit_expr info.d_body)))
   in
-  Printf.sprintf "static %s %s__direct(%s) {\n%s  return %s;\n}\n%s"
+  Printf.sprintf "static %s %s__direct(%s) {\n%s%s  return %s;\n}\n%s"
     (c_type_of info.d_ret) (c_safe_name name) params_c
+    (tail_prologue tail_used info.d_ret info.d_params)
     (line_directive info.d_body.Ast.loc) body_c
     (line_directive_end ())
 
@@ -4808,12 +4927,14 @@ let emit_lifted_fn_direct (f : lifted_fn) : string option =
     set_inner_lifts_for_host f.l_host;
     let all_bindings = f.l_captures @ all_params in
     let params_c = String.concat ", " (List.map format_param all_bindings) in
-    let body_c =
-      with_var_types all_bindings (fun () ->
-        with_expected_ty final_ret (fun () -> emit_expr inner_body))
+    let body_c, tail_used =
+      with_self_tail (f.l_name ^ "__direct") all_bindings (fun () ->
+        with_var_types all_bindings (fun () ->
+          with_expected_ty final_ret (fun () -> emit_expr inner_body)))
     in
-    Some (Printf.sprintf "%s %s__direct(%s) {\n  return %s;\n}"
-            (c_type_of final_ret) f.l_name params_c body_c)
+    Some (Printf.sprintf "%s %s__direct(%s) {\n%s  return %s;\n}"
+            (c_type_of final_ret) f.l_name params_c
+            (tail_prologue tail_used final_ret all_bindings) body_c)
 
 let emit_lifted_fn_direct_forward_decl (f : lifted_fn) : string option =
   match peel_lifted_direct f with
@@ -4860,6 +4981,12 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
     header ^ " { char* buf; asprintf(&buf, \"\\\"%s\\\"\", __lang_str_escape(v)); return __lang_str_of_cstr(buf); }"
   | Ast.TyUnit ->
     header ^ " { (void)v; return __lang_str_of_cstr(\"()\"); }"
+  | Ast.TyFloat ->
+    (* Q-029 probe fallout: show had no float case and fell through to
+       "<unsupported>", so a program could not print a measurement it had just
+       taken. The formatter already exists and is the one the interp, the LLVM
+       helper and the Wasm host all share; this only wires it up. *)
+    header ^ " { return __lang_str_of_float(v); }"
   | Ast.TyTuple ts ->
     let parts =
       List.mapi (fun i et ->

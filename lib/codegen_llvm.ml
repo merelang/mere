@@ -2564,6 +2564,15 @@ let emit_struct_fn ?(json = false) (tag : string) (t : Ast.ty) : string =
       r
     | Ast.TyUnit ->
       (if json then "@.s_json_null" else "@.s_unit")
+    | Ast.TyFloat ->
+      (* Q-029 probe fallout: show on a float had no case here and fell out
+         to the unit string, so LLVM printed "()" for a number — the worst of
+         the four answers the four backends were giving. __lang_str_of_float
+         is already the shared formatter. *)
+      let r = fresh_reg () in
+      emit_instr (Printf.sprintf
+                    "  %s = call ptr @__lang_str_of_float(double %%x)" r);
+      r
     | Ast.TyTuple ts ->
       (* Show each element, then asprintf "(%s, %s, ...)" with them. *)
       let tname = tuple_struct_name ts in

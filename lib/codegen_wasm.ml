@@ -4250,6 +4250,13 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
       "  (func $show_unit (param $u i64) (result i64)\n\
       \    (i64.const %d))"
       off
+  | Ast.TyFloat ->
+    (* Q-029 probe fallout: show on a float hit the `_ ->` fallback and
+       printed "<?show_float?>", so the four backends were giving four
+       different answers for the same program. A float value is an i64
+       pointer here, so load the f64 and hand it to the shared formatter
+       (an env import, which returns an i32 str pointer). *)
+    "  (func $show_float (param $x i64) (result i64)\n    \    (i64.extend_i32_u\n    \      (call $__lang_str_of_float\n    \        (f64.load offset=0 align=8 (i32.wrap_i64 (local.get $x))))))"
   | Ast.TyTuple ts ->
     let comma = intern_show_str ", " in
     let lparen = intern_show_str "(" in

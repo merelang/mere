@@ -4,6 +4,102 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.230 — 2026-08-13
+
+_A loop was a function calling itself, and whether it survived was up to clang._
+
+```
+  while, 200 000 iterations        before        after
+    clang -O0                      SIGSEGV       ok      (10 000 000 ok)
+    clang -O1 and up               ok            ok
+```
+
+**`while` never reached a backend as a loop.** The parser desugars `while cond do body`
+into a tail-recursive `let rec`, so by the time codegen sees it there is nothing left
+that says "iteration" — the C backend emitted a self-recursive function and left the
+tail call to the optimizer. That made the iteration bound a property of the build:
+`-O0` died with no output at somewhere between 100 000 and 200 000, `-O1` did not.
+
+The build that dies is the one `scripts/debug_info.sh` prescribes: `clang -g -w -O0`.
+So the debugger work of v0.1.212-215 — a compiled program you can step through against
+its Mere source — and a program with a loop in it were mutually exclusive, and nothing
+said so. A 100 KB input walked one byte at a time is 100 000 iterations.
+
+`for i in a..b do body` was worse, not better: `range` materialises the whole range as a
+list and `list_iter` then recurses down it. There was no safe way to iterate.
+
+**A self tail call now lowers to a goto.** Tail position is tracked the way
+`codegen_wasm` already tracked it — taken on entry to `emit_expr`, handed on only by the
+cases where a subexpression really is in tail position (`Annot`, both arms of `If`, the
+body of `Let` in each of its four pattern forms, the body of `Let_rec`, and match arms;
+deliberately not `Region_block` or `With`, which have reclamation left to do after the
+value). The call becomes argument temporaries, assignments to the parameters, and a jump:
+
+```c
+int f(vec* i, long long n, int u) {
+  int __mere_ret;
+  __mere_tail: ;
+  return (cond ? ({ __auto_type __mt0 = i; ...; i = __mt0; ...;
+                    goto __mere_tail; __mere_ret; })
+                : 0);
+}
+```
+
+`__mere_ret` is never evaluated; it is there to give the statement expression the
+function's return type, which is what lets a `goto` sit in expression position at all —
+the C backend is expression-oriented and cannot restructure a body into a statement
+loop. Verified by hand first, with a struct return, before any of this was written.
+
+**Two things the parity suite caught, both of which had built and linked cleanly.**
+
+`schema_reflect` printed nothing. Rewriting `If` to name its operands had reversed the
+order they were emitted in: OCaml evaluates the right argument of `^` first, so the
+original chain emitted else, then, cond — and `emit_expr` interns strings and numbers
+closures as it goes, so the order is part of the output. Restored, with a comment, since
+nothing in the expression makes it look load-bearing.
+
+Then it looped forever. `*(&p)` rather than `p` is why the assignments go through
+aliases taken at function entry: `Json.parse_object` binds `let j = skip_ws s j` five
+times, so by the tail call the name `j` is a local shadowing the parameter. Assigning by
+name wrote the shadow and jumped with the parameter unchanged. The address is taken
+before the body runs, so it names the parameter however the body rebinds that name.
+
+Neither showed up in `dune runtest` or `ctest.sh` — the first needs a program whose
+output depends on interning order, the second a function that shadows its own parameter
+and tail-calls itself. `MERE_NO_TAIL_LOOP=1` disables the rewrite, which is what made
+"is it this change?" a one-variable question; `MERE_TAIL_ONLY=<substring>` narrows it
+to matching callees.
+
+The prologue is only emitted for functions that actually produced a jump, so a function
+with no self tail call is emitted exactly as before. That is per function, not per
+program: the prelude has tail-recursive functions of its own, so **all 84 parity programs
+contain a rewritten function**, which is what makes 85/0 there worth something rather
+than an accident of coverage. `examples/bst.mere` has one of its own (`lookup`), and its
+output is byte-identical before and after, at `-O0` and `-O2`, and against the
+interpreter.
+
+`__attribute__((noinline))` on the `show_*` helpers has a comment from v0.1.31 saying it
+exists because an inlined helper's escaped local defeated clang's sibling-call
+optimisation and deep loops overflowed. That was this bug, seen once from the other end
+and worked around locally.
+
+**The LLVM backend has the same defect** — `-O0` dies at 10 000 000, and the emitted IR
+carries no `tail` marker anywhere. The fix there is `musttail`, which LLVM honours
+regardless of optimisation level, but it requires the call to be immediately followed by
+the `ret` of its result, and this backend has no tail-position notion and returns from
+many places. Measured and left open rather than guessed at.
+
+**`show` on a float gave four different answers.** The interpreter formatted it, C
+printed `<unsupported>`, LLVM printed `()` — a number rendered as unit — and Wasm
+printed `<?show_float?>`. Each backend's `show` generator simply had no float case and
+fell through to a different placeholder. `parity.sh` never caught it because no program
+in the suite showed a float; the probe that found it could not print the time it had
+just measured. The formatter was already there and already shared, so this only wires it
+up in the three generators. All four now agree, including `0.1 + 0.2` at 17 digits and
+the trailing `.0` on whole values.
+
+---
+
 ## v0.1.229 — 2026-08-13
 
 _Formatting a long function was quadratic in two places, neither of them arithmetic._
