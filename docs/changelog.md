@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.229 — 2026-08-13
+
+_Formatting a long function was quadratic in two places, neither of them arithmetic._
+
+```
+              16 000 nested lets      22 810-line file
+  fmt          1.30s  ->  0.05s        1.23s  ->  0.67s
+```
+
+**A run of `let ... in` is now written out as a run.** The formatter recursed into the
+body and concatenated what came back, so every level copied the whole remainder of the
+function into a new string. All 87 profile samples were inside `Stdlib.(^)`. Each
+binding in a run sits at the same indent as the one before it, which is what makes the
+run flattenable at all.
+
+**`rename_free_vars` carried its shadow set as a list**, extended with `@`. That copies
+the whole list at every binding, and each `Var` scanned it linearly — so a pass whose
+entire job is renaming names cost O(depth²). It is a set now, which shares structure.
+This one is not the formatter's: `mere -t` on the same input went 2.60s to 1.34s,
+because every path that parses pays for it.
+
+The formatter's output is unchanged: 193 files — every example, every `contrib` source,
+every parity program, and a 22 810-line one — format byte-identically before and after.
+That is the only acceptable evidence for a change to a formatter.
+
+**What is left, measured rather than assumed**: `mere -t` on that 16 000-deep chain is
+still quadratic (0.10 / 0.36 / 1.34 at 4k / 8k / 16k), because the type environment is
+an association list and looking up a variable bound at the top of a function walks
+every binding since. The deepest run of consecutive `let`s in this repository's own
+sources is **281**, and those files type-check in 0.02s. So it is real, it is not
+biting, and rewriting the environment on the strength of a synthetic chain is the kind
+of thing Q-023 exists to say no to. Recorded as Q-026.
+
 ## v0.1.228 — 2026-08-13
 
 _The support matrix is asked for rather than remembered, and it found three holes._

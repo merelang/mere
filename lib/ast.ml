@@ -391,6 +391,8 @@ let rec pattern_vars p =
    rewrite or `None` to leave the Var alone. Shadowing scopes (Fun,
    Let body, Let_rec, Match arm body, With body) hide names from the
    rewrite. *)
+module StringSet = Set.Make (String)
+
 let rename_free_vars (lookup : string -> string option) (e : expr) : expr =
   (* Rename a free name (Var, Constr, Record_lit, P_constr, P_record). For
      Var the name is shadowable by let-bound names; for Constr / Record /
@@ -409,14 +411,23 @@ let rename_free_vars (lookup : string -> string option) (e : expr) : expr =
     | P_or (a, b) -> { p with pnode = P_or (go_pat a, go_pat b) }
     | P_var _ | P_wild | P_int _ | P_bool _ | P_str _ | P_unit -> p
   in
+  (* `shadowed` is a set rather than a list. It used to be a list, and
+     `with_shadow` prepended with `@` — which copies the whole thing at every
+     binding, while each `Var` scanned it linearly. A function that is one long
+     `let ... in` chain therefore cost O(depth^2) in a pass that only renames
+     names: 16 000 nested lets took 1.3s to format and 2.6s to check, most of it
+     here rather than in the formatter or the typer. A set shares its structure,
+     so extending it is O(log n) and copies nothing. *)
   let rec go shadowed e =
     let n_or_e n =
-      if List.mem n shadowed then e
+      if StringSet.mem n shadowed then e
       else match lookup n with
         | Some n' -> { e with node = Var n' }
         | None -> e
     in
-    let with_shadow xs e' = go (xs @ shadowed) e' in
+    let with_shadow xs e' =
+      go (List.fold_left (fun acc x -> StringSet.add x acc) shadowed xs) e'
+    in
     match e.node with
     | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit -> e
     | Var n -> n_or_e n
@@ -480,7 +491,7 @@ let rename_free_vars (lookup : string -> string option) (e : expr) : expr =
       let updates' = List.map (fun (f, ex) -> (f, go shadowed ex)) updates in
       { e with node = Record_update (base', updates') }
   in
-  go [] e
+  go StringSet.empty e
 
 (* 2048-dogfood P3: α-rename nested (inner) fn bindings to globally-unique
    names, so no two inner fns ever share a source name. Inner-fn lifting
