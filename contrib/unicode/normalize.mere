@@ -1,0 +1,201 @@
+// contrib/unicode/normalize.mere — Unicode normalization, canonical forms.
+//
+// `é` can be one code point or two, and the two spellings are the same text. NFD
+// puts everything in the long form, NFC in the short one. Anything that compares
+// text — an origin check, a cache key, a search — has to pick one, and a renderer
+// that draws both spellings differently is drawing the same text two ways.
+//
+// Only the canonical forms are here. NFKC and NFKD fold compatibility
+// differences (`ﬁ` to `fi`, `①` to `1`), which is a different question and needs a
+// different table; see the note at the bottom.
+//
+// Three things carry the weight, and only the first is obvious:
+//
+//   * **Canonical ordering.** Combining marks have a class, and NFD sorts each run
+//     of them by it — stably, so marks of equal class keep their order. `q` with a
+//     dot below and a dot above is one text however it was typed.
+//   * **A decomposition is not automatically a composition.** Four kinds of
+//     mapping are excluded from the inverse — singletons, non-starter
+//     decompositions, the script-specific exclusion list, and the compatibility
+//     mappings, which are not canonical at all. The generator applies and counts
+//     all four; `NfcTable` only ever holds the ones that do compose.
+//   * **Blocking.** In NFC a mark composes with the last starter only if nothing
+//     between them blocks it: a character blocks if its class is zero, or is not
+//     lower than the mark's. Without that, `q` + dot-below + dot-above would
+//     wrongly compose the dot-above onto the `q`.
+//
+// Hangul is arithmetic rather than table lookup — 11,172 syllables that would
+// otherwise be entries.
+//
+// Usage:
+//   import "contrib/unicode/normalize.mere";
+//   Normalize.nfd "é"    // "e" + U+0301
+//   Normalize.nfc "é"    // U+00E9
+//   Normalize.is_nfc s   // without building the result
+
+import "nfc_table.mere";
+
+module Normalize {
+
+  // --- Hangul ------------------------------------------------------------
+  // Names as UAX #15 writes them, so the arithmetic can be checked against it.
+
+  let s_base = 0xAC00;
+  let l_base = 0x1100;
+  let v_base = 0x1161;
+  let t_base = 0x11A7;
+  let l_count = 19;
+  let v_count = 21;
+  let t_count = 28;
+  let n_count = 588;      // v_count * t_count
+  let s_count = 11172;    // l_count * n_count
+
+  let is_hangul_syllable = fn (cp: int) ->
+    cp >= s_base && cp < s_base + s_count;
+
+  // --- decomposition -----------------------------------------------------
+  // Recursive, because a canonical mapping's parts may themselves have one. The
+  // longest mapping in the UCD is two code points, so the recursion is what buys
+  // full expansion instead of a variable-length table.
+
+  let rec _decompose_into = fn (out) -> fn (cp: int) ->
+    if is_hangul_syllable cp then
+      let s = cp - s_base in
+      let l = l_base + s / n_count in
+      let v = v_base + (s % n_count) / t_count in
+      let t = s % t_count in
+      let _ = vec_push out l in
+      let _ = vec_push out v in
+      if t == 0 then () else vec_push out (t_base + t)
+    else
+      let row = NfcTable.decomp_row cp in
+      if row < 0 then vec_push out cp
+      else
+        let a = NfcTable.decomp_first row in
+        let b = NfcTable.decomp_second row in
+        let _ = _decompose_into out a in
+        if b == 0 then () else _decompose_into out b;
+
+  // --- canonical ordering ------------------------------------------------
+  // A stable insertion sort over each run of non-zero classes. Stability is not a
+  // detail: marks of equal class must keep the order they were typed in, and a
+  // sort that reorders them changes the text.
+
+  let rec _order_from = fn (v) -> fn (i: int) -> fn (n: int) ->
+    if i >= n then ()
+    else
+      let c = NfcTable.ccc_of (vec_get v i) in
+      let _ =
+        if c == 0 then ()
+        else
+          let rec sink = fn (j: int) ->
+            if j <= 0 then ()
+            else
+              let prev = NfcTable.ccc_of (vec_get v (j - 1)) in
+              if prev <= c then ()
+              else
+                let a = vec_get v (j - 1) in
+                let b = vec_get v j in
+                let _ = vec_set v (j - 1) b in
+                let _ = vec_set v j a in
+                sink (j - 1) in
+          sink i in
+      _order_from v (i + 1) n;
+
+  // --- NFD ---------------------------------------------------------------
+
+  let _codepoints_of = fn (s: str) ->
+    let v = vec_new () in
+    let rec go = fn (chars: str list) ->
+      match chars with
+      | Nil -> v
+      | Cons (ch, rest) -> let _ = vec_push v (codepoint_of ch) in go rest in
+    go (utf8_chars s);
+
+  let _str_of_vec = fn (v) ->
+    let buf = strbuf_new () in
+    let rec go = fn (i: int) ->
+      if i >= vec_len v then strbuf_to_str buf
+      else
+        let _ = strbuf_push buf (str_of_codepoint (vec_get v i)) in
+        go (i + 1) in
+    go 0;
+
+  let nfd_codepoints = fn (s: str) ->
+    let src = _codepoints_of s in
+    let out = vec_new () in
+    let rec go = fn (i: int) ->
+      if i >= vec_len src then out
+      else let _ = _decompose_into out (vec_get src i) in go (i + 1) in
+    let d = go 0 in
+    let _ = _order_from d 1 (vec_len d) in
+    d;
+
+  let nfd = fn (s: str) -> _str_of_vec (nfd_codepoints s);
+
+  // --- NFC ---------------------------------------------------------------
+  // Composition over the decomposed form. `last` is the index in the output of the
+  // starter a mark may attach to, and `prev_ccc` is the class of whatever was
+  // appended last — together they answer the blocking question without a second
+  // pass.
+
+  let _compose_hangul = fn (a: int) -> fn (b: int) ->
+    if a >= l_base && a < l_base + l_count
+       && b >= v_base && b < v_base + v_count
+    then s_base + ((a - l_base) * v_count + (b - v_base)) * t_count
+    else if is_hangul_syllable a && (a - s_base) % t_count == 0
+            && b > t_base && b < t_base + t_count
+    then a + (b - t_base)
+    else 0 - 1;
+
+  let _compose = fn (a: int) -> fn (b: int) ->
+    let h = _compose_hangul a b in
+    if h >= 0 then h else NfcTable.compose_pair a b;
+
+  let nfc_codepoints = fn (s: str) ->
+    let d = nfd_codepoints s in
+    let out = vec_new () in
+    // Both start at -1: no starter seen, and no previous class.
+    let state = vec_new () in
+    let _ = vec_push state (0 - 1) in    // index of the last starter in `out`
+    let _ = vec_push state (0 - 1) in    // ccc of the last appended code point
+    let rec go = fn (i: int) ->
+      if i >= vec_len d then out
+      else
+        let cp = vec_get d i in
+        let c = NfcTable.ccc_of cp in
+        let last = vec_get state 0 in
+        let prev = vec_get state 1 in
+        // Not blocked when the mark follows the starter directly, or when every
+        // character between them has a strictly lower class.
+        let reachable = last >= 0 && (vec_len out == last + 1 || prev < c) in
+        let composed = if reachable then _compose (vec_get out last) cp else 0 - 1 in
+        if composed >= 0 then
+          let _ = vec_set out last composed in
+          go (i + 1)
+        else
+          let _ = vec_push out cp in
+          let _ = if c == 0 then vec_set state 0 (vec_len out - 1) else () in
+          let _ = vec_set state 1 c in
+          go (i + 1) in
+    go 0;
+
+  let nfc = fn (s: str) -> _str_of_vec (nfc_codepoints s);
+
+  // --- questions that do not need the result -----------------------------
+
+  let is_nfc = fn (s: str) -> nfc s == s;
+  let is_nfd = fn (s: str) -> nfd s == s;
+
+  // The property the ordering step is written in terms of, exported because a
+  // caller doing its own combining-mark work wants it.
+  let ccc_of = fn (cp: int) -> NfcTable.ccc_of cp;
+
+}
+
+// NFKC and NFKD are not here. They fold compatibility differences — `ﬁ` to `fi`,
+// `①` to `1`, halfwidth katakana to fullwidth — which needs the 3,833
+// compatibility mappings the generator currently counts and discards, and which is
+// a different question from "are these the same text": NFKC is lossy on purpose.
+// The first caller that needs it will be UTS #46 for IDNA, and adding it is
+// another column in the same table rather than a new mechanism.

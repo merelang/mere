@@ -1,0 +1,81 @@
+// contrib/unicode's normalization, held to one output on every backend.
+// Correctness has two gates of its own — scripts/normalize_conformance.sh (the
+// UCD's 20,034 cases, six assertions each) and the normalization section of
+// scripts/unicode_parity.sh (8,755 inputs against node's String.prototype.normalize).
+// This file is about the four backends agreeing.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+import "../../contrib/unicode/normalize.mere";
+
+let cp = fn (n: int) -> str_of_codepoint n;
+
+let cps = fn (s: str) ->
+  let rec go = fn (i: int) -> fn (acc: str) ->
+    if i >= utf8_len s then acc
+    else go (i + 1) (acc ++ (if acc == "" then "" else " ")
+                     ++ show (codepoint_at s i)) in
+  go 0 "";
+
+let t = fn (label: str) -> fn (s: str) ->
+  print (label ++ "  NFD=" ++ cps (Normalize.nfd s)
+         ++ "  NFC=" ++ cps (Normalize.nfc s));
+
+let _ = print "=== the same text, two spellings ===";
+let _ = t "composed     " (cp 0x00E9);
+let _ = t "decomposed   " ("e" ++ cp 0x0301);
+let _ = t "ascii        " "abc";
+let _ = t "empty        " "";
+
+let _ = print "=== canonical ordering is stable, and by class ===";
+let _ = t "above-below  " ("q" ++ cp 0x0307 ++ cp 0x0323);
+let _ = t "below-above  " ("q" ++ cp 0x0323 ++ cp 0x0307);
+let _ = t "two-equal    " ("a" ++ cp 0x0316 ++ cp 0x0317);
+let _ = t "three-marks  " ("a" ++ cp 0x0301 ++ cp 0x0316 ++ cp 0x0323);
+
+let _ = print "=== blocking: a mark reaches the starter only if nothing intervenes ===";
+let _ = t "d-below-above" ("d" ++ cp 0x0323 ++ cp 0x0307);
+let _ = t "d-above-below" ("d" ++ cp 0x0307 ++ cp 0x0323);
+let _ = t "a-acute-acute" ("a" ++ cp 0x0301 ++ cp 0x0301);
+let _ = t "a-blocked    " ("a" ++ cp 0x0301 ++ cp 0x0308);
+
+let _ = print "=== singletons never compose back ===";
+let _ = t "angstrom     " (cp 0x212B);
+let _ = t "ohm          " (cp 0x2126);
+let _ = t "kelvin       " (cp 0x212A);
+
+let _ = print "=== script exclusions stay decomposed ===";
+let _ = t "tibetan-0F77 " (cp 0x0F77);
+let _ = t "tibetan-0F81 " (cp 0x0F81);
+let _ = t "devanagari   " (cp 0x0958);
+
+let _ = print "=== Hangul is arithmetic, not a table ===";
+let _ = t "LV           " (cp 0xAC00);
+let _ = t "LVT          " (cp 0xAC01);
+let _ = t "last         " (cp 0xD7A3);
+let _ = t "before-first " (cp 0xABFF);
+let _ = t "after-last   " (cp 0xD7A4);
+let _ = t "jamo L V     " (cp 0x1100 ++ cp 0x1161);
+let _ = t "jamo L V T   " (cp 0x1100 ++ cp 0x1161 ++ cp 0x11A8);
+let _ = t "jamo L V T0  " (cp 0x1100 ++ cp 0x1161 ++ cp 0x11A7);
+let _ = t "LV + T       " (cp 0xAC00 ++ cp 0x11A8);
+let _ = t "LVT + T      " (cp 0xAC01 ++ cp 0x11A8);
+
+let _ = print "=== recursive decomposition ===";
+let _ = t "1E0A         " (cp 0x1E0A);
+let _ = t "1E0A + below " (cp 0x1E0A ++ cp 0x0323);
+let _ = t "vietnamese   " (cp 0x1EC7);
+
+let _ = print "=== text ===";
+let _ = t "japanese     " "日本語";
+let _ = t "halfwidth ka " (cp 0xFF76 ++ cp 0xFF9E);
+let _ = t "mixed        " ("cafe" ++ cp 0x0301 ++ " 日本");
+
+let _ = print "=== the questions that do not need the result ===";
+let _ = print ("is_nfc composed:   " ++ show (Normalize.is_nfc (cp 0x00E9)));
+let _ = print ("is_nfc decomposed: " ++ show (Normalize.is_nfc ("e" ++ cp 0x0301)));
+let _ = print ("is_nfd composed:   " ++ show (Normalize.is_nfd (cp 0x00E9)));
+let _ = print ("is_nfd decomposed: " ++ show (Normalize.is_nfd ("e" ++ cp 0x0301)));
+let _ = print ("ccc of 0x0301:     " ++ show (Normalize.ccc_of 0x0301));
+let _ = print ("ccc of 'a':        " ++ show (Normalize.ccc_of 0x61));
+0

@@ -5,7 +5,7 @@
 # For terms of use and license, see https://www.unicode.org/terms_of_use.html
 #
 #
-# Comments stripped by scripts/gen_linebreak_testdata.sh. Regenerate with it.
+# Comments stripped by scripts/gen_ucd_testdata.sh. Regenerate with it.
 #
 × 2757 × 2757 ÷
 × 2757 × 0020 ÷ 2757 ÷
