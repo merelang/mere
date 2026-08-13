@@ -103,9 +103,9 @@ The interpreter has every one of these, and is not a column.
 | `print` | yes | yes | yes |
 | `print_bool` | yes | yes | yes |
 | `print_bytes` | yes | yes | yes |
-| `print_err` | yes | refused | yes |
+| `print_err` | yes | yes | refused |
 | `print_int` | yes | yes | yes |
-| `print_no_nl` | yes | refused | yes |
+| `print_no_nl` | yes | yes | yes |
 | `random_float` | nocompile | refused | refused |
 | `random_int` | yes | refused | yes |
 | `read_bytes` | yes | refused | refused |

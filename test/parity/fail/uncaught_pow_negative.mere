@@ -1,0 +1,9 @@
+// `pow` with a negative exponent, which the interpreter builtin raised on and the
+// prelude definition had to keep raising on — with the same message, since that
+// message is now the only implementation there is.
+//
+// Execution mode: 4 backends, compared on exit status + stdout + failure message
+
+let _ = print "raising";
+let _ = print (show (pow 2 (0 - 3)));
+0

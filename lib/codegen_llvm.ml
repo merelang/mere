@@ -28,7 +28,7 @@ let unsupported loc what =
    mkdir_p, file_mtime, sleep_ms, channel_close/recv_opt/recv_timeout) are
    deliberately NOT listed — they are already loud. *)
 let host_builtins_without_llvm_lowering =
-  [ "print_no_nl"; "print_err";
+  [ (* print_no_nl / print_err were here until v0.1.246 *)
     (* v0.1.228: found by scripts/host_matrix.sh, which asks the compiler instead of
        remembering. These arrived with the `bytes` type in v0.1.216, after this list
        was written, and fell straight through to "unbound variable" — the exact hole
@@ -3880,6 +3880,29 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  call i32 @puts(ptr %s)" av);
     emit_instr "  call i32 @fflush(ptr null)";
     "0"  (* unit / int 0 *)
+  (* v0.1.246: these two were refused for want of a stderr lowering, which the
+     panic path then went and did with stdout. Both are a `write` to a file
+     descriptor — 2 for the diagnostic stream, 1 without the newline — and the
+     declaration is already there for `print_bytes`. `print` is flushed before
+     either, so a raw write cannot land ahead of buffered stdio. *)
+  | Ast.App ({ node = Ast.Var "print_err"; _ }, arg) ->
+    let av = emit_expr env arg in
+    emit_instr "  call i32 @fflush(ptr null)";
+    let l = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @strlen(ptr %s)" l av);
+    let w = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @write(i32 2, ptr %s, i64 %s)" w av l);
+    let w2 = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @write(i32 2, ptr @.s_newline, i64 1)" w2);
+    "0"
+  | Ast.App ({ node = Ast.Var "print_no_nl"; _ }, arg) ->
+    let av = emit_expr env arg in
+    emit_instr "  call i32 @fflush(ptr null)";
+    let l = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @strlen(ptr %s)" l av);
+    let w = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @write(i32 1, ptr %s, i64 %s)" w av l);
+    "0"
   (* print_bytes: `fwrite` with the length, which is the whole reason `bytes`
      exists as a type. `puts` would stop at the first zero byte, and did — see the
      mpng dogfood, where the same program wrote different files on different
@@ -4678,7 +4701,14 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let result_ty =
       match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt
     in
-    let av = emit_expr env arg in
+    let av0 = emit_expr env arg in
+    (* The `fail: ` tag belongs to this builtin, not to the printer — see the
+       note in the C backend. Tagging in the printer tagged the backend's own
+       failures too, which the interpreter does not. *)
+    let av = fresh_reg () in
+    emit_instr
+      (Printf.sprintf "  %s = call ptr @__lang_str_concat(ptr @.fail_prefix, ptr %s)"
+         av av0);
     (* Phase 25.1: __lang_fail_impl is noreturn — the return value is
        unreachable. For ptr / struct / etc. contexts where __lang_fail_int
        (i32) wouldn't type-check, emit the call (which aborts) then
@@ -6410,6 +6440,13 @@ let runtime_decls =
       "declare ptr @memcpy(ptr, ptr, i64)";
       "declare i32 @memcmp(ptr, ptr, i64)";
       "declare i32 @puts(ptr)";
+      (* A write with the length, which is the point of the type. `write(fd, ...)`
+         rather than `fwrite`: getting at `stdout` / `stderr` from IR means naming
+         a symbol that differs between platforms (`__stdoutp`, `stderr`), and the
+         file descriptor is the same everywhere. It is also unbuffered, which is
+         what `print_no_nl` promises. Declared unconditionally because the panic
+         path needs fd 2 whether or not the program uses `print_bytes`. *)
+      "declare i64 @write(i32, ptr, i64)";
       (* Same reason the C backend line-buffers stdout: `print` must mean the
          same thing piped as it does on a terminal, or a long-running program
          logs nothing until it exits. fflush(NULL) flushes every open output
@@ -6431,6 +6468,7 @@ let runtime_decls =
       "declare i32 @fprintf(ptr, ptr, ...)";
       "declare i32 @asprintf(ptr, ptr, ...)";
       "declare void @abort()";
+      "declare void @exit(i32)";
       "declare i32 @atoi(ptr)";
       "declare i64 @strtoll(ptr, ptr, i32)";
       "declare double @atof(ptr)";  (* Phase 34.2: float_of_str *)
@@ -6446,7 +6484,9 @@ let runtime_decls =
       "declare i32 @setjmp(ptr) returns_twice";
       "declare void @longjmp(ptr, i32) noreturn";
       "@.fail_prefix = internal constant [7 x i8] c\"fail: \\00\"";
-      "@.ios_msg = internal constant [28 x i8] c\"int_of_str: not a valid int\\00\"";
+      "@.s_newline = internal constant [2 x i8] c\"\\0A\\00\"";
+      "@.ios_pre = internal constant [14 x i8] c\"int_of_str: \\22\\00\"";
+      "@.ios_suf = internal constant [21 x i8] c\"\\22 is not a valid int\\00\"";
       "@__lang_fail_jmpbuf = global [200 x i8] zeroinitializer, align 16";
       "@__lang_fail_jmpbuf_set = global i32 0" ]
 (* Phase 30.2b: declare top-level non-fn lets as @name LLVM globals.
@@ -8275,12 +8315,6 @@ let bytes_runtime_llvm =
       "  store i64 %len, ptr %b";
       "  ret ptr %b";
       "}";
-      (* A write with the length, which is the point of the type. `write(1, ...)`
-         rather than `fwrite` to stdout: getting at `stdout` from IR means naming
-         a symbol that differs between platforms (`__stdoutp`, `stdout`), and the
-         file descriptor is the same everywhere. It is also unbuffered, which is
-         what `print_no_nl` promises. *)
-      "declare i64 @write(i32, ptr, i64)";
       "define i64 @__lang_print_bytes(ptr %b) {";
       "entry:";
       "  %len = load i64, ptr %b";
@@ -9101,10 +9135,17 @@ let str_concat_helper =
       "do_jmp:";
       "  call void @longjmp(ptr @__lang_fail_jmpbuf, i32 1)";
       "  unreachable";
+      (* This wrote the diagnostic with `puts` — to *stdout* — and then
+         abort()ed for exit 134, while the interpreter and C both wrote to
+         stderr and the interpreter exited 1. A backend that refuses
+         `print_err` for having no stderr lowering was using stdout for its own
+         panic message. write(2, ...) is the lowering, and it was already
+         declared for other builtins. *)
       "do_abort:";
-      "  %p1 = call ptr @__lang_str_concat(ptr @.fail_prefix, ptr %msg)";
-      "  call i32 @puts(ptr %p1)";
-      "  call void @abort()";
+      "  %flen = call i64 @strlen(ptr %msg)";
+      "  %fw = call i64 @write(i32 2, ptr %msg, i64 %flen)";
+      "  %nlw = call i64 @write(i32 2, ptr @.s_newline, i64 1)";
+      "  call void @exit(i32 1)";
       "  unreachable";
       "}";
       "define i32 @__lang_fail_int(ptr %msg) {";
@@ -9146,8 +9187,14 @@ let str_concat_helper =
       "ws:";
       "  %pn = getelementptr i8, ptr %p, i64 1";
       "  br label %trail";
+      (* The message names the input, as the interpreter's and C's do. It said
+         only `int_of_str: not a valid int` here, so the same failing program
+         reported two different messages depending on the backend — and the one
+         that omitted the input is the one you cannot debug from. *)
       "bad:";
-      "  call void @__lang_fail_impl(ptr @.ios_msg)";
+      "  %m1 = call ptr @__lang_str_concat(ptr @.ios_pre, ptr %s)";
+      "  %m2 = call ptr @__lang_str_concat(ptr %m1, ptr @.ios_suf)";
+      "  call void @__lang_fail_impl(ptr %m2)";
       "  unreachable";
       "good:";
       "  ret i64 %v";

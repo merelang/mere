@@ -1,0 +1,13 @@
+// A native failure rather than a `fail` call: `int_of_str` on junk.
+//
+// This one is why the message body is compared and not just the exit status. Two
+// backends named the offending input and two did not — `int_of_str: not a valid
+// int` against `int_of_str: "abc" is not a valid int` — so the same failing
+// program told you two different things, and the version that omits the input is
+// the one you cannot debug from.
+//
+// Execution mode: 4 backends, compared on exit status + stdout + failure message
+
+let _ = print "parsing";
+let _ = print (show (int_of_str "abc"));
+0

@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.245" Version.v "0.1.245";
+  check "version is 0.1.246" Version.v "0.1.246";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -5487,7 +5487,10 @@ let () =
   check "v0.1.67: C fail is silent when caught (longjmp before the stderr print)"
     (let c = vec_codegen_c "try_or (fn u -> int_of_str \"x\") 0" in
      let jmp = idx_of c "__lang_fail_jmpbuf_set) { longjmp" in
-     let prn = idx_of c "fprintf(stderr, \"fail:" in
+     (* v0.1.246: the `fail: ` tag moved from this print to the `fail` builtin, so
+        the print is a bare "%s" now. The property is the same one — the longjmp
+        has to come first, or a caught failure leaks a diagnostic. *)
+     let prn = idx_of c "fprintf(stderr, \"%s" in
      if jmp >= 0 && prn >= 0 && jmp < prn then "ordered"
      else "bad(" ^ string_of_int jmp ^ "," ^ string_of_int prn ^ ")")
     "ordered";

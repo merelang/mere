@@ -4,6 +4,82 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.246 — 2026-08-14
+
+_The parity harness compared stdout, so the failure surface of the language was the one
+part of it four independent implementations were never held to. No parity test used
+`fail` — and that was not an oversight: none could have passed._
+
+```
+  scripts/parity.sh                   failing programs compared on exit + stdout + message; DIVERGE
+  test/parity/fail/*.mere             new: five uncaught failures, four backends
+  test/parity/failure_caught.mere     new: try_or over every failure kind
+  lib/codegen_c.ml                    exit 1, not abort; the `fail: ` tag moves to the builtin
+  lib/codegen_llvm.ml                 a stderr at last: diagnostics, print_err, print_no_nl
+  lib/codegen_wasm.ml                 the tag; int_of_str names its input; print_err refuses
+```
+
+**What an uncaught failure did, before this slice.** The same program exited **1** on
+two backends and **134** (SIGABRT) on two others. It wrote its diagnostic to **stderr**
+on two and **stdout** on two. It tagged the message `fail: ` on three and not on the
+fourth. And `int_of_str "abc"` named the offending input on two backends and said only
+`int_of_str: not a valid int` on the other two — the same failing program telling you
+two different things, and the version that omits the input is the one you cannot debug
+from. Five differences, none of which any test could see.
+
+All four now write one line to **stderr** and exit **1**, with the message the program
+raised. LLVM's panic path had been using `puts` — a backend that *refused* `print_err`
+for having no stderr lowering was writing its own diagnostic to stdout. `write(2, ...)`
+was already declared for `print_bytes`; declaring it unconditionally made the panic
+path correct and made `print_err` and `print_no_nl` three lines each, so both stopped
+being refusals on that backend.
+
+**The `fail: ` tag belongs to the `fail` builtin, not to the printer.** Tagging where
+the diagnostic is written tagged the backend's *own* failures too, which the
+interpreter does not: hence `fail: int_of_str: ...` against `int_of_str: ...`. Moving it
+to the builtin makes the message comparable **verbatim**, which matters more than it
+sounds — see below.
+
+**On Wasm, `print_err` now refuses.** It wrote to the same host sink as `print`, so a
+diagnostic landed in the program's own output and nothing said so. The JS host ABI has
+one sink (`env.puts`); giving it a second one is a change to every host that
+instantiates a module, which is a deliberate change and not a side effect of a panic
+message. Nothing in the repo used `print_err`, so there was nothing to break — and a
+refusal names the missing thing where a silent stdout write named nothing.
+
+**`test/parity/fail/*.mere`** is the gate: programs that are supposed to fail, compared
+on exit status, the stdout written *before* the failure, and the message. Five of them.
+The harness takes only the interpreter's envelope off the message (it names the source
+file it is running; a compiled binary has none) and compares the rest byte for byte.
+
+**The first version of that comparison stripped the `fail: ` tag as well**, and it made
+the harness unable to see the difference this slice had just fixed: `boom` and
+`fail: boom` both normalized to `boom`, so removing the fix still passed. The control
+experiment caught it — revert a fix, confirm the gate goes red. **A normalization is a
+place a gate stops looking**, and the fix was to make the thing consistent by
+construction instead of normalizing it away.
+
+**And a DIVERGE state, because the caught-failure test found a live one.** `fail` on
+Wasm sets a flag that callers check on the way out; it does not unwind, so statements
+after it in the same body still run. Inside a `try_or` thunk that is an observably
+different *result*, not just extra output — a buffer that reads `onetwo` on three
+backends and `onetwothree` on the fourth. A gate with no place to say "these two
+legitimately differ here" loses the first real divergence it finds, along with
+everything else that test was checking. So a divergence is declared by a file next to
+the case (`failure_caught.wasm.expected`) holding that backend's output **exactly**:
+the known difference is pinned rather than tolerated, any other change is still a
+failure, and the day that backend learns to unwind, the declaration breaks and says so.
+
+**Two smaller things found on the way.** Passing a `test/parity/fail/` file as an
+explicit argument ran it as an ordinary test and reported it as one the interpreter
+could not run — arguments are partitioned by path now, the same way the defaults are.
+And `__lang_str_concat("fail: ", msg)` in the C backend hung the program instead of
+printing: this backend's strings carry a length header before byte 0, a raw C literal
+has none, so the concat read whatever preceded the constant as its length. Same trap
+that made `str_replace` return `""` in v0.1.233.
+
+---
+
 ## v0.1.245 — 2026-08-14
 
 _Ten builtins that existed only on the interpreter became ten definitions in the language.

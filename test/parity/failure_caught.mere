@@ -1,0 +1,68 @@
+// `try_or` over every way a program can fail, held to one answer on all four.
+//
+// The uncaught side lives in test/parity/fail/. This is the caught side, and it is
+// the half where the backends are least alike underneath: the interpreter raises
+// an exception, C and LLVM longjmp out of a jmpbuf, and Wasm has no unwinding at
+// all — it sets a flag and returns a zero of the expected type, then every caller
+// on the way out checks the flag. Three mechanisms, one meaning, and until v0.1.246
+// no test compared them.
+//
+// So the interesting cases here are not "does it catch" but the ones a flag can get
+// wrong: work done before the failure, a success immediately after a catch (the
+// flag must be cleared), nesting, and a failure in the *default* expression.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+let probe = fn (label: str) -> fn (thunk: unit -> int) ->
+  print (label ++ " -> " ++ show (try_or thunk (0 - 999)));
+
+let _ = print "=== each kind of failure is caught, and none of them prints ===";
+let _ = probe "fail" (fn () -> fail "boom");
+let _ = probe "assert false" (fn () -> let _ = assert false "nope" in 1);
+let _ = probe "divmod by zero" (fn () -> let (q, r) = divmod 1 0 in q);
+let _ = probe "pow negative exp" (fn () -> pow 2 (0 - 1));
+let _ = probe "int_of_str junk" (fn () -> int_of_str "abc");
+let _ = probe "no failure" (fn () -> 42);
+
+let _ = print "=== a caught failure must not leave the catch armed ===";
+// On a flag-based implementation this is where a leak shows: the successful call
+// right after a caught one would come back as the default.
+let _ = probe "success after catch" (fn () -> 7);
+let _ = print (show (try_or (fn () -> fail "x") 1) ++ " "
+               ++ show (try_or (fn () -> 2) 0) ++ " "
+               ++ show (try_or (fn () -> fail "y") 3) ++ " "
+               ++ show (try_or (fn () -> 4) 0));
+
+let _ = print "=== work before the failure still happened ===";
+// And this is where the three mechanisms stop meaning the same thing. `fail` on
+// Wasm sets a flag and returns; the callers on the way out check it, but the
+// statements after it in the same body still run, so "three" gets pushed. The
+// interpreter, C and LLVM all leave the buffer at "onetwo".
+//
+// That difference is declared in failure_caught.wasm.expected rather than deleted
+// from this file, because it is a known limitation of that backend and not a
+// mistake in this test — and pinning it to an exact output means the day the
+// backend learns to unwind, this expectation breaks and says so.
+let acc = strbuf_new ();
+let _ = try_or (fn () ->
+  let _ = strbuf_push acc "one" in
+  let _ = strbuf_push acc "two" in
+  let _ = fail "after two" in
+  strbuf_push acc "three") ();
+let _ = print ("buffer = " ++ strbuf_to_str acc);
+
+let _ = print "=== nesting: the inner catch takes it, the outer sees success ===";
+let _ = print (show (try_or (fn () -> try_or (fn () -> fail "inner") 5) 0));
+let _ = print (show (try_or (fn () -> let _ = try_or (fn () -> 1) 0 in fail "outer") 6));
+let _ = print (show (try_or (fn () -> try_or (fn () -> fail "in") 0 + 10) 99));
+
+let _ = print "=== the value type does not have to be int ===";
+let _ = print (try_or (fn () -> fail "s") "fallback");
+let _ = print (show (try_or (fn () -> fail "b") true));
+let _ = print (show (try_or (fn () -> (fail "t", 1)) (0, 0)));
+
+let _ = print "=== and a caught failure inside a function that keeps going ===";
+let safe_div = fn (a: int) -> fn (b: int) -> try_or (fn () -> let (q, r) = divmod a b in q) 0;
+let _ = print (show (safe_div 17 5) ++ " " ++ show (safe_div 17 0) ++ " "
+               ++ show (safe_div 0 5) ++ " " ++ show (safe_div 17 1));
+0

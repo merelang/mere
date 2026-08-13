@@ -1,0 +1,10 @@
+// `assert false` — the same surface as `fail`, reached through the prelude helper
+// that v0.1.245 defined in the language rather than in each backend.
+//
+// Execution mode: 4 backends, compared on exit status + stdout + failure message
+
+let n = 41;
+let _ = print ("checking " ++ show n);
+let _ = assert (n == 42) ("expected 42, got " ++ show n);
+let _ = print "unreachable";
+0

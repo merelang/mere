@@ -39,6 +39,12 @@ let host_builtins_without_wasm_lowering =
        (`par_map` is handled at the tail instead: it is desugared before codegen, so
        this name never reaches here.) *)
     "read_bytes"; "write_bytes";
+    (* v0.1.246: `print_err` wrote to the same host sink as `print`, so a
+       diagnostic landed in the program's own output and nothing said so. The JS
+       host ABI has one sink (`env.puts`); giving it a second one is a change to
+       every host that instantiates a module, and that is a deliberate change
+       rather than a side effect of a panic message. Refusing says which. *)
+    "print_err";
     "read_key"; "tty_raw"; "tty_restore";
     "read_lines"; "file_pread";
     "random_float"; "detach" ]
@@ -109,6 +115,10 @@ let fresh_str_offset (s : string) : int =
     Printf.sprintf "  (data (i32.const %d) \"%s%s\\00\")" off len_hdr escaped
     :: !str_data_decls;
   off + 4
+
+(* Offset of the interned "fail: " tag that the `fail` builtin prepends to its
+   message. Set at the top of emit_program; see the note there. *)
+let fail_prefix_offset = ref 0
 
 (* Reset per emit_program. *)
 let print_no_nl_used = ref false
@@ -2604,8 +2614,13 @@ let rec emit_expr (e : Ast.expr) : unit =
   (* Phase 26.1: fail / char / substring / int_of_str / str_of_int /
      str_unescape — Wasm version of LLVM Phase 25.1 / 25.4. *)
   | Ast.App ({ node = Ast.Var "fail"; _ }, arg) ->
+    (* The `fail: ` tag belongs here and not to $__lang_fail, which the backend's
+       own failures (int_of_str on junk, and the rest) also go through and which
+       the interpreter does not tag. *)
     fail_used := true;
+    emit_instr (Printf.sprintf "i64.const %d" !fail_prefix_offset);
     emit_expr arg;
+    emit_instr "call $__lang_str_concat";
     emit_instr "call $__lang_fail"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "char_at"; _ }, s_e); _ }, i_e) ->
     char_table_used := true;
@@ -2794,9 +2809,11 @@ let rec emit_expr (e : Ast.expr) : unit =
        is interned here and passed in. *)
     int_of_str_used := true;
     fail_used := true;
-    let msg_off = intern_show_str "int_of_str: not a valid int" in
+    let pre_off = intern_show_str "int_of_str: \"" in
+    let suf_off = intern_show_str "\" is not a valid int" in
     emit_expr arg;
-    emit_instr (Printf.sprintf "i64.const %d" msg_off);
+    emit_instr (Printf.sprintf "i64.const %d" pre_off);
+    emit_instr (Printf.sprintf "i64.const %d" suf_off);
     emit_instr "call $__lang_int_of_str"
   | Ast.App ({ node = Ast.Var "str_of_int"; _ }, arg) ->
     (* str_of_int is an alias for show_int. *)
@@ -2887,12 +2904,7 @@ let rec emit_expr (e : Ast.expr) : unit =
       emit_instr "drop";
       emit_expr { e with Ast.node = Ast.Constr ("None", None) }
     end
-  | Ast.App ({ node = Ast.Var "print_err"; _ }, arg)
-    when not (user_shadows_wasm "print_err") ->
-    (* stderr — route to the same host sink as print. *)
-    emit_expr arg;
-    emit_instr "call $puts";
-    emit_instr "i64.const 0"
+
   | Ast.App ({ node = Ast.Var "exit"; _ }, code_e)
     when not (user_shadows_wasm "exit") ->
     (* no process to exit — evaluate the code for effect, then trap. *)
@@ -5532,7 +5544,12 @@ let runtime_helpers = {|
   ;; (WS* [+-]? DIGIT+ WS*); anything else calls $__lang_fail with the
   ;; interned msg (try_or-able), matching the interpreter instead of the
   ;; old atoi semantics that silently returned 0 / a partial prefix.
-  (func $__lang_int_of_str (param $s8 i64) (param $msg i64) (result i64)
+  ;; The message names the input, as the interpreter's and C's do. It was the
+  ;; interned constant `int_of_str: not a valid int` here, so the same failing
+  ;; program reported two different messages depending on the backend — and the
+  ;; one that omits the input is the one you cannot debug from. Two halves come in
+  ;; because the input goes between them.
+  (func $__lang_int_of_str (param $s8 i64) (param $pre i64) (param $suf i64) (result i64)
     (local $s i32)
     (local $i i32) (local $sign i64) (local $acc i64) (local $c i32)
     (local $nd i32)
@@ -5587,7 +5604,10 @@ let runtime_helpers = {|
           (i32.eqz (local.get $nd))          ;; no digits
           (i32.ne (local.get $c) (i32.const 0)))  ;; junk after
       (then
-        (drop (call $__lang_fail (local.get $msg)))
+        (drop (call $__lang_fail
+          (call $__lang_str_concat
+            (call $__lang_str_concat (local.get $pre) (local.get $s8))
+            (local.get $suf))))
         (return (i64.const 0))))
     (i64.mul (local.get $acc) (local.get $sign)))
   ;; Phase 26.1: str_unescape s — replace backslash-escape sequences
@@ -7949,6 +7969,11 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   Hashtbl.reset multi_inst_fns_wasm;
   str_data_decls := [];
   str_offset_counter := str_initial_offset;
+  (* Interned here, before anything else can intern a string, and
+     unconditionally: the data section is built from this list, so minting it
+     lazily at the use site put the offset in the code and left the bytes out —
+     which reads as an empty tag rather than as an error. *)
+  fail_prefix_offset := fresh_str_offset "fail: ";
   vec_used := false;
   vec_higher_order_used := false;
   strbuf_used := false;
