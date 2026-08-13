@@ -6609,14 +6609,20 @@ let str_concat_helper =
       (* Phase 36: str_replace — return s with all non-overlapping occurrences
          of old replaced by new_str. Empty old returns s unchanged. *)
       "static const char* __lang_str_replace(const char* s, const char* old, const char* new_str) {";
-      "  if (old[0] == '\\0') return s;";
       "  size_t slen = __lang_str_size(s);";
       "  size_t olen = __lang_str_size(old);";
       "  size_t nlen = __lang_str_size(new_str);";
+      "  if (olen == 0) return s;";
       "  /* Worst-case size: every char becomes new_str-length. */";
-      "  size_t cap = slen + 1;";
-      "  if (nlen > olen) cap += (slen / (olen > 0 ? olen : 1)) * (nlen - olen) + nlen;";
-      "  char* buf = (char*)__lang_region_alloc(__lang_current_region, cap);";
+      "  size_t cap = slen;";
+      "  if (nlen > olen) cap += (slen / olen) * (nlen - olen) + nlen;";
+      (* __lang_str_alloc, not __lang_region_alloc: a str carries its length in
+         a header word at [-1], and a bare region buffer has no such word, so
+         __lang_str_size of the result read whatever bytes happened to precede
+         it. It read zero often enough that every replacement came back empty,
+         which is how contrib/url found it: cleaning a URL removes tabs with
+         str_replace, so on this backend every URL was rejected. *)
+      "  char* buf = __lang_str_alloc(__lang_current_region, cap);";
       "  size_t bi = 0;";
       "  for (size_t i = 0; i < slen; ) {";
       "    if (i + olen <= slen && memcmp(s + i, old, olen) == 0) {";
@@ -6625,6 +6631,9 @@ let str_concat_helper =
       "      buf[bi++] = s[i++];";
       "    }";
       "  }";
+      (* The cap is a worst case, so the header has to be corrected down to
+         what was actually written whenever the replacement is shorter. *)
+      "  ((size_t*)buf)[-1] = bi;";
       "  buf[bi] = '\\0';";
       "  return buf;";
       "}";
