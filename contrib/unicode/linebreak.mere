@@ -1,0 +1,402 @@
+// contrib/unicode/linebreak.mere — UAX #14 line break opportunities.
+//
+// Where a renderer is allowed to end a line. Not where it should — that is the
+// layout engine's decision, made with widths — but where the text permits one.
+//
+// The algorithm is a list of numbered rules applied in order, first match wins,
+// and this file is written in that order so it can be checked against the
+// standard line by line. What makes it long is not the rules, most of which look
+// only at the two characters either side of a position. It is three things:
+//
+//   * **LB9 and LB10 are not break rules, they are a preprocessing step.** A
+//     combining mark takes the class of the character it follows, so the unit the
+//     rules see is a base plus its trailing CM/ZWJ run — except after a hard
+//     break or a space, where LB10 makes the leftover mark an AL of its own.
+//   * **"even after spaces" appears in six rules** (LB8, LB14, LB15a, LB15b,
+//     LB16, LB17). Each needs the last NON-SPACE class as well as the immediately
+//     preceding one, and all six sit before LB18, which is the rule that breaks
+//     after a space. So the state carries both.
+//   * **Some rules look further than one character either way.** LB25 needs a
+//     number-sequence state and two characters of lookahead; LB15a, LB20a, LB21a
+//     and LB28a need what came *before* the previous character; LB30a needs a
+//     count of preceding regional indicators.
+//
+// Usage:
+//   import "contrib/unicode/linebreak.mere";
+//   LineBreak.opportunities "a b"   // one bool per position, sot..eot
+//   LineBreak.split_lines "a b"     // ["a "; "b"]
+
+import "lb_table.mere";
+
+// A unit is a base character with its combining marks folded in (LB9). `cp` is
+// the base's code point, kept because LB28a is written in terms of one literal
+// character rather than a class. `width` is how many code points it spans, so a
+// caller can map back into the text.
+type lb_unit = { cls: int, flags: int, cp: int, width: int, zwj: bool };
+
+// Everything the rules need beyond the two characters either side of a position.
+type lb_ctx = {
+  sot: bool,        // nothing consumed yet
+  prev: int,        // class immediately before the position
+  prev_flags: int,
+  prev_cp: int,
+  prev_zwj: bool,  // the previous unit was an unfolded ZWJ: LB8a
+  prev2: int,       // and the class before that: LB20a, LB21a
+  prev2_flags: int, // and ITS flags: LB19a's last line asks about the
+                    // character before the quotation mark, not the mark
+  ns: int,          // last non-SP class: the six "even after spaces" rules
+  ns_flags: int,
+  ns_prev: int,     // what came before that one: LB15a
+  ri: int,          // consecutive regional indicators: LB30a
+  num: int,         // 0 none, 1 in NU (SY|IS)*, 2 that plus CL|CP: LB25
+  vi: bool,         // (AK | ◌ | AS) VI just seen: LB28a
+};
+
+module LineBreak {
+
+  let none = 0 - 1;
+  let dotted_circle = 0x25CC;
+
+  // --- units: LB9 and LB10 -----------------------------------------------
+
+  let _no_fold_after = fn (c: int) ->
+    c == LbTable.k_bk || c == LbTable.k_cr || c == LbTable.k_lf
+    || c == LbTable.k_nl || c == LbTable.k_sp || c == LbTable.k_zw;
+
+  let _is_mark = fn (c: int) -> c == LbTable.k_cm || c == LbTable.k_zwj;
+
+  let rec _units = fn (cps: int list) -> fn (acc: lb_unit list) ->
+    match cps with
+    | Nil -> list_rev acc
+    | Cons (cp, rest) ->
+      let key = LbTable.key_of cp in
+      let c = LbTable.class_of_key key in
+      let f = LbTable.flags_of_key key in
+      match acc with
+      | Nil ->
+        // LB10 at the start of text: a leading mark has nothing to attach to, so
+        // it becomes an AL — with U+0041's properties, which means no flags.
+        _units rest (Cons (lb_unit { cls = if _is_mark c then LbTable.k_al else c,
+                                     flags = if _is_mark c then 0 else f,
+                                     cp = cp, width = 1,
+                                     zwj = c == LbTable.k_zwj }, acc))
+      | Cons (last, older) ->
+        if _is_mark c && not (_no_fold_after last.cls) then
+          // `zwj` means the unit's LAST code point is a ZWJ, which is what LB8a
+          // asks about — so folding a combining mark on top of one clears it, and
+          // folding a ZWJ on top of anything sets it. The conformance suite is
+          // what distinguishes those: `200D 0308 X` breaks before X, `X 200D Y`
+          // does not break before Y.
+          _units rest (Cons (lb_unit { cls = last.cls, flags = last.flags,
+                                       cp = last.cp, width = last.width + 1,
+                                       zwj = c == LbTable.k_zwj }, older))
+        else
+          _units rest (Cons (lb_unit { cls = if _is_mark c then LbTable.k_al else c,
+                                       flags = if _is_mark c then 0 else f,
+                                       cp = cp, width = 1,
+                                       zwj = c == LbTable.k_zwj }, acc));
+
+  // --- small predicates, named after what the rules call them -------------
+
+  let _al_hl = fn (c: int) -> c == LbTable.k_al || c == LbTable.k_hl;
+  let _hard = fn (c: int) ->
+    c == LbTable.k_bk || c == LbTable.k_cr || c == LbTable.k_lf
+    || c == LbTable.k_nl;
+  let _hy_hh = fn (c: int) -> c == LbTable.k_hy || c == LbTable.k_hh;
+  let _east = fn (f: int) -> (bit_and f LbTable.flag_eastasian) > 0;
+  let _pi = fn (f: int) -> (bit_and f LbTable.flag_pi) > 0;
+  let _pf = fn (f: int) -> (bit_and f LbTable.flag_pf) > 0;
+  let _unassigned_pict = fn (f: int) ->
+    (bit_and f LbTable.flag_unassigned_pict) > 0;
+
+  // LB28a spells one of its operands as a literal character rather than a class,
+  // which is why a unit carries its code point.
+  let _ak_like = fn (c: int) -> fn (cp: int) ->
+    c == LbTable.k_ak || c == LbTable.k_as || cp == dotted_circle;
+  let _ak_or_circle = fn (c: int) -> fn (cp: int) ->
+    c == LbTable.k_ak || cp == dotted_circle;
+
+  let _jamo = fn (c: int) ->
+    c == LbTable.k_jl || c == LbTable.k_jv || c == LbTable.k_jt
+    || c == LbTable.k_h2 || c == LbTable.k_h3;
+
+  let _id_eb_em = fn (c: int) ->
+    c == LbTable.k_id || c == LbTable.k_eb || c == LbTable.k_em;
+
+  let _lb15b_after = fn (c: int) ->
+    c == LbTable.k_sp || c == LbTable.k_gl || c == LbTable.k_wj
+    || c == LbTable.k_cl || c == LbTable.k_qu || c == LbTable.k_cp
+    || c == LbTable.k_ex || c == LbTable.k_is || c == LbTable.k_sy
+    || _hard c || c == LbTable.k_zw;
+
+  let _lb15a_before = fn (c: int) ->
+    c == none || _hard c || c == LbTable.k_op || c == LbTable.k_qu
+    || c == LbTable.k_gl || c == LbTable.k_sp || c == LbTable.k_zw;
+
+  let _lb20a_before = fn (c: int) ->
+    c == none || _hard c || c == LbTable.k_sp || c == LbTable.k_zw
+    || c == LbTable.k_cb || c == LbTable.k_gl;
+
+  // --- the rules ---------------------------------------------------------
+  // `true` means a break is allowed at this position. In UAX #14 order: the first
+  // rule that matches decides, so the chain IS the algorithm.
+
+  let breaks_at = fn (x: lb_ctx) -> fn (cur: int) -> fn (cur_flags: int) ->
+                 fn (cur_cp: int) -> fn (n1: int) -> fn (n1_flags: int) ->
+                 fn (n2: int) ->
+    // LB2: sot ×
+    if x.sot then false
+    // LB3: ! eot
+    else if cur == none then true
+    // LB4: BK !
+    else if x.prev == LbTable.k_bk then true
+    // LB5: CR × LF; CR !; LF !; NL !
+    else if x.prev == LbTable.k_cr && cur == LbTable.k_lf then false
+    else if x.prev == LbTable.k_cr || x.prev == LbTable.k_lf
+            || x.prev == LbTable.k_nl
+    then true
+    // LB6: × (BK | CR | LF | NL)
+    else if _hard cur then false
+    // LB7: × SP; × ZW
+    else if cur == LbTable.k_sp || cur == LbTable.k_zw then false
+    // LB8: ZW SP* ÷
+    else if x.ns == LbTable.k_zw then true
+    // LB8a: ZWJ ×
+    // Reachable, and it took the conformance suite to say so. LB9 folds a ZWJ
+    // into the character before it, and where there is no such character — the
+    // start of text, or after a hard break or a space — LB10 turns it into an AL.
+    // But LB8a comes BEFORE both of those rules, so it still applies: the unit
+    // remembers it was a ZWJ for exactly this.
+    else if x.prev_zwj then false
+    // LB11: × WJ; WJ ×
+    else if cur == LbTable.k_wj || x.prev == LbTable.k_wj then false
+    // LB12: GL ×
+    else if x.prev == LbTable.k_gl then false
+    // LB12a: [^SP BA HY HH] × GL
+    else if cur == LbTable.k_gl
+            && not (x.prev == LbTable.k_sp || x.prev == LbTable.k_ba
+                    || _hy_hh x.prev)
+    then false
+    // LB13: × CL; × CP; × EX; × SY
+    else if cur == LbTable.k_cl || cur == LbTable.k_cp || cur == LbTable.k_ex
+            || cur == LbTable.k_sy
+    then false
+    // LB14: OP SP* ×
+    else if x.ns == LbTable.k_op then false
+    // LB15a: (sot | BK | CR | LF | NL | OP | QU | GL | SP | ZW) [Pi&QU] SP* ×
+    else if x.ns == LbTable.k_qu && _pi x.ns_flags && _lb15a_before x.ns_prev
+    then false
+    // LB15b: × [Pf&QU] (SP | GL | WJ | CL | QU | CP | EX | IS | SY | BK | CR | LF | NL | ZW | eot)
+    else if cur == LbTable.k_qu && _pf cur_flags
+            && (n1 == none || _lb15b_after n1)
+    then false
+    // LB15c: SP ÷ IS NU
+    else if x.prev == LbTable.k_sp && cur == LbTable.k_is && n1 == LbTable.k_nu
+    then true
+    // LB15d: × IS
+    else if cur == LbTable.k_is then false
+    // LB16: (CL | CP) SP* × NS
+    else if (x.ns == LbTable.k_cl || x.ns == LbTable.k_cp)
+            && cur == LbTable.k_ns
+    then false
+    // LB17: B2 SP* × B2
+    else if x.ns == LbTable.k_b2 && cur == LbTable.k_b2 then false
+    // LB18: SP ÷
+    else if x.prev == LbTable.k_sp then true
+    // LB19: × [QU - Pi]; [QU - Pf] ×
+    else if cur == LbTable.k_qu && not (_pi cur_flags) then false
+    else if x.prev == LbTable.k_qu && not (_pf x.prev_flags) then false
+    // LB19a: unless surrounded by East Asian characters, do not break either side
+    else if cur == LbTable.k_qu && not (_east x.prev_flags) then false
+    else if cur == LbTable.k_qu && (n1 == none || not (_east n1_flags))
+    then false
+    else if x.prev == LbTable.k_qu && not (_east cur_flags) then false
+    // ( sot | [^EastAsian] ) QU × — the East Asian test is on what precedes the
+    // quotation mark, which is prev2, not on the mark itself. Three cases in the
+    // conformance suite tell those apart, all of them CJK text with curly quotes.
+    else if x.prev == LbTable.k_qu
+            && (x.prev2 == none || not (_east x.prev2_flags))
+    then false
+    // LB20: ÷ CB; CB ÷
+    else if cur == LbTable.k_cb || x.prev == LbTable.k_cb then true
+    // LB20a: (sot | BK | CR | LF | NL | SP | ZW | CB | GL) (HY | HH) × (AL | HL)
+    else if _hy_hh x.prev && _lb20a_before x.prev2 && _al_hl cur then false
+    // LB21: × BA; × HH; × HY; × NS; BB ×
+    else if cur == LbTable.k_ba || cur == LbTable.k_hh || cur == LbTable.k_hy
+            || cur == LbTable.k_ns || x.prev == LbTable.k_bb
+    then false
+    // LB21a: HL (HY | HH) × [^HL]
+    else if x.prev2 == LbTable.k_hl && _hy_hh x.prev
+            && not (cur == LbTable.k_hl)
+    then false
+    // LB21b: SY × HL
+    else if x.prev == LbTable.k_sy && cur == LbTable.k_hl then false
+    // LB22: × IN
+    else if cur == LbTable.k_in then false
+    // LB23: (AL | HL) × NU; NU × (AL | HL)
+    else if _al_hl x.prev && cur == LbTable.k_nu then false
+    else if x.prev == LbTable.k_nu && _al_hl cur then false
+    // LB23a: PR × (ID | EB | EM); (ID | EB | EM) × PO
+    else if x.prev == LbTable.k_pr && _id_eb_em cur then false
+    else if _id_eb_em x.prev && cur == LbTable.k_po then false
+    // LB24: (PR | PO) × (AL | HL); (AL | HL) × (PR | PO)
+    else if (x.prev == LbTable.k_pr || x.prev == LbTable.k_po) && _al_hl cur
+    then false
+    else if _al_hl x.prev && (cur == LbTable.k_pr || cur == LbTable.k_po)
+    then false
+    // LB25: do not break numbers
+    else if x.num == 1
+            && (cur == LbTable.k_po || cur == LbTable.k_pr
+                || cur == LbTable.k_nu)
+    then false
+    else if x.num == 2 && (cur == LbTable.k_po || cur == LbTable.k_pr)
+    then false
+    else if (x.prev == LbTable.k_po || x.prev == LbTable.k_pr)
+            && (cur == LbTable.k_nu
+                || (cur == LbTable.k_op
+                    && (n1 == LbTable.k_nu
+                        || (n1 == LbTable.k_is && n2 == LbTable.k_nu))))
+    then false
+    else if (x.prev == LbTable.k_hy || x.prev == LbTable.k_is)
+            && cur == LbTable.k_nu
+    then false
+    // LB26: do not break a Korean syllable
+    else if x.prev == LbTable.k_jl
+            && (cur == LbTable.k_jl || cur == LbTable.k_jv
+                || cur == LbTable.k_h2 || cur == LbTable.k_h3)
+    then false
+    else if (x.prev == LbTable.k_jv || x.prev == LbTable.k_h2)
+            && (cur == LbTable.k_jv || cur == LbTable.k_jt)
+    then false
+    else if (x.prev == LbTable.k_jt || x.prev == LbTable.k_h3)
+            && cur == LbTable.k_jt
+    then false
+    // LB27: treat a Korean syllable block the same as ID
+    else if _jamo x.prev && cur == LbTable.k_po then false
+    else if x.prev == LbTable.k_pr && _jamo cur then false
+    // LB28: (AL | HL) × (AL | HL)
+    else if _al_hl x.prev && _al_hl cur then false
+    // LB28a: the orthographic syllables of Brahmic scripts
+    else if x.prev == LbTable.k_ap && _ak_like cur cur_cp then false
+    else if _ak_like x.prev x.prev_cp
+            && (cur == LbTable.k_vf || cur == LbTable.k_vi)
+    then false
+    else if x.vi && _ak_or_circle cur cur_cp then false
+    else if _ak_like x.prev x.prev_cp && _ak_like cur cur_cp
+            && n1 == LbTable.k_vf
+    then false
+    // LB29: IS × (AL | HL)
+    else if x.prev == LbTable.k_is && _al_hl cur then false
+    // LB30: (AL | HL | NU) × [OP - EastAsian]; [CP - EastAsian] × (AL | HL | NU)
+    else if (_al_hl x.prev || x.prev == LbTable.k_nu) && cur == LbTable.k_op
+            && not (_east cur_flags)
+    then false
+    else if x.prev == LbTable.k_cp && not (_east x.prev_flags)
+            && (_al_hl cur || cur == LbTable.k_nu)
+    then false
+    // LB30a: an even number of preceding regional indicators
+    else if x.prev == LbTable.k_ri && cur == LbTable.k_ri && x.ri % 2 == 1
+    then false
+    // LB30b: EB × EM; [ExtPict & Cn] × EM
+    else if x.prev == LbTable.k_eb && cur == LbTable.k_em then false
+    else if _unassigned_pict x.prev_flags && cur == LbTable.k_em then false
+    // LB31: break everywhere else
+    else true;
+
+  // --- advancing the state -----------------------------------------------
+
+  let _advance = fn (x: lb_ctx) -> fn (u: lb_unit) ->
+    let is_sp = u.cls == LbTable.k_sp in
+    lb_ctx {
+      sot = false,
+      prev = u.cls, prev_flags = u.flags, prev_cp = u.cp, prev_zwj = u.zwj,
+      prev2 = x.prev, prev2_flags = x.prev_flags,
+      ns = if is_sp then x.ns else u.cls,
+      ns_flags = if is_sp then x.ns_flags else u.flags,
+      ns_prev = if is_sp then x.ns_prev else x.prev,
+      ri = if u.cls == LbTable.k_ri then
+             (if x.prev == LbTable.k_ri then x.ri + 1 else 1)
+           else 0,
+      num = if u.cls == LbTable.k_nu then 1
+            else if x.num > 0 && (u.cls == LbTable.k_sy || u.cls == LbTable.k_is)
+            then x.num
+            else if x.num == 1
+                    && (u.cls == LbTable.k_cl || u.cls == LbTable.k_cp)
+            then 2
+            else 0,
+      vi = u.cls == LbTable.k_vi && _ak_like x.prev x.prev_cp,
+    };
+
+  let _start = lb_ctx { sot = true, prev = none, prev_flags = 0, prev_cp = none,
+                        prev_zwj = false, prev2 = none, prev2_flags = 0, ns = none, ns_flags = 0, ns_prev = none,
+                        ri = 0, num = 0, vi = false };
+
+  // --- the walk ----------------------------------------------------------
+  // One entry per position, from the start of text to the end, so there is one
+  // more entry than there are units. The first is always false (LB2) and the last
+  // always true (LB3).
+
+  let _cls = fn (u: lb_unit list) -> match u with Nil -> none | Cons (h, _) -> h.cls;
+  let _flg = fn (u: lb_unit list) -> match u with Nil -> 0 | Cons (h, _) -> h.flags;
+  let _cpof = fn (u: lb_unit list) -> match u with Nil -> none | Cons (h, _) -> h.cp;
+  let _tl = fn (u: lb_unit list) -> match u with Nil -> u | Cons (_, t) -> t;
+
+  // A unit may span several code points, and a position exists between every pair
+  // of code points — not every pair of units. The positions inside a fold are
+  // exactly the ones LB9 forbids breaking at, so they are `false`, and there are
+  // `width - 1` of them after each unit's own decision.
+  let rec _pad = fn (n: int) -> fn (acc: bool list) ->
+    if n <= 0 then acc else _pad (n - 1) (Cons (false, acc));
+
+  let rec _walk = fn (x: lb_ctx) -> fn (units: lb_unit list) -> fn (acc: bool list) ->
+    let after = _tl units in
+    let here = breaks_at x (_cls units) (_flg units) (_cpof units)
+                          (_cls after) (_flg after) (_cls (_tl after)) in
+    match units with
+    | Nil -> list_rev (Cons (here, acc))
+    | Cons (u, rest) ->
+      _walk (_advance x u) rest (_pad (u.width - 1) (Cons (here, acc)));
+
+  let opportunities_of_units = fn (units: lb_unit list) -> _walk _start units Nil;
+
+  let units_of = fn (s: str) ->
+    _units (list_map (utf8_chars s) codepoint_of) Nil;
+
+  let opportunities = fn (s: str) -> opportunities_of_units (units_of s);
+
+  // --- splitting ---------------------------------------------------------
+  // At every opportunity, which is what a layout engine narrows down rather than
+  // what it uses directly. Pieces keep their trailing spaces, because LB18 breaks
+  // after a space and the space belongs to the line it ends.
+
+  let rec _take = fn (chars: str list) -> fn (n: int) -> fn (buf) ->
+    if n <= 0 then chars
+    else
+      match chars with
+      | Nil -> chars
+      | Cons (ch, rest) -> let _ = strbuf_push buf ch in _take rest (n - 1) buf;
+
+  let split_lines = fn (s: str) ->
+    let rec go = fn (units: lb_unit list) -> fn (opps: bool list) ->
+                 fn (chars: str list) -> fn (buf) -> fn (acc: str list) ->
+      match units with
+      | Nil ->
+        let last = strbuf_to_str buf in
+        list_rev (if str_len last == 0 then acc else Cons (last, acc))
+      | Cons (u, urest) ->
+        // opps is aligned so its head is the position before this unit.
+        let brk = match opps with Nil -> false | Cons (b, _) -> b in
+        let opps2 = match opps with Nil -> opps | Cons (_, t) -> t in
+        let started = str_len (strbuf_to_str buf) > 0 in
+        if brk && started then
+          let piece = strbuf_to_str buf in
+          let fresh = strbuf_new () in
+          let rest_chars = _take chars u.width fresh in
+          go urest opps2 rest_chars fresh (Cons (piece, acc))
+        else
+          let rest_chars = _take chars u.width buf in
+          go urest opps2 rest_chars buf acc in
+    let us = units_of s in
+    go us (opportunities_of_units us) (utf8_chars s) (strbuf_new ()) Nil;
+
+}

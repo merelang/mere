@@ -9,6 +9,8 @@ character.
 |---|---|---|
 | `grapheme.mere` | `module Grapheme { clusters, count, breaks_between, class_of }` | ~150 |
 | `gcb_table.mere` | `module GcbTable { class_of, the 18 class constants }` — **generated** | ~40 + a 22,834-char literal |
+| `linebreak.mere` | `module LineBreak { opportunities, split_lines, breaks_at, units_of }` | ~330 |
+| `lb_table.mere` | `module LbTable { key_of, class_of, flags_of, the 44 class constants }` — **generated** | ~50 + a 32,625-char literal |
 
 ## Usage
 
@@ -101,14 +103,80 @@ output — a separate question, and not an idle one here: the table is a
 22,834-character literal read with `char_at`, so a backend whose strings behaved
 differently would produce a different table rather than a different algorithm.
 
+## Line breaking (UAX #14)
+
+`LineBreak.opportunities` says where a line is *allowed* to end — not where it
+should, which is the layout engine's decision, made with widths.
+
+```
+LineBreak.opportunities "a b"   // one bool per position, sot..eot
+LineBreak.split_lines "a b"     // ["a "; "b"]
+```
+
+Forty-four numbered rules applied in order, first match wins, written in that
+order so the chain can be read against the standard line by line. What makes it
+long is not the rules — most look only at the two characters either side of a
+position — but three things around them:
+
+* **LB9 and LB10 are a preprocessing step, not break rules.** A combining mark
+  takes the class of the character before it, so the unit the rules see is a base
+  plus its trailing `CM`/`ZWJ` run. Except after a hard break or a space, where
+  LB10 makes the leftover mark an `AL` of its own. The result still reports **one
+  position per code point**: the positions inside a fold are exactly the ones LB9
+  forbids breaking at.
+* **"even after spaces" appears in six rules** (LB8, LB14, LB15a, LB15b, LB16,
+  LB17), each needing the last *non-space* class as well as the immediately
+  preceding one — and all six sit before LB18, which is the rule that breaks after
+  a space.
+* **Some rules look further than one character either way.** LB25 needs a
+  number-sequence state and two of lookahead; LB15a, LB19a, LB20a, LB21a and LB28a
+  need what came *before* the previous character; LB30a needs a count of preceding
+  regional indicators.
+
+`lb_table.mere` is **generated** by `sh scripts/gen_linebreak_table.sh` from four
+UCD files, because several rules are written in terms of properties other than
+`Line_Break`: LB15a/15b test `General_Category` Pi and Pf, LB19a and LB30 test
+`East_Asian_Width`, LB30b tests an unassigned `Extended_Pictographic`. **LB1's
+resolution happens in the generator** — AI/SG/XX become AL, CJ becomes NS, SA
+becomes CM or AL by general category — which are the choices the UCD's own test
+file assumes, and which let the rules read the way the standard writes them. CB is
+deliberately left alone, because LB20 is written in terms of it.
+
+2,175 ranges, fifteen characters each, same shape as the other tables.
+
+### How this was checked, and how that gate differs from the others
+
+`sh scripts/linebreak_conformance.sh` runs the **Unicode Consortium's own test
+file**, 19,338 cases, vendored under `test/data` so it needs no network and cannot
+drift from the table's version. All agreeing.
+
+That is a different kind of gate from the other three in this repository, and the
+difference cuts both ways:
+
+* **Weaker**: the file is derived from the same rules the implementation reads, so
+  a shared misreading of the prose would agree with itself. `Intl.Segmenter` and
+  node's `URL` are independent implementations; this is not one.
+* **Stronger**: it is exhaustive over the pair table — every class against every
+  class, with and without an intervening combining mark and space — which no
+  hand-written corpus and no sampling of another implementation would reach.
+
+It earned its keep immediately. Three defects survived a careful reading of the
+rules and were caught by cases nobody would have thought to write:
+
+| what | how it showed |
+|---|---|
+| positions were reported per *unit* rather than per code point | every case containing a combining mark was one position short — 48% passing |
+| **LB8a was called unreachable, and is not** | a ZWJ at the start of text has nothing to fold into, so LB10 makes it an `AL` — but LB8a comes *before* LB10, so `ZWJ ×` still applies. 25 cases |
+| **LB19a's last line tests the character before the quotation mark**, not the mark | 3 cases, all of them CJK text with curly quotes |
+
+`test/parity/linebreak.mere` additionally holds all four backends to the same
+output — the table is a 32,625-character literal read with `char_at`.
+
 ## Not here yet
 
-- **UAX #14 line breaking.** The next thing a layout engine needs, and the
-  reason `class_of` is exported. It has no oracle in node — `Intl.Segmenter` has
-  no `line` granularity and `Intl.v8BreakIterator` is gone — so it will be
-  checked against the UCD's own test file rather than against another
-  implementation, which is a weaker gate and worth saying out loud in advance.
-- **East Asian Width** (UAX #11), needed for advance widths in CJK text.
+- **East Asian Width** (UAX #11) as an exported property. The line break table
+  already carries the wide/fullwidth/halfwidth bit because LB19a and LB30 need it;
+  a layout engine wants it directly, for advance widths.
 - **Normalization.** `String.prototype.normalize` is an oracle for it, so it is
   gateable whenever it is needed; a renderer can draw unnormalized text, so it is
   not needed first.

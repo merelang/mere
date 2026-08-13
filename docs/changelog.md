@@ -4,6 +4,63 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.240 — 2026-08-13
+
+_The first gate here that is not an independent implementation — and it caught three
+defects a careful reading of the rules had not._
+
+```
+  contrib/unicode/linebreak.mere    UAX #14, forty-four rules in the standard's order
+  contrib/unicode/lb_table.mere     generated: 2,175 ranges, four UCD properties
+  scripts/gen_linebreak_table.sh    derives the table
+  scripts/gen_linebreak_testdata.sh vendors the conformance suite
+  scripts/linebreak_conformance.sh  19,338 cases, all agreeing
+```
+
+**`LineBreak.opportunities`** says where a line is *allowed* to end. Not where it should —
+that is the layout engine's decision, made with widths — but where the text permits one.
+
+Three things make UAX #14 long, and none of them are the rules themselves. **LB9 and LB10
+are a preprocessing step**: a combining mark takes the class of the character before it, so
+the unit the rules see is a base plus its trailing `CM`/`ZWJ` run, except after a hard break
+or a space where LB10 makes the leftover an `AL`. **"even after spaces" appears in six
+rules**, each needing the last non-space class as well as the immediately preceding one, all
+six sitting before the rule that breaks after a space. And **some rules look further than one
+character either way** — LB25 needs a number state and two of lookahead, five rules need what
+came before the previous character, LB30a needs a count.
+
+**Four UCD properties in the table**, because several rules are written in terms of things
+other than `Line_Break`: LB15a/15b test `General_Category` Pi and Pf, LB19a and LB30 test
+`East_Asian_Width`, LB30b tests an unassigned `Extended_Pictographic`. LB1's resolution
+happens in the generator, which lets the rules read the way the standard writes them.
+
+**The gate is a different kind, and the difference cuts both ways.** UAX #14 has no oracle in
+node: `Intl.Segmenter` has no `line` granularity and `Intl.v8BreakIterator` is gone. So this
+runs the Unicode Consortium's own conformance file instead — **weaker**, because it is derived
+from the same rules the implementation reads and a shared misreading of the prose would agree
+with itself; **stronger**, because it is exhaustive over the pair table, every class against
+every class with and without an intervening combining mark and space, which no hand-written
+corpus would reach. It is vendored under `test/data` so it runs offline and cannot drift from
+the table's version.
+
+**It earned its keep immediately.** Three defects survived a careful reading of the rules:
+
+* positions were reported **per unit rather than per code point**, so every case containing a
+  combining mark was one short — 48% passing, and the pattern was uniform enough to name the
+  cause before reading a second failure;
+* **LB8a was called unreachable in a comment, and is not.** A ZWJ at the start of text has
+  nothing to fold into, so LB10 turns it into an `AL` — but LB8a comes *before* LB10, so
+  `ZWJ ×` still applies. Then the fix needed a second correction: the flag means "this unit's
+  **last** code point is a ZWJ", so folding a combining mark on top of one clears it. The
+  suite distinguishes those two readings in 24 cases;
+* **LB19a's last line tests the character before the quotation mark**, not the mark itself.
+  Three cases, all of them CJK text with curly quotes.
+
+None of those would have been found by a corpus somebody wrote by hand, which is the argument
+for the exhaustive-but-not-independent gate rather than against it.
+
+---
+
 ## v0.1.239 — 2026-08-13
 
 _A grapheme cluster is what a reader calls a character, and it is what a renderer has to
