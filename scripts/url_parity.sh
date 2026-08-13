@@ -29,12 +29,40 @@
 # Usage:
 #   sh scripts/url_parity.sh
 
+# The oracle has a version, and that matters more than it sounds like it should:
+# node 22 and node 24 give DIFFERENT answers to two of the questions below, in
+# both cases because the older one predates a change to the Standard.
+#
+#   * `^` (U+005E) in a path. The path percent-encode set is "the query set and
+#     ? ^ ` { }" — node 24 encodes `^`, node 22 does not.
+#   * `..` resolved against a base whose path is empty, e.g. `foo://h`. Path
+#     state shortens the path and then, because the input ended, appends the
+#     empty string — so the answer is `foo://h/`. node 24 agrees; node 22 leaves
+#     the path empty and answers `foo://h`.
+#
+# Both were found by running this harness on a machine with a different node than
+# the one it was written against, which is the useful kind of embarrassment: a
+# differential gate's oracle is a dependency with a version, and an unpinned
+# oracle makes the result depend on the machine. So the version is required here,
+# and printed, rather than discovered from a page of phantom failures.
+NODE_MIN=24
+
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
 
 command -v node >/dev/null 2>&1 || { echo "url_parity: node absent, skipping"; exit 0; }
 [ -x "$MERE" ] || { echo "url_parity: $MERE not found — run 'dune build'" >&2; exit 1; }
+
+NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
+if [ "$NODE_MAJOR" -lt "$NODE_MIN" ]; then
+  echo "url_parity: node $(node -v) is older than the Standard this checks against"
+  echo "            (needs >= v${NODE_MIN}; see the note at the top of this script"
+  echo "             for the two answers that changed)"
+  echo "url_parity: skipping"
+  exit 0
+fi
+echo "url_parity: oracle is node $(node -v)"
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
