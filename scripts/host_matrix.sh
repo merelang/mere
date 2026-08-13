@@ -154,7 +154,13 @@ if [ ! -f "$OUT" ]; then
 fi
 
 if diff -u "$OUT" "$TMP/matrix.md" > "$TMP/diff"; then
-  echo "host_matrix: ok  ($(grep -c '^| \`' "$OUT") builtins, $missing MISSING, $errors error)"
+  # A bare backtick, matching the two greps above. With a backslash before it
+  # this counted 50 on BSD grep and 0 on GNU grep, where `\`` is an extension
+  # meaning "start of buffer" — so CI reported "ok (0 builtins)" for a run that
+  # had in fact classified every one of them. The diff above is the real check
+  # and it was passing; it was the summary line that lied, which is worse than
+  # it sounds: "0 checked" is exactly what a gate that did not run looks like.
+  echo "host_matrix: ok  ($(grep -c '^| `' "$OUT") builtins, $missing MISSING, $errors error)"
   exit 0
 fi
 
