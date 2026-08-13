@@ -6622,10 +6622,14 @@ let str_concat_helper =
       "}";
       "";
       (* Phase 36: gcd via Euclid (abs(a), abs(b)) *)
-      "static int __lang_gcd(int a, int b) {";
+      (* `int` here truncated both arguments: the language's int is 64-bit on
+         this backend, so gcd 3037000493 3037000493 came back as 1257966803 —
+         the low 32 bits, negated and abs'd. Every probe of gcd had used small
+         literals, so it read as present and correct on all four backends. *)
+      "static long long __lang_gcd(long long a, long long b) {";
       "  if (a < 0) a = -a;";
       "  if (b < 0) b = -b;";
-      "  while (b != 0) { int t = b; b = a % b; a = t; }";
+      "  while (b != 0) { long long t = b; b = a % b; a = t; }";
       "  return a;";
       "}";
       "";
@@ -6782,11 +6786,14 @@ let str_concat_helper =
       (* v0.1.20 (mrog dogfood P3): random_int n — uniform in [0, n).
          Seeded once from time^pid; n <= 0 fails like the interpreter. *)
       "#include <time.h>";
-      "static int __lang_random_int(int n) {";
+      (* Same 32-bit truncation as __lang_gcd had: the bound is a language int.
+         Not observable from a parity test — the result is random — but a bound
+         above 2^31 came through as a different bound, or as zero. *)
+      "static long long __lang_random_int(long long n) {";
       "  static int __seeded = 0;";
       "  if (!__seeded) { srand((unsigned)(time(NULL) ^ getpid())); __seeded = 1; }";
       "  if (n <= 0) __lang_fail_impl(\"random_int: bound must be positive\");";
-      "  return rand() % n;";
+      "  return ((long long)rand() * RAND_MAX + rand()) % n;";
       "}";
       "";
       (* Phase 44: mkdir_p doesn't depend on list_str, so it can live in the header *)
@@ -6799,10 +6806,11 @@ let str_concat_helper =
       "  return (double)st.st_mtime;";
       "}";
       (* v0.1.21 (mwasm dogfood P1): true byte length via stat. *)
-      "static int __lang_file_size(const char* path) {";
+      (* Same class: a file over 2GB reported a truncated (or negative) size. *)
+      "static long long __lang_file_size(const char* path) {";
       "  struct stat st;";
       "  if (stat(path, &st) != 0) __lang_fail_impl(path);";
-      "  return (int)st.st_size;";
+      "  return (long long)st.st_size;";
       "}";
       (* v0.1.15 (mk dogfood P3): file_exists — stat succeeds. *)
       "static int __lang_file_exists(const char* path) {";

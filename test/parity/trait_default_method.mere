@@ -3,6 +3,12 @@
 // method `eq` is inlined per instance by trait_elab before type-checking, so
 // no self-referential dictionary is needed. `describe` exercises both the
 // provided method and the inherited default.
+//
+// This file had a parse error from the commit that added it (v0.1.101) — bare
+// `print (...)` statements where every other test writes `let _ = ...` — so the
+// interpreter refused it, the harness printed one SKIP line, and the summary
+// counted neither. It ran for the first time in v0.1.245, which is also when the
+// harness started counting files it could not run.
 trait Eq 'a {
   eq  : 'a -> 'a -> bool;
   neq : 'a -> 'a -> bool = fn x -> fn y -> (if eq x y then false else true);
@@ -11,5 +17,6 @@ impl Eq int { eq = fn a -> fn b -> a == b; }
 
 let describe = fn a -> fn b ->
   (if eq a b then "eq" else (if neq a b then "neq" else "?"));
-print (describe 3 3);
-print (describe 3 4)
+let _ = print (describe 3 3);
+let _ = print (describe 3 4);
+0

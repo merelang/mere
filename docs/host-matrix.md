@@ -13,7 +13,7 @@ The interpreter has every one of these, and is not a column.
 |---|:--:|:--:|:--:|
 | `abs` | yes | yes | yes |
 | `args` | yes | yes | yes |
-| `assert` | nocompile | MISSING | MISSING |
+| `assert` | yes | yes | yes |
 | `atan2` | yes | yes | yes |
 | `bit_and` | yes | yes | yes |
 | `bit_not` | yes | yes | yes |
@@ -38,10 +38,10 @@ The interpreter has every one of these, and is not a column.
 | `cos` | yes | yes | yes |
 | `csr_read` | refused | MISSING | MISSING |
 | `csr_write` | refused | MISSING | MISSING |
-| `cube` | nocompile | MISSING | MISSING |
-| `decr` | nocompile | MISSING | MISSING |
+| `cube` | yes | yes | yes |
+| `decr` | yes | yes | yes |
 | `detach` | yes | refused | refused |
-| `divmod` | nocompile | MISSING | MISSING |
+| `divmod` | yes | yes | yes |
 | `e` | yes | yes | yes |
 | `env_var` | nocompile | refused | yes |
 | `even` | yes | yes | yes |
@@ -74,7 +74,7 @@ The interpreter has every one of these, and is not a column.
 | `float_of_str` | yes | yes | yes |
 | `floor` | yes | yes | refused |
 | `gcd` | yes | yes | yes |
-| `incr` | nocompile | MISSING | MISSING |
+| `incr` | yes | yes | yes |
 | `int_max` | nocompile | MISSING | MISSING |
 | `int_min` | nocompile | MISSING | MISSING |
 | `int_of_float` | yes | yes | yes |
@@ -83,7 +83,7 @@ The interpreter has every one of these, and is not a column.
 | `is_digit` | yes | yes | yes |
 | `is_space` | yes | yes | yes |
 | `join` | yes | yes | yes |
-| `lcm` | nocompile | MISSING | MISSING |
+| `lcm` | yes | yes | yes |
 | `list_dir` | yes | refused | refused |
 | `log` | nocompile | MISSING | MISSING |
 | `map_new` | yes | yes | yes |
@@ -99,7 +99,7 @@ The interpreter has every one of these, and is not a column.
 | `ord` | yes | yes | yes |
 | `owned_vec_new` | yes | yes | yes |
 | `pi` | yes | yes | yes |
-| `pow` | nocompile | MISSING | MISSING |
+| `pow` | yes | yes | yes |
 | `print` | yes | yes | yes |
 | `print_bool` | yes | yes | yes |
 | `print_bytes` | yes | yes | yes |
@@ -117,12 +117,12 @@ The interpreter has every one of these, and is not a column.
 | `read_stdin` | yes | refused | yes |
 | `round` | yes | yes | refused |
 | `run` | yes | refused | yes |
-| `sign` | nocompile | MISSING | MISSING |
+| `sign` | yes | yes | yes |
 | `sin` | yes | yes | yes |
 | `sleep_ms` | yes | refused | refused |
 | `spawn` | yes | yes | yes |
 | `sqrt` | yes | yes | yes |
-| `square` | nocompile | MISSING | MISSING |
+| `square` | yes | yes | yes |
 | `stdin_byte` | yes | MISSING | MISSING |
 | `str_compare` | yes | yes | yes |
 | `str_contains` | yes | yes | yes |
@@ -142,7 +142,7 @@ The interpreter has every one of these, and is not a column.
 | `str_unescape` | yes | yes | yes |
 | `strbuf_new` | yes | yes | yes |
 | `substring` | yes | yes | yes |
-| `sum_range` | nocompile | MISSING | MISSING |
+| `sum_range` | yes | yes | yes |
 | `tan` | yes | yes | yes |
 | `time` | yes | yes | yes |
 | `to_lower` | yes | yes | yes |

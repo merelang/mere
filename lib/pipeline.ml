@@ -170,8 +170,26 @@ let reset_warnings () = warnings := []
 let take_warnings () = let ws = List.rev !warnings in warnings := []; ws
 let warn loc msg = warnings := (loc, msg) :: !warnings
 
-let warn_reserved_name loc name =
-  if name = "main" then
+let warn_reserved_name (loc : Loc.t) name =
+  (* Not for the prelude's own declarations. They are prepended to every program,
+     so a warning about one fires on every compile, and the user cannot rename a
+     name they did not write. The prelude is tokenized with `~file:prelude_file`,
+     which is what makes it tellable.
+
+     Worth knowing if this list is ever revisited: the "this will be a compile
+     error at codegen" claim is at least partly stale. `pow` is in
+     `reserved_c_names`, and a prelude `let pow` compiles and runs on the C backend
+     (`pow 2 10` gives 1024) because the backend mangles top-level names — the same
+     thing the `main` case below already documents.
+
+     One measured consequence of skipping the prelude here: a name the prelude
+     binds is a rebind when the user binds it too, and the walk warns once, so a
+     user top-level `let pow` no longer gets nagged. `pow` is the only one of the
+     ten helpers added to the prelude that is in this list, and a user `let pow`
+     compiles and runs correctly on the C backend, so what was lost is a nag that
+     was wrong for that name anyway. *)
+  if loc.Loc.file = Some prelude_file then ()
+  else if name = "main" then
     (* Mere has no `main`-function convention: the entry point IS the file's
        trailing expression. A user binding named `main` no longer collides
        with the synthesized entry — the C backend mangles it (`mu_main`) and

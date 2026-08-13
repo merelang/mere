@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.244" Version.v "0.1.244";
+  check "version is 0.1.245" Version.v "0.1.245";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2844,6 +2844,25 @@ let () =
             let t = Typer.infer outer value in Typer.check_pattern pat t) in
         type_env := List.fold_left (fun acc (n, ty) ->
           (n, Typer.generalize outer ty) :: acc) outer bs
+      | Ast.Top_let_rec bindings ->
+        (* Also from process_decls, as `typed_for_codegen` below already had.
+           Skipping it worked only for as long as no plain `let` in the prelude
+           referred to a `let rec` one: the recursive helpers were dropped here and
+           so were their callers, so nothing was left dangling. `pow` calling
+           `_pow_go` (v0.1.245) is the first pair that crosses the two forms, and
+           it came out as `unbound variable: _pow_go` from a test with no integers
+           in it. *)
+        let outer = !type_env in
+        let alphas =
+          Typer.enter_level (fun () ->
+            List.map (fun _ -> Typer.fresh_var ()) bindings) in
+        let env_rec = List.fold_left2 (fun acc (n, _) a ->
+          (n, Typer.mono a) :: acc) outer bindings alphas in
+        List.iter2 (fun (_, value) alpha ->
+          let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
+          Typer.unify value.Ast.loc alpha t) bindings alphas;
+        type_env := List.fold_left2 (fun acc (n, _) a ->
+          (n, Typer.generalize outer a) :: acc) outer bindings alphas
       | _ -> ()
     ) prog.decls;
     let main_ty = Typer.infer !type_env (Ast.desugar_program prog) in
@@ -3567,6 +3586,25 @@ let () =
             let t = Typer.infer outer value in Typer.check_pattern pat t) in
         type_env := List.fold_left (fun acc (n, ty) ->
           (n, Typer.generalize outer ty) :: acc) outer bs
+      | Ast.Top_let_rec bindings ->
+        (* Also from process_decls, as `typed_for_codegen` below already had.
+           Skipping it worked only for as long as no plain `let` in the prelude
+           referred to a `let rec` one: the recursive helpers were dropped here and
+           so were their callers, so nothing was left dangling. `pow` calling
+           `_pow_go` (v0.1.245) is the first pair that crosses the two forms, and
+           it came out as `unbound variable: _pow_go` from a test with no integers
+           in it. *)
+        let outer = !type_env in
+        let alphas =
+          Typer.enter_level (fun () ->
+            List.map (fun _ -> Typer.fresh_var ()) bindings) in
+        let env_rec = List.fold_left2 (fun acc (n, _) a ->
+          (n, Typer.mono a) :: acc) outer bindings alphas in
+        List.iter2 (fun (_, value) alpha ->
+          let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
+          Typer.unify value.Ast.loc alpha t) bindings alphas;
+        type_env := List.fold_left2 (fun acc (n, _) a ->
+          (n, Typer.generalize outer a) :: acc) outer bindings alphas
       | _ -> ()
     ) prog.decls;
     let main_ty = Typer.infer !type_env (Ast.desugar_program prog) in
@@ -4174,6 +4212,25 @@ let () =
             let t = Typer.infer outer value in Typer.check_pattern pat t) in
         type_env := List.fold_left (fun acc (n, ty) ->
           (n, Typer.generalize outer ty) :: acc) outer bs
+      | Ast.Top_let_rec bindings ->
+        (* Also from process_decls, as `typed_for_codegen` below already had.
+           Skipping it worked only for as long as no plain `let` in the prelude
+           referred to a `let rec` one: the recursive helpers were dropped here and
+           so were their callers, so nothing was left dangling. `pow` calling
+           `_pow_go` (v0.1.245) is the first pair that crosses the two forms, and
+           it came out as `unbound variable: _pow_go` from a test with no integers
+           in it. *)
+        let outer = !type_env in
+        let alphas =
+          Typer.enter_level (fun () ->
+            List.map (fun _ -> Typer.fresh_var ()) bindings) in
+        let env_rec = List.fold_left2 (fun acc (n, _) a ->
+          (n, Typer.mono a) :: acc) outer bindings alphas in
+        List.iter2 (fun (_, value) alpha ->
+          let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
+          Typer.unify value.Ast.loc alpha t) bindings alphas;
+        type_env := List.fold_left2 (fun acc (n, _) a ->
+          (n, Typer.generalize outer a) :: acc) outer bindings alphas
       | _ -> ()
     ) prog.decls;
     let main_ty = Typer.infer !type_env (Ast.desugar_program prog) in
@@ -7806,9 +7863,13 @@ let () =
         + v0.1.231 (codepoint pair, Q-014's deferred sliver): 6
            (_cp_bad / str_of_codepoint / _cp_span / _cp_cont /
             codepoint_of / codepoint_at)
-        = 67 total *)
+        + v0.1.245 (small integer helpers, previously interpreter-only builtins
+           with no lowering on any compiled backend): 11
+           (sign / incr / decr / square / cube / sum_range / _pow_go / pow /
+            lcm / divmod / assert)
+        = 78 total *)
      string_of_int (List.length prog.Ast.decls))
-    "67";
+    "78";
 
   (* Phase 39.A' #4: list_sort_by / list_sort prelude helpers *)
   check "list_sort_by: ascending int sort"

@@ -4,6 +4,77 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.245 — 2026-08-14
+
+_Ten builtins that existed only on the interpreter became ten definitions in the language.
+Moving them exposed three bugs that had nothing to do with them, two of which were wrong
+answers from builtins every test called correct._
+
+```
+  lib/prelude_stdlib.ml               sign incr decr square cube sum_range pow lcm divmod assert
+  lib/eval.ml                         -105 lines: the ten builtins those replace
+  lib/codegen_llvm.ml                 string globals minted once; int_of_str returns i64
+  lib/codegen_c.ml                    gcd, random_int, file_size widened to long long
+  test/parity/int_width.mere          new: every int builtin, with arguments above 2^31
+  test/parity/show_json_same_program  new: show and to_json in one program
+```
+
+**The ten.** `sign` / `incr` / `decr` / `square` / `cube` / `sum_range` / `pow` / `lcm` /
+`divmod` / `assert` were in the typer's environment and in `eval.ml` and nowhere else: they
+type-checked on every backend and `mere -c` then emitted a reference to a name the C compiler
+had never heard of. Defining them as Mere source in the prelude gives all five backends the
+same one from one place, which is cheaper than five codegen cases and cannot drift between
+them. `int_max` / `int_min` are deliberately not among them — they cannot be a portable
+literal while int is 63-bit on interp and 64-bit elsewhere.
+
+**"The same as the builtin" was wrong four times out of ten,** and only outside the range a
+small test looks at. `sum_range` and `pow` recursed where the builtin was closed-form and
+square-and-multiply, which is a stack overflow rather than a slow answer at a million terms.
+`lcm` multiplied before dividing, which overflows for operands whose lcm fits but whose
+product does not — on interp that made `lcm 3037000493 3037000493` answer `13`. And `divmod`
+left its documented zero failure to `/`, which is not one thing across the backends: **bare
+`x / 0` raises on the interpreter and returns 0 on C and LLVM**, so the failure would have
+depended on which backend you built with. It has its own check now; the divergence in `/`
+itself is still there and is not yet under any gate, because the parity harness compares
+stdout and does not compare failures at all.
+
+**The prelude definition shadows the builtin — measured, not assumed.** Making `eval.ml`'s
+`sign` return 999 changed no answer, so the ten builtins were unreachable rather than
+merely redundant, and 105 lines came out. The typer declarations stay: that is the set
+`host_matrix.sh` generates its questions from, so deleting a declaration would have removed
+the question rather than answered it.
+
+**`@.s_true` was defined twice.** The first symptom of any of this was `to_json_composite`
+failing to compile on LLVM with `redefinition of global '@.s_true'`. The show emitter and the
+to_json emitter register their string constants in separate blocks, and they want some of the
+same names — `s_true`, `s_false`, `s_lbracket`, `s_rbracket`. **Any program using both `show`
+and `to_json` hit it**, which no test did until a prelude helper's error path called `show`
+and gave every program a show emitter. Minting is idempotent by name now, and a second mint
+with different content fails the compile instead of resolving last-wins.
+
+**Then the value that found `lcm` found a real one: `gcd 3037000493 3037000493` was
+`1257966803` on the C backend.** The generated runtime declared
+`static int __lang_gcd(int, int)` while int is 64-bit there, so both arguments were truncated
+to their low 32 bits. Nothing was missing and nothing failed to compile — the builtin was
+recorded as present and correct on all four backends, because every probe of it had used a
+one-digit literal. **The gap was in the values, not in the list of names.**
+
+`test/parity/int_width.mere` is that gate, and it found the second one while being written
+for the first: LLVM's `int_of_str` parsed with `strtoll` and truncated to `i32`, so
+`int_of_str "3037000493"` was `-1257966803` and the largest int was `-1` — the return width
+left behind when int widened to i64. `random_int` and `file_size` on C are the same shape and
+are widened too, though neither is observable from a parity test (one is random, the other
+needs a 2GB file). Sweeping both backends for the rest: every remaining narrow helper returns
+a status code or a count bounded by a string's length.
+
+**An intermediate has a width too.** With those fixed, one line still diverged:
+`sum_range (0 - 3037000493) 0` has an answer both int widths hold and a naive Gauss
+intermediate only the 64-bit one does. Halving inside the product — exactly one of the two
+factors is even, since an odd count means the endpoints share parity — makes the function
+portable over the whole range its result can hold.
+
+---
+
 ## v0.1.244 — 2026-08-13
 
 _The harness whose job is to ask which backend has which builtin was asking about a set

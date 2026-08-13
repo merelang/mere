@@ -1,0 +1,72 @@
+// The small integer helpers, held to one output on every backend.
+//
+// These were interpreter builtins with no lowering anywhere: `mere -c` emitted a
+// name the C compiler had never heard of, so they worked in the REPL and failed at
+// link time, and no test used them. They are Mere source in the prelude now, which
+// is why this file can exist at all.
+//
+// The small answers below are the ones the interpreter builtins gave. The section
+// at the end is the one that matters: on small inputs a plausible-looking Mere
+// definition agrees with the builtin, and four of the ten stopped agreeing further
+// out — a recursion where the builtin was closed-form is a stack overflow rather
+// than a slow answer, and a multiply before a divide is an overflow rather than a
+// large number. Those values are checked against an independent calculator, not
+// against the definition that produced them.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+let show2 = fn (t: (int * int)) -> let (a, b) = t in "(" ++ show a ++ "," ++ show b ++ ")";
+
+let _ = print "=== sign ===";
+let _ = print (show (sign 5) ++ " " ++ show (sign 0) ++ " " ++ show (sign (0 - 7))
+               ++ " " ++ show (sign 1) ++ " " ++ show (sign (0 - 1)));
+
+let _ = print "=== incr / decr ===";
+let _ = print (show (incr 41) ++ " " ++ show (decr 43) ++ " " ++ show (incr (0 - 1))
+               ++ " " ++ show (decr 0));
+
+let _ = print "=== square / cube, and that a negative cube stays negative ===";
+let _ = print (show (square 7) ++ " " ++ show (square (0 - 7)) ++ " " ++ show (square 0)
+               ++ " " ++ show (cube 3) ++ " " ++ show (cube (0 - 3)) ++ " " ++ show (cube 0));
+
+let _ = print "=== sum_range, inclusive, empty when reversed ===";
+let _ = print (show (sum_range 1 10) ++ " " ++ show (sum_range 5 5) ++ " "
+               ++ show (sum_range 5 1) ++ " " ++ show (sum_range (0 - 3) 3)
+               ++ " " ++ show (sum_range 0 0));
+
+let _ = print "=== pow, including the zeroth power of zero ===";
+let _ = print (show (pow 2 10) ++ " " ++ show (pow 2 0) ++ " " ++ show (pow 0 0)
+               ++ " " ++ show (pow (0 - 2) 3) ++ " " ++ show (pow (0 - 2) 4)
+               ++ " " ++ show (pow 5 1) ++ " " ++ show (pow 1 62));
+
+let _ = print "=== gcd / lcm, with zero absorbing ===";
+let _ = print (show (gcd 12 18) ++ " " ++ show (gcd 7 13) ++ " " ++ show (lcm 4 6)
+               ++ " " ++ show (lcm 0 5) ++ " " ++ show (lcm 5 0) ++ " " ++ show (lcm 7 7));
+
+let _ = print "=== divmod is truncated division, matching / and % ===";
+let _ = print (show2 (divmod 17 5) ++ " " ++ show2 (divmod (0 - 17) 5) ++ " "
+               ++ show2 (divmod 17 (0 - 5)) ++ " " ++ show2 (divmod (0 - 17) (0 - 5))
+               ++ " " ++ show2 (divmod 0 5));
+
+let _ = print "=== assert passes silently ===";
+let _ = assert true "not reached";
+let _ = assert (1 + 1 == 2) "arithmetic";
+let _ = print "both passed";
+
+let _ = print "=== the inputs where a plausible definition stops agreeing ===";
+// sum_range has to be the closed form: summing a million terms by recursion is a
+// stack overflow, not a slow answer. Same for pow — square-and-multiply reaches an
+// exponent of a million in twenty steps.
+let _ = print (show (sum_range 1 1000000) ++ " " ++ show (sum_range (0 - 1000000) 1000000)
+               ++ " " ++ show (sum_range 999999 1000000));
+let _ = print (show (pow 2 40) ++ " " ++ show (pow 3 30) ++ " " ++ show (pow (0 - 1) 1000001)
+               ++ " " ++ show (pow (0 - 1) 1000000));
+// lcm has to divide before multiplying: 3037000493 squared does not fit in a signed
+// 64-bit int, and the pair after it lands just under the interpreter's 63-bit limit.
+let _ = print (show (lcm 1000000007 2) ++ " " ++ show (lcm 3037000493 3037000493)
+               ++ " " ++ show (lcm 2147483647 2147483646));
+
+let _ = print "=== and they compose, which is what a lifted inner fn exercises ===";
+let f = fn (n: int) -> let g = fn (k: int) -> square (incr k) in g n + cube (sign n);
+let _ = print (show (f 3) ++ " " ++ show (f (0 - 3)) ++ " " ++ show (f 0));
+0

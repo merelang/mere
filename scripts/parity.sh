@@ -44,6 +44,12 @@ have_wat=0; command -v wat2wasm >/dev/null 2>&1 && command -v node >/dev/null 2>
 unsup_c=0; unsup_llvm=0; unsup_wasm=0; unsup_names=""
 TMP="${TMPDIR:-/tmp}/mere_parity.$$"; mkdir -p "$TMP"; trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0
+# A file the interpreter cannot run is not compared on ANY backend, so it is a
+# test that does not exist. It used to print one SKIP line and be left out of the
+# summary entirely: `trait_default_method.mere` had a parse error from the commit
+# that added it (v0.1.101) and sat unnoticed behind `96 passed, 0 failed` for
+# 144 versions. Counted, named, and fatal now.
+skip=0; skip_names=""
 
 # emit_fail_kind <errfile> : "unsup" if the emit error is a clean
 # backend-unsupported, else "hard".
@@ -51,7 +57,7 @@ emit_kind() { grep -qE 'unsupported|not supported in .* codegen subset|does not 
 
 for f in $FILES; do
   name="$(basename "$f" .mere)"
-  ref="$("$MERE" "$f" 2>"$TMP/i.err")" || { echo "SKIP $name (interpreter error)"; sed 's/^/    /' "$TMP/i.err" | head -3; continue; }
+  ref="$("$MERE" "$f" 2>"$TMP/i.err")" || { echo "SKIP $name (interpreter error)"; sed 's/^/    /' "$TMP/i.err" | head -3; skip=$((skip + 1)); skip_names="$skip_names $name"; continue; }
   row=""; bad=0
   # C
   if "$MERE" -c "$f" > "$TMP/c.c" 2>"$TMP/c.err"; then
@@ -91,7 +97,11 @@ for f in $FILES; do
 done
 
 echo "----"
-echo "parity: $pass passed, $fail failed"
+if [ "$skip" -gt 0 ]; then
+  echo "parity: $pass passed, $fail failed, $skip never ran (interpreter error):$skip_names"
+else
+  echo "parity: $pass passed, $fail failed"
+fi
 total=$((pass + fail))
 for b in c llvm wasm; do
   eval "n=\$unsup_$b"
@@ -102,4 +112,4 @@ for b in c llvm wasm; do
     done
   }
 done
-[ "$fail" -eq 0 ]
+[ "$fail" -eq 0 ] && [ "$skip" -eq 0 ]

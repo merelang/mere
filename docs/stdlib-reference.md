@@ -226,7 +226,7 @@ str_unescape "a\\nb"                          // a + newline + b (3 chars)
 | `abs` | `int -> int` | Absolute value |
 | `sign` | `int -> int` | -1 / 0 / 1 |
 | `clamp` | `int -> int -> int -> int` | `clamp lo hi x` restricts to `[lo, hi]` |
-| `pow` ⚡ | `int -> int -> int` | base^exp; raises on negative exp |
+| `pow` ⚡ | `int -> int -> int` | base^exp by square-and-multiply; raises on negative exp |
 | `square` | `int -> int` | x * x |
 | `cube` | `int -> int` | x * x * x |
 | `incr` | `int -> int` | +1 |
@@ -235,8 +235,8 @@ str_unescape "a\\nb"                          // a + newline + b (3 chars)
 | `odd` | `int -> bool` | n mod 2 != 0 |
 | `gcd` | `int -> int -> int` | Euclid (handles negatives and 0 correctly) |
 | `lcm` | `int -> int -> int` | `|a/gcd * b|`; 0 in input → 0 |
-| `divmod` ⚡ | `int -> int -> (int * int)` | (quotient, remainder); raises on 0 div |
-| `sum_range` | `int -> int -> int` | Sum over `lo..hi` (Gauss formula, O(1)) |
+| `divmod` ⚡ | `int -> int -> (int * int)` | (quotient, remainder); raises on 0 div — the check is its own, because bare `/` by zero raises on interp and returns 0 on C and LLVM |
+| `sum_range` | `int -> int -> int` | Sum over `lo..hi` (Gauss formula, O(1)); halves inside the product, so it is portable over the whole range its result can hold |
 | `not` | `bool -> bool` | Logical negation |
 | `bit_and` | `int -> int -> int` | Bitwise AND on the backend's native int width (v0.1.42) |
 | `bit_or` | `int -> int -> int` | Bitwise OR (v0.1.42) |
@@ -244,6 +244,22 @@ str_unescape "a\\nb"                          // a + newline + b (3 chars)
 | `bit_not` | `int -> int` | Bitwise complement; numerically `-x - 1` on every backend (v0.1.42) |
 | `bit_shl` | `int -> int -> int` | Shift left. Keep counts in `0..62` for portable code — int is 64-bit on C, LLVM and Wasm (widened in v0.1.96 / v0.1.127), 63-bit on interp |
 | `bit_shr` | `int -> int -> int` | **Arithmetic** (sign-propagating) shift right; `bit_shr x n` equals floor division by 2^n on every backend (v0.1.42) |
+
+**★ On the width these are actually computed at** (v0.1.245): a builtin can be
+present on every backend, answer every small question correctly, and still be
+implemented at a narrower width than the language's int. `gcd` was a
+`static int __lang_gcd(int, int)` in the generated C — `gcd 3037000493 3037000493`
+came back as `1257966803` — and `int_of_str` on LLVM parsed with `strtoll` and then
+truncated the result to `i32`, so the largest int read back as `-1`. Both were
+invisible to every existing test and to `host-matrix.md`, because the arguments
+used to probe a builtin were all one or two digits.
+
+`test/parity/int_width.mere` is the gate for this: every deterministic int builtin,
+with arguments above 2^31, held to one answer on all four backends. It found the
+second bug while being written for the first. Values there stay inside ±(2^62 − 1)
+so that the interpreter's 63-bit int is not itself the difference — and note that
+an *intermediate* counts: `sum_range` used to form a product twice the size of its
+own answer, which made it portable over only half the range its result could hold.
 
 ### Float arithmetic (4)
 

@@ -1077,61 +1077,6 @@ let builtin_odd =
     | V_int n -> V_bool (n mod 2 <> 0)
     | _ -> failwith "odd: expected int")
 
-let builtin_sign =
-  V_builtin ("sign", fun v ->
-    match v with
-    | V_int n -> V_int (if n > 0 then 1 else if n < 0 then -1 else 0)
-    | _ -> failwith "sign: expected int")
-
-let builtin_incr =
-  V_builtin ("incr", fun v ->
-    match v with
-    | V_int n -> V_int (n + 1)
-    | _ -> failwith "incr: expected int")
-
-let builtin_decr =
-  V_builtin ("decr", fun v ->
-    match v with
-    | V_int n -> V_int (n - 1)
-    | _ -> failwith "decr: expected int")
-
-let builtin_square =
-  V_builtin ("square", fun v ->
-    match v with
-    | V_int n -> V_int (n * n)
-    | _ -> failwith "square: expected int")
-
-let builtin_cube =
-  V_builtin ("cube", fun v ->
-    match v with
-    | V_int n -> V_int (n * n * n)
-    | _ -> failwith "cube: expected int")
-
-let builtin_divmod =
-  V_builtin ("divmod", fun a_val ->
-    match a_val with
-    | V_int a ->
-      V_builtin ("divmod_partial", fun b_val ->
-        match b_val with
-        | V_int 0 ->
-          raise (Eval_error (Loc.dummy, "divmod: division by zero"))
-        | V_int b ->
-          V_tuple [V_int (a / b); V_int (a mod b)]
-        | _ -> failwith "divmod: 2nd arg expected int")
-    | _ -> failwith "divmod: 1st arg expected int")
-
-let builtin_sum_range =
-  V_builtin ("sum_range", fun lo_val ->
-    match lo_val with
-    | V_int lo ->
-      V_builtin ("sum_range_partial", fun hi_val ->
-        match hi_val with
-        | V_int hi ->
-          if lo > hi then V_int 0
-          else V_int ((hi - lo + 1) * (lo + hi) / 2)
-        | _ -> failwith "sum_range: 2nd arg expected int")
-    | _ -> failwith "sum_range: 1st arg expected int")
-
 let builtin_clamp =
   V_builtin ("clamp", fun lo_val ->
     match lo_val with
@@ -1163,44 +1108,6 @@ let builtin_gcd =
           V_int (euclid (abs x) (abs y))
         | _ -> failwith "gcd: 2nd arg expected int")
     | _ -> failwith "gcd: 1st arg expected int")
-
-let builtin_lcm =
-  V_builtin ("lcm", fun a ->
-    match a with
-    | V_int x ->
-      V_builtin ("lcm_partial", fun b ->
-        match b with
-        | V_int y ->
-          if x = 0 || y = 0 then V_int 0
-          else
-            let rec euclid a b =
-              if b = 0 then a
-              else euclid b (a mod b)
-            in
-            let g = euclid (abs x) (abs y) in
-            V_int (abs (x / g * y))
-        | _ -> failwith "lcm: 2nd arg expected int")
-    | _ -> failwith "lcm: 1st arg expected int")
-
-let builtin_pow =
-  V_builtin ("pow", fun base ->
-    match base with
-    | V_int b ->
-      V_builtin ("pow_partial", fun exp ->
-        match exp with
-        | V_int e when e < 0 ->
-          raise (Eval_error (Loc.dummy,
-            Printf.sprintf "pow: negative exponent %d" e))
-        | V_int e ->
-          (* iterative integer exponentiation *)
-          let rec loop acc base exp =
-            if exp = 0 then acc
-            else if exp mod 2 = 1 then loop (acc * base) (base * base) (exp / 2)
-            else loop acc (base * base) (exp / 2)
-          in
-          V_int (loop 1 b e)
-        | _ -> failwith "pow: 2nd arg expected int")
-    | _ -> failwith "pow: 1st arg expected int")
 
 let builtin_fail =
   V_builtin ("fail", fun v ->
@@ -1752,18 +1659,6 @@ let builtin_iter_n =
         done;
         V_unit)
     | _ -> failwith "iter_n: 1st arg expected int")
-
-let builtin_assert =
-  V_builtin ("assert", fun cond ->
-    match cond with
-    | V_bool b ->
-      V_builtin ("assert_partial", fun msg ->
-        match msg with
-        | V_str m ->
-          if b then V_unit
-          else raise (Eval_error (Loc.dummy, "assertion failed: " ^ m))
-        | _ -> failwith "assert: 2nd arg expected str")
-    | _ -> failwith "assert: 1st arg expected bool")
 
 let builtin_str_eq =
   V_builtin ("str_eq", fun a_val ->
@@ -2763,18 +2658,8 @@ let initial_env : env =
     ("abs", ref builtin_abs);
     ("even", ref builtin_even);
     ("odd", ref builtin_odd);
-    ("sign", ref builtin_sign);
-    ("incr", ref builtin_incr);
-    ("decr", ref builtin_decr);
-    ("sum_range", ref builtin_sum_range);
-    ("square", ref builtin_square);
-    ("cube", ref builtin_cube);
-    ("divmod", ref builtin_divmod);
     ("clamp", ref builtin_clamp);
-    ("pow", ref builtin_pow);
     ("gcd", ref builtin_gcd);
-    ("lcm", ref builtin_lcm);
-    ("assert", ref builtin_assert);
     ("show", ref builtin_show);
     ("to_json", ref builtin_to_json);
     ("of_json", ref builtin_of_json);
