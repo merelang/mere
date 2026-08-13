@@ -32,3 +32,118 @@ jobs:
 
       - name: Run tests
         run: opam exec -- dune runtest
+
+  # The gates that are not `dune runtest`: cross-backend parity, the differential
+  # checks against other people's implementations (node's URL and TextDecoder,
+  # QEMU), self-hosting, and the language server.
+  #
+  # These live in scripts/ and were run by hand until now, which is the same
+  # exposure as a measurement that only exists in /tmp — a gate nobody runs is a
+  # gate that is not protecting anything. str_replace was returning a buffer with
+  # no length header on the C backend for as long as it had existed, and what
+  # found it was scripts/parity.sh: exactly one of these.
+  #
+  # One step per harness, so a red build names the gate rather than a log line.
+  # Every script here exits non-zero on a real failure and exits zero with a
+  # printed reason when a dependency is absent, so a green job means each step
+  # either passed or said why it did not run.
+  #
+  # Linux only, and that is deliberate rather than a shortcut: development
+  # happens on macOS, where these are run before every commit, so the two
+  # platforms end up covered between CI and the working copy.
+  gates:
+    name: Gates (cross-backend and differential)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.4"
+
+      # clang, because the LLVM backend's output is LLVM IR and gcc cannot
+      # compile it — parity.sh would report MISCOMPILE for every case rather
+      # than skipping. wabt for the wasm backend.
+      - name: Install harness tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang wabt
+
+      # Best effort: qemu_virt.sh is the differential check against an emulator
+      # nobody here wrote, and it skips cleanly when the binary is absent. It is
+      # installed separately and allowed to fail so that a package rename
+      # degrades this gate to a skip instead of turning the build red.
+      - name: Install qemu-system-riscv32 (optional gate)
+        continue-on-error: true
+        run: sudo apt-get install -y qemu-system-misc
+
+      - name: Install dependencies
+        run: opam install . --deps-only --with-test
+
+      - name: Build
+        run: opam exec -- dune build
+
+      # Asserted rather than assumed: a missing tool would otherwise turn into
+      # either a silent skip (a gate that passes without running) or a storm of
+      # MISCOMPILE rows. wat2wasm's flags are checked because parity.sh treats a
+      # rejected flag as a failure, not as an absent toolchain.
+      - name: Toolchain preflight
+        run: |
+          set -e
+          for t in clang node python3 wat2wasm wasm-objdump; do
+            command -v "$t" >/dev/null 2>&1 || { echo "required tool missing: $t"; exit 1; }
+          done
+          for f in --enable-tail-call --enable-threads; do
+            wat2wasm --help 2>&1 | grep -q -- "$f" \
+              || { echo "wat2wasm does not support $f"; exit 1; }
+          done
+          clang --version | head -1
+          node --version
+          wat2wasm --version
+          command -v qemu-system-riscv32 >/dev/null 2>&1 \
+            && qemu-system-riscv32 --version | head -1 \
+            || echo "qemu-system-riscv32 absent: qemu_virt will skip"
+          echo "lldb is deliberately not installed: debug_info will skip"
+
+      - name: parity (interp / C / LLVM / wasm agree)
+        run: sh scripts/parity.sh
+
+      - name: ctest (C backend end to end)
+        run: sh scripts/ctest.sh
+
+      - name: url_parity (vs node's URL)
+        run: sh scripts/url_parity.sh
+
+      - name: encoding_parity (vs node's TextDecoder)
+        run: sh scripts/encoding_parity.sh
+
+      - name: host_matrix (every builtin on every backend)
+        run: sh scripts/host_matrix.sh
+
+      - name: selfhost_check
+        run: sh scripts/selfhost_check.sh
+
+      - name: lsp_smoke
+        run: sh scripts/lsp_smoke.sh
+
+      - name: socket_parity
+        run: sh scripts/socket_parity.sh
+
+      - name: tcp_read_codes
+        run: sh scripts/tcp_read_codes.sh
+
+      - name: infer_scaling (type inference stays linear)
+        run: sh scripts/infer_scaling.sh
+
+      - name: wasm_sourcemap
+        run: sh scripts/wasm_sourcemap.sh
+
+      # Skips without lldb, and the log says so. Kept as a step so the gap is
+      # visible in the run rather than only in this comment.
+      - name: debug_info
+        run: sh scripts/debug_info.sh
+
+      - name: qemu_virt (vs an emulator nobody here wrote)
+        run: sh scripts/qemu_virt.sh
