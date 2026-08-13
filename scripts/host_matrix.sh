@@ -12,10 +12,16 @@
 # So this one is produced by asking. For each builtin, a one-line program that uses it
 # is emitted for each backend and the outcome recorded:
 #
-#   yes       the backend emitted code
+#   yes       the backend emitted code, and for C the emitted C also compiles
+#   nocompile the backend emitted code and a C compiler then rejected it
 #   refused   the backend said it has no lowering — loud, and fine
 #   MISSING   "unbound variable" — the compiler blamed the user for a backend hole
 #   error     anything else (shown, so it can be looked at)
+#
+# `nocompile` exists because `floor`, `ceil` and `round` sat in this table's blind
+# spot for as long as they had been in the environment: emission SUCCEEDED and the
+# C compiler then failed on an undeclared identifier. A matrix that only asks "did
+# it emit" calls that `yes`.
 #
 # `MISSING` is the one that matters: it is the failure mode Mere's loud-failure rule
 # exists to prevent, and it is invisible until somebody writes that program.
@@ -44,17 +50,23 @@ if [ ! -x "$MERE" ]; then
   exit 1
 fi
 
+CC="${CC:-clang}"; command -v "$CC" >/dev/null 2>&1 || CC=cc
+have_cc=0; command -v "$CC" >/dev/null 2>&1 && have_cc=1
+
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-# name|a program that uses it. One line each, and each has to type-check: the point is
-# to reach codegen, so anything the typer rejects would measure nothing.
-cat > "$TMP/cases" <<'CASES'
-print|let _ = print "x"; 0
-print_no_nl|let _ = print_no_nl "x"; 0
-print_err|let _ = print_err "x"; 0
-print_int|let _ = print_int 1; 0
-print_bool|let _ = print_bool true; 0
+# The set of builtins to probe used to be a hand-written list, which is how fifteen
+# names that no compiled backend implements went unnoticed: the harness whose job is
+# to ask which backend has which builtin was asking about a set somebody remembered.
+#
+# Now the set comes from the compiler too. `mere --dump-builtins` prints every name in
+# the typer's initial environment with its type, and a probe program is synthesized
+# from the type — one literal per argument. What cannot be synthesized falls back to
+# the hand-written overrides below, and what is neither is COUNTED and named, so the
+# part of the environment this harness cannot see is a number rather than a silence.
+
+cat > "$TMP/overrides" <<'CASES'
 print_bytes|let _ = print_bytes (bytes_of_str "x"); 0
 read_file|let s = read_file "/dev/null"; str_len s
 write_file|let _ = write_file "/dev/null" "x"; 0
@@ -62,27 +74,10 @@ read_file_bytes|let v = read_file_bytes "/dev/null"; vec_len v
 write_file_bytes|let _ = write_file_bytes "/dev/null" (vec_new ()); 0
 read_bytes|let b = read_bytes "/dev/null"; bytes_len b
 write_bytes|let _ = write_bytes "/dev/null" (bytes_of_str "x"); 0
-read_line|let s = read_line (); str_len s
-read_stdin|let s = read_stdin (); str_len s
 read_lines|let xs = read_lines "/dev/null"; 0
-read_key|let k = read_key (); k
-tty_raw|let _ = tty_raw (); 0
-tty_restore|let _ = tty_restore (); 0
-args|let xs = args (); 0
-run|let n = run "true"; n
-env_var|let e = env_var "HOME"; 0
-exit|let _ = print "x"; let _ = exit 0; 0
-file_exists|let b = file_exists "/dev/null"; if b then 1 else 0
-file_mtime|let t = file_mtime "/dev/null"; 0
 file_size|let n = file_size "/dev/null"; n
 list_dir|let xs = list_dir "/tmp"; 0
 mkdir_p|let _ = mkdir_p "/tmp/mere_probe"; 0
-sleep_ms|let _ = sleep_ms 1; 0
-time|let t = time (); 0
-random_int|let n = random_int 10; n
-random_float|let f = random_float (); 0
-str_of_float|let s = str_of_float 1.5; str_len s
-float_of_str|let f = float_of_str "1.5"; 0
 spawn|let _ = spawn (fn () -> ()); 0
 join|let h = spawn (fn () -> ()); let _ = join h; 0
 detach|let h = spawn (fn () -> ()); let _ = detach h; 0
@@ -92,19 +87,122 @@ channel_recv|let c = channel_new (); let _ = channel_send c 1; let v = channel_r
 channel_close|let c = channel_new (); let _ = channel_send c 1; let _ = channel_close c; 0
 channel_recv_opt|let c = channel_new (); let _ = channel_send c 1; let _ = channel_recv_opt c; 0
 channel_recv_timeout|let c = channel_new (); let _ = channel_send c 1; let _ = channel_recv_timeout c 10; 0
-par_map|let xs = par_map (fn (x: int) -> x + 1) (Cons (1, Nil)); 0
 file_open|let f = file_open "/dev/null"; let _ = file_close f; 0
 file_read_line|let f = file_open "/dev/null"; let s = file_read_line f; 0
 file_openrw|let f = file_openrw "/tmp/mere_probe.bin"; let _ = file_close f; 0
-file_fsync|let f = file_openrw "/tmp/mere_probe.bin"; let _ = file_fsync f; 0
 file_pread|let f = file_open "/dev/null"; let v = file_pread f 0 4; vec_len v
 file_pwrite|let f = file_openrw "/tmp/mere_probe.bin"; let n = file_pwrite f 0 (vec_new ()); n
 file_pwrite_bytes|let f = file_openrw "/tmp/mere_probe.bin"; let n = file_pwrite_bytes f 0 (bytes_of_str "x"); n
+map_new|let m = map_new (); let _ = map_set m "k" 1; 0
+owned_vec_new|let v = owned_vec_new (); let _ = owned_vec_push v 1; 0
 CASES
 
+"$MERE" --dump-builtins > "$TMP/builtins.tsv"
+
+OVERRIDES="$TMP/overrides" BUILTINS="$TMP/builtins.tsv" CASES_OUT="$TMP/cases" \
+python3 - <<'PYGEN' 2> "$TMP/gen.log"
+import os, sys
+
+# pp_ty prints fully parenthesised, so splitting at the first top-level `->` peels
+# one argument at a time.
+def split_arrow(t):
+    t = t.strip()
+    while t.startswith("(") and t.endswith(")"):
+        depth = 0
+        for i, ch in enumerate(t):
+            if ch == "(": depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and i != len(t) - 1: return None if False else _split_top(t)
+        t = t[1:-1].strip()
+    return _split_top(t)
+
+def _split_top(t):
+    depth = 0
+    i = 0
+    while i < len(t):
+        c = t[i]
+        if c == "(": depth += 1
+        elif c == ")": depth -= 1
+        elif depth == 0 and t.startswith("->", i):
+            return (t[:i].strip(), t[i+2:].strip())
+        i += 1
+    return None
+
+LITERAL = {"int": "1", "float": "1.0", "str": '"x"', "bool": "true", "unit": "()"}
+
+def synth(name, ty):
+    args, cur = [], ty
+    while True:
+        cur_s = cur.strip()
+        while cur_s.startswith("(") and cur_s.endswith(")") and _split_top(cur_s[1:-1]) is not None:
+            cur_s = cur_s[1:-1].strip()
+        parts = _split_top(cur_s)
+        if parts is None: break
+        a, rest = parts
+        a = a.strip()
+        while a.startswith("(") and a.endswith(")"): a = a[1:-1].strip()
+        if a not in LITERAL: return None, "argument of type " + a
+        args.append(LITERAL[a])
+        cur = rest
+    if not args: return "let _ = " + name + "; 0", None
+    return "let _ = " + name + " " + " ".join(args) + "; 0", None
+
+overrides = {}
+with open(os.environ["OVERRIDES"]) as f:
+    for line in f:
+        if "|" in line: overrides[line.split("|", 1)[0]] = line.rstrip("\n").split("|", 1)[1]
+
+rows, skipped = [], []
+with open(os.environ["BUILTINS"]) as f:
+    for line in f:
+        if "\t" not in line: continue
+        name, ty = line.rstrip("\n").split("\t", 1)
+        if name in overrides:
+            rows.append((name, overrides[name])); continue
+        prog, why = synth(name, ty)
+        if prog is None: skipped.append((name, why))
+        else: rows.append((name, prog))
+
+rows.sort()
+with open(os.environ["CASES_OUT"], "w") as out:
+    for name, prog in rows: out.write(name + "|" + prog + "\n")
+
+sys.stderr.write("%d in the environment, %d probed (%d by override), %d not synthesizable\n"
+                 % (len(rows) + len(skipped), len(rows), len(overrides), len(skipped)))
+for name, why in sorted(skipped):
+    sys.stderr.write("    %-22s %s\n" % (name, why))
+PYGEN
+gen_summary=$(head -1 "$TMP/gen.log")
+
+# A synthesized program still has to type-check — the point is to reach codegen, and
+# anything the typer rejects would measure nothing. Dropped ones are counted, not
+# hidden.
+: > "$TMP/cases_ok"
+dropped=0
+while IFS='|' read -r name prog; do
+  [ -z "$name" ] && continue
+  printf '%s\n' "$prog" > "$TMP/tc.mere"
+  if "$MERE" -t "$TMP/tc.mere" >/dev/null 2>&1; then
+    printf '%s|%s\n' "$name" "$prog" >> "$TMP/cases_ok"
+  else
+    dropped=$((dropped + 1))
+    printf '%s\n' "$name" >> "$TMP/dropped"
+  fi
+done < "$TMP/cases"
+mv "$TMP/cases_ok" "$TMP/cases"
+
 classify() {  # classify <flag> <file>
-  if "$MERE" "$1" "$2" >/dev/null 2>"$TMP/err"; then
-    echo yes
+  if "$MERE" "$1" "$2" > "$TMP/emitted" 2>"$TMP/err"; then
+    # Emitting is not the same as working. For C the emitted source is handed to a
+    # compiler, which is where an undeclared identifier for a builtin nobody lowered
+    # actually shows up.
+    if [ "$1" = "-c" ] && [ "$have_cc" = 1 ] \
+       && ! "$CC" -fsyntax-only -w -x c "$TMP/emitted" 2>/dev/null; then
+      echo nocompile
+    else
+      echo yes
+    fi
   elif grep -q 'unbound variable' "$TMP/err"; then
     echo MISSING
   elif grep -qE 'no (LLVM|Wasm) lowering|unsupported' "$TMP/err"; then
@@ -144,7 +242,10 @@ errors=$(grep -c '^| `.*| error' "$TMP/matrix.md" || true)
 if [ "$UPDATE" = 1 ]; then
   cp "$TMP/matrix.md" "$OUT"
   echo "host_matrix: wrote $OUT"
+  echo "             $gen_summary"
   [ "$missing" != 0 ] && echo "host_matrix: $missing row(s) still say MISSING — those are backend holes reported as user typos"
+  nc=$(grep -c '^| `.*nocompile' "$OUT" || true)
+  [ "$nc" != 0 ] && echo "host_matrix: $nc row(s) say nocompile — emitted and then rejected by the C compiler"
   exit 0
 fi
 
@@ -160,7 +261,11 @@ if diff -u "$OUT" "$TMP/matrix.md" > "$TMP/diff"; then
   # had in fact classified every one of them. The diff above is the real check
   # and it was passing; it was the summary line that lied, which is worse than
   # it sounds: "0 checked" is exactly what a gate that did not run looks like.
-  echo "host_matrix: ok  ($(grep -c '^| `' "$OUT") builtins, $missing MISSING, $errors error)"
+  nocompile=$(grep -c '^| `.*nocompile' "$OUT" || true)
+  echo "host_matrix: ok  ($(grep -c '^| `' "$OUT") builtins, $missing MISSING, $nocompile nocompile, $errors error)"
+  echo "             $gen_summary"
+  [ "$dropped" != 0 ] && echo "             $dropped synthesized probe(s) did not type-check, dropped"
+  true
   exit 0
 fi
 
