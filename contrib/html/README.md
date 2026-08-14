@@ -24,10 +24,10 @@ somebody's idea of what to check, but the cases the people who wrote the standar
 thought were worth writing down.
 
 ```
-sh scripts/html_tokenizer_conformance.sh     # 1,704 cases
+sh scripts/html_tokenizer_conformance.sh     # 1,900 cases
 ```
 
-**1,598 of 1,704 pass, and the number is pinned exactly rather than as a floor.** A
+**1,807 of 1,900 pass, and the number is pinned exactly rather than as a floor.** A
 floor lets a regression hide behind a new pass; a number that has to be edited when
 it moves is a number somebody looks at. The harness prints the first ten failures
 in full, so what is missing is visible in the output and not only in this file.
@@ -41,12 +41,18 @@ network fails for reasons that have nothing to do with the code).
 | | cases | what it needs |
 |---|--:|---|
 | character references | 53 | the named entity table (2,231 entries) plus the numeric forms — the same "how do you carry a large table" question `contrib/unicode` answered |
-| non-Data initial states | 111 | RCDATA / RAWTEXT / script data / PLAINTEXT: `tokenize` takes no starting state, and the tree builder is what switches it |
 | the remaining 76 | 76 | individual spec details, named one by one in the harness output |
 
-U+0000 replacement and newline preprocessing are **implemented** (v0.1.251). Worth
-knowing about the first: the harness runs on the interpreter, because a Mere `str`
-cannot carry a NUL through the compiled backends.
+Implemented since the first slice: U+0000 replacement, newline preprocessing, and the
+non-Data initial states (`Html.tokenize_in` takes the starting state and the tag that
+opened the element — the tree builder is what knows which). Worth knowing about the
+first: the harness runs on the interpreter, because a Mere `str` cannot carry a NUL
+through the compiled backends.
+
+The case count is larger than the number of entries in the files because **a case
+listed under several initial states is several cases** — the suite writes it once and
+means it for each, and running only the first would report a number smaller than what
+was checked.
 
 ## Why it is written this way
 

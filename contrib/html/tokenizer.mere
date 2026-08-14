@@ -75,7 +75,13 @@ module Html {
   // `acc` is the token list in reverse. Character tokens are coalesced as they are
   // pushed: the standard emits one per character and every consumer immediately
   // joins them, and the test suite's expected output is joined too.
-  let tokenize = fn (src0: str) ->
+  // The tokenizer's starting state is not always Data: an element whose content
+  // model is text (`title`, `textarea`, `style`, `script`, ...) puts it in one of
+  // the text-like states, and only the tag that opened it can end it. The tree
+  // builder is what knows which, so it is a parameter here rather than a guess.
+  //
+  // `state` is the standard's name for it; `last` is that opening tag.
+  let tokenize_in = fn (state: str) -> fn (last: str) -> fn (src0: str) ->
     let src = _newlines src0 in
     let n = str_len src in
     let at = fn (i: int) -> if i >= n then "" else char_at src i in
@@ -391,6 +397,30 @@ module Html {
 
     // Anything the DOCTYPE grammar does not accept: skip to ">" and mark it as a
     // doctype that puts the document in quirks mode.
+    // RCDATA, RAWTEXT and script data share one shape: everything is character
+    // data until `</` followed by the tag that opened the element and then a
+    // space, a slash or `>`. Anything else after `</` is character data too — which
+    // is why `</` inside a script is harmless and `</script` is not.
+    and text_like = fn (i: int) -> fn (acc: token list) ->
+      if i >= n then list_rev acc
+      else
+        let c = at i in
+        if c != "<" then text_like (i + 1) (push_char acc c)
+        else if at (i + 1) != "/" then text_like (i + 1) (push_char acc c)
+        else
+          let ln = str_len last in
+          let after = at (i + 2 + ln) in
+          if ln > 0 && str_len src >= i + 2 + ln
+             && to_lower (substring src (i + 2) (i + 2 + ln)) == last
+             && (_is_space after || after == "/" || after == ">")
+          then end_tag_name (i + 2 + ln) acc last
+          else text_like (i + 1) (push_char acc c)
+
+    // PLAINTEXT never ends: everything from here is character data.
+    and plaintext = fn (i: int) -> fn (acc: token list) ->
+      if i >= n then list_rev acc
+      else plaintext (i + 1) (push_char acc (at i))
+
     and bogus_doctype = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
                         fn (pub: str) -> fn (has_pub: bool) ->
                         fn (sys: str) -> fn (has_sys: bool) ->
@@ -403,7 +433,12 @@ module Html {
         data (i + 1) (Cons (TDoctype (name, pub, has_pub, sys, has_sys, false), acc))
       else bogus_doctype (i + 1) acc name pub has_pub sys has_sys
     in
-    data 0 Nil;
+    if state == "PLAINTEXT state" then plaintext 0 Nil
+    else if state == "RCDATA state" || state == "RAWTEXT state"
+            || state == "Script data state" then text_like 0 Nil
+    else data 0 Nil;
+
+  let tokenize = fn (src: str) -> tokenize_in "Data state" "" src;
 
   // One line per token, in the shape the conformance harness compares. Kept next
   // to the tokenizer because it is part of what the gate reads, not a debug aid.

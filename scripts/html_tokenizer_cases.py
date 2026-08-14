@@ -109,21 +109,22 @@ def collect(data_dir):
         with open(os.path.join(data_dir, name), encoding="utf-8") as fh:
             doc = json.load(fh)
         for t in doc.get("tests", []):
-            skip = None
-            states = t.get("initialStates") or ["Data state"]
-            if states != ["Data state"]:
-                skip = "initial-state"
-            elif t.get("doubleEscaped"):
-                skip = "double-escaped"
-            cases.append(
-                {
-                    "file": name,
-                    "desc": t.get("description", ""),
-                    "input": t.get("input", ""),
-                    "output": t.get("output", []),
-                    "skip": skip,
-                }
-            )
+            skip = "double-escaped" if t.get("doubleEscaped") else None
+            # A case listed under several initial states is several cases: the
+            # suite writes it once and means it for each, and running only the
+            # first would report a number smaller than what was checked.
+            for st in (t.get("initialStates") or ["Data state"]):
+                cases.append(
+                    {
+                        "file": name,
+                        "desc": "%s [%s]" % (t.get("description", ""), st),
+                        "state": st,
+                        "last": t.get("lastStartTag", ""),
+                        "input": t.get("input", ""),
+                        "output": t.get("output", []),
+                        "skip": skip,
+                    }
+                )
     return cases
 
 
@@ -148,7 +149,7 @@ def main_generate(data_dir, cases_path, expected_path, meta_path):
         for i, c in enumerate(cases):
             # Every case gets a line so the indices line up; a skipped one is run
             # anyway and its result ignored, which keeps the two files in step.
-            cf.write(esc_input(c["input"]) + "\n")
+            cf.write("%s\t%s\t%s\n" % (c["state"], c["last"], esc_input(c["input"])))
             ef.write("##%d\n%s\n" % (i, render_expected(c["output"])))
             reason = c["skip"] or ("entities" if has_entity(c) else "")
             mf.write("%s\t%s\t%s\n" % (reason, c["file"], c["desc"]))

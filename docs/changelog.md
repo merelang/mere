@@ -4,6 +4,28 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.252 — 2026-08-14
+
+_The tokenizer's other starting states: 1,598 of 1,704 becomes 1,807 of 1,900._
+
+**`Html.tokenize_in` takes the state to start in and the tag that opened the
+element.** An element whose content model is text — `title`, `textarea`, `style`,
+`script` — puts the tokenizer in RCDATA, RAWTEXT or script data, and **only the tag
+that opened it can end it**. That is why the starting state is a parameter and not a
+guess: the tree builder is what knows which element it is inside, and a tokenizer
+that guessed would be wrong exactly where `</` appears inside a script.
+
+The three text-like states share one shape and one implementation: character data
+until `</` plus the opening tag's name plus a space, a slash or `>`. PLAINTEXT is
+the degenerate case that never ends.
+
+**And the case count went up, which is the point.** A case listed under several
+initial states is several cases — the suite writes it once and means it for each.
+Running only the first reported a number smaller than what was being checked, so the
+harness expands them: 1,704 entries are 1,900 cases.
+
+---
+
 ## v0.1.251 — 2026-08-14
 
 _Three more of the tokenizer's rules: 1,505 of 1,704 becomes 1,598. Sixty-two of
