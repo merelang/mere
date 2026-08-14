@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.251 — 2026-08-14
+
+_Three more of the tokenizer's rules: 1,505 of 1,704 becomes 1,598. Sixty-two of
+those came from one line._
+
+**Newline preprocessing** — CRLF and a lone CR both become LF before the machine
+sees them. The standard puts this in a preprocessing step rather than in the states
+for the reason it shows here: otherwise every state has to say it.
+
+**U+0000 becomes U+FFFD inside markup** — names, attribute values, comments,
+doctypes. It is a parse error and the character is replaced rather than dropped,
+because dropping it changes how many characters a later consumer counts.
+
+**And the one that was worth sixty-two cases: the bogus-doctype state was throwing
+away what had already been parsed.** `<!DOCTYPE a PUBLIC""` followed by junk has a
+public identifier that is *present and empty*; discarding the state on the way into
+the recovery path reported it as *missing*, which is a different token. Recovery
+paths keep what they have — that is what makes them recovery rather than restart.
+
+---
+
 ## v0.1.250 — 2026-08-14
 
 _An HTML tokenizer, measured against the standard's own suite from the first run:
