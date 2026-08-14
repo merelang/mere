@@ -98,7 +98,7 @@ const env = Object.assign({
   time: () => Date.now() / 1000,
   mere_spawn: stub, mere_join: stub,
   __lang_str_of_float: stub, __lang_float_of_str: stub,
-  __lang_sin: Math.sin, __lang_cos: Math.cos, __lang_tan: Math.tan,
+  __lang_sin: Math.sin, __lang_cos: Math.cos, __lang_tan: Math.tan, __lang_exp: Math.exp, __lang_log: Math.log,
   __lang_f_pow: Math.pow, __lang_atan2: Math.atan2,
 }, makeChannelEnv(() => memory.buffer, () => { throw new Error('no alloc in spawned worker'); }));
 (async () => {
@@ -264,19 +264,33 @@ const wasmPath = process.argv[2];
       else if (f === -Infinity) s = "-inf";
       else {
         for (let p = 12; ; p++) {
-          // %.{p}g equivalent: p significant digits, strip trailing zeros
-          s = f.toPrecision(p);
-          if (s.includes('e') || s.includes('E')) {
-            // 1.23000000000e+10 -> 1.23e+10
-            s = s.replace(/(\.\d*?)0+(e[+-]?\d+)/i, '$1$2').replace(/\.(e[+-]?\d+)/i, '$1');
-          } else if (s.includes('.')) {
-            s = s.replace(/\.?0+$/, '');
-            if (s === '' || s === '-') s = '0';
+          // C's %g, which is what the other three backends print through: with
+          // P significant digits and X the decimal exponent, use %e when
+          // X < -4 or X >= P and %f otherwise, then strip trailing zeros.
+          // `toPrecision` is NOT that rule — it stays decimal down to 1e-7 — so
+          // exp -10 printed as 0.00004539992976248485 here and as
+          // 4.5399929762484854e-05 on the other three. The exponent comes from
+          // toExponential rather than log10, which is off by one at a power of
+          // ten.
+          const es = f.toExponential(p - 1);
+          const x = parseInt(es.slice(es.indexOf("e") + 1), 10);
+          if (x < -4 || x >= p) {
+            let m = es.slice(0, es.indexOf("e"));
+            if (m.includes(".")) m = m.replace(/0+$/, "").replace(/\.$/, "");
+            const e = es.slice(es.indexOf("e") + 1);
+            const sign = e[0] === "-" ? "-" : "+";
+            // C pads the exponent to at least two digits; JS does not.
+            const digits = e.replace(/^[+-]/, "").padStart(2, "0");
+            s = m + "e" + sign + digits;
+          } else {
+            s = f.toFixed(Math.max(0, p - 1 - x));
+            if (s.includes(".")) s = s.replace(/0+$/, "").replace(/\.$/, "");
+            if (s === "" || s === "-") s = "0";
           }
           if (p >= 17 || Number(s) === f) break;
         }
         // OCaml: append ".0" for plain integer-valued floats
-        if (!/[.eEni]/.test(s)) s += '.0';
+        if (!/[.eEni]/.test(s)) s += ".0";
       }
       return writeStr(s);
     },
@@ -296,7 +310,7 @@ const wasmPath = process.argv[2];
     // Phase 34.4: libm functions (anything not in Wasm intrinsics is provided by the host)
     __lang_sin: Math.sin,
     __lang_cos: Math.cos,
-    __lang_tan: Math.tan,
+    __lang_tan: Math.tan, __lang_exp: Math.exp, __lang_log: Math.log,
     __lang_f_pow: Math.pow,
     __lang_atan2: Math.atan2,
     // Phase 32.4 (C1 FFI): default impls for common libc functions that

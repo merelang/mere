@@ -1782,6 +1782,7 @@ let rec emit_expr (e : Ast.expr) : unit =
       || name = "str_of_float" || name = "float_of_str"
       || name = "f_neg" || name = "f_abs"
       || name = "sqrt" || name = "sin" || name = "cos" || name = "tan"
+      || name = "exp" || name = "log"
       || name = "print" || name = "fail"
       || name = "fst" || name = "snd"
     in
@@ -2752,7 +2753,8 @@ let rec emit_expr (e : Ast.expr) : unit =
     unsupported e.loc
       (fname ^ " is not supported in the wasm codegen subset")
   | Ast.App ({ node = Ast.Var fname; _ }, a_e)
-    when fname = "sin" || fname = "cos" || fname = "tan" ->
+    when fname = "sin" || fname = "cos" || fname = "tan"
+         || fname = "exp" || fname = "log" ->
     emit_expr a_e;
     emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8";
@@ -8631,6 +8633,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     "  (import \"env\" \"__lang_sin\" (func $__lang_sin (param f64) (result f64)))\n\
     \  (import \"env\" \"__lang_cos\" (func $__lang_cos (param f64) (result f64)))\n\
     \  (import \"env\" \"__lang_tan\" (func $__lang_tan (param f64) (result f64)))\n\
+    \  (import \"env\" \"__lang_exp\" (func $__lang_exp (param f64) (result f64)))\n\
+    \  (import \"env\" \"__lang_log\" (func $__lang_log (param f64) (result f64)))\n\
     \  (import \"env\" \"__lang_f_pow\" (func $__lang_f_pow (param f64) (param f64) (result f64)))\n\
     \  (import \"env\" \"__lang_atan2\" (func $__lang_atan2 (param f64) (param f64) (result f64)))\n"
   in
@@ -8652,6 +8656,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       ^ "  (func $__lang_sin (param f64) (result f64) unreachable)\n\
       \  (func $__lang_cos (param f64) (result f64) unreachable)\n\
       \  (func $__lang_tan (param f64) (result f64) unreachable)\n\
+      \  (func $__lang_exp (param f64) (result f64) unreachable)\n\
+      \  (func $__lang_log (param f64) (result f64) unreachable)\n\
       \  (func $__lang_f_pow (param f64) (param f64) (result f64) unreachable)\n\
       \  (func $__lang_atan2 (param f64) (param f64) (result f64) unreachable)\n"
       (* In component mode the env host imports ($<name>_h) are dropped, but

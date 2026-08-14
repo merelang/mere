@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.247" Version.v "0.1.247";
+  check "version is 0.1.248" Version.v "0.1.248";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -3629,7 +3629,7 @@ let () =
   check "user top-level main decl runs (renamed transparently)"
     (Pipeline.process "let main = fn (u: unit) -> 42;\nmain ()") "42";
   assert_contains "llvm: user main decl is renamed away from the entry"
-    (llvm "let main = fn (u: unit) -> 42;\nmain ()") "@__mere_user_main";
+    (llvm "let main = fn (u: unit) -> 42;\nmain ()") "@mu___mere_user_main";
   (* Q-012 step 3b-4d: LLVM backend spawn / join over pthreads. The emitted
      IR compiles with clang and runs the closure on a real OS thread
      (validated manually). *)
@@ -3713,23 +3713,23 @@ let () =
   (* --- LLVM IR codegen: function lifting + recursion (Phase 5.2) --- *)
   assert_contains "llvm: top-level fn lifted to @name"
     (llvm "let inc = fn x -> x + 1 in inc 5")
-    "define i64 @inc(i64 %x)";
+    "define i64 @mu_inc(i64 %x)";
   assert_contains "llvm: direct call site uses call instr"
     (llvm "let inc = fn x -> x + 1 in inc 5")
-    "call i64 @inc(i64 5)";
+    "call i64 @mu_inc(i64 5)";
   assert_contains "llvm: self-recursion compiles"
     (llvm "let rec fact = fn n -> if n <= 1 then 1 else n * fact (n - 1) in fact 5")
-    "call i64 @fact";
+    "call i64 @mu_fact";
   assert_contains "llvm: mutual recursion emits both definitions"
     (llvm "let rec is_even = fn n -> if n == 0 then true else is_odd (n - 1)\n\
            and is_odd = fn n -> if n == 0 then false else is_even (n - 1)\n\
            in is_even 4")
-    "define i1 @is_even(i64 %n)";
+    "define i1 @mu_is_even(i64 %n)";
   assert_contains "llvm: mutual recursion second fn"
     (llvm "let rec is_even = fn n -> if n == 0 then true else is_odd (n - 1)\n\
            and is_odd = fn n -> if n == 0 then false else is_even (n - 1)\n\
            in is_even 4")
-    "define i1 @is_odd(i64 %n)";
+    "define i1 @mu_is_odd(i64 %n)";
   assert_contains "llvm: param accessed via %name"
     (llvm "let inc = fn x -> x + 1 in inc 5")
     "add i64 %x, 1";
@@ -3763,10 +3763,10 @@ let () =
     "declare ptr @strstr(ptr, ptr)";
   assert_contains "llvm: str-returning fn signature"
     (llvm "let exclaim = fn s -> s ++ \"!\" in exclaim \"hi\"")
-    "define ptr @exclaim(ptr %s)";
+    "define ptr @mu_exclaim(ptr %s)";
   assert_contains "llvm: str arg passed as ptr"
     (llvm "let len = fn s -> str_len s in len \"hello\"")
-    "@len(ptr ";
+    "@mu_len(ptr ";
 
   (* --- LLVM IR codegen: tuple (Phase 5.4) ---
      Tuples lower to named struct types; literals build via insertvalue
@@ -3788,10 +3788,10 @@ let () =
     "%tuple_tuple_int_int_int = type { %tuple_int_int, i64 }";
   assert_contains "llvm: tuple-arg fn signature"
     (llvm "let sum_pair = fn p -> fst p + snd p in sum_pair (1, 2)")
-    "define i64 @sum_pair(%tuple_int_int %p)";
+    "define i64 @mu_sum_pair(%tuple_int_int %p)";
   assert_contains "llvm: tuple-returning fn signature"
     (llvm "let split = fn s -> (s, str_len s) in split \"hi\"")
-    "define %tuple_str_int @split(ptr %s)";
+    "define %tuple_str_int @mu_split(ptr %s)";
 
   (* --- LLVM IR codegen: record (Phase 5.5) ---
      Monomorphic records lower to named structs; literal builds via
@@ -3826,7 +3826,7 @@ let () =
     (llvm_with_decls
       "type CgLPt4 = { x: int, y: int };\n\
        let mk = fn n -> CgLPt4 { x = n, y = n + 1 } in (mk 5).x")
-    "define %CgLPt4 @mk(i64 %n)";
+    "define %CgLPt4 @mu_mk(i64 %n)";
 
   (* --- LLVM IR codegen: variant + match (Phase 5.6) ---
      Variants lower to `%V = type { i32 }` (nullary) or `%V = type { i32, T }`
@@ -3887,13 +3887,13 @@ let () =
     "%closure_int_int = type { ptr, ptr }";
   assert_contains "llvm: closure adapter emitted"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "define i64 @inc_closure_fn(ptr %env_unused, i64 %x)";
+    "define i64 @mu_inc_closure_fn(ptr %env_unused, i64 %x)";
   assert_contains "llvm: fn-as-value builds closure with adapter"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "insertvalue %closure_int_int undef, ptr null, 0";
   assert_contains "llvm: fn-as-value sets fn pointer"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "ptr @inc_closure_fn, 1";
+    "ptr @mu_inc_closure_fn, 1";
   assert_contains "llvm: indirect App extracts env + fn ptr"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "extractvalue %closure_int_int";
@@ -3902,7 +3902,7 @@ let () =
     "= call i32 ";
   assert_contains "llvm: HOF receives closure-typed param"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "define i64 @apply(%closure_int_int %f)";
+    "define i64 @mu_apply(%closure_int_int %f)";
 
   (* --- LLVM IR codegen: anonymous Fun + closure-with-captures (Phase 5.7-b) ---
      Inner `fn x -> ...` in expression position lifts to an env struct
@@ -9509,7 +9509,7 @@ let () =
          else scan (i + 1)
        in scan 0
      in
-     if has "@total = internal global" && has "store i32 " && has ", ptr @total" then "globalized"
+     if has "@mu_total = internal global" && has "store i32 " && has ", ptr @mu_total" then "globalized"
      else "not-globalized")
     "globalized";
   (* Phase 31.0: port str_compare to the 3 backends (align what was interp-only) *)
@@ -9642,10 +9642,10 @@ let () =
        "let is_alpha = fn (c: str) -> c == \"_\";\n\
         is_alpha \"_\"") in
      let has_user_fn =
-       let nlen = String.length ll and plen = String.length "@is_alpha(" in
+       let nlen = String.length ll and plen = String.length "@mu_is_alpha(" in
        let rec scan i =
          if i + plen > nlen then false
-         else if String.sub ll i plen = "@is_alpha(" then true
+         else if String.sub ll i plen = "@mu_is_alpha(" then true
          else scan (i + 1)
        in scan 0
      in
@@ -9864,7 +9864,7 @@ let () =
      in
      (* uniquify_toplevel_shadows renames the user's shadowing definition to
         `list_rev_into__v2`, emitted exactly once. *)
-     if has "define %closure_list_int_list_int @list_rev_into__v2(" = 1 then "ok"
+     if has "define %closure_list_int_list_int @mu_list_rev_into__v2(" = 1 then "ok"
      else "duplicate-or-missing")
     "ok";
 

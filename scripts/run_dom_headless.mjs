@@ -234,7 +234,7 @@ const makeStoreHost = async (wasmPath) => {
     write_file: stub,
     __lang_str_of_float: stub,
     __lang_float_of_str: () => 0.0,
-    __lang_sin: Math.sin, __lang_cos: Math.cos, __lang_tan: Math.tan,
+    __lang_sin: Math.sin, __lang_cos: Math.cos, __lang_tan: Math.tan, __lang_exp: Math.exp, __lang_log: Math.log,
     __lang_f_pow: Math.pow, __lang_atan2: Math.atan2,
     // The positioned file I/O the store is built on (v0.1.153). An OPFS
     // access handle offers exactly these five operations, which is why
@@ -330,7 +330,7 @@ const env = {
   __lang_float_of_str: () => 0.0,
   __lang_sin: Math.sin,
   __lang_cos: Math.cos,
-  __lang_tan: Math.tan,
+  __lang_tan: Math.tan, __lang_exp: Math.exp, __lang_log: Math.log,
   __lang_f_pow: Math.pow,
   __lang_atan2: Math.atan2,
 };

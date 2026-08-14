@@ -1,0 +1,73 @@
+// `exp` and `log`, held to one answer on every backend — as properties, not as
+// digits.
+//
+// The two were the last of the family that started with `floor` / `ceil` / `round`
+// in v0.1.243: names in the typer's environment with a type, so a program using
+// them type-checked everywhere and then `mere -c` emitted a call to a symbol the C
+// compiler had never heard of while LLVM and Wasm said "unbound variable".
+//
+// The shape of this file is the interesting part. These go through four routes —
+// the interpreter's OCaml `exp`, C's libm, LLVM's `@llvm.exp.f64`, and Wasm's host
+// import to JavaScript's `Math.exp` — and a transcendental function is **not
+// required to be correctly rounded by anybody**. Measured: `exp -10` is
+// 4.5399929762484854e-05 on three of them and 4.539992976248485e-05 through
+// JavaScript. That is not a bug in any of the four, and a gate that compared the
+// digits would be reporting the C library's build options.
+//
+// So the exact prints below are only the points whose answers are exact in binary
+// floating point, and everything else is asserted as an identity within a
+// tolerance. That still catches an implementation that is wrong rather than
+// last-bit different — an `exp` that returned its argument, or a `log` wired to
+// log10, fails every line here.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+let close = fn (a: float) -> fn (b: float) -> f_abs (a - b) < 0.000000001;
+let near = fn (label: str) -> fn (a: float) -> fn (b: float) ->
+  print (label ++ ": " ++ show (close a b));
+
+let _ = print "=== the points that are exact ===";
+let _ = print ("exp 0 = " ++ str_of_float (exp 0.0));
+let _ = print ("log 1 = " ++ str_of_float (log 1.0));
+let _ = print ("exp (log 1) = " ++ str_of_float (exp (log 1.0)));
+let _ = print ("log (exp 0) = " ++ str_of_float (log (exp 0.0)));
+
+let _ = print "=== each undoes the other ===";
+let _ = near "log (exp 3.5) = 3.5" (log (exp 3.5)) 3.5;
+let _ = near "exp (log 7.25) = 7.25" (exp (log 7.25)) 7.25;
+let _ = near "log (exp -2.75) = -2.75" (log (exp (0.0 - 2.75))) (0.0 - 2.75);
+let _ = near "exp (log 0.125) = 0.125" (exp (log 0.125)) 0.125;
+let _ = near "log (exp 100) = 100" (log (exp 100.0)) 100.0;
+
+let _ = print "=== the values with names ===";
+let _ = near "exp 1 = e" (exp 1.0) e;
+let _ = near "log e = 1" (log e) 1.0;
+let _ = near "exp -1 = 1/e" (exp (0.0 - 1.0)) (1.0 / e);
+let _ = near "log 2 = 0.693147..." (log 2.0) 0.6931471805599453;
+let _ = near "log 10 = 2.302585..." (log 10.0) 2.302585092994046;
+let _ = near "exp 2 = 7.389056..." (exp 2.0) 7.38905609893065;
+
+let _ = print "=== the laws that tie them together ===";
+// log (a*b) = log a + log b, and exp (a+b) = exp a * exp b.
+let _ = near "log 6 = log 2 + log 3" (log 6.0) (log 2.0 + log 3.0);
+let _ = near "exp 5 = exp 2 * exp 3" (exp 5.0) (exp 2.0 * exp 3.0);
+let _ = near "log (1/4) = -log 4" (log 0.25) (0.0 - log 4.0);
+// x^y through exp/log against f_pow and sqrt, which are different entry points.
+let _ = near "exp (2 log 3) = f_pow 3 2" (exp (2.0 * log 3.0)) (f_pow 3.0 2.0);
+let _ = near "exp (0.5 log 2) = sqrt 2" (exp (0.5 * log 2.0)) (sqrt 2.0);
+let _ = near "log (sqrt 2) = 0.5 log 2" (log (sqrt 2.0)) (0.5 * log 2.0);
+
+let _ = print "=== a wrong implementation would not survive these ===";
+// `log` wired to log10 gives 0.301... here; `exp` returning its argument gives 2.
+let _ = near "log 2 is natural, not base 10" (log 2.0) 0.6931471805599453;
+let _ = near "exp 2 is not 2" (exp 2.0) 7.38905609893065;
+let _ = print ("log 2 < log 3: " ++ show (log 2.0 < log 3.0));
+let _ = print ("exp -1 < 1: " ++ show (exp (0.0 - 1.0) < 1.0));
+let _ = print ("exp 10 > 20000: " ++ show (exp 10.0 > 20000.0));
+let _ = print ("log 0.5 < 0: " ++ show (log 0.5 < 0.0));
+
+let _ = print "=== and the magnitudes still line up, to a tolerance ===";
+let _ = near "exp 10 = 22026.4657..." (exp 10.0) 22026.465794806718;
+let _ = near "exp -10 = 0.0000453999..." (exp (0.0 - 10.0)) 0.000045399929762484854;
+let _ = near "log 1000000 = 13.8155..." (log 1000000.0) 13.815510557964274;
+0
