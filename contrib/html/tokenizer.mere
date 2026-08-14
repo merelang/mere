@@ -20,6 +20,8 @@
 // check, but the cases the people who wrote the specification thought were worth
 // writing down.
 
+import "entities.mere";
+
 // A tag's attributes, in source order. Duplicates are dropped, keeping the first,
 // which is what the standard says.
 type attr = { name: str, value: str };
@@ -81,6 +83,48 @@ module Html {
   // builder is what knows which, so it is a parameter here rather than a guess.
   //
   // `state` is the standard's name for it; `last` is that opening tag.
+  // A character reference, as text and how many characters it took, or ("", 0)
+  // when what follows the `&` is not one. `in_attr` is the one place the rules
+  // differ: inside an attribute value a match that did not end in `;` is left
+  // alone when the next character is `=` or alphanumeric, because `?a&not=b` is a
+  // query string far more often than it is a negation sign.
+  let charref = fn (src: str) -> fn (i: int) -> fn (in_attr: bool) ->
+    let n = str_len src in
+    let at = fn (k: int) -> if k >= n then "" else char_at src k in
+    let is_alnum = fn (c: str) ->
+      (c >= "0" && c <= "9") || (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") in
+    if at i != "&" then ("", 0)
+    else if at (i + 1) == "#" then
+      let hexy = at (i + 2) == "x" || at (i + 2) == "X" in
+      let start = if hexy then i + 3 else i + 2 in
+      let digit = fn (c: str) ->
+        if c >= "0" && c <= "9" then ord c - 48
+        else if hexy && c >= "a" && c <= "f" then ord c - 87
+        else if hexy && c >= "A" && c <= "F" then ord c - 55
+        else 0 - 1 in
+      let rec go = fn (k: int) -> fn (acc: int) ->
+        let d = digit (at k) in
+        if d < 0 then (k, acc) else go (k + 1) (acc * (if hexy then 16 else 10) + d) in
+      let (endk, cp0) = go start 0 in
+      if endk == start then ("", 0)
+      else
+        let taken = (endk - i) + (if at endk == ";" then 1 else 0) in
+        // The standard rewrites a handful of code points rather than emitting
+        // them: NUL, anything past the Unicode range, and the surrogates all
+        // become U+FFFD.
+        let cp = if cp0 == 0 || cp0 > 1114111 || (cp0 >= 55296 && cp0 <= 57343)
+                 then 65533 else cp0 in
+        (str_of_codepoint cp, taken)
+    else
+      let rest = substring src (i + 1) (if i + 33 > n then n else i + 33) in
+      let (idx, len) = Entities.longest_match rest in
+      if idx < 0 then ("", 0)
+      else
+        let ends_semi = char_at rest (len - 1) == ";" in
+        let nxt = at (i + 1 + len) in
+        if in_attr && (not ends_semi) && (nxt == "=" || is_alnum nxt) then ("", 0)
+        else (Entities.chars_at idx, len + 1);
+
   let tokenize_in = fn (state: str) -> fn (last: str) -> fn (src0: str) ->
     let src = _newlines src0 in
     let n = str_len src in
@@ -108,6 +152,10 @@ module Html {
       else
         let c = at i in
         if c == "<" then tag_open (i + 1) acc
+        else if c == "&" then
+          let (txt, took) = charref src i false in
+          if took == 0 then data (i + 1) (push_char acc c)
+          else data (i + took) (push_char acc txt)
         else data (i + 1) (push_char acc c)
 
     and tag_open = fn (i: int) -> fn (acc: token list) ->
@@ -212,6 +260,10 @@ module Html {
       if c == "" then list_rev acc
       else if c == "\"" then
         after_attr_value (i + 1) acc name (Cons (attr { name = an, value = av }, attrs))
+      else if c == "&" then
+        let (txt, took) = charref src i true in
+        if took == 0 then attr_value_dq (i + 1) acc name attrs an (av ++ c)
+        else attr_value_dq (i + took) acc name attrs an (av ++ txt)
       else attr_value_dq (i + 1) acc name attrs an (av ++ _nz c)
 
     and attr_value_sq = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
@@ -220,6 +272,10 @@ module Html {
       if c == "" then list_rev acc
       else if c == "'" then
         after_attr_value (i + 1) acc name (Cons (attr { name = an, value = av }, attrs))
+      else if c == "&" then
+        let (txt, took) = charref src i true in
+        if took == 0 then attr_value_sq (i + 1) acc name attrs an (av ++ c)
+        else attr_value_sq (i + took) acc name attrs an (av ++ txt)
       else attr_value_sq (i + 1) acc name attrs an (av ++ _nz c)
 
     and attr_value_uq = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
@@ -231,6 +287,10 @@ module Html {
       else if c == ">" then
         data (i + 1) (Cons (TStart (name,
           finish_attrs (Cons (attr { name = an, value = av }, attrs)), false), acc))
+      else if c == "&" then
+        let (txt, took) = charref src i true in
+        if took == 0 then attr_value_uq (i + 1) acc name attrs an (av ++ c)
+        else attr_value_uq (i + took) acc name attrs an (av ++ txt)
       else attr_value_uq (i + 1) acc name attrs an (av ++ _nz c)
 
     and after_attr_value = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->

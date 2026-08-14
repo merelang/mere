@@ -128,17 +128,10 @@ def collect(data_dir):
     return cases
 
 
-def has_entity(case):
-    """Cases the tokenizer cannot pass because it does not decode `&...;` yet.
-    A conservative test — an ampersand in the input and not in the output."""
-    if "&" not in case["input"]:
-        return False
-    text = "".join(
-        t[1] for t in case["output"] if t and t[0] == "Character"
-    ) + "".join(
-        "".join(t[2].values()) for t in case["output"] if t and t[0] == "StartTag"
-    )
-    return "&" not in text or case["input"].count("&") > text.count("&")
+# There was a `has_entity` here that excused cases needing character references
+# from the failure count, back when the tokenizer had none. It came out when they
+# were implemented: a bucket that exists because a feature is missing hides real
+# failures the moment the feature arrives.
 
 
 def main_generate(data_dir, cases_path, expected_path, meta_path):
@@ -151,7 +144,7 @@ def main_generate(data_dir, cases_path, expected_path, meta_path):
             # anyway and its result ignored, which keeps the two files in step.
             cf.write("%s\t%s\t%s\n" % (c["state"], c["last"], esc_input(c["input"])))
             ef.write("##%d\n%s\n" % (i, render_expected(c["output"])))
-            reason = c["skip"] or ("entities" if has_entity(c) else "")
+            reason = c["skip"] or ""
             mf.write("%s\t%s\t%s\n" % (reason, c["file"], c["desc"]))
     print("html_tokenizer: %d cases from %s" % (len(cases), data_dir))
 
