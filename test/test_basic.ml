@@ -2763,7 +2763,29 @@ let () =
   assert_contains "codegen: ++ becomes __lang_str_concat call"
     (codegen "\"a\" ++ \"b\"") "__lang_str_concat(";
   assert_contains "codegen: print → puts inside statement expression"
-    (codegen "print \"hi\"") "puts(__lang_str_dup_n(\"hi\"";
+    (codegen "print \"hi\"") "puts((__sl_";
+  (* A string literal is immutable, so it is emitted ONCE as a static constant
+     carrying the length header, and every evaluation refers to it. It used to
+     be a fresh region copy per evaluation, which is invisible in a small
+     program and a third of the time and memory in an interpreter, where the
+     same literals are compared millions of times. *)
+  assert_contains "codegen: a string literal is one static constant"
+    (codegen "str_eq \"abc\" \"abc\"")
+    "static const struct { size_t l; char s[4]; } __sl_";
+  check "codegen: the same literal twice is the same constant"
+    (let c = codegen "str_eq \"zzq\" \"zzq\"" in
+     let nlen = String.length c in
+     let count needle =
+       let plen = String.length needle in
+       let rec scan i acc =
+         if i + plen > nlen then acc
+         else if String.sub c i plen = needle then scan (i + 1) (acc + 1)
+         else scan (i + 1) acc
+       in scan 0 0
+     in
+     (* one declaration, and no per-evaluation copy of it anywhere *)
+     if count "\"zzq\"" = 1 && count "__lang_str_dup_n(\"" = 0 then "ok" else "no")
+    "ok";
   (* Phase 27.0: C codegen now prints "()" for unit-typed main to match
      interp (was: no printf at all). *)
   assert_contains "codegen: unit-typed main prints \"()\""
@@ -8988,7 +9010,7 @@ let () =
        in scan 0
      in
      if has "extern int setenv(const char*, const char*, int);"
-        && has "setenv(__lang_str_dup_n(\"K\"" then "ok" else "no")
+        && has "setenv((__sl_" then "ok" else "no")
     "ok";
 
   (* v0.1.41: int is 64-bit (`long long`) on the C backend. The SHA-256
@@ -9067,7 +9089,7 @@ let () =
        in scan 0
      in
      if has "static mere_vec_int* __lang_read_file_bytes"
-        && has "__lang_read_file_bytes(__lang_str_dup_n(\"x.bin\"" then "ok" else "no")
+        && has "__lang_read_file_bytes((__sl_" then "ok" else "no")
     "ok";
   (* v0.1.123: read_file_bytes is now supported on all backends. *)
   assert_contains
@@ -9181,7 +9203,7 @@ let () =
        in scan 0
      in
      if has "static int __lang_write_file_bytes"
-        && has "__lang_write_file_bytes(__lang_str_dup_n(\"x.bin\"" then "ok" else "no")
+        && has "__lang_write_file_bytes((__sl_" then "ok" else "no")
     "ok";
   assert_contains
     "v0.1.123: Wasm codegen supports write_file_bytes (host import)"
