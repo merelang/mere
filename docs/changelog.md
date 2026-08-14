@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.256 — 2026-08-14
+
+_All 228 labels the Encoding Standard defines, generated, replacing a hand-written
+list of the four this directory can decode._
+
+The previous slice added `utf-16` to that list. This is the same gap at its full
+size: a page declaring `iso-8859-2` read as a page declaring **nothing at all**,
+because the list only had labels for encodings there is a decoder for.
+
+**Those are two different questions.** `label_of` answers what a label names;
+whether this directory can decode the result is what `decode` answers, and it
+already answers `None`. Conflating them made the absence of a decoder look like the
+absence of a declaration, which the HTML standard treats differently — it is the
+difference between "use the default" and "use the encoding the page named".
+
+The table is generated from `encodings.json` and carried the way the Unicode tables
+and the HTML named references are (Q-028): fixed-width records in one sorted string,
+binary-searched by index arithmetic. 228 labels for 40 encodings, 8,208 characters.
+
+The comment above the old list had already written down what would happen — "it
+cannot discover a label we forgot to list, and that gap is real and is recorded
+rather than implied". It took a program that asks about labels rather than about
+decoding to walk into it.
+
+---
+
 ## v0.1.255 — 2026-08-14
 
 _A label the table forgot, found by the program that asks about labels._
