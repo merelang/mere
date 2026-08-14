@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.257" Version.v "0.1.257";
+  check "version is 0.1.259" Version.v "0.1.259";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2772,6 +2772,27 @@ let () =
   assert_contains "codegen: a string literal is one static constant"
     (codegen "str_eq \"abc\" \"abc\"")
     "static const struct { size_t l; char s[4]; } __sl_";
+  (* v0.1.259: an inner fn name went into a PROGRAM-wide "known" list, so a
+     later function's parameter of the same name was taken for that function
+     and never captured — "unbound variable" in a module that compiled alone.
+     A binder shadows a global; the Wasm lifter now subtracts the enclosing
+     binders. *)
+  check "wasm: a parameter shadows another function's inner fn name"
+    (let src =
+       String.concat "\n"
+         [ "let host_a = fn (n: int) ->";
+           "  let rec skip = fn (i: int) -> if i == n then 0 else skip (i + 1) in";
+           "  skip 0;";
+           "let host_b = fn (skip: int) ->";
+           "  let rec go = fn (i: int) -> if i == 5 then 0 else if i == skip then i else go (i + 1) in";
+           "  go 0;";
+           "host_a 1 + host_b 3" ]
+     in
+     let prog = Pipeline.parse_program src in
+     let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     let wat = Codegen_wasm.emit_program ~main_ty prog in
+     if String.length wat > 0 then "ok" else "no")
+    "ok";
   check "codegen: the same literal twice is the same constant"
     (let c = codegen "str_eq \"zzq\" \"zzq\"" in
      let nlen = String.length c in
