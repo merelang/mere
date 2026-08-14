@@ -27,7 +27,7 @@ thought were worth writing down.
 sh scripts/html_tokenizer_conformance.sh     # 1,900 cases
 ```
 
-**1,822 of 1,900 pass, and the number is pinned exactly rather than as a floor.** A
+**All 1,900 pass, and the number is pinned exactly rather than as a floor.** A
 floor lets a regression hide behind a new pass; a number that has to be edited when
 it moves is a number somebody looks at. The harness prints the first ten failures
 in full, so what is missing is visible in the output and not only in this file.
@@ -36,16 +36,17 @@ The vendored copy of the suite is in `test/data/html5lib`, fetched by
 `scripts/gen_html5lib_testdata.sh` (a maintenance command — a gate that needs the
 network fails for reasons that have nothing to do with the code).
 
-## What is not implemented yet, counted
+## What is not covered
 
-| | cases | what it needs |
-|---|--:|---|
-| the remaining 78 | 78 | individual spec details, named one by one in the harness output |
+**No exemption buckets, and no failures**: every one of the 1,900 cases is run and
+passes. There was a bucket for character references while they were unimplemented, and
+it came out the moment they were — a bucket that exists because a feature is missing
+hides real failures as soon as the feature arrives.
 
-**There are no exemption buckets left.** Every case is a pass or a failure. There was
-one for character references while they were unimplemented, and it came out the moment
-they were: a bucket that exists because a feature is missing hides real failures as
-soon as the feature arrives.
+What is genuinely not here is the part of html5lib-tests this repository has not
+vendored: the tree-construction suite, and the tokenizer files beyond `test1`-`test3`
+(`entities`, `xmlViolation`, the script-data escape states). Those come with the parts
+that need them.
 
 Implemented since the first slice: U+0000 replacement, newline preprocessing, and the
 non-Data initial states (`Html.tokenize_in` takes the starting state and the tag that

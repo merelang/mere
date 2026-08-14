@@ -37,8 +37,13 @@ type token =
   | TChar of str;
 
 module Html {
+  // Form feed is whitespace to HTML and is written as `chr 12` rather than as an
+  // escape: whether the language spells it \f, \014 or \x0c is a question this
+  // file does not need to have an opinion about, and getting it wrong is silent —
+  // the literal becomes four ordinary characters and form feed stops being space.
+  let _ff = chr 12;
   let _is_space = fn (c: str) ->
-    c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\012";
+    c == " " || c == "\t" || c == "\n" || c == "\r" || c == _ff;
 
   let _lower = fn (c: str) ->
     if c >= "A" && c <= "Z" then to_lower c else c;
@@ -212,7 +217,7 @@ module Html {
       else if c == "=" then
         // A name starting with "=" is a parse error and the "=" is part of it.
         attr_name (i + 1) acc name attrs "="
-      else attr_name (i + 1) acc name attrs (_lower c)
+      else attr_name (i + 1) acc name attrs (_nz (_lower c))
 
     and attr_name = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
                     fn (attrs: attr list) -> fn (an: str) ->
@@ -240,7 +245,7 @@ module Html {
           finish_attrs (Cons (attr { name = an, value = "" }, attrs)), false), acc))
       // A new attribute starts; the previous one had no value.
       else attr_name (i + 1) acc name (Cons (attr { name = an, value = "" }, attrs))
-             (_lower c)
+             (_nz (_lower c))
 
     and before_attr_value = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
                             fn (attrs: attr list) -> fn (an: str) ->
@@ -395,7 +400,7 @@ module Html {
       else if str_len src >= i + 6
               && to_lower (substring src i (i + 6)) == "system" then
         before_doctype_id (i + 6) acc name false
-      else bogus_doctype (i + 1) acc name "" false "" false
+      else bogus_doctype (i + 1) acc name "" false "" false false
 
     and before_doctype_id = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
                             fn (is_public: bool) ->
@@ -407,7 +412,7 @@ module Html {
       else if c == "'" then doctype_id (i + 1) acc name is_public "'" ""
       else if c == ">" then
         data (i + 1) (Cons (TDoctype (name, "", false, "", false, false), acc))
-      else bogus_doctype (i + 1) acc name "" false "" false
+      else bogus_doctype (i + 1) acc name "" false "" false false
 
     and doctype_id = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
                      fn (is_public: bool) -> fn (q: str) -> fn (buf: str) ->
@@ -433,7 +438,7 @@ module Html {
         data (i + 1) (Cons (TDoctype (name, pub, true, "", false, true), acc))
       else if c == "\"" then doctype_sys_after_pub (i + 1) acc name pub "\"" ""
       else if c == "'" then doctype_sys_after_pub (i + 1) acc name pub "'" ""
-      else bogus_doctype (i + 1) acc name pub true "" false
+      else bogus_doctype (i + 1) acc name pub true "" false false
 
     and doctype_sys_after_pub = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
                                 fn (pub: str) -> fn (q: str) -> fn (buf: str) ->
@@ -453,7 +458,7 @@ module Html {
       else if _is_space c then after_doctype_system (i + 1) acc name pub has_pub sys
       else if c == ">" then
         data (i + 1) (Cons (TDoctype (name, pub, has_pub, sys, true, true), acc))
-      else bogus_doctype (i + 1) acc name pub has_pub sys true
+      else bogus_doctype (i + 1) acc name pub has_pub sys true true
 
     // Anything the DOCTYPE grammar does not accept: skip to ">" and mark it as a
     // doctype that puts the document in quirks mode.
@@ -481,17 +486,21 @@ module Html {
       if i >= n then list_rev acc
       else plaintext (i + 1) (push_char acc (at i))
 
+    // `ok` is the standard's force-quirks flag, inverted. Reaching this state does
+    // not set it by itself: junk after a complete PUBLIC/SYSTEM pair is a parse
+    // error but the doctype is still a correct one, while junk where an identifier
+    // was expected is not.
     and bogus_doctype = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
                         fn (pub: str) -> fn (has_pub: bool) ->
-                        fn (sys: str) -> fn (has_sys: bool) ->
+                        fn (sys: str) -> fn (has_sys: bool) -> fn (ok: bool) ->
       let c = at i in
       // Whatever was already read stays: an identifier followed by junk is
       // present and empty, not missing, and the two are different tokens.
       if c == "" then
-        list_rev (Cons (TDoctype (name, pub, has_pub, sys, has_sys, false), acc))
+        list_rev (Cons (TDoctype (name, pub, has_pub, sys, has_sys, ok), acc))
       else if c == ">" then
-        data (i + 1) (Cons (TDoctype (name, pub, has_pub, sys, has_sys, false), acc))
-      else bogus_doctype (i + 1) acc name pub has_pub sys has_sys
+        data (i + 1) (Cons (TDoctype (name, pub, has_pub, sys, has_sys, ok), acc))
+      else bogus_doctype (i + 1) acc name pub has_pub sys has_sys ok
     in
     if state == "PLAINTEXT state" then plaintext 0 Nil
     else if state == "RCDATA state" || state == "RAWTEXT state"

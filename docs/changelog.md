@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.254 — 2026-08-14
+
+_1,900 of 1,900. The vendored tokenizer suite passes entirely, with no exemptions._
+
+Three fixes, and two of them were the same mistake in different clothes.
+
+**Form feed was not whitespace.** `_is_space` compared against a `\012` escape the
+lexer did not read as U+000C — so the literal was four ordinary characters and form
+feed silently stopped being a space character everywhere the tokenizer looked for one.
+It is `chr 12` now: whether the language spells it `\f`, `\014` or `\x0c` is a question
+this file does not need an opinion about, and **getting it wrong is silent**. Twelve
+cases.
+
+**The bogus-doctype state was inventing quirks mode.** It hardcoded the force-quirks
+flag rather than carrying the one the token already had, so `<!DOCTYPE a PUBLIC''''`
+followed by junk — a complete, correct doctype with a parse error after it — was
+reported as a quirks-mode document. Reaching a recovery state does not by itself mean
+the thing recovered from was fatal. **Sixty-two cases**, and the same shape as the fix
+two slices ago: the recovery path was discarding what it had rather than keeping it.
+
+**And a NUL starting an attribute name** went through unreplaced, because that one path
+appended the character without the substitution every other one had. Four cases.
+
+---
+
 ## v0.1.253 — 2026-08-14
 
 _Character references, named and numeric: 1,807 of 1,900 becomes 1,822 — and the
