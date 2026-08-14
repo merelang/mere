@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.253 — 2026-08-14
+
+_Character references, named and numeric: 1,807 of 1,900 becomes 1,822 — and the
+last exemption bucket comes out of the harness._
+
+**The 2,231 named references are one string of fixed-width records**, generated from
+the standard's own `entities.json`, sorted, and binary-searched by index arithmetic.
+That is the shape Q-028 settled for the Unicode tables, applied again: 44 characters
+per record — the name space-padded to 32, then two code points as six hex digits
+each. Space pads rather than NUL because a Mere `str` cannot carry a NUL through the
+compiled backends, and because space sorts below every character a name uses, so the
+padded order is the plain order and a short name needs no special case. 98,164
+characters, and it compiles and runs on the C backend as well as the interpreter.
+
+**Matching is longest-first**, because `&notin;` is one reference and not `&not`
+followed by `in;` — a search that stopped at the first match would be a different
+tokenizer. Inside an attribute value a match that did not end in `;` is left alone
+when the next character is `=` or alphanumeric, because `?a&not=b` is a query string
+far more often than it is a negation sign.
+
+**And the harness lost its last exemption.** It had a bucket that excused cases
+needing character references from the failure count, back when there were none. It
+came out the moment they were implemented: a bucket that exists because a feature is
+missing hides real failures as soon as the feature arrives. Every one of the 1,900
+cases is now a pass or a failure, and the 78 remaining are named one by one.
+
+---
+
 ## v0.1.252 — 2026-08-14
 
 _The tokenizer's other starting states: 1,598 of 1,704 becomes 1,807 of 1,900._
