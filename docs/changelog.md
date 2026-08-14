@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.249 — 2026-08-14
+
+_A window, its pixels, and its input — promoted from a probe to a capability. The
+interesting part is that it can be checked without anybody looking at a screen._
+
+```
+  lib/codegen_c.ml               the SDL2 runtime, emitted when a win_* extern is declared
+  contrib/window/window.mere     the typed side: window, event, show, capture, poll
+  test/window/window_check.mere  draw, show, read back, compare
+  scripts/window_check.sh        new gate: SDL's dummy driver, no display needed
+```
+
+**Six externs and no language feature.** `win_open` / `win_size` / `win_blit` /
+`win_readback` / `win_poll` / `win_close`. Pixels cross the boundary as a flat arena
+offset and everything else is an int — the contract the socket family established —
+so the runtime is conditional C the way PortMidi's is, emitted only when a program
+declares one of these. Build with `sdl2-config --cflags --libs`.
+
+**`size` asks the renderer, not the window.** They are different numbers on a HiDPI
+display: a 640×480 window has a 1280×960 renderer, and the pixels are in the second
+one. This was recorded as friction 3 when the capability was a probe — a readback
+comparison against the window's size compares against a number the pixels are not
+in — so the capability returns `SDL_GetRendererOutputSize` and nothing else.
+
+**`Window.show` composites a `canvas` with the same arithmetic as
+`Canvas.to_ppm`**, so what a program puts on the screen and what it writes to a file
+are the same image by construction rather than by two similar loops.
+
+**The gate is a readback, and it needed one more thing to be evidence.** Draw a known
+pattern with `contrib/raster`, show it, read the window's pixels back, compare —
+3072 pixels, 0 mismatches, under SDL's `dummy` video driver, which has a software
+renderer and a real event queue but no display. That runs in CI and does not open a
+window on your desktop.
+
+**But `show` writes the image into the same arena block `capture` reads back into**,
+so a readback that did nothing at all would hand back exactly what was written and
+every pixel would match — a gate that passes while testing nothing. `capture`
+poisons the block first. Checked by making the runtime's readback a no-op: 3072 of
+3072 pixels then differ.
+
+**Not gated: that an event ever arrives.** `poll` is checked only for answering
+`Nothing` on an empty queue. Delivering a real key or click needs either a display
+or a way to inject one, and a test-only extern that pushes events would be checking
+the scaffolding rather than the capability.
+
+---
+
 ## v0.1.248 — 2026-08-14
 
 _Adding the last two math builtins turned up a silent wrong answer in every LLVM program

@@ -1,0 +1,51 @@
+// The window capability, checked without anybody looking at a screen.
+//
+// Draw a known pattern with contrib/raster, put it on the window, read the
+// window's pixels back, compare. That is the whole argument: "it looked right" is
+// not evidence, and a readback is. It runs under SDL's `dummy` video driver, so it
+// needs no display and works in CI.
+//
+// What this does NOT check: that an event ever arrives. `poll` is checked only for
+// answering `Nothing` on an empty queue — delivering a real key or click needs
+// either a display or a way to inject one, and inventing a test-only extern to
+// push events would be checking the scaffolding rather than the capability.
+//
+// Build: mere -c, then clang with `sdl2-config --cflags --libs`.
+
+import "../../contrib/window/window.mere";
+
+let white = Canvas.rgba 255 255 255 255;
+let black = Canvas.rgba 0 0 0 255;
+let red = Canvas.rgba 255 0 0 255;
+
+let main_ = fn (u: unit) ->
+  match Window.open_ 64 48 "mere window check" with
+  | None -> print "win: could not open"
+  | Some win ->
+    let (w, h) = Window.size win in
+    let _ = print ("renderer size = " ++ show w ++ "x" ++ show h) in
+    let c = Canvas.new_ 64 48 in
+    let _ = Canvas.clear c white in
+    let _ = Canvas.fill_rect c (Canvas.full_clip c) 8 8 20 16 black in
+    let _ = Canvas.fill_rect c (Canvas.full_clip c) 34 20 20 16 red in
+    let _ = print ("show -> " ++ show (Window.show win c white)) in
+    let back = Window.capture win in
+    let _ = (match back with
+      | None -> print "capture -> none"
+      | Some got ->
+        let rec cmp = fn (i: int) -> fn (bad: int) ->
+          if i >= 64 * 48 then bad
+          else
+            let x = i % 64 in
+            let y = i / 64 in
+            let a = bit_and (Canvas.get c x y) 4294967040 in
+            let b = bit_and (Canvas.get got x y) 4294967040 in
+            cmp (i + 1) (if a == b then bad else bad + 1) in
+        print ("pixels compared = " ++ show (64 * 48)
+               ++ ", mismatches = " ++ show (cmp 0 0))) in
+    let _ = print ("poll (empty) -> " ++ (match Window.poll 0 with
+      | Nothing -> "Nothing" | Quit -> "Quit" | _ -> "other")) in
+    print ("close -> " ++ show (Window.close win));
+
+let _ = main_ ();
+0

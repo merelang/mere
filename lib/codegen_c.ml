@@ -332,6 +332,7 @@ let uses_file_openrw = ref false  (* v0.1.115: file_openrw (read/write open) *)
 let uses_file_fsync = ref false   (* v0.1.115: file_fsync (durability) *)
 let uses_tls = ref false  (* v0.1.91: tcp_starttls* -> real OpenSSL runtime *)
 let uses_midi = ref false  (* v0.1.128: midi_* -> PortMidi input runtime *)
+let uses_window = ref false  (* v0.1.249: win_* -> SDL2 window / pixels / input *)
 let uses_file_io = ref false  (* v0.1.59: file_open / file_read_line / file_close *)
 let uses_int_of_str = ref false  (* v0.1.60: validating int parse *)
 let uses_write_file_bytes = ref false
@@ -5769,6 +5770,10 @@ let native_ffi_names =
     "now_ms";                            (* v0.1.63: mbench dogfood *)
     "midi_init"; "midi_default_input"; "midi_open_input";  (* v0.1.128: midi dogfood *)
     "midi_poll"; "midi_read"; "midi_close";
+    (* v0.1.249: a window, its pixels, and its input events. Same shape as the
+       socket family — flat arena offsets and ints — which is why none of this
+       needed a language feature. *)
+    "win_open"; "win_size"; "win_blit"; "win_readback"; "win_poll"; "win_close";
     "str_ptr"; "mem_alloc"; "mem_set_u8"; "mem_get_u8";
     "mem_set_u32be"; "mem_get_u32be"; "mem_set_u16be"; "mem_get_u16be";
     "mem_copy_str"; "mem_to_str"; "bytes_from_hex_alloc"; "bytes_to_hex_len" ]
@@ -6006,7 +6011,7 @@ let native_http_runtime =
       "  return 0;";
       "}" ]
 
-let native_ffi_runtime ~tls ~midi =
+let native_ffi_runtime ~tls ~midi ~window =
   String.concat "\n"
     [ "/* --- native FFI runtime: Wasm-style byte arena + POSIX TCP --- */";
       "#include <sys/socket.h>";
@@ -6206,6 +6211,125 @@ let native_ffi_runtime ~tls ~midi =
       "  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);";
       "  return 0;";
       "}";
+      (if window then
+         "/* --- window / pixels / input (SDL2) — v0.1.249. The probe for this\n\
+          \   established that it needs no language feature: the pixels\n\
+          \   cross as a flat arena offset and everything else is an int, which\n\
+          \   is the socket family's contract. Emitted only when a program\n\
+          \   declares a win_* extern; build with `sdl2-config --cflags --libs`.\n\
+          \n\
+          \   Pixels: one per four bytes, ARGB in memory order — which is what\n\
+          \   `mem_set_u32be` of 0xAARRGGBB writes. SDL_PIXELFORMAT_ARGB32 is the\n\
+          \   byte-order alias, not the packed one, so this is endian-independent.\n\
+          \n\
+          \   Size: win_size asks the RENDERER, not the window. They differ on a\n\
+          \   HiDPI display, and the probe recorded that as the thing a\n\
+          \   readback comparison gets wrong first — a capability that reported\n\
+          \   the window's size would be handing out a number the pixels are not\n\
+          \   in. */\n\
+          #include <SDL.h>\n\
+          #define __WIN_MAX 8\n\
+          static SDL_Window*   __win_win[__WIN_MAX];\n\
+          static SDL_Renderer* __win_ren[__WIN_MAX];\n\
+          static SDL_Texture*  __win_tex[__WIN_MAX];\n\
+          static int __win_tw[__WIN_MAX];\n\
+          static int __win_th[__WIN_MAX];\n\
+          static int __win_n = 0;\n\
+          static int __win_inited = 0;\n\
+          static int __win_live(int id) {\n\
+          \  return id >= 0 && id < __win_n && __win_win[id] != NULL;\n\
+          }\n\
+          static long long win_open(long long w, long long h, const char* title) {\n\
+          \  if (__win_n >= __WIN_MAX || w <= 0 || h <= 0) return -1;\n\
+          \  if (!__win_inited) {\n\
+          \    SDL_SetMainReady();\n\
+          \    if (SDL_Init(SDL_INIT_VIDEO) != 0) return -1;\n\
+          \    __win_inited = 1;\n\
+          \  }\n\
+          \  SDL_Window* win = SDL_CreateWindow(title,\n\
+          \    SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, (int)w, (int)h,\n\
+          \    SDL_WINDOW_ALLOW_HIGHDPI);\n\
+          \  if (!win) return -1;\n\
+          \  SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);\n\
+          \  if (!ren) { SDL_DestroyWindow(win); return -1; }\n\
+          \  int id = __win_n++;\n\
+          \  __win_win[id] = win; __win_ren[id] = ren; __win_tex[id] = NULL;\n\
+          \  __win_tw[id] = 0; __win_th[id] = 0;\n\
+          \  return id;\n\
+          }\n\
+          static long long win_size(long long id) {\n\
+          \  int w = 0, h = 0;\n\
+          \  if (!__win_live((int)id)) return -1;\n\
+          \  if (SDL_GetRendererOutputSize(__win_ren[(int)id], &w, &h) != 0) return -1;\n\
+          \  if (w < 0 || h < 0 || w > 0xFFFFF || h > 0xFFFFF) return -1;\n\
+          \  return ((long long)w << 20) | (long long)h;\n\
+          }\n\
+          static long long win_blit(long long id, long long off, long long w, long long h) {\n\
+          \  if (!__win_live((int)id) || w <= 0 || h <= 0) return -1;\n\
+          \  if (off < 0 || off + w * h * 4 > (long long)sizeof __mem) return -1;\n\
+          \  if (__win_tex[(int)id] == NULL || __win_tw[(int)id] != (int)w\n\
+          \      || __win_th[(int)id] != (int)h) {\n\
+          \    if (__win_tex[(int)id]) SDL_DestroyTexture(__win_tex[(int)id]);\n\
+          \    __win_tex[(int)id] = SDL_CreateTexture(__win_ren[(int)id],\n\
+          \      SDL_PIXELFORMAT_ARGB32, SDL_TEXTUREACCESS_STREAMING, (int)w, (int)h);\n\
+          \    if (!__win_tex[(int)id]) return -1;\n\
+          \    __win_tw[(int)id] = (int)w; __win_th[(int)id] = (int)h;\n\
+          \  }\n\
+          \  if (SDL_UpdateTexture(__win_tex[(int)id], NULL, __mem + off, (int)w * 4) != 0)\n\
+          \    return -1;\n\
+          \  SDL_RenderClear(__win_ren[(int)id]);\n\
+          \  if (SDL_RenderCopy(__win_ren[(int)id], __win_tex[(int)id], NULL, NULL) != 0)\n\
+          \    return -1;\n\
+          \  SDL_RenderPresent(__win_ren[(int)id]);\n\
+          \  return 0;\n\
+          }\n\
+          static long long win_readback(long long id, long long off, long long w, long long h) {\n\
+          \  if (!__win_live((int)id) || w <= 0 || h <= 0) return -1;\n\
+          \  if (off < 0 || off + w * h * 4 > (long long)sizeof __mem) return -1;\n\
+          \  return SDL_RenderReadPixels(__win_ren[(int)id], NULL,\n\
+          \    SDL_PIXELFORMAT_ARGB32, __mem + off, (int)w * 4) == 0 ? 0 : -1;\n\
+          }\n\
+          /* An event packs into one int: kind in bits 52.., a in bits 20..51,\n\
+          \   b in bits 0..19. `a` gets 32 bits because an SDL keycode with the\n\
+          \   scancode bit set is above 2^30. 0 means the queue was empty. */\n\
+          static long long win_poll(long long timeout_ms) {\n\
+          \  SDL_Event e;\n\
+          \  long long kind = 0, a = 0, b = 0;\n\
+          \  int got;\n\
+          \  if (!__win_inited) return 0;\n\
+          \  got = timeout_ms > 0 ? SDL_WaitEventTimeout(&e, (int)timeout_ms)\n\
+          \                       : SDL_PollEvent(&e);\n\
+          \  if (!got) return 0;\n\
+          \  switch (e.type) {\n\
+          \    case SDL_QUIT: kind = 1; break;\n\
+          \    case SDL_KEYDOWN: kind = 2; a = (long long)(Uint32)e.key.keysym.sym; break;\n\
+          \    case SDL_KEYUP:   kind = 3; a = (long long)(Uint32)e.key.keysym.sym; break;\n\
+          \    case SDL_MOUSEBUTTONDOWN: kind = 4; a = e.button.x; b = e.button.y; break;\n\
+          \    case SDL_MOUSEBUTTONUP:   kind = 5; a = e.button.x; b = e.button.y; break;\n\
+          \    case SDL_MOUSEMOTION:     kind = 6; a = e.motion.x; b = e.motion.y; break;\n\
+          \    case SDL_WINDOWEVENT:\n\
+          \      if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {\n\
+          \        kind = 7; a = e.window.data1; b = e.window.data2;\n\
+          \      }\n\
+          \      break;\n\
+          \    default: break;\n\
+          \  }\n\
+          \  if (kind == 0) return 0;\n\
+          \  if (a < 0) a = 0; if (b < 0) b = 0;\n\
+          \  if (a > 0xFFFFFFFFLL) a = 0xFFFFFFFFLL;\n\
+          \  if (b > 0xFFFFF) b = 0xFFFFF;\n\
+          \  return (kind << 52) | (a << 20) | b;\n\
+          }\n\
+          static long long win_close(long long id) {\n\
+          \  if (!__win_live((int)id)) return -1;\n\
+          \  if (__win_tex[(int)id]) SDL_DestroyTexture(__win_tex[(int)id]);\n\
+          \  SDL_DestroyRenderer(__win_ren[(int)id]);\n\
+          \  SDL_DestroyWindow(__win_win[(int)id]);\n\
+          \  __win_win[(int)id] = NULL; __win_ren[(int)id] = NULL;\n\
+          \  __win_tex[(int)id] = NULL;\n\
+          \  return 0;\n\
+          }\n"
+       else "");
       (if midi then
          "/* --- MIDI input (PortMidi) — v0.1.128, midi dogfood. Polling model\n\
           \   (Pm_Poll/Pm_Read) matches the synchronous FFI shape, and a MIDI\n\
@@ -9261,6 +9385,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.mem extern_fn_decls "midi_open_input"
     || Hashtbl.mem extern_fn_decls "midi_read"
     || Hashtbl.mem extern_fn_decls "midi_init";
+  (* v0.1.249: declaring a win_* extern pulls in the SDL2 runtime and asks the
+     clang line for `sdl2-config --cflags --libs`; everyone else needs no SDL. *)
+  uses_window :=
+    Hashtbl.mem extern_fn_decls "win_open"
+    || Hashtbl.mem extern_fn_decls "win_blit"
+    || Hashtbl.mem extern_fn_decls "win_poll";
   strbuf_used := false;
   bytebuf_used := false;
   bytes_used := false;
@@ -10160,7 +10290,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          them as unresolved `extern` prototypes. *)
       (if Hashtbl.fold (fun n _ acc -> acc || is_native_ffi n)
             extern_fn_decls false
-       then native_ffi_runtime ~tls:!uses_tls ~midi:!uses_midi ^ "\n"
+       then native_ffi_runtime ~tls:!uses_tls ~midi:!uses_midi ~window:!uses_window ^ "\n"
        else "");
       (* Q-012: concurrency runtime. `spawn` runs a `unit -> unit` closure on a
          fresh OS thread; the trampoline invokes the closure the same way the
