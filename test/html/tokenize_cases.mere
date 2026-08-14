@@ -31,12 +31,21 @@ let unescape = fn (s: str) ->
         else go (i + 2) (out ++ d) in
   go 0 "";
 
+// Each line is `state<TAB>lastStartTag<TAB>escaped input`: the tokenizer's starting
+// state is a property of the case, not of the file, because the suite has cases for
+// every content model an element can have.
+let field = fn (line: str) -> fn (k: int) ->
+  match list_drop (str_split line "\t") k with
+  | Cons (v, _) -> v
+  | Nil -> "";
+
 let rec run = fn (xs: str list) -> fn (i: int) ->
   match xs with
   | Nil -> ()
   | Cons (line, rest) ->
     let _ = print ("##" ++ show i) in
-    let _ = print (Html.render (Html.tokenize (unescape line))) in
+    let _ = print (Html.render (Html.tokenize_in (field line 0) (field line 1)
+                                 (unescape (field line 2)))) in
     run rest (i + 1);
 
 let path = match args () with
