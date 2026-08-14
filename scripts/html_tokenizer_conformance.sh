@@ -34,7 +34,7 @@ command -v python3 >/dev/null 2>&1 || { echo "html_tokenizer: python3 needed to 
 
 # The exact number of cases expected to pass. Raise it when the tokenizer grows;
 # a drop is a regression and a rise without a code change is a suite that moved.
-EXPECT_PASS=${EXPECT_PASS:-1505}
+EXPECT_PASS=${EXPECT_PASS:-1598}
 
 TMP="${TMPDIR:-/tmp}/mere_html.$$"; mkdir -p "$TMP"; trap 'rm -rf "$TMP"' EXIT
 

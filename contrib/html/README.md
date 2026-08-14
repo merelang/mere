@@ -27,7 +27,7 @@ thought were worth writing down.
 sh scripts/html_tokenizer_conformance.sh     # 1,704 cases
 ```
 
-**1,505 of 1,704 pass, and the number is pinned exactly rather than as a floor.** A
+**1,598 of 1,704 pass, and the number is pinned exactly rather than as a floor.** A
 floor lets a regression hide behind a new pass; a number that has to be edited when
 it moves is a number somebody looks at. The harness prints the first ten failures
 in full, so what is missing is visible in the output and not only in this file.
@@ -42,11 +42,11 @@ network fails for reasons that have nothing to do with the code).
 |---|--:|---|
 | character references | 53 | the named entity table (2,231 entries) plus the numeric forms — the same "how do you carry a large table" question `contrib/unicode` answered |
 | non-Data initial states | 111 | RCDATA / RAWTEXT / script data / PLAINTEXT: `tokenize` takes no starting state, and the tree builder is what switches it |
-| U+0000 handling | 57 | the standard replaces NUL with U+FFFD in most states. Worth knowing: the harness runs on the interpreter because a Mere `str` cannot carry a NUL through the compiled backends |
-| newline preprocessing | | CRLF and lone CR become LF before the tokenizer sees them |
+| the remaining 76 | 76 | individual spec details, named one by one in the harness output |
 
-The rest of the failures are individual spec details rather than categories, and
-the harness names them.
+U+0000 replacement and newline preprocessing are **implemented** (v0.1.251). Worth
+knowing about the first: the harness runs on the interpreter, because a Mere `str`
+cannot carry a NUL through the compiled backends.
 
 ## Why it is written this way
 

@@ -44,6 +44,30 @@ module Html {
   let _is_alpha = fn (c: str) ->
     (c >= "a" && c <= "z") || (c >= "A" && c <= "Z");
 
+  // U+FFFD, built from its bytes rather than written as a literal so the source
+  // stays ASCII and no escape syntax is assumed.
+  let _repl = chr 239 ++ chr 191 ++ chr 189;
+
+  // The standard replaces U+0000 with U+FFFD everywhere inside markup — names,
+  // attribute values, comments, doctypes. It is a parse error and the character is
+  // not dropped, because dropping it would change how many characters a later
+  // consumer counts.
+  let _nz = fn (c: str) -> if ord c == 0 then _repl else c;
+
+  // The input stream is normalized before the tokenizer sees it: CRLF and a lone
+  // CR both become LF. Every state would otherwise have to say so itself, which is
+  // why the standard puts it in the preprocessing step and not in the machine.
+  let _newlines = fn (s: str) ->
+    let rec go = fn (i: int) -> fn (out: str) ->
+      if i >= str_len s then out
+      else
+        let c = char_at s i in
+        if c != "\r" then go (i + 1) (out ++ c)
+        else if i + 1 < str_len s && char_at s (i + 1) == "\n" then
+          go (i + 2) (out ++ "\n")
+        else go (i + 1) (out ++ "\n") in
+    go 0 "";
+
   // The tokenizer is a fold over the input with an explicit state, written as a
   // recursive function per state rather than a tag dispatch, so each one reads
   // like its paragraph in the standard.
@@ -51,7 +75,8 @@ module Html {
   // `acc` is the token list in reverse. Character tokens are coalesced as they are
   // pushed: the standard emits one per character and every consumer immediately
   // joins them, and the test suite's expected output is joined too.
-  let tokenize = fn (src: str) ->
+  let tokenize = fn (src0: str) ->
+    let src = _newlines src0 in
     let n = str_len src in
     let at = fn (i: int) -> if i >= n then "" else char_at src i in
 
@@ -102,7 +127,7 @@ module Html {
       else if _is_space c then end_tag_ignore (i + 1) acc name
       else if c == ">" then data (i + 1) (Cons (TEnd name, acc))
       else if c == "/" then end_tag_ignore (i + 1) acc name
-      else end_tag_name (i + 1) acc (name ++ _lower c)
+      else end_tag_name (i + 1) acc (name ++ _nz (_lower c))
 
     // An end tag's attributes are parsed and thrown away, which is what the
     // standard says to do rather than treating them as text.
@@ -120,7 +145,7 @@ module Html {
       else if c == "/" then self_closing (i + 1) acc name attrs
       else if c == ">" then
         data (i + 1) (Cons (TStart (name, finish_attrs attrs, selfc), acc))
-      else tag_name (i + 1) acc (name ++ _lower c) attrs selfc
+      else tag_name (i + 1) acc (name ++ _nz (_lower c)) attrs selfc
 
     and before_attr_name = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
                            fn (attrs: attr list) ->
@@ -146,7 +171,7 @@ module Html {
       else if c == ">" then
         data (i + 1) (Cons (TStart (name,
           finish_attrs (Cons (attr { name = an, value = "" }, attrs)), false), acc))
-      else attr_name (i + 1) acc name attrs (an ++ _lower c)
+      else attr_name (i + 1) acc name attrs (an ++ _nz (_lower c))
 
     and after_attr_name = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
                           fn (attrs: attr list) -> fn (an: str) ->
@@ -181,7 +206,7 @@ module Html {
       if c == "" then list_rev acc
       else if c == "\"" then
         after_attr_value (i + 1) acc name (Cons (attr { name = an, value = av }, attrs))
-      else attr_value_dq (i + 1) acc name attrs an (av ++ c)
+      else attr_value_dq (i + 1) acc name attrs an (av ++ _nz c)
 
     and attr_value_sq = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
                         fn (attrs: attr list) -> fn (an: str) -> fn (av: str) ->
@@ -189,7 +214,7 @@ module Html {
       if c == "" then list_rev acc
       else if c == "'" then
         after_attr_value (i + 1) acc name (Cons (attr { name = an, value = av }, attrs))
-      else attr_value_sq (i + 1) acc name attrs an (av ++ c)
+      else attr_value_sq (i + 1) acc name attrs an (av ++ _nz c)
 
     and attr_value_uq = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
                         fn (attrs: attr list) -> fn (an: str) -> fn (av: str) ->
@@ -200,7 +225,7 @@ module Html {
       else if c == ">" then
         data (i + 1) (Cons (TStart (name,
           finish_attrs (Cons (attr { name = an, value = av }, attrs)), false), acc))
-      else attr_value_uq (i + 1) acc name attrs an (av ++ c)
+      else attr_value_uq (i + 1) acc name attrs an (av ++ _nz c)
 
     and after_attr_value = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
                            fn (attrs: attr list) ->
@@ -226,7 +251,7 @@ module Html {
       let c = at i in
       if c == "" then list_rev (Cons (TComment buf, acc))
       else if c == ">" then data (i + 1) (Cons (TComment buf, acc))
-      else bogus_comment (i + 1) acc (buf ++ c)
+      else bogus_comment (i + 1) acc (buf ++ _nz c)
 
     and markup_declaration = fn (i: int) -> fn (acc: token list) ->
       if at i == "-" && at (i + 1) == "-" then comment_start (i + 2) acc ""
@@ -247,7 +272,7 @@ module Html {
       let c = at i in
       if c == "" then list_rev (Cons (TComment buf, acc))
       else if c == "-" then comment_end_dash (i + 1) acc buf
-      else comment_body (i + 1) acc (buf ++ c)
+      else comment_body (i + 1) acc (buf ++ _nz c)
 
     // A dash that turned out not to end anything goes back into the data, and one
     // sitting at the end of the input is dropped — which is the difference between
@@ -280,7 +305,7 @@ module Html {
       else if _is_space c then before_doctype_name (i + 1) acc
       else if c == ">" then
         data (i + 1) (Cons (TDoctype ("", "", false, "", false, false), acc))
-      else doctype_name (i + 1) acc (_lower c)
+      else doctype_name (i + 1) acc (_nz (_lower c))
 
     and doctype_name = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
       let c = at i in
@@ -289,7 +314,7 @@ module Html {
       else if c == ">" then
         data (i + 1) (Cons (TDoctype (name, "", false, "", false, true), acc))
       else if _is_space c then after_doctype_name (i + 1) acc name
-      else doctype_name (i + 1) acc (name ++ _lower c)
+      else doctype_name (i + 1) acc (name ++ _nz (_lower c))
 
     and after_doctype_name = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
       let c = at i in
@@ -304,7 +329,7 @@ module Html {
       else if str_len src >= i + 6
               && to_lower (substring src i (i + 6)) == "system" then
         before_doctype_id (i + 6) acc name false
-      else bogus_doctype (i + 1) acc name
+      else bogus_doctype (i + 1) acc name "" false "" false
 
     and before_doctype_id = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
                             fn (is_public: bool) ->
@@ -316,7 +341,7 @@ module Html {
       else if c == "'" then doctype_id (i + 1) acc name is_public "'" ""
       else if c == ">" then
         data (i + 1) (Cons (TDoctype (name, "", false, "", false, false), acc))
-      else bogus_doctype (i + 1) acc name
+      else bogus_doctype (i + 1) acc name "" false "" false
 
     and doctype_id = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
                      fn (is_public: bool) -> fn (q: str) -> fn (buf: str) ->
@@ -330,7 +355,7 @@ module Html {
       else if c == ">" then
         data (i + 1) (Cons ((if is_public then TDoctype (name, buf, true, "", false, false)
                              else TDoctype (name, "", false, buf, true, false)), acc))
-      else doctype_id (i + 1) acc name is_public q (buf ++ c)
+      else doctype_id (i + 1) acc name is_public q (buf ++ _nz c)
 
     and after_doctype_public = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
                                fn (pub: str) ->
@@ -342,7 +367,7 @@ module Html {
         data (i + 1) (Cons (TDoctype (name, pub, true, "", false, true), acc))
       else if c == "\"" then doctype_sys_after_pub (i + 1) acc name pub "\"" ""
       else if c == "'" then doctype_sys_after_pub (i + 1) acc name pub "'" ""
-      else bogus_doctype (i + 1) acc name
+      else bogus_doctype (i + 1) acc name pub true "" false
 
     and doctype_sys_after_pub = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
                                 fn (pub: str) -> fn (q: str) -> fn (buf: str) ->
@@ -352,7 +377,7 @@ module Html {
       else if c == q then after_doctype_system (i + 1) acc name pub true buf
       else if c == ">" then
         data (i + 1) (Cons (TDoctype (name, pub, true, buf, true, false), acc))
-      else doctype_sys_after_pub (i + 1) acc name pub q (buf ++ c)
+      else doctype_sys_after_pub (i + 1) acc name pub q (buf ++ _nz c)
 
     and after_doctype_system = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
                                fn (pub: str) -> fn (has_pub: bool) -> fn (sys: str) ->
@@ -362,17 +387,21 @@ module Html {
       else if _is_space c then after_doctype_system (i + 1) acc name pub has_pub sys
       else if c == ">" then
         data (i + 1) (Cons (TDoctype (name, pub, has_pub, sys, true, true), acc))
-      else bogus_doctype (i + 1) acc name
+      else bogus_doctype (i + 1) acc name pub has_pub sys true
 
     // Anything the DOCTYPE grammar does not accept: skip to ">" and mark it as a
     // doctype that puts the document in quirks mode.
     and bogus_doctype = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+                        fn (pub: str) -> fn (has_pub: bool) ->
+                        fn (sys: str) -> fn (has_sys: bool) ->
       let c = at i in
+      // Whatever was already read stays: an identifier followed by junk is
+      // present and empty, not missing, and the two are different tokens.
       if c == "" then
-        list_rev (Cons (TDoctype (name, "", false, "", false, false), acc))
+        list_rev (Cons (TDoctype (name, pub, has_pub, sys, has_sys, false), acc))
       else if c == ">" then
-        data (i + 1) (Cons (TDoctype (name, "", false, "", false, false), acc))
-      else bogus_doctype (i + 1) acc name
+        data (i + 1) (Cons (TDoctype (name, pub, has_pub, sys, has_sys, false), acc))
+      else bogus_doctype (i + 1) acc name pub has_pub sys has_sys
     in
     data 0 Nil;
 
