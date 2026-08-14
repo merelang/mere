@@ -84,6 +84,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang wabt lldb
+          # SDL2 for the window capability. window_check.sh skips without it, and
+          # a skipped gate is a gate that is not running — so install it here.
+          sudo apt-get install -y libsdl2-dev
 
       # socket_parity builds a Wasm component and compares its socket behaviour
       # against the C build, so it needs the component toolchain: wasm-tools,
@@ -197,6 +200,12 @@ jobs:
 
       - name: tcp_read_codes
         run: sh scripts/tcp_read_codes.sh
+
+      # The window capability, checked by reading the window's own pixels back.
+      # SDL's `dummy` video driver gives a software renderer and an event queue
+      # with no display, so this needs no X server on the runner.
+      - name: window_check
+        run: sh scripts/window_check.sh
 
       - name: infer_scaling (type inference stays linear)
         run: sh scripts/infer_scaling.sh

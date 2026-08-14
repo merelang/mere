@@ -1,0 +1,148 @@
+// contrib/window — a window, its pixels, and its input events.
+//
+// The other half of `contrib/raster`: that one turns a document into pixels and
+// needs no display, this one puts pixels on a screen and takes keys and clicks
+// back. They meet at `Window.show`, which composites a `canvas` over a background
+// and hands the bytes to the window — the same rule `Canvas.to_ppm` uses to write
+// a file, so what you see and what you save are the same image by construction.
+//
+// **C backend only.** The runtime is SDL2, emitted by the C backend when a program
+// declares a `win_*` extern, the way PortMidi and OpenSSL are. Build with
+// `sdl2-config --cflags --libs`. The other three backends have no window: the
+// browser has the DOM, and the bare-metal one has a framebuffer.
+//
+// Nothing here needed a language feature. Pixels cross as a flat arena offset and
+// everything else is an int — the contract the socket family established — so the
+// probe that established this was four `extern fn` lines and no compiler change.
+
+import "../raster/canvas.mere";
+
+extern fn win_open : int -> int -> str -> int;
+extern fn win_size : int -> int;
+extern fn win_blit : int -> int -> int -> int -> int;
+extern fn win_readback : int -> int -> int -> int -> int;
+extern fn win_poll : int -> int;
+extern fn win_close : int -> int;
+extern fn mem_alloc : int -> int;
+extern fn mem_set_u32be : int -> int -> int -> unit;
+extern fn mem_get_u32be : int -> int -> int;
+
+// A window and the arena block its pixels live in. The block is allocated once at
+// the size asked for; `show` refuses a canvas that would not fit rather than
+// writing past it.
+type window = { id: int, buf: int, cap: int };
+
+// What `poll` can return. `Nothing` is an empty queue, which is the common case in
+// a frame loop and not a failure.
+type event =
+  | Nothing
+  | Quit
+  | KeyDown of int
+  | KeyUp of int
+  | MouseDown of (int * int)
+  | MouseUp of (int * int)
+  | MouseMove of (int * int)
+  | Resized of (int * int);
+
+module Window {
+  // A window that could not open is `None` rather than a failure: no display, no
+  // SDL, or eight windows already open are all ordinary conditions for a program
+  // that might also run headless.
+  let open_ = fn (w: int) -> fn (h: int) -> fn (title: str) ->
+    let id = win_open w h title in
+    if id < 0 then None
+    else
+      let n = w * h * 4 in
+      Some (window { id = id, buf = mem_alloc n, cap = n });
+
+  // The size of the RENDERER, which is not the size of the window on a HiDPI
+  // display — it is the number of pixels there actually are, and the number a
+  // readback comparison has to use. The probe for this recorded getting it wrong as
+  // the first thing that breaks.
+  let size = fn (win: window) ->
+    let s = win_size win.id in
+    if s < 0 then (0, 0) else (bit_shr s 20, bit_and s 1048575);
+
+  let width = fn (win: window) -> let (w, _h) = size win in w;
+  let height = fn (win: window) -> let (_w, h) = size win in h;
+
+  // Composite `c` over `bg` and put it on the screen. Premultiplied source-over,
+  // the same arithmetic Canvas.to_ppm uses, so the window and the file agree.
+  // Returns false if the canvas does not fit the block this window was opened
+  // with, which is the only way this can fail without SDL failing.
+  let show = fn (win: window) -> fn (c: canvas) -> fn (bg: int) ->
+    if c.w * c.h * 4 > win.cap then false
+    else
+      let br = (bg / 16777216) % 256 in
+      let bgg = (bg / 65536) % 256 in
+      let bb = (bg / 256) % 256 in
+      let over = fn (p: int) -> fn (b: int) -> fn (inv: int) ->
+        let t = b * inv + 128 in
+        p + (t + t / 256) / 256 in
+      let rec go = fn (i: int) ->
+        if i >= c.w * c.h then win_blit win.id win.buf c.w c.h == 0
+        else
+          let j = i * 4 in
+          let a = bytebuf_get c.px (j + 3) in
+          let inv = 255 - a in
+          let r = over (bytebuf_get c.px j) br inv in
+          let g = over (bytebuf_get c.px (j + 1)) bgg inv in
+          let b = over (bytebuf_get c.px (j + 2)) bb inv in
+          // 0xAARRGGBB, written big-endian, which is ARGB in memory order — the
+          // byte order the runtime hands to SDL.
+          let _ = mem_set_u32be win.buf j
+                    (255 * 16777216 + r * 65536 + g * 256 + b) in
+          go (i + 1) in
+      go 0;
+
+  // Read the window's pixels back into a fresh canvas. This is what makes the
+  // capability checkable without anybody looking at a screen: draw a known
+  // pattern, read it back, compare. Alpha comes back opaque.
+  let capture = fn (win: window) ->
+    let (w, h) = size win in
+    if w * h * 4 > win.cap then None
+    else
+      // Poison the block first. `show` wrote the pixels into this same block, so
+      // a readback that did nothing at all would hand back exactly what was
+      // written and every comparison would pass while proving nothing. After
+      // this, anything the readback does not overwrite reads as magenta.
+      let rec poison = fn (i: int) ->
+        if i >= w * h then ()
+        else
+          let _ = mem_set_u32be win.buf (i * 4) 4294902015 in
+          poison (i + 1) in
+      let _ = poison 0 in
+      if win_readback win.id win.buf w h != 0 then None
+      else
+      let c = Canvas.new_ w h in
+      let rec go = fn (i: int) ->
+        if i >= w * h then Some c
+        else
+          let v = mem_get_u32be win.buf (i * 4) in
+          let r = bit_and (bit_shr v 16) 255 in
+          let g = bit_and (bit_shr v 8) 255 in
+          let b = bit_and v 255 in
+          let _ = Canvas.set c (i % w) (i / w) (Canvas.rgba r g b 255) in
+          go (i + 1) in
+      go 0;
+
+  // One event, or `Nothing`. A positive timeout waits that many milliseconds for
+  // one to arrive; zero returns immediately, which is what a frame loop wants.
+  let poll = fn (timeout_ms: int) ->
+    let ev = win_poll timeout_ms in
+    if ev == 0 then Nothing
+    else
+      let kind = bit_shr ev 52 in
+      let a = bit_and (bit_shr ev 20) 4294967295 in
+      let b = bit_and ev 1048575 in
+      if kind == 1 then Quit
+      else if kind == 2 then KeyDown a
+      else if kind == 3 then KeyUp a
+      else if kind == 4 then MouseDown (a, b)
+      else if kind == 5 then MouseUp (a, b)
+      else if kind == 6 then MouseMove (a, b)
+      else if kind == 7 then Resized (a, b)
+      else Nothing;
+
+  let close = fn (win: window) -> win_close win.id == 0;
+}
