@@ -39,12 +39,6 @@ let host_builtins_without_wasm_lowering =
        (`par_map` is handled at the tail instead: it is desugared before codegen, so
        this name never reaches here.) *)
     "read_bytes"; "write_bytes";
-    (* v0.1.246: `print_err` wrote to the same host sink as `print`, so a
-       diagnostic landed in the program's own output and nothing said so. The JS
-       host ABI has one sink (`env.puts`); giving it a second one is a change to
-       every host that instantiates a module, and that is a deliberate change
-       rather than a side effect of a panic message. Refusing says which. *)
-    "print_err";
     "read_key"; "tty_raw"; "tty_restore";
     "read_lines"; "file_pread";
     "random_float"; "detach" ]
@@ -127,14 +121,25 @@ let modzero_msg_offset = ref 0
 
 (* Reset per emit_program. *)
 let print_no_nl_used = ref false
+(* v0.1.259: `print_err` is a SECOND host sink, so it is imported only when the
+   program uses it — a module that never writes a diagnostic imports nothing new
+   and still runs on a host that only provides `env.puts`. (Refusing it outright
+   was the earlier answer; it left every stderr-writing program without a Wasm
+   build, mere-ruby's browser playground among them.) *)
+let print_err_used = ref false
 (* print_bytes needs its own host import: `print_no_nl` takes a NUL-terminated
    pointer, which is exactly what a byte sequence cannot be. Gated, so a program
    that does not use it imports nothing new and runs on an older host. *)
 let print_bytes_used = ref false
 
+(* Per-FUNCTION state only. The host-usage flags below are per PROGRAM and are
+   cleared in emit_program: `reset ()` is also called again before the main
+   body, so clearing them here silently dropped the import and the shim for
+   anything used in a function but not in main -- and the module then referred
+   to a function it did not define. (mere-ruby writes binary output from a
+   helper, so its Wasm build failed to assemble: "undefined function variable
+   $__lang_print_bytes".) *)
 let reset () =
-  print_no_nl_used := false;
-  print_bytes_used := false;
   instrs := [];
   local_counter := 0;
   local_types := [];
@@ -1269,9 +1274,18 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list)
   in
   let known = ref (toplevel_names @ builtin_names @ extern_names) in
   let current_host = ref "" in
-  let lift_one _host_param host_locals n p fn_body =
+  let lift_one host_param host_locals n p fn_body =
+    (* `known` accumulates every inner function name in the PROGRAM, so a name
+       bound in an enclosing scope has to be subtracted from it or it is taken
+       for a global and never captured. The host's parameter is one such name:
+       mere-ruby has an inner fn called `skip` in one function and a parameter
+       called `skip` in another, and the second one's closures came out
+       referring to the first one's lifted function -- "unbound variable: skip"
+       at emission, in a module that compiled by itself. A binder shadows a
+       global; that is all this is. *)
+    let shadowed = host_param :: host_locals in
     let effective_known =
-      List.filter (fun k -> not (List.mem k host_locals)) !known
+      List.filter (fun k -> not (List.mem k shadowed)) !known
     in
     let body_fvs = free_vars fn_body (p :: effective_known) in
     let lifted_name = fresh_inner_name_wasm n in
@@ -1301,7 +1315,7 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list)
       (match pat.Ast.pnode, value.Ast.node with
        | Ast.P_var n, Ast.Fun (p, _, fn_body) ->
          let fn_body = lift_one host_param host_locals n p fn_body in
-         walk p [] fn_body;
+         walk p [p] fn_body;
          walk host_param (n :: host_locals) body
        | _ ->
          walk host_param host_locals value;
@@ -1318,9 +1332,12 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list)
       known := rec_names @ !known;
       List.iter (fun (n, p, fb) ->
         let _ = lift_one host_param host_locals n p fb in ()) fn_specs;
-      List.iter (fun (_, p, fb) -> walk p [] fb) fn_specs;
+      List.iter (fun (_, p, fb) -> walk p [p] fb) fn_specs;
       walk host_param (rec_names @ host_locals) body
-    | Ast.Fun (_, _, b) -> walk host_param host_locals b
+    (* a nested lambda's parameter is a binder too: `fn s -> fn count -> ...`
+       used to lose `count`, so an inner fn under it captured nothing and
+       resolved the name to whatever global happened to share it *)
+    | Ast.Fun (pp, _, b) -> walk host_param (pp :: host_locals) b
     | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
     | Ast.Unit_lit | Ast.Var _ -> ()
     | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
@@ -1335,9 +1352,10 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list)
     | Ast.Constr (_, None) -> ()
     | Ast.Match (s, arms) ->
       walk host_param host_locals s;
-      List.iter (fun (_, g, b) ->
-        (match g with Some ge -> walk host_param host_locals ge | None -> ());
-        walk host_param host_locals b) arms
+      List.iter (fun (pat, g, b) ->
+        let arm_locals = pattern_vars pat @ host_locals in
+        (match g with Some ge -> walk host_param arm_locals ge | None -> ());
+        walk host_param arm_locals b) arms
     | Ast.Tuple es -> List.iter (walk host_param host_locals) es
     | Ast.Region_block (_, b) -> walk host_param host_locals b
     | Ast.Ref (_, _, a) -> walk host_param host_locals a
@@ -2274,12 +2292,18 @@ let rec emit_expr (e : Ast.expr) : unit =
        read: worse than not having the capability, because a missing feature is a
        compile error and a silent no-op is a hang (measured at ten minutes before it
        was killed). Refused here, at the call, until WASI's poll is wired up. *)
-    if name = "tcp_set_timeout" then
+    (* ...and only when the in-module WASI shim is what would answer it. With
+       env host imports the host answers, and a host that cannot set a deadline
+       returns a failure the program can see -- which is the opposite of the
+       silent success this guards against. Refusing there kept a browser build
+       (where sockets are stubbed and unreachable anyway) from compiling at
+       all. *)
+    if name = "tcp_set_timeout" && !wasm_socket_ffi then
       unsupported e.Ast.loc
-        "tcp_set_timeout has no Wasm lowering: WASI's sockets have no receive \
-         deadline here, and this used to compile to a no-op that reported success \
-         and left the next read blocking forever. A program that needs a bounded \
-         wait needs the native backend";
+        "tcp_set_timeout has no Wasm lowering in a WASI socket component: \
+         WASI's sockets have no receive deadline here, and this used to compile \
+         to a no-op that reported success and left the next read blocking \
+         forever. A program that needs a bounded wait needs the native backend";
     let rec result_ty t =
       match Ast.walk t with
       | Ast.TyArrow (_, r) -> result_ty r
@@ -2342,6 +2366,13 @@ let rec emit_expr (e : Ast.expr) : unit =
     print_no_nl_used := true;
     emit_expr arg;
     emit_instr "call $__lang_print_no_nl";
+    emit_instr "i64.const 0"  (* unit *)
+  (* print_err: like print, to the host's diagnostic sink, with a newline. *)
+  | Ast.App ({ node = Ast.Var "print_err"; _ }, arg)
+    when not (user_shadows_wasm "print_err") ->
+    print_err_used := true;
+    emit_expr arg;
+    emit_instr "call $__lang_print_err";
     emit_instr "i64.const 0"  (* unit *)
   (* print_bytes: hand the host the data pointer and the length. A `bytes` is
      [i32 len][data...], so the data starts four bytes in. *)
@@ -7982,6 +8013,9 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   wasm_env_used := false;
   wasm_stdin_used := false;
   wasm_socket_ffi := false;
+  print_no_nl_used := false;
+  print_err_used := false;
+  print_bytes_used := false;
   reset ();
   Hashtbl.reset toplevel_fn_names;
   Hashtbl.reset variant_tags;
@@ -8209,7 +8243,13 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   let multi_base_names =
     Hashtbl.fold (fun k _ acc -> k :: acc) multi_inst_fns_wasm []
   in
-  let toplevel_names = mangled_names @ multi_base_names in
+  (* ...and the top-level non-fn lets, which are Wasm globals: `Var name`
+     already lowers to `global.get`, so an inner fn must NOT try to capture
+     one. It used to, and the capture store — which can only read locals —
+     refused with "cannot resolve capture". (A local of the same name still
+     shadows: lift_one subtracts the enclosing binders from this list.) *)
+  let global_names = Hashtbl.fold (fun k _ acc -> k :: acc) top_globals_wasm [] in
+  let toplevel_names = mangled_names @ multi_base_names @ global_names in
   lift_inner_fns_wasm toplevel_names fns body_expr;
   (* Phase 36 (DEFERRED §1.19 fix): register top-level closure adapter
      table indices BEFORE emit_fn_def so that fn bodies (and nested
@@ -8555,6 +8595,9 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     (if !print_no_nl_used then
       "  (import \"env\" \"print_no_nl\" (func $__lang_print_no_nl_h (param i32)))\n"
     else "")
+    ^ (if !print_err_used && not !wasm_component_command then
+      "  (import \"env\" \"print_err\" (func $__lang_print_err_h (param i32)))\n"
+    else "")
     ^ (if !print_bytes_used then
       "  (import \"env\" \"print_bytes\" (func $__lang_print_bytes_h (param i32) (param i32)))\n"
     else "")
@@ -8583,6 +8626,9 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     "  (func $puts (param i64) (call $puts_h (i32.wrap_i64 (local.get 0))))\n"
     ^ (if !print_no_nl_used then
       "  (func $__lang_print_no_nl (param i64) (call $__lang_print_no_nl_h (i32.wrap_i64 (local.get 0))))\n"
+    else "")
+    ^ (if !print_err_used then
+      "  (func $__lang_print_err (param i64) (call $__lang_print_err_h (i32.wrap_i64 (local.get 0))))\n"
     else "")
     ^ (if !print_bytes_used then
       "  (func $__lang_print_bytes (param i64)\n\
@@ -8688,6 +8734,9 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
          else "")
       ^ (if !print_no_nl_used then
            "  (func $__lang_print_no_nl_h (param i32) unreachable)\n"
+         else "")
+      ^ (if !print_err_used && not !wasm_component_command then
+           "  (func $__lang_print_err_h (param i32) unreachable)\n"
          else "")
       ^ (if !print_bytes_used then
            "  (func $__lang_print_bytes_h (param i32) (param i32) unreachable)\n"
@@ -9418,6 +9467,20 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \    (i32.store offset=0 (local.get $b) (i32.add (local.get $b) (i32.const 12)))\n\
         \    (i32.store offset=4 (local.get $b) (i32.const 1))\n\
         \    (drop (call $fd_write (i32.const 1) (local.get $b) (i32.const 1) (i32.add (local.get $b) (i32.const 8)))))\n"
+      ^ (if !print_err_used then
+           "  (func $__lang_print_err_h (param $p i32)\n\
+           \    (local $len i32) (local $b i32)\n\
+           \    (local.set $len (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $p)))))\n\
+           \    (local.set $b (global.get $__lang_bump))\n\
+           \    (global.set $__lang_bump (i32.add (local.get $b) (i32.const 16)))\n\
+           \    (i32.store offset=0 (local.get $b) (local.get $p))\n\
+           \    (i32.store offset=4 (local.get $b) (local.get $len))\n\
+           \    (drop (call $fd_write (i32.const 2) (local.get $b) (i32.const 1) (i32.add (local.get $b) (i32.const 8))))\n\
+           \    (i32.store8 offset=12 (local.get $b) (i32.const 10))\n\
+           \    (i32.store offset=0 (local.get $b) (i32.add (local.get $b) (i32.const 12)))\n\
+           \    (i32.store offset=4 (local.get $b) (i32.const 1))\n\
+           \    (drop (call $fd_write (i32.const 2) (local.get $b) (i32.const 1) (i32.add (local.get $b) (i32.const 8)))))\n"
+         else "")
       ^ cstr_to_str_fn
       ^ args_fn
       ^ clock_fn
