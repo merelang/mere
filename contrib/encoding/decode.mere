@@ -28,6 +28,7 @@
 //   | None -> ""
 
 import "jis.mere";
+import "labels.mere";
 
 module Encoding {
 
@@ -61,49 +62,14 @@ module Encoding {
   // confirms each label maps where we say it does, and it cannot discover a
   // label we forgot to list. That gap is real and is recorded rather than
   // implied.
-  let label_of = fn (raw: str) ->
-    let s = normalize_label raw in
-    if s == "utf-8" || s == "utf8" || s == "unicode-1-1-utf-8"
-       || s == "unicode11utf8" || s == "unicode20utf8" || s == "x-unicode20utf8"
-    then Some "utf-8"
-    else if s == "windows-1252" || s == "ascii" || s == "us-ascii"
-            || s == "latin1" || s == "l1" || s == "cp1252" || s == "x-cp1252"
-            || s == "cp819" || s == "ibm819" || s == "csisolatin1"
-            || s == "iso-8859-1" || s == "iso8859-1" || s == "iso88591"
-            || s == "iso_8859-1" || s == "iso_8859-1:1987" || s == "iso-ir-100"
-            || s == "ansi_x3.4-1968"
-    then Some "windows-1252"
-    // v0.1.255: labels without a decoder here, and listing them is still the right
-    // thing — `label_of` answers "what does this label name", which is a different
-    // question from "can this directory decode it". Leaving them out made
-    // `<meta charset=utf-16>` look like a page with no declaration at all, which
-    // the HTML standard answers differently from a page declaring UTF-16: that
-    // declaration cannot be true (it is written in ASCII) and reads as UTF-8.
-    // Found by the browser dogfood, which is what asks the question.
-    else if s == "utf-16" || s == "utf-16le" then Some "utf-16le"
-    else if s == "utf-16be" then Some "utf-16be"
-    else if s == "shift_jis" || s == "shift-jis" || s == "sjis" || s == "x-sjis"
-            || s == "ms932" || s == "ms_kanji" || s == "windows-31j"
-            || s == "csshiftjis"
-    then Some "shift_jis"
-    else if s == "euc-jp" || s == "x-euc-jp" || s == "cseucpkdfmtjapanese"
-    then Some "euc-jp"
-    else None;
-
-  // --- UTF-8 -------------------------------------------------------------
-  //
-  // The Standard's decoder, which is a state machine and not a loop over
-  // sequence lengths. The state is (needed, code point so far, and the range
-  // the NEXT byte must fall in) — that last part is what rejects an overlong
-  // form and a surrogate without a separate check afterwards:
-  //
-  //   E0 needs its first continuation in A0..BF, not 80..BF, so E0 80 ..
-  //      cannot express a value that a two-byte sequence could have held
-  //   ED needs its first continuation in 80..9F, which is exactly the bound
-  //      that keeps D800..DFFF unrepresentable
-  //   F0 needs 90..BF and F4 needs 80..8F, bounding the range at both ends
-  //
-  // 0x80..0xC1 and 0xF5..0xFF are never a lead byte, so they are one error each.
+  // Every label the Standard defines, from the generated table. It was a
+  // hand-written list of the four encodings this directory decodes, and the comment
+  // above it said what would go wrong — "it cannot discover a label we forgot to
+  // list" — which is exactly what happened: a page declaring `iso-8859-2` read as a
+  // page declaring nothing at all. Answering "what does this label name" is a
+  // different question from "can this directory decode it", and `decode` already
+  // answers the second one with None.
+  let label_of = fn (raw: str) -> Labels.find (normalize_label raw);
 
   let rec _utf8 = fn (b: bytes) -> fn (i: int) -> fn (n: int) -> fn buf ->
                  fn (needed: int) -> fn (cp: int) ->
