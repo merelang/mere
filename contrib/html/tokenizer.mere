@@ -1,0 +1,417 @@
+// contrib/html — the HTML tokenizer, as the standard writes it.
+//
+// The first half of parsing HTML: bytes in, tokens out. The second half — building
+// a tree out of those tokens, with the insertion modes and the parts that recover
+// from mis-nesting — is a browser's job and lives with the browser.
+//
+// The standard specifies this as a state machine with a named state per position,
+// and this is that machine with the same names, so a line here can be found in the
+// specification by searching for its state. It is not written as a regular
+// expression or a lookahead scanner, because the recovery rules are what make HTML
+// parseable at all and they are stated per state.
+//
+// **What is here**: data, tags, attributes in all four quoting forms, comments in
+// all their malformed shapes, and DOCTYPE. **What is not**: character references
+// (`&amp;`), the RCDATA / RAWTEXT / script states, and CDATA. Those are named in
+// the README with what each one needs.
+//
+// The gate is the standard's own test suite (html5lib-tests), which is the same
+// kind of evidence as the UCD conformance files: not somebody's idea of what to
+// check, but the cases the people who wrote the specification thought were worth
+// writing down.
+
+// A tag's attributes, in source order. Duplicates are dropped, keeping the first,
+// which is what the standard says.
+type attr = { name: str, value: str };
+
+type token =
+  // name, public id, system id, "not a quirks-mode doctype". A missing id is the
+  // empty string with its `has` flag false, because the standard distinguishes a
+  // missing identifier from an empty one.
+  | TDoctype of (str * str * bool * str * bool * bool)
+  | TStart of (str * attr list * bool)
+  | TEnd of str
+  | TComment of str
+  | TChar of str;
+
+module Html {
+  let _is_space = fn (c: str) ->
+    c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\012";
+
+  let _lower = fn (c: str) ->
+    if c >= "A" && c <= "Z" then to_lower c else c;
+
+  let _is_alpha = fn (c: str) ->
+    (c >= "a" && c <= "z") || (c >= "A" && c <= "Z");
+
+  // The tokenizer is a fold over the input with an explicit state, written as a
+  // recursive function per state rather than a tag dispatch, so each one reads
+  // like its paragraph in the standard.
+  //
+  // `acc` is the token list in reverse. Character tokens are coalesced as they are
+  // pushed: the standard emits one per character and every consumer immediately
+  // joins them, and the test suite's expected output is joined too.
+  let tokenize = fn (src: str) ->
+    let n = str_len src in
+    let at = fn (i: int) -> if i >= n then "" else char_at src i in
+
+    let push_char = fn (acc: token list) -> fn (s: str) ->
+      match acc with
+      | Cons (TChar prev, rest) -> Cons (TChar (prev ++ s), rest)
+      | _ -> Cons (TChar s, acc) in
+
+    // Attributes accumulate in reverse and get de-duplicated on the way out.
+    // Source order first, THEN de-duplicate: the standard keeps the first of a
+    // repeated attribute, and walking the reversed accumulator kept the last.
+    let finish_attrs = fn (rev: attr list) ->
+      let rec go = fn (xs: attr list) -> fn (seen: str list) -> fn (out: attr list) ->
+        match xs with
+        | Nil -> list_rev out
+        | Cons (a, rest) ->
+          if list_member seen a.name then go rest seen out
+          else go rest (Cons (a.name, seen)) (Cons (a, out)) in
+      go (list_rev rev) Nil Nil in
+
+    let rec data = fn (i: int) -> fn (acc: token list) ->
+      if i >= n then list_rev acc
+      else
+        let c = at i in
+        if c == "<" then tag_open (i + 1) acc
+        else data (i + 1) (push_char acc c)
+
+    and tag_open = fn (i: int) -> fn (acc: token list) ->
+      let c = at i in
+      if c == "!" then markup_declaration (i + 1) acc
+      else if c == "/" then end_tag_open (i + 1) acc
+      else if _is_alpha c then tag_name (i + 1) acc (_lower c) Nil false
+      else if c == "?" then bogus_comment i acc ""
+      // Not a tag after all: the "<" is character data and the same character is
+      // reconsidered in the data state.
+      else data i (push_char acc "<")
+
+    and end_tag_open = fn (i: int) -> fn (acc: token list) ->
+      let c = at i in
+      if _is_alpha c then end_tag_name (i + 1) acc (_lower c)
+      else if c == ">" then data (i + 1) acc          // </> is dropped entirely
+      else if c == "" then data i (push_char acc "</")
+      else bogus_comment i acc ""
+
+    and end_tag_name = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+      let c = at i in
+      if c == "" then list_rev acc
+      else if _is_space c then end_tag_ignore (i + 1) acc name
+      else if c == ">" then data (i + 1) (Cons (TEnd name, acc))
+      else if c == "/" then end_tag_ignore (i + 1) acc name
+      else end_tag_name (i + 1) acc (name ++ _lower c)
+
+    // An end tag's attributes are parsed and thrown away, which is what the
+    // standard says to do rather than treating them as text.
+    and end_tag_ignore = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+      let c = at i in
+      if c == "" then list_rev acc
+      else if c == ">" then data (i + 1) (Cons (TEnd name, acc))
+      else end_tag_ignore (i + 1) acc name
+
+    and tag_name = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+                   fn (attrs: attr list) -> fn (selfc: bool) ->
+      let c = at i in
+      if c == "" then list_rev acc
+      else if _is_space c then before_attr_name (i + 1) acc name attrs
+      else if c == "/" then self_closing (i + 1) acc name attrs
+      else if c == ">" then
+        data (i + 1) (Cons (TStart (name, finish_attrs attrs, selfc), acc))
+      else tag_name (i + 1) acc (name ++ _lower c) attrs selfc
+
+    and before_attr_name = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+                           fn (attrs: attr list) ->
+      let c = at i in
+      if c == "" then list_rev acc
+      else if _is_space c then before_attr_name (i + 1) acc name attrs
+      else if c == "/" then self_closing (i + 1) acc name attrs
+      else if c == ">" then
+        data (i + 1) (Cons (TStart (name, finish_attrs attrs, false), acc))
+      else if c == "=" then
+        // A name starting with "=" is a parse error and the "=" is part of it.
+        attr_name (i + 1) acc name attrs "="
+      else attr_name (i + 1) acc name attrs (_lower c)
+
+    and attr_name = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+                    fn (attrs: attr list) -> fn (an: str) ->
+      let c = at i in
+      if c == "" then list_rev acc
+      else if _is_space c then after_attr_name (i + 1) acc name attrs an
+      else if c == "/" then
+        self_closing (i + 1) acc name (Cons (attr { name = an, value = "" }, attrs))
+      else if c == "=" then before_attr_value (i + 1) acc name attrs an
+      else if c == ">" then
+        data (i + 1) (Cons (TStart (name,
+          finish_attrs (Cons (attr { name = an, value = "" }, attrs)), false), acc))
+      else attr_name (i + 1) acc name attrs (an ++ _lower c)
+
+    and after_attr_name = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+                          fn (attrs: attr list) -> fn (an: str) ->
+      let c = at i in
+      if c == "" then list_rev acc
+      else if _is_space c then after_attr_name (i + 1) acc name attrs an
+      else if c == "=" then before_attr_value (i + 1) acc name attrs an
+      else if c == "/" then
+        self_closing (i + 1) acc name (Cons (attr { name = an, value = "" }, attrs))
+      else if c == ">" then
+        data (i + 1) (Cons (TStart (name,
+          finish_attrs (Cons (attr { name = an, value = "" }, attrs)), false), acc))
+      // A new attribute starts; the previous one had no value.
+      else attr_name (i + 1) acc name (Cons (attr { name = an, value = "" }, attrs))
+             (_lower c)
+
+    and before_attr_value = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+                            fn (attrs: attr list) -> fn (an: str) ->
+      let c = at i in
+      if c == "" then list_rev acc
+      else if _is_space c then before_attr_value (i + 1) acc name attrs an
+      else if c == "\"" then attr_value_dq (i + 1) acc name attrs an ""
+      else if c == "'" then attr_value_sq (i + 1) acc name attrs an ""
+      else if c == ">" then
+        data (i + 1) (Cons (TStart (name,
+          finish_attrs (Cons (attr { name = an, value = "" }, attrs)), false), acc))
+      else attr_value_uq i acc name attrs an ""
+
+    and attr_value_dq = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+                        fn (attrs: attr list) -> fn (an: str) -> fn (av: str) ->
+      let c = at i in
+      if c == "" then list_rev acc
+      else if c == "\"" then
+        after_attr_value (i + 1) acc name (Cons (attr { name = an, value = av }, attrs))
+      else attr_value_dq (i + 1) acc name attrs an (av ++ c)
+
+    and attr_value_sq = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+                        fn (attrs: attr list) -> fn (an: str) -> fn (av: str) ->
+      let c = at i in
+      if c == "" then list_rev acc
+      else if c == "'" then
+        after_attr_value (i + 1) acc name (Cons (attr { name = an, value = av }, attrs))
+      else attr_value_sq (i + 1) acc name attrs an (av ++ c)
+
+    and attr_value_uq = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+                        fn (attrs: attr list) -> fn (an: str) -> fn (av: str) ->
+      let c = at i in
+      if c == "" then list_rev acc
+      else if _is_space c then
+        before_attr_name (i + 1) acc name (Cons (attr { name = an, value = av }, attrs))
+      else if c == ">" then
+        data (i + 1) (Cons (TStart (name,
+          finish_attrs (Cons (attr { name = an, value = av }, attrs)), false), acc))
+      else attr_value_uq (i + 1) acc name attrs an (av ++ c)
+
+    and after_attr_value = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+                           fn (attrs: attr list) ->
+      let c = at i in
+      if c == "" then list_rev acc
+      else if _is_space c then before_attr_name (i + 1) acc name attrs
+      else if c == "/" then self_closing (i + 1) acc name attrs
+      else if c == ">" then
+        data (i + 1) (Cons (TStart (name, finish_attrs attrs, false), acc))
+      else before_attr_name i acc name attrs
+
+    and self_closing = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+                       fn (attrs: attr list) ->
+      let c = at i in
+      if c == "" then list_rev acc
+      else if c == ">" then
+        data (i + 1) (Cons (TStart (name, finish_attrs attrs, true), acc))
+      else before_attr_name i acc name attrs
+
+    // `<?`, `</=`, and everything else that looks like markup and is not: the rest
+    // up to ">" becomes a comment rather than being dropped or shown.
+    and bogus_comment = fn (i: int) -> fn (acc: token list) -> fn (buf: str) ->
+      let c = at i in
+      if c == "" then list_rev (Cons (TComment buf, acc))
+      else if c == ">" then data (i + 1) (Cons (TComment buf, acc))
+      else bogus_comment (i + 1) acc (buf ++ c)
+
+    and markup_declaration = fn (i: int) -> fn (acc: token list) ->
+      if at i == "-" && at (i + 1) == "-" then comment_start (i + 2) acc ""
+      else if str_len src >= i + 7
+              && to_lower (substring src i (i + 7)) == "doctype" then
+        before_doctype_name (i + 7) acc
+      else bogus_comment i acc ""
+
+    and comment_start = fn (i: int) -> fn (acc: token list) -> fn (buf: str) ->
+      let c = at i in
+      // `<!-->` and `<!--->` are comments with empty data, not the start of one.
+      if c == ">" && buf == "" then data (i + 1) (Cons (TComment "", acc))
+      else if c == "-" && buf == "" && at (i + 1) == ">" then
+        data (i + 2) (Cons (TComment "", acc))
+      else comment_body i acc buf
+
+    and comment_body = fn (i: int) -> fn (acc: token list) -> fn (buf: str) ->
+      let c = at i in
+      if c == "" then list_rev (Cons (TComment buf, acc))
+      else if c == "-" then comment_end_dash (i + 1) acc buf
+      else comment_body (i + 1) acc (buf ++ c)
+
+    // A dash that turned out not to end anything goes back into the data, and one
+    // sitting at the end of the input is dropped — which is the difference between
+    // `<!-- -` commenting " " and commenting " -".
+    and comment_end_dash = fn (i: int) -> fn (acc: token list) -> fn (buf: str) ->
+      let c = at i in
+      if c == "" then list_rev (Cons (TComment buf, acc))
+      else if c == "-" then comment_end (i + 1) acc buf
+      else comment_body i acc (buf ++ "-")
+
+    and comment_end = fn (i: int) -> fn (acc: token list) -> fn (buf: str) ->
+      let c = at i in
+      if c == "" then list_rev (Cons (TComment buf, acc))
+      else if c == ">" then data (i + 1) (Cons (TComment buf, acc))
+      else if c == "!" then comment_end_bang (i + 1) acc buf
+      else if c == "-" then comment_end (i + 1) acc (buf ++ "-")
+      else comment_body i acc (buf ++ "--")
+
+    and comment_end_bang = fn (i: int) -> fn (acc: token list) -> fn (buf: str) ->
+      let c = at i in
+      if c == "" then list_rev (Cons (TComment buf, acc))
+      else if c == ">" then data (i + 1) (Cons (TComment buf, acc))
+      else if c == "-" then comment_end_dash (i + 1) acc (buf ++ "--!")
+      else comment_body i acc (buf ++ "--!")
+
+    and before_doctype_name = fn (i: int) -> fn (acc: token list) ->
+      let c = at i in
+      if c == "" then
+        list_rev (Cons (TDoctype ("", "", false, "", false, false), acc))
+      else if _is_space c then before_doctype_name (i + 1) acc
+      else if c == ">" then
+        data (i + 1) (Cons (TDoctype ("", "", false, "", false, false), acc))
+      else doctype_name (i + 1) acc (_lower c)
+
+    and doctype_name = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+      let c = at i in
+      if c == "" then
+        list_rev (Cons (TDoctype (name, "", false, "", false, false), acc))
+      else if c == ">" then
+        data (i + 1) (Cons (TDoctype (name, "", false, "", false, true), acc))
+      else if _is_space c then after_doctype_name (i + 1) acc name
+      else doctype_name (i + 1) acc (name ++ _lower c)
+
+    and after_doctype_name = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+      let c = at i in
+      if c == "" then
+        list_rev (Cons (TDoctype (name, "", false, "", false, false), acc))
+      else if _is_space c then after_doctype_name (i + 1) acc name
+      else if c == ">" then
+        data (i + 1) (Cons (TDoctype (name, "", false, "", false, true), acc))
+      else if str_len src >= i + 6
+              && to_lower (substring src i (i + 6)) == "public" then
+        before_doctype_id (i + 6) acc name true
+      else if str_len src >= i + 6
+              && to_lower (substring src i (i + 6)) == "system" then
+        before_doctype_id (i + 6) acc name false
+      else bogus_doctype (i + 1) acc name
+
+    and before_doctype_id = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+                            fn (is_public: bool) ->
+      let c = at i in
+      if c == "" then
+        list_rev (Cons (TDoctype (name, "", false, "", false, false), acc))
+      else if _is_space c then before_doctype_id (i + 1) acc name is_public
+      else if c == "\"" then doctype_id (i + 1) acc name is_public "\"" ""
+      else if c == "'" then doctype_id (i + 1) acc name is_public "'" ""
+      else if c == ">" then
+        data (i + 1) (Cons (TDoctype (name, "", false, "", false, false), acc))
+      else bogus_doctype (i + 1) acc name
+
+    and doctype_id = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+                     fn (is_public: bool) -> fn (q: str) -> fn (buf: str) ->
+      let c = at i in
+      if c == "" then
+        list_rev (Cons ((if is_public then TDoctype (name, buf, true, "", false, false)
+                         else TDoctype (name, "", false, buf, true, false)), acc))
+      else if c == q then
+        if is_public then after_doctype_public (i + 1) acc name buf
+        else after_doctype_system (i + 1) acc name "" false buf
+      else if c == ">" then
+        data (i + 1) (Cons ((if is_public then TDoctype (name, buf, true, "", false, false)
+                             else TDoctype (name, "", false, buf, true, false)), acc))
+      else doctype_id (i + 1) acc name is_public q (buf ++ c)
+
+    and after_doctype_public = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+                               fn (pub: str) ->
+      let c = at i in
+      if c == "" then
+        list_rev (Cons (TDoctype (name, pub, true, "", false, false), acc))
+      else if _is_space c then after_doctype_public (i + 1) acc name pub
+      else if c == ">" then
+        data (i + 1) (Cons (TDoctype (name, pub, true, "", false, true), acc))
+      else if c == "\"" then doctype_sys_after_pub (i + 1) acc name pub "\"" ""
+      else if c == "'" then doctype_sys_after_pub (i + 1) acc name pub "'" ""
+      else bogus_doctype (i + 1) acc name
+
+    and doctype_sys_after_pub = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+                                fn (pub: str) -> fn (q: str) -> fn (buf: str) ->
+      let c = at i in
+      if c == "" then
+        list_rev (Cons (TDoctype (name, pub, true, buf, true, false), acc))
+      else if c == q then after_doctype_system (i + 1) acc name pub true buf
+      else if c == ">" then
+        data (i + 1) (Cons (TDoctype (name, pub, true, buf, true, false), acc))
+      else doctype_sys_after_pub (i + 1) acc name pub q (buf ++ c)
+
+    and after_doctype_system = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+                               fn (pub: str) -> fn (has_pub: bool) -> fn (sys: str) ->
+      let c = at i in
+      if c == "" then
+        list_rev (Cons (TDoctype (name, pub, has_pub, sys, true, false), acc))
+      else if _is_space c then after_doctype_system (i + 1) acc name pub has_pub sys
+      else if c == ">" then
+        data (i + 1) (Cons (TDoctype (name, pub, has_pub, sys, true, true), acc))
+      else bogus_doctype (i + 1) acc name
+
+    // Anything the DOCTYPE grammar does not accept: skip to ">" and mark it as a
+    // doctype that puts the document in quirks mode.
+    and bogus_doctype = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
+      let c = at i in
+      if c == "" then
+        list_rev (Cons (TDoctype (name, "", false, "", false, false), acc))
+      else if c == ">" then
+        data (i + 1) (Cons (TDoctype (name, "", false, "", false, false), acc))
+      else bogus_doctype (i + 1) acc name
+    in
+    data 0 Nil;
+
+  // One line per token, in the shape the conformance harness compares. Kept next
+  // to the tokenizer because it is part of what the gate reads, not a debug aid.
+  let _esc = fn (s: str) ->
+    let rec go = fn (i: int) -> fn (out: str) ->
+      if i >= str_len s then out
+      else
+        let c = char_at s i in
+        let e =
+          if c == "\\" then "\\\\"
+          else if c == "\t" then "\\t"
+          else if c == "\n" then "\\n"
+          else if c == "\r" then "\\r"
+          else c in
+        go (i + 1) (out ++ e) in
+    go 0 "";
+
+  let render = fn (ts: token list) ->
+    let one = fn (t: token) ->
+      match t with
+      | TDoctype (name, pub, has_pub, sys, has_sys, ok) ->
+        "D\t" ++ _esc name
+        // `\N` for a missing identifier: _esc doubles every backslash, so no
+        // rendered value can collide with it. A NUL would have been the obvious
+        // sentinel and is the one thing a str cannot carry through the compiled
+        // backends.
+        ++ "\t" ++ (if has_pub then _esc pub else "\\N")
+        ++ "\t" ++ (if has_sys then _esc sys else "\\N")
+        ++ "\t" ++ (if ok then "1" else "0")
+      | TStart (name, attrs, selfc) ->
+        let rec go = fn (xs: attr list) -> fn (out: str) ->
+          match xs with
+          | Nil -> out
+          | Cons (a, rest) -> go rest (out ++ "\t" ++ _esc a.name ++ "=" ++ _esc a.value) in
+        "S\t" ++ _esc name ++ "\t" ++ (if selfc then "1" else "0") ++ go attrs ""
+      | TEnd name -> "E\t" ++ _esc name
+      | TComment data -> "C\t" ++ _esc data
+      | TChar data -> "T\t" ++ _esc data in
+    str_join "\n" (list_map ts one);
+}

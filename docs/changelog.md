@@ -4,6 +4,43 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.250 — 2026-08-14
+
+_An HTML tokenizer, measured against the standard's own suite from the first run:
+1,505 of 1,704._
+
+```
+  contrib/html/tokenizer.mere            the state machine, with the standard's state names
+  test/data/html5lib/*.test              vendored html5lib-tests (tokenizer)
+  scripts/gen_html5lib_testdata.sh       how they got here (maintenance, needs network)
+  scripts/html_tokenizer_conformance.sh  the gate
+```
+
+**Written as the standard writes it**: one function per named state, so a line can
+be found in the specification by searching for its state. Not a regular expression
+or a lookahead scanner, because the recovery rules are what make HTML parseable at
+all and they are stated per state — `<`, `</`, `<!` and `<?` all have defined
+behaviour when what follows them is not what it looked like, and that is where the
+bugs are. Two of the first three the suite found were exactly that shape: a
+repeated attribute keeping the last instead of the first, and a comment ending in a
+lone dash keeping it instead of dropping it.
+
+**The pass count is pinned exactly, not as a floor.** A floor lets a regression hide
+behind a new pass. The harness prints the first ten failures in full, so what is
+missing is in the output rather than only in a document — and what is not covered
+yet is counted by category rather than skipped silently: character references (53),
+non-Data initial states (111), U+0000 replacement (57).
+
+The suite is vendored rather than fetched by the gate, the same decision the UCD
+conformance files got: a gate that needs the network fails for reasons that have
+nothing to do with the code.
+
+**Placement**: a conformant tokenizer is a library — the same shape as `contrib/url`
+and `contrib/encoding` — so it lives here. Tree construction is where a browser
+starts and is not.
+
+---
+
 ## v0.1.249 — 2026-08-14
 
 _A window, its pixels, and its input — promoted from a probe to a capability. The

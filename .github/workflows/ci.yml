@@ -207,6 +207,11 @@ jobs:
       - name: window_check
         run: sh scripts/window_check.sh
 
+      # The HTML tokenizer against html5lib-tests, the suite maintained alongside
+      # the specification. Vendored, so this needs no network.
+      - name: html_tokenizer_conformance
+        run: sh scripts/html_tokenizer_conformance.sh
+
       - name: infer_scaling (type inference stays linear)
         run: sh scripts/infer_scaling.sh
 

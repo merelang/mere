@@ -1,0 +1,46 @@
+// Runs the tokenizer over a file of cases, one per line, and prints what it made
+// of each. The conformance harness writes the file and reads this back.
+//
+// The cases arrive escaped rather than raw because an HTML test input contains
+// newlines, tabs, NULs and lone control characters — the exact things a
+// line-per-case file cannot carry — and because passing them as Mere source would
+// mean two escaping schemes instead of one.
+
+import "../../contrib/html/tokenizer.mere";
+
+let unescape = fn (s: str) ->
+  let hex = fn (c: str) ->
+    if c >= "0" && c <= "9" then ord c - 48
+    else if c >= "a" && c <= "f" then ord c - 87
+    else if c >= "A" && c <= "F" then ord c - 55
+    else 0 in
+  let rec go = fn (i: int) -> fn (out: str) ->
+    if i >= str_len s then out
+    else
+      let c = char_at s i in
+      if c != "\\" || i + 1 >= str_len s then go (i + 1) (out ++ c)
+      else
+        let d = char_at s (i + 1) in
+        if d == "\\" then go (i + 2) (out ++ "\\")
+        else if d == "t" then go (i + 2) (out ++ "\t")
+        else if d == "n" then go (i + 2) (out ++ "\n")
+        else if d == "r" then go (i + 2) (out ++ "\r")
+        else if d == "x" && i + 3 < str_len s then
+          go (i + 4) (out ++ chr (hex (char_at s (i + 2)) * 16
+                                 + hex (char_at s (i + 3))))
+        else go (i + 2) (out ++ d) in
+  go 0 "";
+
+let rec run = fn (xs: str list) -> fn (i: int) ->
+  match xs with
+  | Nil -> ()
+  | Cons (line, rest) ->
+    let _ = print ("##" ++ show i) in
+    let _ = print (Html.render (Html.tokenize (unescape line))) in
+    run rest (i + 1);
+
+let path = match args () with
+  | Cons (p, _) -> p
+  | Nil -> "cases.txt";
+let _ = run (read_lines path) 0;
+0
