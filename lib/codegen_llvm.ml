@@ -616,6 +616,27 @@ let synthesize_curried_eta_llvm (name : string) (arrow_ty : Ast.ty) (loc : Loc.t
 let multi_inst_fns_llvm : (string, Ast.ty list) Hashtbl.t = Hashtbl.create 4
 
 (* Phase 25.5: mangle a fn name with its concrete arrow type tag. *)
+(* Mere top-level names and the C library share one global namespace in the
+   emitted IR, and this backend was putting Mere names in it unprefixed. When the
+   prelude grew an integer `pow` (v0.1.245) that became `define @pow`, which is
+   libm's symbol — and `@llvm.pow.f64` lowers to a call to `pow`, so every `f_pow`
+   on this backend called the integer one and `f_pow 3.0 2.0` came back `3.0`.
+   Neither `internal` linkage nor renaming only the intrinsic helps: the collision
+   is the name. The C backend has prefixed since it was written; this one now does
+   too, with the same `mu_`. A site missed by this prefix fails at link time with
+   an undefined symbol, which is the loud kind of wrong.
+
+   Not prefixed: `extern fn` names (those ARE C symbols, which is the point of
+   declaring them) and the generated adapters, whose `_<tag>_closure_fn` and
+   `_as_value` suffixes already put them out of reach of a bare C name. *)
+let mu (name : string) : string = "mu_" ^ name
+
+(* The inverse, for the one place that needs the source name back: the
+   free-variable analysis compares against names the program wrote. *)
+let unmu (name : string) : string =
+  let n = String.length name in
+  if n > 3 && String.sub name 0 3 = "mu_" then String.sub name 3 (n - 3) else name
+
 let mangled_inst_name_llvm (base : string) (arrow : Ast.ty) : string =
   let rec collect_tys t acc =
     match Ast.walk t with
@@ -1538,7 +1559,7 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
       List.map (fun (arrow, cloned_body) ->
         match Ast.walk arrow with
         | Ast.TyArrow (p, r) ->
-          { name = mangled_inst_name_llvm s.sname arrow;
+          { name = mu (mangled_inst_name_llvm s.sname arrow);
             param = s.sparam;
             body = cloned_body;
             param_ty = Ast.walk p;
@@ -1552,7 +1573,7 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
       (match Hashtbl.find_opt resolved s.sname with
        | None -> []
        | Some (Ast.TyArrow (p, r)) ->
-         [{ name = s.sname; param = s.sparam; body = s.sbody;
+         [{ name = mu s.sname; param = s.sparam; body = s.sbody;
             param_ty = Ast.walk p; return_ty = Ast.walk r }]
        | Some _ ->
          raise (Codegen_error (s.sfun.Ast.loc,
@@ -1755,7 +1776,10 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
       List.iter (fun (_, e) -> walk host_param host_locals e) fs
   in
   List.iter (fun (f : fn_decl) ->
-    current_host := f.name;
+    (* The source name: this is the key `set_inner_lifts_for_host_llvm` looks the
+       host up by, and it also indexes toplevel_fn_pos. Emitted names are for the
+       IR only. *)
+    current_host := unmu f.name;
     walk f.param [f.param] f.body) fns;
   (* Phase 45 (DEFERRED §8): compute the transitive capture closure to handle
      mutual references between inner-lifted fns (same algorithm as codegen_c).
@@ -3378,6 +3402,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       || name = "str_of_float" || name = "float_of_str"
       || name = "f_neg" || name = "f_abs"
       || name = "sqrt" || name = "sin" || name = "cos" || name = "tan"
+      || name = "exp" || name = "log"
       || name = "floor" || name = "ceil" || name = "round"
       || name = "print" || name = "fail"
       || name = "fst" || name = "snd"
@@ -3430,8 +3455,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        in
        (* Phase 25.5: if name is multi-inst, use the mangled spec name. *)
        let dispatch_name =
-         if Hashtbl.mem multi_inst_fns_llvm name then mangled_inst_name_llvm name arrow
-         else name
+         if Hashtbl.mem multi_inst_fns_llvm name then
+           mu (mangled_inst_name_llvm name arrow)
+         else mu name
        in
        let r0 = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = insertvalue %%%s undef, ptr null, 0" r0 cname);
@@ -3444,7 +3470,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
           file-scope global @name. Load it into a register. *)
        let ty = Hashtbl.find top_globals_llvm name in
        let r = fresh_reg () in
-       emit_instr (Printf.sprintf "  %s = load %s, ptr @%s" r (llvm_ty_of ty) name);
+       emit_instr (Printf.sprintf "  %s = load %s, ptr @%s" r (llvm_ty_of ty) (mu name));
        r
      | None when Hashtbl.mem inner_lifts_llvm name ->
        (* Phase 39.A2: materialize inner-lifted fn at value position.
@@ -3689,7 +3715,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
           right source-order point. *)
        if Hashtbl.mem top_globals_llvm name then
          emit_instr (Printf.sprintf "  store %s %s, ptr @%s"
-                       (llvm_ty_of value_ty) rv name);
+                       (llvm_ty_of value_ty) rv (mu name));
        (* Phase 38.G-1 (DEFERRED §1.3 Level 1): detect safe auto-Drop. *)
        let value_is_fresh_owned_vec =
          (match value.Ast.node with
@@ -4283,6 +4309,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   (* Phase 34.4: libm functions (intrinsics where available) *)
   | Ast.App ({ node = Ast.Var fname; _ }, a_e)
     when fname = "sqrt" || fname = "sin" || fname = "cos" || fname = "tan"
+         || fname = "exp" || fname = "log"
          || fname = "floor" || fname = "ceil" || fname = "round" ->
     let llvm_fn = match fname with
       | "sqrt" -> "@llvm.sqrt.f64"
@@ -4294,6 +4321,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       (* llvm.round is half-away-from-zero, which is what C's round() and the
          interpreter both do — llvm.roundeven would be the other one. *)
       | "round" -> "@llvm.round.f64"
+      (* v0.1.248: the last two the matrix called MISSING here. *)
+      | "exp" -> "@llvm.exp.f64"
+      | "log" -> "@llvm.log.f64"
       | _ -> "@sqrt"
     in
     let av = emit_expr env a_e in
@@ -6123,7 +6153,7 @@ and emit_user_app (env : env) (e : Ast.expr) : string =
                Pass the loaded value of `ptr @cn`, not `ptr %cn` (register). *)
             let r = fresh_reg () in
             emit_instr (Printf.sprintf "  %s = load %s, ptr @%s"
-                          r (llvm_ty_of cty) cn);
+                          r (llvm_ty_of cty) (mu cn));
             r
           | None -> "%" ^ llvm_safe_local cn  (* fallback *)
         in
@@ -6173,10 +6203,10 @@ and emit_user_app (env : env) (e : Ast.expr) : string =
         match f_ty with
         | Some t ->
           (match Ast.walk t with
-           | Ast.TyArrow _ as arrow -> mangled_inst_name_llvm name arrow
-           | _ -> name)
-        | None -> name
-      else name
+           | Ast.TyArrow _ as arrow -> mu (mangled_inst_name_llvm name arrow)
+           | _ -> mu name)
+        | None -> mu name
+      else mu name
     in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call %s @%s(%s %s)" r ret_ty dispatch_name arg_ty av);
@@ -6391,7 +6421,8 @@ let emit_fn_def (f : fn_decl) : string =
   instrs := [];
   current_var_types := [(f.param, f.param_ty)];
   current_expected_ty := Some f.return_ty;
-  current_host_fn_llvm := f.name;
+  (* A key into tables built from source names, not a symbol. *)
+  current_host_fn_llvm := unmu f.name;
   emit_instr "entry:";
   let env = [(f.param, "%" ^ llvm_safe_local f.param)] in
   (* A position that names a file came from the prelude or an import: not a line
@@ -6399,7 +6430,10 @@ let emit_fn_def (f : fn_decl) : string =
   let dbg =
     match !debug_file with
     | Some _ when f.body.Ast.loc.Loc.line > 0 && f.body.Ast.loc.Loc.file = None ->
-      debug_subprograms := (f.name, f.body.Ast.loc.Loc.line) :: !debug_subprograms;
+      (* The source name: a debugger shows this, and `mu_twice` is not what the
+         program calls it. The emitted symbol is the mangled one; the two differ
+         on purpose. *)
+      debug_subprograms := (unmu f.name, f.body.Ast.loc.Loc.line) :: !debug_subprograms;
       let n = List.length !debug_subprograms in
       Some n
     | _ -> None
@@ -6489,6 +6523,8 @@ let runtime_decls =
       "declare double @llvm.sin.f64(double)";
       "declare double @llvm.cos.f64(double)";
       "declare double @tan(double)";
+      "declare double @llvm.exp.f64(double)";
+      "declare double @llvm.log.f64(double)";
       "declare double @llvm.pow.f64(double, double)";
       "declare double @atan2(double, double)";
       "declare i32 @setjmp(ptr) returns_twice";
@@ -6505,7 +6541,7 @@ let runtime_decls =
 let emit_top_globals_llvm (lst : (string * Ast.expr * Ast.ty) list) : string list =
   List.map (fun (name, _value, ty) ->
     Printf.sprintf "@%s = internal global %s zeroinitializer"
-      name (llvm_ty_of ty)) lst
+      (mu name) (llvm_ty_of ty)) lst
 
 (* Region runtime — mirrors codegen_c's region_runtime_helpers but
    expressed in LLVM IR. Uses an 8-byte aligned bump-pointer allocator.
@@ -10715,7 +10751,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      Phase 25.5: include multi-inst base names (un-mangled) so inner
      fn free_var analysis treats `rev` etc. as a known toplevel — the
      call site rewrites to the mangled spec at emit time. *)
-  let mangled_names = List.map (fun f -> f.name) fns in
+  (* Source names, not emitted names: this list is compared against `Ast.Var`
+     names by the free-variable analysis, so it has to be what the program wrote.
+     Handing it the `mu_`-prefixed emitted names made every top-level fn look like
+     a free variable to an inner fn that called one, which lifted it as a capture
+     and then passed a local that does not exist. *)
+  let mangled_names = List.map (fun f -> unmu f.name) fns in
   let multi_base_names =
     Hashtbl.fold (fun k _ acc -> k :: acc) multi_inst_fns_llvm []
   in
@@ -10723,7 +10764,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   lift_inner_fns_llvm toplevel_names fns;
   let fn_defs =
     List.map (fun f ->
-      set_inner_lifts_for_host_llvm f.name;
+      set_inner_lifts_for_host_llvm (unmu f.name);
       emit_fn_def f) fns
   in
   let lifted_defs = List.map emit_lifted_fn_llvm !lifted_fns_llvm in

@@ -46,7 +46,7 @@ The interpreter has every one of these, and is not a column.
 | `env_var` | nocompile | refused | yes |
 | `even` | yes | yes | yes |
 | `exit` | yes | refused | yes |
-| `exp` | nocompile | MISSING | MISSING |
+| `exp` | yes | yes | yes |
 | `f_abs` | yes | yes | yes |
 | `f_add` | yes | yes | yes |
 | `f_div` | yes | yes | yes |
@@ -85,7 +85,7 @@ The interpreter has every one of these, and is not a column.
 | `join` | yes | yes | yes |
 | `lcm` | yes | yes | yes |
 | `list_dir` | yes | refused | refused |
-| `log` | nocompile | MISSING | MISSING |
+| `log` | yes | yes | yes |
 | `map_new` | yes | yes | yes |
 | `max` | yes | yes | yes |
 | `min` | yes | yes | yes |

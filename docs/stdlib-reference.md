@@ -251,6 +251,15 @@ str_unescape "a\\nb"                          // a + newline + b (3 chars)
 | `bit_shl` | `int -> int -> int` | Shift left. Keep counts in `0..62` for portable code — int is 64-bit on C, LLVM and Wasm (widened in v0.1.96 / v0.1.127), 63-bit on interp |
 | `bit_shr` | `int -> int -> int` | **Arithmetic** (sign-propagating) shift right; `bit_shr x n` equals floor division by 2^n on every backend (v0.1.42) |
 
+**★ A transcendental is not correctly rounded by anybody** (v0.1.248). `exp` and
+`log` reach C through libm, LLVM through `@llvm.exp.f64`, and Wasm through the host's
+`Math.exp` — and measured, `exp -10` is `4.5399929762484854e-05` on three of those and
+`4.539992976248485e-05` through JavaScript. That is not a bug in any of them.
+`test/parity/exp_log.mere` therefore prints exact values only at the points that are
+exact in binary floating point (`exp 0`, `log 1`) and asserts everything else as an
+identity within a tolerance — which still fails an `exp` that returns its argument or a
+`log` wired to log10, and does not report the C library's build options as a difference.
+
 **★ Integer `/` and `%` by zero raise** (v0.1.247): `division by zero` and
 `modulo by zero`, catchable with `try_or`, on the interpreter and the C, LLVM and
 Wasm backends. It cost a branch per division to make that true, and it was worth it
@@ -311,8 +320,8 @@ own answer, which made it portable over only half the range its result could hol
 | `f_min` ★ | `float -> float -> float` | Smaller (Phase 19.7) |
 | `f_max` ★ | `float -> float -> float` | Larger (Phase 19.7) |
 | `f_pow` ★ | `float -> float -> float` | Power `base ^ exp` (Phase 19.7) |
-| `log` ★ | `float -> float` | Natural log (Phase 19.7) |
-| `exp` ★ | `float -> float` | e^x (Phase 19.7) |
+| `log` ★ | `float -> float` | Natural log (Phase 19.7; all 4 backends in v0.1.248) |
+| `exp` ★ | `float -> float` | e^x (Phase 19.7; all 4 backends in v0.1.248) |
 | `sin` ★ | `float -> float` | Sine (radians; Phase 19.7) |
 | `cos` ★ | `float -> float` | Cosine (Phase 19.7) |
 | `tan` ★ | `float -> float` | Tangent (Phase 19.7) |

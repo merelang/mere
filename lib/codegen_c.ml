@@ -1445,6 +1445,7 @@ let rec emit_expr (e : Ast.expr) : string =
       || name = "str_of_float" || name = "float_of_str"
       || name = "f_neg" || name = "f_abs"
       || name = "sqrt" || name = "sin" || name = "cos" || name = "tan"
+      || name = "exp" || name = "log"
       || name = "floor" || name = "ceil" || name = "round"
       || name = "print" || name = "print_err" || name = "print_no_nl" || name = "fail"
       || name = "fst" || name = "snd"
@@ -2371,6 +2372,14 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "cos(%s)" (emit_expr arg)
      | Ast.Var "tan" when not (user_shadows "tan") ->
        Printf.sprintf "tan(%s)" (emit_expr arg)
+     (* v0.1.248: the same treatment for the two the matrix still called
+        `nocompile` — in the environment with a type, emitting a call to a name
+        the C compiler had never heard of. Same shape as floor / ceil / round in
+        v0.1.243, and the last of that family. *)
+     | Ast.Var "exp" when not (user_shadows "exp") ->
+       Printf.sprintf "exp(%s)" (emit_expr arg)
+     | Ast.Var "log" when not (user_shadows "log") ->
+       Printf.sprintf "log(%s)" (emit_expr arg)
      (* floor / ceil / round had no case on ANY compiled backend: emit succeeded
         and the C compiler then failed on an undeclared `mu_floor`, so nothing
         short of a program that used them could notice. Found while writing the

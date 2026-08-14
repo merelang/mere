@@ -4,6 +4,64 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.248 — 2026-08-14
+
+_Adding the last two math builtins turned up a silent wrong answer in every LLVM program
+that used floats: `f_pow 3.0 2.0` was `3.0`, because the prelude's integer `pow` had
+taken libm's symbol._
+
+```
+  lib/codegen_llvm.ml          Mere top-level names are prefixed `mu_`, as C's always were
+  lib/codegen_c.ml             exp / log beside sqrt
+  lib/codegen_wasm.ml          the same, as host imports
+  scripts/run_wasm.js + 5      __lang_exp / __lang_log; and str_of_float follows C's %g
+  test/parity/exp_log.mere     new: identities within a tolerance, not digits
+```
+
+**`exp` and `log`** were the last of the family that began with `floor` / `ceil` /
+`round` in v0.1.243: names in the typer's environment with a type, so a program using
+them type-checked everywhere and then `mere -c` emitted a call to a symbol the C compiler
+had never heard of, while LLVM and Wasm said "unbound variable". They are three lines on
+each backend. MISSING 8 → 6, nocompile 10 → 8.
+
+**Then the new test failed on LLVM, for a reason that had nothing to do with it:
+`f_pow 3.0 2.0` came back `3.0`.** This backend emitted Mere top-level names into the
+IR's global namespace **unprefixed**, so when the prelude grew an integer `pow` in
+v0.1.245 that became `define @pow` — which is libm's symbol, and `@llvm.pow.f64` lowers
+to a call to `pow`. Every `f_pow` on this backend has been calling the integer power
+since. The C backend has prefixed with `mu_` since it was written; this one now does too.
+
+Neither `internal` linkage nor renaming the intrinsic helps — both were tried and
+measured. The collision is the name, and the name was in a namespace shared with the C
+library: `write`, `exit`, `time`, `free` and every other libc symbol were the same
+accident waiting for a program to name a function after one.
+
+The rename is the loud kind of change: a site missed by the prefix fails at link time
+with an undefined symbol rather than computing something else. Four such sites turned up
+and all four were tables **keyed by the source name** — the free-variable analysis, the
+lifting pass's host, the shadowing guard's position lookup, and the debug info's
+`DISubprogram(name:)`, which shows in a debugger and must stay what the program calls it.
+Emitted names are for the IR; source names are for everything that reasons about the
+program.
+
+**And the Wasm host printed floats by a different rule.** `str_of_float` there emulated
+C's `%g` with JavaScript's `toPrecision`, which is not that rule: `%g` goes exponential
+when the decimal exponent is below -4 and `toPrecision` stays decimal down to 1e-7, so
+`exp -10` printed as `0.00004539992976248485` on Wasm and `4.5399929762484854e-05`
+everywhere else. The host implements the actual rule now, exponent padded to two digits
+as C does.
+
+**What the test asserts, and why it is not digits.** A transcendental function is not
+required to be correctly rounded by anybody: `exp -10` differs in the last bit between
+libm and JavaScript, and a gate comparing the digits would be reporting the C library's
+build options. So `exp_log.mere` prints exact values only where the answer is exact in
+binary floating point and asserts everything else as an identity within a tolerance —
+`log (exp x) = x`, `exp (2 log 3) = f_pow 3 2`, `exp (0.5 log 2) = sqrt 2`. That still
+fails an `exp` that returns its argument or a `log` wired to log10, both checked by
+reverting the fix and watching the gate go red.
+
+---
+
 ## v0.1.247 — 2026-08-14
 
 _`x / 0` was four different things, and three of them were not failures. The gate built

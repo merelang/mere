@@ -80,24 +80,38 @@ const wasmPath = process.argv[2];
       }
     },
     __lang_str_of_float: (f) => {
-      // v0.1.65: shortest round-trip formatting (12 digits first, widen
-      // toward 17 until the string parses back to the same double) —
-      // keep in lockstep with run_wasm.js and the interp / C / LLVM.
       let s;
       if (Number.isNaN(f)) s = "nan";
       else if (f === Infinity) s = "inf";
       else if (f === -Infinity) s = "-inf";
       else {
         for (let p = 12; ; p++) {
-          s = f.toPrecision(p);
-          if (s.includes("e") || s.includes("E")) {
-            s = s.replace(/(\.\d*?)0+(e[+-]?\d+)/i, "$1$2").replace(/\.(e[+-]?\d+)/i, "$1");
-          } else if (s.includes(".")) {
-            s = s.replace(/\.?0+$/, "");
+          // C's %g, which is what the other three backends print through: with
+          // P significant digits and X the decimal exponent, use %e when
+          // X < -4 or X >= P and %f otherwise, then strip trailing zeros.
+          // `toPrecision` is NOT that rule — it stays decimal down to 1e-7 — so
+          // exp -10 printed as 0.00004539992976248485 here and as
+          // 4.5399929762484854e-05 on the other three. The exponent comes from
+          // toExponential rather than log10, which is off by one at a power of
+          // ten.
+          const es = f.toExponential(p - 1);
+          const x = parseInt(es.slice(es.indexOf("e") + 1), 10);
+          if (x < -4 || x >= p) {
+            let m = es.slice(0, es.indexOf("e"));
+            if (m.includes(".")) m = m.replace(/0+$/, "").replace(/\.$/, "");
+            const e = es.slice(es.indexOf("e") + 1);
+            const sign = e[0] === "-" ? "-" : "+";
+            // C pads the exponent to at least two digits; JS does not.
+            const digits = e.replace(/^[+-]/, "").padStart(2, "0");
+            s = m + "e" + sign + digits;
+          } else {
+            s = f.toFixed(Math.max(0, p - 1 - x));
+            if (s.includes(".")) s = s.replace(/0+$/, "").replace(/\.$/, "");
             if (s === "" || s === "-") s = "0";
           }
           if (p >= 17 || Number(s) === f) break;
         }
+        // OCaml: append ".0" for plain integer-valued floats
         if (!/[.eEni]/.test(s)) s += ".0";
       }
       return writeStr(s);
@@ -105,7 +119,7 @@ const wasmPath = process.argv[2];
     __lang_float_of_str: (ptr) => parseFloat(readCStr(ptr)),
     __lang_sin: Math.sin,
     __lang_cos: Math.cos,
-    __lang_tan: Math.tan,
+    __lang_tan: Math.tan, __lang_exp: Math.exp, __lang_log: Math.log,
     __lang_f_pow: Math.pow,
     __lang_atan2: Math.atan2,
     // Positioned file I/O (v0.1.153), same contract as run_wasm.js: the
