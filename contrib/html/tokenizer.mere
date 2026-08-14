@@ -203,7 +203,7 @@ module Html {
       else if _is_space c then before_attr_name (i + 1) acc name attrs
       else if c == "/" then self_closing (i + 1) acc name attrs
       else if c == ">" then
-        data (i + 1) (Cons (TStart (name, finish_attrs attrs, selfc), acc))
+        after_start name (i + 1) (Cons (TStart (name, finish_attrs attrs, selfc), acc))
       else tag_name (i + 1) acc (name ++ _nz (_lower c)) attrs selfc
 
     and before_attr_name = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
@@ -213,7 +213,7 @@ module Html {
       else if _is_space c then before_attr_name (i + 1) acc name attrs
       else if c == "/" then self_closing (i + 1) acc name attrs
       else if c == ">" then
-        data (i + 1) (Cons (TStart (name, finish_attrs attrs, false), acc))
+        after_start name (i + 1) (Cons (TStart (name, finish_attrs attrs, false), acc))
       else if c == "=" then
         // A name starting with "=" is a parse error and the "=" is part of it.
         attr_name (i + 1) acc name attrs "="
@@ -228,7 +228,7 @@ module Html {
         self_closing (i + 1) acc name (Cons (attr { name = an, value = "" }, attrs))
       else if c == "=" then before_attr_value (i + 1) acc name attrs an
       else if c == ">" then
-        data (i + 1) (Cons (TStart (name,
+        after_start name (i + 1) (Cons (TStart (name,
           finish_attrs (Cons (attr { name = an, value = "" }, attrs)), false), acc))
       else attr_name (i + 1) acc name attrs (an ++ _nz (_lower c))
 
@@ -241,7 +241,7 @@ module Html {
       else if c == "/" then
         self_closing (i + 1) acc name (Cons (attr { name = an, value = "" }, attrs))
       else if c == ">" then
-        data (i + 1) (Cons (TStart (name,
+        after_start name (i + 1) (Cons (TStart (name,
           finish_attrs (Cons (attr { name = an, value = "" }, attrs)), false), acc))
       // A new attribute starts; the previous one had no value.
       else attr_name (i + 1) acc name (Cons (attr { name = an, value = "" }, attrs))
@@ -255,7 +255,7 @@ module Html {
       else if c == "\"" then attr_value_dq (i + 1) acc name attrs an ""
       else if c == "'" then attr_value_sq (i + 1) acc name attrs an ""
       else if c == ">" then
-        data (i + 1) (Cons (TStart (name,
+        after_start name (i + 1) (Cons (TStart (name,
           finish_attrs (Cons (attr { name = an, value = "" }, attrs)), false), acc))
       else attr_value_uq i acc name attrs an ""
 
@@ -290,7 +290,7 @@ module Html {
       else if _is_space c then
         before_attr_name (i + 1) acc name (Cons (attr { name = an, value = av }, attrs))
       else if c == ">" then
-        data (i + 1) (Cons (TStart (name,
+        after_start name (i + 1) (Cons (TStart (name,
           finish_attrs (Cons (attr { name = an, value = av }, attrs)), false), acc))
       else if c == "&" then
         let (txt, took) = charref src i true in
@@ -305,7 +305,7 @@ module Html {
       else if _is_space c then before_attr_name (i + 1) acc name attrs
       else if c == "/" then self_closing (i + 1) acc name attrs
       else if c == ">" then
-        data (i + 1) (Cons (TStart (name, finish_attrs attrs, false), acc))
+        after_start name (i + 1) (Cons (TStart (name, finish_attrs attrs, false), acc))
       else before_attr_name i acc name attrs
 
     and self_closing = fn (i: int) -> fn (acc: token list) -> fn (name: str) ->
@@ -313,7 +313,7 @@ module Html {
       let c = at i in
       if c == "" then list_rev acc
       else if c == ">" then
-        data (i + 1) (Cons (TStart (name, finish_attrs attrs, true), acc))
+        after_start name (i + 1) (Cons (TStart (name, finish_attrs attrs, true), acc))
       else before_attr_name i acc name attrs
 
     // `<?`, `</=`, and everything else that looks like markup and is not: the rest
@@ -462,16 +462,29 @@ module Html {
 
     // Anything the DOCTYPE grammar does not accept: skip to ">" and mark it as a
     // doctype that puts the document in quirks mode.
+    // After a start tag, the state its content is in. The standard has the tree
+    // builder decide this, and for HTML it is a pure function of the tag name — the
+    // exception is foreign content, where `<title>` inside SVG is an ordinary
+    // element. Until this backend knows about foreign content, deciding here is the
+    // same answer and does not need the two to be one loop.
+    and after_start = fn (name: str) -> fn (i: int) -> fn (acc: token list) ->
+      if name == "title" || name == "textarea"
+         || name == "style" || name == "xmp" || name == "iframe"
+         || name == "noembed" || name == "noframes"
+         || name == "script" then text_like name i acc
+      else if name == "plaintext" then plaintext i acc
+      else data i acc
+
     // RCDATA, RAWTEXT and script data share one shape: everything is character
     // data until `</` followed by the tag that opened the element and then a
     // space, a slash or `>`. Anything else after `</` is character data too — which
     // is why `</` inside a script is harmless and `</script` is not.
-    and text_like = fn (i: int) -> fn (acc: token list) ->
+    and text_like = fn (last: str) -> fn (i: int) -> fn (acc: token list) ->
       if i >= n then list_rev acc
       else
         let c = at i in
-        if c != "<" then text_like (i + 1) (push_char acc c)
-        else if at (i + 1) != "/" then text_like (i + 1) (push_char acc c)
+        if c != "<" then text_like last (i + 1) (push_char acc c)
+        else if at (i + 1) != "/" then text_like last (i + 1) (push_char acc c)
         else
           let ln = str_len last in
           let after = at (i + 2 + ln) in
@@ -479,7 +492,7 @@ module Html {
              && to_lower (substring src (i + 2) (i + 2 + ln)) == last
              && (_is_space after || after == "/" || after == ">")
           then end_tag_name (i + 2 + ln) acc last
-          else text_like (i + 1) (push_char acc c)
+          else text_like last (i + 1) (push_char acc c)
 
     // PLAINTEXT never ends: everything from here is character data.
     and plaintext = fn (i: int) -> fn (acc: token list) ->
@@ -504,7 +517,7 @@ module Html {
     in
     if state == "PLAINTEXT state" then plaintext 0 Nil
     else if state == "RCDATA state" || state == "RAWTEXT state"
-            || state == "Script data state" then text_like 0 Nil
+            || state == "Script data state" then text_like last 0 Nil
     else data 0 Nil;
 
   let tokenize = fn (src: str) -> tokenize_in "Data state" "" src;

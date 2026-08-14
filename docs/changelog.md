@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.257 — 2026-08-14
+
+_The tokenizer switches its own state after a start tag, which is a shortcut with a
+stated boundary rather than a guess._
+
+`<title>t</title>` used to tokenize as a start tag, a bare `t`, and an end tag,
+because the content of a title is RCDATA and **the standard has the tree builder
+decide that**. A tokenizer handed a whole document cannot ask.
+
+For HTML the decision is a pure function of the tag name, so the tokenizer makes it:
+title and textarea go to RCDATA, style and its relatives to RAWTEXT, script to script
+data, plaintext to PLAINTEXT. **The exception is foreign content** — `<title>` inside
+SVG is an ordinary element — and until this backend knows about foreign content the
+two answers are the same. That is why this is a shortcut and not a mistake: the
+boundary is known and written down where it is taken.
+
+The conformance suite still passes 1,900 of 1,900, and the browser dogfood's tree
+construction went from 83 of 189 to 88.
+
+---
+
 ## v0.1.256 — 2026-08-14
 
 _All 228 labels the Encoding Standard defines, generated, replacing a hand-written
