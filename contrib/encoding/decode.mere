@@ -73,6 +73,15 @@ module Encoding {
             || s == "iso_8859-1" || s == "iso_8859-1:1987" || s == "iso-ir-100"
             || s == "ansi_x3.4-1968"
     then Some "windows-1252"
+    // v0.1.255: labels without a decoder here, and listing them is still the right
+    // thing — `label_of` answers "what does this label name", which is a different
+    // question from "can this directory decode it". Leaving them out made
+    // `<meta charset=utf-16>` look like a page with no declaration at all, which
+    // the HTML standard answers differently from a page declaring UTF-16: that
+    // declaration cannot be true (it is written in ASCII) and reads as UTF-8.
+    // Found by the browser dogfood, which is what asks the question.
+    else if s == "utf-16" || s == "utf-16le" then Some "utf-16le"
+    else if s == "utf-16be" then Some "utf-16be"
     else if s == "shift_jis" || s == "shift-jis" || s == "sjis" || s == "x-sjis"
             || s == "ms932" || s == "ms_kanji" || s == "windows-31j"
             || s == "csshiftjis"

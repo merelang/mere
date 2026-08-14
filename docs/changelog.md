@@ -4,6 +4,24 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.255 — 2026-08-14
+
+_A label the table forgot, found by the program that asks about labels._
+
+`label_of` had no `utf-16`, `utf-16le` or `utf-16be`. The comment above that table
+already said what would happen — "it cannot discover a label we forgot to list, and
+that gap is real and is recorded rather than implied" — and this is the gap, found by
+the browser dogfood asking a page what encoding it claims to be in.
+
+Listing them is right even though nothing here decodes UTF-16: `label_of` answers
+"what does this label name", which is a different question from "can this directory
+decode it", and `decode` already returns `None` for a name it does not implement.
+Leaving them out made `<meta charset=utf-16>` look like a page with **no declaration
+at all** — and the HTML standard answers that differently from a page declaring
+UTF-16, which cannot be true (the declaration is written in ASCII) and reads as UTF-8.
+
+---
+
 ## v0.1.254 — 2026-08-14
 
 _1,900 of 1,900. The vendored tokenizer suite passes entirely, with no exemptions._
