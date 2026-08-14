@@ -103,6 +103,36 @@ type direct_fn_info = {
 }
 let direct_fns : (string, direct_fn_info) Hashtbl.t = Hashtbl.create 16
 
+(* Distinct string literals, in the order first seen: each becomes one static
+   constant carrying the length header this backend's strings expect. Reset per
+   compilation unit by [generate]. *)
+let str_literals : (string, int) Hashtbl.t = Hashtbl.create 512
+
+let str_literal_id (s : string) : int =
+  match Hashtbl.find_opt str_literals s with
+  | Some i -> i
+  | None ->
+    let i = Hashtbl.length str_literals in
+    Hashtbl.add str_literals s i;
+    i
+
+(* Replaced with the declarations once the whole unit has been generated: the
+   literals are only all known by then. *)
+let str_literal_marker = "/*__MERE_STRING_LITERALS__*/"
+
+let str_literal_decls () =
+  let items =
+    Hashtbl.fold (fun s i acc -> (i, s) :: acc) str_literals []
+    |> List.sort (fun (a, _) (b, _) -> compare a b)
+  in
+  String.concat "\n"
+    (List.map
+       (fun (i, s) ->
+         Printf.sprintf
+           "static const struct { size_t l; char s[%d]; } __sl_%d = { %d, %s };"
+           (String.length s + 1) i (String.length s) (Ast.escape_string s))
+       items)
+
 let rec ty_concrete (t : Ast.ty) : bool =
   match Ast.walk t with
   | Ast.TyVar _ | Ast.TyParam _ -> false
@@ -1325,7 +1355,13 @@ let rec emit_expr (e : Ast.expr) : string =
       then s else s ^ ".0"
   | Ast.Bool_lit b -> if b then "1" else "0"
   | Ast.Str_lit s ->
-    Printf.sprintf "__lang_str_dup_n(%s, %d)" (Ast.escape_string s) (String.length s)
+    (* A string literal is immutable and compares by value, so ONE static copy
+       serves every evaluation of it. Emitting a fresh region copy each time
+       (which is what this did) is not free at interpreter scale: mere-ruby
+       evaluates 22930 literal sites, most of them inside `str_eq name "..."`
+       dispatch chains, and paying an allocation + memcpy per comparison cost
+       it about a third of its time and a third of its memory. *)
+    Printf.sprintf "(__sl_%d.s)" (str_literal_id s)
   | Ast.Var name ->
     (* Phase 24.1: shadowing check — if the name is bound as a local
        (in current_var_types) or by a captured env field
@@ -2748,7 +2784,10 @@ let rec emit_expr (e : Ast.expr) : string =
           as its length — the program looped instead of printing its failure. Same
           trap that made str_replace return "" in v0.1.233. *)
        let arg_c =
-         Printf.sprintf "__lang_str_concat(__lang_str_dup_n(\"fail: \", 6), %s)" arg_c
+         (* the prefix is a literal like any other: one static copy, not one
+            per fail site *)
+         Printf.sprintf "__lang_str_concat(%s, %s)"
+           (Printf.sprintf "(__sl_%d.s)" (str_literal_id "fail: ")) arg_c
        in
        (match result_ty with
         | Ast.TyStr ->
@@ -9342,6 +9381,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      desugared main, which drops type decls) and emit a tagged-union
      struct for each declared variant type. This also populates
      variant_tags as a side effect. *)
+  Hashtbl.reset str_literals;
   Hashtbl.reset variant_tags;
   Hashtbl.reset recursive_variants;
   Hashtbl.reset polymorphic_variants;
@@ -10269,6 +10309,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "#include <pthread.h>";  (* Q-012: spawn / join. Link with -pthread on Linux. *)
       "#include <unistd.h>";   (* native FFI: read / write / close *)
       "";
+      (* the static string literals, filled in after the unit is generated *)
+      str_literal_marker;
+      "";
       (* Region runtime FIRST (v0.1.32): native_ffi_runtime's mem_to_str
          allocates in the thread's current region (it used to malloc and
          leak), so the region helpers must precede it. They themselves
@@ -10694,4 +10737,25 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         "}";
         "" ]
   in
-  String.concat "\n" parts
+  let out = String.concat "\n" parts in
+  (* Every literal is known only now, so the declarations are patched in where
+     the marker was reserved above. *)
+  let decls = str_literal_decls () in
+  match String.index_opt out '\000' with
+  | Some _ -> out   (* unreachable; keeps the match total *)
+  | None ->
+    let marker_len = String.length str_literal_marker in
+    (match
+       (* find the marker; it is emitted exactly once *)
+       let rec find i =
+         if i + marker_len > String.length out then None
+         (* cheap first-byte guard: the output is megabytes and the marker is
+            near the top, so this must not String.sub at every position *)
+         else if out.[i] = '/' && String.sub out i marker_len = str_literal_marker then Some i
+         else find (i + 1)
+       in
+       find 0
+     with
+     | None -> out
+     | Some i ->
+       String.sub out 0 i ^ decls ^ String.sub out (i + marker_len) (String.length out - i - marker_len))
