@@ -5211,19 +5211,25 @@ let runtime_helpers = {|
   ;; Phase 36: str_trim — strip leading + trailing whitespace
   (func $__lang_str_trim (param $s8 i64) (result i64)
     (local $p i32) (local $len i32) (local $r i32) (local $i i32) (local $c i32)
-    (local $s i32)
+    (local $s i32) (local $olen i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $p (local.get $s))
+    ;; v0.1.262: the ORIGINAL length, taken once. What follows walks a pointer
+    ;; INTO the string, and an interior pointer has no header of its own --
+    ;; asking $__lang_strlen for its length (as this did) reads the string's
+    ;; own bytes as a length. It is also what bounds the scan, so a NUL inside
+    ;; the value is a byte here like everywhere else.
+    (local.set $olen (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
     ;; skip leading whitespace
     (block $end_lead
       (loop $lp_lead
+        (br_if $end_lead (i32.ge_u (i32.sub (local.get $p) (local.get $s)) (local.get $olen)))
         (local.set $c (i32.load8_u (local.get $p)))
-        (br_if $end_lead (i32.eqz (local.get $c)))
         (br_if $end_lead (i32.eqz (i32.wrap_i64 (call $__lang_is_ws (i64.extend_i32_s (local.get $c))))))
         (local.set $p (i32.add (local.get $p) (i32.const 1)))
         (br $lp_lead)))
-    ;; compute remaining length
-    (local.set $len (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $p)))))
+    ;; what is left after the skip
+    (local.set $len (i32.sub (local.get $olen) (i32.sub (local.get $p) (local.get $s))))
     ;; trim trailing
     (block $end_trail
       (loop $lp_trail

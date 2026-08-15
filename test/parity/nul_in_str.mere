@@ -12,12 +12,13 @@
 //   - LLVM has no length header at all; its str is a bare pointer and
 //     `str_len (chr 0)` is 0 there against 1 everywhere else. The NUL is not
 //     truncated on output, it is never in the value.
-//   - Wasm HAS the header and `str_len` reads it, but the host writes what it
-//     finds up to the first NUL. Making the host trust the header instead
-//     turned up a second thing -- one str on the self-hosted compiler's path
-//     reaches the host with a header that overstates its content by half a
-//     megabyte of zeros -- so the host is left scanning until that is
-//     understood, and this is where it will be noticed.
+//   - Wasm HAS the header and `str_len` reads it, but the JS host writes what
+//     it finds up to the first NUL. It cannot do otherwise yet: the
+//     SELF-HOSTED Wasm backend still emits the pre-header representation --
+//     its own `$__lang_strlen` scans for a NUL -- while stamping the same ABI
+//     number as the compiler that carries a header. One host runs both kinds
+//     of module, so it can only trust the header once the self-hosted backend
+//     carries one (or stops claiming the ABI that says it does).
 //
 // Both are pinned as DIVERGE rather than left out: dropping U+0000 from the
 // case would have made the file agree by not asking.
