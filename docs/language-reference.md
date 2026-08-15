@@ -15,7 +15,7 @@ The syntax and semantics of Mere as currently implemented (as of 2026-06-24 / Ph
 | Kind | Example |
 |---|---|
 | Integer | `0`, `42`, `-5` (syntactically `Neg (Int_lit 5)`) |
-| Float | `1.5`, `3.14`, `0.0` (digits.digits; bare `1.` is not a float) |
+| Float | `1.5`, `3.14`, `0.0`, `1e3`, `2.5e-8`, `4E+5` (digits.digits, or an exponent; bare `1.` is not a float) |
 | Boolean | `true`, `false` |
 | String | `"hello"`; escapes are `\n` `\t` `\\` `\"` |
 | Char (length-1 str) | `'X'`; escapes are `'\n'` `'\t'` `'\\'` `'\''` `'\"'` |
@@ -75,7 +75,7 @@ print "escape: \{not interpolated\}"            // "escape: {not interpolated}"
 int   float   bool   str   unit
 ```
 
-`float` is IEEE 754 double. Literals with a decimal point and digits (e.g. `1.5`) are float; `1` is int (bare `1.` is not float but `1` + a potential `.field`). `int` and `float` are distinct types with no implicit coercion — use `float_of_int` / `int_of_float` explicitly; arithmetic uses `f_add` / `f_sub` / `f_mul` / `f_div`.
+`float` is IEEE 754 double. Literals with a decimal point and digits (e.g. `1.5`) are float, and so is anything with an exponent — `1e3`, `2.5e-8`, `4E+5` — which is how the ends of the double range are written (`1.7976931348623157e308`). A digit must follow the `e`, so `1.5 e` is still a float applied to a variable named `e`. `1` is int (bare `1.` is not float but `1` + a potential `.field`). `int` and `float` are distinct types with no implicit coercion — use `float_of_int` / `int_of_float` explicitly; arithmetic uses `f_add` / `f_sub` / `f_mul` / `f_div`.
 
 ### Composite types
 ```

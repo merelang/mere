@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.259" Version.v "0.1.259";
+  check "version is 0.1.260" Version.v "0.1.260";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -13397,6 +13397,53 @@ let () =
        let bin = Codegen_riscv.emit_program ~main_ty:mt prog in
        if String.length bin > 64 then "assembled" else "suspiciously short"
      with e -> Printexc.to_string e) "assembled";
+
+  (* v0.1.260: exponent notation. Writing the ends of the double range --
+     the largest finite value, the smallest normal, the smallest subnormal --
+     was the probe that wanted it: `1.7976931348623157e308` lexed as the float
+     1.7976931348623157 applied to a variable named e308, so those constants
+     had to be BUILT from powers of two. A digit must follow the e, so a float
+     applied to a variable called `e` still reads as it always did. *)
+  check "v0.1.260: exponent literal 1.5e3" (Pipeline.process "1.5e3") "1500.0";
+  check "v0.1.260: exponent with no decimal point" (Pipeline.process "1e3") "1000.0";
+  check "v0.1.260: negative exponent" (Pipeline.process "2.0e-3") "0.002";
+  check "v0.1.260: uppercase E and a signed exponent"
+    (Pipeline.process "4E+5") "400000.0";
+  check "v0.1.260: the largest finite double round-trips"
+    (Pipeline.process "1.7976931348623157e308 == 1.7976931348623157e308 * 1.0") "true";
+  check "v0.1.260: the smallest normal double is not zero"
+    (Pipeline.process "2.2250738585072014e-308 > 0.0") "true";
+  check "v0.1.260: the smallest subnormal halves to zero"
+    (Pipeline.process "5.0e-324 * 0.5 == 0.0") "true";
+  check "v0.1.260: an exponent literal is a float, not an int"
+    (Pipeline.process "1e2 / 8.0") "12.5";
+  check "v0.1.260: a variable named e is still a variable"
+    (Pipeline.process "let e = fn (x: float) -> x + 1.0;\ne 1.5") "2.5";
+  check "v0.1.260: no digit after e, so `1.5e` is still an application"
+    (try let _ = Pipeline.process "1.5e" in "no-error" with _ -> "error")
+    "error";
+  (* and `fmt` must not change a literal's VALUE: 12 significant digits was
+     enough for everything that could be written before exponent notation and
+     is not enough now, so the formatter takes the shortest form that reads
+     back as the same double. *)
+  let fmt_one src =
+    Formatter.format_program (Pipeline.parse_program ~prelude:false src) in
+  check "v0.1.260: fmt round-trips the largest finite double"
+    (fmt_one "let a = 1.7976931348623157e308;")
+    "let a = 1.7976931348623157e+308;\n";
+  check "v0.1.260: fmt keeps a short literal short"
+    (fmt_one "let a = 1.5;") "let a = 1.5;\n";
+  check "v0.1.260: fmt writes a whole float with its fractional digit"
+    (fmt_one "let a = 1e3;") "let a = 1000.0;\n";
+  check "v0.1.260: the C backend emits the exponent value"
+    (let c = Codegen_c.emit_program ~main_ty:Ast.TyFloat (typed_prog "1.5e3") in
+     let nlen = String.length c in
+     let has needle =
+       let plen = String.length needle in
+       let rec go i = i + plen <= nlen && (String.sub c i plen = needle || go (i + 1)) in
+       go 0
+     in
+     if has "1500" then "emitted" else "missing") "emitted";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

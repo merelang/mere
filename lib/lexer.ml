@@ -374,17 +374,39 @@ let rec tokenize ?file s =
           if j < len && is_digit s.[j] then read (j + 1) else j
         in
         let j = read i in
+        (* v0.1.260: an exponent makes the literal a float, with or without
+           a decimal point (1e3, 1.5e3, 2.0e-3, 4E+5). Writing the smallest
+           and largest doubles was the probe that wanted it: 1.7976931348623157e308
+           had to be BUILT out of powers of two instead, because `1.5e3` lexed
+           as the float 1.5 applied to a variable named e3. A digit must
+           follow the e (after an optional sign), so `2.0 e` — a float applied
+           to a variable called e — still reads the way it always did. *)
+        let exp_end k =
+          if k < len && (s.[k] = 'e' || s.[k] = 'E') then begin
+            let k1 = if k + 1 < len && (s.[k + 1] = '+' || s.[k + 1] = '-')
+                     then k + 2 else k + 1 in
+            if k1 < len && is_digit s.[k1] then Some (read k1) else None
+          end else None
+        in
         if j + 1 < len && s.[j] = '.' && is_digit s.[j + 1] then begin
           let k = read (j + 1) in
+          let k = (match exp_end k with Some e -> e | None -> k) in
           let text = String.sub s i (k - i) in
           let w = k - i in
           advance w;
           aux k ((with_width pos w, T_float (float_of_string text)) :: acc)
         end else begin
-          let n = int_of_string (String.sub s i (j - i)) in
-          let w = j - i in
-          advance w;
-          aux j ((with_width pos w, T_int n) :: acc)
+          match exp_end j with
+          | Some k ->
+            let text = String.sub s i (k - i) in
+            let w = k - i in
+            advance w;
+            aux k ((with_width pos w, T_float (float_of_string text)) :: acc)
+          | None ->
+            let n = int_of_string (String.sub s i (j - i)) in
+            let w = j - i in
+            advance w;
+            aux j ((with_width pos w, T_int n) :: acc)
         end
       | c when is_alpha c ->
         (* Allow ML-style primed identifiers (`arg'`, `x''`) — `'` is a
