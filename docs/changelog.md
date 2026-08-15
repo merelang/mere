@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.260 — 2026-08-15
+
+_Exponent notation, because the ends of the double range could not be written down._
+
+`1.7976931348623157e308` lexed as the float `1.7976931348623157` applied to a variable
+named `e308`. A probe that needed the largest finite double, the smallest normal and
+the smallest subnormal had to **build all three out of powers of two** — scaling by
+halves until the value stopped changing — rather than write them.
+
+Now a literal with an exponent is a float, with or without a decimal point: `1e3`,
+`2.0e-3`, `4E+5`. A digit has to follow the `e` (after an optional sign), so `1.5 e`
+is still a float applied to a variable called `e`, which is the only thing this could
+have taken away.
+
+The formatter had to change with it. `string_of_float` keeps 12 significant digits,
+which was enough for every literal that could be written before and is not enough
+now: formatting `1.7976931348623157e308` would have written a *different number*
+back. It emits the shortest form that reads back as the same double.
+
+---
+
 ## v0.1.257 — 2026-08-14
 
 _The tokenizer switches its own state after a start tag, which is a shortcut with a

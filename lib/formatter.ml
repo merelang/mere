@@ -211,10 +211,29 @@ let rec fmt_expr ~prec:p ~ind e =
   | Float_lit f ->
     (* OCaml's `string_of_float 3.0` returns `"3."`, but the Mere lexer
        requires `<digit>+.<digit>+` (so `3.` is lexed as `Int 3` followed
-       by `.`). Always emit at least one fractional digit. *)
-    let s = string_of_float f in
+       by `.`). Always emit at least one fractional digit.
+
+       v0.1.260: and it has to ROUND-TRIP. string_of_float keeps 12
+       significant digits, which is enough for what could be written before
+       exponent notation existed and not enough afterwards: formatting
+       `1.7976931348623157e308` would quietly write a different number back.
+       Take the shortest form that reads back as the same double. *)
+    let round_trips s = try float_of_string s = f with _ -> false in
+    let s =
+      let d12 = string_of_float f in
+      if round_trips d12 then d12
+      else
+        let p15 = Printf.sprintf "%.15g" f in
+        if round_trips p15 then p15
+        else
+          let p16 = Printf.sprintf "%.16g" f in
+          if round_trips p16 then p16 else Printf.sprintf "%.17g" f
+    in
+    (* `1e+308` / `3` need the fractional digit as much as `3.` does *)
+    let has c = String.contains s c in
     if String.length s > 0 && s.[String.length s - 1] = '.' then s ^ "0"
-    else s
+    else if has '.' || has 'e' || has 'E' || has 'n' (* nan/inf *) then s
+    else s ^ ".0"
   | Bool_lit true -> "true" | Bool_lit false -> "false"
   | Str_lit s -> escape_string_for_fmt s
   | Unit_lit -> "()"
