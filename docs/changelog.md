@@ -23,6 +23,17 @@ which was enough for every literal that could be written before and is not enoug
 now: formatting `1.7976931348623157e308` would have written a *different number*
 back. It emits the shortest form that reads back as the same double.
 
+And then the notation paid for itself immediately. A new parity case walks the float
+values four backends had never been asked about — the ends of the range, the
+subnormals below the smallest normal, both zeros, NaN — none of which could be
+*reached* before, because every float literal in the suite was one a human types.
+It found a real divergence on the first run: **`nan < 0.0` was true on the
+interpreter and false on all three compiled backends.** The interpreter routed every
+ordered comparison through OCaml's total `compare`, which sorts NaN below
+everything; the operator is IEEE, where every ordered comparison with NaN is false.
+Sorting still uses the total order — that part was deliberate — but `<` on two
+floats is now the float comparison, and the four backends agree.
+
 ---
 
 ## v0.1.257 — 2026-08-14

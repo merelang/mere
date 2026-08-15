@@ -1,0 +1,74 @@
+// The float VALUES four backends were never asked about: the ends of the
+// range, the subnormals below the smallest normal, both zeros, and NaN.
+//
+// This file could not have been written before v0.1.260. Every float probe in
+// the suite used a literal a human types -- 3.5, 2.0, 0.1 -- because a literal
+// with an exponent lexed as a float applied to a variable (`1.5e3` was 1.5
+// applied to `e3`). So the axis the open question about builtin parity names
+// -- "not which builtins, but at which VALUES" -- had a whole class of values
+// no test could reach.
+//
+// The comparisons here are the invariants, not the printed digits: a subnormal
+// is smaller than the smallest normal and still above zero, halving the
+// smallest subnormal reaches zero, the largest finite value doubles to
+// infinity, infinity is its own half, NaN is not equal to itself, and the two
+// zeros compare equal while carrying different signs.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+let max_finite = 1.7976931348623157e308;
+let min_normal = 2.2250738585072014e-308;
+let min_subnormal = 5.0e-324;
+let eps = 2.220446049250313e-16;
+
+// there is no str_of_bool; a bool prints as the 1 or 0 it decides
+let b = fn (x: bool) -> if x then "1" else "0";
+
+// the exponent is what the literal is for: these are exact powers of two
+let _ = print (b (min_normal * 0.5 > 0.0));          // subnormal, not zero
+let _ = print (b (min_normal * 0.5 < min_normal));
+let _ = print (b (min_subnormal > 0.0));
+let _ = print (b (min_subnormal * 0.5 == 0.0));      // nothing below it
+let _ = print (b (min_subnormal < min_normal));
+
+// 1 + eps is the first double above 1, and half an eps is not enough
+let _ = print (b (1.0 + eps > 1.0));
+let _ = print (b (1.0 + eps * 0.5 == 1.0));
+
+// the top of the range, and what lies past it
+let inf = max_finite * 2.0;
+let neg_inf = 0.0 - inf;
+let _ = print (b (max_finite < inf));
+let _ = print (b (inf * 0.5 == inf));                // infinity halves to itself
+let _ = print (b (inf + 1.0 == inf));
+let _ = print (b (neg_inf < 0.0 - max_finite));
+let _ = print (b (inf > 0.0 && neg_inf < 0.0));
+
+// NaN is the one value that is not equal to itself
+let nan = inf - inf;
+let _ = print (b (nan == nan));
+let _ = print (b (nan < 0.0));
+let _ = print (b (nan > 0.0));
+
+// both zeros: equal as numbers, distinguishable by what dividing tells you
+let pos_zero = 0.0;
+let neg_zero = 0.0 * (0.0 - 1.0);
+let _ = print (b (pos_zero == neg_zero));
+let _ = print (b (1.0 / pos_zero == inf));
+let _ = print (b (1.0 / neg_zero == neg_inf));
+
+// exponent literals mean the same thing written either way
+let _ = print (b (1e3 == 1000.0));
+let _ = print (b (2.5e-8 == 0.000000025));
+let _ = print (b (4E+5 == 400000.0));
+
+// int_of_float at the edges of what an int can hold
+let _ = print (str_of_int (int_of_float 1e18));
+let _ = print (str_of_int (int_of_float (0.0 - 1e18)));
+let _ = print (str_of_int (int_of_float 2.5));
+let _ = print (str_of_int (int_of_float (0.0 - 2.5)));
+
+// and the printed form of ordinary values, which every backend does share
+let _ = print (str_of_float 1e3);
+let _ = print (str_of_float 2.0e-3);
+let _ = print (str_of_float (min_normal / min_normal));
