@@ -3234,11 +3234,27 @@ let rec eval_in (env : env) (e : Ast.expr) =
      (* v0.1.11 derive-ord: all ordering routes through the structural
         value_compare (scalars, tuple, record, variant/list). *)
      | Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge ->
-       let c = value_compare va vb in
-       V_bool (match op with
-         | Ast.Lt -> c < 0 | Ast.Le -> c <= 0
-         | Ast.Gt -> c > 0 | Ast.Ge -> c >= 0
-         | _ -> false))
+       (match va, vb with
+        (* v0.1.260: two floats compare by IEEE, where every ordered
+           comparison with NaN is false. value_compare is OCaml's TOTAL
+           compare, which sorts NaN below everything -- right for derive-ord
+           and wrong for the operator: `nan < 0.0` answered true here and
+           false on all three compiled backends, which emit the float
+           comparison. The parity case that found it could not be written
+           until floats had exponent literals to reach NaN with. *)
+        | V_float x, V_float y ->
+          V_bool (match op with
+            | Ast.Lt -> (x : float) < (y : float)
+            | Ast.Le -> (x : float) <= (y : float)
+            | Ast.Gt -> (x : float) > (y : float)
+            | Ast.Ge -> (x : float) >= (y : float)
+            | _ -> false)
+        | _ ->
+          let c = value_compare va vb in
+          V_bool (match op with
+            | Ast.Lt -> c < 0 | Ast.Le -> c <= 0
+            | Ast.Gt -> c > 0 | Ast.Ge -> c >= 0
+            | _ -> false)))
   | Ast.Logic (op, a, b) ->
     (* short-circuit evaluation: don't evaluate b unless needed *)
     (match op, eval_in env a with

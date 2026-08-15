@@ -13435,6 +13435,30 @@ let () =
     (fmt_one "let a = 1.5;") "let a = 1.5;\n";
   check "v0.1.260: fmt writes a whole float with its fractional digit"
     (fmt_one "let a = 1e3;") "let a = 1000.0;\n";
+  (* and the operator on two floats is IEEE, where every ordered comparison
+     with NaN is false. The interpreter routed < through OCaml's TOTAL
+     compare (NaN sorts least), so `nan < 0.0` was true here and false on all
+     three compiled backends. Sorting still uses the total order. *)
+  check "v0.1.260: nan < 0.0 is false"
+    (Pipeline.process
+       "let inf = 1.7976931348623157e308 * 2.0;\n\
+        let nan = inf - inf;\n\
+        nan < 0.0") "false";
+  check "v0.1.260: nan > 0.0 is false"
+    (Pipeline.process
+       "let inf = 1.7976931348623157e308 * 2.0;\n\
+        let nan = inf - inf;\n\
+        nan > 0.0") "false";
+  check "v0.1.260: nan <= nan is false"
+    (Pipeline.process
+       "let inf = 1.7976931348623157e308 * 2.0;\n\
+        let nan = inf - inf;\n\
+        nan <= nan") "false";
+  check "v0.1.260: ordinary float comparison is unchanged"
+    (Pipeline.process "1.5 < 2.5 && 2.5 >= 2.5 && 3.5 > 2.5") "true";
+  check "v0.1.260: sorting floats still works"
+    (Pipeline.process "list_sort_by (fn a -> fn b -> a < b) [3.5, 1.5, 2.5]")
+    "[1.5, 2.5, 3.5]";
   check "v0.1.260: the C backend emits the exponent value"
     (let c = Codegen_c.emit_program ~main_ty:Ast.TyFloat (typed_prog "1.5e3") in
      let nlen = String.length c in
