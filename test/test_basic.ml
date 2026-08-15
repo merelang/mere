@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.261" Version.v "0.1.261";
+  check "version is 0.1.262" Version.v "0.1.262";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -13401,6 +13401,20 @@ let () =
        let bin = Codegen_riscv.emit_program ~main_ty:mt prog in
        if String.length bin > 64 then "assembled" else "suspiciously short"
      with e -> Printexc.to_string e) "assembled";
+
+  (* v0.1.262: str_trim walked a pointer INTO the string and then asked
+     $__lang_strlen how long it was. An interior pointer has no header of its
+     own, so that read took the string's own bytes as a length -- on the Wasm
+     backend, where the header is the only length there is. A NUL inside the
+     value now stays a byte here too. *)
+  check "v0.1.262: str_trim keeps the middle, including a NUL"
+    (Pipeline.process
+       "let s = \"  a\" ++ chr 0 ++ \"b  \";\n\
+        str_len (str_trim s)") "3";
+  check "v0.1.262: str_trim of all whitespace is empty"
+    (Pipeline.process "str_len (str_trim \"     \")") "0";
+  check "v0.1.262: str_trim of an untrimmed string keeps its length"
+    (Pipeline.process "str_len (str_trim \"nospace\")") "7";
 
   (* v0.1.260: exponent notation. Writing the ends of the double range --
      the largest finite value, the smallest normal, the smallest subnormal --

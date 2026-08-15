@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.262 — 2026-08-15
+
+_An interior pointer has no header, and `str_trim` asked one for its length._
+
+Chasing the Wasm half of the previous slice found something smaller and real.
+`str_trim` skips leading whitespace by walking a pointer INTO the string, and then
+called `$__lang_strlen` on that pointer to find out how much was left. The length of
+a Mere str lives in a header immediately before byte0 — so for an interior pointer
+that read takes **the string's own bytes as a length**. It is bounded by a NUL scan
+on the other backends, which is why only Wasm blew up on it, and why
+`str_len (str_trim s)` was the shape that showed it rather than `print (str_trim s)`.
+
+It takes the original length once now, uses it to bound the skip, and subtracts what
+the skip consumed. A NUL inside the value stays a byte through `str_trim`, on all
+four backends.
+
+The Wasm host still writes up to the first NUL, and the reason turned out to be
+sharper than "something overstates its length": **the self-hosted Wasm backend emits
+the pre-header string representation** — its `$__lang_strlen` scans for a NUL and its
+strings carry no header — while stamping the same ABI number as the compiler that
+does. The host is shared between both kinds of module, so it cannot trust the header
+until the self-hosted backend carries one, or stops claiming the ABI that says it
+does. That is written down where the parity case pins it.
+
+---
+
 ## v0.1.261 — 2026-08-15
 
 _`print` writes the string's length, and the two backends that cannot are pinned._
