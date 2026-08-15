@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.260" Version.v "0.1.260";
+  check "version is 0.1.261" Version.v "0.1.261";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2762,8 +2762,11 @@ let () =
     (codegen "\"hi\"") "printf(\"%s\\n\"";
   assert_contains "codegen: ++ becomes __lang_str_concat call"
     (codegen "\"a\" ++ \"b\"") "__lang_str_concat(";
-  assert_contains "codegen: print → puts inside statement expression"
-    (codegen "print \"hi\"") "puts((__sl_";
+  (* v0.1.261: print writes the str's LENGTH (Q-033), so the emitted call is
+     an fwrite of __lang_str_size bytes rather than puts, which stopped at the
+     first NUL. *)
+  assert_contains "codegen: print writes the str by length"
+    (codegen "print \"hi\"") "fwrite(__ps, 1, __lang_str_size(__ps), stdout)";
   (* A string literal is immutable, so it is emitted ONCE as a static constant
      carrying the length header, and every evaluation refers to it. It used to
      be a fresh region copy per evaluation, which is invisible in a small
@@ -2972,8 +2975,9 @@ let () =
     (codegen "read_key ()") "__lang_read_key";
   assert_contains "codegen C: tty_raw emits termios helper"
     (codegen "tty_raw ()") "__lang_tty_raw";
-  assert_contains "codegen C: print_no_nl emits flushed fputs"
-    (codegen "print_no_nl \"x\"") "fputs";
+  (* v0.1.261: by length, like print -- fputs stopped at the first NUL *)
+  assert_contains "codegen C: print_no_nl writes the str by length"
+    (codegen "print_no_nl \"x\"") "fwrite(__pn, 1, __lang_str_size(__pn), stdout)";
   assert_contains "codegen C: random_int emits __lang_random_int"
     (codegen "random_int 4") "__lang_random_int";
   assert_contains "codegen C: file_size emits __lang_file_size"

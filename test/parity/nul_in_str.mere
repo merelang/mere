@@ -1,0 +1,45 @@
+// A zero byte inside a str: does every backend agree it is a byte?
+//
+// `str` became byte-safe in the v0.1.129 arc -- the length lives in a header
+// rather than in a terminator -- and `str_len (chr 0 ++ "X")` has answered 2
+// ever since. `print` did not: it went out through a NUL-terminated write on
+// two of the four backends, so the same value measured 2 and printed 1
+// character. Two answers about one value is a bug and not a choice, which is
+// why this file prints the strings as well as measuring them.
+//
+// Two backends are pinned rather than fixed here, each for its own reason:
+//
+//   - LLVM has no length header at all; its str is a bare pointer and
+//     `str_len (chr 0)` is 0 there against 1 everywhere else. The NUL is not
+//     truncated on output, it is never in the value.
+//   - Wasm HAS the header and `str_len` reads it, but the host writes what it
+//     finds up to the first NUL. Making the host trust the header instead
+//     turned up a second thing -- one str on the self-hosted compiler's path
+//     reaches the host with a header that overstates its content by half a
+//     megabyte of zeros -- so the host is left scanning until that is
+//     understood, and this is where it will be noticed.
+//
+// Both are pinned as DIVERGE rather than left out: dropping U+0000 from the
+// case would have made the file agree by not asking.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), LLVM and Wasm pinned
+
+let nul = chr 0;
+let s = nul ++ "X";
+
+// measured
+let _ = print (str_of_int (str_len nul));
+let _ = print (str_of_int (str_len s));
+let _ = print (str_of_int (str_len ("A" ++ s ++ "B")));
+
+// and printed: the bytes reach the output, so a NUL in the middle of a line
+// does not end the line
+let _ = print ("A" ++ s ++ "B");
+let _ = print ("[" ++ nul ++ "]");
+
+// a NUL is an ordinary byte to the string operations
+let _ = print (str_of_int (ord (char_at s 0)));
+let _ = print (str_of_int (ord (char_at s 1)));
+let _ = print (str_of_int (str_len (substring ("A" ++ s ++ "B") 0 3)));
+let _ = print (str_of_int (if s == nul ++ "X" then 1 else 0));
+let _ = print (str_of_int (if nul == "" then 1 else 0));
