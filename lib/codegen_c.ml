@@ -2178,7 +2178,12 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var name when user_shadows name -> emit_user_call name
      | Ast.App _ when app_head_user_bound_c f -> emit_closure_call ()
      | Ast.Var "print" ->
-       "({ puts(" ^ emit_expr arg ^ "); 0; })"
+       (* v0.1.261 (Q-033): write the str's LENGTH, not up to its first NUL.
+          `str_len (chr 0 ++ "X")` is 2 on every backend, and `puts` printed
+          one character of it -- two answers about the same value, which is a
+          bug rather than a choice. The header carries the length, so writing
+          it is what `print_bytes` already does. *)
+       "({ const char* __ps = " ^ emit_expr arg ^ ";            fwrite(__ps, 1, __lang_str_size(__ps), stdout);            fputc('\\n', stdout); 0; })"
      (* print_int / print_bool had no arm at all: the names fell through to the
         closure path and emitted a call to an undefined `mu_print_int`, so the
         refusal came from clang as "use of undeclared identifier" — a documented
@@ -2189,12 +2194,14 @@ let rec emit_expr (e : Ast.expr) : string =
        "({ puts((" ^ emit_expr arg ^ ") ? \"true\" : \"false\"); 0; })"
      | Ast.Var "print_err" ->
        (* v0.1.13 (mk dogfood P2): write to stderr with a newline, mirroring
-          print → puts. A native CLI needs diagnostics separate from stdout. *)
-       "({ fprintf(stderr, \"%s\\n\", " ^ emit_expr arg ^ "); 0; })"
+          print. A native CLI needs diagnostics separate from stdout.
+          v0.1.261: by length, for the same reason as print. *)
+       "({ const char* __pe = " ^ emit_expr arg ^ ";            fwrite(__pe, 1, __lang_str_size(__pe), stderr);            fputc('\\n', stderr); 0; })"
      | Ast.Var "print_no_nl" ->
        (* v0.1.19 (mrog dogfood P2): newline-free flushed write — a TUI's
-          cursor-control sequences must not be line-buffered. *)
-       "({ fputs(" ^ emit_expr arg ^ ", stdout); fflush(stdout); 0; })"
+          cursor-control sequences must not be line-buffered.
+          v0.1.261: by length, for the same reason as print. *)
+       "({ const char* __pn = " ^ emit_expr arg ^ ";            fwrite(__pn, 1, __lang_str_size(__pn), stdout); fflush(stdout); 0; })"
      (* Q-012: spawn a `unit -> unit` closure on a fresh OS thread. Copy the
         closure value onto the heap so the child owns it, then pthread_create
         the trampoline. Returns a ThreadHandle. *)

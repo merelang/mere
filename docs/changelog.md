@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.261 — 2026-08-15
+
+_`print` writes the string's length, and the two backends that cannot are pinned._
+
+`str` became byte-safe in the v0.1.129 arc: the length lives in a header rather than
+in a terminator, and `str_len (chr 0 ++ "X")` has answered 2 ever since. `print` did
+not — it went out through `puts`, which stops at the first NUL — so the same value
+measured 2 and printed one character. **Two answers about one value is a bug, not a
+choice**, which is what the open question about this asked to settle.
+
+The C backend writes by length now (`print`, `print_err`, `print_no_nl`), and matches
+the interpreter byte for byte.
+
+The other two are pinned rather than fixed, each for its own reason, in a new parity
+case that prints NUL-carrying strings as well as measuring them:
+
+- **LLVM** has no length header at all — its `str` is a bare pointer, and
+  `str_len (chr 0)` is 0 there against 1 everywhere else. The NUL is not truncated
+  on output; it was never in the value.
+- **Wasm** has the header and `str_len` reads it, but the JS host writes what it
+  finds up to the first NUL. Making the host trust the header instead surfaced a
+  second thing: one `str` on the self-hosted compiler's path arrives with a header
+  that overstates its content by half a megabyte of zeros. Until that is understood
+  the host keeps scanning, and the pinned case is where it will be noticed.
+
+Pinning is the point. Dropping U+0000 from the case — which is what happened the
+first time this came up — would have made the file agree by not asking.
+
+---
+
 ## v0.1.260 — 2026-08-15
 
 _Exponent notation, because the ends of the double range could not be written down._
