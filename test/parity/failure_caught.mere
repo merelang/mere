@@ -36,21 +36,22 @@ let _ = print (show (try_or (fn () -> fail "x") 1) ++ " "
                ++ show (try_or (fn () -> 4) 0));
 
 let _ = print "=== work before the failure still happened ===";
-// And this is where the three mechanisms stop meaning the same thing. `fail` on
-// Wasm sets a flag and returns; the callers on the way out check it, but the
-// statements after it in the same body still run, so "three" gets pushed. The
-// interpreter, C and LLVM all leave the buffer at "onetwo".
+// This is where the three mechanisms used to stop meaning the same thing. `fail`
+// on Wasm sets a flag and returns a sentinel; there is no unwinding underneath
+// it, so the statements after the fail in the same body still ran and "three"
+// got pushed, where the interpreter, C and LLVM all left the buffer at "onetwo".
 //
-// What that return VALUE is stopped mattering in v0.1.265. It used to be 0,
-// which is not an address, so a consumer between the fail and the try_or that
-// treated it as a str read a length header at -4 and trapped -- the program
-// died with no output where the others returned the default. It is an empty
-// str now: still not unwinding, but what runs in between survives.
+// Two slices closed that. v0.1.265 changed the sentinel from 0 to an interned
+// empty str, so a consumer between the fail and the catch could no longer trap
+// on a length header at -4 -- the program had been dying with no output at all
+// there. v0.1.272 then made the failure actually unwind: every call site asks
+// whether the callee failed and returns at once if it did, which is what a
+// caller does by hand in a language without exceptions.
 //
-// That difference is declared in failure_caught.wasm.expected rather than deleted
-// from this file, because it is a known limitation of that backend and not a
-// mistake in this test — and pinning it to an exact output means the day the
-// backend learns to unwind, this expectation breaks and says so.
+// The difference lived in failure_caught.wasm.expected for three slices rather
+// than being deleted from this file, and that pin is what said the day it was
+// fixed -- the case started matching, and the gate now refuses a pin that no
+// longer describes a divergence.
 let acc = strbuf_new ();
 let _ = try_or (fn () ->
   let _ = strbuf_push acc "one" in

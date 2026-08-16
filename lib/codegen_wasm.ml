@@ -46,7 +46,60 @@ let host_builtins_without_wasm_lowering =
 (* Accumulator for the function body's instructions (one WAT token per
    list entry). The driver concatenates them with newlines + indent. *)
 let instrs : string list ref = ref []
-let emit_instr s = instrs := s :: !instrs
+
+(* v0.1.272 (Q-032): `fail` on this backend has no unwinding to do it with. It
+   sets a flag, returns a sentinel, and the try_or at the boundary reads the
+   flag -- so the failure was caught, but everything BETWEEN the fail and the
+   catch still ran. A body that pushed three strings and failed after the second
+   pushed the third here and nowhere else.
+
+   Unwinding, written out by hand: after any call, ask whether the callee failed,
+   and if it did, return at once. That check is what a caller does in a language
+   without exceptions, and the one place every call passes through is
+   `emit_instr` -- so it is added there rather than at each of the emission sites,
+   which is how the two that were forgotten last time would have been missed
+   again.
+
+   A `return_call` is excluded because it is a tail call: this frame is already
+   gone, and its caller's own check is the one that runs.
+
+   `fail_unwind_on` says the emitter is inside a body a return can leave --
+   every user function, lifted fn and closure body, all of which return i64.
+   `main` is deliberately not one of them: the flag is only ever set inside an
+   active try_or scope, and try_or clears it before handing back, so main's own
+   body can never see it set. A check there would be instructions that can only
+   ever be false.
+   `fail_unwind_off` suppresses the check where an early return would be wrong:
+   try_or's own call to the thunk, which is exactly the frame that must NOT
+   propagate. *)
+let fail_unwind_on : bool ref = ref false
+let fail_unwind_off : int ref = ref 0
+let in_fail_check : bool ref = ref false
+
+let starts_with pre s =
+  String.length s >= String.length pre && String.sub s 0 (String.length pre) = pre
+
+let rec emit_instr s =
+  instrs := s :: !instrs;
+  if !fail_unwind_on && !fail_unwind_off = 0 && not !in_fail_check
+     && (starts_with "call " s || starts_with "call_indirect" s)
+  then begin
+    in_fail_check := true;
+    emit_instr "global.get $__lang_fail_flag";
+    emit_instr "if";
+    emit_instr "global.get $__lang_fail_sentinel";
+    emit_instr "i64.extend_i32_u";
+    emit_instr "return";
+    emit_instr "end";
+    in_fail_check := false
+  end
+
+let without_fail_unwind f =
+  incr fail_unwind_off;
+  let finish () = decr fail_unwind_off in
+  (match f () with
+   | () -> finish ()
+   | exception e -> finish (); raise e)
 
 (* Local slot bookkeeping. Lang variables map to Wasm locals; we mint
    a fresh slot per Let binding. Wasm locals are typed, so we track the
@@ -3054,7 +3107,8 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr (Printf.sprintf "local.get %d" cl_slot);
     emit_instr "i32.wrap_i64";
     emit_instr "i32.load offset=4";   (* fn_idx (table index stays i32) *)
-    emit_instr "call_indirect (type $cl)";
+    (* the one call that must not unwind: this is the catch *)
+    without_fail_unwind (fun () -> emit_instr "call_indirect (type $cl)");
     emit_instr (Printf.sprintf "local.set %d" result_slot);
     (* Restore active counter. *)
     emit_instr (Printf.sprintf "local.get %d" saved_active);
@@ -4089,8 +4143,11 @@ let emit_fn_def (f : fn_decl) : string =
   local_types := [];
   locals := [(f.param, 0)];
   let saved_tail = !wasm_tail_pos in
+  let saved_unwind = !fail_unwind_on in
   wasm_tail_pos := true;
+  fail_unwind_on := true;
   emit_expr f.body;
+  fail_unwind_on := saved_unwind;
   wasm_tail_pos := saved_tail;
   let body_instrs = List.rev !instrs in
   let extra_locals = !local_counter - 1 in
@@ -4140,8 +4197,11 @@ let emit_lifted_fn_wasm (lf : lifted_fn_wasm) : string =
   let cap_locals = List.mapi (fun i n -> (n, i)) lf.l_captures in
   locals := (lf.l_param, n_caps) :: cap_locals;
   let saved_tail = !wasm_tail_pos in
+  let saved_unwind = !fail_unwind_on in
   wasm_tail_pos := true;
+  fail_unwind_on := true;
   emit_expr lf.l_body;
+  fail_unwind_on := saved_unwind;
   wasm_tail_pos := saved_tail;
   let body_instrs = List.rev !instrs in
   let extra_locals = !local_counter - (n_caps + 1) in
@@ -4238,8 +4298,11 @@ let emit_anon_adapter (ce : closure_emission) : string =
   local_types := [];
   locals := (ce.ce_param, param_slot) :: capture_locals;
   let saved_tail = !wasm_tail_pos in
+  let saved_unwind = !fail_unwind_on in
   wasm_tail_pos := true;
+  fail_unwind_on := true;
   emit_expr ce.ce_body;
+  fail_unwind_on := saved_unwind;
   wasm_tail_pos := saved_tail;
   let body_instrs = List.rev !instrs in
   let extra_locals = !local_counter - 2 in
@@ -8030,6 +8093,142 @@ let emit_of_json_opt_fn (inner_tag : string) (_inner_t : Ast.ty) : string =
     inner_tag inner_tag none_tag some_tag
 
 
+(* v0.1.272: most of the unwind checks are asking a question whose answer is
+   already known. `emit_instr` adds one after every call because it cannot know
+   what the callee does; the assembled module can know, so it takes them back
+   out. A call whose callee cannot reach `$__lang_fail` -- transitively, over
+   the whole module -- cannot have set the flag, and the check after it is dead
+   weight. On a self-hosted compile that is 2,524 of 3,722 of them, and the
+   difference between +14% and +4% of module size.
+
+   Everything unknowable stays: an indirect call (the callee is a table index),
+   an imported function (the host can call back into the module), and any callee
+   this pass cannot find a definition for. Removing a check that was needed would
+   be a silent wrong answer, so the default on every doubt is to keep it. *)
+let prune_dead_fail_checks (wat : string) : string =
+  let lines = String.split_on_char '\n' wat in
+  let trim = String.trim in
+  (* `call $name` -> Some name, wherever it appears on a line (the runtime
+     helpers are written as nested s-expressions, the emitted bodies flat). *)
+  let calls_on_line l =
+    let out = ref [] in
+    let n = String.length l in
+    let i = ref 0 in
+    while !i + 5 <= n do
+      if String.sub l !i 5 = "call " then begin
+        let j = ref (!i + 5) in
+        while !j < n && l.[!j] = ' ' do incr j done;
+        if !j < n && l.[!j] = '$' then begin
+          let k = ref !j in
+          while !k < n
+                && (let c = l.[!k] in
+                    c = '$' || c = '_' || c = '.' || (c >= 'a' && c <= 'z')
+                    || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+          do incr k done;
+          out := String.sub l !j (!k - !j) :: !out
+        end;
+        i := !i + 5
+      end else incr i
+    done;
+    !out
+  in
+  let func_name l =
+    (* "(func $name" possibly indented; the type section's "(func (param" has
+       no name and must not match *)
+    let t = trim l in
+    let pre = "(func $" in
+    if String.length t > String.length pre && String.sub t 0 (String.length pre) = pre
+    then begin
+      let rest = String.sub t 6 (String.length t - 6) in
+      let k = ref 0 in
+      let n = String.length rest in
+      while !k < n
+            && (let c = rest.[!k] in
+                c = '$' || c = '_' || c = '.' || (c >= 'a' && c <= 'z')
+                || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+      do incr k done;
+      Some (String.sub rest 0 !k)
+    end else None
+  in
+  let callees : (string, (string, unit) Hashtbl.t) Hashtbl.t = Hashtbl.create 512 in
+  let unknowable : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+  let defined : (string, unit) Hashtbl.t = Hashtbl.create 512 in
+  let cur = ref None in
+  List.iter (fun l ->
+    (match func_name l with
+     | Some name ->
+       Hashtbl.replace defined name ();
+       (* an import's "(func $x ...)" is inside an (import ...) line: the host
+          owns that code and can re-enter the module *)
+       let is_import =
+         let t = trim l in
+         String.length t >= 8 && String.sub t 0 8 = "(import "
+       in
+       if is_import then (Hashtbl.replace unknowable name (); cur := None)
+       else begin
+         if not (Hashtbl.mem callees name) then
+           Hashtbl.replace callees name (Hashtbl.create 8);
+         cur := Some name
+       end
+     | None -> ());
+    match !cur with
+    | None -> ()
+    | Some f ->
+      List.iter (fun c -> Hashtbl.replace (Hashtbl.find callees f) c ())
+        (calls_on_line l);
+      (* a call through the table can land on anything *)
+      let t = trim l in
+      let rec has i =
+        i + 13 <= String.length t
+        && (String.sub t i 13 = "call_indirect" || has (i + 1))
+      in
+      if String.length t >= 13 && has 0 then Hashtbl.replace unknowable f ())
+    lines;
+  (* fixpoint: who can reach the failure *)
+  let can_fail : (string, unit) Hashtbl.t = Hashtbl.create 512 in
+  Hashtbl.replace can_fail "$__lang_fail" ();
+  Hashtbl.iter (fun f () -> Hashtbl.replace can_fail f ()) unknowable;
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    Hashtbl.iter (fun f cs ->
+      if not (Hashtbl.mem can_fail f) then
+        Hashtbl.iter (fun c () ->
+          if Hashtbl.mem can_fail c && not (Hashtbl.mem can_fail f) then begin
+            Hashtbl.replace can_fail f (); changed := true
+          end) cs) callees
+  done;
+  (* second pass: drop the six-line check after a call that cannot have failed *)
+  let arr = Array.of_list lines in
+  let n = Array.length arr in
+  let buf = Buffer.create (String.length wat) in
+  let i = ref 0 in
+  while !i < n do
+    let is_check =
+      !i + 5 < n
+      && trim arr.(!i) = "global.get $__lang_fail_flag"
+      && trim arr.(!i + 1) = "if"
+      && trim arr.(!i + 2) = "global.get $__lang_fail_sentinel"
+      && trim arr.(!i + 3) = "i64.extend_i32_u"
+      && trim arr.(!i + 4) = "return"
+      && trim arr.(!i + 5) = "end"
+    in
+    let dead =
+      is_check && !i > 0
+      && (match calls_on_line arr.(!i - 1) with
+          | [ callee ] ->
+            Hashtbl.mem defined callee && not (Hashtbl.mem can_fail callee)
+          | _ -> false)
+    in
+    if dead then i := !i + 6
+    else begin
+      Buffer.add_string buf arr.(!i);
+      if !i < n - 1 then Buffer.add_char buf '\n';
+      incr i
+    end
+  done;
+  Buffer.contents buf
+
 let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program) : string =
   ignore main_ty;
   debug_fn_lines := [];
@@ -9672,6 +9871,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     vec_higher_order_section strbuf_section map_key_eq_section map_runtime_section
     (args_host_section ^ vec_to_list_section) list_len_section
     fn_section component_section local_decl indented_body
+  |> prune_dead_fail_checks
 
 (* The table `mere -wg` prints: which Mere line each Wasm function came from.
    A tool with the assembled binary turns this into a source map, matching the

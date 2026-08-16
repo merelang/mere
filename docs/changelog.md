@@ -4,6 +4,50 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.272 — 2026-08-16
+
+_Q-032 closed: the Wasm backend learned to unwind, and the last pin came down._
+
+`fail` on this backend has nothing to unwind with. It sets a flag, returns a
+sentinel, and the `try_or` at the boundary reads the flag -- so the failure was
+caught, but **everything between the fail and the catch still ran**. A body that
+pushed three strings and failed after the second pushed the third here and
+nowhere else. That one line was the parity suite's last DIVERGE pin, standing
+since v0.1.246.
+
+Unwinding, written out by hand: after a call, ask whether the callee failed and
+return at once if it did. The check goes in at `emit_instr` -- the one place every
+call passes through -- rather than at each emission site, which is how the sites
+that were forgotten in earlier sweeps would have been forgotten again. A
+`return_call` is exempt: it is a tail call, the frame is already gone. So is
+`try_or`'s own call to the thunk, which is the frame that must *not* propagate.
+
+The interesting half is the second question: **which calls need to ask**. A callee
+that cannot reach `$__lang_fail` cannot have set the flag, and the assembled module
+can prove that where the emitter could not -- so a pass over the finished module
+computes reachability and takes those checks back out. On a self-hosted compile
+that is 2,524 of 3,722 call sites:
+
+| | module | vs no unwinding |
+|---|---|---|
+| no unwinding (before) | 241,915 B | — |
+| a check after every call | 275,273 B | +13.8% |
+| dead checks pruned | 253,067 B | **+4.6%** |
+
+Everything unknowable keeps its check: indirect calls (the callee is a table
+index), imported functions (the host can re-enter the module), and any callee
+without a definition in the module. Removing a needed check would be a silent
+wrong answer, so every doubt resolves toward keeping it.
+
+`scripts/parity.sh` also learned to fail on a **stale pin**. A pinned divergence
+that starts matching used to pass quietly, because a matching case never reads
+its `.expected` file -- the declaration would have stayed on disk saying something
+that had stopped being true. That is the exact failure the pin mechanism exists to
+prevent, so the gate now names the file and asks for it to be deleted. It is how
+this slice found out it was done.
+
+---
+
 ## v0.1.271 — 2026-08-16
 
 _The failure that had no name._
