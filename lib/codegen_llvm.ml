@@ -4644,10 +4644,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   | Ast.App ({ node = Ast.Var "ord"; _ }, s_e) ->
     (* Phase 36: ord s — load first byte, zext to i32 *)
     let sv = emit_expr env s_e in
-    let bv = fresh_reg () in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = load i8, ptr %s" bv sv);
-    emit_instr (Printf.sprintf "  %s = zext i8 %s to i64" r bv);
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_ord(ptr %s)" r sv);
     r
   | Ast.App ({ node = Ast.Var "to_upper"; _ }, s_e) ->
     let sv = emit_expr env s_e in
@@ -9278,8 +9276,14 @@ let str_concat_helper =
          Mere's ints are 64-bit and this one is now too. *)
       "define ptr @__lang_str_repeat(ptr %s, i64 %n) {";
       "entry:";
-      "  %neg = icmp sle i64 %n, 0";
-      "  br i1 %neg, label %ret_empty, label %dowork";
+      "  %neg = icmp slt i64 %n, 0";
+      "  br i1 %neg, label %repfail, label %maybe_empty";
+      "repfail:";
+      "  call void @__lang_fail_num(ptr @.numfmt_rep, i64 %n)";
+      "  unreachable";
+      "maybe_empty:";
+      "  %zero = icmp eq i64 %n, 0";
+      "  br i1 %zero, label %ret_empty, label %dowork";
       "ret_empty:";
       (* v0.1.266: through str_alloc like every other string. A bare 1-byte
          allocation has no header, so `str_len` on the result of
@@ -9349,6 +9353,16 @@ let str_concat_helper =
       "define ptr @__lang_char_at_chr(i64 %n) {";
       "entry:";
       "  call void @__lang_char_table_setup()";
+      (* v0.1.276: masking to 255 is not a check, it is an agreement to accept
+         anything -- `chr 256` came back as a NUL *)
+      "  %lt0 = icmp slt i64 %n, 0";
+      "  %gt = icmp sgt i64 %n, 255";
+      "  %bad = or i1 %lt0, %gt";
+      "  br i1 %bad, label %chrfail, label %chrok";
+      "chrfail:";
+      "  call void @__lang_fail_num(ptr @.numfmt_chr, i64 %n)";
+      "  unreachable";
+      "chrok:";
       "  %n64 = and i64 %n, 255";
       "  %ent = getelementptr [256 x { i64, [2 x i8] }], ptr @__lang_char_table, i64 0, i64 %n64";
       "  %p = getelementptr { i64, [2 x i8] }, ptr %ent, i64 0, i32 1";
@@ -9499,6 +9513,31 @@ let str_concat_helper =
       "@.idxfmt_vecset = private constant [47 x i8] c\"vec_set: index %lld out of bounds (len = %lld)\\00\"";
       "@.idxfmt_charat = private constant [44 x i8] c\"char_at: index %lld out of range (len=%lld)\\00\"";
       "@.idxfmt_substr = private constant [61 x i8] c\"substring: range [%lld, %lld) invalid for str of length %lld\\00\"";
+      "@.numfmt_chr = private constant [37 x i8] c\"chr: %lld out of byte range [0, 255]\\00\"";
+      "@.numfmt_ord = private constant [47 x i8] c\"ord: expected single-char str, got length %lld\\00\"";
+      "@.numfmt_rep = private constant [32 x i8] c\"str_repeat: negative count %lld\\00\"";
+      "@.chrfmt_esc = private constant [35 x i8] c\"str_unescape: unknown escape \\27\\5C%c\\27\\00\"";
+      "@.idxfmt_ovget = private constant [53 x i8] c\"owned_vec_get: index %lld out of bounds (len = %lld)\\00\"";
+      "define void @__lang_fail_num(ptr %fmt, i64 %a) noreturn {";
+      "entry:";
+      "  %buf = alloca [192 x i8]";
+      "  %n = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buf, i64 192, ptr %fmt, i64 %a)";
+      "  %n64 = sext i32 %n to i64";
+      "  %s = call ptr @__lang_str_alloc(i64 %n64)";
+      "  call ptr @memcpy(ptr %s, ptr %buf, i64 %n64)";
+      "  call void @__lang_fail_impl(ptr %s)";
+      "  unreachable";
+      "}";
+      "define void @__lang_fail_chr(ptr %fmt, i32 %c) noreturn {";
+      "entry:";
+      "  %buf = alloca [192 x i8]";
+      "  %n = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buf, i64 192, ptr %fmt, i32 %c)";
+      "  %n64 = sext i32 %n to i64";
+      "  %s = call ptr @__lang_str_alloc(i64 %n64)";
+      "  call ptr @memcpy(ptr %s, ptr %buf, i64 %n64)";
+      "  call void @__lang_fail_impl(ptr %s)";
+      "  unreachable";
+      "}";
       "define void @__lang_fail_idx(ptr %fmt, i64 %a, i64 %b) noreturn {";
       "entry:";
       "  %buf = alloca [192 x i8]";
@@ -9760,6 +9799,19 @@ let str_concat_helper =
          (n / t / r / quote / backslash / slash) into the actual characters;
          leave others as-is. Used by json_parser etc. for string literal
          escape processing. Allocated in a region. *)
+      "define i64 @__lang_ord(ptr %s) {";
+      "entry:";
+      "  %n = call i64 @__lang_str_size(ptr %s)";
+      "  %one = icmp ne i64 %n, 1";
+      "  br i1 %one, label %ordfail, label %ordok";
+      "ordfail:";
+      "  call void @__lang_fail_num(ptr @.numfmt_ord, i64 %n)";
+      "  unreachable";
+      "ordok:";
+      "  %b = load i8, ptr %s";
+      "  %r = zext i8 %b to i64";
+      "  ret i64 %r";
+      "}";
       "define ptr @__lang_str_unescape(ptr %s) {";
       "entry:";
       "  %n64 = call i64 @__lang_str_size(ptr %s)";
@@ -9792,6 +9844,21 @@ let str_concat_helper =
       "  %is_n = icmp eq i8 %ec, 110";
       "  %is_t = icmp eq i8 %ec, 116";
       "  %is_r = icmp eq i8 %ec, 114";
+      (* v0.1.276: an escape nobody defined used to become the letter itself *)
+      "  %is_bs2 = icmp eq i8 %ec, 92";
+      "  %is_q = icmp eq i8 %ec, 34";
+      "  %is_sl = icmp eq i8 %ec, 47";
+      "  %k1 = or i1 %is_n, %is_t";
+      "  %k2 = or i1 %k1, %is_r";
+      "  %k3 = or i1 %k2, %is_bs2";
+      "  %k4 = or i1 %k3, %is_q";
+      "  %known = or i1 %k4, %is_sl";
+      "  br i1 %known, label %escok, label %escbad";
+      "escbad:";
+      "  %ec32 = zext i8 %ec to i32";
+      "  call void @__lang_fail_chr(ptr @.chrfmt_esc, i32 %ec32)";
+      "  unreachable";
+      "escok:";
       "  %sel1 = select i1 %is_n, i8 10, i8 %ec";
       "  %sel2 = select i1 %is_t, i8 9, i8 %sel1";
       "  %sel3 = select i1 %is_r, i8 13, i8 %sel2";

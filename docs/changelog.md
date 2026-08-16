@@ -4,6 +4,49 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.276 — 2026-08-17
+
+_Asking the question mechanically, after finding the same shape by accident twice._
+
+v0.1.274 found string sizes narrowed to 32 bits; v0.1.275 found indices narrowed
+the same way, one layer down. Both were found by a probe that happened to ask.
+So the third time the question was asked from the other end: **every refusal the
+interpreter can raise**, enumerated from `eval.ml`, checked against what the
+compiled backends do with the same input.
+
+Nine diverged, and always in the same direction — the compiled backends had no
+check at all and returned whatever the byte or pointer arithmetic produced:
+
+| input | interp | C / LLVM / Wasm (before) |
+|---|---|---|
+| `chr 256` | refuses | a NUL — the cast to `unsigned char` *was* the domain check |
+| `chr (0-1)` | refuses | `0xFF` |
+| `chr (2^32+65)` | refuses | `"A"` |
+| `ord ""` | refuses | `0` (it read byte 0 whatever the length was) |
+| `ord "ab"` | refuses | `97` |
+| `str_repeat s (0-1)` | refuses | `""` |
+| `str_unescape "a\q"` | refuses | `"aq"` — an undefined escape became the letter |
+| `owned_vec_get v 5` | refuses | `abort()`, which `try_or` cannot catch |
+
+Every one is a value a program can produce by accident and then keep computing
+with. All four backends now raise the interpreter's own failure, with its exact
+words: `chr: 256 out of byte range [0, 255]`, `ord: expected single-char str, got
+length 2`, `str_repeat: negative count -1`, `str_unescape: unknown escape '\q'`.
+`test/parity/refusals.mere` is the caught side; `uncaught_chr_range` and
+`uncaught_ord_length` join the uncaught ones.
+
+The same sweep turned up three more narrowings and closed them: `str_count`'s
+result, `strbuf_len`'s result, and `sleep_ms`'s argument were all `int`.
+
+A note on method: the harness for the first measurement had a bug of exactly the
+kind these slices keep finding — when a backend failed to compile, the shell
+variable kept the *previous* backend's output, so one column of the table was a
+copy of another. It was caught because `random_int` has no LLVM lowering and the
+"LLVM" column reported values anyway. A measurement that cannot fail loudly is
+not a measurement.
+
+---
+
 ## v0.1.275 — 2026-08-17
 
 _An index the collection does not have — answered, for years, with an element._

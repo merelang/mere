@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.275" Version.v "0.1.275";
+  check "version is 0.1.276" Version.v "0.1.276";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -13422,6 +13422,34 @@ let () =
        let bin = Codegen_riscv.emit_program ~main_ty:mt prog in
        if String.length bin > 64 then "assembled" else "suspiciously short"
      with e -> Printexc.to_string e) "assembled";
+
+  (* v0.1.276: the third time the same shape turned up (widths, then indices),
+     the question was asked mechanically instead of by probe: every refusal the
+     interpreter can raise, checked against what the compiled backends do with
+     the same input. Nine diverged, and always the same way -- the compiled
+     backends had no check at all and returned whatever the byte or pointer
+     arithmetic produced. `chr 256` was a NUL, because the cast to unsigned char
+     WAS the domain check; `ord ""` was the NUL terminator; a negative
+     `str_repeat` count was silently an empty string; an undefined escape became
+     the letter itself.
+
+     test/parity/refusals.mere is the caught side of all of it. *)
+  assert_contains "v0.1.276: C checks chr's domain rather than masking it"
+    (codegen "chr 65") "chr: %lld out of byte range [0, 255]";
+  assert_contains "v0.1.276: C checks ord's argument is one character"
+    (codegen "ord \"a\"") "ord: expected single-char str, got length %lld";
+  assert_contains "v0.1.276: C refuses a negative repeat count"
+    (codegen "str_repeat \"a\" 2") "str_repeat: negative count %lld";
+  assert_contains "v0.1.276: LLVM checks chr's domain"
+    (llvm "chr 65") "@.numfmt_chr";
+  assert_contains "v0.1.276: LLVM's ord goes through the checked helper"
+    (llvm "ord \"a\"") "call i64 @__lang_ord(ptr";
+  assert_contains "v0.1.276: Wasm checks chr before wrapping to i32"
+    (wasm "chr 65") "(i64.gt_s (local.get $n8) (i64.const 255))";
+  (* and the widths the same sweep turned up: a count of matches and a buffer
+     length are Mere ints too *)
+  assert_contains "v0.1.276: C returns str_count at full width"
+    (codegen "str_count \"aaa\" \"a\"") "static long long __lang_str_count(";
 
   (* v0.1.275: an index is a Mere int, and every compiled runtime took it as a
      32-bit one -- the bounds check then ran on the truncated value, so

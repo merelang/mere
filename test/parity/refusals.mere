@@ -1,0 +1,59 @@
+// What every builtin does when it is handed a value outside its domain, held to
+// the interpreter on all four backends.
+//
+// This file exists because the previous two slices found the same shape twice
+// (string widths, then indices), so the third time the question was asked
+// mechanically instead: every refusal the interpreter can raise, checked against
+// what the compiled backends do with the same input. Nine of them diverged, and
+// they diverged the same way each time -- the compiled backends had no check at
+// all, and returned whatever the underlying byte or pointer arithmetic produced:
+//
+//   chr 256          -> a NUL      (the cast to unsigned char WAS the domain check)
+//   chr (-1)         -> 0xFF
+//   ord ""           -> 0          (it read byte 0 whatever the length was)
+//   ord "ab"         -> 97
+//   str_repeat s (-1)-> ""         (a mistake, silently agreed to)
+//   str_unescape     -> the letter itself for an escape nobody defined
+//   owned_vec_get    -> abort(), which try_or cannot catch
+//
+// Every one of them was a value a program could produce by accident and then
+// keep computing with. The interpreter has refused all of them since it was
+// written; three backends agreed with each other and not with it.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+let s = fn (label: str) -> fn (t: unit -> str) ->
+  print (label ++ " = " ++ try_or (fn () -> "[" ++ t () ++ "]") "REFUSED");
+let i = fn (label: str) -> fn (t: unit -> int) ->
+  print (label ++ " = " ++ str_of_int (try_or t (0 - 999)));
+
+// --- chr: a byte, and only a byte ---
+let _ = s "chr 65" (fn () -> chr 65);
+let _ = s "chr 0" (fn () -> chr 0);
+let _ = s "chr 255" (fn () -> chr 255);
+let _ = s "chr 256" (fn () -> chr 256);
+let _ = s "chr -1" (fn () -> chr (0 - 1));
+// past what 32 bits can name, which used to wrap back into range
+let _ = s "chr 2^32+65" (fn () -> chr 4294967361);
+
+// --- ord: one character, and only one ---
+let _ = i "ord A" (fn () -> ord "A");
+let _ = i "ord empty" (fn () -> ord "");
+let _ = i "ord two" (fn () -> ord "ab");
+
+// --- str_repeat: zero is empty, negative is a mistake ---
+let _ = s "repeat 2" (fn () -> str_repeat "ab" 2);
+let _ = s "repeat 0" (fn () -> str_repeat "ab" 0);
+let _ = s "repeat -1" (fn () -> str_repeat "ab" (0 - 1));
+
+// --- str_unescape: the escapes that exist, and one that does not ---
+let _ = s "unescape known" (fn () -> str_unescape "a\\nb");
+let _ = s "unescape unknown" (fn () -> str_unescape "a\\q");
+
+// --- owned_vec: the same index rules as vec ---
+let ov = owned_vec_new ();
+let _ = owned_vec_push ov 7;
+let _ = i "owned_vec_get 0" (fn () -> owned_vec_get ov 0);
+let _ = i "owned_vec_get 5" (fn () -> owned_vec_get ov 5);
+let _ = i "owned_vec_get big" (fn () -> owned_vec_get ov 4294967297);
+0

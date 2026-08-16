@@ -179,6 +179,12 @@ let idx_mid_vec_offset = ref 0
 let idx_post_vec_offset = ref 0
 let idx_pre_charat_offset = ref 0
 let idx_mid_charat_offset = ref 0
+let num_pre_chr_offset = ref 0
+let num_post_chr_offset = ref 0
+let num_pre_ord_offset = ref 0
+let num_pre_rep_offset = ref 0
+let esc_pre_offset = ref 0
+let esc_post_offset = ref 0
 let idx_pre_sub_offset = ref 0
 let idx_mid1_sub_offset = ref 0
 let idx_mid2_sub_offset = ref 0
@@ -2703,10 +2709,10 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr arg;
     emit_instr "call $__lang_char_at_chr"
   | Ast.App ({ node = Ast.Var "ord"; _ }, arg) ->
+    (* v0.1.276: it read byte 0 whatever the length was, so `ord ""` was the
+       NUL terminator and `ord "ab"` was 'a' *)
     emit_expr arg;
-    emit_instr "i32.wrap_i64";
-    emit_instr "i32.load8_u";
-    emit_instr "i64.extend_i32_u"
+    emit_instr "call $__lang_ord"
   | Ast.App ({ node = Ast.Var "to_upper"; _ }, arg) ->
     emit_expr arg;
     emit_instr "call $__lang_to_upper"
@@ -5366,6 +5372,11 @@ let runtime_helpers = {|
     (local $s i32)
     (local $n i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
+    (if (i64.lt_s (local.get $n8) (i64.const 0))
+      (then (return (call $__lang_fail_num
+                      (i64.extend_i32_u (global.get $__lang_num_pre_rep))
+                      (local.get $n8)
+                      (i64.extend_i32_u (global.get $__lang_fail_sentinel))))))
     (local.set $n (i32.wrap_i64 (local.get $n8)))
     (if (i32.le_s (local.get $n) (i32.const 0))
       (then
@@ -5427,6 +5438,14 @@ let runtime_helpers = {|
   ;; ((unsigned char)n) and the self-host $chr (i32.store8 truncation).
   (func $__lang_char_at_chr (param $n8 i64) (result i64)
     (local $n i32)
+    ;; v0.1.276: masking to 255 is not a check, it is an agreement to accept
+    ;; anything -- `chr 256` came back as a NUL
+    (if (i32.or (i64.lt_s (local.get $n8) (i64.const 0))
+                (i64.gt_s (local.get $n8) (i64.const 255)))
+      (then (return (call $__lang_fail_num
+                      (i64.extend_i32_u (global.get $__lang_num_pre_chr))
+                      (local.get $n8)
+                      (i64.extend_i32_u (global.get $__lang_num_post_chr))))))
     (local.set $n (i32.wrap_i64 (local.get $n8)))
     (call $__lang_char_at_setup)
     (i64.extend_i32_s (i32.add (i32.add (global.get $__lang_char_table)
@@ -5615,6 +5634,18 @@ let runtime_helpers = {|
             (local.get $mid))
           (call $show_int (local.get $len)))
         (local.get $post))))
+  (func $__lang_fail_num (param $pre i64) (param $a i64) (param $post i64) (result i64)
+    (call $__lang_fail
+      (call $__lang_str_concat
+        (call $__lang_str_concat (local.get $pre) (call $show_int (local.get $a)))
+        (local.get $post))))
+  (func $__lang_ord (param $s8 i64) (result i64)
+    (if (i64.ne (call $__lang_strlen (local.get $s8)) (i64.const 1))
+      (then (return (call $__lang_fail_num
+                      (i64.extend_i32_u (global.get $__lang_num_pre_ord))
+                      (call $__lang_strlen (local.get $s8))
+                      (i64.extend_i32_u (global.get $__lang_fail_sentinel))))))
+    (i64.extend_i32_u (i32.load8_u (i32.wrap_i64 (local.get $s8)))))
   (func $__lang_fail_range (param $pre i64) (param $a i64) (param $mid1 i64)
                            (param $b i64) (param $mid2 i64) (param $c i64) (result i64)
     (call $__lang_fail
@@ -5845,6 +5876,22 @@ let runtime_helpers = {|
               (i32.lt_s (i32.add (local.get $i) (i32.const 1)) (local.get $n)))
           (then
             (local.set $ec (i32.load8_u (i32.add (local.get $s) (i32.add (local.get $i) (i32.const 1)))))
+            ;; v0.1.276: an escape nobody defined used to become the letter
+            ;; itself. The accepted set is the interpreter's: n t r \\ " /
+            (if (i32.eqz (i32.or
+                  (i32.or (i32.or (i32.eq (local.get $ec) (i32.const 110))
+                                  (i32.eq (local.get $ec) (i32.const 116)))
+                          (i32.or (i32.eq (local.get $ec) (i32.const 114))
+                                  (i32.eq (local.get $ec) (i32.const 92))))
+                  (i32.or (i32.eq (local.get $ec) (i32.const 34))
+                          (i32.eq (local.get $ec) (i32.const 47)))))
+              (then (return (call $__lang_fail
+                              (call $__lang_str_concat
+                                (call $__lang_str_concat
+                                  (i64.extend_i32_u (global.get $__lang_esc_pre))
+                                  (call $__lang_char_at_chr
+                                    (i64.extend_i32_u (local.get $ec))))
+                                (i64.extend_i32_u (global.get $__lang_esc_post)))))))
             (if (i32.eq (local.get $ec) (i32.const 110))      ;; 'n'
               (then (local.set $ec (i32.const 10)))
               (else (if (i32.eq (local.get $ec) (i32.const 116))  ;; 't'
@@ -8352,6 +8399,12 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   idx_post_vec_offset := fresh_str_offset ")";
   idx_pre_charat_offset := fresh_str_offset "char_at: index ";
   idx_mid_charat_offset := fresh_str_offset " out of range (len=";
+  num_pre_chr_offset := fresh_str_offset "chr: ";
+  num_post_chr_offset := fresh_str_offset " out of byte range [0, 255]";
+  num_pre_ord_offset := fresh_str_offset "ord: expected single-char str, got length ";
+  num_pre_rep_offset := fresh_str_offset "str_repeat: negative count ";
+  esc_pre_offset := fresh_str_offset "str_unescape: unknown escape '\\";
+  esc_post_offset := fresh_str_offset "'";
   idx_pre_sub_offset := fresh_str_offset "substring: range [";
   idx_mid1_sub_offset := fresh_str_offset ", ";
   idx_mid2_sub_offset := fresh_str_offset ") invalid for str of length ";
@@ -9931,6 +9984,12 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      \  (global $__lang_idx_post_vec i32 (i32.const %d))\n\
      \  (global $__lang_idx_pre_charat i32 (i32.const %d))\n\
      \  (global $__lang_idx_mid_charat i32 (i32.const %d))\n\
+     \  (global $__lang_num_pre_chr i32 (i32.const %d))\n\
+     \  (global $__lang_num_post_chr i32 (i32.const %d))\n\
+     \  (global $__lang_num_pre_ord i32 (i32.const %d))\n\
+     \  (global $__lang_num_pre_rep i32 (i32.const %d))\n\
+     \  (global $__lang_esc_pre i32 (i32.const %d))\n\
+     \  (global $__lang_esc_post i32 (i32.const %d))\n\
      \  (global $__lang_idx_pre_sub i32 (i32.const %d))\n\
      \  (global $__lang_idx_mid1_sub i32 (i32.const %d))\n\
      \  (global $__lang_idx_mid2_sub i32 (i32.const %d))\n\
@@ -9955,6 +10014,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     table_section bump_init char_table_offset !fail_sentinel_offset !mapget_msg_offset
     !idx_pre_get_offset !idx_pre_set_offset !idx_mid_vec_offset !idx_post_vec_offset
     !idx_pre_charat_offset !idx_mid_charat_offset
+    !num_pre_chr_offset !num_post_chr_offset !num_pre_ord_offset !num_pre_rep_offset
+    !esc_pre_offset !esc_post_offset
     !idx_pre_sub_offset !idx_mid1_sub_offset !idx_mid2_sub_offset
     top_globals_section
     data_section runtime_helpers
