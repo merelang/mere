@@ -132,6 +132,22 @@ for f in $FILES; do
     else [ "$(emit_kind "$TMP/w.err")" = unsup ] && row="$row wasm:UNSUP" || { row="$row wasm:EMITFAIL"; bad=1; }; fi
   else row="$row wasm:SKIP"; fi
 
+  # A pin that no longer describes a divergence is a claim that has stopped being
+  # true. v0.1.272 is what made this worth checking: the Wasm backend learned to
+  # unwind, `failure_caught` went from DIVERGE to MATCH -- and the .expected file
+  # sat there passing quietly, because a matching case never reads it. The gate
+  # would have kept a stale declaration on disk indefinitely, which is the exact
+  # failure the pin mechanism exists to prevent.
+  for b in c llvm wasm; do
+    case "$row" in
+      *"$b:MATCH"*)
+        if [ -f "${f%.mere}.$b.expected" ]; then
+          echo "FAIL $name  ($b matches now — delete the stale pin ${f%.mere}.$b.expected)"
+          bad=1
+        fi ;;
+    esac
+  done
+
   # A backend that refused is a backend this case did not check. Counted so
   # the blind spot is a number rather than a word buried in a passing row.
   for b in c llvm wasm; do

@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.271" Version.v "0.1.271";
+  check "version is 0.1.272" Version.v "0.1.272";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -13418,6 +13418,83 @@ let () =
        let bin = Codegen_riscv.emit_program ~main_ty:mt prog in
        if String.length bin > 64 then "assembled" else "suspiciously short"
      with e -> Printexc.to_string e) "assembled";
+
+  (* v0.1.272 (Q-032): the Wasm backend has no unwinding underneath `fail` -- it
+     sets a flag, returns a sentinel, and the try_or at the boundary reads the
+     flag. The failure was caught, but everything BETWEEN the fail and the catch
+     still ran: a body that pushed three strings and failed after the second
+     pushed the third here and nowhere else. That was the last DIVERGE pin in
+     the parity suite.
+
+     Unwinding written by hand: after a call, ask whether the callee failed and
+     return at once if it did. The interesting half is the second question --
+     which calls need to ask. A callee that cannot reach `$__lang_fail` cannot
+     have set the flag, and on a self-hosted compile that is 2,524 of 3,722 call
+     sites: the difference between +14% and +4% of module size. Everything
+     unknowable keeps its check (indirect calls, imports, anything without a
+     definition in the module), because removing a needed one is a silent wrong
+     answer. *)
+  let wasm_body src name =
+    let prog = Pipeline.parse_program src in
+    let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+    let w = Codegen_wasm.emit_program ~main_ty:Ast.TyInt prog in
+    let lines = String.split_on_char '\n' w in
+    let opening = "(func " ^ name ^ " " in
+    let rec collect started acc = function
+      | [] -> List.rev acc
+      | l :: rest ->
+        let t = String.trim l in
+        let is_func_head =
+          String.length t >= 6 && String.sub t 0 6 = "(func "
+        in
+        let is_this =
+          String.length t >= String.length opening
+          && String.sub t 0 (String.length opening) = opening
+        in
+        if (not started) && is_this then collect true acc rest
+        else if started && is_func_head then List.rev acc
+        else if started then collect true (t :: acc) rest
+        else collect false acc rest
+    in
+    String.concat " ; " (collect false [] lines)
+  in
+  let unwind_src =
+    "let pure = fn (x: int) -> x + 1;\n\
+     let risky = fn (x: int) -> x / 0;\n\
+     let outer = fn (x: int) -> let a = risky x in let b = pure x in a + b;\n\
+     let _ = print (str_of_int (try_or (fn () -> outer 1) 0));\n\
+     0"
+  in
+  (* `risky` divides, so it can fail: the call to it asks. `pure` adds, so it
+     cannot: the call to it does not. Both halves in one body, because a test
+     that only checks the first would pass with the check on every call in the
+     module -- which is the version that costs 14%. *)
+  check "v0.1.272: a call that can fail unwinds, one that cannot is not asked"
+    (wasm_body unwind_src "$outer")
+    "(local i64 i64) ; local.get 0 ; call $risky ; \
+     global.get $__lang_fail_flag ; if ; global.get $__lang_fail_sentinel ; \
+     i64.extend_i32_u ; return ; end ; local.set 1 ; local.get 0 ; \
+     call $pure ; local.set 2 ; local.get 1 ; local.get 2 ; i64.add)";
+  (* And the one call that must never unwind is try_or's own call to the thunk:
+     that frame is the catch. If it propagated, nothing would ever be caught. *)
+  check "v0.1.272: the catch itself does not unwind"
+    (let b = wasm_body unwind_src "$main" in
+     let rec find i =
+       if i + 24 > String.length b then "not found"
+       else if String.sub b i 24 = "call_indirect (type $cl)" then
+         String.sub b i (min 60 (String.length b - i))
+       else find (i + 1)
+     in
+     let seg = find 0 in
+     if seg = "not found" then seg
+     else
+       (* the first indirect call in main is try_or's; it is followed by a
+          local.set, not by a flag check *)
+       String.concat " ; "
+         (match String.split_on_char ';' seg with
+          | a :: b :: _ -> [ String.trim a; String.trim b ]
+          | l -> List.map String.trim l))
+    "call_indirect (type $cl) ; local.set 1";
 
   (* v0.1.271: the failure that had no name. Recursion deeper than the stack
      killed a compiled program with SIGSEGV -- exit 139, empty stderr, nothing
