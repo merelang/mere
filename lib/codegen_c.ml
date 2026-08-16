@@ -2520,8 +2520,11 @@ let rec emit_expr (e : Ast.expr) : string =
        (* Phase 36: chr n — int in [0,255] → single-byte str via char_table *)
        Printf.sprintf "__lang_char_at_chr(%s)" (emit_expr arg)
      | Ast.Var "ord" when not (user_shadows "ord") ->
-       (* Phase 36: ord s — single-byte str → int *)
-       Printf.sprintf "((int)(unsigned char)((%s)[0]))" (emit_expr arg)
+       (* Phase 36: ord s — single-byte str → int.
+          v0.1.276: it read byte 0 whatever the length was, so `ord ""` was the
+          NUL terminator (0) and `ord "ab"` was 'a' -- two answers the
+          interpreter has always refused to give. *)
+       Printf.sprintf "__lang_ord(%s)" (emit_expr arg)
      | Ast.Var "to_upper" ->
        Printf.sprintf "__lang_to_upper(%s)" (emit_expr arg)
      | Ast.Var "to_lower" ->
@@ -6799,7 +6802,8 @@ let str_concat_helper =
       "}";
       "";
       (* Phase 24.4: str_count s needle — non-overlapping count. *)
-      "static int __lang_str_count(const char* s, const char* n) {";
+      (* v0.1.276: counts and lengths are Mere ints *)
+      "static long long __lang_str_count(const char* s, const char* n) {";
       "  if (n[0] == '\\0') return 0;";
       "  size_t slen = __lang_str_size(s);";
       "  size_t nlen = __lang_str_size(n);";
@@ -6853,7 +6857,12 @@ let str_concat_helper =
          that serves them has to be too. The product is checked as well: a length
          that wraps buys a small buffer for a large copy. *)
       "static const char* __lang_str_repeat(const char* s, int64_t n) {";
-      "  if (n <= 0) return __lang_str_of_cstr(\"\");";
+      (* v0.1.276: a negative count is a mistake, not an empty string -- the
+         interpreter says so and the compiled backends quietly agreed to
+         anything *)
+      "  if (n < 0)";
+      "    __lang_fail_num(\"str_repeat: negative count %lld\", (long long)n);";
+      "  if (n == 0) return __lang_str_of_cstr(\"\");";
       "  size_t sl = __lang_str_size(s);";
       "  if (sl && (size_t)n > ((size_t)-1 - 1) / sl) __lang_fail_impl(\"str_repeat: result too large\");";
       "  size_t total = sl * (size_t)n;";
@@ -6873,8 +6882,13 @@ let str_concat_helper =
       "}";
       "";
       (* Phase 36: chr n — return pointer to char_table entry for byte n. *)
-      "static const char* __lang_char_at_chr(int n) {";
+      (* v0.1.276: the cast to unsigned char was the whole domain check. `chr
+         256` came back as a NUL and `chr (0-1)` as 0xFF, on every compiled
+         backend and never in the interpreter. *)
+      "static const char* __lang_char_at_chr(long long n) {";
       "  __lang_char_table_setup();";
+      "  if (n < 0 || n > 255)";
+      "    __lang_fail_num(\"chr: %lld out of byte range [0, 255]\", n);";
       "  return __lang_char_table[(unsigned char)n].__c;";
       "}";
       "";
@@ -7116,7 +7130,7 @@ let str_concat_helper =
       "  struct stat st;";
       "  return stat(path, &st) == 0;";
       "}";
-      "static int __lang_sleep_ms(int ms) {";
+      "static int __lang_sleep_ms(long long ms) {";
       "  if (ms <= 0) return 0;";
       "  usleep((useconds_t)ms * 1000);";
       "  return 0;";
@@ -7145,6 +7159,12 @@ let str_concat_helper =
       (* Phase 22.6: str_unescape — interpret backslash escapes (n / t / r /
          backslash / quote / slash); pass others through unchanged. Handles
          escapes inside string literals for json_parser and the like. *)
+      "static long long __lang_ord(const char* s) {";
+      "  long long __n = (long long)__lang_str_size(s);";
+      "  if (__n != 1)";
+      "    __lang_fail_num(\"ord: expected single-char str, got length %lld\", __n);";
+      "  return (long long)(unsigned char)s[0];";
+      "}";
       "static const char* __lang_str_unescape(const char* s) {";
       "  size_t n = __lang_str_size(s);";
       "  char* r = __lang_str_alloc(__lang_current_region, n);";
@@ -7159,7 +7179,10 @@ let str_concat_helper =
       "        case '\\\\': r[j++] = '\\\\'; break;";
       "        case '\"': r[j++] = '\"'; break;";
       "        case '/': r[j++] = '/'; break;";
-      "        default: r[j++] = c; break;";
+      (* v0.1.276: an escape nobody defined used to become the letter itself,
+         so `\\q` was `q` -- the interpreter refuses it, and a typo in an escape
+         is exactly the kind of thing worth refusing *)
+      "        default: __lang_fail_chr(\"str_unescape: unknown escape \\'\\\\%c\\'\", c); break;";
       "      }";
       "      i += 2;";
       "    } else {";
@@ -7244,6 +7267,18 @@ let region_runtime_helpers =
       "    const char* fmt, long long a, long long b) {";
       "  char __m[160];";
       "  snprintf(__m, sizeof __m, fmt, a, b);";
+      "  __lang_fail_impl(__m);";
+      "}";
+      "__attribute__((noreturn)) static void __lang_fail_num(";
+      "    const char* fmt, long long a) {";
+      "  char __m[160];";
+      "  snprintf(__m, sizeof __m, fmt, a);";
+      "  __lang_fail_impl(__m);";
+      "}";
+      "__attribute__((noreturn)) static void __lang_fail_chr(";
+      "    const char* fmt, int c) {";
+      "  char __m[160];";
+      "  snprintf(__m, sizeof __m, fmt, c);";
       "  __lang_fail_impl(__m);";
       "}";
       "__attribute__((noreturn)) static void __lang_fail_range(";
@@ -7757,7 +7792,7 @@ let strbuf_runtime =
       "  return r;";
       "}";
       "";
-      "static int mere_strbuf_len(mere_strbuf* sb) { return sb->len; }" ]
+      "static long long mere_strbuf_len(mere_strbuf* sb) { return sb->len; }" ]
 
 (* ByteBuf[R]: the same shape as StrBuf, for bytes. Random access is the point —
    `bytes` is immutable and StrBuf appends only — and one byte per byte is the
@@ -8205,10 +8240,9 @@ let emit_owned_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  return 0; /* unit */";
       "}";
       "";
-      Printf.sprintf "static %s %s_get(%s* v, int i) {" c_elem struct_name struct_name;
-      "  if (i < 0 || i >= v->len) {";
-      "    fprintf(stderr, \"owned_vec_get: index %d out of bounds (len = %d)\\n\", i, v->len);";
-      "    abort();";
+      Printf.sprintf "static %s %s_get(%s* v, long long i) {" c_elem struct_name struct_name;
+      "  if (i < 0 || i >= (long long)v->len) {";
+      "    __lang_fail_idx(\"owned_vec_get: index %lld out of bounds (len = %lld)\", i, (long long)v->len);";
       "  }";
       "  return v->data[i];";
       "}";

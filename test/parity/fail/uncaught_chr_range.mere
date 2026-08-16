@@ -1,0 +1,6 @@
+// A byte value that is not a byte. The cast to `unsigned char` was the entire
+// domain check on the compiled backends, so `chr 256` came back as a NUL and
+// `chr (0-1)` as 0xFF -- values a program then computes with (v0.1.276).
+let _ = print "before";
+let _ = print (chr 256);
+0

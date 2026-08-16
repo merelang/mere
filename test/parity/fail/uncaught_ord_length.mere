@@ -1,0 +1,6 @@
+// `ord` on something that is not one character. It read byte 0 whatever the
+// length was, so `ord ""` was the NUL terminator and `ord "ab"` was 'a'
+// (v0.1.276).
+let _ = print "before";
+let _ = print (str_of_int (ord "ab"));
+0
