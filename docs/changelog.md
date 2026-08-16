@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.266 — 2026-08-16
+
+_The string values four backends were never asked about, and the two answers that
+were wrong._
+
+A new parity case walks the axes the open question about builtin parity names next
+to the width one it already closed: the empty string, an index that is not inside
+the string, and a string big enough to leave the small cases behind. Every string
+probe in the suite until now used a literal a human types in the middle of the
+range, so a helper that divides by a length of zero, or reads one byte past the
+end, answered every question it was asked.
+
+It found two, both on LLVM and both from this week's header migration:
+
+- **`str_repeat s 0`** allocated its empty result directly, without a header — the
+  one case that computes no length, and so the one the mechanical conversion
+  missed. `str_len` of it read whatever preceded the allocation.
+- **`str_trim`** walked a pointer into the string and then asked for *its* length.
+  An interior pointer has no header of its own. This is the same bug the Wasm
+  backend had in v0.1.262 — invisible on LLVM until today, because there was no
+  header there to read wrongly.
+
+The second one is the interesting one: the same defect existed in two backends,
+written years apart, and the gate that found the first could not see the second
+until the representation changed underneath it.
+
+---
+
 ## v0.1.265 — 2026-08-16
 
 _What `fail` hands back on Wasm is an empty str, so the code it cannot unwind past

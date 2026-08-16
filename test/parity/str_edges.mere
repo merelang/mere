@@ -1,0 +1,58 @@
+// The string values four backends were never asked about: the empty one, an
+// index that is not inside the string, and one big enough to leave the small
+// cases behind.
+//
+// The open question about builtin parity puts it as "not which builtins, but
+// at which VALUES", and names these axes next to the width axis a previous
+// case closed. Every string probe in the suite until now used a literal a
+// human types in the middle of the range -- "hello", "abc", "a,b,c" -- so a
+// helper that reads one byte past the end, or divides by a length that is
+// zero, or overflows an i32 offset, answered every question it was asked.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+let b = fn (x: bool) -> if x then "1" else "0";
+let empty = "";
+
+// --- the empty string ---
+let _ = print (str_of_int (str_len empty));
+let _ = print (b (empty == ""));
+let _ = print (b (str_eq empty ""));
+let _ = print ("[" ++ empty ++ "]");
+let _ = print ("[" ++ substring empty 0 0 ++ "]");
+let _ = print ("[" ++ to_upper empty ++ "]");
+let _ = print ("[" ++ to_lower empty ++ "]");
+let _ = print ("[" ++ str_trim empty ++ "]");
+let _ = print ("[" ++ str_rev empty ++ "]");
+let _ = print ("[" ++ str_repeat empty 5 ++ "]");
+let _ = print ("[" ++ str_repeat "ab" 0 ++ "]");
+let _ = print (str_of_int (str_index_of "abc" empty));
+let _ = print (b (str_starts_with "abc" empty));
+let _ = print (b (str_ends_with "abc" empty));
+let _ = print (b (str_contains "abc" empty));
+let _ = print ("[" ++ str_join "," (Cons (empty, Cons (empty, Nil))) ++ "]");
+let _ = print (str_of_int (list_len (str_split empty ",")));
+let _ = print (str_of_int (list_len (str_split "a,b" ",")));
+
+// --- an index that is not inside the string ---
+let s = "abc";
+let _ = print ("[" ++ substring s 0 0 ++ "]");
+let _ = print ("[" ++ substring s 3 3 ++ "]");
+let _ = print ("[" ++ substring s 1 1 ++ "]");
+let _ = print (str_of_int (str_index_of s "z"));
+let _ = print (str_of_int (str_index_of empty "z"));
+let _ = print (b (str_starts_with empty "z"));
+let _ = print (b (str_ends_with empty "z"));
+
+// --- a string big enough to leave the small cases behind ---
+let big = str_repeat "0123456789" 20000;
+let _ = print (str_of_int (str_len big));
+let _ = print (str_of_int (str_len (big ++ big)));
+let _ = print (substring big 0 10);
+let _ = print (substring big 199990 200000);
+let _ = print (str_of_int (str_index_of big "9012345678"));
+let _ = print (str_of_int (str_len (str_rev big)));
+let _ = print (substring (str_rev big) 0 10);
+let _ = print (str_of_int (str_len (to_upper big)));
+let _ = print (str_of_int (str_len (str_trim ("  " ++ big ++ "  "))));
+let _ = print (str_of_int (list_len (str_split big "9")));
