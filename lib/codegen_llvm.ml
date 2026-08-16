@@ -5743,6 +5743,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | None -> "i32"
     in
     let merge_label = fresh_label "match_join_" in
+    let match_in_tail = __in_tail in
     let phi_entries = ref [] in
     (* Combine two i1 booleans with `and i1`. *)
     let and_cond a b =
@@ -5959,8 +5960,20 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
            emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s"
                          gv pass_label next_label);
            emit_label pass_label);
+        (* v0.1.269: an arm in tail position RETURNS, like a tail-position
+           If branch. Nearly every recursive list helper is written with
+           `match`, so leaving Match out of the tail-position work in
+           v0.1.267 left their tail calls sitting before a `br` to the join
+           -- which is the one shape musttail cannot take. *)
+        llvm_tail_pos := match_in_tail;
         let v = emit_expr env' body in
         current_var_types := saved_vt;
+        if match_in_tail then begin
+          (if !llvm_returned then llvm_returned := false
+           else emit_instr (Printf.sprintf "  ret %s %s" result_ty v));
+          emit_label next_label;
+          emit_arms rest
+        end else begin
         let end_label = fresh_label "arm_end_" in
         emit_instr (Printf.sprintf "  br label %%%s" end_label);
         emit_label end_label;
@@ -5968,8 +5981,15 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         emit_instr (Printf.sprintf "  br label %%%s" merge_label);
         emit_label next_label;
         emit_arms rest
+        end
     in
     emit_arms arms;
+    if match_in_tail then begin
+      (* every arm returned; what follows the last arm's fallthrough is the
+         no-match path the emitter already put there *)
+      llvm_returned := true;
+      "0"
+    end else begin
     emit_label merge_label;
     let r = fresh_reg () in
     let phi_parts =
@@ -5978,6 +5998,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     in
     emit_instr (Printf.sprintf "  %s = phi %s %s" r result_ty phi_parts);
     r
+    end
   | Ast.Fun (param, _, fn_body) ->
     (* Anonymous Fun in expression position → emit a closure value:
        env-struct alloc (default region) + adapter (deferred) + closure

@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.269 — 2026-08-16
+
+_A `match` arm is a tail position too, which is where nearly every recursive list
+helper's tail call actually lives._
+
+v0.1.267 gave the LLVM backend a notion of tail position and emitted `musttail`,
+and the measurement that immediately followed it — the collection value axis — said
+`list_sum` over a list still died at 100,000 there while C was fine at 200,000. The
+reason was narrow: **only `If` had been made tail-aware.** Every recursive helper in
+the prelude is written with `match`, so its tail call sat in an arm that branched to
+a join and phi'd — the one shape `musttail` cannot take.
+
+An arm in tail position returns now, exactly as a tail-position `If` branch does.
+`list_sum` runs at 500,000 on LLVM, and a program that puts a 300,000-element list
+through every list helper — len, sum, rev, map, filter, fold — gives the same
+answers on the interpreter, C and LLVM.
+
+The lesson is about where the measurement pointed. "Tail position" sounded like one
+concept and was implemented as one construct; the gate written an hour later found
+the other construct by asking a question that had nothing to do with tail calls.
+
+---
+
 ## v0.1.268 — 2026-08-16
 
 _A missing map key is catchable everywhere, and `list_filter` survives a list longer
