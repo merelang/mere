@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.265" Version.v "0.1.265";
+  check "version is 0.1.266" Version.v "0.1.266";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -13414,6 +13414,23 @@ let () =
        let bin = Codegen_riscv.emit_program ~main_ty:mt prog in
        if String.length bin > 64 then "assembled" else "suspiciously short"
      with e -> Printexc.to_string e) "assembled";
+
+  (* v0.1.266: the value axis for strings -- the empty one, an index outside
+     the string, one big enough to leave the small cases behind. Two LLVM bugs
+     came out of asking: `str_repeat s 0` allocated its empty result without a
+     header (the one case that computes no length), and str_trim asked an
+     interior pointer for its length, which is the same bug the Wasm backend
+     had in v0.1.262 and which only became reachable here once this backend
+     had a header to read. *)
+  check "v0.1.266: repeating a string zero times is empty"
+    (Pipeline.process "str_len (str_repeat \"ab\" 0)") "0";
+  check "v0.1.266: repeating the empty string is empty"
+    (Pipeline.process "str_len (str_repeat \"\" 5)") "0";
+  check "v0.1.266: trimming keeps a long middle"
+    (Pipeline.process "str_len (str_trim (\"  \" ++ str_repeat \"ab\" 1000 ++ \"  \"))")
+    "2000";
+  check "v0.1.266: an index outside the string is an empty slice"
+    (Pipeline.process "str_len (substring \"abc\" 3 3)") "0";
 
   (* v0.1.265 (Q-032): on Wasm `fail` sets a flag and returns a value, because
      there is no unwinding there. That value used to be 0 -- not an address --

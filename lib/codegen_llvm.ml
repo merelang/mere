@@ -9022,20 +9022,29 @@ let str_concat_helper =
       (* Phase 36: str_trim — leading + trailing whitespace strip *)
       "define ptr @__lang_str_trim(ptr %s) {";
       "entry:";
+      (* v0.1.266: the ORIGINAL length, taken once. What follows walks a
+         pointer INTO the string, and an interior pointer has no header of its
+         own -- asking str_size for its length reads the string's own bytes.
+         The Wasm backend had this exact bug (v0.1.262); it was invisible here
+         until this backend gained a header to read. *)
+      "  %olen = call i64 @__lang_str_size(ptr %s)";
       "  br label %lead";
       "lead:";
       "  %p = phi ptr [ %s, %entry ], [ %p1, %lead_body ]";
-      "  %c = load i8, ptr %p";
-      "  %iz = icmp eq i8 %c, 0";
-      "  br i1 %iz, label %trail_start, label %check";
+      "  %walked = ptrtoint ptr %p to i64";
+      "  %base = ptrtoint ptr %s to i64";
+      "  %skipped = sub i64 %walked, %base";
+      "  %at_end = icmp uge i64 %skipped, %olen";
+      "  br i1 %at_end, label %trail_start, label %check";
       "check:";
+      "  %c = load i8, ptr %p";
       "  %iws = call i1 @__lang_is_ws(i8 %c)";
       "  br i1 %iws, label %lead_body, label %trail_start";
       "lead_body:";
       "  %p1 = getelementptr i8, ptr %p, i64 1";
       "  br label %lead";
       "trail_start:";
-      "  %lenL = call i64 @__lang_str_size(ptr %p)";
+      "  %lenL = sub i64 %olen, %skipped";
       "  br label %trail";
       "trail:";
       "  %l = phi i64 [ %lenL, %trail_start ], [ %l1, %trail_body ]";
@@ -9082,8 +9091,12 @@ let str_concat_helper =
       "  %neg = icmp sle i32 %n, 0";
       "  br i1 %neg, label %ret_empty, label %dowork";
       "ret_empty:";
-      "  %empty = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 1)";
-      "  store i8 0, ptr %empty";
+      (* v0.1.266: through str_alloc like every other string. A bare 1-byte
+         allocation has no header, so `str_len` on the result of
+         `str_repeat s 0` read whatever preceded it -- the empty case was the
+         one the mechanical conversion missed, because it is the one that does
+         not compute a length. *)
+      "  %empty = call ptr @__lang_str_alloc(i64 0)";
       "  ret ptr %empty";
       "dowork:";
       "  %sl  = call i64 @__lang_str_size(ptr %s)";
