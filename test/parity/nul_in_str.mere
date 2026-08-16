@@ -7,19 +7,19 @@
 // character. Two answers about one value is a bug and not a choice, which is
 // why this file prints the strings as well as measuring them.
 //
-// One backend is pinned rather than fixed: LLVM has no length header at all,
-// its str is a bare pointer, and `str_len (chr 0)` is 0 there against 1
-// everywhere else. The NUL is not truncated on output; it is never in the
-// value. That is pinned as a DIVERGE rather than left out -- dropping U+0000
-// from the case would have made the file agree by not asking, which is what
-// happened the first time this came up.
+// Both backends that could not answer are fixed rather than pinned now. Wasm
+// was pinned for one slice: one host runs modules from both compilers, and it
+// could not trust the length header while the self-hosted backend still
+// emitted the pre-header representation. LLVM was pinned for two: its str was
+// a bare pointer with no header anywhere, so `str_len (chr 0)` was 0 there
+// against 1 everywhere else -- the NUL was not truncated on output, it was
+// never in the value.
 //
-// Wasm was pinned here too for one slice. The host could not trust the length
-// header while the SELF-HOSTED backend still emitted the pre-header
-// representation, since one host runs modules from both compilers; giving the
-// self-hosted backend the same layout is what let the pin go.
+// Dropping U+0000 from the case would have made this file agree by not
+// asking, which is what happened the first time the question came up. Pinning
+// instead is what kept it asking until all four could answer.
 //
-// Execution mode: 4 backends (interp + C + LLVM + Wasm), LLVM pinned
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
 let nul = chr 0;
 let s = nul ++ "X";

@@ -498,6 +498,13 @@ let llvm_string_escape (s : string) : string =
    Each entry: full LLVM declaration line. *)
 let str_globals : string list ref = ref []
 let str_counter = ref 0
+(* v0.1.264 (Q-031): a literal carries its LENGTH in front of its bytes,
+   the layout the C and Wasm backends already use -- `[i64 len][bytes][NUL]`
+   with the value pointing at byte0. The trailing NUL stays, so every libc
+   call in this backend keeps working on NUL-free strings; what the header
+   adds is a length that does not have to be searched for, which is the only
+   way a str can carry a zero byte. The value is a constant getelementptr
+   into the second field, so nothing but this function needs to know. *)
 let fresh_str_global (s : string) : string =
   let n = !str_counter in
   incr str_counter;
@@ -505,11 +512,14 @@ let fresh_str_global (s : string) : string =
   let escaped = llvm_string_escape s in
   let bytes_len = String.length s + 1 in
   let decl =
-    Printf.sprintf "%s = private constant [%d x i8] c\"%s\\00\""
-      label bytes_len escaped
+    Printf.sprintf
+      "%s = private constant { i64, [%d x i8] } { i64 %d, [%d x i8] c\"%s\\00\" }"
+      label bytes_len (String.length s) bytes_len escaped
   in
   str_globals := decl :: !str_globals;
-  label
+  Printf.sprintf
+    "getelementptr inbounds ({ i64, [%d x i8] }, ptr %s, i32 0, i32 1)"
+    bytes_len label
 
 let rec ty_is_concrete (t : Ast.ty) : bool =
   match Ast.walk t with
@@ -2538,13 +2548,19 @@ let mint_once name content emit =
     Hashtbl.add minted_globals name content;
     emit ()
 
+(* v0.1.264: these globals are Mere strs -- show concatenates with them and
+   reads their length -- so they carry the header every other str has. The
+   alias keeps every use site (`@.s_true`) spelled the way it was. *)
 let mint_show_global name content =
   mint_once name content (fun () ->
     let bytes_len = String.length content + 1 in
     let escaped = llvm_string_escape content in
     show_string_globals :=
-      Printf.sprintf "@.%s = private constant [%d x i8] c\"%s\\00\""
-        name bytes_len escaped
+      Printf.sprintf
+        "@.%s_h = private constant { i64, [%d x i8] } { i64 %d, [%d x i8] c\"%s\\00\" }\n\
+         @.%s = private alias [%d x i8], getelementptr inbounds ({ i64, [%d x i8] }, ptr @.%s_h, i32 0, i32 1)"
+        name bytes_len (String.length content) bytes_len escaped
+        name bytes_len bytes_len name
       :: !show_string_globals)
 
 let mint_show_format name fmt =
@@ -2580,8 +2596,12 @@ let emit_struct_fn ?(json = false) (tag : string) (t : Ast.ty) : string =
     emit_instr (Printf.sprintf
                   "  call i32 (ptr, ptr, ...) @asprintf(ptr %s, ptr @.fmt_%s%s)"
                   p fmt_name arg_str);
+    let raw = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" raw p);
+    (* v0.1.264: asprintf hands back a plain C string. A Mere str carries its
+       length in front of byte0, so the boundary copies it into one. *)
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" r p);
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_of_cstr(ptr %s)" r raw);
     r
   in
   emit_instr "entry:";
@@ -2606,8 +2626,10 @@ let emit_struct_fn ?(json = false) (tag : string) (t : Ast.ty) : string =
       emit_instr (Printf.sprintf
                     "  call i32 (ptr, ptr, ...) @asprintf(ptr %s, ptr @.fmt_%s_str, ptr %s)"
                     p pfx esc);
+      let raw = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" raw p);
       let r = fresh_reg () in
-      emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" r p);
+      emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_of_cstr(ptr %s)" r raw);
       r
     | Ast.TyUnit ->
       (if json then "@.s_json_null" else "@.s_unit")
@@ -2816,8 +2838,12 @@ let emit_struct_fn ?(json = false) (tag : string) (t : Ast.ty) : string =
               emit_instr (Printf.sprintf
                             "  call i32 (ptr, ptr, ...) @asprintf(ptr %s, ptr @.fmt_%s_ctor_payload, ptr @.s_%sctor_%s, ptr %s)"
                             p pfx (if json then "j" else "") cname ps);
+              let raw = fresh_reg () in
+              emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" raw p);
+              (* asprintf hands back a plain C string; a Mere str carries its
+                 length in front of byte0 (v0.1.264) *)
               let r = fresh_reg () in
-              emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" r p);
+              emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_of_cstr(ptr %s)" r raw);
               r
             end
         in
@@ -2887,8 +2913,10 @@ let emit_struct_fn ?(json = false) (tag : string) (t : Ast.ty) : string =
             emit_instr (Printf.sprintf
                           "  call i32 (ptr, ptr, ...) @asprintf(ptr %s, ptr @.fmt_%s_ctor_payload, ptr @.s_%sctor_%s, ptr %s)"
                           p pfx (if json then "j" else "") cname ps);
+            let raw = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" raw p);
             let r = fresh_reg () in
-            emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" r p);
+            emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_of_cstr(ptr %s)" r raw);
             r
         in
         let end_label = fresh_label "show_armend_" in
@@ -3602,8 +3630,11 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     (* Phase 25.1: string comparison uses strcmp instead of icmp. *)
     (match a_ty with
      | Ast.TyStr ->
+       (* v0.1.264: by the header, not by strcmp -- `chr 0` and "" have the
+          same first byte and different lengths, and the operator has to
+          tell them apart. __lang_str_compare orders by bytes then length. *)
        let cmp = fresh_reg () in
-       emit_instr (Printf.sprintf "  %s = call i32 @strcmp(ptr %s, ptr %s)" cmp ra rb);
+       emit_instr (Printf.sprintf "  %s = call i32 @__lang_str_compare(ptr %s, ptr %s)" cmp ra rb);
        let r = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = icmp %s i32 %s, 0" r (llvm_cmp_int op) cmp);
        r
@@ -3912,9 +3943,16 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                      r (llvm_ty_of ret_ty) name arg_ll);
        r)
   | Ast.App ({ node = Ast.Var "print"; _ }, arg) ->
+    (* v0.1.264 (Q-033/Q-031): write the str's LENGTH. `puts` stopped at the
+       first NUL, so a value `str_len` called 2 printed one character. *)
     let av = emit_expr env arg in
-    emit_instr (Printf.sprintf "  call i32 @puts(ptr %s)" av);
+    let l = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_str_size(ptr %s)" l av);
     emit_instr "  call i32 @fflush(ptr null)";
+    let w = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @write(i32 1, ptr %s, i64 %s)" w av l);
+    let w2 = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @write(i32 1, ptr @.s_newline, i64 1)" w2);
     "0"  (* unit / int 0 *)
   (* v0.1.246: these two were refused for want of a stderr lowering, which the
      panic path then went and did with stdout. Both are a `write` to a file
@@ -3925,7 +3963,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let av = emit_expr env arg in
     emit_instr "  call i32 @fflush(ptr null)";
     let l = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i64 @strlen(ptr %s)" l av);
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_str_size(ptr %s)" l av);
     let w = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i64 @write(i32 2, ptr %s, i64 %s)" w av l);
     let w2 = fresh_reg () in
@@ -3935,7 +3973,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let av = emit_expr env arg in
     emit_instr "  call i32 @fflush(ptr null)";
     let l = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i64 @strlen(ptr %s)" l av);
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_str_size(ptr %s)" l av);
     let w = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i64 @write(i32 1, ptr %s, i64 %s)" w av l);
     "0"
@@ -4141,7 +4179,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     (* v0.1.96: int is i64, so strlen's i64 result is the value directly. *)
     let av = emit_expr env arg in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i64 @strlen(ptr %s)" r av);
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_str_size(ptr %s)" r av);
     r
   (* bytes builtins. *)
   | Ast.App ({ node = Ast.Var "bytes_of_hex"; _ }, arg) ->
@@ -4226,7 +4264,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let bv = emit_expr env b_e in
     let raw = fresh_reg () in
     emit_instr (Printf.sprintf
-                  "  %s = call i32 @strcmp(ptr %s, ptr %s)"
+                  "  %s = call i32 @__lang_str_compare(ptr %s, ptr %s)"
                   raw av bv);
     let is_lt = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = icmp slt i32 %s, 0" is_lt raw);
@@ -4979,7 +5017,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
      | Ast.TyStr ->
        let av = emit_expr env arg in
        let r = fresh_reg () in
-       emit_instr (Printf.sprintf "  %s = call i64 @strlen(ptr %s)" r av);
+       emit_instr (Printf.sprintf "  %s = call i64 @__lang_str_size(ptr %s)" r av);
        r
      | Ast.TyTuple ts ->
        (* Static arity. Emit arg for side effects (but tuples have none). *)
@@ -6474,7 +6512,80 @@ let main_format_of (t : Ast.ty) : (string * string) option =
    helpers but inlined into the .ll module so the file is self-contained. *)
 let runtime_decls =
   String.concat "\n"
-    [ "declare ptr @malloc(i64)";
+    [ (* v0.1.264: the str allocator and the header read are emitted
+         UNCONDITIONALLY. They were part of the concat helper, which is only
+         emitted when a program concatenates -- and a program that only SHOWS
+         a value calls str_of_cstr, so it referred to a function that was not
+         there. The Wasm backend had the identical shape an hour earlier. *)
+      (* v0.1.264 (Q-031): the length lives in an i64 immediately before
+         byte0, so `str_len` need not scan and a zero byte inside a value is
+         a byte. Every str this backend allocates goes through str_alloc; the
+         trailing NUL is still written, so the libc calls the rest of this
+         runtime makes keep working for NUL-free strings. *)
+      "define ptr @__lang_str_alloc(i64 %len) {";
+      "entry:";
+      "  %sz = add i64 %len, 9";
+      "  %h = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %sz)";
+      "  store i64 %len, ptr %h";
+      "  %p = getelementptr i8, ptr %h, i64 8";
+      "  %e = getelementptr i8, ptr %p, i64 %len";
+      "  store i8 0, ptr %e";
+      "  ret ptr %p";
+      "}";
+      "";
+      (* A helper that allocates an upper bound and only learns its real
+         length at the end rewrites the header here, so `str_len` answers
+         what was written rather than what was reserved. *)
+      (* Byte order first, then length -- so a NUL inside a value takes
+         part, and two strings that share a prefix order by which is longer.
+         For NUL-free strings this is exactly what strcmp answered. *)
+      "define i32 @__lang_str_compare(ptr %a, ptr %b) {";
+      "entry:";
+      "  %la = call i64 @__lang_str_size(ptr %a)";
+      "  %lb = call i64 @__lang_str_size(ptr %b)";
+      "  %alt = icmp ult i64 %la, %lb";
+      "  %m = select i1 %alt, i64 %la, i64 %lb";
+      "  %r = call i32 @memcmp(ptr %a, ptr %b, i64 %m)";
+      "  %ne = icmp ne i32 %r, 0";
+      "  br i1 %ne, label %ret_r, label %by_len";
+      "ret_r:";
+      "  ret i32 %r";
+      "by_len:";
+      "  %shorter = icmp ult i64 %la, %lb";
+      "  %longer = icmp ugt i64 %la, %lb";
+      "  %v1 = select i1 %longer, i32 1, i32 0";
+      "  %v2 = select i1 %shorter, i32 -1, i32 %v1";
+      "  ret i32 %v2";
+      "}";
+      "";
+      "define ptr @__lang_str_finish(ptr %s, i64 %len) {";
+      "entry:";
+      "  %h = getelementptr i8, ptr %s, i64 -8";
+      "  store i64 %len, ptr %h";
+      "  %e = getelementptr i8, ptr %s, i64 %len";
+      "  store i8 0, ptr %e";
+      "  ret ptr %s";
+      "}";
+      "";
+      "define i64 @__lang_str_size(ptr %s) {";
+      "entry:";
+      "  %h = getelementptr i8, ptr %s, i64 -8";
+      "  %n = load i64, ptr %h";
+      "  ret i64 %n";
+      "}";
+      "";
+      (* A string that arrives from libc (getenv, a read, a formatted
+         number) has no header. Copying it into one is what makes it a Mere
+         str -- the same boundary the C backend calls __lang_str_of_cstr. *)
+      "define ptr @__lang_str_of_cstr(ptr %c) {";
+      "entry:";
+      "  %n = call i64 @strlen(ptr %c)";
+      "  %r = call ptr @__lang_str_alloc(i64 %n)";
+      "  call ptr @memcpy(ptr %r, ptr %c, i64 %n)";
+      "  ret ptr %r";
+      "}";
+      "";
+      "declare ptr @malloc(i64)";
       "declare ptr @realloc(ptr, i64)";
       "declare void @free(ptr)";
       "declare i64 @strlen(ptr)";
@@ -6529,10 +6640,17 @@ let runtime_decls =
       "declare double @atan2(double, double)";
       "declare i32 @setjmp(ptr) returns_twice";
       "declare void @longjmp(ptr, i32) noreturn";
-      "@.fail_prefix = internal constant [7 x i8] c\"fail: \\00\"";
+      (* v0.1.264: a str the runtime concatenates with needs a header like any
+         other -- this one is read for its length by str_concat. *)
+      "@.fail_prefix_h = internal constant { i64, [7 x i8] } { i64 6, [7 x i8] c\"fail: \\00\" }";
+      "@.fail_prefix = internal alias [7 x i8], getelementptr inbounds ({ i64, [7 x i8] }, ptr @.fail_prefix_h, i32 0, i32 1)";
       "@.s_newline = internal constant [2 x i8] c\"\\0A\\00\"";
-      "@.ios_pre = internal constant [14 x i8] c\"int_of_str: \\22\\00\"";
-      "@.ios_suf = internal constant [21 x i8] c\"\\22 is not a valid int\\00\"";
+      (* v0.1.264: these two are concatenated into a failure message, which
+         reads their length -- so they carry a header like every other str. *)
+      "@.ios_pre_h = internal constant { i64, [14 x i8] } { i64 13, [14 x i8] c\"int_of_str: \\22\\00\" }";
+      "@.ios_pre = internal alias [14 x i8], getelementptr inbounds ({ i64, [14 x i8] }, ptr @.ios_pre_h, i32 0, i32 1)";
+      "@.ios_suf_h = internal constant { i64, [21 x i8] } { i64 20, [21 x i8] c\"\\22 is not a valid int\\00\" }";
+      "@.ios_suf = internal alias [21 x i8], getelementptr inbounds ({ i64, [21 x i8] }, ptr @.ios_suf_h, i32 0, i32 1)";
       "@__lang_fail_jmpbuf = global [200 x i8] zeroinitializer, align 16";
       "@__lang_fail_jmpbuf_set = global i32 0" ]
 (* Phase 30.2b: declare top-level non-fn lets as @name LLVM globals.
@@ -8387,7 +8505,7 @@ let bytes_runtime_llvm =
       "}";
       "define ptr @__lang_bytes_of_str(ptr %s) {";
       "entry:";
-      "  %n = call i64 @strlen(ptr %s)";
+      "  %n = call i64 @__lang_str_size(ptr %s)";
       "  %b = call ptr @__lang_bytes_alloc(i64 %n)";
       "  %d = getelementptr i8, ptr %b, i64 8";
       "  call ptr @memcpy(ptr %d, ptr %s, i64 %n)";
@@ -8396,8 +8514,7 @@ let bytes_runtime_llvm =
       "define ptr @__lang_str_of_bytes(ptr %b) {";
       "entry:";
       "  %n = load i64, ptr %b";
-      "  %sz = add i64 %n, 1";
-      "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %sz)";
+      "  %s = call ptr @__lang_str_alloc(i64 %n)";
       "  %d = getelementptr i8, ptr %b, i64 8";
       "  call ptr @memcpy(ptr %s, ptr %d, i64 %n)";
       "  %endp = getelementptr i8, ptr %s, i64 %n";
@@ -8409,8 +8526,7 @@ let bytes_runtime_llvm =
       "  %i = alloca i64";
       "  %n = load i64, ptr %b";
       "  %sz = mul i64 %n, 2";
-      "  %sz1 = add i64 %sz, 1";
-      "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %sz1)";
+      "  %s = call ptr @__lang_str_alloc(i64 %sz)";
       "  %data = getelementptr i8, ptr %b, i64 8";
       "  store i64 0, ptr %i";
       "  br label %loop";
@@ -8475,7 +8591,7 @@ let bytes_runtime_llvm =
       "define ptr @__lang_bytes_of_hex(ptr %h) {";
       "entry:";
       "  %i = alloca i64";
-      "  %n = call i64 @strlen(ptr %h)";
+      "  %n = call i64 @__lang_str_size(ptr %h)";
       "  %half = udiv i64 %n, 2";
       "  %b = call ptr @__lang_bytes_alloc(i64 %half)";
       "  %data = getelementptr i8, ptr %b, i64 8";
@@ -8606,7 +8722,7 @@ let strbuf_runtime_llvm =
       (* push *)
       "define i32 @mere_strbuf_push(ptr %sb, ptr %s) {";
       "entry:";
-      "  %slen64 = call i64 @strlen(ptr %s)";
+      "  %slen64 = call i64 @__lang_str_size(ptr %s)";
       "  %slen = trunc i64 %slen64 to i32";
       "  br label %check";
       "check:";
@@ -8649,9 +8765,8 @@ let strbuf_runtime_llvm =
       "entry:";
       "  %lp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 1";
       "  %len = load i32, ptr %lp";
-      "  %len1 = add i32 %len, 1";
-      "  %len1_64 = zext i32 %len1 to i64";
-      "  %out = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %len1_64)";
+      "  %len_pre = zext i32 %len to i64";
+      "  %out = call ptr @__lang_str_alloc(i64 %len_pre)";
       "  %dp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 0";
       "  %buf = load ptr, ptr %dp";
       "  %len_64 = zext i32 %len to i64";
@@ -8791,11 +8906,13 @@ let float_helpers_llvm =
       "has_dot:";
       "  call i32 (ptr, ptr, ...) @asprintf(ptr %buf_ptr, ptr @.fmt_str, ptr %tmp)";
       "  %buf = load ptr, ptr %buf_ptr";
-      "  ret ptr %buf";
+      "  %bufs = call ptr @__lang_str_of_cstr(ptr %buf)";
+      "  ret ptr %bufs";
       "no_dot:";
       "  call i32 (ptr, ptr, ...) @asprintf(ptr %buf_ptr, ptr @.fmt_dot0, ptr %tmp)";
       "  %buf2 = load ptr, ptr %buf_ptr";
-      "  ret ptr %buf2";
+      "  %buf2s = call ptr @__lang_str_of_cstr(ptr %buf2)";
+      "  ret ptr %buf2s";
       "}";
       "";
       (* v0.1.127: time () — wall-clock epoch seconds as a double. A timespec
@@ -8821,41 +8938,37 @@ let float_helpers_llvm =
    str_eq"). Byte-compare two NUL-terminated strings, returning i1. *)
 let str_eq_helper =
   String.concat "\n"
-    [ "define i1 @__lang_str_eq(ptr %a, ptr %b) {";
+    [ (* v0.1.264: equal LENGTH and equal bytes. Walking to a NUL made
+         `chr 0` equal to "" -- two different values with the same first
+         byte, which is exactly what a header exists to tell apart. *)
+      "define i1 @__lang_str_eq(ptr %a, ptr %b) {";
       "entry:";
-      "  br label %loop";
-      "loop:";
-      "  %pa = phi ptr [ %a, %entry ], [ %na, %cont ]";
-      "  %pb = phi ptr [ %b, %entry ], [ %nb, %cont ]";
-      "  %ca = load i8, ptr %pa";
-      "  %cb = load i8, ptr %pb";
-      "  %ne = icmp ne i8 %ca, %cb";
-      "  br i1 %ne, label %diff, label %cont";
-      "cont:";
-      "  %isz = icmp eq i8 %ca, 0";
-      "  %na = getelementptr i8, ptr %pa, i64 1";
-      "  %nb = getelementptr i8, ptr %pb, i64 1";
-      "  br i1 %isz, label %eq, label %loop";
-      "diff:";
+      "  %la = call i64 @__lang_str_size(ptr %a)";
+      "  %lb = call i64 @__lang_str_size(ptr %b)";
+      "  %same_len = icmp eq i64 %la, %lb";
+      "  br i1 %same_len, label %cmp, label %ne";
+      "cmp:";
+      "  %r = call i32 @memcmp(ptr %a, ptr %b, i64 %la)";
+      "  %eq = icmp eq i32 %r, 0";
+      "  ret i1 %eq";
+      "ne:";
       "  ret i1 0";
-      "eq:";
-      "  ret i1 1";
-      "}" ]
+      "}";
+    ]
 
+(* Phase 5.4: `++` on strings. The allocation, and the length that goes with
+   it, live in __lang_str_alloc. *)
 let str_concat_helper =
   String.concat "\n"
     [ "define ptr @__lang_str_concat(ptr %a, ptr %b) {";
       "entry:";
-      "  %la = call i64 @strlen(ptr %a)";
-      "  %lb = call i64 @strlen(ptr %b)";
+      "  %la = call i64 @__lang_str_size(ptr %a)";
+      "  %lb = call i64 @__lang_str_size(ptr %b)";
       "  %total = add i64 %la, %lb";
-      "  %totalp1 = add i64 %total, 1";
-      "  %r = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %totalp1)";
+      "  %r = call ptr @__lang_str_alloc(i64 %total)";
       "  call ptr @memcpy(ptr %r, ptr %a, i64 %la)";
       "  %p1 = getelementptr i8, ptr %r, i64 %la";
       "  call ptr @memcpy(ptr %p1, ptr %b, i64 %lb)";
-      "  %p2 = getelementptr i8, ptr %r, i64 %total";
-      "  store i8 0, ptr %p2";
       "  ret ptr %r";
       "}";
       "";
@@ -8885,7 +8998,7 @@ let str_concat_helper =
       (* Phase 36: str_starts_with — bool *)
       "define i1 @__lang_str_starts_with(ptr %s, ptr %p) {";
       "entry:";
-      "  %pl = call i64 @strlen(ptr %p)";
+      "  %pl = call i64 @__lang_str_size(ptr %p)";
       "  %r = call i32 @strncmp(ptr %s, ptr %p, i64 %pl)";
       "  %ok = icmp eq i32 %r, 0";
       "  ret i1 %ok";
@@ -8922,7 +9035,7 @@ let str_concat_helper =
       "  %p1 = getelementptr i8, ptr %p, i64 1";
       "  br label %lead";
       "trail_start:";
-      "  %lenL = call i64 @strlen(ptr %p)";
+      "  %lenL = call i64 @__lang_str_size(ptr %p)";
       "  br label %trail";
       "trail:";
       "  %l = phi i64 [ %lenL, %trail_start ], [ %l1, %trail_body ]";
@@ -8939,8 +9052,7 @@ let str_concat_helper =
       "  br label %trail";
       "alloc:";
       "  %final_l = phi i64 [ %l, %trail ], [ %l, %trail_check ]";
-      "  %cap = add i64 %final_l, 1";
-      "  %buf = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  %buf = call ptr @__lang_str_alloc(i64 %final_l)";
       "  call ptr @memcpy(ptr %buf, ptr %p, i64 %final_l)";
       "  %term = getelementptr i8, ptr %buf, i64 %final_l";
       "  store i8 0, ptr %term";
@@ -8950,8 +9062,8 @@ let str_concat_helper =
       (* Phase 36: str_ends_with — bool *)
       "define i1 @__lang_str_ends_with(ptr %s, ptr %p) {";
       "entry:";
-      "  %sl = call i64 @strlen(ptr %s)";
-      "  %pl = call i64 @strlen(ptr %p)";
+      "  %sl = call i64 @__lang_str_size(ptr %s)";
+      "  %pl = call i64 @__lang_str_size(ptr %p)";
       "  %ok = icmp uge i64 %sl, %pl";
       "  br i1 %ok, label %do_cmp, label %ret_false";
       "ret_false:";
@@ -8974,11 +9086,10 @@ let str_concat_helper =
       "  store i8 0, ptr %empty";
       "  ret ptr %empty";
       "dowork:";
-      "  %sl  = call i64 @strlen(ptr %s)";
+      "  %sl  = call i64 @__lang_str_size(ptr %s)";
       "  %n64 = sext i32 %n to i64";
       "  %tot = mul i64 %sl, %n64";
-      "  %cap = add i64 %tot, 1";
-      "  %buf = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  %buf = call ptr @__lang_str_alloc(i64 %tot)";
       "  br label %loop";
       "loop:";
       "  %i = phi i32 [ 0, %dowork ], [ %inext, %body ]";
@@ -9000,9 +9111,8 @@ let str_concat_helper =
       (* Phase 36: str_rev *)
       "define ptr @__lang_str_rev(ptr %s) {";
       "entry:";
-      "  %sl  = call i64 @strlen(ptr %s)";
-      "  %cap = add i64 %sl, 1";
-      "  %buf = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  %sl  = call i64 @__lang_str_size(ptr %s)";
+      "  %buf = call ptr @__lang_str_alloc(i64 %sl)";
       "  br label %loop";
       "loop:";
       "  %i = phi i64 [ 0, %entry ], [ %inext, %body ]";
@@ -9031,16 +9141,16 @@ let str_concat_helper =
       "entry:";
       "  call void @__lang_char_table_setup()";
       "  %n64 = and i64 %n, 255";
-      "  %p = getelementptr [256 x [2 x i8]], ptr @__lang_char_table, i64 0, i64 %n64";
+      "  %ent = getelementptr [256 x { i64, [2 x i8] }], ptr @__lang_char_table, i64 0, i64 %n64";
+      "  %p = getelementptr { i64, [2 x i8] }, ptr %ent, i64 0, i32 1";
       "  ret ptr %p";
       "}";
       "";
       (* Phase 36: to_upper / to_lower — ASCII case conversion. *)
       "define ptr @__lang_to_upper(ptr %s) {";
       "entry:";
-      "  %sl  = call i64 @strlen(ptr %s)";
-      "  %cap = add i64 %sl, 1";
-      "  %buf = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  %sl  = call i64 @__lang_str_size(ptr %s)";
+      "  %buf = call ptr @__lang_str_alloc(i64 %sl)";
       "  br label %loop";
       "loop:";
       "  %i = phi i64 [ 0, %entry ], [ %inext, %body ]";
@@ -9065,9 +9175,8 @@ let str_concat_helper =
       "}";
       "define ptr @__lang_to_lower(ptr %s) {";
       "entry:";
-      "  %sl  = call i64 @strlen(ptr %s)";
-      "  %cap = add i64 %sl, 1";
-      "  %buf = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  %sl  = call i64 @__lang_str_size(ptr %s)";
+      "  %buf = call ptr @__lang_str_alloc(i64 %sl)";
       "  br label %loop";
       "loop:";
       "  %i = phi i64 [ 0, %entry ], [ %inext, %body ]";
@@ -9123,9 +9232,9 @@ let str_concat_helper =
       "ret_s:";
       "  ret ptr %s";
       "dowork:";
-      "  %slen = call i64 @strlen(ptr %s)";
-      "  %olen = call i64 @strlen(ptr %old)";
-      "  %nlen = call i64 @strlen(ptr %new_str)";
+      "  %slen = call i64 @__lang_str_size(ptr %s)";
+      "  %olen = call i64 @__lang_str_size(ptr %old)";
+      "  %nlen = call i64 @__lang_str_size(ptr %new_str)";
       (* Worst-case cap: slen + (slen/olen)*max(0, nlen-olen) + nlen + 1 *)
       "  %quot = udiv i64 %slen, %olen";
       "  %nbig = icmp ugt i64 %nlen, %olen";
@@ -9134,8 +9243,7 @@ let str_concat_helper =
       "  %grow = mul i64 %quot, %sel";
       "  %cap0 = add i64 %slen, %grow";
       "  %cap1 = add i64 %cap0, %nlen";
-      "  %cap  = add i64 %cap1, 1";
-      "  %buf  = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  %buf  = call ptr @__lang_str_alloc(i64 %cap1)";
       "  br label %loop";
       "loop:";
       "  %i  = phi i64 [ 0, %dowork ], [ %i_next, %adv_match ], [ %i_next2, %adv_one ]";
@@ -9166,9 +9274,8 @@ let str_concat_helper =
       "  %bi_next2 = add i64 %bi, 1";
       "  br label %loop";
       "finish:";
-      "  %tp = getelementptr i8, ptr %buf, i64 %bi";
-      "  store i8 0, ptr %tp";
-      "  ret ptr %buf";
+      "  %fin = call ptr @__lang_str_finish(ptr %buf, i64 %bi)";
+      "  ret ptr %fin";
       "}";
       "";
       (* Phase 25.1 + 25.2: fail builtin. If try_or's jmpbuf is set,
@@ -9188,7 +9295,7 @@ let str_concat_helper =
          panic message. write(2, ...) is the lowering, and it was already
          declared for other builtins. *)
       "do_abort:";
-      "  %flen = call i64 @strlen(ptr %msg)";
+      "  %flen = call i64 @__lang_str_size(ptr %msg)";
       "  %fw = call i64 @write(i32 2, ptr %msg, i64 %flen)";
       "  %nlw = call i64 @write(i32 2, ptr @.s_newline, i64 1)";
       "  call void @exit(i32 1)";
@@ -9198,8 +9305,10 @@ let str_concat_helper =
          zero is undefined behaviour in IR, and b == -1 is the other undefined
          case (INT_MIN / -1 does not fit). The unsigned negation is the
          two's-complement wraparound the interpreter already produces. *)
-      "@.divzero_msg = internal constant [17 x i8] c\"division by zero\\00\"";
-      "@.modzero_msg = internal constant [15 x i8] c\"modulo by zero\\00\"";
+      "@.divzero_msg_h = internal constant { i64, [17 x i8] } { i64 16, [17 x i8] c\"division by zero\\00\" }";
+      "@.divzero_msg = internal alias [17 x i8], getelementptr inbounds ({ i64, [17 x i8] }, ptr @.divzero_msg_h, i32 0, i32 1)";
+      "@.modzero_msg_h = internal constant { i64, [15 x i8] } { i64 14, [15 x i8] c\"modulo by zero\\00\" }";
+      "@.modzero_msg = internal alias [15 x i8], getelementptr inbounds ({ i64, [15 x i8] }, ptr @.modzero_msg_h, i32 0, i32 1)";
       "define i64 @__lang_idiv(i64 %a, i64 %b) {";
       "entry:";
       "  %z = icmp eq i64 %b, 0";
@@ -9287,7 +9396,11 @@ let str_concat_helper =
       "";
       (* Phase 25.1: char builtins. char_at: per-byte from 256-entry
          static table (allocated at first call); is_X: inline tests. *)
-      "@__lang_char_table = internal global [256 x [2 x i8]] zeroinitializer";
+      (* v0.1.264: each entry is a str, so it carries its length in front of
+         its byte: `{ i64 1, [2 x i8] }`. The table existed so `chr` need not
+         allocate, and it still does -- what changed is that the pointer it
+         hands back has a header behind it like every other str. *)
+      "@__lang_char_table = internal global [256 x { i64, [2 x i8] }] zeroinitializer";
       "@__lang_char_table_init = internal global i32 0";
       "define void @__lang_char_table_setup() {";
       "entry:";
@@ -9302,10 +9415,12 @@ let str_concat_helper =
       "  br i1 %cond, label %body, label %finish";
       "body:";
       "  %i64 = sext i32 %i to i64";
-      "  %ent = getelementptr [256 x [2 x i8]], ptr @__lang_char_table, i64 0, i64 %i64";
+      "  %ent = getelementptr [256 x { i64, [2 x i8] }], ptr @__lang_char_table, i64 0, i64 %i64";
+      "  store i64 1, ptr %ent";
+      "  %bytes = getelementptr { i64, [2 x i8] }, ptr %ent, i64 0, i32 1";
       "  %i8 = trunc i32 %i to i8";
-      "  store i8 %i8, ptr %ent";
-      "  %ent2 = getelementptr [2 x i8], ptr %ent, i64 0, i64 1";
+      "  store i8 %i8, ptr %bytes";
+      "  %ent2 = getelementptr [2 x i8], ptr %bytes, i64 0, i64 1";
       "  store i8 0, ptr %ent2";
       "  %next = add i32 %i, 1";
       "  br label %loop";
@@ -9321,8 +9436,9 @@ let str_concat_helper =
       "  %cp = getelementptr i8, ptr %s, i64 %i";
       "  %c = load i8, ptr %cp";
       "  %cz = zext i8 %c to i64";
-      "  %ent = getelementptr [256 x [2 x i8]], ptr @__lang_char_table, i64 0, i64 %cz";
-      "  ret ptr %ent";
+      "  %ent = getelementptr [256 x { i64, [2 x i8] }], ptr @__lang_char_table, i64 0, i64 %cz";
+      "  %p = getelementptr { i64, [2 x i8] }, ptr %ent, i64 0, i32 1";
+      "  ret ptr %p";
       "}";
       "define i1 @__lang_is_digit(ptr %s) {";
       "entry:";
@@ -9364,8 +9480,7 @@ let str_concat_helper =
       "  %neg = icmp slt i32 %lendiff, 0";
       "  %len = select i1 %neg, i32 0, i32 %lendiff";
       "  %len64 = sext i32 %len to i64";
-      "  %sz = add i64 %len64, 1";
-      "  %r = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %sz)";
+      "  %r = call ptr @__lang_str_alloc(i64 %len64)";
       "  %start64 = sext i32 %start to i64";
       "  %srcp = getelementptr i8, ptr %s, i64 %start64";
       "  call ptr @memcpy(ptr %r, ptr %srcp, i64 %len64)";
@@ -9380,9 +9495,8 @@ let str_concat_helper =
          escape processing. Allocated in a region. *)
       "define ptr @__lang_str_unescape(ptr %s) {";
       "entry:";
-      "  %n64 = call i64 @strlen(ptr %s)";
-      "  %cap = add i64 %n64, 1";
-      "  %r = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  %n64 = call i64 @__lang_str_size(ptr %s)";
+      "  %r = call ptr @__lang_str_alloc(i64 %n64)";
       "  br label %loop";
       "loop:";
       "  %i = phi i64 [0, %entry], [%i_next, %cont]";
@@ -9437,10 +9551,9 @@ let str_concat_helper =
          in a region. *)
       "define ptr @__lang_str_escape(ptr %s) {";
       "entry:";
-      "  %n64 = call i64 @strlen(ptr %s)";
+      "  %n64 = call i64 @__lang_str_size(ptr %s)";
       "  %n2 = mul i64 %n64, 2";
-      "  %cap = add i64 %n2, 1";
-      "  %r = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  %r = call ptr @__lang_str_alloc(i64 %n2)";
       "  br label %loop";
       "loop:";
       "  %i = phi i64 [0, %entry], [%i_next, %cont]";
@@ -9495,8 +9608,8 @@ let str_count_runtime_llvm =
   String.concat "\n"
     [ "define i32 @__lang_str_count(ptr %s, ptr %n) {";
       "entry:";
-      "  %nl = call i64 @strlen(ptr %n)";
-      "  %sl = call i64 @strlen(ptr %s)";
+      "  %nl = call i64 @__lang_str_size(ptr %n)";
+      "  %sl = call i64 @__lang_str_size(ptr %s)";
       "  %nz = icmp eq i64 %nl, 0";
       "  br i1 %nz, label %retz, label %loop";
       "retz:";
@@ -9600,7 +9713,7 @@ let str_split_runtime_llvm =
       "";
       "define i32 @__lang_utf8_len(ptr %s) {";
       "entry:";
-      "  %n64 = call i64 @strlen(ptr %s)";
+      "  %n64 = call i64 @__lang_str_size(ptr %s)";
       "  %n = trunc i64 %n64 to i32";
       "  %ip = alloca i32";
       "  %cp = alloca i32";
@@ -9631,7 +9744,7 @@ let str_split_runtime_llvm =
       "";
       "define ptr @__lang_utf8_chars(ptr %s) {";
       "entry:";
-      "  %n64 = call i64 @strlen(ptr %s)";
+      "  %n64 = call i64 @__lang_str_size(ptr %s)";
       "  %endp = alloca i32";
       "  %stp = alloca i32";
       "  %accp = alloca ptr";
@@ -9666,9 +9779,8 @@ let str_split_runtime_llvm =
       "copy:";
       "  %st2 = load i32, ptr %stp";
       "  %l = sub i32 %e, %st2";
-      "  %l1 = add i32 %l, 1";
-      "  %l64 = sext i32 %l1 to i64";
-      "  %tok = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %l64)";
+      "  %l64 = sext i32 %l to i64";
+      "  %tok = call ptr @__lang_str_alloc(i64 %l64)";
       "  %jp = alloca i32";
       "  store i32 0, ptr %jp";
       "  br label %cl";
@@ -9703,8 +9815,8 @@ let str_split_runtime_llvm =
          linking Cons cells from last to first. *)
       "define ptr @__lang_str_split(ptr %s, ptr %delim) {";
       "entry:";
-      "  %sl = call i64 @strlen(ptr %s)";
-      "  %dl = call i64 @strlen(ptr %delim)";
+      "  %sl = call i64 @__lang_str_size(ptr %s)";
+      "  %dl = call i64 @__lang_str_size(ptr %delim)";
       "  %dz = icmp eq i64 %dl, 0";
       "  br i1 %dz, label %empty_delim, label %count_init";
       "empty_delim:";
@@ -9796,8 +9908,7 @@ let str_split_runtime_llvm =
       "  %bstart = load i64, ptr %bsp_src";
       "  %blp_src = getelementptr i64, ptr %lens, i64 %bi_dec";
       "  %blen = load i64, ptr %blp_src";
-      "  %btk_cap = add i64 %blen, 1";
-      "  %btk = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %btk_cap)";
+      "  %btk = call ptr @__lang_str_alloc(i64 %blen)";
       "  %btk_src = getelementptr i8, ptr %s, i64 %bstart";
       "  call ptr @memcpy(ptr %btk, ptr %btk_src, i64 %blen)";
       "  %btk_end = getelementptr i8, ptr %btk, i64 %blen";
@@ -9813,7 +9924,7 @@ let str_join_runtime_llvm =
     [ (* str_join: walks list_str, concats with sep. *)
       "define ptr @__lang_str_join(ptr %sep, ptr %xs) {";
       "entry:";
-      "  %sl = call i64 @strlen(ptr %sep)";
+      "  %sl = call i64 @__lang_str_size(ptr %sep)";
       (* First pass: compute total length. *)
       "  br label %len_loop";
       "len_loop:";
@@ -9830,14 +9941,13 @@ let str_join_runtime_llvm =
       "  %pl1 = load %tuple_str_list_str, ptr %pl_box1";
       "  %head1 = extractvalue %tuple_str_list_str %pl1, 0";
       "  %next1 = extractvalue %tuple_str_list_str %pl1, 1";
-      "  %hl = call i64 @strlen(ptr %head1)";
+      "  %hl = call i64 @__lang_str_size(ptr %head1)";
       "  %add_sep = select i1 %first, i64 0, i64 %sl";
       "  %t1 = add i64 %total, %add_sep";
       "  %total_n = add i64 %t1, %hl";
       "  br label %len_loop";
       "alloc:";
-      "  %cap = add i64 %total, 1";
-      "  %r = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  %r = call ptr @__lang_str_alloc(i64 %total)";
       "  br label %write_loop";
       "write_loop:";
       "  %cur2 = phi ptr [%xs, %alloc], [%next2, %w_join]";
@@ -9863,7 +9973,7 @@ let str_join_runtime_llvm =
       "  br label %w_join";
       "w_join:";
       "  %pos_after_sep = phi i64 [%pos, %w_no_sep], [%pos_added, %w_with_sep]";
-      "  %hl2 = call i64 @strlen(ptr %head2)";
+      "  %hl2 = call i64 @__lang_str_size(ptr %head2)";
       "  %h_dst = getelementptr i8, ptr %r, i64 %pos_after_sep";
       "  call ptr @memcpy(ptr %h_dst, ptr %head2, i64 %hl2)";
       "  %pos_n = add i64 %pos_after_sep, %hl2";
@@ -10070,8 +10180,7 @@ let file_io_runtime_llvm =
       "  %_se = call i32 @fseek(ptr %f, i64 0, i32 2)";  (* SEEK_END *)
       "  %len64 = call i64 @ftell(ptr %f)";
       "  %_ss = call i32 @fseek(ptr %f, i64 0, i32 0)";  (* SEEK_SET *)
-      "  %cap = add i64 %len64, 1";
-      "  %buf = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  %buf = call ptr @__lang_str_alloc(i64 %len64)";
       "  %is_zero = icmp eq i64 %len64, 0";
       "  br i1 %is_zero, label %skip_read, label %do_read";
       "do_read:";
@@ -10093,7 +10202,7 @@ let file_io_runtime_llvm =
       "  call void @__lang_fail_impl(ptr %path)";
       "  unreachable";
       "ok:";
-      "  %len64 = call i64 @strlen(ptr %content)";
+      "  %len64 = call i64 @__lang_str_size(ptr %content)";
       "  %is_zero = icmp eq i64 %len64, 0";
       "  br i1 %is_zero, label %skip_write, label %do_write";
       "do_write:";
@@ -10123,8 +10232,7 @@ let file_bytes_runtime_llvm =
       "  %len = call i64 @ftell(ptr %f)";
       "  %_ss = call i32 @fseek(ptr %f, i64 0, i32 0)";
       "  %v = call ptr @mere_vec_int_new(ptr %r)";
-      "  %cap = add i64 %len, 1";
-      "  %buf = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %cap)";
+      "  %buf = call ptr @__lang_str_alloc(i64 %len)";
       "  %_rd = call i64 @fread(ptr %buf, i64 1, i64 %len, ptr %f)";
       "  %_c = call i32 @fclose(ptr %f)";
       "  store i64 0, ptr %i";

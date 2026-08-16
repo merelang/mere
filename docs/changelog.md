@@ -4,6 +4,40 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.264 — 2026-08-16
+
+_The LLVM backend's `str` carries its length, and the last pin comes off._
+
+Its str was a bare pointer: `str_len` called `strlen`, `==` called `strcmp`, and
+literals were plain `[N x i8]` globals. So on that backend a zero byte was not a
+byte — `str_len (chr 0)` answered 0 against 1 everywhere else, and `chr 0 == ""`
+was true. The open question about it named the consumers: percent-decoding a URL
+and decoding Shift_JIS both produce arbitrary bytes, and LLVM alone gave a
+different answer for them.
+
+It now lays a str out the way the other three do — `[i64 len][bytes][NUL]`, value
+at byte0. Literals are `{ i64, [N x i8] }` constants and the value is a constant
+getelementptr into the second field; every runtime helper that builds a string
+allocates through `__lang_str_alloc`; the ones that only learn their length at the
+end (replace, trim, unescape) call `__lang_str_finish` to write it. Strings that
+arrive from libc — `asprintf` for show, `snprintf` for floats — are copied into a
+header by `__lang_str_of_cstr` at the boundary. `str_len`, `==`, `str_compare` and
+`print` all read the header, so a NUL is a byte on all four backends.
+
+The trailing NUL stays. Everything else in this runtime still hands pointers to
+libc, and keeping the terminator is what let the migration be incremental rather
+than a rewrite.
+
+Two things repeated from the Wasm slice a day earlier, which is worth writing down:
+the allocator had to be emitted **unconditionally** (it lived with the concat
+helper, so a program that only showed a value referred to a function that was not
+there), and every internal message global that gets concatenated — the fail prefix,
+the int_of_str message, the show constants — needed a header of its own.
+
+`nul_in_str` has no pinned divergence left.
+
+---
+
 ## v0.1.263 — 2026-08-16
 
 _The self-hosted Wasm backend carries the length header too, so the host can stop
