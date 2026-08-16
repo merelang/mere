@@ -6653,6 +6653,12 @@ let str_concat_helper =
       "}";
       "static const char* __lang_char_at(const char* s, int64_t i) {";
       "  __lang_char_table_setup();";
+      (* v0.1.275: it read the byte first and asked questions never. The
+         interpreter has always refused this; the compiled backends returned
+         whatever was next to the string. *)
+      "  long long __n = (long long)__lang_str_size(s);";
+      "  if (i < 0 || i >= __n)";
+      "    __lang_fail_idx(\"char_at: index %lld out of range (len=%lld)\", (long long)i, __n);";
       "  return __lang_char_table[(unsigned char)s[i]].__c;";
       "}";
       "static int __lang_is_digit(const char* s) {";
@@ -6758,6 +6764,10 @@ let str_concat_helper =
       "";
       (* Phase 22.5: substring s start end_ — region alloc + memcpy. *)
       "static const char* __lang_substring(const char* s, int64_t start, int64_t end_) {";
+      "  long long __n = (long long)__lang_str_size(s);";
+      "  if (start < 0 || end_ > __n || start > end_)";
+      "    __lang_fail_range(\"substring: range [%lld, %lld) invalid for str of length %lld\",";
+      "                      (long long)start, (long long)end_, __n);";
       "  int64_t len = end_ - start;";
       "  if (len < 0) len = 0;";
       "  char* r = __lang_str_alloc(__lang_current_region, (size_t)len);";
@@ -7226,6 +7236,22 @@ let region_runtime_helpers =
       (* declared here because the region allocator, which is emitted first,
          needs to be able to say so *)
       "__attribute__((noreturn)) static void __lang_fail_impl(const char* msg);";
+      (* v0.1.275: the index failures name the index and the length, so they are
+         built rather than picked from a list of constants. Catchable, like every
+         other failure the language defines -- these used to abort(), which
+         try_or cannot catch and which the interpreter never did. *)
+      "__attribute__((noreturn)) static void __lang_fail_idx(";
+      "    const char* fmt, long long a, long long b) {";
+      "  char __m[160];";
+      "  snprintf(__m, sizeof __m, fmt, a, b);";
+      "  __lang_fail_impl(__m);";
+      "}";
+      "__attribute__((noreturn)) static void __lang_fail_range(";
+      "    const char* fmt, long long a, long long b, long long c) {";
+      "  char __m[160];";
+      "  snprintf(__m, sizeof __m, fmt, a, b, c);";
+      "  __lang_fail_impl(__m);";
+      "}";
       "static void __lang_region_add_block(__lang_region* r, size_t cap) {";
       "  __lang_region_block* b =";
       "    (__lang_region_block*) malloc(sizeof(__lang_region_block) + cap);";
@@ -8230,21 +8256,23 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  return 0; /* unit */";
       "}";
       "";
-      Printf.sprintf "static %s %s_get(%s* v, int i) {" c_elem struct_name struct_name;
-      "  if (i < 0 || i >= v->len) {";
-      "    fprintf(stderr, \"vec_get: index %d out of bounds (len = %d)\\n\", i, v->len);";
-      "    abort();";
+      Printf.sprintf "static %s %s_get(%s* v, long long i) {" c_elem struct_name struct_name;
+      (* v0.1.275: `long long`, because the index is a Mere int. As an `int` it
+         arrived as its low 32 bits, so `vec_get v 4294967297` on a two-element
+         vec returned element 1 and exited 0 -- on all three compiled backends,
+         which agreed with each other and not with the interpreter. *)
+      "  if (i < 0 || i >= (long long)v->len) {";
+      "    __lang_fail_idx(\"vec_get: index %lld out of bounds (len = %lld)\", i, (long long)v->len);";
       "  }";
       "  return v->data[i];";
       "}";
       "";
-      Printf.sprintf "static int %s_len(%s* v) { return v->len; }" struct_name struct_name;
+      Printf.sprintf "static long long %s_len(%s* v) { return v->len; }" struct_name struct_name;
       "";
-      Printf.sprintf "static int %s_set(%s* v, int i, %s x) {"
+      Printf.sprintf "static int %s_set(%s* v, long long i, %s x) {"
         struct_name struct_name c_elem;
-      "  if (i < 0 || i >= v->len) {";
-      "    fprintf(stderr, \"vec_set: index %d out of bounds (len = %d)\\n\", i, v->len);";
-      "    abort();";
+      "  if (i < 0 || i >= (long long)v->len) {";
+      "    __lang_fail_idx(\"vec_set: index %lld out of bounds (len = %lld)\", i, (long long)v->len);";
       "  }";
       Printf.sprintf "  x = __mcopy_%s(v->region, x);" tag;
       "  v->data[i] = x;";

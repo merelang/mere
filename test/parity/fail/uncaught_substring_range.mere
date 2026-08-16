@@ -1,0 +1,7 @@
+// A range that is not inside the string. Same as char_at: refused by the
+// interpreter, read out of bounds by every compiled backend until v0.1.275.
+// The message names the range and the length, so which of the three ways it is
+// wrong (start negative, end past the length, start after end) is readable.
+let _ = print "before";
+let _ = print (substring "abc" 5 10);
+0

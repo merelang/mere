@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.274" Version.v "0.1.274";
+  check "version is 0.1.275" Version.v "0.1.275";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -13422,6 +13422,40 @@ let () =
        let bin = Codegen_riscv.emit_program ~main_ty:mt prog in
        if String.length bin > 64 then "assembled" else "suspiciously short"
      with e -> Printexc.to_string e) "assembled";
+
+  (* v0.1.275: an index is a Mere int, and every compiled runtime took it as a
+     32-bit one -- the bounds check then ran on the truncated value, so
+     `vec_get v 4294967297` on a two-element vec returned its second element and
+     exited 0. Three backends agreed with each other and none agreed with the
+     interpreter. Out of range was worse: C abort()ed (which try_or cannot
+     catch), LLVM and Wasm trapped with no message, and char_at and substring
+     read past the end of the string and returned whatever was there.
+
+     test/parity/index_edges.mere is the caught side and the three
+     test/parity/fail/uncaught_*_index cases are the uncaught side; these check
+     the shape that makes them possible. *)
+  assert_contains "v0.1.275: C takes a vec index as a Mere int"
+    (codegen "let v = vec_new () in let _ = vec_push v 1 in vec_get v 0")
+    "_get(mere_vec_int* v, long long i)";
+  assert_contains "v0.1.275: an out-of-range vec index is catchable, not abort()"
+    (codegen "let v = vec_new () in let _ = vec_push v 1 in vec_get v 0")
+    "vec_get: index %lld out of bounds (len = %lld)";
+  assert_contains "v0.1.275: C bounds-checks char_at"
+    (codegen "char_at \"abc\" 0") "char_at: index %lld out of range (len=%lld)";
+  assert_contains "v0.1.275: C bounds-checks substring"
+    (codegen "substring \"abc\" 0 1")
+    "substring: range [%lld, %lld) invalid for str of length %lld";
+  assert_contains "v0.1.275: LLVM takes a vec index as a Mere int"
+    (llvm "let v = vec_new () in let _ = vec_push v 1 in vec_get v 0")
+    "@mere_vec_int_get(ptr %v, i64 %i)";
+  (* the varargs signature has to be spelled out at the call, or snprintf reads
+     the arguments from the wrong ABI slots and the message prints numbers
+     nobody passed -- which is what it did the first time *)
+  assert_contains "v0.1.275: LLVM spells out snprintf's varargs signature"
+    (llvm "char_at \"abc\" 0") "call i32 (ptr, i64, ptr, ...) @snprintf";
+  assert_contains "v0.1.275: Wasm checks the index before wrapping it to i32"
+    (wasm "let v = vec_new () in let _ = vec_push v 1 in vec_get v 0")
+    "(i64.ge_s (local.get $i8)";
 
   (* v0.1.274: Mere's int is 64-bit; the runtimes serving it were not. A string
      of 2.15GB -- one byte of address past what a 32-bit offset can name --

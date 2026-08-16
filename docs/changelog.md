@@ -4,6 +4,57 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.275 — 2026-08-17
+
+_An index the collection does not have — answered, for years, with an element._
+
+```
+let v = vec_new ();
+let _ = vec_push v 10;
+let _ = vec_push v 20;
+vec_get v 4294967297     // interp: refuses.  C, LLVM, Wasm: 20.
+```
+
+An index is a Mere int, sixty-four bits of it, and every compiled runtime took
+one as thirty-two. The bounds check then ran on the truncated value, so
+4294967297 was checked as 1 and a two-element vec cheerfully returned its second
+element and exited 0. All three compiled backends agreed with each other, and
+none of them agreed with the interpreter. No test caught it because every index
+in every test was small — the same blind spot the string widths had in v0.1.274,
+one layer down.
+
+Out of range was its own mess, three ways at once:
+
+| | before | after |
+|---|---|---|
+| interp | catchable failure naming index and length | unchanged — it was the oracle |
+| C | `fprintf` + `abort()`: exit 134, and nothing `try_or` could catch | the interpreter's failure |
+| LLVM | `abort()`, no message | same |
+| Wasm | `unreachable`: a trap, no message | same |
+| `char_at` / `substring`, all three | read past the end and returned what was there | same |
+
+Every backend now raises the interpreter's own failure, which names both numbers
+at full width: `vec_get: index 4294967297 out of bounds (len = 2)`. On C and LLVM
+the message is built with `snprintf` — LLVM's needed its varargs signature spelled
+out at the call site, or the arguments arrive through the wrong ABI slots and the
+message prints numbers nobody passed. Wasm has no `snprintf`, so it builds the
+sentence from interned parts with its own `show_int` and `str_concat`.
+
+`test/parity/index_edges.mere` is the caught side (nineteen positions, in range,
+one past the end, negative, backwards, and past what 32 bits can name);
+`uncaught_vec_index`, `uncaught_char_at_index` and `uncaught_substring_range` are
+the uncaught side.
+
+**What it found immediately.** The Ruby subset's `utf8_cp` decodes a sequence's
+continuation bytes before checking they exist, and on binary data — where any byte
+≥ 0xC0 looks like a lead byte — the last one sends it past the end of the buffer.
+It had been reading out of bounds on every `SHA-1` call for as long as digest has
+existed, and nothing showed: the read returned the NUL terminator and the value
+was discarded, since only the sequence *length* is used. A check that refuses is
+how a read like that stops being invisible.
+
+---
+
 ## v0.1.274 — 2026-08-16
 
 _A string the machine cannot hold, and two backends that answered with a number._
