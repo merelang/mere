@@ -170,6 +170,18 @@ let fail_prefix_offset = ref 0
 (* Offsets of the interned "division by zero" / "modulo by zero" messages, minted
    alongside the tag. The two differ because the interpreter's two differ. *)
 let divzero_msg_offset = ref 0
+(* v0.1.275: the index failures name the index and the length, and this backend
+   has no snprintf -- the message is built from interned parts with the module's
+   own show_int and str_concat. *)
+let idx_pre_get_offset = ref 0
+let idx_pre_set_offset = ref 0
+let idx_mid_vec_offset = ref 0
+let idx_post_vec_offset = ref 0
+let idx_pre_charat_offset = ref 0
+let idx_mid_charat_offset = ref 0
+let idx_pre_sub_offset = ref 0
+let idx_mid1_sub_offset = ref 0
+let idx_mid2_sub_offset = ref 0
 let modzero_msg_offset = ref 0
 
 (* Q-032: the address of an interned empty str, which is what `fail` returns
@@ -5587,6 +5599,34 @@ let runtime_helpers = {|
         (return (i64.extend_i32_u (global.get $__lang_fail_sentinel)))))
     (call $puts_h (local.get $msg))
     (unreachable))
+  ;; v0.1.275: the index is a Mere int, so it is checked as one -- BEFORE the
+  ;; wrap to i32. `vec_get v 4294967297` on a two-element vec used to wrap to 1
+  ;; and return that element; the bounds check saw the wrapped value and was
+  ;; happy. And an index that was genuinely out of range executed `unreachable`,
+  ;; which is a trap: no message, nothing for try_or to catch, where the
+  ;; interpreter raises a catchable failure that names the index and the length.
+  (func $__lang_fail_idx (param $pre i64) (param $i i64) (param $mid i64)
+                         (param $len i64) (param $post i64) (result i64)
+    (call $__lang_fail
+      (call $__lang_str_concat
+        (call $__lang_str_concat
+          (call $__lang_str_concat
+            (call $__lang_str_concat (local.get $pre) (call $show_int (local.get $i)))
+            (local.get $mid))
+          (call $show_int (local.get $len)))
+        (local.get $post))))
+  (func $__lang_fail_range (param $pre i64) (param $a i64) (param $mid1 i64)
+                           (param $b i64) (param $mid2 i64) (param $c i64) (result i64)
+    (call $__lang_fail
+      (call $__lang_str_concat
+        (call $__lang_str_concat
+          (call $__lang_str_concat
+            (call $__lang_str_concat
+              (call $__lang_str_concat (local.get $pre) (call $show_int (local.get $a)))
+              (local.get $mid1))
+            (call $show_int (local.get $b)))
+          (local.get $mid2))
+        (call $show_int (local.get $c)))))
   ;; Integer division and remainder with a checked divisor. i64.div_s by zero
   ;; traps, which is a defined failure but a silent one — the program died with no
   ;; message where the interpreter named it — and INT_MIN / -1 traps here where it
@@ -5636,6 +5676,15 @@ let runtime_helpers = {|
     (local $s i32)
     (local $i i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
+    ;; v0.1.275: it read the byte and asked questions never
+    (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0))
+                (i64.ge_s (local.get $i8) (call $__lang_strlen (local.get $s8))))
+      (then (return (call $__lang_fail_idx
+                      (i64.extend_i32_u (global.get $__lang_idx_pre_charat))
+                      (local.get $i8)
+                      (i64.extend_i32_u (global.get $__lang_idx_mid_charat))
+                      (call $__lang_strlen (local.get $s8))
+                      (i64.extend_i32_u (global.get $__lang_idx_post_vec))))))
     (local.set $i (i32.wrap_i64 (local.get $i8)))
     (call $__lang_char_at_setup)
     (i64.extend_i32_s (i32.add (i32.add (global.get $__lang_char_table)
@@ -5668,12 +5717,24 @@ let runtime_helpers = {|
       (i32.or (i32.eq (local.get $c) (i32.const 10))
               (i32.eq (local.get $c) (i32.const 13))))))
   ;; Phase 26.1: substring s start end_ — region alloc + memcpy.
-  (func $__lang_substring (param $s8 i64) (param $start8 i64) (param $end_8 i64) (result i64)
+    (func $__lang_substring (param $s8 i64) (param $start8 i64) (param $end_8 i64) (result i64)
     (local $len i32) (local $r i32) (local $i i32)
     (local $s i32)
     (local $start i32)
     (local $end_ i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
+    ;; v0.1.275: a range outside the string used to be read anyway
+    (if (i32.or (i32.or (i64.lt_s (local.get $start8) (i64.const 0))
+                        (i64.gt_s (local.get $end_8)
+                                  (call $__lang_strlen (local.get $s8))))
+                (i64.gt_s (local.get $start8) (local.get $end_8)))
+      (then (return (call $__lang_fail_range
+                      (i64.extend_i32_u (global.get $__lang_idx_pre_sub))
+                      (local.get $start8)
+                      (i64.extend_i32_u (global.get $__lang_idx_mid1_sub))
+                      (local.get $end_8)
+                      (i64.extend_i32_u (global.get $__lang_idx_mid2_sub))
+                      (call $__lang_strlen (local.get $s8))))))
     (local.set $start (i32.wrap_i64 (local.get $start8)))
     (local.set $end_ (i32.wrap_i64 (local.get $end_8)))
     (local.set $len (i32.sub (local.get $end_) (local.get $start)))
@@ -6236,11 +6297,16 @@ let vec_runtime = {|
     (local $v i32)
     (local $i i32)
     (local.set $v (i32.wrap_i64 (local.get $v8)))
-    (local.set $i (i32.wrap_i64 (local.get $i8)))
     (local.set $len (i32.load offset=4 (local.get $v)))
-    (if (i32.or (i32.lt_s (local.get $i) (i32.const 0))
-                (i32.ge_s (local.get $i) (local.get $len)))
-      (then (unreachable)))
+    (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0))
+                (i64.ge_s (local.get $i8) (i64.extend_i32_s (local.get $len))))
+      (then (return (call $__lang_fail_idx
+                      (i64.extend_i32_u (global.get $__lang_idx_pre_get))
+                      (local.get $i8)
+                      (i64.extend_i32_u (global.get $__lang_idx_mid_vec))
+                      (i64.extend_i32_s (local.get $len))
+                      (i64.extend_i32_u (global.get $__lang_idx_post_vec))))))
+    (local.set $i (i32.wrap_i64 (local.get $i8)))
     (local.set $buf (i32.load offset=0 (local.get $v)))
     (i64.load
       (i32.add (local.get $buf)
@@ -6254,11 +6320,16 @@ let vec_runtime = {|
     (local $v i32)
     (local $i i32)
     (local.set $v (i32.wrap_i64 (local.get $v8)))
-    (local.set $i (i32.wrap_i64 (local.get $i8)))
     (local.set $len (i32.load offset=4 (local.get $v)))
-    (if (i32.or (i32.lt_s (local.get $i) (i32.const 0))
-                (i32.ge_s (local.get $i) (local.get $len)))
-      (then (unreachable)))
+    (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0))
+                (i64.ge_s (local.get $i8) (i64.extend_i32_s (local.get $len))))
+      (then (return (call $__lang_fail_idx
+                      (i64.extend_i32_u (global.get $__lang_idx_pre_set))
+                      (local.get $i8)
+                      (i64.extend_i32_u (global.get $__lang_idx_mid_vec))
+                      (i64.extend_i32_s (local.get $len))
+                      (i64.extend_i32_u (global.get $__lang_idx_post_vec))))))
+    (local.set $i (i32.wrap_i64 (local.get $i8)))
     (local.set $buf (i32.load offset=0 (local.get $v)))
     (i64.store
       (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 8)))
@@ -8275,6 +8346,15 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      which reads as an empty tag rather than as an error. *)
   fail_prefix_offset := fresh_str_offset "fail: ";
   divzero_msg_offset := fresh_str_offset "division by zero";
+  idx_pre_get_offset := fresh_str_offset "vec_get: index ";
+  idx_pre_set_offset := fresh_str_offset "vec_set: index ";
+  idx_mid_vec_offset := fresh_str_offset " out of bounds (len = ";
+  idx_post_vec_offset := fresh_str_offset ")";
+  idx_pre_charat_offset := fresh_str_offset "char_at: index ";
+  idx_mid_charat_offset := fresh_str_offset " out of range (len=";
+  idx_pre_sub_offset := fresh_str_offset "substring: range [";
+  idx_mid1_sub_offset := fresh_str_offset ", ";
+  idx_mid2_sub_offset := fresh_str_offset ") invalid for str of length ";
   modzero_msg_offset := fresh_str_offset "modulo by zero";
   (* Q-032: the value `fail` hands back while a try_or is active. It used to be
      0, which is not an address: a consumer between the fail and the try_or
@@ -9845,6 +9925,15 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      \  (global $__lang_fail_active (mut i32) (i32.const 0))\n\
      \  (global $__lang_fail_sentinel i32 (i32.const %d))\n\
      \  (global $__lang_mapget_msg i64 (i64.const %d))\n\
+     \  (global $__lang_idx_pre_get i32 (i32.const %d))\n\
+     \  (global $__lang_idx_pre_set i32 (i32.const %d))\n\
+     \  (global $__lang_idx_mid_vec i32 (i32.const %d))\n\
+     \  (global $__lang_idx_post_vec i32 (i32.const %d))\n\
+     \  (global $__lang_idx_pre_charat i32 (i32.const %d))\n\
+     \  (global $__lang_idx_mid_charat i32 (i32.const %d))\n\
+     \  (global $__lang_idx_pre_sub i32 (i32.const %d))\n\
+     \  (global $__lang_idx_mid1_sub i32 (i32.const %d))\n\
+     \  (global $__lang_idx_mid2_sub i32 (i32.const %d))\n\
      %s\
      %s\
      %s\
@@ -9864,6 +9953,9 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     file_io_imports
     memory_section
     table_section bump_init char_table_offset !fail_sentinel_offset !mapget_msg_offset
+    !idx_pre_get_offset !idx_pre_set_offset !idx_mid_vec_offset !idx_post_vec_offset
+    !idx_pre_charat_offset !idx_mid_charat_offset
+    !idx_pre_sub_offset !idx_mid1_sub_offset !idx_mid2_sub_offset
     top_globals_section
     data_section runtime_helpers
     list_str_runtime_section

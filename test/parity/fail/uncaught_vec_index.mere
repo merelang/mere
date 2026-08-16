@@ -1,0 +1,20 @@
+// An index a vec does not have. Until v0.1.275 the three compiled backends
+// answered this with an ELEMENT: the index is a Mere int (64-bit), it reached
+// the runtime as an `int`, and the bounds check ran on the truncated value --
+// so 4294967297 became 1, and a two-element vec happily returned its second
+// element and exited 0. All three agreed with each other and none agreed with
+// the interpreter.
+//
+// The out-of-range case was no better: C printed to stderr and abort()ed (exit
+// 134, and nothing try_or could catch), while LLVM and Wasm executed a trap
+// with no message at all.
+//
+// Now every backend raises the interpreter's own failure, which names both
+// numbers -- and names them at full width, which is the whole point.
+
+let v = vec_new ();
+let _ = vec_push v 10;
+let _ = vec_push v 20;
+let _ = print "before";
+let _ = print (str_of_int (vec_get v 4294967297));
+0

@@ -4905,11 +4905,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let elem_ty = Hashtbl.find vec_instances elem_tag in
     let av = emit_expr env vec_e in
     let iv0 = emit_expr env idx_e in
-    let iv = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" iv iv0);
+    let iv = iv0 in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
-                  "  %s = call %s @mere_vec_%s_get(ptr %s, i32 %s)"
+                  "  %s = call %s @mere_vec_%s_get(ptr %s, i64 %s)"
                   r (llvm_ty_of elem_ty) elem_tag av iv);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_set"; _ }, vec_e); _ }, idx_e); _ }, val_e) ->
@@ -4918,12 +4917,11 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let elem_ty = Hashtbl.find vec_instances elem_tag in
     let av = emit_expr env vec_e in
     let iv0 = emit_expr env idx_e in
-    let iv = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" iv iv0);
+    let iv = iv0 in
     let xv = emit_expr env val_e in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
-                  "  %s = call i32 @mere_vec_%s_set(ptr %s, i32 %s, %s %s)"
+                  "  %s = call i32 @mere_vec_%s_set(ptr %s, i64 %s, %s %s)"
                   r elem_tag av iv (llvm_ty_of elem_ty) xv);
     "0"
   | Ast.App ({ node = Ast.Var "vec_reverse"; _ }, vec_e) ->
@@ -5204,11 +5202,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let elem_ty = Hashtbl.find owned_vec_instances elem_tag in
     let av = emit_expr env vec_e in
     let iv0 = emit_expr env idx_e in
-    let iv = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" iv iv0);
+    let iv = iv0 in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
-                  "  %s = call %s @mere_owned_vec_%s_get(ptr %s, i32 %s)"
+                  "  %s = call %s @mere_owned_vec_%s_get(ptr %s, i64 %s)"
                   r (llvm_ty_of elem_ty) elem_tag av iv);
     r
   | Ast.App ({ node = Ast.Var "vec_to_list"; _ }, vec_e) ->
@@ -7009,21 +7006,22 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       "}";
       "";
       (* get *)
-      Printf.sprintf "define %s @mere_vec_%s_get(ptr %%v, i32 %%i) {" c_elem tag;
+      Printf.sprintf "define %s @mere_vec_%s_get(ptr %%v, i64 %%i) {" c_elem tag;
       "entry:";
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
-      "  %len = load i32, ptr %lp";
-      "  %lt0 = icmp slt i32 %i, 0";
-      "  %ge = icmp sge i32 %i, %len";
+      "  %len32 = load i32, ptr %lp";
+      "  %len = sext i32 %len32 to i64";
+      "  %lt0 = icmp slt i64 %i, 0";
+      "  %ge = icmp sge i64 %i, %len";
       "  %oob = or i1 %lt0, %ge";
       "  br i1 %oob, label %fail, label %ok";
       "fail:";
-      "  call void @abort()";
+      "  call void @__lang_fail_idx(ptr @.idxfmt_vecget, i64 %i, i64 %len)";
       "  unreachable";
       "ok:";
       Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
       "  %data = load ptr, ptr %dp";
-      Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i32 %%i" c_elem;
+      Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i64 %%i" c_elem;
       Printf.sprintf "  %%val = load %s, ptr %%slot" c_elem;
       Printf.sprintf "  ret %s %%val" c_elem;
       "}";
@@ -7038,21 +7036,22 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       "}";
       "";
       (* Phase 15.5: vec_set v i x — in-place mutation. *)
-      Printf.sprintf "define i32 @mere_vec_%s_set(ptr %%v, i32 %%i, %s %%x) {" tag c_elem;
+      Printf.sprintf "define i32 @mere_vec_%s_set(ptr %%v, i64 %%i, %s %%x) {" tag c_elem;
       "entry:";
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
-      "  %len = load i32, ptr %lp";
-      "  %lt0 = icmp slt i32 %i, 0";
-      "  %ge = icmp sge i32 %i, %len";
+      "  %len32 = load i32, ptr %lp";
+      "  %len = sext i32 %len32 to i64";
+      "  %lt0 = icmp slt i64 %i, 0";
+      "  %ge = icmp sge i64 %i, %len";
       "  %oob = or i1 %lt0, %ge";
       "  br i1 %oob, label %fail, label %ok";
       "fail:";
-      "  call void @abort()";
+      "  call void @__lang_fail_idx(ptr @.idxfmt_vecset, i64 %i, i64 %len)";
       "  unreachable";
       "ok:";
       Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
       "  %data = load ptr, ptr %dp";
-      Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i32 %%i" c_elem;
+      Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i64 %%i" c_elem;
       Printf.sprintf "  store %s %%x, ptr %%slot" c_elem;
       "  ret i32 0";
       "}" ]
@@ -7533,21 +7532,22 @@ let emit_owned_vec_runtime_llvm (elem_ty : Ast.ty) : string =
       "}";
       "";
       (* get *)
-      Printf.sprintf "define %s @mere_owned_vec_%s_get(ptr %%v, i32 %%i) {" c_elem tag;
+      Printf.sprintf "define %s @mere_owned_vec_%s_get(ptr %%v, i64 %%i) {" c_elem tag;
       "entry:";
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
-      "  %len = load i32, ptr %lp";
-      "  %lt0 = icmp slt i32 %i, 0";
-      "  %ge = icmp sge i32 %i, %len";
+      "  %len32 = load i32, ptr %lp";
+      "  %len = sext i32 %len32 to i64";
+      "  %lt0 = icmp slt i64 %i, 0";
+      "  %ge = icmp sge i64 %i, %len";
       "  %oob = or i1 %lt0, %ge";
       "  br i1 %oob, label %fail, label %ok";
       "fail:";
-      "  call void @abort()";
+      "  call void @__lang_fail_idx(ptr @.idxfmt_vecget, i64 %i, i64 %len)";
       "  unreachable";
       "ok:";
       Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
       "  %data = load ptr, ptr %dp";
-      Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i32 %%i" c_elem;
+      Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i64 %%i" c_elem;
       Printf.sprintf "  %%val = load %s, ptr %%slot" c_elem;
       Printf.sprintf "  ret %s %%val" c_elem;
       "}";
@@ -9489,6 +9489,39 @@ let str_concat_helper =
       "";
       (* Phase 25.1 + 25.2: fail builtin. If try_or's jmpbuf is set,
          longjmp to it (rescue). Otherwise: print msg + abort. *)
+      (* v0.1.275: an index failure names the index and the length, so its
+         message is built rather than chosen from a list of constants. The
+         buffer becomes a real Mere str because fail_impl reads the length
+         header, and it goes through fail_impl so try_or can catch it -- these
+         used to call abort(), which nothing can catch and which the
+         interpreter never did. *)
+      "@.idxfmt_vecget = private constant [47 x i8] c\"vec_get: index %lld out of bounds (len = %lld)\\00\"";
+      "@.idxfmt_vecset = private constant [47 x i8] c\"vec_set: index %lld out of bounds (len = %lld)\\00\"";
+      "@.idxfmt_charat = private constant [44 x i8] c\"char_at: index %lld out of range (len=%lld)\\00\"";
+      "@.idxfmt_substr = private constant [61 x i8] c\"substring: range [%lld, %lld) invalid for str of length %lld\\00\"";
+      "define void @__lang_fail_idx(ptr %fmt, i64 %a, i64 %b) noreturn {";
+      "entry:";
+      "  %buf = alloca [192 x i8]";
+      (* the varargs signature has to be spelled out at the call, or the
+         arguments go through the wrong ABI slots and the message prints
+         numbers nobody passed *)
+      "  %n = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buf, i64 192, ptr %fmt, i64 %a, i64 %b)";
+      "  %n64 = sext i32 %n to i64";
+      "  %s = call ptr @__lang_str_alloc(i64 %n64)";
+      "  call ptr @memcpy(ptr %s, ptr %buf, i64 %n64)";
+      "  call void @__lang_fail_impl(ptr %s)";
+      "  unreachable";
+      "}";
+      "define void @__lang_fail_range(ptr %fmt, i64 %a, i64 %b, i64 %c) noreturn {";
+      "entry:";
+      "  %buf = alloca [192 x i8]";
+      "  %n = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buf, i64 192, ptr %fmt, i64 %a, i64 %b, i64 %c)";
+      "  %n64 = sext i32 %n to i64";
+      "  %s = call ptr @__lang_str_alloc(i64 %n64)";
+      "  call ptr @memcpy(ptr %s, ptr %buf, i64 %n64)";
+      "  call void @__lang_fail_impl(ptr %s)";
+      "  unreachable";
+      "}";
       "define void @__lang_fail_impl(ptr %msg) noreturn {";
       "entry:";
       "  %set = load i32, ptr @__lang_fail_jmpbuf_set";
@@ -9648,6 +9681,16 @@ let str_concat_helper =
       "define ptr @__lang_char_at(ptr %s, i64 %i) {";
       "entry:";
       "  call void @__lang_char_table_setup()";
+      (* v0.1.275: it read the byte and asked questions never *)
+      "  %n = call i64 @__lang_str_size(ptr %s)";
+      "  %lt0 = icmp slt i64 %i, 0";
+      "  %ge = icmp sge i64 %i, %n";
+      "  %oob = or i1 %lt0, %ge";
+      "  br i1 %oob, label %oobfail, label %inrange";
+      "oobfail:";
+      "  call void @__lang_fail_idx(ptr @.idxfmt_charat, i64 %i, i64 %n)";
+      "  unreachable";
+      "inrange:";
       "  %cp = getelementptr i8, ptr %s, i64 %i";
       "  %c = load i8, ptr %cp";
       "  %cz = zext i8 %c to i64";
@@ -9691,6 +9734,17 @@ let str_concat_helper =
       (* Phase 25.1: substring — region alloc + memcpy. *)
       "define ptr @__lang_substring(ptr %s, i64 %start, i64 %end_) {";
       "entry:";
+      "  %n = call i64 @__lang_str_size(ptr %s)";
+      "  %s_lt0 = icmp slt i64 %start, 0";
+      "  %e_gt = icmp sgt i64 %end_, %n";
+      "  %s_gt_e = icmp sgt i64 %start, %end_";
+      "  %bad1 = or i1 %s_lt0, %e_gt";
+      "  %bad = or i1 %bad1, %s_gt_e";
+      "  br i1 %bad, label %rangefail, label %okrange";
+      "rangefail:";
+      "  call void @__lang_fail_range(ptr @.idxfmt_substr, i64 %start, i64 %end_, i64 %n)";
+      "  unreachable";
+      "okrange:";
       "  %lendiff = sub i64 %end_, %start";
       "  %neg = icmp slt i64 %lendiff, 0";
       "  %len64 = select i1 %neg, i64 0, i64 %lendiff";

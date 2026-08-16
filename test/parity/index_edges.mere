@@ -1,0 +1,57 @@
+// Every way a program can name a position that is not there, held to one answer
+// on all four backends. The caught side: `try_or` around each, so what the
+// backends do with a bad index is a value this file can print.
+//
+// Until v0.1.275 there were three different behaviours here and none of them
+// was the interpreter's. An index is a Mere int -- 64 bits -- and it reached
+// every compiled runtime as a 32-bit one, so `vec_get v 4294967297` on a
+// two-element vec was checked as index 1 and returned the second element. Three
+// backends agreed with each other and all three were wrong; nothing caught it,
+// because every index in every test was small.
+//
+// Out of range was its own mess: C printed to stderr and abort()ed, which
+// try_or cannot catch, and LLVM and Wasm trapped with no message at all, while
+// char_at and substring simply read past the end of the string and returned
+// whatever was next to it in memory.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+let v = vec_new ();
+let _ = vec_push v 10;
+let _ = vec_push v 20;
+let big = 4294967297;
+let i = fn (label: str) -> fn (t: unit -> int) ->
+  print (label ++ " = " ++ str_of_int (try_or t (0 - 999)));
+let s = fn (label: str) -> fn (t: unit -> str) ->
+  print (label ++ " = " ++ try_or t "REFUSED");
+
+// --- the values that are there ---
+let _ = i "vec_get 0" (fn () -> vec_get v 0);
+let _ = i "vec_get 1" (fn () -> vec_get v 1);
+let _ = s "char_at 0" (fn () -> char_at "abc" 0);
+let _ = s "char_at 2" (fn () -> char_at "abc" 2);
+let _ = s "substring 0 3" (fn () -> substring "abc" 0 3);
+let _ = s "substring 1 1" (fn () -> substring "abc" 1 1);
+
+// --- one past the end, which is where an off-by-one lives ---
+let _ = i "vec_get 2" (fn () -> vec_get v 2);
+let _ = s "char_at 3" (fn () -> char_at "abc" 3);
+let _ = s "substring 0 4" (fn () -> substring "abc" 0 4);
+
+// --- negative ---
+let _ = i "vec_get -1" (fn () -> vec_get v (0 - 1));
+let _ = s "char_at -1" (fn () -> char_at "abc" (0 - 1));
+let _ = s "substring -1 2" (fn () -> substring "abc" (0 - 1) 2);
+
+// --- backwards ---
+let _ = s "substring 2 1" (fn () -> substring "abc" 2 1);
+
+// --- past what 32 bits can name: the one that used to return a value ---
+let _ = i "vec_get big" (fn () -> vec_get v big);
+let _ = s "char_at big" (fn () -> char_at "abc" big);
+let _ = s "substring big" (fn () -> substring "abc" big (big + 1));
+
+// --- and a write, not just a read ---
+let _ = i "vec_set big" (fn () -> let _ = vec_set v big 7 in 1);
+let _ = i "vec_set 0" (fn () -> let _ = vec_set v 0 7 in vec_get v 0);
+0

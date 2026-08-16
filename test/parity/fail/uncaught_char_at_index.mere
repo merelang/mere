@@ -1,0 +1,6 @@
+// A byte past the end of the string. The interpreter has always refused this;
+// the compiled backends read whatever was next to the string in memory and
+// returned it as a character (v0.1.275).
+let _ = print "before";
+let _ = print (char_at "abc" 7);
+0
