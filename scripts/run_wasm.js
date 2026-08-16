@@ -6,6 +6,31 @@
 
 const fs = require('fs');
 const { checkAbi, makeMarshal } = require("./mere_host.js");
+
+function mereParseFloat(raw) {
+  const s = raw.trim().split("_").join("");
+  if (s === "") return { ok: false, value: 0 };
+  const m = /^([+-]?)(inf(inity)?|nan)$/i.exec(s);
+  if (m) {
+    if (/^nan$/i.test(m[2])) return { ok: true, value: NaN };
+    return { ok: true, value: m[1] === "-" ? -Infinity : Infinity };
+  }
+  // hex floats: 0x1p3 is 8, and JS has no literal for them
+  const h = /^([+-]?)0[xX]([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?(?:[pP]([+-]?\d+))?$/.exec(s);
+  if (h) {
+    if (!h[2] && !h[3]) return { ok: false, value: 0 };
+    let v = 0;
+    for (const c of h[2] || "") v = v * 16 + parseInt(c, 16);
+    let scale = 1 / 16;
+    for (const c of h[3] || "") { v += parseInt(c, 16) * scale; scale /= 16; }
+    if (h[4] !== undefined) v *= Math.pow(2, parseInt(h[4], 10));
+    return { ok: true, value: h[1] === "-" ? -v : v };
+  }
+  if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(s)) return { ok: false, value: 0 };
+  const v = Number(s);
+  return Number.isNaN(v) ? { ok: false, value: 0 } : { ok: true, value: v };
+}
+
 const { Worker } = require('worker_threads');
 const { makePgEnv } = require('./pg_env.js');
 const { makeHttpFetchEnv } = require('./http_fetch_env.js');
@@ -107,9 +132,15 @@ const env = Object.assign({
   time: () => Date.now() / 1000,
   mere_spawn: stub, mere_join: stub,
   __lang_str_of_float: stub, __lang_float_of_str: stub,
+  // v0.1.277: the worker instantiates the SAME module, so every import the
+  // module declares has to exist here too -- a missing one makes instantiation
+  // throw inside the worker, and the main thread then waits on a generator that
+  // will never yield. It cost twenty minutes of a hung parity run to notice.
+  __lang_float_of_str_ok: stub,
   __lang_sin: Math.sin, __lang_cos: Math.cos, __lang_tan: Math.tan, __lang_exp: Math.exp, __lang_log: Math.log,
   __lang_f_pow: Math.pow, __lang_atan2: Math.atan2,
 }, makeChannelEnv(() => memory.buffer, () => { throw new Error('no alloc in spawned worker'); }));
+
 (async () => {
   const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
   // Point this worker's bump allocator at its private region so allocations
@@ -306,10 +337,17 @@ const wasmPath = process.argv[2];
       }
       return writeStr(s);
     },
-    __lang_float_of_str: (ptr) => {
-      const s = readCStr(ptr);
-      return parseFloat(s);
-    },
+    // v0.1.277: parseFloat is not this language's float syntax. It reads a
+    // PREFIX (so "1.5x" was 1.5 and "1_000.5" was 1.0), does not know
+    // "inf"/"infinity" or hex floats (both nan / 0 here, both real values
+    // everywhere else), and answers NaN for a string that is not a float at all
+    // -- which is indistinguishable from the float `nan`, so nothing could be
+    // refused. The rule below is the interpreter's: trim, drop the underscores
+    // OCaml allows as separators, then accept only if the whole of what is left
+    // is a float. Validity is reported through a second import, because one
+    // return value cannot say both "nan" and "not a number at all".
+    __lang_float_of_str: (ptr) => mereParseFloat(readCStr(ptr)).value,
+    __lang_float_of_str_ok: (ptr) => (mereParseFloat(readCStr(ptr)).ok ? 1 : 0),
     // v0.1.127: wall clock for the `time` builtin (epoch seconds, f64).
     time: () => Date.now() / 1000,
     // print without the trailing newline (Mere's print_no_nl builtin), by

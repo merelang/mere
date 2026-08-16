@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.276" Version.v "0.1.276";
+  check "version is 0.1.277" Version.v "0.1.277";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -13422,6 +13422,34 @@ let () =
        let bin = Codegen_riscv.emit_program ~main_ty:mt prog in
        if String.length bin > 64 then "assembled" else "suspiciously short"
      with e -> Printexc.to_string e) "assembled";
+
+  (* v0.1.277: finishing the enumeration the previous slice started -- the
+     refusals it had not yet asked about. `bool_of_str "yes"` was false on every
+     compiled backend (the C source even carried a comment saying that matched
+     the interpreter; it never has), and `float_of_str` was three different
+     wrong answers: C and LLVM read a PREFIX through atof, so "1.5x" was 1.5 and
+     junk was 0.0, while the Wasm host used parseFloat, which made "1_000.5" 1.0,
+     "inf" a nan, and junk a nan -- indistinguishable from the float nan, so
+     nothing could be refused there at all.
+
+     The oracle is `float_of_string (String.trim s)`, which accepts rather more
+     than a decimal point: hex floats, inf / infinity / nan in any case, signs,
+     and underscores as separators. All four now agree on all of it. *)
+  assert_contains "v0.1.277: C checks the whole string is a float"
+    (codegen "float_of_str \"1.5\"") "is not a valid float";
+  assert_contains "v0.1.277: C refuses a word that is not true or false"
+    (codegen "bool_of_str \"true\"") "is not 'true' or 'false'";
+  assert_contains "v0.1.277: LLVM parses the float itself rather than atof"
+    (llvm "float_of_str \"1.5\"") "@__lang_float_of_str_checked";
+  assert_contains "v0.1.277: Wasm asks the host whether it IS a float"
+    (wasm "float_of_str \"1.5\"") "call $__lang_float_of_str_ok";
+  (* and the bug the new gate found on its way in: str_unescape allocated for
+     the input's length and every escape makes the output shorter, so the header
+     said the wrong thing and printing wrote a trailing NUL *)
+  assert_contains "v0.1.277: C shortens the header after unescaping"
+    (codegen "str_unescape \"a\\\\nb\"") "((size_t*)r)[-1] = j;";
+  check "v0.1.277: an unescaped string is as long as what it holds"
+    (Pipeline.process "str_len (str_unescape \"a\\\\nb\")") "3";
 
   (* v0.1.276: the third time the same shape turned up (widths, then indices),
      the question was asked mechanically instead of by probe: every refusal the

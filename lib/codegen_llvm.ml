@@ -4374,7 +4374,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   | Ast.App ({ node = Ast.Var "float_of_str"; _ }, a_e) ->
     let av = emit_expr env a_e in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call double @atof(ptr %s)" r av);
+    emit_instr (Printf.sprintf "  %s = call double @__lang_float_of_str_checked(ptr %s)" r av);
     r
   | Ast.App ({ node = Ast.Var "time"; _ }, a_e) ->
     (* v0.1.127: wall clock. Evaluate the unit arg for parity, then discard. *)
@@ -4679,12 +4679,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     r
   | Ast.App ({ node = Ast.Var "bool_of_str"; _ }, s_e) ->
     (* Phase 36: bool_of_str — strcmp s "true". Reuse the dedicated const *)
-    let true_label = fresh_str_global "true" in
     let sv = emit_expr env s_e in
-    let pr = fresh_reg () in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i32 @strcmp(ptr %s, ptr %s)" pr sv true_label);
-    emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, 0" r pr);
+    emit_instr (Printf.sprintf "  %s = call i1 @__lang_bool_of_str(ptr %s)" r sv);
     r
   | Ast.App ({ node = Ast.Var "read_file"; _ }, path_e) ->
     (* Phase 25.9: read_file path — returns str (region-allocated buffer). *)
@@ -6812,6 +6809,143 @@ let runtime_decls =
          reads their length -- so they carry a header like every other str. *)
       "@.mapget_msg_h = internal constant { i64, [59 x i8] } { i64 58, [59 x i8] c\"map_get: key not found in Map (use map_has to check first)\\00\" }";
       "@.mapget_msg = internal alias [59 x i8], getelementptr inbounds ({ i64, [59 x i8] }, ptr @.mapget_msg_h, i32 0, i32 1)";
+      "@.fos_pre_h = internal constant { i64, [16 x i8] } { i64 15, [16 x i8] c\"float_of_str: \\22\\00\" }";
+      "@.fos_pre = internal alias [16 x i8], getelementptr inbounds ({ i64, [16 x i8] }, ptr @.fos_pre_h, i32 0, i32 1)";
+      "@.fos_suf_h = internal constant { i64, [23 x i8] } { i64 22, [23 x i8] c\"\\22 is not a valid float\\00\" }";
+      "@.fos_suf = internal alias [23 x i8], getelementptr inbounds ({ i64, [23 x i8] }, ptr @.fos_suf_h, i32 0, i32 1)";
+      "@.bos_pre_h = internal constant { i64, [15 x i8] } { i64 14, [15 x i8] c\"bool_of_str: \\22\\00\" }";
+      "@.bos_pre = internal alias [15 x i8], getelementptr inbounds ({ i64, [15 x i8] }, ptr @.bos_pre_h, i32 0, i32 1)";
+      "@.bos_suf_h = internal constant { i64, [27 x i8] } { i64 26, [27 x i8] c\"\\22 is not 'true' or 'false'\\00\" }";
+      "@.bos_suf = internal alias [27 x i8], getelementptr inbounds ({ i64, [27 x i8] }, ptr @.bos_suf_h, i32 0, i32 1)";
+      (* Its own copies of the two words: the module's @.s_true_k / @.s_false_k
+         are emitted only when something prints a bool, and a helper that is
+         always emitted cannot depend on a constant that is not. That gate has
+         caught the string allocator twice already. *)
+      "@.bos_true_h = internal constant { i64, [5 x i8] } { i64 4, [5 x i8] c\"true\\00\" }";
+      "@.bos_true = internal alias [5 x i8], getelementptr inbounds ({ i64, [5 x i8] }, ptr @.bos_true_h, i32 0, i32 1)";
+      "@.bos_false_h = internal constant { i64, [6 x i8] } { i64 5, [6 x i8] c\"false\\00\" }";
+      "@.bos_false = internal alias [6 x i8], getelementptr inbounds ({ i64, [6 x i8] }, ptr @.bos_false_h, i32 0, i32 1)";
+      (* v0.1.277: atof answers 0.0 for anything it cannot read, and strcmp
+         against "true" answered false for everything else -- neither is what the
+         interpreter does, and neither says so. *)
+      (* strtod is already declared with the runtime's other libc entries *)
+      (* Same rule as the C backend's: the oracle is
+         `float_of_string (String.trim s)`, so trim the ends, drop the
+         underscores OCaml allows as separators, and only then hand what is left
+         to strtod -- which knows the hex floats, the signs and the inf /
+         infinity / nan spellings. Interior whitespace is NOT dropped: "1 . 5"
+         has to stay a refusal. *)
+      "define double @__lang_float_of_str_checked(ptr %s) {";
+      "entry:";
+      "  %n = call i64 @__lang_str_size(ptr %s)";
+      "  %buf = call ptr @__lang_str_alloc(i64 %n)";
+      "  %ip = alloca i64";
+      "  %jp = alloca i64";
+      "  %ep = alloca i64";
+      "  store i64 0, ptr %ip";
+      "  store i64 0, ptr %jp";
+      "  store i64 %n, ptr %ep";
+      "  br label %lead";
+      "lead:";
+      "  %li = load i64, ptr %ip";
+      "  %lend = load i64, ptr %ep";
+      "  %lmore = icmp slt i64 %li, %lend";
+      "  br i1 %lmore, label %leadc, label %trail";
+      "leadc:";
+      "  %lcp = getelementptr i8, ptr %s, i64 %li";
+      "  %lc = load i8, ptr %lcp";
+      "  %lw = call i1 @__lang_is_ws_byte(i8 %lc)";
+      "  br i1 %lw, label %leadskip, label %trail";
+      "leadskip:";
+      "  %li1 = add i64 %li, 1";
+      "  store i64 %li1, ptr %ip";
+      "  br label %lead";
+      "trail:";
+      "  %ti = load i64, ptr %ip";
+      "  %te = load i64, ptr %ep";
+      "  %tmore = icmp slt i64 %ti, %te";
+      "  br i1 %tmore, label %trailc, label %copy";
+      "trailc:";
+      "  %tem1 = sub i64 %te, 1";
+      "  %tcp = getelementptr i8, ptr %s, i64 %tem1";
+      "  %tcb = load i8, ptr %tcp";
+      "  %tw = call i1 @__lang_is_ws_byte(i8 %tcb)";
+      "  br i1 %tw, label %trailskip, label %copy";
+      "trailskip:";
+      "  store i64 %tem1, ptr %ep";
+      "  br label %trail";
+      "copy:";
+      "  %ci = load i64, ptr %ip";
+      "  %ce = load i64, ptr %ep";
+      "  %cmore = icmp slt i64 %ci, %ce";
+      "  br i1 %cmore, label %copyc, label %copydone";
+      "copyc:";
+      "  %ccp = getelementptr i8, ptr %s, i64 %ci";
+      "  %cc = load i8, ptr %ccp";
+      "  %isu = icmp eq i8 %cc, 95";
+      "  br i1 %isu, label %copynext, label %copykeep";
+      "copykeep:";
+      "  %cj = load i64, ptr %jp";
+      "  %cdp = getelementptr i8, ptr %buf, i64 %cj";
+      "  store i8 %cc, ptr %cdp";
+      "  %cj1 = add i64 %cj, 1";
+      "  store i64 %cj1, ptr %jp";
+      "  br label %copynext";
+      "copynext:";
+      "  %ci1 = add i64 %ci, 1";
+      "  store i64 %ci1, ptr %ip";
+      "  br label %copy";
+      "copydone:";
+      "  %jf = load i64, ptr %jp";
+      "  %zp = getelementptr i8, ptr %buf, i64 %jf";
+      "  store i8 0, ptr %zp";
+      "  %endp = alloca ptr";
+      "  %v = call double @strtod(ptr %buf, ptr %endp)";
+      "  %end = load ptr, ptr %endp";
+      "  %same = icmp eq ptr %end, %buf";
+      "  br i1 %same, label %fosbad, label %chktail";
+      "chktail:";
+      "  %tc = load i8, ptr %end";
+      "  %tz = icmp eq i8 %tc, 0";
+      "  br i1 %tz, label %fosok, label %fosbad";
+      "fosbad:";
+      "  %fm1 = call ptr @__lang_str_concat(ptr @.fos_pre, ptr %s)";
+      "  %fm2 = call ptr @__lang_str_concat(ptr %fm1, ptr @.fos_suf)";
+      "  call void @__lang_fail_impl(ptr %fm2)";
+      "  unreachable";
+      "fosok:";
+      "  ret double %v";
+      "}";
+      "define i1 @__lang_is_ws_byte(i8 %c) {";
+      "entry:";
+      "  %sp = icmp eq i8 %c, 32";
+      "  %tb = icmp eq i8 %c, 9";
+      "  %cr = icmp eq i8 %c, 13";
+      "  %nl = icmp eq i8 %c, 10";
+      "  %w1 = or i1 %sp, %tb";
+      "  %w2 = or i1 %w1, %cr";
+      "  %w3 = or i1 %w2, %nl";
+      "  ret i1 %w3";
+      "}";
+      "define i1 @__lang_bool_of_str(ptr %s) {";
+      "entry:";
+      "  %ct = call i32 @strcmp(ptr %s, ptr @.bos_true)";
+      "  %ist = icmp eq i32 %ct, 0";
+      "  br i1 %ist, label %yes, label %maybe_false";
+      "yes:";
+      "  ret i1 1";
+      "maybe_false:";
+      "  %cf = call i32 @strcmp(ptr %s, ptr @.bos_false)";
+      "  %isf = icmp eq i32 %cf, 0";
+      "  br i1 %isf, label %no, label %bosbad";
+      "no:";
+      "  ret i1 0";
+      "bosbad:";
+      "  %bm1 = call ptr @__lang_str_concat(ptr @.bos_pre, ptr %s)";
+      "  %bm2 = call ptr @__lang_str_concat(ptr %bm1, ptr @.bos_suf)";
+      "  call void @__lang_fail_impl(ptr %bm2)";
+      "  unreachable";
+      "}";
       "@.ios_pre_h = internal constant { i64, [14 x i8] } { i64 13, [14 x i8] c\"int_of_str: \\22\\00\" }";
       "@.ios_pre = internal alias [14 x i8], getelementptr inbounds ({ i64, [14 x i8] }, ptr @.ios_pre_h, i32 0, i32 1)";
       "@.ios_suf_h = internal constant { i64, [21 x i8] } { i64 20, [21 x i8] c\"\\22 is not a valid int\\00\" }";
@@ -9876,7 +10010,10 @@ let str_concat_helper =
       "finish:";
       "  %endp = getelementptr i8, ptr %r, i64 %j";
       "  store i8 0, ptr %endp";
-      "  ret ptr %r";
+      (* v0.1.277: the buffer was sized for the input and every escape
+         shortens the output, but the header still said the input's length *)
+      "  %fin = call ptr @__lang_str_finish(ptr %r, i64 %j)";
+      "  ret ptr %fin";
       "}";
       "";
       (* Phase 25.6: str_escape — show_str outputs through this; convert

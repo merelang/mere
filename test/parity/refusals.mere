@@ -50,6 +50,38 @@ let _ = s "repeat -1" (fn () -> str_repeat "ab" (0 - 1));
 let _ = s "unescape known" (fn () -> str_unescape "a\\nb");
 let _ = s "unescape unknown" (fn () -> str_unescape "a\\q");
 
+// --- bool_of_str: two words, and nothing else ---
+// The comment in the C backend said "others -> false (matches interp)". The
+// interpreter has never done that. A claim in a comment is not a check.
+let _ = s "bool true" (fn () -> if bool_of_str "true" then "T" else "F");
+let _ = s "bool false" (fn () -> if bool_of_str "false" then "T" else "F");
+let _ = s "bool yes" (fn () -> if bool_of_str "yes" then "T" else "F");
+let _ = s "bool empty" (fn () -> if bool_of_str "" then "T" else "F");
+
+// --- float_of_str: the whole string, or none of it ---
+// The oracle is OCaml's float_of_string over the trimmed input, which accepts
+// more than a decimal point: hex floats, the inf / infinity / nan spellings in
+// any case, signs, and underscores as separators. C read a prefix and answered
+// 0.0 for junk; the Wasm host used parseFloat, which answered 1.0 for
+// "1_000.5", nan for "inf", and nan for junk -- indistinguishable from the
+// float nan, so nothing could be refused at all.
+let f = fn (label: str) -> fn (t: unit -> float) ->
+  print (label ++ " = " ++ try_or (fn () -> str_of_float (t ())) "REFUSED");
+let _ = f "float 1.5" (fn () -> float_of_str "1.5");
+let _ = f "float 1e10" (fn () -> float_of_str "1e10");
+let _ = f "float nan" (fn () -> float_of_str "nan");
+let _ = f "float inf" (fn () -> float_of_str "inf");
+let _ = f "float -INF" (fn () -> float_of_str "-INF");
+let _ = f "float infinity" (fn () -> float_of_str "infinity");
+let _ = f "float hex" (fn () -> float_of_str "0x1p3");
+let _ = f "float spaced" (fn () -> float_of_str "  1.5  ");
+let _ = f "float under" (fn () -> float_of_str "1_000.5");
+let _ = f "float dot" (fn () -> float_of_str ".5");
+let _ = f "float junk" (fn () -> float_of_str "abc");
+let _ = f "float prefix" (fn () -> float_of_str "1.5x");
+let _ = f "float empty" (fn () -> float_of_str "");
+let _ = f "float e5" (fn () -> float_of_str "e5");
+
 // --- owned_vec: the same index rules as vec ---
 let ov = owned_vec_new ();
 let _ = owned_vec_push ov 7;
