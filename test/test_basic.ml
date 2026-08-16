@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.263" Version.v "0.1.263";
+  check "version is 0.1.264" Version.v "0.1.264";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -3782,14 +3782,19 @@ let () =
     "add i64 %x, 1";
 
   (* --- LLVM IR codegen: strings / print / ++ / str_len (Phase 5.3) --- *)
-  assert_contains "llvm: str literal global"
-    (llvm "\"hi\"") "= private constant [3 x i8] c\"hi\\00\"";   (* slot numbers shift with the prelude; assert the constant, not the slot *)
+  (* v0.1.264: a literal carries `[i64 len][bytes][NUL]`, so the constant is a
+     struct and the value is a getelementptr into its second field. *)
+  assert_contains "llvm: str literal global carries its length"
+    (llvm "\"hi\"")
+    "= private constant { i64, [3 x i8] } { i64 2, [3 x i8] c\"hi\\00\" }";
   assert_contains "llvm: str main printf uses %s"
     (llvm "\"hi\"") "@.fmt_s = private constant [4 x i8] c\"%s\\0A\\00\"";
   assert_contains "llvm: str passed as ptr to printf"
-    (llvm "\"hi\"") "@printf(ptr @.fmt_s, ptr @.str_";   (* slot-agnostic *)
-  assert_contains "llvm: print emits puts call"
-    (llvm "print \"hi\"") "call i32 @puts(ptr ";
+    (llvm "\"hi\"") "@printf(ptr @.fmt_s, ptr getelementptr";   (* slot-agnostic *)
+  (* v0.1.264: print writes the str's length, so puts (which stops at the
+     first NUL) is gone from this path. *)
+  assert_contains "llvm: print writes the str by length"
+    (llvm "print \"hi\"") "call i64 @__lang_str_size(ptr ";
   assert_contains "llvm: ++ lowers to __lang_str_concat"
     (llvm "\"a\" ++ \"b\"") "call ptr @__lang_str_concat";
   assert_contains "llvm: __lang_str_concat helper is emitted"
@@ -4002,9 +4007,11 @@ let () =
   assert_contains "llvm: main frees default region"
     (llvm "1 + 2")
     "call void @__lang_region_free(ptr @__lang_default_region)";
-  assert_contains "llvm: str_concat uses default region"
+  (* v0.1.264: concat allocates through str_alloc, which is where the header
+     is written; the region call moved in there with it. *)
+  assert_contains "llvm: str_alloc uses default region"
     (llvm "\"a\" ++ \"b\"")
-    "call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %totalp1)";
+    "call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %sz)";
   assert_contains "llvm: closure env alloc uses default region"
     (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
     "call ptr @__lang_region_alloc(ptr @__lang_default_region, i64";
@@ -9577,7 +9584,9 @@ let () =
      in
      if has "strcmp(" && has "__r < 0 ? -1" then "ok" else "no")
     "ok";
-  check "§31.0: LLVM codegen emits strcmp + select normalize"
+  (* v0.1.264: by the header, like the other two backends -- a NUL inside a
+     value takes part in the comparison, which strcmp could not do. *)
+  check "§31.0: LLVM codegen emits __lang_str_compare + select normalize"
     (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
        "str_compare \"a\" \"b\"") in
      let nlen = String.length ll in
@@ -9589,7 +9598,7 @@ let () =
          else scan (i + 1)
        in scan 0
      in
-     if has "call i32 @strcmp" && has "select i1" then "ok" else "no")
+     if has "call i32 @__lang_str_compare" && has "select i1" then "ok" else "no")
     "ok";
   check "§31.0: Wasm codegen emits $__lang_str_compare helper + call"
     (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
