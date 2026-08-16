@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.268" Version.v "0.1.268";
+  check "version is 0.1.269" Version.v "0.1.269";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -13417,6 +13417,24 @@ let () =
        let bin = Codegen_riscv.emit_program ~main_ty:mt prog in
        if String.length bin > 64 then "assembled" else "suspiciously short"
      with e -> Printexc.to_string e) "assembled";
+
+  (* v0.1.269: a match ARM in tail position returns, like a tail-position If
+     branch. Nearly every recursive list helper is written with `match`, so
+     leaving Match out of v0.1.267's work left their tail calls sitting before
+     a branch to the join -- the one shape musttail cannot take. list_sum over
+     a list died at 100,000 on LLVM before this and runs at 500,000 after. *)
+  assert_contains "v0.1.269: a tail call inside a match arm is musttail"
+    (llvm "let rec go = fn (xs: int list) -> fn (acc: int) ->\n\
+             match xs with\n\
+             | Nil -> acc\n\
+             | Cons (h, t) -> go t (acc + h);\n\
+           go [1, 2, 3] 0")
+    "musttail call";
+  check "v0.1.269: a long fold still answers"
+    (Pipeline.process
+       "let rec upto = fn (i: int) -> fn (acc: int list) ->\n\
+          if i == 0 then acc else upto (i - 1) (Cons (i, acc));\n\
+        list_sum (upto 50000 Nil)") "1250025000";
 
   (* v0.1.268: a missing map key is a `fail`, which a try_or catches. The three
      compiled backends wrote their own diagnostic and abort()ed or trapped, so
