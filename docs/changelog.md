@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.265 — 2026-08-16
+
+_What `fail` hands back on Wasm is an empty str, so the code it cannot unwind past
+survives to reach the `try_or`._
+
+Wasm has no unwinding here: `fail` sets a flag and returns, and the callers check
+the flag on the way out. The value it returned was 0 — which is not an address. A
+consumer sitting between the fail and the `try_or` that treated it as a str read
+the length header at -4 and trapped, so `try_or (fn () -> str_len (fail "b")) (-1)`
+**died with no output** where the interpreter, C and LLVM all answered -1. Which of
+the two happened depended on what the consumer did with the value, which is the
+worst property a failure can have.
+
+The sentinel is an interned empty str now. An empty str is a valid answer to every
+string operation, so the code between the fail and the catch survives, and the
+`try_or` default comes back on all four backends.
+
+This does not make `fail` unwind, and the parity case still pins the difference
+that remains: statements after a `fail` in the same body still run, so a buffer
+that three pushes wrote to reads "onetwothree" there and "onetwo" everywhere else.
+That is the open half of the question, and it is where the pin now points.
+
+---
+
 ## v0.1.264 — 2026-08-16
 
 _The LLVM backend's `str` carries its length, and the last pin comes off._
