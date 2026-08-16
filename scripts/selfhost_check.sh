@@ -35,11 +35,17 @@ if [ ! -x "$MERE" ]; then
   exit 1
 fi
 
-if [ ! -f "$SELF" ]; then
-  echo "== bootstrap: building self-hosted compiler =="
-  "$MERE" -w examples/selfhost_wasm_cli.mere > /tmp/selfmere.wat
-  wat2wasm --enable-tail-call /tmp/selfmere.wat -o "$SELF"
-fi
+# v0.1.273: built every run, not reused if present. It used to be reused, and
+# the copy sitting in /tmp was three days and an ABI change old — so this gate
+# spent those days reporting 7 failures out of 7 for a self-host compiler that
+# was fine, while CI reported all-clear on the same commit. CI never disagreed
+# with the working tree: it starts with an empty /tmp and therefore always built
+# the fresh one. The green answer came from the machine nobody was looking at.
+#
+# The whole build is 260ms. There was never enough here to cache.
+echo "== building the self-hosted compiler =="
+"$MERE" -w examples/selfhost_wasm_cli.mere > /tmp/selfmere.wat
+wat2wasm --enable-tail-call /tmp/selfmere.wat -o "$SELF"
 
 check_one() {
   input="$1"
@@ -76,10 +82,16 @@ check_one() {
     return 0
   else
     printf "  FAIL %-40s\n" "$name"
-    echo "    reference output:"
-    sed 's/^/      /' "$ref_out"
-    echo "    self-host output:"
-    sed 's/^/      /' "$self_out"
+    # The first lines of each, not both files: when this last failed it wrote
+    # 18MB into the terminal, and the useful part -- that one side was empty --
+    # was the first line of it. The paths are named so the whole thing is still
+    # one command away.
+    printf "    reference output (%s lines, %s):\n" \
+      "$(wc -l < "$ref_out" | tr -d ' ')" "$ref_out"
+    head -10 "$ref_out" | sed 's/^/      /'
+    printf "    self-host output (%s lines, %s):\n" \
+      "$(wc -l < "$self_out" | tr -d ' ')" "$self_out"
+    head -10 "$self_out" | sed 's/^/      /'
     return 1
   fi
 }

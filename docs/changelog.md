@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.273 — 2026-08-16
+
+_A gate that cached the thing it was testing._
+
+`scripts/selfhost_check.sh` compiles a set of programs with both compilers -- the
+OCaml one and the self-hosted Mere-in-Mere one -- and diffs what the two binaries
+print. Run yesterday it reported **7 failures out of 7**, every case, with the
+self-host side empty: the reading a person would take from that is that the
+self-hosted compiler is completely broken.
+
+It was fine. The gate builds the self-hosted compiler into `/tmp/selfmere.wasm`
+*only if that file does not already exist*, and the copy sitting there was three
+days and one ABI change old -- built before `str` grew its length header. The gate
+was testing a compiler nobody had asked about.
+
+CI never disagreed. A fresh runner starts with an empty `/tmp`, so CI always built
+the current compiler and always passed. **The same commit was green on the machine
+nobody looks at and red on the machine someone is working on**, and the red one was
+the wrong answer.
+
+It builds every run now. The whole build is 260ms -- there was never enough here to
+cache. A sweep of the other gates for the same shape (reuse an artifact if present)
+finds none.
+
+The failure report is also bounded now. When this failed it wrote 18MB of WAT into
+the terminal, and the part worth reading -- that one side was empty -- was the first
+line of it. Ten lines of each side and the paths, so the rest is one command away.
+
+---
+
 ## v0.1.272 — 2026-08-16
 
 _Q-032 closed: the Wasm backend learned to unwind, and the last pin came down._
