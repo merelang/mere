@@ -478,6 +478,17 @@ const wasmPath = process.argv[2];
   try {
     instance.exports.main();
   } catch (e) {
+    if (e instanceof RangeError) {
+      // v0.1.271: the host's own words for this are "Maximum call stack size
+      // exceeded", with a stack trace of the same wasm frame a few hundred
+      // times. Say what the other three backends say instead -- the failure is
+      // the same one, and a program should not be diagnosed differently
+      // depending on which backend it was run through.
+      // stdout, because that is the one sink this host's diagnostics use
+      // (env.puts writes there, and scripts/parity.sh pins the fact).
+      process.stdout.write("stack overflow (recursion too deep)\n");
+      process.exit(1);
+    }
     if (e instanceof WebAssembly.RuntimeError) {
       // Wasm trap (typically from fail's unreachable). Mere's fail prints
       // via puts BEFORE unreachable, so the message has already been

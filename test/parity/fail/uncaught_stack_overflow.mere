@@ -1,0 +1,21 @@
+// Recursion deeper than the stack. Until v0.1.271 this was the failure with no
+// name at all: the C and LLVM backends died with SIGSEGV -- exit 139, an empty
+// stderr, nothing to read -- while the interpreter reported OCaml's own words
+// ("Fatal error: exception Stack overflow") with exit 2 and the Wasm host
+// reported node's ("Maximum call stack size exceeded") with a few hundred
+// frames of trace. Four backends, four different answers, and the two most used
+// gave none.
+//
+// It is the most common way a Mere program actually dies -- three findings in
+// one week were this -- so it is the last failure that should have been
+// anonymous. Now every backend says the same sentence and exits 1, which is
+// what this case checks.
+//
+// The depth is bounded rather than infinite on purpose: 5,000,000 frames
+// overflow every stack this runs on -- the compiled backends give out around a
+// hundred thousand, the interpreter at its own declared limit -- but if some
+// future change ever turned this shape into a loop, the case would finish in a
+// moment instead of hanging the gate forever.
+
+let rec deep = fn (i: int) -> if i == 0 then 0 else (let d = deep (i - 1) in d + 1);
+let _ = print (str_of_int (deep 5000000));

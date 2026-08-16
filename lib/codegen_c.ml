@@ -6675,6 +6675,62 @@ let str_concat_helper =
          depending on the return type. *)
       "static int __lang_fail_jmpbuf_set = 0;";
       "static jmp_buf __lang_fail_jmpbuf;";
+      (* v0.1.271: a stack overflow used to be a bare SIGSEGV -- no output, exit
+         139, nothing to read. Deep recursion is the most common way a Mere
+         program dies on a compiled backend (three of this week's findings were
+         exactly that), and "no message" is the one failure shape this language
+         has spent the most effort removing elsewhere. The handler runs on its
+         own stack, because the overflowed one has no room to run it, and only
+         claims a stack overflow when the faulting address is NEAR THE STACK --
+         a segfault from anything else keeps its own name rather than being
+         reported as recursion. *)
+      "static char __lang_sigstack[SIGSTKSZ * 4];";
+      "static char* __lang_stack_lo = 0;";
+      "static char* __lang_stack_hi = 0;";
+      "static void __lang_segv(int sig, siginfo_t* info, void* uap) {";
+      "  (void)sig; (void)uap;";
+      "  const char* m;";
+      "  char* a = (char*)(info ? info->si_addr : 0);";
+      "  if (__lang_stack_lo && a >= __lang_stack_lo - (1 << 20) && a <= __lang_stack_hi)";
+      "    m = \"stack overflow (recursion too deep)\\n\";";
+      "  else";
+      "    m = \"segmentation fault\\n\";";
+      "  ssize_t __unused_w = write(2, m, strlen(m)); (void)__unused_w;";
+      "  _exit(1);";
+      "}";
+      (* the real bounds, not an assumed 8MB: a program linked with a bigger
+         stack (mere-ruby uses 512MB) would overflow far below any guess, and
+         the handler would then report the wrong name -- which is worse than
+         reporting none. *)
+      "static void __lang_stack_bounds(void) {";
+      "#ifdef __APPLE__";
+      "  __lang_stack_hi = (char*) pthread_get_stackaddr_np(pthread_self());";
+      "  __lang_stack_lo = __lang_stack_hi - pthread_get_stacksize_np(pthread_self());";
+      "#else";
+      "  pthread_attr_t at;";
+      "  void* lo; size_t sz;";
+      "  if (pthread_getattr_np(pthread_self(), &at) == 0) {";
+      "    if (pthread_attr_getstack(&at, &lo, &sz) == 0) {";
+      "      __lang_stack_lo = (char*)lo; __lang_stack_hi = __lang_stack_lo + sz;";
+      "    }";
+      "    pthread_attr_destroy(&at);";
+      "  }";
+      "#endif";
+      "}";
+      "static void __lang_install_segv(void) {";
+      "  stack_t ss;";
+      "  ss.ss_sp = __lang_sigstack;";
+      "  ss.ss_size = sizeof(__lang_sigstack);";
+      "  ss.ss_flags = 0;";
+      "  if (sigaltstack(&ss, 0) != 0) return;";
+      "  struct sigaction sa;";
+      "  memset(&sa, 0, sizeof(sa));";
+      "  sa.sa_sigaction = __lang_segv;";
+      "  sa.sa_flags = SA_SIGINFO | SA_ONSTACK;";
+      "  sigemptyset(&sa.sa_mask);";
+      "  sigaction(SIGSEGV, &sa, 0);";
+      "  sigaction(SIGBUS, &sa, 0);";
+      "}";
       "__attribute__((noreturn)) static void __lang_fail_impl(const char* msg) {";
       "  /* v0.1.67 (mere-ruby dogfood): print only when the failure is NOT";
       "     caught by an active try_or — a caught fail is control flow, not an";
@@ -10315,6 +10371,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "#include <stdlib.h>";
       "#include <string.h>";
       "#include <setjmp.h>";
+      "#include <signal.h>";   (* v0.1.271: name a stack overflow *)
       "#include <math.h>";  (* Phase 34.4: sqrt / sin / cos / tan / pow / atan2 *)
       "#include <time.h>";  (* v0.1.127: time () wall clock *)
       "#include <pthread.h>";  (* Q-012: spawn / join. Link with -pthread on Linux. *)
@@ -10734,6 +10791,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
            had not accumulated yet. A program's log is how it is watched, and it
            should not stop existing because someone redirected it. *)
         "  setvbuf(stdout, NULL, _IOLBF, 0);";
+        (* the stack bounds are read here, where `main`'s frame is the deepest
+           the program has been so far *)
+        "  __lang_stack_bounds();";
+        "  __lang_install_segv();";
         (if !args_used then "  __lang_argc = argc; __lang_argv = argv;"
          else "  (void)argc; (void)argv;");
         "  __lang_region_init(&__lang_default_region, 1 << 22);";

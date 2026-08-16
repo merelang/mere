@@ -6711,6 +6711,87 @@ let runtime_decls =
       "declare i32 @pthread_mutex_init(ptr, ptr)";
       "declare i32 @pthread_mutex_lock(ptr)";
       "declare i32 @pthread_mutex_unlock(ptr)";
+      (* v0.1.271: the same nameless death the C backend had -- deep recursion
+         exits 139 with an empty stderr. The handler must run on a stack of its
+         own, because the one that overflowed has no room left to run it, and it
+         only claims a stack overflow when the faulting address is NEAR THE
+         STACK; any other fault keeps its own name.
+
+         The struct layouts below are macOS's, which is what this backend's
+         target triple says. On another platform the zeroed alloca means
+         `sa_flags` reads 0, so no alternate stack is requested and the program
+         dies exactly as it does today -- wrong-but-quiet rather than
+         wrong-and-armed. *)
+      "declare i32 @sigaltstack(ptr, ptr)";
+      "declare i32 @sigaction(i32, ptr, ptr)";
+      (* @write is already declared by the runtime above *)
+      "declare void @_exit(i32)";
+      "declare ptr @pthread_self()";
+      "declare ptr @pthread_get_stackaddr_np(ptr)";
+      "declare i64 @pthread_get_stacksize_np(ptr)";
+      "@__lang_sigstack = internal global [131072 x i8] zeroinitializer";
+      "@__lang_stack_lo = internal global i64 0";
+      "@__lang_stack_hi = internal global i64 0";
+      "@__lang_msg_stackov = private unnamed_addr constant [36 x i8] c\"stack overflow (recursion too deep)\n\"";
+      "@__lang_msg_segv = private unnamed_addr constant [19 x i8] c\"segmentation fault\n\"";
+      "define internal void @__lang_segv(i32 %sig, ptr %info, ptr %uap) {";
+      "entry:";
+      "  %isnull = icmp eq ptr %info, null";
+      "  br i1 %isnull, label %plain, label %check";
+      "check:";
+      "  %ap = getelementptr i8, ptr %info, i64 24";
+      "  %addr = load ptr, ptr %ap";
+      "  %ai = ptrtoint ptr %addr to i64";
+      "  %lo = load i64, ptr @__lang_stack_lo";
+      "  %hi = load i64, ptr @__lang_stack_hi";
+      "  %lo2 = sub i64 %lo, 1048576";
+      "  %ge = icmp uge i64 %ai, %lo2";
+      "  %le = icmp ule i64 %ai, %hi";
+      "  %near = and i1 %ge, %le";
+      "  %known = icmp ne i64 %hi, 0";
+      "  %isov = and i1 %near, %known";
+      "  br i1 %isov, label %overflow, label %plain";
+      "overflow:";
+      "  call i64 @write(i32 2, ptr @__lang_msg_stackov, i64 36)";
+      "  call void @_exit(i32 1)";
+      "  unreachable";
+      "plain:";
+      "  call i64 @write(i32 2, ptr @__lang_msg_segv, i64 19)";
+      "  call void @_exit(i32 1)";
+      "  unreachable";
+      "}";
+      "define internal void @__lang_install_segv() {";
+      "entry:";
+      "  %th = call ptr @pthread_self()";
+      "  %hip = call ptr @pthread_get_stackaddr_np(ptr %th)";
+      "  %sz = call i64 @pthread_get_stacksize_np(ptr %th)";
+      "  %hi = ptrtoint ptr %hip to i64";
+      "  %lo = sub i64 %hi, %sz";
+      "  store i64 %hi, ptr @__lang_stack_hi";
+      "  store i64 %lo, ptr @__lang_stack_lo";
+      (* stack_t on macOS is { ss_sp, ss_size, ss_flags } -- that order *)
+      "  %ss = alloca [32 x i8]";
+      "  call void @llvm.memset.p0.i64(ptr %ss, i8 0, i64 32, i1 false)";
+      "  store ptr @__lang_sigstack, ptr %ss";
+      "  %szf = getelementptr i8, ptr %ss, i64 8";
+      "  store i64 131072, ptr %szf";
+      "  %rc = call i32 @sigaltstack(ptr %ss, ptr null)";
+      "  %ok = icmp eq i32 %rc, 0";
+      "  br i1 %ok, label %arm, label %done";
+      "arm:";
+      (* struct sigaction on macOS is { handler, sa_mask (i32), sa_flags (i32) };
+         160 zeroed bytes so no other platform reads uninitialised memory *)
+      "  %sa = alloca [160 x i8]";
+      "  call void @llvm.memset.p0.i64(ptr %sa, i8 0, i64 160, i1 false)";
+      "  store ptr @__lang_segv, ptr %sa";
+      "  %fl = getelementptr i8, ptr %sa, i64 12";
+      "  store i32 65, ptr %fl";
+      "  call i32 @sigaction(i32 11, ptr %sa, ptr null)";
+      "  call i32 @sigaction(i32 10, ptr %sa, ptr null)";
+      "  br label %done";
+      "done:";
+      "  ret void";
+      "}";
       "declare i32 @pthread_cond_init(ptr, ptr)";
       "declare i32 @pthread_cond_signal(ptr)";
       "declare i32 @pthread_cond_wait(ptr, ptr)";
@@ -11391,6 +11472,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
             :: eta_lines @ [""])
     @ [ (if !args_used_llvm then "define i32 @main(i32 %__argc, ptr %__argv) {"
          else "define i32 @main() {");
+        (* installed before the program's own entry block runs *)
+        "__lang_boot:";
+        "  call void @__lang_install_segv()";
+        "  br label %entry";
         body;
         "}";
         "" ]

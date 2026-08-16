@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.270" Version.v "0.1.270";
+  check "version is 0.1.271" Version.v "0.1.271";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -13418,6 +13418,75 @@ let () =
        let bin = Codegen_riscv.emit_program ~main_ty:mt prog in
        if String.length bin > 64 then "assembled" else "suspiciously short"
      with e -> Printexc.to_string e) "assembled";
+
+  (* v0.1.271: the failure that had no name. Recursion deeper than the stack
+     killed a compiled program with SIGSEGV -- exit 139, empty stderr, nothing
+     to read -- while the interpreter reported OCaml's words with exit 2 and the
+     Wasm host reported node's with a few hundred frames of trace. All four say
+     the same sentence now and exit 1; test/parity/fail/uncaught_stack_overflow
+     is where the agreement is checked.
+
+     The interpreter's ceiling is declared rather than discovered: OCaml 5 grows
+     the main fibre's stack by copying it, so finding the host's real limit costs
+     68 seconds and gigabytes, and the answer is a depth no compiled backend can
+     reach anyway. *)
+  let saved_depth = !Mere.Eval.max_depth in
+  Mere.Eval.max_depth := 100;
+  check "v0.1.271: recursion past the limit is named, not fatal"
+    (try
+       ignore (Pipeline.process
+         "let rec deep = fn (i: int) -> if i == 0 then 0 else \n\
+            (let d = deep (i - 1) in d + 1);\n\
+          deep 1000");
+       "no failure"
+     with Mere.Eval.Eval_error (_, m) -> m)
+    "stack overflow (recursion too deep)";
+  check "v0.1.271: recursion within the limit is untouched"
+    (Pipeline.process
+       "let rec deep = fn (i: int) -> if i == 0 then 0 else \n\
+          (let d = deep (i - 1) in d + 1);\n\
+        deep 90")
+    "90";
+  (* The count has to come back down with the stack it was counting: a program
+     that catches a failure inside a loop would otherwise drift upward until it
+     reported a depth it was not at. Twenty frames abandoned thirty times is six
+     hundred against a limit of a hundred, so drift fails this and nothing else
+     does -- the loop and the abandoned frames together never exceed fifty. *)
+  check "v0.1.271: a caught failure gives its frames back"
+    (Pipeline.process
+       "let rec f = fn (i: int) -> if i == 0 then fail \"x\" else \n\
+          (let d = f (i - 1) in d + 1);\n\
+        let rec loop = fn (n: int) -> if n == 0 then 0 else \n\
+          (let _ = try_or (fn () -> f 20) 0 in loop (n - 1));\n\
+        loop 30")
+    "0";
+  Mere.Eval.max_depth := saved_depth;
+  (* and the compiled backends carry a handler that can say it: it runs on a
+     stack of its own, because the one that overflowed has no room to run it *)
+  let segv_src = "let _ = print \"x\";" in
+  let segv_prog () =
+    let prog = Pipeline.parse_program segv_src in
+    let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+    prog
+  in
+  assert_contains "v0.1.271: the C backend installs the handler"
+    (Codegen_c.emit_program ~main_ty:Ast.TyUnit (segv_prog ()))
+    "__lang_install_segv();";
+  assert_contains "v0.1.271: the C handler has a sentence to print"
+    (Codegen_c.emit_program ~main_ty:Ast.TyUnit (segv_prog ()))
+    "stack overflow (recursion too deep)";
+  (* on its own stack: the overflowed one has no room left to run a handler *)
+  assert_contains "v0.1.271: the C handler runs on an alternate stack"
+    (Codegen_c.emit_program ~main_ty:Ast.TyUnit (segv_prog ()))
+    "sigaltstack";
+  assert_contains "v0.1.271: the LLVM backend installs the handler too"
+    (Codegen_llvm.emit_program ~main_ty:Ast.TyUnit (segv_prog ()))
+    "call void @__lang_install_segv()";
+  (* and a fault that is not the stack keeps its own name, rather than every
+     segfault being reported as recursion *)
+  assert_contains "v0.1.271: a fault away from the stack is not renamed"
+    (Codegen_c.emit_program ~main_ty:Ast.TyUnit (segv_prog ()))
+    "segmentation fault";
 
   (* v0.1.270: list_sort_insert was the other helper that rebuilt its prefix
      through the return path -- `Cons (h, list_sort_insert cmp t x)` recurses

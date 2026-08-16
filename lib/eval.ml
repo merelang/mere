@@ -2,6 +2,24 @@
 
 exception Eval_error of Loc.t * string
 
+(* v0.1.271: how deep a Mere program may recurse in the interpreter.
+   OCaml 5 grows the main fibre's stack by copying it, so past about a million
+   frames the cost stops being the program's and becomes the copying's: 1M
+   frames take 0.9s, 2M take 3.1s, and 10M take 68s before the host finally
+   raises Stack_overflow. That is not a limit anyone can use -- a program that
+   recurses that deep has already failed on every compiled backend, where the
+   stack runs out two orders of magnitude earlier -- so the interpreter says so
+   at a depth it can still say it quickly.
+   MERE_MAX_DEPTH raises or lowers it for a program that genuinely wants the
+   host's own ceiling. *)
+let max_depth =
+  ref
+    (match Sys.getenv_opt "MERE_MAX_DEPTH" with
+     | Some s -> (try int_of_string s with _ -> 1_000_000)
+     | None -> 1_000_000)
+
+let call_depth = ref 0
+
 type value =
   | V_int of int
   | V_float of float
@@ -1489,8 +1507,14 @@ let builtin_flip =
 let builtin_try_or =
   V_builtin ("try_or", fun f ->
     V_builtin ("try_or_partial", fun default ->
+      let saved = !call_depth in
       try !apply_value_ref f V_unit
-      with Eval_error _ -> default))
+      with Eval_error _ ->
+        (* the frames the failure unwound are gone, so the count of them goes
+           too -- otherwise a program that catches inside a loop drifts upward
+           until it reports a depth it is not at *)
+        call_depth := saved;
+        default))
 
 (* Phase 12.9: higher-order Vec API (iter / map / fold / set).
    Calls user functions (V_closure / V_builtin) via apply_value_ref. *)
@@ -3311,7 +3335,15 @@ let rec eval_in (env : env) (e : Ast.expr) =
     (match eval_in env f with
      | V_closure (param, body, captured) ->
        let v = eval_in env arg in
-       eval_in ((param, ref v) :: captured) body
+       let d = !call_depth in
+       if d >= !max_depth then begin
+         call_depth := 0;
+         raise (Eval_error (e.Ast.loc, "stack overflow (recursion too deep)"))
+       end;
+       call_depth := d + 1;
+       let r = eval_in ((param, ref v) :: captured) body in
+       call_depth := d;
+       r
      | V_builtin (_, fn) ->
        let v = eval_in env arg in
        fn v
@@ -3387,6 +3419,14 @@ let () =
   apply_value_ref := (fun f arg ->
     match f with
     | V_closure (param, body, captured) ->
-      eval_in ((param, ref arg) :: captured) body
+      let d = !call_depth in
+      if d >= !max_depth then begin
+        call_depth := 0;
+        raise (Eval_error (Loc.dummy, "stack overflow (recursion too deep)"))
+      end;
+      call_depth := d + 1;
+      let r = eval_in ((param, ref arg) :: captured) body in
+      call_depth := d;
+      r
     | V_builtin (_, fn) -> fn arg
     | _ -> failwith "apply_value: not a function")
