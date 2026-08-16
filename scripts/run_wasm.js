@@ -490,9 +490,22 @@ const wasmPath = process.argv[2];
       process.exit(1);
     }
     if (e instanceof WebAssembly.RuntimeError) {
-      // Wasm trap (typically from fail's unreachable). Mere's fail prints
-      // via puts BEFORE unreachable, so the message has already been
-      // output. Exit cleanly.
+      // Wasm trap. `fail` is the expected one: it prints via puts and THEN
+      // executes unreachable, so its message is already out and this handler
+      // has nothing to add.
+      //
+      // v0.1.274: every other trap used to exit here in silence. The one a
+      // Mere program reaches by ordinary means is running out of memory --
+      // this backend's memory is a fixed 64MB and nothing grows it, so an
+      // allocation past the end is an out-of-bounds store -- and it exited 1
+      // with no output at all, where the C and LLVM backends now name it.
+      // Any other trap says what the engine called it rather than nothing.
+      const msg = String(e.message || "");
+      if (/out of bounds/i.test(msg)) {
+        process.stdout.write("out of memory\n");
+      } else if (!/unreachable/i.test(msg)) {
+        process.stdout.write("trap: " + msg + "\n");
+      }
       process.exit(1);
     } else {
       throw e;

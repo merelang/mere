@@ -1,0 +1,22 @@
+// A string the machine cannot hold. Until v0.1.274 the four backends gave four
+// answers to this, and the two most used gave a NUMBER:
+//
+//   interp  Fatal error: exception Out of memory   exit 2  (OCaml's words)
+//   C       -1530494976                            exit 0
+//   LLVM    2764472320                             exit 0
+//   Wasm    (no output at all)                     exit 1
+//
+// C and LLVM printed a plausible length and carried on. Two things had to be
+// true for that: the count reached the runtime through an `int`, so a 64-bit
+// Mere value arrived as its low 32 bits and asked for a string a program could
+// actually have -- a DIFFERENT string, silently -- and the allocator never read
+// what malloc answered, so a request that did get through died by writing to
+// the null it returned.
+//
+// Both are fixed, and the failure has one name on all four. The size is absurd
+// on purpose: 10^15 bytes is refused by every allocator instantly, so this case
+// costs nothing and cannot make a machine swap.
+
+let s = str_repeat "ab" 500000000000000;
+let _ = print (str_of_int (str_len s));
+0

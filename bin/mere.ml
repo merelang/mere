@@ -189,6 +189,12 @@ let run_action ?(rv = false) ?base_dir action label source =
   | Mere.Codegen_llvm.Codegen_error (loc, msg) -> report loc "codegen error" msg
   | Mere.Codegen_wasm.Codegen_error (loc, msg) -> report loc "codegen error" msg
   | Mere.Codegen_riscv.Codegen_error (loc, msg) -> report loc "codegen error" msg
+  | Out_of_memory ->
+    (* v0.1.274: OCaml's default is "Fatal error: exception Out of memory" and
+       exit 2 -- the host runtime's words again, and a different exit code than
+       the compiled backends give the same program. *)
+    prerr_endline "out of memory";
+    exit 1
   | Stack_overflow ->
     (* v0.1.271: OCaml's default for this is "Fatal error: exception Stack
        overflow" and exit 2 -- the host runtime's words, not the language's, and
