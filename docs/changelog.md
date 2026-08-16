@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.274 — 2026-08-16
+
+_A string the machine cannot hold, and two backends that answered with a number._
+
+Asking for `str_repeat "ab" 500000000000000` used to produce four different
+things, and the two most used backends produced a **plausible integer and exit 0**:
+
+| | before | after |
+|---|---|---|
+| interp | `Fatal error: exception Out of memory`, exit 2 | `out of memory`, exit 1 |
+| C | `-1530494976`, exit 0 | `out of memory`, exit 1 |
+| LLVM | `2764472320`, exit 0 | `out of memory`, exit 1 |
+| Wasm | *(no output)*, exit 1 | `out of memory`, exit 1 |
+
+Two defects compounded to make that possible.
+
+**Mere's int is 64-bit; the runtimes serving it were not.** The count reached C
+through an `int` parameter and LLVM through an explicit `trunc i64 ... to i32`, so
+a 64-bit value arrived as its low 32 bits and asked for a string the program could
+actually have — a *different string*, returned without complaint. The same
+narrowing was in `str_len` (`(int) __lang_str_size`), `substring`'s indices,
+`str_index_of`'s result and `utf8_len`'s count. A 2.15GB string — one byte of
+address past what a 32-bit offset can name — reported a **negative length** and a
+**negative match offset**. Every string in every test until now was small, so the
+axis had never been asked.
+
+**The allocator never read what malloc answered.** When it said no, the next line
+wrote through the null it returned, and the program died by segfault — the
+nameless death v0.1.271 removed everywhere else. It is a named, catchable failure
+now, on both backends, and the region's doubling no longer wraps `size_t` on its
+way to a request bigger than half the address space.
+
+On Wasm the memory is a fixed 64MB and nothing grows it, so exhaustion arrives as
+an out-of-bounds trap. The host used to exit 1 in silence for every trap that was
+not `fail`; it now names that one *out of memory* and prints the engine's own words
+for anything else, so no trap is anonymous.
+
+Gated two ways. `test/parity/fail/uncaught_out_of_memory.mere` holds all four
+backends to the same sentence on a request no allocator can satisfy — it is refused
+instantly, so it costs nothing. `scripts/bigstr_check.sh` is the 2.15GB
+measurement, deliberately *not* in the parity run: it costs 4.3GB of resident
+memory per backend, and a gate too expensive to run is one people stop running.
+The Wasm backend is not in it, because a 2GB string is not a value that backend can
+hold — asking it would measure the memory limit rather than the width.
+
+---
+
 ## v0.1.273 — 2026-08-16
 
 _A gate that cached the thing it was testing._

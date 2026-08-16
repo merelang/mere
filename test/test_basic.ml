@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.273" Version.v "0.1.273";
+  check "version is 0.1.274" Version.v "0.1.274";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -2835,7 +2835,9 @@ let () =
     "__lang_str_index_of(";
   assert_contains "codegen: __lang_str_index_of helper defined"
     (codegen "str_index_of \"hi\" \"i\"")
-    "static int __lang_str_index_of(const char* h, const char* n)";
+    (* v0.1.274: int64_t, not int -- an offset into a string longer than 2GB
+       came back negative *)
+    "static int64_t __lang_str_index_of(const char* h, const char* n)";
   check_raises "codegen: unsupported type (e.g. float fn) → Codegen_error"
     (fun () ->
       let _ = codegen "let f = fn x -> x +. 1.0 in f 2.0" in ());
@@ -3806,10 +3808,11 @@ let () =
   (* Phase 19.1.1: str_index_of codegen *)
   assert_contains "llvm: str_index_of calls __lang_str_index_of"
     (llvm "str_index_of \"hi\" \"i\"")
-    "call i32 @__lang_str_index_of(ptr ";
+    (* v0.1.274: i64, like the C backend's *)
+    "call i64 @__lang_str_index_of(ptr ";
   assert_contains "llvm: __lang_str_index_of helper defined"
     (llvm "str_index_of \"hi\" \"i\"")
-    "define i32 @__lang_str_index_of";
+    "define i64 @__lang_str_index_of";
   assert_contains "llvm: declares strstr"
     (llvm "str_index_of \"hi\" \"i\"")
     "declare ptr @strstr(ptr, ptr)";
@@ -7209,7 +7212,8 @@ let () =
     (let prog = Pipeline.parse_program len_src in
      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
      Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
-    "((int)__lang_str_size";
+    (* v0.1.274: long long, so a length past 2GB is not negative *)
+    "((long long)__lang_str_size";
   assert_contains "len: LLVM codegen dispatches Vec"
     (let prog = Pipeline.parse_program len_src in
      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
@@ -13418,6 +13422,34 @@ let () =
        let bin = Codegen_riscv.emit_program ~main_ty:mt prog in
        if String.length bin > 64 then "assembled" else "suspiciously short"
      with e -> Printexc.to_string e) "assembled";
+
+  (* v0.1.274: Mere's int is 64-bit; the runtimes serving it were not. A string
+     of 2.15GB -- one byte of address past what a 32-bit offset can name --
+     reported a NEGATIVE length on the C backend, and `str_repeat` took its count
+     through an `int`, so asking for 2^31 copies produced a different string with
+     no complaint. The two compiled backends did not even agree on which wrong
+     answer to give.
+
+     Both are checked here at the shape level; scripts/bigstr_check.sh is the
+     measurement itself (it costs 4.3GB of memory per backend, which is why it is
+     not in the parity gate). *)
+  assert_contains "v0.1.274: C returns str_len as a 64-bit value"
+    (codegen "str_len \"hi\"") "(long long) __lang_str_size(";
+  assert_contains "v0.1.274: C takes str_repeat's count as 64-bit"
+    (codegen "str_repeat \"a\" 3") "__lang_str_repeat(const char* s, int64_t n)";
+  assert_contains "v0.1.274: C reports an offset as 64-bit"
+    (codegen "str_index_of \"hi\" \"i\"") "static int64_t __lang_str_index_of";
+  assert_contains "v0.1.274: LLVM takes str_repeat's count as 64-bit"
+    (llvm "str_repeat \"a\" 3") "define ptr @__lang_str_repeat(ptr %s, i64 %n)";
+  (* And an allocation that cannot be satisfied is a failure with a name, not a
+     write through the null malloc returned. *)
+  assert_contains "v0.1.274: the C region allocator reads malloc's answer"
+    (codegen "1 + 1") "if (!b) __lang_fail_impl(\"out of memory\")";
+  assert_contains "v0.1.274: the LLVM region allocator reads it too"
+    (llvm "1 + 1") "call void @__lang_fail_impl(ptr @.oom_msg)";
+  (* A product that wraps would buy a small buffer for a large copy. *)
+  assert_contains "v0.1.274: str_repeat checks the size it is about to ask for"
+    (codegen "str_repeat \"a\" 3") "str_repeat: result too large";
 
   (* v0.1.272 (Q-032): the Wasm backend has no unwinding underneath `fail` -- it
      sets a flag, returns a sentinel, and the try_or at the boundary reads the

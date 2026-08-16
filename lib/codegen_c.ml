@@ -2301,7 +2301,10 @@ let rec emit_expr (e : Ast.expr) : string =
           __rok ? (%s){.tag = 1, .payload.Some = __rv} : (%s){.tag = 0}; })"
          tag (emit_expr ch_e) (emit_expr arg) opt_name opt_name
      | Ast.Var "str_len" ->
-       "((int) __lang_str_size(" ^ emit_expr arg ^ "))"
+       (* v0.1.274: `long long`, the C type of a Mere int. It was `int`, so
+          `str_len` of a string past 2GB came back negative -- the length of a
+          string the program was holding in its hand. *)
+       "((long long) __lang_str_size(" ^ emit_expr arg ^ "))"
      (* bytes builtins. *)
      | Ast.Var "bytes_of_hex" ->
        bytes_used := true; Printf.sprintf "__lang_bytes_of_hex(%s)" (emit_expr arg)
@@ -3157,7 +3160,7 @@ let rec emit_expr (e : Ast.expr) : string =
           Printf.sprintf "mere_map_%s_%s_len(%s)"
             k_tag v_tag (emit_expr arg)
         | Ast.TyStr ->
-          Printf.sprintf "((int)__lang_str_size(%s))" (emit_expr arg)
+          Printf.sprintf "((long long)__lang_str_size(%s))" (emit_expr arg)
         | Ast.TyTuple ts ->
           (* Static arity — just emit the constant. Arg evaluated for
              side effects but discarded. *)
@@ -6620,12 +6623,12 @@ let str_concat_helper =
       "";
       (* Phase 19.1.1: str_index_of — return position of needle in
          haystack, -1 if not found. Empty needle returns 0. *)
-      "static int __lang_str_index_of(const char* h, const char* n) {";
+      "static int64_t __lang_str_index_of(const char* h, const char* n) {";
       "  size_t hn = __lang_str_size(h), nn = __lang_str_size(n);";
       "  if (nn == 0) return 0;";
       "  if (nn > hn) return -1;";
       "  for (size_t i = 0; i + nn <= hn; i++)";
-      "    if (memcmp(h + i, n, nn) == 0) return (int)i;";
+      "    if (memcmp(h + i, n, nn) == 0) return (int64_t)i;";
       "  return -1;";
       "}";
       "";
@@ -6648,7 +6651,7 @@ let str_concat_helper =
       "  }";
       "  __lang_char_table_init = 1;";
       "}";
-      "static const char* __lang_char_at(const char* s, int i) {";
+      "static const char* __lang_char_at(const char* s, int64_t i) {";
       "  __lang_char_table_setup();";
       "  return __lang_char_table[(unsigned char)s[i]].__c;";
       "}";
@@ -6754,10 +6757,10 @@ let str_concat_helper =
       "}";
       "";
       (* Phase 22.5: substring s start end_ — region alloc + memcpy. *)
-      "static const char* __lang_substring(const char* s, int start, int end_) {";
-      "  int len = end_ - start;";
+      "static const char* __lang_substring(const char* s, int64_t start, int64_t end_) {";
+      "  int64_t len = end_ - start;";
       "  if (len < 0) len = 0;";
-      "  char* r = __lang_str_alloc(__lang_current_region, len);";
+      "  char* r = __lang_str_alloc(__lang_current_region, (size_t)len);";
       "  memcpy(r, s + start, (size_t)len);";
       "  r[len] = '\\0';";
       "  return r;";
@@ -6834,12 +6837,18 @@ let str_concat_helper =
       "}";
       "";
       (* Phase 36: str_repeat s n — concat n copies of s. *)
-      "static const char* __lang_str_repeat(const char* s, int n) {";
+      (* v0.1.274: the count came in as `int`, so a Mere program asking for
+         2^31 copies got whatever the low 32 bits happened to say -- a different
+         string, returned with no complaint. Mere's ints are 64-bit; the runtime
+         that serves them has to be too. The product is checked as well: a length
+         that wraps buys a small buffer for a large copy. *)
+      "static const char* __lang_str_repeat(const char* s, int64_t n) {";
       "  if (n <= 0) return __lang_str_of_cstr(\"\");";
       "  size_t sl = __lang_str_size(s);";
+      "  if (sl && (size_t)n > ((size_t)-1 - 1) / sl) __lang_fail_impl(\"str_repeat: result too large\");";
       "  size_t total = sl * (size_t)n;";
       "  char* buf = __lang_str_alloc(__lang_current_region, total);";
-      "  for (int i = 0; i < n; i++) memcpy(buf + i * sl, s, sl);";
+      "  for (int64_t i = 0; i < n; i++) memcpy(buf + (size_t)i * sl, s, sl);";
       "  buf[total] = '\\0';";
       "  return buf;";
       "}";
@@ -7208,9 +7217,19 @@ let region_runtime_helpers =
       "  __lang_region_block* blocks;  /* chain of every block, for free */";
       "} __lang_region;";
       "";
+      (* v0.1.274: malloc's answer used to go unread. When it said no, the very
+         next line wrote through the null it returned, and the program died with
+         a segfault -- the same nameless death v0.1.271 removed everywhere else.
+         An allocation that cannot be satisfied is a failure the language can
+         name, and `fail` is how it names things: catchable with try_or, exit 1,
+         a sentence that says what happened. *)
+      (* declared here because the region allocator, which is emitted first,
+         needs to be able to say so *)
+      "__attribute__((noreturn)) static void __lang_fail_impl(const char* msg);";
       "static void __lang_region_add_block(__lang_region* r, size_t cap) {";
       "  __lang_region_block* b =";
       "    (__lang_region_block*) malloc(sizeof(__lang_region_block) + cap);";
+      "  if (!b) __lang_fail_impl(\"out of memory\");";
       "  b->prev = r->blocks;";
       "  r->blocks = b;";
       "  r->base = (char*)(b + 1);";
@@ -7248,7 +7267,13 @@ let region_runtime_helpers =
       "  size_t aligned = (n + 7) & ~((size_t)7);";
       "  if (r->top + aligned > r->base + r->cap) {";
       "    size_t ncap = r->cap * 2;";
-      "    while (ncap < aligned) ncap *= 2;";
+      (* doubling toward a request bigger than half the address space wraps to
+         zero, and a wrapped capacity buys a block far too small for the
+         allocation that asked for it *)
+      "    while (ncap < aligned) {";
+      "      if (ncap > (size_t)-1 / 2) { ncap = aligned; break; }";
+      "      ncap *= 2;";
+      "    }";
       "    __lang_region_add_block(r, ncap);";
       "  }";
       "  void* p = r->top;";
@@ -7870,10 +7895,10 @@ let str_list_helpers =
       "  if (b >= 0xF0 && b <= 0xF7) return 4;";
       "  return 1;";
       "}";
-      "static int __lang_utf8_len(const char* s) {";
-      "  int n = (int)__lang_str_size(s), i = 0, c = 0;";
+      "static int64_t __lang_utf8_len(const char* s) {";
+      "  int64_t n = (int64_t)__lang_str_size(s), i = 0, c = 0;";
       "  while (i < n) {";
-      "    int l = __lang_utf8_span((unsigned char)s[i]);";
+      "    int64_t l = __lang_utf8_span((unsigned char)s[i]);";
       "    i += (l > n - i) ? (n - i) : l;";
       "    c++;";
       "  }";

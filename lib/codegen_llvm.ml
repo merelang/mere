@@ -4292,11 +4292,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let nv = emit_expr env n_e in
     let raw = fresh_reg () in
     emit_instr (Printf.sprintf
-                  "  %s = call i32 @__lang_str_index_of(ptr %s, ptr %s)"
+                  "  %s = call i64 @__lang_str_index_of(ptr %s, ptr %s)"
                   raw hv nv);
-    let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = sext i32 %s to i64" r raw);
-    r
+    raw
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_compare"; _ }, a_e); _ }, b_e) ->
     (* Phase 31.0: str_compare a b — sign-normalize the raw strcmp value to
        (-1/0/1). Matches the interp's `compare s t` (OCaml). *)
@@ -4426,12 +4424,11 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let startv0 = emit_expr env start_e in
     let endv0 = emit_expr env end_e in
     let startv = fresh_reg () and endv = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" startv startv0);
-    emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" endv endv0);
+    ignore startv; ignore endv;
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
-                  "  %s = call ptr @__lang_substring(ptr %s, i32 %s, i32 %s)"
-                  r sv startv endv);
+                  "  %s = call ptr @__lang_substring(ptr %s, i64 %s, i64 %s)"
+                  r sv startv0 endv0);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "char_at"; _ }, s_e); _ }, i_e) ->
     let sv = emit_expr env s_e in
@@ -4520,10 +4517,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     str_split_used_llvm := true;
     let sv = emit_expr env s_e in
     let raw = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i32 @__lang_utf8_len(ptr %s)" raw sv);
-    let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = sext i32 %s to i64" r raw);
-    r
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_utf8_len(ptr %s)" raw sv);
+    raw
   | Ast.App ({ node = Ast.Var "utf8_chars"; _ }, s_e) ->
     str_split_used_llvm := true;
     let sv = emit_expr env s_e in
@@ -4570,10 +4565,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_repeat"; _ }, s_e); _ }, n_e) ->
     let sv = emit_expr env s_e in
     let nv0 = emit_expr env n_e in
-    let nv = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" nv nv0);
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_repeat(ptr %s, i32 %s)" r sv nv);
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_repeat(ptr %s, i64 %s)" r sv nv0);
     r
   (* v0.1.42 (bitwise): direct i32 instructions. bit_shr is the
      arithmetic shift (ashr). *)
@@ -6856,10 +6849,19 @@ let region_runtime_helpers =
     [ "%__lang_region = type { ptr, ptr, i64, ptr }";
       "@__lang_default_region = internal global %__lang_region zeroinitializer";
       "";
+      (* v0.1.274: malloc's answer used to go unread here, and the next store
+         wrote through the null it returned. An allocation that cannot be
+         satisfied is a failure the language can name. *)
       "define void @__lang_region_add_block(ptr %r, i64 %cap) {";
       "entry:";
       "  %blk_sz = add i64 %cap, 16";
       "  %b = call ptr @malloc(i64 %blk_sz)";
+      "  %oom = icmp eq ptr %b, null";
+      "  br i1 %oom, label %nomem, label %got";
+      "nomem:";
+      "  call void @__lang_fail_impl(ptr @.oom_msg)";
+      "  unreachable";
+      "got:";
       "  %blocks_p = getelementptr %__lang_region, ptr %r, i32 0, i32 3";
       "  %old = load ptr, ptr %blocks_p";
       "  store ptr %old, ptr %b";
@@ -9157,25 +9159,26 @@ let str_concat_helper =
       "";
       (* Phase 19.1.1: str_index_of — needle position in haystack, -1 if
          not found. Empty needle returns 0. Uses libc strstr. *)
-      "define i32 @__lang_str_index_of(ptr %h, ptr %n) {";
+      (* v0.1.274: i64, like the C backend's. A match past two gigabytes came
+         back as a negative offset. *)
+      "define i64 @__lang_str_index_of(ptr %h, ptr %n) {";
       "entry:";
       "  %nfirst = load i8, ptr %n";
       "  %is_empty = icmp eq i8 %nfirst, 0";
       "  br i1 %is_empty, label %ret0, label %dosearch";
       "ret0:";
-      "  ret i32 0";
+      "  ret i64 0";
       "dosearch:";
       "  %p = call ptr @strstr(ptr %h, ptr %n)";
       "  %notfound = icmp eq ptr %p, null";
       "  br i1 %notfound, label %retneg, label %retdiff";
       "retneg:";
-      "  ret i32 -1";
+      "  ret i64 -1";
       "retdiff:";
       "  %diff = ptrtoint ptr %p to i64";
       "  %base = ptrtoint ptr %h to i64";
       "  %off = sub i64 %diff, %base";
-      "  %r = trunc i64 %off to i32";
-      "  ret i32 %r";
+      "  ret i64 %off";
       "}";
       "";
       (* Phase 36: str_starts_with — bool *)
@@ -9269,9 +9272,13 @@ let str_concat_helper =
       "}";
       "";
       (* Phase 36: str_repeat *)
-      "define ptr @__lang_str_repeat(ptr %s, i32 %n) {";
+      (* v0.1.274: the count was an i32, so a Mere program asking for 2^31
+         copies got whatever the low 32 bits said -- a different string, and a
+         different one again than the C backend produced for the same program.
+         Mere's ints are 64-bit and this one is now too. *)
+      "define ptr @__lang_str_repeat(ptr %s, i64 %n) {";
       "entry:";
-      "  %neg = icmp sle i32 %n, 0";
+      "  %neg = icmp sle i64 %n, 0";
       "  br i1 %neg, label %ret_empty, label %dowork";
       "ret_empty:";
       (* v0.1.266: through str_alloc like every other string. A bare 1-byte
@@ -9283,20 +9290,26 @@ let str_concat_helper =
       "  ret ptr %empty";
       "dowork:";
       "  %sl  = call i64 @__lang_str_size(ptr %s)";
-      "  %n64 = sext i32 %n to i64";
-      "  %tot = mul i64 %sl, %n64";
+      (* a product that wraps buys a small buffer for a large copy *)
+      "  %mo = call { i64, i1 } @llvm.umul.with.overflow.i64(i64 %sl, i64 %n)";
+      "  %ovf = extractvalue { i64, i1 } %mo, 1";
+      "  br i1 %ovf, label %toobig, label %sized";
+      "toobig:";
+      "  call void @__lang_fail_impl(ptr @.strrepeat_msg)";
+      "  unreachable";
+      "sized:";
+      "  %tot = extractvalue { i64, i1 } %mo, 0";
       "  %buf = call ptr @__lang_str_alloc(i64 %tot)";
       "  br label %loop";
       "loop:";
-      "  %i = phi i32 [ 0, %dowork ], [ %inext, %body ]";
-      "  %done = icmp sge i32 %i, %n";
+      "  %i = phi i64 [ 0, %sized ], [ %inext, %body ]";
+      "  %done = icmp sge i64 %i, %n";
       "  br i1 %done, label %finish, label %body";
       "body:";
-      "  %i64 = sext i32 %i to i64";
-      "  %off = mul i64 %i64, %sl";
+      "  %off = mul i64 %i, %sl";
       "  %bp  = getelementptr i8, ptr %buf, i64 %off";
       "  call ptr @memcpy(ptr %bp, ptr %s, i64 %sl)";
-      "  %inext = add i32 %i, 1";
+      "  %inext = add i64 %i, 1";
       "  br label %loop";
       "finish:";
       "  %tp = getelementptr i8, ptr %buf, i64 %tot";
@@ -9501,6 +9514,12 @@ let str_concat_helper =
          zero is undefined behaviour in IR, and b == -1 is the other undefined
          case (INT_MIN / -1 does not fit). The unsigned negation is the
          two's-complement wraparound the interpreter already produces. *)
+      "declare { i64, i1 } @llvm.umul.with.overflow.i64(i64, i64)";
+      (* v0.1.274: words for two failures that had none on this backend *)
+      "@.strrepeat_msg_h = internal constant { i64, [29 x i8] } { i64 28, [29 x i8] c\"str_repeat: result too large\\00\" }";
+      "@.strrepeat_msg = internal alias [29 x i8], getelementptr inbounds ({ i64, [29 x i8] }, ptr @.strrepeat_msg_h, i32 0, i32 1)";
+      "@.oom_msg_h = internal constant { i64, [14 x i8] } { i64 13, [14 x i8] c\"out of memory\\00\" }";
+      "@.oom_msg = internal alias [14 x i8], getelementptr inbounds ({ i64, [14 x i8] }, ptr @.oom_msg_h, i32 0, i32 1)";
       "@.divzero_msg_h = internal constant { i64, [17 x i8] } { i64 16, [17 x i8] c\"division by zero\\00\" }";
       "@.divzero_msg = internal alias [17 x i8], getelementptr inbounds ({ i64, [17 x i8] }, ptr @.divzero_msg_h, i32 0, i32 1)";
       "@.modzero_msg_h = internal constant { i64, [15 x i8] } { i64 14, [15 x i8] c\"modulo by zero\\00\" }";
@@ -9670,15 +9689,13 @@ let str_concat_helper =
       "}";
       "";
       (* Phase 25.1: substring — region alloc + memcpy. *)
-      "define ptr @__lang_substring(ptr %s, i32 %start, i32 %end_) {";
+      "define ptr @__lang_substring(ptr %s, i64 %start, i64 %end_) {";
       "entry:";
-      "  %lendiff = sub i32 %end_, %start";
-      "  %neg = icmp slt i32 %lendiff, 0";
-      "  %len = select i1 %neg, i32 0, i32 %lendiff";
-      "  %len64 = sext i32 %len to i64";
+      "  %lendiff = sub i64 %end_, %start";
+      "  %neg = icmp slt i64 %lendiff, 0";
+      "  %len64 = select i1 %neg, i64 0, i64 %lendiff";
       "  %r = call ptr @__lang_str_alloc(i64 %len64)";
-      "  %start64 = sext i32 %start to i64";
-      "  %srcp = getelementptr i8, ptr %s, i64 %start64";
+      "  %srcp = getelementptr i8, ptr %s, i64 %start";
       "  call ptr @memcpy(ptr %r, ptr %srcp, i64 %len64)";
       "  %endp = getelementptr i8, ptr %r, i64 %len64";
       "  store i8 0, ptr %endp";
@@ -9907,35 +9924,37 @@ let str_split_runtime_llvm =
       "r1b: ret i32 1";
       "}";
       "";
-      "define i32 @__lang_utf8_len(ptr %s) {";
+      (* v0.1.274: counted in i64. Over a string longer than 2GB the count and
+         the walking index were both i32, so it looped on a wrapped position. *)
+      "define i64 @__lang_utf8_len(ptr %s) {";
       "entry:";
-      "  %n64 = call i64 @__lang_str_size(ptr %s)";
-      "  %n = trunc i64 %n64 to i32";
-      "  %ip = alloca i32";
-      "  %cp = alloca i32";
-      "  store i32 0, ptr %ip";
-      "  store i32 0, ptr %cp";
+      "  %n = call i64 @__lang_str_size(ptr %s)";
+      "  %ip = alloca i64";
+      "  %cp = alloca i64";
+      "  store i64 0, ptr %ip";
+      "  store i64 0, ptr %cp";
       "  br label %loop";
       "loop:";
-      "  %i = load i32, ptr %ip";
-      "  %done = icmp sge i32 %i, %n";
+      "  %i = load i64, ptr %ip";
+      "  %done = icmp sge i64 %i, %n";
       "  br i1 %done, label %exit, label %body";
       "body:";
-      "  %bp = getelementptr i8, ptr %s, i32 %i";
+      "  %bp = getelementptr i8, ptr %s, i64 %i";
       "  %b = load i8, ptr %bp";
-      "  %l = call i32 @__lang_utf8_span(i8 %b)";
-      "  %rem = sub i32 %n, %i";
-      "  %too = icmp sgt i32 %l, %rem";
-      "  %l2 = select i1 %too, i32 %rem, i32 %l";
-      "  %i2 = add i32 %i, %l2";
-      "  store i32 %i2, ptr %ip";
-      "  %c = load i32, ptr %cp";
-      "  %c2v = add i32 %c, 1";
-      "  store i32 %c2v, ptr %cp";
+      "  %l32 = call i32 @__lang_utf8_span(i8 %b)";
+      "  %l = sext i32 %l32 to i64";
+      "  %rem = sub i64 %n, %i";
+      "  %too = icmp sgt i64 %l, %rem";
+      "  %l2 = select i1 %too, i64 %rem, i64 %l";
+      "  %i2 = add i64 %i, %l2";
+      "  store i64 %i2, ptr %ip";
+      "  %c = load i64, ptr %cp";
+      "  %c2v = add i64 %c, 1";
+      "  store i64 %c2v, ptr %cp";
       "  br label %loop";
       "exit:";
-      "  %res = load i32, ptr %cp";
-      "  ret i32 %res";
+      "  %res = load i64, ptr %cp";
+      "  ret i64 %res";
       "}";
       "";
       "define ptr @__lang_utf8_chars(ptr %s) {";
