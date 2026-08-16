@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.267 — 2026-08-16
+
+_The LLVM backend's tail calls are `musttail`, so a loop written as recursion runs
+in constant stack there too._
+
+The C backend learned this in v0.1.230 — self tail calls became a `goto` — and the
+same measurement was left standing against LLVM: **ten million iterations died with
+SIGSEGV at `-O0`** while C ran them in constant space, and the emitted IR carried no
+tail marker at all. The note recorded it as measured rather than assumed, and said
+what the fix would cost: `musttail` is the marker LLVM guarantees regardless of
+optimisation level, but it requires the call to be **immediately followed by a `ret`
+of its result**, and this backend had no notion of tail position.
+
+It has one now. `emit_expr` carries the same tail-position flag the C backend uses,
+cleared at entry and restored only for the sub-expression that stays in tail
+position. An `If` in tail position **returns from each branch** instead of joining
+through a phi, which is what puts a tail call next to its `ret`. A call in tail
+position whose prototype matches the enclosing function's is emitted as `musttail`.
+
+Ten million iterations now run at `-O0`, and so does mutual recursion between two
+functions. `MERE_NO_TAIL_CALL=1` turns the transform off, the same escape hatch
+`MERE_NO_TAIL_LOOP` gives the C side — "is it this change?" stays a one-variable
+question.
+
+---
+
 ## v0.1.266 — 2026-08-16
 
 _The string values four backends were never asked about, and the two answers that

@@ -494,6 +494,21 @@ let llvm_string_escape (s : string) : string =
   ) s;
   Buffer.contents buf
 
+(* Q-029: tail position. `llvm_tail_pos` is true while emitting an expression
+   whose value is the enclosing function's result; `llvm_returned` says the
+   emitter has already written a `ret`, so the caller must not write another
+   (two terminators in one block is invalid IR). Both are set and cleared the
+   way the C backend does it -- read into a local at the top of emit_expr,
+   restored only for the sub-expression that stays in tail position. *)
+let llvm_tail_pos = ref false
+let llvm_returned = ref false
+(* (return type, argument types) of the function being emitted, as LLVM type
+   strings. musttail requires the callee's prototype to match the caller's, so
+   the check is exactly this comparison. *)
+let llvm_current_sig : (string * string list) option ref = ref None
+let no_tail_call =
+  (try Sys.getenv "MERE_NO_TAIL_CALL" <> "" with Not_found -> false)
+
 (* Accumulator for string-literal globals.
    Each entry: full LLVM declaration line. *)
 let str_globals : string list ref = ref []
@@ -3323,6 +3338,11 @@ let cast_from_i64 (v : string) (llty : string) : string =
    literal) holding the result. Caller is expected to know the expected
    LLVM type from the AST's `.ty` annotation. *)
 let rec emit_expr (env : env) (e : Ast.expr) : string =
+  (* Q-029: whether THIS expression is in tail position. Cleared immediately,
+     so a sub-expression is not in tail position unless the case below puts it
+     back -- the same discipline the C backend's c_tail_pos uses. *)
+  let __in_tail = !llvm_tail_pos in
+  llvm_tail_pos := false;
   match e.Ast.node with
   | Ast.Int_lit n ->
     (* v0.1.96: the LLVM backend's int is 64-bit (i64), matching the C
@@ -3702,6 +3722,26 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | None -> "i64"
     in
     let cv = emit_expr env cond in
+    if __in_tail then begin
+      (* Each branch is the function's result, so each branch RETURNS. No join
+         block and no phi -- which is what lets a tail call in a branch be
+         immediately followed by its `ret`, the shape musttail requires. *)
+      let l_then = fresh_label "then_" in
+      let l_else = fresh_label "else_" in
+      emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" cv l_then l_else);
+      emit_label l_then;
+      llvm_tail_pos := true;
+      let tv = emit_expr env t in
+      if !llvm_returned then llvm_returned := false
+      else emit_instr (Printf.sprintf "  ret %s %s" result_ty tv);
+      emit_label l_else;
+      llvm_tail_pos := true;
+      let fv = emit_expr env f in
+      if !llvm_returned then llvm_returned := false
+      else emit_instr (Printf.sprintf "  ret %s %s" result_ty fv);
+      llvm_returned := true;
+      "0"
+    end else
     let l_then = fresh_label "then_" in
     let l_else = fresh_label "else_" in
     let l_join = fresh_label "join_" in
@@ -3840,7 +3880,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
      program actually bound that name, so a program that shadows nothing
      reaches exactly the arms it reached before. Externs are untouched —
      they live in their own table, not in the ones consulted here. *)
-  | Ast.App _ when app_head_user_bound env e -> emit_user_app env e
+  | Ast.App _ when app_head_user_bound env e -> emit_user_app ~tail:__in_tail env e
   | Ast.App ({ node = Ast.Var "fst"; _ }, arg) ->
     let av = emit_expr env arg in
     let tname =
@@ -5321,7 +5361,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   (* Phase 30.0 / v0.1.172: every call whose head the user bound lands
      here, whether it reached this point by falling past the builtin arms
      or by being sent past them from the guard above. *)
-  | Ast.App _ -> emit_user_app env e
+  | Ast.App _ -> emit_user_app ~tail:__in_tail env e
   | Ast.Tuple elems ->
     let tname =
       match e.Ast.ty with
@@ -6163,7 +6203,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       let bits = Int64.bits_of_float f in
       Printf.sprintf "0x%016Lx" bits
 
-and emit_user_app (env : env) (e : Ast.expr) : string =
+and emit_user_app ?(tail = false) (env : env) (e : Ast.expr) : string =
   (* The three shapes an ordinary call can take: an inner-lifted fn, a
      top-level fn, or a closure value. Split out of emit_expr so that the
      shadowing guard has somewhere to send a call it must not let the
@@ -6332,9 +6372,30 @@ and emit_user_app (env : env) (e : Ast.expr) : string =
     let fn_reg = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1" fn_reg cname cv);
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call %s %s(ptr %s, %s %s)"
-                  r ret_ty fn_reg env_reg arg_ty av);
-    r
+    (* Q-029: a tail call becomes `musttail`, which LLVM guarantees at every
+       optimisation level -- without it this backend grew the stack per
+       iteration and 10 million of them died at -O0 while C ran them in
+       constant space. The guarantee has conditions: the call must be
+       immediately followed by `ret` of its result (which tail-position If
+       emission arranges) and the prototypes must match, which is the
+       comparison below. *)
+    let can_musttail =
+      (not no_tail_call) && tail
+      && (match !llvm_current_sig with
+          | Some (r_ty, args) -> r_ty = ret_ty && args = ["ptr"; arg_ty]
+          | None -> false)
+    in
+    if can_musttail then begin
+      emit_instr (Printf.sprintf "  %s = musttail call %s %s(ptr %s, %s %s)"
+                    r ret_ty fn_reg env_reg arg_ty av);
+      emit_instr (Printf.sprintf "  ret %s %s" ret_ty r);
+      llvm_returned := true;
+      r
+    end else begin
+      emit_instr (Printf.sprintf "  %s = call %s %s(ptr %s, %s %s)"
+                    r ret_ty fn_reg env_reg arg_ty av);
+      r
+    end
   | _ -> unsupported e.Ast.loc "emit_user_app: not an application"
 
 (* Emit the body of an anonymous-Fun adapter: gep + load each capture
@@ -6382,8 +6443,14 @@ let emit_anon_adapter (ce : closure_emission) : string =
    | Some t ->
      (try Typer.unify Loc.dummy t ce.ce_return_ty with _ -> ())
    | None -> ());
+  llvm_tail_pos := true;
+  llvm_returned := false;
+  llvm_current_sig :=
+    Some (llvm_ty_of ce.ce_return_ty, ["ptr"; llvm_ty_of ce.ce_param_ty]);
   let rv = emit_expr env ce.ce_body in
-  emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of ce.ce_return_ty) rv);
+  if !llvm_returned then llvm_returned := false
+  else emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of ce.ce_return_ty) rv);
+  llvm_current_sig := None;
   let body = String.concat "\n" (List.rev !instrs) in
   instrs := saved_instrs;
   reg_counter := saved_reg;
@@ -6419,8 +6486,11 @@ let emit_lifted_fn_llvm (lf : lifted_fn_llvm) : string =
   current_var_types :=
     List.map (fun (n, t) -> (n, t)) lf.l_captures
     @ [(lf.l_param, lf.l_param_ty)];
+  llvm_tail_pos := true;
+  llvm_returned := false;
   let rv = emit_expr env lf.l_body in
-  emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of lf.l_return_ty) rv);
+  if !llvm_returned then llvm_returned := false
+  else emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of lf.l_return_ty) rv);
   let body = String.concat "\n" (List.rev !instrs) in
   instrs := saved_instrs;
   current_var_types := saved_vt;
@@ -6480,8 +6550,11 @@ let emit_fn_def (f : fn_decl) : string =
   (match dbg with
    | Some n -> debug_loc_suffix := Printf.sprintf ", !dbg !%d" (dbg_location_id n)
    | None -> debug_loc_suffix := "");
+  llvm_tail_pos := true;
+  llvm_returned := false;
   let rv = emit_expr env f.body in
-  emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of f.return_ty) rv);
+  if !llvm_returned then llvm_returned := false
+  else emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of f.return_ty) rv);
   debug_loc_suffix := saved_suffix;
   let body = String.concat "\n" (List.rev !instrs) in
   instrs := saved;
