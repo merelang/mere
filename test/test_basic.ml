@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.264" Version.v "0.1.264";
+  check "version is 0.1.265" Version.v "0.1.265";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -13414,6 +13414,17 @@ let () =
        let bin = Codegen_riscv.emit_program ~main_ty:mt prog in
        if String.length bin > 64 then "assembled" else "suspiciously short"
      with e -> Printexc.to_string e) "assembled";
+
+  (* v0.1.265 (Q-032): on Wasm `fail` sets a flag and returns a value, because
+     there is no unwinding there. That value used to be 0 -- not an address --
+     so a consumer between the fail and the try_or that read it as a str
+     trapped on the length header at -4, and the program died with no output.
+     It is an empty str now: the try_or default comes back like everywhere
+     else. This checks the interpreter agrees, which it always did. *)
+  check "v0.1.265: a failing str consumer still reaches its try_or"
+    (Pipeline.process "try_or (fn () -> str_len (fail \"b\")) (0 - 1)") "-1";
+  check "v0.1.265: a failing int consumer still reaches its try_or"
+    (Pipeline.process "try_or (fn () -> 1 + (fail \"b\")) (0 - 1)") "-1";
 
   (* v0.1.262: str_trim walked a pointer INTO the string and then asked
      $__lang_strlen how long it was. An interior pointer has no header of its

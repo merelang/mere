@@ -119,6 +119,10 @@ let fail_prefix_offset = ref 0
 let divzero_msg_offset = ref 0
 let modzero_msg_offset = ref 0
 
+(* Q-032: the address of an interned empty str, which is what `fail` returns
+   while a try_or is active. See the note where it is minted. *)
+let fail_sentinel_offset = ref 0
+
 (* Reset per emit_program. *)
 let print_no_nl_used = ref false
 (* v0.1.259: `print_err` is a SECOND host sink, so it is imported only when the
@@ -5506,7 +5510,13 @@ let runtime_helpers = {|
     (if (global.get $__lang_fail_active)
       (then
         (global.set $__lang_fail_flag (i32.const 1))
-        (return (i64.extend_i32_s (i32.const 0)))))
+        ;; Q-032: an EMPTY STR, not 0. `fail` does not unwind here -- the code
+        ;; between it and the try_or still runs -- so whatever it hands back is
+        ;; going to be used. 0 is not an address: reading its length header at
+        ;; -4 trapped, and the program died with no output where the other
+        ;; backends returned the try_or default. An empty str answers every str
+        ;; operation, so what runs in between survives to reach the try_or.
+        (return (i64.extend_i32_u (global.get $__lang_fail_sentinel)))))
     (call $puts_h (local.get $msg))
     (unreachable))
   ;; Integer division and remainder with a checked divisor. i64.div_s by zero
@@ -8055,6 +8065,14 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   fail_prefix_offset := fresh_str_offset "fail: ";
   divzero_msg_offset := fresh_str_offset "division by zero";
   modzero_msg_offset := fresh_str_offset "modulo by zero";
+  (* Q-032: the value `fail` hands back while a try_or is active. It used to be
+     0, which is not an address: a consumer between the fail and the try_or
+     that treats it as a str read the length header at -4 and trapped, so the
+     program died with no output where the other backends returned the
+     default. An empty str IS a valid answer to every str operation, so the
+     sentinel is one. It does not make fail unwind -- the code in between still
+     runs -- it makes what runs survivable. *)
+  fail_sentinel_offset := fresh_str_offset "";
   vec_used := false;
   vec_higher_order_used := false;
   strbuf_used := false;
@@ -9612,6 +9630,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      \  (global $__lang_char_table_initialized (mut i32) (i32.const 0))\n\
      \  (global $__lang_fail_flag (mut i32) (i32.const 0))\n\
      \  (global $__lang_fail_active (mut i32) (i32.const 0))\n\
+     \  (global $__lang_fail_sentinel i32 (i32.const %d))\n\
      %s\
      %s\
      %s\
@@ -9630,7 +9649,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     puts_decl
     file_io_imports
     memory_section
-    table_section bump_init char_table_offset
+    table_section bump_init char_table_offset !fail_sentinel_offset
     top_globals_section
     data_section runtime_helpers
     list_str_runtime_section
