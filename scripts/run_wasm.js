@@ -86,12 +86,21 @@ const readCStr = (ptr) => {
   let end = ptr; while (end < bytes.length && bytes[end] !== 0) end++;
   return Buffer.from(bytes.subarray(ptr, end)).toString('utf8');
 };
+// A str's length is in its header (ptr-4), so a zero byte inside it is a
+// byte and not an end. print writes the whole value on the interpreter
+// and on C; scanning for a NUL here made the Wasm build print less.
+const readStrBytes = (ptr) => {
+  if (!ptr) return Buffer.alloc(0);
+  const len = new DataView(memory.buffer).getInt32(ptr - 4, true);
+  if (len < 0 || ptr + len > memory.buffer.byteLength) return Buffer.alloc(0);
+  return Buffer.from(new Uint8Array(memory.buffer).subarray(ptr, ptr + len));
+};
 ${makeChannelEnv.toString()}
 const stub = () => 0;
 const env = Object.assign({
   memory,
-  puts: (ptr) => process.stdout.write(readCStr(ptr) + '\\n'),
-  print_no_nl: (ptr) => process.stdout.write(readCStr(ptr)),
+  puts: (ptr) => { process.stdout.write(readStrBytes(ptr)); process.stdout.write('\\n'); },
+  print_no_nl: (ptr) => process.stdout.write(readStrBytes(ptr)),
   // A pointer and a length: a zero is a byte, not an end.
   print_bytes: (ptr, len) =>
     process.stdout.write(Buffer.from(memory.buffer, ptr, len)),
@@ -129,7 +138,7 @@ const wasmPath = process.argv[2];
   // a shared helper — the reason the length header landed here and in no
   // other host.
   let langBump = null;  // set after instantiate
-  const { bumpAlloc, writeStr, writeBytes, readCStr } = makeMarshal({
+  const { bumpAlloc, writeStr, writeBytes, readCStr, readStrBytes } = makeMarshal({
     getMemory: () => memory,
     getBump: () => langBump,
   });
@@ -140,8 +149,11 @@ const wasmPath = process.argv[2];
 
   const env = {
     puts: (ptr) => {
-      // C's puts appends a newline; match that.
-      process.stdout.write(readCStr(ptr) + "\n");
+      // By LENGTH, not up to the first NUL: a str carries its length in the
+      // header, `str_len` answers with it, and printing less than that is
+      // two answers about one value. The newline matches C's puts.
+      process.stdout.write(readStrBytes(ptr));
+      process.stdout.write("\n");
     },
     read_file: (pathPtr) => {
       const path = readCStr(pathPtr);
@@ -300,8 +312,9 @@ const wasmPath = process.argv[2];
     },
     // v0.1.127: wall clock for the `time` builtin (epoch seconds, f64).
     time: () => Date.now() / 1000,
-    // print without the trailing newline (Mere's print_no_nl builtin).
-    print_no_nl: (ptr) => process.stdout.write(readCStr(ptr)),
+    // print without the trailing newline (Mere's print_no_nl builtin), by
+    // length for the same reason as puts.
+    print_no_nl: (ptr) => process.stdout.write(readStrBytes(ptr)),
     // print_bytes takes a pointer *and a length*, which is the whole reason
     // it exists: a byte sequence is exactly what a NUL-terminated string
     // cannot carry, because a zero is a byte and not an end.

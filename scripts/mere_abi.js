@@ -15,7 +15,10 @@
 // ABI 1
 //   - a Mere value is i64; addresses are the low 32 bits
 //   - a str is `[i32 len][bytes][NUL]`, and the value points at byte0, so
-//     the length is at ptr-4
+//     the length is at ptr-4. BOTH compilers lay it out this way: the
+//     self-hosted Wasm backend emitted a bare NUL-terminated buffer while
+//     stamping this same number until v0.1.263, and a host that trusted the
+//     header printed half a megabyte of zeros for one of its strings
 //   - a closure value is `{ i32 env, i32 fn_idx }`
 //   - a closure is called as (param i64 i64) (result i64)
 //   - compound fields are 8-byte slots; variant cells are

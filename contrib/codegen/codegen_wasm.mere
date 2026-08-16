@@ -606,16 +606,30 @@ let wat_escape_str = fn (s: str) ->
   let s5 = str_replace s4 "\t" "\\09" in
   s5;
 
+// A literal is laid out like every other str: [i32 len][bytes][NUL],
+// with the VALUE pointing at byte0. The four header bytes are written
+// as hex escapes, little-endian, so `$__lang_strlen` can read the
+// length rather than scan for a terminator.
+let hex_nibble = fn (v: int) ->
+  if v < 10 then chr (48 + v) else chr (87 + v);
+let le32_escape = fn (n: int) ->
+  let byte = fn (k: int) ->
+    let b = (n / k) % 256 in
+    "\\" ++ hex_nibble (b / 16) ++ hex_nibble (b % 16) in
+  byte 1 ++ byte 256 ++ byte 65536 ++ byte 16777216;
+
 let alloc_str_literal = fn (s: str) -> fn (st: EmitState) ->
   match lookup_assoc s st.str_offsets with
   | Some off -> ((off, st) : (int * EmitState))
   | None ->
-    let off = st.str_offset in
+    // the header sits at `hdr_off`; the value is the byte after it
+    let hdr_off = st.str_offset in
+    let off = hdr_off + 4 in
     // `+ 1` for the NUL terminator that wat_escape_str doesn't emit.
     let new_off = off + str_len s + 1 in
     let data_decl =
-      "  (data (i32.const " ++ show off ++ ") \"" ++
-      wat_escape_str s ++ "\\00\")\n" in
+      "  (data (i32.const " ++ show hdr_off ++ ") \"" ++
+      le32_escape (str_len s) ++ wat_escape_str s ++ "\\00\")\n" in
     let st2 = ({ st |
       str_offsets = Cons ((s, off), st.str_offsets),
       data = Cons (data_decl, st.data),
@@ -2073,14 +2087,37 @@ let rec build_extern_imports = fn (uses: str list) ->
 // the full str_concat body. `str_concat` notes both helpers' use.
 let helper_decl_strlen =
   "  (func $__lang_strlen (param $s i32) (result i32)\n" ++
-  "    (local $i i32)\n" ++
+  "    (i32.load (i32.sub (local.get $s) (i32.const 4))))\n";
+
+// Every str this backend hands out is [i32 len][bytes][NUL] with the
+// value pointing at byte0, the same layout the OCaml backend uses -- so
+// one host can read either one's output by its length. These two are
+// emitted UNCONDITIONALLY: any helper that builds a string calls them,
+// and gating them on a use-list made a module that showed a bool without
+// measuring one refer to a function it did not define.
+let helper_decl_str_alloc =
+  "  (func $__lang_str_alloc (param $len i32) (result i32)\n" ++
+  "    (local $p i32)\n" ++
+  "    (i32.store (global.get $__lang_bump) (local.get $len))\n" ++
+  "    (local.set $p (i32.add (global.get $__lang_bump) (i32.const 4)))\n" ++
+  "    (global.set $__lang_bump\n" ++
+  "      (i32.add (i32.add (local.get $p) (local.get $len)) (i32.const 1)))\n" ++
+  "    (i32.store8 (i32.add (local.get $p) (local.get $len)) (i32.const 0))\n" ++
+  "    (local.get $p))\n" ++
+  // A right-to-left digit buffer has no room for a header in front of
+  // where its result begins, so it is copied into a str that does.
+  "  (func $__lang_str_copyn (param $src i32) (param $len i32) (result i32)\n" ++
+  "    (local $dst i32) (local $i i32)\n" ++
+  "    (local.set $dst (call $__lang_str_alloc (local.get $len)))\n" ++
   "    (local.set $i (i32.const 0))\n" ++
-  "    (block $end\n" ++
-  "      (loop $lp\n" ++
-  "        (br_if $end (i32.eqz (i32.load8_u (i32.add (local.get $s) (local.get $i)))))\n" ++
+  "    (block $cn_end\n" ++
+  "      (loop $cn_lp\n" ++
+  "        (br_if $cn_end (i32.eq (local.get $i) (local.get $len)))\n" ++
+  "        (i32.store8 (i32.add (local.get $dst) (local.get $i))\n" ++
+  "          (i32.load8_u (i32.add (local.get $src) (local.get $i))))\n" ++
   "        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
-  "        (br $lp)))\n" ++
-  "    (local.get $i))\n";
+  "        (br $cn_lp)))\n" ++
+  "    (local.get $dst))\n";
 
 // Phase 54.28: Map — assoc-list backed by a 4-byte mutable cell that
 // holds a pointer to the current list head. The list is a chain of
@@ -2320,10 +2357,8 @@ let helper_decl_float_box =
 let helper_decl_chr =
   "  (func $chr (param $n i32) (result i32)\n" ++
   "    (local $r i32)\n" ++
-  "    (local.set $r (global.get $__lang_bump))\n" ++
-  "    (global.set $__lang_bump (i32.add (local.get $r) (i32.const 2)))\n" ++
+  "    (local.set $r (call $__lang_str_alloc (i32.const 1)))\n" ++
   "    (i32.store8 (local.get $r) (local.get $n))\n" ++
-  "    (i32.store8 (i32.add (local.get $r) (i32.const 1)) (i32.const 0))\n" ++
   "    (local.get $r))\n";
 
 // Phase 54.12: `$char_at s i` — return a 1-byte NUL-terminated string
@@ -2334,11 +2369,9 @@ let helper_decl_chr =
 let helper_decl_char_at =
   "  (func $char_at (param $s i32) (param $i i32) (result i32)\n" ++
   "    (local $r i32)\n" ++
-  "    (local.set $r (global.get $__lang_bump))\n" ++
-  "    (global.set $__lang_bump (i32.add (local.get $r) (i32.const 2)))\n" ++
+  "    (local.set $r (call $__lang_str_alloc (i32.const 1)))\n" ++
   "    (i32.store8 (local.get $r)\n" ++
   "      (i32.load8_u (i32.add (local.get $s) (local.get $i))))\n" ++
-  "    (i32.store8 (i32.add (local.get $r) (i32.const 1)) (i32.const 0))\n" ++
   "    (local.get $r))\n";
 
 // Phase 54.5: `$is_space b` — true iff byte b is ' ' / '\t' / '\n' / '\r'.
@@ -2406,7 +2439,7 @@ let helper_decl_str_repeat =
   "  (func $str_repeat (param $s i32) (param $n i32) (result i32)\n" ++
   "    (local $slen i32) (local $r i32) (local $k i32) (local $i i32)\n" ++
   "    (local.set $slen (call $__lang_strlen (local.get $s)))\n" ++
-  "    (local.set $r (global.get $__lang_bump))\n" ++
+  "    (local.set $r (call $__lang_str_alloc (i32.mul (local.get $n) (local.get $slen))))\n" ++
   "    (local.set $k (i32.const 0))\n" ++
   "    (block $end_k\n" ++
   "      (loop $lp_k\n" ++
@@ -2423,12 +2456,6 @@ let helper_decl_str_repeat =
   "            (br $lp_i)))\n" ++
   "        (local.set $k (i32.add (local.get $k) (i32.const 1)))\n" ++
   "        (br $lp_k)))\n" ++
-  "    (i32.store8\n" ++
-  "      (i32.add (local.get $r) (i32.mul (local.get $n) (local.get $slen)))\n" ++
-  "      (i32.const 0))\n" ++
-  "    (global.set $__lang_bump\n" ++
-  "      (i32.add (i32.add (local.get $r) (i32.mul (local.get $n) (local.get $slen)))\n" ++
-  "               (i32.const 1)))\n" ++
   "    (local.get $r))\n";
 
 // Phase 54.11: StrBuf — a small heap record (cap / len / data_ptr) +
@@ -2494,9 +2521,7 @@ let helper_decl_strbuf_to_str =
   "    (local $cur_len i32) (local $data i32) (local $out i32) (local $i i32)\n" ++
   "    (local.set $cur_len (i32.load offset=4 (local.get $rec)))\n" ++
   "    (local.set $data (i32.load offset=8 (local.get $rec)))\n" ++
-  "    (local.set $out (global.get $__lang_bump))\n" ++
-  "    (global.set $__lang_bump\n" ++
-  "      (i32.add (i32.add (local.get $out) (local.get $cur_len)) (i32.const 1)))\n" ++
+  "    (local.set $out (call $__lang_str_alloc (local.get $cur_len)))\n" ++
   "    (local.set $i (i32.const 0))\n" ++
   "    (block $cp_end\n" ++
   "      (loop $cp_lp\n" ++
@@ -2505,7 +2530,6 @@ let helper_decl_strbuf_to_str =
   "          (i32.load8_u (i32.add (local.get $data) (local.get $i))))\n" ++
   "        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
   "        (br $cp_lp)))\n" ++
-  "    (i32.store8 (i32.add (local.get $out) (local.get $cur_len)) (i32.const 0))\n" ++
   "    (local.get $out))\n";
 
 // Phase 54.8: `$str_unescape s` — walk bytes, replace recognized escape
@@ -2517,7 +2541,9 @@ let helper_decl_str_unescape =
   "    (local $slen i32) (local $r i32) (local $i i32) (local $j i32)\n" ++
   "    (local $b i32) (local $b2 i32) (local $out i32)\n" ++
   "    (local.set $slen (call $__lang_strlen (local.get $s)))\n" ++
-  "    (local.set $r (global.get $__lang_bump))\n" ++
+  // the unescaped result is never longer than the source, so allocate
+  // that bound and hand back a copy of what was actually written
+  "    (local.set $r (call $__lang_str_alloc (local.get $slen)))\n" ++
   "    (local.set $i (i32.const 0))\n" ++
   "    (local.set $j (i32.const 0))\n" ++
   "    (block $end\n" ++
@@ -2552,10 +2578,7 @@ let helper_decl_str_unescape =
   "            (local.set $j (i32.add (local.get $j) (i32.const 1)))\n" ++
   "            (local.set $i (i32.add (local.get $i) (i32.const 1)))))\n" ++
   "        (br $lp)))\n" ++
-  "    (i32.store8 (i32.add (local.get $r) (local.get $j)) (i32.const 0))\n" ++
-  "    (global.set $__lang_bump\n" ++
-  "      (i32.add (i32.add (local.get $r) (local.get $j)) (i32.const 1)))\n" ++
-  "    (local.get $r))\n";
+  "    (call $__lang_str_copyn (local.get $r) (local.get $j)))\n";
 
 // Phase 54.7: `$int_of_str s` — parse leading [ws*][-]?[0-9]* as signed
 // decimal int. Stops at first non-digit. Returns 0 if no digits found
@@ -2596,7 +2619,7 @@ let helper_decl_substring =
   "  (func $substring (param $s i32) (param $st i32) (param $ed i32) (result i32)\n" ++
   "    (local $len i32) (local $r i32) (local $i i32)\n" ++
   "    (local.set $len (i32.sub (local.get $ed) (local.get $st)))\n" ++
-  "    (local.set $r (global.get $__lang_bump))\n" ++
+  "    (local.set $r (call $__lang_str_alloc (local.get $len)))\n" ++
   "    (local.set $i (i32.const 0))\n" ++
   "    (block $end\n" ++
   "      (loop $lp\n" ++
@@ -2605,9 +2628,6 @@ let helper_decl_substring =
   "          (i32.load8_u (i32.add (i32.add (local.get $s) (local.get $st)) (local.get $i))))\n" ++
   "        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
   "        (br $lp)))\n" ++
-  "    (i32.store8 (i32.add (local.get $r) (local.get $len)) (i32.const 0))\n" ++
-  "    (global.set $__lang_bump\n" ++
-  "      (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))\n" ++
   "    (local.get $r))\n";
 
 // Stage 53j-2: `$__lang_streq a b` — byte-by-byte NUL-terminated
@@ -2633,7 +2653,7 @@ let helper_decl_str_concat =
   "    (local $la i32) (local $lb i32) (local $r i32) (local $i i32)\n" ++
   "    (local.set $la (call $__lang_strlen (local.get $a)))\n" ++
   "    (local.set $lb (call $__lang_strlen (local.get $b)))\n" ++
-  "    (local.set $r (global.get $__lang_bump))\n" ++
+  "    (local.set $r (call $__lang_str_alloc (i32.add (local.get $la) (local.get $lb))))\n" ++
   "    (local.set $i (i32.const 0))\n" ++
   "    (block $end_a\n" ++
   "      (loop $lp_a\n" ++
@@ -2650,11 +2670,6 @@ let helper_decl_str_concat =
   "                    (i32.load8_u (i32.add (local.get $b) (local.get $i))))\n" ++
   "        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
   "        (br $lp_b)))\n" ++
-  "    (i32.store8 (i32.add (i32.add (local.get $r) (local.get $la)) (local.get $lb))\n" ++
-  "                (i32.const 0))\n" ++
-  "    (global.set $__lang_bump\n" ++
-  "      (i32.add (i32.add (i32.add (local.get $r) (local.get $la)) (local.get $lb))\n" ++
-  "               (i32.const 1)))\n" ++
   "    (local.get $r))\n";
 
 // Stage 53i-3: `$show_int` — int → decimal C-string via a fresh
@@ -2678,7 +2693,7 @@ let helper_decl_show_int =
   "      (then\n" ++
   "        (local.set $i (i32.sub (local.get $i) (i32.const 1)))\n" ++
   "        (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 48))\n" ++
-  "        (return (i32.add (local.get $buf) (local.get $i)))))\n" ++
+  "        (return (call $__lang_str_copyn (i32.add (local.get $buf) (local.get $i)) (i32.const 1)))))\n" ++
   "    (block $end\n" ++
   "      (loop $lp\n" ++
   "        (br_if $end (i32.eqz (local.get $abs)))\n" ++
@@ -2691,7 +2706,8 @@ let helper_decl_show_int =
   "      (then\n" ++
   "        (local.set $i (i32.sub (local.get $i) (i32.const 1)))\n" ++
   "        (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 45))))\n" ++
-  "    (i32.add (local.get $buf) (local.get $i)))\n";
+  "    (call $__lang_str_copyn (i32.add (local.get $buf) (local.get $i))\n" ++
+  "      (i32.sub (i32.const 15) (local.get $i))))\n";
 
 // Phase 55a: `$show_bool` — bool → "true" / "false" C-string. Bytes are
 // written into a fresh bump-allocated buffer (8 bytes reserved for
@@ -2701,23 +2717,21 @@ let helper_decl_show_int =
 let helper_decl_show_bool =
   "  (func $show_bool (param $b i32) (result i32)\n" ++
   "    (local $buf i32)\n" ++
-  "    (local.set $buf (global.get $__lang_bump))\n" ++
-  "    (global.set $__lang_bump (i32.add (global.get $__lang_bump) (i32.const 8)))\n" ++
   "    (if (result i32) (local.get $b)\n" ++
   "      (then\n" ++
+  "        (local.set $buf (call $__lang_str_alloc (i32.const 4)))\n" ++
   "        (i32.store8 (i32.add (local.get $buf) (i32.const 0)) (i32.const 116))\n" ++
   "        (i32.store8 (i32.add (local.get $buf) (i32.const 1)) (i32.const 114))\n" ++
   "        (i32.store8 (i32.add (local.get $buf) (i32.const 2)) (i32.const 117))\n" ++
   "        (i32.store8 (i32.add (local.get $buf) (i32.const 3)) (i32.const 101))\n" ++
-  "        (i32.store8 (i32.add (local.get $buf) (i32.const 4)) (i32.const 0))\n" ++
   "        (local.get $buf))\n" ++
   "      (else\n" ++
+  "        (local.set $buf (call $__lang_str_alloc (i32.const 5)))\n" ++
   "        (i32.store8 (i32.add (local.get $buf) (i32.const 0)) (i32.const 102))\n" ++
   "        (i32.store8 (i32.add (local.get $buf) (i32.const 1)) (i32.const 97))\n" ++
   "        (i32.store8 (i32.add (local.get $buf) (i32.const 2)) (i32.const 108))\n" ++
   "        (i32.store8 (i32.add (local.get $buf) (i32.const 3)) (i32.const 115))\n" ++
   "        (i32.store8 (i32.add (local.get $buf) (i32.const 4)) (i32.const 101))\n" ++
-  "        (i32.store8 (i32.add (local.get $buf) (i32.const 5)) (i32.const 0))\n" ++
   "        (local.get $buf))))\n";
 
 // Phase 55a: `$show_str` — str → `"..."` (wrap in double-quotes) via
@@ -2728,10 +2742,8 @@ let helper_decl_show_bool =
 let helper_decl_show_str =
   "  (func $show_str (param $s i32) (result i32)\n" ++
   "    (local $q i32)\n" ++
-  "    (local.set $q (global.get $__lang_bump))\n" ++
+  "    (local.set $q (call $__lang_str_alloc (i32.const 1)))\n" ++
   "    (i32.store8 (local.get $q) (i32.const 34))\n" ++
-  "    (i32.store8 (i32.add (local.get $q) (i32.const 1)) (i32.const 0))\n" ++
-  "    (global.set $__lang_bump (i32.add (local.get $q) (i32.const 2)))\n" ++
   "    (call $__lang_str_concat\n" ++
   "      (call $__lang_str_concat (local.get $q) (local.get $s))\n" ++
   "      (local.get $q)))\n";
@@ -3015,7 +3027,10 @@ let emit_program = fn (prog: program) ->
   let show_variant_decl = (match extern_already_noted "show_variant" s.helpers_used with
     | true -> build_show_variant_helper s
     | false -> "") in
-  let helper_decls = helper_decls_base ++ show_variant_decl in
+  // str_alloc / str_copyn are unconditional: every string-building helper
+  // calls them, so gating them on a use-list only produces modules that
+  // refer to functions they do not define.
+  let helper_decls = helper_decl_str_alloc ++ helper_decls_base ++ show_variant_decl in
   wrap_module locals_decl body lifted_str table_size elem_line data_str bump_start extern_imports helper_decls;
 
 // Phase 54.9: a tiny prelude prepended to every input. Keeps the
