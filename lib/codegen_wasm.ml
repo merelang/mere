@@ -179,6 +179,12 @@ let idx_mid_vec_offset = ref 0
 let idx_post_vec_offset = ref 0
 let idx_pre_charat_offset = ref 0
 let idx_mid_charat_offset = ref 0
+let fos_pre_offset = ref 0
+let fos_suf_offset = ref 0
+let bos_true_offset = ref 0
+let bos_false_offset = ref 0
+let bos_pre_offset = ref 0
+let bos_suf_offset = ref 0
 let num_pre_chr_offset = ref 0
 let num_post_chr_offset = ref 0
 let num_pre_ord_offset = ref 0
@@ -2838,7 +2844,26 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr "call $__lang_str_of_float";  (* env import, returns i32 ptr to str *)
     emit_instr "i64.extend_i32_u"
   | Ast.App ({ node = Ast.Var "float_of_str"; _ }, a_e) ->
+    (* v0.1.277: the host answers NaN for a string that is not a float at all,
+       which is the same answer it gives for the float `nan` -- so validity
+       comes back separately. *)
+    let slot = fresh_local () in
     emit_expr a_e;
+    emit_instr (Printf.sprintf "local.set %d" slot);
+    emit_instr (Printf.sprintf "local.get %d" slot);
+    emit_instr "i32.wrap_i64";
+    emit_instr "call $__lang_float_of_str_ok";
+    emit_instr "i32.eqz";
+    emit_instr "if";
+    emit_instr "global.get $__lang_fos_pre";
+    emit_instr "i64.extend_i32_u";
+    emit_instr (Printf.sprintf "local.get %d" slot);
+    emit_instr "global.get $__lang_fos_suf";
+    emit_instr "i64.extend_i32_u";
+    emit_instr "call $__lang_fail_str";
+    emit_instr "drop";
+    emit_instr "end";
+    emit_instr (Printf.sprintf "local.get %d" slot);
     emit_instr "i32.wrap_i64";               (* env import takes an i32 ptr *)
     emit_instr "call $__lang_float_of_str";  (* env import, f64 *)
     emit_float_alloc_from_f64_on_stack ()
@@ -5533,15 +5558,17 @@ let runtime_helpers = {|
     (local.get $a))
   ;; Phase 36: bool_of_str — "true" → 1, otherwise → 0
   (func $__lang_bool_of_str (param $s8 i64) (result i64)
-    (local $s i32)
-    (local.set $s (i32.wrap_i64 (local.get $s8)))
-    (if (i32.ne (i32.load8_u (local.get $s)) (i32.const 116)) (then (return (i64.extend_i32_s (i32.const 0)))))
-    (if (i32.ne (i32.load8_u (i32.add (local.get $s) (i32.const 1))) (i32.const 114)) (then (return (i64.extend_i32_s (i32.const 0)))))
-    (if (i32.ne (i32.load8_u (i32.add (local.get $s) (i32.const 2))) (i32.const 117)) (then (return (i64.extend_i32_s (i32.const 0)))))
-    (if (i32.ne (i32.load8_u (i32.add (local.get $s) (i32.const 3))) (i32.const 101)) (then (return (i64.extend_i32_s (i32.const 0)))))
-    (if (i32.ne (i32.load8_u (i32.add (local.get $s) (i32.const 4))) (i32.const 0)) (then (return (i64.extend_i32_s (i32.const 0)))))
-    (i64.extend_i32_s (i32.const 1)))
-  ;; Phase 36: str_replace s old new — replace all non-overlapping occurrences
+    ;; v0.1.277: it compared the bytes of "true" and answered false for
+    ;; everything else, including "yes" -- which the interpreter refuses.
+    ;; Comparing to both words and refusing the rest is the whole rule.
+    (if (i64.ne (call $__lang_streq (local.get $s8) (i64.extend_i32_u (global.get $__lang_bos_true))) (i64.const 0))
+      (then (return (i64.extend_i32_s (i32.const 1)))))
+    (if (i64.ne (call $__lang_streq (local.get $s8) (i64.extend_i32_u (global.get $__lang_bos_false))) (i64.const 0))
+      (then (return (i64.extend_i32_s (i32.const 0)))))
+    (return (call $__lang_fail_str
+              (i64.extend_i32_u (global.get $__lang_bos_pre))
+              (local.get $s8)
+              (i64.extend_i32_u (global.get $__lang_bos_suf)))))
   (func $__lang_str_replace (param $s8 i64) (param $old8 i64) (param $new8 i64) (result i64)
     (local $slen i32) (local $olen i32) (local $nlen i32)
     (local $r i32) (local $bi i32) (local $i i32) (local $j i32) (local $match i32)
@@ -5633,6 +5660,11 @@ let runtime_helpers = {|
             (call $__lang_str_concat (local.get $pre) (call $show_int (local.get $i)))
             (local.get $mid))
           (call $show_int (local.get $len)))
+        (local.get $post))))
+  (func $__lang_fail_str (param $pre i64) (param $s i64) (param $post i64) (result i64)
+    (call $__lang_fail
+      (call $__lang_str_concat
+        (call $__lang_str_concat (local.get $pre) (local.get $s))
         (local.get $post))))
   (func $__lang_fail_num (param $pre i64) (param $a i64) (param $post i64) (result i64)
     (call $__lang_fail
@@ -8399,6 +8431,12 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   idx_post_vec_offset := fresh_str_offset ")";
   idx_pre_charat_offset := fresh_str_offset "char_at: index ";
   idx_mid_charat_offset := fresh_str_offset " out of range (len=";
+  fos_pre_offset := fresh_str_offset "float_of_str: \"";
+  fos_suf_offset := fresh_str_offset "\" is not a valid float";
+  bos_true_offset := fresh_str_offset "true";
+  bos_false_offset := fresh_str_offset "false";
+  bos_pre_offset := fresh_str_offset "bool_of_str: \"";
+  bos_suf_offset := fresh_str_offset "\" is not 'true' or 'false'";
   num_pre_chr_offset := fresh_str_offset "chr: ";
   num_post_chr_offset := fresh_str_offset " out of byte range [0, 255]";
   num_pre_ord_offset := fresh_str_offset "ord: expected single-char str, got length ";
@@ -9041,6 +9079,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   let float_io_imports =
     "  (import \"env\" \"__lang_str_of_float\" (func $__lang_str_of_float (param f64) (result i32)))\n\
     \  (import \"env\" \"__lang_float_of_str\" (func $__lang_float_of_str (param i32) (result f64)))\n\
+    \  (import \"env\" \"__lang_float_of_str_ok\" (func $__lang_float_of_str_ok (param i32) (result i32)))\n\
     \  (import \"env\" \"time\" (func $__lang_time (result f64)))\n"
   in
   (* Phase 34.4: libm host imports (sin / cos / tan / pow / atan2). sqrt
@@ -9064,7 +9103,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
          (time returns 0) are safe. Programs that actually use these under
          --component will trap — a documented Slice-1 limitation. *)
       "  (func $__lang_str_of_float (param f64) (result i32) unreachable)\n\
-      \  (func $__lang_float_of_str (param i32) (result f64) unreachable)\n"
+      \  (func $__lang_float_of_str (param i32) (result f64) unreachable)\n\
+      \  (func $__lang_float_of_str_ok (param i32) (result i32) unreachable)\n"
       ^ (if !wasm_component_command && !wasm_time_used then ""
          (* command + time(): the real wasi-backed $__lang_time is emitted in
             puts_decl (with the clock_time_get import); skip the stub here. *)
@@ -9984,6 +10024,12 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      \  (global $__lang_idx_post_vec i32 (i32.const %d))\n\
      \  (global $__lang_idx_pre_charat i32 (i32.const %d))\n\
      \  (global $__lang_idx_mid_charat i32 (i32.const %d))\n\
+     \  (global $__lang_fos_pre i32 (i32.const %d))\n\
+     \  (global $__lang_fos_suf i32 (i32.const %d))\n\
+     \  (global $__lang_bos_true i32 (i32.const %d))\n\
+     \  (global $__lang_bos_false i32 (i32.const %d))\n\
+     \  (global $__lang_bos_pre i32 (i32.const %d))\n\
+     \  (global $__lang_bos_suf i32 (i32.const %d))\n\
      \  (global $__lang_num_pre_chr i32 (i32.const %d))\n\
      \  (global $__lang_num_post_chr i32 (i32.const %d))\n\
      \  (global $__lang_num_pre_ord i32 (i32.const %d))\n\
@@ -10014,6 +10060,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     table_section bump_init char_table_offset !fail_sentinel_offset !mapget_msg_offset
     !idx_pre_get_offset !idx_pre_set_offset !idx_mid_vec_offset !idx_post_vec_offset
     !idx_pre_charat_offset !idx_mid_charat_offset
+    !fos_pre_offset !fos_suf_offset
+    !bos_true_offset !bos_false_offset !bos_pre_offset !bos_suf_offset
     !num_pre_chr_offset !num_post_chr_offset !num_pre_ord_offset !num_pre_rep_offset
     !esc_pre_offset !esc_post_offset
     !idx_pre_sub_offset !idx_mid1_sub_offset !idx_mid2_sub_offset

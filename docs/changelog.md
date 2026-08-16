@@ -4,6 +4,55 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.277 — 2026-08-17
+
+_Finishing the enumeration, and two things it turned up on the way._
+
+v0.1.276 asked the oracle's refusals and fixed the nine it had probed. This is
+the rest of that list.
+
+**`bool_of_str`** answered `false` for anything that was not `"true"` — on all
+three compiled backends, with a comment in the C source stating that this
+"matches interp". The interpreter has never done it: it refuses any word that is
+not one of the two. A claim in a comment is not a check.
+
+**`float_of_str`** was three different wrong answers to the same program:
+
+| input | interp | C / LLVM (atof) | Wasm (parseFloat) |
+|---|---|---|---|
+| `"abc"` | refuses | `0.0` | `nan` |
+| `"1.5x"` | refuses | `1.5` | `1.5` |
+| `"1_000.5"` | `1000.5` | `1000.5` | **`1.0`** |
+| `"inf"` | `inf` | `inf` | **`nan`** |
+| `"0x1p3"` | `8.0` | `8.0` | **`0.0`** |
+| `""` | refuses | refuses | `nan` |
+
+`atof` reads a *prefix* and has no way to say "that was not a number"; on Wasm
+the host's `parseFloat` has the same problem plus a smaller idea of what a float
+is, and its failure value is `NaN` — which is indistinguishable from the float
+`nan`, so nothing could be refused there at all. Validity now comes back from the
+host separately, because one return value cannot say both.
+
+The oracle is `float_of_string (String.trim s)`, which accepts rather more than a
+decimal point: hex floats, `inf` / `infinity` / `nan` in any case, signs, and
+underscores as separators (`1__0.5` is 10.5). All four backends now agree across
+all of it, and `test/parity/refusals.mere` checks fourteen spellings.
+
+**Two things the new gate found on its way in:**
+
+- `str_unescape` allocated its buffer for the *input's* length, and every escape
+  makes the output shorter — so the length header said the wrong thing, and
+  `str_len (str_unescape "a\nb")` was 4 on C and LLVM where the interpreter and
+  Wasm said 3. Printing the value wrote a trailing NUL, which is invisible in a
+  terminal. It took a case that printed an unescaped string to see it.
+- The Wasm host's *worker* env is a second import table for the same module, and
+  adding an import to the module without adding it there makes instantiation
+  throw inside the worker — after which the main thread waits on a generator that
+  will never yield. That is a hang, not an error: it cost twenty minutes of a
+  parity run before I looked at the process list.
+
+---
+
 ## v0.1.276 — 2026-08-17
 
 _Asking the question mechanically, after finding the same shape by accident twice._

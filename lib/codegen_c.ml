@@ -2405,7 +2405,11 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "str_of_float" ->
        Printf.sprintf "__lang_str_of_float(%s)" (emit_expr arg)
      | Ast.Var "float_of_str" ->
-       Printf.sprintf "(atof(%s))" (emit_expr arg)
+       (* v0.1.277: atof answers 0.0 for anything it cannot read, so
+          `float_of_str "abc"` was a number -- and on Wasm the same program
+          answered nan, so the three compiled backends did not even agree on
+          which wrong value to give. *)
+       Printf.sprintf "__lang_float_of_str_checked(%s)" (emit_expr arg)
      | Ast.Var "time" when not (user_shadows "time") ->
        (* v0.1.127: wall clock; the unit arg is inert (evaluated for parity
           with the interpreter, then discarded via the comma operator). *)
@@ -2536,8 +2540,12 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.App ({ node = Ast.Var "gcd"; _ }, a_e) ->
        Printf.sprintf "__lang_gcd(%s, %s)" (emit_expr a_e) (emit_expr arg)
      | Ast.Var "bool_of_str" ->
-       (* Phase 36: bool_of_str s — "true" → true, others → false (matches interp) *)
-       Printf.sprintf "(strcmp(%s, \"true\") == 0)" (emit_expr arg)
+       (* Phase 36: bool_of_str s — "true" → true, "false" → false.
+          v0.1.277: the comment here used to say "others → false (matches
+          interp)", and the interpreter has never done that -- it refuses
+          anything that is not one of the two words. A claim in a comment is
+          not a check. *)
+       Printf.sprintf "__lang_bool_of_str(%s)" (emit_expr arg)
      | Ast.App ({ node = Ast.Var "write_file"; _ }, path_e) ->
        (* Phase 24.4: write_file path content — curried. *)
        Printf.sprintf "__lang_write_file(%s, %s)"
@@ -7159,6 +7167,46 @@ let str_concat_helper =
       (* Phase 22.6: str_unescape — interpret backslash escapes (n / t / r /
          backslash / quote / slash); pass others through unchanged. Handles
          escapes inside string literals for json_parser and the like. *)
+      (* The oracle is `float_of_string (String.trim s)`, so: trim, drop the
+         underscores OCaml allows as separators (`1__0.5` is 10.5, and even a
+         leading or trailing one is accepted), then require strtod to consume
+         what is left. strtod already handles the hex floats, the signs and the
+         inf / infinity / nan spellings in either case. *)
+      "static double __lang_float_of_str_checked(const char* s) {";
+      "  size_t __n = __lang_str_size(s);";
+      "  char __b[512];";
+      "  char* __d = __b;";
+      "  size_t __cap = sizeof __b - 1;";
+      "  char* __heap = 0;";
+      "  if (__n > __cap) { __heap = (char*)malloc(__n + 1);";
+      "    if (!__heap) __lang_fail_impl(\"out of memory\"); __d = __heap; }";
+      "  { size_t __i = 0, __j = 0;";
+      "    while (__i < __n && (s[__i] == ' ' || s[__i] == '\\t' || s[__i] == '\\r' || s[__i] == '\\n')) __i++;";
+      "    size_t __e = __n;";
+      "    while (__e > __i && (s[__e-1] == ' ' || s[__e-1] == '\\t' || s[__e-1] == '\\r' || s[__e-1] == '\\n')) __e--;";
+      "    for (; __i < __e; __i++) if (s[__i] != '_') __d[__j++] = s[__i];";
+      "    __d[__j] = '\\0'; }";
+      "  char* end = 0;";
+      "  double v = strtod(__d, &end);";
+      "  const char* p = __d;";
+      "  const char* r = end;";
+      "  int __bad = (end == p || *r != '\\0');";
+      "  if (__heap) free(__heap);";
+      "  if (__bad) {";
+      "    char __m[160];";
+      "    snprintf(__m, sizeof __m, \"float_of_str: \\\"%s\\\" is not a valid float\", s);";
+      "    __lang_fail_impl(__m);";
+      "  }";
+      "  return v;";
+      "}";
+      "static int __lang_bool_of_str(const char* s) {";
+      "  if (strcmp(s, \"true\") == 0) return 1;";
+      "  if (strcmp(s, \"false\") == 0) return 0;";
+      "  { char __m[160];";
+      "    snprintf(__m, sizeof __m, \"bool_of_str: \\\"%s\\\" is not 'true' or 'false'\", s);";
+      "    __lang_fail_impl(__m); }";
+      "  return 0;";
+      "}";
       "static long long __lang_ord(const char* s) {";
       "  long long __n = (long long)__lang_str_size(s);";
       "  if (__n != 1)";
@@ -7190,6 +7238,12 @@ let str_concat_helper =
       "    }";
       "  }";
       "  r[j] = '\\0';";
+      (* v0.1.277: the buffer was allocated for the INPUT's length and every
+         escape makes the output shorter, but the header still said the input's
+         -- so `str_len (str_unescape "a\\nb")` was 4, and printing the value
+         wrote a trailing NUL. Nothing caught it until a case printed an
+         unescaped string, because the NUL is invisible in a terminal. *)
+      "  ((size_t*)r)[-1] = j;";
       "  return r;";
       "}";
       "";
