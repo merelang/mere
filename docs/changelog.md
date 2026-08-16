@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.263 — 2026-08-16
+
+_The self-hosted Wasm backend carries the length header too, so the host can stop
+guessing._
+
+The previous slice found that `print` on Wasm wrote up to the first NUL and could not
+do otherwise: the JS host runs modules from **both** compilers, and while the OCaml
+backend lays a str out as `[i32 len][bytes][NUL]`, the self-hosted one still emitted
+the pre-header representation — a bare NUL-terminated buffer — while stamping the
+same ABI number as the compiler that carries a header. A number that says "you may
+read the length at ptr-4" is worth nothing if half the modules do not have one.
+
+So the self-hosted backend lays strings out the same way now: literals carry a
+four-byte header in the data section, `$__lang_strlen` reads it instead of scanning,
+and every helper that builds a string — concat, substring, repeat, char_at, chr,
+strbuf_to_str, unescape, show_int/bool/str — allocates through one place that writes
+it. The digit buffer `show_int` fills right-to-left is copied into a str that has
+room for a header in front, the same answer the OCaml backend reached.
+
+With both compilers agreeing, the host reads by length, and `print` on Wasm writes
+the whole value: the `nul_in_str` parity case needed a Wasm pin for exactly one
+slice. LLVM keeps its pin — its str is a bare pointer with no header anywhere.
+
+Two things fell out of doing it. `$__lang_str_alloc` had to be emitted
+unconditionally rather than with the length helper: a module that showed a bool
+without measuring a string referred to a function it did not define. And the emitted
+module grew 17 bytes, which the size guard on the self-hosted codegen reports —
+four bytes per literal is the cost of a length that does not have to be searched for.
+
+---
+
 ## v0.1.262 — 2026-08-15
 
 _An interior pointer has no header, and `str_trim` asked one for its length._

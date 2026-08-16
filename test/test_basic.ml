@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.262" Version.v "0.1.262";
+  check "version is 0.1.263" Version.v "0.1.263";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -11673,8 +11673,12 @@ let () =
        -> 97272 (v0.1.156: the emitter now exports a __mere_abi global, so
        a host can refuse a module built for a different value
        representation instead of failing on first use). *)
+    (* The number is the length of the WAT the SELF-HOSTED codegen emits for
+       "42", measured by running that codegen under Node. v0.1.263 gave every
+       string it emits a length header -- four bytes per literal, plus the two
+       allocation helpers -- so the module it produces is 17 bytes longer. *)
     codegen_runtime_bootstrap "oneshot codegen"
-      "examples/oneshot_codegen.mere" "97272";
+      "examples/oneshot_codegen.mere" "97289";
 
     (* Stage 55g: THE bootstrap fixpoint. Compile a test program T with
        (A) the self-host compiler running under the interpreter, and
