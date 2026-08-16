@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.267" Version.v "0.1.267";
+  check "version is 0.1.268" Version.v "0.1.268";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -7933,9 +7933,12 @@ let () =
            with no lowering on any compiled backend): 11
            (sign / incr / decr / square / cube / sum_range / _pow_go / pow /
             lcm / divmod / assert)
-        = 78 total *)
+        = 78 total   + v0.1.268: 1
+           (_lfilter_into -- list_filter accumulates and reverses now, like
+            list_map, so it survives a list longer than the stack)
+        *)
      string_of_int (List.length prog.Ast.decls))
-    "78";
+    "79";
 
   (* Phase 39.A' #4: list_sort_by / list_sort prelude helpers *)
   check "list_sort_by: ascending int sort"
@@ -13414,6 +13417,25 @@ let () =
        let bin = Codegen_riscv.emit_program ~main_ty:mt prog in
        if String.length bin > 64 then "assembled" else "suspiciously short"
      with e -> Printexc.to_string e) "assembled";
+
+  (* v0.1.268: a missing map key is a `fail`, which a try_or catches. The three
+     compiled backends wrote their own diagnostic and abort()ed or trapped, so
+     the same program answered the default on the interpreter and died with
+     134 (C, LLVM) or 1 (Wasm) everywhere else. *)
+  check "v0.1.268: a missing map key is catchable"
+    (Pipeline.process
+       "let m = map_new ();\n\
+        let _ = map_set m \"k\" 1;\n\
+        try_or (fn () -> map_get m \"absent\") (0 - 1)") "-1";
+  check "v0.1.268: list_filter survives a list longer than the stack"
+    (Pipeline.process
+       "let rec upto = fn (i: int) -> fn (acc: int list) ->\n\
+          if i == 0 then acc else upto (i - 1) (Cons (i, acc));\n\
+        list_len (list_filter (upto 50000 Nil) (fn (x: int) -> x % 2 == 0))")
+    "25000";
+  check "v0.1.268: list_filter keeps its order"
+    (Pipeline.process "list_filter [1, 2, 3, 4, 5] (fn (x: int) -> x % 2 == 1)")
+    "[1, 3, 5]";
 
   (* v0.1.267 (Q-029): the LLVM backend emits a tail call as `musttail`, which
      LLVM guarantees at every optimisation level. Without it this backend grew

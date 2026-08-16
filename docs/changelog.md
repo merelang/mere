@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.268 — 2026-08-16
+
+_A missing map key is catchable everywhere, and `list_filter` survives a list longer
+than the stack._
+
+The third value-axis parity case — after the integer widths and the string edges —
+asks about collections: the empty ones, the single-element ones, a key that is not
+there, and a list long enough to leave the small cases behind. It found two.
+
+**A missing map key was not catchable on any compiled backend.** `map_get` wrote its
+own diagnostic and then `abort()`ed (C, LLVM) or executed `unreachable` (Wasm), so
+`try_or (fn () -> map_get m k) d` answered `d` on the interpreter and died with 134
+or 1 everywhere else. It goes through the same failure path every other `fail` uses
+now: caught, it returns the default; uncaught, all four print the same sentence and
+exit 1.
+
+**`list_filter` recursed to the length of the list.** Every other list helper in the
+prelude accumulates and reverses — `list_map`, `list_take`, `list_concat`,
+`list_zip`, `list_append` all do — and this one built `Cons (h, list_filter t p)`, so
+filtering 100,000 elements overflowed the stack on a backend where mapping them did
+not. It accumulates now.
+
+The case is sized at thirty thousand deliberately. Past that the axis stops being
+about values and becomes about stack depth, which differs per backend and per
+operation — `list_sum` alone survives 80,000 on LLVM and dies at 100,000 while C is
+fine at 200,000. A value gate that also measured the stack would report the wrong
+thing whenever either moved.
+
+---
+
 ## v0.1.267 — 2026-08-16
 
 _The LLVM backend's tail calls are `musttail`, so a loop written as recursion runs
