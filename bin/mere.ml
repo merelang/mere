@@ -189,6 +189,14 @@ let run_action ?(rv = false) ?base_dir action label source =
   | Mere.Codegen_llvm.Codegen_error (loc, msg) -> report loc "codegen error" msg
   | Mere.Codegen_wasm.Codegen_error (loc, msg) -> report loc "codegen error" msg
   | Mere.Codegen_riscv.Codegen_error (loc, msg) -> report loc "codegen error" msg
+  | Stack_overflow ->
+    (* v0.1.271: OCaml's default for this is "Fatal error: exception Stack
+       overflow" and exit 2 -- the host runtime's words, not the language's, and
+       a different exit code than the same program gets on the other three
+       backends. The failure is one a Mere program can cause on purpose, so it
+       is named the way the compiled backends name it. *)
+    prerr_endline "stack overflow (recursion too deep)";
+    exit 1
   | Sys_error msg ->
     Printf.eprintf "io error: %s\n" msg;
     exit 1

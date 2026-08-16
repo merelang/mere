@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.271 — 2026-08-16
+
+_The failure that had no name._
+
+Recursion deeper than the stack is the most common way a Mere program actually
+dies -- three of this week's findings were exactly that -- and until this slice it
+was the one failure the language never said anything about. Four backends gave
+four answers, and the two most used gave none:
+
+| | before | after |
+|---|---|---|
+| interp | `Fatal error: exception Stack overflow`, exit 2 | `stack overflow (recursion too deep)`, exit 1 |
+| C | *(nothing)*, exit 139 | same sentence, exit 1 |
+| LLVM | *(nothing)*, exit 139 | same sentence, exit 1 |
+| Wasm | node's `RangeError` + hundreds of trace frames, exit 1 | same sentence, exit 1 |
+
+The compiled backends carry a `SIGSEGV`/`SIGBUS` handler that runs **on a stack of
+its own** -- the stack that just overflowed has no room left to run a handler --
+and it claims a stack overflow only when the faulting address is *near the stack*.
+Anything else keeps its own name: a segfault from some other cause is still
+reported as a segfault, because a diagnostic that guesses is worse than one that
+does not exist. The bounds are read from the thread rather than assumed, which is
+what makes the answer right for a program linked with a bigger stack -- a 512MB
+one, as the Ruby subset uses, overflows far below any 8MB guess and would
+otherwise have been misnamed.
+
+The interpreter's limit is **declared, not discovered**. OCaml 5 grows the main
+fibre's stack by copying it, so finding the host's real ceiling costs 68 seconds
+and gigabytes of copying, and the depth it finds -- around forty million frames --
+is two orders of magnitude past anything a compiled backend can reach. A program
+that recurses that far has already failed everywhere else. The interpreter now
+stops at 1,000,000 frames (`MERE_MAX_DEPTH` to move it) and says the same sentence
+in about a second. The count comes back down with the stack it was counting, so a
+program that catches a failure inside a loop does not drift upward into a depth it
+is not at.
+
+`test/parity/fail/uncaught_stack_overflow.mere` is where the agreement is checked
+rather than claimed: 8 failing-program cases now, all four backends matching on
+exit status, prior output and message.
+
+This also corrects v0.1.270's closing paragraph, which named the region as the
+cause of a crash nobody had measured. It was the stack.
+
+---
+
 ## v0.1.270 — 2026-08-16
 
 _The other helper that could not survive a long list, and a sweep that says there is
@@ -26,6 +71,11 @@ Worth separating from the depth question: each list helper handles a 50,000-elem
 list on its own, and a program that builds *several* such lists at once stops
 earlier on the compiled backends. That is the region running out, not the stack --
 a different axis, and one this measurement deliberately does not mix in.
+
+> **Corrected in v0.1.271.** That last paragraph is a guess written as a finding:
+> the crash was never measured, only named. It is the stack. The same program
+> runs to completion under `ulimit -s 65520`, and under v0.1.271 it says so
+> itself. The region was not involved.
 
 ---
 
