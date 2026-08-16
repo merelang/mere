@@ -185,12 +185,19 @@ let rec list_min = fn xs ->
 //
 // Removes the chore of writing a hand-rolled insertion sort each time in
 // task_scheduler.mere and the like.
-let rec list_sort_insert = fn cmp -> fn xs -> fn x ->
+// v0.1.270: accumulate the prefix and reverse it onto the rest, rather than
+// rebuilding it through the return path. The recursive form
+// (`Cons (h, list_sort_insert cmp t x)`) recurses once per element it walks
+// past, so inserting into a 50,000-long sorted list overflowed the stack on
+// the compiled backends -- the same shape list_filter had, in the one helper
+// the merge sort left behind.
+let rec _lsi_into = fn cmp -> fn xs -> fn x -> fn acc ->
   match xs with
-  | Nil -> Cons (x, Nil)
+  | Nil -> list_rev_into (Cons (x, Nil)) acc
   | Cons (h, t) ->
-    if cmp x h then Cons (x, xs)
-    else Cons (h, list_sort_insert cmp t x);
+    if cmp x h then list_rev_into (Cons (x, xs)) acc
+    else _lsi_into cmp t x (Cons (h, acc));
+let rec list_sort_insert = fn cmp -> fn xs -> fn x -> _lsi_into cmp xs x Nil;
 
 // v0.1.39: merge sort — stable, O(n log n), stack-safe (the merge is
 // tail-recursive via a reversed accumulator; the recursion depth of the

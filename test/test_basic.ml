@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.269" Version.v "0.1.269";
+  check "version is 0.1.270" Version.v "0.1.270";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -7933,12 +7933,13 @@ let () =
            with no lowering on any compiled backend): 11
            (sign / incr / decr / square / cube / sum_range / _pow_go / pow /
             lcm / divmod / assert)
-        = 78 total   + v0.1.268: 1
-           (_lfilter_into -- list_filter accumulates and reverses now, like
-            list_map, so it survives a list longer than the stack)
+        = 78 total   + v0.1.268 / v0.1.270: 2
+           (_lfilter_into / _lsi_into -- list_filter and list_sort_insert
+            accumulate and reverse now, like list_map, so they survive a list
+            longer than the stack)
         *)
      string_of_int (List.length prog.Ast.decls))
-    "79";
+    "80";
 
   (* Phase 39.A' #4: list_sort_by / list_sort prelude helpers *)
   check "list_sort_by: ascending int sort"
@@ -13417,6 +13418,35 @@ let () =
        let bin = Codegen_riscv.emit_program ~main_ty:mt prog in
        if String.length bin > 64 then "assembled" else "suspiciously short"
      with e -> Printexc.to_string e) "assembled";
+
+  (* v0.1.270: list_sort_insert was the other helper that rebuilt its prefix
+     through the return path -- `Cons (h, list_sort_insert cmp t x)` recurses
+     once per element it walks past, so inserting into a 50,000-long sorted
+     list overflowed the stack on the compiled backends. It accumulates and
+     reverses now, like list_filter (v0.1.268) and list_map before it. A sweep
+     of the prelude finds no remaining self-call wrapped in a constructor. *)
+  check "v0.1.270: list_sort_insert keeps its order"
+    (Pipeline.process
+       "list_sort_insert (fn (a: int) -> fn (b: int) -> a < b) [1, 3, 5] 4")
+    "[1, 3, 4, 5]";
+  check "v0.1.270: list_sort_insert at the front"
+    (Pipeline.process
+       "list_sort_insert (fn (a: int) -> fn (b: int) -> a < b) [1, 3, 5] 0")
+    "[0, 1, 3, 5]";
+  check "v0.1.270: list_sort_insert at the back"
+    (Pipeline.process
+       "list_sort_insert (fn (a: int) -> fn (b: int) -> a < b) [1, 3, 5] 9")
+    "[1, 3, 5, 9]";
+  check "v0.1.270: list_sort_insert into the empty list"
+    (Pipeline.process
+       "list_sort_insert (fn (a: int) -> fn (b: int) -> a < b) (Nil : int list) 7")
+    "[7]";
+  check "v0.1.270: inserting into a long sorted list"
+    (Pipeline.process
+       "let rec upto = fn (i: int) -> fn (acc: int list) ->\n\
+          if i == 0 then acc else upto (i - 1) (Cons (i, acc));\n\
+        list_len (list_sort_insert (fn (a: int) -> fn (b: int) -> a < b)\n\
+                    (upto 50000 Nil) 99999)") "50001";
 
   (* v0.1.269: a match ARM in tail position returns, like a tail-position If
      branch. Nearly every recursive list helper is written with `match`, so

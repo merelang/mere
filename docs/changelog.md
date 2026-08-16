@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.270 — 2026-08-16
+
+_The other helper that could not survive a long list, and a sweep that says there is
+no third._
+
+`list_filter` was fixed two slices ago for rebuilding its result through the return
+path. The obvious next question is whether it was the only one, and asking it the
+lazy way — grep the prelude for a self-call wrapped in a constructor — turns up
+exactly one more: **`list_sort_insert`**, which walks to the insertion point through
+`Cons (h, list_sort_insert cmp t x)` and so recurses once per element it passes.
+Inserting into a 50,000-long sorted list overflowed the stack on the compiled
+backends.
+
+It accumulates and reverses now. The same sweep over the whole prelude afterwards
+finds no remaining wrapped self-call: `list_map`, `take`, `concat`, `flat_map`,
+`zip`, `append`, the merge-sort quartet and the utf8 helpers were all already in
+that shape, and the two that were not are both fixed.
+
+Worth separating from the depth question: each list helper handles a 50,000-element
+list on its own, and a program that builds *several* such lists at once stops
+earlier on the compiled backends. That is the region running out, not the stack --
+a different axis, and one this measurement deliberately does not mix in.
+
+---
+
 ## v0.1.269 — 2026-08-16
 
 _A `match` arm is a tail position too, which is where nearly every recursive list
