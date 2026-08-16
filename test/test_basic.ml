@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.266" Version.v "0.1.266";
+  check "version is 0.1.267" Version.v "0.1.267";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -13414,6 +13414,27 @@ let () =
        let bin = Codegen_riscv.emit_program ~main_ty:mt prog in
        if String.length bin > 64 then "assembled" else "suspiciously short"
      with e -> Printexc.to_string e) "assembled";
+
+  (* v0.1.267 (Q-029): the LLVM backend emits a tail call as `musttail`, which
+     LLVM guarantees at every optimisation level. Without it this backend grew
+     the stack per iteration, and 10 million of them died at -O0 while C ran
+     them in constant space. The guarantee needs the call to be immediately
+     followed by `ret` of its result, which is why an If in tail position now
+     returns from each branch instead of joining through a phi. *)
+  assert_contains "v0.1.267: a tail call is musttail"
+    (llvm "let rec go = fn (i: int) -> fn (acc: int) ->\n\
+           if i == 0 then acc else go (i - 1) (acc + 1);\n\
+           go 3 0")
+    "musttail call";
+  assert_contains "v0.1.267: a tail-position if returns from its branches"
+    (llvm "let rec go = fn (i: int) -> fn (acc: int) ->\n\
+           if i == 0 then acc else go (i - 1) (acc + 1);\n\
+           go 3 0")
+    "ret i64 %acc";
+  check "v0.1.267: MERE_NO_TAIL_CALL turns it off"
+    (let saved = try Some (Sys.getenv "MERE_NO_TAIL_CALL") with Not_found -> None in
+     ignore saved;
+     if Codegen_llvm.no_tail_call then "off" else "on") "on";
 
   (* v0.1.266: the value axis for strings -- the empty one, an index outside
      the string, one big enough to leave the small cases behind. Two LLVM bugs
