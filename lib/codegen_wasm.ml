@@ -123,6 +123,11 @@ let modzero_msg_offset = ref 0
    while a try_or is active. See the note where it is minted. *)
 let fail_sentinel_offset = ref 0
 
+(* v0.1.268: the message a missing map key fails with, interned like the other
+   internal failure messages so the miss can go through `fail` (catchable)
+   rather than `unreachable` (not). *)
+let mapget_msg_offset = ref 0
+
 (* Reset per emit_program. *)
 let print_no_nl_used = ref false
 (* v0.1.259: `print_err` is a SECOND host sink, so it is imported only when the
@@ -7206,7 +7211,10 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
         (then (return (i64.load (i32.add (local.get $values) (i32.mul (local.get $occ) (i32.const 8)))))))
       (local.set $s (i32.and (i32.add (local.get $s) (i32.const 1)) (local.get $icm1)))
       (br $probe)))
-    (unreachable))
+    ;; v0.1.268: a missing key is a `fail`, which a try_or can catch -- not a
+    ;; trap. `unreachable` killed the module where the interpreter answered
+    ;; the try_or default.
+    (call $__lang_fail (global.get $__lang_mapget_msg)))
   (func $mere_map_%s_has (param $m8 i64) (param $k i64) (result i64)
     (local $m i32)
     (local $s i32) (local $idx i32) (local $icm1 i32) (local $keys i32) (local $occ i32)
@@ -7391,7 +7399,8 @@ let map_int_runtime_wasm = {|
                                        (i32.mul (local.get $i) (i32.const 4)))))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $scan_lp)))
-    (unreachable))
+    ;; v0.1.268: catchable, same as the str-keyed one above
+    (call $__lang_fail (global.get $__lang_mapget_msg)))
   (func $mere_map_int_has (param $m i64) (param $k i64) (result i64)
     (local $i i32) (local $len i32) (local $keys i32)
     (local.set $len (i32.load offset=8 (i32.wrap_i64 (local.get $m))))
@@ -7540,7 +7549,10 @@ let map_str_runtime_wasm = {|
                                        (i32.mul (local.get $i) (i32.const 4)))))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $scan_lp)))
-    (unreachable))
+    ;; v0.1.268: a missing key is a `fail`, which a try_or can catch -- not a
+    ;; trap. `unreachable` here killed the module where the interpreter
+    ;; answered the try_or default.
+    (call $__lang_fail (global.get $__lang_mapget_msg)))
   (func $mere_map_str_has (param $m i64) (param $k i64) (result i64)
     (local $i i32) (local $len i32) (local $keys i32)
     (local.set $len (i32.load offset=8 (i32.wrap_i64 (local.get $m))))
@@ -8073,6 +8085,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      sentinel is one. It does not make fail unwind -- the code in between still
      runs -- it makes what runs survivable. *)
   fail_sentinel_offset := fresh_str_offset "";
+  mapget_msg_offset :=
+    fresh_str_offset "map_get: key not found in Map (use map_has to check first)";
   vec_used := false;
   vec_higher_order_used := false;
   strbuf_used := false;
@@ -9631,6 +9645,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      \  (global $__lang_fail_flag (mut i32) (i32.const 0))\n\
      \  (global $__lang_fail_active (mut i32) (i32.const 0))\n\
      \  (global $__lang_fail_sentinel i32 (i32.const %d))\n\
+     \  (global $__lang_mapget_msg i64 (i64.const %d))\n\
      %s\
      %s\
      %s\
@@ -9649,7 +9664,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     puts_decl
     file_io_imports
     memory_section
-    table_section bump_init char_table_offset !fail_sentinel_offset
+    table_section bump_init char_table_offset !fail_sentinel_offset !mapget_msg_offset
     top_globals_section
     data_section runtime_helpers
     list_str_runtime_section

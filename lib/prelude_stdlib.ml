@@ -70,12 +70,16 @@ let rec _range_down = fn (a: int) -> fn (i: int) -> fn acc ->
 let rec range = fn (a: int) -> fn (b: int) -> _range_down a b Nil;
 
 // Phase 36: narrow a list by a predicate (symmetric with list_map / list_iter)
-let rec list_filter = fn xs -> fn p ->
+// v0.1.268: accumulate and reverse, like list_map -- the recursive form
+// (`Cons (h, list_filter t p)`) recurses to the LENGTH of the list, so a
+// filter over 100,000 elements overflowed the stack on the C backend while
+// the map beside it, written with an accumulator, did not. Every other list
+// helper here was already in this shape; this was the one that was not.
+let rec _lfilter_into = fn xs -> fn p -> fn acc ->
   match xs with
-  | Nil -> Nil
-  | Cons (h, t) ->
-    if p h then Cons (h, list_filter t p)
-    else list_filter t p;
+  | Nil -> acc
+  | Cons (h, t) -> _lfilter_into t p (if p h then Cons (h, acc) else acc);
+let rec list_filter = fn xs -> fn p -> list_rev_into Nil (_lfilter_into xs p Nil);
 
 // Phase 36: take the first n elements (returns all if n exceeds len)
 let rec _ltake_into = fn xs -> fn (n: int) -> fn acc ->

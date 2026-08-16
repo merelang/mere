@@ -6720,6 +6720,8 @@ let runtime_decls =
       "@.s_newline = internal constant [2 x i8] c\"\\0A\\00\"";
       (* v0.1.264: these two are concatenated into a failure message, which
          reads their length -- so they carry a header like every other str. *)
+      "@.mapget_msg_h = internal constant { i64, [59 x i8] } { i64 58, [59 x i8] c\"map_get: key not found in Map (use map_has to check first)\\00\" }";
+      "@.mapget_msg = internal alias [59 x i8], getelementptr inbounds ({ i64, [59 x i8] }, ptr @.mapget_msg_h, i32 0, i32 1)";
       "@.ios_pre_h = internal constant { i64, [14 x i8] } { i64 13, [14 x i8] c\"int_of_str: \\22\\00\" }";
       "@.ios_pre = internal alias [14 x i8], getelementptr inbounds ({ i64, [14 x i8] }, ptr @.ios_pre_h, i32 0, i32 1)";
       "@.ios_suf_h = internal constant { i64, [21 x i8] } { i64 20, [21 x i8] c\"\\22 is not a valid int\\00\" }";
@@ -8061,7 +8063,10 @@ let emit_map_runtime_llvm_linear (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  %i_next = add i32 %i, 1";
       "  br label %scan_check";
       "fail:";
-      "  call void @abort()";
+      (* v0.1.268: through the failure path a try_or can catch, like every
+         other `fail`. abort() here made a missing key uncatchable on this
+         backend while the interpreter answered the try_or default. *)
+      "  call void @__lang_fail_impl(ptr @.mapget_msg)";
       "  unreachable";
       "}";
       "";
@@ -8412,7 +8417,10 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  store i32 %spm, ptr %s";
       "  br label %probe";
       "fail:";
-      "  call void @abort()";
+      (* v0.1.268: through the failure path a try_or can catch, like every
+         other `fail`. abort() here made a missing key uncatchable on this
+         backend while the interpreter answered the try_or default. *)
+      "  call void @__lang_fail_impl(ptr @.mapget_msg)";
       "  unreachable";
       "}";
       "";

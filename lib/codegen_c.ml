@@ -7453,8 +7453,12 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
         (key_eq_expr "m->keys[i]" "__mk");
       "    s = (s + 1) & (m->idx_cap - 1);";
       "  }";
-      "  fprintf(stderr, \"map_get: key not found\\n\");";
-      "  abort();";
+      (* v0.1.268: through the same failure path every other `fail` uses, so a
+         try_or can catch it. This wrote its own diagnostic and abort()ed, so
+         `try_or (fn () -> map_get m k) d` died with 134 on this backend while
+         the interpreter answered `d` -- a failure the language defines as
+         catchable was not catchable here. *)
+      "  __lang_fail_impl(\"map_get: key not found in Map (use map_has to check first)\");";
       "}";
       "";
       (* has *)

@@ -1,0 +1,105 @@
+// The collection values four backends were never asked about: the empty ones,
+// the single-element ones, a key that is not there, and a list long enough to
+// leave the small cases behind.
+//
+// This is the third axis of the same open question -- "not which builtins, but
+// at which VALUES" -- after the integer width one and the string one. Both of
+// those found real divergences on their first run, and for the same reason:
+// every probe in the suite used a value from the middle of the range. A list
+// of three, a map of two.
+//
+// The empty cases are where a fold has nothing to start from, a length is
+// zero, and a lookup has nowhere to look. The long one is where an i32 index
+// or a doubling capacity would show.
+//
+// The long list is thirty thousand and not more because past that the axis
+// stops being about values and becomes about STACK DEPTH, which differs per
+// backend and per operation: `list_sum` alone survives 80,000 on LLVM and
+// dies at 100,000 while C is fine at 200,000, and inside a program that has
+// already built several lists the C limit comes down further. That is a real
+// difference and worth its own measurement -- it is not what this file is
+// asking about, and a value axis that also measured the stack would report
+// the wrong thing when either moved.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+let b = fn (x: bool) -> if x then "1" else "0";
+let nil_ints = (Nil : int list);
+
+// --- the empty list ---
+let _ = print (str_of_int (list_len nil_ints));
+let _ = print (str_of_int (list_sum nil_ints));
+let _ = print (str_of_int (list_product nil_ints));
+let _ = print (str_of_int (list_len (list_rev nil_ints)));
+let _ = print (str_of_int (list_len (list_map nil_ints (fn (x: int) -> x + 1))));
+let _ = print (str_of_int (list_fold nil_ints 7 (fn (a: int) -> fn (x: int) -> a + x)));
+let _ = print (str_of_int (list_len (list_filter nil_ints (fn (x: int) -> x > 0))));
+let _ = print (b (list_any nil_ints (fn (x: int) -> x > 0)));
+let _ = print (b (list_for_all nil_ints (fn (x: int) -> x > 0)));
+let _ = print ("[" ++ str_join "," (Nil : str list) ++ "]");
+let _ = print (str_of_int (list_len (list_take nil_ints 3)));
+let _ = print (str_of_int (list_len (list_drop nil_ints 3)));
+let _ = print (str_of_int (list_len (list_append nil_ints nil_ints)));
+let _ = print (str_of_int (list_len (list_sort nil_ints)));
+let _ = print (b (list_member nil_ints 1));
+let _ = print (str_of_int (list_len (list_zip nil_ints nil_ints)));
+
+// --- one element, which is where an off-by-one lives ---
+let one = Cons (5, Nil);
+let _ = print (str_of_int (list_len one));
+let _ = print (str_of_int (list_sum one));
+let _ = print (str_of_int (list_len (list_rev one)));
+let _ = print (str_of_int (list_fold one 0 (fn (a: int) -> fn (x: int) -> a + x)));
+let _ = print ("[" ++ str_join "," (Cons ("x", Nil)) ++ "]");
+let _ = print (str_of_int (list_len (list_take one 3)));
+let _ = print (str_of_int (list_len (list_drop one 3)));
+let _ = print (str_of_int (list_len (list_take one 0)));
+let _ = print (str_of_int (list_max one));
+let _ = print (str_of_int (list_min one));
+let _ = print (b (list_member one 5));
+let _ = print (str_of_int (list_len (list_sort one)));
+
+// --- a map with nothing in it, and a key that is not there ---
+let m = map_new ();
+let _ = print (str_of_int (map_len m));
+let _ = print (b (map_has m "absent"));
+// a missing key is a failure, not a zero -- so ask it the way the language
+// wants it asked, and let the try_or say what all four backends do with it
+let _ = print (str_of_int (try_or (fn () -> map_get m "absent") (0 - 1)));
+let _ = map_set m "k" 1;
+let _ = print (str_of_int (map_len m));
+let _ = print (b (map_has m "k"));
+let _ = print (str_of_int (map_get m "k"));
+let _ = print (b (map_has m "absent"));
+let _ = map_set m "k" 2;
+let _ = print (str_of_int (map_len m));
+let _ = print (str_of_int (map_get m "k"));
+let _ = map_delete m "k";
+let _ = print (str_of_int (map_len m));
+let _ = print (b (map_has m "k"));
+let _ = map_delete m "absent";
+let _ = print (str_of_int (map_len m));
+let _ = print (b (map_has m ""));
+let _ = map_set m "" 9;
+let _ = print (str_of_int (map_get m ""));
+
+// --- long enough to leave the small cases behind ---
+let rec upto = fn (i: int) -> fn (acc: int list) ->
+  if i == 0 then acc else upto (i - 1) (Cons (i, acc));
+let big = upto 30000 Nil;
+let _ = print (str_of_int (list_len big));
+let _ = print (str_of_int (list_sum big));
+let _ = print (str_of_int (list_len (list_rev big)));
+let _ = print (str_of_int (list_len (list_map big (fn (x: int) -> x + 1))));
+let _ = print (str_of_int (list_fold big 0 (fn (a: int) -> fn (x: int) -> a + 1)));
+let _ = print (str_of_int (list_len (list_filter big (fn (x: int) -> x % 2 == 0))));
+
+// the map is mutated in place, so the loop only needs the counter
+let bigm = map_new ();
+let rec fill = fn (i: int) ->
+  if i == 0 then 0 else (let _ = map_set bigm (str_of_int i) i in fill (i - 1));
+let _ = fill 20000;
+let _ = print (str_of_int (map_len bigm));
+let _ = print (str_of_int (map_get bigm "1"));
+let _ = print (str_of_int (map_get bigm "20000"));
+let _ = print (b (map_has bigm "20001"));
