@@ -1,0 +1,42 @@
+// ByteBuf's index surface, and the byte range a file write accepts.
+//
+// The bytes/ByteBuf pair is interp + C by scope (Q-015/Q-017), so LLVM and Wasm
+// refuse this at emit time and the harness counts it as unchecked there rather
+// than failing it.
+//
+// Until v0.1.279 every one of these ended the program on C: bytebuf_get and
+// bytebuf_set printed to stderr and called exit(1), and the byte-range check in
+// write_file_bytes did the same -- so `try_or` could not take any of them, and a
+// program that asked one bad question stopped, where the interpreter carried on
+// with the default. The messages were already right; what was missing was that
+// a failure the language defines has to be a failure the language can catch.
+//
+// Execution mode: interp + C (LLVM / Wasm refuse ByteBuf at emit)
+
+let i = fn (label: str) -> fn (t: unit -> int) ->
+  print (label ++ " = " ++ str_of_int (try_or t (0 - 999)));
+
+let bb = bytebuf_new 4;
+let _ = i "get 0" (fn () -> bytebuf_get bb 0);
+let _ = i "get 3" (fn () -> bytebuf_get bb 3);
+let _ = i "get 4" (fn () -> bytebuf_get bb 4);
+let _ = i "get -1" (fn () -> bytebuf_get bb (0 - 1));
+// past what 32 bits can name, which is where the index used to be truncated
+let _ = i "get big" (fn () -> bytebuf_get bb 4294967297);
+let _ = i "set 0" (fn () -> let _ = bytebuf_set bb 0 65 in bytebuf_get bb 0);
+let _ = i "set 4" (fn () -> let _ = bytebuf_set bb 4 1 in 1);
+let _ = i "set -1" (fn () -> let _ = bytebuf_set bb (0 - 1) 1 in 1);
+
+// --- the byte range a Vec[int] must be inside to be written as bytes ---
+let ok = vec_new ();
+let _ = vec_push ok 65;
+let _ = vec_push ok 66;
+let bad = vec_new ();
+let _ = vec_push bad 300;
+let neg = vec_new ();
+let _ = vec_push neg (0 - 1);
+let _ = i "write ok" (fn () -> let _ = write_file_bytes "/tmp/mere_parity_bbe.bin" ok in 1);
+let _ = i "write 300" (fn () -> let _ = write_file_bytes "/tmp/mere_parity_bbe.bin" bad in 1);
+let _ = i "write -1" (fn () -> let _ = write_file_bytes "/tmp/mere_parity_bbe.bin" neg in 1);
+let _ = print (read_file "/tmp/mere_parity_bbe.bin");
+0

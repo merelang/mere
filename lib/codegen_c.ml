@@ -3177,15 +3177,21 @@ let rec emit_expr (e : Ast.expr) : string =
              side effects but discarded. *)
           Printf.sprintf "({ (void)(%s); %d; })"
             (emit_expr arg) (List.length ts)
+        (* v0.1.279: THIS type's constructors, not "does the program contain a
+           list somewhere". The guard used to ask `variant_tags` -- a global
+           table -- so `len (Some 1)` in any program that also mentioned a list
+           took the cons-walking branch, and the C it emitted (`->payload.Cons`
+           on an option) did not compile at all. The interpreter refuses this at
+           runtime; the backend can see it is impossible before running. *)
         | Ast.TyCon (n, _) when Hashtbl.mem polymorphic_variants n
-                             && Hashtbl.mem variant_tags "Cons"
-                             && Hashtbl.mem variant_tags "Nil" ->
+                             && (let (_, ctors) = Hashtbl.find polymorphic_variants n in
+                                 List.mem_assoc "Cons" ctors && List.mem_assoc "Nil" ctors) ->
           (* Phase 15.12: `len` on `T list` (Nil/Cons chain). Walk the
              cons chain counting. Works for any user-declared
              `type 'a list = Nil | Cons of 'a * 'a list`-shaped variant. *)
           let cons_tag = Hashtbl.find variant_tags "Cons" in
           Printf.sprintf
-            "({ __auto_type __l = %s; int __n = 0; \
+            "({ __auto_type __l = %s; long long __n = 0; \
              while (__l->tag == %d) { __n++; __l = __l->payload.Cons.f1; } __n; })"
             (emit_expr arg) cons_tag
         | _ ->
@@ -7888,19 +7894,18 @@ let bytebuf_runtime =
       "";
       "static long long mere_bytebuf_len(mere_bytebuf* bb) { return bb->len; }";
       "";
+      (* v0.1.279: catchable, like every other bad index. These printed and
+         exited, so try_or could not take them and the program stopped where the
+         interpreter carried on. *)
       "static long long mere_bytebuf_get(mere_bytebuf* bb, long long i) {";
-      "  if (i < 0 || i >= bb->len) {";
-      "    fprintf(stderr, \"bytebuf_get: index %lld out of bounds (len = %lld)\\n\", i, bb->len);";
-      "    exit(1);";
-      "  }";
+      "  if (i < 0 || i >= bb->len)";
+      "    __lang_fail_idx(\"bytebuf_get: index %lld out of bounds (len = %lld)\", i, bb->len);";
       "  return (long long)bb->data[i];";
       "}";
       "";
       "static long long mere_bytebuf_set(mere_bytebuf* bb, long long i, long long v) {";
-      "  if (i < 0 || i >= bb->len) {";
-      "    fprintf(stderr, \"bytebuf_set: index %lld out of bounds (len = %lld)\\n\", i, bb->len);";
-      "    exit(1);";
-      "  }";
+      "  if (i < 0 || i >= bb->len)";
+      "    __lang_fail_idx(\"bytebuf_set: index %lld out of bounds (len = %lld)\", i, bb->len);";
       "  bb->data[i] = (unsigned char)(v & 255);";
       "  return 0; /* unit */";
       "}";
@@ -10761,8 +10766,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                "  for (int i = 0; i < v->len; i++) {";
                "    long long b = v->data[i];";
                "    if (b < 0 || b > 255) {";
-               "      fprintf(stderr, \"file_pwrite: byte value %lld out of range 0..255\\n\", b);";
-               "      exit(1);";
+               (* v0.1.279: catchable, like the interpreter's *)
+               "      __lang_fail_num(\"file_pwrite: byte value %lld out of range 0..255\", b);";
                "    }";
                "    fputc((int)b, f);";
                "  }";
@@ -10796,8 +10801,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                "    long long b = v->data[i];";
                "    if (b < 0 || b > 255) {";
                "      fclose(f);";
-               "      fprintf(stderr, \"write_file_bytes: byte value %lld out of range 0..255\\n\", b);";
-               "      exit(1);";
+               "      __lang_fail_num(\"write_file_bytes: byte value %lld out of range 0..255\", b);";
                "    }";
                "    fputc((int)b, f);";
                "  }";
@@ -10809,7 +10813,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        else owned_vec_registry_runtime :: "" :: owned_vec_runtimes @ [""])
     @ (if channel_runtimes = [] then [] else channel_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime; ""] else [])
-    @ (if !bytes_used then [bytes_runtime; ""] else [])
+    (* v0.1.279: `|| !bytebuf_used`. The comment below already knew that
+       freezing a ByteBuf calls __lang_bytes_alloc -- the ORDER was handled and
+       the DEPENDENCY was not, so a program that used a ByteBuf and no bytes
+       value emitted a call to a function that was never emitted. It did not
+       compile at all, which is the third time a use-gate has done this. *)
+    @ (if !bytes_used || !bytebuf_used then [bytes_runtime; ""] else [])
     (* Also after it, for the same reason: it dereferences a mere_bytes. *)
     @ (if !uses_file_pwrite_bytes then [file_pwrite_bytes_runtime; ""] else [])
     (* After the bytes runtime: freezing a ByteBuf calls __lang_bytes_alloc. *)

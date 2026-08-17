@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.278" Version.v "0.1.278";
+  check "version is 0.1.279" Version.v "0.1.279";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -13422,6 +13422,52 @@ let () =
        let bin = Codegen_riscv.emit_program ~main_ty:mt prog in
        if String.length bin > 64 then "assembled" else "suspiciously short"
      with e -> Printexc.to_string e) "assembled";
+
+  (* v0.1.279: the refusals that were left, and two bugs they uncovered.
+
+     `f == g` was a runtime failure on the interpreter and INVALID C on the
+     compiled backends -- `==` between two closure structs does not compile. The
+     type is known where the comparison is written, so the typer answers now.
+
+     `len (Some 1)` took the cons-walking branch of the C backend's `len`,
+     because its guard asked whether the PROGRAM contained a list type rather
+     than whether THIS type has Nil and Cons. The C it emitted dereferenced
+     `payload.Cons` on an option.
+
+     And ByteBuf's index failures printed and called exit(1), so try_or could
+     not take them; test/parity/bytebuf_edges.mere is the gate. *)
+  check "v0.1.279: comparing functions is a type error, not a build error"
+    (try ignore (Pipeline.process "(fn (x: int) -> x) == (fn (x: int) -> x)"); "accepted"
+     with Mere.Typer.Type_error (_, m) -> m)
+    "functions are not comparable with == / !=";
+  check "v0.1.279: comparing ordinary values still works"
+    (Pipeline.process "(1, \"a\") == (1, \"a\")") "true";
+  check "v0.1.279: len on a non-list is refused by the C backend, not miscompiled"
+    (try
+       let src = "let xs = Cons (1, Nil); len (Some 1)" in
+       let prog = Pipeline.parse_program src in
+       let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+       ignore (Codegen_c.emit_program ~main_ty:Ast.TyInt prog); "emitted"
+     with Codegen_c.Codegen_error (_, m) ->
+       (* the message is prefixed with "unsupported in C codegen subset: " *)
+       let has_len =
+         let n = String.length m in
+         let rec go i = i + 4 <= n && (String.sub m i 4 = "len:" || go (i + 1)) in
+         go 0
+       in
+       if has_len then "refused" else m)
+    "refused";
+  check "v0.1.279: len on an actual list still walks it"
+    (Pipeline.process "let xs = Cons (1, Cons (2, Nil)); len xs") "2";
+  (* the use-gate that emitted a call to a function it did not emit *)
+  assert_contains "v0.1.279: a ByteBuf program carries the bytes runtime"
+    (codegen "let b = bytebuf_new 4 in bytebuf_get b 0") "__lang_bytes_alloc";
+  assert_contains "v0.1.279: a bad ByteBuf index is catchable"
+    (codegen "let b = bytebuf_new 4 in bytebuf_get b 0")
+    "__lang_fail_idx(\"bytebuf_get: index %lld out of bounds (len = %lld)\"";
+  (* and the width the previous sweep missed on one backend *)
+  assert_contains "v0.1.279: LLVM counts matches at full width"
+    (llvm "str_count \"aaa\" \"a\"") "define i64 @__lang_str_count";
 
   (* v0.1.278: the last of the oracle's refusals -- the bytes index surface and
      random_int's bound. bytes_get and bytes_slice ended in abort() on C and
