@@ -8811,7 +8811,9 @@ let bytes_runtime_llvm =
       "  %oob = or i1 %lo, %hi";
       "  br i1 %oob, label %fail, label %ok";
       "fail:";
-      "  call void @abort()";
+      (* v0.1.278: abort() is not a failure the language defines -- try_or
+         cannot catch it, and it says nothing *)
+      "  call void @__lang_fail_impl(ptr @.bget_msg)";
       "  unreachable";
       "ok:";
       "  %d = getelementptr i8, ptr %b, i64 8";
@@ -8940,6 +8942,20 @@ let bytes_runtime_llvm =
       "}";
       "define ptr @__lang_bytes_slice(ptr %b, i64 %start, i64 %len) {";
       "entry:";
+      (* v0.1.278: there was no range check here at all -- it copied from
+         wherever the arithmetic pointed *)
+      "  %blen = load i64, ptr %b";
+      "  %s_lt0 = icmp slt i64 %start, 0";
+      "  %l_lt0 = icmp slt i64 %len, 0";
+      "  %sum = add i64 %start, %len";
+      "  %over = icmp sgt i64 %sum, %blen";
+      "  %bad1 = or i1 %s_lt0, %l_lt0";
+      "  %bad = or i1 %bad1, %over";
+      "  br i1 %bad, label %slicefail, label %sliceok";
+      "slicefail:";
+      "  call void @__lang_fail_impl(ptr @.bslice_msg)";
+      "  unreachable";
+      "sliceok:";
       "  %o = call ptr @__lang_bytes_alloc(i64 %len)";
       "  %od = getelementptr i8, ptr %o, i64 8";
       "  %bd = getelementptr i8, ptr %b, i64 8";
@@ -9647,6 +9663,10 @@ let str_concat_helper =
       "@.idxfmt_vecset = private constant [47 x i8] c\"vec_set: index %lld out of bounds (len = %lld)\\00\"";
       "@.idxfmt_charat = private constant [44 x i8] c\"char_at: index %lld out of range (len=%lld)\\00\"";
       "@.idxfmt_substr = private constant [61 x i8] c\"substring: range [%lld, %lld) invalid for str of length %lld\\00\"";
+      "@.bget_msg_h = internal constant { i64, [30 x i8] } { i64 29, [30 x i8] c\"bytes_get: index out of range\\00\" }";
+      "@.bget_msg = internal alias [30 x i8], getelementptr inbounds ({ i64, [30 x i8] }, ptr @.bget_msg_h, i32 0, i32 1)";
+      "@.bslice_msg_h = internal constant { i64, [33 x i8] } { i64 32, [33 x i8] c\"bytes_slice: range out of bounds\\00\" }";
+      "@.bslice_msg = internal alias [33 x i8], getelementptr inbounds ({ i64, [33 x i8] }, ptr @.bslice_msg_h, i32 0, i32 1)";
       "@.numfmt_chr = private constant [37 x i8] c\"chr: %lld out of byte range [0, 255]\\00\"";
       "@.numfmt_ord = private constant [47 x i8] c\"ord: expected single-char str, got length %lld\\00\"";
       "@.numfmt_rep = private constant [32 x i8] c\"str_repeat: negative count %lld\\00\"";

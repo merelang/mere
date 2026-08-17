@@ -7767,7 +7767,10 @@ let bytes_runtime =
       "}";
       "static mere_bytes* __lang_bytes_slice(mere_bytes* b, long long start, long long len) {";
       "  if (start < 0 || len < 0 || start + len > b->len) {";
-      "    fprintf(stderr, \"bytes_slice: range out of bounds\\n\"); abort();";
+      (* v0.1.278: abort() is not a failure the language defines -- try_or
+          cannot catch it and the shell reports 134. The interpreter raises a
+          catchable failure here, as it does for every other bad index. *)
+      "    __lang_fail_impl(\"bytes_slice: range out of bounds\");";
       "  }";
       "  mere_bytes* o = __lang_bytes_alloc(len);";
       "  memcpy(o->data, b->data + start, (size_t)len);";
@@ -7780,7 +7783,7 @@ let bytes_runtime =
       "  return o;";
       "}";
       "static long long __lang_bytes_get(mere_bytes* b, long long i) {";
-      "  if (i < 0 || i >= b->len) { fprintf(stderr, \"bytes_get: index out of range\\n\"); abort(); }";
+      "  if (i < 0 || i >= b->len) __lang_fail_impl(\"bytes_get: index out of range\");";
       "  return (long long)b->data[i];";
       "}" ]
 

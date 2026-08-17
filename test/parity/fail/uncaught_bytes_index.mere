@@ -1,0 +1,8 @@
+// An index the bytes value does not have. It ended in abort() on C and LLVM --
+// exit 134, and nothing try_or could catch -- and in a bare trap with no
+// message on Wasm, where the index was also checked after being truncated to 32
+// bits (v0.1.278).
+let b = bytes_of_hex "0102";
+let _ = print "before";
+let _ = print (str_of_int (bytes_get b 5));
+0

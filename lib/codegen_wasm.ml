@@ -179,6 +179,10 @@ let idx_mid_vec_offset = ref 0
 let idx_post_vec_offset = ref 0
 let idx_pre_charat_offset = ref 0
 let idx_mid_charat_offset = ref 0
+let bytes_get_msg_offset = ref 0
+let bytes_slice_msg_offset = ref 0
+let rand_pre_offset = ref 0
+let rand_post_offset = ref 0
 let fos_pre_offset = ref 0
 let fos_suf_offset = ref 0
 let bos_true_offset = ref 0
@@ -3006,10 +3010,25 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr "i64.const 0"
   | Ast.App ({ node = Ast.Var "random_int"; _ }, n_e)
     when not (user_shadows_wasm "random_int") ->
-    (* no RNG wired on the Wasm host yet — deterministic 0 (refine to a host
-       Math.random import later). *)
+    (* No RNG wired on the Wasm host yet -- deterministic 0 (refine to a host
+       Math.random import later). v0.1.278: the BOUND is still checked, because
+       "no RNG here" is a limitation and "any bound is fine" is a wrong answer;
+       the interpreter refuses a non-positive bound and so does this. *)
+    let slot = fresh_local () in
     emit_expr n_e;
+    emit_instr (Printf.sprintf "local.set %d" slot);
+    emit_instr (Printf.sprintf "local.get %d" slot);
+    emit_instr "i64.const 1";
+    emit_instr "i64.lt_s";
+    emit_instr "if";
+    emit_instr "global.get $__lang_rand_pre";
+    emit_instr "i64.extend_i32_u";
+    emit_instr (Printf.sprintf "local.get %d" slot);
+    emit_instr "global.get $__lang_rand_post";
+    emit_instr "i64.extend_i32_u";
+    emit_instr "call $__lang_fail_num";
     emit_instr "drop";
+    emit_instr "end";
     emit_instr "i64.const 0"
   | Ast.App ({ node = Ast.Var "time"; _ }, _)
     when not (user_shadows_wasm "time") ->
@@ -6675,10 +6694,14 @@ let bytes_runtime_wasm = {|
     (local $b i32)
     (local $i i32)
     (local.set $b (i32.wrap_i64 (local.get $b8)))
+    ;; v0.1.278: checked at full width, and it says what happened -- this used
+    ;; to check the truncated index and then trap with no message
+    (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0))
+                (i64.ge_s (local.get $i8)
+                          (i64.extend_i32_s (i32.load (local.get $b)))))
+      (then (return (call $__lang_fail
+                      (i64.extend_i32_u (global.get $__lang_bytes_get_msg))))))
     (local.set $i (i32.wrap_i64 (local.get $i8)))
-    (if (i32.or (i32.lt_s (local.get $i) (i32.const 0))
-                (i32.ge_s (local.get $i) (i32.load (local.get $b))))
-      (then (unreachable)))
     (i64.extend_i32_s (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i)))))
   (func $__lang_bytes_of_str (param $s8 i64) (result i64)
     (local $n i32) (local $b i32) (local $i i32)
@@ -6771,6 +6794,13 @@ let bytes_runtime_wasm = {|
     (local.set $b (i32.wrap_i64 (local.get $b8)))
     (local.set $start (i32.wrap_i64 (local.get $start8)))
     (local.set $len (i32.wrap_i64 (local.get $len8)))
+    ;; v0.1.278: there was no range check here at all
+    (if (i32.or (i32.or (i64.lt_s (local.get $start8) (i64.const 0))
+                        (i64.lt_s (local.get $len8) (i64.const 0)))
+                (i64.gt_s (i64.add (local.get $start8) (local.get $len8))
+                          (i64.extend_i32_s (i32.load (local.get $b)))))
+      (then (return (call $__lang_fail
+                      (i64.extend_i32_u (global.get $__lang_bytes_slice_msg))))))
     (local.set $o (i32.wrap_i64 (call $__lang_bytes_alloc (i64.extend_i32_s (local.get $len)))))
     (local.set $i (i32.const 0))
     (block $end (loop $lp
@@ -8431,6 +8461,10 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   idx_post_vec_offset := fresh_str_offset ")";
   idx_pre_charat_offset := fresh_str_offset "char_at: index ";
   idx_mid_charat_offset := fresh_str_offset " out of range (len=";
+  bytes_get_msg_offset := fresh_str_offset "bytes_get: index out of range";
+  bytes_slice_msg_offset := fresh_str_offset "bytes_slice: range out of bounds";
+  rand_pre_offset := fresh_str_offset "random_int: bound must be positive (got ";
+  rand_post_offset := fresh_str_offset ")";
   fos_pre_offset := fresh_str_offset "float_of_str: \"";
   fos_suf_offset := fresh_str_offset "\" is not a valid float";
   bos_true_offset := fresh_str_offset "true";
@@ -10024,6 +10058,10 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      \  (global $__lang_idx_post_vec i32 (i32.const %d))\n\
      \  (global $__lang_idx_pre_charat i32 (i32.const %d))\n\
      \  (global $__lang_idx_mid_charat i32 (i32.const %d))\n\
+     \  (global $__lang_bytes_get_msg i32 (i32.const %d))\n\
+     \  (global $__lang_bytes_slice_msg i32 (i32.const %d))\n\
+     \  (global $__lang_rand_pre i32 (i32.const %d))\n\
+     \  (global $__lang_rand_post i32 (i32.const %d))\n\
      \  (global $__lang_fos_pre i32 (i32.const %d))\n\
      \  (global $__lang_fos_suf i32 (i32.const %d))\n\
      \  (global $__lang_bos_true i32 (i32.const %d))\n\
@@ -10060,6 +10098,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     table_section bump_init char_table_offset !fail_sentinel_offset !mapget_msg_offset
     !idx_pre_get_offset !idx_pre_set_offset !idx_mid_vec_offset !idx_post_vec_offset
     !idx_pre_charat_offset !idx_mid_charat_offset
+    !bytes_get_msg_offset !bytes_slice_msg_offset !rand_pre_offset !rand_post_offset
     !fos_pre_offset !fos_suf_offset
     !bos_true_offset !bos_false_offset !bos_pre_offset !bos_suf_offset
     !num_pre_chr_offset !num_post_chr_offset !num_pre_ord_offset !num_pre_rep_offset
