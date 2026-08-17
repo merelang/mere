@@ -4,6 +4,44 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.279 — 2026-08-17
+
+_The refusals that were left, and three bugs they walked into._
+
+The enumeration's tail: `bytebuf_get` / `bytebuf_set`, `write_file_bytes`'s byte
+range, `len` on a value that is not a list, and comparing two functions. Asking
+them turned up three things that were not about refusals at all.
+
+**A program that used a ByteBuf and no `bytes` value did not compile.** The C
+backend emits the `bytes` runtime when `bytes_used` is set, and freezing a
+ByteBuf calls `__lang_bytes_alloc` — the comment above the emit even says so, so
+the *order* of the two runtimes had been thought about and the *dependency* had
+not. Third time a use-gate has emitted a call to a function it did not emit.
+
+**`len (Some 1)` emitted C that dereferenced `payload.Cons` on an option.** The
+guard for the cons-walking branch asked whether the *program* contained `Nil` and
+`Cons` anywhere, not whether *this type* has them, so any program that also
+mentioned a list took that branch for every polymorphic variant. It asks the
+type now, and a type with no length is a clean codegen refusal naming the
+alternatives.
+
+**Comparing two functions was a runtime failure on the interpreter and invalid C
+on the compiled backends** — `==` between two closure structs does not compile.
+The type is known where the comparison is written, so the typer answers there
+now, with the interpreter's own words.
+
+The refusals themselves: ByteBuf's index failures and the byte-range check both
+printed and called `exit(1)`, so `try_or` could not take them and the program
+stopped where the interpreter carried on. They are catchable failures now, with
+the messages they already had. `test/parity/bytebuf_edges.mere` is the gate —
+interp + C, since bytes/ByteBuf is those two backends by scope.
+
+Also: `__lang_str_count` still returned `i32` on LLVM after v0.1.276 widened it
+on C and Wasm — a count past two billion came back negative. The sweep missed
+exactly one backend of the three.
+
+---
+
 ## v0.1.278 — 2026-08-17
 
 _The last of the oracle's refusals._

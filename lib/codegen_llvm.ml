@@ -4508,10 +4508,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let sv = emit_expr env s_e in
     let nv = emit_expr env n_e in
     let raw = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i32 @__lang_str_count(ptr %s, ptr %s)" raw sv nv);
-    let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = sext i32 %s to i64" r raw);
-    r
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_str_count(ptr %s, ptr %s)" raw sv nv);
+    raw
   | Ast.App ({ node = Ast.Var "utf8_len"; _ }, s_e) ->
     (* v0.1.38 (Unicode): codepoint count (span walk, same as interp/C/wasm). *)
     str_split_used_llvm := true;
@@ -10097,17 +10095,21 @@ let str_concat_helper =
 (* Phase 25.9: str_count s needle — count non-overlapping occurrences. *)
 let str_count_runtime_llvm =
   String.concat "\n"
-    [ "define i32 @__lang_str_count(ptr %s, ptr %n) {";
+    (* v0.1.279: the accumulator and the result were i32 while the positions
+        walking the haystack were already i64, so a count past two billion came
+        back negative. The C and Wasm backends were widened in v0.1.276; this is
+        the one the sweep missed. *)
+      [ "define i64 @__lang_str_count(ptr %s, ptr %n) {";
       "entry:";
       "  %nl = call i64 @__lang_str_size(ptr %n)";
       "  %sl = call i64 @__lang_str_size(ptr %s)";
       "  %nz = icmp eq i64 %nl, 0";
       "  br i1 %nz, label %retz, label %loop";
       "retz:";
-      "  ret i32 0";
+      "  ret i64 0";
       "loop:";
       "  %i = phi i64 [0, %entry], [%i_next, %cont]";
-      "  %acc = phi i32 [0, %entry], [%acc_next, %cont]";
+      "  %acc = phi i64 [0, %entry], [%acc_next, %cont]";
       "  %i_plus_nl = add i64 %i, %nl";
       "  %done = icmp ugt i64 %i_plus_nl, %sl";
       "  br i1 %done, label %finish, label %check";
@@ -10117,7 +10119,7 @@ let str_count_runtime_llvm =
       "  %is_match = icmp eq i32 %r, 0";
       "  br i1 %is_match, label %hit, label %skip";
       "hit:";
-      "  %acc_hit = add i32 %acc, 1";
+      "  %acc_hit = add i64 %acc, 1";
       "  %i_hit = add i64 %i, %nl";
       "  br label %cont_hit";
       "cont_hit:";
@@ -10129,10 +10131,10 @@ let str_count_runtime_llvm =
       "  br label %cont";
       "cont:";
       "  %i_next = phi i64 [%i_hit, %cont_hit], [%i_skip, %cont_skip]";
-      "  %acc_next = phi i32 [%acc_hit, %cont_hit], [%acc, %cont_skip]";
+      "  %acc_next = phi i64 [%acc_hit, %cont_hit], [%acc, %cont_skip]";
       "  br label %loop";
       "finish:";
-      "  ret i32 %acc";
+      "  ret i64 %acc";
       "}" ]
 
 (* Phase 25.9: str_split / str_join — construct list_str (recursive variant)

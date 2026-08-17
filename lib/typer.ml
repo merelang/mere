@@ -2242,7 +2242,20 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        unify a.loc ta tb
      | Ast.Eq | Ast.Ne ->
        (* Symmetric: lhs is the "first observed" type. *)
-       unify e.loc ta tb);
+       unify e.loc ta tb;
+       (* v0.1.279: and it must not be a function. The interpreter has always
+          refused this at runtime ("functions are not comparable with == / !="),
+          but the compiled backends emitted `==` between two closure structs,
+          which is not valid C and does not compile at all -- so the same
+          program was a catchable failure on one backend and a build error on
+          another. Where the type is known here, the answer is known here.
+          A comparison that only becomes one at monomorphization is still the
+          backends' problem; they refuse it cleanly rather than emitting
+          nonsense. *)
+       (match Ast.walk ta with
+        | Ast.TyArrow _ ->
+          raise (Type_error (e.loc, "functions are not comparable with == / !="))
+        | _ -> ()));
     Ast.TyBool
   | Ast.Logic (_, a, b) ->
     let ta = infer env a in
