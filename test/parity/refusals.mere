@@ -82,6 +82,22 @@ let _ = f "float prefix" (fn () -> float_of_str "1.5x");
 let _ = f "float empty" (fn () -> float_of_str "");
 let _ = f "float e5" (fn () -> float_of_str "e5");
 
+// --- bytes: the same index rules again, on the other sequence type ---
+// bytes_get checked the index AFTER truncating it to 32 bits on Wasm, and both
+// it and bytes_slice ended in abort() on C and LLVM and a bare trap on Wasm --
+// so a bad index killed the program where the interpreter raised something
+// try_or could take. bytes_slice on Wasm had no range check at all and copied
+// from wherever the arithmetic pointed (v0.1.278).
+let bs = bytes_of_hex "0102";
+let _ = i "bytes_get 0" (fn () -> bytes_get bs 0);
+let _ = i "bytes_get 2" (fn () -> bytes_get bs 2);
+let _ = i "bytes_get -1" (fn () -> bytes_get bs (0 - 1));
+let _ = i "bytes_get big" (fn () -> bytes_get bs 4294967297);
+let _ = s "bytes_slice ok" (fn () -> hex_of_bytes (bytes_slice bs 0 1));
+let _ = s "bytes_slice all" (fn () -> hex_of_bytes (bytes_slice bs 0 2));
+let _ = s "bytes_slice past" (fn () -> hex_of_bytes (bytes_slice bs 1 9));
+let _ = s "bytes_slice neg" (fn () -> hex_of_bytes (bytes_slice bs (0 - 1) 1));
+
 // --- owned_vec: the same index rules as vec ---
 let ov = owned_vec_new ();
 let _ = owned_vec_push ov 7;

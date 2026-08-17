@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.277" Version.v "0.1.277";
+  check "version is 0.1.278" Version.v "0.1.278";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -13422,6 +13422,24 @@ let () =
        let bin = Codegen_riscv.emit_program ~main_ty:mt prog in
        if String.length bin > 64 then "assembled" else "suspiciously short"
      with e -> Printexc.to_string e) "assembled";
+
+  (* v0.1.278: the last of the oracle's refusals -- the bytes index surface and
+     random_int's bound. bytes_get and bytes_slice ended in abort() on C and
+     LLVM (exit 134, uncatchable) and in a bare trap on Wasm, where the index was
+     checked AFTER being truncated to 32 bits and bytes_slice had no range check
+     at all. random_int on Wasm accepted any bound: there is no RNG on that host
+     yet, which is a limitation, but "any bound is fine" is a wrong answer. *)
+  assert_contains "v0.1.278: C makes a bad bytes index catchable"
+    (codegen "bytes_get (bytes_of_hex \"01\") 0")
+    "__lang_fail_impl(\"bytes_get: index out of range\")";
+  assert_contains "v0.1.278: LLVM does too"
+    (llvm "bytes_get (bytes_of_hex \"01\") 0") "@.bget_msg";
+  assert_contains "v0.1.278: LLVM range-checks bytes_slice, which had no check"
+    (llvm "bytes_slice (bytes_of_hex \"0102\") 0 1") "@.bslice_msg";
+  assert_contains "v0.1.278: Wasm checks the bytes index at full width"
+    (wasm "bytes_get (bytes_of_hex \"01\") 0") "(i64.ge_s (local.get $i8)";
+  assert_contains "v0.1.278: Wasm still checks random_int's bound with no RNG"
+    (wasm "random_int 5") "$__lang_rand_pre";
 
   (* v0.1.277: finishing the enumeration the previous slice started -- the
      refusals it had not yet asked about. `bool_of_str "yes"` was false on every

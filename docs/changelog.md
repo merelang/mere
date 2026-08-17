@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.278 — 2026-08-17
+
+_The last of the oracle's refusals._
+
+The `bytes` value has the same index surface as `vec`, and it had all the same
+problems one slice later than `vec` did:
+
+| | before | after |
+|---|---|---|
+| C, LLVM | `abort()` — exit 134, and nothing `try_or` could catch | the interpreter's catchable failure |
+| Wasm `bytes_get` | trapped with no message, after truncating the index to 32 bits | checked at full width, and it says what happened |
+| Wasm `bytes_slice` | **no range check at all** — copied from wherever the arithmetic pointed | refused |
+
+`random_int` on the Wasm host accepted any bound. There is no RNG wired there
+yet, which is a documented limitation — but *"no RNG here"* and *"any bound is
+fine"* are different statements, and the second one is a wrong answer. The bound
+is checked now even though the value it returns is still a deterministic zero.
+
+That closes the enumeration started in v0.1.276: every refusal the interpreter
+raises is now raised by all four backends, with the same words, catchable in the
+same way. `test/parity/refusals.mere` covers the caught side and there are 15
+programs in `test/parity/fail/`.
+
+---
+
 ## v0.1.277 — 2026-08-17
 
 _Finishing the enumeration, and two things it turned up on the way._
