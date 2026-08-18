@@ -1,0 +1,225 @@
+// contrib/graphql/parser.mere — tokens into a GraphQL executable document.
+//
+// Recursive descent, threading the token list: every function takes the tokens
+// it starts at and returns (value, tokens it did not consume). There is no
+// mutable cursor, so a function cannot advance the input by accident — the only
+// way to move is to return the rest, which the caller has to accept.
+//
+// Scope: EXECUTABLE documents — operations and fragments. Type-system definitions
+// (SDL: `type`, `interface`, `input`, `enum`, `schema`, …) are a separate grammar
+// and are not parsed here.
+//
+// THE ONE PLACE THE GRAMMAR IS GENUINELY AMBIGUOUS-LOOKING: after `...`, three
+// things can follow — `on Name` (an inline fragment with a type condition), a
+// Name (a fragment spread), or `{` / `@` (an inline fragment with no condition).
+// The spread case has to be checked AFTER `on`, because `on` is a Name too and a
+// fragment may not be called `on`.
+//
+// Usage:
+//   import "contrib/graphql/parser.mere";
+//   Gparse.document "{ a b }"        // gdef list
+
+module Gparse {
+
+  let rec rev_list = fn (xs, acc) ->
+    match xs with
+    | [] -> acc
+    | [h, ...t] -> rev_list t (Cons (h, acc));
+
+  let tok_of = fn (ts) -> match ts with | [] -> TEof | [(_, t), ..._] -> t;
+  let rest_of = fn (ts) -> match ts with | [] -> [] | [_, ...r] -> r;
+  let pos_of = fn (ts) -> match ts with | [] -> 0 - 1 | [(p, _), ..._] -> p;
+
+  let at = fn (ts) -> " at offset " ++ str_of_int (pos_of ts);
+
+  let is_punct = fn (ts, p: str) ->
+    match tok_of ts with | TPunct q -> q == p | _ -> false;
+  let is_kw = fn (ts, n: str) ->
+    match tok_of ts with | TName m -> m == n | _ -> false;
+
+  let expect = fn (ts, p: str) ->
+    if is_punct ts p then rest_of ts
+    else fail ("graphql: expected '" ++ p ++ "'" ++ at ts);
+
+  let take_name = fn (ts) ->
+    match tok_of ts with
+    | TName n -> (n, rest_of ts)
+    | _ -> fail ("graphql: expected a name" ++ at ts);
+
+  // --- types ---------------------------------------------------------------
+  // `!` binds tighter than the brackets it sits outside of, so it is read after
+  // the base type rather than as part of it: `[Int!]!` is NonNull(List(NonNull)).
+  let rec parse_type = fn (ts) ->
+    let (base, r1) =
+      if is_punct ts "[" then
+        let (inner, r) = parse_type (rest_of ts) in
+        (TyList inner, expect r "]")
+      else
+        let (n, r) = take_name ts in
+        (TyNamed n, r) in
+    if is_punct r1 "!" then (TyNonNull base, rest_of r1) else (base, r1);
+
+  // --- values --------------------------------------------------------------
+  // `true` / `false` / `null` are Names in the lexical grammar and only become
+  // themselves here. An enum value is any other name, which is why an enum
+  // called `true` is not expressible — that is the specification's rule, not a
+  // shortcut.
+  let rec parse_value = fn (ts) ->
+    match tok_of ts with
+    | TInt v -> (VInt v, rest_of ts)
+    | TFloat v -> (VFloat v, rest_of ts)
+    | TStr v -> (VStr v, rest_of ts)
+    | TBlock v -> (VBlock v, rest_of ts)
+    | TName n ->
+      if n == "true" then (VBool true, rest_of ts)
+      else if n == "false" then (VBool false, rest_of ts)
+      else if n == "null" then (VNull, rest_of ts)
+      else (VEnum n, rest_of ts)
+    | TPunct p ->
+      if p == "$" then
+        let (n, r) = take_name (rest_of ts) in (VVar n, r)
+      else if p == "[" then parse_items (rest_of ts) []
+      else if p == "\{" then parse_fields (rest_of ts) []
+      else fail ("graphql: '" ++ p ++ "' cannot start a value" ++ at ts)
+    | TEof -> fail "graphql: a value was expected but the document ended"
+  and parse_items = fn (ts, acc) ->
+    if is_punct ts "]" then (VList (rev_list acc []), rest_of ts)
+    else
+      match tok_of ts with
+      | TEof -> fail "graphql: unterminated list value"
+      | _ -> let (v, r) = parse_value ts in parse_items r (Cons (v, acc))
+  and parse_fields = fn (ts, acc) ->
+    if is_punct ts "}" then (VObj (rev_list acc []), rest_of ts)
+    else
+      match tok_of ts with
+      | TEof -> fail "graphql: unterminated object value"
+      | _ ->
+        let (n, r1) = take_name ts in
+        let (v, r3) = parse_value (expect r1 ":") in
+        parse_fields r3 (Cons ((n, v), acc));
+
+  // --- arguments and directives -------------------------------------------
+
+  let rec parse_args = fn (ts, acc) ->
+    if is_punct ts ")" then (rev_list acc [], rest_of ts)
+    else
+      match tok_of ts with
+      | TEof -> fail "graphql: unterminated argument list"
+      | _ ->
+        let (n, r1) = take_name ts in
+        let (v, r3) = parse_value (expect r1 ":") in
+        parse_args r3 (Cons ((n, v), acc));
+
+  let args_opt = fn (ts) ->
+    if is_punct ts "(" then parse_args (rest_of ts) [] else ([], ts);
+
+  let rec parse_dirs = fn (ts, acc) ->
+    if is_punct ts "@" then
+      let (n, r1) = take_name (rest_of ts) in
+      let (a, r2) = args_opt r1 in
+      parse_dirs r2 (Cons (Dir (n, a), acc))
+    else (rev_list acc [], ts);
+
+  // --- selections ----------------------------------------------------------
+
+  let rec parse_sel_set = fn (ts) -> parse_sels (expect ts "\{") []
+  and parse_sels = fn (ts, acc) ->
+    if is_punct ts "}" then (rev_list acc [], rest_of ts)
+    else
+      match tok_of ts with
+      | TEof -> fail "graphql: unterminated selection set"
+      | _ -> let (s, r) = parse_sel ts in parse_sels r (Cons (s, acc))
+  and parse_sel = fn (ts) ->
+    if is_punct ts "..." then
+      let after = rest_of ts in
+      if is_kw after "on" then
+        let (tc, r1) = take_name (rest_of after) in
+        let (d, r2) = parse_dirs r1 [] in
+        let (sels, r3) = parse_sel_set r2 in
+        (Inline (tc, d, sels), r3)
+      else
+        match tok_of after with
+        | TName n ->
+          let (d, r2) = parse_dirs (rest_of after) [] in
+          (Spread (n, d), r2)
+        | _ ->
+          let (d, r2) = parse_dirs after [] in
+          let (sels, r3) = parse_sel_set r2 in
+          (Inline ("", d, sels), r3)
+    else
+      // A field, possibly aliased. `a: b` is alias a, name b — the colon has to
+      // be looked for after the first name, because both forms start the same.
+      let (n1, r1) = take_name ts in
+      let (alias, name, r2) =
+        if is_punct r1 ":" then
+          let (n2, r) = take_name (rest_of r1) in (n1, n2, r)
+        else ("", n1, r1) in
+      let (a, r3) = args_opt r2 in
+      let (d, r4) = parse_dirs r3 [] in
+      if is_punct r4 "\{" then
+        let (sels, r5) = parse_sel_set r4 in
+        (Field (alias, name, a, d, sels), r5)
+      else (Field (alias, name, a, d, []), r4);
+
+  // --- variable definitions ------------------------------------------------
+  // The default value is a 0-or-1 element list rather than an option, so that
+  // "absent" and "present and null" stay distinguishable: `$x: Int = null` has a
+  // default, and it is null.
+  let rec parse_vardefs = fn (ts, acc) ->
+    if is_punct ts ")" then (rev_list acc [], rest_of ts)
+    else
+      match tok_of ts with
+      | TEof -> fail "graphql: unterminated variable definitions"
+      | _ ->
+        let (n, r1) = take_name (expect ts "$") in
+        let (ty, r3) = parse_type (expect r1 ":") in
+        let (dflt, r4) =
+          if is_punct r3 "=" then
+            let (v, r) = parse_value (rest_of r3) in (Cons (v, []), r)
+          else ([], r3) in
+        let (d, r5) = parse_dirs r4 [] in
+        parse_vardefs r5 (Cons (VarDef (n, ty, dflt, d), acc));
+
+  // --- definitions ---------------------------------------------------------
+
+  let parse_def = fn (ts) ->
+    // The shorthand: a bare selection set is an anonymous query. It is the only
+    // definition that does not start with a keyword.
+    if is_punct ts "\{" then
+      let (sels, r) = parse_sel_set ts in
+      (OpDef ("query", "", [], [], sels), r)
+    else
+      match tok_of ts with
+      | TName kw ->
+        if kw == "fragment" then
+          let (nm, r1) = take_name (rest_of ts) in
+          let r2 =
+            if is_kw r1 "on" then rest_of r1
+            else fail ("graphql: expected 'on' after a fragment name" ++ at r1) in
+          let (tc, r3) = take_name r2 in
+          let (d, r4) = parse_dirs r3 [] in
+          let (sels, r5) = parse_sel_set r4 in
+          (FragDef (nm, tc, d, sels), r5)
+        else if kw == "query" || kw == "mutation" || kw == "subscription" then
+          let r1 = rest_of ts in
+          let (nm, r2) =
+            match tok_of r1 with
+            | TName n -> (n, rest_of r1)
+            | _ -> ("", r1) in
+          let (vs, r3) =
+            if is_punct r2 "(" then parse_vardefs (rest_of r2) [] else ([], r2) in
+          let (d, r4) = parse_dirs r3 [] in
+          let (sels, r5) = parse_sel_set r4 in
+          (OpDef (kw, nm, vs, d, sels), r5)
+        else
+          fail ("graphql: '" ++ kw ++ "' does not start an executable definition"
+                ++ " (type-system definitions are not parsed here)" ++ at ts)
+      | _ -> fail ("graphql: a definition was expected" ++ at ts);
+
+  let rec parse_defs = fn (ts, acc) ->
+    match tok_of ts with
+    | TEof -> rev_list acc []
+    | _ -> let (d, r) = parse_def ts in parse_defs r (Cons (d, acc));
+
+  let document = fn (src: str) -> parse_defs (Glex.tokens src) [];
+}

@@ -1,0 +1,157 @@
+// contrib/graphql/printer.mere — a GraphQL document back into source text.
+//
+// This exists to be half of a gate, and that shapes what it has to guarantee.
+// The check in `scripts/graphql_parity.sh` is:
+//
+//     graphql-js:  print(parse(D))                        -> A
+//     us:          Gprint.document (Gparse.document D)     -> M
+//     graphql-js:  print(parse(M))                        -> B
+//     assert A == B
+//
+// `print` is a function of the AST alone, so A == B holds exactly when the two
+// ASTs are equal. That means THIS PRINTER DOES NOT HAVE TO MATCH graphql-js'S
+// FORMATTING — only to emit a document that parses back to the same tree. No AST
+// has to be transcribed into a shared comparison format, which is the part of a
+// differential gate that can quietly share a bug with the thing it is checking.
+//
+// Consequently the output is deliberately plain: one line, single spaces. It is
+// not a pretty-printer and should not be mistaken for one.
+//
+// THE ONE THING THAT CANNOT BE PRINTED FAITHFULLY, and is refused rather than
+// approximated: a block string whose value would not survive being re-parsed.
+// Re-parsing applies the dedent rule again, so a value with common leading
+// whitespace on its continuation lines comes back different. Emitting it as an
+// ordinary string instead would round-trip the TEXT and lose `block: true` from
+// the tree — a wrong answer that the gate above would report as a parser bug.
+// So `Gprint` fails loudly and names the value. See G2 in the plan note.
+
+module Gprint {
+
+  let rec join_map = fn (f, xs, sep: str, acc: str, first: bool) ->
+    match xs with
+    | [] -> acc
+    | [h, ...t] ->
+      let piece = f h in
+      join_map f t sep (if first then piece else acc ++ sep ++ piece) false;
+
+  let jm = fn (f, xs, sep: str) -> join_map f xs sep "" true;
+
+  // --- types ---------------------------------------------------------------
+  let rec ptype = fn (t: gtype) ->
+    match t with
+    | TyNamed n -> n
+    | TyList inner -> "[" ++ ptype inner ++ "]"
+    | TyNonNull inner -> ptype inner ++ "!";
+
+  // --- strings -------------------------------------------------------------
+  // Escaping for an ordinary string literal. Control characters below 0x20 go
+  // out as \uXXXX unless they have a shorter spelling; that is what the parser
+  // on the other side decodes back, which is the only property required.
+  let hex_digit = fn (n: int) ->
+    if n < 10 then chr (48 + n) else chr (87 + n);
+
+  let u_escape = fn (b: int) ->
+    "\\u00" ++ hex_digit (bit_and (bit_shr b 4) 15) ++ hex_digit (bit_and b 15);
+
+  let rec esc_at = fn (s: str, i: int, buf) ->
+    if i >= str_len s then strbuf_to_str buf
+    else
+      let c = char_at s i in
+      let b = ord c in
+      let _ =
+        if c == "\"" then strbuf_push buf "\\\""
+        else if c == "\\" then strbuf_push buf "\\\\"
+        else if c == "\n" then strbuf_push buf "\\n"
+        else if b == 13 then strbuf_push buf "\\r"
+        else if b == 9 then strbuf_push buf "\\t"
+        else if b == 8 then strbuf_push buf "\\b"
+        else if b == 12 then strbuf_push buf "\\f"
+        else if b < 32 then strbuf_push buf (u_escape b)
+        else strbuf_push buf c in
+      esc_at s (i + 1) buf;
+
+  let pstr = fn (s: str) -> "\"" ++ esc_at s 0 (strbuf_new ()) ++ "\"";
+
+  // A block string is only emitted when re-parsing it gives the value back.
+  // `Glex.block_value` is the same dedent the parser applies, so this asks the
+  // real question rather than approximating it with a check on whitespace.
+  let pblock = fn (s: str) ->
+    let raw = s in
+    if str_contains raw "\"\"\"" then
+      fail ("graphql: a block string containing \"\"\" cannot be printed yet: " ++ raw)
+    else if str_eq (Glex.block_value raw) raw then
+      "\"\"\"" ++ raw ++ "\"\"\""
+    else
+      fail ("graphql: this block string's value does not survive re-parsing, so"
+            ++ " printing it would change the tree — refusing rather than"
+            ++ " emitting an ordinary string (see G2): " ++ raw);
+
+  // --- values --------------------------------------------------------------
+  let rec pval = fn (v: gval) ->
+    match v with
+    | VVar n -> "$" ++ n
+    | VInt lex -> lex
+    | VFloat lex -> lex
+    | VStr s -> pstr s
+    | VBlock s -> pblock s
+    | VBool b -> if b then "true" else "false"
+    | VNull -> "null"
+    | VEnum n -> n
+    | VList xs -> "[" ++ jm pval xs ", " ++ "]"
+    | VObj fs -> "\{" ++ jm pfield fs ", " ++ "}"
+  and pfield = fn (kv) -> let (k, v) = kv in k ++ ": " ++ pval v;
+
+  // --- arguments and directives -------------------------------------------
+  let parg = fn (kv) -> let (k, v) = kv in k ++ ": " ++ pval v;
+
+  let pargs = fn (a) ->
+    match a with
+    | [] -> ""
+    | _ -> "(" ++ jm parg a ", " ++ ")";
+
+  let pdir = fn (d: gdir) ->
+    match d with | Dir (n, a) -> "@" ++ n ++ pargs a;
+
+  let pdirs = fn (ds) ->
+    match ds with
+    | [] -> ""
+    | _ -> " " ++ jm pdir ds " ";
+
+  // --- selections ----------------------------------------------------------
+  let rec psel_set = fn (sels) -> "\{ " ++ jm psel sels " " ++ " }"
+  and psel = fn (s: gsel) ->
+    match s with
+    | Field (alias, name, a, d, sub) ->
+      let head = if str_eq alias "" then name else alias ++ ": " ++ name in
+      let tail = match sub with | [] -> "" | _ -> " " ++ psel_set sub in
+      head ++ pargs a ++ pdirs d ++ tail
+    | Spread (n, d) -> "..." ++ n ++ pdirs d
+    | Inline (tc, d, sub) ->
+      let cond = if str_eq tc "" then "" else " on " ++ tc in
+      "..." ++ cond ++ pdirs d ++ " " ++ psel_set sub;
+
+  // --- definitions ---------------------------------------------------------
+  let pvardef = fn (v: gvardef) ->
+    match v with
+    | VarDef (n, ty, dflt, d) ->
+      let dv = match dflt with | [] -> "" | [x, ..._] -> " = " ++ pval x in
+      "$" ++ n ++ ": " ++ ptype ty ++ dv ++ pdirs d;
+
+  let pvardefs = fn (vs) ->
+    match vs with
+    | [] -> ""
+    | _ -> "(" ++ jm pvardef vs ", " ++ ")";
+
+  let pdef = fn (d: gdef) ->
+    match d with
+    | OpDef (op, nm, vs, ds, sels) ->
+      // The shorthand form is not reproduced: `query { a }` and `{ a }` parse to
+      // the same tree apart from... nothing, so printing the long form is safe
+      // and one fewer case to get wrong.
+      op ++ (if str_eq nm "" then "" else " " ++ nm)
+         ++ pvardefs vs ++ pdirs ds ++ " " ++ psel_set sels
+    | FragDef (nm, tc, ds, sels) ->
+      "fragment " ++ nm ++ " on " ++ tc ++ pdirs ds ++ " " ++ psel_set sels;
+
+  let document = fn (defs) -> jm pdef defs "\n";
+}

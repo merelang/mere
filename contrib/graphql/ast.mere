@@ -1,0 +1,62 @@
+// contrib/graphql/ast.mere — the GraphQL executable document, as types.
+//
+// Type-only, no functions, so that the lexer, the parser and the printer share
+// one definition instead of three that drift. Same arrangement as
+// contrib/parser/ast.mere.
+//
+// TWO REPRESENTATION CHOICES worth stating, because both are load-bearing for
+// the parity gate:
+//
+//  1. IntValue and FloatValue keep their LEXEME, not a parsed number. That is
+//     what the specification's AST does and what graphql-js does
+//     (`{kind:'IntValue', value:'123'}` — a string), and it is the only shape
+//     that can round-trip a literal the host language cannot hold. A document
+//     is not obliged to fit in an int64 just because we parsed it.
+//
+//  2. A block string is a DIFFERENT constructor from a plain string, even
+//     though both carry a decoded value. graphql-js records `block: true` in the
+//     AST, so folding the two together would make two different documents print
+//     the same — and the gate compares printed documents.
+//
+// Absence is "" for an alias, an operation name and a type condition. Those are
+// the three places the grammar allows a name to be missing, and none of them can
+// legally be the empty string, so the sentinel cannot collide with a real value.
+
+type gtok =
+  | TName of str
+  | TInt of str
+  | TFloat of str
+  | TStr of str
+  | TBlock of str
+  | TPunct of str
+  | TEof;
+
+type gtype =
+  | TyNamed of str
+  | TyList of gtype
+  | TyNonNull of gtype;
+
+type gval =
+  | VVar of str
+  | VInt of str
+  | VFloat of str
+  | VStr of str
+  | VBlock of str
+  | VBool of bool
+  | VNull
+  | VEnum of str
+  | VList of gval list
+  | VObj of (str * gval) list;
+
+type gdir = Dir of (str * (str * gval) list);
+
+type gsel =
+  | Field of (str * str * (str * gval) list * gdir list * gsel list)
+  | Spread of (str * gdir list)
+  | Inline of (str * gdir list * gsel list);
+
+type gvardef = VarDef of (str * gtype * gval list * gdir list);
+
+type gdef =
+  | OpDef of (str * str * gvardef list * gdir list * gsel list)
+  | FragDef of (str * str * gdir list * gsel list);

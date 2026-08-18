@@ -4,6 +4,72 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-08-18 — Two protocols: the protobuf wire format, and GraphQL documents
+
+_`contrib/proto` and `contrib/graphql`, each with a gate against somebody else's
+implementation._
+
+**`contrib/proto/wire.mere`** — the Protocol Buffers wire format, both
+directions, below any schema. `scripts/proto_parity.sh` holds it to **protoc's
+bytes**: one message containing every wire type compared whole, swept value lists
+crossing every varint length boundary, the int64 edges, and protoc's own bytes
+read back and rewritten. Interpreter and C backend both.
+
+Three things the harness had to be taught, each by being wrong first:
+
+* **`bit_shr` is arithmetic**, so a negative int64 shifted right never reaches
+  zero and the encoder loops forever. Every right shift here is masked.
+* **0 cannot be swept.** proto3 omits a scalar holding its default, so
+  `protoc --encode` answers the empty string for `v: 0` while a schema-less layer
+  writes `0800`. That is a question one layer up, not a wire-format disagreement.
+* **The zigzag bound is half the varint bound**, because zigzag doubles its input.
+
+And one thing that is pinned rather than fixed: **the interpreter's int is
+63-bit** (OCaml's native int) while every compiled backend's is 64-bit, so above
+2^62 the same program gives different answers — `bit_shl 1 62` is negative on the
+interpreter and `bit_shl 1 63` is zero. Those are recorded as a DIVERGE pin, not
+a tolerance, so the day the interpreter becomes 64-bit that section fails and
+says the pin must be retired. Related: an integer literal above 2^62−1 cannot be
+written at all — it dies with an uncaught `Failure("int_of_string")` — so the edge
+values in the harness are computed from 2^62−1 instead. This is the int axis of
+the open question about builtin parity at particular values, and it is the same
+shape as the float axis before exponent literals landed in v0.1.260: the reason
+it was not measured is that it could not be written.
+
+**`contrib/graphql`** — lexer, parser and printer for executable documents
+(operations and fragments; SDL is a separate grammar and is not here).
+`scripts/graphql_parity.sh` checks it against graphql-js by sending our output
+back through their parser:
+
+```
+theirs: print(parse(D)) -> A     ours: print(parse(ours(D))) -> B     assert A == B
+```
+
+`print` is a function of the AST alone, so equality holds exactly when the parses
+agree — **and nothing transcribes an AST**. The alternative, serialising both
+trees into a shared format, needs a serialiser for the oracle's tree that can hold
+the same misreading as the parser it checks; a differential gate that shares a bug
+with its subject reports agreement. The corpus is derived rather than written
+down: every value kind × every position admitting a value, every selection form,
+every operation shape, nested type expressions. 153 documents.
+
+**The gate was then deliberately broken to see whether it could fail.** Dropping
+every directive in the printer: caught. Dropping field aliases in the parser:
+caught. Making the lexer call **every** number an `IntValue`: **not caught** — the
+printer emits a numeric literal's lexeme unchanged, so `IntValue "1.0"` prints
+`1.0`, the oracle re-parses it as a `FloatValue`, and the two printed documents
+agree. A round-trip is blind to any distinction that prints identically. A fourth
+section now asks for the kind directly, and it is the one place that transcribes
+anything from the oracle's tree — a two-word vocabulary.
+
+The printer **refuses** a block string whose value would not survive re-parsing
+rather than emitting an ordinary string: the dedent rule is applied again on the
+way back in, and downgrading it would round-trip the text while losing
+`block: true` from the tree — a wrong answer wearing the face of a parser bug.
+
+Both gates are in CI, both run under `dash` before being put there, and both
+oracles are pinned and printed (protoc 27.3, graphql-js 17.0.2).
+
 ## v0.1.279 — 2026-08-17
 
 _The refusals that were left, and three bugs they walked into._
