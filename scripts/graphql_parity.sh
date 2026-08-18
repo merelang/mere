@@ -65,10 +65,43 @@ fi
 GQL_VER=$(node -p "require('$GQL_DIR/package.json').version")
 echo "graphql_parity: oracle is graphql-js $GQL_VER (node $(node -v)) at $GQL_DIR"
 
+# THE SUBJECT IS ALLOWED TO CRASH, AND THAT MUST BE REPORTED RATHER THAN FATAL.
+#
+# `set -e` plus a failing `$MERE` used to abort this script in the middle: the
+# raw Mere error printed, no verdict line appeared, and EVERY SECTION AFTER THE
+# CRASH WAS SILENTLY SKIPPED. A parser change that made one corpus document
+# unparseable therefore hid the reject-list and the numeric-kind sections
+# entirely — the same shape as a skip path that hides what it has not reached.
+#
+# Found by deliberately dropping `repeatable` from the parser: the harness said
+# nothing at all and exited as though it had run.
+#
+# So the subject runs through this, which never aborts, names the section, and
+# lets the remaining sections still run.
+run_subject() {  # run_subject <label> <mere-file> [<stdout-file>]
+  label=$1; file=$2; out=${3:-/dev/null}
+  if ( ulimit -t 300; "$MERE" "$file" ) > "$out" 2> "$TMP/subject.err"; then
+    return 0
+  else
+    echo "  FAIL  $label  the parser itself failed on this section:"
+    sed 's/^/          /' "$TMP/subject.err" | head -4
+    fail=1
+    return 1
+  fi
+}
+
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"; rm -f "$ROOT/examples/.graphql_parity_tmp.mere"' EXIT
 mkdir -p "$TMP/in" "$TMP/out"
 fail=0
+
+# `set -e` was right for the preflight — a missing oracle should stop everything —
+# and WRONG for the sections. Every section below records its own verdict in
+# `fail`, so an abort here does not add safety, it removes sections: the first
+# section whose subject crashed took the rest of the harness with it and the
+# script exited having printed no summary. From here on, a failing command is a
+# recorded failure, not the end of the run.
+set +e
 
 # --- the corpus, derived --------------------------------------------------
 python3 - "$TMP/in" <<'PY'
@@ -144,6 +177,71 @@ add("{ f(a: 1, b: 2,) }")
 add('{ f(a: """hello""") }')
 add('{ f(a: """\nhello\nworld\n""") }')
 
+# --- type-system definitions (SDL) ---------------------------------------
+# Same idea: cross the axes rather than write down the cases somebody thought of.
+descs = ["", '"d" ', '"""d""" ']
+dirs  = ["", " @d", " @d @e", " @d(x: 1)"]
+
+for desc in descs:
+    for d in dirs:
+        add(f"{desc}scalar S{d}")
+        add(f"{desc}type T{d}")
+        add(f"{desc}type T{d} {{ f: Int }}")
+        add(f"{desc}interface I{d} {{ a: Int }}")
+        add(f"{desc}union U{d} = A")
+        add(f"{desc}enum E{d} {{ A }}")
+        add(f"{desc}input In{d} {{ a: Int }}")
+        add(f"{desc}schema{d} {{ query: Q }}")
+        # a directive DEFINITION cannot itself carry directives, so `d` is not
+        # applied here — the axis does not exist for this production.
+        add(f"{desc}directive @dd on FIELD")
+
+# objects and interfaces: implements × fields
+for impl in ["", " implements A", " implements A & B", " implements A & B & C"]:
+    for fields in ["", " { f: Int }", " { f: Int g: String! }"]:
+        add(f"type T{impl}{fields}")
+        add(f"interface I{impl}{fields}")
+
+# field definitions: arguments × types × directives
+for args in ["", "(x: Int)", "(x: Int = 1)", "(x: Int, y: [String!]! = [])",
+             '("ad" x: Int)', '("""ad""" x: Int = null)']:
+    for ty in ["Int", "Int!", "[Int]", "[[Int!]!]!"]:
+        add(f"type T {{ f{args}: {ty} }}")
+        add(f"type T {{ f{args}: {ty} @d }}")
+
+# unions, enums, inputs at several sizes
+for ms in ["A", "A | B", "A | B | C"]:
+    add(f"union U = {ms}")
+for vs in ["A", "A B", "A B @d", '"d" A B']:
+    add(f"enum E {{ {vs} }}")
+for fs in ["a: Int", "a: Int = 1", "a: Int b: String = \"s\"", '"d" a: Int = null']:
+    add(f"input In {{ {fs} }}")
+
+# directive definitions: repeatable × arguments × locations
+for rep in ["", " repeatable"]:
+    for args in ["", "(a: Int)", "(a: Int = 1, b: String)"]:
+        for locs in ["FIELD", "FIELD | OBJECT",
+                     "QUERY | MUTATION | SUBSCRIPTION | FIELD_DEFINITION"]:
+            add(f"directive @dd{args}{rep} on {locs}")
+
+# schema definitions
+for ops in ["query: Q", "query: Q mutation: M", "query: Q mutation: M subscription: S"]:
+    add(f"schema {{ {ops} }}")
+
+# a whole schema, and a document that mixes SDL with executable definitions
+add("""
+"The root"
+type Query { hello(name: String = "world"): String! users: [User!]! }
+"A user"
+type User implements Node { id: ID! name: String @deprecated(reason: "no") }
+interface Node { id: ID! }
+union Any = Query | User
+enum Colour { RED GREEN "a blue" BLUE @deprecated }
+input Filter { name: String limit: Int = 10 }
+directive @auth(role: String!) repeatable on FIELD_DEFINITION | OBJECT
+schema { query: Query }
+""".strip())
+
 print(n)
 PY
 CORPUS=$(ls "$TMP/in" | wc -l | tr -d ' ')
@@ -190,7 +288,7 @@ fi
   echo '0'
 } > "$ROOT/examples/.graphql_parity_tmp.mere"
 
-( ulimit -t 300; "$MERE" "$ROOT/examples/.graphql_parity_tmp.mere" ) > /dev/null
+run_subject "round-trip" "$ROOT/examples/.graphql_parity_tmp.mere" || true
 
 # --- B = print(parse(M)), then compare A and B ---------------------------
 cat > "$TMP/back.js" <<'NODE'
@@ -322,7 +420,8 @@ GQL_DIR="$GQL_DIR" node "$TMP/kinds.js" "$TMP/nums.txt" > "$TMP/kinds_want.txt"
   echo '0'
 } > "$ROOT/examples/.graphql_parity_tmp.mere"
 
-( ulimit -t 180; "$MERE" "$ROOT/examples/.graphql_parity_tmp.mere" ) | sed '$d' > "$TMP/kinds_ours.txt"
+run_subject "numeric kind" "$ROOT/examples/.graphql_parity_tmp.mere" "$TMP/kinds_raw.txt" || true
+sed '$d' "$TMP/kinds_raw.txt" > "$TMP/kinds_ours.txt" 2>/dev/null || : > "$TMP/kinds_ours.txt"
 
 if diff -q "$TMP/kinds_want.txt" "$TMP/kinds_ours.txt" >/dev/null; then
   echo "  ok    numeric kind  $(grep -c . "$TMP/nums.txt") lexemes: Int/Float classified as the oracle does"
@@ -331,6 +430,117 @@ else
   paste -d'|' "$TMP/nums.txt" "$TMP/kinds_want.txt" "$TMP/kinds_ours.txt" \
     | awk -F'|' '$2 != $3 { printf "        %-32s oracle=%-16s ours=%s\n", $1, $2, $3 }'
   fail=1
+fi
+
+# --- what must be REJECTED -----------------------------------------------
+#
+# Everything above feeds valid documents. A parser that accepts anything passes
+# all of it. So this section is the other half: documents the ORACLE rejects,
+# which we must reject too. Each runs in its own process because a refusal aborts.
+#
+# The distinction being checked is not "does it error" but "does it error INSTEAD
+# of quietly producing a tree" — a parser that reads `{ a` as `{ a }` has invented
+# a closing brace, and nothing in the round-trip section would notice.
+python3 - "$TMP" <<'PY'
+import sys, pathlib
+bad = [
+    "{ a",                       # unterminated selection set
+    "{ a }}",                    # a brace too many
+    "{ }",                       # a selection set needs a selection
+    "{ f(a: ) }",                # an argument needs a value
+    "{ f(a 1) }",                # an argument needs a colon
+    "query",                     # an operation needs a selection set
+    "query Q(",                  # unterminated variable definitions
+    "query Q($x) { f }",         # a variable definition needs a type
+    "query Q($x: ) { f }",       # ... and the type must be there
+    "fragment on T { a }",       # a fragment may not be called `on`
+    "fragment F T { a }",        # `on` is not optional
+    "fragment F on { a }",       # ... and it needs a type
+    "{ ...on }",                 # `on` needs a type condition
+    "{ f @ }",                   # a directive needs a name
+    "{ f(a: [1) }",              # unterminated list
+    "{ f(a: {k: 1) }",           # unterminated object
+    "{ f(a: 007) }",             # an IntValue may not have a leading zero
+    "{ f(a: .5) }",              # a FloatValue needs an integer part
+    "{ f(a: 1.) }",              # ... and a fraction needs a digit
+    '{ f(a: "unterminated) }',   # unterminated string
+    "type",                      # a type definition needs a name
+    "type T { }",                # a fields block may not be empty
+    "type T { f }",              # a field definition needs a type
+    "union U =",                 # a union needs a member
+    "enum E { }",                # an enum values block may not be empty
+    "input In { }",              # ... nor an input fields block
+    "directive dd on FIELD",     # a directive definition needs `@`
+    "directive @dd on",          # ... and at least one location
+    "schema { query }",          # an operation type needs a named type
+    "!",                         # not a definition
+    ". ",                        # a lone dot is not a token
+    "schema { }",                # a schema definition needs a root operation type
+    "{ f() }",                   # an argument list may not be empty
+    "query Q() { f }",           # nor a variable definition list
+    "type T { f(): Int }",       # nor an argument DEFINITION list
+    "{ f(a: 1.2.3) }",           # a number may not be followed by `.`
+    "{ f(a: 1abc) }",            # nor by a name start
+]
+pathlib.Path(sys.argv[1], "bad.txt").write_text("\n".join(bad) + "\n")
+PY
+
+cat > "$TMP/badcheck.js" <<'NODE'
+const fs = require("fs");
+const { parse } = require(process.env.GQL_DIR);
+for (const doc of fs.readFileSync(process.argv[2], "utf8").split("\n")) {
+  if (!doc) continue;
+  let ok = "REJECT";
+  try { parse(doc); ok = "ACCEPT"; } catch (e) {}
+  console.log(ok);
+}
+NODE
+GQL_DIR="$GQL_DIR" node "$TMP/badcheck.js" "$TMP/bad.txt" > "$TMP/bad_oracle.txt"
+
+# A document in this list that the ORACLE accepts is a bug in the list, not a
+# finding — the same rule as the corpus check above.
+if grep -qx ACCEPT "$TMP/bad_oracle.txt"; then
+  echo "  FAIL  reject-list  the oracle ACCEPTS documents this list calls invalid:"
+  paste -d'|' "$TMP/bad.txt" "$TMP/bad_oracle.txt" \
+    | awk -F'|' '$2 == "ACCEPT" { printf "        %s\n", $1 }' | head -8
+  fail=1
+else
+  nbad=0; nwrong=0
+  while IFS= read -r doc; do
+    [ -z "$doc" ] && continue
+    nbad=$((nbad + 1))
+    printf 'import "../contrib/graphql/ast.mere";\nimport "../contrib/graphql/lexer.mere";\nimport "../contrib/graphql/parser.mere";\nimport "../contrib/graphql/printer.mere";\nprint (Gprint.document (Gparse.document (read_file "%s")))\n' \
+      "$TMP/one.graphql" > "$ROOT/examples/.graphql_parity_tmp.mere"
+    printf '%s' "$doc" > "$TMP/one.graphql"
+    if ( ulimit -t 60; "$MERE" "$ROOT/examples/.graphql_parity_tmp.mere" ) >/dev/null 2>&1; then
+      echo "        ACCEPTED (should have been refused): $doc"
+      nwrong=$((nwrong + 1))
+    fi
+  done < "$TMP/bad.txt"
+  if [ "$nwrong" = 0 ]; then
+    echo "  ok    reject-list  $nbad documents the oracle rejects are refused here too"
+  else
+    echo "  FAIL  reject-list  $nwrong of $nbad were accepted"
+    fail=1
+  fi
+fi
+
+# --- the documented gap, checked ----------------------------------------
+#
+# Type-system EXTENSIONS are valid GraphQL that this parser does not implement.
+# That is a gap, and a gap is only honest if it is CHECKED: the parser must refuse
+# `extend` rather than read it as the non-extension form, and this asserts the
+# refusal. When extensions land, this section fails and says the assertion is
+# stale — the same discipline as the DIVERGE pin in proto_parity.
+printf 'extend type T { a: Int }' > "$TMP/one.graphql"
+printf 'import "../contrib/graphql/ast.mere";\nimport "../contrib/graphql/lexer.mere";\nimport "../contrib/graphql/parser.mere";\nimport "../contrib/graphql/printer.mere";\nprint (Gprint.document (Gparse.document (read_file "%s")))\n' \
+  "$TMP/one.graphql" > "$ROOT/examples/.graphql_parity_tmp.mere"
+if ( ulimit -t 60; "$MERE" "$ROOT/examples/.graphql_parity_tmp.mere" ) >/dev/null 2>&1; then
+  echo "  FAIL  extensions  `extend type T` was ACCEPTED — either extensions now work"
+  echo "        (retire this section) or they are being mis-parsed as a plain definition."
+  fail=1
+else
+  echo "  DOCUMENTED-GAP  extensions  \`extend ...\` is refused, not mis-parsed"
 fi
 
 [ "$fail" = 0 ] && echo "graphql_parity: ok ($CORPUS generated documents)" \
