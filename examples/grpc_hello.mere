@@ -28,19 +28,12 @@ import "../contrib/http2/server.mere";
 // omits a field holding its default, so a request of `{}` arrives as ZERO bytes —
 // not as an empty string in field 1 — and a decoder that reads field 1 without
 // looking would fail on the most ordinary input there is.
-// `wt_delimited` is a local copy of `Wire.delimited`, and it has to be: an inner
-// `let rec` that references a MODULE-QUALIFIED constant makes the C backend emit
-// the qualified name as a struct field — `long long Wire.delimited;` — which is
-// not valid C. The interpreter is fine, so this is only visible after `mere -c`.
-// Six-line reproduction and the diagnosis are in the open questions.
-let wt_delimited = Wire.delimited;
-
 let req_name = fn (msg: bytes) ->
   let rec go = fn (i: int, acc: str) ->
     if i >= bytes_len msg then acc
     else
       let (f, wt, j) = Wire.get_tag msg i in
-      if f == 1 && wt == wt_delimited then
+      if f == 1 && wt == Wire.delimited then
         let (v, k) = Wire.get_delimited msg j in
         go k (str_of_bytes v)
       else go (Wire.skip_value msg j wt) acc in

@@ -1987,7 +1987,7 @@ let rec emit_expr (e : Ast.expr) : string =
       let inits =
         String.concat " "
           (List.map (fun (n, _) ->
-            Printf.sprintf "__env->%s = %s;" n (emit_expr
+            Printf.sprintf "__env->%s = %s;" (flatten_module_dots n) (emit_expr
               { Ast.loc = e.loc; ty = Some (List.assoc n captures);
                 node = Ast.Var n })) captures)
       in
@@ -5059,10 +5059,20 @@ let emit_lifted_fn_direct_forward_decl (f : lifted_fn) : string option =
 let emit_closure_env_typedef (ce : closure_emission) : string =
   if ce.ce_env_fields = [] then ""
   else
+    (* Q-043: a capture's name becomes a STRUCT FIELD, and a module-qualified
+       name contains a dot, which is not legal in a C identifier. An inner
+       `let rec` referencing `Wire.delimited` emitted `long long Wire.delimited;`
+       and the generated C failed to parse — pointing at a line the user never
+       wrote. The inner-LIFTED env path (`__env_local->`) already flattened the
+       dots; this path did not, and the two have to agree.
+
+       `flatten_module_dots` is the identity for a name without a dot, so every
+       program that did not hit this emits byte-identical C. *)
     let fields =
       String.concat "\n"
         (List.map (fun (n, t) ->
-          Printf.sprintf "  %s %s;" (c_type_of t) n) ce.ce_env_fields)
+          Printf.sprintf "  %s %s;" (c_type_of t) (flatten_module_dots n))
+          ce.ce_env_fields)
     in
     Printf.sprintf "typedef struct {\n%s\n} %s;" fields ce.ce_env_name
 
@@ -5779,8 +5789,11 @@ let emit_closure_adapter (ce : closure_emission) : string =
      when this closure was queued, so any Let_rec inside the closure
      body finds its inner-lifted siblings. *)
   set_inner_lifts_for_host ce.ce_host;
+  (* Q-043: the KEY is the name as written (that is what `Var n` in the body
+     says), the FIELD is the flattened one (that is what the struct declares). *)
   let env_subst =
-    List.map (fun (n, _) -> (n, "(__env_self->" ^ n ^ ")"))
+    List.map (fun (n, _) ->
+      (n, "(__env_self->" ^ flatten_module_dots n ^ ")"))
       ce.ce_env_fields
   in
   let prev = !current_env_subst in
