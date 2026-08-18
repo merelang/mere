@@ -1,0 +1,237 @@
+// contrib/http2/frame.mere — HTTP/2 frames, both directions.
+//
+// The layer below HPACK and below any notion of a request: an HTTP/2 connection
+// is a preface followed by a sequence of frames, each a 9-byte header and a
+// payload. Nothing here knows what a HEADERS frame's payload means — that is
+// HPACK's job — which is what lets this be shared by a server, a client and a
+// packet dumper.
+//
+// The oracle is `hyperframe`, an independent implementation of RFC 9113, and
+// `scripts/http2_parity.sh` compares BYTES with it in both directions.
+//
+// TWO FACTS THAT COST TIME IF YOU GET THEM WRONG, and that the gate keeps true:
+//
+//  1. HTTP/2 IS BIG-ENDIAN, and protobuf's fixed fields are little-endian. Two
+//     protocols in the same program with opposite byte order is exactly the
+//     place a copied helper produces a plausible wrong answer, so nothing here
+//     is shared with contrib/proto.
+//
+//  2. THE STREAM IDENTIFIER IS 31 BITS. The top bit of that 4-byte field is
+//     reserved and MUST be ignored on receipt — not rejected, ignored. A decoder
+//     that reads all 32 bits works against every well-behaved peer and then
+//     reports a stream id of 2147483649 the first time it meets one that sets the
+//     bit.
+//
+// Buffers follow the same split as contrib/proto: the writer builds into a
+// `Vec[R, int]`, the reader reads from `bytes`. `bytes_slice` gives a frame's
+// payload its own buffer with no copy loop.
+
+module H2 {
+
+  // The connection preface a client sends before anything else. It is exactly
+  // these 24 bytes, and it is deliberately not valid HTTP/1.1 so that a server
+  // which does not speak HTTP/2 cannot half-understand it.
+  let preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+  let preface_len = 24;
+
+  // --- frame types ---------------------------------------------------------
+  let data = 0;
+  let headers = 1;
+  let priority = 2;
+  let rst_stream = 3;
+  let settings = 4;
+  let push_promise = 5;
+  let ping = 6;
+  let goaway = 7;
+  let window_update = 8;
+  let continuation = 9;
+
+  // --- flags ---------------------------------------------------------------
+  // ACK and END_STREAM share the value 0x1: which one it means depends on the
+  // frame type. Naming both is the point — a call site that says `H2.ack` on a
+  // SETTINGS frame reads correctly, and one that says `end_stream` there is a
+  // bug a reader can see.
+  let end_stream = 1;
+  let ack = 1;
+  let end_headers = 4;
+  let padded = 8;
+  let flag_priority = 32;
+
+  let header_len = 9;
+
+  // --- big-endian integers -------------------------------------------------
+  //
+  // `bit_shr` IS AN ARITHMETIC SHIFT and that is fine HERE, which is worth
+  // stating because it is not fine in contrib/proto. The difference is what
+  // happens to the shifted value:
+  //
+  //   * here every shift is immediately masked with 255 to extract one byte, and
+  //     the bits an arithmetic shift copies in are all above bit 7, so they are
+  //     discarded. A logical shift would give the same byte.
+  //   * in contrib/proto the shifted value is the LOOP VARIABLE — the varint
+  //     encoder shifts until it reaches zero — so a negative int64 shifted
+  //     arithmetically never terminates. There the mask is load-bearing.
+  //
+  // The first version of this file carried the mask anyway. Poisoning the gate
+  // showed removing it changed nothing, which is the definition of dead code:
+  // a guard that cannot fire is a claim the reader has to check for themselves.
+  let put_u8 = fn (b, x: int) -> vec_push b (bit_and x 255);
+
+  let put_u16be = fn (b, x: int) ->
+    let _ = put_u8 b (bit_shr x 8) in put_u8 b x;
+
+  let put_u24be = fn (b, x: int) ->
+    let _ = put_u8 b (bit_shr x 16) in
+    let _ = put_u8 b (bit_shr x 8) in
+    put_u8 b x;
+
+  let put_u32be = fn (b, x: int) ->
+    let _ = put_u8 b (bit_shr x 24) in
+    let _ = put_u8 b (bit_shr x 16) in
+    let _ = put_u8 b (bit_shr x 8) in
+    put_u8 b x;
+
+  let get_u8 = fn (b: bytes, i: int) ->
+    if i >= bytes_len b then fail "http2: read past the end of the buffer"
+    else bytes_get b i;
+
+  let get_u16be = fn (b: bytes, i: int) ->
+    bit_or (bit_shl (get_u8 b i) 8) (get_u8 b (i + 1));
+
+  let get_u24be = fn (b: bytes, i: int) ->
+    bit_or (bit_shl (get_u8 b i) 16)
+      (bit_or (bit_shl (get_u8 b (i + 1)) 8) (get_u8 b (i + 2)));
+
+  let get_u32be = fn (b: bytes, i: int) ->
+    bit_or (bit_shl (get_u8 b i) 24)
+      (bit_or (bit_shl (get_u8 b (i + 1)) 16)
+        (bit_or (bit_shl (get_u8 b (i + 2)) 8) (get_u8 b (i + 3))));
+
+  let rec append_bytes_at = fn (out, v: bytes, k: int) ->
+    if k >= bytes_len v then ()
+    else
+      let _ = vec_push out (bytes_get v k) in
+      append_bytes_at out v (k + 1);
+
+  // --- writing a frame -----------------------------------------------------
+  //
+  // The length is the PAYLOAD's length, not the frame's, and it is written
+  // before the payload — so a writer that streams cannot know it in advance and
+  // has to buffer. That is why the payload arrives here already built.
+  let put_header = fn (b, ln: int, ty: int, flags: int, stream: int) ->
+    let _ = put_u24be b ln in
+    let _ = put_u8 b ty in
+    let _ = put_u8 b flags in
+    // The reserved bit is written as zero. Masking on the way out as well as on
+    // the way in means a caller that hands over a negative stream id gets a
+    // well-formed frame instead of four garbage bytes.
+    put_u32be b (bit_and stream 2147483647);
+
+  let put_frame = fn (b, ty: int, flags: int, stream: int, payload: bytes) ->
+    let _ = put_header b (bytes_len payload) ty flags stream in
+    append_bytes_at b payload 0;
+
+  let frame_bytes = fn (ty: int, flags: int, stream: int, payload: bytes) ->
+    let b = vec_new () in
+    let _ = put_frame b ty flags stream payload in
+    bytes_of_vec b;
+
+  // --- reading a frame -----------------------------------------------------
+  //
+  // Returns (length, type, flags, stream, payload, next index). The next index
+  // is part of the answer because frames are back to back with no separator:
+  // position is the only thing that says where one ended.
+  let read_frame = fn (b: bytes, i: int) ->
+    if i + header_len > bytes_len b then
+      fail "http2: a frame header runs past the end of the buffer"
+    else
+      let ln = get_u24be b i in
+      let ty = get_u8 b (i + 3) in
+      let flags = get_u8 b (i + 4) in
+      // The top bit is RESERVED and must be ignored, not rejected.
+      let stream = bit_and (get_u32be b (i + 5)) 2147483647 in
+      let p = i + header_len in
+      if p + ln > bytes_len b then
+        fail "http2: a frame's payload runs past the end of the buffer"
+      else (ln, ty, flags, stream, bytes_slice b p ln, p + ln);
+
+  let has_flag = fn (flags: int, f: int) -> bit_and flags f == f;
+
+  // --- SETTINGS ------------------------------------------------------------
+  // The payload is a sequence of (16-bit identifier, 32-bit value) pairs, and
+  // an ACK carries no payload at all. An unknown identifier must be IGNORED
+  // rather than refused, which is how the protocol stays extensible.
+  let rec put_settings_at = fn (b, kvs) ->
+    match kvs with
+    | [] -> ()
+    | [(k, v), ...rest] ->
+      let _ = put_u16be b k in
+      let _ = put_u32be b v in
+      put_settings_at b rest;
+
+  let settings_payload = fn (kvs) ->
+    let b = vec_new () in
+    let _ = put_settings_at b kvs in
+    bytes_of_vec b;
+
+  let rec read_settings_at = fn (p: bytes, i: int, acc) ->
+    if i >= bytes_len p then acc
+    else if i + 6 > bytes_len p then
+      fail "http2: a SETTINGS payload must be a multiple of six bytes"
+    else
+      read_settings_at p (i + 6)
+        (Cons ((get_u16be p i, get_u32be p (i + 4)), acc));
+
+  // Reversed by construction, so reverse once at the end rather than per pair.
+  let rec rev_pairs = fn (xs, acc) ->
+    match xs with
+    | [] -> acc
+    | [h, ...t] -> rev_pairs t (Cons (h, acc));
+
+  let read_settings = fn (p: bytes) -> rev_pairs (read_settings_at p 0 []) [];
+
+  // --- the payloads that are a single 32-bit integer -----------------------
+  let u32_payload = fn (x: int) ->
+    let b = vec_new () in
+    let _ = put_u32be b x in
+    bytes_of_vec b;
+
+  // WINDOW_UPDATE's increment and RST_STREAM's error code are both one u32; the
+  // increment's top bit is reserved, the error code's is not.
+  let window_increment = fn (p: bytes) -> bit_and (get_u32be p 0) 2147483647;
+  let error_code = fn (p: bytes) -> get_u32be p 0;
+
+  // --- GOAWAY --------------------------------------------------------------
+  let goaway_payload = fn (last_stream: int, err: int, debug: bytes) ->
+    let b = vec_new () in
+    let _ = put_u32be b (bit_and last_stream 2147483647) in
+    let _ = put_u32be b err in
+    let _ = append_bytes_at b debug 0 in
+    bytes_of_vec b;
+
+  // --- the gRPC message framing -------------------------------------------
+  //
+  // NOT part of HTTP/2. gRPC puts its own length prefix inside DATA frames: one
+  // byte saying whether the message is compressed, then a BIG-ENDIAN 32-bit
+  // length, then that many bytes. It lives here because it is the other framing
+  // a DATA frame's payload has, and separating them would mean two files that
+  // both have to know the byte order.
+  //
+  // Measured against a real client rather than read off prose: grpcurl 1.8.8
+  // sent `00 0000000f` ahead of a 15-byte message.
+  let grpc_message = fn (msg: bytes) ->
+    let b = vec_new () in
+    let _ = put_u8 b 0 in
+    let _ = put_u32be b (bytes_len msg) in
+    let _ = append_bytes_at b msg 0 in
+    bytes_of_vec b;
+
+  let read_grpc_message = fn (p: bytes, i: int) ->
+    if i + 5 > bytes_len p then fail "http2: a gRPC message prefix needs five bytes"
+    else
+      let compressed = get_u8 p i in
+      let ln = get_u32be p (i + 1) in
+      if i + 5 + ln > bytes_len p then
+        fail "http2: a gRPC message runs past the end of the DATA payload"
+      else (compressed, bytes_slice p (i + 5) ln, i + 5 + ln);
+}
