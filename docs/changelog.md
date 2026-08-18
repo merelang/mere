@@ -4,6 +4,50 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-08-18 — A GraphQL executor, and the one case out of 67 that mattered
+
+_`contrib/graphql/exec.mere` plus `scripts/graphql_exec_parity.sh` against
+graphql-js's `execute()`._
+
+**The resolvers are the data.** A field is resolved by looking its name up in the
+parent object, which is graphql-js's default. Both sides get the same schema, the
+same document and the same root value, so **nothing about resolution is
+transcribed** — two hand-written resolver sets would drift and the drift would look
+like an execution difference.
+
+What that arrangement really exercises is **null propagation**, and it is why an
+oracle earns its place. A non-null field that resolves to null is not an error in
+that field: it destroys the nearest **nullable** ancestor. `{ nn }` answers
+`"data": null`. An item error in `[Int!]` nulls the whole list with a path of
+`["ln", 1]`. All of it was measured off the oracle before being implemented,
+because reading behaviour off a specification and reading it off a running
+implementation are different activities.
+
+Every position is one of two things — `GOk (value, errors)` or `GBubble errors` —
+and the four cases in the specification fall out of those two constructors instead
+of needing exceptions the language does not have.
+
+**Of 67 corpus cases exactly one differed, and it was the interesting one.**
+`{ o2 { nnx } }` with `o2: O!` produced *two* errors: the real one about `O.nnx`
+and an invented one about `Query.o2`. The oracle produces one. When a non-null
+position is null **because an error already propagated**, no second error is
+raised — the check that would raise it is never reached, because the propagation
+went past it. The fix splits the job: `raw` completes a position with no absorbing,
+and `complete` decides what the position's nullability means. A list item goes
+through `complete`, so `[O]` nulls the item and `[O!]` nulls the list, which now
+falls out rather than being special-cased.
+
+Poisoning the gate ten ways caught nine immediately. The tenth is worth recording
+as a coverage lesson: breaking the **named** fragment's type-condition check went
+unnoticed because the corpus only had the **inline** form. Two nearly identical
+branches, one of them unchecked. Three named-spread cases closed it, and the
+poison then failed as it should.
+
+Error messages are compared verbatim — the specification does not fix the prose, so
+matching the reference implementation is the only way to compare them at all, and
+the oracle is pinned. `locations` are stripped from both sides: they need source
+positions the parser does not carry, which is a stated gap rather than an accident.
+
 ## v0.1.280 — 2026-08-18
 
 _A capture whose name has a dot in it._
