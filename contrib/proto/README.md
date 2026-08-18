@@ -192,8 +192,12 @@ Poisoning found two coverage gaps:
    two spellings mean the same thing rather than being told.
 
 ## Not here yet
-- `double` / `float` fields. They need IEEE-754 bit patterns; a bit-exact
-  conversion from existing language features has been measured to work (24 values,
-  no differences) but costs a scaling loop per value.
+- ~~`double` / `float` fields~~ — **done** (mere v0.1.281). They needed IEEE-754 bit
+  patterns, and `float_bits_hi` / `float_bits_lo` / `f32_bits` provide them. The
+  bits come out in two 32-bit halves rather than one 64-bit integer, because a
+  whole pattern read as a signed int64 does not fit the interpreter's native int for
+  a large share of ordinary values — `1e308` among them — and one accessor would have
+  answered differently there than on every compiled backend. `put_double` /
+  `put_float` keep that split inside this layer.
 - Groups (wire types 3 and 4) are recognised by `skip_value`'s refusal, not
   decoded. They are deprecated and no proto3 file can produce them.

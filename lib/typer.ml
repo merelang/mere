@@ -1931,6 +1931,22 @@ let initial_env : env =
     ("str_of_int",  mono (Ast.TyArrow (Ast.TyInt,  Ast.TyStr)));
     ("float_of_int", mono (Ast.TyArrow (Ast.TyInt,  Ast.TyFloat)));
     ("int_of_float", mono (Ast.TyArrow (Ast.TyFloat, Ast.TyInt)));
+    (* Q-038: IEEE-754 bit access, as TWO 32-BIT HALVES rather than one 64-bit
+       integer. That is not a stylistic choice — it was measured. A double's bit
+       pattern read as a signed int64 exceeds this interpreter's 63-bit native int
+       for a large share of ordinary values: -1.5, 1e308, inf and nan all do. A
+       single 64-bit accessor would therefore answer differently on the
+       interpreter than on every compiled backend, for `1e308`. Each 32-bit half
+       is always below 2^32, so there is nothing to diverge about. *)
+    ("float_bits_hi", mono (Ast.TyArrow (Ast.TyFloat, Ast.TyInt)));
+    ("float_bits_lo", mono (Ast.TyArrow (Ast.TyFloat, Ast.TyInt)));
+    ("float_of_bits", mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyFloat))));
+    (* float32, for a protobuf `float` field and anything else with a 4-byte float.
+       The rounding is the backend's own double-to-float conversion, which is
+       round-to-nearest-even — writing that rounding by hand is the part nobody
+       should have to get right twice. *)
+    ("f32_bits", mono (Ast.TyArrow (Ast.TyFloat, Ast.TyInt)));
+    ("float_of_f32_bits", mono (Ast.TyArrow (Ast.TyInt, Ast.TyFloat)));
     ("str_of_float", mono (Ast.TyArrow (Ast.TyFloat, Ast.TyStr)));
     ("float_of_str", mono (Ast.TyArrow (Ast.TyStr,  Ast.TyFloat)));
     ("f_add",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyFloat))));
