@@ -62,6 +62,20 @@ type gvalue =
   | GStr of str
   | GList of gvalue list
   | GObj of (str * gvalue) list
+  // A FIELD THAT IS A FUNCTION OF ITS ARGUMENTS.
+  //
+  // Everywhere else "the resolvers are the data", which is what makes the execution
+  // gate meaningful: with the default resolver on both sides nothing about resolution
+  // is transcribed. But `user(id: 5)` cannot be data — its value depends on an argument
+  // the document supplies — so a field's value may be a function of the coerced
+  // arguments instead.
+  //
+  // The gate for THIS is necessarily different, and the difference is worth stating: a
+  // hand-written resolver exists on both sides and the two could drift. So the harness
+  // makes its resolvers ECHO THE ARGUMENTS THEY RECEIVED, which keeps the resolver
+  // trivial and puts the comparison back on argument COERCION — defaults, absence,
+  // variables — where an oracle earns its place.
+  | GFn of ((str * gvalue) list -> gvalue)
   // A LAZY REFERENCE TO A TYPE, and the only non-data value in this model.
   //
   // Introspection is CYCLIC: `__schema.types` lists every type, each type's
@@ -223,7 +237,30 @@ module Gexec {
     | [] -> GNull
     | [(k, v), ...rest] -> if str_eq k name then v else lookup_var rest name;
 
-  let doc_value = fn (v: gval, vars) ->
+  // WHETHER A VARIABLE WAS SUPPLIED, which is not whether its value is non-null. An
+  // explicitly-null variable is supplied, and that distinction decides two things:
+  //
+  //   * an explicit null BEATS the variable's own default. Measured:
+  //     `query Q($v: Int = 9)` with `{"v": null}` gives `null`, with `{}` gives `9`.
+  //   * an argument whose variable was NOT supplied is treated as not written at all,
+  //     so the field's schema default applies to it.
+  //
+  // `lookup_var` answers `GNull` for both cases, so asking it was the bug.
+  let rec has_var = fn (vars, name: str) ->
+    match vars with
+    | [] -> false
+    | [(k, _), ...rest] -> if str_eq k name then true else has_var rest name;
+
+  // A value written in the document, as a runtime value. It serves BOTH directive
+  // arguments and field arguments now, and the difference is why lists and input
+  // objects are here: a directive's `if:` is a scalar, so this used to refuse them with
+  // a message about directives — which became wrong the moment field arguments started
+  // reaching resolvers.
+  //
+  // An ENUM becomes a string, matching how the executor coerces enum values everywhere
+  // else. An input object keeps the document's key order, which is what the harness
+  // compares.
+  let rec doc_value = fn (v: gval, vars) ->
     match v with
     | VVar n -> lookup_var vars n
     | VBool b -> GBool b
@@ -233,7 +270,9 @@ module Gexec {
     | VBlock s -> GStr s
     | VEnum n -> GStr n
     | VFloat lex -> GFloat (float_of_str lex)
-    | _ -> fail "graphql: this value form is not supported in a directive argument";
+    | VList xs -> GList (list_map xs (fn (x) -> doc_value x vars))
+    | VObj fs ->
+      GObj (list_map fs (fn (kv) -> let (k, x) = kv in (k, doc_value x vars)));
 
   let truthy = fn (v: gvalue) ->
     match v with | GBool b -> b | _ -> false;
@@ -246,6 +285,51 @@ module Gexec {
     match args with
     | [] -> []
     | [(k, v), ...rest] -> if str_eq k name then Cons (v, []) else arg_of rest name;
+
+  // --- the arguments a resolver receives ----------------------------------
+  //
+  // NOT the argument list the document wrote. Every rule below was measured against
+  // graphql-js, and every one of them is a distinction something could get wrong:
+  //
+  //   * a schema DEFAULT applies when the argument is omitted — `b: Int = 7` makes `b`
+  //     present and 7
+  //   * a default of `null` applies too: `e: Boolean = null` gives `e: null`, which is
+  //     how "the default is null" differs from "there is no default"
+  //   * an argument with NO default that is not supplied is ABSENT, not null
+  //   * an explicit `null` in the document is present and null
+  //   * A VARIABLE THAT WAS NOT SUPPLIED MEANS THE ARGUMENT WAS NOT WRITTEN, so the
+  //     schema default applies to it. The sharpest case: `f(a: $v, b: $v)` with no `v`
+  //     gives `{b: 7}` — `b` falls back to its default and `a`, which has none, is
+  //     absent. One variable, two different outcomes, decided by the field definition.
+  //   * the ORDER is the FIELD DEFINITION's argument order, not the document's.
+  //     `f(c: "s", d: [1,2])` comes back `{b, c, d, e}`.
+  let rec arg_defs_of = fn (fs, fname: str) ->
+    match fs with
+    | [] -> []
+    | [FieldDef (_, n, args, _, _), ...rest] ->
+      if str_eq n fname then args else arg_defs_of rest fname;
+
+  // Was this argument written with a value that actually arrived? A variable the caller
+  // did not supply counts as NOT written — see the rule above.
+  let arg_supplied = fn (args, name: str, vars) ->
+    match arg_of args name with
+    | [] -> []
+    | [v, ..._] ->
+      match v with
+      | VVar vn -> if has_var vars vn then Cons (doc_value v vars, []) else []
+      | _ -> Cons (doc_value v vars, []);
+
+  let coerce_args = fn (argdefs, args, vars) ->
+    list_fold argdefs [] (fn (acc, iv) ->
+      match iv with
+      | InputVal (_, an, _, dflt, _) ->
+        match arg_supplied args an vars with
+        | [v, ..._] -> appl acc (Cons ((an, v), []))
+        | [] ->
+          match dflt with
+          | [d, ..._] -> appl acc (Cons ((an, doc_value d vars), []))
+          | [] -> acc);
+
 
   let rec included = fn (dirs, vars) ->
     match dirs with
@@ -768,9 +852,17 @@ module Gexec {
                  // so every section that uses it agreed while this was missing. It
                  // took a hand-written `__type(name: "Colour") \{ enumValues }` — no
                  // argument, hence the default — to disagree.
-                 let fv = if str_starts_with tname "__" && deprecatable name
-                          then filter_deprecated fv0 (include_deprecated fargs vars)
-                          else fv0 in
+                 let fv1 = if str_starts_with tname "__" && deprecatable name
+                           then filter_deprecated fv0 (include_deprecated fargs vars)
+                           else fv0 in
+                 // A field whose value is a FUNCTION is applied to its coerced
+                 // arguments here — the one place resolution stops being a lookup.
+                 let fv = match fv1 with
+                          | GFn rf ->
+                            rf (coerce_args
+                                  (arg_defs_of (find_obj_or_iface defs tname) name)
+                                  fargs vars)
+                          | _ -> fv1 in
                  let fpath = appl path (Cons (PName key, [])) in
                  let lbl = tname ++ "." ++ name in
                  match complete defs fty fv sub vars fpath lbl with
@@ -808,7 +900,7 @@ module Gexec {
     | [vd, ...rest] ->
       match vd with
       | VarDef (n, _, dflt, _) ->
-        let have = match lookup_var vars n with | GNull -> false | _ -> true in
+        let have = has_var vars n in
         (match dflt with
          | [d, ..._] ->
            if have then with_defaults rest vars
@@ -854,6 +946,11 @@ module Gexec {
     // non-exhaustive match.
     | GTypeRef _ ->
       fail "graphql: a field of type __Type must have a selection of subfields"
+    // Unreachable through `exec_fields`, which applies a `GFn` before completing the
+    // field. It is here because a resolver may RETURN one, and a function is not a
+    // value a response can carry.
+    | GFn _ ->
+      fail "graphql: a resolver returned a function, which is not a serialisable value"
     | GList xs -> "[" ++ str_join "," (list_map xs to_json) ++ "]"
     | GObj fs ->
       "\{" ++ str_join "," (list_map fs (fn (kv) ->

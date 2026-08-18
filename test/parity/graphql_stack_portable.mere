@@ -1,0 +1,38 @@
+// The GraphQL stack, compiled. Every gate for `contrib/graphql` runs the INTERPRETER,
+// so until this existed nothing in that directory had ever been compiled to anything —
+// and three separate things were wrong with it:
+//
+//  1. `take_while s i is_digit buf` passes a BUILTIN AS A VALUE, which no compiled
+//     backend supports: C emitted `mu_is_digit` and failed in the C compiler, LLVM and
+//     Wasm refused with `unbound variable: is_digit`. A user function becomes
+//     `<name>_as_value` and an extern becomes `__ext_<name>_as_value`; a builtin has no
+//     adapter because its C name lives in a per-backend `App` case, not in a table.
+//  2. and 3. two inner functions captured a variable two levels of lifting away, which
+//     LLVM reported as `unbound variable: declared` and Wasm as
+//     `inner-lifted capture 'frags' not in scope`.
+//
+// This program exercises the whole chain — lex, parse, print, validate, execute,
+// introspect, and a resolver that reads its arguments — so the four backends have to
+// agree with the interpreter about all of it.
+import "../../contrib/graphql/exec.mere";
+import "../../contrib/graphql/validate.mere";
+
+let sdl = " type Query \{ a: Int u(id: Int!, tag: String = \"d\"): String l: [Int!]! }";
+
+// A resolver that is a FUNCTION of its arguments, which is the thing `GFn` exists for.
+// `tag` has a default, so a query that omits it still sees "d" — the executor supplies
+// it, and a compiled backend that lost the default would print something else.
+let echo = GFn (fn (args) -> GStr (Gexec.to_json (GObj args)));
+let root = GObj ([("a", GInt 1), ("u", echo), ("l", GList ([GInt 1, GInt 2]))]);
+
+let doc = fn (q: str) -> Gparse.document (q ++ sdl);
+let run = fn (q: str) -> Gexec.run_json (doc q) root [];
+
+let _ = print (Gprint.document (Gparse.document "\{ a b(x: 1) @d \{ c } ...F }"));
+let _ = print (run "\{ a l }");
+let _ = print (run "\{ u(id: 7) }");
+let _ = print (run "\{ u(id: 7, tag: \"t\") }");
+let _ = print (run "\{ __type(name: \"Query\") \{ name kind } }");
+let _ = print (Gvalid.report (Gparse.document "\{ nope }") (Gparse.document sdl));
+print (Gvalid.report (Gparse.document "fragment A on Query \{ ...B } fragment B on Query \{ ...A } \{ ...A }")
+                     (Gparse.document sdl))

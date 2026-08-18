@@ -23,6 +23,21 @@
 
 module Glex {
 
+  // `digit_p` WRAPS A BUILTIN IN A LAMBDA, and that is a workaround rather than a
+  // preference: `take_while s i is_digit buf` passes `is_digit` as a VALUE, and no
+  // compiled backend supports a builtin in value position. C emitted `mu_is_digit` and
+  // failed in the C compiler; LLVM and Wasm refused with `unbound variable: is_digit`.
+  //
+  // The mechanism exists for the two neighbouring cases — a user function becomes
+  // `<name>_as_value` and an extern becomes `__ext_<name>_as_value` — and a builtin has
+  // no such adapter because its C name lives in a per-backend `App` special case rather
+  // than in a table. Registered upstream; the general fix is the declarative builtin
+  // registry, not a lambda at each call site.
+  //
+  // Worth stating because THIS FILE HAD NEVER BEEN COMPILED: every gate runs the
+  // GraphQL stack interpreted, so nothing here was portable and nothing said so.
+  let digit_p = fn (c: str) -> is_digit c;
+
   let is_name_start = fn (c: str) -> is_alpha c || c == "_";
   let is_name_cont = fn (c: str) -> is_alpha c || is_digit c || c == "_";
 
@@ -70,7 +85,7 @@ module Glex {
       if i0 < str_len s && char_at s i0 == "-" then
         let _ = strbuf_push buf "-" in i0 + 1
       else i0 in
-    let (_, i2) = take_while s i1 is_digit buf in
+    let (_, i2) = take_while s i1 digit_p buf in
     let _ =
       if i2 == i1 then fail "graphql: a number needs at least one digit"
       else if char_at s i1 == "0" && i2 - i1 > 1 then
@@ -79,7 +94,7 @@ module Glex {
     let (frac, i3) =
       if i2 < str_len s && char_at s i2 == "." then
         let _ = strbuf_push buf "." in
-        let (_, j) = take_while s (i2 + 1) is_digit buf in
+        let (_, j) = take_while s (i2 + 1) digit_p buf in
         let _ = if j == i2 + 1 then fail "graphql: a fraction needs a digit" else () in
         (true, j)
       else (false, i2) in
@@ -91,7 +106,7 @@ module Glex {
              && (char_at s (i3 + 1) == "+" || char_at s (i3 + 1) == "-") then
             let _ = strbuf_push buf (char_at s (i3 + 1)) in i3 + 2
           else i3 + 1 in
-        let (_, j) = take_while s j0 is_digit buf in
+        let (_, j) = take_while s j0 digit_p buf in
         let _ = if j == j0 then fail "graphql: an exponent needs a digit" else () in
         (true, j)
       else (false, i3) in

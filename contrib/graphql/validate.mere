@@ -248,30 +248,35 @@ module Gvalid {
   // the path through the others. `A -> B -> A` is one error naming A "via B" and NOT
   // a second one naming B — the first version reported both, and the harness caught
   // it as a message the oracle never produces.
+  // `frags` is a PARAMETER of both, not a capture — see `cond_errs` above for why: the
+  // Wasm backend cannot resolve a capture through two levels of inner-function lifting,
+  // and the LLVM backend cannot either. Nothing said so until this file was compiled for
+  // the first time.
+  let rec cycle_reaches = fn (frags, start: str, n: str, path, seen) ->
+    match frag_named frags n with
+    | [] -> []
+    | [(_, _, sels), ..._] ->
+      let rec go = fn (ns) ->
+        match ns with
+        | [] -> []
+        | [m, ...rest] ->
+          if str_eq m start then Cons (rev_list path [], [])
+          else if list_member seen m then go rest
+          else
+            (match cycle_reaches frags start m (Cons (m, path)) (Cons (m, seen)) with
+             | [] -> go rest
+             | [p, ..._] -> Cons (p, []))
+      in go (rev_list (spread_names_in sels []) []);
+
   let rule_no_frag_cycles = fn (defs) ->
     let frags = fragments defs in
-    let rec reaches = fn (start: str, n: str, path, seen) ->
-      match frag_named frags n with
-      | [] -> []
-      | [(_, _, sels), ..._] ->
-        let rec go = fn (ns) ->
-          match ns with
-          | [] -> []
-          | [m, ...rest] ->
-            if str_eq m start then Cons (rev_list path [], [])
-            else if list_member seen m then go rest
-            else
-              (match reaches start m (Cons (m, path)) (Cons (m, seen)) with
-               | [] -> go rest
-               | [p, ..._] -> Cons (p, []))
-        in go (rev_list (spread_names_in sels []) []) in
     let rec go = fn (fs, covered, acc) ->
       match fs with
       | [] -> rev_list acc []
       | [(n, _, _, _), ...rest] ->
         if list_member covered n then go rest covered acc
         else
-          match reaches n n [] (Cons (n, [])) with
+          match cycle_reaches frags n n [] (Cons (n, [])) with
           | [] -> go rest covered acc
           | [path, ..._] ->
             let via = if list_len path == 0 then ""
@@ -301,6 +306,21 @@ module Gvalid {
           else go rest (Cons (n, seen)) a in
       go vardefs [] acc);
 
+  // Same reason as `cycle_reaches`: `declared` and `name` are parameters rather than
+  // captures, so nothing has to be resolved through two levels of lifting.
+  let rec undefined_walk = fn (declared, name: str, us, seen, a) ->
+    match us with
+    | [] -> a
+    | [u, ...rest] ->
+      if list_member seen u then undefined_walk declared name rest seen a
+      else if list_member declared u then
+        undefined_walk declared name rest (Cons (u, seen)) a
+      else
+        undefined_walk declared name rest (Cons (u, seen))
+          (Cons (GVErr ("NoUndefinedVariables",
+                 "Variable " ++ q ("$" ++ u) ++ " is not defined"
+                 ++ op_label "by" name ++ "."), a));
+
   let rule_no_undefined_vars = fn (defs) ->
     let frags = fragments defs in
     list_fold (operations defs) [] (fn (acc, o) ->
@@ -312,18 +332,7 @@ module Gvalid {
                       match frag_named frags fn_name with
                       | [] -> a
                       | [(_, fdirs, fsels), ..._] -> vars_in_sels fsels (vars_in_dirs fdirs a)) in
-      let rec go = fn (us, seen, a) ->
-        match us with
-        | [] -> a
-        | [u, ...rest] ->
-          if list_member seen u then go rest seen a
-          else if list_member declared u then go rest (Cons (u, seen)) a
-          else
-            go rest (Cons (u, seen))
-              (Cons (GVErr ("NoUndefinedVariables",
-                     "Variable " ++ q ("$" ++ u) ++ " is not defined"
-                     ++ op_label "by" name ++ "."), a)) in
-      go (rev_list used []) [] acc);
+      undefined_walk declared name (rev_list used []) [] acc);
 
   let rule_no_unused_vars = fn (defs) ->
     let frags = fragments defs in
@@ -462,27 +471,40 @@ module Gvalid {
         else a1);
 
   // --- KnownTypeNames / FragmentsOnCompositeTypes / VariablesAreInputTypes -
+  // `defs` and `all_names` are PARAMETERS of both helpers rather than captured from the
+  // enclosing function, and that is not a style choice: the Wasm backend lifts an inner
+  // function and could not resolve the capture two levels down —
+  // "inner-lifted capture `all_names` not in scope".
+  //
+  // Which is a thing worth noticing about this file rather than only about the backend:
+  // EVERY GATE RUNS THE VALIDATOR INTERPRETED, so it had never been compiled to
+  // anything. `test/parity/graphql_validate_portable.mere` exists so that stays true of
+  // no future change.
+  let cond_errs = fn (defs, all_names, label: str, tc: str, acc) ->
+    if str_eq tc "" then acc
+    else if not (list_member all_names tc) then
+      Cons (GVErr ("KnownTypeNames", "Unknown type " ++ q tc ++ "."), acc)
+    else if not (is_composite defs tc) then
+      Cons (GVErr ("FragmentsOnCompositeTypes",
+             "Fragment " ++ label ++ "cannot condition on non composite type "
+             ++ q tc ++ "."), acc)
+    else acc;
+
+  let rec inline_conds = fn (defs, all_names, sels, acc) ->
+    list_fold sels acc (fn (a, s) ->
+      match s with
+      | Field (_, _, _, _, sub) -> inline_conds defs all_names sub a
+      | Spread (_, _) -> a
+      | Inline (tc, _, isels) ->
+        inline_conds defs all_names isels (cond_errs defs all_names "" tc a));
+
   let rule_type_conditions_in = fn (doc_defs, defs, all_names) ->
-    let named_errs = fn (label: str, tc: str, acc) ->
-      if str_eq tc "" then acc
-      else if not (list_member all_names tc) then
-        Cons (GVErr ("KnownTypeNames", "Unknown type " ++ q tc ++ "."), acc)
-      else if not (is_composite defs tc) then
-        Cons (GVErr ("FragmentsOnCompositeTypes",
-               "Fragment " ++ label ++ "cannot condition on non composite type "
-               ++ q tc ++ "."), acc)
-      else acc in
-    let rec inline_conds = fn (sels, acc) ->
-      list_fold sels acc (fn (a, s) ->
-        match s with
-        | Field (_, _, _, _, sub) -> inline_conds sub a
-        | Spread (_, _) -> a
-        | Inline (tc, _, isels) -> inline_conds isels (named_errs "" tc a)) in
     let from_frags = list_fold (fragments doc_defs) [] (fn (acc, f) ->
       let (n, tc, _, sels) = f in
-      inline_conds sels (named_errs (q n ++ " ") tc acc)) in
+      inline_conds defs all_names sels
+        (cond_errs defs all_names (q n ++ " ") tc acc)) in
     list_fold (operations doc_defs) from_frags (fn (acc, o) ->
-      let (_, _, _, _, sels) = o in inline_conds sels acc);
+      let (_, _, _, _, sels) = o in inline_conds defs all_names sels acc);
 
   let is_input_type = fn (defs, n: str) ->
     match Gexec.find_tsdef defs n with

@@ -350,6 +350,74 @@ check that reads it.**
   with the path through the others: `A -> B -> A` is one error naming A "via B" and
   not a second naming B.
 
+## Arguments reach a resolver
+
+A field's value may be a **function of its coerced arguments**, which is what
+`user(id: 5)` needs. Everywhere else the resolvers are the data — a field is
+resolved by looking its name up in the parent — and that is what makes the
+execution gate meaningful, but it also meant a field's value could not depend on
+an argument.
+
+```mere
+let root = GObj ([("user", GFn (fn (args) -> ...))]);
+```
+
+### The gate for this has to be different, and the difference is the point
+
+A hand-written resolver now exists on **both** sides and the two could drift. So
+the harness makes its resolvers **echo the arguments they received**, as JSON. The
+resolver becomes trivial and the comparison moves onto argument **coercion**, which
+is where the rules actually are. Every one of these was measured, and every one is a
+distinction something could get wrong:
+
+| | |
+|---|---|
+| omitted, has a schema default | present, with the default |
+| default is `null` | present, `null` — which is how it differs from having no default |
+| omitted, no default | **absent**, not null |
+| written as `null` | present, `null` |
+| variable **not supplied** | the argument was not written, so the schema default applies |
+| variable supplied as `null` | present, `null` — an explicit null **beats** its own default |
+| key order | the **field definition's** argument order, not the document's |
+
+The sharpest case is `f(a: $v, b: $v)` with no `v`: it gives `{b: 7}`. One variable,
+two outcomes, decided by the field definition — `b` falls back to its default and
+`a`, which has none, is absent.
+
+The explicit-null rule was a **bug**: `lookup_var` answers null both for "supplied
+as null" and for "not supplied", and asking it was the mistake. It is not observable
+without an argument-taking resolver, which is why it survived — the only other place
+a variable is visible is `@skip` / `@include`, whose `if:` is `Boolean!`, so the
+oracle answers a coercion error there rather than a different value.
+
+`doc_value` also had to learn lists and input objects. It served only directive
+arguments before, whose values are scalars, so it refused them **with a message
+about directives** — which became wrong the moment field arguments started reaching
+resolvers.
+
+## The stack is compilable, and was not
+
+Every gate here runs the **interpreter**. Until `test/parity/graphql_stack_portable.mere`
+existed, nothing in this directory had ever been compiled to anything — and three
+separate things were wrong with it:
+
+- **A builtin passed as a value.** `take_while s i is_digit buf` hands `is_digit`
+  over as a value, and no compiled backend supports that: C emitted `mu_is_digit`
+  and failed in the C compiler, LLVM and Wasm refused with `unbound variable:
+  is_digit`. The mechanism exists for both neighbours — a user function becomes
+  `<name>_as_value`, an extern becomes `__ext_<name>_as_value` — and a builtin has
+  no adapter because its C name lives in a per-backend `App` case rather than in a
+  table. Wrapped in a lambda here; the general fix is the declarative builtin
+  registry, and it is registered upstream.
+- **Two inner functions captured a variable two levels of lifting away**, which LLVM
+  reported as `unbound variable: declared` and Wasm as `inner-lifted capture
+  'frags' not in scope`. Both take the value as a parameter now.
+
+The parity program exercises lex, parse, print, validate, execute, introspect and an
+argument-reading resolver, so every backend has to agree with the interpreter about
+all of it. **A library that only ever runs interpreted has untested portability and
+nothing says so.**
+
 ## Not here yet
 
 - **13 validation rules**, each named on the harness's gap list and each exercised by

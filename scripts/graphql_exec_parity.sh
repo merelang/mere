@@ -78,6 +78,19 @@ add("{ i }", {"i": "7"})            # a string coerces to Int
 add("{ i }", {"i": 1.7})            # ... and a non-integral one does not
 add("{ f }", {"f": 3})              # an int widens to Float
 add("{ s }", {"s": 42})             # ... and an int stringifies
+
+# --- a variable's own default is applied ---------------------------------
+#
+# The related rule — AN EXPLICITLY-NULL VARIABLE BEATS ITS DEFAULT — is fixed in the
+# executor and is NOT gated here, because it is not observable from this harness:
+# `lookup_var` answers null both for "supplied as null" and for "not supplied", and the
+# only place a variable is observable without an argument-taking resolver is
+# `@skip` / `@include`, whose `if:` is `Boolean!` — so the oracle answers a coercion
+# error there rather than a different value, and that error is a gap of its own.
+# It is gated in the arguments section instead, where a resolver can echo what it got.
+add("query Q($v: Boolean = true) { s @include(if: $v) }", {"s": "x"}, {})
+add("query Q($v: Boolean = true) { s @include(if: $v) }", {"s": "x"}, {"v": False})
+add("query Q($v: Boolean = false) { s @skip(if: $v) }", {"s": "x"}, {})
 add("{ e }", {"e": "BLUE"})         # not a member
 add("{ f }", {"f": 1.0})            # an integral float prints without its fraction
 add("{ f }", {"f": 100.0})
@@ -246,6 +259,119 @@ if run_subject "execute" "$ROOT/examples/.gexec_tmp.mere" "$TMP/got_raw.txt"; th
       }
     ' "$TMP/want.txt" "$TMP/got.txt" "$TMP/cases.json"
     fail=1
+  fi
+fi
+
+# --- the arguments a resolver receives -----------------------------------
+#
+# Everywhere above, the resolvers ARE the data — which is what makes the comparison
+# mean something: with the default resolver on both sides nothing about resolution is
+# transcribed. A field like `user(id: 5)` cannot be data, so a field's value may be a
+# function of its coerced arguments instead.
+#
+# THAT CHANGES WHAT THE ORACLE IS GOOD FOR. A hand-written resolver now exists on both
+# sides and the two could drift, so the resolvers here do the one thing that cannot:
+# ECHO THE ARGUMENTS THEY RECEIVED, as JSON. The comparison is then about argument
+# COERCION — defaults, absence, variables, order — which is exactly where the rules are
+# and exactly what nobody can hold in their head:
+#
+#   * a schema default applies when the argument is omitted
+#   * a default of `null` applies too, which is how it differs from having no default
+#   * an argument with no default that is not supplied is ABSENT, not null
+#   * an explicit `null` is present and null
+#   * a variable that was NOT supplied means the argument was not written, so the schema
+#     default applies to it
+#   * an explicitly-null variable BEATS its own default
+#   * the key order is the FIELD DEFINITION's argument order, not the document's
+ASDL=' type Query { f(a: Int, b: Int = 7, c: String, d: [Int!], e: Boolean = null): String'
+ASDL="$ASDL"' g(x: Int!): String h: String }'
+cat > "$TMP/args.txt" <<'CASES'
+{ f }	{}
+{ f(a: 1) }	{}
+{ f(a: 1, b: 2) }	{}
+{ f(a: null) }	{}
+{ f(b: null) }	{}
+{ f(c: "s", d: [1,2]) }	{}
+{ f(d: []) }	{}
+{ f(e: true) }	{}
+query Q($v: Int) { f(a: $v) }	{}
+query Q($v: Int) { f(a: $v) }	{"v":5}
+query Q($v: Int) { f(a: $v) }	{"v":null}
+query Q($v: Int) { f(a: $v, b: $v) }	{}
+query Q($v: Int) { f(a: $v, b: $v) }	{"v":3}
+query Q($v: Int = 9) { f(a: $v) }	{}
+query Q($v: Int = 9) { f(a: $v) }	{"v":null}
+query Q($v: Int = 9) { f(b: $v) }	{"v":null}
+query Q($v: [Int!]) { f(d: $v) }	{"v":[7,8]}
+{ g(x: 1) }	{}
+{ h }	{}
+CASES
+NARGS=$(grep -c . "$TMP/args.txt")
+
+node > "$TMP/args_want.txt" 2>"$TMP/args_oracle.err" <<NODE
+import * as g from "$GQL_DIR/index.js";
+import { readFileSync } from "fs";
+const sdl = '$ASDL';
+const schema = g.buildSchema(sdl);
+// Every field echoes what it received. \`h\` takes no arguments, so it echoes {} — the
+// case that says an argument-free field still goes through the same path.
+const root = { f: a => JSON.stringify(a), g: a => JSON.stringify(a),
+               h: a => JSON.stringify(a) };
+const lines = readFileSync("$TMP/args.txt", "utf8").split("\n").filter(l => l.trim());
+const out = [];
+for (const line of lines) {
+  const [q, v] = line.split("\t");
+  const r = g.executeSync({ schema, document: g.parse(q), rootValue: root,
+                            variableValues: JSON.parse(v) });
+  // The whole response, not just \`data\` — the subject prints \`Gexec.run_json\`, which
+  // is the response. Comparing \`r.data\` against a response was the first version and
+  // reported every case as differing while every value in them agreed.
+  out.push(r.errors ? "ORACLE-ERROR " + r.errors.map(e => e.message).join("; ")
+                    : JSON.stringify({ data: r.data }));
+}
+console.log(out.join("\n"));
+NODE
+if [ ! -s "$TMP/args_want.txt" ]; then
+  echo "  FAIL  arguments  the oracle could not answer:"
+  sed 's/^/        /' "$TMP/args_oracle.err" | head -5
+  fail=1
+elif grep -q "^ORACLE-ERROR" "$TMP/args_want.txt"; then
+  echo "  FAIL  arguments  the ORACLE rejected a case this harness wrote:"
+  grep -n "^ORACLE-ERROR" "$TMP/args_want.txt" | head -4 | sed 's/^/        /'
+  fail=1
+else
+  {
+    echo 'import "../contrib/graphql/exec.mere";'
+    printf 'let sdl = "%s";\n' "$(printf '%s' "$ASDL" | sed 's/\\/\\\\/g; s/"/\\"/g; s/{/\\{/g')"
+    echo 'let echo = GFn (fn (a) -> GStr (Gexec.to_json (GObj a)));'
+    echo 'let root = GObj ([("f", echo), ("g", echo), ("h", echo)]);'
+    while IFS="$(printf '\t')" read -r q v; do
+      [ -z "$q" ] && continue
+      qe=$(printf '%s' "$q" | sed 's/\\/\\\\/g; s/"/\\"/g; s/{/\\{/g')
+      ve=$(printf '%s' "$v" | node -e '
+        const j = JSON.parse(require("fs").readFileSync(0, "utf8"));
+        const lit = v => v === null ? "GNull"
+          : typeof v === "boolean" ? `GBool ${v}`
+          : typeof v === "number" ? (Number.isInteger(v) ? `GInt ${v}` : `GFloat ${v}`)
+          : typeof v === "string" ? `GStr "${v}"`
+          : Array.isArray(v) ? `GList ${lst(v.map(lit))}` : "GNull";
+        const lst = xs => xs.reduceRight((a, x) => `(Cons (${x}, ${a}))`, "Nil");
+        process.stdout.write(lst(Object.entries(j).map(([k, x]) => `("${k}", ${lit(x)})`)));')
+      printf 'let _ = print (Gexec.run_json (Gparse.document ("%s" ++ sdl)) root %s);\n' "$qe" "$ve"
+    done < "$TMP/args.txt"
+    echo '0'
+  } > "$ROOT/examples/.gexec_tmp.mere"
+  if run_subject "arguments" "$ROOT/examples/.gexec_tmp.mere" "$TMP/args_raw.txt"; then
+    sed '$d' "$TMP/args_raw.txt" > "$TMP/args_got.txt"
+    if diff -q "$TMP/args_want.txt" "$TMP/args_got.txt" >/dev/null; then
+      echo "  ok    arguments  $NARGS cases: defaults, absence, variables and order agree"
+    else
+      echo "  FAIL  arguments"
+      paste -d'|' "$TMP/args.txt" "$TMP/args_want.txt" "$TMP/args_got.txt" \
+        | awk -F'|' '$2 != $3 { printf "        %-40s\n          oracle=%.80s\n          ours  =%.80s\n", $1, $2, $3 }' \
+        | head -15
+      fail=1
+    fi
   fi
 fi
 
