@@ -4,6 +4,57 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-08-18 — HPACK, and three ways a gate can pass without checking anything
+
+_`contrib/http2/hpack.mere` plus a generated table and a seven-section gate. The
+implementation went green on the first run; poisoning it is what produced the
+interesting part._
+
+**What had to be complete was measured.** grpcurl 1.8.8's first HEADERS frame on a
+real connection uses static-table indices, Huffman-coded literals and **seven**
+dynamic-table insertions — so the decoder is complete (integers, both string forms,
+all five instructions, eviction) while the **encoder is trivial**: literal, new
+name, no indexing, no Huffman, which RFC 7541 permits and which a real client was
+confirmed accepting end to end. That asymmetry is why a gRPC server is reachable
+without writing a Huffman encoder.
+
+The dynamic table is connection state and is **threaded through the API** rather
+than hidden in a global, because one decoder per connection is correct and two is
+not, and a parameter makes that visible at the call site.
+
+**The tables are generated from the same library the gate uses as its oracle**,
+which is a hole a differential test cannot close: a shared transcription error is
+invisible. So one section decodes a header block **captured from grpc-go 1.57** — a
+third implementation, in another language, that never saw either table. Nine header
+names and the table's own accounting come back matching.
+
+Then the gate was deliberately broken, nine ways. Six were caught immediately. The
+other three were the point:
+
+1. **Valid input does not test a refusal.** Removing the Huffman padding check
+   changed nothing, because well-formed blocks have well-formed padding. Nine
+   malformed blocks now exercise the refusals — the same lesson the GraphQL
+   reject-list taught, arriving again in a different file.
+2. **"Does it refuse" and "does it say what was wrong" are different questions.**
+   Removing the index-0, EOS and string-length checks *still* refused, further
+   downstream, with a message about something else — so the gate stayed green while
+   three named diagnostics had been deleted. Each malformed case now asserts a
+   substring the refusal must contain. That couples the harness to *our own*
+   wording, which is the acceptable direction; coupling it to the oracle's would be
+   brittle for no gain.
+3. **A check whose input never arrives passes.** The case file was written with two
+   columns while the reader expected three, so every expectation was the empty
+   string and `grep -q ""` matched every message. An empty expectation is now a
+   failure in itself — and so is a reject-list that checked **zero** cases, which
+   is the rule the builtin matrix learned in another form: a gate reporting ok for
+   no cases cannot be told apart from one that did not run.
+
+One line survives poisoning on purpose. `len2 < huff_min_len` is a **fast path, not
+a check** — `huff_count` already answers 0 below the minimum length — and it is
+labelled so the next reader does not have to work that out. The contrast with the
+`lshr` mask deleted yesterday is deliberate: that one was a guard that could not
+fire, this one is an optimisation that provably cannot change an answer.
+
 ## 2026-08-18 — GraphQL's type-system half, and HTTP/2 frames
 
 _`contrib/graphql` grows SDL; `contrib/http2/frame.mere` arrives with a gate
