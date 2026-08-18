@@ -4,6 +4,56 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-08-18 — A .proto parser, and the bootstrap closing
+
+_`contrib/proto/parse.mere` + `contrib/proto/descriptor.mere`: a `.proto` file in,
+a `FileDescriptorSet` out, byte-identical to `protoc --descriptor_set_out` across 72
+derived files._
+
+**The bootstrap closes here, and that is why it is one harness rather than two.** A
+descriptor set is itself a protobuf message, so the code that reads a schema is
+serialised by the code that reads wire bytes. If the varint encoder is wrong, this
+diff says so; if a descriptor field number is wrong, the same diff says so. One
+oracle checks both layers at once.
+
+The comparison is bytes. A descriptor that decodes to the same text but different
+bytes is still a different descriptor to anything that hashes or caches it.
+
+**Three things were measured off the oracle before anything was written**, and each
+would have been wrong from memory:
+
+* **`descriptor.proto` is proto2, which reverses a rule the wire harness had just
+  learned.** A set field is written even at its default, so an enum value's
+  `number: 0` appears on the wire — where proto3 omits a scalar holding its default
+  and `v: 0` could not be swept at all. Same encoder, opposite rule, decided by the
+  schema being encoded rather than by the encoder.
+* **`json_name` is not plain camelCase.** `my_field` → `myField` is the easy one;
+  `a_b_c` → `aBC`, `trailing_` → `trailing`, `__lead` → `Lead` and `num_2_x` →
+  `num2X` are the ones a guess gets wrong. The rule is "drop underscores, upper-case
+  what follows each one".
+* **`type_name` carries a leading dot and is fully qualified**, and a reference
+  resolves from the innermost scope outward — so the same simple name is a different
+  type at a different depth, and the wrong order still produces a well-formed
+  descriptor.
+
+**The last of the 72 files to match differed by two bytes.**
+`rpc U (Q) returns (R) {}` is not the same as `rpc U (Q) returns (R);` — the empty
+body sets `MethodOptions` to an *empty submessage*, so protoc writes `22 00` there
+and nothing for the semicolon form. Presence with no content is the whole
+difference.
+
+**The subset is refused, not skipped.** `oneof`, `map`, `import`, `option`,
+`reserved`, `optional`, `extend`, `group` and proto2 are outside it, and protoc
+accepts every one — so the oracle cannot be asked whether they are wrong. The
+harness checks instead that each is refused **by name**, because a skipped construct
+produces a descriptor that is wrong where nothing looks. Getting that right needed
+two fixes the corpus found: an absolute type reference (`.pk.M`) is a different
+production from a name and needed its own reader, and a field option list met
+"expected ';'" — a syntax error about a file that is syntactically fine — until it
+was given a named refusal.
+
+Ten poison mutations, none uncaught.
+
 ## 2026-08-18 — RPC statuses, and an expectation the wire corrected
 
 _A gRPC handler can now fail._
