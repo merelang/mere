@@ -261,6 +261,151 @@ if run_subject "descriptors" "$ROOT/examples/.pdesc_tmp.mere" "$TMP/got_raw.txt"
   fi
 fi
 
+# --- imports, which need more than one file ------------------------------
+#
+# The single-file corpus above cannot express these: a cross-file type reference
+# resolves to `.package.Type` using the IMPORTED file's package, and whether it is
+# TYPE_MESSAGE or TYPE_ENUM comes from the imported file's declarations. So both sides
+# get a directory.
+#
+# What each case is for:
+#   * the three kinds of reference — qualified into another package, unqualified into
+#     the SAME package in a different file, and an enum (a different type code)
+#   * `public` and `weak`, whose indices go in separate lists from the paths
+#   * an import that is declared and never used, which still appears in `dependency`
+#   * the ORDER: `dependency` is field 3 and `message_type` is 4, so paths come before
+#     messages, while `public_dependency` (10) and `weak_dependency` (11) come after
+mkdir -p "$TMP/imp"
+python3 - "$TMP/imp" <<'PY'
+import sys, pathlib, json
+d = pathlib.Path(sys.argv[1])
+files = {
+  "d1.proto": 'syntax = "proto3";\npackage dep;\nmessage Shared { string s = 1; }\nenum Kind { A = 0; B = 1; }\n',
+  "d2.proto": 'syntax = "proto3";\npackage other;\nmessage Second { int32 t = 1; }\n',
+  "same.proto": 'syntax = "proto3";\npackage pk;\nmessage Local { int32 l = 1; }\n',
+  "nopkg.proto": 'syntax = "proto3";\nmessage Bare { int32 b = 1; }\n',
+  "mid_pub.proto": 'syntax = "proto3";\npackage mid;\nimport public "d1.proto";\nmessage Mid { dep.Shared s = 1; }\n',
+}
+cases = {
+  # target file -> its own source; every other file above is available to both sides.
+  "t_qual.proto": 'syntax = "proto3";\npackage pk;\nimport "d1.proto";\nmessage M { dep.Shared a = 1; }\n',
+  "t_enum.proto": 'syntax = "proto3";\npackage pk;\nimport "d1.proto";\nmessage M { dep.Kind k = 1; }\n',
+  "t_samepkg.proto": 'syntax = "proto3";\npackage pk;\nimport "same.proto";\nmessage M { Local c = 1; }\n',
+  "t_nopkg.proto": 'syntax = "proto3";\npackage pk;\nimport "nopkg.proto";\nmessage M { Bare b = 1; }\n',
+  "t_two.proto": 'syntax = "proto3";\npackage pk;\nimport "d1.proto";\nimport "d2.proto";\n'
+                 'message M { dep.Shared a = 1; other.Second b = 2; }\n',
+  "t_public.proto": 'syntax = "proto3";\npackage pk;\nimport "d1.proto";\nimport public "d2.proto";\n'
+                    'message M { dep.Shared a = 1; other.Second b = 2; }\n',
+  "t_weak.proto": 'syntax = "proto3";\npackage pk;\nimport "d1.proto";\nimport weak "same.proto";\n'
+                  'message M { dep.Shared a = 1; Local c = 2; }\n',
+  "t_all3.proto": 'syntax = "proto3";\npackage pk;\nimport "d1.proto";\nimport public "d2.proto";\n'
+                  'import weak "same.proto";\nmessage M { dep.Shared a = 1; other.Second b = 2; Local c = 3; }\n',
+  "t_unused.proto": 'syntax = "proto3";\npackage pk;\nimport "d1.proto";\nmessage M { int32 v = 1; }\n',
+  # `public` is transitive: the middle file re-exports d1, so this reaches dep.Shared
+  # WITHOUT importing d1 itself. Measured: protoc accepts this and rejects the same
+  # shape through a private import.
+  "t_transitive.proto": 'syntax = "proto3";\npackage pk;\nimport "mid_pub.proto";\n'
+                        'message M { dep.Shared a = 1; mid.Mid m = 2; }\n',
+  "t_absolute.proto": 'syntax = "proto3";\npackage pk;\nimport "d1.proto";\nmessage M { .dep.Shared a = 1; }\n',
+}
+for n, src in files.items(): d.joinpath(n).write_text(src)
+for n, src in cases.items(): d.joinpath(n).write_text(src)
+d.joinpath("targets.txt").write_text("\n".join(sorted(cases)) + "\n")
+d.joinpath("deps.txt").write_text("\n".join(sorted(files)) + "\n")
+PY
+NIMP=$(grep -c . "$TMP/imp/targets.txt")
+
+# protoc's answer per target.
+ibad=0
+: > "$TMP/imp/want.txt"
+while IFS= read -r t; do
+  [ -z "$t" ] && continue
+  if ! protoc --descriptor_set_out="$TMP/imp/$t.pb" -I"$TMP/imp" "$TMP/imp/$t" 2>"$TMP/imp/perr.txt"; then
+    echo "        protoc REJECTS the harness's own case $t:"
+    sed 's/^/          /' "$TMP/imp/perr.txt" | head -2
+    ibad=$((ibad + 1)); continue
+  fi
+  python3 -c "import sys;print(open(sys.argv[1],'rb').read().hex())" "$TMP/imp/$t.pb" >> "$TMP/imp/want.txt"
+done < "$TMP/imp/targets.txt"
+
+# Our answer. Every dep file is offered for every target: an import the target does not
+# declare must not become visible just because it was supplied, which is what makes
+# `t_unused` and the transitive case mean anything.
+{
+  echo 'import "../contrib/proto/descriptor.mere";'
+  echo 'let rec arg_at = fn (xs, k: int, d: str) ->'
+  echo '  match xs with [] -> d | [h, ...t] -> if k == 0 then h else arg_at t (k - 1) d;'
+  echo 'let dir = arg_at (args ()) 0 "";'
+  echo 'let load = fn (n: str) -> (n, read_file (dir ++ "/" ++ n));'
+  printf 'let deps = list_map ['
+  first=1
+  while IFS= read -r dep; do
+    [ -z "$dep" ] && continue
+    [ "$first" = 1 ] || printf ', '
+    printf '"%s"' "$dep"; first=0
+  done < "$TMP/imp/deps.txt"
+  printf '] load;\n'
+  while IFS= read -r t; do
+    [ -z "$t" ] && continue
+    printf 'let _ = print (hex_of_bytes (Pdesc.of_sources "%s" (read_file (dir ++ "/%s")) deps));\n' "$t" "$t"
+  done < "$TMP/imp/targets.txt"
+  echo '0'
+} > "$ROOT/examples/.pdesc_tmp.mere"
+
+if ( ulimit -t 300; "$MERE" "$ROOT/examples/.pdesc_tmp.mere" "$TMP/imp" ) \
+     > "$TMP/imp/raw.txt" 2>"$TMP/imp/err.txt"; then
+  sed '$d' "$TMP/imp/raw.txt" > "$TMP/imp/ours.txt"
+  if [ "$ibad" != 0 ]; then
+    echo "  FAIL  imports  $ibad of the harness's own cases were rejected by protoc"
+    fail=1
+  elif diff -q "$TMP/imp/want.txt" "$TMP/imp/ours.txt" >/dev/null; then
+    echo "  ok    imports  $NIMP multi-file cases byte-identical to protoc"
+  else
+    echo "  FAIL  imports"
+    paste -d'|' "$TMP/imp/targets.txt" "$TMP/imp/want.txt" "$TMP/imp/ours.txt" \
+      | awk -F'|' '$2 != $3 { printf "        %-22s\n          protoc=%.90s\n          ours  =%.90s\n", $1, $2, $3 }' \
+      | head -12
+    fail=1
+  fi
+else
+  echo "  FAIL  imports  the subject failed:"
+  sed 's/^/        /' "$TMP/imp/err.txt" | head -4
+  fail=1
+fi
+
+# --- the visibility rule, in BOTH directions ----------------------------
+#
+# A private import is NOT transitive and a public one is. Measured on protoc:
+#   "cc.Deep" seems to be defined in "c.proto", which is not imported by "a.proto"
+# A resolver that followed every import transitively would accept a schema protoc
+# rejects — the wrong direction to be wrong in. So the refusal is checked, not assumed.
+python3 - "$TMP/imp" <<'PY'
+import sys, pathlib
+d = pathlib.Path(sys.argv[1])
+d.joinpath("mid_priv.proto").write_text(
+  'syntax = "proto3";\npackage mid2;\nimport "d1.proto";\nmessage MidP { dep.Shared s = 1; }\n')
+d.joinpath("t_priv_trans.proto").write_text(
+  'syntax = "proto3";\npackage pk;\nimport "mid_priv.proto";\nmessage M { dep.Shared a = 1; }\n')
+PY
+if protoc --descriptor_set_out=/dev/null -I"$TMP/imp" "$TMP/imp/t_priv_trans.proto" 2>/dev/null; then
+  echo "  FAIL  visibility  protoc ACCEPTED a private transitive reference — the rule this"
+  echo "        section is built on does not hold, so the refusal below means nothing"
+  fail=1
+else
+  printf 'import "../contrib/proto/descriptor.mere";\nlet load = fn (n: str) -> (n, read_file ("%s/" ++ n));\nprint (hex_of_bytes (Pdesc.of_sources "t_priv_trans.proto" (read_file "%s/t_priv_trans.proto") [load "mid_priv.proto", load "d1.proto"]))\n' \
+    "$TMP/imp" "$TMP/imp" > "$ROOT/examples/.pdesc_tmp.mere"
+  if ( ulimit -t 60; "$MERE" "$ROOT/examples/.pdesc_tmp.mere" ) >/dev/null 2>"$TMP/imp/verr.txt"; then
+    echo "  FAIL  visibility  we ACCEPTED a private transitive reference protoc rejects"
+    fail=1
+  elif ! grep -q "no such type" "$TMP/imp/verr.txt"; then
+    echo "  FAIL  visibility  refused, but not as an unresolved type:"
+    echo "        got: $(head -1 "$TMP/imp/verr.txt" | cut -c1-110)"
+    fail=1
+  else
+    echo "  ok    visibility  a private import is not transitive; a public one is"
+  fi
+fi
+
 # --- what must be REFUSED ------------------------------------------------
 # protoc ACCEPTS every one of these, so the oracle cannot be asked whether they are
 # wrong — they are simply outside the subset. What can be checked is that the parser
@@ -272,8 +417,7 @@ cases = [
     ("map", 'syntax = "proto3";\nmessage M { map<string, int32> m = 1; }'),
     ("reserved", 'syntax = "proto3";\nmessage M { reserved 2, 15; int32 v = 1; }'),
     ("optional", 'syntax = "proto3";\nmessage M { optional int32 v = 1; }'),
-    ("import", 'syntax = "proto3";\nimport "dep.proto";\nmessage M { int32 v = 1; }'),
-    # `option` and `field option` USED TO BE HERE. They are implemented now, and this
+    # `option`, `field option` and `import` USED TO BE HERE. They are implemented now, and this
     # list is what said so: both assertions failed and named themselves stale on the
     # first run after the encoder landed.
     #
@@ -296,8 +440,6 @@ cases = [
     ("debug_redact", 'syntax = "proto3";\nmessage M { int32 v = 1 [debug_redact = true]; }'),
 ]
 tmp = pathlib.Path(sys.argv[1])
-# `import "dep.proto"` needs the file to exist for protoc to accept the case.
-tmp.joinpath("dep.proto").write_text('syntax = "proto3";\nmessage Dep { int32 d = 1; }\n')
 lines = []
 for i, (label, src) in enumerate(cases):
     f = tmp / ("refuse%d.proto" % i)

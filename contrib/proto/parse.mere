@@ -47,7 +47,14 @@ type pmsg = PMsg of (str * pfield list * pmsg list * penum list * popt list);
 // two spellings differ by exactly those two bytes.
 type pmethod = PMethod of (str * str * str * bool * bool * bool * popt list);
 type psvc = PSvc of (str * pmethod list * popt list);
-type pfile = PFile of (str * str * pmsg list * penum list * psvc list * popt list);
+// An import, as the descriptor records it: a path, and which of the two INDEX lists it
+// belongs to. `public` and `weak` are not separate path lists — measured, three imports
+// give `dependency` 0,1,2 with `public_dependency: 1` and `weak_dependency: 2`, so the
+// flags decide which index is written and not which string.
+type pimport = PImport of (str * bool * bool);
+
+type pfile = PFile of (str * str * pimport list * pmsg list * penum list * psvc list
+                       * popt list);
 
 // A declaration's fully-qualified name and whether it is a message or an enum,
 // which is what decides TYPE_MESSAGE vs TYPE_ENUM.
@@ -219,6 +226,23 @@ module Pparse {
       else if str_eq w "false" then (POBool false, k)
       else (POIdent w, k);
 
+  // `import "path";`, `import public "path";`, `import weak "path";`
+  let import_stmt = fn (s: str, i: int) ->
+    let j = skip_ws s i in
+    let (isp, isw, k) =
+      if j < str_len s && char_at s j == "\"" then (false, false, j)
+      else
+        let (w, k1) = word s j in
+        if str_eq w "public" then (true, false, k1)
+        else if str_eq w "weak" then (false, true, k1)
+        else fail ("proto: expected a quoted path, 'public' or 'weak' after 'import'"
+                   ++ at j) in
+    let k2 = skip_ws s k in
+    let k3 = if k2 < str_len s && char_at s k2 == "\"" then k2 + 1
+             else fail ("proto: expected a quoted import path" ++ at k2) in
+    let (path, k4) = take_string s k3 (strbuf_new ()) in
+    (PImport (path, isp, isw), expect_ch s k4 ";");
+
   // `option name = value;` — the statement form, at file / message / enum / service /
   // method level.
   let option_stmt = fn (s: str, i: int) ->
@@ -384,12 +408,12 @@ module Pparse {
 
   // --- the file ------------------------------------------------------------
   let parse_file = fn (fname: str, s: str) ->
-    let rec top = fn (i: int, pkg: str, msgs, enums, svcs, opts) ->
+    let rec top = fn (i: int, pkg: str, imps, msgs, enums, svcs, opts) ->
       let j = skip_ws s i in
       if j >= str_len s then
-        PFile (fname, pkg, rev_list msgs [], rev_list enums [], rev_list svcs [],
-               rev_list opts [])
-      else if char_at s j == ";" then top (j + 1) pkg msgs enums svcs opts
+        PFile (fname, pkg, rev_list imps [], rev_list msgs [], rev_list enums [],
+               rev_list svcs [], rev_list opts [])
+      else if char_at s j == ";" then top (j + 1) pkg imps msgs enums svcs opts
       else
         let (kw, k) = word s j in
         if str_eq kw "syntax" then
@@ -399,26 +423,29 @@ module Pparse {
                    else fail ("proto: expected a quoted syntax" ++ at k2) in
           let (v, k4) = take_string s k3 (strbuf_new ()) in
           let k5 = expect_ch s k4 ";" in
-          if str_eq v "proto3" then top k5 pkg msgs enums svcs opts
+          if str_eq v "proto3" then top k5 pkg imps msgs enums svcs opts
           else fail ("proto: only proto3 is in this parser's subset, got '" ++ v ++ "'")
         else if str_eq kw "package" then
           let (p, k1) = word s k in
           let k2 = expect_ch s k1 ";" in
-          top k2 p msgs enums svcs opts
+          top k2 p imps msgs enums svcs opts
         else if str_eq kw "message" then
           let (m, k1) = parse_message s k in
-          top k1 pkg (Cons (m, msgs)) enums svcs opts
+          top k1 pkg imps (Cons (m, msgs)) enums svcs opts
         else if str_eq kw "enum" then
           let (e, k1) = parse_enum s k in
-          top k1 pkg msgs (Cons (e, enums)) svcs opts
+          top k1 pkg imps msgs (Cons (e, enums)) svcs opts
         else if str_eq kw "service" then
           let (v, k1) = parse_service s k in
-          top k1 pkg msgs enums (Cons (v, svcs)) opts
+          top k1 pkg imps msgs enums (Cons (v, svcs)) opts
         else if str_eq kw "option" then
           let (o, k1) = option_stmt s k in
-          top k1 pkg msgs enums svcs (Cons (o, opts))
+          top k1 pkg imps msgs enums svcs (Cons (o, opts))
+        else if str_eq kw "import" then
+          let (im, k1) = import_stmt s k in
+          top k1 pkg (Cons (im, imps)) msgs enums svcs opts
         else refuse kw j in
-    top 0 "" [] [] [] [];
+    top 0 "" [] [] [] [] [];
 
   // --- name resolution -----------------------------------------------------
   //
@@ -435,13 +462,62 @@ module Pparse {
                    match e with | PEnum (en, _, _) -> Cons (PDecl (q ++ "." ++ en, false), a)) in
       list_fold subs acc3 (fn (a, sm) -> collect_msg q sm a);
 
+  let file_imports = fn (f: pfile) ->
+    match f with | PFile (_, _, imps, _, _, _, _) -> imps;
+
   let collect = fn (f: pfile) ->
     match f with
-    | PFile (_, pkg, msgs, enums, _, _) ->
+    | PFile (_, pkg, _, msgs, enums, _, _) ->
       let base = if str_eq pkg "" then "" else "." ++ pkg in
       let a1 = list_fold enums [] (fn (a, e) ->
                  match e with | PEnum (en, _, _) -> Cons (PDecl (base ++ "." ++ en, false), a)) in
       list_fold msgs a1 (fn (a, m) -> collect_msg base m a);
+
+  // --- what an importing file may refer to ---------------------------------
+  //
+  // Its own declarations, plus each DIRECTLY imported file's, plus — transitively —
+  // the declarations of files those re-export with `public`.
+  //
+  // THE PUBLIC RULE IS A RULE AND NOT A CONVENIENCE. Measured: protoc REJECTS a type
+  // reached through a private import two files away —
+  //   "cc.Deep" seems to be defined in "c.proto", which is not imported by "a.proto"
+  // — and ACCEPTS the same reference when the middle file says `import public`. So a
+  // resolver that walked every import transitively would accept programs protoc
+  // rejects, which is the wrong direction to be wrong in: a schema that compiles here
+  // and nowhere else is worse than one that is refused.
+  //
+  // `loaded` is (path, pfile) for every file the caller has read. A path that is not
+  // there is an error NAMING IT, because otherwise the reference would simply fail to
+  // resolve and be reported as an unknown type in the importing file — a message about
+  // the wrong file.
+  let rec loaded_find = fn (loaded, path: str) ->
+    match loaded with
+    | [] -> []
+    | [(p, f), ...rest] -> if str_eq p path then Cons (f, []) else loaded_find rest path;
+
+  let visible_decls = fn (loaded, f: pfile) ->
+    // `direct` is true for the file's own imports and false once we are following a
+    // `public` chain — only a public re-export is followed further.
+    let rec walk = fn (imps, direct: bool, seen, acc) ->
+      match imps with
+      | [] -> (seen, acc)
+      | [PImport (path, isp, _), ...rest] ->
+        if not direct && not isp then walk rest direct seen acc
+        else if list_member seen path then walk rest direct seen acc
+        else
+          match loaded_find loaded path with
+          | [] ->
+            fail ("proto: import \"" ++ path ++ "\" was not supplied to the encoder"
+                  ++ " — a cross-file type reference cannot be resolved without the"
+                  ++ " imported file's package and declarations")
+          | [dep, ..._] ->
+            let seen2 = Cons (path, seen) in
+            let acc2 = appl (collect dep) acc in
+            // Follow the dep's own imports, but only its PUBLIC ones.
+            let (seen3, acc3) = walk (file_imports dep) false seen2 acc2 in
+            walk rest direct seen3 acc3 in
+    let (_, acc) = walk (file_imports f) true [] [] in
+    appl (collect f) acc;
 
   let rec decl_find = fn (decls, q: str) ->
     match decls with
@@ -483,4 +559,19 @@ module Pparse {
       match try_scope scope with
       | [(q, is_msg), ..._] -> (q, is_msg)
       | [] -> fail ("proto: no such type: " ++ name ++ " (from scope '" ++ scope ++ "')");
+
+  // `resolve` that ANSWERS instead of failing, for a caller asking whether a name is in
+  // a set rather than asking to use it. Same walk, 0-or-1 result.
+  let try_resolve = fn (decls, scope: str, name: str) ->
+    if str_len name > 0 && char_at name 0 == "." then
+      match decl_find decls name with
+      | [is_msg, ..._] -> Cons ((name, is_msg), [])
+      | [] -> []
+    else
+      let rec try_scope = fn (sc: str) ->
+        let cand = sc ++ "." ++ name in
+        match decl_find decls cand with
+        | [is_msg, ..._] -> Cons ((cand, is_msg), [])
+        | [] -> if str_eq sc "" then [] else try_scope (strip_last sc) in
+      try_scope scope;
 }

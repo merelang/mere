@@ -291,26 +291,58 @@ module Pdesc {
         put_opts b 3 "a service" svc_opts_table opts);
 
   // --- FileDescriptorProto / FileDescriptorSet -----------------------------
-  let file_desc = fn (f: pfile) ->
-    let decls = Pparse.collect f in
+  // `loaded` is (path, pfile) for every imported file the caller has read. It is what
+  // makes a cross-file type reference resolvable: `dep.Shared` becomes `.dep.Shared`
+  // only if the imported file's PACKAGE is known, and whether it is TYPE_MESSAGE or
+  // TYPE_ENUM only if its declarations are.
+  let file_desc_in = fn (loaded, f: pfile) ->
+    let decls = Pparse.visible_decls loaded f in
     match f with
-    | PFile (fname, pkg, msgs, enums, svcs, opts) ->
+    | PFile (fname, pkg, imps, msgs, enums, svcs, opts) ->
       let scope = if str_eq pkg "" then "" else "." ++ pkg in
-      // name=1 package=2 message_type=4 enum_type=5 service=6 options=8 syntax=12,
-      // written ascending.
+      // name=1 package=2 dependency=3 message_type=4 enum_type=5 service=6 options=8
+      // public_dependency=10 weak_dependency=11 syntax=12, written ascending — so the
+      // paths come BEFORE the messages and the two index lists come AFTER them.
+      //
+      // `public_dependency` and `weak_dependency` hold INDICES into `dependency`, not
+      // paths. Measured: three imports where the second is public and the third weak
+      // give `10: 1` and `11: 2`.
       sub (fn (b) ->
         let _ = put_string b 1 fname in
         let _ = if str_eq pkg "" then () else put_string b 2 pkg in
+        let _ = list_iter imps (fn (im) ->
+                  match im with | PImport (path, _, _) -> put_string b 3 path) in
         let _ = list_iter msgs (fn (m) -> put_msg b 4 (msg_desc decls scope m)) in
         let _ = list_iter enums (fn (e) -> put_msg b 5 (enum_desc e)) in
         let _ = list_iter svcs (fn (v) -> put_msg b 6 (svc_desc decls scope v)) in
         let _ = put_opts b 8 "a file" file_opts_table opts in
+        let rec idx = fn (xs, n: int, want_public: bool) ->
+          match xs with
+          | [] -> ()
+          | [PImport (_, isp, isw), ...rest] ->
+            let hit = if want_public then isp else isw in
+            let _ = if hit then put_int b (if want_public then 10 else 11) n else () in
+            idx rest (n + 1) want_public in
+        let _ = idx imps 0 true in
+        let _ = idx imps 0 false in
         put_string b 12 "proto3");
 
-  let file_set = fn (f: pfile) ->
+  let file_desc = fn (f: pfile) -> file_desc_in [] f;
+
+  let file_set_in = fn (loaded, f: pfile) ->
     let b = vec_new () in
-    let _ = put_msg b 1 (file_desc f) in
+    let _ = put_msg b 1 (file_desc_in loaded f) in
     bytes_of_vec b;
 
-  let of_source = fn (fname: str, src: str) -> file_set (Pparse.parse_file fname src);
+  let file_set = fn (f: pfile) -> file_set_in [] f;
+
+  // The descriptor for one file, with the sources of the files it imports. `deps` is
+  // (path, source) — I/O stays with the caller, which is why this takes text rather
+  // than reading anything.
+  let of_sources = fn (fname: str, src: str, deps) ->
+    let loaded = list_map deps (fn (d) ->
+                   let (p, s) = d in (p, Pparse.parse_file p s)) in
+    file_set_in loaded (Pparse.parse_file fname src);
+
+  let of_source = fn (fname: str, src: str) -> of_sources fname src [];
 }
