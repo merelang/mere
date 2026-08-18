@@ -41,7 +41,17 @@ trap 'rm -rf "$TMP"' EXIT
 
 # Each line is `× 0041 ÷ 0042 ÷`: the marks are the answer, the hex is the input.
 # Split into two files so the comparison is a plain diff.
-awk '
+# LC_ALL=C, AND THAT IS LOAD-BEARING. Under a UTF-8 locale this machine's awk
+# (version 20200816) compares `÷` EQUAL TO `×` — collation, not bytes — so every
+# mark became `x`, `want.txt` came out with 19338 lines and not one break in it, and
+# the gate reported all 19338 cases differing. The implementation was right and the
+# EXPECTATION was degenerate.
+#
+# It passes under the C locale and on GNU awk, which is why CI is green and a
+# Japanese-locale machine is not: exactly the environment difference to suspect when
+# a gate disagrees with CI. The data is ASCII plus these two symbols, so byte
+# comparison is what was wanted all along.
+LC_ALL=C awk '
   /^[×÷]/ {
     cps = ""; brk = ""
     n = split($0, t, /[ \t]+/)

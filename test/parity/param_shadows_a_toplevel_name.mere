@@ -1,0 +1,22 @@
+// Q-046: a PARAMETER named the same as a top-level binding, captured by an inner fn.
+//
+// The backends lift an inner function and resolve its captures by name. Before the
+// fix the lifted `loop` took no parameter for `handler` at all and its body referred
+// to the CALLER'S GLOBAL of that name.
+//
+// It was invisible while both had the same type — the wrong binding happened to fit —
+// and surfaced only when their types diverged, as C that did not compile. So the
+// two `handler`s here have DIFFERENT types on purpose: that is the whole test.
+//
+// `handler` because it is the name a user naturally reaches for, which is what made
+// this a rule about a library's parameter names rather than a bug.
+module Srv {
+  let call = fn (handler) -> handler 7;
+  let serve = fn (n: int, handler) ->
+    let rec loop = fn (k: int, acc: int) ->
+      if k >= n then acc else loop (k + 1) (acc + call handler) in
+    loop 0 0;
+}
+let handler = fn (s: str) -> str_len s;
+let plus_one = fn (x: int) -> x + 1;
+print (str_of_int (Srv.serve 2 plus_one) ++ "/" ++ str_of_int (handler "abc"))
