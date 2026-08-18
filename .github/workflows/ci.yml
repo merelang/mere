@@ -286,6 +286,9 @@ jobs:
       - name: graphql_exec_parity (vs graphql-js execute)
         run: sh scripts/graphql_exec_parity.sh
 
+      - name: graphql_intro_parity (vs graphql-js introspection)
+        run: sh scripts/graphql_intro_parity.sh
+
       # HTTP/2 framing against hyperframe, in both directions, plus the reserved
       # bit of the stream identifier — the one field that behaves correctly
       # against every well-behaved peer while being wrong.

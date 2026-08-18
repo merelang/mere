@@ -198,9 +198,92 @@ recording: breaking the **named** fragment's type-condition check went unnoticed
 because the corpus only had the **inline** form, so one of two nearly identical
 branches was unchecked. Three named-spread cases closed it.
 
+## Introspection
+
+`__schema`, `__type(name:)` and `__typename`, answered by **the ordinary executor**.
+
+### The schema is a file, and that is the whole design
+
+The introspection types — `__Schema`, `__Type`, `__Field`, `__InputValue`,
+`__EnumValue`, `__Directive`, `__TypeKind`, `__DirectiveLocation` — are ordinary
+SDL, generated into `introspection_sdl.mere` and **appended to the document's own
+definitions**. From there `__Type` is an object type like any other, so field
+lookup, nullability, null propagation, list handling and enum coercion all apply to
+it unchanged. There is no second executor and no introspection code path.
+
+The SDL is **generated from graphql-js and committed**, the same arrangement as the
+Unicode and HPACK tables: the specification fixes every name, type and nullability
+in it, so typing it out would be a transcription, and a 200-line transcription has
+a mistake in it. `graphql_intro_parity.sh` regenerates and diffs.
+
+**Descriptions are dropped** from the generated schema — they are prose that no
+answer here depends on, and keeping them would put the oracle's English in this
+repo and make every graphql-js release a diff. That is a stated gap, and the gate
+asserts `description` is null at every position rather than letting the
+normalisation hide it.
+
+### Introspection is cyclic, so one value has to be lazy
+
+`__schema.types` lists every type, each type's `fields` name types, whose fields
+name types. **A strict value cannot hold that** — building it eagerly does not
+terminate — and what bounds the expansion is the query: `getIntrospectionQuery()`
+asks for `ofType` exactly nine levels deep and stops.
+
+So `gvalue` has one non-data arm, `GTypeRef of gtype`, carrying a type
+*expression*; its `__Type` fields are computed when asked for. That makes it the
+only place in this executor where a field is computed rather than looked up —
+worth saying out loud, because everywhere else the resolvers are the data.
+
+### Where arguments started mattering
+
+This executor ignores field arguments, like graphql-js's default resolver. Two
+places here cannot:
+
+- **`__type(name:)`** — without its argument it is not a field, it is a different
+  question.
+- **`includeDeprecated`** on `fields` / `enumValues` / `inputFields` / `args`, whose
+  default is **false**. Filtered in one place rather than at the four producers,
+  because two of them build a `GObj` and two answer from a `GTypeRef`, so filtering
+  at the source would be the same rule written twice in two shapes.
+
+**The standard introspection query passes `includeDeprecated: true`**, so every
+section of the gate that uses it agreed while this was missing entirely. It took a
+hand-written `__type(name: "Colour") { enumValues }` — no argument, hence the
+default — to disagree.
+
+### The gate, and the check that is stronger than comparing
+
+Four oracles for one feature:
+
+1. the committed SDL vs a fresh generation
+2. `getIntrospectionQuery()` — 109 lines nobody here wrote — executed on both sides
+   and compared as JSON, over 11 schemas covering every `__TypeKind`
+3. **the round trip**: our introspection result fed to graphql-js's own
+   `buildClientSchema` and printed must equal `printSchema(buildSchema(sdl))`
+4. `__type` by hand, including an unknown name and `__Type` itself
+
+(3) is the one worth copying. It holds exactly when our answer carries the whole
+schema, it is blind to field order (which the specification does not fix), and
+**nothing transcribes an introspection result** — the same reason the document gate
+compares printed documents rather than serialised ASTs. It passed before (2) did,
+and the differences (2) then found were both real.
+
+### Two things the oracle had to correct
+
+- **A built-in scalar belongs to a schema only if something refers to it.** The
+  oracle's type map for `type Query { a: Int }` is `Query Int Boolean String` and
+  not the other two. `Boolean` and `String` are always present because the
+  **built-in directives** refer to them — `@skip(if: Boolean!)`,
+  `@deprecated(reason: String!)` — which falls out of walking the appended SDL
+  rather than being special-cased.
+- **graphql-js 17 keeps an argument's default in `a.default.value`**, not
+  `a.defaultValue`. Reading the old field silently dropped
+  `@deprecated(reason: String! = "No longer supported")`'s default, and the
+  oracle's own introspection of our answer is what said so.
+
 ## Not here yet
 
-- **Validation and introspection** beyond `__typename`.
+- **Validation.**
 - **Type-system extensions** (`extend type T { … }`). Valid GraphQL that this
   parser refuses rather than mis-reads: reading `extend type T` as `type T` would
   produce a tree that says something the document did not. The refusal is
