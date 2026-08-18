@@ -95,7 +95,7 @@ oracle — `protoc --descriptor_set_out` — checks both layers at once. If the 
 encoder is wrong the descriptor diff says so; if a descriptor field number is wrong,
 the same diff says so.
 
-`scripts/proto_desc_parity.sh` compares **bytes** across 72 derived files. Not a
+`scripts/proto_desc_parity.sh` compares **bytes** across 103 derived files. Not a
 decoded rendering and not a field walk: a descriptor that decodes to the same text
 but different bytes is still a different descriptor to anything that hashes or
 caches it.
@@ -121,10 +121,64 @@ resolves from the innermost scope outward — so the same simple name means diff
 types at different depths, and getting the order wrong produces a descriptor that is
 still well-formed.
 
+## Options
+
+`option name = value;` at file, message, enum, service and method level, and
+`[a = 1, b = 2]` on a field or an enum value.
+
+### The subset lives in the encoder, not the parser
+
+An option's name means nothing to the grammar — `option x = 1;` is well-formed
+whatever `x` is — and the field number that encodes it belongs to
+`descriptor.proto`. So the parser accepts any `name = value` and
+`descriptor.mere` refuses a name it cannot encode, **by name**. Keeping the list
+of known names in both places is how the two drift.
+
+### protoc emits options in ascending field order, not source order
+
+Measured: `option go_package` (field 11) written before `option java_package`
+(field 1) comes back as 1 then 11. Same inside a field's brackets —
+`[jstype = JS_STRING, deprecated = true]` is emitted 3 then 6. Every multi-option
+case in the corpus is therefore written in **descending** field order on purpose,
+so a writer that keeps source order produces different bytes.
+
+### `json_name` is not an option
+
+`[json_name = "wire"]` sets `FieldDescriptorProto`'s own `json_name` (field 10)
+and produces **no options submessage at all**. Treating it as an option would put
+it in the wrong message under a number that means something else. The encoder
+pulls it out of the bracket list before looking anything up.
+
+Three more things the oracle fixed:
+
+- **`OptimizeMode` does not start at 0** — `SPEED = 1`, `CODE_SIZE = 2`,
+  `LITE_RUNTIME = 3`. `JSType`, `CType` and `IdempotencyLevel` do start at 0.
+- **An unset `options` submessage is omitted**, so writing an empty one adds two
+  bytes protoc does not — *except* on a method, where `{}` must emit an empty
+  submessage and `;` must emit nothing. That distinction predates options and is
+  why `has_body` is still carried separately from the options a body may hold.
+- **A method body may now contain options**, so the "only empty braces" refusal is
+  gone; anything other than `option` inside one is still a named error.
+
+### What is still refused, and what cannot be tested
+
+The options protoc accepts and this encoder does not carry are refused by name and
+each has a case in the gate: `java_string_check_utf8`, `php_class_prefix`,
+`cc_generic_services`, `weak`, `debug_redact`. **Adding one to the table makes its
+case fail as stale** — measured by doing it.
+
+A **custom option** (`option (my.ext) = 1`) is refused where the syntax says what
+it is: an extension's field number comes from a registry built out of other
+`.proto` files, so it cannot be encoded from this file alone.
+
+Two guards are **defensive and unreachable from valid input**, and say so in the
+code: an unknown option name and a wrong-typed value. protoc rejects both, so no
+protoc-accepted file reaches either branch.
+
 ### The subset is refused, not skipped
 
-`oneof`, `map`, `import`, `option` (file and field), `reserved`, `optional`,
-`extend`, `group` and proto2 syntax are outside the subset. **protoc accepts all of
+`oneof`, `map`, `import`, `reserved`, `optional`, `extend`, `group` and proto2
+syntax are outside the subset. **protoc accepts all of
 them**, so the oracle cannot be asked whether they are wrong — they are simply not
 implemented. What the harness checks instead is that the parser **refuses each one by
 name**: a skipped construct would produce a descriptor that is wrong where nothing

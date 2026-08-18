@@ -57,52 +57,207 @@ module Pdesc {
     let _ = Wire.tag out field Wire.varint in
     Wire.put_varint out (if v then 1 else 0);
 
+  // --- options ---------------------------------------------------------------
+  //
+  // THE SUBSET LIVES HERE, NOT IN THE PARSER. An option's name means nothing to the
+  // grammar — `option x = 1;` is well-formed whatever `x` is — and the field number
+  // that encodes it belongs to `descriptor.proto`, which is this file's business. So
+  // the parser accepts any `name = value` and this refuses a name it cannot encode,
+  // BY NAME. Putting the list of known names in both places is how the two drift.
+  //
+  // Every number below was read out of `descriptor.proto`, not recalled:
+  //
+  //   FileOptions       java_package=1 java_outer_classname=8 java_multiple_files=10
+  //                     optimize_for=9 go_package=11 deprecated=23 cc_enable_arenas=31
+  //                     objc_class_prefix=36 csharp_namespace=37 swift_prefix=39
+  //                     php_namespace=41 ruby_package=45
+  //   FieldOptions      ctype=1 packed=2 deprecated=3 lazy=5 jstype=6
+  //   MessageOptions    message_set_wire_format=1 no_standard_descriptor_accessor=2
+  //                     deprecated=3
+  //   EnumOptions       allow_alias=2 deprecated=3
+  //   EnumValueOptions  deprecated=1
+  //   ServiceOptions    deprecated=33
+  //   MethodOptions     deprecated=33 idempotency_level=34
+  //
+  // `json_name` is NOT in the field table and that is the whole point of measuring:
+  // `[json_name = "wireY"]` sets FieldDescriptorProto's `json_name` (field 10)
+  // DIRECTLY and produces no `options` submessage at all. Treating it as an option
+  // would put it in the wrong message with a field number that means something else.
+
+  let kind_str = 0;
+  let kind_bool = 1;
+  let kind_optimize = 2;
+  let kind_jstype = 3;
+  let kind_ctype = 4;
+  let kind_idem = 5;
+
+  let file_opts_table =
+    [("java_package", 1, kind_str), ("java_outer_classname", 8, kind_str),
+     ("java_multiple_files", 10, kind_bool), ("optimize_for", 9, kind_optimize),
+     ("go_package", 11, kind_str), ("deprecated", 23, kind_bool),
+     ("cc_enable_arenas", 31, kind_bool), ("objc_class_prefix", 36, kind_str),
+     ("csharp_namespace", 37, kind_str), ("swift_prefix", 39, kind_str),
+     ("php_namespace", 41, kind_str), ("ruby_package", 45, kind_str)];
+
+  let field_opts_table =
+    [("ctype", 1, kind_ctype), ("packed", 2, kind_bool), ("deprecated", 3, kind_bool),
+     ("lazy", 5, kind_bool), ("jstype", 6, kind_jstype)];
+
+  let msg_opts_table =
+    [("message_set_wire_format", 1, kind_bool),
+     ("no_standard_descriptor_accessor", 2, kind_bool), ("deprecated", 3, kind_bool)];
+
+  let enum_opts_table = [("allow_alias", 2, kind_bool), ("deprecated", 3, kind_bool)];
+  let enumval_opts_table = [("deprecated", 1, kind_bool)];
+  let svc_opts_table = [("deprecated", 33, kind_bool)];
+  let method_opts_table = [("deprecated", 33, kind_bool),
+                           ("idempotency_level", 34, kind_idem)];
+
+  let rec opt_lookup = fn (tbl, name: str) ->
+    match tbl with
+    | [] -> []
+    | [(n, f, k), ...rest] ->
+      if str_eq n name then Cons ((f, k), []) else opt_lookup rest name;
+
+  // An enum-valued option carries a NAME in the source and a NUMBER on the wire, and
+  // the numbers are `descriptor.proto`'s. Measured: OptimizeMode SPEED=1 CODE_SIZE=2
+  // LITE_RUNTIME=3 (note it does NOT start at 0), JSType JS_NORMAL=0 JS_STRING=1
+  // JS_NUMBER=2, CType STRING=0 CORD=1 STRING_PIECE=2, IdempotencyLevel
+  // IDEMPOTENCY_UNKNOWN=0 NO_SIDE_EFFECTS=1 IDEMPOTENT=2.
+  let enum_opt_num = fn (kind: int, oname: str, v: str) ->
+    let tbl =
+      if kind == kind_optimize then
+        [("SPEED", 1), ("CODE_SIZE", 2), ("LITE_RUNTIME", 3)]
+      else if kind == kind_jstype then
+        [("JS_NORMAL", 0), ("JS_STRING", 1), ("JS_NUMBER", 2)]
+      else if kind == kind_ctype then
+        [("STRING", 0), ("CORD", 1), ("STRING_PIECE", 2)]
+      else [("IDEMPOTENCY_UNKNOWN", 0), ("NO_SIDE_EFFECTS", 1), ("IDEMPOTENT", 2)] in
+    let rec go = fn (ts) ->
+      match ts with
+      | [] -> fail ("proto: '" ++ v ++ "' is not a value of option '" ++ oname
+                    ++ "' — the value names an enum in descriptor.proto and this"
+                    ++ " one has no such name")
+      | [(n, num), ...rest] -> if str_eq n v then num else go rest in
+    go tbl;
+
+  // One option, as (field number, writer). Sorted by field number afterwards, because
+  // PROTOC EMITS OPTIONS IN ASCENDING FIELD ORDER AND NOT SOURCE ORDER — measured:
+  // `option go_package` then `option java_package` comes back as field 1 then 11.
+  // The same rule the field encoder already follows, for the same reason.
+  let opt_entry = fn (ctx: str, tbl, o: popt) ->
+    match o with
+    | POpt (name, v) ->
+      match opt_lookup tbl name with
+      | [] ->
+        fail ("proto: option '" ++ name ++ "' is not in this encoder's subset ("
+              ++ ctx ++ ") — the option's field number comes from descriptor.proto"
+              ++ " and this one is not carried, so it is refused rather than dropped")
+      | [(f, kind), ..._] ->
+        if kind == kind_str then
+          (match v with
+           | POStr sv -> (f, fn (b) -> put_string b f sv)
+           | _ -> fail ("proto: option '" ++ name ++ "' takes a string"))
+        else if kind == kind_bool then
+          (match v with
+           | POBool bv -> (f, fn (b) -> put_bool b f bv)
+           | _ -> fail ("proto: option '" ++ name ++ "' takes true or false"))
+        else
+          (match v with
+           | POIdent iv -> (f, fn (b) -> put_int b f (enum_opt_num kind name iv))
+           | _ -> fail ("proto: option '" ++ name
+                        ++ "' takes an enum value name, not a literal"));
+
+  // The `options` submessage, or nothing. An unset optional submessage is OMITTED by
+  // protoc, so an empty one would add two bytes it does not write — except for a
+  // method body, where the emptiness IS the content and the caller says so.
+  let opts_sub = fn (ctx: str, tbl, opts) ->
+    let entries = list_map opts (fn (o) -> opt_entry ctx tbl o) in
+    let sorted = list_sort_by (fn (a, b) -> let (fa, _) = a in let (fb, _) = b in fa <= fb)
+                   entries in
+    sub (fn (b) -> list_iter sorted (fn (e) -> let (_, w) = e in w b));
+
+  let put_opts = fn (out, field: int, ctx: str, tbl, opts) ->
+    if list_len opts == 0 then () else put_msg out field (opts_sub ctx tbl opts);
+
+  // `json_name` in a field's brackets OVERRIDES the derived one. It is looked up here
+  // rather than in the options table because it is not an option — see above.
+  let rec json_override = fn (opts) ->
+    match opts with
+    | [] -> []
+    | [POpt (n, v), ...rest] ->
+      if str_eq n "json_name" then
+        (match v with
+         | POStr sv -> Cons (sv, [])
+         | _ -> fail "proto: json_name takes a string")
+      else json_override rest;
+
+  let rec without_json_name = fn (opts) ->
+    match opts with
+    | [] -> []
+    | [o, ...rest] ->
+      match o with
+      | POpt (n, _) ->
+        if str_eq n "json_name" then without_json_name rest
+        else Cons (o, without_json_name rest);
+
   // --- FieldDescriptorProto ------------------------------------------------
   // `label` and `json_name` are ALWAYS written: descriptor.proto is proto2, so
   // protoc emits them for every field and a descriptor without them differs.
   let field_desc = fn (decls, scope: str, f: pfield) ->
     match f with
-    | PField (name, num, rep, ty) ->
+    | PField (name, num, rep, ty, opts) ->
+      // FIELD ORDER MATTERS AND IT IS NOT SOURCE ORDER: `options` is field 8 and
+      // `json_name` is field 10, so options come first. protoc writes a message's
+      // fields ascending, and a descriptor that decodes the same but orders these two
+      // differently is still different bytes.
+      let jname = match json_override opts with
+                  | [] -> Pparse.json_name name
+                  | [j, ..._] -> j in
+      let fopts = without_json_name opts in
       sub (fn (b) ->
         let _ = put_string b 1 name in
         let _ = put_int b 3 num in
         let _ = put_int b 4 (if rep then label_repeated else label_optional) in
-        match ty with
-        | PScalar (_, code) ->
-          let _ = put_int b 5 code in
-          put_string b 10 (Pparse.json_name name)
-        | PRef n ->
-          let (q, is_msg) = Pparse.resolve decls scope n in
-          let _ = put_int b 5 (if is_msg then Pparse.ty_message else Pparse.ty_enum) in
-          let _ = put_string b 6 q in
-          put_string b 10 (Pparse.json_name name));
+        let _ = match ty with
+                | PScalar (_, code) -> put_int b 5 code
+                | PRef n ->
+                  let (q, is_msg) = Pparse.resolve decls scope n in
+                  let _ = put_int b 5 (if is_msg then Pparse.ty_message
+                                       else Pparse.ty_enum) in
+                  put_string b 6 q in
+        let _ = put_opts b 8 "a field" field_opts_table fopts in
+        put_string b 10 jname);
 
   // --- EnumDescriptorProto -------------------------------------------------
   let enum_desc = fn (e: penum) ->
     match e with
-    | PEnum (name, vals) ->
+    | PEnum (name, vals, opts) ->
       sub (fn (b) ->
         let _ = put_string b 1 name in
-        list_iter vals (fn (v) ->
+        let _ = list_iter vals (fn (v) ->
           match v with
-          | PEnumV (vn, vnum) ->
+          | PEnumV (vn, vnum, vopts) ->
             // `number: 0` IS written. proto2 presence, not proto3 defaults.
             put_msg b 2 (sub (fn (c) ->
               let _ = put_string c 1 vn in
-              put_int c 2 vnum))));
+              let _ = put_int c 2 vnum in
+              put_opts c 3 "an enum value" enumval_opts_table vopts))) in
+        put_opts b 3 "an enum" enum_opts_table opts);
 
   // --- DescriptorProto -----------------------------------------------------
   // The scope grows as it descends, because a field's type reference resolves from
   // the innermost enclosing message outward.
   let rec msg_desc = fn (decls, scope: str, m: pmsg) ->
     match m with
-    | PMsg (name, fields, subs, enums) ->
+    | PMsg (name, fields, subs, enums, opts) ->
       let inner = scope ++ "." ++ name in
       sub (fn (b) ->
         let _ = put_string b 1 name in
         let _ = list_iter fields (fn (f) -> put_msg b 2 (field_desc decls inner f)) in
         let _ = list_iter subs (fn (sm) -> put_msg b 3 (msg_desc decls inner sm)) in
-        list_iter enums (fn (e) -> put_msg b 4 (enum_desc e)));
+        let _ = list_iter enums (fn (e) -> put_msg b 4 (enum_desc e)) in
+        put_opts b 7 "a message" msg_opts_table opts);
 
   // --- ServiceDescriptorProto ----------------------------------------------
   // `client_streaming` / `server_streaming` are only written when true: they are
@@ -110,37 +265,46 @@ module Pdesc {
   // add bytes protoc does not.
   let svc_desc = fn (decls, scope: str, v: psvc) ->
     match v with
-    | PSvc (name, ms) ->
+    | PSvc (name, ms, opts) ->
+      // name=1, method=2, options=3 — written in that order because protoc writes a
+      // message's fields ascending and these bytes are compared, not decoded.
       sub (fn (b) ->
         let _ = put_string b 1 name in
-        list_iter ms (fn (m) ->
+        let _ = list_iter ms (fn (m) ->
           match m with
-          | PMethod (mn, inty, outty, cs, ss, has_body) ->
+          | PMethod (mn, inty, outty, cs, ss, has_body, mopts) ->
             put_msg b 2 (sub (fn (c) ->
               let (qi, _) = Pparse.resolve decls scope inty in
               let (qo, _) = Pparse.resolve decls scope outty in
               let _ = put_string c 1 mn in
               let _ = put_string c 2 qi in
               let _ = put_string c 3 qo in
-              // `options` (field 4) as an EMPTY submessage when the method was
-              // written with `{}`. Presence is the whole content: protoc emits
-              // `22 00` there and nothing at all for the `;` form.
-              let _ = if has_body then put_msg c 4 (bytes_of_hex "") else () in
+              // `options` (field 4) is written when the method HAD BRACES, even if
+              // they were empty: presence is the content there. protoc emits `22 00`
+              // for `{}` and nothing at all for the `;` form — that two-byte
+              // difference was the last of 72 files to match.
+              let _ = if has_body then
+                        put_msg c 4 (opts_sub "a method" method_opts_table mopts)
+                      else () in
               let _ = if cs then put_bool c 5 true else () in
-              if ss then put_bool c 6 true else ()))));
+              if ss then put_bool c 6 true else ()))) in
+        put_opts b 3 "a service" svc_opts_table opts);
 
   // --- FileDescriptorProto / FileDescriptorSet -----------------------------
   let file_desc = fn (f: pfile) ->
     let decls = Pparse.collect f in
     match f with
-    | PFile (fname, pkg, msgs, enums, svcs) ->
+    | PFile (fname, pkg, msgs, enums, svcs, opts) ->
       let scope = if str_eq pkg "" then "" else "." ++ pkg in
+      // name=1 package=2 message_type=4 enum_type=5 service=6 options=8 syntax=12,
+      // written ascending.
       sub (fn (b) ->
         let _ = put_string b 1 fname in
         let _ = if str_eq pkg "" then () else put_string b 2 pkg in
         let _ = list_iter msgs (fn (m) -> put_msg b 4 (msg_desc decls scope m)) in
         let _ = list_iter enums (fn (e) -> put_msg b 5 (enum_desc e)) in
         let _ = list_iter svcs (fn (v) -> put_msg b 6 (svc_desc decls scope v)) in
+        let _ = put_opts b 8 "a file" file_opts_table opts in
         put_string b 12 "proto3");
 
   let file_set = fn (f: pfile) ->
