@@ -1,0 +1,209 @@
+// contrib/http2/server.mere — an h2c connection, enough of one to serve gRPC.
+//
+// TLS IS NOT MISSING BY OVERSIGHT. gRPC over cleartext HTTP/2 ("h2c", prior
+// knowledge) is what `grpcurl -plaintext` and every gRPC client's insecure mode
+// speak: the connection opens with 24 literal bytes and no negotiation. Measured,
+// not assumed — a capture of grpcurl's first packet is exactly the preface
+// followed by an empty SETTINGS frame. So a server can be useful before anything
+// here knows what ALPN is.
+//
+// WHAT THIS DOES NOT DO, stated up front because a reader will look for it:
+//
+//   * ONE CONNECTION AT A TIME. `tcp_accept` returns, the connection is served to
+//     completion, and then the next one is taken. mhttpd already showed how to
+//     spawn a handler per connection with a buffer pool; doing it here as well
+//     would mix two problems in one file's first version.
+//   * NO FLOW CONTROL. WINDOW_UPDATE frames are read and ignored, and none are
+//     sent. That is safe only because the responses here are small: the default
+//     connection window is 65535 bytes and nothing negotiates it up.
+//   * ONE STREAM'S STATE AT A TIME. A client that interleaves two requests on one
+//     connection before finishing either would be mis-served. Unary gRPC does not,
+//     and the parity harness checks the case that exists rather than pretending
+//     about the case that does not.
+//
+// BINARY CROSSES THE FFI AS HEX. `tcp_read` writes into the integer-addressed byte
+// arena, and there is no arena-to-`bytes` bridge — `mem_to_str` stops at the first
+// zero byte, which every second HPACK block contains. `bytes_to_hex_len` returns
+// the arena's contents as hex in one call, and `bytes_of_hex` turns that into
+// `bytes`. Two characters per byte, one FFI call. Writing goes the other way with
+// `mem_set_u8` per byte, because the hex-decoding entry point ALLOCATES and the
+// arena is a bump allocator with no free.
+
+import "frame.mere";
+import "hpack.mere";
+
+extern fn tcp_listen: int -> int;
+extern fn tcp_accept: int -> int;
+extern fn tcp_read: int -> int -> int -> int;
+extern fn tcp_write: int -> int -> int -> int;
+extern fn tcp_close: int -> unit;
+extern fn mem_alloc: int -> int;
+extern fn mem_set_u8: int -> int -> int -> int;
+extern fn bytes_to_hex_len: int -> int -> str;
+
+module H2Server {
+
+  let read_chunk = 16384;
+
+  // One read. Returns the bytes that arrived, or empty when the peer is done.
+  let recv = fn (cfd: int, rbuf: int) ->
+    let n = tcp_read cfd rbuf read_chunk in
+    if n <= 0 then bytes_of_hex ""
+    else bytes_of_hex (bytes_to_hex_len rbuf n);
+
+  let rec put_bytes_at = fn (wbuf: int, b: bytes, k: int) ->
+    if k >= bytes_len b then ()
+    else
+      let _ = mem_set_u8 wbuf k (bytes_get b k) in
+      put_bytes_at wbuf b (k + 1);
+
+  let send = fn (cfd: int, wbuf: int, b: bytes) ->
+    let _ = put_bytes_at wbuf b 0 in
+    let _ = tcp_write cfd wbuf (bytes_len b) in
+    ();
+
+  // Enough bytes for a frame header, and then for its payload. A frame can and
+  // does arrive split across reads — the harness's own client sends the preface
+  // and SETTINGS in one packet and HEADERS in another — so "read once and parse"
+  // is not a simplification, it is a bug that happens to pass on a fast loopback.
+  let rec ensure = fn (cfd: int, rbuf: int, buf: bytes, want: int) ->
+    if bytes_len buf >= want then buf
+    else
+      let more = recv cfd rbuf in
+      if bytes_len more == 0 then buf                    // peer closed
+      else ensure cfd rbuf (bytes_concat buf more) want;
+
+  // `drop` is a reserved word (the language has `drop type`), so this cannot be
+  // called what it is. Named for what it returns instead.
+  let after = fn (b: bytes, n: int) -> bytes_slice b n (bytes_len b - n);
+
+  // --- the response ------------------------------------------------------
+  //
+  // Three frames: headers, one DATA carrying one gRPC message, then TRAILERS.
+  // The trailers are not optional and not cosmetic — a gRPC client waits for
+  // `grpc-status` and reports "unexpected EOF" without it, which is what makes
+  // this the only place a missing frame looks like a network fault.
+  let respond_ok = fn (cfd: int, wbuf: int, stream: int, msg: bytes) ->
+    let h = Hpack.encode [(":status", "200"), ("content-type", "application/grpc")] in
+    let t = Hpack.encode [("grpc-status", "0")] in
+    let _ = send cfd wbuf (H2.frame_bytes H2.headers H2.end_headers stream h) in
+    let _ = send cfd wbuf (H2.frame_bytes H2.data 0 stream (H2.grpc_message msg)) in
+    send cfd wbuf
+      (H2.frame_bytes H2.headers (bit_or H2.end_headers H2.end_stream) stream t);
+
+  // An error is a status in the TRAILERS, not an HTTP status: the request
+  // succeeded as HTTP and failed as RPC. Code 12 is UNIMPLEMENTED.
+  let respond_err = fn (cfd: int, wbuf: int, stream: int, code: int, msg: str) ->
+    let h = Hpack.encode [(":status", "200"), ("content-type", "application/grpc")] in
+    let t = Hpack.encode [("grpc-status", str_of_int code), ("grpc-message", msg)] in
+    let _ = send cfd wbuf (H2.frame_bytes H2.headers H2.end_headers stream h) in
+    send cfd wbuf
+      (H2.frame_bytes H2.headers (bit_or H2.end_headers H2.end_stream) stream t);
+
+  // --- the frame loop ----------------------------------------------------
+  //
+  // `path` and `data` are the current stream's accumulation. `stream` is 0 until
+  // a HEADERS frame names one.
+  let rec pump = fn (cfd: int, rbuf: int, wbuf: int, buf: bytes, st: hstate,
+                     stream: int, path: str, data: bytes, handler) ->
+    let b = ensure cfd rbuf buf H2.header_len in
+    if bytes_len b < H2.header_len then ()                // peer closed cleanly
+    else
+      let need = H2.header_len + H2.get_u24be b 0 in
+      let b2 = ensure cfd rbuf b need in
+      if bytes_len b2 < need then ()                      // truncated frame
+      else
+        let (_, ty, flags, sid, payload, nxt) = H2.read_frame b2 0 in
+        let rest = after b2 nxt in
+        if ty == H2.settings then
+          // A SETTINGS that is not an ACK must be acknowledged, and the ACK
+          // carries no payload. Its own settings are read and ignored: nothing
+          // here depends on a value the peer would send.
+          let _ =
+            if H2.has_flag flags H2.ack then ()
+            else send cfd wbuf (H2.frame_bytes H2.settings H2.ack 0 (bytes_of_hex "")) in
+          pump cfd rbuf wbuf rest st stream path data handler
+        else if ty == H2.ping then
+          let _ =
+            if H2.has_flag flags H2.ack then ()
+            else send cfd wbuf (H2.frame_bytes H2.ping H2.ack 0 payload) in
+          pump cfd rbuf wbuf rest st stream path data handler
+        else if ty == H2.goaway then ()
+        else if ty == H2.headers then
+          // The HPACK state is threaded, not rebuilt: the dynamic table is
+          // connection state, and a second decoder would desynchronise on the
+          // second request.
+          let (hs, st2) = Hpack.decode st payload in
+          let p = list_fold hs "" (fn (acc, kv) ->
+                    let (n, v) = kv in if str_eq n ":path" then v else acc) in
+          if H2.has_flag flags H2.end_stream then
+            let out = handler p (bytes_of_hex "") in
+            let _ = respond_ok cfd wbuf sid out in
+            pump cfd rbuf wbuf rest st2 0 "" (bytes_of_hex "") handler
+          else pump cfd rbuf wbuf rest st2 sid p (bytes_of_hex "") handler
+        else if ty == H2.data then
+          let d = bytes_concat data payload in
+          if H2.has_flag flags H2.end_stream then
+            // The gRPC prefix says how long the message is, so a DATA payload is
+            // not the message: it is a framed message inside one.
+            let (_, msg, _) = H2.read_grpc_message d 0 in
+            let out = handler path msg in
+            let _ = respond_ok cfd wbuf sid out in
+            pump cfd rbuf wbuf rest st 0 "" (bytes_of_hex "") handler
+          else pump cfd rbuf wbuf rest st stream path d handler
+        else
+          // WINDOW_UPDATE, PRIORITY, RST_STREAM, CONTINUATION: read and skipped.
+          // Skipping is only correct because the extent is known from the header,
+          // which is the whole reason a length-prefixed framing exists.
+          pump cfd rbuf wbuf rest st stream path data handler;
+
+  let serve_conn = fn (cfd: int, rbuf: int, wbuf: int, handler) ->
+    let pre = bytes_of_str H2.preface in
+    let b = ensure cfd rbuf (bytes_of_hex "") H2.preface_len in
+    if bytes_len b < H2.preface_len then tcp_close cfd
+    else if hex_of_bytes (bytes_slice b 0 H2.preface_len) != hex_of_bytes pre then
+      // Not HTTP/2. Closing is the whole answer: the preface is deliberately not
+      // valid HTTP/1.1 so that this cannot be a half-understood request.
+      tcp_close cfd
+    else
+      let _ = send cfd wbuf (H2.frame_bytes H2.settings 0 0 (bytes_of_hex "")) in
+      let _ = pump cfd rbuf wbuf (after b H2.preface_len) Hpack.new_state
+                   0 "" (bytes_of_hex "") handler in
+      tcp_close cfd;
+
+  // `handler` is `str -> bytes -> bytes`: a path and a request message, giving a
+  // response message. Everything about HTTP/2 stays on this side of it.
+  let serve = fn (port: int, handler) ->
+    let sfd = tcp_listen port in
+    if sfd < 0 then fail ("http2: could not listen on port " ++ str_of_int port)
+    else
+      let rbuf = mem_alloc read_chunk in
+      let wbuf = mem_alloc read_chunk in
+      let rec loop = fn (n: int) ->
+        let cfd = tcp_accept sfd in
+        if cfd < 0 then ()
+        else
+          let _ = serve_conn cfd rbuf wbuf handler in
+          loop (n + 1) in
+      loop 0;
+
+  // Serving a bounded number of connections, so a harness can start the server,
+  // make its requests and have the process exit on its own instead of being
+  // killed. A test that has to kill its subject cannot tell a clean exit from a
+  // hang.
+  let serve_n = fn (port: int, count: int, handler) ->
+    let sfd = tcp_listen port in
+    if sfd < 0 then fail ("http2: could not listen on port " ++ str_of_int port)
+    else
+      let rbuf = mem_alloc read_chunk in
+      let wbuf = mem_alloc read_chunk in
+      let rec loop = fn (k: int) ->
+        if k >= count then ()
+        else
+          let cfd = tcp_accept sfd in
+          if cfd < 0 then ()
+          else
+            let _ = serve_conn cfd rbuf wbuf handler in
+            loop (k + 1) in
+      loop 0;
+}

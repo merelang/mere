@@ -4,6 +4,59 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-08-18 — A gRPC server in Mere, and two bugs loopback was hiding
+
+_`contrib/http2/server.mere` plus `examples/grpc_hello.mere`. `grpcurl` asks a Mere
+server for a greeting and gets one._
+
+```
+$ grpcurl -plaintext -protoset hello.protoset -d '{"name":"mere"}' \
+    127.0.0.1:50079 hello.Greeter/SayHello
+{
+  "message": "hello mere"
+}
+```
+
+Everything under that line is Mere: the protobuf wire format, the HTTP/2 framing,
+HPACK, and the connection. TLS is absent by measurement rather than oversight — h2c
+is what `grpcurl -plaintext` speaks, 24 literal bytes and no negotiation.
+
+`scripts/grpc_parity.sh` is the first harness here that does not compare bytes.
+Every layer underneath already has a byte-level gate; none of them answers whether
+a client that knows nothing about any of it gets a reply it recognises. Two clients,
+because they ask different questions: `grpcurl` (Go) over four connections
+including an empty proto3 request, and a python `h2` client making three requests on
+**one** connection — the case grpcurl cannot express for a unary method, and the one
+that catches a per-stream HPACK decoder.
+
+**Poisoning it found two bugs that every other section passed:**
+
+1. **Removing the frame reassembly changed nothing.** On loopback a request arrives
+   in a single read, so a server that parses whatever one read handed it works. The
+   comment in `server.mere` had said reassembly "is not a simplification, it is a bug
+   that happens to pass on a fast loopback" — and the harness proved the comment
+   right by failing to catch its removal. The python client now sends one request
+   **split every seven bytes**, so the 9-byte header itself straddles two reads.
+2. **Removing the SETTINGS acknowledgement changed nothing**, because neither client
+   blocks on it. The client now asserts the ACK arrives.
+
+Both are the mirror of the dead guards found in `frame.mere` yesterday: there, code
+that nothing reached; here, behaviour that nothing observed.
+
+**Two harness bugs were worth more than they cost.** The readiness check waited for
+the port *by connecting to it* — which the server counts, since it serves a bounded
+number of connections and then exits, so the probe ate one and the last real call
+got "connection refused" while the harness blamed the server. It waits for the
+server's own "listening" line now. And the unknown-method section printed its
+DOCUMENTED-GAP without calling anything: a claim, not a check. It calls a method the
+schema declares and the server does not handle, and requires the documented answer.
+
+**One compiler bug came out of writing the example** and is recorded rather than
+fixed: an inner `let rec` that references a module-qualified constant makes the C
+backend emit the qualified name as a struct field — `long long Wire.delimited;`,
+which is not valid C. Six lines reproduce it, the interpreter is correct, and the
+error names generated C rather than the program that caused it.
+
 ## 2026-08-18 — HPACK, and three ways a gate can pass without checking anything
 
 _`contrib/http2/hpack.mere` plus a generated table and a seven-section gate. The
