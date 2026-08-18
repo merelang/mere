@@ -91,8 +91,13 @@ module H2 {
     let _ = put_u8 b (bit_shr x 8) in
     put_u8 b x;
 
+  // The message NAMES THE BOUNDARY. "read past the end of the buffer" was true and
+  // useless: every big-endian accessor funnels through here, so the one thing the
+  // reader needs — which byte, of how many — was the one thing it did not say.
   let get_u8 = fn (b: bytes, i: int) ->
-    if i >= bytes_len b then fail "http2: read past the end of the buffer"
+    if i >= bytes_len b then
+      fail ("http2: read of byte " ++ str_of_int i ++ " past the end of a "
+            ++ str_of_int (bytes_len b) ++ "-byte buffer")
     else bytes_get b i;
 
   let get_u16be = fn (b: bytes, i: int) ->
@@ -174,13 +179,23 @@ module H2 {
     let _ = put_settings_at b kvs in
     bytes_of_vec b;
 
+  // AN ENTRY IS SIX BYTES: a 16-bit identifier at i, then its 32-bit value at
+  // i+2. This read the value at i+4 for a long time, which is two bytes past
+  // every entry — so the last entry of any payload read past the end.
+  //
+  // Nothing caught it because nothing CALLED it. The writer had a parity section
+  // against hyperframe from the start; the reader was exported, documented, and
+  // never fed a single byte, and the server's own comment said its peer's
+  // settings were "read and ignored". The first caller found it immediately: a
+  // python h2 client opens with seven settings pairs, and byte 42 of a 42-byte
+  // payload is where it stopped.
   let rec read_settings_at = fn (p: bytes, i: int, acc) ->
     if i >= bytes_len p then acc
     else if i + 6 > bytes_len p then
       fail "http2: a SETTINGS payload must be a multiple of six bytes"
     else
       read_settings_at p (i + 6)
-        (Cons ((get_u16be p i, get_u32be p (i + 4)), acc));
+        (Cons ((get_u16be p i, get_u32be p (i + 2)), acc));
 
   // Reversed by construction, so reverse once at the end rather than per pair.
   let rec rev_pairs = fn (xs, acc) ->

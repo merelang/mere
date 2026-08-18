@@ -557,8 +557,11 @@ and parse_atom_raw = fn (toks: pos_token list) ->
               | Nil -> fail ("line " ++ show line ++ ": unexpected EOF after `region`"))
           // Uppercase ident = constructor. `Foo (x, y)` eagerly swallows
           // the paren payload so the AST mirrors OCaml's `Constr (..)`
-          // shape. `Foo { f = e }` / `Foo { e with f = e' }` is record
-          // literal / record update (Stage 50i). Bare `Foo` becomes a
+          // shape. `Foo { f = e }` is a record literal (Stage 50i);
+          // record UPDATE is `{ base | f = e }` and is parsed by
+          // parse_brace_form, not here — this comment said `with` for a
+          // long time and neither parser has ever accepted that spelling.
+          // Bare `Foo` becomes a
           // no-arg constructor; if followed by another atom (lowercase
           // ident, number, ...), parse_apply glues it as a function-
           // style application. Non-paren constructor payloads like

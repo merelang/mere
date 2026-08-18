@@ -13,15 +13,44 @@
 //     completion, and then the next one is taken. mhttpd already showed how to
 //     spawn a handler per connection with a buffer pool; doing it here as well
 //     would mix two problems in one file's first version.
-//   * NO FLOW CONTROL. WINDOW_UPDATE frames are read and ignored, and none are
-//     sent. That is safe only because the responses here are small: the default
-//     connection window is 65535 bytes and nothing negotiates it up.
 //   * ONE STREAM'S STATE AT A TIME. A client that interleaves two requests on one
 //     connection before finishing either would be mis-served. Unary gRPC does not,
 //     and the parity harness checks the case that exists rather than pretending
 //     about the case that does not.
-//   * NO STREAMING. A handler answers once, so server-streaming and
-//     client-streaming methods are not expressible in its signature.
+//   * NO INTERLEAVED BIDIRECTIONAL STREAMING. A handler is called after the request
+//     half-closes, so a response cannot begin before the request ends. Many messages
+//     in each direction work (see FLOW CONTROL AND STREAMING below); a response that
+//     must react to a request message *while more are arriving* does not.
+//
+// FLOW CONTROL AND STREAMING, and the order the limits actually bite in. All four
+// numbers below were measured against a python `h2` client, not read off the RFC:
+//
+//   1. `wbuf` HOLDS 16384 BYTES AND NOTHING CHECKED IT. `mem_copy_bytes` is a
+//      `memcpy` into a bump-allocated arena that records no allocation sizes, so a
+//      larger response wrote past the buffer, clobbered the next allocation, and
+//      RETURNED THE LENGTH AS IF IT HAD SUCCEEDED. Demonstrated with a sentinel: 32
+//      bytes into a 16-byte allocation changed the byte after it and reported 32.
+//      `send` now takes the capacity and fails loudly. A bound nothing enforces is
+//      not a bound.
+//   2. SETTINGS_MAX_FRAME_SIZE IS 16384 BY DEFAULT and a DATA frame may not exceed
+//      it. This bites at 16385 bytes — BEFORE flow control ever does — and the
+//      client refuses the frame outright (`FrameTooLargeError`). So the first thing
+//      a large response needs is not a window, it is being cut into frames.
+//   3. THE FLOW-CONTROL WINDOW IS 65535 BYTES, per connection and per stream.
+//      Past that the peer will not accept more DATA until it sends WINDOW_UPDATE.
+//   4. INBOUND, THE SAME WINDOW IS OURS TO REFILL. A client sending a 70009-byte
+//      request stalled at exactly 65535 with no WINDOW_UPDATE from us.
+//
+// THE ADVERTISED WINDOW IS DELIBERATELY LEFT AT THE DEFAULT. Sending a SETTINGS
+// that raises SETTINGS_INITIAL_WINDOW_SIZE would make large requests work without
+// any WINDOW_UPDATE logic — and would therefore make that logic untestable. The
+// small window is what keeps the gate able to fail.
+//
+// FLOW CONTROL MAKES THE WRITER A READER. Before it, sending was a leaf: bytes went
+// out and nothing came back. Now a send whose window is exhausted has to CONSUME
+// INPUT — the WINDOW_UPDATE that reopens it — so the send path and the frame loop
+// are mutually recursive. That is the one structural consequence of this whole
+// section, and it is why `send_data` and `pump` are declared with `and`.
 //
 // BINARY CROSSES THE FFI AS BYTES, as of mere v0.1.281. `tcp_read` writes into the
 // integer-addressed arena, and `mem_to_str` cannot bring that back — it stops at the
@@ -41,7 +70,25 @@ import "hpack.mere";
 // got a reply that looked like a success. gRPC reports failure in the TRAILERS —
 // the request succeeded as HTTP and failed as RPC — so this is not an HTTP status
 // and cannot be expressed as one.
-type grpc_reply = RpcOk of bytes | RpcErr of (int * str);
+type grpc_reply =
+  | RpcOk of bytes                 // one message, the unary case
+  | RpcStream of bytes list        // many messages, server-streaming
+  | RpcErr of (int * str);
+
+// The peer's limits, and what is LEFT of the windows it has granted us.
+//
+// Threaded as a parameter rather than kept in a mutable cell, so a path that
+// forgets to account for the bytes it sent cannot compile: `send_data` returns the
+// new state and its caller has to use it.
+//
+//   cwin     the connection-level window (stream 0). Shared by every stream.
+//   swin     the window for the stream being answered.
+//   maxframe the peer's SETTINGS_MAX_FRAME_SIZE — the largest DATA frame it will
+//            accept. 16384 until it says otherwise, and it bites before cwin does.
+//   initwin  the peer's SETTINGS_INITIAL_WINDOW_SIZE, remembered because a SETTINGS
+//            arriving mid-connection ADJUSTS an open stream's window by the delta
+//            rather than resetting it (RFC 9113 6.9.2).
+type h2conn = { cwin: int, swin: int, maxframe: int, initwin: int };
 
 extern fn tcp_listen: int -> int;
 extern fn tcp_accept: int -> int;
@@ -103,15 +150,111 @@ module H2Server {
 
   let empty = bytes_of_hex "";
 
+  // --- flow control constants ----------------------------------------------
+  //
+  // The defaults RFC 9113 fixes, named because a bare 65535 at a call site is a
+  // number and `default_window` is the protocol saying something.
+  let default_window = 65535;
+  let default_max_frame = 16384;
+
+  // The DATA payload one frame from here may carry. `wbuf` is allocated as this plus
+  // a frame header, so this is a property of the buffer and not of the peer; the
+  // peer's SETTINGS_MAX_FRAME_SIZE is the other bound and the smaller wins.
+  //
+  // 65536 AND NOT 16384, so that BOTH bounds can decide the answer. With 16384 the
+  // peer's value could never bind — SETTINGS_MAX_FRAME_SIZE has a MINIMUM of 16384,
+  // so a peer can only ever raise it, and `min(maxframe, write_cap)` was always
+  // `write_cap`. Reading the setting was a term that could not change the result,
+  // which is the same dead guard this directory already deleted once from
+  // `frame.mere` — except here the fix is to make it live rather than to remove it:
+  // a peer that allows 32768-byte frames gets half as many of them.
+  let write_cap = 65536;
+
+  // SETTINGS identifiers this server acts on. The rest are ignored, which is how
+  // the protocol stays extensible — an unknown identifier is not an error.
+  let settings_initial_window_size = 4;
+  let settings_max_frame_size = 5;
+
+  let new_conn = h2conn { cwin = default_window, swin = default_window,
+                          maxframe = default_max_frame, initwin = default_window };
+
+  // A SETTINGS frame from the peer. INITIAL_WINDOW_SIZE adjusts the open stream's
+  // window BY THE DELTA: a stream that has spent 1000 of a 65535 window has 64535
+  // left, and a new size of 100000 must leave it 99000, not 100000. Resetting it
+  // would hand back credit that was already spent.
+  let rec apply_settings = fn (cn: h2conn, kvs) ->
+    match kvs with
+    | [] -> cn
+    | [(k, v), ...rest] ->
+      if k == settings_max_frame_size then
+        apply_settings { cn | maxframe = v } rest
+      else if k == settings_initial_window_size then
+        apply_settings { cn | swin = cn.swin + (v - cn.initwin), initwin = v } rest
+      else apply_settings cn rest;
+
+  // A WINDOW_UPDATE's credit, applied to whichever window it names. Stream 0 is
+  // the connection.
+  //
+  // AN INCREMENT OF 0 IS A PROTOCOL ERROR (RFC 9113 6.9) and it is refused HERE, in
+  // one place, because it was previously decided in two: the frame loop silently
+  // IGNORED a zero increment while the window-wait loop FAILED on it. Two spellings
+  // of one rule, and only one of them was right — and the wrong one was on the path
+  // every ordinary frame takes.
+  //
+  // Reporting it properly would need RST_STREAM or GOAWAY, neither of which this
+  // server sends, so it fails and names the peer's bug. That beats waiting forever
+  // for credit a conforming peer would have sent.
+  let apply_window_update = fn (cn: h2conn, sid: int, inc: int) ->
+    if inc == 0 then
+      fail ("http2: a WINDOW_UPDATE increment of 0 is a protocol error (stream "
+            ++ str_of_int sid ++ ")")
+    else if sid == 0 then { cn | cwin = cn.cwin + inc }
+    else { cn | swin = cn.swin + inc };
+
+  // A new stream starts with the peer's INITIAL_WINDOW_SIZE. The CONNECTION window
+  // is NOT reset: it is per-connection, and a stream finishing returns no credit to
+  // it. Resetting it here would invent credit the peer never granted, which shows up
+  // as the peer refusing a frame rather than as anything happening at this line.
+  let reset_stream = fn (cn: h2conn) -> { cn | swin = cn.initwin };
+
+  // --- the unary case, as an adapter --------------------------------------
+  //
+  // The handler this module calls takes the request's messages as a LIST, because
+  // that is what a client-streaming method sends. A unary handler should not have to
+  // say so, so this wraps one.
+  //
+  // `[]` becomes an empty message rather than an error: proto3 gives a message no
+  // way to distinguish "no bytes arrived" from "every field is at its default", so
+  // for a unary method an absent request and an empty one ARE the same value. That
+  // is the schema's rule, not a shortcut taken here.
+  let unary = fn (h, path: str, msgs) ->
+    match msgs with
+    | [] -> h path empty
+    | [m, ...rest] -> h path m;
+
   // One read. Returns the bytes that arrived, or empty when the peer is done.
   let recv = fn (cfd: int, rbuf: int) ->
     let n = tcp_read cfd rbuf read_chunk in
     if n <= 0 then empty else mem_to_bytes rbuf n;
 
+  // THE CAPACITY IS CHECKED HERE BECAUSE NOTHING BELOW CHECKS IT. `mem_copy_bytes`
+  // is a memcpy into a bump-allocated arena that records no allocation sizes, so
+  // there is no layer that could catch this: measured, 32 bytes into a 16-byte
+  // allocation overwrote the next one and returned 32 as if it had worked.
+  //
+  // So this is the only bound that exists, and it fails loudly rather than
+  // truncating — a short frame would be a protocol error the peer reports as
+  // something else entirely, three layers from the cause.
   let send = fn (cfd: int, wbuf: int, b: bytes) ->
-    let n = mem_copy_bytes wbuf 0 b in
-    let _ = tcp_write cfd wbuf n in
-    ();
+    if bytes_len b > write_cap + H2.header_len then
+      fail ("http2: a " ++ str_of_int (bytes_len b)
+            ++ "-byte frame does not fit the "
+            ++ str_of_int (write_cap + H2.header_len)
+            ++ "-byte write buffer — DATA must go through send_data")
+    else
+      let n = mem_copy_bytes wbuf 0 b in
+      let _ = tcp_write cfd wbuf n in
+      ();
 
   // Enough bytes for a frame header, and then for its payload. A frame can and
   // does arrive split across reads — the harness's own client sends the preface
@@ -128,42 +271,179 @@ module H2Server {
   // called what it is. Named for what it returns instead.
   let after = fn (b: bytes, n: int) -> bytes_slice b n (bytes_len b - n);
 
+  // --- the reader inside the writer ---------------------------------------
+  //
+  // When a send exhausts its window, the only thing that can reopen it is a
+  // WINDOW_UPDATE from the peer — so the writer has to consume input. This is the
+  // one structural consequence of flow control: sending stops being a leaf.
+  //
+  // It returns the new state AND the unconsumed buffer, because frames arrive in
+  // whatever grouping the network chose and the next one may already be in hand.
+  // Dropping that tail would lose a whole request.
+  //
+  // What it accepts is deliberately narrow. A response is in flight, so a HEADERS
+  // frame here is a second request interleaved with the first, which this server
+  // does not serve. It FAILS AND NAMES THAT rather than skipping the frame: a
+  // skipped HEADERS is a request that never gets an answer, and the client would
+  // report a timeout with nothing in the log to say why.
+  let rec await_window = fn (cfd: int, rbuf: int, wbuf: int, cn: h2conn,
+                             buf: bytes, stream: int) ->
+    let b = ensure cfd rbuf buf H2.header_len in
+    if bytes_len b < H2.header_len then
+      fail "http2: the peer closed while DATA was waiting for a window"
+    else
+      let need = H2.header_len + H2.get_u24be b 0 in
+      let b2 = ensure cfd rbuf b need in
+      if bytes_len b2 < need then
+        fail "http2: the peer closed mid-frame while DATA was waiting for a window"
+      else
+        let (_, ty, flags, sid, payload, nxt) = H2.read_frame b2 0 in
+        let rest = after b2 nxt in
+        if ty == H2.window_update then
+          (apply_window_update cn sid (H2.window_increment payload), rest)
+        else if ty == H2.settings then
+          let cn2 = if H2.has_flag flags H2.ack then cn
+                    else apply_settings cn (H2.read_settings payload) in
+          let _ = if H2.has_flag flags H2.ack then ()
+                  else send cfd wbuf (H2.frame_bytes H2.settings H2.ack 0 empty) in
+          // RETURNS rather than recursing. A SETTINGS can RAISE the window — that
+          // is the whole point of SETTINGS_INITIAL_WINDOW_SIZE — so a peer that
+          // reopens a stalled stream that way and never sends a WINDOW_UPDATE is
+          // conforming, and recursing here would wait for it forever.
+          //
+          // This line recursed for a while under a comment that said it did not.
+          // Poisoning found it: a poison that RESET the window instead of adjusting
+          // it by the delta went undetected, because the poisoned server was stuck
+          // in this same loop and so looked exactly like the correct one.
+          (cn2, rest)
+        else if ty == H2.ping then
+          let _ = if H2.has_flag flags H2.ack then ()
+                  else send cfd wbuf (H2.frame_bytes H2.ping H2.ack 0 payload) in
+          await_window cfd rbuf wbuf cn rest stream
+        else if ty == H2.headers then
+          fail ("http2: the peer opened stream " ++ str_of_int sid
+                ++ " while stream " ++ str_of_int stream
+                ++ " was still being answered — interleaved streams are not served")
+        else if ty == H2.rst_stream then
+          fail ("http2: the peer reset stream " ++ str_of_int sid
+                ++ " mid-response — cancellation is not implemented")
+        else await_window cfd rbuf wbuf cn rest stream;
+
+  // --- one message, as as many DATA frames as the peer's limits require -----
+  //
+  // The chunk is the smallest of four bounds, and the order they bite in was
+  // measured, not read off the RFC:
+  //
+  //   * the peer's SETTINGS_MAX_FRAME_SIZE — 16384 by default, and it bites FIRST,
+  //     at 16385 bytes, where the client refuses the frame outright
+  //   * this buffer's capacity — the bound nothing below `send` enforces
+  //   * the connection window and the stream window — 65535 each, biting at 65536
+  //   * what is left of the message
+  //
+  // No END_STREAM anywhere: in gRPC the stream ends on the TRAILERS, so a DATA
+  // frame here never carries it. A `last` parameter would be a flag no call site
+  // ever sets, which is a claim the reader has to check for themselves.
+  let rec send_data = fn (cfd: int, rbuf: int, wbuf: int, cn: h2conn, buf: bytes,
+                          stream: int, msg: bytes, off: int) ->
+    let remaining = bytes_len msg - off in
+    if remaining <= 0 then (cn, buf)
+    else
+      let win = if cn.cwin < cn.swin then cn.cwin else cn.swin in
+      if win <= 0 then
+        let (cn2, buf2) = await_window cfd rbuf wbuf cn buf stream in
+        send_data cfd rbuf wbuf cn2 buf2 stream msg off
+      else
+        let cap1 = if cn.maxframe < write_cap then cn.maxframe else write_cap in
+        let cap2 = if cap1 < win then cap1 else win in
+        let n = if remaining < cap2 then remaining else cap2 in
+        let _ = send cfd wbuf
+                  (H2.frame_bytes H2.data 0 stream (bytes_slice msg off n)) in
+        send_data cfd rbuf wbuf { cn | cwin = cn.cwin - n, swin = cn.swin - n }
+                  buf stream msg (off + n);
+
   // --- the response ------------------------------------------------------
   //
-  // Three frames: headers, one DATA carrying one gRPC message, then TRAILERS.
-  // The trailers are not optional and not cosmetic — a gRPC client waits for
-  // `grpc-status` and reports "unexpected EOF" without it, which is what makes
-  // this the only place a missing frame looks like a network fault.
-  let respond_ok = fn (cfd: int, wbuf: int, stream: int, msg: bytes) ->
-    let h = Hpack.encode [(":status", "200"), ("content-type", "application/grpc")] in
-    let t = Hpack.encode [("grpc-status", "0")] in
-    let _ = send cfd wbuf (H2.frame_bytes H2.headers H2.end_headers stream h) in
-    let _ = send cfd wbuf (H2.frame_bytes H2.data 0 stream (H2.grpc_message msg)) in
-    send cfd wbuf
-      (H2.frame_bytes H2.headers (bit_or H2.end_headers H2.end_stream) stream t);
+  // HEADERS, then a DATA frame per gRPC message, then TRAILERS. The trailers are
+  // not optional and not cosmetic — a gRPC client waits for `grpc-status` and
+  // reports "unexpected EOF" without it, which is what makes this the only place a
+  // missing frame looks like a network fault.
+  let response_headers = fn (cfd: int, wbuf: int, stream: int) ->
+    let h = Hpack.encode [(":status", "200"),
+                          ("content-type", "application/grpc")] in
+    send cfd wbuf (H2.frame_bytes H2.headers H2.end_headers stream h);
+
+  let trailers = fn (cfd: int, wbuf: int, stream: int, kvs) ->
+    send cfd wbuf (H2.frame_bytes H2.headers
+                     (bit_or H2.end_headers H2.end_stream) stream (Hpack.encode kvs));
+
+  // SERVER-STREAMING IS N DATA FRAMES AND ONE SET OF TRAILERS, not N responses.
+  // Each message carries its own gRPC length prefix, so a client that reads the
+  // stream sees message boundaries wherever the writer put them — independently of
+  // where the HTTP/2 frame boundaries fell, which flow control moves around.
+  let rec send_msgs = fn (cfd: int, rbuf: int, wbuf: int, cn: h2conn, buf: bytes,
+                          stream: int, msgs) ->
+    match msgs with
+    | [] -> (cn, buf)
+    | [m, ...rest] ->
+      let (cn2, buf2) =
+        send_data cfd rbuf wbuf cn buf stream (H2.grpc_message m) 0 in
+      send_msgs cfd rbuf wbuf cn2 buf2 stream rest;
 
   // An error is a status in the TRAILERS, not an HTTP status: the request
-  // succeeded as HTTP and failed as RPC. There is no DATA frame — a failed unary
-  // call carries no message — so this is HEADERS then trailers and nothing else.
-  let respond_err = fn (cfd: int, wbuf: int, stream: int, code: int, msg: str) ->
-    let h = Hpack.encode [(":status", "200"), ("content-type", "application/grpc")] in
-    let t = Hpack.encode [("grpc-status", str_of_int code),
-                          ("grpc-message", pct_encode msg)] in
-    let _ = send cfd wbuf (H2.frame_bytes H2.headers H2.end_headers stream h) in
-    send cfd wbuf
-      (H2.frame_bytes H2.headers (bit_or H2.end_headers H2.end_stream) stream t);
-
-  let respond = fn (cfd: int, wbuf: int, stream: int, r: grpc_reply) ->
+  // succeeded as HTTP and failed as RPC. There is no DATA frame — a failed call
+  // carries no message — so this is HEADERS then trailers and nothing else.
+  let respond = fn (cfd: int, rbuf: int, wbuf: int, cn: h2conn, buf: bytes,
+                    stream: int, r: grpc_reply) ->
     match r with
-    | RpcOk msg -> respond_ok cfd wbuf stream msg
-    | RpcErr (code, msg) -> respond_err cfd wbuf stream code msg;
+    | RpcOk msg ->
+      let _ = response_headers cfd wbuf stream in
+      let (cn2, buf2) = send_msgs cfd rbuf wbuf cn buf stream [msg] in
+      let _ = trailers cfd wbuf stream [("grpc-status", "0")] in
+      (cn2, buf2)
+    | RpcStream msgs ->
+      let _ = response_headers cfd wbuf stream in
+      let (cn2, buf2) = send_msgs cfd rbuf wbuf cn buf stream msgs in
+      let _ = trailers cfd wbuf stream [("grpc-status", "0")] in
+      (cn2, buf2)
+    | RpcErr (code, msg) ->
+      let _ = response_headers cfd wbuf stream in
+      let _ = trailers cfd wbuf stream [("grpc-status", str_of_int code),
+                                        ("grpc-message", pct_encode msg)] in
+      (cn, buf);
+
+  // --- the request, split into gRPC messages ------------------------------
+  //
+  // A DATA payload is not a message: it is a stream of length-prefixed messages,
+  // and the two boundaries are independent. CLIENT-STREAMING IS EXACTLY THIS LIST
+  // HAVING MORE THAN ONE ELEMENT — there is no separate code path for it, which is
+  // why it works without anything having been written for it.
+  //
+  // An empty buffer gives `[]`, which is a client that half-closed with nothing to
+  // say. That is a different value from `[empty]`, and a unary method cannot tell
+  // them apart — see `unary` below for why that is correct rather than convenient.
+  let rec split_msgs = fn (d: bytes, i: int, acc) ->
+    if i >= bytes_len d then list_rev acc
+    else
+      let (_, m, j) = H2.read_grpc_message d i in
+      split_msgs d j (Cons (m, acc));
+
+  // An empty `bytes list`, BUILT rather than written as `[]`.
+  //
+  // A bare `[]` at the call site below leaves its element type to be fixed by the
+  // OTHER call site, and the C backend's monomorphiser then disagrees with the
+  // typer about the handler's type: `mere -c` succeeded and the C it emitted said
+  // `passing 'closure_str_closure_bytes_grpc_reply' to parameter of incompatible
+  // type 'closure_str_closure_list_bytes_grpc_reply'`. Same family as Q-042 — an
+  // empty collection literal whose element type is decided somewhere else.
+  let no_msgs = split_msgs empty 0 [];
 
   // --- the frame loop ----------------------------------------------------
   //
   // `path` and `data` are the current stream's accumulation. `stream` is 0 until
-  // a HEADERS frame names one.
+  // a HEADERS frame names one. `cn` is the flow-control state, threaded so that a
+  // branch which sends without accounting for it cannot typecheck.
   let rec pump = fn (cfd: int, rbuf: int, wbuf: int, buf: bytes, st: hstate,
-                     stream: int, path: str, data: bytes, handler) ->
+                     cn: h2conn, stream: int, path: str, data: bytes, h) ->
     let b = ensure cfd rbuf buf H2.header_len in
     if bytes_len b < H2.header_len then ()                // peer closed cleanly
     else
@@ -175,17 +455,26 @@ module H2Server {
         let rest = after b2 nxt in
         if ty == H2.settings then
           // A SETTINGS that is not an ACK must be acknowledged, and the ACK
-          // carries no payload. Its own settings are read and ignored: nothing
-          // here depends on a value the peer would send.
+          // carries no payload. ITS VALUES ARE NO LONGER IGNORED: MAX_FRAME_SIZE
+          // decides how large a DATA frame may be and INITIAL_WINDOW_SIZE how much
+          // may be in flight, so both are now things this server depends on.
+          let cn2 = if H2.has_flag flags H2.ack then cn
+                    else apply_settings cn (H2.read_settings payload) in
           let _ =
             if H2.has_flag flags H2.ack then ()
             else send cfd wbuf (H2.frame_bytes H2.settings H2.ack 0 empty) in
-          pump cfd rbuf wbuf rest st stream path data handler
+          pump cfd rbuf wbuf rest st cn2 stream path data h
         else if ty == H2.ping then
           let _ =
             if H2.has_flag flags H2.ack then ()
             else send cfd wbuf (H2.frame_bytes H2.ping H2.ack 0 payload) in
-          pump cfd rbuf wbuf rest st stream path data handler
+          pump cfd rbuf wbuf rest st cn stream path data h
+        else if ty == H2.window_update then
+          // Read and APPLIED. These used to be skipped, which was safe only while
+          // no response was ever large enough to need the credit they carry.
+          pump cfd rbuf wbuf rest st
+               (apply_window_update cn sid (H2.window_increment payload))
+               stream path data h
         else if ty == H2.goaway then ()
         else if ty == H2.headers then
           // The HPACK state is threaded, not rebuilt: the dynamic table is
@@ -195,27 +484,41 @@ module H2Server {
           let p = list_fold hs "" (fn (acc, kv) ->
                     let (n, v) = kv in if str_eq n ":path" then v else acc) in
           if H2.has_flag flags H2.end_stream then
-            let out = handler p empty in
-            let _ = respond cfd wbuf sid out in
-            pump cfd rbuf wbuf rest st2 0 "" empty handler
-          else pump cfd rbuf wbuf rest st2 sid p empty handler
+            let (cn2, buf2) = respond cfd rbuf wbuf cn rest sid (h p no_msgs) in
+            pump cfd rbuf wbuf buf2 st2 (reset_stream cn2) 0 "" empty h
+          else pump cfd rbuf wbuf rest st2 cn sid p empty h
         else if ty == H2.data then
+          let ln = bytes_len payload in
+          let fin = H2.has_flag flags H2.end_stream in
+          // INBOUND FLOW CONTROL. The window a client sends into is OURS to refill,
+          // and nothing here refilled it: measured, a 70009-byte request stopped at
+          // exactly 65535 bytes and waited forever.
+          //
+          // An increment of 0 is a protocol error, so an empty DATA frame — which is
+          // how a client with nothing to say half-closes — gets no update at all.
+          //
+          // The CONNECTION window is refilled even on the frame that ends the
+          // stream, because it is shared and permanent. The STREAM window is not,
+          // because that stream will never carry data again.
+          let _ = if ln == 0 then ()
+                  else send cfd wbuf
+                         (H2.frame_bytes H2.window_update 0 0 (H2.u32_payload ln)) in
+          let _ = if ln == 0 || fin then ()
+                  else send cfd wbuf
+                         (H2.frame_bytes H2.window_update 0 sid (H2.u32_payload ln)) in
           let d = bytes_concat data payload in
-          if H2.has_flag flags H2.end_stream then
-            // The gRPC prefix says how long the message is, so a DATA payload is
-            // not the message: it is a framed message inside one.
-            let (_, msg, _) = H2.read_grpc_message d 0 in
-            let out = handler path msg in
-            let _ = respond cfd wbuf sid out in
-            pump cfd rbuf wbuf rest st 0 "" empty handler
-          else pump cfd rbuf wbuf rest st stream path d handler
+          if fin then
+            let (cn2, buf2) =
+              respond cfd rbuf wbuf cn rest sid (h path (split_msgs d 0 [])) in
+            pump cfd rbuf wbuf buf2 st (reset_stream cn2) 0 "" empty h
+          else pump cfd rbuf wbuf rest st cn stream path d h
         else
-          // WINDOW_UPDATE, PRIORITY, RST_STREAM, CONTINUATION: read and skipped.
-          // Skipping is only correct because the extent is known from the header,
-          // which is the whole reason a length-prefixed framing exists.
-          pump cfd rbuf wbuf rest st stream path data handler;
+          // PRIORITY, RST_STREAM, CONTINUATION: read and skipped. Skipping is only
+          // correct because the extent is known from the header, which is the whole
+          // reason a length-prefixed framing exists.
+          pump cfd rbuf wbuf rest st cn stream path data h;
 
-  let serve_conn = fn (cfd: int, rbuf: int, wbuf: int, handler) ->
+  let serve_conn = fn (cfd: int, rbuf: int, wbuf: int, h) ->
     let pre = bytes_of_str H2.preface in
     let b = ensure cfd rbuf empty H2.preface_len in
     if bytes_len b < H2.preface_len then tcp_close cfd
@@ -224,24 +527,43 @@ module H2Server {
       // valid HTTP/1.1 so that this cannot be a half-understood request.
       tcp_close cfd
     else
+      // OUR OWN SETTINGS ARE EMPTY ON PURPOSE. Raising
+      // SETTINGS_INITIAL_WINDOW_SIZE here would let a large request through
+      // without any WINDOW_UPDATE logic at all — and would therefore make that
+      // logic untestable. The small default window is what keeps the gate able
+      // to fail.
       let _ = send cfd wbuf (H2.frame_bytes H2.settings 0 0 empty) in
       let _ = pump cfd rbuf wbuf (after b H2.preface_len) Hpack.new_state
-                   0 "" empty handler in
+                   new_conn 0 "" empty h in
       tcp_close cfd;
 
-  // `handler` is `str -> bytes -> bytes`: a path and a request message, giving a
-  // response message. Everything about HTTP/2 stays on this side of it.
-  let serve = fn (port: int, handler) ->
+  // `h` is `str -> bytes list -> grpc_reply`: a path and the request's messages,
+  // giving one message, many, or a status. Everything about HTTP/2 — frames,
+  // HPACK, windows — stays on this side of it.
+  //
+  // Wrap a one-message-in, one-reply-out handler with `H2Server.unary`.
+  //
+  // THE PARAMETER IS CALLED `h` AND NOT `handler` ON PURPOSE, and this is a
+  // workaround rather than a preference. When a caller's own top-level binding
+  // has the SAME NAME as this parameter, the C backend's inner-function lifting
+  // resolves the captured name to the CALLER'S GLOBAL: the lifted loop took no
+  // handler parameter at all and its body referred to the top-level one. That
+  // was invisible while both had the same type — the wrong binding happened to
+  // fit — and surfaced only when `unary` made the types differ.
+  //
+  // `handler` is the obvious name for a user to choose, so the library cannot
+  // also claim it. Registered upstream; the real fix is not a naming rule.
+  let serve = fn (port: int, h) ->
     let sfd = tcp_listen port in
     if sfd < 0 then fail ("http2: could not listen on port " ++ str_of_int port)
     else
       let rbuf = mem_alloc read_chunk in
-      let wbuf = mem_alloc read_chunk in
+      let wbuf = mem_alloc (write_cap + H2.header_len) in
       let rec loop = fn (n: int) ->
         let cfd = tcp_accept sfd in
         if cfd < 0 then ()
         else
-          let _ = serve_conn cfd rbuf wbuf handler in
+          let _ = serve_conn cfd rbuf wbuf h in
           loop (n + 1) in
       loop 0;
 
@@ -249,19 +571,19 @@ module H2Server {
   // make its requests and have the process exit on its own instead of being
   // killed. A test that has to kill its subject cannot tell a clean exit from a
   // hang.
-  let serve_n = fn (port: int, count: int, handler) ->
+  let serve_n = fn (port: int, count: int, h) ->
     let sfd = tcp_listen port in
     if sfd < 0 then fail ("http2: could not listen on port " ++ str_of_int port)
     else
       let rbuf = mem_alloc read_chunk in
-      let wbuf = mem_alloc read_chunk in
+      let wbuf = mem_alloc (write_cap + H2.header_len) in
       let rec loop = fn (k: int) ->
         if k >= count then ()
         else
           let cfd = tcp_accept sfd in
           if cfd < 0 then ()
           else
-            let _ = serve_conn cfd rbuf wbuf handler in
+            let _ = serve_conn cfd rbuf wbuf h in
             loop (k + 1) in
       loop 0;
 }
