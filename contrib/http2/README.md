@@ -28,6 +28,15 @@ hex_of_bytes (H2.frame_bytes H2.settings 0 0 (H2.settings_payload []))
 let (ln, ty, flags, stream, payload, next) = H2.read_frame buf 0 in ...
 ```
 
+**Binary crosses the FFI as `bytes`** (mere v0.1.282). `tcp_read` writes into the
+integer-addressed arena and `mem_to_str` cannot bring that back — it stops at the
+first zero byte, which every second HPACK block contains. `mem_to_bytes` /
+`mem_copy_bytes` are the arena's two directions for data that may contain one.
+
+This file used to go arena → hex → `bytes` on the way in and call `mem_set_u8`
+**once per byte** on the way out. The write was the one that mattered: a response is
+one FFI call now rather than one call per byte of it.
+
 Writers build into a `Vec[R, int]`, readers read from `bytes` — the same split as
 `contrib/proto`, and for the same two reasons: `bytes_slice` gives a frame's
 payload its own buffer with no copy loop, and the `bytes` accessors are

@@ -54,6 +54,21 @@ Legend:
 | `bytebuf_of_bytes` | `bytes -> ByteBuf[R]` | The other way, for editing |
 | `print_bytes` ⚡ | `bytes -> unit` | Write a `bytes` to stdout, unbuffered and with **no newline**. This is what `print_no_nl` cannot be: a `str` is NUL-terminated in the compiled backends, so a zero byte ended the output there and did not on the interpreter. **All four backends** (v0.1.216, Wasm in v0.1.219) |
 | `write_file` ⚡ | `str -> str -> unit` | Write content to path (overwrite); raises on failure |
+
+**The FFI byte arena's `bytes` bridge** (v0.1.282). `tcp_read` and friends write into
+an integer-addressed arena, and `mem_to_str` cannot bring binary back out — it stops
+at the first zero byte, which every binary protocol has. Declare these as `extern fn`
+alongside the rest of the `mem_*` family:
+
+```mere
+extern fn mem_to_bytes: int -> int -> bytes;          // arena ptr, len -> bytes
+extern fn mem_copy_bytes: int -> int -> bytes -> int; // arena ptr, offset, bytes -> written
+```
+
+Native (C) and a Wasm **component** both provide them; `scripts/socket_parity.sh`
+requires the two backends to agree. In a plain Wasm build they become an `env` host
+import like any other extern, so a host that does not provide them fails at
+instantiation with a missing-import error rather than a wrong answer.
 | `write_file_bytes` ⚡ | `str -> Vec[R, int] -> unit` | Write an int vec as raw bytes (each element 0..255) — the write half of the binary path; PPM P6 etc. interp + C only (v0.1.44, Mandelbrot probe) |
 | `read_lines` ⚡ ★ | `str -> str list` | Read line by line, returns `str list` (Phase 19.6; depends on prelude) |
 | `file_exists` | `str -> bool` | Whether path exists (Phase 19.6; on C native since v0.1.15) |

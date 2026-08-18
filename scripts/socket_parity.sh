@@ -69,7 +69,7 @@ let _ = print ("listen " ++ str_of_int (if srv >= 0 then 1 else 0));
 let cli = tcp_connect "127.0.0.1" $PORT;
 let _ = print ("connect " ++ str_of_int (if cli >= 0 then 1 else 0));
 let acc = tcp_accept srv;
-let buf = mem_alloc 256;
+let buf = mem_alloc 4096;
 let n = mem_copy_str buf 0 "ping";
 let _ = tcp_write cli buf n;
 let got = tcp_read acc buf 256;
@@ -104,12 +104,90 @@ fi
 wasm=$(wasmtime run -S inherit-network=y "$TMP/sock.component.wasm" 2>/dev/null \
        | grep -E '^(listen|connect|read|eof) ' | tr '\n' '|')
 
-if [ "$native" = "$wasm" ]; then
-  echo "socket_parity: ok  ($(printf '%s' "$native" | tr '|' ' ' | sed 's/ $//'))"
-  exit 0
+if [ "$native" != "$wasm" ]; then
+  echo "socket_parity: FAILED" >&2
+  echo "  native: $native" >&2
+  echo "  wasm:   $wasm" >&2
+  exit 1
 fi
+echo "  ok    round trip  ($(printf '%s' "$native" | tr '|' ' ' | sed 's/ $//'))"
 
-echo "socket_parity: FAILED" >&2
-echo "  native: $native" >&2
-echo "  wasm:   $wasm" >&2
-exit 1
+# --- the arena's bytes bridge (Q-044) -------------------------------------
+#
+# `mem_to_bytes` / `mem_copy_bytes` are the arena's two directions for data that may
+# contain a ZERO BYTE — which `mem_to_str` cannot carry, because it stops there, and
+# which every binary protocol has. They belong in this harness rather than in
+# test/parity because they are externs: the interpreter has no mock for them, so a
+# parity test would SKIP rather than check.
+#
+# The payload is chosen to break the old workaround: a zero byte first, a zero in the
+# middle, and a high byte. Nothing here opens a socket, but declaring an arena extern
+# is what turns on the component's in-module helpers, so both backends exercise the
+# same path they would on a real connection.
+cat > "$TMP/ab.mere" <<'MERE'
+extern fn mem_alloc: int -> int;
+extern fn mem_to_bytes: int -> int -> bytes;
+extern fn mem_copy_bytes: int -> int -> bytes -> int;
+
+// NOT named `show`: a user binding of that name breaks the PRELUDE on every
+// compiled backend, because the prelude calls `show` itself and the shadow takes
+// over there too. Three lines reproduce it; recorded as an open question.
+let dump = fn (label: str, b: bytes) -> print (label ++ " " ++ hex_of_bytes b);
+
+let buf = mem_alloc 4096;
+let rt = fn (label: str, hex: str) ->
+  let src = bytes_of_hex hex in
+  let n = mem_copy_bytes buf 0 src in
+  let back = mem_to_bytes buf n in
+  print (label ++ " " ++ str_of_int n ++ " " ++ hex_of_bytes back
+         ++ (if hex_of_bytes back == hex then " same" else " DIFFERENT"));
+let _ = rt "ab-nul-first" "00ff41";
+let _ = rt "ab-nul-mid" "41004200ff";
+let _ = rt "ab-empty" "";
+let _ = rt "ab-all-high" "fffefdfc";
+let _ = rt "ab-long" "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+// LONGER THAN 255 BYTES. Poisoning `mem_copy_bytes` to read the length with
+// `i32.load8_u` instead of `i32.load` went unnoticed until this existed: on a
+// little-endian machine the low byte of a length under 256 IS the length, so every
+// payload in the corpus agreed. 300 bytes is the first size that does not.
+let rec rep = fn (n: int, acc: str) -> if n <= 0 then acc else rep (n - 1) (acc ++ "5a");
+let _ = rt "ab-300" (rep 300 "");
+let _ = rt "ab-256" (rep 256 "");
+let _ = rt "ab-255" (rep 255 "");
+// An offset write, so the `off` parameter is not always zero.
+let src = bytes_of_hex "aabb";
+let _ = mem_copy_bytes buf 8 src;
+let _ = dump "ab-offset" (mem_to_bytes (buf + 8) 2);
+print "ab-done"
+MERE
+
+"$MERE" -c "$TMP/ab.mere" > "$TMP/ab.c" 2>"$TMP/ab.err" || {
+  echo "socket_parity: FAILED — the arena-bytes program did not compile" >&2
+  head -4 "$TMP/ab.err" >&2; exit 1; }
+"$CC" -O1 -w "$TMP/ab.c" -o "$TMP/ab.bin" 2>"$TMP/ab.cc" || {
+  echo "socket_parity: FAILED — the arena-bytes C did not build" >&2
+  grep error: "$TMP/ab.cc" | head -4 >&2; exit 1; }
+ab_native=$("$TMP/ab.bin" | grep -E '^ab-' | tr '\n' '|')
+
+if ! MERE="$MERE" "$ROOT/scripts/build-component.sh" "$TMP/ab.mere" \
+      "$TMP/ab.component.wasm" > "$TMP/abbuild.log" 2>&1; then
+  echo "socket_parity: FAILED — the arena-bytes component build broke" >&2
+  tail -20 "$TMP/abbuild.log" >&2; exit 1
+fi
+ab_wasm=$(wasmtime run "$TMP/ab.component.wasm" 2>/dev/null | grep -E '^ab-' | tr '\n' '|')
+
+if [ "$ab_native" != "$ab_wasm" ]; then
+  echo "socket_parity: FAILED — the arena's bytes bridge differs between backends" >&2
+  echo "  native: $ab_native" >&2
+  echo "  wasm:   $ab_wasm" >&2
+  exit 1
+fi
+case "$ab_native" in
+  *DIFFERENT*)
+    echo "socket_parity: FAILED — a payload did not survive the arena round trip" >&2
+    echo "  $ab_native" >&2; exit 1 ;;
+esac
+echo "  ok    bytes bridge  9 payloads (zero / high / >255 bytes), C and wasm agree"
+
+echo "socket_parity: ok"
+exit 0

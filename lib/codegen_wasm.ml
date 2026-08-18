@@ -357,7 +357,12 @@ let socket_ffi_externs =
   ["tcp_connect"; "tcp_listen"; "tcp_accept"; "tcp_read"; "tcp_write"; "tcp_close";
    "udp_open"; "udp_send"; "udp_recv"; "tcp_set_timeout";
    "mem_alloc"; "mem_get_u8"; "mem_set_u8"; "mem_get_u16be"; "mem_set_u16be";
-   "mem_copy_str"; "mem_to_str"; "str_ptr"]
+   "mem_copy_str"; "mem_to_str"; "str_ptr";
+   (* Q-044: the arena's two directions for data that may contain a zero byte.
+      `mem_to_str` stops at the first one, which every binary protocol has, so a
+      reader had to go arena -> hex -> bytes and a writer had to call mem_set_u8
+      once per byte. *)
+   "mem_to_bytes"; "mem_copy_bytes"]
 
 (* Phase 15.10/15.14: Map[R, K, V] — in Wasm all values are i32, so no per-V
    is needed; only per-K. Register K's type in `map_key_types`, and
@@ -9780,6 +9785,22 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $l)))\n\
         \    (i32.store8 (i32.add (local.get $st) (local.get $len)) (i32.const 0))\n\
         \    (i32.store (i32.sub (local.get $st) (i32.const 4)) (local.get $len)) (local.get $st))\n\
+        \  ;; Q-044. A `bytes` is [i32 len][data] with the POINTER AT THE LENGTH, which is
+        \  ;; where it differs from a str: a str's pointer is its data and the length sits
+        \  ;; at ptr-4. Getting that backwards would read a length out of the payload.
+        \  (func $mem_to_bytes_h (param $p i32) (param $len i32) (result i32) (local $st i32) (local $i i32)\n\
+        \    (local.set $st (global.get $__lang_bump))\n\
+        \    (global.set $__lang_bump (i32.add (local.get $st) (i32.add (local.get $len) (i32.const 4))))\n\
+        \    (i32.store (local.get $st) (local.get $len))\n\
+        \    (block $e (loop $l (br_if $e (i32.ge_u (local.get $i) (local.get $len)))\n\
+        \      (i32.store8 (i32.add (i32.add (local.get $st) (i32.const 4)) (local.get $i)) (i32.load8_u (i32.add (local.get $p) (local.get $i))))\n\
+        \      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $l)))\n\
+        \    (local.get $st))\n\
+        \  (func $mem_copy_bytes_h (param $p i32) (param $o i32) (param $v i32) (result i32) (local $len i32) (local $i i32)\n\
+        \    (local.set $len (i32.load (local.get $v)))\n\
+        \    (block $e (loop $l (br_if $e (i32.ge_u (local.get $i) (local.get $len)))\n\
+        \      (i32.store8 (i32.add (i32.add (local.get $p) (local.get $o)) (local.get $i)) (i32.load8_u (i32.add (i32.add (local.get $v) (i32.const 4)) (local.get $i))))\n\
+        \      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $l))) (local.get $len))\n\
         \  (func $__parse_ipv4 (param $s i32) (param $out i32) (local $i i32) (local $oct i32) (local $b i32) (local $c i32)\n\
         \    (block $done (loop $lp\n\
         \      (local.set $c (i32.load8_u (i32.add (local.get $s) (local.get $i))))\n\

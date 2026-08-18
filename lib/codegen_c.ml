@@ -5882,7 +5882,13 @@ let native_ffi_names =
     "win_open"; "win_size"; "win_blit"; "win_readback"; "win_poll"; "win_close";
     "str_ptr"; "mem_alloc"; "mem_set_u8"; "mem_get_u8";
     "mem_set_u32be"; "mem_get_u32be"; "mem_set_u16be"; "mem_get_u16be";
-    "mem_copy_str"; "mem_to_str"; "bytes_from_hex_alloc"; "bytes_to_hex_len" ]
+    "mem_copy_str"; "mem_to_str"; "bytes_from_hex_alloc"; "bytes_to_hex_len";
+    (* Q-044: the arena had no `bytes` bridge, so a binary protocol read had to
+       go arena -> hex -> bytes (two characters per byte) and a write had to call
+       mem_set_u8 once PER BYTE. `mem_to_str` cannot do it: it stops at the first
+       zero byte, which every second HPACK block contains. Same shape as v0.1.222,
+       where file_pwrite could not take a `bytes` and built one boxed int per byte. *)
+    "mem_to_bytes"; "mem_copy_bytes" ]
 
 (* TLS externs. Not implemented natively yet (needs libssl FFI). Stubbed so
    a native build LINKS and plaintext connections work; referenced by the
@@ -6207,8 +6213,7 @@ let native_ffi_runtime ~tls ~midi ~window =
       "  char* s = __lang_str_alloc(__lang_current_region, (size_t)len);";
       "  memcpy(s, __mem + p, len); s[len] = 0; return s;";
       "}";
-      "";
-      "static int tcp_connect(const char* host, int port) {";
+      "";      "static int tcp_connect(const char* host, int port) {";
       "  struct addrinfo hints, *res; char portstr[16];";
       "  memset(&hints, 0, sizeof hints);";
       "  hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM;";
@@ -7750,9 +7755,14 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
    NUL termination. All allocations land in __lang_current_region, matching the
    str helpers' copy-out semantics. The vec bridge (bytes_of_vec / vec_of_bytes)
    is interp-only for now — it depends on mere_vec_int's layout. *)
-let bytes_runtime =
+(* Q-044: `~arena` says whether the program declared `mem_to_bytes` /
+   `mem_copy_bytes`. It has to be a PARAMETER and not a Hashtbl lookup in here:
+   this used to be a top-level constant, evaluated at module-initialisation time —
+   before any program has been parsed — so the lookup would have been false for
+   every program that ever declared them. *)
+let bytes_runtime ~arena =
   String.concat "\n"
-    [ "struct mere_bytes { long long len; unsigned char data[]; };";
+    ([ "struct mere_bytes { long long len; unsigned char data[]; };";
       "static mere_bytes* __lang_read_bytes(const char* path) {";
       "  FILE* f = fopen(path, \"rb\");";
       "  if (!f) { fprintf(stderr, \"read_bytes: %s\\n\", path); exit(1); }";
@@ -7775,6 +7785,34 @@ let bytes_runtime =
       "  b->len = len;";
       "  return b;";
       "}";
+      ]
+    (* Q-044: the arena's two directions for data that may contain a zero byte.
+       TWO conditions have to hold and they are independent, which is what the
+       first version got wrong:
+         * `b->data` needs the COMPLETE mere_bytes struct, so these cannot sit with
+           the rest of the arena — that block is emitted earlier, and putting them
+           there made the generated C say "unknown type name 'mere_bytes'".
+         * `__mem` is the arena, and the arena is only emitted when the program
+           declares an arena extern. Emitting these unconditionally in the bytes
+           runtime broke every program that uses `bytes` WITHOUT the arena — which
+           is most of them, and `proto_parity` said so immediately.
+       So: here, and only when the extern was declared. *)
+    @ (if arena then
+      [ "/* mem_to_bytes / mem_copy_bytes: mem_to_str's two directions, for bytes.";
+        "   mem_to_str stops at the first zero byte, which every binary protocol";
+        "   contains, so a reader had to go arena -> hex -> bytes and a writer had to";
+        "   call mem_set_u8 once per byte. */";
+        "static mere_bytes* mem_to_bytes(int p, int len) {";
+        "  if (len < 0) len = 0;";
+        "  mere_bytes* b = __lang_bytes_alloc((long long)len);";
+        "  memcpy(b->data, __mem + p, (size_t)len);";
+        "  return b;";
+        "}";
+        "static int mem_copy_bytes(int dst, int off, mere_bytes* v) {";
+        "  memcpy(__mem + dst + off, v->data, (size_t)v->len);";
+        "  return (int)v->len;";
+        "}" ] else [])
+    @ [
       "static mere_bytes* __lang_bytes_of_str(const char* s) {";
       "  long long n = (long long)__lang_str_size(s);";
       "  mere_bytes* b = __lang_bytes_alloc(n);";
@@ -7831,7 +7869,7 @@ let bytes_runtime =
       "static long long __lang_bytes_get(mere_bytes* b, long long i) {";
       "  if (i < 0 || i >= b->len) __lang_fail_impl(\"bytes_get: index out of range\");";
       "  return (long long)b->data[i];";
-      "}" ]
+      "}" ])
 
 (* bytes <-> Vec[int] bridge. Emitted only when the bridge is used (so it can
    safely reference mere_vec_int), and injected after both the vec_int runtime
@@ -10858,7 +10896,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        the DEPENDENCY was not, so a program that used a ByteBuf and no bytes
        value emitted a call to a function that was never emitted. It did not
        compile at all, which is the third time a use-gate has done this. *)
-    @ (if !bytes_used || !bytebuf_used then [bytes_runtime; ""] else [])
+    @ (if !bytes_used || !bytebuf_used then
+         [bytes_runtime
+            ~arena:(Hashtbl.mem extern_fn_decls "mem_to_bytes"
+                    || Hashtbl.mem extern_fn_decls "mem_copy_bytes"); ""] else [])
     (* Also after it, for the same reason: it dereferences a mere_bytes. *)
     @ (if !uses_file_pwrite_bytes then [file_pwrite_bytes_runtime; ""] else [])
     (* After the bytes runtime: freezing a ByteBuf calls __lang_bytes_alloc. *)
