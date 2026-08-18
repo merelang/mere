@@ -4361,6 +4361,43 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = sitofp i64 %s to double" r av);
     r
+  (* Q-038: bit access, as two 32-bit halves. `bitcast` is the whole operation —
+     no conversion, no rounding — which is exactly what "the bits of this double"
+     has to mean. *)
+  | Ast.App ({ node = Ast.Var "float_bits_hi"; _ }, a_e) ->
+    let av = emit_expr env a_e in
+    let b = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = bitcast double %s to i64" b av);
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = lshr i64 %s, 32" r b);
+    r
+  | Ast.App ({ node = Ast.Var "float_bits_lo"; _ }, a_e) ->
+    let av = emit_expr env a_e in
+    let b = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = bitcast double %s to i64" b av);
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = and i64 %s, 4294967295" r b);
+    r
+  | Ast.App ({ node = Ast.Var "f32_bits"; _ }, a_e) ->
+    (* `fptrunc` IS the rounding: LLVM's double-to-float is round-to-nearest-even,
+       and 1e308 becomes +inf rather than a wrapped number. *)
+    let av = emit_expr env a_e in
+    let f = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = fptrunc double %s to float" f av);
+    let b = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = bitcast float %s to i32" b f);
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = zext i32 %s to i64" r b);
+    r
+  | Ast.App ({ node = Ast.Var "float_of_f32_bits"; _ }, a_e) ->
+    let av = emit_expr env a_e in
+    let t = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" t av);
+    let f = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = bitcast i32 %s to float" f t);
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = fpext float %s to double" r f);
+    r
   | Ast.App ({ node = Ast.Var "int_of_float"; _ }, a_e) ->
     let av = emit_expr env a_e in
     let r = fresh_reg () in
@@ -4411,6 +4448,20 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let bv = emit_expr env b_e in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call double @llvm.pow.f64(double %s, double %s)" r av bv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "float_of_bits"; _ }, a_e); _ }, b_e) ->
+    let hv = emit_expr env a_e in
+    let lv = emit_expr env b_e in
+    let hm = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = and i64 %s, 4294967295" hm hv);
+    let lm = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = and i64 %s, 4294967295" lm lv);
+    let sh = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = shl i64 %s, 32" sh hm);
+    let o = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = or i64 %s, %s" o sh lm);
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = bitcast i64 %s to double" r o);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "atan2"; _ }, a_e); _ }, b_e) ->
     let av = emit_expr env a_e in

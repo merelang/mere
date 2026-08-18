@@ -87,6 +87,23 @@ module Wire {
   let put_fixed32 = fn (b, x: int) -> put_fixed b x 4;
   let put_fixed64 = fn (b, x: int) -> put_fixed b x 8;
 
+  // --- double and float ----------------------------------------------------
+  //
+  // A `double` field is eight little-endian bytes of the IEEE-754 pattern, and a
+  // `float` field is four. The pattern arrives as TWO 32-BIT HALVES rather than one
+  // 64-bit integer, because a whole pattern read as a signed int64 does not fit the
+  // interpreter's native int for a large share of ordinary values — `1e308` among
+  // them. Keeping the split inside this layer means a caller writes a `float` and
+  // never learns that.
+  //
+  // Measured before being written: `protoc --encode` answers
+  // `29 000000000000f83f` for `e: 1.5` and `35 00002040` for `f: 2.5`.
+  let put_double = fn (b, d: float) ->
+    let _ = put_fixed b (float_bits_lo d) 4 in
+    put_fixed b (float_bits_hi d) 4;
+
+  let put_float = fn (b, d: float) -> put_fixed b (f32_bits d) 4;
+
   let rec append = fn (b, src, i: int) ->
     if i >= vec_len src then ()
     else
@@ -155,6 +172,18 @@ module Wire {
 
   let get_fixed32 = fn (b: bytes, i: int) -> get_fixed_at b i 4 0 0;
   let get_fixed64 = fn (b: bytes, i: int) -> get_fixed_at b i 8 0 0;
+
+  // The halves are read separately for the same reason they are written that way:
+  // `get_fixed_at` accumulating all eight bytes into one int would overflow the
+  // interpreter's before the top byte arrived.
+  let get_double = fn (b: bytes, i: int) ->
+    let (lo, j) = get_fixed_at b i 4 0 0 in
+    let (hi, k) = get_fixed_at b j 4 0 0 in
+    (float_of_bits hi lo, k);
+
+  let get_float = fn (b: bytes, i: int) ->
+    let (u, j) = get_fixed_at b i 4 0 0 in
+    (float_of_f32_bits u, j);
 
   // A length-delimited value as its own `bytes`, plus where it ended. Handing
   // the slice back to `get_tag` is how a nested message is decoded.

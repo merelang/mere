@@ -24,10 +24,10 @@
 // same field. A decoder that only reads the packed form works against protoc and
 // fails against an older writer.
 //
-// REFUSED, not approximated: `double` and `float`. They need IEEE-754 bit patterns,
-// and `contrib/proto/wire.mere` has no float path yet — a bit-exact conversion from
-// existing language features has been measured to work but is not wired in. Emitting
-// something for them would produce a codec that is wrong on the wire.
+// `double` and `float` WORK NOW, and they did not before: they need IEEE-754 bit
+// patterns, and until `float_bits_hi` / `float_bits_lo` / `f32_bits` existed there was
+// no way to reach them. The generator refused those two types rather than emitting
+// something wrong on the wire; that refusal is gone and the corpus covers them.
 
 import "parse.mere";
 
@@ -45,9 +45,7 @@ module Pgen {
 
   // --- the Mere type of a field -------------------------------------------
   let scalar_mere_ty = fn (n: str) ->
-    if str_eq n "double" || str_eq n "float" then
-      fail ("proto-gen: '" ++ n ++ "' is not supported yet — a float field needs"
-            ++ " IEEE-754 bit access, which contrib/proto/wire.mere does not have")
+    if str_eq n "double" || str_eq n "float" then "float"
     else if str_eq n "bool" then "bool"
     else if str_eq n "string" then "str"
     else if str_eq n "bytes" then "bytes"
@@ -118,7 +116,8 @@ module Pgen {
       if rep || is_msg_ref then "[]"
       else match ty with
            | PScalar (n, _) ->
-             if str_eq n "bool" then "false"
+             if str_eq n "double" || str_eq n "float" then "0.0"
+             else if str_eq n "bool" then "false"
              else if str_eq n "string" then "\"\""
              else if str_eq n "bytes" then "(bytes_of_hex \"\")"
              else "0"
@@ -147,6 +146,12 @@ module Pgen {
     else if str_eq tyname "bytes" then
       "    let _ = Wire.tag b " ++ str_of_int num ++ " Wire.delimited in"
       ++ nl ++ "    let _ = Wire.put_bytes b " ++ expr ++ " in"
+    else if str_eq tyname "double" then
+      "    let _ = Wire.tag b " ++ str_of_int num ++ " Wire.fixed64 in"
+      ++ nl ++ "    let _ = Wire.put_double b " ++ expr ++ " in"
+    else if str_eq tyname "float" then
+      "    let _ = Wire.tag b " ++ str_of_int num ++ " Wire.fixed32 in"
+      ++ nl ++ "    let _ = Wire.put_float b " ++ expr ++ " in"
     else if str_eq tyname "bool" then
       "    let _ = Wire.tag b " ++ str_of_int num ++ " Wire.varint in"
       ++ nl ++ "    let _ = Wire.put_varint b (if " ++ expr ++ " then 1 else 0) in"
@@ -160,7 +165,11 @@ module Pgen {
     not (str_eq tyname "string" || str_eq tyname "bytes");
 
   let is_default_test = fn (tyname: str, expr: str) ->
-    if str_eq tyname "bool" then expr
+    // A float compares against `0.0`, not `0` — the overload picks float only when
+    // an operand is concretely float, so `x != 0` on a float is a type error rather
+    // than a wrong answer, which is the better failure of the two.
+    if str_eq tyname "double" || str_eq tyname "float" then expr ++ " != 0.0"
+    else if str_eq tyname "bool" then expr
     else if str_eq tyname "string" then "not (str_eq " ++ expr ++ " \"\")"
     else if str_eq tyname "bytes" then "bytes_len " ++ expr ++ " > 0"
     else expr ++ " != 0";
@@ -183,6 +192,8 @@ module Pgen {
       ("Wire.get_fixed32", "", "Wire.fixed32")
     else if str_eq tyname "fixed64" || str_eq tyname "sfixed64" then
       ("Wire.get_fixed64", "", "Wire.fixed64")
+    else if str_eq tyname "double" then ("Wire.get_double", "", "Wire.fixed64")
+    else if str_eq tyname "float" then ("Wire.get_float", "", "Wire.fixed32")
     else if str_eq tyname "bool" then ("Wire.get_varint", "BOOL", "Wire.varint")
     else ("Wire.get_varint", "", "Wire.varint");
 
@@ -322,6 +333,8 @@ module Pgen {
                else if str_eq sn "sint64" then "        Wire.put_varint p (Wire.zz64 x)"
                else if str_eq sn "fixed32" || str_eq sn "sfixed32" then "        Wire.put_fixed32 p x"
                else if str_eq sn "fixed64" || str_eq sn "sfixed64" then "        Wire.put_fixed64 p x"
+               else if str_eq sn "double" then "        Wire.put_double p x"
+               else if str_eq sn "float" then "        Wire.put_float p x"
                else if str_eq sn "bool" then "        Wire.put_varint p (if x then 1 else 0)"
                else "        Wire.put_varint p x") ++ ") in",
               "      let _ = Wire.tag b " ++ n ++ " Wire.delimited in",

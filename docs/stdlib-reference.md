@@ -156,6 +156,23 @@ let content = read_file "/tmp/out.txt" in print content;
 | `bool_of_str` ⚡ | `str -> bool` | Trim then `"true"`/`"false"` only; raises otherwise |
 | `float_of_int` | `int -> float` | int → float (no precision loss) |
 | `int_of_float` | `float -> int` | float → int (truncation) |
+| `float_bits_hi` ★ | `float -> int` | The top 32 bits of a double's IEEE-754 pattern (v0.1.281) |
+| `float_bits_lo` ★ | `float -> int` | The bottom 32 bits (v0.1.281) |
+| `float_of_bits` ★ | `int -> int -> float` | `float_of_bits hi lo` — the inverse of the two above (v0.1.281) |
+| `f32_bits` ★ | `float -> int` | The 32-bit IEEE-754 pattern of the **float32** nearest this double. The narrowing *is* the rounding (round-to-nearest-even); a value with no float32 becomes ±inf rather than wrapping (v0.1.281) |
+| `float_of_f32_bits` ★ | `int -> float` | A float32 pattern back to a double (v0.1.281) |
+
+**Why the bits come out in two halves.** A double's pattern read as one signed
+int64 does not fit the interpreter's native int — which is OCaml's, and 63-bit — for
+a large share of ordinary values: `-1.5`, `1e308`, `inf` and `nan` all exceed it. A
+single 64-bit accessor would therefore answer differently on the interpreter than on
+every compiled backend, for a literal as plain as `1e308`. Each 32-bit half is
+always below 2^32, so there is nothing left to diverge about. Pinned by
+`test/parity/float_bits.mere` on all four backends.
+
+These are the primitive the rest is built from: `contrib/proto/wire.mere` writes a
+protobuf `double` as `put_double` and a `float` as `put_float` on top of them, and
+neither the caller nor the generated codec learns about the split.
 | `str_of_float` | `float -> str` | Float to string (OCaml semantics) |
 | `float_of_str` ⚡ | `str -> float` | Parse after trim; raises on bad input |
 

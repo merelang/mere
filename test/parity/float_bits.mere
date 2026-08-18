@@ -1,0 +1,93 @@
+// Q-038: IEEE-754 bit access, on all four backends.
+//
+// The bits come out as TWO 32-BIT HALVES and not as one 64-bit integer, and that
+// was measured rather than chosen. A double's pattern read as a signed int64
+// exceeds this interpreter's 63-bit native int for a large share of ordinary
+// values — -1.5, 1e308, inf and nan all do — so a single 64-bit accessor would
+// answer differently on the interpreter than on every compiled backend, for a
+// literal as plain as `1e308`. Each half is below 2^32, so there is nothing left
+// to diverge about. This file is the check that the choice held.
+//
+// `f32_bits` narrows to float32, and the narrowing IS the rounding: every backend's
+// double-to-float conversion is round-to-nearest-even, which is what a 4-byte wire
+// field wants. 1e308 has no float32, and the answer is +inf rather than a wrapped
+// number — which is the IEEE result and is worth pinning because a hand-written
+// conversion would be tempted to do something else.
+//
+// Execution mode: 4 backends (interp + C + LLVM + wasm), diff = 0
+
+let max_finite = 1.7976931348623157e308;
+let min_normal = 2.2250738585072014e-308;
+let min_subnormal = 5.0e-324;
+let inf = max_finite * 2.0;
+let nan = inf - inf;
+let neg_zero = 0.0 * (0.0 - 1.0);
+
+let hl = fn (d: float) ->
+  print (str_of_int (float_bits_hi d) ++ "," ++ str_of_int (float_bits_lo d));
+
+// Every class: normal, subnormal, both zeros, both infinities, NaN, range ends.
+let _ = hl 0.0;
+let _ = hl neg_zero;
+let _ = hl 1.0;
+let _ = hl 1.5;
+let _ = hl (0.0 - 1.5);
+let _ = hl 0.1;
+let _ = hl 3.141592653589793;
+let _ = hl max_finite;
+let _ = hl (0.0 - max_finite);
+let _ = hl min_normal;
+let _ = hl min_subnormal;
+let _ = hl 1e308;
+let _ = hl 1e-308;
+let _ = hl inf;
+let _ = hl (0.0 - inf);
+let _ = hl nan;
+
+// A round trip has to be the identity. `==` on NaN is false by IEEE, so NaN is
+// checked through its bits instead of through equality — comparing it the obvious
+// way would report a failure that is the comparison's own rule.
+let rt = fn (d: float) ->
+  let back = float_of_bits (float_bits_hi d) (float_bits_lo d) in
+  print (if back == d then "1" else "0");
+let _ = rt 0.0;
+let _ = rt 1.0;
+let _ = rt (0.0 - 1.5);
+let _ = rt 0.1;
+let _ = rt max_finite;
+let _ = rt min_subnormal;
+let _ = rt 1e308;
+let _ = rt inf;
+let _ = rt (0.0 - inf);
+
+let rt_bits = fn (d: float) ->
+  let back = float_of_bits (float_bits_hi d) (float_bits_lo d) in
+  print (if float_bits_hi back == float_bits_hi d
+            && float_bits_lo back == float_bits_lo d then "1" else "0");
+let _ = rt_bits nan;
+let _ = rt_bits neg_zero;
+
+// float32. The last three have no float32 and must saturate or flush, not wrap.
+let f32 = fn (d: float) -> print (str_of_int (f32_bits d));
+let _ = f32 0.0;
+let _ = f32 1.0;
+let _ = f32 2.5;
+let _ = f32 (0.0 - 2.5);
+let _ = f32 0.1;
+let _ = f32 max_finite;
+let _ = f32 min_subnormal;
+let _ = f32 inf;
+
+// float32 round trip: not the identity for a double, but idempotent once narrowed.
+let f32_rt = fn (d: float) ->
+  let once = float_of_f32_bits (f32_bits d) in
+  let twice = float_of_f32_bits (f32_bits once) in
+  print (if once == twice then "1" else "0");
+let _ = f32_rt 2.5;
+let _ = f32_rt 0.1;
+let _ = f32_rt 3.141592653589793;
+let _ = f32_rt (0.0 - 1e30);
+
+let _ = print (str_of_float (float_of_f32_bits (f32_bits 2.5)));
+let _ = print (str_of_float (float_of_f32_bits 1069547520));
+print "ok"

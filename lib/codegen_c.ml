@@ -2397,6 +2397,24 @@ let rec emit_expr (e : Ast.expr) : string =
          (emit_expr arg) (emit_expr arg) (emit_expr arg)
      | Ast.Var "float_of_int" ->
        Printf.sprintf "((double)(%s))" (emit_expr arg)
+     | Ast.Var "float_bits_hi" ->
+       Printf.sprintf
+         "({ double __d = (%s); unsigned long long __u; memcpy(&__u, &__d, 8); \
+             (long long)(__u >> 32); })" (emit_expr arg)
+     | Ast.Var "float_bits_lo" ->
+       Printf.sprintf
+         "({ double __d = (%s); unsigned long long __u; memcpy(&__u, &__d, 8); \
+             (long long)(__u & 0xFFFFFFFFULL); })" (emit_expr arg)
+     | Ast.Var "f32_bits" ->
+       (* The narrowing IS the rounding: C's double-to-float conversion is
+          round-to-nearest-even, which is what the wire format wants. *)
+       Printf.sprintf
+         "({ float __f = (float)(%s); unsigned int __u; memcpy(&__u, &__f, 4); \
+             (long long)__u; })" (emit_expr arg)
+     | Ast.Var "float_of_f32_bits" ->
+       Printf.sprintf
+         "({ unsigned int __u = (unsigned int)((%s) & 0xFFFFFFFFULL); \
+             float __f; memcpy(&__f, &__u, 4); (double)__f; })" (emit_expr arg)
      | Ast.Var "int_of_float" ->
        (* Mere int is long long on this backend; a bare (int) cast truncated
           anything above 2^31 (UB in C — clang clamped to INT_MAX), so
@@ -2445,6 +2463,15 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "round(%s)" (emit_expr arg)
      | Ast.App ({ node = Ast.Var "f_pow"; _ }, a_e) ->
        Printf.sprintf "pow(%s, %s)" (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "float_of_bits"; _ }, a_e) ->
+       (* memcpy, not a cast through a pointer: type-punning a double through a
+          long long* is undefined, and this backend has been bitten by UB that
+          happened to work on one CPU before (v0.1.242). *)
+       Printf.sprintf
+         "({ unsigned long long __u = ((unsigned long long)((%s) & 0xFFFFFFFFULL) << 32) \
+             | ((unsigned long long)((%s) & 0xFFFFFFFFULL)); \
+             double __d; memcpy(&__d, &__u, 8); __d; })"
+         (emit_expr a_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "atan2"; _ }, a_e) ->
        Printf.sprintf "atan2(%s, %s)" (emit_expr a_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "str_split"; _ }, s_e) ->

@@ -63,6 +63,29 @@ newcase M 'a: 7  b: 8  c: -9  d: -10' <<'P'
 syntax = "proto3";
 message M { fixed32 a = 1; fixed64 b = 2; sfixed32 c = 3; sfixed64 d = 4; }
 P
+# double and float. Until float_bits_hi / f32_bits existed the generator REFUSED
+# these two types rather than emit something wrong on the wire, so these cases are
+# the check that the refusal is gone for the right reason.
+newcase M 'a: 1.5  b: 2.5' <<'P'
+syntax = "proto3";
+message M { double a = 1; float b = 2; }
+P
+newcase M 'a: -1.5  b: 0.1  c: 1e308  d: 1e-308' <<'P'
+syntax = "proto3";
+message M { double a = 1; double b = 2; double c = 3; double d = 4; }
+P
+newcase M 'a: 0.1  b: -2.5  c: 3.4028234663852886e38' <<'P'
+syntax = "proto3";
+message M { float a = 1; float b = 2; float c = 3; }
+P
+newcase M 'a: 0  b: 0' <<'P'
+syntax = "proto3";
+message M { double a = 1; float b = 2; }
+P
+newcase M 'a: [1.5,-2.5,0.1]  b: [1.5,2.5]' <<'P'
+syntax = "proto3";
+message M { repeated double a = 1; repeated float b = 2; }
+P
 newcase M 'a: true  b: "hello"  c: "\x01\x02\xff"' <<'P'
 syntax = "proto3";
 message M { bool a = 1; string b = 2; bytes c = 3; }

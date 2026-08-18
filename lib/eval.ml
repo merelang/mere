@@ -777,6 +777,48 @@ let binary_float name f =
         | _ -> failwith (name ^ ": 2nd arg expected float"))
     | _ -> failwith (name ^ ": 1st arg expected float"))
 
+(* Q-038: the halves are taken with a LOGICAL shift and a mask, so each result is
+   below 2^32 and fits this interpreter's native int. Returning the whole pattern
+   would not: as a signed int64 it exceeds 63 bits for -1.5, 1e308, inf and nan. *)
+let builtin_float_bits_hi =
+  V_builtin ("float_bits_hi", fun v ->
+    match v with
+    | V_float f ->
+      V_int (Int64.to_int (Int64.shift_right_logical (Int64.bits_of_float f) 32))
+    | _ -> failwith "float_bits_hi: expected float")
+
+let builtin_float_bits_lo =
+  V_builtin ("float_bits_lo", fun v ->
+    match v with
+    | V_float f ->
+      V_int (Int64.to_int (Int64.logand (Int64.bits_of_float f) 0xFFFFFFFFL))
+    | _ -> failwith "float_bits_lo: expected float")
+
+let builtin_float_of_bits =
+  V_builtin ("float_of_bits", fun hi ->
+    match hi with
+    | V_int h ->
+      V_builtin ("float_of_bits.1", fun lo ->
+        match lo with
+        | V_int l ->
+          let h64 = Int64.logand (Int64.of_int h) 0xFFFFFFFFL in
+          let l64 = Int64.logand (Int64.of_int l) 0xFFFFFFFFL in
+          V_float (Int64.float_of_bits (Int64.logor (Int64.shift_left h64 32) l64))
+        | _ -> failwith "float_of_bits: 2nd arg expected int")
+    | _ -> failwith "float_of_bits: 1st arg expected int")
+
+let builtin_f32_bits =
+  V_builtin ("f32_bits", fun v ->
+    match v with
+    | V_float f -> V_int (Int32.to_int (Int32.bits_of_float f) land 0xFFFFFFFF)
+    | _ -> failwith "f32_bits: expected float")
+
+let builtin_float_of_f32_bits =
+  V_builtin ("float_of_f32_bits", fun v ->
+    match v with
+    | V_int b -> V_float (Int32.float_of_bits (Int32.of_int (b land 0xFFFFFFFF)))
+    | _ -> failwith "float_of_f32_bits: expected int")
+
 let builtin_atan2 = binary_float "atan2" Float.atan2
 let builtin_f_min = binary_float "f_min" Float.min
 let builtin_f_max = binary_float "f_max" Float.max
@@ -2631,6 +2673,11 @@ let initial_env : env =
     ("cos", ref builtin_cos);
     ("tan", ref builtin_tan);
     ("atan2", ref builtin_atan2);
+    ("float_bits_hi", ref builtin_float_bits_hi);
+    ("float_bits_lo", ref builtin_float_bits_lo);
+    ("float_of_bits", ref builtin_float_of_bits);
+    ("f32_bits", ref builtin_f32_bits);
+    ("float_of_f32_bits", ref builtin_float_of_f32_bits);
     ("f_min", ref builtin_f_min);
     ("f_max", ref builtin_f_max);
     ("f_pow", ref builtin_f_pow);

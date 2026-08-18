@@ -2836,6 +2836,40 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr a_e;
     emit_instr "f64.convert_i64_s";
     emit_float_alloc_from_f64_on_stack ()
+  (* Q-038 on Wasm: a float is a pointer into linear memory here, so the value is
+     loaded first and then reinterpreted. Wasm has the reinterpret instructions
+     natively, so none of this needs a host import. *)
+  | Ast.App ({ node = Ast.Var "float_bits_hi"; _ }, a_e) ->
+    emit_expr a_e;
+    emit_instr "i32.wrap_i64";
+    emit_instr "f64.load offset=0 align=8";
+    emit_instr "i64.reinterpret_f64";
+    emit_instr "i64.const 32";
+    (* LOGICAL, not arithmetic. The top bit of a double's pattern is its sign bit,
+       so an arithmetic shift sign-extends it and `float_bits_hi (-0.0)` comes back
+       as -2147483648 instead of 2147483648 — a value that then compares as negative
+       and divides the wrong way, on this backend only. *)
+    emit_instr "i64.shr_u"
+  | Ast.App ({ node = Ast.Var "float_bits_lo"; _ }, a_e) ->
+    emit_expr a_e;
+    emit_instr "i32.wrap_i64";
+    emit_instr "f64.load offset=0 align=8";
+    emit_instr "i64.reinterpret_f64";
+    emit_instr "i64.const 4294967295";
+    emit_instr "i64.and"
+  | Ast.App ({ node = Ast.Var "f32_bits"; _ }, a_e) ->
+    emit_expr a_e;
+    emit_instr "i32.wrap_i64";
+    emit_instr "f64.load offset=0 align=8";
+    emit_instr "f32.demote_f64";
+    emit_instr "i32.reinterpret_f32";
+    emit_instr "i64.extend_i32_u"
+  | Ast.App ({ node = Ast.Var "float_of_f32_bits"; _ }, a_e) ->
+    emit_expr a_e;
+    emit_instr "i32.wrap_i64";
+    emit_instr "f32.reinterpret_i32";
+    emit_instr "f64.promote_f32";
+    emit_float_alloc_from_f64_on_stack ()
   | Ast.App ({ node = Ast.Var "int_of_float"; _ }, a_e) ->
     emit_expr a_e;
     emit_instr "i32.wrap_i64";
@@ -2908,6 +2942,18 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8";
     emit_instr "call $__lang_f_pow";
+    emit_float_alloc_from_f64_on_stack ()
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "float_of_bits"; _ }, a_e); _ }, b_e) ->
+    emit_expr a_e;
+    emit_instr "i64.const 4294967295";
+    emit_instr "i64.and";
+    emit_instr "i64.const 32";
+    emit_instr "i64.shl";
+    emit_expr b_e;
+    emit_instr "i64.const 4294967295";
+    emit_instr "i64.and";
+    emit_instr "i64.or";
+    emit_instr "f64.reinterpret_i64";
     emit_float_alloc_from_f64_on_stack ()
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "atan2"; _ }, a_e); _ }, b_e) ->
     emit_expr a_e;

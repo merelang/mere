@@ -4,6 +4,56 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.281 — 2026-08-18
+
+_IEEE-754 bit access, in two halves because one would not fit._
+
+`float_bits_hi` / `float_bits_lo` / `float_of_bits`, and `f32_bits` /
+`float_of_f32_bits` for float32. All five on all four backends, closing the last
+thing that stopped a protobuf `double` or `float` field from being generated.
+
+**The API shape was measured, not chosen.** The obvious design is one accessor
+returning the whole 64-bit pattern. It does not work: read as a signed int64, a
+double's pattern exceeds this interpreter's native int — which is OCaml's, and
+63-bit — for a large share of ordinary values. `-1.5`, `1e308`, `inf` and `nan` all
+do. A single accessor would therefore answer differently on the interpreter than on
+every compiled backend, for a literal as plain as `1e308`, and the honest options
+were a DIVERGE pin or a different API. Two 32-bit halves are each below 2^32, so
+there is nothing left to diverge about — and they are also exactly what a wire
+format wants, since it writes the bytes anyway.
+
+`f32_bits` narrows to float32 with the **backend's own** double-to-float conversion,
+which is round-to-nearest-even. That matters more than it sounds: `1e308` has no
+float32, and the answer is `+inf` rather than a wrapped number. Writing that
+rounding by hand is the part nobody should have to get right twice.
+
+`contrib/proto/wire.mere` gains `put_double` / `get_double` / `put_float` /
+`get_float` on top, so the split stays inside that layer and neither a caller nor a
+generated codec learns about it. The generator's refusal of `double` and `float` is
+gone, and `scripts/proto_gen_parity.sh` covers them — 25 schemas now, including
+`1e308`, `1e-308`, float32's maximum, and repeated floats, all byte-identical to
+protoc.
+
+**Two mistakes worth recording, both mine and both in the checking rather than the
+code.**
+
+The Wasm arm shifted with `i64.shr_s`. The top bit of a double's pattern is its sign
+bit, so an arithmetic shift sign-extends it and `float_bits_hi (-0.0)` came back as
+`-2147483648` — a value that then compares as negative and divides the wrong way, on
+that backend only. It is `i64.shr_u`, and the comment now says why.
+
+Finding it took two detours. First I read a stale binary: `dune build 2>&1 | head -2`
+had exited on SIGPIPE, so the compiler under test was the poisoned one from a
+mutation run that a timeout had killed mid-restore. Then I "verified" the restore
+with `grep -c 'i64.shr_u'`, which returned 1 — from a *different, pre-existing*
+occurrence elsewhere in the file. **A check that cannot tell the two states apart is
+not a check**; the verification is anchored to the arm now.
+
+`test/parity/float_bits.mere` pins every class — normal, subnormal, both zeros, both
+infinities, NaN, the range ends — on four backends. NaN is checked through its bits
+rather than through `==`, because `==` on NaN is false by IEEE and comparing it the
+obvious way reports a failure that is the comparison's own rule.
+
 ## 2026-08-18 — A protobuf code generator, and two branches nothing reached
 
 _`contrib/proto/gen.mere` + `examples/protoc_mere.mere`: a `.proto` in, Mere source

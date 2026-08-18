@@ -22,7 +22,7 @@ The interpreter has every one of these, and is not a column.
 | `bit_shr` | yes | yes | yes |
 | `bit_xor` | yes | yes | yes |
 | `bool_of_str` | yes | yes | yes |
-| `bytebuf_new` | nocompile | refused | MISSING |
+| `bytebuf_new` | yes | refused | MISSING |
 | `bytes_of_hex` | yes | yes | yes |
 | `bytes_of_str` | yes | yes | yes |
 | `ceil` | yes | yes | refused |
@@ -47,6 +47,7 @@ The interpreter has every one of these, and is not a column.
 | `even` | yes | yes | yes |
 | `exit` | yes | refused | yes |
 | `exp` | yes | yes | yes |
+| `f32_bits` | yes | yes | yes |
 | `f_abs` | yes | yes | yes |
 | `f_add` | yes | yes | yes |
 | `f_div` | yes | yes | yes |
@@ -70,6 +71,10 @@ The interpreter has every one of these, and is not a column.
 | `file_pwrite_bytes` | yes | yes | yes |
 | `file_read_line` | yes | refused | refused |
 | `file_size` | yes | yes | yes |
+| `float_bits_hi` | yes | yes | yes |
+| `float_bits_lo` | yes | yes | yes |
+| `float_of_bits` | yes | yes | yes |
+| `float_of_f32_bits` | yes | yes | yes |
 | `float_of_int` | yes | yes | yes |
 | `float_of_str` | yes | yes | yes |
 | `floor` | yes | yes | refused |
