@@ -4,6 +4,48 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.282 — 2026-08-18
+
+_The FFI byte arena gets a `bytes` bridge._
+
+`mem_to_bytes` / `mem_copy_bytes`, the arena's two directions for data that may
+contain a **zero byte** — which `mem_to_str` cannot carry, because it stops there,
+and which every binary protocol has. Native and Wasm-component both, and
+`scripts/socket_parity.sh` requires the two to agree.
+
+**What it replaced.** `contrib/http2/server.mere` was reading arena → hex → `bytes`
+(two characters per byte, three passes) and writing with **`mem_set_u8` once per
+byte**. The write is the one that mattered: a response is now one FFI call instead of
+one call per byte of it. Same shape as v0.1.222, where `file_pwrite` could not take a
+`bytes` and built one boxed int per byte.
+
+The Wasm helper is a few instructions because the arena *is* linear memory there. The
+one thing to get right is that a `bytes` pointer points **at the length**, where a
+`str` pointer points at its data with the length at `ptr-4`; a comment says so, and
+poisoning the layout both ways is caught.
+
+**Two mistakes, and the second is the interesting one.**
+
+First, the definitions went where the rest of the arena lives — and the generated C
+said `unknown type name 'mere_bytes'`, because `b->data` needs the complete struct
+and that block is emitted earlier. So they moved into the bytes runtime.
+
+Then they were emitted there **unconditionally**, and `__mem` — the arena — is only
+emitted when a program declares an arena extern. Every program that uses `bytes`
+*without* the arena stopped compiling, which is most of them; `proto_parity` said so
+on the next run. **Two independent conditions, and satisfying one is what made the
+other easy to miss.**
+
+The gate for that turned out to need one more thing: `bytes_runtime` was a top-level
+constant, evaluated at module-initialisation time — *before any program is parsed* —
+so a `Hashtbl` lookup inside it would have been false for every program that ever
+declared the externs. It takes the flag as a parameter now.
+
+Poisoning found a coverage gap too: reading the length with `i32.load8_u` instead of
+`i32.load` passed, because on a little-endian machine the low byte of a length under
+256 **is** the length, and every payload in the corpus was shorter than that. There
+are 255-, 256- and 300-byte payloads now.
+
 ## v0.1.281 — 2026-08-18
 
 _IEEE-754 bit access, in two halves because one would not fit._

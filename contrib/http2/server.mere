@@ -23,13 +23,15 @@
 //   * NO STREAMING. A handler answers once, so server-streaming and
 //     client-streaming methods are not expressible in its signature.
 //
-// BINARY CROSSES THE FFI AS HEX. `tcp_read` writes into the integer-addressed byte
-// arena, and there is no arena-to-`bytes` bridge — `mem_to_str` stops at the first
-// zero byte, which every second HPACK block contains. `bytes_to_hex_len` returns
-// the arena's contents as hex in one call, and `bytes_of_hex` turns that into
-// `bytes`. Two characters per byte, one FFI call. Writing goes the other way with
-// `mem_set_u8` per byte, because the hex-decoding entry point ALLOCATES and the
-// arena is a bump allocator with no free.
+// BINARY CROSSES THE FFI AS BYTES, as of mere v0.1.281. `tcp_read` writes into the
+// integer-addressed arena, and `mem_to_str` cannot bring that back — it stops at the
+// first zero byte, which every second HPACK block contains.
+//
+// This file used to go arena -> hex -> `bytes` on the way in (two characters per
+// byte) and call `mem_set_u8` ONCE PER BYTE on the way out. `mem_to_bytes` and
+// `mem_copy_bytes` are the arena's two directions for data that may contain a zero,
+// so both of those are gone. The per-byte write is the one that mattered: a response
+// is now one call instead of one call per byte of it.
 
 import "frame.mere";
 import "hpack.mere";
@@ -47,8 +49,8 @@ extern fn tcp_read: int -> int -> int -> int;
 extern fn tcp_write: int -> int -> int -> int;
 extern fn tcp_close: int -> unit;
 extern fn mem_alloc: int -> int;
-extern fn mem_set_u8: int -> int -> int -> int;
-extern fn bytes_to_hex_len: int -> int -> str;
+extern fn mem_to_bytes: int -> int -> bytes;
+extern fn mem_copy_bytes: int -> int -> bytes -> int;
 
 module H2Server {
 
@@ -99,21 +101,16 @@ module H2Server {
 
   let pct_encode = fn (s: str) -> pct_at (bytes_of_str s) 0 (strbuf_new ());
 
+  let empty = bytes_of_hex "";
+
   // One read. Returns the bytes that arrived, or empty when the peer is done.
   let recv = fn (cfd: int, rbuf: int) ->
     let n = tcp_read cfd rbuf read_chunk in
-    if n <= 0 then bytes_of_hex ""
-    else bytes_of_hex (bytes_to_hex_len rbuf n);
-
-  let rec put_bytes_at = fn (wbuf: int, b: bytes, k: int) ->
-    if k >= bytes_len b then ()
-    else
-      let _ = mem_set_u8 wbuf k (bytes_get b k) in
-      put_bytes_at wbuf b (k + 1);
+    if n <= 0 then empty else mem_to_bytes rbuf n;
 
   let send = fn (cfd: int, wbuf: int, b: bytes) ->
-    let _ = put_bytes_at wbuf b 0 in
-    let _ = tcp_write cfd wbuf (bytes_len b) in
+    let n = mem_copy_bytes wbuf 0 b in
+    let _ = tcp_write cfd wbuf n in
     ();
 
   // Enough bytes for a frame header, and then for its payload. A frame can and
@@ -182,7 +179,7 @@ module H2Server {
           // here depends on a value the peer would send.
           let _ =
             if H2.has_flag flags H2.ack then ()
-            else send cfd wbuf (H2.frame_bytes H2.settings H2.ack 0 (bytes_of_hex "")) in
+            else send cfd wbuf (H2.frame_bytes H2.settings H2.ack 0 empty) in
           pump cfd rbuf wbuf rest st stream path data handler
         else if ty == H2.ping then
           let _ =
@@ -198,10 +195,10 @@ module H2Server {
           let p = list_fold hs "" (fn (acc, kv) ->
                     let (n, v) = kv in if str_eq n ":path" then v else acc) in
           if H2.has_flag flags H2.end_stream then
-            let out = handler p (bytes_of_hex "") in
+            let out = handler p empty in
             let _ = respond cfd wbuf sid out in
-            pump cfd rbuf wbuf rest st2 0 "" (bytes_of_hex "") handler
-          else pump cfd rbuf wbuf rest st2 sid p (bytes_of_hex "") handler
+            pump cfd rbuf wbuf rest st2 0 "" empty handler
+          else pump cfd rbuf wbuf rest st2 sid p empty handler
         else if ty == H2.data then
           let d = bytes_concat data payload in
           if H2.has_flag flags H2.end_stream then
@@ -210,7 +207,7 @@ module H2Server {
             let (_, msg, _) = H2.read_grpc_message d 0 in
             let out = handler path msg in
             let _ = respond cfd wbuf sid out in
-            pump cfd rbuf wbuf rest st 0 "" (bytes_of_hex "") handler
+            pump cfd rbuf wbuf rest st 0 "" empty handler
           else pump cfd rbuf wbuf rest st stream path d handler
         else
           // WINDOW_UPDATE, PRIORITY, RST_STREAM, CONTINUATION: read and skipped.
@@ -220,16 +217,16 @@ module H2Server {
 
   let serve_conn = fn (cfd: int, rbuf: int, wbuf: int, handler) ->
     let pre = bytes_of_str H2.preface in
-    let b = ensure cfd rbuf (bytes_of_hex "") H2.preface_len in
+    let b = ensure cfd rbuf empty H2.preface_len in
     if bytes_len b < H2.preface_len then tcp_close cfd
     else if hex_of_bytes (bytes_slice b 0 H2.preface_len) != hex_of_bytes pre then
       // Not HTTP/2. Closing is the whole answer: the preface is deliberately not
       // valid HTTP/1.1 so that this cannot be a half-understood request.
       tcp_close cfd
     else
-      let _ = send cfd wbuf (H2.frame_bytes H2.settings 0 0 (bytes_of_hex "")) in
+      let _ = send cfd wbuf (H2.frame_bytes H2.settings 0 0 empty) in
       let _ = pump cfd rbuf wbuf (after b H2.preface_len) Hpack.new_state
-                   0 "" (bytes_of_hex "") handler in
+                   0 "" empty handler in
       tcp_close cfd;
 
   // `handler` is `str -> bytes -> bytes`: a path and a request message, giving a
