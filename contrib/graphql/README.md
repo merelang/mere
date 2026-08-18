@@ -281,9 +281,85 @@ and the differences (2) then found were both real.
   `@deprecated(reason: String! = "No longer supported")`'s default, and the
   oracle's own introspection of our answer is what said so.
 
+## Validation
+
+19 of the specification's 32 rules, in `validate.mere`. Without it the executor
+answered a malformed document by failing somewhere in the middle — a message about
+an internal position rather than about the request.
+
+```mere
+Gvalid.report (Gparse.document query) (Gparse.document sdl)
+// FieldsOnCorrectType	Cannot query field "nope" on type "Query".
+```
+
+### The document and the schema are separate arguments
+
+Unlike the executor, which takes one list from parsing `query ++ sdl`. That is not
+style: **`ExecutableDefinitions` is the rule that a document being executed must not
+contain type-system definitions**, and in a combined list every schema it is
+validated against violates it. The first version did exactly that and reported every
+SDL type as "not executable". It is also how the oracle is called —
+`validate(schema, document)` — so the comparison is not about an arrangement neither
+side has.
+
+### Every error carries the name of the rule that produced it
+
+That is what makes a **partial** validator gateable, and it is the part worth
+copying. The harness compares the **set of rule names** that fired against graphql-js
+running each of its 32 rules individually — the oracle classifying its own output;
+nothing here maps a message to a rule.
+
+Two reasons rule names and not the error list, both measured:
+
+1. graphql-js returns errors in **visitor order, interleaved across rules**:
+   `{ a(x: 1, x: 2) }` yields `UniqueArgumentNames` then two `KnownArgumentNames`.
+   Matching that list would require all 32 rules plus the traversal, so a partial
+   validator could never agree about anything.
+2. Rule names are a vocabulary of about thirty identifiers from the specification's
+   own section titles — small enough that a shared misreading is not a real risk, the
+   same argument the document gate makes for `Int` against `Float`.
+
+Messages are compared too, as sorted sets: **every message we produce must be one
+graphql-js produces.** `Did you mean ...` is stripped from the oracle's side, and the
+harness fails if no oracle message carried one — a normalisation nothing exercises
+is a claim about nothing.
+
+### Three failures, not one
+
+| | |
+|---|---|
+| we reject what the oracle accepts | the worst: a false positive fails a valid request |
+| we miss a rule we **claim** | a real defect |
+| we miss a rule we do **not** claim | DOCUMENTED-GAP — and the rule must be on the list |
+
+A gap-list entry that never fires in the corpus **fails the harness as stale**. And
+the claim list is checked in both directions: every rule we report must be on it.
+Without that second direction, dropping a rule from the list while still implementing
+it left the harness green — poisoning found it, because the list is otherwise
+consulted only for rules that were *missed*. **A wrong list silently weakens every
+check that reads it.**
+
+### What the harness caught
+
+- **We rejected `{ __schema { queryType { name } } }`.** `__schema`, `__type` and
+  `__typename` are provided *by* the schema rather than declared in it, so a lookup
+  reports them as unknown fields. A false positive, and the worst kind.
+- **`is not defined by operation` versus `is never used in operation`** — two
+  prepositions, and one shared helper put the wrong word in one of them.
+- **A fragment cycle is reported once**, at the first fragment in document order,
+  with the path through the others: `A -> B -> A` is one error naming A "via B" and
+  not a second naming B.
+
 ## Not here yet
 
-- **Validation.**
+- **13 validation rules**, each named on the harness's gap list and each exercised by
+  its corpus: `ValuesOfCorrectType`, `ProvidedRequiredArguments`,
+  `VariablesInAllowedPosition`, `OverlappingFieldsCanBeMerged`,
+  `PossibleFragmentSpreads`, `UniqueInputFieldNames`, `SingleFieldSubscriptions` and
+  the rest.
+- **`Did you mean ...` suggestions**, which need graphql-js's own ranking.
+- **Source positions**, so no rule reports a location — the parser does not carry
+  them, the same gap the executor has for `locations`.
 - **Type-system extensions** (`extend type T { … }`). Valid GraphQL that this
   parser refuses rather than mis-reads: reading `extend type T` as `type T` would
   produce a tree that says something the document did not. The refusal is

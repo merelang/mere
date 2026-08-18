@@ -1,0 +1,573 @@
+// contrib/graphql/validate.mere — the specification's validation rules.
+//
+// A GraphQL server is supposed to REJECT a bad request before executing any of it,
+// with an error that names what is wrong. Without this, `contrib/graphql`'s executor
+// answered a malformed document by failing somewhere in the middle — a message about
+// an internal position rather than about the request.
+//
+// EVERY ERROR CARRIES THE NAME OF THE RULE THAT PRODUCED IT, and that is not
+// decoration: it is what makes a PARTIAL validator gateable. 19 of the
+// specification's 32 rules are implemented here, and the harness compares the SET OF
+// RULE NAMES that fired against graphql-js running each of its rules individually.
+// A rule that is not implemented has to appear on an explicit list, and a list entry
+// that stops producing a gap fails the harness as stale — so "not implemented" is a
+// claim with an expiry rather than a silence.
+//
+// WHY RULE NAMES AND NOT MESSAGES. The oracle's messages are compared too, but they
+// cannot be the primary comparison for two reasons found by measuring:
+//
+//   1. graphql-js returns errors in VISITOR order, interleaved across rules. Matching
+//      the list in order would require implementing all 32 rules AND reproducing the
+//      traversal, so a partial validator could never agree about anything.
+//   2. Several messages end in a SUGGESTION — `Unknown type "Nope". Did you mean
+//      "Node"?`, `Field "obj" of type "O" must have a selection of subfields. Did you
+//      mean "obj { ... }"?`. Those need graphql-js's own suggestion ranking. The
+//      suggestion is dropped here and the harness strips it from the oracle's side,
+//      which is a stated gap.
+//
+// Rule names are a vocabulary of about thirty identifiers taken from the
+// specification's own section titles — the same argument the document gate makes for
+// comparing `Int` against `Float`: small enough that a shared misreading is not a
+// real risk.
+//
+// Positions are NOT reported, for the same reason the executor does not report
+// `locations`: the parser does not carry them.
+
+import "ast.mere";
+import "lexer.mere";
+import "parser.mere";
+import "printer.mere";
+import "exec.mere";
+
+// A rule name and a message. The rule name is graphql-js's, minus the `Rule` suffix.
+type gverr = GVErr of (str * str);
+
+module Gvalid {
+
+  let rec appl = fn (a, b) ->
+    match a with
+    | [] -> b
+    | [h, ...t] -> Cons (h, appl t b);
+
+  let rec rev_list = fn (xs, acc) ->
+    match xs with
+    | [] -> acc
+    | [h, ...t] -> rev_list t (Cons (h, acc));
+
+  let err = fn (rule: str, msg: str) -> Cons (GVErr (rule, msg), []);
+
+  let q = fn (s: str) -> "\"" ++ s ++ "\"";
+
+  // --- what the document contains -----------------------------------------
+
+  let rec operations = fn (defs) ->
+    match defs with
+    | [] -> []
+    | [d, ...rest] ->
+      match d with
+      | OpDef (op, name, vardefs, dirs, sels) ->
+        Cons ((op, name, vardefs, dirs, sels), operations rest)
+      | _ -> operations rest;
+
+  let rec fragments = fn (defs) ->
+    match defs with
+    | [] -> []
+    | [d, ...rest] ->
+      match d with
+      | FragDef (name, tc, dirs, sels) ->
+        Cons ((name, tc, dirs, sels), fragments rest)
+      | _ -> fragments rest;
+
+  let rec frag_named = fn (frags, name: str) ->
+    match frags with
+    | [] -> []
+    | [(n, tc, dirs, sels), ...rest] ->
+      if str_eq n name then Cons ((tc, dirs, sels), []) else frag_named rest name;
+
+  // --- ExecutableDefinitions ----------------------------------------------
+  //
+  // A type-system definition in a document being EXECUTED is not executable. The
+  // wording distinguishes a named definition from the schema block, which has no
+  // name to report.
+  let ts_label = fn (td: gtsdef) ->
+    match td with
+    | SchemaDef (_, _, _) -> "schema"
+    | ScalarDef (_, n, _) -> q n
+    | ObjectDef (_, n, _, _, _) -> q n
+    | InterfaceDef (_, n, _, _, _) -> q n
+    | UnionDef (_, n, _, _) -> q n
+    | EnumDef (_, n, _, _) -> q n
+    | InputDef (_, n, _, _) -> q n
+    | DirectiveDef (_, n, _, _, _) -> q ("@" ++ n);
+
+  let rec rule_executable = fn (defs) ->
+    match defs with
+    | [] -> []
+    | [d, ...rest] ->
+      match d with
+      | TsDef td ->
+        appl (err "ExecutableDefinitions"
+                  ("The " ++ ts_label td ++ " definition is not executable."))
+             (rule_executable rest)
+      | _ -> rule_executable rest;
+
+  // --- UniqueOperationNames / LoneAnonymousOperation ----------------------
+  let rule_unique_op_names = fn (defs) ->
+    let ops = operations defs in
+    let rec go = fn (os, seen, acc) ->
+      match os with
+      | [] -> rev_list acc []
+      | [(_, name, _, _, _), ...rest] ->
+        if str_eq name "" then go rest seen acc
+        else if list_member seen name then
+          go rest seen (Cons (GVErr ("UniqueOperationNames",
+                        "There can be only one operation named " ++ q name ++ "."), acc))
+        else go rest (Cons (name, seen)) acc in
+    go ops [] [];
+
+  // One error PER anonymous operation, which is why `{ a } { a }` gives two.
+  let rule_lone_anonymous = fn (defs) ->
+    let ops = operations defs in
+    if list_len ops < 2 then []
+    else
+      let rec go = fn (os, acc) ->
+        match os with
+        | [] -> rev_list acc []
+        | [(_, name, _, _, _), ...rest] ->
+          if str_eq name "" then
+            go rest (Cons (GVErr ("LoneAnonymousOperation",
+              "This anonymous operation must be the only defined operation."), acc))
+          else go rest acc in
+      go ops [];
+
+  // --- UniqueFragmentNames ------------------------------------------------
+  let rule_unique_frag_names = fn (defs) ->
+    let rec go = fn (fs, seen, acc) ->
+      match fs with
+      | [] -> rev_list acc []
+      | [(n, _, _, _), ...rest] ->
+        if list_member seen n then
+          go rest seen (Cons (GVErr ("UniqueFragmentNames",
+                        "There can be only one fragment named " ++ q n ++ "."), acc))
+        else go rest (Cons (n, seen)) acc in
+    go (fragments defs) [] [];
+
+  // --- walking a selection set --------------------------------------------
+  //
+  // One walk collects what several rules need: the fragment names spread, the
+  // variables used, the directives at each location, and the argument names at each
+  // field. Separate walks per rule would each be simpler and would drift.
+
+  let rec spread_names_in = fn (sels, acc) ->
+    match sels with
+    | [] -> acc
+    | [s, ...rest] ->
+      match s with
+      | Field (_, _, _, _, sub) -> spread_names_in rest (spread_names_in sub acc)
+      | Spread (n, _) -> spread_names_in rest (Cons (n, acc))
+      | Inline (_, _, isels) -> spread_names_in rest (spread_names_in isels acc);
+
+  let rec vars_in_value = fn (v: gval, acc) ->
+    match v with
+    | VVar n -> Cons (n, acc)
+    | VList xs -> list_fold xs acc (fn (a, x) -> vars_in_value x a)
+    | VObj fs -> list_fold fs acc (fn (a, kv) -> let (_, x) = kv in vars_in_value x a)
+    | _ -> acc;
+
+  let vars_in_args = fn (args, acc) ->
+    list_fold args acc (fn (a, kv) -> let (_, v) = kv in vars_in_value v a);
+
+  let vars_in_dirs = fn (dirs, acc) ->
+    list_fold dirs acc (fn (a, d) ->
+      match d with | Dir (_, args) -> vars_in_args args a);
+
+  let rec vars_in_sels = fn (sels, acc) ->
+    match sels with
+    | [] -> acc
+    | [s, ...rest] ->
+      match s with
+      | Field (_, _, args, dirs, sub) ->
+        vars_in_sels rest (vars_in_sels sub (vars_in_dirs dirs (vars_in_args args acc)))
+      | Spread (_, dirs) -> vars_in_sels rest (vars_in_dirs dirs acc)
+      | Inline (_, dirs, isels) ->
+        vars_in_sels rest (vars_in_sels isels (vars_in_dirs dirs acc));
+
+  // The fragments an operation reaches, transitively. `NoUndefinedVariables` needs
+  // this: a variable used only inside a spread fragment IS used by the operation.
+  let rec frag_closure = fn (frags, pending, seen) ->
+    match pending with
+    | [] -> seen
+    | [n, ...rest] ->
+      if list_member seen n then frag_closure frags rest seen
+      else
+        match frag_named frags n with
+        | [] -> frag_closure frags rest (Cons (n, seen))
+        | [(_, _, sels), ..._] ->
+          frag_closure frags (appl (spread_names_in sels []) rest) (Cons (n, seen));
+
+  // --- KnownFragmentNames / NoUnusedFragments / NoFragmentCycles ----------
+  let rule_known_frag_names = fn (defs) ->
+    let frags = fragments defs in
+    let rec walk_all = fn (ds, acc) ->
+      match ds with
+      | [] -> acc
+      | [d, ...rest] ->
+        match d with
+        | OpDef (_, _, _, _, sels) -> walk_all rest (spread_names_in sels acc)
+        | FragDef (_, _, _, sels) -> walk_all rest (spread_names_in sels acc)
+        | _ -> walk_all rest acc in
+    let rec go = fn (ns, seen, acc) ->
+      match ns with
+      | [] -> rev_list acc []
+      | [n, ...rest] ->
+        if list_member seen n then go rest seen acc
+        else
+          match frag_named frags n with
+          | [] -> go rest (Cons (n, seen))
+                    (Cons (GVErr ("KnownFragmentNames",
+                           "Unknown fragment " ++ q n ++ "."), acc))
+          | _ -> go rest (Cons (n, seen)) acc in
+    go (rev_list (walk_all defs []) []) [] [];
+
+  let rule_no_unused_frags = fn (defs) ->
+    let frags = fragments defs in
+    let used = list_fold (operations defs) []
+                 (fn (acc, o) ->
+                    let (_, _, _, _, sels) = o in
+                    appl (frag_closure frags (spread_names_in sels []) []) acc) in
+    let rec go = fn (fs, acc) ->
+      match fs with
+      | [] -> rev_list acc []
+      | [(n, _, _, _), ...rest] ->
+        if list_member used n then go rest acc
+        else go rest (Cons (GVErr ("NoUnusedFragments",
+                      "Fragment " ++ q n ++ " is never used."), acc)) in
+    go frags [];
+
+  // A CYCLE IS REPORTED ONCE, at the first fragment of it in document order, with
+  // the path through the others. `A -> B -> A` is one error naming A "via B" and NOT
+  // a second one naming B — the first version reported both, and the harness caught
+  // it as a message the oracle never produces.
+  let rule_no_frag_cycles = fn (defs) ->
+    let frags = fragments defs in
+    let rec reaches = fn (start: str, n: str, path, seen) ->
+      match frag_named frags n with
+      | [] -> []
+      | [(_, _, sels), ..._] ->
+        let rec go = fn (ns) ->
+          match ns with
+          | [] -> []
+          | [m, ...rest] ->
+            if str_eq m start then Cons (rev_list path [], [])
+            else if list_member seen m then go rest
+            else
+              (match reaches start m (Cons (m, path)) (Cons (m, seen)) with
+               | [] -> go rest
+               | [p, ..._] -> Cons (p, []))
+        in go (rev_list (spread_names_in sels []) []) in
+    let rec go = fn (fs, covered, acc) ->
+      match fs with
+      | [] -> rev_list acc []
+      | [(n, _, _, _), ...rest] ->
+        if list_member covered n then go rest covered acc
+        else
+          match reaches n n [] (Cons (n, [])) with
+          | [] -> go rest covered acc
+          | [path, ..._] ->
+            let via = if list_len path == 0 then ""
+                      else " via " ++ str_join ", " (list_map path q) in
+            go rest (appl (Cons (n, path)) covered)
+              (Cons (GVErr ("NoFragmentCycles",
+                     "Cannot spread fragment " ++ q n ++ " within itself" ++ via ++ "."), acc)) in
+    go frags [] [];
+
+  // --- variables ----------------------------------------------------------
+  // TWO PREPOSITIONS, NOT ONE, and the harness is what noticed: a variable is "not
+  // defined BY operation" and "never used IN operation". One helper for both put the
+  // wrong word in one of them.
+  let op_label = fn (prep: str, name: str) ->
+    if str_eq name "" then "" else " " ++ prep ++ " operation " ++ q name;
+
+  let rule_unique_var_names = fn (defs) ->
+    list_fold (operations defs) [] (fn (acc, o) ->
+      let (_, _, vardefs, _, _) = o in
+      let rec go = fn (vds, seen, a) ->
+        match vds with
+        | [] -> a
+        | [VarDef (n, _, _, _), ...rest] ->
+          if list_member seen n then
+            go rest seen (Cons (GVErr ("UniqueVariableNames",
+              "There can be only one variable named " ++ q ("$" ++ n) ++ "."), a))
+          else go rest (Cons (n, seen)) a in
+      go vardefs [] acc);
+
+  let rule_no_undefined_vars = fn (defs) ->
+    let frags = fragments defs in
+    list_fold (operations defs) [] (fn (acc, o) ->
+      let (_, name, vardefs, dirs, sels) = o in
+      let declared = list_map vardefs (fn (vd) -> match vd with VarDef (n, _, _, _) -> n) in
+      let reachable = frag_closure frags (spread_names_in sels []) [] in
+      let used = list_fold reachable (vars_in_sels sels (vars_in_dirs dirs []))
+                   (fn (a, fn_name) ->
+                      match frag_named frags fn_name with
+                      | [] -> a
+                      | [(_, fdirs, fsels), ..._] -> vars_in_sels fsels (vars_in_dirs fdirs a)) in
+      let rec go = fn (us, seen, a) ->
+        match us with
+        | [] -> a
+        | [u, ...rest] ->
+          if list_member seen u then go rest seen a
+          else if list_member declared u then go rest (Cons (u, seen)) a
+          else
+            go rest (Cons (u, seen))
+              (Cons (GVErr ("NoUndefinedVariables",
+                     "Variable " ++ q ("$" ++ u) ++ " is not defined"
+                     ++ op_label "by" name ++ "."), a)) in
+      go (rev_list used []) [] acc);
+
+  let rule_no_unused_vars = fn (defs) ->
+    let frags = fragments defs in
+    list_fold (operations defs) [] (fn (acc, o) ->
+      let (_, name, vardefs, dirs, sels) = o in
+      let reachable = frag_closure frags (spread_names_in sels []) [] in
+      let used = list_fold reachable (vars_in_sels sels (vars_in_dirs dirs []))
+                   (fn (a, fn_name) ->
+                      match frag_named frags fn_name with
+                      | [] -> a
+                      | [(_, fdirs, fsels), ..._] -> vars_in_sels fsels (vars_in_dirs fdirs a)) in
+      list_fold vardefs acc (fn (a, vd) ->
+        match vd with
+        | VarDef (n, _, _, _) ->
+          if list_member used n then a
+          else Cons (GVErr ("NoUnusedVariables",
+                     "Variable " ++ q ("$" ++ n) ++ " is never used"
+                     ++ op_label "in" name ++ "."), a)));
+
+  // --- arguments and directives, at every location ------------------------
+  let dup_arg_errors = fn (args, acc) ->
+    let rec go = fn (as_, seen, a) ->
+      match as_ with
+      | [] -> a
+      | [(k, _), ...rest] ->
+        if list_member seen k then
+          go rest seen (Cons (GVErr ("UniqueArgumentNames",
+            "There can be only one argument named " ++ q k ++ "."), a))
+        else go rest (Cons (k, seen)) a in
+    go args [] acc;
+
+  // A directive may repeat at one location only if it is declared `repeatable`.
+  let rec is_repeatable = fn (defs, name: str) ->
+    match defs with
+    | [] -> false
+    | [d, ...rest] ->
+      match d with
+      | TsDef (DirectiveDef (_, n, _, rep, _)) ->
+        if str_eq n name then rep else is_repeatable rest name
+      | _ -> is_repeatable rest name;
+
+  let dir_errors = fn (defs, known, dirs, acc) ->
+    let rec go = fn (ds, seen, a) ->
+      match ds with
+      | [] -> a
+      | [Dir (n, args), ...rest] ->
+        let a1 = dup_arg_errors args a in
+        let a2 = if list_member known n then a1
+                 else Cons (GVErr ("KnownDirectives",
+                            "Unknown directive " ++ q ("@" ++ n) ++ "."), a1) in
+        let a3 = if list_member seen n && not (is_repeatable defs n) then
+                   Cons (GVErr ("UniqueDirectivesPerLocation",
+                          "The directive " ++ q ("@" ++ n)
+                          ++ " can only be used once at this location."), a2)
+                 else a2 in
+        go rest (Cons (n, seen)) a3 in
+    go dirs [] acc;
+
+  let rec known_directive_names = fn (defs, acc) ->
+    match defs with
+    | [] -> acc
+    | [d, ...rest] ->
+      match d with
+      | TsDef (DirectiveDef (_, n, _, _, _)) -> known_directive_names rest (Cons (n, acc))
+      | _ -> known_directive_names rest acc;
+
+  // --- the schema-aware walk ----------------------------------------------
+  //
+  // FieldsOnCorrectType, ScalarLeafs and KnownArgumentNames all need the type at
+  // each position, so they share one traversal. A composite type is one whose
+  // fields can be selected; a leaf is one whose cannot.
+  let is_composite = fn (defs, n: str) ->
+    match Gexec.find_tsdef defs n with
+    | [ObjectDef (_, _, _, _, _), ..._] -> true
+    | [InterfaceDef (_, _, _, _, _), ..._] -> true
+    | [UnionDef (_, _, _, _), ..._] -> true
+    | _ -> false;
+
+  let arg_names_of = fn (defs, tname: str, fname: str) ->
+    let rec go = fn (fs) ->
+      match fs with
+      | [] -> []
+      | [FieldDef (_, n, args, _, _), ...rest] ->
+        if str_eq n fname then
+          Cons (list_map args (fn (iv) -> match iv with InputVal (_, an, _, _, _) -> an), [])
+        else go rest in
+    match go (Gexec.find_obj_or_iface defs tname) with
+    | [] -> []
+    | [ns, ..._] -> ns;
+
+  let rec walk_sels = fn (defs, known_dirs, frags, tname: str, sels, acc) ->
+    list_fold sels acc (fn (a, s) ->
+      match s with
+      | Field (_, name, args, dirs, sub) ->
+        let a1 = dir_errors defs known_dirs dirs (dup_arg_errors args a) in
+        // `__typename` exists on every composite type, and `__schema` / `__type` are
+        // PROVIDED BY the schema on its query root — none of the three is in anybody's
+        // SDL, so a lookup would report them as unknown fields. The harness caught
+        // exactly that: we rejected `\{ __schema \{ queryType \{ name } } }`, which is
+        // a false positive and the worst kind of validation failure.
+        if str_eq name "__typename" then a1
+        else if (str_eq name "__schema" || str_eq name "__type")
+                && str_eq tname (Gexec.schema_query defs) then
+          walk_sels defs known_dirs frags
+                    (if str_eq name "__schema" then "__Schema" else "__Type") sub a1
+        else
+          (match Gexec.field_ty_in (Gexec.find_obj_or_iface defs tname) name with
+           | [] ->
+             Cons (GVErr ("FieldsOnCorrectType",
+                    "Cannot query field " ++ q name ++ " on type " ++ q tname ++ "."), a1)
+           | [fty, ..._] ->
+             let base = Gexec.base_name fty in
+             let a2 = list_fold args a1 (fn (aa, kv) ->
+                        let (k, _) = kv in
+                        if list_member (arg_names_of defs tname name) k then aa
+                        else Cons (GVErr ("KnownArgumentNames",
+                                   "Unknown argument " ++ q k ++ " on field "
+                                   ++ q (tname ++ "." ++ name) ++ "."), aa)) in
+             if is_composite defs base then
+               if list_len sub == 0 then
+                 Cons (GVErr ("ScalarLeafs",
+                        "Field " ++ q name ++ " of type " ++ q (Gprint.ptype fty)
+                        ++ " must have a selection of subfields."), a2)
+               else walk_sels defs known_dirs frags base sub a2
+             else
+               if list_len sub == 0 then a2
+               else
+                 Cons (GVErr ("ScalarLeafs",
+                        "Field " ++ q name ++ " must not have a selection since type "
+                        ++ q (Gprint.ptype fty) ++ " has no subfields."), a2))
+      | Spread (_, dirs) -> dir_errors defs known_dirs dirs a
+      | Inline (tc, dirs, isels) ->
+        let a1 = dir_errors defs known_dirs dirs a in
+        if str_eq tc "" then walk_sels defs known_dirs frags tname isels a1
+        else if is_composite defs tc then walk_sels defs known_dirs frags tc isels a1
+        else a1);
+
+  // --- KnownTypeNames / FragmentsOnCompositeTypes / VariablesAreInputTypes -
+  let rule_type_conditions_in = fn (doc_defs, defs, all_names) ->
+    let named_errs = fn (label: str, tc: str, acc) ->
+      if str_eq tc "" then acc
+      else if not (list_member all_names tc) then
+        Cons (GVErr ("KnownTypeNames", "Unknown type " ++ q tc ++ "."), acc)
+      else if not (is_composite defs tc) then
+        Cons (GVErr ("FragmentsOnCompositeTypes",
+               "Fragment " ++ label ++ "cannot condition on non composite type "
+               ++ q tc ++ "."), acc)
+      else acc in
+    let rec inline_conds = fn (sels, acc) ->
+      list_fold sels acc (fn (a, s) ->
+        match s with
+        | Field (_, _, _, _, sub) -> inline_conds sub a
+        | Spread (_, _) -> a
+        | Inline (tc, _, isels) -> inline_conds isels (named_errs "" tc a)) in
+    let from_frags = list_fold (fragments doc_defs) [] (fn (acc, f) ->
+      let (n, tc, _, sels) = f in
+      inline_conds sels (named_errs (q n ++ " ") tc acc)) in
+    list_fold (operations doc_defs) from_frags (fn (acc, o) ->
+      let (_, _, _, _, sels) = o in inline_conds sels acc);
+
+  let is_input_type = fn (defs, n: str) ->
+    match Gexec.find_tsdef defs n with
+    | [ScalarDef (_, _, _), ..._] -> true
+    | [EnumDef (_, _, _, _), ..._] -> true
+    | [InputDef (_, _, _, _), ..._] -> true
+    | [] -> true                       // a built-in scalar has no definition
+    | _ -> false;
+
+  let rule_var_types = fn (doc_defs, defs, all_names) ->
+    list_fold (operations doc_defs) [] (fn (acc, o) ->
+      let (_, _, vardefs, _, _) = o in
+      list_fold vardefs acc (fn (a, vd) ->
+        match vd with
+        | VarDef (n, ty, _, _) ->
+          let base = Gexec.base_name ty in
+          if not (list_member all_names base) then
+            Cons (GVErr ("KnownTypeNames", "Unknown type " ++ q base ++ "."), a)
+          else if not (is_input_type defs base) then
+            Cons (GVErr ("VariablesAreInputTypes",
+                   "Variable " ++ q ("$" ++ n) ++ " cannot be non-input type "
+                   ++ q (Gprint.ptype ty) ++ "."), a)
+          else a));
+
+  // --- the whole thing ----------------------------------------------------
+  //
+  // THE DOCUMENT AND THE SCHEMA ARE SEPARATE ARGUMENTS, unlike the executor, which
+  // takes one list produced by parsing `query ++ sdl`. That is not a stylistic
+  // difference — `ExecutableDefinitions` is the rule that a document being EXECUTED
+  // must not contain type-system definitions, and in a combined list every schema it
+  // is validated against would violate it. The first version did exactly that and
+  // reported every SDL type as "not executable".
+  //
+  // It is also how the oracle is called: `validate(schema, document)`. Two arguments
+  // on both sides means the comparison is not about an arrangement neither of us has.
+  //
+  // The introspection schema is appended to the SCHEMA side for the same reason the
+  // executor appends it — `fragment F on __Type` is legal, and `@skip` has to be a
+  // known directive.
+  let validate = fn (doc_defs, schema_defs0) ->
+    let defs = Gexec.with_introspection schema_defs0 in
+    let all_names = Gexec.all_type_names defs in
+    let known_dirs = known_directive_names defs [] in
+    let frags = fragments doc_defs in
+    let root = Gexec.schema_query defs in
+    let from_ops = list_fold (operations doc_defs) [] (fn (acc, o) ->
+      let (op, _, _, dirs, sels) = o in
+      let start = if str_eq op "query" then root
+                  else if str_eq op "mutation" then Gexec.schema_root defs "mutation" "Mutation"
+                  else Gexec.schema_root defs "subscription" "Subscription" in
+      walk_sels defs known_dirs frags start sels (dir_errors defs known_dirs dirs acc)) in
+    let from_frags = list_fold frags from_ops (fn (acc, f) ->
+      let (_, tc, dirs, sels) = f in
+      let a1 = dir_errors defs known_dirs dirs acc in
+      if str_eq tc "" || not (is_composite defs tc) then a1
+      else walk_sels defs known_dirs frags tc sels a1) in
+    // `list_concat` and not a tower of `appl`, because the first version of this WAS
+    // a tower of `appl` and its closing parens were off by one.
+    list_concat ([rule_executable doc_defs,
+                  rule_unique_op_names doc_defs,
+                  rule_lone_anonymous doc_defs,
+                  rule_unique_frag_names doc_defs,
+                  rule_known_frag_names doc_defs,
+                  rule_no_unused_frags doc_defs,
+                  rule_no_frag_cycles doc_defs,
+                  rule_unique_var_names doc_defs,
+                  rule_no_undefined_vars doc_defs,
+                  rule_no_unused_vars doc_defs,
+                  rule_type_conditions_in doc_defs defs all_names,
+                  rule_var_types doc_defs defs all_names,
+                  from_frags]);
+
+  // The rule names this file implements. The harness reads it: a rule that fires in
+  // the oracle and is NOT here has to be on the harness's gap list, and a gap-list
+  // entry that never fires is stale.
+  let implemented = ["ExecutableDefinitions", "UniqueOperationNames",
+    "LoneAnonymousOperation", "UniqueFragmentNames", "KnownFragmentNames",
+    "NoUnusedFragments", "NoFragmentCycles", "UniqueVariableNames",
+    "NoUndefinedVariables", "NoUnusedVariables", "UniqueArgumentNames",
+    "KnownDirectives", "UniqueDirectivesPerLocation", "KnownTypeNames",
+    "FragmentsOnCompositeTypes", "VariablesAreInputTypes", "FieldsOnCorrectType",
+    "ScalarLeafs", "KnownArgumentNames"];
+
+  // Rule names and messages, each on its own line, for a harness to compare.
+  let report = fn (doc_defs, schema_defs) ->
+    str_join "\n" (list_map (validate doc_defs schema_defs)
+      (fn (e) -> match e with GVErr (r, m) -> r ++ "\t" ++ m));
+}
