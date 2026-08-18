@@ -45,13 +45,23 @@ let hello_reply = fn (m: str) ->
   let _ = Wire.put_str b m in
   bytes_of_vec b;
 
-// F1 routes on the path and answers; it does not yet return an RPC status for an
-// unknown method (the server can, but the handler signature cannot ask it to).
-// So an unknown path gets a named message rather than a silent empty reply.
+// A handler answers with `RpcOk` or with a status. An unknown method is
+// UNIMPLEMENTED — the request succeeded as HTTP and failed as RPC, which is why
+// this is a trailer and not an HTTP status.
+//
+// `Fail` exists so the harness can exercise the error path on a method that DOES
+// exist: "unknown method" and "this method said no" are different routes through
+// the server, and only one of them is reached by calling something that is absent.
 let handler = fn (path: str, req: bytes) ->
   if str_eq path "/hello.Greeter/SayHello" then
-    hello_reply ("hello " ++ req_name req)
-  else hello_reply ("no such method: " ++ path);
+    let n = req_name req in
+    if str_eq n "boom" then
+      RpcErr (H2Server.invalid_argument, "name must not be 'boom'")
+    else if str_eq n "unicode" then
+      // A message that has to be percent-encoded on the way out.
+      RpcErr (H2Server.failed_precondition, "café: 100% not ok")
+    else RpcOk (hello_reply ("hello " ++ n))
+  else RpcErr (H2Server.unimplemented, "no such method: " ++ path);
 
 // `args` gives a `str list` and the prelude has no indexing helper, so walk it.
 let rec arg_at = fn (xs, k: int, dflt: str) ->

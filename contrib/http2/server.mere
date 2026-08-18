@@ -20,6 +20,8 @@
 //     connection before finishing either would be mis-served. Unary gRPC does not,
 //     and the parity harness checks the case that exists rather than pretending
 //     about the case that does not.
+//   * NO STREAMING. A handler answers once, so server-streaming and
+//     client-streaming methods are not expressible in its signature.
 //
 // BINARY CROSSES THE FFI AS HEX. `tcp_read` writes into the integer-addressed byte
 // arena, and there is no arena-to-`bytes` bridge — `mem_to_str` stops at the first
@@ -31,6 +33,13 @@
 
 import "frame.mere";
 import "hpack.mere";
+
+// A handler answers with a message OR with a status. `bytes` alone could not say
+// "this failed", so the server had no way to route an error and an unknown method
+// got a reply that looked like a success. gRPC reports failure in the TRAILERS —
+// the request succeeded as HTTP and failed as RPC — so this is not an HTTP status
+// and cannot be expressed as one.
+type grpc_reply = RpcOk of bytes | RpcErr of (int * str);
 
 extern fn tcp_listen: int -> int;
 extern fn tcp_accept: int -> int;
@@ -44,6 +53,51 @@ extern fn bytes_to_hex_len: int -> int -> str;
 module H2Server {
 
   let read_chunk = 16384;
+
+  // --- status codes --------------------------------------------------------
+  // The ones a server actually reaches for. Named because `12` at a call site is
+  // a number and `H2Server.unimplemented` is a decision.
+  let ok = 0;
+  let cancelled = 1;
+  let unknown_status = 2;
+  let invalid_argument = 3;
+  let deadline_exceeded = 4;
+  let not_found = 5;
+  let already_exists = 6;
+  let permission_denied = 7;
+  let resource_exhausted = 8;
+  let failed_precondition = 9;
+  let aborted = 10;
+  let out_of_range = 11;
+  let unimplemented = 12;
+  let internal_status = 13;
+  let unavailable = 14;
+  let unauthenticated = 16;
+
+  // --- grpc-message is percent-encoded -------------------------------------
+  //
+  // Not optional and not cosmetic: an HTTP/2 header value is bytes, but gRPC
+  // specifies that `grpc-message` is percent-encoded, and a client DECODES it.
+  // Measured — grpc-go turned `caf%C3%A9 %25 done` into `café % done` — so sending
+  // a raw `%` would come back as the start of an escape and a raw UTF-8 byte would
+  // be at the mercy of the client's decoder.
+  //
+  // Everything outside printable ASCII goes out as %XX, and `%` itself first.
+  let hex_up = fn (n: int) -> if n < 10 then chr (48 + n) else chr (55 + n);
+
+  let rec pct_at = fn (b: bytes, i: int, buf) ->
+    if i >= bytes_len b then strbuf_to_str buf
+    else
+      let c = bytes_get b i in
+      let _ =
+        if c < 32 || c > 126 || c == 37 then
+          let _ = strbuf_push buf "%" in
+          let _ = strbuf_push buf (hex_up (bit_and (bit_shr c 4) 15)) in
+          strbuf_push buf (hex_up (bit_and c 15))
+        else strbuf_push buf (chr c) in
+      pct_at b (i + 1) buf;
+
+  let pct_encode = fn (s: str) -> pct_at (bytes_of_str s) 0 (strbuf_new ());
 
   // One read. Returns the bytes that arrived, or empty when the peer is done.
   let recv = fn (cfd: int, rbuf: int) ->
@@ -92,13 +146,20 @@ module H2Server {
       (H2.frame_bytes H2.headers (bit_or H2.end_headers H2.end_stream) stream t);
 
   // An error is a status in the TRAILERS, not an HTTP status: the request
-  // succeeded as HTTP and failed as RPC. Code 12 is UNIMPLEMENTED.
+  // succeeded as HTTP and failed as RPC. There is no DATA frame — a failed unary
+  // call carries no message — so this is HEADERS then trailers and nothing else.
   let respond_err = fn (cfd: int, wbuf: int, stream: int, code: int, msg: str) ->
     let h = Hpack.encode [(":status", "200"), ("content-type", "application/grpc")] in
-    let t = Hpack.encode [("grpc-status", str_of_int code), ("grpc-message", msg)] in
+    let t = Hpack.encode [("grpc-status", str_of_int code),
+                          ("grpc-message", pct_encode msg)] in
     let _ = send cfd wbuf (H2.frame_bytes H2.headers H2.end_headers stream h) in
     send cfd wbuf
       (H2.frame_bytes H2.headers (bit_or H2.end_headers H2.end_stream) stream t);
+
+  let respond = fn (cfd: int, wbuf: int, stream: int, r: grpc_reply) ->
+    match r with
+    | RpcOk msg -> respond_ok cfd wbuf stream msg
+    | RpcErr (code, msg) -> respond_err cfd wbuf stream code msg;
 
   // --- the frame loop ----------------------------------------------------
   //
@@ -138,7 +199,7 @@ module H2Server {
                     let (n, v) = kv in if str_eq n ":path" then v else acc) in
           if H2.has_flag flags H2.end_stream then
             let out = handler p (bytes_of_hex "") in
-            let _ = respond_ok cfd wbuf sid out in
+            let _ = respond cfd wbuf sid out in
             pump cfd rbuf wbuf rest st2 0 "" (bytes_of_hex "") handler
           else pump cfd rbuf wbuf rest st2 sid p (bytes_of_hex "") handler
         else if ty == H2.data then
@@ -148,7 +209,7 @@ module H2Server {
             // not the message: it is a framed message inside one.
             let (_, msg, _) = H2.read_grpc_message d 0 in
             let out = handler path msg in
-            let _ = respond_ok cfd wbuf sid out in
+            let _ = respond cfd wbuf sid out in
             pump cfd rbuf wbuf rest st 0 "" (bytes_of_hex "") handler
           else pump cfd rbuf wbuf rest st stream path d handler
         else
