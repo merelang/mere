@@ -1,0 +1,7 @@
+import "../contrib/proto/descriptor.mere";
+let rec arg_at = fn (xs, k: int, d: str) -> match xs with [] -> d | [h,...t] -> if k==0 then h else arg_at t (k-1) d;
+let a = args ();
+let dir = arg_at a 0 "";
+let load = fn (n: str) -> (n, read_file (dir ++ "/" ++ n));
+print (hex_of_bytes (Pdesc.of_sources "imp.proto" (read_file (dir ++ "/imp.proto"))
+        [load "d1.proto", load "d2.proto", load "samepkg.proto"]))

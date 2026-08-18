@@ -320,5 +320,58 @@ else
   fail=1
 fi
 
+# --- a cross-file type reference is refused, and says why ----------------
+#
+# `contrib/proto/descriptor` resolves an imported type and emits it; the GENERATOR
+# cannot, because generated Mere source would need the imported file's GENERATED names
+# — which means knowing what the other output file is called. That is the caller's
+# layout, and it is why `wire_path` is already an argument.
+#
+# So this checks two things that are easy to conflate: the cross-file case is REFUSED
+# AND NAMES THE REASON, and a file that imports something it never references across
+# still generates. Without the second, "refuses imports" would be indistinguishable
+# from "refuses any file with an import in it".
+mkdir -p "$TMP/xf"
+cat > "$TMP/xf/dep.proto" <<'P'
+syntax = "proto3";
+package dep;
+message Shared { string s = 1; }
+P
+cat > "$TMP/xf/cross.proto" <<'P'
+syntax = "proto3";
+package pk;
+import "dep.proto";
+message M { dep.Shared a = 1; }
+P
+cat > "$TMP/xf/unused.proto" <<'P'
+syntax = "proto3";
+package pk;
+import "dep.proto";
+message M { int32 v = 1; }
+P
+xfail=0
+if ( ulimit -t 60; "$MERE" "$ROOT/examples/protoc_mere.mere" "$TMP/xf/cross.proto" ) \
+     >/dev/null 2>"$TMP/xf/err.txt"; then
+  echo "        ACCEPTED a cross-file reference — the generated source would name a type"
+  echo "        that is not in the output file"
+  xfail=1
+elif ! grep -q "the code generator cannot use" "$TMP/xf/err.txt"; then
+  echo "        refused, but not with the named reason:"
+  echo "          got: $(head -1 "$TMP/xf/err.txt" | cut -c1-110)"
+  xfail=1
+fi
+if ! ( ulimit -t 60; "$MERE" "$ROOT/examples/protoc_mere.mere" "$TMP/xf/unused.proto" ) \
+       >/dev/null 2>"$TMP/xf/err2.txt"; then
+  echo "        REFUSED a file whose import is never referenced across:"
+  echo "          got: $(head -1 "$TMP/xf/err2.txt" | cut -c1-110)"
+  xfail=1
+fi
+if [ "$xfail" = 0 ]; then
+  echo "  DOCUMENTED-GAP  cross-file  an imported type is refused by name; an unused import is fine"
+else
+  echo "  FAIL  cross-file"
+  fail=1
+fi
+
 [ "$fail" = 0 ] && echo "proto_gen_parity: ok" || echo "proto_gen_parity: FAILED"
 [ "$fail" = 0 ]

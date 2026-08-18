@@ -422,10 +422,48 @@ module Pgen {
         (Cons (ty_decl, Cons (getters, Cons (dec, Cons (enc, [])))))));
 
   // --- the file ------------------------------------------------------------
+  // A CROSS-FILE TYPE REFERENCE IS REFUSED HERE, and the reason is a decision the
+  // generator cannot make rather than a gap in the parser: `contrib/proto/descriptor`
+  // resolves `dep.Shared` into `.dep.Shared` from the imported file and emits it, but
+  // GENERATED MERE SOURCE would need the imported file's generated NAMES — which means
+  // knowing what the other output file is called and emitting an `import` for it. That
+  // is the caller's layout, which is exactly why `wire_path` is already an argument.
+  //
+  // So it is named rather than met with "no such type", which would point at the field
+  // and say nothing about why the type is missing.
+  let check_own_types = fn (decls, f: pfile) ->
+    match f with
+    | PFile (fname, pkg, imps, msgs, _, _, _) ->
+      if list_len imps == 0 then ()
+      else
+        let scope = if str_eq pkg "" then "" else "." ++ pkg in
+        let rec chk_msg = fn (sc: str, m: pmsg) ->
+          match m with
+          | PMsg (mn, fields, subs, _, _) ->
+            let inner = sc ++ "." ++ mn in
+            let _ = list_iter fields (fn (fl) ->
+              match fl with
+              | PField (fn_name, _, _, ty, _) ->
+                match ty with
+                | PScalar (_, _) -> ()
+                | PRef n ->
+                  if list_len (Pparse.try_resolve decls inner n) > 0 then ()
+                  else
+                    fail ("proto: the code generator cannot use '" ++ n
+                          ++ "' (field '" ++ fn_name ++ "' of " ++ mn ++ " in " ++ fname
+                          ++ "): it is not declared in this file, so it comes from an"
+                          ++ " import — and generated Mere source would need the"
+                          ++ " imported file's GENERATED names, which is a decision"
+                          ++ " about output layout that this generator cannot make."
+                          ++ " contrib/proto/descriptor.mere does support it")) in
+            list_iter subs (fn (sm) -> chk_msg inner sm) in
+        list_iter msgs (fn (m) -> chk_msg scope m);
+
   let file_source = fn (wire_path: str, f: pfile) ->
     let decls = Pparse.collect f in
+    let _ = check_own_types decls f in
     match f with
-    | PFile (fname, pkg, msgs, enums, _, _) ->
+    | PFile (fname, pkg, _, msgs, enums, _, _) ->
       let scope = if str_eq pkg "" then "" else "." ++ pkg in
       let top_enums = list_map enums (fn (e) ->
         match e with

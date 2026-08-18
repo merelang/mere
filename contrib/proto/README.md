@@ -175,10 +175,76 @@ Two guards are **defensive and unreachable from valid input**, and say so in the
 code: an unknown option name and a wrong-typed value. protoc rejects both, so no
 protoc-accepted file reaches either branch.
 
+## Imports
+
+`import "path";`, `import public "path";`, `import weak "path";` — recorded in the
+descriptor and used to resolve types across files.
+
+```mere
+Pdesc.of_sources "a.proto" a_src [("dep.proto", dep_src)]
+```
+
+`deps` is `(path, source)`, so **I/O stays with the caller**: `contrib` reads no
+files.
+
+### The two index lists are indices, not paths
+
+`public_dependency` (field 10) and `weak_dependency` (field 11) hold **positions in
+`dependency`**, not their own path strings. Measured: three imports where the second
+is public and the third weak give `dependency` 0,1,2 with `10: 1` and `11: 2`.
+
+Field order matters because these are compared as bytes: `dependency` is 3 and
+`message_type` is 4, so the paths come **before** the messages, while the two index
+lists (10, 11) come **after** them.
+
+### A private import is not transitive; a public one is
+
+This is a rule, not a convenience, and the oracle is what says so. protoc rejects a
+type reached through a private import two files away:
+
+```
+"cc.Deep" seems to be defined in "c.proto", which is not imported by "a.proto"
+```
+
+and accepts the same reference when the middle file says `import public`. **A
+resolver that walked every import transitively would accept schemas protoc rejects**
+— the wrong direction to be wrong in, because a schema that compiles here and
+nowhere else is worse than one that is refused. The gate checks both directions.
+
+An import path the caller did not supply is an error **naming the path**. Without
+that, the reference would simply fail to resolve and be reported as an unknown type
+in the importing file — a message about the wrong file.
+
+### Three kinds of cross-file reference, and all three are in the gate
+
+- **qualified into another package** — `dep.Shared` → `.dep.Shared`
+- **unqualified into the same package in a different file** — `Local` → `.pk.Local`
+- **an enum**, which resolves to a different type code (`TYPE_ENUM`, not
+  `TYPE_MESSAGE`) and so needs the imported file's *declarations* and not just its
+  package
+
+`scripts/proto_desc_parity.sh` compares 11 multi-file cases as bytes, and offers
+**every** dependency file to **every** target — so an import a target does not
+declare must not become visible merely because it was supplied.
+
+### The generator refuses a cross-file reference, and that is a layout decision
+
+`contrib/proto/descriptor` resolves an imported type and emits it. `gen.mere` will
+not, because generated Mere source would need the imported file's **generated
+names** — which means knowing what the other output file is called and emitting an
+`import` for it. That is the caller's layout, and it is exactly why `wire_path` is
+already an argument.
+
+So it is refused **by name**, pointing at the descriptor path, rather than met with
+"no such type" — which would point at the field and say nothing about why the type
+is missing. A file that imports something it never references across still
+generates, and the gate checks both halves: without the second, "refuses imports"
+would be indistinguishable from "refuses any file containing an import".
+
 ### The subset is refused, not skipped
 
-`oneof`, `map`, `import`, `reserved`, `optional`, `extend`, `group` and proto2
-syntax are outside the subset. **protoc accepts all of
+`oneof`, `map`, `reserved`, `optional`, `extend`, `group` and proto2 syntax are
+outside the subset. **protoc accepts all of
 them**, so the oracle cannot be asked whether they are wrong — they are simply not
 implemented. What the harness checks instead is that the parser **refuses each one by
 name**: a skipped construct would produce a descriptor that is wrong where nothing
