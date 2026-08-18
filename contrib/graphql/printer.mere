@@ -142,8 +142,80 @@ module Gprint {
     | [] -> ""
     | _ -> "(" ++ jm pvardef vs ", " ++ ")";
 
+  // --- type-system definitions (SDL) --------------------------------------
+  //
+  // A description is printed from its own node, so a value written as a block
+  // string goes back out as one. Folding it to an ordinary string would round-trip
+  // the text and lose `block: true` from the tree.
+  let pdesc = fn (desc) ->
+    match desc with
+    | [] -> ""
+    | [v, ..._] -> pval v ++ " ";
+
+  let pimpl = fn (ifs) ->
+    match ifs with
+    | [] -> ""
+    | _ -> " implements " ++ jm (fn (n: str) -> n) ifs " & ";
+
+  let pinputval = fn (iv: ginpval) ->
+    match iv with
+    | InputVal (desc, n, ty, dflt, d) ->
+      let dv = match dflt with | [] -> "" | [x, ..._] -> " = " ++ pval x in
+      pdesc desc ++ n ++ ": " ++ ptype ty ++ dv ++ pdirs d;
+
+  // An EMPTY argument list is not the same as no argument list: `f: Int` and
+  // `f(): Int` differ, and the second is not legal, so absence must print as
+  // nothing rather than as `()`.
+  let pinputvals = fn (ivs) ->
+    match ivs with
+    | [] -> ""
+    | _ -> "(" ++ jm pinputval ivs ", " ++ ")";
+
+  let pfielddef = fn (f: gfield) ->
+    match f with
+    | FieldDef (desc, n, args, ty, d) ->
+      pdesc desc ++ n ++ pinputvals args ++ ": " ++ ptype ty ++ pdirs d;
+
+  let pblock_of = fn (label: str, xs, f) ->
+    match xs with
+    | [] -> ""
+    | _ -> " \{ " ++ jm f xs " " ++ " }";
+
+  let penumv = fn (e: genumv) ->
+    match e with | EnumVal (desc, n, d) -> pdesc desc ++ n ++ pdirs d;
+
+  let popty = fn (o: gopty) ->
+    match o with | OpTy (op, nm) -> op ++ ": " ++ nm;
+
+  let pmembers = fn (ms) ->
+    match ms with
+    | [] -> ""
+    | _ -> " = " ++ jm (fn (n: str) -> n) ms " | ";
+
+  let ptsdef = fn (t: gtsdef) ->
+    match t with
+    | SchemaDef (desc, d, ops) ->
+      pdesc desc ++ "schema" ++ pdirs d ++ pblock_of "" ops popty
+    | ScalarDef (desc, n, d) -> pdesc desc ++ "scalar " ++ n ++ pdirs d
+    | ObjectDef (desc, n, ifs, d, fs) ->
+      pdesc desc ++ "type " ++ n ++ pimpl ifs ++ pdirs d ++ pblock_of "" fs pfielddef
+    | InterfaceDef (desc, n, ifs, d, fs) ->
+      pdesc desc ++ "interface " ++ n ++ pimpl ifs ++ pdirs d
+        ++ pblock_of "" fs pfielddef
+    | UnionDef (desc, n, d, ms) ->
+      pdesc desc ++ "union " ++ n ++ pdirs d ++ pmembers ms
+    | EnumDef (desc, n, d, vs) ->
+      pdesc desc ++ "enum " ++ n ++ pdirs d ++ pblock_of "" vs penumv
+    | InputDef (desc, n, d, fs) ->
+      pdesc desc ++ "input " ++ n ++ pdirs d ++ pblock_of "" fs pinputval
+    | DirectiveDef (desc, n, args, rep, locs) ->
+      pdesc desc ++ "directive @" ++ n ++ pinputvals args
+        ++ (if rep then " repeatable" else "")
+        ++ " on " ++ jm (fn (l: str) -> l) locs " | ";
+
   let pdef = fn (d: gdef) ->
     match d with
+    | TsDef t -> ptsdef t
     | OpDef (op, nm, vs, ds, sels) ->
       // The shorthand form is not reproduced: `query { a }` and `{ a }` parse to
       // the same tree apart from... nothing, so printing the long form is safe

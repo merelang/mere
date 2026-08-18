@@ -50,6 +50,33 @@ type gval =
 
 type gdir = Dir of (str * (str * gval) list);
 
+// --- type-system definitions (SDL) ----------------------------------------
+//
+// A DESCRIPTION IS A `gval list` OF LENGTH 0 OR 1, not a `str`. It has to carry
+// the string's own kind, because graphql-js records `block: true` on it and the
+// gate compares printed documents — a description that was written as a block
+// string and comes back as an ordinary one is a different tree.
+//
+// The same 0-or-1 list shape is used for a default value, where it keeps
+// "absent" distinguishable from "present and null".
+
+type ginpval = InputVal of (gval list * str * gtype * gval list * gdir list);
+type gfield = FieldDef of (gval list * str * ginpval list * gtype * gdir list);
+type genumv = EnumVal of (gval list * str * gdir list);
+type gopty = OpTy of (str * str);
+
+type gtsdef =
+  | SchemaDef of (gval list * gdir list * gopty list)
+  | ScalarDef of (gval list * str * gdir list)
+  | ObjectDef of (gval list * str * str list * gdir list * gfield list)
+  | InterfaceDef of (gval list * str * str list * gdir list * gfield list)
+  | UnionDef of (gval list * str * gdir list * str list)
+  | EnumDef of (gval list * str * gdir list * genumv list)
+  | InputDef of (gval list * str * gdir list * ginpval list)
+  | DirectiveDef of (gval list * str * ginpval list * bool * str list);
+
+// --- executable definitions ----------------------------------------------
+
 type gsel =
   | Field of (str * str * (str * gval) list * gdir list * gsel list)
   | Spread of (str * gdir list)
@@ -59,4 +86,5 @@ type gvardef = VarDef of (str * gtype * gval list * gdir list);
 
 type gdef =
   | OpDef of (str * str * gvardef list * gdir list * gsel list)
-  | FragDef of (str * str * gdir list * gsel list);
+  | FragDef of (str * str * gdir list * gsel list)
+  | TsDef of gtsdef;

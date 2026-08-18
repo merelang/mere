@@ -53,6 +53,17 @@ module Glex {
 
   // A number, and which kind it is. The kind is decided by whether a fraction or
   // an exponent appeared — not by whether the value happens to be integral.
+  //
+  // THE VALIDATION IS THE POINT, and it is what the first version was missing.
+  // The lexical grammar is narrower than "digits and dots":
+  //
+  //   * an IntValue is `-? (0 | [1-9][0-9]*)` — `007` is NOT a number, and a
+  //     lexer that shrugs and reads `007` produces a document the specification
+  //     does not contain
+  //   * a fraction needs at least one digit after the `.` — `1.` is not a float
+  //   * an exponent needs at least one digit after the optional sign
+  //   * and a number may not be FOLLOWED by a digit, a `.`, or a name start:
+  //     `1.2.3` and `1abc` are errors, not two tokens
   let read_number = fn (s: str, i0: int) ->
     let buf = strbuf_new () in
     let i1 =
@@ -60,10 +71,16 @@ module Glex {
         let _ = strbuf_push buf "-" in i0 + 1
       else i0 in
     let (_, i2) = take_while s i1 is_digit buf in
+    let _ =
+      if i2 == i1 then fail "graphql: a number needs at least one digit"
+      else if char_at s i1 == "0" && i2 - i1 > 1 then
+        fail "graphql: an integer may not have a leading zero"
+      else () in
     let (frac, i3) =
       if i2 < str_len s && char_at s i2 == "." then
         let _ = strbuf_push buf "." in
         let (_, j) = take_while s (i2 + 1) is_digit buf in
+        let _ = if j == i2 + 1 then fail "graphql: a fraction needs a digit" else () in
         (true, j)
       else (false, i2) in
     let (expo, i4) =
@@ -75,8 +92,16 @@ module Glex {
             let _ = strbuf_push buf (char_at s (i3 + 1)) in i3 + 2
           else i3 + 1 in
         let (_, j) = take_while s j0 is_digit buf in
+        let _ = if j == j0 then fail "graphql: an exponent needs a digit" else () in
         (true, j)
       else (false, i3) in
+    let _ =
+      if i4 < str_len s then
+        let c = char_at s i4 in
+        if is_digit c || c == "." || is_name_start c then
+          fail ("graphql: a number may not be followed by '" ++ c ++ "'")
+        else ()
+      else () in
     let lex = strbuf_to_str buf in
     if frac || expo then (TFloat lex, i4) else (TInt lex, i4);
 

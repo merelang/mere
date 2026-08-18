@@ -37,6 +37,21 @@ module Gparse {
   let is_kw = fn (ts, n: str) ->
     match tok_of ts with | TName m -> m == n | _ -> false;
 
+  // EVERY DELIMITED LIST IN THIS GRAMMAR REQUIRES AT LEAST ONE ELEMENT — except
+  // the two that are values rather than blocks. `[]` and `{}` are a legal empty
+  // list and a legal empty object; `{ }` as a selection set, a fields block, an
+  // enum values block, an input fields block, an argument list or a schema body
+  // is NOT legal. The first version of this parser returned an empty list for all
+  // of them, which accepted six documents the specification does not contain.
+  //
+  // So the closer is only accepted when something has already been parsed. The
+  // check is here rather than repeated at six call sites, and it names the
+  // production so the message says which block was empty.
+  let nonempty = fn (acc, what: str, ts) ->
+    match acc with
+    | [] -> fail ("graphql: " ++ what ++ " may not be empty" ++ at ts)
+    | _ -> ();
+
   let expect = fn (ts, p: str) ->
     if is_punct ts p then rest_of ts
     else fail ("graphql: expected '" ++ p ++ "'" ++ at ts);
@@ -101,7 +116,8 @@ module Gparse {
   // --- arguments and directives -------------------------------------------
 
   let rec parse_args = fn (ts, acc) ->
-    if is_punct ts ")" then (rev_list acc [], rest_of ts)
+    if is_punct ts ")" then
+      let _ = nonempty acc "an argument list" ts in (rev_list acc [], rest_of ts)
     else
       match tok_of ts with
       | TEof -> fail "graphql: unterminated argument list"
@@ -124,7 +140,8 @@ module Gparse {
 
   let rec parse_sel_set = fn (ts) -> parse_sels (expect ts "\{") []
   and parse_sels = fn (ts, acc) ->
-    if is_punct ts "}" then (rev_list acc [], rest_of ts)
+    if is_punct ts "}" then
+      let _ = nonempty acc "a selection set" ts in (rev_list acc [], rest_of ts)
     else
       match tok_of ts with
       | TEof -> fail "graphql: unterminated selection set"
@@ -166,7 +183,8 @@ module Gparse {
   // "absent" and "present and null" stay distinguishable: `$x: Int = null` has a
   // default, and it is null.
   let rec parse_vardefs = fn (ts, acc) ->
-    if is_punct ts ")" then (rev_list acc [], rest_of ts)
+    if is_punct ts ")" then
+      let _ = nonempty acc "a variable definition list" ts in (rev_list acc [], rest_of ts)
     else
       match tok_of ts with
       | TEof -> fail "graphql: unterminated variable definitions"
@@ -182,16 +200,196 @@ module Gparse {
 
   // --- definitions ---------------------------------------------------------
 
-  let parse_def = fn (ts) ->
+  // --- type-system definitions (SDL) --------------------------------------
+  //
+  // A description is a string or block string sitting immediately in front of a
+  // definition, a field, an enum value or an input value. It is consumed by
+  // whatever follows it, which is why it is read first and passed down rather
+  // than looked for afterwards.
+  let take_desc = fn (ts) ->
+    match tok_of ts with
+    | TStr s -> (Cons (VStr s, []), rest_of ts)
+    | TBlock s -> (Cons (VBlock s, []), rest_of ts)
+    | _ -> ([], ts);
+
+  // `implements A & B`, and the specification allows a leading `&`.
+  let rec parse_implements = fn (ts, acc) ->
+    let r0 = if is_punct ts "&" then rest_of ts else ts in
+    let (n, r1) = take_name r0 in
+    let acc2 = Cons (n, acc) in
+    if is_punct r1 "&" then parse_implements r1 acc2 else (rev_list acc2 [], r1);
+
+  let implements_opt = fn (ts) ->
+    if is_kw ts "implements" then parse_implements (rest_of ts) [] else ([], ts);
+
+  // `= A | B`, and a leading `|` is allowed here too.
+  let rec parse_members = fn (ts, acc) ->
+    let r0 = if is_punct ts "|" then rest_of ts else ts in
+    let (n, r1) = take_name r0 in
+    let acc2 = Cons (n, acc) in
+    if is_punct r1 "|" then parse_members r1 acc2 else (rev_list acc2 [], r1);
+
+  // The SAME production, `InputValueDefinition`, appears in two places with two
+  // different closers: inside `( )` for an argument definition, and inside `{ }`
+  // for an input object's fields. Sharing the loop but hard-coding `)` made
+  // `input In { a: Int }` fail on its own closing brace.
+  let rec parse_inputvals = fn (ts, close: str, acc) ->
+    if is_punct ts close then
+      let _ = nonempty acc "an input value list" ts in (rev_list acc [], rest_of ts)
+    else
+      match tok_of ts with
+      | TEof -> fail "graphql: unterminated argument definitions"
+      | _ ->
+        let (desc, r0) = take_desc ts in
+        let (n, r1) = take_name r0 in
+        let (ty, r3) = parse_type (expect r1 ":") in
+        let (dflt, r4) =
+          if is_punct r3 "=" then
+            let (v, r) = parse_value (rest_of r3) in (Cons (v, []), r)
+          else ([], r3) in
+        let (d, r5) = parse_dirs r4 [] in
+        parse_inputvals r5 close (Cons (InputVal (desc, n, ty, dflt, d), acc));
+
+  let inputvals_opt = fn (ts) ->
+    if is_punct ts "(" then parse_inputvals (rest_of ts) ")" [] else ([], ts);
+
+  let rec parse_fielddefs = fn (ts, acc) ->
+    if is_punct ts "}" then
+      let _ = nonempty acc "a fields block" ts in (rev_list acc [], rest_of ts)
+    else
+      match tok_of ts with
+      | TEof -> fail "graphql: unterminated field definitions"
+      | _ ->
+        let (desc, r0) = take_desc ts in
+        let (n, r1) = take_name r0 in
+        let (args, r2) = inputvals_opt r1 in
+        let (ty, r4) = parse_type (expect r2 ":") in
+        let (d, r5) = parse_dirs r4 [] in
+        parse_fielddefs r5 (Cons (FieldDef (desc, n, args, ty, d), acc));
+
+  // A fields block is OPTIONAL — `type T` with no braces is a legal definition —
+  // but an EMPTY block is not, so the absence has to be modelled as "no block"
+  // rather than as a block with nothing in it.
+  let fielddefs_opt = fn (ts) ->
+    if is_punct ts "\{" then parse_fielddefs (rest_of ts) [] else ([], ts);
+
+  let rec parse_enumvals = fn (ts, acc) ->
+    if is_punct ts "}" then
+      let _ = nonempty acc "an enum values block" ts in (rev_list acc [], rest_of ts)
+    else
+      match tok_of ts with
+      | TEof -> fail "graphql: unterminated enum values"
+      | _ ->
+        let (desc, r0) = take_desc ts in
+        let (n, r1) = take_name r0 in
+        let (d, r2) = parse_dirs r1 [] in
+        parse_enumvals r2 (Cons (EnumVal (desc, n, d), acc));
+
+  let rec parse_optys = fn (ts, acc) ->
+    if is_punct ts "}" then
+      let _ = nonempty acc "a schema definition" ts in (rev_list acc [], rest_of ts)
+    else
+      match tok_of ts with
+      | TEof -> fail "graphql: unterminated schema definition"
+      | _ ->
+        let (op, r1) = take_name ts in
+        let (nm, r3) = take_name (expect r1 ":") in
+        parse_optys r3 (Cons (OpTy (op, nm), acc));
+
+  // Directive locations: `on FIELD | OBJECT`, leading `|` allowed.
+  let rec parse_locations = fn (ts, acc) ->
+    let r0 = if is_punct ts "|" then rest_of ts else ts in
+    let (n, r1) = take_name r0 in
+    let acc2 = Cons (n, acc) in
+    if is_punct r1 "|" then parse_locations r1 acc2 else (rev_list acc2 [], r1);
+
+  let parse_tsdef = fn (desc, ts) ->
+    let (kw, r0) = take_name ts in
+    if kw == "schema" then
+      let (d, r1) = parse_dirs r0 [] in
+      let (ops, r2) =
+        if is_punct r1 "\{" then parse_optys (rest_of r1) [] else ([], r1) in
+      (SchemaDef (desc, d, ops), r2)
+    else if kw == "scalar" then
+      let (n, r1) = take_name r0 in
+      let (d, r2) = parse_dirs r1 [] in
+      (ScalarDef (desc, n, d), r2)
+    else if kw == "type" then
+      let (n, r1) = take_name r0 in
+      let (ifs, r2) = implements_opt r1 in
+      let (d, r3) = parse_dirs r2 [] in
+      let (fs, r4) = fielddefs_opt r3 in
+      (ObjectDef (desc, n, ifs, d, fs), r4)
+    else if kw == "interface" then
+      let (n, r1) = take_name r0 in
+      let (ifs, r2) = implements_opt r1 in
+      let (d, r3) = parse_dirs r2 [] in
+      let (fs, r4) = fielddefs_opt r3 in
+      (InterfaceDef (desc, n, ifs, d, fs), r4)
+    else if kw == "union" then
+      let (n, r1) = take_name r0 in
+      let (d, r2) = parse_dirs r1 [] in
+      let (ms, r3) =
+        if is_punct r2 "=" then parse_members (rest_of r2) [] else ([], r2) in
+      (UnionDef (desc, n, d, ms), r3)
+    else if kw == "enum" then
+      let (n, r1) = take_name r0 in
+      let (d, r2) = parse_dirs r1 [] in
+      let (vs, r3) =
+        if is_punct r2 "\{" then parse_enumvals (rest_of r2) [] else ([], r2) in
+      (EnumDef (desc, n, d, vs), r3)
+    else if kw == "input" then
+      let (n, r1) = take_name r0 in
+      let (d, r2) = parse_dirs r1 [] in
+      let (fs, r3) =
+        if is_punct r2 "\{" then parse_inputvals (rest_of r2) "}" [] else ([], r2) in
+      (InputDef (desc, n, d, fs), r3)
+    else if kw == "directive" then
+      let (n, r1) = take_name (expect r0 "@") in
+      let (args, r2) = inputvals_opt r1 in
+      let (rep, r3) = if is_kw r2 "repeatable" then (true, rest_of r2) else (false, r2) in
+      let r4 =
+        if is_kw r3 "on" then rest_of r3
+        else fail ("graphql: expected 'on' in a directive definition" ++ at r3) in
+      let (locs, r5) = parse_locations r4 [] in
+      (DirectiveDef (desc, n, args, rep, locs), r5)
+    else
+      fail ("graphql: '" ++ kw ++ "' does not start a definition" ++ at ts);
+
+  let is_tsdef_kw = fn (kw: str) ->
+    kw == "schema" || kw == "scalar" || kw == "type" || kw == "interface"
+    || kw == "union" || kw == "enum" || kw == "input" || kw == "directive";
+
+  let parse_def = fn (ts0) ->
+    // A description belongs to the definition that follows it, so it is taken
+    // before anything is decided. An executable definition cannot have one, and
+    // that is refused rather than silently dropped.
+    let (desc, ts) = take_desc ts0 in
+    let has_desc = match desc with | [] -> false | _ -> true in
+    let no_desc = fn (what: str) ->
+      if has_desc then
+        fail ("graphql: " ++ what ++ " cannot take a description"
+              ++ " — only type-system definitions do" ++ at ts0)
+      else () in
     // The shorthand: a bare selection set is an anonymous query. It is the only
     // definition that does not start with a keyword.
     if is_punct ts "\{" then
+      let _ = no_desc "a selection set" in
       let (sels, r) = parse_sel_set ts in
       (OpDef ("query", "", [], [], sels), r)
     else
       match tok_of ts with
       | TName kw ->
-        if kw == "fragment" then
+        if is_tsdef_kw kw then
+          let (td, r) = parse_tsdef desc ts in (TsDef td, r)
+        else if kw == "extend" then
+          // Refused, not mis-parsed. A type-system EXTENSION has its own five
+          // productions, and reading `extend type T` as `type T` would produce a
+          // tree that says something the document did not.
+          fail ("graphql: type-system extensions (`extend ...`) are not parsed yet"
+                ++ at ts)
+        else if kw == "fragment" then
+          let _ = no_desc "a fragment definition" in
           let (nm, r1) = take_name (rest_of ts) in
           let r2 =
             if is_kw r1 "on" then rest_of r1
@@ -201,6 +399,7 @@ module Gparse {
           let (sels, r5) = parse_sel_set r4 in
           (FragDef (nm, tc, d, sels), r5)
         else if kw == "query" || kw == "mutation" || kw == "subscription" then
+          let _ = no_desc "an operation" in
           let r1 = rest_of ts in
           let (nm, r2) =
             match tok_of r1 with
@@ -212,8 +411,7 @@ module Gparse {
           let (sels, r5) = parse_sel_set r4 in
           (OpDef (kw, nm, vs, d, sels), r5)
         else
-          fail ("graphql: '" ++ kw ++ "' does not start an executable definition"
-                ++ " (type-system definitions are not parsed here)" ++ at ts)
+          fail ("graphql: '" ++ kw ++ "' does not start a definition" ++ at ts)
       | _ -> fail ("graphql: a definition was expected" ++ at ts);
 
   let rec parse_defs = fn (ts, acc) ->

@@ -1,19 +1,19 @@
-# contrib/graphql — GraphQL executable documents
+# contrib/graphql — GraphQL documents
 
-A lexer, parser and printer for GraphQL's **executable** documents: operations
-and fragments. Type-system definitions (SDL — `type`, `interface`, `input`,
-`enum`, `schema`) are a separate grammar and are not parsed here yet.
+A lexer, parser and printer for GraphQL documents: **executable** definitions
+(operations and fragments) and **type-system** definitions (SDL — `schema`,
+`scalar`, `type`, `interface`, `union`, `enum`, `input`, `directive`).
 
 ## Files
 
 | file | exports | lines |
 |---|---|---|
-| `ast.mere` | `gtok` / `gtype` / `gval` / `gdir` / `gsel` / `gvardef` / `gdef` — type-only | ~65 |
-| `lexer.mere` | `module Glex { tokens, block_value }` | ~230 |
-| `parser.mere` | `module Gparse { document }` | ~215 |
-| `printer.mere` | `module Gprint { document, pval, ptype }` | ~150 |
+| `ast.mere` | `gtok` / `gtype` / `gval` / `gdir` / `ginpval` / `gfield` / `genumv` / `gopty` / `gtsdef` / `gsel` / `gvardef` / `gdef` — type-only | ~95 |
+| `lexer.mere` | `module Glex { tokens, block_value }` | ~260 |
+| `parser.mere` | `module Gparse { document }` | ~390 |
+| `printer.mere` | `module Gprint { document, pval, ptype }` | ~230 |
 
-`ast.mere` is type-only so the three others share one definition instead of
+`ast.mere` is type-only so the other three share one definition instead of
 three that drift — the same arrangement as `contrib/parser/ast.mere`.
 
 ## Usage
@@ -48,7 +48,22 @@ legally be empty, so the sentinel cannot collide with a real value.
 
 A variable definition's default is a 0-or-1 element list rather than an option,
 so that "absent" and "present and null" stay distinguishable: `$x: Int = null`
-*has* a default, and it is null.
+*has* a default, and it is null. **A description is the same shape** — a
+`gval list`, not a `str` — because it has to carry the string's own kind:
+graphql-js records `block: true` on it, so a description written as a block string
+and printed as an ordinary one is a different tree.
+
+## Empty blocks are not empty lists
+
+Every delimited list in this grammar requires at least one element **except the
+two that are values**: `[]` and `{}` are a legal empty list and a legal empty
+object, while `{ }` as a selection set — or a fields block, an enum values block,
+an input fields block, an argument list, an argument *definition* list, or a
+schema body — is not legal at all.
+
+The first version returned an empty list for all of them and so accepted six
+documents the specification does not contain. The check now lives in one helper
+that names the production, rather than at seven call sites.
 
 ## The gate
 
@@ -74,8 +89,10 @@ emitting something that parses back the same. The output is deliberately plain,
 one line, single spaces. It is not a pretty-printer.
 
 The corpus is **derived**: a cross product of every value kind × every position
-that admits a value, every selection form, every operation shape, and a set of
-nested type expressions. 153 documents at the time of writing.
+that admits a value, every selection form, every operation shape, nested type
+expressions, and — for SDL — every definition kind × description form × directive
+form, `implements` at several arities, and argument definitions with and without
+defaults. **366 documents** at the time of writing.
 
 ### A round-trip is blind to anything that prints identically
 
@@ -91,15 +108,43 @@ one place that transcribes anything from the oracle's tree, and the shared
 vocabulary is two words (`Int`, `Float`) — small enough that a shared misreading
 is not a real risk.
 
+### Valid documents only would test nothing
+
+Everything above feeds *valid* input, and a parser that accepts anything passes
+all of it. So there is a **reject-list**: 37 documents the oracle rejects, which
+must be rejected here too. Its first run found six real defects — the four empty
+blocks above, plus `007` (an `IntValue` may not have a leading zero) and `1.`
+(a fraction needs a digit). The lexer now also refuses a number followed by a
+digit, a `.` or a name start, so `1.2.3` and `1abc` are errors rather than two
+tokens.
+
+The distinction being checked is not "does it error" but "does it error *instead
+of* quietly producing a tree" — a parser that reads `{ a` as `{ a }` has invented
+a closing brace, and nothing in the round-trip section would notice.
+
+### A gate that aborts on its subject's crash reports nothing
+
+`set -e` was right for the preflight and wrong for the sections. Deliberately
+dropping `repeatable` from the parser made one corpus document unparseable, the
+Mere process exited non-zero, and the harness **stopped in the middle having
+printed no verdict** — taking the reject-list and numeric-kind sections with it.
+The subject now runs through a helper that never aborts, names the section it
+failed in, and lets the rest of the harness still run.
+
 The other sections are round-trip, idempotence (the oracle's own output fed back
 through us, so a printer that loses something on the first pass and is stable
 afterwards cannot pass), and a corpus check that fails loudly if the **oracle**
 rejects a document this harness generated — that is a bug in the generator, not
-a result. It caught `007`, which is not a legal `IntValue`.
+a result.
 
 ## Not here yet
 
-- **SDL** (type-system definitions), validation, execution, introspection.
+- **Validation, execution, introspection.**
+- **Type-system extensions** (`extend type T { … }`). Valid GraphQL that this
+  parser refuses rather than mis-reads: reading `extend type T` as `type T` would
+  produce a tree that says something the document did not. The refusal is
+  *asserted* by the harness, so the day extensions land, that section fails and
+  says the assertion is stale — the same discipline as a DIVERGE pin.
 - **A block string whose value does not survive re-parsing** is *refused* by the
   printer, not approximated. Re-parsing applies the dedent rule again, so a value
   with common leading whitespace on its continuation lines comes back different;
