@@ -1,0 +1,75 @@
+// examples/grpc_hello.mere — a gRPC Greeter, in Mere, over h2c.
+//
+// This is the whole stack meeting: contrib/proto for the messages, contrib/http2
+// for the frames and HPACK, and contrib/http2/server for the connection. What it
+// proves is not that the pieces compile — the parity harnesses already say that —
+// but that a real gRPC client, which knows nothing about any of them, gets an
+// answer it recognises.
+//
+//   mere -c examples/grpc_hello.mere > s.c && clang -O2 s.c -o s
+//   ./s 50077 1 &
+//   grpcurl -plaintext -protoset hello.protoset \
+//     -d '{"name":"mere"}' 127.0.0.1:50077 hello.Greeter/SayHello
+//   # => { "message": "hello mere" }
+//
+// `-protoset` rather than server reflection: reflection is itself a gRPC service
+// returning protobuf, and grpcurl's very first call on a connection is a
+// reflection request unless it is given the schema locally. Measured, not assumed.
+//
+// The service is
+//   message HelloRequest { string name = 1; }
+//   message HelloReply   { string message = 1; }
+//   service Greeter { rpc SayHello (HelloRequest) returns (HelloReply); }
+
+import "../contrib/proto/wire.mere";
+import "../contrib/http2/server.mere";
+
+// Decoding walks the fields rather than assuming an order or a presence. proto3
+// omits a field holding its default, so a request of `{}` arrives as ZERO bytes —
+// not as an empty string in field 1 — and a decoder that reads field 1 without
+// looking would fail on the most ordinary input there is.
+// `wt_delimited` is a local copy of `Wire.delimited`, and it has to be: an inner
+// `let rec` that references a MODULE-QUALIFIED constant makes the C backend emit
+// the qualified name as a struct field — `long long Wire.delimited;` — which is
+// not valid C. The interpreter is fine, so this is only visible after `mere -c`.
+// Six-line reproduction and the diagnosis are in the open questions.
+let wt_delimited = Wire.delimited;
+
+let req_name = fn (msg: bytes) ->
+  let rec go = fn (i: int, acc: str) ->
+    if i >= bytes_len msg then acc
+    else
+      let (f, wt, j) = Wire.get_tag msg i in
+      if f == 1 && wt == wt_delimited then
+        let (v, k) = Wire.get_delimited msg j in
+        go k (str_of_bytes v)
+      else go (Wire.skip_value msg j wt) acc in
+  go 0 "";
+
+let hello_reply = fn (m: str) ->
+  let b = vec_new () in
+  let _ = Wire.tag b 1 Wire.delimited in
+  let _ = Wire.put_str b m in
+  bytes_of_vec b;
+
+// F1 routes on the path and answers; it does not yet return an RPC status for an
+// unknown method (the server can, but the handler signature cannot ask it to).
+// So an unknown path gets a named message rather than a silent empty reply.
+let handler = fn (path: str, req: bytes) ->
+  if str_eq path "/hello.Greeter/SayHello" then
+    hello_reply ("hello " ++ req_name req)
+  else hello_reply ("no such method: " ++ path);
+
+// `args` gives a `str list` and the prelude has no indexing helper, so walk it.
+let rec arg_at = fn (xs, k: int, dflt: str) ->
+  match xs with
+  | [] -> dflt
+  | [h, ...t] -> if k == 0 then h else arg_at t (k - 1) dflt;
+
+let argv = args ();
+let port = int_of_str (arg_at argv 0 "50077");
+let count = int_of_str (arg_at argv 1 "1");
+let _ = print ("grpc_hello: listening on " ++ str_of_int port
+               ++ " for " ++ str_of_int count ++ " connection(s)");
+let _ = H2Server.serve_n port count handler;
+print "grpc_hello: done"

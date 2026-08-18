@@ -1,4 +1,4 @@
-# contrib/http2 — HTTP/2 frames and HPACK
+# contrib/http2 — HTTP/2 frames, HPACK, and an h2c server
 
 The layer below HPACK and below any notion of a request: an HTTP/2 connection is
 a 24-byte preface followed by a sequence of frames, each a 9-byte header and a
@@ -10,6 +10,7 @@ packet dumper.
 
 | file | exports | lines |
 |---|---|---|
+| `server.mere` | `module H2Server { serve, serve_n, respond_ok, respond_err }` — an h2c connection | ~200 |
 | `hpack.mere` | `type hstate`; `module Hpack { new_state; decode; encode; decode_int / encode_int; huff_decode; insert / resize; lookup }` | ~250 |
 | `hpack_table.mere` | `module HpackTable { … }` — **generated** by `scripts/gen_hpack_tables.sh` | ~160 |
 | `frame.mere` | `module H2 { preface; frame types; flags; put_u8/16be/24be/32be; get_u8/16be/24be/32be; put_header / put_frame / frame_bytes; read_frame; has_flag; settings_payload / read_settings; u32_payload / window_increment / error_code; goaway_payload; grpc_message / read_grpc_message }` | ~215 |
@@ -158,9 +159,62 @@ Poisoning found three things:
 One line survives poisoning on purpose: the `len2 < huff_min_len` test is a **fast
 path, not a check**, and is labelled as such so nobody has to re-derive that.
 
+## The server
+
+`server.mere` turns the layers above into a connection. A handler is
+`str -> bytes -> bytes` — a path and a request message, giving a response message
+— and everything about HTTP/2 stays on the other side of it.
+
+```mere
+import "contrib/http2/server.mere";
+H2Server.serve 50051 (fn (path: str, req: bytes) -> reply_for path req)
+```
+
+`examples/grpc_hello.mere` is a gRPC Greeter built on it, and
+`scripts/grpc_parity.sh` drives it with two real clients. That harness is the only
+one here that does not compare bytes: every layer underneath already has a
+byte-level gate, and none of them answers the question a server exists to answer —
+whether a client that knows nothing about any of this gets a reply it recognises.
+
+**TLS is absent by measurement, not oversight.** gRPC over cleartext HTTP/2 (h2c,
+prior knowledge) is what `grpcurl -plaintext` and every gRPC client's insecure mode
+speak: 24 literal bytes and no negotiation. So a server is useful before anything
+here knows what ALPN is.
+
+### What the server does not do, and how each one is checked
+
+- **One connection at a time.** `mhttpd` already showed how to spawn a handler per
+  connection with a buffer pool; doing it here too would mix two problems in one
+  first version.
+- **No flow control.** WINDOW_UPDATE frames are read and ignored and none are sent.
+  Safe only because the responses are small.
+- **One stream's state at a time.** Sequential streams on one connection work and
+  are checked; interleaved ones would be mis-served.
+- **No RPC status for an unknown method.** The handler signature cannot ask for one
+  yet, so an unknown path gets a named message. `grpc_parity.sh` *calls* a method
+  the schema declares and the server does not handle, and requires that documented
+  behaviour — so when statuses land, the section fails and says the assertion is
+  stale.
+
+### Two things loopback hid
+
+Poisoning `grpc_parity.sh` found two bugs that every other section passed:
+
+1. **Removing the frame reassembly changed nothing.** On loopback a request arrives
+   in a single read, so a server that parses whatever one read gave it works. The
+   python client now sends one request **split every seven bytes**, so the 9-byte
+   frame header itself lands across two reads.
+2. **Removing the SETTINGS acknowledgement changed nothing.** Neither client blocks
+   on it. The client now asserts the ACK arrives.
+
+Both are the same shape as the guards found dead in `frame.mere`, from the other
+direction: there, code nothing reached; here, behaviour nothing observed.
+
 ## Not here yet
 
 - Flow control, stream state, priority, `CONTINUATION` reassembly.
+- Concurrency (one connection at a time), and interleaved streams.
+- Server-side TLS and ALPN — needed for `h2` over TLS, not for h2c.
 - **Huffman *encoding*.** Not needed (see above), and its absence is a size
   question rather than a correctness one.
 - **Which frame types may appear on which streams** is a rule of its own and is

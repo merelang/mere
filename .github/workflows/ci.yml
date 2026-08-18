@@ -137,6 +137,19 @@ jobs:
         continue-on-error: true
         run: sudo apt-get install -y qemu-system-misc
 
+      # grpcurl is one of the two clients grpc_parity drives. Pinned, like every
+      # other oracle here — and it is an ORACLE in the useful sense: it was
+      # written by people who never saw this implementation.
+      - name: Install grpcurl (client for grpc_parity)
+        run: |
+          set -e
+          GRPCURL=1.8.8
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL}/grpcurl_${GRPCURL}_linux_x86_64.tar.gz" \
+            | tar -xz -C /tmp grpcurl
+          install /tmp/grpcurl "$HOME/.local/bin/"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       # hyperframe is the oracle for http2_parity.sh — an independent RFC 9113
       # implementation and the frame layer of h2. Pinned for the same reason as
       # node, protoc and graphql-js: the gate's answer comes from it.
@@ -168,6 +181,7 @@ jobs:
           [ -f "$(npm root -g)/graphql/package.json" ] || { echo "graphql-js missing"; exit 1; }
           python3 -c "import hyperframe" || { echo "hyperframe missing"; exit 1; }
           python3 -c "import hpack" || { echo "hpack missing"; exit 1; }
+          command -v grpcurl >/dev/null || { echo "grpcurl missing"; exit 1; }
           for f in --enable-tail-call --enable-threads; do
             wat2wasm --help 2>&1 | grep -q -- "$f" \
               || { echo "wat2wasm does not support $f"; exit 1; }
@@ -261,6 +275,14 @@ jobs:
       # what checks the two tables the oracle and the implementation share.
       - name: hpack_parity (vs hpack)
         run: sh scripts/hpack_parity.sh
+
+      # The whole stack, driven by clients that know nothing about it: grpcurl
+      # (Go) over four connections, and a python h2 client making three requests
+      # on ONE connection with one of them split across TCP segments. The split is
+      # not decoration — removing the server's frame reassembly passed every other
+      # section, because on loopback a request arrives in a single read.
+      - name: grpc_parity (grpcurl and python h2 against a Mere server)
+        run: sh scripts/grpc_parity.sh
 
       # The window capability, checked by reading the window's own pixels back.
       # SDL's `dummy` video driver gives a software renderer and an event queue
