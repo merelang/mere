@@ -107,6 +107,27 @@ jobs:
           install "/tmp/wasmtime-v${WASMTIME}-x86_64-linux/wasmtime" "$HOME/.local/bin/"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           npm install -g @bytecodealliance/jco@1.27.0
+          # graphql-js is the oracle for graphql_parity.sh. Pinned for the same
+          # reason as everything else here: the gate's answer comes from it.
+          npm install -g graphql@17.0.2
+
+      # protoc is the oracle for proto_parity.sh, and it is pinned for the same
+      # reason node is: a gate whose answer comes from a tool inherits that
+      # tool's version. The wire format itself is frozen — protobuf's
+      # compatibility guarantee is that these bytes never change — so unlike
+      # node's URL, a version bump here is not expected to move any answer. The
+      # pin is so that if one ever does, the diff names a version change instead
+      # of looking like a regression in contrib/proto.
+      - name: Install protoc (oracle for proto_parity)
+        run: |
+          set -e
+          PROTOC=27.3
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC}/protoc-${PROTOC}-linux-x86_64.zip" \
+            -o /tmp/protoc.zip
+          unzip -q -o /tmp/protoc.zip -d /tmp/protoc
+          install /tmp/protoc/bin/protoc "$HOME/.local/bin/"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       # Best effort: qemu_virt.sh is the differential check against an emulator
       # nobody here wrote, and it skips cleanly when the binary is absent. It is
@@ -129,13 +150,16 @@ jobs:
       - name: Toolchain preflight
         run: |
           set -e
-          for t in clang lldb node python3 wat2wasm wasm-objdump wasm-tools wasmtime; do
+          for t in clang lldb node python3 protoc wat2wasm wasm-objdump wasm-tools wasmtime; do
             command -v "$t" >/dev/null 2>&1 || { echo "required tool missing: $t"; exit 1; }
           done
           # socket_parity finds the WASI command adapter inside the global jco
           # install, and skips without it — so its absence is asserted here too.
           adapter="$(npm root -g)/@bytecodealliance/jco/lib/wasi_snapshot_preview1.command.wasm"
           [ -f "$adapter" ] || { echo "WASI command adapter missing: $adapter"; exit 1; }
+          # graphql_parity skips without this, and a gate that skips in CI is a
+          # gate that passes without running.
+          [ -f "$(npm root -g)/graphql/package.json" ] || { echo "graphql-js missing"; exit 1; }
           for f in --enable-tail-call --enable-threads; do
             wat2wasm --help 2>&1 | grep -q -- "$f" \
               || { echo "wat2wasm does not support $f"; exit 1; }
@@ -200,6 +224,22 @@ jobs:
 
       - name: tcp_read_codes
         run: sh scripts/tcp_read_codes.sh
+
+      # The Protocol Buffers wire format against protoc's BYTES. Runs the
+      # interpreter AND the C backend, because two of its four sections are about
+      # the int-width difference between them: above 2^62 the interpreter is
+      # 63-bit and the compiled backends are 64-bit, and that divergence is
+      # PINNED here rather than dropped, so a fix breaks this gate and says so.
+      - name: proto_parity (vs protoc's bytes)
+        run: sh scripts/proto_parity.sh
+
+      # The GraphQL parser and printer against graphql-js, by sending our output
+      # back through their parser rather than by comparing serialised ASTs — so
+      # nothing here transcribes their tree, and a shared misreading has nowhere
+      # to hide. A deliberately broken lexer proved the round-trip alone is blind
+      # to the Int/Float distinction, so the harness asks for that kind directly.
+      - name: graphql_parity (vs graphql-js)
+        run: sh scripts/graphql_parity.sh
 
       # The window capability, checked by reading the window's own pixels back.
       # SDL's `dummy` video driver gives a software renderer and an event queue

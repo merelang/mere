@@ -1,0 +1,189 @@
+// contrib/proto/wire.mere — the Protocol Buffers wire format, both directions.
+//
+// This is the layer below any schema: a protobuf message on the wire is a
+// sequence of (field number, wire type) tags each followed by a value in one of
+// six shapes. Nothing here knows what a field means, which is what makes it
+// reusable by a generated encoder, a hand-written one, and a schema-less
+// inspector alike.
+//
+// The oracle is protoc. `scripts/proto_parity.sh` puts every function here
+// against `protoc --encode`'s BYTES — not against a description of them — so a
+// transcription error in this file shows up as a byte difference rather than as
+// a message some other implementation happens to also misread.
+//
+// Usage:
+//   import "contrib/proto/wire.mere";
+//   let b = vec_new () in
+//   let _ = Wire.tag b 1 Wire.varint in
+//   let _ = Wire.put_varint b 300 in
+//   hex_of_bytes (bytes_of_vec b)          // "08ac02"
+//
+// Buffers are `Vec[R, int]` of byte values, bridged to `bytes` with
+// `bytes_of_vec` / `vec_of_bytes`. A `ByteBuf` would avoid the per-element
+// boxing, but Vec is what the parity gate is written against; moving to ByteBuf
+// is an optimisation to make after the gate is green, not before.
+//
+// THREE THINGS THAT ARE NOT OBVIOUS, and that the gate exists to keep true:
+//
+//  1. `bit_shr` is an ARITHMETIC shift. Every right shift of a value that may
+//     have its top bit set needs a mask, or a negative int64 never reaches zero
+//     and the encoder loops forever. `lshr` below is the only correct form.
+//
+//  2. A negative int64 encodes as TEN bytes, not nine. protoc sign-extends to
+//     64 bits and then packs 7 bits at a time, so -1 is `ff`*9 + `01`. Writing
+//     the loop without the mask in (1) gets nine bytes and a wrong answer.
+//
+//  3. fixed32 / fixed64 are LITTLE-endian. `mem_get_u32be` is big-endian only
+//     and there is no 64-bit accessor at all, so the byte order is assembled
+//     here rather than borrowed.
+
+module Wire {
+
+  // --- wire type constants ------------------------------------------------
+  // The low three bits of a tag. Named so that call sites read as the spec.
+
+  let varint = 0;            // int32/64, uint32/64, sint32/64, bool, enum
+  let fixed64 = 1;           // fixed64, sfixed64, double
+  let delimited = 2;         // string, bytes, embedded messages, packed repeated
+  let start_group = 3;       // deprecated, decoded so unknown fields survive
+  let end_group = 4;         // deprecated
+  let fixed32 = 5;           // fixed32, sfixed32, float
+
+  // --- logical shifts -----------------------------------------------------
+  // `bit_shr` propagates the sign, so mask off the bits it copied in. The mask
+  // is built rather than written as a literal because the largest literal this
+  // compiler accepts is 2^62-1 — see the int-width note in OPEN_QUESTIONS.
+
+  let lshr = fn (x: int, n: int) ->
+    if n <= 0 then x
+    else if n >= 64 then 0
+    else bit_and (bit_shr x n) ((bit_shl 1 (64 - n)) - 1);
+
+  // --- encode -------------------------------------------------------------
+
+  let rec put_varint = fn (b, x: int) ->
+    let lo = bit_and x 127 in
+    let rest = lshr x 7 in
+    if rest == 0 then vec_push b lo
+    else
+      let _ = vec_push b (bit_or lo 128) in
+      put_varint b rest;
+
+  let tag = fn (b, field: int, wt: int) ->
+    put_varint b (bit_or (bit_shl field 3) wt);
+
+  // zigzag: move the sign into the low bit so that small negatives stay short.
+  // Without it, -1 as an int64 costs ten bytes; with it, one.
+  let zz32 = fn (n: int) ->
+    bit_and (bit_xor (bit_shl n 1) (bit_shr n 31)) 4294967295;
+  let zz64 = fn (n: int) -> bit_xor (bit_shl n 1) (bit_shr n 63);
+
+  let rec put_fixed = fn (b, x: int, n: int) ->
+    if n == 0 then ()
+    else
+      let _ = vec_push b (bit_and x 255) in
+      put_fixed b (lshr x 8) (n - 1);
+
+  let put_fixed32 = fn (b, x: int) -> put_fixed b x 4;
+  let put_fixed64 = fn (b, x: int) -> put_fixed b x 8;
+
+  let rec append = fn (b, src, i: int) ->
+    if i >= vec_len src then ()
+    else
+      let _ = vec_push b (vec_get src i) in
+      append b src (i + 1);
+
+  // A length-delimited value: the length has to be known before it is written,
+  // so the payload is built into its own buffer first. Guessing a width and
+  // patching it later would be wrong for any payload whose length crosses a
+  // varint boundary.
+  let put_delimited = fn (b, payload) ->
+    let _ = put_varint b (vec_len payload) in
+    append b payload 0;
+
+  // `put_str` / `put_bytes` are defined after the reader, because they write a
+  // `bytes` and the byte-walking helper lives down there.
+
+  // --- decode -------------------------------------------------------------
+  //
+  // The reader takes `bytes`, not the `Vec[R, int]` the writer builds into.
+  // That asymmetry is deliberate and it is not only about immutability:
+  //
+  //   * `bytes_get` / `bytes_len` / `bytes_slice` are monomorphic on `bytes`,
+  //     so nothing here is generic. The first version of this half read from a
+  //     Vec and could not be compiled — see the note in OPEN_QUESTIONS about
+  //     `vec_* on Vec with unresolved element type`, which the C backend raises
+  //     at a line in THIS file for a program that never mentions a Vec.
+  //   * `bytes_slice` gives a sub-buffer for a length-delimited value without a
+  //     copy loop, which is what a nested message wants: decode it by handing
+  //     the slice back to this same reader.
+  //
+  // Each reader returns (value, next index). A caller that ignores the index
+  // cannot advance, which is the point: the wire format has no separators, so
+  // position is the only thing that says where a value ended.
+
+  let rec get_varint_at = fn (b: bytes, i: int, shift: int, acc: int) ->
+    if i >= bytes_len b then fail "proto: varint runs past the end of the buffer"
+    else
+      let byte = bytes_get b i in
+      let acc2 = bit_or acc (bit_shl (bit_and byte 127) shift) in
+      if bit_and byte 128 == 0 then (acc2, i + 1)
+      else if shift >= 63 then fail "proto: varint longer than ten bytes"
+      else get_varint_at b (i + 1) (shift + 7) acc2;
+
+  let get_varint = fn (b: bytes, i: int) -> get_varint_at b i 0 0;
+
+  // A tag splits into a field number and a wire type. Field 0 is not legal and
+  // is refused here rather than handed on as a field named zero.
+  let get_tag = fn (b: bytes, i: int) ->
+    let (t, j) = get_varint b i in
+    let field = lshr t 3 in
+    if field == 0 then fail "proto: field number 0 is not a valid tag"
+    else (field, bit_and t 7, j);
+
+  // Undoing zigzag: the low bit becomes the sign again. `0 - (n & 1)` is the
+  // all-ones mask when the low bit is set, which is the standard form and works
+  // here only because `lshr` is the masked shift and not `bit_shr`.
+  let unzz32 = fn (n: int) -> bit_xor (lshr n 1) (0 - (bit_and n 1));
+  let unzz64 = fn (n: int) -> bit_xor (lshr n 1) (0 - (bit_and n 1));
+
+  let rec get_fixed_at = fn (b: bytes, i: int, n: int, k: int, acc: int) ->
+    if k >= n then (acc, i + n)
+    else if i + k >= bytes_len b then fail "proto: fixed field runs past the end"
+    else get_fixed_at b i n (k + 1)
+           (bit_or acc (bit_shl (bytes_get b (i + k)) (8 * k)));
+
+  let get_fixed32 = fn (b: bytes, i: int) -> get_fixed_at b i 4 0 0;
+  let get_fixed64 = fn (b: bytes, i: int) -> get_fixed_at b i 8 0 0;
+
+  // A length-delimited value as its own `bytes`, plus where it ended. Handing
+  // the slice back to `get_tag` is how a nested message is decoded.
+  let get_delimited = fn (b: bytes, i: int) ->
+    let (n, j) = get_varint b i in
+    if j + n > bytes_len b then fail "proto: length-delimited value runs past the end"
+    else (bytes_slice b j n, j + n);
+
+  // Skipping is what lets a decoder preserve fields it does not know: an
+  // unknown field can be copied verbatim only if its extent can be found
+  // without understanding it.
+  let skip_value = fn (b: bytes, i: int, wt: int) ->
+    if wt == varint then let (_, j) = get_varint b i in j
+    else if wt == fixed64 then i + 8
+    else if wt == fixed32 then i + 4
+    else if wt == delimited then let (_, j) = get_delimited b i in j
+    else fail "proto: cannot skip a value of this wire type";
+
+  // Writing a `bytes` back out, so that a value read by the reader can be
+  // handed to the writer without going through a Vec by hand.
+  let rec append_bytes_at = fn (out, v: bytes, k: int) ->
+    if k >= bytes_len v then ()
+    else
+      let _ = vec_push out (bytes_get v k) in
+      append_bytes_at out v (k + 1);
+
+  let put_bytes = fn (out, v: bytes) ->
+    let _ = put_varint out (bytes_len v) in
+    append_bytes_at out v 0;
+
+  let put_str = fn (out, s: str) -> put_bytes out (bytes_of_str s);
+}
