@@ -1,0 +1,249 @@
+// contrib/http2/hpack.mere — HPACK (RFC 7541): HTTP/2 header compression.
+//
+// WHAT HAS TO BE COMPLETE HERE, AND WHAT DOES NOT, WAS MEASURED RATHER THAN
+// GUESSED. grpcurl 1.8.8's very first HEADERS frame on a real connection uses
+// static-table indices, HUFFMAN-CODED string literals, and SEVEN dynamic-table
+// insertions. So:
+//
+//   * THE DECODER MUST BE COMPLETE. There is no "static table only" shortcut
+//     that gets through one request, let alone two — the dynamic table's state
+//     changes what later indices mean, so a decoder that skips insertions
+//     desynchronises and then reports plausible wrong header names.
+//
+//   * THE ENCODER CAN BE TRIVIAL. RFC 7541 permits a literal with no indexing
+//     and no Huffman, and a server emitting only those was confirmed end to end:
+//     grpcurl accepted the response and printed the message. Compression is an
+//     optimisation, and this file does not do it.
+//
+// That asymmetry is the whole reason a gRPC server is reachable without writing a
+// Huffman *encoder*.
+//
+// THE DYNAMIC TABLE IS CONNECTION STATE, and it is threaded through the API
+// rather than hidden in a global: `decode` takes a state and returns the new one.
+// A connection that shares one decoder across streams is correct; two decoders on
+// one connection is not, and an explicit parameter makes that visible at the call
+// site instead of at 3am.
+
+import "hpack_table.mere";
+
+// entries (most recent first) * current size * maximum size
+type hstate = HState of ((str * str) list * int * int);
+
+module Hpack {
+
+  // The default SETTINGS_HEADER_TABLE_SIZE. A peer may change it, and until it
+  // does this is the number both ends must assume.
+  let default_max_size = 4096;
+
+  let new_state = HState ([], 0, default_max_size);
+
+  // RFC 7541 §4.1: an entry's size is its name plus its value plus 32. The 32 is
+  // an allowance for the entry's own bookkeeping and is not negotiable — a table
+  // that omits it evicts too late and desynchronises from the peer.
+  let entry_size = fn (n: str, v: str) -> str_len n + str_len v + 32;
+
+  let syms = bytes_of_hex HpackTable.huff_syms_hex;
+  let huff_sym = fn (i: int) ->
+    bit_or (bit_shl (bytes_get syms (i * 2)) 8) (bytes_get syms (i * 2 + 1));
+
+  // --- integer representation (§5.1) --------------------------------------
+  //
+  // The first octet carries the low bits in a prefix whose width depends on the
+  // instruction. If every prefix bit is set the value continues in following
+  // octets, seven bits at a time. The prefix being FULL rather than a sentinel is
+  // the part that catches people: a value equal to the prefix maximum still needs
+  // a continuation octet, so `decode_int` cannot stop at "the prefix fits".
+  let rec int_cont = fn (b: bytes, i: int, acc: int, shift: int) ->
+    if i >= bytes_len b then fail "hpack: an integer runs past the end of the block"
+    else
+      let o = bytes_get b i in
+      let acc2 = acc + bit_shl (bit_and o 127) shift in
+      if bit_and o 128 == 0 then (acc2, i + 1)
+      else if shift > 56 then fail "hpack: an integer is longer than any legal value"
+      else int_cont b (i + 1) acc2 (shift + 7);
+
+  let decode_int = fn (b: bytes, i: int, prefix: int) ->
+    let mask = (bit_shl 1 prefix) - 1 in
+    let v = bit_and (bytes_get b i) mask in
+    if v < mask then (v, i + 1) else int_cont b (i + 1) mask 0;
+
+  let rec put_int_cont = fn (out, v: int) ->
+    if v < 128 then vec_push out v
+    else
+      let _ = vec_push out (bit_or (bit_and v 127) 128) in
+      put_int_cont out (bit_shr v 7);
+
+  // `first` is whatever the instruction's high bits are, already shifted.
+  let encode_int = fn (out, first: int, prefix: int, v: int) ->
+    let mask = (bit_shl 1 prefix) - 1 in
+    if v < mask then vec_push out (bit_or first v)
+    else
+      let _ = vec_push out (bit_or first mask) in
+      put_int_cont out (v - mask);
+
+  // --- Huffman decoding (§5.2, Appendix B) --------------------------------
+  //
+  // Canonical, so no tree: accumulate bits until (length, code) names a symbol.
+  // `hpack_table.mere`'s generator ASSERTS the canonical property, so this is
+  // sound rather than lucky.
+  //
+  // The end of a Huffman string is padding: the most significant bits of the EOS
+  // code, which is all ones. Fewer than 8 bits of padding, and every one of them
+  // set. Padding that spells a real symbol would be a symbol, so a decoder that
+  // just stops at the byte boundary silently drops a character.
+  let rec huff_bit_at = fn (b: bytes, k: int) ->
+    bit_and (bit_shr (bytes_get b (k / 8)) (7 - (k % 8))) 1;
+
+  let rec huff_go = fn (b: bytes, k: int, nbits: int, code: int, len: int, out) ->
+    if k >= nbits then
+      // Whatever is left must be padding: fewer than 8 bits, all of them set.
+      if len >= 8 then fail "hpack: Huffman padding is eight bits or more"
+      else if code != (bit_shl 1 len) - 1 then
+        fail "hpack: Huffman padding is not all ones"
+      else strbuf_to_str out
+    else
+      let code2 = bit_or (bit_shl code 1) (huff_bit_at b k) in
+      let len2 = len + 1 in
+      // A FAST PATH, NOT A CHECK: no code is shorter than the table's minimum
+      // length, so `huff_count` already answers 0 below it and the test after
+      // this one would reject anyway. Removing this line changes no answer —
+      // measured by poisoning the gate — and it is labelled so that the next
+      // reader does not have to work that out to know whether it is load-bearing.
+      if len2 < HpackTable.huff_min_len then huff_go b (k + 1) nbits code2 len2 out
+      else
+        let cnt = HpackTable.huff_count len2 in
+        let fc = HpackTable.huff_first_code len2 in
+        if cnt > 0 && code2 >= fc && code2 - fc < cnt then
+          let sym = huff_sym (HpackTable.huff_first_index len2 + (code2 - fc)) in
+          if sym == 256 then fail "hpack: the EOS symbol appeared in a string"
+          else
+            let _ = strbuf_push out (chr sym) in
+            huff_go b (k + 1) nbits 0 0 out
+        else if len2 > HpackTable.huff_max_len then
+          fail "hpack: a Huffman code is longer than any in the table"
+        else huff_go b (k + 1) nbits code2 len2 out;
+
+  let huff_decode = fn (b: bytes) ->
+    huff_go b 0 (bytes_len b * 8) 0 0 (strbuf_new ());
+
+  // --- string literal (§5.2) ----------------------------------------------
+  let decode_str = fn (b: bytes, i: int) ->
+    let huffman = bit_and (bytes_get b i) 128 == 128 in
+    let (ln, j) = decode_int b i 7 in
+    if j + ln > bytes_len b then fail "hpack: a string runs past the end of the block"
+    else
+      let raw = bytes_slice b j ln in
+      ((if huffman then huff_decode raw else str_of_bytes raw), j + ln);
+
+  // Written without Huffman and without indexing: the measured-sufficient form.
+  let encode_str = fn (out, s: str) ->
+    let bs = bytes_of_str s in
+    let _ = encode_int out 0 7 (bytes_len bs) in
+    let rec go = fn (k: int) ->
+      if k >= bytes_len bs then ()
+      else
+        let _ = vec_push out (bytes_get bs k) in
+        go (k + 1) in
+    go 0;
+
+  // --- the tables ---------------------------------------------------------
+  let rec nth_entry = fn (xs, k: int) ->
+    match xs with
+    | [] -> fail "hpack: an index refers to a table entry that does not exist"
+    | [h, ...t] -> if k == 0 then h else nth_entry t (k - 1);
+
+  // Indices are 1-based, the static table comes first, and the dynamic table
+  // continues from 62 with the MOST RECENT entry first. Index 0 is not an index —
+  // in a literal instruction it means "a new name follows".
+  let lookup = fn (st: hstate, idx: int) ->
+    match st with
+    | HState (entries, _, _) ->
+      if idx <= 0 then fail "hpack: index 0 is not a table entry"
+      else if idx <= HpackTable.static_count then
+        nth_entry HpackTable.static_entries (idx - 1)
+      else nth_entry entries (idx - HpackTable.static_count - 1);
+
+  // Eviction is from the END — the oldest entry — until the table fits. It runs
+  // on insertion, and an entry larger than the whole table empties it and is then
+  // not added, which is a rule and not an error (§4.4).
+  let rec evict = fn (entries, size: int, maxs: int) ->
+    if size <= maxs then (entries, size)
+    else
+      match list_rev entries with
+      | [] -> ([], 0)
+      | [(n, v), ...rest] ->
+        evict (list_rev rest) (size - entry_size n v) maxs;
+
+  let insert = fn (st: hstate, n: str, v: str) ->
+    match st with
+    | HState (entries, size, maxs) ->
+      let sz = entry_size n v in
+      if sz > maxs then HState ([], 0, maxs)
+      else
+        let (e2, s2) = evict (Cons ((n, v), entries)) (size + sz) maxs in
+        HState (e2, s2, maxs);
+
+  let resize = fn (st: hstate, maxs: int) ->
+    match st with
+    | HState (entries, size, _) ->
+      let (e2, s2) = evict entries size maxs in
+      HState (e2, s2, maxs);
+
+  // --- decoding a header block (§6) ---------------------------------------
+  //
+  // Five instructions, told apart by their high bits. The order of these tests
+  // matters: `001` (a size update) and `0001` (never indexed) both start with a
+  // zero bit, so a decoder that checks `0000` first mis-reads both.
+  let rec block_go = fn (b: bytes, i: int, st: hstate, acc) ->
+    if i >= bytes_len b then (list_rev acc, st)
+    else
+      let o = bytes_get b i in
+      if bit_and o 128 == 128 then
+        // 1xxxxxxx — indexed header field
+        let (idx, j) = decode_int b i 7 in
+        let (n, v) = lookup st idx in
+        block_go b j st (Cons ((n, v), acc))
+      else if bit_and o 192 == 64 then
+        // 01xxxxxx — literal with incremental indexing
+        let (idx, j) = decode_int b i 6 in
+        let (n, j2) =
+          if idx == 0 then decode_str b j
+          else let (nm, _) = lookup st idx in (nm, j) in
+        let (v, j3) = decode_str b j2 in
+        block_go b j3 (insert st n v) (Cons ((n, v), acc))
+      else if bit_and o 224 == 32 then
+        // 001xxxxx — dynamic table size update. Not a header: it emits nothing.
+        let (sz, j) = decode_int b i 5 in
+        block_go b j (resize st sz) acc
+      else
+        // 0000xxxx / 0001xxxx — literal without indexing / never indexed. Both
+        // leave the table alone, and the difference matters only to a proxy
+        // deciding what it may re-encode, so they decode identically here.
+        let (idx, j) = decode_int b i 4 in
+        let (n, j2) =
+          if idx == 0 then decode_str b j
+          else let (nm, _) = lookup st idx in (nm, j) in
+        let (v, j3) = decode_str b j2 in
+        block_go b j3 st (Cons ((n, v), acc));
+
+  let decode = fn (st: hstate, b: bytes) -> block_go b 0 st [];
+
+  // --- encoding a header block --------------------------------------------
+  //
+  // Literal, new name, no indexing, no Huffman: `0000 0000` then two strings.
+  // This is the form a real client was measured accepting, and it leaves the
+  // dynamic table untouched — so an encoder does not have to track state at all.
+  let rec encode_pairs = fn (out, hs) ->
+    match hs with
+    | [] -> ()
+    | [(n, v), ...rest] ->
+      let _ = vec_push out 0 in
+      let _ = encode_str out n in
+      let _ = encode_str out v in
+      encode_pairs out rest;
+
+  let encode = fn (hs) ->
+    let out = vec_new () in
+    let _ = encode_pairs out hs in
+    bytes_of_vec out;
+}
