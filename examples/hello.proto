@@ -4,5 +4,23 @@ message HelloRequest { string name = 1; }
 message HelloReply   { string message = 1; }
 service Greeter {
   rpc SayHello (HelloRequest) returns (HelloReply);
+  // Declared and NOT handled, so the harness has a real unknown method to call
+  // rather than a claim about one.
   rpc NotImplemented (HelloRequest) returns (HelloReply);
+
+  // One request, many replies.
+  rpc SayHelloStream (HelloRequest) returns (stream HelloReply);
+  // Many requests, one reply — the list the handler receives, joined.
+  rpc SayHelloMany (stream HelloRequest) returns (HelloReply);
+  // Many in, many out. NOT interleaved: the handler runs after the request
+  // half-closes, so every reply is produced once every request has arrived.
+  rpc Echo (stream HelloRequest) returns (stream HelloReply);
+
+  // The two flow-control methods. `Fill` reads its request as a byte count and
+  // answers with that many bytes, which crosses SETTINGS_MAX_FRAME_SIZE at 16385
+  // and the connection window at 65536. `Measure` answers with the LENGTH of its
+  // request, so a large request can be checked without a large reply — the two
+  // directions have separate windows and separate bugs.
+  rpc Fill (HelloRequest) returns (HelloReply);
+  rpc Measure (HelloRequest) returns (HelloReply);
 }

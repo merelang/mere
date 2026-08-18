@@ -284,6 +284,103 @@ if run_subject "writer reserved bit" "$ROOT/examples/.http2_parity_tmp.mere" "$T
   fi
 fi
 
+# --- 2d. the PAYLOAD accessors ------------------------------------------
+#
+# Sections 1 and 2 cover the frame HEADER in both directions: type, flags, stream,
+# length. Neither of them ever looks inside a payload, and that gap hid a real bug
+# for as long as this file has existed.
+#
+# `H2.read_settings` read each entry's 32-bit value at offset i+4 instead of i+2 —
+# two bytes past every six-byte entry, so the LAST entry of any payload read off
+# the end. Nothing caught it because nothing CALLED it: the writer
+# (`settings_payload`) had a parity section from the start, the reader was
+# exported and documented and never fed a single byte, and the server's own
+# comment said its peer's settings were "read and ignored". The first caller found
+# it on the first connection.
+#
+# So this section exists for a reason that generalises past SETTINGS: AN EXPORT
+# LIST IS NOT A COVERAGE LIST. Enumerating what `frame.mere` exports and counting
+# call sites turned up a second accessor in the same state — `H2.error_code`, zero
+# callers and zero coverage. It happens to be right. It was not checked.
+python3 - "$TMP" <<'PY'
+import sys, pathlib
+from hyperframe.frame import (SettingsFrame, WindowUpdateFrame, RstStreamFrame,
+                              Frame)
+
+rows = []   # (label, mere-expression, expected-string)
+
+# SETTINGS payloads, decoded to "id=value" in WIRE ORDER.
+#
+# Seven pairs is not arbitrary: it is what a python h2 client actually opens with,
+# and 7 x 6 = 42 bytes is where the off-by-two first showed itself. One pair would
+# also have caught it (the value would have read past a 6-byte payload), which is
+# the measure of how untested this was.
+settings_cases = [
+    {},
+    {4: 65535},
+    {5: 16384},
+    {1: 4096, 2: 0, 3: 100, 4: 65535, 5: 16384, 6: 4294967295},
+    # The seven-pair opener, with a settings id we do not know (0x8 = ENABLE_CONNECT
+    # PROTOCOL) present so the "ignore what you do not recognise" path is walked.
+    {1: 4096, 2: 0, 3: 100, 4: 65535, 5: 16384, 6: 16384, 8: 1},
+    # Maximum 32-bit values: the ones an arithmetic shift gets wrong.
+    {4: 4294967295, 5: 4294967295},
+]
+for kvs in settings_cases:
+    f = SettingsFrame(0, settings=dict(kvs))
+    payload = f.serialize()[9:]
+    want = " ".join(f"{k}={v}" for k, v in kvs.items())
+    rows.append((f"SETTINGS {kvs}",
+                 'str_join " " (list_map (H2.read_settings (bytes_of_hex "%s")) '
+                 '(fn (kv) -> let (k, v) = kv in str_of_int k ++ "=" ++ str_of_int v))'
+                 % payload.hex(),
+                 want))
+
+# WINDOW_UPDATE increments, including the reserved top bit set: it must be IGNORED
+# on receipt, so 0x80000001 is an increment of 1.
+for raw_inc, want in ((1, 1), (65535, 65535), (2147483647, 2147483647),
+                      (0x80000001, 1)):
+    payload = raw_inc.to_bytes(4, "big")
+    rows.append((f"window_increment 0x{raw_inc:08x}",
+                 'str_of_int (H2.window_increment (bytes_of_hex "%s"))' % payload.hex(),
+                 str(want)))
+
+# RST_STREAM error codes. The top bit is NOT reserved here — an error code is a
+# full 32 bits — which is exactly the distinction a shared helper would erase.
+for err in (0, 1, 2, 8, 11, 13, 2147483648, 4294967295):
+    f = RstStreamFrame(1, error_code=err)
+    payload = f.serialize()[9:]
+    rows.append((f"error_code {err}",
+                 'str_of_int (H2.error_code (bytes_of_hex "%s"))' % payload.hex(),
+                 str(err)))
+
+tmp = pathlib.Path(sys.argv[1])
+tmp.joinpath("pay_labels.txt").write_text("\n".join(r[0] for r in rows) + "\n")
+tmp.joinpath("pay_exprs.txt").write_text("\n".join(r[1] for r in rows) + "\n")
+tmp.joinpath("pay_want.txt").write_text("\n".join(r[2] for r in rows) + "\n")
+PY
+NPAY=$(wc -l < "$TMP/pay_want.txt" | tr -d ' ')
+{
+  echo 'import "../contrib/http2/frame.mere";'
+  while IFS= read -r expr; do
+    [ -z "$expr" ] && continue
+    printf 'let _ = print (%s);\n' "$expr"
+  done < "$TMP/pay_exprs.txt"
+  echo '0'
+} > "$ROOT/examples/.http2_parity_tmp.mere"
+if run_subject "payload accessors" "$ROOT/examples/.http2_parity_tmp.mere" "$TMP/pay_raw.txt"; then
+  sed '$d' "$TMP/pay_raw.txt" > "$TMP/pay.txt"
+  if diff -q "$TMP/pay_want.txt" "$TMP/pay.txt" >/dev/null; then
+    echo "  ok    payload accessors  $NPAY cases: read_settings / window_increment / error_code"
+  else
+    echo "  FAIL  payload accessors"
+    paste -d'|' "$TMP/pay_labels.txt" "$TMP/pay_want.txt" "$TMP/pay.txt" \
+      | awk -F'|' '$2 != $3 { printf "        %-42s oracle=[%s] ours=[%s]\n", $1, $2, $3 }' \
+      | head -12
+    fail=1
+  fi
+fi
+
 # --- 3. the gRPC message prefix -----------------------------------------
 # Not part of HTTP/2, and not checkable against hyperframe. The oracle here is a
 # MEASUREMENT: grpcurl 1.8.8 was observed sending `00 0000000f` ahead of a

@@ -239,13 +239,136 @@ Poisoning `grpc_parity.sh` found two bugs that every other section passed:
 Both are the same shape as the guards found dead in `frame.mere`, from the other
 direction: there, code nothing reached; here, behaviour nothing observed.
 
+## Flow control, and streaming
+
+Both directions of the flow-control window, `SETTINGS_MAX_FRAME_SIZE`, and gRPC
+methods that send or receive more than one message.
+
+### The limits bite in an order, and the first one is not a window
+
+Every number below was measured against a python `h2` client before any of the
+code existed:
+
+| bound | bites at | what the client does |
+|---|---|---|
+| `wbuf` capacity, unchecked | 16385 | **nothing** — the write ran past the buffer and returned success |
+| `SETTINGS_MAX_FRAME_SIZE` | 16385 | refuses the frame: `FrameTooLargeError` |
+| the flow-control window | 65536 | accepts no more DATA until it sends `WINDOW_UPDATE` |
+| **inbound**, the same window | 65536 | stalls at exactly 65535 with nothing from us |
+
+**The first thing a large response needs is not a window, it is being cut into
+frames.** A fix that added window accounting without splitting frames would still
+have failed at 16385.
+
+The `wbuf` row is the one with no symptom. `mem_copy_bytes` is a `memcpy` into a
+bump-allocated arena that records no allocation sizes, so no layer below could
+catch it — demonstrated with a sentinel: 32 bytes into a 16-byte allocation
+changed the byte after it and reported 32. `send` takes the capacity now and fails
+loudly. **A bound nothing enforces is not a bound.**
+
+The write buffer holds **65536** bytes rather than 16384, and that is not for
+speed. `SETTINGS_MAX_FRAME_SIZE` has a *minimum* of 16384, so a peer can only ever
+raise it — with a 16384-byte buffer `min(peer, capacity)` was always the capacity
+and reading the setting was a term that could not change the answer. The same dead
+guard this directory already deleted once from `frame.mere`, except here making it
+live is better than removing it: a peer that allows 32768-byte frames gets half as
+many of them.
+
+### Flow control makes the writer a reader
+
+Before it, sending was a leaf: bytes went out and nothing came back. A send whose
+window is exhausted has to **consume input** — the `WINDOW_UPDATE` that reopens it
+— so `send_data` contains a reader. That reader is deliberately narrow: a HEADERS
+frame arriving there is a second request interleaved with the first, which this
+server does not serve, and it **fails and names that** rather than skipping the
+frame. A skipped HEADERS is a request that never gets an answer.
+
+### The advertised window is left at the default on purpose
+
+Raising `SETTINGS_INITIAL_WINDOW_SIZE` in our own SETTINGS would let large requests
+through with no `WINDOW_UPDATE` logic at all — and would therefore make that logic
+untestable. The small default window is what keeps the gate able to fail.
+
+### Streaming is the list having more than one element
+
+The handler takes the request's messages as a `bytes list` and answers with
+`RpcOk` (one), `RpcStream` (many), or `RpcErr`. There is no separate code path for
+client-streaming: a DATA payload is a stream of length-prefixed messages, so
+splitting it is the same work either way. `H2Server.unary` adapts a
+one-in-one-out handler.
+
+**Interleaving is not supported and is stated rather than approximated.** The
+handler runs after the request half-closes, so no reply can precede the last
+request message.
+
+### Four things the gate had to be taught, three of them by being wrong first
+
+- **The boundary in the field is not the boundary on the wire.** A 16384-byte reply
+  *field* is 16393 bytes of DATA once the gRPC prefix, the protobuf tag and a
+  3-byte varint are added — so it already needs two frames. The first frame-count
+  expectation was wrong for this reason, and so, later, was a window grant that
+  left the server nine bytes short.
+- **A well-behaved client cannot see a server that ignores its window.** Poisoning
+  the window check to "a billion bytes" left the whole section green: a client that
+  acknowledges as it reads has already granted more credit by the time the next
+  chunk is processed. The gate now includes a **rude** client that advertises 8192
+  and stops reading, and measures how much arrives before it acknowledges anything.
+- **`SETTINGS` adjusts a spent window by the delta; it does not reset it.** Those
+  two rules agree exactly when nothing has been spent, which is where the first
+  version of the test put the SETTINGS. It now arrives mid-response, with the
+  window driven to **-57343** — negative is legal, and a SETTINGS reduction after
+  credit was spent is the only way to get there.
+- **`h2`'s `local_settings.initial_window_size = ...` is silently ignored** before
+  `initiate_connection`. The client advertised the default 65535, the server
+  correctly sent 65535, and the harness blamed the server. `update_settings` is the
+  API — and it makes the frame arrive mid-connection, which is what the delta path
+  needed anyway.
+
+### An export list is not a coverage list
+
+`H2.read_settings` read each SETTINGS entry's 32-bit value at offset `i+4` instead
+of `i+2` — two bytes past every six-byte entry, so the **last entry of any payload
+read off the end**. It had been wrong for as long as the file existed.
+
+Nothing caught it because **nothing called it**. The writer had a parity section
+from the start; the reader was exported, documented in the table above, and never
+fed a single byte — and this server's own comment said its peer's settings were
+"read and ignored". The first caller found it on the first connection, at byte 42
+of a 42-byte payload.
+
+So the fix was not only the offset. Enumerating every export and counting call
+sites turned up a second accessor in the same state — `H2.error_code`, zero callers
+and zero coverage. It happens to be right; it had not been checked. Section 2d of
+`http2_parity.sh` now feeds every payload accessor, and poisoning the original
+off-by-two turns it red.
+
+### One rule, written twice
+
+A `WINDOW_UPDATE` increment of 0 is a protocol error. The frame loop **ignored**
+it and the window-wait loop **failed** on it — two spellings of one rule, and the
+wrong one was on the path every ordinary frame takes. There is one
+`apply_window_update` now, and the gate sends a hand-built illegal frame, because
+no conforming client will.
+
+A related find, from a poison in a *different* rule: the SETTINGS branch of the
+window-wait loop **recursed** under a comment saying it returned to its caller. A
+peer may reopen a stalled stream with `SETTINGS` alone and send no `WINDOW_UPDATE`
+at all, and this server would have waited forever. The delta poison was
+undetectable precisely because the poisoned server got stuck in the same place.
+
 ## Not here yet
 
-- Flow control, stream state, priority, `CONTINUATION` reassembly.
+- Stream state, priority, `CONTINUATION` reassembly.
 - Concurrency (one connection at a time), and interleaved streams.
 - Server-side TLS and ALPN — needed for `h2` over TLS, not for h2c.
 - **Huffman *encoding*.** Not needed (see above), and its absence is a size
   question rather than a correctness one.
+- **Interleaved bidirectional streaming.** Many messages in each direction work;
+  a reply that must react to a request message *while more are arriving* does not.
+- **`SETTINGS_MAX_FRAME_SIZE` cannot be checked by conformance.** Its minimum is
+  the default, so a peer can only ever raise it — ignoring it forgoes fewer frames
+  and can never produce an illegal one. It is honoured, and the gate checks it
+  behaviourally rather than as a conformance rule.
 - **Which frame types may appear on which streams** is a rule of its own and is
   not enforced here. hyperframe does enforce it, and refusing to build a SETTINGS
   frame on stream 1 is how the gate found that out.

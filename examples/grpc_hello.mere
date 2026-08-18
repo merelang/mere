@@ -34,23 +34,79 @@
 import "hello_pb.mere";
 import "../contrib/http2/server.mere";
 
-// A handler answers with `RpcOk` or with a status. An unknown method is
-// UNIMPLEMENTED — the request succeeded as HTTP and failed as RPC, which is why
-// this is a trailer and not an HTTP status.
+// A handler answers with `RpcOk`, with `RpcStream` (many messages), or with a
+// status. An unknown method is UNIMPLEMENTED — the request succeeded as HTTP and
+// failed as RPC, which is why this is a trailer and not an HTTP status.
+//
+// This one is written in the UNARY shape — one request message, one reply — and
+// `H2Server.unary` adapts it to the list the server actually hands over. The
+// streaming methods below take the list directly.
 //
 // `Fail` exists so the harness can exercise the error path on a method that DOES
 // exist: "unknown method" and "this method said no" are different routes through
 // the server, and only one of them is reached by calling something that is absent.
+let name_of = fn (b: bytes) -> (decode_HelloRequest b).name;
+let reply = fn (s: str) -> encode_HelloReply (HelloReply { message = s });
+
+// The server hands over the request's messages as a list. For a unary method the
+// list has one element; `first_msg` takes it, and an empty list becomes an empty
+// message because proto3 cannot tell "nothing arrived" from "all defaults".
+let first_msg = fn (msgs) ->
+  match msgs with
+  | [] -> bytes_of_hex ""
+  | [m, ...rest] -> m;
+
 let handler = fn (path: str, req: bytes) ->
   if str_eq path "/hello.Greeter/SayHello" then
-    let n = (decode_HelloRequest req).name in
+    let n = name_of req in
     if str_eq n "boom" then
       RpcErr (H2Server.invalid_argument, "name must not be 'boom'")
     else if str_eq n "unicode" then
       // A message that has to be percent-encoded on the way out.
       RpcErr (H2Server.failed_precondition, "café: 100% not ok")
-    else RpcOk (encode_HelloReply (HelloReply { message = "hello " ++ n }))
+    else RpcOk (reply ("hello " ++ n))
   else RpcErr (H2Server.unimplemented, "no such method: " ++ path);
+
+// --- the streaming and flow-control methods --------------------------------
+//
+// These take the message LIST directly rather than going through
+// `H2Server.unary`, which is the whole difference between a unary method and a
+// streaming one: there is no separate protocol for client-streaming, only a list
+// with more than one element in it.
+//
+// `Fill` and `Measure` exist to put the two flow-control directions on their own.
+// A method that answered a large request with a large reply would pass while only
+// one of the two windows worked, because the failure of either looks the same from
+// the client: nothing arrives.
+let dispatch = fn (path: str, msgs) ->
+  if str_eq path "/hello.Greeter/SayHelloStream" then
+    let n = name_of (first_msg msgs) in
+    // The list is parenthesised because a constructor glues only a few token
+    // kinds as its payload and `[` is not one of them: `RpcStream [..]` is
+    // reported as "constructor RpcStream requires an argument".
+    RpcStream ([reply ("hello " ++ n ++ " #1"),
+                reply ("hello " ++ n ++ " #2"),
+                reply ("hello " ++ n ++ " #3")])
+
+  else if str_eq path "/hello.Greeter/SayHelloMany" then
+    // Every request message, in order. Joined so that a reordering or a dropped
+    // element is visible in one string rather than needing a count.
+    RpcOk (reply ("hello " ++ str_join ", " (list_map msgs name_of)))
+
+  else if str_eq path "/hello.Greeter/Echo" then
+    RpcStream (list_map msgs (fn (m) -> reply ("echo " ++ name_of m)))
+
+  else if str_eq path "/hello.Greeter/Fill" then
+    // The request names a byte count and the reply is that many bytes. Past 16384
+    // this needs the response split into frames; past 65535 it needs the window.
+    RpcOk (reply (str_repeat "x" (int_of_str (name_of (first_msg msgs)))))
+
+  else if str_eq path "/hello.Greeter/Measure" then
+    // The reply is the request's LENGTH, so a 300 KB request is checked with a
+    // reply of a handful of bytes.
+    RpcOk (reply (str_of_int (str_len (name_of (first_msg msgs)))))
+
+  else H2Server.unary handler path msgs;
 
 // `args` gives a `str list` and the prelude has no indexing helper, so walk it.
 let rec arg_at = fn (xs, k: int, dflt: str) ->
@@ -63,5 +119,5 @@ let port = int_of_str (arg_at argv 0 "50077");
 let count = int_of_str (arg_at argv 1 "1");
 let _ = print ("grpc_hello: listening on " ++ str_of_int port
                ++ " for " ++ str_of_int count ++ " connection(s)");
-let _ = H2Server.serve_n port count handler;
+let _ = H2Server.serve_n port count dispatch;
 print "grpc_hello: done"

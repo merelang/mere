@@ -4,6 +4,92 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## contrib — HTTP/2 flow control and gRPC streaming — 2026-08-18
+
+_No compiler change. `contrib/http2`, `examples/grpc_hello.mere`, and two gates._
+
+Both directions of the flow-control window, `SETTINGS_MAX_FRAME_SIZE`, and gRPC
+methods that send or receive more than one message. `grpcurl` now gets
+server-streaming, client-streaming and bidirectional answers from a Mere server, and
+a 300 KB request and a 300 KB reply both go through.
+
+**The limits bite in an order, and the first one is not a window.** Measured against
+a python `h2` client before any of the code existed:
+
+| bound | bites at | what the client does |
+|---|---|---|
+| `wbuf` capacity, unchecked | 16385 | **nothing** — wrote past the buffer, returned success |
+| `SETTINGS_MAX_FRAME_SIZE` | 16385 | refuses the frame outright |
+| the flow-control window | 65536 | accepts no more DATA until it grants credit |
+| inbound, the same window | 65536 | stalls at exactly 65535 with nothing from us |
+
+A fix that added window accounting without splitting frames would still have failed
+at 16385. The `wbuf` row is the one with no symptom at all: `mem_copy_bytes` is a
+`memcpy` into a bump arena that records no allocation sizes, so nothing below could
+catch it. Demonstrated with a sentinel — 32 bytes into a 16-byte allocation changed
+the byte after it and reported 32.
+
+**Flow control makes the writer a reader.** A send whose window is exhausted has to
+consume the `WINDOW_UPDATE` that reopens it, so `send_data` contains a reader.
+
+### An export list is not a coverage list
+
+`H2.read_settings` read each SETTINGS entry's 32-bit value at offset `i+4` instead of
+`i+2` — two bytes past every six-byte entry, so the last entry of any payload read
+off the end. Wrong for as long as the file has existed, and **nothing called it**:
+the writer had a parity section from the start, the reader was exported, documented,
+and never fed a byte, and the server's own comment said its peer's settings were
+"read and ignored". The first caller found it on the first connection, at byte 42 of
+a 42-byte payload.
+
+Enumerating every export and counting call sites turned up a second accessor in the
+same state — `H2.error_code`, zero callers and zero coverage. It happens to be right.
+`http2_parity.sh` now feeds every payload accessor.
+
+### What poisoning found that valid traffic could not
+
+- **A well-behaved client cannot see a server that ignores its window.** Poisoning
+  the check to "a billion bytes" left the section green: a client that acknowledges
+  as it reads has already granted more credit by the time the next chunk arrives. The
+  gate now has a rude client that advertises 8192 and stops reading.
+- **`SETTINGS` adjusts a spent window by the delta; it does not reset it** — and the
+  two rules agree exactly when nothing has been spent. The SETTINGS now arrives
+  mid-response, driving the window to **-57343**; negative is legal, and a reduction
+  after credit was spent is the only way to get there.
+- **The SETTINGS branch of the window-wait loop recursed under a comment saying it
+  returned to its caller.** A peer may reopen a stalled stream with `SETTINGS` alone,
+  and this server would have waited forever. Found only because the delta poison was
+  undetectable for the same reason.
+- **One rule was written twice.** A `WINDOW_UPDATE` increment of 0 is a protocol
+  error; the frame loop ignored it and the window-wait loop failed on it. The wrong
+  one was on the path every ordinary frame takes.
+- **`SETTINGS_MAX_FRAME_SIZE` could not bind.** Its minimum *is* the default, so with
+  a 16384-byte write buffer `min(peer, capacity)` was always the capacity and reading
+  the setting could not change the answer. The buffer is 65536 now, which makes the
+  term live rather than deleting it.
+
+### Two wrong expectations, both the same slip
+
+The boundary in the *field* is not the boundary on the *wire*: a 16384-byte reply
+field is 16393 bytes of DATA once the gRPC prefix, the protobuf tag and a 3-byte
+varint are added, so it already needs two frames. That got the frame-count
+expectation wrong, and later a window grant that left the server nine bytes short.
+
+Also `h2`'s `local_settings.initial_window_size = ...` is silently ignored before
+`initiate_connection` — the client advertised 65535, the server correctly sent 65535,
+and the harness blamed the server.
+
+### Streaming is the list having more than one element
+
+The handler takes the request's messages as a `bytes list` and answers `RpcOk`,
+`RpcStream` or `RpcErr`; `H2Server.unary` adapts a one-in-one-out handler. There is
+no separate path for client-streaming. Interleaving is **not** supported and is said
+so rather than approximated: the handler runs after the request half-closes.
+
+`examples/hello.proto` gained five methods and `contrib/proto` needed no change —
+`stream` was already parsed, and our descriptor for the new schema matches
+`protoc` byte for byte.
+
 ## v0.1.282 — 2026-08-18
 
 _The FFI byte arena gets a `bytes` bridge._
