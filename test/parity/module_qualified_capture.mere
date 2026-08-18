@@ -1,0 +1,54 @@
+// Q-043: a capture whose name is MODULE-QUALIFIED becomes a struct field, and a
+// dot is not legal in a C identifier.
+//
+// An inner `let rec` that references `M.k` used to make the C backend emit
+//
+//     long long M.k;
+//
+// inside the closure's environment struct, so the generated C failed to parse and
+// the error pointed at a line the program never contained. The interpreter was
+// always correct, which is why nothing caught it until a dogfood compiled a
+// wire-format decoder — `Wire.delimited` inside a field-walking loop.
+//
+// The shape matters and is narrow. None of these were broken:
+//
+//   * `M.k` used at the top level
+//   * a top-level closure that uses `M.k`
+//   * a top-level closure passed to a function
+//   * an inner `let rec` capturing only its enclosing function's parameter
+//
+// Only an INNER `let rec` referencing a qualified name, which is the one path
+// where the name reaches the environment-struct emitter rather than being
+// referenced directly. The inner-LIFTED environment already flattened the dots;
+// the anonymous-closure environment did not, and the fix was to make the two
+// agree.
+//
+// Execution mode: 4 backends (interp + C + LLVM + wasm), diff = 0
+
+module M {
+  let k = 7;
+  let step = fn (x: int) -> x + 1;
+}
+
+// The failing shape: an inner `let rec` reading a qualified CONSTANT while also
+// capturing the enclosing parameter.
+let sum_k = fn (n: int) ->
+  let rec go = fn (i: int, acc: int) ->
+    if i >= n then acc else go (i + 1) (acc + M.k) in
+  go 0 0;
+
+// The same shape reading a qualified FUNCTION.
+let step_n = fn (n: int) ->
+  let rec go = fn (i: int, acc: int) ->
+    if i >= n then acc else go (i + 1) (M.step acc) in
+  go 0 0;
+
+// Qualified names in an inner closure that is not recursive.
+let via_map = fn (xs) -> list_map xs (fn (x: int) -> x + M.k);
+
+let _ = print (str_of_int (sum_k 3));            // 21
+let _ = print (str_of_int (sum_k 0));            // 0
+let _ = print (str_of_int (step_n 5));           // 5
+let _ = print (str_of_int (list_sum (via_map (Cons (1, Cons (2, Nil))))));  // 17
+let _ = print (str_of_int M.k);                  // 7 — the unqualified path
+print "ok"

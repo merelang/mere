@@ -4,6 +4,45 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.280 — 2026-08-18
+
+_A capture whose name has a dot in it._
+
+An inner `let rec` that referenced a module-qualified name put that name into the
+closure's environment struct verbatim, so the C backend emitted
+
+```c
+long long Wire.delimited;
+```
+
+and the generated C failed to parse. **The error pointed at a line the program did
+not contain**, which is the part that makes this worse than a refusal: the
+diagnostic was about generated C, not about the source that caused it. The
+interpreter was always correct, so nothing saw it until a dogfood compiled a
+wire-format decoder with `Wire.delimited` inside a field-walking loop.
+
+The shape is narrow, and measuring which variants were affected is what located it.
+Four were fine — `M.k` at the top level, a top-level closure using it, that closure
+passed to a function, and an inner `let rec` capturing only its enclosing
+parameter. Only an inner `let rec` referencing a qualified name reaches the
+environment-struct emitter instead of being referenced directly.
+
+**The fix is that two paths now agree.** The inner-LIFTED environment
+(`__env_local->…`) already ran capture names through `flatten_module_dots`; the
+anonymous-closure environment did not. Three sites — the struct's field
+declaration, the adapter's substitution, and the creation site that fills the
+environment in — now flatten too, with the substitution still *keyed* on the name
+as written because that is what `Var n` in the body says.
+
+`flatten_module_dots` is the identity for a name without a dot, so **every program
+that did not hit this emits byte-identical C**. And every output that does change
+was previously invalid C — a dot in a field name has never been legal — so there is
+no program whose working output moved.
+
+`test/parity/module_qualified_capture.mere` pins it on all four backends, including
+the variants that were *not* broken, so a future change cannot fix one path and
+regress the other.
+
 ## 2026-08-18 — A gRPC server in Mere, and two bugs loopback was hiding
 
 _`contrib/http2/server.mere` plus `examples/grpc_hello.mere`. `grpcurl` asks a Mere
