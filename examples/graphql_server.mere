@@ -1,0 +1,310 @@
+// examples/graphql_server.mere — a GraphQL endpoint, in Mere, over HTTP/1.1.
+//
+// This is the piece `contrib/graphql` was missing. The parser, printer, executor,
+// introspection and validation were all there and all gated against graphql-js — and
+// nothing in the repository called `Gexec.run`. A query language you cannot serve is a
+// library, not a server.
+//
+//   mere -c examples/graphql_server.mere > s.c && clang -O2 s.c -o s
+//   ./s 8080 &
+//   curl -sS -X POST -d '{"query":"{ user(id: 2) { name } }"}' http://127.0.0.1:8080/graphql
+//   # => {"data":{"user":{"name":"bob"}}}
+//
+// TWO THINGS THIS DEMONSTRATES THAT WERE NOT POSSIBLE BEFORE.
+//
+// `user(id: 2)`. The executor's resolvers are the DATA — a field is resolved by looking
+// its name up in the parent — which is what makes the parity gate meaningful, but it
+// also meant a field's value could not depend on an argument. `GFn` is a field that is a
+// function of its coerced arguments, and `user` / `users` below are why it exists.
+//
+// And that this file COMPILES. Every gate for `contrib/graphql` runs the interpreter, so
+// until recently nothing in that directory had been compiled to anything: a builtin
+// passed as a value and two inner-function captures each stopped a different backend.
+// The interpreter cannot listen on a socket (`tcp_listen` has no interp mock, and says
+// so), so a server was unreachable from both ends at once.
+//
+// WHY HTTP/1.1 ON RAW SOCKETS rather than `contrib/http`. That module is Node-hosted —
+// one extern plus glue JS, needing a Wasm build and `node` to run. This runs natively,
+// the same way `examples/grpc_hello.mere` does, and for the same reason: a server you can
+// hand somebody as a binary. The HTTP handling below is deliberately minimal and lives
+// here rather than in `contrib/` until a second program needs it; a real HTTP/1.1 module
+// owes a gate of its own for keep-alive, chunked bodies and header folding, none of which
+// are here.
+
+import "../contrib/graphql/exec.mere";
+import "../contrib/graphql/validate.mere";
+import "../contrib/json/json.mere";
+
+extern fn tcp_listen: int -> int;
+extern fn tcp_accept: int -> int;
+extern fn tcp_read: int -> int -> int -> int;
+extern fn tcp_write: int -> int -> int -> int;
+extern fn tcp_close: int -> unit;
+extern fn mem_alloc: int -> int;
+extern fn mem_to_bytes: int -> int -> bytes;
+extern fn mem_copy_bytes: int -> int -> bytes -> int;
+
+// --- the schema -----------------------------------------------------------
+//
+// `user(id: Int!)` and `users(first: Int = 10)` are the two argument-taking fields.
+// `first` has a DEFAULT, which is the case a resolver cannot see the difference in
+// unless the executor applies it: the resolver is handed `first: 10` for a query that
+// never wrote `first`.
+let sdl =
+  " type Query \{"
+  ++ "   hello: String"
+  ++ "   user(id: Int!): User"
+  ++ "   users(first: Int = 10): [User!]!"
+  ++ " }"
+  ++ " type User \{ id: Int! name: String! email: String }";
+
+// --- the data -------------------------------------------------------------
+// `だいち` is here so that a multi-byte body goes through the whole path — read, parse,
+// execute, serialise, frame — and comes back unchanged. It was added to catch a
+// `Content-Length` measured in characters and did NOT, because Mere's `str_len` already
+// counts bytes; the row kept its place for the thing it does check.
+let people = [(1, "alice", "alice@example.com"),
+              (2, "bob", "bob@example.com"),
+              (3, "carol", "carol@example.com"),
+              (4, "だいち", "daichi@example.com")];
+
+let user_value = fn (p) ->
+  let (id, name, email) = p in
+  GObj ([("id", GInt id), ("name", GStr name), ("email", GStr email)]);
+
+let rec arg_int = fn (args, name: str, dflt: int) ->
+  match args with
+  | [] -> dflt
+  | [(k, v), ...rest] ->
+    if str_eq k name then (match v with | GInt n -> n | _ -> dflt)
+    else arg_int rest name dflt;
+
+// --- the resolvers --------------------------------------------------------
+//
+// An absent user is `GNull` and not an error: `user: User` is nullable, so the
+// executor puts null there. Making it an error would be a different schema.
+// Hoisted to the top level because the Wasm backend does not take a `let rec` inside an
+// expression — a stated limitation of that codegen, and the shape a closure wants.
+let rec find_person = fn (ps, want: int) ->
+  match ps with
+  | [] -> GNull
+  | [p, ...rest] ->
+    let (id, _, _) = p in
+    if id == want then user_value p else find_person rest want;
+
+let resolve_user = GFn (fn (args) -> find_person people (arg_int args "id" 0));
+
+// `first` arrives as 10 for a query that omitted it, because the SCHEMA says so — the
+// resolver does not carry that number and could not know it.
+let resolve_users = GFn (fn (args) ->
+  GList (list_map (list_take people (arg_int args "first" 0)) user_value));
+
+let root = GObj ([("hello", GStr "hello from Mere"),
+                  ("user", resolve_user),
+                  ("users", resolve_users)]);
+
+// --- the endpoint ---------------------------------------------------------
+//
+// A JSON object with a `query` and optional `variables`, which is what every GraphQL
+// client posts. `contrib/json` reads it; the variables come across as `json` and have
+// to become `gvalue`, which is a conversion and not a cast — the two types exist for
+// different reasons and neither is the other's serialisation.
+let rec json_to_gvalue = fn (j: json) ->
+  match j with
+  | JNull -> GNull
+  | JBool b -> GBool b
+  // `contrib/json`'s `JNum` is an INT, not a float — a stated limitation of that
+  // parser, and it happens to be what GraphQL variables mostly are. A fractional
+  // variable would need a `json` that can hold one, which is that library's problem
+  // and not this file's; saying so is better than converting an int to a float and
+  // pretending the range came from the request.
+  | JNum n -> GInt n
+  | JStr s -> GStr s
+  | JArr xs -> GList (list_map xs json_to_gvalue)
+  | JObj fs -> GObj (list_map fs (fn (kv) -> let (k, v) = kv in (k, json_to_gvalue v)));
+
+let rec json_field = fn (fs, name: str) ->
+  match fs with
+  | [] -> []
+  | [(k, v), ...rest] -> if str_eq k name then Cons (v, []) else json_field rest name;
+
+let json_str_field = fn (fs, name: str) ->
+  match json_field fs name with
+  | [JStr s, ..._] -> s
+  | _ -> "";
+
+let json_vars = fn (fs) ->
+  match json_field fs "variables" with
+  | [JObj vs, ..._] -> list_map vs (fn (kv) -> let (k, v) = kv in (k, json_to_gvalue v))
+  | _ -> [];
+
+// A GraphQL error response is a 200 with an `errors` array — NOT an HTTP error status.
+// The request succeeded as HTTP; the operation failed as GraphQL. Same distinction the
+// gRPC side makes with trailers, and for the same reason.
+let error_body = fn (msg: str) ->
+  "\{\"errors\":[\{\"message\":" ++ Gexec.jstr msg ++ "}]}";
+
+// VALIDATE BEFORE EXECUTING, which is the whole point of having a validator: a
+// malformed request is answered with the rule that rejected it instead of failing
+// somewhere inside execution. 19 of the specification's 32 rules are implemented;
+// what is not is listed in contrib/graphql/README.md.
+let run_query = fn (q: str, vars) ->
+  let doc = Gparse.document q in
+  let schema = Gparse.document sdl in
+  match Gvalid.validate doc schema with
+  | [] -> Gexec.run_json (Gparse.document (q ++ sdl)) root vars
+  | [GVErr (rule, msg), ..._] -> error_body (rule ++ ": " ++ msg);
+
+// --- HTTP/1.1, the minimum a GraphQL client needs -----------------------
+//
+// A request is a line, headers, a blank line, then `Content-Length` bytes of body. What
+// is NOT here: keep-alive (the connection is closed after one exchange), chunked
+// transfer, header folding, and any header this endpoint does not read. Each of those is
+// a real rule and leaving them out is a decision rather than an oversight — a module in
+// `contrib/` would owe a gate for every one.
+
+let read_chunk = 65536;
+let empty = bytes_of_hex "";
+
+let recv = fn (cfd: int, rbuf: int) ->
+  let n = tcp_read cfd rbuf read_chunk in
+  if n <= 0 then empty else mem_to_bytes rbuf n;
+
+let send_str = fn (cfd: int, wbuf: int, s: str) ->
+  let b = bytes_of_str s in
+  let n = mem_copy_bytes wbuf 0 b in
+  let _ = tcp_write cfd wbuf n in
+  ();
+
+// The index just past `\r\n\r\n`, or 0 - 1 when the headers are not complete yet. A
+// scan and not a `str_index_of`, because the request arrives as bytes and turning a
+// partial read into a `str` to search it would decode something that is not there yet.
+let rec end_of_headers = fn (b: bytes, i: int) ->
+  if i + 3 >= bytes_len b then 0 - 1
+  else if bytes_get b i == 13 && bytes_get b (i + 1) == 10
+       && bytes_get b (i + 2) == 13 && bytes_get b (i + 3) == 10 then i + 4
+  else end_of_headers b (i + 1);
+
+// Byte-wise, which is correct for what it is used on: HTTP header NAMES are ASCII by
+// specification. It would mangle a non-ASCII string, and nothing hands it one.
+let rec lower_at = fn (s: str, i: int, buf) ->
+  if i >= str_len s then strbuf_to_str buf
+  else
+    let c = char_at s i in
+    let o = ord c in
+    let _ = strbuf_push buf (if o >= 65 && o <= 90 then chr (o + 32) else c) in
+    lower_at s (i + 1) buf;
+
+// `Content-Length` is matched case-INSENSITIVELY, because HTTP header names are and a
+// client is free to send `content-length`. curl sends one case and a hand-written client
+// another; a server that only accepts the spelling it was tested against is one that
+// works with exactly one client.
+let content_length = fn (headers: str) ->
+  let low = lower_at headers 0 (strbuf_new ()) in
+  let at = str_index_of low "content-length:" in
+  if at < 0 then 0
+  else
+    let rest = str_of_bytes (bytes_slice (bytes_of_str low) (at + 15)
+                              (str_len low - at - 15)) in
+    let line = match str_split rest "\r" with
+               | [l, ..._] -> l
+               | [] -> rest in
+    int_of_str (str_trim line);
+
+// Read until the headers are complete, then until the body is. Two loops and not one,
+// because the length of the body is in the headers: how much to read is not known until
+// the first part has arrived.
+let rec read_until_headers = fn (cfd: int, rbuf: int, acc: bytes) ->
+  let e = end_of_headers acc 0 in
+  if e >= 0 then (acc, e)
+  else
+    let more = recv cfd rbuf in
+    if bytes_len more == 0 then (acc, 0 - 1)
+    else read_until_headers cfd rbuf (bytes_concat acc more);
+
+let rec read_body = fn (cfd: int, rbuf: int, acc: bytes, want: int) ->
+  if bytes_len acc >= want then acc
+  else
+    let more = recv cfd rbuf in
+    if bytes_len more == 0 then acc
+    else read_body cfd rbuf (bytes_concat acc more) want;
+
+let http_response = fn (status: str, body: str) ->
+  "HTTP/1.1 " ++ status ++ "\r\n"
+  ++ "Content-Type: application/json\r\n"
+  // `Content-Length` counts BYTES, and MERE'S `str_len` ALREADY DOES — measured:
+  // `str_len "だいち"` is 9, and `char_at` returns one byte. So this is `str_len` and
+  // not a round trip through `bytes_of_str`, which is what the first version wrote
+  // under a comment claiming the two differed. Worth stating because a reader coming
+  // from a language whose `len` counts characters would add that conversion back.
+  ++ "Content-Length: " ++ str_of_int (str_len body) ++ "\r\n"
+  ++ "Connection: close\r\n\r\n" ++ body;
+
+// --- one request --------------------------------------------------------
+let serve_conn = fn (cfd: int, rbuf: int, wbuf: int) ->
+  let (buf, e) = read_until_headers cfd rbuf empty in
+  if e < 0 then tcp_close cfd
+  else
+    let headers = str_of_bytes (bytes_slice buf 0 e) in
+    let want = content_length headers in
+    let full = read_body cfd rbuf buf (e + want) in
+    let body = str_of_bytes (bytes_slice full e (bytes_len full - e)) in
+    let line = match str_split headers "\r" with
+               | [l, ..._] -> l
+               | [] -> headers in
+    let out =
+      if str_starts_with line "POST /graphql" then
+        (match try_or (fn (u) -> Cons (Json.parse_json body, [])) [] with
+         | [JObj fs, ..._] ->
+           let q = json_str_field fs "query" in
+           if str_eq q "" then
+             http_response "400 Bad Request" (error_body "the request body has no \"query\"")
+           else
+             // `try_or` and not a bare call: a query that does not parse must be a 400,
+             // not a dead server. A process that exits on a malformed request is a
+             // denial of service with extra steps.
+             (match try_or (fn (u) -> Cons (run_query q (json_vars fs), [])) [] with
+              | [r, ..._] -> http_response "200 OK" r
+              | [] -> http_response "400 Bad Request"
+                        (error_body "the query could not be parsed or executed"))
+         | _ -> http_response "400 Bad Request"
+                  (error_body "the request body is not a JSON object"))
+      else if str_starts_with line "GET /graphql" then
+        http_response "405 Method Not Allowed"
+          (error_body "GraphQL requests are POSTed as JSON to /graphql")
+      else
+        http_response "404 Not Found" (error_body ("no such endpoint: " ++ line)) in
+    let _ = send_str cfd wbuf out in
+    tcp_close cfd;
+
+let rec arg_at = fn (xs, k: int, dflt: str) ->
+  match xs with
+  | [] -> dflt
+  | [h, ...t] -> if k == 0 then h else arg_at t (k - 1) dflt;
+
+let argv = args ();
+let port = int_of_str (arg_at argv 0 "8080");
+// A BOUNDED number of connections, so a harness can start the server, make its requests
+// and have the process exit on its own. A test that has to kill its subject cannot tell
+// a clean exit from a hang — the same reason `H2Server.serve_n` exists.
+let count = int_of_str (arg_at argv 1 "0");
+
+let sfd = tcp_listen port;
+let _ = if sfd < 0 then fail ("graphql_server: could not listen on port " ++ str_of_int port)
+        else ();
+let rbuf = mem_alloc read_chunk;
+let wbuf = mem_alloc read_chunk;
+let _ = print ("graphql_server: listening on " ++ str_of_int port
+               ++ " (POST /graphql)"
+               ++ (if count == 0 then "" else " for " ++ str_of_int count ++ " request(s)"));
+
+let rec loop = fn (k: int) ->
+  if count > 0 && k >= count then ()
+  else
+    let cfd = tcp_accept sfd in
+    if cfd < 0 then ()
+    else
+      let _ = serve_conn cfd rbuf wbuf in
+      loop (k + 1);
+let _ = loop 0;
+print "graphql_server: done"

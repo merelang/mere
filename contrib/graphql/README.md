@@ -418,6 +418,47 @@ argument-reading resolver, so every backend has to agree with the interpreter ab
 all of it. **A library that only ever runs interpreted has untested portability and
 nothing says so.**
 
+## Serving it
+
+`examples/graphql_server.mere` is a GraphQL endpoint over HTTP/1.1, compiled with the
+C backend and driven by `curl` in `scripts/graphql_server_parity.sh`.
+
+**HTTP/1.1 on raw sockets rather than `contrib/http`**, which is Node-hosted — one
+extern plus glue JS, needing a Wasm build and `node`. This runs natively, the same way
+`examples/grpc_hello.mere` does, and for the same reason: a server you can hand
+somebody as a binary. The HTTP handling lives in the example rather than in `contrib/`
+until a second program needs it; a real HTTP/1.1 module owes a gate of its own for
+keep-alive, chunked bodies and header folding, none of which are there.
+
+### What that gate is for, and what it leaves alone
+
+Execution, introspection and validation are each gated exhaustively against graphql-js
+without a socket in sight. What is new is the **transport**, so that is what this
+checks: request framing, `Content-Length`, header case, the error statuses, and that a
+client which knows nothing about any of it gets JSON it can parse.
+
+Three things it found, all of which a polite client hides:
+
+- **The headers and the body can arrive in separate writes.** On loopback `curl` sends
+  one packet, so a server that parses whatever the first read gave it passes every
+  polite test. Removing the body-read loop does not fail the harness without a case
+  that splits the request.
+- **`content-length` is case-insensitive** and `curl` sends one spelling. A server that
+  only accepts the case it was tested against works with exactly one client.
+- **A valid request carrying an invalid query reached nothing.** Every other case was
+  either a well-formed query or a broken request, so poisoning the endpoint to skip
+  validation entirely left the gate green.
+
+### And one thing the gate could not find, because there was nothing there
+
+A non-ASCII fixture row went in to catch a `Content-Length` measured in characters. It
+did not — **Mere's `str_len` already counts bytes** (`str_len "だいち"` is 9, and
+`char_at` returns one byte), so the poison and the correct code were the same program
+and no corpus could tell them apart. The round trip through `bytes_of_str` came out and
+the comment claiming the two differed came out with it. The row stayed, for the thing it
+does check: that a multi-byte body survives read, parse, execute, serialise and framing
+unchanged.
+
 ## Not here yet
 
 - **13 validation rules**, each named on the harness's gap list and each exercised by

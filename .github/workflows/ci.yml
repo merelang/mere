@@ -292,6 +292,9 @@ jobs:
       - name: graphql_validate_parity (vs graphql-js validate)
         run: sh scripts/graphql_validate_parity.sh
 
+      - name: graphql_server_parity (a native GraphQL endpoint, real clients)
+        run: sh scripts/graphql_server_parity.sh
+
       # HTTP/2 framing against hyperframe, in both directions, plus the reserved
       # bit of the stream identifier — the one field that behaves correctly
       # against every well-behaved peer while being wrong.
