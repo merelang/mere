@@ -1,0 +1,152 @@
+// contrib/proto/descriptor.mere — a parsed `.proto` as a `FileDescriptorSet`.
+//
+// THE BOOTSTRAP CLOSES HERE. A descriptor set is itself a protobuf message, so the
+// thing that reads schemas is written with the thing that reads wire bytes, and one
+// oracle — `protoc --descriptor_set_out` — checks both at once. If the wire layer
+// mis-encodes a varint, this file's output stops matching; if this file gets a field
+// number wrong, the same diff says so.
+//
+// THE MESSAGE BEING WRITTEN IS PROTO2, AND THAT REVERSES A RULE. `descriptor.proto`
+// is proto2, so a field that is set is written even when its value is a default:
+// an enum value with `number: 0` appears on the wire. The B1 gate had to learn the
+// opposite — proto3 OMITS a scalar holding its default, which is why `v: 0` could
+// not be swept there. Same encoder, opposite rule, decided by the schema being
+// encoded rather than by the encoder.
+//
+// Field numbers, all measured off `protoc --decode_raw` rather than recalled:
+//
+//   FileDescriptorSet   file=1
+//   FileDescriptorProto name=1 package=2 message_type=4 enum_type=5 service=6
+//                       syntax=12
+//   DescriptorProto     name=1 field=2 nested_type=3 enum_type=4
+//   FieldDescriptorProto name=1 number=3 label=4 type=5 type_name=6 json_name=10
+//   EnumDescriptorProto name=1 value=2
+//   EnumValueDescriptorProto name=1 number=2
+//   ServiceDescriptorProto name=1 method=2
+//   MethodDescriptorProto name=1 input_type=2 output_type=3
+//                        client_streaming=5 server_streaming=6
+
+import "wire.mere";
+import "parse.mere";
+
+module Pdesc {
+
+  let label_optional = 1;
+  let label_repeated = 3;
+
+  // A submessage is built into its own buffer because its length has to be known
+  // before its tag can be written — the same reason `Wire.put_delimited` exists.
+  let sub = fn (f) ->
+    let b = vec_new () in
+    let _ = f b in
+    bytes_of_vec b;
+
+  let put_msg = fn (out, field: int, payload: bytes) ->
+    let _ = Wire.tag out field Wire.delimited in
+    Wire.put_bytes out payload;
+
+  let put_string = fn (out, field: int, s: str) ->
+    let _ = Wire.tag out field Wire.delimited in
+    Wire.put_str out s;
+
+  let put_int = fn (out, field: int, v: int) ->
+    let _ = Wire.tag out field Wire.varint in
+    Wire.put_varint out v;
+
+  let put_bool = fn (out, field: int, v: bool) ->
+    let _ = Wire.tag out field Wire.varint in
+    Wire.put_varint out (if v then 1 else 0);
+
+  // --- FieldDescriptorProto ------------------------------------------------
+  // `label` and `json_name` are ALWAYS written: descriptor.proto is proto2, so
+  // protoc emits them for every field and a descriptor without them differs.
+  let field_desc = fn (decls, scope: str, f: pfield) ->
+    match f with
+    | PField (name, num, rep, ty) ->
+      sub (fn (b) ->
+        let _ = put_string b 1 name in
+        let _ = put_int b 3 num in
+        let _ = put_int b 4 (if rep then label_repeated else label_optional) in
+        match ty with
+        | PScalar (_, code) ->
+          let _ = put_int b 5 code in
+          put_string b 10 (Pparse.json_name name)
+        | PRef n ->
+          let (q, is_msg) = Pparse.resolve decls scope n in
+          let _ = put_int b 5 (if is_msg then Pparse.ty_message else Pparse.ty_enum) in
+          let _ = put_string b 6 q in
+          put_string b 10 (Pparse.json_name name));
+
+  // --- EnumDescriptorProto -------------------------------------------------
+  let enum_desc = fn (e: penum) ->
+    match e with
+    | PEnum (name, vals) ->
+      sub (fn (b) ->
+        let _ = put_string b 1 name in
+        list_iter vals (fn (v) ->
+          match v with
+          | PEnumV (vn, vnum) ->
+            // `number: 0` IS written. proto2 presence, not proto3 defaults.
+            put_msg b 2 (sub (fn (c) ->
+              let _ = put_string c 1 vn in
+              put_int c 2 vnum))));
+
+  // --- DescriptorProto -----------------------------------------------------
+  // The scope grows as it descends, because a field's type reference resolves from
+  // the innermost enclosing message outward.
+  let rec msg_desc = fn (decls, scope: str, m: pmsg) ->
+    match m with
+    | PMsg (name, fields, subs, enums) ->
+      let inner = scope ++ "." ++ name in
+      sub (fn (b) ->
+        let _ = put_string b 1 name in
+        let _ = list_iter fields (fn (f) -> put_msg b 2 (field_desc decls inner f)) in
+        let _ = list_iter subs (fn (sm) -> put_msg b 3 (msg_desc decls inner sm)) in
+        list_iter enums (fn (e) -> put_msg b 4 (enum_desc e)));
+
+  // --- ServiceDescriptorProto ----------------------------------------------
+  // `client_streaming` / `server_streaming` are only written when true: they are
+  // proto2 optional bools and protoc omits an unset one, so writing `false` would
+  // add bytes protoc does not.
+  let svc_desc = fn (decls, scope: str, v: psvc) ->
+    match v with
+    | PSvc (name, ms) ->
+      sub (fn (b) ->
+        let _ = put_string b 1 name in
+        list_iter ms (fn (m) ->
+          match m with
+          | PMethod (mn, inty, outty, cs, ss, has_body) ->
+            put_msg b 2 (sub (fn (c) ->
+              let (qi, _) = Pparse.resolve decls scope inty in
+              let (qo, _) = Pparse.resolve decls scope outty in
+              let _ = put_string c 1 mn in
+              let _ = put_string c 2 qi in
+              let _ = put_string c 3 qo in
+              // `options` (field 4) as an EMPTY submessage when the method was
+              // written with `{}`. Presence is the whole content: protoc emits
+              // `22 00` there and nothing at all for the `;` form.
+              let _ = if has_body then put_msg c 4 (bytes_of_hex "") else () in
+              let _ = if cs then put_bool c 5 true else () in
+              if ss then put_bool c 6 true else ()))));
+
+  // --- FileDescriptorProto / FileDescriptorSet -----------------------------
+  let file_desc = fn (f: pfile) ->
+    let decls = Pparse.collect f in
+    match f with
+    | PFile (fname, pkg, msgs, enums, svcs) ->
+      let scope = if str_eq pkg "" then "" else "." ++ pkg in
+      sub (fn (b) ->
+        let _ = put_string b 1 fname in
+        let _ = if str_eq pkg "" then () else put_string b 2 pkg in
+        let _ = list_iter msgs (fn (m) -> put_msg b 4 (msg_desc decls scope m)) in
+        let _ = list_iter enums (fn (e) -> put_msg b 5 (enum_desc e)) in
+        let _ = list_iter svcs (fn (v) -> put_msg b 6 (svc_desc decls scope v)) in
+        put_string b 12 "proto3");
+
+  let file_set = fn (f: pfile) ->
+    let b = vec_new () in
+    let _ = put_msg b 1 (file_desc f) in
+    bytes_of_vec b;
+
+  let of_source = fn (fname: str, src: str) -> file_set (Pparse.parse_file fname src);
+}

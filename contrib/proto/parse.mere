@@ -1,0 +1,398 @@
+// contrib/proto/parse.mere — a `.proto` file into descriptor form.
+//
+// The output is the shape `descriptor.mere` encodes as a `FileDescriptorSet`, which
+// is itself a protobuf message — so `contrib/proto/wire.mere` serialises it and the
+// bootstrap closes: the thing that reads schemas is checked by the thing that reads
+// wire bytes, and `protoc --descriptor_set_out` is the oracle for both.
+//
+// SCOPE is a proto3 subset: `syntax`, `package`, messages (fields, nested messages,
+// nested enums), enums, and services. Scalars, message and enum field types, and
+// `repeated`. Everything else — `oneof`, `map`, `import`, `option`, `reserved`,
+// groups, and proto2 syntax — is REFUSED with a named message rather than skipped,
+// because a schema silently missing a field produces a descriptor that is wrong in
+// a way nothing downstream can notice.
+//
+// TWO THINGS THAT WERE MEASURED, not recalled:
+//
+//  1. `type_name` is FULLY QUALIFIED WITH A LEADING DOT — `.pk.N`, not `N`. A
+//     reference resolves from the innermost scope outward, so the same `N` means
+//     different things at different depths.
+//
+//  2. `json_name` is always present, and the rule is: drop underscores and
+//     upper-case whatever follows each one. Measured against protoc —
+//     `my_field` -> `myField`, `a_b_c` -> `aBC`, `trailing_` -> `trailing`,
+//     `__lead` -> `Lead`, `num_2_x` -> `num2X`. Guessing "camelCase" gets the last
+//     three wrong.
+
+// A scalar carries its FieldDescriptorProto type code; a reference carries a name
+// that resolution has to turn into a code and a qualified name.
+type pty = PScalar of (str * int) | PRef of str;
+
+type pfield = PField of (str * int * bool * pty);
+type penumv = PEnumV of (str * int);
+type penum = PEnum of (str * penumv list);
+type pmsg = PMsg of (str * pfield list * pmsg list * penum list);
+// The last flag is whether the method was written with a `{}` BODY rather than a
+// `;`. It is not cosmetic: an empty body sets MethodOptions to an empty submessage,
+// so protoc emits `22 00` for it and nothing for the semicolon form. Measured — the
+// two spellings differ by exactly those two bytes.
+type pmethod = PMethod of (str * str * str * bool * bool * bool);
+type psvc = PSvc of (str * pmethod list);
+type pfile = PFile of (str * str * pmsg list * penum list * psvc list);
+
+// A declaration's fully-qualified name and whether it is a message or an enum,
+// which is what decides TYPE_MESSAGE vs TYPE_ENUM.
+type pdecl = PDecl of (str * bool);
+
+module Pparse {
+
+  let rec rev_list = fn (xs, acc) ->
+    match xs with
+    | [] -> acc
+    | [h, ...t] -> rev_list t (Cons (h, acc));
+
+  let rec appl = fn (a, b) ->
+    match a with
+    | [] -> b
+    | [h, ...t] -> Cons (h, appl t b);
+
+  // --- FieldDescriptorProto type codes (descriptor.proto's enum) -----------
+  let ty_double = 1;   let ty_float = 2;    let ty_int64 = 3;   let ty_uint64 = 4;
+  let ty_int32 = 5;    let ty_fixed64 = 6;  let ty_fixed32 = 7; let ty_bool = 8;
+  let ty_string = 9;   let ty_message = 11; let ty_bytes = 12;  let ty_uint32 = 13;
+  let ty_enum = 14;    let ty_sfixed32 = 15; let ty_sfixed64 = 16;
+  let ty_sint32 = 17;  let ty_sint64 = 18;
+
+  let scalar_code = fn (n: str) ->
+    if str_eq n "double" then Cons (ty_double, [])
+    else if str_eq n "float" then Cons (ty_float, [])
+    else if str_eq n "int64" then Cons (ty_int64, [])
+    else if str_eq n "uint64" then Cons (ty_uint64, [])
+    else if str_eq n "int32" then Cons (ty_int32, [])
+    else if str_eq n "fixed64" then Cons (ty_fixed64, [])
+    else if str_eq n "fixed32" then Cons (ty_fixed32, [])
+    else if str_eq n "bool" then Cons (ty_bool, [])
+    else if str_eq n "string" then Cons (ty_string, [])
+    else if str_eq n "bytes" then Cons (ty_bytes, [])
+    else if str_eq n "uint32" then Cons (ty_uint32, [])
+    else if str_eq n "sfixed32" then Cons (ty_sfixed32, [])
+    else if str_eq n "sfixed64" then Cons (ty_sfixed64, [])
+    else if str_eq n "sint32" then Cons (ty_sint32, [])
+    else if str_eq n "sint64" then Cons (ty_sint64, [])
+    else [];
+
+  // --- json_name -----------------------------------------------------------
+  // Underscores go, and the character after each one is upper-cased. A digit has
+  // no upper case, so `num_2_x` becomes `num2X` rather than `num_2X` or `num2x`.
+  let rec json_at = fn (s: str, i: int, up: bool, buf) ->
+    if i >= str_len s then strbuf_to_str buf
+    else
+      let c = char_at s i in
+      if c == "_" then json_at s (i + 1) true buf
+      else
+        let _ = strbuf_push buf (if up then to_upper c else c) in
+        json_at s (i + 1) false buf;
+
+  let json_name = fn (s: str) -> json_at s 0 false (strbuf_new ());
+
+  // --- tokens --------------------------------------------------------------
+  // `.proto` needs no separate token type: the only things the grammar looks at
+  // are identifiers, integers, string literals and single punctuation characters.
+  let is_ident_start = fn (c: str) -> is_alpha c || c == "_";
+  let is_ident_cont = fn (c: str) -> is_alpha c || is_digit c || c == "_" || c == ".";
+
+  let rec skip_ws = fn (s: str, i: int) ->
+    if i >= str_len s then i
+    else
+      let c = char_at s i in
+      if is_space c then skip_ws s (i + 1)
+      else if c == "/" && i + 1 < str_len s && char_at s (i + 1) == "/" then
+        let rec eol = fn (j: int) ->
+          if j >= str_len s then j
+          else if char_at s j == "\n" then j
+          else eol (j + 1) in
+        skip_ws s (eol (i + 2))
+      else if c == "/" && i + 1 < str_len s && char_at s (i + 1) == "*" then
+        let rec close = fn (j: int) ->
+          if j + 1 >= str_len s then str_len s
+          else if char_at s j == "*" && char_at s (j + 1) == "/" then j + 2
+          else close (j + 1) in
+        skip_ws s (close (i + 2))
+      else i;
+
+  let rec take_ident = fn (s: str, i: int, buf) ->
+    if i < str_len s && is_ident_cont (char_at s i) then
+      let _ = strbuf_push buf (char_at s i) in
+      take_ident s (i + 1) buf
+    else (strbuf_to_str buf, i);
+
+  let rec take_digits = fn (s: str, i: int, buf) ->
+    if i < str_len s && is_digit (char_at s i) then
+      let _ = strbuf_push buf (char_at s i) in
+      take_digits s (i + 1) buf
+    else (strbuf_to_str buf, i);
+
+  let rec take_string = fn (s: str, i: int, buf) ->
+    if i >= str_len s then fail "proto: unterminated string literal"
+    else if char_at s i == "\"" then (strbuf_to_str buf, i + 1)
+    else
+      let _ = strbuf_push buf (char_at s i) in
+      take_string s (i + 1) buf;
+
+  let at = fn (i: int) -> " at offset " ++ str_of_int i;
+
+  let expect_ch = fn (s: str, i: int, c: str) ->
+    let j = skip_ws s i in
+    if j < str_len s && char_at s j == c then j + 1
+    else fail ("proto: expected '" ++ c ++ "'" ++ at j);
+
+  let peek = fn (s: str, i: int) ->
+    let j = skip_ws s i in
+    if j >= str_len s then "" else char_at s j;
+
+  let word = fn (s: str, i: int) ->
+    let j = skip_ws s i in
+    if j < str_len s && is_ident_start (char_at s j) then take_ident s j (strbuf_new ())
+    else fail ("proto: expected a name" ++ at j);
+
+  // A TYPE reference may be absolute — `.pk.M` — which `word` rejects because a
+  // leading dot is not an identifier start. It is a different production, so it
+  // gets a different reader rather than a looser `word` that would also accept
+  // `.foo` as a field name.
+  let type_word = fn (s: str, i: int) ->
+    let j = skip_ws s i in
+    if j < str_len s && char_at s j == "." then
+      let (rest, k) = take_ident s (j + 1) (strbuf_new ()) in
+      ("." ++ rest, k)
+    else word s j;
+
+  let number = fn (s: str, i: int) ->
+    let j = skip_ws s i in
+    let (d, k) = take_digits s j (strbuf_new ()) in
+    if str_len d == 0 then fail ("proto: expected a number" ++ at j)
+    else (int_of_str d, k);
+
+  // Anything the subset does not implement is refused by name. A skipped
+  // construct would produce a descriptor that is wrong where nothing looks.
+  // `[deprecated = true]` after a field. protoc accepts it; this parser does not,
+  // and the difference has to be a NAMED refusal — meeting it with "expected ';'"
+  // reports a syntax error about a file that is syntactically fine.
+  let field_end = fn (s: str, i: int) ->
+    if peek s i == "[" then
+      fail ("proto: field options are not in this parser's subset" ++ at (skip_ws s i)
+            ++ " (oneof / map / import / option / reserved / extend / group and"
+            ++ " proto2 syntax are refused rather than skipped)")
+    else expect_ch s i ";";
+
+  let refuse = fn (kw: str, i: int) ->
+    fail ("proto: '" ++ kw ++ "' is not in this parser's subset" ++ at i
+          ++ " (oneof / map / import / option / reserved / extend / group and"
+          ++ " proto2 syntax are refused rather than skipped)");
+
+  // --- messages ------------------------------------------------------------
+  let rec parse_msg_body = fn (s: str, i: int, fields, msgs, enums) ->
+    let j = skip_ws s i in
+    if j >= str_len s then fail "proto: unterminated message"
+    else if char_at s j == "}" then
+      (rev_list fields [], rev_list msgs [], rev_list enums [], j + 1)
+    else if char_at s j == ";" then parse_msg_body s (j + 1) fields msgs enums
+    else if char_at s j == "." then
+      // An absolute type at the start of a field line: `.pk.M m = 1;`
+      let (tyname, k) = type_word s j in
+      let (fname, k4) = word s k in
+      let k5 = expect_ch s k4 "=" in
+      let (num, k6) = number s k5 in
+      let k7 = field_end s k6 in
+      parse_msg_body s k7 (Cons (PField (fname, num, false, PRef tyname), fields)) msgs enums
+    else
+      let (kw, k) = word s j in
+      if str_eq kw "message" then
+        let (m, k2) = parse_message s k in
+        parse_msg_body s k2 fields (Cons (m, msgs)) enums
+      else if str_eq kw "enum" then
+        let (e, k2) = parse_enum s k in
+        parse_msg_body s k2 fields msgs (Cons (e, enums))
+      else if str_eq kw "oneof" || str_eq kw "map" || str_eq kw "reserved"
+           || str_eq kw "option" || str_eq kw "extend" || str_eq kw "group" then
+        refuse kw j
+      else
+        // A field: [repeated] Type name = number ;
+        let (rep, tyname, k2) =
+          if str_eq kw "repeated" then
+            let (t, k3) = type_word s k in (true, t, k3)
+          else if str_eq kw "optional" || str_eq kw "required" then refuse kw j
+          else (false, kw, k) in
+        let (fname, k4) = word s k2 in
+        let k5 = expect_ch s k4 "=" in
+        let (num, k6) = number s k5 in
+        let k7 = field_end s k6 in
+        let ty = match scalar_code tyname with
+                 | [c, ..._] -> PScalar (tyname, c)
+                 | [] -> PRef tyname in
+        parse_msg_body s k7 (Cons (PField (fname, num, rep, ty), fields)) msgs enums
+  and parse_message = fn (s: str, i: int) ->
+    let (name, j) = word s i in
+    let k = expect_ch s j "\{" in
+    let (fields, msgs, enums, k2) = parse_msg_body s k [] [] [] in
+    (PMsg (name, fields, msgs, enums), k2)
+  and parse_enum = fn (s: str, i: int) ->
+    let (name, j) = word s i in
+    let k = expect_ch s j "\{" in
+    let rec body = fn (p: int, vals) ->
+      let q = skip_ws s p in
+      if q >= str_len s then fail "proto: unterminated enum"
+      else if char_at s q == "}" then (PEnum (name, rev_list vals []), q + 1)
+      else if char_at s q == ";" then body (q + 1) vals
+      else
+        let (vn, r) = word s q in
+        if str_eq vn "option" || str_eq vn "reserved" then refuse vn q
+        else
+          let r2 = expect_ch s r "=" in
+          let (num, r3) = number s r2 in
+          let r4 = expect_ch s r3 ";" in
+          body r4 (Cons (PEnumV (vn, num), vals)) in
+    body k [];
+
+  // --- services ------------------------------------------------------------
+  let parse_service = fn (s: str, i: int) ->
+    let (name, j) = word s i in
+    let k = expect_ch s j "\{" in
+    let rec body = fn (p: int, ms) ->
+      let q = skip_ws s p in
+      if q >= str_len s then fail "proto: unterminated service"
+      else if char_at s q == "}" then (PSvc (name, rev_list ms []), q + 1)
+      else if char_at s q == ";" then body (q + 1) ms
+      else
+        let (kw, r) = word s q in
+        if str_eq kw "option" then refuse kw q
+        else if str_eq kw "rpc" then
+          let (mname, r1) = word s r in
+          let r2 = expect_ch s r1 "(" in
+          // `stream` before the type is what makes a method streaming, and it is a
+          // separate flag in the descriptor rather than part of the type name.
+          let (cs, inty, r3) =
+            let (w1, ra) = type_word s r2 in
+            if str_eq w1 "stream" then let (t, rb) = type_word s ra in (true, t, rb)
+            else (false, w1, ra) in
+          let r4 = expect_ch s r3 ")" in
+          let (rw, r5) = word s r4 in
+          let r6 = if str_eq rw "returns" then r5
+                   else fail ("proto: expected 'returns'" ++ at r4) in
+          let r7 = expect_ch s r6 "(" in
+          let (ss, outty, r8) =
+            let (w2, rc) = type_word s r7 in
+            if str_eq w2 "stream" then let (t, rd) = type_word s rc in (true, t, rd)
+            else (false, w2, rc) in
+          let r9 = expect_ch s r8 ")" in
+          // A method body is either `;` or `{ }`. Only the EMPTY braces form is
+          // accepted — a body with options in it would need the option grammar,
+          // which is outside the subset and is refused where options are read.
+          let (has_body, r10) =
+            if peek s r9 == ";" then (false, expect_ch s r9 ";")
+            else
+              let a = expect_ch s r9 "\{" in
+              let b2 = skip_ws s a in
+              if b2 < str_len s && char_at s b2 == "}" then (true, b2 + 1)
+              else refuse "option" b2 in
+          body r10 (Cons (PMethod (mname, inty, outty, cs, ss, has_body), ms))
+        else fail ("proto: expected 'rpc' in a service" ++ at q) in
+    body k [];
+
+  // --- the file ------------------------------------------------------------
+  let parse_file = fn (fname: str, s: str) ->
+    let rec top = fn (i: int, pkg: str, msgs, enums, svcs) ->
+      let j = skip_ws s i in
+      if j >= str_len s then
+        PFile (fname, pkg, rev_list msgs [], rev_list enums [], rev_list svcs [])
+      else if char_at s j == ";" then top (j + 1) pkg msgs enums svcs
+      else
+        let (kw, k) = word s j in
+        if str_eq kw "syntax" then
+          let k1 = expect_ch s k "=" in
+          let k2 = skip_ws s k1 in
+          let k3 = if char_at s k2 == "\"" then k2 + 1
+                   else fail ("proto: expected a quoted syntax" ++ at k2) in
+          let (v, k4) = take_string s k3 (strbuf_new ()) in
+          let k5 = expect_ch s k4 ";" in
+          if str_eq v "proto3" then top k5 pkg msgs enums svcs
+          else fail ("proto: only proto3 is in this parser's subset, got '" ++ v ++ "'")
+        else if str_eq kw "package" then
+          let (p, k1) = word s k in
+          let k2 = expect_ch s k1 ";" in
+          top k2 p msgs enums svcs
+        else if str_eq kw "message" then
+          let (m, k1) = parse_message s k in
+          top k1 pkg (Cons (m, msgs)) enums svcs
+        else if str_eq kw "enum" then
+          let (e, k1) = parse_enum s k in
+          top k1 pkg msgs (Cons (e, enums)) svcs
+        else if str_eq kw "service" then
+          let (v, k1) = parse_service s k in
+          top k1 pkg msgs enums (Cons (v, svcs))
+        else refuse kw j in
+    top 0 "" [] [] [];
+
+  // --- name resolution -----------------------------------------------------
+  //
+  // Every declaration's fully-qualified name, collected so a reference can be
+  // resolved and so its KIND (message or enum) can decide TYPE_MESSAGE vs
+  // TYPE_ENUM. Nested declarations qualify under their parent, which is why this
+  // walks rather than reading the top level.
+  let rec collect_msg = fn (prefix: str, m: pmsg, acc) ->
+    match m with
+    | PMsg (name, _, subs, enums) ->
+      let q = prefix ++ "." ++ name in
+      let acc2 = Cons (PDecl (q, true), acc) in
+      let acc3 = list_fold enums acc2 (fn (a, e) ->
+                   match e with | PEnum (en, _) -> Cons (PDecl (q ++ "." ++ en, false), a)) in
+      list_fold subs acc3 (fn (a, sm) -> collect_msg q sm a);
+
+  let collect = fn (f: pfile) ->
+    match f with
+    | PFile (_, pkg, msgs, enums, _) ->
+      let base = if str_eq pkg "" then "" else "." ++ pkg in
+      let a1 = list_fold enums [] (fn (a, e) ->
+                 match e with | PEnum (en, _) -> Cons (PDecl (base ++ "." ++ en, false), a)) in
+      list_fold msgs a1 (fn (a, m) -> collect_msg base m a);
+
+  let rec decl_find = fn (decls, q: str) ->
+    match decls with
+    | [] -> []
+    | [d, ...rest] ->
+      match d with
+      | PDecl (n, is_msg) -> if str_eq n q then Cons (is_msg, []) else decl_find rest q;
+
+  // Innermost scope outward: inside `.pk.Outer`, a reference to `N` is
+  // `.pk.Outer.N` if that exists, otherwise `.pk.N`, otherwise `.N`. Getting the
+  // order wrong makes a name mean a different type at a different depth, and the
+  // descriptor would still be well-formed.
+  // There is no substring builtin, so a prefix is built rather than sliced.
+  let rec take_upto = fn (q: str, n: int, i: int, buf) ->
+    if i >= n then strbuf_to_str buf
+    else
+      let _ = strbuf_push buf (char_at q i) in
+      take_upto q n (i + 1) buf;
+
+  let strip_last = fn (q: str) ->
+    let rec go = fn (i: int, last: int) ->
+      if i >= str_len q then last
+      else go (i + 1) (if char_at q i == "." then i else last) in
+    let p = go 0 (0 - 1) in
+    if p <= 0 then "" else take_upto q p 0 (strbuf_new ());
+
+  let resolve = fn (decls, scope: str, name: str) ->
+    // An already-absolute reference is used as written.
+    if str_len name > 0 && char_at name 0 == "." then
+      match decl_find decls name with
+      | [is_msg, ..._] -> (name, is_msg)
+      | [] -> fail ("proto: no such type: " ++ name)
+    else
+      let rec try_scope = fn (sc: str) ->
+        let cand = sc ++ "." ++ name in
+        match decl_find decls cand with
+        | [is_msg, ..._] -> Cons ((cand, is_msg), [])
+        | [] -> if str_eq sc "" then [] else try_scope (strip_last sc) in
+      match try_scope scope with
+      | [(q, is_msg), ..._] -> (q, is_msg)
+      | [] -> fail ("proto: no such type: " ++ name ++ " (from scope '" ++ scope ++ "')");
+}

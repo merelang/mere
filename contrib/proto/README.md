@@ -9,6 +9,8 @@ a hand-written one and a schema-less inspector share it.
 
 | file | exports | lines |
 |---|---|---|
+| `parse.mere` | `type pty/pfield/penum/pmsg/pmethod/psvc/pfile/pdecl`; `module Pparse { parse_file, collect, resolve, json_name, type codes }` | ~360 |
+| `descriptor.mere` | `module Pdesc { of_source, file_set, file_desc }` | ~150 |
 | `wire.mere` | `module Wire { varint / fixed64 / delimited / fixed32 constants; lshr; put_varint / tag / zz32 / zz64 / put_fixed32 / put_fixed64 / put_delimited / put_bytes / put_str; get_varint / get_tag / unzz32 / unzz64 / get_fixed32 / get_fixed64 / get_delimited / skip_value }` | ~185 |
 
 ## Usage
@@ -76,10 +78,62 @@ Related: integer literals above 2^62−1 cannot be written at all (the lexer die
 with an uncaught `Failure("int_of_string")`), so the edge values in the harness
 are *computed* from 2^62−1.
 
+## The schema half
+
+`parse.mere` reads a `.proto` file and `descriptor.mere` writes it out as a
+`FileDescriptorSet`.
+
+```mere
+import "contrib/proto/descriptor.mere";
+hex_of_bytes (Pdesc.of_source "a.proto" (read_file "a.proto"))
+```
+
+**The bootstrap closes here.** A descriptor set is itself a protobuf message, so the
+code that reads a schema is serialised by the code that reads wire bytes, and one
+oracle — `protoc --descriptor_set_out` — checks both layers at once. If the varint
+encoder is wrong the descriptor diff says so; if a descriptor field number is wrong,
+the same diff says so.
+
+`scripts/proto_desc_parity.sh` compares **bytes** across 72 derived files. Not a
+decoded rendering and not a field walk: a descriptor that decodes to the same text
+but different bytes is still a different descriptor to anything that hashes or
+caches it.
+
+### Three things the oracle taught before any of it was written
+
+- **`descriptor.proto` is proto2, which reverses a rule.** A set field is written
+  even at its default, so an enum value's `number: 0` appears on the wire. The wire
+  harness had to learn the opposite for proto3 — `v: 0` could not be swept there.
+  Same encoder, opposite rule, decided by the schema being encoded.
+- **`json_name` is always present and is not plain camelCase.** Measured:
+  `my_field` → `myField`, `a_b_c` → `aBC`, `already_Camel` → `alreadyCamel`,
+  `trailing_` → `trailing`, `__lead` → `Lead`, `num_2_x` → `num2X`. The rule is
+  "drop underscores, upper-case what follows each one" — guessing camelCase gets the
+  last three wrong.
+- **`rpc U (Q) returns (R) {}` is not the same as `rpc U (Q) returns (R);`.** The
+  empty body sets `MethodOptions` to an empty submessage, so protoc emits `22 00`
+  for it and nothing for the semicolon form. That two-byte difference was the last
+  file of 72 to match.
+
+`type_name` is fully qualified with a **leading dot** (`.pk.N`), and a reference
+resolves from the innermost scope outward — so the same simple name means different
+types at different depths, and getting the order wrong produces a descriptor that is
+still well-formed.
+
+### The subset is refused, not skipped
+
+`oneof`, `map`, `import`, `option` (file and field), `reserved`, `optional`,
+`extend`, `group` and proto2 syntax are outside the subset. **protoc accepts all of
+them**, so the oracle cannot be asked whether they are wrong — they are simply not
+implemented. What the harness checks instead is that the parser **refuses each one by
+name**: a skipped construct would produce a descriptor that is wrong where nothing
+looks.
+
 ## Not here yet
 
-- Schema-driven encode/decode. A `.proto` parser and a generator that emits
-  records plus `encode_*` / `decode_*` are the next two slices.
+- **A generator**: `foo.proto` → `foo_pb.mere` with records and
+  `encode_*` / `decode_*`. The descriptor is the input it needs, so this is the next
+  slice rather than a new direction.
 - `double` / `float` fields. They need IEEE-754 bit patterns; a bit-exact
   conversion from existing language features has been measured to work (24 values,
   no differences) but costs a scaling loop per value.

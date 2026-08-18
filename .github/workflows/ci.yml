@@ -255,6 +255,14 @@ jobs:
       - name: proto_parity (vs protoc's bytes)
         run: sh scripts/proto_parity.sh
 
+      # The .proto parser and descriptor encoder, byte-identical to
+      # `protoc --descriptor_set_out`. This is where the bootstrap closes: a
+      # descriptor set is itself a protobuf message, so the code that reads a
+      # schema is serialised by the code that reads wire bytes and one oracle
+      # checks both layers at once.
+      - name: proto_desc_parity (vs protoc's descriptor set)
+        run: sh scripts/proto_desc_parity.sh
+
       # The GraphQL parser and printer against graphql-js, by sending our output
       # back through their parser rather than by comparing serialised ASTs — so
       # nothing here transcribes their tree, and a shared misreading has nowhere
