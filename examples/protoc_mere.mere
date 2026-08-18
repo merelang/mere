@@ -1,0 +1,22 @@
+// examples/protoc_mere.mere — the generator's command line.
+//
+//   mere examples/protoc_mere.mere path/to/foo.proto ../contrib/proto/wire.mere
+//
+// Prints Mere source: a record and an `encode_` / `decode_` pair per message. The
+// second argument is the import path the generated file should use for the wire
+// layer, because that depends on where the OUTPUT will live and the generator
+// cannot know it.
+import "../contrib/proto/gen.mere";
+
+let rec arg_at = fn (xs, k: int, dflt: str) ->
+  match xs with
+  | [] -> dflt
+  | [h, ...t] -> if k == 0 then h else arg_at t (k - 1) dflt;
+
+let argv = args ();
+let path = arg_at argv 0 "";
+let wire = arg_at argv 1 "../contrib/proto/wire.mere";
+let _ = if str_eq path "" then
+          fail "usage: protoc_mere <file.proto> [wire-import-path]"
+        else ();
+print (Pgen.file_source wire (Pparse.parse_file path (read_file path)))

@@ -263,6 +263,13 @@ jobs:
       - name: proto_desc_parity (vs protoc's descriptor set)
         run: sh scripts/proto_desc_parity.sh
 
+      # The GENERATED codec against protoc's bytes: decode protoc's output and
+      # re-encode it, and require the two byte strings to be identical. Also diffs
+      # the committed examples/hello_pb.mere against a fresh run, because a
+      # generator whose output nobody reads is a generator nobody can review.
+      - name: proto_gen_parity (generated codec vs protoc's bytes)
+        run: sh scripts/proto_gen_parity.sh
+
       # The GraphQL parser and printer against graphql-js, by sending our output
       # back through their parser rather than by comparing serialised ASTs — so
       # nothing here transcribes their tree, and a shared misreading has nowhere

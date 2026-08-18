@@ -1,0 +1,432 @@
+// contrib/proto/gen.mere — a `.proto` file into Mere source.
+//
+// Emits, for each message, a record type and a pair of functions:
+//
+//   type M = { a: int, b: str, c: int list, d: N list };
+//   let encode_M : M -> bytes
+//   let decode_M : bytes -> M
+//
+// WHY A SINGULAR MESSAGE FIELD IS A 0-OR-1 LIST. proto3 gives message fields
+// explicit presence: "absent" and "present but empty" are different, and a record
+// field of type `N` could not say the first one. A list of length 0 or 1 says both,
+// and it also makes a recursive message expressible — `message Node { Node next = 1; }`
+// is a type that mentions itself, which a bare field could not be.
+//
+// WHAT THE GENERATED ENCODER OMITS. proto3 does not write a scalar holding its
+// default, so `a = 0` produces no bytes at all. That is not an optimisation: it is
+// the reason `protoc --encode` answers the empty string for `v: 0`, and a generated
+// encoder that wrote the zero would not round-trip against it. (The wire harness had
+// to learn the same thing from the other side.)
+//
+// WHAT THE GENERATED DECODER ACCEPTS. A repeated scalar may arrive PACKED or not —
+// proto3 requires a decoder to accept both, whatever the writer chose — so the
+// generated decoder handles a length-delimited run and a repeated single tag for the
+// same field. A decoder that only reads the packed form works against protoc and
+// fails against an older writer.
+//
+// REFUSED, not approximated: `double` and `float`. They need IEEE-754 bit patterns,
+// and `contrib/proto/wire.mere` has no float path yet — a bit-exact conversion from
+// existing language features has been measured to work but is not wired in. Emitting
+// something for them would produce a codec that is wrong on the wire.
+
+import "parse.mere";
+
+module Pgen {
+
+  let nl = "\n";
+
+  let rec join_lines = fn (xs) -> str_join nl xs;
+
+  // --- names ---------------------------------------------------------------
+  // A nested message becomes `Outer_Inner`: Mere has no nested types, and a flat
+  // name that encodes the path keeps two different `Inner`s apart.
+  let qual = fn (prefix: str, name: str) ->
+    if str_eq prefix "" then name else prefix ++ "_" ++ name;
+
+  // --- the Mere type of a field -------------------------------------------
+  let scalar_mere_ty = fn (n: str) ->
+    if str_eq n "double" || str_eq n "float" then
+      fail ("proto-gen: '" ++ n ++ "' is not supported yet — a float field needs"
+            ++ " IEEE-754 bit access, which contrib/proto/wire.mere does not have")
+    else if str_eq n "bool" then "bool"
+    else if str_eq n "string" then "str"
+    else if str_eq n "bytes" then "bytes"
+    else "int";
+
+  // A reference is a message (its generated record) or an enum (an int, because a
+  // proto3 enum is OPEN — an unknown number must survive a round trip, and a
+  // closed variant could not hold one).
+  let ref_mere_ty = fn (decls, scope: str, n: str) ->
+    let (q, is_msg) = Pparse.resolve decls scope n in
+    if is_msg then
+      // `.pk.Outer.Inner` -> `Outer_Inner`: drop the package, join the rest.
+      let rec go = fn (i: int, seen_pkg: bool, buf) ->
+        if i >= str_len q then strbuf_to_str buf
+        else
+          let c = char_at q i in
+          if c == "." then
+            let _ = if str_len (strbuf_to_str buf) == 0 then () else strbuf_push buf "_" in
+            go (i + 1) true buf
+          else
+            let _ = strbuf_push buf c in
+            go (i + 1) seen_pkg buf in
+      // The leading dot and the package are stripped by taking only what follows
+      // the package prefix, which `strip_pkg` does with the known package length.
+      go 0 false (strbuf_new ())
+    else "int";
+
+  // The package prefix has to come off the qualified name, and the package is known
+  // only at the file level — so it is passed in rather than guessed from the dots.
+  let rec drop_prefix = fn (q: str, pfx: str, i: int, buf) ->
+    if i >= str_len q then strbuf_to_str buf
+    else
+      if i < str_len pfx then drop_prefix q pfx (i + 1) buf
+      else
+        let c = char_at q i in
+        let _ = strbuf_push buf (if c == "." then "_" else c) in
+        drop_prefix q pfx (i + 1) buf;
+
+  let msg_ty_name = fn (decls, pkg: str, scope: str, n: str) ->
+    let (q, is_msg) = Pparse.resolve decls scope n in
+    if is_msg then
+      let pfx = if str_eq pkg "" then "." else "." ++ pkg ++ "." in
+      drop_prefix q pfx 0 (strbuf_new ())
+    else "int";
+
+  let field_mere_ty = fn (decls, pkg: str, scope: str, f: pfield) ->
+    match f with
+    | PField (_, _, rep, ty) ->
+      let base = match ty with
+                 | PScalar (n, _) -> scalar_mere_ty n
+                 | PRef n -> msg_ty_name decls pkg scope n in
+      let is_msg_ref = match ty with
+                       | PRef n -> let (_, m) = Pparse.resolve decls scope n in m
+                       | PScalar (_, _) -> false in
+      // repeated -> a list. A singular MESSAGE is also a list, of length 0 or 1,
+      // because presence has to be representable.
+      if rep then base ++ " list"
+      else if is_msg_ref then base ++ " list"
+      else base;
+
+  // --- default values ------------------------------------------------------
+  let default_expr = fn (decls, pkg: str, scope: str, f: pfield) ->
+    match f with
+    | PField (_, _, rep, ty) ->
+      let is_msg_ref = match ty with
+                       | PRef n -> let (_, m) = Pparse.resolve decls scope n in m
+                       | PScalar (_, _) -> false in
+      if rep || is_msg_ref then "[]"
+      else match ty with
+           | PScalar (n, _) ->
+             if str_eq n "bool" then "false"
+             else if str_eq n "string" then "\"\""
+             else if str_eq n "bytes" then "(bytes_of_hex \"\")"
+             else "0"
+           | PRef _ -> "0";        // an enum
+
+  // --- encoding ------------------------------------------------------------
+  // `zigzag` only for sint32/sint64; fixed widths for the fixed families. Getting
+  // this table wrong produces bytes that decode to a different number, which is why
+  // the harness compares against protoc rather than against itself.
+  let put_scalar = fn (tyname: str, num: int, expr: str) ->
+    if str_eq tyname "sint32" then
+      "    let _ = Wire.tag b " ++ str_of_int num ++ " Wire.varint in"
+      ++ nl ++ "    let _ = Wire.put_varint b (Wire.zz32 " ++ expr ++ ") in"
+    else if str_eq tyname "sint64" then
+      "    let _ = Wire.tag b " ++ str_of_int num ++ " Wire.varint in"
+      ++ nl ++ "    let _ = Wire.put_varint b (Wire.zz64 " ++ expr ++ ") in"
+    else if str_eq tyname "fixed32" || str_eq tyname "sfixed32" then
+      "    let _ = Wire.tag b " ++ str_of_int num ++ " Wire.fixed32 in"
+      ++ nl ++ "    let _ = Wire.put_fixed32 b " ++ expr ++ " in"
+    else if str_eq tyname "fixed64" || str_eq tyname "sfixed64" then
+      "    let _ = Wire.tag b " ++ str_of_int num ++ " Wire.fixed64 in"
+      ++ nl ++ "    let _ = Wire.put_fixed64 b " ++ expr ++ " in"
+    else if str_eq tyname "string" then
+      "    let _ = Wire.tag b " ++ str_of_int num ++ " Wire.delimited in"
+      ++ nl ++ "    let _ = Wire.put_str b " ++ expr ++ " in"
+    else if str_eq tyname "bytes" then
+      "    let _ = Wire.tag b " ++ str_of_int num ++ " Wire.delimited in"
+      ++ nl ++ "    let _ = Wire.put_bytes b " ++ expr ++ " in"
+    else if str_eq tyname "bool" then
+      "    let _ = Wire.tag b " ++ str_of_int num ++ " Wire.varint in"
+      ++ nl ++ "    let _ = Wire.put_varint b (if " ++ expr ++ " then 1 else 0) in"
+    else
+      "    let _ = Wire.tag b " ++ str_of_int num ++ " Wire.varint in"
+      ++ nl ++ "    let _ = Wire.put_varint b " ++ expr ++ " in";
+
+  // A packed repeated scalar: one tag, one length, the values back to back. Only the
+  // numeric and bool families are packable — a string or a message repeats its tag.
+  let packable = fn (tyname: str) ->
+    not (str_eq tyname "string" || str_eq tyname "bytes");
+
+  let is_default_test = fn (tyname: str, expr: str) ->
+    if str_eq tyname "bool" then expr
+    else if str_eq tyname "string" then "not (str_eq " ++ expr ++ " \"\")"
+    else if str_eq tyname "bytes" then "bytes_len " ++ expr ++ " > 0"
+    else expr ++ " != 0";
+  // --- the emitter ---------------------------------------------------------
+  //
+  // DECODE SCANS THE BUFFER ONCE PER FIELD. A single pass would have to thread every
+  // field's value through the loop as an N-tuple; one pass per field is O(fields ×
+  // bytes) instead of O(bytes), and it makes the generated code a small independent
+  // function per field rather than one large threaded one. That is a deliberate
+  // trade — stated here because a reader will otherwise assume the single pass.
+  //
+  // Each getter takes the LAST occurrence for a singular field, which is what proto3
+  // specifies. A repeated field appends, and accepts the packed and unpacked forms
+  // for the same field number, because a writer may choose either.
+
+  let scalar_reader = fn (tyname: str) ->
+    if str_eq tyname "sint32" then ("Wire.get_varint", "Wire.unzz32", "Wire.varint")
+    else if str_eq tyname "sint64" then ("Wire.get_varint", "Wire.unzz64", "Wire.varint")
+    else if str_eq tyname "fixed32" || str_eq tyname "sfixed32" then
+      ("Wire.get_fixed32", "", "Wire.fixed32")
+    else if str_eq tyname "fixed64" || str_eq tyname "sfixed64" then
+      ("Wire.get_fixed64", "", "Wire.fixed64")
+    else if str_eq tyname "bool" then ("Wire.get_varint", "BOOL", "Wire.varint")
+    else ("Wire.get_varint", "", "Wire.varint");
+
+  let wrap = fn (conv: str, e: str) ->
+    if str_eq conv "" then e
+    else if str_eq conv "BOOL" then "(" ++ e ++ " != 0)"
+    else "(" ++ conv ++ " " ++ e ++ ")";
+
+  // One getter per field.
+  let getter = fn (decls, pkg: str, scope: str, tyn: str, f: pfield) ->
+    match f with
+    | PField (name, num, rep, ty) ->
+      // A GENERATED IDENTIFIER CANNOT START WITH THE TYPE NAME. Uppercase-leading
+      // is how this language recognises a constructor, so `M_get_a` parses as one
+      // and the getter is reported as an unknown constructor at its use site — an
+      // error about a name the schema author never wrote. Hence the `get_` prefix.
+      let g = "get_" ++ tyn ++ "_" ++ name in
+      let dflt = default_expr decls pkg scope f in
+      let n = str_of_int num in
+      match ty with
+      | PScalar (sn, _) ->
+        if str_eq sn "string" || str_eq sn "bytes" then
+          let take = if str_eq sn "string" then "str_of_bytes v" else "v" in
+          if rep then
+            join_lines [
+              "let rec " ++ g ++ " = fn (b: bytes, i: int, acc) ->",
+              "  if i >= bytes_len b then list_rev acc",
+              "  else",
+              "    let (f, wt, j) = Wire.get_tag b i in",
+              "    if f == " ++ n ++ " && wt == Wire.delimited then",
+              "      let (v, k) = Wire.get_delimited b j in",
+              "      " ++ g ++ " b k (Cons (" ++ take ++ ", acc))",
+              "    else " ++ g ++ " b (Wire.skip_value b j wt) acc;" ]
+          else
+            join_lines [
+              "let rec " ++ g ++ " = fn (b: bytes, i: int, acc) ->",
+              "  if i >= bytes_len b then acc",
+              "  else",
+              "    let (f, wt, j) = Wire.get_tag b i in",
+              "    if f == " ++ n ++ " && wt == Wire.delimited then",
+              "      let (v, k) = Wire.get_delimited b j in",
+              "      " ++ g ++ " b k (" ++ take ++ ")",
+              "    else " ++ g ++ " b (Wire.skip_value b j wt) acc;" ]
+        else
+          let (rd, conv, wt) = scalar_reader sn in
+          if rep then
+            // Both encodings for the same field: a length-delimited packed run and a
+            // repeated single tag. A decoder that reads only one of them works
+            // against exactly one kind of writer.
+            join_lines [
+              "let rec " ++ g ++ "_packed = fn (p: bytes, i: int, acc) ->",
+              "  if i >= bytes_len p then acc",
+              "  else let (v, k) = " ++ rd ++ " p i in",
+              "       " ++ g ++ "_packed p k (Cons (" ++ wrap conv "v" ++ ", acc));",
+              "let rec " ++ g ++ " = fn (b: bytes, i: int, acc) ->",
+              "  if i >= bytes_len b then list_rev acc",
+              "  else",
+              "    let (f, wt, j) = Wire.get_tag b i in",
+              "    if f == " ++ n ++ " && wt == Wire.delimited then",
+              "      let (p, k) = Wire.get_delimited b j in",
+              "      " ++ g ++ " b k (" ++ g ++ "_packed p 0 acc)",
+              "    else if f == " ++ n ++ " && wt == " ++ wt ++ " then",
+              "      let (v, k) = " ++ rd ++ " b j in",
+              "      " ++ g ++ " b k (Cons (" ++ wrap conv "v" ++ ", acc))",
+              "    else " ++ g ++ " b (Wire.skip_value b j wt) acc;" ]
+          else
+            join_lines [
+              "let rec " ++ g ++ " = fn (b: bytes, i: int, acc) ->",
+              "  if i >= bytes_len b then acc",
+              "  else",
+              "    let (f, wt, j) = Wire.get_tag b i in",
+              "    if f == " ++ n ++ " && wt == " ++ wt ++ " then",
+              "      let (v, k) = " ++ rd ++ " b j in",
+              "      " ++ g ++ " b k " ++ wrap conv "v",
+              "    else " ++ g ++ " b (Wire.skip_value b j wt) acc;" ]
+      | PRef rn ->
+        let (_, is_msg) = Pparse.resolve decls scope rn in
+        if is_msg then
+          let sub = msg_ty_name decls pkg scope rn in
+          join_lines [
+            "let rec " ++ g ++ " = fn (b: bytes, i: int, acc) ->",
+            "  if i >= bytes_len b then list_rev acc",
+            "  else",
+            "    let (f, wt, j) = Wire.get_tag b i in",
+            "    if f == " ++ n ++ " && wt == Wire.delimited then",
+            "      let (p, k) = Wire.get_delimited b j in",
+            "      " ++ g ++ " b k (Cons (decode_" ++ sub ++ " p, acc))",
+            "    else " ++ g ++ " b (Wire.skip_value b j wt) acc;" ]
+        else
+          // An enum is an int on the wire and an int here, so it reads as a varint.
+          if rep then
+            join_lines [
+              "let rec " ++ g ++ "_packed = fn (p: bytes, i: int, acc) ->",
+              "  if i >= bytes_len p then acc",
+              "  else let (v, k) = Wire.get_varint p i in",
+              "       " ++ g ++ "_packed p k (Cons (v, acc));",
+              "let rec " ++ g ++ " = fn (b: bytes, i: int, acc) ->",
+              "  if i >= bytes_len b then list_rev acc",
+              "  else",
+              "    let (f, wt, j) = Wire.get_tag b i in",
+              "    if f == " ++ n ++ " && wt == Wire.delimited then",
+              "      let (p, k) = Wire.get_delimited b j in",
+              "      " ++ g ++ " b k (" ++ g ++ "_packed p 0 acc)",
+              "    else if f == " ++ n ++ " && wt == Wire.varint then",
+              "      let (v, k) = Wire.get_varint b j in",
+              "      " ++ g ++ " b k (Cons (v, acc))",
+              "    else " ++ g ++ " b (Wire.skip_value b j wt) acc;" ]
+          else
+            join_lines [
+              "let rec " ++ g ++ " = fn (b: bytes, i: int, acc) ->",
+              "  if i >= bytes_len b then acc",
+              "  else",
+              "    let (f, wt, j) = Wire.get_tag b i in",
+              "    if f == " ++ n ++ " && wt == Wire.varint then",
+              "      let (v, k) = Wire.get_varint b j in",
+              "      " ++ g ++ " b k v",
+              "    else " ++ g ++ " b (Wire.skip_value b j wt) acc;" ];
+
+  // The encoder for one field, guarded so a default writes nothing.
+  let putter = fn (decls, pkg: str, scope: str, f: pfield) ->
+    match f with
+    | PField (name, num, rep, ty) ->
+      let n = str_of_int num in
+      let acc = "v." ++ name in
+      match ty with
+      | PScalar (sn, _) ->
+        if rep then
+          if packable sn then
+            join_lines [
+              "  let _ =",
+              "    match " ++ acc ++ " with",
+              "    | [] -> ()",
+              "    | _ ->",
+              "      let p = vec_new () in",
+              "      let _ = list_iter " ++ acc ++ " (fn (x) ->",
+              (if str_eq sn "sint32" then "        Wire.put_varint p (Wire.zz32 x)"
+               else if str_eq sn "sint64" then "        Wire.put_varint p (Wire.zz64 x)"
+               else if str_eq sn "fixed32" || str_eq sn "sfixed32" then "        Wire.put_fixed32 p x"
+               else if str_eq sn "fixed64" || str_eq sn "sfixed64" then "        Wire.put_fixed64 p x"
+               else if str_eq sn "bool" then "        Wire.put_varint p (if x then 1 else 0)"
+               else "        Wire.put_varint p x") ++ ") in",
+              "      let _ = Wire.tag b " ++ n ++ " Wire.delimited in",
+              "      Wire.put_bytes b (bytes_of_vec p) in" ]
+          else
+            join_lines [
+              "  let _ = list_iter " ++ acc ++ " (fn (x) ->",
+              "    let _ = Wire.tag b " ++ n ++ " Wire.delimited in",
+              (if str_eq sn "string" then "    Wire.put_str b x" else "    Wire.put_bytes b x")
+              ++ ") in" ]
+        else
+          join_lines [
+            "  let _ = if " ++ is_default_test sn acc ++ " then",
+            put_scalar sn num acc,
+            "    () else () in" ]
+      | PRef rn ->
+        let (_, is_msg) = Pparse.resolve decls scope rn in
+        if is_msg then
+          let sub = msg_ty_name decls pkg scope rn in
+          join_lines [
+            "  let _ = list_iter " ++ acc ++ " (fn (x) ->",
+            "    let _ = Wire.tag b " ++ n ++ " Wire.delimited in",
+            "    Wire.put_bytes b (encode_" ++ sub ++ " x)) in" ]
+        else if rep then
+          join_lines [
+            "  let _ =",
+            "    match " ++ acc ++ " with",
+            "    | [] -> ()",
+            "    | _ ->",
+            "      let p = vec_new () in",
+            "      let _ = list_iter " ++ acc ++ " (fn (x) -> Wire.put_varint p x) in",
+            "      let _ = Wire.tag b " ++ n ++ " Wire.delimited in",
+            "      Wire.put_bytes b (bytes_of_vec p) in" ]
+        else
+          join_lines [
+            "  let _ = if " ++ acc ++ " != 0 then",
+            "    let _ = Wire.tag b " ++ n ++ " Wire.varint in",
+            "    let _ = Wire.put_varint b " ++ acc ++ " in",
+            "    () else () in" ];
+
+  // --- one message ---------------------------------------------------------
+  let rec msg_source = fn (decls, pkg: str, scope: str, prefix: str, m: pmsg) ->
+    match m with
+    | PMsg (name, fields, subs, enums) ->
+      let tyn = qual prefix name in
+      let inner = scope ++ "." ++ name in
+      let nested = list_map subs (fn (sm) -> msg_source decls pkg inner tyn sm) in
+      let enum_consts = list_map enums (fn (e) ->
+        match e with
+        | PEnum (en, vals) ->
+          join_lines (list_map vals (fn (ev) ->
+            match ev with
+            | PEnumV (vn, vnum) ->
+              "let enum_" ++ qual tyn en ++ "_" ++ vn ++ " = " ++ str_of_int vnum ++ ";"))) in
+      let ty_decl =
+        "type " ++ tyn ++ " = \{ "
+        ++ str_join ", " (list_map fields (fn (f) ->
+             match f with
+             | PField (fn_, _, _, _) -> fn_ ++ ": " ++ field_mere_ty decls pkg inner f))
+        ++ " };" in
+      let getters = join_lines (list_map fields (fn (f) ->
+                      getter decls pkg inner tyn f)) in
+      let dec =
+        "let decode_" ++ tyn ++ " = fn (b: bytes) ->" ++ nl
+        ++ "  " ++ tyn ++ " \{ "
+        ++ str_join ", " (list_map fields (fn (f) ->
+             match f with
+             | PField (fn_, _, _, _) ->
+               fn_ ++ " = get_" ++ tyn ++ "_" ++ fn_ ++ " b 0 "
+               ++ default_expr decls pkg inner f))
+        ++ " };" in
+      // FIELD-NUMBER ORDER, NOT DECLARATION ORDER. protoc writes fields ascending
+      // by number, so a schema that declares `int32 c = 3;` first would otherwise
+      // produce the same fields in a different sequence and different bytes.
+      let fnum = fn (f: pfield) -> match f with | PField (_, num, _, _) -> num in
+      let by_number = list_sort_by (fn (a: pfield, b: pfield) -> fnum a <= fnum b)
+                        fields in
+      let enc =
+        join_lines (list_append
+          (Cons ("let encode_" ++ tyn ++ " = fn (v: " ++ tyn ++ ") ->", 
+           Cons ("  let b = vec_new () in", [])))
+          (list_append (list_map by_number (fn (f) -> putter decls pkg inner f))
+                (Cons ("  bytes_of_vec b;", [])))) in
+      join_lines (list_append nested (list_append enum_consts
+        (Cons (ty_decl, Cons (getters, Cons (dec, Cons (enc, [])))))));
+
+  // --- the file ------------------------------------------------------------
+  let file_source = fn (wire_path: str, f: pfile) ->
+    let decls = Pparse.collect f in
+    match f with
+    | PFile (fname, pkg, msgs, enums, _) ->
+      let scope = if str_eq pkg "" then "" else "." ++ pkg in
+      let top_enums = list_map enums (fn (e) ->
+        match e with
+        | PEnum (en, vals) ->
+          join_lines (list_map vals (fn (ev) ->
+            match ev with
+            | PEnumV (vn, vnum) -> "let enum_" ++ en ++ "_" ++ vn ++ " = " ++ str_of_int vnum ++ ";"))) in
+      let bodies = list_map msgs (fn (m) -> msg_source decls pkg scope "" m) in
+      join_lines (list_append
+        (Cons ("// GENERATED from " ++ fname ++ " — do not edit.", 
+         Cons ("// Regenerate with `mere examples/protoc_mere.mere <file.proto>` and commit;", 
+         Cons ("// scripts/proto_gen_parity.sh diffs this against a fresh run.", 
+         Cons ("", 
+         Cons ("import \"" ++ wire_path ++ "\";", 
+         Cons ("", []))))))) 
+        (list_append top_enums bodies));
+}

@@ -21,29 +21,18 @@
 //   message HelloReply   { string message = 1; }
 //   service Greeter { rpc SayHello (HelloRequest) returns (HelloReply); }
 
-import "../contrib/proto/wire.mere";
+// The codec is GENERATED from examples/hello.proto — see examples/hello_pb.mere and
+// `mere examples/protoc_mere.mere`. It used to be hand-written here: a field walk
+// that read field 1 as a string, and a two-line encoder. Both were correct and both
+// were a schema transcribed by hand, which is the thing a generator exists to stop.
+//
+// The generated record makes a singular message field a 0-or-1 LIST, because proto3
+// gives message fields explicit presence and a bare field could not say "absent".
+// A scalar keeps its default, so `HelloRequest { name = "" }` and a request that
+// omitted `name` are the same value — which is correct, and is why the empty request
+// in the parity harness answers "hello ".
+import "hello_pb.mere";
 import "../contrib/http2/server.mere";
-
-// Decoding walks the fields rather than assuming an order or a presence. proto3
-// omits a field holding its default, so a request of `{}` arrives as ZERO bytes —
-// not as an empty string in field 1 — and a decoder that reads field 1 without
-// looking would fail on the most ordinary input there is.
-let req_name = fn (msg: bytes) ->
-  let rec go = fn (i: int, acc: str) ->
-    if i >= bytes_len msg then acc
-    else
-      let (f, wt, j) = Wire.get_tag msg i in
-      if f == 1 && wt == Wire.delimited then
-        let (v, k) = Wire.get_delimited msg j in
-        go k (str_of_bytes v)
-      else go (Wire.skip_value msg j wt) acc in
-  go 0 "";
-
-let hello_reply = fn (m: str) ->
-  let b = vec_new () in
-  let _ = Wire.tag b 1 Wire.delimited in
-  let _ = Wire.put_str b m in
-  bytes_of_vec b;
 
 // A handler answers with `RpcOk` or with a status. An unknown method is
 // UNIMPLEMENTED — the request succeeded as HTTP and failed as RPC, which is why
@@ -54,13 +43,13 @@ let hello_reply = fn (m: str) ->
 // the server, and only one of them is reached by calling something that is absent.
 let handler = fn (path: str, req: bytes) ->
   if str_eq path "/hello.Greeter/SayHello" then
-    let n = req_name req in
+    let n = (decode_HelloRequest req).name in
     if str_eq n "boom" then
       RpcErr (H2Server.invalid_argument, "name must not be 'boom'")
     else if str_eq n "unicode" then
       // A message that has to be percent-encoded on the way out.
       RpcErr (H2Server.failed_precondition, "café: 100% not ok")
-    else RpcOk (hello_reply ("hello " ++ n))
+    else RpcOk (encode_HelloReply (HelloReply { message = "hello " ++ n }))
   else RpcErr (H2Server.unimplemented, "no such method: " ++ path);
 
 // `args` gives a `str list` and the prelude has no indexing helper, so walk it.

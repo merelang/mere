@@ -4,6 +4,55 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-08-18 — A protobuf code generator, and two branches nothing reached
+
+_`contrib/proto/gen.mere` + `examples/protoc_mere.mere`: a `.proto` in, Mere source
+out. `examples/grpc_hello.mere` now uses it, and its hand-written codec is gone._
+
+```sh
+mere examples/protoc_mere.mere examples/hello.proto ../contrib/proto/wire.mere \
+  > examples/hello_pb.mere
+```
+
+The codec in that example used to be a hand-written field walk and a two-line
+encoder. Both were correct, and both were a schema transcribed by hand — which is
+the thing a generator exists to stop.
+
+`scripts/proto_gen_parity.sh` runs protoc's bytes through the generated codec and
+back: `protoc --encode` → `decode_M` → `encode_M`, byte-compared. 20 schemas. A round
+trip through the oracle's bytes catches more than it looks like, because a field the
+decoder ignores cannot be written back and shows up as a shorter byte string. The one
+thing it cannot see is a consistent swap of two fields holding equal values, so every
+field in the corpus has a distinct value.
+
+**Three representation choices, each forced by proto3 rather than chosen:** a singular
+message field is a 0-or-1 list (message fields have explicit presence, so "absent" and
+"present but empty" differ — and it makes a recursive message expressible); an enum is
+an `int` and not a variant (a proto3 enum is *open*, and an unknown number has to
+survive a round trip); and a generated identifier never begins with the type name,
+because uppercase-leading is how this language recognises a constructor — `M_get_a`
+parses as one and is reported as an unknown constructor at its *use* site, naming
+something the schema author never wrote.
+
+The encoder writes fields in **field-number order, not declaration order**, because
+protoc does.
+
+**Poisoning found two branches nothing reached:**
+
+1. **The repeated zigzag and fixed families were not in the corpus.** It had *singular*
+   sint32 and *repeated* sint64, so the repeated-sint32 path was generated and never
+   executed — breaking it changed nothing.
+2. **protoc always writes packed, so the decoder's unpacked branch was never reached.**
+   proto3 requires a decoder to accept both forms whatever the writer chose, and
+   deleting that branch left the harness green. A decoder that only understands the
+   encoding its own oracle emits works against exactly one kind of writer.
+
+The second one needed input protoc does not produce, so the harness builds it — and
+the first hand-typed version had field 2's tag as length-delimited, which protoc
+rejected and the harness reported as its own bug, correctly. **Hand-written test bytes
+are a transcription like any other**, so they are computed from the values now. protoc
+is then *asked* whether the two spellings mean the same value rather than being told.
+
 ## 2026-08-18 — A .proto parser, and the bootstrap closing
 
 _`contrib/proto/parse.mere` + `contrib/proto/descriptor.mere`: a `.proto` file in,

@@ -9,6 +9,7 @@ a hand-written one and a schema-less inspector share it.
 
 | file | exports | lines |
 |---|---|---|
+| `gen.mere` | `module Pgen { file_source }` — a `.proto` into Mere source | ~420 |
 | `parse.mere` | `type pty/pfield/penum/pmsg/pmethod/psvc/pfile/pdecl`; `module Pparse { parse_file, collect, resolve, json_name, type codes }` | ~360 |
 | `descriptor.mere` | `module Pdesc { of_source, file_set, file_desc }` | ~150 |
 | `wire.mere` | `module Wire { varint / fixed64 / delimited / fixed32 constants; lshr; put_varint / tag / zz32 / zz64 / put_fixed32 / put_fixed64 / put_delimited / put_bytes / put_str; get_varint / get_tag / unzz32 / unzz64 / get_fixed32 / get_fixed64 / get_delimited / skip_value }` | ~185 |
@@ -129,11 +130,68 @@ implemented. What the harness checks instead is that the parser **refuses each o
 name**: a skipped construct would produce a descriptor that is wrong where nothing
 looks.
 
-## Not here yet
+## The generator
 
-- **A generator**: `foo.proto` → `foo_pb.mere` with records and
-  `encode_*` / `decode_*`. The descriptor is the input it needs, so this is the next
-  slice rather than a new direction.
+`gen.mere` turns a `.proto` into Mere source — a record per message and an
+`encode_` / `decode_` pair — and `examples/protoc_mere.mere` is its command line:
+
+```sh
+mere examples/protoc_mere.mere examples/hello.proto ../contrib/proto/wire.mere \
+  > examples/hello_pb.mere
+```
+
+`examples/grpc_hello.mere` uses it, and that is the point of the slice: the codec
+there used to be a hand-written field walk and a two-line encoder. Both were correct
+and both were a schema transcribed by hand.
+
+### Three representation choices
+
+- **A singular message field is a 0-or-1 list.** proto3 gives message fields explicit
+  presence, so "absent" and "present but empty" differ and a bare field could not say
+  the first. It also makes `message Node { Node next = 1; }` expressible.
+- **An enum is an `int`, not a variant.** A proto3 enum is *open*: an unknown number
+  must survive a round trip, and a closed variant could not hold one. The generator
+  emits `enum_<Type>_<VALUE>` constants beside it.
+- **A generated identifier never starts with the type name.** Uppercase-leading is how
+  this language recognises a constructor, so `M_get_a` parses as one and is reported as
+  an unknown constructor at its *use* site — an error naming something the schema
+  author never wrote. Hence `get_M_a`.
+
+**Decode scans the buffer once per field.** A single pass would have to thread every
+field through the loop as an N-tuple; one pass per field is O(fields × bytes) and
+makes each field a small independent function. A deliberate trade, stated because a
+reader would otherwise assume the single pass.
+
+**The encoder writes fields in field-number order, not declaration order**, because
+protoc does — a schema declaring `int32 c = 3;` first would otherwise produce the same
+fields in a different sequence and different bytes.
+
+### The gate, and the two gaps poisoning found
+
+`scripts/proto_gen_parity.sh` runs protoc's bytes through the generated codec and back:
+`protoc --encode` → `decode_M` → `encode_M` → compare. 20 schemas. A round trip through
+the oracle's bytes catches more than it looks like — a field the decoder ignores cannot
+be written back, so it shows up as a shorter byte string — and the one thing it cannot
+see is a consistent swap of two fields holding equal values, which is why every field
+in the corpus has a distinct value.
+
+The committed `examples/hello_pb.mere` is diffed against a fresh run, the same
+arrangement as the Unicode tables: a generator whose output nobody reads is a generator
+nobody can review.
+
+Poisoning found two coverage gaps:
+
+1. **The repeated zigzag and fixed families were not in the corpus.** It had *singular*
+   sint32 and *repeated* sint64, so the repeated-sint32 path was generated and never
+   executed. Breaking it changed nothing.
+2. **protoc always writes packed, so the decoder's unpacked branch was never reached.**
+   proto3 requires a decoder to accept both forms whatever the writer chose, and
+   removing that branch left the harness green. The unpacked bytes are now built by the
+   harness — *computed from the values*, after a hand-typed first version put field 2's
+   tag as length-delimited and protoc rejected it — and **protoc is asked** whether the
+   two spellings mean the same thing rather than being told.
+
+## Not here yet
 - `double` / `float` fields. They need IEEE-754 bit patterns; a bit-exact
   conversion from existing language features has been measured to work (24 values,
   no differences) but costs a scaling loop per value.
