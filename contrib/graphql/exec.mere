@@ -29,11 +29,18 @@
 //     parser does not carry. The harness strips them from the oracle's answer too,
 //     and says so.
 //   * Field ARGUMENTS are not passed to resolution, because the default resolver
-//     ignores them — the same as graphql-js. Arguments on `@skip` / `@include` ARE
-//     evaluated, since those are directives rather than resolution.
+//     ignores them — the same as graphql-js. Three exceptions, all of them places
+//     where the argument IS the question rather than an input to a resolver:
+//     `@skip` / `@include`, `__type(name:)`, and `includeDeprecated`.
 //   * Interfaces and unions are not resolved: with data as the resolver there is
 //     nothing to resolve a concrete type from.
-//   * Introspection beyond `__typename`, custom scalars, and subscriptions.
+//   * Custom scalars and subscriptions.
+//
+// INTROSPECTION IS HERE, and it is answered by this same executor: the introspection
+// schema is SDL (generated into `introspection_sdl.mere`) appended to the document's
+// own definitions, so `__Type` is an object type like any other and nullability,
+// null propagation, list handling and enum coercion all apply to it unchanged. The
+// one thing that could not be data is the CYCLE — see `GTypeRef`.
 //
 // Anything outside that is REFUSED with a named message rather than approximated,
 // so an unhandled combination shows up as a refusal and not as a wrong answer.
@@ -41,6 +48,11 @@
 import "ast.mere";
 import "lexer.mere";
 import "parser.mere";
+// The printer, because an input value's `defaultValue` is introspected as a STRING
+// — the value printed as GraphQL — so the same printer the document round-trip is
+// gated on produces it.
+import "printer.mere";
+import "introspection_sdl.mere";
 
 type gvalue =
   | GNull
@@ -49,7 +61,20 @@ type gvalue =
   | GFloat of float
   | GStr of str
   | GList of gvalue list
-  | GObj of (str * gvalue) list;
+  | GObj of (str * gvalue) list
+  // A LAZY REFERENCE TO A TYPE, and the only non-data value in this model.
+  //
+  // Introspection is CYCLIC: `__schema.types` lists every type, each type's
+  // `fields` name types, whose fields name types. A strict value cannot hold that
+  // — building it eagerly does not terminate — and the standard introspection
+  // query is what bounds the expansion: it asks for `ofType` exactly nine levels
+  // deep and stops.
+  //
+  // So a type is carried as its type EXPRESSION and its `__Type` fields are
+  // computed when the query asks for them. That makes this the first place in this
+  // executor where a field is computed rather than looked up, which is worth
+  // saying out loud: everywhere else "the resolvers are the data".
+  | GTypeRef of gtype;
 
 // A path element is a field name or a list index — the two things the
 // specification says a path is made of.
@@ -85,6 +110,20 @@ module Gexec {
       match d with
       | TsDef (ObjectDef (_, n, _, _, fs)) -> if str_eq n name then fs else find_obj rest name
       | _ -> find_obj rest name;
+
+  // Fields live on objects AND interfaces. `find_obj` answers only for objects,
+  // which is right for execution — nothing resolves against an interface here —
+  // and wrong for introspection, where `__Type.fields` is non-null for both.
+  let rec find_obj_or_iface = fn (defs, name: str) ->
+    match defs with
+    | [] -> []
+    | [d, ...rest] ->
+      match d with
+      | TsDef (ObjectDef (_, n, _, _, fs)) ->
+        if str_eq n name then fs else find_obj_or_iface rest name
+      | TsDef (InterfaceDef (_, n, _, _, fs)) ->
+        if str_eq n name then fs else find_obj_or_iface rest name
+      | _ -> find_obj_or_iface rest name;
 
   let rec find_enum = fn (defs, name: str) ->
     match defs with
@@ -128,20 +167,25 @@ module Gexec {
   // The root operation type. A `schema { query: X }` names it; without one the
   // convention is a type called `Query`, which is a rule of the specification and
   // not a guess.
-  let rec schema_query = fn (defs) ->
+  // A `schema { query: X }` names it; without one the convention is a type called
+  // `Query` / `Mutation` / `Subscription`, which is a rule of the specification and
+  // not a guess. `dflt` is that convention.
+  let rec schema_root = fn (defs, kind: str, dflt: str) ->
     match defs with
-    | [] -> "Query"
+    | [] -> dflt
     | [d, ...rest] ->
       match d with
       | TsDef (SchemaDef (_, _, ops)) ->
         let rec pick = fn (os) ->
           match os with
-          | [] -> schema_query rest
+          | [] -> schema_root rest kind dflt
           | [o, ...more] ->
             match o with
-            | OpTy (k, n) -> if str_eq k "query" then n else pick more in
+            | OpTy (k, n) -> if str_eq k kind then n else pick more in
         pick ops
-      | _ -> schema_query rest;
+      | _ -> schema_root rest kind dflt;
+
+  let schema_query = fn (defs) -> schema_root defs "query" "Query";
 
   let rec find_frag = fn (defs, name: str) ->
     match defs with
@@ -219,6 +263,325 @@ module Gexec {
           | [v, ..._] -> if truthy (doc_value v vars) then included rest vars else false
         else included rest vars;
 
+  // --- introspection ------------------------------------------------------
+  //
+  // Answered by the ORDINARY executor against ordinary type definitions. The
+  // introspection schema is SDL — generated from graphql-js into
+  // `introspection_sdl.mere` and appended to the document's own definitions — so
+  // field lookup, nullability, null propagation, list handling and enum coercion
+  // all apply to `__Type` exactly as they do to a user's type. There is no second
+  // executor, and that is the reason the schema is a file rather than a data
+  // structure.
+  //
+  // What IS special is two fields and one value:
+  //
+  //   * `__schema` and `__type` are not declared in anybody's SDL. The
+  //     specification says the schema PROVIDES them, and graphql-js adds them
+  //     implicitly too, so they are a branch beside `__typename` rather than an
+  //     injection into the user's Query type.
+  //   * `GTypeRef` is lazy, because introspection is cyclic (see the type above).
+  //
+  // INTROSPECTION IS ALSO WHERE FIELD ARGUMENTS START MATTERING. Everywhere else
+  // this executor ignores them, matching graphql-js's default resolver. Two places
+  // here cannot:
+  //
+  //   * `__type(name:)` — without its argument it is not a field, it is a different
+  //     question.
+  //   * `includeDeprecated` on `fields` / `enumValues` / `inputFields` / `args`,
+  //     whose default is FALSE. The standard introspection query passes `true`, so
+  //     every gate section that uses it agreed while this was missing; it took a
+  //     hand-written `__type(name: "Colour") { enumValues }` to disagree.
+
+  // The four introspection fields the specification gives an `includeDeprecated`
+  // argument. Named as a list so the rule has one spelling.
+  let deprecatable = fn (name: str) ->
+    str_eq name "fields" || str_eq name "enumValues"
+    || str_eq name "inputFields" || str_eq name "args";
+
+  let include_deprecated = fn (args, vars) ->
+    match arg_of args "includeDeprecated" with
+    | [] -> false                       // the argument's default is false
+    | [v, ..._] -> truthy (doc_value v vars);
+
+  let filter_deprecated = fn (v: gvalue, keep: bool) ->
+    if keep then v
+    else
+      match v with
+      | GList xs ->
+        GList (list_filter xs (fn (x: gvalue) ->
+          match x with
+          | GObj fs -> (match obj_get fs "isDeprecated" with
+                        | GBool true -> false
+                        | _ -> true)
+          | _ -> true))
+      | _ -> v;
+
+  let gstr_or_null = fn (xs) ->
+    match xs with | [] -> GNull | [x, ..._] -> GStr x;
+
+  // A definition's name, for the ones that have one.
+  let tsdef_name = fn (d: gtsdef) ->
+    match d with
+    | ScalarDef (_, n, _) -> Cons (n, [])
+    | ObjectDef (_, n, _, _, _) -> Cons (n, [])
+    | InterfaceDef (_, n, _, _, _) -> Cons (n, [])
+    | UnionDef (_, n, _, _) -> Cons (n, [])
+    | EnumDef (_, n, _, _) -> Cons (n, [])
+    | InputDef (_, n, _, _) -> Cons (n, [])
+    | _ -> [];
+
+  let rec find_tsdef = fn (defs, name: str) ->
+    match defs with
+    | [] -> []
+    | [d, ...rest] ->
+      match d with
+      | TsDef td ->
+        (match tsdef_name td with
+         | [n, ..._] -> if str_eq n name then Cons (td, []) else find_tsdef rest name
+         | [] -> find_tsdef rest name)
+      | _ -> find_tsdef rest name;
+
+  // The five built-in scalars. They are part of every schema whether or not the
+  // document declares them, so they are named here rather than found in `defs`.
+  let builtin_scalars = ["Int", "Float", "String", "Boolean", "ID"];
+
+  let rec is_declared = fn (defs, n: str) ->
+    match find_tsdef defs n with | [] -> false | _ -> true;
+
+  // The named type at the bottom of a type expression.
+  let rec base_name = fn (t: gtype) ->
+    match t with
+    | TyNamed n -> n
+    | TyList inner -> base_name inner
+    | TyNonNull inner -> base_name inner;
+
+  // Every type name MENTIONED anywhere: field types, argument types, input field
+  // types, directive argument types, union members, `implements` lists.
+  //
+  // This exists for the built-in scalars and nothing else. A built-in scalar belongs
+  // to a schema only if something refers to it — measured against the oracle, whose
+  // type map for `type Query \{ a: Int }` is `Query Int Boolean String` and NOT the
+  // other two. `Boolean` and `String` are always there because the BUILT-IN
+  // DIRECTIVES refer to them: `@skip(if: Boolean!)`, `@deprecated(reason: String!)`.
+  // That falls out here rather than being special-cased, because those directives
+  // are in the appended introspection SDL and get walked like anything else.
+  let referenced_names = fn (defs) ->
+    let iv_names = fn (ivs, acc) ->
+      list_fold ivs acc (fn (a, iv) ->
+        match iv with | InputVal (_, _, ty, _, _) -> Cons (base_name ty, a)) in
+    let field_names = fn (fs, acc) ->
+      list_fold fs acc (fn (a, f) ->
+        match f with
+        | FieldDef (_, _, args, ty, _) -> iv_names args (Cons (base_name ty, a))) in
+    list_fold defs [] (fn (acc, d) ->
+      match d with
+      | TsDef (ObjectDef (_, _, ifs, _, fs)) -> field_names fs (appl ifs acc)
+      | TsDef (InterfaceDef (_, _, ifs, _, fs)) -> field_names fs (appl ifs acc)
+      | TsDef (InputDef (_, _, _, ivs)) -> iv_names ivs acc
+      | TsDef (UnionDef (_, _, _, members)) -> appl members acc
+      | TsDef (DirectiveDef (_, _, args, _, _)) -> iv_names args acc
+      | _ -> acc);
+
+  // Every declared type in declaration order, then the built-in scalars something
+  // refers to. Order is not load-bearing: the gate sorts `types` by name on both
+  // sides, and its main comparison goes through graphql-js's own
+  // `buildClientSchema`, which is order-blind.
+  let all_type_names = fn (defs) ->
+    let refs = referenced_names defs in
+    let rec declared = fn (ds, acc) ->
+      match ds with
+      | [] -> rev_list acc []
+      | [d, ...rest] ->
+        match d with
+        | TsDef td ->
+          (match tsdef_name td with
+           | [n, ..._] -> declared rest (Cons (n, acc))
+           | [] -> declared rest acc)
+        | _ -> declared rest acc in
+    let rec add_missing = fn (bs, acc) ->
+      match bs with
+      | [] -> rev_list acc []
+      | [b, ...rest] ->
+        if is_declared defs b || not (list_member refs b) then add_missing rest acc
+        else add_missing rest (Cons (b, acc)) in
+    appl (declared defs []) (add_missing builtin_scalars []);
+
+  let intro_kind = fn (defs, n: str) ->
+    match find_tsdef defs n with
+    | [] -> "SCALAR"                      // a built-in scalar has no definition
+    | [td, ..._] ->
+      match td with
+      | ScalarDef (_, _, _) -> "SCALAR"
+      | ObjectDef (_, _, _, _, _) -> "OBJECT"
+      | InterfaceDef (_, _, _, _, _) -> "INTERFACE"
+      | UnionDef (_, _, _, _) -> "UNION"
+      | EnumDef (_, _, _, _) -> "ENUM"
+      | InputDef (_, _, _, _) -> "INPUT_OBJECT"
+      | _ -> "SCALAR";
+
+  // `isDeprecated` / `deprecationReason` come from `@deprecated`, whose `reason`
+  // has a DEFAULT of "No longer supported" — so an argumentless `@deprecated` still
+  // reports a reason, and reporting null there would differ from the oracle.
+  let rec find_dir = fn (dirs, name: str) ->
+    match dirs with
+    | [] -> []
+    | [d, ...rest] ->
+      match d with
+      | Dir (n, args) -> if str_eq n name then Cons (args, []) else find_dir rest name;
+
+  let deprecation = fn (dirs) ->
+    match find_dir dirs "deprecated" with
+    | [] -> (GBool false, GNull)
+    | [args, ..._] ->
+      (GBool true,
+       match arg_of args "reason" with
+       | [] -> GStr "No longer supported"
+       | [v, ..._] -> (match v with
+                       | VStr sv -> GStr sv
+                       | VBlock sv -> GStr sv
+                       | VNull -> GNull
+                       | _ -> GStr "No longer supported"));
+
+  // An input value's `defaultValue` is a STRING — the value printed as GraphQL —
+  // and not the value itself. `Gprint.pval` is what prints it, so the same printer
+  // the document round-trip is gated on produces this.
+  let intro_input = fn (iv: ginpval) ->
+    match iv with
+    | InputVal (_, n, ty, dflt, dirs) ->
+      let (dep, reason) = deprecation dirs in
+      GObj ([("name", GStr n),
+            ("description", GNull),
+            ("type", GTypeRef ty),
+            ("defaultValue", match dflt with
+                             | [] -> GNull
+                             | [d, ..._] -> GStr (Gprint.pval d)),
+            ("isDeprecated", dep),
+            ("deprecationReason", reason)]);
+
+  let intro_field = fn (f: gfield) ->
+    match f with
+    | FieldDef (_, n, args, ty, dirs) ->
+      let (dep, reason) = deprecation dirs in
+      GObj ([("name", GStr n),
+            ("description", GNull),
+            ("args", GList (list_map args intro_input)),
+            ("type", GTypeRef ty),
+            ("isDeprecated", dep),
+            ("deprecationReason", reason)]);
+
+  let intro_enumval = fn (v: genumv) ->
+    match v with
+    | EnumVal (_, n, dirs) ->
+      let (dep, reason) = deprecation dirs in
+      GObj ([("name", GStr n),
+            ("description", GNull),
+            ("isDeprecated", dep),
+            ("deprecationReason", reason)]);
+
+  // Which object and interface types declare a given interface. `possibleTypes` on
+  // an interface is exactly this, and on a union it is the members it lists.
+  let implementors_of = fn (defs, iface: str) ->
+    let rec go = fn (ds, acc) ->
+      match ds with
+      | [] -> rev_list acc []
+      | [d, ...rest] ->
+        match d with
+        | TsDef (ObjectDef (_, n, ifs, _, _)) ->
+          if list_member ifs iface then go rest (Cons (GTypeRef (TyNamed n), acc))
+          else go rest acc
+        | TsDef (InterfaceDef (_, n, ifs, _, _)) ->
+          if list_member ifs iface then go rest (Cons (GTypeRef (TyNamed n), acc))
+          else go rest acc
+        | _ -> go rest acc in
+    go defs [];
+
+  // One field of one `__Type`. This is where the laziness lives: a wrapper answers
+  // `ofType` with another `GTypeRef` and the recursion goes exactly as deep as the
+  // query asked.
+  let intro_type_field = fn (defs, t: gtype, name: str) ->
+    match t with
+    | TyList inner ->
+      if str_eq name "kind" then GStr "LIST"
+      else if str_eq name "ofType" then GTypeRef inner
+      else GNull
+    | TyNonNull inner ->
+      if str_eq name "kind" then GStr "NON_NULL"
+      else if str_eq name "ofType" then GTypeRef inner
+      else GNull
+    | TyNamed n ->
+      let kind = intro_kind defs n in
+      if str_eq name "kind" then GStr kind
+      else if str_eq name "name" then GStr n
+      else if str_eq name "description" then GNull
+      else if str_eq name "ofType" then GNull
+      else if str_eq name "specifiedByURL" then GNull
+      else if str_eq name "fields" then
+        (if str_eq kind "OBJECT" || str_eq kind "INTERFACE" then
+           GList (list_map (find_obj_or_iface defs n) intro_field)
+         else GNull)
+      else if str_eq name "inputFields" then
+        (match find_tsdef defs n with
+         | [InputDef (_, _, _, ivs), ..._] -> GList (list_map ivs intro_input)
+         | _ -> GNull)
+      else if str_eq name "enumValues" then
+        (match find_tsdef defs n with
+         | [EnumDef (_, _, _, vs), ..._] -> GList (list_map vs intro_enumval)
+         | _ -> GNull)
+      else if str_eq name "interfaces" then
+        (match find_tsdef defs n with
+         | [ObjectDef (_, _, ifs, _, _), ..._] ->
+           GList (list_map ifs (fn (i: str) -> GTypeRef (TyNamed i)))
+         | [InterfaceDef (_, _, ifs, _, _), ..._] ->
+           GList (list_map ifs (fn (i: str) -> GTypeRef (TyNamed i)))
+         | _ -> GNull)
+      else if str_eq name "possibleTypes" then
+        (match find_tsdef defs n with
+         | [InterfaceDef (_, _, _, _, _), ..._] -> GList (implementors_of defs n)
+         | [UnionDef (_, _, _, members), ..._] ->
+           GList (list_map members (fn (m: str) -> GTypeRef (TyNamed m)))
+         | _ -> GNull)
+      else if str_eq name "isOneOf" then
+        (if str_eq kind "INPUT_OBJECT" then GBool false else GNull)
+      else
+        fail ("graphql: __Type has no field '" ++ name ++ "'");
+
+  let intro_directive = fn (d: gtsdef) ->
+    match d with
+    | DirectiveDef (_, n, args, rep, locs) ->
+      GObj ([("name", GStr n),
+            ("description", GNull),
+            ("isRepeatable", GBool rep),
+            ("locations", GList (list_map locs (fn (l: str) -> GStr l))),
+            ("args", GList (list_map args intro_input)),
+            ("isDeprecated", GBool false),
+            ("deprecationReason", GNull)])
+    | _ -> fail "graphql: intro_directive on something that is not a directive";
+
+  let rec all_directives = fn (defs, acc) ->
+    match defs with
+    | [] -> rev_list acc []
+    | [d, ...rest] ->
+      match d with
+      | TsDef (DirectiveDef (a, b, c, e, f)) ->
+        all_directives rest (Cons (intro_directive (DirectiveDef (a, b, c, e, f)), acc))
+      | _ -> all_directives rest acc;
+
+  // A root operation type is reported only if it EXISTS. `mutationType` is null on
+  // a schema with no mutations, and reporting a `__Type` for a type nobody declared
+  // would make `buildClientSchema` fail on the other side rather than disagree.
+  let root_or_null = fn (defs, n: str) ->
+    if is_declared defs n then GTypeRef (TyNamed n) else GNull;
+
+  let intro_schema = fn (defs) ->
+    GObj ([("description", GNull),
+          ("types", GList (list_map (all_type_names defs)
+                                    (fn (n: str) -> GTypeRef (TyNamed n)))),
+          ("queryType", GTypeRef (TyNamed (schema_query defs))),
+          ("mutationType", root_or_null defs (schema_root defs "mutation" "Mutation")),
+          ("subscriptionType",
+             root_or_null defs (schema_root defs "subscription" "Subscription")),
+          ("directives", GList (all_directives defs []))]);
+
   // --- leaf coercion ------------------------------------------------------
   // The messages are graphql-js's, verbatim, for the cases here. That couples this
   // to the reference implementation's wording, which is the useful direction for a
@@ -233,6 +596,7 @@ module Gexec {
     | GFloat f -> str_of_float f
     | GStr s -> "\"" ++ s ++ "\""
     | _ -> "value";
+
 
   let coerce_leaf = fn (defs, tyname: str, v: gvalue, path) ->
     match v with
@@ -349,17 +713,64 @@ module Gexec {
       | [] -> GOk (GObj (rev_list acc []), errs)
       | [s, ...rest] ->
         match s with
-        | Field (alias, name, _, dirs, sub) ->
+        | Field (alias, name, fargs, dirs, sub) ->
           if not (included dirs vars) then go rest acc errs
           else
             let key = if str_eq alias "" then name else alias in
             if str_eq name "__typename" then
               go rest (Cons ((key, GStr tname), acc)) errs
+            // `__schema` and `__type` are provided BY THE SCHEMA rather than
+            // declared in it, so they are handled beside `__typename` instead of
+            // being injected into the user's Query type. Both are only legal on the
+            // query root, and asking for them elsewhere is a field that does not
+            // exist — which is what the branch below already reports.
+            else if str_eq name "__schema" && str_eq tname (schema_query defs) then
+              (match complete defs (TyNonNull (TyNamed "__Schema")) (intro_schema defs)
+                       sub vars (appl path (Cons (PName key, []))) "Query.__schema" with
+               | GBubble e2 -> GBubble (appl errs e2)
+               | GOk (cv, e2) -> go rest (Cons ((key, cv), acc)) (appl errs e2))
+            else if str_eq name "__type" && str_eq tname (schema_query defs) then
+              // An unknown name answers null, which is what the oracle does; it is
+              // not an error.
+              let tn = match arg_of fargs "name" with
+                       | [] -> fail "graphql: __type requires a 'name' argument"
+                       | [av, ..._] -> (match doc_value av vars with
+                                        | GStr sv -> sv
+                                        | _ -> fail "graphql: __type's 'name' must be a string") in
+              // `is_declared` is not the test: a built-in scalar has no definition
+              // and is still a type. `all_type_names` is the schema's type list, so
+              // asking it is asking the same question `__schema.types` answers.
+              let tv = if list_member (all_type_names defs) tn
+                       then GTypeRef (TyNamed tn) else GNull in
+              (match complete defs (TyNamed "__Type") tv
+                       sub vars (appl path (Cons (PName key, []))) "Query.__type" with
+               | GBubble e2 -> GBubble (appl errs e2)
+               | GOk (cv, e2) -> go rest (Cons ((key, cv), acc)) (appl errs e2))
             else
-              (match field_ty_in (find_obj defs tname) name with
+              (match field_ty_in (find_obj_or_iface defs tname) name with
                | [] -> fail ("graphql: " ++ tname ++ " has no field '" ++ name ++ "'")
                | [fty, ..._] ->
-                 let fv = resolve v name in
+                 // A `GTypeRef` computes its fields instead of carrying them — see
+                 // the constructor's comment for why introspection cannot be data.
+                 let fv0 = match v with
+                           | GTypeRef tr -> intro_type_field defs tr name
+                           | _ -> resolve v name in
+                 // `includeDeprecated` DEFAULTS TO FALSE, and the four fields that
+                 // take it are the four the specification gives it to: `fields`,
+                 // `enumValues`, `inputFields` and `args`.
+                 //
+                 // Filtered here, in one place, rather than at the four producers —
+                 // because two of them build a `GObj` (a `__Field`'s `args`) and two
+                 // answer from a `GTypeRef`, so filtering at the source would mean
+                 // the same rule written twice in two different shapes.
+                 //
+                 // The standard introspection query passes `includeDeprecated: true`,
+                 // so every section that uses it agreed while this was missing. It
+                 // took a hand-written `__type(name: "Colour") \{ enumValues }` — no
+                 // argument, hence the default — to disagree.
+                 let fv = if str_starts_with tname "__" && deprecatable name
+                          then filter_deprecated fv0 (include_deprecated fargs vars)
+                          else fv0 in
                  let fpath = appl path (Cons (PName key, [])) in
                  let lbl = tname ++ "." ++ name in
                  match complete defs fty fv sub vars fpath lbl with
@@ -436,6 +847,13 @@ module Gexec {
     | GInt n -> str_of_int n
     | GFloat f -> float_json f
     | GStr s -> jstr s
+    // A `GTypeRef` here means a `__Type` was asked for WITHOUT a selection of
+    // subfields — `\{ __type(name: "Query") }`. graphql-js reports that as a
+    // validation error before execution starts; there is no validator here, so it
+    // is named at the point it becomes unanswerable rather than left as a
+    // non-exhaustive match.
+    | GTypeRef _ ->
+      fail "graphql: a field of type __Type must have a selection of subfields"
     | GList xs -> "[" ++ str_join "," (list_map xs to_json) ++ "]"
     | GObj fs ->
       "\{" ++ str_join "," (list_map fs (fn (kv) ->
@@ -463,7 +881,19 @@ module Gexec {
       "\{" ++ jstr "errors" ++ ":[" ++ str_join "," (list_map errs err_json)
       ++ "]," ++ jstr "data" ++ ":null}";
 
-  let run = fn (defs, root: gvalue, vars) ->
+  // THE INTROSPECTION SCHEMA IS APPENDED TO THE DOCUMENT'S OWN DEFINITIONS, and
+  // that one line is what makes introspection need no second executor: `__Type` is
+  // an object type like any other from here on, so field lookup, nullability, null
+  // propagation, list handling and enum coercion all apply to it unchanged.
+  //
+  // Appended rather than prepended, so a document's own definitions are found first
+  // — the built-in directives are `@skip` / `@include` / `@deprecated` /
+  // `@specifiedBy` / `@oneOf`, and a schema is free to redeclare one.
+  let with_introspection = fn (defs) ->
+    appl defs (Gparse.document Gintro.sdl);
+
+  let run = fn (defs0, root: gvalue, vars) ->
+    let defs = with_introspection defs0 in
     let (vardefs, sels) = first_op defs in
     let vars2 = with_defaults vardefs vars in
     exec_fields defs (schema_query defs) root sels vars2 [];
