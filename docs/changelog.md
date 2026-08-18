@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-08-18 — RPC statuses, and an expectation the wire corrected
+
+_A gRPC handler can now fail._
+
+`bytes` alone could not say "this failed", so an unknown method got a reply that
+looked like a success. A handler now answers `RpcOk of bytes` or
+`RpcErr of (int * str)`, and a failure goes out as a status in the **trailers** —
+the request succeeded as HTTP and failed as RPC, so it cannot be expressed as a 4xx,
+and a failed unary call carries no DATA frame at all.
+
+**`grpc-message` is percent-encoded**, which is neither optional nor cosmetic: the
+specification says so and grpc-go *decodes* it. Measured before implementing —
+`caf%C3%A9 %25 done` came back as `café % done` — so a raw `%` would have been read
+as the start of an escape.
+
+**And then the wire corrected the harness.** The first expectation written for the
+raw trailer assumed a space and an apostrophe would be encoded. They are not: the
+rule is "bytes outside printable ASCII, plus `%` itself", the same as grpc-go's own
+encoder. The implementation was right and the expectation was a guess; the failing
+diff is what said which.
+
+The DOCUMENTED-GAP that asserted the *absence* of statuses did its job on the way
+out: closing the gap made that assertion fail and report itself stale. Three routes
+are checked in its place — a method the schema declares and the server does not
+handle, a method that exists and refuses its input, and a message that needs
+encoding — and the python client now reads the **raw** trailers. That is the
+observation grpcurl cannot give: it prints the decoded message and the rendered code
+name, so whether the encoding happened is invisible there. Poisoning found nothing
+uncaught across five mutations, including lower-cased hex digits.
+
 ## 2026-08-18 — A GraphQL executor, and the one case out of 67 that mattered
 
 _`contrib/graphql/exec.mere` plus `scripts/graphql_exec_parity.sh` against

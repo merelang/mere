@@ -148,31 +148,59 @@ except Exception: print('NOT-JSON: ' + d.replace(chr(10),' ')[:100])")
   fi
 fi
 
-# --- 2. an unknown method ------------------------------------------------
-# F1 answers with a named message rather than an RPC status, because the handler
-# signature cannot ask for one yet. That is a gap, and a gap is only honest if it
-# is CHECKED — the first version of this section printed the gap without calling
-# anything, which is a claim, not a check. This calls a method the schema declares
-# and the server does not handle, and requires the documented behaviour. When F2
-# adds statuses, this fails and says the assertion is stale.
-if start_server 1; then
-  got=$(grpcurl -plaintext -protoset "$TMP/hello.protoset" -max-time 10 \
-          -d '{}' "127.0.0.1:$PORT" hello.Greeter/NotImplemented 2>&1 \
-        | python3 -c "import sys,json
-d=sys.stdin.read()
-try: print(json.loads(d).get('message',''))
-except Exception: print('NOT-JSON: ' + d.replace(chr(10),' ')[:110])")
+# --- 2. RPC statuses -----------------------------------------------------
+#
+# A failed call is a status in the TRAILERS, not an HTTP status: the request
+# succeeded as HTTP and failed as RPC. Three routes, and they are different code
+# paths rather than three spellings of one:
+#
+#   * a method the schema declares and the server does not handle  -> UNIMPLEMENTED
+#   * a method that exists and refuses this input                  -> INVALID_ARGUMENT
+#   * a message that has to be percent-encoded on the way out      -> FAILED_PRECONDITION
+#
+# The third is not decoration. `grpc-message` is percent-encoded by specification
+# and grpc-go DECODES it — measured, `caf%C3%A9 %25` came back as `café %` — so a
+# raw `%` in a message would be read as the start of an escape.
+#
+# This section replaced a DOCUMENTED-GAP that asserted the absence of statuses.
+# Closing the gap made that assertion fail and say it was stale, which is what it
+# was written to do.
+cat > "$TMP/status_cases.txt" <<'CASES'
+NotImplemented	{}	Unimplemented	no such method: /hello.Greeter/NotImplemented
+SayHello	{"name":"boom"}	InvalidArgument	name must not be 'boom'
+SayHello	{"name":"unicode"}	FailedPrecondition	café: 100% not ok
+CASES
+NSTATUS=$(grep -c . "$TMP/status_cases.txt")
+if start_server "$NSTATUS"; then
+  bad=0
+  while IFS="$(printf '\t')" read -r method req wantcode wantmsg; do
+    [ -z "$method" ] && continue
+    # grpcurl writes a failure to stderr as `Code:` / `Message:` lines. Reduced to
+    # one line so a diff names the case rather than a block of formatting.
+    got=$(grpcurl -plaintext -protoset "$TMP/hello.protoset" -max-time 10 \
+            -d "$req" "127.0.0.1:$PORT" "hello.Greeter/$method" 2>&1 \
+          | python3 -c "
+import sys, re
+t = sys.stdin.read()
+c = re.search(r'^\s*Code:\s*(.*)$', t, re.M)
+m = re.search(r'^\s*Message:\s*(.*)$', t, re.M)
+print((c.group(1).strip() if c else 'NO-CODE') + '|' + (m.group(1).strip() if m else 'NO-MESSAGE'))")
+    if [ "$got" != "$wantcode|$wantmsg" ]; then
+      echo "        $method $req"
+      echo "          want: [$wantcode|$wantmsg]"
+      echo "          got : [$got]"
+      bad=$((bad + 1))
+    fi
+  done < "$TMP/status_cases.txt"
   wait $SRV 2>/dev/null
-  case "$got" in
-    "no such method: /hello.Greeter/NotImplemented")
-      echo "  DOCUMENTED-GAP  unknown method answers a named message, not grpc-status 12" ;;
-    *)
-      echo "  FAIL  unknown method  expected the documented message, got: [$got]"
-      echo "        either the gap closed (retire this section) or routing is wrong."
-      fail=1 ;;
-  esac
+  if [ "$bad" = 0 ]; then
+    echo "  ok    statuses  $NSTATUS codes reported, including a percent-encoded message"
+  else
+    echo "  FAIL  statuses  $bad of $NSTATUS"
+    fail=1
+  fi
 else
-  echo "  FAIL  unknown method  the server never started"
+  echo "  FAIL  statuses  the server never started"
   fail=1
 fi
 
@@ -188,7 +216,8 @@ else
 import socket, sys, time
 from h2.connection import H2Connection
 from h2.config import H2Configuration
-from h2.events import DataReceived, StreamEnded, SettingsAcknowledged
+from h2.events import (DataReceived, StreamEnded, SettingsAcknowledged,
+                       TrailersReceived, ResponseReceived)
 
 def frame(msg: bytes) -> bytes:
     return b"\x00" + len(msg).to_bytes(4, "big") + msg
@@ -210,6 +239,7 @@ c.initiate_connection()
 s.sendall(c.data_to_send())
 
 saw_settings_ack = False
+last_trailers = {}
 
 def call(sid, name, chunk=0):
     global saw_settings_ack
@@ -243,9 +273,15 @@ def call(sid, name, chunk=0):
                 done = True
             elif isinstance(ev, SettingsAcknowledged):
                 saw_settings_ack = True
+            elif isinstance(ev, TrailersReceived):
+                # grpcurl only shows the RENDERED code name. The raw trailer is a
+                # different observation, and this is the client that can make it.
+                last_trailers.clear()
+                last_trailers.update({k.decode(): v.decode() for k, v in ev.headers})
         out = c.data_to_send()
         if out: s.sendall(out)
-    return reply_text(body[5:5 + int.from_bytes(body[1:5], "big")]) if body else "NO-BODY"
+    if not body: return "NO-BODY"        # an error carries no message
+    return reply_text(body[5:5 + int.from_bytes(body[1:5], "big")])
 
 print(call(1, "first"))
 print(call(3, "second"))
@@ -255,12 +291,29 @@ print(call(5, "split", chunk=7))
 # The peer must acknowledge our SETTINGS. Neither client blocks on it, so it is
 # asserted rather than assumed — removing the ACK went unnoticed without this.
 print("settings-ack" if saw_settings_ack else "NO-SETTINGS-ACK")
+# The error path's raw trailers, straight off the wire. This is the observation
+# grpcurl cannot give: it prints the DECODED message and the RENDERED code name, so
+# whether the percent-encoding actually happened is invisible there.
+#
+# The rule is "bytes outside printable ASCII, plus `%` itself" — the same as
+# grpc-go's encodeGrpcMessage. So a space and an apostrophe pass through unencoded,
+# which is why the first expectation written here was wrong and the wire corrected
+# it. "unicode" is the case where the encoding is visible.
+call(7, "boom")
+print("A grpc-status=" + last_trailers.get("grpc-status", "?")
+      + " grpc-message=" + last_trailers.get("grpc-message", "?"))
+call(9, "unicode")
+print("B grpc-status=" + last_trailers.get("grpc-status", "?")
+      + " grpc-message=" + last_trailers.get("grpc-message", "?"))
 s.close()
 PY
   wait $SRV 2>/dev/null
-  printf 'hello first\nhello second\nhello split\nsettings-ack\n' > "$TMP/h2_want.txt"
+  { printf 'hello first\nhello second\nhello split\nsettings-ack\n'
+    printf 'A grpc-status=3 grpc-message=%s\n' "name must not be 'boom'"
+    printf 'B grpc-status=9 grpc-message=%s\n' "caf%C3%A9: 100%25 not ok"
+  } > "$TMP/h2_want.txt"
   if diff -q "$TMP/h2_want.txt" "$TMP/h2.txt" >/dev/null; then
-    echo "  ok    one connection  3 streams (one split across segments) + SETTINGS ack"
+    echo "  ok    one connection  5 streams (split / failing / encoded) + SETTINGS ack + raw trailers"
   else
     echo "  FAIL  one connection  sequential requests / segment splitting / SETTINGS ack"
     diff "$TMP/h2_want.txt" "$TMP/h2.txt" | sed 's/^/        /' | head -12

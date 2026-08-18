@@ -10,7 +10,7 @@ packet dumper.
 
 | file | exports | lines |
 |---|---|---|
-| `server.mere` | `module H2Server { serve, serve_n, respond_ok, respond_err }` — an h2c connection | ~200 |
+| `server.mere` | `type grpc_reply`; `module H2Server { serve, serve_n, respond, respond_ok, respond_err, status codes, pct_encode }` — an h2c connection | ~260 |
 | `hpack.mere` | `type hstate`; `module Hpack { new_state; decode; encode; decode_int / encode_int; huff_decode; insert / resize; lookup }` | ~250 |
 | `hpack_table.mere` | `module HpackTable { … }` — **generated** by `scripts/gen_hpack_tables.sh` | ~160 |
 | `frame.mere` | `module H2 { preface; frame types; flags; put_u8/16be/24be/32be; get_u8/16be/24be/32be; put_header / put_frame / frame_bytes; read_frame; has_flag; settings_payload / read_settings; u32_payload / window_increment / error_code; goaway_payload; grpc_message / read_grpc_message }` | ~215 |
@@ -161,14 +161,29 @@ path, not a check**, and is labelled as such so nobody has to re-derive that.
 
 ## The server
 
-`server.mere` turns the layers above into a connection. A handler is
-`str -> bytes -> bytes` — a path and a request message, giving a response message
-— and everything about HTTP/2 stays on the other side of it.
+`server.mere` turns the layers above into a connection. A handler is `str -> bytes -> grpc_reply` — a path and a request message, giving
+either a response message or a status — and everything about HTTP/2 stays on the
+other side of it.
 
 ```mere
 import "contrib/http2/server.mere";
-H2Server.serve 50051 (fn (path: str, req: bytes) -> reply_for path req)
+H2Server.serve 50051 (fn (path: str, req: bytes) ->
+  if str_eq path "/svc/Method" then RpcOk (reply_for req)
+  else RpcErr (H2Server.unimplemented, "no such method: " ++ path))
 ```
+
+**A failure is a status in the trailers, not an HTTP status.** The request succeeded
+as HTTP and failed as RPC, so it cannot be expressed as a 4xx — and a failed unary
+call carries no DATA frame at all, only HEADERS and trailers. `bytes` alone could
+not say "this failed", which is why the handler's answer is a variant: before it
+was, an unknown method got a reply that looked like a success.
+
+**`grpc-message` is percent-encoded**, and that is neither optional nor cosmetic:
+the specification says so and grpc-go *decodes* it — measured, `caf%C3%A9 %25`
+came back as `café %` — so a raw `%` in a message would be read as the start of an
+escape. The rule is "bytes outside printable ASCII, plus `%` itself", which means a
+space and an apostrophe pass through. The first expectation written into the harness
+assumed otherwise and the wire corrected it.
 
 `examples/grpc_hello.mere` is a gRPC Greeter built on it, and
 `scripts/grpc_parity.sh` drives it with two real clients. That harness is the only
@@ -190,11 +205,16 @@ here knows what ALPN is.
   Safe only because the responses are small.
 - **One stream's state at a time.** Sequential streams on one connection work and
   are checked; interleaved ones would be mis-served.
-- **No RPC status for an unknown method.** The handler signature cannot ask for one
-  yet, so an unknown path gets a named message. `grpc_parity.sh` *calls* a method
-  the schema declares and the server does not handle, and requires that documented
-  behaviour — so when statuses land, the section fails and says the assertion is
-  stale.
+- **No streaming.** A handler answers once, so server-streaming and
+  client-streaming methods are not expressible in its signature.
+
+The DOCUMENTED-GAP that used to sit here — "no RPC status for an unknown method" —
+is gone, and closing it worked the way it was meant to: the assertion of the gap's
+*presence* failed and said it was stale. Three status routes are checked now
+(unimplemented, a method that refuses its input, and a message needing
+percent-encoding), and the python client reads the **raw** trailers, which is the
+observation grpcurl cannot give — it prints the decoded message and the rendered
+code name, so whether the encoding happened is invisible there.
 
 ### Two things loopback hid
 
