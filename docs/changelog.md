@@ -4,6 +4,88 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## contrib — GraphQL introspection and validation — 2026-08-18
+
+_No compiler change. `contrib/graphql`, two new gates._
+
+### Introspection is answered by the ordinary executor
+
+`__schema`, `__type(name:)` and `__typename`. The introspection types are **ordinary
+SDL**, generated from graphql-js into `introspection_sdl.mere` and *appended to the
+document's own definitions* — so `__Type` is an object type like any other and field
+lookup, nullability, null propagation, list handling and enum coercion all apply to it
+unchanged. One line, and there is no second executor.
+
+The SDL is generated and committed, like the Unicode and HPACK tables: the
+specification fixes every name, type and nullability, and a 200-line transcription has
+a mistake in it.
+
+**Introspection is cyclic, so one value has to be lazy.** `__schema.types` lists every
+type, each type's `fields` name types, whose fields name types; a strict value cannot
+hold that and eager construction does not terminate. What bounds the expansion is the
+query — `getIntrospectionQuery()` asks for `ofType` exactly nine levels deep. So
+`gvalue` has one non-data arm, `GTypeRef of gtype`, computed when asked for: the only
+place in this executor where a field is computed rather than looked up.
+
+**The strongest check is not a comparison.** Our introspection result fed to
+graphql-js's own `buildClientSchema` and printed must equal
+`printSchema(buildSchema(sdl))`. It holds exactly when our answer carries the whole
+schema, it is blind to field order (which the specification does not fix), and nothing
+transcribes an introspection result. It passed *before* the JSON comparison did, and
+both differences that then surfaced were real:
+
+- **A built-in scalar belongs to a schema only if something refers to it.** The
+  oracle's type map for `type Query { a: Int }` is `Query Int Boolean String` and not
+  the other two — `Boolean` and `String` because the **built-in directives** refer to
+  them, which falls out of walking the appended SDL rather than being special-cased.
+- **graphql-js 17 keeps an argument's default in `a.default.value`**, not
+  `a.defaultValue`. Reading the old field silently dropped `@deprecated`'s default.
+
+**`includeDeprecated` defaults to false**, and the standard introspection query passes
+`true` — so every gate section using it agreed while that was missing entirely. It took
+a hand-written `__type(name: "Colour") { enumValues }` to disagree.
+
+### Validation, and how a partial validator is gated
+
+19 of the specification's 32 rules. The gateable part is the design:
+
+**Every error carries the name of the rule that produced it**, and the harness compares
+the *set of rule names* against graphql-js running each of its 32 rules individually —
+the oracle classifying its own output. Not the error list, for two measured reasons:
+graphql-js returns errors in visitor order interleaved across rules, so a partial
+validator could never agree about anything; and rule names are about thirty identifiers
+from the specification's own section titles, small enough that a shared misreading is
+not a real risk.
+
+Three failures, not one: rejecting what the oracle accepts (**the worst** — a false
+positive fails a valid request), missing a rule we *claim*, and missing a rule we do
+not claim (DOCUMENTED-GAP, and the rule must be listed). **A gap-list entry that never
+fires fails the harness as stale.**
+
+The claim list is checked **in both directions**: every rule reported must be on it.
+Without that, dropping a rule from the list while still implementing it left the
+harness green — poisoning found it, because the list is otherwise consulted only for
+rules that were *missed*. A wrong list silently weakens every check that reads it.
+
+**The document and the schema are separate arguments**, unlike the executor.
+`ExecutableDefinitions` is the rule that a document being executed must not contain
+type-system definitions, so a combined list makes every schema violate it — the first
+version reported every SDL type as "not executable".
+
+What the harness caught: we rejected `{ __schema { queryType { name } } }` because
+`__schema` / `__type` / `__typename` are provided *by* the schema rather than declared
+in it; `is not defined **by** operation` versus `is never used **in** operation`, two
+prepositions and one helper that put the wrong word in one of them; and a fragment
+cycle is reported *once*, at the first fragment in document order.
+
+### A harness bug worth naming
+
+Comments inside a node script passed in a double-quoted shell string may contain
+**neither a backtick nor a double quote** — one is command substitution, the other ends
+the string. Both mistakes were made in consecutive edits. The second turned the
+comparison into a syntax error rather than a wrong answer, which is the good failure of
+the two.
+
 ## contrib — HTTP/2 flow control and gRPC streaming — 2026-08-18
 
 _No compiler change. `contrib/http2`, `examples/grpc_hello.mere`, and two gates._
