@@ -78,8 +78,24 @@ let parse_program ?(prelude = true) ?base_dir ?(search_paths = []) s =
      2048-dogfood P3: then α-rename nested fn bindings to unique names so
      same-named inner fns (e.g. a `let rec go` per if-branch) don't collide
      in the backends' name-keyed inner-fn lift resolution. *)
+  (* The builtin names a USER binding may shadow (Q-045). The prelude deliberately
+     shadows ten builtins of its own (`pow`, `divmod`, …) and those must keep the
+     names they have always had, so the prelude's own top-level names are subtracted:
+     what is left is the set where a user binding is the FIRST shadow and has to be
+     renamed. *)
+  let prelude_bound =
+    List.concat_map (fun d ->
+      match d with
+      | Ast.Top_let ({ Ast.pnode = Ast.P_var n; _ }, _) -> [n]
+      | Ast.Top_let_rec bs -> List.map fst bs
+      | _ -> []) prelude_decls
+  in
+  let shadowable =
+    List.filter (fun n -> not (List.mem n prelude_bound))
+      (List.map fst Typer.initial_env)
+  in
   let prog =
-    Ast.uniquify_toplevel_shadows
+    Ast.uniquify_toplevel_shadows ~shadowable
       (Ast.reserve_toplevel_main
         (Ast.uniquify_inner_fns_program
           (Ast.lower_par_map_program
@@ -512,6 +528,25 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
      too. *)
   let recovering = on_error <> None in
   let report loc msg = match on_error with Some f -> f (loc, msg) | None -> () in
+  (* The environment the DESUGARED program is typed against, which is not the same
+     thing as the environment the declaration loop builds.
+
+     `desugar_program` turns every `Top_let` into a nested `Let`, so the desugared
+     expression rebinds all of them itself. Typing it against the accumulated
+     environment therefore does not add anything — except one thing it must not add:
+     a binding is visible to declarations that come BEFORE it.
+
+     That was a real bug (Q-045). A user's `let show = fn (x: int) -> x + 1` made the
+     PRELUDE fail to type, because the prelude's `pow` calls the `show` builtin and
+     the accumulated environment had the user's `show` shadowing it — at a position
+     textually earlier than the user's own line. The error named `<prelude>:485` for a
+     program that never mentions the prelude, on all four compiled backends, while the
+     interpreter was fine: the interpreter types each declaration against the
+     environment as it stood, and only `main` against the full one.
+
+     So this holds exactly what desugaring DROPS and the expression cannot rebind:
+     externs. Everything else desugaring keeps. *)
+  let base_env = ref Typer.initial_env in
   (* The typer collects too, for the two kinds of error that account for nearly
      all of them: a mismatch and an unknown name. So a single declaration can
      report more than one problem, and the per-declaration guard below is what
@@ -590,7 +625,10 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
     | Ast.Top_local name ->
       Typer.register_local_type name
     | Ast.Top_extern (name, ty) ->
-      type_env := (name, Typer.mono ty) :: !type_env
+      (* Into BOTH: the declaration loop needs it, and so does the desugared
+         program, which drops the declaration and so cannot rebind it. *)
+      type_env := (name, Typer.mono ty) :: !type_env;
+      base_env := (name, Typer.mono ty) :: !base_env
     | Ast.Top_extern_type type_name ->
       Typer.register_type type_name [] []
     | Ast.Top_ctor_alias (alias, target) ->
@@ -604,9 +642,9 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
      this pass usually re-raises the first error the loop above already reported.
      `check` de-duplicates, which is what makes that harmless. *)
   let main_ty =
-    if not recovering then Typer.infer !type_env desugared
+    if not recovering then Typer.infer !base_env desugared
     else
-      try Typer.infer !type_env desugared with
+      try Typer.infer !base_env desugared with
       | Typer.Type_error (loc, msg) | Trait_elab.Trait_error (loc, msg) ->
         report loc msg; Ast.TyUnit
   in

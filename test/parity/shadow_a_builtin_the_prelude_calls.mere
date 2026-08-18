@@ -1,0 +1,23 @@
+// Q-045: a top-level binding that shadows a BUILTIN THE PRELUDE ITSELF CALLS.
+//
+// `show` is a builtin and the prelude's `pow` calls it. Before the fix this program
+// made the PRELUDE fail to type — `expected 'str', got 'int'` at `<prelude>:485`, for
+// a program that never mentions the prelude — on all four compiled backends, while
+// the interpreter answered correctly.
+//
+// Two independent causes, and the first one hid the second:
+//
+//  1. the desugared program was typed against the ACCUMULATED environment, so a
+//     declaration saw bindings that come after it. Fixing that turned the error into
+//     a refusal from the monomorphiser, because
+//  2. the backends resolve a top-level name globally, and one name now had two
+//     meanings. `uniquify_toplevel_shadows` renames the user's, so references BEFORE
+//     it — the prelude's — still mean the builtin.
+//
+// `str_len` is here too because the fix must not be about `show`: the prelude calls
+// `str_len` three times and `list_len` three times, and a fix that special-cased one
+// name would pass with only the first line.
+let show = fn (x: int) -> x + 1;
+let str_len = fn (x: int) -> x * 10;
+let list_len = fn (x: int) -> x - 1;
+print (str_of_int (show 1) ++ "," ++ str_of_int (str_len 2) ++ "," ++ str_of_int (list_len 3))

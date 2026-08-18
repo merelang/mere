@@ -48,7 +48,7 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.282" Version.v "0.1.282";
+  check "version is 0.1.283" Version.v "0.1.283";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -9687,15 +9687,22 @@ let () =
   (* Phase 30.0 (DEFERRED §1.12 fix): verify that a user-defined fn can shadow
      a builtin's hardcoded dispatch. is_alpha is a builtin, but when a user
      definition exists, skip the builtin call and dispatch to the user fn. *)
+  (* These three match the symbol PREFIX, not an exact name. A user binding that
+     shadows a BUILTIN is renamed (`is_alpha` -> `is_alpha__v2`) so that references
+     before it — the prelude's — still mean the builtin; see Q-045 and
+     `Ast.uniquify_toplevel_shadows`. The property being asserted is "a user function
+     of this name was emitted and the builtin did not leak", which the prefix says and
+     the exact name only said by accident. Measured before changing: the compiled
+     program answers `true`, and the builtin answers `false` for the same input. *)
   check "§30.0: C codegen — user-defined is_alpha shadows __lang_is_alpha"
     (let c = Codegen_c.emit_program ~main_ty:Ast.TyBool (typed_prog
        "let is_alpha = fn (c: str) -> c == \"_\";\n\
         is_alpha \"_\"") in
      let has_user_fn =
-       let nlen = String.length c and plen = String.length "int mu_is_alpha(" in
+       let nlen = String.length c and plen = String.length "int mu_is_alpha" in
        let rec scan i =
          if i + plen > nlen then false
-         else if String.sub c i plen = "int mu_is_alpha(" then true
+         else if String.sub c i plen = "int mu_is_alpha" then true
          else scan (i + 1)
        in scan 0
      in
@@ -9706,10 +9713,10 @@ let () =
        "let is_alpha = fn (c: str) -> c == \"_\";\n\
         is_alpha \"_\"") in
      let has_user_fn =
-       let nlen = String.length ll and plen = String.length "@mu_is_alpha(" in
+       let nlen = String.length ll and plen = String.length "@mu_is_alpha" in
        let rec scan i =
          if i + plen > nlen then false
-         else if String.sub ll i plen = "@mu_is_alpha(" then true
+         else if String.sub ll i plen = "@mu_is_alpha" then true
          else scan (i + 1)
        in scan 0
      in
@@ -9720,10 +9727,10 @@ let () =
        "let is_alpha = fn (c: str) -> c == \"_\";\n\
         is_alpha \"_\"") in
      let has_user_fn =
-       let nlen = String.length wat and plen = String.length "(func $is_alpha " in
+       let nlen = String.length wat and plen = String.length "(func $is_alpha" in
        let rec scan i =
          if i + plen > nlen then false
-         else if String.sub wat i plen = "(func $is_alpha " then true
+         else if String.sub wat i plen = "(func $is_alpha" then true
          else scan (i + 1)
        in scan 0
      in

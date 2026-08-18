@@ -4,6 +4,84 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.283 — 2026-08-18
+
+_Two shadowing bugs, and a gate whose expectation was degenerate._
+
+Both bugs had the same shape: **the compiled backends resolve a name globally, and
+something shadowed it.** The interpreter was right in both cases, which is what made
+them findable at all.
+
+### Q-045: a user binding that shadows a builtin the prelude calls
+
+```mere
+let show = fn (x: int) -> x + 1;
+print (str_of_int (show 1))
+```
+
+Three lines, and it made the **prelude** fail to type — `expected 'str', got 'int'` at
+`<prelude>:485` for a program that never mentions the prelude — on all four compiled
+backends. The prelude's `pow` calls the `show` builtin. Not `show`-specific: `str_len`
+and `list_len` are each called three times in there.
+
+**Two independent causes, and the first hid the second.**
+
+The desugared program was typed against the **accumulated** environment. Since
+`desugar_program` turns every `Top_let` into a nested `Let`, the expression rebinds all
+of them itself — so passing the accumulated environment added nothing except the one
+thing it must not: *a binding visible to declarations that come before it*. It now types
+against an environment holding only what desugaring **drops**, which is externs.
+
+That turned the error into a refusal from the monomorphiser, because
+`uniquify_toplevel_shadows` never saw the user's `show` as a shadow — a builtin is not
+a top-level declaration, so the first binding of that name kept it. It is seeded with
+the builtin names now, so the user's binding is renamed and references *before* it — the
+prelude's — still mean the builtin.
+
+The seed subtracts the prelude's own top-level names: the prelude deliberately shadows
+ten builtins (`pow`, `divmod`, `assert`, …) and those keep the names they have always
+had.
+
+### Q-046: a parameter named the same as a top-level binding
+
+`uniquify_inner_fns_expr` renames inner **fn** bindings that collide with a top-level
+name, and left `Fun` **parameters** alone. So a lifted inner function took no parameter
+for its captured `handler` at all, and its body referred to the caller's global of that
+name.
+
+**It was invisible while both had the same type** — the wrong binding happened to fit —
+and surfaced as C that would not compile only when the types diverged. `contrib/http2`
+carried a naming workaround for it; the parameter is renamed now, so that workaround is
+a comment about history rather than a rule.
+
+Parameters get a different treatment from inner fns and the distinction is the point: an
+inner fn becomes a symbol and must **reserve** its name, a parameter does not and only
+has to **not be mistaken** for one.
+
+### Three test assertions were pinning a symbol name
+
+`§30.0` checked that a user-defined `is_alpha` shadows the builtin by grepping the output
+for `int mu_is_alpha(`. The fix renames it to `is_alpha__v2`, so they matched the prefix
+instead. Measured before changing: the compiled program answers `true` and the builtin
+answers `false` for the same input, so the behaviour under test was unaffected — the
+exact name only said it by accident.
+
+### The line-break gate was comparing against nothing
+
+`linebreak_conformance` reported **19338 of 19338 cases differing**. `want.txt` had
+19338 lines and **not one break mark in it**: under this machine's `LANG=ja_JP.UTF-8`,
+awk 20200816 compares `÷` **equal to** `×` — collation, not bytes — so every mark became
+`×`.
+
+The implementation was right and the **expectation** was degenerate. It runs under
+`LC_ALL=C` now. It passes on GNU awk and under the C locale, which is why CI was green
+and a Japanese-locale machine was not — the environment difference to suspect first when
+a gate disagrees with CI. The data is ASCII plus those two symbols, so byte comparison
+was what was wanted all along.
+
+Verified: 28 CI gates, `runtest 2526/0`, `parity 110/0 + 15/0` (two new parity programs),
+`selfhost_check all passed`, `host_matrix ok`.
+
 ## contrib — GraphQL introspection and validation — 2026-08-18
 
 _No compiler change. `contrib/graphql`, two new gates._

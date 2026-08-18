@@ -386,6 +386,25 @@ let rec pattern_vars p =
   | P_as (inner, n) -> n :: pattern_vars inner
   | P_or (a, _) -> pattern_vars a  (* P_or arms bind the same names *)
 
+(* Rename BOUND variables in a pattern. `pattern_vars` answers which names a pattern
+   binds; this rewrites them. Used by the shadow-uniquifier below, which has to move a
+   binder out of the way rather than a reference to one. *)
+let rec rename_pat_vars (subst : (string * string) list) (p : pattern) : pattern =
+  let sub n = match List.assoc_opt n subst with Some n' -> n' | None -> n in
+  match p.pnode with
+  | P_wild | P_int _ | P_bool _ | P_str _ | P_unit -> p
+  | P_var n -> { p with pnode = P_var (sub n) }
+  | P_constr (c, None) -> { p with pnode = P_constr (c, None) }
+  | P_constr (c, Some inner) ->
+    { p with pnode = P_constr (c, Some (rename_pat_vars subst inner)) }
+  | P_tuple ps -> { p with pnode = P_tuple (List.map (rename_pat_vars subst) ps) }
+  | P_record (rn, fields) ->
+    { p with pnode =
+        P_record (rn, List.map (fun (f, q) -> (f, rename_pat_vars subst q)) fields) }
+  | P_as (inner, n) -> { p with pnode = P_as (rename_pat_vars subst inner, sub n) }
+  | P_or (a, b) ->
+    { p with pnode = P_or (rename_pat_vars subst a, rename_pat_vars subst b) }
+
 (* Walk an expr and rewrite every FREE variable reference matching
    `lookup name` to a new name. `lookup` returns `Some new_name` to
    rewrite or `None` to leave the Var alone. Shadowing scopes (Fun,
@@ -521,6 +540,20 @@ let uniquify_inner_fns_expr (seen : (string, unit) Hashtbl.t) (e0 : expr) : expr
       incr uq_counter; Some (n ^ "_uq" ^ string_of_int !uq_counter)
     end else begin Hashtbl.add seen n (); None end
   in
+  (* A binder that COLLIDES with a name already taken, without claiming the name it
+     moves to. `claim` is for inner fns, which become symbols of their own and so must
+     reserve their name; a parameter does not become a symbol, it just must not be
+     mistaken for one.
+     Q-046: a parameter named the same as a top-level binding made the backends'
+     inner-fn lift resolve the CAPTURE to the top-level symbol. The lifted loop took no
+     parameter for it at all and its body referred to the global. That was invisible
+     while both had the same type — the wrong binding happened to fit — and surfaced
+     as bad C only when their types diverged. *)
+  let claim_shadow n =
+    if Hashtbl.mem seen n then begin
+      incr uq_counter; Some (n ^ "_uq" ^ string_of_int !uq_counter)
+    end else None
+  in
   let rec uq (e : expr) : expr =
     match e.node with
     | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit | Var _ -> e
@@ -532,7 +565,12 @@ let uniquify_inner_fns_expr (seen : (string, unit) Hashtbl.t) (e0 : expr) : expr
     | App (f, a) -> { e with node = App (uq f, uq a) }
     | Annot (i, t) -> { e with node = Annot (uq i, t) }
     | Tuple es -> { e with node = Tuple (List.map uq es) }
-    | Fun (p, t, body) -> { e with node = Fun (p, t, uq body) }
+    | Fun (pname, t, body) ->
+      (match claim_shadow pname with
+       | None -> { e with node = Fun (pname, t, uq body) }
+       | Some pname' ->
+         let lookup n = if n = pname then Some pname' else None in
+         { e with node = Fun (pname', t, uq (rename_free_vars lookup body)) })
     | Match (s, arms) ->
       let arms' = List.map (fun (p, g, b) -> (p, Option.map uq g, uq b)) arms in
       { e with node = Match (uq s, arms') }
@@ -647,9 +685,28 @@ let reserve_toplevel_main (prog : program) : program =
    rename the redefinition (`Greet.hello` -> `Greet.hello__v2`) and rewrite
    every later reference to it, so all four backends see distinct symbols.
    Only dotted redefinitions are touched, so ordinary programs are unaffected. *)
-let uniquify_toplevel_shadows (prog : program) : program =
+(* `shadowable` names are treated as ALREADY BOUND, so the first top-level binding
+   of one of them counts as a shadow and gets renamed.
+
+   It carries the builtin names (Q-045). A builtin is not a top-level declaration, so
+   this pass could not see `let show = fn (x: int) -> x + 1` as shadowing anything —
+   it kept the name `show`, and the backends, which resolve a top-level name globally,
+   then resolved the PRELUDE's call to the `show` BUILTIN to the user's function. The
+   symptom was a type error at `<prelude>:485` for a program that never mentions the
+   prelude, and after the typer half was fixed, a refusal from the monomorphiser
+   because one name had two skeletons.
+
+   Renaming the user's binding is the whole fix: references BEFORE it (the prelude)
+   still mean the builtin, references after it resolve through `cur` to the renamed
+   one, and `rename_free_vars` is scope-aware so inner binders are untouched.
+
+   The caller passes only the builtins the PRELUDE does not itself define — the
+   prelude deliberately shadows ten of them (`pow`, `divmod`, …), and those must keep
+   the names they have always had. *)
+let uniquify_toplevel_shadows ?(shadowable = []) (prog : program) : program =
   let cur : (string, string) Hashtbl.t = Hashtbl.create 16 in
   let count : (string, int) Hashtbl.t = Hashtbl.create 16 in
+  List.iter (fun n -> Hashtbl.replace count n 1) shadowable;
   let lk n = Hashtbl.find_opt cur n in
   (* Register a binding occurrence of `n`; return the (possibly fresh) name it
      should be bound under, updating `cur` for later free references. The first

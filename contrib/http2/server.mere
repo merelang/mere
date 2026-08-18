@@ -543,16 +543,15 @@ module H2Server {
   //
   // Wrap a one-message-in, one-reply-out handler with `H2Server.unary`.
   //
-  // THE PARAMETER IS CALLED `h` AND NOT `handler` ON PURPOSE, and this is a
-  // workaround rather than a preference. When a caller's own top-level binding
-  // has the SAME NAME as this parameter, the C backend's inner-function lifting
-  // resolves the captured name to the CALLER'S GLOBAL: the lifted loop took no
-  // handler parameter at all and its body referred to the top-level one. That
-  // was invisible while both had the same type — the wrong binding happened to
-  // fit — and surfaced only when `unary` made the types differ.
+  // The parameter is called `h` and not `handler` for a reason that is now
+  // HISTORY rather than a rule (Q-046, fixed in mere v0.1.283).
   //
-  // `handler` is the obvious name for a user to choose, so the library cannot
-  // also claim it. Registered upstream; the real fix is not a naming rule.
+  // A caller's own top-level `handler` used to collide with this parameter: the C
+  // backend's inner-function lifting resolved the captured name to the CALLER'S
+  // GLOBAL — the lifted loop took no handler parameter at all. It was invisible
+  // while both had the same type, and surfaced only when `unary` made the types
+  // differ. The compiler renames a colliding parameter now, so `handler` would be
+  // a fine name here again.
   let serve = fn (port: int, h) ->
     let sfd = tcp_listen port in
     if sfd < 0 then fail ("http2: could not listen on port " ++ str_of_int port)
