@@ -137,6 +137,12 @@ jobs:
         continue-on-error: true
         run: sudo apt-get install -y qemu-system-misc
 
+      # hyperframe is the oracle for http2_parity.sh — an independent RFC 9113
+      # implementation and the frame layer of h2. Pinned for the same reason as
+      # node, protoc and graphql-js: the gate's answer comes from it.
+      - name: Install hyperframe (oracle for http2_parity)
+        run: python3 -m pip install --break-system-packages hyperframe==6.1.0 h2==4.4.1
+
       - name: Install dependencies
         run: opam install . --deps-only --with-test
 
@@ -160,6 +166,7 @@ jobs:
           # graphql_parity skips without this, and a gate that skips in CI is a
           # gate that passes without running.
           [ -f "$(npm root -g)/graphql/package.json" ] || { echo "graphql-js missing"; exit 1; }
+          python3 -c "import hyperframe" || { echo "hyperframe missing"; exit 1; }
           for f in --enable-tail-call --enable-threads; do
             wat2wasm --help 2>&1 | grep -q -- "$f" \
               || { echo "wat2wasm does not support $f"; exit 1; }
@@ -240,6 +247,12 @@ jobs:
       # to the Int/Float distinction, so the harness asks for that kind directly.
       - name: graphql_parity (vs graphql-js)
         run: sh scripts/graphql_parity.sh
+
+      # HTTP/2 framing against hyperframe, in both directions, plus the reserved
+      # bit of the stream identifier — the one field that behaves correctly
+      # against every well-behaved peer while being wrong.
+      - name: http2_parity (vs hyperframe)
+        run: sh scripts/http2_parity.sh
 
       # The window capability, checked by reading the window's own pixels back.
       # SDL's `dummy` video driver gives a software renderer and an event queue

@@ -4,6 +4,67 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## 2026-08-18 — GraphQL's type-system half, and HTTP/2 frames
+
+_`contrib/graphql` grows SDL; `contrib/http2/frame.mere` arrives with a gate
+against hyperframe. Both gates were then deliberately broken to see whether they
+could fail, and both had blind spots._
+
+**SDL** — schema / scalar / type / interface / union / enum / input / directive,
+with descriptions, `implements A & B`, argument definitions and defaults. The
+derived corpus goes from 153 to 366 documents and the round-trip covers all of it
+unchanged, because graphql-js's `print` handles type-system definitions too.
+
+Then the half that was missing: everything so far fed **valid** documents, and a
+parser that accepts anything passes all of it. A reject-list of 37 documents the
+oracle rejects found six real defects on its first run:
+
+* `{ }`, `type T { }`, `enum E { }` and `input In { }` were all accepted. Every
+  delimited list in this grammar needs at least one element **except the two that
+  are values** — `[]` and `{}` are legal, `{ }` as a block is not. One helper that
+  names the production replaced seven call sites that each returned `[]`.
+* `007` was accepted (an IntValue may not have a leading zero) and so was `1.`
+  (a fraction needs a digit). The lexer now also refuses a number followed by a
+  digit, a `.` or a name start, so `1.2.3` is an error rather than two tokens.
+
+A harness defect came out of the same exercise: `set -e` plus a crashing subject
+made the script stop mid-run having printed **no verdict**, hiding every later
+section. The subject now runs through a helper that never aborts and names the
+section it failed in. `set -e` stays for the preflight, where a missing oracle
+should stop everything.
+
+Type-system **extensions** (`extend ...`) are refused rather than mis-parsed —
+reading `extend type T` as `type T` would produce a tree that says something the
+document did not — and the refusal is *asserted*, so the day extensions land that
+section fails and says the assertion is stale.
+
+**HTTP/2 frames** — the preface, the 9-byte header, SETTINGS / WINDOW_UPDATE /
+RST_STREAM / GOAWAY payloads, and the gRPC message prefix. `hyperframe` is the
+oracle: 50 frames byte-identical on encode, the same 50 compared on *fields* on
+decode, with the sweep crossing type × flags × stream id × payload size (0, 1, 2,
+255, 256, 16383, 16384 — every length-encoding boundary).
+
+One byte has **two independent confirmations**, which is the only kind of
+agreement worth having: an empty SETTINGS frame serialises as
+`000000040000000000`, and that is byte-for-byte what `grpcurl` 1.8.8 was observed
+sending on a real connection. hyperframe and grpcurl never met.
+
+Poisoning that gate found two things the sweep could not reach:
+
+* **The `lshr` mask was dead.** Every shift here is immediately masked with 255 to
+  extract a byte, and the bits an arithmetic shift copies in sit above bit 7, so a
+  logical shift gives the same answer. Removing the mask changed nothing, which is
+  the definition of dead code. It is *not* dead in `contrib/proto`, where the
+  shifted value is the loop variable and a negative int64 would never terminate —
+  the contrast is now written down in both files.
+* **The writer's stream-id mask was never exercised**, because every stream id in
+  the sweep already has the reserved bit clear. A section now writes `0x80000001`
+  and requires the same frame as stream 1. The decode direction was already
+  covered: `0x80000001` must read as 1, not 2147483649.
+
+Both are the same shape — a guard nothing reaches is indistinguishable from a
+guard that is wrong.
+
 ## 2026-08-18 — Two protocols: the protobuf wire format, and GraphQL documents
 
 _`contrib/proto` and `contrib/graphql`, each with a gate against somebody else's
