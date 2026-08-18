@@ -12,6 +12,7 @@ A lexer, parser and printer for GraphQL documents: **executable** definitions
 | `lexer.mere` | `module Glex { tokens, block_value }` | ~260 |
 | `parser.mere` | `module Gparse { document }` | ~390 |
 | `printer.mere` | `module Gprint { document, pval, ptype }` | ~230 |
+| `exec.mere` | `type gvalue` / `gpath` / `gerr` / `gout`; `module Gexec { run, run_json, to_json }` | ~370 |
 
 `ast.mere` is type-only so the other three share one definition instead of
 three that drift — the same arrangement as `contrib/parser/ast.mere`.
@@ -137,9 +138,69 @@ afterwards cannot pass), and a corpus check that fails loudly if the **oracle**
 rejects a document this harness generated — that is a bug in the generator, not
 a result.
 
+## Execution
+
+`exec.mere` executes a document against data. **The resolvers are the data**: a
+field is resolved by looking its name up in the parent object, which is what
+graphql-js does by default. That is what makes `scripts/graphql_exec_parity.sh`
+meaningful — with the default resolver on both sides, nothing about resolution is
+transcribed, so a difference in the output is a difference in *execution* rather
+than two hand-written resolver sets that drifted.
+
+```mere
+import "contrib/graphql/exec.mere";
+Gexec.run_json (Gparse.document (query ++ sdl)) root_value variables
+// {"data":{"a":1}}   or   {"errors":[{"message":"…","path":["a"]}],"data":{"a":null}}
+```
+
+### Null propagation is the hard part
+
+A non-null field that resolves to null is **not** an error in that field — it
+destroys the nearest **nullable** ancestor. `{ nn }` where `nn: Int!` answers
+`"data": null`, not `"data": {"nn": null}`. An item error in `[Int!]` nulls the
+whole list, with a path of `["ln", 1]`.
+
+Every position is one of two things, and that is all `gout` says:
+
+| | meaning |
+|---|---|
+| `GOk (value, errors)` | a value, possibly null, and whatever went wrong below |
+| `GBubble errors` | this position could not be null and was; a nullable ancestor must absorb it |
+
+Written that way, the four cases in the specification — field, list item, object,
+top level — fall out of two constructors instead of needing exceptions the language
+does not have.
+
+**Where absorption happens is the whole subtlety, and the oracle found it.** The
+first version absorbed inside the object and list arms, which is right for a
+nullable position and wrong inside a `!`. Of 67 cases exactly one differed:
+`{ o2 { nnx } }` with `o2: O!` produced *two* errors — the real one about `O.nnx`
+and an invented one about `Query.o2` — where the oracle produces one. When a
+non-null position is null **because an error already propagated**, no second error
+is raised: the check that would raise it is never reached. So `raw` completes a
+position with no absorbing and `complete` decides what the position's nullability
+means. A list item goes through `complete`, so `[O]` nulls the item and `[O!]`
+nulls the list; that falls out rather than being special-cased.
+
+### What the gate compares, and what it does not
+
+Data, errors, error paths, and the **order** of all of it — a GraphQL response's
+field order follows the query, so it is compared as it comes rather than sorted.
+Error messages are compared **verbatim**: the specification does not fix the prose,
+so matching the reference implementation is the only way to compare messages at
+all, and the oracle's version is pinned and printed.
+
+`locations` are **stripped from both sides**. They need source positions the parser
+does not carry — a stated gap, not an accident.
+
+Poisoning it ten ways caught nine immediately. The tenth was a coverage gap worth
+recording: breaking the **named** fragment's type-condition check went unnoticed
+because the corpus only had the **inline** form, so one of two nearly identical
+branches was unchecked. Three named-spread cases closed it.
+
 ## Not here yet
 
-- **Validation, execution, introspection.**
+- **Validation and introspection** beyond `__typename`.
 - **Type-system extensions** (`extend type T { … }`). Valid GraphQL that this
   parser refuses rather than mis-reads: reading `extend type T` as `type T` would
   produce a tree that says something the document did not. The refusal is

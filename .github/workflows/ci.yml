@@ -263,6 +263,14 @@ jobs:
       - name: graphql_parity (vs graphql-js)
         run: sh scripts/graphql_parity.sh
 
+      # The executor against graphql-js's execute(), with the resolvers being the
+      # DATA on both sides so nothing about resolution is transcribed. What it
+      # really exercises is null propagation: a non-null field that resolves to
+      # null destroys the nearest nullable ancestor, and an item error in [Int!]
+      # nulls the whole list.
+      - name: graphql_exec_parity (vs graphql-js execute)
+        run: sh scripts/graphql_exec_parity.sh
+
       # HTTP/2 framing against hyperframe, in both directions, plus the reserved
       # bit of the stream identifier — the one field that behaves correctly
       # against every well-behaved peer while being wrong.

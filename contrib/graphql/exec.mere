@@ -1,0 +1,472 @@
+// contrib/graphql/exec.mere — executing a GraphQL document against data.
+//
+// The value model is `gvalue`, and the "resolvers" are the data: a field is
+// resolved by looking its name up in the parent object, which is what graphql-js
+// does by default. That is a deliberate choice for a first executor, and it is
+// what makes the parity harness meaningful — with the default resolver on both
+// sides, nothing about resolution has to be transcribed, so a difference in the
+// output is a difference in EXECUTION rather than in two hand-written resolver
+// sets that drifted.
+//
+// NULL PROPAGATION IS THE HARD PART, and it is why an oracle earns its place here.
+// A non-null field that resolves to null is not an error in that field — it is an
+// error that destroys the nearest NULLABLE ancestor. `{ nn }` where `nn: Int!`
+// answers `"data": null`, not `"data": {"nn": null}`. Every position is therefore
+// one of two things, and that is exactly what `gout` says:
+//
+//   GOk (value, errors)   — a value, possibly null, and whatever went wrong below
+//   GBubble errors        — this position could not be null and was; the enclosing
+//                          nullable position has to absorb it
+//
+// A nullable position absorbs a `GBubble` into `GOk (GNull, errors)`; a non-null
+// position passes it on. Written that way, the four cases in the specification
+// (field, list item, object, top level) all fall out of the same two constructors
+// instead of needing exceptions the language does not have.
+//
+// SCOPE, and each of these is a stated gap rather than a silent one:
+//
+//   * `locations` in errors are NOT produced. They need source positions the
+//     parser does not carry. The harness strips them from the oracle's answer too,
+//     and says so.
+//   * Field ARGUMENTS are not passed to resolution, because the default resolver
+//     ignores them — the same as graphql-js. Arguments on `@skip` / `@include` ARE
+//     evaluated, since those are directives rather than resolution.
+//   * Interfaces and unions are not resolved: with data as the resolver there is
+//     nothing to resolve a concrete type from.
+//   * Introspection beyond `__typename`, custom scalars, and subscriptions.
+//
+// Anything outside that is REFUSED with a named message rather than approximated,
+// so an unhandled combination shows up as a refusal and not as a wrong answer.
+
+import "ast.mere";
+import "lexer.mere";
+import "parser.mere";
+
+type gvalue =
+  | GNull
+  | GBool of bool
+  | GInt of int
+  | GFloat of float
+  | GStr of str
+  | GList of gvalue list
+  | GObj of (str * gvalue) list;
+
+// A path element is a field name or a list index — the two things the
+// specification says a path is made of.
+type gpath = PName of str | PIdx of int;
+type gerr = GErr of (str * gpath list);
+
+// `GOk` / `GBubble` and not `GOk` / `GBubble`: `GOk` is already a constructor of the
+// prelude's `result` type, and reusing it makes every `match` on a `gout` a type
+// error about `result` in the prelude — a message that names a file the program
+// never mentions.
+type gout = GOk of (gvalue * gerr list) | GBubble of gerr list;
+
+module Gexec {
+
+  let rec rev_list = fn (xs, acc) ->
+    match xs with
+    | [] -> acc
+    | [h, ...t] -> rev_list t (Cons (h, acc));
+
+  let rec appl = fn (a, b) ->
+    match a with
+    | [] -> b
+    | [h, ...t] -> Cons (h, appl t b);
+
+  // --- reading the schema -------------------------------------------------
+  // Linear lookups. A schema has tens of types, and an index would be a second
+  // representation to keep in step with the first.
+
+  let rec find_obj = fn (defs, name: str) ->
+    match defs with
+    | [] -> []
+    | [d, ...rest] ->
+      match d with
+      | TsDef (ObjectDef (_, n, _, _, fs)) -> if str_eq n name then fs else find_obj rest name
+      | _ -> find_obj rest name;
+
+  let rec find_enum = fn (defs, name: str) ->
+    match defs with
+    | [] -> []
+    | [d, ...rest] ->
+      match d with
+      | TsDef (EnumDef (_, n, _, vs)) -> if str_eq n name then vs else find_enum rest name
+      | _ -> find_enum rest name;
+
+  let rec is_enum_name = fn (defs, name: str) ->
+    match defs with
+    | [] -> false
+    | [d, ...rest] ->
+      match d with
+      | TsDef (EnumDef (_, n, _, _)) -> if str_eq n name then true else is_enum_name rest name
+      | _ -> is_enum_name rest name;
+
+  let rec is_obj_name = fn (defs, name: str) ->
+    match defs with
+    | [] -> false
+    | [d, ...rest] ->
+      match d with
+      | TsDef (ObjectDef (_, n, _, _, _)) -> if str_eq n name then true else is_obj_name rest name
+      | _ -> is_obj_name rest name;
+
+  let rec field_ty_in = fn (fs, name: str) ->
+    match fs with
+    | [] -> []
+    | [f, ...rest] ->
+      match f with
+      | FieldDef (_, n, _, ty, _) ->
+        if str_eq n name then Cons (ty, []) else field_ty_in rest name;
+
+  let rec enum_has = fn (vs, name: str) ->
+    match vs with
+    | [] -> false
+    | [v, ...rest] ->
+      match v with
+      | EnumVal (_, n, _) -> if str_eq n name then true else enum_has rest name;
+
+  // The root operation type. A `schema { query: X }` names it; without one the
+  // convention is a type called `Query`, which is a rule of the specification and
+  // not a guess.
+  let rec schema_query = fn (defs) ->
+    match defs with
+    | [] -> "Query"
+    | [d, ...rest] ->
+      match d with
+      | TsDef (SchemaDef (_, _, ops)) ->
+        let rec pick = fn (os) ->
+          match os with
+          | [] -> schema_query rest
+          | [o, ...more] ->
+            match o with
+            | OpTy (k, n) -> if str_eq k "query" then n else pick more in
+        pick ops
+      | _ -> schema_query rest;
+
+  let rec find_frag = fn (defs, name: str) ->
+    match defs with
+    | [] -> []
+    | [d, ...rest] ->
+      match d with
+      | FragDef (n, tc, _, sels) ->
+        if str_eq n name then Cons ((tc, sels), []) else find_frag rest name
+      | _ -> find_frag rest name;
+
+  let rec first_op = fn (defs) ->
+    match defs with
+    | [] -> fail "graphql: the document has no operation to execute"
+    | [d, ...rest] ->
+      match d with
+      | OpDef (_, _, vardefs, _, sels) -> (vardefs, sels)
+      | _ -> first_op rest;
+
+  // --- reading data -------------------------------------------------------
+  let rec obj_get = fn (fields, name: str) ->
+    match fields with
+    | [] -> GNull                       // an absent field is null, not an error
+    | [(k, v), ...rest] -> if str_eq k name then v else obj_get rest name;
+
+  let resolve = fn (parent: gvalue, name: str) ->
+    match parent with
+    | GObj fields -> obj_get fields name
+    | GNull -> GNull
+    | _ -> fail ("graphql: cannot resolve field '" ++ name
+                 ++ "' on a value that is not an object");
+
+  // --- values in the document (arguments, variables) ----------------------
+  let rec lookup_var = fn (vars, name: str) ->
+    match vars with
+    | [] -> GNull
+    | [(k, v), ...rest] -> if str_eq k name then v else lookup_var rest name;
+
+  let doc_value = fn (v: gval, vars) ->
+    match v with
+    | VVar n -> lookup_var vars n
+    | VBool b -> GBool b
+    | VNull -> GNull
+    | VInt lex -> GInt (int_of_str lex)
+    | VStr s -> GStr s
+    | VBlock s -> GStr s
+    | VEnum n -> GStr n
+    | VFloat lex -> GFloat (float_of_str lex)
+    | _ -> fail "graphql: this value form is not supported in a directive argument";
+
+  let truthy = fn (v: gvalue) ->
+    match v with | GBool b -> b | _ -> false;
+
+  // --- @skip / @include ---------------------------------------------------
+  // `@skip(if: true)` removes the field ENTIRELY — the response has no key for it,
+  // which is different from a null. Measured, because "null or absent" is exactly
+  // the kind of thing a reader assumes.
+  let rec arg_of = fn (args, name: str) ->
+    match args with
+    | [] -> []
+    | [(k, v), ...rest] -> if str_eq k name then Cons (v, []) else arg_of rest name;
+
+  let rec included = fn (dirs, vars) ->
+    match dirs with
+    | [] -> true
+    | [d, ...rest] ->
+      match d with
+      | Dir (n, args) ->
+        if str_eq n "skip" then
+          match arg_of args "if" with
+          | [] -> included rest vars
+          | [v, ..._] -> if truthy (doc_value v vars) then false else included rest vars
+        else if str_eq n "include" then
+          match arg_of args "if" with
+          | [] -> included rest vars
+          | [v, ..._] -> if truthy (doc_value v vars) then included rest vars else false
+        else included rest vars;
+
+  // --- leaf coercion ------------------------------------------------------
+  // The messages are graphql-js's, verbatim, for the cases here. That couples this
+  // to the reference implementation's wording, which is the useful direction for a
+  // differential gate: the specification does not fix the prose, so matching the
+  // oracle is the only way to compare messages at all — and the oracle's version
+  // is pinned and printed by the harness.
+  let show_gv = fn (v: gvalue) ->
+    match v with
+    | GNull -> "null"
+    | GBool b -> if b then "true" else "false"
+    | GInt n -> str_of_int n
+    | GFloat f -> str_of_float f
+    | GStr s -> "\"" ++ s ++ "\""
+    | _ -> "value";
+
+  let coerce_leaf = fn (defs, tyname: str, v: gvalue, path) ->
+    match v with
+    | GNull -> GOk (GNull, [])
+    | _ ->
+      if str_eq tyname "Int" then
+        match v with
+        | GInt n -> GOk (GInt n, [])
+        | GStr s -> GOk (GInt (int_of_str s), [])
+        | GFloat f ->
+          if f == float_of_int (int_of_float f) then GOk (GInt (int_of_float f), [])
+          else GOk (GNull, Cons (GErr ("Int cannot represent non-integer value: "
+                                      ++ str_of_float f, path), []))
+        | _ -> fail "graphql: unsupported coercion to Int"
+      else if str_eq tyname "Float" then
+        match v with
+        | GFloat f -> GOk (GFloat f, [])
+        | GInt n -> GOk (GFloat (float_of_int n), [])
+        | _ -> fail "graphql: unsupported coercion to Float"
+      else if str_eq tyname "String" || str_eq tyname "ID" then
+        match v with
+        | GStr s -> GOk (GStr s, [])
+        | GInt n -> GOk (GStr (str_of_int n), [])
+        | _ -> fail "graphql: unsupported coercion to String"
+      else if str_eq tyname "Boolean" then
+        match v with
+        | GBool b -> GOk (GBool b, [])
+        | _ -> fail "graphql: unsupported coercion to Boolean"
+      else if is_enum_name defs tyname then
+        match v with
+        | GStr s ->
+          if enum_has (find_enum defs tyname) s then GOk (GStr s, [])
+          else GOk (GNull, Cons (GErr ("Enum \"" ++ tyname ++ "\" cannot represent value: "
+                                      ++ "\"" ++ s ++ "\"", path), []))
+        | _ -> fail ("graphql: unsupported coercion to enum " ++ tyname)
+      else fail ("graphql: no coercion for leaf type " ++ tyname);
+
+  let rec ty_name_of = fn (t: gtype) ->
+    match t with
+    | TyNamed n -> n
+    | TyList inner -> ty_name_of inner
+    | TyNonNull inner -> ty_name_of inner;
+
+  // --- execution ----------------------------------------------------------
+  //
+  // `complete` and `exec_fields` are mutually recursive because a field's value
+  // may be an object whose fields are values. `label` is the "Type.field" a
+  // non-null violation names, and it has to be threaded because the message is
+  // written where the field is known, not where the constraint is checked.
+  // NULLABILITY BELONGS TO THE POSITION, AND ABSORPTION HAS TO HAPPEN THERE.
+  //
+  // The first version absorbed a bubble in the object and list arms, which is
+  // right for a nullable position and wrong inside a `!`. `{ o2 { nnx } }` with
+  // `o2: O!` then produced TWO errors — the real one about `O.nnx` and an invented
+  // one about `Query.o2` — where the oracle produces one. When a non-null position
+  // is null BECAUSE AN ERROR ALREADY PROPAGATED, no second error is raised: the
+  // check that would raise it is never reached, because the propagation went past.
+  //
+  // So the two jobs are split. `raw` completes a position without any absorbing,
+  // and `complete` decides what the position's nullability means:
+  //
+  //   TyNonNull inner  — take `raw inner`; a bubble passes through UNCHANGED, and
+  //                      only a plain null becomes the "cannot return null" error
+  //   anything else    — take `raw` of it; a bubble is absorbed into null here
+  //
+  // A list ITEM goes through `complete inner`, so `[O]` nulls the item and `[O!]`
+  // nulls the list. That falls out rather than being special-cased.
+  let rec raw = fn (defs, t: gtype, v: gvalue, sels, vars, path, label: str) ->
+    match t with
+    | TyNonNull inner -> complete defs inner v sels vars path label
+    | TyList inner ->
+      (match v with
+       | GNull -> GOk (GNull, [])
+       | GList items ->
+         let rec go = fn (xs, i: int, acc, errs) ->
+           match xs with
+           | [] -> GOk (GList (rev_list acc []), errs)
+           | [x, ...rest] ->
+             let ip = appl path (Cons (PIdx i, [])) in
+             (match complete defs inner x sels vars ip label with
+              | GBubble e2 -> GBubble (appl errs e2)
+              | GOk (xv, e2) -> go rest (i + 1) (Cons (xv, acc)) (appl errs e2)) in
+         go items 0 [] []
+       | _ -> fail "graphql: a list field resolved to something that is not a list")
+    | TyNamed n ->
+      if is_obj_name defs n then
+        (match v with
+         | GNull -> GOk (GNull, [])
+         | _ -> exec_fields defs n v sels vars path)
+      else coerce_leaf defs n v path
+  and complete = fn (defs, t: gtype, v: gvalue, sels, vars, path, label: str) ->
+    match t with
+    | TyNonNull inner ->
+      (match raw defs inner v sels vars path label with
+       | GBubble errs -> GBubble errs
+       | GOk (x, errs) ->
+         match x with
+         | GNull ->
+           GBubble (appl errs
+             (Cons (GErr ("Cannot return null for non-nullable field " ++ label ++ ".",
+                          path), [])))
+         | _ -> GOk (x, errs))
+    | _ ->
+      (match raw defs t v sels vars path label with
+       | GBubble errs -> GOk (GNull, errs)
+       | GOk (x, errs) -> GOk (x, errs))
+  and exec_fields = fn (defs, tname: str, v: gvalue, sels, vars, path) ->
+    // Selections are flattened in order: a fragment contributes its fields where
+    // the spread appears. Duplicate response keys are NOT merged — that needs
+    // field-set merging, and the harness's corpus does not contain a case where
+    // the difference shows, which is stated rather than left to be discovered.
+    let rec go = fn (ss, acc, errs) ->
+      match ss with
+      | [] -> GOk (GObj (rev_list acc []), errs)
+      | [s, ...rest] ->
+        match s with
+        | Field (alias, name, _, dirs, sub) ->
+          if not (included dirs vars) then go rest acc errs
+          else
+            let key = if str_eq alias "" then name else alias in
+            if str_eq name "__typename" then
+              go rest (Cons ((key, GStr tname), acc)) errs
+            else
+              (match field_ty_in (find_obj defs tname) name with
+               | [] -> fail ("graphql: " ++ tname ++ " has no field '" ++ name ++ "'")
+               | [fty, ..._] ->
+                 let fv = resolve v name in
+                 let fpath = appl path (Cons (PName key, [])) in
+                 let lbl = tname ++ "." ++ name in
+                 match complete defs fty fv sub vars fpath lbl with
+                 | GBubble e2 -> GBubble (appl errs e2)
+                 | GOk (cv, e2) -> go rest (Cons ((key, cv), acc)) (appl errs e2))
+        | Spread (fname, dirs) ->
+          if not (included dirs vars) then go rest acc errs
+          else
+            (match find_frag defs fname with
+             | [] -> fail ("graphql: no fragment named '" ++ fname ++ "'")
+             | [(tc, fsels), ..._] ->
+               if str_eq tc "" || str_eq tc tname then
+                 match go fsels acc errs with
+                 | GBubble e2 -> GBubble e2
+                 | GOk (GObj inner, e2) -> go rest (rev_list inner []) e2
+                 | GOk (_, e2) -> go rest acc e2
+               else go rest acc errs)
+        | Inline (tc, dirs, isels) ->
+          if not (included dirs vars) then go rest acc errs
+          else if str_eq tc "" || str_eq tc tname then
+            (match go isels acc errs with
+             | GBubble e2 -> GBubble e2
+             | GOk (GObj inner, e2) -> go rest (rev_list inner []) e2
+             | GOk (_, e2) -> go rest acc e2)
+          else go rest acc errs in
+    go sels [] [];
+
+  // --- the response -------------------------------------------------------
+  //
+  // Variable defaults are applied for a variable the caller did not supply, which
+  // is what makes `query Q($v: Boolean = true)` behave without one.
+  let rec with_defaults = fn (vardefs, vars) ->
+    match vardefs with
+    | [] -> vars
+    | [vd, ...rest] ->
+      match vd with
+      | VarDef (n, _, dflt, _) ->
+        let have = match lookup_var vars n with | GNull -> false | _ -> true in
+        (match dflt with
+         | [d, ..._] ->
+           if have then with_defaults rest vars
+           else with_defaults rest (Cons ((n, doc_value d vars), vars))
+         | [] -> with_defaults rest vars);
+
+  // --- serialising --------------------------------------------------------
+  //
+  // JSON prints an integral float without its fraction — `1`, not `1.0` — and
+  // `str_of_float` prints `1.0`. So the trailing `.0` comes off, or every Float
+  // field differs from the oracle for a reason that has nothing to do with GraphQL.
+  let float_json = fn (f: float) ->
+    let s = str_of_float f in
+    if str_ends_with s ".0" then str_replace s ".0" "" else s;
+
+  let rec esc_at = fn (s: str, i: int, buf) ->
+    if i >= str_len s then strbuf_to_str buf
+    else
+      let c = char_at s i in
+      let b = ord c in
+      let _ =
+        if c == "\"" then strbuf_push buf "\\\""
+        else if c == "\\" then strbuf_push buf "\\\\"
+        else if c == "\n" then strbuf_push buf "\\n"
+        else if b == 13 then strbuf_push buf "\\r"
+        else if b == 9 then strbuf_push buf "\\t"
+        else strbuf_push buf c in
+      esc_at s (i + 1) buf;
+
+  let jstr = fn (s: str) -> "\"" ++ esc_at s 0 (strbuf_new ()) ++ "\"";
+
+  let rec to_json = fn (v: gvalue) ->
+    match v with
+    | GNull -> "null"
+    | GBool b -> if b then "true" else "false"
+    | GInt n -> str_of_int n
+    | GFloat f -> float_json f
+    | GStr s -> jstr s
+    | GList xs -> "[" ++ str_join "," (list_map xs to_json) ++ "]"
+    | GObj fs ->
+      "\{" ++ str_join "," (list_map fs (fn (kv) ->
+        let (k, x) = kv in jstr k ++ ":" ++ to_json x)) ++ "}";
+
+  let path_json = fn (p) ->
+    "[" ++ str_join "," (list_map p (fn (e: gpath) ->
+      match e with | PName n -> jstr n | PIdx i -> str_of_int i)) ++ "]";
+
+  let err_json = fn (e: gerr) ->
+    match e with
+    | GErr (msg, p) -> "\{" ++ jstr "message" ++ ":" ++ jstr msg
+                       ++ "," ++ jstr "path" ++ ":" ++ path_json p ++ "}";
+
+  // graphql-js puts `errors` BEFORE `data`, and the response's field order is
+  // observable, so this matches rather than sorting.
+  let response_json = fn (r: gout) ->
+    match r with
+    | GOk (v, errs) ->
+      (match errs with
+       | [] -> "\{" ++ jstr "data" ++ ":" ++ to_json v ++ "}"
+       | _ -> "\{" ++ jstr "errors" ++ ":[" ++ str_join "," (list_map errs err_json)
+              ++ "]," ++ jstr "data" ++ ":" ++ to_json v ++ "}")
+    | GBubble errs ->
+      "\{" ++ jstr "errors" ++ ":[" ++ str_join "," (list_map errs err_json)
+      ++ "]," ++ jstr "data" ++ ":null}";
+
+  let run = fn (defs, root: gvalue, vars) ->
+    let (vardefs, sels) = first_op defs in
+    let vars2 = with_defaults vardefs vars in
+    exec_fields defs (schema_query defs) root sels vars2 [];
+
+  let run_json = fn (defs, root: gvalue, vars) -> response_json (run defs root vars);
+}
