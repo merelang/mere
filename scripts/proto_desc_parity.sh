@@ -145,6 +145,67 @@ add("message M {\n  // about v\n  int32 v = 1;  // trailing\n}")
 add("message M {}")
 add("message M { message N {} }")
 
+# --- options -------------------------------------------------------------
+# Every one of these is compared as BYTES against protoc, which is what makes the
+# option feature checkable at all: an option is a field number in a submessage, and
+# the numbers are descriptor.proto's rather than this schema's.
+#
+# THE ORDER IS THE INTERESTING PART. protoc emits options in ASCENDING FIELD NUMBER,
+# not source order — so `go_package` (11) written first comes back after
+# `java_package` (1). Each of the multi-option cases below is written in DESCENDING
+# field order on purpose, so a writer that keeps source order produces different bytes.
+add('option java_package = "com.example";\nmessage M { int32 v = 1; }')
+add('option go_package = "example.com/pk";\nmessage M { int32 v = 1; }')
+add('option go_package = "z";\noption java_package = "a";\nmessage M { int32 v = 1; }')
+add('option java_outer_classname = "Outer";\noption java_multiple_files = true;\n'
+    'message M { int32 v = 1; }')
+add('option optimize_for = SPEED;\nmessage M { int32 v = 1; }')
+add('option optimize_for = CODE_SIZE;\nmessage M { int32 v = 1; }')
+add('option optimize_for = LITE_RUNTIME;\nmessage M { int32 v = 1; }')
+add('option deprecated = true;\nmessage M { int32 v = 1; }')
+add('option cc_enable_arenas = false;\nmessage M { int32 v = 1; }')
+add('option ruby_package = "R";\noption php_namespace = "P";\noption swift_prefix = "S";\n'
+    'option csharp_namespace = "C";\noption objc_class_prefix = "O";\n'
+    'message M { int32 v = 1; }')
+
+# Field options. `packed = false` on a repeated scalar is the one that changes what a
+# DECODER must do, and `deprecated` is by far the most common in real schemas.
+add("message M { int32 v = 1 [deprecated = true]; }")
+add("message M { int32 v = 1 [deprecated = false]; }")
+add("message M { repeated int32 v = 1 [packed = false]; }")
+add("message M { repeated int32 v = 1 [packed = true]; }")
+add("message M { int64 v = 1 [jstype = JS_STRING]; }")
+add("message M { int64 v = 1 [jstype = JS_NORMAL]; }")
+add("message M { int64 v = 1 [jstype = JS_NUMBER, deprecated = true]; }")
+add("message M { bytes v = 1 [ctype = CORD]; }")
+
+# `json_name` is NOT an option: it sets FieldDescriptorProto's own field 10 and
+# produces no options submessage. Measured, and it is why the encoder pulls it out of
+# the bracket list rather than looking it up in the option table.
+add('message M { string my_field = 1 [json_name = "wire"]; }')
+add('message M { string my_field = 1 [json_name = "wire", deprecated = true]; }')
+
+# Options on every other declaration kind.
+add("message M { option deprecated = true; int32 v = 1; }")
+add("message M { option message_set_wire_format = false;\n"
+    "  option no_standard_descriptor_accessor = false; int32 v = 1; }")
+add("enum E { option allow_alias = true; A = 0; B = 0; }")
+add("enum E { option deprecated = true; A = 0; }")
+add("enum E { A = 0; B = 1 [deprecated = true]; }")
+add("message Q { int32 v = 1; }\nservice S { option deprecated = true;\n"
+    "  rpc U (Q) returns (Q); }")
+add("message Q { int32 v = 1; }\nservice S {\n"
+    "  rpc U (Q) returns (Q) { option deprecated = true; } }")
+add("message Q { int32 v = 1; }\nservice S {\n"
+    "  rpc U (Q) returns (Q) { option idempotency_level = NO_SIDE_EFFECTS; } }")
+add("message Q { int32 v = 1; }\nservice S {\n"
+    "  rpc U (Q) returns (Q) { option idempotency_level = IDEMPOTENT;\n"
+    "                          option deprecated = true; } }")
+# The empty body again, now that a body may hold options: `{}` still has to emit an
+# EMPTY options submessage and `;` still has to emit nothing.
+add("message Q { int32 v = 1; }\nservice S { rpc U (Q) returns (Q) {} }")
+add("message Q { int32 v = 1; }\nservice S { rpc U (Q) returns (Q); }")
+
 print(n)
 PY
 ls "$TMP/in" > "$TMP/names.txt"
@@ -209,12 +270,34 @@ import sys, pathlib
 cases = [
     ("oneof", 'syntax = "proto3";\nmessage M { oneof o { int32 a = 1; string b = 2; } }'),
     ("map", 'syntax = "proto3";\nmessage M { map<string, int32> m = 1; }'),
-    ("option", 'syntax = "proto3";\noption java_package = "x";\nmessage M { int32 v = 1; }'),
     ("reserved", 'syntax = "proto3";\nmessage M { reserved 2, 15; int32 v = 1; }'),
     ("optional", 'syntax = "proto3";\nmessage M { optional int32 v = 1; }'),
-    ("field option", 'syntax = "proto3";\nmessage M { int32 v = 1 [deprecated = true]; }'),
+    ("import", 'syntax = "proto3";\nimport "dep.proto";\nmessage M { int32 v = 1; }'),
+    # `option` and `field option` USED TO BE HERE. They are implemented now, and this
+    # list is what said so: both assertions failed and named themselves stale on the
+    # first run after the encoder landed.
+    #
+    # WHAT IS LEFT OF THE OPTION FEATURE is the options protoc accepts and this encoder
+    # does not carry. The label is the OPTION NAME, which is what the encoder's refusal
+    # quotes — so these are checked exactly like the constructs above, and adding one to
+    # the table makes its case fail as stale.
+    #
+    # An unknown option name cannot be tested this way at all: protoc REJECTS
+    # `option no_such_thing = 1`, so there is no protoc-accepted file that reaches that
+    # branch. Neither can a wrong-typed value (`option java_package = true`), which
+    # protoc also rejects. Both guards are defensive and say so in the code.
+    ("java_string_check_utf8",
+     'syntax = "proto3";\noption java_string_check_utf8 = true;\nmessage M { int32 v = 1; }'),
+    ("php_class_prefix",
+     'syntax = "proto3";\noption php_class_prefix = "P";\nmessage M { int32 v = 1; }'),
+    ("cc_generic_services",
+     'syntax = "proto3";\noption cc_generic_services = true;\nmessage M { int32 v = 1; }'),
+    ("weak", 'syntax = "proto3";\nmessage M { int32 v = 1 [weak = false]; }'),
+    ("debug_redact", 'syntax = "proto3";\nmessage M { int32 v = 1 [debug_redact = true]; }'),
 ]
 tmp = pathlib.Path(sys.argv[1])
+# `import "dep.proto"` needs the file to exist for protoc to accept the case.
+tmp.joinpath("dep.proto").write_text('syntax = "proto3";\nmessage Dep { int32 d = 1; }\n')
 lines = []
 for i, (label, src) in enumerate(cases):
     f = tmp / ("refuse%d.proto" % i)
@@ -238,8 +321,17 @@ while IFS="$(printf '\t')" read -r label path; do
   if ( ulimit -t 60; "$MERE" "$ROOT/examples/.pdesc_tmp.mere" ) >/dev/null 2>"$TMP/rerr.txt"; then
     echo "        ACCEPTED (should have been refused): $label"
     nwrong=$((nwrong + 1))
-  elif ! grep -q "not in this parser's subset" "$TMP/rerr.txt"; then
+  elif ! grep -qE "not in this (parser|encoder)'s subset" "$TMP/rerr.txt"; then
     echo "        REFUSED BUT UNNAMED: $label"
+    echo "          got: $(head -1 "$TMP/rerr.txt" | cut -c1-110)"
+    nwrong=$((nwrong + 1))
+  # THE MESSAGE MUST NAME THE CONSTRUCT BEING TESTED. Checking only for "not in this
+  # parser's subset" let a file refused for an UNRELATED reason count as a pass: a
+  # custom-option case needed `import` to be valid protoc, so it was refused at the
+  # import and the harness credited it to custom options. A case that cannot fail for
+  # its own reason is not testing its own reason.
+  elif ! grep -q "'$label'" "$TMP/rerr.txt"; then
+    echo "        REFUSED FOR THE WRONG REASON: $label"
     echo "          got: $(head -1 "$TMP/rerr.txt" | cut -c1-110)"
     nwrong=$((nwrong + 1))
   fi

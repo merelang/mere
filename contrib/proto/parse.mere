@@ -28,17 +28,26 @@
 // that resolution has to turn into a code and a qualified name.
 type pty = PScalar of (str * int) | PRef of str;
 
-type pfield = PField of (str * int * bool * pty);
-type penumv = PEnumV of (str * int);
-type penum = PEnum of (str * penumv list);
-type pmsg = PMsg of (str * pfield list * pmsg list * penum list);
+// --- options ---------------------------------------------------------------
+//
+// An option's value in the shapes the grammar allows. An IDENTIFIER stays a NAME:
+// `optimize_for = SPEED` names an enum value, and turning it into a number is the
+// descriptor encoder's job because the number belongs to `descriptor.proto`, not to
+// the file being parsed.
+type poptval = POStr of str | POBool of bool | POInt of int | POIdent of str;
+type popt = POpt of (str * poptval);
+
+type pfield = PField of (str * int * bool * pty * popt list);
+type penumv = PEnumV of (str * int * popt list);
+type penum = PEnum of (str * penumv list * popt list);
+type pmsg = PMsg of (str * pfield list * pmsg list * penum list * popt list);
 // The last flag is whether the method was written with a `{}` BODY rather than a
 // `;`. It is not cosmetic: an empty body sets MethodOptions to an empty submessage,
 // so protoc emits `22 00` for it and nothing for the semicolon form. Measured — the
 // two spellings differ by exactly those two bytes.
-type pmethod = PMethod of (str * str * str * bool * bool * bool);
-type psvc = PSvc of (str * pmethod list);
-type pfile = PFile of (str * str * pmsg list * penum list * psvc list);
+type pmethod = PMethod of (str * str * str * bool * bool * bool * popt list);
+type psvc = PSvc of (str * pmethod list * popt list);
+type pfile = PFile of (str * str * pmsg list * penum list * psvc list * popt list);
 
 // A declaration's fully-qualified name and whether it is a message or an enum,
 // which is what decides TYPE_MESSAGE vs TYPE_ENUM.
@@ -172,17 +181,70 @@ module Pparse {
     if str_len d == 0 then fail ("proto: expected a number" ++ at j)
     else (int_of_str d, k);
 
-  // Anything the subset does not implement is refused by name. A skipped
-  // construct would produce a descriptor that is wrong where nothing looks.
-  // `[deprecated = true]` after a field. protoc accepts it; this parser does not,
-  // and the difference has to be a NAMED refusal — meeting it with "expected ';'"
-  // reports a syntax error about a file that is syntactically fine.
+  // --- options -------------------------------------------------------------
+  //
+  // The GRAMMAR here is general; the SUBSET is in the descriptor encoder, which knows
+  // the field numbers and refuses a name it cannot encode. That split is deliberate:
+  // an option's name means nothing to the parser, and putting the list of known names
+  // in two places is how the two drift.
+  //
+  // A PARENTHESISED name is a custom option — an extension. Its field number lives in
+  // a registry built from other `.proto` files, which this parser does not have, so it
+  // is refused here where the syntax says what it is.
+  let option_name = fn (s: str, i: int) ->
+    let j = skip_ws s i in
+    if j < str_len s && char_at s j == "(" then
+      fail ("proto: a custom option is not in this parser's subset" ++ at j
+            ++ " — an extension's field number comes from an extension registry,"
+            ++ " so it cannot be encoded from this file alone")
+    else word s j;
+
+  let option_value = fn (s: str, i: int) ->
+    let j = skip_ws s i in
+    if j >= str_len s then fail ("proto: expected an option value" ++ at j)
+    else if char_at s j == "\"" then
+      let (v, k) = take_string s (j + 1) (strbuf_new ()) in (POStr v, k)
+    else if char_at s j == "-" then
+      let (n, k) = number s (j + 1) in (POInt (0 - n), k)
+    else if is_digit (char_at s j) then
+      let (n, k) = number s j in (POInt n, k)
+    else if char_at s j == "\{" then
+      // An aggregate value — `option (f) = { a: 1 }` — belongs to custom options,
+      // which are already refused above. Reaching it means a message-valued builtin
+      // option, and those are all `features`, which this parser does not carry.
+      fail ("proto: an aggregate option value is not in this parser's subset" ++ at j)
+    else
+      let (w, k) = word s j in
+      if str_eq w "true" then (POBool true, k)
+      else if str_eq w "false" then (POBool false, k)
+      else (POIdent w, k);
+
+  // `option name = value;` — the statement form, at file / message / enum / service /
+  // method level.
+  let option_stmt = fn (s: str, i: int) ->
+    let (n, j) = option_name s i in
+    let k = expect_ch s j "=" in
+    let (v, k2) = option_value s k in
+    (POpt (n, v), expect_ch s k2 ";");
+
+  // `[a = 1, b = 2]` — the bracketed form, after a field or an enum value.
+  let rec bracket_opts = fn (s: str, i: int, acc) ->
+    let (n, j) = option_name s i in
+    let k = expect_ch s j "=" in
+    let (v, k2) = option_value s k in
+    let acc2 = Cons (POpt (n, v), acc) in
+    let k3 = skip_ws s k2 in
+    if k3 < str_len s && char_at s k3 == "," then bracket_opts s (k3 + 1) acc2
+    else (rev_list acc2 [], expect_ch s k3 "]");
+
+  // A field or enum value ends with `;`, optionally preceded by `[...]`. Returns the
+  // options as well as the position, so a caller cannot forget to collect them.
   let field_end = fn (s: str, i: int) ->
     if peek s i == "[" then
-      fail ("proto: field options are not in this parser's subset" ++ at (skip_ws s i)
-            ++ " (oneof / map / import / option / reserved / extend / group and"
-            ++ " proto2 syntax are refused rather than skipped)")
-    else expect_ch s i ";";
+      let j = expect_ch s i "[" in
+      let (opts, k) = bracket_opts s j [] in
+      (opts, expect_ch s k ";")
+    else ([], expect_ch s i ";");
 
   let refuse = fn (kw: str, i: int) ->
     fail ("proto: '" ++ kw ++ "' is not in this parser's subset" ++ at i
@@ -190,33 +252,37 @@ module Pparse {
           ++ " proto2 syntax are refused rather than skipped)");
 
   // --- messages ------------------------------------------------------------
-  let rec parse_msg_body = fn (s: str, i: int, fields, msgs, enums) ->
+  let rec parse_msg_body = fn (s: str, i: int, fields, msgs, enums, opts) ->
     let j = skip_ws s i in
     if j >= str_len s then fail "proto: unterminated message"
     else if char_at s j == "}" then
-      (rev_list fields [], rev_list msgs [], rev_list enums [], j + 1)
-    else if char_at s j == ";" then parse_msg_body s (j + 1) fields msgs enums
+      (rev_list fields [], rev_list msgs [], rev_list enums [], rev_list opts [], j + 1)
+    else if char_at s j == ";" then parse_msg_body s (j + 1) fields msgs enums opts
     else if char_at s j == "." then
       // An absolute type at the start of a field line: `.pk.M m = 1;`
       let (tyname, k) = type_word s j in
       let (fname, k4) = word s k in
       let k5 = expect_ch s k4 "=" in
       let (num, k6) = number s k5 in
-      let k7 = field_end s k6 in
-      parse_msg_body s k7 (Cons (PField (fname, num, false, PRef tyname), fields)) msgs enums
+      let (fopts, k7) = field_end s k6 in
+      parse_msg_body s k7 (Cons (PField (fname, num, false, PRef tyname, fopts), fields))
+                     msgs enums opts
     else
       let (kw, k) = word s j in
       if str_eq kw "message" then
         let (m, k2) = parse_message s k in
-        parse_msg_body s k2 fields (Cons (m, msgs)) enums
+        parse_msg_body s k2 fields (Cons (m, msgs)) enums opts
       else if str_eq kw "enum" then
         let (e, k2) = parse_enum s k in
-        parse_msg_body s k2 fields msgs (Cons (e, enums))
+        parse_msg_body s k2 fields msgs (Cons (e, enums)) opts
+      else if str_eq kw "option" then
+        let (o, k2) = option_stmt s k in
+        parse_msg_body s k2 fields msgs enums (Cons (o, opts))
       else if str_eq kw "oneof" || str_eq kw "map" || str_eq kw "reserved"
-           || str_eq kw "option" || str_eq kw "extend" || str_eq kw "group" then
+           || str_eq kw "extend" || str_eq kw "group" then
         refuse kw j
       else
-        // A field: [repeated] Type name = number ;
+        // A field: [repeated] Type name = number [options] ;
         let (rep, tyname, k2) =
           if str_eq kw "repeated" then
             let (t, k3) = type_word s k in (true, t, k3)
@@ -225,46 +291,53 @@ module Pparse {
         let (fname, k4) = word s k2 in
         let k5 = expect_ch s k4 "=" in
         let (num, k6) = number s k5 in
-        let k7 = field_end s k6 in
+        let (fopts, k7) = field_end s k6 in
         let ty = match scalar_code tyname with
                  | [c, ..._] -> PScalar (tyname, c)
                  | [] -> PRef tyname in
-        parse_msg_body s k7 (Cons (PField (fname, num, rep, ty), fields)) msgs enums
+        parse_msg_body s k7 (Cons (PField (fname, num, rep, ty, fopts), fields))
+                       msgs enums opts
   and parse_message = fn (s: str, i: int) ->
     let (name, j) = word s i in
     let k = expect_ch s j "\{" in
-    let (fields, msgs, enums, k2) = parse_msg_body s k [] [] [] in
-    (PMsg (name, fields, msgs, enums), k2)
+    let (fields, msgs, enums, opts, k2) = parse_msg_body s k [] [] [] [] in
+    (PMsg (name, fields, msgs, enums, opts), k2)
   and parse_enum = fn (s: str, i: int) ->
     let (name, j) = word s i in
     let k = expect_ch s j "\{" in
-    let rec body = fn (p: int, vals) ->
+    let rec body = fn (p: int, vals, opts) ->
       let q = skip_ws s p in
       if q >= str_len s then fail "proto: unterminated enum"
-      else if char_at s q == "}" then (PEnum (name, rev_list vals []), q + 1)
-      else if char_at s q == ";" then body (q + 1) vals
+      else if char_at s q == "}" then
+        (PEnum (name, rev_list vals [], rev_list opts []), q + 1)
+      else if char_at s q == ";" then body (q + 1) vals opts
       else
         let (vn, r) = word s q in
-        if str_eq vn "option" || str_eq vn "reserved" then refuse vn q
+        if str_eq vn "option" then
+          let (o, r2) = option_stmt s r in body r2 vals (Cons (o, opts))
+        else if str_eq vn "reserved" then refuse vn q
         else
           let r2 = expect_ch s r "=" in
           let (num, r3) = number s r2 in
-          let r4 = expect_ch s r3 ";" in
-          body r4 (Cons (PEnumV (vn, num), vals)) in
-    body k [];
+          // An enum VALUE takes the bracketed form too: `B = 1 [deprecated = true];`
+          let (vopts, r4) = field_end s r3 in
+          body r4 (Cons (PEnumV (vn, num, vopts), vals)) opts in
+    body k [] [];
 
   // --- services ------------------------------------------------------------
   let parse_service = fn (s: str, i: int) ->
     let (name, j) = word s i in
     let k = expect_ch s j "\{" in
-    let rec body = fn (p: int, ms) ->
+    let rec body = fn (p: int, ms, opts) ->
       let q = skip_ws s p in
       if q >= str_len s then fail "proto: unterminated service"
-      else if char_at s q == "}" then (PSvc (name, rev_list ms []), q + 1)
-      else if char_at s q == ";" then body (q + 1) ms
+      else if char_at s q == "}" then
+        (PSvc (name, rev_list ms [], rev_list opts []), q + 1)
+      else if char_at s q == ";" then body (q + 1) ms opts
       else
         let (kw, r) = word s q in
-        if str_eq kw "option" then refuse kw q
+        if str_eq kw "option" then
+          let (o, r2) = option_stmt s r in body r2 ms (Cons (o, opts))
         else if str_eq kw "rpc" then
           let (mname, r1) = word s r in
           let r2 = expect_ch s r1 "(" in
@@ -284,27 +357,39 @@ module Pparse {
             if str_eq w2 "stream" then let (t, rd) = type_word s rc in (true, t, rd)
             else (false, w2, rc) in
           let r9 = expect_ch s r8 ")" in
-          // A method body is either `;` or `{ }`. Only the EMPTY braces form is
-          // accepted — a body with options in it would need the option grammar,
-          // which is outside the subset and is refused where options are read.
-          let (has_body, r10) =
-            if peek s r9 == ";" then (false, expect_ch s r9 ";")
+          // A method body is either `;` or `{ ... }`. The BRACES THEMSELVES are
+          // observable even when empty: protoc emits `options {}` for `{}` and nothing
+          // at all for `;`, which is why `has_body` is carried separately from the
+          // options it may contain. That two-byte difference was the last of 72 files
+          // to match when this was first written.
+          let (has_body, mopts, r10) =
+            if peek s r9 == ";" then (false, [], expect_ch s r9 ";")
             else
               let a = expect_ch s r9 "\{" in
-              let b2 = skip_ws s a in
-              if b2 < str_len s && char_at s b2 == "}" then (true, b2 + 1)
-              else refuse "option" b2 in
-          body r10 (Cons (PMethod (mname, inty, outty, cs, ss, has_body), ms))
+              let rec mbody = fn (p2: int, acc) ->
+                let c2 = skip_ws s p2 in
+                if c2 >= str_len s then fail "proto: unterminated method body"
+                else if char_at s c2 == "}" then (rev_list acc [], c2 + 1)
+                else if char_at s c2 == ";" then mbody (c2 + 1) acc
+                else
+                  let (kw2, d) = word s c2 in
+                  if str_eq kw2 "option" then
+                    let (o, d2) = option_stmt s d in mbody d2 (Cons (o, acc))
+                  else fail ("proto: only 'option' is allowed in a method body" ++ at c2) in
+              let (os, rb) = mbody a [] in
+              (true, os, rb) in
+          body r10 (Cons (PMethod (mname, inty, outty, cs, ss, has_body, mopts), ms)) opts
         else fail ("proto: expected 'rpc' in a service" ++ at q) in
-    body k [];
+    body k [] [];
 
   // --- the file ------------------------------------------------------------
   let parse_file = fn (fname: str, s: str) ->
-    let rec top = fn (i: int, pkg: str, msgs, enums, svcs) ->
+    let rec top = fn (i: int, pkg: str, msgs, enums, svcs, opts) ->
       let j = skip_ws s i in
       if j >= str_len s then
-        PFile (fname, pkg, rev_list msgs [], rev_list enums [], rev_list svcs [])
-      else if char_at s j == ";" then top (j + 1) pkg msgs enums svcs
+        PFile (fname, pkg, rev_list msgs [], rev_list enums [], rev_list svcs [],
+               rev_list opts [])
+      else if char_at s j == ";" then top (j + 1) pkg msgs enums svcs opts
       else
         let (kw, k) = word s j in
         if str_eq kw "syntax" then
@@ -314,23 +399,26 @@ module Pparse {
                    else fail ("proto: expected a quoted syntax" ++ at k2) in
           let (v, k4) = take_string s k3 (strbuf_new ()) in
           let k5 = expect_ch s k4 ";" in
-          if str_eq v "proto3" then top k5 pkg msgs enums svcs
+          if str_eq v "proto3" then top k5 pkg msgs enums svcs opts
           else fail ("proto: only proto3 is in this parser's subset, got '" ++ v ++ "'")
         else if str_eq kw "package" then
           let (p, k1) = word s k in
           let k2 = expect_ch s k1 ";" in
-          top k2 p msgs enums svcs
+          top k2 p msgs enums svcs opts
         else if str_eq kw "message" then
           let (m, k1) = parse_message s k in
-          top k1 pkg (Cons (m, msgs)) enums svcs
+          top k1 pkg (Cons (m, msgs)) enums svcs opts
         else if str_eq kw "enum" then
           let (e, k1) = parse_enum s k in
-          top k1 pkg msgs (Cons (e, enums)) svcs
+          top k1 pkg msgs (Cons (e, enums)) svcs opts
         else if str_eq kw "service" then
           let (v, k1) = parse_service s k in
-          top k1 pkg msgs enums (Cons (v, svcs))
+          top k1 pkg msgs enums (Cons (v, svcs)) opts
+        else if str_eq kw "option" then
+          let (o, k1) = option_stmt s k in
+          top k1 pkg msgs enums svcs (Cons (o, opts))
         else refuse kw j in
-    top 0 "" [] [] [];
+    top 0 "" [] [] [] [];
 
   // --- name resolution -----------------------------------------------------
   //
@@ -340,19 +428,19 @@ module Pparse {
   // walks rather than reading the top level.
   let rec collect_msg = fn (prefix: str, m: pmsg, acc) ->
     match m with
-    | PMsg (name, _, subs, enums) ->
+    | PMsg (name, _, subs, enums, _) ->
       let q = prefix ++ "." ++ name in
       let acc2 = Cons (PDecl (q, true), acc) in
       let acc3 = list_fold enums acc2 (fn (a, e) ->
-                   match e with | PEnum (en, _) -> Cons (PDecl (q ++ "." ++ en, false), a)) in
+                   match e with | PEnum (en, _, _) -> Cons (PDecl (q ++ "." ++ en, false), a)) in
       list_fold subs acc3 (fn (a, sm) -> collect_msg q sm a);
 
   let collect = fn (f: pfile) ->
     match f with
-    | PFile (_, pkg, msgs, enums, _) ->
+    | PFile (_, pkg, msgs, enums, _, _) ->
       let base = if str_eq pkg "" then "" else "." ++ pkg in
       let a1 = list_fold enums [] (fn (a, e) ->
-                 match e with | PEnum (en, _) -> Cons (PDecl (base ++ "." ++ en, false), a)) in
+                 match e with | PEnum (en, _, _) -> Cons (PDecl (base ++ "." ++ en, false), a)) in
       list_fold msgs a1 (fn (a, m) -> collect_msg base m a);
 
   let rec decl_find = fn (decls, q: str) ->

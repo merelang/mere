@@ -93,7 +93,7 @@ module Pgen {
 
   let field_mere_ty = fn (decls, pkg: str, scope: str, f: pfield) ->
     match f with
-    | PField (_, _, rep, ty) ->
+    | PField (_, _, rep, ty, _) ->
       let base = match ty with
                  | PScalar (n, _) -> scalar_mere_ty n
                  | PRef n -> msg_ty_name decls pkg scope n in
@@ -109,7 +109,7 @@ module Pgen {
   // --- default values ------------------------------------------------------
   let default_expr = fn (decls, pkg: str, scope: str, f: pfield) ->
     match f with
-    | PField (_, _, rep, ty) ->
+    | PField (_, _, rep, ty, _) ->
       let is_msg_ref = match ty with
                        | PRef n -> let (_, m) = Pparse.resolve decls scope n in m
                        | PScalar (_, _) -> false in
@@ -205,7 +205,7 @@ module Pgen {
   // One getter per field.
   let getter = fn (decls, pkg: str, scope: str, tyn: str, f: pfield) ->
     match f with
-    | PField (name, num, rep, ty) ->
+    | PField (name, num, rep, ty, _) ->
       // A GENERATED IDENTIFIER CANNOT START WITH THE TYPE NAME. Uppercase-leading
       // is how this language recognises a constructor, so `M_get_a` parses as one
       // and the getter is reported as an unknown constructor at its use site — an
@@ -315,7 +315,7 @@ module Pgen {
   // The encoder for one field, guarded so a default writes nothing.
   let putter = fn (decls, pkg: str, scope: str, f: pfield) ->
     match f with
-    | PField (name, num, rep, ty) ->
+    | PField (name, num, rep, ty, _) ->
       let n = str_of_int num in
       let acc = "v." ++ name in
       match ty with
@@ -378,22 +378,22 @@ module Pgen {
   // --- one message ---------------------------------------------------------
   let rec msg_source = fn (decls, pkg: str, scope: str, prefix: str, m: pmsg) ->
     match m with
-    | PMsg (name, fields, subs, enums) ->
+    | PMsg (name, fields, subs, enums, _) ->
       let tyn = qual prefix name in
       let inner = scope ++ "." ++ name in
       let nested = list_map subs (fn (sm) -> msg_source decls pkg inner tyn sm) in
       let enum_consts = list_map enums (fn (e) ->
         match e with
-        | PEnum (en, vals) ->
+        | PEnum (en, vals, _) ->
           join_lines (list_map vals (fn (ev) ->
             match ev with
-            | PEnumV (vn, vnum) ->
+            | PEnumV (vn, vnum, _) ->
               "let enum_" ++ qual tyn en ++ "_" ++ vn ++ " = " ++ str_of_int vnum ++ ";"))) in
       let ty_decl =
         "type " ++ tyn ++ " = \{ "
         ++ str_join ", " (list_map fields (fn (f) ->
              match f with
-             | PField (fn_, _, _, _) -> fn_ ++ ": " ++ field_mere_ty decls pkg inner f))
+             | PField (fn_, _, _, _, _) -> fn_ ++ ": " ++ field_mere_ty decls pkg inner f))
         ++ " };" in
       let getters = join_lines (list_map fields (fn (f) ->
                       getter decls pkg inner tyn f)) in
@@ -402,14 +402,14 @@ module Pgen {
         ++ "  " ++ tyn ++ " \{ "
         ++ str_join ", " (list_map fields (fn (f) ->
              match f with
-             | PField (fn_, _, _, _) ->
+             | PField (fn_, _, _, _, _) ->
                fn_ ++ " = get_" ++ tyn ++ "_" ++ fn_ ++ " b 0 "
                ++ default_expr decls pkg inner f))
         ++ " };" in
       // FIELD-NUMBER ORDER, NOT DECLARATION ORDER. protoc writes fields ascending
       // by number, so a schema that declares `int32 c = 3;` first would otherwise
       // produce the same fields in a different sequence and different bytes.
-      let fnum = fn (f: pfield) -> match f with | PField (_, num, _, _) -> num in
+      let fnum = fn (f: pfield) -> match f with | PField (_, num, _, _, _) -> num in
       let by_number = list_sort_by (fn (a: pfield, b: pfield) -> fnum a <= fnum b)
                         fields in
       let enc =
@@ -425,14 +425,14 @@ module Pgen {
   let file_source = fn (wire_path: str, f: pfile) ->
     let decls = Pparse.collect f in
     match f with
-    | PFile (fname, pkg, msgs, enums, _) ->
+    | PFile (fname, pkg, msgs, enums, _, _) ->
       let scope = if str_eq pkg "" then "" else "." ++ pkg in
       let top_enums = list_map enums (fn (e) ->
         match e with
-        | PEnum (en, vals) ->
+        | PEnum (en, vals, _) ->
           join_lines (list_map vals (fn (ev) ->
             match ev with
-            | PEnumV (vn, vnum) -> "let enum_" ++ en ++ "_" ++ vn ++ " = " ++ str_of_int vnum ++ ";"))) in
+            | PEnumV (vn, vnum, _) -> "let enum_" ++ en ++ "_" ++ vn ++ " = " ++ str_of_int vnum ++ ";"))) in
       let bodies = list_map msgs (fn (m) -> msg_source decls pkg scope "" m) in
       join_lines (list_append
         (Cons ("// GENERATED from " ++ fname ++ " — do not edit.", 
