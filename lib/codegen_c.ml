@@ -2509,8 +2509,13 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "__lang_str_ends_with(%s, %s)"
          (emit_expr s_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "str_contains"; _ }, h_e) ->
-       (* Phase 36: str_contains haystack needle — bool *)
-       Printf.sprintf "(strstr(%s, %s) != NULL)"
+       (* Phase 36: str_contains haystack needle — bool.
+          v0.1.284: was strstr, which ends the needle at its first NUL. Since
+          v0.1.264 a str carries its length and may hold one, so a needle
+          beginning with NUL looked like the empty needle and strstr answered
+          "found at the start" for every haystack. __lang_str_index_of reads
+          both lengths from the header and compares bytes. *)
+       Printf.sprintf "(__lang_str_index_of(%s, %s) >= 0)"
          (emit_expr h_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "str_repeat"; _ }, s_e) ->
        Printf.sprintf "__lang_str_repeat(%s, %s)"
@@ -6196,8 +6201,11 @@ let native_ffi_runtime ~tls ~midi ~window =
       "}";
       "/* str_ptr: place a Mere str's bytes in the arena, return the offset";
       "   (Wasm gets this for free since a str is already an offset there). */";
+      (* v0.1.284: strlen here dropped everything after a NUL on the way into
+         the arena, which is the one place a str stops being a str and becomes
+         bytes somebody else reads. *)
       "static int str_ptr(const char* s) {";
-      "  int n = (int)strlen(s); int p = __mem_bump(n + 1);";
+      "  int n = (int)__lang_str_size(s); int p = __mem_bump(n + 1);";
       "  memcpy(__mem + p, s, n); __mem[p + n] = 0; return p;";
       "}";
       "/* mem_copy_str: copy a NUL-terminated str into __mem[dst+off], return len. */";
@@ -8198,7 +8206,12 @@ let str_list_helpers =
       "      memcpy(r + pos, sep, seplen);";
       "      pos += seplen;";
       "    }";
-      "    size_t l = strlen(cur->payload.Cons.f0);";
+      (* v0.1.284: the sizing pass above asks __lang_str_size and this one used
+         to ask strlen, so a joined element containing a NUL was measured at its
+         full length and copied only up to the NUL. The total was right and the
+         bytes after the NUL were the allocator's zeros. One function, two
+         notions of how long a string is. *)
+      "    size_t l = __lang_str_size(cur->payload.Cons.f0);";
       "    memcpy(r + pos, cur->payload.Cons.f0, l);";
       "    pos += l;";
       "    first = 0;";
@@ -8279,7 +8292,9 @@ let read_lines_helper =
   String.concat "\n"
     [ "static list_str __lang_read_lines(const char* path) {";
       "  const char* content = __lang_read_file(path);";
-      "  size_t n = strlen(content);";
+      (* v0.1.284: read_file returns a header-carrying str, so ask it its size
+         rather than scanning for a NUL that the file is allowed to contain. *)
+      "  size_t n = __lang_str_size(content);";
       "  list_str acc = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "  acc->tag = 0;";
       "  if (n == 0) return acc;";

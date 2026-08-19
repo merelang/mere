@@ -1,0 +1,61 @@
+// The list prelude, over generated inputs rather than chosen ones.
+//
+// coll_edges.mere asks about the empty list, the one-element list and a long
+// one, because those are where a fold has nothing to start from and where a
+// doubling capacity would show. It also found `list_filter` alone not being
+// tail-recursive — but it found that at thirty thousand elements, and the
+// reason nobody found it earlier is that every other probe in the suite used a
+// list of three.
+//
+// This file stays small on purpose. Length is a different axis and it belongs
+// to coll_edges: past a few tens of thousands the answer stops being about
+// values and starts being about stack depth, which differs per backend and per
+// operation, and a gate measuring two axes reports the wrong one when either
+// moves. What this adds is the CONTENTS — negative elements, elements either
+// side of a word boundary, duplicates, a list that is already sorted and one
+// that is its own reverse.
+//
+// list_product is deliberately not here, for the reason prop_int.mere gives for
+// multiplication: a product of these elements overflows, and the interpreter
+// wraps at 63 bits where the compiled backends wrap at 64.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+import "../../contrib/prop/prop.mere";
+
+let n = 70;
+
+let sum_str = fn (xs: int list) ->
+  str_join "," (list_map xs (fn (x: int) -> str_of_int x));
+
+let rec loop = fn (i: int) ->
+  if i >= n then 0
+  else
+    let xs = Prop.list_at i in
+    let ys = Prop.list_at (i + 421) in
+    let k = Prop.small_at i in
+    let p = fn (x: int) -> x % 2 == 0 in
+    let _ = Prop.line i "in" (str_of_int (list_len xs) ++ " " ++ str_of_int (list_len ys) ++ " " ++ str_of_int k) in
+    let _ = Prop.line i "sum" (Prop.int_call (fn () -> list_sum xs)) in
+    let _ = Prop.line i "len" (Prop.int_call (fn () -> list_len xs)) in
+    let _ = Prop.line i "rev" (Prop.str_call (fn () -> sum_str (list_rev xs))) in
+    let _ = Prop.line i "rr" (Prop.str_call (fn () -> sum_str (list_rev (list_rev xs)))) in
+    let _ = Prop.line i "srt" (Prop.str_call (fn () -> sum_str (list_sort xs))) in
+    let _ = Prop.line i "max" (Prop.int_call (fn () -> list_max xs)) in
+    let _ = Prop.line i "min" (Prop.int_call (fn () -> list_min xs)) in
+    let _ = Prop.line i "flt" (Prop.str_call (fn () -> sum_str (list_filter xs p))) in
+    let _ = Prop.line i "map" (Prop.str_call (fn () -> sum_str (list_map xs (fn (x: int) -> x + 1)))) in
+    let _ = Prop.line i "tak" (Prop.str_call (fn () -> sum_str (list_take xs k))) in
+    let _ = Prop.line i "drp" (Prop.str_call (fn () -> sum_str (list_drop xs k))) in
+    // take k ++ drop k is the whole list, whatever k is — the one property here
+    // that does not need any implementation to agree with, only with itself
+    let _ = Prop.line i "spl" (Prop.str_call (fn () -> sum_str (list_append (list_take xs k) (list_drop xs k)))) in
+    let _ = Prop.line i "app" (Prop.str_call (fn () -> sum_str (list_append xs ys))) in
+    let _ = Prop.line i "zip" (Prop.int_call (fn () -> list_len (list_zip xs ys))) in
+    let _ = Prop.line i "any" (Prop.bool_call (fn () -> list_any xs p)) in
+    let _ = Prop.line i "all" (Prop.bool_call (fn () -> list_for_all xs p)) in
+    let _ = Prop.line i "mem" (Prop.bool_call (fn () -> list_member xs (Prop.int_at i))) in
+    let _ = Prop.line i "fld" (Prop.int_call (fn () -> list_fold xs 0 (fn (a: int) -> fn (x: int) -> a + 1))) in
+    loop (i + 1);
+
+print (str_of_int (loop 0))

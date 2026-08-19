@@ -4603,13 +4603,17 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  %s = call i1 @__lang_str_ends_with(ptr %s, ptr %s)" r sv pv);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_contains"; _ }, h_e); _ }, n_e) ->
-    (* Phase 36: str_contains h n — bool via strstr *)
+    (* Phase 36: str_contains h n — bool.
+       v0.1.284: was strstr, which ends the needle at its first NUL. A str has
+       carried its length since v0.1.264 and may hold one, so a needle starting
+       with NUL read as the empty needle and strstr said "found". Ask the
+       length-aware search instead, so contains and index_of cannot disagree. *)
     let hv = emit_expr env h_e in
     let nv = emit_expr env n_e in
     let pr = fresh_reg () in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call ptr @strstr(ptr %s, ptr %s)" pr hv nv);
-    emit_instr (Printf.sprintf "  %s = icmp ne ptr %s, null" r pr);
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_str_index_of(ptr %s, ptr %s)" pr hv nv);
+    emit_instr (Printf.sprintf "  %s = icmp sge i64 %s, 0" r pr);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_repeat"; _ }, s_e); _ }, n_e) ->
     let sv = emit_expr env s_e in
@@ -6719,7 +6723,6 @@ let runtime_decls =
       "declare i64 @strlen(ptr)";
       "declare i32 @strcmp(ptr, ptr)";
       "declare i32 @strncmp(ptr, ptr, i64)";
-      "declare ptr @strstr(ptr, ptr)";
       "declare ptr @memcpy(ptr, ptr, i64)";
       "declare i32 @memcmp(ptr, ptr, i64)";
       "declare i32 @puts(ptr)";
@@ -9355,34 +9358,63 @@ let str_concat_helper =
       "}";
       "";
       (* Phase 19.1.1: str_index_of — needle position in haystack, -1 if
-         not found. Empty needle returns 0. Uses libc strstr. *)
+         not found. Empty needle returns 0. *)
       (* v0.1.274: i64, like the C backend's. A match past two gigabytes came
          back as a negative offset. *)
+      (* v0.1.284: the search reads both lengths from the header and compares
+         bytes, where it used to load the needle's first byte and hand the two
+         pointers to strstr. Both of those end a string at its first NUL, which
+         has not been what a str is since v0.1.264: a needle starting with NUL
+         was taken for the empty needle and the answer was 0 for any haystack.
+         This is the C backend's __lang_str_index_of, transcribed. *)
       "define i64 @__lang_str_index_of(ptr %h, ptr %n) {";
       "entry:";
-      "  %nfirst = load i8, ptr %n";
-      "  %is_empty = icmp eq i8 %nfirst, 0";
-      "  br i1 %is_empty, label %ret0, label %dosearch";
+      "  %hn = call i64 @__lang_str_size(ptr %h)";
+      "  %nn = call i64 @__lang_str_size(ptr %n)";
+      "  %is_empty = icmp eq i64 %nn, 0";
+      "  br i1 %is_empty, label %ret0, label %chk";
       "ret0:";
       "  ret i64 0";
-      "dosearch:";
-      "  %p = call ptr @strstr(ptr %h, ptr %n)";
-      "  %notfound = icmp eq ptr %p, null";
-      "  br i1 %notfound, label %retneg, label %retdiff";
+      "chk:";
+      "  %toolong = icmp ugt i64 %nn, %hn";
+      "  br i1 %toolong, label %retneg, label %pre";
+      "pre:";
+      "  %last = sub i64 %hn, %nn";
+      "  br label %loop";
+      "loop:";
+      "  %i = phi i64 [ 0, %pre ], [ %inext, %cont ]";
+      "  %p = getelementptr i8, ptr %h, i64 %i";
+      "  %c = call i32 @memcmp(ptr %p, ptr %n, i64 %nn)";
+      "  %eq = icmp eq i32 %c, 0";
+      "  br i1 %eq, label %found, label %cont";
+      "cont:";
+      "  %inext = add i64 %i, 1";
+      "  %done = icmp ugt i64 %inext, %last";
+      "  br i1 %done, label %retneg, label %loop";
+      "found:";
+      "  ret i64 %i";
       "retneg:";
       "  ret i64 -1";
-      "retdiff:";
-      "  %diff = ptrtoint ptr %p to i64";
-      "  %base = ptrtoint ptr %h to i64";
-      "  %off = sub i64 %diff, %base";
-      "  ret i64 %off";
       "}";
       "";
       (* Phase 36: str_starts_with — bool *)
+      (* v0.1.284: strncmp, and no length check on the haystack — the only one
+         of the four starts_with/ends_with implementations across the two
+         backends that was written this way. strncmp ends both strings at their
+         first NUL, so a prefix beginning with NUL matched everything, and
+         without the length check a prefix longer than the string was compared
+         against bytes past its end. This is the C backend's version and this
+         backend's own ends_with, transcribed. *)
       "define i1 @__lang_str_starts_with(ptr %s, ptr %p) {";
       "entry:";
+      "  %sl = call i64 @__lang_str_size(ptr %s)";
       "  %pl = call i64 @__lang_str_size(ptr %p)";
-      "  %r = call i32 @strncmp(ptr %s, ptr %p, i64 %pl)";
+      "  %fits = icmp uge i64 %sl, %pl";
+      "  br i1 %fits, label %do_cmp, label %ret_false";
+      "ret_false:";
+      "  ret i1 0";
+      "do_cmp:";
+      "  %r = call i32 @memcmp(ptr %s, ptr %p, i64 %pl)";
       "  %ok = icmp eq i32 %r, 0";
       "  ret i1 %ok";
       "}";

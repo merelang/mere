@@ -1,0 +1,65 @@
+// The string builtins, over generated inputs rather than chosen ones.
+//
+// str_edges.mere asks the same builtins about values a person picked. It found
+// two defects on its first run and both were real, which is the argument for
+// having written it. This file is the other half of that argument: the picking
+// is mechanical work, and a generator reaches inputs nobody would sit down and
+// list — a nine-byte string of NUL, a lone UTF-8 continuation byte and a quote,
+// asked to be trimmed.
+//
+// There is no expected output here and there cannot be one. The property is
+// "all four implementations answer the same thing", and the harness already
+// knows how to check that. A generated corpus with a committed expectation
+// would be a corpus that has to be regenerated whenever the answer legitimately
+// changes, and regenerating an expectation is how a gate stops asking.
+//
+// Every call goes through try_or, because a refusal IS an answer and the four
+// backends were only recently made to refuse in the same words (v0.1.276). A
+// case where one backend answers and three refuse is exactly the shape this is
+// looking for, and without try_or it would abort the run instead of printing a
+// difference.
+//
+// Strings are reported as length:digest, never raw. Control bytes and NUL would
+// pass through four different runners on the way to the diff and the gate would
+// end up measuring the runners.
+//
+// codepoint_at is not here. It diverges on malformed UTF-8 and the divergence is
+// real -- it moved to test/parity/prop_utf8.mere, where it is pinned rather than
+// dropped, because a value gate that also carried an open question would report
+// that question on every run and the next real difference would arrive inside a
+// case that is already red.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+import "../../contrib/prop/prop.mere";
+
+let n = 120;
+
+let rec loop = fn (i: int) ->
+  if i >= n then 0
+  else
+    let s = Prop.str_at i in
+    let t = Prop.str_at (i + 977) in
+    let k = Prop.small_at i in
+    let _ = Prop.line i "in" (Prop.str_report s ++ " " ++ Prop.str_report t ++ " " ++ str_of_int k) in
+    let _ = Prop.line i "len" (Prop.int_call (fn () -> str_len s)) in
+    let _ = Prop.line i "rev" (Prop.str_call (fn () -> str_rev s)) in
+    let _ = Prop.line i "trim" (Prop.str_call (fn () -> str_trim s)) in
+    let _ = Prop.line i "rep" (Prop.str_call (fn () -> str_repeat s k)) in
+    let _ = Prop.line i "cat" (Prop.str_call (fn () -> s ++ t)) in
+    let _ = Prop.line i "cmp" (Prop.int_call (fn () -> str_compare s t)) in
+    let _ = Prop.line i "eq" (Prop.bool_call (fn () -> str_eq s t)) in
+    let _ = Prop.line i "has" (Prop.bool_call (fn () -> str_contains s t)) in
+    let _ = Prop.line i "pre" (Prop.bool_call (fn () -> str_starts_with s t)) in
+    let _ = Prop.line i "suf" (Prop.bool_call (fn () -> str_ends_with s t)) in
+    let _ = Prop.line i "idx" (Prop.int_call (fn () -> str_index_of s t)) in
+    let _ = Prop.line i "cnt" (Prop.int_call (fn () -> str_count s t)) in
+    let _ = Prop.line i "sub" (Prop.str_call (fn () -> str_replace s t "Z")) in
+    let _ = Prop.line i "spl" (Prop.int_call (fn () -> list_len (str_split s t))) in
+    let _ = Prop.line i "rtn" (Prop.str_call (fn () -> str_join t (str_split s t))) in
+    let _ = Prop.line i "une" (Prop.str_call (fn () -> str_unescape s)) in
+    let _ = Prop.line i "chr" (Prop.str_call (fn () -> char_at s k)) in
+    let _ = Prop.line i "ord" (Prop.int_call (fn () -> ord s)) in
+    loop (i + 1);
+
+print (str_of_int (loop 0))

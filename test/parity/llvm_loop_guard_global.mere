@@ -1,0 +1,50 @@
+// A loop whose bound is a top-level binding stops after one iteration on LLVM.
+//
+// The three ingredients are all needed, and each was removed in turn to check:
+//
+//   - the loop's bound is a TOP-LEVEL let (`n`), not a literal. Writing `i >= 4`
+//     makes the same program run to completion.
+//   - the body evaluates a `try_or` whose thunk calls a PRELUDE function
+//     (`codepoint_at`, which is Mere code over chr/ord/char_at). The same shape
+//     with a builtin in the thunk — `ord "a"`, `str_len "abc"` — runs to
+//     completion, and so does calling `codepoint_at` directly without the thunk.
+//   - it is a recursive function. Straight-line code reads `n` correctly.
+//
+// The interpreter, C and Wasm print four values. LLVM prints one and returns,
+// so the guard `i >= n` became true on the second pass: whatever `n` is read
+// from after the lifted thunk has been called is not the global that holds 4.
+//
+// This is not a value question and it is not about codepoint_at — that builtin
+// is only the shortest prelude function that reproduces it. A program that
+// folded over a list this way would silently process the first element and
+// report success, which is the failure mode worth having a case for.
+//
+// Found by contrib/prop while it was generating inputs for something else: the
+// utf8 gate was written with `let n = 60` and reported 3 lines instead of 184 on
+// LLVM, and the missing lines were not the ones it was asking about.
+//
+// The LLVM answer is pinned rather than tolerated. Fixing the codegen breaks the
+// pin, which is how this file will say it is finished.
+//
+// Execution mode: 4 backends, interp is the reference, LLVM is pinned.
+
+let n = 4;
+
+let rec loop = fn (i: int) ->
+  if i >= n then 0
+  else
+    let c = try_or (fn () -> codepoint_at "abc" 0) (0 - 1) in
+    let _ = print (str_of_int i ++ ":" ++ str_of_int c) in
+    loop (i + 1);
+
+let _ = print (str_of_int (loop 0));
+
+// the same loop with a literal bound, which is the control: all four agree
+let rec loop_lit = fn (i: int) ->
+  if i >= 4 then 0
+  else
+    let c = try_or (fn () -> codepoint_at "abc" 0) (0 - 1) in
+    let _ = print ("lit " ++ str_of_int i ++ ":" ++ str_of_int c) in
+    loop_lit (i + 1);
+
+print (str_of_int (loop_lit 0))

@@ -1,0 +1,170 @@
+// contrib/prop/prop.mere — generated inputs for the differential gates.
+//
+// The suite's value-axis gates (str_edges, coll_edges, index_edges, refusals)
+// were written by hand: someone sat down and enumerated the interesting values
+// for each builtin. That enumeration found real defects — `str_repeat s 0`
+// allocating without a length field on LLVM alone, `chr 256` returning NUL on
+// three backends, `ord ""` reading byte zero of an empty string — and it found
+// them because the values were chosen, not drawn. It is also the part of the
+// work a machine can do.
+//
+// This module produces the values. It does NOT compare them: a property test
+// written with it is an ordinary parity case, so the other four backends are
+// the oracle and there is nothing to write down as an expectation. That is the
+// same shape as the reftest in the browser dogfood — a gate whose two sides are
+// both ours, so it commits no expected output — moved from pixels to values.
+//
+// Three decisions are worth stating, because each is a way this could have
+// quietly measured nothing.
+//
+// 1. It does not use `random_int`. That builtin asks the host, and five hosts
+//    would draw five different sequences, so every case would report DIFF and
+//    the gate would be reporting on itself. The generator is pure Mere.
+//
+// 2. Values are a function of an INDEX, not of a carried state. `int_at i` is
+//    reproducible on its own, threads nothing, and — because each printed line
+//    carries its index — a differing line in the parity diff already names the
+//    input that produced it. That is also why there is no shrinker here: the
+//    smallest reproducer is `i`, and it is printed. A shrinker starts to earn
+//    its keep when an input is a compound structure whose printed form is too
+//    large to read, which none of these are yet.
+//
+// 3. Every intermediate stays below 2^45. The interpreter's int is 63-bit and
+//    the compiled backends' is 64-bit; a mix that overflowed would overflow
+//    differently on the interpreter, and the gate would be noise on every line
+//    rather than a signal on one.
+//
+// Backend support: interp / C / LLVM / Wasm (the parity set).
+
+module Prop {
+
+// --- mixing ---------------------------------------------------------------
+
+let mask32 = fn (x: int) -> bit_and x 0xFFFFFFFF;
+
+// one xorshift32 round; `bit_shl x 13` on a 32-bit x reaches 2^45 and no further
+let round = fn (x0: int) ->
+  let a = mask32 (bit_xor x0 (bit_shl x0 13)) in
+  let b = bit_xor a (bit_shr a 17) in
+  mask32 (bit_xor b (bit_shl b 5));
+
+// two rounds so that adjacent indices do not give adjacent values
+let hash = fn (i: int) -> round (round (mask32 (i * 2654435761 + 1013904223)));
+
+// a second, independent stream off the same index, for the cases that need two
+// numbers (a length and a content, a haystack and a needle)
+let hash2 = fn (i: int) -> round (round (mask32 (i * 40503 + 2246822519)));
+
+let below = fn (h: int) -> fn (n: int) -> if n <= 0 then 0 else h % n;
+
+// --- integers -------------------------------------------------------------
+
+// The first entries are a table, not a draw. Every integer defect this suite
+// has found sat on one of these: zero, one either side of a byte boundary, one
+// either side of 2^31 and 2^32, and the value that made `chr` answer "A" for an
+// input 2^32 above 'A'. A uniform draw over the whole range reaches them with
+// probability about zero, so a generator that only drew would be weaker than
+// the hand-written gates it is meant to extend.
+let int_edges = [
+  0, 1, 0 - 1, 2, 0 - 2, 7, 8, 9,
+  126, 127, 128, 129, 254, 255, 256, 257,
+  32767, 32768, 65535, 65536, 65537,
+  2147483646, 2147483647, 2147483648, 2147483649,
+  0 - 2147483647, 0 - 2147483648,
+  4294967295, 4294967296, 4294967361
+];
+
+let rec nth = fn (xs: int list) -> fn (n: int) ->
+  match xs with
+  | Nil -> 0
+  | Cons (h, t) -> if n <= 0 then h else nth t (n - 1);
+
+let edge_count = list_len int_edges;
+
+// index below edge_count takes the table; beyond it, a signed draw
+let int_at = fn (i: int) ->
+  if i < edge_count then nth int_edges i
+  else
+    let h = hash i in
+    let magnitude =
+      if (below (hash2 i) 4) == 0 then below h 4294967296 else below h 512 in
+    if (bit_and h 1) == 1 then 0 - magnitude else magnitude;
+
+// a small non-negative int, for counts and indices
+let small_at = fn (i: int) -> below (hash i) 12;
+
+// --- strings --------------------------------------------------------------
+
+// Bytes are drawn from a set that includes the ones a string implementation is
+// most likely to treat specially: NUL, a backslash, a quote, a multi-byte UTF-8
+// lead and continuation, and ordinary ASCII. NUL is in the set on purpose — it
+// was a real divergence for two backends, and a corpus that leaves it out is
+// the "reach agreement by declining to ask" failure.
+let byte_pool = [
+  0, 9, 10, 13, 32, 34, 39, 47, 48, 57, 65, 90, 92, 97, 122, 127,
+  195, 169, 227, 129, 130, 240, 159, 152, 128, 255
+];
+
+let pool_count = list_len byte_pool;
+
+let rec build = fn (i: int) -> fn (n: int) -> fn (acc: str) ->
+  if n <= 0 then acc
+  else
+    let h = round (mask32 (hash i + n * 2654435761)) in
+    build i (n - 1) (acc ++ chr (nth byte_pool (below h pool_count)));
+
+// indices 0..3 are the shapes a length calculation gets wrong first
+let str_at = fn (i: int) ->
+  if i == 0 then ""
+  else if i == 1 then " "
+  else if i == 2 then chr 0
+  else if i == 3 then "a" ++ chr 0 ++ "b"
+  else build i (below (hash2 i) 9) "";
+
+// --- lists ----------------------------------------------------------------
+
+let rec build_list = fn (i: int) -> fn (n: int) -> fn (acc: int list) ->
+  if n <= 0 then acc
+  else build_list i (n - 1) (Cons (int_at (below (round (mask32 (hash i + n))) 64), acc));
+
+let list_at = fn (i: int) ->
+  if i == 0 then (Nil : int list)
+  else build_list i (below (hash2 i) 7) (Nil : int list);
+
+// --- reporting ------------------------------------------------------------
+
+// A generated string is never printed raw. Control bytes and NUL would travel
+// through four different runners on their way to the diff, and the gate would
+// then be measuring the runners. A length and a byte-wise digest are stable
+// under all four, and are enough to say "these two strings differ".
+let rec digest_from = fn (s: str) -> fn (k: int) -> fn (acc: int) ->
+  if k >= str_len s then acc
+  else digest_from s (k + 1) (mask32 (acc * 31 + ord (char_at s k)));
+
+let digest = fn (s: str) -> digest_from s 0 7;
+
+let str_report = fn (s: str) -> str_of_int (str_len s) ++ ":" ++ str_of_int (digest s);
+
+// A refusal is an answer. Wrapping every call in try_or means a case that all
+// four backends refuse prints the same marker on all four — which is the result
+// being compared — while a case that one backend answers and three refuse shows
+// up as the DIFF it is.
+//
+// The str form asks whether the call succeeded before asking what it returned,
+// rather than substituting a marker string on failure. A marker is itself a
+// string, so "the call refused" and "the call returned this particular string"
+// would be the same line whenever the generator produced the marker — and
+// `str_unescape` over a pool containing a backslash and digits can produce any
+// byte at all. Distinguishing them by a prefix that a report can never start
+// with costs one extra call of a pure builtin.
+let int_call = fn (f: unit -> int) -> str_of_int (try_or f (0 - 999999));
+let str_call = fn (f: unit -> str) ->
+  if (try_or (fn () -> let _ = f () in 1) 0) == 1
+  then "ok " ++ str_report (f ())
+  else "REFUSED";
+let bool_call = fn (f: unit -> bool) -> if try_or f false then "T" else "F";
+
+let line = fn (i: int) -> fn (label: str) -> fn (body: str) ->
+  print (str_of_int i ++ " " ++ label ++ " " ++ body);
+
+}

@@ -3813,9 +3813,18 @@ let () =
   assert_contains "llvm: __lang_str_index_of helper defined"
     (llvm "str_index_of \"hi\" \"i\"")
     "define i64 @__lang_str_index_of";
-  assert_contains "llvm: declares strstr"
+  (* v0.1.284: this used to assert that the backend declares strstr, which was a
+     claim about how index_of is implemented rather than about what it answers.
+     strstr ends both strings at their first NUL and a str has carried its length
+     since v0.1.264, so the search now reads the two lengths and compares bytes.
+     Asserting the memcmp keeps the test on the property that mattered — that the
+     needle is compared by length and not by termination. *)
+  assert_contains "llvm: str_index_of compares by length, not NUL"
     (llvm "str_index_of \"hi\" \"i\"")
-    "declare ptr @strstr(ptr, ptr)";
+    "call i32 @memcmp(ptr %p, ptr %n, i64 %nn)";
+  assert_no_contains "llvm: str_index_of does not call strstr"
+    (llvm "str_index_of \"hi\" \"i\"")
+    "@strstr";
   assert_contains "llvm: str-returning fn signature"
     (llvm "let exclaim = fn s -> s ++ \"!\" in exclaim \"hi\"")
     "define ptr @mu_exclaim(ptr %s)";
