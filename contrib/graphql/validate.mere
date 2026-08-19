@@ -374,6 +374,222 @@ module Gvalid {
         if str_eq n name then rep else is_repeatable rest name
       | _ -> is_repeatable rest name;
 
+  // --- ValuesOfCorrectType / ProvidedRequiredArguments --------------------
+  //
+  // These two are the rules that look INSIDE an argument, and they are the pair a real
+  // service meets first: everything above this point can be decided from the document's
+  // shape, while these need the argument's declared type.
+  //
+  // WHAT IS NOT CHECKED HERE, deliberately:
+  //   * a VARIABLE in value position. Whether `$v` may stand where an `Int!` is wanted
+  //     is `VariablesInAllowedPosition`, still on the gap list. Checking it here would
+  //     report the right problem under the wrong rule name, which the gate compares.
+  //   * an argument whose name is not declared. `KnownArgumentNames` reports that, and
+  //     an undeclared argument has no type to check its value against.
+  //   * a CUSTOM SCALAR's literal. `buildSchema` gives a custom scalar the identity
+  //     `parseLiteral`, so graphql-js accepts `dt: 1` for `scalar DateTime` — measured
+  //     against the oracle, not assumed from the specification.
+  let iv_name = fn (iv: ginpval) -> match iv with InputVal (_, n, _, _, _) -> n;
+  let iv_type = fn (iv: ginpval) -> match iv with InputVal (_, _, t, _, _) -> t;
+
+  // REQUIRED means non-null AND no default. The default is what makes `x: Int! = 3`
+  // legal to omit, and leaving it out of this test reports every defaulted argument.
+  let is_required_iv = fn (iv: ginpval) ->
+    match iv with
+    | InputVal (_, _, ty, dflt, _) ->
+      (match ty with | TyNonNull _ -> true | _ -> false) && list_len dflt == 0;
+
+  let rec find_iv = fn (ivs, name: str) ->
+    match ivs with
+    | [] -> []
+    | [iv, ...rest] -> if str_eq (iv_name iv) name then Cons (iv, []) else find_iv rest name;
+
+  let arg_key_names = fn (args) -> list_map args (fn (kv) -> let (k, _) = kv in k);
+
+  let arg_defs_at = fn (defs, tname: str, fname: str) ->
+    Gexec.arg_defs_of (Gexec.find_obj_or_iface defs tname) fname;
+
+  let rec dir_arg_defs = fn (defs, name: str) ->
+    match defs with
+    | [] -> []
+    | [d, ...rest] ->
+      match d with
+      | TsDef (DirectiveDef (_, n, args, _, _)) ->
+        if str_eq n name then args else dir_arg_defs rest name
+      | _ -> dir_arg_defs rest name;
+
+  let input_fields_of = fn (defs, n: str) ->
+    match Gexec.find_tsdef defs n with
+    | [InputDef (_, _, _, fs), ..._] -> fs
+    | _ -> [];
+
+  let enum_value_names = fn (defs, n: str) ->
+    match Gexec.find_tsdef defs n with
+    | [EnumDef (_, _, _, vs), ..._] ->
+      list_map vs (fn (ev) -> match ev with EnumVal (_, nm, _) -> nm)
+    | _ -> [];
+
+  // GraphQL's `Int` IS 32-BIT, and the lexeme is a STRING here by design — ast.mere
+  // keeps the literal rather than a number precisely because a document is not obliged
+  // to fit in the host's int. So the range test compares DIGITS. Parsing first would
+  // answer a different question than the one asked, and would answer it wrongly for
+  // exactly the literals this test exists to catch.
+  let rec cmp_digits_at = fn (s: str, off: int, lim: str, k: int) ->
+    if k >= str_len lim then 0
+    else
+      let a = char_at s (off + k) in
+      let b = char_at lim k in
+      if str_eq a b then cmp_digits_at s off lim (k + 1)
+      else if str_compare a b < 0 then (0 - 1) else 1;
+
+  let int32_in_range = fn (lex: str) ->
+    let neg = str_len lex > 0 && str_eq (char_at lex 0) "-" in
+    let off = if neg then 1 else 0 in
+    let ndigits = str_len lex - off in
+    // The two bounds are both ten digits, so a shorter literal is always in range and a
+    // longer one never is; only an equal-length one needs comparing.
+    let lim = if neg then "2147483648" else "2147483647" in
+    if ndigits < str_len lim then true
+    else if ndigits > str_len lim then false
+    else cmp_digits_at lex off lim 0 <= 0;
+
+  // The five built-in scalars, each with graphql-js's own wording. The wording differs
+  // between them in ways that look like accidents and are not — `a non string value`
+  // for String, `non numeric value` for Float, `non-integer` for Int — so each is
+  // written out rather than generated from a template.
+  let builtin_scalar_err = fn (n: str, v: gval) ->
+    let p = Gprint.pval v in
+    if str_eq n "Int" then
+      (match v with
+       | VInt lex ->
+         if int32_in_range lex then []
+         else err "ValuesOfCorrectType"
+                ("Int cannot represent non 32-bit signed integer value: " ++ p)
+       | _ -> err "ValuesOfCorrectType" ("Int cannot represent non-integer value: " ++ p))
+    else if str_eq n "Float" then
+      (match v with
+       | VInt _ -> []
+       | VFloat _ -> []
+       | _ -> err "ValuesOfCorrectType" ("Float cannot represent non numeric value: " ++ p))
+    else if str_eq n "String" then
+      (match v with
+       | VStr _ -> []
+       | VBlock _ -> []
+       | _ -> err "ValuesOfCorrectType" ("String cannot represent a non string value: " ++ p))
+    else if str_eq n "Boolean" then
+      (match v with
+       | VBool _ -> []
+       | _ -> err "ValuesOfCorrectType" ("Boolean cannot represent a non boolean value: " ++ p))
+    else if str_eq n "ID" then
+      (match v with
+       | VStr _ -> []
+       | VBlock _ -> []
+       | VInt _ -> []
+       | _ -> err "ValuesOfCorrectType"
+                ("ID cannot represent a non-string and non-integer value: " ++ p))
+    // A named type with no definition and no built-in wording: `KnownTypeNames` is the
+    // rule that reports it, and inventing a value error here would report the same
+    // problem twice under two names.
+    else [];
+
+  let rec check_value = fn (defs, ty: gtype, v: gval) ->
+    match v with
+    | VVar _ -> []
+    | _ ->
+      match ty with
+      | TyNonNull inner ->
+        (match v with
+         | VNull -> err "ValuesOfCorrectType"
+                      ("Expected value of non-null type " ++ q (Gprint.ptype ty)
+                       ++ " not to be null.")
+         | _ -> check_value defs inner v)
+      | TyList item ->
+        (match v with
+         | VNull -> []
+         | VList xs -> list_concat (list_map xs (fn (x) -> check_value defs item x))
+         // A SINGLE VALUE WHERE A LIST IS WANTED IS COERCION, not an error: `li: 1`
+         // means `[1]`, so the ITEM type is what it is checked against. Reporting it
+         // would be a false positive, and a false positive is the worst failure a
+         // validator has.
+         | _ -> check_value defs item v)
+      | TyNamed n ->
+        (match v with
+         | VNull -> []
+         | _ ->
+           match Gexec.find_tsdef defs n with
+           | [InputDef (_, _, _, fields), ..._] -> check_input_obj defs n fields v
+           | [EnumDef (_, _, _, _), ..._] ->
+             (match v with
+              | VEnum e ->
+                if list_member (enum_value_names defs n) e then []
+                else err "ValuesOfCorrectType"
+                       ("Value " ++ q e ++ " does not exist in " ++ q n ++ " enum.")
+              | _ -> err "ValuesOfCorrectType"
+                       ("Enum " ++ q n ++ " cannot represent non-enum value: "
+                        ++ Gprint.pval v ++ "."))
+           | [ScalarDef (_, _, _), ..._] -> []
+           | _ -> builtin_scalar_err n v)
+
+  // Split out of `check_value` rather than nested inside it: the bodies below are
+  // lambdas that would sit two levels inside an enclosing function, and a capture that
+  // deep is the one the Wasm backend cannot resolve (see the note under
+  // `cond_errs`). Everything it needs is a parameter for the same reason.
+  and check_input_obj = fn (defs, n: str, fields, v: gval) ->
+    match v with
+    | VObj fs ->
+      let p = Gprint.pval v in
+      let declared = list_map fields iv_name in
+      let given = arg_key_names fs in
+      let unknown = list_concat (list_map fs (fn (kv) ->
+        let (k, _) = kv in
+        if list_member declared k then []
+        else err "ValuesOfCorrectType"
+               ("Expected value of type " ++ q n ++ " not to include unknown field "
+                ++ q k ++ ", found: " ++ p ++ "."))) in
+      let missing = list_concat (list_map fields (fn (iv) ->
+        if not (is_required_iv iv) then []
+        else if list_member given (iv_name iv) then []
+        else err "ValuesOfCorrectType"
+               ("Expected value of type " ++ q n ++ " to include required field "
+                ++ q (iv_name iv) ++ ", found: " ++ p ++ "."))) in
+      let inner = list_concat (list_map fs (fn (kv) ->
+        let (k, fv) = kv in
+        match find_iv fields k with
+        | [] -> []
+        | [iv, ..._] -> check_value defs (iv_type iv) fv)) in
+      list_concat ([unknown, missing, inner])
+    | _ -> err "ValuesOfCorrectType"
+             ("Expected value of type " ++ q n ++ " to be an object, found: "
+              ++ Gprint.pval v ++ ".");
+
+  // `label` is the parent as graphql-js writes it in the message: `Query.withArg` for a
+  // field, `@skip` for a directive, `<meta>` for the two the schema provides.
+  let missing_required = fn (label: str, adefs, args) ->
+    let given = arg_key_names args in
+    list_concat (list_map adefs (fn (iv) ->
+      if not (is_required_iv iv) then []
+      else if list_member given (iv_name iv) then []
+      else err "ProvidedRequiredArguments"
+             ("Argument " ++ q (label ++ "(" ++ iv_name iv ++ ":)") ++ " of type "
+              ++ q (Gprint.ptype (iv_type iv))
+              ++ " is required, but it was not provided.")));
+
+  let arg_value_errors = fn (defs, adefs, args) ->
+    list_concat (list_map args (fn (kv) ->
+      let (k, v) = kv in
+      match find_iv adefs k with
+      | [] -> []
+      | [iv, ..._] -> check_value defs (iv_type iv) v));
+
+  let arg_errors = fn (defs, label: str, adefs, args) ->
+    appl (missing_required label adefs args) (arg_value_errors defs adefs args);
+
+  // `__type(name: String!)` is PROVIDED BY the schema and is in nobody's SDL, so its
+  // argument definition is written here — the same reason the walk special-cases the
+  // field at all. graphql-js calls the parent `<meta>`, which is a literal in the
+  // message rather than a type that exists.
+  let meta_type_args = Cons (InputVal ([], "name", TyNonNull (TyNamed "String"), [], []), []);
+
   let dir_errors = fn (defs, known, dirs, acc) ->
     let rec go = fn (ds, seen, a) ->
       match ds with
@@ -388,7 +604,10 @@ module Gvalid {
                           "The directive " ++ q ("@" ++ n)
                           ++ " can only be used once at this location."), a2)
                  else a2 in
-        go rest (Cons (n, seen)) a3 in
+        // An UNKNOWN directive has no argument definitions, so this adds nothing for
+        // `@nope` — `KnownDirectives` above is what reports it.
+        let a4 = appl (arg_errors defs ("@" ++ n) (dir_arg_defs defs n) args) a3 in
+        go rest (Cons (n, seen)) a4 in
     go dirs [] acc;
 
   let rec known_directive_names = fn (defs, acc) ->
@@ -411,17 +630,10 @@ module Gvalid {
     | [UnionDef (_, _, _, _), ..._] -> true
     | _ -> false;
 
+  // One lookup, two readers: `KnownArgumentNames` wants the names and the two rules
+  // above want the definitions. Two walks over the same field list would drift.
   let arg_names_of = fn (defs, tname: str, fname: str) ->
-    let rec go = fn (fs) ->
-      match fs with
-      | [] -> []
-      | [FieldDef (_, n, args, _, _), ...rest] ->
-        if str_eq n fname then
-          Cons (list_map args (fn (iv) -> match iv with InputVal (_, an, _, _, _) -> an), [])
-        else go rest in
-    match go (Gexec.find_obj_or_iface defs tname) with
-    | [] -> []
-    | [ns, ..._] -> ns;
+    list_map (arg_defs_at defs tname fname) iv_name;
 
   let rec walk_sels = fn (defs, known_dirs, frags, tname: str, sels, acc) ->
     list_fold sels acc (fn (a, s) ->
@@ -436,8 +648,10 @@ module Gvalid {
         if str_eq name "__typename" then a1
         else if (str_eq name "__schema" || str_eq name "__type")
                 && str_eq tname (Gexec.schema_query defs) then
+          let am = if str_eq name "__type" then meta_type_args else [] in
           walk_sels defs known_dirs frags
-                    (if str_eq name "__schema" then "__Schema" else "__Type") sub a1
+                    (if str_eq name "__schema" then "__Schema" else "__Type") sub
+                    (appl (arg_errors defs ("<meta>." ++ name) am args) a1)
         else
           (match Gexec.field_ty_in (Gexec.find_obj_or_iface defs tname) name with
            | [] ->
@@ -451,6 +665,8 @@ module Gvalid {
                         else Cons (GVErr ("KnownArgumentNames",
                                    "Unknown argument " ++ q k ++ " on field "
                                    ++ q (tname ++ "." ++ name) ++ "."), aa)) in
+             let a2 = appl (arg_errors defs (tname ++ "." ++ name)
+                                       (arg_defs_at defs tname name) args) a2 in
              if is_composite defs base then
                if list_len sub == 0 then
                  Cons (GVErr ("ScalarLeafs",
@@ -478,8 +694,9 @@ module Gvalid {
   //
   // Which is a thing worth noticing about this file rather than only about the backend:
   // EVERY GATE RUNS THE VALIDATOR INTERPRETED, so it had never been compiled to
-  // anything. `test/parity/graphql_validate_portable.mere` exists so that stays true of
-  // no future change.
+  // anything. `test/parity/graphql_stack_portable.mere` exists so that stays true of no
+  // future change. (This comment named a `graphql_validate_portable.mere` that was
+  // never written -- a note asserting a file into existence.)
   let cond_errs = fn (defs, all_names, label: str, tc: str, acc) ->
     if str_eq tc "" then acc
     else if not (list_member all_names tc) then
@@ -513,6 +730,17 @@ module Gvalid {
     | [InputDef (_, _, _, _), ..._] -> true
     | [] -> true                       // a built-in scalar has no definition
     | _ -> false;
+
+  // A VARIABLE'S DEFAULT IS A VALUE IN AN INPUT POSITION, so it is checked too —
+  // `query Q($v: Int = "x")` is a `ValuesOfCorrectType` error in the oracle. This is
+  // the one place the rule fires outside an argument list.
+  let rule_var_defaults = fn (doc_defs, defs) ->
+    list_concat (list_map (operations doc_defs) (fn (o) ->
+      let (_, _, vardefs, _, _) = o in
+      list_concat (list_map vardefs (fn (vd) ->
+        match vd with
+        | VarDef (_, ty, dflt, _) ->
+          list_concat (list_map dflt (fn (d) -> check_value defs ty d))))));
 
   let rule_var_types = fn (doc_defs, defs, all_names) ->
     list_fold (operations doc_defs) [] (fn (acc, o) ->
@@ -575,6 +803,7 @@ module Gvalid {
                   rule_no_unused_vars doc_defs,
                   rule_type_conditions_in doc_defs defs all_names,
                   rule_var_types doc_defs defs all_names,
+                  rule_var_defaults doc_defs defs,
                   from_frags]);
 
   // The rule names this file implements. The harness reads it: a rule that fires in
@@ -586,7 +815,8 @@ module Gvalid {
     "NoUndefinedVariables", "NoUnusedVariables", "UniqueArgumentNames",
     "KnownDirectives", "UniqueDirectivesPerLocation", "KnownTypeNames",
     "FragmentsOnCompositeTypes", "VariablesAreInputTypes", "FieldsOnCorrectType",
-    "ScalarLeafs", "KnownArgumentNames"];
+    "ScalarLeafs", "KnownArgumentNames", "ValuesOfCorrectType",
+    "ProvidedRequiredArguments"];
 
   // Rule names and messages, each on its own line, for a harness to compare.
   let report = fn (doc_defs, schema_defs) ->

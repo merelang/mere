@@ -17,13 +17,23 @@
 import "../../contrib/graphql/exec.mere";
 import "../../contrib/graphql/validate.mere";
 
-let sdl = " type Query \{ a: Int u(id: Int!, tag: String = \"d\"): String l: [Int!]! }";
+let sdl = " type Query \{ a: Int u(id: Int!, tag: String = \"d\"): String l: [Int!]! w(o: In): Int"
+          ++ " n: Node }"
+          ++ " input In \{ j: Int! k: Int }"
+          ++ " interface Node \{ id: ID! }"
+          ++ " type Post implements Node \{ id: ID! title: String }"
+          ++ " type User implements Node \{ id: ID! name: String }";
 
 // A resolver that is a FUNCTION of its arguments, which is the thing `GFn` exists for.
 // `tag` has a default, so a query that omits it still sees "d" — the executor supplies
 // it, and a compiled backend that lost the default would print something else.
 let echo = GFn (fn (args) -> GStr (Gexec.to_json (GObj args)));
-let root = GObj ([("a", GInt 1), ("u", echo), ("l", GList ([GInt 1, GInt 2]))]);
+// `__typename` in the data is what names the concrete type at an abstract position —
+// graphql-js's own default resolver, and the one piece of this that a backend could
+// plausibly get wrong by comparing strings differently.
+let post = GObj ([("__typename", GStr "Post"), ("id", GStr "7"), ("title", GStr "T")]);
+let root = GObj ([("a", GInt 1), ("u", echo), ("l", GList ([GInt 1, GInt 2])),
+                  ("n", post)]);
 
 let doc = fn (q: str) -> Gparse.document (q ++ sdl);
 let run = fn (q: str) -> Gexec.run_json (doc q) root [];
@@ -33,6 +43,25 @@ let _ = print (run "\{ a l }");
 let _ = print (run "\{ u(id: 7) }");
 let _ = print (run "\{ u(id: 7, tag: \"t\") }");
 let _ = print (run "\{ __type(name: \"Query\") \{ name kind } }");
+// Abstract resolution, its fragment matching, and the shape of its failure.
+let _ = print (run "\{ n \{ __typename id ... on Post \{ title } ... on User \{ name } } }");
+let _ = print (run "\{ n \{ ... on Node \{ id } } }");
+let _ = print (Gexec.run_json (doc "\{ n \{ id } }")
+                              (GObj ([("n", GObj ([("id", GStr "1")]))])) []);
 let _ = print (Gvalid.report (Gparse.document "\{ nope }") (Gparse.document sdl));
-print (Gvalid.report (Gparse.document "fragment A on Query \{ ...B } fragment B on Query \{ ...A } \{ ...A }")
-                     (Gparse.document sdl))
+let _ = print (Gvalid.report (Gparse.document "fragment A on Query \{ ...B } fragment B on Query \{ ...A } \{ ...A }")
+                             (Gparse.document sdl));
+
+// THE TWO RULES THAT LOOK INSIDE AN ARGUMENT, on every backend. Each of these builds a
+// message by CONCATENATING a printed type or a printed value into text that the parity
+// gate compares byte for byte, so a backend that formats either differently is caught
+// here rather than only in the interpreted oracle gate.
+//
+// The last one prints an object value into `found: ...`, which is the case that had our
+// value printer disagreeing with graphql-js for as long as it existed.
+let vrep = fn (q: str) -> print (Gvalid.report (Gparse.document q) (Gparse.document sdl));
+let _ = vrep "\{ u }";
+let _ = vrep "\{ u(id: \"x\") }";
+let _ = vrep "\{ u(id: 2147483648) }";
+let _ = vrep "\{ w(o: \{ k: 1 }) }";
+vrep "\{ w(o: \{ j: 1, nope: 2 }) }"

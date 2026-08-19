@@ -60,10 +60,18 @@ tmp = pathlib.Path(sys.argv[1])
 
 SDL = (" type Query { i: Int i2: Int! s: String s2: String! b: Boolean f: Float"
        " e: E e2: E! o: O o2: O! l: [Int] ln: [Int!] l2: [Int]! lo: [O] lon: [O!]"
-       " ll: [[Int]] }"
+       " ll: [[Int]] n: Node nn: Node! t: Thing nl: [Node] }"
        " type O { x: Int y: String nnx: Int! sub: O }"
-       " enum E { RED GREEN }")
-FRAGS = " fragment FO on O { x y } fragment FQ on Query { i s } fragment FX on O { nnx }"
+       " enum E { RED GREEN }"
+       # Abstract types, and a `Loose` that implements nothing so that "an object the
+       # abstract type cannot be" is reachable at all.
+       " interface Node { id: ID! }"
+       " type Post implements Node { id: ID! title: String }"
+       " type User implements Node { id: ID! name: String }"
+       " type Loose { id: ID! }"
+       " union Thing = Post | User")
+FRAGS = (" fragment FO on O { x y } fragment FQ on Query { i s } fragment FX on O { nnx }"
+         " fragment FN on Node { id } fragment FP on Post { title }")
 
 cases = []
 def add(q, root, variables=None, frags=False):
@@ -124,6 +132,34 @@ add("{ lo { x } }", {"lo": [{"x": 1}, None, {"x": 3}]})
 add("{ lon { x } }", {"lon": [{"x": 1}, None]})
 add("{ lo { nnx } }", {"lo": [{"nnx": 1}, {}]})
 add("{ ll }", {"ll": [[1, 2], None, [3]]})
+
+# --- interfaces and unions -----------------------------------------------
+#
+# THE CONCRETE TYPE COMES FROM `__typename` IN THE DATA, which is graphql-js's own
+# default `resolveType` — so, exactly as with field resolution, neither side has a
+# hand-written resolver that could drift from the other. What is being compared is the
+# RESOLUTION, including its four distinct failures and how each interacts with
+# nullability: the same missing `__typename` nulls `n: Node` and destroys `nn: Node!`.
+POST = {"__typename": "Post", "id": "1", "title": "T"}
+USER = {"__typename": "User", "id": "2", "name": "N"}
+add("{ n { id } }", {"n": POST})
+add("{ n { __typename id } }", {"n": POST})
+add("{ n { id ... on Post { title } } }", {"n": POST})
+add("{ n { id ... on User { name } } }", {"n": POST})      # no match, contributes nothing
+add("{ n { ... on Node { id } } }", {"n": POST})            # condition IS the interface
+add("{ n { ...FN } }", {"n": POST}, frags=True)             # named fragment on it
+add("{ n { ...FP } }", {"n": POST}, frags=True)             # ... and on the concrete type
+add("{ t { __typename ... on Post { title } ... on User { name } } }", {"t": USER})
+add("{ t { ... on Post { title } } }", {"t": USER})
+add("{ nl { __typename id } }", {"nl": [POST, USER]})
+add("{ nl { id } }", {"nl": [POST, None]})
+add("{ n { id } }", {"n": None})
+add("{ n { id } }", {"n": {"id": "1"}})                     # 1. no __typename at all
+add("{ nn { id } }", {"nn": {"id": "1"}})                   # ... and past a non-null
+add("{ n { id } }", {"n": {"__typename": "Nope"}})          # 2. not in the schema
+add("{ n { id } }", {"n": {"__typename": "E"}})             # 3. in it, but not an object
+add("{ n { id } }", {"n": {"__typename": "Loose", "id": "1"}})  # 4. not a possible type
+add("{ nl { id } }", {"nl": [POST, {"id": "9"}]})           # an item fails, siblings live
 
 # aliases, repeated fields, __typename at each level
 add("{ a1: i a2: i i }", {"i": 4})

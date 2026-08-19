@@ -98,7 +98,18 @@ module Gprint {
     | VNull -> "null"
     | VEnum n -> n
     | VList xs -> "[" ++ jm pval xs ", " ++ "]"
-    | VObj fs -> "\{" ++ jm pfield fs ", " ++ "}"
+    // `\{ ` and ` }` — the SPACES ARE THE ORACLE'S. This printer is otherwise held only
+    // to round-tripping (see graphql_parity.sh: the document goes back through
+    // graphql-js, so our layout is our own), but a value has a second obligation the
+    // document does not: it is quoted verbatim inside text that IS compared as an exact
+    // string — introspection's `defaultValue`, and every `ValuesOfCorrectType` message.
+    // graphql-js builds this as `"\{ " + join(fields, ", ") + " }"`, so an EMPTY object
+    // prints as `\{  }` with two spaces. That is not a typo being copied for its own
+    // sake: it is the string the oracle compares against.
+    //
+    // It was wrong here — `\{k: 1}` — from the beginning, and nothing caught it: no
+    // corpus in either gate had an object-valued default or an object argument.
+    | VObj fs -> "\{ " ++ jm pfield fs ", " ++ " }"
   and pfield = fn (kv) -> let (k, v) = kv in k ++ ": " ++ pval v;
 
   // --- arguments and directives -------------------------------------------

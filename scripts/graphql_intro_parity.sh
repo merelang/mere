@@ -133,6 +133,19 @@ type Post { author: User comments: [Comment!]! }
 type User { name: String posts: [Post!] }
 type Comment { body: String author: User }
 S
+# OBJECT-VALUED DEFAULTS, and the reason this schema exists at all. `defaultValue` is
+# the value PRINTED as GraphQL, so it is the one place introspection compares our value
+# printer against the oracle as an exact string. Every default above is a scalar or a
+# list, and our printer emitted `{k: 1}` where graphql-js emits `{ k: 1 }` — for as long
+# as the printer has existed, invisible because nothing here had an object in it.
+# The empty one is deliberate: graphql-js builds this as `"{ " + join(fields) + " }"`,
+# so an empty object is `{  }` with two spaces, and a printer that "tidied" that would
+# be wrong against the oracle.
+cat > "$TMP/schemas/12_object_default.graphql" <<'S'
+type Query { o(x: Obj = { p: 1, q: "s" }, y: Opt = {}, z: Obj = { p: 2, n: { r: 5 } }, l: [Opt] = [{ r: 1 }]): Int }
+input Obj { p: Int! q: String n: Opt }
+input Opt { r: Int }
+S
 NSCHEMA=$(ls "$TMP/schemas" | wc -l | tr -d ' ')
 
 # --- the oracle's side, once per schema ---------------------------------
