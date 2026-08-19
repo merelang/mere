@@ -117,7 +117,12 @@ let rec arg_at = fn (xs, k: int, dflt: str) ->
 let argv = args ();
 let port = int_of_str (arg_at argv 0 "50077");
 let count = int_of_str (arg_at argv 1 "1");
+// A worker pool, so a client that opens a connection and stalls mid-frame does not hold
+// the server. One worker is the old behaviour and the harness asks for it where a section
+// is about a single connection's state.
+let workers = int_of_str (arg_at argv 2 "4");
 let _ = print ("grpc_hello: listening on " ++ str_of_int port
-               ++ " for " ++ str_of_int count ++ " connection(s)");
-let _ = H2Server.serve_n port count dispatch;
+               ++ " for " ++ str_of_int count ++ " connection(s), "
+               ++ str_of_int workers ++ " workers");
+let _ = H2Server.serve_pool port count workers dispatch;
 print "grpc_hello: done"

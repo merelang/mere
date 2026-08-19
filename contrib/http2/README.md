@@ -10,10 +10,10 @@ packet dumper.
 
 | file | exports | lines |
 |---|---|---|
-| `server.mere` | `type grpc_reply`; `module H2Server { serve, serve_n, respond, respond_ok, respond_err, status codes, pct_encode }` — an h2c connection | ~260 |
+| `server.mere` | `type grpc_reply` (`RpcOk` / `RpcStream` / `RpcErr`); `module H2Server { serve, serve_n, serve_pool, serve_conn, respond, status codes, pct_encode }` — an h2c connection | ~650 |
 | `hpack.mere` | `type hstate`; `module Hpack { new_state; decode; encode; decode_int / encode_int; huff_decode; insert / resize; lookup }` | ~250 |
 | `hpack_table.mere` | `module HpackTable { … }` — **generated** by `scripts/gen_hpack_tables.sh` | ~160 |
-| `frame.mere` | `module H2 { preface; frame types; flags; put_u8/16be/24be/32be; get_u8/16be/24be/32be; put_header / put_frame / frame_bytes; read_frame; has_flag; settings_payload / read_settings; u32_payload / window_increment / error_code; goaway_payload; grpc_message / read_grpc_message }` | ~215 |
+| `frame.mere` | `module H2 { preface; frame types; flags; put_u8/16be/24be/32be; get_u8/16be/24be/32be; put_header / put_frame / frame_bytes; read_frame; has_flag; settings_payload / read_settings; u32_payload / window_increment / error_code; goaway_payload; grpc_message / read_grpc_message }` | ~250 |
 
 ## Usage
 
@@ -356,10 +356,55 @@ peer may reopen a stalled stream with `SETTINGS` alone and send no `WINDOW_UPDAT
 at all, and this server would have waited forever. The delta poison was
 undetectable precisely because the poisoned server got stuck in the same place.
 
+## A worker pool
+
+`H2Server.serve_pool port count workers h` — the same accept loop with the connection
+handed to one of a fixed set of workers.
+
+**Not a throughput question.** One connection at a time means a client that opens a
+socket, sends the preface and then stops holds the server for as long as it likes, which
+a half-dead client does by accident.
+
+### The arena decides the shape
+
+A thread per connection would be the obvious design and is the wrong one here:
+`mem_alloc` is a bump allocator **with no free**, so a buffer pair per connection leaks a
+pair per connection. Workers are fixed, each owns its buffers for the life of the
+process, and the accept loop does nothing but accept.
+
+### The HPACK dynamic table is per connection and stays that way
+
+It lives in `pump`'s arguments, so it lives on the worker's call stack — one worker
+handles one connection at a time, which makes "per connection" and "per worker's stack"
+the same thing. Two connections sharing a decoder would desynchronise on the second
+request, which is exactly what `grpc_parity`'s single-connection section was written to
+catch.
+
+### Shutdown is `channel_close`, and both halves of it are needed
+
+`channel_recv_opt` returns `None` once the channel is closed **and** drained, which is the
+whole protocol: the accept loop closes once, each worker finishes the connection it holds
+and then sees `None`. A "negative fd means stop" token also works — a descriptor is never
+negative — but it makes the **sender** responsible for knowing how many receivers there
+are, and it lasts only as long as the channel carries a type with a value to spare.
+
+Closing says "stop when you are free"; **joining** the handles is what makes "free" happen
+before the process does. The first version threw the handles away under a comment claiming
+the workers were drained, and a client whose request was still in flight got a connection
+reset instead of its answer.
+
+### The gate is binary, not timed
+
+Comparing a concurrent server's latency against a sequential one needs a threshold, and a
+threshold is a flake waiting for a loaded machine. "A is stalled, does B get an answer?"
+has no threshold in it — with one worker B is never answered at all. The section also
+checks that **A is still served once it finishes**, because a server that closed A to get
+on with B would pass the first half.
+
 ## Not here yet
 
 - Stream state, priority, `CONTINUATION` reassembly.
-- Concurrency (one connection at a time), and interleaved streams.
+- Interleaved streams on one connection.
 - Server-side TLS and ALPN — needed for `h2` over TLS, not for h2c.
 - **Huffman *encoding*.** Not needed (see above), and its absence is a size
   question rather than a correctness one.

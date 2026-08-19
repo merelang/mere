@@ -282,29 +282,85 @@ let rec arg_at = fn (xs, k: int, dflt: str) ->
   | [] -> dflt
   | [h, ...t] -> if k == 0 then h else arg_at t (k - 1) dflt;
 
+// --- a worker pool ------------------------------------------------------
+//
+// One connection at a time was the previous shape, and it is not a performance
+// question: a client that opens a connection and then STALLS — sends half a request and
+// waits — blocks every other client for as long as it likes. That is a denial of
+// service one `curl` can perform by accident.
+//
+// WHY A POOL AND NOT A THREAD PER CONNECTION. `mem_alloc` is a bump allocator with no
+// free (it says so when it runs out), so a buffer pair per connection leaks a pair per
+// request. The arena is what decides the shape here: a fixed set of workers, each
+// owning its buffers for the life of the process, taking file descriptors off a
+// channel. The accept loop does nothing but accept.
+//
+// The HTTP state that used to live in `serve_conn`'s arguments still does — a worker
+// handles one connection at a time, so "per connection" and "per worker's call stack"
+// are the same thing. Nothing is shared between workers except the channel.
+//
+// SHUTDOWN IS `channel_close`, NOT A SENTINEL. `channel_recv_opt` returns `None` once the
+// channel is closed AND drained — which is the entire protocol: the accept loop closes
+// once, each worker finishes the connection it is holding, and then sees `None`. A
+// "negative fd means stop" token would work, since a descriptor is never negative, but it
+// makes the SENDER responsible for knowing how many receivers there are.
+let rec worker = fn (ch, rbuf: int, wbuf: int) ->
+  match channel_recv_opt ch with
+  | None -> ()
+  | Some cfd ->
+    let _ = serve_conn cfd rbuf wbuf in
+    worker ch rbuf wbuf;
+
+// Returns the thread handles, because the parent has to WAIT for them — see the
+// shutdown at the bottom. The first version threw them away under a comment claiming the
+// workers were drained, and a client whose request was still in flight got a connection
+// reset when the process exited from under it.
+let rec start_workers = fn (ch, k: int, n: int, acc) ->
+  if k >= n then acc
+  else
+    // Each worker's buffers are allocated HERE, in the parent, and captured. Allocating
+    // inside the worker would be the same total (workers are fixed) but would race on
+    // the bump pointer at startup for no reason.
+    let rbuf = mem_alloc read_chunk in
+    let wbuf = mem_alloc read_chunk in
+    let t = spawn (fn (u) -> worker ch rbuf wbuf) in
+    start_workers ch (k + 1) n (Cons (t, acc));
+
 let argv = args ();
 let port = int_of_str (arg_at argv 0 "8080");
 // A BOUNDED number of connections, so a harness can start the server, make its requests
 // and have the process exit on its own. A test that has to kill its subject cannot tell
 // a clean exit from a hang — the same reason `H2Server.serve_n` exists.
 let count = int_of_str (arg_at argv 1 "0");
+let workers = int_of_str (arg_at argv 2 "4");
 
 let sfd = tcp_listen port;
 let _ = if sfd < 0 then fail ("graphql_server: could not listen on port " ++ str_of_int port)
         else ();
-let rbuf = mem_alloc read_chunk;
-let wbuf = mem_alloc read_chunk;
+let ch = channel_new ();
+let handles = start_workers ch 0 workers [];
 let _ = print ("graphql_server: listening on " ++ str_of_int port
-               ++ " (POST /graphql)"
-               ++ (if count == 0 then "" else " for " ++ str_of_int count ++ " request(s)"));
+               ++ " (POST /graphql), " ++ str_of_int workers ++ " workers"
+               ++ (if count == 0 then "" else ", " ++ str_of_int count ++ " request(s)"));
 
-let rec loop = fn (k: int) ->
+let rec accept_loop = fn (k: int) ->
   if count > 0 && k >= count then ()
   else
     let cfd = tcp_accept sfd in
     if cfd < 0 then ()
     else
-      let _ = serve_conn cfd rbuf wbuf in
-      loop (k + 1);
-let _ = loop 0;
+      let _ = channel_send ch cfd in
+      accept_loop (k + 1);
+let _ = accept_loop 0;
+// Close the channel, THEN WAIT FOR EVERY WORKER. Both halves are needed and the second
+// was missing: a worker still reading a request kept going while the main thread printed
+// "done" and exited, and the client got a connection reset instead of its answer. The
+// close says "stop when you are free"; the join is what makes "free" happen before the
+// process does.
+//
+// `fn (h) -> join h` and not `join`, because a BUILTIN CANNOT BE PASSED AS A VALUE on any
+// compiled backend — the same gap that had to be worked around in
+// `contrib/graphql/lexer.mere`. Registered upstream as Q-049.
+let _ = channel_close ch;
+let _ = list_iter handles (fn (h) -> join h);
 print "graphql_server: done"
