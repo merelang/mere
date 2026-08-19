@@ -28,9 +28,10 @@
 //   * `locations` in errors are NOT produced. They need source positions the
 //     parser does not carry. The harness strips them from the oracle's answer too,
 //     and says so.
-//   * Field ARGUMENTS are not passed to resolution, because the default resolver
-//     ignores them — the same as graphql-js. Three exceptions, all of them places
-//     where the argument IS the question rather than an input to a resolver:
+//   * Field ARGUMENTS reach a resolver only when the field's value IS one: a `GFn`
+//     is applied to its coerced arguments. Plain data ignores them, which is what
+//     graphql-js's default resolver does too. Three further places read an argument
+//     without any resolver being involved, because there the argument IS the question:
 //     `@skip` / `@include`, `__type(name:)`, and `includeDeprecated`.
 //   * Interfaces and unions ARE resolved, from a `__typename` field in the data —
 //     which is graphql-js's own default `resolveType`, so neither side has a
