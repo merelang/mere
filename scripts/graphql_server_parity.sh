@@ -70,9 +70,11 @@ PORT=$(python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print
 # THE READINESS CHECK MUST NOT BE A CONNECTION: the server answers a bounded number of
 # requests and then exits, so a probe that connects eats one. Waiting for its own
 # "listening" line perturbs nothing.
+# `$2` is the worker count, defaulting to 4 — the sections that do not care pass nothing
+# and get the same pool the example ships with.
 start_server() {
   : > "$TMP/srv.log"
-  "$TMP/server" "$PORT" "$1" > "$TMP/srv.log" 2>&1 &
+  "$TMP/server" "$PORT" "$1" "${2:-4}" > "$TMP/srv.log" 2>&1 &
   SRV=$!
   i=0
   while [ "$i" -lt 200 ]; do
@@ -311,6 +313,72 @@ PY
   fi
 else
   echo "  FAIL  transport  the server never started"
+  fail=1
+fi
+
+# --- 3. a stalled connection does not block another ----------------------
+#
+# THIS IS THE POINT OF THE WORKER POOL, and it is not a performance claim. One connection
+# at a time means a client that opens a socket and sends HALF a request holds the server
+# for as long as it likes — a denial of service one `curl` can perform by accident.
+#
+# The check is BINARY and not a measurement. Timing a concurrent server against a
+# sequential one needs a threshold, and a threshold is a flake waiting for a loaded CI
+# box. "A is stalled, is B answered?" has no threshold in it: with one connection at a
+# time B is never answered at all.
+#
+# Two connections and two workers, so the accept count matches what the harness opens —
+# a server waiting for a third connection looks exactly like a server that hung.
+if start_server 2 2; then
+  python3 - "$PORT" > "$TMP/conc.txt" 2>&1 <<'PY'
+import socket, sys, json, time
+
+port = int(sys.argv[1])
+body = json.dumps({"query": "{ hello }"}).encode()
+head = (b"POST /graphql HTTP/1.1\r\nHost: x\r\nContent-Length: "
+        + str(len(body)).encode() + b"\r\n\r\n")
+
+def drain(s):
+    s.settimeout(5)
+    buf = b""
+    try:
+        while True:
+            d = s.recv(65535)
+            if not d: break
+            buf += d
+    except socket.timeout:
+        pass
+    return buf
+
+# A sends only its headers and then holds the connection open.
+a = socket.create_connection(("127.0.0.1", port), 5)
+a.sendall(head)
+time.sleep(0.2)
+
+# B is a complete request made while A is still stalled.
+b = socket.create_connection(("127.0.0.1", port), 5)
+b.sendall(head + body)
+print("B-while-A-stalled", b"hello from Mere" in drain(b))
+b.close()
+
+# And A still gets its answer once it finishes, so the stall was survived rather than
+# dropped: a server that closed A to get on with B would also pass the line above.
+a.sendall(body)
+print("A-after-it-finishes", b"hello from Mere" in drain(a))
+a.close()
+PY
+  wait_server || fail=1
+  printf 'B-while-A-stalled True\nA-after-it-finishes True\n' > "$TMP/conc_want.txt"
+  if diff -q "$TMP/conc_want.txt" "$TMP/conc.txt" >/dev/null; then
+    echo "  ok    concurrency  a half-sent request does not block another connection"
+  else
+    echo "  FAIL  concurrency"
+    diff "$TMP/conc_want.txt" "$TMP/conc.txt" | sed 's/^/        /' | head -8
+    echo "        server log:"; sed 's/^/          /' "$TMP/srv.log" | head -3
+    fail=1
+  fi
+else
+  echo "  FAIL  concurrency  the server never started"
   fail=1
 fi
 

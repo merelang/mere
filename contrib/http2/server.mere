@@ -566,6 +566,74 @@ module H2Server {
           loop (n + 1) in
       loop 0;
 
+  // --- a worker pool ------------------------------------------------------
+  //
+  // `serve` and `serve_n` take one connection at a time, which is not a throughput
+  // question: a client that opens a connection and sends HALF a frame holds the server
+  // for as long as it likes. `serve_pool` is the same accept loop with the connection
+  // handed to one of a fixed set of workers.
+  //
+  // WHY A POOL AND NOT A THREAD PER CONNECTION. `mem_alloc` is a bump allocator with no
+  // free, so a buffer pair per connection leaks a pair per connection. The arena decides
+  // the shape: workers are fixed, each owns its buffers for the life of the process, and
+  // the accept loop does nothing but accept.
+  //
+  // THE HPACK DYNAMIC TABLE IS PER CONNECTION AND STAYS THAT WAY. It lives in `pump`'s
+  // arguments, so it lives on the worker's call stack — one worker handles one connection
+  // at a time, which makes "per connection" and "per worker's stack" the same thing.
+  // Nothing is shared between workers but the channel; two connections sharing a decoder
+  // would desynchronise on the second request, which is the bug section 3 of
+  // `grpc_parity` was written to catch in the single-connection case.
+  //
+  // SHUTDOWN IS `channel_close`, NOT A SENTINEL. `channel_recv_opt` returns `None` once
+  // the channel is closed AND drained, which is the whole shutdown protocol: the accept
+  // loop closes once, every worker finishes the connection it holds, and each sees
+  // `None` when the queue is empty. A "negative fd means stop" token would work here
+  // because a descriptor is never negative, but it makes the SENDER responsible for
+  // knowing how many receivers there are, and it only exists as long as the channel
+  // carries a type with a value to spare.
+  let rec pool_worker = fn (ch, rbuf: int, wbuf: int, h) ->
+    match channel_recv_opt ch with
+    | None -> ()
+    | Some cfd ->
+      let _ = serve_conn cfd rbuf wbuf h in
+      pool_worker ch rbuf wbuf h;
+
+  // Returns the handles, because the parent has to WAIT for them: a worker still reading
+  // a request keeps going after the accept loop is done, and a process that exits from
+  // under it gives the client a connection reset instead of its answer.
+  let rec start_pool = fn (ch, k: int, n: int, h, acc) ->
+    if k >= n then acc
+    else
+      let rbuf = mem_alloc read_chunk in
+      let wbuf = mem_alloc (write_cap + H2.header_len) in
+      let t = spawn (fn (u) -> pool_worker ch rbuf wbuf h) in
+      start_pool ch (k + 1) n h (Cons (t, acc));
+
+  let serve_pool = fn (port: int, count: int, workers: int, h) ->
+    let sfd = tcp_listen port in
+    if sfd < 0 then fail ("http2: could not listen on port " ++ str_of_int port)
+    else
+      let ch = channel_new () in
+      let handles = start_pool ch 0 workers h [] in
+      let rec loop = fn (k: int) ->
+        if count > 0 && k >= count then ()
+        else
+          let cfd = tcp_accept sfd in
+          if cfd < 0 then ()
+          else
+            let _ = channel_send ch cfd in
+            loop (k + 1) in
+      let _ = loop 0 in
+      // Close, THEN WAIT. Both halves are needed and the second is the one that is easy
+      // to leave out: closing says "stop when you are free", and `join` is what makes
+      // "free" happen before the process does. Without it a worker still reading a
+      // request gets its client a connection reset instead of an answer.
+      let _ = channel_close ch in
+      // `fn (t) -> join t` and not `join`: a builtin cannot be passed as a value on any
+      // compiled backend (Q-049). Same gap as `digit_p` in contrib/graphql/lexer.mere.
+      list_iter handles (fn (t) -> join t);
+
   // Serving a bounded number of connections, so a harness can start the server,
   // make its requests and have the process exit on its own instead of being
   // killed. A test that has to kill its subject cannot tell a clean exit from a

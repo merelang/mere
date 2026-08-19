@@ -88,7 +88,7 @@ echo "  ok    build  the server compiles through the C backend"
 # (v0.1.221), so the line appears when it is true rather than at exit.
 start_server() {
   : > "$TMP/srv.log"
-  "$TMP/server" "$PORT" "$1" > "$TMP/srv.log" 2>&1 &
+  "$TMP/server" "$PORT" "$1" "${2:-1}" > "$TMP/srv.log" 2>&1 &
   SRV=$!
   i=0
   while [ "$i" -lt 200 ]; do
@@ -875,6 +875,114 @@ PY
   fi
 else
   echo "  FAIL  flow control  the server never started"
+  fail=1
+fi
+
+# --- 6. a stalled connection does not block another ----------------------
+#
+# The worker pool exists for this, and it is not a throughput claim: one connection at a
+# time means a client that opens a socket, sends the preface and then stops holds the
+# server for as long as it likes — which a half-dead client does by accident.
+#
+# BINARY, NOT TIMED. Comparing a concurrent server's latency against a sequential one
+# needs a threshold, and a threshold is a flake waiting for a loaded machine. "A is
+# stalled, does B get an answer?" has no threshold in it: with one worker B is never
+# answered at all.
+#
+# Two connections, two workers, so the accept count matches what the harness opens — a
+# server waiting for a third connection is indistinguishable from one that hung.
+if start_server 2 2; then
+  python3 - "$PORT" > "$TMP/conc.txt" 2>&1 <<'PY'
+import socket, sys, time
+from h2.connection import H2Connection
+from h2.config import H2Configuration
+from h2.events import DataReceived, StreamEnded
+
+port = int(sys.argv[1])
+
+def framed(name: str) -> bytes:
+    b = name.encode()
+    body = b"\x0a" + bytes([len(b)]) + b if name else b""
+    return b"\x00" + len(body).to_bytes(4, "big") + body
+
+def headers(port):
+    return [(":method", "POST"), (":scheme", "http"),
+            (":authority", f"127.0.0.1:{port}"),
+            (":path", "/hello.Greeter/SayHello"),
+            ("content-type", "application/grpc"), ("te", "trailers")]
+
+# A: the preface and the request headers, and then nothing. The server is waiting for a
+# DATA frame that never comes.
+sa = socket.create_connection(("127.0.0.1", port), 10)
+ca = H2Connection(config=H2Configuration(client_side=True))
+ca.initiate_connection()
+ca.send_headers(1, headers(port))
+sa.sendall(ca.data_to_send())
+time.sleep(0.2)
+
+def complete():
+    s = socket.create_connection(("127.0.0.1", port), 10)
+    s.settimeout(6)
+    c = H2Connection(config=H2Configuration(client_side=True))
+    c.initiate_connection()
+    c.send_headers(1, headers(port))
+    c.send_data(1, framed("mere"), end_stream=True)
+    s.sendall(c.data_to_send())
+    body, done = b"", False
+    try:
+        while not done:
+            d = s.recv(65535)
+            if not d: break
+            for ev in c.receive_data(d):
+                if isinstance(ev, DataReceived):
+                    body += ev.data
+                    c.acknowledge_received_data(ev.flow_controlled_length, ev.stream_id)
+                elif isinstance(ev, StreamEnded):
+                    done = True
+            o = c.data_to_send()
+            if o: s.sendall(o)
+    except socket.timeout:
+        pass
+    s.close()
+    return body
+
+print("B-while-A-stalled", b"hello mere" in complete())
+
+# And A is still served once it finishes, so the stall was survived rather than dropped:
+# a server that closed A to get on with B would also pass the line above.
+ca.send_data(1, framed("later"), end_stream=True)
+sa.sendall(ca.data_to_send())
+sa.settimeout(6)
+body, done = b"", False
+try:
+    while not done:
+        d = sa.recv(65535)
+        if not d: break
+        for ev in ca.receive_data(d):
+            if isinstance(ev, DataReceived):
+                body += ev.data
+                ca.acknowledge_received_data(ev.flow_controlled_length, ev.stream_id)
+            elif isinstance(ev, StreamEnded):
+                done = True
+        o = ca.data_to_send()
+        if o: sa.sendall(o)
+except socket.timeout:
+    pass
+sa.close()
+print("A-after-it-finishes", b"hello later" in body)
+PY
+  wait $SRV 2>/dev/null
+  printf 'B-while-A-stalled True\nA-after-it-finishes True\n' > "$TMP/conc_want.txt"
+  if diff -q "$TMP/conc_want.txt" "$TMP/conc.txt" >/dev/null; then
+    echo "  ok    concurrency  a half-sent request does not block another connection"
+  else
+    echo "  FAIL  concurrency"
+    diff "$TMP/conc_want.txt" "$TMP/conc.txt" | sed 's/^/        /' | head -10
+    echo "        server log:"; sed 's/^/          /' "$TMP/srv.log" | head -3
+    fail=1
+  fi
+else
+  echo "  FAIL  concurrency  the server never started"
   fail=1
 fi
 
