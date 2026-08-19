@@ -32,8 +32,10 @@
 //     ignores them — the same as graphql-js. Three exceptions, all of them places
 //     where the argument IS the question rather than an input to a resolver:
 //     `@skip` / `@include`, `__type(name:)`, and `includeDeprecated`.
-//   * Interfaces and unions are not resolved: with data as the resolver there is
-//     nothing to resolve a concrete type from.
+//   * Interfaces and unions ARE resolved, from a `__typename` field in the data —
+//     which is graphql-js's own default `resolveType`, so neither side has a
+//     hand-written resolver. A value that does not carry one is the oracle's error,
+//     with its wording, rather than a guess.
 //   * Custom scalars and subscriptions.
 //
 // INTROSPECTION IS HERE, and it is answered by this same executor: the introspection
@@ -579,6 +581,92 @@ module Gexec {
         | _ -> go rest acc in
     go defs [];
 
+  // --- interfaces and unions, at run time ---------------------------------
+  //
+  // An abstract position has to name a CONCRETE object type before its fields can be
+  // selected, and with data as the resolver the question is where that name comes from.
+  // It comes from a `__typename` FIELD IN THE DATA — which is not an invention here:
+  // it is graphql-js's own default `resolveType`, which looks at `value.__typename`
+  // before it tries anything else. Keeping the same default is what lets the harness
+  // stay meaningful, because neither side has a hand-written resolver to drift.
+  //
+  // So the header's old claim -- "with data as the resolver there is nothing to resolve
+  // a concrete type from" -- was wrong about the oracle rather than about the design.
+  // There was something to resolve it from; nobody had looked.
+  let dquote = fn (s: str) -> "\"" ++ s ++ "\"";
+
+  let rec is_abstract_name = fn (defs, name: str) ->
+    match find_tsdef defs name with
+    | [InterfaceDef (_, _, _, _, _), ..._] -> true
+    | [UnionDef (_, _, _, _), ..._] -> true
+    | _ -> false;
+
+  let rec obj_implements = fn (defs, obj: str, iface: str) ->
+    match find_tsdef defs obj with
+    | [ObjectDef (_, _, ifs, _, _), ..._] -> list_member ifs iface
+    // An interface may implement an interface; an object still has to DECLARE every
+    // interface it implements transitively, so the list above is the whole answer.
+    | [InterfaceDef (_, _, ifs, _, _), ..._] -> list_member ifs iface
+    | _ -> false;
+
+  // Is `concrete` one of the types `abs` can be at run time? For an interface that is
+  // the implements list; for a union, its members. Anything else answers false, which
+  // makes this safe to ask about a plain object type as well — the fragment-matching
+  // test below does exactly that.
+  let possible_type = fn (defs, abs: str, concrete: str) ->
+    match find_tsdef defs abs with
+    | [InterfaceDef (_, _, _, _, _), ..._] -> obj_implements defs concrete abs
+    | [UnionDef (_, _, _, members), ..._] -> list_member members concrete
+    | _ -> false;
+
+  // A fragment's type condition matches when the condition IS the current type or when
+  // the current type is one of the condition's possible types. With `tname` already
+  // concrete at an abstract position, `... on Node` on a `Post` goes through the second
+  // arm and `... on User` matches neither.
+  let cond_matches = fn (defs, tname: str, tc: str) ->
+    str_eq tc "" || str_eq tc tname || possible_type defs tc tname;
+
+  // The concrete type NAME carried by a value, or nothing. Only an object can carry
+  // one, and only as a string.
+  let runtime_type_of = fn (v: gvalue) ->
+    match v with
+    | GObj fields ->
+      (match obj_get fields "__typename" with
+       | GStr n -> Cons (n, [])
+       | _ -> [])
+    | _ -> [];
+
+  // The four ways naming a runtime type can go wrong, each with the oracle's wording.
+  // They are DISTINCT on purpose: "no name at all", "a name that is not in the schema",
+  // "a name that is not an object" and "an object that this abstract type cannot be"
+  // are four different mistakes by whoever produced the data, and collapsing them into
+  // one message would make the common one (a missing `__typename`) unrecognisable.
+  let abstract_type_error = fn (defs, abs: str, label: str, v: gvalue, path) ->
+    match runtime_type_of v with
+    | [] ->
+      Cons (GErr ("Abstract type " ++ dquote abs
+                  ++ " must resolve to an Object type at runtime for field "
+                  ++ dquote label ++ ". Either the " ++ dquote abs
+                  ++ " type should provide a " ++ dquote "resolveType"
+                  ++ " function or each possible type should provide an "
+                  ++ dquote "isTypeOf" ++ " function.", path), [])
+    | [rt, ..._] ->
+      if not (list_member (all_type_names defs) rt) then
+        Cons (GErr ("Abstract type " ++ dquote abs ++ " was resolved to a type "
+                    ++ dquote rt ++ " that does not exist inside the schema.", path), [])
+      else if not (is_obj_name defs rt) then
+        Cons (GErr ("Abstract type " ++ dquote abs
+                    ++ " was resolved to a non-object type " ++ dquote rt ++ ".", path), [])
+      else
+        Cons (GErr ("Runtime Object type " ++ dquote rt
+                    ++ " is not a possible type for " ++ dquote abs ++ ".", path), []);
+
+  let abstract_ok = fn (defs, abs: str, v: gvalue) ->
+    match runtime_type_of v with
+    | [] -> []
+    | [rt, ..._] ->
+      if is_obj_name defs rt && possible_type defs abs rt then Cons (rt, []) else [];
+
   // One field of one `__Type`. This is where the laziness lives: a wrapper answers
   // `ofType` with another `GTypeRef` and the recursion goes exactly as deep as the
   // query asked.
@@ -770,6 +858,17 @@ module Gexec {
         (match v with
          | GNull -> GOk (GNull, [])
          | _ -> exec_fields defs n v sels vars path)
+      // AN ABSTRACT POSITION RESOLVES FIRST, THEN SELECTS. The error is a `GBubble`,
+      // which is what makes the nullability fall out instead of being special-cased:
+      // a nullable `n: Node` absorbs it into `"n": null`, and a `nn: Node!` passes it
+      // on and nulls its parent. Both match the oracle without either being written.
+      else if is_abstract_name defs n then
+        (match v with
+         | GNull -> GOk (GNull, [])
+         | _ ->
+           match abstract_ok defs n v with
+           | [] -> GBubble (abstract_type_error defs n label v path)
+           | [rt, ..._] -> exec_fields defs rt v sels vars path)
       else coerce_leaf defs n v path
   and complete = fn (defs, t: gtype, v: gvalue, sels, vars, path, label: str) ->
     match t with
@@ -874,7 +973,7 @@ module Gexec {
             (match find_frag defs fname with
              | [] -> fail ("graphql: no fragment named '" ++ fname ++ "'")
              | [(tc, fsels), ..._] ->
-               if str_eq tc "" || str_eq tc tname then
+               if cond_matches defs tname tc then
                  match go fsels acc errs with
                  | GBubble e2 -> GBubble e2
                  | GOk (GObj inner, e2) -> go rest (rev_list inner []) e2
@@ -882,7 +981,7 @@ module Gexec {
                else go rest acc errs)
         | Inline (tc, dirs, isels) ->
           if not (included dirs vars) then go rest acc errs
-          else if str_eq tc "" || str_eq tc tname then
+          else if cond_matches defs tname tc then
             (match go isels acc errs with
              | GBubble e2 -> GBubble e2
              | GOk (GObj inner, e2) -> go rest (rev_list inner []) e2

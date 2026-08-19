@@ -283,9 +283,29 @@ and the differences (2) then found were both real.
 
 ## Validation
 
-19 of the specification's 32 rules, in `validate.mere`. Without it the executor
+21 of the specification's 32 rules, in `validate.mere`. Without it the executor
 answered a malformed document by failing somewhere in the middle — a message about
 an internal position rather than about the request.
+
+### The two that look inside an argument
+
+`ValuesOfCorrectType` and `ProvidedRequiredArguments` are the pair a real service meets
+first: every other rule above them decides from the document's shape alone, while these
+need the argument's declared type. **Required** means non-null *and* without a default,
+which is what keeps `x: Int! = 3` legal to omit.
+
+Three things they deliberately do not report, each because another rule owns it: a
+**variable** in value position (`VariablesInAllowedPosition`), an **undeclared**
+argument (`KnownArgumentNames` — and an undeclared argument has no type to check
+against), and a **custom scalar's** literal, which `buildSchema` accepts unconditionally
+through the identity `parseLiteral`. That last one was measured against the oracle
+rather than read out of the specification.
+
+Two details that only a boundary shows. GraphQL's `Int` **is 32-bit**, and it has a
+message of its own for a literal that is an integer but too large — so the range test
+compares **digits**, since the AST keeps the lexeme precisely because a document is not
+obliged to fit in the host's int. And a single value where a list is wanted is
+**coercion, not an error**: `li: 1` means `[1]`, so it is checked against the item type.
 
 ```mere
 Gvalid.report (Gparse.document query) (Gparse.document sdl)
@@ -459,11 +479,44 @@ the comment claiming the two differed came out with it. The row stayed, for the 
 does check: that a multi-byte body survives read, parse, execute, serialise and framing
 unchanged.
 
+## Abstract types resolve from the data
+
+An interface or union position has to name a **concrete object type** before its fields
+can be selected, and with the data as the resolver the question is where that name comes
+from. It comes from a **`__typename` field in the data** — which is not an invention
+here: it is what graphql-js's own default `resolveType` looks at first. Keeping the same
+default is what keeps `graphql_exec_parity.sh` meaningful, for the same reason field
+resolution does: neither side has a hand-written resolver that could drift.
+
+```mere
+let post = GObj ([("__typename", GStr "Post"), ("id", GStr "1"), ("title", GStr "T")]);
+// { n { __typename id ... on Post { title } ... on User { name } } }
+// -> {"n":{"__typename":"Post","id":"1","title":"T"}}
+```
+
+A fragment's type condition matches when it **is** the concrete type or when the
+concrete type is one of its possible types, so `... on Node` matches a `Post` and
+`... on User` matches neither.
+
+**Four ways it can go wrong, kept apart.** No `__typename` at all; a name that is not in
+the schema; a name that is in it but is not an object; an object that this abstract type
+cannot be. Each has the oracle's own wording, because they are four different mistakes
+by whoever produced the data and collapsing them would make the common one — a missing
+`__typename` — unrecognisable.
+
+Each is a **field error**, so nullability decides the rest without being written twice:
+the same missing `__typename` answers `"n": null` for `n: Node` and destroys the parent
+for `nn: Node!`.
+
+The header of `exec.mere` used to say interfaces and unions could not be resolved
+because *"with data as the resolver there is nothing to resolve a concrete type from"*.
+That was wrong about the oracle rather than about the design — there was something to
+resolve it from, and nobody had looked.
+
 ## Not here yet
 
-- **13 validation rules**, each named on the harness's gap list and each exercised by
-  its corpus: `ValuesOfCorrectType`, `ProvidedRequiredArguments`,
-  `VariablesInAllowedPosition`, `OverlappingFieldsCanBeMerged`,
+- **11 validation rules**, each named on the harness's gap list and each exercised by
+  its corpus: `VariablesInAllowedPosition`, `OverlappingFieldsCanBeMerged`,
   `PossibleFragmentSpreads`, `UniqueInputFieldNames`, `SingleFieldSubscriptions` and
   the rest.
 - **`Did you mean ...` suggestions**, which need graphql-js's own ranking.

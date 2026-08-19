@@ -71,8 +71,6 @@ run_subject() {
 # or the entry is stale and this harness fails — a "not implemented" note with nothing
 # behind it is the same problem as a pin that cannot detect its own repair.
 cat > "$TMP/gaps.txt" <<'GAPS'
-ValuesOfCorrectType
-ProvidedRequiredArguments
 VariablesInAllowedPosition
 OverlappingFieldsCanBeMerged
 PossibleFragmentSpreads
@@ -91,7 +89,10 @@ type Query {
   n: Node
   t: Thing
   inp(k: In): Int
+  s(i: Int, f: Float, st: String, b: Boolean, d: ID, e: Colour, li: [Int], oi: In, dt: DateTime, nn: [Int!]): Int
+  dflt(x: Int! = 3): Int
 }
+scalar DateTime
 type Mutation { m: Int }
 type Subscription { s: Int t: Int }
 type O { x: Int y: String o: O }
@@ -151,6 +152,54 @@ subscription { s t }
 { inp(k: { k: 1, k: 2 }) }
 query Q($v: String) { withArg(x: $v) }
 { x: a x: c }
+{ s(i: 1.5) }
+{ s(i: "x") }
+{ s(i: [1]) }
+{ s(i: 2147483647) }
+{ s(i: 2147483648) }
+{ s(i: -2147483648) }
+{ s(i: -2147483649) }
+{ s(f: 1) }
+{ s(f: "x") }
+{ s(st: 1) }
+{ s(st: RED) }
+{ s(b: 1) }
+{ s(d: 1) }
+{ s(d: 1.5) }
+{ s(e: RED) }
+{ s(e: BLUE) }
+{ s(e: "RED") }
+{ s(e: null) }
+{ s(li: [1, 2]) }
+{ s(li: [1, "x"]) }
+{ s(li: 1) }
+{ s(li: [[1]]) }
+{ s(li: []) }
+{ s(nn: [1, null]) }
+{ s(nn: null) }
+{ s(oi: { k: 1 }) }
+{ s(oi: { j: 1, nope: 2 }) }
+{ s(oi: { nope: 2 }) }
+{ s(oi: {}) }
+{ s(oi: 1) }
+{ s(oi: [{ j: 1 }]) }
+{ s(oi: { k: "x", j: 1 }) }
+{ s(oi: { j: null }) }
+{ s(oi: { j: 1, n: 2 }) }
+{ s(dt: 1) }
+{ s(dt: RED) }
+{ s(i: null) }
+{ withArg(x: null, req: null) }
+query Q($v: Int) { s(i: $v) }
+query Q($v: Int = "x") { s(i: $v) }
+{ dflt }
+{ dflt(x: 1) }
+{ a @skip }
+{ a @skip(if: 1) }
+{ a @nope }
+{ __type { name } }
+{ __type(name: 1) { name } }
+{ withArg(x: 1, req: 2) }
 DOCS
 NDOCS=$(grep -cv '^$' "$TMP/docs.txt")
 
@@ -159,6 +208,10 @@ node --input-type=module -e "
 import * as g from '$GQL_DIR/index.js';
 import { readFileSync, writeFileSync } from 'fs';
 const schema = g.buildSchema(readFileSync('$TMP/schema.graphql','utf8'));
+const unsuggest = (m) => {
+  const r = m.match(/^(.*)\. Did you mean .*\? Found: (.*)\$/);
+  return r ? r[1] + ', found: ' + r[2] : m.replace(/ Did you mean .*\$/, '');
+};
 const docs = readFileSync('$TMP/docs.txt','utf8').split('\n').filter(l => l.trim().length);
 const out = [];
 for (const d of docs) {
@@ -175,7 +228,16 @@ for (const d of docs) {
     rules,
     // The suggestion needs graphql-js's own ranking; stated gap, asserted in
     // section 4 by checking that at least one oracle message HAS one.
-    msgs: errs.map(e => e.message.replace(/ Did you mean .*\$/, '')),
+    // THE SUGGESTION IS NOT ALWAYS A SUFFIX, which a corpus document with a
+    // near-miss field name is what showed. graphql-js writes
+    //     X, found: Z.                        when it has nothing to suggest
+    //     X. Did you mean A or B? Found: Z.   when it does
+    // Stripping a trailing clause recovers the first shape and DESTROYS the second:
+    // it takes the found: part with it, and that part is the only place the value
+    // PRINTER is compared against this oracle as text. So the second shape is put
+    // back into the first rather than thrown away. Messages that really do end in a
+    // suggestion (the enum and unknown-field ones) still lose only the suggestion.
+    msgs: errs.map(e => unsuggest(e.message)),
     hadSuggestion: errs.some(e => / Did you mean /.test(e.message)),
   });
 }

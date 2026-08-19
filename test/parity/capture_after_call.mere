@@ -1,0 +1,32 @@
+// A CLOSURE'S CAPTURED VALUE, AFTER AN UNRELATED CALL. Q-052.
+//
+// `run` is defined once and invoked twice, with a call into another module in between.
+// The first invocation is right on every backend. The second is right on the
+// interpreter, C and Wasm, and reads its captured `root` as a non-object on LLVM.
+//
+// WHAT NARROWS IT, and each of these was measured rather than guessed:
+//   * it is NOT capture time — the closure is defined before the first call, which
+//     succeeds, and the SAME closure fails afterwards
+//   * it is NOT the global — `Gexec.to_json root` still answers `{"a":1}` after the
+//     call, so the binding is intact and only the capture is not
+//   * it is NOT the abstract-type code this file grew alongside; a plain `\{ a }`
+//     query is enough
+//   * it needs the allocation VOLUME of the real modules: the same shape written with
+//     a hand-rolled variant and two small modules does not reproduce
+//
+// This is pinned rather than deleted because a pin is how a difference keeps being
+// asked about. `graphql_stack_portable.mere` is ordered so that it does not meet this
+// bug, which keeps ITS LLVM coverage whole — the cost of pinning there would have been
+// every line after the first validator call.
+import "../../contrib/graphql/exec.mere";
+import "../../contrib/graphql/validate.mere";
+
+let sdl = " type Query \{ a: Int }";
+let root = GObj ([("a", GInt 1)]);
+let run = fn (q: str) -> Gexec.run_json (Gparse.document (q ++ sdl)) root [];
+
+let _ = print (run "\{ a }");
+let _ = print (Gvalid.report (Gparse.document "\{ nope }") (Gparse.document sdl));
+// The global itself is fine here; it is the capture that is not.
+let _ = print (Gexec.to_json root);
+print (run "\{ a }")
