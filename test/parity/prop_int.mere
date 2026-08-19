@@ -1,0 +1,57 @@
+// The integer builtins, over generated inputs rather than chosen ones.
+//
+// The width axis is the one that has cost the most: an i32 index where the
+// value was i64, a size narrowed on the way into an allocator, an `unsigned
+// char` cast that WAS the range check. Those were found by hand-enumerating
+// what the interpreter refuses and asking the other three the same thing
+// (v0.1.276). This asks the same question without the enumeration, and reaches
+// past the table into the space between the boundaries.
+//
+// The first thirty indices are the table, on purpose. A generator that only
+// drew would be weaker than the hand-written gate it extends: 2^32 + 65 is not
+// a value anything reaches by chance, and it is the value that made `chr`
+// answer "A".
+//
+// Multiplication of two drawn values is deliberately not here. The product of
+// two numbers this wide overflows, and the interpreter's int is 63-bit while the
+// compiled backends' is 64-bit, so it wraps at a different place -- a documented
+// property of the interpreter, not a defect. A gate that measured it would
+// report the same known difference on every run and would be reporting the width
+// axis while claiming to report the value axis. The width axis has its own case:
+// test/parity/int64_arith.mere.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+import "../../contrib/prop/prop.mere";
+
+let n = 90;
+
+let rec loop = fn (i: int) ->
+  if i >= n then 0
+  else
+    let a = Prop.int_at i in
+    let b = Prop.int_at (i + 613) in
+    let k = Prop.small_at i in
+    let _ = Prop.line i "in" (str_of_int a ++ " " ++ str_of_int b ++ " " ++ str_of_int k) in
+    let _ = Prop.line i "add" (Prop.int_call (fn () -> a + b)) in
+    let _ = Prop.line i "sub" (Prop.int_call (fn () -> a - b)) in
+    let _ = Prop.line i "div" (Prop.int_call (fn () -> a / b)) in
+    let _ = Prop.line i "mod" (Prop.int_call (fn () -> a % b)) in
+    let _ = Prop.line i "and" (Prop.int_call (fn () -> bit_and a b)) in
+    let _ = Prop.line i "or" (Prop.int_call (fn () -> bit_or a b)) in
+    let _ = Prop.line i "xor" (Prop.int_call (fn () -> bit_xor a b)) in
+    let _ = Prop.line i "not" (Prop.int_call (fn () -> bit_not a)) in
+    let _ = Prop.line i "shl" (Prop.int_call (fn () -> bit_shl a k)) in
+    let _ = Prop.line i "shr" (Prop.int_call (fn () -> bit_shr a k)) in
+    let _ = Prop.line i "lt" (Prop.bool_call (fn () -> a < b)) in
+    let _ = Prop.line i "eq" (Prop.bool_call (fn () -> a == b)) in
+    let _ = Prop.line i "sho" (Prop.str_call (fn () -> str_of_int a)) in
+    let _ = Prop.line i "chr" (Prop.str_call (fn () -> chr a)) in
+    let _ = Prop.line i "rep" (Prop.str_call (fn () -> str_repeat "ab" k)) in
+    // the round trip is the property that does not need a table: whatever
+    // str_of_int prints, int_of_str must read back as the same number
+    let _ = Prop.line i "rtn" (Prop.int_call (fn () -> int_of_str (str_of_int a))) in
+    let _ = Prop.line i "flt" (Prop.str_call (fn () -> str_of_float (float_of_int a))) in
+    loop (i + 1);
+
+print (str_of_int (loop 0))

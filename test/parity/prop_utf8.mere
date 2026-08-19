@@ -1,0 +1,57 @@
+// UTF-8 character splitting disagrees between the interpreter and the three
+// compiled backends, and the interpreter is the one that is right.
+//
+// Found by contrib/prop on its first run, then narrowed below codepoint_at to
+// the thing that actually differs. For `s = "A" ++ chr 128` — two bytes, 0x41
+// then a stray continuation byte:
+//
+//                        interp        C / LLVM / Wasm
+//   utf8_chars s         2 characters  1 character
+//   utf8_at s 0          1 byte        2 bytes
+//   codepoint_at s 0     65            refuses
+//
+// Index 0 of that string is "A". It is a complete one-byte codepoint and what
+// follows it cannot change that, so grouping 0x41 with the byte after it is
+// wrong and the refusal downstream is a consequence rather than the defect.
+// codepoint_at only made it visible: it asks codepoint_of about whatever
+// utf8_at handed back, and a two-byte answer beginning with an ASCII byte is
+// not a codepoint.
+//
+// What makes this worth a case of its own rather than a fix in this commit: the
+// span computation is prelude Mere, one source, compiled by all four. Four
+// implementations of the same source giving two answers means the difference is
+// under it — in a builtin the span logic calls, or in a second implementation
+// of it that the interpreter reaches first — and finding out which is a
+// separate measurement, not a guess to make while writing a test.
+//
+// The three compiled answers are pinned, not tolerated: each must match its
+// .expected byte for byte, so any other change here is still a failure, and
+// fixing the split breaks all three pins at once and says so. Deleting the lines
+// would be reaching agreement by declining to ask.
+//
+// Execution mode: 4 backends, interp is the reference, C / LLVM / Wasm pinned.
+
+import "../../contrib/prop/prop.mere";
+
+// The bound is a literal, not `let n = 60`. With a top-level binding here this
+// file printed 3 lines instead of 184 on LLVM and the missing lines were not the
+// ones it asks about — a separate defect, minimised and pinned in
+// test/parity/llvm_loop_guard_global.mere. A gate carrying two questions reports
+// the wrong one.
+let rec loop = fn (i: int) ->
+  if i >= 60 then 0
+  else
+    let s = Prop.str_at i in
+    let _ = Prop.line i "in" (Prop.str_report s) in
+    let _ = Prop.line i "cpa0" (Prop.int_call (fn () -> codepoint_at s 0)) in
+    let _ = Prop.line i "cpa1" (Prop.int_call (fn () -> codepoint_at s 1)) in
+    loop (i + 1);
+
+// the two minimised shapes, kept beside the generated ones so that a reader of
+// the .expected files does not have to reconstruct an index to see the question
+let a = "A" ++ chr 128;
+let b = chr 195 ++ chr 227 ++ "z";
+let _ = print ("min-ascii-then-stray " ++ Prop.int_call (fn () -> codepoint_at a 0));
+let _ = print ("min-lead-then-nonc " ++ Prop.int_call (fn () -> codepoint_at b 0));
+
+print (str_of_int (loop 0))
