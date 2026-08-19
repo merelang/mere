@@ -8,14 +8,20 @@ A lexer, parser and printer for GraphQL documents: **executable** definitions
 
 | file | exports | lines |
 |---|---|---|
-| `ast.mere` | `gtok` / `gtype` / `gval` / `gdir` / `ginpval` / `gfield` / `genumv` / `gopty` / `gtsdef` / `gsel` / `gvardef` / `gdef` — type-only | ~95 |
-| `lexer.mere` | `module Glex { tokens, block_value }` | ~260 |
-| `parser.mere` | `module Gparse { document }` | ~390 |
-| `printer.mere` | `module Gprint { document, pval, ptype }` | ~230 |
-| `exec.mere` | `type gvalue` / `gpath` / `gerr` / `gout`; `module Gexec { run, run_json, to_json }` | ~370 |
+| `ast.mere` | `gtok` / `gtype` / `gval` / `gdir` / `ginpval` / `gfield` / `genumv` / `gopty` / `gtsdef` / `gsel` / `gvardef` / `gdef` — type-only | ~90 |
+| `lexer.mere` | `module Glex { tokens, block_value }` | ~285 |
+| `parser.mere` | `module Gparse { document }` | ~425 |
+| `printer.mere` | `module Gprint { document, pval, ptype }` | ~240 |
+| `exec.mere` | `type gvalue` / `gpath` / `gerr` / `gout`; `module Gexec { run, run_json, to_json, jstr }`, plus the schema lookups `validate.mere` shares (`find_tsdef`, `find_obj_or_iface`, `field_ty_in`, `arg_defs_of`, `base_name`, `all_type_names`, `schema_query` / `schema_root`, `with_introspection`) | ~1100 |
+| `validate.mere` | `type gverr`; `module Gvalid { validate, report, implemented }` | ~825 |
+| `introspection_sdl.mere` | `module Gintro { sdl }` — **generated** by `scripts/gen_introspection_sdl.sh` | ~20 |
 
-`ast.mere` is type-only so the other three share one definition instead of
-three that drift — the same arrangement as `contrib/parser/ast.mere`.
+`ast.mere` is type-only so the others share one definition instead of several
+that drift — the same arrangement as `contrib/parser/ast.mere`.
+
+The schema lookups are listed because they are a real interface, not an accident:
+`validate.mere` answers "does this field exist on this type" with the same code the
+executor uses to resolve it, so the two cannot disagree about the schema.
 
 ## Usage
 
