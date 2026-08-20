@@ -6763,7 +6763,12 @@ let str_concat_helper =
          claims a stack overflow when the faulting address is NEAR THE STACK --
          a segfault from anything else keeps its own name rather than being
          reported as recursion. *)
-      "static char __lang_sigstack[SIGSTKSZ * 4];";
+      (* A LITERAL, NOT `SIGSTKSZ * 4`. Since glibc 2.34 `SIGSTKSZ` expands to
+         `sysconf(_SC_SIGSTKSZ)` -- a call, not a constant -- so it cannot size a static
+         array and clang rejects it as a variable length array at file scope. It is a
+         compile-time constant on macOS, which is why this compiled here. 64 KiB is well
+         above `MINSIGSTKSZ` on both, and the handler that runs on it writes one string. *)
+      "static char __lang_sigstack[65536];";
       "static char* __lang_stack_lo = 0;";
       "static char* __lang_stack_hi = 0;";
       "static void __lang_segv(int sig, siginfo_t* info, void* uap) {";
@@ -10609,7 +10614,16 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     | Some fmt -> "  printf(\"" ^ fmt ^ "\\n\", " ^ main_body ^ ");"
   in
   let parts =
-    [ "#include <stdio.h>";
+    [ (* _GNU_SOURCE BEFORE EVERY HEADER, because that is the only place it works.
+         `pthread_getattr_np` is the glibc way to ask a thread for its stack, and glibc
+         declares it only under this macro -- so without it the emitted C called an
+         undeclared function, which clang 16 and later treat as an ERROR rather than a
+         warning. `-w` does not silence an error, so every C-backend program failed to
+         compile on Linux while compiling here, where the __APPLE__ branch is taken and
+         this function is never named. v0.1.271 added the branch and was verified on one
+         platform; CI said so for four days. *)
+      "#define _GNU_SOURCE 1";
+      "#include <stdio.h>";
       "#include <stdlib.h>";
       "#include <string.h>";
       "#include <setjmp.h>";
