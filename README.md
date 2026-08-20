@@ -8,7 +8,7 @@
 
 > *Make Explicit Region-bound Effects.*
 
-OCaml implementation of **Mere**, a small ML-family language (Old English for "lake"; 4 letters; region metaphor). Memory is region-based with no GC (region / view / Trivial[R]), effects are ordinary capability values (capability passing + refined borrow annotations), and **five backends are kept in byte-level agreement**: the interpreter, C, LLVM IR, Wasm, and RV32IM.
+OCaml implementation of **Mere**, a small ML-family language (Old English for "lake"; 4 letters; region metaphor). Memory is region-based with no GC (region / view / Trivial[R]), effects are ordinary capability values (capability passing + refined borrow annotations), and there are **five backends**: an interpreter, C, LLVM IR, Wasm, and RV32IM machine code. The first four are held to each other by a parity suite that compares their output byte for byte; the fifth boots under QEMU — the one implementation in this stack that nobody here wrote.
 
 It **self-hosts** — the Mere-in-Mere compiler, compiled by itself and run as Wasm, emits byte-identical output to the reference. The RV32IM backend emits a flat binary with no external assembler or linker, and `--bare` hands the program the machine instead of a host; on that there is a kernel, a scheduler and a shell written in Mere, and the self-hosted compiler runs there as a user process — on a RISC-V CPU also written in Mere — emitting WAT byte-identical to the native one. See [docs/bare-metal.md](docs/bare-metal.md).
 
