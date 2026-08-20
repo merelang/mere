@@ -4,6 +4,49 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.287 — 2026-08-20
+
+_The LLVM handler installs itself on Linux, which needed seven measured constants._
+
+v0.1.285 stopped the LLVM backend failing to link off Darwin by making the two Darwin-only
+pthread calls `extern_weak` and guarding them, and left the fault unnamed there. What it did
+not do was notice that the handler was not being installed at all: `stack_t`, `struct
+sigaction`, the `SA_*` flag values and `SIGBUS` are all different on glibc, so `sigaltstack`
+was handed a size where it expected flags, refused, and the early return meant no handler
+ever arrived. The process died with the shell reporting the signal.
+
+**The platform is a runtime fact here, not an emit-time one.** IR has no preprocessor, and
+choosing when the IR is written would make `-ll` output specific to the machine that produced
+it -- which it has never been. `pthread_get_stackaddr_np` is already declared weak, so its
+address is non-null on Darwin and null everywhere else: one `icmp` and every constant below
+is a `select`.
+
+Measured on macOS/arm64, Linux/x86_64 and Linux/aarch64 rather than recalled, because a wrong
+offset here writes a flag word into a signal mask and the handler simply never comes:
+
+    si_addr in siginfo_t          24  /  16
+    stack_t ss_size, ss_flags     8, 16  /  16, 8
+    struct sigaction sa_flags     12 (of 16 bytes)  /  136 (of 152)
+    SA_SIGINFO | SA_ONSTACK       65  /  134217732
+    SIGBUS                        10  /  7
+
+The observable difference on Linux is small and exact: `Segmentation fault` from the shell
+becomes `segmentation fault` from our own handler, and the exit status becomes 1 -- what the
+interpreter exits with -- instead of 139. So `parity`'s pinned divergence for
+`uncaught_stack_overflow` moves from `EXIT(139)` to `MSG`: the process now fails the way the
+interpreter fails and only the message differs. The pin catching that is what it is for.
+
+**The name still needs the bounds, and that is one measured step away.** The glibc pair is
+`pthread_getattr_np` + `pthread_attr_getstack`, and declaring them `extern_weak` does not
+work: ELF resolves an undefined weak reference to zero and Mach-O's linker refuses it
+outright, so adding them broke the Darwin build. `dlsym` with `RTLD_DEFAULT` is the portable
+way to ask for an optional symbol, and `RTLD_DEFAULT` is itself platform-dependent (0 against
+-2), which the same `icmp` can select. Not done here: it is a separate change with its own
+verification, and shipping it half-measured is how this release's predecessor got the layout
+wrong.
+
+---
+
 ## v0.1.286 — 2026-08-20
 
 _A capture the walker forgot, twice, and the shape that needs three things at once._

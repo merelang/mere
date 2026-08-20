@@ -6789,7 +6789,17 @@ let runtime_decls =
       "  %isnull = icmp eq ptr %info, null";
       "  br i1 %isnull, label %plain, label %check";
       "check:";
-      "  %ap = getelementptr i8, ptr %info, i64 24";
+      (* THE PLATFORM IS A RUNTIME FACT HERE, NOT AN EMIT-TIME ONE. LLVM IR has no
+         preprocessor, and choosing when the IR is written would make `-ll` output specific
+         to the machine that produced it -- which it has never been. `pthread_get_stackaddr_np`
+         is a Darwin-only symbol and is already declared weak for the bounds probe, so its
+         address is non-null on Darwin and null everywhere else: one `icmp` and every layout
+         constant below is a `select`.
+         Measured, not recalled, on macOS/arm64 and Linux/x86_64 and Linux/aarch64:
+         si_addr sits at 24 in a 104-byte siginfo_t and at 16 in a 128-byte one. *)
+      "  %dar = icmp ne ptr @pthread_get_stackaddr_np, null";
+      "  %sioff = select i1 %dar, i64 24, i64 16";
+      "  %ap = getelementptr i8, ptr %info, i64 %sioff";
       "  %addr = load ptr, ptr %ap";
       "  %ai = ptrtoint ptr %addr to i64";
       "  %lo = load i64, ptr @__lang_stack_lo";
@@ -6826,25 +6836,37 @@ let runtime_decls =
       "  store i64 %lo, ptr @__lang_stack_lo";
       "  br label %nobounds";
       "nobounds:";
-      (* stack_t on macOS is { ss_sp, ss_size, ss_flags } -- that order *)
+      (* stack_t is { ss_sp, ss_size, ss_flags } on macOS and { ss_sp, ss_flags, ss_size } on
+         glibc -- 24 bytes either way, with size at 8 or at 16. `ss_sp` is at 0 on both and
+         `ss_flags` is 0 on both, which the memset already wrote. *)
+      "  %dar2 = icmp ne ptr @pthread_get_stackaddr_np, null";
       "  %ss = alloca [32 x i8]";
       "  call void @llvm.memset.p0.i64(ptr %ss, i8 0, i64 32, i1 false)";
       "  store ptr @__lang_sigstack, ptr %ss";
-      "  %szf = getelementptr i8, ptr %ss, i64 8";
+      "  %szoff = select i1 %dar2, i64 8, i64 16";
+      "  %szf = getelementptr i8, ptr %ss, i64 %szoff";
       "  store i64 131072, ptr %szf";
       "  %rc = call i32 @sigaltstack(ptr %ss, ptr null)";
       "  %ok = icmp eq i32 %rc, 0";
       "  br i1 %ok, label %arm, label %done";
       "arm:";
-      (* struct sigaction on macOS is { handler, sa_mask (i32), sa_flags (i32) };
-         160 zeroed bytes so no other platform reads uninitialised memory *)
+      (* struct sigaction is 16 bytes on macOS with sa_flags at 12, and 152 on glibc with
+         sa_flags at 136 -- the difference is a 128-byte sa_mask, which has to be zero and is.
+         160 zeroed bytes covers both. The FLAG VALUES differ too and are not a layout
+         question: SA_SIGINFO|SA_ONSTACK is 64|1 on macOS and 4|0x08000000 on Linux. So does
+         SIGBUS, which is 10 on macOS and 7 on Linux; SIGSEGV is 11 on both.
+         All measured on the three platforms named above, because a wrong offset here writes
+         a flag word into a signal mask and the handler simply never arrives. *)
       "  %sa = alloca [160 x i8]";
       "  call void @llvm.memset.p0.i64(ptr %sa, i8 0, i64 160, i1 false)";
       "  store ptr @__lang_segv, ptr %sa";
-      "  %fl = getelementptr i8, ptr %sa, i64 12";
-      "  store i32 65, ptr %fl";
+      "  %floff = select i1 %dar2, i64 12, i64 136";
+      "  %fl = getelementptr i8, ptr %sa, i64 %floff";
+      "  %flval = select i1 %dar2, i32 65, i32 134217732";
+      "  store i32 %flval, ptr %fl";
+      "  %sigbus = select i1 %dar2, i32 10, i32 7";
       "  call i32 @sigaction(i32 11, ptr %sa, ptr null)";
-      "  call i32 @sigaction(i32 10, ptr %sa, ptr null)";
+      "  call i32 @sigaction(i32 %sigbus, ptr %sa, ptr null)";
       "  br label %done";
       "done:";
       "  ret void";
