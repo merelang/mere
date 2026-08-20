@@ -3112,12 +3112,36 @@ let () =
      carry the lifted fn's captures in ITS env (else the injected arg is an
      undeclared identifier in the emitted C). The emitted env store for the
      spawn closure must include the captured `k`. *)
+  (* `mu_k` and not `k`: a capture's name is a struct FIELD, and since the closure-env
+     typedef started going through `c_safe_name` a field is namespaced the way every other
+     user name in the C backend already was. `fn (short: str)` used to emit
+     `const char* short;`, which is a keyword and not an identifier. The store and the
+     declaration are checked together here because the two disagreeing about this struct is
+     what went wrong the last two times. *)
   assert_contains "codegen C: par_map spawn closure carries lifted-callee caps"
     (codegen_with_decls
       "let rec worker = fn (x: int) -> fn (k: int) -> x + k \
        and outer = fn (k: int) -> par_map (fn (x: int) -> worker x k) [1, 2, 3] \
        in 0")
-    "->k = ";
+    "->mu_k = ";
+  assert_contains "codegen C: and the env struct declares the field it stores into"
+    (codegen_with_decls
+      "let rec worker = fn (x: int) -> fn (k: int) -> x + k \
+       and outer = fn (k: int) -> par_map (fn (x: int) -> worker x k) [1, 2, 3] \
+       in 0")
+    "long long mu_k;";
+  (* A capture whose name is a C keyword. Two lines is all it takes, and before the field
+     went through `c_safe_name` this emitted `const char* short;` and nothing built. *)
+  assert_contains "codegen C: a capture named `short` is not a C keyword in the struct"
+    (codegen_with_decls
+      "let f = fn (short: str) -> \
+         (let g = fn (xs: str list) -> \
+            (let rec go = fn (ys: str list) -> \
+               match ys with Nil -> short | Cons (y, r) -> go r \
+             in go xs) \
+          in g [\"a\"]) \
+       in 0")
+    "mu_short;";
   (* Q-012-C-mem: the shared program-lifetime arena is lock-guarded so
      spawned threads can allocate from it without racing (validated under
      ThreadSanitizer with concurrent allocs). *)
@@ -3574,10 +3598,16 @@ let () =
      The helpers added to prelude in Phase 36 consume the __anon counter, so
      user-defined anon adapter slots are advanced (we pick the latest slot via
      substring match). *)
+  (* These three pin the SAME struct from its three sides -- the typedef, the store and the
+     read -- which is the point: the two times this struct was wrong, one of the three
+     disagreed with the others. The field is `mu_f` and not `f` because a capture's name is
+     a user name and now goes through `c_safe_name`, the prefix v0.1.56 chose over a
+     reserved-word list. Before that, a capture called `short` emitted `const char* short;`
+     and no program using it built. *)
   assert_contains "codegen: anonymous Fun emits env typedef"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
-    "  closure_int_int f;\n} __anon_";   (* Slot numbers shift whenever the
+    "  closure_int_int mu_f;\n} __anon_";   (* Slot numbers shift whenever the
                              prelude gains lambdas — match the unique env FIELD
                              (`closure_int_int f` = the user's `fn x -> f x` capturing f)
                              without pinning the slot. *)
@@ -3588,11 +3618,11 @@ let () =
   assert_contains "codegen: anonymous Fun emits closure construction"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
-    "__env->f = mu_f";
+    "__env->mu_f = mu_f";
   assert_contains "codegen: captured var rewritten to env access"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
-    "(__env_self->f)";
+    "(__env_self->mu_f)";
 
   (* --- C codegen: recursive variants + P_tuple pattern (Phase 4.10) --- *)
   assert_contains "codegen: recursive variant emits forward + ptr typedef"
