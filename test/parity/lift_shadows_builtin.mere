@@ -1,0 +1,20 @@
+// A curried parameter whose name shadows a BUILTIN, read from a nested lift.
+//
+// `id` is the identity builtin, so the name is in the codegen's `known` set. The walker that
+// records which names belong to the current FRAME used to discard a curried parameter --
+// `Ast.Fun (_, _, body)` -- so `id` here was never recorded as a frame-local, was therefore
+// never subtracted from `known`, and the inner `let rec` that reads it captured nothing. The
+// lifted function then referred to an identifier the C it was emitted into never declared.
+//
+// Three things have to line up and that is why it went unnoticed: the name shadows a builtin,
+// it is a curried parameter rather than the first one, and it is read from a nested lift.
+// Any two of the three and this compiles.
+let find = fn (xs: (int * int) list) -> fn (id: int) ->
+  let rec go = fn (l: (int * int) list) ->
+    match l with
+    | Nil -> 0 - 1
+    | Cons ((k, v), rest) -> if k == id then v else go rest
+  in go xs;
+let table = [(1, 10), (2, 20), (3, 30)];
+let _ = print (str_of_int (find table 2));
+print (str_of_int (find table 9))

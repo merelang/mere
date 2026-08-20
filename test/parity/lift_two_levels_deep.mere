@@ -1,0 +1,19 @@
+// An enclosing frame's parameter, read two lifts down -- and named after a BUILTIN.
+//
+// The top-level driver passes a function's parameter in `host_locals` so it stays capturable;
+// descending into a LIFTED function's body reset that list to empty, so one level further in
+// the outermost parameter looked like a name already in scope. One level worked because the
+// enclosing frame was the top-level one, whose parameter the driver had recorded.
+//
+// `abs` and not `base`: the name has to be in the codegen's `known` set for the reset to
+// matter, and `known` is builtins plus top-level names. Written with an ordinary name first,
+// this program passed with the fix reverted -- it never reached the code it was for, and only
+// poisoning said so.
+let outer = fn (abs: int) ->
+  let mid = fn (xs: int list) ->
+    let rec inner = fn (ys: int list) ->
+      match ys with Nil -> abs | Cons (y, rest) -> if y == abs then y else inner rest
+    in inner xs
+  in mid [7, 8, 9];
+let _ = print (str_of_int (outer 8));
+print (str_of_int (outer 5))

@@ -8545,6 +8545,15 @@ let lift_inner_fns
       List.filter (fun k -> not (List.mem k host_locals)) !known
     in
     let body_fvs = free_vars fn_body (p :: effective_known) in
+    if (try Sys.getenv "MERE_LIFT_DEBUG" <> "" with Not_found -> false) then
+      (* The captures are the body's free variables MINUS what is already in scope, so when
+         a capture is missing the question is always which of the two lists ate it. Both are
+         printed: `fvs` is what will be captured and `blocked` is what a name in `known`
+         stopped from being captured, which is the shape this pass got wrong twice. *)
+      Printf.eprintf "  lift_one %-12s param=%-8s host=%-8s fvs=[%s] blocked=[%s]\n"
+        n p host_param (String.concat "," body_fvs)
+        (String.concat "," (List.filter (fun k -> List.mem k (free_vars fn_body [p]))
+                              effective_known));
     let captures =
       List.map (fun fv ->
         let ty = lookup_var_ty fn_body fv in
@@ -8617,7 +8626,20 @@ let lift_inner_fns
          let (host_param, fn_body) =
            lift_one host_param host_locals n p fn_body value.Ast.loc value.Ast.ty
          in
-         walk_in_fn p [] fn_body;
+         (* `host_param :: host_locals`, NOT `[]`. `host_locals` exists to be subtracted
+            from `known`, so that a name which is in scope only because of the enclosing
+            FRAME is treated as capturable instead of as already present -- which is why
+            the top-level driver passes `[f.param]` and not `[]`. Resetting it here threw
+            that away one level down: an inner `let rec` two lifts deep referenced the
+            outermost parameter, `free_vars` found it in `known` and captured nothing, and
+            the lifted function came out of the C compiler as `use of undeclared
+            identifier`. One level worked because the enclosing frame WAS the top-level
+            one, whose parameter the driver had put in `host_locals`.
+
+            Subtracting more from `known` can only make more things capturable, and every
+            name added here is a frame-local -- never a global -- so there is no
+            over-capture to trade against. *)
+         walk_in_fn p (host_param :: host_locals) fn_body;
          walk_in_fn host_param (n :: host_locals) body
        | _ ->
          walk_in_fn host_param host_locals value;
@@ -8639,8 +8661,9 @@ let lift_inner_fns
       List.iter (fun (n, p, fn_body, loc, vty) ->
         let _ = lift_one host_param host_locals n p fn_body loc vty in ()
       ) fn_specs;
+      (* Same reason as the `Let` case above: the enclosing frame's names stay capturable. *)
       List.iter (fun (_, p, fn_body, _, _) ->
-        walk_in_fn p [] fn_body) fn_specs;
+        walk_in_fn p (host_param :: host_locals) fn_body) fn_specs;
       walk_in_fn host_param (rec_names @ host_locals) body;
       (* Restore: a `let rec`'s names are in scope for its own bindings and its
          body, and nowhere else. Leaving them in `known` leaked them into every
@@ -8652,8 +8675,18 @@ let lift_inner_fns
          dogfood: `png.mere` has an inner `let rec row`, `encode.mere` has a
          parameter called `row`, and the second one lost it. *)
       known := known_before
-    | Ast.Fun (_, _, body) ->
-      walk_in_fn host_param host_locals body
+    | Ast.Fun (q, _, body) ->
+      (* THE PARAMETER NAME IS NOT DISCARDABLE. This was `Ast.Fun (_, _, body)`, so
+         descending through a curried `fn (cs) -> fn (id) -> ...` recorded `cs` and forgot
+         `id`. `host_locals` is what gets subtracted from `known`, and `id` IS in `known` --
+         it is the identity builtin -- so an inner `let rec` referring to the parameter had
+         it blocked as already-in-scope and captured nothing. The lifted function then
+         referred to a name it never declared, which the C compiler reports thousands of
+         lines from here.
+         The shape needs three things at once and that is why it survived: a parameter whose
+         name shadows a BUILTIN, introduced by a CURRIED arrow rather than the first one, and
+         read from a nested lift. Any two of the three and it works. *)
+      walk_in_fn host_param (q :: host_locals) body
     | _ -> walk_children walk_in_fn host_param host_locals e
   and walk_children walker host_param host_locals e =
     match e.Ast.node with
@@ -8824,6 +8857,18 @@ let lift_inner_fns
       Hashtbl.replace captures_map lf.l_name !new_caps
     ) all_lifted
   done;
+  (* MERE_LIFT_DEBUG=1 prints what this pass decided: one line per lifted function with its
+     host, its parameter and the captures it ended up with. Kept rather than deleted after
+     use, because the alternative to reading this is reading the fixpoint and guessing which
+     of the four skip conditions fired -- and a capture that should be here and is not comes
+     out of the C compiler as `use of undeclared identifier`, several thousand lines from
+     the decision that dropped it. *)
+  if (try Sys.getenv "MERE_LIFT_DEBUG" <> "" with Not_found -> false) then
+    List.iter (fun lf ->
+      let caps = Hashtbl.find captures_map lf.l_name in
+      Printf.eprintf "lift: %-28s host=%-16s param=%-8s caps=[%s]\n"
+        lf.l_name lf.l_host lf.l_param
+        (String.concat ", " (List.map fst caps))) all_lifted;
   (* Reflect the extended captures into all_lifted + inner_lifts_by_host *)
   let updated_lifted = List.map (fun lf ->
     let new_caps = Hashtbl.find captures_map lf.l_name in

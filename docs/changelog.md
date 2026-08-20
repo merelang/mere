@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.286 — 2026-08-20
+
+_A capture the walker forgot, twice, and the shape that needs three things at once._
+
+The browser dogfood is the first program here to ask the C backend to compile something
+large, and it did not compile at all: 29 errors, in two families. The first was field names
+not going through `c_safe_name` and is fixed above. This is the second, and it is the one
+that had been invisible for a reason worth writing down.
+
+**`known` decides what is NOT captured, and `host_locals` is what rescues a name from it.**
+`known` is builtins plus top-level names plus externs — things referenced directly in the
+generated C rather than through an env. `host_locals` is subtracted from it, which is how a
+frame-local that happens to share a builtin's name gets captured anyway. The top-level
+driver has always passed `[f.param]` for exactly this. Two places lost it.
+
+**A curried parameter's name was discarded.** The walker's own `Fun` case read
+`Ast.Fun (_, _, body)`, so descending through `fn (cs) -> fn (id) -> ...` recorded `cs` and
+forgot `id` — and `id` is the identity builtin, so it sat in `known`, and an inner `let rec`
+reading the parameter captured nothing. The lifted function then named an identifier that
+was never declared, reported by the C compiler thousands of lines from the decision.
+
+**And descending into a lifted body reset the list.** `walk_in_fn p [] fn_body` threw away
+the enclosing frame's names, so one lift further in the outermost parameter looked like
+something already in scope. One level worked because the enclosing frame was the top-level
+one, whose parameter the driver had recorded.
+
+**Three things have to line up, which is why neither showed up before.** The name shadows a
+builtin; it is a curried parameter rather than the first one, or read from a nested lift;
+and it is read from a lifted function. Any two of the three and the program compiles.
+
+Two parity programs, one per defect, each verified to catch its own by reverting the fix.
+The second was written with an ordinary name first and **passed with the fix reverted** — it
+never reached the code it was for, and only poisoning said so. It names its parameter after
+a builtin now, and the comment says why.
+
+`MERE_LIFT_DEBUG=1` prints what this pass decided: per lifted function its host, parameter
+and captures, and per lift the body's free variables alongside the names `known` blocked.
+Kept rather than deleted after use — a missing capture surfaces as `use of undeclared
+identifier` in generated C, and the alternative to reading this is guessing which of the
+four skip conditions in the fixpoint fired.
+
+The browser dogfood compiles now, and the measurement its north-star gate owed can be
+taken: a 559-byte page in 45 ms, of which 19 is loading the font and 18 is style and
+layout, at a 39 MiB high-water mark.
+
+---
+
 ## v0.1.285 — 2026-08-20
 
 _"On every backend" was verified on one platform, and CI said so for four days._
