@@ -2796,7 +2796,7 @@ let () =
     "%s [INFO] %s";
   assert_contains "codegen: Logger struct uses closure fields"
     (codegen "let lg = mk_logger \"app\" in lg.info \"hi\"")
-    "closure_str_unit info";
+    "closure_str_unit mu_info";
   assert_contains "codegen: mk_metrics emits runtime call"
     (codegen "let m = mk_metrics () in m.inc \"x\"")
     "__mere_mk_metrics";
@@ -2998,24 +2998,30 @@ let () =
     let main_ty = Typer.infer !type_env (Ast.desugar_program prog) in
     Codegen_c.emit_program ~main_ty prog
   in
+  (* The field spellings below carry `mu_` because a record field is a C struct member and a
+     user name: `type t = { short: str }` emitted `const char* short;`, a keyword where a
+     declarator belongs. v0.1.56 settled this class for values with a uniform prefix rather than
+     a reserved-word list, and the same argument decides it here. These assertions failing loudly
+     when the prefix was introduced is that decision's other property working -- an emission path
+     that forgets it breaks every record rather than only the unluckily-named ones. *)
   assert_contains "codegen: record typedef"
     (codegen_with_decls
       "type CgRectA = { w: int, h: int };\n\
        let r = CgRectA { w = 3, h = 4 } in r.w * r.h")
     "struct CgRectA {
-  long long w;
-  long long h;
+  long long mu_w;
+  long long mu_h;
 };";
   assert_contains "codegen: record literal compound"
     (codegen_with_decls
       "type CgRectB = { w: int, h: int };\n\
        let r = CgRectB { w = 3, h = 4 } in r.w")
-    "((CgRectB){.w = 3LL, .h = 4LL})";
+    "((CgRectB){.mu_w = 3LL, .mu_h = 4LL})";
   assert_contains "codegen: record field access"
     (codegen_with_decls
       "type CgRectC = { w: int };\n\
        let r = CgRectC { w = 5 } in r.w")
-    "(mu_r).w";
+    "(mu_r).mu_w";
   (* Q-012 step 3b-4a: C backend spawn / join over pthreads (env-less closures).
      The emitted program compiles with clang and runs the closure on a real
      OS thread (validated manually; there is no C compile-run harness). *)
@@ -3301,7 +3307,7 @@ let () =
     (codegen_with_decls
       "type CgRectD = { w: int, h: int };\n\
        let r = CgRectD { w = 1, h = 2 } in { r | w = 99 }")
-    "__rupd.w = 99";
+    "__rupd.mu_w = 99";
   assert_contains "codegen: record-returning fn signature"
     (codegen_with_decls
       "type CgRectE = { w: int };\n\
@@ -3311,7 +3317,7 @@ let () =
     (codegen_with_decls
       "type CgUser = { name: str, age: int };\n\
        let u = CgUser { name = \"a\", age = 30 } in u.name")
-    "  const char* name;";
+    "  const char* mu_name;";
   assert_contains "codegen: polymorphic record specialized via monomorphization"
     (* Was previously rejected; Phase 4.13 specializes per instantiation. *)
     (codegen_with_decls
@@ -3322,12 +3328,12 @@ let () =
     (codegen_with_decls
       "type 'a CgBox2 = { v: 'a };\n\
        let b = CgBox2 { v = \"hi\" } in b.v")
-    "  const char* v;\n};";
+    "  const char* mu_v;\n};";
   assert_contains "codegen: poly record literal uses mono name"
     (codegen_with_decls
       "type 'a CgBox3 = { v: 'a };\n\
        CgBox3 { v = 42 }")
-    "((CgBox3_int){.v = 42LL})";
+    "((CgBox3_int){.mu_v = 42LL})";
 
   (* --- C codegen: complex patterns (Phase 4.14) --- *)
   assert_contains "codegen: P_int compiles to equality"
@@ -3423,7 +3429,7 @@ let () =
        let mk = fn id ->\n\
          CgConn2 { id = id, close = fn () -> () } in\n\
        with c = mk 1 in c.id")
-    "c.close.fn(c.close.env, 0)";
+    "c.mu_close.fn(c.mu_close.env, 0)";
   assert_contains "codegen: with on Drop type without close field omits call"
     (codegen_with_decls
       "drop type CgRes = { v: int };\n\
@@ -3445,7 +3451,7 @@ let () =
     (codegen_with_decls
       "view CgCell3[R] of int { v: int };\n\
        region R { let c = CgCell3 { v = 7 } in c.v }")
-    "(mu_c)->v";
+    "(mu_c)->mu_v";
 
   (* --- C codegen: closure env in default region (Phase 4.20) — closures
        outlive any user region, so their env structs go to a program-lifetime
@@ -5512,7 +5518,7 @@ let () =
     (let prog = Pipeline.parse_program borrow_field_src in
      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
      Codegen_c.emit_program ~main_ty:Ast.TyUnit prog)
-    "(mu_lg)->info";
+    "(mu_lg)->mu_info";
   assert_contains "borrow codegen: LLVM unwraps TyRef for field GEP"
     (let prog = Pipeline.parse_program borrow_field_src in
      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in

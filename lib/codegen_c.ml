@@ -257,6 +257,19 @@ let flatten_module_dots (n : string) : string =
 let c_safe_name (n : string) : string =
   "mu_" ^ flatten_module_dots n
 
+(* Record FIELD identifiers. A field is a user name and C keywords are not available as
+   member declarators -- `type t = { short: str }` emitted `const char* short;`, which is a
+   syntax error, and the same for `long` and `inline`. v0.1.56 settled this class for values
+   by prefixing rather than by keeping a reserved-word list, on the grounds that the list
+   "was inherently incomplete and recurred six times"; the same argument applies here and the
+   same prefix is used, so there is one rule to know rather than two.
+
+   Fields live in a per-struct namespace, so there is nothing for a prefix to collide with;
+   what it buys is that no C keyword can reach a declarator. And because it is uniform, an
+   emission path that forgets it breaks EVERY record rather than only the unluckily-named
+   ones, which is what makes a miss show up immediately instead of years later. *)
+let c_field_name (n : string) : string = "mu_" ^ flatten_module_dots n
+
 (* Type identifiers (record / variant type names): module-dot flattening only,
    no prefix — so definition sites (typedefs / struct bodies) and use sites
    (c_type_of) agree without touching the raw type-name emission machinery. *)
@@ -1897,7 +1910,7 @@ let rec emit_expr (e : Ast.expr) : string =
             | Some _ ->
               let dot = if is_ptr_ty t then "->" else "." in
               Printf.sprintf
-                "%s%sclose.fn(%s%sclose.env, 0); "
+                "%s%smu_close.fn(%s%smu_close.env, 0); "
                 name dot name dot
             | None -> "")
          | _ -> "")
@@ -3632,7 +3645,7 @@ let rec emit_expr (e : Ast.expr) : string =
   | Ast.Record_lit (name, fields) ->
     let parts =
       List.map (fun (f, ex) ->
-        Printf.sprintf ".%s = %s" f (emit_expr ex)) fields
+        Printf.sprintf ".%s = %s" (c_field_name f) (emit_expr ex)) fields
     in
     if Hashtbl.mem Typer.views name then begin
       (* View construction: bump-allocate in the construction-time
@@ -3682,14 +3695,14 @@ let rec emit_expr (e : Ast.expr) : string =
          | _ -> ".")
       | None -> "."
     in
-    "(" ^ emit_expr inner ^ ")" ^ dot ^ fname
+    "(" ^ emit_expr inner ^ ")" ^ dot ^ c_field_name fname
   | Ast.Record_update (base, updates) ->
     (* Use a statement expression with a tmp variable so we can patch
        individual fields and yield the result. *)
     let tmp = "__rupd" in
     let updates_c =
       List.map (fun (f, ex) ->
-        Printf.sprintf "%s.%s = %s;" tmp f (emit_expr ex)) updates
+        Printf.sprintf "%s.%s = %s;" tmp (c_field_name f) (emit_expr ex)) updates
     in
     "({ __auto_type " ^ tmp ^ " = " ^ emit_expr base ^ "; "
     ^ String.concat " " updates_c ^ " " ^ tmp ^ "; })"
@@ -3764,7 +3777,7 @@ and compile_pattern (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
   | Ast.P_record (_, fps) ->
     let parts =
       List.map (fun (fname, p) ->
-        let sub_v = Printf.sprintf "(%s).%s" v_c fname in
+        let sub_v = Printf.sprintf "(%s).%s" v_c (c_field_name fname) in
         let sub_ty = field_ty v_ty fname in
         compile_pattern p sub_v sub_ty) fps
     in
@@ -5191,7 +5204,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
     let info = Hashtbl.find Typer.records name in
     let fields_parts =
       List.map (fun (fname, ft) ->
-        Printf.sprintf "show_%s(v.%s)" (ty_tag ft) fname)
+        Printf.sprintf "show_%s(v.%s)" (ty_tag ft) (c_field_name fname))
         info.Typer.r_fields
     in
     let fmt =
@@ -5305,7 +5318,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
     let info = Hashtbl.find Typer.records name in
     let fields_parts =
       List.map (fun (fname, ft) ->
-        Printf.sprintf "to_json_%s(v.%s)" (ty_tag ft) fname)
+        Printf.sprintf "to_json_%s(v.%s)" (ty_tag ft) (c_field_name fname))
         info.Typer.r_fields
     in
     let fmt =
@@ -5535,8 +5548,11 @@ let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
       let info = Hashtbl.find Typer.records name in
       let inits =
         List.map (fun (fname, ft) ->
+          (* ONE NAME, TWO QUESTIONS. The designator is a C identifier and is namespaced; the
+             key is what the JSON document says and must stay exactly as the user wrote it.
+             Prefixing both renamed every key in every serialised record. *)
           Printf.sprintf ".%s = __ojnode_%s(__mj_field(j, \"%s\"))"
-            fname (ty_tag (Ast.walk ft)) fname)
+            (c_field_name fname) (ty_tag (Ast.walk ft)) fname)
           info.Typer.r_fields
       in
       Printf.sprintf "  return ((%s){%s});" cty (String.concat ", " inits)
@@ -5639,7 +5655,7 @@ let emit_eq_fn (tag : string) (t : Ast.ty) : string =
     let info = Hashtbl.find Typer.records name in
     let conds =
       List.map (fun (fname, ft) ->
-        Printf.sprintf "eq_%s(a.%s, b.%s)" (ty_tag ft) fname fname)
+        Printf.sprintf "eq_%s(a.%s, b.%s)" (ty_tag ft) (c_field_name fname) (c_field_name fname))
         info.Typer.r_fields in
     Printf.sprintf "%s { return %s; }"
       header (if conds = [] then "1" else String.concat " && " conds)
@@ -5701,7 +5717,7 @@ let emit_cmp_fn (tag : string) (t : Ast.ty) : string =
     let steps =
       List.map (fun (fname, ft) ->
         Printf.sprintf "  c = cmp_%s(a.%s, b.%s); if (c) return c;"
-          (ty_tag ft) fname fname)
+          (ty_tag ft) (c_field_name fname) (c_field_name fname))
         info.Typer.r_fields in
     Printf.sprintf "%s {\n  int c;\n%s\n  return 0;\n}"
       header (String.concat "\n" steps)
@@ -5772,7 +5788,7 @@ let emit_copy_fn (tag : string) (t : Ast.ty) : string =
     let info = Hashtbl.find Typer.records name in
     let steps =
       List.map (fun (fname, ft) ->
-        Printf.sprintf "  v.%s = __mcopy_%s(r, v.%s);" fname (ty_tag ft) fname)
+        Printf.sprintf "  v.%s = __mcopy_%s(r, v.%s);" (c_field_name fname) (ty_tag ft) (c_field_name fname))
         info.Typer.r_fields in
     Printf.sprintf "%s {\n%s\n  return v;\n}" header (String.concat "\n" steps)
   | Ast.TyCon (name, args) ->
@@ -7556,8 +7572,8 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       let info = Hashtbl.find Typer.records rname in
       let parts = List.map (fun (fname, fty) ->
         key_eq_for fty
-          (Printf.sprintf "(%s).%s" a fname)
-          (Printf.sprintf "(%s).%s" b fname)) info.Typer.r_fields in
+          (Printf.sprintf "(%s).%s" a (c_field_name fname))
+          (Printf.sprintf "(%s).%s" b (c_field_name fname))) info.Typer.r_fields in
       "(" ^ String.concat " && " parts ^ ")"
     | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
       (* Phase 15.15/15.16: variant key — first check tags match, then
@@ -7602,7 +7618,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
     | Ast.TyCon (rname, _) when Hashtbl.mem Typer.records rname ->
       let info = Hashtbl.find Typer.records rname in
       let parts = List.map (fun (fname, fty) ->
-        key_hash_for fty (Printf.sprintf "(%s).%s" a fname)) info.Typer.r_fields in
+        key_hash_for fty (Printf.sprintf "(%s).%s" a (c_field_name fname))) info.Typer.r_fields in
       List.fold_left (fun acc p ->
         Printf.sprintf "((%s) * 1000003ULL + (%s))" acc p)
         "14695981039346656037ULL" parts
@@ -8074,9 +8090,9 @@ let logger_runtime =
       "}";
       "static Logger __mere_mk_logger(const char* prefix) {";
       "  return (Logger){";
-      "    .info  = {.env = (void*)prefix, .fn = __mere_logger_info_fn},";
-      "    .warn  = {.env = (void*)prefix, .fn = __mere_logger_warn_fn},";
-      "    .error = {.env = (void*)prefix, .fn = __mere_logger_error_fn},";
+      "    .mu_info  = {.env = (void*)prefix, .fn = __mere_logger_info_fn},";
+      "    .mu_warn  = {.env = (void*)prefix, .fn = __mere_logger_warn_fn},";
+      "    .mu_error = {.env = (void*)prefix, .fn = __mere_logger_error_fn},";
       "  };";
       "}" ]
 
@@ -8103,8 +8119,8 @@ let metrics_runtime =
       "static Metrics __mere_mk_metrics(int unit_arg) {";
       "  (void)unit_arg;";
       "  return (Metrics){";
-      "    .inc    = {.env = NULL, .fn = __mere_metrics_inc_fn},";
-      "    .record = {.env = NULL, .fn = __mere_metrics_record_outer_fn},";
+      "    .mu_inc    = {.env = NULL, .fn = __mere_metrics_inc_fn},";
+      "    .mu_record = {.env = NULL, .fn = __mere_metrics_record_outer_fn},";
       "  };";
       "}" ]
 
@@ -9410,7 +9426,7 @@ let emit_record_struct_body (name : string) : string =
   else
     let fields =
       List.map (fun (fname, ft) ->
-        Printf.sprintf "  %s %s;" (c_type_of ft) fname) info.Typer.r_fields
+        Printf.sprintf "  %s %s;" (c_type_of ft) (c_field_name fname)) info.Typer.r_fields
     in
     Printf.sprintf "struct %s {\n%s\n};" (c_type_name name)
       (String.concat "\n" fields)
@@ -9429,7 +9445,7 @@ let emit_mono_record_struct_body (record_name : string) (args : Ast.ty list) : s
   in
   let field_lines =
     List.map (fun (fname, ft) ->
-      Printf.sprintf "  %s %s;" (c_type_of ft) fname) subst_fields
+      Printf.sprintf "  %s %s;" (c_type_of ft) (c_field_name fname)) subst_fields
   in
   Printf.sprintf "struct %s {\n%s\n};"
     mono_name (String.concat "\n" field_lines)

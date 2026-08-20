@@ -6779,6 +6779,25 @@ let runtime_decls =
          time -- so `-ll` output stays the same file wherever it was produced. *)
       "declare extern_weak ptr @pthread_get_stackaddr_np(ptr)";
       "declare extern_weak i64 @pthread_get_stacksize_np(ptr)";
+      (* The glibc pair that answers the same question is reached through `dlsym`, not
+         through a declaration. `extern_weak` cannot be used for it: ELF resolves an
+         undefined weak reference to zero, and Mach-O's linker refuses it outright, so
+         declaring `pthread_getattr_np` broke the Darwin build the first time it was tried.
+         `dlsym` asks at run time and needs no reference at link time, which is the portable
+         way to want an optional symbol -- and measured, it is in libc on both platforms, so
+         no extra link flag. `RTLD_DEFAULT` is itself platform-dependent, 0 against -2,
+         which the same `icmp` selects. *)
+      "declare ptr @dlsym(ptr, ptr)";
+      (* The array length is COMPUTED. Written out by hand, two of the three were wrong by one
+         -- an off-by-one in a string literal's declared size, which LLVM catches but only
+         after the file is emitted, and which nothing about the source made obvious. *)
+      (let sym name =
+         Printf.sprintf
+           "@__lang_s_%s = private unnamed_addr constant [%d x i8] c\"%s\\00\""
+           name (String.length name + 1) name
+       in String.concat "\n"
+            [ sym "pthread_getattr_np"; sym "pthread_attr_getstack";
+              sym "pthread_attr_destroy" ]);
       "@__lang_sigstack = internal global [131072 x i8] zeroinitializer";
       "@__lang_stack_lo = internal global i64 0";
       "@__lang_stack_hi = internal global i64 0";
@@ -6822,10 +6841,11 @@ let runtime_decls =
       "}";
       "define internal void @__lang_install_segv() {";
       "entry:";
+      "  %dar0 = icmp ne ptr @pthread_get_stackaddr_np, null";
       (* Guarded, so a null weak symbol is skipped rather than called. Off Darwin the
          bounds stay zero and the handler falls through to "segmentation fault". *)
       "  %have = icmp ne ptr @pthread_get_stackaddr_np, null";
-      "  br i1 %have, label %bounds, label %nobounds";
+      "  br i1 %have, label %bounds, label %glibc";
       "bounds:";
       "  %th = call ptr @pthread_self()";
       "  %hip = call ptr @pthread_get_stackaddr_np(ptr %th)";
@@ -6834,6 +6854,44 @@ let runtime_decls =
       "  %lo = sub i64 %hi, %sz";
       "  store i64 %hi, ptr @__lang_stack_hi";
       "  store i64 %lo, ptr @__lang_stack_lo";
+      "  br label %nobounds";
+      (* glibc reports the LOW address and the size, which is the other way round from the
+         Darwin pair. `pthread_attr_t` is 56 bytes on glibc/x86_64 and 64 on glibc/aarch64
+         and macOS; 64 zeroed bytes covers all three. *)
+      "glibc:";
+      "  %rtld = select i1 %dar0, ptr inttoptr (i64 -2 to ptr), ptr null";
+      "  %fga = call ptr @dlsym(ptr %rtld, ptr @__lang_s_pthread_getattr_np)";
+      "  %fgs = call ptr @dlsym(ptr %rtld, ptr @__lang_s_pthread_attr_getstack)";
+      "  %hga = icmp ne ptr %fga, null";
+      "  %hgs = icmp ne ptr %fgs, null";
+      "  %hboth = and i1 %hga, %hgs";
+      "  br i1 %hboth, label %gcall, label %nobounds";
+      "gcall:";
+      "  %ga = alloca [64 x i8]";
+      "  call void @llvm.memset.p0.i64(ptr %ga, i8 0, i64 64, i1 false)";
+      "  %gth = call ptr @pthread_self()";
+      "  %grc = call i32 %fga(ptr %gth, ptr %ga)";
+      "  %gok = icmp eq i32 %grc, 0";
+      "  br i1 %gok, label %gstack, label %nobounds";
+      "gstack:";
+      "  %glop = alloca i64";
+      "  %gszp = alloca i64";
+      "  %grc2 = call i32 %fgs(ptr %ga, ptr %glop, ptr %gszp)";
+      "  %gok2 = icmp eq i32 %grc2, 0";
+      "  br i1 %gok2, label %gset, label %gfree";
+      "gset:";
+      "  %glo = load i64, ptr %glop";
+      "  %gsz = load i64, ptr %gszp";
+      "  %ghi = add i64 %glo, %gsz";
+      "  store i64 %ghi, ptr @__lang_stack_hi";
+      "  store i64 %glo, ptr @__lang_stack_lo";
+      "  br label %gfree";
+      "gfree:";
+      "  %fad = call ptr @dlsym(ptr %rtld, ptr @__lang_s_pthread_attr_destroy)";
+      "  %had = icmp ne ptr %fad, null";
+      "  br i1 %had, label %gdes, label %nobounds";
+      "gdes:";
+      "  %ignore = call i32 %fad(ptr %ga)";
       "  br label %nobounds";
       "nobounds:";
       (* stack_t is { ss_sp, ss_size, ss_flags } on macOS and { ss_sp, ss_flags, ss_size } on

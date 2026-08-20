@@ -4,6 +4,91 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.289 — 2026-08-20
+
+_A record field is a C struct member, and one name answered two questions._
+
+The other half of the keyword surface. v0.1.286 routed a closure CAPTURE's name through
+`c_safe_name`; a user record's fields never went through anything, so
+`type t = { short: str }` emitted `const char* short;` — a keyword where a declarator belongs.
+Same argument as v0.1.56's, which chose a uniform `mu_` prefix over a reserved-word list
+because the list "was inherently incomplete and recurred six times", so the same prefix is
+used and there is one rule to know rather than two. Fields live in a per-struct namespace, so
+a prefix collides with nothing; what it buys is that no C keyword reaches a declarator.
+
+Fourteen sites: two definitions (the struct body and the monomorphised one) and twelve uses —
+literal, update, field access, pattern binding, `show_`, `to_json`, `from_json`, `eq`, `cmp`,
+`__mcopy`, and a map key's equality and hash. Plus two hand-written runtime literals, for
+`mk_logger` and `mk_metrics`, which spell the field names out and had to spell them the same
+way.
+
+**One real bug came out of doing it, and it is the interesting one.** `from_json` used the
+same `fname` twice in one format string — once as the C designator and once as the JSON KEY.
+Prefixing both renamed every key in every serialised record, which four parity programs said
+immediately. The designator is an identifier and the key is what the document says; one name,
+two questions, and only one of them wanted namespacing.
+
+**And the loud-failure property earned its keep.** Eleven assertions in the suite pin this
+struct's spelling from various sides and all eleven went red at once, which is exactly what
+v0.1.56 argued a uniform prefix would buy: a path that forgets it breaks every record rather
+than only the unluckily-named ones. Separating "the assertion is stale" from "the codegen is
+broken" was one measurement — the four JSON parity programs compile and run — and after that
+the assertions were bookkeeping.
+
+Two sites were missed on the first pass and both were found by gates rather than by reading:
+the `cmp` line, because the replacement written for it was character-identical to the original
+and the patch skipped it, and `mk_logger`'s runtime literal. `host_matrix` named the second in
+one line. `mk_metrics` is still `nocompile` on the C backend and was before this — a function
+pointer type mismatch, unrelated.
+
+Verified on Darwin: dune runtest 2531/0, parity 119/0, ctest 14/0, host_matrix with no
+change, selfhost ok, stack_overflow ok. Verified on Linux in a container: fifteen programs
+through the C backend and eleven through LLVM, including a record with `short`, `long` and
+`inline` as field names, all matching the interpreter.
+
+---
+
+## v0.1.288 — 2026-08-20
+
+_The LLVM backend names a stack overflow on Linux, which took `dlsym` and a computed array length._
+
+Three releases and two wrong shapes to get here, all of them the same underlying fact: LLVM IR
+has no preprocessor, so a runtime detail that differs by platform has to be selected at run
+time or not at all.
+
+v0.1.285 made the Darwin-only pthread pair `extern_weak` and guarded the call, which stopped
+the link failure and left the bounds unknown off Darwin. v0.1.287 found that the handler was
+not even being installed there — `stack_t`, `struct sigaction`, the `SA_*` values and `SIGBUS`
+all differ — and selected seven measured constants off one `icmp`. What was left was the
+bounds, and the obvious move does not work: declaring `pthread_getattr_np` `extern_weak`
+breaks the DARWIN build, because Mach-O's linker refuses an undefined weak reference where ELF
+resolves it to zero. Measured, not assumed — it was tried and reverted.
+
+`dlsym(RTLD_DEFAULT, …)` asks at run time and needs no reference at link time, which is what
+wanting an optional symbol actually calls for. Measured: it is in libc on both platforms, so
+no extra link flag, and `RTLD_DEFAULT` is itself platform-dependent — 0 against -2 — which the
+same `icmp` selects. glibc reports the LOW address and the size, the other way round from the
+Darwin pair.
+
+    platform         C backend    LLVM backend
+    macOS/arm64      names it     names it
+    Linux/x86_64     names it     names it
+    Linux/aarch64    names it     names it
+
+**So the divergence is gone and both the things that recorded it are gone with it.** The
+parity pin for `uncaught_stack_overflow` is deleted, and `scripts/stack_overflow.sh` expects
+one answer everywhere instead of a per-platform one — if a platform stops naming the fault
+that is now a regression rather than a fact about the platform. The gate's second mode, for a
+backend expected not to name it, is removed rather than left: nothing reached it, and a branch
+nothing reaches cannot be told from a branch that is wrong.
+
+One thing worth the line because it was caught late and cheaply: the three symbol-name
+constants had their array lengths written out by hand and two of the three were off by one.
+They are computed from `String.length` now. LLVM catches that, but only after the file is
+emitted, and nothing about the source made it visible.
+
+---
+
 ## v0.1.287 — 2026-08-20
 
 _The LLVM handler installs itself on Linux, which needed seven measured constants._
