@@ -52,6 +52,20 @@ MERE="$ROOT/_build/default/bin/mere.exe"
 CC="${CC:-clang}"; command -v "$CC" >/dev/null 2>&1 || CC=cc
 [ -x "$MERE" ] || { echo "parity: $MERE not found — run 'dune build'" >&2; exit 1; }
 command -v "$CC" >/dev/null 2>&1 || { echo "parity: no C compiler" >&2; exit 0; }
+
+# WHY IT DID NOT COMPILE, NOT JUST THAT IT DID NOT. The compiler's stderr was written to a
+# file and thrown away, so a red run said `c:MISCOMPILE llvm:MISCOMPILE` for 116 of 117
+# programs and not one word about the reason — and diagnosing it needed a container
+# reproducing the runner, because the log had nothing in it. Four days of that.
+#
+# "Did it refuse" and "did it say why" are different questions, and only the first was
+# being asked. Collected into `diag` and printed under the row, three lines per backend:
+# the first error is the one to read and the rest are usually its consequences.
+note_diag() {  # $1 = label, $2 = file holding the compiler's stderr
+  [ -s "$2" ] || return 0
+  diag="$diag$(printf '    %s: %s' "$1" "$(head -3 "$2" | sed 's/^/      /' | sed '1s/^ *//' | tr '\n' '~')")"
+}
+
 have_wat=0; command -v wat2wasm >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && have_wat=1
 
 # Explicit arguments are partitioned the same way the defaults are: a path under
@@ -98,7 +112,7 @@ classify_mismatch() {
 for f in $FILES; do
   name="$(basename "$f" .mere)"
   ref="$("$MERE" "$f" 2>"$TMP/i.err")" || { echo "SKIP $name (interpreter error)"; sed 's/^/    /' "$TMP/i.err" | head -3; skip=$((skip + 1)); skip_names="$skip_names $name"; continue; }
-  row=""; bad=0
+  row=""; bad=0; diag=""
   # C
   if "$MERE" -c "$f" > "$TMP/c.c" 2>"$TMP/c.err"; then
     if "$CC" -O0 -w "$TMP/c.c" -o "$TMP/c.bin" -lm 2>"$TMP/c.cc"; then
@@ -107,8 +121,8 @@ for f in $FILES; do
       elif [ "$(classify_mismatch c "$f" "$out")" = DIVERGE ]; then
         row="$row c:DIVERGE"; div_names="$div_names c/$name"
       else row="$row c:DIFF"; bad=1; fi
-    else row="$row c:MISCOMPILE"; bad=1; fi
-  else [ "$(emit_kind "$TMP/c.err")" = unsup ] && row="$row c:UNSUP" || { row="$row c:EMITFAIL"; bad=1; }; fi
+    else row="$row c:MISCOMPILE"; bad=1; note_diag c "$TMP/c.cc"; fi
+  else [ "$(emit_kind "$TMP/c.err")" = unsup ] && row="$row c:UNSUP" || { row="$row c:EMITFAIL"; bad=1; note_diag c "$TMP/c.err"; }; fi
   # LLVM
   if "$MERE" -ll "$f" > "$TMP/l.ll" 2>"$TMP/l.err"; then
     if "$CC" -O0 -w "$TMP/l.ll" -o "$TMP/l.bin" -lm 2>"$TMP/l.cc"; then
@@ -117,8 +131,8 @@ for f in $FILES; do
       elif [ "$(classify_mismatch llvm "$f" "$out")" = DIVERGE ]; then
         row="$row llvm:DIVERGE"; div_names="$div_names llvm/$name"
       else row="$row llvm:DIFF"; bad=1; fi
-    else row="$row llvm:MISCOMPILE"; bad=1; fi
-  else [ "$(emit_kind "$TMP/l.err")" = unsup ] && row="$row llvm:UNSUP" || { row="$row llvm:EMITFAIL"; bad=1; }; fi
+    else row="$row llvm:MISCOMPILE"; bad=1; note_diag llvm "$TMP/l.cc"; fi
+  else [ "$(emit_kind "$TMP/l.err")" = unsup ] && row="$row llvm:UNSUP" || { row="$row llvm:EMITFAIL"; bad=1; note_diag llvm "$TMP/l.err"; }; fi
   # Wasm
   if [ "$have_wat" = 1 ]; then
     if "$MERE" -w "$f" > "$TMP/w.wat" 2>"$TMP/w.err"; then
@@ -128,8 +142,8 @@ for f in $FILES; do
       elif [ "$(classify_mismatch wasm "$f" "$out")" = DIVERGE ]; then
         row="$row wasm:DIVERGE"; div_names="$div_names wasm/$name"
       else row="$row wasm:DIFF"; bad=1; fi
-      else row="$row wasm:MISCOMPILE"; bad=1; fi
-    else [ "$(emit_kind "$TMP/w.err")" = unsup ] && row="$row wasm:UNSUP" || { row="$row wasm:EMITFAIL"; bad=1; }; fi
+      else row="$row wasm:MISCOMPILE"; bad=1; note_diag wasm "$TMP/w.w2"; fi
+    else [ "$(emit_kind "$TMP/w.err")" = unsup ] && row="$row wasm:UNSUP" || { row="$row wasm:EMITFAIL"; bad=1; note_diag wasm "$TMP/w.err"; }; fi
   else row="$row wasm:SKIP"; fi
 
   # A pin that no longer describes a divergence is a claim that has stopped being
@@ -158,7 +172,13 @@ for f in $FILES; do
   done
 
   if [ "$bad" = 0 ]; then echo "PASS $name  [interp=$ref ]$row"; pass=$((pass + 1))
-  else echo "FAIL $name  [interp=$ref ]$row"; fail=$((fail + 1)); fi
+  else
+    echo "FAIL $name  [interp=$ref ]$row"; fail=$((fail + 1))
+    # An `if`, not `[ ... ] && printf`: as the last command of a branch under `set -e` a
+    # false test is the branch's exit status, and whether that ends the script is exactly
+    # the sort of thing that differs between shells this is meant to run under.
+    if [ -n "$diag" ]; then printf '%s\n' "$diag" | tr '~' '\n'; fi
+  fi
 done
 
 # --- programs that are supposed to fail -------------------------------------
@@ -183,6 +203,7 @@ wasm_diag_stream=out
 # source context under it (`--> file:line`, then the lines), so the last line of that
 # is a line of the program. A `fail` call carries no location and renders on one line.
 payload() { sed -e 's/^.*eval error: //' "$1" | head -1; }
+
 
 # $1=label $2=stream(out|err) $3=exit status. Reads $TMP/f.out and $TMP/f.err.
 check_fail_backend() {
@@ -233,33 +254,36 @@ for f in $FAILFILES; do
     ffail=$((ffail + 1)); continue
   fi
   iout="$(cat "$TMP/i.out")"; ipay="$(payload "$TMP/i.err")"
-  row=""; bad=0
+  row=""; bad=0; diag=""
   # C
   if "$MERE" -c "$f" > "$TMP/c.c" 2>"$TMP/c.err"; then
     if "$CC" -O0 -w "$TMP/c.c" -o "$TMP/c.bin" -lm 2>"$TMP/c.cc"; then
       "$TMP/c.bin" > "$TMP/f.out" 2> "$TMP/f.err" && rc=0 || rc=$?
       check_fail_backend c err "$rc"
-    else row="$row c:MISCOMPILE"; bad=1; fi
-  else [ "$(emit_kind "$TMP/c.err")" = unsup ] && row="$row c:UNSUP" || { row="$row c:EMITFAIL"; bad=1; }; fi
+    else row="$row c:MISCOMPILE"; bad=1; note_diag c "$TMP/c.cc"; fi
+  else [ "$(emit_kind "$TMP/c.err")" = unsup ] && row="$row c:UNSUP" || { row="$row c:EMITFAIL"; bad=1; note_diag c "$TMP/c.err"; }; fi
   # LLVM
   if "$MERE" -ll "$f" > "$TMP/l.ll" 2>"$TMP/l.err"; then
     if "$CC" -O0 -w "$TMP/l.ll" -o "$TMP/l.bin" -lm 2>"$TMP/l.cc"; then
       "$TMP/l.bin" > "$TMP/f.out" 2> "$TMP/f.err" && rc=0 || rc=$?
       check_fail_backend llvm err "$rc"
-    else row="$row llvm:MISCOMPILE"; bad=1; fi
-  else [ "$(emit_kind "$TMP/l.err")" = unsup ] && row="$row llvm:UNSUP" || { row="$row llvm:EMITFAIL"; bad=1; }; fi
+    else row="$row llvm:MISCOMPILE"; bad=1; note_diag llvm "$TMP/l.cc"; fi
+  else [ "$(emit_kind "$TMP/l.err")" = unsup ] && row="$row llvm:UNSUP" || { row="$row llvm:EMITFAIL"; bad=1; note_diag llvm "$TMP/l.err"; }; fi
   # Wasm
   if [ "$have_wat" = 1 ]; then
     if "$MERE" -w "$f" > "$TMP/w.wat" 2>"$TMP/w.err"; then
       if wat2wasm --enable-tail-call --enable-threads "$TMP/w.wat" -o "$TMP/w.wasm" 2>"$TMP/w.w2"; then
         node "$ROOT/scripts/run_wasm.js" "$TMP/w.wasm" > "$TMP/f.out" 2> "$TMP/f.err" && rc=0 || rc=$?
         check_fail_backend wasm "$wasm_diag_stream" "$rc"
-      else row="$row wasm:MISCOMPILE"; bad=1; fi
-    else [ "$(emit_kind "$TMP/w.err")" = unsup ] && row="$row wasm:UNSUP" || { row="$row wasm:EMITFAIL"; bad=1; }; fi
+      else row="$row wasm:MISCOMPILE"; bad=1; note_diag wasm "$TMP/w.w2"; fi
+    else [ "$(emit_kind "$TMP/w.err")" = unsup ] && row="$row wasm:UNSUP" || { row="$row wasm:EMITFAIL"; bad=1; note_diag wasm "$TMP/w.err"; }; fi
   else row="$row wasm:SKIP"; fi
 
   if [ "$bad" = 0 ]; then echo "PASS $name  [exit=$irc msg=$ipay ]$row"; fpass=$((fpass + 1))
-  else echo "FAIL $name  [exit=$irc msg=$ipay ]$row"; ffail=$((ffail + 1)); fi
+  else
+    echo "FAIL $name  [exit=$irc msg=$ipay ]$row"; ffail=$((ffail + 1))
+    if [ -n "$diag" ]; then printf '%s\n' "$diag" | tr '~' '\n'; fi
+  fi
 done
 
 echo "----"

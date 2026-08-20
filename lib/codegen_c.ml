@@ -1987,7 +1987,7 @@ let rec emit_expr (e : Ast.expr) : string =
       let inits =
         String.concat " "
           (List.map (fun (n, _) ->
-            Printf.sprintf "__env->%s = %s;" (flatten_module_dots n) (emit_expr
+            Printf.sprintf "__env->%s = %s;" (c_safe_name n) (emit_expr
               { Ast.loc = e.loc; ty = Some (List.assoc n captures);
                 node = Ast.Var n })) captures)
       in
@@ -5099,11 +5099,24 @@ let emit_closure_env_typedef (ce : closure_emission) : string =
        dots; this path did not, and the two have to agree.
 
        `flatten_module_dots` is the identity for a name without a dot, so every
-       program that did not hit this emits byte-identical C. *)
+       program that did not hit this emits byte-identical C.
+
+       AND THE SAME ASYMMETRY HAD A SECOND HALF. Flattening a dot makes the name a legal
+       identifier; it does not make it a name C has left free. `fn (short: str)` emitted
+       `const char* short;` — every C-backend program in a browser dogfood, because that
+       is where a parameter happened to be called `short`, `long` or `inline`. v0.1.56
+       settled this for values by prefixing every user name with `mu_` instead of keeping
+       a reserved-word list, on the grounds that the list "was inherently incomplete and
+       recurred six times". A field name is a user name too, and the inner-LIFTED env path
+       has always used `c_safe_name` for exactly this reason. This path did not — the same
+       two paths, disagreeing again about the same struct.
+
+       So: `c_safe_name`, which is `mu_` plus the flattening, and the three sites that
+       touch this struct move together. *)
     let fields =
       String.concat "\n"
         (List.map (fun (n, t) ->
-          Printf.sprintf "  %s %s;" (c_type_of t) (flatten_module_dots n))
+          Printf.sprintf "  %s %s;" (c_type_of t) (c_safe_name n))
           ce.ce_env_fields)
     in
     Printf.sprintf "typedef struct {\n%s\n} %s;" fields ce.ce_env_name
@@ -5821,11 +5834,14 @@ let emit_closure_adapter (ce : closure_emission) : string =
      when this closure was queued, so any Let_rec inside the closure
      body finds its inner-lifted siblings. *)
   set_inner_lifts_for_host ce.ce_host;
-  (* Q-043: the KEY is the name as written (that is what `Var n` in the body
-     says), the FIELD is the flattened one (that is what the struct declares). *)
+  (* Q-043: the KEY is the name as written (that is what `Var n` in the body says), the
+     FIELD is what the struct declares -- `c_safe_name`, so a capture called `short` is
+     `mu_short` and not a C keyword. Declaration, creation and this read are one fact in
+     three places; the last two times this struct was wrong, it was one of the three
+     disagreeing with the others. *)
   let env_subst =
     List.map (fun (n, _) ->
-      (n, "(__env_self->" ^ flatten_module_dots n ^ ")"))
+      (n, "(__env_self->" ^ c_safe_name n ^ ")"))
       ce.ce_env_fields
   in
   let prev = !current_env_subst in
