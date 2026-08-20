@@ -195,13 +195,36 @@ check_fail_backend() {
   else
     _pay="$(payload "$TMP/f.err")"; _out="$(cat "$TMP/f.out")"
   fi
-  if   [ "$_rc" != "$irc" ];    then row="$row $_lbl:EXIT($_rc)"; bad=1
-  elif [ "$_out" != "$iout" ];  then row="$row $_lbl:OUT";        bad=1
-  elif [ "$_pay" != "$ipay" ];  then row="$row $_lbl:MSG";        bad=1
-  else row="$row $_lbl:MATCH"; fi
+  if   [ "$_rc" != "$irc" ];    then _tok="EXIT($_rc)"
+  elif [ "$_out" != "$iout" ];  then _tok="OUT"
+  elif [ "$_pay" != "$ipay" ];  then _tok="MSG"
+  else _tok="MATCH"; fi
+  # A DIVERGENCE THAT DEPENDS ON THE PLATFORM, pinned rather than deleted. The section
+  # above has `.<backend>.expected` for this; this one had nothing, so an answer that is
+  # right on one operating system and different on another left the choice between a red
+  # gate forever and dropping the program — and dropping it stops asking the question.
+  #
+  # The pin is per backend AND per `uname -s`, because that is what the difference is: the
+  # LLVM backend names a stack overflow on Darwin, where the two calls that find the real
+  # stack bounds exist, and cannot elsewhere (v0.1.285). A file named
+  # `<program>.<backend>.<uname>.diverge` holds the row token that is accepted there.
+  #
+  # AND IT DETECTS ITS OWN RETIREMENT. A pin whose backend has started matching is
+  # reported as stale and fails, because a pin nobody revisits is a claim that has stopped
+  # being true — the whole reason for pinning instead of skipping is to keep asking.
+  _pin="${f%.mere}.$_lbl.$(uname -s).diverge"
+  if [ "$_tok" = MATCH ]; then
+    if [ -f "$_pin" ]; then
+      row="$row $_lbl:MATCH(pin is stale: ${_pin#$ROOT/})"; bad=1
+    else row="$row $_lbl:MATCH"; fi
+  elif [ -f "$_pin" ] && [ "$_tok" = "$(cat "$_pin")" ]; then
+    row="$row $_lbl:DIVERGE"; fdiv_names="$fdiv_names $_lbl/$name"
+  else
+    row="$row $_lbl:$_tok"; bad=1
+  fi
 }
 
-fpass=0; ffail=0
+fpass=0; ffail=0; fdiv_names=""
 for f in $FAILFILES; do
   name="$(basename "$f" .mere)"
   "$MERE" "$f" > "$TMP/i.out" 2> "$TMP/i.err" && irc=0 || irc=$?
@@ -247,6 +270,10 @@ else
 fi
 [ "$fpass" -gt 0 ] || [ "$ffail" -gt 0 ] &&
   echo "parity (failing programs): $fpass passed, $ffail failed  [wasm diagnostic stream: $wasm_diag_stream]"
+if [ -n "$fdiv_names" ]; then
+  echo "declared divergences among the failing programs (pinned per platform, $(uname -s)):"
+  for entry in $fdiv_names; do echo "    $entry"; done
+fi
 total=$((pass + fail))
 [ -n "$div_names" ] && {
   echo "declared divergences (pinned to a .expected file):"
