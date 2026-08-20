@@ -3000,7 +3000,7 @@ Two things stay unequal and are recorded rather than fixed:
 - **`sleep_ms` is interp + C only**, which is why the parity program contains no
   clock at all.
 
-The general shape is the one note 153 named: a capability with a per-backend
+The general shape is the one the host-builtin registry work named: a capability with a per-backend
 implementation and no single place that says which backends really have it. This is
 the second silent gap found by running one, after `print_int` in v0.1.190.
 

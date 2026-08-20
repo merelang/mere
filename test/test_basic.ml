@@ -48,7 +48,89 @@ let check_raises_containing name substr f =
     end
 
 let () =
-  check "version is 0.1.283" Version.v "0.1.283";
+  (* Walk up from cwd until we find the project's dune-project. Dune runs the test
+     binary from `_build/default/test`, so the source tree is up the tree somewhere.
+     Bound here rather than beside its first user because the version check below
+     needs it too. *)
+  let project_root =
+    let rec walk d =
+      if Sys.file_exists (Filename.concat d "dune-project") then d
+      else
+        let parent = Filename.dirname d in
+        if parent = d then failwith "could not locate dune-project"
+        else walk parent
+    in
+    walk (Sys.getcwd ())
+  in
+
+  (* THE VERSION, AGAINST THE CHANGELOG, AND NOT AGAINST A LITERAL WRITTEN HERE.
+     This used to be `check "version is 0.1.283" Version.v "0.1.283"` — a value compared
+     against a copy of itself two tokens away. Its only possible failure was "somebody
+     edited version.ml and not this line", so it never caught a defect and went stale
+     four recorded times: pinned at 0.1.151 while v0.1.169 shipped, stale from v0.1.258
+     until v0.1.259, stale from v0.1.280 until v0.1.281 (that release's own note says the
+     bump happened after the suite ran, not before), and again from v0.1.284. The line had
+     been revised 240 times.
+
+     What actually drifts is the pair. The release that prompted this said `v0.1.284` in a
+     commit message and nine source comments while `version.ml` and the changelog both said
+     0.1.283 — and nothing in this repository read the changelog at all. So the check is now
+     the agreement between the two claims that a release consists of, and neither can be
+     satisfied by editing the other:
+
+       - bump `version.ml` and forget the changelog entry -> red
+       - write the changelog entry and forget the bump    -> red
+       - cut a release                                    -> nothing to edit here
+
+     The headings are also required to descend strictly, which reading only the newest
+     cannot see: a duplicated or out-of-order entry is invisible to a first-match read.
+
+     What it still cannot see is the commit message, which is not available at test time. *)
+  let changelog_versions =
+    (* `changelog.md`, lower case, because that is the name in the tree. Written as
+       `CHANGELOG.md` first, which opens on a case-insensitive filesystem and raises
+       `Sys_error` on the Linux runner — a check that passes where it was written and
+       crashes the whole binary where it matters, which is worse than the assertion it
+       replaced. *)
+    let path = Filename.concat project_root (Filename.concat "docs" "changelog.md") in
+    let ic =
+      try open_in path
+      with Sys_error m -> failwith ("the version check cannot read " ^ path ^ ": " ^ m)
+    in
+    let acc = ref [] in
+    (try
+       while true do
+         let line = input_line ic in
+         let n = String.length line in
+         if n > 5 && String.sub line 0 5 = "## v0" then begin
+           (* "## v0.1.284 — 2026-08-19" -> "0.1.284" *)
+           let rest = String.sub line 4 (n - 4) in
+           let stop =
+             match String.index_opt rest ' ' with Some i -> i | None -> String.length rest
+           in
+           acc := String.sub rest 0 stop :: !acc
+         end
+       done
+     with End_of_file -> ());
+    close_in ic;
+    List.rev !acc
+  in
+  let parse_v v =
+    match String.split_on_char '.' v with
+    | [a; b; c] -> (int_of_string a, int_of_string b, int_of_string c)
+    | _ -> failwith ("changelog heading is not a version: " ^ v)
+  in
+  check "the changelog has entries" (string_of_bool (changelog_versions <> [])) "true";
+  check "version.ml matches the newest changelog entry"
+    Version.v (List.hd changelog_versions);
+  let descending =
+    let rec go = function
+      | a :: (b :: _ as rest) -> parse_v a > parse_v b && go rest
+      | _ -> true
+    in
+    go changelog_versions
+  in
+  check "the changelog headings descend strictly" (string_of_bool descending) "true";
 
   (* --- regression --- *)
   check "'1 + 2'"  (Pipeline.process "1 + 2") "3";
@@ -10198,19 +10280,7 @@ let () =
      — so this is the strongest dogfood we have that the self-host port
      is faithful. *)
 
-  (* Walk up from cwd until we find the project's dune-project. Dune
-     runs the test binary from `_build/default/test`, so the source
-     tree's `contrib/` is up the tree somewhere. *)
-  let project_root =
-    let rec walk d =
-      if Sys.file_exists (Filename.concat d "dune-project") then d
-      else
-        let parent = Filename.dirname d in
-        if parent = d then failwith "could not locate dune-project"
-        else walk parent
-    in
-    walk (Sys.getcwd ())
-  in
+  (* `project_root` is bound at the top of this function; see the version check. *)
 
   (* P3 (mq dogfood): contrib/json's serializer lives in the same
      `module Json` as the parser, so they share the `json` type and

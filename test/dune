@@ -6,4 +6,7 @@
  ; test binary from `_build/default/test`, so the test resolves the
  ; project root at runtime by walking up to the first ancestor
  ; containing `dune-project`.
- (deps (source_tree ../contrib) (source_tree ../scripts)))
+ ; ../docs: the version check reads docs/changelog.md, so the sandbox needs it.
+ ; Lower case, which is the name in the tree — the first version of this said CHANGELOG
+ ; and the code that matched it opened fine here and raised on the Linux runner.
+ (deps (source_tree ../contrib) (source_tree ../scripts) (source_tree ../docs)))
