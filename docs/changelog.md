@@ -4,6 +4,74 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.284 — 2026-08-19
+
+_Generated inputs for the differential gates, and five NUL-length defects they found._
+
+`contrib/prop` generates values; it does not compare them. A property test written with
+it is an ordinary parity case, so the other four backends are the oracle and there is
+nothing to commit as an expectation — the same shape as the browser dogfood's reftest,
+moved from pixels to values.
+
+Three decisions, each a way this could have measured nothing. It does not use
+`random_int`: that builtin asks the host, five hosts would draw five sequences, and every
+line would report DIFF while the gate reported on itself. Values are a function of an
+**index** rather than a carried state, so a differing line in the diff already names its
+input — which is why there is no shrinker, the smallest reproducer is `i` and it is
+printed. Every intermediate stays below 2^45, because the interpreter's int is 63-bit and
+the compiled backends' is 64-bit.
+
+The edge tables are not a draw. Every integer defect this suite has found sat on one of
+those values and a uniform draw reaches them with probability about zero, so a generator
+that only drew would be weaker than the hand-written gates it extends. NUL is in the byte
+pool on purpose.
+
+### Five defects on the first run, all one family
+
+Code that was correct while a `str` ended at its first NUL, and silently wrong after
+v0.1.264 gave a `str` a length header.
+
+| builtin | backend | what was wrong |
+|---|---|---|
+| `str_contains` | C, LLVM | `strstr` — a needle beginning with NUL matched every haystack |
+| `str_index_of` | LLVM | `strstr` — answered 0 where the C backend's length-aware search answers -1 |
+| `str_starts_with` | LLVM | `strncmp`, and no length check on the haystack — the only one of the four starts/ends implementations across the two backends written that way |
+| `str_join` | C | the sizing pass asked `__lang_str_size` and the copying pass asked `strlen`, so an element holding a NUL was measured at its full length and copied only to the NUL. One function, two notions of how long a string is |
+| `str_ptr`, `read_lines` | C | found by sweeping every `strlen` in the backend after the first four, not by waiting for a gate to point at them |
+
+### Two recorded rather than fixed
+
+Each pinned in its own case so it keeps being asked.
+
+`test/parity/prop_utf8.mere` — UTF-8 character splitting. For `"A" ++ chr 128` the
+interpreter says two characters and the three compiled backends say one, so `utf8_at`
+returns two bytes and `codepoint_at` then refuses. Index 0 is `"A"` and what follows
+cannot change that, so the interpreter is right. The span computation is prelude Mere,
+one source compiled by all four, which means the difference is under it — a separate
+measurement, not a guess to make while writing a test.
+
+`test/parity/llvm_loop_guard_global.mere` — a loop whose bound is a top-level binding
+stops after one iteration on LLVM. All three ingredients are needed and each was removed
+in turn to check: the bound must be a top-level `let` and not a literal, the body must
+evaluate a `try_or` whose thunk calls a prelude function, and it must be recursive. A
+program folding this way would silently process the first element and report success.
+
+### The axes are kept apart
+
+`prop_int` leaves multiplication out and `prop_list` leaves `list_product` out, both with
+the reason written down: their operands overflow, the interpreter wraps at 63 bits where
+the compiled backends wrap at 64, and a gate measuring the width axis while claiming the
+value axis reports the wrong one when either moves. `codepoint_at` moved out of
+`prop_str` for the same reason.
+
+`test_basic`: "llvm: declares strstr" asserted how `index_of` is implemented rather than
+what it answers. It now asserts the `memcmp` and that `strstr` is absent.
+
+Gates: unit 2527-0, parity 117-0 + failing 15-0 (5 declared divergences), ctest 14-0,
+selfhost 7-7, html_tokenizer ok.
+
+---
+
 ## v0.1.283 — 2026-08-18
 
 _Two shadowing bugs, and a gate whose expectation was degenerate._

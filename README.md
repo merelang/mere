@@ -8,13 +8,13 @@
 
 > *Make Explicit Region-bound Effects.*
 
-OCaml implementation of **Mere**, a new programming language (Old English for "lake"; 4 letters; region metaphor). An ML-family mini language that has reached a practical level — its memory model (region / view / Trivial[R]), effect system (capability passing + refined borrow annotations), and three codegen backends (C / LLVM IR / Wasm) all work at feature parity.
+OCaml implementation of **Mere**, a small ML-family language (Old English for "lake"; 4 letters; region metaphor). Memory is region-based with no GC (region / view / Trivial[R]), effects are ordinary capability values (capability passing + refined borrow annotations), and **five backends are kept in byte-level agreement**: the interpreter, C, LLVM IR, Wasm, and RV32IM.
 
-Former tentative name: `lang-ml` (finalized as Mere on 2026-06-19).
+It **self-hosts** — the Mere-in-Mere compiler, compiled by itself and run as Wasm, emits byte-identical output to the reference. The RV32IM backend emits a flat binary with no external assembler or linker, and `--bare` hands the program the machine instead of a host; on that there is a kernel, a scheduler and a shell written in Mere, and the self-hosted compiler runs there as a user process — on a RISC-V CPU also written in Mere — emitting WAT byte-identical to the native one. See [docs/bare-metal.md](docs/bare-metal.md).
 
 ## Install
 
-Prebuilt binary (no OCaml toolchain needed), once a release is published:
+Prebuilt binary (no OCaml toolchain needed):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/merelang/mere/main/scripts/install.sh | sh
@@ -36,11 +36,14 @@ installed `mere`, `mere install` (see [docs/packages.md](docs/packages.md))
 fetches an app's dependencies *and* its Node runtime host, so no compiler
 source tree is needed to build or run an app.
 
-## Status (as of 2026-07-12)
+## Status (as of 2026-08-20)
 
-- **2035 tests passing**
+- **2527 tests passing**, plus cross-backend parity (117 programs, 5 declared divergences) and ~30 differential gates against external oracles in CI
 - **🏆 Bootstrap fixpoint — truly self-hosting** (v0.1.10, 2026-07-12): the Mere-in-Mere compiler, **compiled by itself and run as wasm, produces byte-identical output to the reference** — and that output runs correctly. Compiling a program with (A) the compiler under the interpreter and (B) the compiler compiled by itself yields the same WAT, byte for byte (CI-verified by a permanent fixpoint regression test). Getting there required guaranteed tail calls in the self-host codegen (`return_call_indirect`, Stage 55f) and fixing three latent self-compilation bugs (an eager pattern-check payload dereference, pointer-equality string compares in the untyped self-host codegen, and a missing `\r` lexer escape — Stage 55g). See [docs/changelog.md](docs/changelog.md).
 - **🏗️ A fifth backend, and an operating system on top of it** (v0.1.134–198): `mere -rv` emits a flat RV32IM binary with no external assembler or linker, and `--bare` hands the program the machine instead of a host — raw memory arrives as an unforgeable window capability, traps as ordinary Mere closures. On that: a preemptive scheduler, a shell, a syscall boundary, and finally **Mere's own self-hosted compiler running as a user process on a Mere kernel, on a CPU written in Mere**, emitting WAT byte-identical to the native interpreter. `mere -rvg` then emits a debug map beside the binary — from the same item list the assembler consumes, so it describes the bytes that actually ran — which is what lets [riscv-dbg](https://github.com/284km/memu/tree/main/riscv-dbg) break on Mere **source lines**, print a backtrace, and step **backwards**. See [docs/bare-metal.md](docs/bare-metal.md).
+- **🛰️ gRPC and GraphQL, against real clients** (v0.1.280–283): `contrib/proto` (protobuf wire both ways, `FileDescriptorSet`, and a code generator from `.proto`), `contrib/http2` (framing + HPACK + an h2c server with flow control in both directions and a worker pool), and `contrib/graphql` (lexer / parser / printer / SDL / executor with null propagation, introspection, and 21 of the specification's 32 validation rules). `grpcurl` and `graphql-js` are the oracles, and interfaces and unions resolve from `__typename` the way graphql-js's default `resolveType` does. See [contrib/proto/README.md](contrib/proto/README.md), [contrib/http2/README.md](contrib/http2/README.md), [contrib/graphql/README.md](contrib/graphql/README.md).
+- **🖥️ Editor support from the compiler's own answers** (v0.1.203–215): diagnostics, hover, go-to-definition, completion, outline, formatting, semantic tokens, references and rename, all served by `mere lsp` — the editor's three questions turned out to be one the compiler could already answer. Debug info is emitted by every backend (C `#line`, LLVM `!dbg`, a Wasm source map, an RV32I map). The extension lives in [merelang/mere-vscode](https://github.com/merelang/mere-vscode).
+- **🌍 A browser for static pages, written in Mere** ([mbrowse](https://github.com/284km/mbrowse)): HTML tokenizer and tree construction, CSS cascade, layout and painting, gated against html5lib and by reftests — the one gate that needs no oracle.
 - **📦 Package system v0.2**: `mere install` reads a `mere.toml`, fetches git dependencies (monorepo `subdir` supported) into `.mere_modules/`, resolves transitive cross-package imports, and writes a `mere.lock`. An optional `[host]` entry also vendors the Node runtime host into `.mere_host/`, so `mere serve app.wasm` runs a compiled server with no compiler source tree. See [docs/packages.md](docs/packages.md).
 - **🧵 Concurrency**: `spawn` / `channel` / `join` + `par_map` on all four backends (interp / C / LLVM / Wasm), with a `Send` / `Sync` type discipline (move / use-after-move analysis, HM-integrated Send bound for polymorphic channels). See `examples/parallel_compute.mere`, `examples/par_map.mere`.
 - **🎉 Self-host bootstrap** (Phase 54, 2026-06-30 → 2026-07-01): the Mere source of the compiler compiles itself. Five major runtime components — `lexer`, `parser`, `evaluator`, `type inferencer`, `formatter` — are written in Mere, compiled through the self-host `parse_and_emit_file` pipeline to WAT, and confirmed running correctly under wasm at runtime (10 CI-verified bootstrap tests exercising parse / eval / infer / format on real inputs). The self-host codegen (`codegen_wasm.mere`) also compiles itself at compile-time (1.56 MB WAT, wat2wasm-verified). **All 18 contrib libraries** self-host-compilable: `ast` / `lexer` / `parser` / `typer` / `eval` / `fmt` / `json` / `path` / `option` / `regex` / `regex.engine` / `argparse` / `test` / `toml` / `markdown/to_html` / `markdown/to_text` / `markdown/toc` / `time`. 13 of the 18 have CI compile-time verification via `bootstrap_wat_ok` (wat2wasm-checks the emitted module).
@@ -61,6 +64,8 @@ source tree is needed to build or run an app.
 - **Phase 36 prelude expansion (16 entries)**: `range` / `list_filter` / `list_take` / `list_drop` / `list_find` / `list_append` / `list_concat` / `list_flat_map` / `list_zip` / `list_for_all` / `list_any` / `list_member` / `list_sum` / `list_product` / `list_max` / `list_min` (34 entries total).
 - REPL: multi-line input, `:env` / `:show` / `:load` / `:reset`, Rust-style code frame error display.
 - Design context is kept in separate internal design notes.
+
+Former tentative name: `lang-ml` (finalized as Mere on 2026-06-19).
 
 ## Feature highlights
 
