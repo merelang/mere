@@ -4,6 +4,54 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.285 — 2026-08-20
+
+_"On every backend" was verified on one platform, and CI said so for four days._
+
+v0.1.271 named the stack overflow, and its title says "on every backend". It was true on
+Darwin. On Linux it stopped the C backend compiling and the LLVM backend linking — every
+program, not an edge case — and `parity` has been red since the commit after it. Four
+consecutive days of failures, latterly hidden behind a stale version assertion.
+
+**Three platform-specific defects in one runtime block.**
+
+`pthread_getattr_np` is glibc's way to ask a thread for its stack, and glibc declares it
+only under `_GNU_SOURCE`. Without the macro the emitted C called an undeclared function,
+which clang 16 and later treat as an ERROR — and `-w`, which the parity harness passes,
+does not silence an error. The `#define` now comes before every header, which is the only
+place it works.
+
+`static char __lang_sigstack[SIGSTKSZ * 4]` is a variable length array at file scope on
+modern glibc, where `SIGSTKSZ` expands to `sysconf(_SC_SIGSTKSZ)` rather than a constant.
+It is a literal 65536 now, comfortably above `MINSIGSTKSZ` on both platforms.
+
+**And the one that had no preprocessor to hide behind.** The C backend picks between the
+Darwin pair and the glibc call with `#ifdef`; LLVM IR cannot, so the Darwin names went out
+on every target and nothing linked. They are `declare extern_weak` now and the call is
+guarded: on Darwin they resolve and the fault keeps its name, and elsewhere they are null,
+the bounds stay unknown, and the handler falls through to the plain segmentation fault it
+already reported for a fault outside the stack. That costs the NAME off Darwin and nothing
+else, and it needs no platform detection at emit time — so `-ll` output is still the same
+file wherever it was produced. A name derived from an assumed stack size would be wrong for
+any program linked with a bigger one, which is worse than no name.
+
+**What let it through is the shape worth keeping.** The suite checks this feature by
+looking for `stack overflow (recursion too deep)` and `sigaltstack` in the EMITTED TEXT.
+Those assertions stayed green throughout, because a string is present whether or not the
+file it is in compiles. `scripts/stack_overflow.sh` runs a program that recurses until it
+dies and reads what it says, per backend, with the per-platform answers pinned rather than
+smoothed over. It is in CI.
+
+    platform   C backend                              LLVM backend
+    Darwin     stack overflow (recursion too deep)    stack overflow (recursion too deep)
+    other      stack overflow (recursion too deep)    a plain crash, no name
+
+Measured on Linux in a container, not inferred: the C backend now compiles and matches the
+interpreter on the first twelve parity programs, where before none of them built, and it
+names the overflow there for the first time.
+
+---
+
 ## v0.1.284 — 2026-08-19
 
 _Generated inputs for the differential gates, and five NUL-length defects they found._

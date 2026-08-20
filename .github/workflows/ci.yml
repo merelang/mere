@@ -207,6 +207,12 @@ jobs:
       - name: Run tests (full, with the wasm toolchain present)
         run: opam exec -- dune runtest
 
+      # A program that overflows, and what it says when it does. The suite checks this
+      # feature by looking for the message in the EMITTED TEXT, which stayed green while
+      # neither backend built on this runner at all. See v0.1.285.
+      - name: stack_overflow (the fault names itself, per backend)
+        run: sh scripts/stack_overflow.sh
+
       - name: parity (interp / C / LLVM / wasm agree)
         run: sh scripts/parity.sh
 

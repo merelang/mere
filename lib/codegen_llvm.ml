@@ -6764,8 +6764,21 @@ let runtime_decls =
       (* @write is already declared by the runtime above *)
       "declare void @_exit(i32)";
       "declare ptr @pthread_self()";
-      "declare ptr @pthread_get_stackaddr_np(ptr)";
-      "declare i64 @pthread_get_stacksize_np(ptr)";
+      (* extern_weak, BECAUSE THESE TWO ARE DARWIN-ONLY AND LLVM IR HAS NO #ifdef.
+         The C backend picks between the Darwin pair and glibc's `pthread_getattr_np`
+         with a preprocessor branch; IR cannot, so v0.1.271 emitted the Darwin names on
+         every target and nothing linked on Linux -- every LLVM-backend program, which is
+         what CI had been saying since that release.
+
+         A weak declaration resolves to null instead of failing to link, so the call is
+         guarded below and the bounds simply stay unknown off Darwin. That is not a
+         degradation invented here: the handler already treats a zero `hi` as "not the
+         stack" and reports a plain segmentation fault, which is the behaviour the comment
+         above calls wrong-but-quiet rather than wrong-and-armed. It costs the NAME of the
+         fault on non-Darwin and nothing else, and it needs no platform detection at emit
+         time -- so `-ll` output stays the same file wherever it was produced. *)
+      "declare extern_weak ptr @pthread_get_stackaddr_np(ptr)";
+      "declare extern_weak i64 @pthread_get_stacksize_np(ptr)";
       "@__lang_sigstack = internal global [131072 x i8] zeroinitializer";
       "@__lang_stack_lo = internal global i64 0";
       "@__lang_stack_hi = internal global i64 0";
@@ -6799,6 +6812,11 @@ let runtime_decls =
       "}";
       "define internal void @__lang_install_segv() {";
       "entry:";
+      (* Guarded, so a null weak symbol is skipped rather than called. Off Darwin the
+         bounds stay zero and the handler falls through to "segmentation fault". *)
+      "  %have = icmp ne ptr @pthread_get_stackaddr_np, null";
+      "  br i1 %have, label %bounds, label %nobounds";
+      "bounds:";
       "  %th = call ptr @pthread_self()";
       "  %hip = call ptr @pthread_get_stackaddr_np(ptr %th)";
       "  %sz = call i64 @pthread_get_stacksize_np(ptr %th)";
@@ -6806,6 +6824,8 @@ let runtime_decls =
       "  %lo = sub i64 %hi, %sz";
       "  store i64 %hi, ptr @__lang_stack_hi";
       "  store i64 %lo, ptr @__lang_stack_lo";
+      "  br label %nobounds";
+      "nobounds:";
       (* stack_t on macOS is { ss_sp, ss_size, ss_flags } -- that order *)
       "  %ss = alloca [32 x i8]";
       "  call void @llvm.memset.p0.i64(ptr %ss, i8 0, i64 32, i1 false)";
