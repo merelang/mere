@@ -696,6 +696,62 @@ let rec deep_erase_tyvars (t : Ast.ty) : Ast.ty =
   | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, deep_erase_tyvars inner)
   | t -> t
 
+(* v0.1.293: the type that `ty_tag` NAMES, which is not always the type handed to it.
+   `ty_tag` erases an unresolved tyvar to `int` -- and a region-parameterised
+   container's unresolved region slot to `__heap` -- so a type `ty_is_concrete`
+   REJECTS can still have its copier named in the emitted C. Registration has to go
+   through this, or the emitted call has no definition. That is what happened to
+   `__mcopy_list_tuple_str_int` (a closure capturing a `list (str, 'a)` whose element
+   type never resolved) and, by the same mechanism, to a trait dictionary's closure
+   field. Erasing with `deep_erase_tyvars` instead is NOT the same thing: it turns the
+   region slot into `int` and would register `Vec_int_int` for what `ty_tag` calls
+   `Vec___heap_int` -- the mpng P5 shape, one type under two names. *)
+let rec ty_as_tagged (t : Ast.ty) : Ast.ty =
+  match Ast.walk t with
+  | Ast.TyVar _ | Ast.TyParam _ -> Ast.TyInt
+  | Ast.TyTuple ts -> Ast.TyTuple (List.map ty_as_tagged ts)
+  | Ast.TyArrow (a, b) -> Ast.TyArrow (ty_as_tagged a, ty_as_tagged b)
+  | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, ty_as_tagged inner)
+  | Ast.TyCon ((("Vec" | "Map" | "StrBuf" | "ByteBuf") as name), (first :: rest)) ->
+    (* Slot 0 is the region. Keep ty_tag's answer for an unresolved one. *)
+    let first =
+      match Ast.walk first with
+      | Ast.TyVar _ | Ast.TyParam _ -> Ast.TyRef (Ast.BorrowedRead, "__heap", Ast.TyUnit)
+      | other -> ty_as_tagged other
+    in
+    Ast.TyCon (name, first :: List.map ty_as_tagged rest)
+  | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map ty_as_tagged args)
+  | t -> t
+
+(* v0.1.293: a record's field types AS THE STRUCT EMITTER WILL EMIT THEM -- the one
+   place that knows the rule, because three places needed it and two of them had a
+   different answer.
+
+   A polymorphic record (a trait dictionary `Trait__dict 'a` is the case that matters)
+   is monomorphized at `args`, with any residual param erased to int. So for
+   `Num__dict int` the field is `int -> int -> int`, and for `Num__dict m7` it is
+   `m7 -> m7 -> m7`. Reading `r_fields` directly instead answers with the GENERIC field
+   type, and the two consumers then disagree in opposite directions: the copier named
+   `__mcopy_closure_int_closure_int_int` for a struct whose field is
+   `closure_m7_closure_m7_m7` (wrong name and wrong type), while the collector that
+   decides which copiers to emit dropped the field entirely, because a type holding a
+   TyParam is not concrete. That combination is what emitted a call to a function that
+   was never defined. *)
+let record_field_types_at (name : string) (args : Ast.ty list) : (string * Ast.ty) list =
+  match Hashtbl.find_opt Typer.records name with
+  | None -> []
+  | Some info ->
+    if info.Typer.r_params = [] then info.Typer.r_fields
+    else
+      let args_erased = List.map (fun a -> deep_erase_tyvars (Ast.walk a)) args in
+      let mapping =
+        try List.combine info.Typer.r_params args_erased
+        with Invalid_argument _ -> [] in
+      if mapping = [] then info.Typer.r_fields
+      else
+        List.map (fun (fn, ft) -> (fn, ty_as_tagged (subst_params mapping ft)))
+          info.Typer.r_fields
+
 let rec ty_tag (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyInt -> "int"
@@ -5841,12 +5897,12 @@ let emit_copy_fn (tag : string) (t : Ast.ty) : string =
       List.mapi (fun i et ->
         Printf.sprintf "  v.f%d = __mcopy_%s(r, v.f%d);" i (ty_tag et) i) ts in
     Printf.sprintf "%s {\n%s\n  return v;\n}" header (String.concat "\n" steps)
-  | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
-    let info = Hashtbl.find Typer.records name in
+  | Ast.TyCon (name, args) when Hashtbl.mem Typer.records name ->
+    (* Fields at `args`, not the generic ones: see record_field_types_at. *)
     let steps =
       List.map (fun (fname, ft) ->
         Printf.sprintf "  v.%s = __mcopy_%s(r, v.%s);" (c_field_name fname) (ty_tag ft) (c_field_name fname))
-        info.Typer.r_fields in
+        (record_field_types_at name args) in
     Printf.sprintf "%s {\n%s\n  return v;\n}" header (String.concat "\n" steps)
   | Ast.TyCon (name, args) ->
     let variants =
@@ -9003,8 +9059,10 @@ let rec add_type_and_deps (tbl : (string, Ast.ty) Hashtbl.t) (t : Ast.ty) : unit
       | Ast.TyCon (name, args) ->
         List.iter (add_type_and_deps tbl) args;
         if Hashtbl.mem Typer.records name then
-          let info = Hashtbl.find Typer.records name in
-          List.iter (fun (_, ft) -> add_type_and_deps tbl ft) info.Typer.r_fields
+          (* At `args`, so a dictionary's closure field is registered rather than
+             dropped as non-concrete: see record_field_types_at. *)
+          List.iter (fun (_, ft) -> add_type_and_deps tbl ft)
+            (record_field_types_at name args)
         else if Hashtbl.mem polymorphic_variants name then begin
           let (params, variants) = Hashtbl.find polymorphic_variants name in
           let svariants = subst_variants params args variants in
@@ -9264,26 +9322,13 @@ let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) :
          && not (Hashtbl.mem seen_records name)
       then begin
         Hashtbl.add seen_records name ();
-        let info = Hashtbl.find Typer.records name in
-        if info.Typer.r_params = [] then
-          List.iter (fun (_, ft) -> walk_ty ft) info.Typer.r_fields
-        else begin
-          (* Polymorphic record (e.g. a trait dictionary `Trait__dict 'a`):
-             the struct emitter monomorphizes it at `args`, with residual
-             TyParams erased to int (deep_erase_tyvars). A dict record left
-             fully generic — e.g. `Trait__pack`'s dictionary parameter — is
-             emitted as `Trait__dict_int`, whose field closure types
-             (`int -> R`) may appear nowhere else in the program. Walk the
-             substituted field types here so those closure typedefs are
-             collected and the emitted struct body stays well-formed. *)
-          let args_erased = List.map (fun a -> deep_erase_tyvars (Ast.walk a)) args in
-          let mapping =
-            try List.combine info.Typer.r_params args_erased
-            with Invalid_argument _ -> [] in
-          if mapping <> [] then
-            List.iter (fun (_, ft) ->
-              walk_ty (subst_params mapping ft)) info.Typer.r_fields
-        end
+        (* Walk the field types at `args` so a dictionary's closure typedefs are
+           collected even when that closure type appears nowhere else in the
+           program — e.g. `Trait__pack`'s fully generic dictionary parameter, which
+           is emitted as `Trait__dict_int`. This rule now lives in one place
+           (record_field_types_at); it used to live only here, and the copier and
+           the copy-type collector each had their own wrong version of it. *)
+        List.iter (fun (_, ft) -> walk_ty ft) (record_field_types_at name args)
       end
     | Ast.TyRef (_, _, inner) -> walk_ty inner
     | _ -> ()
@@ -10621,10 +10666,22 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   (* v0.1.290: one env copier per closure env, so a closure can be copied out of
      a region. The forward decls go with the env typedefs (before anything that
      names them); the definitions go after the __mcopy_<tag> family they call. *)
+  (* v0.1.293: the lifted half of this list is NOT filtered on `captures = []`, because
+     the two halves differ in a way one shared filter assumed away. A CLOSURE with no
+     captures has no env struct at all and passes `.env = NULL`, so there is nothing to
+     copy and skipping it is right. An inner-lifted fn ALWAYS gets an env struct -- with
+     `char __unused;` in it so `sizeof` stays positive -- and its use site writes
+     `__env_local->__copy = __mcopy_env_<env>` unconditionally. Skip it there and the
+     emitted C names a copier that was never defined.
+
+     Measured, not reasoned: restoring the filter fails exactly one parity program
+     (`prop_list`) and nothing else. An earlier version of this comment claimed the
+     filter was what broke all 16 -- it was not; those were the tag-vs-concrete
+     mismatch that ty_as_tagged and record_field_types_at fix, and the two faults were
+     independent, each hidden behind the other's failure. *)
   let closure_env_copy_list =
     !closure_env_copies
-    @ List.filter_map (fun (lifted_name, captures, _a, _r) ->
-        if captures = [] then None else Some (lifted_name ^ "_env", captures))
+    @ List.map (fun (lifted_name, captures, _a, _r) -> (lifted_name ^ "_env", captures))
         !inner_lift_closure_pending
   in
   (* no region blocks -> no copiers to emit, and nothing references them *)
@@ -10755,9 +10812,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        per-message region. *)
     List.iter (add_type_and_deps copy_types) !region_result_types;
     (* v0.1.290: a closure env's captured fields are copied by the env copier,
-       so each field type needs its own __mcopy_<tag>. *)
+       so each field type needs its own __mcopy_<tag>.
+       v0.1.293: through ty_as_tagged, because the copier names `__mcopy_<ty_tag t>`
+       and ty_tag erases a tyvar the concrete-only registration would drop -- a
+       capture of `list (str, 'a)` was named and never defined. *)
     List.iter (fun (_n, fields) ->
-      List.iter (fun (_, t) -> add_type_and_deps copy_types t) fields)
+      List.iter (fun (_, t) -> add_type_and_deps copy_types (ty_as_tagged t)) fields)
       closure_env_copy_list;
     Hashtbl.iter (fun _ elem_ty ->
       add_type_and_deps copy_types elem_ty) channel_instances;
