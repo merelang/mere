@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.294 — 2026-08-22
+
+_Every formatted value leaked its scaffolding._
+
+Both native backends build a formatted string in an asprintf buffer, copy it into
+the current region at the `__lang_str_of_cstr` boundary -- and never free the
+buffer. One vasprintf buffer is 160 bytes on macOS, so a million `str_of_int`
+calls leaked 48 MB. The list formatter was worse: it rolled its accumulator
+through asprintf on every element (`__acc = __buf`), leaking the whole previous
+prefix each step -- quadratic bytes in the list length.
+
+Found from the outside: mere-ruby's new `bench/region_reuse.sh` asked whether a
+region whose block chain GREW past one block hands its memory back in a reusable
+form (the property a compaction loop stands on), and the answer looked like no --
+peak footprint grew linearly, ~38 MiB per iteration, while the runtime's own
+block counters insisted everything was returned. A minimal C probe cleared libc
+(the same malloc/free pattern is flat at any iteration count), and `leaks`
+named the 300,000 vasprintf buffers.
+
+The boundary now has an owning twin: `__lang_str_take_cstr` copies into the
+region and frees its argument. All 13 asprintf sites in the C backend and all 6
+in the LLVM backend go through it; `getenv`/`argv`/literal sites stay on the
+borrowing one. The C list/json formatters free their rolling accumulator.
+
+After the fix the original question answers itself: released grown chains are
+fully reusable through plain libc -- 1, 8, and 32 sibling ~64 MB regions all peak
+at 36-39 MiB. No runtime block pool is needed.
+
+parity 119/0, dune test 2536/0, ctest, stack_overflow, selfhost_check,
+url/encoding parity, debug_info, wasm_sourcemap, lsp_smoke -- all run locally
+before push, plus `leaks --atExit` reporting zero on the probe and on a
+list-show program.
+
+---
+
 ## v0.1.293 — 2026-08-21
 
 _Whoever names a copier decides that it exists._

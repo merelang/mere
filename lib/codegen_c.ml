@@ -5257,14 +5257,14 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
   in
   match Ast.walk t with
   | Ast.TyInt ->
-    header ^ " {\n  char* buf; asprintf(&buf, \"%lld\", v); return __lang_str_of_cstr(buf);\n}"
+    header ^ " {\n  char* buf; asprintf(&buf, \"%lld\", v); return __lang_str_take_cstr(buf);\n}"
   | Ast.TyBool ->
     header ^ " { return __lang_str_of_cstr(v ? \"true\" : \"false\"); }"
   | Ast.TyStr ->
     (* Phase 23.5: escape special chars so show_str's output matches
        interp (which shows backslash-n as 2 literal chars, not a real
        newline). *)
-    header ^ " { char* buf; asprintf(&buf, \"\\\"%s\\\"\", __lang_str_escape(v)); return __lang_str_of_cstr(buf); }"
+    header ^ " { char* buf; asprintf(&buf, \"\\\"%s\\\"\", __lang_str_escape(v)); return __lang_str_take_cstr(buf); }"
   | Ast.TyUnit ->
     header ^ " { (void)v; return __lang_str_of_cstr(\"()\"); }"
   | Ast.TyFloat ->
@@ -5279,7 +5279,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
         Printf.sprintf "show_%s(v.f%d)" (ty_tag et) i) ts
     in
     let fmt = "(" ^ String.concat ", " (List.map (fun _ -> "%s") ts) ^ ")" in
-    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return __lang_str_of_cstr(buf);\n}"
+    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return __lang_str_take_cstr(buf);\n}"
       header fmt (String.concat ", " parts)
   | Ast.TyArrow _ ->
     header ^ " { (void)v; return __lang_str_of_cstr(\"<closure>\"); }"
@@ -5302,11 +5302,12 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
            } else {\n  \
              asprintf(&__buf, \"%%s, %%s\", __acc, %s(__cur->payload.Cons.f0));\n  \
            }\n  \
+           if (!__first) free((void*)__acc);\n  \
            __acc = __buf;\n  \
            __cur = __cur->payload.Cons.f1;\n  \
            __first = 0;\n  \
          }\n  \
-         char* __buf; asprintf(&__buf, \"%%s]\", __acc); return __lang_str_of_cstr(__buf);\n\
+         char* __buf; asprintf(&__buf, \"%%s]\", __acc); if (!__first) free((void*)__acc); return __lang_str_take_cstr(__buf);\n\
        }"
       header cty elem_show elem_show
   | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
@@ -5322,7 +5323,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
         (List.map (fun (fname, _) -> fname ^ " = %s") info.Typer.r_fields) ^
       " }"
     in
-    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return __lang_str_of_cstr(buf);\n}"
+    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return __lang_str_take_cstr(buf);\n}"
       header fmt (String.concat ", " fields_parts)
   | Ast.TyCon (name, args) ->
     (* Variant — either monomorphic or polymorphic instance. Find its
@@ -5353,7 +5354,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
             dot tag_n cname
         | Some ty ->
           Printf.sprintf
-            "  if (v%stag == %d) { char* buf; asprintf(&buf, \"%s %%s\", show_%s(v%spayload.%s)); return __lang_str_of_cstr(buf); }"
+            "  if (v%stag == %d) { char* buf; asprintf(&buf, \"%s %%s\", show_%s(v%spayload.%s)); return __lang_str_take_cstr(buf); }"
             dot tag_n cname (ty_tag ty) dot cname)
         variants
     in
@@ -5375,11 +5376,11 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
   let header = Printf.sprintf "__attribute__((noinline)) static const char* to_json_%s(%s v)" tag cty in
   match Ast.walk t with
   | Ast.TyInt ->
-    header ^ " {\n  char* buf; asprintf(&buf, \"%lld\", v); return __lang_str_of_cstr(buf);\n}"
+    header ^ " {\n  char* buf; asprintf(&buf, \"%lld\", v); return __lang_str_take_cstr(buf);\n}"
   | Ast.TyBool ->
     header ^ " { return __lang_str_of_cstr(v ? \"true\" : \"false\"); }"
   | Ast.TyStr ->
-    header ^ " { char* buf; asprintf(&buf, \"\\\"%s\\\"\", __lang_str_escape(v)); return __lang_str_of_cstr(buf); }"
+    header ^ " { char* buf; asprintf(&buf, \"\\\"%s\\\"\", __lang_str_escape(v)); return __lang_str_take_cstr(buf); }"
   | Ast.TyUnit ->
     header ^ " { (void)v; return __lang_str_of_cstr(\"null\"); }"
   | Ast.TyArrow _ ->
@@ -5390,7 +5391,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
         Printf.sprintf "to_json_%s(v.f%d)" (ty_tag et) i) ts
     in
     let fmt = "[" ^ String.concat "," (List.map (fun _ -> "%s") ts) ^ "]" in
-    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return __lang_str_of_cstr(buf);\n}"
+    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return __lang_str_take_cstr(buf);\n}"
       header fmt (String.concat ", " parts)
   | Ast.TyCon ("list", [elem_ty]) when Hashtbl.mem polymorphic_variants "list" ->
     let elem = "to_json_" ^ ty_tag (Ast.walk elem_ty) in
@@ -5407,11 +5408,12 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
            } else {\n  \
              asprintf(&__buf, \"%%s,%%s\", __acc, %s(__cur->payload.Cons.f0));\n  \
            }\n  \
+           if (!__first) free((void*)__acc);\n  \
            __acc = __buf;\n  \
            __cur = __cur->payload.Cons.f1;\n  \
            __first = 0;\n  \
          }\n  \
-         char* __buf; asprintf(&__buf, \"%%s]\", __acc); return __lang_str_of_cstr(__buf);\n\
+         char* __buf; asprintf(&__buf, \"%%s]\", __acc); if (!__first) free((void*)__acc); return __lang_str_take_cstr(__buf);\n\
        }"
       header cty elem elem
   | Ast.TyCon ("option", [inner]) ->
@@ -5436,7 +5438,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
         (List.map (fun (fname, _) -> "\\\"" ^ fname ^ "\\\":%s") info.Typer.r_fields) ^
       "}"
     in
-    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return __lang_str_of_cstr(buf);\n}"
+    Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return __lang_str_take_cstr(buf);\n}"
       header fmt (String.concat ", " fields_parts)
   | Ast.TyCon (name, args) ->
     let variants =
@@ -5463,7 +5465,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
             dot tag_n cname
         | Some ty ->
           Printf.sprintf
-            "  if (v%stag == %d) { char* buf; asprintf(&buf, \"{\\\"%s\\\":%%s}\", to_json_%s(v%spayload.%s)); return __lang_str_of_cstr(buf); }"
+            "  if (v%stag == %d) { char* buf; asprintf(&buf, \"{\\\"%s\\\":%%s}\", to_json_%s(v%spayload.%s)); return __lang_str_take_cstr(buf); }"
             dot tag_n cname (ty_tag ty) dot cname)
         variants
     in
@@ -6817,6 +6819,17 @@ let str_concat_helper =
       "  memcpy(r, s, n);";
       "  return r;";
       "}";
+      (* v0.1.294: same, but OWNS s -- copies into the current region, then
+         frees it. Every asprintf result must come through here: each used to
+         leak its malloc'd buffer (160 bytes per vasprintf on this platform;
+         48 MB per million str_of_int calls -- found by mere-ruby's
+         bench/region_reuse.sh, where it read as "region reuse does not
+         work"). getenv / argv / string literals must NOT come here. *)
+      "static const char* __lang_str_take_cstr(char* s) {";
+      "  const char* r = __lang_str_of_cstr(s);";
+      "  free(s);";
+      "  return r;";
+      "}";
       (* String literals lower to a __lang_str_dup_n call: a fresh
          header-carrying copy of the first N bytes (N is the literal's exact
          byte length, so embedded NULs copy faithfully). Mere strings compare
@@ -7477,7 +7490,7 @@ let str_concat_helper =
       "  }";
       "  char* buf;";
       "  asprintf(&buf, has_dot ? \"%s\" : \"%s.0\", tmp);";
-      "  return __lang_str_of_cstr(buf);";
+      "  return __lang_str_take_cstr(buf);";
       "}";
       "";
       (* v0.1.127: time () — wall-clock epoch seconds as a double (matches the
