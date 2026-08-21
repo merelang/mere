@@ -4,6 +4,44 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.290 — 2026-08-21
+
+_A closure carries the copier that lets it leave a region._
+
+Closure environments were allocated in the default (program-lifetime) region, and
+the reason was written where the deep-copy family is defined: "closures copy
+shallowly: their envs live in the default region". A closure's env is a
+type-erased `void*`, so nothing could copy it into another region — and a
+permanent allocation was the only answer that could not dangle. The cost is
+invisible in a small program and decisive in a large one: an interpreter written
+in Mere allocated 2548 closure envs' worth of default-region references against
+1346 current-region ones, so every call leaked whatever it closed over.
+
+A closure now has a third member beside `env` and `fn`: `void* (*copy)(region*,
+void*)`, generated per env type next to the env's own typedef, where the field
+types are known. It region-allocates a fresh env, copies the struct across, then
+re-copies each captured field through that field's own `__mcopy_<tag>` — so a
+captured string is deep-copied rather than left pointing into the region that is
+about to be released. `__mcopy` for an arrow calls it when it is set, and a
+closure leaves a region block the way every other value does.
+
+Two shapes deliberately keep the old behaviour, and get it for free from C's
+zero-initialization of omitted designated initializers: a closure with no
+captures passes `env == NULL`, and an FFI adapter holds a borrowed pointer it
+does not own. Both leave `copy` zero and are copied shallowly.
+
+The test that asserted the old rule now asserts the new one, in the same three
+places it was checked: the allocation follows `__lang_current_region`, the
+closure literal carries `.copy = __mcopy_env_...`, and a captured `str` reaches
+the copier. 2533 tests pass across four backends; the change is C-only, since the
+other backends do not share this representation.
+
+What this does NOT do on its own: an interpreter with no `region` blocks has
+`__lang_current_region == &__lang_default_region`, so nothing moves until the
+blocks exist. It removes the reason they could not pay off.
+
+---
+
 ## v0.1.289 — 2026-08-20
 
 _A record field is a C struct member, and one name answered two questions._

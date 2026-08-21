@@ -111,9 +111,19 @@ as of v0.1.31 it is the implemented semantics on the C backend:
   and variant nodes allocate in a thread-local *current region*. A
   `region R { ... }` block makes itself current for its body, so
   everything the body allocates is reclaimed when the block exits.
-  Closure environments and container structs (Vec / Map / StrBuf) stay in
-  their own binding region — they carry identity and must not die with a
-  scratch block.
+  Container structs (Vec / Map / StrBuf) stay in their own binding region
+  — they carry identity and must not die with a scratch block.
+- **Closure environments follow the current region too (v0.1.290).** They
+  used to be allocated in the default (program-lifetime) region for one
+  reason: a closure's env is a type-erased `void*`, so nothing could copy
+  it out of a dying block, and a permanent allocation was the only safe
+  answer. A closure now carries a third member beside `env` and `fn` — a
+  `copy` function generated per env type, which region-allocates a fresh
+  env and deep-copies each captured field through that field's own
+  `__mcopy_<tag>`. `__mcopy` for an arrow calls it, so a closure leaves a
+  region block the way every other value does. A closure with no captures
+  (`env == NULL`) and an FFI adapter holding a borrowed pointer leave
+  `copy` zero and are copied shallowly, exactly as before.
 - **The block's result is copied out** into the enclosing region
   (per-type deep copy, specialized like the `show`/`==` derive family),
   so returning a value from a block is always safe. A container cannot be

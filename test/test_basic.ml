@@ -3460,10 +3460,24 @@ let () =
     (codegen_with_decls
       "let add = fn n -> fn x -> n + x in (add 3) 4")
     "static __lang_region __lang_default_region;";
-  assert_contains "codegen: closure env uses default region alloc"
+  (* v0.1.290: a closure env follows the CURRENT region, and the closure carries
+     the copier that lets it leave one. It used to be allocated in the default
+     (program-lifetime) region, for one reason: nothing could copy a type-erased
+     `void* env`, so it could not be moved out of a dying block -- which made
+     every closure a permanent allocation. This test named that decision, and
+     names the new one now. *)
+  assert_contains "codegen: closure env follows the current region"
     (codegen_with_decls
       "let add = fn n -> fn x -> n + x in (add 3) 4")
-    "__lang_region_alloc(&__lang_default_region, sizeof(__anon";
+    "__lang_region_alloc(__lang_current_region, sizeof(__anon";
+  assert_contains "codegen: a closure carries its env copier"
+    (codegen_with_decls
+      "let add = fn n -> fn x -> n + x in (add 3) 4")
+    ".copy = __mcopy_env___anon";
+  assert_contains "codegen: the env copier deep-copies a captured str"
+    (codegen_with_decls
+      "let f = fn s -> fn x -> str_len s + x in (f \"ab\") 1")
+    "__mcopy_env_";
   assert_no_contains "codegen: closure env no longer uses malloc"
     (codegen_with_decls
       "let add = fn n -> fn x -> n + x in (add 3) 4")
