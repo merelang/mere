@@ -4,6 +4,55 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.296 — 2026-08-22
+
+_A loop that carries its state between arenas._
+
+`region R { }` is LIFO, and one thing genuinely does not fit LIFO: long-lived
+state that is periodically compacted. A compaction copies the live set into a
+NEW space and frees the OLD one -- the new generation must outlive the old --
+and every attempt to write that with nested blocks puts the copy in a region
+that dies first (or, iterated, in the enclosing region, monotonically). The ML
+Kit hit this wall thirty years ago; it is the reason "region inference
+degenerates to one global region" for non-LIFO programs.
+
+`region R loop x { body }` is the hand-over-hand form. Each iteration runs in
+a fresh arena named R. The body sees `x : option C` -- None on entry, Some
+carry after -- and answers `region_flow[C, D]` (a new prelude type):
+`Continue carry` deep-copies the carry into the next arena and releases the
+current one; `Done d` copies d out and exits. The typing rule is the block's
+with one split: **the carry may mention R** -- a `Map[R, ...]` crossing arenas
+is the construct's whole point -- **the Done value may not**. No rigid type
+variables were needed, though the road here assumed they would be: nothing of
+arena N reaches arena N+1 except through the Continue copy, so the one name R
+honestly denotes "the loop's current arena" in every iteration. The construct
+the compaction story was blocked on turned out to be a loop, not a quantifier.
+
+Continue's copy goes through a new family, `__mdeep_<tag>`: __mcopy with the
+one difference that containers are copied into the target region instead of
+passed as handles (a handle would dangle the moment the old arena is
+released). A carried Map is rebuilt entry by entry -- `_set` re-hashes and
+copies keys and values into the new arena, so the copy IS the compaction:
+dead overwrites simply stay behind. What __mdeep cannot copy is refused at
+emit time, by type: functions (captures hide behind a void* it cannot see
+into), Channel, ThreadHandle, OwnedVec, StrBuf, ByteBuf.
+
+Measured: 2000 cycles overwriting 50 map keys 1000 times each -- 2.4 GB of
+dead entries churned, 51 entries live -- peak footprint **1.6 MiB**, 0.32 s.
+The same shape without the loop is the monotonic default-region growth every
+long-running Mere program has today.
+
+Backends: interp and C; llvm / wasm / rv32 refuse cleanly (their reclamation
+is a LIFO bump rollback, which cannot express the swap). Errors are typed:
+a Done value mentioning R is a type error naming both rules; an uncarryable
+type in C names itself and why.
+
+parity 120/0 (new: region_loop_carry -- interp and C agree, llvm/wasm
+documented-refuse), dune test 2541/0, ctest, stack_overflow, selfhost_check,
+lsp_smoke.
+
+---
+
 ## v0.1.295 — 2026-08-22
 
 _One cached region is not enough once regions nest._

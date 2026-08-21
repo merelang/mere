@@ -1,0 +1,30 @@
+// The region-carrying loop: a Map crosses arenas by deep copy at each
+// Continue, dead overwrites stay behind in the released arena. Interp (no
+// arenas) and C must agree on the value; llvm / wasm refuse cleanly (their
+// bump rollback is LIFO and cannot express the swap).
+let pad = "----------------------------------------" in
+let rec churn = fn (m: Map[RL, str, str]) -> fn (k: int) ->
+  if k == 0 then m
+  else
+    let _ = map_set m ("key" ++ str_of_int (k % 7)) (str_of_int k ++ pad) in
+    churn m (k - 1);
+let total = region RL loop x {
+  match x with
+  | None ->
+    let m0 = map_new () in
+    let _ = map_set m0 "cycles" "0" in
+    Continue m0
+  | Some m ->
+    let c = int_of_str (map_get m "cycles") in
+    if c >= 200 then Done (map_len m)
+    else
+      let m2 = churn m 40 in
+      let _ = map_set m2 "cycles" (str_of_int (c + 1)) in
+      Continue m2
+} in
+let n = region RS loop y {
+  match y with
+  | None -> Continue 1
+  | Some k -> if k >= 5 then Done (k * 10) else Continue (k + 1)
+} in
+print ("live: " ++ str_of_int total ++ " n: " ++ str_of_int n ++ "\n")

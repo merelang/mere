@@ -347,6 +347,12 @@ let copy_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
    collection time — emission runs before the collector is in scope. *)
 let region_result_types : Ast.ty list ref = ref []
 
+(* v0.1.296: carry types of every `region R loop` in the program -- each needs
+   the __mdeep_<tag> family (deep = containers copied into the target region).
+   Filled at emission time, read where the copy families are assembled, same
+   order-dependence as region_result_types above. *)
+let region_loop_carry_types : Ast.ty list ref = ref []
+
 (* v0.1.291: does this program use a region block at all? A closure only needs a
    copier for its env if the env can be in a region that dies -- and with no
    region blocks, `__lang_current_region` IS the default region, so nothing can.
@@ -934,7 +940,7 @@ let lookup_var_ty (e : Ast.expr) (name : string) : Ast.ty =
       List.iter (fun (_, g, b) ->
         (match g with Some ge -> go ge | None -> ()); go b) arms
     | Ast.Tuple es -> List.iter go es
-    | Ast.Region_block (_, b) -> go b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
     | Ast.Ref (_, _, a) -> go a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
     | Ast.Field_get (a, _) -> go a
@@ -1045,6 +1051,7 @@ let free_vars (e : Ast.expr) (initially_bound : string list) : string list =
         go body bound') arms
     | Ast.Tuple es -> List.iter (fun e -> go e bound) es
     | Ast.Region_block (n, b) -> go b (n :: bound)
+    | Ast.Region_loop (n, x, b) -> go b (x :: n :: bound)
     | Ast.Ref (_, _, a) -> go a bound
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e bound) fs
     | Ast.Field_get (a, _) -> go a bound
@@ -1113,7 +1120,7 @@ let rec var_appears_in (v : string) (e : Ast.expr) : bool =
   | Ast.Tuple es -> List.exists g es
   | Ast.Record_lit (_, fs) -> List.exists (fun (_, e') -> g e') fs
   | Ast.Record_update (a, fs) -> g a || List.exists (fun (_, e') -> g e') fs
-  | Ast.Region_block (_, b) -> g b
+  | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> g b
   | Ast.Ref (_, _, a) -> g a
 
 (* Check 1: no value-leaking construction has v inside it. *)
@@ -1149,7 +1156,7 @@ let rec no_value_leak (v : string) (e : Ast.expr) : bool =
        (match gd with Some ge -> g ge | None -> true)
        && (List.mem v (pattern_vars pat) || g b)) arms
   | Ast.With (n, value, body) -> g value && (n = v || g body)
-  | Ast.Region_block (_, b) -> g b
+  | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> g b
   | Ast.Ref (_, _, a) -> g a
 
 (* Check 2: tail expression of body doesn't return v (or a value containing v). *)
@@ -1167,6 +1174,7 @@ let rec tail_does_not_return_v (v : string) (e : Ast.expr) : bool =
        List.mem v (pattern_vars pat) || tail_does_not_return_v v b) arms
   | Ast.With (n, _, body) -> n = v || tail_does_not_return_v v body
   | Ast.Region_block (_, body) -> tail_does_not_return_v v body
+  | Ast.Region_loop (_, _, body) -> tail_does_not_return_v v body
   | Ast.Annot (a, _) -> tail_does_not_return_v v a
   | _ ->
     (* Other tail expressions: type determines safety. If tail type contains
@@ -1305,7 +1313,7 @@ let rec no_tainted_leak (tainted : string list) (e : Ast.expr) : bool =
     && List.for_all (fun (_, gd, b) ->
        (match gd with Some ge -> g ge | None -> true) && g b) arms
   | Ast.With (_, value, body) -> g value && g body
-  | Ast.Region_block (_, b) -> g b
+  | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> g b
   | Ast.Ref (_, _, a) -> g a
 
 (* Combined check, hardened with taint propagation. *)
@@ -3700,6 +3708,127 @@ let rec emit_expr (e : Ast.expr) : string =
        __r_out; })"
       region_var name region_var (emit_expr body) name rtag
       region_var
+  | Ast.Region_loop (name, x, body) ->
+    (* `region R loop x { body }` -- the hand-over-hand swap the block above
+       cannot express. Two arenas alternate: the body runs in the current one;
+       Continue deep-copies the carry into a fresh arena and releases the old;
+       Done copies its value out to the enclosing region and releases. The
+       carry may be (and usually is) a container: __mdeep exists for exactly
+       this crossing. *)
+    let flow_ty =
+      match body.Ast.ty with
+      | Some t -> Ast.walk t
+      | None -> unsupported e.Ast.loc "region loop: body type not recorded" in
+    let (c_ty, d_ty) =
+      match flow_ty with
+      | Ast.TyCon ("region_flow", [c; d]) -> (Ast.walk c, Ast.walk d)
+      | _ -> unsupported e.Ast.loc "region loop: body is not region_flow" in
+    (* What the carry may contain: what __mdeep can copy. A function's captures
+       hide behind a void* the deep copier cannot see into (its env copier
+       copies fields with __mcopy, which is shallow for containers), and the
+       owned / handle types have identity a copy would break. Refused here, by
+       type, rather than discovered as a use-after-free. *)
+    let seen = Hashtbl.create 8 in
+    let rec carry_check t =
+      let t = Ast.walk t in
+      let tag = ty_tag t in
+      if Hashtbl.mem seen tag then ()
+      else begin
+        Hashtbl.add seen tag ();
+        match t with
+        | Ast.TyArrow _ ->
+          unsupported e.Ast.loc
+            "region loop: the carry contains a function -- its captures \
+             cannot be deep-copied across arenas yet"
+        | Ast.TyCon (("OwnedVec" | "StrBuf" | "ByteBuf" | "Channel"
+                      | "ThreadHandle") as n, _) ->
+          unsupported e.Ast.loc
+            (Printf.sprintf
+               "region loop: the carry contains a %s, which cannot be \
+                deep-copied across arenas" n)
+        | Ast.TyCon ("Map", [_; k; v]) -> carry_check k; carry_check v
+        | Ast.TyCon ("Vec", [_; el]) -> carry_check el
+        | Ast.TyTuple ts -> List.iter carry_check ts
+        | Ast.TyCon (nm, args) when Hashtbl.mem Typer.records nm ->
+          List.iter (fun (_, ft) -> carry_check ft)
+            (record_field_types_at nm args)
+        | Ast.TyCon (nm, args) ->
+          List.iter carry_check args;
+          let variants =
+            if Hashtbl.mem polymorphic_variants nm then
+              let (params, vs) = Hashtbl.find polymorphic_variants nm in
+              subst_variants params args vs
+            else
+              Hashtbl.fold (fun cname (info : Typer.constr_info) acc ->
+                if info.type_name = nm && Ast.canonical_ctor cname = cname
+                then (cname, info.arg) :: acc else acc)
+                Typer.constructors []
+          in
+          List.iter (fun (_, a) ->
+            match a with Some ty -> carry_check ty | None -> ()) variants
+        | _ -> ()
+      end
+    in
+    carry_check c_ty;
+    (* The Done value crosses like a block's result: same conservative refusal
+       of containers (their storage would die with the arena). *)
+    let rec contains_container t =
+      match Ast.walk t with
+      | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf"), _) -> true
+      | Ast.TyTuple ts -> List.exists contains_container ts
+      | Ast.TyCon (_, args) -> List.exists contains_container args
+      | _ -> false
+    in
+    if contains_container d_ty then
+      unsupported e.Ast.loc
+        "region loop: the Done value cannot be a Map / Vec / StrBuf -- its \
+         storage dies with the loop's arena. Carry it (Continue) or store \
+         into a container created outside.";
+    region_loop_carry_types := c_ty :: !region_loop_carry_types;
+    region_result_types := d_ty :: !region_result_types;
+    let ctag = ty_tag c_ty and dtag = ty_tag d_ty in
+    (* option / region_flow are prelude polymorphic variants; their mono
+       (non-recursive, by-value) instance names come from mono_variant_name,
+       the same resolution the Constr arm uses. The result's C type is never
+       named: __auto_type receives the __mcopy call, as the block arm does. *)
+    let opt_cty = mono_variant_name "option" [Ast.walk c_ty] in
+    let flow_cty = mono_variant_name "region_flow" [Ast.walk c_ty; Ast.walk d_ty] in
+    let tag_of cname dflt =
+      try Hashtbl.find variant_tags cname with Not_found -> dflt in
+    let none_tag = tag_of "None" 0 and some_tag = tag_of "Some" 1 in
+    let cont_tag = tag_of "Continue" 0 in
+    let xc = c_safe_name x in
+    Printf.sprintf
+      "({ __lang_region* __rl_cur = __lang_region_block_acquire(); \
+       __lang_region* __rl_saved = __lang_current_region; \
+       %s __rl_x = ((%s){.tag = %d}); \
+       %s __rl_f; \
+       for (;;) { \
+         __lang_current_region = __rl_cur; \
+         __lang_region* __region_%s = __rl_cur; (void)__region_%s; \
+         __auto_type %s = __rl_x; (void)%s; \
+         __rl_f = (%s); \
+         if (__rl_f.tag != %d) break; \
+         __lang_region* __rl_next = __lang_region_block_acquire(); \
+         __lang_current_region = __rl_next; \
+         __auto_type __rl_c = __mdeep_%s(__rl_next, __rl_f.payload.Continue); \
+         __lang_region_block_release(__rl_cur); \
+         __rl_cur = __rl_next; \
+         __rl_x = ((%s){.tag = %d, .payload.Some = __rl_c}); \
+       } \
+       __lang_current_region = __rl_saved; \
+       __auto_type __rl_res = __mcopy_%s(__lang_current_region, __rl_f.payload.Done); \
+       __lang_region_block_release(__rl_cur); \
+       __rl_res; })"
+      opt_cty opt_cty none_tag
+      flow_cty
+      name name
+      xc xc
+      (emit_expr body)
+      cont_tag
+      ctag
+      opt_cty some_tag
+      dtag
   | Ast.Ref (_mode, region, inner) ->
     (* `&R v` — allocate v in region R's bump buffer and return a
        pointer of type `T*`. Uses typeof / __auto_type so we don't need
@@ -4125,7 +4254,7 @@ let find_concrete_arrow (name : string) (e : Ast.expr) : Ast.ty option =
       List.iter (fun (_, g, b) ->
         (match g with Some ge -> go ge | None -> ()); go b) arms
     | Ast.Tuple es -> List.iter go es
-    | Ast.Region_block (_, b) -> go b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
     | Ast.Ref (_, _, a) -> go a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
     | Ast.Field_get (a, _) -> go a
@@ -4178,7 +4307,7 @@ let find_live_arrow (name : string) (skel_names : (string, unit) Hashtbl.t)
         List.iter (fun (_, g, b) ->
           (match g with Some ge -> go ge | None -> ()); go b) arms
       | Ast.Tuple es -> List.iter go es
-      | Ast.Region_block (_, b) -> go b
+      | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
       | Ast.Ref (_, _, a) -> go a
       | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
       | Ast.Field_get (a, _) -> go a
@@ -4230,7 +4359,7 @@ let find_all_concrete_arrows_in (name : string) (exprs : Ast.expr list) : Ast.ty
       List.iter (fun (_, g, b) ->
         (match g with Some ge -> go ge | None -> ()); go b) arms
     | Ast.Tuple es -> List.iter go es
-    | Ast.Region_block (_, b) -> go b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
     | Ast.Ref (_, _, a) -> go a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
     | Ast.Field_get (a, _) -> go a
@@ -4300,7 +4429,7 @@ let has_unresolved_use_of (name : string) (exprs : Ast.expr list) : bool =
       go s; List.iter (fun (_, g, b) ->
         (match g with Some ge -> go ge | None -> ()); go b) arms
     | Ast.Tuple es -> List.iter go es
-    | Ast.Region_block (_, b) -> go b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
     | Ast.Ref (_, _, a) -> go a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, v) -> go v) fs
     | Ast.Field_get (a, _) -> go a
@@ -4375,7 +4504,7 @@ let specialize_single_use_local_fns (root : Ast.expr) : unit =
       List.iter (fun (_, g, b) ->
         (match g with Some ge -> go ge | None -> ()); go b) arms
     | Ast.Tuple es -> List.iter go es
-    | Ast.Region_block (_, b) -> go b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
     | Ast.Ref (_, _, a) -> go a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
     | Ast.Field_get (a, _) -> go a
@@ -4443,6 +4572,7 @@ let clone_with_fresh_tyvars (e : Ast.expr) : Ast.expr =
            clone_expr b)) arms)
     | Ast.Tuple es -> Ast.Tuple (List.map clone_expr es)
     | Ast.Region_block (n, b) -> Ast.Region_block (n, clone_expr b)
+    | Ast.Region_loop (n, x, b) -> Ast.Region_loop (n, x, clone_expr b)
     | Ast.Ref (m, r, a) -> Ast.Ref (m, r, clone_expr a)
     | Ast.Record_lit (n, fs) ->
       Ast.Record_lit (n, List.map (fun (k, v) -> (k, clone_expr v)) fs)
@@ -4524,7 +4654,7 @@ let duplicate_multi_use_local_fns (root : Ast.expr) : Ast.expr =
           if List.mem f (pattern_vars p) then shadowed := true
           else ((match g with Some ge -> go ge | None -> ()); go b)) arms
       | Ast.Tuple es -> List.iter go es
-      | Ast.Region_block (_, b) -> go b
+      | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
       | Ast.Ref (_, _, a) -> go a
       | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
       | Ast.Field_get (a, _) -> go a
@@ -4562,6 +4692,7 @@ let duplicate_multi_use_local_fns (root : Ast.expr) : Ast.expr =
             List.map (fun (p, g, b) -> (p, Option.map rw g, rw b)) arms)
         | Ast.Tuple es -> Ast.Tuple (List.map rw es)
         | Ast.Region_block (r, b) -> Ast.Region_block (r, rw b)
+        | Ast.Region_loop (r, x, b) -> Ast.Region_loop (r, x, rw b)
         | Ast.Ref (m, r, a) -> Ast.Ref (m, r, rw a)
         | Ast.Record_lit (n, fs) ->
           Ast.Record_lit (n, List.map (fun (fn, v) -> (fn, rw v)) fs)
@@ -4670,6 +4801,7 @@ let duplicate_multi_use_local_fns (root : Ast.expr) : Ast.expr =
             List.map (fun (p, g, b) -> (p, Option.map go g, go b)) arms) }
     | Ast.Tuple es -> { e with Ast.node = Ast.Tuple (List.map go es) }
     | Ast.Region_block (r, b) -> { e with Ast.node = Ast.Region_block (r, go b) }
+    | Ast.Region_loop (r, x, b) -> { e with Ast.node = Ast.Region_loop (r, x, go b) }
     | Ast.Ref (m, r, a) -> { e with Ast.node = Ast.Ref (m, r, go a) }
     | Ast.Record_lit (n, fs) ->
       { e with Ast.node =
@@ -5951,6 +6083,106 @@ let emit_copy_fn (tag : string) (t : Ast.ty) : string =
 
 let emit_copy_fn_forward_decl (tag : string) (t : Ast.ty) : string =
   Printf.sprintf "static %s __mcopy_%s(__lang_region*, %s);"
+    (c_type_of t) tag (c_type_of t)
+
+(* v0.1.296: the DEEP copy family, __mdeep_<tag>, for a region loop's carry.
+   Like __mcopy with one difference that is the whole point: containers are
+   COPIED into the target region instead of passed as handles. __mcopy's
+   shallow container answer is right at its own call sites -- copy-on-store
+   already owns contents, and a handle crossing a statement region still has
+   its storage in its binding region -- and would be a use-after-free here,
+   because the carry's old arena is released the moment this returns. The
+   region-loop emission refuses by type anything this cannot copy (functions,
+   channels, owned buffers), so every arm below is total for what reaches it. *)
+let emit_deep_copy_fn (tag : string) (t : Ast.ty) : string =
+  let cty = c_type_of t in
+  let header =
+    Printf.sprintf "static %s __mdeep_%s(__lang_region* r, %s v)" cty tag cty
+  in
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool | Ast.TyFloat | Ast.TyUnit ->
+    header ^ " { (void)r; return v; }"
+  | Ast.TyStr ->
+    header ^ " {\n  size_t n = __lang_str_size(v);\n  \
+              char* s = __lang_str_alloc(r, n);\n  \
+              memcpy(s, v, n);\n  return s;\n}"
+  | Ast.TyCon ("Map", [_; k_ty; v_ty]) ->
+    let k_tag = ty_tag k_ty and v_tag = ty_tag v_ty in
+    let m = Printf.sprintf "mere_map_%s_%s" k_tag v_tag in
+    (* keys/values are dense in [0, len); _set copies the key and the value
+       into m2's region itself (shallow for a container value, which keeps the
+       handle __mdeep just built -- allocated in r, exactly right). *)
+    Printf.sprintf
+      "%s {\n  %s* m2 = %s_new(r);\n  \
+       for (int i = 0; i < v->len; i++)\n    \
+       %s_set(m2, v->keys[i], __mdeep_%s(r, v->values[i]));\n  \
+       return m2;\n}"
+      header m m m v_tag
+  | Ast.TyCon ("Vec", [_; el_ty]) ->
+    let el_tag = ty_tag el_ty in
+    let vs = Printf.sprintf "mere_vec_%s" el_tag in
+    Printf.sprintf
+      "%s {\n  %s* v2 = %s_new(r);\n  \
+       for (int i = 0; i < v->len; i++)\n    \
+       %s_push(v2, __mdeep_%s(r, v->data[i]));\n  \
+       return v2;\n}"
+      header vs vs vs el_tag
+  | Ast.TyTuple ts ->
+    let steps =
+      List.mapi (fun i et ->
+        Printf.sprintf "  v.f%d = __mdeep_%s(r, v.f%d);" i (ty_tag et) i) ts in
+    Printf.sprintf "%s {\n%s\n  return v;\n}" header (String.concat "\n" steps)
+  | Ast.TyCon (name, args) when Hashtbl.mem Typer.records name ->
+    let steps =
+      List.map (fun (fname, ft) ->
+        Printf.sprintf "  v.%s = __mdeep_%s(r, v.%s);"
+          (c_field_name fname) (ty_tag ft) (c_field_name fname))
+        (record_field_types_at name args) in
+    Printf.sprintf "%s {\n%s\n  return v;\n}" header (String.concat "\n" steps)
+  | Ast.TyCon (name, args) ->
+    let variants =
+      if Hashtbl.mem polymorphic_variants name then
+        let (params, vs) = Hashtbl.find polymorphic_variants name in
+        subst_variants params args vs
+      else
+        Hashtbl.fold (fun cname (info : Typer.constr_info) acc ->
+          if info.type_name = name && Ast.canonical_ctor cname = cname
+          then (cname, info.arg) :: acc else acc)
+          Typer.constructors []
+    in
+    if is_recursive_variant cty then
+      let cases =
+        List.filter_map (fun (cname, arg_opt) ->
+          match arg_opt with
+          | None -> None
+          | Some ty ->
+            let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
+            Some (Printf.sprintf
+              "  if (p->tag == %d) p->payload.%s = __mdeep_%s(r, p->payload.%s);"
+              tag_n cname (ty_tag ty) cname))
+          variants
+      in
+      Printf.sprintf
+        "%s {\n  %s_node* p = (%s_node*)__lang_region_alloc(r, sizeof(%s_node));\n  \
+         *p = *v;\n%s\n  return p;\n}"
+        header cty cty cty (String.concat "\n" cases)
+    else
+      let cases =
+        List.filter_map (fun (cname, arg_opt) ->
+          match arg_opt with
+          | None -> None
+          | Some ty ->
+            let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
+            Some (Printf.sprintf
+              "  if (v.tag == %d) v.payload.%s = __mdeep_%s(r, v.payload.%s);"
+              tag_n cname (ty_tag ty) cname))
+          variants
+      in
+      Printf.sprintf "%s {\n%s\n  return v;\n}" header (String.concat "\n" cases)
+  | _ -> header ^ " { (void)r; return v; }"
+
+let emit_deep_copy_fn_forward_decl (tag : string) (t : Ast.ty) : string =
+  Printf.sprintf "static %s __mdeep_%s(__lang_region*, %s);"
     (c_type_of t) tag (c_type_of t)
 
 let emit_closure_adapter_forward_decl (ce : closure_emission) : string =
@@ -8895,7 +9127,7 @@ let lift_inner_fns
         (match g with Some ge -> walker host_param host_locals ge | None -> ());
         walker host_param host_locals b) arms
     | Ast.Tuple es -> List.iter (walker host_param host_locals) es
-    | Ast.Region_block (_, b) -> walker host_param host_locals b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walker host_param host_locals b
     | Ast.Ref (_, _, a) -> walker host_param host_locals a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walker host_param host_locals e) fs
     | Ast.Field_get (a, _) -> walker host_param host_locals a
@@ -9198,7 +9430,7 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
       List.iter (fun (_, g, b) ->
         (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
-    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walk_expr b
     | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
     | Ast.Field_get (a, _) -> walk_expr a
@@ -9264,7 +9496,7 @@ let collect_mono_variant_instances
       List.iter (fun (_, g, b) ->
         (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
-    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walk_expr b
     | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
     | Ast.Field_get (a, _) -> walk_expr a
@@ -9383,7 +9615,7 @@ let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) :
       List.iter (fun (_, g, b) ->
         (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
-    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walk_expr b
     | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
     | Ast.Field_get (a, _) -> walk_expr a
@@ -9473,7 +9705,7 @@ let collect_tuple_shapes (root : Ast.expr) : Ast.ty list list =
         (match g with Some ge -> walk_expr ge | None -> ());
         walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
-    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walk_expr b
     | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
     | Ast.Field_get (a, _) -> walk_expr a
@@ -9546,7 +9778,7 @@ let collect_record_names (root : Ast.expr) (fns : fn_decl list) : string list =
       List.iter (fun (_, g, b) ->
         (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
-    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walk_expr b
     | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (name, fs) ->
       add name; List.iter (fun (_, e) -> walk_expr e) fs
@@ -10229,6 +10461,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset eq_types;
   Hashtbl.reset cmp_types;
   region_result_types := [];
+  region_loop_carry_types := [];
   (* Pre-populate polymorphic_records so the collector sees them. The
      typedef emission itself (which depends on c_type_of being correct
      for nested types) happens later via mono_record_typedefs. *)
@@ -10841,6 +11074,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        copied too — out of the dying block, and across threads into a
        per-message region. *)
     List.iter (add_type_and_deps copy_types) !region_result_types;
+    (* v0.1.296: a carry's arrow-free deps also want __mcopy (map/vec _set
+       calls it on the values __mdeep hands over). *)
+    List.iter (fun t -> add_type_and_deps copy_types (ty_as_tagged t))
+      !region_loop_carry_types;
     (* v0.1.290: a closure env's captured fields are copied by the env copier,
        so each field type needs its own __mcopy_<tag>.
        v0.1.293: through ty_as_tagged, because the copier names `__mcopy_<ty_tag t>`
@@ -10857,6 +11094,19 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     in
     (List.map (fun (tag, t) -> emit_copy_fn_forward_decl tag t) tags,
      List.map (fun (tag, t) -> emit_copy_fn tag t) tags)
+  in
+  (* v0.1.296: the deep family for region-loop carries -- one __mdeep_<tag>
+     per type reachable from any carry, emitted only when a loop exists. *)
+  let deep_fn_decls, deep_fn_defs =
+    let tbl = Hashtbl.create 16 in
+    List.iter (fun t -> add_type_and_deps tbl (ty_as_tagged t))
+      !region_loop_carry_types;
+    let tags =
+      List.sort compare
+        (Hashtbl.fold (fun tag t acc -> (tag, t) :: acc) tbl [])
+    in
+    (List.map (fun (tag, t) -> emit_deep_copy_fn_forward_decl tag t) tags,
+     List.map (fun (tag, t) -> emit_deep_copy_fn tag t) tags)
   in
   let map_forward_typedefs =
     Hashtbl.fold (fun _key (k_ty, v_ty) acc ->
@@ -11033,6 +11283,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        runtimes that call them; definitions after (they only need the
        value typedefs, which are all complete by here). *)
     @ (if copy_fn_decls = [] then [] else copy_fn_decls @ [""])
+    @ (if deep_fn_decls = [] then [] else deep_fn_decls @ [""])
     @ (if vec_runtimes = [] then [] else vec_runtimes @ [""])
     @ (if not !uses_int_of_str then []
        else
@@ -11217,6 +11468,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !bytes_vec_used then [bytes_vec_bridge_runtime; ""] else [])
     @ (if map_runtimes = [] then [] else (map_hash_helpers :: map_runtimes) @ [""])
     @ (if copy_fn_defs = [] then [] else copy_fn_defs @ [""])
+    @ (if deep_fn_defs = [] then [] else deep_fn_defs @ [""])
     @ (if closure_env_copy_defs = [] then [] else closure_env_copy_defs @ [""])
     (* Phase 16.3: Logger / Metrics runtime — depends on Logger /
        Metrics struct bodies (= records) and closure_str_unit /

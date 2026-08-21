@@ -34,6 +34,31 @@ let y: owned String = x    // move; x is no longer usable
 
 Pass a reference without transferring ownership. Equivalent to Rust's `&T` / `&mut T`, except Mere plans to **refine the borrow annotations** (`&shared write` etc.; design Q-004).
 
+### ③b `region R loop x { ... }` — the region-carrying loop (v0.1.296)
+
+Long-lived state that is periodically compacted — an interpreter's heap, a
+server's session table — does not fit `region R { }`: its lifetimes nest
+(LIFO), and a compaction needs the NEW generation to outlive the OLD one. The
+loop is the hand-over-hand version: each iteration runs in a fresh arena named
+R; the body sees `x : option C` (None on entry, Some carry after) and answers
+`region_flow[C, D]` (prelude): `Continue carry` deep-copies the carry into the
+next arena — containers included, via the `__mdeep` family — and releases the
+current one; `Done d` copies `d` out and exits.
+
+The escape rule splits where the block's could not: **C may mention R** (a
+`Map[R, ...]` carried from arena to arena is the construct's point), **D may
+not** — same check as a block's result. No fresh rigid variable per iteration
+is needed: nothing of arena N reaches arena N+1 except through the Continue
+copy, so one name R honestly denotes "the loop's current arena" throughout.
+Not carryable (refused at emit time, by type): functions (their captures hide
+behind a `void*` the deep copier cannot see into), Channel, ThreadHandle,
+OwnedVec, StrBuf, ByteBuf.
+
+Measured on the C backend: 2.4 GB of dead map-entry overwrites churned through
+2000 cycles, live set 51 entries — peak footprint 1.6 MiB, 0.32 s. Backends:
+interp + C; llvm / wasm / rv32 refuse cleanly (their reclamation is a LIFO
+bump rollback, which cannot express the swap).
+
 ### ③ `region R { ... }` — bulk per-region
 
 Values placed in region R are freed all together when R is destroyed. Bump-allocator backed. Only Trivial types (no Drop) can live in a region. **Unified with `arena` under Q-008.**

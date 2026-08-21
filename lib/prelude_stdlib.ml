@@ -25,6 +25,9 @@ let contents = {|
 type 'a list = Nil | Cons of 'a * 'a list;
 type 'a option = None | Some of 'a;
 type ('a, 'e) result = Ok of 'a | Err of 'e;
+// The protocol of `region R loop x { ... }`: Continue carries the loop's
+// state into the next arena (deep-copied); Done leaves the loop with a value.
+type ('c, 'd) region_flow = Continue of 'c | Done of 'd;
 
 let rec list_iter = fn xs -> fn f ->
   match xs with

@@ -858,6 +858,7 @@ let free_vars (e : Ast.expr) (initially_bound : string list) : string list =
         (match g with Some ge -> go ge bound' | None -> ()); go b bound') arms
     | Ast.Tuple es -> List.iter (fun e -> go e bound) es
     | Ast.Region_block (n, b) -> go b (n :: bound)
+    | Ast.Region_loop (n, x, b) -> go b (x :: n :: bound)
     | Ast.Ref (_, _, a) -> go a bound
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e bound) fs
     | Ast.Field_get (a, _) -> go a bound
@@ -920,7 +921,7 @@ let rec var_appears_in_llvm (v : string) (e : Ast.expr) : bool =
   | Ast.Tuple es -> List.exists g es
   | Ast.Record_lit (_, fs) -> List.exists (fun (_, e') -> g e') fs
   | Ast.Record_update (a, fs) -> g a || List.exists (fun (_, e') -> g e') fs
-  | Ast.Region_block (_, b) -> g b
+  | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> g b
   | Ast.Ref (_, _, a) -> g a
 
 let rec no_value_leak_llvm (v : string) (e : Ast.expr) : bool =
@@ -955,7 +956,7 @@ let rec no_value_leak_llvm (v : string) (e : Ast.expr) : bool =
        (match gd with Some ge -> g ge | None -> true)
        && (List.mem v (pattern_vars pat) || g b)) arms
   | Ast.With (n, value, body) -> g value && (n = v || g body)
-  | Ast.Region_block (_, b) -> g b
+  | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> g b
   | Ast.Ref (_, _, a) -> g a
 
 let rec tail_does_not_return_v_llvm (v : string) (e : Ast.expr) : bool =
@@ -973,7 +974,7 @@ let rec tail_does_not_return_v_llvm (v : string) (e : Ast.expr) : bool =
        List.mem v (pattern_vars pat)
        || tail_does_not_return_v_llvm v b) arms
   | Ast.With (n, _, body) -> n = v || tail_does_not_return_v_llvm v body
-  | Ast.Region_block (_, body) -> tail_does_not_return_v_llvm v body
+  | Ast.Region_block (_, body) | Ast.Region_loop (_, _, body) -> tail_does_not_return_v_llvm v body
   | Ast.Annot (a, _) -> tail_does_not_return_v_llvm v a
   | _ ->
     let tail_ty = match e.Ast.ty with
@@ -1031,7 +1032,7 @@ let collect_tainted_names_llvm (v : string) (body : Ast.expr) : string list =
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e') -> walk e') fs
     | Ast.Record_update (a, fs) ->
       walk a; List.iter (fun (_, e') -> walk e') fs
-    | Ast.Region_block (_, b) -> walk b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walk b
     | Ast.Ref (_, _, a) -> walk a
     | _ -> ()
   in
@@ -1049,7 +1050,7 @@ let rec tail_does_not_return_any_llvm (tainted : string list) (e : Ast.expr) : b
   | Ast.Match (_, arms) ->
     List.for_all (fun (_, _, b) -> tail_does_not_return_any_llvm tainted b) arms
   | Ast.With (_, _, body) -> tail_does_not_return_any_llvm tainted body
-  | Ast.Region_block (_, body) -> tail_does_not_return_any_llvm tainted body
+  | Ast.Region_block (_, body) | Ast.Region_loop (_, _, body) -> tail_does_not_return_any_llvm tainted body
   | Ast.Annot (a, _) -> tail_does_not_return_any_llvm tainted a
   | _ ->
     let tail_ty = match e.Ast.ty with
@@ -1087,7 +1088,7 @@ let rec no_tainted_leak_llvm (tainted : string list) (e : Ast.expr) : bool =
     && List.for_all (fun (_, gd, b) ->
        (match gd with Some ge -> g ge | None -> true) && g b) arms
   | Ast.With (_, value, body) -> g value && g body
-  | Ast.Region_block (_, b) -> g b
+  | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> g b
   | Ast.Ref (_, _, a) -> g a
 
 let owned_vec_safe_to_drop_at_scope_llvm (body : Ast.expr) (v : string) : bool =
@@ -1191,7 +1192,7 @@ let find_concrete_arrow (name : string) (root : Ast.expr) : Ast.ty option =
       List.iter (fun (_, g, b) ->
         (match g with Some ge -> go ge | None -> ()); go b) arms
     | Ast.Tuple es -> List.iter go es
-    | Ast.Region_block (_, b) -> go b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
     | Ast.Ref (_, _, a) -> go a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
     | Ast.Field_get (a, _) -> go a
@@ -1240,7 +1241,7 @@ let find_all_concrete_arrows_in_llvm (name : string) (exprs : Ast.expr list) : A
       List.iter (fun (_, g, b) ->
         (match g with Some ge -> go ge | None -> ()); go b) arms
     | Ast.Tuple es -> List.iter go es
-    | Ast.Region_block (_, b) -> go b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
     | Ast.Ref (_, _, a) -> go a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
     | Ast.Field_get (a, _) -> go a
@@ -1289,7 +1290,7 @@ let has_unresolved_use_of (name : string) (exprs : Ast.expr list) : bool =
       go s; List.iter (fun (_, g, b) ->
         (match g with Some ge -> go ge | None -> ()); go b) arms
     | Ast.Tuple es -> List.iter go es
-    | Ast.Region_block (_, b) -> go b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
     | Ast.Ref (_, _, a) -> go a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, v) -> go v) fs
     | Ast.Field_get (a, _) -> go a
@@ -1354,7 +1355,7 @@ let specialize_single_use_local_fns (root : Ast.expr) : unit =
       List.iter (fun (_, g, b) ->
         (match g with Some ge -> go ge | None -> ()); go b) arms
     | Ast.Tuple es -> List.iter go es
-    | Ast.Region_block (_, b) -> go b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
     | Ast.Ref (_, _, a) -> go a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
     | Ast.Field_get (a, _) -> go a
@@ -1416,6 +1417,7 @@ let clone_with_fresh_tyvars_llvm (e : Ast.expr) : Ast.expr =
            clone_expr b)) arms)
     | Ast.Tuple es -> Ast.Tuple (List.map clone_expr es)
     | Ast.Region_block (n, b) -> Ast.Region_block (n, clone_expr b)
+    | Ast.Region_loop (n, x, b) -> Ast.Region_loop (n, x, clone_expr b)
     | Ast.Ref (m, r, a) -> Ast.Ref (m, r, clone_expr a)
     | Ast.Record_lit (n, fs) ->
       Ast.Record_lit (n, List.map (fun (k, v) -> (k, clone_expr v)) fs)
@@ -1659,7 +1661,7 @@ let lookup_var_ty_llvm (body : Ast.expr) (name : string) : Ast.ty =
       go s; List.iter (fun (_, g, b) ->
         (match g with Some ge -> go ge | None -> ()); go b) arms
     | Ast.Tuple es -> List.iter go es
-    | Ast.Region_block (_, b) -> go b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
     | Ast.Ref (_, _, a) -> go a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
     | Ast.Field_get (a, _) -> go a
@@ -1792,7 +1794,7 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
         (match g with Some ge -> walk host_param host_locals ge | None -> ());
         walk host_param host_locals b) arms
     | Ast.Tuple es -> List.iter (walk host_param host_locals) es
-    | Ast.Region_block (_, b) -> walk host_param host_locals b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walk host_param host_locals b
     | Ast.Ref (_, _, a) -> walk host_param host_locals a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk host_param host_locals e) fs
     | Ast.Field_get (a, _) -> walk host_param host_locals a
@@ -1865,7 +1867,7 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
        List.iter (fun (_, g, b) ->
          (match g with Some ge -> recurse ge | None -> ()); recurse b) arms
      | Ast.Tuple es -> List.iter recurse es
-     | Ast.Region_block (_, b) -> recurse b
+     | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> recurse b
      | Ast.Ref (_, _, a) -> recurse a
      | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> recurse e) fs
      | Ast.Field_get (a, _) -> recurse a
@@ -1889,7 +1891,7 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
        | Ast.Let (pat, _, _) -> List.iter add (pattern_vars pat)
        | Ast.Let_rec (bs, _) -> List.iter (fun (n, _) -> add n) bs
        | Ast.With (n, _, _) -> add n
-       | Ast.Region_block (n, _) -> add n
+       | Ast.Region_block (n, _) | Ast.Region_loop (n, _, _) -> add n
        | Ast.Match (_, arms) ->
          List.iter (fun (pat, _, _) -> List.iter add (pattern_vars pat)) arms
        | _ -> ());
@@ -1911,7 +1913,7 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
         List.iter (fun (_, g, b) ->
           (match g with Some ge -> go ge | None -> ()); go b) arms
       | Ast.Tuple es -> List.iter go es
-      | Ast.Region_block (_, b) -> go b
+      | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
       | Ast.Ref (_, _, a) -> go a
       | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
       | Ast.Field_get (a, _) -> go a
@@ -1998,7 +2000,7 @@ let collect_tuple_shapes (root : Ast.expr) (fns : fn_decl list) : Ast.ty list li
       List.iter (fun (_, g, b) ->
         (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
-    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walk_expr b
     | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
     | Ast.Field_get (a, _) -> walk_expr a
@@ -2079,7 +2081,7 @@ let collect_variant_names (root : Ast.expr) (fns : fn_decl list) : string list =
       List.iter (fun (_, g, b) ->
         (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
-    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walk_expr b
     | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
     | Ast.Field_get (a, _) -> walk_expr a
@@ -2131,7 +2133,7 @@ let collect_record_names (root : Ast.expr) (fns : fn_decl list) : string list =
       List.iter (fun (_, g, b) ->
         (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
-    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walk_expr b
     | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
     | Ast.Field_get (a, _) -> walk_expr a
@@ -2269,7 +2271,7 @@ let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) : (Ast.ty * Ast.t
       List.iter (fun (_, g, b) ->
         (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
-    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walk_expr b
     | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
     | Ast.Field_get (a, _) -> walk_expr a
@@ -2332,7 +2334,7 @@ let collect_mono_instances (root : Ast.expr) (fns : fn_decl list) : unit =
       List.iter (fun (_, g, b) ->
         (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
-    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walk_expr b
     | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
     | Ast.Field_get (a, _) -> walk_expr a
@@ -2487,7 +2489,7 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
       List.iter (fun (_, g, b) ->
         (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
-    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walk_expr b
     | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
     | Ast.Field_get (a, _) -> walk_expr a
@@ -2527,7 +2529,7 @@ let collect_eq_cmp_types (root : Ast.expr) (fns : fn_decl list) : unit =
       List.iter (fun (_, g, b) ->
         (match g with Some ge -> walk_expr ge | None -> ()); walk_expr b) arms
     | Ast.Tuple es -> List.iter walk_expr es
-    | Ast.Region_block (_, b) -> walk_expr b
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walk_expr b
     | Ast.Ref (_, _, a) -> walk_expr a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk_expr e) fs
     | Ast.Field_get (a, _) -> walk_expr a
@@ -6141,6 +6143,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                     r1 cstruct r0 adapter_name);
       r1
     end
+  | Ast.Region_loop (_, _, _) ->
+    unsupported e.Ast.loc "region loop"
   | Ast.Region_block (name, body) ->
     (* Allocate a fresh region locally, run body within it, free at exit.
        The region's SSA ptr is pushed onto current_regions so Ref / view
@@ -11189,7 +11193,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) ->
         recur a; recur b
       | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _)
-      | Ast.Ref (_, _, a) | Ast.Region_block (_, a) -> recur a
+      | Ast.Ref (_, _, a) | Ast.Region_block (_, a) | Ast.Region_loop (_, _, a) -> recur a
       | Ast.Let (pat, v, b) ->
         recur v;
         (match pat.Ast.pnode with
@@ -11242,7 +11246,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       | Ast.App (a, b) | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b)
       | Ast.Logic (_, a, b) -> walk a; walk b
       | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _)
-      | Ast.Ref (_, _, a) | Ast.Region_block (_, a) | Ast.Fun (_, _, a) ->
+      | Ast.Ref (_, _, a) | Ast.Region_block (_, a) | Ast.Region_loop (_, _, a) | Ast.Fun (_, _, a) ->
         walk a
       | Ast.If (c, t, e_) -> walk c; walk t; walk e_
       | Ast.Tuple es -> List.iter walk es
@@ -11323,7 +11327,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         List.iter (fun (_, g, b) ->
           (match g with Some ge -> go ge | None -> ()); go b) arms
       | Ast.Tuple es -> List.iter go es
-      | Ast.Region_block (_, b) -> go b
+      | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
       | Ast.Ref (_, _, a) -> go a
       | Ast.Record_lit (_, fs) -> List.iter (fun (_, x2) -> go x2) fs
       | Ast.Field_get (a, _) -> go a

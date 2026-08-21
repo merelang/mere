@@ -3501,6 +3501,41 @@ let () =
     (codegen_with_decls
       "let add = fn n -> fn x -> n + x in (add 3) 4")
     "__env = (__anon_0_env*)malloc";
+  (* v0.1.296: the region-carrying loop. *)
+  assert_contains "codegen: region loop swaps arenas at Continue"
+    (codegen_with_decls
+      "let n = region R loop x { match x with | None -> Continue 1 \
+       | Some k -> if k >= 3 then Done k else Continue (k + 1) } in n")
+    "__lang_region_block_release(__rl_cur); __rl_cur = __rl_next;";
+  assert_contains "codegen: the carry crosses through the deep family"
+    (codegen_with_decls
+      "let n = region R loop x { match x with | None -> Continue 1 \
+       | Some k -> if k >= 3 then Done k else Continue (k + 1) } in n")
+    "__mdeep_int(__rl_next";
+  assert_contains "codegen: a carried Map is deep-copied entry by entry"
+    (codegen_with_decls
+      "let n = region R loop x { match x with \
+       | None -> Continue (map_new ()) \
+       | Some m -> \
+         if map_len m >= 3 then Done (map_len m) \
+         else let _ = map_set m (str_of_int (map_len m)) 1 in Continue m } in n")
+    "m2, v->keys[i], __mdeep_int(r, v->values[i])";
+  check_raises_containing
+    "typer: the Done value cannot mention the loop's region"
+    "region escape: Done value"
+    (fun () ->
+      codegen_with_decls
+        "let m = region RX loop x { match x with \
+         | None -> Continue (map_new ()) \
+         | Some mm -> Done mm } in map_len m");
+  check_raises_containing
+    "codegen: a closure in the carry is refused, not miscompiled"
+    "cannot be deep-copied across arenas"
+    (fun () ->
+      codegen_with_decls
+        "let f = region RY loop x { match x with \
+         | None -> Continue (fn (k: int) -> k + 1) \
+         | Some g -> Done (g 1) } in f");
   assert_contains "codegen: main initializes default region"
     (codegen_with_decls "1 + 2")
     "__lang_region_init(&__lang_default_region";
@@ -8085,6 +8120,7 @@ let () =
         + Phase 39.A' (sort helpers): 3 (list_sort_insert / list_sort_by /
            list_sort)
         + v0.1.38 (utf8 view): 6 (_u8_nth / utf8_at / _u8_slice /
+        + v0.1.296: 1 (region_flow, the region loop's protocol)
            utf8_sub / _u8_rev_join / utf8_rev)
         + v0.1.39 (scale safety): 13 (merge-sort quartet + the _l*_into /
            _l{max,min}_from / _llen / _range_down accumulator helpers)
@@ -8103,7 +8139,7 @@ let () =
             longer than the stack)
         *)
      string_of_int (List.length prog.Ast.decls))
-    "80";
+    "81";
 
   (* Phase 39.A' #4: list_sort_by / list_sort prelude helpers *)
   check "list_sort_by: ascending int sort"

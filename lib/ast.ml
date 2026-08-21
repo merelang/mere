@@ -68,6 +68,15 @@ and expr_node =
        fall through to next arm. *)
   | Tuple of expr list
   | Region_block of string * expr   (* `region R { body }` — introduces region name R *)
+  | Region_loop of string * string * expr
+      (* `region R loop x { body }` — a region-carrying loop: each iteration
+         runs in a fresh arena named R; x : option C is None on entry and
+         Some carry after; body : region_flow[C, D] (prelude) chooses
+         Continue carry (deep-copy the carry into the next arena, release
+         this one) or Done d (copy d out, release, exit). C may mention R —
+         that is the point; D must not. The LIFO discipline of Region_block
+         cannot express this hand-over-hand swap, and long-lived state that
+         is periodically compacted (a collector's semispaces) needs it. *)
   | Ref of borrow_mode * string * expr (* `&[m] R e` — value-level ref, mode m *)
   | Record_lit of string * (string * expr) list
     (* nominal record literal:  TypeName { f1 = e1, f2 = e2 } *)
@@ -355,6 +364,8 @@ let rec pp e =
     "(" ^ String.concat ", " (List.map pp es) ^ ")"
   | Region_block (name, body) ->
     "(region " ^ name ^ " { " ^ pp body ^ " })"
+  | Region_loop (name, x, body) ->
+    "(region " ^ name ^ " loop " ^ x ^ " { " ^ pp body ^ " })"
   | Ref (mode, r, inner) ->
     let prefix = match mode with
       | BorrowedRead -> "&"
@@ -498,6 +509,9 @@ let rename_free_vars (lookup : string -> string option) (e : expr) : expr =
       { e with node = Tuple (List.map (go shadowed) es) }
     | Region_block (r, body) ->
       { e with node = Region_block (r, go shadowed body) }
+    | Region_loop (r, x, body) ->
+      let body' = with_shadow [x] body in
+      { e with node = Region_loop (r, x, body') }
     | Ref (mode, r, inner) ->
       { e with node = Ref (mode, r, go shadowed inner) }
     | Record_lit (name, fields) ->
@@ -576,6 +590,12 @@ let uniquify_inner_fns_expr (seen : (string, unit) Hashtbl.t) (e0 : expr) : expr
       { e with node = Match (uq s, arms') }
     | With (n, v, b) -> { e with node = With (n, uq v, uq b) }
     | Region_block (r, b) -> { e with node = Region_block (r, uq b) }
+    | Region_loop (r, x, b) ->
+      (match claim_shadow x with
+       | None -> { e with node = Region_loop (r, x, uq b) }
+       | Some x' ->
+         let lookup n = if n = x then Some x' else None in
+         { e with node = Region_loop (r, x', uq (rename_free_vars lookup b)) })
     | Ref (m, r, a) -> { e with node = Ref (m, r, uq a) }
     | Constr (c, ao) -> { e with node = Constr (c, Option.map uq ao) }
     | Record_lit (n, fs) ->
@@ -793,6 +813,7 @@ let lower_par_map_expr (e : expr) : expr =
         List.map (fun (p, g, b) -> (p, Option.map lo g, lo b)) arms) }
     | Tuple es -> { e with node = Tuple (List.map lo es) }
     | Region_block (n, b) -> { e with node = Region_block (n, lo b) }
+    | Region_loop (n, x, b) -> { e with node = Region_loop (n, x, lo b) }
     | Ref (m, r, a) -> { e with node = Ref (m, r, lo a) }
     | Record_lit (n, fs) ->
       { e with node = Record_lit (n, List.map (fun (f, x) -> (f, lo x)) fs) }
@@ -860,7 +881,8 @@ let desugar_program (prog : program) : expr =
 let children (e : expr) : expr list =
   match e.node with
   | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit | Var _ -> []
-  | Neg a | Annot (a, _) | Field_get (a, _) | Region_block (_, a) | Ref (_, _, a) -> [a]
+  | Neg a | Annot (a, _) | Field_get (a, _) | Region_block (_, a)
+  | Region_loop (_, _, a) | Ref (_, _, a) -> [a]
   | Bin (_, a, b) | Cmp (_, a, b) | Logic (_, a, b) | App (a, b) -> [a; b]
   | Let (_, a, b) -> [a; b]
   | With (_, a, b) -> [a; b]
