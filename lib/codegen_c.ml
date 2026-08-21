@@ -1594,8 +1594,8 @@ let rec emit_expr (e : Ast.expr) : string =
                   semicolons are fine. Even with 0 captures, if store_caps is
                   the empty string we just get an extra ` ` gap — still syntactically OK. *)
                Printf.sprintf
-                 "({ %s* __env_local = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s)); %s(%s){.env = __env_local, .fn = %s}; })"
-                 env_struct_name env_struct_name env_struct_name store_caps closure_struct adapter_name
+                 "({ %s* __env_local = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); %s(%s){.env = __env_local, .fn = %s, .copy = __mcopy_env_%s}; })"
+                 env_struct_name env_struct_name env_struct_name store_caps closure_struct adapter_name env_struct_name
              | _ ->
                unsupported e.loc
                  ("inner-lifted fn `" ^ name ^
@@ -2005,8 +2005,8 @@ let rec emit_expr (e : Ast.expr) : string =
                 node = Ast.Var n })) captures)
       in
       Printf.sprintf
-        "({ %s* __env = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s)); %s (%s){.env = __env, .fn = %s}; })"
-        env_name env_name env_name inits cstruct adapter_name
+        "({ %s* __env = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); %s (%s){.env = __env, .fn = %s, .copy = __mcopy_env_%s}; })"
+        env_name env_name env_name inits cstruct adapter_name env_name
   | Ast.App (f, arg) ->
     (* Phase 32.6 (C1 FFI multi-arg): if the head of a curried App chain is an
        extern fn, collect all arguments and convert to a direct C call. 1-arg
@@ -5039,7 +5039,17 @@ let emit_closure_typedef (p : Ast.ty) (r : Ast.ty) : string =
   let cret = c_type_of r in
   let carg = c_type_of p in
   Printf.sprintf
-    "typedef struct {\n  void* env;\n  %s (*fn)(void*, %s);\n} %s;"
+    (* v0.1.290: a closure carries a COPIER for its env, so a closure can be
+       copied out of a dying region the way every other value is. The env used
+       to be allocated in the default (program-lifetime) region for exactly one
+       reason -- nothing could copy it, since `void* env` is type-erased -- and
+       that made every closure a permanent allocation. The copier is generated
+       per env type, next to the env's own typedef, which is where the field
+       types are known. A closure whose env is NULL, or one built by an FFI
+       adapter over a borrowed pointer, leaves `copy` zero-initialized and is
+       copied shallowly, as before. *)
+    "typedef struct {\n  void* env;\n  %s (*fn)(void*, %s);\n  \
+     void* (*copy)(__lang_region*, void*);\n} %s;"
     cret carg cstruct
 
 let emit_lifted_fn_forward_decl (f : lifted_fn) : string =
@@ -5133,6 +5143,29 @@ let emit_closure_env_typedef (ce : closure_emission) : string =
           ce.ce_env_fields)
     in
     Printf.sprintf "typedef struct {\n%s\n} %s;" fields ce.ce_env_name
+
+(* v0.1.290: the copier for one closure env. It region-allocates a fresh env in
+   the target region, copies the struct across, then re-copies each captured
+   field through that field's own __mcopy_<tag> -- so a captured string or
+   variant is deep-copied and not left pointing into the region that is about to
+   be released. Generated per env type, because that is where the field types
+   are known; the closure struct only ever sees `void*`. *)
+let emit_closure_env_copy_fn (env_name : string) (fields : (string * Ast.ty) list) : string =
+  let steps =
+    String.concat "\n"
+      (List.map (fun (n, t) ->
+        Printf.sprintf "  __d->%s = __mcopy_%s(r, __s->%s);"
+          (c_safe_name n) (ty_tag t) (c_safe_name n)) fields)
+  in
+  Printf.sprintf
+    "static void* __mcopy_env_%s(__lang_region* r, void* __p) {\n\
+    \  %s* __s = (%s*)__p;\n\
+    \  %s* __d = (%s*)__lang_region_alloc(r, sizeof(%s));\n\
+    \  *__d = *__s;\n%s\n  return (void*)__d;\n}"
+    env_name env_name env_name env_name env_name env_name steps
+
+let emit_closure_env_copy_fwd (env_name : string) : string =
+  Printf.sprintf "static void* __mcopy_env_%s(__lang_region*, void*);" env_name
 
 (* Emit a `show_T` function for type `t`, returning a C string. For
    tuple / record / variant types the function composes calls to inner
@@ -5768,8 +5801,11 @@ let emit_copy_fn (tag : string) (t : Ast.ty) : string =
   | Ast.TyInt | Ast.TyBool | Ast.TyFloat | Ast.TyUnit ->
     header ^ " { (void)r; return v; }"
   | Ast.TyArrow _ ->
-    (* Closures copy shallowly: their envs live in the default region. *)
-    header ^ " { (void)r; return v; }"
+    (* v0.1.290: deep-copy the env through the copier the closure carries, so a
+       closure can leave a region block. `copy` is zero for a NULL env and for
+       FFI adapters holding a borrowed pointer, and those stay shallow -- which
+       is what they were when every env lived in the default region. *)
+    header ^ " { if (v.env && v.copy) v.env = v.copy(r, v.env); return v; }"
   | Ast.TyStr ->
     (* Deep-copy a str into region r, preserving its length header (so a
        copied map key/value stays byte-safe, embedded NULs and all). *)
@@ -10427,6 +10463,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      above emissions. They might themselves emit more pending closures
      (nested), so keep draining until the queue is empty. *)
   let closure_env_typedefs = ref [] in
+  (* v0.1.290: collected HERE, in the same drain, because pending_closures is
+     empty by the time the sections are assembled -- the queue is consumed as it
+     is emitted, and nested closures append to it while that happens. *)
+  let closure_env_copies = ref [] in
   let closure_adapter_forward_decls = ref [] in
   let closure_adapters = ref [] in
   let rec drain () =
@@ -10435,6 +10475,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     if queue <> [] then begin
       List.iter (fun ce ->
         closure_env_typedefs := emit_closure_env_typedef ce :: !closure_env_typedefs;
+        (* a closure with no captures has no env struct (and passes .env = NULL),
+           so there is nothing to copy and no typedef to name. *)
+        (if ce.ce_env_fields <> [] then
+           closure_env_copies := (ce.ce_env_name, ce.ce_env_fields) :: !closure_env_copies);
         closure_adapter_forward_decls :=
           emit_closure_adapter_forward_decl ce :: !closure_adapter_forward_decls;
         closure_adapters := emit_closure_adapter ce :: !closure_adapters)
@@ -10530,6 +10574,21 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   (* Phase 39.A2: generate env typedef + adapter body for each
      inner-lifted fn used as a value. *)
+  (* v0.1.290: one env copier per closure env, so a closure can be copied out of
+     a region. The forward decls go with the env typedefs (before anything that
+     names them); the definitions go after the __mcopy_<tag> family they call. *)
+  let closure_env_copy_list =
+    !closure_env_copies
+    @ List.filter_map (fun (lifted_name, captures, _a, _r) ->
+        if captures = [] then None else Some (lifted_name ^ "_env", captures))
+        !inner_lift_closure_pending
+  in
+  let closure_env_copy_fwds =
+    List.map (fun (n, _) -> emit_closure_env_copy_fwd n) closure_env_copy_list
+  in
+  let closure_env_copy_defs =
+    List.map (fun (n, fields) -> emit_closure_env_copy_fn n fields) closure_env_copy_list
+  in
   let inner_lift_closure_decls =
     List.rev_map (fun (lifted_name, captures, _arg_ty, _ret_ty) ->
       let env_struct_name = lifted_name ^ "_env" in
@@ -10648,6 +10707,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        copied too — out of the dying block, and across threads into a
        per-message region. *)
     List.iter (add_type_and_deps copy_types) !region_result_types;
+    (* v0.1.290: a closure env's captured fields are copied by the env copier,
+       so each field type needs its own __mcopy_<tag>. *)
+    List.iter (fun (_n, fields) ->
+      List.iter (fun (_, t) -> add_type_and_deps copy_types t) fields)
+      closure_env_copy_list;
     Hashtbl.iter (fun _ elem_ty ->
       add_type_and_deps copy_types elem_ty) channel_instances;
     let tags =
@@ -10822,6 +10886,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if closure_env_typedefs = [] then [] else closure_env_typedefs @ [""])
     @ (if inner_lift_closure_decls = [] then []
        else inner_lift_closure_decls @ [""])
+    @ (if closure_env_copy_fwds = [] then [] else closure_env_copy_fwds @ [""])
     (* Vec[R, T] / OwnedVec[T] / StrBuf[R] runtime — depends on the
        element type's C struct being complete, so emit after tuple /
        record / variant bodies. OwnedVec registry first (each _new references it). *)
@@ -11013,6 +11078,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !bytes_vec_used then [bytes_vec_bridge_runtime; ""] else [])
     @ (if map_runtimes = [] then [] else (map_hash_helpers :: map_runtimes) @ [""])
     @ (if copy_fn_defs = [] then [] else copy_fn_defs @ [""])
+    @ (if closure_env_copy_defs = [] then [] else closure_env_copy_defs @ [""])
     (* Phase 16.3: Logger / Metrics runtime — depends on Logger /
        Metrics struct bodies (= records) and closure_str_unit /
        closure_int_unit typedefs, so emit after struct bodies. *)
