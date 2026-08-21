@@ -124,6 +124,17 @@ as of v0.1.31 it is the implemented semantics on the C backend:
   region block the way every other value does. A closure with no captures
   (`env == NULL`) and an FFI adapter holding a borrowed pointer leave
   `copy` zero and are copied shallowly, exactly as before.
+- **...and only when the program uses a region block (v0.1.291).** With no
+  region block the current region IS the default region, so an env cannot
+  outlive its region and the closure keeps its two-pointer shape. The
+  third pointer is not free: a closure is passed by value through every
+  frame of an interpreter's dispatch, and one pointer per frame took a
+  512 MB-stack interpreter over the edge on a deeply recursive program —
+  with no room to raise it, since `ld` caps `-stack_size` at 512 MB on
+  arm64. An env also records the region it was allocated in, so copying
+  it into that same region is a no-op: copies are idempotent, a chain of
+  envs capturing closures does not copy without bound, and a shared env
+  keeps its identity instead of becoming two mutable states.
 - **The block's result is copied out** into the enclosing region
   (per-type deep copy, specialized like the `show`/`==` derive family),
   so returning a value from a block is always safe. A container cannot be
