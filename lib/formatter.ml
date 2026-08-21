@@ -190,7 +190,7 @@ and fmt_pat_atom p =
    "block" form like let / if / match / with)? *)
 let is_block e =
   match e.node with
-  | Let _ | Let_rec _ | If _ | Match _ | With _ | Region_block _ -> true
+  | Let _ | Let_rec _ | If _ | Match _ | With _ | Region_block _ | Region_loop _ -> true
   | _ -> false
 
 (* Does this expression end in a `Match` (possibly through Let / With /
@@ -200,7 +200,7 @@ let rec trailing_match e =
   match e.node with
   | Match _ -> true
   | Let (_, _, body) | Let_rec (_, body) | With (_, _, body)
-  | Region_block (_, body) -> trailing_match body
+  | Region_block (_, body) | Region_loop (_, _, body) -> trailing_match body
   | If (_, t, el) -> trailing_match t || trailing_match el
   | _ -> false
 
@@ -338,7 +338,7 @@ let rec fmt_expr ~prec:p ~ind e =
     let s = kw ^ r ^ " " ^ fmt_expr ~prec:(prec_app + 1) ~ind inner in
     wrap (p > prec_app) s
   (* ── block forms ── *)
-  | Let _ | Let_rec _ | With _ | If _ | Match _ | Region_block _ ->
+  | Let _ | Let_rec _ | With _ | If _ | Match _ | Region_block _ | Region_loop _ ->
     let s = fmt_block ~ind e in
     wrap (p > prec_top) s
 
@@ -446,6 +446,10 @@ and fmt_block ~ind e =
     ^ String.concat "\n" (List.map arm_s arms)
   | Region_block (name, body) ->
     "region " ^ name ^ " {\n"
+    ^ indent (ind + 1) ^ fmt_expr ~prec:prec_top ~ind:(ind + 1) body ^ "\n"
+    ^ indent ind ^ "}"
+  | Region_loop (name, x, body) ->
+    "region " ^ name ^ " loop " ^ x ^ " {\n"
     ^ indent (ind + 1) ^ fmt_expr ~prec:prec_top ~ind:(ind + 1) body ^ "\n"
     ^ indent ind ^ "}"
   | _ ->

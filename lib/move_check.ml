@@ -64,6 +64,7 @@ let rec free_vars (e : Ast.expr) : SS.t =
   | Ast.App (a, b) -> SS.union (free_vars a) (free_vars b)
   | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _)
   | Ast.Ref (_, _, a) | Ast.Region_block (_, a) -> free_vars a
+  | Ast.Region_loop (_, x, a) -> SS.remove x (free_vars a)
   | Ast.Fun (param, _, body) -> SS.remove param (free_vars body)
   | Ast.Let (pat, value, body) ->
     let bound = SS.of_list (pattern_vars pat) in
@@ -179,6 +180,10 @@ let rec go (env : venv) (consumed : IS.t) (multi : bool) (e : Ast.expr) : IS.t =
      | _ -> consumed)
   | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _)
   | Ast.Ref (_, _, a) | Ast.Region_block (_, a) -> go env consumed multi a
+  | Ast.Region_loop (_, x, a) ->
+    (* The body runs any number of times, like a closure's: multi=true, so a
+       move inside it of anything outer is rejected. x itself is loop-fresh. *)
+    go (bind_name env x None) consumed true a
   | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) ->
     go env (go env consumed multi a) multi b
   | Ast.Constr (_, Some a) -> go env consumed multi a

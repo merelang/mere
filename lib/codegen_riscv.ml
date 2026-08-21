@@ -176,6 +176,7 @@ let rec free_vars_of (e : Ast.expr) : string list =
     rm names (List.concat_map (fun (_, e) -> free_vars_of e) bs @ free_vars_of body)
   | Ast.Fun (x, _, b) -> rm [x] (free_vars_of b)
   | Ast.Region_block (_, b) -> free_vars_of b
+  | Ast.Region_loop (_, x, b) -> List.filter (fun n -> n <> x) (free_vars_of b)
   | Ast.App (a, b) -> free_vars_of a @ free_vars_of b
   | Ast.Tuple es -> List.concat_map free_vars_of es
   | Ast.Constr (_, Some a) -> free_vars_of a
@@ -227,6 +228,7 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
      from inside `region R { ... }` is never marked reachable and its label
      is never emitted (`undefined label u_f` at assembly time) *)
   | Ast.Region_block (_, b) -> vars_in b acc
+  | Ast.Region_loop (_, _, b) -> vars_in b acc
   | Ast.App (a, b) -> vars_in a (vars_in b acc)
   | Ast.Tuple elems -> List.fold_left (fun ac el -> vars_in el ac) acc elems
   | Ast.Constr (_, Some a) -> vars_in a acc
@@ -762,6 +764,9 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     let label = fresh_label "str_" in
     string_data := (label, mk_str_block s) :: !string_data;
     emit (LoadAddr (a0, label))                                     (* a0 = &block *)
+  | Ast.Region_loop (_, _, _) ->
+    err e.loc "RV32I: `region R loop` is not supported yet -- the bump rollback \
+               here is LIFO, and the loop's carry must survive the rollback"
   | Ast.Region_block (_, body) ->
     (* LIFO reclamation: park the heap top, run the body, roll back — the
        same thing the Wasm backend does by saving and restoring __lang_bump.

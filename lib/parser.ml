@@ -709,6 +709,20 @@ let rec parse_program_internal tokens =
          let arms, toks = parse_arms rest in
          mk pos (Ast.Match (scrut, arms)), toks
        | _ -> raise (Parse_error (pos_of toks, "expected 'with' after match")))
+    | (pos, T_region) :: (_, T_ident name) :: (_, T_ident "loop")
+      :: (_, T_ident binder) :: (_, T_lbrace) :: rest ->
+      (* `region R loop x { body }` -- the region-carrying loop. x : option C
+         (None on entry, Some carry after); body : region_flow[C, D]. *)
+      region_stack := name :: !region_stack;
+      let body, toks =
+        try expr rest
+        with ex -> region_stack := List.tl !region_stack; raise ex
+      in
+      region_stack := List.tl !region_stack;
+      (match toks with
+       | (_, T_rbrace) :: rest ->
+         mk pos (Ast.Region_loop (name, binder, body)), rest
+       | _ -> raise (Parse_error (pos_of toks, "expected '}' to close region loop")))
     | (pos, T_region) :: (_, T_ident name) :: (_, T_lbrace) :: rest ->
       region_stack := name :: !region_stack;
       let body, toks =

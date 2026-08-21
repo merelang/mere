@@ -2398,6 +2398,39 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
           "region escape: value of type `%s` cannot leave region `%s`"
           (Ast.pp_ty t) name));
     t
+  | Ast.Region_loop (name, x, body) ->
+    (* `region R loop x { body }` — the hand-over-hand sibling of the block
+       above. Each iteration runs in a fresh arena named R; the body sees
+       x : option C (None on entry, Some carry after) and answers
+       region_flow[C, D]: Continue carry deep-copies the carry into the NEXT
+       arena and releases this one, Done d copies d out and exits.
+
+       The escape rule splits where the block's could not: C MAY mention R —
+       a Map[R, ...] carried from arena to arena is the construct's whole
+       point (long-lived state, periodically compacted) — while D must not,
+       exactly like a block's result. Soundness needs no fresh rigid
+       variable per iteration: nothing of arena N reaches arena N+1 except
+       through the Continue copy, so one name R honestly denotes "the loop's
+       current arena" in every iteration. *)
+    saw_region_block := true;
+    active_regions := name :: !active_regions;
+    let c = fresh_var () in
+    let d = fresh_var () in
+    let x_ty = Ast.TyCon ("option", [c]) in
+    let t_body =
+      try infer ((x, mono x_ty) :: env) body
+      with ex ->
+        active_regions := List.tl !active_regions;
+        raise ex
+    in
+    active_regions := List.tl !active_regions;
+    unify e.loc t_body (Ast.TyCon ("region_flow", [c; d]));
+    if mentions_region name (Ast.walk d) then
+      raise (Type_error (e.loc,
+        Printf.sprintf
+          "region escape: Done value of type `%s` cannot leave region `%s` (the Continue carry may mention it; the Done value may not)"
+          (Ast.pp_ty (Ast.walk d)) name));
+    Ast.walk d
   | Ast.Ref (mode, region, inner) ->
     (* `&R e` — tag the value's type with region R. Enforces the Trivial[R]
        constraint: the inner value's type must not mention any Drop type. *)
@@ -2939,6 +2972,7 @@ let rec extract_borrows (e : Ast.expr) : (string * string * Ast.borrow_mode * Lo
   | Ast.With (_, _, body) -> extract_borrows body
   | Ast.Annot (inner, _) -> extract_borrows inner
   | Ast.Region_block (_, body) -> extract_borrows body
+  | Ast.Region_loop (_, _, body) -> extract_borrows body
   | _ -> []
 
 let rec check_borrows active (e : Ast.expr) : unit =
@@ -2970,6 +3004,7 @@ let rec check_borrows active (e : Ast.expr) : unit =
       new_b @ acc
     ) active es)
   | Ast.Region_block (_, body) -> go body
+  | Ast.Region_loop (_, _, body) -> go body
   | Ast.Fun (_, _, body) -> go body
   | Ast.Record_lit (_, fields) -> List.iter (fun (_, e') -> go e') fields
   | Ast.Field_get (inner, _) -> go inner

@@ -3432,6 +3432,19 @@ let rec eval_in (env : env) (e : Ast.expr) =
        the region is a unit-value placeholder; actual bump-allocation will
        come with codegen.  *)
     eval_in ((name, ref V_unit) :: env) body
+  | Ast.Region_loop (name, x, body) ->
+    (* The interpreter has no arenas, so the loop is just a loop: x starts
+       None, Continue rebinds it Some, Done exits. The memory behaviour the
+       construct exists for (swap arenas, deep-copy the carry) is codegen's. *)
+    let rec go carry =
+      let cell = ref carry in
+      match eval_in ((x, cell) :: (name, ref V_unit) :: env) body with
+      | V_constr ("Continue", Some c) -> go (V_constr ("Some", Some c))
+      | V_constr ("Done", Some d) -> d
+      | _ ->
+        failwith "region loop body answered a non-region_flow value" 
+    in
+    go (V_constr ("None", None))
   | Ast.Ref (_mode, _region, inner) ->
     (* `&R v` — runtime is identity, the region tag exists only in the type
        system.  Eventual codegen will materialize this as an actual region

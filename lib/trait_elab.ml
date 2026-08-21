@@ -67,6 +67,7 @@ let rec map_expr (subst : expr -> expr option) (e : expr) : expr =
             (p, Option.map go guard, go body)) arms)
       | Tuple es -> Tuple (List.map go es)
       | Region_block (r, b) -> Region_block (r, go b)
+      | Region_loop (r, x, b) -> Region_loop (r, x, go b)
       | Ref (m, r, inner) -> Ref (m, r, go inner)
       | Record_lit (name, fields) ->
         Record_lit (name, List.map (fun (f, v) -> (f, go v)) fields)
