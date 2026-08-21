@@ -3466,29 +3466,33 @@ let () =
      `void* env`, so it could not be moved out of a dying block -- which made
      every closure a permanent allocation. This test named that decision, and
      names the new one now. *)
-  (* v0.1.291: which closure a program gets depends on whether it uses regions.
-     With no region block, `__lang_current_region` IS the default region, so an
-     env cannot outlive its region and the closure stays two pointers -- which
-     matters, because a closure is passed BY VALUE through every frame of an
-     interpreter's dispatch, and a third pointer per frame took one of CRuby's
-     bootstraptest pairs from pass to "stack overflow" on a 512 MB stack. A
-     program that DOES use a region gets the copier and pays for it. *)
-  assert_contains "codegen: no region block -> env in the default region"
+  (* v0.1.292: ONE closure shape, two pointers, whether or not the program uses a
+     region. The copier that lets an env leave a region lives in a header on the
+     ENV, not in the closure struct -- because a closure is passed BY VALUE
+     through every frame of an interpreter's dispatch, and a third pointer per
+     frame cost one of CRuby's bootstraptest pairs its stack on a platform that
+     caps -stack_size at 512 MB. v0.1.291 had answered that by emitting two
+     different closure shapes; a header answers it once. *)
+  assert_contains "codegen: the closure struct is env + fn, nothing else"
     (codegen_with_decls
       "let add = fn n -> fn x -> n + x in (add 3) 4")
-    "__lang_region_alloc(&__lang_default_region, sizeof(__anon";
-  assert_no_contains "codegen: no region block -> closure has no copier"
+    "typedef struct {\n  void* env;\n  long long (*fn)(void*, long long);\n}";
+  assert_no_contains "codegen: the copier is not in the closure struct"
     (codegen_with_decls
       "let add = fn n -> fn x -> n + x in (add 3) 4")
     ".copy = __mcopy_env_";
-  assert_contains "codegen: a region block -> env follows the current region"
+  assert_contains "codegen: the env carries the header"
     (codegen_with_decls
-      "let f = region R { let s = \"a\" ++ \"b\" in fn x -> str_len s + x } in f 1")
+      "let add = fn n -> fn x -> n + x in (add 3) 4")
+    "->__copy = __mcopy_env_";  (* either construction site's variable name *)
+  assert_contains "codegen: an env follows the current region"
+    (codegen_with_decls
+      "let add = fn n -> fn x -> n + x in (add 3) 4")
     "__lang_region_alloc(__lang_current_region, sizeof(__anon";
-  assert_contains "codegen: a region block -> the closure carries its copier"
+  assert_contains "codegen: the arrow copy reads the env's header"
     (codegen_with_decls
       "let f = region R { let s = \"a\" ++ \"b\" in fn x -> str_len s + x } in f 1")
-    ".copy = __mcopy_env___anon";
+    "__lang_env_hdr*";
   assert_contains "codegen: the env copier is idempotent within one region"
     (codegen_with_decls
       "let f = region R { let s = \"a\" ++ \"b\" in fn x -> str_len s + x } in f 1")

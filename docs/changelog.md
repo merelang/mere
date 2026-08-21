@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.292 — 2026-08-21
+
+_The copier moves into the env, and a closure is two pointers again._
+
+v0.1.290 put the env copier in the closure struct, which made a closure three
+pointers. v0.1.291 answered the cost by emitting two different closure shapes --
+three pointers for programs that use a region, two for those that do not. That is
+two rules where there should be one, and it left the memory win unavailable to
+exactly the programs that wanted it: an interpreter that adds a region block to
+reclaim its temporaries pays the pointer on every frame of its dispatch, and one
+of CRuby's bootstraptest pairs loses its stack (`ld` caps -stack_size at 512 MB on
+arm64, so there is no room to buy back).
+
+The copier now lives in a header on the ENV: `{__lang_region* __r; void*
+(*__copy)(__lang_region*, void*);}` at the front of every env struct. `__mcopy`
+for an arrow reads it through the `void*` it already has. The closure struct is
+`{env, fn}` again, for every program, and the region-conditional emission and the
+typer flag it needed are gone.
+
+An FFI adapter used to hold a borrowed pointer directly as its env, which a header
+cannot be read from. Those envs are now real structs -- a header plus the borrowed
+pointer -- allocated in the default region with `__copy = NULL`, which says "do not
+copy me, I am permanent" in the same field that says "copy me like this" for a
+generated env. One rule, read the same way everywhere.
+
+Measured on an interpreter written in Mere: with a region block per statement, 200k
+plain method calls hold 1181 MiB against 1358-1996 before, the same number three
+runs out of three, and run in 1.16-1.20s against 1.43-1.58s. Its corpus is
+157/157 and CRuby's bootstraptest is back to its baseline. The point of v0.1.290
+was to make that possible; this is the version where it is free.
+
+2536 tests pass across four backends.
+
+---
+
 ## v0.1.291 — 2026-08-21
 
 _An env records its region, and a program that uses no region pays nothing._

@@ -1606,14 +1606,9 @@ let rec emit_expr (e : Ast.expr) : string =
                (* GCC statement expression: the last expression is the value,
                   semicolons are fine. Even with 0 captures, if store_caps is
                   the empty string we just get an extra ` ` gap — still syntactically OK. *)
-               if program_uses_regions () then
-                 Printf.sprintf
-                   "({ %s* __env_local = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); __env_local->__r = __lang_current_region; %s(%s){.env = __env_local, .fn = %s, .copy = __mcopy_env_%s}; })"
-                   env_struct_name env_struct_name env_struct_name store_caps closure_struct adapter_name env_struct_name
-               else
-                 Printf.sprintf
-                   "({ %s* __env_local = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s)); __env_local->__r = &__lang_default_region; %s(%s){.env = __env_local, .fn = %s}; })"
-                   env_struct_name env_struct_name env_struct_name store_caps closure_struct adapter_name
+               Printf.sprintf
+                 "({ %s* __env_local = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); __env_local->__r = __lang_current_region; __env_local->__copy = __mcopy_env_%s; %s(%s){.env = __env_local, .fn = %s}; })"
+                 env_struct_name env_struct_name env_struct_name env_struct_name store_caps closure_struct adapter_name
              | _ ->
                unsupported e.loc
                  ("inner-lifted fn `" ^ name ^
@@ -2022,14 +2017,9 @@ let rec emit_expr (e : Ast.expr) : string =
               { Ast.loc = e.loc; ty = Some (List.assoc n captures);
                 node = Ast.Var n })) captures)
       in
-      if program_uses_regions () then
-        Printf.sprintf
-          "({ %s* __env = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); __env->__r = __lang_current_region; %s (%s){.env = __env, .fn = %s, .copy = __mcopy_env_%s}; })"
-          env_name env_name env_name inits cstruct adapter_name env_name
-      else
-        Printf.sprintf
-          "({ %s* __env = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s)); __env->__r = &__lang_default_region; %s (%s){.env = __env, .fn = %s}; })"
-          env_name env_name env_name inits cstruct adapter_name
+      Printf.sprintf
+        "({ %s* __env = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); __env->__r = __lang_current_region; __env->__copy = __mcopy_env_%s; %s (%s){.env = __env, .fn = %s}; })"
+        env_name env_name env_name env_name inits cstruct adapter_name
   | Ast.App (f, arg) ->
     (* Phase 32.6 (C1 FFI multi-arg): if the head of a curried App chain is an
        extern fn, collect all arguments and convert to a direct C call. 1-arg
@@ -5071,12 +5061,8 @@ let emit_closure_typedef (p : Ast.ty) (r : Ast.ty) : string =
      borrowed pointer, leaves `copy` zero-initialized and is copied shallowly.
      v0.1.291: and a program with no region block does not carry the field at
      all -- see program_uses_regions. *)
-    (if program_uses_regions ()
-     then Printf.sprintf
-            "typedef struct {\n  void* env;\n  %s (*fn)(void*, %s);\n  \
-             void* (*copy)(__lang_region*, void*);\n} %s;" cret carg cstruct
-     else Printf.sprintf
-            "typedef struct {\n  void* env;\n  %s (*fn)(void*, %s);\n} %s;" cret carg cstruct)
+    Printf.sprintf
+      "typedef struct {\n  void* env;\n  %s (*fn)(void*, %s);\n} %s;" cret carg cstruct
 
 let emit_lifted_fn_forward_decl (f : lifted_fn) : string =
   let params =
@@ -5173,7 +5159,9 @@ let emit_closure_env_typedef (ce : closure_emission) : string =
        bounded: an env that captures a closure copies that closure's env too, and
        a chain of them overflowed the native stack in a threaded test. It also
        kept identity -- two copies of one env are two mutable states. *)
-    Printf.sprintf "typedef struct {\n  __lang_region* __r;\n%s\n} %s;" fields ce.ce_env_name
+    Printf.sprintf
+      "typedef struct {\n  __lang_region* __r;\n  void* (*__copy)(__lang_region*, void*);\n%s\n} %s;"
+      fields ce.ce_env_name
 
 (* v0.1.290: the copier for one closure env. It region-allocates a fresh env in
    the target region, copies the struct across, then re-copies each captured
@@ -5193,7 +5181,7 @@ let emit_closure_env_copy_fn (env_name : string) (fields : (string * Ast.ty) lis
     \  %s* __s = (%s*)__p;\n\
     \  if (__s->__r == r) return __p;\n\
     \  %s* __d = (%s*)__lang_region_alloc(r, sizeof(%s));\n\
-    \  *__d = *__s;\n  __d->__r = r;\n%s\n  return (void*)__d;\n}"
+    \  *__d = *__s;\n  __d->__r = r;\n  __d->__copy = __s->__copy;\n%s\n  return (void*)__d;\n}"
     env_name env_name env_name env_name env_name env_name steps
 
 let emit_closure_env_copy_fwd (env_name : string) : string =
@@ -5837,9 +5825,8 @@ let emit_copy_fn (tag : string) (t : Ast.ty) : string =
        closure can leave a region block. `copy` is zero for a NULL env and for
        FFI adapters holding a borrowed pointer, and those stay shallow -- which
        is what they were when every env lived in the default region. *)
-    if program_uses_regions ()
-    then header ^ " { if (v.env && v.copy) v.env = v.copy(r, v.env); return v; }"
-    else header ^ " { (void)r; return v; }"
+    header ^ " { if (v.env) { __lang_env_hdr* __h = (__lang_env_hdr*)v.env; \
+                if (__h->__copy) v.env = __h->__copy(r, v.env); } return v; }"
   | Ast.TyStr ->
     (* Deep-copy a str into region r, preserving its length header (so a
        copied map key/value stays byte-safe, embedded NULs and all). *)
@@ -8142,27 +8129,47 @@ let bytebuf_runtime =
    Metrics' `record` is in curried form `str -> int -> unit`, so the outer
    closure returns the inner closure. The inner closure's env must carry the
    field name; allocate it from the default region and reuse. *)
+(* v0.1.292: every closure env begins with this header, so `__mcopy` can copy an
+   env it only knows as `void*` -- the copier moves out of the closure struct,
+   which goes back to two pointers. That matters because a closure is passed BY
+   VALUE through every frame of an interpreter's dispatch, and the third pointer
+   cost one of CRuby's bootstraptest pairs its stack on a platform that caps
+   -stack_size at 512 MB. `__copy == NULL` means "do not copy me": an FFI shim's
+   env is permanent and borrowed. *)
+let env_header_runtime =
+  String.concat "\n"
+    [ "typedef struct {";
+      "  __lang_region* __r;";
+      "  void* (*__copy)(__lang_region*, void*);";
+      "} __lang_env_hdr;";
+      "";
+      "/* An FFI shim's env: a borrowed pointer with a header, so reading the";
+      "   header is always valid for any closure with a non-NULL env. */";
+      "typedef struct { __lang_region* __r; void* (*__copy)(__lang_region*, void*); const char* s; } __lang_shim_env;" ]
+
 let logger_runtime =
   String.concat "\n"
     [ "/* Phase 16.3: mk_logger runtime — returns a Logger record holding";
       "   3 closure_str_unit fields. The prefix is bound as env. */";
       "static int __mere_logger_info_fn(void* env, const char* msg) {";
-      "  printf(\"%s [INFO] %s\\n\", (const char*)env, msg);";
+      "  printf(\"%s [INFO] %s\\n\", ((__lang_shim_env*)env)->s, msg);";
       "  return 0;";
       "}";
       "static int __mere_logger_warn_fn(void* env, const char* msg) {";
-      "  printf(\"%s [WARN] %s\\n\", (const char*)env, msg);";
+      "  printf(\"%s [WARN] %s\\n\", ((__lang_shim_env*)env)->s, msg);";
       "  return 0;";
       "}";
       "static int __mere_logger_error_fn(void* env, const char* msg) {";
-      "  printf(\"%s [ERROR] %s\\n\", (const char*)env, msg);";
+      "  printf(\"%s [ERROR] %s\\n\", ((__lang_shim_env*)env)->s, msg);";
       "  return 0;";
       "}";
       "static Logger __mere_mk_logger(const char* prefix) {";
+      "  __lang_shim_env* e = (__lang_shim_env*)__lang_region_alloc(&__lang_default_region, sizeof(__lang_shim_env));";
+      "  e->__r = &__lang_default_region; e->__copy = NULL; e->s = prefix;";
       "  return (Logger){";
-      "    .mu_info  = {.env = (void*)prefix, .fn = __mere_logger_info_fn},";
-      "    .mu_warn  = {.env = (void*)prefix, .fn = __mere_logger_warn_fn},";
-      "    .mu_error = {.env = (void*)prefix, .fn = __mere_logger_error_fn},";
+      "    .mu_info  = {.env = e, .fn = __mere_logger_info_fn},";
+      "    .mu_warn  = {.env = e, .fn = __mere_logger_warn_fn},";
+      "    .mu_error = {.env = e, .fn = __mere_logger_error_fn},";
       "  };";
       "}" ]
 
@@ -8177,14 +8184,17 @@ let metrics_runtime =
       "  return 0;";
       "}";
       "static int __mere_metrics_record_inner_fn(void* env, int n) {";
-      "  printf(\"[METRIC] %s=%d\\n\", (const char*)env, n);";
+      "  printf(\"[METRIC] %s=%d\\n\", ((__lang_shim_env*)env)->s, n);";
       "  return 0;";
       "}";
       "static closure_int_unit __mere_metrics_record_outer_fn(void* env, const char* name) {";
       "  (void)env;";
       "  /* Assume name is a string literal (same assumption as interpreter);";
-      "     no copy needed, hand it directly to env. */";
-      "  return (closure_int_unit){.env = (void*)name, .fn = __mere_metrics_record_inner_fn};";
+      "     no copy needed -- the env borrows it, and its header says so with a";
+      "     NULL copier. */";
+      "  __lang_shim_env* e = (__lang_shim_env*)__lang_region_alloc(&__lang_default_region, sizeof(__lang_shim_env));";
+      "  e->__r = &__lang_default_region; e->__copy = NULL; e->s = name;";
+      "  return (closure_int_unit){.env = e, .fn = __mere_metrics_record_inner_fn};";
       "}";
       "static Metrics __mere_mk_metrics(int unit_arg) {";
       "  (void)unit_arg;";
@@ -10619,14 +10629,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   (* no region blocks -> no copiers to emit, and nothing references them *)
   let closure_env_copy_fwds =
-    if program_uses_regions ()
-    then List.map (fun (n, _) -> emit_closure_env_copy_fwd n) closure_env_copy_list
-    else []
+    List.map (fun (n, _) -> emit_closure_env_copy_fwd n) closure_env_copy_list
   in
   let closure_env_copy_defs =
-    if program_uses_regions ()
-    then List.map (fun (n, fields) -> emit_closure_env_copy_fn n fields) closure_env_copy_list
-    else []
+    List.map (fun (n, fields) -> emit_closure_env_copy_fn n fields) closure_env_copy_list
   in
   let inner_lift_closure_decls =
     List.rev_map (fun (lifted_name, captures, _arg_ty, _ret_ty) ->
@@ -10639,7 +10645,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                Printf.sprintf "%s %s;" (c_type_of ty) (c_safe_name n))
                captures)
       in
-      Printf.sprintf "typedef struct { __lang_region* __r; %s } %s;" env_fields env_struct_name
+      Printf.sprintf
+        "typedef struct { __lang_region* __r; void* (*__copy)(__lang_region*, void*); %s } %s;"
+        env_fields env_struct_name
     ) !inner_lift_closure_pending
   in
   let inner_lift_closure_adapter_forward_decls =
@@ -10925,6 +10933,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if closure_env_typedefs = [] then [] else closure_env_typedefs @ [""])
     @ (if inner_lift_closure_decls = [] then []
        else inner_lift_closure_decls @ [""])
+    @ [env_header_runtime; ""]
     @ (if closure_env_copy_fwds = [] then [] else closure_env_copy_fwds @ [""])
     (* Vec[R, T] / OwnedVec[T] / StrBuf[R] runtime — depends on the
        element type's C struct being complete, so emit after tuple /
