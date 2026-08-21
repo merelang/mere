@@ -32,8 +32,22 @@ generated env. One rule, read the same way everywhere.
 Measured on an interpreter written in Mere: with a region block per statement, 200k
 plain method calls hold 1181 MiB against 1358-1996 before, the same number three
 runs out of three, and run in 1.16-1.20s against 1.43-1.58s. Its corpus is
-157/157 and CRuby's bootstraptest is back to its baseline. The point of v0.1.290
-was to make that possible; this is the version where it is free.
+157/157 either way.
+
+**Two sentences in the first version of this entry were wrong, and the correction
+is worth more than they were.** They said the memory win now costs nothing and
+that CRuby's bootstraptest was back to its baseline. Neither holds: the pair
+v0.1.291 was written around still fails with the closure at two pointers, so the
+third pointer was not its cause -- or not its only one. That pair runs a thread
+with `while true; // =~ "" end` beside a regex loop, and whether it finishes
+depends on which limit trips first, the interpreter's step budget or the native
+stack. The same source overflows at -O1 and does not at -Os: a canary on the
+line, not a measurement of a change. The interpreter's own record now says so, so
+that its err=59 is not read as a fresh regression.
+
+The reasons to prefer this shape stand without those sentences: one closure
+layout instead of two, no per-frame pointer, and an FFI env that answers the same
+question the same way a generated one does.
 
 2536 tests pass across four backends.
 
