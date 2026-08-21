@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.293 — 2026-08-21
+
+_Whoever names a copier decides that it exists._
+
+v0.1.290 taught `__mcopy` for an arrow type to deep-copy a closure's env, which
+put copier CALLS in two places that had never emitted one before: a record's
+copier, for a field holding a closure, and an env copier, for a captured value.
+CI went red for four releases -- 16 of 119 parity programs, every `trait_*` one
+among them -- with the emitted C naming a function that was never defined:
+
+    v.mu_add = __mcopy_closure_int_closure_int_int(r, v.mu_add);   /* undeclared */
+
+Two independent faults, each hiding behind the other's failure.
+
+The first: **`ty_tag` names types that `ty_is_concrete` rejects.** `ty_tag` erases
+an unresolved type variable to `int`, so a capture of `list (str, 'a)` is named
+`__mcopy_list_tuple_str_int` -- while the collector that decides which copiers to
+emit walks the same type, finds it not concrete, and drops it. A name with no
+definition. Registration now goes through `ty_as_tagged`, which returns the type
+`ty_tag` actually names, including the region slot that `ty_tag` renders as
+`__heap` (erasing that to `int` would reintroduce the mpng P5 shape: one type
+under two names).
+
+The second: **a polymorphic record's fields were read three times, and two of the
+readers had a different answer.** A trait dictionary `Num__dict 'a` is
+monomorphized at its instance -- for `Num__dict m7` the struct field is
+`closure_m7_closure_m7_m7` -- but the copier emitter read `r_fields` directly and
+named `__mcopy_closure_int_closure_int_int`, the wrong type under the wrong name,
+while the collector dropped the field entirely for holding a TyParam. Only the
+closure-typedef collector, which had hit this before, substituted the arguments.
+The rule now lives in one place, `record_field_types_at`, and all three read it.
+
+Also: the inner-lifted half of the env-copier list is no longer filtered on
+`captures = []`. A closure with no captures has no env at all and needs no copier;
+an inner-lifted fn always gets an env struct and its use site assigns `__copy`
+unconditionally. Measured, not reasoned -- restoring the filter fails exactly one
+parity program (`prop_list`).
+
+Gates: parity 119/0 (was 103/16), `dune test` 2536/0, plus ctest, stack_overflow,
+host_matrix, selfhost_check, url/encoding parity, infer_scaling, debug_info,
+wasm_sourcemap, lsp_smoke, window_check -- none of which CI had reached since
+v0.1.290, because it stops at the first failing gate.
+
+---
+
 ## v0.1.292 — 2026-08-21
 
 _The copier moves into the env, and a closure is two pointers again._
