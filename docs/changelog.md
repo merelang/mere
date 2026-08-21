@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.295 — 2026-08-22
+
+_One cached region is not enough once regions nest._
+
+The per-thread cache of block-region structs was one slot deep. That is the
+right size for regions that strictly alternate, and the wrong size the moment
+they nest -- a loop iteration's region inside a statement's region, statement
+regions inside the body -- because releases then arrive out of cache order: the
+innermost release fills the slot, the next-outer release finds it full and
+frees its region entirely (struct, 1 MB seed block and all), and the next
+acquire at that depth buys them back. An interpreter built on this runtime
+paid a 1 MB malloc+free round trip per loop iteration -- ~200 GB of allocator
+churn over a 200k-iteration run, read from its own block counters. libc
+absorbed it well enough that wall-clock barely moved, which is why it went
+unnoticed until the counters said it out loud.
+
+The cache is now a stack of eight. Deeper nesting than eight falls back to
+malloc, which is correct and merely slower. The spawn trampoline drains the
+whole stack at thread exit (same leak the one-slot drain existed for).
+
+parity 119/0 (the first build broke it -- the thread-exit path still assigned
+to the old single slot; the gate caught it before push), dune test 2536/0,
+ctest, stack_overflow, selfhost_check, socket_parity, tcp_read_codes.
+
+---
+
 ## v0.1.294 — 2026-08-22
 
 _Every formatted value leaked its scaffolding._
