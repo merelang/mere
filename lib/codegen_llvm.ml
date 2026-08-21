@@ -2616,7 +2616,7 @@ let emit_struct_fn ?(json = false) (tag : string) (t : Ast.ty) : string =
     (* v0.1.264: asprintf hands back a plain C string. A Mere str carries its
        length in front of byte0, so the boundary copies it into one. *)
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_of_cstr(ptr %s)" r raw);
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_take_cstr(ptr %s)" r raw);
     r
   in
   emit_instr "entry:";
@@ -2644,7 +2644,7 @@ let emit_struct_fn ?(json = false) (tag : string) (t : Ast.ty) : string =
       let raw = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" raw p);
       let r = fresh_reg () in
-      emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_of_cstr(ptr %s)" r raw);
+      emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_take_cstr(ptr %s)" r raw);
       r
     | Ast.TyUnit ->
       (if json then "@.s_json_null" else "@.s_unit")
@@ -2858,7 +2858,7 @@ let emit_struct_fn ?(json = false) (tag : string) (t : Ast.ty) : string =
               (* asprintf hands back a plain C string; a Mere str carries its
                  length in front of byte0 (v0.1.264) *)
               let r = fresh_reg () in
-              emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_of_cstr(ptr %s)" r raw);
+              emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_take_cstr(ptr %s)" r raw);
               r
             end
         in
@@ -2931,7 +2931,7 @@ let emit_struct_fn ?(json = false) (tag : string) (t : Ast.ty) : string =
             let raw = fresh_reg () in
             emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" raw p);
             let r = fresh_reg () in
-            emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_of_cstr(ptr %s)" r raw);
+            emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_take_cstr(ptr %s)" r raw);
             r
         in
         let end_label = fresh_label "show_armend_" in
@@ -6717,6 +6717,17 @@ let runtime_decls =
       "  ret ptr %r";
       "}";
       "";
+      (* v0.1.294: same, but OWNS the C string -- frees it after the copy.
+         asprintf results come through here; each used to leak its buffer
+         (the C backend had the identical leak, found at 48 MB per million
+         str_of_int calls). getenv / argv must NOT come here. *)
+      "define ptr @__lang_str_take_cstr(ptr %c) {";
+      "entry:";
+      "  %r = call ptr @__lang_str_of_cstr(ptr %c)";
+      "  call void @free(ptr %c)";
+      "  ret ptr %r";
+      "}";
+      "";
       "declare ptr @malloc(i64)";
       "declare ptr @realloc(ptr, i64)";
       "declare void @free(ptr)";
@@ -9391,12 +9402,12 @@ let float_helpers_llvm =
       "has_dot:";
       "  call i32 (ptr, ptr, ...) @asprintf(ptr %buf_ptr, ptr @.fmt_str, ptr %tmp)";
       "  %buf = load ptr, ptr %buf_ptr";
-      "  %bufs = call ptr @__lang_str_of_cstr(ptr %buf)";
+      "  %bufs = call ptr @__lang_str_take_cstr(ptr %buf)";
       "  ret ptr %bufs";
       "no_dot:";
       "  call i32 (ptr, ptr, ...) @asprintf(ptr %buf_ptr, ptr @.fmt_dot0, ptr %tmp)";
       "  %buf2 = load ptr, ptr %buf_ptr";
-      "  %buf2s = call ptr @__lang_str_of_cstr(ptr %buf2)";
+      "  %buf2s = call ptr @__lang_str_take_cstr(ptr %buf2)";
       "  ret ptr %buf2s";
       "}";
       "";
