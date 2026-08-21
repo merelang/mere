@@ -423,6 +423,10 @@ let level_check = match Sys.getenv_opt "MERE_LEVEL_CHECK" with
 
 let level_check_failures = ref 0
 
+(* v0.1.291: did the program use a `region` block anywhere? Codegen asks, to
+   decide whether a closure has to carry a copier for its env. *)
+let saw_region_block = ref false
+
 let generalize env t =
   let send_ids = pending_send_ids () in
   (* A variable is generalizable when it was created inside this binding and is
@@ -806,6 +810,11 @@ let builtin_snapshot :
    * (string, string) Hashtbl.t) option ref = ref None
 
 let reset_type_registries () =
+  (* v0.1.291: per-compilation state. Without this reset the flag survives from
+     one program to the next in a process that compiles more than one -- the test
+     harness and the language server both do -- and a program with no region
+     block would emit the closure shape of whatever was compiled before it. *)
+  saw_region_block := false;
   match !builtin_snapshot with
   | None ->
     builtin_snapshot :=
@@ -2366,6 +2375,11 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
     let sch = generalize env tv in
     infer ((name, sch) :: env) body
   | Ast.Region_block (name, body) ->
+    (* v0.1.291: recorded for codegen, which decides whether closures need to
+       carry an env copier at all -- see program_uses_regions. The typer walks
+       the whole program before codegen emits anything, so this is known in time,
+       which a flag set during emission would not be. *)
+    saw_region_block := true;
     (* Phase 2: introduce region name R in scope, then check that R does not
        escape the block (i.e., body's resulting type should not mention R).
        Also push name on active_regions so view constructions inside the

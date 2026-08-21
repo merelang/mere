@@ -346,6 +346,19 @@ let copy_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
    copies its result out via __mcopy_<tag>) and folded into copy_types at
    collection time — emission runs before the collector is in scope. *)
 let region_result_types : Ast.ty list ref = ref []
+
+(* v0.1.291: does this program use a region block at all? A closure only needs a
+   copier for its env if the env can be in a region that dies -- and with no
+   region blocks, `__lang_current_region` IS the default region, so nothing can.
+   Programs that do not use regions therefore keep the pre-v0.1.290 closure: two
+   pointers, an env in the default region, a shallow copy. That matters because
+   the copier is a third pointer in a value that is passed BY VALUE through every
+   frame of an interpreter's dispatch, and an interpreter with a 512 MB stack
+   measured one of CRuby's bootstraptest pairs going from pass to
+   "stack overflow (recursion too deep)" -- the recursion was already at the edge
+   and the extra pointer per frame crossed it. Charging that to programs which
+   cannot benefit is the wrong trade. *)
+let program_uses_regions () = !Typer.saw_region_block
 let needs_struct_cmp = needs_struct_eq
 
 (* Polymorphic record declarations: deferred to instantiation time. *)
@@ -1593,9 +1606,14 @@ let rec emit_expr (e : Ast.expr) : string =
                (* GCC statement expression: the last expression is the value,
                   semicolons are fine. Even with 0 captures, if store_caps is
                   the empty string we just get an extra ` ` gap — still syntactically OK. *)
-               Printf.sprintf
-                 "({ %s* __env_local = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); %s(%s){.env = __env_local, .fn = %s, .copy = __mcopy_env_%s}; })"
-                 env_struct_name env_struct_name env_struct_name store_caps closure_struct adapter_name env_struct_name
+               if program_uses_regions () then
+                 Printf.sprintf
+                   "({ %s* __env_local = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); __env_local->__r = __lang_current_region; %s(%s){.env = __env_local, .fn = %s, .copy = __mcopy_env_%s}; })"
+                   env_struct_name env_struct_name env_struct_name store_caps closure_struct adapter_name env_struct_name
+               else
+                 Printf.sprintf
+                   "({ %s* __env_local = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s)); __env_local->__r = &__lang_default_region; %s(%s){.env = __env_local, .fn = %s}; })"
+                   env_struct_name env_struct_name env_struct_name store_caps closure_struct adapter_name
              | _ ->
                unsupported e.loc
                  ("inner-lifted fn `" ^ name ^
@@ -2004,9 +2022,14 @@ let rec emit_expr (e : Ast.expr) : string =
               { Ast.loc = e.loc; ty = Some (List.assoc n captures);
                 node = Ast.Var n })) captures)
       in
-      Printf.sprintf
-        "({ %s* __env = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); %s (%s){.env = __env, .fn = %s, .copy = __mcopy_env_%s}; })"
-        env_name env_name env_name inits cstruct adapter_name env_name
+      if program_uses_regions () then
+        Printf.sprintf
+          "({ %s* __env = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); __env->__r = __lang_current_region; %s (%s){.env = __env, .fn = %s, .copy = __mcopy_env_%s}; })"
+          env_name env_name env_name inits cstruct adapter_name env_name
+      else
+        Printf.sprintf
+          "({ %s* __env = (%s*)__lang_region_alloc(&__lang_default_region, sizeof(%s)); __env->__r = &__lang_default_region; %s (%s){.env = __env, .fn = %s}; })"
+          env_name env_name env_name inits cstruct adapter_name
   | Ast.App (f, arg) ->
     (* Phase 32.6 (C1 FFI multi-arg): if the head of a curried App chain is an
        extern fn, collect all arguments and convert to a direct C call. 1-arg
@@ -5038,19 +5061,22 @@ let emit_closure_typedef (p : Ast.ty) (r : Ast.ty) : string =
   let cstruct = closure_struct_name p r in
   let cret = c_type_of r in
   let carg = c_type_of p in
-  Printf.sprintf
-    (* v0.1.290: a closure carries a COPIER for its env, so a closure can be
-       copied out of a dying region the way every other value is. The env used
-       to be allocated in the default (program-lifetime) region for exactly one
-       reason -- nothing could copy it, since `void* env` is type-erased -- and
-       that made every closure a permanent allocation. The copier is generated
-       per env type, next to the env's own typedef, which is where the field
-       types are known. A closure whose env is NULL, or one built by an FFI
-       adapter over a borrowed pointer, leaves `copy` zero-initialized and is
-       copied shallowly, as before. *)
-    "typedef struct {\n  void* env;\n  %s (*fn)(void*, %s);\n  \
-     void* (*copy)(__lang_region*, void*);\n} %s;"
-    cret carg cstruct
+  (* v0.1.290: a closure carries a COPIER for its env, so a closure can be
+     copied out of a dying region the way every other value is. The env used to
+     be allocated in the default (program-lifetime) region for exactly one
+     reason -- nothing could copy it, since `void* env` is type-erased -- and
+     that made every closure a permanent allocation. The copier is generated per
+     env type, next to the env's own typedef, which is where the field types are
+     known. A closure whose env is NULL, or one built by an FFI adapter over a
+     borrowed pointer, leaves `copy` zero-initialized and is copied shallowly.
+     v0.1.291: and a program with no region block does not carry the field at
+     all -- see program_uses_regions. *)
+    (if program_uses_regions ()
+     then Printf.sprintf
+            "typedef struct {\n  void* env;\n  %s (*fn)(void*, %s);\n  \
+             void* (*copy)(__lang_region*, void*);\n} %s;" cret carg cstruct
+     else Printf.sprintf
+            "typedef struct {\n  void* env;\n  %s (*fn)(void*, %s);\n} %s;" cret carg cstruct)
 
 let emit_lifted_fn_forward_decl (f : lifted_fn) : string =
   let params =
@@ -5142,7 +5168,12 @@ let emit_closure_env_typedef (ce : closure_emission) : string =
           Printf.sprintf "  %s %s;" (c_type_of t) (c_safe_name n))
           ce.ce_env_fields)
     in
-    Printf.sprintf "typedef struct {\n%s\n} %s;" fields ce.ce_env_name
+    (* v0.1.291: the env records its own region, so a copy into the region it is
+       already in is a no-op. Without that, copying is neither idempotent nor
+       bounded: an env that captures a closure copies that closure's env too, and
+       a chain of them overflowed the native stack in a threaded test. It also
+       kept identity -- two copies of one env are two mutable states. *)
+    Printf.sprintf "typedef struct {\n  __lang_region* __r;\n%s\n} %s;" fields ce.ce_env_name
 
 (* v0.1.290: the copier for one closure env. It region-allocates a fresh env in
    the target region, copies the struct across, then re-copies each captured
@@ -5160,8 +5191,9 @@ let emit_closure_env_copy_fn (env_name : string) (fields : (string * Ast.ty) lis
   Printf.sprintf
     "static void* __mcopy_env_%s(__lang_region* r, void* __p) {\n\
     \  %s* __s = (%s*)__p;\n\
+    \  if (__s->__r == r) return __p;\n\
     \  %s* __d = (%s*)__lang_region_alloc(r, sizeof(%s));\n\
-    \  *__d = *__s;\n%s\n  return (void*)__d;\n}"
+    \  *__d = *__s;\n  __d->__r = r;\n%s\n  return (void*)__d;\n}"
     env_name env_name env_name env_name env_name env_name steps
 
 let emit_closure_env_copy_fwd (env_name : string) : string =
@@ -5805,7 +5837,9 @@ let emit_copy_fn (tag : string) (t : Ast.ty) : string =
        closure can leave a region block. `copy` is zero for a NULL env and for
        FFI adapters holding a borrowed pointer, and those stay shallow -- which
        is what they were when every env lived in the default region. *)
-    header ^ " { if (v.env && v.copy) v.env = v.copy(r, v.env); return v; }"
+    if program_uses_regions ()
+    then header ^ " { if (v.env && v.copy) v.env = v.copy(r, v.env); return v; }"
+    else header ^ " { (void)r; return v; }"
   | Ast.TyStr ->
     (* Deep-copy a str into region r, preserving its length header (so a
        copied map key/value stays byte-safe, embedded NULs and all). *)
@@ -10583,11 +10617,16 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         if captures = [] then None else Some (lifted_name ^ "_env", captures))
         !inner_lift_closure_pending
   in
+  (* no region blocks -> no copiers to emit, and nothing references them *)
   let closure_env_copy_fwds =
-    List.map (fun (n, _) -> emit_closure_env_copy_fwd n) closure_env_copy_list
+    if program_uses_regions ()
+    then List.map (fun (n, _) -> emit_closure_env_copy_fwd n) closure_env_copy_list
+    else []
   in
   let closure_env_copy_defs =
-    List.map (fun (n, fields) -> emit_closure_env_copy_fn n fields) closure_env_copy_list
+    if program_uses_regions ()
+    then List.map (fun (n, fields) -> emit_closure_env_copy_fn n fields) closure_env_copy_list
+    else []
   in
   let inner_lift_closure_decls =
     List.rev_map (fun (lifted_name, captures, _arg_ty, _ret_ty) ->
@@ -10600,7 +10639,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                Printf.sprintf "%s %s;" (c_type_of ty) (c_safe_name n))
                captures)
       in
-      Printf.sprintf "typedef struct { %s } %s;" env_fields env_struct_name
+      Printf.sprintf "typedef struct { __lang_region* __r; %s } %s;" env_fields env_struct_name
     ) !inner_lift_closure_pending
   in
   let inner_lift_closure_adapter_forward_decls =

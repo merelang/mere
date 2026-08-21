@@ -4,6 +4,61 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.291 — 2026-08-21
+
+_An env records its region, and a program that uses no region pays nothing._
+
+v0.1.290 gave a closure a copier for its env and then copied unconditionally.
+That is neither idempotent nor bounded. An env that captures a closure copies
+that closure's env in turn, so a chain of them is a chain of copies, and a
+threaded test in an interpreter written in Mere overflowed the native stack:
+`stack overflow (recursion too deep)`, where the same program passed before.
+Copying also duplicated identity — two copies of one env are two mutable
+states, and a closure that writes through what it captured would write to the
+wrong one.
+
+Each env now carries the region it was allocated in, and the copier returns its
+argument unchanged when that region is the destination. Copies inside one region
+— the common case, and every copy in a program with no region blocks — become
+no-ops, and a cross-region copy still walks only as deep as the chain that
+actually crosses. This is the elision the memory model deferred as needing
+type-level region tracking on values; one pointer per env does it at runtime.
+
+Found by CRuby's bootstraptest, run against an interpreter written in Mere: 1697
+pairs, of which exactly one moved from pass to error. Neither that interpreter's
+own 157-program corpus nor this repo's 2533 tests noticed, because the shape
+needs a closure captured inside a closure inside a thread. A wider gate is worth
+having even when it is somebody else's.
+
+The idempotence fixed the copying, and did NOT fix what the bootstraptest pair
+was actually measuring: v0.1.290 made the closure struct three pointers instead
+of two, and a closure is passed BY VALUE through every frame of an interpreter's
+dispatch. One pointer per frame took that program over its stack limit -- and
+there is no room to raise it, because `ld` refuses `-stack_size` above 512 MB on
+arm64, which is exactly where the interpreter already was.
+
+So the copier is now emitted only for programs that USE a region block. With no
+region block `__lang_current_region` IS the default region, an env cannot outlive
+its region, and the closure keeps its pre-v0.1.290 shape: two pointers, an env in
+the default region, a shallow copy. Charging a cost to programs that cannot
+benefit is the wrong trade, and the measurement said which programs those are.
+Verified end to end: the interpreter rebuilt without a region block is back to
+`pass=1569 err=58`, its baseline, and its generated C carries no copier field at
+all.
+
+The flag that answers "does this program use a region" is set by the typer, not
+during emission -- the typer walks the whole program first, and a closure may be
+emitted before the region block that appears later in the file. It is reset per
+compilation, because the language server and the test harness both compile many
+programs in one process, and a leftover `true` would give a region-less program
+the shape of whatever was compiled before it.
+
+v0.1.290 also shipped with `version.ml` left at 0.1.289: its changelog entry was
+written after the suite ran, so the version test's failure was not seen before
+the commit. Both are corrected here.
+
+---
+
 ## v0.1.290 — 2026-08-21
 
 _A closure carries the copier that lets it leave a region._

@@ -3466,18 +3466,33 @@ let () =
      `void* env`, so it could not be moved out of a dying block -- which made
      every closure a permanent allocation. This test named that decision, and
      names the new one now. *)
-  assert_contains "codegen: closure env follows the current region"
+  (* v0.1.291: which closure a program gets depends on whether it uses regions.
+     With no region block, `__lang_current_region` IS the default region, so an
+     env cannot outlive its region and the closure stays two pointers -- which
+     matters, because a closure is passed BY VALUE through every frame of an
+     interpreter's dispatch, and a third pointer per frame took one of CRuby's
+     bootstraptest pairs from pass to "stack overflow" on a 512 MB stack. A
+     program that DOES use a region gets the copier and pays for it. *)
+  assert_contains "codegen: no region block -> env in the default region"
     (codegen_with_decls
       "let add = fn n -> fn x -> n + x in (add 3) 4")
+    "__lang_region_alloc(&__lang_default_region, sizeof(__anon";
+  assert_no_contains "codegen: no region block -> closure has no copier"
+    (codegen_with_decls
+      "let add = fn n -> fn x -> n + x in (add 3) 4")
+    ".copy = __mcopy_env_";
+  assert_contains "codegen: a region block -> env follows the current region"
+    (codegen_with_decls
+      "let f = region R { let s = \"a\" ++ \"b\" in fn x -> str_len s + x } in f 1")
     "__lang_region_alloc(__lang_current_region, sizeof(__anon";
-  assert_contains "codegen: a closure carries its env copier"
+  assert_contains "codegen: a region block -> the closure carries its copier"
     (codegen_with_decls
-      "let add = fn n -> fn x -> n + x in (add 3) 4")
+      "let f = region R { let s = \"a\" ++ \"b\" in fn x -> str_len s + x } in f 1")
     ".copy = __mcopy_env___anon";
-  assert_contains "codegen: the env copier deep-copies a captured str"
+  assert_contains "codegen: the env copier is idempotent within one region"
     (codegen_with_decls
-      "let f = fn s -> fn x -> str_len s + x in (f \"ab\") 1")
-    "__mcopy_env_";
+      "let f = region R { let s = \"a\" ++ \"b\" in fn x -> str_len s + x } in f 1")
+    "if (__s->__r == r) return __p;";
   assert_no_contains "codegen: closure env no longer uses malloc"
     (codegen_with_decls
       "let add = fn n -> fn x -> n + x in (add 3) 4")
