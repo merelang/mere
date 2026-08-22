@@ -1,0 +1,8 @@
+//! expect: ok
+// `time` reads the virtual clock, so a virtual sleep must move it. Only the
+// DIFFERENCE is checked -- the base is the real time of day at startup, so
+// absolute values differ between runs and must not be printed.
+let t0 = time ();
+let _ = sleep_ms 1500;
+let t1 = time ();
+print (if t1 - t0 >= 1.4 then "advanced" else "stuck")

@@ -658,6 +658,22 @@ address in a hosted process. See
 
 ---
 
+## Virtual clock (v0.1.305)
+
+`MERE_VIRTUAL_CLOCK=1` makes the **interpreter** advance a virtual clock instead
+of waiting: when every live thread is parked, time jumps to the earliest pending
+deadline (Go 1.27 `testing/synctest`'s rule). Timer firing order becomes
+deterministic and a minute of timers costs milliseconds — this is for tests.
+Covered: `channel_recv` / `channel_recv_opt` / `channel_recv_timeout`,
+`sleep_ms` / `sleep`, `join`, and `time` (reads the virtual clock; only
+differences are deterministic). Not covered: `par_map`'s internal joins and
+OS-level waits — a thread in those counts as running, so the clock refuses to
+advance past it. All-blocked with no timer pending fails naming the deadlock
+instead of hanging. Off by default; the C backend is untouched. See
+`scripts/virtual_clock_check.sh`.
+
+---
+
 ## Thread-leak report (v0.1.304)
 
 `MERE_THREAD_REPORT=1` makes the **interpreter** print, at exit, the threads that

@@ -300,10 +300,135 @@ let builtin_mk_metrics =
         [("inc", inc_field); ("record", record_field)])
     | _ -> failwith "mk_metrics: expected unit")
 
+(* ---- v0.1.305: a virtual clock (opt-in, MERE_VIRTUAL_CLOCK=1) ------------
+
+   The rule is Go's testing/synctest rule: WHEN EVERY LIVE THREAD IS PARKED,
+   NOTHING CAN HAPPEN EXCEPT TIME, so the clock jumps to the earliest pending
+   deadline instead of anybody actually waiting. A test that sleeps for thirty
+   virtual seconds finishes in microseconds, and the ORDER in which timers fire
+   becomes a function of the program rather than of the machine's load.
+
+   Why this is a redesign of the waits and not a patch on top of them: the
+   thread-registry instrumentation marks a thread blocked and THEN parks it on
+   the channel's own condition variable. Between those two steps there is a
+   window, and a clock that decides "everyone is parked, advance" inside that
+   window signals a condvar nobody is on yet -- the wakeup is lost, which is a
+   flaky test, which is the disease a virtual clock exists to cure. So under
+   the virtual clock every wait parks on ONE scheduler condvar, and "how many
+   are blocked" is incremented under the SAME lock the park happens under. The
+   last thread to park is the one that advances the clock.
+
+   What routes through it: channel_recv / channel_recv_opt /
+   channel_recv_timeout, sleep_ms / sleep, join, and `time` (which reads the
+   virtual clock). What does not: par_map's internal joins and OS-level waits
+   (stdin, sockets) -- a thread in one of those counts as running, so the clock
+   conservatively refuses to advance past it. The C backend has its own runtime
+   and is untouched; deterministic-time tests are an interpreter workload.
+
+   If every live thread parks and NO deadline is pending, the program can only
+   deadlock, and the run fails saying so rather than hanging -- under a virtual
+   clock a hang is never the intended behaviour of a test.
+
+   Off unless MERE_VIRTUAL_CLOCK is set: the default run of every existing
+   program is byte-identical. *)
+let vclock_on = Sys.getenv_opt "MERE_VIRTUAL_CLOCK" <> None
+let sched_m = Mutex.create ()
+let sched_cv = Condition.create ()
+(* Starts at the real time of day so `time` stays epoch-shaped; only
+   DIFFERENCES are deterministic, which is what tests may compare. *)
+let sched_now_v = ref (Unix.gettimeofday ())
+let sched_live = ref 1          (* main *)
+let sched_blocked = ref 0
+let sched_deadlines : float list ref = ref []
+
+let sched_now () =
+  Mutex.lock sched_m; let t = !sched_now_v in Mutex.unlock sched_m; t
+
+(* Any state change a parked thread might be waiting on (a send, a close, a
+   worker finishing) broadcasts here; waiters re-check their own predicate. *)
+let sched_notify () =
+  Mutex.lock sched_m; Condition.broadcast sched_cv; Mutex.unlock sched_m
+
+let sched_add_live () =
+  Mutex.lock sched_m; incr sched_live; Mutex.unlock sched_m
+let sched_drop_live () =
+  Mutex.lock sched_m; decr sched_live; Condition.broadcast sched_cv;
+  Mutex.unlock sched_m
+
+let sched_remove_one x l =
+  let rec go acc = function
+    | [] -> List.rev acc
+    | y :: t when y = x -> List.rev_append acc t
+    | y :: t -> go (y :: acc) t
+  in go [] l
+
+(* Park until `pred` answers true (it is called with the scheduler lock held,
+   and may briefly take a channel's mutex -- lock order is scheduler first,
+   channel second, everywhere). Returns false instead if `deadline` (absolute,
+   in virtual seconds) arrives first. *)
+let sched_wait ?deadline pred =
+  Mutex.lock sched_m;
+  (match deadline with
+   | Some d -> sched_deadlines := d :: !sched_deadlines
+   | None -> ());
+  let leave r =
+    (match deadline with
+     | Some d -> sched_deadlines := sched_remove_one d !sched_deadlines
+     | None -> ());
+    Mutex.unlock sched_m; r
+  in
+  let rec loop () =
+    if pred () then leave true
+    else match deadline with
+      | Some d when !sched_now_v >= d -> leave false
+      | _ ->
+        incr sched_blocked;
+        if !sched_blocked >= !sched_live then begin
+          (* I am the last one awake. Advance time or declare the deadlock. *)
+          match !sched_deadlines with
+          | [] ->
+            decr sched_blocked;
+            ignore (leave false);
+            raise (Eval_error (Loc.dummy,
+              "virtual clock: every live thread is blocked and no timer is \
+               pending -- the program can only deadlock"))
+          | ds when List.exists (fun d -> d <= !sched_now_v) ds ->
+            (* A deadline has already fired; its owner was woken by the
+               broadcast that advanced the clock and just has not been
+               scheduled yet, so it is still counted blocked and its deadline
+               is still registered. The world is not stuck -- it is mid-step.
+               Advancing again from here is the spin this arm exists to stop:
+               the minimum of the registered deadlines IS the expired one, so
+               "advance" would set the clock to where it already is, forever,
+               while holding the lock the woken thread needs to leave. Park
+               instead -- parking releases the lock -- and let the owner run;
+               whatever it does next (send, finish, park again) comes back
+               through here. *)
+            Condition.wait sched_cv sched_m;
+            decr sched_blocked;
+            loop ()
+          | ds ->
+            sched_now_v := List.fold_left min infinity ds;
+            Condition.broadcast sched_cv;
+            decr sched_blocked;
+            loop ()
+        end else begin
+          Condition.wait sched_cv sched_m;
+          decr sched_blocked;
+          loop ()
+        end
+  in
+  loop ()
+
+let sched_sleep sec =
+  let dl = sched_now () +. sec in
+  ignore (sched_wait ~deadline:dl (fun () -> false))
+
 let builtin_time =
   V_builtin ("time", fun v ->
     match v with
-    | V_unit -> V_float (Unix.gettimeofday ())
+    | V_unit ->
+      V_float (if vclock_on then sched_now () else Unix.gettimeofday ())
     | _ -> failwith "time: expected unit")
 
 let builtin_exit =
@@ -554,7 +679,8 @@ let builtin_sleep_ms =
   V_builtin ("sleep_ms", fun v ->
     match v with
     | V_int ms ->
-      Unix.sleepf (float_of_int ms /. 1000.0);
+      if vclock_on then sched_sleep (float_of_int ms /. 1000.0)
+      else Unix.sleepf (float_of_int ms /. 1000.0);
       V_unit
     | _ -> failwith "sleep_ms: expected int")
 
@@ -2139,7 +2265,9 @@ let lookup_extern (name : string) (_ty : Ast.ty) : value =
   | "sleep" ->
     V_builtin ("sleep", fun v ->
       match v with
-      | V_int n -> Unix.sleep n; V_int 0
+      | V_int n ->
+        (if vclock_on then sched_sleep (float_of_int n) else Unix.sleep n);
+        V_int 0
       | _ -> failwith "sleep: expected int")
   | "srand" ->
     V_builtin ("srand", fun v ->
@@ -2219,7 +2347,15 @@ let lookup_extern (name : string) (_ty : Ast.ty) : value =
    Not covered: the MAIN thread blocking forever (it is never registered -- and
    a main that never returns is a hang, which is visible without a report), and
    anything the C backend does, which has its own runtime and its own pthreads. *)
-type thread_wait = T_running | T_blocked of string | T_finished
+type thread_wait =
+  | T_running
+  | T_blocked of string
+  | T_finished
+  (* v0.1.305: an uncaught failure in a worker used to vanish unless somebody
+     joined the handle -- the domain stores the exception and nobody asks. The
+     registry now keeps what killed it, so the leak report can say which
+     failure went nowhere. *)
+  | T_died of string
 
 let thr_lock = Mutex.create ()
 let thr_status : (int, string * thread_wait ref) Hashtbl.t = Hashtbl.create 8
@@ -2263,6 +2399,7 @@ let thr_report () =
             | T_blocked what -> "blocked on " ^ what
             | T_running -> "still running"
             | T_finished -> "finished, never joined"
+            | T_died msg -> "died: " ^ msg ^ ", never joined"
           in
           (label, why) :: acc)
         thr_status [])
@@ -2287,17 +2424,44 @@ let builtin_spawn =
     let n = thr_guard (fun () -> incr thr_seq; !thr_seq) in
     let label = Printf.sprintf "thread %d" n in
     thr_install_hook ();
+    if vclock_on then sched_add_live ();
     V_thread (Domain.spawn (fun () ->
       let me = thr_me () in
       thr_guard (fun () -> Hashtbl.replace thr_status me (label, ref T_running));
-      let finish () = thr_set_wait T_finished in
       match !apply_value_ref clos V_unit with
-      | v -> finish (); v
-      | exception e -> finish (); raise e)))
+      | v ->
+        thr_set_wait T_finished;
+        if vclock_on then sched_drop_live ();
+        v
+      | exception e ->
+        let why = match e with
+          | Eval_error (_, m) -> m
+          | Failure m -> m
+          | e -> Printexc.to_string e
+        in
+        thr_set_wait (T_died why);
+        if vclock_on then sched_drop_live ();
+        raise e)))
 
 let builtin_join =
   V_builtin ("join", fun h ->
     match h with
+    | V_thread d when vclock_on ->
+      (* Domain.join itself is invisible to the scheduler, so first park on the
+         registry saying the worker is done (its status is written BEFORE its
+         live-count drops, so the broadcast cannot arrive early), then the real
+         join returns without blocking. *)
+      let id = (Domain.get_id d :> int) in
+      ignore (thr_waiting "join" (fun () ->
+        sched_wait (fun () ->
+          thr_guard (fun () ->
+            match Hashtbl.find_opt thr_status id with
+            | Some (_, st) ->
+              (match !st with T_finished | T_died _ -> true | _ -> false)
+            | None -> false))));
+      ignore (Domain.join d);
+      thr_guard (fun () -> Hashtbl.replace thr_claimed id "joined");
+      V_unit
     | V_thread d ->
       let id = (Domain.get_id d :> int) in
       ignore (Domain.join d);
@@ -2338,12 +2502,39 @@ let builtin_channel_send =
         Queue.push v q;
         Condition.signal c;
         Mutex.unlock m;
+        (* Under the virtual clock, receivers park on the scheduler condvar,
+           not the channel's -- tell them the world changed. Never called with
+           the channel mutex held (lock order: scheduler first, channel second). *)
+        if vclock_on then sched_notify ();
         V_unit)
     | _ -> failwith "channel_send: expected a Channel")
 
 let builtin_channel_recv =
   V_builtin ("channel_recv", fun ch ->
     match ch with
+    | V_channel (q, m, c, closed) when vclock_on ->
+      ignore c;
+      let rec take () =
+        Mutex.lock m;
+        if not (Queue.is_empty q) then begin
+          let v = Queue.pop q in Mutex.unlock m; v
+        end else if !closed then begin
+          Mutex.unlock m;
+          raise (Eval_error (Loc.dummy,
+                             "channel_recv: channel is closed and empty"))
+        end else begin
+          Mutex.unlock m;
+          ignore (thr_waiting "channel_recv" (fun () ->
+            sched_wait (fun () ->
+              Mutex.lock m;
+              let ready = not (Queue.is_empty q) || !closed in
+              Mutex.unlock m; ready)));
+          (* pred true means SOMETHING is there, not that it is ours -- another
+             receiver may take it first, so go round and look again. *)
+          take ()
+        end
+      in
+      take ()
     | V_channel (q, m, c, closed) ->
       Mutex.lock m;
       thr_waiting "channel_recv" (fun () ->
@@ -2369,6 +2560,7 @@ let builtin_channel_close =
       closed := true;
       Condition.broadcast c;   (* wake every blocked recv so they see None *)
       Mutex.unlock m;
+      if vclock_on then sched_notify ();
       V_unit
     | _ -> failwith "channel_close: expected a Channel")
 
@@ -2553,6 +2745,26 @@ let builtin_file_pread =
 let builtin_channel_recv_opt =
   V_builtin ("channel_recv_opt", fun ch ->
     match ch with
+    | V_channel (q, m, c, closed) when vclock_on ->
+      ignore c;
+      let rec take () =
+        Mutex.lock m;
+        if not (Queue.is_empty q) then begin
+          let v = Queue.pop q in
+          Mutex.unlock m; V_constr ("Some", Some v)
+        end else if !closed then begin
+          Mutex.unlock m; V_constr ("None", None)
+        end else begin
+          Mutex.unlock m;
+          ignore (thr_waiting "channel_recv_opt" (fun () ->
+            sched_wait (fun () ->
+              Mutex.lock m;
+              let ready = not (Queue.is_empty q) || !closed in
+              Mutex.unlock m; ready)));
+          take ()
+        end
+      in
+      take ()
     | V_channel (q, m, c, closed) ->
       Mutex.lock m;
       thr_waiting "channel_recv_opt" (fun () ->
@@ -2578,6 +2790,40 @@ let builtin_channel_recv_timeout =
       let _ = c in
       V_builtin ("channel_recv_timeout_p", fun tv ->
         match tv with
+        | V_int ms when vclock_on ->
+          (* The deadline is absolute virtual time, fixed once -- re-entering
+             the wait after losing a value to another receiver must not extend
+             it. ms = 0 stays a non-blocking try-recv: the deadline is already
+             here, so the wait answers immediately. *)
+          let dl = sched_now () +. (float_of_int ms /. 1000.0) in
+          let rec take () =
+            Mutex.lock m;
+            if not (Queue.is_empty q) then begin
+              let v = Queue.pop q in
+              Mutex.unlock m; V_constr ("Some", Some v)
+            end else if !closed then begin
+              Mutex.unlock m; V_constr ("None", None)
+            end else begin
+              Mutex.unlock m;
+              let alive = thr_waiting "channel_recv_timeout" (fun () ->
+                sched_wait ~deadline:dl (fun () ->
+                  Mutex.lock m;
+                  let ready = not (Queue.is_empty q) || !closed in
+                  Mutex.unlock m; ready))
+              in
+              if alive then take ()
+              else begin
+                Mutex.lock m;
+                let r =
+                  if not (Queue.is_empty q) then
+                    V_constr ("Some", Some (Queue.pop q))
+                  else V_constr ("None", None)
+                in
+                Mutex.unlock m; r
+              end
+            end
+          in
+          take ()
         | V_int ms ->
           let deadline = Unix.gettimeofday () +. (float_of_int ms /. 1000.0) in
           (* The timeout form polls rather than waiting on the condition, so the
@@ -2611,7 +2857,18 @@ let builtin_par_map =
         | None -> failwith "par_map: expected a list"
       in
       let domains =
-        List.map (fun x -> Domain.spawn (fun () -> !apply_value_ref f x)) elems
+        List.map (fun x ->
+          (* Counted as live so the virtual clock refuses to advance past a
+             worker that is still computing. The join below stays a real
+             Domain.join, invisible to the scheduler -- so the clock also never
+             advances while par_map's caller waits, which is conservative and
+             correct: par_map is for computation, not for timers. *)
+          if vclock_on then sched_add_live ();
+          Domain.spawn (fun () ->
+            match !apply_value_ref f x with
+            | v -> if vclock_on then sched_drop_live (); v
+            | exception e -> if vclock_on then sched_drop_live (); raise e))
+          elems
       in
       let results = List.map Domain.join domains in
       List.fold_right
