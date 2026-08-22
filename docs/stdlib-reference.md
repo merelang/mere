@@ -698,6 +698,27 @@ the C backend. See `scripts/thread_leak_check.sh`.
 
 ---
 
+## Region stats (v0.1.307)
+
+`MERE_REGION_STATS=1` makes a **C-backend** binary print, at exit, the default
+region's block count, total block capacity and cumulative bytes handed out.
+Stderr only, off unless the variable is set.
+
+```
+region-stats default: blocks=2 cap=272629776 alloc_total=272435592
+```
+
+Capacity and allocation are functions of the program, not of the machine —
+unlike peak RSS, which is quantized to powers of two and stops reproducing
+above a few GB — so a gate can hold their ratio to a bound:
+`scripts/region_slack_check.sh` does exactly that. `cap` far above
+`alloc_total` names arena slack (stranded block tails, an inflated doubling
+base); `alloc_total` itself is the number a collector has to attack. The
+report fires through main's epilogue or through `exit()`, whichever comes
+first, and only once.
+
+---
+
 ## System / constants (4)
 
 | Name | Type | Description |

@@ -241,6 +241,20 @@ jobs:
       - name: host_matrix (every builtin on every backend)
         run: sh scripts/host_matrix.sh
 
+      # These two landed with v0.1.304/305 but were never wired in here — a
+      # gate that exists and does not run is a claim, not a check.
+      - name: thread_leak_check (a leak is reported, a join is not)
+        run: sh scripts/thread_leak_check.sh
+
+      - name: virtual_clock_check (parked threads advance the clock)
+        run: sh scripts/virtual_clock_check.sh
+
+      # Arena capacity stays proportional to allocation: one giant allocation
+      # must neither strand the bump block's tail nor become the doubling base
+      # (v0.1.307). Deterministic — the meter is MERE_REGION_STATS, not RSS.
+      - name: region_slack_check (capacity tracks allocation)
+        run: sh scripts/region_slack_check.sh
+
       - name: selfhost_check
         run: sh scripts/selfhost_check.sh
 

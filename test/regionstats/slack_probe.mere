@@ -1,0 +1,24 @@
+// Forces the arena-slack pattern that note-level measurement found under a
+// large Ruby workload: ONE giant allocation follows a stream of small ones.
+//
+// Before v0.1.307 the giant allocation (a) abandoned the tail of the current
+// block and (b) became the base of every later doubling: the next small miss
+// allocated a block TWICE THE GIANT'S SIZE to hold a few bytes. Capacity ended
+// up several times the bytes ever handed out. With the dedicated-block policy
+// the giant pays exactly its own size and the bump block keeps serving small
+// allocations, so capacity stays proportional to allocation.
+//
+// The numbers come from MERE_REGION_STATS=1 (deterministic: capacity and
+// cumulative allocation are functions of the program, unlike peak RSS).
+// scripts/region_slack_check.sh holds their ratio to a bound.
+
+let big = str_repeat "x" 268435456;    // one 256 MiB allocation
+
+// ... followed by small live allocations (list cells + small strs) that keep
+// the region growing a little further.
+let rec grow = fn (i: int) -> fn (acc: str list) ->
+  if i == 0 then acc else grow (i - 1) (str_of_int i :: acc);
+let small = grow 100000 [];
+
+// Keep both alive so nothing is optimized away, print something stable.
+print (str_of_int (str_len big) ++ " " ++ str_of_int (list_len small))
