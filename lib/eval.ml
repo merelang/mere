@@ -1486,6 +1486,14 @@ let builtin_map_len =
 (* Phase 39.A' #2: map_delete — Hashtbl.remove. No-op if the key is
    absent. To preserve Phase 27.1 insertion order, also removes from
    the keys list. *)
+(* v0.1.297: map_compact / vec_compact — no-ops here. Compaction is an
+   optimization the C backend performs (private-arena generation swap); the
+   interpreter has no arenas, so the honest answer is unit. *)
+let builtin_map_compact =
+  V_builtin ("map_compact", fun _ -> V_unit)
+let builtin_vec_compact =
+  V_builtin ("vec_compact", fun _ -> V_unit)
+
 let builtin_map_delete =
   V_builtin ("map_delete", fun v ->
     match v with
@@ -2776,6 +2784,8 @@ let initial_env : env =
     ("map_has",        ref builtin_map_has);
     ("map_len",        ref builtin_map_len);
     ("map_delete",     ref builtin_map_delete);
+    ("map_compact",    ref builtin_map_compact);
+    ("vec_compact",    ref builtin_vec_compact);
     ("len",            ref builtin_len);
   ]
 

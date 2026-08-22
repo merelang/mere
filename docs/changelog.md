@@ -4,6 +4,47 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.297 — 2026-08-22
+
+_A container can hand back its own dead bytes._
+
+`map_compact m` / `vec_compact v`: semantically invisible -- same entries,
+same order, same handle -- and allocator-visible. On the C backend the
+container's internal storage (arrays and every owned copy) moves into a fresh
+private arena and the previous generation is freed, so overwritten values,
+deleted entries' copies and abandoned grown arrays actually return to the OS.
+The first call PROMOTES the container to owning its arena; containers never
+compacted never pay (a per-call frame map costs nothing new -- promotion is
+lazy precisely because an interpreter makes millions of maps and compacts
+five). The interpreter and Wasm answer with a no-op, which is correct:
+compaction is an optimization, not an observable, so parity holds trivially.
+
+Why a primitive and not a library: the alternative was measured first. Moving
+a program's stores into a region-loop carry works when the stores are
+threaded (the v0.1.296 consumer did exactly that for four of them), but a
+store accessed AMBIENTLY -- global helpers closing over it -- costs the
+transitive closure of every function on the access path: 518 functions in the
+first real program measured, on top of ~2100 direct call sites. A container
+that can swap its own generation makes the entire question disappear: the
+helpers keep their shape, the handle stays valid, and reclamation becomes one
+call at a safepoint.
+
+The discipline that makes it flat, measured: caller temporaries die in a
+per-iteration `region` block, container churn goes at each compact -- 100k
+writes churning ~5 MB on each side peak at 1.7 MiB. Compact-only reclaims
+exactly the container's share (16.3 -> 11.6 MiB on the same probe with the
+caller's temporaries left leaking, which are the caller's business).
+
+One rule the types cannot enforce: pointers handed out by `map_get` /
+`vec_get` before a compact dangle after it (the same safepoint discipline as
+region loops -- compact where nothing borrowed is held).
+
+parity 121/0 (new: map_compact -- interp, C and wasm agree; llvm refuses maps
+as before), dune test 2541/0, ctest, stack_overflow, selfhost_check,
+lsp_smoke.
+
+---
+
 ## v0.1.296 — 2026-08-22
 
 _A loop that carries its state between arenas._
