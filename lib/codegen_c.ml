@@ -3355,6 +3355,9 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "map_clear" ->
        let (k_tag, v_tag) = map_kv_tags_of arg.Ast.ty arg.Ast.loc in
        Printf.sprintf "mere_map_%s_%s_clear(%s)" k_tag v_tag (emit_expr arg)
+     | Ast.Var "map_recycle" ->
+       let (k_tag, v_tag) = map_kv_tags_of arg.Ast.ty arg.Ast.loc in
+       Printf.sprintf "mere_map_%s_%s_recycle(%s)" k_tag v_tag (emit_expr arg)
      | Ast.Var "map_bytes" ->
        let (k_tag, v_tag) = map_kv_tags_of arg.Ast.ty arg.Ast.loc in
        Printf.sprintf "mere_map_%s_%s_bytes(%s)" k_tag v_tag (emit_expr arg)
@@ -8104,7 +8107,41 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  for (int i = 0; i < m->idx_cap; i++) m->idx[i] = -1;";
       "  return 0;";
       "}";
-      "";      (* v0.1.299: bytes held by the map's OWN arena -- 0 until the first
+      "";      (* v0.1.300: clear, and hand the private arena's GROWTH back, keeping the
+         seed block hot. The frame-pool pattern: a map reused as a call frame
+         is recycled at every return -- entries gone, arena back to one warm
+         4 KB block, no malloc on the next use. An unowned map is PROMOTED
+         here (fresh private arena), so `map_recycle m` on a map from map_new
+         is also the cheapest way to say "this map will live this pattern".
+         Semantically identical to map_clear -- the interpreter and wasm
+         lower it to exactly that. *)
+      Printf.sprintf "static int %s_recycle(%s* m) {" struct_name struct_name;
+      "  if (m->owns_region) {";
+      "    __lang_region* r = m->region;";
+      "    __lang_region_block* b = r->blocks;";
+      "    while (b->prev) { __lang_region_block* p = b->prev; free(b); b = p; }";
+      "    r->blocks = b;";
+      "    r->base = (char*)(b + 1);";
+      "    r->top = r->base;";
+      "    r->cap = 4096;";
+      "  } else {";
+      "    __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
+      "    if (!fresh) __lang_fail_impl(\"out of memory\");";
+      "    __lang_region_init(fresh, 4096);";
+      "    m->region = fresh;";
+      "    m->owns_region = 1;";
+      "  }";
+      Printf.sprintf "  m->keys = (%s*)__lang_region_alloc(m->region, sizeof(%s) * 4);" c_k c_k;
+      Printf.sprintf "  m->values = (%s*)__lang_region_alloc(m->region, sizeof(%s) * 4);" c_v c_v;
+      "  m->cap = 4;";
+      "  m->len = 0;";
+      "  m->idx = (int*)__lang_region_alloc(m->region, sizeof(int) * 8);";
+      "  for (int i = 0; i < 8; i++) m->idx[i] = -1;";
+      "  m->idx_cap = 8;";
+      "  return 0;";
+      "}";
+      "";
+      (* v0.1.299: bytes held by the map's OWN arena -- 0 until the first
          compact promotes it (a shared region's bytes are not the map's).
          The collection-trigger primitive for byte-heavy stores: entry counts
          cannot see 20 KB values. *)
