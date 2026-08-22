@@ -1,0 +1,62 @@
+// str_last_index_of, at the values that separate it from str_index_of.
+//
+// The builtin exists because two dogfoods wrote it by hand: contrib/url needs
+// the LAST `@` (a password may contain one) and the LAST `:` (the port follows
+// it), and contrib/path needs the last `/`. Both hand-written copies walked the
+// haystack through char_at, which allocates a one-byte str per position on the
+// compiled backends -- so this replaced O(n) allocations per lookup with a
+// memcmp scan.
+//
+// The axes here are the ones where "search from the end" can differ from
+// "search from the start" without a value that separates them saying so:
+// several occurrences (the last, not the first), an overlapping needle, the
+// empty needle, a needle at either boundary, and a haystack holding NUL --
+// which is the byte a length-header representation exists to survive, and the
+// byte a strlen-based scan would stop at.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+let i = fn (x: int) -> print (str_of_int x);
+
+// --- several occurrences: the last one, and the first for contrast ---
+let _ = i (str_last_index_of "a@b@c" "@");      // 3
+let _ = i (str_index_of      "a@b@c" "@");      // 1
+let _ = i (str_last_index_of "a.b.c.d" ".");    // 5
+let _ = i (str_last_index_of "//a//b//" "//");  // 6
+
+// --- overlapping needles: "aa" in "aaa" starts at 0 and at 1 ---
+let _ = i (str_last_index_of "aaa" "aa");       // 1
+let _ = i (str_index_of      "aaa" "aa");       // 0
+let _ = i (str_last_index_of "aaaa" "aa");      // 2
+
+// --- the empty needle occurs one past the last byte, and that is the last
+//     position it occurs at, so the answer is the length ---
+let _ = i (str_last_index_of "abc" "");         // 3
+let _ = i (str_last_index_of "" "");            // 0
+
+// --- boundaries ---
+let _ = i (str_last_index_of "abc" "a");        // 0   (only at the front)
+let _ = i (str_last_index_of "abc" "c");        // 2   (the final byte)
+let _ = i (str_last_index_of "abc" "abc");      // 0   (needle is the haystack)
+let _ = i (str_last_index_of "abc" "abcd");     // -1  (needle is longer)
+let _ = i (str_last_index_of "" "a");           // -1  (empty haystack)
+let _ = i (str_last_index_of "hello" "xyz");    // -1  (absent)
+
+// --- a haystack holding NUL. A scan that asks strlen how long this is stops
+//     at byte 1 and reports -1 for a needle that is really there at 4. ---
+let nul = "a" ++ chr 0 ++ "b" ++ chr 0 ++ "c";
+let _ = i (str_len nul);                        // 5
+let _ = i (str_last_index_of nul (chr 0));      // 3
+let _ = i (str_index_of      nul (chr 0));      // 1
+let _ = i (str_last_index_of nul "c");          // 4
+
+// --- multibyte: the answer is a byte offset, like str_index_of's ---
+let _ = i (str_last_index_of "あいあ" "あ");      // 6
+let _ = i (str_index_of      "あいあ" "あ");      // 0
+
+// --- the shape the dogfoods actually wanted: split at the last separator ---
+let hostport = "user@pass@host:8080";
+let at = str_last_index_of hostport "@";
+let _ = print (substring hostport 0 at);                    // user@pass
+let _ = print (substring hostport (at + 1) (str_len hostport));  // host:8080
+print "ok"

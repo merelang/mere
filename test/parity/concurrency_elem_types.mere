@@ -1,0 +1,49 @@
+// What a channel can carry, checked value by value on every backend that has
+// channels. One worker, one send, one receive per type, so the output is
+// deterministic without any aggregation.
+//
+// "Channels work" was previously demonstrated with ints only. A channel copies
+// its payload across a thread boundary, and for anything with a region behind it
+// -- a str with a length header, a record, a tuple -- that copy is a different
+// code path per element type. Existing coverage would not have noticed one of
+// them going wrong.
+//
+// Execution mode: interp + C. LLVM and Wasm refuse channel_close (v0.1.47
+// scope), so they report UNSUP.
+
+type Point = { x: int, y: int };
+
+let thru_int = fn (v: int) ->
+  let c = channel_new () in
+  let h = spawn (fn () -> let _ = channel_send c v in ()) in
+  let got = channel_recv c in
+  let _ = join h in got;
+
+let thru_str = fn (v: str) ->
+  let c = channel_new () in
+  let h = spawn (fn () -> let _ = channel_send c v in ()) in
+  let got = channel_recv c in
+  let _ = join h in got;
+
+let thru_bool = fn (v: bool) ->
+  let c = channel_new () in
+  let h = spawn (fn () -> let _ = channel_send c v in ()) in
+  let got = channel_recv c in
+  let _ = join h in got;
+
+let thru_point = fn (v: Point) ->
+  let c = channel_new () in
+  let h = spawn (fn () -> let _ = channel_send c v in ()) in
+  let got = channel_recv c in
+  let _ = join h in got;
+
+let _ = print (str_of_int (thru_int 42));
+let _ = print (str_of_int (thru_int (0 - 7)));
+let _ = print ("[" ++ thru_str "hello" ++ "]");
+let _ = print ("[" ++ thru_str "" ++ "]");
+// a str carrying NUL: the length header has to survive the crossing, not strlen
+let _ = print (str_of_int (str_len (thru_str ("a" ++ chr 0 ++ "b"))));
+let _ = print (if thru_bool true then "true" else "false");
+let _ = print (if thru_bool false then "true" else "false");
+let p = thru_point (Point { x = 3, y = 4 });
+print (str_of_int (p.x * 10 + p.y))

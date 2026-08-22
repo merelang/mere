@@ -977,6 +977,32 @@ let builtin_str_index_of =
         | _ -> failwith "str_index_of: 2nd arg expected str")
     | _ -> failwith "str_index_of: 1st arg expected str")
 
+(* v0.1.302: str_last_index_of — the same search from the other end.
+   The empty needle answers h_len rather than 0: it occurs at every position
+   including one past the last byte, and the LAST of those is the length. That
+   keeps `str_index_of s "" <= str_last_index_of s ""` true for every s, which
+   is the property a caller splitting on a separator relies on. *)
+let builtin_str_last_index_of =
+  V_builtin ("str_last_index_of", fun haystack ->
+    match haystack with
+    | V_str h ->
+      V_builtin ("str_last_index_of_partial", fun needle ->
+        match needle with
+        | V_str n ->
+          let h_len = String.length h in
+          let n_len = String.length n in
+          if n_len = 0 then V_int h_len
+          else if n_len > h_len then V_int (-1)
+          else
+            let rec scan i =
+              if i < 0 then V_int (-1)
+              else if String.sub h i n_len = n then V_int i
+              else scan (i - 1)
+            in
+            scan (h_len - n_len)
+        | _ -> failwith "str_last_index_of: 2nd arg expected str")
+    | _ -> failwith "str_last_index_of: 1st arg expected str")
+
 (* Helper: produce an OCaml list of str → wrap as V_constr Nil/Cons chain. *)
 let rec str_list_to_v = function
   | [] -> V_constr ("Nil", None)
@@ -2720,6 +2746,7 @@ let initial_env : env =
     ("str_contains", ref builtin_str_contains);
     ("str_count", ref builtin_str_count);
     ("str_index_of", ref builtin_str_index_of);
+    ("str_last_index_of", ref builtin_str_last_index_of);
     ("str_split", ref builtin_str_split);
     ("utf8_len", ref builtin_utf8_len);
     ("utf8_chars", ref builtin_utf8_chars);

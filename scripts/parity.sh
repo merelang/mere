@@ -68,6 +68,35 @@ note_diag() {  # $1 = label, $2 = file holding the compiler's stderr
 
 have_wat=0; command -v wat2wasm >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && have_wat=1
 
+# A GATE THAT HANGS IS WORSE THAN ONE THAT FAILS. This harness runs whole programs,
+# and a concurrent program can block forever by construction: a channel nobody sends
+# to, a join on a worker that never returns. Unbounded, one such case stops the run
+# with nothing reported and no log to read -- every case after it becomes unknown too.
+#
+# `timeout(1)` is absent on macOS, and `ulimit -t` measures CPU time, which a thread
+# blocked on a condition variable does not consume. Neither bounds this. perl's alarm
+# does, and perl is present wherever this runs.
+#
+# The limit is deliberately generous. It exists to turn "hangs forever" into "reports
+# HUNG", not to measure how fast a program is: a tight bound would go red on a loaded
+# CI box and teach everyone to ignore the gate.
+PARITY_TIMEOUT="${MERE_PARITY_TIMEOUT:-60}"
+HUNG_RC=201
+bounded() {
+  perl -e '
+    my $secs = shift @ARGV;
+    my $pid = fork();
+    defined $pid or exit 202;
+    if ($pid == 0) { exec { $ARGV[0] } @ARGV or exit 127 }
+    $SIG{ALRM} = sub { kill "KILL", $pid; waitpid($pid, 0); exit 201 };
+    alarm $secs;
+    waitpid($pid, 0);
+    alarm 0;
+    exit($? & 127 ? 128 + ($? & 127) : $? >> 8);
+  ' "$PARITY_TIMEOUT" "$@"
+}
+hung_names=""
+
 # Explicit arguments are partitioned the same way the defaults are: a path under
 # test/parity/fail/ is a program that is supposed to fail and goes to the second
 # loop. Without this, naming one on the command line ran it as an ordinary test,
@@ -111,13 +140,19 @@ classify_mismatch() {
 
 for f in $FILES; do
   name="$(basename "$f" .mere)"
-  ref="$("$MERE" "$f" 2>"$TMP/i.err")" || { echo "SKIP $name (interpreter error)"; sed 's/^/    /' "$TMP/i.err" | head -3; skip=$((skip + 1)); skip_names="$skip_names $name"; continue; }
+  ref="$(bounded "$MERE" "$f" 2>"$TMP/i.err")" && iref=0 || iref=$?
+  if [ "$iref" = "$HUNG_RC" ]; then
+    echo "FAIL $name  (the interpreter did not finish within ${PARITY_TIMEOUT}s)"
+    fail=$((fail + 1)); hung_names="$hung_names interp/$name"; continue
+  fi
+  [ "$iref" = 0 ] || { echo "SKIP $name (interpreter error)"; sed 's/^/    /' "$TMP/i.err" | head -3; skip=$((skip + 1)); skip_names="$skip_names $name"; continue; }
   row=""; bad=0; diag=""
   # C
   if "$MERE" -c "$f" > "$TMP/c.c" 2>"$TMP/c.err"; then
     if "$CC" -O0 -w "$TMP/c.c" -o "$TMP/c.bin" -lm 2>"$TMP/c.cc"; then
-      out="$("$TMP/c.bin" 2>/dev/null || true)"
-      if [ "$out" = "$ref" ]; then row="$row c:MATCH"
+      out="$(bounded "$TMP/c.bin" 2>/dev/null)" && orc=0 || orc=$?
+      if [ "$orc" = "$HUNG_RC" ]; then row="$row c:HUNG"; bad=1; hung_names="$hung_names c/$name"
+      elif [ "$out" = "$ref" ]; then row="$row c:MATCH"
       elif [ "$(classify_mismatch c "$f" "$out")" = DIVERGE ]; then
         row="$row c:DIVERGE"; div_names="$div_names c/$name"
       else row="$row c:DIFF"; bad=1; fi
@@ -126,8 +161,9 @@ for f in $FILES; do
   # LLVM
   if "$MERE" -ll "$f" > "$TMP/l.ll" 2>"$TMP/l.err"; then
     if "$CC" -O0 -w "$TMP/l.ll" -o "$TMP/l.bin" -lm 2>"$TMP/l.cc"; then
-      out="$("$TMP/l.bin" 2>/dev/null || true)"
-      if [ "$out" = "$ref" ]; then row="$row llvm:MATCH"
+      out="$(bounded "$TMP/l.bin" 2>/dev/null)" && orc=0 || orc=$?
+      if [ "$orc" = "$HUNG_RC" ]; then row="$row llvm:HUNG"; bad=1; hung_names="$hung_names llvm/$name"
+      elif [ "$out" = "$ref" ]; then row="$row llvm:MATCH"
       elif [ "$(classify_mismatch llvm "$f" "$out")" = DIVERGE ]; then
         row="$row llvm:DIVERGE"; div_names="$div_names llvm/$name"
       else row="$row llvm:DIFF"; bad=1; fi
@@ -137,8 +173,9 @@ for f in $FILES; do
   if [ "$have_wat" = 1 ]; then
     if "$MERE" -w "$f" > "$TMP/w.wat" 2>"$TMP/w.err"; then
       if wat2wasm --enable-tail-call --enable-threads "$TMP/w.wat" -o "$TMP/w.wasm" 2>"$TMP/w.w2"; then
-        out="$(node "$ROOT/scripts/run_wasm.js" "$TMP/w.wasm" 2>/dev/null || true)"
-        if [ "$out" = "$ref" ]; then row="$row wasm:MATCH"
+        out="$(bounded node "$ROOT/scripts/run_wasm.js" "$TMP/w.wasm" 2>/dev/null)" && orc=0 || orc=$?
+        if [ "$orc" = "$HUNG_RC" ]; then row="$row wasm:HUNG"; bad=1; hung_names="$hung_names wasm/$name"
+      elif [ "$out" = "$ref" ]; then row="$row wasm:MATCH"
       elif [ "$(classify_mismatch wasm "$f" "$out")" = DIVERGE ]; then
         row="$row wasm:DIVERGE"; div_names="$div_names wasm/$name"
       else row="$row wasm:DIFF"; bad=1; fi
@@ -216,7 +253,8 @@ check_fail_backend() {
   else
     _pay="$(payload "$TMP/f.err")"; _out="$(cat "$TMP/f.out")"
   fi
-  if   [ "$_rc" != "$irc" ];    then _tok="EXIT($_rc)"
+  if   [ "$_rc" = "$HUNG_RC" ]; then _tok="HUNG"; hung_names="$hung_names $_lbl/$name"
+  elif [ "$_rc" != "$irc" ];    then _tok="EXIT($_rc)"
   elif [ "$_out" != "$iout" ];  then _tok="OUT"
   elif [ "$_pay" != "$ipay" ];  then _tok="MSG"
   else _tok="MATCH"; fi
@@ -248,7 +286,7 @@ check_fail_backend() {
 fpass=0; ffail=0; fdiv_names=""
 for f in $FAILFILES; do
   name="$(basename "$f" .mere)"
-  "$MERE" "$f" > "$TMP/i.out" 2> "$TMP/i.err" && irc=0 || irc=$?
+  bounded "$MERE" "$f" > "$TMP/i.out" 2> "$TMP/i.err" && irc=0 || irc=$?
   if [ "$irc" = 0 ]; then
     echo "FAIL $name  (this file is supposed to fail; the interpreter exited 0)"
     ffail=$((ffail + 1)); continue
@@ -258,14 +296,14 @@ for f in $FAILFILES; do
   # C
   if "$MERE" -c "$f" > "$TMP/c.c" 2>"$TMP/c.err"; then
     if "$CC" -O0 -w "$TMP/c.c" -o "$TMP/c.bin" -lm 2>"$TMP/c.cc"; then
-      "$TMP/c.bin" > "$TMP/f.out" 2> "$TMP/f.err" && rc=0 || rc=$?
+      bounded "$TMP/c.bin" > "$TMP/f.out" 2> "$TMP/f.err" && rc=0 || rc=$?
       check_fail_backend c err "$rc"
     else row="$row c:MISCOMPILE"; bad=1; note_diag c "$TMP/c.cc"; fi
   else [ "$(emit_kind "$TMP/c.err")" = unsup ] && row="$row c:UNSUP" || { row="$row c:EMITFAIL"; bad=1; note_diag c "$TMP/c.err"; }; fi
   # LLVM
   if "$MERE" -ll "$f" > "$TMP/l.ll" 2>"$TMP/l.err"; then
     if "$CC" -O0 -w "$TMP/l.ll" -o "$TMP/l.bin" -lm 2>"$TMP/l.cc"; then
-      "$TMP/l.bin" > "$TMP/f.out" 2> "$TMP/f.err" && rc=0 || rc=$?
+      bounded "$TMP/l.bin" > "$TMP/f.out" 2> "$TMP/f.err" && rc=0 || rc=$?
       check_fail_backend llvm err "$rc"
     else row="$row llvm:MISCOMPILE"; bad=1; note_diag llvm "$TMP/l.cc"; fi
   else [ "$(emit_kind "$TMP/l.err")" = unsup ] && row="$row llvm:UNSUP" || { row="$row llvm:EMITFAIL"; bad=1; note_diag llvm "$TMP/l.err"; }; fi
@@ -273,7 +311,7 @@ for f in $FAILFILES; do
   if [ "$have_wat" = 1 ]; then
     if "$MERE" -w "$f" > "$TMP/w.wat" 2>"$TMP/w.err"; then
       if wat2wasm --enable-tail-call --enable-threads "$TMP/w.wat" -o "$TMP/w.wasm" 2>"$TMP/w.w2"; then
-        node "$ROOT/scripts/run_wasm.js" "$TMP/w.wasm" > "$TMP/f.out" 2> "$TMP/f.err" && rc=0 || rc=$?
+        bounded node "$ROOT/scripts/run_wasm.js" "$TMP/w.wasm" > "$TMP/f.out" 2> "$TMP/f.err" && rc=0 || rc=$?
         check_fail_backend wasm "$wasm_diag_stream" "$rc"
       else row="$row wasm:MISCOMPILE"; bad=1; note_diag wasm "$TMP/w.w2"; fi
     else [ "$(emit_kind "$TMP/w.err")" = unsup ] && row="$row wasm:UNSUP" || { row="$row wasm:EMITFAIL"; bad=1; note_diag wasm "$TMP/w.err"; }; fi
@@ -297,6 +335,10 @@ fi
 if [ -n "$fdiv_names" ]; then
   echo "declared divergences among the failing programs (pinned per platform, $(uname -s)):"
   for entry in $fdiv_names; do echo "    $entry"; done
+fi
+if [ -n "$hung_names" ]; then
+  echo "did not finish within ${PARITY_TIMEOUT}s (raise with MERE_PARITY_TIMEOUT):"
+  for entry in $hung_names; do echo "    $entry"; done
 fi
 total=$((pass + fail))
 [ -n "$div_names" ] && {

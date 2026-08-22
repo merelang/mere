@@ -135,6 +135,7 @@ The interpreter has every one of these, and is not a column.
 | `str_ends_with` | yes | yes | yes |
 | `str_eq` | yes | yes | yes |
 | `str_index_of` | yes | yes | yes |
+| `str_last_index_of` | yes | yes | yes |
 | `str_len` | yes | yes | yes |
 | `str_of_float` | yes | yes | yes |
 | `str_of_int` | yes | yes | yes |
