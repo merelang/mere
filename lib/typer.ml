@@ -1795,6 +1795,22 @@ let map_compact_scheme =
       Ast.TyCon ("Map", [_map_compact_region; _map_compact_k; _map_compact_v]),
       Ast.TyUnit) }
 
+(* v0.1.298: map_clear — `Map[R, K, V] -> unit`, O(index) and allocation-free.
+   The mass-deletion primitive: map_delete shifts the dense arrays and rebuilds
+   the index into the map's region PER CALL, so emptying a big map with it is
+   quadratic time and linear allocation. *)
+let _map_clear_region = fresh_var ()
+let _map_clear_k = fresh_var ()
+let _map_clear_v = fresh_var ()
+let map_clear_scheme =
+  let rid = match _map_clear_region with Ast.TyVar v -> v.id | _ -> assert false in
+  let kid = match _map_clear_k with Ast.TyVar v -> v.id | _ -> assert false in
+  let vid = match _map_clear_v with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid; kid; vid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Map", [_map_clear_region; _map_clear_k; _map_clear_v]),
+      Ast.TyUnit) }
+
 (* v0.1.297: vec_compact — `Vec[R, T] -> unit`, the Vec sibling. *)
 let _vec_compact_region = fresh_var ()
 let _vec_compact_t = fresh_var ()
@@ -2180,6 +2196,7 @@ let initial_env : env =
     ("map_len",        map_len_scheme);
     ("map_delete",     map_delete_scheme);
     ("map_compact",    map_compact_scheme);
+    ("map_clear",      map_clear_scheme);
     ("vec_compact",    vec_compact_scheme);
     ("map_iter",       map_iter_scheme);
     ("vec_push",   vec_push_scheme);

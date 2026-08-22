@@ -1489,6 +1489,12 @@ let builtin_map_len =
 (* v0.1.297: map_compact / vec_compact — no-ops here. Compaction is an
    optimization the C backend performs (private-arena generation swap); the
    interpreter has no arenas, so the honest answer is unit. *)
+let builtin_map_clear =
+  V_builtin ("map_clear", fun v ->
+    match v with
+    | V_map (tbl, keys) -> Hashtbl.reset tbl; keys := []; V_unit
+    | _ -> failwith "map_clear: expected Map")
+
 let builtin_map_compact =
   V_builtin ("map_compact", fun _ -> V_unit)
 let builtin_vec_compact =
@@ -2785,6 +2791,7 @@ let initial_env : env =
     ("map_len",        ref builtin_map_len);
     ("map_delete",     ref builtin_map_delete);
     ("map_compact",    ref builtin_map_compact);
+    ("map_clear",      ref builtin_map_clear);
     ("vec_compact",    ref builtin_vec_compact);
     ("len",            ref builtin_len);
   ]
