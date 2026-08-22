@@ -1,0 +1,28 @@
+// map_compact / vec_compact are semantically invisible: the interpreter (and
+// wasm) answer with a no-op, the C backend swaps the container's internal
+// storage into a fresh private arena. Every backend must print the same
+// bytes; what differs -- the allocator's footprint -- is asserted by the
+// bounded-churn probes in this construct's consumers, not here.
+let m = map_new () in
+let rec churn = fn (k: int) ->
+  if k == 0 then ()
+  else
+    let _ = map_set m ("key" ++ str_of_int (k % 7)) (str_of_int k ++ "--------") in
+    let _ = (if k % 50 == 0 then map_compact m else ()) in
+    churn (k - 1);
+let _ = churn 500 in
+let _ = map_delete m "key2" in
+let _ = map_compact m in
+let _ = map_set m "post" "p" in
+let v = vec_new () in
+let _ = vec_push v 10 in
+let _ = vec_push v 20 in
+let _ = vec_set v 0 99 in
+let _ = vec_compact v in
+let _ = vec_push v 30 in
+print ("m=" ++ str_of_int (map_len m)
+       ++ " k3=" ++ substring (map_get m "key3") 0 1
+       ++ " k2=" ++ (if map_has m "key2" then "!" else "gone")
+       ++ " post=" ++ map_get m "post"
+       ++ " v=" ++ str_of_int (vec_len v)
+       ++ " " ++ str_of_int (vec_get v 0) ++ "," ++ str_of_int (vec_get v 2) ++ "\n")

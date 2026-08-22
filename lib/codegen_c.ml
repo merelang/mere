@@ -3080,6 +3080,9 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "vec_len" ->
        let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
        Printf.sprintf "mere_vec_%s_len(%s)" elem_tag (emit_expr arg)
+     | Ast.Var "vec_compact" ->
+       let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
+       Printf.sprintf "mere_vec_%s_compact(%s)" elem_tag (emit_expr arg)
      | Ast.App ({ node = Ast.Var "vec_push"; _ }, vec_e) ->
        (* `vec_push v x` is curried: App (App (Var "vec_push", v), x).
           The outer App here has inner = App (Var "vec_push", vec_e) and
@@ -3343,6 +3346,9 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "map_len" ->
        let (k_tag, v_tag) = map_kv_tags_of arg.Ast.ty arg.Ast.loc in
        Printf.sprintf "mere_map_%s_%s_len(%s)" k_tag v_tag (emit_expr arg)
+     | Ast.Var "map_compact" ->
+       let (k_tag, v_tag) = map_kv_tags_of arg.Ast.ty arg.Ast.loc in
+       Printf.sprintf "mere_map_%s_%s_compact(%s)" k_tag v_tag (emit_expr arg)
      | Ast.App ({ node = Ast.Var "map_get"; _ }, m_e) ->
        let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
        Printf.sprintf "mere_map_%s_%s_get(%s, %s)"
@@ -8028,6 +8034,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  int* idx;      /* open-addressing index into keys/values (-1 = empty) */";
       "  int idx_cap;   /* power of two */";
       "  __lang_region* region;";
+      "  int owns_region;  /* 1 after the first compact: region is private and freeable */";
       Printf.sprintf "} %s;" struct_name;
       "";
       (* new *)
@@ -8039,6 +8046,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       Printf.sprintf "  m->keys = (%s*)__lang_region_alloc(r, sizeof(%s) * 4);" c_k c_k;
       Printf.sprintf "  m->values = (%s*)__lang_region_alloc(r, sizeof(%s) * 4);" c_v c_v;
       "  m->region = r;";
+      "  m->owns_region = 0;";
       "  m->idx_cap = 8;";
       "  m->idx = (int*)__lang_region_alloc(r, sizeof(int) * 8);";
       "  for (int i = 0; i < 8; i++) m->idx[i] = -1;";
@@ -8059,6 +8067,41 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  }";
       "  m->idx = ni;";
       "  m->idx_cap = newcap;";
+      "}";
+      "";
+      (* v0.1.297: generation swap. The map's internal storage (keys / values /
+         idx arrays and every owned copy) moves into a FRESH private arena and
+         the previous generation is freed -- so overwritten values, deleted
+         entries' copies and abandoned grown arrays actually return. The first
+         call PROMOTES: the birth region is shared (the default region, or a
+         block) and not ours to free, so it is only left behind. The struct
+         itself never moves -- handles stay valid -- and entries keep their
+         order, so the operation is invisible to every observer except the
+         allocator. Maps never compacted never pay: no private arena exists
+         until the first call (a frame-shaped map costs nothing extra). *)
+      Printf.sprintf "static int %s_compact(%s* m) {" struct_name struct_name;
+      "  __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
+      "  if (!fresh) __lang_fail_impl(\"out of memory\");";
+      "  __lang_region_init(fresh, 4096);";
+      "  __lang_region* old = m->region;";
+      "  int owned = m->owns_region;";
+      "  m->region = fresh;";
+      "  int ncap = m->len < 4 ? 4 : m->len;";
+      Printf.sprintf "  %s* nk = (%s*)__lang_region_alloc(fresh, sizeof(%s) * ncap);" c_k c_k c_k;
+      Printf.sprintf "  %s* nv = (%s*)__lang_region_alloc(fresh, sizeof(%s) * ncap);" c_v c_v c_v;
+      "  for (int i = 0; i < m->len; i++) {";
+      Printf.sprintf "    nk[i] = __mcopy_%s(fresh, m->keys[i]);" k_tag;
+      Printf.sprintf "    nv[i] = __mcopy_%s(fresh, m->values[i]);" v_tag;
+      "  }";
+      "  m->keys = nk;";
+      "  m->values = nv;";
+      "  m->cap = ncap;";
+      "  int nic = 8;";
+      "  while (nic < ncap * 2) nic <<= 1;";
+      Printf.sprintf "  %s_reindex(m, nic);" struct_name;
+      "  m->owns_region = 1;";
+      "  if (owned) { __lang_region_free(old); free(old); }";
+      "  return 0;";
       "}";
       "";
       (* set: replace if key exists, otherwise append (grow the array on cap
@@ -8852,6 +8895,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  int len;";
       "  int cap;";
       "  __lang_region* region;";
+      "  int owns_region;  /* 1 after the first compact (see the map twin) */";
       Printf.sprintf "} %s;" struct_name;
       "";
       Printf.sprintf "static %s* %s_new(__lang_region* r) {" struct_name struct_name;
@@ -8861,6 +8905,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  v->len = 0;";
       Printf.sprintf "  v->data = (%s*)__lang_region_alloc(r, sizeof(%s) * 4);" c_elem c_elem;
       "  v->region = r;";
+      "  v->owns_region = 0;";
       "  return v;";
       "}";
       "";
@@ -8878,6 +8923,26 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  }";
       "  v->data[v->len++] = x;";
       "  return 0; /* unit */";
+      "}";
+      "";
+      (* v0.1.297: the Vec twin of map_compact -- see the map runtime for the
+         full story. Slots overwritten by vec_set leave their old owned copies
+         in the arena; the generation swap is what returns them. *)
+      Printf.sprintf "static int %s_compact(%s* v) {" struct_name struct_name;
+      "  __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
+      "  if (!fresh) __lang_fail_impl(\"out of memory\");";
+      "  __lang_region_init(fresh, 4096);";
+      "  __lang_region* old = v->region;";
+      "  int owned = v->owns_region;";
+      "  v->region = fresh;";
+      "  int ncap = v->len < 4 ? 4 : v->len;";
+      Printf.sprintf "  %s* nd = (%s*)__lang_region_alloc(fresh, sizeof(%s) * ncap);" c_elem c_elem c_elem;
+      Printf.sprintf "  for (int i = 0; i < v->len; i++) nd[i] = __mcopy_%s(fresh, v->data[i]);" tag;
+      "  v->data = nd;";
+      "  v->cap = ncap;";
+      "  v->owns_region = 1;";
+      "  if (owned) { __lang_region_free(old); free(old); }";
+      "  return 0;";
       "}";
       "";
       Printf.sprintf "static %s %s_get(%s* v, long long i) {" c_elem struct_name struct_name;

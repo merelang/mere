@@ -1776,6 +1776,36 @@ let map_delete_scheme =
       Ast.TyCon ("Map", [_map_delete_region; _map_delete_k; _map_delete_v]),
       Ast.TyArrow (_map_delete_k, Ast.TyUnit)) }
 
+(* v0.1.297: map_compact — `Map[R, K, V] -> unit`. Semantically invisible:
+   same entries, same order, same handle. On the C backend it swaps the map's
+   internal storage into a fresh private arena (first call promotes the map to
+   owning one) and frees the previous generation -- overwritten values, deleted
+   entries' copies and abandoned grown arrays actually return to the OS. The
+   interpreter and the other backends answer with a no-op, which is correct:
+   compaction is an optimization, not an observable. *)
+let _map_compact_region = fresh_var ()
+let _map_compact_k = fresh_var ()
+let _map_compact_v = fresh_var ()
+let map_compact_scheme =
+  let rid = match _map_compact_region with Ast.TyVar v -> v.id | _ -> assert false in
+  let kid = match _map_compact_k with Ast.TyVar v -> v.id | _ -> assert false in
+  let vid = match _map_compact_v with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid; kid; vid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Map", [_map_compact_region; _map_compact_k; _map_compact_v]),
+      Ast.TyUnit) }
+
+(* v0.1.297: vec_compact — `Vec[R, T] -> unit`, the Vec sibling. *)
+let _vec_compact_region = fresh_var ()
+let _vec_compact_t = fresh_var ()
+let vec_compact_scheme =
+  let rid = match _vec_compact_region with Ast.TyVar v -> v.id | _ -> assert false in
+  let tid = match _vec_compact_t with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid; tid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Vec", [_vec_compact_region; _vec_compact_t]),
+      Ast.TyUnit) }
+
 (* Phase 19.2: map_iter — call (K -> V -> unit) on each entry. *)
 let _map_iter_region = fresh_var ()
 let _map_iter_k = fresh_var ()
@@ -2149,6 +2179,8 @@ let initial_env : env =
     ("map_has",        map_has_scheme);
     ("map_len",        map_len_scheme);
     ("map_delete",     map_delete_scheme);
+    ("map_compact",    map_compact_scheme);
+    ("vec_compact",    vec_compact_scheme);
     ("map_iter",       map_iter_scheme);
     ("vec_push",   vec_push_scheme);
     ("vec_get",    vec_get_scheme);

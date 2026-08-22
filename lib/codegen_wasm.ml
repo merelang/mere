@@ -3392,6 +3392,14 @@ let rec emit_expr (e : Ast.expr) : unit =
     (if k_tag = "int" then map_int_used := true else map_str_used := true);
     emit_expr arg;
     emit_instr (Printf.sprintf "call $mere_map_%s_len" k_tag)
+  | Ast.App ({ node = Ast.Var ("map_compact" | "vec_compact"); _ }, arg) ->
+    (* v0.1.297: compaction is an optimization with no observable behaviour;
+       this backend's bump heap has no per-container arenas to swap, so the
+       honest lowering is: evaluate the argument (for effect ordering), answer
+       unit. The C backend is where the bytes come back. *)
+    emit_expr arg;
+    emit_instr "drop";
+    emit_instr "i64.const 0"  (* unit *)
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "map_get"; _ }, m_e); _ }, k_e) ->
     let k_tag = map_key_tag_of_wasm m_e.Ast.ty m_e.Ast.loc in
     (if k_tag = "int" then map_int_used := true else map_str_used := true);
