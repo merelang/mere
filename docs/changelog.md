@@ -4,6 +4,59 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.304 — 2026-08-22
+
+_The runtime could not say how many threads it had._
+
+`spawn` built a `V_thread` and dropped everything else on the floor, so nothing
+knew a worker existed once its handle went out of scope. A thread parked forever
+on a channel nobody sends to therefore cost nothing and SAID nothing: the program
+printed its last line and exited 0 with the thread still blocked. That is the
+gap Go 1.27 closed by promoting its `goroutineleak` profile, and the first half
+of closing it here is simply keeping a registry — which threads exist, and what
+each is waiting for.
+
+`MERE_THREAD_REPORT=1` prints, at exit, the threads that were NEITHER JOINED NOR
+DETACHED, and what each was blocked on:
+
+    mere: 1 thread(s) neither joined nor detached at exit
+      thread 1: blocked on channel_recv
+
+WHICH THREADS COUNT WAS THE HARD PART, and the language already had the answer.
+A server's accept loop is supposed to block for the life of the process, so
+"still blocked at exit" cannot be the test by itself — and a diagnostic that
+calls every well-formed server a leak is a diagnostic people switch off.
+`detach` is the language saying "I am not going to join this one", so a detached
+thread is disowned on purpose and goes unreported. Nobody claimed it and nobody
+disowned it is the condition.
+
+This is the ANSWERABLE half of what Go does, not the same thing. Go looks for
+goroutines blocked on primitives that have become unreachable, which takes a
+tracing collector to decide; regions cannot answer that. Not covered either: the
+main thread (never registered — and a main that never returns is a hang, which
+is visible without a report), and the C backend, which has its own runtime and
+its own pthreads.
+
+Off by default and written to stderr, because Go's profile is something you ask
+for too and a diagnostic on stdout would change what every existing program
+prints. `scripts/thread_leak_check.sh` holds both halves of that: it checks that
+the default run says nothing, and that turning the report on leaves stdout
+byte-identical.
+
+The gate is BUILT AROUND ITS NEGATIVE CASES. Three of its six programs must
+report nothing — a joined worker, a deliberately detached blocker, and a program
+with no threads at all — because those are what separate a working report from
+one that fires on everything. Each program carries its own expected answer on its
+first line (`//! leaks: 1 blocked on channel_recv`) so that adding a case does not
+mean editing the script, and so a program whose expectation stops matching fails
+instead of being quietly renumbered.
+
+Also: `scripts/bounded.sh` is the wall-clock wrapper v0.1.302 put inside
+`parity.sh`, moved out so this gate uses the same one. Two gates needing a
+bounded runner and defining it twice is how the two drift.
+
+---
+
 ## v0.1.303 — 2026-08-22
 
 _A repeated JSON key was resolved by accident, in three different ways._

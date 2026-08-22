@@ -2191,14 +2191,118 @@ let lookup_extern (name : string) (_ty : Ast.ty) : value =
    Mutex + Condition. This is the "thin runnable slice" (Plan Y): it lets
    test programs actually run two loops in one process; the full Send/Sync
    trait check + move tracking arrive with the shared-memory C backend. *)
+(* ---- v0.1.304: a registry of live threads -------------------------------
+
+   `spawn` used to build a V_thread and drop everything else on the floor: the
+   runtime could not say how many workers existed, let alone what any of them was
+   waiting for. A worker parked forever on a channel nobody sends to therefore
+   cost nothing and said nothing -- the program printed its last line and exited
+   0 with the thread still blocked.
+
+   This is the answerable half of Go 1.27's `goroutineleak` profile. Go looks for
+   goroutines blocked on synchronisation primitives that have become
+   UNREACHABLE, which takes a tracing collector to decide; regions cannot answer
+   it. What is answerable here is narrower and still worth saying: at exit, which
+   threads are still blocked, and on what.
+
+   WHICH ONES COUNT IS THE HARD PART, and the language already had the answer.
+   `detach` means "I am not going to join this one", and a server's accept loop
+   is SUPPOSED to block forever. So a thread is reported only when it was neither
+   joined nor detached -- nobody claimed it and nobody disowned it. Without that
+   distinction the report would call every well-formed server a leak, which is
+   how a diagnostic gets ignored.
+
+   Off unless MERE_THREAD_REPORT is set, and written to stderr. Go's profile is
+   something you ask for as well, and a diagnostic on stdout would change what
+   every existing program prints.
+
+   Not covered: the MAIN thread blocking forever (it is never registered -- and
+   a main that never returns is a hang, which is visible without a report), and
+   anything the C backend does, which has its own runtime and its own pthreads. *)
+type thread_wait = T_running | T_blocked of string | T_finished
+
+let thr_lock = Mutex.create ()
+let thr_status : (int, string * thread_wait ref) Hashtbl.t = Hashtbl.create 8
+(* id -> "joined" | "detached": the two ways a thread stops being anybody's
+   business. Kept apart from thr_status because the parent writes this and the
+   child writes that. *)
+let thr_claimed : (int, string) Hashtbl.t = Hashtbl.create 8
+let thr_seq = ref 0
+let thr_hooked = ref false
+
+let thr_guard : 'a. (unit -> 'a) -> 'a = fun f ->
+  Mutex.lock thr_lock;
+  match f () with
+  | v -> Mutex.unlock thr_lock; v
+  | exception e -> Mutex.unlock thr_lock; raise e
+
+let thr_me () = (Domain.self () :> int)
+
+let thr_set_wait w =
+  thr_guard (fun () ->
+    match Hashtbl.find_opt thr_status (thr_me ()) with
+    | Some (_, st) -> st := w
+    | None -> ())
+
+(* Bracket a block so the status is restored however the wait ends -- a raise
+   out of a wait would otherwise leave the thread reading as blocked for the
+   rest of the program. *)
+let thr_waiting what f =
+  thr_set_wait (T_blocked what);
+  match f () with
+  | v -> thr_set_wait T_running; v
+  | exception e -> thr_set_wait T_running; raise e
+
+let thr_report () =
+  let leaked =
+    thr_guard (fun () ->
+      Hashtbl.fold (fun id (label, st) acc ->
+        if Hashtbl.mem thr_claimed id then acc
+        else
+          let why = match !st with
+            | T_blocked what -> "blocked on " ^ what
+            | T_running -> "still running"
+            | T_finished -> "finished, never joined"
+          in
+          (label, why) :: acc)
+        thr_status [])
+  in
+  if leaked <> [] then begin
+    Printf.eprintf
+      "mere: %d thread(s) neither joined nor detached at exit\n"
+      (List.length leaked);
+    List.iter (fun (label, why) -> Printf.eprintf "  %s: %s\n" label why)
+      (List.sort compare leaked)
+  end
+
+let thr_install_hook () =
+  let need =
+    thr_guard (fun () ->
+      if !thr_hooked then false else (thr_hooked := true; true))
+  in
+  if need && Sys.getenv_opt "MERE_THREAD_REPORT" <> None then at_exit thr_report
+
 let builtin_spawn =
   V_builtin ("spawn", fun clos ->
-    V_thread (Domain.spawn (fun () -> !apply_value_ref clos V_unit)))
+    let n = thr_guard (fun () -> incr thr_seq; !thr_seq) in
+    let label = Printf.sprintf "thread %d" n in
+    thr_install_hook ();
+    V_thread (Domain.spawn (fun () ->
+      let me = thr_me () in
+      thr_guard (fun () -> Hashtbl.replace thr_status me (label, ref T_running));
+      let finish () = thr_set_wait T_finished in
+      match !apply_value_ref clos V_unit with
+      | v -> finish (); v
+      | exception e -> finish (); raise e)))
 
 let builtin_join =
   V_builtin ("join", fun h ->
     match h with
-    | V_thread d -> ignore (Domain.join d); V_unit
+    | V_thread d ->
+      let id = (Domain.get_id d :> int) in
+      ignore (Domain.join d);
+      thr_guard (fun () -> Hashtbl.replace thr_claimed id "joined");
+      V_unit
     | _ -> failwith "join: expected a ThreadHandle")
 
 (* v0.1.84 (mhttpd dogfood): fire-and-forget. The reference interpreter has
@@ -2208,7 +2312,13 @@ let builtin_join =
 let builtin_detach =
   V_builtin ("detach", fun h ->
     match h with
-    | V_thread _ -> V_unit
+    | V_thread d ->
+      (* v0.1.304: a detached thread is disowned on purpose, so the leak report
+         does not name it. This is the one place the language says "blocking
+         forever here is the intent". *)
+      thr_guard (fun () ->
+        Hashtbl.replace thr_claimed (Domain.get_id d :> int) "detached");
+      V_unit
     | _ -> failwith "detach: expected a ThreadHandle")
 
 let builtin_channel_new =
@@ -2236,7 +2346,8 @@ let builtin_channel_recv =
     match ch with
     | V_channel (q, m, c, closed) ->
       Mutex.lock m;
-      while Queue.is_empty q && not !closed do Condition.wait c m done;
+      thr_waiting "channel_recv" (fun () ->
+        while Queue.is_empty q && not !closed do Condition.wait c m done);
       (* v0.1.47: a closed, drained channel used to block forever; now
          recv on it raises (use channel_recv_opt for the shutdown path). *)
       if Queue.is_empty q then begin
@@ -2444,7 +2555,8 @@ let builtin_channel_recv_opt =
     match ch with
     | V_channel (q, m, c, closed) ->
       Mutex.lock m;
-      while Queue.is_empty q && not !closed do Condition.wait c m done;
+      thr_waiting "channel_recv_opt" (fun () ->
+        while Queue.is_empty q && not !closed do Condition.wait c m done);
       let result =
         if Queue.is_empty q then V_constr ("None", None)
         else V_constr ("Some", Some (Queue.pop q))
@@ -2468,6 +2580,8 @@ let builtin_channel_recv_timeout =
         match tv with
         | V_int ms ->
           let deadline = Unix.gettimeofday () +. (float_of_int ms /. 1000.0) in
+          (* The timeout form polls rather than waiting on the condition, so the
+             mark covers the whole poll rather than one iteration of it. *)
           let rec poll () =
             Mutex.lock m;
             if not (Queue.is_empty q) then begin
@@ -2480,7 +2594,7 @@ let builtin_channel_recv_timeout =
               else begin Unix.sleepf 0.001; poll () end
             end
           in
-          poll ()
+          thr_waiting "channel_recv_timeout" poll
         | _ -> failwith "channel_recv_timeout: 2nd arg expected int")
     | _ -> failwith "channel_recv_timeout: expected a Channel")
 

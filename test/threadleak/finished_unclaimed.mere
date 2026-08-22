@@ -1,0 +1,8 @@
+//! leaks: 1 finished, never joined
+// Not blocked -- it ran to completion -- but still nobody's business, which is
+// worth saying separately: the handle was dropped, so any result it produced
+// went nowhere.
+let ch = channel_new ();
+let _dropped = spawn (fn () -> print "worker ran");
+let _ = channel_recv_timeout ch 30;
+print "parent done"
