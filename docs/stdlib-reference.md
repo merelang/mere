@@ -507,6 +507,20 @@ name), an array to a list or tuple, `null`/value to `option` (`None` /
 `Some`), and a string / `{"Ctor": payload}` to a variant. `to_json` uses
 the same mapping in reverse, so `(of_json (to_json x) : T) == x`.
 
+**A repeated object key is refused** (v0.1.303). `{"id":1,"id":2}` does not
+decode: `of_json` fails and `of_json_opt` answers `None`, at any nesting depth,
+because the check belongs to the parser rather than to the decoder generated for
+a particular type. Every decoder used to accept it and keep the *first* value,
+which was not a decision anyone made — it fell out of looking up an assoc list
+built in document order. Go's `encoding/json` v1 kept the *last* for an equally
+accidental reason, and Go 1.27's v2 stopped picking. Two implementations
+resolving the same bytes to different values is the argument: there is no right
+one to choose, so the input is rejected.
+
+Note that **invalid UTF-8 inside a string is still accepted** — a separate
+question, and a harder one, because `utf8_len` deliberately counts an invalid
+byte as one unit and there is no validator to reuse.
+
 ```
 type User = { id: int, name: str, bio: str option };
 to_json (User { id = 1, name = "ada", bio = None })

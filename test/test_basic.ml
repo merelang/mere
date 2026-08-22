@@ -1144,6 +1144,30 @@ let () =
   (* of_json — structural inverse of to_json (str -> 'a). The target type
      comes from an expression annotation `(of_json s : T)`. *)
   check "of_json type" (Pipeline.type_of "of_json") "(str -> 'a)";
+
+  (* v0.1.303: a repeated object key is refused rather than resolved. The
+     accepting cases come first -- a change that rejected everything would pass
+     a group that only ever checks for rejection. *)
+  check "of_json_opt: clean object decodes"
+    (Pipeline.process
+       "type U = { id: int };\n\
+        match (of_json_opt \"\\{\\\"id\\\":1}\" : U option) with \
+        | Some u -> u.id | None -> 0 - 1") "1";
+  check "of_json_opt: duplicate key early is refused"
+    (Pipeline.process
+       "type U = { id: int };\n\
+        match (of_json_opt \"\\{\\\"id\\\":1,\\\"id\\\":2}\" : U option) with \
+        | Some u -> u.id | None -> 0 - 1") "-1";
+  check "of_json_opt: duplicate key of a field not read is refused too"
+    (Pipeline.process
+       "type U = { id: int };\n\
+        match (of_json_opt \"\\{\\\"id\\\":1,\\\"x\\\":2,\\\"x\\\":3}\" : U option) with \
+        | Some u -> u.id | None -> 0 - 1") "-1";
+  check "of_json_opt: duplicate with equal values is still refused"
+    (Pipeline.process
+       "type U = { id: int };\n\
+        match (of_json_opt \"\\{\\\"id\\\":1,\\\"id\\\":1}\" : U option) with \
+        | Some u -> u.id | None -> 0 - 1") "-1";
   check "of_json int" (Pipeline.process "(of_json \"42\" : int)") "42";
   check "of_json bool" (Pipeline.process "(of_json \"true\" : bool)") "true";
   check "of_json str"

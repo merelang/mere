@@ -8156,6 +8156,7 @@ let of_json_runtime_wasm : string = {ojw|
   (func $__mj_object (result i32)
     (local $cell i32) (local $head i32) (local $tail i32) (local $count i32)
     (local $node i32) (local $key i32) (local $val i32) (local $c i32)
+    (local $dup i32)
     (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
     (local.set $head (i32.const 0)) (local.set $tail (i32.const 0)) (local.set $count (i32.const 0))
     (call $__mj_ws)
@@ -8173,6 +8174,18 @@ let of_json_runtime_wasm : string = {ojw|
         (then (global.set $__mj_err (i32.const 1)) (br $done)))
       (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
       (local.set $val (call $__mj_value))
+      (br_if $done (global.get $__mj_err))
+      ;; v0.1.303: refuse a repeated key rather than resolving it. $dup walks the
+      ;; nodes already collected; $__mj_err is this backend's only way to say no.
+      (local.set $dup (local.get $head))
+      (block $dup_end (loop $dup_lp
+        (br_if $dup_end (i32.eqz (local.get $dup)))
+        (if (i32.wrap_i64 (call $__lang_streq
+              (i64.extend_i32_u (i32.load offset=0 (local.get $dup)))
+              (i64.extend_i32_u (local.get $key))))
+          (then (global.set $__mj_err (i32.const 1)) (br $dup_end)))
+        (local.set $dup (i32.load offset=8 (local.get $dup)))
+        (br $dup_lp)))
       (br_if $done (global.get $__mj_err))
       (local.set $node (call $__oj_alloc (i32.const 12)))
       (i32.store offset=0 (local.get $node) (local.get $key))

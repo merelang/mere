@@ -4,6 +4,44 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.303 — 2026-08-22
+
+_A repeated JSON key was resolved by accident, in three different ways._
+
+`of_json` accepted `{"id":1,"id":2}` on every backend that decodes JSON and kept
+the FIRST value. Nobody decided that. It fell out of building an association list
+in document order and looking it up front-to-back — and Go's `encoding/json` v1
+kept the LAST for an equally accidental reason, which is the whole argument:
+two implementations resolve the same bytes to different values, so there is no
+right one to pick. Go 1.27's `encoding/json/v2` stopped picking, and this does
+too. `of_json` fails; `of_json_opt` answers `None`.
+
+The check went into the three PARSERS, one per backend — the interpreter's
+`parse_object`, the C runtime's `__mj_obj`, the Wasm runtime's `$__mj_object` —
+not into the per-type decoders generated from a record's fields. That is why a
+duplicate nested three levels down is refused too, and why the rule did not have
+to be written once per type. (`lib/json.ml` is untouched: it parses the language
+server's wire format, not user data, and holds no `of_json` traffic.)
+
+`test/parity/json_duplicate_key.mere` CHECKS THE ACCEPTING CASES FIRST. A change
+that rejected everything would have passed a file that only ever asked whether
+rejection happens, so the clean object, the reordered one and the whitespace-
+heavy one come before the seven duplicates. It also asks both orderings — the
+duplicate early and the duplicate late — because a decoder keeping the last
+would have agreed with one and not the other.
+
+The comparison is on `of_json_opt` returning `None`, not on a message. The three
+backends do not word a decode failure the same way: the interpreter appends
+`(at offset N)`, the C runtime does not, and the Wasm runtime has no message
+channel at all, only a flag. Comparing messages would have pinned that unrelated
+difference instead of this behaviour.
+
+Still accepted: invalid UTF-8 inside a string. Go 1.27 rejects both, but that
+half needs a validator that does not exist here yet, and it has to be reconciled
+with `utf8_len` counting an invalid byte as one unit on purpose.
+
+---
+
 ## v0.1.302 — 2026-08-22
 
 _Two dogfoods had already written this search, and both wrote it the slow way._
