@@ -1,0 +1,38 @@
+// contrib/path's basename / dirname / ext, held to one output on every backend.
+//
+// The module had no test of its own -- its only caller is the docs-site build --
+// and v0.1.302 rewrote three of its functions to call str_last_index_of instead
+// of scanning with char_at. The values below are the ones where "search from the
+// end" can go wrong in a way an ordinary path would not show: no separator at
+// all, a trailing separator, the root, a dot-prefix (whose leading `.` is not an
+// extension), and several dots in one name.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+import "../../contrib/path/path.mere";
+
+let show = fn (label: str) -> fn (s: str) -> print (label ++ "[" ++ s ++ "]");
+let probe = fn (s: str) ->
+  { print ("--- [" ++ s ++ "]");
+    show "  base " (Path.basename s);
+    show "  dir  " (Path.dirname s);
+    show "  ext  " (Path.ext s);
+    show "  drop " (Path.drop_ext s) };
+
+let _ = probe "docs/tutorial.md";
+let _ = probe "tutorial.md";          // no separator: basename is the whole thing
+let _ = probe "docs/";                // trailing separator: empty basename
+let _ = probe "/";                    // the root
+let _ = probe "/a";                   // separator at index 0 only
+let _ = probe "a/b/c/d.tar.gz";       // several dots: ext is the last one
+let _ = probe ".hidden";              // a leading dot is not an extension
+let _ = probe "docs/.hidden";         // ... and not when it follows a separator
+let _ = probe "noext";
+let _ = probe "trailing.";            // a dot at the end
+let _ = probe "";                     // the empty path
+let _ = probe "あ/い/あ.md";            // byte offsets, not codepoints
+
+let _ = show "join    " (Path.join "docs" "a.md");
+let _ = show "join/   " (Path.join "docs/" "a.md");
+let _ = show "join abs" (Path.join "docs" "/a.md");
+print (if Path.has_ext "a/b.md" ".md" then "has_ext ok" else "has_ext WRONG")

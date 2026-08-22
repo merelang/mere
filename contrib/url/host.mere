@@ -96,16 +96,12 @@ module Url {
   let _is_alpha = fn (b: int) -> (b >= 65 && b <= 90) || (b >= 97 && b <= 122);
   let _is_digit = fn (b: int) -> b >= 48 && b <= 57;
 
-  // There is no str_last_index_of, and both places that need one below want the
-  // LAST occurrence rather than the first: userinfo ends at the last `@` so a
-  // password may contain one, and the port follows the last `:`.
-  let rec _last_of = fn (s: str) -> fn (c: str) -> fn (i: int) ->
-    if i < 0 then 0 - 1
-    else if (char_at s i) == c then i
-    else _last_of s c (i - 1);
-
-  let last_index_of = fn (s: str) -> fn (c: str) ->
-    _last_of s c (str_len s - 1);
+  // Three places below want the LAST occurrence rather than the first: userinfo
+  // ends at the last `@` so a password may contain one, the port follows the
+  // last `:`, and a path's final segment starts after the last `/`. This used to
+  // be a hand-written scan through char_at, which allocates a one-byte str per
+  // position on the compiled backends; str_last_index_of (v0.1.302) is a memcmp
+  // scan and answers the same thing.
 
   let rec _scheme_end = fn (s: str) -> fn (i: int) -> fn (n: int) ->
     if i >= n then 0 - 1
@@ -294,7 +290,7 @@ module Url {
   // The host ends at the last `:` that is not inside brackets.
 
   let _split_userinfo = fn (auth: str) ->
-    let at = last_index_of auth "@" in
+    let at = str_last_index_of auth "@" in
     if at < 0 then ("", "", auth)
     else
       let ui = substring auth 0 at in
@@ -335,7 +331,7 @@ module Url {
            substring after 1 (str_len after))
         else (hostport, "")
     else
-      let colon = last_index_of hostport ":" in
+      let colon = str_last_index_of hostport ":" in
       if colon < 0 then (hostport, "")
       else (substring hostport 0 colon,
             substring hostport (colon + 1) (str_len hostport));
@@ -427,7 +423,7 @@ module Url {
   // replaces the last segment, so `d` against `/a/b/c` is `/a/b/d`, and against
   // `/a/b/` it is `/a/b/d` as well. An empty base path merges as if it were `/`.
   let _strip_last = fn (p: str) ->
-    let i = last_index_of p "/" in
+    let i = str_last_index_of p "/" in
     if i < 0 then "/" else substring p 0 (i + 1);
 
   let _sep = fn (special: bool) -> fn (c: str) ->

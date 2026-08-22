@@ -1,0 +1,56 @@
+// spawn / channel_send / channel_recv / join / channel_close / channel_recv_opt,
+// held to one output on every backend that has them.
+//
+// Until v0.1.302 there was no concurrency case here at all: 128 parity programs
+// and not one of them spawned anything, while `test_basic.ml`'s concurrency
+// checks name `(interp)` in their own titles. So "the interpreter and the C
+// backend agree about threads" was not a claim anything held -- and they do
+// agree, which is exactly the kind of fact that rots unnoticed.
+//
+// EVERY OUTPUT HERE IS ORDER-INDEPENDENT BY CONSTRUCTION. Four workers each send
+// their own id once and the parent sums all four, so the answer is 0+1+2+3
+// whatever order the sends land in. A case whose output depended on the
+// interleaving would be a flaky gate dressed up as a differential one.
+//
+// Execution mode: interp + C. LLVM and Wasm refuse channel_close /
+// channel_recv_opt (v0.1.47 scope), so they report UNSUP rather than a
+// difference -- which is the honest answer and is counted as unchecked.
+
+let n = 4;
+let ch = channel_new ();
+
+let worker = fn (id: int) -> let _ = channel_send ch id in ();
+
+let rec spawn_all = fn (i: int) -> fn (acc: ThreadHandle list) ->
+  if i == n then acc
+  else spawn_all (i + 1) (Cons (spawn (fn () -> worker i), acc));
+let handles = spawn_all 0 Nil;
+
+let rec sum_n = fn (k: int) -> fn (acc: int) ->
+  if k == 0 then acc else sum_n (k - 1) (acc + channel_recv ch);
+let total = sum_n n 0;
+
+let rec join_all = fn (hs: ThreadHandle list) ->
+  match hs with Nil -> () | Cons (h, t) -> let _ = join h in join_all t;
+let _ = join_all handles;
+let _ = print ("total=" ++ str_of_int total);
+
+// After close, a drained channel answers None instead of blocking forever --
+// the primitive that lets a worker loop terminate rather than deadlock.
+let _ = channel_close ch;
+let _ = print (match channel_recv_opt ch with
+               | Some v -> "drained=" ++ str_of_int v
+               | None   -> "drained=None");
+
+// A value queued before the close is still delivered; only the empty-and-closed
+// channel answers None. Ordering these two questions the other way round would
+// have let "close throws the queue away" pass.
+let ch2 = channel_new ();
+let _ = channel_send ch2 7;
+let _ = channel_close ch2;
+let _ = print (match channel_recv_opt ch2 with
+               | Some v -> "queued_survives_close=" ++ str_of_int v
+               | None   -> "queued_survives_close=LOST");
+print (match channel_recv_opt ch2 with
+       | Some v -> "then=" ++ str_of_int v
+       | None   -> "then=None")

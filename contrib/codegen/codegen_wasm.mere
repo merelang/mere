@@ -286,7 +286,8 @@ let is_builtin = fn (n: str) ->
   n == "fst" || n == "snd" || n == "fail" ||
   n == "ord" || n == "is_digit" || n == "is_alpha" || n == "is_space" ||
   n == "str_starts_with" || n == "substring" ||
-  n == "str_index_of" || n == "str_repeat" || n == "int_of_str" ||
+  n == "str_index_of" || n == "str_last_index_of" ||
+  n == "str_repeat" || n == "int_of_str" ||
   n == "str_unescape" || n == "try_or" ||
   n == "strbuf_new" || n == "strbuf_push" ||
   n == "strbuf_to_str" || n == "strbuf_len" ||
@@ -1134,6 +1135,15 @@ let rec emit_expr = fn (e: expr) -> fn (s0: EmitState) ->
         let s2 = emit_expr h_expr s1 in
         let s3 = emit_expr x s2 in
         push_instr "call $str_index_of" s3
+      | EApp (EVar "str_last_index_of", h_expr) ->
+        // v0.1.302: `str_last_index_of haystack needle` — the same 2-arg
+        // curried shape as str_index_of, searching from the end. Pulls strlen
+        // too (the helper body calls $__lang_strlen).
+        let s0 = note_helper_use "strlen" s in
+        let s1 = note_helper_use "str_last_index_of" s0 in
+        let s2 = emit_expr h_expr s1 in
+        let s3 = emit_expr x s2 in
+        push_instr "call $str_last_index_of" s3
       | EApp (EVar "str_repeat", s_expr) ->
         // Phase 54.7: `str_repeat s n` — 2-arg curried. Bump-allocs
         // n*str_len(s)+1 bytes. Helper pulls strlen.
@@ -2433,6 +2443,38 @@ let helper_decl_str_index_of =
   "        (br $outer)))\n" ++
   "    (i32.const -1))\n";
 
+// v0.1.302: `$str_last_index_of h n` — LAST byte-index of n in h, or -1.
+// Empty needle returns strlen(h): it occurs one past the final byte too, and
+// this reports the last position it occurs at. Walks down from hl-nl, so the
+// first match found is the last one present, and stops at 0 rather than letting
+// an unsigned decrement wrap.
+let helper_decl_str_last_index_of =
+  "  (func $str_last_index_of (param $h i32) (param $n i32) (result i32)\n" ++
+  "    (local $hl i32) (local $nl i32) (local $i i32) (local $j i32) (local $ok i32)\n" ++
+  "    (local.set $hl (call $__lang_strlen (local.get $h)))\n" ++
+  "    (local.set $nl (call $__lang_strlen (local.get $n)))\n" ++
+  "    (if (i32.eqz (local.get $nl)) (then (return (local.get $hl))))\n" ++
+  "    (if (i32.gt_s (local.get $nl) (local.get $hl)) (then (return (i32.const -1))))\n" ++
+  "    (local.set $i (i32.sub (local.get $hl) (local.get $nl)))\n" ++
+  "    (block $outer_end\n" ++
+  "      (loop $outer\n" ++
+  "        (local.set $j (i32.const 0))\n" ++
+  "        (local.set $ok (i32.const 1))\n" ++
+  "        (block $inner_end\n" ++
+  "          (loop $inner\n" ++
+  "            (br_if $inner_end (i32.eq (local.get $j) (local.get $nl)))\n" ++
+  "            (if (i32.ne\n" ++
+  "                   (i32.load8_u (i32.add (local.get $h) (i32.add (local.get $i) (local.get $j))))\n" ++
+  "                   (i32.load8_u (i32.add (local.get $n) (local.get $j))))\n" ++
+  "              (then (local.set $ok (i32.const 0)) (br $inner_end)))\n" ++
+  "            (local.set $j (i32.add (local.get $j) (i32.const 1)))\n" ++
+  "            (br $inner)))\n" ++
+  "        (if (local.get $ok) (then (return (local.get $i))))\n" ++
+  "        (br_if $outer_end (i32.eqz (local.get $i)))\n" ++
+  "        (local.set $i (i32.sub (local.get $i) (i32.const 1)))\n" ++
+  "        (br $outer)))\n" ++
+  "    (i32.const -1))\n";
+
 // Phase 54.7: `$str_repeat s n` — bump-allocs s repeated n times +
 // NUL terminator. n=0 yields an empty string (1-byte NUL only).
 let helper_decl_str_repeat =
@@ -2840,6 +2882,7 @@ let helper_body = fn (name: str) ->
   else if name == "str_starts_with" then helper_decl_str_starts_with
   else if name == "substring" then helper_decl_substring
   else if name == "str_index_of" then helper_decl_str_index_of
+  else if name == "str_last_index_of" then helper_decl_str_last_index_of
   else if name == "str_repeat" then helper_decl_str_repeat
   else if name == "int_of_str" then helper_decl_int_of_str
   else if name == "str_unescape" then helper_decl_str_unescape

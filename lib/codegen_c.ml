@@ -2450,6 +2450,10 @@ let rec emit_expr (e : Ast.expr) : string =
           the needle. Emits a call to the runtime helper. *)
        Printf.sprintf "__lang_str_index_of(%s, %s)"
          (emit_expr h_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "str_last_index_of"; _ }, h_e) ->
+       (* v0.1.302: same shape, searching from the end. *)
+       Printf.sprintf "__lang_str_last_index_of(%s, %s)"
+         (emit_expr h_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "str_compare"; _ }, a_e) ->
        (* Phase 31.0: str_compare a b — interp's `compare s t` (OCaml) returns
           -1/0/1. Sign-normalize strcmp's raw value to align behavior across
@@ -7112,6 +7116,20 @@ let str_concat_helper =
       "  if (nn == 0) return 0;";
       "  if (nn > hn) return -1;";
       "  for (size_t i = 0; i + nn <= hn; i++)";
+      "    if (memcmp(h + i, n, nn) == 0) return (int64_t)i;";
+      "  return -1;";
+      "}";
+      "";
+      (* v0.1.302: str_last_index_of — the same search from the other end.
+         Empty needle returns the haystack length, not 0: it occurs at every
+         position including one past the end, and the last of those is hn.
+         Both lengths come from __lang_str_size, never strlen -- a str has
+         carried its length in a header since v0.1.264 and may hold NUL. *)
+      "static int64_t __lang_str_last_index_of(const char* h, const char* n) {";
+      "  size_t hn = __lang_str_size(h), nn = __lang_str_size(n);";
+      "  if (nn == 0) return (int64_t)hn;";
+      "  if (nn > hn) return -1;";
+      "  for (size_t i = hn - nn + 1; i-- > 0; )";
       "    if (memcmp(h + i, n, nn) == 0) return (int64_t)i;";
       "  return -1;";
       "}";

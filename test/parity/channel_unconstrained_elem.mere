@@ -1,0 +1,29 @@
+// A channel whose element type nothing in the program constrains, with the
+// receive's result discarded. This is a REGRESSION CASE for a shape that
+// actually shipped broken.
+//
+// At v0.1.284 the C backend emitted, for this program, calls to a copier named
+// `__mcopy_int` that it never defined -- clang then refused the whole file. The
+// mechanism (fixed in v0.1.293) is that `ty_tag` names a type by erasing an
+// unresolved type variable to int, while the collector deciding WHICH copiers to
+// emit walks the same type, finds it not concrete, and drops it: the name and
+// the definition disagreed about whether the thing exists.
+//
+// v0.1.293 was found through trait_* programs going red in CI and fixed there,
+// and it added no case of its own -- so the channel entrance to the same fault
+// stayed ungated. Three of the four ways in were already benign (annotate the
+// element type, send something, or use the result), which is why this file uses
+// none of them.
+//
+// It uses a 0-ms `channel_recv_timeout` rather than `channel_recv` on purpose: a
+// bare receive on a channel nobody sends to blocks forever, and a parity case
+// that cannot terminate is not a case. The 0-ms form is the non-blocking
+// try-recv, so the program reaches its own end while still leaving the element
+// type unconstrained.
+//
+// Execution mode: interp + C. LLVM and Wasm refuse channel_recv_timeout
+// (v0.1.48 scope = interp + C), so they report UNSUP.
+
+let ch = channel_new ();
+let _ = channel_recv_timeout ch 0;
+print "compiled and ran"

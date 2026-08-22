@@ -2645,6 +2645,11 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr h_e;
     emit_expr n_e;
     emit_instr "call $__lang_str_index_of"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_last_index_of"; _ }, h_e); _ }, n_e) ->
+    (* v0.1.302: str_last_index_of h n — curried, same shape. *)
+    emit_expr h_e;
+    emit_expr n_e;
+    emit_instr "call $__lang_str_last_index_of"
   (* Phase 36: str_trim / str_starts_with / str_replace — runtime helpers
      emitted unconditionally as part of the str runtime block. *)
   | Ast.App ({ node = Ast.Var "str_trim"; _ }, arg) ->
@@ -5389,6 +5394,45 @@ let runtime_helpers = {|
             (br $lp_inner)))
         (if (local.get $match) (then (return (i64.extend_i32_s (local.get $i)))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp_outer)))
+    (i64.extend_i32_s (i32.const -1)))
+  ;; v0.1.302: str_last_index_of — the same search walked from the end, so the
+  ;; first match it finds is the last one present. Empty needle returns the
+  ;; haystack length (it occurs one past the last byte too, and that is the
+  ;; last such position). Lengths come from __lang_strlen, which reads the
+  ;; header, so a str holding NUL is searched correctly.
+  (func $__lang_str_last_index_of (param $h8 i64) (param $n8 i64) (result i64)
+    (local $hlen i32) (local $nlen i32) (local $i i32) (local $j i32)
+    (local $match i32)
+    (local $h i32)
+    (local $n i32)
+    (local.set $h (i32.wrap_i64 (local.get $h8)))
+    (local.set $n (i32.wrap_i64 (local.get $n8)))
+    (local.set $hlen (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $h)))))
+    (local.set $nlen (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $n)))))
+    (if (i32.eqz (local.get $nlen))
+      (then (return (i64.extend_i32_s (local.get $hlen)))))
+    (if (i32.gt_s (local.get $nlen) (local.get $hlen))
+      (then (return (i64.extend_i32_s (i32.const -1)))))
+    (local.set $i (i32.sub (local.get $hlen) (local.get $nlen)))
+    (block $end_outer
+      (loop $lp_outer
+        (local.set $j (i32.const 0))
+        (local.set $match (i32.const 1))
+        (block $end_inner
+          (loop $lp_inner
+            (br_if $end_inner (i32.eq (local.get $j) (local.get $nlen)))
+            (if (i32.ne
+                  (i32.load8_u (i32.add (local.get $h)
+                                        (i32.add (local.get $i) (local.get $j))))
+                  (i32.load8_u (i32.add (local.get $n) (local.get $j))))
+              (then (local.set $match (i32.const 0)) (br $end_inner)))
+            (local.set $j (i32.add (local.get $j) (i32.const 1)))
+            (br $lp_inner)))
+        (if (local.get $match) (then (return (i64.extend_i32_s (local.get $i)))))
+        ;; i is unsigned-safe here: stop at 0 rather than letting it wrap.
+        (br_if $end_outer (i32.eqz (local.get $i)))
+        (local.set $i (i32.sub (local.get $i) (i32.const 1)))
         (br $lp_outer)))
     (i64.extend_i32_s (i32.const -1)))
   ;; Phase 36: __lang_is_ws — ASCII whitespace test (space/tab/lf/cr/ff)

@@ -1,8 +1,9 @@
 // contrib/path/path.mere — POSIX path manipulation helpers
 //
 // Implements `module Path { join, basename, dirname, ext, drop_ext, has_ext }`
-// in pure Mere (no added builtins). Built solely from string operations
-// (`str_len` / `str_index_of` / `substring` / `char_at` / `str_join` / `str_split`).
+// in pure Mere. Built solely from string operations (`str_len` /
+// `str_index_of` / `str_last_index_of` / `substring` / `char_at` / `str_join` /
+// `str_split`).
 //
 // POSIX convention: separator is `/`; Windows paths (backslash) are unsupported for now.
 //
@@ -34,24 +35,13 @@ let join = fn (a: str) -> fn (b: str) ->
 // Return everything after the last `/` (entire s if no `/`)
 let basename = fn (s: str) ->
   let n = str_len s in
-  let rec last_slash = fn i ->
-    if i < 0 then -1
-    else if char_at s i == "/" then i
-    else last_slash (i - 1)
-  in
-  let idx = last_slash (n - 1) in
+  let idx = str_last_index_of s "/" in
   if idx < 0 then s
   else substring s (idx + 1) n;
 
 // Return everything up to the last `/` ("" if no `/`)
 let dirname = fn (s: str) ->
-  let n = str_len s in
-  let rec last_slash = fn i ->
-    if i < 0 then -1
-    else if char_at s i == "/" then i
-    else last_slash (i - 1)
-  in
-  let idx = last_slash (n - 1) in
+  let idx = str_last_index_of s "/" in
   if idx < 0 then ""
   else if idx == 0 then "/"
   else substring s 0 idx;
@@ -61,13 +51,10 @@ let dirname = fn (s: str) ->
 let ext = fn (s: str) ->
   let b = basename s in
   let n = str_len b in
-  let rec last_dot = fn i ->
-    if i <= 0 then -1   // a `.` at index 0 is a dot-prefix and excluded
-    else if char_at b i == "." then i
-    else last_dot (i - 1)
-  in
-  let idx = last_dot (n - 1) in
-  if idx < 0 then ""
+  // `<= 0`, not `< 0`: a `.` at index 0 is a dot-prefix, so the ext of
+  // `.hidden` is "" rather than ".hidden".
+  let idx = str_last_index_of b "." in
+  if idx <= 0 then ""
   else substring b idx n;
 
 // Drop the extension (Path.drop_ext "foo.md" = "foo")

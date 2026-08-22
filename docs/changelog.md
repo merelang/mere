@@ -4,6 +4,79 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.302 — 2026-08-22
+
+_Two dogfoods had already written this search, and both wrote it the slow way._
+
+`str_index_of` searched from the front and there was no counterpart from the
+back, so callers that needed the LAST occurrence wrote their own. Two did:
+`contrib/url` (userinfo ends at the last `@`, because a password may contain
+one; the port follows the last `:`; a path's final segment starts after the
+last `/`) and `contrib/path` (`basename` / `dirname` / `ext`). A third copy sat
+in `contrib/url/ipv6.mere` for the last colon of an embedded IPv4 quad. Each
+carried a comment saying the builtin did not exist -- which is the useful part
+of the record: the workaround was written down as a workaround rather than
+quietly becoming the way it is done.
+
+Every copy scanned with `char_at`, and `char_at` returns a one-character `str`.
+On the compiled backends that is an allocation per byte examined, so finding one
+index in an n-byte string allocated n strings. `str_last_index_of` is a memcmp
+scan in all four backends and allocates none.
+
+The empty needle answers the haystack LENGTH, not 0. It occurs at every position
+including one past the final byte, and this function reports the last of them --
+which keeps `str_index_of s "" <= str_last_index_of s ""` true for every `s`.
+
+Both lengths come from the length header (`__lang_str_size` in C, the same in
+the LLVM transcription, `__lang_strlen` in Wasm), never from `strlen`: a `str`
+has been able to hold NUL since v0.1.264, and `test/parity/str_last_index_of.mere`
+searches a haystack containing two of them for exactly that reason.
+
+Also: `test/parity/path_helpers.mere` is new. `contrib/path` had no test of its
+own -- its only caller is the docs-site build -- so the three functions rewritten
+here had nothing holding them. Before deleting the hand-written versions they
+were run against the builtin over a corpus of paths and separators and agreed on
+every pair.
+
+Not on RV32I: that backend does not have `str_index_of` either, and the pair
+stays symmetric.
+
+Adding it took SIX registrations, not four. Besides the typer and the four
+backends, `contrib/typer/typer.mere` carries its own builtin type environment and
+`contrib/codegen/codegen_wasm.mere` its own known-builtin predicate, dispatch,
+WAT helper and helper-name table -- and the self-host tests compile
+`contrib/path/path.mere`, so the moment that file used the new builtin the
+bootstrap failed with `unbound var str_last_index_of`. Twice, once per layer. A
+builtin is not added until all six agree it exists.
+
+### The parity gate can now hold a program that blocks
+
+`scripts/parity.sh` ran every program with no time limit, so a case that blocked
+forever would have hung the gate rather than failed it -- nothing reported, no
+log, and every case after it unknown. All eight execution sites (the interpreter
+reference and the three compiled runs, in both the ordinary and the
+supposed-to-fail loop) now go through a perl `alarm` wrapper, and outliving the
+limit is its own outcome, `HUNG`, named in the summary rather than folded into a
+DIFF. `timeout(1)` is absent on macOS and `ulimit -t` measures CPU time, which a
+thread blocked on a condition variable does not spend; neither would have worked.
+The limit is generous (60s, `MERE_PARITY_TIMEOUT`) because it exists to convert a
+hang into a report, not to time anything.
+
+That was the prerequisite for the first concurrency cases this suite has ever
+had. There were 128 parity programs and not one of them spawned a thread, while
+the concurrency checks in `test_basic.ml` name `(interp)` in their own titles --
+so "the interpreter and the C backend agree about threads" was not a claim
+anything held. Three cases now hold it: `concurrency_channel` (spawn / send /
+recv / join / close / recv_opt, with every output made order-independent by
+construction), `concurrency_elem_types` (what a channel can carry -- int, str,
+a str containing NUL, bool, a record -- which turns out to MATCH on all four
+backends, not just the two that have the full channel API), and
+`channel_unconstrained_elem`, a regression case for the v0.1.293 copier fault
+reached through a channel instead of a trait, which is the entrance that fix
+did not gate.
+
+---
+
 ## v0.1.301 — 2026-08-24
 
 _A fail now releases the regions it jumps over._

@@ -1758,6 +1758,33 @@ let () =
   check "str_index_of type"
     (Pipeline.type_of "str_index_of") "(str -> (str -> int))";
 
+  (* v0.1.302: str_last_index_of — the same search from the other end. The
+     values that separate it from str_index_of are several occurrences, an
+     overlapping needle, and the empty needle (which answers the length, not 0,
+     because it occurs one past the final byte and that is the last position). *)
+  check "str_last_index_of: last of several"
+    (Pipeline.process "str_last_index_of \"a@b@c\" \"@\"") "3";
+  check "str_last_index_of: first for contrast"
+    (Pipeline.process "str_index_of \"a@b@c\" \"@\"") "1";
+  check "str_last_index_of: overlapping needle"
+    (Pipeline.process "str_last_index_of \"aaa\" \"aa\"") "1";
+  check "str_last_index_of: not found returns -1"
+    (Pipeline.process "str_last_index_of \"hello\" \"xyz\"") "-1";
+  check "str_last_index_of: needle longer than haystack"
+    (Pipeline.process "str_last_index_of \"abc\" \"abcd\"") "-1";
+  check "str_last_index_of: empty needle returns the length"
+    (Pipeline.process "str_last_index_of \"abc\" \"\"") "3";
+  check "str_last_index_of: empty haystack and needle"
+    (Pipeline.process "str_last_index_of \"\" \"\"") "0";
+  check "str_last_index_of: needle is the haystack"
+    (Pipeline.process "str_last_index_of \"abc\" \"abc\"") "0";
+  check "str_last_index_of: final byte"
+    (Pipeline.process "str_last_index_of \"abc\" \"c\"") "2";
+  check "str_last_index_of: multibyte answer is a byte offset"
+    (Pipeline.process "str_last_index_of \"\227\129\130\227\129\132\227\129\130\" \"\227\129\130\"") "6";
+  check "str_last_index_of type"
+    (Pipeline.type_of "str_last_index_of") "(str -> (str -> int))";
+
   check "str_split: basic split"
     (Pipeline.process
        "type 'a list = Nil | Cons of 'a * 'a list;\n\

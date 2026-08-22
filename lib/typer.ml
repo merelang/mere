@@ -2106,6 +2106,14 @@ let initial_env : env =
     (* Phase 19.1: str_split / str_join / str_index_of *)
     ("str_index_of",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyInt))));
+    (* v0.1.302: the other end of the same search. Two dogfoods had already
+       written it by hand -- contrib/url wants the LAST `@` and the LAST `:`,
+       because a password may contain an `@` and a port follows the final
+       colon -- and both hand-written copies walked the haystack a byte at a
+       time through char_at, which allocates a one-byte str per position on
+       the compiled backends. *)
+    ("str_last_index_of",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyInt))));
     ("str_split",
        mono (Ast.TyArrow (Ast.TyStr,
               Ast.TyArrow (Ast.TyStr,

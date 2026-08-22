@@ -1102,6 +1102,7 @@ let initial_type_env =
    // side's initial_env — see lib/typer.ml.
    Cons (("substring", mono (TyArrow (TyStr, TyArrow (TyInt, TyArrow (TyInt, TyStr))))),
    Cons (("str_index_of", mono (TyArrow (TyStr, TyArrow (TyStr, TyInt)))),
+   Cons (("str_last_index_of", mono (TyArrow (TyStr, TyArrow (TyStr, TyInt)))),
    Cons (("str_starts_with", mono (TyArrow (TyStr, TyArrow (TyStr, TyBool)))),
    Cons (("str_repeat", mono (TyArrow (TyStr, TyArrow (TyInt, TyStr)))),
    Cons (("str_join", mono (TyArrow (TyStr, TyArrow (TyCon ("list", Cons (TyStr, Nil)), TyStr)))),
@@ -1225,7 +1226,7 @@ let initial_type_env =
    Cons (("map_has", ((Cons (1030, Cons (1031, Cons (1032, Nil))),
      TyArrow (TyCon ("Map", Cons (TyMeta 1030, Cons (TyMeta 1031, Cons (TyMeta 1032, Nil)))),
        TyArrow (TyMeta 1031, TyBool))) : scheme)),
-   Nil)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))) : type_env);
+   Nil))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))) : type_env);
 
 let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
                   -> fn (s: infer_state) ->

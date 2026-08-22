@@ -199,7 +199,7 @@ bool_of_str "true"   // true
 
 ---
 
-## String operations (22)
+## String operations (23)
 
 | Name | Type | Description |
 |---|---|---|
@@ -209,6 +209,7 @@ bool_of_str "true"   // true
 | `str_ends_with` | `str -> str -> bool` | Suffix test |
 | `str_count` | `str -> str -> int` | Non-overlapping occurrence count |
 | `str_index_of` ★ | `str -> str -> int` | First position of needle; -1 if not found. Empty needle returns 0 (Phase 19.1) |
+| `str_last_index_of` ★ | `str -> str -> int` | **Last** position of needle; -1 if not found. Empty needle returns the haystack length — it occurs one past the final byte too, and that is the last such position (v0.1.302) |
 | `str_split` ★ | `str -> str -> str list` | Split by delimiter; returns `str list`. Requires `type 'a list = ...` declared. Empty delimiter returns a single-element list (Phase 19.1) |
 | `utf8_len` ★ | `str -> int` | Codepoint count (a `str` is bytes; `str_len` is the byte length). Invalid bytes count as single units (v0.1.38) |
 | `utf8_chars` ★ | `str -> str list` | Split into codepoints — the building block for text processing (v0.1.38) |
@@ -243,7 +244,7 @@ str_index_of "hello world" "world"             // 6
 str_index_of "hello" "xyz"                     // -1
 ```
 
-**★ Codegen status**: `str_index_of` / `str_split` / `str_join` / `str_count` / `str_compare` / `str_trim` / `str_starts_with` / `str_ends_with` / `str_contains` / `str_replace` / `str_repeat` / `str_rev` all work **across all 4 backends** (Phase 19.1.1 added str_index_of; Phase 22 added str_split / str_join; Phase 26.5 added all Wasm str ops; Phase 31.0 added str_compare; Phase 36 added str_trim / starts_with / ends_with / contains / replace / repeat / rev). `not` / `abs` / `min` / `max` / `clamp` / `chr` / `ord` / `to_upper` / `to_lower` / `even` / `odd` / `gcd` / `bool_of_str` also reached the 3 backends in Phase 36. The `fn (_: unit) -> body` wildcard parameter was also parser-fixed in Phase 36.
+**★ Codegen status**: `str_index_of` / `str_last_index_of` / `str_split` / `str_join` / `str_count` / `str_compare` / `str_trim` / `str_starts_with` / `str_ends_with` / `str_contains` / `str_replace` / `str_repeat` / `str_rev` all work **across all 4 backends** (Phase 19.1.1 added str_index_of; Phase 22 added str_split / str_join; Phase 26.5 added all Wasm str ops; Phase 31.0 added str_compare; Phase 36 added str_trim / starts_with / ends_with / contains / replace / repeat / rev). `not` / `abs` / `min` / `max` / `clamp` / `chr` / `ord` / `to_upper` / `to_lower` / `even` / `odd` / `gcd` / `bool_of_str` also reached the 3 backends in Phase 36. The `fn (_: unit) -> body` wildcard parameter was also parser-fixed in Phase 36.
 
 ```
 str_replace "foo bar foo" "foo" "X"           // "X bar X"

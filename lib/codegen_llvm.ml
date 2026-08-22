@@ -4297,6 +4297,15 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                   "  %s = call i64 @__lang_str_index_of(ptr %s, ptr %s)"
                   raw hv nv);
     raw
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_last_index_of"; _ }, h_e); _ }, n_e) ->
+    (* v0.1.302: str_last_index_of h n — curried, same shape. *)
+    let hv = emit_expr env h_e in
+    let nv = emit_expr env n_e in
+    let raw = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call i64 @__lang_str_last_index_of(ptr %s, ptr %s)"
+                  raw hv nv);
+    raw
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_compare"; _ }, a_e); _ }, b_e) ->
     (* Phase 31.0: str_compare a b — sign-normalize the raw strcmp value to
        (-1/0/1). Matches the interp's `compare s t` (OCaml). *)
@@ -9506,6 +9515,41 @@ let str_concat_helper =
       "  %inext = add i64 %i, 1";
       "  %done = icmp ugt i64 %inext, %last";
       "  br i1 %done, label %retneg, label %loop";
+      "found:";
+      "  ret i64 %i";
+      "retneg:";
+      "  ret i64 -1";
+      "}";
+      "";
+      (* v0.1.302: str_last_index_of — the C backend's, transcribed. Walks
+         down from hn-nn so the first match found is the last one present.
+         Empty needle answers hn. *)
+      "define i64 @__lang_str_last_index_of(ptr %h, ptr %n) {";
+      "entry:";
+      "  %hn = call i64 @__lang_str_size(ptr %h)";
+      "  %nn = call i64 @__lang_str_size(ptr %n)";
+      "  %is_empty = icmp eq i64 %nn, 0";
+      "  br i1 %is_empty, label %rethn, label %chk";
+      "rethn:";
+      "  ret i64 %hn";
+      "chk:";
+      "  %toolong = icmp ugt i64 %nn, %hn";
+      "  br i1 %toolong, label %retneg, label %pre";
+      "pre:";
+      "  %last = sub i64 %hn, %nn";
+      "  br label %loop";
+      "loop:";
+      "  %i = phi i64 [ %last, %pre ], [ %iprev, %step ]";
+      "  %p = getelementptr i8, ptr %h, i64 %i";
+      "  %c = call i32 @memcmp(ptr %p, ptr %n, i64 %nn)";
+      "  %eq = icmp eq i32 %c, 0";
+      "  br i1 %eq, label %found, label %cont";
+      "cont:";
+      "  %atzero = icmp eq i64 %i, 0";
+      "  br i1 %atzero, label %retneg, label %step";
+      "step:";
+      "  %iprev = sub i64 %i, 1";
+      "  br label %loop";
       "found:";
       "  ret i64 %i";
       "retneg:";
