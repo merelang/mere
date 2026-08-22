@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.299 — 2026-08-22
+
+_A trigger cannot see byte pressure through an entry count._
+
+`map_bytes m` / `vec_bytes v`: the bytes held by the container's OWN arena --
+0 until the first compact promotes it, capacity rather than bump-used (within
+2x, costs nothing on the hot path, monotone between compactions: everything a
+collection trigger needs and nothing more). Found the way most of this week's
+primitives were found, by a consumer: a store of 20 KB values under-collected
+on any count-based trigger, and a large program's collector STARVED outright
+-- its amortization term grew with total-slots-ever while its trigger counted
+entries, so collections effectively stopped and an 87 GB peak looked like "GC
+present, memory anyway".
+
+The value is deliberately backend-dependent (0 where no per-container arenas
+exist: interpreter, wasm) -- so it is for TRIGGERS, never for output. The
+parity probe uses it only in output-invariant positions, which is the rule
+for any program that wants to stay portable.
+
+Blocks carry their capacity in the header's padding field now, which is what
+lets bytes be summed without a hot-path counter.
+
+parity 121/0, dune test 2541/0, ctest.
+
+---
+
 ## v0.1.298 — 2026-08-22
 
 _Emptying a map one key at a time was quadratic, and worse in a private arena._
