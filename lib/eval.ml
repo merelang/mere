@@ -1491,6 +1491,12 @@ let builtin_map_len =
    interpreter has no arenas, so the honest answer is unit. *)
 (* v0.1.299: no arenas here; a trigger reading 0 just never fires on the
    interpreter, which is the no-op collector it already has. *)
+let builtin_map_recycle =
+  V_builtin ("map_recycle", fun v ->
+    match v with
+    | V_map (tbl, keys) -> Hashtbl.reset tbl; keys := []; V_unit
+    | _ -> failwith "map_recycle: expected Map")
+
 let builtin_map_bytes = V_builtin ("map_bytes", fun _ -> V_int 0)
 let builtin_vec_bytes = V_builtin ("vec_bytes", fun _ -> V_int 0)
 
@@ -2797,6 +2803,7 @@ let initial_env : env =
     ("map_delete",     ref builtin_map_delete);
     ("map_compact",    ref builtin_map_compact);
     ("map_clear",      ref builtin_map_clear);
+    ("map_recycle",    ref builtin_map_recycle);
     ("map_bytes",      ref builtin_map_bytes);
     ("vec_bytes",      ref builtin_vec_bytes);
     ("vec_compact",    ref builtin_vec_compact);

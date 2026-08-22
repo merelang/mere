@@ -3392,6 +3392,12 @@ let rec emit_expr (e : Ast.expr) : unit =
     (if k_tag = "int" then map_int_used := true else map_str_used := true);
     emit_expr arg;
     emit_instr (Printf.sprintf "call $mere_map_%s_len" k_tag)
+  | Ast.App ({ node = Ast.Var "map_recycle"; _ }, arg) ->
+    (* v0.1.300: semantically map_clear; no per-container arenas here. *)
+    let k_tag = map_key_tag_of_wasm arg.Ast.ty arg.Ast.loc in
+    (if k_tag = "int" then map_int_used := true else map_str_used := true);
+    emit_expr arg;
+    emit_instr (Printf.sprintf "call $mere_map_%s_clear" k_tag)
   | Ast.App ({ node = Ast.Var "map_clear"; _ }, arg) ->
     let k_tag = map_key_tag_of_wasm arg.Ast.ty arg.Ast.loc in
     (if k_tag = "int" then map_int_used := true else map_str_used := true);

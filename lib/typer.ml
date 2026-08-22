@@ -1795,6 +1795,24 @@ let map_compact_scheme =
       Ast.TyCon ("Map", [_map_compact_region; _map_compact_k; _map_compact_v]),
       Ast.TyUnit) }
 
+(* v0.1.300: map_recycle — `Map[R, K, V] -> unit`. Semantically map_clear; on
+   the C backend it also winds the map's private arena back to its warm seed
+   block (freeing only the growth), which is the frame-pool primitive: a map
+   reused as a call frame recycles at every return and the next use mallocs
+   nothing. Promotes an unowned map. Borrowed internals dangle across it,
+   same discipline as map_compact. *)
+let _map_recycle_region = fresh_var ()
+let _map_recycle_k = fresh_var ()
+let _map_recycle_v = fresh_var ()
+let map_recycle_scheme =
+  let rid = match _map_recycle_region with Ast.TyVar v -> v.id | _ -> assert false in
+  let kid = match _map_recycle_k with Ast.TyVar v -> v.id | _ -> assert false in
+  let vid = match _map_recycle_v with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid; kid; vid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Map", [_map_recycle_region; _map_recycle_k; _map_recycle_v]),
+      Ast.TyUnit) }
+
 (* v0.1.299: map_bytes / vec_bytes — bytes held by the container's OWN arena
    (0 until the first compact promotes it). The collection-trigger primitive:
    entry counts cannot see byte pressure (a 20 KB value store under-collects
@@ -2224,6 +2242,7 @@ let initial_env : env =
     ("map_delete",     map_delete_scheme);
     ("map_compact",    map_compact_scheme);
     ("map_clear",      map_clear_scheme);
+    ("map_recycle",    map_recycle_scheme);
     ("map_bytes",      map_bytes_scheme);
     ("vec_bytes",      vec_bytes_scheme);
     ("vec_compact",    vec_compact_scheme);

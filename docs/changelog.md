@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.300 — 2026-08-23
+
+_The frame-pool primitive._
+
+`map_recycle m`: semantically `map_clear`, and on the C backend it also winds
+the map's private arena back to its warm seed block, freeing only the growth
+-- so a map reused as a CALL FRAME recycles at every return and the next use
+mallocs nothing. Promotes an unowned map on first use. The consumer this was
+built for holds a pool of frame maps: take one at call entry, recycle and
+return it at call exit unless the frame was captured (a proc, a binding, a
+define_method body) -- which is how an interpreter's per-call frames, its
+single largest unreclaimed share, come back without the env-indirection
+surgery that a store-based frame representation would have cost (measured at
+a 518-function transitive closure).
+
+Borrowed internals dangle across a recycle, same discipline as map_compact.
+The interpreter and wasm lower it to map_clear exactly, so parity holds by
+construction.
+
+parity 121/0 (the compact probe exercises recycle-reuse-recycle on all
+three), dune test 2541/0.
+
+---
+
 ## v0.1.299 — 2026-08-22
 
 _A trigger cannot see byte pressure through an entry count._

@@ -19,6 +19,12 @@ let _ = map_set m2 "x" 1 in
 let _ = map_set m2 "y" 2 in
 let _ = map_clear m2 in
 let _ = map_set m2 "z" 9 in
+let m3 = map_new () in
+let _ = map_set m3 "a" 5 in
+let _ = map_recycle m3 in
+let _ = map_set m3 "b" 6 in
+let _ = map_recycle m3 in
+let _ = map_set m3 "c" 7 in
 // map_bytes / vec_bytes answer BACKEND-DEPENDENT numbers (0 where there are
 // no per-container arenas), so a parity probe may only use them in ways whose
 // OUTPUT is backend-independent: existence and sign, never the value.
@@ -34,6 +40,7 @@ print ("m=" ++ str_of_int (map_len m)
        ++ " k2=" ++ (if map_has m "key2" then "!" else "gone")
        ++ " post=" ++ map_get m "post"
        ++ " m2=" ++ str_of_int (map_len m2) ++ "/" ++ str_of_int (map_get m2 "z")
+       ++ " m3=" ++ str_of_int (map_len m3) ++ "/" ++ str_of_int (map_get m3 "c") ++ (if map_has m3 "a" then "!" else "/gone")
        ++ " b=" ++ bytes_sane ++ " vb=" ++ (if vec_bytes v >= 0 then "y" else "n")
        ++ " v=" ++ str_of_int (vec_len v)
        ++ " " ++ str_of_int (vec_get v 0) ++ "," ++ str_of_int (vec_get v 2) ++ "\n")
