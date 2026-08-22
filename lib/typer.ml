@@ -1795,6 +1795,33 @@ let map_compact_scheme =
       Ast.TyCon ("Map", [_map_compact_region; _map_compact_k; _map_compact_v]),
       Ast.TyUnit) }
 
+(* v0.1.299: map_bytes / vec_bytes — bytes held by the container's OWN arena
+   (0 until the first compact promotes it). The collection-trigger primitive:
+   entry counts cannot see byte pressure (a 20 KB value store under-collects
+   on any count-based trigger). Capacity, not bump-used: within 2x, free, and
+   monotone between compactions. Interp answers 0 (no arenas). *)
+let _map_bytes_region = fresh_var ()
+let _map_bytes_k = fresh_var ()
+let _map_bytes_v = fresh_var ()
+let map_bytes_scheme =
+  let rid = match _map_bytes_region with Ast.TyVar v -> v.id | _ -> assert false in
+  let kid = match _map_bytes_k with Ast.TyVar v -> v.id | _ -> assert false in
+  let vid = match _map_bytes_v with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid; kid; vid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Map", [_map_bytes_region; _map_bytes_k; _map_bytes_v]),
+      Ast.TyInt) }
+
+let _vec_bytes_region = fresh_var ()
+let _vec_bytes_t = fresh_var ()
+let vec_bytes_scheme =
+  let rid = match _vec_bytes_region with Ast.TyVar v -> v.id | _ -> assert false in
+  let tid = match _vec_bytes_t with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid; tid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Vec", [_vec_bytes_region; _vec_bytes_t]),
+      Ast.TyInt) }
+
 (* v0.1.298: map_clear — `Map[R, K, V] -> unit`, O(index) and allocation-free.
    The mass-deletion primitive: map_delete shifts the dense arrays and rebuilds
    the index into the map's region PER CALL, so emptying a big map with it is
@@ -2197,6 +2224,8 @@ let initial_env : env =
     ("map_delete",     map_delete_scheme);
     ("map_compact",    map_compact_scheme);
     ("map_clear",      map_clear_scheme);
+    ("map_bytes",      map_bytes_scheme);
+    ("vec_bytes",      vec_bytes_scheme);
     ("vec_compact",    vec_compact_scheme);
     ("map_iter",       map_iter_scheme);
     ("vec_push",   vec_push_scheme);

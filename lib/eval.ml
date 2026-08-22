@@ -1489,6 +1489,11 @@ let builtin_map_len =
 (* v0.1.297: map_compact / vec_compact — no-ops here. Compaction is an
    optimization the C backend performs (private-arena generation swap); the
    interpreter has no arenas, so the honest answer is unit. *)
+(* v0.1.299: no arenas here; a trigger reading 0 just never fires on the
+   interpreter, which is the no-op collector it already has. *)
+let builtin_map_bytes = V_builtin ("map_bytes", fun _ -> V_int 0)
+let builtin_vec_bytes = V_builtin ("vec_bytes", fun _ -> V_int 0)
+
 let builtin_map_clear =
   V_builtin ("map_clear", fun v ->
     match v with
@@ -2792,6 +2797,8 @@ let initial_env : env =
     ("map_delete",     ref builtin_map_delete);
     ("map_compact",    ref builtin_map_compact);
     ("map_clear",      ref builtin_map_clear);
+    ("map_bytes",      ref builtin_map_bytes);
+    ("vec_bytes",      ref builtin_vec_bytes);
     ("vec_compact",    ref builtin_vec_compact);
     ("len",            ref builtin_len);
   ]

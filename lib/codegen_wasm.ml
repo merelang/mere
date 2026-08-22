@@ -3397,6 +3397,12 @@ let rec emit_expr (e : Ast.expr) : unit =
     (if k_tag = "int" then map_int_used := true else map_str_used := true);
     emit_expr arg;
     emit_instr (Printf.sprintf "call $mere_map_%s_clear" k_tag)
+  | Ast.App ({ node = Ast.Var ("map_bytes" | "vec_bytes"); _ }, arg) ->
+    (* v0.1.299: no per-container arenas on this backend; 0 means "trigger
+       never fires", the same honest answer the interpreter gives. *)
+    emit_expr arg;
+    emit_instr "drop";
+    emit_instr "i64.const 0"
   | Ast.App ({ node = Ast.Var ("map_compact" | "vec_compact"); _ }, arg) ->
     (* v0.1.297: compaction is an optimization with no observable behaviour;
        this backend's bump heap has no per-container arenas to swap, so the

@@ -3083,6 +3083,9 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "vec_compact" ->
        let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
        Printf.sprintf "mere_vec_%s_compact(%s)" elem_tag (emit_expr arg)
+     | Ast.Var "vec_bytes" ->
+       let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
+       Printf.sprintf "mere_vec_%s_bytes(%s)" elem_tag (emit_expr arg)
      | Ast.App ({ node = Ast.Var "vec_push"; _ }, vec_e) ->
        (* `vec_push v x` is curried: App (App (Var "vec_push", v), x).
           The outer App here has inner = App (Var "vec_push", vec_e) and
@@ -3352,6 +3355,9 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "map_clear" ->
        let (k_tag, v_tag) = map_kv_tags_of arg.Ast.ty arg.Ast.loc in
        Printf.sprintf "mere_map_%s_%s_clear(%s)" k_tag v_tag (emit_expr arg)
+     | Ast.Var "map_bytes" ->
+       let (k_tag, v_tag) = map_kv_tags_of arg.Ast.ty arg.Ast.loc in
+       Printf.sprintf "mere_map_%s_%s_bytes(%s)" k_tag v_tag (emit_expr arg)
      | Ast.App ({ node = Ast.Var "map_get"; _ }, m_e) ->
        let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
        Printf.sprintf "mere_map_%s_%s_get(%s, %s)"
@@ -7808,6 +7814,10 @@ let region_runtime_helpers =
       "  __lang_region_block* b =";
       "    (__lang_region_block*) malloc(sizeof(__lang_region_block) + cap);";
       "  if (!b) __lang_fail_impl(\"out of memory\");";
+      (* v0.1.299: the pad field (there for 16-alignment) carries the block's
+         capacity, so map_bytes / vec_bytes can sum a container's private
+         arena without any hot-path counter. *)
+      "  b->pad = cap;";
       "  b->prev = r->blocks;";
       "  r->blocks = b;";
       "  r->base = (char*)(b + 1);";
@@ -7858,6 +7868,16 @@ let region_runtime_helpers =
       "  r->top += aligned;";
       "  if (shared) pthread_mutex_unlock(&__lang_default_region_lock);";
       "  return p;";
+      "}";
+      "";
+      "/* v0.1.299: total capacity of a region's block chain. Capacity, not";
+      "   bump-used: within 2x of used (blocks double), free of hot-path cost,";
+      "   and monotone between compactions -- which is all a collection";
+      "   trigger needs. */";
+      "static size_t __lang_region_bytes(__lang_region* r) {";
+      "  size_t n = 0;";
+      "  for (__lang_region_block* b = r->blocks; b; b = b->prev) n += b->pad;";
+      "  return n;";
       "}";
       "";
       "static void __lang_region_free(__lang_region* r) {";
@@ -8084,7 +8104,15 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  for (int i = 0; i < m->idx_cap; i++) m->idx[i] = -1;";
       "  return 0;";
       "}";
+      "";      (* v0.1.299: bytes held by the map's OWN arena -- 0 until the first
+         compact promotes it (a shared region's bytes are not the map's).
+         The collection-trigger primitive for byte-heavy stores: entry counts
+         cannot see 20 KB values. *)
+      Printf.sprintf "static long long %s_bytes(%s* m) {" struct_name struct_name;
+      "  return m->owns_region ? (long long)__lang_region_bytes(m->region) : 0LL;";
+      "}";
       "";
+
       (* v0.1.297: generation swap. The map's internal storage (keys / values /
          idx arrays and every owned copy) moves into a FRESH private arena and
          the previous generation is freed -- so overwritten values, deleted
@@ -8959,6 +8987,11 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  v->owns_region = 1;";
       "  if (owned) { __lang_region_free(old); free(old); }";
       "  return 0;";
+      "}";
+      "";
+      (* v0.1.299: the Vec twin of map_bytes. *)
+      Printf.sprintf "static long long %s_bytes(%s* v) {" struct_name struct_name;
+      "  return v->owns_region ? (long long)__lang_region_bytes(v->region) : 0LL;";
       "}";
       "";
       Printf.sprintf "static %s %s_get(%s* v, long long i) {" c_elem struct_name struct_name;
