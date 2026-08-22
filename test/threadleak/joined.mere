@@ -1,0 +1,7 @@
+//! leaks: 0
+// A worker that is waited for is nobody's leak.
+let ch = channel_new ();
+let h = spawn (fn () -> let _ = channel_send ch 1 in ());
+let _ = channel_recv ch;
+let _ = join h;
+print "done"

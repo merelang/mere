@@ -658,6 +658,24 @@ address in a hosted process. See
 
 ---
 
+## Thread-leak report (v0.1.304)
+
+`MERE_THREAD_REPORT=1` makes the **interpreter** print, at exit, the threads that
+were neither `join`ed nor `detach`ed, and what each was blocked on. It goes to
+stderr and is off unless the variable is set, so it never changes what a program
+prints.
+
+```
+mere: 1 thread(s) neither joined nor detached at exit
+  thread 1: blocked on channel_recv
+```
+
+`detach` is what marks a thread as *meant* to block forever (a server's accept
+loop), so a detached thread is never reported. Not covered: the main thread, and
+the C backend. See `scripts/thread_leak_check.sh`.
+
+---
+
 ## System / constants (4)
 
 | Name | Type | Description |

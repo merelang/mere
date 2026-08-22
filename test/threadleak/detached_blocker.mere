@@ -1,0 +1,8 @@
+//! leaks: 0
+// Blocked forever ON PURPOSE. `detach` is the language saying so, and it is the
+// reason this report can be believed: a server's accept loop parks for the life
+// of the process, and a diagnostic that called that a leak would be ignored.
+let ch = channel_new ();
+let h = spawn (fn () -> let _ = channel_recv ch in ());
+let _ = detach h;
+print "done"

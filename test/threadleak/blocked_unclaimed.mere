@@ -1,0 +1,7 @@
+//! leaks: 1 blocked on channel_recv
+// The leak this whole slice exists for: a worker waiting on a channel nobody
+// sends to, and a parent that neither joins nor detaches it. Before v0.1.304
+// this program printed its line and exited 0 with nothing said.
+let ch = channel_new ();
+let _leaked = spawn (fn () -> let _ = channel_recv ch in ());
+print "parent done"

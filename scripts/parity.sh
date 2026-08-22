@@ -73,28 +73,15 @@ have_wat=0; command -v wat2wasm >/dev/null 2>&1 && command -v node >/dev/null 2>
 # to, a join on a worker that never returns. Unbounded, one such case stops the run
 # with nothing reported and no log to read -- every case after it becomes unknown too.
 #
-# `timeout(1)` is absent on macOS, and `ulimit -t` measures CPU time, which a thread
-# blocked on a condition variable does not consume. Neither bounds this. perl's alarm
-# does, and perl is present wherever this runs.
+# How the bound is taken, and why neither timeout(1) nor ulimit -t works, is in
+# scripts/bounded.sh -- one copy, shared with scripts/thread_leak_check.sh.
 #
 # The limit is deliberately generous. It exists to turn "hangs forever" into "reports
 # HUNG", not to measure how fast a program is: a tight bound would go red on a loaded
 # CI box and teach everyone to ignore the gate.
 PARITY_TIMEOUT="${MERE_PARITY_TIMEOUT:-60}"
 HUNG_RC=201
-bounded() {
-  perl -e '
-    my $secs = shift @ARGV;
-    my $pid = fork();
-    defined $pid or exit 202;
-    if ($pid == 0) { exec { $ARGV[0] } @ARGV or exit 127 }
-    $SIG{ALRM} = sub { kill "KILL", $pid; waitpid($pid, 0); exit 201 };
-    alarm $secs;
-    waitpid($pid, 0);
-    alarm 0;
-    exit($? & 127 ? 128 + ($? & 127) : $? >> 8);
-  ' "$PARITY_TIMEOUT" "$@"
-}
+bounded() { sh "$ROOT/scripts/bounded.sh" "$PARITY_TIMEOUT" "$@"; }
 hung_names=""
 
 # Explicit arguments are partitioned the same way the defaults are: a path under

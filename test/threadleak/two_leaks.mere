@@ -1,0 +1,6 @@
+//! leaks: 2 blocked on channel_recv
+// Two of them, so the count is checked and not just the wording.
+let ch = channel_new ();
+let _a = spawn (fn () -> let _ = channel_recv ch in ());
+let _b = spawn (fn () -> let _ = channel_recv ch in ());
+print "parent done"

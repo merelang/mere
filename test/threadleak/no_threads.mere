@@ -1,0 +1,3 @@
+//! leaks: 0
+// The control that catches a report which fires on everything.
+print "no threads here"
