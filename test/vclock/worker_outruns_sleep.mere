@@ -1,0 +1,14 @@
+//! expect: ok
+// While main sleeps twenty virtual seconds, a worker's five-second timer fires
+// INSIDE that sleep -- the clock stops at every intermediate deadline rather
+// than leaping to the latest one. The try-recv afterwards proves the send
+// happened; "lost wakeup" here is the exact failure mode the single scheduler
+// condvar exists to prevent.
+let ch = channel_new ();
+let w = spawn (fn () -> let _ = sleep_ms 5000 in let _ = channel_send ch 1 in ());
+let _ = sleep_ms 20000;
+let got = (match channel_recv_timeout ch 0 with
+           | Some v -> "worker won"
+           | None -> "lost wakeup");
+let _ = join w;
+print got

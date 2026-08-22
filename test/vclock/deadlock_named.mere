@@ -1,0 +1,9 @@
+//! expect: fail virtual clock
+// All live threads blocked, no timer pending: under a virtual clock that is
+// never a legitimate state for a test to sit in, so the run fails saying so
+// instead of hanging. (The same program WITHOUT the clock really does block --
+// the gate checks that too, because a virtual clock that leaks into default
+// runs would change what production programs do.)
+let ch = channel_new ();
+let _ = channel_recv ch;
+print "unreachable"

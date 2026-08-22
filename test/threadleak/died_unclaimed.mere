@@ -1,0 +1,11 @@
+//! leaks: 1 died: fail: boom, never joined
+// A worker killed by its own failure is worse than one that finished: the
+// domain stores the exception for a join that never comes, so before v0.1.305
+// the failure vanished without a trace. The report now says what killed it.
+// The send/recv pair sequences the worker's start before the parent looks; the
+// short timeout gives the fail itself time to land.
+let ch = channel_new ();
+let _dropped = spawn (fn () -> let _ = channel_send ch 1 in fail "boom");
+let _ = channel_recv ch;
+let _ = channel_recv_timeout ch 100;
+print "parent done"

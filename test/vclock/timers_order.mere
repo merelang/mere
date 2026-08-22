@@ -1,0 +1,13 @@
+//! expect: ok
+// Two timers, deliberately started in the wrong order: the 30-second one first.
+// Under the virtual clock the 10-second one still fires first, every run --
+// firing order is a function of the program, not of the scheduler's mood.
+let ch = channel_new ();
+let a = spawn (fn () -> let _ = sleep_ms 30000 in let _ = channel_send ch 30 in ());
+let b = spawn (fn () -> let _ = sleep_ms 10000 in let _ = channel_send ch 10 in ());
+let x = channel_recv ch;
+let y = channel_recv ch;
+let _ = join a;
+let _ = join b;
+let _ = print (str_of_int x) in
+print (str_of_int y)

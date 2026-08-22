@@ -4,6 +4,65 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.305 — 2026-08-22
+
+_The last thread to park advances the clock._
+
+`MERE_VIRTUAL_CLOCK=1` gives the interpreter Go 1.27's `testing/synctest` rule:
+WHEN EVERY LIVE THREAD IS PARKED, NOTHING CAN HAPPEN EXCEPT TIME, so the clock
+jumps to the earliest pending deadline instead of anybody waiting. A test whose
+timers add up to a minute finishes in milliseconds, and the ORDER in which they
+fire becomes a function of the program rather than of the machine's load. That
+order was previously untestable: a case asserting "the 10-second timer fires
+before the 30-second one" was a flake waiting for a loaded CI box.
+
+This could not be built on top of v0.1.304's instrumentation, and the reason is
+the design constraint of the whole slice: that instrumentation marks a thread
+blocked and THEN parks it on the channel's own condition variable, and a clock
+that decides "everyone is parked, advance" inside that window signals a condvar
+nobody is on yet. The wakeup is lost — a flaky test, the disease a virtual clock
+exists to cure, built into the cure. So under the clock every wait parks on ONE
+scheduler condvar, and the blocked-count increment happens under the SAME lock
+as the park. The last thread to park is the one that advances the clock.
+
+The first working version then span: the advancing thread holds the scheduler
+lock through its whole loop, and the deadline it just expired is still
+registered by its sleeping owner, so "advance to the earliest deadline" set the
+clock to where it already was, forever, while the owner starved for the lock the
+advancer never released. The fix is its own match arm: an already-expired
+deadline means its owner is woken-but-not-scheduled — the world is mid-step, not
+stuck — so the advancer parks (which releases the lock) and lets the owner run.
+
+Routed through the scheduler: `channel_recv` / `channel_recv_opt` /
+`channel_recv_timeout` (whose deadline is fixed once — losing a value to another
+receiver does not extend it, and 0ms stays a non-blocking try-recv), `sleep_ms`
+/ `sleep`, `join` (which parks on the registry saying the worker finished —
+status is written before the live-count drops, so the broadcast cannot arrive
+early — then the real `Domain.join` returns without blocking), and `time`, which
+reads the virtual clock. Its base is the real time of day at startup: only
+DIFFERENCES are deterministic, which is what a test may compare.
+
+If every live thread parks and no deadline is pending, the program can only
+deadlock, and the run fails naming the situation rather than hanging — under a
+virtual clock a hang is never what a test meant.
+
+Not routed: `par_map`'s internal joins and OS-level waits (stdin, sockets). A
+thread in one of those counts as running, so the clock conservatively refuses to
+advance past it. The C backend is untouched — deterministic-time tests are an
+interpreter workload — and the default run of every program is byte-identical,
+which `scripts/virtual_clock_check.sh` checks from both sides: each case's
+virtual waits total 30-65 seconds against a 15-second wall bound (a secretly
+real clock gets killed, not passed slowly), each passing case must produce
+byte-identical stdout twice, and the deadlock case is re-run WITHOUT the
+variable and must really block.
+
+Also: an uncaught failure in a worker used to vanish unless somebody joined the
+handle — the domain stores the exception for a join that never comes. The thread
+registry now records what killed it, and the leak report says
+`died: fail: boom, never joined` instead of the false `finished`.
+
+---
+
 ## v0.1.304 — 2026-08-22
 
 _The runtime could not say how many threads it had._

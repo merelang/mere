@@ -1,0 +1,9 @@
+//! expect: ok
+// A 45-second timeout on a channel nobody sends to. Real clock: 45 seconds of
+// wall time. Virtual clock: the receiver is the only live thread, so the clock
+// jumps straight to the deadline.
+let ch = channel_new ();
+let r = (match channel_recv_timeout ch 45000 with
+         | Some v -> "value?"
+         | None -> "timed out");
+print r
