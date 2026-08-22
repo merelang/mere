@@ -1,0 +1,70 @@
+// A JSON string that is not valid UTF-8 is refused, on every backend that
+// decodes JSON.
+//
+// Until v0.1.306 all three decoders passed the bytes through untouched: none
+// of them processes \uXXXX escapes, so a decoded string is exactly the raw
+// bytes between the quotes, and nobody ever looked at them. Go 1.27's
+// encoding/json/v2 refuses invalid UTF-8 by default (v1 silently replaced it
+// with U+FFFD, which is a lossy rewrite nobody asked for). Refusing is the
+// only answer that neither invents bytes nor loses them.
+//
+// This is the PARSER's rule, not str's: utf8_len counts an invalid byte as
+// one unit on purpose, because a str already in memory has no better answer.
+// Bytes arriving as JSON do.
+//
+// THE CHECK IS ON of_json_opt, NOT of_json -- the backends word their decode
+// failures differently (see json_duplicate_key.mere). `None` is a value.
+//
+// Execution mode: interp + C + Wasm. LLVM refuses of_json (no hand-written
+// parser in that backend), so it reports UNSUP.
+
+type U = { id: int, name: str };
+type Nested = { outer: int, inner: U };
+
+let probe = fn (label: str) -> fn (body: str) ->
+  print (label ++ " -> " ++ (match (of_json_opt body : U option) with
+                             | Some u -> "Some(id=" ++ str_of_int u.id ++ ")"
+                             | None   -> "None"));
+
+// POSITIVE CONTROLS FIRST -- and not just ASCII. A validator that refuses
+// every byte over 127 would fail here, not pass quietly.
+let _ = probe "ascii            " "\{\"id\":1,\"name\":\"a\"}";
+let _ = probe "2-byte (U+0080)  " ("\{\"id\":1,\"name\":\"" ++ chr 194 ++ chr 128 ++ "\"}");
+let _ = probe "3-byte japanese  " "\{\"id\":1,\"name\":\"日本語\"}";
+let _ = probe "4-byte emoji     " ("\{\"id\":1,\"name\":\"" ++ chr 240 ++ chr 159 ++ chr 166 ++ chr 138 ++ "\"}");
+
+// The VALID side of every boundary the validator special-cases. Off-by-one in
+// a bound would flip exactly one of these.
+let _ = probe "U+07FF (DF BF)   " ("\{\"id\":1,\"name\":\"" ++ chr 223 ++ chr 191 ++ "\"}");
+let _ = probe "U+0800 (E0 A0 80)" ("\{\"id\":1,\"name\":\"" ++ chr 224 ++ chr 160 ++ chr 128 ++ "\"}");
+let _ = probe "U+D7FF (ED 9F BF)" ("\{\"id\":1,\"name\":\"" ++ chr 237 ++ chr 159 ++ chr 191 ++ "\"}");
+let _ = probe "U+E000 (EE 80 80)" ("\{\"id\":1,\"name\":\"" ++ chr 238 ++ chr 128 ++ chr 128 ++ "\"}");
+let _ = probe "U+10000 (F0 90..)" ("\{\"id\":1,\"name\":\"" ++ chr 240 ++ chr 144 ++ chr 128 ++ chr 128 ++ "\"}");
+let _ = probe "U+10FFFF (F4 8F.)" ("\{\"id\":1,\"name\":\"" ++ chr 244 ++ chr 143 ++ chr 191 ++ chr 191 ++ "\"}");
+
+// ... then the refusals, each just past one of those boundaries.
+let _ = probe "lone continuation" ("\{\"id\":1,\"name\":\"" ++ chr 128 ++ "\"}");
+let _ = probe "bare FF          " ("\{\"id\":1,\"name\":\"" ++ chr 255 ++ "\"}");
+let _ = probe "overlong C0 AF   " ("\{\"id\":1,\"name\":\"" ++ chr 192 ++ chr 175 ++ "\"}");
+let _ = probe "overlong C1      " ("\{\"id\":1,\"name\":\"" ++ chr 193 ++ chr 129 ++ "\"}");
+let _ = probe "overlong E0 9F   " ("\{\"id\":1,\"name\":\"" ++ chr 224 ++ chr 159 ++ chr 128 ++ "\"}");
+let _ = probe "surrogate ED A0  " ("\{\"id\":1,\"name\":\"" ++ chr 237 ++ chr 160 ++ chr 128 ++ "\"}");
+let _ = probe "overlong F0 8F   " ("\{\"id\":1,\"name\":\"" ++ chr 240 ++ chr 143 ++ chr 128 ++ chr 128 ++ "\"}");
+let _ = probe "beyond F4 90     " ("\{\"id\":1,\"name\":\"" ++ chr 244 ++ chr 144 ++ chr 128 ++ chr 128 ++ "\"}");
+let _ = probe "F5 lead byte     " ("\{\"id\":1,\"name\":\"" ++ chr 245 ++ chr 128 ++ chr 128 ++ chr 128 ++ "\"}");
+let _ = probe "truncated 3-byte " ("\{\"id\":1,\"name\":\"" ++ chr 227 ++ chr 129 ++ "\"}");
+let _ = probe "cont then ascii  " ("\{\"id\":1,\"name\":\"" ++ chr 195 ++ "A\"}");
+
+// A bad byte in a KEY is refused too: keys go through the same string parser,
+// so the rule did not have to be written twice.
+let _ = print ("bad key          -> " ++
+  (match (of_json_opt ("\{\"id\":1,\"na" ++ chr 128 ++ "me\":\"a\"}") : U option) with
+   | Some u -> "Some(id=" ++ str_of_int u.id ++ ")"
+   | None   -> "None"));
+
+// And in a NESTED object: the check belongs to the parser, not to the
+// per-type decoder generated for the outer record.
+print ("nested bad byte  -> " ++
+  (match (of_json_opt ("\{\"outer\":1,\"inner\":\{\"id\":1,\"name\":\"" ++ chr 128 ++ "\"}}") : Nested option) with
+   | Some n -> "Some(outer=" ++ str_of_int n.outer ++ ")"
+   | None   -> "None"))

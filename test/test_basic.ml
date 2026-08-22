@@ -1168,6 +1168,35 @@ let () =
        "type U = { id: int };\n\
         match (of_json_opt \"\\{\\\"id\\\":1,\\\"id\\\":1}\" : U option) with \
         | Some u -> u.id | None -> 0 - 1") "-1";
+
+  (* v0.1.306: a decoded JSON string must be valid UTF-8. The accepting case
+     is multi-byte, not ASCII -- a validator refusing every byte over 127
+     would fail here rather than pass quietly. chr builds the raw bytes. *)
+  check "of_json_opt: valid multi-byte UTF-8 decodes"
+    (Pipeline.process
+       "type U = { id: int, name: str };\n\
+        match (of_json_opt (\"\\{\\\"id\\\":1,\\\"name\\\":\\\"\" ++ chr 195 ++ chr 169 ++ \"\\\"}\") : U option) with \
+        | Some u -> u.id | None -> 0 - 1") "1";
+  check "of_json_opt: a lone continuation byte is refused"
+    (Pipeline.process
+       "type U = { id: int, name: str };\n\
+        match (of_json_opt (\"\\{\\\"id\\\":1,\\\"name\\\":\\\"\" ++ chr 128 ++ \"\\\"}\") : U option) with \
+        | Some u -> u.id | None -> 0 - 1") "-1";
+  check "of_json_opt: an overlong encoding is refused"
+    (Pipeline.process
+       "type U = { id: int, name: str };\n\
+        match (of_json_opt (\"\\{\\\"id\\\":1,\\\"name\\\":\\\"\" ++ chr 192 ++ chr 175 ++ \"\\\"}\") : U option) with \
+        | Some u -> u.id | None -> 0 - 1") "-1";
+  check "of_json_opt: a surrogate encoding is refused"
+    (Pipeline.process
+       "type U = { id: int, name: str };\n\
+        match (of_json_opt (\"\\{\\\"id\\\":1,\\\"name\\\":\\\"\" ++ chr 237 ++ chr 160 ++ chr 128 ++ \"\\\"}\") : U option) with \
+        | Some u -> u.id | None -> 0 - 1") "-1";
+  check "of_json_opt: a bad byte in a KEY is refused"
+    (Pipeline.process
+       "type U = { id: int };\n\
+        match (of_json_opt (\"\\{\\\"i\" ++ chr 128 ++ \"d\\\":1}\") : U option) with \
+        | Some u -> u.id | None -> 0 - 1") "-1";
   check "of_json int" (Pipeline.process "(of_json \"42\" : int)") "42";
   check "of_json bool" (Pipeline.process "(of_json \"true\" : bool)") "true";
   check "of_json str"

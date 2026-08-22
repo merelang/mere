@@ -517,9 +517,15 @@ accidental reason, and Go 1.27's v2 stopped picking. Two implementations
 resolving the same bytes to different values is the argument: there is no right
 one to choose, so the input is rejected.
 
-Note that **invalid UTF-8 inside a string is still accepted** — a separate
-question, and a harder one, because `utf8_len` deliberately counts an invalid
-byte as one unit and there is no validator to reuse.
+**Invalid UTF-8 inside a string is refused too** (v0.1.306). The three
+hand-written parsers process no `\uXXXX` escapes, so a decoded string is
+exactly the raw bytes between the quotes — and until v0.1.306 nobody looked at
+them. The validator (shortest form, no surrogates, max U+10FFFF) runs in the
+parsers' string path, so keys and nested strings are covered without a per-type
+rule. Go 1.27's `encoding/json/v2` made the same call; v1 silently rewrote bad
+bytes to U+FFFD, which is a lossy edit nobody asked for. This is the parser's
+rule, not `str`'s — `utf8_len` still counts an invalid byte as one unit on
+purpose, because a str already in memory has no better answer.
 
 ```
 type User = { id: int, name: str, bio: str option };

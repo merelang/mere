@@ -5666,12 +5666,37 @@ typedef struct { const char* s; int pos; int n; } __mj_ps;
 static void __mj_ws(__mj_ps* p) {
   while (p->pos < p->n) { char c = p->s[p->pos];
     if (c==' '||c=='\t'||c=='\n'||c=='\r') p->pos++; else break; } }
+/* v0.1.306: same rule as the interpreter's json_utf8_valid -- shortest form,
+   no surrogates, max U+10FFFF. The parity gate holds the two to each other. */
+static int __mj_utf8_valid(const char* s, size_t n) {
+  size_t i = 0;
+  while (i < n) {
+    unsigned char c = (unsigned char)s[i];
+    if (c < 0x80) { i++; continue; }
+    if (c < 0xC2 || c > 0xF4) return 0;
+    size_t need; unsigned char lo = 0x80, hi = 0xBF;
+    if (c < 0xE0) need = 1;
+    else if (c < 0xF0) { need = 2; if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; }
+    else { need = 3; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; }
+    if (i + need >= n) return 0;
+    unsigned char b1 = (unsigned char)s[i + 1];
+    if (b1 < lo || b1 > hi) return 0;
+    if (need >= 2 && ((unsigned char)s[i + 2] & 0xC0) != 0x80) return 0;
+    if (need >= 3 && ((unsigned char)s[i + 3] & 0xC0) != 0x80) return 0;
+    i += need + 1;
+  }
+  return 1;
+}
 static char* __mj_pstr(__mj_ps* p) {
   p->pos++; /* opening quote */
   size_t cap = 16, len = 0; char* buf = (char*)malloc(cap);
   while (p->pos < p->n) {
     char c = p->s[p->pos];
-    if (c == '"') { p->pos++; buf[len] = 0; return __lang_str_dup_n(buf, len); }
+    if (c == '"') {
+      p->pos++; buf[len] = 0;
+      if (!__mj_utf8_valid(buf, len)) __mj_die("invalid UTF-8 in string");
+      return __lang_str_dup_n(buf, len);
+    }
     if (c == '\\' && p->pos + 1 < p->n) {
       p->pos++; char e = p->s[p->pos]; char out = e;
       if (e=='n') out='\n'; else if (e=='t') out='\t'; else if (e=='r') out='\r';
