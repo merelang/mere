@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.298 — 2026-08-22
+
+_Emptying a map one key at a time was quadratic, and worse in a private arena._
+
+`map_clear m`: length to zero, index wiped, O(index) and allocation-free. The
+missing mass-deletion primitive: `map_delete` keeps the dense arrays shifted
+and REBUILDS the hash index into the map's region on every call, so deleting
+half of a big map key by key is quadratic time and linear-times-index-size
+ALLOCATION. Found by v0.1.297's first consumer: a collector that deleted a
+store's dead entries one by one watched the store's freshly-promoted private
+arena double its way to 68 GB -- every delete allocating a new index into the
+very arena the compaction was about to reclaim. The pattern that replaces it:
+collect the survivors, `map_clear`, re-set, `map_compact`.
+
+All backends answer the same bytes: interp (Hashtbl.reset), C (len = 0, index
+wiped), wasm (len = 0, in both the linear and the hash map runtimes -- the
+first patch landed in a third, LEGACY runtime that is emitted for nobody, and
+the parity gate said MISCOMPILE before the push instead of after).
+
+parity 121/0 (the compact probe now exercises clear on all three), dune test
+2541/0, ctest, selfhost_check.
+
+---
+
 ## v0.1.297 — 2026-08-22
 
 _A container can hand back its own dead bytes._

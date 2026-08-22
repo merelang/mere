@@ -3392,6 +3392,11 @@ let rec emit_expr (e : Ast.expr) : unit =
     (if k_tag = "int" then map_int_used := true else map_str_used := true);
     emit_expr arg;
     emit_instr (Printf.sprintf "call $mere_map_%s_len" k_tag)
+  | Ast.App ({ node = Ast.Var "map_clear"; _ }, arg) ->
+    let k_tag = map_key_tag_of_wasm arg.Ast.ty arg.Ast.loc in
+    (if k_tag = "int" then map_int_used := true else map_str_used := true);
+    emit_expr arg;
+    emit_instr (Printf.sprintf "call $mere_map_%s_clear" k_tag)
   | Ast.App ({ node = Ast.Var ("map_compact" | "vec_compact"); _ }, arg) ->
     (* v0.1.297: compaction is an optimization with no observable behaviour;
        this backend's bump heap has no per-container arenas to swap, so the
@@ -7274,6 +7279,12 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
     (i64.const 0))
   (func $mere_map_%s_len (param $m8 i64) (result i64)
     (i64.extend_i32_s (i32.load offset=8 (i32.wrap_i64 (local.get $m8)))))
+  ;; v0.1.298: map_clear -- len = 0. O(1); the mass-deletion primitive
+  ;; (map_delete shifts the arrays per call, so emptying a map with it is
+  ;; quadratic time).
+  (func $mere_map_%s_clear (param $m8 i64) (result i64)
+    (i32.store offset=8 (i32.wrap_i64 (local.get $m8)) (i32.const 0))
+    (i64.const 0))
   ;; Phase 19.2: map_iter — call outer(k) → inner closure, then inner(v).
   ;; outer closure: { env@0, fn_idx@4 }; outer(env, k) returns inner closure ptr.
   (func $mere_map_%s_iter (param $m8 i64) (param $cl8 i64) (result i64)
@@ -7341,7 +7352,7 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $find_lp)))
     (i64.const 0))"
-    k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
+    k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
 
 (* O(1) Wasm map for scalar keys (int / bool / str / unit): open-addressing
    hash index over the insertion-order keys/values arrays, mirroring the C
@@ -7543,6 +7554,12 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
     (i64.const 0))
   (func $mere_map_%s_len (param $m8 i64) (result i64)
     (i64.extend_i32_s (i32.load offset=8 (i32.wrap_i64 (local.get $m8)))))
+  ;; v0.1.298: map_clear -- len = 0. O(1); the mass-deletion primitive
+  ;; (map_delete shifts the arrays per call, so emptying a map with it is
+  ;; quadratic time).
+  (func $mere_map_%s_clear (param $m8 i64) (result i64)
+    (i32.store offset=8 (i32.wrap_i64 (local.get $m8)) (i32.const 0))
+    (i64.const 0))
   (func $mere_map_%s_iter (param $m8 i64) (param $cl8 i64) (result i64)
     (local $m i32) (local $cl i32)
     (local $i i32) (local $len i32)
@@ -7608,7 +7625,7 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
       (local.set $s (i32.and (i32.add (local.get $s) (i32.const 1)) (local.get $icm1)))
       (br $probe)))
     (i64.const 0))|}
-    k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
+    k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
     k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
 
 let map_int_runtime_wasm = {|
@@ -7726,6 +7743,10 @@ let map_int_runtime_wasm = {|
     (i32.const 0))
   (func $mere_map_int_len (param $m i64) (result i64)
     (i32.load offset=8 (i32.wrap_i64 (local.get $m))))
+  ;; v0.1.298: map_clear -- len = 0. O(1); the mass-deletion primitive.
+  (func $mere_map_int_clear (param $m i64) (result i64)
+    (i32.store offset=8 (i32.wrap_i64 (local.get $m)) (i32.const 0))
+    (i64.const 0))
   ;; Phase 39.A' #2: map_delete (int-key variant)
   (func $mere_map_int_delete (param $m i64) (param $k i64) (result i64)
     (local $i i32) (local $j i32) (local $len i32) (local $keys i32) (local $values i32)
@@ -7879,6 +7900,10 @@ let map_str_runtime_wasm = {|
     (i32.const 0))
   (func $mere_map_str_len (param $m i64) (result i64)
     (i32.load offset=8 (i32.wrap_i64 (local.get $m))))
+  ;; v0.1.298: map_clear -- len = 0. O(1); the mass-deletion primitive.
+  (func $mere_map_str_clear (param $m i64) (result i64)
+    (i32.store offset=8 (i32.wrap_i64 (local.get $m)) (i32.const 0))
+    (i64.const 0))
   ;; Phase 39.A' #2: map_delete (str-key variant) — when the key matches, shift keys/values
   (func $mere_map_str_delete (param $m i64) (param $k i64) (result i64)
     (local $i i32) (local $j i32) (local $len i32) (local $keys i32) (local $values i32)

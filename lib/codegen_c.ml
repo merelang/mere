@@ -3349,6 +3349,9 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "map_compact" ->
        let (k_tag, v_tag) = map_kv_tags_of arg.Ast.ty arg.Ast.loc in
        Printf.sprintf "mere_map_%s_%s_compact(%s)" k_tag v_tag (emit_expr arg)
+     | Ast.Var "map_clear" ->
+       let (k_tag, v_tag) = map_kv_tags_of arg.Ast.ty arg.Ast.loc in
+       Printf.sprintf "mere_map_%s_%s_clear(%s)" k_tag v_tag (emit_expr arg)
      | Ast.App ({ node = Ast.Var "map_get"; _ }, m_e) ->
        let (k_tag, v_tag) = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
        Printf.sprintf "mere_map_%s_%s_get(%s, %s)"
@@ -8067,6 +8070,19 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  }";
       "  m->idx = ni;";
       "  m->idx_cap = newcap;";
+      "}";
+      "";
+      (* v0.1.298: empty the map in O(idx_cap), allocating NOTHING. This is
+         the mass-deletion primitive: map_delete shifts the dense arrays and
+         rebuilds the hash index INTO THE MAP'S REGION on every call, so
+         deleting half of a big map one key at a time is quadratic time and
+         linear-times-index ALLOCATION -- measured as a store's private arena
+         doubling to 68 GB while a collector deleted its dead entries. Collect
+         the survivors, clear, re-set. *)
+      Printf.sprintf "static int %s_clear(%s* m) {" struct_name struct_name;
+      "  m->len = 0;";
+      "  for (int i = 0; i < m->idx_cap; i++) m->idx[i] = -1;";
+      "  return 0;";
       "}";
       "";
       (* v0.1.297: generation swap. The map's internal storage (keys / values /
