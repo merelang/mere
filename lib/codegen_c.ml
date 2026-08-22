@@ -2857,18 +2857,24 @@ let rec emit_expr (e : Ast.expr) : string =
        in
        (* v0.1.31: also save/restore the thread's current region — a fail
           inside a `region R { }` longjmps past the block's normal exit,
-          which would leave __lang_current_region pointing at a dead stack
-          struct (the abandoned block's chain leaks, which is acceptable;
-          corrupting later allocations is not). *)
+          which would leave __lang_current_region pointing at a dead
+          struct. v0.1.301: the jumped-over regions are RELEASED, not
+          leaked — the active-region stack records every live block
+          region, and the catch arm unwinds it to the depth saved at
+          entry. ("The chain leaks, which is acceptable" stopped being
+          true the day an interpreter wrapped every method call in a
+          region: a raise-heavy load leaked ~1 MB per caught fail.) *)
        Printf.sprintf
          "({ jmp_buf __saved_jmp; int __saved_set = __lang_fail_jmpbuf_set; \
              __lang_region* __saved_cur = __lang_current_region; \
+             int __saved_rsn = __lang_region_active_n; \
              memcpy(__saved_jmp, __lang_fail_jmpbuf, sizeof(jmp_buf)); \
              __lang_fail_jmpbuf_set = 1; \
              __auto_type __default = (%s); \
              __auto_type __res = __default; \
              if (setjmp(__lang_fail_jmpbuf) == 0) { __res = (%s); } \
-             else { __lang_current_region = __saved_cur; } \
+             else { __lang_region_unwind(__saved_rsn); \
+                    __lang_current_region = __saved_cur; } \
              __lang_fail_jmpbuf_set = __saved_set; \
              memcpy(__lang_fail_jmpbuf, __saved_jmp, sizeof(jmp_buf)); \
              __res; })"
@@ -7916,18 +7922,64 @@ let region_runtime_helpers =
       "static _Thread_local __lang_region* __lang_region_cache[__LANG_REGION_CACHE_CAP];";
       "static _Thread_local int __lang_region_cache_n = 0;";
       "";
+      "/* v0.1.301: the ACTIVE region stack. Every live block region is on";
+      "   it, so a fail that longjmps out of nested `region R { }` blocks can";
+      "   release the chains it jumps over. Before this, try_or only restored";
+      "   the current-region pointer and the abandoned chains leaked -- noted";
+      "   as acceptable when regions were rare; measured at 1 MB per caught";
+      "   fail once an interpreter wrapped every call in one (2000 rescues =";
+      "   2.1 GB, flat at 4 MB with the unwind). */";
+      "static _Thread_local __lang_region** __lang_region_active = NULL;";
+      "static _Thread_local int __lang_region_active_n = 0;";
+      "static _Thread_local int __lang_region_active_cap = 0;";
+      "";
+      "static void __lang_region_active_push(__lang_region* r) {";
+      "  if (__lang_region_active_n == __lang_region_active_cap) {";
+      "    int ncap = __lang_region_active_cap ? __lang_region_active_cap * 2 : 64;";
+      "    __lang_region** p = (__lang_region**)realloc(__lang_region_active,";
+      "                                                 sizeof(__lang_region*) * ncap);";
+      "    if (!p) __lang_fail_impl(\"out of memory\");";
+      "    __lang_region_active = p; __lang_region_active_cap = ncap;";
+      "  }";
+      "  __lang_region_active[__lang_region_active_n++] = r;";
+      "}";
+      "";
+      "/* normal exits release in LIFO order; the region-loop swap releases the";
+      "   entry UNDER the just-pushed next arena, so drop searches from the top */";
+      "static void __lang_region_active_drop(__lang_region* r) {";
+      "  for (int i = __lang_region_active_n - 1; i >= 0; i--)";
+      "    if (__lang_region_active[i] == r) {";
+      "      memmove(__lang_region_active + i, __lang_region_active + i + 1,";
+      "              sizeof(__lang_region*) * (size_t)(__lang_region_active_n - i - 1));";
+      "      __lang_region_active_n--;";
+      "      return;";
+      "    }";
+      "}";
+      "";
+      "static void __lang_region_block_release(__lang_region* r);";
+      "static void __lang_region_unwind(int to_n) {";
+      "  while (__lang_region_active_n > to_n) {";
+      "    __lang_region* r = __lang_region_active[__lang_region_active_n - 1];";
+      "    /* release() drops it from the stack itself */";
+      "    __lang_region_block_release(r);";
+      "  }";
+      "}";
+      "";
       "static __lang_region* __lang_region_block_acquire(void) {";
       "  if (__lang_region_cache_n > 0) {";
       "    __lang_region* r = __lang_region_cache[--__lang_region_cache_n];";
       "    r->top = r->base;";
+      "    __lang_region_active_push(r);";
       "    return r;";
       "  }";
       "  __lang_region* r = (__lang_region*)malloc(sizeof(__lang_region));";
       "  __lang_region_init(r, 1 << 20);";
+      "  __lang_region_active_push(r);";
       "  return r;";
       "}";
       "";
       "static void __lang_region_block_release(__lang_region* r) {";
+      "  __lang_region_active_drop(r);";
       "  if (r->blocks->prev) {";
       "    /* grew past the first block: free the chain, re-seed fresh */";
       "    __lang_region_free(r);";
@@ -11360,6 +11412,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "    __lang_region_free(__rc);";
       "    free(__rc);";
       "  }";
+      "  /* v0.1.301: and the active-region stack's storage */";
+      "  free(__lang_region_active);";
+      "  __lang_region_active = NULL; __lang_region_active_n = 0; __lang_region_active_cap = 0;";
       "  return NULL;";
       "}";
       "";

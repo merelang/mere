@@ -1,0 +1,40 @@
+// A fail that longjmps out of nested region blocks must (a) land in the
+// nearest try_or with the right default, (b) leave later region blocks and
+// string allocation working, and (c) release the regions it jumped over --
+// (c) is memory behavior the C backend asserts via its active-region stack
+// (v0.1.301) and is measured by the bounded-churn probe in consumers; here
+// every backend must print the same bytes.
+let deep = fn (n: int) ->
+  region A {
+    let a = "aa" ++ str_of_int n in
+    let inner = region B {
+      let b = a ++ "-bb" in
+      let _ = (if n > 2 then fail ("deep:" ++ b) else ()) in
+      str_len b
+    } in
+    inner + 100
+  };
+let once = fn (n: int) ->
+  try_or (fn (u: unit) -> deep n) (0 - 1);
+// nested try_or: the inner catches, the outer must see the inner's answer
+let nested = fn (n: int) ->
+  try_or (fn (u: unit) ->
+    let inner = try_or (fn (u2: unit) -> deep n) (0 - 7) in
+    if inner < 0 then fail "resurface" else inner + 1000) (0 - 99);
+// a region loop whose body fails on a later iteration: caught outside,
+// and the loop's arenas are among what the unwind releases
+let looped = fn (u: unit) ->
+  try_or (fn (u2: unit) ->
+    region L loop x {
+      let i = (match x with Some v -> v | None -> 0) in
+      let _ = (if i >= 3 then fail "loop-bail" else ()) in
+      Continue (i + 1)
+    }) (0 - 5);
+let _ = print (str_of_int (once 1) ++ "\n");
+let _ = print (str_of_int (once 5) ++ "\n");
+let _ = print (str_of_int (nested 2) ++ "\n");
+let _ = print (str_of_int (nested 9) ++ "\n");
+let _ = print (str_of_int (looped ()) ++ "\n");
+// after all that unwinding, ordinary region work still functions
+let after = region Z { str_len ("post" ++ str_of_int 12345) } in
+print (str_of_int after ++ "\n")

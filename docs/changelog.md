@@ -4,6 +4,33 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.301 — 2026-08-24
+
+_A fail now releases the regions it jumps over._
+
+Since v0.1.31, a `fail` that longjmps out of nested `region R { }` blocks
+restored the current-region pointer and let the abandoned blocks' chains
+leak -- noted at the time as acceptable, because regions were rare and
+failures rarer. Both stopped being true: an interpreter that wraps every
+method call in a region and models every guest exception as a `fail`
+leaks about a megabyte per caught failure (measured: 2,000 rescued fails
+= 2.1 GB peak; flat at 4 MB once released).
+
+The C backend now keeps a thread-local ACTIVE-REGION STACK: block acquire
+pushes, block release drops (searching from the top, because the
+`region R loop` swap releases the arena under the one it just pushed), and
+`try_or`'s catch arm unwinds the stack to the depth saved at entry --
+releasing every chain the longjmp skipped -- before restoring the current
+region. Nested try_or nests the saved depths. Thread exit frees the
+stack's storage along with the cached block regions.
+
+The interpreter is unaffected (OCaml exceptions unwind, the GC owns
+memory). The LLVM and wasm backends keep their previous behavior --
+same values, backend-specific footprint; they get the same treatment
+when something that runs on them does fail-heavy region work. New parity
+lock: `region_fail_unwind` (fail through nested regions, nested try_or,
+fail out of a region loop -- every backend answers the same bytes).
+
 ## v0.1.300 — 2026-08-23
 
 _The frame-pool primitive._
