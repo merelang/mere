@@ -3363,6 +3363,39 @@ type jtree =
 
 exception Json_parse_error of string
 
+(* v0.1.306: a decoded JSON string must be valid UTF-8 (shortest form, no
+   surrogates, max U+10FFFF). This is the parser's rule, not str's: utf8_len
+   counts an invalid byte as one unit ON PURPOSE, because a str already in
+   memory has no better answer. Bytes arriving as JSON do -- Go 1.27's
+   encoding/json/v2 refuses them, and so does this. The same walk guards all
+   three hand-written parsers (interp / C runtime / Wasm runtime); the parity
+   gate holds them to one behaviour. *)
+let json_utf8_valid (s : string) : bool =
+  let n = String.length s in
+  let rec go i =
+    if i >= n then true
+    else
+      let c = Char.code s.[i] in
+      if c < 0x80 then go (i + 1)
+      else if c < 0xC2 || c > 0xF4 then false
+      else
+        let need, lo, hi =
+          if c < 0xE0 then 1, 0x80, 0xBF
+          else if c < 0xF0 then
+            2, (if c = 0xE0 then 0xA0 else 0x80), (if c = 0xED then 0x9F else 0xBF)
+          else
+            3, (if c = 0xF0 then 0x90 else 0x80), (if c = 0xF4 then 0x8F else 0xBF)
+        in
+        if i + need >= n then false
+        else
+          let b1 = Char.code s.[i + 1] in
+          if b1 < lo || b1 > hi then false
+          else if need >= 2 && Char.code s.[i + 2] land 0xC0 <> 0x80 then false
+          else if need >= 3 && Char.code s.[i + 3] land 0xC0 <> 0x80 then false
+          else go (i + need + 1)
+  in
+  go 0
+
 let parse_json_tree (s : string) : jtree =
   let n = String.length s in
   let pos = ref 0 in
@@ -3401,7 +3434,9 @@ let parse_json_tree (s : string) : jtree =
       | c -> Buffer.add_char buf c; incr pos; loop ()
     in
     loop ();
-    Buffer.contents buf in
+    let out = Buffer.contents buf in
+    if not (json_utf8_valid out) then error "invalid UTF-8 in string";
+    out in
   let rec parse_value () =
     skip_ws ();
     match peek () with

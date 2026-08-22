@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.306 — 2026-08-22
+
+_The bytes between the quotes were never looked at._
+
+`of_json` accepted invalid UTF-8 inside a string on every backend that decodes
+JSON, because none of the three hand-written parsers processes `\uXXXX`
+escapes — a decoded string is exactly the raw bytes between the quotes, and
+nobody ever examined them. Go 1.27's `encoding/json/v2` refuses such input by
+default (v1 silently rewrote it to U+FFFD, a lossy edit nobody asked for).
+Refusing is the only answer that neither invents bytes nor loses them. This is
+the second half of the Q-057 strictness slice; the first half (duplicate keys)
+landed in v0.1.303.
+
+The rule is the PARSER's, not `str`'s: `utf8_len` counts an invalid byte as
+one unit on purpose, because a str already in memory has no better answer.
+Bytes arriving as JSON do. The validator (shortest form, no surrogates, max
+U+10FFFF) went into the three parsers — the interpreter's `parse_string_lit`,
+the C runtime's `__mj_pstr`, the Wasm runtime's `$__mj_pstr` — so keys and
+nested strings are covered without writing the rule per type. `lib/json.ml`
+is untouched: it parses the language server's wire format, not user data.
+
+`test/parity/json_invalid_utf8.mere` puts the accepting cases first, and they
+are multi-byte, not ASCII — a validator refusing every byte over 127 would
+fail loudly instead of passing a file that only asks whether rejection
+happens. Both sides of every boundary the validator special-cases are asked:
+U+D7FF then the surrogate just past it, U+10FFFF then F4 90, E0 A0 then the
+E0 9F overlong, C2 then C0/C1. The comparison is on `of_json_opt` returning
+`None`, not on a message (the backends word failures differently).
+
+parity 129 passed / 0 failed; host_matrix ok; dune test green.
+
+---
+
 ## v0.1.305 — 2026-08-22
 
 _The last thread to park advances the clock._

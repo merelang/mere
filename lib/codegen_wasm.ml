@@ -8039,6 +8039,47 @@ let of_json_runtime_wasm : string = {ojw|
       (local.set $s (i32.add (local.get $s) (i32.const 1)))
       (br $lp)))
     (if (result i64) (local.get $neg) (then (i64.sub (i64.const 0) (local.get $r))) (else (local.get $r))))
+  ;; v0.1.306: same rule as the interpreter's json_utf8_valid -- shortest
+  ;; form, no surrogates, max U+10FFFF. 1 = valid. The parity gate holds the
+  ;; three hand-written parsers to one behaviour.
+  (func $__mj_u8ok (param $p i32) (param $n i32) (result i32)
+    (local $i i32) (local $c i32) (local $b i32)
+    (local $need i32) (local $lo i32) (local $hi i32) (local $k i32)
+    (local.set $i (i32.const 0))
+    (block $bad
+      (block $done
+        (loop $lp
+          (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+          (local.set $c (i32.load8_u (i32.add (local.get $p) (local.get $i))))
+          (if (i32.lt_u (local.get $c) (i32.const 128))
+            (then (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $lp)))
+          (br_if $bad (i32.lt_u (local.get $c) (i32.const 194)))
+          (br_if $bad (i32.gt_u (local.get $c) (i32.const 244)))
+          (local.set $lo (i32.const 128)) (local.set $hi (i32.const 191))
+          (if (i32.lt_u (local.get $c) (i32.const 224))
+            (then (local.set $need (i32.const 1)))
+            (else (if (i32.lt_u (local.get $c) (i32.const 240))
+              (then (local.set $need (i32.const 2))
+                    (if (i32.eq (local.get $c) (i32.const 224)) (then (local.set $lo (i32.const 160))))
+                    (if (i32.eq (local.get $c) (i32.const 237)) (then (local.set $hi (i32.const 159)))))
+              (else (local.set $need (i32.const 3))
+                    (if (i32.eq (local.get $c) (i32.const 240)) (then (local.set $lo (i32.const 144))))
+                    (if (i32.eq (local.get $c) (i32.const 244)) (then (local.set $hi (i32.const 143))))))))
+          (br_if $bad (i32.ge_u (i32.add (local.get $i) (local.get $need)) (local.get $n)))
+          (local.set $b (i32.load8_u (i32.add (i32.add (local.get $p) (local.get $i)) (i32.const 1))))
+          (br_if $bad (i32.lt_u (local.get $b) (local.get $lo)))
+          (br_if $bad (i32.gt_u (local.get $b) (local.get $hi)))
+          (local.set $k (i32.const 2))
+          (block $ct (loop $cl
+            (br_if $ct (i32.gt_u (local.get $k) (local.get $need)))
+            (local.set $b (i32.load8_u (i32.add (i32.add (local.get $p) (local.get $i)) (local.get $k))))
+            (br_if $bad (i32.ne (i32.and (local.get $b) (i32.const 192)) (i32.const 128)))
+            (local.set $k (i32.add (local.get $k) (i32.const 1)))
+            (br $cl)))
+          (local.set $i (i32.add (i32.add (local.get $i) (local.get $need)) (i32.const 1)))
+          (br $lp)))
+      (return (i32.const 1)))
+    (i32.const 0))
   (func $__mj_pstr (result i32)
     (local $r i32) (local $len i32) (local $c i32) (local $e i32)
     (global.set $__mj_p (i32.add (global.get $__mj_p) (i32.const 1)))
@@ -8065,6 +8106,10 @@ let of_json_runtime_wasm : string = {ojw|
     (i32.store8 (i32.add (local.get $r) (local.get $len)) (i32.const 0))
     (global.set $__lang_bump (i32.add (i32.add (local.get $r) (local.get $len)) (i32.const 1)))
     (i32.store (i32.sub (local.get $r) (i32.const 4)) (i32.sub (i32.sub (global.get $__lang_bump) (local.get $r)) (i32.const 1)))
+    ;; v0.1.306: a decoded string that is not valid UTF-8 is refused. $__mj_err
+    ;; is this backend's only way to say no.
+    (if (i32.eqz (call $__mj_u8ok (local.get $r) (local.get $len)))
+      (then (global.set $__mj_err (i32.const 1))))
     (local.get $r))
   (func $__mj_num (result i32)
     (local $r i32) (local $len i32) (local $c i32)
