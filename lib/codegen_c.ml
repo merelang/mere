@@ -7825,6 +7825,7 @@ let region_runtime_helpers =
       "  char* top;";
       "  size_t cap;               /* current block capacity */";
       "  __lang_region_block* blocks;  /* chain of every block, for free */";
+      "  size_t alloc_total;       /* cumulative bytes handed out (v0.1.307) */";
       "} __lang_region;";
       "";
       (* v0.1.274: malloc's answer used to go unread. When it said no, the very
@@ -7881,6 +7882,7 @@ let region_runtime_helpers =
       "";
       "static void __lang_region_init(__lang_region* r, size_t cap) {";
       "  r->blocks = NULL;";
+      "  r->alloc_total = 0;";
       "  __lang_region_add_block(r, cap);";
       "}";
       "";
@@ -7907,7 +7909,29 @@ let region_runtime_helpers =
       "  int shared = (r == &__lang_default_region);";
       "  if (shared) pthread_mutex_lock(&__lang_default_region_lock);";
       "  size_t aligned = (n + 7) & ~((size_t)7);";
+      "  r->alloc_total += aligned;";
       "  if (r->top + aligned > r->base + r->cap) {";
+      (* v0.1.307: an allocation bigger than a quarter of the current block
+         gets its own exact-size block, chained in BEHIND the bump block --
+         it is freed with the region like any other block, but it neither
+         strands the bump block's unused tail nor becomes the base that
+         every later doubling inherits. Before this, one giant allocation
+         (a grown map index, a big string) both abandoned the remainder of
+         the current block and doubled FROM ITS OWN SIZE on the next miss,
+         so a region could hold many GB of capacity around a few hundred MB
+         of data. The bump block keeps serving small allocations; doubling
+         stays proportional to small traffic. *)
+      "    if (aligned > r->cap / 4) {";
+      "      __lang_region_block* big =";
+      "        (__lang_region_block*) malloc(sizeof(__lang_region_block) + aligned);";
+      "      if (!big) __lang_fail_impl(\"out of memory\");";
+      "      big->pad = aligned;";
+      "      big->prev = r->blocks->prev;";
+      "      r->blocks->prev = big;";
+      "      void* bp = (void*)(big + 1);";
+      "      if (shared) pthread_mutex_unlock(&__lang_default_region_lock);";
+      "      return bp;";
+      "    }";
       "    size_t ncap = r->cap * 2;";
       (* doubling toward a request bigger than half the address space wraps to
          zero, and a wrapped capacity buys a block far too small for the
@@ -7932,6 +7956,28 @@ let region_runtime_helpers =
       "  size_t n = 0;";
       "  for (__lang_region_block* b = r->blocks; b; b = b->prev) n += b->pad;";
       "  return n;";
+      "}";
+      "";
+      (* v0.1.307: MERE_REGION_STATS=1 prints the default region's block count,
+         capacity and cumulative allocation at exit. Capacity and alloc_total
+         are functions of the program, not of the machine -- unlike peak RSS,
+         which is quantized and stops reproducing above a few GB -- so a gate
+         can hold their RATIO to a bound. This is the meter that makes arena
+         slack (capacity far above allocation) visible without patching the
+         generated C by hand. *)
+      (* Runs once, whichever comes first: the explicit call in main just
+         before the default region is freed (a normal return), or the atexit
+         hook (a program that leaves through exit() never reaches main's
+         epilogue, and its region is still intact when atexit fires). *)
+      "static void __lang_region_stats_report(void) {";
+      "  static int __done = 0;";
+      "  if (__done || !getenv(\"MERE_REGION_STATS\")) return;";
+      "  __done = 1;";
+      "  __lang_region* r = &__lang_default_region;";
+      "  size_t nblocks = 0, cap = 0;";
+      "  for (__lang_region_block* b = r->blocks; b; b = b->prev) { nblocks++; cap += b->pad; }";
+      "  fprintf(stderr, \"region-stats default: blocks=%zu cap=%zu alloc_total=%zu\\n\",";
+      "          nblocks, cap, r->alloc_total);";
       "}";
       "";
       "static void __lang_region_free(__lang_region* r) {";
@@ -11846,12 +11892,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         (if !args_used then "  __lang_argc = argc; __lang_argv = argv;"
          else "  (void)argc; (void)argv;");
         "  __lang_region_init(&__lang_default_region, 1 << 22);";
+        "  atexit(__lang_region_stats_report);";
         (if top_global_inits = [] then ""
          else String.concat "\n" top_global_inits);
         main_stmt;
         (* Phase 15.8: free all OwnedVec allocations registered during run. *)
         (if Hashtbl.length owned_vec_instances > 0
          then "  __mere_owned_vec_free_all();" else "");
+        "  __lang_region_stats_report();";
         "  __lang_region_free(&__lang_default_region);";
         "  return 0;";
         "}";

@@ -4,6 +4,56 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.307 — 2026-08-23
+
+_One giant allocation taxed every block that came after it._
+
+When an allocation missed the current block, the C backend's region allocator
+chained on a block of TWICE THE CURRENT CAPACITY and made it the bump target —
+even when the miss was a single giant request (a grown map index, a big
+string). That did two bad things at once: the remainder of the current block
+was stranded, and the giant became the base that every later doubling
+inherited, so a few hundred MB of data could sit inside several times as much
+capacity.
+
+Now an allocation bigger than a quarter of the current block gets its own
+exact-size block, chained in BEHIND the bump block: freed with the region like
+any other block, invisible to `map_recycle`'s roll-back walk (the seed is
+still the oldest block), but never the bump target and never the doubling
+base. Small allocations keep filling the block they were filling; doubling
+stays proportional to small traffic. On the forcing probe (one 256 MiB string
+in a stream of small cells) capacity drops from 1.99x of allocation to
+1.0007x. The LLVM backend has the same switch-and-double design and is not
+changed here — same C-first precedent as the tail-call work (v0.1.230 →
+v0.1.267).
+
+The meter landed with the fix: `MERE_REGION_STATS=1` prints the default
+region's block count, capacity and cumulative allocation at exit (through
+main's epilogue or through exit(), whichever comes first). Capacity and
+allocation are functions of the program — unlike peak RSS, which is quantized
+to powers of two and stops reproducing above a few GB — so
+`scripts/region_slack_check.sh` holds their ratio to a bound, checks the
+meter against the probe's known floor in the other direction, and was watched
+to FAIL (1.99x) on the old allocator before it was trusted.
+
+The meter's first real reading corrected a recorded number: the large Ruby
+workload whose default region was written down as "17.2 GB of capacity around
+~2 GB in use" in fact hands out 9.0 GB cumulatively (cap 17.18 GB = a normal
+doubling tail, mostly untouched pages that never reach RSS). Its peak RSS
+moved within run-to-run noise under this change (5.7-7.6 GB across repeated
+runs of both binaries — above a few GB, RSS does not reproduce). What is left
+of that workload's footprint is the 9 GB itself: a collection problem, not an
+allocation-policy one.
+
+Also wired `thread_leak_check.sh` and `virtual_clock_check.sh` into CI: both
+landed with v0.1.304/305 but were never run there — a gate that exists and
+does not run is a claim, not a check.
+
+parity 129 passed / 0 failed; host_matrix ok; dune test 2561/0;
+thread_leak 7/0; virtual_clock 6/0; region_slack PASS.
+
+---
+
 ## v0.1.306 — 2026-08-22
 
 _The bytes between the quotes were never looked at._
