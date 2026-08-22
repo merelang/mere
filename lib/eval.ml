@@ -3085,6 +3085,15 @@ let parse_json_tree (s : string) : jtree =
         let k = parse_string_lit () in
         skip_ws (); expect ':';
         let v = parse_value () in
+        (* v0.1.303: a repeated key is refused rather than resolved. Silently
+           keeping one of the two is a choice the input did not make, and the
+           choice is not even stable across implementations -- this decoder kept
+           the FIRST (assoc lookup over a list built in document order), Go's
+           encoding/json v1 kept the LAST, and Go v2 stopped picking in 1.27.
+           Refusing is the only answer that does not depend on who wrote the
+           parser. of_json fails fast; of_json_opt answers None. *)
+        if List.mem_assoc k !acc then
+          error (Printf.sprintf "duplicate object key %S" k);
         acc := (k, v) :: !acc;
         skip_ws ();
         match peek () with

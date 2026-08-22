@@ -5715,6 +5715,8 @@ static mj_node* __mj_obj(__mj_ps* p) {
     if (!(p->pos<p->n && p->s[p->pos]==':')) __mj_die("expected ':'");
     p->pos++;
     mj_node* v = __mj_val(p);
+    for (int __d = 0; __d < node->len; __d++)
+      if (strcmp(node->keys[__d], k) == 0) __mj_die("duplicate object key");
     if ((size_t)node->len >= cap) { cap*=2;
       node->items=(mj_node**)realloc(node->items,cap*sizeof(mj_node*));
       node->keys=(const char**)realloc(node->keys,cap*sizeof(char*)); }

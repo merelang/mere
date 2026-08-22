@@ -1,0 +1,56 @@
+// A repeated object key is refused, on every backend that decodes JSON.
+//
+// Until v0.1.303 all three decoders accepted it and silently kept the FIRST
+// value -- and "first" was not a decision anyone made, it fell out of building
+// an assoc list in document order and looking up with the equivalent of
+// List.assoc. Go's encoding/json v1 kept the LAST for the same accidental
+// reason, and Go 1.27's v2 stopped picking. Two implementations resolving the
+// same input to different values is the argument: there is no right answer to
+// pick, so the input is rejected.
+//
+// THE CHECK IS ON of_json_opt, NOT of_json. The three backends do not word
+// their decode failures the same way -- the interpreter appends "(at offset N)",
+// the C runtime does not, and the Wasm runtime has no message channel at all,
+// only a flag -- so comparing messages here would pin an unrelated difference.
+// `None` is a value, and all four can be held to it.
+//
+// Execution mode: interp + C + Wasm. LLVM refuses of_json (no hand-written
+// parser in that backend), so it reports UNSUP.
+
+type U = { id: int, name: str };
+type Nested = { outer: int, inner: U };
+
+let probe = fn (label: str) -> fn (body: str) ->
+  print (label ++ " -> " ++ (match (of_json_opt body : U option) with
+                             | Some u -> "Some(id=" ++ str_of_int u.id ++ ",name=" ++ u.name ++ ")"
+                             | None   -> "None"));
+
+// A POSITIVE CONTROL FIRST. A change that rejects everything would pass a file
+// that only ever checks for rejection.
+let _ = probe "clean            " "\{\"id\":1,\"name\":\"a\"}";
+let _ = probe "reordered fields " "\{\"name\":\"a\",\"id\":1}";
+let _ = probe "extra whitespace " "\{ \"id\" : 1 , \"name\" : \"a\" }";
+
+// ... then the duplicates. Both orderings, because a decoder that kept the last
+// would have answered these two differently while agreeing on everything else.
+let _ = probe "dup first        " "\{\"id\":1,\"id\":2,\"name\":\"a\"}";
+let _ = probe "dup last         " "\{\"id\":1,\"name\":\"a\",\"id\":2}";
+let _ = probe "dup str field    " "\{\"id\":1,\"name\":\"a\",\"name\":\"b\"}";
+let _ = probe "dup same value   " "\{\"id\":1,\"id\":1,\"name\":\"a\"}";
+
+// A duplicate in a NESTED object is refused too: the check belongs to the
+// parser, not to the per-type decoder generated for the outer record.
+let _ = print ("nested dup       -> " ++
+  (match (of_json_opt "\{\"outer\":1,\"inner\":\{\"id\":1,\"id\":2,\"name\":\"a\"}}" : Nested option) with
+   | Some n -> "Some(outer=" ++ str_of_int n.outer ++ ")"
+   | None   -> "None"));
+let _ = print ("nested clean     -> " ++
+  (match (of_json_opt "\{\"outer\":1,\"inner\":\{\"id\":7,\"name\":\"a\"}}" : Nested option) with
+   | Some n -> "Some(outer=" ++ str_of_int n.outer ++ ")"
+   | None   -> "None"));
+
+// A key repeated in a DIFFERENT object at the same depth is not a duplicate.
+print ("sibling objects  -> " ++
+  (match (of_json_opt "\{\"outer\":2,\"inner\":\{\"id\":3,\"name\":\"n\"}}" : Nested option) with
+   | Some n -> "Some(outer=" ++ str_of_int n.outer ++ ")"
+   | None   -> "None"))
