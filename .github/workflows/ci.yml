@@ -261,6 +261,13 @@ jobs:
       - name: lib_check (shared-library boundary)
         run: sh scripts/lib_check.sh
 
+      # Readiness I/O (v0.1.313): the transcript checks both directions --
+      # events arrive when they should, none are invented when nothing
+      # happened -- and pins the coded would-block returns on nonblocking
+      # read / accept / write.
+      - name: io_poll_check (readiness answers what it claims)
+        run: sh scripts/io_poll_check.sh
+
       - name: selfhost_check
         run: sh scripts/selfhost_check.sh
 
