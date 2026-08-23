@@ -57,6 +57,13 @@ let debug_file : string option ref = ref None
 let lib_mode : bool ref = ref false
 let lib_stem : string ref = ref "lib"
 
+(* `mere --header` prints the C header for the --lib boundary. The exports are
+   decided deep inside emit_program (they need the resolved fn tables), so the
+   header is produced there as a side product of a lib-mode emission and the
+   driver reads it from here instead of re-deriving the export set a second
+   way -- two derivations of one list is how the two drift apart. *)
+let lib_header : string ref = ref ""
+
 (* internal-linkage prefix for definitions that are external symbols in a
    standalone program but must not leak out of a library *)
 let lib_static () = if !lib_mode then "static " else ""
@@ -11477,10 +11484,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         | _ -> false
       in
       let is_unit t = (match Ast.walk t with Ast.TyUnit -> true | _ -> false) in
-      let ret_ok t = scalar t || is_unit t in
-      let is_strbytes t =
-        match Ast.walk t with Ast.TyStr | Ast.TyBytes -> true | _ -> false
-      in
+      let is_str t = (match Ast.walk t with Ast.TyStr -> true | _ -> false) in
+      let is_bytes t = (match Ast.walk t with Ast.TyBytes -> true | _ -> false) in
+      let boundary t = scalar t || is_str t || is_bytes t in
+      let ret_ok t = boundary t || is_unit t in
       let plain_name n =
         n <> "" && n.[0] <> '_'
         && String.for_all (fun c ->
@@ -11497,11 +11504,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       let exports = ref [] and skipped = ref [] in
       let classify name (ptys : Ast.ty list) (rty : Ast.ty)
           (call : string list -> string) =
-        if List.exists is_strbytes (rty :: ptys) then
-          skipped := (name, "str / bytes marshalling is a later slice") :: !skipped
-        else if List.for_all (fun t -> scalar t || is_unit t) ptys && ret_ok rty then
+        if List.for_all (fun t -> boundary t || is_unit t) ptys && ret_ok rty then begin
+          (* a bytes crossing needs the bytes runtime even if the body never
+             touches a bytes builtin (a passthrough only names the type) *)
+          if List.exists is_bytes (rty :: ptys) then bytes_used := true;
           exports := (name, ptys, rty, call) :: !exports
-        else
+        end else
           skipped := (name, "type not representable at the C boundary") :: !skipped
       in
       List.iter (fun sk ->
@@ -11532,33 +11540,94 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           then Some (name, "value binding (only functions are exported)")
           else None) top_globals_list
       in
-      let wrapper (name, ptys, rty, call) =
+      (* the C spelling of a boundary type on the WAY IN: scalars keep their
+         C type, str/bytes arrive as a borrowed (ptr, len) pair *)
+      let c_in_ty t = if is_str t || is_bytes t then "mere_buf" else c_type_of t in
+      let wrapper_sig (name, ptys, rty, _) =
         (* unit parameters exist in the Mere arrow but not in the C one: the
            wrapper drops them from its signature and passes 0 at the call. *)
         let c_params =
           List.concat (List.mapi (fun i t ->
             if is_unit t then []
-            else [Printf.sprintf "%s __a%d" (c_type_of t) i]) ptys)
-        in
-        let call_args =
-          List.mapi (fun i t ->
-            if is_unit t then "0" else Printf.sprintf "__a%d" i) ptys
+            else [Printf.sprintf "%s __a%d" (c_in_ty t) i]) ptys)
         in
         let ret_unit = is_unit rty in
-        let sig_params =
-          c_params
-          @ (if ret_unit then [] else [Printf.sprintf "%s* out" (c_type_of rty)])
-          @ ["mere_buf* err"]
+        let out_param =
+          if ret_unit then []
+          else if is_str rty || is_bytes rty then ["mere_buf* out"]
+          else [Printf.sprintf "%s* out" (c_type_of rty)]
+        in
+        Printf.sprintf "mere_status mere_%s_%s(%s)"
+          !lib_stem name
+          (String.concat ", " (c_params @ out_param @ ["mere_buf* err"]))
+      in
+      let wrapper ((_name, ptys, rty, call) as e) =
+        let call_args =
+          List.mapi (fun i t ->
+            if is_unit t then "0"
+            else if is_str t then Printf.sprintf "__mere_lib_str_in(__a%d)" i
+            else if is_bytes t then Printf.sprintf "__mere_lib_bytes_in(__a%d)" i
+            else Printf.sprintf "__a%d" i) ptys
         in
         let body =
-          if ret_unit then Printf.sprintf "  (void)(%s);" (call call_args)
+          if is_unit rty then Printf.sprintf "  (void)(%s);" (call call_args)
+          else if is_str rty then
+            Printf.sprintf
+              "  const char* __r = %s;\n  if (out) __mere_lib_str_out(__r, out);"
+              (call call_args)
+          else if is_bytes rty then
+            Printf.sprintf
+              "  mere_bytes* __r = %s;\n  if (out) __mere_lib_bytes_out(__r, out);"
+              (call call_args)
           else
             Printf.sprintf "  %s __r = %s;\n  if (out) *out = __r;"
               (c_type_of rty) (call call_args)
         in
         Printf.sprintf
-          "mere_status mere_%s_%s(%s) {\n  mere_lib_init();\n  if (err) { err->ptr = NULL; err->len = 0; }\n%s\n  return MERE_OK;\n}"
-          !lib_stem name (String.concat ", " sig_params) body
+          "%s {\n  mere_lib_init();\n  if (err) { err->ptr = NULL; err->len = 0; }\n%s\n  return MERE_OK;\n}"
+          (wrapper_sig e) body
+      in
+      let uses_str_bnd =
+        List.exists (fun (_, ptys, rty, _) ->
+          List.exists is_str (rty :: ptys)) exports in
+      let uses_bytes_bnd =
+        List.exists (fun (_, ptys, rty, _) ->
+          List.exists is_bytes (rty :: ptys)) exports in
+      let marshal_helpers =
+        (if not (uses_str_bnd || uses_bytes_bnd) then [] else
+          [ "/* Boundary marshalling. IN: str/bytes are copied out of the host's";
+            "   buffer into the region -- the host's memory is borrowed only for";
+            "   the duration of the call. OUT: str/bytes are malloc'd copies the";
+            "   HOST OWNS (free with mere_lib_free); a str copy carries one extra";
+            "   NUL past .len as a courtesy to C callers. Region pointers never";
+            "   cross the boundary in either direction. */" ])
+        @ (if not uses_str_bnd then [] else
+          [ "static const char* __mere_lib_str_in(mere_buf b) {";
+            "  size_t n = b.len > 0 ? (size_t)b.len : 0;";
+            "  char* s = __lang_str_alloc(__lang_current_region, n);";
+            "  if (b.ptr && n) memcpy(s, b.ptr, n);";
+            "  return s;";
+            "}";
+            "static void __mere_lib_str_out(const char* s, mere_buf* out) {";
+            "  size_t n = __lang_str_size(s);";
+            "  unsigned char* p = (unsigned char*)malloc(n + 1);";
+            "  if (!p) __lang_fail_impl(\"out of memory\");";
+            "  memcpy(p, s, n); p[n] = 0;";
+            "  out->ptr = p; out->len = (long long)n;";
+            "}" ])
+        @ (if not uses_bytes_bnd then [] else
+          [ "static mere_bytes* __mere_lib_bytes_in(mere_buf b) {";
+            "  long long n = b.len > 0 ? b.len : 0;";
+            "  mere_bytes* x = __lang_bytes_alloc(n);";
+            "  if (b.ptr && n) memcpy(x->data, b.ptr, (size_t)n);";
+            "  return x;";
+            "}";
+            "static void __mere_lib_bytes_out(mere_bytes* b, mere_buf* out) {";
+            "  unsigned char* p = (unsigned char*)malloc((size_t)b->len + 1);";
+            "  if (!p) __lang_fail_impl(\"out of memory\");";
+            "  memcpy(p, b->data, (size_t)b->len); p[b->len] = 0;";
+            "  out->ptr = p; out->len = b->len;";
+            "}" ])
       in
       [ Printf.sprintf "/* mere --lib manifest (%s)" !lib_stem;
         " * exported:" ]
@@ -11598,10 +11667,69 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           "   allocator is safe to combine with. */";
           "void mere_lib_free(void* p) { free(p); }";
           "" ]
+      @ marshal_helpers
+      @ (if marshal_helpers = [] then [] else [""])
       @ List.map wrapper exports
       @ [ "" ]
     end
   in
+  (* `mere --header`: the boundary's C header, produced from the SAME export
+     list the wrappers were emitted from (see lib_header's comment). *)
+  if !lib_mode then begin
+    (* re-derive nothing: recompute the prototypes by scanning the emitted
+       boundary is tempting and wrong; instead the parts above were built from
+       `exports`, which is local to that block -- so the header is built by the
+       same code path, from the wrapper signatures already in the output. *)
+    let guard =
+      String.map (fun c ->
+        if (c >= 'a' && c <= 'z') then Char.uppercase_ascii c
+        else if (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') then c
+        else '_') !lib_stem
+    in
+    let protos =
+      List.filter_map (fun line ->
+        (* every wrapper definition line starts `mere_status mere_<stem>_` and
+           ends `) {` -- turn it into a prototype *)
+        let pre = "mere_status mere_" ^ !lib_stem ^ "_" in
+        let plen = String.length pre in
+        if String.length line > plen && String.sub line 0 plen = pre then
+          match String.index_opt line '{' with
+          | Some i when i >= 2 && String.sub line (i - 2) 2 = ") " ->
+            Some (String.sub line 0 (i - 1) ^ ";")
+          | _ -> None
+        else None)
+        lib_boundary_parts
+    in
+    lib_header := String.concat "\n"
+      ([ Printf.sprintf "/* C boundary of %s -- generated by `mere --header`." !lib_stem;
+         " * str/bytes cross as mere_buf (ptr, len). Inputs are borrowed for the";
+         " * duration of the call; outputs are malloc'd copies the host owns --";
+         " * release them with mere_lib_free. */";
+         Printf.sprintf "#ifndef MERE_%s_H" guard;
+         Printf.sprintf "#define MERE_%s_H" guard;
+         "";
+         "#ifdef __cplusplus";
+         "extern \"C\" {";
+         "#endif";
+         "";
+         "#ifndef MERE_ABI_DEFINED";
+         "#define MERE_ABI_DEFINED";
+         "typedef struct { const unsigned char* ptr; long long len; } mere_buf;";
+         "typedef enum { MERE_OK = 0, MERE_FAIL = 1 } mere_status;";
+         "#endif";
+         "";
+         "void mere_lib_init(void);      /* optional: wrappers call it themselves */";
+         "void mere_lib_shutdown(void);";
+         "void mere_lib_free(void* p);";
+         "" ]
+       @ protos
+       @ [ "";
+           "#ifdef __cplusplus";
+           "}";
+           "#endif";
+           Printf.sprintf "#endif /* MERE_%s_H */" guard;
+           "" ])
+  end;
   let parts =
     [ (* _GNU_SOURCE BEFORE EVERY HEADER, because that is the only place it works.
          `pthread_getattr_np` is the glibc way to ask a thread for its stack, and glibc

@@ -14266,9 +14266,26 @@ let () =
         && has lib_demo "void mere_lib_shutdown(void)"
         && has lib_demo "void mere_lib_free(void* p)"
      then "boundary" else "missing") "boundary";
-  check "v0.1.308: the manifest names the skipped export and the reason"
-    (if has lib_demo "greet -- str / bytes marshalling is a later slice"
+  check "v0.1.309: str exports cross as mere_buf"
+    (if has lib_demo
+        "mere_status mere_t_greet(mere_buf __a0, mere_buf* out, mere_buf* err)"
+     then "wrapper" else "missing") "wrapper";
+  check "v0.1.309: the manifest names the skipped export and the reason"
+    (let c = lib_c "let pick = fn (f: int -> int) -> f 1;\n0" in
+     if has c "pick -- type not representable at the C boundary"
      then "named" else "silent") "named";
+  check "v0.1.309: a bytes boundary forces the bytes runtime"
+    (let c = lib_c "let idb = fn (b: bytes) -> b;\n0" in
+     if has c "struct mere_bytes { long long len;"
+        && has c "__mere_lib_bytes_in" && has c "__mere_lib_bytes_out"
+     then "runtime" else "missing") "runtime";
+  check "v0.1.309: --header carries the boundary prototypes"
+    (let _ = lib_c "let add = fn (a: int) -> fn (b: int) -> a + b;\n0" in
+     let h = !Codegen_c.lib_header in
+     if has h "mere_status mere_t_add(long long __a0, long long __a1, long long* out, mere_buf* err);"
+        && has h "#ifndef MERE_T_H"
+        && has h "void mere_lib_free(void* p);"
+     then "header" else "missing") "header";
   check "v0.1.308: --lib leaves no extern linkage on internals"
     (if has lib_demo "extern const" then "extern" else "static-only") "static-only";
   check "v0.1.308: without --lib, main is still emitted"

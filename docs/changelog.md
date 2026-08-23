@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.309 — 2026-08-23
+
+_The boundary spoke three words of six._
+
+v0.1.308's library boundary could pass int, bool and float; str and bytes —
+the types most functions worth exporting actually take — were skipped with a
+manifest apology. They cross now, as a `mere_buf` (pointer, length) pair in
+both directions, and the two directions deliberately do not mirror each
+other. IN, the host's buffer is borrowed: the wrapper copies it into the
+region and never looks at it again after the call returns. OUT, the host is
+handed a malloc'd copy it owns and releases with `mere_lib_free` — a region
+pointer never crosses the boundary in either direction, because the region's
+whole point is that a later call may reclaim it. A str copy carries one
+courtesy NUL past `.len` for C callers; bytes are length-only, and the gate
+round-trips a buffer with embedded NULs to hold that distinction (a boundary
+that secretly spoke C strings would truncate it). A bytes signature also
+forces the bytes runtime into the output even when the body never touches a
+bytes builtin — a passthrough only names the type.
+
+`mere --header <file.mere>` prints the boundary's C header: the ABI types
+(include-guarded so two Mere libraries can share a host file), the lifecycle,
+and one prototype per export. The header is not derived a second way — it is
+read off the same wrapper signatures the emission just built, so the two
+cannot drift; the gate's host now compiles against the generated header
+instead of hand-written declarations, which is the header's actual test.
+
 ## v0.1.308 — 2026-08-23
 
 _A Mere program could only ever be the whole program._

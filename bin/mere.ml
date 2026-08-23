@@ -23,6 +23,8 @@ let usage () =
   print_endline "                        emit C for a shared library instead of a program:";
   print_endline "                        no main; exports mere_<stem>_<fn> wrappers plus";
   print_endline "                        mere_lib_init / mere_lib_shutdown / mere_lib_free";
+  print_endline "  mere --header <file.mere>";
+  print_endline "                        print the C header for that boundary";
   print_endline "  mere -rv <file.mere>  emit a flat RV32IM binary (runs on the Mere RISC-V";
   print_endline "                        emulator; integer subset — see codegen_riscv.ml)";
   print_endline "  mere -rve <expr>      emit an RV32IM binary for an inline expression";
@@ -513,6 +515,18 @@ let () =
     let base = Filename.dirname path in
     set_lib_stem path;
     run_action ~base_dir:base (compile_to_c ~base_dir:base) path source
+  | [_; "--header"; path] ->
+    (* the boundary's C header. A lib-mode emission computes the export list;
+       the header falls out of the same computation (Codegen_c.lib_header). *)
+    Mere.Codegen_c.lib_mode := true;
+    set_lib_stem path;
+    let source = read_file path in
+    let base = Filename.dirname path in
+    run_action ~base_dir:base
+      (fun src ->
+         let _ = compile_to_c ~base_dir:base src in
+         !Mere.Codegen_c.lib_header)
+      path source
   | [_; "-lle"; expr] ->
     run_action compile_to_llvm "<inline>" expr
   | [_; "-ll"; path] ->

@@ -32,9 +32,20 @@ let scale = fn (x: float) -> fn (k: float) -> x * k;
 let is_even = fn (n: int) -> n % 2 == 0;
 let fortytwo = fn () -> 42;
 let greet = fn (name: str) -> "hello, " ++ name;
+let revb = fn (b: bytes) ->
+  let n = bytes_len b in
+  let out = bytebuf_new 0 in
+  let rec go = fn (i: int) ->
+    if i == n then () else let _ = bytebuf_push out (bytes_get b (n - 1 - i)) in go (i + 1) in
+  let _ = go 0 in
+  bytes_of_bytebuf out;
+let pick = fn (f: int -> int) -> f 1;
 let _ = print "init";
 ()
 MERE
+
+"$MERE" --header "$TMP/demo.mere" > "$TMP/demo.h" 2>"$TMP/hdr.err" \
+  || { echo "FAIL lib_check: mere --header refused the demo"; cat "$TMP/hdr.err"; exit 1; }
 
 "$MERE" -c --lib "$TMP/demo.mere" > "$TMP/demo.c" 2>"$TMP/demo.err" \
   || { echo "FAIL lib_check: mere -c --lib refused the demo"; cat "$TMP/demo.err"; exit 1; }
@@ -57,7 +68,9 @@ fi
 syms="$(echo "$syms" | grep -v '^_' | grep -v '^$' || true)"
 expected="add2
 fortytwo
+greet
 is_even
+revb
 scale"
 expected_full="$(printf 'mere_lib_free\nmere_lib_init\nmere_lib_shutdown\n'; echo "$expected" | sed 's/^/mere_demo_/')"
 expected_full="$(echo "$expected_full" | sort)"
@@ -68,15 +81,10 @@ expected_full="$(echo "$expected_full" | sort)"
   exit 1; }
 
 # 3. a host calls the boundary; interp computes the same values
+# the host compiles against the GENERATED header -- that is the header's test
 cat > "$TMP/host.c" <<'C'
 #include <stdio.h>
-typedef struct { const unsigned char* ptr; long long len; } mere_buf;
-typedef enum { MERE_OK = 0, MERE_FAIL = 1 } mere_status;
-mere_status mere_demo_add2(long long, long long, long long* out, mere_buf* err);
-mere_status mere_demo_scale(double, double, double* out, mere_buf* err);
-mere_status mere_demo_is_even(long long, int* out, mere_buf* err);
-mere_status mere_demo_fortytwo(long long* out, mere_buf* err);
-void mere_lib_shutdown(void);
+#include "demo.h"
 int main(void) {
   long long s; double d; int b; long long f;
   if (mere_demo_add2(3, 4, &s, 0) != MERE_OK) return 1;
@@ -85,18 +93,38 @@ int main(void) {
   if (mere_demo_is_even(10, &b, 0) != MERE_OK) return 1;
   if (mere_demo_fortytwo(&f, 0) != MERE_OK) return 1;
   printf("%lld %g %d %lld\n", s, d, b, f);
+
+  /* str out is a malloc'd copy with a courtesy NUL past .len */
+  mere_buf name = { (const unsigned char*)"world", 5 };
+  mere_buf out, err;
+  if (mere_demo_greet(name, &out, &err) != MERE_OK) return 1;
+  printf("%.*s nul=%d\n", (int)out.len, out.ptr, out.ptr[out.len]);
+  mere_lib_free((void*)out.ptr);
+
+  /* bytes round-trip with embedded NULs -- a boundary that only carries C
+     strings would silently truncate this */
+  unsigned char raw[5] = { 0x01, 0x00, 0xff, 0x02, 0x00 };
+  mere_buf bin = { raw, 5 };
+  if (mere_demo_revb(bin, &out, &err) != MERE_OK) return 1;
+  printf("revb=");
+  { long long i; for (i = 0; i < out.len; i++) printf("%02x", out.ptr[i]); }
+  printf("\n");
+  mere_lib_free((void*)out.ptr);
+
   mere_lib_shutdown();
   return 0;
 }
 C
-"$CC" -O1 "$TMP/host.c" "$TMP/demo.so" -o "$TMP/host" 2>"$TMP/link.err" \
+"$CC" -O1 -I"$TMP" "$TMP/host.c" "$TMP/demo.so" -o "$TMP/host" 2>"$TMP/link.err" \
   || { echo "FAIL lib_check: host link failed"; cat "$TMP/link.err"; exit 1; }
 got="$("$TMP/host")"
 # Known values, written down rather than recomputed: backend agreement is
 # ctest/parity's job — this gate's subject is the boundary, and its expected
 # output must not depend on the very compiler under test.
 want="init
-17 10 1 42"
+17 10 1 42
+hello, world nul=0
+revb=0002ff0001"
 [ "$got" = "$want" ] || {
   echo "FAIL lib_check: host output differs from interp"
   echo "--- want: $want"
@@ -104,7 +132,7 @@ want="init
   exit 1; }
 
 # 4. the manifest is honest about what it skipped
-grep -q 'greet -- str / bytes marshalling is a later slice' "$TMP/demo.c" || {
-  echo "FAIL lib_check: manifest does not name the skipped str export"; exit 1; }
+grep -q 'pick -- type not representable at the C boundary' "$TMP/demo.c" || {
+  echo "FAIL lib_check: manifest does not name the skipped higher-order export"; exit 1; }
 
-echo "lib_check: ok (boundary symbols exact, host matches interp, init ran once)"
+echo "lib_check: ok (boundary exact, host via generated header, str/bytes round-trip)"
