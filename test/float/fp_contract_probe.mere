@@ -1,0 +1,41 @@
+// fp_contract_probe — the answer must not depend on the optimizer.
+//
+// A dense dot product over LCG-generated doubles, printed as raw IEEE bits.
+// The a*b+c shape is exactly what clang contracts into fma at -O2 on arm64
+// (one rounding instead of two); the gate compiles this file at -O0 and -O2
+// and requires the same bits from both. Without the emitted
+// `#pragma STDC FP_CONTRACT OFF` the two differ (measured: 4 of 10 MLP
+// outputs off by an ulp), and the interpreter sides with -O0.
+let n = 4096;
+
+// Java's 48-bit LCG, masked after every step. 48 bits ON PURPOSE: the
+// interpreter's int is 63-bit OCaml native while the compiled backends are
+// 64-bit (Q-037's second boundary, still open) -- but two's-complement
+// wrap-around preserves LOW bits, so a masked LCG computes identical values
+// on both widths and this gate stays about floats, not about int width.
+let lcg_next = fn (s: int) ->
+  bit_and (s * 25214903917 + 11) 281474976710655;
+
+let to_unit = fn (s: int) ->
+  // top 31 of the 48 bits -> [-0.5, 0.5)
+  let hi = bit_shr s 17 in
+  float_of_int hi / 2147483648.0 - 0.5;
+
+let main =
+  let a = vec_new () in
+  let b = vec_new () in
+  let rec fill = fn (i: int) -> fn (s: int) ->
+    if i == n then ()
+    else
+      let s1 = lcg_next s in
+      let s2 = lcg_next s1 in
+      let _ = vec_push a (to_unit s1) in
+      let _ = vec_push b (to_unit s2) in
+      fill (i + 1) s2 in
+  let _ = fill 0 20260823 in
+  let rec dot = fn (i: int) -> fn (acc: float) ->
+    if i == n then acc
+    else dot (i + 1) (acc + (vec_get a i : float) * (vec_get b i : float)) in
+  let d = dot 0 0.0 in
+  print (str_of_int (float_bits_hi d) ++ " " ++ str_of_int (float_bits_lo d));
+main
