@@ -12001,6 +12001,17 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "#include <time.h>";  (* v0.1.127: time () wall clock *)
       "#include <pthread.h>";  (* Q-012: spawn / join. Link with -pthread on Linux. *)
       "#include <unistd.h>";   (* native FFI: read / write / close *)
+      (* v0.1.315: float semantics must not depend on the C compiler's
+         optimization level. clang on arm64 contracts a*b+c into fma at -O2
+         by default, which rounds ONCE where the interpreter (and -O0, and
+         the LLVM/Wasm backends) round twice -- a dense dot product came out
+         bitwise different between `mere run` and the -O2 native binary, and
+         every existing gate compiles at -O0 where the divergence is
+         invisible. The pragma pins strict evaluation for this translation
+         unit. (gcc parses but ignores it; there, -ffp-contract=off is the
+         user's knob. clang, the toolchain this project builds with, honors
+         it.) *)
+      "#pragma STDC FP_CONTRACT OFF";
       "";
       (* the static string literals, filled in after the unit is generated *)
       str_literal_marker;

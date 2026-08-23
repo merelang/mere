@@ -274,6 +274,13 @@ jobs:
       - name: audio_check (the audio queue's contract, headless)
         run: sh scripts/audio_check.sh
 
+      # Float results must not depend on the C optimizer (v0.1.315): the
+      # same dot product at -O0 and -O2 must produce the same bits, and both
+      # must match the interpreter. Without the emitted FP_CONTRACT OFF
+      # pragma, clang's default fma contraction breaks both claims.
+      - name: fp_contract_check (the optimizer must not change the answer)
+        run: sh scripts/fp_contract_check.sh
+
       - name: selfhost_check
         run: sh scripts/selfhost_check.sh
 

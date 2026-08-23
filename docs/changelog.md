@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.315 — 2026-08-23
+
+_The optimizer was part of the language._
+
+A dense dot product — the inner loop of an MLP dogfood — produced different
+BITS depending on how the emitted C was compiled: `-O2` disagreed with the
+interpreter on 4 of 10 outputs by an ulp, and `-O0` disagreed with both.
+clang contracts `a*b+c` into fused multiply-add by default on arm64, which
+rounds once where the interpreter (and the LLVM and Wasm backends) round
+twice. So a Mere program's float answers depended on a flag the language
+never mentions, passed to a compiler the user chooses.
+
+Nothing in the repo could see it. Every gate that compiles C does so at
+`-O0`; the float parity that exists compares formatted output or quantized
+image bytes, both of which absorb an ulp. The blind spot was structural:
+the divergence lives exactly where no gate looked — unformatted bits, under
+optimization.
+
+The emitted C now carries `#pragma STDC FP_CONTRACT OFF`: float evaluation
+is strict per-operation IEEE, at every optimization level, matching the
+other three backends. (gcc parses the pragma and ignores it — there,
+`-ffp-contract=off` is the user's knob; clang, which this project builds
+and tests with, honors it.) The new gate compiles one dense dot product at
+`-O0` and `-O2` and requires bitwise-identical output from both AND from
+the interpreter; reverting the pragma fails it with the two answers in the
+output. The probe's LCG is masked to 48 bits on purpose — the interpreter's
+int is still 63-bit OCaml native against the compiled backends' 64
+(Q-037's open second boundary), and low bits survive both wraps, so the
+gate stays about floats rather than inheriting that older hole.
+
 ## v0.1.314 — 2026-08-23
 
 _Sound, but never a callback._
