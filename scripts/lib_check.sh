@@ -279,4 +279,37 @@ C
 "$TMP/hostmt" | grep -q "mt bad=0" || {
   echo "FAIL lib_check: concurrent calls returned wrong values"; exit 1; }
 
-echo "lib_check: ok (boundary exact, header-built host, str/bytes round-trip, fail -> status, calls are transactions, 8-thread clean)"
+# ---- 7. lifecycle abuse: shutdown is not the end -----------------------------
+# v0.1.312: pthread_once could not be re-armed, so a call after shutdown
+# reused the freed default region -- a use-after-free that WORKED in every
+# polite test (the memory happened to be intact) and that only an abusive
+# host plus ASan could name. The abuse host shuts down early, calls again
+# (must re-initialize and answer correctly), and shuts down twice. Built
+# with ASan when the compiler has it, so "works by luck" fails loudly.
+cat > "$TMP/abuse.c" <<'C'
+#include <stdio.h>
+#include "demo.h"
+int main(void) {
+  long long r; mere_buf err;
+  if (mere_demo_add2(3, 4, &r, &err) != MERE_OK || r != 7) return 1;
+  mere_lib_shutdown();
+  if (mere_demo_add2(20, 22, &r, &err) != MERE_OK || r != 42) return 2;  /* re-init */
+  mere_lib_shutdown();
+  mere_lib_shutdown();                                                   /* idempotent */
+  printf("lifecycle ok\n");
+  return 0;
+}
+C
+ASAN=""
+if "$CC" -fsanitize=address -x c -o "$TMP/asan_probe" - <<'C' >/dev/null 2>&1
+int main(void) { return 0; }
+C
+then ASAN="-fsanitize=address"; fi
+"$CC" -O1 -w $ASAN -I"$TMP" "$TMP/abuse.c" "$TMP/demo.c" -o "$TMP/abuse" 2>"$TMP/abuse_cc.err" \
+  || { echo "FAIL lib_check: abuse host build failed"; cat "$TMP/abuse_cc.err"; exit 1; }
+abuse_out="$("$TMP/abuse" 2>&1)"; abuse_rc=$?
+[ "$abuse_rc" -eq 0 ] || { echo "FAIL lib_check: lifecycle abuse exited $abuse_rc"; echo "$abuse_out"; exit 1; }
+echo "$abuse_out" | grep -q "lifecycle ok" || { echo "FAIL lib_check: abuse host output"; echo "$abuse_out"; exit 1; }
+echo "$abuse_out" | grep -q "AddressSanitizer" && { echo "FAIL lib_check: ASan finding in lifecycle abuse"; echo "$abuse_out"; exit 1; }
+
+echo "lib_check: ok (boundary exact, header-built host, str/bytes round-trip, fail -> status, calls are transactions, 8-thread clean, lifecycle abuse clean)"

@@ -14320,6 +14320,10 @@ let () =
      in
      if has c "mere_vec_int_new((&__lang_default_region))" then "default" else "moved")
     "default";
+  check "v0.1.312: init is re-armable (a flag, not pthread_once)"
+    (if has lib_demo "static int __mere_lib_live = 0;"
+        && not (has lib_demo "pthread_once")
+     then "re-armable" else "once") "re-armable";
   check "v0.1.308: without --lib, main is still emitted"
     (let c =
        let prog = Pipeline.parse_program "let f = fn (x: int) -> x;\n0" in
