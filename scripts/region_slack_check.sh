@@ -58,3 +58,23 @@ if [ "$cap" -gt "$bound" ]; then
 fi
 
 echo "PASS region_slack: cap=$cap alloc_total=$alloc (bound=$bound)"
+
+# --- second probe: delete-churn must not allocate per delete (v0.1.316) ------
+"$MERE" -c "$ROOT/test/regionstats/delete_churn_probe.mere" > "$TMP/d.c" 2>"$TMP/d.err" \
+  || { echo "FAIL region_slack: mere -c refused the delete probe"; cat "$TMP/d.err"; exit 1; }
+"$CC" -O2 -w "$TMP/d.c" -o "$TMP/d" 2>"$TMP/dcc.err" \
+  || { echo "FAIL region_slack: delete probe C compile failed"; cat "$TMP/dcc.err"; exit 1; }
+MERE_REGION_STATS=1 "$TMP/d" >"$TMP/dout" 2>"$TMP/dstats" || {
+  echo "FAIL region_slack: delete probe exited nonzero"; cat "$TMP/dstats"; exit 1; }
+dline="$(grep '^region-stats default:' "$TMP/dstats" || true)"
+[ -n "$dline" ] || { echo "FAIL region_slack: delete probe printed no region-stats"; exit 1; }
+dalloc="$(echo "$dline" | sed -n 's/.*alloc_total=\([0-9]*\).*/\1/p')"
+# meter validity in the other direction: filling 2000 entries costs at least
+# a few hundred KB; a smaller reading means the meter broke, not the allocator
+[ "$dalloc" -ge 500000 ] || {
+  echo "FAIL region_slack: delete probe alloc_total=$dalloc below its known floor — meter broken"; exit 1; }
+if [ "$dalloc" -gt 16777216 ]; then
+  echo "FAIL region_slack: delete probe alloc_total=$dalloc exceeds 16 MiB — map_delete is allocating per delete again"
+  exit 1
+fi
+echo "PASS region_slack (delete churn): alloc_total=$dalloc"

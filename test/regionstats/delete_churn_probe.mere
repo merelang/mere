@@ -1,0 +1,22 @@
+// A map with a real population, then a set+delete churn: the shape of a
+// bookkeeping table that records one entry per call and removes it on return.
+//
+// Before v0.1.316, EVERY map_delete rebuilt the hash index into a freshly
+// allocated buffer in the map's region (delete shifts the dense arrays and
+// reindexes at the SAME capacity), so this probe bled an index-sized
+// allocation per delete: 820 MB for the 50k deletes below, and 3.15 GB of a
+// large Ruby run's 8.6 GB default-region total. Reindex now reuses the buffer
+// when the capacity is not changing, and this probe allocates ~1 MB.
+// scripts/region_slack_check.sh holds it there via MERE_REGION_STATS.
+let m = map_new ();
+let rec fill = fn (i: int) ->
+  if i == 0 then () else let _ = map_set m ("live" ++ str_of_int i) i in fill (i - 1);
+let _ = fill 2000;
+let rec churn = fn (i: int) ->
+  if i == 0 then ()
+  else
+    let _ = map_set m "hot" i in
+    let _ = map_delete m "hot" in
+    churn (i - 1);
+let _ = churn 50000;
+print (str_of_int (map_len m))

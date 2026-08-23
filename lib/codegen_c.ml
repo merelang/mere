@@ -8442,7 +8442,16 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          where every array index above the removed entry shifts down). *)
       Printf.sprintf "static void %s_reindex(%s* m, int newcap) {"
         struct_name struct_name;
-      "  int* ni = (int*)__lang_region_alloc(m->region, sizeof(int) * newcap);";
+      (* v0.1.316: reuse the buffer when the capacity is not changing. Before
+         this, EVERY map_delete allocated a fresh index into the map's region
+         (delete shifts the dense arrays and calls reindex at the same cap), so
+         a workload that deletes once per call bled index-sized allocations
+         forever -- measured at 3.15 GB of a large Ruby run's 8.6 GB
+         default-region total, the single biggest emitter. Growth still
+         allocates, as it must. *)
+      "  int* ni = (newcap == m->idx_cap && m->idx)";
+      "    ? m->idx";
+      "    : (int*)__lang_region_alloc(m->region, sizeof(int) * newcap);";
       "  for (int i = 0; i < newcap; i++) ni[i] = -1;";
       "  for (int i = 0; i < m->len; i++) {";
       Printf.sprintf "    unsigned long long h = %s;" (key_hash_expr "m->keys[i]");
@@ -8538,6 +8547,11 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  m->cap = ncap;";
       "  int nic = 8;";
       "  while (nic < ncap * 2) nic <<= 1;";
+      (* v0.1.316: reindex reuses the buffer when the capacity is unchanged --
+         which here would be the OLD arena's buffer, freed two lines down.
+         The index is moving regions, so force a fresh allocation. *)
+      "  m->idx = 0;";
+      "  m->idx_cap = 0;";
       Printf.sprintf "  %s_reindex(m, nic);" struct_name;
       "  m->owns_region = 1;";
       "  if (owned) { __lang_region_free(old); free(old); }";

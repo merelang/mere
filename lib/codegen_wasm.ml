@@ -7483,8 +7483,15 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
     (i64.extend_i32_u (local.get $m)))
   (func $mere_map_%s_reindex (param $m i32) (param $newcap i32)
     (local $ni i32) (local $i i32) (local $s i32) (local $len i32) (local $keys i32) (local $ncm1 i32) (local $h i32)
-    (local.set $ni (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $ni) (i32.mul (local.get $newcap) (i32.const 4))))
+    ;; v0.1.316: reuse the buffer when the capacity is not changing — delete
+    ;; reindexes at the same cap on every call, and this backend's bump memory
+    ;; never shrinks, so allocating here bled linear memory per delete.
+    (if (i32.and (i32.eq (local.get $newcap) (i32.load offset=20 (local.get $m)))
+                 (i32.ne (i32.load offset=16 (local.get $m)) (i32.const 0)))
+      (then (local.set $ni (i32.load offset=16 (local.get $m))))
+      (else
+        (local.set $ni (global.get $__lang_bump))
+        (global.set $__lang_bump (i32.add (local.get $ni) (i32.mul (local.get $newcap) (i32.const 4))))))
     (local.set $i (i32.const 0))
     (block $fend (loop $fl
       (br_if $fend (i32.eq (local.get $i) (local.get $newcap)))

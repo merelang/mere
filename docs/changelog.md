@@ -4,6 +4,45 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.316 — 2026-08-23
+
+_Every delete rebuilt the index into fresh memory._
+
+`map_delete` shifts the dense arrays down and reindexes — at the SAME
+capacity, through a `reindex` that always allocated a fresh index buffer in
+the map's region. So a workload that deletes once per event (a bookkeeping
+table that records an entry per call and removes it on return) bled an
+index-sized allocation per delete, forever. Attribution of a large Ruby run's
+8.6 GB default-region total put this single site at 3.15 GB — the biggest
+emitter, ahead of copy-on-store. v0.1.298's `map_clear` fixed the MASS
+deletion case and left the one-at-a-time case as it was.
+
+`reindex` now reuses the buffer when the capacity is not changing (growth
+still allocates, as it must). The C backend and the Wasm backend — whose bump
+memory never shrinks, so it bled linear memory the same way — both carry the
+fix; the LLVM backend's delete does not reindex per call and needed nothing.
+On the probe (2,000 live entries, 50k set+delete churn) the default region's
+cumulative allocation drops from 820 MB to 1.0 MB.
+
+The reuse has one caller it must not serve, and the parity suite caught it
+hanging: `map_compact` reindexes at a possibly-unchanged capacity while
+MOVING THE MAP TO A FRESH ARENA, so reuse would keep the index in the arena
+freed two lines later — dangling slots that probe forever. Compact zeroes
+`idx`/`idx_cap` before its reindex, which forces the fresh allocation it was
+always paying for. (Wasm's compact lowers to clear and never frees, so only
+the C backend had the interaction.)
+
+The probe is `test/regionstats/delete_churn_probe.mere`, held by
+`scripts/region_slack_check.sh` via MERE_REGION_STATS: alloc_total must stay
+under 16 MiB, and above the probe's known floor in the other direction so a
+broken meter cannot pass as a fixed allocator. The attribution harness that
+found the site is `bench/def_sites.sh` in the mere-ruby repo (two-level
+return-address attribution, ICF disabled so the linker cannot fold the names).
+
+parity 129/0; dune test 2576/0; host_matrix ok; region_slack both probes PASS.
+
+---
+
 ## v0.1.315 — 2026-08-23
 
 _The optimizer was part of the language._
