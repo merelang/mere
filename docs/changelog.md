@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.308 — 2026-08-23
+
+_A Mere program could only ever be the whole program._
+
+Every backend emitted exactly one shape: a standalone executable with its own
+`main`. There was no way to hand a Mere function to an existing system — no
+library output, so "write one function in Mere" was not a thing a host
+process could do. `mere -c --lib <file.mere>` now emits a shared-library
+translation unit instead: no `main`, and a small C ABI boundary in its place
+— `mere_lib_init` / `mere_lib_shutdown` / `mere_lib_free`, plus one uncurried
+wrapper `mere_<stem>_<fn>(args..., T* out, mere_buf* err)` per exportable
+entry-file function. Exports are decided from the resolved tables the
+emission already had: entry-file functions (the prelude and imports carry
+their own file names) whose boundary types are scalars the C side can spell
+without marshalling — int / bool / float, unit results, unit parameters
+erased and passed as 0. Everything not exported is listed in a manifest
+comment WITH the reason (str/bytes marshalling is the next slice; a silently
+missing export reads as "covered").
+
+A library must not do what `main` does. The standalone prologue installs a
+SIGSEGV handler, rebuffers stdout, and registers an atexit hook — all
+process-global policy that belongs to the host, not to a loaded library — so
+lib mode does none of them. Module init (the entry file's top-level bindings
+and its trailing expression) runs once, under `pthread_once`, inside the
+first wrapper call; a host that never calls `mere_lib_init` is still correct.
+
+"Everything else is static" is a linkage claim, so the gate checks it with a
+linker's eyes rather than by grepping the C text: `scripts/lib_check.sh`
+builds the emitted C with `-fPIC -shared`, asserts the .so's exported symbol
+set is EXACTLY the boundary, links a real C host against it, and checks the
+values — calling a wrapper twice to prove init does not re-run. The internal
+symbols it closes off (`mu_*`, `*_as_value`, lifted functions, `__lang_argc`)
+were all external before, which a program never notices and two libraries in
+one host immediately would.
+
 ## v0.1.307 — 2026-08-23
 
 _One giant allocation taxed every block that came after it._

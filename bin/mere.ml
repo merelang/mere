@@ -19,6 +19,10 @@ let usage () =
   print_endline "  mere -w --component <file.mere>";
   print_endline "                        emit Wasm in Component Model shape (exports";
   print_endline "                        run + cabi_realloc; feed to wasm-tools component)";
+  print_endline "  mere -c --lib <file.mere>";
+  print_endline "                        emit C for a shared library instead of a program:";
+  print_endline "                        no main; exports mere_<stem>_<fn> wrappers plus";
+  print_endline "                        mere_lib_init / mere_lib_shutdown / mere_lib_free";
   print_endline "  mere -rv <file.mere>  emit a flat RV32IM binary (runs on the Mere RISC-V";
   print_endline "                        emulator; integer subset — see codegen_riscv.ml)";
   print_endline "  mere -rve <expr>      emit an RV32IM binary for an inline expression";
@@ -221,6 +225,26 @@ let infer_program ?base_dir source =
    written rather than the one that was generated. *)
 let set_c_debug path = Mere.Codegen_c.debug_file := Some path
 
+(* --lib: the wrapper prefix is `mere_<stem>_`, where <stem> is the source
+   filename made into a C identifier. Set whenever a `-c` invocation has a
+   real path; the inline `-ce` form keeps the default ("lib"). *)
+let set_lib_stem path =
+  if !Mere.Codegen_c.lib_mode then begin
+    let base = Filename.remove_extension (Filename.basename path) in
+    let b = Bytes.of_string base in
+    Bytes.iteri (fun i c ->
+      let ok =
+        (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+        || (c >= '0' && c <= '9') || c = '_'
+      in
+      if not ok then Bytes.set b i '_') b;
+    let stem = Bytes.to_string b in
+    let stem = if stem = "" then "lib"
+      else if stem.[0] >= '0' && stem.[0] <= '9' then "_" ^ stem
+      else stem in
+    Mere.Codegen_c.lib_stem := stem
+  end
+
 let compile_to_c ?base_dir source =
   let open Mere in
   let (prog, main_ty) = infer_program ?base_dir source in
@@ -407,6 +431,7 @@ let preprocess_argv () : string array =
     | [] -> (List.rev kept, List.rev dirs)
     | "-I" :: d :: rest -> walk kept (d :: dirs) rest
     | "--component" :: rest -> component_flag := true; walk kept dirs rest
+    | "--lib" :: rest -> Mere.Codegen_c.lib_mode := true; walk kept dirs rest
     | tok :: rest -> walk (tok :: kept) dirs rest
   in
   let (kept, dashI_dirs) = walk [] [] argv in
@@ -481,10 +506,12 @@ let () =
     let source = read_file path in
     let base = Filename.dirname path in
     set_c_debug path;
+    set_lib_stem path;
     run_action ~base_dir:base (compile_to_c ~base_dir:base) path source
   | [_; "-c"; path] ->
     let source = read_file path in
     let base = Filename.dirname path in
+    set_lib_stem path;
     run_action ~base_dir:base (compile_to_c ~base_dir:base) path source
   | [_; "-lle"; expr] ->
     run_action compile_to_llvm "<inline>" expr

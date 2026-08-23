@@ -14222,5 +14222,62 @@ let () =
      in
      if has "1500" then "emitted" else "missing") "emitted";
 
+  (* --- v0.1.308: --lib emission (C ABI shared-library boundary) ---
+     Text-level guards only; linkage and a real host live in
+     scripts/lib_check.sh, which looks with a linker's eyes. *)
+  let lib_c src =
+    Codegen_c.lib_mode := true;
+    Codegen_c.lib_stem := "t";
+    let out =
+      try
+        let prog = Pipeline.parse_program src in
+        let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+        Codegen_c.emit_program ~main_ty prog
+      with e ->
+        Codegen_c.lib_mode := false; Codegen_c.lib_stem := "lib"; raise e
+    in
+    Codegen_c.lib_mode := false;
+    Codegen_c.lib_stem := "lib";
+    out
+  in
+  let lib_demo =
+    lib_c
+      "let add2 = fn (a: int) -> fn (b: int) -> a + b;\n\
+       let greet = fn (name: str) -> \"hi \" ++ name;\n\
+       0"
+  in
+  let has hay needle =
+    let nl = String.length needle and hl = String.length hay in
+    let rec loop i =
+      if i + nl > hl then false
+      else if String.sub hay i nl = needle then true
+      else loop (i + 1)
+    in
+    loop 0
+  in
+  check "v0.1.308: --lib emits no main"
+    (if has lib_demo "int main(" then "main" else "no-main") "no-main";
+  check "v0.1.308: --lib emits the uncurried wrapper"
+    (if has lib_demo
+        "mere_status mere_t_add2(long long __a0, long long __a1, long long* out, mere_buf* err)"
+     then "wrapper" else "missing") "wrapper";
+  check "v0.1.308: --lib emits the boundary lifecycle"
+    (if has lib_demo "void mere_lib_init(void)"
+        && has lib_demo "void mere_lib_shutdown(void)"
+        && has lib_demo "void mere_lib_free(void* p)"
+     then "boundary" else "missing") "boundary";
+  check "v0.1.308: the manifest names the skipped export and the reason"
+    (if has lib_demo "greet -- str / bytes marshalling is a later slice"
+     then "named" else "silent") "named";
+  check "v0.1.308: --lib leaves no extern linkage on internals"
+    (if has lib_demo "extern const" then "extern" else "static-only") "static-only";
+  check "v0.1.308: without --lib, main is still emitted"
+    (let c =
+       let prog = Pipeline.parse_program "let f = fn (x: int) -> x;\n0" in
+       let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+       Codegen_c.emit_program ~main_ty prog
+     in
+     if has c "int main(" then "main" else "no-main") "main";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

@@ -255,6 +255,12 @@ jobs:
       - name: region_slack_check (capacity tracks allocation)
         run: sh scripts/region_slack_check.sh
 
+      # The --lib boundary, checked from the outside: the .so's exported
+      # symbol set is exactly the boundary, a C host linking it gets the
+      # right values, and module init runs once (v0.1.308).
+      - name: lib_check (shared-library boundary)
+        run: sh scripts/lib_check.sh
+
       - name: selfhost_check
         run: sh scripts/selfhost_check.sh
 

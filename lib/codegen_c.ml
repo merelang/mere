@@ -45,6 +45,22 @@ exception Codegen_error of Loc.t * string
    Off by default, so the emitted C is byte-identical to what it always was. *)
 let debug_file : string option ref = ref None
 
+(* --lib (v0.1.308): emit a shared-library translation unit instead of a
+   standalone program. No `main` is emitted; the output exports a small C ABI
+   boundary instead -- `mere_lib_init` / `mere_lib_shutdown` / `mere_lib_free`
+   plus one wrapper per exportable entry-file function (a manifest comment
+   near the end of the output lists what was exported and what was skipped,
+   with the reason). Everything else is emitted `static`, so the boundary's
+   names are the ONLY external symbols and a host can load two Mere libraries
+   without their internals colliding. `lib_stem` prefixes the wrappers
+   (`mere_<stem>_<fn>`); the driver sets it from the source filename. *)
+let lib_mode : bool ref = ref false
+let lib_stem : string ref = ref "lib"
+
+(* internal-linkage prefix for definitions that are external symbols in a
+   standalone program but must not leak out of a library *)
+let lib_static () = if !lib_mode then "static " else ""
+
 (* A position that names a file is not from the source being compiled — it came
    from the prelude or from an `import`, and claiming it as a line of this file
    would point a debugger at the wrong text. That check is the whole rule, and it
@@ -5181,7 +5197,8 @@ let emit_fn (f : fn_decl) : string =
   (* The directive goes *inside* the braces, because it applies to the line
      after it: with the whole body on one line, that puts the body exactly on the
      line the programmer wrote, rather than one past it. *)
-  Printf.sprintf "%s %s(%s) {\n%s  return %s;\n}\n%s"
+  Printf.sprintf "%s%s %s(%s) {\n%s  return %s;\n}\n%s"
+    (lib_static ())
     (c_type_of f.return_ty)
     (c_safe_name f.name)
     (format_param (f.param, f.param_ty))
@@ -5203,7 +5220,8 @@ let emit_lifted_fn (f : lifted_fn) : string =
       with_var_types all_bindings (fun () ->
         with_expected_ty f.l_return_ty (fun () -> emit_expr f.l_body)))
   in
-  Printf.sprintf "%s %s(%s) {\n%s%s  return %s;\n}\n%s"
+  Printf.sprintf "%s%s %s(%s) {\n%s%s  return %s;\n}\n%s"
+    (lib_static ())
     (c_type_of f.l_return_ty) f.l_name params
     (tail_prologue tail_used f.l_return_ty all_bindings)
     (line_directive f.l_body.Ast.loc) body_c
@@ -5235,7 +5253,8 @@ let emit_direct_fn_forward_decl (name : string) (info : direct_fn_info) : string
        (List.map (fun (_, t) -> c_type_of t) info.d_params))
 
 let emit_fn_forward_decl (f : fn_decl) : string =
-  Printf.sprintf "%s %s(%s);"
+  Printf.sprintf "%s%s %s(%s);"
+    (lib_static ())
     (c_type_of f.return_ty) (c_safe_name f.name) (c_type_of f.param_ty)
 
 (* Closure-value wrapper for a top-level fn: an env-ignoring adapter
@@ -5257,10 +5276,10 @@ let emit_closure_wrapper (f : fn_decl) : string =
        (void)__env;\n  \
        return %s(%s);\n\
      }\n\
-     const %s %s_as_value = {.env = NULL, .fn = %s_closure_fn};"
+     %sconst %s %s_as_value = {.env = NULL, .fn = %s_closure_fn};"
     cret safe carg sparam
     safe sparam
-    cstruct safe safe
+    (lib_static ()) cstruct safe safe
 
 (* Closure struct typedef for a `(p) -> r` arrow. *)
 let emit_closure_typedef (p : Ast.ty) (r : Ast.ty) : string =
@@ -5286,7 +5305,7 @@ let emit_lifted_fn_forward_decl (f : lifted_fn) : string =
       (List.map (fun (_, t) -> c_type_of t)
          (f.l_captures @ [(f.l_param, f.l_param_ty)]))
   in
-  Printf.sprintf "%s %s(%s);" (c_type_of f.l_return_ty) f.l_name params
+  Printf.sprintf "%s%s %s(%s);" (lib_static ()) (c_type_of f.l_return_ty) f.l_name params
 
 (* v0.1.52: peel a lifted fn's curried layers into (all params, innermost
    body, final return). Returns None if it isn't worth an uncurried twin
@@ -8794,7 +8813,8 @@ let metrics_runtime =
    `type 'a list = Nil | Cons of 'a * 'a list` instantiated at 'str).
    tag 0 = Nil, tag 1 = Cons (assigned in source order by the typer's
    register_type). *)
-let str_list_helpers =
+(* a function, not a constant: it reads lib_mode (set by the driver) *)
+let str_list_helpers () =
   String.concat "\n"
     [ "/* Phase 24.3: str_split builds a list_str by tokenizing s by delim. */";
       "/* v0.1.38 (Unicode): the codepoint view. A str stays bytes; these";
@@ -8964,8 +8984,8 @@ let str_list_helpers =
       (* Native CLI: argv[1..] as a str list, preserving order. argc/argv are
          captured into these globals by main(). Mirrors interp's `args`
          (argv[0], the program name, is dropped). *)
-      "int __lang_argc = 0;";
-      "char** __lang_argv = 0;";
+      lib_static () ^ "int __lang_argc = 0;";
+      lib_static () ^ "char** __lang_argv = 0;";
       "static list_str __lang_args(void) {";
       "  list_str head = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "  head->tag = 0;";
@@ -11084,8 +11104,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         in
         Printf.sprintf
           "static %s __ext_%s_closure_fn(void* __env, %s __x) { (void)__env; %s; }\n\
-           const %s __ext_%s_as_value = {.env = NULL, .fn = __ext_%s_closure_fn};"
-          cret name carg call cstruct name name)
+           %sconst %s __ext_%s_as_value = {.env = NULL, .fn = __ext_%s_closure_fn};"
+          cret name carg call (lib_static ()) cstruct name name)
         extern_val_pairs
   in
   (* Reset anonymous-closure state before generating fn defs (which
@@ -11211,10 +11231,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let closure_wrapper_forward_decls =
     List.map (fun (f : fn_decl) ->
       let cstruct = closure_struct_name f.param_ty f.return_ty in
-      Printf.sprintf "extern const %s %s_as_value;" cstruct (c_safe_name f.name))
+      Printf.sprintf "%sconst %s %s_as_value;"
+        (if !lib_mode then "static " else "extern ")
+        cstruct (c_safe_name f.name))
       fns
     @ List.map (fun (name, a, b) ->
-        Printf.sprintf "extern const %s __ext_%s_as_value;"
+        Printf.sprintf "%sconst %s __ext_%s_as_value;"
+          (if !lib_mode then "static " else "extern ")
           (closure_struct_name a b) name)
         extern_val_pairs
   in
@@ -11434,6 +11457,150 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          for integer-valued floats). *)
       "  puts(__lang_str_of_float(" ^ main_body ^ "));"
     | Some fmt -> "  printf(\"" ^ fmt ^ "\\n\", " ^ main_body ^ ");"
+  in
+  (* --lib: the C ABI boundary that replaces `main`. Exports are decided from
+     the same resolved tables the emission used: a function is exportable when
+     it comes from the entry file (loc.file = None -- the prelude and imports
+     carry their own file names), it kept its source name (a monomorphization
+     mangle means the source name was polymorphic), and every type at its
+     boundary is a scalar the C side can spell without marshalling: int /
+     bool / float parameters (unit parameters are erased and passed as 0),
+     int / bool / float / unit results. str / bytes marshalling is a later
+     slice. Everything not exported is listed in the manifest comment WITH the
+     reason -- a silently missing export reads as "covered" when it is not. *)
+  let lib_boundary_parts =
+    if not !lib_mode then []
+    else begin
+      let scalar t =
+        match Ast.walk t with
+        | Ast.TyInt | Ast.TyBool | Ast.TyFloat -> true
+        | _ -> false
+      in
+      let is_unit t = (match Ast.walk t with Ast.TyUnit -> true | _ -> false) in
+      let ret_ok t = scalar t || is_unit t in
+      let is_strbytes t =
+        match Ast.walk t with Ast.TyStr | Ast.TyBytes -> true | _ -> false
+      in
+      let plain_name n =
+        n <> "" && n.[0] <> '_'
+        && String.for_all (fun c ->
+             (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+             || (c >= '0' && c <= '9') || c = '_') n
+      in
+      (* skels keep the original names in source order; fns may hold mangled
+         per-instantiation twins whose names no C API should be built from. *)
+      let entry_skels =
+        List.filter (fun s ->
+          s.sfun.Ast.loc.Loc.file = None && plain_name s.sname) skels
+      in
+      let fn_by_name n = List.find_opt (fun (f : fn_decl) -> f.name = n) fns in
+      let exports = ref [] and skipped = ref [] in
+      let classify name (ptys : Ast.ty list) (rty : Ast.ty)
+          (call : string list -> string) =
+        if List.exists is_strbytes (rty :: ptys) then
+          skipped := (name, "str / bytes marshalling is a later slice") :: !skipped
+        else if List.for_all (fun t -> scalar t || is_unit t) ptys && ret_ok rty then
+          exports := (name, ptys, rty, call) :: !exports
+        else
+          skipped := (name, "type not representable at the C boundary") :: !skipped
+      in
+      List.iter (fun sk ->
+        let name = sk.sname in
+        match Hashtbl.find_opt direct_fns name, fn_by_name name with
+        | Some info, _ ->
+          classify name (List.map snd info.d_params) info.d_ret
+            (fun args ->
+               Printf.sprintf "%s__direct(%s)" (c_safe_name name)
+                 (String.concat ", " args))
+        | None, Some f ->
+          (match Ast.walk f.return_ty with
+           | Ast.TyArrow _ ->
+             skipped := (name, "curried type did not resolve to a concrete arrow")
+                        :: !skipped
+           | _ ->
+             classify name [f.param_ty] f.return_ty
+               (fun args ->
+                  Printf.sprintf "%s(%s)" (c_safe_name name)
+                    (String.concat ", " args)))
+        | None, None ->
+          skipped := (name, "polymorphic (emitted per instantiation only)") :: !skipped
+      ) entry_skels;
+      let exports = List.rev !exports and skipped = List.rev !skipped in
+      let skipped_values =
+        List.filter_map (fun (name, (v : Ast.expr), _) ->
+          if v.Ast.loc.Loc.file = None && plain_name name
+          then Some (name, "value binding (only functions are exported)")
+          else None) top_globals_list
+      in
+      let wrapper (name, ptys, rty, call) =
+        (* unit parameters exist in the Mere arrow but not in the C one: the
+           wrapper drops them from its signature and passes 0 at the call. *)
+        let c_params =
+          List.concat (List.mapi (fun i t ->
+            if is_unit t then []
+            else [Printf.sprintf "%s __a%d" (c_type_of t) i]) ptys)
+        in
+        let call_args =
+          List.mapi (fun i t ->
+            if is_unit t then "0" else Printf.sprintf "__a%d" i) ptys
+        in
+        let ret_unit = is_unit rty in
+        let sig_params =
+          c_params
+          @ (if ret_unit then [] else [Printf.sprintf "%s* out" (c_type_of rty)])
+          @ ["mere_buf* err"]
+        in
+        let body =
+          if ret_unit then Printf.sprintf "  (void)(%s);" (call call_args)
+          else
+            Printf.sprintf "  %s __r = %s;\n  if (out) *out = __r;"
+              (c_type_of rty) (call call_args)
+        in
+        Printf.sprintf
+          "mere_status mere_%s_%s(%s) {\n  mere_lib_init();\n  if (err) { err->ptr = NULL; err->len = 0; }\n%s\n  return MERE_OK;\n}"
+          !lib_stem name (String.concat ", " sig_params) body
+      in
+      [ Printf.sprintf "/* mere --lib manifest (%s)" !lib_stem;
+        " * exported:" ]
+      @ (if exports = [] then [" *   (none)"]
+         else List.map (fun (n, _, _, _) ->
+           Printf.sprintf " *   mere_%s_%s  <- %s" !lib_stem n n) exports)
+      @ [" * skipped (entry-file bindings not exported):" ]
+      @ (match skipped @ skipped_values with
+         | [] -> [" *   (none)"]
+         | sk -> List.map (fun (n, r) -> Printf.sprintf " *   %s -- %s" n r) sk)
+      @ [ " */";
+          "";
+          "typedef struct { const unsigned char* ptr; long long len; } mere_buf;";
+          "typedef enum { MERE_OK = 0, MERE_FAIL = 1 } mere_status;";
+          "";
+          "/* One-time runtime setup. Every wrapper calls this itself, so a host";
+          "   that never does is still correct; calling it early only moves the";
+          "   cost. Unlike a standalone program, a library takes NO process-global";
+          "   actions: no signal handler, no stdout buffering, no atexit -- those";
+          "   are the host's policy. The entry file's top-level bindings (and its";
+          "   trailing expression, if it has one) run once, inside this call. */";
+          "static void __mere_lib_init_body(void) {";
+          "  __lang_region_init(&__lang_default_region, 1 << 22);";
+          (if top_global_inits = [] then ""
+           else String.concat "\n" top_global_inits);
+          "  (void)(" ^ main_body ^ ");";
+          "}";
+          "static pthread_once_t __mere_lib_once = PTHREAD_ONCE_INIT;";
+          "void mere_lib_init(void) { pthread_once(&__mere_lib_once, __mere_lib_init_body); }";
+          "void mere_lib_shutdown(void) {";
+          (if Hashtbl.length owned_vec_instances > 0
+           then "  __mere_owned_vec_free_all();" else "");
+          "  __lang_region_free(&__lang_default_region);";
+          "}";
+          "/* Frees any pointer this library handed to the host. malloc and free";
+          "   stay in the same translation unit, so a host built with a different";
+          "   allocator is safe to combine with. */";
+          "void mere_lib_free(void* p) { free(p); }";
+          "" ]
+      @ List.map wrapper exports
+      @ [ "" ]
+    end
   in
   let parts =
     [ (* _GNU_SOURCE BEFORE EVERY HEADER, because that is the only place it works.
@@ -11774,7 +11941,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !metrics_used then [metrics_runtime; ""] else [])
     (* Phase 24.3: str_split / str_join — references list_str_node so
        emit after mono variant bodies (= list_str). *)
-    @ (if !str_split_used || !str_join_used || !list_dir_used || !args_used || !uses_read_lines then [str_list_helpers; ""] else [])
+    @ (if !str_split_used || !str_join_used || !list_dir_used || !args_used || !uses_read_lines then [str_list_helpers (); ""] else [])
     @ (if !uses_read_lines then [read_lines_helper; ""] else [])
     @ (if forward_decls = [] then [] else forward_decls @ [""])
     @ (let extern_decls =
@@ -11876,7 +12043,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        if eta_lines = [] then []
        else "/* Phase 35.1: nullary factory builtins as first-class values */"
             :: eta_lines @ [""])
-    @ [ "int main(int argc, char** argv) {";
+    @ (if !lib_mode then lib_boundary_parts else
+      [ "int main(int argc, char** argv) {";
         (* Line-buffer stdout so `print` means the same thing whether the program
            is watched in a terminal or piped to a file. C's default is to switch
            to full buffering when stdout is not a tty, which for a batch program
@@ -11903,7 +12071,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         "  __lang_region_free(&__lang_default_region);";
         "  return 0;";
         "}";
-        "" ]
+        "" ])
   in
   let out = String.concat "\n" parts in
   (* Every literal is known only now, so the declarations are patched in where
