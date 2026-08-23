@@ -4,6 +4,28 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.312 — 2026-08-23
+
+_It worked in every polite test._
+
+`mere_lib_shutdown` freed the default region; `mere_lib_init` was a
+pthread_once, and once cannot be re-armed. So a host that shut the library
+down and then called an export again reused freed memory — and got the right
+answer anyway, in every test, because nothing had reclaimed the pages yet. A
+use-after-free that works is strictly worse than one that crashes: nothing
+names it. It took the second host (a deliberately abusive ctypes harness —
+the first, polite host could never see it) plus AddressSanitizer to make it
+loud.
+
+The once is now a mutex and a flag. Shutdown is idempotent; a call after
+shutdown re-initializes — module init runs again, module state starts fresh,
+which is a meaning "call after shutdown" can keep rather than an accident it
+must avoid. Shutting down while another thread is mid-call remains the
+host's race to avoid, and the header says so. The gate grew a lifecycle
+section built with ASan where the compiler has it: early shutdown, a call
+that must re-initialize and answer correctly, a double shutdown — so "works
+by luck" fails loudly from now on.
+
 ## v0.1.311 — 2026-08-23
 
 _The process used to die before the leak mattered._

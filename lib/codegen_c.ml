@@ -11723,13 +11723,29 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
            else String.concat "\n" top_global_inits);
           "  (void)(" ^ main_body ^ ");";
           "}";
-          "static pthread_once_t __mere_lib_once = PTHREAD_ONCE_INIT;";
-          "void mere_lib_init(void) { pthread_once(&__mere_lib_once, __mere_lib_init_body); }";
+          (* v0.1.312: a mutex and a flag, not pthread_once. once cannot be
+             re-armed, so init after shutdown reused the freed default region
+             -- a use-after-free that HAPPENED to work in every polite test
+             and that ASan named the moment a host called shutdown early. Now
+             shutdown is idempotent and a later call re-initializes: module
+             init runs again, module state starts fresh. Shutting down while
+             another thread is mid-call is still the host's race to avoid. *)
+          "static pthread_mutex_t __mere_lib_lock = PTHREAD_MUTEX_INITIALIZER;";
+          "static int __mere_lib_live = 0;";
+          "void mere_lib_init(void) {";
+          "  pthread_mutex_lock(&__mere_lib_lock);";
+          "  if (!__mere_lib_live) { __mere_lib_init_body(); __mere_lib_live = 1; }";
+          "  pthread_mutex_unlock(&__mere_lib_lock);";
+          "}";
           "void mere_lib_shutdown(void) {";
+          "  pthread_mutex_lock(&__mere_lib_lock);";
+          "  if (!__mere_lib_live) { pthread_mutex_unlock(&__mere_lib_lock); return; }";
+          "  __mere_lib_live = 0;";
           "  __lang_region_stats_report();";
           (if Hashtbl.length owned_vec_instances > 0
            then "  __mere_owned_vec_free_all();" else "");
           "  __lang_region_free(&__lang_default_region);";
+          "  pthread_mutex_unlock(&__mere_lib_lock);";
           "}";
           "/* Frees any pointer this library handed to the host. malloc and free";
           "   stay in the same translation unit, so a host built with a different";
@@ -11788,7 +11804,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          "#endif";
          "";
          "void mere_lib_init(void);      /* optional: wrappers call it themselves */";
-         "void mere_lib_shutdown(void);";
+         "void mere_lib_shutdown(void); /* idempotent; a later call re-initializes";
+         "                                 (module state starts fresh). do not race";
+         "                                 in-flight calls. */";
          "void mere_lib_free(void* p);";
          "" ]
        @ protos
