@@ -1,0 +1,116 @@
+// io_poll_probe — the readiness capability, exercised end to end in one
+// single-threaded process (the client and the server are two fds here).
+//
+// What it checks, in order:
+//   wait0=0            an empty wait invents no events
+//   listener=rd        a pending connection makes the listener readable
+//   preread=-1         nonblocking read before data would block (coded -1)
+//   conn=rd data=hi    data makes the connection readable, read sees it
+//   writable=wr        write interest reports writable on an idle socket
+//   after_del=0        a deleted fd's events stop arriving
+//   eof_rd=1 eof=0     peer close is readable, and the read says 0
+//   accept_wb=-1       nonblocking accept with no one waiting is coded -1
+//   write_wb=-1        writing into a full socket buffer is coded -1
+extern fn tcp_listen: int -> int;
+extern fn tcp_accept: int -> int;
+extern fn tcp_connect: str -> int -> int;
+extern fn tcp_read: int -> int -> int -> int;
+extern fn tcp_write: int -> int -> int -> int;
+extern fn tcp_close: int -> unit;
+extern fn mem_alloc: int -> int;
+extern fn mem_to_str: int -> int -> str;
+extern fn mem_copy_str: int -> int -> str -> int;
+extern fn io_poll_new: int -> int;
+extern fn io_poll_add: int -> int -> int -> int;
+extern fn io_poll_mod: int -> int -> int -> int;
+extern fn io_poll_del: int -> int -> int;
+extern fn io_poll_wait: int -> int -> int;
+extern fn io_poll_get: int -> int -> int;
+extern fn io_set_nonblocking: int -> int;
+
+let buf = mem_alloc 65536;
+
+// listen on the first free port in a small window (fixed ports collide
+// with parallel CI jobs; a window bounds the damage)
+let rec grab = fn (port: int) ->
+  if port > 39299 then (0 - 1, 0)
+  else
+    let srv = tcp_listen port in
+    if srv >= 0 then (srv, port) else grab (port + 1);
+
+let bits_of = fn (ev: int) -> ev % 8;
+let fd_of = fn (ev: int) -> ev / 8;
+
+let main =
+  let (srv, port) = grab 39280 in
+  if srv < 0 then print "no free port"
+  else
+    let ps = io_poll_new 0 in
+    let _ = io_poll_add ps srv 1 in
+
+    // an empty wait invents nothing
+    let _ = print ("wait0=" ++ str_of_int (io_poll_wait ps 0)) in
+
+    // a pending connection makes the listener readable
+    let cli = tcp_connect "127.0.0.1" port in
+    let n1 = io_poll_wait ps 2000 in
+    let e1 = io_poll_get ps 0 in
+    let _ = print (if n1 == 1 && fd_of e1 == srv && bits_of e1 % 2 == 1
+                   then "listener=rd" else "listener=BAD") in
+
+    let conn = tcp_accept srv in
+    let _ = io_set_nonblocking conn in
+
+    // nonblocking read before any data: coded would-block
+    let _ = print ("preread=" ++ str_of_int (tcp_read conn buf 16)) in
+
+    // data makes the connection readable
+    let _ = io_poll_add ps conn 1 in
+    let _ = tcp_write cli buf (mem_copy_str buf 0 "hi") in
+    let n2 = io_poll_wait ps 2000 in
+    let e2 = io_poll_get ps 0 in
+    let got = tcp_read conn buf 16 in
+    let _ = print (if n2 == 1 && fd_of e2 == conn && bits_of e2 % 2 == 1
+                   then "conn=rd data=" ++ mem_to_str buf got else "conn=BAD") in
+
+    // write interest: an idle socket is writable
+    let _ = io_poll_mod ps conn 2 in
+    let n3 = io_poll_wait ps 2000 in
+    let e3 = io_poll_get ps 0 in
+    let _ = print (if n3 == 1 && bits_of e3 / 2 % 2 == 1 then "writable=wr" else "writable=BAD") in
+
+    // a deleted fd's events stop arriving
+    let _ = io_poll_del ps conn in
+    let _ = tcp_write cli buf (mem_copy_str buf 0 "x") in
+    let _ = print ("after_del=" ++ str_of_int (io_poll_wait ps 200)) in
+
+    // peer close: readable, and the read answers 0 (after draining the "x")
+    let _ = io_poll_add ps conn 1 in
+    let _ = tcp_read conn buf 16 in
+    let _ = tcp_close cli in
+    let n4 = io_poll_wait ps 2000 in
+    let e4 = io_poll_get ps 0 in
+    let _ = print ("eof_rd=" ++ str_of_int (bits_of e4 % 2)
+                   ++ " eof=" ++ str_of_int (if n4 == 1 then tcp_read conn buf 16 else 0 - 9)) in
+    let _ = tcp_close conn in
+    let _ = io_poll_del ps conn in
+
+    // nonblocking accept with no one waiting: coded would-block
+    let _ = io_set_nonblocking srv in
+    let _ = print ("accept_wb=" ++ str_of_int (tcp_accept srv)) in
+
+    // writing into a full socket buffer: coded would-block. The reader never
+    // reads, so a bounded loop of 32 KB writes must hit -1.
+    let cli2 = tcp_connect "127.0.0.1" port in
+    let conn2 = tcp_accept srv in
+    let _ = io_set_nonblocking cli2 in
+    let rec fill = fn (i: int) ->
+      if i == 4096 then 0 - 99
+      else
+        let w = tcp_write cli2 buf 32768 in
+        if w < 0 then w else fill (i + 1) in
+    let _ = print ("write_wb=" ++ str_of_int (fill 0)) in
+    let _ = tcp_close cli2 in
+    let _ = tcp_close conn2 in
+    tcp_close srv;
+main

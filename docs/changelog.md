@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.313 — 2026-08-23
+
+_Every server so far either blocked or spawned._
+
+mkv serves one connection at a time from a single loop; mhttpd spawns a
+thread per connection. Between those two shapes sits the one most production
+servers actually use — one thread, many connections, a readiness loop — and
+Mere had no way to write it: no poll, no nonblocking mode, nothing that
+answers "which of these fds is ready?".
+
+The `io_poll_*` externs answer it, in the socket family's own conventions
+(ints and coded negatives, native C backend). A pollset is a registered
+interest set — registration persists across waits, the epoll/kqueue model,
+so the caller's work per wait is O(changes) and a future kqueue/epoll
+implementation changes no API. The v1 implementation is poll(2), portable
+everywhere the socket family already runs. One ready event packs into one
+int (fd*8 + read/write/err bits), the convention midi_read established.
+`io_set_nonblocking` puts any fd of this runtime's into nonblocking mode.
+
+Nonblocking mode is only usable because the failure codes already existed —
+almost. tcp_read has distinguished "try again" (-1) from "the peer is gone"
+(-2) since v0.1.226; tcp_write and tcp_accept still returned a raw -1 for
+everything, and a nonblocking writer against a full socket buffer needs the
+difference. Both now use read's codes. A polite client never fills the
+buffer, which is why write's went uncoded this long: the gate's probe fills
+it on purpose (32 KB writes against a reader that never reads) and pins the
+-1. The transcript checks both directions — an empty wait invents no events,
+a deleted fd's events stop — because a readiness API that fabricates
+readiness passes every positive-only test.
+
 ## v0.1.312 — 2026-08-23
 
 _It worked in every polite test._

@@ -6369,7 +6369,14 @@ let native_ffi_names =
        mem_set_u8 once PER BYTE. `mem_to_str` cannot do it: it stops at the first
        zero byte, which every second HPACK block contains. Same shape as v0.1.222,
        where file_pwrite could not take a `bytes` and built one boxed int per byte. *)
-    "mem_to_bytes"; "mem_copy_bytes" ]
+    "mem_to_bytes"; "mem_copy_bytes";
+    (* v0.1.313: readiness. A registered interest set over any fds this
+       runtime hands out (tcp/udp), waited on with poll(2). Registration
+       persists across waits, so the API survives a later kqueue/epoll
+       implementation unchanged. One ready event packs into an int
+       (fd*8 + bits), the same convention midi_read set. *)
+    "io_poll_new"; "io_poll_add"; "io_poll_mod"; "io_poll_del";
+    "io_poll_wait"; "io_poll_get"; "io_set_nonblocking" ]
 
 (* TLS externs. Not implemented natively yet (needs libssl FFI). Stubbed so
    a native build LINKS and plaintext connections work; referenced by the
@@ -6615,6 +6622,9 @@ let native_ffi_runtime ~tls ~midi ~window =
       "#include <signal.h>";
       (* tcp_read reads errno to say which failure it was. *)
       "#include <errno.h>";
+      (* io_poll_* readiness + io_set_nonblocking (v0.1.313) *)
+      "#include <poll.h>";
+      "#include <fcntl.h>";
       (if tls then
          "#include <openssl/ssl.h>\n#include <openssl/err.h>\n#include <openssl/x509v3.h>\n\
           #define __TLS_MAX 4096\n\
@@ -6724,13 +6734,25 @@ let native_ffi_runtime ~tls ~midi ~window =
       "  if (listen(srv, 128) != 0) { close(srv); return -1; }";
       "  return srv;";
       "}";
-      "/* tcp_accept: block until a client connects to the listening fd, and";
-      "   return the connected client fd, or -1 on failure. */";
-      "static int tcp_accept(int srv) { return (int)accept(srv, 0, 0); }";
+      "/* tcp_accept: the connected client fd, or a coded failure -- the same";
+      "   codes tcp_read has used since v0.1.226 (-1 would-block, -2 gone,";
+      "   -3 other), so a nonblocking accept can tell \"no one is waiting\"";
+      "   from \"the listener broke\". Every existing `< 0` check reads the";
+      "   same as before. */";
+      "static int __lang_read_code(void);";
+      "static int tcp_accept(int srv) {";
+      "  int c = (int)accept(srv, 0, 0);";
+      "  return c >= 0 ? c : __lang_read_code();";
+      "}";
+      (* v0.1.313: write failures carry the same codes as read's (v0.1.226).
+         A nonblocking writer against a full socket buffer needs "try again
+         later" (-1) told apart from "the peer is gone" (-2); a polite
+         client never fills the buffer, which is why this went uncoded for
+         so long. Success still returns the byte count. *)
       (if tls then
-         "static int tcp_write(int fd, int p, int len) { if(fd>=0&&fd<__TLS_MAX&&__tls[fd]) return SSL_write(__tls[fd], __mem+p, len); return (int)write(fd, __mem + p, (size_t)len); }"
+         "static int tcp_write(int fd, int p, int len) { if(fd>=0&&fd<__TLS_MAX&&__tls[fd]) return SSL_write(__tls[fd], __mem+p, len); { long long n = (long long)write(fd, __mem + p, (size_t)len); return n < 0 ? __lang_read_code() : (int)n; } }"
        else
-         "static int tcp_write(int fd, int p, int len) { return (int)write(fd, __mem + p, (size_t)len); }");
+         "static int tcp_write(int fd, int p, int len) { long long n = (long long)write(fd, __mem + p, (size_t)len); return n < 0 ? __lang_read_code() : (int)n; }");
       (* v0.1.226 (mraft dogfood P4): a failed read says *which* failure it was.
          read(2) returns -1 for everything, and with SO_RCVTIMEO set that covers
          both "the deadline passed with nothing arriving" and "the connection
@@ -6805,6 +6827,88 @@ let native_ffi_runtime ~tls ~midi ~window =
       "  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);";
       "  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);";
       "  return 0;";
+      "}";
+      "/* --- io_poll_* (v0.1.313): registered readiness over this runtime's";
+      "   fds, waited on with poll(2). Interests persist across waits (the";
+      "   epoll/kqueue model), so the caller's work per wait is O(changes),";
+      "   not O(fds) -- and a later kqueue/epoll backend changes none of the";
+      "   API. One ready event is one int: fd*8 + (1 read | 2 write | 4 err/hup). */";
+      "#define __IOPS_MAX 8";
+      "typedef struct {";
+      "  struct pollfd* fds; int n; int cap; int live;";
+      "  struct pollfd* ready; int ready_n;";
+      "} __io_pollset;";
+      "static __io_pollset __iops[__IOPS_MAX];";
+      "static int io_poll_new(int dummy) {";
+      "  (void)dummy;";
+      "  for (int i = 0; i < __IOPS_MAX; i++) if (!__iops[i].live) {";
+      "    __io_pollset* p = &__iops[i];";
+      "    if (!p->fds) {";
+      "      p->cap = 64;";
+      "      p->fds = (struct pollfd*)malloc(sizeof(struct pollfd) * (size_t)p->cap);";
+      "      p->ready = (struct pollfd*)malloc(sizeof(struct pollfd) * (size_t)p->cap);";
+      "      if (!p->fds || !p->ready) return -1;";
+      "    }";
+      "    p->n = 0; p->ready_n = 0; p->live = 1;";
+      "    return i;";
+      "  }";
+      "  return -1;";
+      "}";
+      "static __io_pollset* __io_set(int s) {";
+      "  return (s >= 0 && s < __IOPS_MAX && __iops[s].live) ? &__iops[s] : 0;";
+      "}";
+      "static short __io_events(int interest) {";
+      "  return (short)(((interest & 1) ? POLLIN : 0) | ((interest & 2) ? POLLOUT : 0));";
+      "}";
+      "static int io_poll_add(int s, int fd, int interest) {";
+      "  __io_pollset* p = __io_set(s); if (!p) return -1;";
+      "  for (int i = 0; i < p->n; i++) if (p->fds[i].fd == fd) return -1;  /* use io_poll_mod */";
+      "  if (p->n == p->cap) {";
+      "    int ncap = p->cap * 2;";
+      "    struct pollfd* nf = (struct pollfd*)realloc(p->fds, sizeof(struct pollfd) * (size_t)ncap);";
+      "    struct pollfd* nr = (struct pollfd*)realloc(p->ready, sizeof(struct pollfd) * (size_t)ncap);";
+      "    if (!nf || !nr) return -1;";
+      "    p->fds = nf; p->ready = nr; p->cap = ncap;";
+      "  }";
+      "  p->fds[p->n].fd = fd; p->fds[p->n].events = __io_events(interest); p->fds[p->n].revents = 0;";
+      "  p->n++;";
+      "  return 0;";
+      "}";
+      "static int io_poll_mod(int s, int fd, int interest) {";
+      "  __io_pollset* p = __io_set(s); if (!p) return -1;";
+      "  for (int i = 0; i < p->n; i++) if (p->fds[i].fd == fd) { p->fds[i].events = __io_events(interest); return 0; }";
+      "  return -1;";
+      "}";
+      "static int io_poll_del(int s, int fd) {";
+      "  __io_pollset* p = __io_set(s); if (!p) return -1;";
+      "  for (int i = 0; i < p->n; i++) if (p->fds[i].fd == fd) {";
+      "    p->fds[i] = p->fds[p->n - 1]; p->n--;";
+      "    return 0;";
+      "  }";
+      "  return -1;";
+      "}";
+      "static int io_poll_wait(int s, int timeout_ms) {";
+      "  __io_pollset* p = __io_set(s); if (!p) return -1;";
+      "  int r = poll(p->fds, (nfds_t)p->n, timeout_ms);";
+      "  if (r < 0) return -1;";
+      "  p->ready_n = 0;";
+      "  for (int i = 0; i < p->n && p->ready_n < r; i++)";
+      "    if (p->fds[i].revents) p->ready[p->ready_n++] = p->fds[i];";
+      "  return p->ready_n;";
+      "}";
+      "static int io_poll_get(int s, int idx) {";
+      "  __io_pollset* p = __io_set(s); if (!p) return -1;";
+      "  if (idx < 0 || idx >= p->ready_n) return -1;";
+      "  struct pollfd* e = &p->ready[idx];";
+      "  int bits = ((e->revents & POLLIN) ? 1 : 0)";
+      "           | ((e->revents & POLLOUT) ? 2 : 0)";
+      "           | ((e->revents & (POLLERR | POLLHUP | POLLNVAL)) ? 4 : 0);";
+      "  return e->fd * 8 + bits;";
+      "}";
+      "static int io_set_nonblocking(int fd) {";
+      "  int fl = fcntl(fd, F_GETFL, 0);";
+      "  if (fl < 0) return -1;";
+      "  return fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0 ? -1 : 0;";
       "}";
       (if window then
          "/* --- window / pixels / input (SDL2) — v0.1.249. The probe for this\n\
