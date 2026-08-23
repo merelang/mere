@@ -148,4 +148,135 @@ after=7"
 grep -q 'pick -- type not representable at the C boundary' "$TMP/demo.c" || {
   echo "FAIL lib_check: manifest does not name the skipped higher-order export"; exit 1; }
 
-echo "lib_check: ok (boundary exact, header-built host, str/bytes round-trip, fail -> status)"
+# ---- 5. memory contract: calls are transactions ----------------------------
+# Each wrapper call runs in its own region; containers whose region erased to
+# __heap follow the current region (v0.1.311), so the DEFAULT region must not
+# grow with the number of calls. The check is two-sided: module init builds a
+# map (so alloc_total > 0 proves the meter sees the subject), then two runs
+# with different call counts must report the SAME default-region numbers --
+# equal-and-positive is growth-free; zero would mean the meter broke.
+cat > "$TMP/state.mere" <<'MERE'
+let base = map_new ();
+let seed =
+  let rec go = fn (i: int) ->
+    if i == 64 then () else let _ = map_set base i (i * i) in go (i + 1) in
+  go 0;
+let counts = map_new ();
+let names = map_new ();
+let bump = fn (k: int) ->
+  let cur = if map_has counts k then map_get counts k else 0 in
+  let _ = map_set counts k (cur + 1) in
+  cur + 1;
+let label = fn (k: int) -> fn (name: str) ->
+  let _ = map_set names k (name ++ "!") in
+  0;
+let read_label = fn (k: int) ->
+  if map_has names k then map_get names k else "(none)";
+let churn = fn (n: int) ->
+  let v = vec_new () in
+  let m = map_new () in
+  let rec go = fn (i: int) ->
+    if i == n then ()
+    else
+      let _ = vec_push v (i * 2) in
+      let _ = map_set m i (str_of_int i) in
+      go (i + 1) in
+  let _ = go 0 in
+  vec_len v + map_len m;
+MERE
+"$MERE" -c --lib "$TMP/state.mere" > "$TMP/state.c" 2>"$TMP/state.err" \
+  || { echo "FAIL lib_check: mere -c --lib refused the state lib"; cat "$TMP/state.err"; exit 1; }
+"$CC" -O1 -w -fPIC -shared "$TMP/state.c" -o "$TMP/state.so" \
+  || { echo "FAIL lib_check: state lib shared build failed"; exit 1; }
+
+cat > "$TMP/hoststate.c" <<'C'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+typedef struct { const unsigned char* ptr; long long len; } mere_buf;
+typedef enum { MERE_OK = 0, MERE_FAIL = 1 } mere_status;
+mere_status mere_state_bump(long long, long long* out, mere_buf* err);
+mere_status mere_state_label(long long, mere_buf, long long* out, mere_buf* err);
+mere_status mere_state_read_label(long long, mere_buf* out, mere_buf* err);
+mere_status mere_state_churn(long long, long long* out, mere_buf* err);
+void mere_lib_free(void* p);
+void mere_lib_shutdown(void);
+int main(int argc, char** argv) {
+  long long n = argc > 1 ? atoll(argv[1]) : 1000, r;
+  /* a call-local str stored into module state must survive the call's
+     region AND the host reusing its buffer (copy-on-store, twice) */
+  char scratch[8]; strcpy(scratch, "hello");
+  mere_buf nm = { (const unsigned char*)scratch, 5 };
+  if (mere_state_label(1, nm, &r, 0) != MERE_OK) return 1;
+  memset(scratch, 'X', sizeof scratch);
+  for (long long i = 0; i < n; i++) {
+    if (mere_state_churn(24, &r, 0) != MERE_OK || r != 48) return 1;
+    if (mere_state_bump(7, &r, 0) != MERE_OK) return 1;
+  }
+  mere_buf out, err;
+  if (mere_state_read_label(1, &out, &err) != MERE_OK) return 1;
+  printf("count=%lld label=%.*s\n", r, (int)out.len, out.ptr);
+  mere_lib_free((void*)out.ptr);
+  mere_lib_shutdown();
+  return 0;
+}
+C
+"$CC" -O1 "$TMP/hoststate.c" "$TMP/state.so" -o "$TMP/hoststate" \
+  || { echo "FAIL lib_check: state host link failed"; exit 1; }
+
+small="$(MERE_REGION_STATS=1 "$TMP/hoststate" 2000 2>&1)"
+large="$(MERE_REGION_STATS=1 "$TMP/hoststate" 50000 2>&1)"
+echo "$small" | grep -q "count=2000 label=hello!" || {
+  echo "FAIL lib_check: module state wrong after 2000 calls"; echo "$small"; exit 1; }
+echo "$large" | grep -q "count=50000 label=hello!" || {
+  echo "FAIL lib_check: module state wrong after 50000 calls"; echo "$large"; exit 1; }
+stat_small="$(echo "$small" | grep '^region-stats default:')"
+stat_large="$(echo "$large" | grep '^region-stats default:')"
+alloc_small="$(echo "$stat_small" | sed -n 's/.*alloc_total=\([0-9]*\).*/\1/p')"
+[ -n "$stat_small" ] && [ -n "$stat_large" ] || {
+  echo "FAIL lib_check: no region-stats line -- meter gone"; exit 1; }
+[ "$alloc_small" -gt 0 ] || {
+  echo "FAIL lib_check: default alloc_total is 0 -- the meter cannot see module init"; exit 1; }
+[ "$stat_small" = "$stat_large" ] || {
+  echo "FAIL lib_check: default region grew with the call count -- calls are not transactions"
+  echo "--- 2000  calls: $stat_small"
+  echo "--- 50000 calls: $stat_large"
+  exit 1; }
+
+# ---- 6. thread contract: concurrent calls from 8 host threads --------------
+cat > "$TMP/hostmt.c" <<'C'
+#include <stdio.h>
+#include <pthread.h>
+typedef struct { const unsigned char* ptr; long long len; } mere_buf;
+typedef enum { MERE_OK = 0, MERE_FAIL = 1 } mere_status;
+mere_status mere_demo_add2(long long, long long, long long* out, mere_buf* err);
+mere_status mere_demo_greet(mere_buf, mere_buf* out, mere_buf* err);
+mere_status mere_demo_boom(long long, long long* out, mere_buf* err);
+void mere_lib_free(void* p);
+static void* worker(void* arg) {
+  (void)arg;
+  long long r; mere_buf out, err;
+  mere_buf name = { (const unsigned char*)"mt", 2 };
+  for (int i = 0; i < 4000; i++) {
+    if (mere_demo_add2(i, i, &r, 0) != MERE_OK || r != 2 * i) return (void*)1;
+    if (mere_demo_greet(name, &out, 0) != MERE_OK || out.len != 9) return (void*)1;
+    mere_lib_free((void*)out.ptr);
+    if (mere_demo_boom(1, &r, &err) != MERE_FAIL) return (void*)1;  /* per-thread jmpbuf */
+    mere_lib_free((void*)err.ptr);
+  }
+  return NULL;
+}
+int main(void) {
+  pthread_t t[8]; int bad = 0;
+  for (int i = 0; i < 8; i++) pthread_create(&t[i], NULL, worker, NULL);
+  for (int i = 0; i < 8; i++) { void* rv; pthread_join(t[i], &rv); if (rv) bad++; }
+  printf("mt bad=%d\n", bad);
+  return bad ? 1 : 0;
+}
+C
+"$CC" -O1 "$TMP/hostmt.c" "$TMP/demo.so" -o "$TMP/hostmt" -lpthread \
+  || { echo "FAIL lib_check: mt host link failed"; exit 1; }
+"$TMP/hostmt" | grep -q "mt bad=0" || {
+  echo "FAIL lib_check: concurrent calls returned wrong values"; exit 1; }
+
+echo "lib_check: ok (boundary exact, header-built host, str/bytes round-trip, fail -> status, calls are transactions, 8-thread clean)"
