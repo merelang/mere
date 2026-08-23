@@ -5827,7 +5827,9 @@ let () =
     go 0 in
   check "v0.1.67: C fail is silent when caught (longjmp before the stderr print)"
     (let c = vec_codegen_c "try_or (fn u -> int_of_str \"x\") 0" in
-     let jmp = idx_of c "__lang_fail_jmpbuf_set) { longjmp" in
+     (* v0.1.310 reshaped the guard to multiple lines (it copies the message
+        into the per-thread slot before jumping); the property is unchanged. *)
+     let jmp = idx_of c "longjmp(__lang_fail_jmpbuf, 1);" in
      (* v0.1.246: the `fail: ` tag moved from this print to the `fail` builtin, so
         the print is a bare "%s" now. The property is the same one — the longjmp
         has to come first, or a caught failure leaks a diagnostic. *)
@@ -14288,6 +14290,19 @@ let () =
      then "header" else "missing") "header";
   check "v0.1.308: --lib leaves no extern linkage on internals"
     (if has lib_demo "extern const" then "extern" else "static-only") "static-only";
+  check "v0.1.310: the wrapper guards the call with setjmp"
+    (if has lib_demo "if (setjmp(__lang_fail_jmpbuf) != 0) {"
+        && has lib_demo "return MERE_FAIL;"
+     then "guarded" else "bare") "guarded";
+  check "v0.1.310: the fail jmpbuf is per-thread in every mode"
+    (let c =
+       let prog = Pipeline.parse_program "let f = fn (x: int) -> x;\n0" in
+       let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+       Codegen_c.emit_program ~main_ty prog
+     in
+     if has c "static _Thread_local int __lang_fail_jmpbuf_set = 0;"
+        && has c "static _Thread_local jmp_buf __lang_fail_jmpbuf;"
+     then "thread-local" else "global") "thread-local";
   check "v0.1.308: without --lib, main is still emitted"
     (let c =
        let prog = Pipeline.parse_program "let f = fn (x: int) -> x;\n0" in

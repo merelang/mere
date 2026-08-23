@@ -7237,8 +7237,19 @@ let str_concat_helper =
          needed. When combined with show-style helpers we need to return a
          str, so we provide two variants (__lang_fail_int / __lang_fail_str)
          depending on the return type. *)
-      "static int __lang_fail_jmpbuf_set = 0;";
-      "static jmp_buf __lang_fail_jmpbuf;";
+      (* v0.1.310: one jmpbuf PER THREAD. The single global slot meant a fail
+         in a spawned thread could longjmp into a jmp_buf that some OTHER
+         thread's try_or had armed -- a jump into a foreign stack. try_or's
+         save/restore protects against re-entry on one thread; only
+         _Thread_local protects against a neighbour. A thread with no try_or
+         of its own now takes the uncaught path (print + exit 1), which is
+         what the interpreter does. The message slot exists for boundaries
+         that must REPORT the failure rather than print it (--lib wrappers):
+         the fail_* helpers build messages in stack buffers that longjmp
+         abandons, so the message is copied somewhere that survives the jump. *)
+      "static _Thread_local int __lang_fail_jmpbuf_set = 0;";
+      "static _Thread_local jmp_buf __lang_fail_jmpbuf;";
+      "static _Thread_local char __lang_fail_msg[256];";
       (* v0.1.271: a stack overflow used to be a bare SIGSEGV -- no output, exit
          139, nothing to read. Deep recursion is the most common way a Mere
          program dies on a compiled backend (three of this week's findings were
@@ -7306,7 +7317,10 @@ let str_concat_helper =
       "     error, so it must be silent (matching the LLVM backend and the";
       "     interpreter). Previously this printed unconditionally, leaking a";
       "     'fail: ...' line on every try_or-caught failure. */";
-      "  if (__lang_fail_jmpbuf_set) { longjmp(__lang_fail_jmpbuf, 1); }";
+      "  if (__lang_fail_jmpbuf_set) {";
+      "    snprintf(__lang_fail_msg, sizeof __lang_fail_msg, \"%s\", msg);";
+      "    longjmp(__lang_fail_jmpbuf, 1);";
+      "  }";
       "  fprintf(stderr, \"%s\\n\", msg);";
       (* exit rather than abort: an uncaught `fail` is a program error the
          language defines, not a crash. abort() made the shell report 134 /
@@ -11583,8 +11597,36 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
             Printf.sprintf "  %s __r = %s;\n  if (out) *out = __r;"
               (c_type_of rty) (call call_args)
         in
+        (* the same save/restore + region unwind as try_or's catch arm: a fail
+           inside the call longjmps here, the jumped-over block regions are
+           released, and the failure comes back as a status + message instead
+           of exit(1) -- a library must not decide the host process is over. *)
         Printf.sprintf
-          "%s {\n  mere_lib_init();\n  if (err) { err->ptr = NULL; err->len = 0; }\n%s\n  return MERE_OK;\n}"
+          "%s {\n\
+          \  mere_lib_init();\n\
+          \  if (err) { err->ptr = NULL; err->len = 0; }\n\
+          \  jmp_buf __saved_jmp; int __saved_set = __lang_fail_jmpbuf_set;\n\
+          \  __lang_region* __saved_cur = __lang_current_region;\n\
+          \  int __saved_rsn = __lang_region_active_n;\n\
+          \  memcpy(__saved_jmp, __lang_fail_jmpbuf, sizeof(jmp_buf));\n\
+          \  __lang_fail_jmpbuf_set = 1;\n\
+          \  if (setjmp(__lang_fail_jmpbuf) != 0) {\n\
+          \    __lang_region_unwind(__saved_rsn);\n\
+          \    __lang_current_region = __saved_cur;\n\
+          \    __lang_fail_jmpbuf_set = __saved_set;\n\
+          \    memcpy(__lang_fail_jmpbuf, __saved_jmp, sizeof(jmp_buf));\n\
+          \    if (err) {\n\
+          \      size_t __n = strlen(__lang_fail_msg);\n\
+          \      unsigned char* __p = (unsigned char*)malloc(__n + 1);\n\
+          \      if (__p) { memcpy(__p, __lang_fail_msg, __n + 1); err->ptr = __p; err->len = (long long)__n; }\n\
+          \    }\n\
+          \    return MERE_FAIL;\n\
+          \  }\n\
+          %s\n\
+          \  __lang_fail_jmpbuf_set = __saved_set;\n\
+          \  memcpy(__lang_fail_jmpbuf, __saved_jmp, sizeof(jmp_buf));\n\
+          \  return MERE_OK;\n\
+          }"
           (wrapper_sig e) body
       in
       let uses_str_bnd =
