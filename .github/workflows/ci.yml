@@ -268,6 +268,12 @@ jobs:
       - name: io_poll_check (readiness answers what it claims)
         run: sh scripts/io_poll_check.sh
 
+      # Audio output (v0.1.314): the queue's contract under the SDL dummy
+      # driver — visible pending bytes, bounded drain to exactly 0, -1 after
+      # close. Sample correctness is the consumer's oracle, not this gate's.
+      - name: audio_check (the audio queue's contract, headless)
+        run: sh scripts/audio_check.sh
+
       - name: selfhost_check
         run: sh scripts/selfhost_check.sh
 

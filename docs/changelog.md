@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.314 — 2026-08-23
+
+_Sound, but never a callback._
+
+Native audio output did not exist — the browser backend could beep through a
+DOM binding, and that was all of it. The `audio_*` externs add it on the
+socket family's terms: SDL2 audio (the build line win_* already established),
+fixed s16le mono, samples crossing as arena bytes like every other device's
+data.
+
+The design choice is the push model. Audio APIs usually hand you a callback
+that a device thread calls on a hard deadline — which for Mere would mean a
+host-owned thread calling back into the language, a whole boundary design of
+its own (the --lib arc met it from the other side). SDL_QueueAudio inverts
+the direction: the device drains a queue, `audio_queued` says how much is
+left, and the PROGRAM's job is to keep the queue fed before it empties.
+The hard deadline is still real — missing it is an audible gap — but it is
+now a deadline the program meets with ordinary code (a low-water loop of
+synthesize-and-queue), not a foreign thread inside the runtime.
+
+The gate runs headless under SDL's dummy driver and holds the queue to its
+contract: pending bytes are visible, the queue drains to exactly zero in
+bounded time, a closed device answers -1, a nonsense rate answers -1. What
+the samples should BE is deliberately not this gate's claim — the dummy
+driver eats them, and SDL's disk driver was measured rewriting them (stereo
+upmix, chunk padding) — so byte-correctness belongs to the consumer, which
+checks its rendered PCM against an independently computed expectation.
+
 ## v0.1.313 — 2026-08-23
 
 _Every server so far either blocked or spawned._

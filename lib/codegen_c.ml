@@ -434,6 +434,7 @@ let uses_file_fsync = ref false   (* v0.1.115: file_fsync (durability) *)
 let uses_tls = ref false  (* v0.1.91: tcp_starttls* -> real OpenSSL runtime *)
 let uses_midi = ref false  (* v0.1.128: midi_* -> PortMidi input runtime *)
 let uses_window = ref false  (* v0.1.249: win_* -> SDL2 window / pixels / input *)
+let uses_audio = ref false  (* v0.1.314: audio_* -> SDL2 audio, push model *)
 let uses_file_io = ref false  (* v0.1.59: file_open / file_read_line / file_close *)
 let uses_int_of_str = ref false  (* v0.1.60: validating int parse *)
 let uses_write_file_bytes = ref false
@@ -6376,7 +6377,11 @@ let native_ffi_names =
        implementation unchanged. One ready event packs into an int
        (fd*8 + bits), the same convention midi_read set. *)
     "io_poll_new"; "io_poll_add"; "io_poll_mod"; "io_poll_del";
-    "io_poll_wait"; "io_poll_get"; "io_set_nonblocking" ]
+    "io_poll_wait"; "io_poll_get"; "io_set_nonblocking";
+    (* v0.1.314: audio output, push model (SDL_QueueAudio -- no callback into
+       Mere; the program's job is to keep the queue fed before the deadline).
+       s16le mono. Samples cross as arena bytes, like every other device. *)
+    "audio_open"; "audio_queue"; "audio_queued"; "audio_close" ]
 
 (* TLS externs. Not implemented natively yet (needs libssl FFI). Stubbed so
    a native build LINKS and plaintext connections work; referenced by the
@@ -6611,7 +6616,7 @@ let native_http_runtime =
       "  return 0;";
       "}" ]
 
-let native_ffi_runtime ~tls ~midi ~window =
+let native_ffi_runtime ~tls ~midi ~window ~audio =
   String.concat "\n"
     [ "/* --- native FFI runtime: Wasm-style byte arena + POSIX TCP --- */";
       "#include <sys/socket.h>";
@@ -7026,6 +7031,57 @@ let native_ffi_runtime ~tls ~midi ~window =
           \  SDL_DestroyWindow(__win_win[(int)id]);\n\
           \  __win_win[(int)id] = NULL; __win_ren[(int)id] = NULL;\n\
           \  __win_tex[(int)id] = NULL;\n\
+          \  return 0;\n\
+          }\n"
+       else "");
+      (if audio then
+         "/* --- audio output (SDL2 audio, push model) — v0.1.314. No callback\n\
+          \   into Mere: the device drains a queue, and the PROGRAM's job is to\n\
+          \   keep the queue fed before the deadline (audio_queued below a low\n\
+          \   water mark means synthesize more). Missing the deadline is an\n\
+          \   audible failure, not a crash — which is the shape of the domain.\n\
+          \   Format is fixed s16le mono at the requested rate; samples cross\n\
+          \   as arena bytes like every other device's data. Emitted only when\n\
+          \   a program declares an audio_* extern; build with\n\
+          \   `sdl2-config --cflags --libs`. */\n\
+          #include <SDL.h>\n\
+          #define __AUD_MAX 8\n\
+          static SDL_AudioDeviceID __aud_dev[__AUD_MAX];\n\
+          static int __aud_n = 0;\n\
+          static int __aud_inited = 0;\n\
+          static int __aud_live(int id) {\n\
+          \  return id >= 0 && id < __aud_n && __aud_dev[id] != 0;\n\
+          }\n\
+          static long long audio_open(long long rate) {\n\
+          \  if (__aud_n >= __AUD_MAX || rate <= 0) return -1;\n\
+          \  if (!__aud_inited) {\n\
+          \    SDL_SetMainReady();\n\
+          \    if (SDL_Init(SDL_INIT_AUDIO) != 0) return -1;\n\
+          \    __aud_inited = 1;\n\
+          \  }\n\
+          \  SDL_AudioSpec want, have;\n\
+          \  SDL_zero(want);\n\
+          \  want.freq = (int)rate; want.format = AUDIO_S16LSB;\n\
+          \  want.channels = 1; want.samples = 1024; want.callback = NULL;\n\
+          \  SDL_AudioDeviceID d = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);\n\
+          \  if (!d) return -1;\n\
+          \  SDL_PauseAudioDevice(d, 0);\n\
+          \  int id = __aud_n++;\n\
+          \  __aud_dev[id] = d;\n\
+          \  return id;\n\
+          }\n\
+          static long long audio_queue(long long id, long long p, long long bytes) {\n\
+          \  if (!__aud_live((int)id) || bytes < 0) return -1;\n\
+          \  return SDL_QueueAudio(__aud_dev[(int)id], __mem + p, (Uint32)bytes) == 0 ? 0 : -1;\n\
+          }\n\
+          static long long audio_queued(long long id) {\n\
+          \  if (!__aud_live((int)id)) return -1;\n\
+          \  return (long long)SDL_GetQueuedAudioSize(__aud_dev[(int)id]);\n\
+          }\n\
+          static long long audio_close(long long id) {\n\
+          \  if (!__aud_live((int)id)) return -1;\n\
+          \  SDL_CloseAudioDevice(__aud_dev[(int)id]);\n\
+          \  __aud_dev[(int)id] = 0;\n\
           \  return 0;\n\
           }\n"
        else "");
@@ -10664,6 +10720,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.mem extern_fn_decls "win_open"
     || Hashtbl.mem extern_fn_decls "win_blit"
     || Hashtbl.mem extern_fn_decls "win_poll";
+  (* v0.1.314: declaring an audio_* extern pulls in the SDL2 audio runtime
+     (same build line as win_*: `sdl2-config --cflags --libs`). *)
+  uses_audio :=
+    Hashtbl.mem extern_fn_decls "audio_open"
+    || Hashtbl.mem extern_fn_decls "audio_queue";
   strbuf_used := false;
   bytebuf_used := false;
   bytes_used := false;
@@ -11965,7 +12026,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          them as unresolved `extern` prototypes. *)
       (if Hashtbl.fold (fun n _ acc -> acc || is_native_ffi n)
             extern_fn_decls false
-       then native_ffi_runtime ~tls:!uses_tls ~midi:!uses_midi ~window:!uses_window ^ "\n"
+       then native_ffi_runtime ~tls:!uses_tls ~midi:!uses_midi ~window:!uses_window
+              ~audio:!uses_audio ^ "\n"
        else "");
       (* Q-012: concurrency runtime. `spawn` runs a `unit -> unit` closure on a
          fresh OS thread; the trampoline invokes the closure the same way the

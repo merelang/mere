@@ -1,0 +1,52 @@
+// audio_probe — the audio capability's contract, headless.
+//
+// Runs under SDL_AUDIODRIVER=dummy, so nothing is audible and no hardware is
+// needed: what is checked is the CONTRACT — a queue that accepts bytes,
+// reports how much is pending, drains monotonically, and answers -1 once
+// closed. What the samples sound like is the consumer's business (msynth
+// proves the bytes against an independent oracle); what SDL's drivers do
+// with them is SDL's.
+extern fn audio_open:   int -> int;
+extern fn audio_queue:  int -> int -> int -> int;
+extern fn audio_queued: int -> int;
+extern fn audio_close:  int -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_set_u8: int -> int -> int -> int;
+
+let rate = 44100;
+let seconds_bytes = rate * 2;   // 1 second of s16le mono
+
+let buf = mem_alloc seconds_bytes;
+
+// one second of 440 Hz sine at amplitude 3000, s16le
+let synth =
+  let rec go = fn (i: int) ->
+    if i == rate then ()
+    else
+      let v = int_of_float (3000.0 * sin (6.283185307179586 * 440.0
+                                          * float_of_int i / 44100.0)) in
+      let u = if v < 0 then v + 65536 else v in
+      let _ = mem_set_u8 buf (i * 2) (u % 256) in
+      let _ = mem_set_u8 buf (i * 2 + 1) (u / 256) in
+      go (i + 1) in
+  go 0;
+
+let main =
+  let dev = audio_open rate in
+  let _ = print (if dev >= 0 then "open=ok" else "open=BAD") in
+  let _ = print ("empty=" ++ str_of_int (audio_queued dev)) in
+  let q = audio_queue dev buf seconds_bytes in
+  let pending = audio_queued dev in
+  let _ = print (if q == 0 && pending > 0 then "queued>0" else "queue=BAD") in
+  // the dummy device drains in real time; a second of audio is a bounded wait
+  let rec drain = fn (tries: int) ->
+    if tries == 0 then 0 - 99
+    else
+      let left = audio_queued dev in
+      if left == 0 then 0
+      else let _ = sleep_ms 50 in drain (tries - 1) in
+  let _ = print ("drained=" ++ str_of_int (drain 100)) in
+  let _ = print ("close=" ++ str_of_int (audio_close dev)) in
+  let _ = print ("after_close=" ++ str_of_int (audio_queued dev)) in
+  print ("badrate=" ++ str_of_int (audio_open (0 - 1)));
+main
