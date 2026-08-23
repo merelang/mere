@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.310 — 2026-08-23
+
+_A library must not decide the host process is over._
+
+An uncaught `fail` inside a --lib wrapper called exit(1) — correct for a
+standalone program, and exactly the thing a loaded library may never do to
+its host. Every wrapper now arms the same setjmp guard try_or uses (the same
+save/restore, the same active-region unwind from v0.1.301), and a failure
+comes back across the boundary as MERE_FAIL plus the failure's own words,
+malloc'd into the caller's `err` buffer and released with `mere_lib_free`.
+The library stays usable after its own failure — the gate calls the failing
+export again and expects the right answer.
+
+Getting the words across took a slot: the fail_* helpers build their messages
+in stack buffers, and longjmp abandons the frame the message lives in, so
+`__lang_fail_impl` copies it into a per-thread buffer before jumping.
+
+Per-thread is the other half of this change, and it is not lib-only. The
+jmp_buf and its armed flag were single process-wide globals, so a fail in a
+spawned thread could longjmp into a jmp_buf that some OTHER thread's try_or
+had armed — a jump into a foreign stack. try_or's save/restore protects
+against re-entry on one thread; only `_Thread_local` protects against a
+neighbour. Both are thread-local now, in every mode: a thread with no try_or
+of its own takes the uncaught path (print + exit 1), which is what the
+interpreter does.
+
 ## v0.1.309 — 2026-08-23
 
 _The boundary spoke three words of six._

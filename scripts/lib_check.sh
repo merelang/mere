@@ -40,6 +40,7 @@ let revb = fn (b: bytes) ->
   let _ = go 0 in
   bytes_of_bytebuf out;
 let pick = fn (f: int -> int) -> f 1;
+let boom = fn (flag: int) -> if flag == 1 then fail "boom says no" else flag;
 let _ = print "init";
 ()
 MERE
@@ -67,6 +68,7 @@ fi
 # _edata, _end, _fini, _init...) that no source line asked for; ignore them.
 syms="$(echo "$syms" | grep -v '^_' | grep -v '^$' || true)"
 expected="add2
+boom
 fortytwo
 greet
 is_even
@@ -111,6 +113,15 @@ int main(void) {
   printf("\n");
   mere_lib_free((void*)out.ptr);
 
+  /* a fail comes back as a status + message, not as the host's death;
+     and the library keeps working after its own failure */
+  { long long r; mere_buf e2;
+    if (mere_demo_boom(1, &r, &e2) != MERE_FAIL) return 1;
+    printf("%.*s\n", (int)e2.len, e2.ptr);
+    mere_lib_free((void*)e2.ptr);
+    if (mere_demo_boom(7, &r, &e2) != MERE_OK) return 1;
+    printf("after=%lld\n", r); }
+
   mere_lib_shutdown();
   return 0;
 }
@@ -124,7 +135,9 @@ got="$("$TMP/host")"
 want="init
 17 10 1 42
 hello, world nul=0
-revb=0002ff0001"
+revb=0002ff0001
+fail: boom says no
+after=7"
 [ "$got" = "$want" ] || {
   echo "FAIL lib_check: host output differs from interp"
   echo "--- want: $want"
@@ -135,4 +148,4 @@ revb=0002ff0001"
 grep -q 'pick -- type not representable at the C boundary' "$TMP/demo.c" || {
   echo "FAIL lib_check: manifest does not name the skipped higher-order export"; exit 1; }
 
-echo "lib_check: ok (boundary exact, host via generated header, str/bytes round-trip)"
+echo "lib_check: ok (boundary exact, header-built host, str/bytes round-trip, fail -> status)"
