@@ -21,7 +21,12 @@ trap 'rm -rf "$TMP"' EXIT
 
 "$MERE" -c "$ROOT/test/audio/audio_probe.mere" > "$TMP/p.c" 2>"$TMP/p.err" \
   || { echo "FAIL audio: mere -c refused the probe"; cat "$TMP/p.err"; exit 1; }
-"$CC" -O1 -w "$TMP/p.c" $(sdl2-config --cflags --libs) -o "$TMP/p" 2>"$TMP/cc.err" \
+# -lm explicitly: the probe's sine generator needs libm, which macOS bundles
+# into libSystem but Linux does not — this line was the first thing this gate
+# did on a Linux runner, and it turned CI red from v0.1.314 to v0.1.316 while
+# every gate wired in after it went unrun (a red build stops at the first
+# failed step; everything downstream is unknown, not green).
+"$CC" -O1 -w "$TMP/p.c" $(sdl2-config --cflags --libs) -lm -o "$TMP/p" 2>"$TMP/cc.err" \
   || { echo "FAIL audio: C compile failed"; cat "$TMP/cc.err"; exit 1; }
 
 SDL_AUDIODRIVER=dummy sh "$ROOT/scripts/bounded.sh" 30 "$TMP/p" > "$TMP/got" 2>&1
