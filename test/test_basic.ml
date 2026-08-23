@@ -14303,6 +14303,23 @@ let () =
      if has c "static _Thread_local int __lang_fail_jmpbuf_set = 0;"
         && has c "static _Thread_local jmp_buf __lang_fail_jmpbuf;"
      then "thread-local" else "global") "thread-local";
+  check "v0.1.311: each wrapper call runs in its own region"
+    (if has lib_demo "__lang_region* __call_region = __lang_region_block_acquire();"
+        && has lib_demo "__lang_region_block_release(__call_region);"
+     then "transaction" else "ambient") "transaction";
+  check "v0.1.311: __heap containers follow the current region in lib mode"
+    (let c = lib_c "let f = fn (n: int) ->\n  let v = vec_new () in\n  let _ = vec_push v n in vec_len v;\n0" in
+     if has c "mere_vec_int_new(__lang_current_region)" then "current" else "default")
+    "current";
+  check "v0.1.311: without --lib, __heap containers stay in the default region"
+    (let c =
+       let prog = Pipeline.parse_program
+         "let f = fn (n: int) ->\n  let v = vec_new () in\n  let _ = vec_push v n in vec_len v;\nf 1" in
+       let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+       Codegen_c.emit_program ~main_ty prog
+     in
+     if has c "mere_vec_int_new((&__lang_default_region))" then "default" else "moved")
+    "default";
   check "v0.1.308: without --lib, main is still emitted"
     (let c =
        let prog = Pipeline.parse_program "let f = fn (x: int) -> x;\n0" in

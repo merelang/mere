@@ -4,6 +4,43 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.311 — 2026-08-23
+
+_The process used to die before the leak mattered._
+
+Each --lib wrapper call now runs inside its own region — the same
+acquire/release machinery as `region R { }` blocks, acquired after setjmp
+records the active-stack depth so a failure's unwind releases it too. Values
+were already handled: strings, cons cells and variant nodes follow the
+thread's current region, and the marshalling copies results out to malloc
+before the release. The leak was the containers. A Vec or Map whose region
+variable erased to `__heap` was pinned to the default region (v0.1.31: a
+container carries identity and may outlive any block — and the process dies
+with the program anyway, so nothing ever reclaimed it). A library breaks that
+last assumption: the process outlives every call. Measured, the pin cost 512
+bytes per call for a small Vec and 1.5 KB for a small Map — 226 MB of default
+region across 100k calls of three small exports, in a program whose visible
+footprint should have been constant.
+
+The fix follows from what the boundary already promises: a call is a
+transaction. Results are copied out; containers cannot cross. So in lib mode
+`__heap` containers follow the CURRENT region — the per-call region during an
+export call (reclaimed at return), the default region during module init
+(module state persists). Copy-on-store already covers the seam: a call-local
+value stored into module state is copied into the store's region, and the
+gate proves it by overwriting the host's buffer and reading the value back
+50,000 calls later. After the change the same 300k-call run reads
+alloc_total=0 against the default region and a 1.5 MB resident set — was
+264 MB of capacity.
+
+The gate is two-sided and grew a thread section: module init builds a map so
+a zero reading would name a broken meter, two runs at different call counts
+must report byte-identical default-region stats, and 8 host threads hammer
+the same three exports concurrently (per-thread call regions, per-thread fail
+jmpbufs — v0.1.310's other half) with every value checked. TSan-clean;
+reverting the container redirect makes the gate fail with the growth numbers
+in its output.
+
 ## v0.1.310 — 2026-08-23
 
 _A library must not decide the host process is over._

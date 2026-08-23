@@ -68,6 +68,22 @@ let lib_header : string ref = ref ""
    standalone program but must not leak out of a library *)
 let lib_static () = if !lib_mode then "static " else ""
 
+(* v0.1.311: the region a container whose region variable erased to `__heap`
+   is created in. A standalone program pins these to the default region
+   (v0.1.31: a container carries identity and may outlive any block, and the
+   program dies with the process anyway). In lib mode that pin is the leak:
+   the process outlives every call, so each call's containers accumulate in
+   a region nothing reclaims (measured 512 B/call for a small Vec, 1.5 KB/call
+   for a small Map -- 226 MB over 100k calls). The boundary makes every call
+   a transaction -- results are copied out, containers cannot cross -- so
+   `__heap` containers follow the CURRENT region instead: the per-call region
+   during an export call (reclaimed at return), the default region during
+   module init (module state persists). Stores into longer-lived containers
+   still copy their contents (v0.1.31 copy-on-store), so a call-local value
+   stored into module state survives the call's region. *)
+let heap_container_region () =
+  if !lib_mode then "__lang_current_region" else "(&__lang_default_region)"
+
 (* A position that names a file is not from the source being compiled — it came
    from the prelude or from an `import`, and claiming it as a line of this file
    would point a debugger at the wrong text. That check is the whole rule, and it
@@ -2464,8 +2480,8 @@ let rec emit_expr (e : Ast.expr) : string =
        let region_var =
          match Option.map Ast.walk e.Ast.ty with
          | Some (Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); _])) ->
-           if r = "__heap" then "(&__lang_default_region)" else "__region_" ^ r
-         | _ -> "(&__lang_default_region)"
+           if r = "__heap" then (heap_container_region ()) else "__region_" ^ r
+         | _ -> (heap_container_region ())
        in
        Printf.sprintf "__lang_vec_of_bytes(%s, %s)" (emit_expr arg) region_var
      | Ast.App ({ node = Ast.Var "str_index_of"; _ }, h_e) ->
@@ -2720,12 +2736,12 @@ let rec emit_expr (e : Ast.expr) : string =
             | Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); _]) ->
               if not (Hashtbl.mem vec_instances "int") then
                 Hashtbl.add vec_instances "int" Ast.TyInt;
-              if r = "__heap" then "(&__lang_default_region)"
+              if r = "__heap" then (heap_container_region ())
               else "__region_" ^ r
             | _ ->
               if not (Hashtbl.mem vec_instances "int") then
                 Hashtbl.add vec_instances "int" Ast.TyInt;
-              "(&__lang_default_region)")
+              (heap_container_region ()))
          | None -> unsupported e.loc "read_file_bytes: missing type info"
        in
        uses_read_file_bytes := true;
@@ -2743,12 +2759,12 @@ let rec emit_expr (e : Ast.expr) : string =
             | Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); _]) ->
               if not (Hashtbl.mem vec_instances "int") then
                 Hashtbl.add vec_instances "int" Ast.TyInt;
-              if r = "__heap" then "(&__lang_default_region)"
+              if r = "__heap" then (heap_container_region ())
               else "__region_" ^ r
             | _ ->
               if not (Hashtbl.mem vec_instances "int") then
                 Hashtbl.add vec_instances "int" Ast.TyInt;
-              "(&__lang_default_region)")
+              (heap_container_region ()))
          | None -> unsupported e.loc "file_pread: missing type info"
        in
        uses_file_io := true;
@@ -3106,7 +3122,7 @@ let rec emit_expr (e : Ast.expr) : string =
             thread-local current region defeats sibling-call optimization,
             and deep tail loops with per-iteration regions overflowed the
             stack). The default region stays a static struct. *)
-         if region_name = "__heap" then "(&__lang_default_region)"
+         if region_name = "__heap" then (heap_container_region ())
          else "__region_" ^ region_name
        in
        Printf.sprintf "mere_vec_%s_new(%s)" elem_tag region_var
@@ -3375,7 +3391,7 @@ let rec emit_expr (e : Ast.expr) : string =
             thread-local current region defeats sibling-call optimization,
             and deep tail loops with per-iteration regions overflowed the
             stack). The default region stays a static struct. *)
-         if region_name = "__heap" then "(&__lang_default_region)"
+         if region_name = "__heap" then (heap_container_region ())
          else "__region_" ^ region_name
        in
        Printf.sprintf "mere_map_%s_%s_new(%s)" k_tag v_tag region_var
@@ -3443,7 +3459,7 @@ let rec emit_expr (e : Ast.expr) : string =
             thread-local current region defeats sibling-call optimization,
             and deep tail loops with per-iteration regions overflowed the
             stack). The default region stays a static struct. *)
-         if region_name = "__heap" then "(&__lang_default_region)"
+         if region_name = "__heap" then (heap_container_region ())
          else "__region_" ^ region_name
        in
        Printf.sprintf "mere_strbuf_new(%s)" region_var
@@ -3463,7 +3479,7 @@ let rec emit_expr (e : Ast.expr) : string =
          | None -> "__heap"
        in
        let region_var =
-         if region_name = "__heap" then "(&__lang_default_region)"
+         if region_name = "__heap" then (heap_container_region ())
          else "__region_" ^ region_name
        in
        Printf.sprintf "mere_bytebuf_new(%s, %s)" region_var (emit_expr arg)
@@ -3476,7 +3492,7 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "bytebuf_of_bytes" ->
        bytebuf_used := true; bytes_used := true;
        Printf.sprintf "mere_bytebuf_of_bytes(%s, %s)"
-         "(&__lang_default_region)" (emit_expr arg)
+         (heap_container_region ()) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "bytebuf_get"; _ }, bb_e) ->
        bytebuf_used := true;
        Printf.sprintf "mere_bytebuf_get(%s, %s)" (emit_expr bb_e) (emit_expr arg)
@@ -3512,7 +3528,7 @@ let rec emit_expr (e : Ast.expr) : string =
             thread-local current region defeats sibling-call optimization,
             and deep tail loops with per-iteration regions overflowed the
             stack). The default region stays a static struct. *)
-         if region_name = "__heap" then "(&__lang_default_region)"
+         if region_name = "__heap" then (heap_container_region ())
          else "__region_" ^ region_name
        in
        (* Result is Vec[R, T] — register element type for runtime emission. *)
@@ -11600,7 +11616,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         (* the same save/restore + region unwind as try_or's catch arm: a fail
            inside the call longjmps here, the jumped-over block regions are
            released, and the failure comes back as a status + message instead
-           of exit(1) -- a library must not decide the host process is over. *)
+           of exit(1) -- a library must not decide the host process is over.
+           v0.1.311: each call runs inside its own region (the same
+           acquire/release machinery as `region R { }` blocks -- the acquire
+           happens AFTER setjmp records the active-stack depth, so the catch
+           arm's unwind releases it on failure too). The marshalling copies
+           the result out to malloc BEFORE the release, so nothing the host
+           receives points into reclaimed memory. *)
         Printf.sprintf
           "%s {\n\
           \  mere_lib_init();\n\
@@ -11622,7 +11644,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           \    }\n\
           \    return MERE_FAIL;\n\
           \  }\n\
+          \  __lang_region* __call_region = __lang_region_block_acquire();\n\
+          \  __lang_current_region = __call_region;\n\
           %s\n\
+          \  __lang_current_region = __saved_cur;\n\
+          \  __lang_region_block_release(__call_region);\n\
           \  __lang_fail_jmpbuf_set = __saved_set;\n\
           \  memcpy(__lang_fail_jmpbuf, __saved_jmp, sizeof(jmp_buf));\n\
           \  return MERE_OK;\n\
@@ -11700,6 +11726,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           "static pthread_once_t __mere_lib_once = PTHREAD_ONCE_INIT;";
           "void mere_lib_init(void) { pthread_once(&__mere_lib_once, __mere_lib_init_body); }";
           "void mere_lib_shutdown(void) {";
+          "  __lang_region_stats_report();";
           (if Hashtbl.length owned_vec_instances > 0
            then "  __mere_owned_vec_free_all();" else "");
           "  __lang_region_free(&__lang_default_region);";
@@ -12182,7 +12209,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                  | Ast.TyCon ("Vec", [_; et]) -> ty_tag (Ast.walk et)
                  | _ -> "?"
                in
-               Printf.sprintf "mere_vec_%s_new(&__lang_default_region)" elem_tag
+               Printf.sprintf "mere_vec_%s_new(%s)" elem_tag (heap_container_region ())
              | "owned_vec_new" ->
                let elem_tag =
                  match Ast.walk ret_ty with
@@ -12191,7 +12218,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                in
                Printf.sprintf "mere_owned_vec_%s_new()" elem_tag
              | "strbuf_new" ->
-               "mere_strbuf_new(&__lang_default_region)"
+               Printf.sprintf "mere_strbuf_new(%s)" (heap_container_region ())
              | "map_new" ->
                let (k_tag, v_tag) =
                  match Ast.walk ret_ty with
@@ -12199,7 +12226,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                    (ty_tag (Ast.walk k), ty_tag (Ast.walk v))
                  | _ -> ("?", "?")
                in
-               Printf.sprintf "mere_map_%s_%s_new(&__lang_default_region)" k_tag v_tag
+               Printf.sprintf "mere_map_%s_%s_new(%s)" k_tag v_tag (heap_container_region ())
              | _ -> "0"
            in
            let fn_def = Printf.sprintf
