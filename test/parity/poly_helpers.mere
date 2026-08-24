@@ -1,0 +1,56 @@
+// Q-064: the eight documented polymorphic helpers, on every backend.
+//
+// Five of them -- id, pair, swap, const, flip -- were typer builtins with
+// interpreter implementations and no code generator at all, so they worked
+// under `mere file.mere` and nowhere else. The LLVM and Wasm backends refused
+// them by name; the C backend emitted a reference to an undeclared `mu_pair`
+// and let the C compiler report it, in terms of a symbol the author never
+// wrote. They are prelude definitions now, which is what this pins: ordinary
+// closures, compiled by every backend, with one implementation rather than
+// one per backend to keep in step.
+//
+// Partial application and use as a first-class value are exercised too, since
+// those are what a special case in the emitter cannot give you and a closure
+// gets for free.
+
+let sub = fn a -> fn b -> a - b;
+
+let _ = print (show 42);
+let _ = print (str_of_int (id 42));
+let _ = print (id "id is polymorphic");
+let _ = print (str_of_int (fst (10, 20)));
+let _ = print (str_of_int (snd (10, 20)));
+
+let p = pair "k" 7;   // pair is used at exactly ONE type in this file, so it
+                      // stays usable in value position on every backend
+let _ = print (fst p ++ "=" ++ str_of_int (snd p));
+let q = swap p;
+let _ = print (str_of_int (fst q) ++ "=" ++ snd q);
+
+let _ = print (str_of_int (const 7 "the second argument is dropped"));
+let _ = print (str_of_int (flip sub 3 10));          // sub 10 3 = 7
+
+// Higher-order: passed as VALUES rather than applied in place, which is the
+// half a special case in the emitter cannot give you.
+//
+// `id` is deliberately not among them. It is used at int and at str above, and
+// the Wasm backend refuses a multi-instantiated polymorphic function in value
+// position by name ("no single value form on Wasm yet") -- an honest refusal,
+// and a limit of that backend rather than of these helpers. Passing it here
+// too would put this whole case in parity's "unchecked on wasm" list, which is
+// to say it would stop protecting the backend it was written for.
+let ap1 = fn f -> fn x -> f x;
+let ap2 = fn f -> fn x -> fn y -> f x y;
+let _ = print (str_of_int (ap2 const 5 "dropped"));
+let _ = print (str_of_int (ap1 (flip sub 3) 10));
+let _ = print (str_of_int (snd (ap2 pair "k2" 8)));  // same (str * int) as above
+
+// partial application returning a closure that is then called
+let take3 = flip sub 3;
+let _ = print (str_of_int (take3 10));
+
+// used through the list helpers, i.e. as an ordinary argument
+let xs = Cons (1, Cons (2, Cons (3, Nil)));
+let _ = print (str_of_int (list_len (list_map xs (fn x -> x))));
+let _ = print (str_of_int (list_fold xs 0 (fn acc -> fn x -> acc + x)));
+print "done"

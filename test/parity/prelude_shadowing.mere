@@ -1,0 +1,29 @@
+// Q-064 moved id / pair / swap / const / flip from the typer's builtin table
+// into the prelude. The names were already taken either way -- this is where
+// they are DEFINED changing, not whether they exist -- but `id` and `const`
+// are common enough that a program defining its own is not a hypothetical, so
+// the shadowing is pinned here rather than assumed.
+//
+// The mangled names moved when this landed: a user `id` specialised as
+// `id__int` before and `id_uq1__int__int` after, because the prelude binding
+// now has to be uniquified around. Three unit tests asserted on the old
+// spelling and caught it. Those tests were renamed to keep them about
+// specialisation; this case is the one that is about shadowing.
+
+let id = fn x -> x + 1;              // NOT the identity
+let const = fn a -> fn b -> b;       // returns the SECOND, unlike the prelude
+let pair = fn a -> fn b -> (b, a);   // reversed
+
+let _ = print (str_of_int (id 10));           // 11, not 10
+let _ = print (str_of_int (const 1 2));       // 2, not 1
+let _ = print (str_of_int (fst (pair 1 2)));  // 2, not 1
+
+// A shadowed name stays shadowed inside a function defined after it.
+let use_them = fn x -> id (const 0 x);
+let _ = print (str_of_int (use_them 5));      // const 0 5 = 5, id 5 = 6
+
+// And the ones NOT shadowed still come from the prelude in the same program.
+let sub = fn a -> fn b -> a - b;
+let _ = print (str_of_int (flip sub 3 10));   // 7
+let _ = print (str_of_int (fst (swap (1, 2))));
+print "done"

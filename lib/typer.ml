@@ -1121,57 +1121,11 @@ let snd_scheme =
 
 (* `id : 'a -> 'a` — identity function. *)
 let _id_alpha = fresh_var ()
-let id_scheme =
-  let aid = match _id_alpha with Ast.TyVar v -> v.id | _ -> assert false in
-  { constraints = []; quantified = [aid];
-    body = Ast.TyArrow (_id_alpha, _id_alpha) }
-
-(* `swap : ('a * 'b) -> ('b * 'a)` — 2-tuple swap. *)
-let _swap_alpha = fresh_var ()
-let _swap_beta = fresh_var ()
-let swap_scheme =
-  let aid = match _swap_alpha with Ast.TyVar v -> v.id | _ -> assert false in
-  let bid = match _swap_beta with Ast.TyVar v -> v.id | _ -> assert false in
-  { constraints = []; quantified = [aid; bid];
-    body = Ast.TyArrow (Ast.TyTuple [_swap_alpha; _swap_beta],
-                        Ast.TyTuple [_swap_beta; _swap_alpha]) }
-
-(* `pair : 'a -> 'b -> ('a * 'b)` — construct a 2-tuple from curried args. *)
-let _pair_alpha = fresh_var ()
-let _pair_beta = fresh_var ()
-let pair_scheme =
-  let aid = match _pair_alpha with Ast.TyVar v -> v.id | _ -> assert false in
-  let bid = match _pair_beta with Ast.TyVar v -> v.id | _ -> assert false in
-  { constraints = []; quantified = [aid; bid];
-    body = Ast.TyArrow (_pair_alpha,
-                        Ast.TyArrow (_pair_beta,
-                                     Ast.TyTuple [_pair_alpha; _pair_beta])) }
-
-(* `const : 'a -> 'b -> 'a` — returns first arg, ignores second. *)
-let _const_alpha = fresh_var ()
-let _const_beta = fresh_var ()
-let const_scheme =
-  let aid = match _const_alpha with Ast.TyVar v -> v.id | _ -> assert false in
-  let bid = match _const_beta with Ast.TyVar v -> v.id | _ -> assert false in
-  { constraints = []; quantified = [aid; bid];
-    body = Ast.TyArrow (_const_alpha,
-                        Ast.TyArrow (_const_beta, _const_alpha)) }
-
-(* `flip : ('a -> 'b -> 'c) -> ('b -> 'a -> 'c)` — flip arg order of a curried
-   binary function.  Lang's first 3-quantified, higher-order builtin. *)
-let _flip_alpha = fresh_var ()
-let _flip_beta = fresh_var ()
-let _flip_gamma = fresh_var ()
-let flip_scheme =
-  let aid = match _flip_alpha with Ast.TyVar v -> v.id | _ -> assert false in
-  let bid = match _flip_beta with Ast.TyVar v -> v.id | _ -> assert false in
-  let cid = match _flip_gamma with Ast.TyVar v -> v.id | _ -> assert false in
-  let arrow_in =
-    Ast.TyArrow (_flip_alpha, Ast.TyArrow (_flip_beta, _flip_gamma)) in
-  let arrow_out =
-    Ast.TyArrow (_flip_beta, Ast.TyArrow (_flip_alpha, _flip_gamma)) in
-  { constraints = []; quantified = [aid; bid; cid];
-    body = Ast.TyArrow (arrow_in, arrow_out) }
+(* Q-064: `id` / `swap` / `pair` / `const` / `flip` were typer builtins with
+   polymorphic schemes and interpreter implementations, and no code generator
+   knew them at all -- so they worked under `mere file.mere` and nowhere else.
+   They are prelude definitions now (see prelude_stdlib.ml), which is to say
+   ordinary polymorphic code that every backend already knows how to compile. *)
 
 (* `try_or : (unit -> 'a) -> 'a -> 'a` — catch Eval_error, return default. *)
 let _try_alpha = fresh_var ()
@@ -2201,11 +2155,6 @@ let initial_env : env =
     ("len",         len_scheme);
     ("fst",         fst_scheme);
     ("snd",         snd_scheme);
-    ("id",          id_scheme);
-    ("swap",        swap_scheme);
-    ("pair",        pair_scheme);
-    ("const",       const_scheme);
-    ("flip",        flip_scheme);
     ("try_or",      try_or_scheme);
     ("iter_n",
        mono (Ast.TyArrow (Ast.TyInt,
