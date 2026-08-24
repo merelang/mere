@@ -4,6 +4,63 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.317 — 2026-08-24
+
+_Deleting one key cost the whole table._
+
+`map_delete` found its entry through the hash index and then SHIFTED every
+dense entry above it down one slot and rebuilt the index. One delete was
+O(live), so a table under churn — a bounded live set with a lot of traffic
+through it, which is what a session table, a connection map or a
+bookkeeping table is — was quadratic in the number of operations.
+
+The new cross-language benchmark suite is what named it, and named it in the
+form that made it unarguable. Its `churn` sweep holds the operation count
+fixed and doubles the live set: an implementation whose delete is O(1) draws
+a flat line. Rust, Go, Node, Ruby and Python all drew flat lines. This
+backend drew 130 / 208 / 392 / 817 / 1659 ms, doubling with the table, and
+came out **behind Python** on a workload it should not lose. Isolating it —
+same operation count, same key, only the resident table size changing —
+showed `map_set` flat and `map_delete` alone linear.
+
+Delete tombstones now. `dead[i]` marks a vacated dense slot, `live` is what
+`map_len` answers, and the index slot becomes `-2` rather than `-1`: a
+vacated slot must not end a probe chain, because a key inserted after the
+deletion may sit further along it. Nothing moves. The dense arrays are
+squeezed — in place, in insertion order, allocating nothing — only when the
+dead outnumber the live, so the O(len) squeeze is paid once per O(live)
+deletes and each delete is amortised O(1). `set` reuses a vacated index slot
+before consuming a fresh one, and the load factor counts occupied slots
+rather than live entries, so tombstones cannot silently lengthen every probe.
+
+The sweep is now flat: 40 / 42 / 41 / 44 / 42 ms. The benchmark's main row
+goes 1687 ms → 74 ms (23x), and at the largest live set 1659 ms → 42 ms
+(39x). Mere now sits between Go and Rust there instead of behind Python.
+Cumulative allocation moves 43,298,448 → 43,404,960 bytes (+0.25%, the
+tombstone arrays) and peak RSS is unchanged.
+
+**Insertion order is why this is a tombstone and not a swap-with-last.**
+`map_iter` order is pinned to insertion order across all four backends
+(Phase 27.1), which rules out the cheaper fix. Everything here is therefore
+supposed to be invisible, and `test/parity/map_delete_tombstone.mere` is what
+holds that: it crosses both internal thresholds deliberately (the squeeze
+needs the dead to outnumber the live AND to number at least eight; the index
+doubles past a 0.7 load factor), and all four backends run it — the three
+that still shift have to produce the same transcript as the one that no
+longer does. Poisoned both ways to check it is load-bearing: `map_len`
+returning the high-water mark fails it and three others, and vacating with
+`-1` instead of `-2` fails **only** this case, which is the subtle failure
+this design has and nothing else in the suite could see.
+
+The C backend only. The interpreter has the same shape — `map_delete` filters
+the insertion-order list, O(live) per call — and it is measurably there
+(20k operations, live set 500 → 8,000: 0.38 s → 1.92 s, where O(1) would be
+flat and O(live) would be 16x), but diluted by interpreter overhead rather
+than dominant. LLVM, Wasm and RV32I still shift. Those are the remaining half
+of the question and are recorded as such rather than quietly counted as done.
+
+---
+
 ## v0.1.316 — 2026-08-23
 
 _Every delete rebuilt the index into fresh memory._

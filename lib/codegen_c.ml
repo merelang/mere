@@ -3438,6 +3438,7 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf
          "({ __auto_type __m = %s; __auto_type __outer = %s; \
           for (int __i = 0; __i < __m->len; __i++) { \
+            if (__m->dead[__i]) continue; \
             __auto_type __inner = __outer.fn(__outer.env, __m->keys[__i]); \
             __inner.fn(__inner.env, __m->values[__i]); \
           } 0; })"
@@ -6212,8 +6213,9 @@ let emit_deep_copy_fn (tag : string) (t : Ast.ty) : string =
        handle __mdeep just built -- allocated in r, exactly right). *)
     Printf.sprintf
       "%s {\n  %s* m2 = %s_new(r);\n  \
-       for (int i = 0; i < v->len; i++)\n    \
-       %s_set(m2, v->keys[i], __mdeep_%s(r, v->values[i]));\n  \
+       for (int i = 0; i < v->len; i++) {\n    \
+       if (v->dead[i]) continue;\n    \
+       %s_set(m2, v->keys[i], __mdeep_%s(r, v->values[i]));\n  }\n  \
        return m2;\n}"
       header m m m v_tag
   | Ast.TyCon ("Vec", [_; el_ty]) ->
@@ -8414,10 +8416,22 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
     [ Printf.sprintf "typedef struct %s {" struct_name;
       Printf.sprintf "  %s* keys;" c_k;
       Printf.sprintf "  %s* values;" c_v;
-      "  int len;";
+      "  int len;       /* dense high-water mark: entries ever appended */";
       "  int cap;";
-      "  int* idx;      /* open-addressing index into keys/values (-1 = empty) */";
+      (* Q-063: delete used to SHIFT the dense arrays and rebuild the index, so
+         one delete cost O(live) and a table under churn was quadratic --
+         measured flat in every other language's map and doubling in this one
+         (benchmarks/churn's sweep). It tombstones now: `dead[i]` marks a slot
+         vacated, `live` is what map_len answers, and the arrays are squeezed
+         only when the tombstones outnumber the survivors, which is amortised
+         O(1) per delete. Insertion order survives because nothing moves on a
+         delete -- and that order is pinned across all four backends
+         (Phase 27.1), which is what rules out the cheaper swap-with-last. *)
+      "  unsigned char* dead;  /* dead[i] = the dense slot i was deleted */";
+      "  int live;      /* entries not tombstoned; what map_len returns */";
+      "  int* idx;      /* open addressing into keys/values (-1 empty, -2 vacated) */";
       "  int idx_cap;   /* power of two */";
+      "  int idx_used;  /* index slots not -1: live entries PLUS vacated ones */";
       "  __lang_region* region;";
       "  int owns_region;  /* 1 after the first compact: region is private and freeable */";
       Printf.sprintf "} %s;" struct_name;
@@ -8430,11 +8444,15 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  m->len = 0;";
       Printf.sprintf "  m->keys = (%s*)__lang_region_alloc(r, sizeof(%s) * 4);" c_k c_k;
       Printf.sprintf "  m->values = (%s*)__lang_region_alloc(r, sizeof(%s) * 4);" c_v c_v;
+      "  m->dead = (unsigned char*)__lang_region_alloc(r, 4);";
+      "  for (int i = 0; i < 4; i++) m->dead[i] = 0;";
+      "  m->live = 0;";
       "  m->region = r;";
       "  m->owns_region = 0;";
       "  m->idx_cap = 8;";
       "  m->idx = (int*)__lang_region_alloc(r, sizeof(int) * 8);";
       "  for (int i = 0; i < 8; i++) m->idx[i] = -1;";
+      "  m->idx_used = 0;";
       "  return m;";
       "}";
       "";
@@ -8454,6 +8472,10 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "    : (int*)__lang_region_alloc(m->region, sizeof(int) * newcap);";
       "  for (int i = 0; i < newcap; i++) ni[i] = -1;";
       "  for (int i = 0; i < m->len; i++) {";
+      (* A rebuilt index has no vacated slots -- that is the point of rebuilding
+         it -- so tombstoned dense entries are simply not indexed, and the probe
+         loops below terminate sooner afterwards. *)
+      "    if (m->dead[i]) continue;";
       Printf.sprintf "    unsigned long long h = %s;" (key_hash_expr "m->keys[i]");
       "    int s = (int)(h & (unsigned long long)(newcap - 1));";
       "    while (ni[s] != -1) s = (s + 1) & (newcap - 1);";
@@ -8461,6 +8483,26 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  }";
       "  m->idx = ni;";
       "  m->idx_cap = newcap;";
+      "  m->idx_used = m->live;";
+      "}";
+      "";
+      (* Q-063: drop the tombstones from the dense arrays, in place, keeping
+         insertion order, allocating nothing (reindex reuses the index buffer at
+         an unchanged capacity). Called from delete when the dead outnumber the
+         live, so its O(len) is paid once per O(live) deletes.
+         Entries MOVE here -- but they already moved on every delete before
+         this, so no caller could have been holding an interior pointer across
+         one. Same discipline as map_compact. *)
+      Printf.sprintf "static void %s_squeeze(%s* m) {" struct_name struct_name;
+      "  int w = 0;";
+      "  for (int i = 0; i < m->len; i++) {";
+      "    if (m->dead[i]) continue;";
+      "    if (w != i) { m->keys[w] = m->keys[i]; m->values[w] = m->values[i]; }";
+      "    m->dead[w] = 0;";
+      "    w++;";
+      "  }";
+      "  m->len = w;";
+      Printf.sprintf "  %s_reindex(m, m->idx_cap);" struct_name;
       "}";
       "";
       (* v0.1.298: empty the map in O(idx_cap), allocating NOTHING. This is
@@ -8472,7 +8514,9 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          the survivors, clear, re-set. *)
       Printf.sprintf "static int %s_clear(%s* m) {" struct_name struct_name;
       "  m->len = 0;";
+      "  m->live = 0;";
       "  for (int i = 0; i < m->idx_cap; i++) m->idx[i] = -1;";
+      "  m->idx_used = 0;";
       "  return 0;";
       "}";
       "";      (* v0.1.300: clear, and hand the private arena's GROWTH back, keeping the
@@ -8501,11 +8545,15 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  }";
       Printf.sprintf "  m->keys = (%s*)__lang_region_alloc(m->region, sizeof(%s) * 4);" c_k c_k;
       Printf.sprintf "  m->values = (%s*)__lang_region_alloc(m->region, sizeof(%s) * 4);" c_v c_v;
+      "  m->dead = (unsigned char*)__lang_region_alloc(m->region, 4);";
+      "  for (int i = 0; i < 4; i++) m->dead[i] = 0;";
       "  m->cap = 4;";
       "  m->len = 0;";
+      "  m->live = 0;";
       "  m->idx = (int*)__lang_region_alloc(m->region, sizeof(int) * 8);";
       "  for (int i = 0; i < 8; i++) m->idx[i] = -1;";
       "  m->idx_cap = 8;";
+      "  m->idx_used = 0;";
       "  return 0;";
       "}";
       "";
@@ -8535,15 +8583,27 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  __lang_region* old = m->region;";
       "  int owned = m->owns_region;";
       "  m->region = fresh;";
-      "  int ncap = m->len < 4 ? 4 : m->len;";
+      (* Q-063: sized to the LIVE count and copying only the live entries -- a
+         compact that carried tombstones into the fresh arena would be paying to
+         move what it exists to drop. `dead` moves too: it lives in the arena
+         about to be freed. *)
+      "  int ncap = m->live < 4 ? 4 : m->live;";
       Printf.sprintf "  %s* nk = (%s*)__lang_region_alloc(fresh, sizeof(%s) * ncap);" c_k c_k c_k;
       Printf.sprintf "  %s* nv = (%s*)__lang_region_alloc(fresh, sizeof(%s) * ncap);" c_v c_v c_v;
+      "  unsigned char* nd = (unsigned char*)__lang_region_alloc(fresh, (size_t)ncap);";
+      "  int w = 0;";
       "  for (int i = 0; i < m->len; i++) {";
-      Printf.sprintf "    nk[i] = __mcopy_%s(fresh, m->keys[i]);" k_tag;
-      Printf.sprintf "    nv[i] = __mcopy_%s(fresh, m->values[i]);" v_tag;
+      "    if (m->dead[i]) continue;";
+      Printf.sprintf "    nk[w] = __mcopy_%s(fresh, m->keys[i]);" k_tag;
+      Printf.sprintf "    nv[w] = __mcopy_%s(fresh, m->values[i]);" v_tag;
+      "    nd[w] = 0;";
+      "    w++;";
       "  }";
       "  m->keys = nk;";
       "  m->values = nv;";
+      "  m->dead = nd;";
+      "  m->len = w;";
+      "  m->live = w;";
       "  m->cap = ncap;";
       "  int nic = 8;";
       "  while (nic < ncap * 2) nic <<= 1;";
@@ -8575,33 +8635,64 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          of O(distinct keys). *)
       Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "__mk");
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
+      (* Q-063: -2 is a VACATED slot. The probe must walk through it (a key
+         inserted after the deletion may sit further along this chain) but must
+         not compare against it, and the first one seen is where this insert
+         goes if the key turns out to be absent -- reusing it instead of
+         consuming a fresh slot is what keeps the index from filling up with
+         tombstones under churn. *)
+      "  int reuse = -1;";
       "  while (m->idx[s] != -1) {";
       "    int i = m->idx[s];";
-      Printf.sprintf "    if (%s) { m->values[i] = __mcopy_%s(m->region, __mv); return 0; }"
+      "    if (i < 0) { if (reuse < 0) reuse = s; }";
+      Printf.sprintf "    else if (%s) { m->values[i] = __mcopy_%s(m->region, __mv); return 0; }"
         (key_eq_expr "m->keys[i]" "__mk") v_tag;
       "    s = (s + 1) & (m->idx_cap - 1);";
       "  }";
       Printf.sprintf "  __mk = __mcopy_%s(m->region, __mk);" k_tag;
       Printf.sprintf "  __mv = __mcopy_%s(m->region, __mv);" v_tag;
+      (* Q-063: squeeze before growing. The dense arrays are at capacity, but if
+         most of what fills them is tombstones then doubling would buy space
+         that dropping them already has -- and this is the path a churning table
+         takes, where every insert follows a delete. *)
+      "  if (m->len == m->cap && m->len - m->live > m->cap / 4) {";
+      Printf.sprintf "    %s_squeeze(m);" struct_name;
+      (* squeeze rebuilt the index, so the slot chosen above is stale. *)
+      Printf.sprintf "    unsigned long long h2 = %s;" (key_hash_expr "__mk");
+      "    s = (int)(h2 & (unsigned long long)(m->idx_cap - 1));";
+      "    reuse = -1;";
+      "    while (m->idx[s] != -1) s = (s + 1) & (m->idx_cap - 1);";
+      "  }";
       "  if (m->len == m->cap) {";
       "    int new_cap = m->cap * 2;";
       Printf.sprintf "    %s* __mnk = (%s*)__lang_region_alloc(m->region, sizeof(%s) * new_cap);" c_k c_k c_k;
       Printf.sprintf "    %s* __mnv = (%s*)__lang_region_alloc(m->region, sizeof(%s) * new_cap);" c_v c_v c_v;
+      "    unsigned char* __mnd = (unsigned char*)__lang_region_alloc(m->region, (size_t)new_cap);";
       "    for (int i = 0; i < m->len; i++) {";
       "      __mnk[i] = m->keys[i];";
       "      __mnv[i] = m->values[i];";
+      "      __mnd[i] = m->dead[i];";
       "    }";
       "    m->keys = __mnk;";
       "    m->values = __mnv;";
+      "    m->dead = __mnd;";
       "    m->cap = new_cap;";
       "  }";
       "  m->keys[m->len] = __mk;";
       "  m->values[m->len] = __mv;";
+      "  m->dead[m->len] = 0;";
       "  m->len++;";
-      "  if (m->len * 10 >= m->idx_cap * 7) {";
-      Printf.sprintf "    %s_reindex(m, m->idx_cap * 2);" struct_name;
+      "  m->live++;";
+      "  if (reuse >= 0) {";
+      "    m->idx[reuse] = m->len - 1;";
       "  } else {";
       "    m->idx[s] = m->len - 1;";
+      "    m->idx_used++;";
+      "  }";
+      (* The load factor is on OCCUPIED slots, not on live entries: a vacated
+         slot still lengthens every probe that passes through it. *)
+      "  if (m->idx_used * 10 >= m->idx_cap * 7) {";
+      Printf.sprintf "    %s_reindex(m, m->idx_cap * 2);" struct_name;
       "  }";
       "  return 0; /* unit */";
       "}";
@@ -8613,7 +8704,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
       "  while (m->idx[s] != -1) {";
       "    int i = m->idx[s];";
-      Printf.sprintf "    if (%s) return m->values[i];"
+      Printf.sprintf "    if (i >= 0 && %s) return m->values[i];"
         (key_eq_expr "m->keys[i]" "__mk");
       "    s = (s + 1) & (m->idx_cap - 1);";
       "  }";
@@ -8632,7 +8723,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
       "  while (m->idx[s] != -1) {";
       "    int i = m->idx[s];";
-      Printf.sprintf "    if (%s) return 1;"
+      Printf.sprintf "    if (i >= 0 && %s) return 1;"
         (key_eq_expr "m->keys[i]" "__mk");
       "    s = (s + 1) & (m->idx_cap - 1);";
       "  }";
@@ -8640,25 +8731,36 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "}";
       "";
       (* len *)
-      Printf.sprintf "static int %s_len(%s* m) { return m->len; }"
+      (* Q-063: the LIVE count. `len` is the dense high-water mark and includes
+         tombstones, which no observer of the language is allowed to see. *)
+      Printf.sprintf "static int %s_len(%s* m) { return m->live; }"
         struct_name struct_name;
       "";
-      (* Phase 39.A' #2: delete — remove the matching key by shifting the
-         keys / values arrays. No-op if the key is absent. *)
+      (* Phase 39.A' #2 / Q-063: delete by TOMBSTONE. No-op if the key is absent.
+         This shifted the dense arrays and rebuilt the index on every call until
+         v0.1.317, which made one delete cost O(live) and a churning table
+         quadratic -- benchmarks/churn's sweep drew a doubling line here against
+         a flat one in every other language's map, and this backend came out
+         behind Python on it. Nothing moves now; the squeeze at the bottom is
+         amortised across O(live) deletes. *)
       Printf.sprintf "static int %s_delete(%s* m, %s __mk) {"
         struct_name struct_name c_k;
       Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "__mk");
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
       "  while (m->idx[s] != -1) {";
       "    int i = m->idx[s];";
-      Printf.sprintf "    if (%s) {" (key_eq_expr "m->keys[i]" "__mk");
-      "      for (int j = i; j < m->len - 1; j++) {";
-      "        m->keys[j] = m->keys[j+1];";
-      "        m->values[j] = m->values[j+1];";
+      Printf.sprintf "    if (i >= 0 && %s) {" (key_eq_expr "m->keys[i]" "__mk");
+      "      m->dead[i] = 1;";
+      "      m->live--;";
+      (* -2 and not -1: a key inserted after this one may sit further along this
+         probe chain, and -1 would end the probe before reaching it. *)
+      "      m->idx[s] = -2;";
+      (* The floor keeps a small map from squeezing on its first delete; the
+         ratio is what makes the cost amortised -- O(len) work once per O(live)
+         deletes is O(1) each. *)
+      "      if (m->len - m->live >= 8 && m->len - m->live > m->live) {";
+      Printf.sprintf "        %s_squeeze(m);" struct_name;
       "      }";
-      "      m->len--;";
-      (* every array index above i just shifted down — rebuild the index. *)
-      Printf.sprintf "      %s_reindex(m, m->idx_cap);" struct_name;
       "      return 0;";
       "    }";
       "    s = (s + 1) & (m->idx_cap - 1);";
