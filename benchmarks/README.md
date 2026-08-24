@@ -83,6 +83,7 @@ compiled ones, for that reason.
 | `churn` | a long-lived table under insert/delete churn, bounded live set | Was the shape Mere was structurally **bad** at — `map_delete` was O(live) and this row came out behind Python. Fixed in v0.1.317/320; kept because `bench_regionloop.mere` sits next to the naive version and shows what a region loop costs and buys. |
 | `startup` | the smallest useful program: one argument in, one answer out | The **strongest claim**, and the one no other row measures — every other workload here does enough work to bury process startup. What is left is the cost of *being* a program: runtime init, a GC's first heap, an interpreter parsing its own stdlib. |
 | `binarytrees` | allocate a great many small nodes, walk them, discard them | The row that **splits**. Bump allocation with no collector to trace should win on time; never handing anything back should lose on footprint. `bench_region.mere` is the language's answer and here it costs nothing — a block copies only its result out. |
+| `matmul` | dense double-precision multiply-accumulate, 512x512 | The **floating-point** axis, which nothing else here touches — and the one where getting the implementations to agree was most of the work. Expected to tie C, and exists to notice the day it stops. |
 | `json` | parse with the ecosystem's parser, then walk the whole tree | A **different question**: `contrib/json` is written in Mere, and every other row's parser is native code shipped with its runtime. "A language plus what its ecosystem hands you" is a real question, and not the one the rest of the suite answers. Read it twice — subtract startup and the ordering changes. |
 
 Every benchmark's `MANIFEST` carries a `claim` that says what the workload is
@@ -118,9 +119,25 @@ sweep = 1000 1 | 1000 2 | 1000 4 # optional
 ```
 
 Reference implementations are found by filename: `ref.c`, `ref.rs`, `ref.go`,
-`ref.js`, `ref.rb`, `ref.py`. Extra Mere variants are `bench_<name>.mere` and
+`ref.js`, `ref.rb`, `ref.py`. `cflags` in the MANIFEST is passed to the C row's
+compiler (and only to it) — a flag that decides whether the answers match is
+part of naming the implementation, so it lives next to the claim. Extra Mere variants are `bench_<name>.mere` and
 appear as their own rows — that is how `churn` shows the naive program and the
 region-loop program side by side.
+
+**If the answer is a float, expect the same-answer check to be the hard part.**
+`a*b + c` may be contracted into one fused multiply-add, which rounds once
+instead of twice, and clang does it by default on arm64 while Go's gc does it
+on arm64 too. `matmul` pins both — `-ffp-contract=off` for C, the `float64()`
+conversion the Go spec names for Go — and both were verified load-bearing
+rather than assumed: without them those rows print a checksum 24 ulps off
+everyone else. Mere needs neither, because it emits
+`#pragma STDC FP_CONTRACT OFF` itself, and the runner deliberately does not
+pass the flag to Mere's own cc: the bit-identity is evidence the pragma works,
+and only while nothing else is producing it. Print the IEEE-754 bits rather
+than a formatted double, and choose inputs that actually round — values that
+happen to be exact agree whether or not anything fused, and the check passes
+for the wrong reason.
 
 Three things to get right, all of them learned by getting them wrong here:
 
@@ -152,7 +169,7 @@ changes the input and every implementation then agrees on the wrong answer.
 
 ## A note on what the rows have cost to get right
 
-Three of the six workloads were **predicted wrong** before they were run.
+Three of the seven workloads were **predicted wrong** before they were run.
 `crc32` was written against the wrong byte API and reported Mere at 2.9x C
 until that was found. `json` was expected to be an easy loss for a parser
 written in Mere and is the fastest row on wall clock. `binarytrees` was

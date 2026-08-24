@@ -1,0 +1,45 @@
+name  = matmul
+shape = dense double-precision multiply-accumulate, 512x512
+args  = 512
+cflags = -ffp-contract=off
+claim = the floating-point axis, which nothing else here touches. crc32 guards
+        the integer path; the only measurement of the FP path was one note that
+        said "about the same as C" once, and this is that turned into something
+        a machine re-runs.
+        ---
+        FLOATING POINT MAKES THE SAME-ANSWER CHECK HARD, and that shaped the
+        row more than anything else. `a*b + c` may be contracted into one fused
+        multiply-add, rounding ONCE instead of twice, and the bits differ. Both
+        precautions here were verified to be load-bearing rather than assumed:
+        clang at its arm64 default prints a checksum of ...693 where every
+        unfused implementation prints ...737, and Go's gc does the same until
+        the multiply is wrapped in the `float64()` conversion its spec names as
+        the way to prevent fusion. So the C row carries `-ffp-contract=off`
+        (above) and the Go row carries that conversion. Mere needs neither: it
+        emits `#pragma STDC FP_CONTRACT OFF` itself (v0.1.315), and the runner
+        deliberately does NOT pass the flag to Mere's cc -- if it did, the flag
+        would stand in for the pragma the day the pragma stopped being emitted.
+        Inputs are non-dyadic (divided by 1000, not 1024) so the arithmetic
+        actually rounds; values that happened to be exact would agree whether
+        or not anything fused, and the check would pass for the wrong reason.
+        The answer is printed as the two halves of the IEEE-754 pattern,
+        because a formatted double hides the low bits, which is where a
+        contraction difference lives.
+        ---
+        No Python or Ruby row. The inner loop reads B down a column, so this is
+        as much a memory-access benchmark as an arithmetic one -- identical for
+        every row, so the comparison is fair, but it means the number is "this
+        loop as written" and not peak FLOPs. Nobody writes that loop in Python
+        or Ruby; they write a numpy or BLAS binding, which would time Fortran.
+        And at this size the hand-written version takes 20 seconds, which would
+        make the suite something nobody runs.
+        ---
+        The expected result is a TIE with C, and the row exists to notice the
+        day it stops being one.
+
+# 6.3 MB of matrices (three 512x512 double arrays) plus the region's own
+# rounding, at v0.1.321. Tight, because this program's allocation is three
+# fixed-size buffers: anything that moves it is a change in how Vec[R, float]
+# is laid out, which is exactly what this row should notice.
+alloc_min = 6291456
+alloc_max = 16777216

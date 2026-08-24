@@ -263,7 +263,7 @@ def discover(bench_dir, tools):
     return impls
 
 
-def build(impl, outdir):
+def build(impl, outdir, extra_flags=None):
     os.makedirs(outdir, exist_ok=True)
     base = os.path.splitext(os.path.basename(impl.src))[0]
     out = os.path.join(outdir, "%s.%s" % (base, impl.tool.key))
@@ -277,7 +277,8 @@ def build(impl, outdir):
             return False
         with open(cfile, "w") as f:
             f.write(r.stdout)
-        r = subprocess.run([CC, "-O2", "-w", cfile, "-o", out],
+        r = subprocess.run([CC, "-O2", "-w"] + (extra_flags or [])
+                           + [cfile, "-o", out],
                            capture_output=True, text=True)
         if r.returncode != 0:
             impl.status = "build-failed"
@@ -287,6 +288,14 @@ def build(impl, outdir):
         return True
 
     cmd = impl.tool.build(impl.src, out)
+    # Per-benchmark compiler flags. The one that made this necessary is
+    # matmul's `-ffp-contract=off`: clang fuses a*b+c into a single FMA by
+    # default on arm64, which rounds once instead of twice, and the C row
+    # printed a checksum 44 ulps off every other implementation until it was
+    # told not to. A flag that decides whether the answers match is part of
+    # naming the implementation, so it lives in the MANIFEST next to the claim.
+    if cmd is not None and extra_flags:
+        cmd = cmd[:1] + extra_flags + cmd[1:]
     if cmd is None:                            # interpreted
         impl.exe = None
         return True
@@ -378,7 +387,15 @@ def run_bench(name, bench_dir, tools, reps, verify_only, do_sweep=False):
         if not impl.tool.available():
             print("  skip %-20s toolchain absent (%s)" % (impl.label, impl.tool.probe))
             continue
-        if not build(impl, os.path.join(BUILD, name)):
+        # The C row only. Not Rust (rustc does not take clang's flag, and does
+        # not contract), and deliberately NOT Mere: Mere emits its own
+        # `#pragma STDC FP_CONTRACT OFF`, and handing its cc the flag as well
+        # would let the flag stand in for the pragma if the pragma ever stopped
+        # being emitted -- the bit-identity here is evidence that the pragma
+        # works, and only while nothing else is producing it.
+        if not build(impl, os.path.join(BUILD, name),
+                     man.get("cflags", "").split() if impl.tool.key == "c"
+                     else None):
             print("  FAIL %-20s %s: %s" % (impl.label, impl.status, impl.note))
             # A build failure is a failure of the run, not a row that quietly
             # disappears. The first version of this runner printed the line
