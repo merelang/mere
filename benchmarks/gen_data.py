@@ -80,6 +80,34 @@ def gen_words(path, n_words):
     return len(text)
 
 
+def gen_json(path, n_records):
+    """json's input: an array of flat objects, integers and strings only.
+
+    No floats and no exponents, because `contrib/json` parses `JNum of int` --
+    a document this suite generated with 1.5e3 in it would be measuring the
+    parser's error path in one implementation and its happy path in five.
+    Nesting is one level for the same reason: the comparison is a parser's
+    throughput on an ordinary document, not its handling of a pathological one.
+    """
+    g = lcg(31337)
+    tags = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"]
+    out = ["["]
+    for i in range(n_records):
+        a = next(g) % 1000000
+        b = (next(g) % 2000) - 1000          # negatives too
+        tag = tags[next(g) % len(tags)]
+        note = "n%04d-%s" % (next(g) % 10000, tag)
+        out.append(
+            '{"id":%d,"score":%d,"tag":"%s","note":"%s","ok":%s}%s'
+            % (i, b, tag, note, "true" if a % 2 == 0 else "false",
+               "," if i + 1 < n_records else ""))
+    out.append("]")
+    text = "\n".join(out) + "\n"
+    with open(path, "w") as f:
+        f.write(text)
+    return len(text)
+
+
 def main():
     os.makedirs(DATA, exist_ok=True)
     b = os.path.join(DATA, "bytes.bin")
@@ -97,6 +125,18 @@ def main():
         print("generated %s (%d bytes)" % (w, n))
     else:
         print("kept %s" % w)
+
+    j = os.path.join(DATA, "records.json")
+    if force or not os.path.exists(j):
+        # 160k records, ~12 MB. Sized so the PARSE dominates: at 20k the
+        # document went through in 16 ms of Mere and the row was mostly each
+        # runtime's startup, which benchmarks/startup already isolates -- a
+        # benchmark whose signal is buried under a cost another row measures is
+        # not measuring what its claim says.
+        n = gen_json(j, 160000)
+        print("generated %s (%d bytes)" % (j, n))
+    else:
+        print("kept %s" % j)
 
 
 if __name__ == "__main__":
