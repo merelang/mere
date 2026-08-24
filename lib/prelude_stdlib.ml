@@ -524,4 +524,26 @@ let divmod = fn (a: int) -> fn (b: int) ->
   if b == 0 then fail "divmod: division by zero" else (a / b, a % b);
 let assert = fn (cond: bool) -> fn (msg: str) ->
   if cond then () else fail ("assertion failed: " ++ msg);
+// Q-064: these five were builtins with polymorphic schemes in the typer and
+// implementations in the interpreter, and NOTHING in any code generator. The
+// LLVM and Wasm backends refused them by name ("unbound variable: pair"); the
+// C backend emitted a reference to `mu_pair` and left the diagnosis to the C
+// compiler, which reported it in terms of a symbol the author never wrote.
+// So five of the eight documented polymorphic helpers worked only under the
+// interpreter, and one of the three ways of finding that out was worse than
+// the other two.
+//
+// As ordinary prelude definitions they are ordinary code: every backend
+// compiles them, partial application and use as a first-class value work
+// because they are closures rather than a special case in the emitter, and
+// there is one implementation instead of one per backend to keep in step.
+// Same migration `pow` / `lcm` / `divmod` / `assert` above already made.
+let id = fn x -> x;
+let pair = fn a -> fn b -> (a, b);
+let swap = fn t -> (snd t, fst t);
+// `b` is still evaluated: Mere is call-by-value, so `const a b` runs b's
+// effects before the call, exactly as the builtin did.
+let const = fn a -> fn b -> a;
+// flip f x y = f y x. `(flip sub) 3 10` is `sub 10 3`.
+let flip = fn f -> fn a -> fn b -> f b a;
 |}

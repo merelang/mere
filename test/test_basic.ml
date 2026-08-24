@@ -8221,7 +8221,7 @@ let () =
             longer than the stack)
         *)
      string_of_int (List.length prog.Ast.decls))
-    "81";
+    "86";
 
   (* Phase 39.A' #4: list_sort_by / list_sort prelude helpers *)
   check "list_sort_by: ascending int sort"
@@ -8818,9 +8818,9 @@ let () =
      emit) instead of raising. Verify both call sites succeed. *)
   check "§23.3: multi-instantiation poly fn — int + str (interp)"
     (Pipeline.process
-       "let rec id = fn x -> x in\n\
-        let a = id 5 in\n\
-        let b = id \"hi\" in\n\
+       "let rec myid = fn x -> x in\n\
+        let a = myid 5 in\n\
+        let b = myid \"hi\" in\n\
         a") "5";
   (* Phase 23.5: show_str escapes special chars to match interp.
      show's output wraps the str in quotes, so e.g. `show "a\nb"`
@@ -8855,12 +8855,12 @@ let () =
     "all4";
   check "§23.3: multi-instantiation poly fn — C codegen emits 2 specs"
     (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
-       "let rec id = fn x -> x in\n\
-        let a = id 5 in\n\
-        let b = id \"hi\" in\n\
+       "let rec myid = fn x -> x in\n\
+        let a = myid 5 in\n\
+        let b = myid \"hi\" in\n\
         let __ = print b in\n\
         a") in
-     (* Should contain mangled id__int and id__str. *)
+     (* Should contain mangled myid__int and myid__str. *)
      let s = c_src in
      let has p =
        let nlen = String.length s and plen = String.length p in
@@ -8871,7 +8871,7 @@ let () =
        in
        scan 0
      in
-     if has "id__int" && has "id__str" then "ok" else "missing-spec")
+     if has "myid__int" && has "myid__str" then "ok" else "missing-spec")
     "ok";
 
   (* Phase 25.3: LLVM inner let-rec lifting. Port the C codegen inner-fn lift
@@ -8974,9 +8974,9 @@ let () =
      emit one spec per type with mangled name + dispatch at call site. *)
   check "§25.5: LLVM multi-instantiation poly fn — int + str emits 2 specs"
     (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
-       "let rec id = fn x -> x in\n\
-        let a = id 5 in\n\
-        let b = id \"hi\" in\n\
+       "let rec myid = fn x -> x in\n\
+        let a = myid 5 in\n\
+        let b = myid \"hi\" in\n\
         let __ = print b in\n\
         a") in
      let has p =
@@ -8988,7 +8988,7 @@ let () =
        in
        scan 0
      in
-     if has "id__int" && has "id__str" then "ok" else "missing-spec")
+     if has "myid__int" && has "myid__str" then "ok" else "missing-spec")
     "ok";
   check "§25.5: LLVM multi-inst rev (json_parser style — 2 list types)"
     (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
@@ -9232,9 +9232,9 @@ let () =
      (Wasm version of LLVM Phase 25.5). *)
   check "§26.4: Wasm multi-inst poly fn emits 2 specs (int + str)"
     (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
-       "let rec id = fn x -> x in\n\
-        let a = id 5 in\n\
-        let b = id \"hi\" in\n\
+       "let rec myid = fn x -> x in\n\
+        let a = myid 5 in\n\
+        let b = myid \"hi\" in\n\
         let __ = print b in\n\
         a") in
      let has p =
@@ -9245,7 +9245,7 @@ let () =
          else scan (i + 1)
        in scan 0
      in
-     if has "$id__int" && has "$id__str" then "ok" else "missing-spec")
+     if has "$myid__int" && has "$myid__str" then "ok" else "missing-spec")
     "ok";
 
   (* Phase 26.3: Wasm inner let-rec lifting (Wasm version of LLVM Phase 25.3). *)

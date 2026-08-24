@@ -1692,36 +1692,11 @@ let builtin_snd =
     | V_tuple [_; b] -> b
     | _ -> failwith "snd: expected 2-tuple")
 
-let builtin_id =
-  V_builtin ("id", fun v -> v)
-
-let builtin_swap =
-  V_builtin ("swap", fun v ->
-    match v with
-    | V_tuple [a; b] -> V_tuple [b; a]
-    | _ -> failwith "swap: expected 2-tuple")
-
-let builtin_pair =
-  V_builtin ("pair", fun a ->
-    V_builtin ("pair_partial", fun b -> V_tuple [a; b]))
-
-let builtin_const =
-  V_builtin ("const", fun a ->
-    V_builtin ("const_partial", fun _b -> a))
-
 (* Forward-reference into eval_in's apply machinery so higher-order builtins
    like `flip` can call user functions (V_closure / V_builtin) at runtime.
    Patched at the bottom of this file, after eval_in is defined. *)
 let apply_value_ref : (value -> value -> value) ref =
   ref (fun _ _ -> failwith "apply_value_ref: not initialized (BUG)")
-
-let builtin_flip =
-  V_builtin ("flip", fun f ->
-    V_builtin ("flip_p1", fun b ->
-      V_builtin ("flip_p2", fun a ->
-        (* flip f b a = (f a) b *)
-        let f_a = !apply_value_ref f a in
-        !apply_value_ref f_a b)))
 
 let builtin_try_or =
   V_builtin ("try_or", fun f ->
@@ -3160,11 +3135,6 @@ let initial_env : env =
     ("of_json_opt", ref builtin_of_json);
     ("fst", ref builtin_fst);
     ("snd", ref builtin_snd);
-    ("id", ref builtin_id);
-    ("swap", ref builtin_swap);
-    ("pair", ref builtin_pair);
-    ("const", ref builtin_const);
-    ("flip", ref builtin_flip);
     ("try_or", ref builtin_try_or);
     ("iter_n", ref builtin_iter_n);
     ("mk_logger", ref builtin_mk_logger);

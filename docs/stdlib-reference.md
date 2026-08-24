@@ -1,6 +1,10 @@
 # Stdlib reference (mere)
 
-202 builtins that are always available via `initial_env`. Check a name's type with `mere -te NAME`.
+221 builtins are always available via `initial_env`. Check a name's type with
+`mere -te NAME`, and the count with `sh scripts/host_matrix.sh`, which
+enumerates the environment rather than reading this document — a
+hand-maintained tally rots, and this one had (it read 202 while the
+environment held 226).
 
 Legend:
 - ⚡ = may raise `Eval_error`
@@ -433,18 +437,37 @@ message**: the language can observe that something failed, not why.
 
 ---
 
-## Polymorphic helpers (8 ★)
+## Polymorphic helpers (8)
 
-| Name | Type | Description |
-|---|---|---|
-| `show` ★ | `'a -> str` | Stringify any value via to_string |
-| `id` ★ | `'a -> 'a` | Identity function |
-| `fst` ★ | `('a * 'b) -> 'a` | Tuple first |
-| `snd` ★ | `('a * 'b) -> 'b` | Tuple second |
-| `pair` ★ | `'a -> 'b -> ('a * 'b)` | Tuple constructor (curried) |
-| `swap` ★ | `('a * 'b) -> ('b * 'a)` | Tuple swap |
-| `const` ★ | `'a -> 'b -> 'a` | Drop second arg, return first |
-| `flip` ★ | `('a -> 'b -> 'c) -> ('b -> 'a -> 'c)` | Reverse arg order of a curried fn (higher-order) |
+| Name | Type | Where | Description |
+|---|---|---|---|
+| `show` ★ | `'a -> str` | builtin | Stringify any value via to_string |
+| `fst` ★ | `('a * 'b) -> 'a` | builtin | Tuple first |
+| `snd` ★ | `('a * 'b) -> 'b` | builtin | Tuple second |
+| `id` | `'a -> 'a` | prelude | Identity function |
+| `pair` | `'a -> 'b -> ('a * 'b)` | prelude | Tuple constructor (curried) |
+| `swap` | `('a * 'b) -> ('b * 'a)` | prelude | Tuple swap |
+| `const` | `'a -> 'b -> 'a` | prelude | Drop second arg, return first (`b` is still evaluated — Mere is call-by-value) |
+| `flip` | `('a -> 'b -> 'c) -> ('b -> 'a -> 'c)` | prelude | Reverse arg order of a curried fn (higher-order) |
+
+**All eight work on all four backends (v0.1.318).** The bottom five were
+builtins with polymorphic schemes in the typer and implementations in the
+interpreter, and nothing in any code generator — so they worked under
+`mere file.mere` and nowhere else. LLVM and Wasm refused them by name; the C
+backend emitted a reference to an undeclared `mu_pair` and left the diagnosis
+to the C compiler, which reported it in terms of a symbol the author never
+wrote. As prelude definitions they are ordinary closures: every backend
+compiles them, partial application and use in value position work without a
+special case in any emitter, and there is one implementation rather than one
+per backend to keep in step. (The same migration `pow`, `lcm`, `divmod` and
+`assert` already made.)
+
+They are ordinary bindings, so a program may shadow them —
+`test/parity/prelude_shadowing.mere` pins that. One Wasm limit is worth
+knowing: a polymorphic function used at several types **and** passed as a
+value is refused there by name ("no single value form on Wasm yet"), which
+applies to these exactly as it does to any `let`-polymorphic function of your
+own.
 
 ```
 show 42                          // "42"
@@ -742,17 +765,22 @@ iter_n 3 (fn () -> print "===")   // prints === three times
 
 ---
 
-## All builtins (alphabetical, 129)
+## The named builtins, alphabetical (122)
+
+Not the whole 221: the `vec_*` / `owned_vec_*` / `strbuf_*` / `map_*` families
+below are registered separately. `id` / `pair` / `swap` / `const` / `flip` left
+this list in v0.1.318 — they are prelude definitions now (see Polymorphic
+helpers above). The heading said 129 while the list held 127, before that.
 
 ```
 abs args assert atan2 bit_and bit_not bit_or bit_shl bit_shr bit_xor
-bool_of_str ceil char_at chr clamp const
+bool_of_str ceil char_at chr clamp
 cos cube decr divmod e env_var even exit exp f_abs f_add
 f_div f_ge f_gt f_le f_lt f_max f_min f_mul f_neg f_pow
-f_sub fail file_exists flip float_of_int float_of_str floor
-fst gcd id incr int_max int_min int_of_float int_of_str
+f_sub fail file_exists float_of_int float_of_str floor
+fst gcd incr int_max int_min int_of_float int_of_str
 is_alpha is_digit is_space iter_n lcm log max min mk_logger
-mk_metrics not odd ord pair pi pow print print_bool
+mk_metrics not odd ord pi pow print print_bool
 print_err print_int print_no_nl random_float random_int
 closure_code closure_env csr_read csr_write machine_scratch
 raw_base raw_len raw_peek32 raw_peek8 raw_poke32 raw_poke8 raw_window trap_save
@@ -761,7 +789,7 @@ read_file read_file_bytes read_line read_lines round show sign sin snd sqrt
 square str_compare str_contains str_count str_ends_with
 str_index_of str_join str_len str_of_float str_of_int
 str_repeat str_replace str_rev str_split str_starts_with
-set_trap_handler str_trim str_unescape substring sum_range swap tan time
+set_trap_handler str_trim str_unescape substring sum_range tan time
 to_lower to_upper try_or write_file write_file_bytes
 ```
 

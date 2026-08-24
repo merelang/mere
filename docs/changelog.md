@@ -4,6 +4,78 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.318 — 2026-08-24
+
+_Five of the eight polymorphic helpers only ever worked under the interpreter._
+
+`id`, `pair`, `swap`, `const` and `flip` were builtins with polymorphic
+schemes in the typer and implementations in the interpreter, and **nothing in
+any code generator**. So they worked under `mere file.mere` and nowhere else,
+and had since they were added.
+
+What made it worth a release rather than a footnote is the shape of the
+failure, which was different on each backend and worst on the one people
+compile with. LLVM and Wasm refuse them by name — `unbound variable: pair` —
+which is a diagnosis. The C backend emitted a reference to an undeclared
+`mu_pair` and left the diagnosis to the C compiler, which reported it in terms
+of a symbol the author never wrote, at a line in generated code they had never
+seen. An unimplemented thing should fail in a way that says it is
+unimplemented.
+
+They are prelude definitions now (`prelude_stdlib.ml`), which is to say
+ordinary polymorphic Mere code:
+
+```
+let id = fn x -> x;
+let pair = fn a -> fn b -> (a, b);
+let swap = fn t -> (snd t, fst t);
+let const = fn a -> fn b -> a;
+let flip = fn f -> fn a -> fn b -> f b a;
+```
+
+Every backend compiles that. Partial application and use in value position
+work because these are closures rather than a special case in an emitter, and
+there is one implementation instead of one per backend to keep in step. The
+same migration `pow`, `lcm`, `divmod` and `assert` already made. All eight
+helpers now run on all four backends; three did before.
+
+`const b` is still evaluated: Mere is call-by-value, so the argument's effects
+happen before the call, exactly as the builtin's did.
+
+The names were already taken — this changes where they are DEFINED, not
+whether they exist — but `id` and `const` are common enough that a program
+defining its own is not hypothetical, so shadowing is pinned in
+`test/parity/prelude_shadowing.mere` rather than assumed. Three unit tests
+found the one real consequence: a user's `id` used to mangle as `id__int` and
+now mangles as `id_uq1__int__int`, because the prelude binding has to be
+uniquified around. Those tests are about specialisation, so they were renamed
+off the prelude's name; the shadowing case is the one that is about shadowing.
+
+`test/parity/poly_helpers.mere` covers the eight on every backend. It is
+written to stay OUT of parity's "unchecked on wasm" list, which took two
+rewrites: Wasm refuses a polymorphic function that is used at several types
+**and** passed as a value ("no single value form on Wasm yet"), so `id` is
+applied directly there and `pair` is kept at one type. A case that a backend
+refuses at emit time is a case that is not protecting that backend.
+
+Two things found alongside and NOT fixed here, recorded rather than folded in:
+`fst` / `snd` in value position (`let f = fst`) are still applied-form special
+cases in the C emitter and are refused by all three compiled backends; and
+partial application of a polymorphic two-argument function emits uncompilable
+C — `let g = pair "k"` produces a `tuple_int_int` initialised with a
+`const char*`. The second is not about these helpers at all: an equivalent
+user-written `fn a -> fn b -> (a, b)` does the same thing, so it is the
+monomorphiser defaulting type variables, and it is the same
+emit-bad-C-instead-of-refusing shape this release is about.
+
+The builtin counts in `docs/stdlib-reference.md` were wrong before this
+touched them (the header read 202 against an environment of 226; the
+alphabetical heading read 129 against a list of 127). They now name
+`scripts/host_matrix.sh` as the thing that counts, because it enumerates the
+environment instead of being maintained by hand.
+
+---
+
 ## v0.1.317 — 2026-08-24
 
 _Deleting one key cost the whole table._
