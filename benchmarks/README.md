@@ -82,6 +82,8 @@ compiled ones, for that reason.
 | `wordfreq` | read text, count words in a hash table, rank, exit | The shape most short-lived programs actually have, and the one the region model should be **good** at: allocate freely, never give anything back, exit. |
 | `churn` | a long-lived table under insert/delete churn, bounded live set | Was the shape Mere was structurally **bad** at — `map_delete` was O(live) and this row came out behind Python. Fixed in v0.1.317/320; kept because `bench_regionloop.mere` sits next to the naive version and shows what a region loop costs and buys. |
 | `startup` | the smallest useful program: one argument in, one answer out | The **strongest claim**, and the one no other row measures — every other workload here does enough work to bury process startup. What is left is the cost of *being* a program: runtime init, a GC's first heap, an interpreter parsing its own stdlib. |
+| `binarytrees` | allocate a great many small nodes, walk them, discard them | The row that **splits**. Bump allocation with no collector to trace should win on time; never handing anything back should lose on footprint. `bench_region.mere` is the language's answer and here it costs nothing — a block copies only its result out. |
+| `json` | parse with the ecosystem's parser, then walk the whole tree | A **different question**: `contrib/json` is written in Mere, and every other row's parser is native code shipped with its runtime. "A language plus what its ecosystem hands you" is a real question, and not the one the rest of the suite answers. Read it twice — subtract startup and the ordering changes. |
 
 Every benchmark's `MANIFEST` carries a `claim` that says what the workload is
 supposed to show, including the ones where the answer is unflattering. A suite
@@ -147,3 +149,16 @@ purpose — generating the input with Mere would close a loop in which a Mere bu
 changes the input and every implementation then agrees on the wrong answer.
 
 `benchmarks/data/` and `benchmarks/.build/` are generated and git-ignored.
+
+## A note on what the rows have cost to get right
+
+Three of the six workloads were **predicted wrong** before they were run.
+`crc32` was written against the wrong byte API and reported Mere at 2.9x C
+until that was found. `json` was expected to be an easy loss for a parser
+written in Mere and is the fastest row on wall clock. `binarytrees` was
+expected to trade time for footprint, and the region-block version turned out
+to win both.
+
+That is the argument for the suite existing rather than an embarrassment about
+it. Every one of those was a belief held confidently enough to write down, and
+the only thing that moved any of them was a number.

@@ -1,0 +1,31 @@
+name  = binarytrees
+shape = allocate a great many small nodes, walk them, discard them
+args  = 16
+claim = the shape the region model is built around, and the one where its two
+        halves pull in opposite directions. Allocation is a bump -- no header to
+        fill in, no free list to consult, no collector to trace -- so the TIME
+        should be good; and nothing is ever handed back, so every discarded tree
+        stays resident and the FOOTPRINT should be bad. A row that splits is
+        worth more than one that wins.
+        The C row frees each tree after checking it, which is what a C
+        programmer writes and is why its footprint stays flat. A C version that
+        bump-allocated into an arena and never freed would look like the Mere
+        row -- that is the comparison Mere is making, not a different algorithm.
+        bench_region.mere puts each depth's batch inside a `region R { }` block,
+        which is the language's answer, and pays a copy of the answer out.
+
+# Total allocation across every arena, at v0.1.321. The two Mere rows sit at
+# almost the same point (353,371,856 B naive; 3,147,344 + 350,224,512 B for the
+# region version) and that is the finding: a `region R { }` whose result is an
+# int copies almost nothing out, so bounding the residency is FREE here. What
+# it changes is peak -- 337 MiB against 63 MiB, and 190 ms against 87 ms,
+# because the naive version's working set stops fitting anywhere near the CPU.
+#
+# Contrast churn, where the same idea costs 44% more cumulative allocation: a
+# loop has to deep-copy its live set into each new generation, and a block only
+# has to copy its answer.
+alloc_min = 268435456
+alloc_max = 419430400
+
+# The number the region block exists to control.
+peak_max = 100663296

@@ -1,0 +1,48 @@
+// json -- parse a document and walk the tree it produces.
+//
+// The row where Mere is expected to lose, and the MANIFEST says why: this is
+// `contrib/json`, a parser written in Mere, against parsers that are native
+// code shipped with their runtime. Go's encoding/json, Python's json, Ruby's
+// JSON and V8's JSON.parse are none of them written in the language whose row
+// they occupy. So this compares "a language plus what its ecosystem hands
+// you", which is a real question a person choosing a language asks -- and a
+// different question from the one every other row here answers.
+//
+// The checksum walks the WHOLE tree rather than reading a field or two, so a
+// parser cannot win by being lazy about the parts nobody looks at. Three
+// accumulators are threaded rather than a tuple, because a tuple would
+// allocate once per node and this row is about the parser, not about that.
+
+import "../../contrib/json/json.mere";
+
+let path = match args () with | Cons (p, _) -> p | Nil -> "";
+
+let rec walk_v = fn (v: Json.json) -> fn (n: int) -> fn (i: int) -> fn (l: int) ->
+  match v with
+  | Json.JNull -> (n + 1, i, l)
+  | Json.JBool b -> (n + 1, i + (if b then 1 else 0), l)
+  | Json.JNum x -> (n + 1, i + x, l)
+  | Json.JStr s -> (n + 1, i, l + str_len s)
+  | Json.JArr xs -> walk_l xs (n + 1) i l
+  | Json.JObj kvs -> walk_o kvs (n + 1) i l
+and walk_l = fn (xs: Json.json list) -> fn (n: int) -> fn (i: int) -> fn (l: int) ->
+  match xs with
+  | Nil -> (n, i, l)
+  | Cons (h, t) ->
+      let (n2, i2, l2) = walk_v h n i l in
+      walk_l t n2 i2 l2
+and walk_o = fn (kvs: (str * Json.json) list) -> fn (n: int) -> fn (i: int) -> fn (l: int) ->
+  match kvs with
+  | Nil -> (n, i, l)
+  | Cons (kv, t) ->
+      let (n2, i2, l2) = walk_v (snd kv) n i (l + str_len (fst kv)) in
+      walk_o t n2 i2 l2;
+
+let doc = read_file path;
+let tree = Json.parse_json doc;
+// `strlen` would collide with libc at the C boundary -- mere warns about it.
+let (nodes, ints, chars) = walk_v tree 0 0 0;
+let _ = print ("nodes " ++ str_of_int nodes) in
+let _ = print ("ints " ++ str_of_int ints) in
+let _ = print ("strlen " ++ str_of_int chars) in
+exit 0

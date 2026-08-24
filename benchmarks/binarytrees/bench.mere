@@ -1,0 +1,47 @@
+// binarytrees -- allocate a great many small nodes, walk them, discard them.
+//
+// The shape the region model is built around, and the one where its two halves
+// pull in opposite directions. Allocation is a bump: no header to fill in, no
+// free list to consult, no collector to trace, so the TIME should be good. And
+// nothing is ever handed back, so every tree this discards stays resident and
+// the FOOTPRINT should be bad -- against runtimes that reclaim each iteration's
+// garbage before the next one starts.
+//
+// bench_region.mere is the same program with the discarded generations inside
+// a `region R { }` block, which is the language's answer and costs a copy of
+// the answer out. Both rows are in the table for the same reason churn's two
+// are.
+
+type tree = Leaf | Branch of tree * tree;
+
+let rec build = fn (d: int) ->
+  if d == 0 then Leaf else Branch (build (d - 1), build (d - 1));
+
+let rec check = fn (t: tree) ->
+  match t with
+  | Leaf -> 1
+  | Branch (l, r) -> 1 + check l + check r;
+
+let rec pow2 = fn (n: int) -> if n == 0 then 1 else 2 * pow2 (n - 1);
+
+let maxdepth = match args () with | Cons (a, _) -> int_of_str a | Nil -> 14;
+
+// One long-lived tree, held across every iteration below, so the program has a
+// live set and is not purely garbage.
+let longlived = build maxdepth;
+
+let rec batch = fn (d: int) -> fn (iters: int) -> fn (acc: int) ->
+  if iters == 0 then acc else batch d (iters - 1) (acc + check (build d));
+
+let rec depths = fn (d: int) ->
+  if d > maxdepth then ()
+  else
+    let iters = pow2 (maxdepth - d + 4) in
+    let _ = print (str_of_int iters ++ " trees of depth " ++ str_of_int d
+                   ++ " check " ++ str_of_int (batch d iters 0)) in
+    depths (d + 2);
+
+let _ = depths 4 in
+let _ = print ("long-lived tree of depth " ++ str_of_int maxdepth
+               ++ " check " ++ str_of_int (check longlived)) in
+exit 0

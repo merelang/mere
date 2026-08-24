@@ -77,3 +77,4 @@ TODO.md
 # benchmark inputs and build products: generated, never committed
 benchmarks/data/
 benchmarks/.build/
+__pycache__/

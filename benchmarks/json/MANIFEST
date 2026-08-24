@@ -1,0 +1,38 @@
+name  = json
+shape = parse a document with the ecosystem's parser, then walk the whole tree
+args  = $DATA/records.json
+claim = a different question from every other row here. This is `contrib/json`,
+        a parser written in Mere, against parsers that are native code shipped
+        with their runtime -- Go's encoding/json, V8's JSON.parse, Ruby's JSON
+        and Python's json are none of them written in the language whose row
+        they occupy. So this measures "a language plus what its ecosystem hands
+        you", which is a real question when choosing one, and not the same
+        question as "how fast is code this language compiles".
+        No C or Rust row: C has no standard JSON parser, and Rust's is a crate
+        this suite cannot fetch. Hand-rolling either would compare parsers
+        rather than ecosystems, which is the one thing this row is not for.
+        READ THIS ROW TWICE. On wall clock Mere is fastest, and that is a real
+        answer to "how long until I have the number". But subtract each row's
+        process startup, which benchmarks/startup isolates (mere 5 ms, Go 6 ms,
+        Python 35 ms, Ruby 176 ms, Node 200 ms), and the ordering changes:
+        contrib/json does its ~124 ms of work against V8's ~87 ms. Mere's
+        parser is SLOWER than the fastest native one here and wins the row
+        anyway because the runtime carrying that parser costs more to start
+        than the parsing costs to do. Both halves are true and they answer
+        different questions.
+        The document is sized so the parse dominates. At an eighth of it the
+        parse was 16 ms of Mere and every dynamic row was mostly startup -- a
+        benchmark whose signal is buried under a cost another row already
+        measures is not measuring what its claim says.
+        The checksum walks the WHOLE tree, so a parser cannot win by being lazy
+        about the parts nobody reads. Numbers in the input are integers only
+        and nesting is one level deep: `contrib/json` parses `JNum of int`, and
+        a document with 1.5e3 in it would be timing one implementation's error
+        path against five implementations' happy path.
+
+# 161.4 MB at v0.1.321, for a 11.8 MB document -- a ~14x expansion into the
+# parse tree, which is what a `json list` of `(str * json)` pairs costs when
+# every node is a region allocation and nothing is freed. Go holds 90 MB for
+# the same tree with a collector underneath it.
+alloc_min = 134217728
+alloc_max = 201326592

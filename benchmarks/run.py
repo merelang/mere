@@ -517,10 +517,16 @@ def run_bench(name, bench_dir, tools, reps, verify_only, do_sweep=False):
               " answer different questions:")
         print("  CUMULATIVE is what the program asked the allocator for over"
               " its whole run, and PEAK")
-        print("  is the most any one generation held at once. A region loop"
-              " raises the first and")
-        print("  lowers the second -- it pays for a copy per generation to"
-              " bound what is resident.")
+        print("  is the most any one generation held at once. Both constructs"
+              " lower the peak; what")
+        print("  they cost differs. A `region R { }` block copies only its"
+              " RESULT out, so if that is")
+        print("  small the cumulative is unchanged and the block is free. A"
+              " `region R loop` has to")
+        print("  deep-copy its CARRY into each new generation, so it raises the"
+              " cumulative -- that")
+        print("  copy is the price of a live set that outlives the arena"
+              " holding it.")
     return {"name": name, "impls": agreeing, "mismatch": mismatch}
 
 

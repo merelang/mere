@@ -1,0 +1,48 @@
+// binarytrees, with the language's answer applied -- `region R { }`.
+//
+// Same program as bench.mere. The difference is that each depth's batch of
+// throwaway trees is built INSIDE a region block, so the whole generation is
+// released at the block's end instead of accumulating for the run.
+//
+// This is the trade the region model actually offers, and it is a smaller trade
+// here than in churn: the batch's answer is an int, which copies out for
+// nothing, and the trees never had to survive the block. Where churn had to
+// carry a live table across generations and pay a deep copy per generation,
+// this one only has to say where the garbage ends.
+//
+// The long-lived tree stays outside, because it has to outlive every block --
+// which is also the reason a block and not a loop: its lifetime nests.
+
+type tree = Leaf | Branch of tree * tree;
+
+let rec build = fn (d: int) ->
+  if d == 0 then Leaf else Branch (build (d - 1), build (d - 1));
+
+let rec check = fn (t: tree) ->
+  match t with
+  | Leaf -> 1
+  | Branch (l, r) -> 1 + check l + check r;
+
+let rec pow2 = fn (n: int) -> if n == 0 then 1 else 2 * pow2 (n - 1);
+
+let maxdepth = match args () with | Cons (a, _) -> int_of_str a | Nil -> 14;
+
+let longlived = build maxdepth;
+
+let rec batch = fn (d: int) -> fn (iters: int) -> fn (acc: int) ->
+  if iters == 0 then acc else batch d (iters - 1) (acc + check (build d));
+
+let rec depths = fn (d: int) ->
+  if d > maxdepth then ()
+  else
+    let iters = pow2 (maxdepth - d + 4) in
+    // The batch's trees are born in R and die with it; only the int leaves.
+    let total = region R { batch d iters 0 } in
+    let _ = print (str_of_int iters ++ " trees of depth " ++ str_of_int d
+                   ++ " check " ++ str_of_int total) in
+    depths (d + 2);
+
+let _ = depths 4 in
+let _ = print ("long-lived tree of depth " ++ str_of_int maxdepth
+               ++ " check " ++ str_of_int (check longlived)) in
+exit 0
