@@ -52,7 +52,7 @@ type value =
        the string's bytes. Treated as Trivial, so it can live in a
        region. The type is TyCon ("StrBuf", [TyRef BR R TyUnit])
        (1-arg region marker, the same convention as view types). *)
-  | V_map of (value, value) Hashtbl.t * value list ref
+  | V_map of map_state
     (* `Map[R, K, V]` — region-aware mutable associative map (Phase 12.10,
        Q-010 narrowed). Minimal implementation of design doc
        13_region_std_types.md §5. Internally an OCaml Hashtbl using
@@ -82,12 +82,58 @@ type value =
        (Sub-Q A: OS-thread / Domain-like). `join` blocks on Domain.join.
        The domain runs the `unit -> unit` closure passed to `spawn`. *)
 
+(* Q-063: the interpreter's Map, with the same tombstone discipline the C
+   backend got in v0.1.317. `m_order` is newest-first and APPEND-ONLY: a delete
+   touches only the hash table, so it costs O(1) instead of the O(live)
+   `List.filter` this used to do. The list therefore accumulates keys that are
+   no longer present, and keys present more than once (deleted and re-inserted),
+   so every reader walks it newest-first and keeps the FIRST occurrence of each
+   key that is still in `m_tbl` -- which puts a re-inserted key at its new
+   position, matching the compiled backends. `m_order_n` exists so the
+   compaction trigger does not have to call List.length, which would put the
+   O(live) back where it was taken from. *)
+and map_state = {
+  m_tbl : (value, value) Hashtbl.t;
+  mutable m_order : value list;
+  mutable m_order_n : int;
+}
+
 and bytebuf = { mutable bb_data : Bytes.t; mutable bb_len : int }
 
 and env = (string * value ref) list
 
 (* hex <-> raw byte string, shared by bytes display / to_json
    and the bytes_of_hex / hex_of_bytes builtins. Lowercase, 2 chars per byte. *)
+(* Q-063: the live keys of a map, oldest-first. Walks `m_order` newest-first
+   keeping the first occurrence of each key still present, then reverses -- so
+   a key deleted and re-inserted appears once, at the position of its LATEST
+   insertion, which is where the compiled backends put it. *)
+let map_live_keys (m : map_state) : value list =
+  (* The common case is a map that has never been deleted from, where the list
+     is already exactly the live keys: skip building a dedup table for it, so
+     iteration does not pay for a facility only churn needs. *)
+  if m.m_order_n = Hashtbl.length m.m_tbl then List.rev m.m_order else
+  let seen = Hashtbl.create (Hashtbl.length m.m_tbl * 2 + 1) in
+  let out = ref [] in
+  List.iter (fun k ->
+    if Hashtbl.mem m.m_tbl k && not (Hashtbl.mem seen k) then begin
+      Hashtbl.replace seen k ();
+      out := k :: !out
+    end) m.m_order;
+  !out
+
+(* Drop the stale and duplicate entries when they outnumber the live ones, so
+   the append-only list stays proportional to the live set rather than to the
+   number of writes. O(order) once per O(live) deletes, i.e. amortised O(1) --
+   the same trade as the C backend's squeeze. *)
+let map_maybe_compact (m : map_state) : unit =
+  let live = Hashtbl.length m.m_tbl in
+  if m.m_order_n > 2 * live + 8 then begin
+    let oldest_first = map_live_keys m in
+    m.m_order <- List.rev oldest_first;
+    m.m_order_n <- List.length m.m_order
+  end
+
 let hex_of_string (s : string) : string =
   let b = Buffer.create (String.length s * 2) in
   String.iter (fun c -> Buffer.add_string b (Printf.sprintf "%02x" (Char.code c))) s;
@@ -179,11 +225,10 @@ and to_string = function
     "Vec[" ^ String.concat ", " (List.map to_string elems) ^ "]"
   | V_strbuf buf ->
     "StrBuf[" ^ Ast.escape_string (Buffer.contents buf) ^ "]"
-  | V_map (tbl, keys) ->
-    (* keys is newest-first (O(1) prepend in map_set); reverse for order. *)
+  | V_map m ->
     let parts = List.map (fun k ->
-      let v = Hashtbl.find tbl k in
-      to_string k ^ " => " ^ to_string v) (List.rev !keys) in
+      let v = Hashtbl.find m.m_tbl k in
+      to_string k ^ " => " ^ to_string v) (map_live_keys m) in
     "Map[" ^ String.concat ", " parts ^ "]"
   | V_channel _ -> "<channel>"
   | V_file _ -> "<file>"
@@ -235,12 +280,12 @@ and to_json_string = function
   | V_vec arr ->
     "[" ^ String.concat "," (List.map to_json_string (Array.to_list !arr)) ^ "]"
   | V_strbuf buf -> Ast.escape_string (Buffer.contents buf)
-  | V_map (tbl, keys) ->
+  | V_map m ->
     let parts = List.map (fun k ->
-      let v = Hashtbl.find tbl k in
+      let v = Hashtbl.find m.m_tbl k in
       (* JSON object keys must be strings: use the key's string form. *)
       let ks = match k with V_str s -> s | _ -> to_string k in
-      Ast.escape_string ks ^ ":" ^ to_json_string v) (List.rev !keys) in
+      Ast.escape_string ks ^ ":" ^ to_json_string v) (map_live_keys m) in
     "{" ^ String.concat "," parts ^ "}"
 
 let type_error loc msg = raise (Eval_error (loc, msg))
@@ -1366,7 +1411,7 @@ let builtin_len =
     match v with
     | V_vec arr -> V_int (Array.length !arr)
     | V_strbuf buf -> V_int (Buffer.length buf)
-    | V_map (tbl, _) -> V_int (Hashtbl.length tbl)
+    | V_map m -> V_int (Hashtbl.length m.m_tbl)
     | V_str s -> V_int (String.length s)
     | V_tuple es -> V_int (List.length es)
     | V_constr _ ->
@@ -1590,13 +1635,13 @@ let builtin_strbuf_len =
 let builtin_map_new =
   V_builtin ("map_new", fun v ->
     match v with
-    | V_unit -> V_map (Hashtbl.create 16, ref [])
+    | V_unit -> V_map { m_tbl = Hashtbl.create 16; m_order = []; m_order_n = 0 }
     | _ -> failwith "map_new: expected unit")
 
 let builtin_map_set =
   V_builtin ("map_set", fun v ->
     match v with
-    | V_map (tbl, keys) ->
+    | V_map m ->
       V_builtin ("map_set_p1", fun k ->
         V_builtin ("map_set_p2", fun vv ->
           (* Phase 27.1: track insertion order. Only record NEW keys;
@@ -1604,17 +1649,20 @@ let builtin_map_set =
              newest-first (O(1) prepend); readers reverse it to recover
              insertion order. Appending (`@ [k]`) was O(n) per new key =
              O(n^2) to fill a map (measured this). *)
-          if not (Hashtbl.mem tbl k) then keys := k :: !keys;
-          Hashtbl.replace tbl k vv;
+          if not (Hashtbl.mem m.m_tbl k) then begin
+            m.m_order <- k :: m.m_order;
+            m.m_order_n <- m.m_order_n + 1
+          end;
+          Hashtbl.replace m.m_tbl k vv;
           V_unit))
     | _ -> failwith "map_set: expected Map")
 
 let builtin_map_get =
   V_builtin ("map_get", fun v ->
     match v with
-    | V_map (tbl, _) ->
+    | V_map m ->
       V_builtin ("map_get_p1", fun k ->
-        match Hashtbl.find_opt tbl k with
+        match Hashtbl.find_opt m.m_tbl k with
         | Some vv -> vv
         | None ->
           raise (Eval_error (Loc.dummy,
@@ -1624,20 +1672,23 @@ let builtin_map_get =
 let builtin_map_has =
   V_builtin ("map_has", fun v ->
     match v with
-    | V_map (tbl, _) ->
+    | V_map m ->
       V_builtin ("map_has_p1", fun k ->
-        V_bool (Hashtbl.mem tbl k))
+        V_bool (Hashtbl.mem m.m_tbl k))
     | _ -> failwith "map_has: expected Map")
 
 let builtin_map_len =
   V_builtin ("map_len", fun v ->
     match v with
-    | V_map (tbl, _) -> V_int (Hashtbl.length tbl)
+    | V_map m -> V_int (Hashtbl.length m.m_tbl)
     | _ -> failwith "map_len: expected Map")
 
-(* Phase 39.A' #2: map_delete — Hashtbl.remove. No-op if the key is
-   absent. To preserve Phase 27.1 insertion order, also removes from
-   the keys list. *)
+(* Phase 39.A' #2 / Q-063: map_delete — Hashtbl.remove and nothing else.
+   This used to also do `List.filter` over the insertion-order list to keep it
+   exact, which made one delete O(live): 20k operations over a live set grown
+   from 500 to 8,000 went 0.38 s to 1.92 s, where O(1) is flat. The list is
+   append-only now and readers skip what is gone (see map_live_keys), with
+   map_maybe_compact keeping it proportional to the live set. *)
 (* v0.1.297: map_compact / vec_compact — no-ops here. Compaction is an
    optimization the C backend performs (private-arena generation swap); the
    interpreter has no arenas, so the honest answer is unit. *)
@@ -1646,7 +1697,7 @@ let builtin_map_len =
 let builtin_map_recycle =
   V_builtin ("map_recycle", fun v ->
     match v with
-    | V_map (tbl, keys) -> Hashtbl.reset tbl; keys := []; V_unit
+    | V_map m -> Hashtbl.reset m.m_tbl; m.m_order <- []; m.m_order_n <- 0; V_unit
     | _ -> failwith "map_recycle: expected Map")
 
 let builtin_map_bytes = V_builtin ("map_bytes", fun _ -> V_int 0)
@@ -1655,7 +1706,7 @@ let builtin_vec_bytes = V_builtin ("vec_bytes", fun _ -> V_int 0)
 let builtin_map_clear =
   V_builtin ("map_clear", fun v ->
     match v with
-    | V_map (tbl, keys) -> Hashtbl.reset tbl; keys := []; V_unit
+    | V_map m -> Hashtbl.reset m.m_tbl; m.m_order <- []; m.m_order_n <- 0; V_unit
     | _ -> failwith "map_clear: expected Map")
 
 let builtin_map_compact =
@@ -1666,11 +1717,11 @@ let builtin_vec_compact =
 let builtin_map_delete =
   V_builtin ("map_delete", fun v ->
     match v with
-    | V_map (tbl, keys) ->
+    | V_map m ->
       V_builtin ("map_delete_p1", fun k ->
-        if Hashtbl.mem tbl k then begin
-          Hashtbl.remove tbl k;
-          keys := List.filter (fun kk -> kk <> k) !keys
+        if Hashtbl.mem m.m_tbl k then begin
+          Hashtbl.remove m.m_tbl k;
+          map_maybe_compact m
         end;
         V_unit)
     | _ -> failwith "map_delete: expected Map")
@@ -1748,16 +1799,15 @@ let builtin_vec_fold =
 let builtin_map_iter =
   V_builtin ("map_iter", fun v ->
     match v with
-    | V_map (tbl, keys) ->
+    | V_map m ->
       V_builtin ("map_iter_p1", fun f ->
         (* Phase 27.1: iterate in insertion order so output matches
-           C / LLVM / Wasm Map runtime (which all use parallel arrays).
-           keys is newest-first (O(1) prepend); reverse to get order. *)
+           C / LLVM / Wasm Map runtime (which all use parallel arrays). *)
         List.iter (fun k ->
-          let vv = Hashtbl.find tbl k in
+          let vv = Hashtbl.find m.m_tbl k in
           let f_k = !apply_value_ref f k in
           ignore (!apply_value_ref f_k vv)
-        ) (List.rev !keys);
+        ) (map_live_keys m);
         V_unit)
     | _ -> failwith "map_iter: expected Map")
 

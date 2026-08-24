@@ -4,6 +4,52 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.320 — 2026-08-24
+
+_The interpreter had the same O(live) delete, and it was hiding behind its own overhead._
+
+v0.1.317 tombstoned `map_delete` on the C backend. The interpreter's version
+was the same bug in a different shape: `Hashtbl.remove` (O(1)) followed by
+`List.filter` over the insertion-order key list (O(live)) to keep that list
+exact.
+
+It was diluted rather than dominant, which is why it survived — at 20k
+operations with the live set grown from 500 to 8,000, the run went 0.38 s to
+1.92 s, where O(1) is flat and pure O(live) would be 16x. Enough of the cost
+was interpreter overhead that the shape did not stand out until the C backend's
+had been measured and named.
+
+Same discipline as the C fix. The key list is append-only now: a delete touches
+only the hash table. So the list accumulates keys that are gone, and keys that
+appear twice (deleted, then re-inserted) — and every reader (`map_iter`,
+`to_string`, `to_json_string`) walks it newest-first keeping the FIRST
+occurrence of each key still in the table, which puts a re-inserted key at its
+new position, matching every compiled backend. `map_maybe_compact` rebuilds the
+list when the stale entries outnumber the live ones, so it stays proportional to
+the live set rather than to the number of writes, amortised O(1) per delete.
+
+`V_map` carries a small record now (`m_tbl` / `m_order` / `m_order_n`) instead
+of a Hashtbl and a list ref: the length has to be a field, because a trigger
+that called `List.length` would put back the O(live) it was removing.
+
+Readers get a fast path for the case that has no tombstones at all — when the
+list length equals the table's, it is already exactly the live keys, so
+iteration does not build a dedup table for a facility only churn needs.
+
+Measured, 20k operations, live 500 → 8,000: **0.38/0.58/0.82/1.29/1.92 s
+becomes 0.23/0.23/0.23/0.22/0.19 s.** Flat, and 10x faster at the top.
+
+Two backends still shift, and they were measured before this was written rather
+than assumed. 40k operations, live 500 → 4,000, against the C backend's flat
+0.02 s: **LLVM 0.19 / 0.45 / 1.16 s** and **Wasm (minus node's ~0.25 s
+startup) 0.09 / 0.19 / 0.43 / 0.87 s** — both doubling with the table. Their
+map runtimes are hand-written IR and WAT, so this is a larger change than the
+two already made and is not folded in here. Semantics are unaffected either
+way: `test/parity/map_delete_tombstone.mere` runs on all four backends and the
+ones that still shift produce the same transcript as the ones that do not.
+
+---
+
 ## v0.1.319 — 2026-08-24
 
 _The deterministic memory meter could not see the construct that manages memory._
