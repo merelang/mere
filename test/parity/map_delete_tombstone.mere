@@ -1,0 +1,91 @@
+// Q-063: delete became a tombstone on the C backend (v0.1.317) instead of a
+// shift-and-reindex. That is supposed to be INVISIBLE -- so this case pins the
+// observable half of the change, and every backend runs it: the ones that still
+// shift have to produce the same transcript as the one that no longer does.
+//
+// What a leaking tombstone would look like, and what each section catches:
+//   - map_len counting the dense high-water mark instead of the survivors
+//   - map_iter visiting a deleted slot, or visiting survivors out of order
+//   - a deleted key found again by map_has / map_get (the index slot vacated
+//     with -1 instead of -2 would end a probe chain early and LOSE a later
+//     key, which is the opposite failure and is caught by the same asserts)
+//   - a reinserted key landing back in its old position rather than at the tail
+//
+// Sizes are chosen to cross the internal thresholds rather than to be round:
+// the squeeze fires only when the dead outnumber the live AND there are at
+// least eight of them, and the index doubles past a 0.7 load factor. A case
+// that never crosses either one would pass against a completely broken
+// implementation of both.
+
+let rec fill = fn m -> fn i -> fn n ->
+  if i >= n then () else let _ = map_set m i (i * 10) in fill m (i + 1) n;
+
+let show = fn m -> map_iter m (fn (k: int) -> fn (v: int) ->
+  print_no_nl (str_of_int k ++ ":" ++ str_of_int v ++ " "));
+
+// --- 1. survivors keep insertion order, and len counts only them ----------
+let a = map_new ();
+let _ = fill a 0 12;
+let rec del_evens = fn i ->
+  if i >= 12 then () else let _ = map_delete a i in del_evens (i + 2);
+let _ = del_evens 0;                  // 6 deletes: dead(6) < live(6), no squeeze
+let _ = print ("len " ++ str_of_int (map_len a));            // 6
+let _ = show a in let _ = print "" in                        // 1,3,5,7,9,11
+let _ = map_delete a 1;               // 7th: dead(7) > live(5), squeeze fires
+let _ = print ("len " ++ str_of_int (map_len a));            // 5
+let _ = show a in let _ = print "" in                        // 3,5,7,9,11 -- order survived the squeeze
+
+// --- 2. a reinserted key goes to the TAIL, not back to its old slot -------
+let _ = map_set a 5 555;              // still present: an update, stays in place
+let _ = map_set a 0 999;              // deleted earlier: a fresh insert, goes last
+let _ = show a in let _ = print "" in                        // 3,5(555),7,9,11,0(999)
+let _ = print ("get 0 " ++ str_of_int (map_get a 0));        // 999
+let _ = print ("has 2 " ++ (if map_has a 2 then "y" else "n"));  // n
+
+// --- 3. deleting what is not there changes nothing ------------------------
+let _ = map_delete a 4242;
+let _ = map_delete a 2;
+let _ = print ("len " ++ str_of_int (map_len a));            // 6
+
+// --- 4. empty it completely, then refill through the same slots -----------
+let rec del_all = fn i ->
+  if i >= 12 then () else let _ = map_delete a i in del_all (i + 1);
+let _ = del_all 0;
+let _ = print ("emptied " ++ str_of_int (map_len a));        // 0
+let _ = fill a 100 106;
+let _ = print ("refilled " ++ str_of_int (map_len a));       // 6
+let _ = show a in let _ = print "" in                        // 100..105 in order
+
+// --- 5. deletes interleaved with growth, past the index load factor -------
+// 400 inserts against a live set of 40 -- the churn shape, and the one that
+// forces repeated squeezes and index rebuilds in the same run.
+let b = map_new ();
+let rec churn = fn i ->
+  if i >= 400 then ()
+  else
+    let _ = map_set b i i in
+    let _ = (if i >= 40 then map_delete b (i - 40) else ()) in
+    churn (i + 1);
+let _ = churn 0;
+let _ = print ("churn len " ++ str_of_int (map_len b));      // 40
+let _ = print ("churn first " ++ str_of_int (map_get b 360));
+let _ = print ("churn last " ++ str_of_int (map_get b 399));
+let _ = print ("churn gone " ++ (if map_has b 359 then "y" else "n"));  // n
+let sum = map_new ();
+let _ = map_set sum "t" 0;
+let _ = map_iter b (fn (k: int) -> fn (_v: int) ->
+  map_set sum "t" (map_get sum "t" + k));
+let _ = print ("churn key sum " ++ str_of_int (map_get sum "t"));  // 360..399
+// str keys through the same paths -- the hash and the eq differ by key type
+let c = map_new ();
+let rec sfill = fn i ->
+  if i >= 30 then ()
+  else
+    let _ = map_set c ("k" ++ str_of_int i) i in
+    let _ = (if i % 3 == 0 then map_delete c ("k" ++ str_of_int i) else ()) in
+    sfill (i + 1);
+let _ = sfill 0;
+let _ = print ("str len " ++ str_of_int (map_len c));        // 20
+let _ = print ("str has k1 " ++ (if map_has c "k1" then "y" else "n"));   // y
+let _ = print ("str has k3 " ++ (if map_has c "k3" then "y" else "n"));   // n
+print "done"
