@@ -1,0 +1,53 @@
+// wordfreq -- read a text file, count words, print the ten most frequent.
+//
+// The shape most short-lived programs actually have: a bounded amount of text
+// in, a lot of small strings and one hash table in the middle, an answer out,
+// exit. It is the workload the region model is supposed to be good at -- the
+// program never has to give memory back, it just ends -- and it is where the
+// comparison against the garbage-collected runtimes is a real question rather
+// than a foregone conclusion.
+//
+// Ties are broken by word so the top-ten list is a function of the input and
+// not of any implementation's sort stability. Every reference here does the
+// same: count desc, then word asc.
+
+let path = match args () with | Cons (p, _) -> p | Nil -> "";
+
+let text = read_file path;
+let words = str_split (str_replace text "\n" " ") " ";
+
+let counts = map_new ();
+let rec tally = fn (ws: str list) -> fn (n: int) ->
+  match ws with
+  | Nil -> n
+  | Cons (w, rest) ->
+      if str_eq w "" then tally rest n
+      else
+        let prev = if map_has counts w then map_get counts w else 0 in
+        let _ = map_set counts w (prev + 1) in
+        tally rest (n + 1);
+let total = tally words 0;
+
+// map_iter is the only way out of a Map, so the pairs are accumulated into a
+// list by side effect on a ref cell -- there is no map_to_list.
+let acc = vec_new ();
+let _ = map_iter counts (fn (w: str) -> fn (c: int) -> vec_push acc (w, c));
+
+let pairs = vec_to_list acc;
+let ranked = list_sort_by
+  (fn (a: str * int) -> fn (b: str * int) ->
+     if snd a == snd b then fst a < fst b else snd a > snd b)
+  pairs;
+
+let rec take = fn (n: int) -> fn (xs: (str * int) list) ->
+  if n == 0 then ()
+  else match xs with
+       | Nil -> ()
+       | Cons (p, rest) ->
+           let _ = print (fst p ++ " " ++ str_of_int (snd p)) in
+           take (n - 1) rest;
+
+let _ = print ("words " ++ str_of_int total) in
+let _ = print ("unique " ++ str_of_int (map_len counts)) in
+let _ = take 10 ranked in
+exit 0

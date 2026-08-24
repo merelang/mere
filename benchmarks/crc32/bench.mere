@@ -1,0 +1,43 @@
+// crc32 -- compute-bound over a byte stream, almost no allocation.
+//
+// The comparison this workload exists for is against C: Mere lowers to C and
+// is then compiled by the same clang, so the honest expectation here is a TIE,
+// and the number worth watching is any gap that opens up. Against the managed
+// runtimes it is a per-byte interpreter-loop comparison and the outcome is not
+// in doubt; it is recorded anyway so the table has a scale on it.
+//
+// The one Mere-specific cost is visible in peak RSS rather than in time:
+// `read_file_bytes` returns `Vec[R, int]` and int is 64-bit, so a 4 MiB file
+// occupies 32 MiB in memory. That is the same "1 byte is 8 bytes" finding the
+// PNG work hit, and this bench is where it stays measured instead of recalled.
+
+let mask32 = 0xFFFFFFFF;
+
+let crc_byte = fn crc -> fn b ->
+  let x = bit_xor crc b in
+  let rec go = fn i -> fn c ->
+    if i == 8 then c
+    else
+      let c2 = if bit_and c 1 == 1
+               then bit_xor (bit_shr c 1) 0xEDB88320
+               else bit_shr c 1 in
+      go (i + 1) c2 in
+  go 0 x;
+
+let args_v = args ();
+let path = match args_v with | Cons (p, _) -> p | Nil -> "" in
+if str_eq path "" then print "usage: bench <file>"
+else
+  let data = read_file_bytes path in
+  let n = vec_len data in
+  let rec go = fn i -> fn crc ->
+    if i == n then crc
+    else go (i + 1) (crc_byte crc (vec_get data i)) in
+  let crc = bit_xor (go 0 mask32) mask32 in
+  let _ = print ("bytes " ++ str_of_int n) in
+  let _ = print ("crc32 " ++ str_of_int crc) in
+  // Every Mere program echoes its final expression, and `print` evaluates to
+  // unit -- so without this the process would emit a trailing "()" that no
+  // other implementation emits. Suppressing it here rather than filtering it
+  // in the runner keeps the same-answer check a plain equality.
+  exit 0
