@@ -1,0 +1,37 @@
+// churn, naive -- one Map, set and delete, no reclamation.
+//
+// This is the workload that a bump-allocated region cannot serve: the live set
+// stays at LIVE entries the whole time, but nothing is ever handed back, so
+// the footprint follows N (the number of operations) rather than LIVE. The
+// garbage-collected references opposite this row follow LIVE.
+//
+// It is here to be lost, and to be lost in a number rather than in a memory of
+// having read about it. bench_regionloop.mere is the same program with the
+// language's answer applied.
+
+let pad = "------------------------------------------";
+
+let argv = args ();
+let n = match argv with | Cons (a, _) -> int_of_str a | Nil -> 200000;
+let live = match argv with | Cons (_, Cons (b, _)) -> int_of_str b | Nil -> 2000;
+
+let m = map_new ();
+
+let rec step = fn (i: int) ->
+  if i == n then ()
+  else
+    let _ = map_set m ("s" ++ str_of_int i) (str_of_int i ++ pad) in
+    let _ = if i >= live then map_delete m ("s" ++ str_of_int (i - live)) else () in
+    step (i + 1);
+let _ = step 0;
+
+// Read the survivors back: proves the table still holds what it should, and
+// makes the answer a function of the map rather than of the loop counter.
+let rec checksum = fn (j: int) -> fn (acc: int) ->
+  if j == n then acc
+  else checksum (j + 1) (acc + str_len (map_get m ("s" ++ str_of_int j)));
+let acc = checksum (n - live) 0;
+
+let _ = print ("live " ++ str_of_int (map_len m)) in
+let _ = print ("checksum " ++ str_of_int acc) in
+exit 0

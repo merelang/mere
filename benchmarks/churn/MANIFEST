@@ -1,0 +1,30 @@
+name  = churn
+shape = a long-lived table under insert/delete churn with a BOUNDED live set
+args  = 200000 2000
+claim = the shape Mere is structurally bad at, kept in the suite for that
+        reason. A region is a bump arena: `map_delete` returns nothing and an
+        overwrite leaves the old deep copy behind, so a naive Mere table grows
+        with the TOTAL number of operations while every garbage-collected
+        runtime here tracks the LIVE SET instead. bench_regionloop.mere is the
+        language's answer (`region R loop`, v0.1.296) and is in the table next
+        to the naive version, so the row shows both the cost and the tool. A
+        suite that only carried workloads its subject wins is not a
+        measurement.
+
+# The sweep is the point of this benchmark. Operation count is held constant
+# and the LIVE SET is doubled: an implementation whose delete is O(1) draws a
+# flat line, and one whose delete shifts the table draws a doubling one.
+sweep_axis = live-set size, at a fixed 100k operations
+sweep = 100000 250 | 100000 500 | 100000 1000 | 100000 2000 | 100000 4000
+
+# Measured 43,298,448 B at v0.1.316 for the NAIVE program at `args` -- 200k
+# operations over a 2,000-entry live set, so ~43 MB is retained to hold what is
+# at any moment ~100 KB of data. That ratio is the finding, and the ceiling is
+# here so a change to it is announced rather than discovered.
+#
+# bench_regionloop.mere has no bound: its allocation happens in a NAMED arena,
+# which MERE_REGION_STATS cannot see, so its default-region reading (184 B) is
+# the meter's blind spot and not a fact about the program. Pinning it would
+# pin the blindness.
+alloc_min = 25165824
+alloc_max = 58720256

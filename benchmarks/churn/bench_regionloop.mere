@@ -1,0 +1,54 @@
+// churn, with the language's answer applied -- `region R loop` (v0.1.296).
+//
+// Same program as bench.mere. The difference is that the table is CARRIED
+// through a region loop: every `batch` operations the live entries are deep
+// copied into a fresh arena and the old arena -- with every dead overwrite and
+// every deleted entry still sitting in it -- is released whole.
+//
+// That is the trade the region model actually offers. It does not give
+// reclamation away; it makes reclamation something the program says, at a
+// point the program chooses, for a set the program names. The cost is the
+// copy, and it is in the wall-clock column next to the naive row.
+//
+// Backends: interp and C. llvm / wasm / rv32 refuse the construct cleanly --
+// their reclamation is a LIFO bump rollback, which cannot express the swap.
+
+let pad = "------------------------------------------";
+let batch = 5000;
+
+let argv = args ();
+let n = match argv with | Cons (a, _) -> int_of_str a | Nil -> 200000;
+let live = match argv with | Cons (_, Cons (b, _)) -> int_of_str b | Nil -> 2000;
+
+// "#i" is the loop counter, kept inside the carried Map: the carry is one
+// container, which is the shape the construct is tested on. It is one extra
+// entry, so the live count subtracts it.
+let answer = region R loop x {
+  match x with
+  | None ->
+      let m0 = map_new () in
+      let _ = map_set m0 "#i" "0" in
+      Continue m0
+  | Some m ->
+      let i0 = int_of_str (map_get m "#i") in
+      if i0 >= n then
+        let rec checksum = fn (j: int) -> fn (acc: int) ->
+          if j == n then acc
+          else checksum (j + 1) (acc + str_len (map_get m ("s" ++ str_of_int j))) in
+        Done (map_len m - 1, checksum (n - live) 0)
+      else
+        let hi = if i0 + batch > n then n else i0 + batch in
+        let rec step = fn (i: int) ->
+          if i == hi then ()
+          else
+            let _ = map_set m ("s" ++ str_of_int i) (str_of_int i ++ pad) in
+            let _ = if i >= live then map_delete m ("s" ++ str_of_int (i - live)) else () in
+            step (i + 1) in
+        let _ = step i0 in
+        let _ = map_set m "#i" (str_of_int hi) in
+        Continue m
+};
+
+let _ = print ("live " ++ str_of_int (fst answer)) in
+let _ = print ("checksum " ++ str_of_int (snd answer)) in
+exit 0

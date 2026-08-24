@@ -255,6 +255,15 @@ jobs:
       - name: region_slack_check (capacity tracks allocation)
         run: sh scripts/region_slack_check.sh
 
+      # The cross-language benchmark suite, deterministic half only: every
+      # implementation of a workload must print the same bytes, Mere's
+      # programs must build, and the default region's cumulative allocation
+      # must stay in its recorded band. No wall clock and no peak RSS -- both
+      # measure the runner. Reference toolchains absent from the image are
+      # skipped with a printed reason rather than silently.
+      - name: bench_check (the implementations agree; allocation is in band)
+        run: sh scripts/bench_check.sh
+
       # The --lib boundary, checked from the outside: the .so's exported
       # symbol set is exactly the boundary, a C host linking it gets the
       # right values, and module init runs once (v0.1.308).

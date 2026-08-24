@@ -1,0 +1,14 @@
+name  = wordfreq
+shape = read text, count words in a hash table, rank, exit
+args  = $DATA/words.txt
+claim = the shape a short-lived program actually has, and the one the region
+        model should be good at: allocate freely, never give anything back,
+        exit. Each implementation uses its OWN idiomatic hash table -- Mere's
+        Map, Rust's HashMap, Go's map, Ruby's Hash, Python's dict, JS's Map.
+        There is deliberately no C row: hand-rolling a hash table in C would
+        compare hash tables, not languages, and the systems-language question
+        is already answered by the Rust row.
+
+# Measured 27,334,672 B at v0.1.316.
+alloc_min = 16777216
+alloc_max = 41943040

@@ -73,3 +73,7 @@ scratch/
 TODO.md
 *.local.md
 *.ppm
+
+# benchmark inputs and build products: generated, never committed
+benchmarks/data/
+benchmarks/.build/
