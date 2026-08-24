@@ -80,7 +80,8 @@ compiled ones, for that reason.
 |---|---|---|
 | `crc32` | compute-bound over a byte stream, almost no allocation | Mere lowers to C and the same clang compiles both, so the honest expectation is a **tie with C**, and it is one. `bench_vecint.mere` is the same algorithm over the other byte API and is 2.7x slower on 12x the memory — the pair of rows is the measurement. |
 | `wordfreq` | read text, count words in a hash table, rank, exit | The shape most short-lived programs actually have, and the one the region model should be **good** at: allocate freely, never give anything back, exit. |
-| `churn` | a long-lived table under insert/delete churn, bounded live set | The shape Mere is structurally **bad** at, kept for that reason. `bench_regionloop.mere` is the language's answer, in the table next to the naive version. |
+| `churn` | a long-lived table under insert/delete churn, bounded live set | Was the shape Mere was structurally **bad** at — `map_delete` was O(live) and this row came out behind Python. Fixed in v0.1.317/320; kept because `bench_regionloop.mere` sits next to the naive version and shows what a region loop costs and buys. |
+| `startup` | the smallest useful program: one argument in, one answer out | The **strongest claim**, and the one no other row measures — every other workload here does enough work to bury process startup. What is left is the cost of *being* a program: runtime init, a GC's first heap, an interpreter parsing its own stdlib. |
 
 Every benchmark's `MANIFEST` carries a `claim` that says what the workload is
 supposed to show, including the ones where the answer is unflattering. A suite

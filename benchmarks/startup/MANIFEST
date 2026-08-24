@@ -1,0 +1,24 @@
+name  = startup
+shape = the smallest useful program: read one argument, answer, exit
+args  = 7
+claim = the strongest claim Mere has against a managed runtime, and the one no
+        other workload here measures. Every other row in this suite does enough
+        work to bury process startup; this one does almost none, so what it
+        reports is the cost of BEING a program in each language -- runtime
+        initialisation, a garbage collector's first heap, an interpreter
+        parsing its own standard library. Mere has none of those, and this is
+        the row where that is worth something. It is also the shape a CLI tool
+        and a per-request process actually have.
+        The tiny amount of work is deliberate but not zero: each
+        implementation parses the argument and prints a value derived from it,
+        so a runtime cannot be credited for a program that was optimised away
+        and the measurement stays a measurement of a program that ran.
+
+# 104 B at v0.1.320 -- the whole program's allocation. The tightest band in the
+# suite, and worth being tight: this row's claim is that Mere starts up like a C
+# program rather than like a runtime, and the thing that would quietly break it
+# is initialisation work creeping in. A ceiling of a few KB catches that on the
+# first commit that adds it, where wall clock at this scale is mostly the
+# scheduler.
+alloc_min = 64
+alloc_max = 4096
