@@ -214,7 +214,15 @@ def read_manifest(path):
     last = None
     with open(path) as f:
         for raw in f:
-            line = raw.split("#", 1)[0].rstrip()
+            # A comment is a line whose first non-space character is `#`. It
+            # used to be everything after any `#` on any line, which silently
+            # ate the second half of matmul's claim at the words
+            # "#pragma STDC FP_CONTRACT OFF" -- a parser that drops the
+            # reasoning while keeping the number is the exact failure this
+            # file exists to prevent.
+            if raw.lstrip().startswith("#"):
+                continue
+            line = raw.rstrip()
             if not line.strip():
                 continue
             if raw[:1] in (" ", "\t") and last:
