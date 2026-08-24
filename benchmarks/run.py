@@ -426,6 +426,11 @@ def run_bench(name, bench_dir, tools, reps, verify_only, do_sweep=False):
         for impl in agreeing:
             if impl.tool.key != "mere":
                 continue
+            if man.get("alloc_unbounded") and \
+                    os.path.basename(impl.src) in man["alloc_unbounded"].split():
+                print("  alloc %-22s deliberately unbounded (see MANIFEST)"
+                      % impl.label)
+                continue
             alloc, named = region_alloc(impl, args, cwd)
             if named:
                 print("  alloc %-22s named arena -- unmetered, no bound"

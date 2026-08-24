@@ -6,13 +6,23 @@ claim = the honest expectation is a TIE with C -- mere lowers to C and the same
         not an optimizer difference. Every implementation runs the SAME bitwise
         algorithm: no lookup table, no library CRC (zlib, hash/crc32, Zlib.crc32),
         because a table-driven reference would compare algorithms instead.
+        bench_vecint.mere is the same algorithm over `read_file_bytes`
+        (Vec[R, int], eight bytes per byte) instead of `bytes`: one API choice,
+        and the whole gap between tying C and being three times slower than it.
 
 # Deterministic bounds on the default region's cumulative allocation, checked
 # by scripts/bench_check.sh. Not a performance threshold -- alloc_total is a
 # function of the program, so it is safe to gate on, unlike wall clock.
-# Measured 67,109,048 B at v0.1.316: a 4 MiB file becomes 32 MiB of Vec[R,int]
-# (one 64-bit int per byte) and the arena doubles to 64 MiB to hold it.
-# The FLOOR is not decoration: a meter that reads zero passes a ceiling
-# forever.
-alloc_min = 33554432
-alloc_max = 75497472
+#
+# Measured 4,194,496 B at v0.1.316 for bench.mere: the file, once, on the
+# `bytes` path. The FLOOR is not decoration -- it is set just under the file
+# size, so a meter that reads zero, or a program that stops reading the file,
+# fails here instead of passing a ceiling forever.
+#
+# bench_vecint.mere reads 67,109,048 B for the same 4 MiB file and is NOT
+# bounded here: it exists to show that number, and a ceiling on it would have
+# to be loose enough to be meaningless. The bound that matters is on the
+# idiomatic path.
+alloc_min = 4194304
+alloc_max = 8388608
+alloc_unbounded = bench_vecint.mere

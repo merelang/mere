@@ -1,0 +1,39 @@
+// crc32 over `read_file_bytes` -- the SAME algorithm as bench.mere, reading
+// the file through the other byte API.
+//
+// `read_file_bytes : str -> Vec[R, int]` gives one 64-bit int per byte. The
+// stdlib reference says so and says "prefer read_bytes" in the same row, and
+// this file is what that sentence costs when it is not read: a 4 MiB file
+// becomes 32 MiB of Vec, the arena doubles to 64 MiB to hold it, and the loop
+// streams eight times the memory it needs to.
+//
+// It is kept as its own row rather than deleted because the pair of rows is
+// the measurement. One API choice, no algorithmic difference, and the whole
+// gap between "ties hand-written C" and "three times slower than it".
+
+let mask32 = 0xFFFFFFFF;
+
+let crc_byte = fn crc -> fn b ->
+  let x = bit_xor crc b in
+  let rec go = fn i -> fn c ->
+    if i == 8 then c
+    else
+      let c2 = if bit_and c 1 == 1
+               then bit_xor (bit_shr c 1) 0xEDB88320
+               else bit_shr c 1 in
+      go (i + 1) c2 in
+  go 0 x;
+
+let args_v = args ();
+let path = match args_v with | Cons (p, _) -> p | Nil -> "" in
+if str_eq path "" then print "usage: bench <file>"
+else
+  let data = read_file_bytes path in
+  let n = vec_len data in
+  let rec go = fn i -> fn crc ->
+    if i == n then crc
+    else go (i + 1) (crc_byte crc (vec_get data i)) in
+  let crc = bit_xor (go 0 mask32) mask32 in
+  let _ = print ("bytes " ++ str_of_int n) in
+  let _ = print ("crc32 " ++ str_of_int crc) in
+  exit 0

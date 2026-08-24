@@ -58,7 +58,7 @@ compiled ones, for that reason.
 
 | | shape | why it is here |
 |---|---|---|
-| `crc32` | compute-bound over a byte stream, almost no allocation | Mere lowers to C and the same clang compiles both, so the honest expectation is a **tie with C**. Any gap is a codegen or representation cost. |
+| `crc32` | compute-bound over a byte stream, almost no allocation | Mere lowers to C and the same clang compiles both, so the honest expectation is a **tie with C**, and it is one. `bench_vecint.mere` is the same algorithm over the other byte API and is 2.7x slower on 12x the memory — the pair of rows is the measurement. |
 | `wordfreq` | read text, count words in a hash table, rank, exit | The shape most short-lived programs actually have, and the one the region model should be **good** at: allocate freely, never give anything back, exit. |
 | `churn` | a long-lived table under insert/delete churn, bounded live set | The shape Mere is structurally **bad** at, kept for that reason. `bench_regionloop.mere` is the language's answer, in the table next to the naive version. |
 
@@ -108,7 +108,14 @@ Three things to get right, all of them learned by getting them wrong here:
 2. **Make the answer a function of the data**, not of the loop counter — read
    the structure back at the end. An answer the optimizer can fold is a
    benchmark the optimizer can delete.
-3. **Give inputs a distribution with a shape.** `wordfreq`'s first generator put
+3. **Reach for the right builtin, and check that it is the right one.** The
+   first `crc32` here used `read_file_bytes`, whose `Vec[R, int]` spends eight
+   bytes on every byte, and reported Mere at 2.9x C on 12x the memory. The
+   stdlib reference says "prefer `read_bytes`" in that builtin's own table row.
+   A benchmark measures whatever it was written against, and an unflattering
+   number is not self-evidently the language's fault — check the API before
+   filing the finding.
+4. **Give inputs a distribution with a shape.** `wordfreq`'s first generator put
    half of 300,000 occurrences on one word and touched 885 of a 5,000-word
    vocabulary; a hash table that small had stopped being part of what was
    measured.
