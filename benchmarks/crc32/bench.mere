@@ -6,10 +6,15 @@
 // runtimes it is a per-byte interpreter-loop comparison and the outcome is not
 // in doubt; it is recorded anyway so the table has a scale on it.
 //
-// The one Mere-specific cost is visible in peak RSS rather than in time:
-// `read_file_bytes` returns `Vec[R, int]` and int is 64-bit, so a 4 MiB file
-// occupies 32 MiB in memory. That is the same "1 byte is 8 bytes" finding the
-// PNG work hit, and this bench is where it stays measured instead of recalled.
+// Written on `bytes` (v0.1.216) and not on `read_file_bytes`. The first
+// version of this benchmark used the latter, which returns `Vec[R, int]` --
+// one 64-bit int per byte -- and reported Mere at 2.9x C and 12x its memory.
+// That was a measurement of the wrong API: the stdlib reference says of
+// `read_file_bytes`, in the same table row, "costs eight bytes per byte;
+// prefer read_bytes". A benchmark author reaching for the obviously-named
+// builtin is exactly who that sentence is for, and exactly who did not read
+// it. bench_vecint.mere keeps the old version, because the gap between the
+// two rows is the actual finding.
 
 let mask32 = 0xFFFFFFFF;
 
@@ -28,11 +33,11 @@ let args_v = args ();
 let path = match args_v with | Cons (p, _) -> p | Nil -> "" in
 if str_eq path "" then print "usage: bench <file>"
 else
-  let data = read_file_bytes path in
-  let n = vec_len data in
+  let data = read_bytes path in
+  let n = bytes_len data in
   let rec go = fn i -> fn crc ->
     if i == n then crc
-    else go (i + 1) (crc_byte crc (vec_get data i)) in
+    else go (i + 1) (crc_byte crc (bytes_get data i)) in
   let crc = bit_xor (go 0 mask32) mask32 in
   let _ = print ("bytes " ++ str_of_int n) in
   let _ = print ("crc32 " ++ str_of_int crc) in
