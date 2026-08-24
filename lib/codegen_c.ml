@@ -3767,7 +3767,7 @@ let rec emit_expr (e : Ast.expr) : string =
        current region defeats clang's sibling-call optimization, and a
        deep tail loop with a per-iteration region overflowed the stack. *)
     Printf.sprintf
-      "({ __lang_region* %s = __lang_region_block_acquire(); \
+      "({ __lang_region* %s = __lang_region_block_acquire(\"region %s\"); \
        __lang_region* __saved_cur_%s = __lang_current_region; \
        __lang_current_region = %s; \
        __auto_type __r_result = (%s); \
@@ -3775,7 +3775,7 @@ let rec emit_expr (e : Ast.expr) : string =
        __auto_type __r_out = __mcopy_%s(__lang_current_region, __r_result); \
        __lang_region_block_release(%s); \
        __r_out; })"
-      region_var name region_var (emit_expr body) name rtag
+      region_var name name region_var (emit_expr body) name rtag
       region_var
   | Ast.Region_loop (name, x, body) ->
     (* `region R loop x { body }` -- the hand-over-hand swap the block above
@@ -3868,7 +3868,7 @@ let rec emit_expr (e : Ast.expr) : string =
     let cont_tag = tag_of "Continue" 0 in
     let xc = c_safe_name x in
     Printf.sprintf
-      "({ __lang_region* __rl_cur = __lang_region_block_acquire(); \
+      "({ __lang_region* __rl_cur = __lang_region_block_acquire(\"region %s loop\"); \
        __lang_region* __rl_saved = __lang_current_region; \
        %s __rl_x = ((%s){.tag = %d}); \
        %s __rl_f; \
@@ -3878,7 +3878,7 @@ let rec emit_expr (e : Ast.expr) : string =
          __auto_type %s = __rl_x; (void)%s; \
          __rl_f = (%s); \
          if (__rl_f.tag != %d) break; \
-         __lang_region* __rl_next = __lang_region_block_acquire(); \
+         __lang_region* __rl_next = __lang_region_block_acquire(\"region %s loop\"); \
          __lang_current_region = __rl_next; \
          __auto_type __rl_c = __mdeep_%s(__rl_next, __rl_f.payload.Continue); \
          __lang_region_block_release(__rl_cur); \
@@ -3889,12 +3889,14 @@ let rec emit_expr (e : Ast.expr) : string =
        __auto_type __rl_res = __mcopy_%s(__lang_current_region, __rl_f.payload.Done); \
        __lang_region_block_release(__rl_cur); \
        __rl_res; })"
+      name
       opt_cty opt_cty none_tag
       flow_cty
       name name
       xc xc
       (emit_expr body)
       cont_tag
+      name
       ctag
       opt_cty some_tag
       dtag
@@ -8044,6 +8046,10 @@ let region_runtime_helpers =
       "  size_t cap;               /* current block capacity */";
       "  __lang_region_block* blocks;  /* chain of every block, for free */";
       "  size_t alloc_total;       /* cumulative bytes handed out (v0.1.307) */";
+      (* Q-065: which source construct this arena is serving, for the meter.
+         A static string (a `region R` name, or a runtime-owned arena's label)
+         or NULL for the default region and for an arena already charged. *)
+      "  const char* site;";
       "} __lang_region;";
       "";
       (* v0.1.274: malloc's answer used to go unread. When it said no, the very
@@ -8101,6 +8107,7 @@ let region_runtime_helpers =
       "static void __lang_region_init(__lang_region* r, size_t cap) {";
       "  r->blocks = NULL;";
       "  r->alloc_total = 0;";
+      "  r->site = 0;";
       "  __lang_region_add_block(r, cap);";
       "}";
       "";
@@ -8176,6 +8183,50 @@ let region_runtime_helpers =
       "  return n;";
       "}";
       "";
+      (* Q-065: cumulative accounting per arena NAME.
+         MERE_REGION_STATS reported the DEFAULT region only, so a program that
+         allocated inside `region R { }` or `region R loop` -- which is to say
+         a program managing its memory deliberately -- read as a few hundred
+         bytes. The deterministic meter could not see the construct that exists
+         to manage memory, and peak RSS, the number it exists to replace, was
+         the only figure left for exactly those programs.
+         Named arenas are created and destroyed during the run, so there is
+         nothing to walk at exit: each one is charged to its name as it is
+         released. Pooled block arenas are recycled across sites, so the name
+         is set at acquire and alloc_total is reset there too. *)
+      "#define __LANG_REGION_SITES 32";
+      "typedef struct { const char* name; size_t entries; size_t alloc_total;";
+      "                 size_t peak_cap; } __lang_region_site;";
+      "static __lang_region_site __lang_region_sites[__LANG_REGION_SITES];";
+      "static int __lang_region_site_n = 0;";
+      "static size_t __lang_region_sites_dropped = 0;";
+      "static pthread_mutex_t __lang_region_sites_lock = PTHREAD_MUTEX_INITIALIZER;";
+      "";
+      "static void __lang_region_charge(__lang_region* r) {";
+      "  if (!r->site) return;";
+      "  size_t cap = 0;";
+      "  for (__lang_region_block* b = r->blocks; b; b = b->prev) cap += b->pad;";
+      "  pthread_mutex_lock(&__lang_region_sites_lock);";
+      "  for (int i = 0; i < __lang_region_site_n; i++) {";
+      "    if (strcmp(__lang_region_sites[i].name, r->site) == 0) {";
+      "      __lang_region_sites[i].entries++;";
+      "      __lang_region_sites[i].alloc_total += r->alloc_total;";
+      "      if (cap > __lang_region_sites[i].peak_cap)";
+      "        __lang_region_sites[i].peak_cap = cap;";
+      "      pthread_mutex_unlock(&__lang_region_sites_lock);";
+      "      return;";
+      "    }";
+      "  }";
+      "  if (__lang_region_site_n < __LANG_REGION_SITES) {";
+      "    __lang_region_site* s = &__lang_region_sites[__lang_region_site_n++];";
+      "    s->name = r->site; s->entries = 1;";
+      "    s->alloc_total = r->alloc_total; s->peak_cap = cap;";
+      (* A meter that silently drops what it cannot fit reports a smaller
+         number than the truth and looks like an improvement. *)
+      "  } else { __lang_region_sites_dropped++; }";
+      "  pthread_mutex_unlock(&__lang_region_sites_lock);";
+      "}";
+      "";
       (* v0.1.307: MERE_REGION_STATS=1 prints the default region's block count,
          capacity and cumulative allocation at exit. Capacity and alloc_total
          are functions of the program, not of the machine -- unlike peak RSS,
@@ -8196,9 +8247,26 @@ let region_runtime_helpers =
       "  for (__lang_region_block* b = r->blocks; b; b = b->prev) { nblocks++; cap += b->pad; }";
       "  fprintf(stderr, \"region-stats default: blocks=%zu cap=%zu alloc_total=%zu\\n\",";
       "          nblocks, cap, r->alloc_total);";
+      (* Q-065: the named arenas, one line each. The `default:` line above keeps
+         its exact spelling -- scripts/region_slack_check.sh greps for it. *)
+      "  size_t named_alloc = 0;";
+      "  for (int i = 0; i < __lang_region_site_n; i++) {";
+      "    __lang_region_site* s = &__lang_region_sites[i];";
+      "    named_alloc += s->alloc_total;";
+      "    fprintf(stderr, \"region-stats named %s: arenas=%zu alloc_total=%zu peak_cap=%zu\\n\",";
+      "            s->name, s->entries, s->alloc_total, s->peak_cap);";
+      "  }";
+      "  if (__lang_region_site_n > 0)";
+      "    fprintf(stderr, \"region-stats named-total: sites=%d alloc_total=%zu\\n\",";
+      "            __lang_region_site_n, named_alloc);";
+      (* A meter that quietly drops rows reads as a smaller program. *)
+      "  if (__lang_region_sites_dropped)";
+      "    fprintf(stderr, \"region-stats WARNING: %zu arena releases uncounted (more than %d names)\\n\",";
+      "            __lang_region_sites_dropped, __LANG_REGION_SITES);";
       "}";
       "";
       "static void __lang_region_free(__lang_region* r) {";
+      "  __lang_region_charge(r);";
       "  __lang_region_block* b = r->blocks;";
       "  while (b) {";
       "    __lang_region_block* prev = b->prev;";
@@ -8274,21 +8342,29 @@ let region_runtime_helpers =
       "  }";
       "}";
       "";
-      "static __lang_region* __lang_region_block_acquire(void) {";
+      "static __lang_region* __lang_region_block_acquire(const char* __site) {";
       "  if (__lang_region_cache_n > 0) {";
       "    __lang_region* r = __lang_region_cache[--__lang_region_cache_n];";
       "    r->top = r->base;";
+      (* the struct is recycled across sites, so each use starts its own tally *)
+      "    r->alloc_total = 0;";
+      "    r->site = __site;";
       "    __lang_region_active_push(r);";
       "    return r;";
       "  }";
       "  __lang_region* r = (__lang_region*)malloc(sizeof(__lang_region));";
       "  __lang_region_init(r, 1 << 20);";
+      "  r->site = __site;";
       "  __lang_region_active_push(r);";
       "  return r;";
       "}";
       "";
       "static void __lang_region_block_release(__lang_region* r) {";
       "  __lang_region_active_drop(r);";
+      "  __lang_region_charge(r);";
+      (* charged: the __lang_region_free below is the same arena and must not
+         count it twice, and the recycled struct starts clean at acquire *)
+      "  r->site = 0;";
       "  if (r->blocks->prev) {";
       "    /* grew past the first block: free the chain, re-seed fresh */";
       "    __lang_region_free(r);";
@@ -11925,7 +12001,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           \    }\n\
           \    return MERE_FAIL;\n\
           \  }\n\
-          \  __lang_region* __call_region = __lang_region_block_acquire();\n\
+          \  __lang_region* __call_region = __lang_region_block_acquire(\"lib call\");\n\
           \  __lang_current_region = __call_region;\n\
           %s\n\
           \  __lang_current_region = __saved_cur;\n\

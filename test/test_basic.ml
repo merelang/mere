@@ -3484,7 +3484,7 @@ let () =
     "__lang_region_alloc";
   assert_contains "codegen: region block initializes + frees buffer"
     (codegen "region R { 42 }")
-    "__lang_region* __region_R = __lang_region_block_acquire()";
+    "__lang_region* __region_R = __lang_region_block_acquire(\"region R\")";
   assert_contains "codegen: region block frees at end"
     (codegen "region R { 42 }")
     "__lang_region_block_release(__region_R)";
@@ -6679,7 +6679,7 @@ let () =
   assert_contains "region block: copies its result out"
     c_src_scratch "__mcopy_int(__lang_current_region, __r_result)";
   assert_contains "region block: heap-acquired (tail-call friendly)"
-    c_src_scratch "__lang_region_block_acquire()";
+    c_src_scratch "__lang_region_block_acquire(\"region R\")";
   let c_src_chan =
     vec_codegen_c
       "let ch = channel_new () in \
@@ -14304,7 +14304,7 @@ let () =
         && has c "static _Thread_local jmp_buf __lang_fail_jmpbuf;"
      then "thread-local" else "global") "thread-local";
   check "v0.1.311: each wrapper call runs in its own region"
-    (if has lib_demo "__lang_region* __call_region = __lang_region_block_acquire();"
+    (if has lib_demo "__lang_region* __call_region = __lang_region_block_acquire(\"lib call\");"
         && has lib_demo "__lang_region_block_release(__call_region);"
      then "transaction" else "ambient") "transaction";
   check "v0.1.311: __heap containers follow the current region in lib mode"

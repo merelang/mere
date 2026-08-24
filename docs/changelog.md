@@ -4,6 +4,66 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.319 — 2026-08-24
+
+_The deterministic memory meter could not see the construct that manages memory._
+
+`MERE_REGION_STATS` reported the DEFAULT region only. A program that did its
+allocating inside `region R { }` or `region R loop` — which is to say a
+program managing its memory deliberately — read as a few hundred bytes. The
+number that exists precisely because peak RSS is quantized and stops
+reproducing above a few GB was blind to exactly the programs where memory is
+the point, and peak RSS was the only figure left for them.
+
+The benchmark suite is where this became untenable rather than merely known:
+its churn row ran a region loop that moved 62 MB through 42 arenas and the
+deterministic column printed `0 KiB`.
+
+Named arenas are created and destroyed during the run, so there is nothing to
+walk at exit. Each is charged to its source name as it is RELEASED, into a
+32-entry table keyed by that name. Pooled block arenas are recycled across
+sites, so the name is set at acquire and the running total is reset there too.
+The output gains one line per name and a total:
+
+```
+region-stats default: blocks=1 cap=4194304 alloc_total=184
+region-stats named region R loop: arenas=42 alloc_total=62376872 peak_cap=3145728
+region-stats named-total: sites=1 alloc_total=62376872
+```
+
+The `default:` line keeps its exact spelling — `scripts/region_slack_check.sh`
+greps for it.
+
+**What the number immediately corrected.** The region-loop variant of the
+churn benchmark was being read as the cheaper program. It is not: it allocates
+62.4 MB against the naive version's 43.4 MB, because it copies the live set
+into a fresh arena once per generation. What it does is hold 3.1 MB at peak
+instead of 60 MB of capacity. The construct does not make reclamation free; it
+bounds residency and charges a copy for it. Both halves of that are now
+measurable, and `benchmarks/run.py` prints both — with the churn MANIFEST
+gaining a `peak_max` bound, since peak arena capacity is a function of the
+program in a way peak RSS is not.
+
+The benchmark gate also stopped bounding the wrong thing: it held the default
+region's allocation, which a program that moves its work into a named arena
+steps out of by construction. It bounds every arena now.
+
+Two limits, stated rather than left to be discovered. An arena still live at
+exit is never released and so never charged — in practice a map's private
+arena between compactions. And past 32 distinct names, releases are counted
+and reported as a `region-stats WARNING` line rather than dropped, because an
+undercount looks exactly like an improvement.
+
+Three unit tests asserted on `__lang_region_block_acquire()`, which now takes
+the site name. One of them was invisible: it dumps the whole generated C on
+failure, the dump carries the NUL bytes of the emitted string table, and `grep`
+declared the log binary and reported zero matches while the summary line said
+one test had failed. Finding it took instrumenting the harness to print names
+to stderr. **A harness that prints its entire subject on failure can make the
+failure unreadable** — which is worth more than the three-character fix.
+
+---
+
 ## v0.1.318 — 2026-08-24
 
 _Five of the eight polymorphic helpers only ever worked under the interpreter._

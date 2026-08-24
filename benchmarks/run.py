@@ -324,31 +324,38 @@ def region_alloc(impl, args, cwd):
     peak RSS it is a function of the program, so it is the number to compare
     across commits.
 
-    THE METER'S SCOPE. It reports the DEFAULT region only. A program that does
-    its allocating inside a named arena -- `region R { }` or `region R loop`,
-    which is to say the programs that manage memory deliberately -- reads as a
-    few hundred bytes here, and a few hundred bytes formatted as "0 KiB" reads
-    as "allocated nothing". That is how this column first reported the
-    region-loop row. Until the meter can see named arenas, such a row is
-    flagged rather than printed as a number that means the opposite of the
-    truth.
+    Since v0.1.319 it reports NAMED arenas too, one line per `region R { }` /
+    `region R loop` in the source, so a program that allocates deliberately is
+    no longer invisible to the number that exists to replace peak RSS. Before
+    that it saw the default region only, and the region-loop row here read
+    "0 KiB" -- a few hundred bytes rounded down, which says the opposite of the
+    truth about a program that moved 62 MB through 42 arenas.
+
+    Returns (default_alloc, named) where `named` is a list of
+    (site, arenas, alloc_total, peak_cap).
     """
     if impl.tool.key != "mere" or impl.exe is None:
-        return None, False
-    # Matched against the source with `//` comments stripped: the first
-    # version of this test grepped for the word "region" and flagged the
-    # NAIVE program, whose comment explains what a region is. A detector that
-    # reads prose puts the disclaimer on the row that does not need it and
-    # makes the flag meaningless on the row that does.
-    src = "\n".join(l.split("//", 1)[0] for l in open(impl.src).read().splitlines())
-    named = re.search(r"\bregion\s+\w+\s*(loop\b|\{)", src) is not None
+        return None, []
     r = measure([impl.exe] + args, cwd, env={"MERE_REGION_STATS": "1"})
+    default, named = None, []
     for line in r.err.splitlines():
         if line.startswith("region-stats default:"):
             for tok in line.split():
                 if tok.startswith("alloc_total="):
-                    return int(tok.split("=", 1)[1]), named
-    return None, False
+                    default = int(tok.split("=", 1)[1])
+        elif line.startswith("region-stats named "):
+            # "region-stats named <site>: arenas=N alloc_total=N peak_cap=N"
+            head, _, rest = line[len("region-stats named "):].rpartition(":")
+            fields = dict(t.split("=", 1) for t in rest.split() if "=" in t)
+            named.append((head,
+                          int(fields.get("arenas", 0)),
+                          int(fields.get("alloc_total", 0)),
+                          int(fields.get("peak_cap", 0))))
+        elif line.startswith("region-stats WARNING"):
+            # The meter said it dropped rows. Never swallow that: an
+            # undercount looks exactly like an improvement.
+            print("  " + line)
+    return default, named
 
 
 def run_bench(name, bench_dir, tools, reps, verify_only, do_sweep=False):
@@ -432,15 +439,26 @@ def run_bench(name, bench_dir, tools, reps, verify_only, do_sweep=False):
                       % impl.label)
                 continue
             alloc, named = region_alloc(impl, args, cwd)
-            if named:
-                print("  alloc %-22s named arena -- unmetered, no bound"
-                      % impl.label)
-                continue
+            for site, arenas, total, peak in named:
+                print("  alloc %-22s %s: %d arenas, %d B cumulative, %d B peak"
+                      % (impl.label, site, arenas, total, peak))
             if alloc is None:
                 print("  FAIL  %-22s MERE_REGION_STATS printed nothing: the"
                       " meter is broken, not the program" % impl.label)
                 mismatch = True
                 continue
+            # The bound is on EVERY arena, not on the default one. Bounding the
+            # default alone would hold a program that moved its allocation into
+            # a `region R { }` to a limit it can no longer exceed by
+            # construction -- a gate that its subject has stepped out of.
+            alloc += sum(t for _, _, t, _ in named)
+            peak = max([p for _, _, _, p in named] or [0])
+            pmax = man.get("peak_max")
+            if pmax and peak > int(pmax):
+                print("  FAIL  %-22s peak arena capacity %d exceeds %s -- the"
+                      " construct that bounds residency stopped bounding it"
+                      % (impl.label, peak, pmax))
+                mismatch = True
             lo_i, hi_i = int(lo), int(hi)
             if alloc < lo_i:
                 print("  FAIL  %-22s alloc_total=%d is BELOW the floor %d --"
@@ -456,8 +474,9 @@ def run_bench(name, bench_dir, tools, reps, verify_only, do_sweep=False):
                       " function of the program alone.)")
                 mismatch = True
             else:
-                print("  alloc %-22s %d B, within [%d, %d]"
-                      % (impl.label, alloc, lo_i, hi_i))
+                print("  alloc %-22s %d B total, within [%d, %d]%s"
+                      % (impl.label, alloc, lo_i, hi_i,
+                         "" if not named else " (peak %d)" % peak))
 
     if verify_only:
         return {"name": name, "impls": agreeing, "mismatch": mismatch}
@@ -467,7 +486,7 @@ def run_bench(name, bench_dir, tools, reps, verify_only, do_sweep=False):
         argv = impl.tool.run(impl.src, impl.exe, args)
         for _ in range(reps):
             impl.runs.append(measure(argv, cwd))
-        impl.alloc, impl.named_region = region_alloc(impl, args, cwd)
+        impl.alloc, impl.named = region_alloc(impl, args, cwd)
 
     print("")
     print("  | implementation | wall median | wall band | peak RSS |"
@@ -483,8 +502,9 @@ def run_bench(name, bench_dir, tools, reps, verify_only, do_sweep=False):
         if fmt_bytes(rsses[0]) != fmt_bytes(rsses[-1]):
             rss += " (%s–%s)" % (fmt_bytes(rsses[0]), fmt_bytes(rsses[-1]))
         alloc = fmt_bytes(impl.alloc) if getattr(impl, "alloc", None) else "—"
-        if getattr(impl, "named_region", False):
-            alloc = "%s + named arena (unmetered) ✱" % alloc
+        for site, arenas, total, peak in getattr(impl, "named", []):
+            alloc += " · %s %s in %d arenas (peak %s)" % (
+                site, fmt_bytes(total), arenas, fmt_bytes(peak))
             footnote = True
         print("  | %s | %.0f ms | %s | %s | %s |"
               % (impl.label, med * 1000, band, rss, alloc))
@@ -493,14 +513,14 @@ def run_bench(name, bench_dir, tools, reps, verify_only, do_sweep=False):
 
     if footnote:
         print("")
-        print("  ✱ MERE_REGION_STATS reports the DEFAULT region only. A program"
-              " that allocates inside")
-        print("    a named arena is invisible to it, so for those rows peak RSS"
-              " is the only memory")
-        print("    figure here -- and peak RSS is the one that does not"
-              " reproduce. The deterministic")
-        print("    meter cannot yet see the construct that exists to manage"
-              " memory.")
+        print("  A row with a named arena reports two numbers because they"
+              " answer different questions:")
+        print("  CUMULATIVE is what the program asked the allocator for over"
+              " its whole run, and PEAK")
+        print("  is the most any one generation held at once. A region loop"
+              " raises the first and")
+        print("  lowers the second -- it pays for a copy per generation to"
+              " bound what is resident.")
     return {"name": name, "impls": agreeing, "mismatch": mismatch}
 
 
