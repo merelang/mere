@@ -44,6 +44,26 @@ machine. When it and peak RSS disagree about whether something changed, it is
 the one to believe. It is also the only number here that CI is allowed to
 gate on.
 
+That is measured, not assumed. The first CI run of this suite read, against
+a development machine on macOS/arm64 with Apple clang 21:
+
+| benchmark | macOS arm64, clang 21 | Linux x86_64, gcc 13.3 |
+|---|---|---|
+| `churn` | 43,298,448 | 43,298,448 |
+| `crc32` (vecint) | 67,109,088 | 67,109,072 |
+| `wordfreq` | 27,334,712 | 27,334,696 |
+
+Different architecture, different OS, different C compiler, and `churn` — the
+only one of the three that takes no file path — agrees to the byte. The other
+two differ by 16 bytes, which is **not** platform noise: `alloc_total` counts
+the argv strings too, and the two checkouts live at paths of different
+lengths. Lengthening the path by 31 characters moves the number by 32 (the
+allocator rounds to 8), which is how that was confirmed rather than assumed.
+
+So the number is a pure function of the program *and its literal inputs*. Keep
+enough headroom in a bound to absorb a path — the bands here have megabytes of
+it, against tens of bytes of variation.
+
 **Absent toolchains are skipped out loud.** A suite that quietly omits the fast
 competitor reads as a win.
 
