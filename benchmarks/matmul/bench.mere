@@ -1,0 +1,71 @@
+// matmul -- dense double-precision multiply-accumulate, the axis no other row
+// touches. crc32 guards the integer path; nothing guarded the floating-point
+// one, and the only measurement of it was a single note that said "about the
+// same as C" once.
+//
+// FLOATING POINT MAKES THE SAME-ANSWER CHECK HARD, which is most of why this
+// row is shaped the way it is. `a*b + c` may be contracted into one fused
+// multiply-add, which rounds ONCE instead of twice and gives different bits.
+// clang does it by default on arm64. So every implementation here is pinned to
+// unfused arithmetic -- Mere emits `#pragma STDC FP_CONTRACT OFF` (v0.1.315),
+// the C row is compiled with `-ffp-contract=off`, and the Go row writes
+// `float64(a*b)`, the conversion its spec says prevents fusion. Rust, JS,
+// Python and Ruby do not contract.
+//
+// The inputs are non-dyadic on purpose (a division by 1000, not by 1024), so
+// the products and the sums actually round. Values that happened to be exact
+// would agree across every implementation whether or not they fused, and the
+// check would be passing for the wrong reason.
+//
+// The answer is printed as the two halves of the IEEE-754 pattern, not
+// formatted: a formatted double hides the low bits, which is exactly where a
+// contraction difference shows up.
+
+let n = match args () with | Cons (a, _) -> int_of_str a | Nil -> 128;
+
+// One LCG, filling both matrices row-major. `f_div` by 1000.0 lands the
+// entries off the dyadic grid.
+let mk = fn (seed: int) ->
+  let v = vec_new () in
+  let rec fill = fn (i: int) -> fn (x: int) ->
+    if i == n * n then ()
+    else
+      let x2 = (1103515245 * x + 12345) % 2147483648 in
+      let _ = vec_push v (f_div (float_of_int (x2 % 2001 - 1000)) 1000.0) in
+      fill (i + 1) x2 in
+  let _ = fill 0 seed in
+  v;
+
+let a = mk 20260825;
+let b = mk 77770707;
+let c = vec_new ();
+
+// C[i][j] = sum over k of A[i][k] * B[k][j], k ascending -- the accumulation
+// order is part of the answer and every implementation walks it the same way.
+let rec row = fn (i: int) ->
+  if i == n then ()
+  else
+    let rec col = fn (j: int) ->
+      if j == n then ()
+      else
+        let rec dot = fn (k: int) -> fn (acc: float) ->
+          if k == n then acc
+          else dot (k + 1)
+                   (f_add acc (f_mul (vec_get a (i * n + k))
+                                     (vec_get b (k * n + j)))) in
+        let _ = vec_push c (dot 0 0.0) in
+        col (j + 1) in
+    let _ = col 0 in
+    row (i + 1);
+let _ = row 0;
+
+// Checksum in the same row-major order, so the sum is a function of the matrix
+// and not of anyone's iteration choice.
+let rec total = fn (i: int) -> fn (acc: float) ->
+  if i == n * n then acc else total (i + 1) (f_add acc (vec_get c i));
+let s = total 0 0.0;
+
+let _ = print ("n " ++ str_of_int n) in
+let _ = print ("checksum " ++ str_of_int (float_bits_hi s)
+               ++ " " ++ str_of_int (float_bits_lo s)) in
+exit 0
