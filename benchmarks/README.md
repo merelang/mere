@@ -67,6 +67,37 @@ it, against tens of bytes of variation.
 **Absent toolchains are skipped out loud.** A suite that quietly omits the fast
 competitor reads as a win.
 
+## The MoonBit row
+
+Every other implementation here is either a systems language with manual or
+ownership-based memory (C, Rust), a garbage-collected static language with a
+mature runtime (Go), or a dynamic runtime (Node, Ruby, Python). None of them is
+what Mere actually is: **a young statically-typed ML-family language that
+compiles to native and to Wasm**. MoonBit is, which makes it the most direct
+comparison in the table — and its native backend lowers to C, so a gap against
+it is a codegen or representation difference rather than an optimizer one.
+
+It is built `--release --target native`. The default is a debug build, and a
+debug build in a performance table measures the wrong artifact while looking
+exactly like the right one.
+
+MoonBit builds a *project* — a `moon.mod`, a package declaring itself
+executable, and the source under `cmd/main`. Every other row here is one file
+and one command, and keeping that true for a reader is worth more than matching
+the toolchain's shape, so `ref.mbt` is one file and the runner writes the
+project around it. `mbt_imports` in the MANIFEST names the core packages that
+file needs.
+
+**Three workloads have no MoonBit row yet.** `crc32`, `wordfreq` and `json`
+read a file, and MoonBit's core library has no file I/O — that lives in
+`moonbitlang/x`, a separate dependency this suite does not fetch. Adding it is
+the next step if those rows are wanted; until then their absence is stated
+here rather than left to be noticed.
+
+The toolchain is not installed on CI, so the MoonBit rows skip there and the
+record says so. A skipped row is a comparison not made — the same-answer count
+drops from 9 to 8 on `binarytrees`, visibly.
+
 ## Naming the other side
 
 "Faster than Go" is not a statement. "Faster than `go version go1.22.0
@@ -118,8 +149,8 @@ sweep_axis = what the sweep varies
 sweep = 1000 1 | 1000 2 | 1000 4 # optional
 ```
 
-Reference implementations are found by filename: `ref.c`, `ref.rs`, `ref.go`,
-`ref.js`, `ref.rb`, `ref.py`. `cflags` in the MANIFEST is passed to the C row's
+Reference implementations are found by filename: `ref.c`, `ref.rs`, `ref.mbt`,
+`ref.go`, `ref.js`, `ref.rb`, `ref.py`. `cflags` in the MANIFEST is passed to the C row's
 compiler (and only to it) — a flag that decides whether the answers match is
 part of naming the implementation, so it lives next to the claim. Extra Mere variants are `bench_<name>.mere` and
 appear as their own rows — that is how `churn` shows the naive program and the

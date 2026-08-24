@@ -43,3 +43,6 @@ claim = the floating-point axis, which nothing else here touches. crc32 guards
 # is laid out, which is exactly what this row should notice.
 alloc_min = 6291456
 alloc_max = 16777216
+
+# MoonBit needs strconv for the size argument.
+mbt_imports = moonbitlang/core/env moonbitlang/core/strconv

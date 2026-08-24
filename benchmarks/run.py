@@ -58,6 +58,11 @@ MAXRSS_UNIT = 1 if sys.platform == "darwin" else 1024
 
 CC = os.environ.get("CC", "cc")
 
+# MoonBit installs to ~/.moon and puts that on PATH by editing a shell profile,
+# which a non-interactive shell may not have read. Resolve it the way a user
+# would have it, and then the way the installer left it.
+MOON = shutil.which("moon") or os.path.expanduser("~/.moon/bin/moon")
+
 
 # --------------------------------------------------------------------------
 # toolchains
@@ -66,18 +71,22 @@ CC = os.environ.get("CC", "cc")
 class Tool:
     """One language toolchain: how to check it, build with it, and name it."""
 
-    def __init__(self, key, label, probe, version_cmd, build, run):
+    def __init__(self, key, label, probe, version_cmd, build, run,
+                 version_lines=1):
         self.key = key            # ref.<key>, or "mere"
         self.label = label        # column label
         self.probe = probe        # executable that must exist
         self.version_cmd = version_cmd
         self.build = build        # (src, out) -> argv or None (interpreted)
         self.run = run            # (src, out, args) -> argv
+        self.version_lines = version_lines
         self._version = None
 
     def available(self):
         if self.key == "mere":
             return os.path.exists(MERE)
+        if os.path.sep in self.probe:
+            return os.path.exists(self.probe)
         return shutil.which(self.probe) is not None
 
     def version(self):
@@ -90,13 +99,21 @@ class Tool:
             out = subprocess.run(self.version_cmd, capture_output=True, text=True,
                                  timeout=30)
             text = (out.stdout or "") + (out.stderr or "")
-            return text.strip().splitlines()[0].strip()
+            lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
+            # MoonBit ships a driver and a compiler with separate versions, and
+            # the compiler's is the one that decides the generated code. Keep
+            # both: naming the implementation is this header's whole job.
+            return " / ".join(lines[:self.version_lines])
         except Exception as e:               # noqa: BLE001 - reported, not raised
             return "unknown (%s)" % e
 
 
 def _mere_build(src, out):
     return None  # handled specially: mere -c, then CC
+
+
+def _mbt_build(src, out):
+    return None  # handled specially: a project is synthesised around the file
 
 
 def _tools():
@@ -113,6 +130,16 @@ def _tools():
              ["rustc", "--version"],
              lambda s, o: ["rustc", "-O", "-A", "warnings", s, "-o", o],
              lambda s, o, a: [o] + a),
+        # MoonBit builds a PROJECT, not a file: a moon.mod, a package
+        # declaring itself executable, and the source under cmd/main. Every
+        # other row here is one file and one command, and keeping that true for
+        # the reader is worth more than matching the toolchain's shape -- so
+        # `ref.mbt` is one file and the runner writes the project around it.
+        Tool("mbt", "MoonBit", MOON,
+             [MOON, "version", "--all"],
+             _mbt_build,
+             lambda s, o, a: [o] + a,
+             version_lines=2),
         Tool("go", "Go", "go",
              ["go", "version"],
              lambda s, o: ["go", "build", "-o", o, s],
@@ -263,7 +290,7 @@ def discover(bench_dir, tools):
             variant = fn[len("bench_"):-len(".mere")]
             impls.append(Impl(by_key["mere"], os.path.join(bench_dir, fn),
                               "mere (%s)" % variant))
-    order = ["c", "rs", "go", "js", "rb", "py"]
+    order = ["c", "rs", "mbt", "go", "js", "rb", "py"]
     for key in order:
         src = os.path.join(bench_dir, "ref." + key)
         if os.path.exists(src):
@@ -271,7 +298,45 @@ def discover(bench_dir, tools):
     return impls
 
 
-def build(impl, outdir, extra_flags=None):
+def _build_moonbit(impl, outdir, out, imports):
+    """Write a MoonBit project around ref.mbt and build it native + release.
+
+    `--release` is not a detail: the default is a debug build, and a debug
+    build in a performance table would be measuring the wrong artifact while
+    looking exactly like the right one.
+    """
+    proj = os.path.join(outdir, "mbt_" + os.path.basename(impl.src)[:-4])
+    pkg = os.path.join(proj, "cmd", "main")
+    os.makedirs(pkg, exist_ok=True)
+    with open(os.path.join(proj, "moon.mod"), "w") as f:
+        f.write('name = "bench/%s"\nversion = "0.1.0"\n'
+                % os.path.basename(outdir))
+    with open(os.path.join(pkg, "moon.pkg"), "w") as f:
+        f.write('pkgtype(kind: "executable")\n')
+        if imports:
+            f.write("\nimport {\n")
+            for i in imports:
+                f.write('  "%s",\n' % i)
+            f.write("}\n")
+    shutil.copyfile(impl.src, os.path.join(pkg, "main.mbt"))
+    r = subprocess.run([MOON, "build", "--release", "--target", "native"],
+                       cwd=proj, capture_output=True, text=True)
+    if r.returncode != 0:
+        impl.status = "build-failed"
+        msg = (r.stderr or r.stdout).strip().splitlines() or [""]
+        impl.note = "moon: " + msg[0]
+        return False
+    exe = os.path.join(proj, "_build", "native", "release", "build",
+                       "cmd", "main", "main.exe")
+    if not os.path.exists(exe):
+        impl.status = "build-failed"
+        impl.note = "moon built nothing at %s" % exe
+        return False
+    impl.exe = exe
+    return True
+
+
+def build(impl, outdir, extra_flags=None, mbt_imports=None):
     os.makedirs(outdir, exist_ok=True)
     base = os.path.splitext(os.path.basename(impl.src))[0]
     out = os.path.join(outdir, "%s.%s" % (base, impl.tool.key))
@@ -294,6 +359,9 @@ def build(impl, outdir, extra_flags=None):
             return False
         impl.exe = out
         return True
+
+    if impl.tool.key == "mbt":
+        return _build_moonbit(impl, outdir, out, mbt_imports)
 
     cmd = impl.tool.build(impl.src, out)
     # Per-benchmark compiler flags. The one that made this necessary is
@@ -403,7 +471,8 @@ def run_bench(name, bench_dir, tools, reps, verify_only, do_sweep=False):
         # works, and only while nothing else is producing it.
         if not build(impl, os.path.join(BUILD, name),
                      man.get("cflags", "").split() if impl.tool.key == "c"
-                     else None):
+                     else None,
+                     man.get("mbt_imports", "moonbitlang/core/env").split()):
             print("  FAIL %-20s %s: %s" % (impl.label, impl.status, impl.note))
             # A build failure is a failure of the run, not a row that quietly
             # disappears. The first version of this runner printed the line
