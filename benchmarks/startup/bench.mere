@@ -1,0 +1,9 @@
+// startup -- almost no work, so what is measured is the cost of being a program.
+//
+// The argument is parsed and used, and the answer depends on it, so nothing
+// here can be folded away at compile time or skipped at run time. Anything
+// more would start burying the thing being measured.
+
+let n = match args () with | Cons (a, _) -> int_of_str a | Nil -> 0;
+let _ = print ("startup " ++ str_of_int (n * n + 1)) in
+exit 0
