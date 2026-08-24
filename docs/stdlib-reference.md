@@ -723,13 +723,36 @@ the C backend. See `scripts/thread_leak_check.sh`.
 
 ## Region stats (v0.1.307)
 
-`MERE_REGION_STATS=1` makes a **C-backend** binary print, at exit, the default
-region's block count, total block capacity and cumulative bytes handed out.
-Stderr only, off unless the variable is set.
+`MERE_REGION_STATS=1` makes a **C-backend** binary print, at exit, each arena's
+block count, total block capacity and cumulative bytes handed out. Stderr only,
+off unless the variable is set.
 
 ```
 region-stats default: blocks=2 cap=272629776 alloc_total=272435592
+region-stats named region R loop: arenas=42 alloc_total=62376872 peak_cap=3145728
+region-stats named-total: sites=1 alloc_total=62376872
 ```
+
+The `named` lines arrived in v0.1.319. Before them the meter saw the default
+region only — so a program that did its allocating inside `region R { }` or
+`region R loop`, which is to say a program managing its memory deliberately,
+read as a few hundred bytes. The number that exists to replace peak RSS was
+blind to the construct that exists to manage memory, and peak RSS was the only
+figure left for exactly those programs.
+
+Named arenas are created and destroyed during the run, so there is nothing to
+walk at exit: each is charged to its source name as it is released. Hence
+`arenas=` (how many were opened) and two different totals — `alloc_total` is
+everything that arena's generations ever asked for, and `peak_cap` is the most
+any single one held at once. A region loop *raises* the first and lowers the
+second: it pays a copy per generation to bound what is resident. Only the
+second half of that trade was measurable before.
+
+Two limits worth knowing. An arena still live at exit is never released and so
+is never charged — in practice a map's private arena between compactions.
+And the table holds 32 distinct names; past that, releases are counted and
+reported as a `region-stats WARNING` line rather than dropped silently, because
+an undercount looks exactly like an improvement.
 
 Capacity and allocation are functions of the program, not of the machine —
 unlike peak RSS, which is quantized to powers of two and stops reproducing

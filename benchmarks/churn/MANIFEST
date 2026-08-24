@@ -22,9 +22,22 @@ sweep = 100000 250 | 100000 500 | 100000 1000 | 100000 2000 | 100000 4000
 # at any moment ~100 KB of data. That ratio is the finding, and the ceiling is
 # here so a change to it is announced rather than discovered.
 #
-# bench_regionloop.mere has no bound: its allocation happens in a NAMED arena,
-# which MERE_REGION_STATS cannot see, so its default-region reading (184 B) is
-# the meter's blind spot and not a fact about the program. Pinning it would
-# pin the blindness.
+# The band covers BOTH Mere rows, and the bound is on every arena rather than
+# on the default one -- since v0.1.319 the meter reports named arenas too, so
+# a program that moves its allocation into `region R loop` no longer drops out
+# of its own gate. The two rows sit at opposite ends on purpose:
+#
+#   naive       43.4 MB, all of it in the default region, none of it returned
+#   region loop 62.4 MB cumulative across 42 arenas, 3.1 MB resident at peak
+#
+# The loop allocates MORE in total (it copies the live set into a fresh arena
+# once per generation) and holds 20x less at once. That trade is the whole
+# claim of the construct, and until the meter could see named arenas only the
+# second half of it was measurable -- through peak RSS, the figure that does
+# not reproduce.
 alloc_min = 25165824
-alloc_max = 58720256
+alloc_max = 83886080
+
+# The number the region loop exists to control. Deterministic, unlike the RSS
+# that used to be the only evidence for it.
+peak_max = 8388608
