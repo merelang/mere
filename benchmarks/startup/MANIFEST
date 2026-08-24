@@ -22,3 +22,6 @@ claim = the strongest claim Mere has against a managed runtime, and the one no
 # scheduler.
 alloc_min = 64
 alloc_max = 4096
+
+# MoonBit's row needs strconv as well as env.
+mbt_imports = moonbitlang/core/env moonbitlang/core/strconv

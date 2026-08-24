@@ -29,3 +29,6 @@ alloc_max = 419430400
 
 # The number the region block exists to control.
 peak_max = 100663296
+
+# MoonBit needs strconv for the depth argument.
+mbt_imports = moonbitlang/core/env moonbitlang/core/strconv
