@@ -7544,6 +7544,30 @@ let emit_vec_iter_helper_llvm (elem_ty : Ast.ty) : string =
 (* Phase 19.2: map_iter helper per (K, V) pair.
    Signature: i32 @mere_map_<K>_<V>_iter(ptr m, %closure_<K>_<closure_<V>_unit> outer)
    outer: K -> (V -> unit). Apply outer(k) to get inner_cl, then inner_cl(v). *)
+(* O(1) map (parity with the C backend's v0.1.68 hash index): a key type is
+   "index-safe" when we can emit a straight-line structural hash for it without
+   reading a possibly-uninitialized payload. That covers int / bool / str /
+   unit and tuples / records / all-nullary variants of index-safe types. A
+   variant that carries a payload is NOT index-safe here: hashing it would need
+   to branch on the tag to avoid reading a nullary value's garbage payload
+   field (C gets this for free via short-circuit `?:`, which LLVM `select`
+   can't do). Those rare keys keep the linear-scan runtime — correct, just
+   O(n). int / str (the common keys) are index-safe, so they become O(1). *)
+let rec map_key_index_safe (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
+  | Ast.TyTuple ts -> List.for_all map_key_index_safe ts
+  | Ast.TyCon (rname, _) when Hashtbl.mem Typer.records rname ->
+    let info = Hashtbl.find Typer.records rname in
+    List.for_all (fun (_, ft) -> map_key_index_safe ft) info.Typer.r_fields
+  | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
+    let ctors = Hashtbl.find Exhaustive.type_variants vname in
+    List.for_all (fun (_, p) -> p = None) ctors
+  | _ -> false
+
+(* The two scalar hash primitives, mirroring codegen_c's __lang_hash_u64 /
+   __lang_hash_str. Emitted once when any index-safe map exists. *)
+
 let emit_map_iter_helper_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
   let k_tag = ty_tag k_ty in
   let v_tag = ty_tag v_ty in
@@ -7552,8 +7576,13 @@ let emit_map_iter_helper_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
   let struct_name = "mere_map_" ^ k_tag ^ "_" ^ v_tag in
   let inner_cl = closure_struct_name v_ty Ast.TyUnit in
   let outer_cl = closure_struct_name k_ty (Ast.TyArrow (v_ty, Ast.TyUnit)) in
+  (* Q-063: only the HASHED runtime carries the tombstone fields; the linear
+     fallback's struct is five fields wide and reading a `dead` pointer out of
+     it would be a read past the end. Same predicate that chooses the runtime,
+     so the two cannot drift apart. *)
+  let tombstoned = map_key_index_safe k_ty in
   String.concat "\n"
-    [ Printf.sprintf "define i32 @mere_map_%s_%s_iter(ptr %%m, %%%s %%outer) {"
+    ([ Printf.sprintf "define i32 @mere_map_%s_%s_iter(ptr %%m, %%%s %%outer) {"
         k_tag v_tag outer_cl;
       "entry:";
       Printf.sprintf "  %%outer_env = extractvalue %%%s %%outer, 0" outer_cl;
@@ -7563,13 +7592,28 @@ let emit_map_iter_helper_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" struct_name;
       "  %keys = load ptr, ptr %kp";
       Printf.sprintf "  %%vp = getelementptr %%%s, ptr %%m, i32 0, i32 1" struct_name;
-      "  %values = load ptr, ptr %vp";
-      "  br label %check";
+      "  %values = load ptr, ptr %vp" ]
+     @ (if tombstoned then
+          [ Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%m, i32 0, i32 7"
+              struct_name;
+            "  %dead = load ptr, ptr %dp" ]
+        else [])
+     @ [ "  br label %check";
+      (* The phi has two predecessors either way: `cont` is where both the
+         visited and the skipped slot rejoin, so adding the skip does not add
+         an incoming edge. *)
       "check:";
-      "  %i = phi i32 [ 0, %entry ], [ %i_next, %body ]";
-      "  %done = icmp sge i32 %i, %len";
-      "  br i1 %done, label %end, label %body";
-      "body:";
+      "  %i = phi i32 [ 0, %entry ], [ %i_next, %cont ]";
+      "  %done = icmp sge i32 %i, %len" ]
+     @ (if tombstoned then
+          [ "  br i1 %done, label %end, label %live_check";
+            "live_check:";
+            "  %dslot = getelementptr i8, ptr %dead, i32 %i";
+            "  %d = load i8, ptr %dslot";
+            "  %isdead = icmp ne i8 %d, 0";
+            "  br i1 %isdead, label %cont, label %body" ]
+        else [ "  br i1 %done, label %end, label %body" ])
+     @ [ "body:";
       Printf.sprintf "  %%kslot = getelementptr %s, ptr %%keys, i32 %%i" c_k;
       Printf.sprintf "  %%k = load %s, ptr %%kslot" c_k;
       Printf.sprintf "  %%vslot = getelementptr %s, ptr %%values, i32 %%i" c_v;
@@ -7579,11 +7623,13 @@ let emit_map_iter_helper_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       Printf.sprintf "  %%inner_env = extractvalue %%%s %%inner, 0" inner_cl;
       Printf.sprintf "  %%inner_fn = extractvalue %%%s %%inner, 1" inner_cl;
       Printf.sprintf "  %%_ = call i32 %%inner_fn(ptr %%inner_env, %s %%v)" c_v;
+      "  br label %cont";
+      "cont:";
       "  %i_next = add i32 %i, 1";
       "  br label %check";
       "end:";
       "  ret i32 0";
-      "}" ]
+      "}" ])
 
 (* Phase 15.5: vec_fold helper per (T, U) pair.
    Signature: <U> @mere_vec_<T>_fold_<U>(ptr v, <U> acc, %closure_<U>_closure_<T>_<U> outer)
@@ -8040,29 +8086,6 @@ let emit_list_len_helper_llvm (elem_ty : Ast.ty) (list_ty : Ast.ty) : string =
       "  ret i64 %n";
       "}" ]
 
-(* O(1) map (parity with the C backend's v0.1.68 hash index): a key type is
-   "index-safe" when we can emit a straight-line structural hash for it without
-   reading a possibly-uninitialized payload. That covers int / bool / str /
-   unit and tuples / records / all-nullary variants of index-safe types. A
-   variant that carries a payload is NOT index-safe here: hashing it would need
-   to branch on the tag to avoid reading a nullary value's garbage payload
-   field (C gets this for free via short-circuit `?:`, which LLVM `select`
-   can't do). Those rare keys keep the linear-scan runtime — correct, just
-   O(n). int / str (the common keys) are index-safe, so they become O(1). *)
-let rec map_key_index_safe (t : Ast.ty) : bool =
-  match Ast.walk t with
-  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
-  | Ast.TyTuple ts -> List.for_all map_key_index_safe ts
-  | Ast.TyCon (rname, _) when Hashtbl.mem Typer.records rname ->
-    let info = Hashtbl.find Typer.records rname in
-    List.for_all (fun (_, ft) -> map_key_index_safe ft) info.Typer.r_fields
-  | Ast.TyCon (vname, _) when Hashtbl.mem Exhaustive.type_variants vname ->
-    let ctors = Hashtbl.find Exhaustive.type_variants vname in
-    List.for_all (fun (_, p) -> p = None) ctors
-  | _ -> false
-
-(* The two scalar hash primitives, mirroring codegen_c's __lang_hash_u64 /
-   __lang_hash_str. Emitted once when any index-safe map exists. *)
 let map_hash_runtime_llvm =
   let m1 = Printf.sprintf "%Lu" 0xff51afd7ed558ccdL in
   let m2 = Printf.sprintf "%Lu" 0xc4ceb9fe1a85ec53L in
@@ -8581,7 +8604,15 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
   let hash reg out = Printf.sprintf "  %s = call i64 @mere_map_key_hash_%s(%s %s)" out k_tag c_k reg in
   let key_eq a b out = Printf.sprintf "  %s = call i1 @mere_map_key_eq_%s(%s %s, %s %s)" out k_tag c_k a c_k b in
   String.concat "\n"
-    [ Printf.sprintf "%%%s = type { ptr, ptr, i32, i32, ptr, ptr, i32 }" sn;
+    (* Q-063: fields 7/8/9 are the tombstone state, mirroring the C backend's
+       v0.1.317 layout -- dead[] marks a vacated dense slot, live is what _len
+       answers, idx_used counts occupied index slots (live entries PLUS vacated
+       ones, since a vacated slot still lengthens every probe through it).
+       Delete used to shift the dense arrays and rebuild the index, so one
+       delete cost O(live): measured 0.19 / 0.45 / 1.16 s for 40k operations
+       over a live set of 500 / 1000 / 2000 / 4000, against a flat 0.02 s on the
+       C backend. *)
+    [ Printf.sprintf "%%%s = type { ptr, ptr, i32, i32, ptr, ptr, i32, ptr, i32, i32 }" sn;
       "";
       (* new *)
       Printf.sprintf "define ptr @%s_new(ptr %%r) {" p;
@@ -8613,6 +8644,21 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  store ptr %idx, ptr %ip";
       Printf.sprintf "  %%icp = getelementptr %%%s, ptr %%m, i32 0, i32 6" sn;
       "  store i32 8, ptr %icp";
+      (* dead[]: one byte per dense slot, zeroed *)
+      "  %dead = call ptr @__lang_region_alloc(ptr %r, i64 4)";
+      "  store i8 0, ptr %dead";
+      "  %d1 = getelementptr i8, ptr %dead, i32 1";
+      "  store i8 0, ptr %d1";
+      "  %d2 = getelementptr i8, ptr %dead, i32 2";
+      "  store i8 0, ptr %d2";
+      "  %d3 = getelementptr i8, ptr %dead, i32 3";
+      "  store i8 0, ptr %d3";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%m, i32 0, i32 7" sn;
+      "  store ptr %dead, ptr %dp";
+      Printf.sprintf "  %%livep = getelementptr %%%s, ptr %%m, i32 0, i32 8" sn;
+      "  store i32 0, ptr %livep";
+      Printf.sprintf "  %%iup = getelementptr %%%s, ptr %%m, i32 0, i32 9" sn;
+      "  store i32 0, ptr %iup";
       "  store i32 0, ptr %ci";
       "  br label %fl";
       "fl:";
@@ -8656,6 +8702,8 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  %keys = load ptr, ptr %kp";
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" sn;
       "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%m, i32 0, i32 7" sn;
+      "  %dead = load ptr, ptr %dp";
       "  %ncm1 = sub i32 %newcap, 1";
       "  %ncm1_64 = zext i32 %ncm1 to i64";
       "  store i32 0, ptr %i";
@@ -8663,7 +8711,19 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "pl:";
       "  %jv = load i32, ptr %i";
       "  %pdone = icmp sge i32 %jv, %len";
-      "  br i1 %pdone, label %pend, label %pbody";
+      "  br i1 %pdone, label %pend, label %plive";
+      (* A rebuilt index has no vacated slots -- that is the point of rebuilding
+         it -- so a tombstoned dense entry is simply not indexed. *)
+      "plive:";
+      "  %pdslot = getelementptr i8, ptr %dead, i32 %jv";
+      "  %pd = load i8, ptr %pdslot";
+      "  %pisdead = icmp ne i8 %pd, 0";
+      "  br i1 %pisdead, label %pskip, label %pbody";
+      "pskip:";
+      "  %jvs = load i32, ptr %i";
+      "  %jsn = add i32 %jvs, 1";
+      "  store i32 %jsn, ptr %i";
+      "  br label %pl";
       "pbody:";
       Printf.sprintf "  %%kslot = getelementptr %s, ptr %%keys, i32 %%jv" c_k;
       Printf.sprintf "  %%kk = load %s, ptr %%kslot" c_k;
@@ -8693,6 +8753,76 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  store ptr %ni, ptr %ip";
       Printf.sprintf "  %%icp = getelementptr %%%s, ptr %%m, i32 0, i32 6" sn;
       "  store i32 %newcap, ptr %icp";
+      (* no vacated slots in a fresh index, so the occupied count is the live
+         count *)
+      Printf.sprintf "  %%rlivep = getelementptr %%%s, ptr %%m, i32 0, i32 8" sn;
+      "  %rlive = load i32, ptr %rlivep";
+      Printf.sprintf "  %%riup = getelementptr %%%s, ptr %%m, i32 0, i32 9" sn;
+      "  store i32 %rlive, ptr %riup";
+      "  ret void";
+      "}";
+      "";
+      (* Q-063 squeeze: drop the tombstones from the dense arrays in place,
+         keeping insertion order, then rebuild the index. Called from delete
+         when the dead outnumber the live, so its O(len) is paid once per
+         O(live) deletes. Entries MOVE -- but they moved on every delete before
+         this, so no caller could hold an interior pointer across one. *)
+      Printf.sprintf "define void @%s_squeeze(ptr %%m) {" p;
+      "entry:";
+      "  %i = alloca i32";
+      "  %w = alloca i32";
+      Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" sn;
+      "  %keys = load ptr, ptr %kp";
+      Printf.sprintf "  %%vp = getelementptr %%%s, ptr %%m, i32 0, i32 1" sn;
+      "  %values = load ptr, ptr %vp";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" sn;
+      "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%m, i32 0, i32 7" sn;
+      "  %dead = load ptr, ptr %dp";
+      "  store i32 0, ptr %i";
+      "  store i32 0, ptr %w";
+      "  br label %loop";
+      "loop:";
+      "  %iv = load i32, ptr %i";
+      "  %done = icmp sge i32 %iv, %len";
+      "  br i1 %done, label %fin, label %body";
+      "body:";
+      "  %dslot = getelementptr i8, ptr %dead, i32 %iv";
+      "  %d = load i8, ptr %dslot";
+      "  %isdead = icmp ne i8 %d, 0";
+      "  br i1 %isdead, label %next, label %keep";
+      "keep:";
+      "  %wv = load i32, ptr %w";
+      "  %same = icmp eq i32 %wv, %iv";
+      "  br i1 %same, label %mark, label %move";
+      "move:";
+      Printf.sprintf "  %%sk = getelementptr %s, ptr %%keys, i32 %%iv" c_k;
+      Printf.sprintf "  %%dk = getelementptr %s, ptr %%keys, i32 %%wv" c_k;
+      Printf.sprintf "  %%mk = load %s, ptr %%sk" c_k;
+      Printf.sprintf "  store %s %%mk, ptr %%dk" c_k;
+      Printf.sprintf "  %%sv2 = getelementptr %s, ptr %%values, i32 %%iv" c_v;
+      Printf.sprintf "  %%dv2 = getelementptr %s, ptr %%values, i32 %%wv" c_v;
+      Printf.sprintf "  %%mv = load %s, ptr %%sv2" c_v;
+      Printf.sprintf "  store %s %%mv, ptr %%dv2" c_v;
+      "  br label %mark";
+      "mark:";
+      "  %wv2 = load i32, ptr %w";
+      "  %wdslot = getelementptr i8, ptr %dead, i32 %wv2";
+      "  store i8 0, ptr %wdslot";
+      "  %wn = add i32 %wv2, 1";
+      "  store i32 %wn, ptr %w";
+      "  br label %next";
+      "next:";
+      "  %ivn = load i32, ptr %i";
+      "  %in2 = add i32 %ivn, 1";
+      "  store i32 %in2, ptr %i";
+      "  br label %loop";
+      "fin:";
+      "  %wf = load i32, ptr %w";
+      "  store i32 %wf, ptr %lp";
+      Printf.sprintf "  %%sicp = getelementptr %%%s, ptr %%m, i32 0, i32 6" sn;
+      "  %sic = load i32, ptr %sicp";
+      Printf.sprintf "  call void @%s_reindex(ptr %%m, i32 %%sic)" p;
       "  ret void";
       "}";
       "";
@@ -8700,6 +8830,11 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       Printf.sprintf "define i32 @%s_set(ptr %%m, %s %%k, %s %%v) {" p c_k c_v;
       "entry:";
       "  %s = alloca i32";
+      (* Q-063: the index slot of the first VACATED entry this probe walked
+         through, or -1. Reusing it instead of consuming a fresh slot is what
+         keeps a churning table's index from filling with tombstones. *)
+      "  %reuse = alloca i32";
+      "  store i32 -1, ptr %reuse";
       hash "%k" "%h";
       Printf.sprintf "  %%icp = getelementptr %%%s, ptr %%m, i32 0, i32 6" sn;
       "  %idxcap = load i32, ptr %icp";
@@ -8720,7 +8855,19 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  %slot = getelementptr i32, ptr %idx, i32 %sv";
       "  %occ = load i32, ptr %slot";
       "  %empty = icmp eq i32 %occ, -1";
-      "  br i1 %empty, label %insert, label %check";
+      "  br i1 %empty, label %insert, label %occupied";
+      (* -2 is vacated: walk through it (a key inserted after the deletion may
+         sit further along this chain) but do not compare against it. *)
+      "occupied:";
+      "  %vacated = icmp slt i32 %occ, 0";
+      "  br i1 %vacated, label %note_reuse, label %check";
+      "note_reuse:";
+      "  %rv = load i32, ptr %reuse";
+      "  %have = icmp sge i32 %rv, 0";
+      "  br i1 %have, label %pnext, label %set_reuse";
+      "set_reuse:";
+      "  store i32 %sv, ptr %reuse";
+      "  br label %pnext";
       "check:";
       Printf.sprintf "  %%ckslot = getelementptr %s, ptr %%keys, i32 %%occ" c_k;
       Printf.sprintf "  %%ck = load %s, ptr %%ckslot" c_k;
@@ -8738,10 +8885,27 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "insert:";
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" sn;
       "  %len = load i32, ptr %lp";
+      Printf.sprintf "  %%livep = getelementptr %%%s, ptr %%m, i32 0, i32 8" sn;
+      "  %live = load i32, ptr %livep";
       Printf.sprintf "  %%cp = getelementptr %%%s, ptr %%m, i32 0, i32 3" sn;
       "  %cap = load i32, ptr %cp";
       "  %full = icmp eq i32 %len, %cap";
-      "  br i1 %full, label %grow, label %do_store";
+      "  br i1 %full, label %maybe_squeeze, label %do_store";
+      (* Q-063: at capacity, but if a quarter of it is tombstones then dropping
+         them buys the room doubling would -- and that is the path a churning
+         table takes, where every insert follows a delete. *)
+      "maybe_squeeze:";
+      "  %deadn = sub i32 %len, %live";
+      "  %capq = sdiv i32 %cap, 4";
+      "  %worth = icmp sgt i32 %deadn, %capq";
+      "  br i1 %worth, label %do_squeeze, label %grow";
+      (* The squeeze rebuilt the index, so every register this probe derived is
+         stale. Re-entering is the honest way to say that: the key is still
+         absent and there is room now, so the recursion is one level deep. *)
+      "do_squeeze:";
+      Printf.sprintf "  call void @%s_squeeze(ptr %%m)" p;
+      Printf.sprintf "  %%again = call i32 @%s_set(ptr %%m, %s %%k, %s %%v)" p c_k c_v;
+      "  ret i32 %again";
       "grow:";
       Printf.sprintf "  %%grp = getelementptr %%%s, ptr %%m, i32 0, i32 4" sn;
       "  %greg = load ptr, ptr %grp";
@@ -8755,37 +8919,67 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  %gv_bytes = mul i64 %gnc64, %gvsize";
       "  %new_keys = call ptr @__lang_region_alloc(ptr %greg, i64 %gk_bytes)";
       "  %new_values = call ptr @__lang_region_alloc(ptr %greg, i64 %gv_bytes)";
+      "  %new_dead = call ptr @__lang_region_alloc(ptr %greg, i64 %gnc64)";
       "  %len64 = zext i32 %len to i64";
       "  %kcopy = mul i64 %len64, %gksize";
       "  %vcopy = mul i64 %len64, %gvsize";
       "  call ptr @memcpy(ptr %new_keys, ptr %keys, i64 %kcopy)";
       "  call ptr @memcpy(ptr %new_values, ptr %values, i64 %vcopy)";
+      Printf.sprintf "  %%gdp = getelementptr %%%s, ptr %%m, i32 0, i32 7" sn;
+      "  %old_dead = load ptr, ptr %gdp";
+      "  call ptr @memcpy(ptr %new_dead, ptr %old_dead, i64 %len64)";
       "  store ptr %new_keys, ptr %kp";
       "  store ptr %new_values, ptr %vp";
+      "  store ptr %new_dead, ptr %gdp";
       "  store i32 %new_cap, ptr %cp";
       "  br label %do_store";
       "do_store:";
       "  %ckeys = load ptr, ptr %kp";
       "  %cvalues = load ptr, ptr %vp";
+      Printf.sprintf "  %%sdp = getelementptr %%%s, ptr %%m, i32 0, i32 7" sn;
+      "  %cdead = load ptr, ptr %sdp";
       Printf.sprintf "  %%kslot2 = getelementptr %s, ptr %%ckeys, i32 %%len" c_k;
       Printf.sprintf "  store %s %%k, ptr %%kslot2" c_k;
       Printf.sprintf "  %%vslot2 = getelementptr %s, ptr %%cvalues, i32 %%len" c_v;
       Printf.sprintf "  store %s %%v, ptr %%vslot2" c_v;
+      "  %dslot2 = getelementptr i8, ptr %cdead, i32 %len";
+      "  store i8 0, ptr %dslot2";
       "  %newlen = add i32 %len, 1";
       "  store i32 %newlen, ptr %lp";
-      "  %nl10 = mul i32 %newlen, 10";
+      "  %newlive = add i32 %live, 1";
+      "  store i32 %newlive, ptr %livep";
+      "  %insidx = sub i32 %newlen, 1";
+      "  %rv2 = load i32, ptr %reuse";
+      "  %usereuse = icmp sge i32 %rv2, 0";
+      "  br i1 %usereuse, label %place_reuse, label %place_fresh";
+      (* reusing a vacated slot leaves the occupied count unchanged *)
+      "place_reuse:";
+      "  %rslot = getelementptr i32, ptr %idx, i32 %rv2";
+      "  store i32 %insidx, ptr %rslot";
+      "  br label %after_place";
+      "place_fresh:";
+      "  %sv2 = load i32, ptr %s";
+      "  %slot2 = getelementptr i32, ptr %idx, i32 %sv2";
+      "  store i32 %insidx, ptr %slot2";
+      Printf.sprintf "  %%iup = getelementptr %%%s, ptr %%m, i32 0, i32 9" sn;
+      "  %iu = load i32, ptr %iup";
+      "  %iu1 = add i32 %iu, 1";
+      "  store i32 %iu1, ptr %iup";
+      "  br label %after_place";
+      (* The load factor is on OCCUPIED slots, not on live entries: a vacated
+         slot still lengthens every probe that passes through it. *)
+      "after_place:";
+      Printf.sprintf "  %%iup2 = getelementptr %%%s, ptr %%m, i32 0, i32 9" sn;
+      "  %used = load i32, ptr %iup2";
+      "  %u10 = mul i32 %used, 10";
       "  %ic7 = mul i32 %idxcap, 7";
-      "  %crowded = icmp sge i32 %nl10, %ic7";
-      "  br i1 %crowded, label %do_reindex, label %do_index";
+      "  %crowded = icmp sge i32 %u10, %ic7";
+      "  br i1 %crowded, label %do_reindex, label %set_done";
       "do_reindex:";
       "  %newic = mul i32 %idxcap, 2";
       Printf.sprintf "  call void @%s_reindex(ptr %%m, i32 %%newic)" p;
       "  ret i32 0";
-      "do_index:";
-      "  %sv2 = load i32, ptr %s";
-      "  %slot2 = getelementptr i32, ptr %idx, i32 %sv2";
-      "  %insidx = sub i32 %newlen, 1";
-      "  store i32 %insidx, ptr %slot2";
+      "set_done:";
       "  ret i32 0";
       "}";
       "";
@@ -8813,7 +9007,12 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  %slot = getelementptr i32, ptr %idx, i32 %sv";
       "  %occ = load i32, ptr %slot";
       "  %empty = icmp eq i32 %occ, -1";
-      "  br i1 %empty, label %fail, label %check";
+      "  br i1 %empty, label %fail, label %occupied";
+      (* Q-063: -2 is a vacated slot -- keep probing, do not compare. No index
+         slot ever points at a tombstoned dense entry, so a hit here is live. *)
+      "occupied:";
+      "  %vacated = icmp slt i32 %occ, 0";
+      "  br i1 %vacated, label %pnext, label %check";
       "check:";
       Printf.sprintf "  %%ckslot = getelementptr %s, ptr %%keys, i32 %%occ" c_k;
       Printf.sprintf "  %%ck = load %s, ptr %%ckslot" c_k;
@@ -8858,7 +9057,10 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  %slot = getelementptr i32, ptr %idx, i32 %sv";
       "  %occ = load i32, ptr %slot";
       "  %empty = icmp eq i32 %occ, -1";
-      "  br i1 %empty, label %not_found, label %check";
+      "  br i1 %empty, label %not_found, label %occupied";
+      "occupied:";
+      "  %vacated = icmp slt i32 %occ, 0";
+      "  br i1 %vacated, label %pnext, label %check";
       "check:";
       Printf.sprintf "  %%ckslot = getelementptr %s, ptr %%keys, i32 %%occ" c_k;
       Printf.sprintf "  %%ck = load %s, ptr %%ckslot" c_k;
@@ -8876,19 +9078,23 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "}";
       "";
       (* len *)
+      (* Q-063: the LIVE count. Field 2 is the dense high-water mark and
+         includes tombstones, which no observer of the language may see. *)
       Printf.sprintf "define i64 @%s_len(ptr %%m) {" p;
       "entry:";
-      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" sn;
-      "  %len32 = load i32, ptr %lp";
-      "  %len = zext i32 %len32 to i64";
+      Printf.sprintf "  %%livep = getelementptr %%%s, ptr %%m, i32 0, i32 8" sn;
+      "  %live32 = load i32, ptr %livep";
+      "  %len = zext i32 %live32 to i64";
       "  ret i64 %len";
       "}";
       "";
-      (* delete: find via index, shift keys/values down, reindex. *)
+      (* Q-063 delete: tombstone. This found its entry through the index and
+         then shifted every dense entry above it down one slot and rebuilt the
+         index, so one delete cost O(live). Nothing moves now; the squeeze at
+         the bottom is amortised across O(live) deletes. *)
       Printf.sprintf "define i32 @%s_delete(ptr %%m, %s %%k) {" p c_k;
       "entry:";
       "  %s = alloca i32";
-      "  %j = alloca i32";
       hash "%k" "%h";
       Printf.sprintf "  %%icp = getelementptr %%%s, ptr %%m, i32 0, i32 6" sn;
       "  %idxcap = load i32, ptr %icp";
@@ -8901,15 +9107,18 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  %idx = load ptr, ptr %ip";
       Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" sn;
       "  %keys = load ptr, ptr %kp";
-      Printf.sprintf "  %%vp = getelementptr %%%s, ptr %%m, i32 0, i32 1" sn;
-      "  %values = load ptr, ptr %vp";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%m, i32 0, i32 7" sn;
+      "  %dead = load ptr, ptr %dp";
       "  br label %probe";
       "probe:";
       "  %sv = load i32, ptr %s";
       "  %slot = getelementptr i32, ptr %idx, i32 %sv";
       "  %occ = load i32, ptr %slot";
       "  %empty = icmp eq i32 %occ, -1";
-      "  br i1 %empty, label %not_found, label %check";
+      "  br i1 %empty, label %not_found, label %occupied";
+      "occupied:";
+      "  %vacated = icmp slt i32 %occ, 0";
+      "  br i1 %vacated, label %pnext, label %check";
       "check:";
       Printf.sprintf "  %%ckslot = getelementptr %s, ptr %%keys, i32 %%occ" c_k;
       Printf.sprintf "  %%ck = load %s, ptr %%ckslot" c_k;
@@ -8921,31 +9130,28 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  store i32 %spm, ptr %s";
       "  br label %probe";
       "do_del:";
-      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" sn;
-      "  %len = load i32, ptr %lp";
-      "  store i32 %occ, ptr %j";
-      "  br label %shift";
-      "shift:";
-      "  %jv = load i32, ptr %j";
-      "  %j1 = add i32 %jv, 1";
-      "  %sdone = icmp sge i32 %j1, %len";
-      "  br i1 %sdone, label %dec, label %sbody";
-      "sbody:";
-      Printf.sprintf "  %%dk = getelementptr %s, ptr %%keys, i32 %%jv" c_k;
-      Printf.sprintf "  %%sk = getelementptr %s, ptr %%keys, i32 %%j1" c_k;
-      Printf.sprintf "  %%kv = load %s, ptr %%sk" c_k;
-      Printf.sprintf "  store %s %%kv, ptr %%dk" c_k;
-      Printf.sprintf "  %%dv = getelementptr %s, ptr %%values, i32 %%jv" c_v;
-      Printf.sprintf "  %%svl = getelementptr %s, ptr %%values, i32 %%j1" c_v;
-      Printf.sprintf "  %%vv = load %s, ptr %%svl" c_v;
-      Printf.sprintf "  store %s %%vv, ptr %%dv" c_v;
-      "  %jn = add i32 %jv, 1";
-      "  store i32 %jn, ptr %j";
-      "  br label %shift";
-      "dec:";
-      "  %newlen = sub i32 %len, 1";
-      "  store i32 %newlen, ptr %lp";
-      Printf.sprintf "  call void @%s_reindex(ptr %%m, i32 %%idxcap)" p;
+      "  %dslot = getelementptr i8, ptr %dead, i32 %occ";
+      "  store i8 1, ptr %dslot";
+      Printf.sprintf "  %%livep = getelementptr %%%s, ptr %%m, i32 0, i32 8" sn;
+      "  %live = load i32, ptr %livep";
+      "  %nlive = sub i32 %live, 1";
+      "  store i32 %nlive, ptr %livep";
+      (* -2 and not -1: a key inserted after this one may sit further along this
+         probe chain, and -1 would end the probe before reaching it. *)
+      "  store i32 -2, ptr %slot";
+      (* The floor keeps a small map from squeezing on its first delete; the
+         ratio is what makes it amortised -- O(len) once per O(live) deletes. *)
+      Printf.sprintf "  %%dlp = getelementptr %%%s, ptr %%m, i32 0, i32 2" sn;
+      "  %dlen = load i32, ptr %dlp";
+      "  %deadn = sub i32 %dlen, %nlive";
+      "  %enough = icmp sge i32 %deadn, 8";
+      "  %most = icmp sgt i32 %deadn, %nlive";
+      "  %both = and i1 %enough, %most";
+      "  br i1 %both, label %do_squeeze, label %del_done";
+      "do_squeeze:";
+      Printf.sprintf "  call void @%s_squeeze(ptr %%m)" p;
+      "  br label %del_done";
+      "del_done:";
       "  ret i32 0";
       "not_found:";
       "  ret i32 0";

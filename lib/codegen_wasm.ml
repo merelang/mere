@@ -7458,22 +7458,36 @@ let emit_map_key_hash_wasm (k_ty : Ast.ty) : string =
 let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
   let k_tag = ty_tag k_ty in
   Printf.sprintf {|
+  ;; Q-063: the header is 36 bytes now. 24 = dead[] (one byte per dense slot,
+  ;; non-zero means vacated), 28 = live (what _len answers), 32 = idx_used
+  ;; (occupied index slots: live entries PLUS vacated ones, since a vacated slot
+  ;; still lengthens every probe through it). Delete used to shift the dense
+  ;; arrays and rebuild the index, so one delete cost O(live) -- measured
+  ;; 0.09 / 0.19 / 0.43 / 0.87 s (node startup subtracted) for 40k operations
+  ;; over a live set of 500 / 1000 / 2000 / 4000.
   (func $mere_map_%s_new (result i64)
     (local $m i32) (local $keys i32) (local $values i32) (local $idx i32) (local $i i32)
+    (local $dead i32)
     (local.set $m (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $m) (i32.const 24)))
+    (global.set $__lang_bump (i32.add (local.get $m) (i32.const 36)))
     (local.set $keys (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $keys) (i32.const 32)))
     (local.set $values (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $values) (i32.const 32)))
     (local.set $idx (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $idx) (i32.const 32)))
+    (local.set $dead (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $dead) (i32.const 4)))
     (i32.store offset=0 (local.get $m) (local.get $keys))
     (i32.store offset=4 (local.get $m) (local.get $values))
     (i32.store offset=8 (local.get $m) (i32.const 0))
     (i32.store offset=12 (local.get $m) (i32.const 4))
     (i32.store offset=16 (local.get $m) (local.get $idx))
     (i32.store offset=20 (local.get $m) (i32.const 8))
+    (i32.store offset=24 (local.get $m) (local.get $dead))
+    (i32.store offset=28 (local.get $m) (i32.const 0))
+    (i32.store offset=32 (local.get $m) (i32.const 0))
+    (i32.store offset=0 (local.get $dead) (i32.const 0))
     (local.set $i (i32.const 0))
     (block $fend (loop $fl
       (br_if $fend (i32.eq (local.get $i) (i32.const 8)))
@@ -7483,6 +7497,7 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
     (i64.extend_i32_u (local.get $m)))
   (func $mere_map_%s_reindex (param $m i32) (param $newcap i32)
     (local $ni i32) (local $i i32) (local $s i32) (local $len i32) (local $keys i32) (local $ncm1 i32) (local $h i32)
+    (local $dead i32)
     ;; v0.1.316: reuse the buffer when the capacity is not changing — delete
     ;; reindexes at the same cap on every call, and this backend's bump memory
     ;; never shrinks, so allocating here bled linear memory per delete.
@@ -7500,10 +7515,17 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
       (br $fl)))
     (local.set $keys (i32.load offset=0 (local.get $m)))
     (local.set $len (i32.load offset=8 (local.get $m)))
+    (local.set $dead (i32.load offset=24 (local.get $m)))
     (local.set $ncm1 (i32.sub (local.get $newcap) (i32.const 1)))
     (local.set $i (i32.const 0))
     (block $pend (loop $pl
       (br_if $pend (i32.eq (local.get $i) (local.get $len)))
+      ;; A rebuilt index has no vacated slots -- that is the point of rebuilding
+      ;; it -- so a tombstoned dense entry is simply not indexed.
+      (if (i32.load8_u (i32.add (local.get $dead) (local.get $i)))
+        (then
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $pl)))
       (local.set $h (i32.wrap_i64 (call $mere_map_key_hash_%s
         (i64.load (i32.add (local.get $keys) (i32.mul (local.get $i) (i32.const 8)))))))
       (local.set $s (i32.and (local.get $h) (local.get $ncm1)))
@@ -7517,12 +7539,45 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $pl)))
     (i32.store offset=16 (local.get $m) (local.get $ni))
-    (i32.store offset=20 (local.get $m) (local.get $newcap)))
+    (i32.store offset=20 (local.get $m) (local.get $newcap))
+    ;; no vacated slots in a fresh index, so occupied == live
+    (i32.store offset=32 (local.get $m) (i32.load offset=28 (local.get $m))))
+  ;; Q-063 squeeze: drop the tombstones from the dense arrays in place, keeping
+  ;; insertion order, then rebuild the index. Called from delete when the dead
+  ;; outnumber the live, so its O(len) is paid once per O(live) deletes.
+  ;; Entries MOVE -- but they moved on every delete before this, so no caller
+  ;; could hold an interior pointer across one.
+  (func $mere_map_%s_squeeze (param $m i32)
+    (local $i i32) (local $w i32) (local $len i32)
+    (local $keys i32) (local $values i32) (local $dead i32)
+    (local.set $keys (i32.load offset=0 (local.get $m)))
+    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $len (i32.load offset=8 (local.get $m)))
+    (local.set $dead (i32.load offset=24 (local.get $m)))
+    (local.set $i (i32.const 0))
+    (local.set $w (i32.const 0))
+    (block $end (loop $lp
+      (br_if $end (i32.eq (local.get $i) (local.get $len)))
+      (if (i32.eqz (i32.load8_u (i32.add (local.get $dead) (local.get $i))))
+        (then
+          (if (i32.ne (local.get $w) (local.get $i))
+            (then
+              (i64.store (i32.add (local.get $keys) (i32.mul (local.get $w) (i32.const 8)))
+                (i64.load (i32.add (local.get $keys) (i32.mul (local.get $i) (i32.const 8)))))
+              (i64.store (i32.add (local.get $values) (i32.mul (local.get $w) (i32.const 8)))
+                (i64.load (i32.add (local.get $values) (i32.mul (local.get $i) (i32.const 8)))))))
+          (i32.store8 (i32.add (local.get $dead) (local.get $w)) (i32.const 0))
+          (local.set $w (i32.add (local.get $w) (i32.const 1)))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (i32.store offset=8 (local.get $m) (local.get $w))
+    (call $mere_map_%s_reindex (local.get $m) (i32.load offset=20 (local.get $m))))
   (func $mere_map_%s_set (param $m8 i64) (param $k i64) (param $v i64) (result i64)
     (local $m i32)
     (local $h i32) (local $s i32) (local $idx i32) (local $idxcap i32) (local $icm1 i32)
     (local $keys i32) (local $values i32) (local $len i32) (local $cap i32) (local $occ i32)
     (local $nk i32) (local $nv i32) (local $i i32) (local $newlen i32)
+    (local $reuse i32) (local $dead i32) (local $nd i32) (local $live i32)
     (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $h (i32.wrap_i64 (call $mere_map_key_hash_%s (local.get $k))))
     (local.set $m (i32.wrap_i64 (local.get $m8)))
@@ -7532,19 +7587,42 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
     (local.set $s (i32.and (local.get $h) (local.get $icm1)))
     (local.set $keys (i32.load offset=0 (local.get $m)))
     (local.set $values (i32.load offset=4 (local.get $m)))
+    ;; Q-063: -2 is a VACATED slot. The probe walks through it (a key inserted
+    ;; after the deletion may sit further along this chain) but does not compare
+    ;; against it, and the first one seen is where this insert goes if the key
+    ;; turns out to be absent -- reusing it instead of consuming a fresh slot is
+    ;; what keeps a churning table's index from filling with tombstones.
+    (local.set $reuse (i32.const -1))
     (block $done_probe (loop $probe
       (local.set $occ (i32.load (i32.add (local.get $idx) (i32.mul (local.get $s) (i32.const 4)))))
       (br_if $done_probe (i32.eq (local.get $occ) (i32.const -1)))
-      (if (i32.wrap_i64 (call $mere_map_key_eq_%s
-            (i64.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 8))))
-            (local.get $k)))
+      (if (i32.lt_s (local.get $occ) (i32.const 0))
         (then
-          (i64.store (i32.add (local.get $values) (i32.mul (local.get $occ) (i32.const 8))) (local.get $v))
-          (return (i64.const 0))))
+          (if (i32.lt_s (local.get $reuse) (i32.const 0))
+            (then (local.set $reuse (local.get $s)))))
+        (else
+          (if (i32.wrap_i64 (call $mere_map_key_eq_%s
+                (i64.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 8))))
+                (local.get $k)))
+            (then
+              (i64.store (i32.add (local.get $values) (i32.mul (local.get $occ) (i32.const 8))) (local.get $v))
+              (return (i64.const 0))))))
       (local.set $s (i32.and (i32.add (local.get $s) (i32.const 1)) (local.get $icm1)))
       (br $probe)))
     (local.set $len (i32.load offset=8 (local.get $m)))
     (local.set $cap (i32.load offset=12 (local.get $m)))
+    (local.set $live (i32.load offset=28 (local.get $m)))
+    ;; At capacity, but if a quarter of it is tombstones then dropping them buys
+    ;; the room doubling would -- and that is the path a churning table takes,
+    ;; where every insert follows a delete. The squeeze rebuilds the index, so
+    ;; every local this probe derived is stale: re-entering is the honest way to
+    ;; say that, and the key is still absent with room now, so it is one level.
+    (if (i32.and (i32.eq (local.get $len) (local.get $cap))
+                 (i32.gt_s (i32.sub (local.get $len) (local.get $live))
+                           (i32.div_s (local.get $cap) (i32.const 4))))
+      (then
+        (call $mere_map_%s_squeeze (local.get $m))
+        (return (call $mere_map_%s_set (local.get $m8) (local.get $k) (local.get $v)))))
     (if (i32.eq (local.get $len) (local.get $cap))
       (then
         (local.set $cap (i32.mul (local.get $cap) (i32.const 2)))
@@ -7552,6 +7630,9 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
         (global.set $__lang_bump (i32.add (local.get $nk) (i32.mul (local.get $cap) (i32.const 8))))
         (local.set $nv (global.get $__lang_bump))
         (global.set $__lang_bump (i32.add (local.get $nv) (i32.mul (local.get $cap) (i32.const 8))))
+        (local.set $nd (global.get $__lang_bump))
+        (global.set $__lang_bump (i32.add (local.get $nd) (local.get $cap)))
+        (local.set $dead (i32.load offset=24 (local.get $m)))
         (local.set $i (i32.const 0))
         (block $cend (loop $cl
           (br_if $cend (i32.eq (local.get $i) (local.get $len)))
@@ -7559,21 +7640,37 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
                      (i64.load (i32.add (local.get $keys) (i32.mul (local.get $i) (i32.const 8)))))
           (i64.store (i32.add (local.get $nv) (i32.mul (local.get $i) (i32.const 8)))
                      (i64.load (i32.add (local.get $values) (i32.mul (local.get $i) (i32.const 8)))))
+          (i32.store8 (i32.add (local.get $nd) (local.get $i))
+                      (i32.load8_u (i32.add (local.get $dead) (local.get $i))))
           (local.set $i (i32.add (local.get $i) (i32.const 1)))
           (br $cl)))
         (i32.store offset=0 (local.get $m) (local.get $nk))
         (i32.store offset=4 (local.get $m) (local.get $nv))
+        (i32.store offset=24 (local.get $m) (local.get $nd))
         (i32.store offset=12 (local.get $m) (local.get $cap))
         (local.set $keys (local.get $nk))
         (local.set $values (local.get $nv))))
     (i64.store (i32.add (local.get $keys) (i32.mul (local.get $len) (i32.const 8))) (local.get $k))
     (i64.store (i32.add (local.get $values) (i32.mul (local.get $len) (i32.const 8))) (local.get $v))
+    (i32.store8 (i32.add (i32.load offset=24 (local.get $m)) (local.get $len)) (i32.const 0))
     (local.set $newlen (i32.add (local.get $len) (i32.const 1)))
     (i32.store offset=8 (local.get $m) (local.get $newlen))
-    (if (i32.ge_s (i32.mul (local.get $newlen) (i32.const 10)) (i32.mul (local.get $idxcap) (i32.const 7)))
-      (then (call $mere_map_%s_reindex (local.get $m) (i32.mul (local.get $idxcap) (i32.const 2))))
-      (else (i32.store (i32.add (local.get $idx) (i32.mul (local.get $s) (i32.const 4)))
-                       (i32.sub (local.get $newlen) (i32.const 1)))))
+    (i32.store offset=28 (local.get $m) (i32.add (local.get $live) (i32.const 1)))
+    ;; reusing a vacated slot leaves the occupied count unchanged
+    (if (i32.ge_s (local.get $reuse) (i32.const 0))
+      (then
+        (i32.store (i32.add (local.get $idx) (i32.mul (local.get $reuse) (i32.const 4)))
+                   (i32.sub (local.get $newlen) (i32.const 1))))
+      (else
+        (i32.store (i32.add (local.get $idx) (i32.mul (local.get $s) (i32.const 4)))
+                   (i32.sub (local.get $newlen) (i32.const 1)))
+        (i32.store offset=32 (local.get $m)
+                   (i32.add (i32.load offset=32 (local.get $m)) (i32.const 1)))))
+    ;; The load factor is on OCCUPIED slots, not on live entries: a vacated slot
+    ;; still lengthens every probe that passes through it.
+    (if (i32.ge_s (i32.mul (i32.load offset=32 (local.get $m)) (i32.const 10))
+                  (i32.mul (local.get $idxcap) (i32.const 7)))
+      (then (call $mere_map_%s_reindex (local.get $m) (i32.mul (local.get $idxcap) (i32.const 2)))))
     (i64.const 0))
   (func $mere_map_%s_get (param $m8 i64) (param $k i64) (result i64)
     (local $m i32)
@@ -7587,10 +7684,14 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
     (block $fail (loop $probe
       (local.set $occ (i32.load (i32.add (local.get $idx) (i32.mul (local.get $s) (i32.const 4)))))
       (br_if $fail (i32.eq (local.get $occ) (i32.const -1)))
-      (if (i32.wrap_i64 (call $mere_map_key_eq_%s
-            (i64.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 8))))
-            (local.get $k)))
-        (then (return (i64.load (i32.add (local.get $values) (i32.mul (local.get $occ) (i32.const 8)))))))
+      ;; Q-063: -2 is vacated -- keep probing, do not compare. No index slot
+      ;; ever points at a tombstoned dense entry, so a hit here is live.
+      (if (i32.ge_s (local.get $occ) (i32.const 0))
+        (then
+          (if (i32.wrap_i64 (call $mere_map_key_eq_%s
+                (i64.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 8))))
+                (local.get $k)))
+            (then (return (i64.load (i32.add (local.get $values) (i32.mul (local.get $occ) (i32.const 8)))))))))
       (local.set $s (i32.and (i32.add (local.get $s) (i32.const 1)) (local.get $icm1)))
       (br $probe)))
     ;; v0.1.268: a missing key is a `fail`, which a try_or can catch -- not a
@@ -7608,38 +7709,53 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
     (block $notf (loop $probe
       (local.set $occ (i32.load (i32.add (local.get $idx) (i32.mul (local.get $s) (i32.const 4)))))
       (br_if $notf (i32.eq (local.get $occ) (i32.const -1)))
-      (if (i32.wrap_i64 (call $mere_map_key_eq_%s
-            (i64.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 8))))
-            (local.get $k)))
-        (then (return (i64.const 1))))
+      (if (i32.ge_s (local.get $occ) (i32.const 0))
+        (then
+          (if (i32.wrap_i64 (call $mere_map_key_eq_%s
+                (i64.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 8))))
+                (local.get $k)))
+            (then (return (i64.const 1))))))
       (local.set $s (i32.and (i32.add (local.get $s) (i32.const 1)) (local.get $icm1)))
       (br $probe)))
     (i64.const 0))
+  ;; Q-063: the LIVE count. Offset 8 is the dense high-water mark and includes
+  ;; tombstones, which no observer of the language may see.
   (func $mere_map_%s_len (param $m8 i64) (result i64)
-    (i64.extend_i32_s (i32.load offset=8 (i32.wrap_i64 (local.get $m8)))))
-  ;; v0.1.298: map_clear -- len = 0. O(1); the mass-deletion primitive
-  ;; (map_delete shifts the arrays per call, so emptying a map with it is
-  ;; quadratic time).
+    (i64.extend_i32_s (i32.load offset=28 (i32.wrap_i64 (local.get $m8)))))
+  ;; v0.1.298: map_clear -- O(1) where emptying one key at a time is a walk.
+  ;; It resets the tombstone state too, and rebuilds the index, because leaving
+  ;; vacated slots behind an empty map would make the next probe walk them.
   (func $mere_map_%s_clear (param $m8 i64) (result i64)
     (i32.store offset=8 (i32.wrap_i64 (local.get $m8)) (i32.const 0))
+    (i32.store offset=28 (i32.wrap_i64 (local.get $m8)) (i32.const 0))
+    (i32.store offset=32 (i32.wrap_i64 (local.get $m8)) (i32.const 0))
+    (call $mere_map_%s_reindex (i32.wrap_i64 (local.get $m8))
+                               (i32.load offset=20 (i32.wrap_i64 (local.get $m8))))
     (i64.const 0))
   (func $mere_map_%s_iter (param $m8 i64) (param $cl8 i64) (result i64)
     (local $m i32) (local $cl i32)
     (local $i i32) (local $len i32)
     (local $keys i32) (local $values i32)
     (local $outer_env i32) (local $outer_fn i32)
-    (local $k i64) (local $v i64) (local $inner_cl i32)
+    (local $k i64) (local $v i64) (local $inner_cl i32) (local $dead i32)
     (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $cl (i32.wrap_i64 (local.get $cl8)))
     (local.set $len    (i32.load offset=8 (local.get $m)))
     (local.set $keys   (i32.load offset=0 (local.get $m)))
     (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $dead   (i32.load offset=24 (local.get $m)))
     (local.set $outer_env (i32.load offset=0 (local.get $cl)))
     (local.set $outer_fn  (i32.load offset=4 (local.get $cl)))
     (local.set $i (i32.const 0))
     (block $end
       (loop $lp
         (br_if $end (i32.eq (local.get $i) (local.get $len)))
+        ;; Q-063: a vacated dense slot is skipped, so an iteration sees
+        ;; insertion order over the survivors -- the same as every backend.
+        (if (i32.load8_u (i32.add (local.get $dead) (local.get $i)))
+          (then
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $lp)))
         (local.set $k (i64.load (i32.add (local.get $keys)
                                   (i32.mul (local.get $i) (i32.const 8)))))
         (local.set $v (i64.load (i32.add (local.get $values)
@@ -7658,38 +7774,43 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
     (local $m i32)
     (local $s i32) (local $idx i32) (local $idxcap i32) (local $icm1 i32)
     (local $keys i32) (local $values i32) (local $occ i32) (local $len i32) (local $j i32)
+    (local $dead i32) (local $live i32) (local $deadn i32)
     (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $idx (i32.load offset=16 (local.get $m)))
     (local.set $idxcap (i32.load offset=20 (local.get $m)))
     (local.set $icm1 (i32.sub (local.get $idxcap) (i32.const 1)))
     (local.set $s (i32.and (i32.wrap_i64 (call $mere_map_key_hash_%s (local.get $k))) (local.get $icm1)))
     (local.set $keys (i32.load offset=0 (local.get $m)))
-    (local.set $values (i32.load offset=4 (local.get $m)))
+    (local.set $dead (i32.load offset=24 (local.get $m)))
     (block $notf (loop $probe
       (local.set $occ (i32.load (i32.add (local.get $idx) (i32.mul (local.get $s) (i32.const 4)))))
       (br_if $notf (i32.eq (local.get $occ) (i32.const -1)))
-      (if (i32.wrap_i64 (call $mere_map_key_eq_%s
-            (i64.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 8))))
-            (local.get $k)))
+      (if (i32.ge_s (local.get $occ) (i32.const 0))
         (then
-          (local.set $len (i32.load offset=8 (local.get $m)))
-          (local.set $j (local.get $occ))
-          (block $sdone (loop $sl
-            (br_if $sdone (i32.ge_s (i32.add (local.get $j) (i32.const 1)) (local.get $len)))
-            (i64.store (i32.add (local.get $keys) (i32.mul (local.get $j) (i32.const 8)))
-              (i64.load (i32.add (local.get $keys) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 8)))))
-            (i64.store (i32.add (local.get $values) (i32.mul (local.get $j) (i32.const 8)))
-              (i64.load (i32.add (local.get $values) (i32.mul (i32.add (local.get $j) (i32.const 1)) (i32.const 8)))))
-            (local.set $j (i32.add (local.get $j) (i32.const 1)))
-            (br $sl)))
-          (i32.store offset=8 (local.get $m) (i32.sub (local.get $len) (i32.const 1)))
-          (call $mere_map_%s_reindex (local.get $m) (local.get $idxcap))
-          (return (i64.const 0))))
+          (if (i32.wrap_i64 (call $mere_map_key_eq_%s
+                (i64.load (i32.add (local.get $keys) (i32.mul (local.get $occ) (i32.const 8))))
+                (local.get $k)))
+            (then
+              (i32.store8 (i32.add (local.get $dead) (local.get $occ)) (i32.const 1))
+              (local.set $live (i32.sub (i32.load offset=28 (local.get $m)) (i32.const 1)))
+              (i32.store offset=28 (local.get $m) (local.get $live))
+              ;; -2 and not -1: a key inserted after this one may sit further
+              ;; along this probe chain, and -1 would end the probe short of it.
+              (i32.store (i32.add (local.get $idx) (i32.mul (local.get $s) (i32.const 4)))
+                         (i32.const -2))
+              ;; The floor keeps a small map from squeezing on its first delete;
+              ;; the ratio is what makes it amortised -- O(len) once per O(live).
+              (local.set $deadn (i32.sub (i32.load offset=8 (local.get $m)) (local.get $live)))
+              (if (i32.and (i32.ge_s (local.get $deadn) (i32.const 8))
+                           (i32.gt_s (local.get $deadn) (local.get $live)))
+                (then (call $mere_map_%s_squeeze (local.get $m))))
+              (return (i64.const 0))))))
       (local.set $s (i32.and (i32.add (local.get $s) (i32.const 1)) (local.get $icm1)))
       (br $probe)))
     (i64.const 0))|}
     k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
-    k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
+    k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
+    k_tag k_tag k_tag
 
 let map_int_runtime_wasm = {|
   (func $mere_map_int_new (result i64)

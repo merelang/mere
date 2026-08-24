@@ -4,6 +4,63 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.321 — 2026-08-24
+
+_Q-063 closed: the last two backends that shifted._
+
+v0.1.317 tombstoned `map_delete` on the C backend and v0.1.320 on the
+interpreter. LLVM and Wasm still found the entry through the index and then
+shifted every dense entry above it down one slot and rebuilt the index, so one
+delete cost O(live) on both. Measured before being written about — 40k
+operations, live set 500 → 4,000, against the C backend's flat 0.02 s:
+
+    LLVM   0.19  0.45  1.16 s
+    Wasm   0.34  0.44  0.68  1.12 s   (node's ~0.18 s startup included)
+
+Both carry the same design as the C backend now: `dead[]` marks a vacated
+dense slot, `live` is what `_len` answers, `idx_used` counts occupied index
+slots (live PLUS vacated, because a vacated slot still lengthens every probe
+through it), the index slot becomes **-2** rather than -1 so a probe walks past
+it to a key inserted after the deletion, `set` reuses a vacated slot before
+consuming a fresh one, and the dense arrays are squeezed in place — keeping
+insertion order — only when the dead outnumber the live.
+
+    LLVM   0.02  0.01  0.01  0.01  0.01 s   (live 500 → 8,000)
+    Wasm   0.20  0.19  0.18  0.19  0.20 s   (node startup, and little else)
+
+Flat on both. At the largest live set the suite measured, LLVM goes 1.16 s →
+0.01 s.
+
+**Two things that were structural rather than transcribed.** Where the C
+backend re-probes inline after a squeeze, both of these **re-enter `set`**:
+the squeeze rebuilds the index, so every register or local the probe derived is
+stale, and a self-call is the honest way to say so — the key is still absent and
+there is room now, so it is one level deep. And the LLVM iteration helper is
+shared with the LINEAR fallback runtime, whose struct is five fields wide;
+reading a `dead` pointer out of it would be a read past the end. The helper
+takes the same `map_key_index_safe` predicate that picks the runtime, so the
+two cannot drift apart.
+
+Wasm's `map_clear` gained work rather than losing it: it now resets the
+tombstone counters and rebuilds the index, because leaving vacated slots behind
+an emptied map would make the next probe walk them.
+
+**RV32I is not in this list and is not an omission.** Its map is an association
+list in the bare-metal prelude — `_mget`, `_mset` and `_mdel` all walk it — so
+delete being O(n) there is not a distinguishable defect but the shape of a
+runtime chosen for code size on a machine with no hash index at all.
+Tombstoning it would not change any complexity class.
+
+Semantics are unchanged, which is the whole claim, and
+`test/parity/map_delete_tombstone.mere` is what holds it: all four backends run
+it and produce one transcript. Poisoned on both new backends. Vacating with -1
+instead of -2 on LLVM fails **that case and nothing else** — 131 of 132 stay
+green — which is the third time that specific poison has been visible only to
+the test written alongside the design. `map_len` returning the high-water mark
+on Wasm fails five.
+
+---
+
 ## v0.1.320 — 2026-08-24
 
 _The interpreter had the same O(live) delete, and it was hiding behind its own overhead._
