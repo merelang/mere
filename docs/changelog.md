@@ -4,6 +4,72 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.322 — 2026-08-25
+
+_Half of what a tree-shaped program allocated was empty nodes._
+
+A boxed variant's NULLARY constructors carry no payload. Every `Nil`, every
+`Leaf` of a recursive type is indistinguishable from every other one — and
+each was a fresh region allocation. On the binarytrees benchmark that was
+**50.3% of everything the program allocated**: 7.4 million empty nodes, 170
+MiB, for values that differ in nothing.
+
+They share one immutable static per (type, tag) now.
+
+    binarytrees   191 ms  338 MiB   ->   107 ms  169 MiB
+    with region    87 ms  53.6 MiB  ->    68 ms   28.1 MiB
+    json          169.2 MB alloc    ->  159.0 MB   (-6.1%)
+    wordfreq       27.4 MB alloc    ->   26.7 MB   (-2.3%)
+
+The naive row is now **faster than hand-written C** on that workload (183 ms)
+and level with MoonBit (102 ms), where before it was C's speed on a hundred
+times C's memory. Nothing about codegen changed: cutting the memory in half cut
+the time in half, because a 338 MiB working set does not fit anywhere near the
+CPU.
+
+**Where this came from.** The MoonBit row added in the previous commit beat
+naive Mere on both axes, and reading its generated C is what named the reason —
+`Leaf` compiles to `&moonbit_constant_constructor_0`, a static, where Mere
+compiled it to a bump allocation. The other reason it wins there is a reference
+counter, and that one Mere should not copy: `region R { }` already answers the
+same question and answers it faster (68 ms against 102 ms). What Mere was
+missing was not a way to reclaim, it was a decent DEFAULT — and this is the
+half of that gap that costs nothing to close.
+
+The symbol is keyed by tag number rather than constructor name, because the
+expression emitter and the struct-body emitter reach the name by different
+routes (raw, canonical, substituted) and the tag is the one thing both already
+agree on.
+
+**What was checked before touching it**, since this hands out a pointer that
+lives in no arena:
+
+* Nothing mutates a variant node after construction — `__mcopy` and `__mdeep`
+  write to the fresh copy they just made, and `vec_to_list` writes to the node
+  it just built.
+* Equality on a boxed variant is structural (`eq_t` compares tags, then
+  payloads), not pointer identity, so two separately written `Nil`s were equal
+  before and are equal now for the same reason.
+* The copiers were deliberately left ALONE. Making them return a shared node
+  unchanged would have been faster still, but it would make correctness depend
+  on "every nullary node is the shared static" — an invariant the `list_str`
+  builtin helpers quietly break, one node per call. They copy it instead, which
+  is correct without needing the invariant to hold anywhere.
+
+`test/parity/shared_nullary_regions.mere` is the case written for the failure
+this could introduce and nothing else would have caught: an empty list, a
+non-empty list, and a user variant each leave a `region R { }`, the arena is
+then burned over with 2,000 fresh strings, and all three are read again. Plus
+the region-loop carry, and the two equality claims above. It does not detect
+whether the sharing is happening — reverting to allocation passes it, and
+should, because both are semantically identical. What detects that is the
+deterministic allocation bound in `benchmarks/binarytrees/MANIFEST`, whose
+FLOOR caught this change as a breach: a number that halves is either an
+improvement or a meter that stopped looking, and from the outside those are the
+same event.
+
+---
+
 ## v0.1.321 — 2026-08-24
 
 _Q-063 closed: the last two backends that shifted._
