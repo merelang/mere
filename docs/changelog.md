@@ -4,6 +4,57 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.325 — 2026-08-25
+
+_Q-066: the call site looked the callee up under a name it is never emitted as._
+
+A saturated call to a known N-ary function goes straight to its uncurried
+`__direct` twin instead of building a closure to apply the second argument.
+That never happened for a **multi-instantiated** function, and the reason turns
+out to be a single lookup: `direct_fns` was consulted under the **source**
+name, which is never a key for such a function. Its specialisations are in
+there — they are ordinary `fn_decl`s with concrete parameter types, keyed by
+`mangled_inst_name` — and their `__direct` twins have always been emitted.
+Nothing could name them.
+
+So every recursive call in `contrib/json`'s `rev_aux` built a 32-byte closure
+environment: 800,000 of them, 25.6 MB, 18% of everything the JSON benchmark
+allocated.
+
+The lookup uses the emitted name now — the instance's mangled name when the
+call's head type has resolved to a concrete arrow, the source name otherwise.
+A multi-inst call whose head type has not resolved still takes the closure
+path, which is the same fallback as before, narrowed to the case that needs it.
+
+**v0.1.324's library workaround is gone.** `rev_aux` is one polymorphic
+function again, and the numbers are byte-identical to the two hand-specialised
+copies:
+
+    json alloc   112,911,240 B   (same as the workaround, to the byte)
+    json RSS     109.2 MiB
+    json wall    105 ms
+
+Which is the point: the workaround was faking what the compiler should do, and
+its comment said to collapse it back when the compiler learned to. It has.
+
+Cumulatively, one 11.8 MB document went 169.2 → 159.0 → 139.8 → 112.9 MB across
+four releases, every step found by attributing allocations to return addresses.
+
+**The test asserts the CALL, not the definition**, and that distinction is the
+whole lesson of v0.1.324. The first attempt at this fix computed the mangled
+name for the callee and left the lookup alone. It built, every gate stayed
+green, and the allocation moved by zero bytes — the guard could not fire, and
+nothing in the suite could tell. `test/test_basic.ml` now checks that the twin
+is *reached*: both instances emit one, and neither body still calls the
+one-argument curried entry. Poisoned by restoring the source-name lookup, which
+fails it and nothing else.
+
+Nothing else in the benchmark suite moves — `binarytrees`, `churn`, `crc32`,
+`matmul`, `startup` and `wordfreq` have no multi-instantiated function on a hot
+path, and their allocation is unchanged to the byte.
+
+---
+
 ## v0.1.324 — 2026-08-25
 
 _Half of a list reversal's cost was closure environments._

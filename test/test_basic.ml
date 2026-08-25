@@ -8902,6 +8902,42 @@ let () =
      if has "helper__int" && has "helper__str" && has "wrap__int" && has "wrap__str"
      then "all4" else "missing")
     "all4";
+  (* Q-066 (v0.1.325): a SATURATED call to a multi-instantiated function must
+     reach that instance's uncurried `__direct` twin, not build a closure to
+     apply the second argument. The twins were always emitted; the call site
+     looked `direct_fns` up under the SOURCE name, which is never a key for such
+     a function, so every call took the closure path and allocated a 32-byte
+     environment. On contrib/json's `rev_aux` that was 800,000 environments and
+     18% of the JSON benchmark.
+     This asserts the CALL, not the definition -- a first attempt at this fix
+     left the definition exactly as it is here, passed every gate, and moved the
+     allocation by zero bytes, because only the callee name had changed and the
+     lookup that gates it had not. *)
+  check "Q-066: a saturated multi-inst call reaches its instance's __direct"
+    (let c = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "let rec revx = fn xs -> fn acc ->\n\
+        \  match xs with | Nil -> acc | Cons (h, t) -> revx t (Cons (h, acc));\n\
+        let a = revx (Cons (1, Cons (2, Nil))) Nil;\n\
+        let b = revx (Cons (\"x\", Nil)) Nil;\n\
+        list_len a + list_len b") in
+     let nlen = String.length c in
+     let has p =
+       let plen = String.length p in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub c i plen = p then true
+         else scan (i + 1)
+       in scan 0
+     in
+     (* Both instances get a twin, and the recursive call inside each one
+        reaches it. Before the fix the body of the int twin called
+        `mu_revx__list_int__list_int__list_int(` -- the one-argument curried
+        entry -- and then applied the closure it returned. *)
+     if has "mu_revx__list_int__list_int__list_int__direct("
+        && has "mu_revx__list_str__list_str__list_str__direct("
+        && not (has "__auto_type __c = mu_revx__list_int")
+     then "direct" else "closure")
+    "direct";
   check "§23.3: multi-instantiation poly fn — C codegen emits 2 specs"
     (let c_src = Codegen_c.emit_program ~main_ty:Ast.TyInt (typed_prog
        "let rec myid = fn x -> x in\n\

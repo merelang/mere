@@ -2172,23 +2172,51 @@ let rec emit_expr (e : Ast.expr) : string =
        against direct_fns. Guarded like the 1-arg direct-call path below
        (local/captured shadowing, inner-lifted fns, multi-instantiation
        fns fall through to the closure paths). *)
+    (* Q-066 (v0.1.325): look the callee up under the name it is EMITTED as.
+       A multi-instantiated function's specialisations already sit in
+       `direct_fns` -- they are ordinary fn_decls with concrete parameter types,
+       keyed by `mangled_inst_name` -- and their uncurried `__direct` twins have
+       always been emitted. What was missing was here: the lookup used the
+       SOURCE name, which is never a key for such a function, so every call fell
+       through to the closure path and built a 32-byte environment to apply its
+       second argument. On contrib/json's `rev_aux` that was 800,000
+       environments, 25.6 MB, 18% of the JSON benchmark.
+       A first attempt at this dropped the `multi_inst_fns` exclusion and
+       computed the mangled name for the CALLEE while still looking up the
+       source name for the arity check. It built, every gate stayed green, and
+       the allocation did not move by a byte -- the guard could not fire. The
+       lookup is the part that had to change. *)
     let collect_direct e0 =
       let rec spine e' acc =
         match e'.Ast.node with
         | Ast.App (f', a) -> spine f' (a :: acc)
-        | Ast.Var n -> Some (n, acc)
+        | Ast.Var n -> Some (n, e', acc)
         | _ -> None
       in
+      (* The emitted name for this call: the instance's mangled name when the
+         head's type has resolved to a concrete arrow, else the source name. *)
+      let emitted_name n head =
+        if Hashtbl.mem multi_inst_fns n then
+          match head.Ast.ty with
+          | Some t ->
+            (match Ast.walk t with
+             | Ast.TyArrow _ as arrow -> Some (mangled_inst_name n arrow)
+             | _ -> None)
+          | None -> None
+        else Some n
+      in
       match spine e0 [] with
-      | Some (n, args)
-        when (match Hashtbl.find_opt direct_fns n with
-              | Some info -> List.length args = List.length info.d_params
-              | None -> false)
-             && not (Hashtbl.mem multi_inst_fns n)
-             && not (Hashtbl.mem inner_lifts n)
-             && not (List.mem_assoc n !current_var_types)
-             && not (List.mem_assoc n !current_env_subst) ->
-        Some (n, args)
+      | Some (n, head, args) ->
+        (match emitted_name n head with
+         | Some ename
+           when (match Hashtbl.find_opt direct_fns ename with
+                 | Some info -> List.length args = List.length info.d_params
+                 | None -> false)
+                && not (Hashtbl.mem inner_lifts n)
+                && not (List.mem_assoc n !current_var_types)
+                && not (List.mem_assoc n !current_env_subst) ->
+           Some (c_safe_name ename, args)
+         | _ -> None)
       | _ -> None
     in
     (* v0.1.52: exactly-saturated call to a curried INNER-lifted fn with an
@@ -2214,11 +2242,11 @@ let rec emit_expr (e : Ast.expr) : string =
       | _ -> None
     in
     (match collect_direct (Ast.{ node = Ast.App (f, arg); ty = e.ty; loc = e.loc }) with
-     | Some (n, args) ->
+     | Some (base, args) ->
        (* Statement-expr temporaries pin the interpreter's left-to-right
           argument evaluation order (C argument order is unspecified). *)
        let args_c = List.map emit_expr args in
-       let callee = c_safe_name n ^ "__direct" in
+       let callee = base ^ "__direct" in
        (match (if __in_tail then self_tail_goto callee args_c else None) with
         | Some g -> g
         | None ->
