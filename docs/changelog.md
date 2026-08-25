@@ -4,6 +4,82 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.323 — 2026-08-25
+
+_Q-053: the escape check only ever looked at the way out it could see._
+
+`region R { }` rejects a container returned as the block's RESULT. It said
+nothing about one STORED into a binding that outlives the block, because the
+check read the result type and these programs return nothing:
+
+```
+let m = map_new () in
+let _ = region R { let v = vec_new () in ... map_set m "k" v } in
+print (str_of_int (vec_len (map_get m "k")))
+```
+
+That type-checked. Containers are handles and copy-on-store copies the handle —
+by design; mkv's actor-shared Map depends on it — so `m` kept a pointer into
+the block's arena. With the arena burned over afterwards, the C backend read a
+length of 2,054,847,098 and then segfaulted, while the interpreter, which has
+no arenas, printed the right answer. **Two backends disagreeing, with nothing
+watching.** `region R loop` had the same hole, one iteration sooner.
+
+The routes were enumerated rather than guessed, and the hole is exactly
+containers: `Vec` into a `Map`, `Vec` into a `Vec`, `Map` into a `Map` all
+dangled. `str`, recursive variants like `list`, and closures were already safe
+— all three are deep-copied on the way out, closures including their captured
+environment (v0.1.290).
+
+The check now also scans the bindings that existed BEFORE the block. The
+unification that puts `R` into an outer binding's type happens inside the
+block, so by the time the body is typed the damage is already visible — there
+was no ordering problem to work around, which the Q-053 note had listed as the
+risk. The message names the binding and the type it became.
+
+**It walks everything except the inside of a function type**, and
+`region_loop_carry` is what taught that: it binds, outside the loop,
+`churn : Map[RL, str, str] -> int -> Map[RL, str, str]` — a function that
+operates on the carry, which is how the construct is meant to be used — and the
+first version of this check stopped it type-checking. A function holds nothing;
+a closure's captured environment is deep-copied with it. A binding holds a
+region's memory when the name reaches it through a container, a tuple or a
+variant, and those are still walked.
+
+Six cases in the suite: three that must be rejected, and the three that must
+NOT be — the function over the carry, a closure leaving a region, and a
+deep-copied value crossing outward. Each of the latter was rejected at some
+point while this was being written.
+
+---
+
+_And two things that came out of comparing against MoonBit._
+
+**`str_unescape` looked at nothing before allocating.** A string with no
+backslash in it unescapes to itself, and it was copying it anyway: 1.12 million
+identical copies, 19.2 MB, 12% of everything the JSON benchmark allocated.
+Found by attributing allocations to their return addresses rather than
+guessing — the same method the Ruby workload's 8.6 GB was taken apart with. It
+returns `s` now, and so does `str_trim` when there is nothing to trim.
+`str_replace` already returned `s` for an empty needle, so this is an
+established shape rather than a new one.
+
+    json alloc   159.0 MB -> 139.8 MB   (-19.2 MB, matching the attribution to the byte)
+    json RSS     153.2 MiB -> 134.9 MiB
+
+**`docs/patterns.md` §8.4: a function whose body is a region.** Not a new
+feature — `region R { }` is an expression and could always be a function's
+whole body — but nothing said so, and it is where the construct usually wants
+to be. It says plainly what had been left implicit: **Mere does not reclaim by
+default**, so a program that allocates in a loop and never writes `region`
+holds everything it ever allocated. The section carries the measurement (32
+bytes in the default region with it, 192,032 without), what cannot cross the
+boundary, and why the function boundary in particular — the cost of a region is
+entirely what has to cross it, and a function draws that line where the
+crossing set is already written down.
+
+---
+
 ## v0.1.322 — 2026-08-25
 
 _Half of what a tree-shaped program allocated was empty nodes._

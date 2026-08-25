@@ -30,9 +30,24 @@ claim = a different question from every other row here. This is `contrib/json`,
         a document with 1.5e3 in it would be timing one implementation's error
         path against five implementations' happy path.
 
-# 161.4 MB at v0.1.321, for a 11.8 MB document -- a ~14x expansion into the
+# 139.8 MB at v0.1.323, for an 11.8 MB document -- a ~12x expansion into the
 # parse tree, which is what a `json list` of `(str * json)` pairs costs when
 # every node is a region allocation and nothing is freed. Go holds 90 MB for
 # the same tree with a collector underneath it.
-alloc_min = 134217728
-alloc_max = 201326592
+#
+# It was 169.2 MB at v0.1.321 and 159.0 at v0.1.322. Attribution by return
+# address named where the rest went, and two of the three biggest sites were
+# fixable: 50.3%-of-binarytrees'-kind of empty nodes (v0.1.322, shared nullary
+# constructors, -10.2 MB here) and 1.12 million calls to `str_unescape` that
+# copied a string with no escape in it into an identical one (v0.1.323,
+# -19.2 MB, which matched the attribution to the byte). The largest remaining
+# site is contrib/json's own `rev_aux`, which allocates a fresh spine to
+# reverse its accumulator -- 28%, and a library question rather than a language
+# one.
+#
+# The floor sits well below the current value on purpose. Its job is to catch a
+# meter that stopped seeing its subject, not to argue with the next
+# improvement -- and it has already caught one legitimate halving by being too
+# close (binarytrees, v0.1.322).
+alloc_min = 67108864
+alloc_max = 167772160

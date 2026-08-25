@@ -606,6 +606,48 @@ let rec mentions_region (name : string) (t : Ast.ty) : bool =
   | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit
   | Ast.TyParam _ | Ast.TyVar _ -> false
 
+(* Q-053: a region name that got into a binding which OUTLIVES the block.
+   The result-type check below catches `region R { v }` -- returning the
+   container -- but says nothing about `region R { map_set outer "k" v }`,
+   which stores it instead. Containers are handles and copy-on-store copies the
+   handle, by design (mkv's actor-shared Map depends on it), so after the block
+   the outer map holds a pointer into a freed arena. It type-checked, and on
+   the C backend it reads freed memory and then segfaults; the interpreter has
+   no arenas and prints the right answer, so the two backends disagreed and
+   nothing was watching.
+   The unification that puts R there happens INSIDE the block, so by the time
+   the body has been typed the damage is already visible in the outer binding's
+   type -- there is no ordering problem to work around. Only monomorphic
+   bindings can be mutated this way; a generalized scheme instantiates fresh
+   variables at every use, and `mentions_region` answers false for TyParam. *)
+(* Everything `mentions_region` walks EXCEPT the inside of a function type.
+   `region_loop_carry` is what taught this: it binds, outside the loop,
+   `churn : Map[RL, str, str] -> int -> Map[RL, str, str]` -- a function that
+   OPERATES on the carry, which is exactly how the construct is meant to be
+   used. It holds nothing; a value of that type is a closure whose env the
+   copiers deep-copy (v0.1.290), which is why a closure escaping a region was
+   already safe when this was measured. A binding holds a region's memory when
+   the region name reaches it through a container, a tuple or a variant -- all
+   of which this still walks. *)
+let rec mentions_region_in_value (name : string) (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyArrow _ -> false
+  | Ast.TyRef (_, r, inner) -> r = name || mentions_region_in_value name inner
+  | Ast.TyTuple ts -> List.exists (mentions_region_in_value name) ts
+  | Ast.TyCon (_, args) -> List.exists (mentions_region_in_value name) args
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit
+  | Ast.TyParam _ | Ast.TyVar _ -> false
+
+let region_leaked_into_env (name : string) (env_before : (string * scheme) list)
+  : string option =
+  let rec find = function
+    | [] -> None
+    | (bind, sch) :: rest ->
+      if mentions_region_in_value name (Ast.walk sch.body) then Some bind
+      else find rest
+  in
+  find env_before
+
 (* Replace TyParam by fresh TyVars, sharing per param name within one call.
    Used to instantiate polymorphic constructors and user-supplied annotations. *)
 let freshen_params t =
@@ -2451,6 +2493,17 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
         Printf.sprintf
           "region escape: value of type `%s` cannot leave region `%s`"
           (Ast.pp_ty t) name));
+    (match region_leaked_into_env name env with
+     | Some bind ->
+       raise (Type_error (e.loc,
+         Printf.sprintf
+           "region escape: `%s` now holds a value from region `%s`, which is \
+            freed at the end of this block (its type became `%s`). A container \
+            stored into something that outlives the block keeps a pointer into \
+            the block's arena -- build it outside the block, or copy its \
+            contents out"
+           bind name (Ast.pp_ty (Ast.walk (List.assoc bind env).body))))
+     | None -> ());
     t
   | Ast.Region_loop (name, x, body) ->
     (* `region R loop x { body }` — the hand-over-hand sibling of the block
@@ -2484,6 +2537,21 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
         Printf.sprintf
           "region escape: Done value of type `%s` cannot leave region `%s` (the Continue carry may mention it; the Done value may not)"
           (Ast.pp_ty (Ast.walk d)) name));
+    (* Q-053, the loop's half. The carry may mention R and does; a binding
+       from OUTSIDE the loop may not. Each generation's arena is released when
+       the next one is built, so a container stored outward from the body
+       dangles one iteration later -- sooner than the block's version, not
+       later. `env` here is the enclosing environment: `x` is bound only in the
+       body's environment above, so the carry is not in what this scans. *)
+    (match region_leaked_into_env name env with
+     | Some bind ->
+       raise (Type_error (e.loc,
+         Printf.sprintf
+           "region escape: `%s` now holds a value from region `%s`, which is \
+            freed at the end of each iteration (its type became `%s`). The \
+            loop's carry may live in `%s`; a binding from outside it may not"
+           bind name (Ast.pp_ty (Ast.walk (List.assoc bind env).body)) name))
+     | None -> ());
     Ast.walk d
   | Ast.Ref (mode, region, inner) ->
     (* `&R e` — tag the value's type with region R. Enforces the Trivial[R]
