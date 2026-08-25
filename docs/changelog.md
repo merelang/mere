@@ -4,6 +4,55 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.324 — 2026-08-25
+
+_Half of a list reversal's cost was closure environments._
+
+The JSON benchmark's biggest remaining allocation site was `contrib/json`'s
+`rev_aux`, at 32% — and it is not the algorithm it looks like. Reversing an
+accumulator costs N cons cells and always did. What attributing the
+allocations to their return addresses showed is that **half of that 32% was
+closure ENVIRONMENTS**: 800,000 of them, 32 bytes each, 25.6 MB, one per list
+element.
+
+Why: a call site can call a known N-ary function directly, without building a
+closure to apply the second argument — but only if the function is in
+`direct_fns`, and that table admits a function only when its parameter and
+return types are **concrete**. A polymorphic
+`rev_aux : 'a list -> 'a list -> 'a list` is not. So every recursive call built
+a closure. The uncurried `__direct` twin was being emitted for each
+instantiation the whole time and nothing could name it.
+
+`rev_aux` is two monomorphic copies now, one per element type, which is what the
+compiler can exploit today:
+
+    json alloc   139.8 MB -> 112.9 MB   (-26.9 MB)
+    json RSS     134.9 MiB -> 109.2 MiB
+    json wall    124 ms -> 107 ms
+
+Cumulatively over four releases, the same 11.8 MB document went from 169.2 MB
+of allocation to 112.9 — a third of it gone, and every step found by
+attribution rather than by reasoning about where the bytes ought to be.
+
+**A compiler fix was tried first and reverted, which is the more useful half of
+this entry.** The obvious move was to widen `collect_direct` so a
+multi-instantiated function resolves to its own instance's `__direct` twin —
+the call site already computes the mangled instance name for the closure entry,
+so the name was available. It built, every gate stayed green, and it changed
+nothing: the allocation was byte-identical. The reason is that the two
+conditions are mutually exclusive. `direct_fns` requires concrete parameter
+types; a function is multi-instantiated precisely because its parameters are
+NOT concrete. The widened guard could never fire — dead code that looked like
+an optimisation. Reverted.
+
+The real fix is to register instantiations in `direct_fns` under their mangled
+names, which is a change inside the monomorphisation path rather than at the
+call site, and belongs in its own arc. Until then the library-level workaround
+carries a comment saying what it is working around and when it should collapse
+back into one function.
+
+---
+
 ## v0.1.323 — 2026-08-25
 
 _Q-053: the escape check only ever looked at the way out it could see._

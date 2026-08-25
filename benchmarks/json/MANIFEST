@@ -30,20 +30,28 @@ claim = a different question from every other row here. This is `contrib/json`,
         a document with 1.5e3 in it would be timing one implementation's error
         path against five implementations' happy path.
 
-# 139.8 MB at v0.1.323, for an 11.8 MB document -- a ~12x expansion into the
+# 112.9 MB at v0.1.324, for an 11.8 MB document -- a ~9.6x expansion into the
 # parse tree, which is what a `json list` of `(str * json)` pairs costs when
 # every node is a region allocation and nothing is freed. Go holds 90 MB for
 # the same tree with a collector underneath it.
 #
-# It was 169.2 MB at v0.1.321 and 159.0 at v0.1.322. Attribution by return
-# address named where the rest went, and two of the three biggest sites were
-# fixable: 50.3%-of-binarytrees'-kind of empty nodes (v0.1.322, shared nullary
-# constructors, -10.2 MB here) and 1.12 million calls to `str_unescape` that
-# copied a string with no escape in it into an identical one (v0.1.323,
-# -19.2 MB, which matched the attribution to the byte). The largest remaining
-# site is contrib/json's own `rev_aux`, which allocates a fresh spine to
-# reverse its accumulator -- 28%, and a library question rather than a language
-# one.
+# 169.2 MB at v0.1.321, 159.0 at v0.1.322, 139.8 at v0.1.323, 112.9 at
+# v0.1.324 -- a third of it gone, and every step of it found by attributing
+# allocations to their return addresses rather than by reasoning about where
+# they ought to be:
+#
+#   v0.1.322  -10.2 MB  nullary constructors of a boxed variant share a static
+#   v0.1.323  -19.2 MB  str_unescape stopped copying strings with no escape
+#   v0.1.324  -26.9 MB  contrib/json's rev_aux specialised per element type
+#
+# The last one is not the algorithm it looks like. Reversing an accumulator
+# costs N cons cells and always did; what the attribution showed was that HALF
+# of `rev_aux`'s cost was closure ENVIRONMENTS -- 32 bytes per element, because
+# a polymorphic function's parameter types are not concrete, `direct_fns` only
+# admits concrete ones, and so every recursive call built a closure to apply
+# its second argument. The uncurried `__direct` twin existed per instantiation
+# the whole time and nothing could name it. Two monomorphic copies are what the
+# compiler can exploit today; see the note in contrib/json/json.mere.
 #
 # The floor sits well below the current value on purpose. Its job is to catch a
 # meter that stopped seeing its subject, not to argue with the next
