@@ -145,6 +145,68 @@ The base record doesn't change (immutable). Multiple fields can be updated at on
 
 ---
 
+## 8.4. A function whose body is a region
+
+A `region R { ... }` is an expression, so **it can be the whole body of a
+function** — and that is usually where you want it. Everything the body
+allocates dies when the call returns; only the result is copied out.
+
+```mere
+let sum_scratch = fn (n: int) -> region R {
+  let rec go = fn (i: int) -> fn (acc: int) ->
+    if i == 0 then acc else go (i - 1) (acc + str_len (str_repeat "x" 32)) in
+  go n 0
+};
+```
+
+Measured on that function at n = 2000, twice over: with the region, the default
+region takes **32 bytes** and the named arena takes 192,000 across two arenas.
+Without it, all 192,032 bytes land in the default region and stay there for the
+life of the process, because the default region is never freed.
+
+That is the whole trade, and it is worth stating plainly: **Mere does not
+reclaim by default.** A program that allocates in a loop and never says
+`region` holds everything it ever allocated. The construct is not an
+optimisation to reach for when something is slow; it is how you say "these
+allocations are temporary", and nothing else says it for you.
+
+Why the function boundary in particular: the cost of a region is entirely
+what has to CROSS it. A block draws that boundary wherever you happened to
+type `{`; a function draws it where the crossing set is already written down —
+the parameters and the return type. On the `binarytrees` benchmark, wrapping
+each batch in a block cost nothing at all (the result is an `int`) and cut peak
+memory sixfold and wall clock by a third.
+
+**What cannot cross.** The result may not mention `R`, which means a function
+like this cannot RETURN a container built inside it:
+
+```mere
+let mk = fn (n: int) -> region R {
+  let v = vec_new () in
+  let _ = vec_push v n in
+  v                      // ERROR: Vec[R, int] cannot leave region R
+};
+```
+
+Nor can it store one into something that outlives the call — that is rejected
+too, since v0.1.323:
+
+```mere
+let m = map_new () in
+let _ = region R {
+  let v = vec_new () in
+  map_set m "k" v        // ERROR: `m` now holds a value from region `R`
+} in ...
+```
+
+Values that are DEEP-COPIED on the way out are fine and need no thought: `str`,
+records, tuples, recursive variants like `list`, and closures (their captured
+environment is copied with them). It is containers — `Vec`, `Map`, `StrBuf` —
+that are handles, and a handle copied out of a dead arena is a dangling
+pointer. Build them outside the region, or copy their contents out.
+
+---
+
 ## 8.5. "Update only one element" inside a collection of records
 
 `Vec` / `OwnedVec` are append-only and records are immutable, so there's no direct way to mutate a specific record in a collection. Instead, **use `vec_map` + `{ t | f = v }` to build a "new collection with conditional elements replaced"**:

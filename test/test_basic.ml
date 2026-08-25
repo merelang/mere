@@ -2502,6 +2502,55 @@ let () =
     (fun () -> Pipeline.type_of "region R { fn (x: int) -> &R x }");
   check_raises "region escape: tuple containing &R"
     (fun () -> Pipeline.process "region R { (&R 1, 2) }");
+  (* Q-053 (v0.1.323): the STORE path, which the result-type check above cannot
+     see because these programs do not return anything. A container is a handle
+     and copy-on-store copies the handle -- by design, mkv's actor-shared Map
+     depends on it -- so what the outer binding kept was a pointer into the
+     block's arena. It type-checked; the C backend then read freed memory and
+     segfaulted while the interpreter, which has no arenas, printed the right
+     answer. Two backends disagreeing with nothing watching. *)
+  check_raises_containing "Q-053: Vec stored into an outer Map" "now holds a value from region"
+    (fun () -> Pipeline.type_of
+      "let m = map_new () in \
+       let _ = region R { let v = vec_new () in let _ = vec_push v 7 in map_set m \"k\" v } in \
+       print \"x\"");
+  check_raises_containing "Q-053: Vec stored into an outer Vec" "now holds a value from region"
+    (fun () -> Pipeline.type_of
+      "let o = vec_new () in \
+       let _ = region R { let v = vec_new () in let _ = vec_push v 7 in vec_push o v } in \
+       print \"x\"");
+  check_raises_containing "Q-053: the region LOOP's half" "freed at the end of each iteration"
+    (fun () -> Pipeline.type_of
+      "let o = vec_new () in \
+       let _ = region R loop x { match x with | None -> Continue 0 | Some n -> \
+         if n >= 2 then Done n else \
+         let v = vec_new () in let _ = vec_push v n in let _ = vec_push o v in \
+         Continue (n + 1) } in print \"x\"");
+  (* The three things the check must NOT reject, each of which it did at some
+     point while being written. A function OVER the carry is how the loop is
+     meant to be used (region_loop_carry binds exactly that and stopped
+     type-checking until function types were excluded from the walk); a closure
+     escaping is already safe because the copiers deep-copy its env; and a
+     deep-copied value crossing the boundary was never the problem. *)
+  check "Q-053: a function over the carry is not a leak"
+    (let ok = try ignore (Pipeline.type_of
+      "let rec churn = fn (m: Map[RL, str, str]) -> fn (k: int) -> \
+         if k == 0 then m else let _ = map_set m \"a\" \"b\" in churn m (k - 1); \
+       let t = region RL loop x { match x with | None -> Continue (map_new ()) | Some m -> \
+         if map_len m > 3 then Done (map_len m) else Continue (churn m 2) } in \
+       print (str_of_int t)"); true with _ -> false in
+     if ok then "accepted" else "rejected") "accepted";
+  check "Q-053: a closure leaving a region is not a leak"
+    (let ok = try ignore (Pipeline.type_of
+      "let o = vec_new () in \
+       let _ = region R { let b = str_repeat \"w\" 8 in vec_push o (fn (u: unit) -> str_len b) } in \
+       print (str_of_int ((vec_get o 0) ()))"); true with _ -> false in
+     if ok then "accepted" else "rejected") "accepted";
+  check "Q-053: a deep-copied str stored outward is not a leak"
+    (let ok = try ignore (Pipeline.type_of
+      "let m = map_new () in let _ = region R { map_set m \"k\" (str_repeat \"q\" 4) } in print \"x\"");
+      true with _ -> false in
+     if ok then "accepted" else "rejected") "accepted";
   check "different region names don't unify"
     (* &R int != &S int *)
     (let ok =

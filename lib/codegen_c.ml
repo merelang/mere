@@ -7599,6 +7599,8 @@ let str_concat_helper =
       "    else break;";
       "  }";
       "  size_t len = b - a;";
+      (* Same as unescape: a string with nothing to trim trims to itself. *)
+      "  if (a == 0 && len == n) return s;";
       "  char* buf = __lang_str_alloc(__lang_current_region, len);";
       "  if (len > 0) memcpy(buf, s + a, len);";
       "  return buf;";
@@ -7976,6 +7978,14 @@ let str_concat_helper =
       "}";
       "static const char* __lang_str_unescape(const char* s) {";
       "  size_t n = __lang_str_size(s);";
+      (* v0.1.323: look before allocating. A string with no backslash in it
+         unescapes to itself, and copying it produced a second string with the
+         same bytes -- 1.12 million of them, 19.2 MB, 12% of everything the
+         JSON benchmark allocated, all of it identical to its input. `str` is
+         immutable, so handing the input back is the same value by every
+         observation the language can make. `str_replace` already returns `s`
+         when the needle is empty; this is that, for the case that dominates. *)
+      "  { size_t k = 0; while (k < n && s[k] != '\\\\') k++; if (k == n) return s; }";
       "  char* r = __lang_str_alloc(__lang_current_region, n);";
       "  size_t i = 0, j = 0;";
       "  while (i < n) {";
