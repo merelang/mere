@@ -14,21 +14,27 @@ claim = the shape the region model is built around, and the one where its two
         bench_region.mere puts each depth's batch inside a `region R { }` block,
         which is the language's answer, and pays a copy of the answer out.
 
-# Total allocation across every arena, at v0.1.321. The two Mere rows sit at
-# almost the same point (353,371,856 B naive; 3,147,344 + 350,224,512 B for the
-# region version) and that is the finding: a `region R { }` whose result is an
-# int copies almost nothing out, so bounding the residency is FREE here. What
-# it changes is peak -- 337 MiB against 63 MiB, and 190 ms against 87 ms,
-# because the naive version's working set stops fitting anywhere near the CPU.
+# Total allocation across every arena, at v0.1.322 -- 175,638,224 B, down from
+# 353,371,856 B in v0.1.321. That halving is what shared nullary constructors buy:
+# 50.3% of what it used to allocate was `Leaf`, a constructor with no payload,
+# and every one of those 7.4 million empty nodes was a fresh 24 bytes. They
+# share one static now (v0.1.322). The floor below CAUGHT the change as a breach, which is
+# what a floor is for -- a number that drops by half is either an improvement or
+# a meter that stopped looking, and the two are indistinguishable from the
+# outside.
 #
-# Contrast churn, where the same idea costs 44% more cumulative allocation: a
-# loop has to deep-copy its live set into each new generation, and a block only
-# has to copy its answer.
-alloc_min = 268435456
-alloc_max = 419430400
+# The two Mere rows still sit at the same point to the byte (175,638,224 for
+# both), which is the other finding: a `region R { }` whose result is an int
+# copies almost nothing out, so bounding the residency is FREE here. What it
+# changes is peak. Contrast churn, where the same idea costs 44% MORE
+# cumulative allocation, because a loop has to deep-copy its live set into
+# every new generation and a block only has to copy its answer.
+alloc_min = 134217728
+alloc_max = 209715200
 
-# The number the region block exists to control.
-peak_max = 100663296
+# The number the region block exists to control. 32,505,856 B at v0.1.322,
+# halved along with everything else.
+peak_max = 50331648
 
 # MoonBit needs strconv for the depth argument.
 mbt_imports = moonbitlang/core/env moonbitlang/core/strconv

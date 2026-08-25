@@ -1,0 +1,66 @@
+// v0.1.322 made the nullary constructors of a BOXED variant share one static
+// node each, instead of allocating a fresh one per `Nil` / `Leaf`. That static
+// lives outside every arena, which is the one thing about it that could go
+// wrong -- so this case walks a nullary node across every region boundary the
+// language has and then uses it after the arena it came from is gone.
+//
+// The failure it is written against is a use-after-free that a green suite
+// would not have shown: nothing else here returns an EMPTY recursive value out
+// of a region, and an empty list is the most ordinary value in the language.
+
+type tree = Leaf | Branch of tree * tree;
+
+// 1. an empty list leaving a region block
+let e1 = region A { Nil };
+let _ = print ("empty out of a block: " ++ str_of_int (list_len e1));
+
+// 2. a NON-empty list built in a region, whose tail is the shared node
+let e2 = region B {
+  let rec mk = fn (i: int) -> if i == 0 then Nil else Cons (i, mk (i - 1)) in
+  mk 5
+};
+let _ = print ("list out of a block: " ++ str_of_int (list_len e2));
+
+// 3. a user variant whose leaves are shared, out of a region
+let t = region C {
+  let rec build = fn (d: int) ->
+    if d == 0 then Leaf else Branch (build (d - 1), build (d - 1)) in
+  build 3
+};
+let rec count = fn (x: tree) ->
+  match x with | Leaf -> 1 | Branch (l, r) -> 1 + count l + count r;
+let _ = print ("tree out of a block: " ++ str_of_int (count t));
+
+// 4. the arena is reused after the block -- if anything above kept a pointer
+//    INTO it, this is what would overwrite the bytes it points at
+let _ = region D {
+  let rec burn = fn (i: int) -> fn (acc: int) ->
+    if i == 0 then acc else burn (i - 1) (acc + str_len (str_repeat "x" 64)) in
+  burn 2000 0
+};
+let _ = print ("after reuse, list is still: " ++ str_of_int (list_len e2));
+let _ = print ("after reuse, tree is still: " ++ str_of_int (count t));
+let _ = print ("after reuse, empty is still: " ++ str_of_int (list_len e1));
+
+// 5. carried through a region LOOP, whose whole point is that the carry is
+//    deep-copied into a fresh arena every generation while the old one dies
+let carried = region R loop x {
+  match x with
+  | None -> Continue (map_new ())
+  | Some m ->
+    let n = if map_has m "n" then map_get m "n" else 0 in
+    if n >= 3 then Done n
+    else
+      let _ = map_set m "n" (n + 1) in
+      Continue m
+};
+let _ = print ("region loop: " ++ str_of_int carried);
+
+// 6. equality still compares structure, not identity -- two separately
+//    written empty lists are equal because their contents are, and that has
+//    to stay true now that they are also the same pointer
+let a = Nil;
+let b = Nil;
+let _ = print ("two empties equal: " ++ (if a == b then "y" else "n"));
+let _ = print ("empty vs one-elem: " ++ (if a == Cons (1, Nil) then "y" else "n"));
+print "done"

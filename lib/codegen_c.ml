@@ -321,6 +321,19 @@ let c_type_name (n : string) : string = flatten_module_dots n
      typedef intlist_node* intlist;
    So `intlist` in C is `intlist_node*`, Cons mallocs a node, and
    pattern match dereferences via `->`. *)
+(* v0.1.322: a boxed variant's NULLARY constructors carry no payload, so every
+   `Nil`, every `Leaf`, every `None` of a recursive type is indistinguishable
+   from every other one -- and until now each was a fresh region allocation.
+   On binarytrees that was 50.3% of everything the program allocated: 7.4
+   million empty nodes, 170 MiB, for values that differ in nothing.
+   They share one immutable static per (type, tag) instead. The symbol is keyed
+   by TAG NUMBER rather than by constructor name because the two emission sites
+   -- the expression emitter and the struct-body emitter -- reach the name by
+   different routes (raw vs canonical vs substituted), and the tag is the one
+   thing both already agree on. *)
+let shared_nullary_sym (node_type : string) (tag : int) : string =
+  Printf.sprintf "__mshared_%s_t%d" node_type tag
+
 let recursive_variants : (string, unit) Hashtbl.t = Hashtbl.create 4
 
 let is_recursive_variant (name : string) : bool =
@@ -3614,17 +3627,22 @@ let rec emit_expr (e : Ast.expr) : string =
       | Some arg -> Some (emit_expr arg)
     in
     if is_recursive_variant actual_type_name then
-      (* Recursive variant: allocate a node in the default region and
-         return its pointer (the value type for recursive variants in
-         C). Reclaimed in bulk when main exits. *)
+      (* Recursive variant: the value is a pointer to a node. *)
       let node = actual_type_name ^ "_node" in
-      Printf.sprintf
-        "({ %s* __p = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); \
-         __p->tag = %d%s; __p; })"
-        node node node tag
-        (match arg_c_opt with
-         | None -> ""
-         | Some arg_c -> "; __p->payload." ^ name ^ " = " ^ arg_c)
+      match arg_c_opt with
+      | None ->
+        (* v0.1.322: no payload, so there is nothing to distinguish one of
+           these from another. Point at the shared static instead of bumping
+           the region for a node whose only content is its tag. It outlives
+           every arena, which is what makes it safe to hand across a region
+           boundary; the copiers still copy it, so no invariant about where a
+           nullary node lives is being relied on anywhere. *)
+        Printf.sprintf "(&%s)" (shared_nullary_sym actual_type_name tag)
+      | Some arg_c ->
+        Printf.sprintf
+          "({ %s* __p = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); \
+           __p->tag = %d; __p->payload.%s = %s; __p; })"
+          node node node tag name arg_c
     else
       let payload_str =
         match arg_c_opt with
@@ -10635,6 +10653,30 @@ let mono_variant_is_recursive
     match arg_opt with Some t -> ty_mentions t | None -> false)
     subst_variants
 
+(* v0.1.322: one immutable static per nullary constructor of a BOXED variant.
+   Emitted straight after the struct body, which is where the type is first
+   complete enough to initialise one. Non-recursive variants are values rather
+   than pointers, so their nullary constructors already cost nothing and get
+   none of these. *)
+let shared_nullary_defs (mono_name : string) (node_name : string)
+    (variants : (string * Ast.ty option) list) : string =
+  if not (Hashtbl.mem recursive_variants mono_name) then ""
+  else
+    let defs =
+      List.filter_map (fun (cname, arg_opt) ->
+        match arg_opt with
+        | Some _ -> None
+        | None ->
+          let cn = Ast.canonical_ctor cname in
+          (match Hashtbl.find_opt variant_tags cn with
+           | None -> None
+           | Some tag ->
+             Some (Printf.sprintf "static struct %s %s = { .tag = %d };"
+                     node_name (shared_nullary_sym mono_name tag) tag)))
+        variants
+    in
+    if defs = [] then "" else "\n" ^ String.concat "\n" defs
+
 (* Emit typedef for a mono variant instance — same shape as the
    monomorphic case (forward + ptr if recursive, else inline struct). *)
 let emit_mono_variant_typedef (variant_name : string) (args : Ast.ty list) : string =
@@ -10688,7 +10730,8 @@ let emit_mono_variant_struct_body (variant_name : string) (args : Ast.ty list)
       "  int tag;\n  union {\n" ^ String.concat "\n" payload_arms ^
       "\n  } payload;"
   in
-  Some (Printf.sprintf "struct %s {\n%s\n};" node_name body)
+  Some (Printf.sprintf "struct %s {\n%s\n};%s" node_name body
+          (shared_nullary_defs mono_name node_name svariants))
 
 (* Emit the full struct body for a variant — both recursive and
    non-recursive. Called by emit_program AFTER closure / tuple / record
@@ -10714,7 +10757,8 @@ let emit_variant_struct_body (name : string)
         "  int tag;\n  union {\n" ^ String.concat "\n" payload_arms ^
         "\n  } payload;"
     in
-    Some (Printf.sprintf "struct %s {\n%s\n};" node_name body)
+    Some (Printf.sprintf "struct %s {\n%s\n};%s" node_name body
+            (shared_nullary_defs name node_name variants))
 
 (* Q-012: per-element-type channel runtime. A heap-allocated ring buffer
    guarded by a mutex + condition variable; recv blocks until an element is
