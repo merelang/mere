@@ -31,31 +31,12 @@ type json =
 
 // === List utilities (rev for accumulator-style parsing) ===
 
-// Specialised per element type rather than written once polymorphically, and
-// the reason is measurable. `direct_fns` -- the table a call site consults to
-// call a known N-ary function without building a closure -- only admits
-// functions whose parameter and return types are CONCRETE. A polymorphic
-// `rev_aux : 'a list -> 'a list -> 'a list` is not, so every recursive call
-// went through the closure path and allocated a 32-byte environment per list
-// element: 800,000 of them, 25.6 MB, 18% of everything the JSON benchmark
-// allocated. The uncurried `__direct` twin was being emitted for each
-// instantiation the whole time and nothing could name it.
-//
-// Two monomorphic copies are what the compiler can currently exploit. If the
-// direct-call path ever learns to resolve a multi-instantiated function to its
-// own instance, these should collapse back into one.
-let rec rev_json_aux = fn (xs: json list) -> fn (acc: json list) ->
+let rec rev_aux = fn (xs, acc) ->
   match xs with
   | [] -> acc
-  | [h, ...t] -> rev_json_aux t (Cons (h, acc));
+  | [h, ...t] -> rev_aux t (Cons (h, acc));
 
-let rec rev_field_aux = fn (xs: (str * json) list) -> fn (acc: (str * json) list) ->
-  match xs with
-  | [] -> acc
-  | [h, ...t] -> rev_field_aux t (Cons (h, acc));
-
-let rev_json = fn (xs: json list) -> rev_json_aux xs Nil;
-let rev_field = fn (xs: (str * json) list) -> rev_field_aux xs Nil;
+let rev = fn (xs) -> rev_aux xs Nil;
 
 // === Whitespace skip ===
 
@@ -144,7 +125,7 @@ and parse_array = fn (s: str, i: int) ->
       else
         match char_at s j with
         | ',' -> loop (Cons (v, acc)) (j + 1)
-        | ']' -> (JArr (rev_json (Cons (v, acc))), j + 1)
+        | ']' -> (JArr (rev (Cons (v, acc))), j + 1)
         | _   -> fail ("expected ',' or ']' at pos " ++ str_of_int j)
     in
     loop Nil i
@@ -166,7 +147,7 @@ and parse_object = fn (s: str, i: int) ->
       else
         match char_at s j with
         | ',' -> loop (Cons ((key, v), acc)) (j + 1)
-        | '}' -> (JObj (rev_field (Cons ((key, v), acc))), j + 1)
+        | '}' -> (JObj (rev (Cons ((key, v), acc))), j + 1)
         | _   -> fail ("expected ',' or '}' at pos " ++ str_of_int j)
     in
     loop Nil i;
