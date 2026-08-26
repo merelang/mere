@@ -290,7 +290,12 @@ let rec tokenize ?file s =
               in
               let end_brace = find_end (j + 1) 0 in
               let expr_src = String.sub s (j + 1) (end_brace - j - 1) in
-              parts := `Expr expr_src :: !parts;
+              (* The column the fragment starts at in the enclosing line, kept
+                 with it because `parts` is walked later and `j` is gone by
+                 then. `pos` is the opening quote, so this is a character
+                 offset from it. *)
+              let frag_col = pos.Loc.col + (j + 1 - i) in
+              parts := `Expr (expr_src, frag_col) :: !parts;
               read (end_brace + 1)
             | '\n' ->
               raise (Lex_error (pos, "newline in string literal"))
@@ -320,20 +325,34 @@ let rec tokenize ?file s =
             (* The trailing T_eof from tokenize is dropped because it gets in the way of the outer stream. *)
             List.filter (fun (_, t) -> t <> T_eof) toks
           in
+          (* An interpolation fragment is re-tokenised from scratch, so its
+             tokens come back positioned at line 1, column 1 OF THE FRAGMENT.
+             Left alone those leak into the outer report: `let c = "x:{id=1}"`
+             on line 3 reported its parse error at 1:3 -- a position in the
+             file the reader is looking at, and not the one the compiler read.
+             A string literal cannot contain a newline (see the '\n' case
+             above), so the whole fragment sits on one line and the correction
+             is a column shift. *)
+          let retag frag_col toks =
+            List.map (fun ((l : Loc.t), t) ->
+              ({ l with Loc.line = pos.Loc.line;
+                        Loc.col = frag_col + l.Loc.col - 1;
+                        Loc.file = pos.Loc.file }, t)) toks
+          in
+          let expr_tokens src frag_col =
+            let inner = retag frag_col (strip_eof (tokenize ?file src)) in
+            lparen_tok :: inner @ [rparen_tok]
+          in
           let rec emit = function
             | [] -> []
             | [last] ->
               (match last with
                | `Lit s -> lit_tokens s
-               | `Expr src ->
-                 let inner = strip_eof (tokenize ?file src) in
-                 lparen_tok :: inner @ [rparen_tok])
+               | `Expr (src, frag_col) -> expr_tokens src frag_col)
             | first :: more ->
               let first_toks = match first with
                 | `Lit s -> lit_tokens s
-                | `Expr src ->
-                  let inner = strip_eof (tokenize ?file src) in
-                  lparen_tok :: inner @ [rparen_tok]
+                | `Expr (src, frag_col) -> expr_tokens src frag_col
               in
               first_toks @ (plus_plus_tok :: emit more)
           in

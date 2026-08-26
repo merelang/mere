@@ -13157,6 +13157,22 @@ let () =
   let type_name_warnings =
     warnings_of "type wait = Waiting | Finished of int;\nlet _ = print \"x\";\n"
   in
+  (* v0.1.327: an interpolation fragment is re-tokenised from scratch, so its
+     tokens used to come back positioned at line 1 column 1 OF THE FRAGMENT and
+     those positions leaked into the outer report -- a parse error on line 3
+     was announced at 1:3, which is a position in the file the reader is
+     looking at and not the one the compiler read. Found while making
+     examples/toy_sql.mere lex again: the diagnostic pointed at a comment that
+     lexes fine on its own, so bisection rather than the message is what
+     located the real line. *)
+  check "interpolation: an unbound name is reported where it is written"
+    (String.concat ";" (List.map (fun (d : Pipeline.diagnostic) ->
+       Printf.sprintf "%d:%d" d.Pipeline.d_loc.Loc.line d.Pipeline.d_loc.Loc.col)
+       (List.filter (fun (d : Pipeline.diagnostic) ->
+          d.Pipeline.d_severity = Pipeline.Error)
+          (Pipeline.diagnostics
+             "let a = 1;\nlet b = 2;\nlet _ = print \"v = {nosuch}\";\n"))))
+    "3:21";
   check "reserved type name: warned about, on the name itself"
     (String.concat ";" (List.map (fun (d : Pipeline.diagnostic) ->
        Printf.sprintf "%d:%d" d.Pipeline.d_loc.Loc.line d.Pipeline.d_loc.Loc.col)
