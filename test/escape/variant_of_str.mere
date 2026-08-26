@@ -1,0 +1,8 @@
+// SAFE, and it is the claim v0.1.323 actually made: a variant of `str` leaving
+// a region is deep-copied on the way out. Q-067 is a variant of a CONTAINER,
+// which is a different claim -- see variant_payload.mere. This row exists so
+// that fixing the second one cannot quietly break the first.
+type msg = MNone | MSome of str;
+let o = vec_new ();
+let _ = region R { vec_push o (MSome (str_repeat "q" 3)) };
+print (match vec_get o 0 with | MNone -> "-" | MSome s -> s)

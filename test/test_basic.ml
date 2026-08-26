@@ -2526,6 +2526,44 @@ let () =
          if n >= 2 then Done n else \
          let v = vec_new () in let _ = vec_push v n in let _ = vec_push o v in \
          Continue (n + 1) } in print \"x\"");
+  (* Q-067 (v0.1.326): the region can be named in a type's DECLARATION instead
+     of in its application. `Box` and `hold` are nullary type constructors, so
+     walking TyCon's ARGUMENTS found nothing and the outer binding read
+     `Vec[__heap, Box]` with R nowhere in it. Both dangled -- the C backend read
+     a length of 2,054,847,098 out of the burned arena while the interpreter
+     answered 3, the same value and the same shape as Q-053. Found by filling
+     in test/escape/ROUTES rather than by hitting it. *)
+  check_raises_containing "Q-067: a container in a record FIELD" "now holds a value from region"
+    (fun () -> Pipeline.type_of
+      "type Box = { items: Vec[R, int] }; \
+       let o = vec_new () in \
+       let _ = region R { let v = vec_new () in let _ = vec_push v 7 in vec_push o (Box { items = v }) } in \
+       print \"x\"");
+  check_raises_containing "Q-067: a container in a variant PAYLOAD" "now holds a value from region"
+    (fun () -> Pipeline.type_of
+      "type hold = HNone | HVec of Vec[R, int]; \
+       let o = vec_new () in \
+       let _ = region R { let v = vec_new () in let _ = vec_push v 7 in vec_push o (HVec v) } in \
+       print \"x\"");
+  (* The fix walks declarations, and `type t = T of t` names itself in its own.
+     Without the `seen` set this does not answer wrongly -- it does not answer,
+     which is the one failure a verdict-shaped test cannot see. *)
+  check "Q-067: a self-referential declaration terminates"
+    (let ok = try ignore (Pipeline.type_of
+      "type t = TNil | TCons of t; \
+       let o = vec_new () in \
+       let _ = region R { vec_push o (TCons TNil) } in \
+       print \"x\""); true with _ -> false in
+     if ok then "accepted" else "rejected") "accepted";
+  (* And the claim v0.1.323 correctly made, which the above must not swallow:
+     a variant of `str` is deep-copied on the way out. *)
+  check "Q-067: a variant of str is still not a leak"
+    (let ok = try ignore (Pipeline.type_of
+      "type msg = MNone | MSome of str; \
+       let o = vec_new () in \
+       let _ = region R { vec_push o (MSome (str_repeat \"q\" 3)) } in \
+       print \"x\""); true with _ -> false in
+     if ok then "accepted" else "rejected") "accepted";
   (* The three things the check must NOT reject, each of which it did at some
      point while being written. A function OVER the carry is how the loop is
      meant to be used (region_loop_carry binds exactly that and stopped
