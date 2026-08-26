@@ -1,0 +1,7 @@
+// The store happens inside a function, so the call site never names the outer
+// container. The check works on types rather than on syntax, which is why this
+// is caught for the same reason the direct store is.
+let stash = fn (dst: Vec[__heap, Vec[R, int]]) -> fn (x: Vec[R, int]) -> vec_push dst x;
+let o = vec_new ();
+let _ = region R { let v = vec_new () in let _ = vec_push v 7 in stash o v };
+print "ok"

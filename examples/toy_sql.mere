@@ -1012,7 +1012,7 @@ let rec show_row_aux = fn (row: (str * value) list) -> fn (acc: str) ->
     let sep = if acc == "" then "" else "," in
     show_row_aux rest (acc ++ sep ++ k ++ "=" ++ show_value v);
 
-let show_row = fn (row: (str * value) list) -> "{" ++ show_row_aux row "" ++ "}";
+let show_row = fn (row: (str * value) list) -> "\{" ++ show_row_aux row "" ++ "}";
 
 let rec show_rows_aux = fn (rs: (str * value) list list) -> fn (acc: str) ->
   match rs with

@@ -1,0 +1,6 @@
+// SAFE. A closure leaving a region carries its captured environment, and the
+// copiers deep-copy that env (v0.1.290). Rejecting this would cost a construct
+// that costs nothing.
+let o = vec_new ();
+let _ = region R { let b = str_repeat "w" 8 in vec_push o (fn (u: unit) -> str_len b) };
+print (str_of_int ((vec_get o 0) ()))

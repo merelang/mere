@@ -1,0 +1,5 @@
+// The third container kind. StrBuf is append-only text rather than a Vec or a
+// Map, and it is a handle for the same reason, so it takes the same route.
+let o = vec_new ();
+let _ = region R { let s = strbuf_new () in let _ = strbuf_push s "hi" in vec_push o s };
+print (str_of_int (strbuf_len (vec_get o 0)))

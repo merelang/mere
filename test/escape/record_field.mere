@@ -1,0 +1,15 @@
+// OPEN HOLE. The container reaches the outer binding inside a RECORD FIELD.
+// `mentions_region_in_value` walks a TyCon's type ARGUMENTS, and `Box` has
+// none -- the region is named in the field's declared type, which is in the
+// record registry and not in the outer binding's type. So the outer binding
+// reads `Vec[__heap, Box]` and nothing in it mentions R.
+// Measured: the C backend reads a length of 2054847098 from the freed arena
+// while the interpreter, which has no arenas, answers 3.
+type Box = { items: Vec[R, int] };
+let o = vec_new ();
+let _ = region R {
+  let v = vec_new () in
+  let _ = vec_push v 7 in
+  vec_push o (Box { items = v })
+};
+print (str_of_int (vec_len (vec_get o 0).items))

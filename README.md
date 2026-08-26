@@ -10,7 +10,58 @@
 
 OCaml implementation of **Mere**, a small ML-family language (Old English for "lake"; 4 letters; region metaphor). Memory is region-based with no GC (region / view / Trivial[R]), effects are ordinary capability values (capability passing + refined borrow annotations), and there are **five backends**: an interpreter, C, LLVM IR, Wasm, and RV32IM machine code. The first four are held to each other by a parity suite that compares their output byte for byte; the fifth boots under QEMU — the one implementation in this stack that nobody here wrote.
 
-It **self-hosts** — the Mere-in-Mere compiler, compiled by itself and run as Wasm, emits byte-identical output to the reference. The RV32IM backend emits a flat binary with no external assembler or linker, and `--bare` hands the program the machine instead of a host; on that there is a kernel, a scheduler and a shell written in Mere, and the self-hosted compiler runs there as a user process — on a RISC-V CPU also written in Mere — emitting WAT byte-identical to the native one. See [docs/bare-metal.md](docs/bare-metal.md).
+## What it is for
+
+Programs that must not have a garbage collector, and that you would rather not write in C.
+
+Memory is region-based, and `region R { ... }` is an **expression**: everything allocated
+inside it is reclaimed when it ends. Not eventually, not when a collector decides — there.
+The type system's job is to stop a value from outliving the arena it came from, and
+[`test/escape/ROUTES`](test/escape/ROUTES) is the enumerated list of every way anyone has
+shown you could try, with what each entry point answers and which holes are still open.
+
+Measured against other implementations of the same program
+([`benchmarks/`](benchmarks/README.md), `python3 benchmarks/run.py`):
+
+| binarytrees — same program, same input | wall | peak RSS |
+|---|---|---|
+| hand-written C, `malloc`/`free` | 183 ms | — |
+| MoonBit (reference counting) | 103 ms | 5.8 MiB |
+| Mere, no `region` written | 107 ms | 169 MiB |
+| **Mere, one `region R { }`** | **68 ms** | **28.1 MiB** |
+
+A reference counter runs whether or not you needed it to. A region block is you saying
+where. On this workload, saying where beats both the collector and hand-written `malloc`.
+
+**And it is not free, which the same suite says out loud.** Mere with no `region` written
+holds 29x the memory MoonBit does, because nothing is reclaimed by default. The language
+does not decide for you; it makes deciding cheap to write.
+
+Nor is the safety claim finished, and the table says which parts are not. Eight routes are
+rejected by every compiling backend. **Two are open holes** — a container reaching an outer
+binding through a record field or a variant payload is accepted today and reads freed
+memory (Q-067) — and they are rows in the table rather than absences from it, so
+`scripts/escape_check.sh` fails if one silently closes. Where this lands first is
+therefore bare metal, embedded, and allocation-bound batch work: places where a collector
+is not an option and the shape of the memory is something you were going to have to think
+about anyway.
+
+### The row to read twice
+
+The suite carries two implementations of `crc32` that differ **only in which API they
+call** — same algorithm, same file, same input:
+
+| `crc32` | wall | peak RSS |
+|---|---|---|
+| hand-written C | 45 ms | 5.3 MiB |
+| Mere, `bytes` | **44 ms** | **5.4 MiB** |
+| Mere, `Vec[R, int]` | 119 ms | 65.6 MiB |
+
+One byte per byte versus one 64-bit int per byte: 2.7x the time and 12x the memory, from a
+choice the type checker is happy with either way. Both rows stay in the table on purpose.
+The cost of a representation is worth more sitting next to its alternative than either
+number is alone — and the first version of this README quoted the slow row as the
+language's speed.
 
 ## Install
 
@@ -36,9 +87,11 @@ installed `mere`, `mere install` (see [docs/packages.md](docs/packages.md))
 fetches an app's dependencies *and* its Node runtime host, so no compiler
 source tree is needed to build or run an app.
 
-## Status (as of 2026-08-20)
+## What is proven
 
-- **2527 tests passing**, plus cross-backend parity (117 programs, 5 declared divergences) and ~30 differential gates against external oracles in CI
+It **self-hosts** — the Mere-in-Mere compiler, compiled by itself and run as Wasm, emits byte-identical output to the reference. The RV32IM backend emits a flat binary with no external assembler or linker, and `--bare` hands the program the machine instead of a host; on that there is a kernel, a scheduler and a shell written in Mere, and the self-hosted compiler runs there as a user process — on a RISC-V CPU also written in Mere — emitting WAT byte-identical to the native one. See [docs/bare-metal.md](docs/bare-metal.md).
+
+- **2583 tests passing** (`dune test`), plus cross-backend parity (133 programs) and ~30 differential gates against external oracles in CI. These counts are checked against the suite by `scripts/first_run_check.sh`, because a number in a README rots silently
 - **🏆 Bootstrap fixpoint — truly self-hosting** (v0.1.10, 2026-07-12): the Mere-in-Mere compiler, **compiled by itself and run as wasm, produces byte-identical output to the reference** — and that output runs correctly. Compiling a program with (A) the compiler under the interpreter and (B) the compiler compiled by itself yields the same WAT, byte for byte (CI-verified by a permanent fixpoint regression test). Getting there required guaranteed tail calls in the self-host codegen (`return_call_indirect`, Stage 55f) and fixing three latent self-compilation bugs (an eager pattern-check payload dereference, pointer-equality string compares in the untyped self-host codegen, and a missing `\r` lexer escape — Stage 55g). See [docs/changelog.md](docs/changelog.md).
 - **🏗️ A fifth backend, and an operating system on top of it** (v0.1.134–198): `mere -rv` emits a flat RV32IM binary with no external assembler or linker, and `--bare` hands the program the machine instead of a host — raw memory arrives as an unforgeable window capability, traps as ordinary Mere closures. On that: a preemptive scheduler, a shell, a syscall boundary, and finally **Mere's own self-hosted compiler running as a user process on a Mere kernel, on a CPU written in Mere**, emitting WAT byte-identical to the native interpreter. `mere -rvg` then emits a debug map beside the binary — from the same item list the assembler consumes, so it describes the bytes that actually ran — which is what lets [riscv-dbg](https://github.com/284km/memu/tree/main/riscv-dbg) break on Mere **source lines**, print a backtrace, and step **backwards**. See [docs/bare-metal.md](docs/bare-metal.md).
 - **🛰️ gRPC and GraphQL, against real clients** (v0.1.280–283): `contrib/proto` (protobuf wire both ways, `FileDescriptorSet`, and a code generator from `.proto`), `contrib/http2` (framing + HPACK + an h2c server with flow control in both directions and a worker pool), and `contrib/graphql` (lexer / parser / printer / SDL / executor with null propagation, introspection, and 21 of the specification's 32 validation rules). `grpcurl` and `graphql-js` are the oracles, and interfaces and unions resolve from `__typename` the way graphql-js's default `resolveType` does. See [contrib/proto/README.md](contrib/proto/README.md), [contrib/http2/README.md](contrib/http2/README.md), [contrib/graphql/README.md](contrib/graphql/README.md).
@@ -116,10 +169,6 @@ $ dune exec ./bin/mere.exe -- contrib/json/json.mere
 
 $ dune exec ./bin/mere.exe -- examples/pipeline.mere
 # A realistic example combining region / view / effects / `with`
-
-$ dune exec ./bin/mere.exe -- examples/toy_sql.mere
-# 1165-line toy SQL engine (tokenizer + parser + executor + JOIN);
-# 59 tests pass with diff = 0 across all 4 backends (interp + C + LLVM + Wasm)
 
 $ dune exec ./bin/mere.exe -- examples/calc.mere
 # Phase 36: recursive-descent arithmetic parser + `?!` Result chain.

@@ -1,0 +1,12 @@
+// MUST NOT BE REJECTED, and the first version of the Q-053 check did reject it.
+// `churn` is bound OUTSIDE the loop with a type that names RL in both its
+// argument and its result -- a function that OPERATES on the carry, which is
+// how the construct is meant to be used. It holds nothing: a value of that
+// type is a closure whose env the copiers deep-copy. This is why the walk
+// stops at the inside of a function type.
+let rec churn = fn (m: Map[RL, str, str]) -> fn (k: int) ->
+  if k == 0 then m else let _ = map_set m (str_of_int (map_len m)) "b" in churn m (k - 1);
+let t = region RL loop x { match x with
+  | None -> Continue (map_new ())
+  | Some m -> if map_len m > 3 then Done (map_len m) else Continue (churn m 2) };
+print (str_of_int t)

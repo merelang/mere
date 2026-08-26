@@ -1,0 +1,11 @@
+// OPEN HOLE, the same one spelled as a variant. `hold` is a nullary type
+// constructor whose PAYLOAD mentions R, so the region never appears in the
+// outer binding's type either.
+// v0.1.323 recorded that "recursive variants were already safe" -- true, and
+// about a variant of `str`, which is deep-copied on the way out. A variant of
+// a CONTAINER is not the same claim, and this is the program that separates
+// them.
+type hold = HNone | HVec of Vec[R, int];
+let o = vec_new ();
+let _ = region R { let v = vec_new () in let _ = vec_push v 7 in vec_push o (HVec v) };
+print (str_of_int (match vec_get o 0 with | HNone -> 0 - 1 | HVec v -> vec_len v))

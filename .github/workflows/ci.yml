@@ -255,6 +255,23 @@ jobs:
       - name: region_slack_check (capacity tracks allocation)
         run: sh scripts/region_slack_check.sh
 
+      # The enumerated escape table. Every way a region-bound value can reach
+      # something that outlives its block, with what each entry point answers
+      # -- and the four compiling backends must agree, because two backends
+      # disagreeing with nothing watching is what Q-053 was. Open holes are
+      # rows, not absences: if one closes, this FAILS until the table says so.
+      - name: escape_check (region escape routes, enumerated)
+        run: sh scripts/escape_check.sh
+
+      # The README, executed. Its Quick-examples transcript is cut from the
+      # file at run time and run, the counts it states are re-derived from the
+      # repo, and a newcomer's first program is built and run outside this
+      # directory on two backends. `install.sh` once served a binary 260
+      # versions old while every gate here was green: nothing was pointed
+      # outward. This is.
+      - name: first_run_check (the README, executed)
+        run: sh scripts/first_run_check.sh
+
       # The cross-language benchmark suite, deterministic half only: every
       # implementation of a workload must print the same bytes, Mere's
       # programs must build, and the default region's cumulative allocation
