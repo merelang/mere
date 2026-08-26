@@ -25,7 +25,13 @@ case "$os" in
   Darwin)
     case "$arch" in
       arm64) asset="mere-macos-arm64" ;;
-      x86_64) asset="mere-macos-x86_64" ;;
+      # macOS x86_64 is NOT built -- see the matrix in .github/workflows/
+      # release.yml. This script used to name the asset anyway, so an Intel
+      # Mac got a 404 and a message asking whether a release had been
+      # published: releases exist, that platform is not in them. An install
+      # script that names an artifact nobody builds is a claim, not a path.
+      # scripts/first_run_check.sh now holds the two files to each other.
+      x86_64) os_unsupported=1 ;;
       *) os_unsupported=1 ;;
     esac
     ;;

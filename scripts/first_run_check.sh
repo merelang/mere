@@ -105,6 +105,31 @@ elif [ "$claimed" != "$actual" ]; then
   fails=$((fails + 1))
 fi
 
+# --- 3. the install path names only artifacts that are actually built ------
+# install.sh used to map Darwin/x86_64 to `mere-macos-x86_64`, which the
+# release matrix does not build. An Intel Mac got a 404 and a message asking
+# whether a release had been published -- releases exist, that platform is not
+# in them. Naming an artifact nobody builds is a claim, not a path.
+# Both directions: an asset built and never offered is a release nobody can
+# install, which is the same defect facing the other way.
+inst_assets="$(sed -n 's/.*asset="\([a-z0-9._-]*\)".*/\1/p' "$ROOT/scripts/install.sh" | sort -u)"
+rel_assets="$(sed -n 's/^[[:space:]]*asset:[[:space:]]*\([a-z0-9._-]*\).*/\1/p' "$ROOT/.github/workflows/release.yml" | sort -u)"
+if [ -z "$inst_assets" ] || [ -z "$rel_assets" ]; then
+  echo "FAIL first_run[assets]: could not read asset names from install.sh or release.yml -- the check lost its subject"
+  fails=$((fails + 1))
+else
+  for a in $inst_assets; do
+    echo "$rel_assets" | grep -qx "$a" || {
+      echo "FAIL first_run[assets]: install.sh offers \`$a\`, which release.yml does not build"
+      fails=$((fails + 1)); }
+  done
+  for a in $rel_assets; do
+    echo "$inst_assets" | grep -qx "$a" || {
+      echo "FAIL first_run[assets]: release.yml builds \`$a\`, which install.sh never offers"
+      fails=$((fails + 1)); }
+  done
+fi
+
 # --- 3. a stranger's first program, outside this directory -----------------
 PROJ="$TMP/hello"
 mkdir -p "$PROJ"
@@ -146,4 +171,4 @@ if [ "$fails" -gt 0 ]; then
   echo "FAIL first_run_check: $fails problem(s)"
   exit 1
 fi
-echo "PASS first_run_check: $cmds README commands, parity count $actual, first program agrees on both backends"
+echo "PASS first_run_check: $cmds README commands, parity count $actual, install/release assets agree, first program agrees on both backends"

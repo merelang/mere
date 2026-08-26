@@ -4,6 +4,54 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.327 — 2026-08-27
+
+_An interpolation error was reported in a file the compiler never read, an
+example nobody could run, and an install script offering an artifact nobody
+builds._
+
+**A `{...}` fragment inside a string is re-tokenised from scratch**, so its
+tokens came back positioned at line 1, column 1 *of the fragment* — and those
+positions went straight into the outer report. `let c = "x:{id=1,name='A'}"` on
+line 3 announced its parse error at **1:3**, which is a position in the file the
+reader is looking at and not the one the compiler read. A string literal cannot
+contain a newline, so the whole fragment sits on one line and the correction is
+a column shift; the inner tokens are retagged onto the enclosing string's
+position.
+
+**`examples/toy_sql.mere` did not lex**, and the README advertised it. `"{"`
+opens interpolation, so `show_row` and ten expectation strings full of
+`rows:[{id=1,name='Alice'}]` were being read as code. It runs now: **59 tests,
+0 failures, and the interpreter, C and LLVM agree byte for byte.** Wasm
+miscompiles it — `__lang_str_concat` is called with `[i64, i32]` where the type
+says `[i64, i64]`, so the module does not validate (**Q-068**, open). The README
+says which backends are claimed.
+
+Finding it was its own lesson: **the diagnostic pointed at line 1 of a comment
+that lexes fine on its own**, so bisecting prefixes rather than reading the
+message is what located line 1053. And the first scan for sibling cases used
+`{[a-z_]*=`, which missed `{users.uid=` — a pattern narrow enough to look
+thorough. Extracting the string literals and asking each one whether it holds an
+unescaped brace found the last case.
+
+**`scripts/install.sh` offered `mere-macos-x86_64`, which the release matrix
+does not build.** An Intel Mac got a 404 and a message asking whether a release
+had been published — releases exist; that platform is not in them. The script
+routes it to build-from-source now, and `first_run_check` holds the two files to
+each other in both directions.
+
+**`release.yml` never looked at what it published.** Three checks now do: the
+tag against `lib/version.ml`, the built binary against the tag, and — the one
+that would have caught `install.sh` serving a binary 260 versions old — the
+**uploaded** binary, fetched back the way a user gets it, asked for its version
+and made to run a one-line program. `gh release create ... || true` also
+swallowed every failure, not just the expected "already exists".
+
+`dune test` 2588/0, parity 133/0, escape_check 16 routes / 0 holes,
+first_run_check 10 README commands.
+
+---
+
 ## v0.1.326 — 2026-08-26
 
 _Q-067: the region can be named in a type's declaration instead of in its

@@ -17,6 +17,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # A tag is a claim about which compiler this is. Nothing checked it, and
+      # scripts/install.sh once served a binary 260 versions old while every
+      # gate in the repo was green -- because no gate looked at the artifact a
+      # user actually downloads. The three checks added here look at it: the
+      # tag against the source, the built binary against the tag, and the
+      # UPLOADED binary against the tag once it has been fetched back.
+      - name: The tag must be the version in the source
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          tag="${tag%%-*}"            # v0.1.0-rc1 -> 0.1.0
+          src="$(sed -n 's/^let v = "\(.*\)"$/\1/p' lib/version.ml)"
+          if [ -z "$src" ]; then
+            echo "release: could not read the version out of lib/version.ml" >&2
+            exit 1
+          fi
+          if [ "$tag" != "$src" ]; then
+            echo "release: tag ${GITHUB_REF_NAME} does not match lib/version.ml ($src)" >&2
+            echo "release: bump the source or retag -- a release that lies about its version is how install.sh went stale" >&2
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches lib/version.ml ($src)"
+
       - name: Create (or reuse) the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -25,10 +47,18 @@ jobs:
           # GitHub pre-release, so they're excluded from /releases/latest.
           PRE=""
           case "${GITHUB_REF_NAME}" in *-*) PRE="--prerelease" ;; esac
-          gh release create "${GITHUB_REF_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes $PRE || true
+          # Idempotent, but only for the one failure that is expected on a
+          # re-run. `|| true` swallowed every other reason this can fail, and
+          # a release that was never created is a release nobody can install.
+          if ! out="$(gh release create "${GITHUB_REF_NAME}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --title "${GITHUB_REF_NAME}" \
+                --generate-notes $PRE 2>&1)"; then
+            case "$out" in
+              *"already exists"*) echo "release ${GITHUB_REF_NAME} already exists, reusing it" ;;
+              *) echo "$out" >&2; exit 1 ;;
+            esac
+          fi
 
   binaries:
     needs: create-release
@@ -64,6 +94,14 @@ jobs:
           cp _build/default/bin/mere.exe "dist/${{ matrix.asset }}"
           chmod +x "dist/${{ matrix.asset }}"
 
+      - name: The binary must report the tag's version
+        run: |
+          want="${GITHUB_REF_NAME#v}"; want="${want%%-*}"
+          got="$(./dist/${{ matrix.asset }} --version | sed -n 's/^mere v//p')"
+          [ "$got" = "$want" ] || {
+            echo "release: built ${{ matrix.asset }} reports v$got, tag says v$want" >&2; exit 1; }
+          echo "${{ matrix.asset }} reports v$got"
+
       - name: Upload to release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -71,3 +109,32 @@ jobs:
           gh release upload "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
             "dist/${{ matrix.asset }}" --clobber
+
+      # The one check that would have caught the 260-version-old install: ask
+      # the release for the asset, the way a user does, and run what comes
+      # back. Verifying what was built says nothing about what was served.
+      - name: The UPLOADED binary must report the tag's version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          want="${GITHUB_REF_NAME#v}"; want="${want%%-*}"
+          mkdir -p roundtrip
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "${{ matrix.asset }}" --dir roundtrip --clobber
+          chmod +x "roundtrip/${{ matrix.asset }}"
+          got="$(./roundtrip/${{ matrix.asset }} --version | sed -n 's/^mere v//p')"
+          [ "$got" = "$want" ] || {
+            echo "release: the asset served for ${{ matrix.asset }} reports v$got, tag says v$want" >&2
+            echo "release: what was built and what is being served are different binaries" >&2
+            exit 1; }
+          echo "served ${{ matrix.asset }} reports v$got"
+
+          # And it must actually run. A binary that reports a version and then
+          # cannot compile anything is still a broken install.
+          printf 'let _ = print "release-ok";\n' > roundtrip/smoke.mere
+          out="$(./roundtrip/${{ matrix.asset }} roundtrip/smoke.mere)"
+          case "$out" in
+            *release-ok*) echo "served ${{ matrix.asset }} runs a program" ;;
+            *) echo "release: the served binary did not run a one-line program" >&2; exit 1 ;;
+          esac

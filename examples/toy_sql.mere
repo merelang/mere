@@ -1050,15 +1050,15 @@ let _ =
   let (nid_c, r_c) = run_stmt cat1 st1 nid_b "INSERT INTO u VALUES (2, 'Bob')" in
   let _ = check "exec-insert-2" r_c "affected:1" in
   let (nid_d, r_d) = run_stmt cat1 st1 nid_c "SELECT * FROM u" in
-  let _ = check "exec-select-all" r_d "rows:[{id=1,name='Alice'};{id=2,name='Bob'}]" in
+  let _ = check "exec-select-all" r_d "rows:[\{id=1,name='Alice'};\{id=2,name='Bob'}]" in
   let (nid_e, r_e) = run_stmt cat1 st1 nid_d "SELECT name FROM u" in
-  let _ = check "exec-select-project" r_e "rows:[{name='Alice'};{name='Bob'}]" in
+  let _ = check "exec-select-project" r_e "rows:[\{name='Alice'};\{name='Bob'}]" in
   let (nid_f, r_f) = run_stmt cat1 st1 nid_e "SELECT * FROM u WHERE id = 1" in
-  let _ = check "exec-select-where-eq" r_f "rows:[{id=1,name='Alice'}]" in
+  let _ = check "exec-select-where-eq" r_f "rows:[\{id=1,name='Alice'}]" in
   let (nid_g, r_g) = run_stmt cat1 st1 nid_f "SELECT name FROM u WHERE id < 2" in
-  let _ = check "exec-select-where-lt" r_g "rows:[{name='Alice'}]" in
+  let _ = check "exec-select-where-lt" r_g "rows:[\{name='Alice'}]" in
   let (nid_h, r_h) = run_stmt cat1 st1 nid_g "SELECT * FROM u WHERE name = 'Bob'" in
-  let _ = check "exec-select-where-str" r_h "rows:[{id=2,name='Bob'}]" in
+  let _ = check "exec-select-where-str" r_h "rows:[\{id=2,name='Bob'}]" in
   let (nid_i, r_i) = run_stmt cat1 st1 nid_h "SELECT * FROM unknown" in
   let _ = check "exec-select-no-table" r_i "error:no such table: unknown" in
   let (nid_j, r_j) = run_stmt cat1 st1 nid_i "INSERT INTO ghost VALUES (1)" in
@@ -1072,11 +1072,11 @@ let _ =
   let (nid_n, r_n) = run_stmt cat1 st1 nid_m "INSERT INTO o VALUES (2, 200)" in
   let _ = check "exec-insert-mix-2" r_n "affected:1" in
   let (nid_o, r_o) = run_stmt cat1 st1 nid_n "SELECT * FROM o" in
-  let _ = check "exec-select-o" r_o "rows:[{uid=1,total=100};{uid=2,total=200}]" in
+  let _ = check "exec-select-o" r_o "rows:[\{uid=1,total=100};\{uid=2,total=200}]" in
   let (nid_p, r_p) = run_stmt cat1 st1 nid_o "SELECT * FROM u" in
-  let _ = check "exec-select-u-after-mix" r_p "rows:[{id=1,name='Alice'};{id=2,name='Bob'}]" in
+  let _ = check "exec-select-u-after-mix" r_p "rows:[\{id=1,name='Alice'};\{id=2,name='Bob'}]" in
   let (nid_q, r_q) = run_stmt cat1 st1 nid_p "SELECT * FROM u WHERE id > 0 AND id < 10" in
-  let _ = check "exec-select-where-and" r_q "rows:[{id=1,name='Alice'};{id=2,name='Bob'}]" in
+  let _ = check "exec-select-where-and" r_q "rows:[\{id=1,name='Alice'};\{id=2,name='Bob'}]" in
   ();
 
 let _ = log.info "=== Phase 29.2 done ===";
@@ -1105,17 +1105,17 @@ let _ =
   let (n9, r9) = run_stmt cat2 st2 n8 "SELECT * FROM users JOIN orders ON users.uid = orders.uid" in
   let _ = check "join-star"
     r9
-    "rows:[{users.uid=1,users.name='Alice',orders.oid=101,orders.uid=1,orders.total=50};{users.uid=1,users.name='Alice',orders.oid=102,orders.uid=1,orders.total=75};{users.uid=2,users.name='Bob',orders.oid=103,orders.uid=2,orders.total=100}]" in
+    "rows:[\{users.uid=1,users.name='Alice',orders.oid=101,orders.uid=1,orders.total=50};\{users.uid=1,users.name='Alice',orders.oid=102,orders.uid=1,orders.total=75};\{users.uid=2,users.name='Bob',orders.oid=103,orders.uid=2,orders.total=100}]" in
   // projection: name + total (qualifier required, output key is stripped)
   let (nA, rA) = run_stmt cat2 st2 n9 "SELECT users.name, orders.total FROM users JOIN orders ON users.uid = orders.uid" in
   let _ = check "join-project"
     rA
-    "rows:[{name='Alice',total=50};{name='Alice',total=75};{name='Bob',total=100}]" in
+    "rows:[\{name='Alice',total=50};\{name='Alice',total=75};\{name='Bob',total=100}]" in
   // JOIN + WHERE (no qualifier in WHERE; resolves via fallback)
   let (nB, rB) = run_stmt cat2 st2 nA "SELECT users.name, orders.total FROM users JOIN orders ON users.uid = orders.uid WHERE orders.total > 60" in
   let _ = check "join-where"
     rB
-    "rows:[{name='Alice',total=75};{name='Bob',total=100}]" in
+    "rows:[\{name='Alice',total=75};\{name='Bob',total=100}]" in
   // empty intersection
   let (nC, _r) = run_stmt cat2 st2 nB "CREATE TABLE empty_t (x int)" in
   let (nD, rD) = run_stmt cat2 st2 nC "SELECT * FROM users JOIN empty_t ON users.uid = empty_t.x" in
