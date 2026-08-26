@@ -1,0 +1,4 @@
+// The region reaches the outer binding through a TUPLE rather than directly.
+let o = vec_new ();
+let _ = region R { let v = vec_new () in let _ = vec_push v 7 in vec_push o (1, v) };
+print "ok"

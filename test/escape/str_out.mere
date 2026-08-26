@@ -1,0 +1,5 @@
+// SAFE, and the reason is deep copy rather than the check. A `str` crossing
+// the boundary is copied by the copiers, so the outer Map holds its own bytes.
+let m = map_new ();
+let _ = region R { map_set m "k" (str_repeat "q" 4) };
+print (map_get m "k")

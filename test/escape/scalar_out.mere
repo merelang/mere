@@ -1,0 +1,5 @@
+// SAFE. The block allocates and returns a number computed from it. Nothing
+// region-bound crosses the boundary, which is the shape `region R { }` exists
+// to make cheap.
+let n = region R { let v = vec_new () in let _ = vec_push v 7 in vec_len v };
+print (str_of_int n)

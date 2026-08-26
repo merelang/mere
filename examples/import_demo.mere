@@ -2,11 +2,11 @@
 // is referenced (directly or indirectly) more than once, the cycle guard
 // ensures it is imported exactly once.
 //
-// To reference lib_list_ops.mere from this file, run with:
+// Paths resolve relative to THIS FILE's directory, so the same import works
+// from any working directory:
 // dune exec bin/mere.exe -- examples/import_demo.mere
-// (paths resolve relative to cwd).
 
-import "examples/lib_list_ops.mere";
+import "lib_list_ops.mere";
 
 let xs = [1, 2, 3, 4, 5] in
 {

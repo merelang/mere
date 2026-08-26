@@ -1,0 +1,5 @@
+// A container returned as the block's RESULT. The oldest of these routes and
+// the only one the pre-v0.1.323 check could see, because it reads the result
+// type and this is the one program that has one.
+let r = region R { let v = vec_new () in let _ = vec_push v 7 in v };
+print (str_of_int (vec_len r))

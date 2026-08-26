@@ -1,0 +1,5 @@
+// Q-053. A Vec STORED into a Map that outlives the block. The program returns
+// nothing, so a check that reads the result type says nothing about it.
+let m = map_new ();
+let _ = region R { let v = vec_new () in let _ = vec_push v 7 in map_set m "k" v };
+print (str_of_int (vec_len (map_get m "k")))

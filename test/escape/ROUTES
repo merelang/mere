@@ -1,0 +1,48 @@
+# test/escape/ROUTES -- every way a region-bound value can reach something that
+# outlives its block, enumerated, with what each entry point actually answers.
+#
+# WHAT THIS IS. The claim this language makes is "no GC, and the compiler will
+# not let a value outlive the arena it was allocated in". That claim is only
+# worth what its enumeration is worth. Q-053 was found by writing one program;
+# two more holes were found by writing this table, because a table has to have
+# every row filled in and a bug report does not.
+#
+# WHY IT HAS TWO AXES. The routes are the obvious axis. The second one is the
+# ENTRY POINT, and it is where Q-053's fix turned out to be partial: the check
+# fires on the compiling path and not under the interpreter or `mere -t`. That
+# is defensible -- the interpreter has no arenas, so nothing dangles there --
+# but it means one program gets two answers from one toolchain, so it is
+# recorded as a divergence rather than left to be discovered again.
+#
+# HOW TO READ A ROW.
+#   kind       GATED  the check rejects it, and it must keep rejecting it
+#              HOLE   accepted today and it DANGLES -- see `q`
+#              SAFE   accepted, and safe for a reason stated in the program
+#   compiled   what -c / -ll / -w / -rv answer (they must agree; the gate
+#              checks that they do, because two backends disagreeing with
+#              nothing watching is the failure mode that produced Q-053)
+#   interp     what `mere <file>` and `mere -t <file>` answer
+#   unreadable backends that refuse this program for a reason that is NOT
+#              about escape (a documented codegen subset limit). Their answer
+#              is not a verdict and the gate does not read it as one.
+#
+# A HOLE ROW IS A QUESTION THAT KEEPS BEING ASKED. If one starts being
+# rejected, this gate FAILS rather than passing quietly -- a fixed hole has to
+# be moved to GATED by hand, because a table that silently agrees with whatever
+# the compiler currently does is not checking anything.
+#
+# route              kind   compiled  interp      unreadable  q
+result_container     GATED  REJECT    REJECT      -           -
+vec_into_map         GATED  REJECT    ACCEPT      -           Q-053
+vec_into_vec         GATED  REJECT    ACCEPT      -           Q-053
+map_into_map         GATED  REJECT    ACCEPT      -           Q-053
+strbuf_into_vec      GATED  REJECT    ACCEPT      -           Q-053
+tuple_into_vec       GATED  REJECT    ACCEPT      -           Q-053
+via_fn_arg           GATED  REJECT    REJECT      -           Q-053
+loop_store_outer     GATED  REJECT    ACCEPT      -           Q-053
+record_field         HOLE   ACCEPT    UNREADABLE  w           Q-067
+variant_payload      HOLE   ACCEPT    ACCEPT      w           Q-067
+str_out              SAFE   ACCEPT    ACCEPT      w           -
+closure_out          SAFE   ACCEPT    ACCEPT      w,rv        -
+scalar_out           SAFE   ACCEPT    ACCEPT      -           -
+fn_over_carry        SAFE   ACCEPT    ACCEPT      ll,w,rv     -

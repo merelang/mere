@@ -1,0 +1,8 @@
+// The region LOOP's half of Q-053: the arena is burned at the end of every
+// ITERATION, so this dangles one iteration sooner than the block form.
+let o = vec_new ();
+let _ = region R loop x { match x with
+  | None -> Continue 0
+  | Some n -> if n >= 2 then Done n else
+      let v = vec_new () in let _ = vec_push v n in let _ = vec_push o v in Continue (n + 1) };
+print (str_of_int (vec_len o))
