@@ -4,6 +4,52 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.326 — 2026-08-26
+
+_Q-067: the region can be named in a type's declaration instead of in its
+application — and the table that found it._
+
+`mentions_region_in_value` walked a `TyCon`'s type **arguments**. `type Box = {
+items: Vec[R, int] }` and `type hold = HVec of Vec[R, int]` are **nullary** type
+constructors, so there were no arguments to walk: the region is named in the
+declaration, which lives in the record and constructor registries. An outer
+binding therefore read `Vec[__heap, Box]` with `R` nowhere in it and the store
+escaped.
+
+Both dangled. Burning the arena with 4,000 strings and reading the container
+back gave **2,054,847,098 on the C backend against 3 under the interpreter** —
+the same garbage value and the same two-backends-disagreeing shape as Q-053.
+
+The check now consults both registries when it meets a nominal type. `seen` is
+not an optimisation: `type t = T of t` names itself in its own declaration, and
+without it the walk does not answer wrongly, it does not answer.
+
+**v0.1.323 recorded that recursive variants were already safe. That was true,
+and it was about a variant of `str`**, which is deep-copied on the way out. A
+variant of a *container* is a different claim. `test/escape/variant_of_str.mere`
+and `test/escape/variant_payload.mere` are the two programs that separate them,
+and the first is in the suite so that fixing the second cannot swallow it.
+
+### How it was found, which is the part worth keeping
+
+Not by hitting it. `test/escape/ROUTES` enumerates every way a region-bound
+value can reach something that outlives its block, and `scripts/escape_check.sh`
+runs it. **A table has to have every row filled in; a bug report is complete at
+one.** Filling it in produced these two holes and one entry-point asymmetry (the
+store check does not fire under the interpreter or `mere -t`, because those
+paths generalise each declaration while the compiling path desugars top-level
+lets into nested `Let`s — pinned in the table's `interp` column rather than left
+to be found again).
+
+The gate is also what said the holes had closed: `HOLE` rows fail on being
+rejected, so the table cannot silently agree with whatever the compiler
+currently does.
+
+16 routes, 0 open holes. Over-plug guards ran green throughout: `dune test`
+2587/0, parity 133/0, selfhost all passed.
+
+---
+
 ## v0.1.325 — 2026-08-25
 
 _Q-066: the call site looked the callee up under a name it is never emitted as._

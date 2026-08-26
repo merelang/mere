@@ -4,8 +4,8 @@
 # WHAT THIS IS. The claim this language makes is "no GC, and the compiler will
 # not let a value outlive the arena it was allocated in". That claim is only
 # worth what its enumeration is worth. Q-053 was found by writing one program;
-# two more holes were found by writing this table, because a table has to have
-# every row filled in and a bug report does not.
+# two more holes (Q-067) were found by writing this table, because a table has
+# to have every row filled in and a bug report is complete at one.
 #
 # WHY IT HAS TWO AXES. The routes are the obvious axis. The second one is the
 # ENTRY POINT, and it is where Q-053's fix turned out to be partial: the check
@@ -26,10 +26,19 @@
 #              about escape (a documented codegen subset limit). Their answer
 #              is not a verdict and the gate does not read it as one.
 #
-# A HOLE ROW IS A QUESTION THAT KEEPS BEING ASKED. If one starts being
-# rejected, this gate FAILS rather than passing quietly -- a fixed hole has to
-# be moved to GATED by hand, because a table that silently agrees with whatever
-# the compiler currently does is not checking anything.
+# THERE ARE NO OPEN HOLES TODAY, and the HOLE machinery stays anyway. It is how
+# the next one gets recorded instead of argued about: a route that dangles is a
+# row with a Q number, not an absence from the file. If a HOLE row starts being
+# rejected, this gate FAILS until someone promotes it by hand -- a table that
+# silently agrees with whatever the compiler currently does is not checking
+# anything, and that is exactly how it caught Q-067 being closed.
+#
+# THREE OF THE SAFE ROWS ARE THERE TO STOP AN OVER-PLUG. `variant_of_str` is
+# the claim v0.1.323 correctly made, which the Q-067 fix must not swallow;
+# `fn_over_carry` is the shape the first version of the Q-053 check rejected;
+# `recursive_type` does not test a verdict at all -- it tests that the walk
+# TERMINATES, since `type t = T of t` names itself in its own declaration and
+# the fix follows declarations now.
 #
 # route              kind   compiled  interp      unreadable  q
 result_container     GATED  REJECT    REJECT      -           -
@@ -40,9 +49,11 @@ strbuf_into_vec      GATED  REJECT    ACCEPT      -           Q-053
 tuple_into_vec       GATED  REJECT    ACCEPT      -           Q-053
 via_fn_arg           GATED  REJECT    REJECT      -           Q-053
 loop_store_outer     GATED  REJECT    ACCEPT      -           Q-053
-record_field         HOLE   ACCEPT    UNREADABLE  w           Q-067
-variant_payload      HOLE   ACCEPT    ACCEPT      w           Q-067
+record_field         GATED  REJECT    UNREADABLE  -           Q-067
+variant_payload      GATED  REJECT    ACCEPT      -           Q-067
 str_out              SAFE   ACCEPT    ACCEPT      w           -
+variant_of_str       SAFE   ACCEPT    ACCEPT      w           -
 closure_out          SAFE   ACCEPT    ACCEPT      w,rv        -
 scalar_out           SAFE   ACCEPT    ACCEPT      -           -
+recursive_type       SAFE   ACCEPT    ACCEPT      -           -
 fn_over_carry        SAFE   ACCEPT    ACCEPT      ll,w,rv     -

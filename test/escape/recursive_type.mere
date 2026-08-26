@@ -1,0 +1,10 @@
+// MUST NOT HANG, which is a different requirement from must not be rejected.
+// Q-067's fix walks a nominal type's DECLARATION, and `type t = T of t` names
+// itself there. Without the `seen` set the walk follows it forever and the
+// compiler stops responding rather than answering wrongly -- the one failure
+// mode a verdict-shaped gate cannot see, which is why every run here is
+// bounded.
+type t = TNil | TCons of t;
+let rec depth = fn (x: t) -> match x with | TNil -> 0 | TCons y -> 1 + depth y;
+let _ = region R { print (str_of_int (depth (TCons TNil))) };
+print "ok"

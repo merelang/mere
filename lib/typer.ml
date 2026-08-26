@@ -629,25 +629,6 @@ let rec mentions_region (name : string) (t : Ast.ty) : bool =
    already safe when this was measured. A binding holds a region's memory when
    the region name reaches it through a container, a tuple or a variant -- all
    of which this still walks. *)
-let rec mentions_region_in_value (name : string) (t : Ast.ty) : bool =
-  match Ast.walk t with
-  | Ast.TyArrow _ -> false
-  | Ast.TyRef (_, r, inner) -> r = name || mentions_region_in_value name inner
-  | Ast.TyTuple ts -> List.exists (mentions_region_in_value name) ts
-  | Ast.TyCon (_, args) -> List.exists (mentions_region_in_value name) args
-  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit
-  | Ast.TyParam _ | Ast.TyVar _ -> false
-
-let region_leaked_into_env (name : string) (env_before : (string * scheme) list)
-  : string option =
-  let rec find = function
-    | [] -> None
-    | (bind, sch) :: rest ->
-      if mentions_region_in_value name (Ast.walk sch.body) then Some bind
-      else find rest
-  in
-  find env_before
-
 (* Replace TyParam by fresh TyVars, sharing per param name within one call.
    Used to instantiate polymorphic constructors and user-supplied annotations. *)
 let freshen_params t =
@@ -689,6 +670,57 @@ type record_info = {
   r_fields : (string * Ast.ty) list;
 }
 let records : (string, record_info) Hashtbl.t = Hashtbl.create 16
+
+(* Q-067: the region can also be named in a type's DECLARATION rather than in
+   its application. `type Box = { items: Vec[R, int] }` and
+   `type hold = HVec of Vec[R, int]` are nullary type constructors, so walking
+   TyCon's ARGUMENTS finds nothing and the outer binding reads `Vec[__heap,
+   Box]` with R nowhere in it. Both dangled: the C backend read a length of
+   2,054,847,098 out of the burned arena while the interpreter answered 3.
+   v0.1.323 recorded that recursive variants were already safe. That was true
+   and it was about a variant of `str`, which is deep-copied on the way out; a
+   variant of a CONTAINER is a different claim, and this is where the two part.
+   `seen` is not an optimisation. `type t = T of t` walks into itself forever
+   without it. *)
+let rec mentions_region_in_value ?(seen : string list = []) (name : string)
+  (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyArrow _ -> false
+  | Ast.TyRef (_, r, inner) -> r = name || mentions_region_in_value ~seen name inner
+  | Ast.TyTuple ts -> List.exists (mentions_region_in_value ~seen name) ts
+  | Ast.TyCon (n, args) ->
+    List.exists (mentions_region_in_value ~seen name) args
+    || (not (List.mem n seen) && declared_mentions_region ~seen:(n :: seen) name n)
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit
+  | Ast.TyParam _ | Ast.TyVar _ -> false
+
+(* The field types of a record and the payload types of a variant's
+   constructors -- the two places a nominal type can name a region without
+   taking it as an argument. Builtin containers are in neither registry, so
+   `Map[R, K, V]` is still answered by the argument walk above. *)
+and declared_mentions_region ~(seen : string list) (name : string)
+  (tyname : string) : bool =
+  (match Hashtbl.find_opt records tyname with
+   | Some ri ->
+     List.exists (fun (_, ft) -> mentions_region_in_value ~seen name ft) ri.r_fields
+   | None -> false)
+  || Hashtbl.fold (fun _ ci acc ->
+       acc
+       || (ci.type_name = tyname
+           && (match ci.arg with
+               | Some at -> mentions_region_in_value ~seen name at
+               | None -> false)))
+       constructors false
+
+let region_leaked_into_env (name : string) (env_before : (string * scheme) list)
+  : string option =
+  let rec find = function
+    | [] -> None
+    | (bind, sch) :: rest ->
+      if mentions_region_in_value name (Ast.walk sch.body) then Some bind
+      else find rest
+  in
+  find env_before
 
 (* View registry: name -> (region_param, ordered field list).
    View construction is enforced to happen inside an active region block;
