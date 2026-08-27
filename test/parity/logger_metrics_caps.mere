@@ -1,0 +1,23 @@
+// Q-068: the Logger and Metrics runtime sections were hand-written WAT from
+// the era when a Mere value was an i32. Their signatures said i64 and their
+// bodies said i32, so the module did not validate -- and once it did, the
+// Logger record still used 4-byte fields while a record FIELD is read with
+// `i64.load offset=(8 * idx)`, so `warn` returned the `error` closure and
+// `error` read past the end.
+//
+// Nothing caught it because no Wasm-compiled program in the corpus used a
+// capability. examples/toy_sql.mere does, and it had not lexed since the
+// interpolation rule changed -- a program that does not lex is examined by no
+// backend at all.
+//
+// Both widths are exercised on purpose: the record's 8-byte fields, and the
+// closure's two i32 slots (env, fn_idx) that each field points at.
+let logger = mk_logger "app";
+let metrics = mk_metrics ();
+{
+  logger.info "hello";
+  logger.warn "careful";
+  logger.error "bad";
+  metrics.inc "hits";
+  metrics.record "latency" 42
+}

@@ -9232,8 +9232,13 @@ let metrics_runtime =
       "  printf(\"[METRIC] inc %s\\n\", name);";
       "  return 0;";
       "}";
-      "static int __mere_metrics_record_inner_fn(void* env, int n) {";
-      "  printf(\"[METRIC] %s=%d\\n\", ((__lang_shim_env*)env)->s, n);";
+      (* Q-068: `int n` here was written before v0.1.41 made Mere's int 64-bit
+         on this backend, and the closure type it is assigned to says
+         `long long`. Nothing caught it because no corpus program compiled
+         `metrics.record` -- the capability sections are reachable only from
+         programs that use a capability. *)
+      "static int __mere_metrics_record_inner_fn(void* env, long long n) {";
+      "  printf(\"[METRIC] %s=%lld\\n\", ((__lang_shim_env*)env)->s, n);";
       "  return 0;";
       "}";
       "static closure_int_unit __mere_metrics_record_outer_fn(void* env, const char* name) {";

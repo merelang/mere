@@ -95,7 +95,7 @@ The interpreter has every one of these, and is not a column.
 | `max` | yes | yes | yes |
 | `min` | yes | yes | yes |
 | `mk_logger` | yes | yes | yes |
-| `mk_metrics` | nocompile | yes | yes |
+| `mk_metrics` | yes | yes | yes |
 | `mkdir_p` | yes | refused | refused |
 | `not` | yes | yes | yes |
 | `odd` | yes | yes | yes |

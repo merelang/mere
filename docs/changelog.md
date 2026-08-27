@@ -4,6 +4,54 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.328 — 2026-08-27
+
+_Q-068: the capability runtime sections were hand-written for a compiler two
+width changes ago, and no program in the corpus reached them._
+
+`mk_logger` / `mk_metrics` and the closures they hand out are emitted as
+literal WAT and C text rather than compiled from Mere. That text was written
+when a Mere value was an `i32` on the Wasm backend and an `int` on the C one.
+Both have since changed, and the text did not.
+
+**Three defects, in increasing order of how well they hid.**
+
+1. **Wasm did not validate.** `(local $tmp i32)`, `(i32.const %d)` for a string
+   offset and `(i32.const 0)` as an `i64` result, against
+   `__lang_str_concat : (i64, i64) -> i64`. A module that does not validate
+   cannot run, so this one announced itself.
+2. **Then it validated and printed the wrong thing.** The Logger record still
+   used 4-byte fields, and a record *field* is read with
+   `i64.load offset=(8 * idx)`. So `logger.warn` returned the `error` closure
+   and `logger.error` read past the end. The closure a field points at *is*
+   two `i32` slots (env, fn_idx) — two widths in one structure, and only one of
+   them had moved.
+3. **C compiled a function pointer of the wrong type.**
+   `__mere_metrics_record_inner_fn(void* env, int n)` against a closure typed
+   `int (*)(void*, long long)` — `int` here predates v0.1.41, which made Mere's
+   int 64-bit on that backend.
+
+**Why it survived: the capability sections are reachable only from a program
+that uses a capability, and no Wasm-compiled program in the corpus did.**
+`examples/toy_sql.mere` does — and it had not lexed since the interpolation
+rule changed, so it was examined by no backend at all. Fixing the lexer
+(v0.1.327) is what exposed this.
+
+`test/parity/logger_metrics_caps.mere` is nine lines and touches the whole
+surface: all three logger levels, both metrics entry points, and therefore both
+widths. It is what found the C defect after the two Wasm ones were fixed.
+Poisoned by moving the `warn` field back to offset 4 — the module still
+validates and the output is wrong, which is the half that needed a runtime
+comparison rather than a type check.
+
+`examples/toy_sql.mere` now agrees byte for byte on all four backends, which is
+what the README had been claiming since before it stopped lexing.
+
+parity 134/0, `dune test` 2588/0, escape_check 16 routes / 0 holes,
+first_run_check 10 README commands.
+
+---
+
 ## v0.1.327 — 2026-08-27
 
 _An interpolation error was reported in a file the compiler never read, an
