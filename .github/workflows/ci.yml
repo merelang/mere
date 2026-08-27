@@ -511,11 +511,27 @@ jobs:
           cd "$RUNNER_TEMP/downstream"
           for r in $(awk '$1 !~ /^#/ && NF && $3 == "compile" {print $1}' \
                        "$GITHUB_WORKSPACE/test/downstream/REPOS"); do
-            git clone --depth 1 -q "https://github.com/284km/$r.git" "$r" \
-              || echo "clone failed: $r (the gate will report it absent)"
+            # --recurse-submodules because mere-ruby carries contrib/mgz as a
+            # submodule; a plain --depth 1 clone leaves .mere_modules/mgz an
+            # empty directory and the gate blames the compiler for it.
+            git clone --depth 1 --recurse-submodules --shallow-submodules -q \
+              "https://github.com/284km/$r.git" "$r" \
+              || { echo "clone failed: $r (the gate will report it absent)"; continue; }
+            # RESOLVE THEIR DEPENDENCIES, because a fresh clone has none.
+            # Four of these repos import packages through mere.toml, and this
+            # step used to stop at the clone -- so the gate reported "no longer
+            # compiles" for a missing .mere_modules rather than for anything
+            # this compiler did. It passed locally because the development
+            # checkouts already had one. Reproduced by cloning mq into an empty
+            # directory: fails without this, compiles with it.
+            if [ -f "$r/mere.toml" ]; then
+              ( cd "$r" && "$GITHUB_WORKSPACE/_build/default/bin/mere.exe" install ) \
+                || echo "mere install failed: $r (the gate will report it)"
+            fi
           done
 
       - name: downstream_check (their code is still a program)
+        if: ${{ !cancelled() }}
         run: MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" sh scripts/downstream_check.sh
 
       # memu is already among the dogfood clones above, so the RISC-V
@@ -524,4 +540,5 @@ jobs:
       # the same pass line either way, which is how a gate stops meaning what
       # it says. It names which halves ran now.
       - name: qemu_virt (vs an emulator nobody here wrote, and one we did)
+        if: ${{ !cancelled() }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/qemu_virt.sh

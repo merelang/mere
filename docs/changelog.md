@@ -29,6 +29,22 @@ Two fixes, because the second is the general one:
 This is the same shape as v0.1.271's `_GNU_SOURCE`: a difference between the
 development machine and the CI machine, verified on one platform, believed on both.
 
+**And running them showed `downstream_check` had been wrong about four repos.** With the
+rest of the workflow finally executing, it reported that mpng, mq, mere-blog and
+mere-ruby "no longer compile against this compiler". They compile fine — the CI step
+cloned each repo and never resolved its dependencies, so it was reporting a missing
+`.mere_modules` as a language regression. It passed locally because the development
+checkouts already have one. Fixed by running `mere install` after each clone, and by
+cloning with `--recurse-submodules` (mere-ruby carries `contrib/mgz` as a submodule, and
+a `--depth 1` clone leaves the directory empty). Verified by cloning all four into an
+empty directory: three fail without `mere install` and pass with it, the fourth needs
+the submodule.
+
+The `if:` sweep needed a second pass for the same reason a fix usually does: the first
+one matched `run: sh scripts/` and missed the two steps that set an environment
+variable first — `downstream_check` and `qemu_virt`, one of which was the failure and
+the other the step it was hiding. 44 of 44 now.
+
 
 _A Mere program can **answer** a TLS connection._ `tls_server_init` (load a
 certificate chain and key, once per process) and `tcp_accept_tls` (handshake on an
