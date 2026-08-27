@@ -51,7 +51,7 @@ machine rather than a host.
 | `detach` | yes | refused | refused | refused |
 | `divmod` | yes | yes | yes | yes |
 | `e` | yes | yes | yes | refused |
-| `env_var` | nocompile | refused | yes | refused |
+| `env_var` | refused | refused | yes | refused |
 | `even` | yes | yes | yes | refused |
 | `exit` | yes | refused | yes | refused |
 | `exp` | yes | yes | yes | refused |
@@ -88,8 +88,8 @@ machine rather than a host.
 | `floor` | yes | yes | refused | refused |
 | `gcd` | yes | yes | yes | refused |
 | `incr` | yes | yes | yes | yes |
-| `int_max` | nocompile | refused | refused | refused |
-| `int_min` | nocompile | refused | refused | refused |
+| `int_max` | refused | refused | refused | refused |
+| `int_min` | refused | refused | refused | refused |
 | `int_of_float` | yes | yes | yes | refused |
 | `int_of_str` | yes | yes | yes | yes |
 | `is_alpha` | yes | yes | yes | yes |
@@ -107,8 +107,8 @@ machine rather than a host.
 | `mkdir_p` | yes | refused | refused | refused |
 | `not` | yes | yes | yes | yes |
 | `odd` | yes | yes | yes | refused |
-| `of_json` | nocompile | refused | refused | refused |
-| `of_json_opt` | nocompile | refused | refused | refused |
+| `of_json` | refused | refused | refused | refused |
+| `of_json_opt` | refused | refused | refused | refused |
 | `ord` | yes | yes | yes | yes |
 | `owned_vec_new` | yes | yes | yes | refused |
 | `pi` | yes | yes | yes | refused |
@@ -119,7 +119,7 @@ machine rather than a host.
 | `print_err` | yes | yes | yes | refused |
 | `print_int` | yes | yes | yes | yes |
 | `print_no_nl` | yes | yes | yes | yes |
-| `random_float` | nocompile | refused | refused | refused |
+| `random_float` | refused | refused | refused | refused |
 | `random_int` | yes | refused | yes | refused |
 | `read_bytes` | yes | refused | refused | refused |
 | `read_file` | yes | yes | yes | refused |
