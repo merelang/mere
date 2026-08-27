@@ -424,5 +424,18 @@ jobs:
       - name: debug_info (lldb agrees where each line is)
         run: sh scripts/debug_info.sh
 
-      - name: qemu_virt (vs an emulator nobody here wrote)
-        run: sh scripts/qemu_virt.sh
+      # The RISC-V arc's headline claim is that the same bytes behave
+      # identically on QEMU and on a CPU written in Mere. That emulator lives
+      # in another repository, so without this checkout qemu_virt ran the QEMU
+      # half only -- and reported the same pass line either way, which is how a
+      # gate stops meaning what it says. It says which half it ran now, and
+      # this makes the answer "both".
+      - name: Check out memu (the RISC-V emulator written in Mere)
+        uses: actions/checkout@v5
+        continue-on-error: true
+        with:
+          repository: 284km/memu
+          path: memu
+
+      - name: qemu_virt (vs an emulator nobody here wrote, and one we did)
+        run: MEMU="$GITHUB_WORKSPACE/memu" sh scripts/qemu_virt.sh

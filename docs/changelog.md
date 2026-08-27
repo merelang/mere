@@ -4,6 +4,47 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.334 — 2026-08-27
+
+_The differential that gives the RISC-V arc its claim was never running in CI,
+and the gate reported the same line either way._
+
+Three candidates were checked for being ungated. **Two were already handled
+correctly**, which is worth saying because the reflex after a run of findings is
+to expect more:
+
+* `bench_check` gates the deterministic half only — no wall clock, no peak RSS —
+  and that is a stated decision with a reason (both measure the runner; RSS is
+  quantized and stops reproducing above a few GB). **All seven benchmarks carry
+  an allocation band**, so nothing deterministic is ungated.
+* `test/escape/ROUTES` has **four** rows (not six) where a backend cannot read
+  the program — all `SAFE` rows, all refused for documented codegen-subset
+  reasons unrelated to escape, all recorded per backend and checked in both
+  directions.
+
+**The third was real.** `scripts/qemu_virt.sh` can diff each RISC-V image
+against the emulator written in Mere, and **CI never set `MEMU`** — so the
+headline claim of the whole arc, that the same bytes behave identically on QEMU
+and on a CPU we wrote, was true (it passes) and gated nowhere.
+
+Worse than not running: it **reported the same `3 passed, 0 failed` either
+way**. A gate that checks half of what it can check, and says the same thing
+about both, reads as having checked all of it.
+
+Now: the missing half is named on its own line, the summary says which halves
+ran, and CI checks out `284km/memu` and points `MEMU` at it. If that checkout
+fails the run continues on the QEMU half and says so, the same way
+`component_parity` and `socket_parity` skip loudly rather than silently.
+
+The summary's parenthetical is a claim, so it is only made when true — the first
+version of it said "agreed on every image" next to a nonzero failure count.
+Poisoned both ways: a wrong expected output fails as `(qemu)`, and an emulator
+that disagrees fails as `(memu disagrees with qemu)` on all three images.
+
+`dune test` 2594/0, parity 136/0, qemu_virt 3/3 on both emulators.
+
+---
+
 ## v0.1.333 — 2026-08-27
 
 _Q-071: the six `nocompile` rows were two mechanisms, and both were the failure

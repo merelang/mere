@@ -66,6 +66,14 @@ if [ -n "$MEMU" ] && [ -f "$MEMU/riscv-runc/rv32i_run.mere" ]; then
     echo "qemu_virt: could not build the Mere emulator from \$MEMU — QEMU only" >&2
   fi
 fi
+if [ -z "$RVRUN" ]; then
+  # A gate that checks half of what it can check, and reports the same line
+  # either way, reads as having checked all of it. The claim this half carries
+  # is the whole point of the RISC-V arc -- that the same bytes behave
+  # identically on QEMU and on a CPU written in Mere -- so its absence is said
+  # out loud, next to the pass count and not only here.
+  echo "qemu_virt: the Mere emulator half is NOT running (set MEMU=<memu checkout>)"
+fi
 
 # Run one image and diff its output. QEMU stops on its own: each program writes
 # 0x5555 to virt's test finisher at 0x00100000 to power the machine off. The
@@ -129,5 +137,15 @@ check examples/riscv_virt_sched.mere 'scheduling two tasks:
 ABABABA
 switched enough, stopping'
 
-echo "qemu_virt: $pass passed, $fail failed"
+# The parenthetical is a CLAIM, so it only gets made when it is true. Saying
+# "agreed on every image" next to a nonzero failure count was the first version
+# of this line, and a summary that contradicts the rows above it is worse than
+# no summary.
+if [ -z "$RVRUN" ]; then
+  echo "qemu_virt: $pass passed, $fail failed (QEMU only — the differential against our own CPU did not run)"
+elif [ "$fail" -eq 0 ]; then
+  echo "qemu_virt: $pass passed, $fail failed (QEMU and the Mere emulator agreed on every image)"
+else
+  echo "qemu_virt: $pass passed, $fail failed (both emulators ran; see the failures above)"
+fi
 [ "$fail" -eq 0 ]
