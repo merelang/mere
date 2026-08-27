@@ -102,9 +102,16 @@ function makeHttpGlue() {
   let arenaMark = null;
 
   const glue = {
-    http_serve: (port, closurePtr) => {
-      const http = require("http");
-      const server = http.createServer((req, res) => {
+    // The request handler, and the two things that can carry it: a plain
+    // http.Server and an https.Server. Factored out in v0.1.338 so the two
+    // hosts agree -- the C backend gained http_serve_tls, and a program that
+    // runs on one host and not the other is not the same program.
+    //
+    // Nothing below the handshake differs: Node terminates TLS before the
+    // request event, exactly as the C runtime does before its first read.
+    __requestHandler: null,
+    __makeRequestHandler: (closurePtr) => {
+      return (req, res) => {
         // /sse/<channel> — SSE upgrade path. Intercept before the
         // normal request/response Mere-callout path.
         if (req.method === "GET" && req.url && req.url.startsWith("/sse/")) {
@@ -165,7 +172,9 @@ function makeHttpGlue() {
           activeRes = null;
           streamStarted = false;
         });
-      });
+      };
+    },
+    __bindServer: (server, port, scheme) => {
       server.on("upgrade", (req, socket, head) => {
         if (ws.tryUpgrade(req, socket, head)) return;
         // Any other Upgrade request (e.g. HTTP/2 h2c) is not
@@ -181,8 +190,33 @@ function makeHttpGlue() {
         console.error("contrib/http: server error:", e.message);
       });
       server.listen(port, () => {
-        console.log(`contrib/http: listening on :${port}`);
+        console.log(`contrib/http: listening on :${port} (${scheme})`);
       });
+    },
+    http_serve: (port, closurePtr) => {
+      const server = require("http").createServer(
+        glue.__makeRequestHandler(closurePtr));
+      glue.__bindServer(server, port, "http");
+    },
+    // v0.1.338: the same server, terminating TLS itself. The certificate and
+    // key are PEM paths, read once before listening -- an unreadable one is a
+    // startup error rather than a surprise on the first connection, which is
+    // the same contract the C runtime's tls_server_init has.
+    http_serve_tls: (port, certPtr, keyPtr, closurePtr) => {
+      const fs = require("fs");
+      const certPath = readCStr(certPtr);
+      const keyPath = readCStr(keyPtr);
+      let opts;
+      try {
+        opts = { cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath) };
+      } catch (e) {
+        console.error("contrib/http: certificate/key unusable:", e.message);
+        process.exitCode = 1;
+        return;
+      }
+      const server = require("https").createServer(
+        opts, glue.__makeRequestHandler(closurePtr));
+      glue.__bindServer(server, port, "https");
     },
     // Push a `data: <payload>\n\n` line to every client currently
     // subscribed to `channel`. Payload with embedded newlines is split

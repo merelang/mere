@@ -7,29 +7,7 @@
 const fs = require('fs');
 const { checkAbi, makeMarshal } = require("./mere_host.js");
 
-function mereParseFloat(raw) {
-  const s = raw.trim().split("_").join("");
-  if (s === "") return { ok: false, value: 0 };
-  const m = /^([+-]?)(inf(inity)?|nan)$/i.exec(s);
-  if (m) {
-    if (/^nan$/i.test(m[2])) return { ok: true, value: NaN };
-    return { ok: true, value: m[1] === "-" ? -Infinity : Infinity };
-  }
-  // hex floats: 0x1p3 is 8, and JS has no literal for them
-  const h = /^([+-]?)0[xX]([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?(?:[pP]([+-]?\d+))?$/.exec(s);
-  if (h) {
-    if (!h[2] && !h[3]) return { ok: false, value: 0 };
-    let v = 0;
-    for (const c of h[2] || "") v = v * 16 + parseInt(c, 16);
-    let scale = 1 / 16;
-    for (const c of h[3] || "") { v += parseInt(c, 16) * scale; scale /= 16; }
-    if (h[4] !== undefined) v *= Math.pow(2, parseInt(h[4], 10));
-    return { ok: true, value: h[1] === "-" ? -v : v };
-  }
-  if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(s)) return { ok: false, value: 0 };
-  const v = Number(s);
-  return Number.isNaN(v) ? { ok: false, value: 0 } : { ok: true, value: v };
-}
+const { mereParseFloat } = require("./mere_parse_float.js");
 
 const { Worker } = require('worker_threads');
 const { makePgEnv } = require('./pg_env.js');

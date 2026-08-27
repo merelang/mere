@@ -11,6 +11,7 @@ const fs = require("fs");
 const { checkAbi, makeMarshal } = require("./mere_host.js");
 const path = require("path");
 const { makeHttpGlue } = require("../contrib/http/http.glue.js");
+const { mereParseFloat } = require("./mere_parse_float.js");
 const { makePgEnv } = require("./pg_env.js");
 const { makeHttpFetchEnv } = require("./http_fetch_env.js");
 const { makeSseRedisBridge } = require("./sse_redis_bridge.js");
@@ -116,7 +117,10 @@ const wasmPath = process.argv[2];
       }
       return writeStr(s);
     },
-    __lang_float_of_str: (ptr) => parseFloat(readCStr(ptr)),
+    // Shared with run_wasm.js rather than paraphrased -- see
+    // scripts/mere_parse_float.js for what the paraphrase cost.
+    __lang_float_of_str: (ptr) => mereParseFloat(readCStr(ptr)).value,
+    __lang_float_of_str_ok: (ptr) => (mereParseFloat(readCStr(ptr)).ok ? 1 : 0),
     __lang_sin: Math.sin,
     __lang_cos: Math.cos,
     __lang_tan: Math.tan, __lang_exp: Math.exp, __lang_log: Math.log,
