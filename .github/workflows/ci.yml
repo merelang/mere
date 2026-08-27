@@ -434,7 +434,7 @@ jobs:
       # repositories exist, none of them with CI, and this repository could not
       # see any of them -- so a language change broke them silently and the
       # news arrived whenever somebody next opened one. test/downstream/REPOS
-      # names one per surface; the check is `mere -t` from inside each, which
+      # names one per surface; the check is `mere -c` from inside each, which
       # asks the question this repo can answer (is their code still a program)
       # rather than the one they own (do their tests pass).
       # A clone that fails leaves that repo absent, which the gate counts and
@@ -444,7 +444,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/downstream"
           cd "$RUNNER_TEMP/downstream"
-          for r in $(awk '$1 !~ /^#/ && NF && $3 == "typecheck" {print $1}' \
+          for r in $(awk '$1 !~ /^#/ && NF && $3 == "compile" {print $1}' \
                        "$GITHUB_WORKSPACE/test/downstream/REPOS"); do
             git clone --depth 1 -q "https://github.com/284km/$r.git" "$r" \
               || echo "clone failed: $r (the gate will report it absent)"

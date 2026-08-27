@@ -8,11 +8,14 @@
 # that repo. test/downstream/REPOS names one per language surface and this runs
 # them.
 #
-# THE CHECK IS `mere -t <entry>` FROM INSIDE THE REPO: parse, resolve every
-# import, type the whole program. It is deliberately not "the project works" --
-# it does not run their tests, and each repo owns that question. It is the
-# question THIS repo can answer, it is the failure a language upstream actually
-# causes, and it costs about a second per repo.
+# THE CHECK IS `mere -c <entry>` FROM INSIDE THE REPO: parse, resolve every
+# import, type the whole program, and emit C. Deliberately not "the project
+# works" -- it does not run their tests, and each repo owns that question.
+#
+# IT WAS `-t` UNTIL v0.1.336. A codegen refusal introduced in v0.1.333 stopped
+# mere-ruby compiling and this gate said nothing, because typing is not where
+# that failure lives; v0.1.335 shipped with it. Emitting is the wider question
+# and costs 43 seconds for all twelve.
 #
 # SKIPS LOUDLY. Point MERE_DOWNSTREAM at a directory holding the checkouts.
 # Without it, or for a repo that is not there, the row is reported as skipped
@@ -31,7 +34,7 @@ DIR="${MERE_DOWNSTREAM:-}"
 [ -f "$TABLE" ] || { echo "downstream_check: $TABLE not found" >&2; exit 1; }
 
 if [ -z "$DIR" ]; then
-  echo "downstream_check: SKIP (set MERE_DOWNSTREAM=<dir of checkouts>) -- 0 of $(awk '$1 !~ /^#/ && NF && $3 == "typecheck"' "$TABLE" | wc -l | tr -d ' ') repos checked"
+  echo "downstream_check: SKIP (set MERE_DOWNSTREAM=<dir of checkouts>) -- 0 of $(awk '$1 !~ /^#/ && NF && $3 == "compile"' "$TABLE" | wc -l | tr -d ' ') repos checked"
   exit 0
 fi
 
@@ -45,9 +48,9 @@ while read -r repo entry check rest; do
       deferred=$((deferred + 1))
       echo "  defer $repo — $rest"
       continue ;;
-    typecheck) : ;;
+    compile) : ;;
     *)
-      echo "FAIL downstream[$repo]: unknown check \`$check\` (want typecheck or deps)"
+      echo "FAIL downstream[$repo]: unknown check \`$check\` (want compile or deps)"
       fails=$((fails + 1)); continue ;;
   esac
   if [ ! -d "$DIR/$repo" ]; then
@@ -60,10 +63,10 @@ while read -r repo entry check rest; do
     fails=$((fails + 1)); continue
   fi
   ran=$((ran + 1))
-  if ( cd "$DIR/$repo" && sh "$ROOT/scripts/bounded.sh" "$BOUND" "$MERE" -t "$entry" >/dev/null 2>"$err" ); then
+  if ( cd "$DIR/$repo" && sh "$ROOT/scripts/bounded.sh" "$BOUND" "$MERE" -c "$entry" > /dev/null >/dev/null 2>"$err" ); then
     echo "  ok    $repo ($entry)"
   else
-    echo "FAIL downstream[$repo]: $entry no longer types against this compiler"
+    echo "FAIL downstream[$repo]: $entry no longer compiles against this compiler"
     echo "        $rest"
     sed -n '1,3p' "$err" | sed 's/^/        /'
     fails=$((fails + 1))

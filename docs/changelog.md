@@ -4,6 +4,46 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.336 — 2026-08-27
+
+_A regression from v0.1.333, shipped in v0.1.335, that the gate built to catch
+exactly this could not see._
+
+v0.1.333 made the C backend refuse a builtin it has no lowering for instead of
+emitting `mu_<name>` and letting a C compiler complain. Correct — and the guard
+that keeps a user's own binding of such a name on the ordinary path,
+`user_shadows`, answers for top-level **functions**, locals, captures and
+lifted inner fns. **Not for a top-level VALUE binding.** mere-ruby has
+
+```
+let int_max = 4611686018427387903 * 2 + 1;
+let int_min = 0 - int_max - 1;
+```
+
+and stopped compiling. `top_globals` is asked about too now.
+
+**`downstream_check` said nothing, and that is the more useful half.** It ran
+`mere -t`, and this failure is at `mere -c` — so the gate written three
+releases ago to catch upstream breakage in the dogfood watched an upstream
+breakage go past and into a release. It was found by building mere-ruby by
+hand.
+
+The check is `mere -c` now: parse, resolve imports, type, and emit. All twelve
+repositories pass it, and **43 seconds covers all of them** (41 of that is
+mere-ruby). Not `-ll` or `-w` as well: ten and seven of the twelve are
+legitimately *refused* by those backends for features they do not have, so
+requiring emission there would be requiring the wrong thing.
+
+Poisoned by restoring the v0.1.333 behaviour: the mere-ruby row fails and names
+it.
+
+**v0.1.335 cannot build mere-ruby.** It is the release cut an hour before this
+was found.
+
+`dune test` 2596/0 (two new), parity 136/0, downstream_check 12/12.
+
+---
+
 ## v0.1.335 — 2026-08-27
 
 _Around three dozen programs are written in this language, none of them has CI,
