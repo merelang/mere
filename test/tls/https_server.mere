@@ -3,12 +3,11 @@
 // v0.1.338. Two things this program REFUSES to work around, because working
 // around them is what hid the gaps:
 //
-//   1. It terminates TLS itself -- no stunnel, no nginx, no reverse proxy.
-//      Until now the C backend could only DIAL a TLS connection
-//      (`tcp_starttls`); it could not ANSWER one. That is the real reason
-//      every web dogfood so far served plaintext and told the reader to put
-//      something in front of it. The workaround was so ordinary that it never
-//      looked like a missing feature.
+//   1. It terminates TLS itself. Until now the C backend could only DIAL a
+//      TLS connection (`tcp_starttls`); it could not ANSWER one, which is why
+//      every web dogfood so far served plaintext. No document in the project
+//      said so or suggested anything to put in front -- there was nothing to
+//      notice, which is what made it durable.
 //
 //   2. It reads its own configuration from the environment (v0.1.337). Before
 //      that, a native binary had no `env_var`, so a server's port and file

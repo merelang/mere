@@ -37,8 +37,11 @@ extern fn http_serve: int -> (str -> str) -> unit;
 //
 // WHY THIS EXISTS. Until v0.1.338 a Mere program could dial a TLS connection
 // but not answer one, so every web program written against this module served
-// cleartext and told its reader to put nginx in front. That is ordinary enough
-// advice that the gap never read as a gap.
+// cleartext. Nothing said so. No README in the project recommended a proxy or
+// mentioned TLS for serving at all -- mere-blog's says `./mere-blog # serves
+// :8080` and moves on. That is what made the gap durable: not advice that
+// papered over it, but a question that never came up, because cleartext on
+// localhost is what a demo does.
 //
 // C backend only, and only when the program declares this extern -- declaring
 // it is what links OpenSSL. On the Node host, terminate TLS in the host.

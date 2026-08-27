@@ -150,8 +150,9 @@ client failed" the same result — so a server with a bad certificate would look
 until a user arrived. `tls_server_init` returning non-zero is the whole difference.
 
 Until v0.1.338 only the client half existed, so a Mere program could dial a TLS
-connection but not answer one. Nothing announced this: every web program in the
-project simply terminated TLS in nginx and looked finished.
+connection but not answer one. Nothing announced this, and nothing worked around it
+either -- no document in the project mentioned TLS for serving, so there was no
+workaround to notice. `grep tcp_starttls` finds TLS and TLS is there.
 `scripts/tls_server_check.sh` drives `test/tls/https_server.mere` with curl and
 `openssl s_client` — two TLS implementations that are not ours.
 

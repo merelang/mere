@@ -2,10 +2,11 @@
 # scripts/tls_server_check.sh — a Mere program ANSWERS a TLS connection.
 #
 # v0.1.338. Until now the C backend could only DIAL TLS (`tcp_starttls`). It
-# could not terminate one, so every web dogfood served plaintext and told the
-# reader to put nginx in front. That workaround is so ordinary that the gap
-# never looked like a gap: the app worked, the gate was green, and the thing
-# the language could not do was invisible because nobody tried to do it.
+# could not terminate one, so every web dogfood served plaintext -- and no
+# document in the project said so, recommended a proxy, or mentioned TLS for
+# serving at all. There was no workaround to notice. The app worked, the gate
+# was green, and the thing the language could not do was invisible because
+# nobody had tried to do it.
 #
 # THE ORACLE IS SOMEONE ELSE'S TLS. curl and `openssl s_client` are two
 # independent client implementations that refuse a handshake we get wrong, and
