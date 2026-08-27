@@ -430,12 +430,33 @@ jobs:
       # half only -- and reported the same pass line either way, which is how a
       # gate stops meaning what it says. It says which half it ran now, and
       # this makes the answer "both".
-      - name: Check out memu (the RISC-V emulator written in Mere)
-        uses: actions/checkout@v5
+      # The programs written IN this language. Around three dozen dogfood
+      # repositories exist, none of them with CI, and this repository could not
+      # see any of them -- so a language change broke them silently and the
+      # news arrived whenever somebody next opened one. test/downstream/REPOS
+      # names one per surface; the check is `mere -t` from inside each, which
+      # asks the question this repo can answer (is their code still a program)
+      # rather than the one they own (do their tests pass).
+      # A clone that fails leaves that repo absent, which the gate counts and
+      # names rather than dropping.
+      - name: Check out the dogfood repositories
         continue-on-error: true
-        with:
-          repository: 284km/memu
-          path: memu
+        run: |
+          mkdir -p "$RUNNER_TEMP/downstream"
+          cd "$RUNNER_TEMP/downstream"
+          for r in $(awk '$1 !~ /^#/ && NF && $3 == "typecheck" {print $1}' \
+                       "$GITHUB_WORKSPACE/test/downstream/REPOS"); do
+            git clone --depth 1 -q "https://github.com/284km/$r.git" "$r" \
+              || echo "clone failed: $r (the gate will report it absent)"
+          done
 
+      - name: downstream_check (their code is still a program)
+        run: MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" sh scripts/downstream_check.sh
+
+      # memu is already among the dogfood clones above, so the RISC-V
+      # differential points at that checkout rather than fetching it twice.
+      # Without it, qemu_virt runs the QEMU half only -- and used to report
+      # the same pass line either way, which is how a gate stops meaning what
+      # it says. It names which halves ran now.
       - name: qemu_virt (vs an emulator nobody here wrote, and one we did)
-        run: MEMU="$GITHUB_WORKSPACE/memu" sh scripts/qemu_virt.sh
+        run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/qemu_virt.sh

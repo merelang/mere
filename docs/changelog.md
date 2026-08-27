@@ -4,6 +4,50 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.335 — 2026-08-27
+
+_Around three dozen programs are written in this language, none of them has CI,
+and this repository could not see any of them._
+
+An upstream language change breaks its own dogfood silently. The news arrives
+whenever somebody next opens that repository — which for most of them is not
+soon. v0.1.334 wired in the first one because the RISC-V differential needed
+it; this is the rest of the answer.
+
+`test/downstream/REPOS` names **twelve, one per language surface** — TCP and
+actors (mkv), partial failure and time-as-messages (mraft), the `bytes` type
+(mpng), native CLI and package resolution (mq), subprocess (mk), interactive
+terminal (mrog), binary parsing (mwasm), web plus a typed model layer
+(mere-blog), the largest single program (mbrowse), the largest surface of the
+language (mere-ruby), the memory model as a library (mere-gcheap), and the
+emulator the RISC-V differential runs against (memu). A breakage lands on the
+row that names the feature.
+
+**The check is `mere -t <entry>` from inside the repo**: parse, resolve every
+import, type the whole program. Deliberately not "the project works" — it does
+not run their tests, and each repo owns that question. It is the question this
+repo can answer, it is the failure a language upstream actually causes, and it
+costs about a second each.
+
+Twelve check green today. A thirteenth row is recorded and **not** run:
+`mbigfmt` imports another repo through `mere.toml`, and fetching it is a
+network dependency this gate does not take on — so the row says that rather
+than being absent.
+
+**Poisoned by removing one builtin from the typer's environment: all twelve
+fail, each naming its surface.** The mechanics were poisoned three more ways —
+a row pointing at a file that is gone, every repo missing (reported as `0
+checked, 12 absent`, not as success), and an unknown check value.
+
+Said plainly in the file: **this table cannot be derived**, unlike the others
+here. The set of repositories lives on GitHub, not in this tree, so nothing
+notices a new one. Knowing which kind of table you are holding is the
+difference between trusting it and checking it.
+
+`dune test` 2594/0, parity 136/0, downstream_check 12/12.
+
+---
+
 ## v0.1.334 — 2026-08-27
 
 _The differential that gives the RISC-V arc its claim was never running in CI,
