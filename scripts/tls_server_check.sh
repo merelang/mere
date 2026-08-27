@@ -248,12 +248,79 @@ else
   bad "(placeholder)"
 fi
 
+# ---- 7. the OTHER host --------------------------------------------------
+# contrib/http has two implementations -- the C runtime above and
+# scripts/run_http_server.js -- and the glue comment claims they agree. A claim
+# with no check behind it is how this broke: run_http_server.js hand-copied
+# run_wasm.js's env imports under a comment saying it reused them, so when
+# v0.1.277 added `__lang_float_of_str_ok` only the maintained copy got it, and
+# the HTTP host stopped being able to instantiate ANY Mere module. Nothing
+# noticed for months because no gate ever started it.
+#
+# Check 14 is deliberately the weakest possible assertion -- "a Mere program
+# starts at all under this host" -- because that is the assertion that was false.
+if command -v node >/dev/null 2>&1 && command -v wat2wasm >/dev/null 2>&1; then
+  # The paths are interpolated rather than read from the environment because
+  # plain Wasm answers None to env_var on every host (see docs; the component
+  # backend is the one with an environment). The MODULE under test is real.
+  cat > "$WORK/nodehost.mere" <<EOF
+import "$ROOT/contrib/http/http.mere";
+extern fn http_serve_tls: int -> str -> str -> (str -> str) -> unit;
+let h = fn (req: str) -> "node host says: " ++ req ++ "\n";
+let _ = http_serve_tls $PORT2 "$WORK/cert.pem" "$WORK/key.pem" h;
+0
+EOF
+  cat > "$WORK/nodehost_plain.mere" <<EOF
+import "$ROOT/contrib/http/http.mere";
+let h = fn (req: str) -> "node host says: " ++ req ++ "\n";
+let _ = http_serve $PORT2 h;
+0
+EOF
+  built=1
+  for m in nodehost_plain nodehost; do
+    "$MERE" -w "$WORK/$m.mere" > "$WORK/$m.wat" 2>"$WORK/$m.err" \
+      && wat2wasm --enable-tail-call "$WORK/$m.wat" -o "$WORK/$m.wasm" 2>>"$WORK/$m.err" \
+      || built=0
+  done
+  if [ "$built" -eq 1 ]; then
+    node "$ROOT/scripts/run_http_server.js" "$WORK/nodehost_plain.wasm" > "$WORK/node.log" 2>&1 &
+    SRVPID=$!
+    np=$(curl -sS --retry 15 --retry-delay 1 --retry-connrefused --max-time 8 \
+           "http://127.0.0.1:$PORT2/node" 2>&1 || true)
+    grep -q 'LinkError\|not a function\|requires a callable' "$WORK/node.log" \
+      && bad "the Node HTTP host cannot instantiate a Mere module ($(head -1 "$WORK/node.log" | cut -c1-120))" \
+      || ok "the Node HTTP host instantiates a Mere module"
+    echo "$np" | grep -q 'node host says' \
+      && ok "the Node HTTP host serves the same program over plaintext" \
+      || bad "the Node HTTP host did not answer (got: $(echo "$np" | tr '\n' ' ' | cut -c1-120))"
+    kill "$SRVPID" 2>/dev/null || true; SRVPID=""
+
+    node "$ROOT/scripts/run_http_server.js" "$WORK/nodehost.wasm" > "$WORK/nodetls.log" 2>&1 &
+    SRVPID=$!
+    nt=$(curl -sS --cacert "$WORK/cert.pem" --resolve "localhost:$PORT2:127.0.0.1" \
+           --retry 15 --retry-delay 1 --retry-connrefused --max-time 8 \
+           "https://localhost:$PORT2/node" 2>&1 || true)
+    echo "$nt" | grep -q 'node host says' \
+      && ok "the Node HTTP host terminates TLS too — both hosts run the same program" \
+      || bad "the Node host did not serve over TLS (got: $(echo "$nt" | tr '\n' ' ' | cut -c1-120))"
+    kill "$SRVPID" 2>/dev/null || true; SRVPID=""
+  else
+    bad "the Node-host programs did not build: $(head -2 "$WORK/nodehost.err" | tr '\n' ' ')"
+    bad "(and so the remaining two Node-host checks did not run)"
+    bad "(placeholder)"
+  fi
+  NODE_CHECKS=3
+else
+  echo "tls_server_check: node or wat2wasm missing — the three Node-host checks are SKIPPED, not passed"
+  NODE_CHECKS=0
+fi
+
 # HOW MANY CHECKS THERE ARE, asserted. `set -e` plus a `kill` on an
 # already-exited server made an earlier draft of this script stop after check 2
 # and exit 0: five PASS lines, no summary, and a green CI. A gate that reports
 # only what it managed to reach cannot tell "everything passed" from "it stopped
 # early". Raise this number in the same commit that adds a check.
-EXPECTED=13
+EXPECTED=$((13 + NODE_CHECKS))
 echo
 echo "tls_server_check: $pass passed, $fail failed, of $EXPECTED checks"
 if [ $((pass + fail)) -ne "$EXPECTED" ]; then

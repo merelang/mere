@@ -60,8 +60,25 @@ Declaring `http_serve_tls` is what links OpenSSL; a program that never mentions 
 unaffected. Declared-but-unreachable is an error message, not cleartext on a port the
 caller believes is encrypted.
 
+**And the other host had been broken for months.** `contrib/http` has two
+implementations — the C runtime and `scripts/run_http_server.js` — and adding
+`http_serve_tls` to the second one meant starting it, which nothing in CI had ever
+done. It could not instantiate **any** Mere module: it hand-copied `run_wasm.js`'s env
+imports under a comment saying it *reused* them, so when v0.1.277 added
+`__lang_float_of_str_ok` to the refusal enumeration only the maintained copy got it.
+The same paraphrase had `__lang_float_of_str` calling bare `parseFloat` where
+`run_wasm.js` calls a Mere-specific parser — so the two hosts disagreed about what a
+float literal is, quietly, for as long as both existed.
+`scripts/mere_parse_float.js` is now one copy that both require, and three checks run
+the Node host: that a module instantiates at all (the assertion that was false), that
+it serves, and that it terminates TLS.
+
 **Not on every backend**, and unchanged in that respect: TLS is C-backend only,
-client half included.
+client half included. Plain Wasm also still answers `None` to `env_var` on every host,
+including Node, which has an environment — so a program configured through the
+environment takes its defaults there. Recorded rather than fixed: making it a host
+import would mean every browser host must bind it or fail to instantiate, which is the
+same failure class as the one above.
 
 ---
 
