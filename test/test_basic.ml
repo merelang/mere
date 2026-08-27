@@ -13897,6 +13897,18 @@ let () =
     (let out = c_refusal "let env_var = fn (s: str) -> str_len s; env_var \"abc\"" in
      if out = "emitted" then "emitted" else out)
     "emitted";
+  (* Q-071 follow-up (v0.1.336): `user_shadows` answers for top-level
+     FUNCTIONS, locals, captures and lifted inner fns -- not for a top-level
+     VALUE binding, which lives in `top_globals`. mere-ruby binds exactly
+     `int_max` and `int_min` that way and stopped compiling. Found by building
+     a downstream repository by hand, which is what downstream_check exists to
+     do and could not: it runs `mere -t`, and this failure is at `mere -c`. *)
+  check "Q-071: a top-level VALUE binding of a builtin name still compiles"
+    (c_refusal "let int_max = 100; let int_min = 0 - int_max; int_max + int_min")
+    "emitted";
+  check "Q-071: and it is still refused when nothing bound it"
+    (says "has no C lowering yet" (c_refusal "let _ = int_min; 0"))
+    "refused";
   (* B: `ty_tag` erases an unconstrained type variable to "int" -- right where
      a tag names a representation, wrong where it names a function whose
      definition the registrar declines to emit for a non-concrete type. *)

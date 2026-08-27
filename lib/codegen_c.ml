@@ -1749,7 +1749,9 @@ let rec emit_expr (e : Ast.expr) : string =
             unsupported e.loc
               ("extern `" ^ name ^ "` used as a value must have a simple `A -> B` \
                 type; wrap a curried or higher-order extern as `fn x -> " ^ name ^ " x`"))
-       else if List.mem_assoc name Typer.initial_env && not (user_shadows name) then
+       else if List.mem_assoc name Typer.initial_env
+               && not (user_shadows name)
+               && not (Hashtbl.mem top_globals name) then
          (* Q-071: a builtin this backend has no lowering for used to fall
             through to `mu_<name>` -- the mangling for a USER binding -- so the
             emitted C referenced an identifier nobody declared and the
@@ -1759,7 +1761,11 @@ let rec emit_expr (e : Ast.expr) : string =
             is less the missing lowering than the failure being handed to cc.
             `user_shadows` keeps a user's own `let env_var = ...` on the
             ordinary path -- the name being a builtin does not make it one
-            here. *)
+            here. It answers for top-level FUNCTIONS, locals, captures and
+            lifted inner fns; a top-level VALUE binding (`let int_min = 0 -
+            int_max - 1;`) lives in `top_globals` and is asked about
+            separately. mere-ruby binds exactly those two names and stopped
+            compiling when this check first landed without that half. *)
          unsupported e.loc (name ^ " has no C lowering yet (host builtin)")
        else c_safe_name name))
   | Ast.Annot (inner, _) -> c_tail_pos := __in_tail; emit_expr inner
