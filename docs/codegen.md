@@ -181,6 +181,35 @@ clang sample.c -o sample
 ./sample
 ```
 
+### A large program may need `-fbracket-depth`
+
+An `if / else if / ...` chain in Mere becomes NESTED TERNARIES in the emitted C,
+one level per arm, so the C nests as deep as the chain is long. Measured, with a
+synthetic n-way chain:
+
+| arms | max nesting in the emitted C |
+|---|---|
+| 5 | 23 |
+| 50 | 54 |
+| 100 | 104 |
+| 200 | 204 |
+
+Mainline clang caps bracket nesting at **256**, so a chain of roughly 250 arms
+or more fails to compile with
+
+```
+fatal error: bracket nesting level exceeded maximum of 256
+```
+
+Apple's clang allows more, which is why this does not show up on macOS. Pass
+`-fbracket-depth=1024` (or higher) where it does. `mere-ruby`'s dispatch tables
+reach 613 and need it; ordinary programs sit around 23 and never will.
+
+This is a property of the emitted code and not a bug in the C it emits -- the
+program is correct, the compiler's default limit is simply below it. It is
+written down here because it was found by compiling a large Mere program on
+Linux for the first time, and nothing said so.
+
 ---
 
 ## 5. Phase 4 slices
