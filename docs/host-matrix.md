@@ -51,7 +51,7 @@ machine rather than a host.
 | `detach` | yes | refused | refused | refused |
 | `divmod` | yes | yes | yes | yes |
 | `e` | yes | yes | yes | refused |
-| `env_var` | refused | refused | yes | refused |
+| `env_var` | yes | yes | yes | refused |
 | `even` | yes | yes | yes | refused |
 | `exit` | yes | refused | yes | refused |
 | `exp` | yes | yes | yes | refused |

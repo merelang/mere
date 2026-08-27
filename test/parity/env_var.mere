@@ -1,0 +1,32 @@
+// v0.1.337: reading the environment from a NATIVE binary. Until now only the
+// Wasm component backend had this, so `mere -c` produced programs that could
+// be configured only by editing their source -- which is why mere-blog
+// hardcodes its database host, port, user and name. Not the app being lazy;
+// the only thing the backend allowed.
+//
+// DETERMINISTIC WITHOUT CONTROLLING THE ENVIRONMENT. The harness sets nothing,
+// so the case asks two questions whose answers are the same everywhere: a name
+// nobody sets is None, and PATH is set and non-empty. Comparing PATH's VALUE
+// would compare machines.
+//
+// Both arms on purpose: a lowering that always answered None would pass the
+// first check alone, and one that always answered Some would pass the second.
+//
+// PLAIN WASM DIVERGES, AND THE PIN SAYS SO. A browser or worker host has no
+// environment, so `mere -w` answers None to everything -- see
+// env_var.wasm.expected. The COMPONENT backend does have it (wasi environ_get,
+// covered by scripts/component_parity.sh), which is why the divergence is the
+// host's and not the backend's. If plain Wasm ever gains an environment the
+// pin stops describing anything and the gate says so.
+let unset = match env_var "MERE_PARITY_DEFINITELY_UNSET_XYZ" with
+  | None -> "none"
+  | Some v -> "unexpectedly set: " ++ v;
+
+let path_present = match env_var "PATH" with
+  | None -> "PATH is unset, which no shell does"
+  | Some p -> if str_len p > 0 then "set and non-empty" else "set but empty";
+
+{
+  print unset;
+  print path_present
+}

@@ -13889,8 +13889,13 @@ let () =
   check "Q-071: a builtin with no C lowering names its own gap"
     (says "has no C lowering yet" (c_refusal "let _ = int_max; 0"))
     "refused";
+  (* This case named `env_var` when it was written, and v0.1.337 gave that a C
+     lowering -- so the test asserted a fact that had stopped being true, and
+     said so. Which is the gate working: the list of builtins this backend
+     lacks is a moving target, and a test that pins one has to move with it.
+     `random_float` is refused today. *)
   check "Q-071: and so does a builtin-shaped function"
-    (says "has no C lowering yet" (c_refusal "let _ = env_var \"x\"; 0"))
+    (says "has no C lowering yet" (c_refusal "let _ = random_float (); 0"))
     "refused";
   (* ...but a user binding of that same name is not a builtin here. *)
   check "Q-071: a user binding that shadows a builtin still compiles"

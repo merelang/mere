@@ -62,6 +62,7 @@ c:strbuf_runtime                 mere_strbuf_new           c          test/parit
 llvm:args_runtime                __lang_args               llvm       test/parity/args_empty.mere
 llvm:bytes_runtime               __lang_bytes_alloc        llvm       test/parity/bytes_roundtrip.mere
 llvm:bytes_vec_bridge_runtime    __lang_bytes_of_vec       llvm       test/parity/bytes_vec_bridge.mere
+llvm:env_var_runtime             __lang_env_var            llvm       test/parity/env_var.mere
 llvm:file_pio_runtime            __lang_file_openrw        llvm       test/parity/file_pio.mere
 llvm:logger_runtime              __mere_logger_info_fn     llvm       test/parity/logger_metrics_caps.mere
 llvm:metrics_runtime             __mere_metrics_inc_fn     llvm       test/parity/logger_metrics_caps.mere

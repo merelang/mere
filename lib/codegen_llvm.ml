@@ -37,7 +37,7 @@ let host_builtins_without_llvm_lowering =
     "read_line"; "read_stdin"; "read_key";
     "tty_raw"; "tty_restore"; "exit";
     "read_lines";
-    "env_var"; "run";
+    "run";
     "file_exists"; "random_int"; "random_float";
     "detach" ]
 
@@ -222,6 +222,9 @@ let bytes_vec_used = ref false  (* gate the bytes <-> Vec[int] bridge runtime *)
 let str_split_used_llvm = ref false
 let str_join_used_llvm = ref false
 let str_count_used_llvm = ref false
+(* v0.1.337: env_var pulls in its runtime AND registers `option_str`, which a
+   program consuming the result with `match` alone would never register. *)
+let env_var_used_llvm = ref false
 let file_io_used_llvm = ref false
 (* v0.1.163: positioned file I/O (file_openrw / file_size / file_pread /
    file_pwrite / file_fsync / file_close), the group a paged or
@@ -4592,6 +4595,13 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let raw = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i64 @__lang_str_count(ptr %s, ptr %s)" raw sv nv);
     raw
+  | Ast.App ({ node = Ast.Var "env_var"; _ }, name_e) ->
+    (* v0.1.337: see env_var_runtime_llvm. *)
+    env_var_used_llvm := true;
+    let nv = emit_expr env name_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call %%option_str @__lang_env_var(ptr %s)" r nv);
+    r
   | Ast.App ({ node = Ast.Var "utf8_len"; _ }, s_e) ->
     (* v0.1.38 (Unicode): codepoint count (span walk, same as interp/C/wasm). *)
     str_split_used_llvm := true;
@@ -11126,6 +11136,48 @@ let file_pio_runtime_llvm =
       "  ret i64 0";
       "}" ]
 
+(* v0.1.337: a NATIVE binary could not read its environment -- only the Wasm
+   component backend had `env_var`, so `mere -c` and `mere -ll` produced
+   programs configurable only by editing their source. It is written as a
+   runtime function rather than inline because the result branches, and
+   because `__lang_str_of_cstr` has to run on the hit: getenv hands back a
+   bare C string and this backend's `str` carries a length header, so the
+   environment's own pointer is not a str. (The C backend learned that the
+   loud way -- it compiled, the unset case worked, and the first program that
+   found the variable died with "out of memory".) Copying also means a later
+   setenv cannot move the string out from under the value. *)
+let env_var_runtime_llvm =
+  String.concat "\n"
+    [ "declare ptr @getenv(ptr)";
+      "";
+      "define %option_str @__lang_env_var(ptr %name) {";
+      "entry:";
+      "  %c = call ptr @getenv(ptr %name)";
+      "  %isnull = icmp eq ptr %c, null";
+      "  br i1 %isnull, label %none, label %some";
+      (* THE PAYLOAD SLOT HOLDS A POINTER TO THE VALUE, NOT THE VALUE. The
+         match compiles `Some v` to `extractvalue ... 1` followed by
+         `load ptr` -- Phase 25.0 boxed variant payloads -- so storing the
+         string pointer directly made the reader dereference the string's
+         first eight bytes as an address. It matched `Some` fine and crashed
+         the moment anything touched `v`, which is why the arm that ignores
+         the binding passed. Same shape as Q-069's LLVM half, made again
+         within the day. *)
+      "some:";
+      "  %s = call ptr @__lang_str_of_cstr(ptr %c)";
+      "  %box_sz_p = getelementptr ptr, ptr null, i32 1";
+      "  %box_sz = ptrtoint ptr %box_sz_p to i64";
+      "  %box = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %box_sz)";
+      "  store ptr %s, ptr %box";
+      "  %a0 = insertvalue %option_str undef, i32 1, 0";
+      "  %a1 = insertvalue %option_str %a0, ptr %box, 1";
+      "  ret %option_str %a1";
+      "none:";
+      "  %b0 = insertvalue %option_str undef, i32 0, 0";
+      "  %b1 = insertvalue %option_str %b0, ptr null, 1";
+      "  ret %option_str %b1";
+      "}" ]
+
 let file_io_runtime_llvm =
   String.concat "\n"
     [ "declare ptr @fopen(ptr, ptr)";
@@ -12111,6 +12163,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !bytes_used then [bytes_runtime_llvm; ""] else [])
     @ (if !bytes_vec_used then [bytes_vec_bridge_runtime_llvm; ""] else [])
     @ (if !str_count_used_llvm then [str_count_runtime_llvm; ""] else [])
+    @ (if !env_var_used_llvm then [env_var_runtime_llvm; ""] else [])
     @ (if !str_split_used_llvm then [str_split_runtime_llvm; ""] else [])
     @ (if !str_join_used_llvm then [str_join_runtime_llvm; ""] else [])
     @ (if !file_io_used_llvm || !uses_read_file_bytes_llvm || !uses_write_file_bytes_llvm
