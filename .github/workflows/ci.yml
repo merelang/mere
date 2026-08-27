@@ -324,6 +324,14 @@ jobs:
       - name: socket_parity
         run: sh scripts/socket_parity.sh
 
+      # Three runtime sections exist only under `-w --component`, so the parity
+      # harness -- which compiles with plain `-w` -- cannot reach them at all.
+      # This builds and RUNS them against the interpreter. It shares the
+      # component toolchain installed for socket_parity above, and skips loudly
+      # rather than silently if that toolchain is absent.
+      - name: component_parity (the component-only sections, run)
+        run: sh scripts/component_parity.sh
+
       - name: tcp_read_codes
         run: sh scripts/tcp_read_codes.sh
 

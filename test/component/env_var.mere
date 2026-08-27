@@ -1,0 +1,8 @@
+// The `env_var` runtime section is emitted only under `-w --component`, so the
+// parity harness (plain `-w`) can never reach it. This is what does.
+// The harness sets MERE_PROBE and leaves MERE_ABSENT unset, so both arms of
+// the option are exercised and the answer does not depend on the machine.
+{
+  print (match env_var "MERE_PROBE" with | None -> "unset" | Some v -> v);
+  print (match env_var "MERE_ABSENT_ON_PURPOSE" with | None -> "unset" | Some v -> v)
+}
