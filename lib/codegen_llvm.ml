@@ -247,6 +247,16 @@ let map_instances : (string, Ast.ty * Ast.ty) Hashtbl.t = Hashtbl.create 4
 let vec_to_list_instances : (string, Ast.ty * Ast.ty) Hashtbl.t =
   Hashtbl.create 4
 
+(* Q-069: `len` on a list used to register HERE, in vec_to_list_instances,
+   because both helpers are per-element-type and the table already existed.
+   One table, two questions: emit_program asks it both "which vec_to_list
+   helpers do I need" and "which list_len helpers do I need", so `len xs` on a
+   list also emitted @mere_vec_to_list_<T> -- which dereferences
+   %mere_vec_<T>, a struct type emitted only when a real vec is used. A
+   program with a list and no vec therefore did not compile at all. *)
+let list_len_instances : (string, Ast.ty * Ast.ty) Hashtbl.t =
+  Hashtbl.create 4
+
 let rec subst_params (mapping : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
   match Ast.walk t with
   | Ast.TyParam p ->
@@ -5117,16 +5127,17 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                              && Hashtbl.mem variant_tags "Cons"
                              && Hashtbl.mem variant_tags "Nil" ->
        (* Phase 15.12: `len` on `T list` — call per-T helper
-          `@mere_list_<T>_len`. Track in `vec_to_list_instances` so
-          emit_program emits the helper. *)
+          `@mere_list_<T>_len`. Tracked in its OWN table (Q-069): sharing
+          vec_to_list_instances also emitted a vec_to_list helper for a
+          program that has no vec. *)
        let args = List.map Ast.walk args in
        (match args with
         | [t_ty] ->
           let t_tag = ty_tag t_ty in
           let list_mono = mono_variant_name n args in
           let key = list_mono ^ "__" ^ t_tag in
-          if not (Hashtbl.mem vec_to_list_instances key) then
-            Hashtbl.add vec_to_list_instances key (t_ty,
+          if not (Hashtbl.mem list_len_instances key) then
+            Hashtbl.add list_len_instances key (t_ty,
               Ast.TyCon (n, [t_ty]));
           let lv = emit_expr env arg in
           let r = fresh_reg () in
@@ -8078,7 +8089,13 @@ let emit_list_len_helper_llvm (elem_ty : Ast.ty) (list_ty : Ast.ty) : string =
       "  br i1 %is_cons, label %body, label %end";
       "body:";
       Printf.sprintf "  %%pp = getelementptr %%%s, ptr %%cur, i32 0, i32 1" node_struct;
-      Printf.sprintf "  %%tup = load %%%s, ptr %%pp" tup_struct;
+      (* Q-069: the payload slot holds a POINTER to the tuple, not the tuple
+         (Phase 25.0 boxed it). This helper loaded the slot AS the tuple, so
+         `extractvalue ... 1` produced a word of the pointer and dereferencing
+         it segfaulted. The same two steps are written out at the list-fold
+         site; this one was left behind by the representation change. *)
+      "  %pbox = load ptr, ptr %pp";
+      Printf.sprintf "  %%tup = load %%%s, ptr %%pbox" tup_struct;
       "  %next = extractvalue " ^ "%" ^ tup_struct ^ " %tup, 1";
       "  %n_next = add i64 %n, 1";
       "  br label %check";
@@ -11380,6 +11397,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset owned_vec_instances;
   Hashtbl.reset map_instances;
   Hashtbl.reset vec_to_list_instances;
+  Hashtbl.reset list_len_instances;
   strbuf_used := false;
   bytes_used := false;
   bytes_vec_used := false;
@@ -12012,7 +12030,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       else begin
         Hashtbl.add seen t_tag ();
         emit_list_len_helper_llvm t_ty list_ty :: acc
-      end) vec_to_list_instances []
+      end) list_len_instances []
   in
   let vec_to_owned_helpers =
     Hashtbl.fold (fun tag _elem_ty acc ->

@@ -272,6 +272,14 @@ jobs:
       - name: first_run_check (the README, executed)
         run: sh scripts/first_run_check.sh
 
+      # Parts of the Wasm runtime are literal WAT text gated behind a flag only
+      # a program using that feature sets, so text nobody reaches is never
+      # validated and a representation change walks past it. Q-068 and Q-069
+      # were both that, in sections wrong since values widened. Every gated
+      # section needs a program, or a written reason it cannot have one.
+      - name: section_coverage (every hand-written runtime section has a program)
+        run: sh scripts/section_coverage.sh
+
       # The cross-language benchmark suite, deterministic half only: every
       # implementation of a workload must print the same bytes, Mere's
       # programs must build, and the default region's cumulative allocation

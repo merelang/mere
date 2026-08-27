@@ -9738,16 +9738,21 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     if not !list_len_used then "" else
     Printf.sprintf "
   (func $mere_list_len (param $l i64) (result i64)
-    (local $n i32) (local $tag i32) (local $payload i32)
-    (local.set $n (i32.const 0))
+    ;; Q-069: a variant is a widened pointer; its TAG is `i64.load offset=0`
+    ;; and its PAYLOAD `i64.load offset=8`, and a tuple field is
+    ;; `i64.load offset=(8 * idx)` -- see the match compilation. This body
+    ;; still read them as i32 at offsets 0 and 4, which is what they were
+    ;; before values widened. It could not have worked; nothing called it.
+    (local $n i64) (local $tag i64) (local $payload i64)
+    (local.set $n (i64.const 0))
     (block $end
       (loop $lp
-        (local.set $tag (i32.load offset=0 (local.get $l)))
-        (br_if $end (i32.ne (local.get $tag) (i32.const %d)))  ;; not Cons
-        (local.set $n (i32.add (local.get $n) (i32.const 1)))
-        (local.set $payload (i32.load offset=4 (local.get $l)))
-        ;; tuple.f1 (next list) at offset 4 of payload
-        (local.set $l (i32.load offset=4 (local.get $payload)))
+        (local.set $tag (i64.load offset=0 (i32.wrap_i64 (local.get $l))))
+        (br_if $end (i64.ne (local.get $tag) (i64.const %d)))  ;; not Cons
+        (local.set $n (i64.add (local.get $n) (i64.const 1)))
+        (local.set $payload (i64.load offset=8 (i32.wrap_i64 (local.get $l))))
+        ;; tuple field 1 (the tail) of the payload
+        (local.set $l (i64.load offset=8 (i32.wrap_i64 (local.get $payload))))
         (br $lp)))
     (local.get $n))" cons_tag_v
   in

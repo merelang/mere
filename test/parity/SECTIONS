@@ -1,0 +1,40 @@
+# test/parity/SECTIONS -- runtime sections that only exist when a program asks
+# for them, and the program in this corpus that asks.
+#
+# WHAT THIS IS. Parts of the Wasm runtime are emitted as literal WAT text
+# rather than compiled from Mere, and each is gated behind a flag that only a
+# program using that feature sets. Text that is never emitted is never
+# validated, never linked and never run -- so a representation change can walk
+# past it and nothing goes red.
+#
+# That is not hypothetical. It has happened three times, all found in one day:
+#
+#   Q-068  mk_logger / mk_metrics: i32 locals against i64 signatures, and a
+#          Logger record with 4-byte fields where a field is 8. No Wasm-compiled
+#          program in the corpus used a capability.
+#   Q-069  $mere_list_len: tag read as i32 at offset 0, payload at offset 4 --
+#          the layout from before values widened. Nothing called it.
+#          (LLVM's list-len helper was broken twice over, separately.)
+#
+# So the rule this file encodes: A SECTION WITH NO PROGRAM IS UNTESTED CODE
+# THAT LOOKS LIKE TESTED CODE. scripts/section_coverage.sh compiles every
+# parity program, collects the sections that actually appear, and fails if a
+# section has none.
+#
+# UNREACHABLE rows are the honest half. Some sections cannot be reached by this
+# harness at all -- it runs `mere -w`, not `mere -w --component`, and it has no
+# network. Those are recorded WITH THE REASON rather than left looking covered.
+# If one becomes reachable, the gate says so rather than quietly passing.
+#
+# section              marker                  status       covered-by / why
+file_io_used           __lang_read_file_h      COVERED      file_pio.mere
+list_len_used          mere_list_len           COVERED      list_len.mere
+logger_used            __mere_logger_info_fn   COVERED      logger_metrics_caps.mere
+metrics_used           __mere_metrics_inc_fn   COVERED      logger_metrics_caps.mere
+vec_to_list_used       mere_vec_to_list        COVERED      show_composite.mere
+wasm_args_used         __lang_args             COVERED      args_empty.mere
+wasm_args_host_used    __lang_args_host        COVERED      args_empty.mere
+wasm_time_used         __lang_time             COVERED      arith.mere
+wasm_env_used          __lang_env_var          UNREACHABLE  component-only (`-w --component`); this harness runs plain `-w`
+wasm_stdin_used        __lang_read_stdin       UNREACHABLE  component-only, and reading stdin in a parity run would block
+wasm_socket_ffi        sock_instnet            UNREACHABLE  needs a live peer; scripts/socket_parity.sh covers sockets separately

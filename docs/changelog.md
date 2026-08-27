@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.329 — 2026-08-27
+
+_Q-069: `len` on a list did not work on two of four backends, and the audit
+that found it is now a gate._
+
+Q-068 ended with a general worry rather than a finding: **runtime sections
+emitted as literal text are never type-checked, and one that no program reaches
+is never validated, linked or run either.** So the sections were enumerated —
+eleven of them are gated behind a `*_used` flag in the Wasm backend — and each
+was checked against the corpus by compiling all 134 parity programs and looking
+for the section's marker in the output.
+
+**Four were reached by nothing.** Three of those cannot be reached by this
+harness at all and are now recorded with the reason (two are
+`--component`-only; one needs a live peer). The fourth was `$mere_list_len`,
+and probing it found `len` on a `T list` broken on **two backends, three
+separate ways**:
+
+* **Wasm** read the tag as `i32.load offset=0` and the payload at offset 4 —
+  the layout from before values widened. A variant's tag is `i64.load
+  offset=0` and its payload `offset=8`, and a tuple field is `8 * idx`.
+* **LLVM** registered `len`-on-a-list in `vec_to_list_instances`, the table
+  that *also* drives which `vec_to_list` helpers get emitted. One table, two
+  questions: a program with a list and no vec emitted a vec_to_list helper
+  dereferencing `%mere_vec_<T>`, a struct type emitted only for real vecs. It
+  did not compile.
+* **LLVM again**, behind that one: the helper loaded the payload slot *as* the
+  tuple. Phase 25.0 boxed the payload behind a pointer, and the code that does
+  this correctly is written out at the list-fold site three thousand lines
+  away. It segfaulted.
+
+Interp and C were right the whole time, which is why nothing looked wrong.
+
+`scripts/section_coverage.sh` and `test/parity/SECTIONS` keep it from happening
+again. The flag list is read **from `lib/codegen_wasm.ml` at run time**, so a
+new gated section with no row fails on the commit that adds it; `COVERED` rows
+must be reached by the program they name; and `UNREACHABLE` rows must still be
+unreachable, so a section that becomes testable is promoted rather than left
+looking covered.
+
+parity 135/0, `dune test` 2588/0, section_coverage 11 sections / 125 programs
+compiled / 3 declared unreachable.
+
+---
+
 ## v0.1.328 — 2026-08-27
 
 _Q-068: the capability runtime sections were hand-written for a compiler two
