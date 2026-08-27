@@ -6,6 +6,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ## v0.1.338 — 2026-08-28
 
+**Twenty-one gates in CI had not run for weeks, and CI said "skipped".**
+`component_parity` invokes `scripts/build-component.sh`, which declares
+`#!/usr/bin/env bash` and uses `set -o pipefail` — and it invoked it with `sh`. On
+macOS `/bin/sh` is bash, so it was green here; on Ubuntu `/bin/sh` is dash, which has
+no `pipefail`, so all three component builds failed. Because it is a step in the
+middle of the workflow, every step *after* it — proto, graphql ×4, http2, hpack, grpc,
+window, html tokenizer, infer scaling, sourcemap, debug info, `downstream_check`,
+`qemu_virt`, and the new `tls_server_check` — was reported as **skipped**, which reads
+like "nothing else was wrong" and means "nothing else was asked".
+
+Two fixes, because the second is the general one:
+
+- the call goes through the script's own shebang. Reproduced by putting `dash` on
+  `PATH` as `sh`: the old form fails 3 of 3, the new form passes 3 of 3.
+- **every gate step now carries `if: ${{ !cancelled() }}`**, so one red gate no longer
+  turns the rest into unknowns. A red CI should be one known failure plus everything
+  else measured, not one known failure plus everything downstream unmeasured. Setup
+  steps are deliberately not marked: a failed toolchain install should make the gates
+  below it fail loudly rather than silently not exist.
+
+This is the same shape as v0.1.271's `_GNU_SOURCE`: a difference between the
+development machine and the CI machine, verified on one platform, believed on both.
+
+
 _A Mere program can **answer** a TLS connection._ `tls_server_init` (load a
 certificate chain and key, once per process) and `tcp_accept_tls` (handshake on an
 accepted fd) join `tcp_starttls` / `tcp_starttls_verified` on the C backend. After the

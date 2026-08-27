@@ -39,9 +39,16 @@ trap 'rm -rf "$TMP"' EXIT
 fails=0
 ran=0
 
+# NOT `sh scripts/build-component.sh`: that script declares
+# `#!/usr/bin/env bash` and uses `set -o pipefail`, which dash does not have. On
+# macOS /bin/sh is bash and this passed; on Ubuntu /bin/sh is dash and every
+# component build failed with "Illegal option -o pipefail". So this gate was red
+# in CI while green here -- and because it is a step in the middle of the
+# workflow, the twenty-one gates AFTER it were SKIPPED rather than run, for
+# every commit since it was added. Invoke it through its own shebang.
 build() {  # build <name>
   MERE="$MERE" WASI_ADAPTER="$adapter" \
-    sh "$ROOT/scripts/build-component.sh" "$ROOT/test/component/$1.mere" "$TMP/$1.wasm" \
+    "$ROOT/scripts/build-component.sh" "$ROOT/test/component/$1.mere" "$TMP/$1.wasm" \
     >"$TMP/$1.build" 2>&1
 }
 

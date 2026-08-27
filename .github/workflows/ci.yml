@@ -6,6 +6,21 @@ on:
   pull_request:
     branches: [main]
 
+# EVERY GATE STEP RUNS, EVEN AFTER ONE FAILS (`if: ${{ !cancelled() }}`).
+#
+# Without it a red step ends the job and every step after it is reported as
+# "skipped", which reads like "nothing else was wrong" and means "nothing else
+# was asked". That is not hypothetical: `component_parity` invoked a
+# bash-shebang script with `sh`, which is bash on macOS and dash on Ubuntu, so
+# it was green here and red in CI -- and the TWENTY-ONE gates after it in this
+# file (proto, graphql, http2, grpc, downstream_check, qemu_virt, ...) had not
+# run for any commit since. A red CI is one known failure plus everything
+# downstream unknown; this makes it one known failure plus everything else
+# actually measured.
+#
+# Setup steps are deliberately NOT marked: if the toolchain fails to install,
+# the gates below it fail loudly rather than silently not existing.
+
 jobs:
   build:
     strategy:
@@ -211,48 +226,60 @@ jobs:
       # feature by looking for the message in the EMITTED TEXT, which stayed green while
       # neither backend built on this runner at all. See v0.1.285.
       - name: stack_overflow (the fault names itself, per backend)
+        if: ${{ !cancelled() }}
         run: sh scripts/stack_overflow.sh
 
       - name: parity (interp / C / LLVM / wasm agree)
+        if: ${{ !cancelled() }}
         run: sh scripts/parity.sh
 
       - name: ctest (C backend end to end)
+        if: ${{ !cancelled() }}
         run: sh scripts/ctest.sh
 
       - name: url_parity (vs node's URL)
+        if: ${{ !cancelled() }}
         run: sh scripts/url_parity.sh
 
       - name: encoding_parity (vs node's TextDecoder)
+        if: ${{ !cancelled() }}
         run: sh scripts/encoding_parity.sh
 
       - name: unicode_parity (vs node's Intl.Segmenter)
+        if: ${{ !cancelled() }}
         run: sh scripts/unicode_parity.sh
 
       # No oracle exists for UAX #14, so this one runs the Unicode Consortium's
       # own conformance file, vendored under test/data so it needs no network.
       - name: linebreak_conformance (UCD test file)
+        if: ${{ !cancelled() }}
         run: sh scripts/linebreak_conformance.sh
 
       # Normalization is the one algorithm here with both kinds of gate: an
       # independent implementation above, and the UCD's exhaustive file here.
       - name: normalize_conformance (UCD test file)
+        if: ${{ !cancelled() }}
         run: sh scripts/normalize_conformance.sh
 
       - name: host_matrix (every builtin on every backend)
+        if: ${{ !cancelled() }}
         run: sh scripts/host_matrix.sh
 
       # These two landed with v0.1.304/305 but were never wired in here — a
       # gate that exists and does not run is a claim, not a check.
       - name: thread_leak_check (a leak is reported, a join is not)
+        if: ${{ !cancelled() }}
         run: sh scripts/thread_leak_check.sh
 
       - name: virtual_clock_check (parked threads advance the clock)
+        if: ${{ !cancelled() }}
         run: sh scripts/virtual_clock_check.sh
 
       # Arena capacity stays proportional to allocation: one giant allocation
       # must neither strand the bump block's tail nor become the doubling base
       # (v0.1.307). Deterministic — the meter is MERE_REGION_STATS, not RSS.
       - name: region_slack_check (capacity tracks allocation)
+        if: ${{ !cancelled() }}
         run: sh scripts/region_slack_check.sh
 
       # The enumerated escape table. Every way a region-bound value can reach
@@ -261,6 +288,7 @@ jobs:
       # disagreeing with nothing watching is what Q-053 was. Open holes are
       # rows, not absences: if one closes, this FAILS until the table says so.
       - name: escape_check (region escape routes, enumerated)
+        if: ${{ !cancelled() }}
         run: sh scripts/escape_check.sh
 
       # The README, executed. Its Quick-examples transcript is cut from the
@@ -270,6 +298,7 @@ jobs:
       # versions old while every gate here was green: nothing was pointed
       # outward. This is.
       - name: first_run_check (the README, executed)
+        if: ${{ !cancelled() }}
         run: sh scripts/first_run_check.sh
 
       # Parts of the Wasm runtime are literal WAT text gated behind a flag only
@@ -278,6 +307,7 @@ jobs:
       # were both that, in sections wrong since values widened. Every gated
       # section needs a program, or a written reason it cannot have one.
       - name: section_coverage (every hand-written runtime section has a program)
+        if: ${{ !cancelled() }}
         run: sh scripts/section_coverage.sh
 
       # The cross-language benchmark suite, deterministic half only: every
@@ -287,12 +317,14 @@ jobs:
       # measure the runner. Reference toolchains absent from the image are
       # skipped with a printed reason rather than silently.
       - name: bench_check (the implementations agree; allocation is in band)
+        if: ${{ !cancelled() }}
         run: sh scripts/bench_check.sh
 
       # The --lib boundary, checked from the outside: the .so's exported
       # symbol set is exactly the boundary, a C host linking it gets the
       # right values, and module init runs once (v0.1.308).
       - name: lib_check (shared-library boundary)
+        if: ${{ !cancelled() }}
         run: sh scripts/lib_check.sh
 
       # Readiness I/O (v0.1.313): the transcript checks both directions --
@@ -300,12 +332,14 @@ jobs:
       # happened -- and pins the coded would-block returns on nonblocking
       # read / accept / write.
       - name: io_poll_check (readiness answers what it claims)
+        if: ${{ !cancelled() }}
         run: sh scripts/io_poll_check.sh
 
       # Audio output (v0.1.314): the queue's contract under the SDL dummy
       # driver — visible pending bytes, bounded drain to exactly 0, -1 after
       # close. Sample correctness is the consumer's oracle, not this gate's.
       - name: audio_check (the audio queue's contract, headless)
+        if: ${{ !cancelled() }}
         run: sh scripts/audio_check.sh
 
       # Float results must not depend on the C optimizer (v0.1.315): the
@@ -313,15 +347,19 @@ jobs:
       # must match the interpreter. Without the emitted FP_CONTRACT OFF
       # pragma, clang's default fma contraction breaks both claims.
       - name: fp_contract_check (the optimizer must not change the answer)
+        if: ${{ !cancelled() }}
         run: sh scripts/fp_contract_check.sh
 
       - name: selfhost_check
+        if: ${{ !cancelled() }}
         run: sh scripts/selfhost_check.sh
 
       - name: lsp_smoke
+        if: ${{ !cancelled() }}
         run: sh scripts/lsp_smoke.sh
 
       - name: socket_parity
+        if: ${{ !cancelled() }}
         run: sh scripts/socket_parity.sh
 
       # Three runtime sections exist only under `-w --component`, so the parity
@@ -330,9 +368,11 @@ jobs:
       # component toolchain installed for socket_parity above, and skips loudly
       # rather than silently if that toolchain is absent.
       - name: component_parity (the component-only sections, run)
+        if: ${{ !cancelled() }}
         run: sh scripts/component_parity.sh
 
       - name: tcp_read_codes
+        if: ${{ !cancelled() }}
         run: sh scripts/tcp_read_codes.sh
 
       # A Mere program ANSWERING a TLS connection, not dialling one. The client
@@ -341,6 +381,7 @@ jobs:
       # oracles are curl and openssl s_client -- two TLS implementations that
       # are not ours and cannot be made lenient from this repository.
       - name: tls_server_check (a Mere program terminates TLS)
+        if: ${{ !cancelled() }}
         run: sh scripts/tls_server_check.sh
 
       # The Protocol Buffers wire format against protoc's BYTES. Runs the
@@ -349,6 +390,7 @@ jobs:
       # 63-bit and the compiled backends are 64-bit, and that divergence is
       # PINNED here rather than dropped, so a fix breaks this gate and says so.
       - name: proto_parity (vs protoc's bytes)
+        if: ${{ !cancelled() }}
         run: sh scripts/proto_parity.sh
 
       # The .proto parser and descriptor encoder, byte-identical to
@@ -357,6 +399,7 @@ jobs:
       # schema is serialised by the code that reads wire bytes and one oracle
       # checks both layers at once.
       - name: proto_desc_parity (vs protoc's descriptor set)
+        if: ${{ !cancelled() }}
         run: sh scripts/proto_desc_parity.sh
 
       # The GENERATED codec against protoc's bytes: decode protoc's output and
@@ -364,6 +407,7 @@ jobs:
       # the committed examples/hello_pb.mere against a fresh run, because a
       # generator whose output nobody reads is a generator nobody can review.
       - name: proto_gen_parity (generated codec vs protoc's bytes)
+        if: ${{ !cancelled() }}
         run: sh scripts/proto_gen_parity.sh
 
       # The GraphQL parser and printer against graphql-js, by sending our output
@@ -372,6 +416,7 @@ jobs:
       # to hide. A deliberately broken lexer proved the round-trip alone is blind
       # to the Int/Float distinction, so the harness asks for that kind directly.
       - name: graphql_parity (vs graphql-js)
+        if: ${{ !cancelled() }}
         run: sh scripts/graphql_parity.sh
 
       # The executor against graphql-js's execute(), with the resolvers being the
@@ -380,21 +425,26 @@ jobs:
       # null destroys the nearest nullable ancestor, and an item error in [Int!]
       # nulls the whole list.
       - name: graphql_exec_parity (vs graphql-js execute)
+        if: ${{ !cancelled() }}
         run: sh scripts/graphql_exec_parity.sh
 
       - name: graphql_intro_parity (vs graphql-js introspection)
+        if: ${{ !cancelled() }}
         run: sh scripts/graphql_intro_parity.sh
 
       - name: graphql_validate_parity (vs graphql-js validate)
+        if: ${{ !cancelled() }}
         run: sh scripts/graphql_validate_parity.sh
 
       - name: graphql_server_parity (a native GraphQL endpoint, real clients)
+        if: ${{ !cancelled() }}
         run: sh scripts/graphql_server_parity.sh
 
       # HTTP/2 framing against hyperframe, in both directions, plus the reserved
       # bit of the stream identifier — the one field that behaves correctly
       # against every well-behaved peer while being wrong.
       - name: http2_parity (vs hyperframe)
+        if: ${{ !cancelled() }}
         run: sh scripts/http2_parity.sh
 
       # HPACK against the Python hpack library, per CONNECTION rather than per
@@ -402,6 +452,7 @@ jobs:
       # different header name. Includes a block captured from grpc-go, which is
       # what checks the two tables the oracle and the implementation share.
       - name: hpack_parity (vs hpack)
+        if: ${{ !cancelled() }}
         run: sh scripts/hpack_parity.sh
 
       # The whole stack, driven by clients that know nothing about it: grpcurl
@@ -410,26 +461,32 @@ jobs:
       # not decoration — removing the server's frame reassembly passed every other
       # section, because on loopback a request arrives in a single read.
       - name: grpc_parity (grpcurl and python h2 against a Mere server)
+        if: ${{ !cancelled() }}
         run: sh scripts/grpc_parity.sh
 
       # The window capability, checked by reading the window's own pixels back.
       # SDL's `dummy` video driver gives a software renderer and an event queue
       # with no display, so this needs no X server on the runner.
       - name: window_check
+        if: ${{ !cancelled() }}
         run: sh scripts/window_check.sh
 
       # The HTML tokenizer against html5lib-tests, the suite maintained alongside
       # the specification. Vendored, so this needs no network.
       - name: html_tokenizer_conformance
+        if: ${{ !cancelled() }}
         run: sh scripts/html_tokenizer_conformance.sh
 
       - name: infer_scaling (type inference stays linear)
+        if: ${{ !cancelled() }}
         run: sh scripts/infer_scaling.sh
 
       - name: wasm_sourcemap
+        if: ${{ !cancelled() }}
         run: sh scripts/wasm_sourcemap.sh
 
       - name: debug_info (lldb agrees where each line is)
+        if: ${{ !cancelled() }}
         run: sh scripts/debug_info.sh
 
       # The RISC-V arc's headline claim is that the same bytes behave
