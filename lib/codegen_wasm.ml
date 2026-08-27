@@ -9186,47 +9186,50 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       let error_prefix_off = fresh_str_offset " [ERROR] " in
       Printf.sprintf {|
   (func $__mere_logger_info_fn (param $env i64) (param $msg i64) (result i64)
-    (local $tmp i32)
-    (local.set $tmp (call $__lang_str_concat (local.get $env) (i32.const %d)))
+    (local $tmp i64)
+    (local.set $tmp (call $__lang_str_concat (local.get $env) (i64.const %d)))
     (local.set $tmp (call $__lang_str_concat (local.get $tmp) (local.get $msg)))
     (call $puts (local.get $tmp))
-    (i32.const 0))
+    (i64.const 0))
   (func $__mere_logger_warn_fn (param $env i64) (param $msg i64) (result i64)
-    (local $tmp i32)
-    (local.set $tmp (call $__lang_str_concat (local.get $env) (i32.const %d)))
+    (local $tmp i64)
+    (local.set $tmp (call $__lang_str_concat (local.get $env) (i64.const %d)))
     (local.set $tmp (call $__lang_str_concat (local.get $tmp) (local.get $msg)))
     (call $puts (local.get $tmp))
-    (i32.const 0))
+    (i64.const 0))
   (func $__mere_logger_error_fn (param $env i64) (param $msg i64) (result i64)
-    (local $tmp i32)
-    (local.set $tmp (call $__lang_str_concat (local.get $env) (i32.const %d)))
+    (local $tmp i64)
+    (local.set $tmp (call $__lang_str_concat (local.get $env) (i64.const %d)))
     (local.set $tmp (call $__lang_str_concat (local.get $tmp) (local.get $msg)))
     (call $puts (local.get $tmp))
-    (i32.const 0))
+    (i64.const 0))
   (func $__mere_mk_logger (param $prefix i64) (result i64)
     (local $logger i32) (local $cl i32)
-    ;; Logger record: 3 ptrs to closures = 12 bytes
+    ;; Logger record: 3 fields. A record FIELD is 8 bytes and is read with
+    ;; `i64.load offset=(8 * idx)` -- see the field-access emission. The
+    ;; CLOSURE it points at is two i32 slots (env, fn_idx), which is what the
+    ;; indirect-call path loads. Two different widths, one record.
     (local.set $logger (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $logger) (i32.const 12)))
-    ;; info closure (8 bytes: env, fn_idx)
+    (global.set $__lang_bump (i32.add (local.get $logger) (i32.const 24)))
+    ;; info closure (8 bytes: env i32, fn_idx i32)
     (local.set $cl (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
-    (i32.store offset=0 (local.get $cl) (local.get $prefix))
+    (i32.store offset=0 (local.get $cl) (i32.wrap_i64 (local.get $prefix)))
     (i32.store offset=4 (local.get $cl) (i32.const %d))
-    (i32.store offset=0 (local.get $logger) (local.get $cl))
+    (i64.store offset=0 (local.get $logger) (i64.extend_i32_u (local.get $cl)))
     ;; warn
     (local.set $cl (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
-    (i32.store offset=0 (local.get $cl) (local.get $prefix))
+    (i32.store offset=0 (local.get $cl) (i32.wrap_i64 (local.get $prefix)))
     (i32.store offset=4 (local.get $cl) (i32.const %d))
-    (i32.store offset=4 (local.get $logger) (local.get $cl))
+    (i64.store offset=8 (local.get $logger) (i64.extend_i32_u (local.get $cl)))
     ;; error
     (local.set $cl (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
-    (i32.store offset=0 (local.get $cl) (local.get $prefix))
+    (i32.store offset=0 (local.get $cl) (i32.wrap_i64 (local.get $prefix)))
     (i32.store offset=4 (local.get $cl) (i32.const %d))
-    (i32.store offset=8 (local.get $logger) (local.get $cl))
-    (local.get $logger))|}
+    (i64.store offset=16 (local.get $logger) (i64.extend_i32_u (local.get $cl)))
+    (i64.extend_i32_u (local.get $logger)))|}
         info_prefix_off warn_prefix_off error_prefix_off
         info_idx warn_idx error_idx
     end
@@ -9241,43 +9244,43 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       let eq_off         = fresh_str_offset "=" in
       Printf.sprintf {|
   (func $__mere_metrics_inc_fn (param $env i64) (param $name i64) (result i64)
-    (local $tmp i32)
-    (local.set $tmp (call $__lang_str_concat (i32.const %d) (local.get $name)))
+    (local $tmp i64)
+    (local.set $tmp (call $__lang_str_concat (i64.const %d) (local.get $name)))
     (call $puts (local.get $tmp))
-    (i32.const 0))
+    (i64.const 0))
   (func $__mere_metrics_record_inner_fn (param $env i64) (param $n i64) (result i64)
-    (local $tmp i32) (local $ns i32)
+    (local $tmp i64) (local $ns i64)
     (local.set $ns (call $show_int (local.get $n)))
-    (local.set $tmp (call $__lang_str_concat (i32.const %d) (local.get $env)))
-    (local.set $tmp (call $__lang_str_concat (local.get $tmp) (i32.const %d)))
+    (local.set $tmp (call $__lang_str_concat (i64.const %d) (local.get $env)))
+    (local.set $tmp (call $__lang_str_concat (local.get $tmp) (i64.const %d)))
     (local.set $tmp (call $__lang_str_concat (local.get $tmp) (local.get $ns)))
     (call $puts (local.get $tmp))
-    (i32.const 0))
+    (i64.const 0))
   (func $__mere_metrics_record_outer_fn (param $env i64) (param $name i64) (result i64)
     (local $cl i32)
     (local.set $cl (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
-    (i32.store offset=0 (local.get $cl) (local.get $name))
+    (i32.store offset=0 (local.get $cl) (i32.wrap_i64 (local.get $name)))
     (i32.store offset=4 (local.get $cl) (i32.const %d))
-    (local.get $cl))
+    (i64.extend_i32_u (local.get $cl)))
   (func $__mere_mk_metrics (result i64)
     (local $m i32) (local $cl i32)
-    ;; Metrics record: 2 ptrs = 8 bytes
+    ;; Metrics record: 2 fields of 8 bytes each (see mk_logger).
     (local.set $m (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $m) (i32.const 8)))
+    (global.set $__lang_bump (i32.add (local.get $m) (i32.const 16)))
     ;; inc closure
     (local.set $cl (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
     (i32.store offset=0 (local.get $cl) (i32.const 0))
     (i32.store offset=4 (local.get $cl) (i32.const %d))
-    (i32.store offset=0 (local.get $m) (local.get $cl))
+    (i64.store offset=0 (local.get $m) (i64.extend_i32_u (local.get $cl)))
     ;; record outer closure
     (local.set $cl (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
     (i32.store offset=0 (local.get $cl) (i32.const 0))
     (i32.store offset=4 (local.get $cl) (i32.const %d))
-    (i32.store offset=4 (local.get $m) (local.get $cl))
-    (local.get $m))|}
+    (i64.store offset=8 (local.get $m) (i64.extend_i32_u (local.get $cl)))
+    (i64.extend_i32_u (local.get $m)))|}
         inc_prefix_off rec_prefix_off eq_off rec_inner inc_idx rec_outer
     end
   in
