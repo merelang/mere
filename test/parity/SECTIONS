@@ -1,47 +1,71 @@
 # test/parity/SECTIONS -- runtime sections that exist only when a program asks
-# for them, and the program that asks.
+# for them, and the program that asks. All three compiling backends.
 #
-# WHAT THIS IS. Parts of the Wasm runtime are emitted as literal WAT text
-# rather than compiled from Mere, each gated behind a flag only a program using
-# that feature sets. Text that is never emitted is never validated, never
-# linked and never run -- so a representation change walks past it and nothing
-# goes red. That is not hypothetical; it happened three times in one day:
+# WHAT THIS IS. Parts of each backend's runtime are emitted as literal text --
+# WAT, C, LLVM IR -- rather than compiled from Mere, each gated behind a flag
+# only a program using that feature sets. Text that is never emitted is never
+# validated, never linked and never run, so a representation change walks past
+# it and nothing goes red. That is not hypothetical; it happened three times in
+# one day:
 #
-#   Q-068  mk_logger / mk_metrics: i32 locals against i64 signatures, and a
-#          Logger record with 4-byte fields where a field is 8. No
-#          Wasm-compiled program in the corpus used a capability.
+#   Q-068  mk_logger / mk_metrics: i32 locals against i64 signatures, a Logger
+#          record with 4-byte fields where a field is 8, and on C a function
+#          pointer typed `int` where the closure says `long long`. No compiled
+#          program in the corpus used a capability.
 #   Q-069  $mere_list_len: tag read as i32 at offset 0, payload at offset 4 --
-#          the layout from before values widened. Nothing called it. (LLVM's
-#          list-len helper was broken twice over, separately.)
+#          the layout from before values widened. Nothing called it. LLVM's
+#          list-len helper was broken twice over, separately.
 #
 # THE RULE THIS FILE ENCODES: a section with no program is untested code that
 # looks like tested code.
 #
+# AND THE OTHER HALF: most sections audited this way were FINE. Four Wasm
+# sections and one C section had no program; one of the five was broken. An
+# untested section is a risk, not a defect, and a file that only recorded the
+# defects would make the ratio unreadable.
+#
 # MODE is which invocation reaches the section, and it is load-bearing:
 #
-#   plain      `mere -w`. test/parity/ compiles this way, so the section is
-#              also required to be reached by SOME parity program -- the named
-#              one is a pointer, not a licence.
-#   component  `mere -w --component`. Three sections exist only here, and the
+#   wasm       `mere -w`      | test/parity/ compiles all three of these ways,
+#   c          `mere -c`      | so these sections are additionally required to
+#   llvm       `mere -ll`     | be reached by SOME parity program. The named
+#                             | program is a pointer, not a licence.
+#   component  `mere -w --component`. Three sections exist only here and the
 #              parity harness cannot reach them at all. scripts/
-#              component_parity.sh builds and RUNS these against the
-#              interpreter; scripts/section_coverage.sh checks the section is
-#              emitted at all.
+#              component_parity.sh builds and RUNS them against the
+#              interpreter; this gate checks they are emitted.
 #   none       genuinely unreachable, with the reason in the last column. There
 #              are none today. The status is kept because the next one should
 #              be a row with a reason rather than an absence, and because
-#              section_coverage FAILS if a `none` row becomes reachable instead
-#              of passing quietly.
+#              section_coverage FAILS if a `none` row becomes reachable.
 #
-# section              marker                  mode       program
-file_io_used           __lang_read_file_h      plain      test/parity/file_pio.mere
-list_len_used          mere_list_len           plain      test/parity/list_len.mere
-logger_used            __mere_logger_info_fn   plain      test/parity/logger_metrics_caps.mere
-metrics_used           __mere_metrics_inc_fn   plain      test/parity/logger_metrics_caps.mere
-vec_to_list_used       mere_vec_to_list        plain      test/parity/show_composite.mere
-wasm_args_used         __lang_args             plain      test/parity/args_empty.mere
-wasm_args_host_used    __lang_args_host        plain      test/parity/args_empty.mere
-wasm_time_used         __lang_time             plain      test/parity/arith.mere
-wasm_env_used          __lang_env_var          component  test/component/env_var.mere
-wasm_stdin_used        __lang_read_stdin       component  test/component/read_stdin.mere
-wasm_socket_ffi        sock_instnet            component  test/component/socket_ffi_shape.mere
+# section                        marker                    mode       program
+file_io_used                     __lang_read_file_h        wasm       test/parity/file_pio.mere
+list_len_used                    mere_list_len             wasm       test/parity/list_len.mere
+logger_used                      __mere_logger_info_fn     wasm       test/parity/logger_metrics_caps.mere
+metrics_used                     __mere_metrics_inc_fn     wasm       test/parity/logger_metrics_caps.mere
+vec_to_list_used                 mere_vec_to_list          wasm       test/parity/show_composite.mere
+wasm_args_used                   __lang_args               wasm       test/parity/args_empty.mere
+wasm_args_host_used              __lang_args_host          wasm       test/parity/args_empty.mere
+wasm_time_used                   __lang_time               wasm       test/parity/arith.mere
+wasm_env_used                    __lang_env_var            component  test/component/env_var.mere
+wasm_stdin_used                  __lang_read_stdin         component  test/component/read_stdin.mere
+wasm_socket_ffi                  sock_instnet              component  test/component/socket_ffi_shape.mere
+c:bytebuf_runtime                mere_bytebuf_new          c          test/parity/bytebuf_edges.mere
+c:bytes_vec_bridge_runtime       __lang_bytes_of_vec       c          test/parity/bytes_vec_bridge.mere
+c:file_pwrite_bytes_runtime      __lang_file_pwrite_bytes  c          test/parity/file_pwrite_bytes.mere
+c:logger_runtime                 __mere_logger_info_fn     c          test/parity/logger_metrics_caps.mere
+c:metrics_runtime                __mere_metrics_inc_fn     c          test/parity/logger_metrics_caps.mere
+c:read_lines_helper              __lang_read_lines         c          test/parity/read_lines.mere
+c:str_list_helpers               __lang_utf8_span          c          test/parity/adt_match.mere
+c:strbuf_runtime                 mere_strbuf_new           c          test/parity/encoding_decode.mere
+llvm:args_runtime                __lang_args               llvm       test/parity/args_empty.mere
+llvm:bytes_runtime               __lang_bytes_alloc        llvm       test/parity/bytes_roundtrip.mere
+llvm:bytes_vec_bridge_runtime    __lang_bytes_of_vec       llvm       test/parity/bytes_vec_bridge.mere
+llvm:file_pio_runtime            __lang_file_openrw        llvm       test/parity/file_pio.mere
+llvm:logger_runtime              __mere_logger_info_fn     llvm       test/parity/logger_metrics_caps.mere
+llvm:metrics_runtime             __mere_metrics_inc_fn     llvm       test/parity/logger_metrics_caps.mere
+llvm:str_count_runtime           __lang_str_count          llvm       test/parity/prop_str.mere
+llvm:str_join_runtime            __lang_str_join           llvm       test/parity/coll_edges.mere
+llvm:str_split_runtime           __lang_list_str_nil       llvm       test/parity/adt_match.mere
+llvm:strbuf_runtime              mere_strbuf_new           llvm       test/parity/encoding_decode.mere

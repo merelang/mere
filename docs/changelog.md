@@ -4,6 +4,42 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.331 — 2026-08-27
+
+_The same audit on C and LLVM: eighteen more sections, one with no program, and
+it worked._
+
+v0.1.329 enumerated the Wasm backend's hand-emitted runtime sections and
+measured which the corpus reaches. The C metrics defect in Q-068 had been found
+by accident — through a Wasm program — so the same measurement was owed to the
+other two backends.
+
+**C has eight gated sections, LLVM ten.** Compiling all 135 parity programs
+with `-c` and `-ll` and looking for each section's marker left exactly one with
+no program: C's `read_lines_helper`. Probing it found `read_lines` correct on
+the interpreter and C, and **refused by name** on LLVM and Wasm (Phase 5.1 /
+6.1 MVP) — the honest half of a partial implementation, which parity records as
+`UNSUP`. `test/parity/read_lines.mere` covers it, with a blank line and no
+trailing newline in the payload, since that is where a line splitter's
+off-by-one lives.
+
+**Running total: five sections across three backends had no program, and one of
+the five was broken.** Writing the other four down matters as much — a file
+that recorded only the defects would make the ratio unreadable.
+
+`test/parity/SECTIONS` now carries all three backends (29 rows), keyed
+`c:` / `llvm:` where a section name would otherwise collide — `logger_used`
+names a different piece of text in each. `section_coverage` compiles the corpus
+once per mode and each row's program in the mode the row claims, so a
+component-only section declared `wasm` fails on both counts. Extractor and
+table agree at 29 in both directions, which is the check that the gate is
+looking at all.
+
+parity 136/0, `dune test` 2588/0, section_coverage 29 sections, component_parity
+3 programs.
+
+---
+
 ## v0.1.330 — 2026-08-27
 
 _The three sections that had no program now have one, and none of them was
