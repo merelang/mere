@@ -1749,6 +1749,18 @@ let rec emit_expr (e : Ast.expr) : string =
             unsupported e.loc
               ("extern `" ^ name ^ "` used as a value must have a simple `A -> B` \
                 type; wrap a curried or higher-order extern as `fn x -> " ^ name ^ " x`"))
+       else if List.mem_assoc name Typer.initial_env && not (user_shadows name) then
+         (* Q-071: a builtin this backend has no lowering for used to fall
+            through to `mu_<name>` -- the mangling for a USER binding -- so the
+            emitted C referenced an identifier nobody declared and the
+            diagnostic came from the C compiler, about a name the programmer
+            did not write. LLVM and Wasm name their own gap; this is the same
+            fix, and Q-064 recorded the shape a version earlier: what is wrong
+            is less the missing lowering than the failure being handed to cc.
+            `user_shadows` keeps a user's own `let env_var = ...` on the
+            ordinary path -- the name being a builtin does not make it one
+            here. *)
+         unsupported e.loc (name ^ " has no C lowering yet (host builtin)")
        else c_safe_name name))
   | Ast.Annot (inner, _) -> c_tail_pos := __in_tail; emit_expr inner
   | Ast.Neg a -> "(-" ^ emit_expr a ^ ")"
@@ -3113,6 +3125,18 @@ let rec emit_expr (e : Ast.expr) : string =
            unsupported e.loc
              "of_json: cannot infer target type (add an annotation, e.g. `(of_json s : T)`)"
        in
+       (* Q-071: the tag has to name a decoder that will EXIST. `ty_tag` erases
+          an unconstrained type variable to "int" on the documented grounds
+          that nothing inspects such a value -- true where the tag names a
+          representation, false here, where it names a function whose
+          definition `add_type_and_deps` declines to emit for a non-concrete
+          type. The registrar and the emitter were applying different rules to
+          the same type, so `let _ = of_json "1"; 0` called `of_json_int` and
+          nobody defined it. Same rule now, and the message this already had
+          for a missing type is the right one for an undetermined one. *)
+       if not (ty_is_concrete target_ty) then
+         unsupported e.loc
+           "of_json: cannot infer target type (add an annotation, e.g. `(of_json s : T)`)";
        Printf.sprintf "of_json_%s(%s)" (ty_tag target_ty) (emit_expr arg)
      | Ast.Var "of_json_opt" ->
        (* result is `T option`; dispatch on the inner T's tag. *)
@@ -3124,6 +3148,10 @@ let rec emit_expr (e : Ast.expr) : string =
             | _ -> unsupported e.loc "of_json_opt: result type is not an option")
          | None -> unsupported e.loc "of_json_opt: cannot infer target type"
        in
+       (* Q-071, the option half. See of_json above. *)
+       if not (ty_is_concrete inner) then
+         unsupported e.loc
+           "of_json_opt: cannot infer target type (add an annotation, e.g. `(of_json_opt s : T option)`)";
        Printf.sprintf "of_json_opt_%s(%s)" (ty_tag inner) (emit_expr arg)
      | Ast.Var "mk_logger" ->
        (* Phase 16.3 / DEFERRED §1.5: emit a runtime helper call that

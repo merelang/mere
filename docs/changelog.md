@@ -4,6 +4,47 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.333 — 2026-08-27
+
+_Q-071: the six `nocompile` rows were two mechanisms, and both were the failure
+being handed to a C compiler._
+
+`nocompile` is `host_matrix`'s worst category: the backend emitted C, and a C
+compiler then rejected it — so the diagnostic reaches the programmer from a
+tool they did not invoke, about a name they did not write. Six rows had it.
+Classifying them before fixing anything (the point of classifying is to decide
+whether they can be bundled) split them **two ways, not six and not one**.
+
+**Four rows, one mechanism: `mu_<name>`.** `int_max`, `int_min`, `env_var` and
+`random_float` have no C lowering at all, and the reference path fell through
+to `c_safe_name` — the mangling for a **user** binding. So the emitted C
+referenced `mu_int_max`, which nobody declared. LLVM and Wasm name their own
+gap; C now does too, via the same `Typer.initial_env` derivation as v0.1.332,
+guarded by `user_shadows` so a program's own `let env_var = ...` stays on the
+ordinary path. Q-064 recorded this shape one release before this one found the
+rest of it.
+
+**Two rows, a different one: a tag that named a function nobody emits.**
+`ty_tag` erases an unconstrained type variable to `"int"`, on the documented
+grounds that nothing ever inspects such a value — correct where a tag names a
+**representation**, and wrong here, where `of_json_<tag>` names a **function
+whose definition** `add_type_and_deps` declines to emit for a non-concrete
+type. The registrar and the emitter were applying different rules to the same
+type, so `let _ = of_json "1"; 0` called `of_json_int` and nothing defined it.
+Both now use the registrar's rule, and the message `of_json` already carried
+for a *missing* target type is the right one for an *undetermined* one.
+`(of_json s : int)` is unaffected.
+
+`host_matrix`: **0 MISSING, 0 nocompile, 0 error** — every hole in that table is
+now a backend saying so itself, plus two `bare-only` cells that are an honest
+third answer. It has never read that way before.
+
+`dune test` 2594/0 (six new, poisoned two ways: removing the backstop fails
+exactly the two `mu_` tests, removing the concreteness check exactly the two
+`of_json` ones), parity 136/0.
+
+---
+
 ## v0.1.332 — 2026-08-27
 
 _The matrix whose job is to say which backend has which builtin was missing a

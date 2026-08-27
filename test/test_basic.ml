@@ -13869,6 +13869,46 @@ let () =
        in
        if has_len then "refused" else m)
     "refused";
+  (* Q-071 (v0.1.333): the two shapes host_matrix called `nocompile` -- the C
+     backend emitting C that a C compiler then rejects. Both are the failure
+     being handed to cc, about a name the programmer never wrote. *)
+  let c_refusal src =
+    try
+      let prog = Pipeline.parse_program src in
+      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+      ignore (Codegen_c.emit_program ~main_ty:Ast.TyInt prog); "emitted"
+    with Codegen_c.Codegen_error (_, m) -> m
+  in
+  let says needle m =
+    let n = String.length m and k = String.length needle in
+    let rec go i = i + k <= n && (String.sub m i k = needle || go (i + 1)) in
+    if go 0 then "refused" else m
+  in
+  (* A: a builtin with no C lowering fell through to `mu_<name>` -- the
+     mangling for a USER binding -- so cc reported an undeclared identifier. *)
+  check "Q-071: a builtin with no C lowering names its own gap"
+    (says "has no C lowering yet" (c_refusal "let _ = int_max; 0"))
+    "refused";
+  check "Q-071: and so does a builtin-shaped function"
+    (says "has no C lowering yet" (c_refusal "let _ = env_var \"x\"; 0"))
+    "refused";
+  (* ...but a user binding of that same name is not a builtin here. *)
+  check "Q-071: a user binding that shadows a builtin still compiles"
+    (let out = c_refusal "let env_var = fn (s: str) -> str_len s; env_var \"abc\"" in
+     if out = "emitted" then "emitted" else out)
+    "emitted";
+  (* B: `ty_tag` erases an unconstrained type variable to "int" -- right where
+     a tag names a representation, wrong where it names a function whose
+     definition the registrar declines to emit for a non-concrete type. *)
+  check "Q-071: of_json with an undetermined target is refused, not named"
+    (says "cannot infer target type" (c_refusal "let _ = of_json \"1\"; 0"))
+    "refused";
+  check "Q-071: of_json_opt likewise"
+    (says "cannot infer target type" (c_refusal "let _ = of_json_opt \"1\"; 0"))
+    "refused";
+  check "Q-071: an annotated of_json still emits"
+    (c_refusal "let n = (of_json \"1\" : int); n")
+    "emitted";
   check "v0.1.279: len on an actual list still walks it"
     (Pipeline.process "let xs = Cons (1, Cons (2, Nil)); len xs") "2";
   (* the use-gate that emitted a call to a function it did not emit *)
