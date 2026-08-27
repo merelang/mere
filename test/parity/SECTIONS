@@ -1,40 +1,47 @@
-# test/parity/SECTIONS -- runtime sections that only exist when a program asks
-# for them, and the program in this corpus that asks.
+# test/parity/SECTIONS -- runtime sections that exist only when a program asks
+# for them, and the program that asks.
 #
 # WHAT THIS IS. Parts of the Wasm runtime are emitted as literal WAT text
-# rather than compiled from Mere, and each is gated behind a flag that only a
-# program using that feature sets. Text that is never emitted is never
-# validated, never linked and never run -- so a representation change can walk
-# past it and nothing goes red.
-#
-# That is not hypothetical. It has happened three times, all found in one day:
+# rather than compiled from Mere, each gated behind a flag only a program using
+# that feature sets. Text that is never emitted is never validated, never
+# linked and never run -- so a representation change walks past it and nothing
+# goes red. That is not hypothetical; it happened three times in one day:
 #
 #   Q-068  mk_logger / mk_metrics: i32 locals against i64 signatures, and a
-#          Logger record with 4-byte fields where a field is 8. No Wasm-compiled
-#          program in the corpus used a capability.
+#          Logger record with 4-byte fields where a field is 8. No
+#          Wasm-compiled program in the corpus used a capability.
 #   Q-069  $mere_list_len: tag read as i32 at offset 0, payload at offset 4 --
-#          the layout from before values widened. Nothing called it.
-#          (LLVM's list-len helper was broken twice over, separately.)
+#          the layout from before values widened. Nothing called it. (LLVM's
+#          list-len helper was broken twice over, separately.)
 #
-# So the rule this file encodes: A SECTION WITH NO PROGRAM IS UNTESTED CODE
-# THAT LOOKS LIKE TESTED CODE. scripts/section_coverage.sh compiles every
-# parity program, collects the sections that actually appear, and fails if a
-# section has none.
+# THE RULE THIS FILE ENCODES: a section with no program is untested code that
+# looks like tested code.
 #
-# UNREACHABLE rows are the honest half. Some sections cannot be reached by this
-# harness at all -- it runs `mere -w`, not `mere -w --component`, and it has no
-# network. Those are recorded WITH THE REASON rather than left looking covered.
-# If one becomes reachable, the gate says so rather than quietly passing.
+# MODE is which invocation reaches the section, and it is load-bearing:
 #
-# section              marker                  status       covered-by / why
-file_io_used           __lang_read_file_h      COVERED      file_pio.mere
-list_len_used          mere_list_len           COVERED      list_len.mere
-logger_used            __mere_logger_info_fn   COVERED      logger_metrics_caps.mere
-metrics_used           __mere_metrics_inc_fn   COVERED      logger_metrics_caps.mere
-vec_to_list_used       mere_vec_to_list        COVERED      show_composite.mere
-wasm_args_used         __lang_args             COVERED      args_empty.mere
-wasm_args_host_used    __lang_args_host        COVERED      args_empty.mere
-wasm_time_used         __lang_time             COVERED      arith.mere
-wasm_env_used          __lang_env_var          UNREACHABLE  component-only (`-w --component`); this harness runs plain `-w`
-wasm_stdin_used        __lang_read_stdin       UNREACHABLE  component-only, and reading stdin in a parity run would block
-wasm_socket_ffi        sock_instnet            UNREACHABLE  needs a live peer; scripts/socket_parity.sh covers sockets separately
+#   plain      `mere -w`. test/parity/ compiles this way, so the section is
+#              also required to be reached by SOME parity program -- the named
+#              one is a pointer, not a licence.
+#   component  `mere -w --component`. Three sections exist only here, and the
+#              parity harness cannot reach them at all. scripts/
+#              component_parity.sh builds and RUNS these against the
+#              interpreter; scripts/section_coverage.sh checks the section is
+#              emitted at all.
+#   none       genuinely unreachable, with the reason in the last column. There
+#              are none today. The status is kept because the next one should
+#              be a row with a reason rather than an absence, and because
+#              section_coverage FAILS if a `none` row becomes reachable instead
+#              of passing quietly.
+#
+# section              marker                  mode       program
+file_io_used           __lang_read_file_h      plain      test/parity/file_pio.mere
+list_len_used          mere_list_len           plain      test/parity/list_len.mere
+logger_used            __mere_logger_info_fn   plain      test/parity/logger_metrics_caps.mere
+metrics_used           __mere_metrics_inc_fn   plain      test/parity/logger_metrics_caps.mere
+vec_to_list_used       mere_vec_to_list        plain      test/parity/show_composite.mere
+wasm_args_used         __lang_args             plain      test/parity/args_empty.mere
+wasm_args_host_used    __lang_args_host        plain      test/parity/args_empty.mere
+wasm_time_used         __lang_time             plain      test/parity/arith.mere
+wasm_env_used          __lang_env_var          component  test/component/env_var.mere
+wasm_stdin_used        __lang_read_stdin       component  test/component/read_stdin.mere
+wasm_socket_ffi        sock_instnet            component  test/component/socket_ffi_shape.mere

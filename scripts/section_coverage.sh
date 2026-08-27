@@ -19,9 +19,12 @@
 #      not reach it is the failure this is here to prevent.
 #   3. Every COVERED section is reached by SOME parity program (the named one
 #      is a pointer, not the only permitted source).
-#   4. UNREACHABLE rows must still be unreachable. If any parity program starts
+#   4. `component` rows name a program compiled with `-w --component`, which is
+#      the only way three of these sections can be reached at all. Running them
+#      is scripts/component_parity.sh's job; this checks they are emitted.
+#   5. `none` rows must still be unreachable. If a parity program starts
 #      emitting one, the row is stale and says something untrue -- so the gate
-#      fails and asks for it to be promoted, rather than passing quietly.
+#      fails and asks for a mode, rather than passing quietly.
 #
 # WHY THE MARKERS ARE READ FROM THE COMPILER SOURCE. Copying the flag list here
 # would make this agree with a snapshot of the backend instead of the backend.
@@ -60,32 +63,42 @@ emitted=$(ls "$TMP" | grep -c '^wat\.' || true)
 [ "$emitted" -gt 0 ] || { echo "FAIL section_coverage: no parity program emitted Wasm -- nothing was measured"; exit 1; }
 
 rows=0
-while read -r flag marker status rest; do
+while read -r flag marker mode prog; do
   case "$flag" in ''|\#*) continue ;; esac
   rows=$((rows + 1))
-  # who actually emits it?
+  # who among the parity corpus emits it?
   hits="$(grep -l "\$$marker" "$TMP"/wat.* 2>/dev/null | sed 's/.*\/wat\.//' | tr '\n' ' ')"
-  case "$status" in
-    COVERED)
-      if [ -z "$hits" ]; then
-        echo "FAIL section_coverage[$flag]: marked COVERED and no parity program emits \`$marker\`"
-        fails=$((fails + 1))
+  case "$mode" in
+    plain|component)
+      if [ ! -f "$ROOT/$prog" ]; then
+        echo "FAIL section_coverage[$flag]: row names $prog, which does not exist"
+        fails=$((fails + 1)); continue
+      fi
+      # Compile the named program the way the row says it is reached, and
+      # require the section to actually appear. Naming a program that does not
+      # reach it is the failure this is here to prevent.
+      if [ "$mode" = component ]; then
+        sh "$ROOT/scripts/bounded.sh" "$BOUND" "$MERE" -w --component "$ROOT/$prog" > "$TMP/named" 2>/dev/null
       else
-        named="${rest%%.mere*}"
-        named="${named##* }"
-        [ -z "$named" ] || [ -f "$TMP/wat.$named" ] || named=""
-        if [ -n "$named" ] && ! grep -q "\$$marker" "$TMP/wat.$named"; then
-          echo "FAIL section_coverage[$flag]: row names $named.mere, which does not emit \`$marker\` (reached by:$hits)"
-          fails=$((fails + 1))
-        fi
+        sh "$ROOT/scripts/bounded.sh" "$BOUND" "$MERE" -w "$ROOT/$prog" > "$TMP/named" 2>/dev/null
+      fi
+      if ! grep -q "\$$marker" "$TMP/named"; then
+        echo "FAIL section_coverage[$flag]: $prog does not emit \`$marker\` under mode $mode"
+        fails=$((fails + 1))
+      fi
+      # A `plain` section must additionally be reached by the corpus at large;
+      # `component` ones cannot be, which is the whole reason for the column.
+      if [ "$mode" = plain ] && [ -z "$hits" ]; then
+        echo "FAIL section_coverage[$flag]: marked plain and no parity program emits \`$marker\`"
+        fails=$((fails + 1))
       fi ;;
-    UNREACHABLE)
+    none)
       if [ -n "$hits" ]; then
-        echo "FAIL section_coverage[$flag]: marked UNREACHABLE but reached by:$hits -- promote the row to COVERED"
+        echo "FAIL section_coverage[$flag]: marked unreachable but reached by:$hits -- give it a mode"
         fails=$((fails + 1))
       fi ;;
     *)
-      echo "FAIL section_coverage[$flag]: unknown status \`$status\` (want COVERED or UNREACHABLE)"
+      echo "FAIL section_coverage[$flag]: unknown mode \`$mode\` (want plain, component or none)"
       fails=$((fails + 1)) ;;
   esac
 done < "$TABLE"
@@ -94,5 +107,6 @@ if [ "$fails" -gt 0 ]; then
   echo "FAIL section_coverage: $fails problem(s) across $rows rows"
   exit 1
 fi
-unreach=$(awk '$1 !~ /^#/ && NF && $3 == "UNREACHABLE"' "$TABLE" | wc -l | tr -d ' ')
-echo "PASS section_coverage: $rows sections, $emitted programs compiled, $unreach declared unreachable"
+comp=$(awk '$1 !~ /^#/ && NF && $3 == "component"' "$TABLE" | wc -l | tr -d ' ')
+none=$(awk '$1 !~ /^#/ && NF && $3 == "none"' "$TABLE" | wc -l | tr -d ' ')
+echo "PASS section_coverage: $rows sections ($comp component-only, $none unreachable), $emitted parity programs compiled"

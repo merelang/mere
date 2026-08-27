@@ -1,0 +1,9 @@
+// The `read_stdin` section is component-only as well. It is also why a plain
+// parity run could not host this even if the section were reachable there:
+// read_stdin blocks until EOF, and a harness that feeds nothing would hang
+// rather than fail.
+let s = read_stdin ();
+{
+  print (str_of_int (str_len s));
+  print s
+}

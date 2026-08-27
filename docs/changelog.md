@@ -4,6 +4,43 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.330 — 2026-08-27
+
+_The three sections that had no program now have one, and none of them was
+broken._
+
+v0.1.329 left `test/parity/SECTIONS` with three rows marked UNREACHABLE: the
+parity harness compiles with plain `mere -w`, and `env_var`, `read_stdin` and
+the socket FFI helpers only exist under `-w --component`. Recording the reason
+was honest, but "cannot be reached by this harness" is a statement about the
+harness.
+
+`scripts/component_parity.sh` builds each as a component and **runs it against
+the interpreter**: `env_var` with one variable set and one deliberately unset,
+so both arms of the option are exercised and the answer does not depend on the
+machine; `read_stdin` with a fixed payload — which is also why parity could not
+host it, since `read_stdin` blocks until EOF and a harness feeding nothing
+would hang rather than fail. The socket program **opens nothing**: declaring
+the externs is what turns the section on, so it is built, validated and run,
+while talking to a live peer stays `socket_parity.sh`'s job. Those are two
+different questions and the file says so.
+
+**All three were correct.** After Q-068 and Q-069 the expectation was more of
+the same, and it is worth writing down that it was not: an untested section is
+a risk, not a defect.
+
+`SECTIONS` gains a `mode` column (`plain` / `component` / `none`) and
+`section_coverage` compiles each row's program the way the row says it is
+reached, so a `component` row mis-declared as `plain` fails on both counts.
+`none` survives as a status with no rows in it — the next genuinely unreachable
+section should be a row with a reason rather than an absence, and the gate
+still fails if one becomes reachable.
+
+Zero unreachable sections. parity 135/0, `dune test` 2588/0, section_coverage
+11 sections (3 component-only), component_parity 3 programs.
+
+---
+
 ## v0.1.329 — 2026-08-27
 
 _Q-069: `len` on a list did not work on two of four backends, and the audit

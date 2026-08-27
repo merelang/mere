@@ -1,0 +1,33 @@
+// Q-069 follow-up: the socket FFI's in-module helpers are a runtime section,
+// and a section nobody emits is never validated. scripts/socket_parity.sh
+// exercises them against a live peer -- which needs a peer, so it cannot be
+// what keeps the section from rotting on an ordinary run.
+//
+// This program does not open anything. Declaring the externs is what turns the
+// section on, so building it as a component validates the emitted helpers.
+// The two halves are on purpose: "does it validate" every run, "does it talk"
+// where a network exists.
+extern fn tcp_listen: int -> int;
+extern fn tcp_connect: str -> int -> int;
+extern fn tcp_read: int -> int -> int -> int;
+extern fn tcp_write: int -> int -> int -> int;
+extern fn tcp_close: int -> unit;
+extern fn mem_alloc: int -> int;
+extern fn mem_copy_str: int -> int -> str -> int;
+extern fn mem_to_str: int -> int -> str;
+
+let use_them = fn (n: int) ->
+  if n < 0 then {
+    let s = tcp_listen 0;
+    let c = tcp_connect "127.0.0.1" 0;
+    let b = mem_alloc 16;
+    let _ = mem_copy_str b 0 "x";
+    let _ = tcp_write c b 1;
+    let _ = tcp_read s b 1;
+    let _ = mem_to_str b 1;
+    tcp_close c
+  } else ();
+{
+  use_them 1;
+  print "socket-ffi shape ok"
+}
