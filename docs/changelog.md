@@ -4,6 +4,50 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.337 — 2026-08-28
+
+_A native binary could not read its own environment._
+
+`env_var` existed on the Wasm **component** backend and nowhere else. So
+`mere -c` and `mere -ll` — the single-binary deployment the web dogfood
+advertises as its best story — produced programs configurable only by editing
+their source. `mere-blog` hardcodes its database host, port, user and name, and
+that is not the app being lazy: it is the only thing the backend allowed.
+
+C and LLVM have it now. `env_var` reads `yes | yes | yes` across the compiling
+backends, with RV32I refusing as it should — there is no environment on bare
+metal.
+
+**Both backends got the same thing wrong first, and the second one had already
+been written down.** `getenv` hands back a bare C string; this project's `str`
+carries a length header in the bytes before the pointer, so the environment's
+own pointer is not a `str`. C compiled, answered the unset case correctly, and
+died with "out of memory" on the first program that found the variable.
+`__lang_str_of_cstr` copies it into the region — which also means a later
+`setenv` cannot move the string out from under the value.
+
+Then LLVM: the payload slot of an option holds a **pointer to** the value, not
+the value (Phase 25.0 boxed variant payloads). Storing the string pointer
+directly made the reader dereference the string's first eight bytes as an
+address. It matched `Some` fine and crashed the moment anything touched the
+binding — so the arm that ignores it passed, and `str_len v` segfaulted. Same
+shape as Q-069's LLVM half, made again inside a day.
+
+`test/parity/env_var.mere` asks two questions whose answers are the same on
+every machine: a name nobody sets is `None`, and `PATH` is set and non-empty.
+Comparing PATH's value would compare machines. Both arms, because a lowering
+that always answered `None` would pass the first alone.
+
+Plain Wasm diverges and is **pinned**: a browser or worker host has no
+environment, so `mere -w` answers `None` to everything. The component backend
+does have it. The divergence is the host's, not the backend's, and the pin
+retires itself if that stops being true.
+
+`dune test` 2596/0, parity 137/0 with one declared divergence, host_matrix
+0 MISSING / 0 nocompile / 0 error.
+
+---
+
 ## v0.1.336 — 2026-08-27
 
 _A regression from v0.1.333, shipped in v0.1.335, that the gate built to catch

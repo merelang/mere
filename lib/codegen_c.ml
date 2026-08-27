@@ -445,6 +445,12 @@ let uses_file_pwrite_bytes = ref false  (* v0.1.222: the same over `bytes` *)
 let uses_file_openrw = ref false  (* v0.1.115: file_openrw (read/write open) *)
 let uses_file_fsync = ref false   (* v0.1.115: file_fsync (durability) *)
 let uses_tls = ref false  (* v0.1.91: tcp_starttls* -> real OpenSSL runtime *)
+(* v0.1.337: `env_var` returns `str option`, and `option_str`'s typedef is only
+   emitted for types the program is seen to use. A program whose ONLY producer
+   of one is this builtin never writes `Some ...` anywhere, so the type went
+   unregistered and the emitted C named an undeclared struct -- the same hole
+   v0.1.175 fixed for record fields. This flag is what registers it. *)
+let env_var_used = ref false
 let uses_midi = ref false  (* v0.1.128: midi_* -> PortMidi input runtime *)
 let uses_window = ref false  (* v0.1.249: win_* -> SDL2 window / pixels / input *)
 let uses_audio = ref false  (* v0.1.314: audio_* -> SDL2 audio, push model *)
@@ -2932,6 +2938,25 @@ let rec emit_expr (e : Ast.expr) : string =
        (* v0.1.15 (mk dogfood P3): whether a path exists (guards file_mtime,
           which raises on a missing path). *)
        Printf.sprintf "__lang_file_exists(%s)" (emit_expr arg)
+     | Ast.Var "env_var" when not (user_shadows "env_var") ->
+       (* v0.1.337: a NATIVE binary could not read its environment. Only the
+          Wasm component backend had this, so `mere -c` -- the single-binary
+          deployment mere-blog advertises -- had no way to be configured
+          except by editing the source, and it hardcodes host, port, user and
+          database because of it. That is not the app being lazy; it is the
+          only thing the backend allowed.
+          THE VALUE IS COPIED, not aliased. `getenv` hands back a bare C
+          string and this backend's `str` carries a LENGTH HEADER in the bytes
+          before the pointer -- so passing the environment's pointer through
+          as a str made the runtime read whatever preceded it as a length. It
+          compiled, the unset case worked, and the first program that actually
+          found the variable died with "out of memory". `__lang_str_of_cstr`
+          measures with strlen and copies into the current region, which also
+          means a later setenv cannot move the string out from under it. *)
+       env_var_used := true;
+       Printf.sprintf
+         "({ const char* __ev = getenv(%s); __ev ? ((option_str){.tag = 1, .payload.Some = __lang_str_of_cstr(__ev)}) : ((option_str){.tag = 0}); })"
+         (emit_expr arg)
      | Ast.Var "file_size" when not (user_shadows "file_size") ->
        (* v0.1.21 (mwasm dogfood P1): true byte length via stat. *)
        Printf.sprintf "__lang_file_size(%s)" (emit_expr arg)
@@ -10331,6 +10356,11 @@ let collect_mono_variant_instances
     if info.r_params = [] then
       List.iter (fun (_, ft) -> walk_ty ft) info.r_fields)
     Typer.records;
+  (* v0.1.337, the same hole once more: `env_var` PRODUCES a `str option` and
+     a program can consume it with `match` without ever writing `Some ...`, so
+     nothing else registers `option_str`. Registering it from the use of the
+     builtin is the rule the other producers already follow. *)
+  if !env_var_used then walk_ty (Ast.TyCon ("option", [Ast.TyStr]));
   (* Also walk substituted payload types of each collected instance so
      tuples that appear only inside variant payloads (e.g.
      `tuple_int_list_int` inside Cons) get found by later collectors.
@@ -11018,6 +11048,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      extern gets the real OpenSSL-backed TLS runtime (and its SSL-aware
      tcp_read/write/close); everyone else keeps the plaintext path and needs no
      OpenSSL at build time. *)
+  env_var_used := false;
   uses_tls :=
     Hashtbl.mem extern_fn_decls "tcp_starttls"
     || Hashtbl.mem extern_fn_decls "tcp_starttls_verified";
