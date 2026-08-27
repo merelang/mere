@@ -1,0 +1,77 @@
+#!/bin/sh
+# scripts/downstream_check.sh -- the programs written in this language still
+# parse and type against the compiler in this tree.
+#
+# WHAT THIS IS. Mere has around three dozen dogfood repositories, none of them
+# with CI, and this repository could not see any of them. An upstream language
+# change broke them silently and the news arrived whenever somebody next opened
+# that repo. test/downstream/REPOS names one per language surface and this runs
+# them.
+#
+# THE CHECK IS `mere -t <entry>` FROM INSIDE THE REPO: parse, resolve every
+# import, type the whole program. It is deliberately not "the project works" --
+# it does not run their tests, and each repo owns that question. It is the
+# question THIS repo can answer, it is the failure a language upstream actually
+# causes, and it costs about a second per repo.
+#
+# SKIPS LOUDLY. Point MERE_DOWNSTREAM at a directory holding the checkouts.
+# Without it, or for a repo that is not there, the row is reported as skipped
+# and counted -- never silently dropped, because a gate that quietly checks
+# nothing reports the same success as one that checked everything.
+#
+# NEGATIVE TEST: point a row's entry at a file that does not exist, or break
+# something upstream and watch which row names the surface.
+set -u
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+MERE="$ROOT/_build/default/bin/mere.exe"
+TABLE="$ROOT/test/downstream/REPOS"
+BOUND="${DOWNSTREAM_TIMEOUT:-180}"
+DIR="${MERE_DOWNSTREAM:-}"
+[ -x "$MERE" ] || { echo "downstream_check: $MERE not found -- run 'dune build'" >&2; exit 1; }
+[ -f "$TABLE" ] || { echo "downstream_check: $TABLE not found" >&2; exit 1; }
+
+if [ -z "$DIR" ]; then
+  echo "downstream_check: SKIP (set MERE_DOWNSTREAM=<dir of checkouts>) -- 0 of $(awk '$1 !~ /^#/ && NF && $3 == "typecheck"' "$TABLE" | wc -l | tr -d ' ') repos checked"
+  exit 0
+fi
+
+fails=0; ran=0; skipped=0; deferred=0
+err="$(mktemp)"; trap 'rm -f "$err"' EXIT
+
+while read -r repo entry check rest; do
+  case "$repo" in ''|\#*) continue ;; esac
+  case "$check" in
+    deps)
+      deferred=$((deferred + 1))
+      echo "  defer $repo — $rest"
+      continue ;;
+    typecheck) : ;;
+    *)
+      echo "FAIL downstream[$repo]: unknown check \`$check\` (want typecheck or deps)"
+      fails=$((fails + 1)); continue ;;
+  esac
+  if [ ! -d "$DIR/$repo" ]; then
+    skipped=$((skipped + 1))
+    echo "  skip  $repo (not in \$MERE_DOWNSTREAM)"
+    continue
+  fi
+  if [ ! -f "$DIR/$repo/$entry" ]; then
+    echo "FAIL downstream[$repo]: entry $entry does not exist -- the row names a file that is gone"
+    fails=$((fails + 1)); continue
+  fi
+  ran=$((ran + 1))
+  if ( cd "$DIR/$repo" && sh "$ROOT/scripts/bounded.sh" "$BOUND" "$MERE" -t "$entry" >/dev/null 2>"$err" ); then
+    echo "  ok    $repo ($entry)"
+  else
+    echo "FAIL downstream[$repo]: $entry no longer types against this compiler"
+    echo "        $rest"
+    sed -n '1,3p' "$err" | sed 's/^/        /'
+    fails=$((fails + 1))
+  fi
+done < "$TABLE"
+
+if [ "$fails" -gt 0 ]; then
+  echo "downstream_check: $fails failed, $ran checked, $skipped absent, $deferred deferred"
+  exit 1
+fi
+echo "downstream_check: $ran checked, $skipped absent, $deferred deferred (needs \`mere install\`)"

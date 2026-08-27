@@ -1,0 +1,45 @@
+# test/downstream/REPOS -- the programs written IN this language that a change
+# to it can break, and the one command that says whether it did.
+#
+# WHAT THIS IS. Mere has around three dozen dogfood repositories. Not one of
+# them has CI, and this repository's CI could not see any of them, so an
+# upstream language change broke them silently and the news arrived whenever
+# somebody next opened that repo. v0.1.334 wired in the first one (memu, for
+# the RISC-V differential); this is the rest of the answer.
+#
+# WHAT THE CHECK IS, AND WHAT IT IS NOT. `mere -t <entry>` from inside the
+# repo: parse, resolve every import, and type the whole program. It is not
+# "the project works" -- it does not run their tests, and each of these repos
+# owns that question. It is the question THIS repo can answer: did a change
+# here stop their code from being a program. That is the failure mode a
+# language upstream actually causes, and it costs about a second per repo.
+#
+# WHY THESE AND NOT ALL OF THEM. One per language surface the dogfood was
+# written to exercise, so a breakage lands on the row that names the feature.
+# The `why` column is that argument, per row, and is the thing to read when
+# deciding whether to add another.
+#
+# THIS LIST CANNOT BE DERIVED, WHICH THE OTHER TABLES HERE CAN. The set of
+# repositories lives on GitHub, not in this tree, so nothing here notices a new
+# one. Said plainly because it is the drift this file is exposed to: a table
+# that cannot be checked against its source has to be maintained by hand, and
+# knowing which kind you are holding is the difference between trusting it and
+# checking it.
+#
+# CHECK is `typecheck` (run it) or `deps` (needs `mere install`; the fetch is a
+# network dependency this gate does not take on, and the row records why).
+#
+# repo         entry              check      why this one
+mkv            mkv.mere           typecheck  TCP server, actor-shared Map, per-request region reclamation
+mraft          mraft.mere         typecheck  concurrency and partial failure; time carried as messages
+mpng           mpng.mere          typecheck  the `bytes` type, added because this program needed it
+mq             main.mere          typecheck  native CLI, and a package dependency resolved from mere.toml
+mk             main.mere          typecheck  subprocess control
+mrog           main.mere          typecheck  interactive terminal
+mwasm          main.mere          typecheck  binary parsing
+mere-blog      app.mere           typecheck  web plus a typed model layer over a database
+mbrowse        src/main.mere      typecheck  the largest single program: tokenizer, CSS, layout, paint
+mere-ruby      main.mere          typecheck  the largest surface of the language, and the strictest reader of it
+mere-gcheap    gcloop.mere        typecheck  a library about the memory model itself
+memu           riscv.mere         typecheck  the emulator the RISC-V differential runs against
+mbigfmt        bigfmt.mere        deps       imports github.com/284km/mbignum; needs `mere install` first
