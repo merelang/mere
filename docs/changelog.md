@@ -12,11 +12,19 @@ accepted fd) join `tcp_starttls` / `tcp_starttls_verified` on the C backend. Aft
 handshake, `tcp_read` / `tcp_write` / `tcp_close` route through the `SSL*` unchanged,
 so a plaintext handler becomes a TLS handler by inserting one line.
 
-**The gap was invisible because working around it was normal.** Every web program in
-this project — mere-blog, the HTTP samples — served plaintext and told the reader to
-put nginx in front of it. That is such ordinary deployment advice that nobody read it
-as "the language cannot do this". The client half had existed for a long time, which
-made the surface *look* complete: `grep tcp_starttls` finds TLS, and TLS is there.
+**The gap was invisible because nothing was in its place.** Every web program in this
+project served plaintext, and no README, doc or comment recommended a proxy or
+mentioned TLS for serving at all — mere-blog's README says `./mere-blog # serves :8080`
+and moves on. There was no workaround to notice and no advice to read past. The client
+half had existed for a long time, which made the surface *look* complete:
+`grep tcp_starttls` finds TLS, and TLS is there.
+
+(The first draft of this entry, and the three commit messages under it, said these
+programs "told the reader to put nginx in front". They do not. That sentence was
+invented to explain the gap and then written down five times as though it were the
+record — the commit messages are pushed and stay wrong. What actually happened is
+quieter and is the more useful observation: a capability nobody asks for produces no
+workaround, and therefore no trace.)
 
 `test/tls/https_server.mere` is a TLS-terminating HTTP server that refuses both of the
 available workarounds: it terminates TLS itself, and it reads its certificate paths and

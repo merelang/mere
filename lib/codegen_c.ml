@@ -6498,8 +6498,8 @@ let native_ffi_names =
 let native_ffi_stub_names =
   [ "tcp_starttls"; "tcp_starttls_verified";
     (* v0.1.338: the SERVER half. Everything above this line dials out; a
-       program could not answer a TLS connection at all, which is why the web
-       dogfood serves plaintext and assumes a reverse proxy in front. *)
+       program could not answer a TLS connection at all, which is why every web
+       dogfood in the project serves plaintext. *)
     "tls_server_init"; "tcp_accept_tls" ]
 
 (* Native HTTP server externs (Stage 3). Implemented in native_http_runtime,
