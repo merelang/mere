@@ -5,159 +5,167 @@
 Which backends have a lowering for each host / IO builtin, asked of the
 compiler rather than remembered. `refused` means the backend says so itself,
 which is the correct way to lack something; `MISSING` means a program using it
-fails with `unbound variable`, blaming the user for a backend hole.
+fails with `unbound variable`, blaming the user for a backend hole;
+`bare` means the backend has it on `-rv --bare` only, where the program is
+handed the machine instead of a host.
 
 The interpreter has every one of these, and is not a column.
 
-| builtin | C | LLVM | Wasm |
-|---|:--:|:--:|:--:|
-| `abs` | yes | yes | yes |
-| `args` | yes | yes | yes |
-| `assert` | yes | yes | yes |
-| `atan2` | yes | yes | yes |
-| `bit_and` | yes | yes | yes |
-| `bit_not` | yes | yes | yes |
-| `bit_or` | yes | yes | yes |
-| `bit_shl` | yes | yes | yes |
-| `bit_shr` | yes | yes | yes |
-| `bit_xor` | yes | yes | yes |
-| `bool_of_str` | yes | yes | yes |
-| `bytebuf_new` | yes | refused | MISSING |
-| `bytes_of_hex` | yes | yes | yes |
-| `bytes_of_str` | yes | yes | yes |
-| `ceil` | yes | yes | refused |
-| `channel_close` | yes | refused | refused |
-| `channel_new` | yes | yes | yes |
-| `channel_recv` | yes | yes | yes |
-| `channel_recv_opt` | yes | refused | refused |
-| `channel_recv_timeout` | yes | refused | refused |
-| `channel_send` | yes | yes | yes |
-| `char_at` | yes | yes | yes |
-| `chr` | yes | yes | yes |
-| `clamp` | yes | yes | yes |
-| `cos` | yes | yes | yes |
-| `csr_read` | refused | MISSING | MISSING |
-| `csr_write` | refused | MISSING | MISSING |
-| `cube` | yes | yes | yes |
-| `decr` | yes | yes | yes |
-| `detach` | yes | refused | refused |
-| `divmod` | yes | yes | yes |
-| `e` | yes | yes | yes |
-| `env_var` | nocompile | refused | yes |
-| `even` | yes | yes | yes |
-| `exit` | yes | refused | yes |
-| `exp` | yes | yes | yes |
-| `f32_bits` | yes | yes | yes |
-| `f_abs` | yes | yes | yes |
-| `f_add` | yes | yes | yes |
-| `f_div` | yes | yes | yes |
-| `f_ge` | yes | yes | yes |
-| `f_gt` | yes | yes | yes |
-| `f_le` | yes | yes | yes |
-| `f_lt` | yes | yes | yes |
-| `f_max` | yes | yes | yes |
-| `f_min` | yes | yes | yes |
-| `f_mul` | yes | yes | yes |
-| `f_neg` | yes | yes | yes |
-| `f_pow` | yes | yes | yes |
-| `f_sub` | yes | yes | yes |
-| `fail` | yes | yes | yes |
-| `file_exists` | yes | refused | yes |
-| `file_mtime` | yes | refused | refused |
-| `file_open` | yes | refused | refused |
-| `file_openrw` | yes | yes | yes |
-| `file_pread` | yes | refused | refused |
-| `file_pwrite` | yes | yes | yes |
-| `file_pwrite_bytes` | yes | yes | yes |
-| `file_read_line` | yes | refused | refused |
-| `file_size` | yes | yes | yes |
-| `float_bits_hi` | yes | yes | yes |
-| `float_bits_lo` | yes | yes | yes |
-| `float_of_bits` | yes | yes | yes |
-| `float_of_f32_bits` | yes | yes | yes |
-| `float_of_int` | yes | yes | yes |
-| `float_of_str` | yes | yes | yes |
-| `floor` | yes | yes | refused |
-| `gcd` | yes | yes | yes |
-| `incr` | yes | yes | yes |
-| `int_max` | nocompile | MISSING | MISSING |
-| `int_min` | nocompile | MISSING | MISSING |
-| `int_of_float` | yes | yes | yes |
-| `int_of_str` | yes | yes | yes |
-| `is_alpha` | yes | yes | yes |
-| `is_digit` | yes | yes | yes |
-| `is_space` | yes | yes | yes |
-| `join` | yes | yes | yes |
-| `lcm` | yes | yes | yes |
-| `list_dir` | yes | refused | refused |
-| `log` | yes | yes | yes |
-| `map_new` | yes | yes | yes |
-| `max` | yes | yes | yes |
-| `min` | yes | yes | yes |
-| `mk_logger` | yes | yes | yes |
-| `mk_metrics` | yes | yes | yes |
-| `mkdir_p` | yes | refused | refused |
-| `not` | yes | yes | yes |
-| `odd` | yes | yes | yes |
-| `of_json` | nocompile | refused | refused |
-| `of_json_opt` | nocompile | refused | refused |
-| `ord` | yes | yes | yes |
-| `owned_vec_new` | yes | yes | yes |
-| `pi` | yes | yes | yes |
-| `pow` | yes | yes | yes |
-| `print` | yes | yes | yes |
-| `print_bool` | yes | yes | yes |
-| `print_bytes` | yes | yes | yes |
-| `print_err` | yes | yes | yes |
-| `print_int` | yes | yes | yes |
-| `print_no_nl` | yes | yes | yes |
-| `random_float` | nocompile | refused | refused |
-| `random_int` | yes | refused | yes |
-| `read_bytes` | yes | refused | refused |
-| `read_file` | yes | yes | yes |
-| `read_file_bytes` | yes | yes | yes |
-| `read_key` | yes | refused | refused |
-| `read_line` | yes | refused | yes |
-| `read_lines` | yes | refused | refused |
-| `read_stdin` | yes | refused | yes |
-| `round` | yes | yes | refused |
-| `run` | yes | refused | yes |
-| `sign` | yes | yes | yes |
-| `sin` | yes | yes | yes |
-| `sleep_ms` | yes | refused | refused |
-| `spawn` | yes | yes | yes |
-| `sqrt` | yes | yes | yes |
-| `square` | yes | yes | yes |
-| `stdin_byte` | yes | MISSING | MISSING |
-| `str_compare` | yes | yes | yes |
-| `str_contains` | yes | yes | yes |
-| `str_count` | yes | yes | yes |
-| `str_ends_with` | yes | yes | yes |
-| `str_eq` | yes | yes | yes |
-| `str_index_of` | yes | yes | yes |
-| `str_last_index_of` | yes | yes | yes |
-| `str_len` | yes | yes | yes |
-| `str_of_float` | yes | yes | yes |
-| `str_of_int` | yes | yes | yes |
-| `str_repeat` | yes | yes | yes |
-| `str_replace` | yes | yes | yes |
-| `str_rev` | yes | yes | yes |
-| `str_split` | yes | yes | yes |
-| `str_starts_with` | yes | yes | yes |
-| `str_trim` | yes | yes | yes |
-| `str_unescape` | yes | yes | yes |
-| `strbuf_new` | yes | yes | yes |
-| `substring` | yes | yes | yes |
-| `sum_range` | yes | yes | yes |
-| `tan` | yes | yes | yes |
-| `time` | yes | yes | yes |
-| `to_lower` | yes | yes | yes |
-| `to_upper` | yes | yes | yes |
-| `tty_raw` | yes | refused | refused |
-| `tty_restore` | yes | refused | refused |
-| `utf8_chars` | yes | yes | yes |
-| `utf8_len` | yes | yes | yes |
-| `vec_new` | refused | refused | yes |
-| `write_bytes` | yes | refused | refused |
-| `write_file` | yes | yes | yes |
-| `write_file_bytes` | yes | yes | yes |
+RV32I is the fifth backend and was missing from this table until
+v0.1.332 — a record whose job is to say which backend has which builtin,
+with a backend not in it. Most of its column is `refused`, which is the
+right answer for an integer-subset target that hands the program a
+machine rather than a host.
+
+| builtin | C | LLVM | Wasm | RV32I |
+|---|:--:|:--:|:--:|:--:|
+| `abs` | yes | yes | yes | refused |
+| `args` | yes | yes | yes | refused |
+| `assert` | yes | yes | yes | yes |
+| `atan2` | yes | yes | yes | refused |
+| `bit_and` | yes | yes | yes | yes |
+| `bit_not` | yes | yes | yes | yes |
+| `bit_or` | yes | yes | yes | yes |
+| `bit_shl` | yes | yes | yes | yes |
+| `bit_shr` | yes | yes | yes | yes |
+| `bit_xor` | yes | yes | yes | yes |
+| `bool_of_str` | yes | yes | yes | refused |
+| `bytebuf_new` | yes | refused | refused | refused |
+| `bytes_of_hex` | yes | yes | yes | refused |
+| `bytes_of_str` | yes | yes | yes | refused |
+| `ceil` | yes | yes | refused | refused |
+| `channel_close` | yes | refused | refused | refused |
+| `channel_new` | yes | yes | yes | refused |
+| `channel_recv` | yes | yes | yes | refused |
+| `channel_recv_opt` | yes | refused | refused | refused |
+| `channel_recv_timeout` | yes | refused | refused | refused |
+| `channel_send` | yes | yes | yes | refused |
+| `char_at` | yes | yes | yes | yes |
+| `chr` | yes | yes | yes | yes |
+| `clamp` | yes | yes | yes | refused |
+| `cos` | yes | yes | yes | refused |
+| `csr_read` | bare | refused | refused | bare |
+| `csr_write` | bare | refused | refused | bare |
+| `cube` | yes | yes | yes | yes |
+| `decr` | yes | yes | yes | yes |
+| `detach` | yes | refused | refused | refused |
+| `divmod` | yes | yes | yes | yes |
+| `e` | yes | yes | yes | refused |
+| `env_var` | nocompile | refused | yes | refused |
+| `even` | yes | yes | yes | refused |
+| `exit` | yes | refused | yes | refused |
+| `exp` | yes | yes | yes | refused |
+| `f32_bits` | yes | yes | yes | refused |
+| `f_abs` | yes | yes | yes | refused |
+| `f_add` | yes | yes | yes | refused |
+| `f_div` | yes | yes | yes | refused |
+| `f_ge` | yes | yes | yes | refused |
+| `f_gt` | yes | yes | yes | refused |
+| `f_le` | yes | yes | yes | refused |
+| `f_lt` | yes | yes | yes | refused |
+| `f_max` | yes | yes | yes | refused |
+| `f_min` | yes | yes | yes | refused |
+| `f_mul` | yes | yes | yes | refused |
+| `f_neg` | yes | yes | yes | refused |
+| `f_pow` | yes | yes | yes | refused |
+| `f_sub` | yes | yes | yes | refused |
+| `fail` | yes | yes | yes | yes |
+| `file_exists` | yes | refused | yes | refused |
+| `file_mtime` | yes | refused | refused | refused |
+| `file_open` | yes | refused | refused | refused |
+| `file_openrw` | yes | yes | yes | refused |
+| `file_pread` | yes | refused | refused | refused |
+| `file_pwrite` | yes | yes | yes | refused |
+| `file_pwrite_bytes` | yes | yes | yes | refused |
+| `file_read_line` | yes | refused | refused | refused |
+| `file_size` | yes | yes | yes | refused |
+| `float_bits_hi` | yes | yes | yes | refused |
+| `float_bits_lo` | yes | yes | yes | refused |
+| `float_of_bits` | yes | yes | yes | refused |
+| `float_of_f32_bits` | yes | yes | yes | refused |
+| `float_of_int` | yes | yes | yes | refused |
+| `float_of_str` | yes | yes | yes | refused |
+| `floor` | yes | yes | refused | refused |
+| `gcd` | yes | yes | yes | refused |
+| `incr` | yes | yes | yes | yes |
+| `int_max` | nocompile | refused | refused | refused |
+| `int_min` | nocompile | refused | refused | refused |
+| `int_of_float` | yes | yes | yes | refused |
+| `int_of_str` | yes | yes | yes | yes |
+| `is_alpha` | yes | yes | yes | yes |
+| `is_digit` | yes | yes | yes | yes |
+| `is_space` | yes | yes | yes | yes |
+| `join` | yes | yes | yes | refused |
+| `lcm` | yes | yes | yes | refused |
+| `list_dir` | yes | refused | refused | refused |
+| `log` | yes | yes | yes | refused |
+| `map_new` | yes | yes | yes | yes |
+| `max` | yes | yes | yes | refused |
+| `min` | yes | yes | yes | refused |
+| `mk_logger` | yes | yes | yes | refused |
+| `mk_metrics` | yes | yes | yes | refused |
+| `mkdir_p` | yes | refused | refused | refused |
+| `not` | yes | yes | yes | yes |
+| `odd` | yes | yes | yes | refused |
+| `of_json` | nocompile | refused | refused | refused |
+| `of_json_opt` | nocompile | refused | refused | refused |
+| `ord` | yes | yes | yes | yes |
+| `owned_vec_new` | yes | yes | yes | refused |
+| `pi` | yes | yes | yes | refused |
+| `pow` | yes | yes | yes | yes |
+| `print` | yes | yes | yes | yes |
+| `print_bool` | yes | yes | yes | yes |
+| `print_bytes` | yes | yes | yes | refused |
+| `print_err` | yes | yes | yes | refused |
+| `print_int` | yes | yes | yes | yes |
+| `print_no_nl` | yes | yes | yes | yes |
+| `random_float` | nocompile | refused | refused | refused |
+| `random_int` | yes | refused | yes | refused |
+| `read_bytes` | yes | refused | refused | refused |
+| `read_file` | yes | yes | yes | refused |
+| `read_file_bytes` | yes | yes | yes | refused |
+| `read_key` | yes | refused | refused | refused |
+| `read_line` | yes | refused | yes | refused |
+| `read_lines` | yes | refused | refused | refused |
+| `read_stdin` | yes | refused | yes | refused |
+| `round` | yes | yes | refused | refused |
+| `run` | yes | refused | yes | refused |
+| `sign` | yes | yes | yes | yes |
+| `sin` | yes | yes | yes | refused |
+| `sleep_ms` | yes | refused | refused | refused |
+| `spawn` | yes | yes | yes | refused |
+| `sqrt` | yes | yes | yes | refused |
+| `square` | yes | yes | yes | yes |
+| `stdin_byte` | yes | refused | refused | refused |
+| `str_compare` | yes | yes | yes | yes |
+| `str_contains` | yes | yes | yes | yes |
+| `str_count` | yes | yes | yes | refused |
+| `str_ends_with` | yes | yes | yes | yes |
+| `str_eq` | yes | yes | yes | yes |
+| `str_index_of` | yes | yes | yes | yes |
+| `str_last_index_of` | yes | yes | yes | refused |
+| `str_len` | yes | yes | yes | yes |
+| `str_of_float` | yes | yes | yes | refused |
+| `str_of_int` | yes | yes | yes | yes |
+| `str_repeat` | yes | yes | yes | yes |
+| `str_replace` | yes | yes | yes | yes |
+| `str_rev` | yes | yes | yes | yes |
+| `str_split` | yes | yes | yes | yes |
+| `str_starts_with` | yes | yes | yes | yes |
+| `str_trim` | yes | yes | yes | yes |
+| `str_unescape` | yes | yes | yes | yes |
+| `strbuf_new` | yes | yes | yes | yes |
+| `substring` | yes | yes | yes | yes |
+| `sum_range` | yes | yes | yes | yes |
+| `tan` | yes | yes | yes | refused |
+| `time` | yes | yes | yes | refused |
+| `to_lower` | yes | yes | yes | yes |
+| `to_upper` | yes | yes | yes | yes |
+| `tty_raw` | yes | refused | refused | refused |
+| `tty_restore` | yes | refused | refused | refused |
+| `utf8_chars` | yes | yes | yes | refused |
+| `utf8_len` | yes | yes | yes | refused |
+| `vec_new` | refused | refused | yes | yes |
+| `write_bytes` | yes | refused | refused | refused |
+| `write_file` | yes | yes | yes | refused |
+| `write_file_bytes` | yes | yes | yes | refused |

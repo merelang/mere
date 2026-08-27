@@ -3603,6 +3603,16 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        if List.mem name host_builtins_without_llvm_lowering then
          unsupported e.Ast.loc
            (name ^ " has no LLVM lowering yet (host builtin; scope = interp + C)")
+       else if List.mem_assoc name Typer.initial_env then
+         (* A hand-list is a snapshot; the typer's environment is the set.
+            This backstop is why the list can be wrong without the diagnostic
+            being wrong: a builtin added after the list was written (v0.1.216
+            did exactly that) still gets named as a backend gap instead of
+            falling through to "unbound variable", which blames the user for a
+            hole that is ours. The list above stays because it can say more --
+            it knows the scope -- but it is no longer the only thing standing
+            between a known name and a wrong diagnostic. *)
+         unsupported e.Ast.loc (name ^ " has no LLVM lowering yet (host builtin)")
        else
          unsupported e.Ast.loc ("unbound variable: " ^ name))))
   | Ast.Annot (inner, _) -> emit_expr env inner

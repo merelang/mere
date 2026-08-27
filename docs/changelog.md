@@ -4,6 +4,49 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.332 — 2026-08-27
+
+_The matrix whose job is to say which backend has which builtin was missing a
+backend, and every hole it did show was a diagnostic blaming the user._
+
+The RV32I backend has no flag-gated runtime sections — it emits instructions,
+not text blobs — so the Q-069 audit had nothing to find there. What it has
+instead is a **column that was never in `docs/host-matrix.md`**. A record whose
+whole purpose is "which backend has which builtin", with the fifth backend not
+in it.
+
+**RV32I now reads 48 yes, 100 refused, 2 bare-only, 0 MISSING.**
+
+Two things had to be true first.
+
+**RV said `unbound variable` for a name the language has.** That is the failure
+shape `host_matrix` calls `MISSING`: a backend hole reported as a user typo. It
+names its own gap now — and the set is derived from `Typer.initial_env` rather
+than kept as a second list, because a second list drifts from the first.
+
+**`csr_read` / `csr_write` are neither.** RV32I has them, on `--bare` only,
+where the program is handed the machine instead of a host. Calling that
+`refused` would be the matrix lying in the flattering direction and `yes` would
+be lying in the other, so the cell says `bare`.
+
+**Then the new column showed the same defect in two old ones.** `int_max`,
+`int_min`, `stdin_byte`, `bytebuf_new` and the CSR pair reported `unbound
+variable` on LLVM and Wasm — six rows, all of them builtins added after those
+backends' hand-written "no lowering yet" lists were written. `codegen_wasm.ml`'s
+own comment says this happened at v0.1.216. The lists stay, because they can say
+more (they know the scope), but the same `Typer.initial_env` derivation now
+stands behind them, so a builtin added tomorrow is named as a backend gap
+instead of as the user's mistake.
+
+**MISSING is 0 across every backend for the first time.** The 6 `nocompile`
+rows — emitted C that a C compiler then rejects — are a different category and
+still open.
+
+`dune test` 2588/0, parity 136/0, host_matrix 150 builtins / 0 MISSING /
+6 nocompile / 2 bare-only / 0 error.
+
+---
+
 ## v0.1.331 — 2026-08-27
 
 _The same audit on C and LLVM: eighteen more sections, one with no program, and
