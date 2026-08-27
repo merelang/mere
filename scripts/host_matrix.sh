@@ -205,7 +205,13 @@ classify() {  # classify <flag> <file>
     fi
   elif grep -q 'unbound variable' "$TMP/err"; then
     echo MISSING
-  elif grep -qE 'no (LLVM|Wasm) lowering|unsupported' "$TMP/err"; then
+  elif grep -q 'bare-metal target' "$TMP/err"; then
+    # Neither `yes` nor `refused`: RV32I HAS these, on `--bare` only, where the
+    # program is handed the machine instead of a host. Calling that refused
+    # would be the matrix lying in the flattering direction about a backend,
+    # and calling it yes would be lying in the other one.
+    echo bare
+  elif grep -qE 'no (LLVM|Wasm|RV32I) lowering|unsupported' "$TMP/err"; then
     echo refused
   else
     echo error
@@ -220,19 +226,28 @@ classify() {  # classify <flag> <file>
   echo "Which backends have a lowering for each host / IO builtin, asked of the"
   echo "compiler rather than remembered. \`refused\` means the backend says so itself,"
   echo "which is the correct way to lack something; \`MISSING\` means a program using it"
-  echo "fails with \`unbound variable\`, blaming the user for a backend hole."
+  echo "fails with \`unbound variable\`, blaming the user for a backend hole;"
+  echo "\`bare\` means the backend has it on \`-rv --bare\` only, where the program is"
+  echo "handed the machine instead of a host."
   echo
   echo "The interpreter has every one of these, and is not a column."
   echo
-  echo "| builtin | C | LLVM | Wasm |"
-  echo "|---|:--:|:--:|:--:|"
+  echo "RV32I is the fifth backend and was missing from this table until"
+  echo "v0.1.332 — a record whose job is to say which backend has which builtin,"
+  echo "with a backend not in it. Most of its column is \`refused\`, which is the"
+  echo "right answer for an integer-subset target that hands the program a"
+  echo "machine rather than a host."
+  echo
+  echo "| builtin | C | LLVM | Wasm | RV32I |"
+  echo "|---|:--:|:--:|:--:|:--:|"
   while IFS='|' read -r name prog; do
     [ -z "$name" ] && continue
     printf '%s\n' "$prog" > "$TMP/p.mere"
     c=$(classify -c "$TMP/p.mere")
     l=$(classify -ll "$TMP/p.mere")
     w=$(classify -w "$TMP/p.mere")
-    printf '| `%s` | %s | %s | %s |\n' "$name" "$c" "$l" "$w"
+    r=$(classify -rv "$TMP/p.mere")
+    printf '| `%s` | %s | %s | %s | %s |\n' "$name" "$c" "$l" "$w" "$r"
   done < "$TMP/cases"
 } > "$TMP/matrix.md"
 
@@ -262,7 +277,8 @@ if diff -u "$OUT" "$TMP/matrix.md" > "$TMP/diff"; then
   # and it was passing; it was the summary line that lied, which is worse than
   # it sounds: "0 checked" is exactly what a gate that did not run looks like.
   nocompile=$(grep -c '^| `.*nocompile' "$OUT" || true)
-  echo "host_matrix: ok  ($(grep -c '^| `' "$OUT") builtins, $missing MISSING, $nocompile nocompile, $errors error)"
+  bare=$(grep -c '^| `.*| bare' "$OUT" || true)
+  echo "host_matrix: ok  ($(grep -c '^| `' "$OUT") builtins, $missing MISSING, $nocompile nocompile, $bare bare-only, $errors error)"
   echo "             $gen_summary"
   [ "$dropped" != 0 ] && echo "             $dropped synthesized probe(s) did not type-check, dropped"
   true

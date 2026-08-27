@@ -636,6 +636,16 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
           if is_top v then
             err e.loc (Printf.sprintf
               "RV32I: `%s` used as a value (higher-order / partial application not supported yet)" v)
+          else if List.mem_assoc v Typer.initial_env then
+            (* The shape of the failure, not just the fact of it. This branch
+               used to say "unbound variable" for a name the language HAS --
+               a backend hole reported as a user typo, which is what
+               scripts/host_matrix.sh calls MISSING and what codegen_llvm /
+               codegen_wasm avoid by naming their own gap. The set is derived
+               from the typer's environment rather than kept as a second list
+               here, because a second list drifts from the first. *)
+            err e.loc (Printf.sprintf
+              "RV32I: `%s` has no RV32I lowering yet (host builtin)" v)
           else
             err e.loc (Printf.sprintf "RV32I: unbound variable `%s`" v)))
   | Ast.Neg a ->
