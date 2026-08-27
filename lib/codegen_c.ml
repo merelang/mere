@@ -6496,7 +6496,11 @@ let native_ffi_names =
    a native build LINKS and plaintext connections work; referenced by the
    STARTTLS path but not called unless a program requests SSL. *)
 let native_ffi_stub_names =
-  [ "tcp_starttls"; "tcp_starttls_verified" ]
+  [ "tcp_starttls"; "tcp_starttls_verified";
+    (* v0.1.338: the SERVER half. Everything above this line dials out; a
+       program could not answer a TLS connection at all, which is why the web
+       dogfood serves plaintext and assumes a reverse proxy in front. *)
+    "tls_server_init"; "tcp_accept_tls" ]
 
 (* Native HTTP server externs (Stage 3). Implemented in native_http_runtime,
    emitted after the closure typedefs (http_serve takes a `str -> str`
@@ -7351,6 +7355,27 @@ let native_ffi_runtime ~tls ~midi ~window ~audio =
          \  if(SSL_connect(ssl)!=1){ SSL_free(ssl); return -1; }\n\
          \  __tls[fd]=ssl; return 0;\n\
           }\n\
+          static SSL_CTX* __tls_srv_ctx = 0;\n\
+         \ /* v0.1.338: the server half. Two calls rather than one, because a\n\
+         \   certificate is loaded once per process and a handshake happens per\n\
+         \   connection -- folding them together would re-read the files on every\n\
+         \   accept and hide which of the two failed. */\n\
+          static int tls_server_init(const char* cert, const char* key){\n\
+         \  if(__tls_srv_ctx) return 0;\n\
+         \  SSL_CTX* c = SSL_CTX_new(TLS_server_method()); if(!c) return -1;\n\
+         \  if(SSL_CTX_use_certificate_chain_file(c, cert)!=1){ SSL_CTX_free(c); return -2; }\n\
+         \  if(SSL_CTX_use_PrivateKey_file(c, key, SSL_FILETYPE_PEM)!=1){ SSL_CTX_free(c); return -3; }\n\
+         \  if(SSL_CTX_check_private_key(c)!=1){ SSL_CTX_free(c); return -4; }\n\
+         \  __tls_srv_ctx = c; return 0;\n\
+          }\n\
+          static int tcp_accept_tls(int fd){\n\
+         \  if(fd<0||fd>=__TLS_MAX) return -1;\n\
+         \  if(!__tls_srv_ctx) return -2;  /* tls_server_init was never called */\n\
+         \  SSL* ssl = SSL_new(__tls_srv_ctx); if(!ssl) return -1;\n\
+         \  SSL_set_fd(ssl, fd);\n\
+         \  if(SSL_accept(ssl)!=1){ SSL_free(ssl); return -5; }\n\
+         \  __tls[fd]=ssl; return 0;\n\
+          }\n\
           static int tcp_starttls_verified(int fd, const char* host, const char* ca){\n\
          \  if(fd<0||fd>=__TLS_MAX) return -1;\n\
          \  SSL_CTX* ctx = __tls_get_ctx();\n\
@@ -7365,7 +7390,9 @@ let native_ffi_runtime ~tls ~midi ~window ~audio =
          \  __tls[fd]=ssl; return 0;\n\
           }"
        else
-         "static int tcp_starttls(int fd, const char* host){ (void)fd;(void)host; fprintf(stderr,\"native: tcp_starttls unsupported (TLS not implemented; use a plaintext connection)\\n\"); return -1; }\n\
+         "static int tls_server_init(const char* c, const char* k){ (void)c;(void)k; fprintf(stderr,\"native: tls_server_init unsupported in this build\\n\"); return -1; }\n\
+          static int tcp_accept_tls(int fd){ (void)fd; fprintf(stderr,\"native: tcp_accept_tls unsupported in this build\\n\"); return -1; }\n\
+          static int tcp_starttls(int fd, const char* host){ (void)fd;(void)host; fprintf(stderr,\"native: tcp_starttls unsupported (TLS not implemented; use a plaintext connection)\\n\"); return -1; }\n\
           static int tcp_starttls_verified(int fd, const char* h, const char* ca){ (void)fd;(void)h;(void)ca; fprintf(stderr,\"native: tcp_starttls_verified unsupported (TLS not implemented)\\n\"); return -1; }");
       "/* gen_request_id: 16 random bytes (from /dev/urandom) as a 32-char hex id. */";
       "static char* gen_request_id(void) {";
@@ -11051,7 +11078,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   env_var_used := false;
   uses_tls :=
     Hashtbl.mem extern_fn_decls "tcp_starttls"
-    || Hashtbl.mem extern_fn_decls "tcp_starttls_verified";
+    || Hashtbl.mem extern_fn_decls "tcp_starttls_verified"
+    || Hashtbl.mem extern_fn_decls "tls_server_init"
+    || Hashtbl.mem extern_fn_decls "tcp_accept_tls";
   (* v0.1.128: declaring a midi_* extern pulls in the PortMidi runtime (and
      asks the clang line for -lportmidi); everyone else needs no portmidi. *)
   uses_midi :=

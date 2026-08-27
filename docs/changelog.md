@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.338 — 2026-08-28
+
+_A Mere program can **answer** a TLS connection._ `tls_server_init` (load a
+certificate chain and key, once per process) and `tcp_accept_tls` (handshake on an
+accepted fd) join `tcp_starttls` / `tcp_starttls_verified` on the C backend. After the
+handshake, `tcp_read` / `tcp_write` / `tcp_close` route through the `SSL*` unchanged,
+so a plaintext handler becomes a TLS handler by inserting one line.
+
+**The gap was invisible because working around it was normal.** Every web program in
+this project — mere-blog, the HTTP samples — served plaintext and told the reader to
+put nginx in front of it. That is such ordinary deployment advice that nobody read it
+as "the language cannot do this". The client half had existed for a long time, which
+made the surface *look* complete: `grep tcp_starttls` finds TLS, and TLS is there.
+
+`test/tls/https_server.mere` is a TLS-terminating HTTP server that refuses both of the
+available workarounds: it terminates TLS itself, and it reads its certificate paths and
+port from the environment (v0.1.337) rather than compiling them in.
+`scripts/tls_server_check.sh` drives it with curl and `openssl s_client` — two TLS
+implementations that are not ours and cannot be made lenient from this repository, and
+notably **without `-k`**, so the certificate presented is checked to be the one loaded.
+
+**Three defects in the gate itself, found by poisoning it**, all of the same family —
+a check that reports something other than what it names:
+
+- asserting curl's `%{ssl_verify_result} == 0` stayed green under a poison that removed
+  the handshake entirely, because that field is `0` when curl never connected. Replaced
+  by the assertion that gives verification meaning: the *same* request without the CA
+  must **fail**.
+- "the listener survived the failed handshake" was `echo`ed rather than tested, and was
+  printed by a run in which the listener had died. It now asks for another answer.
+- `set -e` plus a `kill` on an already-exited server made the script stop after check 2
+  and exit **0** — five PASS lines, no summary, green CI. The gate now asserts *how
+  many* checks ran.
+
+And one in its bounds: with both key checks removed the server started successfully
+with a mismatched key, and a foreground run that was only ever fast because it was
+expected to fail became a hang. Both foreground runs are bounded now — a wrong answer
+should be a FAIL, never a wait.
+
+Recorded because it is the opposite of what poisoning usually shows: the subject was
+fine and the instrument was not.
+
+**Not on every backend**, and unchanged in that respect: TLS is C-backend only,
+client half included.
+
+---
+
 ## v0.1.337 — 2026-08-28
 
 _A native binary could not read its own environment._

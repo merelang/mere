@@ -1,0 +1,134 @@
+// A TLS-terminating HTTP server, written in Mere.
+//
+// v0.1.338. Two things this program REFUSES to work around, because working
+// around them is what hid the gaps:
+//
+//   1. It terminates TLS itself -- no stunnel, no nginx, no reverse proxy.
+//      Until now the C backend could only DIAL a TLS connection
+//      (`tcp_starttls`); it could not ANSWER one. That is the real reason
+//      every web dogfood so far served plaintext and told the reader to put
+//      something in front of it. The workaround was so ordinary that it never
+//      looked like a missing feature.
+//
+//   2. It reads its own configuration from the environment (v0.1.337). Before
+//      that, a native binary had no `env_var`, so a server's port and file
+//      paths had to be compiled in. mere-blog hardcodes its database
+//      connection for exactly this reason.
+//
+// THE ORACLE IS AN EXTERNAL TLS CLIENT. curl and `openssl s_client` refuse a
+// handshake we get wrong, and nothing in this file can make them lenient. A
+// self-check ("did SSL_accept return 1?") would only report our own opinion.
+
+extern fn tcp_listen: int -> int;
+extern fn tcp_accept: int -> int;
+extern fn tcp_read: int -> int -> int -> int;
+extern fn tcp_write: int -> int -> int -> int;
+extern fn tcp_close: int -> unit;
+extern fn mem_alloc: int -> int;
+extern fn mem_get_u8: int -> int -> int;
+extern fn mem_to_str: int -> int -> str;
+extern fn mem_copy_str: int -> int -> str -> int;
+
+// The server half. `tls_server_init` loads the certificate once per process;
+// `tcp_accept_tls` performs one handshake on an already-accepted fd. Split in
+// two on purpose: folding them together would re-read the files on every
+// connection and make "bad certificate" and "bad handshake" the same failure.
+extern fn tls_server_init: str -> str -> int;
+extern fn tcp_accept_tls: int -> int;
+
+let crlf = chr 13 ++ chr 10;
+let bufsz = 16384;
+
+// ---- request head: scan for the CRLFCRLF terminator ------------------
+// Scanning the whole buffer rather than only its tail, because a read may
+// split anywhere -- a tail-only check passes with curl (which writes the head
+// in one go) and fails against a client that dribbles.
+let rec find_head_end = fn (buf: int) -> fn (i: int) -> fn (g: int) ->
+  if i + 4 > g then 0 - 1
+  else if mem_get_u8 buf i != 13 then find_head_end buf (i + 1) g
+  else if mem_get_u8 buf (i + 1) != 10 then find_head_end buf (i + 1) g
+  else if mem_get_u8 buf (i + 2) != 13 then find_head_end buf (i + 1) g
+  else if mem_get_u8 buf (i + 3) != 10 then find_head_end buf (i + 1) g
+  else i + 4;
+
+let rec read_head = fn (fd: int) -> fn (buf: int) -> fn (got: int) ->
+  if find_head_end buf 0 got >= 0 then got
+  else if got >= bufsz then got
+  else
+    let n = tcp_read fd (buf + got) (bufsz - got) in
+    if n <= 0 then got else read_head fd buf (got + n);
+
+// "GET /hello HTTP/1.1\r\n..." -> "/hello"
+let request_path = fn (head: str) ->
+  match str_split head " " with
+  | Cons (_, Cons (p, _)) -> p
+  | _ -> "/";
+
+let respond = fn (path: str) ->
+  let body = "mere: TLS terminated in-process" ++ chr 10 ++ "path=" ++ path ++ chr 10 in
+  "HTTP/1.1 200 OK" ++ crlf
+  ++ "Content-Type: text/plain" ++ crlf
+  ++ "Content-Length: " ++ str_of_int (str_len body) ++ crlf
+  ++ "Connection: close" ++ crlf ++ crlf ++ body;
+
+let serve_one = fn (srv: int) -> fn (buf: int) -> fn (wbuf: int) ->
+  let c = tcp_accept srv in
+  if c < 0 then 0
+  else
+    // The handshake happens BEFORE any read: from here on tcp_read and
+    // tcp_write route through the SSL* the runtime stored for this fd, so the
+    // rest of the handler is byte-identical to the plaintext one.
+    let h = tcp_accept_tls c in
+    if h != 0 then
+      let _ = print_err ("handshake failed: " ++ str_of_int h) in
+      let _ = tcp_close c in
+      0
+    else
+      let g = read_head c buf 0 in
+      let head = mem_to_str buf g in
+      let out = respond (request_path head) in
+      let n = mem_copy_str wbuf 0 out in
+      let _ = tcp_write c wbuf n in
+      let _ = tcp_close c in
+      1;
+
+let rec accept_loop = fn (srv: int) -> fn (buf: int) -> fn (wbuf: int) -> fn (left: int) ->
+  if left <= 0 then ()
+  else
+    let served = serve_one srv buf wbuf in
+    accept_loop srv buf wbuf (left - served);
+
+// ---- main ------------------------------------------------------------
+let cert = match env_var "MERE_TLS_CERT" with
+  | Some p -> p
+  | None -> "";
+let key = match env_var "MERE_TLS_KEY" with
+  | Some p -> p
+  | None -> "";
+let port = match env_var "MERE_TLS_PORT" with
+  | Some p -> int_of_str p
+  | None -> 8443;
+// How many requests to answer before exiting. A server that never returns
+// cannot be a gate; one that exits after N makes the gate's success and the
+// process's exit the same event.
+let want = match env_var "MERE_TLS_REQUESTS" with
+  | Some n -> int_of_str n
+  | None -> 1;
+
+if str_len cert == 0 then
+  let _ = print_err "set MERE_TLS_CERT and MERE_TLS_KEY" in
+  1
+else
+  let rc = tls_server_init cert key in
+  if rc != 0 then
+    let _ = print_err ("tls_server_init failed: " ++ str_of_int rc) in
+    1
+  else
+    let srv = tcp_listen port in
+    if srv < 0 then
+      let _ = print_err ("could not listen on " ++ str_of_int port) in
+      1
+    else
+      let _ = print ("mere https listening on :" ++ str_of_int port) in
+      let _ = accept_loop srv (mem_alloc bufsz) (mem_alloc bufsz) want in
+      0

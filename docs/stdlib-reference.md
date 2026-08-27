@@ -128,6 +128,37 @@ to time the call and ask whether it had failed slowly enough to have been a time
 inferring a cause from a duration. Every existing `< 0` check is unaffected.
 `scripts/tcp_read_codes.sh` produces all three rather than describing them.
 
+**TLS**, both halves (v0.1.338). Also `extern fn` declarations, and declaring any of
+them is what makes the C backend link OpenSSL — a program that never mentions TLS
+does not need it installed.
+
+| name | type | notes |
+|---|---|---|
+| `tcp_starttls` | `int -> str -> int` | Client: upgrade an established fd, SNI, **no certificate check** |
+| `tcp_starttls_verified` | `int -> str -> str -> int` | Client: peer verification against a CA + hostname match |
+| `tls_server_init` | `str -> str -> int` | Server: load a certificate chain and key, once per process. `0`, or negative |
+| `tcp_accept_tls` | `int -> int` | Server: perform the handshake on an accepted fd. `0`, or negative |
+
+After either call succeeds, `tcp_read` / `tcp_write` / `tcp_close` on that fd go
+through TLS with no further change — which is why a plaintext handler becomes a TLS
+handler by inserting one line.
+
+The server side is two calls rather than one because a certificate is read once and a
+handshake happens per connection. Folding them together would re-read the files on
+every accept, and would make "your certificate is unusable" and "this particular
+client failed" the same result — so a server with a bad certificate would look healthy
+until a user arrived. `tls_server_init` returning non-zero is the whole difference.
+
+Until v0.1.338 only the client half existed, so a Mere program could dial a TLS
+connection but not answer one. Nothing announced this: every web program in the
+project simply terminated TLS in nginx and looked finished.
+`scripts/tls_server_check.sh` drives `test/tls/https_server.mere` with curl and
+`openssl s_client` — two TLS implementations that are not ours.
+
+**Not on every backend.** TLS is C-backend only, client half included: `mere -ll` and
+`mere -w` have no lowering for any of the four, so a program that terminates TLS is a
+program you build with `mere -c`.
+
 **On Wasm** the whole family works — `scripts/socket_parity.sh` runs the same round
 trip natively and under `wasmtime -S inherit-network=y` and compares — with two
 differences:
