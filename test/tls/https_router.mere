@@ -1,0 +1,51 @@
+// contrib/http, serving HTTPS (v0.1.338).
+//
+// The companion to https_server.mere: that one drives the raw externs, this
+// one drives the module every web program in the project actually uses. They
+// are separate because routing `http_serve` through TLS and routing
+// `tcp_read` through TLS are different code paths, and only one of them is
+// what mere-blog calls.
+//
+// It asks for a FILE as well as a page, on purpose. `http_send_file` writes
+// straight to the connection instead of returning a body, so it was the site
+// most likely to be left behind writing cleartext into a TLS socket -- a
+// half-fix that looks finished because every page still renders.
+
+import "../../contrib/http/http.mere";
+import "../../contrib/http/router.mere";
+
+extern fn http_serve_tls: int -> str -> str -> (str -> str) -> unit;
+extern fn http_send_file: str -> str -> int;
+
+let env_or = fn (name: str) -> fn (dflt: str) ->
+  match env_var name with
+  | Some v -> v
+  | None -> dflt;
+
+let hello = fn (req: str) -> "hello over tls\n";
+
+let file_h = fn (req: str) ->
+  let _ = http_send_file (env_or "MERE_TLS_FILE" "/etc/hostname") "text/plain; charset=utf-8" in
+  "";
+
+let echo_h = fn (req: str) ->
+  let _ = http_set_header "X-Mere" "tls" in
+  "req=" ++ req ++ "\n";
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in "not found\n";
+
+let routes = [
+  route "GET" "/" hello,
+  route "GET" "/file" file_h,
+  route "GET" "/echo" echo_h
+];
+
+let cert = env_or "MERE_TLS_CERT" "";
+let key  = env_or "MERE_TLS_KEY" "";
+let port = match env_var "MERE_TLS_PORT" with
+  | Some p -> int_of_str p
+  | None -> 8443;
+
+let _ = http_serve_tls port cert key (router routes not_found);
+0

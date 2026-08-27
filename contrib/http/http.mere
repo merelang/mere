@@ -24,6 +24,26 @@
 // the process alive as long as the server is bound.
 extern fn http_serve: int -> (str -> str) -> unit;
 
+// The same accept loop, terminating TLS itself (mere v0.1.338, C backend).
+// `http_serve_tls port cert_path key_path handler` -- the certificate chain
+// and key are PEM paths, loaded once before the socket is bound, so a
+// certificate that cannot be used is an error at startup rather than a
+// surprise on the first connection.
+//
+// After the handshake the handler is byte-identical to the plaintext one:
+// the response path, `http_send_file`, and the per-request arena are all
+// unchanged, because the runtime routes every byte of a served connection
+// through one read/write pair.
+//
+// WHY THIS EXISTS. Until v0.1.338 a Mere program could dial a TLS connection
+// but not answer one, so every web program written against this module served
+// cleartext and told its reader to put nginx in front. That is ordinary enough
+// advice that the gap never read as a gap.
+//
+// C backend only, and only when the program declares this extern -- declaring
+// it is what links OpenSSL. On the Node host, terminate TLS in the host.
+extern fn http_serve_tls: int -> str -> str -> (str -> str) -> unit;
+
 // Return the request body of the HTTP request currently being handled.
 // Only valid to call from inside the `http_serve` handler closure; at
 // any other time it returns an empty string.

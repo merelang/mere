@@ -46,6 +46,20 @@ should be a FAIL, never a wait.
 Recorded because it is the opposite of what poisoning usually shows: the subject was
 fine and the instrument was not.
 
+`contrib/http` gains `http_serve_tls port cert key handler` — the same accept loop
+with the handshake in front of it. The handler is byte-identical to the plaintext one,
+because every byte of a served connection now goes through one `__conn_read` /
+`__conn_write` / `__conn_close` triple instead of calling `read` / `write` / `close`
+directly in six places. **`http_send_file` was the sixth**: it writes straight to the
+connection rather than returning a body, so converting only `http_serve` would have
+left file downloads putting cleartext into a TLS socket — a half-fix that looks
+finished because every page still renders. Poisoning exactly that site turns exactly
+one of the thirteen checks red, which is why it is worth a check of its own.
+
+Declaring `http_serve_tls` is what links OpenSSL; a program that never mentions TLS is
+unaffected. Declared-but-unreachable is an error message, not cleartext on a port the
+caller believes is encrypted.
+
 **Not on every backend**, and unchanged in that respect: TLS is C-backend only,
 client half included.
 

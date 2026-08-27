@@ -6507,7 +6507,7 @@ let native_ffi_stub_names =
    closure = the `closure_str_str` struct). Single-threaded accept loop;
    response metadata is per-request global state. *)
 let native_http_names =
-  [ "http_serve"; "http_current_body"; "http_set_status";
+  [ "http_serve"; "http_serve_tls"; "http_current_body"; "http_set_status";
     "http_set_content_type"; "http_set_header"; "http_get_header";
     "http_current_status"; "http_arena_mark";
     "http_send_file"; "unix_time" ]
@@ -6530,9 +6530,9 @@ let is_native_ffi name =
   || List.mem name native_http_names
   || List.mem name native_util_names
 
-let native_http_runtime =
+let native_http_runtime ~tls =
   String.concat "\n"
-    [ "/* --- native HTTP server (Stage 3): single-threaded accept loop, ";
+    ([ "/* --- native HTTP server (Stage 3): single-threaded accept loop, ";
       "   per-request response state. Same extern contract as the Node host: ";
       "   the handler gets \"METHOD URL\", sets status/content-type/headers via ";
       "   the http_set_* externs, and returns the response body. --- */";
@@ -6598,6 +6598,24 @@ let native_http_runtime =
       "   response after this one. */";
       "static int __http_sent = 0;";
       "static int __http_conn = -1;";
+      "/* Connection I/O. Every byte in and out of a served connection goes";
+      " * through these three, so that turning TLS on is one decision in one";
+      " * place. http_send_file used to call write(__http_conn, ...) directly:";
+      " * routing only http_serve would have left file downloads writing";
+      " * cleartext into a TLS socket, which is the kind of half-fix that looks";
+      " * finished because every page still renders. */";
+      (if tls then
+         "static ssize_t __conn_read(int fd, void* b, size_t n) { return (fd >= 0 && fd < __TLS_MAX && __tls[fd]) ? (ssize_t)SSL_read(__tls[fd], b, (int)n) : read(fd, b, n); }"
+       else
+         "static ssize_t __conn_read(int fd, void* b, size_t n) { return read(fd, b, n); }");
+      (if tls then
+         "static ssize_t __conn_write(int fd, const void* b, size_t n) { return (fd >= 0 && fd < __TLS_MAX && __tls[fd]) ? (ssize_t)SSL_write(__tls[fd], b, (int)n) : write(fd, b, n); }"
+       else
+         "static ssize_t __conn_write(int fd, const void* b, size_t n) { return write(fd, b, n); }");
+      (if tls then
+         "static void __conn_close(int fd) { if (fd >= 0 && fd < __TLS_MAX && __tls[fd]) { SSL_shutdown(__tls[fd]); SSL_free(__tls[fd]); __tls[fd] = 0; } close(fd); }"
+       else
+         "static void __conn_close(int fd) { close(fd); }");
       "static int http_send_file(const char* path, const char* ctype) {";
       "  FILE* f = fopen(path, \"rb\");";
       "  if (!f) return 0;";
@@ -6610,10 +6628,10 @@ let native_http_runtime =
       "    \"HTTP/1.1 %d\\r\\nContent-Type: %s\\r\\nContent-Length: %ld\\r\\n%sConnection: close\\r\\n\\r\\n\",";
       "    __http_status, ctype, n, __http_extra_hdrs);";
       "  if (__http_conn >= 0) {";
-      "    write(__http_conn, head, hn);";
+      "    __conn_write(__http_conn, head, hn);";
       "    char chunk[65536]; size_t got;";
       "    while ((got = fread(chunk, 1, sizeof chunk, f)) > 0)";
-      "      write(__http_conn, chunk, got);";
+      "      __conn_write(__http_conn, chunk, got);";
       "  }";
       "  fclose(f);";
       "  __http_sent = 1;";
@@ -6667,7 +6685,10 @@ let native_http_runtime =
       "  val[0] = 0; return __lang_str_of_cstr(val);";
       "}";
       "";
-      "static int http_serve(int port, closure_str_str handler) {";
+      (if tls then
+         "static int __http_tls = 0;  /* handshake each accepted connection */"
+       else "static int __http_tls = 0;");
+      "static int __http_serve_impl(int port, closure_str_str handler) {";
       "  int srv = socket(AF_INET, SOCK_STREAM, 0);";
       "  int one = 1; setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);";
       "  struct sockaddr_in addr; memset(&addr, 0, sizeof addr);";
@@ -6680,14 +6701,17 @@ let native_http_runtime =
       "  for (;;) {";
       "    int c = accept(srv, 0, 0);";
       "    if (c < 0) continue;";
+      (if tls then
+         "    if (__http_tls && tcp_accept_tls(c) != 0) { close(c); continue; }  /* a client that cannot handshake is not a request */"
+       else "    (void)__http_tls;");
       "    int n = 0, hdr_end = -1;";
       "    while (n < (int)sizeof buf - 1) {";
-      "      int r = (int)read(c, buf + n, sizeof buf - 1 - n);";
+      "      int r = (int)__conn_read(c, buf + n, sizeof buf - 1 - n);";
       "      if (r <= 0) break; n += r; buf[n] = 0;";
       "      char* e = strstr(buf, \"\\r\\n\\r\\n\");";
       "      if (e) { hdr_end = (int)(e - buf) + 4; break; }";
       "    }";
-      "    if (hdr_end < 0) { close(c); continue; }";
+      "    if (hdr_end < 0) { __conn_close(c); continue; }";
       "    /* request head (request line + headers) for http_get_header */";
       "    __http_req_head_len = hdr_end < (int)sizeof __http_req_head - 1 ? hdr_end : (int)sizeof __http_req_head - 1;";
       "    memcpy(__http_req_head, buf, __http_req_head_len); __http_req_head[__http_req_head_len] = 0;";
@@ -6697,7 +6721,7 @@ let native_http_runtime =
       "      while (*cl) { if (strncasecmp(cl, \"content-length:\", 15) == 0) { clen = atoi(cl + 15); break; }";
       "                    char* e2 = strstr(cl, \"\\r\\n\"); if (!e2) break; cl = e2 + 2; } }";
       "    while (n - hdr_end < clen && n < (int)sizeof buf - 1) {";
-      "      int r = (int)read(c, buf + n, sizeof buf - 1 - n); if (r <= 0) break; n += r;";
+      "      int r = (int)__conn_read(c, buf + n, sizeof buf - 1 - n); if (r <= 0) break; n += r;";
       "    }";
       "    __http_req_body_len = n - hdr_end;";
       "    if (__http_req_body_len > (int)sizeof __http_req_body - 1) __http_req_body_len = sizeof __http_req_body - 1;";
@@ -6721,13 +6745,36 @@ let native_http_runtime =
       "    int hn = snprintf(head, sizeof head,";
       "      \"HTTP/1.1 %d\\r\\nContent-Type: %s\\r\\nContent-Length: %zu\\r\\n%sConnection: close\\r\\n\\r\\n\",";
       "      __http_status, __http_ctype, blen, __http_extra_hdrs);";
-      "    if (!__http_sent) { write(c, head, hn); write(c, body, blen); }";
-      "    close(c); __http_conn = -1;";
+      "    if (!__http_sent) { __conn_write(c, head, hn); __conn_write(c, body, blen); }";
+      "    __conn_close(c); __http_conn = -1;";
       "    /* The response is out; the request's allocations can go. */";
       "    __http_arena_release();";
       "  }";
       "  return 0;";
+      "}";
+      "static int http_serve(int port, closure_str_str handler) {";
+      "  __http_tls = 0; return __http_serve_impl(port, handler);";
       "}" ]
+    @ (if tls then
+         [ "/* v0.1.338: the same accept loop, with the handshake in front of it.";
+           " * The certificate is loaded ONCE here rather than per connection, and a";
+           " * certificate that cannot be loaded returns before the socket is opened --";
+           " * a server with an unusable certificate that bound anyway would look";
+           " * healthy right up until the first user arrived. */";
+           "static int http_serve_tls(int port, const char* cert, const char* key, closure_str_str handler) {";
+           "  int rc = tls_server_init(cert, key);";
+           "  if (rc != 0) { fprintf(stderr, \"native http: certificate/key unusable (tls_server_init=%d)\\n\", rc); return rc; }";
+           "  __http_tls = 1; return __http_serve_impl(port, handler);";
+           "}" ]
+       else
+         [ "/* Declared but not reachable: this program never mentioned TLS, so the";
+           " * OpenSSL runtime was not compiled in. Naming the gap rather than";
+           " * serving cleartext on a port the caller believes is encrypted. */";
+           "static int http_serve_tls(int port, const char* cert, const char* key, closure_str_str handler) {";
+           "  (void)port; (void)cert; (void)key; (void)handler;";
+           "  fprintf(stderr, \"native http: http_serve_tls needs the TLS runtime; declare it and rebuild\\n\");";
+           "  return -1;";
+           "}" ]))
 
 let native_ffi_runtime ~tls ~midi ~window ~audio =
   String.concat "\n"
@@ -11080,7 +11127,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Hashtbl.mem extern_fn_decls "tcp_starttls"
     || Hashtbl.mem extern_fn_decls "tcp_starttls_verified"
     || Hashtbl.mem extern_fn_decls "tls_server_init"
-    || Hashtbl.mem extern_fn_decls "tcp_accept_tls";
+    || Hashtbl.mem extern_fn_decls "tcp_accept_tls"
+    || Hashtbl.mem extern_fn_decls "http_serve_tls";
   (* v0.1.128: declaring a midi_* extern pulls in the PortMidi runtime (and
      asks the clang line for -lportmidi); everyone else needs no portmidi. *)
   uses_midi :=
@@ -12482,7 +12530,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        closure typedefs (http_serve takes a `closure_str_str` handler). *)
     @ (if Hashtbl.fold (fun n _ acc -> acc || List.mem n native_http_names)
             extern_fn_decls false
-       then [native_http_runtime; ""]
+       then [native_http_runtime ~tls:!uses_tls; ""]
        else [])
     (* Now the struct bodies themselves — fields may reference closure
        types (e.g., `closure_unit_unit close;` inside a Drop record), so

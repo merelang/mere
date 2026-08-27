@@ -201,12 +201,59 @@ echo "$out" | grep -q 'tls_server_init failed' \
   && ok "a key that does not match the certificate is refused at init" \
   || bad "a mismatched key was accepted (got: $(echo "$out" | tr '\n' ' '))"
 
+# ---- 6. contrib/http, the module every web program here actually uses ---
+# Separate from checks 1-5 on purpose: routing `tcp_read` through TLS and
+# routing the runtime's own accept loop through TLS are different code paths,
+# and only the second one is what mere-blog calls.
+"$MERE" -c "$ROOT/test/tls/https_router.mere" > "$WORK/router.c"
+if $CC -O1 -o "$WORK/router" "$WORK/router.c" $SSL_FLAGS -lssl -lcrypto -lm 2>"$WORK/cc2.log"; then
+  printf 'some content over tls\n' > "$WORK/payload.txt"
+  MERE_TLS_CERT="$WORK/cert.pem" MERE_TLS_KEY="$WORK/key.pem" MERE_TLS_PORT="$PORT2" \
+    MERE_TLS_FILE="$WORK/payload.txt" "$WORK/router" > "$WORK/router.log" 2>&1 &
+  SRVPID=$!
+
+  page=$(curl -sS --cacert "$WORK/cert.pem" --resolve "localhost:$PORT2:127.0.0.1" \
+           --retry 15 --retry-delay 1 --retry-connrefused --max-time 8 \
+           -w '\nHTTP=%{http_code}' "https://localhost:$PORT2/" 2>&1 || true)
+  echo "$page" | grep -q 'hello over tls' \
+    && ok "contrib/http's router answered over verified TLS" \
+    || bad "contrib/http did not answer over TLS (got: $(echo "$page" | tr '\n' ' ' | cut -c1-160))"
+
+  # THE ONE THAT CATCHES A HALF-FIX. http_send_file writes straight to the
+  # connection rather than returning a body, so it is the site most likely to
+  # be left calling write() while every page still renders correctly.
+  filed=$(curl -sS --cacert "$WORK/cert.pem" --resolve "localhost:$PORT2:127.0.0.1" \
+            --max-time 8 "https://localhost:$PORT2/file" 2>&1 || true)
+  echo "$filed" | grep -q 'some content over tls' \
+    && ok "http_send_file's bytes arrived intact over TLS" \
+    || bad "http_send_file did not deliver over TLS (got: $(echo "$filed" | tr '\n' ' ' | cut -c1-160))"
+
+  st=$(curl -sS --cacert "$WORK/cert.pem" --resolve "localhost:$PORT2:127.0.0.1" \
+         --max-time 8 -o /dev/null -w '%{http_code}' "https://localhost:$PORT2/nope" 2>&1 || true)
+  [ "$st" = "404" ] \
+    && ok "status and headers survive the TLS path (404 route)" \
+    || bad "the 404 route did not come back as 404 (got: $st)"
+
+  rplain=$(curl -sS --max-time 6 -o /dev/null -w '%{http_code}' \
+             "http://127.0.0.1:$PORT2/" 2>/dev/null || true)
+  [ "$rplain" = "200" ] \
+    && bad "http_serve_tls answered a plaintext request with 200" \
+    || ok "http_serve_tls refuses plaintext (http_code=$rplain)"
+
+  kill "$SRVPID" 2>/dev/null || true; SRVPID=""
+else
+  bad "test/tls/https_router.mere did not build: $(head -3 "$WORK/cc2.log" | tr '\n' ' ')"
+  bad "(and so the four contrib/http checks did not run)"
+  bad "(placeholder)"
+  bad "(placeholder)"
+fi
+
 # HOW MANY CHECKS THERE ARE, asserted. `set -e` plus a `kill` on an
 # already-exited server made an earlier draft of this script stop after check 2
 # and exit 0: five PASS lines, no summary, and a green CI. A gate that reports
 # only what it managed to reach cannot tell "everything passed" from "it stopped
 # early". Raise this number in the same commit that adds a check.
-EXPECTED=9
+EXPECTED=13
 echo
 echo "tls_server_check: $pass passed, $fail failed, of $EXPECTED checks"
 if [ $((pass + fail)) -ne "$EXPECTED" ]; then
