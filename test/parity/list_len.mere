@@ -1,0 +1,22 @@
+// Q-069: `len` on a `T list`. Two backends could not run this at all and no
+// program in the corpus asked them to.
+//
+// Wasm's $mere_list_len read the tag as `i32.load offset=0` and the payload at
+// offset 4 -- the layout from before values widened; a variant's tag is
+// `i64.load offset=0` and its payload `i64.load offset=8`.
+//
+// LLVM had two: `len` on a list registered itself in `vec_to_list_instances`,
+// so a program with a list and no vec emitted a vec_to_list helper that
+// dereferences a struct type only emitted for real vecs (it did not compile);
+// and the helper loaded the payload slot AS the tuple, where Phase 25.0 boxed
+// it behind a pointer (it segfaulted).
+//
+// Both element types, both spellings, and the empty case.
+let xs = [10, 20, 30];
+let ss = ["a", "b"];
+{
+  print (str_of_int (len xs));
+  print (str_of_int (len ss));
+  print (str_of_int (len (Cons (1, Cons (2, Cons (3, Cons (4, Nil)))))));
+  print (str_of_int (len (Cons ("only", Nil))))
+}
