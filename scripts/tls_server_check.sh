@@ -1,0 +1,217 @@
+#!/bin/sh
+# scripts/tls_server_check.sh — a Mere program ANSWERS a TLS connection.
+#
+# v0.1.338. Until now the C backend could only DIAL TLS (`tcp_starttls`). It
+# could not terminate one, so every web dogfood served plaintext and told the
+# reader to put nginx in front. That workaround is so ordinary that the gap
+# never looked like a gap: the app worked, the gate was green, and the thing
+# the language could not do was invisible because nobody tried to do it.
+#
+# THE ORACLE IS SOMEONE ELSE'S TLS. curl and `openssl s_client` are two
+# independent client implementations that refuse a handshake we get wrong, and
+# nothing in this repository can make them lenient. Note the ABSENCE of `-k`:
+# the certificate is verified against the CA the harness generated, so this
+# also asserts that the certificate the server presents is the one
+# `tls_server_init` was handed -- a server that loaded nothing and negotiated
+# an anonymous cipher would still "complete a handshake".
+#
+# It also asserts the NEGATIVE, because a program that quietly fell back to
+# plaintext would pass a check that only ever spoke TLS to it (check 2), and
+# so would one that answered before the handshake finished.
+#
+# The certificate is generated per run and never committed: a private key in a
+# public repository is a finding whatever it protects.
+#
+# Skips (exit 0) without a C compiler, openssl, or curl.
+#
+# Usage:
+#   sh scripts/tls_server_check.sh
+
+set -e
+
+MERE=${MERE:-./_build/default/bin/mere.exe}
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PORT=${PORT:-18443}
+PORT2=$((PORT + 1))
+
+for tool in openssl curl; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "tls_server_check: $tool not found — skipping (this check is optional)"
+    exit 0
+  fi
+done
+if ! command -v clang >/dev/null 2>&1 && ! command -v cc >/dev/null 2>&1; then
+  echo "tls_server_check: no C compiler — skipping (this check is optional)"
+  exit 0
+fi
+CC=$(command -v clang || command -v cc)
+
+# OpenSSL headers. Homebrew keeps them off the default include path; on Linux
+# libssl-dev puts them where the compiler already looks.
+if [ -z "$SSL_PREFIX" ] && command -v brew >/dev/null 2>&1; then
+  SSL_PREFIX=$(brew --prefix openssl@3 2>/dev/null || true)
+fi
+SSL_FLAGS=""
+if [ -n "$SSL_PREFIX" ] && [ -d "$SSL_PREFIX/include" ]; then
+  SSL_FLAGS="-I$SSL_PREFIX/include -L$SSL_PREFIX/lib"
+fi
+
+WORK=$(mktemp -d)
+SRVPID=""
+cleanup() {
+  [ -n "$SRVPID" ] && kill "$SRVPID" 2>/dev/null
+  :
+  rm -rf "$WORK"
+}
+trap cleanup EXIT INT TERM
+
+pass=0; fail=0
+ok()   { pass=$((pass + 1)); echo "PASS  $1"; }
+bad()  { fail=$((fail + 1)); echo "FAIL  $1"; }
+
+# ---- the certificate (generated, never committed) ----------------------
+openssl req -x509 -newkey rsa:2048 -keyout "$WORK/key.pem" -out "$WORK/cert.pem" \
+  -days 2 -nodes -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" >/dev/null 2>&1 \
+  || { echo "tls_server_check: openssl req failed — skipping"; exit 0; }
+
+# ---- build -------------------------------------------------------------
+"$MERE" -c "$ROOT/test/tls/https_server.mere" > "$WORK/https.c"
+if ! $CC -O1 -o "$WORK/https" "$WORK/https.c" $SSL_FLAGS -lssl -lcrypto -lm 2>"$WORK/cc.log"; then
+  echo "tls_server_check: could not link against OpenSSL — skipping"
+  sed -n '1,10p' "$WORK/cc.log"
+  exit 0
+fi
+
+start_server() {
+  # $1 = port, $2 = cert, $3 = key, $4 = how many requests to answer
+  MERE_TLS_CERT="$2" MERE_TLS_KEY="$3" MERE_TLS_PORT="$1" MERE_TLS_REQUESTS="$4" \
+    "$WORK/https" > "$WORK/srv.log" 2>&1 &
+  SRVPID=$!
+}
+
+# ---- one server, five requests, four kinds of client --------------------
+# A generous budget and an explicit kill, rather than "exits after exactly the
+# number we expect": the budget is not what is under test here, and a gate that
+# depends on it turns a wrong answer into a hang.
+start_server "$PORT" "$WORK/cert.pem" "$WORK/key.pem" 5
+
+# 1. plaintext to the TLS port must NOT be answered.
+plain=$(curl -sS --retry 15 --retry-delay 1 --retry-connrefused --max-time 8 \
+          -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/plain" 2>/dev/null || true)
+if [ "$plain" = "200" ]; then
+  bad "a plaintext request got a 200 — the server is not requiring TLS"
+else
+  ok "plaintext to the TLS port is refused (http_code=$plain)"
+fi
+
+# 2. curl, WITH certificate verification. No -k anywhere in this file.
+body=$(curl -sS --cacert "$WORK/cert.pem" --resolve "localhost:$PORT:127.0.0.1" \
+         --retry 10 --retry-delay 1 --retry-connrefused --max-time 8 \
+         -w '\nHTTP=%{http_code}' \
+         "https://localhost:$PORT/hello/world" 2>&1 || true)
+echo "$body" | grep -q 'HTTP=200' \
+  && ok "curl completed a verified TLS handshake and got 200" \
+  || bad "curl did not get 200 (got: $(echo "$body" | tr '\n' ' ' | cut -c1-160))"
+
+# 3. the body came back through the TLS layer intact.
+echo "$body" | grep -q 'path=/hello/world' \
+  && ok "the request path survived the TLS layer intact" \
+  || bad "the response body did not echo the request path"
+
+# 4. the SAME request WITHOUT the CA must fail.
+#
+# This is what makes check 2 mean anything. An earlier draft asserted
+# curl's %{ssl_verify_result} == 0 instead -- and that field is 0 when curl
+# never connected at all, so it stayed green under a poison that removed the
+# handshake entirely. Verification only proves something if the unverified
+# case is shown to fail: a server presenting a certificate that chains to
+# nothing must be REJECTED by a client using the system CA store.
+nocacert=$(curl -sS --resolve "localhost:$PORT:127.0.0.1" --max-time 8 \
+             -o /dev/null -w '%{http_code}' \
+             "https://localhost:$PORT/nocacert" 2>/dev/null || true)
+if [ "$nocacert" = "200" ]; then
+  bad "a client that does not trust our CA still got 200 — verification is not happening"
+else
+  ok "a client without our CA is rejected (http_code=$nocacert) — check 2 is a real verification"
+fi
+
+# 5. the listener survived. Two handshakes have now failed on this process
+# (checks 1 and 4). Asserting it by asking for another answer, because the
+# earlier draft simply PRINTED that the listener survived -- and printed it
+# under a poison that had killed the listener.
+again=$(curl -sS --cacert "$WORK/cert.pem" --resolve "localhost:$PORT:127.0.0.1" \
+          --max-time 8 -o /dev/null -w '%{http_code}' \
+          "https://localhost:$PORT/again" 2>/dev/null || true)
+[ "$again" = "200" ] \
+  && ok "the listener survived two failed handshakes and answered again" \
+  || bad "the server stopped answering after a failed handshake (http_code=$again)"
+
+kill "$SRVPID" 2>/dev/null || true; SRVPID=""
+
+# ---- 3. a second, independent TLS client -------------------------------
+# On a DIFFERENT port, which is also the assertion that the port came from the
+# environment: nothing in the binary knows about $PORT2.
+start_server "$PORT2" "$WORK/cert.pem" "$WORK/key.pem" 1
+# Readiness without spending the request budget: a PLAINTEXT connect fails the
+# handshake, so the server loops back to accept without counting it. (A probe
+# that completed a handshake would eat the one request this server will answer
+# -- which is how the first draft of this gate stalled.)
+curl -sS --retry 15 --retry-delay 1 --retry-connrefused --max-time 5 \
+     -o /dev/null "http://127.0.0.1:$PORT2/ready" >/dev/null 2>&1 || true
+sout=$(printf 'GET /s_client HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' \
+        | sh "$ROOT/scripts/bounded.sh" 20 openssl s_client -connect "127.0.0.1:$PORT2" \
+            -servername localhost -CAfile "$WORK/cert.pem" -verify_return_error -quiet 2>&1 || true)
+echo "$sout" | grep -q 'path=/s_client' \
+  && ok "openssl s_client (an independent implementation) also got a verified answer" \
+  || bad "openssl s_client did not get the response (got: $(echo "$sout" | tr '\n' ' ' | cut -c1-160))"
+kill "$SRVPID" 2>/dev/null || true; SRVPID=""
+
+# ---- 4. a certificate that is not there is an error, not a silent start --
+# The reason tls_server_init and tcp_accept_tls are two calls: a server that
+# discovered its bad certificate only on the first connection would look
+# healthy until a user arrived.
+# BOUNDED. This run is only fast because the certificate is expected to be
+# rejected; if it ever stops being rejected the server listens forever, and an
+# unbounded gate turns a wrong answer into a hang. (It did: dropping both key
+# checks made this line run until the harness was killed.)
+out=$(MERE_TLS_CERT="$WORK/nope.pem" MERE_TLS_KEY="$WORK/key.pem" \
+      MERE_TLS_PORT="$PORT2" MERE_TLS_REQUESTS=1 \
+      sh "$ROOT/scripts/bounded.sh" 15 "$WORK/https" 2>&1 || true)
+echo "$out" | grep -q 'tls_server_init failed' \
+  && ok "a missing certificate fails at init, before the socket is opened" \
+  || bad "a missing certificate did not fail at init (got: $(echo "$out" | tr '\n' ' '))"
+echo "$out" | grep -q 'listening' \
+  && bad "it listened anyway, with no usable certificate" \
+  || ok "and it did not listen"
+
+# ---- 5. a key that does not match the certificate ----------------------
+# TWO LINES CATCH THIS, EITHER ALONE SUFFICES, established by poisoning them
+# separately: SSL_CTX_use_PrivateKey_file already refuses a key inconsistent
+# with the certificate loaded before it, and SSL_CTX_check_private_key catches
+# it too. So neither is dead code and neither is individually detectable here --
+# only removing BOTH turns this check red. Recorded because "poison it and the
+# gate stayed green" otherwise reads as a useless check.
+openssl req -x509 -newkey rsa:2048 -keyout "$WORK/other.key" -out "$WORK/other.crt" \
+  -days 2 -nodes -subj "/CN=elsewhere" >/dev/null 2>&1
+out=$(MERE_TLS_CERT="$WORK/cert.pem" MERE_TLS_KEY="$WORK/other.key" \
+      MERE_TLS_PORT="$PORT2" MERE_TLS_REQUESTS=1 \
+      sh "$ROOT/scripts/bounded.sh" 15 "$WORK/https" 2>&1 || true)
+echo "$out" | grep -q 'tls_server_init failed' \
+  && ok "a key that does not match the certificate is refused at init" \
+  || bad "a mismatched key was accepted (got: $(echo "$out" | tr '\n' ' '))"
+
+# HOW MANY CHECKS THERE ARE, asserted. `set -e` plus a `kill` on an
+# already-exited server made an earlier draft of this script stop after check 2
+# and exit 0: five PASS lines, no summary, and a green CI. A gate that reports
+# only what it managed to reach cannot tell "everything passed" from "it stopped
+# early". Raise this number in the same commit that adds a check.
+EXPECTED=9
+echo
+echo "tls_server_check: $pass passed, $fail failed, of $EXPECTED checks"
+if [ $((pass + fail)) -ne "$EXPECTED" ]; then
+  echo "tls_server_check: only $((pass + fail)) of $EXPECTED checks ran — the script stopped early"
+  exit 1
+fi
+[ "$fail" -eq 0 ] || exit 1
+echo "tls_server_check: ok"

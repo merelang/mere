@@ -335,6 +335,14 @@ jobs:
       - name: tcp_read_codes
         run: sh scripts/tcp_read_codes.sh
 
+      # A Mere program ANSWERING a TLS connection, not dialling one. The client
+      # half has existed since v0.1.x; the server half did not, which is why
+      # every web dogfood in this project serves plaintext behind a proxy. The
+      # oracles are curl and openssl s_client -- two TLS implementations that
+      # are not ours and cannot be made lenient from this repository.
+      - name: tls_server_check (a Mere program terminates TLS)
+        run: sh scripts/tls_server_check.sh
+
       # The Protocol Buffers wire format against protoc's BYTES. Runs the
       # interpreter AND the C backend, because two of its four sections are about
       # the int-width difference between them: above 2^62 the interpreter is
