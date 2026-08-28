@@ -825,8 +825,28 @@ let rec _collect_result = fn (fd: int) -> fn (cols: (str * int) list)
   else if mtype == _MSG_ROW_DESC then
     _collect_result fd (_parse_row_desc payload) acc
   else if mtype == _MSG_ERROR then
-    let _ = print ("pg query error: " ++ mem_to_str payload plen) in
-    _collect_result fd cols acc
+    // SEVERITY DECIDES, and the difference matters more than it looks. This
+    // used to print and carry on, so a query that failed returned the rows it
+    // had -- none -- and the caller could not tell "no rows" from "the database
+    // is gone". Measured: restart Postgres under a running mere-blog and
+    // `GET /api/posts` answers `[]` with a 200. A dead database looked like an
+    // empty one.
+    //
+    // ERROR is a statement that failed on a connection that is still good: a
+    // unique violation on signup is this, and turning it into a failure would
+    // make "that name is taken" a 500. Those still return, as before.
+    //
+    // FATAL and PANIC mean the connection is finished -- the server has already
+    // closed it -- so there is nothing to return and no honest way to say so in
+    // a row list. `fail` is the only channel this API has for that, and with
+    // contrib/http/rescue.mere it becomes a 500 rather than a silent lie.
+    //
+    // The V field is read, not S: S is localized and V is not.
+    let msg = mem_to_str payload plen in
+    let _ = print ("pg query error: " ++ msg) in
+    if str_contains msg "VFATAL" then fail ("pg: connection lost -- " ++ msg)
+    else if str_contains msg "VPANIC" then fail ("pg: server panic -- " ++ msg)
+    else _collect_result fd cols acc
   else if mtype == _MSG_NOTIFY then
     let _ = _pg_enqueue_notif payload plen in
     _collect_result fd cols acc
