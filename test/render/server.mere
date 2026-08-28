@@ -1,0 +1,36 @@
+// test/render/server.mere — the server half of the render-agreement gate.
+//
+// Walks the SAME tree client.mere hands to the DOM, but serialises it
+// directly. The canonical form is the one scripts/run_dom_headless.mjs
+// prints, so the two are compared as bytes with no reformatting in
+// between: a normaliser is somewhere a real difference can be rubbed out.
+import "page.mere";
+
+let rec spaces = fn (n: int) -> if n <= 0 then "" else "  " ++ spaces (n - 1);
+
+let rec attrs_str = fn (attrs: (str * str) list) ->
+  match attrs with
+  | Nil -> ""
+  | Cons ((k, v), rest) -> " " ++ k ++ "=\"" ++ v ++ "\"" ++ attrs_str rest
+  ;
+
+// Mirrors El.dump() in scripts/run_dom_headless.mjs: an element whose only
+// child is text carries that text on the open tag, because dom_set_text
+// makes text a property and not a child node.
+let rec dump = fn (n: node) -> fn (depth: int) ->
+  match n with
+  | Text t -> spaces depth ++ "<span>" ++ t
+  | El (tag, attrs, kids) ->
+    let open_tag = spaces depth ++ "<" ++ tag ++ attrs_str attrs ++ ">" in
+    (match kids with
+     | Nil -> open_tag
+     | Cons (Text t, Nil) -> open_tag ++ t
+     | _ -> open_tag ++ "\n" ++ dump_all kids (depth + 1))
+and dump_all = fn (kids: node list) -> fn (depth: int) ->
+  match kids with
+  | Nil -> ""
+  | Cons (k, Nil) -> dump k depth
+  | Cons (k, rest) -> dump k depth ++ "\n" ++ dump_all rest depth
+  ;
+
+print (dump (page ()) 1)

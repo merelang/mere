@@ -1,0 +1,36 @@
+// test/render/client.mere — the client half of the render-agreement gate.
+//
+// Walks the SAME tree page.mere gives the server, but builds real DOM with
+// contrib/dom instead of printing. scripts/render_agreement_check.sh dumps
+// what this produced and compares it to what the server printed.
+import "../../contrib/dom/dom.mere";
+import "page.mere";
+
+let rec set_attrs = fn (el: JsRef) -> fn (attrs: (str * str) list) ->
+  match attrs with
+  | Nil -> ()
+  | Cons ((k, v), rest) -> let _ = dom_set_attr el k v in set_attrs el rest
+  ;
+
+// A node whose children are a single Text becomes an element with text,
+// which is what dom_set_text produces -- not a child node.
+let rec build = fn (n: node) ->
+  match n with
+  | Text t -> let e = dom_create "span" in let _ = dom_set_text e t in e
+  | El (tag, attrs, kids) ->
+    let e = dom_create tag in
+    let _ = set_attrs e attrs in
+    (match kids with
+     | Cons (Text t, Nil) -> let _ = dom_set_text e t in e
+     | _ -> let _ = append_all e kids in e)
+and append_all = fn (parent: JsRef) -> fn (kids: node list) ->
+  match kids with
+  | Nil -> ()
+  | Cons (k, rest) -> let _ = dom_append parent (build k) in append_all parent rest
+  ;
+
+let main =
+  let root = dom_get_by_id "app" in
+  let _ = dom_append root (build (page ())) in
+  0;
+main
