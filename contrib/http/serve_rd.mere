@@ -47,6 +47,7 @@
 
 import "serve_mt.mere";
 
+extern fn tcp_listen_shared: int -> int;
 extern fn io_poll_new: int -> int;
 extern fn io_poll_add: int -> int -> int -> int;
 extern fn io_poll_del: int -> int -> int;
@@ -92,6 +93,11 @@ let now_ms = fn (u: unit) -> int_of_float (time () * 1000.0);
 // holds a descriptor", which is cheap and still finite: without a reaper,
 // MERE_HTTP_MAX_CONN silent clients fill the table and nobody else gets in.
 let rd_idle_ms = rd_env_int "MERE_HTTP_IDLE_MS" 15000;
+
+// See serve_mt.mere for why sharing is opt-in rather than always on.
+let rd_listen = fn (port: int) ->
+  if rd_env_int "MERE_HTTP_REUSEPORT" 0 == 1 then tcp_listen_shared port
+  else tcp_listen port;
 
 let rd_max_fd = rd_env_int "MERE_HTTP_MAX_CONN" 64;
 let rd_slot = rd_env_int "MERE_HTTP_SLOT" 131072;
@@ -208,7 +214,7 @@ let rec rd_start = fn (ch) -> fn (back) -> fn (slots: int) -> fn (k: int) -> fn 
 
 // ---- the loop ----------------------------------------------------------
 let http_serve_rd_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h) ->
-  let srv = tcp_listen port in
+  let srv = rd_listen port in
   if srv < 0 then
     print_err ("http_serve_rd: could not listen on " ++ str_of_int port)
   else

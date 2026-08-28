@@ -31,6 +31,7 @@
 //   let _ = http_serve_mt 8080 8 (router routes not_found);
 
 extern fn tcp_listen: int -> int;
+extern fn tcp_listen_shared: int -> int;
 extern fn tcp_accept: int -> int;
 extern fn tcp_read: int -> int -> int -> int;
 extern fn tcp_write: int -> int -> int -> int;
@@ -48,6 +49,20 @@ extern fn http_response_sent: unit -> int;
 extern fn http_end_request: unit -> int;
 
 let mt_bufsz = 65536;
+
+// MERE_HTTP_REUSEPORT=1 lets several processes share the port and have the
+// kernel spread connections between them -- for fault isolation, or a restart
+// that does not drop traffic. OFF by default on purpose: with it always on, a
+// deploy that starts a second copy by mistake serves half the requests from the
+// old binary instead of failing to start.
+let mt_env_int = fn (name: str) -> fn (d: int) ->
+  match env_var name with
+  | Some v -> if str_len v > 0 then int_of_str v else d
+  | None -> d;
+
+let mt_listen = fn (port: int) ->
+  if mt_env_int "MERE_HTTP_REUSEPORT" 0 == 1 then tcp_listen_shared port
+  else tcp_listen port;
 
 // ---- request head ------------------------------------------------------
 // Scanning the whole buffer rather than its tail: a read may split anywhere,
@@ -252,7 +267,7 @@ let rec mt_start_ctx = fn (ch, k: int, n: int, mk, h) ->
 // anything richer can be keyed by one. If type parameters ever gain a Send
 // bound, this signature is the first thing that should widen.
 let http_serve_mt_ctx_hook = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h) -> fn (hook) ->
-  let srv = tcp_listen port in
+  let srv = mt_listen port in
   if srv < 0 then
     print_err ("http_serve_mt_ctx: could not listen on " ++ str_of_int port)
   else
@@ -267,7 +282,7 @@ let http_serve_mt_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h)
 
 // `http_serve_mt port workers handler` -- never returns.
 let http_serve_mt = fn (port: int) -> fn (workers: int) -> fn (h) ->
-  let srv = tcp_listen port in
+  let srv = mt_listen port in
   if srv < 0 then
     print_err ("http_serve_mt: could not listen on " ++ str_of_int port)
   else

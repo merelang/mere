@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.347 — 2026-08-28
+
+_Several processes can share a port, if you ask._ `tcp_listen_shared`, and
+`MERE_HTTP_REUSEPORT=1` in both servers.
+
+Measured first: a second process could not bind at all. `SO_REUSEADDR` — which
+`tcp_listen` has always set — lets a *restart* rebind through `TIME_WAIT`; it does not
+let two live processes share a listener. So "sessions live in the database now, which
+means more than one process could serve" was half a claim: the sessions could, the
+server could not.
+
+`SO_REUSEPORT` does, and the kernel spreads connections across the processes. **Off by
+default, and that is a decision rather than an oversight**: with sharing always on, a
+deploy script that starts a second copy by mistake does not fail — it quietly serves
+half the traffic from the old binary, alternating, which is the hardest kind of wrong to
+notice. Failing to bind is the better default.
+
+Verified in C before Mere, in both directions, and that order mattered: the Mere side
+looked broken and was — a string replacement that did not match, read as a working
+build because the program still compiled and ran.
+
+---
+
 ## v0.1.346 — 2026-08-28
 
 _A dead database stops looking like an empty one._ `contrib/db/pg.mere`.
