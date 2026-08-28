@@ -26,12 +26,24 @@
 // A CONNECTION HAS NO STACK, so its progress is a value: how many bytes have
 // arrived, in a Map the loop thread alone touches. mpoll found that framing.
 //
-// WHAT THIS VERSION DOES NOT DO, said plainly: the worker WRITES the response
-// with a blocking write. A client that sends a request and then refuses to read
-// the answer holds a worker, exactly as under http_serve_mt. Fixing that means
-// handing the fd back to the loop with a Writing state -- which is what mpoll
-// does and what this should grow. The read side is the half that matters first:
-// a client that dribbles a request is the cheap attack.
+// BOTH DIRECTIONS GO THROUGH THE LOOP (v0.1.342). The worker tries to write the
+// response and, if the socket will not take all of it, hands the remainder back
+// -- fd, offset, bytes left -- and takes the next request. A client that sends a
+// request and then refuses to read the answer costs a map entry, the same as one
+// that dribbles the request. The first version of this file wrote blocking in
+// the worker and said so; that was half the property.
+//
+// THE LOOP HAS TO NOTICE A WORKER FINISHING, and it is asleep in poll(). So it
+// polls with a 5 ms timeout WHILE ANY REQUEST IS IN FLIGHT and blocks
+// indefinitely when none is: an idle server wakes up never, a busy one wakes up
+// two hundred times a second on a handful of descriptors. The alternative is a
+// self-pipe, which needs a primitive this language does not have.
+//
+// THE RESPONSE REUSES THE REQUEST'S SLOT. By the time the handler returns, the
+// request has been copied out of it (mem_to_str allocates), so the bytes are
+// free. One slot array rather than two, and the response ceiling is the slot.
+// A response that does not fit is a 500 with a line on stderr -- truncating it
+// would send a well-formed reply that is not the answer.
 
 import "serve_mt.mere";
 
@@ -45,8 +57,29 @@ extern fn io_set_nonblocking: int -> int;
 // One read slot per fd, indexed BY the fd: the OS reuses closed descriptors, so
 // slot reuse follows fd reuse for free -- and the arena has no free, so anything
 // allocated per connection would leak per connection. mpoll's rule.
-let rd_max_fd = 256;
-let rd_slot = 32768;
+// THE ARENA IS 16 MB AND HAS NO FREE, so these two multiply into a budget
+// rather than being free choices: connections x slot must leave room for
+// everything else the program allocates. 64 x 128 KB = 8 MB.
+//
+// The slot is also the RESPONSE ceiling, because the response is written back
+// into it. 32 KB was the first guess and it is too small for a web application:
+// a JSON list of rows passes it easily. `http_send_file` is unaffected -- it
+// writes to the descriptor directly and never enters this buffer, so static
+// assets of any size are fine.
+// CONFIGURABLE, because the right answer is a deployment decision and because a
+// property that only appears at one size cannot be checked at another: the
+// partial-write path below is unreachable while a whole response fits in the
+// socket buffer, which 128 KB does on loopback. At 1 MB it is not, and the
+// difference is stark -- a single write against a nonblocking descriptor
+// delivered 3.2 MB of wrongness for a 896 KB response, because it wrote once
+// and ignored what it did not send.
+let rd_env_int = fn (name: str) -> fn (d: int) ->
+  match env_var name with
+  | Some v -> if str_len v > 0 then int_of_str v else d
+  | None -> d;
+
+let rd_max_fd = rd_env_int "MERE_HTTP_MAX_CONN" 64;
+let rd_slot = rd_env_int "MERE_HTTP_SLOT" 131072;
 
 // A request bigger than a slot is refused rather than truncated. Truncating
 // would hand the handler a request that parses and is not what was sent.
@@ -63,38 +96,69 @@ let rd_complete = fn (base: int) -> fn (got: int) -> fn (pat: int) -> fn (patn: 
     if got >= he + want then he + want else 0 - 1;
 
 // ---- the worker: handler, response, close ------------------------------
-let rd_worker_one = fn (fd: int) -> fn (base: int) -> fn (total: int) -> fn (wbuf: int) -> fn (ctx: int) -> fn (h) ->
+// Write what the socket will take, starting at base+off. Returns how many bytes
+// are still unwritten (0 = done). A -1 from tcp_write is "would block", which is
+// not an error and not progress.
+let rec rd_push = fn (fd: int) -> fn (base: int) -> fn (off: int) -> fn (rem: int) ->
+  if rem <= 0 then 0
+  else
+    let n = tcp_write fd (base + off) rem in
+    if n <= 0 then rem
+    else rd_push fd base (off + n) (rem - n);
+
+// Returns (fd, off, rem). rem = 0 means the worker finished and closed it.
+let rd_worker_one = fn (fd: int) -> fn (base: int) -> fn (total: int) -> fn (ctx: int) -> fn (h) ->
   let he = mt_find_head_end base 0 total in
   let head = mem_to_str base he in
   let body = mem_to_str (base + he) (total - he) in
   let reqline = mem_to_str base (mt_reqline_end base 0 he 0) in
   let _ = http_begin_request fd head body in
   let out = h ctx reqline in
-  let _ =
-    if http_response_sent () != 0 then 0
+  if http_response_sent () != 0 then
+    // http_send_file / the streaming API already wrote it, straight to the fd.
+    // Those still block in the worker; they bypass this path entirely.
+    let _ = http_end_request () in
+    let _ = tcp_close fd in
+    (fd, 0, 0)
+  else
+    let resp = http_response_head (str_len out) ++ out in
+    let len = str_len resp in
+    if len > rd_slot then
+      let _ = print_err ("http: response of " ++ str_of_int len
+                         ++ " bytes exceeds the " ++ str_of_int rd_slot
+                         ++ " byte slot; sending 500 instead of a truncated body") in
+      let n = mem_copy_str base 0
+                ("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") in
+      let left = rd_push fd base 0 n in
+      let _ = http_end_request () in
+      let _ = if left <= 0 then tcp_close fd else () in
+      (fd, n - left, left)
     else
-      let n = mem_copy_str wbuf 0 (http_response_head (str_len out) ++ out) in
-      tcp_write fd wbuf n in
-  let _ = http_end_request () in
-  let _ = tcp_close fd in
-  1;
+      let n = mem_copy_str base 0 resp in
+      let left = rd_push fd base 0 n in
+      let _ = http_end_request () in
+      let _ = if left <= 0 then tcp_close fd else () in
+      (fd, n - left, left);
 
-let rec rd_worker = fn (ch) -> fn (slots: int) -> fn (wbuf: int) -> fn (ctx: int) -> fn (h) ->
+let rec rd_worker = fn (ch) -> fn (back) -> fn (slots: int) -> fn (ctx: int) -> fn (h) ->
   match channel_recv_opt ch with
   | None -> ()
   // (fd, total). The bytes are already in this fd's slot; the loop stopped
-  // watching the fd before sending, so the worker owns both until it closes.
+  // watching the fd before sending, so the worker owns both until it either
+  // closes the fd or hands the leftover back.
   | Some (fd, total) ->
-    let _ = rd_worker_one fd (slots + fd * rd_slot) total wbuf ctx h in
-    rd_worker ch slots wbuf ctx h;
+    let r = rd_worker_one fd (slots + fd * rd_slot) total ctx h in
+    // ALWAYS reported, even when finished, because the loop counts requests in
+    // flight to decide whether it may sleep indefinitely.
+    let _ = channel_send back r in
+    rd_worker ch back slots ctx h;
 
-let rec rd_start = fn (ch) -> fn (slots: int) -> fn (k: int) -> fn (n: int) -> fn (mk) -> fn (h) ->
+let rec rd_start = fn (ch) -> fn (back) -> fn (slots: int) -> fn (k: int) -> fn (n: int) -> fn (mk) -> fn (h) ->
   if k >= n then ()
   else
-    let wbuf = mem_alloc rd_slot in
     let ctx = mk k in
-    let _ = spawn (fn () -> rd_worker ch slots wbuf ctx h) in
-    rd_start ch slots (k + 1) n mk h;
+    let _ = spawn (fn () -> rd_worker ch back slots ctx h) in
+    rd_start ch back slots (k + 1) n mk h;
 
 // ---- the loop ----------------------------------------------------------
 let http_serve_rd_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h) ->
@@ -107,8 +171,15 @@ let http_serve_rd_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h)
     let pat = mem_alloc 32 in
     let patn = mem_copy_str pat 0 "content-length:" in
     let ch = channel_new () in
+    // Workers report back on this one. Loop-owned state stays in the loop's
+    // own maps; nothing but these two channels crosses a thread boundary.
+    let back = channel_new () in
     let conns = map_new () in
-    let _ = rd_start ch slots 0 workers mk h in
+    let woff = map_new () in
+    let wrem = map_new () in
+    let inflight = map_new () in
+    let _ = map_set inflight 0 0 in
+    let _ = rd_start ch back slots 0 workers mk h in
     let _ = io_set_nonblocking srv in
     let _ = io_poll_add ps srv 1 in
     let _ = print ("http_serve_rd: listening on :" ++ str_of_int port
@@ -148,6 +219,7 @@ let http_serve_rd_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h)
           // from here the worker owns the fd, the slot, and the close.
           let _ = io_poll_del ps fd in
           let _ = map_delete conns fd in
+          let _ = map_set inflight 0 (map_get inflight 0 + 1) in
           channel_send ch (fd, total)
         else if g >= rd_slot then
           let wb = mem_alloc 128 in
@@ -156,8 +228,46 @@ let http_serve_rd_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h)
           close_conn fd
         else map_set conns fd g in
 
+    // A worker's answer arrives on a channel, not on a descriptor, so the loop
+    // cannot wait for it in poll(). While anything is in flight it wakes every
+    // 5 ms to look; with nothing in flight it blocks, so an idle server costs
+    // nothing. A self-pipe would be the usual answer and needs a primitive this
+    // language does not have.
+    let rec drain_back = fn (u: unit) ->
+      match channel_recv_timeout back 0 with
+      | None -> ()
+      | Some (fd, off, rem) ->
+        let _ = map_set inflight 0 (map_get inflight 0 - 1) in
+        let _ =
+          if rem <= 0 then ()          // the worker finished and closed it
+          else
+            // Not all of the response fit. Take the fd back and finish it here.
+            let _ = map_set woff fd off in
+            let _ = map_set wrem fd rem in
+            let _ = io_poll_add ps fd 2 in
+            () in
+        drain_back () in
+
+    let on_writable = fn (fd: int) ->
+      let base = slots + fd * rd_slot in
+      let left = rd_push fd base (map_get woff fd) (map_get wrem fd) in
+      if left <= 0 then
+        let _ = io_poll_del ps fd in
+        let _ = map_delete woff fd in
+        let _ = map_delete wrem fd in
+        tcp_close fd
+      else
+        let _ = map_set woff fd (map_get woff fd + (map_get wrem fd - left)) in
+        map_set wrem fd left in
+
+    let wclose = fn (fd: int) ->
+      let _ = io_poll_del ps fd in
+      let _ = map_delete woff fd in
+      let _ = map_delete wrem fd in
+      tcp_close fd in
+
     let rec loop = fn (u: unit) ->
-      let n = io_poll_wait ps (0 - 1) in
+      let n = io_poll_wait ps (if map_get inflight 0 > 0 then 5 else 0 - 1) in
       let rec each = fn (i: int) ->
         if i >= n then ()
         else
@@ -166,6 +276,10 @@ let http_serve_rd_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h)
           let bits = ev % 8 in
           let _ =
             if fd == srv then accept_all ()
+            else if map_has wrem fd then
+              (if bits / 4 % 2 == 1 then wclose fd
+               else if bits / 2 % 2 == 1 then on_writable fd
+               else ())
             // A connection already handed to a worker can still have an event
             // queued behind it: consult the map, not the event.
             else if map_has conns fd == false then ()
@@ -174,6 +288,7 @@ let http_serve_rd_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h)
             else () in
           each (i + 1) in
       let _ = each 0 in
+      let _ = drain_back () in
       loop () in
     loop ();
 

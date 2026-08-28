@@ -201,6 +201,31 @@ else
   bad "(placeholder)"
 fi
 
+  # ---- a response that cannot go out in one write -----------------------
+  # The partial-write path is unreachable while the whole response fits in the
+  # socket buffer, which 128 KB does on loopback -- so a server that writes once
+  # against a nonblocking descriptor and ignores the short count looks perfect.
+  # At 896 KB it does not: that exact mistake delivered 3 271 270 bytes for this
+  # request. Checked by CONTENT, not by length, because a wrong length is only
+  # the loudest way to be wrong.
+  MERE_HTTP_PORT=$((PORT + 6)) MERE_HTTP_WORKERS=2 MERE_HTTP_DELAY_MS=0 \
+    MERE_HTTP_MAX_CONN=8 MERE_HTTP_SLOT=1048576 \
+    "$WORK/rdsrv" > "$WORK/rdbig.log" 2>&1 &
+  SRVPID=$!
+  k=0
+  while [ $k -lt 25 ]; do
+    curl -sS --max-time 3 -o /dev/null "http://127.0.0.1:$((PORT + 6))/ok" >/dev/null 2>&1 && break
+    k=$((k + 1)); perl -e 'select(undef, undef, undef, 0.4)'
+  done
+  curl -sS --max-time 20 -o "$WORK/big.out" "http://127.0.0.1:$((PORT + 6))/big" 2>/dev/null || true
+  kill "$SRVPID" 2>/dev/null || true; SRVPID=""
+  perl -e 'print "0123456789abcdef" x 56000' > "$WORK/big.want"
+  if cmp -s "$WORK/big.out" "$WORK/big.want"; then
+    ok "an 896 KB response arrives byte-for-byte (it needs several writes)"
+  else
+    bad "the large response differs: got $(wc -c < "$WORK/big.out" 2>/dev/null | tr -d ' ') bytes, wanted 896000"
+  fi
+
 # ---- a failing handler ---------------------------------------------------
 # WITHOUT the middleware, a handler that fails unwinds past the server loop and
 # ends the PROCESS: one bad route takes the whole site down, and it is the route
@@ -246,7 +271,7 @@ else
 fi
 
 echo
-echo "http_concurrency_check: $pass passed, $fail failed, of 10 checks"
-[ $((pass + fail)) -eq 10 ] || { echo "only $((pass + fail)) of 10 checks ran"; exit 1; }
+echo "http_concurrency_check: $pass passed, $fail failed, of 11 checks"
+[ $((pass + fail)) -eq 11 ] || { echo "only $((pass + fail)) of 11 checks ran"; exit 1; }
 [ "$fail" -eq 0 ] || exit 1
 echo "http_concurrency_check: ok"
