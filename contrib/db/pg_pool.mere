@@ -1,10 +1,27 @@
 // contrib/db/pg_pool.mere — connection reuse across queries.
 //
-// Mere's Wasm runtime is single-threaded; every http_serve handler runs
-// to completion before the next request is dispatched. That means a
-// "connection pool" here really means "keep-alive" — one fd held open
-// across acquire/release cycles so we don't pay the 4- or 6-message
-// startup handshake per query.
+// THIS MODULE'S PREMISE EXPIRED IN v0.1.340, and the note is left here rather
+// than quietly edited away. It used to open:
+//
+//   "Mere's Wasm runtime is single-threaded; every http_serve handler runs to
+//    completion before the next request is dispatched. That means a connection
+//    pool here really means keep-alive."
+//
+// That was true of `http_serve` and is still true of it. It is NOT true of
+// `http_serve_mt` or `http_serve_rd`, where several handlers run at once --
+// and two of them sharing one fd interleave on a Postgres socket and corrupt
+// the wire protocol. So on a concurrent server this module is not a pool and
+// must not be used as one.
+//
+// WHAT TO USE INSTEAD, and it is not a bag of connections: `http_serve_mt_ctx`
+// / `http_serve_rd_ctx` build one connection per worker, owned by that worker
+// and never shared. No checkout, no return, and a handler that fails cannot
+// fail to give one back. mere-blog does exactly this.
+//
+// WHAT THIS IS STILL FOR: one fd held open across acquire/release cycles so a
+// program does not pay the 4- or 6-message startup handshake per query. That
+// is keep-alive, it is genuinely useful, and it is correct wherever the calls
+// are serialised -- a CLI, a batch job, a single worker's own connection.
 //
 // The design is deliberately tiny — no LIFO stack, no health checks,
 // no per-request checkout accounting. If the underlying fd dies (server

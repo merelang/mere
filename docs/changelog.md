@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.341 — 2026-08-28
+
+_Readiness for the I/O, workers for the handlers._ `contrib/http/serve_rd.mere`.
+
+**The capability was not missing. The adoption was.** `io_poll_new/add/mod/del/wait/get`
+and `io_set_nonblocking` landed in **v0.1.313**, under a commit message that read
+"every server so far either blocked or spawned", with a dogfood — `mpoll`, 193 lines,
+"one thread, many connections" — that serves HTTP over a readiness loop and holds each
+connection's progress as a **value** in a Map, because a connection with no thread has
+no stack to remember where it was. `contrib/http`, the module every web program here
+actually imports, then went on offering exactly the two shapes mpoll's header called
+insufficient. v0.1.340 added the second one again, from scratch.
+
+Neither half is enough, and this is the measurement rather than the argument:
+
+| | slow **client** (8 stalled connections) | slow **handler** (8 × 400 ms) |
+|---|---|---|
+| `http_serve_mt` (8 workers) | **no answer in 5 s** | 0.47 s |
+| readiness loop alone | fine | would serialise |
+| `http_serve_rd` | **0.04 s** | **0.46 s** |
+
+A client that connects, sends half a request and goes quiet holds a worker under the
+pool — and opening a socket and saying nothing is free for an attacker, where making a
+handler slow is not. Under the loop it holds one map entry. Q-081, which recorded that
+keep-alive could not be added to the worker pool because an idle connection would hold
+a worker, stops describing anything: under this loop an idle connection holds nothing.
+
+The gate runs **both servers against the same eight stalled clients**, and the control
+is the check: the worker pool must FAIL to answer, or "the readiness server answered"
+says nothing about readiness.
+
+**`contrib/db/pg_pool.mere`'s premise expired**, and the note says so rather than being
+quietly edited: it opens by explaining that "every `http_serve` handler runs to
+completion before the next request is dispatched", which was true of `http_serve` and
+is not true of the other two. Two handlers sharing one fd interleave on a Postgres
+socket and corrupt the protocol, so on a concurrent server that module is not a pool.
+What to use instead is per-worker state, which is not a bag of connections at all.
+
+Still blocking on the **write** side: a client that sends a request and refuses to read
+the answer holds a worker. Fixing it means handing the fd back to the loop with a
+Writing state — which is what mpoll does and what this should grow. The read side is
+the half that matters first, because dribbling a request is the cheap attack.
+
+---
+
 ## v0.1.340 — 2026-08-28
 
 _The server answers more than one request at a time._ `contrib/http/serve_mt.mere`
