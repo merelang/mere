@@ -517,18 +517,12 @@ jobs:
             git clone --depth 1 --recurse-submodules --shallow-submodules -q \
               "https://github.com/284km/$r.git" "$r" \
               || { echo "clone failed: $r (the gate will report it absent)"; continue; }
-            # RESOLVE THEIR DEPENDENCIES, because a fresh clone has none.
-            # Four of these repos import packages through mere.toml, and this
-            # step used to stop at the clone -- so the gate reported "no longer
-            # compiles" for a missing .mere_modules rather than for anything
-            # this compiler did. It passed locally because the development
-            # checkouts already had one. Reproduced by cloning mq into an empty
-            # directory: fails without this, compiles with it.
-            if [ -f "$r/mere.toml" ]; then
-              ( cd "$r" && "$GITHUB_WORKSPACE/_build/default/bin/mere.exe" install ) \
-                || echo "mere install failed: $r (the gate will report it)"
-            fi
           done
+          # Dependency resolution is NOT here: downstream_check.sh runs
+          # `mere install` itself when a repo has a mere.toml and no
+          # .mere_modules, so the gate asks the same question on a fresh clone
+          # and on a development checkout. Splitting it between this file and
+          # the script is what let the two drift apart in the first place.
 
       - name: downstream_check (their code is still a program)
         if: ${{ !cancelled() }}
