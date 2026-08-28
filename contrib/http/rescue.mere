@@ -1,0 +1,53 @@
+// contrib/http/rescue.mere -- one bad route must not take the server with it.
+//
+// WHAT IT WAS. A handler that fails -- `read_file` on a path that is not there,
+// `of_json` on input it refuses, an index out of range -- unwinds past the
+// server loop and ends the PROCESS. Measured, on the readiness server with four
+// workers: GET /ok answers, GET /boom is a failing route, and the next GET /ok
+// cannot connect because nothing is listening any more. One request path takes
+// the whole site down, and it is the path nobody tested.
+//
+// That is not a property of the server shape. `http_serve`, `http_serve_mt` and
+// `http_serve_rd` all behave this way, because none of them was catching
+// anything: the language HAS `try_or`, and contrib/http simply never used it.
+//
+//   import "http/rescue.mere";
+//   let _ = http_serve_rd 8080 8 (with_rescue (router routes not_found));
+//
+// WHY `Some`/`None` RATHER THAN A DEFAULT BODY. `try_or thunk default` takes a
+// VALUE, not a second thunk, so the default is evaluated whether or not the
+// thunk fails. A default of `let _ = http_set_status 500 in "..."` would set 500
+// on EVERY request, including the ones that succeed. Wrapping the result in an
+// option keeps the default pure -- `None` -- and puts the status change in the
+// branch that is only taken on failure.
+//
+// WHAT IT DOES NOT CATCH, said plainly: `try_or` catches a Mere `fail`. A stack
+// overflow, a segfault in an extern, or a worker killed by a signal are not
+// that, and they still end the process. What this buys is that a bug in one
+// handler stops being an outage.
+//
+// THE RESPONSE BODY SAYS NOTHING. A failure message can carry a path, a query,
+// or a row -- so it goes to stderr, where the operator reads it, and the client
+// gets five words.
+
+extern fn http_set_status: int -> unit;
+
+let with_rescue = fn (inner) -> fn (req: str) ->
+  match try_or (fn () -> Some (inner req)) None with
+  | Some body -> body
+  | None ->
+    let _ = print_err ("http: handler failed for " ++ req) in
+    let _ = http_set_status 500 in
+    "internal server error\n"
+  ;
+
+// The same, for a handler that takes per-worker context
+// (http_serve_mt_ctx / http_serve_rd_ctx).
+let with_rescue_ctx = fn (inner) -> fn (ctx: int) -> fn (req: str) ->
+  match try_or (fn () -> Some (inner ctx req)) None with
+  | Some body -> body
+  | None ->
+    let _ = print_err ("http: handler failed for " ++ req) in
+    let _ = http_set_status 500 in
+    "internal server error\n"
+  ;

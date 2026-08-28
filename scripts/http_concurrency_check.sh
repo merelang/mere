@@ -201,8 +201,52 @@ else
   bad "(placeholder)"
 fi
 
+# ---- a failing handler ---------------------------------------------------
+# WITHOUT the middleware, a handler that fails unwinds past the server loop and
+# ends the PROCESS: one bad route takes the whole site down, and it is the route
+# nobody tested. The control is run FIRST and must show exactly that, or the
+# check below says nothing.
+"$MERE" -c "$ROOT/test/http/rescue.mere" > "$WORK/rs.c"
+if $CC -O1 -o "$WORK/rssrv" "$WORK/rs.c" -lm 2>"$WORK/cc4.log"; then
+
+  # $1 = 0/1 rescue, $2 = port. Prints "<boom_code> <alive_after>".
+  boom_probe() {
+    MERE_HTTP_RESCUE="$1" MERE_HTTP_PORT="$2" "$WORK/rssrv" > "$WORK/rs$1.log" 2>&1 &
+    SRVPID=$!
+    k=0
+    while [ $k -lt 25 ]; do
+      curl -sS --max-time 3 -o /dev/null "http://127.0.0.1:$2/ok" >/dev/null 2>&1 && break
+      k=$((k + 1)); perl -e 'select(undef, undef, undef, 0.4)'
+    done
+    bc=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$2/boom" 2>/dev/null || true)
+    perl -e 'select(undef, undef, undef, 0.6)'
+    av=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$2/ok" 2>/dev/null || true)
+    kill "$SRVPID" 2>/dev/null || true; SRVPID=""
+    echo "$bc $av"
+  }
+
+  ctl=$(boom_probe 0 $((PORT + 4)))
+  set -- $ctl
+  [ "$2" != "200" ] \
+    && ok "without the middleware a failing route ends the server (then /ok gives $2)" \
+    || bad "the unwrapped server survived a failing handler; this pair measures nothing"
+
+  res=$(boom_probe 1 $((PORT + 5)))
+  set -- $res
+  [ "$1" = "500" ] \
+    && ok "with it, the failing route is a 500" \
+    || bad "the rescued route returned $1, not 500"
+  [ "$2" = "200" ] \
+    && ok "and the server is still answering afterwards" \
+    || bad "the server did not survive even with the middleware (/ok gave $2)"
+else
+  bad "test/http/rescue.mere did not build: $(head -2 "$WORK/cc4.log" | tr '\n' ' ')"
+  bad "(and so the other two rescue checks did not run)"
+  bad "(placeholder)"
+fi
+
 echo
-echo "http_concurrency_check: $pass passed, $fail failed, of 7 checks"
-[ $((pass + fail)) -eq 7 ] || { echo "only $((pass + fail)) of 7 checks ran"; exit 1; }
+echo "http_concurrency_check: $pass passed, $fail failed, of 10 checks"
+[ $((pass + fail)) -eq 10 ] || { echo "only $((pass + fail)) of 10 checks ran"; exit 1; }
 [ "$fail" -eq 0 ] || exit 1
 echo "http_concurrency_check: ok"

@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.342 — 2026-08-28
+
+_One bad route no longer takes the server with it._ `contrib/http/rescue.mere`.
+
+A handler that fails — `read_file` on a path that is not there, a refused decode, an
+index out of range — unwound past the server loop and ended the **process**. Measured on
+the readiness server: `GET /ok` answers, `GET /boom` is a failing route, and the next
+`GET /ok` cannot connect, because nothing is listening any more. **One request path took
+the whole site down, and it is the path nobody tested.**
+
+Not a property of any server shape: all three behaved this way, because none of them
+caught anything. The language has `try_or`; `contrib/http` had simply never used it.
+`grep -rn try_or contrib/http/` was empty — the same one-line question that was empty
+for `io_poll` yesterday.
+
+```mere
+let _ = http_serve_rd 8080 8 (with_rescue (router routes not_found));
+```
+
+`try_or thunk default` takes a **value**, not a second thunk, so a default of
+`let _ = http_set_status 500 in "..."` would set 500 on every successful request too.
+The result is wrapped in an option instead: the default stays pure (`None`) and the
+status change lives in the branch only failure reaches.
+
+**What it does not catch, said plainly**: `try_or` catches a Mere `fail`. A stack
+overflow, a segfault in an extern, or a worker killed by a signal are not that. What
+this buys is that a bug in one handler stops being an outage. The failure message goes
+to stderr — it can carry a path, a query or a row — and the client gets five words.
+
+The gate runs **the same binary with the middleware off first**, and the control has to
+show the server dying, or "the rescued server survived" is not evidence about the
+middleware.
+
+---
+
 ## v0.1.341 — 2026-08-28
 
 _Readiness for the I/O, workers for the handlers._ `contrib/http/serve_rd.mere`.
