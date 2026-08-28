@@ -1,0 +1,39 @@
+// test/boundary/tolerant.mere — decoding that treats an ABSENT key as null.
+//
+// Measured (2026-08-29): the derived `of_json` requires every key to be
+// PRESENT, `option` fields included — `option` says the value may be null,
+// not that the key may be absent, and `None` is written as `"k":null`. So
+// adding a field breaks every client that has not been redeployed, and there
+// is no compatible change available at all.
+//
+// This asks whether that is a property of the LANGUAGE or only of the
+// DEFAULT decoder: given a witness of the target type, the expected key set
+// is already recoverable (contrib/schema/reflect), so a payload missing a key
+// can have `"k":null` spliced in before `of_json` sees it.
+//
+// It is deliberately a library, not a compiler change: if this works, "the
+// boundary cannot evolve" was never a language limit.
+import "../../contrib/schema/reflect.mere";
+
+// Is `"<key>"` present in the payload's top level? Good enough for the flat
+// records a boundary uses; nested objects are a further question.
+let has_key = fn (payload: str) -> fn (k: str) ->
+  str_contains payload ("\"" ++ k ++ "\":")
+  ;
+
+let rec splice_missing = fn (payload: str) -> fn (keys: str list) ->
+  match keys with
+  | Nil -> payload
+  | Cons (k, rest) ->
+    if has_key payload k then splice_missing payload rest
+    else
+      // insert before the final `}`
+      let body = substring payload 0 (str_len payload - 1) in
+      let sep = if str_eq body "\{" then "" else "," in
+      splice_missing (body ++ sep ++ "\"" ++ k ++ "\":null}") rest
+  ;
+
+// `witness` fixes the target type; `schema_fields` gives that type's keys.
+let fill = fn (witness) -> fn (payload: str) ->
+  splice_missing payload (schema_fields witness)
+  ;
