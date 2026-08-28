@@ -126,8 +126,83 @@ else
   bad "test/http/per_worker.mere did not build: $(head -2 "$WORK/cc2.log" | tr '\n' ' ')"
 fi
 
+# ---- a slow CLIENT ------------------------------------------------------
+# The question a worker pool cannot answer. Eight clients connect, send HALF a
+# request, and say nothing more. Under the pool they hold all eight workers and
+# a normal request never gets served; under the readiness loop they are eight
+# entries in a map.
+#
+# Opening a socket and going quiet costs an attacker nothing, which is why this
+# is different in kind from "a slow handler holds a worker".
+"$MERE" -c "$ROOT/test/http/readiness.mere" > "$WORK/rd.c"
+if $CC -O1 -o "$WORK/rdsrv" "$WORK/rd.c" -lm 2>"$WORK/cc3.log"; then
+
+  # $1 = binary, $2 = port -> prints "yes" if a normal request is answered
+  # while eight stalled clients are holding connections open.
+  stalled_probe() {
+    MERE_HTTP_PORT="$2" MERE_HTTP_WORKERS=8 MERE_HTTP_DELAY_MS=0 \
+      "$WORK/$1" > "$WORK/$1.log" 2>&1 &
+    SRVPID=$!
+    curl -sS --retry 40 --retry-delay 1 --retry-connrefused --max-time 10 \
+         -o /dev/null "http://127.0.0.1:$2/warm" >/dev/null 2>&1 || true
+    j=0; spids=""
+    while [ $j -lt 8 ]; do
+      perl -e 'use IO::Socket::INET;
+               my $s = IO::Socket::INET->new(PeerAddr=>"127.0.0.1",
+                                             PeerPort=>'"$2"', Proto=>"tcp") or exit;
+               print $s "GET /stall HTTP/1.1\r\nHost: x\r\n";
+               select(undef, undef, undef, 8);' &
+      spids="$spids $!"; j=$((j + 1))
+    done
+    perl -e 'select(undef, undef, undef, 1.5)'
+    rm -f "$WORK/stall.out"
+    curl -sS --max-time 4 -o "$WORK/stall.out" "http://127.0.0.1:$2/normal" 2>/dev/null || true
+    kill "$SRVPID" 2>/dev/null || true; SRVPID=""
+    for p in $spids; do kill "$p" 2>/dev/null || true; done
+    for p in $spids; do wait "$p" 2>/dev/null || true; done
+    [ -s "$WORK/stall.out" ] && echo yes || echo no
+  }
+
+  rd_ans=$(stalled_probe rdsrv $((PORT + 2)))
+  [ "$rd_ans" = yes ] \
+    && ok "eight stalled clients do not stop the readiness server" \
+    || bad "the readiness server was stopped by eight stalled clients"
+
+  # THE CONTROL, and it is the check: without it, "the readiness server
+  # answered" proves nothing about readiness -- a machine or a kernel that
+  # buffers differently could answer under either shape.
+  mt_ans=$(stalled_probe srv $((PORT + 3)))
+  [ "$mt_ans" = no ] \
+    && ok "the worker pool IS stopped by them -- so the check above measured readiness" \
+    || bad "the worker pool answered too; this pair is not measuring what it claims"
+
+  # And the half readiness alone would lose: slow handlers still run at once.
+  MERE_HTTP_PORT="$PORT" MERE_HTTP_WORKERS="$N" MERE_HTTP_DELAY_MS="$DELAY" \
+    "$WORK/rdsrv" > "$WORK/rd.log" 2>&1 &
+  SRVPID=$!
+  curl -sS --retry 40 --retry-delay 1 --retry-connrefused --max-time 10 \
+       -o /dev/null "http://127.0.0.1:$PORT/warm" >/dev/null 2>&1 || true
+  s=$(now); i=0; rpids=""
+  while [ $i -lt "$N" ]; do
+    curl -sS --max-time 60 -o /dev/null "http://127.0.0.1:$PORT/r$i" 2>/dev/null &
+    rpids="$rpids $!"; i=$((i + 1))
+  done
+  for p in $rpids; do wait "$p" 2>/dev/null || true; done
+  e=$(now)
+  kill "$SRVPID" 2>/dev/null || true; SRVPID=""
+  rdconc=$(perl -e "printf '%.2f', $e - $s")
+  echo "  $N concurrent, $DELAY ms handler, readiness server: ${rdconc}s"
+  perl -e "exit(($rdconc < $seq_budget) ? 0 : 1)" \
+    && ok "and slow handlers still run at once (${rdconc}s) -- the loop is not the bottleneck" \
+    || bad "the readiness server serialised slow handlers (${rdconc}s)"
+else
+  bad "test/http/readiness.mere did not build: $(head -2 "$WORK/cc3.log" | tr '\n' ' ')"
+  bad "(and so the other two readiness checks did not run)"
+  bad "(placeholder)"
+fi
+
 echo
-echo "http_concurrency_check: $pass passed, $fail failed, of 4 checks"
-[ $((pass + fail)) -eq 4 ] || { echo "only $((pass + fail)) of 4 checks ran"; exit 1; }
+echo "http_concurrency_check: $pass passed, $fail failed, of 7 checks"
+[ $((pass + fail)) -eq 7 ] || { echo "only $((pass + fail)) of 7 checks ran"; exit 1; }
 [ "$fail" -eq 0 ] || exit 1
 echo "http_concurrency_check: ok"

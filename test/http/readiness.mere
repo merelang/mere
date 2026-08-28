@@ -1,0 +1,20 @@
+// The hybrid server (v0.1.341): readiness for the I/O, workers for the handler.
+//
+// Same environment knobs as test/http/concurrent.mere, so the gate can run the
+// two side by side and ask each the same two questions. Neither shape answers
+// both: a worker pool is stopped by a slow CLIENT, a readiness loop alone is
+// stopped by a slow HANDLER.
+import "../../contrib/http/http.mere";
+import "../../contrib/http/serve_rd.mere";
+
+let env_int = fn (name: str) -> fn (d: int) ->
+  match env_var name with
+  | Some v -> if str_len v > 0 then int_of_str v else d
+  | None -> d;
+
+let h = fn (req: str) ->
+  let _ = sleep_ms (env_int "MERE_HTTP_DELAY_MS" 400) in
+  "done " ++ req ++ "\n";
+
+let _ = http_serve_rd (env_int "MERE_HTTP_PORT" 8080) (env_int "MERE_HTTP_WORKERS" 8) h;
+0

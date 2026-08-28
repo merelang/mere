@@ -1,0 +1,184 @@
+// contrib/http/serve_rd.mere -- readiness for the I/O, workers for the handlers.
+//
+// WHY BOTH. The two server shapes this project already had each fix what the
+// other cannot, and neither is enough alone:
+//
+//   http_serve      one at a time. A slow handler stops everything.
+//   http_serve_mt   a worker per connection. A slow HANDLER is fine; a slow
+//                   CLIENT is not -- it holds a worker while it dribbles, and
+//                   opening a socket and saying nothing is free for an attacker.
+//   a readiness     a slow CLIENT is one Map entry; a slow HANDLER stops the
+//   loop alone      whole loop, and a 680 ms password hash is a slow handler.
+//
+// So: the loop does the I/O, and a handler runs on a worker. A client that
+// dribbles costs an entry in a map. A handler that takes half a second costs
+// one of N workers. Q-081 upstream is the note that said keep-alive could not
+// be added to the worker pool because an idle connection would hold a worker;
+// under this loop an idle connection holds nothing.
+//
+// THE CAPABILITY IS NOT NEW -- the ADOPTION is. `io_poll_*` and
+// `io_set_nonblocking` landed in v0.1.313 with a dogfood (mpoll: "one thread,
+// many connections") whose own header says "every server in this language so
+// far either blocked or spawned". contrib/http, the module every web program
+// here actually imports, then went on offering exactly those two shapes. This
+// file is mpoll's loop where the web programs can reach it.
+//
+// A CONNECTION HAS NO STACK, so its progress is a value: how many bytes have
+// arrived, in a Map the loop thread alone touches. mpoll found that framing.
+//
+// WHAT THIS VERSION DOES NOT DO, said plainly: the worker WRITES the response
+// with a blocking write. A client that sends a request and then refuses to read
+// the answer holds a worker, exactly as under http_serve_mt. Fixing that means
+// handing the fd back to the loop with a Writing state -- which is what mpoll
+// does and what this should grow. The read side is the half that matters first:
+// a client that dribbles a request is the cheap attack.
+
+import "serve_mt.mere";
+
+extern fn io_poll_new: int -> int;
+extern fn io_poll_add: int -> int -> int -> int;
+extern fn io_poll_del: int -> int -> int;
+extern fn io_poll_wait: int -> int -> int;
+extern fn io_poll_get: int -> int -> int;
+extern fn io_set_nonblocking: int -> int;
+
+// One read slot per fd, indexed BY the fd: the OS reuses closed descriptors, so
+// slot reuse follows fd reuse for free -- and the arena has no free, so anything
+// allocated per connection would leak per connection. mpoll's rule.
+let rd_max_fd = 256;
+let rd_slot = 32768;
+
+// A request bigger than a slot is refused rather than truncated. Truncating
+// would hand the handler a request that parses and is not what was sent.
+let rd_413 =
+  "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+// Is the request in this slot complete? Returns the total needed, or -1.
+let rd_complete = fn (base: int) -> fn (got: int) -> fn (pat: int) -> fn (patn: int) ->
+  let he = mt_find_head_end base 0 got in
+  if he < 0 then 0 - 1
+  else
+    let clpos = mt_find_ci base 0 he pat patn in
+    let want = if clpos < 0 then 0 else mt_digits base (mt_skip_sp base clpos he) he 0 in
+    if got >= he + want then he + want else 0 - 1;
+
+// ---- the worker: handler, response, close ------------------------------
+let rd_worker_one = fn (fd: int) -> fn (base: int) -> fn (total: int) -> fn (wbuf: int) -> fn (ctx: int) -> fn (h) ->
+  let he = mt_find_head_end base 0 total in
+  let head = mem_to_str base he in
+  let body = mem_to_str (base + he) (total - he) in
+  let reqline = mem_to_str base (mt_reqline_end base 0 he 0) in
+  let _ = http_begin_request fd head body in
+  let out = h ctx reqline in
+  let _ =
+    if http_response_sent () != 0 then 0
+    else
+      let n = mem_copy_str wbuf 0 (http_response_head (str_len out) ++ out) in
+      tcp_write fd wbuf n in
+  let _ = http_end_request () in
+  let _ = tcp_close fd in
+  1;
+
+let rec rd_worker = fn (ch) -> fn (slots: int) -> fn (wbuf: int) -> fn (ctx: int) -> fn (h) ->
+  match channel_recv_opt ch with
+  | None -> ()
+  // (fd, total). The bytes are already in this fd's slot; the loop stopped
+  // watching the fd before sending, so the worker owns both until it closes.
+  | Some (fd, total) ->
+    let _ = rd_worker_one fd (slots + fd * rd_slot) total wbuf ctx h in
+    rd_worker ch slots wbuf ctx h;
+
+let rec rd_start = fn (ch) -> fn (slots: int) -> fn (k: int) -> fn (n: int) -> fn (mk) -> fn (h) ->
+  if k >= n then ()
+  else
+    let wbuf = mem_alloc rd_slot in
+    let ctx = mk k in
+    let _ = spawn (fn () -> rd_worker ch slots wbuf ctx h) in
+    rd_start ch slots (k + 1) n mk h;
+
+// ---- the loop ----------------------------------------------------------
+let http_serve_rd_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h) ->
+  let srv = tcp_listen port in
+  if srv < 0 then
+    print_err ("http_serve_rd: could not listen on " ++ str_of_int port)
+  else
+    let ps = io_poll_new rd_max_fd in
+    let slots = mem_alloc (rd_max_fd * rd_slot) in
+    let pat = mem_alloc 32 in
+    let patn = mem_copy_str pat 0 "content-length:" in
+    let ch = channel_new () in
+    let conns = map_new () in
+    let _ = rd_start ch slots 0 workers mk h in
+    let _ = io_set_nonblocking srv in
+    let _ = io_poll_add ps srv 1 in
+    let _ = print ("http_serve_rd: listening on :" ++ str_of_int port
+                   ++ " with " ++ str_of_int workers ++ " workers"
+                   ++ " (readiness I/O, up to " ++ str_of_int rd_max_fd ++ " connections)") in
+
+    let close_conn = fn (fd: int) ->
+      let _ = io_poll_del ps fd in
+      let _ = map_delete conns fd in
+      tcp_close fd in
+
+    let rec accept_all = fn (u: unit) ->
+      let c = tcp_accept srv in
+      if c < 0 then ()                      // -1: nobody else waiting
+      else if c >= rd_max_fd then
+        // Beyond the slot table. Refused rather than served without a slot.
+        let _ = tcp_close c in accept_all ()
+      else
+        let _ = io_set_nonblocking c in
+        let _ = io_poll_add ps c 1 in
+        let _ = map_set conns c 0 in
+        accept_all () in
+
+    let on_readable = fn (fd: int) -> fn (got: int) ->
+      let base = slots + fd * rd_slot in
+      let n = tcp_read fd (base + got) (rd_slot - got) in
+      if n == 0 then close_conn fd                // clean end of stream
+      else if n < 0 then
+        // -1 is "would block", which is not an error: the event was spurious
+        // or the peer paused. Anything else is a dead connection.
+        (if n == (0 - 1) then () else close_conn fd)
+      else
+        let g = got + n in
+        let total = rd_complete base g pat patn in
+        if total >= 0 then
+          // Complete. Stop watching it and hand fd + byte count to a worker;
+          // from here the worker owns the fd, the slot, and the close.
+          let _ = io_poll_del ps fd in
+          let _ = map_delete conns fd in
+          channel_send ch (fd, total)
+        else if g >= rd_slot then
+          let wb = mem_alloc 128 in
+          let k = mem_copy_str wb 0 rd_413 in
+          let _ = tcp_write fd wb k in
+          close_conn fd
+        else map_set conns fd g in
+
+    let rec loop = fn (u: unit) ->
+      let n = io_poll_wait ps (0 - 1) in
+      let rec each = fn (i: int) ->
+        if i >= n then ()
+        else
+          let ev = io_poll_get ps i in
+          let fd = ev / 8 in
+          let bits = ev % 8 in
+          let _ =
+            if fd == srv then accept_all ()
+            // A connection already handed to a worker can still have an event
+            // queued behind it: consult the map, not the event.
+            else if map_has conns fd == false then ()
+            else if bits / 4 % 2 == 1 then close_conn fd        // hangup
+            else if bits % 2 == 1 then on_readable fd (map_get conns fd)
+            else () in
+          each (i + 1) in
+      let _ = each 0 in
+      loop () in
+    loop ();
+
+let rd_no_ctx = fn (i: int) -> 0;
+
+// `http_serve_rd port workers handler` -- handler is `str -> str`.
+let http_serve_rd = fn (port: int) -> fn (workers: int) -> fn (h) ->
+  http_serve_rd_ctx port workers rd_no_ctx (fn (c: int) -> fn (req: str) -> h req);
