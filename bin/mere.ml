@@ -6,6 +6,9 @@ let usage () =
   print_endline "  mere -e <expr>        evaluate an inline expression";
   print_endline "  mere -t <file.mere>   print the inferred type";
   print_endline "  mere -te <expr>       print the inferred type of an inline expression";
+  print_endline "        -t and -te ANSWER A TYPE QUESTION, they do not accept the";
+  print_endline "        program: the borrow and thread-capture checks do not run,";
+  print_endline "        so a type here is not a promise that `mere -c` will build it";
   print_endline "  mere -c <file.mere>   emit C source (compile with clang)";
   print_endline "  mere -ce <expr>       emit C source for an inline expression";
   print_endline "        -c and -ll take `-g`: debug information back to the .mere";
