@@ -6508,6 +6508,9 @@ let native_ffi_stub_names =
    response metadata is per-request global state. *)
 let native_http_names =
   [ "http_serve"; "http_serve_tls"; "http_current_body"; "http_set_status";
+    (* v0.1.340: the pieces a Mere-level accept loop drives *)
+    "http_begin_request"; "http_response_head"; "http_response_sent";
+    "http_end_request";
     "http_set_content_type"; "http_set_header"; "http_get_header";
     "http_current_status"; "http_arena_mark";
     "http_send_file"; "unix_time" ]
@@ -6537,11 +6540,11 @@ let native_http_runtime ~tls =
       "   the handler gets \"METHOD URL\", sets status/content-type/headers via ";
       "   the http_set_* externs, and returns the response body. --- */";
       "#include <arpa/inet.h>";
-      "static int  __http_status = 200;";
-      "static char __http_ctype[256] = \"text/plain\";";
-      "static char __http_extra_hdrs[8192]; static int __http_extra_len = 0;";
-      "static char __http_req_body[1 << 20]; static int __http_req_body_len = 0;";
-      "static char __http_req_head[16384]; static int __http_req_head_len = 0;";
+      "static _Thread_local int  __http_status = 200;";
+      "static _Thread_local char __http_ctype[256] = \"text/plain\";";
+      "static _Thread_local char __http_extra_hdrs[8192]; static _Thread_local int __http_extra_len = 0;";
+      "static _Thread_local char __http_req_body[1 << 20]; static _Thread_local int __http_req_body_len = 0;";
+      "static _Thread_local char __http_req_head[16384]; static _Thread_local int __http_req_head_len = 0;";
       "";
       "static const char* http_current_body(void) { return __lang_str_of_cstr(__http_req_body); }";
       "static int http_set_status(int c) { __http_status = c; return 0; }";
@@ -6557,21 +6560,21 @@ let native_http_runtime ~tls =
       "   side, because it is only sound when nothing the handler allocated";
       "   outlives the response — which is why the rollback happens after";
       "   the body has gone out on the socket, not before. */";
-      "static __lang_region_block* __http_mark_blocks = 0;";
-      "static char* __http_mark_top = 0;";
-      "static char* __http_mark_base = 0;";
-      "static size_t __http_mark_cap = 0;";
-      "static int __http_marked = 0;";
+      "static _Thread_local __lang_region_block* __http_mark_blocks = 0;";
+      "static _Thread_local char* __http_mark_top = 0;";
+      "static _Thread_local char* __http_mark_base = 0;";
+      "static _Thread_local size_t __http_mark_cap = 0;";
+      "static _Thread_local int __http_marked = 0;";
       "/* Where the region stood before anything was allocated for this";
       "   request. The mark is taken there rather than wherever the handler";
       "   happens to call this, so the request line and the body copy — made";
       "   by the accept loop before the handler is entered — are inside the";
       "   checkpoint too. Still opt-in: nothing is released unless a handler";
       "   asks by calling this. */";
-      "static __lang_region_block* __http_req_blocks = 0;";
-      "static char* __http_req_top = 0;";
-      "static char* __http_req_base = 0;";
-      "static size_t __http_req_cap = 0;";
+      "static _Thread_local __lang_region_block* __http_req_blocks = 0;";
+      "static _Thread_local char* __http_req_top = 0;";
+      "static _Thread_local char* __http_req_base = 0;";
+      "static _Thread_local size_t __http_req_cap = 0;";
       "static void __http_request_begin(void) {";
       "  __http_req_blocks = __lang_default_region.blocks;";
       "  __http_req_top = __lang_default_region.top;";
@@ -6596,8 +6599,8 @@ let native_http_runtime ~tls =
       "   opened, so the caller can tell \"not found\" from \"empty\". The";
       "   accept loop is told by __http_sent so it does not write a second";
       "   response after this one. */";
-      "static int __http_sent = 0;";
-      "static int __http_conn = -1;";
+      "static _Thread_local int __http_sent = 0;";
+      "static _Thread_local int __http_conn = -1;";
       "/* Connection I/O. Every byte in and out of a served connection goes";
       " * through these three, so that turning TLS on is one decision in one";
       " * place. http_send_file used to call write(__http_conn, ...) directly:";
@@ -6688,6 +6691,45 @@ let native_http_runtime ~tls =
       (if tls then
          "static int __http_tls = 0;  /* handshake each accepted connection */"
        else "static int __http_tls = 0;");
+      "/* --- what a Mere-level accept loop needs (v0.1.340) ------------------";
+      " * The loop below is sequential and stays that way. A CONCURRENT server is";
+      " * written in Mere instead -- contrib/http/serve_mt.mere -- so that `spawn`";
+      " * is a real spawn and the compiler's capture analysis sees what the handler";
+      " * shares between connections. A thread pool hidden inside this runtime";
+      " * would hand a program threads with no such check, which is the one thing";
+      " * this language is supposed to be good at refusing.";
+      " *";
+      " * These three let Mere drive a request through the same per-request state";
+      " * the http_set_* externs already write, now that the state is per-thread.";
+      " */";
+      "static int http_begin_request(int fd, const char* head, const char* body) {";
+      "  __http_req_head_len = (int)__lang_str_size(head);";
+      "  if (__http_req_head_len > (int)sizeof __http_req_head - 1) __http_req_head_len = sizeof __http_req_head - 1;";
+      "  memcpy(__http_req_head, head, __http_req_head_len); __http_req_head[__http_req_head_len] = 0;";
+      "  __http_req_body_len = (int)__lang_str_size(body);";
+      "  if (__http_req_body_len > (int)sizeof __http_req_body - 1) __http_req_body_len = sizeof __http_req_body - 1;";
+      "  memcpy(__http_req_body, body, __http_req_body_len); __http_req_body[__http_req_body_len] = 0;";
+      "  __http_status = 200; strcpy(__http_ctype, \"text/plain\");";
+      "  __http_extra_len = 0; __http_extra_hdrs[0] = 0;";
+      "  __http_sent = 0; __http_conn = fd;";
+      "  __http_request_begin();";
+      "  return 0;";
+      "}";
+      "/* The response head the handler's http_set_* calls imply. Returned as a";
+      " * Mere str so the Mere loop writes it with the same tcp_write it uses for";
+      " * the body -- and so a TLS connection goes through the same path. */";
+      "static const char* http_response_head(long long body_len) {";
+      "  static _Thread_local char head[9216];";
+      "  snprintf(head, sizeof head,";
+      "    \"HTTP/1.1 %d\\r\\nContent-Type: %s\\r\\nContent-Length: %lld\\r\\n%sConnection: close\\r\\n\\r\\n\",";
+      "    __http_status, __http_ctype, body_len, __http_extra_hdrs);";
+      "  return __lang_str_of_cstr(head);";
+      "}";
+      "/* Non-zero when http_send_file or the streaming API already wrote the";
+      " * response, so the caller must not write a second one. */";
+      "static int http_response_sent(void) { return __http_sent; }";
+      "static int http_end_request(void) { __http_conn = -1; __http_arena_release(); return 0; }";
+      "";
       "static int __http_serve_impl(int port, closure_str_str handler) {";
       "  int srv = socket(AF_INET, SOCK_STREAM, 0);";
       "  int one = 1; setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);";

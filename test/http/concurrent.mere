@@ -1,0 +1,24 @@
+// A server whose handler is SLOW ON PURPOSE (v0.1.340).
+//
+// Concurrency is not visible in a fast handler: with a microsecond of work per
+// request, a sequential loop and a worker pool finish a burst in the same
+// wall-clock time and the gate would pass either way. The sleep is what makes
+// the two answers different -- eight requests against a 400ms handler take
+// 3.2s sequentially and about 0.4s on a pool.
+//
+// The worker count and the port come from the environment so the gate can ask
+// the SAME BINARY both questions: one worker is the sequential answer.
+import "../../contrib/http/http.mere";
+import "../../contrib/http/serve_mt.mere";
+
+let env_int = fn (name: str) -> fn (d: int) ->
+  match env_var name with
+  | Some v -> if str_len v > 0 then int_of_str v else d
+  | None -> d;
+
+let h = fn (req: str) ->
+  let _ = sleep_ms (env_int "MERE_HTTP_DELAY_MS" 400) in
+  "done " ++ req ++ "\n";
+
+let _ = http_serve_mt (env_int "MERE_HTTP_PORT" 8080) (env_int "MERE_HTTP_WORKERS" 8) h;
+0
