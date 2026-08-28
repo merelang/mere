@@ -1,0 +1,29 @@
+// A route that fails, with and without the rescue middleware (v0.1.342).
+//
+// The same binary answers both questions: MERE_HTTP_RESCUE=1 wraps the router,
+// 0 does not. Without the control the check proves nothing -- a server that
+// happened to survive for another reason would pass it.
+import "../../contrib/http/http.mere";
+import "../../contrib/http/router.mere";
+import "../../contrib/http/serve_rd.mere";
+import "../../contrib/http/rescue.mere";
+
+let env_int = fn (name: str) -> fn (d: int) ->
+  match env_var name with
+  | Some v -> if str_len v > 0 then int_of_str v else d
+  | None -> d;
+
+let ok_h = fn (req: str) -> "alive\n";
+// Fails the way a real bug does: a path that is not there.
+let boom_h = fn (req: str) -> read_file "/definitely/not/here/mere-http-gate.txt";
+let nf = fn (req: str) -> let _ = http_set_status 404 in "nf\n";
+
+let routes = [ route "GET" "/ok" ok_h, route "GET" "/boom" boom_h ];
+let base = router routes nf;
+
+let _ =
+  if env_int "MERE_HTTP_RESCUE" 1 == 1 then
+    http_serve_rd (env_int "MERE_HTTP_PORT" 8080) 4 (with_rescue base)
+  else
+    http_serve_rd (env_int "MERE_HTTP_PORT" 8080) 4 base;
+0
