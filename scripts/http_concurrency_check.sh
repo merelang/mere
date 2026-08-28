@@ -98,8 +98,36 @@ else
   bad "one worker was also fast (${one}s); this gate is not measuring concurrency"
 fi
 
+# ---- per-worker state ---------------------------------------------------
+# What a connection pool is here. Checked by counting DISTINCT contexts across
+# a burst: a single shared value would serve every request and still be fast,
+# so speed alone does not distinguish "a pool" from "one connection everyone
+# uses at once" -- which is the bug this is meant to prevent.
+"$MERE" -c "$ROOT/test/http/per_worker.mere" > "$WORK/w.c"
+if $CC -O1 -o "$WORK/wsrv" "$WORK/w.c" -lm 2>"$WORK/cc2.log"; then
+  W=4
+  MERE_HTTP_PORT="$PORT" MERE_HTTP_WORKERS="$W" MERE_HTTP_DELAY_MS=300 \
+    "$WORK/wsrv" > "$WORK/wsrv.log" 2>&1 &
+  SRVPID=$!
+  curl -sS --retry 40 --retry-delay 1 --retry-connrefused --max-time 10 \
+       -o /dev/null "http://127.0.0.1:$PORT/warm" >/dev/null 2>&1 || true
+  i=0; wpids=""
+  while [ $i -lt "$W" ]; do
+    curl -sS --max-time 60 -o "$WORK/w$i" "http://127.0.0.1:$PORT/w$i" 2>/dev/null &
+    wpids="$wpids $!"; i=$((i + 1))
+  done
+  for p in $wpids; do wait "$p" 2>/dev/null || true; done
+  kill "$SRVPID" 2>/dev/null || true; SRVPID=""
+  distinct=$(cat "$WORK"/w[0-9]* 2>/dev/null | sort -u | grep -c 'ctx=' || true)
+  [ "$distinct" -eq "$W" ] \
+    && ok "$W workers built $W distinct contexts -- none is shared" \
+    || bad "saw $distinct distinct contexts across $W workers (expected $W)"
+else
+  bad "test/http/per_worker.mere did not build: $(head -2 "$WORK/cc2.log" | tr '\n' ' ')"
+fi
+
 echo
-echo "http_concurrency_check: $pass passed, $fail failed, of 3 checks"
-[ $((pass + fail)) -eq 3 ] || { echo "only $((pass + fail)) of 3 checks ran"; exit 1; }
+echo "http_concurrency_check: $pass passed, $fail failed, of 4 checks"
+[ $((pass + fail)) -eq 4 ] || { echo "only $((pass + fail)) of 4 checks ran"; exit 1; }
 [ "$fail" -eq 0 ] || exit 1
 echo "http_concurrency_check: ok"
