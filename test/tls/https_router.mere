@@ -13,8 +13,9 @@
 
 import "../../contrib/http/http.mere";
 import "../../contrib/http/router.mere";
-
-extern fn http_serve_tls: int -> str -> str -> (str -> str) -> unit;
+// The opt-in module, imported rather than re-declared, so the gate exercises
+// the thing a user would write.
+import "../../contrib/http/tls.mere";
 extern fn http_send_file: str -> str -> int;
 
 let env_or = fn (name: str) -> fn (dflt: str) ->
