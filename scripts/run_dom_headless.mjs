@@ -33,6 +33,13 @@ import * as fsSync from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { createRequire } from "node:module";
+// The one copy of how a Mere `float_of_str` reads a string. There were three
+// hosts and this was the third to be missing `__lang_float_of_str_ok`, which
+// the compiler has emitted as a required import since v0.1.277 — so this
+// runner could not instantiate ANY current Mere module. Nothing noticed
+// because nothing ran it; scripts/render_agreement_check.sh now does.
+const { mereParseFloat } = createRequire(import.meta.url)("./mere_parse_float.js");
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { makeDomGlue } = await import(
@@ -233,7 +240,8 @@ const makeStoreHost = async (wasmPath) => {
     read_file: stub,
     write_file: stub,
     __lang_str_of_float: stub,
-    __lang_float_of_str: () => 0.0,
+    __lang_float_of_str: (ptr) => mereParseFloat(readStr(ptr)).value,
+    __lang_float_of_str_ok: (ptr) => (mereParseFloat(readStr(ptr)).ok ? 1 : 0),
     __lang_sin: Math.sin, __lang_cos: Math.cos, __lang_tan: Math.tan, __lang_exp: Math.exp, __lang_log: Math.log,
     __lang_f_pow: Math.pow, __lang_atan2: Math.atan2,
     // The positioned file I/O the store is built on (v0.1.153). An OPFS
@@ -318,6 +326,18 @@ if (workerPath) {
     new Promise((resolve) => setTimeout(() => resolve(storeCall(request)), 0)));
 }
 const stub = () => 0;
+// The main module's memory is only known after instantiation, and these
+// imports are only ever CALLED after it — so the reader is lazy. Without it,
+// `__lang_float_of_str*` below would satisfy the linker and throw the moment a
+// program actually parsed a float. An import that links but cannot be called is
+// worse than a missing one: instantiation goes green and the failure moves.
+const mainReadStr = (ptr) => {
+  const bytes = new Uint8Array(instance.exports.memory.buffer);
+  let end = ptr;
+  while (end < bytes.length && bytes[end] !== 0) end++;
+  return Buffer.from(bytes.subarray(ptr, end)).toString("utf8");
+};
+
 const env = {
   ...glue,
   // The prelude imports the float / libm set whether or not the program
@@ -327,7 +347,8 @@ const env = {
   read_file: stub,
   write_file: stub,
   __lang_str_of_float: stub,
-  __lang_float_of_str: () => 0.0,
+  __lang_float_of_str: (ptr) => mereParseFloat(mainReadStr(ptr)).value,
+  __lang_float_of_str_ok: (ptr) => (mereParseFloat(mainReadStr(ptr)).ok ? 1 : 0),
   __lang_sin: Math.sin,
   __lang_cos: Math.cos,
   __lang_tan: Math.tan, __lang_exp: Math.exp, __lang_log: Math.log,

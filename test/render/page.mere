@@ -1,0 +1,21 @@
+// test/render/view.mere — the tree both sides must agree on.
+//
+// One pure function, `view`, returns a node tree. The server walks it and
+// prints a canonical serialisation; the client walks the SAME tree calling
+// contrib/dom, building real DOM that the headless runner then dumps.
+// Neither side gets its own idea of what the page is.
+
+type node = El of str * (str * str) list * node list | Text of str;
+
+// Shapes that a direct walk and a DOM-building walk have historically
+// disagreed on: several attributes on one element (order), nesting,
+// an empty child list, and text containing markup characters.
+let page = fn () ->
+  El ("div", [("id", "app"), ("class", "root")],
+    [ El ("h1", [], [Text "Posts"])
+    , El ("ul", [("id", "list")],
+        [ El ("li", [("data-id", "1")], [Text "first"])
+        , El ("li", [("data-id", "2")], [Text "second & <third>"])
+        ])
+    , El ("p", [("id", "empty")], [])
+    ]);

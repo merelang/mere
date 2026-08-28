@@ -233,6 +233,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/determinism_check.sh
 
+      - name: render_agreement (server walk vs client DOM, same tree)
+        if: ${{ !cancelled() }}
+        run: sh scripts/render_agreement_check.sh
+
       - name: parity (interp / C / LLVM / wasm agree)
         if: ${{ !cancelled() }}
         run: sh scripts/parity.sh
