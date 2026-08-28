@@ -4,6 +4,42 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.348 — 2026-08-28
+
+_What the capture analysis actually catches._ No behaviour change; a correction and
+three pinned facts.
+
+`spawn`'s capture analysis was reported here as not catching a mutable `Map` shared
+across threads. **It catches it.** The measurement that said otherwise used `mere -t`,
+which does not run `Move_check` — only `mere -c`, the run path, and `Pipeline.process`
+do. Asked the right way:
+
+| | |
+|---|---|
+| `spawn (fn () -> map_set hits …)` — the Map held directly | **refused**, "neither Send nor Sync" |
+| `spawn (fn () -> h ())` where `h` captured it | accepted |
+| the same, with `h` arriving as a parameter | accepted |
+
+`Map` is `false` for both `is_send_v` and `is_sync_v`; the classifier was right all
+along. **The real hole is narrower and sharper**: a captured value is classified by its
+**type**, and `TyArrow _ -> true` for both Send and Sync — a function type says nothing
+about what the function closed over. So the Map is caught one level up and invisible one
+level in, **and a request handler is exactly one level in**. That is why
+`http_serve_mt` cannot vouch for what a handler shares, and why mere-blog still had to
+move its sessions into the database.
+
+All three are pinned in `test_basic.ml`, **including the two that pass**: a defect
+asserted as accepted makes the suite fail the day it is fixed, which is when the record
+needs updating.
+
+Closing it means classifying a closure by its capture set — a type-system feature, not a
+patch. A syntactic approximation (recurse into a captured name's definition when it is
+visible) catches the second row and not the third, and errs toward refusing programs
+that work today: `mkv`, `contrib/http2` and `serve_mt` all hand closures to spawned
+workers. The routes that must **not** be closed need enumerating before any are.
+
+---
+
 ## v0.1.347 — 2026-08-28
 
 _Several processes can share a port, if you ask._ `tcp_listen_shared`, and
