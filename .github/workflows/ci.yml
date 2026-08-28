@@ -402,6 +402,14 @@ jobs:
           fi
           echo "ok: no bare wait in scripts/"
 
+      # A file upload, checked by CONTENT. contrib/http/multipart.mere had been
+      # written, documented and never run; running it found that request bodies
+      # stopped at their first zero byte, so every JSON test passed while every
+      # binary upload would have been truncated.
+      - name: http_upload_check (a binary upload survives its zero bytes)
+        if: ${{ !cancelled() }}
+        run: sh scripts/http_upload_check.sh
+
       - name: http_concurrency_check (the server serves more than one at once)
         if: ${{ !cancelled() }}
         run: sh scripts/http_concurrency_check.sh
