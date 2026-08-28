@@ -1,0 +1,30 @@
+// contrib/http/serve_mt_tls.mere -- the worker pool, terminating TLS.
+//
+// SEPARATE MODULE FOR THE SAME REASON contrib/http/tls.mere is separate: the C
+// backend links OpenSSL into a program that declares a TLS extern, and an
+// import declares everything the imported module declares. Putting these two
+// externs in serve_mt.mere would make every plaintext concurrent server need
+// OpenSSL to build -- the exact regression v0.1.338 shipped and v0.1.339 undid.
+//
+//   import "http/http.mere";
+//   import "http/serve_mt.mere";
+//   import "http/serve_mt_tls.mere";
+//   let _ = http_serve_mt_ctx_tls 8443 8 cert key make_conn handler;
+//
+// The handshake runs in the ACCEPT LOOP rather than in the worker, which is a
+// deliberate trade and worth knowing: a client that opens a connection and
+// stalls mid-handshake holds the accept loop, not just one worker. Doing it in
+// the worker instead would need the worker to know the fd is unhandshaked, and
+// the fd is all that crosses the channel. A read timeout is the answer if this
+// matters; `tcp_set_timeout` is the knob.
+extern fn tls_server_init: str -> str -> int;
+extern fn tcp_accept_tls: int -> int;
+
+let http_serve_mt_ctx_tls =
+  fn (port: int) -> fn (workers: int) -> fn (cert: str) -> fn (key: str) -> fn (mk) -> fn (h) ->
+    let rc = tls_server_init cert key in
+    if rc != 0 then
+      print_err ("http_serve_mt_ctx_tls: certificate/key unusable (tls_server_init="
+                 ++ str_of_int rc ++ ")")
+    else
+      http_serve_mt_ctx_hook port workers mk h (fn (c: int) -> tcp_accept_tls c);

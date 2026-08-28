@@ -276,7 +276,24 @@ if "$MERE" -c "$WORK/plain_http.mere" > "$WORK/plain_http.c" 2>"$WORK/plain_http
 else
   bad "the plaintext contrib/http program did not compile: $(head -2 "$WORK/plain_http.err" | tr '\n' ' ')"
 fi
-# ...and the opposite, so the check above is not vacuous: importing the TLS
+# The concurrent server has the same property and its own module boundary, so
+# it gets its own check rather than an assumption that the first one covers it.
+cat > "$WORK/plain_mt.mere" <<EOF
+import "$ROOT/contrib/http/http.mere";
+import "$ROOT/contrib/http/serve_mt.mere";
+let h = fn (req: str) -> "plaintext";
+let _ = http_serve_mt 1 2 h;
+0
+EOF
+if "$MERE" -c "$WORK/plain_mt.mere" > "$WORK/plain_mt.c" 2>"$WORK/plain_mt.err"; then
+  grep -q 'openssl/' "$WORK/plain_mt.c" \
+    && bad "a plaintext concurrent server pulls in OpenSSL" \
+    || ok "a plaintext concurrent server needs no OpenSSL either"
+else
+  bad "the plaintext concurrent program did not compile: $(head -2 "$WORK/plain_mt.err" | tr '\n' ' ')"
+fi
+
+# ...and the opposite, so the checks above are not vacuous: importing a TLS
 # module must produce the dependency.
 if grep -q 'openssl/' "$WORK/router.c" 2>/dev/null; then
   ok "importing http/tls.mere does produce the OpenSSL dependency"
@@ -356,7 +373,7 @@ fi
 # and exit 0: five PASS lines, no summary, and a green CI. A gate that reports
 # only what it managed to reach cannot tell "everything passed" from "it stopped
 # early". Raise this number in the same commit that adds a check.
-EXPECTED=$((15 + NODE_CHECKS))
+EXPECTED=$((16 + NODE_CHECKS))
 echo
 echo "tls_server_check: $pass passed, $fail failed, of $EXPECTED checks"
 if [ $((pass + fail)) -ne "$EXPECTED" ]; then
