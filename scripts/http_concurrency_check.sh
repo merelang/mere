@@ -201,6 +201,82 @@ else
   bad "(placeholder)"
 fi
 
+  # ---- keep-alive --------------------------------------------------------
+  # curl is the oracle: it decides whether to reuse, and it says so. Matched
+  # case-insensitively on "re-using" rather than on a whole sentence -- the
+  # first attempt greped for "Re-using existing connection", curl 8 says
+  # "Re-using existing connection with host", and a zero count was read as
+  # "keep-alive does not work" when it did.
+  MERE_HTTP_PORT=$((PORT + 7)) MERE_HTTP_WORKERS=2 MERE_HTTP_DELAY_MS=0 \
+    "$WORK/rdsrv" > "$WORK/rdka.log" 2>&1 &
+  SRVPID=$!
+  k=0
+  while [ $k -lt 25 ]; do
+    curl -sS --max-time 3 -o /dev/null "http://127.0.0.1:$((PORT + 7))/ok" >/dev/null 2>&1 && break
+    k=$((k + 1)); perl -e 'select(undef, undef, undef, 0.4)'
+  done
+  urls=""
+  u=0
+  while [ $u -lt 5 ]; do urls="$urls http://127.0.0.1:$((PORT + 7))/k$u"; u=$((u + 1)); done
+  reused=$(curl -sS -v -o /dev/null $urls 2>&1 | grep -ic 're-using' || true)
+  [ "$reused" -ge 4 ] \
+    && ok "five requests went over one connection ($reused reuses)" \
+    || bad "keep-alive did not reuse the connection ($reused of an expected 4)"
+
+  # And that a client asking to close is obeyed -- keeping a connection the
+  # client said to close is the failure that hangs it.
+  cl=$(curl -sS -v -H 'Connection: close' -o /dev/null \
+         "http://127.0.0.1:$((PORT + 7))/c1" "http://127.0.0.1:$((PORT + 7))/c2" 2>&1 \
+         | grep -ic 're-using' || true)
+  [ "$cl" -eq 0 ] \
+    && ok "and Connection: close is obeyed (no reuse)" \
+    || bad "the server kept a connection the client asked to close"
+  kill "$SRVPID" 2>/dev/null || true; SRVPID=""
+
+  # ---- the idle reaper ----------------------------------------------------
+  # Keep-alive turns "an idle client holds a worker" into "an idle client holds
+  # a descriptor". Cheap, and still finite: without a reaper, MERE_HTTP_MAX_CONN
+  # silent clients fill the table and nobody else gets in. Eight clients take
+  # every slot, are refused a ninth, and after the idle window the slot is back.
+  #
+  # The reaper only runs when the loop runs, and the loop used to block forever
+  # with nothing in flight -- so this check failed the first time for a reason
+  # that had nothing to do with reaping.
+  RP=$((PORT + 8))
+  MERE_HTTP_PORT="$RP" MERE_HTTP_WORKERS=2 MERE_HTTP_DELAY_MS=0 \
+    MERE_HTTP_IDLE_MS=1500 MERE_HTTP_MAX_CONN=8 \
+    "$WORK/rdsrv" > "$WORK/rdidle.log" 2>&1 &
+  SRVPID=$!
+  k=0
+  while [ $k -lt 25 ]; do
+    curl -sS --max-time 3 -o /dev/null "http://127.0.0.1:$RP/ok" >/dev/null 2>&1 && break
+    k=$((k + 1)); perl -e 'select(undef, undef, undef, 0.4)'
+  done
+  hpids=""; j=0
+  while [ $j -lt 8 ]; do
+    perl -e 'use IO::Socket::INET;
+             my $s = IO::Socket::INET->new(PeerAddr=>"127.0.0.1",
+                                           PeerPort=>'"$RP"', Proto=>"tcp") or exit;
+             print $s "GET /hold HTTP/1.1\r\nHost: x\r\n\r\n"; $s->flush;
+             my $b; sysread($s, $b, 65536);
+             select(undef, undef, undef, 9);' &
+    hpids="$hpids $!"; j=$((j + 1))
+  done
+  perl -e 'select(undef, undef, undef, 1)'
+  full=$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$RP/ok" 2>/dev/null || true)
+  perl -e 'select(undef, undef, undef, 3.5)'
+  rm -f "$WORK/reap.out"
+  curl -sS --max-time 4 -o "$WORK/reap.out" "http://127.0.0.1:$RP/ok" 2>/dev/null || true
+  kill "$SRVPID" 2>/dev/null || true; SRVPID=""
+  for p in $hpids; do kill "$p" 2>/dev/null || true; done
+  for p in $hpids; do wait "$p" 2>/dev/null || true; done
+  [ "$full" != "200" ] \
+    && ok "with every slot held, a further connection is refused ($full)" \
+    || bad "the connection table did not fill; this check is not measuring it"
+  [ -s "$WORK/reap.out" ] \
+    && ok "and after the idle window the slot comes back" \
+    || bad "the idle reaper did not reclaim a silent kept-alive connection"
+
   # ---- a response that cannot go out in one write -----------------------
   # The partial-write path is unreachable while the whole response fits in the
   # socket buffer, which 128 KB does on loopback -- so a server that writes once
@@ -271,7 +347,7 @@ else
 fi
 
 echo
-echo "http_concurrency_check: $pass passed, $fail failed, of 11 checks"
-[ $((pass + fail)) -eq 11 ] || { echo "only $((pass + fail)) of 11 checks ran"; exit 1; }
+echo "http_concurrency_check: $pass passed, $fail failed, of 15 checks"
+[ $((pass + fail)) -eq 15 ] || { echo "only $((pass + fail)) of 15 checks ran"; exit 1; }
 [ "$fail" -eq 0 ] || exit 1
 echo "http_concurrency_check: ok"

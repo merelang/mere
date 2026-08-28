@@ -4,6 +4,35 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.343 — 2026-08-28
+
+_Keep-alive, and the slot it costs instead._ `http_response_head_ka` in the runtime, and
+`contrib/http/serve_rd.mere` reuses a connection instead of closing it.
+
+Q-081 said keep-alive could not be added to the worker pool, because an idle connection
+would hold a worker and going quiet is free for an attacker. Under the readiness loop it
+holds a **descriptor** — cheap, and still finite, which is the part a deployment feels:
+`MERE_HTTP_MAX_CONN` silent clients fill the table and nobody else gets in. So the
+connection also carries a last-touched time, and anything silent past
+`MERE_HTTP_IDLE_MS` (15 s) has its slot taken back.
+
+**The reaper only runs when the loop runs**, and the loop blocked indefinitely with
+nothing in flight — so the first version reaped nothing and the check failed for a
+reason unrelated to reaping. The wait is three cases now: 5 ms with a request in flight,
+1 s with connections open and none in flight, and indefinite with neither.
+
+`Connection: close` is obeyed, and so is HTTP/1.0. Pipelining is **refused rather than
+mishandled**: the response is written back into the request's slot, so a second request
+already in the buffer is gone — a connection that arrived with extra bytes is closed
+after its first answer.
+
+**A grep that did not match read as a feature that did not work.** The first check
+counted `Re-using existing connection` in curl's trace and got zero; curl 8 says
+`Re-using existing connection with host`. Keep-alive had been working the whole time.
+The check matches `re-using`, case-insensitively, now.
+
+---
+
 ## v0.1.342 — 2026-08-28
 
 _One bad route no longer takes the server with it._ `contrib/http/rescue.mere`.
