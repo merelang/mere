@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.345 — 2026-08-28
+
+_A request body stopped at its first zero byte._ Every binary upload was truncated,
+silently, and every test passed.
+
+`contrib/http/multipart.mere` had been written, documented and **never run**. Running it
+found a defect that is not in it: `http_current_body` built the body with
+`__lang_str_of_cstr`, which is `strlen`. A 52-byte file with forty zeroes inside arrived
+as its first **8** bytes. Text bodies have no zero, so JSON worked everywhere and nothing
+ever said otherwise. The length was known the whole time — `__http_req_body_len` — and
+thrown away.
+
+**Then the checksum agreed with the bug.** With the length fixed, the file was still
+wrong: `sha256_hex` also used `strlen`, so it hashed the same 8 bytes and reported a
+digest that matched a truncated file. The instrument and the subject failed the same
+way, which is the only arrangement in which a wrong answer looks confirmed.
+
+Three helpers take arbitrary bytes and had this: `sha256_hex`, `hmac_sha256_hex_str`
+(its message), and `pbkdf2_sha256_hex` (its password). All now use `__lang_str_size`.
+**The hex helpers beside them keep `strlen` on purpose** — their input is hex text with
+no zero byte, and asking `__lang_str_size` about a plain C string reads a header that is
+not there. Verified against outside references (`shasum`, `openssl dgst`,
+`hashlib.pbkdf2_hmac`): all four values unchanged for text, so nothing that already
+worked moved.
+
+`scripts/http_upload_check.sh` compares a SHA-256 taken by the server against one taken
+by the shell, on a file chosen to be binary in the way that matters, and separately pins
+`sha256_hex` on a string containing a zero.
+
+---
+
 ## v0.1.344 — 2026-08-28
 
 _A stuck handler stops being an outage._ `contrib/http/serve_rd.mere` sheds.

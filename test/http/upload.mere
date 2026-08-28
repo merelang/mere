@@ -1,0 +1,39 @@
+// A file upload, parsed with contrib/http/multipart (v0.1.345).
+//
+// multipart.mere was written, documented, and never run. What running it found
+// was not in multipart.mere at all: `http_current_body` returned the body via
+// strlen, so an upload STOPPED AT ITS FIRST ZERO BYTE. Text bodies have none --
+// which is why every JSON test passed and every image would have arrived broken.
+//
+// The handler reports each part's length AND a SHA-256 of its contents, because
+// the length alone is the loudest way to be wrong and not the only one: the
+// first fix made the length right while the bytes were still wrong.
+import "../../contrib/http/http.mere";
+import "../../contrib/http/router.mere";
+import "../../contrib/http/multipart.mere";
+import "../../contrib/http/serve_rd.mere";
+
+extern fn sha256_hex: str -> str;
+
+let env_int = fn (name: str) -> fn (d: int) ->
+  match env_var name with
+  | Some v -> if str_len v > 0 then int_of_str v else d
+  | None -> d;
+
+let rec describe = fn (ps) -> fn (acc: str) ->
+  match ps with
+  | Nil -> acc
+  | Cons ((name, filename, content), rest) ->
+    describe rest (acc ++ name ++ " " ++ filename ++ " "
+                   ++ str_of_int (str_len content) ++ " "
+                   ++ sha256_hex content ++ "\n");
+
+let upload = fn (req: str) ->
+  let b = boundary_from_content_type (http_get_header "Content-Type") in
+  if str_eq b "" then "no-boundary\n"
+  else describe (parse_multipart (http_current_body ()) b) "";
+
+let nf = fn (req: str) -> let _ = http_set_status 404 in "nf\n";
+let _ = http_serve_rd (env_int "MERE_HTTP_PORT" 8080) 4
+          (router [route "POST" "/upload" upload] nf);
+0
