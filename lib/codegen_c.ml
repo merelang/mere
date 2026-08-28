@@ -6509,7 +6509,8 @@ let native_ffi_stub_names =
 let native_http_names =
   [ "http_serve"; "http_serve_tls"; "http_current_body"; "http_set_status";
     (* v0.1.340: the pieces a Mere-level accept loop drives *)
-    "http_begin_request"; "http_response_head"; "http_response_sent";
+    "http_begin_request"; "http_response_head"; "http_response_head_ka";
+    "http_response_sent";
     "http_end_request";
     "http_set_content_type"; "http_set_header"; "http_get_header";
     "http_current_status"; "http_arena_mark";
@@ -6718,6 +6719,16 @@ let native_http_runtime ~tls =
       "/* The response head the handler's http_set_* calls imply. Returned as a";
       " * Mere str so the Mere loop writes it with the same tcp_write it uses for";
       " * the body -- and so a TLS connection goes through the same path. */";
+      "/* v0.1.343: the same head, with the connection kept open. Separate from";
+      " * http_response_head rather than a flag on it, because every existing";
+      " * caller means `Connection: close` and should keep meaning it. */";
+      "static const char* http_response_head_ka(long long body_len) {";
+      "  static _Thread_local char head[9216];";
+      "  snprintf(head, sizeof head,";
+      "    \"HTTP/1.1 %d\\r\\nContent-Type: %s\\r\\nContent-Length: %lld\\r\\n%sConnection: keep-alive\\r\\n\\r\\n\",";
+      "    __http_status, __http_ctype, body_len, __http_extra_hdrs);";
+      "  return __lang_str_of_cstr(head);";
+      "}";
       "static const char* http_response_head(long long body_len) {";
       "  static _Thread_local char head[9216];";
       "  snprintf(head, sizeof head,";

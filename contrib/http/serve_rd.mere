@@ -54,6 +54,11 @@ extern fn io_poll_wait: int -> int -> int;
 extern fn io_poll_get: int -> int -> int;
 extern fn io_set_nonblocking: int -> int;
 
+// The rest of the request/response externs arrive with serve_mt.mere; these two
+// are new in v0.1.343 and are declared here.
+extern fn http_response_head_ka: int -> str;
+extern fn http_get_header: str -> str;
+
 // One read slot per fd, indexed BY the fd: the OS reuses closed descriptors, so
 // slot reuse follows fd reuse for free -- and the arena has no free, so anything
 // allocated per connection would leak per connection. mpoll's rule.
@@ -77,6 +82,16 @@ let rd_env_int = fn (name: str) -> fn (d: int) ->
   match env_var name with
   | Some v -> if str_len v > 0 then int_of_str v else d
   | None -> d;
+
+// Milliseconds since the epoch. `time ()` is a float of seconds; there is no
+// integer clock, and a Map holds ints.
+let now_ms = fn (u: unit) -> int_of_float (time () * 1000.0);
+
+// How long a kept-alive connection may sit silent before its slot is taken
+// back. Keep-alive turns "an idle client holds a worker" into "an idle client
+// holds a descriptor", which is cheap and still finite: without a reaper,
+// MERE_HTTP_MAX_CONN silent clients fill the table and nobody else gets in.
+let rd_idle_ms = rd_env_int "MERE_HTTP_IDLE_MS" 15000;
 
 let rd_max_fd = rd_env_int "MERE_HTTP_MAX_CONN" 64;
 let rd_slot = rd_env_int "MERE_HTTP_SLOT" 131072;
@@ -106,7 +121,21 @@ let rec rd_push = fn (fd: int) -> fn (base: int) -> fn (off: int) -> fn (rem: in
     if n <= 0 then rem
     else rd_push fd base (off + n) (rem - n);
 
-// Returns (fd, off, rem). rem = 0 means the worker finished and closed it.
+// HTTP/1.1 keeps the connection open unless asked not to. Only `close` is
+// honoured here; a 1.0 client that wants reuse must say `keep-alive`, and this
+// answers 1.1 to everyone, so the safe reading of an absent header is "keep".
+// Anything unrecognised closes -- being wrong in the closing direction costs a
+// round trip, being wrong in the keeping direction hangs a client.
+let rd_wants_keep = fn (reqline: str) ->
+  let c = http_get_header "Connection" in
+  if str_contains c "close" then false
+  else if str_contains c "Close" then false
+  else if str_starts_with reqline "HTTP/1.0" then false
+  else true;
+
+// Returns (fd, off, rem, keep). rem = 0 means the worker finished; keep says
+// whether the loop should read another request on this descriptor rather than
+// close it.
 let rd_worker_one = fn (fd: int) -> fn (base: int) -> fn (total: int) -> fn (ctx: int) -> fn (h) ->
   let he = mt_find_head_end base 0 total in
   let head = mem_to_str base he in
@@ -114,14 +143,17 @@ let rd_worker_one = fn (fd: int) -> fn (base: int) -> fn (total: int) -> fn (ctx
   let reqline = mem_to_str base (mt_reqline_end base 0 he 0) in
   let _ = http_begin_request fd head body in
   let out = h ctx reqline in
+  let keep = rd_wants_keep reqline in
   if http_response_sent () != 0 then
     // http_send_file / the streaming API already wrote it, straight to the fd.
-    // Those still block in the worker; they bypass this path entirely.
+    // Those still block in the worker; they bypass this path entirely, and
+    // because they wrote their own headers the connection cannot be reused.
     let _ = http_end_request () in
     let _ = tcp_close fd in
-    (fd, 0, 0)
+    (fd, 0, 0, false)
   else
-    let resp = http_response_head (str_len out) ++ out in
+    let resp = (if keep then http_response_head_ka (str_len out)
+                else http_response_head (str_len out)) ++ out in
     let len = str_len resp in
     if len > rd_slot then
       let _ = print_err ("http: response of " ++ str_of_int len
@@ -132,13 +164,15 @@ let rd_worker_one = fn (fd: int) -> fn (base: int) -> fn (total: int) -> fn (ctx
       let left = rd_push fd base 0 n in
       let _ = http_end_request () in
       let _ = if left <= 0 then tcp_close fd else () in
-      (fd, n - left, left)
+      (fd, n - left, left, false)
     else
       let n = mem_copy_str base 0 resp in
       let left = rd_push fd base 0 n in
       let _ = http_end_request () in
-      let _ = if left <= 0 then tcp_close fd else () in
-      (fd, n - left, left);
+      // Only close here when the answer is complete AND the connection is done.
+      // A kept connection goes back to the loop with rem = 0 and keep = true.
+      let _ = if left <= 0 then (if keep then () else tcp_close fd) else () in
+      (fd, n - left, left, keep);
 
 let rec rd_worker = fn (ch) -> fn (back) -> fn (slots: int) -> fn (ctx: int) -> fn (h) ->
   match channel_recv_opt ch with
@@ -177,6 +211,17 @@ let http_serve_rd_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h)
     let conns = map_new () in
     let woff = map_new () in
     let wrem = map_new () in
+    let wkeep = map_new () in
+    // When each connection last did something, so an idle kept-alive connection
+    // can be reclaimed. Without this, sixty-four silent clients exhaust the
+    // descriptor table -- keep-alive turns "holds a worker" into "holds a slot",
+    // and a slot is cheap but not free.
+    let idle = map_new () in
+    // Set when more bytes arrived than the request needed -- a pipelined second
+    // request. The response overwrites the slot, so those bytes are gone; the
+    // connection is closed after the first answer rather than silently losing
+    // the second. Refused, not mishandled.
+    let piped = map_new () in
     let inflight = map_new () in
     let _ = map_set inflight 0 0 in
     let _ = rd_start ch back slots 0 workers mk h in
@@ -189,6 +234,7 @@ let http_serve_rd_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h)
     let close_conn = fn (fd: int) ->
       let _ = io_poll_del ps fd in
       let _ = map_delete conns fd in
+      let _ = map_delete idle fd in
       tcp_close fd in
 
     let rec accept_all = fn (u: unit) ->
@@ -201,6 +247,7 @@ let http_serve_rd_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h)
         let _ = io_set_nonblocking c in
         let _ = io_poll_add ps c 1 in
         let _ = map_set conns c 0 in
+        let _ = map_set idle c (now_ms ()) in
         accept_all () in
 
     let on_readable = fn (fd: int) -> fn (got: int) ->
@@ -215,10 +262,12 @@ let http_serve_rd_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h)
         let g = got + n in
         let total = rd_complete base g pat patn in
         if total >= 0 then
+          let _ = if g > total then map_set piped fd 1 else () in
           // Complete. Stop watching it and hand fd + byte count to a worker;
           // from here the worker owns the fd, the slot, and the close.
           let _ = io_poll_del ps fd in
           let _ = map_delete conns fd in
+          let _ = map_delete idle fd in
           let _ = map_set inflight 0 (map_get inflight 0 + 1) in
           channel_send ch (fd, total)
         else if g >= rd_slot then
@@ -233,29 +282,50 @@ let http_serve_rd_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h)
     // 5 ms to look; with nothing in flight it blocks, so an idle server costs
     // nothing. A self-pipe would be the usual answer and needs a primitive this
     // language does not have.
+    // A kept connection goes back to watching for a request. Its slot is reset
+    // to empty: anything the client pipelined behind the first request was
+    // overwritten by the response, so a second request already in flight would
+    // be lost -- which is why a connection with bytes left over is closed
+    // instead (see on_readable). Pipelining is refused, not mishandled.
+    let rd_reuse = fn (fd: int) ->
+      if map_has piped fd then
+        let _ = map_delete piped fd in
+        tcp_close fd
+      else
+        let _ = map_set conns fd 0 in
+        let _ = map_set idle fd (now_ms ()) in
+        let _ = io_poll_add ps fd 1 in
+        () in
+
     let rec drain_back = fn (u: unit) ->
       match channel_recv_timeout back 0 with
       | None -> ()
-      | Some (fd, off, rem) ->
+      | Some (fd, off, rem, keep) ->
         let _ = map_set inflight 0 (map_get inflight 0 - 1) in
         let _ =
-          if rem <= 0 then ()          // the worker finished and closed it
-          else
-            // Not all of the response fit. Take the fd back and finish it here.
+          if rem > 0 then
+            // Not all of the response fit. Take the fd back and finish it here;
+            // `keep` is remembered until the last byte is out.
             let _ = map_set woff fd off in
             let _ = map_set wrem fd rem in
+            let _ = map_set wkeep fd (if keep then 1 else 0) in
             let _ = io_poll_add ps fd 2 in
-            () in
+            ()
+          else if keep then rd_reuse fd
+          else ()                       // the worker finished and closed it
+          in
         drain_back () in
 
     let on_writable = fn (fd: int) ->
       let base = slots + fd * rd_slot in
       let left = rd_push fd base (map_get woff fd) (map_get wrem fd) in
       if left <= 0 then
+        let k = map_get wkeep fd in
         let _ = io_poll_del ps fd in
         let _ = map_delete woff fd in
         let _ = map_delete wrem fd in
-        tcp_close fd
+        let _ = map_delete wkeep fd in
+        if k == 1 then rd_reuse fd else tcp_close fd
       else
         let _ = map_set woff fd (map_get woff fd + (map_get wrem fd - left)) in
         map_set wrem fd left in
@@ -264,10 +334,35 @@ let http_serve_rd_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h)
       let _ = io_poll_del ps fd in
       let _ = map_delete woff fd in
       let _ = map_delete wrem fd in
+      let _ = map_delete wkeep fd in
       tcp_close fd in
 
+    // Walk the idle table and close anything silent for too long. Called once
+    // per loop pass; the table is at most MERE_HTTP_MAX_CONN entries, so this
+    // is a scan of sixty-four ints, not a data structure problem.
+    let reap = fn (u: unit) ->
+      let cutoff = now_ms () - rd_idle_ms in
+      let rec go = fn (fd: int) ->
+        if fd >= rd_max_fd then ()
+        else
+          let _ =
+            if map_has idle fd then
+              (if map_get idle fd < cutoff then close_conn fd else ())
+            else () in
+          go (fd + 1) in
+      go 0 in
+
     let rec loop = fn (u: unit) ->
-      let n = io_poll_wait ps (if map_get inflight 0 > 0 then 5 else 0 - 1) in
+      // THREE CASES, and the middle one was missing. A request in flight: wake
+      // in 5 ms to collect the worker's answer. No request but open
+      // connections: wake in a second, because the idle reaper only runs when
+      // the loop runs -- an unbounded wait meant a silent kept-alive connection
+      // held its slot forever and the reaper never fired. Nothing at all:
+      // block, so an idle server costs nothing.
+      let n = io_poll_wait ps
+                (if map_get inflight 0 > 0 then 5
+                 else if map_len idle > 0 then 1000
+                 else 0 - 1) in
       let rec each = fn (i: int) ->
         if i >= n then ()
         else
@@ -289,6 +384,7 @@ let http_serve_rd_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h)
           each (i + 1) in
       let _ = each 0 in
       let _ = drain_back () in
+      let _ = reap () in
       loop () in
     loop ();
 
