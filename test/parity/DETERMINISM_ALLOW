@@ -1,0 +1,7 @@
+# Parity cases that legitimately reach an ambient-nondeterministic host builtin
+# (time / random_int / random_float), having turned the value into an assertion
+# that IS a function of the program. Format: <case> <reason>
+#
+# Checked by scripts/determinism_check.sh. An entry whose case no longer calls
+# one is an error, so this list cannot outlive its reason.
+time_clock asserts only structure (epoch > 2020-01-01, second read >= first), never a value

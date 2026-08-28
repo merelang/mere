@@ -229,6 +229,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/stack_overflow.sh
 
+      - name: determinism (parity's precondition: stdout is a function of the program)
+        if: ${{ !cancelled() }}
+        run: sh scripts/determinism_check.sh
+
       - name: parity (interp / C / LLVM / wasm agree)
         if: ${{ !cancelled() }}
         run: sh scripts/parity.sh
