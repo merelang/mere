@@ -12,9 +12,22 @@ let env_int = fn (name: str) -> fn (d: int) ->
   | Some v -> if str_len v > 0 then int_of_str v else d
   | None -> d;
 
-let h = fn (req: str) ->
+import "../../contrib/http/router.mere";
+
+let slow_h = fn (req: str) ->
   let _ = sleep_ms (env_int "MERE_HTTP_DELAY_MS" 400) in
   "done " ++ req ++ "\n";
 
-let _ = http_serve_rd (env_int "MERE_HTTP_PORT" 8080) (env_int "MERE_HTTP_WORKERS" 8) h;
+// A response far larger than any socket buffer, so it CANNOT go out in one
+// write. That is the only way to reach the partial-write path: at 128 KB the
+// buffer swallows the whole thing and a server that writes once and ignores
+// what it did not send looks correct. The harness runs this with
+// MERE_HTTP_SLOT raised, and checks the bytes, not just the count.
+let big_h = fn (req: str) -> str_repeat "0123456789abcdef" 56000;   // 896 000
+
+let nf_h = fn (req: str) -> let _ = http_set_status 404 in "nf\n";
+
+let handle = router [route "GET" "/big" big_h] slow_h;
+
+let _ = http_serve_rd (env_int "MERE_HTTP_PORT" 8080) (env_int "MERE_HTTP_WORKERS" 8) handle;
 0

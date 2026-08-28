@@ -8,6 +8,26 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 _One bad route no longer takes the server with it._ `contrib/http/rescue.mere`.
 
+**And the write side goes through the loop too.** The worker writes what the socket
+takes and hands the remainder back — fd, offset, bytes left — then takes the next
+request. A client that asks for something and then refuses to read it costs a map entry,
+the same as one that dribbles its request.
+
+Finding that out took a control, and the first two attempts had none worth having: six
+impolite clients against four workers answered in 0.03 s under **both** the old blocking
+write and the new handoff, because a 28 KB response fits in the socket buffer and never
+blocks anything. Raising the response to 896 KB separated them, and not in the way the
+change was made for — **the old code was wrong, not slow**. The descriptor is
+nonblocking, and it called `tcp_write` once and ignored the short count: 3 271 270 bytes
+delivered for an 896 KB response. The new one delivers 896 000, byte for byte.
+
+So the gate checks **content at a size that cannot go out in one write**, not timing.
+`rd_max_fd` and `rd_slot` are read from the environment now, because a property that only
+appears at one size cannot be checked at another — and because the slot is both the
+connection budget (the arena is 16 MB with no free) and the response ceiling. 128 KB by
+default: the first guess of 32 KB is too small for a JSON list of rows.
+`http_send_file` never enters this buffer, so static assets of any size are unaffected.
+
 A handler that fails — `read_file` on a path that is not there, a refused decode, an
 index out of range — unwound past the server loop and ended the **process**. Measured on
 the readiness server: `GET /ok` answers, `GET /boom` is a failing route, and the next
