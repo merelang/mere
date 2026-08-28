@@ -338,8 +338,15 @@ EOF
   if [ "$built" -eq 1 ]; then
     node "$ROOT/scripts/run_http_server.js" "$WORK/nodehost_plain.wasm" > "$WORK/node.log" 2>&1 &
     SRVPID=$!
-    np=$(curl -sS --retry 15 --retry-delay 1 --retry-connrefused --max-time 8 \
-           "http://127.0.0.1:$PORT2/node" 2>&1 || true)
+    # Same shape as the TLS probe below, for the same reason: a server that is
+    # binding can reset rather than refuse.
+    j=0
+    while [ $j -lt 25 ]; do
+      curl -sS --max-time 3 -o /dev/null "http://127.0.0.1:$PORT2/ready" >/dev/null 2>&1 && break
+      j=$((j + 1))
+      perl -e 'select(undef, undef, undef, 0.4)'
+    done
+    np=$(curl -sS --max-time 8 "http://127.0.0.1:$PORT2/node" 2>&1 || true)
     grep -q 'LinkError\|not a function\|requires a callable' "$WORK/node.log" \
       && bad "the Node HTTP host cannot instantiate a Mere module ($(head -1 "$WORK/node.log" | cut -c1-120))" \
       || ok "the Node HTTP host instantiates a Mere module"
@@ -350,9 +357,21 @@ EOF
 
     node "$ROOT/scripts/run_http_server.js" "$WORK/nodehost.wasm" > "$WORK/nodetls.log" 2>&1 &
     SRVPID=$!
+    # READINESS BY RETRYING THE WHOLE REQUEST, not by --retry-connrefused.
+    # This check failed once in CI with "curl: (35) Send failure: Connection
+    # reset by peer": the port was already accepting while Node's TLS server
+    # was still coming up, so the connection was RESET rather than REFUSED, and
+    # --retry-connrefused does not cover that. A flaky gate is worse than a
+    # missing one -- it teaches you to re-run instead of to look.
+    j=0
+    while [ $j -lt 25 ]; do
+      curl -sS --cacert "$WORK/cert.pem" --resolve "localhost:$PORT2:127.0.0.1" \
+           --max-time 3 -o /dev/null "https://localhost:$PORT2/ready" >/dev/null 2>&1 && break
+      j=$((j + 1))
+      perl -e 'select(undef, undef, undef, 0.4)'
+    done
     nt=$(curl -sS --cacert "$WORK/cert.pem" --resolve "localhost:$PORT2:127.0.0.1" \
-           --retry 15 --retry-delay 1 --retry-connrefused --max-time 8 \
-           "https://localhost:$PORT2/node" 2>&1 || true)
+           --max-time 8 "https://localhost:$PORT2/node" 2>&1 || true)
     echo "$nt" | grep -q 'node host says' \
       && ok "the Node HTTP host terminates TLS too — both hosts run the same program" \
       || bad "the Node host did not serve over TLS (got: $(echo "$nt" | tr '\n' ' ' | cut -c1-120))"
