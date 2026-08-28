@@ -384,6 +384,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/tls_server_check.sh
 
+      # Whether the server answers requests AT THE SAME TIME. A handler that
+      # sleeps on purpose is what makes the two answers different, and the same
+      # binary run with one worker is the sequential control -- without it a
+      # fast machine passes for the wrong reason.
+      - name: http_concurrency_check (the server serves more than one at once)
+        if: ${{ !cancelled() }}
+        run: sh scripts/http_concurrency_check.sh
+
       # The Protocol Buffers wire format against protoc's BYTES. Runs the
       # interpreter AND the C backend, because two of its four sections are about
       # the int-width difference between them: above 2^62 the interpreter is

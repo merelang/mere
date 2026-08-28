@@ -1,0 +1,182 @@
+// contrib/http/serve_mt.mere -- serve HTTP/1.1 on a pool of workers.
+//
+// WHY THIS IS IN MERE AND NOT IN THE RUNTIME. `http_serve` is a C accept loop
+// that takes one request at a time: four concurrent requests against a handler
+// that sleeps 400ms take 1.66s, not 0.4s. The fix could have been a thread pool
+// inside that loop. It is here instead so that the concurrency is written in
+// the language -- `spawn`, `channel_new`, `channel_recv_opt` -- rather than
+// hidden behind an extern, and so that whatever the capture analysis learns to
+// refuse applies to it automatically.
+//
+// WHAT IT DOES NOT DO, and this was measured rather than assumed. An earlier
+// draft of this comment claimed the compiler would refuse a handler that shares
+// a mutable Map across requests. IT DOES NOT. `spawn` capturing a Map directly
+// compiles today, so capturing a closure that captures one certainly does --
+// Map is not !Send, which is the gap mkv wrote down when it chose to route
+// every access through one owner thread instead of sharing the store.
+//
+// So read this module as: THE SHARING IS YOURS TO GET RIGHT. Moving a handler
+// from `http_serve` to `http_serve_mt` turns state that was safe because the
+// loop was sequential into state that races, and nothing will tell you. What
+// changed is that the sequential loop is no longer hiding it.
+//
+// A FIXED POOL, NOT A THREAD PER CONNECTION, and the arena decides that:
+// `mem_alloc` is a bump allocator with no free, so a buffer per connection
+// leaks a buffer per connection. Workers are fixed, each owns its buffers for
+// the life of the process, and the accept loop does nothing but accept. Same
+// reasoning as contrib/http2/server.mere, which found it first.
+//
+//   import "http/http.mere";
+//   import "http/serve_mt.mere";
+//   let _ = http_serve_mt 8080 8 (router routes not_found);
+
+extern fn tcp_listen: int -> int;
+extern fn tcp_accept: int -> int;
+extern fn tcp_read: int -> int -> int -> int;
+extern fn tcp_write: int -> int -> int -> int;
+extern fn tcp_close: int -> unit;
+extern fn mem_alloc: int -> int;
+extern fn mem_get_u8: int -> int -> int;
+extern fn mem_to_str: int -> int -> str;
+extern fn mem_copy_str: int -> int -> str -> int;
+
+// The per-request state the http_set_* externs write is per-thread as of
+// v0.1.340; these four drive one request through it from Mere.
+extern fn http_begin_request: int -> str -> str -> int;
+extern fn http_response_head: int -> str;
+extern fn http_response_sent: unit -> int;
+extern fn http_end_request: unit -> int;
+
+let mt_bufsz = 65536;
+
+// ---- request head ------------------------------------------------------
+// Scanning the whole buffer rather than its tail: a read may split anywhere,
+// and a tail-only check passes with every client that writes the head in one
+// go and fails against one that dribbles.
+let rec mt_find_head_end = fn (buf: int) -> fn (i: int) -> fn (g: int) ->
+  if i + 4 > g then 0 - 1
+  else if mem_get_u8 buf i != 13 then mt_find_head_end buf (i + 1) g
+  else if mem_get_u8 buf (i + 1) != 10 then mt_find_head_end buf (i + 1) g
+  else if mem_get_u8 buf (i + 2) != 13 then mt_find_head_end buf (i + 1) g
+  else if mem_get_u8 buf (i + 3) != 10 then mt_find_head_end buf (i + 1) g
+  else i + 4;
+
+let rec mt_read_head = fn (fd: int) -> fn (buf: int) -> fn (got: int) ->
+  if mt_find_head_end buf 0 got >= 0 then got
+  else if got >= mt_bufsz then got
+  else
+    let n = tcp_read fd (buf + got) (mt_bufsz - got) in
+    if n <= 0 then got else mt_read_head fd buf (got + n);
+
+let rec mt_read_body = fn (fd: int) -> fn (buf: int) -> fn (got: int) -> fn (want: int) ->
+  if got >= want then got
+  else if got >= mt_bufsz then got
+  else
+    let n = tcp_read fd (buf + got) (mt_bufsz - got) in
+    if n <= 0 then got else mt_read_body fd buf (got + n) want;
+
+// ---- Content-Length, case-insensitively, on bytes ----------------------
+// Header names are case-insensitive and there is no str_lower, so the compare
+// happens on bytes against a pattern the worker wrote into its own scratch
+// buffer once. Doing it on the buffer also avoids building a str for a header
+// block that is about to be handed to the runtime anyway.
+let mt_lc = fn (b: int) -> if b >= 65 then (if b <= 90 then b + 32 else b) else b;
+
+let rec mt_match_ci = fn (buf: int) -> fn (i: int) -> fn (pat: int) -> fn (k: int) -> fn (n: int) ->
+  if k >= n then 1
+  else if mt_lc (mem_get_u8 buf (i + k)) != mt_lc (mem_get_u8 pat k) then 0
+  else mt_match_ci buf i pat (k + 1) n;
+
+let rec mt_find_ci = fn (buf: int) -> fn (i: int) -> fn (lim: int) -> fn (pat: int) -> fn (n: int) ->
+  if i + n > lim then 0 - 1
+  else if mt_match_ci buf i pat 0 n == 1 then i + n
+  else mt_find_ci buf (i + 1) lim pat n;
+
+let rec mt_skip_sp = fn (buf: int) -> fn (i: int) -> fn (lim: int) ->
+  if i >= lim then i
+  else if mem_get_u8 buf i == 32 then mt_skip_sp buf (i + 1) lim
+  else i;
+
+let rec mt_digits = fn (buf: int) -> fn (i: int) -> fn (lim: int) -> fn (acc: int) ->
+  if i >= lim then acc
+  else
+    let b = mem_get_u8 buf i in
+    if b < 48 then acc
+    else if b > 57 then acc
+    else mt_digits buf (i + 1) lim (acc * 10 + (b - 48));
+
+// "GET /path HTTP/1.1" -> the bytes up to the SECOND space, which is the
+// "METHOD URL" shape http_serve hands a handler. Same contract, so router and
+// every middleware written against it drop in unchanged.
+let rec mt_reqline_end = fn (buf: int) -> fn (i: int) -> fn (g: int) -> fn (spaces: int) ->
+  if i >= g then i
+  else
+    let b = mem_get_u8 buf i in
+    if b == 13 then i
+    else if b != 32 then mt_reqline_end buf (i + 1) g spaces
+    else if spaces >= 1 then i
+    else mt_reqline_end buf (i + 1) g 1;
+
+// ---- one connection ----------------------------------------------------
+let mt_serve_conn = fn (fd: int, rbuf: int, wbuf: int, pat: int, patn: int, h) ->
+  let g = mt_read_head fd rbuf 0 in
+  let he = mt_find_head_end rbuf 0 g in
+  if he < 0 then
+    let _ = tcp_close fd in 0
+  else
+    let clpos = mt_find_ci rbuf 0 he pat patn in
+    let want = if clpos < 0 then 0 else mt_digits rbuf (mt_skip_sp rbuf clpos he) he 0 in
+    let total = mt_read_body fd rbuf g (he + want) in
+    let head = mem_to_str rbuf he in
+    let body = mem_to_str (rbuf + he) (total - he) in
+    let reqline = mem_to_str rbuf (mt_reqline_end rbuf 0 he 0) in
+    let _ = http_begin_request fd head body in
+    let out = h reqline in
+    let _ =
+      if http_response_sent () != 0 then 0
+      else
+        // One write rather than two: the head and the body go out together, so
+        // a client that reads eagerly does not see a header block alone.
+        let n = mem_copy_str wbuf 0 (http_response_head (str_len out) ++ out) in
+        tcp_write fd wbuf n in
+    let _ = http_end_request () in
+    let _ = tcp_close fd in
+    1;
+
+// ---- the pool ----------------------------------------------------------
+let rec mt_worker = fn (ch, rbuf: int, wbuf: int, pat: int, patn: int, h) ->
+  match channel_recv_opt ch with
+  | None -> ()
+  | Some cfd ->
+    let _ = mt_serve_conn cfd rbuf wbuf pat patn h in
+    mt_worker ch rbuf wbuf pat patn h;
+
+let rec mt_start = fn (ch, k: int, n: int, h) ->
+  if k >= n then ()
+  else
+    // Each worker's buffers are allocated BEFORE the spawn and captured by
+    // value, so no two workers ever hold the same offsets. Allocating inside
+    // the worker would race on the bump pointer.
+    let rbuf = mem_alloc mt_bufsz in
+    let wbuf = mem_alloc mt_bufsz in
+    let pat = mem_alloc 32 in
+    let patn = mem_copy_str pat 0 "content-length:" in
+    let _ = spawn (fn () -> mt_worker ch rbuf wbuf pat patn h) in
+    mt_start ch (k + 1) n h;
+
+let rec mt_accept_loop = fn (srv: int, ch) ->
+  let c = tcp_accept srv in
+  let _ = if c < 0 then () else channel_send ch c in
+  mt_accept_loop srv ch;
+
+// `http_serve_mt port workers handler` -- never returns.
+let http_serve_mt = fn (port: int) -> fn (workers: int) -> fn (h) ->
+  let srv = tcp_listen port in
+  if srv < 0 then
+    print_err ("http_serve_mt: could not listen on " ++ str_of_int port)
+  else
+    let ch = channel_new () in
+    let _ = mt_start ch 0 workers h in
+    let _ = print ("http_serve_mt: listening on :" ++ str_of_int port
+                   ++ " with " ++ str_of_int workers ++ " workers") in
+    mt_accept_loop srv ch;

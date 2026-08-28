@@ -4,6 +4,50 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.340 — 2026-08-28
+
+_The server answers more than one request at a time._ `contrib/http/serve_mt.mere`
+is an accept loop with a fixed worker pool, and the measurement that prompted it:
+
+| | 8 requests, 400 ms handler |
+|---|---|
+| `http_serve` (the C loop) | **3.27 s** |
+| `http_serve_mt`, 8 workers | **0.45 s** |
+
+`http_serve` is `accept → read → handle → write → close`, sequential. Nothing said so
+and nothing measured it, so "Mere serves HTTP" was true while "Mere serves a web
+application" was not — a handler doing a 50 ms query capped the process at 20 requests
+a second.
+
+**The pool is written in Mere, not added to the runtime.** `spawn`, `channel_new`,
+`channel_recv_opt` — the same shape `contrib/http2/server.mere` arrived at, including
+its reason for a fixed pool rather than a thread per connection: `mem_alloc` is a bump
+allocator with no free, so a buffer per connection leaks one per connection. The
+per-request state the `http_set_*` externs write is now `_Thread_local`, and four new
+externs (`http_begin_request`, `http_response_head`, `http_response_sent`,
+`http_end_request`) let Mere drive a request through it. The handler type is unchanged,
+so `router` and every middleware written against it drop in.
+
+**A claim in the first draft of that module was false, and the correction is the
+finding.** It said the compiler would refuse a handler sharing a mutable Map across
+requests, because `spawn`'s capture analysis sees what a spawned closure captures.
+Measured in three steps: `spawn` capturing a Map **directly** compiles. So does a
+closure capturing one, so does that closure arriving as a parameter. `Map` is not
+!Send — which mkv wrote down when it chose to route every access through one owner
+thread, and then stopped being a live question because mkv had worked around it. The
+module comment now says what is true: **moving a handler to the pool turns state that
+was safe because the loop was sequential into state that races, and nothing will tell
+you.** Recorded as Q-080.
+
+`scripts/http_concurrency_check.sh` runs the same binary twice — eight workers and
+**one** — because a machine fast enough to make the sleep irrelevant would pass the
+concurrency check for the wrong reason. The control is the check.
+
+(Its first draft hung: a bare `wait` waits for the server too, and the server does not
+exit. A timing gate that can hang is the one thing it must not be.)
+
+---
+
 ## v0.1.339 — 2026-08-28
 
 _A fix for something v0.1.338 broke and shipped._ `http_serve_tls` moves out of
