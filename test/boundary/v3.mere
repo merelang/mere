@@ -1,0 +1,26 @@
+// test/boundary/v3.mere — v1 plus one optional field, decoded tolerantly.
+//
+// The point of this version: v2 added a field the ordinary way and broke
+// every client still on v1 (see EXPECTED). v3 adds a field too, but decodes
+// through tolerant.mere, which splices `"k":null` for keys the payload does
+// not carry. If the matrix shows v1 -> v3 as ok, then "a derived boundary
+// cannot evolve" was a property of the default decoder and not of the
+// language -- which is what this version exists to settle.
+import "tolerant.mere";
+
+type Req = { id: int, title: str, tags: str option };
+
+let sample = Req { id = 1, title = "hi", tags = Some "x" };
+let witness = Req { id = 0, title = "", tags = None };
+
+match args () with
+| Cons (mode, rest) ->
+  if str_eq mode "encode" then print (to_json sample)
+  else
+    (match rest with
+     | Cons (payload, _) ->
+       (match (of_json_opt (fill witness payload) : Req option) with
+        | Some _ -> print "ok"
+        | None -> print "fail")
+     | Nil -> print "fail")
+| Nil -> print "fail"

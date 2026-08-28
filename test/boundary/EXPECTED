@@ -6,6 +6,7 @@
 # to a version changed what it sends and moved no cell.
 v1 payload : {"id":1,"title":"hi"}
 v2 payload : {"id":1,"title":"hi","tags":"x"}
+v3 payload : {"id":1,"title":"hi","tags":"x"}
 #
 # encoder -> decoder
 # ok   = that decoder accepts that encoder's payload
@@ -13,5 +14,10 @@ v2 payload : {"id":1,"title":"hi","tags":"x"}
 #        to a server on the decoder version
 v1 -> v1 : ok
 v1 -> v2 : fail
+v1 -> v3 : ok
 v2 -> v1 : ok
 v2 -> v2 : ok
+v2 -> v3 : ok
+v3 -> v1 : ok
+v3 -> v2 : ok
+v3 -> v3 : ok
