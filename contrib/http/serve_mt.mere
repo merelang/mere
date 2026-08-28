@@ -190,10 +190,23 @@ let rec mt_start = fn (ch, k: int, n: int, h) ->
     let _ = spawn (fn () -> mt_worker ch rbuf wbuf pat patn h) in
     mt_start ch (k + 1) n h;
 
-let rec mt_accept_loop = fn (srv: int, ch) ->
+// The accept loop takes a HOOK -- `int -> int`, run on each accepted fd before
+// it is queued, non-zero meaning "drop this connection". It exists so the TLS
+// handshake can happen here without this module declaring a TLS extern:
+// declaring one is what links OpenSSL, and that would put the dependency on
+// every plaintext server that imports this file. See contrib/http/serve_mt_tls.mere.
+let rec mt_accept_loop_hook = fn (srv: int, ch, hook) ->
   let c = tcp_accept srv in
-  let _ = if c < 0 then () else channel_send ch c in
-  mt_accept_loop srv ch;
+  let _ =
+    if c < 0 then ()
+    else if hook c != 0 then tcp_close c
+    else channel_send ch c in
+  mt_accept_loop_hook srv ch hook;
+
+let mt_no_hook = fn (c: int) -> 0;
+
+let rec mt_accept_loop = fn (srv: int, ch) ->
+  mt_accept_loop_hook srv ch mt_no_hook;
 
 let rec mt_worker_ctx = fn (ch, rbuf: int, wbuf: int, pat: int, patn: int, ctx: int, h) ->
   match channel_recv_opt ch with
@@ -238,7 +251,7 @@ let rec mt_start_ctx = fn (ch, k: int, n: int, mk, h) ->
 // what per-worker state actually is here (a descriptor, an arena offset), and
 // anything richer can be keyed by one. If type parameters ever gain a Send
 // bound, this signature is the first thing that should widen.
-let http_serve_mt_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h) ->
+let http_serve_mt_ctx_hook = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h) -> fn (hook) ->
   let srv = tcp_listen port in
   if srv < 0 then
     print_err ("http_serve_mt_ctx: could not listen on " ++ str_of_int port)
@@ -247,7 +260,10 @@ let http_serve_mt_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h)
     let _ = mt_start_ctx ch 0 workers mk h in
     let _ = print ("http_serve_mt_ctx: listening on :" ++ str_of_int port
                    ++ " with " ++ str_of_int workers ++ " workers") in
-    mt_accept_loop srv ch;
+    mt_accept_loop_hook srv ch hook;
+
+let http_serve_mt_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h) ->
+  http_serve_mt_ctx_hook port workers mk h mt_no_hook;
 
 // `http_serve_mt port workers handler` -- never returns.
 let http_serve_mt = fn (port: int) -> fn (workers: int) -> fn (h) ->
