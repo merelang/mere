@@ -3189,6 +3189,44 @@ let () =
       "type CgRectC = { w: int };\n\
        let r = CgRectC { w = 5 } in r.w")
     "(mu_r).mu_w";
+  (* Q-080 (2026-08-28): WHERE THE CAPTURE ANALYSIS STOPS, pinned in all three
+     directions, because the boundary was misread once and written down.
+
+     The misreading came from the instrument: `mere -t` does NOT run
+     Move_check, so `mere -t` on a program that shares a Map across a thread
+     said "int" and was recorded as "the compiler does not catch it". It does.
+     These use Pipeline.process, which is the path that checks.
+
+     What is actually true: a captured value is classified by its TYPE, and a
+     function type says nothing about what the function captured
+     (`TyArrow _ -> true` for both is_send and is_sync). So the Map is caught
+     when `spawn` captures it directly, and invisible one level in. *)
+  let sp_direct =
+    "let hits = map_new ();\n\
+     let _ = spawn (fn () -> let _ = map_set hits \"n\" 1 in ());\n\
+     0" in
+  let sp_in_closure =
+    "let hits = map_new ();\n\
+     let h = fn (u: unit) -> let _ = map_set hits \"n\" 1 in ();\n\
+     let _ = spawn (fn () -> h ());\n\
+     0" in
+  let sp_as_param =
+    "let hits = map_new ();\n\
+     let start = fn (f) -> spawn (fn () -> f ());\n\
+     let _ = start (fn (u: unit) -> let _ = map_set hits \"n\" 1 in ());\n\
+     0" in
+  let accepted src = try ignore (Pipeline.process src); "accepted" with _ -> "refused" in
+  check_raises_containing "Q-080: spawn refuses a Map captured directly"
+    "neither Send nor Sync" (fun () -> Pipeline.process sp_direct);
+  (* THE TWO BELOW ARE THE HOLE, and they are asserted as ACCEPTED on purpose.
+     Pinning a defect this way makes the gate say something the day it closes:
+     if either turns "refused", this test fails and the person who fixed it is
+     told to update the record rather than discovering it years later. *)
+  check "Q-080 hole: a Map inside a captured closure is not seen"
+    (accepted sp_in_closure) "accepted";
+  check "Q-080 hole: nor when that closure arrives as a parameter"
+    (accepted sp_as_param) "accepted";
+
   (* Q-012 step 3b-4a: C backend spawn / join over pthreads (env-less closures).
      The emitted program compiles with clang and runs the closure on a real
      OS thread (validated manually; there is no C compile-run harness). *)

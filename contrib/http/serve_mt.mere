@@ -8,17 +8,26 @@
 // hidden behind an extern, and so that whatever the capture analysis learns to
 // refuse applies to it automatically.
 //
-// WHAT IT DOES NOT DO, and this was measured rather than assumed. An earlier
-// draft of this comment claimed the compiler would refuse a handler that shares
-// a mutable Map across requests. IT DOES NOT. `spawn` capturing a Map directly
-// compiles today, so capturing a closure that captures one certainly does --
-// Map is not !Send, which is the gap mkv wrote down when it chose to route
-// every access through one owner thread instead of sharing the store.
+// WHAT IT CATCHES AND WHAT IT DOES NOT, measured -- and measured twice, because
+// the first measurement used `mere -t`, which does NOT run the capture analysis.
+// It reported "int" for a program that shares a Map across threads, and that
+// was written down as "the compiler does not catch it". It does:
 //
-// So read this module as: THE SHARING IS YOURS TO GET RIGHT. Moving a handler
+//   spawn (fn () -> map_set hits ...)         REFUSED, "neither Send nor Sync"
+//   spawn (fn () -> h ())  where h has hits   accepted
+//   the same, with h arriving as a parameter  accepted
+//
+// The rule is that a captured value is classified by its TYPE, and a function
+// type says nothing about what the function captured -- `TyArrow _ -> true` for
+// both Send and Sync. So a Map is caught when `spawn` holds it directly and is
+// invisible one level in.
+//
+// A HANDLER IS EXACTLY ONE LEVEL IN. `h` arrives here as a parameter and is
+// handed to `spawn`, so whatever it captured crosses unchecked. Read this
+// module as: THE SHARING INSIDE YOUR HANDLER IS YOURS TO GET RIGHT. Moving one
 // from `http_serve` to `http_serve_mt` turns state that was safe because the
-// loop was sequential into state that races, and nothing will tell you. What
-// changed is that the sequential loop is no longer hiding it.
+// loop was sequential into state that races, and nothing will tell you.
+// Pinned in all three directions by test_basic.ml (Q-080).
 //
 // A FIXED POOL, NOT A THREAD PER CONNECTION, and the arena decides that:
 // `mem_alloc` is a bump allocator with no free, so a buffer per connection
