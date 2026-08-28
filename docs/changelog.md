@@ -39,6 +39,20 @@ module comment now says what is true: **moving a handler to the pool turns state
 was safe because the loop was sequential into state that races, and nothing will tell
 you.** Recorded as Q-080.
 
+`http_serve_mt_ctx` adds per-worker state: `make_ctx worker_index` is called once per
+worker and its result is passed to every request that worker serves. **That is what a
+connection pool is here** — not a shared bag of connections with checkout and return,
+but state that never crosses a thread boundary, so a handler that fails cannot fail to
+give one back, and the number of connections equals the number of workers by
+construction.
+
+The context is an `int`, and that is a real limit rather than a simplification: a
+polymorphic context does not compile, because the capture analysis refuses to move a
+value of unknown type across a thread boundary and Mere has no way to write a Send
+bound on a type parameter (`sync type` declares a concrete type, not a constraint).
+Worth noting that this is the analysis **working** — it refuses what it cannot prove,
+and separately fails to classify `Map`, which is Q-080.
+
 `scripts/http_concurrency_check.sh` runs the same binary twice — eight workers and
 **one** — because a machine fast enough to make the sleep irrelevant would pass the
 concurrency check for the wrong reason. The control is the check.

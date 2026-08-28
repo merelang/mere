@@ -143,6 +143,32 @@ let mt_serve_conn = fn (fd: int, rbuf: int, wbuf: int, pat: int, patn: int, h) -
     let _ = tcp_close fd in
     1;
 
+// ---- one connection, with per-worker state -----------------------------
+// The variant that takes a context. `mt_serve_conn` above is this one with the
+// context dropped, so there is one request path rather than two.
+let mt_serve_conn_ctx = fn (fd: int, rbuf: int, wbuf: int, pat: int, patn: int, ctx: int, h) ->
+  let g = mt_read_head fd rbuf 0 in
+  let he = mt_find_head_end rbuf 0 g in
+  if he < 0 then
+    let _ = tcp_close fd in 0
+  else
+    let clpos = mt_find_ci rbuf 0 he pat patn in
+    let want = if clpos < 0 then 0 else mt_digits rbuf (mt_skip_sp rbuf clpos he) he 0 in
+    let total = mt_read_body fd rbuf g (he + want) in
+    let head = mem_to_str rbuf he in
+    let body = mem_to_str (rbuf + he) (total - he) in
+    let reqline = mem_to_str rbuf (mt_reqline_end rbuf 0 he 0) in
+    let _ = http_begin_request fd head body in
+    let out = h ctx reqline in
+    let _ =
+      if http_response_sent () != 0 then 0
+      else
+        let n = mem_copy_str wbuf 0 (http_response_head (str_len out) ++ out) in
+        tcp_write fd wbuf n in
+    let _ = http_end_request () in
+    let _ = tcp_close fd in
+    1;
+
 // ---- the pool ----------------------------------------------------------
 let rec mt_worker = fn (ch, rbuf: int, wbuf: int, pat: int, patn: int, h) ->
   match channel_recv_opt ch with
@@ -168,6 +194,60 @@ let rec mt_accept_loop = fn (srv: int, ch) ->
   let c = tcp_accept srv in
   let _ = if c < 0 then () else channel_send ch c in
   mt_accept_loop srv ch;
+
+let rec mt_worker_ctx = fn (ch, rbuf: int, wbuf: int, pat: int, patn: int, ctx: int, h) ->
+  match channel_recv_opt ch with
+  | None -> ()
+  | Some cfd ->
+    let _ = mt_serve_conn_ctx cfd rbuf wbuf pat patn ctx h in
+    mt_worker_ctx ch rbuf wbuf pat patn ctx h;
+
+let rec mt_start_ctx = fn (ch, k: int, n: int, mk, h) ->
+  if k >= n then ()
+  else
+    let rbuf = mem_alloc mt_bufsz in
+    let wbuf = mem_alloc mt_bufsz in
+    let pat = mem_alloc 32 in
+    let patn = mem_copy_str pat 0 "content-length:" in
+    // The context is built HERE, once per worker, and captured by that worker
+    // alone. Nothing about it crosses a thread boundary, which is the whole
+    // reason this exists: a database connection handed out of a shared pool
+    // per request has to be given back, and a handler that fails never gives
+    // it back. One connection per worker has no such moment.
+    let ctx = mk k in
+    let _ = spawn (fn () -> mt_worker_ctx ch rbuf wbuf pat patn ctx h) in
+    mt_start_ctx ch (k + 1) n mk h;
+
+// `http_serve_mt_ctx port workers make_ctx handler` -- like http_serve_mt, but
+// each worker gets its own context, built once by `make_ctx worker_index` and
+// passed to every request that worker serves.
+//
+//   make_ctx : int -> int        handler : int -> str -> str
+//
+// THIS IS WHAT A CONNECTION POOL IS HERE: not a shared bag of connections with
+// checkout and return, but per-worker state that is never shared at all. The
+// number of connections equals the number of workers by construction, and there
+// is no moment where a handler must give something back -- so a handler that
+// fails cannot leak one.
+//
+// THE CONTEXT IS AN `int`, AND THAT IS A REAL LIMIT, not a simplification. A
+// polymorphic context does not compile: the capture analysis refuses to move a
+// value of unknown type across a thread boundary ("its type is not known to be
+// Send or Sync"), and Mere has no way to write that bound on a type parameter --
+// `sync type` declares a concrete type, not a constraint. An `int` is enough for
+// what per-worker state actually is here (a descriptor, an arena offset), and
+// anything richer can be keyed by one. If type parameters ever gain a Send
+// bound, this signature is the first thing that should widen.
+let http_serve_mt_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h) ->
+  let srv = tcp_listen port in
+  if srv < 0 then
+    print_err ("http_serve_mt_ctx: could not listen on " ++ str_of_int port)
+  else
+    let ch = channel_new () in
+    let _ = mt_start_ctx ch 0 workers mk h in
+    let _ = print ("http_serve_mt_ctx: listening on :" ++ str_of_int port
+                   ++ " with " ++ str_of_int workers ++ " workers") in
+    mt_accept_loop srv ch;
 
 // `http_serve_mt port workers handler` -- never returns.
 let http_serve_mt = fn (port: int) -> fn (workers: int) -> fn (h) ->

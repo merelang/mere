@@ -1,0 +1,25 @@
+// Per-worker state (v0.1.340): each worker builds its context once and no two
+// workers share one. This is what a connection pool is here -- not a shared bag
+// with checkout and return, but state that never crosses a thread boundary, so
+// a handler that fails cannot fail to give anything back.
+//
+// The handler reports which context served it, so the gate can check that N
+// workers really produced N distinct contexts rather than one shared value.
+import "../../contrib/http/http.mere";
+import "../../contrib/http/serve_mt.mere";
+
+let env_int = fn (name: str) -> fn (d: int) ->
+  match env_var name with
+  | Some v -> if str_len v > 0 then int_of_str v else d
+  | None -> d;
+
+// Stands in for `pg_connect`: called once per worker, never shared.
+let make_ctx = fn (i: int) -> 1000 + i;
+
+let h = fn (ctx: int) -> fn (req: str) ->
+  let _ = sleep_ms (env_int "MERE_HTTP_DELAY_MS" 300) in
+  "ctx=" ++ str_of_int ctx ++ "\n";
+
+let _ = http_serve_mt_ctx (env_int "MERE_HTTP_PORT" 8080)
+                          (env_int "MERE_HTTP_WORKERS" 4) make_ctx h;
+0
