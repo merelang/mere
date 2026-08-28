@@ -45,6 +45,19 @@ one matched `run: sh scripts/` and missed the two steps that set an environment
 variable first — `downstream_check` and `qemu_virt`, one of which was the failure and
 the other the step it was hiding. 44 of 44 now.
 
+`mere install` ended up **inside the gate rather than beside it**: putting it in the
+workflow file would have left the CI copy and the local copy able to drift apart again,
+which is the whole shape of this entry. The script now resolves a repo's dependencies
+when it has a `mere.toml` and no `.mere_modules` — and only then, because an existing
+one is the developer's and `mere install` would rewrite their `mere.lock`. Verified in
+both directions: fresh clones into an empty directory compile, and the development
+checkouts are untouched afterwards.
+
+With that, **`mbigfmt`'s deferral stopped being true.** It was listed as `deps` —
+"needs `mere install` first" — and now the gate runs one. A skip outlives its reason
+silently, so the row was retired instead of left saying something false: 13 repos
+checked, 0 deferred.
+
 
 _A Mere program can **answer** a TLS connection._ `tls_server_init` (load a
 certificate chain and key, once per process) and `tcp_accept_tls` (handshake on an

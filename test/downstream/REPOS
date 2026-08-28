@@ -54,4 +54,4 @@ mbrowse        src/main.mere      compile    the largest single program: tokeniz
 mere-ruby      main.mere          compile    the largest surface of the language, and the strictest reader of it
 mere-gcheap    gcloop.mere        compile    a library about the memory model itself
 memu           riscv.mere         compile    the emulator the RISC-V differential runs against
-mbigfmt        bigfmt.mere        deps       imports github.com/284km/mbignum; needs `mere install` first
+mbigfmt        bigfmt.mere        compile    arbitrary-precision formatting; its dependency is another 284km repo

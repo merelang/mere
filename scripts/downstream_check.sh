@@ -45,6 +45,13 @@ while read -r repo entry check rest; do
   case "$repo" in ''|\#*) continue ;; esac
   case "$check" in
     deps)
+      # NOTHING SELECTS THIS ROW TODAY. It existed for mbigfmt, whose imports
+      # come from another repository -- and the reason ("needs `mere install`
+      # first") stopped being true when the CI step started running
+      # `mere install` after each clone. A skip outlives its reason silently,
+      # so the row was retired rather than left saying something false. The
+      # branch stays because the next such repo will want it; if it is still
+      # unselected when someone reads this, delete it.
       deferred=$((deferred + 1))
       echo "  defer $repo — $rest"
       continue ;;
@@ -53,6 +60,7 @@ while read -r repo entry check rest; do
       echo "FAIL downstream[$repo]: unknown check \`$check\` (want compile or deps)"
       fails=$((fails + 1)); continue ;;
   esac
+
   if [ ! -d "$DIR/$repo" ]; then
     skipped=$((skipped + 1))
     echo "  skip  $repo (not in \$MERE_DOWNSTREAM)"
@@ -61,6 +69,20 @@ while read -r repo entry check rest; do
   if [ ! -f "$DIR/$repo/$entry" ]; then
     echo "FAIL downstream[$repo]: entry $entry does not exist -- the row names a file that is gone"
     fails=$((fails + 1)); continue
+  fi
+  # RESOLVE DEPENDENCIES IF THEY ARE NOT THERE, so that this gate answers the
+  # same question on a fresh clone and on a development checkout. It did not:
+  # CI cloned each repo and compiled it, and four repos were reported as "no
+  # longer compiles" for a missing .mere_modules while passing here, where one
+  # already existed. Putting the step in the workflow file instead of here
+  # would have left the two able to drift apart again -- the harness belongs
+  # with the gate, not beside it.
+  #
+  # Only when .mere_modules is ABSENT: an existing one is the developer's, and
+  # `mere install` would rewrite their mere.lock underneath them.
+  if [ -f "$DIR/$repo/mere.toml" ] && [ ! -d "$DIR/$repo/.mere_modules" ]; then
+    ( cd "$DIR/$repo" && "$MERE" install ) >"$err" 2>&1 \
+      || echo "  note  $repo -- mere install failed; the check below says what broke"
   fi
   ran=$((ran + 1))
   if ( cd "$DIR/$repo" && sh "$ROOT/scripts/bounded.sh" "$BOUND" "$MERE" -c "$entry" > /dev/null >/dev/null 2>"$err" ); then
@@ -77,4 +99,4 @@ if [ "$fails" -gt 0 ]; then
   echo "downstream_check: $fails failed, $ran checked, $skipped absent, $deferred deferred"
   exit 1
 fi
-echo "downstream_check: $ran checked, $skipped absent, $deferred deferred (needs \`mere install\`)"
+echo "downstream_check: $ran checked, $skipped absent, $deferred deferred"
