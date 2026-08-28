@@ -4,6 +4,35 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.346 — 2026-08-28
+
+_A dead database stops looking like an empty one._ `contrib/db/pg.mere`.
+
+Measured with a real Postgres in a container, restarted under a running mere-blog:
+`GET /api/posts` answered **`[]` with a 200**. The log said `terminating connection due
+to administrator command`; the API said success. **A client cannot tell that from the
+truth, and a cache would store it.**
+
+`_collect_result` printed the error and carried on, returning the rows it had — none.
+Severity decides now, and the distinction is load-bearing:
+
+- **ERROR** is a statement that failed on a connection that is still usable. A unique
+  violation on signup is this, and failing it would turn "that name is taken" into a
+  500. Those still return, exactly as before.
+- **FATAL** / **PANIC** mean the server has already closed the connection. There is
+  nothing to return and no honest way to say so in a row list, so it `fail`s — which
+  `contrib/http/rescue.mere` turns into a 500.
+
+The `V` field is read rather than `S`: `S` is localized.
+
+Downstream, mere-blog now holds each worker's connection in a **slot it can replace**,
+so a failure drops it and the next request redials. Four workers cost exactly four
+failed requests and then serve again — one per worker, each discovering its own dead
+connection once. Not zero: a request in flight when the server went cannot be saved, and
+its check says so rather than pretending.
+
+---
+
 ## v0.1.345 — 2026-08-28
 
 _A request body stopped at its first zero byte._ Every binary upload was truncated,
