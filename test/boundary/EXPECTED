@@ -1,0 +1,17 @@
+# produced by scripts/boundary_compat_check.sh
+#
+# The payload each version puts on the wire. Recorded because the
+# accept/reject matrix below cannot see a wire change that both sides
+# still tolerate -- found by poisoning this gate: adding a second field
+# to a version changed what it sends and moved no cell.
+v1 payload : {"id":1,"title":"hi"}
+v2 payload : {"id":1,"title":"hi","tags":"x"}
+#
+# encoder -> decoder
+# ok   = that decoder accepts that encoder's payload
+# fail = it does not, so a client on the encoder version cannot talk
+#        to a server on the decoder version
+v1 -> v1 : ok
+v1 -> v2 : fail
+v2 -> v1 : ok
+v2 -> v2 : ok
