@@ -388,6 +388,20 @@ jobs:
       # sleeps on purpose is what makes the two answers different, and the same
       # binary run with one worker is the sequential control -- without it a
       # fast machine passes for the wrong reason.
+      # A bare `wait` waits for every child, including a gate's own background
+      # server, which does not exit. It cost mere-blog a sixty-minute CI job on
+      # 2026-08-28 -- hours after the identical line was fixed in
+      # scripts/http_concurrency_check.sh here. Fixing an instance is not
+      # fixing a pattern.
+      - name: no bare `wait` in a gate that starts a server
+        if: ${{ !cancelled() }}
+        run: |
+          if grep -rn '^[[:space:]]*wait[[:space:]]*$' scripts/*.sh; then
+            echo "a bare wait: name the client PIDs instead"
+            exit 1
+          fi
+          echo "ok: no bare wait in scripts/"
+
       - name: http_concurrency_check (the server serves more than one at once)
         if: ${{ !cancelled() }}
         run: sh scripts/http_concurrency_check.sh
