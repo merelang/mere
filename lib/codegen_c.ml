@@ -6461,7 +6461,7 @@ let emit_closure_adapter (ce : closure_emission) : string =
    definition emitted here instead of an `extern` prototype — so
    `mere -c app.mere | clang` yields a self-contained native binary. *)
 let native_ffi_names =
-  [ "tcp_connect"; "tcp_listen"; "tcp_accept";
+  [ "tcp_connect"; "tcp_listen"; "tcp_listen_shared"; "tcp_accept";
     "tcp_write"; "tcp_read"; "tcp_close"; "tcp_set_timeout";
     "udp_open"; "udp_send"; "udp_recv";  (* v0.1.62: mdns dogfood *)
     "now_ms";                            (* v0.1.63: mbench dogfood *)
@@ -6946,11 +6946,24 @@ let native_ffi_runtime ~tls ~midi ~window ~audio =
       "   the listening fd, or -1 on failure. SO_REUSEADDR so a restart after";
       "   a crash does not hit TIME_WAIT. SIGPIPE ignored so a client that";
       "   disconnects mid-write kills the connection, not the whole server. */";
-      "static int tcp_listen(int port) {";
+      "static int __tcp_listen_opt(int port, int shared) {";
       "  signal(SIGPIPE, SIG_IGN);";
       "  int srv = socket(AF_INET, SOCK_STREAM, 0);";
       "  if (srv < 0) return -1;";
       "  int one = 1; setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);";
+      "#ifdef SO_REUSEPORT";
+      "  /* v0.1.347. SO_REUSEADDR lets a RESTART rebind through TIME_WAIT; it does";
+      "   * not let two live processes share a listener, and the second one gets";
+      "   * -1. SO_REUSEPORT does, and the kernel spreads connections across them.";
+      "   *";
+      "   * OPT-IN, and loudly so: with sharing always on, a deploy script that";
+      "   * starts a second copy by mistake does not fail -- it quietly serves half";
+      "   * the traffic from the old binary, alternating, which is the hardest kind";
+      "   * of wrong to see. Failing to bind is the better default. */";
+      "  if (shared) setsockopt(srv, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);";
+      "#else";
+      "  if (shared) { fprintf(stderr, \"native: SO_REUSEPORT not available on this platform\\n\"); }";
+      "#endif";
       "  struct sockaddr_in addr; memset(&addr, 0, sizeof addr);";
       "  addr.sin_family = AF_INET; addr.sin_addr.s_addr = INADDR_ANY;";
       "  addr.sin_port = htons((unsigned short)port);";
@@ -6958,6 +6971,8 @@ let native_ffi_runtime ~tls ~midi ~window ~audio =
       "  if (listen(srv, 128) != 0) { close(srv); return -1; }";
       "  return srv;";
       "}";
+      "static int tcp_listen(int port) { return __tcp_listen_opt(port, 0); }";
+      "static int tcp_listen_shared(int port) { return __tcp_listen_opt(port, 1); }";
       "/* tcp_accept: the connected client fd, or a coded failure -- the same";
       "   codes tcp_read has used since v0.1.226 (-1 would-block, -2 gone,";
       "   -3 other), so a nonblocking accept can tell \"no one is waiting\"";
