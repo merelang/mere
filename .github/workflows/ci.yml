@@ -233,6 +233,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/determinism_check.sh
 
+      - name: boundary_compat (every released version of the wire, crossed)
+        if: ${{ !cancelled() }}
+        run: sh scripts/boundary_compat_check.sh
+
       - name: render_agreement (server walk vs client DOM, same tree)
         if: ${{ !cancelled() }}
         run: sh scripts/render_agreement_check.sh

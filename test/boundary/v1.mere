@@ -1,0 +1,24 @@
+// test/boundary/v1.mere — the boundary as shipped at v1.
+//
+// A released version is not a note about the past: it is a program still
+// running in someone's browser. So each version is kept as an executable
+// encoder/decoder pair, and scripts/boundary_compat_check.sh crosses every
+// pair in the skew window.
+//
+//   <prog> encode          print this version's payload
+//   <prog> decode <json>   "ok" if this version can read it, "fail" if not
+type Req = { id: int, title: str };
+
+let sample = Req { id = 1, title = "hi" };
+
+match args () with
+| Cons (mode, rest) ->
+  if str_eq mode "encode" then print (to_json sample)
+  else
+    (match rest with
+     | Cons (payload, _) ->
+       (match (of_json_opt payload : Req option) with
+        | Some _ -> print "ok"
+        | None -> print "fail")
+     | Nil -> print "fail")
+| Nil -> print "fail"
