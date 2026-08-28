@@ -1,0 +1,37 @@
+// contrib/http/tls.mere -- serve HTTPS, terminating TLS in the process.
+//
+// SEPARATE FROM http.mere ON PURPOSE, and the reason is mechanical rather than
+// stylistic. The C backend links OpenSSL into a program that DECLARES a TLS
+// extern, and an `import` declares everything the imported module declares. So
+// putting `http_serve_tls` in http.mere made every program that serves HTTP at
+// all -- plaintext ones included -- require OpenSSL headers to build. That is
+// the blanket dependency this project deliberately does not have: before
+// v0.1.338 a plaintext contrib/http program needed no OpenSSL, and v0.1.338
+// took that away without noticing, because the app that would have shown it
+// (mere-blog) already links OpenSSL for Postgres.
+//
+// So: importing this module is the opt-in.
+//
+//   import "http/http.mere";
+//   import "http/tls.mere";
+//   let _ = http_serve_tls port cert_path key_path handler;
+//
+// `http_serve_tls port cert key handler` -- the certificate chain and key are
+// PEM paths, loaded once before the socket is bound, so a certificate that
+// cannot be used is an error at startup rather than a surprise on the first
+// connection.
+//
+// After the handshake the handler is byte-identical to the plaintext one: the
+// response path, `http_send_file`, and the per-request arena are all unchanged,
+// because the runtime routes every byte of a served connection through one
+// read/write pair.
+//
+// WHY IT EXISTS. Until v0.1.338 a Mere program could dial a TLS connection but
+// not answer one, so every web program written against contrib/http served
+// cleartext. Nothing said so -- no README in the project recommended a proxy or
+// mentioned TLS for serving at all. That is what made the gap durable: not
+// advice that papered over it, but a question that never came up.
+//
+// C backend only. On the Node host, http.glue.js implements it with
+// https.createServer, so the same program serves TLS on both.
+extern fn http_serve_tls: int -> str -> str -> (str -> str) -> unit;

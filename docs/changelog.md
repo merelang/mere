@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.339 — 2026-08-28
+
+_A fix for something v0.1.338 broke and shipped._ `http_serve_tls` moves out of
+`contrib/http/http.mere` into `contrib/http/tls.mere`.
+
+**Putting it in http.mere made every contrib/http program require OpenSSL**, plaintext
+ones included. The C backend links OpenSSL into a program that *declares* a TLS extern,
+and an `import` declares everything the imported module declares — so `import
+"http/http.mere"` was enough. Before v0.1.338 a plaintext contrib/http server built with
+no OpenSSL at all; v0.1.338 took that away, and it was released before anyone noticed.
+
+Two reasons it got through, both worth naming. The app that would have shown it —
+mere-blog — **already links OpenSSL for Postgres**, so its build line did not change.
+And the property had **no check**: nothing in the tree asserted that a plaintext server
+stays plaintext-only. That check exists now, on the emitted C rather than on whether a
+link succeeds, so it asks the same question on a machine that happens to have libssl
+installed. Putting the extern back turns exactly one of eighteen checks red.
+
+The dependency is opt-in again, by importing the module that declares it:
+
+```mere
+import "http/http.mere";
+import "http/tls.mere";      // this line is what links OpenSSL
+```
+
+Found while trying to measure something else entirely — a plaintext test server would
+not build. **The measurement it interrupted is worth recording too: the native
+`http_serve` handles one request at a time.** Four concurrent requests against a handler
+that sleeps 400 ms take 1.66 s, not 0.4 s. The accept loop is `accept → read → handle →
+write → close`, sequential, with `Connection: close` hardcoded. That is the largest
+remaining gap for serving a real web application, and it is now a number rather than an
+impression.
+
+---
+
 ## v0.1.338 — 2026-08-28
 
 **Twenty-one gates in CI had not run for weeks, and CI said "skipped".**
