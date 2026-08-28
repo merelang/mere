@@ -101,6 +101,18 @@ let rd_slot = rd_env_int "MERE_HTTP_SLOT" 131072;
 let rd_413 =
   "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
+// SHED RATHER THAN QUEUE. A handler cannot be interrupted -- there is no way in
+// this language to take a thread away from a loop it will not leave -- so a
+// handler that never returns keeps its worker for the life of the process. What
+// CAN be decided is what happens to everyone else: with every worker busy and
+// the queue full, a new request is answered 503 immediately instead of joining
+// a line that may never move.
+//
+// That is the difference between a server that is slow and a server that is
+// gone. It does not rescue the stuck worker, and this file does not pretend to.
+let rd_503 =
+  "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nRetry-After: 1\r\nConnection: close\r\n\r\n";
+
 // Is the request in this slot complete? Returns the total needed, or -1.
 let rd_complete = fn (base: int) -> fn (got: int) -> fn (pat: int) -> fn (patn: int) ->
   let he = mt_find_head_end base 0 got in
@@ -208,6 +220,14 @@ let http_serve_rd_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h)
     // Workers report back on this one. Loop-owned state stays in the loop's
     // own maps; nothing but these two channels crosses a thread boundary.
     let back = channel_new () in
+    // How many requests may wait for a worker before new ones are refused.
+    // Defaults to the worker count: a short burst is absorbed, a stuck server
+    // starts saying so within 2N requests rather than accumulating clients.
+    let qmax = rd_env_int "MERE_HTTP_QUEUE" workers in
+    // Printed once per transition, not per request: a log line per shed request
+    // is what turns an incident into two incidents.
+    let shed = map_new () in
+    let _ = map_set shed 0 0 in
     let conns = map_new () in
     let woff = map_new () in
     let wrem = map_new () in
@@ -262,14 +282,29 @@ let http_serve_rd_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h)
         let g = got + n in
         let total = rd_complete base g pat patn in
         if total >= 0 then
-          let _ = if g > total then map_set piped fd 1 else () in
-          // Complete. Stop watching it and hand fd + byte count to a worker;
-          // from here the worker owns the fd, the slot, and the close.
-          let _ = io_poll_del ps fd in
-          let _ = map_delete conns fd in
-          let _ = map_delete idle fd in
-          let _ = map_set inflight 0 (map_get inflight 0 + 1) in
-          channel_send ch (fd, total)
+          if map_get inflight 0 >= workers + qmax then
+            // Every worker busy and the queue full. Answer now and close; the
+            // slot is worth more to the next client than this one's place in a
+            // line that may never move.
+            let _ =
+              if map_get shed 0 == 0 then
+                let _ = map_set shed 0 1 in
+                print_err ("http: all " ++ str_of_int workers
+                           ++ " workers busy and " ++ str_of_int qmax
+                           ++ " queued -- shedding with 503")
+              else () in
+            let n = mem_copy_str base 0 rd_503 in
+            let _ = rd_push fd base 0 n in
+            close_conn fd
+          else
+            let _ = if g > total then map_set piped fd 1 else () in
+            // Complete. Stop watching it and hand fd + byte count to a worker;
+            // from here the worker owns the fd, the slot, and the close.
+            let _ = io_poll_del ps fd in
+            let _ = map_delete conns fd in
+            let _ = map_delete idle fd in
+            let _ = map_set inflight 0 (map_get inflight 0 + 1) in
+            channel_send ch (fd, total)
         else if g >= rd_slot then
           let wb = mem_alloc 128 in
           let k = mem_copy_str wb 0 rd_413 in
@@ -302,6 +337,13 @@ let http_serve_rd_ctx = fn (port: int) -> fn (workers: int) -> fn (mk) -> fn (h)
       | None -> ()
       | Some (fd, off, rem, keep) ->
         let _ = map_set inflight 0 (map_get inflight 0 - 1) in
+        let _ =
+          if map_get shed 0 == 1 then
+            (if map_get inflight 0 < workers then
+               let _ = map_set shed 0 0 in
+               print_err "http: workers free again -- no longer shedding"
+             else ())
+          else () in
         let _ =
           if rem > 0 then
             // Not all of the response fit. Take the fd back and finish it here;

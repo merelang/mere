@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.344 — 2026-08-28
+
+_A stuck handler stops being an outage._ `contrib/http/serve_rd.mere` sheds.
+
+**A handler that never returns cannot be interrupted.** There is no way in this language
+to take a thread away from a loop it will not leave, and this release does not pretend
+otherwise — the stuck worker stays stuck for the life of the process. What it changes is
+what happens to *everyone else*: with every worker busy and the queue full, a new request
+is answered **503 immediately** rather than joining a line that may never move.
+
+Measured, two workers held by a 20-second handler with four requests already in:
+
+| | the next request |
+|---|---|
+| `MERE_HTTP_QUEUE=2` | **503 in 0.03 s** |
+| `MERE_HTTP_QUEUE=999` (the control) | still hanging at 6 s |
+
+The control is the check. Without it, "the fifth request got a 503" says nothing about
+shedding — and the same binary answers both, so the comparison is between two runs of one
+program.
+
+The queue defaults to the worker count: a short burst is absorbed, a stuck server starts
+saying so within 2N requests instead of accumulating clients. It says so on stderr **once
+per transition**, not once per request — a log line per shed request is what turns an
+incident into two incidents.
+
+---
+
 ## v0.1.343 — 2026-08-28
 
 _Keep-alive, and the slot it costs instead._ `http_response_head_ka` in the runtime, and

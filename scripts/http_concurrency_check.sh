@@ -302,6 +302,56 @@ fi
     bad "the large response differs: got $(wc -c < "$WORK/big.out" 2>/dev/null | tr -d ' ') bytes, wanted 896000"
   fi
 
+  # ---- a handler that never returns ---------------------------------------
+  # It cannot be interrupted: there is no way here to take a thread away from a
+  # loop it will not leave. What CAN be decided is what happens to everyone
+  # else. With every worker stuck and the queue full, a new request is answered
+  # 503 at once instead of joining a line that may never move.
+  #
+  # The control runs the same binary with a queue of 999 and has to HANG --
+  # otherwise "the fifth request got a 503" says nothing about shedding. This is
+  # the slowest part of the gate by design: the 20-second handler is what makes
+  # "stuck" different from "busy".
+  shed_probe() {   # $1 = queue, $2 = port -> "code seconds"
+    MERE_HTTP_PORT="$2" MERE_HTTP_WORKERS=2 MERE_HTTP_DELAY_MS=20000 \
+      MERE_HTTP_QUEUE="$1" "$WORK/rdsrv" > "$WORK/shed$1.log" 2>&1 &
+    SRVPID=$!
+    k=0
+    while [ $k -lt 25 ]; do
+      curl -sS --max-time 3 -o /dev/null "http://127.0.0.1:$2/warm" >/dev/null 2>&1 && break
+      k=$((k + 1)); perl -e 'select(undef, undef, undef, 0.4)'
+    done
+    j=0; spids=""
+    while [ $j -lt 4 ]; do
+      curl -sS --max-time 30 -o /dev/null "http://127.0.0.1:$2/s$j" 2>/dev/null &
+      spids="$spids $!"; j=$((j + 1))
+    done
+    perl -e 'select(undef, undef, undef, 1.5)'
+    st=$(now)
+    cc=$(curl -sS --max-time 6 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$2/late" 2>/dev/null || echo 000)
+    en=$(now)
+    kill "$SRVPID" 2>/dev/null || true; SRVPID=""
+    for p in $spids; do kill "$p" 2>/dev/null || true; done
+    for p in $spids; do wait "$p" 2>/dev/null || true; done
+    echo "$cc $(perl -e "printf '%.2f', $en - $st")"
+  }
+
+  sh1=$(shed_probe 2 $((PORT + 9)))
+  set -- $sh1
+  { [ "$1" = "503" ] && perl -e "exit(($2 < 2.0) ? 0 : 1)"; } \
+    && ok "with every worker stuck, a new request is refused fast (503 in ${2}s)" \
+    || bad "expected a quick 503, got $1 in ${2}s"
+
+  sh2=$(shed_probe 999 $((PORT + 10)))
+  set -- $sh2
+  [ "$1" != "503" ] \
+    && ok "with an unbounded queue it hangs instead ($1) -- so the check above measured shedding" \
+    || bad "the control also shed; MERE_HTTP_QUEUE is not doing anything"
+
+  grep -q "shedding with 503" "$WORK/shed2.log" \
+    && ok "and it said so on stderr" \
+    || bad "shedding was not reported on stderr"
+
 # ---- a failing handler ---------------------------------------------------
 # WITHOUT the middleware, a handler that fails unwinds past the server loop and
 # ends the PROCESS: one bad route takes the whole site down, and it is the route
@@ -347,7 +397,7 @@ else
 fi
 
 echo
-echo "http_concurrency_check: $pass passed, $fail failed, of 15 checks"
-[ $((pass + fail)) -eq 15 ] || { echo "only $((pass + fail)) of 15 checks ran"; exit 1; }
+echo "http_concurrency_check: $pass passed, $fail failed, of 18 checks"
+[ $((pass + fail)) -eq 18 ] || { echo "only $((pass + fail)) of 18 checks ran"; exit 1; }
 [ "$fail" -eq 0 ] || exit 1
 echo "http_concurrency_check: ok"
