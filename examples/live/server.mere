@@ -1,0 +1,82 @@
+// examples/live/server.mere — the live-read loop, end to end.
+//
+// contrib/db/live derives which reads a write makes stale. This is that
+// derivation actually wired to a transport: a client subscribes to a read by
+// opening the SSE channel it was registered under, and a write pushes only to
+// the channels it made stale.
+//
+// The point of running it over real HTTP is the NEGATIVE. In-process the
+// derivation is 37 cases of pure string work, already checked on four
+// backends. What that cannot show is whether the channel a subscriber is
+// actually attached to is the channel a write actually broadcasts on -- two
+// names that agree in a test and disagree on the wire look identical from
+// inside the program.
+//
+// No database. The write path takes the statement in the request body, so the
+// loop under test is registry -> derive -> broadcast -> subscriber, with
+// nothing to install and nothing to skip in CI.
+//
+//   GET  /sse/<channel>   held open by contrib/http's glue (no Mere code)
+//   POST /write           body is a SQL write; replies with the channels it
+//                         woke, and broadcasts to each
+//   GET  /registry        what is registered, for the gate to assert against
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+
+import "../../contrib/http/router.mere";
+import "../../contrib/http/sse.mere";
+import "../../contrib/db/live.mere";
+
+let posts_all    = "SELECT id, title FROM posts ORDER BY id DESC";
+let comments_for = "SELECT id, body FROM comments WHERE post_id = $1";
+let sessions_rd  = "SELECT username FROM sessions WHERE sid = $1";
+let agg          = "SELECT count(*) FROM posts";
+
+let reg = live_new () in
+let _ = live_register reg "posts" posts_all in
+let _ = live_register reg "comments" comments_for in
+let _ = live_register reg "sessions" sessions_rd in
+// refused: no write makes an aggregate stale, so it never gets a channel
+let agg_ok = live_register reg "agg" agg in
+
+let rec join_ch = fn (xs: str list) ->
+  match xs with
+  | Nil -> ""
+  | Cons (c, Nil) -> c
+  | Cons (c, rest) -> c ++ "," ++ join_ch rest
+  ;
+
+let rec broadcast_all = fn (xs: str list) -> fn (payload: str) ->
+  match xs with
+  | Nil -> ()
+  | Cons (c, rest) -> let _ = sse_broadcast c payload in broadcast_all rest payload
+  ;
+
+let write_h = fn (_req: str) ->
+  let sql = http_current_body () in
+  let chans = live_channels reg sql in
+  let _ = broadcast_all chans ("\{\"stale\":true}") in
+  let _ = http_set_content_type "text/plain" in
+  join_ch chans ++ "\n"
+  ;
+
+let registry_h = fn (_req: str) ->
+  let _ = http_set_content_type "text/plain" in
+  "size=" ++ show (live_size reg)
+    ++ " agg_registered=" ++ (if agg_ok then "yes" else "no") ++ "\n"
+  ;
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in
+  "not found: " ++ req ++ "\n"
+  ;
+
+let routes =
+  Cons (route "POST" "/write" write_h,
+  Cons (route "GET" "/registry" registry_h,
+  Nil)) in
+
+let _ = print "live server on :8099" in
+http_serve 8099 (router routes not_found)
