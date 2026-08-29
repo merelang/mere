@@ -257,6 +257,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/live_soundness_check.sh
 
+      - name: mount (the router and the manifest come from one list)
+        if: ${{ !cancelled() }}
+        run: sh scripts/mount_check.sh
+
       - name: htmlbuild (the writing half escapes, on every backend)
         if: ${{ !cancelled() }}
         run: sh scripts/htmlbuild_check.sh

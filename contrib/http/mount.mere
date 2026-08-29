@@ -1,0 +1,59 @@
+// contrib/http/mount.mere — one list, and both things that must agree.
+//
+// A router says how a request is dispatched. It does not say what an endpoint
+// is ALLOWED to do, and a sweep that checks authorization needs that. So an
+// application ends up with two lists -- the routes, and a table of which ones
+// may act for nobody -- and they have to be kept in step by hand.
+//
+// mere-blog had exactly that, and the drift was real enough that a gate got
+// written to compare the counts: a route added to one and not the other was
+// otherwise a hole with nothing watching it. Checking two lists agree is worth
+// doing when you have two lists. Having one is better.
+//
+// The obstacle is that the handlers differ in type: an exact route takes
+// `str -> str` and a pattern route takes `str list -> str -> str`. A single
+// list holds both by naming the difference:
+//
+//   type mount = MExact of str * str * acl * (str -> str)
+//              | MPattern of str * str * acl * (str list -> str -> str)
+//
+//   entries  : mount list -> route_entry list    feed to `router`
+//   manifest : mount list -> str                 "<method> <path> <acl>" per line
+//
+// `acl` is part of the mount because that is the thing the two lists disagreed
+// about. Adding a route without saying what it may do is not possible here --
+// which is the difference between a mechanism and a convention.
+//
+//   Guarded   every effect must name a principal
+//   Anon      may act for nobody, BY DECLARATION -- commenting without an
+//             account is a choice, and what makes it safe is that it is written
+//             down rather than merely true
+//   ReadOnly  performs no effect at all
+import "router.mere";
+
+type acl = Guarded | Anon | ReadOnly;
+
+type mount =
+  | MExact   of str * str * acl * (str -> str)
+  | MPattern of str * str * acl * (str list -> str -> str)
+  ;
+
+let acl_name = fn (a: acl) ->
+  match a with Guarded -> "guarded" | Anon -> "anon" | ReadOnly -> "readonly";
+
+let rec entries = fn (ms: mount list) ->
+  match ms with
+  | Nil -> Nil
+  | Cons (MExact (m, p, _, h), rest) -> Cons (route m p h, entries rest)
+  | Cons (MPattern (m, p, _, h), rest) -> Cons (route_pattern m p h, entries rest)
+  ;
+
+let rec manifest = fn (ms: mount list) ->
+  match ms with
+  | Nil -> ""
+  | Cons (MExact (m, p, a, _), rest) -> m ++ " " ++ p ++ " " ++ acl_name a ++ "\n" ++ manifest rest
+  | Cons (MPattern (m, p, a, _), rest) -> m ++ " " ++ p ++ " " ++ acl_name a ++ "\n" ++ manifest rest
+  ;
+
+let rec count = fn (ms: mount list) ->
+  match ms with Nil -> 0 | Cons (_, rest) -> 1 + count rest;
