@@ -1,0 +1,89 @@
+// contrib/html/build.mere — the writing half. Escaping is not a call you make;
+// it is what happens.
+//
+// tokenizer.mere reads HTML. Every program in this tree that WRITES it does so
+// by concatenating strings, and `html_escape` sits in contrib/http/escape.mere
+// as a function you have to remember:
+//
+//     "<li><b>" ++ p.title ++ "</b>" ++ p.body ++ "</li>"
+//
+// That line was in mere-blog's index. A post titled `<script>alert(1)</script>`
+// was written into the page as markup and ran. Of six examples in this tree
+// that emit HTML, one escapes.
+//
+// The defect is not that the function was missing. It is that the shape of the
+// code let the call be forgotten, and nothing about `++` says otherwise. So
+// this offers a shape where there is no concatenation to forget: you build a
+// tree, and `render` escapes every piece of text and every attribute value on
+// the way out.
+//
+// `Raw` exists, because a page that can never embed pre-rendered markup is a
+// page that cannot include the output of a markdown converter. It is named so
+// that it is visible: `grep Raw` is a review, `grep ++` is not.
+//
+//   type html = El | Text | Raw
+//   render    : html -> str            escapes text and attribute values
+//   page      : str -> html list -> str   doctype, lang, charset, title
+//
+// ATTRIBUTES ARE ESCAPED TOO. A value carrying a quote closes the attribute and
+// starts another; that is injection without a single angle bracket, and it is
+// the half people leave out when they escape "the content".
+import "../http/escape.mere";
+
+type html =
+    El of str * (str * str) list * html list
+  | Text of str
+  | Raw of str
+  ;
+
+let _attr_escape = fn (s: str) ->
+  // `"` first: html_escape turns & into &amp;, and escaping the quote after
+  // that would leave &amp;quot; -- the same double-escaping bug in reverse.
+  html_escape s
+  ;
+
+let rec _attrs = fn (xs: (str * str) list) ->
+  match xs with
+  | Nil -> ""
+  | Cons ((k, v), rest) -> " " ++ k ++ "=\"" ++ _attr_escape v ++ "\"" ++ _attrs rest
+  ;
+
+// Elements with no closing tag. Writing </br> is not an error a browser reports.
+let _void = fn (tag: str) ->
+  str_eq tag "br" || str_eq tag "hr" || str_eq tag "img" || str_eq tag "input"
+  || str_eq tag "meta" || str_eq tag "link"
+  ;
+
+let rec render = fn (n: html) ->
+  match n with
+  | Text t -> html_escape t
+  | Raw r -> r
+  | El (tag, attrs, kids) ->
+    let open_tag = "<" ++ tag ++ _attrs attrs ++ ">" in
+    if _void tag then open_tag
+    else open_tag ++ render_all kids ++ "</" ++ tag ++ ">"
+and render_all = fn (ns: html list) ->
+  match ns with
+  | Nil -> ""
+  | Cons (n, rest) -> render n ++ render_all rest
+  ;
+
+// A whole document. The three things a page owes a reader that are easiest to
+// leave out -- a language, a title, an encoding -- are not parameters a caller
+// can skip. mere-blog's index shipped without the first two, and its admin page
+// had no <html> element at all.
+let page = fn (title: str) -> fn (body: html list) ->
+  "<!doctype html>"
+    ++ render (El ("html", [("lang", "en")],
+        [ El ("head", [],
+            [ El ("meta", [("charset", "utf-8")], Nil)
+            , El ("title", [], [Text title]) ])
+        , El ("body", [], body) ]))
+  ;
+
+// Convenience for the shape every list of things becomes.
+let rec map_html = fn (f) -> fn (xs) ->
+  match xs with
+  | Nil -> Nil
+  | Cons (x, rest) -> Cons (f x, map_html f rest)
+  ;
