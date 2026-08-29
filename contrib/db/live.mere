@@ -1,0 +1,96 @@
+// contrib/db/live.mere — which reads a write affects, derived from the SQL.
+//
+// contrib/state/store.mere solved this for client state by being COARSE: any
+// write re-runs every watcher. That is always correct and never minimal, and
+// it does not reach the server side at all -- a read from Postgres is one
+// shot, and nothing in contrib/db has a notion of a read that stays true.
+//
+// The pieces to push an update already exist (pg's LISTEN/NOTIFY, and
+// contrib/http/sse). What was missing is the DERIVATION between them: given a
+// write, which registered reads stop being true?
+//
+// This module is that derivation and nothing else. It takes SQL text, not a
+// hand-written list of tables, because a hand-written list is an annotation --
+// and an annotation that is wrong returns stale data silently, which is the
+// failure the whole idea exists to remove.
+//
+// SCOPE, said plainly. Table granularity: a write to `posts` affects every
+// registered read of `posts`, whatever the predicates say. That is coarser
+// than row-level and finer than broadcast, and it is the bucket that a survey
+// of one real application (74 reads, 48 tables) put at 54% of reads -- the
+// rest were aggregates, windows, and reads whose result changes with the clock
+// and no write at all. Those are NOT handled here and must not be registered:
+// `derivable` answers whether a read is one this module can speak about.
+
+let _kw = fn (w: str) ->
+  str_eq w "SELECT" || str_eq w "FROM" || str_eq w "WHERE" || str_eq w "JOIN"
+  || str_eq w "LEFT" || str_eq w "RIGHT" || str_eq w "INNER" || str_eq w "OUTER"
+  || str_eq w "ON" || str_eq w "AND" || str_eq w "OR" || str_eq w "ORDER"
+  || str_eq w "GROUP" || str_eq w "BY" || str_eq w "LIMIT" || str_eq w "OFFSET"
+  || str_eq w "INTO" || str_eq w "SET" || str_eq w "VALUES" || str_eq w "AS"
+  ;
+
+// A table name as it appears after FROM / JOIN / INTO / UPDATE, with any
+// alias, punctuation and trailing comma removed.
+let _clean = fn (w: str) ->
+  let w = str_replace w "," "" in
+  let w = str_replace w ";" "" in
+  let w = str_replace w "(" "" in
+  str_replace w ")" ""
+  ;
+
+let rec _after = fn (ws: str list) -> fn (marks: str list) -> fn (acc: str list) ->
+  match ws with
+  | Nil -> acc
+  | Cons (w, rest) ->
+    let up = to_upper w in
+    if _mem up marks then
+      (match rest with
+       | Cons (n, more) ->
+         let t = _clean n in
+         if str_eq t "" || _kw (to_upper t) then _after rest marks acc
+         else _after more marks (Cons (to_lower t, acc))
+       | Nil -> acc)
+    else _after rest marks acc
+and _mem = fn (x: str) -> fn (xs: str list) ->
+  match xs with
+  | Nil -> false
+  | Cons (y, rest) -> if str_eq x y then true else _mem x rest
+  ;
+
+let _words = fn (s: str) ->
+  str_split (str_replace (str_replace s "\n" " ") "\t" " ") " "
+  ;
+
+// Tables a read touches: whatever follows FROM or JOIN.
+let read_tables = fn (sql: str) -> _after (_words sql) ["FROM", "JOIN"] Nil;
+
+// The table a write touches: INSERT INTO t / UPDATE t / DELETE FROM t.
+let write_tables = fn (sql: str) ->
+  _after (_words sql) ["INTO", "UPDATE", "FROM"] Nil
+  ;
+
+// A read this module can speak about. An aggregate, a window, or a predicate
+// that reads the clock does not become true again because some write happened,
+// so registering one would promise a freshness this cannot deliver.
+let derivable = fn (sql: str) ->
+  let u = to_upper sql in
+  if str_contains u "COUNT(" || str_contains u "SUM(" || str_contains u "AVG("
+     || str_contains u "MIN(" || str_contains u "MAX(" || str_contains u "GROUP BY"
+     || str_contains u "DISTINCT" then false
+  else if str_contains u "LIMIT" || str_contains u "OFFSET" then false
+  else if str_contains u "NOW()" || str_contains u "CURRENT_DATE"
+       || str_contains u "CURRENT_TIMESTAMP" || str_contains u "INTERVAL " then false
+  else true
+  ;
+
+let rec _overlap = fn (a: str list) -> fn (b: str list) ->
+  match a with
+  | Nil -> false
+  | Cons (x, rest) -> if _mem x b then true else _overlap rest b
+  ;
+
+// Does this write stop this read from being true?
+let affects = fn (write_sql: str) -> fn (read_sql: str) ->
+  _overlap (write_tables write_sql) (read_tables read_sql)
+  ;

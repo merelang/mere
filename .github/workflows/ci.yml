@@ -233,6 +233,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/determinism_check.sh
 
+      - name: live_query (which reads a write affects, on every backend)
+        if: ${{ !cancelled() }}
+        run: sh scripts/live_query_check.sh
+
       - name: boundary_compat (every released version of the wire, crossed)
         if: ${{ !cancelled() }}
         run: sh scripts/boundary_compat_check.sh
