@@ -27,7 +27,7 @@ rc=$?
 line=$(grep '^htmlbuild:' "$tmp/interp.out" | head -1)
 [ -n "$line" ] || { echo "htmlbuild: FAIL — interpreter produced no summary"; cat "$tmp/interp.out"; exit 1; }
 cases=$(echo "$line" | sed 's/.*: \([0-9]*\) cases.*/\1/')
-[ "${cases:-0}" -ge 11 ] || { echo "htmlbuild: FAIL — only ${cases:-0} cases ran; the file declares 11"; exit 1; }
+[ "${cases:-0}" -ge 12 ] || { echo "htmlbuild: FAIL — only ${cases:-0} cases ran; the file declares 12"; exit 1; }
 # NOT the exit code. `mere <file>` returns 1 whatever the program returns, so a
 # gate that trusts $? reports success while printing the failures it just read.
 # This one failed exactly that way, and only a poison run showed it: the summary

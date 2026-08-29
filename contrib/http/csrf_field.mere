@@ -1,0 +1,16 @@
+// contrib/http/csrf_field.mere — the hidden CSRF input, as a node.
+//
+// csrf.mere's `csrf_hidden_input` builds the tag by concatenation and carries
+// a comment telling callers to make sure the token is never user input. That
+// is a rule a person keeps, and this tree has spent two days finding places
+// where the person did not.
+//
+// As a node the value goes through `render`, which escapes every attribute it
+// writes. The guarantee stops depending on where the token came from.
+//
+// It is a separate file because contrib/http/csrf.mere has callers that build
+// strings, and making it depend on contrib/html would move that cost onto them.
+import "../html/build.mere";
+
+let csrf_hidden_field = fn (token: str) ->
+  El ("input", [("type", "hidden"), ("name", "_csrf"), ("value", token)], Nil);
