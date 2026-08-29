@@ -33,38 +33,42 @@ extern fn http_set_status: int -> unit;
 extern fn http_set_content_type: str -> unit;
 
 import "../contrib/http/router.mere";
+import "../contrib/html/build.mere";
 import "../contrib/http/websocket.mere";
 import "../contrib/http/json_body.mere";
 
 let home = fn (req: str) ->
   let _ = http_set_content_type "text/html; charset=utf-8" in
-  "<!doctype html>\n" ++
-  "<meta charset=utf-8><title>mere ws chat</title>" ++
-  "<style>body\{font:14px/1.4 system-ui;max-width:40em;margin:1em auto}" ++
-  "form\{display:flex;gap:.5em}#log\{height:20em;overflow:auto;" ++
-  "border:1px solid #ccc;padding:.5em;margin:.5em 0}</style>" ++
-  "<h1>ws chat</h1>" ++
-  "<p><small>Two tabs = two peers. Server-side announcements go " ++
-  "through <code>POST /announce</code>.</small></p>" ++
-  "<div id=log></div>" ++
-  "<form id=f><input id=n placeholder=name size=8>" ++
-  "<input id=t placeholder=message required style=flex:1>" ++
-  "<button>send</button></form>" ++
-  "<script>\n" ++
-  "const log=document.getElementById('log');\n" ++
-  "const ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')" ++
-  "  +location.host+'/ws/chat');\n" ++
-  "ws.onmessage=(e)=>\{log.insertAdjacentHTML('beforeend'," ++
-    "'<div>'+e.data+'</div>');log.scrollTop=log.scrollHeight};\n" ++
-  "document.getElementById('f').onsubmit=e=>\{e.preventDefault();" ++
-    "const n=document.getElementById('n').value||'anon';" ++
-    "const t=document.getElementById('t').value;" ++
-    "ws.send('<b>'+n+':</b> '+t);" ++
-    "log.insertAdjacentHTML('beforeend','<div><b>'+n+':</b> '+t+' <em>(you)</em></div>');" ++
-    "log.scrollTop=log.scrollHeight;" ++
-    "document.getElementById('t').value=''};\n" ++
-  "</script>\n"
-  ;
+  let css = "body\{font:14px/1.4 system-ui;max-width:40em;margin:1em auto}"
+            ++ "form\{display:flex;gap:.5em}#log\{height:20em;overflow:auto;"
+            ++ "border:1px solid #ccc;padding:.5em;margin:.5em 0}" in
+  page_with "mere ws chat"
+    [El ("style", Nil, [Raw css])]
+    [ El ("h1", Nil, [Text "ws chat"])
+    , El ("p", Nil, [El ("small", Nil,
+        [ Text "Two tabs = two peers. Server-side announcements go through "
+        , El ("code", Nil, [Text "POST /announce"]), Text "." ])])
+    , El ("div", [("id", "log")], Nil)
+    , El ("form", [("id", "f")],
+        [ El ("input", [("id", "n"), ("placeholder", "name"), ("size", "8")], Nil)
+        , El ("input", [("id", "t"), ("placeholder", "message"), ("required", "required"), ("style", "flex:1")], Nil)
+        , El ("button", Nil, [Text "send"]) ])
+    // The client is `Script`, not `Raw`: it contains `a < b`-shaped code that
+    // Text would break, and a data path that Raw would let out of the element.
+    , El ("script", Nil, [Script (
+        "const log=document.getElementById('log');\n"
+        ++ "const ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')"
+        ++ "  +location.host+'/ws/chat');\n"
+        ++ "ws.onmessage=(e)=>\{log.insertAdjacentHTML('beforeend',"
+        ++ "'<div>'+e.data+'</div>');log.scrollTop=log.scrollHeight};\n"
+        ++ "document.getElementById('f').onsubmit=e=>\{e.preventDefault();"
+        ++ "const n=document.getElementById('n').value||'anon';"
+        ++ "const t=document.getElementById('t').value;"
+        ++ "ws.send('<b>'+n+':</b> '+t);"
+        ++ "log.insertAdjacentHTML('beforeend','<div><b>'+n+':</b> '+t+' <em>(you)</em></div>');"
+        ++ "log.scrollTop=log.scrollHeight;"
+        ++ "document.getElementById('t').value=''};\n")]) ]
+in
 
 let announce_h = fn (req: str) ->
   let msg = body_field "msg" in

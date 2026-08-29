@@ -21,9 +21,13 @@
 // page that cannot include the output of a markdown converter. It is named so
 // that it is visible: `grep Raw` is a review, `grep ++` is not.
 //
-//   type html = El | Text | Raw
+//   type html = El | Text | Raw | Script
 //   render    : html -> str            escapes text and attribute values
 //   page      : str -> html list -> str   doctype, lang, charset, title
+//
+// `Script` is not `Raw` with a nicer name: script content is raw text with one
+// escape, `</script`, and treating it as either ordinary text or as fully raw
+// is wrong in a different direction each way.
 //
 // ATTRIBUTES ARE ESCAPED TOO. A value carrying a quote closes the attribute and
 // starts another; that is injection without a single angle bracket, and it is
@@ -34,6 +38,7 @@ type html =
     El of str * (str * str) list * html list
   | Text of str
   | Raw of str
+  | Script of str
   ;
 
 let _attr_escape = fn (s: str) ->
@@ -54,10 +59,26 @@ let _void = fn (tag: str) ->
   || str_eq tag "meta" || str_eq tag "link"
   ;
 
+// ★ Script EXISTS BECAUSE THE FOURTH USER HAD NEITHER OPTION.
+//
+// examples/http_ws_chat embeds a WebSocket client. As `Text` the script is
+// html-escaped and stops being JavaScript -- `a < b` becomes `a &lt; b`. As
+// `Raw` it works and a string containing `</script>` ends the element early,
+// which is how markup gets into a page through a script that only ever
+// concatenated data.
+//
+// HTML says script content is raw text with exactly one way out: the sequence
+// `</script`. So that is the only thing escaped here, and it is escaped the way
+// the language allows inside a JS string -- `<\/script` is the same string to a
+// parser and is not a closing tag to the tokenizer. Nothing else is touched,
+// because everything else in there is code.
+let _script_escape = fn (js: str) -> str_replace js "</script" "<\\/script";
+
 let rec render = fn (n: html) ->
   match n with
   | Text t -> html_escape t
   | Raw r -> r
+  | Script js -> _script_escape js
   | El (tag, attrs, kids) ->
     let open_tag = "<" ++ tag ++ _attrs attrs ++ ">" in
     if _void tag then open_tag
