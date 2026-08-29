@@ -1,0 +1,51 @@
+// test/live/claims.mere — what contrib/db/live CLAIMS, for a real database to
+// judge. Prints one line per (write, read) pair:  <w> <r> yes|no
+//
+// The pairs are named, not printed as SQL, so scripts/live_soundness_check.sh
+// holds the same statements and can execute them against Postgres. If the two
+// lists drift apart the gate says so: it asserts the pair count it received.
+import "../../contrib/db/live.mere";
+
+let reads = [
+  ("r_posts_all",    "SELECT id, title FROM posts ORDER BY id"),
+  ("r_posts_pub",    "SELECT id, title FROM posts WHERE published = true ORDER BY id"),
+  ("r_post_one",     "SELECT id, title FROM posts WHERE id = 1"),
+  ("r_comments_1",   "SELECT id, body FROM comments WHERE post_id = 1 ORDER BY id"),
+  ("r_sessions",     "SELECT username FROM sessions ORDER BY sid"),
+  ("r_users",        "SELECT id, username FROM users ORDER BY id")
+];
+
+let writes = [
+  ("w_post_ins",     "INSERT INTO posts (author, title, body, published) VALUES ('a','t','b',true)"),
+  ("w_post_upd",     "UPDATE posts SET title = 'changed' WHERE id = 1"),
+  ("w_post_del",     "DELETE FROM posts WHERE id = 1"),
+  ("w_comment_ins",  "INSERT INTO comments (post_id, author, body) VALUES (1,'a','c')"),
+  ("w_session_ins",  "INSERT INTO sessions (sid, username) VALUES ('s9','alice')"),
+  ("w_user_ins",     "INSERT INTO users (username, pw_hash) VALUES ('bob','h')")
+];
+
+// The schema the gate creates. A cascade is a fact about the database, not an
+// annotation, so it is derived from the DDL rather than declared beside it.
+let ddl = "CREATE TABLE users (id serial PRIMARY KEY, username text UNIQUE NOT NULL, pw_hash text NOT NULL); \
+CREATE TABLE sessions (sid text PRIMARY KEY, username text NOT NULL); \
+CREATE TABLE posts (id serial PRIMARY KEY, author text NOT NULL, title text NOT NULL, body text NOT NULL, published boolean NOT NULL DEFAULT false); \
+CREATE TABLE comments (id serial PRIMARY KEY, post_id integer NOT NULL REFERENCES posts(id) ON DELETE CASCADE, author text NOT NULL, body text NOT NULL);";
+
+let casc = cascades_of ddl;
+
+let rec each_read = fn (wn: str) -> fn (ws: str) -> fn (rs) ->
+  match rs with
+  | Nil -> ()
+  | Cons ((rn, rq), rest) ->
+    let _ = print (wn ++ " " ++ rn ++ " " ++ (if affects_via casc ws rq then "yes" else "no")) in
+    each_read wn ws rest
+  ;
+
+let rec each_write = fn (ws) ->
+  match ws with
+  | Nil -> ()
+  | Cons ((wn, wq), rest) -> let _ = each_read wn wq reads in each_write rest
+  ;
+
+let _ = each_write writes in
+print "claims: 36 pairs"
