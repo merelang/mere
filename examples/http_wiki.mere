@@ -37,6 +37,7 @@ import "../contrib/http/cors.mere";
 import "../contrib/http/static.mere";
 import "../contrib/http/router.mere";
 import "../contrib/http/escape.mere";
+import "../contrib/html/build.mere";
 import "../contrib/kv/kv.mere";
 import "../contrib/kv/pack.mere";
 import "../contrib/log/log.mere";
@@ -196,21 +197,25 @@ let render_page = fn (slug: str) -> fn (version: int) ->
     let rendered = MarkdownHtml.render (split_lines body) in
     let latest = latest_version slug in
     let banner = if version < latest then
-                   "<div class=\"banner\">Viewing revision " ++ show version ++
-                   " of " ++ show latest ++ ". <a href=\"/page/" ++ slug ++
-                   "\">Show latest</a>.</div>"
-                 else "" in
+                   El ("div", [("class", "banner")],
+                     [ Text ("Viewing revision " ++ show version ++ " of " ++ show latest ++ ". ")
+                     , El ("a", [("href", "/page/" ++ slug)], [Text "Show latest"])
+                     , Text "." ])
+                 else Text "" in
     let _ = http_set_content_type "text/html; charset=utf-8" in
-    "<!doctype html><meta charset=utf-8><title>" ++ html_escape title ++
-    " — " ++ html_escape wiki_title ++ "</title>" ++
-    "<link rel=\"stylesheet\" href=\"/static/style.css\">" ++
-    banner ++
-    "<nav><a href=\"/\">index</a> · <a href=\"/page/" ++ slug ++
-    "/history\">history</a> · <a href=\"/edit/" ++ slug ++ "\">edit</a></nav>" ++
-    "<h1>" ++ html_escape title ++ "</h1>" ++
-    "<p class=\"meta\">v" ++ show version ++ " · " ++ html_escape ts ++
-    " · " ++ html_escape author ++ "</p>" ++
-    "<article>" ++ rendered ++ "</article>"
+    page_with (title ++ " — " ++ wiki_title)
+      [El ("link", [("rel", "stylesheet"), ("href", "/static/style.css")], Nil)]
+      [ banner
+      , El ("nav", Nil,
+          [ El ("a", [("href", "/")], [Text "index"])
+          , Text " · "
+          , El ("a", [("href", "/page/" ++ slug ++ "/history")], [Text "history"])
+          , Text " · "
+          , El ("a", [("href", "/edit/" ++ slug)], [Text "edit"]) ])
+      , El ("h1", Nil, [Text title])
+      , El ("p", [("class", "meta")],
+          [Text ("v" ++ show version ++ " · " ++ ts ++ " · " ++ author)])
+      , El ("article", Nil, [Raw rendered]) ]
 in
 
 let render_history_page = fn (slug: str) ->

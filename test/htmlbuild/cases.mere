@@ -57,8 +57,19 @@ let _ = check "a title carrying markup is escaped too"
   (page "<script>x</script>" Nil)
   "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>&lt;script&gt;x&lt;/script&gt;</title></head><body></body></html>" in
 
+// --- what the second user needed -----------------------------------------
+// A stylesheet belongs in the head. With only `page`, it landed in the body:
+// tolerated by browsers, and still the wrong shape.
+let _ = check "head_extra goes in the head, not the body"
+  (page_with "t" [El ("link", [("rel", "stylesheet"), ("href", "/s.css")], Nil)]
+             [El ("h1", Nil, [Text "hi"])])
+  "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>t</title><link rel=\"stylesheet\" href=\"/s.css\"></head><body><h1>hi</h1></body></html>" in
+
+let _ = check "page is page_with and no head extras"
+  (page "t" [El ("h1", Nil, [Text "hi"])]) (page_with "t" Nil [El ("h1", Nil, [Text "hi"])]) in
+
 let n = vec_get total 0 in
 let f = vec_get fails 0 in
 let _ = print ("htmlbuild: " ++ show n ++ " cases, " ++ show f ++ " failed") in
-if n < 9 then let _ = print "FAIL: fewer cases ran than declared" in 1
+if n < 11 then let _ = print "FAIL: fewer cases ran than declared" in 1
 else if f > 0 then 1 else 0
