@@ -72,14 +72,23 @@ and render_all = fn (ns: html list) ->
 // leave out -- a language, a title, an encoding -- are not parameters a caller
 // can skip. mere-blog's index shipped without the first two, and its admin page
 // had no <html> element at all.
-let page = fn (title: str) -> fn (body: html list) ->
+//
+// ★ `head_extra` EXISTS BECAUSE THE SECOND USER NEEDED IT. The first version
+// took only a title and a body, which was enough for mere-blog and wrong the
+// moment examples/http_wiki was converted: a wiki links a stylesheet, and with
+// nowhere to put it the <link> landed in the <body>. Browsers tolerate that;
+// the shape was still lying about where things go. One application cannot show
+// that a generalisation is fake -- it fit the one it was derived from.
+let page_with = fn (title: str) -> fn (head_extra: html list) -> fn (body: html list) ->
   "<!doctype html>"
     ++ render (El ("html", [("lang", "en")],
-        [ El ("head", [],
-            [ El ("meta", [("charset", "utf-8")], Nil)
-            , El ("title", [], [Text title]) ])
-        , El ("body", [], body) ]))
+        [ El ("head", Nil,
+            Cons (El ("meta", [("charset", "utf-8")], Nil),
+            Cons (El ("title", Nil, [Text title]), head_extra)))
+        , El ("body", Nil, body) ]))
   ;
+
+let page = fn (title: str) -> fn (body: html list) -> page_with title Nil body;
 
 // Convenience for the shape every list of things becomes.
 let rec map_html = fn (f) -> fn (xs) ->
