@@ -6613,60 +6613,123 @@ let vec_runtime = {|
         (local.set $hi (i32.sub (local.get $hi) (i32.const 1)))
         (br $lp)))
     (i64.extend_i32_s (i32.const 0)))
-  ;; Phase 19.3: vec_sort — in-place insertion sort.
+  ;; v0.1.349: vec_sort — bottom-up STABLE MERGE SORT, the same algorithm the
+  ;; C and LLVM backends emit and the interpreter runs, calling the comparator
+  ;; in the same order (a comparator is an arbitrary Mere closure: it may
+  ;; count, print or mutate, so the sequence is part of what the program does).
+  ;; It was an insertion sort, which made this backend and C O(n^2) while the
+  ;; interpreter's Array.sort was O(n log n) and unstable where these three
+  ;; were stable -- two divergences a stdout-comparing parity suite cannot see.
+  ;; Values are uniform 8-byte slots here, so one function covers every
+  ;; element type.
   ;; cmp: closure_T_(closure_T_int). outer_fn(env, a) → inner closure_T_int,
-  ;; inner_fn(inner.env, b) → i32 (negative/0/positive).
+  ;; inner_fn(inner.env, b) → i64 (negative/0/positive).
+  ;; The scratch buffer comes off the bump allocator and is not returned --
+  ;; this backend has no free, and vec_push already abandons its old buffer
+  ;; the same way.
   (func $mere_vec_sort (param $v8 i64) (param $cmp i64) (result i64)
-    (local $i i32) (local $j i32) (local $len i32) (local $buf i32)
+    (local $v i32) (local $n i32) (local $src i32) (local $dst i32)
     (local $outer_env i32) (local $outer_fn i32)
-    (local $key i64) (local $j_val i64)
+    (local $w i32) (local $lo i32) (local $mid i32) (local $hi i32)
+    (local $i i32) (local $j i32) (local $k i32)
+    (local $swap i32) (local $right i32)
     (local $inner_cl i32) (local $inner_env i32) (local $inner_fn i32)
-    (local $cmp_res i64)
-    (local $v i32)
     (local.set $v (i32.wrap_i64 (local.get $v8)))
-    (local.set $len (i32.load offset=4 (local.get $v)))
-    (local.set $buf (i32.load offset=0 (local.get $v)))
+    (local.set $n (i32.load offset=4 (local.get $v)))
+    (if (i32.le_s (local.get $n) (i32.const 1))
+      (then (return (i64.const 0))))
+    (local.set $src (i32.load offset=0 (local.get $v)))
+    (local.set $dst (global.get $__lang_bump))
+    (global.set $__lang_bump
+      (i32.add (local.get $dst) (i32.mul (local.get $n) (i32.const 8))))
     (local.set $outer_env (i32.load offset=0 (i32.wrap_i64 (local.get $cmp))))
     (local.set $outer_fn  (i32.load offset=4 (i32.wrap_i64 (local.get $cmp))))
-    (local.set $i (i32.const 1))
-    (block $end_outer
-      (loop $lp_outer
-        (br_if $end_outer (i32.ge_s (local.get $i) (local.get $len)))
-        (local.set $key (i64.load
-          (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 8)))))
-        (local.set $j (i32.sub (local.get $i) (i32.const 1)))
-        (block $end_inner
-          (loop $lp_inner
-            (br_if $end_inner (i32.lt_s (local.get $j) (i32.const 0)))
-            (local.set $j_val (i64.load
-              (i32.add (local.get $buf) (i32.mul (local.get $j) (i32.const 8)))))
-            (local.set $inner_cl (i32.wrap_i64
-              (call_indirect (type $cl)
-                (i64.extend_i32_u (local.get $outer_env)) (local.get $j_val)
-                (local.get $outer_fn))))
-            (local.set $inner_env (i32.load offset=0 (local.get $inner_cl)))
-            (local.set $inner_fn  (i32.load offset=4 (local.get $inner_cl)))
-            (local.set $cmp_res
-              (call_indirect (type $cl)
-                (i64.extend_i32_u (local.get $inner_env)) (local.get $key)
-                (local.get $inner_fn)))
-            (br_if $end_inner (i64.le_s (local.get $cmp_res) (i64.const 0)))
-            ;; shift: data[j+1] = data[j]
+    (local.set $w (i32.const 1))
+    (block $w_end
+      (loop $w_lp
+        (br_if $w_end (i32.ge_s (local.get $w) (local.get $n)))
+        (local.set $lo (i32.const 0))
+        (block $lo_end
+          (loop $lo_lp
+            (br_if $lo_end (i32.ge_s (local.get $lo) (local.get $n)))
+            (local.set $mid (i32.add (local.get $lo) (local.get $w)))
+            (if (i32.gt_s (local.get $mid) (local.get $n))
+              (then (local.set $mid (local.get $n))))
+            (local.set $hi
+              (i32.add (local.get $lo) (i32.mul (local.get $w) (i32.const 2))))
+            (if (i32.gt_s (local.get $hi) (local.get $n))
+              (then (local.set $hi (local.get $n))))
+            (local.set $i (local.get $lo))
+            (local.set $j (local.get $mid))
+            (local.set $k (local.get $lo))
+            (block $k_end
+              (loop $k_lp
+                (br_if $k_end (i32.ge_s (local.get $k) (local.get $hi)))
+                ;; which run does the next output element come from?
+                ;; cmp(src[j], src[i]) < 0 takes the right one; a tie keeps
+                ;; the left (earlier) run, which is the stability rule.
+                (if (i32.ge_s (local.get $i) (local.get $mid))
+                  (then (local.set $right (i32.const 1)))
+                  (else
+                    (if (i32.ge_s (local.get $j) (local.get $hi))
+                      (then (local.set $right (i32.const 0)))
+                      (else
+                        (local.set $inner_cl (i32.wrap_i64
+                          (call_indirect (type $cl)
+                            (i64.extend_i32_u (local.get $outer_env))
+                            (i64.load (i32.add (local.get $src)
+                              (i32.mul (local.get $j) (i32.const 8))))
+                            (local.get $outer_fn))))
+                        (local.set $inner_env
+                          (i32.load offset=0 (local.get $inner_cl)))
+                        (local.set $inner_fn
+                          (i32.load offset=4 (local.get $inner_cl)))
+                        (local.set $right (i64.lt_s
+                          (call_indirect (type $cl)
+                            (i64.extend_i32_u (local.get $inner_env))
+                            (i64.load (i32.add (local.get $src)
+                              (i32.mul (local.get $i) (i32.const 8))))
+                            (local.get $inner_fn))
+                          (i64.const 0)))))))
+                (if (local.get $right)
+                  (then
+                    (i64.store
+                      (i32.add (local.get $dst)
+                               (i32.mul (local.get $k) (i32.const 8)))
+                      (i64.load (i32.add (local.get $src)
+                               (i32.mul (local.get $j) (i32.const 8)))))
+                    (local.set $j (i32.add (local.get $j) (i32.const 1))))
+                  (else
+                    (i64.store
+                      (i32.add (local.get $dst)
+                               (i32.mul (local.get $k) (i32.const 8)))
+                      (i64.load (i32.add (local.get $src)
+                               (i32.mul (local.get $i) (i32.const 8)))))
+                    (local.set $i (i32.add (local.get $i) (i32.const 1)))))
+                (local.set $k (i32.add (local.get $k) (i32.const 1)))
+                (br $k_lp)))
+            (local.set $lo
+              (i32.add (local.get $lo) (i32.mul (local.get $w) (i32.const 2))))
+            (br $lo_lp)))
+        (local.set $swap (local.get $src))
+        (local.set $src (local.get $dst))
+        (local.set $dst (local.get $swap))
+        (local.set $w (i32.mul (local.get $w) (i32.const 2)))
+        (br $w_lp)))
+    ;; an odd number of passes leaves the answer in the scratch
+    (if (i32.ne (local.get $src) (i32.load offset=0 (local.get $v)))
+      (then
+        (local.set $dst (i32.load offset=0 (local.get $v)))
+        (local.set $k (i32.const 0))
+        (block $cb_end
+          (loop $cb_lp
+            (br_if $cb_end (i32.ge_s (local.get $k) (local.get $n)))
             (i64.store
-              (i32.add (local.get $buf)
-                       (i32.mul (i32.add (local.get $j) (i32.const 1))
-                                (i32.const 8)))
-              (local.get $j_val))
-            (local.set $j (i32.sub (local.get $j) (i32.const 1)))
-            (br $lp_inner)))
-        ;; place key at j+1
-        (i64.store
-          (i32.add (local.get $buf)
-                   (i32.mul (i32.add (local.get $j) (i32.const 1))
-                            (i32.const 8)))
-          (local.get $key))
-        (local.set $i (i32.add (local.get $i) (i32.const 1)))
-        (br $lp_outer)))
+              (i32.add (local.get $dst) (i32.mul (local.get $k) (i32.const 8)))
+              (i64.load
+                (i32.add (local.get $src) (i32.mul (local.get $k) (i32.const 8)))))
+            (local.set $k (i32.add (local.get $k) (i32.const 1)))
+            (br $cb_lp)))))
     (i64.const 0))
   (func $mere_vec_concat (param $a8 i64) (param $b8 i64) (result i64)
     (local $new i32) (local $i i32) (local $alen i32) (local $blen i32)

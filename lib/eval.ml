@@ -35,10 +35,11 @@ type value =
   | V_constr of string * value option
   | V_tuple of value list
   | V_record of string * (string * value) list
-  | V_vec of value array ref
+  | V_vec of vecbuf
     (* `'a Vec` — region-aware growable vector (Phase 12.1, Q-010
-       narrowed -> first implementation stage). Backed by a mutable array ref;
-       push reallocates. Trivial[R] when element type is Trivial[R]. *)
+       narrowed -> first implementation stage). Backed by a capacity-carrying
+       buffer (`vecbuf` below), so push is amortised O(1).
+       Trivial[R] when element type is Trivial[R]. *)
   | V_strbuf of Buffer.t
   (* A mutable byte buffer: one byte per byte, random access, and growable.
      `StrBuf` is the same shape for text and cannot serve — it appends only, and a
@@ -100,7 +101,38 @@ and map_state = {
 
 and bytebuf = { mutable bb_data : Bytes.t; mutable bb_len : int }
 
+(* v0.1.349: a Vec's storage, with capacity. Slots [0, vc_len) are live and
+   the rest is V_unit filler, so `vec_push` doubles instead of reallocating.
+   It was `value array ref` with an `Array.append` per push -- O(n) per push,
+   so filling an n-element Vec cost O(n^2) HERE while every compiled backend
+   was already amortised. That asymptotic sat in the parity oracle, which is
+   what bounds the input size a differential gate can afford: 200k pushes took
+   74s interpreted and 0.01s compiled. *)
+and vecbuf = { mutable vc_data : value array; mutable vc_len : int }
+
 and env = (string * value ref) list
+
+let vecbuf_of_array (a : value array) : vecbuf =
+  { vc_data = a; vc_len = Array.length a }
+
+let vecbuf_empty () : vecbuf = { vc_data = [||]; vc_len = 0 }
+
+(* The live prefix as an array. Copy-free when the buffer happens to be exactly
+   full, so the result is READ-ONLY -- a caller that mutates must go through
+   vc_data / vc_len instead (vec_reverse, vec_set and vec_sort do). *)
+let vecbuf_live (v : vecbuf) : value array =
+  if v.vc_len = Array.length v.vc_data then v.vc_data
+  else Array.sub v.vc_data 0 v.vc_len
+
+let vecbuf_push (v : vecbuf) (x : value) : unit =
+  if v.vc_len = Array.length v.vc_data then begin
+    let cap = if v.vc_len = 0 then 8 else v.vc_len * 2 in
+    let d = Array.make cap V_unit in
+    Array.blit v.vc_data 0 d 0 v.vc_len;
+    v.vc_data <- d
+  end;
+  v.vc_data.(v.vc_len) <- x;
+  v.vc_len <- v.vc_len + 1
 
 (* hex <-> raw byte string, shared by bytes display / to_json
    and the bytes_of_hex / hex_of_bytes builtins. Lowercase, 2 chars per byte. *)
@@ -221,7 +253,7 @@ and to_string = function
     let parts = List.map (fun (f, v) -> f ^ " = " ^ to_string v) fields in
     name ^ " { " ^ String.concat ", " parts ^ " }"
   | V_vec arr ->
-    let elems = Array.to_list !arr in
+    let elems = Array.to_list (vecbuf_live arr) in
     "Vec[" ^ String.concat ", " (List.map to_string elems) ^ "]"
   | V_strbuf buf ->
     "StrBuf[" ^ Ast.escape_string (Buffer.contents buf) ^ "]"
@@ -278,7 +310,7 @@ and to_json_string = function
         Ast.escape_string f ^ ":" ^ to_json_string v) fields in
     "{" ^ String.concat "," parts ^ "}"
   | V_vec arr ->
-    "[" ^ String.concat "," (List.map to_json_string (Array.to_list !arr)) ^ "]"
+    "[" ^ String.concat "," (List.map to_json_string (Array.to_list (vecbuf_live arr))) ^ "]"
   | V_strbuf buf -> Ast.escape_string (Buffer.contents buf)
   | V_map m ->
     let parts = List.map (fun k ->
@@ -629,7 +661,8 @@ let builtin_read_file_bytes =
          let buf = Bytes.create len in
          really_input ic buf 0 len;
          close_in ic;
-         V_vec (ref (Array.init len (fun i -> V_int (Char.code (Bytes.get buf i)))))
+         V_vec (vecbuf_of_array
+                  (Array.init len (fun i -> V_int (Char.code (Bytes.get buf i)))))
        with Sys_error msg ->
          raise (Eval_error (Loc.dummy, "read_file_bytes: " ^ msg)))
     | _ -> failwith "read_file_bytes: expected str")
@@ -652,7 +685,7 @@ let builtin_write_file_bytes =
                  close_out oc;
                  raise (Eval_error (Loc.dummy,
                    Printf.sprintf "write_file_bytes: byte value %d out of range 0..255" b))
-               | _ -> failwith "write_file_bytes: expected int vec") !arr;
+               | _ -> failwith "write_file_bytes: expected int vec") (vecbuf_live arr);
              close_out oc;
              V_unit
            with Sys_error msg ->
@@ -1409,7 +1442,7 @@ let rec vec_len_via_constr v =
 let builtin_len =
   V_builtin ("len", fun v ->
     match v with
-    | V_vec arr -> V_int (Array.length !arr)
+    | V_vec arr -> V_int arr.vc_len
     | V_strbuf buf -> V_int (Buffer.length buf)
     | V_map m -> V_int (Hashtbl.length m.m_tbl)
     | V_str s -> V_int (String.length s)
@@ -1432,7 +1465,7 @@ let builtin_len =
 let builtin_vec_new =
   V_builtin ("vec_new", fun v ->
     match v with
-    | V_unit -> V_vec (ref [||])
+    | V_unit -> V_vec (vecbuf_empty ())
     | _ -> failwith "vec_new: expected unit")
 
 let builtin_vec_push =
@@ -1440,7 +1473,7 @@ let builtin_vec_push =
     match v with
     | V_vec arr ->
       V_builtin ("vec_push_p1", fun x ->
-        arr := Array.append !arr [| x |];
+        vecbuf_push arr x;
         V_unit)
     | _ -> failwith "vec_push: expected Vec")
 
@@ -1451,18 +1484,18 @@ let builtin_vec_get =
       V_builtin ("vec_get_p1", fun idx ->
         match idx with
         | V_int i ->
-          if i < 0 || i >= Array.length !arr then
+          if i < 0 || i >= arr.vc_len then
             raise (Eval_error (Loc.dummy,
               Printf.sprintf "vec_get: index %d out of bounds (len = %d)"
-                i (Array.length !arr)))
-          else (!arr).(i)
+                i arr.vc_len))
+          else arr.vc_data.(i)
         | _ -> failwith "vec_get: expected int index")
     | _ -> failwith "vec_get: expected Vec")
 
 let builtin_vec_len =
   V_builtin ("vec_len", fun v ->
     match v with
-    | V_vec arr -> V_int (Array.length !arr)
+    | V_vec arr -> V_int arr.vc_len
     | _ -> failwith "vec_len: expected Vec")
 
 (* The higher-order Vec API (Phase 12.9) requires apply_value_ref, so
@@ -1478,7 +1511,7 @@ let builtin_vec_len =
 let builtin_owned_vec_new =
   V_builtin ("owned_vec_new", fun v ->
     match v with
-    | V_unit -> V_vec (ref [||])
+    | V_unit -> V_vec (vecbuf_empty ())
     | _ -> failwith "owned_vec_new: expected unit")
 
 let builtin_owned_vec_push =
@@ -1486,7 +1519,7 @@ let builtin_owned_vec_push =
     match v with
     | V_vec arr ->
       V_builtin ("owned_vec_push_p1", fun x ->
-        arr := Array.append !arr [| x |];
+        vecbuf_push arr x;
         V_unit)
     | _ -> failwith "owned_vec_push: expected OwnedVec")
 
@@ -1497,18 +1530,18 @@ let builtin_owned_vec_get =
       V_builtin ("owned_vec_get_p1", fun idx ->
         match idx with
         | V_int i ->
-          if i < 0 || i >= Array.length !arr then
+          if i < 0 || i >= arr.vc_len then
             raise (Eval_error (Loc.dummy,
               Printf.sprintf "owned_vec_get: index %d out of bounds (len = %d)"
-                i (Array.length !arr)))
-          else (!arr).(i)
+                i arr.vc_len))
+          else arr.vc_data.(i)
         | _ -> failwith "owned_vec_get: expected int index")
     | _ -> failwith "owned_vec_get: expected OwnedVec")
 
 let builtin_owned_vec_len =
   V_builtin ("owned_vec_len", fun v ->
     match v with
-    | V_vec arr -> V_int (Array.length !arr)
+    | V_vec arr -> V_int arr.vc_len
     | _ -> failwith "owned_vec_len: expected OwnedVec")
 
 (* StrBuf[R] builtins (Phase 12.7) — a mutable string buffer inside a
@@ -1768,7 +1801,7 @@ let builtin_vec_iter =
     match v with
     | V_vec arr ->
       V_builtin ("vec_iter_p1", fun f ->
-        Array.iter (fun x -> ignore (!apply_value_ref f x)) !arr;
+        Array.iter (fun x -> ignore (!apply_value_ref f x)) (vecbuf_live arr);
         V_unit)
     | _ -> failwith "vec_iter: expected Vec")
 
@@ -1777,8 +1810,8 @@ let builtin_vec_map =
     match v with
     | V_vec arr ->
       V_builtin ("vec_map_p1", fun f ->
-        let mapped = Array.map (fun x -> !apply_value_ref f x) !arr in
-        V_vec (ref mapped))
+        let mapped = Array.map (fun x -> !apply_value_ref f x) (vecbuf_live arr) in
+        V_vec (vecbuf_of_array mapped))
     | _ -> failwith "vec_map: expected Vec")
 
 let builtin_vec_fold =
@@ -1790,7 +1823,7 @@ let builtin_vec_fold =
           Array.fold_left (fun acc x ->
             let acc_x = !apply_value_ref f acc in
             !apply_value_ref acc_x x
-          ) init !arr))
+          ) init (vecbuf_live arr)))
     | _ -> failwith "vec_fold: expected Vec")
 
 (* Phase 19.2: map_iter — call (K -> V -> unit) for each entry.
@@ -1819,12 +1852,12 @@ let builtin_vec_set =
         V_builtin ("vec_set_p2", fun new_val ->
           match idx with
           | V_int i ->
-            if i < 0 || i >= Array.length !arr then
+            if i < 0 || i >= arr.vc_len then
               raise (Eval_error (Loc.dummy,
                 Printf.sprintf "vec_set: index %d out of bounds (len = %d)"
-                  i (Array.length !arr)))
+                  i arr.vc_len))
             else begin
-              (!arr).(i) <- new_val;
+              arr.vc_data.(i) <- new_val;
               V_unit
             end
           | _ -> failwith "vec_set: expected int index"))
@@ -1835,12 +1868,12 @@ let builtin_vec_reverse =
   V_builtin ("vec_reverse", fun v ->
     match v with
     | V_vec arr ->
-      let n = Array.length !arr in
+      let n = arr.vc_len in
       for i = 0 to (n / 2) - 1 do
         let j = n - 1 - i in
-        let tmp = (!arr).(i) in
-        (!arr).(i) <- (!arr).(j);
-        (!arr).(j) <- tmp
+        let tmp = arr.vc_data.(i) in
+        arr.vc_data.(i) <- arr.vc_data.(j);
+        arr.vc_data.(j) <- tmp
       done;
       V_unit
     | _ -> failwith "vec_reverse: expected Vec")
@@ -1852,7 +1885,7 @@ let builtin_vec_concat =
       V_builtin ("vec_concat_p1", fun v2 ->
         match v2 with
         | V_vec a2 ->
-          V_vec (ref (Array.append !a1 !a2))
+          V_vec (vecbuf_of_array (Array.append (vecbuf_live a1) (vecbuf_live a2)))
         | _ -> failwith "vec_concat: 2nd arg expected Vec")
     | _ -> failwith "vec_concat: 1st arg expected Vec")
 
@@ -1869,7 +1902,52 @@ let builtin_vec_sort =
           | V_int n -> n
           | _ -> failwith "vec_sort: comparator must return int"
         in
-        Array.sort compare_v !arr;
+        (* v0.1.349: the same bottom-up stable merge sort the compiled backends
+           emit, written out here rather than delegated to Array.sort, because
+           two properties of a sort are observable from a Mere program and
+           Array.sort matched the compiled backends on neither:
+
+             - stability. Array.sort is unstable, an insertion sort is stable,
+               and the two printed equal-keyed elements in different orders.
+             - the comparison sequence. A comparator is an arbitrary Mere
+               closure and may count, print, or mutate; "how many times, in
+               what order" is part of what the program does, so the four
+               backends have to run the same algorithm, not merely produce
+               sorted output. Array.stable_sort would fix the first and leave
+               the second.
+
+           Held to the compiled backends by test/parity/vec_sort_stable.mere,
+           which prints the comparison count. *)
+        let n = arr.vc_len in
+        if n > 1 then begin
+          let src = ref arr.vc_data in
+          let dst = ref (Array.make n V_unit) in
+          let w = ref 1 in
+          while !w < n do
+            let lo = ref 0 in
+            while !lo < n do
+              let mid = min (!lo + !w) n in
+              let hi = min (!lo + 2 * !w) n in
+              let i = ref !lo and j = ref mid in
+              for k = !lo to hi - 1 do
+                let take_right =
+                  if !i >= mid then true
+                  else if !j >= hi then false
+                  else compare_v (!src).(!j) (!src).(!i) < 0
+                in
+                if take_right then begin
+                  (!dst).(k) <- (!src).(!j); incr j
+                end else begin
+                  (!dst).(k) <- (!src).(!i); incr i
+                end
+              done;
+              lo := !lo + 2 * !w
+            done;
+            let sw = !src in src := !dst; dst := sw;
+            w := !w * 2
+          done;
+          if !src != arr.vc_data then Array.blit !src 0 arr.vc_data 0 n
+        end;
         V_unit)
     | _ -> failwith "vec_sort: expected Vec")
 
@@ -1884,9 +1962,9 @@ let builtin_vec_filter =
             match !apply_value_ref pred x with
             | V_bool b -> b
             | _ -> failwith "vec_filter: predicate must return bool"
-          ) (Array.to_list !arr)
+          ) (Array.to_list (vecbuf_live arr))
         ) in
-        V_vec (ref filtered))
+        V_vec (vecbuf_of_array filtered))
     | _ -> failwith "vec_filter: expected Vec")
 
 let builtin_vec_to_list =
@@ -1895,7 +1973,7 @@ let builtin_vec_to_list =
     | V_vec arr ->
       Array.fold_right (fun x acc ->
         V_constr ("Cons", Some (V_tuple [x; acc]))
-      ) !arr (V_constr ("Nil", None))
+      ) (vecbuf_live arr) (V_constr ("Nil", None))
     | _ -> failwith "vec_to_list: expected Vec")
 
 let builtin_vec_to_owned =
@@ -1904,7 +1982,7 @@ let builtin_vec_to_owned =
     | V_vec arr ->
       (* Deep copy: the underlying mutable array is duplicated so the
          OwnedVec result is independent of the source Vec's lifetime. *)
-      V_vec (ref (Array.copy !arr))
+      V_vec (vecbuf_of_array (Array.copy (vecbuf_live arr)))
     | _ -> failwith "vec_to_owned: expected Vec")
 
 (* Phase 12.12: the reverse direction OwnedVec[T] -> Vec[R, T]. The
@@ -1914,7 +1992,7 @@ let builtin_vec_to_owned =
 let builtin_owned_vec_to_vec =
   V_builtin ("owned_vec_to_vec", fun v ->
     match v with
-    | V_vec arr -> V_vec (ref (Array.copy !arr))
+    | V_vec arr -> V_vec (vecbuf_of_array (Array.copy (vecbuf_live arr)))
     | _ -> failwith "owned_vec_to_vec: expected OwnedVec")
 
 let builtin_iter_n =
@@ -2656,7 +2734,7 @@ let builtin_file_pwrite =
           V_builtin ("file_pwrite_bytes", fun bv ->
             match bv with
             | V_vec arr ->
-              let a = !arr in
+              let a = vecbuf_live arr in
               let len = Array.length a in
               let buf = Bytes.create len in
               Array.iteri (fun i x ->
@@ -2739,7 +2817,7 @@ let builtin_file_pread =
               seek_in ch off;
               let buf = Bytes.create avail in
               really_input ch buf 0 avail;
-              V_vec (ref (Array.init avail
+              V_vec (vecbuf_of_array (Array.init avail
                 (fun i -> V_int (Char.code (Bytes.get buf i)))))
             | _ -> failwith "file_pread: length expected int")
         | _ -> failwith "file_pread: offset expected int")
@@ -2761,7 +2839,7 @@ let builtin_file_pread =
                   if n <= 0 then pos else read_all (pos + n)
               in
               let got = read_all 0 in
-              V_vec (ref (Array.init got
+              V_vec (vecbuf_of_array (Array.init got
                 (fun i -> V_int (Char.code (Bytes.get buf i)))))
             | _ -> failwith "file_pread: length expected int")
         | _ -> failwith "file_pread: offset expected int")
@@ -3001,7 +3079,7 @@ let builtin_bytes_of_vec =
   V_builtin ("bytes_of_vec", fun v ->
     match v with
     | V_vec arr ->
-      let a = !arr in
+      let a = vecbuf_live arr in
       let b = Buffer.create (Array.length a) in
       Array.iter (function
         | V_int n -> Buffer.add_char b (Char.chr (n land 0xFF))
@@ -3012,7 +3090,8 @@ let builtin_bytes_of_vec =
 let builtin_vec_of_bytes =
   V_builtin ("vec_of_bytes", fun v ->
     let s = expect_bytes "vec_of_bytes" v in
-    V_vec (ref (Array.init (String.length s) (fun i -> V_int (Char.code s.[i])))))
+    V_vec (vecbuf_of_array
+             (Array.init (String.length s) (fun i -> V_int (Char.code s.[i])))))
 
 let initial_env : env =
   [ ("print", ref builtin_print);

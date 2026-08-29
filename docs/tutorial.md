@@ -469,6 +469,8 @@ Builtin API:
 | `vec_push` | `'a Vec -> 'a -> unit` | Push to tail (in-place) |
 | `vec_get` | `'a Vec -> int -> 'a` | Index access (out-of-range is eval error) |
 | `vec_len` | `'a Vec -> int` | Element count |
+| `vec_set` | `'a Vec -> int -> 'a -> unit` | Overwrite an index in place |
+| `vec_sort` | `'a Vec -> ('a -> 'a -> int) -> unit` | Sort in place. **Stable**, O(n log n), and every backend runs the same bottom-up merge sort — so a comparator with a side effect (a counter, a print) sees the same calls in the same order wherever the program runs. The comparator returns negative / 0 / positive like `strcmp`. Each comparison applies a curried closure, which allocates its intermediate in the current region: for a sort in a hot loop, `region R { … }` around it is what reclaims them |
 
 **Placeable in a region**: if `'a` is Trivial[R] (contains no drop type), a Vec can sit in a region:
 

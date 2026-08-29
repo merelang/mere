@@ -4,6 +4,76 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.349 — 2026-08-29
+
+_One sort, four backends._ `vec_sort` was an insertion sort on C / LLVM / Wasm and
+OCaml's `Array.sort` on the interpreter, and both halves of that were wrong in a way
+the parity suite could not see.
+
+**The asymptotics differed by backend.** O(n²) compiled, O(n log n) interpreted. And
+because the comparator is curried, every comparison built its inner closure's
+environment in the region and never freed it — so the compiled backends' memory was
+O(n²) too. Measured, sorting a `Vec[R, int]`:
+
+| n | before | after |
+|---|---|---|
+| 10,000 | 0.59 s, 569 MB | 4.1 MB |
+| 20,000 | 1.44 s, 2.3 GB | 7.3 MB |
+| 40,000 | 5.07 s, 6.7 GB | 14 MB |
+| 200,000 | killed by the OOM killer at 82 s | 0.45 s |
+
+**And they disagreed about stability**, which is observable from a Mere program:
+`Array.sort` is unstable and an insertion sort is stable, so seven pairs keyed by
+`fst` came out `600 400 200 300 700 500 100` interpreted and `200 400 600 100 300 500
+700` compiled. No parity case had ever sorted with a comparator that returns 0 for two
+*different* elements — the only input that can tell.
+
+All four now run the same bottom-up **stable merge sort**, comparing `cmp(right, left)
+< 0` so a tie keeps the earlier run. The scratch buffer is `malloc`/`free` on C and
+LLVM (a temporary the program cannot observe, and a region allocation would leave n
+slots behind per call); Wasm takes it off the bump allocator, which has no free, the
+same way `vec_push` already abandons its old buffer.
+
+**The comparison sequence is part of the contract, not an implementation detail.** A
+comparator is an arbitrary closure — it can count, print, or write — so four backends
+agreeing on sorted output while running two different algorithms is a divergence
+waiting for someone to put a side effect in one. `test/parity/vec_sort_stable.mere`
+therefore prints the comparator call count (8192 for its 1024 elements) next to the
+permutation's checksum: the number is the algorithm's fingerprint, and it fails if any
+backend changes algorithm alone.
+
+**A third divergence fell out of the rewrite, and it was a wrong answer.** The LLVM
+helper called the comparator closure as `i32` while Mere's int is `i64` there. `-1` /
+`0` / `1` survive that truncation, so it had never shown; a comparator written `a - b`
+on values more than 2^31 apart does not. Measured on the pre-change compiler, sorting
+`[5000000000, 1000000000, 9000000000]` ascending: interp, C and Wasm printed
+`1000000000 5000000000 9000000000` and LLVM printed it **backwards**. The parity case
+carries that input now.
+
+What remains is the per-comparison allocation itself: `cmp.fn(env, a)` still
+materialises the inner closure. n log n of those instead of n² is a rate, not a fix —
+removing it needs the closure value to carry an uncurried entry point, the value-level
+twin of the `__direct` fns from v0.1.52 / Q-066.
+
+_Two smaller repairs found by the same probe._
+
+**The interpreter's `vec_push` was `Array.append`** — a full copy per push, so filling
+an n-element Vec cost O(n²) there while every compiled backend doubled. The
+interpreter is the parity oracle, and its asymptotics bound the input size any
+differential gate can afford: 200k pushes took 74 s interpreted and 0.01 s compiled.
+`V_vec` now carries capacity (`vecbuf`, the shape `bytebuf` already had). A 200k-element
+program that reads, sorts and prints went 77 s → 2.8 s.
+
+**An integer literal out of range escaped the compiler as an uncaught OCaml
+exception** — `Failure("int_of_string")`, no location, no file name. Every literal is
+held in the host's 63-bit int, so 4611686018427387903 is the ceiling on *all* backends,
+including the ones that compute in 64 bits. Worse was the hex form: OCaml's parser
+*wraps* rather than failing there, so `0x7FFFFFFFFFFFFFFF` lexed as `-1` — a bit mask,
+which is the reason hex literals exist here (v0.1.46), silently becoming a different
+number. Both now name the limit at the literal's own location.
+
+---
+
 ## v0.1.348 — 2026-08-28
 
 _What the capture analysis actually catches._ No behaviour change; a correction and

@@ -2,6 +2,36 @@
 
 exception Lex_error of Loc.t * string
 
+(* v0.1.349: every integer literal is held in the OCaml int the AST carries, so
+   the ceiling is the host's 62-bit-plus-sign int on ALL backends -- not an
+   interpreter-only limit, even though the C / LLVM / Wasm backends compute in
+   64 bits. Both ways of exceeding it used to be silent or worse:
+
+   - decimal: `int_of_string` raised `Failure "int_of_string"`, which escaped
+     the compiler uncaught -- no location, no message, no file name.
+   - hex: OCaml's parser WRAPS instead of failing for the hex/octal/binary
+     forms, so `0x7FFFFFFFFFFFFFFF` lexed as -1. That is the worse of the two:
+     a bit mask (the reason hex literals exist here, v0.1.46) silently became a
+     different number, and nothing downstream could tell.
+
+   Both now name the limit at the literal's own location. *)
+let lex_int (pos : Loc.t) (text : string) : int =
+  let reject () =
+    raise (Lex_error (pos, Printf.sprintf
+      "integer literal out of range: %s -- literals are held in a %d-bit int, \
+       so the largest is %d (0x%x) on every backend"
+      text (Sys.int_size) max_int max_int))
+  in
+  match int_of_string_opt text with
+  | None -> reject ()
+  | Some n ->
+    (* The wrap check: read the same text as 64-bit and see if it agrees.
+       Int64 wraps in the same places, but one bit later, which is exactly the
+       window (0x4000000000000000 .. 0x7FFFFFFFFFFFFFFF) that int lost. *)
+    (match Int64.of_string_opt text with
+     | Some w when w <> Int64.of_int n -> reject ()
+     | _ -> n)
+
 type token =
   | T_int of int
   | T_float of float
@@ -384,7 +414,7 @@ let rec tokenize ?file s =
             if j < len && is_hex_digit s.[j] then read_hex (j + 1) else j
           in
           let j = read_hex (i + 2) in
-          let n = int_of_string (String.sub s i (j - i)) in
+          let n = lex_int pos (String.sub s i (j - i)) in
           let w = j - i in
           advance w;
           aux j ((with_width pos w, T_int n) :: acc)
@@ -422,7 +452,7 @@ let rec tokenize ?file s =
             advance w;
             aux k ((with_width pos w, T_float (float_of_string text)) :: acc)
           | None ->
-            let n = int_of_string (String.sub s i (j - i)) in
+            let n = lex_int pos (String.sub s i (j - i)) in
             let w = j - i in
             advance w;
             aux j ((with_width pos w, T_int n) :: acc)

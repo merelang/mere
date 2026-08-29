@@ -1,0 +1,79 @@
+// vec_sort: the two things about a sort a Mere program can observe, held to
+// one answer on every backend (v0.1.349).
+//
+// 1. STABILITY. Equal keys must come out in insertion order. Before this,
+//    the interpreter used OCaml's Array.sort (unstable) and the three
+//    compiled backends emitted an insertion sort (stable), so the same
+//    program printed a different order depending on where it ran -- and no
+//    parity case sorted with a comparator that returns 0 for two DIFFERENT
+//    elements, which is the only input that can tell.
+//
+// 2. THE COMPARISON SEQUENCE. A comparator is an arbitrary closure: it can
+//    count, print, or write. So "how many comparisons, in what order" is part
+//    of what the program does, not an implementation detail -- four backends
+//    agreeing on sorted output while running two different algorithms is a
+//    divergence waiting for someone to put a side effect in a comparator.
+//    The count below is that fingerprint: a bottom-up stable merge sort over
+//    these 1024 elements calls the comparator exactly 8192 times. An
+//    insertion sort would say 262144-ish, a quicksort something else again,
+//    so this line fails if any backend changes algorithm without the others.
+//
+// The counter lives in a top-level Vec because Mere has no mutable locals,
+// and `bump` is a top-level fn rather than a closure capturing `cnt` because
+// the LLVM backend cannot resolve that capture yet (Phase 39.A2 MVP).
+
+let cnt = vec_new ();
+let bump = fn (_: unit) -> vec_set cnt 0 (vec_get cnt 0 + 1);
+let cmp_by_fst = fn (a: (int * int)) -> fn (b: (int * int)) ->
+  { bump (); fst a - fst b };
+
+let main = fn (_: unit) ->
+  let _ = vec_push cnt 0 in
+  let v = vec_new () in
+  // 16 distinct keys over 1024 elements: every key has 64 elements whose
+  // relative order only a stable sort keeps.
+  let rec build = fn (i: int) ->
+    if i >= 1024 then ()
+    else { vec_push v ((i * 7919) % 16, i); build (i + 1) } in
+  let _ = build 0 in
+  let _ = vec_sort v cmp_by_fst in
+  // the first eight: key 0, payloads ascending = stable
+  let sb = strbuf_new () in
+  let rec show_head = fn (i: int) ->
+    if i >= 8 then ()
+    else {
+      strbuf_push sb (str_of_int (fst (vec_get v i)) ++ ":"
+                      ++ str_of_int (snd (vec_get v i)) ++ " ");
+      show_head (i + 1)
+    } in
+  let _ = show_head 0 in
+  let _ = print (strbuf_to_str sb) in
+  // the whole permutation in one number (mod keeps it inside every backend's
+  // int: the interpreter's is 63-bit, the other three are 64-bit)
+  let rec chk = fn (i: int) -> fn (acc: int) ->
+    if i >= 1024 then acc
+    else chk (i + 1)
+           ((acc * 31 + fst (vec_get v i) * 4096 + snd (vec_get v i))
+            % 1000000007) in
+  let _ = print ("checksum " ++ str_of_int (chk 0 0)) in
+  // sortedness, checked rather than eyeballed
+  let rec ordered = fn (i: int) ->
+    if i >= 1023 then true
+    else if fst (vec_get v i) > fst (vec_get v (i + 1)) then false
+    else ordered (i + 1) in
+  let _ = print ("ordered " ++ (if ordered 0 then "yes" else "no")) in
+  let _ = print ("comparisons " ++ str_of_int (vec_get cnt 0)) in
+  // 3. THE COMPARATOR'S RESULT IS AN INT, NOT AN i32. `a - b` on values more
+  //    than 2^31 apart is an ordinary way to write a comparator, and the LLVM
+  //    helper used to call the closure as `i32`: this sorted BACKWARDS there
+  //    (9000000000 5000000000 1000000000) while the other three got it right.
+  //    -1/0/1 survived the truncation, so nothing smaller than this could tell.
+  let w = vec_new () in
+  let _ = vec_push w 5000000000 in
+  let _ = vec_push w 1000000000 in
+  let _ = vec_push w 9000000000 in
+  let _ = vec_sort w (fn (a: int) -> fn (b: int) -> a - b) in
+  let wb = strbuf_new () in
+  let _ = vec_iter w (fn (x: int) -> strbuf_push wb (str_of_int x ++ " ")) in
+  print ("wide " ++ strbuf_to_str wb);
+main ()
