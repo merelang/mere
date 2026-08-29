@@ -1,0 +1,7 @@
+# name  floor  ceiling — produced by scripts/budget_check.sh --update
+# A floor exists so that a measurement collapsing to nothing is a failure
+# rather than a pass: see the note in the script.
+wasm_authz 23973 29299
+wasm_nojs 28451 34773
+wasm_live 29201 35689
+html_home 378 462

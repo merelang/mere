@@ -257,6 +257,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/live_soundness_check.sh
 
+      - name: budget (sizes inside their bands, and what a page owes its reader)
+        if: ${{ !cancelled() }}
+        run: sh scripts/budget_check.sh
+
       - name: nojs (the primary flow completes with no JavaScript)
         if: ${{ !cancelled() }}
         run: sh scripts/nojs_check.sh

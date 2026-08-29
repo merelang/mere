@@ -32,13 +32,15 @@ let rec _render = fn (i: int) ->
   ;
 
 let page = fn (msg: str) ->
-  "<!doctype html>\n<html><head><title>guestbook</title></head><body>\n"
+  "<!doctype html>\n<html lang=\"en\"><head><title>guestbook</title></head><body>\n"
   ++ "  <h1>guestbook</h1>\n"
   ++ (if str_eq msg "" then "" else "  <p id=\"flash\">" ++ html_escape msg ++ "</p>\n")
   ++ "  <ul id=\"entries\">\n" ++ _render 0 ++ "  </ul>\n"
   ++ "  <form method=\"POST\" action=\"/entries\">\n"
-  ++ "    <input type=\"text\" name=\"author\" value=\"\">\n"
-  ++ "    <input type=\"text\" name=\"body\" value=\"\">\n"
+  ++ "    <label for=\"author\">Name</label>\n"
+  ++ "    <input type=\"text\" id=\"author\" name=\"author\" value=\"\">\n"
+  ++ "    <label for=\"body\">Message</label>\n"
+  ++ "    <input type=\"text\" id=\"body\" name=\"body\" value=\"\">\n"
   ++ "    <button type=\"submit\">Post</button>\n"
   ++ "  </form>\n"
   ++ "</body></html>\n"
