@@ -1,0 +1,26 @@
+// test/boundary/proto/cross.mere — the same field addition, on the wire format
+// that was designed for it.
+//
+// The JSON lane records `v1 -> v2 : fail`: the derived decoder needs every key
+// present, so a client written before the field existed cannot be read by a
+// server that expects it. This asks whether that is a property of evolution or
+// of the encoding, by making the identical change to a .proto and crossing the
+// generated codecs.
+//
+// protobuf identifies fields by NUMBER, gives an absent one its default, and
+// skips a number it does not know. Those three rules are what "compatible
+// evolution" means; the JSON lane has none of them.
+import "v1_gen.mere";
+import "v2_gen.mere";
+
+let old_payload = encode_Req (Req { id = 1, title = "t" });
+let new_payload = encode_ReqV2 (ReqV2 { id = 1, title = "t", tags = "x" });
+
+// old client -> new server: the field it never knew about takes its default
+let a = decode_ReqV2 old_payload;
+// new client -> old server: the number it does not know is skipped
+let b = decode_Req new_payload;
+
+let ok = fn (c: bool) -> if c then "ok" else "fail";
+let _ = print ("v1 -> v2 : " ++ ok (str_eq a.title "t" && str_eq a.tags "")) in
+print ("v2 -> v1 : " ++ ok (str_eq b.title "t"))

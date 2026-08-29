@@ -20,6 +20,15 @@
 # and a break that disappears means the record was fixed and the note about it
 # is now a lie.
 #
+# TWO LANES. The same change is recorded on both the derived-JSON boundary and
+# on protobuf's wire, because the first one's answer is a property of the
+# encoding rather than of evolution, and a matrix showing only the failure
+# reads as if evolution were impossible. It is not: numbering the fields,
+# defaulting an absent one and skipping an unknown one is what makes it
+# possible, and none of those three is available to a name-keyed decoder.
+#
+# typo_cost.mere records the price of taking the second rule without the first.
+#
 # WHY A RECORDED MATRIX AND NOT "ALL CELLS MUST BE ok". Because measurement says
 # they cannot all be ok. Mere's derived decoder requires every key to be
 # PRESENT — including keys of `option` type, where `option` means the value may
@@ -74,6 +83,22 @@ done
     done
   done
 } > "$tmp/matrix"
+
+# ---- the same change, on a wire format designed for it -------------------
+# The JSON lane records v1 -> v2 : fail. That is a property of the ENCODING,
+# not of evolution, and the matrix says so only if the alternative is beside
+# it: test/boundary/proto makes the identical field addition to a .proto and
+# crosses the generated codecs. Recording both is what turns "our boundary
+# cannot evolve" into a decision about encoding rather than a fact of life.
+{
+  echo "#"
+  echo "# the identical change (one field added), on protobuf's wire:"
+  "$MERE" test/boundary/proto/cross.mere 2>/dev/null | sed 's/^/# proto  /'
+  echo "#"
+  echo "# and what a name-keyed decoder costs if it fills absent keys instead"
+  echo "# of refusing them (test/boundary/typo_cost.mere):"
+  "$MERE" test/boundary/typo_cost.mere 2>/dev/null | sed 's/^/# typo   /'
+} >> "$tmp/matrix"
 
 cells=$(grep -cE '^v[^ ]* -> v[^ ]* : ' "$tmp/matrix")
 if [ "$cells" -eq 0 ]; then
