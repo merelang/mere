@@ -4,6 +4,33 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.350 — 2026-08-30
+
+_Three builtins stop lying on Wasm._ `run`, `env_var` and `file_exists` answered
+constants — 127, None, false — under notes saying a browser has no subprocess, no
+environ and no filesystem. True of a browser. False of `scripts/run_wasm.js`,
+which has had `system`, `getenv`, `file_size`, `read_file` and `write_file` all
+along, and false of docs/host-matrix.md, which called all three `yes`.
+
+`file_exists` was the worst of them: it did not fail, it answered "no", so a
+caller's `if file_exists p then … else …` took the wrong branch with nothing
+anywhere to say why.
+
+All three now go through the host, the way `args` was wired in v0.1.159 for the
+same reason — the runners had supplied `arg_count` / `arg_get` for a long time
+and only the builtin was never connected. Checked against the C backend as the
+oracle: `run "echo x"` prints x and exits 0 on both, `env_var` answers the same
+value and the same None, and `file_exists "/etc/hosts"` is true on both.
+
+**The host had a hole too, and the compiler's hid it.** `getenv` in
+run_wasm.js read the variable, built the buffer, and fell off the end without
+returning — every lookup answered undefined, which arrives as 0 and reads as
+"not set". Nobody noticed because the Wasm backend never called it.
+
+`test/parity/env_var.wasm.expected` is deleted: parity reported that the pin no
+longer diverges, which is the retirement condition a DIVERGE is supposed to
+carry, doing its job.
+
 ## v0.1.349 — 2026-08-29
 
 _One sort, four backends._ `vec_sort` was an insertion sort on C / LLVM / Wasm and
