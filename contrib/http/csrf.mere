@@ -78,9 +78,17 @@ let csrf_validate = fn (store) -> fn (session_id: str)
   else str_eq (map_get store session_id) submitted
   ;
 
-// Emit the hidden form input in one line. Token is embedded raw —
-// callers must ensure the token isn't ever a value from user input
-// (which csrf_token_for guarantees via gen_request_id).
+// Emit the hidden form input in one line.
+//
+// The token is embedded raw here, and the rule "callers must ensure the token
+// is never a value from user input" is a comment -- which is the shape this
+// tree has learned to distrust: csrf_token_for does guarantee it today, and
+// nothing makes that stay true.
+//
+// `csrf_hidden_field` is the same input as a node for contrib/html/build,
+// where the value is escaped because that is what render does to an attribute,
+// not because anyone remembered. Kept beside the string version rather than
+// replacing it: the callers that concatenate strings still need one.
 let csrf_hidden_input = fn (token: str) ->
   "<input type=\"hidden\" name=\"_csrf\" value=\"" ++ token ++ "\">"
   ;

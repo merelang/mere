@@ -54,6 +54,8 @@ import "../contrib/http/router.mere";
 import "../contrib/http/cookie.mere";
 import "../contrib/http/session.mere";
 import "../contrib/http/csrf.mere";
+import "../contrib/http/csrf_field.mere";
+import "../contrib/html/build.mere";
 import "../contrib/http/basic_auth.mere";
 import "../contrib/http/metrics.mere";
 import "../contrib/http/cache.mere";
@@ -100,22 +102,22 @@ let form_field = fn (name: str) ->
 
 let home = fn (req: str) ->
   let _ = http_set_content_type "text/html; charset=utf-8" in
-  "<!doctype html><title>admin dash</title>" ++
-  "<h1>mere admin dash</h1>" ++
-  "<p><a href=/admin/login>log in</a> to see the dashboard.</p>" ++
-  "<p><a href=/metrics>/metrics</a> (scraper / s3cret via Basic Auth).</p>\n"
+  page "admin dash"
+    [ El ("h1", Nil, [Text "mere admin dash"])
+    , El ("p", Nil, [El ("a", [("href", "/admin/login")], [Text "log in"]), Text " to see the dashboard."])
+    , El ("p", Nil, [El ("a", [("href", "/metrics")], [Text "/metrics"]),
+                     Text " (scraper / s3cret via Basic Auth)."]) ]
   ;
 
 let login_form = fn (req: str) ->
   let _ = cache_no_store () in
   let _ = http_set_content_type "text/html; charset=utf-8" in
-  "<!doctype html><title>login</title>" ++
-  "<h1>log in</h1>" ++
-  "<form method=POST action=/admin/login>" ++
-  "<label>user <input name=user></label>" ++
-  "<label>pass <input name=pass type=password></label>" ++
-  "<button>log in</button>" ++
-  "</form>\n"
+  page "login"
+    [ El ("h1", Nil, [Text "log in"])
+    , El ("form", [("method", "POST"), ("action", "/admin/login")],
+        [ El ("label", Nil, [Text "user ", El ("input", [("name", "user")], Nil)])
+        , El ("label", Nil, [Text "pass ", El ("input", [("name", "pass"), ("type", "password")], Nil)])
+        , El ("button", Nil, [Text "log in"]) ]) ]
   ;
 
 let login = fn (req: str) ->
@@ -147,17 +149,21 @@ let dashboard = fn (req: str) ->
     let tok = csrf_token_for csrf_store sid in
     let _ = cache_no_store () in
     let _ = http_set_content_type "text/html; charset=utf-8" in
-    "<!doctype html><title>dashboard</title>" ++
-    "<h1>dashboard</h1>" ++
-    "<p>Logged in as <code>" ++ html_escape user ++ "</code>. " ++
-    "<form method=POST action=/admin/logout style=\"display:inline\">" ++
-    "<button>log out</button></form></p>" ++
-    "<p>Press <em>run job</em> to acquire the Redis lock, sleep " ++
-      show job_ms ++ " ms, release. Second-instance clicks during the " ++
-      "sleep window see <em>contended</em>.</p>" ++
-    "<form method=POST action=/admin/jobs/kick>" ++
-    csrf_hidden_input tok ++
-    "<button>run job</button></form>\n"
+    page "dashboard"
+      [ El ("h1", Nil, [Text "dashboard"])
+      , El ("p", Nil,
+          [ Text "Logged in as ", El ("code", Nil, [Text user]), Text ". "
+          , El ("form", [("method", "POST"), ("action", "/admin/logout"), ("style", "display:inline")],
+              [El ("button", Nil, [Text "log out"])]) ])
+      , El ("p", Nil,
+          [ Text "Press ", El ("em", Nil, [Text "run job"])
+          , Text (" to acquire the Redis lock, sleep " ++ show job_ms ++ " ms, release. "
+                  ++ "Second-instance clicks during the sleep window see ")
+          , El ("em", Nil, [Text "contended"]), Text "." ])
+      // The token is a node now, so its value is escaped by render rather than
+      // by the caller having read a comment.
+      , El ("form", [("method", "POST"), ("action", "/admin/jobs/kick")],
+          [csrf_hidden_field tok, El ("button", Nil, [Text "run job"])]) ]
   ;
 
 let jobs_kick = fn (req: str) ->
