@@ -36,6 +36,7 @@ import "../contrib/http/security.mere";
 import "../contrib/http/cors.mere";
 import "../contrib/http/static.mere";
 import "../contrib/http/router.mere";
+import "../contrib/http/mount.mere";
 import "../contrib/http/escape.mere";
 import "../contrib/html/build.mere";
 import "../contrib/kv/kv.mere";
@@ -305,46 +306,10 @@ in
 
 // Extract path (no query) from raw req.
 
-// Handle /page/<slug>, /page/<slug>/history, /page/<slug>/v/<n>, /edit/<slug>.
-// Returns "" if not a match — the caller renders 404 in that case.
-let dispatch_path = fn (path: str) ->
-  let p_prefix = "/page/" in
-  let e_prefix = "/edit/" in
-  if str_starts_with path p_prefix then
-    let after = substring path (str_len p_prefix) (str_len path) in
-    // after = `<slug>` or `<slug>/history` or `<slug>/v/<n>`
-    let slash = str_index_of after "/" in
-    if slash < 0 then
-      if valid_slug after then render_page after (latest_version after)
-      else let _ = http_set_status 404 in "invalid slug\n"
-    else
-      let slug = substring after 0 slash in
-      let rest = substring after (slash + 1) (str_len after) in
-      if not (valid_slug slug) then
-        let _ = http_set_status 404 in "invalid slug\n"
-      else if str_eq rest "history" then render_history_page slug
-      else if str_starts_with rest "v/" then
-        let vs = substring rest 2 (str_len rest) in
-        render_page slug (parse_int_or_zero vs)
-      else
-        let _ = http_set_status 404 in "unknown page sub-route\n"
-  else if str_starts_with path e_prefix then
-    let slug = substring path (str_len e_prefix) (str_len path) in
-    if valid_slug slug then render_edit_form slug
-    else let _ = http_set_status 404 in "invalid slug\n"
-  else ""
-in
-
 let not_found = fn (req: str) ->
-  let path = req_path req in
-  let attempted = dispatch_path path in
-  if str_eq attempted "" then
-    let _ = http_set_status 404 in "not found: " ++ path ++ "\n"
-  else attempted
+  let _ = http_set_status 404 in "not found: " ++ req_path req ++ "\n"
 in
 
-// The router only owns fixed API paths and /. Dynamic routes are
-// handled by not_found → dispatch_path.
 let history_api_h = fn (req: str) ->
   // /api/pages/<slug>/history — parse slug out of the request line.
   let path = req_path req in
@@ -364,24 +329,50 @@ let history_api_h = fn (req: str) ->
       else page_history_json slug
 in
 
-let routes =
-  Cons (route "GET"  "/"                home_h,
-  Cons (route "GET"  "/api/pages"       pages_list_h,
-  Cons (route "POST" "/api/pages"       page_save_h,
-  Nil))) in
+// Every endpoint in one list. This app used to keep three of them in the
+// router and match the other five by hand in `dispatch_path`, with the comment
+// "the router only owns fixed API paths" -- but every one of those five is a
+// pattern the router can express, and matching them by hand meant the set of
+// endpoints existed nowhere a sweep could read it.
+//
+// ANONYMOUS EDITING IS THE POINT OF THIS DEMO, so most of these are `Anon`:
+// the acl is a declaration of what a route may do, not a wish that it were
+// guarded. `POST /api/pages` writes a revision for anybody, by design.
+let cap1 = fn (caps: str list) -> match caps with Cons (c, _) -> c | Nil -> "";
+let cap2 = fn (caps: str list) ->
+  match caps with Cons (_, Cons (c, _)) -> c | _ -> "";
 
-// The /api/pages/<slug>/history endpoint is dynamic too — put it in the
-// dispatch path as a special case above the "static match" fall-through.
-let dispatch_with_api = fn (req: str) ->
-  let path = req_path req in
-  if str_starts_with path "/api/pages/" && (
-       let n = str_len path in
-       n > 8 && str_eq (substring path (n - 8) n) "/history") then
-    history_api_h req
-  else not_found req
-in
+let with_slug = fn (f) -> fn (caps: str list) -> fn (req: str) ->
+  let slug = cap1 caps in
+  if valid_slug slug then f slug
+  else let _ = http_set_status 404 in "invalid slug\n"
+  ;
 
-let handle_routed = router routes dispatch_with_api in
+let mounts = [
+  MExact   ("GET",  "/",                      ReadOnly, home_h),
+  MExact   ("GET",  "/api/pages",             ReadOnly, pages_list_h),
+  MExact   ("POST", "/api/pages",             Anon,     page_save_h),
+  MPattern ("GET",  "/api/pages/:slug/history", ReadOnly,
+            with_slug (fn (slug: str) -> page_history_json slug)),
+  MPattern ("GET",  "/page/:slug",            ReadOnly,
+            with_slug (fn (slug: str) -> render_page slug (latest_version slug))),
+  MPattern ("GET",  "/page/:slug/history",    ReadOnly,
+            with_slug (fn (slug: str) -> render_history_page slug)),
+  MPattern ("GET",  "/page/:slug/v/:n",       ReadOnly,
+            fn (caps: str list) -> fn (req: str) ->
+              let slug = cap1 caps in
+              if valid_slug slug then render_page slug (parse_int_or_zero (cap2 caps))
+              else let _ = http_set_status 404 in "invalid slug\n"),
+  MPattern ("GET",  "/edit/:slug",            ReadOnly,
+            with_slug (fn (slug: str) -> render_edit_form slug))
+];
+
+let routes_manifest_h = fn (req: str) ->
+  let _ = http_set_content_type "text/plain" in manifest mounts
+  ;
+
+let handle_routed =
+  router (Cons (route "GET" "/_routes" routes_manifest_h, entries mounts)) not_found in
 let handle_with_static = serve_static_fallback "/static/" "examples/wiki" handle_routed in
 
 let _ = print ("starting wiki on :8080 (pages=" ++ pages_db_path ++ ")") in
