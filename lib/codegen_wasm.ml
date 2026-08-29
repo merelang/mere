@@ -343,7 +343,10 @@ let file_pio_used = ref false
    (--component on a unit/CLI program). Command components get real WASI via
    the wasi_snapshot_preview1 adapter; args() returns the actual argv. *)
 let wasm_component_command = ref false
-let wasm_args_host_used = ref false  (* args() on a plain host: emit $__lang_args_host + arg_count/arg_get imports *)
+let wasm_args_host_used = ref false
+let wasm_run_host_used = ref false
+let wasm_env_host_used = ref false
+let wasm_fexists_host_used = ref false  (* args() on a plain host: emit $__lang_args_host + arg_count/arg_get imports *)
 let wasm_args_used = ref false  (* command component called args() -> emit $__lang_args + wasi args imports *)
 let wasm_time_used = ref false  (* command component called time() -> real $__lang_time via wasi clock_time_get *)
 let wasm_env_used = ref false  (* command component called env_var() -> emit $__lang_env_var + wasi environ imports *)
@@ -3072,10 +3075,16 @@ let rec emit_expr (e : Ast.expr) : unit =
      `getenv` is a user `extern` and resolves through the host import object. *)
   | Ast.App ({ node = Ast.Var "file_exists"; _ }, path_e)
     when not (user_shadows_wasm "file_exists") ->
-    (* no filesystem — File.exist? is always false. *)
+    (* v0.1.350: through the host, which has had file_size / read_file /
+       write_file all along. This answered a constant false under the note "no
+       filesystem", which is true of a browser and not of the runners -- and a
+       false answer is worse than a refusal here, because the caller branches
+       on it and gets "absent" rather than an error. *)
+    wasm_fexists_host_used := true;
     emit_expr path_e;
-    emit_instr "drop";
-    emit_instr "i64.const 0"
+    emit_instr "i32.wrap_i64";
+    emit_instr "call $file_exists_h";
+    emit_instr "i64.extend_i32_s"
   | Ast.App ({ node = Ast.Var "random_int"; _ }, n_e)
     when not (user_shadows_wasm "random_int") ->
     (* No RNG wired on the Wasm host yet -- deterministic 0 (refine to a host
@@ -3109,10 +3118,19 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_float_alloc_from_f64_on_stack ()
   | Ast.App ({ node = Ast.Var "run"; _ }, cmd_e)
     when not (user_shadows_wasm "run") ->
-    (* no subprocess on a browser/worker host — commands "fail" (nonzero). *)
+    (* v0.1.350: through the host's system(), which the runners have supplied
+       for as long as args' arg_count/arg_get were there. This used to drop the
+       command and answer 127 with the note "no subprocess on a browser/worker
+       host" — true of a browser and false of scripts/run_wasm.js, so the same
+       program ran a command on C and silently did nothing on Wasm while
+       docs/host-matrix.md called both `yes`. Exactly the shape v0.1.159 fixed
+       for args. A host without a subprocess still answers, because its own
+       system() decides what to return. *)
+    wasm_run_host_used := true;
     emit_expr cmd_e;
-    emit_instr "drop";
-    emit_instr "i64.const 127"
+    emit_instr "i32.wrap_i64";
+    emit_instr "call $system_h";
+    emit_instr "i64.extend_i32_s"
   | Ast.App ({ node = Ast.Var "args"; _ }, _)
     when not (user_shadows_wasm "args") ->
     if !wasm_component_command then begin
@@ -3140,10 +3158,16 @@ let rec emit_expr (e : Ast.expr) : unit =
       emit_instr "i32.wrap_i64";
       emit_instr "call $__lang_env_var"
     end else begin
-      (* no environ on a browser/worker host — env_var is always None. *)
+      (* v0.1.350: through the host's getenv(), which returns 0 for absent and a
+         str pointer otherwise -- the two cases `str option` already has. This
+         used to drop the name and answer None with the note "no environ on a
+         browser/worker host", true of a browser and false of the runners, so a
+         program read its environment on C and saw nothing on Wasm. Same shape
+         as run and as args before it. *)
+      wasm_env_host_used := true;
       emit_expr name_e;
-      emit_instr "drop";
-      emit_expr { e with Ast.node = Ast.Constr ("None", None) }
+      emit_instr "i32.wrap_i64";
+      emit_instr "call $__lang_env_var_host"
     end
 
   | Ast.App ({ node = Ast.Var "exit"; _ }, code_e)
@@ -9471,6 +9495,15 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       \  (import \"env\" \"file_close\" (func $file_close_h (param i32) (result i32)))\n\
       \  (import \"env\" \"file_size\" (func $file_size_h (param i32) (result i32)))\n"
     else "")
+    ^ (if !wasm_run_host_used then
+      "  (import \"env\" \"system\" (func $system_h (param i32) (result i32)))\n"
+    else "")
+    ^ (if !wasm_env_host_used then
+      "  (import \"env\" \"getenv\" (func $getenv_h (param i32) (result i32)))\n"
+    else "")
+    ^ (if !wasm_fexists_host_used then
+      "  (import \"env\" \"file_exists\" (func $file_exists_h (param i32) (result i32)))\n"
+    else "")
   in
   let boundary_shims =
     "  (func $puts (param i64) (call $puts_h (i32.wrap_i64 (local.get 0))))\n"
@@ -9743,6 +9776,33 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      arguments while the same source on C saw them all. A browser host
      reports 0 and this yields Nil, which is the behaviour the hardcoded
      empty list got right. *)
+  (* v0.1.350: env_var through the host's getenv, which answers 0 for an
+     absent name and a str pointer otherwise -- the two cases `str option`
+     already carries. The component path builds the same option from wasi
+     environ_get; this is the plain-host twin of it. *)
+  let env_host_section =
+    if not !wasm_env_host_used then "" else
+    let some_t = (try Hashtbl.find variant_tags "Some" with Not_found -> 1) in
+    let none_t = (try Hashtbl.find variant_tags "None" with Not_found -> 0) in
+    Printf.sprintf
+      "  (func $__lang_env_var_host (param $name i32) (result i64)\n\
+      \    (local $p i32) (local $cell i32)\n\
+      \    (local.set $p (call $getenv_h (local.get $name)))\n\
+      \    (if (result i64) (i32.eqz (local.get $p))\n\
+      \      (then\n\
+      \        (local.set $cell (global.get $__lang_bump))\n\
+      \        (global.set $__lang_bump (i32.add (local.get $cell) (i32.const 16)))\n\
+      \        (i64.store offset=0 (local.get $cell) (i64.const %d))\n\
+      \        (i64.extend_i32_s (local.get $cell)))\n\
+      \      (else\n\
+      \        (local.set $cell (global.get $__lang_bump))\n\
+      \        (global.set $__lang_bump (i32.add (local.get $cell) (i32.const 16)))\n\
+      \        (i64.store offset=0 (local.get $cell) (i64.const %d))\n\
+      \        (i64.store offset=8 (local.get $cell) (i64.extend_i32_s (local.get $p)))\n\
+      \        (i64.extend_i32_s (local.get $cell)))))\n"
+      none_t some_t
+  in
+
   let args_host_section =
     if not !wasm_args_host_used then "" else
     Printf.sprintf
@@ -10538,7 +10598,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     list_str_runtime_section
     vec_runtime_section
     vec_higher_order_section strbuf_section map_key_eq_section map_runtime_section
-    (args_host_section ^ vec_to_list_section) list_len_section
+    (args_host_section ^ env_host_section ^ vec_to_list_section) list_len_section
     fn_section component_section local_decl indented_body
   |> prune_dead_fail_checks
 

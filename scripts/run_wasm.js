@@ -252,6 +252,13 @@ const wasmPath = process.argv[2];
     file_size: (pathPtr) => {
       try { return fs.statSync(readCStr(pathPtr)).size; } catch (e) { return 0; }
     },
+    // The Wasm backend used to answer file_exists with a constant false and
+    // call it "no filesystem", which is true of a browser and not of this
+    // runner -- which has had file_size, read_file and write_file all along.
+    // A caller's `if file_exists p` took the wrong branch and nothing said why.
+    file_exists: (pathPtr) => {
+      try { fs.statSync(readCStr(pathPtr)); return 1; } catch (e) { return 0; }
+    },
     file_close: (handle) => {
       const fd = openFiles[handle];
       if (fd !== undefined) {
@@ -370,9 +377,13 @@ const wasmPath = process.argv[2];
     getenv: (namePtr) => {
       const name = readCStr(namePtr);
       const v = process.env[name];
-      if (v === undefined) return 0;  // NULL — Mere expects str, segfault risk
-      // byte-safe str layout: [i32 len][bytes][NUL]; return byte0 (ptr+4).
-      const body = Buffer.from(v);
+      if (v === undefined) return 0;  // NULL — absent, which env_var reads as None
+      // This function had no return for the present case: it built `body` and
+      // fell off the end, so every lookup answered undefined, which reaches
+      // Wasm as 0 and reads as "not set". Nothing noticed because the Wasm
+      // backend never called it -- env_var was lowered to a constant None, so
+      // the host's half of the hole was invisible behind the compiler's.
+      return writeStr(v);
     },
     setenv: (namePtr, valuePtr, _overwrite) => {
       const name = readCStr(namePtr);

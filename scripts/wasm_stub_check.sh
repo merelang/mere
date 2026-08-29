@@ -67,7 +67,9 @@ host_calls "$tmp/base.wat" > "$tmp/base.txt"
 probe() {
   case $1 in
     run)             echo 'run "echo mere_stub_probe"' ;;
-    env_var)         echo 'env_var "MERE_STUB_PROBE"' ;;
+    # A str option prints differently on the two backends, so the probe answers
+    # with the value itself -- which is what the question is about anyway.
+    env_var)         echo 'match env_var "MERE_STUB_PROBE" with Some v -> v | None -> "unset"' ;;
     file_exists)     echo 'if file_exists "/etc/hosts" then "yes" else "no"' ;;
     # A pointer is not an answer: `args ()` prints an address on C. Its length is.
     args)            echo 'show (list_len (args ()))' ;;
