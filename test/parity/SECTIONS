@@ -47,6 +47,7 @@ metrics_used                     __mere_metrics_inc_fn     wasm       test/parit
 vec_to_list_used                 mere_vec_to_list          wasm       test/parity/show_composite.mere
 wasm_args_used                   __lang_args               wasm       test/parity/args_empty.mere
 wasm_args_host_used              __lang_args_host          wasm       test/parity/args_empty.mere
+wasm_env_host_used               __lang_env_var_host       wasm       test/parity/env_var_host.mere
 wasm_time_used                   __lang_time               wasm       test/parity/arith.mere
 wasm_env_used                    __lang_env_var            component  test/component/env_var.mere
 wasm_stdin_used                  __lang_read_stdin         component  test/component/read_stdin.mere

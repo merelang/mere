@@ -1,0 +1,15 @@
+// The host-backed env_var, which exists only because a program asks for it.
+//
+// v0.1.350 stopped lowering env_var to a constant None on Wasm and sent it to
+// the host's getenv instead. That emits $__lang_env_var_host, a runtime section
+// gated on a flag, and text that is never emitted is never validated -- which
+// is what test/parity/SECTIONS exists to prevent.
+//
+// The value is not asserted: the environment differs between a developer's
+// shell and CI, and this file has to answer the same thing on four backends.
+// What IS the same everywhere is that a name nobody sets is absent, and that
+// asking twice gives the same answer.
+let missing = env_var "MERE_DEFINITELY_UNSET_a7f3" in
+let _ = print (match missing with Some _ -> "present" | None -> "absent") in
+let again = env_var "MERE_DEFINITELY_UNSET_a7f3" in
+print (match again with Some _ -> "present" | None -> "absent")
