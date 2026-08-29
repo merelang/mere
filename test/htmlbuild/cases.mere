@@ -4,6 +4,7 @@
 // attribute case that people leave out when they escape "the content".
 import "../../contrib/html/build.mere";
 import "../../contrib/http/csrf_field.mere";
+import "../../contrib/http/escape.mere";
 
 let fails = vec_new ();
 let _ = vec_push fails 0;
@@ -91,8 +92,16 @@ let _ = check "as Script the code survives and the closing tag does not"
   (render (El ("script", Nil, [Script js])))
   "<script>if (a < b) send('<\\/script><img src=x onerror=1>')</script>" in
 
+// --- the fifth user's feed ------------------------------------------------
+// CDATA has exactly one way out, `]]>`, and there is no escape for it inside a
+// section: the only correct handling is to end the section and start another.
+// examples/http_mini_blog put a post body into <![CDATA[ ... ]]> raw.
+let _ = check "a body carrying ]]> cannot end its own CDATA section"
+  (cdata_escape "hello ]]><script>x</script>")
+  "hello ]]]]><![CDATA[><script>x</script>" in
+
 let n = vec_get total 0 in
 let f = vec_get fails 0 in
 let _ = print ("htmlbuild: " ++ show n ++ " cases, " ++ show f ++ " failed") in
-if n < 14 then let _ = print "FAIL: fewer cases ran than declared" in 1
+if n < 15 then let _ = print "FAIL: fewer cases ran than declared" in 1
 else if f > 0 then 1 else 0
