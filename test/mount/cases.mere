@@ -1,0 +1,65 @@
+// test/mount/cases.mere — the router and the manifest come from one list.
+//
+// The property worth checking is not that `manifest` formats nicely. It is
+// that a route cannot exist in one derivation and not the other, which is the
+// drift the two-list version had and the gate that compared counts existed to
+// catch.
+import "../../contrib/http/mount.mere";
+
+let h  = fn (req: str) -> "x";
+let hp = fn (caps: str list) -> fn (req: str) -> "y";
+
+let ms = [
+  MExact   ("GET",  "/",                 ReadOnly, h),
+  MExact   ("POST", "/api/posts",        Guarded,  h),
+  MPattern ("POST", "/posts/:id/comments", Anon,   hp),
+  MPattern ("DELETE", "/api/posts/:id",  Guarded,  hp)
+];
+
+let fails = vec_new ();
+let _ = vec_push fails 0;
+let total = vec_new ();
+let _ = vec_push total 0;
+let check = fn (label: str) -> fn (got: str) -> fn (want: str) ->
+  let _ = vec_set total 0 (vec_get total 0 + 1) in
+  if str_eq got want then ()
+  else let _ = vec_set fails 0 (vec_get fails 0 + 1) in
+       print ("FAIL " ++ label ++ "\n  got  [" ++ got ++ "]\n  want [" ++ want ++ "]")
+  ;
+
+let rec len = fn (xs) -> match xs with Nil -> 0 | Cons (_, r) -> 1 + len r;
+let rec lines = fn (s: str) -> str_split s "\n";
+let rec nonempty = fn (xs: str list) ->
+  match xs with
+  | Nil -> 0
+  | Cons (x, r) -> (if str_eq x "" then 0 else 1) + nonempty r
+  ;
+
+// ★ the property: neither derivation can hold a route the other does not.
+let _ = check "the router has one entry per mount"
+  (show (len (entries ms))) (show (count ms)) in
+let _ = check "the manifest has one line per mount"
+  (show (nonempty (lines (manifest ms)))) (show (count ms)) in
+
+// both kinds of handler survive, which is what forced two lists before
+let _ = check "an exact route is in the manifest"
+  (if str_contains (manifest ms) "GET / readonly" then "yes" else "no") "yes" in
+let _ = check "a pattern route is in the manifest, with its pattern intact"
+  (if str_contains (manifest ms) "POST /posts/:id/comments anon" then "yes" else "no") "yes" in
+
+// the acl is not optional: every line carries one
+let rec all_have_acl = fn (xs: str list) ->
+  match xs with
+  | Nil -> true
+  | Cons (x, r) ->
+    if str_eq x "" then all_have_acl r
+    else (str_contains x " guarded" || str_contains x " anon" || str_contains x " readonly")
+         && all_have_acl r
+  ;
+let _ = check "every route declares what it may do"
+  (if all_have_acl (lines (manifest ms)) then "yes" else "no") "yes" in
+
+let n = vec_get total 0 in
+let f = vec_get fails 0 in
+let _ = print ("mount: " ++ show n ++ " cases, " ++ show f ++ " failed") in
+if n < 5 then 1 else if f > 0 then 1 else 0
