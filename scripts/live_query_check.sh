@@ -13,8 +13,10 @@
 # THE NEGATIVES ARE THE TEST. A module answering YES to everything passes every
 # positive case and is worth nothing, because that is what store already does.
 # What has to be shown is that a write to `sessions` leaves a read of `posts`
-# alone -- 8 of the 24 cases are exactly that, and turning `affects` into a
-# constant `true` fails 9 of them.
+# alone -- 8 of the 37 cases are exactly that, and turning `affects` into a
+# constant `true` fails 9 of them. The registry cases go further and assert the
+# COUNT: a write must wake exactly the channels it makes stale, so a registry
+# that woke everything would fail even though every subscriber got its update.
 #
 # It also runs on C / LLVM / Wasm, not just the interpreter: the derivation is
 # pure string work, so a backend that disagrees about it is a backend that
@@ -43,8 +45,8 @@ rc=$(run_interp)
 line=$(grep '^live_derive:' "$tmp/interp.out" | head -1)
 [ -n "$line" ] || { echo "live_query: FAIL — interpreter produced no summary"; cat "$tmp/interp.out"; exit 1; }
 cases=$(echo "$line" | sed 's/.*: \([0-9]*\) cases.*/\1/')
-if [ "${cases:-0}" -lt 24 ]; then
-  echo "live_query: FAIL — only ${cases:-0} cases ran; the file declares 24"
+if [ "${cases:-0}" -lt 37 ]; then
+  echo "live_query: FAIL — only ${cases:-0} cases ran; the file declares 37"
   exit 1
 fi
 if [ "$rc" != "0" ]; then
