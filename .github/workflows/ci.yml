@@ -257,6 +257,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/live_soundness_check.sh
 
+      - name: htmlbuild (the writing half escapes, on every backend)
+        if: ${{ !cancelled() }}
+        run: sh scripts/htmlbuild_check.sh
+
       - name: budget (sizes inside their bands, and what a page owes its reader)
         if: ${{ !cancelled() }}
         run: sh scripts/budget_check.sh
