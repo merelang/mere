@@ -52,6 +52,7 @@ import "../contrib/http/ratelimit.mere";
 import "../contrib/http/access_log.mere";
 import "../contrib/http/cors.mere";
 import "../contrib/http/security.mere";
+import "../contrib/html/build.mere";
 import "../contrib/kv/kv.mere";
 import "../contrib/log/log.mere";
 
@@ -185,33 +186,30 @@ let handle = fn (req: str) ->
 
   else if str_eq path "/" && str_eq method "GET" then
     let _ = http_set_content_type "text/html; charset=utf-8" in
-    "<!doctype html><meta charset=utf-8><title>users db demo</title>" ++
-    "<h1>users db demo</h1>" ++
-    "<p>persistent user directory backed by contrib/kv (log-structured, on-disk)</p>" ++
-    "<form id=f>" ++
-    "user: <input name=user value=alice> " ++
-    "pass: <input name=pass value=secret> " ++
-    "<button data-a=signup>signup</button> " ++
-    "<button data-a=login>login</button>" ++
-    "</form>" ++
-    "<p>" ++
-    "<button id=who>whoami</button> " ++
-    "<button id=list>list users</button> " ++
-    "<button id=logout>logout</button>" ++
-    "</p>" ++
-    "<pre id=out></pre>" ++
-    "<script>" ++
-    "const out=document.getElementById(\"out\");" ++
-    "const f=document.getElementById(\"f\");" ++
-    "const call=(m,p,c)=>fetch(p,\{method:m,credentials:\"same-origin\"}).then(r=>r.text()).then(t=>out.textContent=(c||\"\")+t);" ++
-    "f.onsubmit=e=>\{e.preventDefault();};" ++
-    "for(const b of f.querySelectorAll(\"button\"))b.onclick=e=>\{e.preventDefault();" ++
-    "const q=new URLSearchParams(new FormData(f)).toString();" ++
-    "call(\"POST\",\"/\"+b.dataset.a+\"?\"+q, b.dataset.a+\": \");};" ++
-    "document.getElementById(\"who\").onclick=()=>call(\"GET\",\"/whoami\", \"whoami: \");" ++
-    "document.getElementById(\"list\").onclick=()=>call(\"GET\",\"/users\", \"users: \");" ++
-    "document.getElementById(\"logout\").onclick=()=>call(\"POST\",\"/logout\", \"logout: \");" ++
-    "</script>\n"
+    let js = "const out=document.getElementById(\"out\");"
+      ++ "const f=document.getElementById(\"f\");"
+      ++ "const call=(m,p,c)=>fetch(p,\{method:m,credentials:\"same-origin\"}).then(r=>r.text()).then(t=>out.textContent=(c||\"\")+t);"
+      ++ "f.onsubmit=e=>\{e.preventDefault();};"
+      ++ "for(const b of f.querySelectorAll(\"button\"))b.onclick=e=>\{e.preventDefault();"
+      ++ "const q=new URLSearchParams(new FormData(f)).toString();"
+      ++ "call(\"POST\",\"/\"+b.dataset.a+\"?\"+q, b.dataset.a+\": \");};"
+      ++ "document.getElementById(\"who\").onclick=()=>call(\"GET\",\"/whoami\", \"whoami: \");"
+      ++ "document.getElementById(\"list\").onclick=()=>call(\"GET\",\"/users\", \"users: \");"
+      ++ "document.getElementById(\"logout\").onclick=()=>call(\"POST\",\"/logout\", \"logout: \");" in
+    page "users db demo"
+      [ El ("h1", Nil, [Text "users db demo"])
+      , El ("p", Nil, [Text "persistent user directory backed by contrib/kv (log-structured, on-disk)"])
+      , El ("form", [("id", "f")],
+          [ Text "user: ", El ("input", [("name", "user"), ("value", "alice")], Nil)
+          , Text " pass: ", El ("input", [("name", "pass"), ("value", "secret")], Nil)
+          , Text " ", El ("button", [("data-a", "signup")], [Text "signup"])
+          , Text " ", El ("button", [("data-a", "login")], [Text "login"]) ])
+      , El ("p", Nil,
+          [ El ("button", [("id", "who")], [Text "whoami"]), Text " "
+          , El ("button", [("id", "list")], [Text "list users"]), Text " "
+          , El ("button", [("id", "logout")], [Text "logout"]) ])
+      , El ("pre", [("id", "out")], Nil)
+      , El ("script", Nil, [Script js]) ]
 
   else
     let _ = http_set_status 404 in
