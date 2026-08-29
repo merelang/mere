@@ -1,0 +1,37 @@
+// GENERATED from test/boundary/proto/v1.proto — do not edit.
+// Regenerate with `mere examples/protoc_mere.mere <file.proto>` and commit;
+// scripts/proto_gen_parity.sh diffs this against a fresh run.
+
+import "../../../contrib/proto/wire.mere";
+
+type Req = { id: int, title: str };
+let rec get_Req_id = fn (b: bytes, i: int, acc) ->
+  if i >= bytes_len b then acc
+  else
+    let (f, wt, j) = Wire.get_tag b i in
+    if f == 1 && wt == Wire.varint then
+      let (v, k) = Wire.get_varint b j in
+      get_Req_id b k v
+    else get_Req_id b (Wire.skip_value b j wt) acc;
+let rec get_Req_title = fn (b: bytes, i: int, acc) ->
+  if i >= bytes_len b then acc
+  else
+    let (f, wt, j) = Wire.get_tag b i in
+    if f == 2 && wt == Wire.delimited then
+      let (v, k) = Wire.get_delimited b j in
+      get_Req_title b k (str_of_bytes v)
+    else get_Req_title b (Wire.skip_value b j wt) acc;
+let decode_Req = fn (b: bytes) ->
+  Req { id = get_Req_id b 0 0, title = get_Req_title b 0 "" };
+let encode_Req = fn (v: Req) ->
+  let b = vec_new () in
+  let _ = if v.id != 0 then
+    let _ = Wire.tag b 1 Wire.varint in
+    let _ = Wire.put_varint b v.id in
+    () else () in
+  let _ = if not (str_eq v.title "") then
+    let _ = Wire.tag b 2 Wire.delimited in
+    let _ = Wire.put_str b v.title in
+    () else () in
+  bytes_of_vec b;
+()

@@ -1,0 +1,3 @@
+// The same change as v1 -> v2 on the JSON lane: one field added.
+syntax = "proto3";
+message Req { int64 id = 1; string title = 2; string tags = 3; }

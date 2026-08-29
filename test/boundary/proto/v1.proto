@@ -1,0 +1,3 @@
+// The same boundary as test/boundary/v1.mere, described instead of hand-written.
+syntax = "proto3";
+message Req { int64 id = 1; string title = 2; }

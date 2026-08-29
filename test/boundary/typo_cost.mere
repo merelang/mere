@@ -1,0 +1,58 @@
+// test/boundary/typo_cost.mere — what "fill the missing key with a default"
+// costs, measured rather than asserted.
+//
+// tolerant.mere makes a boundary evolvable: a payload written before a field
+// existed still decodes. The obvious next step is to make that the DEFAULT --
+// and this is the case that says not to.
+//
+// A name-keyed decoder cannot tell "the sender omitted this" from "the sender
+// misspelled it". Under the strict decoder a typo is a loud failure. Under a
+// filling one the misspelled key is an extra (ignored), the real key is absent
+// (filled with the default), and the server is told the field was not sent.
+// The sender believes they sent it.
+//
+// This is why protobuf numbers its fields: the number cannot be misspelled.
+// Half-adopting the convention -- defaults without numbers -- keeps the half
+// that loses information and drops the half that protects it.
+import "tolerant.mere";
+
+type Req = { id: int, title: str, slug: str option };
+let witness = Req { id = 0, title = "", slug = None };
+
+let correct = "\{\"id\":1,\"title\":\"t\",\"slug\":\"my-post\"}";
+let typo    = "\{\"id\":1,\"title\":\"t\",\"slgu\":\"my-post\"}";
+let absent  = "\{\"id\":1,\"title\":\"t\"}";
+
+let got = fn (s: str) ->
+  match (of_json_opt s : Req option) with
+  | None -> "refused"
+  | Some r -> (match r.slug with None -> "slug=absent" | Some v -> "slug=" ++ v)
+  ;
+
+let fails = vec_new ();
+let _ = vec_push fails 0;
+let check = fn (label: str) -> fn (g: str) -> fn (want: str) ->
+  if str_eq g want then ()
+  else let _ = vec_set fails 0 (vec_get fails 0 + 1) in
+       print ("FAIL " ++ label ++ ": got " ++ g ++ " want " ++ want)
+  ;
+
+// strict: a typo is refused, which is the behaviour worth keeping
+let _ = check "strict/correct" (got correct) "slug=my-post" in
+let _ = check "strict/typo"    (got typo)    "refused" in
+let _ = check "strict/absent"  (got absent)  "refused" in
+
+// filling: the typo becomes "not sent", indistinguishable from absent
+let _ = check "fill/correct" (got (fill witness correct)) "slug=my-post" in
+let _ = check "fill/typo"    (got (fill witness typo))    "slug=absent" in
+let _ = check "fill/absent"  (got (fill witness absent))  "slug=absent" in
+
+// The cost, stated as the thing a gate can hold: filling makes two DIFFERENT
+// inputs produce the SAME answer. That is the whole finding.
+let _ = check "a typo and an omission become indistinguishable"
+              (if str_eq (got (fill witness typo)) (got (fill witness absent))
+               then "same" else "different") "same" in
+
+let f = vec_get fails 0 in
+let _ = print ("typo_cost: 7 cases, " ++ show f ++ " failed") in
+if f > 0 then 1 else 0
