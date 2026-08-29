@@ -1,0 +1,85 @@
+// examples/nojs/server.mere — a flow that completes with no JavaScript at all.
+//
+// D-5 in the definition is not an aesthetic: the code arrives over the network
+// on every visit, and sometimes it does not. An app whose forms work as HTML
+// degrades when delivery fails; an app with no fallback fails totally. That is
+// partial-failure engineering, and like any other claim about failure it is
+// worth nothing unless something exercises it.
+//
+// So this serves a real <form> -- method and action in the markup, fields with
+// names, a submit button -- and a handler that reads
+// application/x-www-form-urlencoded, not JSON. curl runs no JavaScript by
+// construction, so scripts/nojs_check.sh IS a browser with scripting off.
+//
+// The gate reads the form out of the HTML and posts what the form declares,
+// rather than a request written into the script. A hardcoded POST passes
+// against a page whose form is broken, which is the whole thing being checked.
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+
+import "../../contrib/http/router.mere";
+import "../../contrib/http/query.mere";
+import "../../contrib/http/escape.mere";
+
+let comments = vec_new ();
+
+let rec _render = fn (i: int) ->
+  if i >= vec_len comments then ""
+  else "    <li>" ++ html_escape (vec_get comments i) ++ "</li>\n" ++ _render (i + 1)
+  ;
+
+let page = fn (msg: str) ->
+  "<!doctype html>\n<html><head><title>guestbook</title></head><body>\n"
+  ++ "  <h1>guestbook</h1>\n"
+  ++ (if str_eq msg "" then "" else "  <p id=\"flash\">" ++ html_escape msg ++ "</p>\n")
+  ++ "  <ul id=\"entries\">\n" ++ _render 0 ++ "  </ul>\n"
+  ++ "  <form method=\"POST\" action=\"/entries\">\n"
+  ++ "    <input type=\"text\" name=\"author\" value=\"\">\n"
+  ++ "    <input type=\"text\" name=\"body\" value=\"\">\n"
+  ++ "    <button type=\"submit\">Post</button>\n"
+  ++ "  </form>\n"
+  ++ "</body></html>\n"
+  ;
+
+let home_h = fn (_req: str) ->
+  let _ = http_set_content_type "text/html" in page ""
+  ;
+
+let rec lookup = fn (k: str) -> fn (ps: (str * str) list) ->
+  match ps with
+  | Nil -> ""
+  | Cons ((n, v), rest) -> if str_eq n k then v else lookup k rest
+  ;
+
+// The form's own submission: urlencoded body, and a 303 back to the page --
+// the POST/redirect/GET a browser with no script relies on so that reload
+// does not resubmit.
+let create_h = fn (_req: str) ->
+  let ps = parse_query (http_current_body ()) in
+  let author = lookup "author" ps in
+  let body = lookup "body" ps in
+  if str_eq author "" || str_eq body "" then
+    let _ = http_set_status 422 in
+    let _ = http_set_content_type "text/html" in
+    page "author and body are required"
+  else
+    let _ = vec_push comments (author ++ ": " ++ body) in
+    let _ = http_set_status 303 in
+    let _ = http_set_header "Location" "/" in
+    ""
+  ;
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in "not found: " ++ req ++ "\n"
+  ;
+
+let routes =
+  Cons (route "GET" "/" home_h,
+  Cons (route "POST" "/entries" create_h,
+  Nil)) in
+
+let _ = print "nojs server on :8097" in
+http_serve 8097 (router routes not_found)
