@@ -242,7 +242,7 @@ let feed_h = fn (req: str) ->
           "<link>" ++ blog_url ++ "post/" ++ slug ++ "</link>" ++
           "<guid>" ++ blog_url ++ "post/" ++ slug ++ "</guid>" ++
           "<pubDate>" ++ xml_escape created ++ "</pubDate>" ++
-          "<description><![CDATA[" ++ body ++ "]]></description>" ++
+          "<description><![CDATA[" ++ cdata_escape body ++ "]]></description>" ++
         "</item>" in
       render rest (acc ++ item) in
   let items = render rows "" in

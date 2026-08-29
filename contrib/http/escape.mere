@@ -60,3 +60,15 @@ let xml_escape = fn (s: str) ->
 // call sites read as "this is going into HTML" vs "this is going
 // into an RSS/Atom feed".
 let html_escape = fn (s: str) -> xml_escape s;
+
+// CDATA has exactly one way out, the sequence `]]>`, and a section holding a
+// value that contains it ends early. Found in examples/http_mini_blog's RSS
+// feed, where a post body went into <![CDATA[ ... ]]> raw: a body containing
+// `]]>` closed the section and put whatever followed into the feed as markup.
+//
+// There is no escape FOR `]]>` inside CDATA -- the sequence cannot be
+// represented there at all. The only correct handling is to end the section
+// and start another around the `>`, which is what this does. Callers keep
+// writing `"<![CDATA[" ++ cdata_escape v ++ "]]>"` and the split is invisible
+// to any conforming parser.
+let cdata_escape = fn (s: str) -> str_replace s "]]>" "]]]]><![CDATA[>";
