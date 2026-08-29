@@ -249,6 +249,10 @@ jobs:
           sudo apt-get install -y postgresql postgresql-client
           echo "$(pg_config --bindir)" >> "$GITHUB_PATH"
 
+      - name: migration_check (a migration consumes every existing row)
+        if: ${{ !cancelled() }}
+        run: sh scripts/migration_check.sh
+
       - name: live_soundness (a write never leaves a read stale — judged by the database)
         if: ${{ !cancelled() }}
         run: sh scripts/live_soundness_check.sh
