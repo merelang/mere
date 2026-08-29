@@ -253,6 +253,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/live_soundness_check.sh
 
+      - name: authz_coverage (no effect runs as nobody)
+        if: ${{ !cancelled() }}
+        run: sh scripts/authz_coverage_check.sh
+
       - name: live_e2e (the live-read loop over a real socket)
         if: ${{ !cancelled() }}
         run: sh scripts/live_e2e_check.sh

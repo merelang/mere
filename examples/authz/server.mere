@@ -1,0 +1,124 @@
+// examples/authz/server.mere — every effect names the principal it ran as.
+//
+// CVE-2025-29927's shape: authorization lives in a layer ALONG THE PATH, so
+// input that bypasses the layer bypasses the authorization with it. Exposure
+// is a property of the EFFECT, not of the route -- and a grep for the name of
+// the check finds the call without showing that anything is gated by it.
+//
+// So this records, at runtime, the principal every effect ran as. An effect
+// that ran as nobody is the bug, and scripts/authz_coverage_check.sh finds it
+// by walking the route list this server DERIVES FROM ITS OWN ROUTER: a route
+// added here appears there, so a new endpoint cannot be outside the sweep.
+// A hand-kept list of endpoints to test is a list of the ones somebody
+// remembered.
+extern fn http_serve: int -> (str -> str) -> unit;
+extern fn http_current_body: unit -> str;
+extern fn http_get_header: str -> str;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+
+import "../../contrib/http/router.mere";
+
+// ---- the ledger: one line per effect, with who it ran as -----------------
+let ledger = vec_new ();
+
+// An effect may only be performed through this, so it cannot happen without
+// leaving its principal behind. `who` is "" when nobody was established.
+let effect = fn (name: str) -> fn (who: str) ->
+  let _ = vec_push ledger (name ++ " " ++ (if str_eq who "" then "-" else who)) in
+  ()
+  ;
+
+// ---- principals ----------------------------------------------------------
+// A token stands in for a session. The point is not the scheme; it is that a
+// handler receives the principal as a VALUE and cannot perform an effect
+// without one to hand to `effect`.
+let principal_of = fn () ->
+  let tok = http_get_header "X-Token" in
+  if str_eq tok "t-alice" then "alice"
+  else if str_eq tok "t-bob" then "bob"
+  else ""
+  ;
+
+let deny = fn () ->
+  let _ = http_set_status 401 in
+  "unauthorized\n"
+  ;
+
+// ---- handlers ------------------------------------------------------------
+// Guarded: the effect is reached only with a principal in hand.
+let post_create_h = fn (_req: str) ->
+  let who = principal_of () in
+  if str_eq who "" then deny ()
+  else let _ = effect "post_create" who in "created by " ++ who ++ "\n"
+  ;
+
+let post_delete_h = fn (_req: str) ->
+  let who = principal_of () in
+  if str_eq who "" then deny ()
+  else let _ = effect "post_delete" who in "deleted by " ++ who ++ "\n"
+  ;
+
+// Public by declaration, and it performs no effect.
+let health_h = fn (_req: str) ->
+  let _ = http_set_content_type "text/plain" in "ok\n"
+  ;
+
+// ---- the routes, and the list derived from them --------------------------
+// `spec` carries what the sweep needs: whether a route is public. The router
+// and the manifest are built from ONE value, so they cannot drift.
+type spec = Route of str * str * bool;   // method, path, public
+
+let specs = [
+  Route ("POST", "/posts", false),
+  Route ("DELETE", "/posts/1", false),
+  Route ("GET", "/health", true)
+];
+
+let handler_for = fn (m: str) -> fn (p: str) ->
+  if str_eq p "/posts" then post_create_h
+  else if str_eq p "/posts/1" then post_delete_h
+  else health_h
+  ;
+
+let rec build_routes = fn (ss) ->
+  match ss with
+  | Nil -> Nil
+  | Cons (Route (m, p, _), rest) -> Cons (route m p (handler_for m p), build_routes rest)
+  ;
+
+let rec manifest = fn (ss) ->
+  match ss with
+  | Nil -> ""
+  | Cons (Route (m, p, pub), rest) ->
+    m ++ " " ++ p ++ " " ++ (if pub then "public" else "guarded") ++ "\n" ++ manifest rest
+  ;
+
+let rec dump_ledger = fn (i: int) ->
+  if i >= vec_len ledger then "" else vec_get ledger i ++ "\n" ++ dump_ledger (i + 1)
+  ;
+
+let routes_h = fn (_req: str) ->
+  let _ = http_set_content_type "text/plain" in manifest specs
+  ;
+
+let ledger_h = fn (_req: str) ->
+  let _ = http_set_content_type "text/plain" in
+  "count=" ++ show (vec_len ledger) ++ "\n" ++ dump_ledger 0
+  ;
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in "not found: " ++ req ++ "\n"
+  ;
+
+let rec append_r = fn (a) -> fn (b) ->
+  match a with Nil -> b | Cons (x, r) -> Cons (x, append_r r b)
+  ;
+
+let meta_routes =
+  Cons (route "GET" "/_routes" routes_h,
+  Cons (route "GET" "/_ledger" ledger_h,
+  Nil)) in
+
+let _ = print "authz server on :8098" in
+http_serve 8098 (router (append_r (build_routes specs) meta_routes) not_found)
