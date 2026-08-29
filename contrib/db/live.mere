@@ -94,3 +94,46 @@ let rec _overlap = fn (a: str list) -> fn (b: str list) ->
 let affects = fn (write_sql: str) -> fn (read_sql: str) ->
   _overlap (write_tables write_sql) (read_tables read_sql)
   ;
+
+// ---- the registry ---------------------------------------------------------
+//
+// contrib/http/sse pushes to a named channel. A live read therefore needs a
+// name, and something has to hold the read that the name stands for -- so that
+// a write can be turned into "these channels are now stale" without the write
+// site knowing what anybody is watching. That is this registry, and it is the
+// piece between the derivation above and the transport below it.
+//
+// Entries are "<channel>\t<sql>" in one vec: a vec of tuples would need a
+// region parameter here, the same reason contrib/state/store keeps three cells
+// instead of a record.
+//
+//   live_new      : unit -> Live
+//   live_register : Live -> str -> str -> bool   channel, read sql; false if
+//                                                the read is not derivable
+//   live_channels : Live -> str -> str list      write sql -> stale channels
+//   live_size     : Live -> int
+
+let live_new = fn () -> vec_new ();
+
+let live_register = fn (reg) -> fn (channel: str) -> fn (read_sql: str) ->
+  if derivable read_sql then let _ = vec_push reg (channel ++ "\t" ++ read_sql) in true
+  else false
+  ;
+
+let live_size = fn (reg) -> vec_len reg;
+
+let rec _scan = fn (reg) -> fn (i: int) -> fn (write_sql: str) -> fn (acc: str list) ->
+  if i >= vec_len reg then acc
+  else
+    let entry = vec_get reg i in
+    let tab = str_index_of entry "\t" in
+    let channel = substring entry 0 tab in
+    let sql = substring entry (tab + 1) (str_len entry) in
+    if affects write_sql sql then _scan reg (i + 1) write_sql (Cons (channel, acc))
+    else _scan reg (i + 1) write_sql acc
+  ;
+
+// The channels a write makes stale. A read that was refused at registration
+// is not here, so it can never be told it is stale -- which is the honest
+// answer for a read whose freshness no write determines.
+let live_channels = fn (reg) -> fn (write_sql: str) -> _scan reg 0 write_sql Nil;
