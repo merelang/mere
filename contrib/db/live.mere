@@ -137,3 +137,84 @@ let rec _scan = fn (reg) -> fn (i: int) -> fn (write_sql: str) -> fn (acc: str l
 // is not here, so it can never be told it is stale -- which is the honest
 // answer for a read whose freshness no write determines.
 let live_channels = fn (reg) -> fn (write_sql: str) -> _scan reg 0 write_sql Nil;
+
+// ---- cascades ------------------------------------------------------------
+//
+// FOUND BY THE SOUNDNESS GATE, NOT BY READING THIS FILE. `affects` reads the
+// statement, and a statement does not say everything a write does: with
+//
+//   comments.post_id integer REFERENCES posts(id) ON DELETE CASCADE
+//
+// `DELETE FROM posts WHERE id = 1` also deletes rows from `comments`, so a
+// read of `comments` went stale and the derivation said no. That is the exact
+// failure this module exists to prevent, and it survived 37 in-process cases
+// and an end-to-end socket test because both only ever asked the derivation
+// what it thought -- the database was the first thing to disagree.
+//
+// The fix is not an annotation. A cascade is written down in the schema, in
+// SQL, so it is derived from there like everything else: give `cascades_of`
+// the DDL and it returns the (parent, child) pairs, and `affects_via` widens a
+// write's reach by them.
+//
+//   cascades_of : str -> (str * str) list     DDL -> (parent, child)
+//   affects_via : (str * str) list -> str -> str -> bool
+
+let rec _cascade_scan = fn (ws: str list) -> fn (child: str) -> fn (acc: (str * str) list) ->
+  match ws with
+  | Nil -> acc
+  | Cons (w, rest) ->
+    let up = to_upper w in
+    if str_eq up "TABLE" then
+      (match rest with
+       | Cons (n, more) -> _cascade_scan more (to_lower (_clean n)) acc
+       | Nil -> acc)
+    else if str_eq up "REFERENCES" then
+      (match rest with
+       | Cons (p, more) ->
+         // only a CASCADE delete propagates; RESTRICT / SET NULL do not remove rows
+         let parent = to_lower (_clean (_paren_head p)) in
+         if _has_cascade more then _cascade_scan more child (Cons ((parent, child), acc))
+         else _cascade_scan more child acc
+       | Nil -> acc)
+    else _cascade_scan rest child acc
+and _paren_head = fn (s: str) ->
+  let i = str_index_of s "(" in
+  if i < 0 then s else substring s 0 i
+and _has_cascade = fn (ws: str list) ->
+  // ON DELETE CASCADE appears within a few words of the REFERENCES clause.
+  // The words carry the punctuation they were written with -- `CASCADE,` is
+  // what a column list actually contains, and comparing it raw finds nothing.
+  match ws with
+  | Nil -> false
+  | Cons (a, r1) ->
+    if str_eq (to_upper (_clean a)) "CASCADE" then true
+    else (match r1 with
+          | Nil -> false
+          | Cons (b, r2) ->
+            if str_eq (to_upper (_clean b)) "CASCADE" then true
+            else (match r2 with
+                  | Nil -> false
+                  | Cons (c, _) -> str_eq (to_upper (_clean c)) "CASCADE"))
+  ;
+
+let cascades_of = fn (ddl: str) -> _cascade_scan (_words ddl) "" Nil;
+
+let rec _widen = fn (pairs: (str * str) list) -> fn (tabs: str list) -> fn (acc: str list) ->
+  match pairs with
+  | Nil -> acc
+  | Cons ((parent, child), rest) ->
+    if _mem parent tabs then _widen rest tabs (Cons (child, acc))
+    else _widen rest tabs acc
+  ;
+
+let rec _append = fn (a: str list) -> fn (b: str list) ->
+  match a with
+  | Nil -> b
+  | Cons (x, rest) -> Cons (x, _append rest b)
+  ;
+
+// A write reaches the tables it names AND every table a cascade carries it to.
+let affects_via = fn (cascades: (str * str) list) -> fn (write_sql: str) -> fn (read_sql: str) ->
+  let direct = write_tables write_sql in
+  _overlap (_append direct (_widen cascades direct Nil)) (read_tables read_sql)
+  ;

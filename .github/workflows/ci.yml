@@ -237,6 +237,22 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/live_query_check.sh
 
+      # PostgreSQL as BINARIES, not as a service, the way mere-blog's CI does it:
+      # live_soundness_check.sh runs its own throwaway cluster on a port it picks,
+      # so nothing is shared between runs and there is nothing to collide over.
+      # Without them that gate SKIPS, and a gate that skips is a gate that does
+      # not run.
+      - name: PostgreSQL (oracle for live_soundness)
+        if: ${{ !cancelled() }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql postgresql-client
+          echo "$(pg_config --bindir)" >> "$GITHUB_PATH"
+
+      - name: live_soundness (a write never leaves a read stale — judged by the database)
+        if: ${{ !cancelled() }}
+        run: sh scripts/live_soundness_check.sh
+
       - name: live_e2e (the live-read loop over a real socket)
         if: ${{ !cancelled() }}
         run: sh scripts/live_e2e_check.sh
