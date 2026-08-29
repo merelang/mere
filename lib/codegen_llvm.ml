@@ -7476,7 +7476,23 @@ let emit_vec_concat_helper_llvm (elem_ty : Ast.ty) : string =
       "  ret ptr %new";
       "}" ]
 
-(* Phase 19.3: vec_sort helper per element T — in-place insertion sort.
+(* v0.1.349: vec_sort helper per element T — bottom-up STABLE MERGE SORT,
+   the same algorithm the C backend emits and the interpreter runs, down to
+   the order the comparator is called in (a comparator can count or print, so
+   the sequence is observable). This was an insertion sort: O(n^2) here and on
+   C, against O(n log n) on the interpreter, and stable here against unstable
+   there. Both differences were invisible to a parity suite that compares
+   sorted output.
+
+   Loop variables live in allocas rather than phi nodes -- mem2reg turns them
+   into the phis anyway, and the hand-written version of this file is easier to
+   hold to the other three backends when it reads like the C.
+
+   The comparator result is loaded as i64 (Mere's int on this backend). The
+   insertion sort called it as `i32`, which happened to work for -1/0/1 and
+   silently truncated a comparator written as `a - b` on values more than
+   2^31 apart.
+
    Signature: i32 @mere_vec_<T>_sort(ptr v, %closure_<T>_<closure_<T>_int> cmp) *)
 let emit_vec_sort_helper_llvm (elem_ty : Ast.ty) : string =
   let tag = ty_tag elem_ty in
@@ -7495,48 +7511,148 @@ let emit_vec_sort_helper_llvm (elem_ty : Ast.ty) : string =
       "  %len = load i32, ptr %lp";
       Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
       "  %data = load ptr, ptr %dp";
-      "  br label %outer_check";
-      "outer_check:";
-      "  %i = phi i32 [ 1, %entry ], [ %i_next, %outer_done ]";
-      "  %i_lt_len = icmp slt i32 %i, %len";
-      "  br i1 %i_lt_len, label %outer_body, label %end";
-      "outer_body:";
-      Printf.sprintf "  %%key_slot = getelementptr %s, ptr %%data, i32 %%i" c_elem;
-      Printf.sprintf "  %%key = load %s, ptr %%key_slot" c_elem;
-      "  %j_init = sub i32 %i, 1";
-      "  br label %inner_check";
-      "inner_check:";
-      "  %j = phi i32 [ %j_init, %outer_body ], [ %j_next, %shift ]";
-      "  %j_ge_0 = icmp sge i32 %j, 0";
-      "  br i1 %j_ge_0, label %do_cmp, label %finalize";
+      "  %srcp = alloca ptr";
+      "  %dstp = alloca ptr";
+      "  %wp = alloca i32";
+      "  %lop = alloca i32";
+      "  %ip = alloca i32";
+      "  %jp = alloca i32";
+      "  %kp = alloca i32";
+      "  %big = icmp sgt i32 %len, 1";
+      "  br i1 %big, label %init, label %done";
+      "init:";
+      (* element size via the null-GEP idiom used elsewhere in this file *)
+      Printf.sprintf "  %%esz_p = getelementptr %s, ptr null, i32 1" c_elem;
+      "  %esz = ptrtoint ptr %esz_p to i64";
+      "  %n64 = sext i32 %len to i64";
+      "  %bytes = mul i64 %esz, %n64";
+      "  %scratch = call ptr @malloc(i64 %bytes)";
+      "  store ptr %data, ptr %srcp";
+      "  store ptr %scratch, ptr %dstp";
+      "  store i32 1, ptr %wp";
+      "  br label %w_check";
+      (* for (w = 1; w < n; w *= 2) *)
+      "w_check:";
+      "  %w = load i32, ptr %wp";
+      "  %w_lt = icmp slt i32 %w, %len";
+      "  br i1 %w_lt, label %w_body, label %w_end";
+      "w_body:";
+      "  store i32 0, ptr %lop";
+      "  br label %lo_check";
+      (* for (lo = 0; lo < n; lo += 2*w) *)
+      "lo_check:";
+      "  %lo = load i32, ptr %lop";
+      "  %lo_lt = icmp slt i32 %lo, %len";
+      "  br i1 %lo_lt, label %lo_body, label %lo_end";
+      "lo_body:";
+      "  %mid_raw = add i32 %lo, %w";
+      "  %mid_ov = icmp sgt i32 %mid_raw, %len";
+      "  %mid = select i1 %mid_ov, i32 %len, i32 %mid_raw";
+      "  %tw = mul i32 %w, 2";
+      "  %hi_raw = add i32 %lo, %tw";
+      "  %hi_ov = icmp sgt i32 %hi_raw, %len";
+      "  %hi = select i1 %hi_ov, i32 %len, i32 %hi_raw";
+      "  store i32 %lo, ptr %ip";
+      "  store i32 %mid, ptr %jp";
+      "  store i32 %lo, ptr %kp";
+      "  br label %k_check";
+      (* for (k = lo; k < hi; k++) — one output element per pass *)
+      "k_check:";
+      "  %k = load i32, ptr %kp";
+      "  %k_lt = icmp slt i32 %k, %hi";
+      "  br i1 %k_lt, label %k_body, label %k_end";
+      "k_body:";
+      "  %i = load i32, ptr %ip";
+      "  %j = load i32, ptr %jp";
+      "  %left_done = icmp sge i32 %i, %mid";
+      "  br i1 %left_done, label %take_right, label %chk_right";
+      "chk_right:";
+      "  %right_done = icmp sge i32 %j, %hi";
+      "  br i1 %right_done, label %take_left, label %do_cmp";
+      (* cmp(src[j], src[i]) < 0 -> take the right run; a tie keeps the left,
+         which is the stability rule the other backends use. *)
       "do_cmp:";
-      Printf.sprintf "  %%j_slot = getelementptr %s, ptr %%data, i32 %%j" c_elem;
-      Printf.sprintf "  %%j_val = load %s, ptr %%j_slot" c_elem;
-      Printf.sprintf "  %%inner = call %%%s %%outer_fn(ptr %%outer_env, %s %%j_val)"
+      "  %src_c = load ptr, ptr %srcp";
+      Printf.sprintf "  %%jslot_c = getelementptr %s, ptr %%src_c, i32 %%j" c_elem;
+      Printf.sprintf "  %%jval = load %s, ptr %%jslot_c" c_elem;
+      Printf.sprintf "  %%islot_c = getelementptr %s, ptr %%src_c, i32 %%i" c_elem;
+      Printf.sprintf "  %%ival = load %s, ptr %%islot_c" c_elem;
+      Printf.sprintf "  %%inner = call %%%s %%outer_fn(ptr %%outer_env, %s %%jval)"
         inner_cl c_elem;
       Printf.sprintf "  %%inner_env = extractvalue %%%s %%inner, 0" inner_cl;
       Printf.sprintf "  %%inner_fn = extractvalue %%%s %%inner, 1" inner_cl;
-      Printf.sprintf "  %%cmp_res = call i32 %%inner_fn(ptr %%inner_env, %s %%key)"
+      Printf.sprintf "  %%cres = call i64 %%inner_fn(ptr %%inner_env, %s %%ival)"
         c_elem;
-      "  %need_shift = icmp sgt i32 %cmp_res, 0";
-      "  br i1 %need_shift, label %shift, label %finalize";
-      "shift:";
-      "  %j_plus_1 = add i32 %j, 1";
-      Printf.sprintf "  %%j1_slot = getelementptr %s, ptr %%data, i32 %%j_plus_1"
-        c_elem;
-      Printf.sprintf "  store %s %%j_val, ptr %%j1_slot" c_elem;
-      "  %j_next = sub i32 %j, 1";
-      "  br label %inner_check";
-      "finalize:";
-      "  %dst_idx = add i32 %j, 1";
-      Printf.sprintf "  %%dst_slot = getelementptr %s, ptr %%data, i32 %%dst_idx"
-        c_elem;
-      Printf.sprintf "  store %s %%key, ptr %%dst_slot" c_elem;
-      "  br label %outer_done";
-      "outer_done:";
-      "  %i_next = add i32 %i, 1";
-      "  br label %outer_check";
-      "end:";
+      "  %rgt = icmp slt i64 %cres, 0";
+      "  br i1 %rgt, label %take_right, label %take_left";
+      "take_right:";
+      "  %src_r = load ptr, ptr %srcp";
+      "  %dst_r = load ptr, ptr %dstp";
+      "  %j_r = load i32, ptr %jp";
+      Printf.sprintf "  %%rs = getelementptr %s, ptr %%src_r, i32 %%j_r" c_elem;
+      Printf.sprintf "  %%rv = load %s, ptr %%rs" c_elem;
+      Printf.sprintf "  %%rd = getelementptr %s, ptr %%dst_r, i32 %%k" c_elem;
+      Printf.sprintf "  store %s %%rv, ptr %%rd" c_elem;
+      "  %j_rn = add i32 %j_r, 1";
+      "  store i32 %j_rn, ptr %jp";
+      "  br label %k_next";
+      "take_left:";
+      "  %src_l = load ptr, ptr %srcp";
+      "  %dst_l = load ptr, ptr %dstp";
+      "  %i_l = load i32, ptr %ip";
+      Printf.sprintf "  %%ls = getelementptr %s, ptr %%src_l, i32 %%i_l" c_elem;
+      Printf.sprintf "  %%lv = load %s, ptr %%ls" c_elem;
+      Printf.sprintf "  %%ld = getelementptr %s, ptr %%dst_l, i32 %%k" c_elem;
+      Printf.sprintf "  store %s %%lv, ptr %%ld" c_elem;
+      "  %i_ln = add i32 %i_l, 1";
+      "  store i32 %i_ln, ptr %ip";
+      "  br label %k_next";
+      "k_next:";
+      "  %k_n = add i32 %k, 1";
+      "  store i32 %k_n, ptr %kp";
+      "  br label %k_check";
+      "k_end:";
+      "  %lo_n = add i32 %lo, %tw";
+      "  store i32 %lo_n, ptr %lop";
+      "  br label %lo_check";
+      "lo_end:";
+      (* the pass wrote into dst: swap the roles for the next width *)
+      "  %s_sw = load ptr, ptr %srcp";
+      "  %d_sw = load ptr, ptr %dstp";
+      "  store ptr %d_sw, ptr %srcp";
+      "  store ptr %s_sw, ptr %dstp";
+      "  %w_n = mul i32 %w, 2";
+      "  store i32 %w_n, ptr %wp";
+      "  br label %w_check";
+      "w_end:";
+      (* an odd number of passes leaves the answer in the scratch *)
+      "  %fin = load ptr, ptr %srcp";
+      "  %in_place = icmp eq ptr %fin, %data";
+      "  br i1 %in_place, label %free_dst, label %copy_back";
+      "copy_back:";
+      "  %cbp = alloca i32";
+      "  store i32 0, ptr %cbp";
+      "  br label %cb_check";
+      "cb_check:";
+      "  %ci = load i32, ptr %cbp";
+      "  %ci_lt = icmp slt i32 %ci, %len";
+      "  br i1 %ci_lt, label %cb_body, label %free_src";
+      "cb_body:";
+      Printf.sprintf "  %%cs = getelementptr %s, ptr %%fin, i32 %%ci" c_elem;
+      Printf.sprintf "  %%cv = load %s, ptr %%cs" c_elem;
+      Printf.sprintf "  %%cd = getelementptr %s, ptr %%data, i32 %%ci" c_elem;
+      Printf.sprintf "  store %s %%cv, ptr %%cd" c_elem;
+      "  %ci_n = add i32 %ci, 1";
+      "  store i32 %ci_n, ptr %cbp";
+      "  br label %cb_check";
+      "free_src:";
+      "  call void @free(ptr %fin)";
+      "  br label %done";
+      "free_dst:";
+      "  %fd = load ptr, ptr %dstp";
+      "  call void @free(ptr %fd)";
+      "  br label %done";
+      "done:";
       "  ret i32 0";
       "}" ]
 

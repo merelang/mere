@@ -3307,24 +3307,67 @@ let rec emit_expr (e : Ast.expr) : string =
          (emit_expr a_e) (emit_expr arg)
          elem_tag elem_tag elem_tag elem_tag elem_tag elem_tag
      | Ast.App ({ node = Ast.Var "vec_sort"; _ }, vec_e) ->
-       (* Phase 19.3: vec_sort v cmp — in-place insertion sort with
-          comparator (T -> T -> int) curried. cmp.fn(env, a) returns
-          inner closure, then inner.fn(inner.env, b) returns int.
-          Insertion sort is O(n²) but simple and inline-friendly;
-          replace with quicksort if perf needed. *)
+       (* v0.1.349: bottom-up STABLE MERGE SORT. The comparator is curried
+          (T -> T -> int): cmp.fn(env, a) returns the inner closure, then
+          inner.fn(inner.env, b) returns the int.
+
+          This was an insertion sort, and the two things wrong with it were
+          not "it is slow":
+
+          1. It was O(n²) HERE and O(n log n) on the interpreter, which used
+             OCaml's Array.sort. Same program, same input, two asymptotics --
+             and a parity suite that compares stdout cannot see that.
+          2. Array.sort is UNSTABLE and an insertion sort is stable, so the
+             two backends printed equal-keyed elements in different orders.
+             Measured before this change, on seven pairs keyed by fst:
+             interp `600 400 200 300 700 500 100`, C `200 400 600 100 ...`.
+
+          So the asymptotic and the stability are now one decision for every
+          backend: n log n, stable, comparing cmp(right, left) < 0 so that a
+          tie keeps the left (earlier) run. The comparison SEQUENCE is part of
+          it -- a comparator may have side effects -- which is what
+          test/parity/vec_sort_stable.mere pins by counting the calls.
+
+          The per-comparison cost that remains is the curried application:
+          cmp.fn(env, a) builds the inner closure's environment in the region.
+          n² of those was what made a 40k sort read 6.7 GB; n log n of them is
+          the same allocation, at a rate that stops being the story. Removing
+          it needs the closure to carry an uncurried entry (the value-level
+          twin of the __direct fns), which is its own change.
+
+          The scratch buffer is malloc/free rather than region: it is a
+          temporary the program cannot observe, and a region alloc would
+          leave n slots behind on every call. *)
        let _ = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
        Printf.sprintf
          "({ __auto_type __vs = %s; __auto_type __cmp = %s; \
-          for (int __i = 1; __i < __vs->len; __i++) { \
-            __auto_type __key = __vs->data[__i]; \
-            int __j = __i - 1; \
-            while (__j >= 0) { \
-              __auto_type __inner = __cmp.fn(__cmp.env, __vs->data[__j]); \
-              if (__inner.fn(__inner.env, __key) <= 0) break; \
-              __vs->data[__j + 1] = __vs->data[__j]; \
-              __j--; \
+          int __n = __vs->len; \
+          if (__n > 1) { \
+            __typeof__(__vs->data) __src = __vs->data; \
+            __typeof__(__vs->data) __dst = \
+              (__typeof__(__vs->data))malloc(sizeof(*__src) * (size_t)__n); \
+            for (int __w = 1; __w < __n; __w *= 2) { \
+              for (int __lo = 0; __lo < __n; __lo += 2 * __w) { \
+                int __mid = __lo + __w; if (__mid > __n) __mid = __n; \
+                int __hi = __lo + 2 * __w; if (__hi > __n) __hi = __n; \
+                int __i = __lo, __j = __mid; \
+                for (int __k = __lo; __k < __hi; __k++) { \
+                  int __right; \
+                  if (__i >= __mid) __right = 1; \
+                  else if (__j >= __hi) __right = 0; \
+                  else { \
+                    __auto_type __inner = __cmp.fn(__cmp.env, __src[__j]); \
+                    __right = (__inner.fn(__inner.env, __src[__i]) < 0); \
+                  } \
+                  if (__right) __dst[__k] = __src[__j++]; \
+                  else __dst[__k] = __src[__i++]; \
+                } \
+              } \
+              __typeof__(__vs->data) __sw = __src; __src = __dst; __dst = __sw; \
             } \
-            __vs->data[__j + 1] = __key; \
+            if (__src != __vs->data) \
+              memcpy(__vs->data, __src, sizeof(*__src) * (size_t)__n); \
+            free(__src == __vs->data ? __dst : __src); \
           } 0; })"
          (emit_expr vec_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "vec_map"; _ }, vec_e) ->

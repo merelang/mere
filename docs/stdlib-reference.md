@@ -848,7 +848,24 @@ set_trap_handler str_trim str_unescape substring sum_range tan time
 to_lower to_upper try_or write_file write_file_bytes
 ```
 
-Q-010 collection builtins (`vec_*` / `owned_vec_*` / `strbuf_*` / `map_*` / `len`) are registered builtins outside this table; see language-reference / tutorial. Phase 19.2 added **`map_iter : Map[R, K, V] -> (K -> V -> unit) -> unit`** (works in all 4 backends).
+Q-010 collection builtins (`vec_*` / `owned_vec_*` / `strbuf_*` / `map_*` / `len`) are registered builtins outside this table; see language-reference / tutorial.
+
+**`vec_sort : Vec[R, T] -> (T -> T -> int) -> unit`** carries two guarantees that are
+worth stating because a Mere program can observe both (v0.1.349). It is **stable** —
+equal keys keep insertion order — and all four backends run the **same** bottom-up
+merge sort, so the comparator is called the same number of times in the same order on
+each of them; a comparator that counts or prints is a legitimate thing to write.
+O(n log n) comparisons. It was an insertion sort on the compiled backends (O(n²), and
+O(n²) memory too, because each comparison's curried application allocates in the
+region) against `Array.sort` on the interpreter (O(n log n), unstable) — one program
+with two asymptotics and two orderings, which
+[`test/parity/vec_sort_stable.mere`](https://github.com/merelang/mere/blob/main/test/parity/vec_sort_stable.mere)
+now pins by printing the comparison count.
+
+The per-comparison allocation remains: applying a curried closure to its first
+argument builds the intermediate closure's environment in the current region. It is
+O(n log n) of them rather than O(n²), which is a rate rather than a leak, but a sort in
+a hot loop still wants a `region R { … }` around it. Phase 19.2 added **`map_iter : Map[R, K, V] -> (K -> V -> unit) -> unit`** (works in all 4 backends).
 
 ---
 
