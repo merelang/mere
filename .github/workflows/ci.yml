@@ -257,6 +257,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/live_soundness_check.sh
 
+      - name: wasm_stub (which builtins answer without reaching the host)
+        if: ${{ !cancelled() }}
+        run: sh scripts/wasm_stub_check.sh
+
       - name: mount (the router and the manifest come from one list)
         if: ${{ !cancelled() }}
         run: sh scripts/mount_check.sh

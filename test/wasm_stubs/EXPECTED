@@ -1,0 +1,10 @@
+# builtin  host|stub|refused — produced by scripts/wasm_stub_check.sh --update
+# stub = the Wasm backend answers without reaching the host, and
+#        docs/host-matrix.md records it as `yes`.
+run stub [C=mere_stub_probe Wasm=127]
+env_var stub [C=1 Wasm=]
+file_exists stub [C=yes Wasm=no]
+args host
+read_file host
+file_size host
+read_file_bytes refused
