@@ -1,0 +1,40 @@
+// test/render/render_driver.mere — one entry point into the render path, so
+// the compiler's own dead-code analysis decides what "the render path" means.
+//
+// WHAT THIS ACTUALLY MEASURES, having measured it rather than assumed it. The
+// first version of this driver claimed to bound "what the render path can
+// reach", on the theory that dead code is eliminated and so only reachable
+// code appears in the emitted C. That is true of an unused function in the
+// MAIN file -- a program whose only clock call sat in one produced zero
+// occurrences of __lang_time -- and false of an imported module: putting an
+// uncalled function that reads the clock into contrib/html/build.mere added a
+// __lang_time CALL SITE to this program.
+//
+// So the property is one level coarser and worth stating plainly: THESE VIEW
+// MODULES CONTAIN NO AMBIENT USE ANYWHERE IN THEM. Not "render cannot reach
+// the clock" but "nothing in the module reads it at all", which is a stronger
+// condition and a weaker claim about reachability.
+//
+// The tree below still exercises every constructor, because a module is only
+// in the emitted C if the program pulls it in.
+import "../../contrib/html/build.mere";
+import "../../contrib/http/escape.mere";
+import "../../contrib/http/csrf_field.mere";
+
+// A tree that exercises every constructor, so no branch of `render` is
+// eliminated for want of a caller.
+let tree =
+  El ("div", [("class", "post"), ("data-id", "1")], [
+    El ("h1", Nil, [Text ("A title with <angles> & \"quotes\"")]),
+    El ("p", Nil, [Text ("body & more")]),
+    Raw ("<hr>"),
+    Script ("console.log(1)"),
+    El ("ul", Nil, [
+      El ("li", Nil, [Text ("one")]),
+      El ("li", Nil, [Text ("two")])
+    ])
+  ]);
+
+let _ = print (render tree) in
+let _ = print (page "Title" [tree]) in
+print (page_with "Title" [El ("meta", [("charset", "utf-8")], Nil)] [tree])
