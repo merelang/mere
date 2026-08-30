@@ -4,6 +4,44 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.357 — 2026-08-30
+
+_G-1 assumes rendering is a function of its input; the language does not make
+it one._ `time` and `random_int` are unconditional builtins, and a function
+that reads the clock has the type `str -> str` like any other — measured, not
+assumed: `mere -t` on `fn (x: str) -> x ++ show (time ())` answers
+`(str -> str)`. Nothing seals them, so nothing stops a view from being
+nondeterministic, and `render_agreement` compares a server against a browser,
+which are two different environments.
+
+`scripts/render_purity_check.sh` checks what the language does not prevent. The
+ambient set is the clock, the two PRNG builtins, and the environment ones
+(`env_var`, `args`, `read_file`, `read_stdin`, `run`) — the last group belongs
+because G-1's two sides share no environment, argv, filesystem or stdin.
+
+**The first version of this gate claimed something false and was corrected by
+measurement.** It said it bounded what the render path can REACH, on the theory
+that dead code is eliminated. That holds inside the main file — a program whose
+only clock call sat in an uncalled function emitted zero occurrences of
+`__lang_time` — and does not hold across an import: an uncalled function added
+to `contrib/html/build.mere` put a call site into the driver's C. So the
+property is coarser and stated plainly now: **the view modules contain no
+ambient use anywhere in them**, called or not.
+
+The prelude's own baseline is measured at gate time from a print-only program
+rather than written down, since `getenv` legitimately appears once in every
+program. Each module is anchored by a symbol that must be in the emitted C, so
+a module that stopped being pulled in fails instead of passing as the emptiest
+possible way to be ambient-free.
+
+Poisoned three ways: a clock read inside an uncalled module function, an
+environment read in the tree, and dropping the leaf module's import.
+
+`dune test` 2599/0, render_agreement 6 lines, htmlbuild 15 cases,
+determinism_check 153 cases.
+
+---
+
 ## v0.1.356 — 2026-08-30
 
 _The derivation now says which schemas it cannot speak about._ `derivable`

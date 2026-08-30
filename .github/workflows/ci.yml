@@ -257,6 +257,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/live_soundness_check.sh
 
+      - name: render_purity (no view module reads the clock or the environment)
+        if: ${{ !cancelled() }}
+        run: sh scripts/render_purity_check.sh
+
       - name: cascade_catalog (the DDL parser vs pg_constraint)
         if: ${{ !cancelled() }}
         run: sh scripts/cascade_catalog_check.sh
