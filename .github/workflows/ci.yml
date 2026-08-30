@@ -255,6 +255,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/thread_fail_check.sh
 
+      # host_matrix asks which backend has each builtin; this asks whether the
+      # documentation has heard of it. 25 of 221 had not been written about
+      # anywhere by hand when it was added.
+      - name: "doc coverage (every builtin is named in a hand-written doc)"
+        if: ${{ !cancelled() }}
+        run: sh scripts/doc_coverage_check.sh
+
       - name: live_query (which reads a write affects, on every backend)
         if: ${{ !cancelled() }}
         run: sh scripts/live_query_check.sh
