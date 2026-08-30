@@ -1,0 +1,2 @@
+// `print` is in scope, but wants a str.
+print 42

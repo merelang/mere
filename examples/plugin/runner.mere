@@ -1,0 +1,36 @@
+// examples/plugin/runner.mere — the side of the boundary that runs somebody
+// else's program.
+//
+// One plugin per process. The plugin is Mere source; it is evaluated by
+// contrib/eval, whose `initial_env` seeds exactly two names (`print` and
+// `show`). Everything else a plugin might reach for -- `write_file`,
+// `tcp_connect` -- is not in scope, so the interpreter IS the capability
+// boundary and there is nothing to enforce on top of it. That much the
+// language gets right for free.
+//
+// What this file cannot do is survive the plugin, which is why the host runs
+// it as a child and reads the exit status. See host.mere.
+//
+// The plugin's own output goes to stdout; the value it evaluated to is
+// written to a second path, so the host can tell what the plugin PRINTED
+// from what it RETURNED.
+//
+// Usage:
+//   mere examples/plugin/runner.mere <plugin.mere> <value-out>
+
+import "github.com/merelang/mere/contrib/eval/eval.mere";
+
+let argv = args () in
+// A Mere program prints the value of its main expression, so this process
+// cannot hand the plugin a stdout of its own -- there is always one more line,
+// and it is the runner's. Ending on `()` at least makes that line a constant
+// the host can recognise and drop.
+let _ =
+  match argv with
+    | Cons (path, Cons (value_out, _)) ->
+        let src = read_file path in
+        let v = parse_and_eval src in
+        write_file value_out (value_to_str v)
+    | _ -> print "usage: runner <plugin.mere> <value-out>"
+  in
+()

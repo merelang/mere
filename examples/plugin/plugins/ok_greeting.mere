@@ -1,0 +1,3 @@
+// Well-behaved: prints, returns a value.
+let _ = print "hello from a plugin";
+"done"
