@@ -12,7 +12,11 @@ let reads = [
   ("r_post_one",     "SELECT id, title FROM posts WHERE id = 1"),
   ("r_comments_1",   "SELECT id, body FROM comments WHERE post_id = 1 ORDER BY id"),
   ("r_sessions",     "SELECT username FROM sessions ORDER BY sid"),
-  ("r_users",        "SELECT id, username FROM users ORDER BY id")
+  ("r_users",        "SELECT id, username FROM users ORDER BY id"),
+  // Tags hang off posts with ON DELETE SET NULL. Deleting a post does not
+  // remove a tag -- it nulls the reference -- so the read changes without a
+  // row disappearing, which is the case cascades_of used to skip.
+  ("r_tags",         "SELECT id, label, post_id FROM tags ORDER BY id")
 ];
 
 let writes = [
@@ -29,7 +33,8 @@ let writes = [
 let ddl = "CREATE TABLE users (id serial PRIMARY KEY, username text UNIQUE NOT NULL, pw_hash text NOT NULL); \
 CREATE TABLE sessions (sid text PRIMARY KEY, username text NOT NULL); \
 CREATE TABLE posts (id serial PRIMARY KEY, author text NOT NULL, title text NOT NULL, body text NOT NULL, published boolean NOT NULL DEFAULT false); \
-CREATE TABLE comments (id serial PRIMARY KEY, post_id integer NOT NULL REFERENCES posts(id) ON DELETE CASCADE, author text NOT NULL, body text NOT NULL);";
+CREATE TABLE comments (id serial PRIMARY KEY, post_id integer NOT NULL REFERENCES posts(id) ON DELETE CASCADE, author text NOT NULL, body text NOT NULL); \
+CREATE TABLE tags (id serial PRIMARY KEY, label text NOT NULL, post_id integer REFERENCES posts(id) ON DELETE SET NULL);";
 
 let casc = cascades_of ddl;
 
@@ -48,4 +53,4 @@ let rec each_write = fn (ws) ->
   ;
 
 let _ = each_write writes in
-print "claims: 36 pairs"
+print "claims: 42 pairs"

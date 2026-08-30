@@ -173,30 +173,56 @@ let rec _cascade_scan = fn (ws: str list) -> fn (child: str) -> fn (acc: (str * 
     else if str_eq up "REFERENCES" then
       (match rest with
        | Cons (p, more) ->
-         // only a CASCADE delete propagates; RESTRICT / SET NULL do not remove rows
+         // a pair is recorded when the action CHANGES the child's rows -- see
+         // _changes_child_rows; RESTRICT and NO ACTION refuse the write instead
          let parent = to_lower (_clean (_paren_head p)) in
-         if _has_cascade more then _cascade_scan more child (Cons ((parent, child), acc))
+         if _changes_child_rows more 0 then _cascade_scan more child (Cons ((parent, child), acc))
          else _cascade_scan more child acc
        | Nil -> acc)
     else _cascade_scan rest child acc
 and _paren_head = fn (s: str) ->
   let i = str_index_of s "(" in
   if i < 0 then s else substring s 0 i
-and _has_cascade = fn (ws: str list) ->
-  // ON DELETE CASCADE appears within a few words of the REFERENCES clause.
-  // The words carry the punctuation they were written with -- `CASCADE,` is
-  // what a column list actually contains, and comparing it raw finds nothing.
-  match ws with
+and _ends_clause = fn (w: str) ->
+  // A column definition ends at the `,` before the next one or the `)` closing
+  // the table. The words carry the punctuation they were written with, so this
+  // asks the raw word rather than the cleaned one.
+  str_contains w "," || str_contains w ")"
+and _changes_child_rows = fn (ws: str list) -> fn (n: int) ->
+  // WHAT COUNTS IS WHETHER THE CHILD'S ROWS CHANGE, not whether they are
+  // removed. The previous version scanned three words for CASCADE under the
+  // note "RESTRICT / SET NULL do not remove rows" -- true, and the wrong
+  // conclusion. Asked of Postgres, with one row in the child and the parent
+  // deleted:
+  //
+  //   ON DELETE CASCADE       1:1  ->  (empty)     the read changed
+  //   ON DELETE SET NULL      1:1  ->  1:null      the read changed
+  //   ON DELETE SET DEFAULT   1:1  ->  1:9         the read changed
+  //   ON DELETE RESTRICT      the delete is refused; nothing changed
+  //   ON UPDATE CASCADE       1:1  ->  1:77        on UPDATE of the parent key
+  //
+  // Three of the four row-changing actions were missed, and each one is an
+  // unsoundness: a write changes a read and nothing says so.
+  //
+  // The scan runs to the end of the column definition rather than a fixed
+  // three words, because `ON DELETE RESTRICT ON UPDATE CASCADE` puts CASCADE
+  // sixth and a fixed window silently stops looking.
+  if n > 24 then false
+  else match ws with
   | Nil -> false
-  | Cons (a, r1) ->
-    if str_eq (to_upper (_clean a)) "CASCADE" then true
-    else (match r1 with
-          | Nil -> false
-          | Cons (b, r2) ->
-            if str_eq (to_upper (_clean b)) "CASCADE" then true
-            else (match r2 with
-                  | Nil -> false
-                  | Cons (c, _) -> str_eq (to_upper (_clean c)) "CASCADE"))
+  | Cons (a, rest) ->
+    let ua = to_upper (_clean a) in
+    if str_eq ua "CASCADE" then true
+    else if str_eq ua "SET" then
+      (match rest with
+       | Cons (b, more) ->
+         let ub = to_upper (_clean b) in
+         if str_eq ub "NULL" || str_eq ub "DEFAULT" then true
+         else if _ends_clause a then false
+         else _changes_child_rows more (n + 2)
+       | Nil -> false)
+    else if _ends_clause a then false
+    else _changes_child_rows rest (n + 1)
   ;
 
 let cascades_of = fn (ddl: str) -> _cascade_scan (_words ddl) "" Nil;
