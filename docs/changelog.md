@@ -4,6 +4,40 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.351 — 2026-08-30
+
+_A Mere program holds its own connections open._ `scripts/live_e2e_check.sh`
+already ran subscribe → write → receive over a real socket, but on Wasm under
+Node — the negative it proved was proved by a JavaScript host, leaving open the
+question of whether a Mere program can hold connections open by itself.
+
+Two builtins on the C backend answer it. `http_hijack` takes a connection out of
+`serve_mt`'s hands (returns the fd, marks the response sent) so the worker
+neither writes nor closes; `http_hijacked` lets the two close sites ask. Both
+`_Thread_local`, reset per request. `contrib/http/sse_native.mere` is the
+broadcaster on top: subscribers' fds live inside the broadcaster thread, and
+`scripts/sse_native_check.sh` runs the loop against a 145K native binary.
+
+**The gate has two negatives, because two different wrong implementations pass a
+check that only asks "did the subscriber get it".** A broadcaster ignoring the
+channel delivers to everyone — so a subscriber on `other` must receive nothing.
+A broadcaster keeping one subscriber instead of a list delivers to the most
+recent — so three subscribers on `posts` must all receive. Both are poisoned and
+both go red.
+
+The second was not hypothetical. `channel_recv_opt` reads like a try-receive and
+is not: it is `while (len == 0 && !closed) cond_wait`, and `None` means closed,
+never empty. A pump polling two channels with it parks in the first, which looks
+like a delivery bug rather than a deadlock because the first channel's traffic
+keeps waking it. `docs/stdlib-reference.md` now has the table of which of the
+three receives ends its wait on what. The other seven uses in the tree were
+already the correct shape — a worker loop ended by `channel_close`.
+
+`dune test` 2599/0, parity 139/0. Gates run locally: `sse_native` (new),
+`live_e2e`, `live_query`, `htmlbuild`, `mount`, `extern_host`, `wasm_stub`.
+
+---
+
 ## v0.1.350 — 2026-08-30
 
 _Three builtins stop lying on Wasm._ `run`, `env_var` and `file_exists` answered

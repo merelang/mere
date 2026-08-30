@@ -289,6 +289,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/live_e2e_check.sh
 
+      - name: sse_native (live push from a native binary, no runtime under it)
+        if: ${{ !cancelled() }}
+        run: sh scripts/sse_native_check.sh
+
       - name: boundary_compat (every released version of the wire, crossed)
         if: ${{ !cancelled() }}
         run: sh scripts/boundary_compat_check.sh
