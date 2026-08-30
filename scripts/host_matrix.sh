@@ -15,6 +15,8 @@
 #   yes       the backend emitted code, and for C the emitted C also compiles
 #   nocompile the backend emitted code and a C compiler then rejected it
 #   refused   the backend said it has no lowering — loud, and fine
+#   unattributed  the backend refused, but the message names a DIFFERENT builtin —
+#             the probe could not reach its subject, so the cell is about something else
 #   MISSING   "unbound variable" — the compiler blamed the user for a backend hole
 #   error     anything else (shown, so it can be looked at)
 #
@@ -28,6 +30,13 @@
 #
 # The result is written to docs/host-matrix.md and compared against what is checked
 # in. Run with `--update` to accept a change.
+#
+# `unattributed` exists because a probe has to reach its subject before it can ask
+# anything about it. `file_pread`'s probe opened its handle with `file_open`, which
+# LLVM and Wasm refuse, and so the row said `refused` for two backends that have had
+# a working `file_pread` the whole time. The refusal was true and about `file_open`.
+# The same shape put `refused` under `lcm` for RV32I, where the missing lowering is
+# `abs`. A cell that cannot name its own subject now says so instead of guessing.
 #
 # What this cannot see: a builtin that compiles and then does nothing. `tcp_set_timeout`
 # on Wasm returned the same 0 its C twin returns on success and left the next read
@@ -88,12 +97,13 @@ channel_close|let c = channel_new (); let _ = channel_send c 1; let _ = channel_
 channel_recv_opt|let c = channel_new (); let _ = channel_send c 1; let _ = channel_recv_opt c; 0
 channel_recv_timeout|let c = channel_new (); let _ = channel_send c 1; let _ = channel_recv_timeout c 10; 0
 file_open|let f = file_open "/dev/null"; let _ = file_close f; 0
-file_read_line|let f = file_open "/dev/null"; let s = file_read_line f; 0
+file_read_line|let f = file_openrw "/tmp/mere_probe.bin"; let s = file_read_line f; 0
 file_openrw|let f = file_openrw "/tmp/mere_probe.bin"; let _ = file_close f; 0
-file_pread|let f = file_open "/dev/null"; let v = file_pread f 0 4; vec_len v
+file_pread|let f = file_openrw "/tmp/mere_probe.bin"; let v = file_pread f 0 4; vec_len v
 file_pwrite|let f = file_openrw "/tmp/mere_probe.bin"; let n = file_pwrite f 0 (vec_new ()); n
 file_pwrite_bytes|let f = file_openrw "/tmp/mere_probe.bin"; let n = file_pwrite_bytes f 0 (bytes_of_str "x"); n
 map_new|let m = map_new (); let _ = map_set m "k" 1; 0
+vec_new|let v = vec_new (); let _ = vec_push v 1; vec_len v
 owned_vec_new|let v = owned_vec_new (); let _ = owned_vec_push v 1; 0
 CASES
 
@@ -192,7 +202,7 @@ while IFS='|' read -r name prog; do
 done < "$TMP/cases"
 mv "$TMP/cases_ok" "$TMP/cases"
 
-classify() {  # classify <flag> <file>
+classify() {  # classify <flag> <file> <subject>
   if "$MERE" "$1" "$2" > "$TMP/emitted" 2>"$TMP/err"; then
     # Emitting is not the same as working. For C the emitted source is handed to a
     # compiler, which is where an undeclared identifier for a builtin nobody lowered
@@ -211,8 +221,14 @@ classify() {  # classify <flag> <file>
     # would be the matrix lying in the flattering direction about a backend,
     # and calling it yes would be lying in the other one.
     echo bare
-  elif grep -qE 'no (LLVM|Wasm|RV32I) lowering|unsupported' "$TMP/err"; then
-    echo refused
+  elif head -1 "$TMP/err" | grep -qE 'no (LLVM|Wasm|RV32I) lowering|unsupported'; then
+    # `refused` has to be the SUBJECT's refusal. The probe for `file_pread` opened
+    # its handle with `file_open`, which LLVM and Wasm refuse -- so for as long as
+    # that row existed it reported file_open's refusal under file_pread's name, and
+    # both backends have had a real `file_pread` lowering the whole time
+    # (2026-08-30). The message names whose refusal it is; only the first line is
+    # read, because the echoed source line underneath contains the subject too.
+    if head -1 "$TMP/err" | grep -qF -- "$3"; then echo refused; else echo unattributed; fi
   else
     echo error
   fi
@@ -228,7 +244,9 @@ classify() {  # classify <flag> <file>
   echo "which is the correct way to lack something; \`MISSING\` means a program using it"
   echo "fails with \`unbound variable\`, blaming the user for a backend hole;"
   echo "\`bare\` means the backend has it on \`-rv --bare\` only, where the program is"
-  echo "handed the machine instead of a host."
+  echo "handed the machine instead of a host; \`unattributed\` means the backend refused"
+  echo "but named a different builtin, so the probe never reached its subject and the"
+  echo "cell is evidence about that other name."
   echo
   echo "The interpreter has every one of these, and is not a column."
   echo
@@ -243,10 +261,10 @@ classify() {  # classify <flag> <file>
   while IFS='|' read -r name prog; do
     [ -z "$name" ] && continue
     printf '%s\n' "$prog" > "$TMP/p.mere"
-    c=$(classify -c "$TMP/p.mere")
-    l=$(classify -ll "$TMP/p.mere")
-    w=$(classify -w "$TMP/p.mere")
-    r=$(classify -rv "$TMP/p.mere")
+    c=$(classify -c "$TMP/p.mere" "$name")
+    l=$(classify -ll "$TMP/p.mere" "$name")
+    w=$(classify -w "$TMP/p.mere" "$name")
+    r=$(classify -rv "$TMP/p.mere" "$name")
     printf '| `%s` | %s | %s | %s | %s |\n' "$name" "$c" "$l" "$w" "$r"
   done < "$TMP/cases"
 } > "$TMP/matrix.md"
@@ -261,6 +279,8 @@ if [ "$UPDATE" = 1 ]; then
   [ "$missing" != 0 ] && echo "host_matrix: $missing row(s) still say MISSING — those are backend holes reported as user typos"
   nc=$(grep -c '^| `.*nocompile' "$OUT" || true)
   [ "$nc" != 0 ] && echo "host_matrix: $nc row(s) say nocompile — emitted and then rejected by the C compiler"
+  un=$(grep -c '^| `.*unattributed' "$OUT" || true)
+  [ "$un" != 0 ] && echo "host_matrix: $un row(s) have an unattributed cell — the probe did not reach its subject there"
   exit 0
 fi
 
@@ -278,7 +298,8 @@ if diff -u "$OUT" "$TMP/matrix.md" > "$TMP/diff"; then
   # it sounds: "0 checked" is exactly what a gate that did not run looks like.
   nocompile=$(grep -c '^| `.*nocompile' "$OUT" || true)
   bare=$(grep -c '^| `.*| bare' "$OUT" || true)
-  echo "host_matrix: ok  ($(grep -c '^| `' "$OUT") builtins, $missing MISSING, $nocompile nocompile, $bare bare-only, $errors error)"
+  unatt=$(grep -c '^| `.*unattributed' "$OUT" || true)
+  echo "host_matrix: ok  ($(grep -c '^| `' "$OUT") builtins, $missing MISSING, $nocompile nocompile, $bare bare-only, $unatt unattributed, $errors error)"
   echo "             $gen_summary"
   [ "$dropped" != 0 ] && echo "             $dropped synthesized probe(s) did not type-check, dropped"
   true
