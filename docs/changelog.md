@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.355 — 2026-08-30
+
+_The DDL parser's coverage is now Postgres's answer, not a list someone
+remembered._ `cascades_of` reads foreign keys out of DDL text, and twice the
+set of spellings it survived was enumerated from memory and twice something was
+missing. v0.1.353 was the first: `SET NULL` and `SET DEFAULT` skipped under a
+note saying they "do not remove rows". Probing the spellings found two more:
+
+- **`CREATE TABLE IF NOT EXISTS c` made the child `if`.** The name was taken as
+  the word after `TABLE`. A pair was recorded between the parent and a table
+  that does not exist, the real child was never widened, and `affects_via`
+  answered **false** for a DELETE that empties it — unsound. `ALTER TABLE ONLY
+  c`, which is what `pg_dump` writes, had the same shape.
+- **Quoted identifiers kept their quotes.** `CREATE TABLE "c"` derived `"c"`
+  while `SELECT ... FROM c` derived `c`, so a schema written by a tool that
+  quotes never matched a query written by hand. Both sides go through `_clean`,
+  so stripping there fixes both at once.
+
+`scripts/cascade_catalog_check.sh` is the part meant to outlast this. Fifteen
+fixtures in `test/live/cascade_fixtures.mere` are each built in a real
+Postgres, `pg_constraint` is asked which foreign keys exist and what they do,
+and that is compared to what the parser derived from the same text. The one
+judgement the gate makes is which actions count: `c`/`n`/`d` change the child's
+rows, `a`/`r` refuse the parent's write instead. Everything else is the
+catalog's answer, so a spelling nobody here thought of is still judged.
+
+All three defects poison the gate: reverting the `IF NOT EXISTS` fix fails
+`if_not_exists` and `alter_only`, reverting `SET` fails `inline_setnull` and
+`inline_setdefault`, reverting the quote strip fails `quoted`.
+
+`dune test` 2599/0, live_query 53 cases, live_soundness 42 pairs (0 unsound),
+cascade_catalog 15 schemas.
+
+---
+
 ## v0.1.354 — 2026-08-30
 
 _The broadcaster never let a subscriber go._ `vec_push` was the only thing that

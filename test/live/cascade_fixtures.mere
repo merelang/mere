@@ -1,0 +1,88 @@
+// test/live/cascade_fixtures.mere — schemas for Postgres to answer about.
+//
+// WHY THIS EXISTS. `cascades_of` reads foreign keys out of DDL text, and the
+// set of spellings and actions it has to survive is not something to enumerate
+// from memory. It was enumerated from memory twice, and both times something
+// was missing: ON DELETE SET NULL and SET DEFAULT were skipped under a note
+// saying they "do not remove rows", and `CREATE TABLE IF NOT EXISTS c` made
+// the child `if` -- a pair between the parent and a table that does not exist,
+// so the real child was never widened and `affects_via` answered false for a
+// DELETE that empties it. That second one was latent: mere-blog uses the
+// spelling only for schema_migrations, which is not in the text it derives
+// from. Latent is not the same as harmless -- it was one schema edit away.
+//
+// So the answer comes from pg_constraint now. Each fixture is created in a real
+// Postgres, the catalog is asked which foreign keys exist and what they do, and
+// scripts/cascade_catalog_check.sh compares that to what this file derives.
+// A spelling nobody here thought of is still answered correctly, because
+// Postgres is doing the answering.
+//
+// Prints, per fixture:
+//   ddl   <name> <the schema, one line>
+//   pairs <name> parent>child,parent>child   (or `-` for none)
+import "../../contrib/db/live.mere";
+
+let fixtures = [
+  // --- the five referential actions, inline on the column ---
+  ("inline_cascade",
+   "CREATE TABLE p (id int PRIMARY KEY); CREATE TABLE c (id serial PRIMARY KEY, pid int REFERENCES p(id) ON DELETE CASCADE);"),
+  ("inline_setnull",
+   "CREATE TABLE p (id int PRIMARY KEY); CREATE TABLE c (id serial PRIMARY KEY, pid int REFERENCES p(id) ON DELETE SET NULL);"),
+  ("inline_setdefault",
+   "CREATE TABLE p (id int PRIMARY KEY); CREATE TABLE c (id serial PRIMARY KEY, pid int DEFAULT 9 REFERENCES p(id) ON DELETE SET DEFAULT);"),
+  ("inline_restrict",
+   "CREATE TABLE p (id int PRIMARY KEY); CREATE TABLE c (id serial PRIMARY KEY, pid int REFERENCES p(id) ON DELETE RESTRICT);"),
+  ("inline_noaction",
+   "CREATE TABLE p (id int PRIMARY KEY); CREATE TABLE c (id serial PRIMARY KEY, pid int REFERENCES p(id));"),
+
+  // --- the update side ---
+  ("update_cascade",
+   "CREATE TABLE p (id int PRIMARY KEY); CREATE TABLE c (id serial PRIMARY KEY, pid int REFERENCES p(id) ON UPDATE CASCADE);"),
+  // CASCADE sixth in the clause: a fixed three-word window stopped looking.
+  ("restrict_then_update_cascade",
+   "CREATE TABLE p (id int PRIMARY KEY); CREATE TABLE c (id serial PRIMARY KEY, pid int REFERENCES p(id) ON DELETE RESTRICT ON UPDATE CASCADE);"),
+
+  // --- the spellings ---
+  ("table_level",
+   "CREATE TABLE p (id int PRIMARY KEY); CREATE TABLE c (id serial PRIMARY KEY, pid int, FOREIGN KEY (pid) REFERENCES p(id) ON DELETE CASCADE);"),
+  ("alter_add",
+   "CREATE TABLE p (id int PRIMARY KEY); CREATE TABLE c (id serial PRIMARY KEY, pid int); ALTER TABLE c ADD CONSTRAINT c_fk FOREIGN KEY (pid) REFERENCES p(id) ON DELETE CASCADE;"),
+  ("alter_only",
+   "CREATE TABLE p (id int PRIMARY KEY); CREATE TABLE c (id serial PRIMARY KEY, pid int); ALTER TABLE ONLY c ADD CONSTRAINT c_fk FOREIGN KEY (pid) REFERENCES p(id) ON DELETE CASCADE;"),
+  ("if_not_exists",
+   "CREATE TABLE IF NOT EXISTS p (id int PRIMARY KEY); CREATE TABLE IF NOT EXISTS c (id serial PRIMARY KEY, pid int REFERENCES p(id) ON DELETE CASCADE);"),
+  ("quoted",
+   "CREATE TABLE \"p\" (id int PRIMARY KEY); CREATE TABLE \"c\" (id serial PRIMARY KEY, pid int REFERENCES \"p\"(id) ON DELETE CASCADE);"),
+
+  // --- more than one edge ---
+  ("two_children",
+   "CREATE TABLE p (id int PRIMARY KEY); CREATE TABLE c1 (id serial PRIMARY KEY, pid int REFERENCES p(id) ON DELETE CASCADE); CREATE TABLE c2 (id serial PRIMARY KEY, pid int REFERENCES p(id) ON DELETE SET NULL);"),
+  ("chain",
+   "CREATE TABLE a (id int PRIMARY KEY); CREATE TABLE b (id int PRIMARY KEY, aid int REFERENCES a(id) ON DELETE CASCADE); CREATE TABLE c (id serial PRIMARY KEY, bid int REFERENCES b(id) ON DELETE CASCADE);"),
+  // A child with no foreign key at all, next to one that has one: the pair set
+  // must not grow just because another table is present.
+  ("unrelated_table",
+   "CREATE TABLE p (id int PRIMARY KEY); CREATE TABLE c (id serial PRIMARY KEY, pid int REFERENCES p(id) ON DELETE CASCADE); CREATE TABLE lonely (id serial PRIMARY KEY, note text);")
+];
+
+let rec _join = fn (xs: (str * str) list) -> fn (acc: str) ->
+  match xs with
+  | Nil -> acc
+  | Cons ((parent, child), rest) ->
+    let one = parent ++ ">" ++ child in
+    _join rest (if str_eq acc "" then one else acc ++ "," ++ one)
+  ;
+
+let rec each = fn (fs) ->
+  match fs with
+  | Nil -> ()
+  | Cons ((name, ddl), rest) ->
+    let _ = print ("ddl " ++ name ++ " " ++ ddl) in
+    let joined = _join (cascades_of ddl) "" in
+    let _ = print ("pairs " ++ name ++ " " ++ (if str_eq joined "" then "-" else joined)) in
+    each rest
+  ;
+
+let rec count = fn (fs) -> match fs with Nil -> 0 | Cons (_, r) -> 1 + count r in
+let _ = each fixtures in
+print ("fixtures: " ++ show (count fixtures))

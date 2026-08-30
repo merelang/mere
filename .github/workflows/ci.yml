@@ -257,6 +257,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/live_soundness_check.sh
 
+      - name: cascade_catalog (the DDL parser vs pg_constraint)
+        if: ${{ !cancelled() }}
+        run: sh scripts/cascade_catalog_check.sh
+
       - name: extern_host (which contrib modules a native binary can link)
         if: ${{ !cancelled() }}
         run: sh scripts/extern_host_check.sh
