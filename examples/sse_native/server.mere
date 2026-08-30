@@ -1,0 +1,63 @@
+// examples/sse_native/server.mere — server-sent events from a native binary.
+//
+// The same loop examples/live serves under Node, with no Node: this compiles
+// with `mere -c` to an executable that holds subscribers open and pushes to
+// them. What made that impossible was serve_mt closing every connection when
+// its handler returned, and a subscriber costing a worker if it did not.
+//
+//   GET  /sse/<channel>   the connection is handed to the broadcaster
+//   POST /publish         body is "<channel> <payload>"; delivered to that
+//                         channel's subscribers and to nobody else
+// A subscriber count is deliberately not served: the list is inside the
+// broadcaster, and asking for it would mean sharing what must not be shared.
+extern fn http_current_body: unit -> str;
+extern fn http_set_status: int -> unit;
+
+import "../../contrib/http/serve_mt.mere";
+import "../../contrib/http/router.mere";
+import "../../contrib/http/sse_native.mere";
+
+let bus = sse_start ();
+
+let sub_h = fn (chan: str) -> fn (caps: str list) -> fn (req: str) ->
+  let _ = sse_subscribe bus chan in
+  ""
+  ;
+
+let rec _first = fn (xs: str list) ->
+  match xs with Cons (x, _) -> x | Nil -> "";
+let rec _second = fn (xs: str list) ->
+  match xs with Cons (_, Cons (y, _)) -> y | _ -> "";
+
+let publish_h = fn (req: str) ->
+  let parts = str_split (str_trim (http_current_body ())) " " in
+  let chan = _first parts in
+  let payload = _second parts in
+  if str_eq chan "" then
+    let _ = http_set_status 400 in "usage: <channel> <payload>\n"
+  else
+    let _ = sse_publish bus chan payload in
+    chan ++ "\n"
+  ;
+
+// The count cannot be read from outside: the subscriber list lives inside the
+// broadcaster because a Vec does not cross a thread boundary, which is the
+// whole point. What a caller can observe is what a subscriber receives, so the
+// gate counts frames rather than asking the server for a number.
+
+
+let not_found = fn (req: str) ->
+  let _ = http_set_status 404 in "not found\n";
+
+let routes =
+  Cons (route_pattern "GET" "/sse/:chan" (fn (caps: str list) -> fn (req: str) ->
+          sub_h (_first caps) caps req),
+  Cons (route "POST" "/publish" publish_h,
+  Nil)) in
+
+// The port comes from the environment so the gate can pick one that is free
+// rather than hoping 8095 is.
+let p = match env_var "PORT" with | None -> 0 | Some v -> parse_int_or_zero v in
+let port = if p == 0 then 8095 else p in
+let _ = print ("sse_native on :" ++ show port) in
+http_serve_mt port 8 (router routes not_found)
