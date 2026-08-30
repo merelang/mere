@@ -16,6 +16,7 @@ self-host plan.
 | `lexer.mere` | Tokenizer: source string → `(int, token) list`. Covers literals, ident / keywords, the 12-precedence operator set, and standard punctuation (Stage 50a). | ~336 |
 | `ast.mere` | Shared AST type definitions (`binop` / `cmpop` / `logicop` / `ty` / `pattern` / `expr` / `top_decl` / `program`). Imported by both `parser.mere` and `contrib/fmt/fmt.mere` so the two ends of the self-host pipeline share one definition. Type-only — no functions, no demos. | ~90 |
 | `parser.mere` | Full Mere program parser: tokens → `program = (top_decl list, expr)`. Imports `ast.mere` for the type definitions. | ~1010 |
+| `free_names.mere` | Which names a program uses without binding: `free_names : program -> str list`. An AST query, not evaluation — it exists because a host that runs somebody else's program has to decide whether to run it, and the evaluator only answers when control reaches the call. `extern fn` counts as a request rather than a definition, matching what the evaluator does with it. Consumer: `examples/plugin/runner.mere`, gated by `scripts/plugin_host_check.sh`. | ~170 |
 
 ## Status
 

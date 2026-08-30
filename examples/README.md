@@ -194,9 +194,9 @@ parser. So the boundary is a process.
 
 | File | What it forced |
 |---|---|
-| [plugin/runner.mere](plugin/runner.mere) | The untrusted side: one plugin per process, evaluated in an environment holding two names. Showed that the capability question is answered by construction and the *survival* question is not |
+| [plugin/runner.mere](plugin/runner.mere) | The untrusted side: one plugin per process, evaluated in an environment the host names on the command line. Showed that the capability question is answered by construction, that the *survival* question is not, and that the *answer's timing* is not either — the evaluator refuses when control reaches the call, so it accepted a plugin whose request sat in an untaken branch. Produced `contrib/parser/free_names.mere`, which answers about the whole program before any of it runs |
 | [plugin/host.mere](plugin/host.mere) | The side that has to keep running. Forced the fix in `run`, which reported a signalled child with OCaml's signal encoding (121 for SIGKILL, where the shell and the C backend say 137) -- and made adding `exec` to a command line change the verdict. Its CPU bound comes from `ulimit`, because the language has neither a step budget nor a cap on a region |
-| [plugin/plugins/](plugin/plugins/) | Seven plugins: one that behaves, two that never stop, and four that fail in the four available ways. `scripts/plugin_host_check.sh` counts the verdicts by KIND and asks the filesystem -- not a diagnostic -- whether the capability boundary held |
+| [plugin/plugins/](plugin/plugins/) | Nine plugins: one that behaves, two that never stop, two that fail outright, and four that ask for what they were not granted — two of them where running would never notice, one behind an untaken branch and one behind an `extern fn` it never calls. `scripts/plugin_host_check.sh` counts the verdicts by KIND, asks the filesystem — not a diagnostic — whether the boundary held, and requires that the two hidden requests were caught by READING: each prints a line first, and that line must not appear |
 
 ### Bare metal on the RV32I backend, and what each one forced
 
