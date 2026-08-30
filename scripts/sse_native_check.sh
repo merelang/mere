@@ -102,5 +102,42 @@ if [ "$stray" -ne 0 ]; then
   fail=1
 fi
 
+# ---- and the subscribers are let go ---------------------------------------
+#
+# A broadcaster that only ever pushes onto its list leaks a descriptor per
+# subscription, forever. Measured before it reaped: 20 subscribe-and-disconnect
+# cycles took this server from 8 open descriptors to 28, another 20 took it to
+# 48, and every publish afterwards wrote to a socket nobody was reading.
+#
+# The quiet channel is the half that needs the heartbeat. A subscriber is
+# discovered to be gone by writing to it, so one on a channel nothing is
+# published to is only reachable by the keep-alive comment the broadcaster
+# sends on its own timer.
+fdcount() {
+  if [ -d "/proc/$1/fd" ]; then ls "/proc/$1/fd" 2>/dev/null | wc -l | tr -d ' '
+  elif command -v lsof >/dev/null 2>&1; then lsof -p "$1" 2>/dev/null | grep -c .
+  else echo skip; fi
+}
+base=$(fdcount "$SRV")
+if [ "$base" = skip ]; then
+  echo "sse_native: FAIL -- cannot count descriptors (no /proc and no lsof), so the"
+  echo "  reaping assertion below would report success without checking anything."
+  exit 1
+fi
+
+for n in 1 2 3 4 5 6 7 8 9 10; do
+  curl -s -N -m 1 "http://127.0.0.1:$PORT/sse/quiet" >/dev/null 2>&1
+done
+# Long enough for two heartbeats to have gone out.
+sleep 6
+after=$(fdcount "$SRV")
+if [ "$after" -gt "$((base + 2))" ]; then
+  echo "sse_native: FAIL -- 10 subscribe-and-disconnect cycles on a quiet channel left"
+  echo "  $after descriptors open, up from $base. The broadcaster is not letting go of"
+  echo "  sockets whose peer is gone, and the process dies at the descriptor limit."
+  fail=1
+fi
+
 [ $fail -eq 0 ] || exit 1
-echo "sse_native: OK -- 3/3 subscribers on 'posts' received; 'other' received 0; native binary, no runtime"
+echo "sse_native: OK -- 3/3 subscribers on 'posts' received; 'other' received 0;"
+echo "  10 disconnects on a quiet channel reaped ($base -> $after descriptors); native binary, no runtime"

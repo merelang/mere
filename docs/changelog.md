@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.354 — 2026-08-30
+
+_The broadcaster never let a subscriber go._ `vec_push` was the only thing that
+ever happened to the subscriber list. Measured on the example server: 20
+subscribe-and-disconnect cycles took the process from 8 open descriptors to 28,
+another 20 took it to 48. Every subscription cost a descriptor forever, every
+publish afterwards wrote to a socket nobody was reading, and the server would
+have stopped accepting at the descriptor limit.
+
+A subscriber that left is discovered by writing to it. The write fails, the fd
+is closed, and the slot is marked free — `fd = -1` rather than a shorter vec,
+because Mere's Vec has push, get and set and nothing that shrinks it. The list
+is then bounded by the PEAK number of concurrent subscribers instead of the
+total ever seen.
+
+**The quiet channel is the half that needs a heartbeat.** A subscriber on a
+channel nothing is published to is never written to, so it is never discovered
+to be gone. The pump waits with `channel_recv_timeout` instead of blocking on
+`channel_recv`, and on each timeout writes an SSE comment (`:` then a blank
+line) to everyone — which is also what keeps a proxy from dropping an idle
+stream.
+
+Measured after: 8 descriptors, 8 after 20 disconnects, 8 after another 20 on a
+quiet channel. 50 concurrent subscribers all received a publish, and all 50
+descriptors came back.
+
+The gate counts descriptors before and after ten disconnects on a quiet
+channel, through `/proc` or `lsof`, and fails rather than skipping when it can
+count neither. Removing the reap fails it; leaving the reap but stretching the
+heartbeat to ten minutes fails it too.
+
+`dune test` 2599/0, live_query 53 cases, live_e2e 6 checks, thread_leak 7/7.
+
+---
+
 ## v0.1.353 — 2026-08-30
 
 _Three of the four row-changing referential actions were missed._

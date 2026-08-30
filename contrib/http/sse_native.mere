@@ -54,6 +54,11 @@ extern fn http_set_header: str -> str -> unit;
 // Making the vecs local to the broadcaster removes the question: nothing else
 // can reach them, so nothing else needs to be allowed to.
 
+// How long the broadcaster waits before writing a keep-alive comment. Short
+// enough that a gate can see a reap happen, long enough that an idle server is
+// not busy: proxies commonly drop an idle stream at 30-60s.
+let _sse_beat_ms = 2000;
+
 let _sse_hdr =
   "HTTP/1.1 200 OK\r\n\
    Content-Type: text/event-stream\r\n\
@@ -69,58 +74,69 @@ let _sse_write = fn (fd: int) -> fn (s: str) ->
   tcp_write fd buf k
   ;
 
+let rec _sse_free_slot = fn (fds) -> fn (i: int) ->
+  if i >= vec_len fds then 0 - 1
+  else if vec_get fds i < 0 then i
+  else _sse_free_slot fds (i + 1)
+  ;
+
+// Closing the fd is what returns the descriptor to the process. Marking the
+// slot free is what stops the next publish from walking over it.
+let _sse_reap = fn (fds) -> fn (chans) -> fn (i: int) -> fn (fd: int) ->
+  let _ = tcp_close fd in
+  let _ = vec_set fds i (0 - 1) in
+  vec_set chans i ""
+  ;
+
+// A COMMENT FRAME TO EVERYONE, which is two things at once. SSE comments
+// (`:` then a blank line) are what keeps a proxy from deciding an idle stream
+// is dead, and writing to every subscriber is the only way to learn that one
+// of them left -- a subscriber on a channel nothing is published to would
+// otherwise never be written to, and never be reaped.
+let rec _sse_beat = fn (fds) -> fn (chans) -> fn (i: int) ->
+  if i >= vec_len fds then ()
+  else
+    let fd = vec_get fds i in
+    let _ =
+      if fd < 0 then ()
+      else if _sse_write fd ": beat\n\n" <= 0 then _sse_reap fds chans i fd
+      else () in
+    _sse_beat fds chans (i + 1)
+  ;
+
 // Deliver to every subscriber of one channel, and to nobody else. THE SECOND
 // HALF IS THE POINT: an implementation that wrote to every fd would satisfy
 // every "did the subscriber get it" check and be worth nothing, because that
 // is a broadcast and the derivation in contrib/db/live exists to avoid one.
+// Deliver to every subscriber of one channel, and to nobody else. THE SECOND
+// HALF IS THE POINT: an implementation that wrote to every fd would satisfy
+// any check that only asks whether the subscriber got it.
+//
+// AND IT REAPS. A subscriber that went away is only discovered by writing to
+// it: the write fails, the fd is closed, and the slot is marked free for the
+// next subscriber to take. Before this, `vec_push` was the only thing that ever
+// happened to the list -- measured on the example server, 20 subscribe-and-
+// disconnect cycles took the process from 8 open descriptors to 28, and
+// another 20 took it to 48. Every subscription cost one descriptor forever,
+// and every publish afterwards wrote to a socket nobody was reading.
+//
+// A free slot is `fd = -1`, not a shorter vec: Mere's Vec has push, get and
+// set but nothing that shrinks it. So the list is bounded by the PEAK number
+// of concurrent subscribers rather than by the total ever seen, which is the
+// bound that matters.
 let rec _sse_deliver = fn (fds) -> fn (chans) -> fn (i: int) -> fn (chan: str) -> fn (payload: str) ->
   if i >= vec_len fds then ()
   else
+    let fd = vec_get fds i in
     let _ =
-      if str_eq (vec_get chans i) chan then
-        let _ = _sse_write (vec_get fds i) ("data: " ++ payload ++ "\n\n") in ()
+      if fd < 0 then ()
+      else if str_eq (vec_get chans i) chan then
+        let n = _sse_write fd ("data: " ++ payload ++ "\n\n") in
+        if n <= 0 then _sse_reap fds chans i fd else ()
       else () in
     _sse_deliver fds chans (i + 1) chan payload
   ;
 
-// ---- the bus -------------------------------------------------------------
-//
-// THREE channels, not two, and the reason is a race the first version had. A
-// registration was "send the fd on ctl, then the channel name on msg" and a
-// publish was "send the channel name on msg, then the payload" -- both writing
-// to msg, from different threads, with the broadcaster deciding what a str
-// meant by which message it happened to read first. Two workers doing the two
-// things at once would swap halves and a subscriber would be registered under
-// a payload.
-//
-//   reg_fd    int   a descriptor to register
-//   reg_chan  str   the channel it subscribes to
-//   pub       str   channel name, then payload
-//
-// The registration pair is still two sends, but on two channels only the
-// subscribing worker writes to, in order. Nothing else can interleave with it.
-// ONE CHANNEL, AND ONE SEND PER LOGICAL MESSAGE. Both parts of that sentence
-// were paid for.
-//
-// The first version used two channels and polled them with `channel_recv_opt`,
-// on the reading that a name ending in `_opt` is a try-receive. It is not:
-// `mere_channel_T_recv_opt` does `while (len == 0 && !closed) cond_wait`, so it
-// BLOCKS, and answers None only for a channel that is closed and drained. A
-// pump polling two channels therefore parks in the first one. Measured: one
-// subscriber registered, a second connected and was never seen, and the moment
-// a publish arrived the second registration went through -- the pump had been
-// asleep in `recv_opt pub` the whole time.
-//
-// The version before that used one channel but sent each message in two halves
-// (chan, then payload). Two workers publishing concurrently interleave their
-// halves and each receives the other's. So a message has to be ONE send, which
-// means encoding it into the single string a `Channel[str]` carries:
-//
-//   "S <fd> <chan>"        subscribe: hand this connection to the broadcaster
-//   "P <chan> <payload>"   publish:   deliver to that channel's subscribers
-//
-// A payload may contain spaces; a channel name may not, which is why the split
-// is bounded rather than a full `str_split`.
 let rec _sse_space_at = fn (s: str) -> fn (i: int) ->
   if i >= str_len s then 0 - 1
   else if str_eq (substring s i (i + 1)) " " then i
@@ -138,8 +154,14 @@ let sse_start = fn () ->
   let _ = spawn (fn () ->
     let fds = vec_new () in
     let chans = vec_new () in
+    // `channel_recv` blocks until a message arrives, which is right for the
+    // work and wrong for the upkeep: a broadcaster that only ever wakes for a
+    // publish can never notice a subscriber that left on a quiet channel.
+    // `channel_recv_timeout` gives the loop a floor to stand on.
     let rec pump = fn () ->
-      let msg = channel_recv bus in
+      match channel_recv_timeout bus _sse_beat_ms with
+      | None -> let _ = _sse_beat fds chans 0 in pump ()
+      | Some msg ->
       let (kind, p1) = _sse_field msg 0 in
       let (arg1, p2) = _sse_field msg p1 in
       let rest = substring msg p2 (str_len msg) in
@@ -147,8 +169,10 @@ let sse_start = fn () ->
         if str_eq kind "S" then
           let fd = int_of_str arg1 in
           let _ = _sse_write fd _sse_hdr in
-          let _ = vec_push fds fd in
-          let _ = vec_push chans rest in
+          let slot = _sse_free_slot fds 0 in
+          let _ =
+            if slot < 0 then let _ = vec_push fds fd in vec_push chans rest
+            else let _ = vec_set fds slot fd in vec_set chans slot rest in
           ()
         else
           _sse_deliver fds chans 0 arg1 rest in
