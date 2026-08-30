@@ -1,24 +1,57 @@
 // examples/plugin/runner.mere — the side of the boundary that runs somebody
 // else's program.
 //
-// One plugin per process. The plugin is Mere source; it is evaluated by
-// contrib/eval, whose `initial_env` seeds exactly two names (`print` and
-// `show`). Everything else a plugin might reach for -- `write_file`,
-// `tcp_connect` -- is not in scope, so the interpreter IS the capability
-// boundary and there is nothing to enforce on top of it. That much the
-// language gets right for free.
+// One plugin per process. The plugin is Mere source, evaluated by contrib/eval
+// in an environment the HOST decides: the granted names arrive on the command
+// line, and everything else a plugin might reach for -- `write_file`,
+// `tcp_connect` -- is not in scope. The interpreter is the capability boundary
+// and there is nothing to enforce on top of it.
 //
-// What this file cannot do is survive the plugin, which is why the host runs
-// it as a child and reads the exit status. See host.mere.
+// What the interpreter alone cannot do is answer BEFORE running. Its refusal
+// arrives when control reaches the call, so a plugin whose request sits in a
+// branch it does not take was accepted and reported success -- measured, not
+// assumed: `if 1 > 2 then write_file ... else "harmless"` returned "harmless"
+// and the host learned nothing about the filesystem having been asked for. So
+// the program is parsed first and its free names -- everything it uses without
+// binding -- are compared against the grant. A plugin that asks for something
+// it was not given is refused whole, with every name it asked for, and exits 3
+// so the host can tell that from a plugin that merely failed.
 //
-// The plugin's own output goes to stdout; the value it evaluated to is
-// written to a second path, so the host can tell what the plugin PRINTED
-// from what it RETURNED.
+// What this file still cannot do is survive the plugin, which is why the host
+// runs it as a child. See host.mere.
 //
 // Usage:
-//   mere examples/plugin/runner.mere <plugin.mere> <value-out>
+//   mere examples/plugin/runner.mere <plugin.mere> <value-out> <granted,names>
 
 import "github.com/merelang/mere/contrib/eval/eval.mere";
+import "github.com/merelang/mere/contrib/parser/free_names.mere";
+
+let rec ungranted = fn (asked: str list) -> fn (granted: str list) ->
+  match asked with
+  | Nil -> Nil
+  | Cons (h, t) ->
+    if mem_str h granted then ungranted t granted
+    else Cons (h, ungranted t granted);
+
+let rec join_names = fn (xs: str list) ->
+  match xs with
+  | Nil -> ""
+  | Cons (h, Nil) -> h
+  | Cons (h, t) -> h ++ ", " ++ join_names t;
+
+let run_plugin = fn (path: str) -> fn (value_out: str) -> fn (grant_spec: str) ->
+  let src = read_file path in
+  let toks = tokenize src in
+  let (parsed, _rest) = parse_decls Nil toks in
+  let prog = flatten_and_resolve parsed in
+  let granted = str_split grant_spec "," in
+  let missing = ungranted (free_names prog) granted in
+  match missing with
+    | Cons (_, _) ->
+      let _ = print_err ("plugin asks for what it was not granted: "
+                         ++ join_names missing) in
+      exit 3
+    | Nil -> write_file value_out (value_to_str (run_program prog));
 
 let argv = args () in
 // A Mere program prints the value of its main expression, so this process
@@ -27,10 +60,8 @@ let argv = args () in
 // the host can recognise and drop.
 let _ =
   match argv with
-    | Cons (path, Cons (value_out, _)) ->
-        let src = read_file path in
-        let v = parse_and_eval src in
-        write_file value_out (value_to_str v)
-    | _ -> print "usage: runner <plugin.mere> <value-out>"
+    | Cons (path, Cons (value_out, Cons (grant_spec, _))) ->
+        run_plugin path value_out grant_spec
+    | _ -> print "usage: runner <plugin.mere> <value-out> <granted,names>"
   in
 ()

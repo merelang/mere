@@ -30,6 +30,11 @@ let mere_bin =
   in
 
 let cpu_seconds = "2" in
+
+// What this host hands a plugin. Two names, written down in one place, passed
+// to the runner rather than compiled into it -- the point of saying it out loud
+// is that a request for anything else can be named as such.
+let granted = "print,show" in
 let out_path = "/tmp/mere_plugin_out.txt" in
 let err_path = "/tmp/mere_plugin_err.txt" in
 let val_path = "/tmp/mere_plugin_value.txt" in
@@ -40,9 +45,15 @@ let val_path = "/tmp/mere_plugin_value.txt" in
 // `st > 128` is the shell's convention for a signalled child, and it is a
 // convention rather than a fact -- a program is free to exit(137). It is also
 // the reason this file found Q-088: under the interpreter `run` used to answer
-// 101 for a plugin killed at its CPU limit, which lands in the branch below.
+// 101 for a plugin killed at its CPU limit, which lands in the last branch.
+//
+// `3` is the runner's, and it is the verdict this host most wants: the plugin
+// asked for something it was not granted, and that was decided by reading it
+// rather than by running it, so the answer covers branches the plugin would
+// never have taken.
 let verdict = fn (st: int) -> fn (out: str) -> fn (err: str) ->
   if st == 0 then "returned   " ++ str_trim out
+  else if st == 3 then "denied     " ++ str_trim err
   else if st > 128 then "stopped    killed by signal " ++ str_of_int (st - 128)
   else "refused    " ++ str_trim err
   in
@@ -66,11 +77,17 @@ let printed = fn (out: str) ->
   in
 
 let call = fn (path: str) ->
-  // `exec` so that no shell of ours survives to announce "Cputime limit
-  // exceeded" on the HOST's stderr -- the host reports the deaths here, in its
-  // own words. Adding this one word is what exposed Q-088.
-  let cmd = "ulimit -t " ++ cpu_seconds ++ "; exec " ++ mere_bin
+  // `exec 2>/dev/null` first, because the shell that waits on the plugin
+  // announces "Cputime limit exceeded" on ITS stderr, which is the host's --
+  // the host reports the deaths here, in its own words. The plugin's own stderr
+  // is redirected separately below and survives this.
+  //
+  // An earlier version wrote `exec mere` instead, so that no shell of ours was
+  // left to announce anything. That one word is what exposed Q-088: with no
+  // shell in between, `run` reported the death itself, and reported it wrong.
+  let cmd = "exec 2>/dev/null; ulimit -t " ++ cpu_seconds ++ "; " ++ mere_bin
             ++ " examples/plugin/runner.mere " ++ path ++ " " ++ val_path
+            ++ " " ++ granted
             ++ " > " ++ out_path ++ " 2> " ++ err_path in
   let _ = run ("rm -f " ++ val_path) in
   let st = run cmd in

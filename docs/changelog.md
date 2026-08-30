@@ -4,6 +4,58 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.359 — 2026-08-30
+
+_The boundary held on the path taken._ v0.1.358 said the interpreter is a
+capability boundary, and it is, but the refusal arrives when control REACHES the
+call. A plugin whose request sits in a branch it does not take was accepted and
+reported success — measured, not argued: `if 1 > 2 then write_file ... else
+"harmless"` returned `"harmless"`, wrote nothing, and told the host nothing
+about the filesystem having been asked for. A host deciding whether to run
+something cannot use an answer that only arrives if it runs it.
+
+`contrib/parser/free_names.mere` answers about the whole program instead:
+`free_names : program -> str list`, the names a program uses without binding,
+computed over the parsed AST. Binding forms are `let` through the whole pattern,
+`let rec` with the group in scope in its own bodies, `fn`'s parameter, and a
+match arm's pattern in both the guard and the body. Constructors are not names
+here — the parser has rewritten them into `EConstr` / `PConstr` before this sees
+them, so `Cons` and `Some` never look like requests.
+
+**`extern fn` does not bind.** That is not an oversight but the second evasion:
+the evaluator treats a `TopExternFn` as a no-op and leaves the name unbound, so
+a plugin declaring `extern fn tcp_connect: str -> int -> int` and never calling
+it runs to completion and returns 0. Nothing it does at runtime reveals what it
+asked the host for. Declaring an extern IS the request, and is counted as one.
+
+The grant now comes from the host on the command line rather than from a
+constant inside the evaluator, and a plugin that asks for something outside it
+is refused whole — with every name it asked for, not the first one execution
+happened to reach — and exits 3, so the host can tell "asked for what it was not
+given" from "failed". The corpus is nine plugins and the gate counts four kinds,
+because a host answering "refused" nine times passes a check that only asks
+whether it survived.
+
+**The check that the verdict was READ and not RUN**: both hidden plugins print a
+line before the thing that would give them away, and neither line may appear in
+the output. A host that evaluated its way to the same verdict would print it,
+and would have missed both.
+
+Checked for false denials as well: shadowing an ungranted name, a `let rec`
+calling itself, a match arm's binder and a `fn` parameter are all bound, and
+none of them is reported.
+
+Poisoned four ways, each caught by the assertion it belongs to: the runner not
+consulting the grant, the analysis not descending into an `if` (denied 3 of 4,
+and the hidden branch's line appears), `extern fn` treated as a definition
+(denied 3 of 4, and the declaring plugin's line appears), and the earlier
+poisons still hold.
+
+`dune test` 2599/0, plugin_host_check 9 plugins (1 returned, 4 denied,
+2 refused, 2 stopped).
+
+---
+
 ## v0.1.358 — 2026-08-30
 
 _A plugin host is the one program that takes somebody else's code as input, and
