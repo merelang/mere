@@ -2528,9 +2528,23 @@ let builtin_spawn =
     let label = Printf.sprintf "thread %d" n in
     thr_install_hook ();
     if vclock_on then sched_add_live ();
-    V_thread (Domain.spawn (fun () ->
+    (* THE PARENT REGISTERS THE THREAD, NOT THE THREAD ITSELF. Registering from
+       inside the domain means `spawn` returns before the entry exists, so a
+       main that spawns and exits can reach `at_exit` first and report fewer
+       threads than it started -- silently, because an undercount looks like a
+       clean program. Observed on a loaded CI runner as "1 blocked on
+       channel_recv" for a program that leaks two, and reproducible by delaying
+       the child's first instruction.
+
+       Parent and child write the SAME (label, st) pair under the same key, so
+       whichever arrives first wins and the other is a no-op: the child still
+       registers, because `Domain.get_id` on a domain that has already finished
+       is not something to depend on, and `thr_set_wait` mutates `st` either
+       way. *)
+    let st = ref T_running in
+    let d = Domain.spawn (fun () ->
       let me = thr_me () in
-      thr_guard (fun () -> Hashtbl.replace thr_status me (label, ref T_running));
+      thr_guard (fun () -> Hashtbl.replace thr_status me (label, st));
       match !apply_value_ref clos V_unit with
       | v ->
         thr_set_wait T_finished;
@@ -2544,7 +2558,13 @@ let builtin_spawn =
         in
         thr_set_wait (T_died why);
         if vclock_on then sched_drop_live ();
-        raise e)))
+        raise e)
+    in
+    thr_guard (fun () ->
+      let id = (Domain.get_id d :> int) in
+      if not (Hashtbl.mem thr_status id) then
+        Hashtbl.replace thr_status id (label, st));
+    V_thread d)
 
 let builtin_join =
   V_builtin ("join", fun h ->
