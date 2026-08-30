@@ -1,0 +1,171 @@
+// contrib/http/sse_native.mere — server-sent events without a JS host.
+//
+// contrib/http/sse.mere pushes through Node glue that intercepts /sse/<channel>
+// before Mere sees it. That works and it does not link into a native binary:
+// `mere -c` emits the call and the C compiler answers "Undefined symbols".
+// mere-blog is a 384KB native binary talking to Postgres, so the only way it
+// could have live updates was to stop being one -- an app-wide placement
+// decision forced by a single feature.
+//
+// TWO CONSTRAINTS PICKED THIS DESIGN, and they picked the same one.
+//
+//   A `Map` of subscribers shared by every worker does not compile: the capture
+//   analysis refuses a Map across a thread boundary, neither Send nor Sync. So
+//   ONE thread has to own the set and the others have to talk to it.
+//
+//   A worker that holds a connection cannot take another. Measured: two held
+//   connections against two workers make the third request unanswerable, and
+//   serve_mt's own header says the connection count equals the worker count by
+//   construction -- with mere-blog giving each worker a Postgres connection, a
+//   subscriber would cost one of those too. So a worker must HAND THE
+//   DESCRIPTOR OVER and go back to the pool.
+//
+// One owner, and a handoff. That is this module, and it is what SSE wants
+// anyway: writes to the subscriber set serialised on one thread.
+//
+//   sse_start      : unit -> Bus      spawn the broadcaster, once, at startup
+//   sse_subscribe  : Bus -> str -> unit    from a handler: take this connection
+//   sse_publish    : Bus -> str -> str -> unit    channel, payload
+//
+// The bus carries ints, because that is what crosses a thread boundary here:
+// a descriptor, and a tag saying what to do with it. A payload is a str and
+// str IS Send, so it travels on its own channel beside the control one.
+extern fn tcp_write: int -> int -> int -> int;
+extern fn tcp_close: int -> unit;
+extern fn mem_alloc: int -> int;
+extern fn mem_copy_str: int -> int -> str -> int;
+extern fn http_hijack: unit -> int;
+extern fn http_set_status: int -> unit;
+extern fn http_set_content_type: str -> unit;
+extern fn http_set_header: str -> str -> unit;
+
+// THE SUBSCRIBER LIST IS CREATED INSIDE THE BROADCASTER, and that is not a
+// style choice. Declared at top level and captured, it compiled and did not
+// work: three subscribers registered and `vec_len` answered 1 from every
+// worker, because each thread had its own view of a Vec that is neither Send
+// nor Sync.
+//
+// The compiler refuses that directly -- `spawn (fn () -> vec_push v 1)` is
+// "cannot capture v : Vec[__heap, int] across a thread boundary" -- and did not
+// refuse this, because `spawn (fn () -> pump ())` hands it a FUNCTION, and a
+// function type says nothing about what the function captured. That is Q-080,
+// and this module walked into it.
+//
+// Making the vecs local to the broadcaster removes the question: nothing else
+// can reach them, so nothing else needs to be allowed to.
+
+let _sse_hdr =
+  "HTTP/1.1 200 OK\r\n\
+   Content-Type: text/event-stream\r\n\
+   Cache-Control: no-cache\r\n\
+   Connection: keep-alive\r\n\r\n";
+
+// Write a str to a descriptor. The buffer is per-call rather than shared,
+// because the broadcaster is one thread and the cost is a bump allocation.
+let _sse_write = fn (fd: int) -> fn (s: str) ->
+  let n = str_len s in
+  let buf = mem_alloc (n + 8) in
+  let k = mem_copy_str buf 0 s in
+  tcp_write fd buf k
+  ;
+
+// Deliver to every subscriber of one channel, and to nobody else. THE SECOND
+// HALF IS THE POINT: an implementation that wrote to every fd would satisfy
+// every "did the subscriber get it" check and be worth nothing, because that
+// is a broadcast and the derivation in contrib/db/live exists to avoid one.
+let rec _sse_deliver = fn (fds) -> fn (chans) -> fn (i: int) -> fn (chan: str) -> fn (payload: str) ->
+  if i >= vec_len fds then ()
+  else
+    let _ =
+      if str_eq (vec_get chans i) chan then
+        let _ = _sse_write (vec_get fds i) ("data: " ++ payload ++ "\n\n") in ()
+      else () in
+    _sse_deliver fds chans (i + 1) chan payload
+  ;
+
+// ---- the bus -------------------------------------------------------------
+//
+// THREE channels, not two, and the reason is a race the first version had. A
+// registration was "send the fd on ctl, then the channel name on msg" and a
+// publish was "send the channel name on msg, then the payload" -- both writing
+// to msg, from different threads, with the broadcaster deciding what a str
+// meant by which message it happened to read first. Two workers doing the two
+// things at once would swap halves and a subscriber would be registered under
+// a payload.
+//
+//   reg_fd    int   a descriptor to register
+//   reg_chan  str   the channel it subscribes to
+//   pub       str   channel name, then payload
+//
+// The registration pair is still two sends, but on two channels only the
+// subscribing worker writes to, in order. Nothing else can interleave with it.
+// ONE CHANNEL, AND ONE SEND PER LOGICAL MESSAGE. Both parts of that sentence
+// were paid for.
+//
+// The first version used two channels and polled them with `channel_recv_opt`,
+// on the reading that a name ending in `_opt` is a try-receive. It is not:
+// `mere_channel_T_recv_opt` does `while (len == 0 && !closed) cond_wait`, so it
+// BLOCKS, and answers None only for a channel that is closed and drained. A
+// pump polling two channels therefore parks in the first one. Measured: one
+// subscriber registered, a second connected and was never seen, and the moment
+// a publish arrived the second registration went through -- the pump had been
+// asleep in `recv_opt pub` the whole time.
+//
+// The version before that used one channel but sent each message in two halves
+// (chan, then payload). Two workers publishing concurrently interleave their
+// halves and each receives the other's. So a message has to be ONE send, which
+// means encoding it into the single string a `Channel[str]` carries:
+//
+//   "S <fd> <chan>"        subscribe: hand this connection to the broadcaster
+//   "P <chan> <payload>"   publish:   deliver to that channel's subscribers
+//
+// A payload may contain spaces; a channel name may not, which is why the split
+// is bounded rather than a full `str_split`.
+let rec _sse_space_at = fn (s: str) -> fn (i: int) ->
+  if i >= str_len s then 0 - 1
+  else if str_eq (substring s i (i + 1)) " " then i
+  else _sse_space_at s (i + 1)
+  ;
+
+let _sse_field = fn (s: str) -> fn (from: int) ->
+  let i = _sse_space_at s from in
+  if i < 0 then (substring s from (str_len s), str_len s)
+  else (substring s from i, i + 1)
+  ;
+
+let sse_start = fn () ->
+  let bus = channel_new () in
+  let _ = spawn (fn () ->
+    let fds = vec_new () in
+    let chans = vec_new () in
+    let rec pump = fn () ->
+      let msg = channel_recv bus in
+      let (kind, p1) = _sse_field msg 0 in
+      let (arg1, p2) = _sse_field msg p1 in
+      let rest = substring msg p2 (str_len msg) in
+      let _ =
+        if str_eq kind "S" then
+          let fd = int_of_str arg1 in
+          let _ = _sse_write fd _sse_hdr in
+          let _ = vec_push fds fd in
+          let _ = vec_push chans rest in
+          ()
+        else
+          _sse_deliver fds chans 0 arg1 rest in
+      pump () in
+    pump ()) in
+  bus
+  ;
+
+// From inside a handler: take this connection and give it to the broadcaster.
+// The handler's returned string is not written -- http_hijack marks the
+// response as sent, so serve_mt neither writes nor closes.
+let sse_subscribe = fn (bus) -> fn (chan: str) ->
+  let fd = http_hijack () in
+  channel_send bus ("S " ++ show fd ++ " " ++ chan)
+  ;
+
+// From anywhere: deliver to the subscribers of one channel.
+let sse_publish = fn (bus) -> fn (chan: str) -> fn (payload: str) ->
+  channel_send bus ("P " ++ chan ++ " " ++ payload)
+  ;

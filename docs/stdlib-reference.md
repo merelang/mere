@@ -719,6 +719,27 @@ address in a hosted process. See
 
 ---
 
+## Channel receive: which of the three blocks
+
+All three block. They differ in what ends the wait.
+
+| | returns when | use it for |
+|---|---|---|
+| `channel_recv` | a message arrives | a worker that runs until the process does |
+| `channel_recv_opt` | a message arrives, **or the channel is closed and drained** (`None`) | a worker loop that must terminate: `channel_close` ends it |
+| `channel_recv_timeout` | a message arrives, or the deadline passes | the only one that answers "is there something *now*" |
+
+`channel_recv_opt` is the one that gets misread, because a name ending in
+`_opt` reads like a try-receive. It is not: the implementation is
+`while (len == 0 && !closed) cond_wait`, and `None` means closed, never empty.
+A thread polling two channels with it parks in the first one and never reaches
+the second — which is a deadlock that looks like a delivery bug, since the
+first channel's traffic keeps waking it up just often enough to seem alive.
+Use `channel_recv_timeout` to poll, or put both kinds of message on one
+channel. `contrib/http/sse_native.mere` took the second route and says why.
+
+---
+
 ## Virtual clock (v0.1.305)
 
 `MERE_VIRTUAL_CLOCK=1` makes the **interpreter** advance a virtual clock instead

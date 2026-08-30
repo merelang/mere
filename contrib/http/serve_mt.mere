@@ -55,6 +55,8 @@ extern fn mem_copy_str: int -> int -> str -> int;
 extern fn http_begin_request: int -> str -> str -> int;
 extern fn http_response_head: int -> str;
 extern fn http_response_sent: unit -> int;
+// v0.1.351: non-zero when the handler took the connection (see contrib/http/sse_native).
+extern fn http_hijacked: unit -> int;
 extern fn http_end_request: unit -> int;
 
 let mt_bufsz = 65536;
@@ -164,7 +166,13 @@ let mt_serve_conn = fn (fd: int, rbuf: int, wbuf: int, pat: int, patn: int, h) -
         let n = mem_copy_str wbuf 0 (http_response_head (str_len out) ++ out) in
         tcp_write fd wbuf n in
     let _ = http_end_request () in
-    let _ = tcp_close fd in
+    // v0.1.351: a hijacked connection belongs to whoever the handler gave it
+    // to. Closing it here is what makes a stream impossible, and returning to
+    // the pool immediately is what keeps a subscriber from costing a worker --
+    // measured: with 2 workers, two held connections make the third request
+    // unanswerable, and mere-blog gives each worker its own Postgres
+    // connection, so a subscriber would cost one of those too.
+    let _ = if http_hijacked () != 0 then () else tcp_close fd in
     1;
 
 // ---- one connection, with per-worker state -----------------------------
@@ -190,7 +198,13 @@ let mt_serve_conn_ctx = fn (fd: int, rbuf: int, wbuf: int, pat: int, patn: int, 
         let n = mem_copy_str wbuf 0 (http_response_head (str_len out) ++ out) in
         tcp_write fd wbuf n in
     let _ = http_end_request () in
-    let _ = tcp_close fd in
+    // v0.1.351: a hijacked connection belongs to whoever the handler gave it
+    // to. Closing it here is what makes a stream impossible, and returning to
+    // the pool immediately is what keeps a subscriber from costing a worker --
+    // measured: with 2 workers, two held connections make the third request
+    // unanswerable, and mere-blog gives each worker its own Postgres
+    // connection, so a subscriber would cost one of those too.
+    let _ = if http_hijacked () != 0 then () else tcp_close fd in
     1;
 
 // ---- the pool ----------------------------------------------------------

@@ -6553,7 +6553,7 @@ let native_http_names =
   [ "http_serve"; "http_serve_tls"; "http_current_body"; "http_set_status";
     (* v0.1.340: the pieces a Mere-level accept loop drives *)
     "http_begin_request"; "http_response_head"; "http_response_head_ka";
-    "http_response_sent";
+    "http_response_sent"; "http_hijack"; "http_hijacked";
     "http_end_request";
     "http_set_content_type"; "http_set_header"; "http_get_header";
     "http_current_status"; "http_arena_mark";
@@ -6651,6 +6651,16 @@ let native_http_runtime ~tls =
       "   response after this one. */";
       "static _Thread_local int __http_sent = 0;";
       "static _Thread_local int __http_conn = -1;";
+      "/* v0.1.351: a handler that TAKES the connection -- server-sent events.";
+      " * The accept loop closes the socket when the handler returns, which is";
+      " * right for a request/response and wrong for a stream that has to stay";
+      " * open. `http_hijack` says the handler has handed the descriptor";
+      " * somewhere else and the loop must not close it or write to it. The fd";
+      " * is returned so the caller has something to hand over: it is otherwise";
+      " * invisible to a handler, whose type is str -> str. */";
+      "static _Thread_local int __http_hijacked = 0;";
+      "static int http_hijack(void) { __http_hijacked = 1; __http_sent = 1; return __http_conn; }";
+      "static int http_hijacked(void) { return __http_hijacked; }";
       "/* Connection I/O. Every byte in and out of a served connection goes";
       " * through these three, so that turning TLS on is one decision in one";
       " * place. http_send_file used to call write(__http_conn, ...) directly:";
@@ -6753,6 +6763,7 @@ let native_http_runtime ~tls =
       " * the http_set_* externs already write, now that the state is per-thread.";
       " */";
       "static int http_begin_request(int fd, const char* head, const char* body) {";
+      "  __http_hijacked = 0;";
       "  __http_req_head_len = (int)__lang_str_size(head);";
       "  if (__http_req_head_len > (int)sizeof __http_req_head - 1) __http_req_head_len = sizeof __http_req_head - 1;";
       "  memcpy(__http_req_head, head, __http_req_head_len); __http_req_head[__http_req_head_len] = 0;";
