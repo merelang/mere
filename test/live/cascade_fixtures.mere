@@ -61,6 +61,19 @@ let fixtures = [
    "CREATE TABLE a (id int PRIMARY KEY); CREATE TABLE b (id int PRIMARY KEY, aid int REFERENCES a(id) ON DELETE CASCADE); CREATE TABLE c (id serial PRIMARY KEY, bid int REFERENCES b(id) ON DELETE CASCADE);"),
   // A child with no foreign key at all, next to one that has one: the pair set
   // must not grow just because another table is present.
+  // --- schemas this module must REFUSE to speak about ---
+  //
+  // A trigger body is arbitrary; a view hides the table a read really touches.
+  // Both were silently missed. The catalog is asked whether each fixture has
+  // one, so the refusal is checked against the database rather than against
+  // this file's own idea of what it wrote.
+  ("with_trigger",
+   "CREATE TABLE posts (id serial PRIMARY KEY, title text); CREATE TABLE audit (id serial PRIMARY KEY, what text); CREATE FUNCTION log_post() RETURNS trigger AS $x$ BEGIN INSERT INTO audit (what) VALUES ('t'); RETURN NULL; END $x$ LANGUAGE plpgsql; CREATE TRIGGER t_post AFTER INSERT ON posts FOR EACH ROW EXECUTE FUNCTION log_post();"),
+  ("with_view",
+   "CREATE TABLE posts (id serial PRIMARY KEY, title text); CREATE VIEW published AS SELECT id, title FROM posts;"),
+  ("with_both_and_fk",
+   "CREATE TABLE p (id int PRIMARY KEY); CREATE TABLE c (id serial PRIMARY KEY, pid int REFERENCES p(id) ON DELETE CASCADE); CREATE VIEW cv AS SELECT id FROM c;"),
+
   ("unrelated_table",
    "CREATE TABLE p (id int PRIMARY KEY); CREATE TABLE c (id serial PRIMARY KEY, pid int REFERENCES p(id) ON DELETE CASCADE); CREATE TABLE lonely (id serial PRIMARY KEY, note text);")
 ];
@@ -73,6 +86,12 @@ let rec _join = fn (xs: (str * str) list) -> fn (acc: str) ->
     _join rest (if str_eq acc "" then one else acc ++ "," ++ one)
   ;
 
+let rec _join_strs = fn (xs: str list) -> fn (acc: str) ->
+  match xs with
+  | Nil -> acc
+  | Cons (x, rest) -> _join_strs rest (if str_eq acc "" then x else acc ++ "," ++ x)
+  ;
+
 let rec each = fn (fs) ->
   match fs with
   | Nil -> ()
@@ -80,6 +99,8 @@ let rec each = fn (fs) ->
     let _ = print ("ddl " ++ name ++ " " ++ ddl) in
     let joined = _join (cascades_of ddl) "" in
     let _ = print ("pairs " ++ name ++ " " ++ (if str_eq joined "" then "-" else joined)) in
+    let un = _join_strs (schema_unmodelled ddl) "" in
+    let _ = print ("unmodelled " ++ name ++ " " ++ (if str_eq un "" then "-" else un)) in
     each rest
   ;
 

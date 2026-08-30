@@ -250,6 +250,8 @@ and _changes_child_rows = fn (ws: str list) -> fn (n: int) ->
 
 let cascades_of = fn (ddl: str) -> _cascade_scan (_words ddl) "" Nil;
 
+
+
 let rec _widen = fn (pairs: (str * str) list) -> fn (tabs: str list) -> fn (acc: str list) ->
   match pairs with
   | Nil -> acc
@@ -262,6 +264,79 @@ let rec _append = fn (a: str list) -> fn (b: str list) ->
   match a with
   | Nil -> b
   | Cons (x, rest) -> Cons (x, _append rest b)
+  ;
+
+// ---- what this cannot speak about ----------------------------------------
+//
+// `derivable` refuses a READ whose freshness no write determines. This is the
+// same admission one level up: a SCHEMA can contain constructs that make a
+// write change a read through a path made of neither table names nor foreign
+// keys, and the answer is to say so rather than to answer confidently.
+//
+// Measured in Postgres, both silently wrong before this existed:
+//
+//   TRIGGER  an AFTER INSERT ON posts that writes `audit` turned
+//            `INSERT INTO posts` into a change of a read of `audit`:
+//            "post touched" -> "post touched,post touched". The statement
+//            never names that table, and the trigger body is arbitrary
+//            PL/pgSQL -- there is no honest static answer, only a refusal.
+//
+//   VIEW     `SELECT ... FROM published` where published is a view over posts
+//            changed on `INSERT INTO posts`: "one" -> "one,two". The read
+//            names the view; the write names the table. A view IS expandable
+//            in principle -- its definition is right there in the DDL -- and
+//            until that is done, saying so beats missing it.
+//
+// RULES are here for the trigger's reason: a rule rewrites a statement into
+// one that can touch anything.
+let rec _map_prefix = fn (pre: str) -> fn (xs: str list) ->
+  match xs with
+  | Nil -> Nil
+  | Cons (x, rest) -> Cons (pre ++ x, _map_prefix pre rest)
+  ;
+
+// ONLY AFTER `CREATE`. Scanning for the bare word found `RETURNS trigger AS`
+// inside a function body and reported a trigger named `as` -- refusing too
+// much, which is the safe direction and still noise that hides the real
+// finding. Modifiers between CREATE and the keyword (OR REPLACE, MATERIALIZED,
+// CONSTRAINT) are skipped rather than enumerated at the call site.
+let rec _skip_create_mods = fn (ws: str list) ->
+  match ws with
+  | Nil -> Nil
+  | Cons (w, rest) ->
+    let u = to_upper (_clean w) in
+    if str_eq u "OR" || str_eq u "REPLACE" || str_eq u "TEMP" || str_eq u "TEMPORARY"
+       || str_eq u "MATERIALIZED" || str_eq u "RECURSIVE" || str_eq u "UNLOGGED"
+       || str_eq u "GLOBAL" || str_eq u "LOCAL" || str_eq u "CONSTRAINT"
+    then _skip_create_mods rest else ws
+  ;
+
+let rec _find_all = fn (ws: str list) -> fn (kw: str) -> fn (acc: str list) ->
+  match ws with
+  | Nil -> acc
+  | Cons (w, rest) ->
+    if str_eq (to_upper (_clean w)) "CREATE" then
+      (match _skip_create_mods rest with
+       | Cons (k, after) ->
+         if str_eq (to_upper (_clean k)) kw then
+           (match _skip_noise after with
+            | Cons (n, more) -> _find_all more kw (Cons (to_lower (_clean n), acc))
+            | Nil -> acc)
+         else _find_all rest kw acc
+       | Nil -> acc)
+    else _find_all rest kw acc
+  ;
+
+// The constructs in this schema whose effect on a read this module cannot
+// derive. Empty means every path from a write to a read is a table name or a
+// foreign key -- which is the only case the rest of this file is honest about.
+let schema_unmodelled = fn (ddl: str) ->
+  let ws = _words ddl in
+  let trig = _find_all ws "TRIGGER" Nil in
+  let vws = _find_all ws "VIEW" Nil in
+  let rule = _find_all ws "RULE" Nil in
+  _append (_map_prefix "trigger:" trig)
+    (_append (_map_prefix "view:" vws) (_map_prefix "rule:" rule))
   ;
 
 // A write reaches the tables it names AND every table a cascade carries it to.
