@@ -138,6 +138,8 @@ let rec _scan = fn (reg) -> fn (i: int) -> fn (write_sql: str) -> fn (acc: str l
 // answer for a read whose freshness no write determines.
 let live_channels = fn (reg) -> fn (write_sql: str) -> _scan reg 0 write_sql Nil;
 
+
+
 // ---- cascades ------------------------------------------------------------
 //
 // FOUND BY THE SOUNDNESS GATE, NOT BY READING THIS FILE. `affects` reads the
@@ -218,3 +220,26 @@ let affects_via = fn (cascades: (str * str) list) -> fn (write_sql: str) -> fn (
   let direct = write_tables write_sql in
   _overlap (_append direct (_widen cascades direct Nil)) (read_tables read_sql)
   ;
+
+let rec _scan_via = fn (casc) -> fn (reg) -> fn (i: int) -> fn (write_sql: str) -> fn (acc: str list) ->
+  if i >= vec_len reg then acc
+  else
+    let entry = vec_get reg i in
+    let tab = str_index_of entry "\t" in
+    let channel = substring entry 0 tab in
+    let sql = substring entry (tab + 1) (str_len entry) in
+    if affects_via casc write_sql sql then _scan_via casc reg (i + 1) write_sql (Cons (channel, acc))
+    else _scan_via casc reg (i + 1) write_sql acc
+  ;
+
+// THE SAME QUESTION WITH THE FOREIGN KEYS IN IT, and a subscriber that does not
+// ask it is told nothing when a cascade deletes its rows. Measured in mere-blog
+// before this existed: deleting a post takes its comments with it, and a client
+// subscribed to the comments channel kept a list of rows that were gone --
+// because `affects` sees a statement that never names `comments`.
+//
+// Kept as a second function rather than a default, because the cascades have to
+// come from the schema. A caller with no DDL to read would otherwise get the
+// weaker answer under a name that promises the stronger one.
+let live_channels_via = fn (casc) -> fn (reg) -> fn (write_sql: str) ->
+  _scan_via casc reg 0 write_sql Nil;
