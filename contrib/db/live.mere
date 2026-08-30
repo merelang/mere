@@ -32,11 +32,17 @@ let _kw = fn (w: str) ->
 
 // A table name as it appears after FROM / JOIN / INTO / UPDATE, with any
 // alias, punctuation and trailing comma removed.
+// Punctuation a word was written with is not part of the name. Double quotes
+// included: `CREATE TABLE "c"` and `SELECT ... FROM c` name the same table, and
+// keeping the quotes on one side made them different strings -- a schema
+// written by a tool that quotes everything would never match a query written by
+// hand. Both sides come through here, so stripping once is enough.
 let _clean = fn (w: str) ->
   let w = str_replace w "," "" in
   let w = str_replace w ";" "" in
   let w = str_replace w "(" "" in
-  str_replace w ")" ""
+  let w = str_replace w ")" "" in
+  str_replace w "\"" ""
   ;
 
 let rec _after = fn (ws: str list) -> fn (marks: str list) -> fn (acc: str list) ->
@@ -161,13 +167,30 @@ let live_channels = fn (reg) -> fn (write_sql: str) -> _scan reg 0 write_sql Nil
 //   cascades_of : str -> (str * str) list     DDL -> (parent, child)
 //   affects_via : (str * str) list -> str -> str -> bool
 
+let rec _skip_noise = fn (ws: str list) ->
+  match ws with
+  | Nil -> Nil
+  | Cons (w, rest) ->
+    let u = to_upper (_clean w) in
+    if str_eq u "IF" || str_eq u "NOT" || str_eq u "EXISTS" || str_eq u "ONLY"
+    then _skip_noise rest else ws
+  ;
+
 let rec _cascade_scan = fn (ws: str list) -> fn (child: str) -> fn (acc: (str * str) list) ->
   match ws with
   | Nil -> acc
   | Cons (w, rest) ->
     let up = to_upper w in
     if str_eq up "TABLE" then
-      (match rest with
+      // NOT SIMPLY THE NEXT WORD. `CREATE TABLE IF NOT EXISTS c (...)` made the
+      // child `if`, so a pair was recorded between the parent and a table that
+      // does not exist and the real child was never widened -- `affects_via`
+      // answered false for a DELETE that empties it. Unsound, and the spelling
+      // is in this project's own migrate.mere.
+      //
+      // `ONLY` is here for the same reason: ALTER TABLE ONLY c ADD CONSTRAINT
+      // is what pg_dump writes.
+      (match _skip_noise rest with
        | Cons (n, more) -> _cascade_scan more (to_lower (_clean n)) acc
        | Nil -> acc)
     else if str_eq up "REFERENCES" then
