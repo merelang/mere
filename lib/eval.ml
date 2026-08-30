@@ -2466,6 +2466,19 @@ let thr_status : (int, string * thread_wait ref) Hashtbl.t = Hashtbl.create 8
    business. Kept apart from thr_status because the parent writes this and the
    child writes that. *)
 let thr_claimed : (int, string) Hashtbl.t = Hashtbl.create 8
+(* id -> label for every domain `spawn` returned, written by the PARENT before
+   spawn returns. thr_status is written by the child as its first act, which is
+   accurate about what the thread is doing but says nothing until the child
+   runs: a main that spawns and exits can reach at_exit first and report fewer
+   threads than it started. An undercount is the bad direction for a leak
+   report -- fewer leaks reads as a cleaner program.
+
+   Two tables rather than one because they answer two questions. "Did this
+   thread exist?" is the parent's to answer and is knowable immediately.
+   "What was it doing?" is the child's and is not. Registering the parent's
+   answer into thr_status would have merged them, and the merged entry would
+   claim a state nobody had observed. *)
+let thr_spawned : (int, string) Hashtbl.t = Hashtbl.create 8
 let thr_seq = ref 0
 let thr_hooked = ref false
 
@@ -2507,6 +2520,18 @@ let thr_report () =
           (label, why) :: acc)
         thr_status [])
   in
+  (* A domain `spawn` returned that never reached its first instruction is
+     still a leaked thread. It is reported for what is actually known about
+     it, which is that it exists -- not as "blocked", which would be a state
+     nobody measured. *)
+  let unstarted =
+    thr_guard (fun () ->
+      Hashtbl.fold (fun id label acc ->
+        if Hashtbl.mem thr_status id || Hashtbl.mem thr_claimed id then acc
+        else (label, "spawned, never ran") :: acc)
+        thr_spawned [])
+  in
+  let leaked = leaked @ unstarted in
   if leaked <> [] then begin
     Printf.eprintf
       "mere: %d thread(s) neither joined nor detached at exit\n"
@@ -2541,10 +2566,9 @@ let builtin_spawn =
        registers, because `Domain.get_id` on a domain that has already finished
        is not something to depend on, and `thr_set_wait` mutates `st` either
        way. *)
-    let st = ref T_running in
     let d = Domain.spawn (fun () ->
       let me = thr_me () in
-      thr_guard (fun () -> Hashtbl.replace thr_status me (label, st));
+      thr_guard (fun () -> Hashtbl.replace thr_status me (label, ref T_running));
       match !apply_value_ref clos V_unit with
       | v ->
         thr_set_wait T_finished;
@@ -2561,9 +2585,7 @@ let builtin_spawn =
         raise e)
     in
     thr_guard (fun () ->
-      let id = (Domain.get_id d :> int) in
-      if not (Hashtbl.mem thr_status id) then
-        Hashtbl.replace thr_status id (label, st));
+      Hashtbl.replace thr_spawned (Domain.get_id d :> int) label);
     V_thread d)
 
 let builtin_join =
