@@ -233,6 +233,21 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/determinism_check.sh
 
+      # `run` is the only channel a program has for the fate of a child, and the
+      # interpreter reported a signalled child with OCaml's signal encoding: 121
+      # for SIGKILL where the shell and the C backend say 137. Below 128, where
+      # nobody looks.
+      - name: "run status (how a child died, same answer on both backends)"
+        if: ${{ !cancelled() }}
+        run: sh scripts/run_status_check.sh
+
+      # The interpreter is a capability boundary by construction; this asks the
+      # filesystem whether it held, and asks whether a host can come back with a
+      # verdict for a plugin that loops, allocates, or does not parse.
+      - name: "plugin host (survives somebody else's program)"
+        if: ${{ !cancelled() }}
+        run: sh scripts/plugin_host_check.sh
+
       - name: live_query (which reads a write affects, on every backend)
         if: ${{ !cancelled() }}
         run: sh scripts/live_query_check.sh

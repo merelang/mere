@@ -1,0 +1,98 @@
+// examples/plugin/host.mere — the side of the boundary that has to keep
+// running.
+//
+// The host loads plugins written by somebody else and must survive all of
+// them: the one that never returns, the one that allocates until the
+// machine complains, the one that asks for the filesystem, the one that
+// calls a builtin with the wrong type, the one that does not parse.
+//
+// None of that can be survived in-process. Mere has no way to recover from
+// `fail`, and contrib/eval reaches for it in 20 places and contrib/parser in
+// 59, so any one of them ends the program that called `parse_and_eval`. The
+// plugin therefore runs as a CHILD and the boundary is a process: the host
+// learns what happened from an exit status, which is the only failure
+// channel the language leaves it.
+//
+// Two things here are the shell's rather than Mere's, and that is the point
+// of the file. `ulimit -t` bounds the plugin's CPU because the language has
+// no step budget and no cap on a region. And the child's output comes back
+// through files because `run` returns a status and nothing else -- the
+// capability that returns a child's stdout, `subprocess_run`, exists only on
+// the Node host, so no native program can have it.
+//
+// Usage:
+//   MERE=<mere binary> mere examples/plugin/host.mere <plugin.mere>...
+
+let mere_bin =
+  match env_var "MERE" with
+    | Some v -> v
+    | None -> "mere"
+  in
+
+let cpu_seconds = "2" in
+let out_path = "/tmp/mere_plugin_out.txt" in
+let err_path = "/tmp/mere_plugin_err.txt" in
+let val_path = "/tmp/mere_plugin_value.txt" in
+
+// What the child's exit status means. A plugin that returns is the only case
+// with a value; every other line is the host still standing.
+//
+// `st > 128` is the shell's convention for a signalled child, and it is a
+// convention rather than a fact -- a program is free to exit(137). It is also
+// the reason this file found Q-088: under the interpreter `run` used to answer
+// 101 for a plugin killed at its CPU limit, which lands in the branch below.
+let verdict = fn (st: int) -> fn (out: str) -> fn (err: str) ->
+  if st == 0 then "returned   " ++ str_trim out
+  else if st > 128 then "stopped    killed by signal " ++ str_of_int (st - 128)
+  else "refused    " ++ str_trim err
+  in
+
+// What the plugin PRINTED, which is not what it returned. Keeping the two
+// apart is why runner.mere writes the value to its own path instead of to
+// stdout: a plugin that prints is not thereby returning anything.
+//
+// The last line is dropped because it is not the plugin's. A Mere program
+// prints the value of its main expression, so the runner signs off with `()`
+// on the same stream the plugin has been writing to, and there is no way for
+// it not to.
+let strip_runners_own_line = fn (s: str) ->
+  let t = str_trim s in
+  if str_ends_with t "()" then str_trim (substring t 0 (str_len t - 2)) else t
+  in
+
+let printed = fn (out: str) ->
+  let p = strip_runners_own_line out in
+  if str_len p == 0 then "" else "  [printed: " ++ p ++ "]"
+  in
+
+let call = fn (path: str) ->
+  // `exec` so that no shell of ours survives to announce "Cputime limit
+  // exceeded" on the HOST's stderr -- the host reports the deaths here, in its
+  // own words. Adding this one word is what exposed Q-088.
+  let cmd = "ulimit -t " ++ cpu_seconds ++ "; exec " ++ mere_bin
+            ++ " examples/plugin/runner.mere " ++ path ++ " " ++ val_path
+            ++ " > " ++ out_path ++ " 2> " ++ err_path in
+  let _ = run ("rm -f " ++ val_path) in
+  let st = run cmd in
+  // Only a plugin that returned leaves a value behind; reading a file that
+  // is not there would end the host, which is the failure this file exists
+  // to avoid.
+  let value = if file_exists val_path then read_file val_path else "" in
+  let out = read_file out_path in
+  let err = read_file err_path in
+  print (path ++ "  ->  " ++ verdict st value err ++ printed out)
+  in
+
+let rec each = fn (xs: str list) ->
+  match xs with
+    | Nil -> ()
+    | Cons (x, rest) -> let _ = call x in each rest
+  in
+
+let argv = args () in
+let _ =
+  match argv with
+    | Nil -> print "usage: host <plugin.mere>..."
+    | _ -> each argv
+  in
+0

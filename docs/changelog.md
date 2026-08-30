@@ -4,6 +4,76 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.358 — 2026-08-30
+
+_A plugin host is the one program that takes somebody else's code as input, and
+nobody had written one._ Half of what Mere claims about capabilities holds for
+free and the other half had never been asked. `contrib/eval` seeds its
+environment with `print` and `show`, so a plugin naming `write_file` does not
+reach it and the interpreter is the boundary — asked of the filesystem, not of
+a message: the corpus plugin that tries to write `/tmp/mere_plugin_pwned.txt`
+leaves nothing behind. But the denial and the host's death are the SAME event.
+There is no way to recover from `fail`, and `parse_and_eval` reaches for it
+through 20 call sites in the evaluator and 59 in the parser, so an unknown name,
+a type error and a syntax error all end the process that asked. Nor is there
+anything to stop a plugin that does not stop: no step budget, no cap on a
+region. The infinite loop and the runaway allocation ran until the operating
+system killed them.
+
+`spawn` is not the way out either. A `fail` inside a spawned thread leaves the
+interpreter running and SILENT — no message on either stream — while C and LLVM
+end the process with the host's stdout lost 4 and 19 times out of 20, and Wasm
+prints the failure and carries on. Four backends, three answers, and
+`scripts/parity.sh` cannot see any of it: it discards the compiled backends'
+stderr, compares exit status only against its timeout, and skips a case outright
+when the interpreter exits nonzero.
+
+So the boundary is a process. `examples/plugin` is a host, a runner, and seven
+plugins — one that behaves, two that never stop, four that fail in the four
+available ways — and `scripts/plugin_host_check.sh` requires a verdict for each
+by KIND, since a host that answered "refused" seven times would satisfy a check
+that only asked whether it survived. The CPU bound comes from `ulimit`, which is
+the honest record: the mechanism is the shell's, not the language's.
+
+**Writing the host found a bug in the only failure channel it has.** `run`
+returned 101 for a plugin killed at its CPU limit where the shell and the C
+backend both say 152, and 121 for SIGKILL against their 137. `builtin_run` had
+`WSIGNALED n -> 128 + n`, which is the right shape with the wrong `n`: OCaml's
+waitpid reports signals in OCaml's encoding, where `Sys.sigkill` is -7 and
+`Sys.sigxcpu` is -27. Both results land BELOW 128, where no caller testing for a
+signal will look. It was also intermittent in a way that hid it — adding `exec`
+to the host's command line, which should be invisible, turned "killed by signal
+24" into an ordinary-looking status, because without `exec` a shell survives to
+report the death itself and the wrong arithmetic never runs.
+
+Fixed without a signal table: the command now runs inside a subshell, so the
+shell being waited on always exits normally with 128+signal in the system's own
+numbering. `scripts/run_status_check.sh` checks six cases against a table of
+expected values as well as for agreement, because two backends that are both
+wrong agree perfectly. The `WSIGNALED` branch underneath is still in OCaml's
+encoding and is now merely hard to reach; a correct conversion needs a table
+that differs between Linux and macOS for eleven signals, so it is recorded
+rather than guessed at.
+
+`docs/host-matrix.md` was corrected first, since it is the instrument used to
+decide what is missing. `file_pread` read `refused` on LLVM and Wasm because its
+probe opened the handle with `file_open`, and `vec_new` read `refused` on C and
+LLVM because the synthesized probe left the element type unresolved. Both have
+worked all along. A cell whose diagnostic names a different builtin now says
+`unattributed` instead of guessing, and there are 16 — `lcm` on RV32I is not
+missing `lcm`, it is missing `abs`.
+
+Poisoned five ways: the old `file_pread` probe, the reverted subshell (three of
+six status cases fail, and the plugin host reports its two runaways as `refused`
+with no reason), `write_file` seeded into the plugin environment, which makes the
+pwned file appear, and a three-second wall-clock bound, which is how the runaways
+are held to something other than the good behaviour of the thing under test.
+
+`dune test` 2599/0, host_matrix 150 builtins (16 unattributed),
+run_status_check 6 cases, plugin_host_check 7 plugins.
+
+---
+
 ## v0.1.357 — 2026-08-30
 
 _G-1 assumes rendering is a function of its input; the language does not make

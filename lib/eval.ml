@@ -539,13 +539,27 @@ let builtin_run =
   V_builtin ("run", fun v ->
     match v with
     | V_str cmd ->
+      (* The command runs inside a subshell so that THIS shell always lives
+         to report on it. Without the parentheses a command ending in `exec`
+         replaces the shell, and the death of what `exec` put there is
+         reported to us by waitpid rather than by a shell -- and the branch
+         below turns that into the wrong number, because OCaml's waitpid
+         carries OCaml's own signal encoding (Sys.sigkill = -7), not the
+         operating system's. A plugin host killed at its CPU limit read
+         `run` = 101 under the interpreter and 152 compiled, and 101 is not
+         even in the range a caller tests for. With the subshell the shell
+         exits normally with 128+signal, in the system's numbering, and the
+         two backends agree. See scripts/run_status_check.sh. *)
       let pid =
-        Unix.create_process "/bin/sh" [| "sh"; "-c"; cmd |]
+        Unix.create_process "/bin/sh" [| "sh"; "-c"; "( " ^ cmd ^ "\n)" |]
           Unix.stdin Unix.stdout Unix.stderr
       in
       let (_, status) = Unix.waitpid [] pid in
       let code = match status with
         | Unix.WEXITED n -> n
+        (* Reached only when the shell itself is signalled, which the
+           subshell above makes rare rather than impossible. `128 + n` is the
+           right shape and `n` is still OCaml's encoding here: see Q-088. *)
         | Unix.WSIGNALED n | Unix.WSTOPPED n -> 128 + n
       in
       V_int code
