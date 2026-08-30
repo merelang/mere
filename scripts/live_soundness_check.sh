@@ -79,11 +79,13 @@ CREATE TABLE users    (id serial PRIMARY KEY, username text UNIQUE NOT NULL, pw_
 CREATE TABLE sessions (sid text PRIMARY KEY, username text NOT NULL);
 CREATE TABLE posts    (id serial PRIMARY KEY, author text NOT NULL, title text NOT NULL, body text NOT NULL, published boolean NOT NULL DEFAULT false);
 CREATE TABLE comments (id serial PRIMARY KEY, post_id integer NOT NULL REFERENCES posts(id) ON DELETE CASCADE, author text NOT NULL, body text NOT NULL);
+CREATE TABLE tags     (id serial PRIMARY KEY, label text NOT NULL, post_id integer REFERENCES posts(id) ON DELETE SET NULL);
 INSERT INTO users (username, pw_hash) VALUES ('alice','h');
 INSERT INTO sessions (sid, username) VALUES ('s1','alice');
 INSERT INTO posts (author, title, body, published) VALUES ('alice','first','b',true);
 INSERT INTO posts (author, title, body, published) VALUES ('alice','second','b',false);
 INSERT INTO comments (post_id, author, body) VALUES (1,'alice','hi');
+INSERT INTO tags (label, post_id) VALUES ('mere', 1);
 SQL
 grep -qi error "$TMP/schema.log" && { echo "live_soundness: FAIL — schema"; cat "$TMP/schema.log"; exit 1; }
 
@@ -96,6 +98,7 @@ read_sql() {
     r_comments_1) echo "SELECT id, body FROM comments WHERE post_id = 1 ORDER BY id" ;;
     r_sessions)   echo "SELECT username FROM sessions ORDER BY sid" ;;
     r_users)      echo "SELECT id, username FROM users ORDER BY id" ;;
+    r_tags)       echo "SELECT id, label, post_id FROM tags ORDER BY id" ;;
   esac
 }
 write_sql() {
@@ -112,7 +115,7 @@ write_sql() {
 "$MERE" test/live/claims.mere > "$TMP/claims.txt" 2>"$TMP/claims.err" \
   || { echo "live_soundness: FAIL — claims program"; head -3 "$TMP/claims.err"; exit 1; }
 pairs=$(grep -cE '^(w_[a-z_]+) (r_[a-z_0-9]+) (yes|no)$' "$TMP/claims.txt")
-[ "$pairs" -eq 36 ] || { echo "live_soundness: FAIL — got $pairs claims, expected 36"; exit 1; }
+[ "$pairs" -eq 42 ] || { echo "live_soundness: FAIL — got $pairs claims, expected 42"; exit 1; }
 
 unsound=0; wasteful=0; correct=0; checked=0
 : > "$TMP/report"
@@ -145,7 +148,7 @@ SQL
   fi
 done < "$TMP/claims.txt"
 
-[ "$checked" -eq 36 ] || { echo "live_soundness: FAIL — executed $checked of 36 pairs"; exit 1; }
+[ "$checked" -eq 42 ] || { echo "live_soundness: FAIL — executed $checked of 42 pairs"; exit 1; }
 
 [ -s "$TMP/report" ] && cat "$TMP/report"
 echo "live_soundness: $checked pairs against a real database — $correct exact, $wasteful wasteful, $unsound unsound"
