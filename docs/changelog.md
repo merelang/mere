@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.356 — 2026-08-30
+
+_The derivation now says which schemas it cannot speak about._ `derivable`
+refuses a READ whose freshness no write determines. `schema_unmodelled` is the
+same admission one level up, and both holes it names were measured in Postgres
+before it existed:
+
+- **Trigger.** An `AFTER INSERT ON posts` that writes `audit` turned
+  `INSERT INTO posts` into a change of a read of `audit` — `"post touched"` →
+  `"post touched,post touched"`. The statement never names that table, and a
+  trigger body is arbitrary PL/pgSQL: there is no honest static answer, only a
+  refusal.
+- **View.** `SELECT ... FROM published`, a view over `posts`, changed on an
+  insert into `posts`: `"one"` → `"one,two"`. The read names the view, the
+  write names the table. A view is expandable in principle — its definition is
+  in the DDL — and until that is done, saying so beats missing it.
+
+Rules are refused for the trigger's reason. The scan matches only after
+`CREATE` (skipping `OR REPLACE`, `MATERIALIZED`, `CONSTRAINT`): the bare word
+found `RETURNS trigger AS` inside a function body and reported a trigger named
+`as`, which refuses too much and hides the real finding.
+
+The gate asks `pg_trigger` and `pg_class` whether each fixture has one, so the
+refusal is judged by the database rather than by the file that wrote the
+fixture. Both directions are poisoned: refusing nothing fails `with_trigger`
+and `with_view`; refusing everything fails every schema that has neither, since
+a schema needlessly refused costs every channel in it.
+
+18 fixtures. `dune test` 2599/0, live_query 53 cases, live_soundness 42 pairs
+(0 unsound).
+
+---
+
 ## v0.1.355 — 2026-08-30
 
 _The DDL parser's coverage is now Postgres's answer, not a list someone

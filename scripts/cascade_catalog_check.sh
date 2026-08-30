@@ -119,6 +119,41 @@ SQL
     echo "    DDL: $ddl"
     bad=$((bad + 1))
   fi
+
+  # AND WHETHER IT ADMITS WHAT IT CANNOT SEE. A trigger body is arbitrary and a
+  # view hides the table a read really touches; both make a write change a read
+  # through a path this module does not model. Measured in Postgres: an AFTER
+  # INSERT trigger on posts writing `audit` changed a read of audit, and a read
+  # of a view over posts changed on an insert into posts. Neither statement
+  # names the table the reader was looking at.
+  #
+  # So the catalog is asked whether the fixture has one, and the module must
+  # say so. Refusing is the only honest answer here -- and one this file cannot
+  # be the judge of, which is why the question goes to pg_trigger and pg_class.
+  pg_has=$($PSQL <<SQL
+SELECT CASE WHEN
+  (SELECT count(*) FROM pg_trigger tg JOIN pg_class c ON c.oid = tg.tgrelid
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = 'f' AND NOT tg.tgisinternal) > 0
+  OR (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'f' AND c.relkind IN ('v','m')) > 0
+THEN 'yes' ELSE 'no' END;
+SQL
+)
+  declared_un=$(sed -n "s/^unmodelled $name //p" "$TMP/fix.txt")
+  [ -n "$declared_un" ] || { echo "cascade_catalog: FAIL -- no unmodelled line for $name"; exit 1; }
+  if [ "$pg_has" = yes ] && [ "$declared_un" = "-" ]; then
+    echo "cascade_catalog: FAIL -- $name has a trigger or a view in Postgres, and"
+    echo "    schema_unmodelled reported nothing. A write can reach a read through"
+    echo "    it and the derivation would answer confidently and wrongly."
+    bad=$((bad + 1))
+  fi
+  if [ "$pg_has" = no ] && [ "$declared_un" != "-" ]; then
+    echo "cascade_catalog: FAIL -- $name has neither trigger nor view in Postgres,"
+    echo "    but schema_unmodelled reported: $declared_un"
+    echo "    Refusing a schema it could have spoken about costs every channel in it."
+    bad=$((bad + 1))
+  fi
 done < "$TMP/fix.txt"
 
 [ "$checked" -eq "$declared" ] || {
