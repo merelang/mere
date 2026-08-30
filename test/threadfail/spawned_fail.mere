@@ -1,0 +1,20 @@
+// A spawned thread fails while the program it belongs to keeps working.
+//
+// One worker raises, another sends, and the main thread reads what the healthy
+// one sent. Nothing here is exotic and every backend gets the same work done.
+// What they do not agree on is whether the PROGRAM failed.
+//
+// This is deliberately not a test/parity case. Its stdout is not a function of
+// the program on C, and on LLVM neither is its exit status -- the failing thread
+// races the main thread's last write, and nothing flushes what is lost. A gate
+// that pinned an answer here would be pinning a coin flip, which is the thing
+// scripts/determinism_check.sh exists to keep out of that harness.
+//
+// scripts/thread_fail_check.sh runs it many times per backend instead, and
+// asserts what is stable: that the four backends disagree about what a thread's
+// failure does to the program, and that the interpreter says nothing at all.
+let c = channel_new () in
+let _ = spawn (fn () -> let _ = fail "boom" in channel_send c 1) in
+let _ = spawn (fn () -> channel_send c 2) in
+let _ = channel_recv c in
+0
