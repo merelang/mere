@@ -2,12 +2,19 @@
 # scripts/plugin_host_check.sh — a host that runs somebody else's Mere code has to
 # survive all of it, and this asks whether it does.
 #
-# The interpreter is the capability boundary and gets that right for free:
-# contrib/eval seeds `initial_env` with `print` and `show`, so a plugin naming
-# `write_file` or `tcp_connect` does not reach them. That half is checked by the
-# ARTIFACT -- a plugin that tries to write /tmp/mere_plugin_pwned.txt, and the
-# absence of that file afterwards. Asking the diagnostic instead would pass for a
-# host that never ran the plugin at all.
+# The interpreter is the capability boundary and gets that right for free: a
+# plugin naming `write_file` or `tcp_connect` does not reach them. That half is
+# checked by the ARTIFACT -- a plugin that tries to write
+# /tmp/mere_plugin_pwned.txt, and the absence of that file afterwards. Asking the
+# diagnostic instead would pass for a host that never ran the plugin at all.
+#
+# But the interpreter answers only when control REACHES the call, so
+# hides_its_request.mere -- which asks for the filesystem from a branch it does
+# not take -- used to be accepted and report success. The runner therefore reads
+# the program's free names before running it, and the check that this is a
+# reading and not a running is that plugin's `print`: it says "I only print,
+# honest" before the branch, and that line must NOT appear anywhere in the
+# output. A host that reached the same verdict by evaluating would print it.
 #
 # The other half is that the denial and the host's death are the same event. Mere
 # has no way to recover from `fail`, and contrib/eval reaches for it in 20 places
@@ -17,9 +24,11 @@
 # a VERDICT for every one of them and is still standing at the end.
 #
 # The corpus is examples/plugin/plugins: one plugin that behaves, two that do not
-# stop, and four that fail in the four ways a plugin can. Counting the verdicts by
-# KIND matters -- a host that reported "refused" for all seven would be wrong in a
-# way that a "did it survive" check cannot see.
+# stop, two that fail outright, and four that ask for what they were not granted
+# -- two of them by asking where running would never notice. Counting the verdicts
+# by KIND matters: a host that reported "refused" for all nine would be wrong in a
+# way that a "did it survive" check cannot see, and that is not hypothetical --
+# a missing MERE in the child's environment produces exactly that shape.
 #
 # Usage: scripts/plugin_host_check.sh
 set -u
@@ -59,6 +68,7 @@ fi
 
 n_lines=$(grep -c '  ->  ' "$TMP/out" || true)
 n_returned=$(grep -c '  ->  returned' "$TMP/out" || true)
+n_denied=$(grep -c '  ->  denied' "$TMP/out" || true)
 n_refused=$(grep -c '  ->  refused' "$TMP/out" || true)
 n_stopped=$(grep -c '  ->  stopped' "$TMP/out" || true)
 n_corpus=$(ls "$PLUGINS"/*.mere | wc -l | tr -d ' ')
@@ -71,18 +81,34 @@ fail=0
   echo "FAIL  $n_lines verdict(s) for $n_corpus plugin(s)"; fail=1; }
 
 [ "$n_returned" = 1 ] || { echo "FAIL  returned: want 1, got $n_returned"; fail=1; }
-[ "$n_refused" = 4 ] || { echo "FAIL  refused: want 4, got $n_refused"; fail=1; }
-[ "$n_stopped" = 2 ] || { echo "FAIL  stopped: want 2, got $n_stopped"; fail=1; }
+[ "$n_denied" = 4 ]   || { echo "FAIL  denied: want 4, got $n_denied"; fail=1; }
+[ "$n_refused" = 2 ]  || { echo "FAIL  refused: want 2, got $n_refused"; fail=1; }
+[ "$n_stopped" = 2 ]  || { echo "FAIL  stopped: want 2, got $n_stopped"; fail=1; }
+
+# Neither verdict on a hidden request was reached by running. Both plugins print
+# before the thing that would give them away -- one behind an untaken branch, one
+# behind a declaration it never calls -- so either line appearing in the output
+# means the host evaluated its way to the answer and would have missed both.
+if grep -q 'I only print, honest' "$TMP/out"; then
+  echo "FAIL  hides_its_request ran: its verdict came from evaluation, not from its free names"
+  fail=1
+fi
+if grep -q 'declared, never called' "$TMP/out"; then
+  echo "FAIL  declares_an_extern ran: an extern declaration was not read as a request"
+  fail=1
+fi
 
 # The capability question, asked of the filesystem rather than of a message.
 if [ -f "$PWNED" ]; then
   echo "FAIL  a plugin reached the filesystem: $PWNED exists"; fail=1
 fi
 
-# The two denials must name what was asked for, not just that something failed.
-grep -q 'unbound variable: write_file' "$TMP/out" || {
+# A denial must name what was asked for. "Something went wrong" is what the host
+# had before the runner learned to read the grant, and it is not a verdict a host
+# can act on.
+grep -q 'not granted: write_file' "$TMP/out" || {
   echo "FAIL  the filesystem denial does not name write_file"; fail=1; }
-grep -q 'unbound variable: tcp_connect' "$TMP/out" || {
+grep -q 'not granted: tcp_connect' "$TMP/out" || {
   echo "FAIL  the network denial does not name tcp_connect"; fail=1; }
 
 sed 's/^/    /' "$TMP/out"
@@ -92,4 +118,4 @@ if [ "$fail" != 0 ]; then
   exit 1
 fi
 
-echo "plugin_host_check: ok  ($n_corpus plugins: $n_returned returned, $n_refused refused, $n_stopped stopped; host survived)"
+echo "plugin_host_check: ok  ($n_corpus plugins: $n_returned returned, $n_denied denied, $n_refused refused, $n_stopped stopped; host survived)"

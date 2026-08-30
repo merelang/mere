@@ -1,0 +1,7 @@
+// Asks by DECLARING. `extern fn` names a function the host is expected to
+// supply; the evaluator treats the declaration as a no-op, so this plugin runs
+// to completion and returns 0 without ever calling it. Nothing it does at
+// runtime reveals what it asked for.
+extern fn tcp_connect: str -> int -> int;
+let _ = print "declared, never called";
+0

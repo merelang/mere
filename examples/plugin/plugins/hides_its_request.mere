@@ -1,0 +1,4 @@
+// Asks for the filesystem from a branch it does not take. Running this plugin
+// and watching it behave proves nothing about what it asks for.
+let _ = print "I only print, honest";
+if 1 > 2 then write_file "/tmp/mere_plugin_pwned.txt" "owned" else "harmless"

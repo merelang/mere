@@ -1,0 +1,172 @@
+// contrib/parser/free_names.mere — which names a program uses without binding.
+//
+// A host that runs somebody else's program wants to decide whether to run it,
+// and until now it could not. The evaluator answers "unbound variable:
+// write_file" when control REACHES the call, so a plugin whose capability
+// request sits in a branch it does not take is accepted and reports success --
+// the refusal was path-dependent, and a host reading it learned only about the
+// path taken. This module answers the same question about the whole program,
+// before any of it runs.
+//
+//   free_names : program -> str list
+//
+// A name is free when it is used and nothing in scope binds it. Binding forms
+// are `let` (through the whole pattern), `let rec` (the group is in scope in
+// its own bodies), `fn`'s parameter, and a match arm's pattern. Top-level decls
+// bind left to right, the way the evaluator threads them.
+//
+// `extern fn` DOES NOT BIND. That is not an oversight: the evaluator treats a
+// TopExternFn as a no-op and leaves the name unbound, so a plugin declaring
+// `extern fn write_file: str -> str -> unit` has not defined anything -- it has
+// asked the host for a function, which is exactly the thing being counted.
+//
+// Constructors are not names here. The parser rewrites them into EConstr /
+// PConstr nodes before this sees them, so `Cons` and `Some` never look like
+// requests.
+
+import "github.com/merelang/mere/contrib/parser/ast.mere";
+
+let rec mem_str = fn (x: str) -> fn (xs: str list) ->
+  match xs with
+  | Nil -> false
+  | Cons (h, t) -> if str_eq h x then true else mem_str x t;
+
+let add_name = fn (x: str) -> fn (xs: str list) ->
+  if mem_str x xs then xs else Cons (x, xs);
+
+// === Binders in a pattern ==================================================
+
+let rec pat_vars = fn (p: pattern) -> fn (acc: str list) ->
+  match p with
+  | PWild -> acc
+  | PVar n -> add_name n acc
+  | PInt _ -> acc
+  | PBool _ -> acc
+  | PStr _ -> acc
+  | PUnit -> acc
+  | PConstr (_, sub) ->
+    (match sub with
+      | None -> acc
+      | Some q -> pat_vars q acc)
+  | PTuple ps -> pat_vars_list ps acc
+  | PRecord (_, fps) -> pat_vars_fields fps acc
+  | PAs (sub, n) -> pat_vars sub (add_name n acc)
+  // Both sides of an or-pattern bind the same names; walking both is
+  // harmless because add_name is idempotent.
+  | POr (a, b) -> pat_vars b (pat_vars a acc)
+
+and pat_vars_list = fn (ps: pattern list) -> fn (acc: str list) ->
+  match ps with
+  | Nil -> acc
+  | Cons (h, t) -> pat_vars_list t (pat_vars h acc)
+
+and pat_vars_fields = fn (fps: (str * pattern) list) -> fn (acc: str list) ->
+  match fps with
+  | Nil -> acc
+  | Cons (f, rest) ->
+    let (_, p) = f in
+    pat_vars_fields rest (pat_vars p acc);
+
+// === Free names in an expression ===========================================
+
+let rec free_expr = fn (e: expr) -> fn (bound: str list) -> fn (acc: str list) ->
+  match e with
+  | EInt _ -> acc
+  | EFloat _ -> acc
+  | EBool _ -> acc
+  | EStr _ -> acc
+  | EUnit -> acc
+  | EVar n -> if mem_str n bound then acc else add_name n acc
+  | EBin (_, a, b) -> free_expr b bound (free_expr a bound acc)
+  | ECmp (_, a, b) -> free_expr b bound (free_expr a bound acc)
+  | ELogic (_, a, b) -> free_expr b bound (free_expr a bound acc)
+  | ENeg a -> free_expr a bound acc
+  // The bound expression is outside the pattern's scope; the body is inside.
+  | ELet (p, v, body) -> free_expr body (pat_vars p bound) (free_expr v bound acc)
+  | ELetRec (bs, body) ->
+    let inner = binding_names bs bound in
+    free_expr body inner (free_bindings bs inner acc)
+  | EIf (c, t, f) -> free_expr f bound (free_expr t bound (free_expr c bound acc))
+  | EFun (param, _, body) -> free_expr body (add_name param bound) acc
+  | EApp (f, a) -> free_expr a bound (free_expr f bound acc)
+  | EAnnot (a, _) -> free_expr a bound acc
+  | EConstr (_, sub) ->
+    (match sub with
+      | None -> acc
+      | Some a -> free_expr a bound acc)
+  | EMatch (scrut, arms) -> free_arms arms bound (free_expr scrut bound acc)
+  | ETuple es -> free_list es bound acc
+  | ERecordLit (_, fs) -> free_fields fs bound acc
+  | EFieldGet (a, _) -> free_expr a bound acc
+  | ERecordUpdate (a, fs) -> free_fields fs bound (free_expr a bound acc)
+
+and free_list = fn (es: expr list) -> fn (bound: str list) -> fn (acc: str list) ->
+  match es with
+  | Nil -> acc
+  | Cons (h, t) -> free_list t bound (free_expr h bound acc)
+
+and free_fields = fn (fs: (str * expr) list) -> fn (bound: str list) -> fn (acc: str list) ->
+  match fs with
+  | Nil -> acc
+  | Cons (f, rest) ->
+    let (_, v) = f in
+    free_fields rest bound (free_expr v bound acc)
+
+// A guard is evaluated with the arm's pattern in scope, same as the body.
+and free_arms = fn (arms: (pattern * expr option * expr) list)
+             -> fn (bound: str list) -> fn (acc: str list) ->
+  match arms with
+  | Nil -> acc
+  | Cons (arm, rest) ->
+    let (p, guard, body) = arm in
+    let inner = pat_vars p bound in
+    let acc1 =
+      (match guard with
+        | None -> acc
+        | Some g -> free_expr g inner acc) in
+    free_arms rest bound (free_expr body inner acc1)
+
+and binding_names = fn (bs: (str * expr) list) -> fn (bound: str list) ->
+  match bs with
+  | Nil -> bound
+  | Cons (b, rest) ->
+    let (n, _) = b in
+    binding_names rest (add_name n bound)
+
+and free_bindings = fn (bs: (str * expr) list) -> fn (bound: str list) -> fn (acc: str list) ->
+  match bs with
+  | Nil -> acc
+  | Cons (b, rest) ->
+    let (_, v) = b in
+    free_bindings rest bound (free_expr v bound acc);
+
+// === Free names across top-level decls =====================================
+//
+// Returns (bound-after, free-so-far). Decls bind left to right.
+
+let rec free_decls = fn (ds: top_decl list) -> fn (bound: str list) -> fn (acc: str list) ->
+  match ds with
+  | Nil -> (bound, acc)
+  | Cons (d, rest) ->
+    (match d with
+      | TopLet (p, v) -> free_decls rest (pat_vars p bound) (free_expr v bound acc)
+      | TopLetRec bs ->
+        let inner = binding_names bs bound in
+        free_decls rest inner (free_bindings bs inner acc)
+      | TopType _ -> free_decls rest bound acc
+      | TopRecord _ -> free_decls rest bound acc
+      | TopTypeAlias _ -> free_decls rest bound acc
+      | TopExternType _ -> free_decls rest bound acc
+      // See the header: declaring an extern is asking, not defining.
+      | TopExternFn (n, _) -> free_decls rest bound (add_name n acc)
+      // flatten_and_resolve removes these before a program is run, so this
+      // arm is for a caller that did not flatten. Walking the inner decls is
+      // the conservative answer.
+      | TopModule (_, inner_ds) ->
+        let (_, acc1) = free_decls inner_ds bound acc in
+        free_decls rest bound acc1);
+
+let free_names = fn (p: program) ->
+  let (decls, main) = p in
+  let (bound, acc) = free_decls decls Nil Nil in
+  free_expr main bound acc;
