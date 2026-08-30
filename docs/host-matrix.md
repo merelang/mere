@@ -7,7 +7,9 @@ compiler rather than remembered. `refused` means the backend says so itself,
 which is the correct way to lack something; `MISSING` means a program using it
 fails with `unbound variable`, blaming the user for a backend hole;
 `bare` means the backend has it on `-rv --bare` only, where the program is
-handed the machine instead of a host.
+handed the machine instead of a host; `unattributed` means the backend refused
+but named a different builtin, so the probe never reached its subject and the
+cell is evidence about that other name.
 
 The interpreter has every one of these, and is not a column.
 
@@ -30,16 +32,16 @@ machine rather than a host.
 | `bit_shr` | yes | yes | yes | yes |
 | `bit_xor` | yes | yes | yes | yes |
 | `bool_of_str` | yes | yes | yes | refused |
-| `bytebuf_new` | yes | refused | refused | refused |
+| `bytebuf_new` | yes | unattributed | refused | refused |
 | `bytes_of_hex` | yes | yes | yes | refused |
 | `bytes_of_str` | yes | yes | yes | refused |
 | `ceil` | yes | yes | refused | refused |
-| `channel_close` | yes | refused | refused | refused |
+| `channel_close` | yes | refused | refused | unattributed |
 | `channel_new` | yes | yes | yes | refused |
-| `channel_recv` | yes | yes | yes | refused |
-| `channel_recv_opt` | yes | refused | refused | refused |
-| `channel_recv_timeout` | yes | refused | refused | refused |
-| `channel_send` | yes | yes | yes | refused |
+| `channel_recv` | yes | yes | yes | unattributed |
+| `channel_recv_opt` | yes | refused | refused | unattributed |
+| `channel_recv_timeout` | yes | refused | refused | unattributed |
+| `channel_send` | yes | yes | yes | unattributed |
 | `char_at` | yes | yes | yes | yes |
 | `chr` | yes | yes | yes | yes |
 | `clamp` | yes | yes | yes | refused |
@@ -48,12 +50,12 @@ machine rather than a host.
 | `csr_write` | bare | refused | refused | bare |
 | `cube` | yes | yes | yes | yes |
 | `decr` | yes | yes | yes | yes |
-| `detach` | yes | refused | refused | refused |
+| `detach` | yes | refused | refused | unattributed |
 | `divmod` | yes | yes | yes | yes |
 | `e` | yes | yes | yes | refused |
 | `env_var` | yes | yes | yes | refused |
 | `even` | yes | yes | yes | refused |
-| `exit` | yes | refused | yes | refused |
+| `exit` | yes | unattributed | yes | refused |
 | `exp` | yes | yes | yes | refused |
 | `f32_bits` | yes | yes | yes | refused |
 | `f_abs` | yes | yes | yes | refused |
@@ -74,10 +76,10 @@ machine rather than a host.
 | `file_mtime` | yes | refused | refused | refused |
 | `file_open` | yes | refused | refused | refused |
 | `file_openrw` | yes | yes | yes | refused |
-| `file_pread` | yes | refused | refused | refused |
-| `file_pwrite` | yes | yes | yes | refused |
-| `file_pwrite_bytes` | yes | yes | yes | refused |
-| `file_read_line` | yes | refused | refused | refused |
+| `file_pread` | yes | yes | yes | unattributed |
+| `file_pwrite` | yes | yes | yes | unattributed |
+| `file_pwrite_bytes` | yes | yes | yes | unattributed |
+| `file_read_line` | yes | refused | refused | unattributed |
 | `file_size` | yes | yes | yes | refused |
 | `float_bits_hi` | yes | yes | yes | refused |
 | `float_bits_lo` | yes | yes | yes | refused |
@@ -95,8 +97,8 @@ machine rather than a host.
 | `is_alpha` | yes | yes | yes | yes |
 | `is_digit` | yes | yes | yes | yes |
 | `is_space` | yes | yes | yes | yes |
-| `join` | yes | yes | yes | refused |
-| `lcm` | yes | yes | yes | refused |
+| `join` | yes | yes | yes | unattributed |
+| `lcm` | yes | yes | yes | unattributed |
 | `list_dir` | yes | refused | refused | refused |
 | `log` | yes | yes | yes | refused |
 | `map_new` | yes | yes | yes | yes |
@@ -107,8 +109,8 @@ machine rather than a host.
 | `mkdir_p` | yes | refused | refused | refused |
 | `not` | yes | yes | yes | yes |
 | `odd` | yes | yes | yes | refused |
-| `of_json` | refused | refused | refused | refused |
-| `of_json_opt` | refused | refused | refused | refused |
+| `of_json` | refused | unattributed | unattributed | refused |
+| `of_json_opt` | refused | unattributed | unattributed | refused |
 | `ord` | yes | yes | yes | yes |
 | `owned_vec_new` | yes | yes | yes | refused |
 | `pi` | yes | yes | yes | refused |
@@ -165,7 +167,7 @@ machine rather than a host.
 | `tty_restore` | yes | refused | refused | refused |
 | `utf8_chars` | yes | yes | yes | refused |
 | `utf8_len` | yes | yes | yes | refused |
-| `vec_new` | refused | refused | yes | yes |
+| `vec_new` | yes | yes | yes | yes |
 | `write_bytes` | yes | refused | refused | refused |
 | `write_file` | yes | yes | yes | refused |
 | `write_file_bytes` | yes | yes | yes | refused |
