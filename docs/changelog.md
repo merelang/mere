@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.353 — 2026-08-30
+
+_Three of the four row-changing referential actions were missed._
+`cascades_of` recorded a pair only for `ON DELETE CASCADE`, under a note saying
+"RESTRICT / SET NULL do not remove rows". True, and the wrong question — what
+matters is whether the READ changes. Asked of Postgres, one row in the child,
+parent deleted:
+
+| | before | after |
+|---|---|---|
+| `ON DELETE CASCADE` | `1:1` | `(empty)` |
+| `ON DELETE SET NULL` | `1:1` | `1:null` |
+| `ON DELETE SET DEFAULT` | `1:1` | `1:9` |
+| `ON UPDATE CASCADE` | `1:1` | `1:77` (on UPDATE of the key) |
+| `ON DELETE RESTRICT` | the write is refused; nothing changed |
+
+Each miss is an unsoundness: a write changes a read and nothing says so. The
+scan now runs to the end of the column definition rather than a fixed
+three-word window — `ON DELETE RESTRICT ON UPDATE CASCADE` puts CASCADE sixth,
+and the old scan stopped looking before it got there.
+
+RESTRICT and NO ACTION stay excluded, and that is the negative that separates
+this from returning a pair for everything: a refused write changes nothing, so
+recording a pair for it would wake channels that cannot have gone stale.
+
+Eight string cases in `test/live/derive_cases.mere` (53 total), and — because a
+string case is only this file's claim about what Postgres does — a `tags` table
+with `ON DELETE SET NULL` in the soundness fixture, so Postgres judges it. With
+the fix reverted the gate names it: `UNSOUND w_post_del -> r_tags`.
+
+`dune test` 2599/0, live_query 53 cases on 4 backends, live_soundness 42 pairs
+against a real database (37 exact, 5 wasteful, 0 unsound), live_e2e 6 checks.
+
+---
+
 ## v0.1.352 — 2026-08-30
 
 _The leak report counted threads it had not seen start._ `thread_leak_check`

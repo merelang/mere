@@ -138,8 +138,48 @@ let sess_via = live_channels_via casc reg sess_login in
 let _ = check "sess_login via: exactly one"      (count sess_via == 1) true in
 let _ = check "sess_login via: sessions"         (has "ch_sessions" sess_via) true in
 
+// --- every referential action, as Postgres answered ------------------------
+//
+// These five rows are not invented: each was run against Postgres with one row
+// in the child, and the child read compared before and after the parent write.
+// `cascades_of` used to record only the first, on the note that RESTRICT and
+// SET NULL "do not remove rows" -- true, and not the question. The question is
+// whether the READ changes.
+//
+//   ON DELETE CASCADE       1:1 -> (empty)   changed
+//   ON DELETE SET NULL      1:1 -> 1:null    changed
+//   ON DELETE SET DEFAULT   1:1 -> 1:9       changed
+//   ON UPDATE CASCADE       1:1 -> 1:77      changed, on UPDATE of the key
+//   ON DELETE RESTRICT      the delete is refused; nothing changed
+let ddl_of = fn (action: str) ->
+  "CREATE TABLE p (id int PRIMARY KEY); \
+   CREATE TABLE c (id serial PRIMARY KEY, pid int REFERENCES p(id) " ++ action ++ ");" in
+let pairs_of = fn (action: str) -> cascades_of (ddl_of action) in
+let n_pairs = fn (action: str) ->
+  let rec cnt = fn (xs: (str * str) list) ->
+    match xs with Nil -> 0 | Cons (_, r) -> 1 + cnt r in
+  cnt (pairs_of action) in
+
+let _ = check "ref: ON DELETE CASCADE"      (n_pairs "ON DELETE CASCADE" == 1) true in
+let _ = check "ref: ON DELETE SET NULL"     (n_pairs "ON DELETE SET NULL" == 1) true in
+let _ = check "ref: ON DELETE SET DEFAULT"  (n_pairs "ON DELETE SET DEFAULT" == 1) true in
+let _ = check "ref: ON UPDATE CASCADE"      (n_pairs "ON UPDATE CASCADE" == 1) true in
+
+// THE NEGATIVES. A refused write changes nothing, so recording a pair for it
+// would make every parent write wake a channel that cannot have gone stale --
+// and an implementation that returns a pair for everything passes all four
+// assertions above.
+let _ = check "ref: ON DELETE RESTRICT"     (n_pairs "ON DELETE RESTRICT" == 0) true in
+let _ = check "ref: ON DELETE NO ACTION"    (n_pairs "ON DELETE NO ACTION" == 0) true in
+let _ = check "ref: no action clause"       (n_pairs "" == 0) true in
+
+// CASCADE sixth in the clause: a fixed three-word window stops looking before
+// it gets here, which is how the old scan would have missed this one.
+let _ = check "ref: RESTRICT then UPDATE CASCADE"
+              (n_pairs "ON DELETE RESTRICT ON UPDATE CASCADE" == 1) true in
+
 let n = vec_get total 0 in
 let f = vec_get fails 0 in
 let _ = print ("live_derive: " ++ show n ++ " cases, " ++ show f ++ " failed") in
-if n < 45 then let _ = print "FAIL: fewer cases ran than this file declares" in 1
+if n < 53 then let _ = print "FAIL: fewer cases ran than this file declares" in 1
 else if f > 0 then 1 else 0
