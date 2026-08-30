@@ -65,16 +65,40 @@ for f in $FILES; do
     fail=$((fail + 1)); continue
   fi
 
+  # TWO QUESTIONS, AND ONLY ONE OF THEM HAS A DETERMINISTIC ANSWER ON A REAL
+  # CLOCK. How many threads leaked is settled the moment `spawn` returns. What
+  # each was DOING is a snapshot, and on a loaded runner a worker may not have
+  # reached its blocking call yet -- this gate went red in CI on exactly that,
+  # reporting one leak for a program that leaks two.
+  #
+  # So the count is checked here, on the real clock, where it must always hold.
   n="$(grep -c 'thread [0-9]*:' "$TMP/on.err" || true)"
+  want_n="$(printf '%s' "$want" | cut -d' ' -f1)"
+  if [ "$n" != "$want_n" ]; then
+    echo "FAIL $name  (want $want_n thread(s) reported, got $n)"
+    sed 's/^/    /' "$TMP/on.err" | head -4
+    fail=$((fail + 1)); continue
+  fi
+
+  # And the wording is checked under the virtual clock, whose rule is that time
+  # advances only when every live thread is parked. A `sleep_ms` in the program
+  # therefore returns at a moment when the workers have reached their blocking
+  # calls, which turns "what was it doing" from a race into a fact.
+  MERE_VIRTUAL_CLOCK=1 MERE_THREAD_REPORT=1 sh "$ROOT/scripts/bounded.sh" "$LIMIT" "$MERE" "$f" \
+    > "$TMP/vc.out" 2> "$TMP/vc.err" && vrc=0 || vrc=$?
+  if [ "$vrc" = 201 ]; then
+    echo "FAIL $name  (did not finish within ${LIMIT}s under the virtual clock)"; fail=$((fail + 1)); continue
+  fi
+  n="$(grep -c 'thread [0-9]*:' "$TMP/vc.err" || true)"
   case "$want" in
     0) got="0" ;;
-    *) why="$(sed -n 's/^  thread [0-9]*: //p' "$TMP/on.err" | head -1)"; got="$n $why" ;;
+    *) why="$(sed -n 's/^  thread [0-9]*: //p' "$TMP/vc.err" | head -1)"; got="$n $why" ;;
   esac
   if [ "$got" = "$want" ]; then
     echo "PASS $name  [$got]"; pass=$((pass + 1))
   else
     echo "FAIL $name  (want \`$want\`, got \`$got\`)"
-    sed 's/^/    /' "$TMP/on.err" | head -4
+    sed 's/^/    /' "$TMP/vc.err" | head -4
     fail=$((fail + 1))
   fi
 done

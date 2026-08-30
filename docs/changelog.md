@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.352 — 2026-08-30
+
+_The leak report counted threads it had not seen start._ `thread_leak_check`
+went red on a loaded runner: a program that leaks two threads reported one. It
+passed 300/300 locally, including under load — the shape of a race, not a wrong
+program.
+
+Threads registered themselves from inside the spawned domain, so `spawn`
+returned before the entry existed and a main that spawns and exits could reach
+`at_exit` first. **An undercount is the bad direction for a leak report** —
+fewer leaks reads as a cleaner program, so the diagnostic failed quietly in the
+direction that gets believed.
+
+Two tables now, because there are two questions. *Did this thread exist* is the
+parent's to answer and is known the moment `Domain.spawn` returns. *What was it
+doing* is the child's and is not knowable until it runs. A domain that never
+reached its first instruction is reported as `spawned, never ran` — which is
+what is actually known about it, rather than a state nobody measured.
+
+The gate splits the same way. The count is checked on the real clock, where it
+must always hold. The wording is checked under `MERE_VIRTUAL_CLOCK`, whose rule
+is that time advances only when every live thread is parked: a `sleep_ms` in the
+program returns at a moment when the workers have reached their blocking calls,
+so `blocked on channel_recv` is a fact rather than a snapshot. With a 50ms delay
+injected into every child — the loaded runner, reproduced — the gate is 7/7, and
+it still goes red for both the old undercount and a wrong state word.
+
+`dune test` 2599/0, parity 139/0, thread_leak 7/7, virtual_clock 6/6.
+
+---
+
 ## v0.1.351 — 2026-08-30
 
 _A Mere program holds its own connections open._ `scripts/live_e2e_check.sh`

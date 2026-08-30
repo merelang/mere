@@ -4,4 +4,8 @@
 // this program printed its line and exited 0 with nothing said.
 let ch = channel_new ();
 let _leaked = spawn (fn () -> let _ = channel_recv ch in ());
+// Under MERE_VIRTUAL_CLOCK the clock advances only once every live thread is
+// parked, so this returns exactly when the worker is blocked -- which is what
+// makes the `blocked on channel_recv` wording checkable instead of raced.
+let _ = sleep_ms 1;
 print "parent done"
