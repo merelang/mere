@@ -187,10 +187,13 @@ A plugin host is the one shape that takes untrusted code as INPUT, and the
 language's central claim -- that capabilities are passed, not ambient -- had
 never been asked adversarially. Half of it holds for free: `contrib/eval` seeds
 its environment with `print` and `show`, so a plugin naming `write_file` does not
-reach it, and the interpreter is the boundary. The other half does not: a denial
-and the host's death are the SAME event, because Mere cannot recover from `fail`
-and `parse_and_eval` reaches for it through 79 call sites in the evaluator and the
-parser. So the boundary is a process.
+reach it, and the interpreter is the boundary.
+
+The boundary is a process, but not for the reason first written here. `try_or`
+catches a failure on all four backends, and a host built on it does survive the
+corpus in-process. What it does not do is say WHY -- it returns a default, not
+the message -- and it does nothing about a plugin that never stops. The process
+is there to keep the diagnostic and to bound the runaway.
 
 | File | What it forced |
 |---|---|

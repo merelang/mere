@@ -4,6 +4,62 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.361 — 2026-08-31
+
+_A fourth correction, and the biggest: `try_or` exists._
+
+v0.1.358 justified running each plugin in a child process like this: "None of
+that can be survived in-process. Mere has no way to recover from `fail`, and
+`parse_and_eval` reaches for it through 79 call sites in the evaluator and the
+parser." The claim was repeated in `examples/plugin/host.mere`, in
+`scripts/plugin_host_check.sh`, in `examples/README.md`, and in the commit.
+
+**Mere has recovered from `fail` since long before any of that.**
+`try_or : (unit -> 'a) -> 'a -> 'a` catches `Eval_error` and returns the default.
+It is a builtin on the interpreter and lowers on C, LLVM and Wasm, and it is
+documented in `docs/stdlib-reference.md` with its signature and an example. The
+C backend's own `__lang_fail_impl` is written around it — the `exit(1)` that ends
+a failing program is the branch taken when no `try_or` is active. Nothing was
+hidden; it was not looked for.
+
+Measured rather than argued: a host that wraps tokenize / parse / run in `try_or`
+survives the corpus in-process. `calls_a_builtin_wrongly`, `does_not_parse` and
+`asks_for_the_filesystem` are all caught, the host prints a verdict for each and
+exits 0.
+
+**What survives of the reason for a process is narrower, and it does hold.**
+`try_or` returns a DEFAULT, not the message: a host built on it learns that a
+plugin failed and nothing about why, where the child's stderr carries
+`unbound variable: write_file` — the line the host reports and a user acts on.
+And `try_or` does nothing whatever about a plugin that does not stop;
+`loops_forever` and `allocates_without_end` need the OS either way. So the
+boundary is a process to keep the diagnostic and to bound the runaway, not
+because failure could not be survived. The corrected wording is now in all four
+places that carried the old one.
+
+**A related reading, checked before it was written down.** The interpreter looked
+like it honours `detach` — a detached thread that fails leaves it at exit 0 and
+silent, where C exits 1. It does not. `detach` marks the thread so the leak
+report does not name it (v0.1.304), and the silence is the general one: an
+uncaught failure in a thread reaches the program only through `join`, which does
+re-raise it, on both the interpreter and C. There is no separate detach defect,
+and what is left is one question rather than two.
+
+**That question is unresolved and is now stated as one**: what should an uncaught
+failure in a thread nobody joins do? The vocabulary for the distinction already
+exists — `join` asks for the result and its failures, `detach` disowns the thread,
+and neither is a leak the registry already reports. Three of the four backends
+answer differently and none of them consults that vocabulary. Recorded, not
+decided.
+
+All four corrections in this arc are one mistake: a partial path reported as the
+whole. A second harness in the same file, an environment variable, two backends,
+and now a documented builtin.
+
+`dune test` 2599/0, plugin_host_check 9 plugins, thread_fail_check 7 assertions.
+
+---
+
 ## v0.1.360 — 2026-08-30
 
 _Two corrections to v0.1.358, and the real hole underneath them._
@@ -127,7 +183,9 @@ a message: the corpus plugin that tries to write `/tmp/mere_plugin_pwned.txt`
 leaves nothing behind. But the denial and the host's death are the SAME event.
 There is no way to recover from `fail`, and `parse_and_eval` reaches for it
 through 20 call sites in the evaluator and 59 in the parser, so an unknown name,
-a type error and a syntax error all end the process that asked. Nor is there
+a type error and a syntax error all end the process that asked.
+[**Corrected in v0.1.361**: `try_or` recovers from `fail` on every backend and is
+documented. The design stands for other reasons; the sentence above does not.] Nor is there
 anything to stop a plugin that does not stop: no step budget, no cap on a
 region. The infinite loop and the runaway allocation ran until the operating
 system killed them.
@@ -139,6 +197,9 @@ prints the failure and carries on. Four backends, three answers, and
 `scripts/parity.sh` cannot see any of it: it discards the compiled backends'
 stderr, compares exit status only against its timeout, and skips a case outright
 when the interpreter exits nonzero.
+[**Corrected in v0.1.360**: parity.sh has a second harness that compares exactly
+those things. The hole is at its edge, not its absence — and the interpreter is
+silent by default, not silent.]
 
 So the boundary is a process. `examples/plugin` is a host, a runner, and seven
 plugins — one that behaves, two that never stop, four that fail in the four

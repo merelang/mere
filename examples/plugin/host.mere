@@ -6,12 +6,25 @@
 // machine complains, the one that asks for the filesystem, the one that
 // calls a builtin with the wrong type, the one that does not parse.
 //
-// None of that can be survived in-process. Mere has no way to recover from
-// `fail`, and contrib/eval reaches for it in 20 places and contrib/parser in
-// 59, so any one of them ends the program that called `parse_and_eval`. The
-// plugin therefore runs as a CHILD and the boundary is a process: the host
-// learns what happened from an exit status, which is the only failure
-// channel the language leaves it.
+// The plugin runs as a CHILD, and the boundary is a process. An earlier version
+// of this comment said that was forced -- that Mere has no way to recover from
+// `fail`. THAT WAS WRONG. `try_or : (unit -> 'a) -> 'a -> 'a` catches
+// `Eval_error` on all four backends and is documented in stdlib-reference.md,
+// and wrapping `parse_and_eval` in it does survive the corpus in-process: the
+// type error, the parse error and the unbound name are all caught and the host
+// goes on to the next plugin.
+//
+// What survives of the reason for a process is narrower and still holds:
+//
+//   `try_or` returns a DEFAULT, not the message. A host built on it learns that
+//   a plugin failed and nothing about why -- no `unbound variable: write_file`,
+//   which is the line this host reports and acts on.
+//
+//   `try_or` does not stop a plugin that does not stop. loops_forever and
+//   allocates_without_end are unaffected by it and need the OS either way.
+//
+// So the boundary is a process to keep the diagnostic and to bound the runaway,
+// not because failure could not be survived.
 //
 // Two things here are the shell's rather than Mere's, and that is the point
 // of the file. `ulimit -t` bounds the plugin's CPU because the language has
