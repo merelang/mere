@@ -871,6 +871,62 @@ to_lower to_upper try_or write_file write_file_bytes
 
 Q-010 collection builtins (`vec_*` / `owned_vec_*` / `strbuf_*` / `map_*` / `len`) are registered builtins outside this table; see language-reference / tutorial.
 
+### The names in those families, and the `bytes` ones
+
+Listed because delegating a family to another document only works if something
+says who is in it. `scripts/doc_coverage_check.sh` compares this against
+`mere --dump-builtins`; before it existed, twenty-five names were reachable from
+a program and mentioned nowhere a reader would look -- the whole binary type
+among them, and one Vec operation that appeared in no file under `docs/` at all.
+They are not named in this paragraph on purpose: the gate asks only whether a
+name is spelled somewhere here, so a sentence about a missing builtin would
+satisfy it and hide the very row it was describing.
+
+**`bytes` — the immutable binary type** (a distinct type from `str`: length-prefixed, NUL-safe):
+
+| builtin | signature | notes |
+|---|---|---|
+| `bytes_len` | `bytes -> int` | length in bytes |
+| `bytes_get` | `bytes -> int -> int` | the byte at an index, 0-255 |
+| `bytes_slice` | `bytes -> int -> int -> bytes` | offset and length |
+| `bytes_concat` | `bytes -> bytes -> bytes` | |
+| `bytes_of_str` / `str_of_bytes` | `str -> bytes` / `bytes -> str` | the two directions across the text boundary |
+| `bytes_of_hex` / `hex_of_bytes` | `str -> bytes` / `bytes -> str` | lowercase hex, no separators |
+| `bytes_of_vec` / `vec_of_bytes` | `Vec[R, int] -> bytes` / `bytes -> Vec[R, int]` | the bridge to the integer view |
+
+**`Vec` — the rest of the family** (`vec_new` / `push` / `get` / `set` / `len` / `iter` / `map` / `filter` / `fold` / `sort` / `to_list` / `to_owned` are covered in language-reference and the tutorial):
+
+| builtin | signature | notes |
+|---|---|---|
+| `vec_concat` | `Vec[R, T] -> Vec[R, T] -> Vec[R, T]` | a new Vec in the same region |
+| `vec_reverse` | `Vec[R, T] -> unit` | **in place**, returns unit |
+| `vec_bytes` | `Vec[R, T] -> int` | bytes this Vec currently holds — a measurement, not a capacity |
+| `vec_compact` | `Vec[R, T] -> unit` | shrink the buffer to the live length (v0.1.294-300 reclamation arc) |
+
+**`Map`** (`map_new` / `get` / `set` / `has` / `len` / `delete` / `iter` are covered in language-reference and the tutorial):
+
+| builtin | signature | notes |
+|---|---|---|
+| `map_clear` | `Map[R, K, V] -> unit` | drop every entry, keep the table |
+| `map_compact` | `Map[R, K, V] -> unit` | shrink the table to fit what is left |
+| `map_recycle` | `Map[R, K, V] -> unit` | return the table's storage for reuse |
+| `map_bytes` | `Map[R, K, V] -> int` | bytes this Map currently holds |
+
+**`OwnedVec`**: `owned_vec_get : OwnedVec[T] -> int -> T` joins `owned_vec_new` /
+`push` / `len` / `to_vec`, which are in language-reference.
+
+**Not a family, and missing for the same reason:**
+
+| builtin | signature | notes |
+|---|---|---|
+| `file_open` | `str -> File` | open for reading; `file_openrw` is the read/write one |
+| `file_read_line` | `File -> str option` | `None` at end of file |
+| `read_stdin` | `unit -> str` | the whole of stdin |
+| `list_dir` | `str -> str list` | entries, order unspecified |
+| `mkdir_p` | `str -> unit` | creates parents, succeeds if it exists |
+| `channel_new` | `unit -> Channel[T]` | see "Channel receive: which of the three blocks" above |
+
+
 **`vec_sort : Vec[R, T] -> (T -> T -> int) -> unit`** carries two guarantees that are
 worth stating because a Mere program can observe both (v0.1.349). It is **stable** —
 equal keys keep insertion order — and all four backends run the **same** bottom-up
