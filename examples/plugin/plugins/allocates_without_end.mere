@@ -1,0 +1,4 @@
+// Grows a string until something gives out.
+let rec grow = fn n -> fn acc ->
+  if n < 1 then acc else grow (n - 1) (acc ++ "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+grow 2000000 ""

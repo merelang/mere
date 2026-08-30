@@ -1,0 +1,2 @@
+// Asks for a capability it was not given.
+tcp_connect "example.com" 80

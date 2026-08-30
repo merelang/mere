@@ -1,0 +1,2 @@
+// Asks for a capability it was not given.
+write_file "/tmp/mere_plugin_pwned.txt" "owned"

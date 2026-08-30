@@ -181,6 +181,23 @@ tally) that drives it in a real Chrome, for the claims a headless dump
 cannot settle — focus and caret survival, `blur` as the user causes it,
 state surviving a restart. Missing Playwright is a SKIP, not a failure.
 
+### Running somebody else's program (examples/plugin), and what it forced
+
+A plugin host is the one shape that takes untrusted code as INPUT, and the
+language's central claim -- that capabilities are passed, not ambient -- had
+never been asked adversarially. Half of it holds for free: `contrib/eval` seeds
+its environment with `print` and `show`, so a plugin naming `write_file` does not
+reach it, and the interpreter is the boundary. The other half does not: a denial
+and the host's death are the SAME event, because Mere cannot recover from `fail`
+and `parse_and_eval` reaches for it through 79 call sites in the evaluator and the
+parser. So the boundary is a process.
+
+| File | What it forced |
+|---|---|
+| [plugin/runner.mere](plugin/runner.mere) | The untrusted side: one plugin per process, evaluated in an environment holding two names. Showed that the capability question is answered by construction and the *survival* question is not |
+| [plugin/host.mere](plugin/host.mere) | The side that has to keep running. Forced the fix in `run`, which reported a signalled child with OCaml's signal encoding (121 for SIGKILL, where the shell and the C backend say 137) -- and made adding `exec` to a command line change the verdict. Its CPU bound comes from `ulimit`, because the language has neither a step budget nor a cap on a region |
+| [plugin/plugins/](plugin/plugins/) | Seven plugins: one that behaves, two that never stop, and four that fail in the four available ways. `scripts/plugin_host_check.sh` counts the verdicts by KIND and asks the filesystem -- not a diagnostic -- whether the capability boundary held |
+
 ### Bare metal on the RV32I backend, and what each one forced
 
 `mere -rv` lowers a program to a flat RV32IM binary, and `--bare` hands it the

@@ -1,0 +1,3 @@
+// Never returns. The host has no fuel to give it and no way to stop it.
+let rec go = fn n -> go (n + 1);
+go 0
