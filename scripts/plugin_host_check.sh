@@ -16,12 +16,15 @@
 # honest" before the branch, and that line must NOT appear anywhere in the
 # output. A host that reached the same verdict by evaluating would print it.
 #
-# The other half is that the denial and the host's death are the same event. Mere
-# has no way to recover from `fail`, and contrib/eval reaches for it in 20 places
-# and contrib/parser in 59, so `parse_and_eval` ends the process that called it --
-# for an unknown name, a type error, and a syntax error alike. The host therefore
-# runs each plugin as a child, and what this gate checks is that it comes back with
-# a VERDICT for every one of them and is still standing at the end.
+# The other half is that a failing plugin ends the program that called it, unless
+# something catches it. `try_or` does -- that is a correction to what this header
+# used to say, which was that Mere cannot recover from `fail` at all. It can, on
+# all four backends. But `try_or` returns a DEFAULT and not the message, so a host
+# built on it knows a plugin failed and nothing about why, and it does nothing
+# whatever about a plugin that does not stop. The host therefore runs each plugin
+# as a child -- to keep the diagnostic and to bound the runaway -- and what this
+# gate checks is that it comes back with a VERDICT for every one of them and is
+# still standing at the end.
 #
 # The corpus is examples/plugin/plugins: one plugin that behaves, two that do not
 # stop, two that fail outright, and four that ask for what they were not granted
