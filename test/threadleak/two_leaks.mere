@@ -1,5 +1,13 @@
 //! leaks: 2 blocked on channel_recv
 // Two of them, so the count is checked and not just the wording.
+//
+// This case caught a real undercount: threads used to register themselves from
+// inside the spawned domain, so `spawn` returned before the entry existed and a
+// main that spawns and exits could reach the report first. It read "1 blocked
+// on channel_recv" on a loaded runner -- and an undercount is the bad direction
+// for a leak report, because fewer leaks looks like a cleaner program. The
+// parent registers now. Delay the child's first instruction to see the old
+// behaviour.
 let ch = channel_new ();
 let _a = spawn (fn () -> let _ = channel_recv ch in ());
 let _b = spawn (fn () -> let _ = channel_recv ch in ());
