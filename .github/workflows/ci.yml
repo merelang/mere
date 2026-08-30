@@ -248,6 +248,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/plugin_host_check.sh
 
+      # What a spawned thread's failure does to the program: three answers from
+      # four backends, and on C and LLVM the answer is a coin flip weighted by
+      # machine load -- which is why it cannot live in scripts/parity.sh.
+      - name: "thread fail (what a dead thread does to the program)"
+        if: ${{ !cancelled() }}
+        run: sh scripts/thread_fail_check.sh
+
       - name: live_query (which reads a write affects, on every backend)
         if: ${{ !cancelled() }}
         run: sh scripts/live_query_check.sh

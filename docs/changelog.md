@@ -4,6 +4,66 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.360 — 2026-08-30
+
+_Two corrections to v0.1.358, and the real hole underneath them._
+
+**First correction.** v0.1.358 said of the four-backend split in how a spawned
+thread's failure is reported: "`scripts/parity.sh` cannot see any of it: it
+discards the compiled backends' stderr, compares exit status only against its
+timeout, and skips a case outright when the interpreter exits nonzero." That is
+wrong. parity.sh has TWO harnesses, and the second one — "programs that are
+supposed to fail", over `test/parity/fail/` — compares exit status, stdout AND
+the failure message across backends. It was built in v0.1.246 for exactly this
+purpose. Each clause of the sentence is true of the main loop; the conclusion
+drawn from them is false of the file, which was read as far as the first loop.
+
+**Second correction.** The same entry said a `fail` inside a spawned thread
+"leaves the interpreter running and SILENT — no message on either stream." It is
+silent BY DEFAULT. `builtin_spawn` records `T_died` with the message and
+re-raises into a domain nobody joins, and `MERE_THREAD_REPORT=1` names it:
+`thread 1: died: fail: boom, never joined`. The interpreter has not lost the
+failure; nothing asks it.
+
+**The hole is real and is at the seam.** A program the interpreter FINISHES and a
+compiled backend does not fits in neither harness: the main loop compares stdout
+only and calls it MATCH, and the failure section refuses the file for exiting 0.
+Measured on the spawn case: interp exits 0, C exits 1, stdout byte-identical.
+
+`note_exit` closes it. The main loop now compares exit status, pinned the way
+stdout differences are — `<case>.<backend>.exit` holds the status, and a pin whose
+case has stopped diverging is an error rather than a pass. The interpreter's
+status is 0 for every file that reaches there, so the expectation is 0.
+
+Sizing that change is where a third correction belongs. The number reported before
+making it was "0 of 139 disagree", from a scan that compared the interpreter
+against **C only** — the same mistake as the two above, a partial path presented
+as the whole. Running all four found one: `capture_after_call`, which already
+carries an `llvm.expected` for the wrong output Q-052 describes, exits 1 under
+LLVM where the interpreter exits 0, deterministically in 15 runs of 15. The known
+miscompile reaches the exit status too, which the pin now says out loud.
+
+**And the case that found it still cannot go there.** The defect destroys the
+determinism a pin requires. Measured: interp exits 0 in all 70 runs; C exits 0 in
+5 of 60 and nonzero in 55; LLVM showed 2 zeroes in 20 and then none in 60. The
+proportions move with machine load. The first version of the gate asserted "C
+exits 1 every run", having watched exactly that 20 times, and failed on its next
+run. So `scripts/thread_fail_check.sh` holds it instead and asserts only what does
+not move: the interpreter always exits 0 and says nothing by default, the
+interpreter under `MERE_THREAD_REPORT=1` still names the death and its message, C
+ends the process at least once in ten runs, Wasm always exits 0 with the failure
+in its output, and interp and C do not agree. LLVM is reported and not asserted,
+because asserting that something varies is flaky in the other direction.
+
+Poisoned two ways: removing the `fail` from the spawned thread (four assertions
+fire), and making the interpreter report a dead thread by default (the silence
+assertion fires — which is how this gate finds out it was fixed).
+
+`dune test` 2599/0, parity 139/139 with the exit-status comparison in (the run
+before the pin went in was 138 and 1), thread_fail_check 7 assertions.
+
+---
+
 ## v0.1.359 — 2026-08-30
 
 _The boundary held on the path taken._ v0.1.358 said the interpreter is a
