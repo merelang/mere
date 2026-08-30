@@ -118,6 +118,35 @@ skip=0; skip_names=""
 # backend-unsupported, else "hard".
 emit_kind() { grep -qE 'unsupported|not supported in .* codegen subset|does not fit the .* 32-bit int' "$1" 2>/dev/null && echo unsup || echo hard; }
 
+# note_exit <backend> <case-file> <rc> — appends the exit-status verdict to $row.
+#
+# The main loop compared stdout and nothing else, and the section below compares
+# exit status but only for files the INTERPRETER fails on. A program the
+# interpreter finishes and a compiled backend does not fell between them: the
+# spawn-a-thread-that-fails case leaves interp at 0 and C at 1 with byte-identical
+# stdout, so this loop said MATCH and the failure section refused the file for
+# exiting 0. Neither harness could hold it. Q-036 built the failure comparison in
+# v0.1.246 and this is its missing edge, not its absence.
+#
+# The interpreter's status is 0 for every file that reaches here: a nonzero one is
+# SKIPped above and belongs in test/parity/fail/. So the expectation is 0, and a
+# difference is pinned the way stdout differences are -- <case>.<backend>.exit
+# holding the status, so the known difference is nailed down rather than tolerated,
+# and a pin whose case stopped diverging is an error rather than a pass.
+note_exit() {
+  _pin="${2%.mere}.$1.exit"
+  if [ "$3" = 0 ]; then
+    if [ -f "$_pin" ]; then
+      row="$row $1:EXIT-PIN-STALE(${_pin#$ROOT/})"; bad=1
+    fi
+  elif [ -f "$_pin" ] && [ "$3" = "$(cat "$_pin")" ]; then
+    row="$row $1:DIVERGE(exit $3)"; div_names="$div_names $1/$name(exit)"
+  else
+    row="$row $1:EXIT($3)"; bad=1
+  fi
+  true
+}
+
 # classify_mismatch <backend> <case-file> <actual-output>
 # Prints DIVERGE when a declared expectation matches the output exactly, else DIFF.
 classify_mismatch() {
@@ -139,10 +168,13 @@ for f in $FILES; do
     if "$CC" -O0 -w "$TMP/c.c" -o "$TMP/c.bin" -lm 2>"$TMP/c.cc"; then
       out="$(bounded "$TMP/c.bin" 2>/dev/null)" && orc=0 || orc=$?
       if [ "$orc" = "$HUNG_RC" ]; then row="$row c:HUNG"; bad=1; hung_names="$hung_names c/$name"
-      elif [ "$out" = "$ref" ]; then row="$row c:MATCH"
-      elif [ "$(classify_mismatch c "$f" "$out")" = DIVERGE ]; then
-        row="$row c:DIVERGE"; div_names="$div_names c/$name"
-      else row="$row c:DIFF"; bad=1; fi
+      else
+        if [ "$out" = "$ref" ]; then row="$row c:MATCH"
+        elif [ "$(classify_mismatch c "$f" "$out")" = DIVERGE ]; then
+          row="$row c:DIVERGE"; div_names="$div_names c/$name"
+        else row="$row c:DIFF"; bad=1; fi
+        note_exit c "$f" "$orc"
+      fi
     else row="$row c:MISCOMPILE"; bad=1; note_diag c "$TMP/c.cc"; fi
   else [ "$(emit_kind "$TMP/c.err")" = unsup ] && row="$row c:UNSUP" || { row="$row c:EMITFAIL"; bad=1; note_diag c "$TMP/c.err"; }; fi
   # LLVM
@@ -150,10 +182,13 @@ for f in $FILES; do
     if "$CC" -O0 -w "$TMP/l.ll" -o "$TMP/l.bin" -lm 2>"$TMP/l.cc"; then
       out="$(bounded "$TMP/l.bin" 2>/dev/null)" && orc=0 || orc=$?
       if [ "$orc" = "$HUNG_RC" ]; then row="$row llvm:HUNG"; bad=1; hung_names="$hung_names llvm/$name"
-      elif [ "$out" = "$ref" ]; then row="$row llvm:MATCH"
-      elif [ "$(classify_mismatch llvm "$f" "$out")" = DIVERGE ]; then
-        row="$row llvm:DIVERGE"; div_names="$div_names llvm/$name"
-      else row="$row llvm:DIFF"; bad=1; fi
+      else
+        if [ "$out" = "$ref" ]; then row="$row llvm:MATCH"
+        elif [ "$(classify_mismatch llvm "$f" "$out")" = DIVERGE ]; then
+          row="$row llvm:DIVERGE"; div_names="$div_names llvm/$name"
+        else row="$row llvm:DIFF"; bad=1; fi
+        note_exit llvm "$f" "$orc"
+      fi
     else row="$row llvm:MISCOMPILE"; bad=1; note_diag llvm "$TMP/l.cc"; fi
   else [ "$(emit_kind "$TMP/l.err")" = unsup ] && row="$row llvm:UNSUP" || { row="$row llvm:EMITFAIL"; bad=1; note_diag llvm "$TMP/l.err"; }; fi
   # Wasm
@@ -162,10 +197,13 @@ for f in $FILES; do
       if wat2wasm --enable-tail-call --enable-threads "$TMP/w.wat" -o "$TMP/w.wasm" 2>"$TMP/w.w2"; then
         out="$(bounded node "$ROOT/scripts/run_wasm.js" "$TMP/w.wasm" 2>/dev/null)" && orc=0 || orc=$?
         if [ "$orc" = "$HUNG_RC" ]; then row="$row wasm:HUNG"; bad=1; hung_names="$hung_names wasm/$name"
-      elif [ "$out" = "$ref" ]; then row="$row wasm:MATCH"
-      elif [ "$(classify_mismatch wasm "$f" "$out")" = DIVERGE ]; then
-        row="$row wasm:DIVERGE"; div_names="$div_names wasm/$name"
-      else row="$row wasm:DIFF"; bad=1; fi
+        else
+          if [ "$out" = "$ref" ]; then row="$row wasm:MATCH"
+          elif [ "$(classify_mismatch wasm "$f" "$out")" = DIVERGE ]; then
+            row="$row wasm:DIVERGE"; div_names="$div_names wasm/$name"
+          else row="$row wasm:DIFF"; bad=1; fi
+          note_exit wasm "$f" "$orc"
+        fi
       else row="$row wasm:MISCOMPILE"; bad=1; note_diag wasm "$TMP/w.w2"; fi
     else [ "$(emit_kind "$TMP/w.err")" = unsup ] && row="$row wasm:UNSUP" || { row="$row wasm:EMITFAIL"; bad=1; note_diag wasm "$TMP/w.err"; }; fi
   else row="$row wasm:SKIP"; fi
