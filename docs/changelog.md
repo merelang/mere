@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.362 — 2026-08-31
+
+_`host_matrix` asks which backend has each builtin; nothing asked whether the
+documentation had heard of it._ Twenty-five of 221 had not been written about by
+hand anywhere: every name in the `bytes` family — a first-class type with an arc
+behind it — along with `map_clear` / `compact` / `recycle` / `bytes`,
+`vec_concat` / `reverse` / `compact` / `bytes` / `of_bytes`, `owned_vec_get`,
+`channel_new`, `file_open`, `file_read_line`, `list_dir`, `mkdir_p`,
+`read_stdin`, `hex_of_bytes` and `str_of_bytes`. `vec_reverse` appeared in no
+file under `docs/` at all, the changelog included.
+
+`scripts/doc_coverage_check.sh` compares `mere --dump-builtins` against the
+hand-written docs. The changelog is excluded because a name that appears only
+there has been announced and never documented, which is the case being looked
+for, and `docs/host-matrix.md` is excluded because it is generated from the same
+builtin list — counting it would let the gate pass by citing itself. An
+allowlist takes `<name> <reason>` lines for deliberate omissions, and an entry
+whose builtin has since been documented is an error, so the list cannot rot into
+a to-do nobody rereads.
+
+The twenty-five were documented rather than excused: `stdlib-reference.md` now
+carries the `bytes` family with signatures, the rest of `Vec` / `Map` /
+`OwnedVec` beyond what language-reference and the tutorial cover, and the six
+that belong to no family. 221 of 221.
+
+**What the gate does not check is stated in its header, because a coverage number
+invites the other reading**: it asks whether the name is spelled somewhere, not
+whether it is explained. That weakness bit immediately. The paragraph introducing
+the new roster named two of the builtins it existed to cover, as examples of what
+had been missing — so deleting a table row left the name in the prose ABOUT the
+row, and the first poison run stayed green. The sentence names none of them now,
+and the poison fails as it should.
+
+Three measurements were wrong before one was right, all of them the instrument
+rather than the subject: `grep` here is a ugrep wrapper where an anchor inside a
+group silently matches nothing, an unquoted list of filenames is one argument
+under zsh rather than sixteen, and "the reference documentation" was defined as
+two files when the collection families are deliberately delegated to three
+others. The number went 52, then 69, then 221, then 25. Only the last was checked
+two independent ways.
+
+`dune test` 2599/0, doc_coverage 221/221.
+
+---
+
 ## v0.1.361 — 2026-08-31
 
 _A fourth correction, and the biggest: `try_or` exists._
