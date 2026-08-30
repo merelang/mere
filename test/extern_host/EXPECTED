@@ -1,0 +1,9 @@
+# module  links|needs-a-js-host|emit-refused
+# Produced by scripts/extern_host_check.sh --update.
+# 'needs-a-js-host' is not a defect; contrib/dom is browser-side by
+# design. It is a fact an app that chose native has to know BEFORE the
+# linker tells it.
+http/sse needs-a-js-host
+dom/dom needs-a-js-host
+db/pg links
+http/http links

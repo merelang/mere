@@ -257,6 +257,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/live_soundness_check.sh
 
+      - name: extern_host (which contrib modules a native binary can link)
+        if: ${{ !cancelled() }}
+        run: sh scripts/extern_host_check.sh
+
       - name: wasm_stub (which builtins answer without reaching the host)
         if: ${{ !cancelled() }}
         run: sh scripts/wasm_stub_check.sh
