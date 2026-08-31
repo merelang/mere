@@ -78,3 +78,6 @@ TODO.md
 benchmarks/data/
 benchmarks/.build/
 __pycache__/
+
+# Vendored by `mere install` — reproducible from mere.toml + mere.lock.
+.mere_modules/

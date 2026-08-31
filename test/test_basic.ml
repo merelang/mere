@@ -12050,12 +12050,6 @@ let () =
       (project_root ^ "/contrib/argparse/argparse.mere") 60_000;
     bootstrap_wat_ok "compile: toml"
       (project_root ^ "/contrib/toml/toml.mere") 80_000;
-    bootstrap_wat_ok "compile: markdown to_html"
-      (project_root ^ "/contrib/markdown/to_html.mere") 140_000;
-    bootstrap_wat_ok "compile: markdown to_text"
-      (project_root ^ "/contrib/markdown/to_text.mere") 50_000;
-    bootstrap_wat_ok "compile: markdown toc"
-      (project_root ^ "/contrib/markdown/toc.mere") 50_000;
     (* Phase 54.33: time.mere unlocked via float codegen. Also cements
        the "18/18 contribs self-host compilable" milestone. *)
     bootstrap_wat_ok "compile: time"

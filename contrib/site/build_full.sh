@@ -15,6 +15,11 @@ MODE_FLAG="${3:-}"
 
 set -e
 
+# 0. Vendor what mere.toml names. contrib/site imports the mere-markdown
+#    package and .mere_modules/ is not checked in, so a fresh clone - which is
+#    what CI always has - would fail at the import without this.
+dune exec mere -- install
+
 # 1. Mere SSG: markdown -> HTML + style.css + index + search + sitemap + nojekyll
 #    + copies playground/*.html + *.wat
 dune exec mere -- contrib/site/build.mere "$INPUT_DIR" "$OUTPUT_DIR" $MODE_FLAG

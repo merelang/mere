@@ -106,7 +106,7 @@ with ⭐).
 | [prime_sieve.mere](prime_sieve.mere) ⭐ | Sieve of Eratosthenes (Vec[R, bool] + vec_set + let rec loop; extracts the 15 primes under 50). H1 |
 | [rate_limiter.mere](rate_limiter.mere) ⭐ | fixed 60-second window rate limiter (2 Maps holding window_start + count). Dogfoods 2 Phase 30.2 top-level globals; diff = 0 across 4 backends. G5 |
 | [stack_calc.mere](stack_calc.mere) ⭐ | RPN evaluator (tok variant + op_kind variant + `'a stk` linked-list stack). div-by-zero fallback, 8 test cases. C4 |
-| ~~`markdown_toc.mere`~~ | **Promoted in Phase 40 to [contrib/markdown/toc.mere](../contrib/markdown/toc.mere)** |
+| ~~`markdown_toc.mere`~~ | **Promoted in Phase 40 to contrib, then split out to the `mere-markdown` package: `toc.mere`** |
 | [bank_account.mere](bank_account.mere) ⭐ | a functional bank account (account variant + tx variant + state-passing replay + Vec[R, tx] ledger). G4 |
 | [graph_bfs.mere](graph_bfs.mere) ⭐ | BFS on a directed graph (Map[int, int list] adjacency + Map[int, bool] visited). 3 component scenarios verified on 4 backends. H3 |
 | **Phase 34 (2026-06-22) additions — float + libm** | |
@@ -121,7 +121,7 @@ with ⭐).
 | [fallible_lookup.mere](fallible_lookup.mere) ⭐ | chain a 2-stage Map[str, str] with `result_and_then`. Chained lookup user->email->role and the `result_default` fallback pattern (D4) |
 | [config_loader.mere](config_loader.mere) ⭐ | load `key = value` text into Map[str, str]. Handles comments / blank lines / leading-trailing trim. Phase 36 added `str_trim` / `str_starts_with` to 3 backends, so the code is now natural, directly using prelude builtins (A3) |
 | ~~`csv_writer.mere`~~ | **Promoted in Phase 41 to [contrib/csv/writer.mere](../contrib/csv/writer.mere)** (top-level; module-wrapping is future work) |
-| ~~`markdown_to_text.mere`~~ | **Promoted in Phase 40 to [contrib/markdown/to_text.mere](../contrib/markdown/to_text.mere)** |
+| ~~`markdown_to_text.mere`~~ | **Promoted in Phase 40 to contrib, then split out to the `mere-markdown` package: `to_text.mere`** |
 | [calendar_lite.mere](calendar_lite.mere) ⭐ | print a Sunday-starting month calendar as ASCII from year + month. Leap year + Zeller's congruence + StrBuf to build a 7-column grid (G3) |
 | [matrix_2d.mere](matrix_2d.mere) ⭐ | represent a 2D matrix via a 1D OwnedVec[int] + `r * cols + c` indexing. Matrix add / transpose / pretty-print. Nested Vec[Vec[int]] hits region escape; avoided here (H2) |
 | [borrow_chain.mere](borrow_chain.mere) | reuse the same `&shared write R Logger` borrow across a pipeline calling 3 helpers (demo of Phase 17.1 borrow tracking). **interp only** (no codegen for `&shared write R`; same as borrow_modes.mere, F3) |
@@ -294,7 +294,7 @@ backends (interp + C + LLVM + Wasm).
 | [collatz.mere](collatz.mere) | Collatz sequence |
 | [bin_tree_traversal.mere](bin_tree_traversal.mere) | binary tree pre/in/post-order |
 | [csv_summary.mere](csv_summary.mere) | CSV aggregation (Map + reduce) |
-| ~~`markdown_to_text.mere`~~ | -> [contrib/markdown/to_text.mere](../contrib/markdown/to_text.mere) |
+| ~~`markdown_to_text.mere`~~ | -> `mere-markdown/to_text.mere` |
 | [matrix_2d.mere](matrix_2d.mere) | 2D matrix operations (transpose / scale) |
 | [borrow_chain.mere](borrow_chain.mere) | borrow mode chain demo |
 | [cache_sim.mere](cache_sim.mere) | a simple LRU cache simulator |
@@ -402,7 +402,7 @@ converter.
 
 | File | Content |
 |---|---|
-| ~~`markdown_to_html.mere`~~ | -> [contrib/markdown/to_html.mere](../contrib/markdown/to_html.mere) |
+| ~~`markdown_to_html.mere`~~ | -> `mere-markdown/to_html.mere` |
 | [prettyprinter.mere](prettyprinter.mere) | Wadler-style pretty printer combinator (variant doc + group/nest/line) |
 | ~~`regex_engine.mere`~~ | -> [contrib/regex/engine.mere](../contrib/regex/engine.mere) (NFA-based prototype) |
 
