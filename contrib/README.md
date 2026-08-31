@@ -39,7 +39,7 @@ cp contrib/json/json.mere my_project/
 ```
 
 Top-level libs originating from `examples/` (currently
-`contrib/json/writer.mere` / `contrib/markdown/*`) still work, but to namespace
+`contrib/json/writer.mere`) still work, but to namespace
 them, rewrite into `module Foo { ... }` form incrementally.
 
 ```sh
@@ -57,7 +57,6 @@ naming convention** (`json_parse / json_show / md_to_html / md_to_text`).
 | lib | path | function | module-wrapped |
 |---|---|---|---|
 | **json** | `contrib/json/` | JSON parse (`Json.parse_json`) + write (compact / pretty) | parser only |
-| **markdown** | `contrib/markdown/` | Markdown subset → HTML (`MarkdownHtml.render`) / plain text / TOC | to_html.mere ✓, to_text / toc are top-level |
 | **csv** | `contrib/csv/` | CSV parse (`Csv.parse_csv`, reduced RFC 4180) + writer (`CsvWriter.render` Person-bound) | ✓ both |
 | **argparse** | `contrib/argparse/` | CLI argument parser (`Argparse.parse` flag/opt/positional) | ✓ module |
 | **regex** | `contrib/regex/` | minimal regex (`Regex.parse_re` + `Regex.match_re`, `. ^ $ * + ?` + concat) | ✓ module |

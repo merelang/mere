@@ -245,7 +245,7 @@ Everything the demos import is under [`contrib/`](https://github.com/merelang/me
 
 - `contrib/http/` — 22 modules including `router` (exact / `:capture` / prefix), `client` (outbound curl-based fetch with request + response headers, per-call timeout), `metrics` (Prometheus-style counters + gauges + auto-counting middleware), `session` (in-memory cookie session store — random 16-hex ids, `HttpOnly; SameSite=Lax` defaults), `basic_auth` (RFC 7617 middleware), `csrf` (synchronizer-token guard on top of session), `cache` (Cache-Control postures + ETag/If-None-Match 304), `websocket` (RFC 6455 hub — server-side broadcast + client auto-relay), `json_body`, `escape`, `cookie`, `security`, `access_log`, `cors`, `static`, `multipart`, `sse`, `stream`, and the Node glue
 - `contrib/kv/` — log-structured KV + pipe-separated pack/unpack
-- `contrib/xml/`, `contrib/feed/`, `contrib/markdown/`, `contrib/json/` — parsers / renderers
+- `contrib/xml/`, `contrib/feed/`, `contrib/json/` — parsers / renderers
 - `contrib/auth/jwt.mere` — HS256 sign / verify
 - `contrib/webhook/github.mere` — GitHub signed webhook helpers
 - `contrib/log/log.mere` — JSON lines logger

@@ -44,7 +44,7 @@ import "../contrib/http/cookie.mere";
 import "../contrib/kv/kv.mere";
 import "../contrib/kv/pack.mere";
 import "../contrib/log/log.mere";
-import "../contrib/markdown/to_html.mere";
+import "github.com/284km/mere-markdown/to_html.mere";
 
 let posts_db_path = "/tmp/mere_blog_posts.db" in
 let posts = kv_load posts_db_path in
@@ -60,7 +60,7 @@ in
 
 let blog_title = "Mere mini blog" in
 let blog_url = "http://localhost:8080/" in
-let blog_desc = "Powered by Mere — contrib/http + contrib/markdown + contrib/kv." in
+let blog_desc = "Powered by Mere — contrib/http + mere-markdown + contrib/kv." in
 
 // ---- helpers ------------------------------------------------------
 

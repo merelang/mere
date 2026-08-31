@@ -32,7 +32,8 @@
 // Import paths are resolved relative to the importer file (this file)'s
 // directory (Phase 9.5). From contrib/site/ we reference ../markdown/ and
 // ../path/.
-import "github.com/merelang/mere/contrib/markdown/to_html.mere";
+import "github.com/284km/mere-markdown/to_html.mere";
+import "github.com/284km/mere-markdown/toc.mere";
 import "github.com/merelang/mere/contrib/path/path.mere";
 
 // ===== internal helpers =====
@@ -116,30 +117,31 @@ let slugify = fn (s: str) ->
   if m > 0 && char_at raw (m - 1) == "-" then substring raw 0 (m - 1)
   else raw;
 
-// Extract h2/h3 headings from markdown lines and generate TOC HTML.
-//   Each heading's slug becomes its id so anchor links from the TOC work.
-//   If there are no headings, return "" (the TOC is empty).
-let build_toc_html = fn (lines: str list) ->
+// The table of contents, from the document's headings.
+//
+// This used to scan the lines itself for `## ` and `### `, which made it the
+// fourth place in the tree that decided what a heading is and the only one of
+// those four that was also wrong about code: a `## ` inside a fenced block was
+// a section here and a `<pre>` in the body. It asks `MdToc.headings` now.
+//
+// Showing only h2 and h3 is a choice about this site, not a claim about
+// markdown, so it stays.
+let build_toc_html = fn (doc: block list) ->
   let buf = strbuf_new () in
   let _ = strbuf_push buf "<details class=\"toc\"><summary>Contents</summary><ul>" in
-  // counter tracks whether we added anything to the TOC
   let counter = map_new () in
   let _ = map_set counter "n" 0 in
-  let _ = list_iter lines (fn line ->
-    let n = str_len line in
-    if n >= 4 && substring line 0 4 == "### " then
-      let text = substring line 4 n in
-      let slug = slugify text in
+  let _ = list_iter (MdToc.headings doc) (fn h ->
+    let (level, text) = h in
+    if level == 3 then
       let _ = strbuf_push buf
-        ("<li style=\"margin-left:1em\"><a href=\"#" ++ slug ++ "\">"
+        ("<li style=\"margin-left:1em\"><a href=\"#" ++ slugify text ++ "\">"
          ++ text ++ "</a></li>") in
       let _ = map_set counter "n" (map_get counter "n" + 1) in
       ()
-    else if n >= 3 && substring line 0 3 == "## " then
-      let text = substring line 3 n in
-      let slug = slugify text in
+    else if level == 2 then
       let _ = strbuf_push buf
-        ("<li><a href=\"#" ++ slug ++ "\">" ++ text ++ "</a></li>") in
+        ("<li><a href=\"#" ++ slugify text ++ "\">" ++ text ++ "</a></li>") in
       let _ = map_set counter "n" (map_get counter "n" + 1) in
       ()
     else ()) in
@@ -153,21 +155,14 @@ let build_toc_html = fn (lines: str list) ->
 // construct the heading's rendered HTML, and replace it once with
 // str_replace. If the same heading text appears multiple times, only the
 // first occurrence gets the id (MVP limitation, fine for most docs).
-let inject_heading_ids = fn (html: str) -> fn (lines: str list) ->
+let inject_heading_ids = fn (html: str) -> fn (doc: block list) ->
   // accumulate the running string in a Map (Mere has no mutable string,
   // so we hold each str_replace result in a Map instead of pushing to strbuf)
   let cur = map_new () in
   let _ = map_set cur "html" html in
-  let _ = list_iter lines (fn line ->
-    let n = str_len line in
-    let level_text =
-      if n >= 4 && substring line 0 4 == "### " then
-        (3, substring line 4 n)
-      else if n >= 3 && substring line 0 3 == "## " then
-        (2, substring line 3 n)
-      else (0, "") in
-    let (level, text) = level_text in
-    if level == 0 then ()
+  let _ = list_iter (MdToc.headings doc) (fn h ->
+    let (level, text) = h in
+    if level != 2 && level != 3 then ()
     else
       let rendered = MarkdownHtml.render_inline text in
       let tag = if level == 2 then "h2" else "h3" in
@@ -493,9 +488,13 @@ let process_page = fn (dev_mode: bool) -> fn (input_dir: str) ->
   let title =
     if map_has meta "title" then map_get meta "title"
     else extract_title lines (Path.drop_ext name) in
-  let toc = build_toc_html lines in
-  let body = MarkdownHtml.render lines in
-  let body = inject_heading_ids body lines in
+  // Parsed once. Everything below is a view of the same document, which is the
+  // whole point: the body and the table of contents cannot disagree about what
+  // a heading is if neither of them decides.
+  let doc = Md.parse lines in
+  let toc = build_toc_html doc in
+  let body = MarkdownHtml.to_html doc in
+  let body = inject_heading_ids body doc in
   let body = rewrite_links body in
   let body = toc ++ body in
   let nav_html = render_nav pages (Path.drop_ext name) in

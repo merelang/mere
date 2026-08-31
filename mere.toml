@@ -2,3 +2,6 @@
 name = "mere"
 path = "github.com/merelang/mere"
 version = "0.1.0"
+
+[dependencies]
+markdown = { git = "https://github.com/284km/mere-markdown", rev = "bbc514d9068e244e8e2dfc59cad8cccd1cfaca7c" }
