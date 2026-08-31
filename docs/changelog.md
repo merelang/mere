@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.364 — 2026-08-31
+
+_A file that imports nothing was reachable by exactly one program, because of
+where it sat._ `src/font.mere` in the mbrowse repository reads a TrueType file
+and answers how wide a string is and where a glyph's curves go. It imports
+nothing, it opens no window and it knows nothing about the web — but living in a
+browser's `src/` made that browser the only thing that could use it. It is
+`contrib/font` now, beside `contrib/raster` and `contrib/window`, which are the
+two halves of the same job.
+
+Its gates do not move. The oracle for a metrics reader is a browser's
+`measureText` over the same font file, and mbrowse is the repository that has a
+browser to compare against: `font_widths` 29 of 29 and `glyf_points` 13 of 13,
+unchanged across the move, along with the unit gates that reach it through layout
+and paint. A metrics reader that agrees with a tool nobody uses has agreed with
+nothing.
+
+**Three of five backends take this file.** interp, C and RV32I compile it; Wasm
+and LLVM do not, both inside the contour walker in `_points` and with different
+symptoms — Wasm cannot see an inner-lifted capture (`os`), LLVM an inner binding
+(`ends`). Neither is new and neither is caused by the move; they are the two
+backends' MVP limits on inner-lifted functions meeting the most nested code in
+the tree. So there is no `bootstrap_wat_ok` entry for this module, and its
+absence is a fact about the backends rather than an oversight.
+
+`contrib/font/README.md` writes down what the reader does not do, because those
+are the parts that fail quietly: a CFF font has no outlines here and draws
+nothing, and a variable font satisfies every stated condition and still comes out
+at whatever its `fvar` default is — frequently the lightest master rather than
+the regular one, with no error to say so.
+
+---
+
 ## v0.1.363 — 2026-08-31
 
 _Four places in this tree decided what a heading is, and only one of them had

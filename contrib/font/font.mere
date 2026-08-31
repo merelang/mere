@@ -1,0 +1,778 @@
+// TrueType metrics: what layout has to know before it can put a line of text anywhere.
+//
+// Metrics FIRST, and outlines after, and the order was the point: four tables answer everything a box
+// needs — how tall a line is and how wide a string is — and the curves in `glyf` answer nothing about
+// either. Every box in the layout gate was placed before a single curve was read, which is why a bug in
+// one of these two can never be mistaken for a bug in the other.
+//
+//   loca  where each glyph's outline starts
+//   glyf  the outline itself: contours of points, some on the curve and some controlling it
+//
+//   head  unitsPerEm, the scale every other number is in
+//   hhea  ascender, descender, lineGap — the height of a line
+//   cmap  a character to a glyph index
+//   hmtx  a glyph index to its advance width
+//
+// The gate for this is the browser's own `measureText` over the same font file, which is the only
+// oracle that matters: a metrics reader that agrees with a tool nobody uses has agreed with nothing.
+
+// A parsed font, with the tables it needs already located. `cmap4_*` are the offsets of the one
+// subtable format this reads — see `_find_cmap4`.
+type font = {
+  data: bytes,
+  upem: int, ascender: int, descender: int, line_gap: int,
+  hmtx: int, num_h_metrics: int,
+  // `loca` is a table of offsets into `glyf`, and `loca_long` says whether its entries are four bytes
+  // or two — a short entry holds HALF the offset, because a glyph always starts on an even byte. Read
+  // as a long by mistake it points somewhere arbitrary in the middle of another glyph, which draws
+  // something rather than failing.
+  loca: int, glyf: int, loca_long: bool, num_glyphs: int,
+  cmap4: int, seg_count: int,
+  // The absolute offsets of the pair-positioning subtables the `kern` feature points at. Found once at
+  // load, because finding them per pair means walking the script, feature and lookup lists for every
+  // two letters in the document.
+  kern_subs: int list
+};
+
+module Font {
+  // Big-endian, because every number in an OpenType file is. Written out rather than looped because
+  // there are exactly three widths in the format and a loop would need a length argument at every
+  // call site.
+  let u8 = fn (d: bytes) -> fn (i: int) ->
+    if i < 0 || i >= bytes_len d then 0 else bytes_get d i;
+
+  let u16 = fn (d: bytes) -> fn (i: int) -> u8 d i * 256 + u8 d (i + 1);
+
+  // A signed 16-bit value. `descender` is negative in every font there is, so reading it unsigned
+  // gives a line height of about a thousand pixels and a document that looks like a column.
+  let i16 = fn (d: bytes) -> fn (i: int) ->
+    let v = u16 d i in if v >= 32768 then v - 65536 else v;
+
+  let u32 = fn (d: bytes) -> fn (i: int) -> u16 d i * 65536 + u16 d (i + 2);
+
+  // The offset of a table, or -1. The directory is 12 bytes of header and then 16 bytes per entry:
+  // a four-byte tag, a checksum, an offset and a length.
+  let table = fn (d: bytes) -> fn (tag: str) ->
+    let n = u16 d 4 in
+    let rec go = fn (i: int) ->
+      if i >= n then 0 - 1
+      else
+        let o = 12 + 16 * i in
+        let t = str_of_bytes (bytes_slice d o 4) in
+        if t == tag then u32 d (o + 8) else go (i + 1) in
+    go 0;
+
+  // The `cmap` subtable for format 4, Unicode BMP. Format 4 is the one every font has and the only
+  // one this reads; a font with only format 12 would need the other. Looked for by platform and
+  // encoding rather than by taking the first, because the order of the records is not fixed.
+  let _find_cmap4 = fn (d: bytes) -> fn (cmap: int) ->
+    if cmap < 0 then 0 - 1
+    else
+      let n = u16 d (cmap + 2) in
+      let rec go = fn (i: int) -> fn (best: int) ->
+        if i >= n then best
+        else
+          let r = cmap + 4 + 8 * i in
+          let plat = u16 d r in
+          let enc = u16 d (r + 2) in
+          let off = cmap + u32 d (r + 4) in
+          let fmt = u16 d off in
+          // Windows/BMP first, then Unicode/BMP, then anything in format 4 — in that order because
+          // the Windows record is the one that is always complete.
+          if fmt != 4 then go (i + 1) best
+          else if plat == 3 && enc == 1 then off
+          else if plat == 0 then go (i + 1) (if best < 0 then off else best)
+          else go (i + 1) (if best < 0 then off else best) in
+      go 0 (0 - 1);
+
+  // The `kern` feature's pair-positioning subtables, as absolute offsets. GPOS is four lists deep —
+  // features name lookups, lookups name subtables — and only type 2 lookups are pair positioning. This
+  // font's `kern` feature also names a type 8 chained-context lookup, which is skipped: it is
+  // contextual kerning, and skipping it is a smaller error than guessing at it.
+  let _kern_subs = fn (d: bytes) -> fn (gpos: int) ->
+    if gpos < 0 then Nil
+    else
+      let flist = gpos + u16 d (gpos + 6) in
+      let llist = gpos + u16 d (gpos + 8) in
+      let fcount = u16 d flist in
+      // Every `kern` feature, not the first: a font may have one per script and they name different
+      // lookups.
+      let rec feats = fn (i: int) -> fn (acc: int list) ->
+        if i >= fcount then acc
+        else
+          let r = flist + 2 + 6 * i in
+          if str_of_bytes (bytes_slice d r 4) == "kern" then
+            feats (i + 1) (Cons (flist + u16 d (r + 4), acc))
+          else feats (i + 1) acc in
+      let rec subs_of_lookup = fn (lt: int) -> fn (acc: int list) ->
+        if u16 d lt != 2 then acc
+        else
+          let n = u16 d (lt + 4) in
+          let rec go = fn (j: int) -> fn (a: int list) ->
+            if j >= n then a else go (j + 1) (Cons (lt + u16 d (lt + 6 + 2 * j), a)) in
+          go 0 acc in
+      let rec from_feature = fn (ft: int) -> fn (acc: int list) ->
+        let n = u16 d (ft + 2) in
+        let rec go = fn (j: int) -> fn (a: int list) ->
+          if j >= n then a
+          else
+            let li = u16 d (ft + 4 + 2 * j) in
+            go (j + 1) (subs_of_lookup (llist + u16 d (llist + 2 + 2 * li)) a) in
+        go 0 acc in
+      let rec all = fn (fs: int list) -> fn (acc: int list) ->
+        match fs with
+        | Nil -> acc
+        | Cons (ft, rest) -> all rest (from_feature ft acc) in
+      all (feats 0 Nil) Nil;
+
+  let load = fn (path: str) ->
+    // `read_file_bytes` hands back a vector of ints; `bytes` is what has a slice and a length, so the
+    // conversion happens once here rather than at every read.
+    let d = bytes_of_vec (read_file_bytes path) in
+    let head = table d "head" in
+    let hhea = table d "hhea" in
+    let hmtx = table d "hmtx" in
+    let cmap = table d "cmap" in
+    let c4 = _find_cmap4 d cmap in
+    font {
+      data = d,
+      upem = if head < 0 then 1000 else u16 d (head + 18),
+      ascender = if hhea < 0 then 0 else i16 d (hhea + 4),
+      descender = if hhea < 0 then 0 else i16 d (hhea + 6),
+      line_gap = if hhea < 0 then 0 else i16 d (hhea + 8),
+      hmtx = hmtx,
+      loca = table d "loca",
+      glyf = table d "glyf",
+      loca_long = if head < 0 then false else i16 d (head + 50) == 1,
+      num_glyphs = let mx = table d "maxp" in if mx < 0 then 0 else u16 d (mx + 4),
+      // The last field of `hhea`, and the reason `hmtx` is readable at all: the advance widths run
+      // out after this many glyphs and every glyph after it repeats the last one.
+      num_h_metrics = if hhea < 0 then 0 else u16 d (hhea + 34),
+      cmap4 = c4,
+      seg_count = if c4 < 0 then 0 else u16 d (c4 + 6) / 2,
+      kern_subs = _kern_subs d (table d "GPOS")
+    };
+
+  // A code point to a glyph index, through the format 4 segment lists. Zero is the missing glyph and
+  // is a real answer — every font has one and it has a width.
+  let glyph = fn (f: font) -> fn (cp: int) ->
+    if f.cmap4 < 0 || cp > 65535 then 0
+    else
+      let d = f.data in
+      let n = f.seg_count in
+      let ends = f.cmap4 + 14 in
+      let starts = ends + 2 * n + 2 in
+      let deltas = starts + 2 * n in
+      let ranges = deltas + 2 * n in
+      // The segments are sorted, so this could be a binary search. It is linear because a font has a
+      // few hundred of them and the string being measured is short — and because the corpus will say
+      // if that stops being true.
+      let rec go = fn (i: int) ->
+        if i >= n then 0
+        else if u16 d (ends + 2 * i) < cp then go (i + 1)
+        else if u16 d (starts + 2 * i) > cp then 0
+        else
+          let ro = u16 d (ranges + 2 * i) in
+          if ro == 0 then (cp + i16 d (deltas + 2 * i) + 65536) % 65536
+          else
+            // The offset is from the position of the entry itself, not from the table — the one
+            // place in this format where an offset is relative to where it was read.
+            let gi = u16 d (ranges + 2 * i + ro + 2 * (cp - u16 d (starts + 2 * i))) in
+            if gi == 0 then 0 else (gi + i16 d (deltas + 2 * i) + 65536) % 65536 in
+      go 0;
+
+  // Where a glyph sits in a coverage table, or -1. Format 1 is a sorted glyph list, format 2 a list of
+  // ranges each carrying the index its first glyph has — so the answer is an INDEX and not a yes, and
+  // the pair sets are addressed by it.
+  let _coverage = fn (d: bytes) -> fn (cov: int) -> fn (gid: int) ->
+    let fmt = u16 d cov in
+    if fmt == 1 then
+      let n = u16 d (cov + 2) in
+      let rec go = fn (i: int) ->
+        if i >= n then 0 - 1
+        else if u16 d (cov + 4 + 2 * i) == gid then i else go (i + 1) in
+      go 0
+    else if fmt == 2 then
+      let n = u16 d (cov + 2) in
+      let rec go = fn (i: int) ->
+        if i >= n then 0 - 1
+        else
+          let r = cov + 4 + 6 * i in
+          let lo = u16 d r in
+          let hi = u16 d (r + 2) in
+          if gid >= lo && gid <= hi then u16 d (r + 4) + (gid - lo) else go (i + 1) in
+      go 0
+    else 0 - 1;
+
+  // A glyph's class, which is zero when nothing names it — class zero is a real class and every pair
+  // table has a row and a column for it.
+  let _class_of = fn (d: bytes) -> fn (cd: int) -> fn (gid: int) ->
+    let fmt = u16 d cd in
+    if fmt == 1 then
+      let start = u16 d (cd + 2) in
+      let n = u16 d (cd + 4) in
+      if gid < start || gid >= start + n then 0 else u16 d (cd + 6 + 2 * (gid - start))
+    else if fmt == 2 then
+      let n = u16 d (cd + 2) in
+      let rec go = fn (i: int) ->
+        if i >= n then 0
+        else
+          let r = cd + 4 + 6 * i in
+          if gid >= u16 d r && gid <= u16 d (r + 2) then u16 d (r + 4) else go (i + 1) in
+      go 0
+    else 0;
+
+  // How many bytes a value record takes, from the format's set bits. Only the X advance is read, but
+  // the SIZE depends on every bit, so a format with a placement in front of the advance moves it — this
+  // is the one place where ignoring a field still means counting it.
+  let _value_size = fn (vf: int) ->
+    let rec go = fn (b: int) -> fn (n: int) ->
+      if b > 128 then n else go (b * 2) (n + (if bit_and vf b != 0 then 2 else 0)) in
+    go 1 0;
+
+  // The X advance inside a value record, or zero when the format has none. It sits after the placement
+  // fields, which are bits 1 and 2.
+  let _x_advance = fn (d: bytes) -> fn (at: int) -> fn (vf: int) ->
+    if bit_and vf 4 == 0 then 0
+    else
+      let before = (if bit_and vf 1 != 0 then 2 else 0) + (if bit_and vf 2 != 0 then 2 else 0) in
+      i16 d (at + before);
+
+  // The kerning between two glyphs, in font units. Zero is both "no adjustment" and "no pair", which is
+  // the same answer to a caller and the reason this returns a number rather than an option.
+  let kern = fn (f: font) -> fn (a: int) -> fn (b: int) ->
+    let d = f.data in
+    let one = fn (st: int) ->
+      let fmt = u16 d st in
+      let cov = st + u16 d (st + 2) in
+      let vf1 = u16 d (st + 4) in
+      let vf2 = u16 d (st + 6) in
+      let ci = _coverage d cov a in
+      if ci < 0 then 0
+      else if fmt == 1 then
+        // The pair sets are in coverage order, and each is a sorted list of second glyphs.
+        let ps = st + u16 d (st + 10 + 2 * ci) in
+        let n = u16 d ps in
+        let rec_sz = 2 + _value_size vf1 + _value_size vf2 in
+        let rec go = fn (i: int) ->
+          if i >= n then 0
+          else
+            let r = ps + 2 + rec_sz * i in
+            if u16 d r == b then _x_advance d (r + 2) vf1 else go (i + 1) in
+        go 0
+      else if fmt == 2 then
+        let cd1 = st + u16 d (st + 8) in
+        let cd2 = st + u16 d (st + 10) in
+        let n1 = u16 d (st + 12) in
+        let n2 = u16 d (st + 14) in
+        let c1 = _class_of d cd1 a in
+        let c2 = _class_of d cd2 b in
+        if c1 >= n1 || c2 >= n2 then 0
+        else
+          let rec_sz = _value_size vf1 + _value_size vf2 in
+          _x_advance d (st + 16 + rec_sz * (c1 * n2 + c2)) vf1
+      else 0 in
+    let rec go = fn (sts: int list) ->
+      match sts with
+      | Nil -> 0
+      | Cons (st, rest) ->
+        // The first subtable with something to say wins, which is what a lookup list means: later
+        // subtables are alternatives, not additions.
+        let v = one st in if v != 0 then v else go rest in
+    go f.kern_subs;
+
+  // A glyph's advance in font units. Past `num_h_metrics` every glyph repeats the last width, which
+  // is how a font with ten thousand identical-width glyphs stays small.
+  let advance = fn (f: font) -> fn (gid: int) ->
+    if f.hmtx < 0 || f.num_h_metrics == 0 then 0
+    else
+      let g = if gid < f.num_h_metrics then gid else f.num_h_metrics - 1 in
+      u16 f.data (f.hmtx + 4 * g);
+
+  // The height of a line at this size, rounded to whole pixels the way the browser rounds it. The
+  // sum is ascender minus descender plus the gap, and the descender is negative — so this is a sum
+  // of three signed numbers and not a subtraction of two.
+  // The three parts are scaled and rounded SEPARATELY and then added, which is not the same number as
+  // scaling their sum. At 16px this font gives 17.104 + 4.688 and both ways answer 22; at 32px it gives
+  // 34.208 + 9.376, which is 43 rounded apart and 44 rounded together — and the browser says 43.
+  //
+  // This is "round where the answer is read" reaching the same file from the other side. The ASCENT is
+  // a number a browser reads on its own: it is where the baseline goes. So it is rounded on its own,
+  // and the line height is what the rounded parts come to. The whole layout gate turned on this being
+  // right at one size, and it was, which is why it took a document at another size to say.
+  let line_height = fn (f: font) -> fn (size: int) ->
+    if f.upem == 0 then 0
+    else
+      let part = fn (u: int) -> (u * size + f.upem / 2) / f.upem in
+      part f.ascender + part (0 - f.descender) + part f.line_gap;
+
+  // A UTF-8 character to its code point. Written here because the language hands out characters as
+  // strings of one to four bytes and `ord` answers about one byte: a multi-byte character would come
+  // back as its first byte, which is a number and is not the character.
+  let codepoint = fn (c: str) ->
+    let n = str_len c in
+    if n == 0 then 0
+    else
+      let b0 = ord (char_at c 0) in
+      if n == 1 then b0
+      else if n == 2 then (b0 - 192) * 64 + (ord (char_at c 1) - 128)
+      else if n == 3 then
+        (b0 - 224) * 4096 + (ord (char_at c 1) - 128) * 64 + (ord (char_at c 2) - 128)
+      else
+        (b0 - 240) * 262144 + (ord (char_at c 1) - 128) * 4096
+        + (ord (char_at c 2) - 128) * 64 + (ord (char_at c 3) - 128);
+
+  // The width of a string in font units. Kept in font units because a caller that measures a run and
+  // then a piece of it must not round twice — scaling each glyph would round every one and the errors
+  // would add up to something visible on a long line.
+  let text_units = fn (f: font) -> fn (s: str) ->
+    // Kerning is an adjustment BETWEEN two glyphs, so it is added while walking pairs and not while
+    // walking glyphs: a loop over characters that also asks about the previous one is the shape the
+    // feature has.
+    let rec go = fn (cs: str list) -> fn (prev: int) -> fn (acc: int) ->
+      match cs with
+      | Nil -> acc
+      | Cons (c, rest) ->
+        let g = glyph f (codepoint c) in
+        let k = if prev < 0 then 0 else kern f prev g in
+        go rest g (acc + k + advance f g) in
+    go (utf8_chars s) (0 - 1) 0;
+
+  // Pixels back to font units, for a length that arrived already in pixels — padding and borders are
+  // whole pixels and everything else on a line is in font units, and one of them has to convert.
+  let text_units_of_px = fn (f: font) -> fn (px: int) -> fn (size: int) ->
+    if size == 0 then 0 else (px * f.upem) / size;
+
+  let scale = fn (f: font) -> fn (units: int) -> fn (size: int) ->
+    if f.upem == 0 then 0 else (units * size + f.upem / 2) / f.upem;
+
+  let text_width = fn (f: font) -> fn (s: str) -> fn (size: int) ->
+    scale f (text_units f s) size;
+
+  // ---- outlines -------------------------------------------------------------------------------
+
+  // A signed byte. The x and y deltas of a short-format point are unsigned in the file and take their
+  // sign from a FLAG, which is the one place in this format where the sign of a number is not in the
+  // number.
+  let _i8 = fn (d: bytes) -> fn (i: int) ->
+    let v = u8 d i in if v > 127 then v - 256 else v;
+
+  // Where a glyph's outline starts and ends, from `loca`. A short entry holds half the offset.
+  let _glyph_span = fn (f: font) -> fn (gid: int) ->
+    if f.loca < 0 || f.glyf < 0 || gid < 0 || gid >= f.num_glyphs then (0 - 1, 0 - 1)
+    else if f.loca_long then
+      (f.glyf + u32 f.data (f.loca + gid * 4), f.glyf + u32 f.data (f.loca + gid * 4 + 4))
+    else
+      (f.glyf + u16 f.data (f.loca + gid * 2) * 2, f.glyf + u16 f.data (f.loca + gid * 2 + 2) * 2);
+
+  // The flag array, expanded. One flag byte can stand for itself and any number of repeats — a run of
+  // points that share their flags is stored once and counted — so the array is shorter in the file than
+  // the number of points, and reading it one byte per point walks straight off the end of it into the
+  // coordinates.
+  let _read_flags = fn (d: bytes) -> fn (at: int) -> fn (n: int) ->
+    let rec go = fn (i: int) -> fn (k: int) -> fn (acc: int list) ->
+      if k >= n then (list_rev acc, i)
+      else
+        let fl = u8 d i in
+        if fl / 8 - (fl / 16) * 2 == 1 then
+          // The repeat bit. The next byte says how many MORE points share this flag.
+          let rep = u8 d (i + 1) in
+          let rec dup = fn (j: int) -> fn (a: int list) ->
+            if j > rep || k + j >= n then a else dup (j + 1) (Cons (fl, a)) in
+          go (i + 2) (k + rep + 1) (dup 0 acc)
+        else go (i + 1) (k + 1) (Cons (fl, acc)) in
+    go at 0 Nil;
+
+  // The coordinates of one axis, as absolute values. They are stored as DELTAS from the point before,
+  // in one of three widths chosen by two flag bits: a short byte with its sign elsewhere, nothing at
+  // all when the value repeats, or a signed word.
+  let _read_coords = fn (d: bytes) -> fn (at: int) -> fn (flags: int list) ->
+                     fn (shortbit: int) -> fn (samebit: int) ->
+    let rec go = fn (fs: int list) -> fn (i: int) -> fn (v: int) -> fn (acc: int list) ->
+      match fs with
+      | Nil -> (list_rev acc, i)
+      | Cons (fl, rest) ->
+        let is_short = (fl / shortbit) - (fl / (shortbit * 2)) * 2 == 1 in
+        let is_same = (fl / samebit) - (fl / (samebit * 2)) * 2 == 1 in
+        if is_short then
+          let m = u8 d i in
+          let v2 = if is_same then v + m else v - m in
+          go rest (i + 1) v2 (Cons (v2, acc))
+        else if is_same then go rest i v (Cons (v, acc))
+        else let v2 = v + i16 d i in go rest (i + 2) v2 (Cons (v2, acc)) in
+    go flags at 0 Nil;
+
+  // The raw points of one glyph, as three parallel lists, with the composite already placed. This is
+  // what everything below the reader wants and the string form above is only a way to check it.
+  let rec _points = fn (f: font) -> fn (gid: int) -> fn (ox: int) -> fn (oy: int) ->
+                    fn (depth: int) ->
+    let d = f.data in
+    let (a, b) = _glyph_span f gid in
+    if a < 0 || b <= a || depth > 5 then (Nil, Nil, Nil, Nil)
+    else
+      let nc = i16 d a in
+      if nc < 0 then
+        // A composite is its components, each placed and then concatenated. The contour ends have to
+        // be shifted by however many points came before, or the second component's contours close
+        // back into the first one's.
+        let rec comps = fn (i: int) -> fn (es: int list) -> fn (xs: int list) ->
+                        fn (ys: int list) -> fn (os: int list) ->
+          let fl = u16 d i in
+          let gi = u16 d (i + 2) in
+          let words = fl - (fl / 2) * 2 == 1 in
+          let (dx, dy, after) =
+            if words then (i16 d (i + 4), i16 d (i + 6), i + 8)
+            else (_i8 d (i + 4), _i8 d (i + 5), i + 6) in
+          let skip = if (fl / 8) - (fl / 16) * 2 == 1 then 2
+                     else if (fl / 64) - (fl / 128) * 2 == 1 then 4
+                     else if (fl / 128) - (fl / 256) * 2 == 1 then 8
+                     else 0 in
+          let (ce, cx, cy, co) = _points f gi (ox + dx) (oy + dy) (depth + 1) in
+          let base = list_len xs in
+          let es2 = list_append es (list_map ce (fn (e: int) -> e + base)) in
+          let r = (es2, list_append xs cx, list_append ys cy, list_append os co) in
+          if (fl / 32) - (fl / 64) * 2 == 1 then
+            let (e3, x3, y3, o3) = r in comps (after + skip) e3 x3 y3 o3
+          else r in
+        comps (a + 10) Nil Nil Nil Nil
+      else if nc == 0 then (Nil, Nil, Nil, Nil)
+      else
+        let rec ends = fn (k: int) -> fn (acc: int list) ->
+          if k >= nc then list_rev acc else ends (k + 1) (Cons (u16 d (a + 10 + k * 2), acc)) in
+        let es = ends 0 Nil in
+        let npts = let rec last = fn (xs: int list) -> fn (v: int) ->
+                     match xs with Nil -> v | Cons (x, r) -> last r x in
+                   last es (0 - 1) + 1 in
+        let instr = u16 d (a + 10 + nc * 2) in
+        let (flags, xat) = _read_flags d (a + 12 + nc * 2 + instr) npts in
+        let (xs, yat) = _read_coords d xat flags 2 16 in
+        let (ys, _e) = _read_coords d yat flags 4 32 in
+        (es, list_map xs (fn (v: int) -> v + ox), list_map ys (fn (v: int) -> v + oy),
+         list_map flags (fn (fl: int) -> fl - (fl / 2) * 2));
+
+  // Half away from zero. A midpoint between two integers is a half exactly as often as not, so the
+  // tie is most of the cases and not a corner of them — and it is the one rounding an integer
+  // expression can state in a line. Rounding to even, which is what a float library does by default,
+  // needs to know whether the answer is even before it can produce it.
+  let _mid = fn (a: int) -> fn (b: int) ->
+    let s = a + b in if s >= 0 then (s + 1) / 2 else (s - 1) / 2;
+
+  // A glyph as SEGMENTS: the drawable form. Two rules the file does not spell out are applied here,
+  // and both of them are places to be nearly right —
+  //
+  //   two off-curve points in a row have an on-curve point BETWEEN them that is not stored: their
+  //   midpoint. Leave it out and the curve goes through the wrong place.
+  //
+  //   a contour may START on an off-curve point, and then its starting point is not written down
+  //   either: it is the last point if that one is on-curve, and otherwise the midpoint of the last
+  //   and the first.
+  let segments_str = fn (f: font) -> fn (gid: int) ->
+    let (es, xs, ys, os) = _points f gid 0 0 0 in
+    let nth = fn (l: int list) -> fn (i: int) ->
+      let rec go = fn (r: int list) -> fn (k: int) ->
+        match r with Nil -> 0 | Cons (v, rest) -> if k == 0 then v else go rest (k - 1) in
+      go l i in
+    let on = fn (i: int) -> nth os i == 1 in
+    let rec contours = fn (ends: int list) -> fn (from: int) -> fn (acc: str list) ->
+      match ends with
+      | Nil -> list_rev acc
+      | Cons (e, rest) ->
+        let n = e - from + 1 in
+        if n <= 0 then contours rest (e + 1) acc
+        else
+          // Where the contour starts, and which point the walk begins at.
+          let (sx, sy, first) =
+            if on from then (nth xs from, nth ys from, from + 1)
+            else if on e then (nth xs e, nth ys e, from)
+            else (_mid (nth xs e) (nth xs from), _mid (nth ys e) (nth ys from), from) in
+          let last = if on from then e else (if on e then e - 1 else e) in
+          let rec walk = fn (i: int) -> fn (px: int) -> fn (py: int) -> fn (have: bool) ->
+                         fn (out: str list) ->
+            if i > last then
+              // A control point still in hand closes the contour with a curve back to the start; a
+              // straight run needs nothing, because `Z` is the closing line.
+              (if have then Cons ("Q " ++ str_of_int px ++ " " ++ str_of_int py ++ " "
+                                  ++ str_of_int sx ++ " " ++ str_of_int sy, out)
+               else out)
+            else
+              let cx = nth xs i in
+              let cy = nth ys i in
+              if on i then
+                if have then
+                  walk (i + 1) 0 0 false
+                       (Cons ("Q " ++ str_of_int px ++ " " ++ str_of_int py ++ " "
+                              ++ str_of_int cx ++ " " ++ str_of_int cy, out))
+                else walk (i + 1) 0 0 false
+                          (Cons ("L " ++ str_of_int cx ++ " " ++ str_of_int cy, out))
+              else
+                if have then
+                  let mx = _mid px cx in
+                  let my = _mid py cy in
+                  walk (i + 1) cx cy true
+                       (Cons ("Q " ++ str_of_int px ++ " " ++ str_of_int py ++ " "
+                              ++ str_of_int mx ++ " " ++ str_of_int my, out))
+                else walk (i + 1) cx cy true out in
+          let body = walk first 0 0 false Nil in
+          contours rest (e + 1)
+                   (Cons (str_join " " (list_rev (Cons ("Z", body)))
+                          , Cons ("M " ++ str_of_int sx ++ " " ++ str_of_int sy, acc))) in
+    str_join " " (contours es 0 Nil);
+
+  // ---- rasterising ----------------------------------------------------------------------------
+
+  // Every segment as a QUADRATIC, straight ones included. A quadratic whose control point is the
+  // midpoint of its ends IS the straight line between them — the two `t` terms collapse — so the
+  // winding code below has one case instead of two, and the case it has is the harder one, which is
+  // the right way round for a piece of arithmetic nobody can eyeball.
+  let _quads = fn (f: font) -> fn (gid: int) ->
+    let (es, xs, ys, os) = _points f gid 0 0 0 in
+    let nth = fn (l: int list) -> fn (i: int) ->
+      let rec go = fn (r: int list) -> fn (k: int) ->
+        match r with Nil -> 0 | Cons (v, rest) -> if k == 0 then v else go rest (k - 1) in
+      go l i in
+    let fx = fn (i: int) -> float_of_int (nth xs i) in
+    let fy = fn (i: int) -> float_of_int (nth ys i) in
+    let on = fn (i: int) -> nth os i == 1 in
+    let half = fn (a: float) -> fn (b: float) -> (a + b) / 2.0 in
+    let rec contours = fn (ends: int list) -> fn (from: int) ->
+                       fn (acc: (float * float * float * float * float * float) list) ->
+      match ends with
+      | Nil -> acc
+      | Cons (e, rest) ->
+        if e < from then contours rest (e + 1) acc
+        else
+          let (sx, sy, first) =
+            if on from then (fx from, fy from, from + 1)
+            else if on e then (fx e, fy e, from)
+            else (half (fx e) (fx from), half (fy e) (fy from), from) in
+          let last = if on from then e else (if on e then e - 1 else e) in
+          let rec walk = fn (i: int) -> fn (ax: float) -> fn (ay: float) ->
+                         fn (px: float) -> fn (py: float) -> fn (have: bool) ->
+                         fn (out: (float * float * float * float * float * float) list) ->
+            if i > last then
+              if have then Cons ((ax, ay, px, py, sx, sy), out)
+              else Cons ((ax, ay, half ax sx, half ay sy, sx, sy), out)
+            else
+              let cx = fx i in
+              let cy = fy i in
+              if on i then
+                if have then walk (i + 1) cx cy 0.0 0.0 false (Cons ((ax, ay, px, py, cx, cy), out))
+                else walk (i + 1) cx cy 0.0 0.0 false
+                          (Cons ((ax, ay, half ax cx, half ay cy, cx, cy), out))
+              else
+                if have then
+                  let mx = half px cx in
+                  let my = half py cy in
+                  walk (i + 1) mx my cx cy true (Cons ((ax, ay, px, py, mx, my), out))
+                else walk (i + 1) ax ay cx cy true out in
+          contours rest (e + 1) (walk first sx sy 0.0 0.0 false acc) in
+    contours es 0 Nil;
+
+  // The winding number of the outline about a point, counted along the ray going in +x. A crossing
+  // is worth +1 or -1 by the direction the curve is travelling in y, which is what makes this the
+  // NONZERO rule and not the even-odd one — the two disagree exactly where a shape overlaps itself.
+  //
+  // `t` is taken on the half-open interval [0, 1). A point shared by two segments belongs to the one
+  // that starts there, or every join in the outline would be counted twice.
+  let _winding = fn (qs: (float * float * float * float * float * float) list) ->
+                 fn (px: float) -> fn (py: float) ->
+    let rec go = fn (r: (float * float * float * float * float * float) list) -> fn (w: int) ->
+      match r with
+      | Nil -> w
+      | Cons (q, rest) ->
+        let (x0, y0, cx, cy, x1, y1) = q in
+        let a = y0 - 2.0 * cy + y1 in
+        let b = 2.0 * (cy - y0) in
+        let c = y0 - py in
+        // One crossing's worth: does this `t` land on the segment, ahead of the point, and which way
+        // is the curve going through it.
+        let hit = fn (t: float) -> fn (acc: int) ->
+          if t < 0.0 || t >= 1.0 then acc
+          else
+            let u = 1.0 - t in
+            let x = u * u * x0 + 2.0 * t * u * cx + t * t * x1 in
+            if x <= px then acc
+            else
+              let dy = 2.0 * a * t + b in
+              if dy > 0.0 then acc + 1 else if dy < 0.0 then acc - 1 else acc in
+        let w2 =
+          if a > 0.0 - 0.000001 && a < 0.000001 then
+            // Linear in y. A segment that is exactly horizontal crosses nothing: the ray runs along
+            // it, and a ray that grazes an edge has to count zero or the two sides of a flat top
+            // disagree.
+            (if b > 0.0 - 0.000001 && b < 0.000001 then w else hit (0.0 - c / b) w)
+          else
+            let disc = b * b - 4.0 * a * c in
+            if disc < 0.0 then w
+            else
+              let sq = sqrt disc in
+              let t1 = (0.0 - b + sq) / (2.0 * a) in
+              let t2 = (0.0 - b - sq) / (2.0 * a) in
+              // Both roots, and when the discriminant is zero they are the same number — counted
+              // twice, which is right: the curve touches the ray and turns back, and the two
+              // crossings have opposite directions and cancel.
+              hit t2 (hit t1 w) in
+        go rest w2 in
+    go qs 0;
+
+  // The pixel centres inside a glyph, as one line of `#` and `.` with rows joined by `/`. The grid is
+  // fixed by the four numbers the generator uses, and the question asked of each pixel is the one
+  // question about rasterising that has a single answer: is its CENTRE inside.
+  let raster_str = fn (f: font) -> fn (gid: int) -> fn (ppem: int) -> fn (w: int) ->
+                   fn (h: int) -> fn (desc: int) ->
+    let qs = _quads f gid in
+    let scale_u = float_of_int f.upem / float_of_int ppem in
+    let rec rows = fn (r: int) -> fn (acc: str list) ->
+      if r >= h then str_join "/" (list_rev acc)
+      else
+        let y = (float_of_int (h - 1 - r - desc) + 0.5) * scale_u in
+        let rec cols = fn (cn: int) -> fn (line: str) ->
+          if cn >= w then line
+          else
+            let x = (float_of_int cn + 0.5) * scale_u in
+            cols (cn + 1) (line ++ (if _winding qs x y != 0 then "#" else ".")) in
+        rows (r + 1) (Cons (cols 0 "", acc)) in
+    rows 0 Nil;
+
+  // How much of each pixel the glyph covers, by counting subsamples — the pixel divided into `n` by
+  // `n` equal cells, each cell's CENTRE asked the inside question, and the count reported.
+  //
+  // Not "area, approximated". Area is the exact answer and no two rasterisers approximate it the same
+  // way, so a number reported as area would be an opinion. This is subsample coverage, which is a real
+  // antialiasing method with exactly one answer, and calling it by its own name is the difference
+  // between a gate that checks what was built and a gate that excuses it. Its error against true area
+  // shrinks as `n` grows and is never zero.
+  let coverage_str = fn (f: font) -> fn (gid: int) -> fn (ppem: int) -> fn (w: int) ->
+                     fn (h: int) -> fn (desc: int) -> fn (n: int) ->
+    let qs = _quads f gid in
+    let scale_u = float_of_int f.upem / float_of_int ppem in
+    let fn_ = float_of_int n in
+    let digits = "0123456789abcdefg" in
+    let rec rows = fn (r: int) -> fn (acc: str list) ->
+      if r >= h then str_join "/" (list_rev acc)
+      else
+        let rec cols = fn (cn: int) -> fn (line: str) ->
+          if cn >= w then line
+          else
+            let rec sub = fn (j: int) -> fn (hits: int) ->
+              if j >= n then hits
+              else
+                let y = (float_of_int (h - 1 - r - desc) + (float_of_int j + 0.5) / fn_) * scale_u in
+                let rec subx = fn (i: int) -> fn (k: int) ->
+                  if i >= n then k
+                  else
+                    let x = (float_of_int cn + (float_of_int i + 0.5) / fn_) * scale_u in
+                    subx (i + 1) (if _winding qs x y != 0 then k + 1 else k) in
+                sub (j + 1) (subx 0 hits) in
+            let c = sub 0 0 in
+            cols (cn + 1) (line ++ char_at digits c) in
+        rows (r + 1) (Cons (cols 0 "", acc)) in
+    rows 0 Nil;
+
+  // A whole string rastered: the first thing that uses the metrics and the outlines TOGETHER.
+  //
+  // Each has been checked alone — the advances against a browser, the outlines against fontTools —
+  // and neither check can see the join between them. A reader with the right widths and the right
+  // shapes still draws nonsense if it advances by the wrong one, or advances before drawing instead
+  // of after. This is the smallest thing that can tell.
+  //
+  // Advances only, no kerning: kerning has its own gate against a browser, and a gate asked to check
+  // two things cannot say which of them broke.
+  let text_raster = fn (f: font) -> fn (s: str) -> fn (ppem: int) -> fn (h: int) ->
+                    fn (desc: int) ->
+    let cs = utf8_chars s in
+    // Every glyph's quads, moved to where its own pen position puts it, in one list — so the winding
+    // is counted over the whole line at once and a shape that overlaps its neighbour is not two
+    // separate answers about the same pixel.
+    let rec place = fn (xs: str list) -> fn (pen: int) ->
+                    fn (acc: (float * float * float * float * float * float) list) ->
+      match xs with
+      | Nil -> (acc, pen)
+      | Cons (c, rest) ->
+        let g = glyph f (codepoint c) in
+        let dx = float_of_int pen in
+        let moved = list_map (_quads f g)
+                      (fn (q: (float * float * float * float * float * float)) ->
+                         let (x0, y0, cx, cy, x1, y1) = q in
+                         (x0 + dx, y0, cx + dx, cy, x1 + dx, y1)) in
+        place rest (pen + advance f g) (list_append acc moved) in
+    let (qs, total) = place cs 0 Nil in
+    let scale_u = float_of_int f.upem / float_of_int ppem in
+    let w = (total * ppem) / f.upem + 2 in
+    let rec rows = fn (r: int) -> fn (acc: str list) ->
+      if r >= h then str_join "/" (list_rev acc)
+      else
+        let y = (float_of_int (h - 1 - r - desc) + 0.5) * scale_u in
+        let rec cols = fn (cn: int) -> fn (line: str) ->
+          if cn >= w then line
+          else
+            let x = (float_of_int cn + 0.5) * scale_u in
+            cols (cn + 1) (line ++ (if _winding qs x y != 0 then "#" else ".")) in
+        rows (r + 1) (Cons (cols 0 "", acc)) in
+    rows 0 Nil;
+
+  // The two things a painter needs and nothing else here does: a glyph's curves, worked out once, and
+  // the inside test against them. They are the same `_quads` and `_winding` the raster gate uses —
+  // exposed rather than reimplemented, so that what is drawn on a page is checked by the gate that
+  // checks what is drawn in a box.
+  let glyph_quads = fn (f: font) -> fn (gid: int) -> _quads f gid;
+
+  let quads_cover = fn (qs: (float * float * float * float * float * float) list) ->
+                    fn (gx: float) -> fn (gy: float) -> _winding qs gx gy != 0;
+
+  // A glyph's outline in the canonical form the gate compares, which is the RAW points: the
+  // coordinates as they are stored, before any curve is flattened or any component placed. Comparing
+  // those against fontTools is exact. Comparing a flattened shape would compare two flattenings.
+  let outline_str = fn (f: font) -> fn (gid: int) ->
+    let d = f.data in
+    let (a, b) = _glyph_span f gid in
+    if a < 0 || b <= a then "E"
+    else
+      let nc = i16 d a in
+      if nc < 0 then
+        // A COMPOSITE: other glyphs placed at offsets. The arguments are one byte or two depending on
+        // a flag, and a transform may follow that must be STEPPED OVER even though nothing here reads
+        // it — a component whose size is misjudged makes every component after it garbage.
+        let rec comps = fn (i: int) -> fn (acc: str list) ->
+          let fl = u16 d i in
+          let gi = u16 d (i + 2) in
+          let words = fl - (fl / 2) * 2 == 1 in
+          let (dx, dy, after) =
+            if words then (i16 d (i + 4), i16 d (i + 6), i + 8)
+            else (_i8 d (i + 4), _i8 d (i + 5), i + 6) in
+          let skip = if (fl / 8) - (fl / 16) * 2 == 1 then 2
+                     else if (fl / 64) - (fl / 128) * 2 == 1 then 4
+                     else if (fl / 128) - (fl / 256) * 2 == 1 then 8
+                     else 0 in
+          let acc2 = Cons (str_of_int gi ++ " " ++ str_of_int dx ++ " " ++ str_of_int dy, acc) in
+          if (fl / 32) - (fl / 64) * 2 == 1 then comps (after + skip) acc2
+          else list_rev acc2 in
+        "C | " ++ str_join " " (comps (a + 10) Nil)
+      else if nc == 0 then "E"
+      else
+        let rec ends = fn (k: int) -> fn (acc: int list) ->
+          if k >= nc then list_rev acc else ends (k + 1) (Cons (u16 d (a + 10 + k * 2), acc)) in
+        let es = ends 0 Nil in
+        let npts = let rec last = fn (xs: int list) -> fn (v: int) ->
+                     match xs with Nil -> v | Cons (x, r) -> last r x in
+                   last es (0 - 1) + 1 in
+        let instr = u16 d (a + 10 + nc * 2) in
+        let (flags, xat) = _read_flags d (a + 12 + nc * 2 + instr) npts in
+        let (xs, yat) = _read_coords d xat flags 2 16 in
+        let (ys, _e) = _read_coords d yat flags 4 32 in
+        let rec pts = fn (fs: int list) -> fn (xx: int list) -> fn (yy: int list) ->
+                      fn (acc: str list) ->
+          match fs with
+          | Nil -> list_rev acc
+          | Cons (fl, fr) ->
+            match xx with
+            | Nil -> list_rev acc
+            | Cons (x, xr) ->
+              match yy with
+              | Nil -> list_rev acc
+              | Cons (y, yr) ->
+                pts fr xr yr (Cons (str_of_int x ++ " " ++ str_of_int y ++ " "
+                                    ++ str_of_int (fl - (fl / 2) * 2), acc)) in
+        "S " ++ str_of_int nc ++ " | " ++ str_join " " (list_map es str_of_int)
+        ++ " | " ++ str_join " " (pts flags xs ys Nil);
+}
