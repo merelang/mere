@@ -10,7 +10,7 @@
 # constant.
 #
 #     run "echo hi"             Wasm: 127     interp: hi
-#     env_var "HOME"            Wasm: ""      interp: Some "/Users/284km"
+#     env_var "HOME"            Wasm: ""      interp: Some "/home/you"
 #     file_exists "/etc/hosts"  Wasm: false   interp: true
 #
 # `file_exists` is the worst of them: it does not fail, it answers "no". A
