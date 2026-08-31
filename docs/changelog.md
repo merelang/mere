@@ -4,6 +4,49 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.365 — 2026-08-31
+
+_The point-in-glyph test was half-open in the wrong variable._ It counts ray
+crossings and dropped `t = 1` while keeping `t = 0`, which counts a vertex two
+segments share exactly once — right, until the shared vertex is a maximum or
+minimum in y. There the curve touches the ray and turns back and the net has to
+be zero, but the arriving segment was dropped and the departing one kept. The
+leftover crossing was never cancelled, and since the ray runs rightward it made
+every pixel to the **left** of a flat-topped stem come out inside the glyph.
+
+At 30ppem the letter `d` grew a bar across the top of its ascender, `ed` grew one
+across both letters, and `de` did not — the asymmetry is the fault, not a
+coincidence.
+
+The rule is now half-open in **y**. Each curve is cut at its own y extremum,
+which leaves pieces monotonic in y, and each piece is asked whether `py` lies in
+its half-open span. A maximum is the upper end of both its pieces and belongs to
+neither; a minimum is the lower end of both and the two directions cancel. The
+three special cases the old form needed — a horizontal segment, a negative
+discriminant, a double root — are all just spans that fail that one test, so they
+are gone.
+
+The separation matters more than the arithmetic: the **count** now comes from
+comparing endpoint heights, and a root is solved only to decide which side of
+`px` the crossing is on. Rounding can still move where a crossing is. It can no
+longer change how many there are.
+
+Every existing gate is byte-identical across the change — `glyf_check` in all
+four modes, `font_check`, and the unit checks that reach the rasteriser through
+layout and paint. That is the shape a fix should have: nothing moves except what
+was wrong.
+
+**mbrowse gains `scripts/winding_check.sh`, and it needs no oracle.** Reflecting
+a glyph in x and reflecting the query point with it turns the rightward ray into
+a leftward one over the same code, so the two answers can be compared directly —
+inside is inside whichever way the ray goes. It reports 87 disagreeing pixels
+against the old rule and none against the new one, across letters and sizes no
+case list had asked about. The browser-oracle raster comparison holds the
+renderer to real numbers, but only at the sizes it names; this one is size-blind
+by construction.
+
+---
+
 ## v0.1.364 — 2026-08-31
 
 _A file that imports nothing was reachable by exactly one program, because of
