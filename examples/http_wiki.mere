@@ -42,7 +42,7 @@ import "../contrib/html/build.mere";
 import "../contrib/kv/kv.mere";
 import "../contrib/kv/pack.mere";
 import "../contrib/log/log.mere";
-import "../contrib/markdown/to_html.mere";
+import "github.com/284km/mere-markdown/to_html.mere";
 
 let pages_db_path = "/tmp/mere_wiki_pages.db" in
 let pages = kv_load pages_db_path in

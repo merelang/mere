@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.363 — 2026-08-31
+
+_Four places in this tree decided what a heading is, and only one of them had
+heard of a fenced code block._ `contrib/markdown` answered it three ways —
+`to_html` wanted `# ` with a space and stopped at three levels, `to_text` needed
+no space and had no limit, `toc` counted hashes — and `contrib/site` answered it
+a fourth time in `build_toc_html`, then a fifth in `inject_heading_ids`. Only
+`to_html` tracked fences, so `## x` inside an example was a `<pre>` in the body
+and a section in the table of contents at the same time.
+
+The cause was that there was no parse. Three outputs cannot be three views of a
+document that does not exist, so each one re-read the lines. `contrib/markdown`
+is now the [mere-markdown](https://github.com/284km/mere-markdown) package: one
+`Md.parse`, and HTML, plain text and the table of contents as views of it. Its
+own gate runs the frozen pre-split implementation as the oracle and compares 72
+outputs byte for byte, which is 72 more comparisons than the three
+compile-and-size checks this suite had.
+
+**This is the first external dependency in this repository.** `mere.toml` names
+it, `mere.lock` pins the revision and hash, `.mere_modules/` is ignored, and
+`mere install` reproduces it — the same shape mere-blog and mpng already use, so
+the package manager now has a consumer that is not a demo of itself.
+
+`contrib/site` parses once and both the body and the table of contents are views
+of that. The generated documentation changes on 16 of 19 pages, and all of it is
+escaping: text and attributes were escaped inside code blocks and nowhere else,
+so `--ram <MB>` in `bare-metal.md` has been reaching every reader's browser as a
+tag and being swallowed. One page also gains an `<h4>`, which had rendered as a
+paragraph while appearing in the contents as a depth-4 heading.
+
+The fence defect turned out not to reach this site: `docs/` contains no `## ` or
+`### ` inside a fence, and the table of contents only shows those two levels. It
+was real in the other two outputs: the table of contents for `http-demos.md`
+listed `open http://localhost:8080/ in a browser` as a section, `tutorial.md`
+listed `→ 252`, and `tutorial-rest-api.md` listed `→ {"deleted":true}` — all of
+them `#` comments and output lines from inside shell examples.
+
+Connecting the first real consumer found what using it alone could not: the
+package's `Text` constructor collided with `contrib/html`'s, and the type error
+pointed at the consumer's file rather than the package's. Type declarations are
+top level, so a module does not keep its constructors. Renamed to `Run` /
+`Strong` / `Emph` / `Strike` / `Mono` / `Href` / `Pic`.
+
+---
+
 ## v0.1.362 — 2026-08-31
 
 _`host_matrix` asks which backend has each builtin; nothing asked whether the

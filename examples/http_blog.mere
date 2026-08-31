@@ -8,7 +8,7 @@
 //   contrib/http/json_body       → form_field for POST form-encoded data
 //   contrib/http/static          → CSS from examples/blog/
 //   contrib/db/pg_pool           → persistent post + user storage
-//   contrib/markdown/to_html     → post body → HTML render
+//   mere-markdown/to_html        → post body → HTML render
 //
 // Features:
 //   Public
@@ -58,7 +58,7 @@ import "../contrib/http/cookie.mere";
 import "../contrib/http/session.mere";
 import "../contrib/http/escape.mere";
 import "../contrib/http/static.mere";
-import "../contrib/markdown/to_html.mere";
+import "github.com/284km/mere-markdown/to_html.mere";
 import "../contrib/db/pg_pool.mere";
 
 // ---- config -----------------------------------------------------------
