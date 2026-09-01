@@ -210,6 +210,20 @@ classify() {  # classify <flag> <file> <subject>
     if [ "$1" = "-c" ] && [ "$have_cc" = 1 ] \
        && ! "$CC" -fsyntax-only -w -x c "$TMP/emitted" 2>/dev/null; then
       echo nocompile
+    elif [ "$1" = "-rv" ] && grep -a -q 'is not lowered yet' "$TMP/emitted"; then
+      # Neither `yes` nor `refused`. The -rv prelude defines the float builtins as
+      # shims that ABORT AT RUNTIME naming contrib/softfloat, so a probe for one
+      # compiles and the cell would have said `yes` -- the matrix lying in the
+      # flattering direction about a backend that cannot do the arithmetic.
+      # Refusing at compile time was the other option and is worse for the program
+      # this backend exists to carry, so the honest cell is a third value. The
+      # binary carries the message, which is what this looks for -- so this cell
+      # depends on that wording. The dependency is not silent: the same phrase is
+      # asserted by scripts/rv_prelude_check.sh. That was not true when this
+      # comment was first written -- that script only checked for the word
+      # `softfloat`, so a poison run that reworded the rest flipped 27 cells here
+      # and nothing else noticed. It checks the phrase now.
+      echo stub
     else
       echo yes
     fi
@@ -244,7 +258,10 @@ classify() {  # classify <flag> <file> <subject>
   echo "which is the correct way to lack something; \`MISSING\` means a program using it"
   echo "fails with \`unbound variable\`, blaming the user for a backend hole;"
   echo "\`bare\` means the backend has it on \`-rv --bare\` only, where the program is"
-  echo "handed the machine instead of a host; \`unattributed\` means the backend refused"
+  echo "handed the machine instead of a host; \`stub\` means it compiles there and then"
+  echo "ABORTS AT RUNTIME, which is what the -rv prelude's float shims do while"
+  echo "contrib/softfloat is not wired in -- \`yes\` would be the flattering lie and"
+  echo "\`refused\` the other one; \`unattributed\` means the backend refused"
   echo "but named a different builtin, so the probe never reached its subject and the"
   echo "cell is evidence about that other name."
   echo
@@ -299,7 +316,10 @@ if diff -u "$OUT" "$TMP/matrix.md" > "$TMP/diff"; then
   nocompile=$(grep -c '^| `.*nocompile' "$OUT" || true)
   bare=$(grep -c '^| `.*| bare' "$OUT" || true)
   unatt=$(grep -c '^| `.*unattributed' "$OUT" || true)
-  echo "host_matrix: ok  ($(grep -c '^| `' "$OUT") builtins, $missing MISSING, $nocompile nocompile, $bare bare-only, $unatt unattributed, $errors error)"
+  # `stub` is counted for the same reason the others are: a number nobody prints
+  # is a number nobody notices growing.
+  stub=$(grep -c '^| `.*| stub' "$OUT" || true)
+  echo "host_matrix: ok  ($(grep -c '^| `' "$OUT") builtins, $missing MISSING, $nocompile nocompile, $bare bare-only, $stub stub, $unatt unattributed, $errors error)"
   echo "             $gen_summary"
   [ "$dropped" != 0 ] && echo "             $dropped synthesized probe(s) did not type-check, dropped"
   true

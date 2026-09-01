@@ -7,7 +7,10 @@ compiler rather than remembered. `refused` means the backend says so itself,
 which is the correct way to lack something; `MISSING` means a program using it
 fails with `unbound variable`, blaming the user for a backend hole;
 `bare` means the backend has it on `-rv --bare` only, where the program is
-handed the machine instead of a host; `unattributed` means the backend refused
+handed the machine instead of a host; `stub` means it compiles there and then
+ABORTS AT RUNTIME, which is what the -rv prelude's float shims do while
+contrib/softfloat is not wired in -- `yes` would be the flattering lie and
+`refused` the other one; `unattributed` means the backend refused
 but named a different builtin, so the probe never reached its subject and the
 cell is evidence about that other name.
 
@@ -21,10 +24,10 @@ machine rather than a host.
 
 | builtin | C | LLVM | Wasm | RV32I |
 |---|:--:|:--:|:--:|:--:|
-| `abs` | yes | yes | yes | refused |
+| `abs` | yes | yes | yes | yes |
 | `args` | yes | yes | yes | refused |
 | `assert` | yes | yes | yes | yes |
-| `atan2` | yes | yes | yes | refused |
+| `atan2` | yes | yes | yes | stub |
 | `bit_and` | yes | yes | yes | yes |
 | `bit_not` | yes | yes | yes | yes |
 | `bit_or` | yes | yes | yes | yes |
@@ -35,7 +38,7 @@ machine rather than a host.
 | `bytebuf_new` | yes | unattributed | refused | refused |
 | `bytes_of_hex` | yes | yes | yes | refused |
 | `bytes_of_str` | yes | yes | yes | refused |
-| `ceil` | yes | yes | refused | refused |
+| `ceil` | yes | yes | refused | stub |
 | `channel_close` | yes | refused | refused | unattributed |
 | `channel_new` | yes | yes | yes | refused |
 | `channel_recv` | yes | yes | yes | unattributed |
@@ -44,8 +47,8 @@ machine rather than a host.
 | `channel_send` | yes | yes | yes | unattributed |
 | `char_at` | yes | yes | yes | yes |
 | `chr` | yes | yes | yes | yes |
-| `clamp` | yes | yes | yes | refused |
-| `cos` | yes | yes | yes | refused |
+| `clamp` | yes | yes | yes | yes |
+| `cos` | yes | yes | yes | stub |
 | `csr_read` | bare | refused | refused | bare |
 | `csr_write` | bare | refused | refused | bare |
 | `cube` | yes | yes | yes | yes |
@@ -54,23 +57,23 @@ machine rather than a host.
 | `divmod` | yes | yes | yes | yes |
 | `e` | yes | yes | yes | refused |
 | `env_var` | yes | yes | yes | refused |
-| `even` | yes | yes | yes | refused |
+| `even` | yes | yes | yes | yes |
 | `exit` | yes | unattributed | yes | yes |
-| `exp` | yes | yes | yes | refused |
+| `exp` | yes | yes | yes | stub |
 | `f32_bits` | yes | yes | yes | refused |
-| `f_abs` | yes | yes | yes | refused |
-| `f_add` | yes | yes | yes | refused |
-| `f_div` | yes | yes | yes | refused |
-| `f_ge` | yes | yes | yes | refused |
-| `f_gt` | yes | yes | yes | refused |
-| `f_le` | yes | yes | yes | refused |
-| `f_lt` | yes | yes | yes | refused |
-| `f_max` | yes | yes | yes | refused |
-| `f_min` | yes | yes | yes | refused |
-| `f_mul` | yes | yes | yes | refused |
-| `f_neg` | yes | yes | yes | refused |
-| `f_pow` | yes | yes | yes | refused |
-| `f_sub` | yes | yes | yes | refused |
+| `f_abs` | yes | yes | yes | stub |
+| `f_add` | yes | yes | yes | stub |
+| `f_div` | yes | yes | yes | stub |
+| `f_ge` | yes | yes | yes | stub |
+| `f_gt` | yes | yes | yes | stub |
+| `f_le` | yes | yes | yes | stub |
+| `f_lt` | yes | yes | yes | stub |
+| `f_max` | yes | yes | yes | stub |
+| `f_min` | yes | yes | yes | stub |
+| `f_mul` | yes | yes | yes | stub |
+| `f_neg` | yes | yes | yes | stub |
+| `f_pow` | yes | yes | yes | stub |
+| `f_sub` | yes | yes | yes | stub |
 | `fail` | yes | yes | yes | yes |
 | `file_exists` | yes | refused | yes | refused |
 | `file_mtime` | yes | refused | refused | refused |
@@ -81,18 +84,18 @@ machine rather than a host.
 | `file_pwrite_bytes` | yes | yes | yes | unattributed |
 | `file_read_line` | yes | refused | refused | unattributed |
 | `file_size` | yes | yes | yes | refused |
-| `float_bits_hi` | yes | yes | yes | refused |
-| `float_bits_lo` | yes | yes | yes | refused |
-| `float_of_bits` | yes | yes | yes | refused |
+| `float_bits_hi` | yes | yes | yes | yes |
+| `float_bits_lo` | yes | yes | yes | yes |
+| `float_of_bits` | yes | yes | yes | yes |
 | `float_of_f32_bits` | yes | yes | yes | refused |
-| `float_of_int` | yes | yes | yes | refused |
-| `float_of_str` | yes | yes | yes | refused |
-| `floor` | yes | yes | refused | refused |
-| `gcd` | yes | yes | yes | refused |
+| `float_of_int` | yes | yes | yes | stub |
+| `float_of_str` | yes | yes | yes | stub |
+| `floor` | yes | yes | refused | stub |
+| `gcd` | yes | yes | yes | yes |
 | `incr` | yes | yes | yes | yes |
 | `int_max` | refused | refused | refused | refused |
 | `int_min` | refused | refused | refused | refused |
-| `int_of_float` | yes | yes | yes | refused |
+| `int_of_float` | yes | yes | yes | stub |
 | `int_of_str` | yes | yes | yes | yes |
 | `is_alpha` | yes | yes | yes | yes |
 | `is_digit` | yes | yes | yes | yes |
@@ -100,15 +103,15 @@ machine rather than a host.
 | `join` | yes | yes | yes | unattributed |
 | `lcm` | yes | yes | yes | unattributed |
 | `list_dir` | yes | refused | refused | refused |
-| `log` | yes | yes | yes | refused |
+| `log` | yes | yes | yes | stub |
 | `map_new` | yes | yes | yes | yes |
-| `max` | yes | yes | yes | refused |
-| `min` | yes | yes | yes | refused |
+| `max` | yes | yes | yes | yes |
+| `min` | yes | yes | yes | yes |
 | `mk_logger` | yes | yes | yes | refused |
 | `mk_metrics` | yes | yes | yes | refused |
 | `mkdir_p` | yes | refused | refused | refused |
 | `not` | yes | yes | yes | yes |
-| `odd` | yes | yes | yes | refused |
+| `odd` | yes | yes | yes | yes |
 | `of_json` | refused | unattributed | unattributed | refused |
 | `of_json_opt` | refused | unattributed | unattributed | refused |
 | `ord` | yes | yes | yes | yes |
@@ -130,13 +133,13 @@ machine rather than a host.
 | `read_line` | yes | refused | yes | refused |
 | `read_lines` | yes | refused | refused | refused |
 | `read_stdin` | yes | refused | yes | refused |
-| `round` | yes | yes | refused | refused |
+| `round` | yes | yes | refused | stub |
 | `run` | yes | refused | yes | refused |
 | `sign` | yes | yes | yes | yes |
-| `sin` | yes | yes | yes | refused |
+| `sin` | yes | yes | yes | stub |
 | `sleep_ms` | yes | refused | refused | refused |
 | `spawn` | yes | yes | yes | refused |
-| `sqrt` | yes | yes | yes | refused |
+| `sqrt` | yes | yes | yes | stub |
 | `square` | yes | yes | yes | yes |
 | `stdin_byte` | yes | refused | refused | refused |
 | `str_compare` | yes | yes | yes | yes |
@@ -147,7 +150,7 @@ machine rather than a host.
 | `str_index_of` | yes | yes | yes | yes |
 | `str_last_index_of` | yes | yes | yes | refused |
 | `str_len` | yes | yes | yes | yes |
-| `str_of_float` | yes | yes | yes | refused |
+| `str_of_float` | yes | yes | yes | stub |
 | `str_of_int` | yes | yes | yes | yes |
 | `str_repeat` | yes | yes | yes | yes |
 | `str_replace` | yes | yes | yes | yes |
@@ -159,7 +162,7 @@ machine rather than a host.
 | `strbuf_new` | yes | yes | yes | yes |
 | `substring` | yes | yes | yes | yes |
 | `sum_range` | yes | yes | yes | yes |
-| `tan` | yes | yes | yes | refused |
+| `tan` | yes | yes | yes | stub |
 | `time` | yes | yes | yes | refused |
 | `to_lower` | yes | yes | yes | yes |
 | `to_upper` | yes | yes | yes | yes |
