@@ -92,6 +92,17 @@ let items : item list ref = ref []
 let emit x = items := x :: !items
 let emit_word w = emit (Word w)
 
+(* A literal that does not fit this backend's 32-bit int is a compile error,
+   not a silent reinterpretation. Without this `li` truncated: 4294967295
+   printed as -1 here while the interpreter printed 4294967295, and
+   3220176896 -- the high half of -1.0's bit pattern -- came back as
+   -1074790400. *)
+let check_int_lit loc n =
+  if n > 2147483647 || n < (-2147483648) then
+    err loc (Printf.sprintf
+      "RV32I: the literal %d does not fit this backend's 32-bit int \
+       (-2147483648..2147483647)" n)
+
 let lbl_counter = ref 0
 let fresh_label prefix = incr lbl_counter; prefix ^ string_of_int !lbl_counter
 
@@ -620,7 +631,21 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
   tail_pos := false;
   dbg_mark e.Ast.loc;
   match e.node with
-  | Ast.Int_lit n -> li a0 n
+  | Ast.Neg ({ Ast.node = Ast.Int_lit n; _ }) ->
+    (* The parser hands -2147483648 over as a negation of 2147483648, whose
+       positive half is out of range while the pair is not. Fold first, so the
+       boundary value is accepted and -2147483649 is still refused. *)
+    check_int_lit e.loc (- n); li a0 (- n)
+  | Ast.Int_lit n ->
+    (* v0.1.41 rejected literals outside the target's int on LLVM and Wasm.
+       Both later widened to 64 bits and the check went with them (v0.1.96,
+       v0.1.127) -- and this backend, which is 32-bit, arrived after the
+       deletion, so it never had one. `li` truncated instead: 4294967295
+       printed as -1 here while the interpreter printed 4294967295, and
+       3220176896 (the bit pattern of -1.0's high half) came back as
+       -1074790400. A literal that does not fit is a compile error, not a
+       silent reinterpretation. *)
+    check_int_lit e.loc n; li a0 n
   | Ast.Bool_lit b -> li a0 (if b then 1 else 0)
   | Ast.Unit_lit -> li a0 0
   | Ast.Var v ->

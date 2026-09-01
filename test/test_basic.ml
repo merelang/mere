@@ -13763,6 +13763,21 @@ let () =
      checks the shape the user's own function does produce. *)
   rv_contains "rv32i: a user-defined exit is called, not the builtin"
     "let exit = fn (c: int) -> print_int c;\nlet _ = exit 7;" "jal ra, u_exit";
+  (* v0.1.41 refused literals outside the target's int on LLVM and Wasm; both
+     widened to 64 bits later and the check went with them, and this backend --
+     32-bit, and added after the deletion -- never had one. `li` truncated:
+     4294967295 printed as -1 here while the interpreter printed 4294967295.
+     The pair of boundary cases is the point: 2147483648 is refused, and
+     -2147483648 is not, even though the parser hands the second one over as a
+     negation of the first. *)
+  rv_err_contains "rv32i: a literal wider than 32 bits is refused, not truncated"
+    "let _ = print_int 4294967295;" "does not fit this backend's 32-bit int";
+  rv_err_contains "rv32i: 2147483648 is one past the top"
+    "let _ = print_int 2147483648;" "does not fit this backend's 32-bit int";
+  rv_err_contains "rv32i: -2147483649 is one past the bottom"
+    "let _ = print_int (-2147483649);" "does not fit this backend's 32-bit int";
+  rv_contains "rv32i: -2147483648 is in range, though its positive half is not"
+    "let _ = print_int (-2147483648);" "lui a0, 0x80000";
   Codegen_riscv.bare := true;
   (* reachable through --bare's entry, so the access is actually emitted *)
   rv_contains "rv32i: a raw access bounds-checks its offset"
