@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.373 — 2026-09-01
+
+_The magnitude of a negative integer is not `0 - n`._ `contrib/softfloat/conv`
+converts between a double and the backend's own int. Both directions have a rule
+that was measured and not assumed: int to double **rounds** to nearest with ties
+to even (2^53+1 becomes 2^53, 2^53+3 becomes 2^53+4), and double to int
+**truncates** toward zero (-1.9 becomes -1).
+
+The most negative integer has no positive counterpart, and negating it wraps
+back to itself. The gate caught `-4611686018427387904` — a value that cannot be
+written as a literal, since the lexer caps at 2^62-1, and had to be reached by
+arithmetic to be tested at all. `n / 2` always has a counterpart, so the
+magnitude is built from half of it, doubled in the limbs, with the odd bit put
+back. Poisoning that back to `0 - n` fails exactly one check, which is the
+right number: there is exactly one such value.
+
+`str_of_float` is not here. Mere's prints shortest-round-trip decimal (0.1 is
+`0.1`, not `0.1000000000000000055511151231257827`), which is a different piece of
+work from arithmetic — Ryu's, not IEEE's — and it gets its own slice rather than
+an approximation hidden inside this one.
+
+Also: `l6_of_int` / `l6_to_int` in `contrib/softfloat/limbs`, five limbs wide,
+which is more than any backend's int.
+
+---
+
 ## v0.1.372 — 2026-09-01
 
 _Division, and an invariant that only holds if the loop is entered correctly._
