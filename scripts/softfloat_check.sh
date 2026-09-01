@@ -112,13 +112,28 @@ fi
 #     had a float-using function in it: nothing had made it reachable, so
 #     codegen never saw it. A probe that exercises a subset reports on the
 #     subset, whatever the message says.
-if grep -n '\bfloat\b' "$ROOT/contrib/softfloat/softfloat.mere" \
-       "$ROOT/contrib/softfloat/limbs.mere" \
-       "$ROOT/contrib/softfloat/add.mere" "$ROOT/contrib/softfloat/mul.mere" \
-       "$ROOT/contrib/softfloat/div.mere" "$ROOT/contrib/softfloat/conv.mere" \
-       | grep -v ':[0-9]*: *//' > "$TMP/floats"; then
+#     bits.mere is the one exemption, by name: it is the bridge between hardware
+#     doubles and the limbs, so mentioning float is its whole job. The list of
+#     files to check is a glob minus that one name rather than six paths spelled
+#     out -- a seventh file added to the library is checked the day it appears,
+#     which a hand-kept list would not do.
+for f in "$ROOT"/contrib/softfloat/*.mere; do
+  case "$(basename "$f")" in bits.mere) continue ;; esac
+  # -H keeps the filename prefix that the comment filter below matches against,
+  # and that a failure message needs in order to say which file. grep drops it
+  # when handed a single path, which the six-path version never hit.
+  grep -Hn '\bfloat\b' "$f" | grep -v ':[0-9]*: *//' >> "$TMP/floats" || true
+done
+if [ -s "$TMP/floats" ]; then
   echo "FAIL softfloat: the library names \`float\`, which RV32I does not have"
   cat "$TMP/floats"
+  rc=1
+fi
+# ...and the exemption has to still be earning it. A bits.mere that stopped
+# mentioning float would mean the bridge had moved or gone, and the exemption
+# above would be quietly excusing a file that no longer needs it.
+if ! grep -q '\bfloat\b' "$ROOT/contrib/softfloat/bits.mere"; then
+  echo "FAIL softfloat: bits.mere is exempt from the no-float rule but does not use float"
   rc=1
 fi
 
@@ -128,22 +143,28 @@ fi
 # run failed on the probe's own type error rather than on the poison). So the
 # probe is written by hand and its COVERAGE is what gets checked.
 N="$ROOT/test/float/softfloat_narrow.mere"
+# The bridge gets its own probe: softfloat_narrow.mere's claim is a program with
+# NO float in it, and bits.mere cannot be called without one.
+NB="$ROOT/test/float/softfloat_narrow_bits.mere"
+# Globbed and deduped rather than spelled out. The list this replaces named six
+# paths and named div.mere and conv.mere TWICE, so the count it reported -- the
+# number this gate prints as its headline -- was inflated by the repeats while
+# the coverage loop simply checked those names a second time. A derived list
+# cannot say a number the library does not have.
 NAMES=$(sed -n 's/^let \(rec \)\{0,1\}\([a-z_][a-z_0-9]*\) *=.*/\2/p' \
-        "$ROOT/contrib/softfloat/softfloat.mere" "$ROOT/contrib/softfloat/limbs.mere" \
-        "$ROOT/contrib/softfloat/add.mere" "$ROOT/contrib/softfloat/mul.mere" \
-       "$ROOT/contrib/softfloat/div.mere" "$ROOT/contrib/softfloat/conv.mere" \
-        "$ROOT/contrib/softfloat/div.mere" "$ROOT/contrib/softfloat/conv.mere")
+        "$ROOT"/contrib/softfloat/*.mere | sort -u)
 MISSING=""
 for n in $NAMES; do
-  grep -q "\\b$n\\b" "$N" || MISSING="$MISSING $n"
+  grep -q "\\b$n\\b" "$N" || grep -q "\\b$n\\b" "$NB" || MISSING="$MISSING $n"
 done
 if [ -n "$MISSING" ]; then
   echo "FAIL softfloat: the narrow probe does not mention:$MISSING"
-  echo "  (add them to $N — an unreferenced function is never lowered, so the"
+  echo "  (add them to $N or $NB — an unreferenced function is never lowered, so the"
   echo "   RV32I arm would pass without having compiled it)"
   rc=1
 fi
-if "$MERE" -rv "$N" > "$TMP/narrow.bin" 2>"$TMP/rverr"; then
+if "$MERE" -rv "$N" > "$TMP/narrow.bin" 2>"$TMP/rverr" \
+   && "$MERE" -rv "$NB" > "$TMP/narrow_bits.bin" 2>>"$TMP/rverr"; then
   :
 else
   echo "FAIL softfloat: the library does not compile for RV32I — the target it exists for"

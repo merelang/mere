@@ -4,6 +4,115 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.387 — 2026-09-02
+
+_Float arithmetic on a backend with no float: 2,880 results, bit-identical to the
+machine's own doubles._
+
+`contrib/softfloat` has held an IEEE 754 double in 15-bit limbs for a while, and
+the RV32I backend has refused `+` on two floats for just as long, with a message
+saying the library "is not yet injected into the -rv prelude". It is now.
+
+**The prelude carries the library.** It cannot `import` it -- an installed
+compiler has no `contrib/` on disk, and the -rv path has no file system to
+resolve a path against -- so `scripts/gen_rv_softfloat.py` bakes the source into
+`lib/rv_softfloat.ml`, renamed into a private namespace: `__sf_` on the lowercase
+names, `__rv` after the type names. The library keeps its plain names for anyone
+who imports it directly. One source, two namespaces, and
+`sh scripts/gen_rv_softfloat.sh --check` diffs the result on every run.
+
+The rename is not paranoia. The prelude is PREPENDED to the user's program, so a
+top-level `add` in the program shadows the prelude's -- and would become what
+float `+` calls. mere-ruby has 806 top-level names and collides with none of
+these 76, which is luck, not a design.
+
+**The operators are calls, not lowerings.** `Bin` and `Cmp` on floats rewrite to
+`App (App (Var "__fadd", l), r)` and go through the ordinary application path,
+the way `print_bool` already did: arity, argument order and tail position are
+handled once. A float operator is also the one case where the callee's name
+appears nowhere in the source, so `vars_in` had to learn to mark it -- without
+that, codegen emits a call to a function it never laid down, which is exactly
+what a poison run reported (`undefined label u___feq`).
+
+**`-x` on a float was computing a wrong number, quietly.** Unary minus had one
+arm, and it negated the word -- which for a float is the pointer to its two
+halves. It is a sign-bit flip, defined on NaN too, so it goes through the library
+like everything else.
+
+### The gate: our arithmetic against the machine's
+
+`scripts/rv_float_check.sh` runs `test/float/rv_float_ops.mere` twice -- once
+where a float is a C double, once on RV32I -- and requires identical output.
+Every one of 17 values against every other, four operators and six comparisons
+plus unary minus: **2,880 lines, and they match**. There is no table of
+expectations anywhere in it; the reference is whatever the hardware does.
+
+The values are bit patterns, not decimals: the largest subnormal, the smallest
+normal, a tie that round-to-nearest-even has to decide, the largest finite
+double, a signalling NaN, a negative NaN. The output is bits too, printed as four
+16-bit chunks -- `float_bits_hi` cannot be printed directly, because it is
+unsigned 32-bit and the same bits come out negative on a signed 32-bit int.
+
+It found two real bugs in the library:
+
+* **`a - NaN` came out negated.** `sub` was `add a (neg b)`, and negating a NaN
+  flips its sign bit; every machine with a float unit returns the NaN it was
+  given. The add/mul/div gates had never subtracted a NaN.
+* **`add` quieted one operand and not the other.** Only a signalling NaN can see
+  that, and the test had only a quiet one until this found the first bug and the
+  fix went looking for company.
+
+What it deliberately does not compare: with BOTH operands NaN, which payload
+propagates is unspecified, and this machine does not agree with itself -- its
+`add` returns the first operand's and its `sub` returns the second's. Those nine
+pairs print a skip line naming the reason, so the exclusion is in the output
+rather than in somebody's memory. The comparisons still run on them; NaN
+comparisons *are* specified.
+
+The RV32I half needs a 32-bit machine, which is the hole
+`scripts/softfloat_check.sh` names in its own header. `MEMU=<checkout>` supplies
+one; without it the gate runs the hardware half and says the other did not run,
+rather than printing ok.
+
+### Also
+
+* `f_add` … `f_ge`, `f_abs`, `f_neg`, `float_of_int`, `int_of_float`: twelve
+  matrix cells from `stub` to `yes`, sharing the operators' implementation rather
+  than getting a second one that could disagree with `+`. `f_min`/`f_max` stay
+  stubs on purpose: `if a < b then a else b` is *a* definition, but the host's is
+  fmin/fmax with their own NaN rules, and guessing puts a wrong answer where an
+  honest refusal is.
+* The shim message no longer says softfloat "is not yet injected into the -rv
+  prelude". It was true when written and stopped being true the day it was, and
+  would have gone on telling users to do something already done.
+* `%` and `++` on floats: the typer rejects those before codegen sees them, so
+  the float abort had become a branch no input can reach. Deleted rather than
+  left next to a comment claiming it handles a case.
+* `contrib/softfloat/bits.mere` -- the hardware bridge, moved in from `test/`,
+  because the prelude needs it and the compiler cannot depend on a test file. It
+  is the one file in the library allowed to mention `float`, and the gate now
+  checks the rule against a GLOB minus that one name: a seventh file added to the
+  library is checked the day it appears, which the six hand-listed paths would
+  not have done. The exemption is checked too -- a `bits.mere` that stopped using
+  float would mean the bridge had moved.
+* That gate's headline count was inflated: its path list named `div.mere` and
+  `conv.mere` twice, so "75 exported names" counted repeats. Derived and deduped,
+  it is 76.
+* `test/test_basic.ml` asserted the OPPOSITE of the new behaviour -- that a float
+  operator reached the abort -- and checked it by looking for `li a7, 93`, the
+  exit syscall that `_start`, `__oom` and `__pat_fail` all end with. It held for
+  every program this backend ever compiled. The needles moved to
+  `scripts/rv_prelude_check.sh`, which drives the real compiler: the unit
+  harness types with `Typer.initial_env` and never prepends the prelude, so the
+  callee is not a known binding there and no direct call is emitted at all.
+
+With this, `mere -rv --ram 64` on that interpreter and
+`rvrun 64 -- -e 'puts 1 + 1'` gets past float arithmetic and stops at
+`random_int`. Which call site reaches it during a `puts 1 + 1` is not yet known --
+every one of them is inside a function, and none is a global initializer.
+
+---
+
 ## v0.1.386 — 2026-09-01
 
 _`args` on a target with no host: the loader leaves the command line in RAM._

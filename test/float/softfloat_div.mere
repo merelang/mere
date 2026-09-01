@@ -8,7 +8,7 @@
 //
 // x/0 is also only here: it is an infinity with a sign, and 0/0 is a NaN.
 import "../../contrib/softfloat/div.mere";
-import "./sf_bridge.mere";
+import "../../contrib/softfloat/bits.mere";
 
 let fails = vec_new ();
 let _ = vec_push fails 0;
