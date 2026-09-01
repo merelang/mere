@@ -198,6 +198,15 @@ let run_action ?(rv = false) ?base_dir action label source =
   | Mere.Codegen_llvm.Codegen_error (loc, msg) -> report loc "codegen error" msg
   | Mere.Codegen_wasm.Codegen_error (loc, msg) -> report loc "codegen error" msg
   | Mere.Codegen_riscv.Codegen_error (loc, msg) -> report loc "codegen error" msg
+  | Failure msg ->
+    (* An assembler-level failure -- an undefined label, or a jump past the reach
+       of the instruction that has to carry it. OCaml's default for this is
+       "Fatal error: exception Failure(...)" and exit 2, which reads as a crash
+       when the honest answer is that this backend cannot assemble that program.
+       Caught for the reason Out_of_memory and Stack_overflow are, just below:
+       the host runtime's words are not the language's. *)
+    prerr_endline msg;
+    exit 1
   | Out_of_memory ->
     (* v0.1.274: OCaml's default is "Fatal error: exception Out of memory" and
        exit 2 -- the host runtime's words again, and a different exit code than
