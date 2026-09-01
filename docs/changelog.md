@@ -4,6 +4,38 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.384 — 2026-09-01
+
+_Wide jumps, for the programs that need them._ `auipc` + `jalr` reaches ±2GB, and
+costs four bytes per jump — so only the programs bigger than J-type's ±1MB pay.
+The pass that measures the code decides, which is the two-pass layout from
+v0.1.382 earning its keep a second time.
+
+`t6` carries the address. Nothing else in this backend uses x31, and the trap
+entry saves x1..x31, so a trap landing between the `auipc` and the `jalr` cannot
+lose it.
+
+Two knobs feed each other — wide jumps grow the code, and a bigger code region
+moves the globals — so the layout is a bounded fixed-point loop that says so if
+it does not settle. It settles in one extra round either way.
+
+**Four places answered "how many bytes is this item".** The assembler's address
+pass, the encoder, the listing and the debug map, and three of them still said a
+`Jal` was four bytes after the wide form arrived — which would have put every
+address in a listing and every line in a debug map off by however many jumps
+preceded it. There is one `item_size` now, and the other three call it.
+
+A 3.97 MB interpreter assembles to 4,536,425 bytes and **runs**: it executed for
+ten minutes of wall clock without halting, where before the change it took a trap
+at pc=4195244 in 0.13 seconds. Whether it is making progress is a different
+question, and the emulator cannot answer it yet: it buffers the guest's output
+until the guest halts, so a run that is killed shows nothing at all. That is the
+same shape as the silent halt fixed in memu earlier today, and it is next.
+
+Small programs are byte-identical, checked by stashing the change and comparing.
+
+---
+
 ## v0.1.383 — 2026-09-01
 
 _The comment said a bare B-type "silently truncates", and used J-type to avoid
