@@ -1026,6 +1026,21 @@ and compile_app env e =
     emit_word (enc_i 93 zero 0 a7 0x13);                 (* li a7, 93 *)
     emit_word (enc_i 1 zero 0 a0 0x13);                  (* li a0, 1 *)
     emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall (exit) *)
+  (* exit code : terminate with the status the program chose. Never returns.
+     The same ecall `fail` ends with, with a0 taken from the argument instead
+     of the literal 1. Refused on --bare for the reason `print` is: the exit
+     syscall is a courtesy of the host, and a machine handed to the program
+     does not answer it. A user process under a kernel is not --bare, so this
+     is the lowering it gets. *)
+  | Ast.Var "exit" when !bare && List.length args = 1 ->
+    err e.loc
+      "RV32I --bare: there is no host to exit to — halt through the machine \
+       capability instead (e.g. a `wfi` loop, or the kernel's syscall if this \
+       is a user process)"
+  | Ast.Var "exit" when List.length args = 1 ->
+    compile_expr env (List.hd args);                     (* a0 = status *)
+    emit_word (enc_i 93 zero 0 a7 0x13);                 (* li a7, 93 *)
+    emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall (exit) *)
   | Ast.Var "print_no_nl" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i 0 a0 2 a2 0x03);                    (* lw a2, 0(a0) — len *)

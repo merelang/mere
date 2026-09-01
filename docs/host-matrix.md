@@ -55,7 +55,7 @@ machine rather than a host.
 | `e` | yes | yes | yes | refused |
 | `env_var` | yes | yes | yes | refused |
 | `even` | yes | yes | yes | refused |
-| `exit` | yes | unattributed | yes | refused |
+| `exit` | yes | unattributed | yes | yes |
 | `exp` | yes | yes | yes | refused |
 | `f32_bits` | yes | yes | yes | refused |
 | `f_abs` | yes | yes | yes | refused |
