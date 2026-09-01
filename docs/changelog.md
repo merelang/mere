@@ -4,6 +4,48 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.369 — 2026-09-01
+
+_Six 15-bit limbs, and the two tuple accessors the library needed to return a
+sticky bit._ `contrib/softfloat/limbs` is the working width for adding two
+doubles: 90 bits, wide enough for a 53-bit significand plus the guard, round and
+sticky below it and the carry above, in limbs narrow enough that a product of
+two fits RV32I's signed 32-bit word.
+
+Its gate is `test/float/softfloat_limbs.mere`, and the oracle is the backend's
+own integers — a real oracle here rather than a tautology, because the limb code
+never adds two whole values, only one limb at a time with an explicit carry.
+
+**Three holes in that gate, found by poisoning it:**
+
+A hand-written table caught the carry it was written for and little else:
+breaking one link of the carry chain failed 2 checks and one borrow failed 1.
+A deterministic sweep took those to 91 and 194.
+
+The sweep could not reach the top. Its values stay under 2^58 so the native
+oracle is exact, and l5 (bits 75..89) is outside a 63-bit int entirely —
+dropping the borrow into l4 passed everything. Up there the oracle is an
+identity instead of a value: `(a + b) - b` is `a`, and a shift up and back down
+is `a`. Neither needs a number the backend can hold.
+
+`l6_bitlen`'s base for l4 was checked by nothing at all. Moving it from 60 to 61
+passed every check in the suite, because no value in the table or the sweep ever
+had its top bit up there. A single bit at position i has length i + 1, which
+needs no oracle, so the check now walks 58..89.
+
+One poison that appeared to reveal a fourth hole turned out not to have applied:
+the `sed` looked for `else if a.l5` where the source says `if a.l5`. **A poison
+that does not land looks exactly like a gate that does not catch.**
+
+Also: `fst` and `snd` on RV32I. A tuple there is already a block of words with
+element i at i*4 — what `Ast.Tuple` builds and what a `P_tuple` pattern reads —
+so their absence was not a missing mechanism but a missing pair of cases.
+Destructuring a pair in a `let` compiled; calling `snd` on the same pair did
+not. The library that wanted to return a value and a sticky bit together found
+it.
+
+---
+
 ## v0.1.368 — 2026-09-01
 
 _A double's bits, held as integers narrow enough for the backend that has no

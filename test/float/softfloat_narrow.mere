@@ -7,6 +7,7 @@
 // that is not the defect. scripts/softfloat_check.sh asserts that every name
 // in the library appears here, so the coverage claim is checked instead of
 // trusted.
+import "../../contrib/softfloat/limbs.mere";
 import "../../contrib/softfloat/softfloat.mere";
 
 let one = mk 0 1023 0 0 0 0;          // 1.0
@@ -38,3 +39,25 @@ let _ = print_int (b2i (lt one two));
 let _ = print_int (b2i (gt two one));
 let _ = print_int (b2i (le one one));
 let _ = print_int (b2i (ge one one));
+
+// contrib/softfloat/limbs — the same coverage rule applies: a function nothing
+// references is never lowered, so it would pass the RV32I arm without being
+// compiled.
+let u = l6_of_limbs 0 0 0 1 2 3;
+let v = l6_of_limbs 0 0 0 0 5 7;
+let _ = print_int lbits;
+let _ = print_int lmask;
+let _ = print_int (l6_zero).l0;
+let _ = print_int (b2i (l6_is_zero l6_zero));
+let _ = print_int (l6_cmp u v);
+let _ = print_int (l6_add u v).l0;
+let _ = print_int (l6_sub u v).l0;
+let _ = print_int (l6_limb u 3);
+let _ = print_int (l6_shl1 u).l1;
+let _ = print_int (l6_shr1 u).l0;
+let _ = print_int (l6_low_bit u);
+let _ = print_int (l6_shl u 17).l2;
+let _ = print_int (snd (l6_shr_sticky u 4));
+let _ = print_int (fst (l6_shr_sticky_go u 2 0)).l0;
+let _ = print_int (l6_bitlen_limb 300 0);
+let _ = print_int (l6_bitlen u);
