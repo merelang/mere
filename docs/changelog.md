@@ -4,6 +4,44 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.368 — 2026-09-01
+
+_A double's bits, held as integers narrow enough for the backend that has no
+float._ `contrib/softfloat` is the representation half: sign, exponent, and the
+52-bit fraction in four 15-bit limbs, little-endian. 15 because a product of two
+limbs has to fit the narrowest int any backend has, which is RV32I's signed
+32-bit word.
+
+The obvious representation is the one `float_bits_hi` / `float_bits_lo` already
+give — two 32-bit halves — and it does not work on the target that needs it.
+Those halves are *unsigned* (`float_bits_hi (-1.0)` is 3220176896) and RV32I's
+int is signed and 32 wide, so a half does not fit. The same shape of answer as
+v0.1.281's, one target further down: one accessor would not fit an interpreter's
+63-bit int, and two do not fit a 32-bit one.
+
+**The file never names `float`.** That is the design claim, and the gate checks
+it as one.
+
+The gate is `scripts/softfloat_check.sh`: every double in
+`test/float/softfloat_roundtrip.mere` survives the trip into limbs and back as
+the same 64 bits — including `-0.0` and NaN payloads, which a value comparison
+lets through — the interpreter and the C backend print the same bytes, and every
+exported name compiles for RV32I. The inputs are built from bit patterns rather
+than written as decimals, because the boundaries of the format (the largest
+subnormal, the smallest normal, the limb split that straddles the two halves)
+are exactly the ones nobody writes down.
+
+**The first version of the RV32I arm was green and checking almost nothing.** It
+compiled a probe that called three functions, and passed with a float-using
+function sitting in the library: nothing referenced it, so codegen never saw it.
+The probe is now `test/float/softfloat_narrow.mere`, written by hand, and the
+script asserts that every `let` in the library appears in it — so adding a
+function without exercising it fails the gate by name. A generated probe was
+tried and rejected: it has to guess each function's shape, and a wrong guess
+fails on the probe's own type error instead of on the defect.
+
+---
+
 ## v0.1.367 — 2026-09-01
 
 _The check was deleted for the backends that outgrew it, and the backend that

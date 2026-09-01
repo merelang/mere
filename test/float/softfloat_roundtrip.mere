@@ -1,0 +1,88 @@
+// The gate for contrib/softfloat's representation: a double, re-encoded into
+// the 15-bit limbs that a 32-bit target can hold, and decoded back, must be
+// the SAME 64 bits. Not the same value -- the same bits, so that -0.0 and the
+// NaN payloads are covered too.
+//
+// The bridge between hardware doubles and the limbs lives here rather than in
+// the library, because the library must compile for a backend that has no
+// float at all.
+//
+// The inputs are built from bit patterns, not written as decimals. A table of
+// decimal literals tests whichever doubles the author happened to think of;
+// the boundaries of the format (the largest subnormal, the smallest normal)
+// are exactly the ones nobody writes down.
+import "../../contrib/softfloat/softfloat.mere";
+
+let low15 = 32767;
+let low20 = 1048575;
+let low13 = 8191;
+
+// (hi, lo) -> Sf. hi and lo are the unsigned 32-bit halves the builtins give.
+let sf_of_hi_lo = fn (hi: int) -> fn (lo: int) ->
+  let sign = bit_and (bit_shr hi 31) 1 in
+  let ex = bit_and (bit_shr hi 20) 2047 in
+  let fh = bit_and hi low20 in
+  let f0 = bit_and lo low15 in
+  let f1 = bit_and (bit_shr lo 15) low15 in
+  let f2 = bit_or (bit_and (bit_shr lo 30) 3) (bit_shl (bit_and fh low13) 2) in
+  let f3 = bit_and (bit_shr fh 13) 127 in
+  mk sign ex f3 f2 f1 f0;
+
+let hi_of_sf = fn (a: Sf) ->
+  let fh = bit_or (bit_shr a.f2 2) (bit_shl a.f3 13) in
+  bit_or (bit_or (bit_shl a.sign 31) (bit_shl a.exp 20)) fh;
+
+let lo_of_sf = fn (a: Sf) ->
+  bit_or (bit_or a.f0 (bit_shl a.f1 15)) (bit_shl (bit_and a.f2 3) 30);
+
+let check = fn (name: str) -> fn (hi: int) -> fn (lo: int) ->
+  let a = sf_of_hi_lo hi lo in
+  let hi2 = hi_of_sf a in
+  let lo2 = lo_of_sf a in
+  let x = float_of_bits hi lo in
+  // through a real double and back, so the builtins are in the loop too
+  let hi3 = float_bits_hi x in
+  let lo3 = float_bits_lo x in
+  if hi2 == hi && lo2 == lo && hi3 == hi && lo3 == lo
+  then print ("ok   " ++ name)
+  else print ("FAIL " ++ name ++ " in=" ++ str_of_int hi ++ "," ++ str_of_int lo
+              ++ " limbs=" ++ str_of_int hi2 ++ "," ++ str_of_int lo2
+              ++ " hw=" ++ str_of_int hi3 ++ "," ++ str_of_int lo3);
+
+// the format's own boundaries, named by what they are
+let _ = check "+0"                 0 0;
+let _ = check "-0"                 2147483648 0;
+let _ = check "smallest subnormal" 0 1;
+let _ = check "largest subnormal"  1048575 4294967295;
+let _ = check "smallest normal"    1048576 0;
+let _ = check "largest normal"     2146435071 4294967295;
+let _ = check "1.0"                1072693248 0;
+let _ = check "-1.0"               3220176896 0;
+let _ = check "0.5"                1071644672 0;
+let _ = check "+inf"               2146435072 0;
+let _ = check "-inf"               4293918720 0;
+let _ = check "quiet NaN"          2146959360 0;
+let _ = check "NaN with payload"   2146435072 1;
+// a limb boundary in the fraction is the other thing nobody writes down: the
+// split at bit 30 straddles lo and hi, so f2 is the limb most likely to be
+// assembled wrong
+let _ = check "fraction bit 29"    0 536870912;
+let _ = check "fraction bit 30"    0 1073741824;
+let _ = check "fraction bit 31"    0 2147483648;
+let _ = check "fraction bit 32"    1 0;
+let _ = check "fraction bit 44"    4096 0;
+let _ = check "fraction bit 45"    8192 0;
+let _ = check "all fraction bits"  1048575 4294967295;
+
+// classification, on the same values
+let _ = print (if is_nan (sf_of_hi_lo 2146959360 0) then "ok   is_nan" else "FAIL is_nan");
+let _ = print (if is_inf (sf_of_hi_lo 2146435072 0) then "ok   is_inf" else "FAIL is_inf");
+let _ = print (if is_zero (sf_of_hi_lo 2147483648 0) then "ok   is_zero(-0)" else "FAIL is_zero(-0)");
+let _ = print (if is_subnormal (sf_of_hi_lo 0 1) then "ok   is_subnormal" else "FAIL is_subnormal");
+let _ = print (if not (is_nan (sf_of_hi_lo 2146435072 0)) then "ok   inf is not nan" else "FAIL inf is not nan");
+// -0.0 == +0.0 and NaN != NaN are the two things a bit comparison gets wrong
+let _ = print (if eq (sf_of_hi_lo 2147483648 0) (sf_of_hi_lo 0 0) then "ok   -0 == +0" else "FAIL -0 == +0");
+let _ = print (if not (eq (sf_of_hi_lo 2146959360 0) (sf_of_hi_lo 2146959360 0)) then "ok   NaN != NaN" else "FAIL NaN != NaN");
+let _ = print (if lt (sf_of_hi_lo 3220176896 0) (sf_of_hi_lo 1072693248 0) then "ok   -1 < 1" else "FAIL -1 < 1");
+let _ = print (if lt (sf_of_hi_lo 4293918720 0) (sf_of_hi_lo 3220176896 0) then "ok   -inf < -1" else "FAIL -inf < -1");
+let _ = print (if not (lt (sf_of_hi_lo 2146959360 0) (sf_of_hi_lo 1072693248 0)) then "ok   NaN not < 1" else "FAIL NaN not < 1");
