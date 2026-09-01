@@ -4,6 +4,76 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.386 — 2026-09-01
+
+_`args` on a target with no host: the loader leaves the command line in RAM._
+
+`args` was the last thing standing between a 39,719-line Ruby subset interpreter
+and running on this backend. It is a host service everywhere else -- ask the
+process what it was started with -- and `-rv` has no host to ask, so it was a
+shim that failed with a message. A program that cannot be told what to do can
+only do one thing.
+
+What replaces it is what a kernel does for a Unix process: the loader leaves the
+arguments in memory and the program reads them from there. The block sits in the
+reserved top of RAM, derived from the RAM size like the framebuffer, so it is
+right at every `--ram` provided the loader was told the same one -- a requirement
+`-rv` already puts on it.
+
+```
++0          magic "ARGV"
++4          count
++8 + 4*i    pointer to argument i, already a [len][bytes] string block
+...         the blocks, padded so each starts word-aligned
+```
+
+Three things this gets right on purpose:
+
+* **The magic word.** RAM no loader wrote is not zero in general, and a count
+  read out of garbage hands the program pointers into nothing. With it, an
+  untouched block reads as *no arguments*, which is the true answer.
+* **No argv[0].** The machine did not load the program by name and has no name to
+  offer. Inventing one would be a lie a program could branch on.
+* **No copying.** What the loader leaves already has this backend's string
+  layout, so a pointer out of the block *is* the string.
+
+`args` itself is four lines of prelude over two loads. The list is assembled
+where it is typed rather than in codegen, where a wrong tag would be silent.
+
+The two loads are declared to the typechecker, not just to codegen: a name
+codegen knows and the typer does not is not a builtin, it is an unbound
+variable. Every other backend refuses them and points at `args`. They get their
+own refusal rather than sharing the bare-metal one, which had filed them in the
+matrix under "bare" -- the wrong reason. What a hosted process lacks is the
+block, not the privilege.
+
+**`examples/riscv_virt_args.mere` is its own loader**: it writes the block through
+a window and reads it back with `args`, so what it checks is the reader the
+compiler emits, with no loader and no emulator in the picture. QEMU decodes the
+instructions. It runs identically on QEMU and on the Mere-written emulator.
+
+The lengths are 1, 4 and 5 for a reason. The first version of this used one
+argument and passed while the index was not scaled at all: the shift amount had
+gone into the immediate field where the *value* belongs, assembling to
+`slli a0, a0, 0`. Index 0 lands on the first pointer slot either way. Index 1
+loads from a misaligned address and traps.
+
+`before: 0` is printed once a count and three good pointers are already in RAM
+and only the magic is missing. Asking before writing anything would not check
+the guard at all -- QEMU hands the program zeroed RAM, so a reader that ignored
+the magic entirely would read the count as 0 and look correct.
+
+Also fixed: `qemu_virt.sh` compared the emulator's own `rvrun:` lines -- its halt
+reason, its pc trace -- against QEMU output that has no equivalent. All four
+images had been failing that half since the emulator learned to name its halt
+reason, which is a differential test reporting on its own diagnostics.
+
+With this, `mere -rv --ram 32` on that interpreter and `rvrun 32 -- -e 'puts 1 + 1'`
+gets as far as **float arithmetic**, which this backend does not lower yet. The
+argument now arrives; the next wall is a real one.
+
+---
+
 ## v0.1.385 — 2026-09-01
 
 _The wide jump landed on top of `__str_concat`'s copy pointer, because grepping

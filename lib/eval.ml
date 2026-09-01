@@ -2751,6 +2751,14 @@ let builtin_file_read_line =
    a hosted process, so these refuse loudly rather than pretending. They are
    bound at all (rather than left unbound) so the failure names the reason
    instead of reading like a typo. *)
+(* Not bare_only: the argument block exists on every -rv build, hosted or bare.
+   What it is not is a thing a hosted process has, so the interpreter and the C
+   backend refuse it and point at `args`, which works everywhere. *)
+let rv_only name =
+  V_builtin (name, fun _ ->
+    failwith (name ^ ": only available on the RV32I target (mere -rv); \
+                      use `args` instead, which works on every backend"))
+
 let bare_only name =
   V_builtin (name, fun _ ->
     failwith (name ^ ": only available on the RV32I bare-metal target \
@@ -3192,6 +3200,8 @@ let initial_env : env =
     ("csr_read", ref (bare_only "csr_read"));
     ("csr_write", ref (bare_only "csr_write"));
     ("raw_window", ref (bare_only "raw_window"));
+    ("__rv_argc", ref (rv_only "__rv_argc"));
+    ("__rv_argstr", ref (rv_only "__rv_argstr"));
     ("raw_peek8", ref (bare_only "raw_peek8"));
     ("raw_peek32", ref (bare_only "raw_peek32"));
     ("raw_poke8", ref (bare_only "raw_poke8"));

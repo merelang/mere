@@ -1,0 +1,95 @@
+// How a program that nobody ran from a shell finds out what it was asked to do.
+//
+//   mere -rv --bare --load-base 0x80000000 --ram 8 examples/riscv_virt_args.mere > virt.bin
+//   qemu-system-riscv32 -M virt -bios none -nographic -kernel virt.bin
+//
+// `args` is a host service on every other backend. On -rv there is no host, so
+// the loader leaves the arguments in RAM and `args` walks them. This program is
+// its own loader: it writes the block through a window and then reads it back
+// with `args`, so what it checks is the *reader* — the code the compiler emits —
+// with no emulator and no loader in the picture. QEMU decodes the instructions,
+// which is the point: our emulator agreeing with our binary is not evidence.
+//
+// The layout, which the loader and the compiler have to agree on:
+//
+//   +0          magic "ARGV"
+//   +4          count
+//   +8 + 4*i    pointer to argument i, in this backend's [len][bytes] layout
+//   ...         the blocks, each padded so the next starts word-aligned
+//
+// The address is derived from the RAM size, so it holds at every --ram provided
+// both sides were told the same one: RAM end minus 24 KB. At --load-base
+// 0x80000000 --ram 8 that is 0x80000000 + 0x800000 - 0x6000. Spelled out here
+// because an ABI test that computed it the way the compiler does would agree
+// with the compiler by construction.
+let ram_off = 0x800000 - 0x6000;               // ARGV block, relative to RAM start
+// virt's DRAM starts at 0x80000000, which is one past what a signed 32-bit
+// literal can say. The address is perfectly representable -- it is the bit
+// pattern 0x80000000 -- so it is built rather than written.
+let ram_base = bit_shl 1 31;
+
+let tx_ready = fn (uart: Raw) -> bit_and (raw_peek8 uart 5) 32 != 0;
+let rec drain = fn (uart: Raw) -> fn (spins: int) ->
+  if spins <= 0 then () else if tx_ready uart then () else drain uart (spins - 1);
+let putc = fn (uart: Raw) -> fn (c: int) ->
+  let _ = drain uart 10000 in
+  raw_poke8 uart 0 c;
+let rec uart_puts = fn (uart: Raw) -> fn (s: str) -> fn (i: int) ->
+  if i >= str_len s then ()
+  else let _ = putc uart (ord (char_at s i)) in uart_puts uart s (i + 1);
+
+// Write one [len][bytes] block and return where the next one starts. The padding
+// is what keeps every following block word-aligned: the reader loads the length
+// with `lw`, and a misaligned `lw` traps rather than returning a wrong number,
+// so an unpadded block would fault instead of quietly reading garbage.
+let put_str = fn (ram: Raw) -> fn (at: int) -> fn (s: str) ->
+  let n = str_len s in
+  let _ = raw_poke32 ram at n in
+  let rec bytes = fn (i: int) ->
+    if i >= n then () else
+    let _ = raw_poke8 ram (at + 4 + i) (ord (char_at s i)) in bytes (i + 1) in
+  let _ = bytes 0 in
+  at + 4 + n + bit_and (4 - bit_and n 3) 3;
+
+let rec show = fn (uart: Raw) -> fn (l: str list) ->
+  match l with
+  | Nil -> ()
+  | Cons (x, rest) ->
+    let _ = uart_puts uart ("arg: " ++ x ++ "\n") 0 in
+    show uart rest;
+let rec count_of = fn (l: str list) -> match l with Nil -> 0 | Cons (_, r) -> 1 + count_of r;
+
+let main = fn (mach: Raw) ->
+  let uart = raw_window mach 0x10000000 256 in
+  let ram = raw_window mach ram_base 0x800000 in
+
+  // Three arguments whose lengths are 1, 4 and 5: one shorter than a word, one
+  // exactly a word (padding zero), one that needs padding. A single argument
+  // would not exercise the index scaling at all — index 0 lands on the pointer
+  // array's first slot whether the index is scaled by four or not at all.
+  let _ = raw_poke32 ram (ram_off + 4) 3 in
+  let a0 = ram_off + 8 + 12 in
+  let a1 = put_str ram a0 "x" in
+  let a2 = put_str ram a1 "four" in
+  let _ = put_str ram a2 "fives" in
+  let _ = raw_poke32 ram (ram_off + 8) (ram_base + a0) in
+  let _ = raw_poke32 ram (ram_off + 12) (ram_base + a1) in
+  let _ = raw_poke32 ram (ram_off + 16) (ram_base + a2) in
+  // Everything but the magic is in place now, so this is the case the magic word
+  // exists for: a count and three good pointers sitting in RAM that no loader
+  // put there. It must still read as no arguments. Asking before writing
+  // anything would not check the guard at all -- QEMU hands the program zeroed
+  // RAM, so a reader that ignored the magic entirely would read the count as 0
+  // and look correct.
+  let _ = uart_puts uart ("before: " ++ str_of_int (count_of (args ())) ++ "\n") 0 in
+
+  // The magic goes in last, so a half-written block is never a readable one.
+  let _ = raw_poke32 ram ram_off 0x41524756 in
+
+  let _ = uart_puts uart ("count: " ++ str_of_int (count_of (args ())) ++ "\n") 0 in
+  let _ = show uart (args ()) in
+
+  let test = raw_window mach 0x00100000 8 in
+  raw_poke32 test 0 0x5555;
+
+()

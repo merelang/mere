@@ -2000,6 +2000,15 @@ let initial_env : env =
     ("raw_poke32",  mono (Ast.TyArrow (Ast.TyCon ("Raw", []),
                             Ast.TyArrow (Ast.TyInt,
                               Ast.TyArrow (Ast.TyInt, Ast.TyUnit)))));
+    (* The two loads `args` is built from on -rv, where there is no host to ask
+       for a command line and the loader leaves it in RAM instead. Declared here
+       rather than left to codegen because the prelude that calls them is
+       type-checked like any other source: a name codegen knows and the typer
+       does not is not a builtin, it is an unbound variable. Every other backend
+       refuses them by name -- there is no argument block in a hosted process,
+       and `args` itself is the portable spelling. *)
+    ("__rv_argc",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
+    ("__rv_argstr", mono (Ast.TyArrow (Ast.TyInt, Ast.TyStr)));
     ("read_stdin",  mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     (* v0.1.13 (mk dogfood): run a command line via the shell, inherit
        stdio, return its exit code. *)

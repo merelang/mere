@@ -24,8 +24,10 @@ machine rather than a host.
 
 | builtin | C | LLVM | Wasm | RV32I |
 |---|:--:|:--:|:--:|:--:|
+| `__rv_argc` | refused | refused | refused | yes |
+| `__rv_argstr` | refused | refused | refused | yes |
 | `abs` | yes | yes | yes | yes |
-| `args` | yes | yes | yes | stub |
+| `args` | yes | yes | yes | yes |
 | `assert` | yes | yes | yes | yes |
 | `atan2` | yes | yes | yes | stub |
 | `bit_and` | yes | yes | yes | yes |
