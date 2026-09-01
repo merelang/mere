@@ -121,7 +121,7 @@ machine rather than a host.
 | `print` | yes | yes | yes | yes |
 | `print_bool` | yes | yes | yes | yes |
 | `print_bytes` | yes | yes | yes | refused |
-| `print_err` | yes | yes | yes | refused |
+| `print_err` | yes | yes | yes | yes |
 | `print_int` | yes | yes | yes | yes |
 | `print_no_nl` | yes | yes | yes | yes |
 | `random_float` | refused | refused | refused | refused |

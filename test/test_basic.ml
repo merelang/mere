@@ -13803,6 +13803,21 @@ let () =
      program this exists for carries float code on paths a script never runs. *)
   rv_contains "rv32i: a float operator lowers to an abort, not an integer add"
     "let _ = print_int (float_bits_hi (1.5 + 2.5));" "li a7, 93";
+  (* Maps on this backend are the prelude's assoc list, reached by redirecting
+     the `map_*` names -- so `map_len` is a redirect and not a lowering. Both
+     places that hold the redirect table have to know: the reachability seed and
+     the call site. Missing the first emits a call to a function that was never
+     emitted. *)
+  rv_contains "rv32i: map_len redirects to the prelude's rvmap_len"
+    "let m = map_new ();\nlet _ = print_int (map_len m);" "jal ra, u_rvmap_len";
+  (* stderr, with the descriptor set. The emulator's write syscall ignores it and
+     QEMU's does not, so `li a0, 2` is the part worth pinning. *)
+  rv_contains "rv32i: print_err writes to descriptor 2"
+    "let _ = print_err \"x\";" "li a0, 2";
+  (* The `extern fn` message has its own gate in scripts/rv_prelude_check.sh:
+     this harness types a program itself and its typer answers `unbound
+     variable` for the extern before codegen is reached, so the branch that
+     names the target's limit cannot be seen from here. *)
   (* The prelude's own definitions are not testable here: it is injected by the
      driver, and this harness calls the backend directly. They have their own
      gate, scripts/rv_prelude_check.sh. *)
