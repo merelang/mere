@@ -49,7 +49,14 @@ let random_int = fn (n: int) -> (__h_todo "random_int" : int);
 // that measures elapsed time report 0 rather than say it cannot measure.
 let time = fn (u: unit) -> (__h_todo "time" : float);
 let write_file = fn (p: str) -> fn (c: str) -> (__h_todo "write_file" : unit);
-let args = fn (u: unit) -> (__h_todo "args" : str list);
+// `args` is the one host service on this list that is not a host service here:
+// the loader leaves the arguments in RAM and this walks them. A program built
+// with -rv therefore reads its own command line, and one started by a loader
+// that left the block untouched sees Nil -- which is the true answer, not an
+// error, because it really was given no arguments.
+let rec __rv_args_go = fn (i: int) -> fn (n: int) ->
+  if i >= n then (Nil : str list) else Cons (__rv_argstr i, __rv_args_go (i + 1) n);
+let args = fn (u: unit) -> __rv_args_go 0 (__rv_argc ());
 let read_stdin = fn (u: unit) -> (__h_todo "read_stdin" : str);
 // `bytes` has no representation on this backend at all -- these are not a host
 // service but the type itself, and they are here for the same reason: a program

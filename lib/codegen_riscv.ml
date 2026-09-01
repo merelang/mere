@@ -502,6 +502,26 @@ let trap_stack_top () = stack_top () + 0x10000        (* just below print scratc
 let scratch_base () = stack_top () + 0x10000
 let fb_base () = stack_top () + 0x18000
 let key_base () = stack_top () + 0x19000
+(* The argument block: how a program that was not started by a shell finds out
+   what it was asked to do. There is no host to ask -- `args` is a host service
+   on every other backend -- so the loader leaves the arguments in RAM and the
+   program reads them from there, which is what a kernel does for a Unix process
+   too. It sits in the reserved top region for the same reason the framebuffer
+   does: derived from the RAM size, so it is right at every `--ram` provided the
+   loader was sized to match, which `-rv` already requires of it.
+
+     +0            magic, or the region is untouched and there are no arguments
+     +4            count
+     +8 + 4*i      pointer to argument i, already a [len][bytes] string block
+     ...           the blocks themselves
+
+   The magic word is the whole reason this is safe to read unconditionally: RAM
+   that no loader wrote is not zero in general, and a count read out of garbage
+   would hand the program pointers into nothing. No argv[0]: the machine did not
+   load the program by name and has no name to offer, and inventing one would be
+   a lie a program could branch on. *)
+let argv_base () = stack_top () + 0x1A000
+let argv_magic = 0x41524756                        (* "ARGV" *)
 
 (* What the bare-metal entry point is handed: a window from address 0 to the end
    of everything this machine has. Narrowing it is the only way to get anything
@@ -1582,6 +1602,32 @@ and compile_app env e =
     emit_word (enc_r 0 t0 t1 0 t0 0x33);                     (* addr = FB_BASE + off *)
     emit_word (enc_s 0 a2 t0 0 0x23);                        (* sb v, 0(addr) *)
     emit_word (enc_i 0 zero 0 a0 0x13)                       (* unit *)
+  (* __rv_argc / __rv_argstr: the two loads the prelude's `args` is built from.
+     Kept this small on purpose -- the list is assembled in the prelude, where it
+     is typed, rather than here where a wrong tag would be silent. `__rv_argstr`
+     copies nothing: what the loader left in the block already has this
+     backend's string layout, so the pointer is the string. *)
+  | Ast.Var "__rv_argc" when List.length args = 1 ->
+    compile_expr env (List.hd args);                         (* the unit, discarded *)
+    li t1 (argv_base ());
+    emit_word (enc_i 0 t1 2 t0 0x03);                        (* t0 = magic word *)
+    li t2 argv_magic;
+    emit_word (enc_i 0 zero 0 a0 0x13);                      (* a0 = 0 *)
+    let l_done = fresh_label "argc_done" in
+    emit (Branch (1, t0, t2, l_done));                       (* magic absent -> 0 *)
+    emit_word (enc_i 4 t1 2 a0 0x03);                        (* a0 = count *)
+    emit (Label l_done)
+  | Ast.Var "__rv_argstr" when List.length args = 1 ->
+    compile_expr env (List.hd args);                         (* a0 = i *)
+    li t1 (argv_base ());
+    (* The shift amount is the immediate field. Writing the scale where the
+       *value* goes -- `enc_i 0 a0 1 a0` -- assembles to `slli a0, a0, 0`, which
+       leaves the index unscaled: index 0 still lands on the first pointer slot
+       and reads correctly, and index 1 loads from a misaligned address. A test
+       with one argument cannot see it. *)
+    emit_word (enc_i 2 a0 1 a0 0x13);                        (* slli a0, a0, 2 *)
+    emit_word (enc_r 0 a0 t1 0 t1 0x33);
+    emit_word (enc_i 8 t1 2 a0 0x03)                         (* a0 = block[2 + i] *)
   | Ast.Var "key" when List.length args = 1 ->
     (* fantasy-console input: read the held state (0/1) of button n from the
        MMIO key register at KEY_BASE + n. A host emulator refreshes these bytes
