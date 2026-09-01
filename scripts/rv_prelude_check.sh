@@ -104,17 +104,64 @@ if [ -n "$MISSING" ]; then
   rc=1
 fi
 
-# The float shims must be a RUNTIME stop, not a compile error, and must name
-# what is missing. `li a7, 93` is the exit syscall the abort ends with.
-printf 'let _ = print_int (float_bits_hi (1.5 + 2.5));\n' > "$TMP/op.mere"
-if "$MERE" -rvs "$TMP/op.mere" 2>/dev/null | grep -q 'li a7, 93'; then :; else
-  echo "FAIL rv_prelude: a float operator did not lower to the abort"
+# A float operator must lower to a CALL into the prelude's softfloat wrapper.
+# This assertion used to be its exact opposite -- that the operator reached the
+# abort -- and checked it by looking for `li a7, 93` in the listing, which is the
+# exit syscall that `_start`, __oom and __pat_fail all end with too. It was true
+# of every program ever compiled by this backend.
+# One needle per operator, so an operator wired to the wrong wrapper is caught
+# rather than averaged away: a table that mapped Sub to __fadd would satisfy any
+# check that only asked whether *some* softfloat call was emitted.
+for pair in "+:__fadd" "-:__fsub" "*:__fmul" "/:__fdiv"; do
+  op="${pair%%:*}"; fn="${pair##*:}"
+  printf 'let _ = print_int (float_bits_hi (1.5 %s 2.5));\n' "$op" > "$TMP/op.mere"
+  if "$MERE" -rvs "$TMP/op.mere" 2>/dev/null | grep -q "jal ra, u_$fn"; then :; else
+    echo "FAIL rv_prelude: float $op did not lower to a call to $fn"
+    rc=1
+  fi
+done
+# ...and the named form has to reach the SAME implementation, not a second one.
+printf 'let _ = print_int (float_bits_hi (f_add 1.5 2.5));\n' > "$TMP/opn.mere"
+if "$MERE" -rvs "$TMP/opn.mere" 2>/dev/null | grep -q 'u___fadd'; then :; else
+  echo "FAIL rv_prelude: f_add does not go through the same wrapper as float +"
+  rc=1
+fi
+# Unary minus on a float is a sign-bit flip, not a two's-complement negate. The
+# integer arm negates the word, which for a float is the pointer to its two
+# halves, so before this it returned a wrong number quietly.
+printf 'let x = 1.5;\nlet _ = print_int (float_bits_hi (-x));\n' > "$TMP/neg.mere"
+if "$MERE" -rvs "$TMP/neg.mere" 2>/dev/null | grep -q 'u___fneg'; then :; else
+  echo "FAIL rv_prelude: unary minus on a float did not go through softfloat"
+  rc=1
+fi
+
+# The comparisons, one needle per operator. They live here and not in
+# test/test_basic.ml because that harness types without the prelude, so the
+# callee is not a known binding there and no call is emitted at all.
+for pair in "<:__flt" "<=:__fle" ">:__fgt" ">=:__fge" "==:__feq" "!=:__fne"; do
+  op="${pair%%:*}"; fn="${pair##*:}"
+  printf 'let _ = print_int (if 1.5 %s 2.5 then 1 else 0);\n' "$op" > "$TMP/cmp.mere"
+  if "$MERE" -rvs "$TMP/cmp.mere" 2>/dev/null | grep -q "u_$fn"; then :; else
+    echo "FAIL rv_prelude: float $op did not lower to a call to $fn"
+    rc=1
+  fi
+done
+
+# A wired operator must not still be carrying the shim's apology. `__f_todo` is
+# only reachable from a name that is genuinely not computed here, so its text
+# appearing in an arithmetic-only binary means one of them was left unwired.
+"$MERE" -rv "$TMP/opn.mere" > "$TMP/opn.bin" 2>/dev/null
+if grep -a -q 'is not computed on this backend' "$TMP/opn.bin"; then
+  echo "FAIL rv_prelude: f_add still reaches the not-computed shim"
   rc=1
 fi
 # The message lives in the binary's data, not in the instruction listing, so
 # this looks at the bytes. `grep -a` because the file is binary and grep would
 # otherwise say nothing at all rather than no.
-printf 'let _ = print_int (float_bits_hi (f_add 1.5 2.5));\n' > "$TMP/op2.mere"
+# `sqrt` and not `f_add`: f_add is computed for real now, so it no longer has a
+# message to check. What must still stop at run time is the set softfloat does
+# not compute.
+printf 'let _ = print_int (float_bits_hi (sqrt 2.0));\n' > "$TMP/op2.mere"
 "$MERE" -rv "$TMP/op2.mere" > "$TMP/op2.bin" 2>/dev/null
 if grep -a -q 'softfloat' "$TMP/op2.bin"; then :; else
   echo "FAIL rv_prelude: the f_add shim's message does not name softfloat"
@@ -200,5 +247,10 @@ if "$MERE" -rv "$TMP/tp.mere" 2>&1 | grep -q 'unbound variable'; then :; else
   rc=1
 fi
 
-[ "$rc" = 0 ] && echo "ok rv_prelude: all $COUNT names compile for -rv, and the float shims stop at runtime"
+# The count is the names written in lib/rv_prelude.ml. The prelude ALSO carries
+# contrib/softfloat, spliced in from the generated lib/rv_softfloat.ml, and those
+# names are not in this list -- scripts/softfloat_check.sh compiles all of them
+# for RV32I. Saying "all names" here would have covered 76 that this gate never
+# looked at.
+[ "$rc" = 0 ] && echo "ok rv_prelude: all $COUNT hand-written prelude names compile for -rv, the float shims stop at runtime (softfloat's own names: softfloat_check.sh)"
 exit $rc

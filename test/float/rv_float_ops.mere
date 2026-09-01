@@ -1,0 +1,106 @@
+// Float arithmetic, computed with the operators and printed as BITS.
+//
+// Run twice: once on a backend with a float unit and once on RV32I, where `+` on
+// two floats is a call into contrib/softfloat. The two outputs have to be
+// identical, which makes this a differential test between hardware doubles and
+// our own arithmetic -- not a table of expectations somebody wrote down and then
+// checked against itself.
+//
+// The bits print as four 16-bit chunks and never as `float_bits_hi` directly:
+// that value is UNSIGNED 32-bit, and on a target whose int is a SIGNED 32-bit
+// word the same 32 bits come out negative (3220701184 there is -1074266112).
+// Chunking is the spelling both backends agree on, and it compares bits rather
+// than values, so -0.0 and the NaN payloads are covered.
+//
+// Each 32-bit half is composed from two 16-bit chunks rather than written as one
+// number, because 0x80000000 is 2147483648 and does not fit a signed 32-bit int
+// at all -- and `0 - 2147483648` does not help, the literal is still there.
+//
+// Inputs are bit patterns, not decimals. The boundaries of the format -- the
+// largest subnormal, the smallest normal, a tie that round-to-nearest-even has
+// to decide, the largest finite double -- are the ones nobody writes down.
+//
+// WHAT THIS DELIBERATELY DOES NOT COMPARE: when BOTH operands are NaN, which
+// payload comes out is not specified by IEEE 754, and this machine does not even
+// agree with itself -- its `add` returns the first operand's payload and its
+// `sub` returns the second's. Those pairs print a skip line naming the reason, so
+// the exclusion is in the output rather than in somebody's memory. The six
+// comparison operators still run on them: NaN comparisons ARE specified.
+
+let c0 = fn (x: float) -> bit_and (bit_shr (float_bits_hi x) 16) 65535;
+let c1 = fn (x: float) -> bit_and (float_bits_hi x) 65535;
+let c2 = fn (x: float) -> bit_and (bit_shr (float_bits_lo x) 16) 65535;
+let c3 = fn (x: float) -> bit_and (float_bits_lo x) 65535;
+let show = fn (tag: str) -> fn (x: float) ->
+  print (tag ++ " " ++ str_of_int (c0 x) ++ " " ++ str_of_int (c1 x) ++ " "
+             ++ str_of_int (c2 x) ++ " " ++ str_of_int (c3 x));
+let b = fn (tag: str) -> fn (v: bool) -> print (tag ++ (if v then " 1" else " 0"));
+
+let v_zero = float_of_bits (bit_or (bit_shl 0 16) 0) (bit_or (bit_shl 0 16) 0);   // +0.0
+let v_neg_zero = float_of_bits (bit_or (bit_shl 32768 16) 0) (bit_or (bit_shl 0 16) 0);   // -0.0
+let v_one = float_of_bits (bit_or (bit_shl 16368 16) 0) (bit_or (bit_shl 0 16) 0);   // 1.0
+let v_neg_one = float_of_bits (bit_or (bit_shl 49136 16) 0) (bit_or (bit_shl 0 16) 0);   // -1.0
+let v_tenth = float_of_bits (bit_or (bit_shl 16313 16) 39321) (bit_or (bit_shl 39321 16) 39322);   // 0.1, which is not exact in binary
+let v_three = float_of_bits (bit_or (bit_shl 16392 16) 0) (bit_or (bit_shl 0 16) 0);   // 3.0
+let v_big = float_of_bits (bit_or (bit_shl 32311 16) 58428) (bit_or (bit_shl 34816 16) 30108);   // 1e300, so a product overflows to infinity
+let v_tiny_sub = float_of_bits (bit_or (bit_shl 0 16) 0) (bit_or (bit_shl 0 16) 1);   // the SMALLEST subnormal
+let v_max_sub = float_of_bits (bit_or (bit_shl 15 16) 65535) (bit_or (bit_shl 65535 16) 65535);   // the LARGEST subnormal
+let v_min_norm = float_of_bits (bit_or (bit_shl 16 16) 0) (bit_or (bit_shl 0 16) 0);   // the smallest normal, one ulp above it
+let v_max_dbl = float_of_bits (bit_or (bit_shl 32751 16) 65535) (bit_or (bit_shl 65535 16) 65535);   // the largest finite double
+let v_ulp_tie = float_of_bits (bit_or (bit_shl 15520 16) 0) (bit_or (bit_shl 0 16) 0);   // 2^-53: 1.0 + this is a TIE, and round-to-nearest-EVEN decides it
+let v_inf = float_of_bits (bit_or (bit_shl 32752 16) 0) (bit_or (bit_shl 0 16) 0);   // +infinity
+let v_neg_inf = float_of_bits (bit_or (bit_shl 65520 16) 0) (bit_or (bit_shl 0 16) 0);   // -infinity
+let v_qnan = float_of_bits (bit_or (bit_shl 32760 16) 0) (bit_or (bit_shl 0 16) 0);   // a quiet NaN
+let v_snan = float_of_bits (bit_or (bit_shl 32752 16) 0) (bit_or (bit_shl 0 16) 1);   // a SIGNALLING NaN: quiet bit clear, so an operation must quiet it
+let v_neg_nan = float_of_bits (bit_or (bit_shl 65528 16) 0) (bit_or (bit_shl 0 16) 0);   // -NaN, so a propagated NaN's sign is checked both ways
+
+// The NaN flag is a literal, decided from the bit pattern when this file was
+// written, and not `x != x` at run time -- that would ask the operator under
+// test whether to test the operator.
+let vals = Cons (("zero", v_zero, false),
+            Cons (("neg_zero", v_neg_zero, false),
+            Cons (("one", v_one, false),
+            Cons (("neg_one", v_neg_one, false),
+            Cons (("tenth", v_tenth, false),
+            Cons (("three", v_three, false),
+            Cons (("big", v_big, false),
+            Cons (("tiny_sub", v_tiny_sub, false),
+            Cons (("max_sub", v_max_sub, false),
+            Cons (("min_norm", v_min_norm, false),
+            Cons (("max_dbl", v_max_dbl, false),
+            Cons (("ulp_tie", v_ulp_tie, false),
+            Cons (("inf", v_inf, false),
+            Cons (("neg_inf", v_neg_inf, false),
+            Cons (("qnan", v_qnan, true),
+            Cons (("snan", v_snan, true),
+            Cons (("neg_nan", v_neg_nan, true),
+            Nil)))))))))))))))));
+
+let rec each = fn (l: (str * float * bool) list) -> fn (f: (str * float * bool) -> unit) ->
+  match l with
+  | Nil -> ()
+  | Cons (x, rest) -> let _ = f x in each rest f;
+
+let _ = each vals (fn (p: (str * float * bool)) ->
+  let (an, a, anan) = p in
+  // Unary minus is its own codegen arm on RV32I -- a sign-bit flip and not a
+  // two's-complement negate -- so it gets its own line. Once per value rather
+  // than once per pair, and defined on -0.0, the infinities and NaN.
+  let _ = show ("uneg " ++ an) (-a) in
+  each vals (fn (q: (str * float * bool)) ->
+    let (bn, bb, bnan) = q in
+    let tag = an ++ "/" ++ bn in
+    let _ =
+      if anan && bnan then
+        print ("arith " ++ tag ++ " skipped: with both operands NaN, which payload propagates is unspecified")
+      else
+        let _ = show ("add " ++ tag) (a + bb) in
+        let _ = show ("sub " ++ tag) (a - bb) in
+        let _ = show ("mul " ++ tag) (a * bb) in
+        show ("div " ++ tag) (a / bb) in
+    let _ = b ("eq " ++ tag) (a == bb) in
+    let _ = b ("ne " ++ tag) (a != bb) in
+    let _ = b ("lt " ++ tag) (a < bb) in
+    let _ = b ("le " ++ tag) (a <= bb) in
+    let _ = b ("gt " ++ tag) (a > bb) in
+    b ("ge " ++ tag) (a >= bb)));

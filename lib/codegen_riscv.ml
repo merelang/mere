@@ -130,15 +130,6 @@ let emit_word w = emit (Word w)
 (* a 32-bit half of an IEEE pattern, as the signed word `li` will accept *)
 let signed32 (v : int) = if v > 0x7FFFFFFF then v - 0x100000000 else v
 
-(* The abort a float operation lowers to while contrib/softfloat is not yet
-   connected. It is the tail of `fail`: write the message, then exit(1). A
-   compile-time refusal was the other option and is worse here -- mere-ruby, the
-   program this work exists for, carries float code on paths a script never
-   reaches, and refusing at compile time refuses the whole program. *)
-let float_op_unsupported_msg what =
-  "RV32I: " ^ what ^ " on floats is not lowered yet -- contrib/softfloat \
-computes it in integers, but is not yet injected into the -rv prelude"
-
 let check_int_lit loc n =
   if n > 2147483647 || n < (-2147483648) then
     err loc (Printf.sprintf
@@ -263,6 +254,30 @@ let rec collect_fun (e : Ast.expr) =
 
 (* free-ish var occurrences, used only to compute reachable top-level fns.
    Over-approximation is fine: reachability filters against the tops map. *)
+let rec resolve_ty (t : Ast.ty) : Ast.ty =
+  match t with Ast.TyVar { Ast.link = Some t'; _ } -> resolve_ty t' | _ -> t
+
+let is_float_ty (t : Ast.ty option) =
+  match t with Some t -> (match resolve_ty t with Ast.TyFloat -> true | _ -> false) | None -> false
+
+
+(* Float operators lower to the rv-prelude's softfloat wrappers: this backend
+   has no float unit and no 64-bit word, so `+` on two floats is a call. Kept as
+   one table because reachability and codegen both need it, and two copies of a
+   name->name mapping become two mappings.
+
+   `Mod` and `Concat` are not in it because the typer rejects `%` and `++` on
+   floats before codegen ever sees them -- `1.5 % 2.5` is "expected int, got
+   float". An arm for them here would be a branch no input can reach, next to a
+   comment claiming it handles a case. *)
+let float_bin_fn = function
+  | Ast.Add -> "__fadd" | Ast.Sub -> "__fsub"
+  | Ast.Mul -> "__fmul" | Ast.Div -> "__fdiv"
+  | Ast.Mod | Ast.Concat -> "__f_unreachable"
+let float_cmp_fn = function
+  | Ast.Eq -> "__feq" | Ast.Ne -> "__fne" | Ast.Lt -> "__flt"
+  | Ast.Le -> "__fle" | Ast.Gt -> "__fgt" | Ast.Ge -> "__fge"
+
 let rec vars_in (e : Ast.expr) (acc : string list) : string list =
   match e.node with
   | Ast.Var v ->
@@ -283,6 +298,14 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
      | _ -> v :: acc)
   | Ast.Int_lit _ | Ast.Bool_lit _ | Ast.Unit_lit
   | Ast.Str_lit _ | Ast.Float_lit _ -> acc
+  (* A float operator is the one case where the callee's name appears nowhere in
+     the source, so nothing else would mark it reachable and codegen would emit a
+     call to a function it never laid down. *)
+  | Ast.Bin (op, a, b) when is_float_ty a.Ast.ty || is_float_ty b.Ast.ty ->
+    vars_in a (vars_in b (float_bin_fn op :: acc))
+  | Ast.Cmp (op, a, b) when is_float_ty a.Ast.ty || is_float_ty b.Ast.ty ->
+    vars_in a (vars_in b (float_cmp_fn op :: acc))
+  | Ast.Neg a when is_float_ty a.Ast.ty -> vars_in a ("__fneg" :: acc)
   | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) ->
     vars_in a (vars_in b acc)
   | Ast.Neg a | Ast.Annot (a, _) -> vars_in a acc
@@ -331,11 +354,8 @@ let record_fields : (string, string list) Hashtbl.t = Hashtbl.create 16
    types / record field types, from Top_type / Top_record decls *)
 let type_variants : (string, string list * (string * Ast.ty option) list) Hashtbl.t = Hashtbl.create 16
 let type_records : (string, string list * (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 16
-let rec resolve_ty (t : Ast.ty) : Ast.ty =
-  match t with Ast.TyVar { Ast.link = Some t'; _ } -> resolve_ty t' | _ -> t
 
-let is_float_ty (t : Ast.ty option) =
-  match t with Some t -> (match resolve_ty t with Ast.TyFloat -> true | _ -> false) | None -> false
+
 
 let record_order loc name =
   match Hashtbl.find_opt record_fields name with
@@ -770,7 +790,11 @@ let emit_abort msg =
   emit_word (enc_i 1 zero 0 a0 0x13);                    (* li a0, 1 *)
   emit_word (enc_i 0 zero 0 zero 0x73)                   (* ecall (exit) *)
 
-let emit_float_abort what = emit_abort (float_op_unsupported_msg what)
+
+(* the callee of a rewritten float operator, carrying the operator's location so
+   a failure inside softfloat still points at the user's line *)
+let float_fn (e : Ast.expr) (name : string) : Ast.expr =
+  { e with Ast.node = Ast.Var name; Ast.ty = None }
 
 let rec compile_expr (env : env) (e : Ast.expr) : unit =
   (* every subexpression starts out non-tail; the cases below whose value is
@@ -837,13 +861,25 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
                not a host" v)
           else
             err e.loc (Printf.sprintf "RV32I: unbound variable `%s`" v)))
+  (* Rewritten to a call rather than lowered here, the way `print_bool` is: the
+     application path already handles arity, argument order and tail position,
+     and a second implementation of it next door would be a second set of bugs.
+     `Neg` on a float comes FIRST -- the integer arm below negates the word,
+     which for a float is the pointer to its two halves, so it used to compute a
+     wrong number quietly rather than refuse. *)
+  | Ast.Neg a when is_float_ty a.Ast.ty ->
+    compile_app env { e with Ast.node = Ast.App (float_fn e "__fneg", a) }
   | Ast.Neg a ->
     compile_expr env a;
     emit_word (enc_r 0x20 a0 zero 0 a0 0x33)                         (* sub a0, x0, a0 *)
-  | Ast.Bin (_, l, r) when is_float_ty l.Ast.ty || is_float_ty r.Ast.ty ->
-    emit_float_abort "an arithmetic operator"
-  | Ast.Cmp (_, l, r) when is_float_ty l.Ast.ty || is_float_ty r.Ast.ty ->
-    emit_float_abort "a comparison"
+  | Ast.Bin (op, l, r) when is_float_ty l.Ast.ty || is_float_ty r.Ast.ty ->
+    let f = float_bin_fn op in
+    compile_app env
+      { e with Ast.node = Ast.App ({ e with Ast.node = Ast.App (float_fn e f, l) }, r) }
+  | Ast.Cmp (op, l, r) when is_float_ty l.Ast.ty || is_float_ty r.Ast.ty ->
+    let f = float_cmp_fn op in
+    compile_app env
+      { e with Ast.node = Ast.App ({ e with Ast.node = Ast.App (float_fn e f, l) }, r) }
   | Ast.Bin (op, l, r) -> compile_bin env op l r
   | Ast.Cmp (op, l, r) -> compile_cmp env op l r
   | Ast.Logic (op, l, r) -> compile_logic env op l r

@@ -57,6 +57,7 @@ let write_file = fn (p: str) -> fn (c: str) -> (__h_todo "write_file" : unit);
 let rec __rv_args_go = fn (i: int) -> fn (n: int) ->
   if i >= n then (Nil : str list) else Cons (__rv_argstr i, __rv_args_go (i + 1) n);
 let args = fn (u: unit) -> __rv_args_go 0 (__rv_argc ());
+
 let read_stdin = fn (u: unit) -> (__h_todo "read_stdin" : str);
 // `bytes` has no representation on this backend at all -- these are not a host
 // service but the type itself, and they are here for the same reason: a program
@@ -82,17 +83,23 @@ let print_bytes = fn (b: bytes) -> (__h_todo "print_bytes" : unit);
 //
 // Only the ones a program actually reaches are emitted, so a program that never
 // touches floats pays nothing.
-let __f_todo = fn (n: str) -> fail ("RV32I: " ++ n ++ " on floats is not lowered yet -- contrib/softfloat computes it in integers, but is not yet injected into the -rv prelude");
-let f_add = fn (a: float) -> fn (b: float) -> (__f_todo "f_add" : float);
-let f_sub = fn (a: float) -> fn (b: float) -> (__f_todo "f_sub" : float);
-let f_mul = fn (a: float) -> fn (b: float) -> (__f_todo "f_mul" : float);
-let f_div = fn (a: float) -> fn (b: float) -> (__f_todo "f_div" : float);
+// What is left after softfloat: the transcendentals, `f_pow`, `f_min`/`f_max`,
+// and the decimal conversions. The message used to say softfloat "is not yet
+// injected into the -rv prelude", which stopped being true the day it was --
+// and would have gone on telling every user to go and do the thing that had
+// already been done.
+let __f_todo = fn (n: str) -> fail ("RV32I: " ++ n ++ " is not computed on this backend -- contrib/softfloat is injected and does the four arithmetic operators, the comparisons and int conversion, but not this");
 let f_min = fn (a: float) -> fn (b: float) -> (__f_todo "f_min" : float);
 let f_max = fn (a: float) -> fn (b: float) -> (__f_todo "f_max" : float);
+// f_add / f_sub / f_mul / f_div / f_neg / f_abs / the four f_ comparisons and
+// float_of_int / int_of_float are real now, at the bottom of this file, next to
+// the softfloat library they call. What stays a stub here is what softfloat does
+// not compute: the transcendentals, `f_pow`, and the decimal conversions. f_min
+// and f_max stay too -- `if a < b then a else b` is *a* definition, but the
+// host's is fmin/fmax with their own NaN rules, and guessing which would put a
+// wrong answer where an honest refusal is.
 let f_pow = fn (a: float) -> fn (b: float) -> (__f_todo "f_pow" : float);
 let atan2 = fn (a: float) -> fn (b: float) -> (__f_todo "atan2" : float);
-let f_neg = fn (a: float) -> (__f_todo "f_neg" : float);
-let f_abs = fn (a: float) -> (__f_todo "f_abs" : float);
 let sqrt = fn (a: float) -> (__f_todo "sqrt" : float);
 let sin = fn (a: float) -> (__f_todo "sin" : float);
 let cos = fn (a: float) -> (__f_todo "cos" : float);
@@ -102,12 +109,6 @@ let exp = fn (a: float) -> (__f_todo "exp" : float);
 let floor = fn (a: float) -> (__f_todo "floor" : float);
 let ceil = fn (a: float) -> (__f_todo "ceil" : float);
 let round = fn (a: float) -> (__f_todo "round" : float);
-let f_lt = fn (a: float) -> fn (b: float) -> (__f_todo "f_lt" : bool);
-let f_le = fn (a: float) -> fn (b: float) -> (__f_todo "f_le" : bool);
-let f_gt = fn (a: float) -> fn (b: float) -> (__f_todo "f_gt" : bool);
-let f_ge = fn (a: float) -> fn (b: float) -> (__f_todo "f_ge" : bool);
-let float_of_int = fn (n: int) -> (__f_todo "float_of_int" : float);
-let int_of_float = fn (x: float) -> (__f_todo "int_of_float" : int);
 let float_of_str = fn (s: str) -> (__f_todo "float_of_str" : float);
 let str_of_float = fn (x: float) -> (__f_todo "str_of_float" : str);
 
@@ -266,6 +267,68 @@ let rvmap_len = fn m ->
       if _mseen seen kk then go rest seen acc
       else go rest (Cons (kk, seen)) (acc + 1) in
   go (vec_get m 0) Nil 0;
+// --- softfloat, for float arithmetic on a backend with no float ----------
+// Spliced in HERE, at the end, and not next to the other host-service shims:
+// top-level order matters in Mere, and this library calls `not`, which the
+// prelude itself defines further down. Placed earlier it referred to a name that
+// did not exist yet -- and the failure named `not`, not the placement.
+|mere} ^ Rv_softfloat.contents ^ {mere|
+// --- float arithmetic ------------------------------------------------------
+// This backend has no float unit and no 64-bit word. A float value here is the
+// two 32-bit halves of its IEEE 754 pattern, which is enough to HOLD one and
+// not enough to compute with: a product of two 32-bit halves does not fit a
+// signed 32-bit int. So each operator decodes both operands into 15-bit limbs,
+// works there, and re-encodes.
+//
+// It is slow, and that is the honest trade. The alternative on a target with no
+// float unit is to refuse, which is what this did before: mere-ruby carries
+// float code on paths a script never reaches, and `1 + 1` reached one anyway.
+//
+// The names are `__sf_`-prefixed because this file is prepended to the user's
+// program, so a program with its own top-level `add` would otherwise supply what
+// `+` on floats calls.
+let __fadd = fn (a: float) -> fn (b: float) ->
+  __sf_float_of_sf (__sf_add (__sf_sf_of_float a) (__sf_sf_of_float b));
+let __fsub = fn (a: float) -> fn (b: float) ->
+  __sf_float_of_sf (__sf_sub (__sf_sf_of_float a) (__sf_sf_of_float b));
+let __fmul = fn (a: float) -> fn (b: float) ->
+  __sf_float_of_sf (__sf_mul (__sf_sf_of_float a) (__sf_sf_of_float b));
+let __fdiv = fn (a: float) -> fn (b: float) ->
+  __sf_float_of_sf (__sf_fdiv (__sf_sf_of_float a) (__sf_sf_of_float b));
+// Negation is a sign-bit flip and is defined on NaN too, which is why it goes
+// through the library rather than through `0.0 - x`: that is a different
+// operation on -0.0 and on NaN.
+let __fneg = fn (a: float) -> __sf_float_of_sf (__sf_neg (__sf_sf_of_float a));
+// `eq` and `lt` are not bit comparisons: -0.0 equals +0.0, and a NaN equals
+// nothing, itself included. Neither falls out of comparing the fields, and
+// neither falls out of comparing the two halves as ints.
+let __feq = fn (a: float) -> fn (b: float) ->
+  __sf_eq (__sf_sf_of_float a) (__sf_sf_of_float b);
+let __fne = fn (a: float) -> fn (b: float) -> not (__feq a b);
+let __flt = fn (a: float) -> fn (b: float) ->
+  __sf_lt (__sf_sf_of_float a) (__sf_sf_of_float b);
+let __fle = fn (a: float) -> fn (b: float) ->
+  __sf_le (__sf_sf_of_float a) (__sf_sf_of_float b);
+let __fgt = fn (a: float) -> fn (b: float) ->
+  __sf_gt (__sf_sf_of_float a) (__sf_sf_of_float b);
+let __fge = fn (a: float) -> fn (b: float) ->
+  __sf_ge (__sf_sf_of_float a) (__sf_sf_of_float b);
+
+// The named forms of the same operations. They are the operators' spelling for
+// code that passes them around, so they share the implementation rather than
+// getting a second one that could disagree with `+`.
+let f_add = fn (a: float) -> fn (b: float) -> __fadd a b;
+let f_sub = fn (a: float) -> fn (b: float) -> __fsub a b;
+let f_mul = fn (a: float) -> fn (b: float) -> __fmul a b;
+let f_div = fn (a: float) -> fn (b: float) -> __fdiv a b;
+let f_neg = fn (a: float) -> __fneg a;
+let f_abs = fn (a: float) -> __sf_float_of_sf (__sf_abs (__sf_sf_of_float a));
+let f_lt = fn (a: float) -> fn (b: float) -> __flt a b;
+let f_le = fn (a: float) -> fn (b: float) -> __fle a b;
+let f_gt = fn (a: float) -> fn (b: float) -> __fgt a b;
+let f_ge = fn (a: float) -> fn (b: float) -> __fge a b;
+let float_of_int = fn (n: int) -> __sf_float_of_sf (__sf_of_int n);
+let int_of_float = fn (x: float) -> __sf_to_int (__sf_sf_of_float x);
 |mere}
 
 (* Lines the prelude occupies once it is glued ahead of the user source, so a

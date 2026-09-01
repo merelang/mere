@@ -6,7 +6,7 @@
 // overflows -- so the exponent arithmetic is exercised from both ends here,
 // which is why the sweep bands below differ from the add gate's.
 import "../../contrib/softfloat/mul.mere";
-import "./sf_bridge.mere";
+import "../../contrib/softfloat/bits.mere";
 
 let fails = vec_new ();
 let _ = vec_push fails 0;
