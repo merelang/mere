@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.380 — 2026-09-01
+
+_Or-patterns on RV32I, refused by a rule where they bind._ Try the first
+alternative; jump past the second once it matched; on both mismatches, fail. Both
+the scrutinee and the stack pointer are kept, because the first alternative may
+be a container pattern that parked its pointer and jumped out from inside — the
+same thing v0.1.379 taught `compile_match` to undo at an arm's fail label.
+
+An or-pattern that **binds** is refused, and the message says which rule: both
+alternatives would have to bind into the same slot, and slots are handed out
+while the pattern is walked, so they would name different ones and the arm body
+would read whichever the compiler saw last. A narrow refusal that states its rule
+beats a wide one that does not.
+
+**Two of three poisons walked through the first test set**, which had the first
+alternative failing and the second either failing or matching:
+
+- The stack-pointer restore matters only when the first alternative is a
+  container that failed part-way, AND the second matches, AND the whole match
+  sits in a call argument — then the leftover word is popped as one of that
+  call's other arguments. Any two of the three and it hides.
+- The jump past the second alternative matters only when the first **matches**
+  and the second would not: without it, control falls into the second attempt and
+  the arm is rejected for a value it had accepted.
+
+Both cases are in `test/parity/or_pattern.mere` now, and the comment says why each
+one is there rather than leaving the next reader to guess.
+
+---
+
 ## v0.1.379 — 2026-09-01
 
 _Four bytes that were never the problem; what they displaced was._ A container
