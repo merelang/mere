@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.374 — 2026-09-01
+
+_A float on RV32I is two words, the arithmetic is not lowered, and the program
+says so at runtime instead of quietly adding two pointers._
+
+`compile_bin` does not look at types. Letting a float literal through without a
+guard would have sent `1.5 + 2.5` to the integer add and returned a number, so
+the guard came in the same change as the literal. A float value is a two-word
+block — the halves of the IEEE 754 pattern — which is the shape
+`float_bits_hi` / `float_bits_lo` already ask for; those two and
+`float_of_bits` are real here now, not scaffolding.
+
+The arithmetic is a **scaffold and says so**: an operator aborts at runtime with
+a message naming `contrib/softfloat`. A compile-time refusal was the other
+option and is worse for the program this exists for — a Ruby subset interpreter
+carries float code on paths a script never reaches, and refusing at compile time
+refuses the whole program.
+
+**The shims needed their types written out.** Left to inference they are
+`'a -> 'b`, which unifies with anything and moves the failure elsewhere: the
+typer stopped on `float_of_str n / float_of_str d` with
+`expected float, got int`, because a fresh type variable let `/` resolve as
+integer division.
+
+`abs` / `max` / `min` / `clamp` / `even` / `odd` / `gcd` are also new to this
+backend and are **not** scaffolding — they are int functions that were on the
+refused list only because nobody had written them.
+
+New gate, `scripts/rv_prelude_check.sh`, because the prelude is injected by the
+driver and `test_basic.ml` calls the backend directly — it could not see any of
+this. The probe list is derived from the prelude source, so a name added without
+one fails by name. It found **25 existing prelude names that nothing had ever
+compiled**, and pins a bug it turned up on the way: `rvmap_set` and `rvmap_get`
+used on the same map fail to type-check, and the message is
+`unbound variable: rvmap_new` — for a name that is bound. Either alone is fine,
+and it reproduces on the interpreter, so it is not a backend hole. The pin
+expects the failure and reports when it stops happening.
+
+**What this unblocked**: `mere -rv` on that Ruby subset interpreter now compiles
+past every float in its 39,719 lines. The next wall is not float and not this
+compiler — it is `0xFFFFFFFF` in a gzip library it depends on, which the literal
+check added in v0.1.367 refuses on a 32-bit target.
+
+---
+
 ## v0.1.373 — 2026-09-01
 
 _The magnitude of a negative integer is not `0 - n`._ `contrib/softfloat/conv`
