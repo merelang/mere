@@ -2425,6 +2425,15 @@ let rec emit_expr (e : Ast.expr) : string =
         resources. *)
      | Ast.Var "detach" when not (user_shadows "detach") ->
        "({ __auto_type __h = " ^ emit_expr arg ^ "; pthread_detach(__h.tid); 0; })"
+     (* Not the bare-metal arm above: the argument block exists on every -rv
+        build, hosted or bare. Sharing that arm made the matrix file these under
+        "bare", which is the wrong reason for refusing them -- what a hosted
+        process does not have is the block, and `args` is the spelling that
+        works everywhere. *)
+     | Ast.Var ("__rv_argc" | "__rv_argstr") ->
+       unsupported e.Ast.loc
+         "__rv_argc / __rv_argstr read the RV32I argument block, which a hosted \
+          process does not have — call `args`, which works on every backend"
      (* Raw physical memory is RV32I bare-metal only. Without this arm the
         raw_* names fell through to the closure path and emitted a call to an
         undefined `mu_raw_poke8` plus an unknown `Raw` C type, so the refusal

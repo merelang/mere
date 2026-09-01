@@ -103,7 +103,13 @@ check() {
   # emulators being wrong, which is the whole reason to run both.
   if [ -n "$RVRUN" ]; then
     cp "$bin" "$TMP/prog.bin"
-    ours=$(cd "$TMP" && perl -e 'alarm 300; exec @ARGV' ./rvrun 8 virt 2>&1 || true)
+    # `rvrun: ...` lines are the emulator talking about itself -- the halt reason,
+    # the pc trace -- not the guest's output, and QEMU has no equivalent to
+    # compare them against. Leaving them in made all four images disagree the day
+    # the emulator learned to name its halt reason, which is a differential test
+    # reporting on its own diagnostics.
+    ours=$(cd "$TMP" && perl -e 'alarm 300; exec @ARGV' ./rvrun 8 virt 2>&1 \
+             | grep -v '^rvrun: ' || true)
     if [ "$ours" != "$expected" ]; then
       printf '  FAIL  %s (memu disagrees with qemu)\n' "$name"
       printf '    qemu:\n%s\n' "$got" | sed 's/^/      /'
@@ -130,6 +136,18 @@ check examples/riscv_virt_timer.mere 'tick 1
 tick 2
 tick 3
 three ticks, stopping'
+
+# `args` on a target with no host: the program writes the argument block into RAM
+# itself and reads it back through `args`, so this checks the reader the compiler
+# emits without a loader in the picture. `before: 0` is the magic guard -- at that
+# point a count and three good pointers are already in RAM and must still read as
+# no arguments. The three lengths are 1, 4 and 5 because index 0 reads correctly
+# even when the index is not scaled at all, so a one-argument case sees nothing.
+check examples/riscv_virt_args.mere 'before: 0
+count: 3
+arg: x
+arg: four
+arg: fives'
 
 # The letters come one per switch rather than one per N iterations, so this is a
 # function of the scheduler and not of how fast either machine's clock runs.

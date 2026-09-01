@@ -85,7 +85,7 @@ instantiation with a missing-import error rather than a wrong answer.
 | `file_fsync` | `File -> unit` | Force the OS to commit this handle's writes to stable storage. The difference between "written" and "durable", and what a store calls at a commit point |
 | `file_close` | `File -> unit` | Close the handle |
 | `env_var` ★ | `str -> str option` | Fetch env var; `None` if unset (Phase 19.6; depends on prelude) |
-| `args` ★ | `unit -> str list` | The program's own args (after the script path / binary name); consistent interp ↔ native since v0.1.12 |
+| `args` ★ | `unit -> str list` | The program's own args (after the script path / binary name); consistent interp ↔ native since v0.1.12. On `-rv` there is no host to ask: the loader leaves the arguments in RAM and this reads them, so a program given none — or run by a loader that leaves the block alone — sees an empty list rather than an error |
 | `run` | `str -> int` | Run a command line via the shell, inherit stdio, return its exit code (interp + C native; v0.1.13) |
 | `stdin_byte` | `unit -> int` | One byte from stdin **without blocking**; -1 when nothing is ready. `read_key` blocks, which a device emulator polling a line-status register cannot afford (interp + C native) |
 
