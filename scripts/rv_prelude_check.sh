@@ -56,6 +56,7 @@ probe_for() {
     rvmap_get) echo 'let m = rvmap_new ();\nlet _ = match rvmap_get m "k" with Some v -> print_int v | None -> print_int 0;' ;;
     rvmap_has) echo 'let _ = print_int (if rvmap_has (rvmap_new ()) "k" then 1 else 0);' ;;
     rvmap_delete) echo 'let m = rvmap_new ();\nlet _ = rvmap_delete m "k";\nlet _ = print_int 0;' ;;
+    rvmap_len) echo 'let m = rvmap_new ();\nlet _ = print_int (rvmap_len m);' ;;
     rvmap_iter) echo 'let m = rvmap_new ();\nlet _ = rvmap_iter m (fn k -> fn v -> ());\nlet _ = print_int 0;' ;;
     *) echo "" ;;
   esac
@@ -131,6 +132,28 @@ fi
 printf 'let m = rvmap_new ();\nlet _ = rvmap_set m "k" 1;\nlet _ = match rvmap_get m "k" with Some v -> print_int v | None -> ();\n' > "$TMP/both.mere"
 if "$MERE" -rv "$TMP/both.mere" > /dev/null 2>&1; then
   echo "FAIL rv_prelude: rvmap_set + rvmap_get now compiles — the pin above is stale, retire it"
+  rc=1
+fi
+
+# An `extern fn` is a name the PROGRAM declared. Answering `unbound variable`
+# for it blamed the user for a limit of the target -- the same shape as the
+# builtin hole Q-070 closed, one declaration further out. This lives here rather
+# than in test_basic.ml because that harness types the program itself and its
+# typer answers `unbound variable` before codegen is reached.
+printf 'extern fn getpid: unit -> int;\nlet _ = print_int (getpid ());\n' > "$TMP/ex.mere"
+if "$MERE" -rv "$TMP/ex.mere" >/dev/null 2>"$TMP/exerr"; then
+  echo "FAIL rv_prelude: an extern compiled for -rv, which has no C library"
+  rc=1
+elif grep -q 'has no C library to link against' "$TMP/exerr"; then :; else
+  echo "FAIL rv_prelude: an extern is reported as something other than the target's limit"
+  head -2 "$TMP/exerr"
+  rc=1
+fi
+# and a name nobody declared is still a plain unbound variable, so the branch
+# above did not swallow the ordinary case
+printf 'let _ = print_int (nosuchname 1);\n' > "$TMP/tp.mere"
+if "$MERE" -rv "$TMP/tp.mere" 2>&1 | grep -q 'unbound variable'; then :; else
+  echo "FAIL rv_prelude: a genuine typo no longer reports as unbound"
   rc=1
 fi
 

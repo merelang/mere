@@ -249,6 +249,7 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
      | "map_get" -> "rvmap_get" :: v :: acc
      | "map_has" -> "rvmap_has" :: v :: acc
      | "map_delete" -> "rvmap_delete" :: v :: acc
+     | "map_len" -> "rvmap_len" :: v :: acc
      | "map_iter" -> "rvmap_iter" :: v :: acc
      | _ -> v :: acc)
   | Ast.Int_lit _ | Ast.Bool_lit _ | Ast.Unit_lit
@@ -365,6 +366,13 @@ let request_eq (t : Ast.ty) : string =
    global to its region slot index. *)
 let globals : (string option * Ast.expr) list ref = ref []
 let globals_map : (string, int) Hashtbl.t = Hashtbl.create 32
+
+(* Names declared `extern fn` by the program. This backend has no C library to
+   link against, so it cannot have any of them -- but saying `unbound variable`
+   for a name the program DID declare blames the user for a target's limit. It is
+   the same shape as the hole Q-070 closed for builtins, one declaration further
+   out. *)
+let externs : (string, unit) Hashtbl.t = Hashtbl.create 16
 (* Globals + heap sit well above the code (the program loads at 0). The code
    must stay below this; the self-hosted compiler is ~300KB, so 2MB is ample. *)
 (* Where this program is loaded. Zero for the machine's first program, which the
@@ -716,6 +724,11 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
                here, because a second list drifts from the first. *)
             err e.loc (Printf.sprintf
               "RV32I: `%s` has no RV32I lowering yet (host builtin)" v)
+          else if Hashtbl.mem externs v then
+            err e.loc (Printf.sprintf
+              "RV32I: `%s` is declared `extern fn`, and this target has no C \
+               library to link against -- `--bare` hands the program the machine, \
+               not a host" v)
           else
             err e.loc (Printf.sprintf "RV32I: unbound variable `%s`" v)))
   | Ast.Neg a ->
@@ -1150,6 +1163,15 @@ and compile_app env e =
     compile_expr env (List.hd args);                     (* a0 = status *)
     emit_word (enc_i 93 zero 0 a7 0x13);                 (* li a7, 93 *)
     emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall (exit) *)
+  (* stderr. The emulator's write syscall ignores the descriptor, but QEMU's
+     does not, and a diagnostic on stdout is a diagnostic in the wrong stream. *)
+  | Ast.Var "print_err" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i 0 a0 2 a2 0x03);                    (* lw a2, 0(a0) — len *)
+    emit_word (enc_i 4 a0 0 a1 0x13);                    (* addi a1, a0, 4 *)
+    li a0 2;                                             (* fd = stderr *)
+    emit_word (enc_i 64 zero 0 a7 0x13);                 (* li a7, 64 *)
+    emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall (write) *)
   | Ast.Var "print_no_nl" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i 0 a0 2 a2 0x03);                    (* lw a2, 0(a0) — len *)
@@ -1437,6 +1459,7 @@ and compile_app env e =
   | Ast.Var "map_set" when List.length args = 3 -> call_top env "rvmap_set" args
   | Ast.Var "map_get" when List.length args = 2 -> call_top env "rvmap_get" args
   | Ast.Var "map_has" when List.length args = 2 -> call_top env "rvmap_has" args
+  | Ast.Var "map_len" when List.length args = 1 -> call_top env "rvmap_len" args
   | Ast.Var "map_delete" when List.length args = 2 -> call_top env "rvmap_delete" args
   | Ast.Var "map_iter" when List.length args = 2 -> call_top env "rvmap_iter" args
   | Ast.Var "show" when List.length args = 1 ->
@@ -2398,6 +2421,7 @@ let build_items (prog : Ast.program) : item list =
   Hashtbl.reset record_fields;
   Hashtbl.reset type_variants;
   Hashtbl.reset type_records;
+  Hashtbl.reset externs;
   (* constructor tags + record field orders from the type declarations *)
   List.iter (fun decl ->
     match decl with
@@ -2409,6 +2433,7 @@ let build_items (prog : Ast.program) : item list =
     | Ast.Top_record (name, params, fields) ->
       Hashtbl.replace record_fields name (List.map fst fields);
       Hashtbl.replace type_records name (params, fields)
+    | Ast.Top_extern (name, _) -> Hashtbl.replace externs name ()
     | _ -> ()
   ) prog.Ast.decls;
   let full = Ast.desugar_program prog in
