@@ -4,6 +4,56 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.377 — 2026-09-01
+
+_`try_or` on RV32I, and five poisons the first test set could not see._ There is
+no `longjmp` here, so unwinding is a jump to a recorded address: `try_or` builds
+a five-word record — previous handler, sp, fp, catch address, default — installs
+it in a word reserved at `globals_base`, and `fail` reads that word before
+deciding whether to exit.
+
+The record is on the heap, not the stack, and that is deliberate: it stays
+readable after sp has been moved back, where a record below the restored sp would
+not be.
+
+Nesting works because the record keeps the PREVIOUS handler and both paths put it
+back. A single global slot holding "the current handler" would be overwritten by
+an inner `try_or` and never restored, and the inner one would then catch the
+outer one's failures forever after.
+
+The reserved word is at `globals_base`, ahead of the top-level value bindings,
+rather than in the print scratch region — that region's whole description is
+"the buffer the print helpers build digits in", and putting unrelated state there
+would make the description untrue.
+
+**Five of six poisons got past the first test set, which had looked convincing:**
+catch a failure, catch it from twenty frames down, nest two of them, and run a
+2,000-deep recursion afterwards to show the stack was intact. All four passed
+with the unwinding half-broken.
+
+- `fail` not restoring the previous handler is invisible with one level of
+  nesting, because the *normal* path restores it too. It needs an inner `try_or`
+  that CATCHES and is then followed by another failure.
+- The normal path not restoring it is invisible in the **value**: the next
+  `fail` restores the handler, the second attempt reaches the right one, and only
+  the code between the inner `try_or` and the failure runs twice. That needed a
+  counter, not a value.
+- `sp` not being restored does not corrupt anything once. It **drifts**. One
+  `try_or` and a 2,000-deep recursion afterwards prove nothing; 20,000 of them
+  meet the heap.
+
+`test/parity/try_or_unwind.mere` is the eight cases, MATCH on C, LLVM and Wasm,
+and verified on the Mere-written RV32IM emulator. All six poisons now fail it.
+
+One `timeout` in the poison harness was not detected as missing on this platform,
+and its shell error read as "the poison was caught" for four runs. A poison that
+does not land looks exactly like a gate that does not catch — twice in two days.
+
+**The Ruby subset interpreter's remaining wall is now only the FFI boundary**:
+twelve `extern fn` declarations, seven of them TCP.
+
+---
+
 ## v0.1.376 — 2026-09-01
 
 _Three walls down, and the one left is not a builtin._ Enumerating what still
