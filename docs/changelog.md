@@ -4,6 +4,59 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.389 — 2026-09-02
+
+_The parity suite has 142 programs and RV32I had never been run against any of
+them. Sweeping it found two silent wrong answers._
+
+`scripts/parity.sh` exists because four backends should agree. RV32I is not one
+of the four, because running its output needs a machine. v0.1.388 added
+`rv_exec_check.sh` with five programs; this points it at the whole corpus, with
+the C backend as the reference -- both are compiled programs, so neither is doing
+something the other cannot.
+
+**`<` on a nullary variant compared heap pointers.** `derive (Eq, Ord) color`
+orders by declaration order, which is the tag. The tag compare existed for `==`
+and stopped there, so ordering fell through to the integer path and compared the
+two one-word blocks' addresses. That is not a random wrong answer: operands are
+evaluated left then right, so the left one is always the older allocation and
+`a < b` came out **true for every pair, whichever way round it was written**.
+`lt Red Blue` and `lt Blue Red` were both true.
+
+Ordering on a tuple, record or payload-carrying constructor is now refused by
+name. `==` on those has a generated structural helper; `<` has none, and a
+pointer comparison is not an approximation of one.
+
+**The Map compared every key with `str_eq`.** The rv prelude's Map is an assoc
+list, and its key comparison reads the first word as a length and the rest as
+characters. For a nullary constructor -- a one-word `[tag]` block -- that walks
+off the end, and `map_get c Green` answered *key not found* for a key that was
+there. It did not fail; it read out of bounds and said no.
+
+A key whose type is known and is not `str` is now refused, naming the type. Only
+a *known* non-str type: an unresolved type variable is let through, because a
+polymorphic helper called with string keys is a real program. That gap is
+deliberate and written down.
+
+Both refusals are gated in `rv_prelude_check.sh` and not left to the sweep --
+the sweep skips a program that does not compile, so a refusal quietly deleted
+would become a wrong answer again with nothing going red.
+
+### What the sweep says now
+
+64 programs agree, 8 differ for reasons recorded by name in the script, and 63 of
+the 64 agree *except* for one line: the reference prints the program's own final
+value and an RV32I binary does not. That is a real parity difference and it is
+spelled out as its own accepted shape rather than filtered away, so a difference
+in the last line is still a difference.
+
+The known-different list is checked in both directions. A program in it that
+starts agreeing fails the gate, which is not hypothetical -- `nul_in_str` was
+briefly in the list on the strength of a comparison that had merged stderr into
+the output, and the check said so on the first run.
+
+---
+
 ## v0.1.388 — 2026-09-02
 
 _A `try_or` that fired handed the catcher back the failed callee's registers._
