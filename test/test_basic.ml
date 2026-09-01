@@ -13778,6 +13778,14 @@ let () =
     "let _ = print_int (-2147483649);" "does not fit this backend's 32-bit int";
   rv_contains "rv32i: -2147483648 is in range, though its positive half is not"
     "let _ = print_int (-2147483648);" "lui a0, 0x80000";
+  (* A tuple is a block of words with element i at i*4 -- what `Ast.Tuple`
+     builds and what a `P_tuple` pattern already reads here. So `fst` and `snd`
+     were not a missing mechanism, only a missing pair of cases: destructuring a
+     pair in a `let` compiled, and calling `snd` on the same pair did not. *)
+  rv_contains "rv32i: fst reads the first word of the tuple block"
+    "let p = (11, 22);\nlet _ = print_int (fst p);" "lw a0, 0(a0)";
+  rv_contains "rv32i: snd reads the second"
+    "let p = (11, 22);\nlet _ = print_int (snd p);" "lw a0, 4(a0)";
   Codegen_riscv.bare := true;
   (* reachable through --bare's entry, so the access is actually emitted *)
   rv_contains "rv32i: a raw access bounds-checks its offset"

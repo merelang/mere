@@ -25,6 +25,14 @@ trap 'rm -rf "$TMP"' EXIT
 P="$ROOT/test/float/softfloat_roundtrip.mere"
 rc=0
 
+L="$ROOT/test/float/softfloat_limbs.mere"
+"$MERE" "$L" > "$TMP/limbs" 2>&1 || { echo "FAIL softfloat: the interpreter refused the limb gate"; cat "$TMP/limbs"; exit 1; }
+if grep -q '^FAIL' "$TMP/limbs"; then
+  echo "FAIL softfloat: the limbs disagreed with native int arithmetic"
+  grep '^FAIL' "$TMP/limbs" | head -10
+  rc=1
+fi
+
 "$MERE" "$P" > "$TMP/interp" 2>&1 || { echo "FAIL softfloat: the interpreter refused the gate"; cat "$TMP/interp"; exit 1; }
 if grep -q '^FAIL' "$TMP/interp"; then
   echo "FAIL softfloat: a value did not survive the round trip"
@@ -63,7 +71,8 @@ fi
 #     had a float-using function in it: nothing had made it reachable, so
 #     codegen never saw it. A probe that exercises a subset reports on the
 #     subset, whatever the message says.
-if grep -n '\bfloat\b' "$ROOT/contrib/softfloat/softfloat.mere" | grep -v '^ *[0-9]*: *//' > "$TMP/floats"; then
+if grep -n '\bfloat\b' "$ROOT/contrib/softfloat/softfloat.mere" \
+       "$ROOT/contrib/softfloat/limbs.mere" | grep -v ':[0-9]*: *//' > "$TMP/floats"; then
   echo "FAIL softfloat: the library names \`float\`, which RV32I does not have"
   cat "$TMP/floats"
   rc=1
@@ -76,7 +85,7 @@ fi
 # probe is written by hand and its COVERAGE is what gets checked.
 N="$ROOT/test/float/softfloat_narrow.mere"
 NAMES=$(sed -n 's/^let \(rec \)\{0,1\}\([a-z_][a-z_0-9]*\) *=.*/\2/p' \
-        "$ROOT/contrib/softfloat/softfloat.mere")
+        "$ROOT/contrib/softfloat/softfloat.mere" "$ROOT/contrib/softfloat/limbs.mere")
 MISSING=""
 for n in $NAMES; do
   grep -q "\\b$n\\b" "$N" || MISSING="$MISSING $n"
