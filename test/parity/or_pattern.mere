@@ -1,4 +1,38 @@
-// or-pattern in a match arm (shared binding across constructors)
-type v = A of int | B of int | C of int;
-let f = fn (x: v) -> match x with | A n | B n -> n | C n -> n * 10;
-print (str_of_int (f (A 4) + f (B 8) + f (C 3)))
+// Or-patterns, and the three cases a poison run said were missing.
+//
+// The first version of this file had the first alternative failing and the
+// second failing too, plus one where the second matched. Two poisons walked
+// through it: removing the stack-pointer restore between alternatives, and
+// removing the jump that skips the second alternative once the first has
+// matched. Neither was observable without the case that shows it.
+//
+//   * The restore matters when the first alternative is a CONTAINER pattern that
+//     parked its pointer and failed part-way, AND the second one matches, AND
+//     the whole match sits in a call argument -- then the leftover word is popped
+//     as one of that call's other arguments. Without all three it hides.
+//   * The jump matters only when the first alternative MATCHES and the second
+//     would not: without it, control falls into the second attempt and the arm is
+//     rejected for a value it accepted.
+// first alternative fails, second fails too, inside a call argument
+let rec f1 = fn (n: int) -> fn (a: int) ->
+  if n == 0 then a else f1 (n - 1) (a + (match (1, 2) with (1, 3) | (1, 9) -> 0 | _ -> 1));
+let _ = print_int (f1 300 0);
+// first fails, second matches, inside a call argument -- a leftover push
+// from the first displaces one of the call's other arguments
+let rec f2 = fn (n: int) -> fn (a: int) ->
+  if n == 0 then a else f2 (n - 1) (a + (match (1, 2) with (1, 3) | (1, 2) -> 1 | _ -> 0));
+let _ = print_int (f2 300 0);
+// first matches and the second would not -- without the jump, control falls
+// into the second attempt and the arm is rejected for a value it accepted
+let _ = print_int (match 1 with 1 | 2 -> 7 | _ -> 8);
+let rec f3 = fn (n: int) -> fn (a: int) ->
+  if n == 0 then a else f3 (n - 1) (a + (match (1, 2) with (1, 2) | (9, 9) -> 1 | _ -> 0));
+let _ = print_int (f3 300 0);
+
+// nullary constructors, and three alternatives (the nesting is right-associated)
+type T = A | B | C | D;
+let _ = print_int (match B with A | B -> 1 | C | D -> 2);
+let _ = print_int (match D with A | B -> 1 | C | D -> 2);
+// a record inside an alternative
+type R = { p: int, q: int };
+let _ = print_int (match (R { p = 1, q = 2 }) with R { p = 1, q = 3 } | R { p = 1, q = 2 } -> 5 | _ -> 6);

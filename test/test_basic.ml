@@ -13824,6 +13824,15 @@ let () =
     "let _ = print_int (try_or (fn (u) -> fail \"x\") 7);" "sw t0, 12(t1)";
   rv_contains "rv32i: fail looks for a handler before exiting"
     "let _ = fail \"x\";" "beqz t1, .noCatch";
+  (* Or-patterns: try the first alternative, jump past the second if it matched.
+     Binding is refused by a rule -- both alternatives would have to bind into
+     the same slot, and slots are handed out while the pattern is walked. The
+     behaviour is in test/parity/or_pattern.mere. *)
+  rv_contains "rv32i: an or-pattern skips the second alternative once matched"
+    "let _ = print_int (match 1 with 1 | 2 -> 7 | _ -> 8);" ".orOk";
+  rv_err_contains "rv32i: an or-pattern that binds is refused by name"
+    "type T = A of int | B of int;\nlet _ = print_int (match (A 1) with A x | B x -> x);"
+    "binds a variable is not supported yet";
   (* The `extern fn` message has its own gate in scripts/rv_prelude_check.sh:
      this harness types a program itself and its typer answers `unbound
      variable` for the extern before codegen is reached, so the branch that
