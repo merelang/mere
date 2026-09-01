@@ -65,7 +65,23 @@ let enc_b imm rs2 rs1 f3 op =
   (b12 lsl 31) lor (b10_5 lsl 25) lor (rs2 lsl 20) lor (rs1 lsl 15)
   lor (f3 lsl 12) lor (b4_1 lsl 8) lor (b11 lsl 7) lor op
 
+(* J-type reaches +/-1 MB and this masked to 21 bits, so a jump past that was
+   silently encoded as one to somewhere else. The comment on the long-range branch
+   below says a bare B-type "silently truncates" and uses J-type to avoid it --
+   and J-type does the same thing one megabyte out, which nothing checked. A
+   39,719-line interpreter emits 3.97 MB of code, ran off the end of it, and took
+   a trap: `rvrun: halted at pc=4195244`, past the 4,163,521-byte binary.
+
+   This makes it loud. The fix that makes such a program WORK is a two-instruction
+   `auipc` + `jalr`, chosen when the code is big enough to need it -- the two-pass
+   layout added in v0.1.382 already measures the size, so the second pass could
+   know. That is a separate change; this one stops the wrong answer. *)
 let enc_j imm rd op =
+  if imm > 0xFFFFF || imm < (-0x100000) then
+    failwith (Printf.sprintf
+      "codegen_riscv: a jump of %d bytes does not fit J-type's +/-1MB reach. This \
+       backend has no long-range call yet, and encoding it anyway would jump \
+       somewhere else. The program's code is too big for it." imm);
   let i = imm land 0x1FFFFF in
   let b20 = (i lsr 20) land 1 in
   let b19_12 = (i lsr 12) land 0xFF in

@@ -13718,6 +13718,11 @@ let () =
      here, because two megabytes of code is not a unit test. *)
   rv_contains "rv32i: a small program's globals still start at 0x200000"
     "let _ = print_int 1;" "lui t0, 0x200";
+  (* A jump past J-type's +/-1MB reach used to be masked to 21 bits and encoded
+     as a jump somewhere else. It is a loud failure now. There is no unit test
+     for it -- provoking one takes a megabyte of code -- and the gate is that a
+     3.97 MB interpreter reports it by name instead of running off the end of
+     itself, which is checked against that interpreter rather than here. *)
   Codegen_riscv.ram_bytes := 32 * 1024 * 1024;
   rv_contains "rv32i: --ram moves the stack to the top of RAM"
     "let _ = print_int 1;" "lui sp, 0x1fe0";

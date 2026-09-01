@@ -4,6 +4,40 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.383 — 2026-09-01
+
+_The comment said a bare B-type "silently truncates", and used J-type to avoid
+it. J-type does the same thing one megabyte out._ `enc_j` masked its immediate to
+21 bits and nothing checked the range, so a call farther than 1 MB was encoded as
+a call to somewhere else.
+
+That is what a 3.97 MB interpreter did: it ran off the end of its own code and
+took a trap at pc=4195244, past a 4,163,521-byte binary. It is a loud failure now
+— a jump of 3,168,864 bytes says so and names the reach it does not fit.
+
+The fix that makes such a program *work* is `auipc` + `jalr`, two instructions
+with ±2GB of reach, chosen when the code is big enough to need it. The two-pass
+layout from v0.1.382 already measures the size, so the second pass can know
+whether to widen every jump — which keeps a small program's bytes identical,
+because it is only the big ones that pay. That is the next change; this one stops
+the wrong answer.
+
+The driver catches `Failure` now, for the reason it already catches
+`Out_of_memory` and `Stack_overflow`: OCaml's default is
+"Fatal error: exception Failure(...)" and exit 2, which reads as a crash when the
+honest answer is that this backend cannot assemble that program.
+
+**And the emulator was hiding the evidence.** `memu`'s RV32 runner halted on an
+exit syscall, on a trap with no handler, on a write to the test finisher, and on
+MULH — all four with `vec_set st 1 1` and not a word. A guest that stopped on its
+first unimplemented instruction looked exactly like one that ran to completion
+and printed nothing, which is what a 4 MB guest looked like. It names the reason
+and the pc now, on stderr so a gate comparing stdout is unaffected. That is what
+turned "no output, exit 0" into "halted at pc=4195244 -- a trap with no handler
+installed", and the range check followed from there.
+
+---
+
 ## v0.1.382 — 2026-09-01
 
 _The globals were at a fixed offset, and a program's code grew past it._
