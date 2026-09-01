@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.382 — 2026-09-01
+
+_The globals were at a fixed offset, and a program's code grew past it._
+`globals_base` was `load_base + 0x200000` whatever the program was. A
+39,719-line interpreter emits 3.97 MB, so its first global store would have
+landed on its own code.
+
+It follows the code now, rounded up to the megabyte with a megabyte of room
+after it, and never below the old value — so every program that fit before
+assembles to the same bytes as before, which is what the suite checks.
+
+Sizing it needs the code size and the code needs the address, so the items are
+emitted twice. That terminates because **no item's size depends on an address**:
+`LoadAddr` is eight bytes whatever it loads, and a `li` of any global address is
+two instructions at every base above 4 KB. The second pass asserts the size did
+not move rather than trusting that argument — and the assertion is a guard for a
+future change, not something this commit demonstrated: shifting the rounding
+boundary does not make an emission base-dependent, so there is no cheap poison
+for it.
+
+`code_size` sits next to `assemble`, which computes the same sizes in its first
+pass. A size computed by one rule and encoded by another is a silent mismatch,
+so they are adjacent.
+
+The interpreter's globals now land at 0x500000, above its code. **It still does
+not run**: with the globals at 5 MB and the stack at 8.25 MB there is about 3 MB
+of heap, and that program wants gigabytes. What this removes is the
+self-corruption, not the memory requirement.
+
+---
+
 ## v0.1.381 — 2026-09-01
 
 _A 39,719-line Ruby subset interpreter now compiles for RV32I._ Four megabytes of

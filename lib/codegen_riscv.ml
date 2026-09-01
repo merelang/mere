@@ -396,7 +396,20 @@ let externs : (string, unit) Hashtbl.t = Hashtbl.create 16
    go through this. *)
 let load_base = ref 0
 
-let globals_base () = !load_base + 0x200000
+(* How much room the code gets before the globals and the heap begin. It was a
+   fixed 0x200000, which is fine until a program's code is bigger than that: a
+   39,719-line interpreter emits 3.97 MB and would have written its first global
+   on top of itself. Now it follows the code, rounded up so a four-byte change
+   does not move it, and never shrinks below the old value -- so every program
+   that fit before assembles to the same bytes as before.
+
+   Sizing it needs the code size, and the code needs the address, so this is done
+   by emitting twice. That terminates because no item's SIZE depends on the
+   address: `LoadAddr` is eight bytes whatever it loads, and a `li` of any global
+   address is two instructions at every base above 4 KB. The second pass asserts
+   the size did not move rather than trusting that argument. *)
+let code_span = ref 0x200000
+let globals_base () = !load_base + !code_span
 
 (* The first word at globals_base is the runtime's, not a program's: it holds a
    pointer to the innermost `try_or`'s catch record, or 0. It lives here rather
@@ -2448,6 +2461,17 @@ let emit_eq_helper (tag, ty) =
     emit_word (enc_i 0 ra 0 zero 0x67)
 
 (* --- two-pass assembly: assign addresses, then encode ------------------- *)
+(* The same sizes assemble's first pass uses. Kept next to it so the two cannot
+   drift: a size computed by one rule and encoded by another is a silent
+   mismatch. *)
+let code_size (prog : item list) : int =
+  List.fold_left (fun n it ->
+    match it with
+    | Label _ | Meta _ -> n
+    | Word _ | Jal _ -> n + 4
+    | Branch _ | LoadAddr _ -> n + 8
+    | Bytes b -> n + String.length b) 0 prog
+
 let assemble (prog : item list) : string =
   (* pass 1: label -> byte address *)
   let labels : (string, int) Hashtbl.t = Hashtbl.create 64 in
@@ -2700,14 +2724,37 @@ let build_items (prog : Ast.program) : item list =
   List.iter (fun (label, bytes) -> emit (Label label); emit (Bytes bytes)) !string_data;
   List.rev !items
 
+(* Emit, size the code, and emit again if the globals have to move up. *)
+let build_items_sized (prog : Ast.program) : item list =
+  code_span := 0x200000;
+  let items = build_items prog in
+  let size = code_size items in
+  (* a megabyte of rounding, and a megabyte of room after the code, so neither a
+     small edit nor the two extra words a bigger `li` might take moves the base *)
+  let want = ((size / 0x100000) + 2) * 0x100000 in
+  let span = if want > 0x200000 then want else 0x200000 in
+  if span = !code_span then items
+  else begin
+    code_span := span;
+    let items2 = build_items prog in
+    let size2 = code_size items2 in
+    if size2 <> size then
+      failwith (Printf.sprintf
+        "codegen_riscv: the code size moved when the globals did (%d -> %d). \
+         The two-pass layout assumes no item's size depends on an address; \
+         something now emits a different number of instructions for a \
+         different base." size size2);
+    items2
+  end
+
 let emit_program ~main_ty (prog : Ast.program) : string =
   ignore main_ty;
-  assemble (build_items prog)
+  assemble (build_items_sized prog)
 
 let emit_listing ~main_ty (prog : Ast.program) : string =
   ignore main_ty;
-  listing (build_items prog)
+  listing (build_items_sized prog)
 
 let emit_debug_map ~main_ty (prog : Ast.program) : string =
   ignore main_ty;
-  debug_map (build_items prog)
+  debug_map (build_items_sized prog)
