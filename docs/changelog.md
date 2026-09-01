@@ -4,6 +4,28 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.367 — 2026-09-01
+
+_The check was deleted for the backends that outgrew it, and the backend that
+needed it arrived after the deletion._ v0.1.41 refused an integer literal that
+did not fit the target's int on LLVM and Wasm. Both widened to 64 bits later
+(v0.1.96, v0.1.127) and the rejection went with them. RV32I is 32-bit and was
+added after that, so it never had one, and `li` truncated in silence:
+`4294967295` printed as `-1` where the interpreter printed `4294967295`, and
+`3220176896` — the high half of `-1.0`'s bit pattern — came back as
+`-1074790400`.
+
+It surfaced while sizing a soft-float representation, where the question "what
+fits in a word here" has to have an answer the compiler agrees with.
+
+The boundary is the interesting half. `-2147483648` is in range and
+`2147483648` is not, and the parser hands the first over as a negation of the
+second — so a check that reads only the literal refuses a value that is
+perfectly representable. The fold happens before the check, and both directions
+have a test: one past the top, one past the bottom, and the boundary itself.
+
+---
+
 ## v0.1.366 — 2026-09-01
 
 _`exit` was the one host builtin between a 39,719-line program and the wall
