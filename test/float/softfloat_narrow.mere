@@ -1,0 +1,40 @@
+// Every exported name of contrib/softfloat, called for real, in a program with
+// no `float` in it — so `mere -rv` has to lower all of them for the backend
+// the library exists for.
+//
+// This file is hand-written rather than generated because a generator has to
+// guess each function's shape, and a wrong guess fails the gate for a reason
+// that is not the defect. scripts/softfloat_check.sh asserts that every name
+// in the library appears here, so the coverage claim is checked instead of
+// trusted.
+import "../../contrib/softfloat/softfloat.mere";
+
+let one = mk 0 1023 0 0 0 0;          // 1.0
+let two = mk 0 1024 0 0 0 0;          // 2.0
+let sub = mk 0 0 0 0 0 1;             // the smallest subnormal
+let qnan = mk 0 2047 64 0 0 0;
+
+let b2i = fn (b: bool) -> if b then 1 else 0;
+
+let _ = print_int limb_mask;
+let _ = print_int exp_mask;
+let _ = print_int (zero).exp;
+let _ = print_int (neg_zero).sign;
+let _ = print_int (inf).exp;
+let _ = print_int (neg_inf).sign;
+let _ = print_int (nan).f3;
+let _ = print_int (b2i (frac_is_zero one));
+let _ = print_int (b2i (is_nan qnan));
+let _ = print_int (b2i (is_inf inf));
+let _ = print_int (b2i (is_zero zero));
+let _ = print_int (b2i (is_subnormal sub));
+let _ = print_int (b2i (is_finite one));
+let _ = print_int (neg one).sign;
+let _ = print_int (abs (neg one)).sign;
+let _ = print_int (b2i (is_neg (neg one)));
+let _ = print_int (cmp_mag two one);
+let _ = print_int (b2i (eq one one));
+let _ = print_int (b2i (lt one two));
+let _ = print_int (b2i (gt two one));
+let _ = print_int (b2i (le one one));
+let _ = print_int (b2i (ge one one));
