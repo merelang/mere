@@ -105,6 +105,16 @@ if grep -a -q 'softfloat' "$TMP/op2.bin"; then :; else
   echo "FAIL rv_prelude: the f_add shim's message does not name softfloat"
   rc=1
 fi
+# And the exact phrase scripts/host_matrix.sh keys on to call these cells `stub`
+# rather than `yes`. Rewording it silently turns 27 cells of that matrix into a
+# claim the backend cannot honour, so the phrase is asserted here as well --
+# a poison run reworded it and only the matrix noticed, which made this file's
+# own comment about the coupling untrue.
+if grep -a -q 'is not lowered yet' "$TMP/op2.bin"; then :; else
+  echo "FAIL rv_prelude: the shim message lost the phrase host_matrix.sh keys on"
+  echo "  (want 'is not lowered yet' — see the \`stub\` branch in that script)"
+  rc=1
+fi
 
 # KNOWN, and pinned so it is noticed when it changes: using rvmap_set and
 # rvmap_get on the SAME map fails to type-check, and the message blames the
