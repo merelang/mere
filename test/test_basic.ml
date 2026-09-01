@@ -13751,6 +13751,18 @@ let () =
   rv_err_contains "rv32i: a Raw window cannot be forged out of ints"
     "let _ = raw_poke8 (raw_window 0 0 1) 0 65;"
     "expected `Raw`, got `int`";
+  (* `exit` lowers to the same ecall `fail` ends with (a7 = 93), with the
+     status the program chose instead of the literal 1. The emulator's syscall
+     ABI answers it by halting, so the instructions after the call are not
+     reached -- which is what makes this a termination and not a no-op. *)
+  rv_contains "rv32i: exit lowers to the exit syscall with the given status"
+    "let _ = exit 7;" "li a7, 93";
+  (* A user binding wins over the builtin, so a program with its own `exit`
+     must not emit the syscall for the call it makes. The needle here is the
+     ABSENCE of the lowering, which `rv_contains` cannot express, so this
+     checks the shape the user's own function does produce. *)
+  rv_contains "rv32i: a user-defined exit is called, not the builtin"
+    "let exit = fn (c: int) -> print_int c;\nlet _ = exit 7;" "jal ra, u_exit";
   Codegen_riscv.bare := true;
   (* reachable through --bare's entry, so the access is actually emitted *)
   rv_contains "rv32i: a raw access bounds-checks its offset"
@@ -13765,6 +13777,11 @@ let () =
   rv_err_contains "rv32i: --bare refuses the print builtins"
     "let main = fn (m: Raw) -> print \"x\";\n()"
     "there is no host to print to";
+  (* For the reason print is refused: the exit syscall is a courtesy of the
+     host, and a machine handed to the program does not answer it. *)
+  rv_err_contains "rv32i: --bare refuses exit"
+    "let main = fn (m: Raw) -> exit 0;\n()"
+    "there is no host to exit to";
   rv_contains "rv32i: csr_write emits csrrw with the number as an immediate"
     "let main = fn (m: Raw) -> csr_write 0x305 4096;\n()" "csrrw zero, 0x305, a0";
   rv_contains "rv32i: csr_read emits csrrs from x0"
