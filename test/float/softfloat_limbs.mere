@@ -151,6 +151,16 @@ let _ = want "bit 80 minus itself is zero" (if l6_is_zero (l6_sub top top) then 
 let _ = want "bit 80 plus one, minus one" (l6_cmp (l6_sub (l6_add top (of_int 1)) (of_int 1)) top) 0;
 let _ = want "bit 80 shifted down and up" (l6_cmp (l6_shl (fst (l6_shr_sticky top 40)) 40) top) 0;
 
+// l6_bit against the native oracle, at every bit the sweep can reach
+let _ = each_pos 0 (fn (i: int) ->
+  let v = 191739611069752 in
+  let _ = want ("l6_bit " ++ str_of_int i) (l6_bit (of_int v) i) (bit_and (bit_shr v i) 1) in
+  ());
+let _ = each_high 58 (fn (i: int) ->
+  let _ = want ("l6_bit high " ++ str_of_int i) (l6_bit (l6_shl one_limb i) i) 1 in
+  let _ = want ("l6_bit high off " ++ str_of_int i) (l6_bit (l6_shl one_limb i) (i - 1)) 0 in
+  ());
+
 let n = vec_get fails 0;
 let _ = print (if n == 0 then "ok limbs: table + 400 native-oracle rounds + 400 identity rounds in the top limbs"
                else "FAILED limbs: " ++ str_of_int n ++ " checks");

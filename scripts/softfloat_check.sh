@@ -33,6 +33,14 @@ if grep -q '^FAIL' "$TMP/limbs"; then
   rc=1
 fi
 
+A="$ROOT/test/float/softfloat_add.mere"
+"$MERE" "$A" > "$TMP/add" 2>&1 || { echo "FAIL softfloat: the interpreter refused the add gate"; cat "$TMP/add"; exit 1; }
+if grep -q '^FAIL' "$TMP/add"; then
+  echo "FAIL softfloat: a sum did not match the hardware bit for bit"
+  grep '^FAIL' "$TMP/add" | head -8
+  rc=1
+fi
+
 "$MERE" "$P" > "$TMP/interp" 2>&1 || { echo "FAIL softfloat: the interpreter refused the gate"; cat "$TMP/interp"; exit 1; }
 if grep -q '^FAIL' "$TMP/interp"; then
   echo "FAIL softfloat: a value did not survive the round trip"
@@ -72,7 +80,8 @@ fi
 #     codegen never saw it. A probe that exercises a subset reports on the
 #     subset, whatever the message says.
 if grep -n '\bfloat\b' "$ROOT/contrib/softfloat/softfloat.mere" \
-       "$ROOT/contrib/softfloat/limbs.mere" | grep -v ':[0-9]*: *//' > "$TMP/floats"; then
+       "$ROOT/contrib/softfloat/limbs.mere" \
+       "$ROOT/contrib/softfloat/add.mere" | grep -v ':[0-9]*: *//' > "$TMP/floats"; then
   echo "FAIL softfloat: the library names \`float\`, which RV32I does not have"
   cat "$TMP/floats"
   rc=1
@@ -85,7 +94,8 @@ fi
 # probe is written by hand and its COVERAGE is what gets checked.
 N="$ROOT/test/float/softfloat_narrow.mere"
 NAMES=$(sed -n 's/^let \(rec \)\{0,1\}\([a-z_][a-z_0-9]*\) *=.*/\2/p' \
-        "$ROOT/contrib/softfloat/softfloat.mere" "$ROOT/contrib/softfloat/limbs.mere")
+        "$ROOT/contrib/softfloat/softfloat.mere" "$ROOT/contrib/softfloat/limbs.mere" \
+        "$ROOT/contrib/softfloat/add.mere")
 MISSING=""
 for n in $NAMES; do
   grep -q "\\b$n\\b" "$N" || MISSING="$MISSING $n"

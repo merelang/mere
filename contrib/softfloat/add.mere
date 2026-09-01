@@ -1,0 +1,106 @@
+// contrib/softfloat/add — IEEE 754 addition, in integers only.
+//
+// The working significand is the 53-bit one shifted left by 3, so the three
+// bits below it are the guard, the round and the sticky that
+// round-to-nearest-even needs. A normal's leading bit then sits at 55.
+//
+// The exponent carried around is not the field but the effective one: a value
+// is `significand * 2^(E - 1075)`, with E = the exponent field for normals and
+// E = 1 for subnormals. That single convention is why subnormals need no
+// separate path here -- they arrive with a significand that happens to be
+// small, and the normalisation step that cannot lower E below 1 puts them back.
+import "limbs.mere";
+import "softfloat.mere";
+
+// bit 52 lives in limb 3 at position 7
+let hidden_bit = 128;
+// the quiet bit is fraction bit 51, which is limb 3 bit 6
+let quiet_bit = 64;
+
+// A NaN handed back as a result comes back QUIET. A signalling one arriving as
+// an operand is the only case where the answer is not the operand unchanged --
+// the hardware sets bit 51 and keeps the payload, which is what this does.
+let quiet = fn (a: Sf) -> mk a.sign 2047 (bit_or a.f3 quiet_bit) a.f2 a.f1 a.f0;
+let is_snan = fn (a: Sf) -> is_nan a && bit_and a.f3 quiet_bit == 0;
+
+let sig_of = fn (a: Sf) ->
+  let h = if a.exp == 0 then 0 else hidden_bit in
+  l6_shl (l6_of_limbs 0 0 (a.f3 + h) a.f2 a.f1 a.f0) 3;
+
+let eff_exp = fn (a: Sf) -> if a.exp == 0 then 1 else a.exp;
+
+// Pack a significand (still shifted left by 3) and an effective exponent back
+// into a double, rounding to nearest with ties to even.
+let pack = fn (sign: int) -> fn (s0: L6) -> fn (e0: int) -> fn (st0: int) ->
+  // normalise: a carry out of bit 55 shifts down, leading zeros shift up, and
+  // the shift up stops at E = 1 because there is no exponent below it
+  let rec down = fn (s: L6) -> fn (e: int) -> fn (st: int) ->
+    if l6_bitlen s <= 56 then (s, e, st)
+    else let p = l6_shr_sticky s 1 in down (fst p) (e + 1) (bit_or st (snd p)) in
+  let (sd, ed, std) = down s0 e0 st0 in
+  let rec up = fn (s: L6) -> fn (e: int) ->
+    if e <= 1 then (s, e)
+    else if l6_bitlen s >= 56 then (s, e)
+    else if l6_is_zero s then (s, e)
+    else up (l6_shl s 1) (e - 1) in
+  let (s1, e1) = up sd ed in
+  // round to nearest, ties to even: the round bit decides, and a tie is broken
+  // by whether anything was lost below it or the retained bit is odd
+  let lsb = l6_bit s1 3 in
+  let rnd = l6_bit s1 2 in
+  let sticky = bit_or (bit_or (l6_bit s1 1) (l6_bit s1 0)) std in
+  let s2 = if rnd == 1 && (sticky == 1 || lsb == 1) then l6_add s1 (l6_shl l6_one 3) else s1 in
+  // rounding can carry out of the top
+  let (sr, e3) = if l6_bitlen s2 > 56 then (fst (l6_shr_sticky s2 1), e1 + 1) else (s2, e1) in
+  let s3 = fst (l6_shr_sticky sr 3) in
+  if e3 >= 2047 then (if sign == 1 then neg_inf else inf)
+  else if l6_bit s3 52 == 1 then mk sign e3 (bit_and s3.l3 127) s3.l2 s3.l1 s3.l0
+  else if l6_is_zero s3 then mk sign 0 0 0 0 0
+  else mk sign 0 s3.l3 s3.l2 s3.l1 s3.l0;   // still subnormal: E was 1
+
+let add = fn (a: Sf) -> fn (b: Sf) ->
+  // NaN first, and the first NaN operand is the answer -- what the hardware
+  // does, checked rather than assumed (test/float/softfloat_add.mere).
+  // A SIGNALLING NaN outranks a quiet one, whichever side it is on: the answer
+  // is the signalling one, quieted. Among quiet NaNs the first operand wins.
+  // Both halves of that were measured, not assumed -- the second half cost a
+  // gate failure on `quiet + signalling`, where returning the first NaN gave
+  // the wrong 64 bits.
+  if is_snan a then quiet a
+  else if is_snan b then quiet b
+  else if is_nan a then quiet a
+  else if is_nan b then b
+  else if is_inf a then
+    (if is_inf b && a.sign != b.sign then nan else a)
+  else if is_inf b then b
+  else if is_zero a && is_zero b then
+    // +0 + -0 is +0 under round-to-nearest; only two negative zeros give one
+    (if a.sign == 1 && b.sign == 1 then neg_zero else zero)
+  else if is_zero a then b
+  else if is_zero b then a
+  else
+    let ea = eff_exp a in let eb = eff_exp b in
+    let sa = sig_of a in let sb = sig_of b in
+    // order by magnitude so the subtraction below never goes negative
+    let a_first =
+      if ea != eb then ea > eb else l6_cmp sa sb >= 0 in
+    let hs = if a_first then a.sign else b.sign in
+    let ls = if a_first then b.sign else a.sign in
+    let he = if a_first then ea else eb in
+    let le = if a_first then eb else ea in
+    let hv = if a_first then sa else sb in
+    let lv = if a_first then sb else sa in
+    let d = he - le in
+    // Past 60 the whole of the smaller value is below the sticky, and shifting
+    // one bit at a time that far is only slow.
+    let (lv2, st) = if d > 60 then (l6_zero, if l6_is_zero lv then 0 else 1)
+                    else l6_shr_sticky lv d in
+    if hs == ls then pack hs (l6_add hv lv2) he st
+    else
+      // a - (b + f) with 0 < f < 1 is (a - b - 1) + (1 - f): borrow one and
+      // keep the sticky set, because the remainder is not zero
+      let diff = if st == 1 then l6_sub (l6_sub hv lv2) l6_one else l6_sub hv lv2 in
+      if l6_is_zero diff && st == 0 then zero    // exact cancellation is +0
+      else pack hs diff he st;
+
+let sub = fn (a: Sf) -> fn (b: Sf) -> add a (neg b);

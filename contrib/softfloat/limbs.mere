@@ -119,3 +119,12 @@ let l6_bitlen = fn (a: L6) ->
   else if a.l2 != 0 then 30 + l6_bitlen_limb a.l2 0
   else if a.l1 != 0 then 15 + l6_bitlen_limb a.l1 0
   else l6_bitlen_limb a.l0 0;
+
+// bit i of the 90, counting from 0. Rounding needs to look at three specific
+// bits and normalisation at one, and reaching into the limbs from outside would
+// put the 15 in two files.
+let l6_bit = fn (a: L6) -> fn (i: int) ->
+  let li = i / 15 in
+  bit_and (bit_shr (l6_limb a li) (i - li * 15)) 1;
+
+let l6_one = l6_of_limbs 0 0 0 0 0 1;
