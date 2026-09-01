@@ -1,0 +1,64 @@
+// contrib/softfloat/div — IEEE 754 division, in integers only.
+//
+// Restoring long division: 56 quotient bits, one per round, which is 53 plus the
+// three the rounding needs. The remainder at the end is the sticky.
+//
+// Both significands are normalised to exactly 53 bits FIRST, with the exponent
+// paying for the shift. Without that a subnormal divisor makes the true
+// quotient far wider than 56 bits and the loop, which produces exactly 56,
+// would drop the top of it and hand back a small number where the answer is
+// an overflow.
+import "limbs.mere";
+import "softfloat.mere";
+import "add.mere";
+
+// (significand, effective exponent) with the significand's top bit at 52
+let norm_sig = fn (a: Sf) ->
+  let h = if a.exp == 0 then 0 else hidden_bit in
+  let s = l6_of_limbs 0 0 (a.f3 + h) a.f2 a.f1 a.f0 in
+  let rec go = fn (v: L6) -> fn (e: int) ->
+    if l6_bitlen v >= 53 then (v, e) else go (l6_shl v 1) (e - 1) in
+  go s (eff_exp a);
+
+// floor(a * 2^56 / b), and whether anything was left over.
+//
+// The loop keeps `2^i * a = q * b + rem` with `rem < b`, and one subtraction
+// per step can only hold that if the remainder is already below b when the
+// loop starts. Both significands are normalised to 53 bits, so a/b is in
+// (0.5, 2) and a CAN be the larger -- the first version began with `rem = a`
+// and every quotient with a >= b came back half its true size. The pre-step
+// takes that case out: the integer part is 1, and the loop's 56 shifts carry
+// it to the top of the answer.
+let divide = fn (a: L6) -> fn (b: L6) ->
+  let (r0, q0) = if l6_cmp a b >= 0 then (l6_sub a b, l6_one) else (a, l6_zero) in
+  let rec go = fn (i: int) -> fn (rem: L6) -> fn (q: L6) ->
+    if i <= 0 then (q, if l6_is_zero rem then 0 else 1)
+    else
+      let r1 = l6_shl rem 1 in
+      let q1 = l6_shl q 1 in
+      if l6_cmp r1 b >= 0 then go (i - 1) (l6_sub r1 b) (l6_add q1 l6_one)
+      else go (i - 1) r1 q1 in
+  go 56 r0 q0;
+
+// the normalised significand alone, for the gate's probe: `divide` takes limb
+// vectors and the probe has an Sf.
+let sig_limbs_l6 = fn (a: Sf) -> fst (norm_sig a);
+
+let fdiv = fn (a: Sf) -> fn (b: Sf) ->
+  let sign = bit_xor a.sign b.sign in
+  if is_snan a then quiet a
+  else if is_snan b then quiet b
+  else if is_nan a then a
+  else if is_nan b then b
+  else if is_inf a then (if is_inf b then nan else (if sign == 1 then neg_inf else inf))
+  else if is_inf b then mk sign 0 0 0 0 0
+  else if is_zero a then (if is_zero b then nan else mk sign 0 0 0 0 0)
+  else if is_zero b then (if sign == 1 then neg_inf else inf)
+  else
+    let (na, ea) = norm_sig a in
+    let (nb, eb) = norm_sig b in
+    let (q, st) = divide na nb in
+    // a/b = (A/B) * 2^(Ea - Eb) and q is A * 2^56 / B, so the value is
+    // q * 2^(Ea - Eb - 56); pack reads s as `significand<<3` with value
+    // s * 2^(e - 1078), so e = Ea - Eb + 1022.
+    pack sign q (ea - eb + 1022) st;

@@ -4,6 +4,40 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.372 — 2026-09-01
+
+_Division, and an invariant that only holds if the loop is entered correctly._
+`contrib/softfloat/div` is restoring long division: 56 quotient bits, one per
+round, and the remainder left at the end is the sticky.
+
+The loop keeps `2^i * a = q * b + rem` with `rem < b`, and one subtraction per
+round can only hold that if the remainder is already below `b` when the loop
+starts. Both significands are normalised to 53 bits first, so `a / b` is in
+(0.5, 2) — and `a` **can** be the larger. The first version began with
+`rem = a`, and every quotient where that happened came back at half its true
+size: 286 of them, all with the same shape, which is what said it was one
+condition and not a scatter of arithmetic slips.
+
+Normalising the operands before dividing is the other half. A subnormal divisor
+makes the true quotient far wider than 56 bits, and a loop that produces exactly
+56 would drop the top and answer with a small number where the truth is an
+overflow. The exponent pays for the shift.
+
+`pack` grew a bound to go with it: below 1 the underflow shift is capped at 60
+bits, because past that everything remaining is sticky, and a normalised
+subnormal over a large normal can arrive thousands of exponents below.
+
+Seven poisons, each caught, and the counts say what each one is: removing the
+pre-step fails 286, one round fewer fails 648, the exponent off by one fails 652,
+and `0/0` answering zero instead of NaN fails 4 — the whole table has only four
+such pairs.
+
+Verified on the Mere-written RV32IM emulator as well: 1/3, an overflow, an
+underflow to the smallest subnormal, `x/0` and `0/0` all print the limbs the
+interpreter prints.
+
+---
+
 ## v0.1.371 — 2026-09-01
 
 _Multiplication, which is what the 15-bit limb was for._ Two 53-bit significands
