@@ -604,7 +604,16 @@ let rec flatten_app (e : Ast.expr) =
    fp-relative memory slots. Evaluation temporaries still use the memory
    stack, which is always correct across calls. *)
 
-let sregs = [| 9; 18; 19; 20; 21; 22; 23; 24; 25; 26; 27 |]   (* s1..s11 *)
+(* s1..s10. s11 (x27) is held back for the wide jump below, because there was no
+   free register: t3..t6 are used by the hand-written runtime helpers, which are
+   emitted with numeric register numbers rather than these names -- so grepping
+   for `t6` found nothing and the first wide jump landed on top of
+   `__str_concat`'s copy pointer. That guest looped at pc=296 for four hundred
+   million instructions. a3..a5 are arguments four through six of any call, and
+   s1..s11 are the named bindings, so one has to be reserved. The cost is that a
+   function with more than ten live names spills one more to memory. *)
+let sregs = [| 9; 18; 19; 20; 21; 22; 23; 24; 25; 26 |]   (* s1..s10 *)
+let farjmp = 27                                           (* s11, reserved *)
 let nregs = Array.length sregs
 
 (* per-function frame shape, set by emit_function *)
@@ -2533,14 +2542,17 @@ let assemble (prog : item list) : string =
     | Word w -> put_word (w land 0xFFFFFFFF); here := !here + 4
     | Jal (rd, name) ->
       if !far_jumps then begin
-        (* auipc t6, hi ; jalr rd, lo(t6). t6 because nothing else in this
-           backend uses x31, and the trap entry saves x1..x31, so a trap landing
-           between the two instructions cannot lose it. *)
+        (* auipc s11, hi ; jalr rd, lo(s11). s11 is held back from the
+           named-binding pool for this: there is no otherwise-free register --
+           the first attempt used x31 because grepping for `t6` found nothing,
+           and the hand-written runtime helpers use it under its NUMBER. The
+           trap entry saves x1..x31, so a trap between the two instructions
+           cannot lose it. *)
         let off = target name !here in
         let hi = (off + 0x800) asr 12 in
         let lo = off - (hi lsl 12) in
-        put_word (enc_u (hi land 0xFFFFF) t6 0x17);
-        put_word (enc_i lo t6 0 rd 0x67);
+        put_word (enc_u (hi land 0xFFFFF) farjmp 0x17);
+        put_word (enc_i lo farjmp 0 rd 0x67);
         here := !here + 8
       end else begin
         put_word (enc_j (target name !here) rd 0x6F); here := !here + 4
@@ -2554,8 +2566,8 @@ let assemble (prog : item list) : string =
         let off = target name (!here + 4) in
         let hi = (off + 0x800) asr 12 in
         let lo = off - (hi lsl 12) in
-        put_word (enc_u (hi land 0xFFFFF) t6 0x17);
-        put_word (enc_i lo t6 0 zero 0x67);
+        put_word (enc_u (hi land 0xFFFFF) farjmp 0x17);
+        put_word (enc_i lo farjmp 0 zero 0x67);
         here := !here + 12
       end else begin
         put_word (enc_b 8 rs2 rs1 (f3 lxor 1) 0x63);        (* b<!cond> +8 *)

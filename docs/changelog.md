@@ -4,6 +4,47 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.385 — 2026-09-01
+
+_The wide jump landed on top of `__str_concat`'s copy pointer, because grepping
+for `t6` found nothing and the runtime helpers use it under its number._
+
+v0.1.384 gave the wide jump x31 as scratch on the grounds that nothing else in
+this backend used it. That was checked by searching for the identifier `t6`. The
+hand-written runtime helpers -- `__str_concat`, `__str_eq`, `__print_int` -- are
+emitted as raw `enc_*` calls with **numeric** register operands, so the search
+saw none of them. `__str_concat`'s copy loop keeps its destination in x31, and
+the wide jump at the bottom of that loop overwrote it every iteration.
+
+A guest built that way sat at pc=296 -- inside `.sc_l1` -- for four hundred
+million instructions, printing nothing, which is exactly what a program stuck
+before its first write looks like.
+
+Auditing the numbers rather than the names says there is **no free register**:
+t3..t6 are the helpers', a3..a5 are arguments four through six of any call, and
+s1..s11 are the named bindings. So one is reserved: `s11` leaves the
+named-binding pool and carries the jump address. A function with more than ten
+live names now spills one more to memory, which is the whole cost.
+
+**With that, a 39,719-line Ruby subset interpreter boots on a CPU written in
+Mere** and prints from its own code:
+
+```
+RV32I: args needs a host, and --bare hands the program the machine instead
+```
+
+That is the prelude's own shim reporting that `--bare` has no command line —
+which means the interpreter initialised, ran, and got as far as looking for its
+arguments. What it does after that failure is caught by a `try_or` is the next
+question; it keeps running and the instruction trace does not tick, which those
+two facts cannot both be true of, so something there is still wrong.
+
+Also in memu: `rvrun <ram> trace` reports the pc every 100M instructions on
+stderr, which is what found pc=296. Off by default; off costs one comparison per
+instruction.
+
+---
+
 ## v0.1.384 — 2026-09-01
 
 _Wide jumps, for the programs that need them._ `auipc` + `jalr` reaches ±2GB, and
