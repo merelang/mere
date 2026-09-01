@@ -10,6 +10,7 @@
 import "../../contrib/softfloat/limbs.mere";
 import "../../contrib/softfloat/add.mere";
 import "../../contrib/softfloat/mul.mere";
+import "../../contrib/softfloat/div.mere";
 import "../../contrib/softfloat/softfloat.mere";
 
 let one = mk 0 1023 0 0 0 0;          // 1.0
@@ -91,3 +92,12 @@ let _ = print_int ps.l0;
 let _ = print_int pk;
 let _ = print_int pst;
 let _ = print_int (mul one two).exp;
+
+// contrib/softfloat/div
+let (dn, de) = norm_sig tiny;
+let _ = print_int (l6_bitlen dn);
+let _ = print_int de;
+let (dq, dst) = divide (sig_limbs_l6 one) (sig_limbs_l6 two);
+let _ = print_int (l6_bitlen dq);
+let _ = print_int dst;
+let _ = print_int (fdiv two one).exp;

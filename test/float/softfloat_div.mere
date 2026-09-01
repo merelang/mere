@@ -1,0 +1,134 @@
+// The gate for contrib/softfloat/div, the same shape as the others: the
+// quotient must be the SAME 64 BITS as the hardware's.
+//
+// Division reaches a case the other two do not: a quotient whose true value has
+// far more than 56 significant bits, which is every division that is not exact.
+// So the remainder-as-sticky path is exercised by almost every pair here,
+// rather than by a corner of the table.
+//
+// x/0 is also only here: it is an infinity with a sign, and 0/0 is a NaN.
+import "../../contrib/softfloat/div.mere";
+import "./sf_bridge.mere";
+
+let fails = vec_new ();
+let _ = vec_push fails 0;
+let shown = vec_new ();
+let _ = vec_push shown 0;
+
+let check = fn (ahi: int) -> fn (alo: int) -> fn (bhi: int) -> fn (blo: int) ->
+  let hw = f_div (float_of_bits ahi alo) (float_of_bits bhi blo) in
+  let sw = fdiv (sf_of_hi_lo ahi alo) (sf_of_hi_lo bhi blo) in
+  let ghi = hi_of_sf sw in let glo = lo_of_sf sw in
+  if ghi == float_bits_hi hw && glo == float_bits_lo hw then () else
+    let _ = vec_set fails 0 (vec_get fails 0 + 1) in
+    if vec_get shown 0 >= 12 then () else
+      let _ = vec_set shown 0 (vec_get shown 0 + 1) in
+      print ("FAIL " ++ str_of_int ahi ++ "," ++ str_of_int alo
+             ++ " / " ++ str_of_int bhi ++ "," ++ str_of_int blo
+             ++ " hw=" ++ str_of_int (float_bits_hi hw) ++ "," ++ str_of_int (float_bits_lo hw)
+             ++ " sw=" ++ str_of_int ghi ++ "," ++ str_of_int glo);
+
+// Every pair from the format's own landmarks, both orders, both signs.
+let vhi = vec_new ();
+let vlo = vec_new ();
+let put = fn (h: int) -> fn (l: int) -> let _ = vec_push vhi h in vec_push vlo l;
+let _ = put 0 0;                    // +0
+let _ = put 2147483648 0;           // -0
+let _ = put 0 1;                    // smallest subnormal
+let _ = put 2147483648 1;
+let _ = put 0 2;
+let _ = put 1048575 4294967295;     // largest subnormal
+let _ = put 1048576 0;              // smallest normal
+let _ = put 1048576 1;
+let _ = put 1071644672 0;           // 0.5
+let _ = put 1072693248 0;           // 1.0
+let _ = put 3220176896 0;           // -1.0
+let _ = put 1072693248 1;           // 1.0 + 1ulp
+let _ = put 1073741824 0;           // 2.0
+let _ = put 1074266112 0;           // 3.0
+let _ = put 2146435071 4294967295;  // largest normal
+let _ = put 4293918719 4294967295;  // most negative normal
+let _ = put 2146435072 0;           // +inf
+let _ = put 4293918720 0;           // -inf
+let _ = put 2146959360 0;           // quiet NaN
+let _ = put 2146435072 1;           // signalling NaN
+let _ = put 1127219200 0;           // 2^53
+let _ = put 1127219200 1;           // 2^53 + 1ulp
+
+let n = vec_len vhi;
+let rec loop_j = fn (i: int) -> fn (j: int) ->
+  if j >= n then () else
+  let _ = check (vec_get vhi i) (vec_get vlo i) (vec_get vhi j) (vec_get vlo j) in
+  loop_j i (j + 1);
+let rec loop_i = fn (i: int) ->
+  if i >= n then () else let _ = loop_j i 0 in loop_i (i + 1);
+let _ = loop_i 0;
+
+// A sweep, because a table covers the pairs somebody thought of. Two kinds:
+// unconstrained bit patterns (mostly enormous exponents, which is where
+// overflow to infinity lives) and pairs whose exponents are close together,
+// which is where alignment, cancellation and the round bit actually happen.
+let rec sweep = fn (i: int) -> fn (seed: int) ->
+  if i <= 0 then () else
+  let s1 = bit_and (seed * 25214903917 + 11) 4611686018427387903 in
+  let s2 = bit_and (s1 * 25214903917 + 11) 4611686018427387903 in
+  let s3 = bit_and (s2 * 25214903917 + 11) 4611686018427387903 in
+  let s4 = bit_and (s3 * 25214903917 + 11) 4611686018427387903 in
+  let ahi = bit_and (bit_shr s1 10) 4294967295 in
+  let alo = bit_and (bit_shr s2 10) 4294967295 in
+  let bhi = bit_and (bit_shr s3 10) 4294967295 in
+  let blo = bit_and (bit_shr s4 10) 4294967295 in
+  let _ = check ahi alo bhi blo in
+  // the same fractions, with exponents put within 60 of each other around 1023
+  // For a product the exponents ADD, so the interesting bands are the ones
+  // whose sum leaves the format: two halves of the range, and two near an end.
+  // For a quotient the exponents SUBTRACT, so the ends are reached by a large
+  // numerator over a small denominator and the reverse.
+  let e1 = 1 + bit_and s1 2045 in
+  let e2 = 1 + bit_and s3 2045 in
+  let mk_hi = fn (h: int) -> fn (e: int) ->
+    bit_or (bit_or (bit_and h 2147483648) (bit_shl (bit_and e 2047) 20)) (bit_and h 1048575) in
+  let _ = check (mk_hi ahi e1) alo (mk_hi bhi e2) blo in
+  // both operands subnormal: the product underflows to zero, and the rounding
+  // decides whether it is zero or the smallest subnormal
+  let _ = check (bit_and ahi 1048575) alo (bit_and bhi 1048575) blo in
+  // one subnormal against one large normal, where the product lands back in
+  // the normal range and the hidden bit is absent on one side only
+  let _ = check (bit_and ahi 1048575) alo (bit_or (bit_shl 2040 20) (bit_and bhi 1048575)) blo in
+  sweep (i - 1) s4;
+// 120 rounds: a division is 56 restoring steps over six limbs, so it costs
+// more per pair than the multiply, and the interpreter runs the gate. A multiply is a schoolbook loop over limbs and the
+// tree-walking interpreter runs the gate, so the count is what fits in CI.
+// The C arm of scripts/softfloat_check.sh runs the same file compiled, where
+// the same coverage costs nothing -- but the interpreter is the reference both
+// arms are compared against, so it sets the budget.
+let _ = sweep 500 12345;
+
+// The top of the range, where a product leaves the format.
+let rec sweep_big = fn (i: int) -> fn (seed: int) ->
+  if i <= 0 then () else
+  let s1 = bit_and (seed * 25214903917 + 11) 4611686018427387903 in
+  let s2 = bit_and (s1 * 25214903917 + 11) 4611686018427387903 in
+  // both operands in the top binade, where any carry leaves the format
+  let e = 2046 in
+  let h1 = bit_or (bit_or (bit_and s1 2147483648) (bit_shl e 20)) (bit_and s1 1048575) in
+  let h2 = bit_or (bit_or (bit_and s2 2147483648) (bit_shl e 20)) (bit_and s2 1048575) in
+  let l1 = bit_and s1 4294967295 in
+  let l2 = bit_and s2 4294967295 in
+  let _ = check h1 l1 h2 l2 in
+  // exponents that sum to just under, just at, and just over the top
+  let ea = 1900 + bit_and s1 140 in
+  let eb = ea - 1023 - bit_and s2 60 in
+  let _ = check (bit_or (bit_shl ea 20) (bit_and s1 1048575)) l1
+                (bit_or (bit_shl (bit_and eb 2047) 20) (bit_and s2 1048575)) l2 in
+  // and the bottom, where it sums to just under 1 and underflows gradually
+  let ec = 1 + bit_and s1 60 in
+  let ed = ec + 1023 + bit_and s2 60 in
+  let _ = check (bit_or (bit_shl ec 20) (bit_and s1 1048575)) l1
+                (bit_or (bit_shl (bit_and ed 2047) 20) (bit_and s2 1048575)) l2 in
+  sweep_big (i - 1) s2;
+let _ = sweep_big 300 99;
+
+let f = vec_get fails 0;
+let _ = print (if f == 0 then "ok div: every quotient matched the hardware bit for bit"
+               else "FAILED div: " ++ str_of_int f ++ " quotients");

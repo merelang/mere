@@ -42,6 +42,14 @@ if grep -q '^FAIL' "$TMP/limbs"; then
   rc=1
 fi
 
+D="$ROOT/test/float/softfloat_div.mere"
+"$MERE" "$D" > "$TMP/div" 2>&1 || { echo "FAIL softfloat: the interpreter refused the div gate"; cat "$TMP/div"; exit 1; }
+if grep -q '^FAIL' "$TMP/div"; then
+  echo "FAIL softfloat: a quotient did not match the hardware bit for bit"
+  grep '^FAIL' "$TMP/div" | head -8
+  rc=1
+fi
+
 M2="$ROOT/test/float/softfloat_mul.mere"
 "$MERE" "$M2" > "$TMP/mul" 2>&1 || { echo "FAIL softfloat: the interpreter refused the mul gate"; cat "$TMP/mul"; exit 1; }
 if grep -q '^FAIL' "$TMP/mul"; then
@@ -99,6 +107,7 @@ fi
 if grep -n '\bfloat\b' "$ROOT/contrib/softfloat/softfloat.mere" \
        "$ROOT/contrib/softfloat/limbs.mere" \
        "$ROOT/contrib/softfloat/add.mere" "$ROOT/contrib/softfloat/mul.mere" \
+       "$ROOT/contrib/softfloat/div.mere" \
        | grep -v ':[0-9]*: *//' > "$TMP/floats"; then
   echo "FAIL softfloat: the library names \`float\`, which RV32I does not have"
   cat "$TMP/floats"
@@ -113,7 +122,9 @@ fi
 N="$ROOT/test/float/softfloat_narrow.mere"
 NAMES=$(sed -n 's/^let \(rec \)\{0,1\}\([a-z_][a-z_0-9]*\) *=.*/\2/p' \
         "$ROOT/contrib/softfloat/softfloat.mere" "$ROOT/contrib/softfloat/limbs.mere" \
-        "$ROOT/contrib/softfloat/add.mere" "$ROOT/contrib/softfloat/mul.mere")
+        "$ROOT/contrib/softfloat/add.mere" "$ROOT/contrib/softfloat/mul.mere" \
+       "$ROOT/contrib/softfloat/div.mere" \
+        "$ROOT/contrib/softfloat/div.mere")
 MISSING=""
 for n in $NAMES; do
   grep -q "\\b$n\\b" "$N" || MISSING="$MISSING $n"
