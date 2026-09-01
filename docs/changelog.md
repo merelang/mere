@@ -4,6 +4,45 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.376 — 2026-09-01
+
+_Three walls down, and the one left is not a builtin._ Enumerating what still
+stops the Ruby subset interpreter on RV32I -- by shadowing each refused name with
+a diverging function, which types as `'a -> 'b` and so needs no signature -- gave
+a list of three: `map_len`, `print_err`, `try_or`.
+
+`map_len` is a redirect, not a lowering. Maps here are the prelude's assoc list
+reached by rewriting the `map_*` names, so `rvmap_len` counts DISTINCT keys:
+`rvmap_set` prepends and a key set twice is in the list twice, with the newer one
+shadowing, so counting nodes would count the shadowed ones. Both halves of the
+redirect table had to learn the name — the reachability seed and the call site —
+because missing the first emits a call to a function that was never emitted.
+
+`print_err` sets the descriptor. The emulator's write syscall ignores it; QEMU's
+does not, and a diagnostic on stdout is a diagnostic in the wrong stream.
+
+`try_or` is left. It is the catchable-failure mechanism, and `fail` here writes
+and exits with nothing to unwind to.
+
+**And the wall after those is not a builtin at all.** An `extern fn` is a name
+the *program* declared, and this backend answered `unbound variable` for it —
+blaming the user for a target that has no C library to link against. That is the
+shape Q-070 closed for builtins, one declaration further out. It names the limit
+now, and a name nobody declared still reports as unbound, which the gate checks
+in both directions.
+
+The Ruby subset interpreter declares twelve of them: seven for TCP, four for
+libc memory, and `getpid`. Those are the boundary now — one builtin and an FFI
+surface, from a program that a week ago stopped on the first of 39,719 lines of
+float.
+
+Two of the three gates for this could not live in `test_basic.ml`. It calls the
+backend directly, so it cannot see the prelude, and its own typer answers
+`unbound variable` for an extern before codegen is reached. They are in
+`scripts/rv_prelude_check.sh`.
+
+---
+
 ## v0.1.375 — 2026-09-01
 
 _A cell that compiles and then aborts is not `yes`._ Merging the RV32I float

@@ -205,6 +205,18 @@ let rec _miter = fn node -> fn f -> fn seen ->
     if _mseen seen kk then _miter rest f seen
     else let _ = f kk vv in _miter rest f (Cons (kk, seen));
 let rvmap_iter = fn m -> fn f -> _miter (vec_get m 0) f Nil;
+// The number of DISTINCT keys. `rvmap_set` prepends, so a key set twice is in
+// the list twice and the newer one shadows the older; counting nodes would count
+// the shadowed ones. This is the same walk `_miter` does, with a counter instead
+// of a callback.
+let rvmap_len = fn m ->
+  let rec go = fn node -> fn seen -> fn acc ->
+    match node with
+    | Nil -> acc
+    | Cons ((kk, vv), rest) ->
+      if _mseen seen kk then go rest seen acc
+      else go rest (Cons (kk, seen)) (acc + 1) in
+  go (vec_get m 0) Nil 0;
 |mere}
 
 (* Lines the prelude occupies once it is glued ahead of the user source, so a
