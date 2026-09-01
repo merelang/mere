@@ -1041,6 +1041,18 @@ and compile_app env e =
   | Ast.Var "str_len" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i 0 a0 2 a0 0x03)                     (* lw a0, 0(a0) — length header *)
+  (* A tuple is a block of words with element i at i*4 -- the layout the
+     `Ast.Tuple` case builds and the `P_tuple` pattern already reads. `fst` and
+     `snd` are that read, so their absence was not a missing mechanism, only a
+     missing pair of cases: a library returning a value and a sticky bit as a
+     pair did not compile here while the same pair destructured in a `let`
+     did. *)
+  | Ast.Var "fst" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i 0 a0 2 a0 0x03)                     (* lw a0, 0(a0) *)
+  | Ast.Var "snd" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i 4 a0 2 a0 0x03)                     (* lw a0, 4(a0) *)
   | Ast.Var "fail" when List.length args = 1 ->
     (* fail msg : abort — write the message, then exit(1). Never returns. *)
     compile_expr env (List.hd args);                     (* a0 = msg str *)

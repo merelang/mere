@@ -1,0 +1,156 @@
+// The gate for contrib/softfloat/limbs: six 15-bit limbs must agree with the
+// backend's own integers.
+//
+// The oracle is native int arithmetic. It is a real oracle here and not a
+// tautology: the limb code never uses `+` on a whole value, only on one limb at
+// a time with an explicit carry, so agreeing with `a + b` is a claim about the
+// carry chain. Test values stay under 2^58 so the oracle itself is exact on the
+// interpreter, whose int is 63 bits.
+import "../../contrib/softfloat/limbs.mere";
+
+let of_int = fn (n: int) ->
+  l6_of_limbs (bit_and (bit_shr n 75) lmask) (bit_and (bit_shr n 60) lmask)
+              (bit_and (bit_shr n 45) lmask) (bit_and (bit_shr n 30) lmask)
+              (bit_and (bit_shr n 15) lmask) (bit_and n lmask);
+
+let to_int = fn (a: L6) ->
+  bit_or (bit_or (bit_or (bit_shl a.l4 60) (bit_shl a.l3 45))
+                 (bit_or (bit_shl a.l2 30) (bit_shl a.l1 15))) a.l0;
+
+let fails = vec_new ();
+let _ = vec_push fails 0;
+let bump = fn (u: unit) -> vec_set fails 0 (vec_get fails 0 + 1);
+let want = fn (name: str) -> fn (got: int) -> fn (exp: int) ->
+  if got == exp then () else
+    let _ = bump () in
+    print ("FAIL " ++ name ++ " got=" ++ str_of_int got ++ " want=" ++ str_of_int exp);
+
+// The values are built from bit positions rather than typed out, so the limb
+// boundaries (15, 30, 45) and the bits either side of them are all covered.
+let rec each_pos = fn (i: int) -> fn (f: int -> unit) ->
+  if i > 57 then () else let _ = f i in each_pos (i + 1) f;
+
+let _ = each_pos 0 (fn (i: int) ->
+  let v = bit_shl 1 i in
+  let _ = want ("roundtrip 2^" ++ str_of_int i) (to_int (of_int v)) v in
+  let _ = want ("bitlen 2^" ++ str_of_int i) (l6_bitlen (of_int v)) (i + 1) in
+  let _ = want ("roundtrip 2^n-1 " ++ str_of_int i) (to_int (of_int (v - 1))) (v - 1) in
+  ());
+
+let _ = want "bitlen 0" (l6_bitlen (of_int 0)) 0;
+let _ = want "is_zero 0" (if l6_is_zero (of_int 0) then 1 else 0) 1;
+let _ = want "is_zero 1" (if l6_is_zero (of_int 1) then 1 else 0) 0;
+
+// pairs that straddle limb boundaries in both directions
+let rec each_pair = fn (i: int) -> fn (f: int -> unit) ->
+  if i > 28 then () else let _ = f i in each_pair (i + 1) f;
+
+let _ = each_pair 0 (fn (i: int) ->
+  let a = bit_shl 1 (i * 2) in
+  let b = bit_shl 1 (i * 2 + 1) - 1 in
+  let _ = want ("add " ++ str_of_int i) (to_int (l6_add (of_int a) (of_int b))) (a + b) in
+  let hi = if a > b then a else b in
+  let lo = if a > b then b else a in
+  let _ = want ("sub " ++ str_of_int i) (to_int (l6_sub (of_int hi) (of_int lo))) (hi - lo) in
+  let _ = want ("cmp " ++ str_of_int i) (l6_cmp (of_int hi) (of_int lo)) (if hi == lo then 0 else 1) in
+  ());
+
+// carry all the way up: every limb full, plus one
+let allones = bit_shl 1 45 - 1;
+let _ = want "carry through 3 limbs" (to_int (l6_add (of_int allones) (of_int 1))) (bit_shl 1 45);
+let _ = want "borrow through 3 limbs" (to_int (l6_sub (of_int (bit_shl 1 45)) (of_int 1))) allones;
+let _ = want "sub to zero" (to_int (l6_sub (of_int allones) (of_int allones))) 0;
+
+// shifts, with the sticky the whole exercise exists for
+let rec each_sh = fn (i: int) -> fn (f: int -> unit) ->
+  if i > 30 then () else let _ = f i in each_sh (i + 1) f;
+
+let _ = each_sh 0 (fn (n: int) ->
+  let v = 191739611069752 in   // 0xAE_BBCC_DDEE_F8, a pattern with bits in every limb
+  let _ = want ("shl " ++ str_of_int n) (to_int (l6_shl (of_int v) n)) (bit_shl v n) in
+  let pair = l6_shr_sticky (of_int v) n in
+  let lost = if n == 0 then 0 else (if bit_and v (bit_shl 1 n - 1) != 0 then 1 else 0) in
+  let _ = want ("shr " ++ str_of_int n) (to_int (fst pair)) (bit_shr v n) in
+  let _ = want ("sticky " ++ str_of_int n) (snd pair) lost in
+  ());
+
+// A hand-picked table catches the carry it was written for. Poisoning one
+// carry in the chain failed only 2 of these checks and one borrow only 1 --
+// a margin that a small change to the table would close. So the pairs are
+// swept as well: a deterministic LCG, the same sequence on every backend,
+// with the values spread across the whole 58-bit range.
+let rec sweep = fn (i: int) -> fn (seed: int) ->
+  if i <= 0 then () else
+  let s1 = bit_and (seed * 25214903917 + 11) 288230376151711743 in   // 2^58 - 1
+  let s2 = bit_and (s1 * 25214903917 + 11) 288230376151711743 in
+  let x = s1 in
+  let y = bit_shr s2 (bit_and s1 31) in
+  let hi = if x > y then x else y in
+  let lo = if x > y then y else x in
+  let _ = want "sweep add" (to_int (l6_add (of_int x) (of_int y))) (x + y) in
+  let _ = want "sweep sub" (to_int (l6_sub (of_int hi) (of_int lo))) (hi - lo) in
+  let _ = want "sweep cmp" (l6_cmp (of_int hi) (of_int lo)) (if hi == lo then 0 else 1) in
+  let sh = bit_and s2 31 in
+  let pr = l6_shr_sticky (of_int x) sh in
+  let _ = want "sweep shr" (to_int (fst pr)) (bit_shr x sh) in
+  let _ = want "sweep sticky" (snd pr) (if sh == 0 then 0 else (if bit_and x (bit_shl 1 sh - 1) != 0 then 1 else 0)) in
+  let _ = want "sweep bitlen" (l6_bitlen (of_int x)) (l6_bitlen_limb x 0) in
+  sweep (i - 1) s2;
+
+let _ = sweep 400 1;
+
+// The sweep above cannot reach the top limbs: its values are under 2^58 so the
+// native oracle stays exact, and l5 (bits 75..89) is outside a 63-bit int
+// entirely. Dropping the borrow into l4 passed every check up to here.
+//
+// Up there the oracle is an identity rather than a value: (a + b) - b is a, and
+// a shifted up and back down is a. Neither needs a number the backend can hold.
+let rec sweep_high = fn (i: int) -> fn (seed: int) ->
+  if i <= 0 then () else
+  let s1 = bit_and (seed * 25214903917 + 11) 288230376151711743 in
+  let s2 = bit_and (s1 * 25214903917 + 11) 288230376151711743 in
+  // put the bits where the native oracle cannot go
+  let a = l6_shl (of_int s1) 30 in
+  let b = l6_shl (of_int s2) 28 in
+  let sum = l6_add a b in
+  let _ = want "high (a+b)-b == a" (l6_cmp (l6_sub sum b) a) 0 in
+  let _ = want "high (a+b)-a == b" (l6_cmp (l6_sub sum a) b) 0 in
+  let _ = want "high a-a == 0" (if l6_is_zero (l6_sub a a) then 1 else 0) 1 in
+  // The shift round trip needs headroom: l6_shl discards what leaves the top,
+  // so a value already near bit 88 does not come back. This one tops out at
+  // bit 68, leaving 15 bits of room for the shift. (The first version of this
+  // check used `a` and failed on correct code -- the gate was wrong, not the
+  // library.)
+  let sh = bit_and s2 15 in
+  let c = l6_shl (of_int (bit_shr s1 20)) 30 in
+  let pr = l6_shr_sticky (l6_shl c sh) sh in
+  let _ = want "high shl/shr round trip" (l6_cmp (fst pr) c) 0 in
+  let _ = want "high shl/shr sticky" (snd pr) 0 in
+  sweep_high (i - 1) s2;
+
+let _ = sweep_high 400 7;
+
+// bitlen above the oracle's reach. The table stops at 2^57 and the sweep's
+// values are under 2^58, so nothing had ever put the top bit in l4 (bits
+// 60..74) -- moving that limb's base from 60 to 61 passed every check. Here the
+// expected answer needs no oracle: a single bit at position i has length i + 1.
+let rec each_high = fn (i: int) -> fn (f: int -> unit) ->
+  if i > 89 then () else let _ = f i in each_high (i + 1) f;
+
+let one_limb = l6_of_limbs 0 0 0 0 0 1;
+let _ = each_high 58 (fn (i: int) ->
+  let v = l6_shl one_limb i in
+  let _ = want ("bitlen bit " ++ str_of_int i) (l6_bitlen v) (i + 1) in
+  let _ = want ("bit " ++ str_of_int i ++ " is not zero") (if l6_is_zero v then 1 else 0) 0 in
+  ());
+
+// and the very top: a bit in l5, which no native int can hold
+let top = l6_shl (l6_of_limbs 0 0 0 0 0 1) 80;
+let _ = want "bit 80 has bitlen 81" (l6_bitlen top) 81;
+let _ = want "bit 80 minus itself is zero" (if l6_is_zero (l6_sub top top) then 1 else 0) 1;
+let _ = want "bit 80 plus one, minus one" (l6_cmp (l6_sub (l6_add top (of_int 1)) (of_int 1)) top) 0;
+let _ = want "bit 80 shifted down and up" (l6_cmp (l6_shl (fst (l6_shr_sticky top 40)) 40) top) 0;
+
+let n = vec_get fails 0;
+let _ = print (if n == 0 then "ok limbs: table + 400 native-oracle rounds + 400 identity rounds in the top limbs"
+               else "FAILED limbs: " ++ str_of_int n ++ " checks");
