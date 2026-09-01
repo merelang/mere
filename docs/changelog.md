@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.366 — 2026-09-01
+
+_`exit` was the one host builtin between a 39,719-line program and the wall
+behind it._ The RV32I backend refused `exit`, and `fail` — three lines above it
+in the same match — already ended with the ecall that does the work: `a7 = 93`,
+with the status hardcoded to 1. The lowering is that tail with `a0` taken from
+the argument.
+
+What it unblocked is the more interesting half. Compiling
+[mere-ruby](https://github.com/284km/mere-ruby), a Ruby subset interpreter
+written in Mere, with `-rv` stopped at line 39,719 on `exit`. It now stops at
+line 7,716 on `x * 0.5`. That wall is not a missing builtin: the backend's value
+model is one 32-bit integer per register, and a Mere `float` is an IEEE 754
+double. There is nowhere to put it.
+
+`--bare` refuses `exit` for the reason it refuses `print` — the exit syscall is a
+courtesy of the host, and a machine handed to the program does not answer it. A
+user process under a kernel is not `--bare`, so it gets the lowering.
+
+The backend needed no shadow check to go with it. `compile_app` tests locals,
+globals and top-level functions before any builtin name, so a program that
+defines its own `exit` calls its own; `codegen_c` and `codegen_wasm` each need an
+explicit `user_shadows` guard to reach the same answer.
+
+---
+
 ## v0.1.365 — 2026-08-31
 
 _The point-in-glyph test was half-open in the wrong variable._ It counts ray
