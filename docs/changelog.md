@@ -4,6 +4,35 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.381 — 2026-09-01
+
+_A 39,719-line Ruby subset interpreter now compiles for RV32I._ Four megabytes of
+flat RV32IM, from a program that a week ago stopped on the first of its float
+lines. What was left after or-patterns was one language feature and one clock.
+
+**A top-level function used as a value** gets a one-word closure whose pointer is
+an *adapter*, not the function. A closure here is called with the closure in a0
+and the argument in a1; a one-argument top-level function wants the argument in
+a0. The adapter is that move and a tail jump, emitted once per function however
+many times it is used.
+
+A **curried** one is refused, and the message says how many arguments it takes and
+why: a partial application has to allocate a closure per argument, and this
+backend has no currying layer. `to_s`, which is what the interpreter passes
+around, takes one.
+
+`time` is the last host-service shim. A fixed number would make a program that
+measures elapsed time report 0 rather than say it cannot measure.
+
+**It compiles; it does not yet run.** The binary is 3.97 MB and the code region is
+`globals_base - load_base`, which is 2 MB — so the code overlaps the globals and
+the heap by almost two megabytes and would corrupt itself on the first store.
+`globals_base` is a fixed offset from the load base, and making it follow the
+emitted code is the next thing. The binary itself is right: it opens with the
+stack setup and the store that clears the `try_or` handler word.
+
+---
+
 ## v0.1.380 — 2026-09-01
 
 _Or-patterns on RV32I, refused by a rule where they bind._ Try the first

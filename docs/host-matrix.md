@@ -163,7 +163,7 @@ machine rather than a host.
 | `substring` | yes | yes | yes | yes |
 | `sum_range` | yes | yes | yes | yes |
 | `tan` | yes | yes | yes | stub |
-| `time` | yes | yes | yes | refused |
+| `time` | yes | yes | yes | stub |
 | `to_lower` | yes | yes | yes | yes |
 | `to_upper` | yes | yes | yes | yes |
 | `tty_raw` | yes | refused | refused | refused |

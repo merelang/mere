@@ -185,6 +185,14 @@ let alloc_words rd n =
    by the Fun case, drained (and possibly extended) by build_items. *)
 let lambdas : (string * string list * string * Ast.expr) list ref = ref []
 
+(* Top-level functions used as a VALUE. A closure here is `[code_ptr][captured..]`
+   and a top-level function captures nothing, so its closure is one word -- but the
+   pointer in it cannot be the function itself: a closure is called with the
+   closure in a0 and the argument in a1, and a top-level function of one argument
+   expects the argument in a0. The adapter is that move and a tail jump. Keyed by
+   name so one is emitted however many times the function is used. *)
+let adapters : (string, unit) Hashtbl.t = Hashtbl.create 16
+
 (* the variables a pattern binds *)
 let rec pat_vars (p : Ast.pattern) : string list =
   match p.Ast.pnode with
@@ -733,9 +741,20 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
        (match Hashtbl.find_opt globals_map v with
         | Some gi -> load_global_to_a0 gi                         (* top-level value binding *)
         | None ->
-          if is_top v then
-            err e.loc (Printf.sprintf
-              "RV32I: `%s` used as a value (higher-order / partial application not supported yet)" v)
+          if is_top v then begin
+            let arity = List.length (fst (Hashtbl.find tops v)) in
+            if arity <> 1 then
+              err e.loc (Printf.sprintf
+                "RV32I: `%s` takes %d arguments and is used as a value -- only a \
+                 one-argument top-level function can be, because a partial \
+                 application of a curried one has to allocate a closure per \
+                 argument and this backend has no currying layer" v arity);
+            Hashtbl.replace adapters v ();
+            alloc_words t1 1;
+            emit (LoadAddr (t0, "__adapt_" ^ v));
+            emit_word (enc_s 0 t0 t1 2 0x23);                       (* sw t0, 0(t1) *)
+            emit_word (enc_i 0 t1 0 a0 0x13)                        (* mv a0, t1 *)
+          end
           else if List.mem_assoc v Typer.initial_env then
             (* The shape of the failure, not just the fact of it. This branch
                used to say "unbound variable" for a name the language HAS --
@@ -2568,6 +2587,7 @@ let build_items (prog : Ast.program) : item list =
   lbl_counter := 0;
   string_data := [];
   lambdas := [];
+  Hashtbl.reset adapters;
   globals := [];
   eq_pending := [];
   Hashtbl.reset eq_requested;
@@ -2661,6 +2681,13 @@ let build_items (prog : Ast.program) : item list =
       drain ()
   in
   drain ();
+  (* the adapters: one move and a tail jump each, for every top-level function
+     that was used as a value *)
+  Hashtbl.iter (fun name () ->
+    emit (Label ("__adapt_" ^ name));
+    emit_word (enc_i 0 a1 0 a0 0x13);                               (* mv a0, a1 *)
+    emit (Jal (zero, "u_" ^ name))                                  (* tail jump *)
+  ) adapters;
   (* drain the structural-eq worklist (a helper may request more, e.g. for
      recursive types; eq_requested dedups so it terminates) *)
   let rec drain_eq () =
