@@ -512,7 +512,10 @@ let rec pvars_in_pattern p =
   | Ast.P_constr (_, Some sub) -> pvars_in_pattern sub
   | Ast.P_constr (_, None) -> 0
   | Ast.P_as (inner, _) -> 1 + pvars_in_pattern inner
-  | Ast.P_or (a, _) -> pvars_in_pattern a
+  | Ast.P_or (a, b) ->
+    (* +2 for the scrutinee and the stack pointer, which the second alternative
+       needs after the first one has failed part-way through *)
+    pvars_in_pattern a + pvars_in_pattern b + 2
   | Ast.P_record (_, fields) -> List.fold_left (fun n (_, q) -> n + pvars_in_pattern q) 0 fields
 
 let rec count_lets (e : Ast.expr) : int =
@@ -1741,7 +1744,40 @@ and bind_pattern env pat l_fail =
      | Some subp ->
        emit_word (enc_i 4 a0 2 a0 0x03);           (* a0 = payload *)
        bind_pattern env subp l_fail)
-  | Ast.P_or (_, _) -> err pat.Ast.ploc "RV32I: or-patterns are not supported yet"
+  | Ast.P_or (a, b) ->
+    (* Try the first alternative; on mismatch try the second; on both, fail.
+       Neither may bind a variable: a binding would have to land in the SAME slot
+       on both paths, and slots are handed out as the pattern is walked, so the
+       two alternatives would name different ones and the arm body would read
+       whichever the compiler happened to see last. Refusing by that rule is
+       narrow and says which rule.
+
+       Both the scrutinee and the stack pointer are kept, because the first
+       alternative may be a container pattern that parked its pointer and then
+       jumped out from inside -- the same thing compile_match now undoes at an
+       arm's fail label, for the same reason. *)
+    if pat_vars a <> [] || pat_vars b <> [] then
+      err pat.Ast.ploc
+        "RV32I: an or-pattern that binds a variable is not supported yet -- the \
+         alternatives would have to bind into the same slot, and slots are \
+         handed out while the pattern is walked";
+    let vidx = !slot_ctr in incr slot_ctr;
+    store_a0_to vidx;                              (* keep the scrutinee *)
+    let spidx = !slot_ctr in incr slot_ctr;
+    emit_word (enc_i 0 sp 0 a0 0x13);              (* mv a0, sp *)
+    store_a0_to spidx;
+    let l_b = fresh_label ".orAlt" in
+    let l_ok = fresh_label ".orOk" in
+    load_to_a0 vidx;
+    let _ = bind_pattern env a l_b in
+    emit (Jal (zero, l_ok));
+    emit (Label l_b);
+    load_to_a0 spidx;
+    emit_word (enc_i 0 a0 0 sp 0x13);              (* mv sp, a0 *)
+    load_to_a0 vidx;
+    let _ = bind_pattern env b l_fail in
+    emit (Label l_ok);
+    env
 
 (* --- function + runtime emission ----------------------------------------- *)
 
