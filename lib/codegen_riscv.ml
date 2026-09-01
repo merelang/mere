@@ -97,6 +97,32 @@ let emit_word w = emit (Word w)
    printed as -1 here while the interpreter printed 4294967295, and
    3220176896 -- the high half of -1.0's bit pattern -- came back as
    -1074790400. *)
+(* Floats on this target are a two-word block: the high half of the IEEE 754
+   pattern, then the low half. That is the shape `float_bits_hi` /
+   `float_bits_lo` already ask for, and it is the narrowest thing that holds a
+   double where a word is 32 bits.
+
+   SCAFFOLD: the arithmetic is not wired up. contrib/softfloat computes it in
+   integers and is gated bit-for-bit against the hardware, but connecting it
+   means injecting it into the -rv prelude and mapping `float` operations onto
+   its record type across the typer boundary. Until that lands, an operation
+   ABORTS AT RUNTIME with a message that says so, rather than the alternative:
+   `compile_bin` does not look at types, so a float reaching it would have
+   emitted an integer add on two pointers and returned a number. A program that
+   carries floats without operating on them compiles and runs; one that operates
+   on them stops and says why. *)
+(* a 32-bit half of an IEEE pattern, as the signed word `li` will accept *)
+let signed32 (v : int) = if v > 0x7FFFFFFF then v - 0x100000000 else v
+
+(* The abort a float operation lowers to while contrib/softfloat is not yet
+   connected. It is the tail of `fail`: write the message, then exit(1). A
+   compile-time refusal was the other option and is worse here -- mere-ruby, the
+   program this work exists for, carries float code on paths a script never
+   reaches, and refusing at compile time refuses the whole program. *)
+let float_op_unsupported_msg what =
+  "RV32I: " ^ what ^ " on floats is not lowered yet -- contrib/softfloat \
+computes it in integers, but is not yet injected into the -rv prelude"
+
 let check_int_lit loc n =
   if n > 2147483647 || n < (-2147483648) then
     err loc (Printf.sprintf
@@ -277,6 +303,10 @@ let type_variants : (string, string list * (string * Ast.ty option) list) Hashtb
 let type_records : (string, string list * (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 16
 let rec resolve_ty (t : Ast.ty) : Ast.ty =
   match t with Ast.TyVar { Ast.link = Some t'; _ } -> resolve_ty t' | _ -> t
+
+let is_float_ty (t : Ast.ty option) =
+  match t with Some t -> (match resolve_ty t with Ast.TyFloat -> true | _ -> false) | None -> false
+
 let record_order loc name =
   match Hashtbl.find_opt record_fields name with
   | Some fs -> fs
@@ -624,6 +654,21 @@ let emit_binop op rd rs1 rs2 loc =
   | Ast.Mod -> emit_word (enc_r 1 rs2 rs1 6 rd 0x33)
   | Ast.Concat -> err loc "RV32I: internal — string concat is handled in compile_bin"
 
+(* The abort a float operation lowers to while contrib/softfloat is not
+   connected: the tail of `fail` -- write the message, then exit(1). *)
+let emit_float_abort what =
+  let msg = float_op_unsupported_msg what in
+  let label = fresh_label "str_" in
+  string_data := (label, mk_str_block msg) :: !string_data;
+  emit (LoadAddr (a0, label));
+  emit_word (enc_i 0 a0 2 a2 0x03);                      (* lw a2, 0(a0) — len *)
+  emit_word (enc_i 4 a0 0 a1 0x13);                      (* addi a1, a0, 4 *)
+  emit_word (enc_i 64 zero 0 a7 0x13);                   (* li a7, 64 *)
+  emit_word (enc_i 0 zero 0 zero 0x73);                  (* ecall (write) *)
+  emit_word (enc_i 93 zero 0 a7 0x13);                   (* li a7, 93 *)
+  emit_word (enc_i 1 zero 0 a0 0x13);                    (* li a0, 1 *)
+  emit_word (enc_i 0 zero 0 zero 0x73)                   (* ecall (exit) *)
+
 let rec compile_expr (env : env) (e : Ast.expr) : unit =
   (* every subexpression starts out non-tail; the cases below whose value is
      this expression's value put `saved_tail` back before recursing *)
@@ -676,6 +721,10 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
   | Ast.Neg a ->
     compile_expr env a;
     emit_word (enc_r 0x20 a0 zero 0 a0 0x33)                         (* sub a0, x0, a0 *)
+  | Ast.Bin (_, l, r) when is_float_ty l.Ast.ty || is_float_ty r.Ast.ty ->
+    emit_float_abort "an arithmetic operator"
+  | Ast.Cmp (_, l, r) when is_float_ty l.Ast.ty || is_float_ty r.Ast.ty ->
+    emit_float_abort "a comparison"
   | Ast.Bin (op, l, r) -> compile_bin env op l r
   | Ast.Cmp (op, l, r) -> compile_cmp env op l r
   | Ast.Logic (op, l, r) -> compile_logic env op l r
@@ -815,7 +864,14 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     compile_expr env body;
     pop t0;
     emit_word (enc_i 0 t0 0 gp 0x13)                                (* mv gp, t0 *)
-  | Ast.Float_lit _ -> err e.loc "RV32I: floats are not supported yet"
+  | Ast.Float_lit f ->
+    let b = Int64.bits_of_float f in
+    let hi = signed32 (Int64.to_int (Int64.shift_right_logical b 32)) in
+    let lo = signed32 (Int64.to_int (Int64.logand b 0xFFFFFFFFL)) in
+    alloc_words t1 2;
+    li t0 hi; emit_word (enc_s 0 t0 t1 2 0x23);          (* sw hi, 0(t1) *)
+    li t0 lo; emit_word (enc_s 4 t0 t1 2 0x23);          (* sw lo, 4(t1) *)
+    emit_word (enc_i 0 t1 0 a0 0x13)                     (* mv a0, t1 *)
   | Ast.With _ -> err e.loc "RV32I: `with` expressions are not supported yet"
   | Ast.Ref _ -> err e.loc "RV32I: `&` references are not supported yet"
   | Ast.Record_update (base, updates) ->
@@ -1038,6 +1094,22 @@ and compile_app env e =
     emit_word (enc_i 1 zero 0 a2 0x13);                  (* li   a2, 1 *)
     emit_word (enc_i 64 zero 0 a7 0x13);                 (* li   a7, 64 *)
     emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall (write '\n') *)
+  (* The two halves of the block a float is. These are real, not scaffolding:
+     they are the representation, so a program can take a double apart and put
+     it back on this target even while the arithmetic is not lowered. *)
+  | Ast.Var "float_bits_hi" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i 0 a0 2 a0 0x03)                     (* lw a0, 0(a0) *)
+  | Ast.Var "float_bits_lo" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i 4 a0 2 a0 0x03)                     (* lw a0, 4(a0) *)
+  | Ast.Var "float_of_bits" when List.length args = 2 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1); push a0;
+    alloc_words t1 2;
+    pop t0; emit_word (enc_s 4 t0 t1 2 0x23);            (* sw lo, 4(t1) *)
+    pop t0; emit_word (enc_s 0 t0 t1 2 0x23);            (* sw hi, 0(t1) *)
+    emit_word (enc_i 0 t1 0 a0 0x13)                     (* mv a0, t1 *)
   | Ast.Var "str_len" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i 0 a0 2 a0 0x03)                     (* lw a0, 0(a0) — length header *)

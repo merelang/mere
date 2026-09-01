@@ -13786,6 +13786,26 @@ let () =
     "let p = (11, 22);\nlet _ = print_int (fst p);" "lw a0, 0(a0)";
   rv_contains "rv32i: snd reads the second"
     "let p = (11, 22);\nlet _ = print_int (snd p);" "lw a0, 4(a0)";
+  (* A float here is a two-word block: the two halves of the IEEE 754 pattern.
+     1.5 is 0x3FF8000000000000, so the high word is 0x3FF80000 and the low is 0.
+     The halves are emitted as SIGNED words, which is why the literal check
+     above had to exist first: an unsigned high half does not fit. *)
+  rv_contains "rv32i: a float literal builds its high half"
+    "let x = 1.5;\nlet _ = print_int (float_bits_hi x);" "lui t0, 0x3ff80";
+  rv_contains "rv32i: float_bits_hi reads word 0"
+    "let x = 1.5;\nlet _ = print_int (float_bits_hi x);" "lw a0, 0(a0)";
+  rv_contains "rv32i: float_bits_lo reads word 1"
+    "let x = 1.5;\nlet _ = print_int (float_bits_lo x);" "lw a0, 4(a0)";
+  (* The arithmetic is not lowered. It must not fall through to compile_bin,
+     which does not look at types and would have emitted an integer add on two
+     pointers and returned a number. It lowers to the abort `fail` uses -- a
+     runtime stop with a message, chosen over a compile-time refusal because the
+     program this exists for carries float code on paths a script never runs. *)
+  rv_contains "rv32i: a float operator lowers to an abort, not an integer add"
+    "let _ = print_int (float_bits_hi (1.5 + 2.5));" "li a7, 93";
+  (* The prelude's own definitions are not testable here: it is injected by the
+     driver, and this harness calls the backend directly. They have their own
+     gate, scripts/rv_prelude_check.sh. *)
   Codegen_riscv.bare := true;
   (* reachable through --bare's entry, so the access is actually emitted *)
   rv_contains "rv32i: a raw access bounds-checks its offset"
