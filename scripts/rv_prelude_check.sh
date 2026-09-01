@@ -30,6 +30,19 @@ probe_for() {
     str_index_of) echo 'let _ = print_int (str_index_of "abc" "b");' ;;
     str_repeat) echo 'let _ = print (str_repeat "ab" 2);' ;;
     str_rev|to_lower|to_upper) echo "let _ = print ($1 \"aB\");" ;;
+    run) echo 'let _ = print_int (run "true");' ;;
+    read_file) echo 'let _ = print (read_file "x");' ;;
+    file_exists) echo 'let _ = print_int (if file_exists "x" then 1 else 0);' ;;
+    random_int) echo 'let _ = print_int (random_int 10);' ;;
+    write_file) echo 'let _ = write_file "a" "b";' ;;
+    args) echo 'let _ = print_int (list_len (args ()));' ;;
+    read_stdin) echo 'let _ = print (read_stdin ());' ;;
+    bytes_of_str) echo 'let _ = print_bytes (bytes_of_str "x");' ;;
+    print_bytes) echo 'let _ = print_bytes (bytes_of_str "x");' ;;
+    __h_todo) echo '' ;;
+    rvmap_clear|rvmap_compact|rvmap_recycle) echo "let m = rvmap_new ();\nlet _ = $1 m;\nlet _ = print_int 0;" ;;
+    rvmap_bytes) echo 'let m = rvmap_new ();\nlet _ = print_int (rvmap_bytes m);' ;;
+    rvvec_bytes) echo 'let v = vec_new ();\nlet _ = print_int (rvvec_bytes v);' ;;
     abs) echo 'let _ = print_int (abs (0 - 5));' ;;
     max|min|gcd) echo "let _ = print_int ($1 12 18);" ;;
     clamp) echo 'let _ = print_int (clamp 0 10 42);' ;;
@@ -69,7 +82,7 @@ for n in $NAMES; do
     # A leading underscore marks an internal helper: it is reached through the
     # public name above it, and probing it directly would test nothing extra.
     case "$n" in
-      _*|__f_todo) ;;
+      _*|__f_todo|__h_todo) ;;
       *) MISSING="$MISSING $n" ;;
     esac
     continue
@@ -111,11 +124,21 @@ fi
 # claim the backend cannot honour, so the phrase is asserted here as well --
 # a poison run reworded it and only the matrix noticed, which made this file's
 # own comment about the coupling untrue.
-if grep -a -q 'is not lowered yet' "$TMP/op2.bin"; then :; else
-  echo "FAIL rv_prelude: the shim message lost the phrase host_matrix.sh keys on"
-  echo "  (want 'is not lowered yet' — see the \`stub\` branch in that script)"
-  rc=1
-fi
+# Both shim families must start their message with the prefix
+# scripts/host_matrix.sh keys on to call a cell `stub` rather than `yes`. Losing
+# it silently turns those cells into a claim the backend cannot honour: it
+# happened once, when the host-service shims arrived with a different sentence
+# and nine cells flipped.
+printf 'let _ = print (read_file "x");\n' > "$TMP/op3.mere"
+"$MERE" -rv "$TMP/op3.mere" > "$TMP/op3.bin" 2>/dev/null
+for pair in "op2.bin:float" "op3.bin:host"; do
+  f="$TMP/${pair%%:*}"; what="${pair##*:}"
+  if grep -a -q 'RV32I:' "$f"; then :; else
+    echo "FAIL rv_prelude: the $what shim's message lost the \`RV32I:\` prefix"
+    echo "  (host_matrix.sh keys on it to say \`stub\` instead of \`yes\`)"
+    rc=1
+  fi
+done
 
 # KNOWN, and pinned so it is noticed when it changes: using rvmap_set and
 # rvmap_get on the SAME map fails to type-check, and the message blames the
@@ -140,13 +163,32 @@ fi
 # builtin hole Q-070 closed, one declaration further out. This lives here rather
 # than in test_basic.ml because that harness types the program itself and its
 # typer answers `unbound variable` before codegen is reached.
+# A CALL to an extern compiles and aborts at runtime naming the symbol. It used
+# to be refused at compile time, and this gate asserted that -- correctly, until
+# the behaviour changed underneath it and it said so. Refusing refuses the whole
+# program for a call it may never make.
 printf 'extern fn getpid: unit -> int;\nlet _ = print_int (getpid ());\n' > "$TMP/ex.mere"
-if "$MERE" -rv "$TMP/ex.mere" >/dev/null 2>"$TMP/exerr"; then
-  echo "FAIL rv_prelude: an extern compiled for -rv, which has no C library"
-  rc=1
-elif grep -q 'has no C library to link against' "$TMP/exerr"; then :; else
-  echo "FAIL rv_prelude: an extern is reported as something other than the target's limit"
+if "$MERE" -rv "$TMP/ex.mere" > "$TMP/ex.bin" 2>"$TMP/exerr"; then
+  if grep -a -q 'has no C library to link against' "$TMP/ex.bin"; then :; else
+    echo "FAIL rv_prelude: an extern call compiled without the message that names why it will stop"
+    rc=1
+  fi
+else
+  echo "FAIL rv_prelude: an extern call no longer compiles for -rv"
   head -2 "$TMP/exerr"
+  rc=1
+fi
+# A program that DECLARES one and never calls it must run.
+printf 'extern fn getpid: unit -> int;\nlet _ = print "ok";\n' > "$TMP/exd.mere"
+if "$MERE" -rv "$TMP/exd.mere" >/dev/null 2>&1; then :; else
+  echo "FAIL rv_prelude: declaring an extern without calling it stops the program"
+  rc=1
+fi
+# But an extern used as a VALUE is still refused: higher-order is unsupported
+# here, so there is nothing to abort inside.
+printf 'extern fn getpid: unit -> int;\nlet f = getpid;\nlet _ = print_int (f ());\n' > "$TMP/exv.mere"
+if "$MERE" -rv "$TMP/exv.mere" >/dev/null 2>"$TMP/exverr"; then
+  echo "FAIL rv_prelude: an extern as a value compiled, and nothing can lower that"
   rc=1
 fi
 # and a name nobody declared is still a plain unbound variable, so the branch

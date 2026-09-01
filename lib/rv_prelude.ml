@@ -30,6 +30,30 @@ let rec gcd = fn (a: int) -> fn (b: int) ->
   let y = if b < 0 then 0 - b else b in
   if y == 0 then x else gcd y (x % y);
 
+// --- host services this target does not have ------------------------------
+// Not a scaffold: `--bare` hands the program the machine, and there is no host
+// to read a file from, run a command through, or draw entropy out of. These stop
+// with a message rather than being refused at compile time, for the reason the
+// `extern fn` calls do -- refusing refuses the whole program for a call it may
+// never make, and the program this backend is being carried for is an
+// interpreter whose scripts mostly touch none of them.
+//
+// `random_int` is here rather than implemented because a deterministic sequence
+// returned from something named random is the kind of wrong that stays quiet.
+let __h_todo = fn (n: str) -> fail ("RV32I: " ++ n ++ " needs a host, and --bare hands the program the machine instead");
+let run = fn (c: str) -> (__h_todo "run" : int);
+let read_file = fn (p: str) -> (__h_todo "read_file" : str);
+let file_exists = fn (p: str) -> (__h_todo "file_exists" : bool);
+let random_int = fn (n: int) -> (__h_todo "random_int" : int);
+let write_file = fn (p: str) -> fn (c: str) -> (__h_todo "write_file" : unit);
+let args = fn (u: unit) -> (__h_todo "args" : str list);
+let read_stdin = fn (u: unit) -> (__h_todo "read_stdin" : str);
+// `bytes` has no representation on this backend at all -- these are not a host
+// service but the type itself, and they are here for the same reason: a program
+// that never builds one runs.
+let bytes_of_str = fn (s: str) -> (__h_todo "bytes_of_str" : bytes);
+let print_bytes = fn (b: bytes) -> (__h_todo "print_bytes" : unit);
+
 // --- floats: a scaffold, and it says so -----------------------------------
 // A float on this target is a two-word block (the two halves of the IEEE 754
 // pattern), which codegen_riscv builds for a literal and takes apart for
@@ -209,6 +233,21 @@ let rvmap_iter = fn m -> fn f -> _miter (vec_get m 0) f Nil;
 // the list twice and the newer one shadows the older; counting nodes would count
 // the shadowed ones. This is the same walk `_miter` does, with a counter instead
 // of a callback.
+// The reclamation API, for a map that has no arena. `map_compact` and
+// `map_recycle` exist to return bytes an arena is holding after entries were
+// overwritten or deleted; this representation is an assoc list of ordinary
+// values, so there is nothing behind it to return and a no-op is the honest
+// answer, not a stub. `map_clear` does have work to do.
+//
+// `map_bytes` is different: it asks HOW MANY bytes the arena holds, and
+// answering 0 would read as "this map uses no memory" rather than "the question
+// does not apply here". So it stops and says which it is.
+let rvmap_clear = fn m -> vec_set m 0 Nil;
+let rvmap_compact = fn m -> ();
+let rvmap_recycle = fn m -> ();
+let rvvec_bytes = fn v -> fail "RV32I: vec_bytes measures an arena, and a Vec here is a plain block with none -- there is no number to give";
+let rvmap_bytes = fn m -> fail "RV32I: map_bytes measures an arena, and this target's Map is an assoc list with none -- there is no number to give";
+
 let rvmap_len = fn m ->
   let rec go = fn node -> fn seen -> fn acc ->
     match node with

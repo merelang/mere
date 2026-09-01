@@ -210,19 +210,22 @@ classify() {  # classify <flag> <file> <subject>
     if [ "$1" = "-c" ] && [ "$have_cc" = 1 ] \
        && ! "$CC" -fsyntax-only -w -x c "$TMP/emitted" 2>/dev/null; then
       echo nocompile
-    elif [ "$1" = "-rv" ] && grep -a -q 'is not lowered yet' "$TMP/emitted"; then
+    elif [ "$1" = "-rv" ] && grep -a -q 'RV32I:' "$TMP/emitted"; then
       # Neither `yes` nor `refused`. The -rv prelude defines the float builtins as
       # shims that ABORT AT RUNTIME naming contrib/softfloat, so a probe for one
       # compiles and the cell would have said `yes` -- the matrix lying in the
       # flattering direction about a backend that cannot do the arithmetic.
       # Refusing at compile time was the other option and is worse for the program
       # this backend exists to carry, so the honest cell is a third value. The
-      # binary carries the message, which is what this looks for -- so this cell
-      # depends on that wording. The dependency is not silent: the same phrase is
-      # asserted by scripts/rv_prelude_check.sh. That was not true when this
-      # comment was first written -- that script only checked for the word
-      # `softfloat`, so a poison run that reworded the rest flipped 27 cells here
-      # and nothing else noticed. It checks the phrase now.
+      # binary carries the message, so the signal is that the message is IN it.
+      #
+      # It keys on the `RV32I:` prefix every shim's message starts with, not on
+      # the rest of the wording. The first version looked for one shim family's
+      # exact phrase, and when a second family arrived -- the host services, with
+      # a different sentence -- nine more cells flipped to `yes` and only this
+      # gate's own diff noticed. A prefix every abort shares survives the next
+      # family too. scripts/rv_prelude_check.sh asserts that both families
+      # produce it.
       echo stub
     else
       echo yes
