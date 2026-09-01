@@ -4,6 +4,79 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.388 — 2026-09-02
+
+_A `try_or` that fired handed the catcher back the failed callee's registers._
+
+Five lines of Mere:
+
+```mere
+let g = fn (n: int) -> let a = n + 1 in let b = a + 2 in fail ("b" ++ str_of_int (a + b));
+let f = fn (u: unit) -> let p = 5 in let v = try_or (fn (z: unit) -> g 1) 7 in p + v;
+let _ = print_int (f ());
+```
+
+Every backend prints 12. RV32I printed **9** -- `p` came back holding 2, which is
+`g`'s `a`.
+
+A named binding on this backend lives in a callee-saved register. The unwind
+restored sp and fp by hand, which is enough to land back in the right frame and
+not enough to find the caller's values in it: the failing thunk had already
+written its own bindings over them. The record grows from 5 words to 15 and
+carries s1..s10, which is what `setjmp` saves and for the same reason. s11 is not
+among them -- it is the far-jump scratch and is dead between jumps.
+
+**The suite had a try_or test.** Its thunk had no bindings of its own, so there
+was nothing to overwrite and all four backends agreed.
+
+### An unimplemented service is now a failure a program can catch
+
+`emit_abort` -- what an `extern fn` call lowers to on a target with no C library --
+wrote its message and called exit. So a `try_or` around such a call did nothing:
+the abort left the process from inside the handler's reach. It now goes through
+the same unwind `fail` uses, which is where that sequence already lived; the copy
+in `emit_abort` was the write-and-exit half only.
+
+That matters because coping is the program's job. mere-ruby sets `$$` from
+`getpid` at startup, and wrapping that line was ineffective until this changed.
+
+### The gate that was missing
+
+`scripts/parity.sh` compares four backends by output and RV32I is not one of
+them, because running its output needs a machine. So everything about that
+backend that is a matter of runtime behaviour rather than emitted instructions had
+no gate: `qemu_virt.sh` covers the bare-metal side and nothing covered the hosted
+side. `scripts/rv_exec_check.sh` does now -- each program run on the interpreter
+and on the Mere-written CPU, outputs required to match, so no expected values are
+written down. The one exception is labelled: an `extern fn` that nothing
+implements has no behaviour on another backend to compare against, so that case
+alone carries its expectation.
+
+Both fixes were poisoned and both were caught.
+
+### mere-ruby on the self-made CPU
+
+```
+$ ./rvrun 64
+usage: mere-ruby [-v] [-h] [-e CODE] [-I DIR] [--] <script.rb | -> [args]
+```
+
+**That is a 39,719-line Ruby interpreter, built by this compiler, initialising on
+a RISC-V CPU written in Mere, and printing its own usage message** -- byte for byte
+what the native build prints. It gets there by coping with a machine that has no
+shell, no pid and no arena: the environment reads as empty, `$$` is left unset
+rather than set to a made-up number, and the arena byte counters are not kept.
+Each of those is a decision the program makes, which is why the catchable abort
+had to come first.
+
+`-e` still stops, in mere-ruby's own code rather than at a host wall. The message
+that reports it used to be `mere-ruby: (built-in exception raised)` -- naming
+neither what was raised nor why, while `raise_exc` was holding both arguments. It
+now says `TypeError: Dir is not a class/module`, which is where the next slice
+starts.
+
+---
+
 ## v0.1.387 — 2026-09-02
 
 _Float arithmetic on a backend with no float: 2,880 results, bit-identical to the
