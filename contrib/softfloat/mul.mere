@@ -1,0 +1,103 @@
+// contrib/softfloat/mul — IEEE 754 multiplication, in integers only.
+//
+// This is what the 15-bit limb width was chosen for. Two 53-bit significands
+// make a product of up to 106 bits, and the schoolbook loop computes it as
+// limb-by-limb products of at most 30 bits each. That fits the narrowest int
+// any backend has -- RV32I's signed 32-bit word -- with one condition: the
+// carry must be propagated at every step. Accumulating four of them into one
+// column before carrying reaches 2^32 and overflows there, so the inner loop
+// carries as it goes and no accumulator passes 2^31.
+import "limbs.mere";
+import "softfloat.mere";
+import "add.mere";
+
+// The 53-bit significand as four limbs in a Vec, so the schoolbook loop can be
+// a loop. The fields of a record cannot be indexed.
+let sig_limbs = fn (a: Sf) ->
+  let h = if a.exp == 0 then 0 else hidden_bit in
+  let v = vec_new () in
+  let _ = vec_push v a.f0 in
+  let _ = vec_push v a.f1 in
+  let _ = vec_push v a.f2 in
+  let _ = vec_push v (a.f3 + h) in
+  v;
+
+// p[i+j] += a[i]*b[j], carrying at each step. The bound that matters:
+// p < 2^15, a[i]*b[j] < 2^30, carry < 2^16, so the sum stays under 2^31.
+let mul_limbs = fn (a) -> fn (b) ->
+  let p = vec_new () in
+  let rec zeros = fn (k: int) -> if k <= 0 then () else let _ = vec_push p 0 in zeros (k - 1) in
+  let _ = zeros 8 in
+  let rec inner = fn (i: int) -> fn (j: int) -> fn (carry: int) ->
+    if j >= 4 then vec_set p (i + 4) (vec_get p (i + 4) + carry)
+    else
+      let t = vec_get p (i + j) + vec_get a i * vec_get b j + carry in
+      let _ = vec_set p (i + j) (bit_and t lmask) in
+      inner i (j + 1) (bit_shr t lbits) in
+  let rec outer = fn (i: int) ->
+    if i >= 4 then () else let _ = inner i 0 0 in outer (i + 1) in
+  let _ = outer 0 in
+  p;
+
+// The product, shifted down to the working format: at most 56 bits, which is
+// 53 with three below for the guard, the round and the sticky.
+//
+// The shift is computed from the product's own width, NOT fixed. A fixed
+// `P >> 49` is right for two normals -- their product is 105 or 106 bits -- and
+// wrong the moment either operand is subnormal, because then the product is
+// narrower and the bits below 49 are significand, not sticky. The gate found it
+// as `0,1 * 2146435071,4294967295`: the high half matched the hardware and the
+// low half came back zero. A tolerance would have accepted it.
+let prod_limb = fn (p) -> fn (i: int) -> if i < 0 || i > 7 then 0 else vec_get p i;
+
+let prod_bitlen = fn (p) ->
+  let rec go = fn (k: int) ->
+    if k < 0 then 0
+    else if vec_get p k != 0 then k * 15 + l6_bitlen_limb (vec_get p k) 0
+    else go (k - 1) in
+  go 7;
+
+// bits [from, from+15) of the product, which may straddle two limbs
+let prod_bits15 = fn (p) -> fn (from: int) ->
+  let li = from / 15 in
+  let off = from - li * 15 in
+  if off == 0 then prod_limb p li
+  else bit_and (bit_or (bit_shr (prod_limb p li) off)
+                       (bit_shl (prod_limb p (li + 1)) (15 - off))) lmask;
+
+// is any bit below `n` set?
+let prod_low_nonzero = fn (p) -> fn (n: int) ->
+  let rec go = fn (i: int) ->
+    if i >= n then 0
+    else
+      let li = i / 15 in
+      let take = if n - i >= 15 then 15 else n - i in
+      let v = bit_and (prod_limb p li) (bit_shl 1 take - 1) in
+      if i - li * 15 == 0 && v != 0 then 1 else
+      if bit_and (bit_shr (prod_limb p li) (i - li * 15)) (bit_shl 1 take - 1) != 0 then 1
+      else go (i + take) in
+  go 0;
+
+let product_to_l6 = fn (p) ->
+  let len = prod_bitlen p in
+  let k = if len > 56 then len - 56 else 0 in
+  let st = if k == 0 then 0 else prod_low_nonzero p k in
+  let s = l6_of_limbs (prod_bits15 p (k + 75)) (prod_bits15 p (k + 60))
+                      (prod_bits15 p (k + 45)) (prod_bits15 p (k + 30))
+                      (prod_bits15 p (k + 15)) (prod_bits15 p k) in
+  (s, k, st);
+
+let mul = fn (a: Sf) -> fn (b: Sf) ->
+  let sign = bit_xor a.sign b.sign in
+  if is_snan a then quiet a
+  else if is_snan b then quiet b
+  else if is_nan a then a
+  else if is_nan b then b
+  else if is_inf a then (if is_zero b then nan else (if sign == 1 then neg_inf else inf))
+  else if is_inf b then (if is_zero a then nan else (if sign == 1 then neg_inf else inf))
+  else if is_zero a || is_zero b then mk sign 0 0 0 0 0
+  else
+    let (s, k, st) = product_to_l6 (mul_limbs (sig_limbs a) (sig_limbs b)) in
+    // value = S * 2^(Ea + Eb - 2150 + k), and pack reads s as `significand<<3`
+    // with value = s * 2^(e - 1078), so e = Ea + Eb + k - 1072.
+    pack sign s (eff_exp a + eff_exp b + k - 1072) st;

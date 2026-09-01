@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.371 — 2026-09-01
+
+_Multiplication, which is what the 15-bit limb was for._ Two 53-bit significands
+make a product of up to 106 bits, and the schoolbook loop builds it from
+limb-by-limb products of at most 30 bits — small enough for RV32I's signed
+32-bit word, on one condition: **the carry is propagated at every step**.
+Accumulating four columns before carrying reaches 2^32, which is right on a
+64-bit int and wrong on the target.
+
+**The bug the gate found is the one a tolerance would have accepted.** The first
+version shifted the product down by a fixed 49, which is correct for two
+normals — their product is 105 or 106 bits — and wrong the moment either operand
+is subnormal, because then the bits below 49 are significand and not sticky.
+`0,1 * 2146435071,4294967295` came back with the high half right and the low half
+zero. The shift is now computed from the product's own width.
+
+Subnormal results needed a step in `pack` that addition never reaches: a
+product's exponent can land below 1, and the answer there is not zero but a
+subnormal, obtained by shifting right until the exponent is 1 and rounding there.
+
+**What the gate cannot see, said out loud.** The limb width exists so a product
+of two limbs fits a *signed 32-bit* int, and both arms of
+`scripts/softfloat_check.sh` run where int is 63 or 64 bits wide. A loop that
+accumulated before carrying would pass both and overflow on the target.
+Compiling for RV32I proves the code is expressible there, not that the widths
+hold. The check that does hold it is running the library on a 32-bit machine:
+done here on the Mere-written RV32IM emulator, where the fullest cases —
+every mantissa bit set, on both sides — print the same limbs as the
+interpreter. That is not in CI, because the emulator lives in another
+repository; the script now says so rather than implying the coverage.
+
+---
+
 ## v0.1.370 — 2026-09-01
 
 _IEEE 754 addition in integers, and two NaN rules that had to be measured._

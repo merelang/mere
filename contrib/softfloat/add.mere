@@ -37,13 +37,20 @@ let pack = fn (sign: int) -> fn (s0: L6) -> fn (e0: int) -> fn (st0: int) ->
   let rec down = fn (s: L6) -> fn (e: int) -> fn (st: int) ->
     if l6_bitlen s <= 56 then (s, e, st)
     else let p = l6_shr_sticky s 1 in down (fst p) (e + 1) (bit_or st (snd p)) in
-  let (sd, ed, std) = down s0 e0 st0 in
+  let (sd, ed0, std0) = down s0 e0 st0 in
+  // Gradual underflow. Addition never gets here -- both its exponents are at
+  // least 1 -- but a product's can be far below, and the answer is not zero: it
+  // is a subnormal, reached by shifting right until E is 1 and rounding there.
+  let (sd2, ed, std) =
+    if ed0 >= 1 then (sd, ed0, std0)
+    else let p2 = l6_shr_sticky sd (1 - ed0) in
+         (fst p2, 1, bit_or std0 (snd p2)) in
   let rec up = fn (s: L6) -> fn (e: int) ->
     if e <= 1 then (s, e)
     else if l6_bitlen s >= 56 then (s, e)
     else if l6_is_zero s then (s, e)
     else up (l6_shl s 1) (e - 1) in
-  let (s1, e1) = up sd ed in
+  let (s1, e1) = up sd2 ed in
   // round to nearest, ties to even: the round bit decides, and a tie is broken
   // by whether anything was lost below it or the retained bit is odd
   let lsb = l6_bit s1 3 in
