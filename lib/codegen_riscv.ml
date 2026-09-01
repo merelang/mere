@@ -826,6 +826,36 @@ let emit_abort msg =
 let float_fn (e : Ast.expr) (name : string) : Ast.expr =
   { e with Ast.node = Ast.Var name; Ast.ty = None }
 
+(* The rv-prelude's Map is an assoc list that compares keys with `str_eq`, so a
+   key that is not a string is compared by reading its first word as a length and
+   its bytes as characters. For a nullary constructor -- a one-word [tag] block --
+   that walks off the end of the block, and `map_get c Green` answered "key not
+   found" for a key that was there. It did not fail: it read out of bounds and
+   said no.
+
+   Making it right needs a structural `==` at the key's own type, and the prelude
+   function is polymorphic in that type, so there is no type there to ask. Until
+   there is, a key this backend cannot compare is refused BY NAME instead of
+   silently mis-answered.
+
+   Only a key whose type is KNOWN and is not `str` is refused. An unresolved type
+   variable is let through -- a polymorphic helper that happens to be called with
+   string keys is a real program, and refusing it would be guessing in the other
+   direction. That is the gap, and it is deliberate. *)
+let check_map_key loc (key : Ast.expr) =
+  match key.Ast.ty with
+  | None -> ()
+  | Some t ->
+    (match resolve_ty t with
+     | Ast.TyStr -> ()
+     | Ast.TyVar { Ast.link = None; _ } -> ()
+     | other ->
+       err loc (Printf.sprintf
+         "RV32I: a Map key of type `%s` cannot be compared on this backend -- its \
+          Map is an assoc list that compares keys with `str_eq`, so only `str` \
+          keys are correct here (a tuple or constructor key would be compared by \
+          reading its first word as a length)" (Formatter.fmt_ty other)))
+
 let rec compile_expr (env : env) (e : Ast.expr) : unit =
   (* every subexpression starts out non-tail; the cases below whose value is
      this expression's value put `saved_tail` back before recursing *)
@@ -1136,18 +1166,36 @@ and compile_cmp env op l r =
      constructors) would need a recursive structural eq — reject them clearly
      rather than silently comparing pointers. Ints/bools/type-variables fall
      through to the integer path below (the only `==` the code needs). *)
-  else if (op = Ast.Eq || op = Ast.Ne) &&
-          (match (match l.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit) with
+  else if (match (match l.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit) with
            | Ast.TyCon (n, _) -> Hashtbl.find_opt type_all_nullary n = Some true
            | _ -> false) then begin
+    (* ORDERING is here too, not just ==. `derive (Eq, Ord) color` orders by
+       declaration order, which IS the tag -- and without this the comparison fell
+       through to the integer path below and compared the two one-word blocks'
+       HEAP POINTERS. That is not a random wrong answer: the operands are
+       allocated left then right, so `lt a b` came out true for every pair,
+       whichever way round it was written. `lt Red Blue` and `lt Blue Red` were
+       both true. *)
     compile_expr env l; push a0;
     compile_expr env r; emit_word (enc_i 0 a0 0 a1 0x13); pop a0;   (* a0=l, a1=r *)
     emit_word (enc_i 0 a0 2 t0 0x03);                               (* lw t0, 0(l) — tag *)
     emit_word (enc_i 0 a1 2 t1 0x03);                               (* lw t1, 0(r) — tag *)
-    emit_word (enc_r 0x20 t1 t0 0 a0 0x33);                         (* sub a0, t0, t1 *)
     (match op with
-     | Ast.Eq -> emit_word (enc_i 1 a0 3 a0 0x13)                   (* sltiu a0,a0,1 *)
-     | _ -> emit_word (enc_r 0 a0 zero 3 a0 0x33))                  (* sltu a0,x0,a0 *)
+     | Ast.Eq ->
+       emit_word (enc_r 0x20 t1 t0 0 a0 0x33);                      (* sub a0, t0, t1 *)
+       emit_word (enc_i 1 a0 3 a0 0x13)                             (* sltiu a0,a0,1 *)
+     | Ast.Ne ->
+       emit_word (enc_r 0x20 t1 t0 0 a0 0x33);
+       emit_word (enc_r 0 a0 zero 3 a0 0x33)                        (* sltu a0,x0,a0 *)
+     (* tags are small non-negative ints, so a signed compare is exact *)
+     | Ast.Lt -> emit_word (enc_r 0 t1 t0 2 a0 0x33)                (* slt a0, t0, t1 *)
+     | Ast.Gt -> emit_word (enc_r 0 t0 t1 2 a0 0x33)                (* slt a0, t1, t0 *)
+     | Ast.Le ->
+       emit_word (enc_r 0 t0 t1 2 a0 0x33);                         (* a0 = t1 < t0 *)
+       emit_word (enc_i 1 a0 4 a0 0x13)                             (* xori a0,a0,1 *)
+     | Ast.Ge ->
+       emit_word (enc_r 0 t1 t0 2 a0 0x33);                         (* a0 = t0 < t1 *)
+       emit_word (enc_i 1 a0 4 a0 0x13))
   end
   (* structural `==`/`!=` on a compound value (tuple / record / payload-carrying
      variant): compare by value via a generated per-type __eq_<tag> helper *)
@@ -1167,6 +1215,20 @@ and compile_cmp env op l r =
     (match (op, (match l.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit)) with
      | (Ast.Eq | Ast.Ne), Ast.TyArrow _ ->
        err l.loc "RV32I: `==`/`!=` on functions is not supported"
+     (* Everything that reaches here is compared as a machine word. For a tuple,
+        a record or a payload-carrying constructor that word is the HEAP POINTER,
+        so `<` on one answered from allocation order. `==` on those already went
+        to a generated structural helper above; ordering has no such helper, so it
+        is refused rather than answered wrongly. *)
+     | (Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge), t
+       when (match t with
+             | Ast.TyTuple _ -> true
+             | Ast.TyCon (n, _) -> Hashtbl.mem type_records n || Hashtbl.mem type_variants n
+             | _ -> false) ->
+       err l.loc (Printf.sprintf
+         "RV32I: `<`/`<=`/`>`/`>=` on `%s` would compare heap pointers, not \
+          values -- this backend has a structural `==` for compound types but no \
+          structural ordering yet" (Formatter.fmt_ty t))
      | _ -> ());
   (* `x < k` / `x <= k` with a small literal fold into slti *)
   match op, r.node with
@@ -1722,9 +1784,12 @@ and compile_app env e =
      Map type on `map_new` by name, so these can't just be shadowed). Types
      are erased at codegen, so the Vec-based repr flows through fine. *)
   | Ast.Var "map_new" when List.length args = 1 -> call_top env "rvmap_new" args
-  | Ast.Var "map_set" when List.length args = 3 -> call_top env "rvmap_set" args
-  | Ast.Var "map_get" when List.length args = 2 -> call_top env "rvmap_get" args
-  | Ast.Var "map_has" when List.length args = 2 -> call_top env "rvmap_has" args
+  | Ast.Var "map_set" when List.length args = 3 ->
+    check_map_key e.Ast.loc (List.nth args 1); call_top env "rvmap_set" args
+  | Ast.Var "map_get" when List.length args = 2 ->
+    check_map_key e.Ast.loc (List.nth args 1); call_top env "rvmap_get" args
+  | Ast.Var "map_has" when List.length args = 2 ->
+    check_map_key e.Ast.loc (List.nth args 1); call_top env "rvmap_has" args
   | Ast.Var "map_len" when List.length args = 1 -> call_top env "rvmap_len" args
   | Ast.Var "map_clear" when List.length args = 1 -> call_top env "rvmap_clear" args
   | Ast.Var "map_compact" when List.length args = 1 -> call_top env "rvmap_compact" args
@@ -1737,7 +1802,8 @@ and compile_app env e =
   | Ast.Var "vec_compact" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i 0 zero 0 a0 0x13)                   (* unit *)
-  | Ast.Var "map_delete" when List.length args = 2 -> call_top env "rvmap_delete" args
+  | Ast.Var "map_delete" when List.length args = 2 ->
+    check_map_key e.Ast.loc (List.nth args 1); call_top env "rvmap_delete" args
   | Ast.Var "map_iter" when List.length args = 2 -> call_top env "rvmap_iter" args
   | Ast.Var "show" when List.length args = 1 ->
     (* polymorphic show: only the int case is supported (all the self-hosted

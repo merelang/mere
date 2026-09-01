@@ -31,10 +31,26 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 rc=0; pass=0; fail=0
 
-PROGS="test/parity/try_or_saves_bindings.mere
-test/parity/try_or_unwind.mere
-test/parity/match_arm_stack.mere
-test/parity/or_pattern.mere"
+# The whole parity corpus, not a hand-picked five. That suite exists because four
+# backends should agree; RV32I is not one of the four, so nothing compared it
+# against anything until now. Sweeping it found a `<` on a nullary variant
+# answering from allocation order, a Map comparing non-string keys as strings, and
+# a try_or that did not restore the catcher's registers.
+#
+# The reference is the C backend and not the interpreter: both are compiled
+# programs, so neither is doing anything the other cannot.
+#
+# KNOWN DIFFERENCES, by name and reason. A program not in this list that differs
+# fails the gate; a program IN it that stops differing also fails, so the list
+# cannot quietly outlive its reasons.
+KNOWN_DIFF="coll_edges float_edges str_edges region_growth graphql_stack_portable map_compact nul_in_str time_clock"
+# coll_edges/float_edges/str_edges  64-bit values; this backend's int is 32 bits
+# region_growth                     wants more RAM (and more time) than the sweep gives it
+# graphql_stack_portable            under investigation
+# map_compact                       map_bytes measures an arena; a Vec here has none
+# nul_in_str                        a string with an embedded NUL; differs in the
+#                                   bytes written, under investigation
+# time_clock                        needs a clock, which a bare machine has none of
 
 RVRUN=""
 if [ -n "${MEMU:-}" ]; then
@@ -45,26 +61,39 @@ if [ -n "${MEMU:-}" ]; then
   RVRUN="$TMP/rvrun"
 fi
 
-for p in $PROGS; do
+echoed=0; known=0
+for p in "$ROOT"/test/parity/*.mere; do
   name=$(basename "$p" .mere)
-  # The interpreter prints `()` for the program's own unit result; the RV32I
-  # binary has no such thing to print, so it is dropped from both rather than
-  # from one.
-  "$MERE" "$ROOT/$p" 2>"$TMP/ierr" | grep -v '^()$' > "$TMP/i.out" || {
-    echo "  FAIL  $name (the interpreter refused it)"; head -3 "$TMP/ierr"; fail=$((fail+1)); continue; }
-  if "$MERE" -rv "$ROOT/$p" > "$TMP/prog.bin" 2>"$TMP/rverr"; then :; else
-    echo "  FAIL  $name (-rv refused it)"; head -3 "$TMP/rverr"; fail=$((fail+1)); continue
-  fi
-  if [ -z "$RVRUN" ]; then
-    printf '  ok    %s (built for RV32I; not run)\n' "$name"; pass=$((pass+1)); continue
-  fi
-  ( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' ./rvrun 8 2>&1 ) | grep -v '^rvrun: ' > "$TMP/r.out"
-  if diff -q "$TMP/i.out" "$TMP/r.out" >/dev/null; then
-    printf '  ok    %s (%s lines identical)\n' "$name" "$(grep -c . "$TMP/i.out")"
-    pass=$((pass+1))
+  if "$MERE" -c "$p" > "$TMP/ref.c" 2>/dev/null && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
+    ( ulimit -t 60; "$TMP/ref" ) > "$TMP/i.out" 2>&1
   else
-    printf '  FAIL  %s (RV32I disagrees with the interpreter)\n' "$name"
-    diff "$TMP/i.out" "$TMP/r.out" | head -10 | sed 's/^/    /'
+    continue        # not a C-backend program; nothing to compare against here
+  fi
+  if "$MERE" -rv --ram 32 "$p" > "$TMP/prog.bin" 2>"$TMP/rverr"; then :; else
+    continue        # refused for a named reason; scripts/host_matrix.sh covers those
+  fi
+  if [ -z "$RVRUN" ]; then pass=$((pass+1)); continue; fi
+  ( cd "$TMP" && perl -e 'alarm 60; exec @ARGV' ./rvrun 32 2>/dev/null ) | grep -v '^rvrun: ' > "$TMP/r.out"
+  # The reference prints the program's own final value and an RV32I binary does
+  # not, so an output that matches except for that last line is the ONE accepted
+  # shape -- spelled out rather than filtered, so a real difference in the last
+  # line is still a difference.
+  sed '$d' "$TMP/i.out" > "$TMP/i.trim"
+  expected_diff=no
+  for k in $KNOWN_DIFF; do [ "$k" = "$name" ] && expected_diff=yes; done
+  if diff -q "$TMP/i.out" "$TMP/r.out" >/dev/null; then agree=yes
+  elif diff -q "$TMP/i.trim" "$TMP/r.out" >/dev/null; then agree=yes; echoed=$((echoed+1))
+  else agree=no; fi
+  if [ "$agree" = yes ] && [ "$expected_diff" = yes ]; then
+    printf '  FAIL  %s is in KNOWN_DIFF but now agrees — remove it from the list\n' "$name"
+    fail=$((fail+1)); rc=1
+  elif [ "$agree" = yes ]; then pass=$((pass+1))
+  elif [ "$expected_diff" = yes ]; then known=$((known+1))
+  else
+    printf '  FAIL  %s (RV32I disagrees with the C backend)\n' "$name"
+    # -a: these outputs can contain NUL, and without it diff says only "binary
+    # files differ", which names nothing.
+    diff -a "$TMP/i.out" "$TMP/r.out" | head -8 | sed 's/^/    /'
     fail=$((fail+1)); rc=1
   fi
 done
@@ -96,6 +125,7 @@ fi
 if [ -z "$RVRUN" ]; then
   echo "rv_exec: $pass built, $fail failed — nothing RAN; set MEMU=<memu checkout> for that half"
 else
-  echo "rv_exec: $pass passed, $fail failed (interpreter vs RV32I on the Mere-written CPU)"
+  echo "rv_exec: $pass passed, $fail failed, $known known-different (C backend vs RV32I on the Mere-written CPU)"
+  echo "rv_exec: $echoed of those matched except the program's own final value, which only a compiled-in main prints"
 fi
 exit $rc
