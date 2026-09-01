@@ -14,6 +14,69 @@
    end-exclusive (b is the stop index). *)
 
 let contents = {mere|
+// --- integer builtins this backend never had -----------------------------
+// These are not scaffolding: they are the definitions, in Mere, on top of
+// primitives codegen_riscv already emits. They were on the refused list only
+// because nothing had written them.
+let abs = fn (n: int) -> if n < 0 then 0 - n else n;
+let max = fn (a: int) -> fn (b: int) -> if a > b then a else b;
+let min = fn (a: int) -> fn (b: int) -> if a < b then a else b;
+let clamp = fn (lo: int) -> fn (hi: int) -> fn (n: int) ->
+  if n < lo then lo else if n > hi then hi else n;
+let even = fn (n: int) -> n % 2 == 0;
+let odd = fn (n: int) -> n % 2 != 0;
+let rec gcd = fn (a: int) -> fn (b: int) ->
+  let x = if a < 0 then 0 - a else a in
+  let y = if b < 0 then 0 - b else b in
+  if y == 0 then x else gcd y (x % y);
+
+// --- floats: a scaffold, and it says so -----------------------------------
+// A float on this target is a two-word block (the two halves of the IEEE 754
+// pattern), which codegen_riscv builds for a literal and takes apart for
+// `float_bits_hi` / `float_bits_lo`. The ARITHMETIC is not lowered yet.
+//
+// contrib/softfloat computes all of it in integers and is gated bit-for-bit
+// against the hardware; what is missing is the wiring, which has to map
+// `float` operations onto that library's record type across the typer
+// boundary. Until then these shadow the builtins and stop with a message.
+//
+// EVERY ONE IS ANNOTATED at the builtin's own type. Without the annotations
+// inference makes them `'a -> 'b`, which unifies with anything and moves the
+// failure somewhere else entirely: mere-ruby stopped with `expected float, got
+// int` on a line whose two operands were both these shims, because a fresh
+// type variable let `/` resolve as integer division.
+//
+// Only the ones a program actually reaches are emitted, so a program that never
+// touches floats pays nothing.
+let __f_todo = fn (n: str) -> fail ("RV32I: " ++ n ++ " on floats is not lowered yet -- contrib/softfloat computes it in integers, but is not yet injected into the -rv prelude");
+let f_add = fn (a: float) -> fn (b: float) -> (__f_todo "f_add" : float);
+let f_sub = fn (a: float) -> fn (b: float) -> (__f_todo "f_sub" : float);
+let f_mul = fn (a: float) -> fn (b: float) -> (__f_todo "f_mul" : float);
+let f_div = fn (a: float) -> fn (b: float) -> (__f_todo "f_div" : float);
+let f_min = fn (a: float) -> fn (b: float) -> (__f_todo "f_min" : float);
+let f_max = fn (a: float) -> fn (b: float) -> (__f_todo "f_max" : float);
+let f_pow = fn (a: float) -> fn (b: float) -> (__f_todo "f_pow" : float);
+let atan2 = fn (a: float) -> fn (b: float) -> (__f_todo "atan2" : float);
+let f_neg = fn (a: float) -> (__f_todo "f_neg" : float);
+let f_abs = fn (a: float) -> (__f_todo "f_abs" : float);
+let sqrt = fn (a: float) -> (__f_todo "sqrt" : float);
+let sin = fn (a: float) -> (__f_todo "sin" : float);
+let cos = fn (a: float) -> (__f_todo "cos" : float);
+let tan = fn (a: float) -> (__f_todo "tan" : float);
+let log = fn (a: float) -> (__f_todo "log" : float);
+let exp = fn (a: float) -> (__f_todo "exp" : float);
+let floor = fn (a: float) -> (__f_todo "floor" : float);
+let ceil = fn (a: float) -> (__f_todo "ceil" : float);
+let round = fn (a: float) -> (__f_todo "round" : float);
+let f_lt = fn (a: float) -> fn (b: float) -> (__f_todo "f_lt" : bool);
+let f_le = fn (a: float) -> fn (b: float) -> (__f_todo "f_le" : bool);
+let f_gt = fn (a: float) -> fn (b: float) -> (__f_todo "f_gt" : bool);
+let f_ge = fn (a: float) -> fn (b: float) -> (__f_todo "f_ge" : bool);
+let float_of_int = fn (n: int) -> (__f_todo "float_of_int" : float);
+let int_of_float = fn (x: float) -> (__f_todo "int_of_float" : int);
+let float_of_str = fn (s: str) -> (__f_todo "float_of_str" : float);
+let str_of_float = fn (x: float) -> (__f_todo "str_of_float" : str);
+
 // --- misc ----------------------------------------------------------------
 let not = fn b -> if b then false else true;
 

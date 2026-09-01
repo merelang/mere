@@ -240,6 +240,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/softfloat_check.sh
 
+      # The -rv prelude is injected by the driver, so the backend's own tests
+      # cannot see it. Without this a name could be added there and never
+      # compiled by anything.
+      - name: "rv prelude (every name it defines compiles for -rv)"
+        if: ${{ !cancelled() }}
+        run: sh scripts/rv_prelude_check.sh
+
       # `run` is the only channel a program has for the fate of a child, and the
       # interpreter reported a signalled child with OCaml's signal encoding: 121
       # for SIGKILL where the shell and the C backend say 137. Below 128, where
