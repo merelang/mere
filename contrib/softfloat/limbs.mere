@@ -128,3 +128,18 @@ let l6_bit = fn (a: L6) -> fn (i: int) ->
   bit_and (bit_shr (l6_limb a li) (i - li * 15)) 1;
 
 let l6_one = l6_of_limbs 0 0 0 0 0 1;
+
+// A backend's own int, as limbs. Five limbs is 75 bits, wider than any
+// backend's int, so this loses nothing anywhere. On a 32-bit target the shifts
+// past 31 produce zero, which is the right answer there because the value
+// cannot have those bits.
+let l6_of_int = fn (n: int) ->
+  l6_of_limbs 0 (bit_and (bit_shr n 60) lmask) (bit_and (bit_shr n 45) lmask)
+                (bit_and (bit_shr n 30) lmask) (bit_and (bit_shr n 15) lmask)
+                (bit_and n lmask);
+
+// and back, for values that fit. Limb 5 is dropped: a caller wanting more than
+// 75 bits has to ask a different question.
+let l6_to_int = fn (a: L6) ->
+  bit_or (bit_or (bit_or (bit_shl a.l4 60) (bit_shl a.l3 45))
+                 (bit_or (bit_shl a.l2 30) (bit_shl a.l1 15))) a.l0;
