@@ -4,6 +4,54 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.378 — 2026-09-01
+
+_The FFI boundary, the host services behind it, and a matrix that lied twice
+about both._
+
+A call to an `extern fn` now aborts at runtime naming the symbol, instead of
+being refused at compile time. `fb_set` / `key` / `present` still lower: those
+are MMIO on the machine itself, not calls into a library. Everything else is a C
+symbol there is nothing here to link against, and refusing refuses the whole
+program for a call it may never make — the Ruby subset interpreter this is being
+carried for declares twelve, seven of them TCP, on paths a script never reaches.
+An extern used as a *value* is still refused, because higher-order is unsupported
+here and there would be nothing to abort inside.
+
+The host services go the same way, as prelude shims rather than codegen cases so
+they are visible in the prelude's own source: `run`, `read_file`, `write_file`,
+`file_exists`, `read_stdin`, `args`, and `bytes_of_str` / `print_bytes` — the
+last two not a host service but the `bytes` type, which has no representation
+here at all. `random_int` is a shim rather than an implementation because a
+deterministic sequence returned from something named random is the kind of wrong
+that stays quiet.
+
+The reclamation API is not shims. `map_compact` and `map_recycle` exist to
+return bytes an arena is holding; this backend's Map is the prelude's assoc list
+of ordinary values, so there is nothing behind it to return and **a no-op is the
+honest answer**. `map_clear` does have work. `map_bytes` and `vec_bytes` ask HOW
+MANY bytes the arena holds, and answering 0 would read as "this uses no memory"
+rather than "the question does not apply", so they stop and say which it is.
+
+**`host_matrix.sh` caught the same lie twice.** In v0.1.375 the float shims
+turned 27 cells to `yes`, and `stub` was added for them — keyed on that family's
+exact phrase. The host shims arrived with a different sentence and **nine more
+cells flipped to `yes`**, which only the matrix's own diff noticed. It keys on the
+`RV32I:` prefix every abort message shares now, and `rv_prelude_check.sh` asserts
+that both families produce it. A prefix survives the next family; a phrase does
+not.
+
+RV32I reads 60 yes, 40 refused, **36 stub**, 12 unattributed, 2 bare.
+
+`rv_prelude_check.sh` also had to be updated rather than believed: it asserted
+the compile-time refusal for externs, which this change removed, and it said so.
+
+**What is left for that interpreter is a language feature, not a service**:
+or-patterns, which this backend does not compile. Every host builtin it reaches
+is handled.
+
+---
+
 ## v0.1.377 — 2026-09-01
 
 _`try_or` on RV32I, and five poisons the first test set could not see._ There is
