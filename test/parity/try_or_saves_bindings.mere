@@ -1,0 +1,57 @@
+// A `try_or` that FIRES must leave the catching function's own named bindings
+// alone. On RV32I a named binding lives in a callee-saved register, and the
+// unwind restores sp and fp by hand -- which is enough to land back in the right
+// frame and not enough to find the caller's values in it. The failing thunk has
+// already written its own bindings over those registers.
+//
+// The thunk must have bindings OF ITS OWN, and enough of them to reach past the
+// first register. test/parity/try_or_unwind.mere failed with a thunk that had
+// none, and every backend agreed, because there was nothing to overwrite.
+//
+// The catcher keeps values of several types across the call: a string that is
+// concatenated afterwards (a clobbered pointer traps rather than printing a wrong
+// number), and integers whose sum names which register was lost.
+let rec burn = fn (n: int) ->
+  let a = n + 1 in
+  let b = a + 2 in
+  let c = b + 3 in
+  let d = c + 4 in
+  let e = d + 5 in
+  let f = e + 6 in
+  let g = f + 7 in
+  let h = g + 8 in
+  if n > 0 then burn (n - 1)
+  else fail ("boom " ++ str_of_int (a + b + c + d + e + f + g + h));
+
+let caught = fn (u: unit) ->
+  let p = "one" in
+  let q = "two" in
+  let r = "three" in
+  let s = 40 in
+  let t = 2 in
+  let v = try_or (fn (z: unit) -> burn 3) (0 - 1) in
+  p ++ "/" ++ q ++ "/" ++ r ++ "/" ++ str_of_int (s + t) ++ "/" ++ str_of_int v;
+
+// ...and the same shape where the thunk RETURNS instead of failing, so the
+// normal path is held to the same standard: a save/restore that ran on both
+// paths, or on neither, would pass a test that only ever fails.
+let fine = fn (u: unit) ->
+  let p = "four" in
+  let s = 10 in
+  let v = try_or (fn (z: unit) -> let a = 1 in let b = a + 1 in a + b) (0 - 1) in
+  p ++ "/" ++ str_of_int (s + v);
+
+// Nested: the inner one fires and is caught, then the outer thunk keeps going and
+// fails, so the outer catcher's bindings have survived two unwinds.
+let nested = fn (u: unit) ->
+  let p = "five" in
+  let s = 100 in
+  let v = try_or (fn (z: unit) ->
+            let inner = try_or (fn (y: unit) -> burn 2) 3 in
+            let m = inner + 1 in
+            fail ("inner was " ++ str_of_int m)) (0 - 2) in
+  p ++ "/" ++ str_of_int (s + v);
+
+let _ = print (caught ());
+let _ = print (fine ());
+let _ = print (nested ());

@@ -778,10 +778,33 @@ let emit_binop op rd rs1 rs2 loc =
 (* An abort with a fixed message: the tail of `fail` -- write it, then exit(1).
    Used where this backend cannot do a thing at all and refusing at compile time
    would refuse whole programs for a call they may never make. *)
-let emit_abort msg =
-  let label = fresh_label "str_" in
-  string_data := (label, mk_str_block msg) :: !string_data;
-  emit (LoadAddr (a0, label));
+(* The whole of `fail`, given a0 = the message string block: if a `try_or` is in
+   scope, unwind to it; otherwise write the message and exit(1). Never returns.
+
+   The record was built by try_or and lives on the heap, so it is still readable
+   after sp has been moved back -- a record below the restored sp would not be.
+
+   Shared with the `fail` builtin rather than written twice. The copy that used to
+   live here was the write-and-exit half ONLY, which is why every abort this
+   backend emitted was uncatchable: a program that called an unimplemented extern
+   inside a `try_or` was killed rather than handed the default. That is the whole
+   mechanism a program has for coping with a target that cannot do something. *)
+let emit_fail_from_a0 () =
+  let l_abort = fresh_label ".noCatch" in
+  li t0 (fail_frame_addr ());
+  emit_word (enc_i 0 t0 2 t1 0x03);                      (* lw t1, 0(t0) — record *)
+  emit (Branch (0, t1, zero, l_abort));                  (* beq t1, x0, abort *)
+  emit_word (enc_i 0 t1 2 t2 0x03);                      (* lw t2, 0(t1) — prev *)
+  emit_word (enc_s 0 t2 t0 2 0x23);                      (* sw prev, 0(&frame) *)
+  emit_word (enc_i 4 t1 2 sp 0x03);                      (* lw sp, 4(t1) *)
+  emit_word (enc_i 8 t1 2 fp 0x03);                      (* lw fp, 8(t1) *)
+  (* the catcher's own named bindings, which the thunk has been writing over *)
+  Array.iteri (fun i r ->
+    emit_word (enc_i (20 + i * 4) t1 2 r 0x03)) sregs;
+  emit_word (enc_i 16 t1 2 a0 0x03);                     (* lw a0, 16(t1) — default *)
+  emit_word (enc_i 12 t1 2 t1 0x03);                     (* lw t1, 12(t1) — catch *)
+  emit_word (enc_i 0 t1 0 zero 0x67);                    (* jalr x0, t1 *)
+  emit (Label l_abort);
   emit_word (enc_i 0 a0 2 a2 0x03);                      (* lw a2, 0(a0) — len *)
   emit_word (enc_i 4 a0 0 a1 0x13);                      (* addi a1, a0, 4 *)
   emit_word (enc_i 64 zero 0 a7 0x13);                   (* li a7, 64 *)
@@ -789,6 +812,13 @@ let emit_abort msg =
   emit_word (enc_i 93 zero 0 a7 0x13);                   (* li a7, 93 *)
   emit_word (enc_i 1 zero 0 a0 0x13);                    (* li a0, 1 *)
   emit_word (enc_i 0 zero 0 zero 0x73)                   (* ecall (exit) *)
+
+(* A `fail` whose message is known at compile time. Catchable, like any other. *)
+let emit_abort msg =
+  let label = fresh_label "str_" in
+  string_data := (label, mk_str_block msg) :: !string_data;
+  emit (LoadAddr (a0, label));
+  emit_fail_from_a0 ()
 
 
 (* the callee of a rewritten float operator, carrying the operator's location so
@@ -1281,32 +1311,8 @@ and compile_app env e =
     compile_expr env (List.hd args);
     emit_word (enc_i 4 a0 2 a0 0x03)                     (* lw a0, 4(a0) *)
   | Ast.Var "fail" when List.length args = 1 ->
-    (* fail msg : if a `try_or` is in scope, unwind to it; otherwise write the
-       message and exit(1). Never returns either way.
-
-       The record was built by try_or and lives on the heap, so it is still
-       readable after sp has been moved back -- a record below the restored sp
-       would not be. *)
     compile_expr env (List.hd args);                     (* a0 = msg str *)
-    let l_abort = fresh_label ".noCatch" in
-    li t0 (fail_frame_addr ());
-    emit_word (enc_i 0 t0 2 t1 0x03);                    (* lw t1, 0(t0) — record *)
-    emit (Branch (0, t1, zero, l_abort));                (* beq t1, x0, abort *)
-    emit_word (enc_i 0 t1 2 t2 0x03);                    (* lw t2, 0(t1) — prev *)
-    emit_word (enc_s 0 t2 t0 2 0x23);                    (* sw prev, 0(&frame) *)
-    emit_word (enc_i 4 t1 2 sp 0x03);                    (* lw sp, 4(t1) *)
-    emit_word (enc_i 8 t1 2 fp 0x03);                    (* lw fp, 8(t1) *)
-    emit_word (enc_i 16 t1 2 a0 0x03);                   (* lw a0, 16(t1) — default *)
-    emit_word (enc_i 12 t1 2 t1 0x03);                   (* lw t1, 12(t1) — catch *)
-    emit_word (enc_i 0 t1 0 zero 0x67);                  (* jalr x0, t1 *)
-    emit (Label l_abort);
-    emit_word (enc_i 0 a0 2 a2 0x03);                    (* lw a2, 0(a0) — len *)
-    emit_word (enc_i 4 a0 0 a1 0x13);                    (* addi a1, a0, 4 *)
-    emit_word (enc_i 64 zero 0 a7 0x13);                 (* li a7, 64 *)
-    emit_word (enc_i 0 zero 0 zero 0x73);                (* ecall (write) *)
-    emit_word (enc_i 93 zero 0 a7 0x13);                 (* li a7, 93 *)
-    emit_word (enc_i 1 zero 0 a0 0x13);                  (* li a0, 1 *)
-    emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall (exit) *)
+    emit_fail_from_a0 ()
   (* try_or f default : run the thunk; if it fails, the value is `default`.
      Nesting works because the record keeps the PREVIOUS frame pointer and
      restores it on both paths -- a single global slot holding "the current
@@ -1321,7 +1327,15 @@ and compile_app env e =
   | Ast.Var "try_or" when List.length args = 2 ->
     let l_catch = fresh_label ".catch" in
     let l_after = fresh_label ".tryEnd" in
-    alloc_words t1 5;                                    (* [prev][sp][fp][catch][default] *)
+    (* [prev][sp][fp][catch][default][s1..s10]
+       The s-registers are the point. A named binding lives in one of them, so a
+       function that keeps values across a `try_or` keeps them THERE -- and the
+       thunk, if it fails, has already written its own bindings over them. The
+       unwind used to restore sp and fp only, which is enough to return to the
+       right frame and not enough to find the caller's values in it: a catcher
+       holding `p = 5` got back whatever the failed callee last put in that
+       register. This is what setjmp saves and for the same reason. *)
+    alloc_words t1 15;
     push t1;
     li t0 (fail_frame_addr ());
     emit_word (enc_i 0 t0 2 t2 0x03);                    (* lw t2, 0(t0) — prev *)
@@ -1332,6 +1346,10 @@ and compile_app env e =
     (* sp and fp as they are here: the level both paths return to *)
     emit_word (enc_s 4 sp t1 2 0x23);                    (* sw sp, 4(rec) *)
     emit_word (enc_s 8 fp t1 2 0x23);                    (* sw fp, 8(rec) *)
+    (* ...and every register a named binding can be in. s11 is not among them: it
+       is the far-jump scratch and is dead between jumps. *)
+    Array.iteri (fun i r ->
+      emit_word (enc_s (20 + i * 4) r t1 2 0x23)) sregs;
     push t1;
     compile_expr env (List.nth args 1);                  (* a0 = default *)
     pop t1;
@@ -1688,7 +1706,13 @@ and compile_app env e =
      against. Refusing at compile time refuses the whole program for a call it may
      never make: the Ruby subset interpreter this backend is being carried for
      declares twelve, seven of them TCP, on paths a script never reaches. So the
-     call aborts, naming the symbol, and a program that does not make it runs. *)
+     call aborts, naming the symbol, and a program that does not make it runs.
+
+     The abort is a `fail`, so a `try_or` around the call catches it and the
+     program continues with the default. That is the only way a program can cope
+     with a target that cannot do something: mere-ruby sets `$$` from `getpid` at
+     startup, and until this was catchable, wrapping that line changed nothing --
+     the abort exited the process from inside the handler's reach. *)
   | Ast.Var f when Hashtbl.mem externs f ->
     List.iter (fun arg -> compile_expr env arg) args;
     emit_abort (Printf.sprintf

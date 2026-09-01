@@ -1,0 +1,24 @@
+// An `extern fn` on RV32I has no C library behind it, so the call stops with a
+// message naming the symbol. This checks that the stop is a `fail` and not an
+// exit: a `try_or` around it must catch it and the program must carry on.
+//
+// That is the only way a program can cope with a target that cannot do something.
+// It was NOT true until the backend's compile-time-message abort was routed
+// through the same unwind `fail` uses -- before that, wrapping the call changed
+// nothing, because the abort exited the process from inside the handler's reach.
+// mere-ruby sets `$$` from `getpid` at startup, which is exactly this shape.
+extern fn getpid: unit -> int;
+extern fn some_absent_thing: int -> int;
+
+let pid_or = fn (d: int) -> try_or (fn (u: unit) -> getpid ()) d;
+
+// The catcher's own bindings have to survive, same as any other unwind.
+let go = fn (u: unit) ->
+  let tag = "pid" in
+  let fallback = 0 - 1 in
+  let a = pid_or fallback in
+  let b = try_or (fn (z: unit) -> some_absent_thing 41) 99 in
+  tag ++ "=" ++ str_of_int a ++ " other=" ++ str_of_int b;
+
+let _ = print (go ());
+let _ = print "still running";
