@@ -1,0 +1,99 @@
+// The gate for contrib/softfloat/conv, against `float_of_int` and
+// `int_of_float`. Both directions are compared exactly -- the bits of the
+// double, and the integer itself.
+//
+// The values that matter are the ones where the two directions stop being
+// inverses: above 2^53 an integer no longer fits a double's significand, so
+// int -> double starts rounding, and the tie cases (2^53+1, 2^53+3) are the
+// only ones that tell round-to-even from round-up.
+import "../../contrib/softfloat/conv.mere";
+import "./sf_bridge.mere";
+
+let fails = vec_new ();
+let _ = vec_push fails 0;
+let shown = vec_new ();
+let _ = vec_push shown 0;
+let bad = fn (msg: str) ->
+  let _ = vec_set fails 0 (vec_get fails 0 + 1) in
+  if vec_get shown 0 >= 10 then () else
+    let _ = vec_set shown 0 (vec_get shown 0 + 1) in print ("FAIL " ++ msg);
+
+let ck_of_int = fn (n: int) ->
+  let hw = float_of_int n in
+  let sw = of_int n in
+  if hi_of_sf sw == float_bits_hi hw && lo_of_sf sw == float_bits_lo hw then () else
+    bad ("of_int " ++ str_of_int n
+         ++ " hw=" ++ str_of_int (float_bits_hi hw) ++ "," ++ str_of_int (float_bits_lo hw)
+         ++ " sw=" ++ str_of_int (hi_of_sf sw) ++ "," ++ str_of_int (lo_of_sf sw));
+
+let ck_to_int = fn (hi: int) -> fn (lo: int) ->
+  let x = float_of_bits hi lo in
+  let hw = int_of_float x in
+  let sw = to_int (sf_of_hi_lo hi lo) in
+  if hw == sw then () else
+    bad ("to_int " ++ str_of_int hi ++ "," ++ str_of_int lo
+         ++ " hw=" ++ str_of_int hw ++ " sw=" ++ str_of_int sw);
+
+// int -> double: every power of two and its neighbours, up through the point
+// where the significand runs out and rounding begins
+let rec pows = fn (i: int) ->
+  if i > 61 then () else
+  let v = bit_shl 1 i in
+  let _ = ck_of_int v in
+  let _ = ck_of_int (v - 1) in
+  let _ = ck_of_int (v + 1) in
+  let _ = ck_of_int (0 - v) in
+  let _ = ck_of_int (0 - v - 1) in
+  let _ = ck_of_int (0 - v + 1) in
+  pows (i + 1);
+let _ = pows 0;
+let _ = ck_of_int 0;
+// the ties: 2^53+1 rounds down to 2^53, 2^53+3 rounds up to 2^53+4
+let _ = ck_of_int 9007199254740992;
+let _ = ck_of_int 9007199254740993;
+let _ = ck_of_int 9007199254740995;
+let _ = ck_of_int 9007199254740997;
+let _ = ck_of_int 4611686018427387903;
+let _ = ck_of_int (0 - 4611686018427387903);
+// The most negative integer cannot be written as a literal -- the lexer caps at
+// 2^62 - 1 -- and it is the one value whose magnitude cannot be taken by
+// negating it. Reached by arithmetic, so the gate sees it.
+let _ = ck_of_int (0 - 4611686018427387903 - 1);
+
+// double -> int, over the doubles whose value fits an integer here
+let _ = ck_to_int 0 0;
+let _ = ck_to_int 2147483648 0;
+let _ = ck_to_int 0 1;                 // smallest subnormal truncates to 0
+let _ = ck_to_int 1071644672 0;        // 0.5
+let _ = ck_to_int 3219128320 0;        // -0.5
+let _ = ck_to_int 1072693248 0;        // 1.0
+let _ = ck_to_int 3220176896 0;        // -1.0
+let _ = ck_to_int 1073217536 0;        // 1.5
+let _ = ck_to_int 3220701184 0;        // -1.5
+let _ = ck_to_int 1128267776 0;        // 2^53
+let _ = ck_to_int 1137704960 0;        // 2^62
+let _ = ck_to_int 3285188608 0;        // -2^62
+
+// a sweep of both directions, deterministic
+let rec sweep = fn (i: int) -> fn (seed: int) ->
+  if i <= 0 then () else
+  let s1 = bit_and (seed * 25214903917 + 11) 4611686018427387903 in
+  let s2 = bit_and (s1 * 25214903917 + 11) 4611686018427387903 in
+  let n = bit_shr s1 (bit_and s2 62) in
+  let _ = ck_of_int n in
+  let _ = ck_of_int (0 - n) in
+  // a double built from a moderate exponent, so its value fits an int
+  let e = 1023 + bit_and s2 61 in
+  let hi = bit_or (bit_or (bit_and s1 2147483648) (bit_shl e 20)) (bit_and s1 1048575) in
+  let _ = ck_to_int hi (bit_and s2 4294967295) in
+  // and the round trip: an integer through a double and back is itself when it
+  // fits in 53 bits, which is the only range where that is a law
+  let small = bit_shr s1 10 in
+  let _ = if to_int (of_int small) == small then () else
+            bad ("round trip " ++ str_of_int small) in
+  sweep (i - 1) s2;
+let _ = sweep 800 4242;
+
+let f = vec_get fails 0;
+let _ = print (if f == 0 then "ok conv: int -> double rounds and double -> int truncates, exactly as the hardware"
+               else "FAILED conv: " ++ str_of_int f ++ " checks");

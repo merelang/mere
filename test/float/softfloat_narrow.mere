@@ -11,6 +11,7 @@ import "../../contrib/softfloat/limbs.mere";
 import "../../contrib/softfloat/add.mere";
 import "../../contrib/softfloat/mul.mere";
 import "../../contrib/softfloat/div.mere";
+import "../../contrib/softfloat/conv.mere";
 import "../../contrib/softfloat/softfloat.mere";
 
 let one = mk 0 1023 0 0 0 0;          // 1.0
@@ -101,3 +102,10 @@ let (dq, dst) = divide (sig_limbs_l6 one) (sig_limbs_l6 two);
 let _ = print_int (l6_bitlen dq);
 let _ = print_int dst;
 let _ = print_int (fdiv two one).exp;
+
+// contrib/softfloat/conv, and contrib/softfloat/limbs' two int bridges
+let _ = print_int (l6_of_int 12345).l0;
+let _ = print_int (l6_to_int (l6_of_int 12345));
+let _ = print_int (mag_limbs (0 - 7)).l0;
+let _ = print_int (of_int 42).exp;
+let _ = print_int (to_int (of_int 42));

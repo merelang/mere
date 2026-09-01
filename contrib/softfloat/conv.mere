@@ -1,0 +1,42 @@
+// contrib/softfloat/conv — between a double and the backend's own integer.
+//
+// Both directions have a rule that was measured rather than assumed:
+// int -> double ROUNDS (to nearest, ties to even, so 2^53+1 becomes 2^53 and
+// 2^53+3 becomes 2^53+4), and double -> int TRUNCATES toward zero (so -1.9
+// becomes -1, not -2).
+import "limbs.mere";
+import "softfloat.mere";
+import "add.mere";
+
+// The integer's magnitude with the binary point at 0, handed to `pack`, which
+// does the normalisation and the rounding. pack reads its argument as
+// `significand << 3` with value `s * 2^(e - 1078)`, so a plain integer m is
+// `m << 3` at e = 1075.
+//
+// The magnitude of a negative integer is NOT `0 - n`. For the most negative
+// value there is no positive counterpart, and the subtraction wraps back to
+// itself: the gate caught `-4611686018427387904` coming out as a different
+// double than the hardware's. `n / 2` always has one, so the magnitude is built
+// from half of it, doubled in the limbs, with the odd bit put back.
+let mag_limbs = fn (n: int) ->
+  if n >= 0 then l6_of_int n
+  else l6_add (l6_shl (l6_of_int (0 - (n / 2))) 1)
+              (if bit_and n 1 == 1 then l6_one else l6_zero);
+
+let of_int = fn (n: int) ->
+  if n == 0 then zero
+  else pack (if n < 0 then 1 else 0) (l6_shl (mag_limbs n) 3) 1075 0;
+
+// Truncation toward zero. The exponent says how far the significand sits from
+// the binary point: 1075 - E bits to the right of it.
+let to_int = fn (a: Sf) ->
+  if is_nan a || is_zero a then 0
+  else
+    let h = if a.exp == 0 then 0 else hidden_bit in
+    let s = l6_of_limbs 0 0 (a.f3 + h) a.f2 a.f1 a.f0 in
+    let sh = 1075 - eff_exp a in
+    let m =
+      if sh >= 0 then (if sh > 75 then l6_zero else fst (l6_shr_sticky s sh))
+      else (if 0 - sh > 20 then s else l6_shl s (0 - sh)) in
+    let v = l6_to_int m in
+    if a.sign == 1 then 0 - v else v;
