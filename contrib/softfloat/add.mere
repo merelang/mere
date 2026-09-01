@@ -81,7 +81,7 @@ let add = fn (a: Sf) -> fn (b: Sf) ->
   if is_snan a then quiet a
   else if is_snan b then quiet b
   else if is_nan a then quiet a
-  else if is_nan b then b
+  else if is_nan b then quiet b
   else if is_inf a then
     (if is_inf b && a.sign != b.sign then nan else a)
   else if is_inf b then b
@@ -115,4 +115,13 @@ let add = fn (a: Sf) -> fn (b: Sf) ->
       if l6_is_zero diff && st == 0 then zero    // exact cancellation is +0
       else pack hs diff he st;
 
-let sub = fn (a: Sf) -> fn (b: Sf) -> add a (neg b);
+// `a - b` is `a + (-b)` for every input except a NaN. Negating one flips its
+// sign bit, and an operation handed a NaN propagates the NaN it was GIVEN, not a
+// negated copy of it -- so `1.0 - nan` came out as -nan here while every machine
+// with a float unit returns +nan. The differential against hardware in
+// test/float/rv_float_ops.mere is what found it; the add/mul/div gates never
+// subtracted a NaN.
+let sub = fn (a: Sf) -> fn (b: Sf) ->
+  if is_nan a then quiet a
+  else if is_nan b then quiet b
+  else add a (neg b);

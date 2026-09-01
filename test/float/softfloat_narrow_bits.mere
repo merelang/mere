@@ -1,0 +1,26 @@
+// The bridge half of the coverage probe. It is a separate file from
+// softfloat_narrow.mere because that one's claim is "a program with no `float`
+// in it", and contrib/softfloat/bits.mere cannot be exercised without one --
+// converting a double to limbs is the whole job.
+//
+// It still has to compile for RV32I, and that is not a formality: this is the
+// code the -rv prelude's `+` on floats runs, and it leans on `float_bits_hi` /
+// `float_bits_lo` / `float_of_bits`, all three of which that backend provides.
+import "../../contrib/softfloat/bits.mere";
+import "../../contrib/softfloat/softfloat.mere";
+
+let _ = print_int br_low15;
+let _ = print_int br_low20;
+let _ = print_int br_low13;
+
+// 1.0 is 0x3FF0000000000000. Written as halves rather than as `1.0` so the
+// input is a bit pattern and not a decimal somebody has to trust.
+let a = sf_of_hi_lo 1072693248 0;
+let _ = print_int a.exp;
+let _ = print_int (hi_of_sf a);
+let _ = print_int (lo_of_sf a);
+
+// ...and through a real double, which is the direction the prelude uses.
+let x = float_of_sf a;
+let b = sf_of_float x;
+let _ = print_int (if b.exp == a.exp then 1 else 0);

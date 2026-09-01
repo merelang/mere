@@ -13808,13 +13808,18 @@ let () =
     "let x = 1.5;\nlet _ = print_int (float_bits_hi x);" "lw a0, 0(a0)";
   rv_contains "rv32i: float_bits_lo reads word 1"
     "let x = 1.5;\nlet _ = print_int (float_bits_lo x);" "lw a0, 4(a0)";
-  (* The arithmetic is not lowered. It must not fall through to compile_bin,
-     which does not look at types and would have emitted an integer add on two
-     pointers and returned a number. It lowers to the abort `fail` uses -- a
-     runtime stop with a message, chosen over a compile-time refusal because the
-     program this exists for carries float code on paths a script never runs. *)
-  rv_contains "rv32i: a float operator lowers to an abort, not an integer add"
-    "let _ = print_int (float_bits_hi (1.5 + 2.5));" "li a7, 93";
+  (* Every float OPERATOR is a call into the prelude's softfloat now -- what it
+     must not do is fall through to compile_bin, which does not look at types and
+     would emit an integer add on two pointers and return a number. None of that
+     is asserted here, and cannot be: `rv_typed` above types with
+     `Typer.initial_env` and does not prepend the rv prelude, so the callee is not
+     a known top-level binding and no direct call is emitted at all. The needles
+     live in scripts/rv_prelude_check.sh, which drives the real compiler.
+     What used to be here was the OPPOSITE assertion -- that a float operator
+     reached the abort -- checked by looking for `li a7, 93`, the exit syscall
+     that `_start`, __oom and __pat_fail all end with. It held for every program
+     this backend ever compiled, which is why replacing it with a needle that
+     depends on the prelude is worth the move rather than a weaker check here. *)
   (* Maps on this backend are the prelude's assoc list, reached by redirecting
      the `map_*` names -- so `map_len` is a redirect and not a lowering. Both
      places that hold the redirect table have to know: the reachability seed and

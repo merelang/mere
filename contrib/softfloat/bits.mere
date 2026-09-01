@@ -1,0 +1,39 @@
+// The bridge between hardware doubles and this library's limbs.
+//
+// This is the ONE file here that mentions `float`, and the gate checks that the
+// others do not: the library has to compile for a backend that has no float at
+// all, and a bridge is exactly the thing that cannot honour that. It lives in
+// the library rather than in the gates because the RV32I prelude needs it too --
+// that backend's `+` on floats decodes, adds in limbs, and re-encodes, so the
+// bridge is the load-bearing half of float arithmetic there.
+//
+// Everything here is a BIT operation on the two 32-bit halves, never an
+// arithmetic one, and that is what makes it work on a target whose int is a
+// SIGNED 32-bit word. `float_bits_hi (-1.0)` is 3220176896, which does not fit
+// one; on RV32I the same call returns the same 32 bits as a negative number.
+// Masking a field out of it is right either way. Adding or comparing would not
+// be.
+import "softfloat.mere";
+
+let br_low15 = 32767;
+let br_low20 = 1048575;
+let br_low13 = 8191;
+
+let sf_of_hi_lo = fn (hi: int) -> fn (lo: int) ->
+  let fh = bit_and hi br_low20 in
+  mk (bit_and (bit_shr hi 31) 1)
+     (bit_and (bit_shr hi 20) 2047)
+     (bit_and (bit_shr fh 13) 127)
+     (bit_or (bit_and (bit_shr lo 30) 3) (bit_shl (bit_and fh br_low13) 2))
+     (bit_and (bit_shr lo 15) br_low15)
+     (bit_and lo br_low15);
+
+let hi_of_sf = fn (a: Sf) ->
+  bit_or (bit_or (bit_shl a.sign 31) (bit_shl a.exp 20))
+         (bit_or (bit_shr a.f2 2) (bit_shl a.f3 13));
+
+let lo_of_sf = fn (a: Sf) ->
+  bit_or (bit_or a.f0 (bit_shl a.f1 15)) (bit_shl (bit_and a.f2 3) 30);
+
+let sf_of_float = fn (x: float) -> sf_of_hi_lo (float_bits_hi x) (float_bits_lo x);
+let float_of_sf = fn (a: Sf) -> float_of_bits (hi_of_sf a) (lo_of_sf a);
