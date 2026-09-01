@@ -13814,6 +13814,16 @@ let () =
      QEMU's does not, so `li a0, 2` is the part worth pinning. *)
   rv_contains "rv32i: print_err writes to descriptor 2"
     "let _ = print_err \"x\";" "li a0, 2";
+  (* `try_or` unwinds by jumping to a recorded address. The record is on the
+     heap, not the stack, so it is still readable after sp has been moved back --
+     a record below the restored sp would not be. The behaviour is checked in
+     test/parity/try_or_unwind.mere across four backends and on the RV32IM
+     emulator; what is pinned here is that the lowering exists and that `fail`
+     reads the handler word before deciding to exit. *)
+  rv_contains "rv32i: try_or records where to resume"
+    "let _ = print_int (try_or (fn (u) -> fail \"x\") 7);" "sw t0, 12(t1)";
+  rv_contains "rv32i: fail looks for a handler before exiting"
+    "let _ = fail \"x\";" "beqz t1, .noCatch";
   (* The `extern fn` message has its own gate in scripts/rv_prelude_check.sh:
      this harness types a program itself and its typer answers `unbound
      variable` for the extern before codegen is reached, so the branch that
