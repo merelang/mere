@@ -126,6 +126,37 @@ if "$MERE" -rvs "$TMP/opn.mere" 2>/dev/null | grep -q 'u___fadd'; then :; else
   echo "FAIL rv_prelude: f_add does not go through the same wrapper as float +"
   rc=1
 fi
+# Two things this backend REFUSES rather than answering wrongly. Nothing else
+# gates them: scripts/rv_exec_check.sh skips a program that does not compile, so a
+# refusal that was quietly deleted would turn back into a wrong answer with no
+# test going red.
+#
+# A Map key that is not a string: the prelude's Map is an assoc list comparing
+# keys with `str_eq`, so a one-word constructor block is compared by reading its
+# tag as a length. `map_get c Green` answered "key not found" for a key that was
+# there.
+printf 'type c = Red | Green;\nlet m = map_new ();\nlet _ = map_set m Green 1;\nlet _ = print_int (map_get m Green);\n' > "$TMP/mk.mere"
+if "$MERE" -rv "$TMP/mk.mere" > /dev/null 2>"$TMP/mkerr"; then
+  echo "FAIL rv_prelude: a non-str Map key was accepted (it is compared with str_eq)"
+  rc=1
+elif grep -q 'Map key of type' "$TMP/mkerr"; then :; else
+  echo "FAIL rv_prelude: a non-str Map key was refused for the wrong reason"
+  head -2 "$TMP/mkerr"
+  rc=1
+fi
+# Ordering on a compound value: `==` has a generated structural helper, `<` does
+# not, so it would compare the two heap pointers -- and since operands are
+# allocated left then right, `a < b` came out true whichever way it was written.
+printf 'type p = P of int;\nlet _ = print_bool (P 1 < P 2);\n' > "$TMP/ord.mere"
+if "$MERE" -rv "$TMP/ord.mere" > /dev/null 2>"$TMP/orderr"; then
+  echo "FAIL rv_prelude: ordering on a compound value was accepted (it compares pointers)"
+  rc=1
+elif grep -q 'would compare heap pointers' "$TMP/orderr"; then :; else
+  echo "FAIL rv_prelude: compound ordering was refused for the wrong reason"
+  head -2 "$TMP/orderr"
+  rc=1
+fi
+
 # Unary minus on a float is a sign-bit flip, not a two's-complement negate. The
 # integer arm negates the word, which for a float is the pointer to its two
 # halves, so before this it returned a wrong number quietly.
