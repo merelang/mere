@@ -1,0 +1,60 @@
+// try_or catches a failure, and the stack comes back. Four backends have to
+// agree, and the fifth (-rv) was verified on the Mere-written RV32IM emulator,
+// where the unwinding is a jump to a recorded address rather than longjmp.
+//
+// Six of these cases exist because a poison run got past the first five:
+//
+//   * `fail` not restoring the previous handler is invisible with one level of
+//     nesting, because the normal path restores it too. Case 5 makes an inner
+//     try_or CATCH and then fails again, where the un-restored handler loops.
+//   * The NORMAL path not restoring it is invisible in the value: the next
+//     `fail` restores the handler and the second attempt reaches the right one,
+//     so only the code between the inner try_or and the failure runs twice.
+//     Case 8 counts that.
+//   * `sp` not being restored does not corrupt anything once; it drifts. Case 7
+//     runs 20,000 of them, where the drift meets the heap.
+// 1: a failure gives the default
+let _ = print_int (try_or (fn (u) -> fail "boom") 7);
+// 1b: no failure gives the thunk's value
+let _ = print_int (try_or (fn (u) -> 42) 7);
+// 3: a failure from deep inside a call
+let rec deep = fn (n: int) -> if n == 0 then fail "deep" else deep (n - 1) + 1;
+let _ = print_int (try_or (fn (u) -> deep 20) 99);
+// 2: nested -- the inner one catches and the outer is untouched
+let _ = print_int (try_or (fn (u) -> 1 + try_or (fn (v) -> fail "in") 10) 500);
+// 2b: nested -- the inner one succeeds and the outer catches
+let _ = print_int (try_or (fn (u) -> (let x = try_or (fn (v) -> 3) 10 in fail "out")) 600);
+// 4: the stack after a try_or -- a deep recursion run afterwards
+let rec sum = fn (n: int) -> fn (acc: int) -> if n == 0 then acc else sum (n - 1) (acc + n);
+let _ = print_int (sum 2000 0);
+let _ = print_int (try_or (fn (u) -> fail "x") 5);
+let _ = print_int (sum 2000 0);
+// 5: after the inner one CATCHES, a further failure must reach the outer
+// handler. If `fail` does not restore the previous one, the second failure
+// returns to the inner catch and keeps going round.
+let _ = print_int (try_or (fn (u) ->
+  let a = try_or (fn (v) -> fail "in") 1 in
+  fail "out") 2);
+// 6: after the inner one SUCCEEDS, a failure must give the outer default. If
+// the normal path does not restore the previous handler, the inner default (11)
+// is what shows up -- for one round; case 8 is the one that sees it.
+let _ = print_int (try_or (fn (u) ->
+  let a = try_or (fn (v) -> 3) 11 in
+  fail "out2") 22);
+// 7: many try_or + fail rounds, so an unrestored sp cannot hide. One does not
+// exhaust anything; the count is the check.
+let rec many = fn (n: int) -> fn (acc: int) ->
+  if n == 0 then acc else many (n - 1) (acc + try_or (fn (u) -> fail "x") 1);
+let _ = print_int (many 20000 0);
+// 8: if an inner try_or that returned NORMALLY does not restore the previous
+// handler, a later failure goes to the inner catch once before reaching the
+// outer one. The value comes out right -- `fail` restores the handler, so the
+// second attempt lands correctly -- and only the code BETWEEN the inner try_or
+// and the failure runs twice. A value check cannot see that, so this counts.
+let hits = vec_new ();
+let _ = vec_push hits 0;
+let _ = print_int (try_or (fn (u) ->
+  let a = try_or (fn (v) -> 3) 11 in
+  let _ = vec_set hits 0 (vec_get hits 0 + 1) in
+  fail "out3") 33);
+let _ = print_int (vec_get hits 0);

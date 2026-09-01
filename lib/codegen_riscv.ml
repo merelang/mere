@@ -385,6 +385,15 @@ let load_base = ref 0
 
 let globals_base () = !load_base + 0x200000
 
+(* The first word at globals_base is the runtime's, not a program's: it holds a
+   pointer to the innermost `try_or`'s catch record, or 0. It lives here rather
+   than in the print scratch region because that region's whole description is
+   "the buffer the print helpers build digits in", and putting unrelated state
+   there would make the description untrue. Top-level value bindings start one
+   word further up; the heap starts after those, as before. *)
+let runtime_words = 1
+let fail_frame_addr () = globals_base ()
+
 (* RAM layout, derived from the RAM size so it is no longer three hardcoded
    immediates. The top `reserved_top` bytes hold the scratch buffer the print
    helpers build digits in plus the fantasy-console MMIO; the stack starts
@@ -392,7 +401,7 @@ let globals_base () = !load_base + 0x200000
    everything between the two growing ends is theirs, and the reserved region
    is never in the heap's path.
 
-     code [0, globals_base) | globals+heap ↑ | ... | stack ↓ from stack_top
+     code [0, globals_base) | runtime word | globals+heap ↑ | ... | stack ↓ from stack_top
      | print scratch | framebuffer | keys | end of RAM
 
    At the default 8MB these come out at exactly the addresses this backend has
@@ -583,10 +592,10 @@ let load_to_a0 idx =
 (* top-level value bindings live in a fixed region at globals_base. Load the
    full slot address (li handles any offset, so the global count is unbounded). *)
 let load_global_to_a0 gi =
-  li a0 (globals_base () + gi * 4);
+  li a0 (globals_base () + (runtime_words + gi) * 4);
   emit_word (enc_i 0 a0 2 a0 0x03)                                (* lw a0, 0(a0) *)
 let store_a0_to_global gi =
-  li t1 (globals_base () + gi * 4);
+  li t1 (globals_base () + (runtime_words + gi) * 4);
   emit_word (enc_s 0 a0 t1 2 0x23)                                (* sw a0, 0(t1) *)
 
 (* --- tail calls ----------------------------------------------------------
@@ -1139,8 +1148,25 @@ and compile_app env e =
     compile_expr env (List.hd args);
     emit_word (enc_i 4 a0 2 a0 0x03)                     (* lw a0, 4(a0) *)
   | Ast.Var "fail" when List.length args = 1 ->
-    (* fail msg : abort — write the message, then exit(1). Never returns. *)
+    (* fail msg : if a `try_or` is in scope, unwind to it; otherwise write the
+       message and exit(1). Never returns either way.
+
+       The record was built by try_or and lives on the heap, so it is still
+       readable after sp has been moved back -- a record below the restored sp
+       would not be. *)
     compile_expr env (List.hd args);                     (* a0 = msg str *)
+    let l_abort = fresh_label ".noCatch" in
+    li t0 (fail_frame_addr ());
+    emit_word (enc_i 0 t0 2 t1 0x03);                    (* lw t1, 0(t0) — record *)
+    emit (Branch (0, t1, zero, l_abort));                (* beq t1, x0, abort *)
+    emit_word (enc_i 0 t1 2 t2 0x03);                    (* lw t2, 0(t1) — prev *)
+    emit_word (enc_s 0 t2 t0 2 0x23);                    (* sw prev, 0(&frame) *)
+    emit_word (enc_i 4 t1 2 sp 0x03);                    (* lw sp, 4(t1) *)
+    emit_word (enc_i 8 t1 2 fp 0x03);                    (* lw fp, 8(t1) *)
+    emit_word (enc_i 16 t1 2 a0 0x03);                   (* lw a0, 16(t1) — default *)
+    emit_word (enc_i 12 t1 2 t1 0x03);                   (* lw t1, 12(t1) — catch *)
+    emit_word (enc_i 0 t1 0 zero 0x67);                  (* jalr x0, t1 *)
+    emit (Label l_abort);
     emit_word (enc_i 0 a0 2 a2 0x03);                    (* lw a2, 0(a0) — len *)
     emit_word (enc_i 4 a0 0 a1 0x13);                    (* addi a1, a0, 4 *)
     emit_word (enc_i 64 zero 0 a7 0x13);                 (* li a7, 64 *)
@@ -1148,6 +1174,51 @@ and compile_app env e =
     emit_word (enc_i 93 zero 0 a7 0x13);                 (* li a7, 93 *)
     emit_word (enc_i 1 zero 0 a0 0x13);                  (* li a0, 1 *)
     emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall (exit) *)
+  (* try_or f default : run the thunk; if it fails, the value is `default`.
+     Nesting works because the record keeps the PREVIOUS frame pointer and
+     restores it on both paths -- a single global slot holding "the current
+     handler" would be overwritten by an inner try_or and never put back
+     (the inner one would catch the outer one's failures forever after).
+
+     `default` is evaluated BEFORE the handler is installed, which is the
+     semantics: a failure while computing it belongs to the caller, not here.
+     sp and fp are recorded before anything is pushed, and the catch label sits
+     where the stack is at that same level, so both paths meet with the stack
+     as it was. *)
+  | Ast.Var "try_or" when List.length args = 2 ->
+    let l_catch = fresh_label ".catch" in
+    let l_after = fresh_label ".tryEnd" in
+    alloc_words t1 5;                                    (* [prev][sp][fp][catch][default] *)
+    push t1;
+    li t0 (fail_frame_addr ());
+    emit_word (enc_i 0 t0 2 t2 0x03);                    (* lw t2, 0(t0) — prev *)
+    emit_word (enc_s 0 t2 t1 2 0x23);                    (* sw prev, 0(rec) *)
+    emit (LoadAddr (t0, l_catch));
+    emit_word (enc_s 12 t0 t1 2 0x23);                   (* sw &catch, 12(rec) *)
+    pop t1;
+    (* sp and fp as they are here: the level both paths return to *)
+    emit_word (enc_s 4 sp t1 2 0x23);                    (* sw sp, 4(rec) *)
+    emit_word (enc_s 8 fp t1 2 0x23);                    (* sw fp, 8(rec) *)
+    push t1;
+    compile_expr env (List.nth args 1);                  (* a0 = default *)
+    pop t1;
+    emit_word (enc_s 16 a0 t1 2 0x23);                   (* sw default, 16(rec) *)
+    li t0 (fail_frame_addr ());
+    emit_word (enc_s 0 t1 t0 2 0x23);                    (* install *)
+    compile_expr env (List.nth args 0);                  (* a0 = thunk closure *)
+    li a1 0;                                             (* the unit argument *)
+    emit_word (enc_i 0 a0 2 t1 0x03);                    (* lw t1, 0(a0) — code *)
+    emit_word (enc_i 0 t1 0 ra 0x67);                    (* jalr ra, t1 *)
+    (* normal return: the record is still installed, so it is where to read the
+       previous frame from -- no register had to survive the call. *)
+    li t0 (fail_frame_addr ());
+    emit_word (enc_i 0 t0 2 t1 0x03);                    (* lw t1, 0(t0) — rec *)
+    emit_word (enc_i 0 t1 2 t2 0x03);                    (* lw t2, 0(t1) — prev *)
+    emit_word (enc_s 0 t2 t0 2 0x23);                    (* sw prev, 0(&frame) *)
+    emit (Jal (zero, l_after));
+    emit (Label l_catch);
+    (* fail restored sp/fp, put the default in a0, and uninstalled *)
+    emit (Label l_after)
   (* exit code : terminate with the status the program chose. Never returns.
      The same ecall `fail` ends with, with a0 taken from the argument instead
      of the literal 1. Refused on --bare for the reason `print` is: the exit
@@ -1755,8 +1826,11 @@ let emit_start () =
   emit (Label "_start");
   li sp (stack_top ());                                 (* sp = top of RAM, minus MMIO *)
   emit_word (enc_i 0 sp 0 fp 0x13);                     (* addi fp, sp, 0 *)
-  (* heap top starts just above the globals region (globals_base + n*4) *)
-  li gp (globals_base () + Hashtbl.length globals_map * 4);
+  (* no `try_or` is in scope yet, and `fail` reads this word to find out *)
+  li t0 (fail_frame_addr ());
+  emit_word (enc_s 0 zero t0 2 0x23);                   (* sw x0, 0(t0) *)
+  (* heap top starts just above the runtime word and the globals region *)
+  li gp (globals_base () + (runtime_words + Hashtbl.length globals_map) * 4);
   emit (Jal (ra, "__main"));                            (* run main *)
   li a7 93;                                             (* exit syscall *)
   li a0 0;
