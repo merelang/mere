@@ -4,6 +4,43 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.370 — 2026-09-01
+
+_IEEE 754 addition in integers, and two NaN rules that had to be measured._
+`contrib/softfloat/add` adds two doubles with no floating point anywhere:
+significand shifted left by three so the guard, round and sticky bits have
+somewhere to live, aligned by the exponent difference, added or subtracted by
+magnitude, normalised, and rounded to nearest with ties to even.
+
+Subnormals need no separate path. The exponent carried around is the effective
+one — a value is `significand * 2^(E - 1075)`, with E = 1 for subnormals — and
+the normalisation step simply cannot lower E below 1. What falls out is a
+significand that stays small, which is what a subnormal is.
+
+The gate is `test/float/softfloat_add.mere`, and it compares **bits**, not
+values: 484 pairs from the format's landmarks, 9,000 swept pairs, and 1,800 more
+in the top binade. Bit equality is what puts `-0.0`, the NaN payloads, the
+subnormal boundary and tie-to-even inside the check instead of on a list of
+things to remember.
+
+**Two rules came from the gate rather than from the specification.** The first:
+a signalling NaN operand comes back *quieted*, which cost 45 failures. The
+second: a signalling NaN outranks a quiet one whichever side it is on, so
+`quiet + signalling` is the signalling one quieted, not the first operand. That
+cost one failure, and it is not a rule anybody would guess.
+
+Poisoning found one thin spot worth naming. Moving the overflow threshold from
+2047 to 2048 failed exactly **two** checks, because only `max + max` and
+`min + min` reached it. The interesting overflow is not that pair but a sum that
+is finite until the round bit is applied, so the sweep now spends 600 rounds in
+the top binade — and the same poison fails 1,283.
+
+Also in this slice: `l6_bit`, and `test/float/sf_bridge.mere`, which holds the
+conversion between hardware doubles and the limbs so that both gates share one
+copy and neither library file has to name `float`.
+
+---
+
 ## v0.1.369 — 2026-09-01
 
 _Six 15-bit limbs, and the two tuple accessors the library needed to return a

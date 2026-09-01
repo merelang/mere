@@ -8,11 +8,12 @@
 // in the library appears here, so the coverage claim is checked instead of
 // trusted.
 import "../../contrib/softfloat/limbs.mere";
+import "../../contrib/softfloat/add.mere";
 import "../../contrib/softfloat/softfloat.mere";
 
 let one = mk 0 1023 0 0 0 0;          // 1.0
 let two = mk 0 1024 0 0 0 0;          // 2.0
-let sub = mk 0 0 0 0 0 1;             // the smallest subnormal
+let tiny = mk 0 0 0 0 0 1;            // the smallest subnormal
 let qnan = mk 0 2047 64 0 0 0;
 
 let b2i = fn (b: bool) -> if b then 1 else 0;
@@ -28,7 +29,7 @@ let _ = print_int (b2i (frac_is_zero one));
 let _ = print_int (b2i (is_nan qnan));
 let _ = print_int (b2i (is_inf inf));
 let _ = print_int (b2i (is_zero zero));
-let _ = print_int (b2i (is_subnormal sub));
+let _ = print_int (b2i (is_subnormal tiny));
 let _ = print_int (b2i (is_finite one));
 let _ = print_int (neg one).sign;
 let _ = print_int (abs (neg one)).sign;
@@ -61,3 +62,17 @@ let _ = print_int (snd (l6_shr_sticky u 4));
 let _ = print_int (fst (l6_shr_sticky_go u 2 0)).l0;
 let _ = print_int (l6_bitlen_limb 300 0);
 let _ = print_int (l6_bitlen u);
+let _ = print_int (l6_bit u 3);
+let _ = print_int (l6_one).l0;
+
+// contrib/softfloat/add
+let half = mk 0 1022 0 0 0 0;
+let _ = print_int hidden_bit;
+let _ = print_int quiet_bit;
+let _ = print_int (quiet nan).f3;
+let _ = print_int (b2i (is_snan (mk 0 2047 1 0 0 0)));
+let _ = print_int (sig_of one).l3;
+let _ = print_int (eff_exp tiny);
+let _ = print_int (pack 0 (sig_of one) 1023 0).exp;
+let _ = print_int (add one one).exp;
+let _ = print_int (sub one half).exp;
