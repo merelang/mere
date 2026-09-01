@@ -233,6 +233,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/determinism_check.sh
 
+      # A double's bits, held as integers narrow enough for the one backend
+      # that has no float. The gate checks the round trip bit for bit, that
+      # interp and C agree, and that every exported name compiles for RV32I.
+      - name: "softfloat (a double's bits, on a target with no float)"
+        if: ${{ !cancelled() }}
+        run: sh scripts/softfloat_check.sh
+
       # `run` is the only channel a program has for the fate of a child, and the
       # interpreter reported a signalled child with OCaml's signal encoding: 121
       # for SIGKILL where the shell and the C backend say 137. Below 128, where
