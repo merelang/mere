@@ -4,6 +4,33 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.375 — 2026-09-01
+
+_A cell that compiles and then aborts is not `yes`._ Merging the RV32I float
+work made `host_matrix.sh` fail, which is the gate working: the -rv prelude now
+defines the float builtins, so a probe for `sqrt` or `atan2` compiles and 27
+cells were about to flip to `yes` on a backend that cannot do the arithmetic.
+
+`stub` is the third value for that, next to the `bare` this table already had.
+`yes` would be the flattering lie and `refused` the other one. The int builtins
+the same change added — `abs`, `max`, `min`, `clamp`, `even`, `odd`, `gcd` — are
+`yes`, because they are implementations; so are `float_bits_hi` /
+`float_bits_lo` / `float_of_bits`, which are the representation.
+
+RV32I now reads 59 yes, 50 refused, **27 stub**, 12 unattributed, 2 bare.
+
+**The comment about how this is held was false when it was written.** Detecting
+a stub means looking for the shim's message in the emitted binary, so the cell
+depends on that wording, and the comment said `rv_prelude_check.sh` asserts the
+phrase. It asserted only the word `softfloat`. A poison run reworded the rest,
+27 cells turned to `yes`, and that script stayed green. It checks the phrase now,
+and the same poison fails both.
+
+`stub` is in the summary line too, for the reason the others are: a number
+nobody prints is a number nobody notices growing.
+
+---
+
 ## v0.1.374 — 2026-09-01
 
 _A float on RV32I is two words, the arithmetic is not lowered, and the program
