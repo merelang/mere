@@ -5854,8 +5854,14 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | Ast.P_var n -> ("1", [(n, v_reg)], [(n, v_ty)])
       | Ast.P_unit -> ("1", [], [])
       | Ast.P_int n ->
+        (* i64, not i32. This backend widened int to i64 in v0.1.96 and this line
+           was left behind, so an int literal pattern INSIDE a container --
+           `(1, y)`, `R { p = 1 }`, `A 1` -- emitted ill-typed IR and the
+           program did not compile at all. The top-level case takes a different
+           path and was always right, which is why nothing noticed: the parity
+           suite had no file matching a literal inside a container. *)
         let r = fresh_reg () in
-        emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, %d" r v_reg n);
+        emit_instr (Printf.sprintf "  %s = icmp eq i64 %s, %d" r v_reg n);
         (r, [], [])
       | Ast.P_bool b ->
         let r = fresh_reg () in
