@@ -45,6 +45,9 @@ let run = fn (c: str) -> (__h_todo "run" : int);
 let read_file = fn (p: str) -> (__h_todo "read_file" : str);
 let file_exists = fn (p: str) -> (__h_todo "file_exists" : bool);
 let random_int = fn (n: int) -> (__h_todo "random_int" : int);
+// A clock needs a host to ask. Returning a fixed number would make a program
+// that measures elapsed time report 0 rather than say it cannot measure.
+let time = fn (u: unit) -> (__h_todo "time" : float);
 let write_file = fn (p: str) -> fn (c: str) -> (__h_todo "write_file" : unit);
 let args = fn (u: unit) -> (__h_todo "args" : str list);
 let read_stdin = fn (u: unit) -> (__h_todo "read_stdin" : str);

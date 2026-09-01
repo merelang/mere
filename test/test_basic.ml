@@ -13833,6 +13833,16 @@ let () =
   rv_err_contains "rv32i: an or-pattern that binds is refused by name"
     "type T = A of int | B of int;\nlet _ = print_int (match (A 1) with A x | B x -> x);"
     "binds a variable is not supported yet";
+  (* A top-level function used as a VALUE gets a one-word closure whose pointer
+     is an adapter, not the function: a closure is called with the closure in a0
+     and the argument in a1, and a one-argument top-level function wants the
+     argument in a0. The adapter is that move and a tail jump. *)
+  rv_contains "rv32i: a top-level function as a value gets an adapter"
+    "let d = fn (x: int) -> x * 2;\nlet ap = fn (g) -> fn (v: int) -> g v;\nlet _ = print_int (ap d 21);"
+    "__adapt_d";
+  rv_err_contains "rv32i: a curried one is refused, and says how many arguments"
+    "let add = fn (a: int) -> fn (b: int) -> a + b;\nlet ap = fn (g) -> fn (v: int) -> g v;\nlet _ = print_int (ap (add 1) 2);"
+    "takes 2 arguments and is used as a value";
   (* The `extern fn` message has its own gate in scripts/rv_prelude_check.sh:
      this harness types a program itself and its typer answers `unbound
      variable` for the extern before codegen is reached, so the branch that
