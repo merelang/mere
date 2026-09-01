@@ -1,0 +1,48 @@
+// A container pattern parks its pointer on the stack and unparks it on the way
+// out the bottom, so a sub-pattern mismatch used to leave it there. That was not
+// a leak that grows slowly: the pushes an enclosing CALL has already made for its
+// other arguments sit on the same stack, so the extra word was popped as one of
+// them and the call ran with a pointer where a number belonged.
+//
+// `f (n - 1) (a + (match (1,2) with (1,3) -> .. | ..))` recursed with n set to a
+// heap address and ran until the heap met the stack -- ten iterations was enough
+// to report out of memory. The four bytes were never the problem; what they
+// displaced was.
+//
+// The bisection that found it is why each case is here: the mismatch is needed
+// (a matching pattern unparks), the container is needed (an int pattern parks
+// nothing), the enclosing call is needed (nothing else has pushes to displace),
+// and the tail position is NOT -- the non-tail case fails the same way.
+let rec fail_in_arg = fn (n: int) -> fn (a: int) ->
+  if n == 0 then a
+  else fail_in_arg (n - 1) (a + (match (1, 2) with (1, 3) -> 0 | (x, y) -> 1));
+let _ = print_int (fail_in_arg 300 0);
+
+let rec fail_nontail = fn (n: int) -> fn (a: int) ->
+  if n == 0 then a
+  else 1 + fail_nontail (n - 1) (a + (match (1, 2) with (1, 3) -> 0 | (x, y) -> 1));
+let _ = print_int (fail_nontail 300 0);
+
+type R = { p: int, q: int };
+let rec fail_record = fn (n: int) -> fn (a: int) ->
+  if n == 0 then a
+  else fail_record (n - 1) (a + (match (R { p = 1, q = 2 }) with R { p = 1, q = 3 } -> 0 | _ -> 1));
+let _ = print_int (fail_record 300 0);
+
+let rec fail_nested = fn (n: int) -> fn (a: int) ->
+  if n == 0 then a
+  else fail_nested (n - 1) (a + (match ((1, 2), 3) with ((1, 3), _) -> 0 | _ -> 1));
+let _ = print_int (fail_nested 300 0);
+
+// This file also found a bug in a different backend on its first run: an int
+// literal pattern INSIDE a container -- `(1, y)`, `R { p = 1 }`, `A 1` -- made
+// the LLVM backend emit `icmp eq i32` against an i64, so the program did not
+// compile there at all. int widened to i64 in v0.1.96 and that one line was left
+// behind. The top-level case takes a different path and was always right, and no
+// file in this suite had a literal inside a container, so nothing had asked.
+
+// the control: a pattern that MATCHES unparks, and always did
+let rec ok_in_arg = fn (n: int) -> fn (a: int) ->
+  if n == 0 then a
+  else ok_in_arg (n - 1) (a + (match (1, 2) with (1, 2) -> 1 | (x, y) -> 0));
+let _ = print_int (ok_in_arg 300 0);

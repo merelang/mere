@@ -530,8 +530,11 @@ let rec count_lets (e : Ast.expr) : int =
   | Ast.Record_update (base, ups) ->
     List.fold_left (fun n (_, e) -> n + count_lets e) (count_lets base) ups
   | Ast.Match (scrut, arms) ->
-    (* +1 for the scrutinee stash slot, plus each arm's pattern bindings *)
-    count_lets scrut + 1
+    (* +1 for the scrutinee stash slot, +1 for the stack pointer as it stood when
+       the arm's pattern started (a container pattern parks its pointer on the
+       stack and a mismatch jumps out without unparking it), plus each arm's
+       pattern bindings *)
+    count_lets scrut + 2
     + List.fold_left (fun n (pat, guard, body) ->
         n + pvars_in_pattern pat + count_lets body
         + (match guard with Some g -> count_lets g | None -> 0)) 0 arms
@@ -1643,6 +1646,16 @@ and compile_match env scrut arms ~tail =
   compile_expr env scrut;                          (* a0 = scrutinee *)
   let sidx = !slot_ctr in incr slot_ctr;
   store_a0_to sidx;                                (* stash it (survives arm bodies) *)
+  (* Where the stack stood before any pattern ran. `P_tuple` / `P_record` park
+     the container pointer on it and unpark it only on the way out the bottom, so
+     a sub-pattern mismatch leaves it there. That was not merely a leak: the
+     pushes an enclosing call has already made for its OTHER arguments sit on the
+     same stack, so the extra word was popped as one of them and the call ran with
+     a pointer where a number belonged. `f (n - 1) (match ...)` recursed with n
+     set to a heap address, and the loop ran until the heap met the stack. *)
+  let spidx = !slot_ctr in incr slot_ctr;
+  emit_word (enc_i 0 sp 0 a0 0x13);                (* mv a0, sp *)
+  store_a0_to spidx;
   let l_end = fresh_label ".mend" in
   List.iter (fun (pat, guard, body) ->
     let l_next = fresh_label ".marm" in
@@ -1654,7 +1667,10 @@ and compile_match env scrut arms ~tail =
     tail_pos := tail;
     compile_expr env' body;
     emit (Jal (zero, l_end));
-    emit (Label l_next)
+    emit (Label l_next);
+    (* whatever the pattern parked, unparked *)
+    load_to_a0 spidx;
+    emit_word (enc_i 0 a0 0 sp 0x13)               (* mv sp, a0 *)
   ) arms;
   emit (Label l_end)   (* typer guarantees exhaustiveness, so some arm matched *)
 
