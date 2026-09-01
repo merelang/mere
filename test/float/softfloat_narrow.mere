@@ -9,6 +9,7 @@
 // trusted.
 import "../../contrib/softfloat/limbs.mere";
 import "../../contrib/softfloat/add.mere";
+import "../../contrib/softfloat/mul.mere";
 import "../../contrib/softfloat/softfloat.mere";
 
 let one = mk 0 1023 0 0 0 0;          // 1.0
@@ -76,3 +77,17 @@ let _ = print_int (eff_exp tiny);
 let _ = print_int (pack 0 (sig_of one) 1023 0).exp;
 let _ = print_int (add one one).exp;
 let _ = print_int (sub one half).exp;
+
+// contrib/softfloat/mul
+let la = sig_limbs one;
+let lb = sig_limbs two;
+let pv = mul_limbs la lb;
+let _ = print_int (prod_limb pv 3);
+let _ = print_int (prod_bitlen pv);
+let _ = print_int (prod_bits15 pv 7);
+let _ = print_int (prod_low_nonzero pv 20);
+let (ps, pk, pst) = product_to_l6 pv;
+let _ = print_int ps.l0;
+let _ = print_int pk;
+let _ = print_int pst;
+let _ = print_int (mul one two).exp;
