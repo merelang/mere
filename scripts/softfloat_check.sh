@@ -8,6 +8,15 @@
 #      into 15-bit limbs and back as the SAME 64 bits -- including -0.0 and the
 #      NaN payloads, which a value comparison would let through.
 #   2. The interpreter and the C backend print the same bytes.
+# What this gate does NOT see: the 15-bit limb width exists so that a product of
+# two limbs fits a SIGNED 32-BIT int, and both arms here run on backends whose
+# int is 63 or 64 bits. A schoolbook loop that accumulated a column before
+# carrying would be arithmetically right on both and overflow on the target.
+# Compiling for RV32I (check 3) proves the code is expressible there, not that
+# the widths hold. That one is checked by running the library on a 32-bit
+# machine, which needs an emulator this repository does not depend on --
+# see docs/bare-metal.md for the ones that do.
+#
 #   3. **The library compiles for RV32I**, whose value model is one signed
 #      32-bit word and which has no float at all. That is the whole point of
 #      the representation: `float_bits_hi` / `float_bits_lo` split a double into
@@ -30,6 +39,14 @@ L="$ROOT/test/float/softfloat_limbs.mere"
 if grep -q '^FAIL' "$TMP/limbs"; then
   echo "FAIL softfloat: the limbs disagreed with native int arithmetic"
   grep '^FAIL' "$TMP/limbs" | head -10
+  rc=1
+fi
+
+M2="$ROOT/test/float/softfloat_mul.mere"
+"$MERE" "$M2" > "$TMP/mul" 2>&1 || { echo "FAIL softfloat: the interpreter refused the mul gate"; cat "$TMP/mul"; exit 1; }
+if grep -q '^FAIL' "$TMP/mul"; then
+  echo "FAIL softfloat: a product did not match the hardware bit for bit"
+  grep '^FAIL' "$TMP/mul" | head -8
   rc=1
 fi
 
@@ -81,7 +98,8 @@ fi
 #     subset, whatever the message says.
 if grep -n '\bfloat\b' "$ROOT/contrib/softfloat/softfloat.mere" \
        "$ROOT/contrib/softfloat/limbs.mere" \
-       "$ROOT/contrib/softfloat/add.mere" | grep -v ':[0-9]*: *//' > "$TMP/floats"; then
+       "$ROOT/contrib/softfloat/add.mere" "$ROOT/contrib/softfloat/mul.mere" \
+       | grep -v ':[0-9]*: *//' > "$TMP/floats"; then
   echo "FAIL softfloat: the library names \`float\`, which RV32I does not have"
   cat "$TMP/floats"
   rc=1
@@ -95,7 +113,7 @@ fi
 N="$ROOT/test/float/softfloat_narrow.mere"
 NAMES=$(sed -n 's/^let \(rec \)\{0,1\}\([a-z_][a-z_0-9]*\) *=.*/\2/p' \
         "$ROOT/contrib/softfloat/softfloat.mere" "$ROOT/contrib/softfloat/limbs.mere" \
-        "$ROOT/contrib/softfloat/add.mere")
+        "$ROOT/contrib/softfloat/add.mere" "$ROOT/contrib/softfloat/mul.mere")
 MISSING=""
 for n in $NAMES; do
   grep -q "\\b$n\\b" "$N" || MISSING="$MISSING $n"
