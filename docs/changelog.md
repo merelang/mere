@@ -4,6 +4,45 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.379 — 2026-09-01
+
+_Four bytes that were never the problem; what they displaced was._ A container
+pattern parks its pointer on the stack and unparks it on the way out the bottom,
+so a sub-pattern mismatch left it there. Read as a leak, four bytes per failed
+arm sounds like something to fix eventually.
+
+It is not a leak. The pushes an enclosing **call** has already made for its other
+arguments sit on the same stack, so the extra word was popped as one of them.
+`f (n - 1) (a + (match (1,2) with (1,3) -> 0 | _ -> 1))` called `f` with a heap
+address where `n` belonged, and the loop ran until the heap met the stack — **ten
+iterations was enough to report out of memory**, which is what made the leak
+reading impossible: forty bytes cannot close a six-megabyte gap.
+
+`compile_match` now records the stack pointer as it stood before the arm's
+pattern and restores it at the arm's fail label, which handles arbitrary nesting
+because every push a pattern makes is below that mark.
+
+The bisection is in `test/parity/match_arm_stack.mere`, and each case is there
+because removing it hides the bug: the mismatch is needed (a matching pattern
+unparks), the container is needed (an int pattern parks nothing), the enclosing
+call is needed (nothing else has pushes to displace), and the tail position is
+**not** — the non-tail case fails identically, which is what ruled out the frame
+teardown.
+
+**That file found a second bug on its first run, in a different backend.** An int
+literal pattern inside a container -- `(1, y)`, `R { p = 1 }`, `A 1` -- made the
+LLVM backend emit `icmp eq i32` against an i64, so such a program did not compile
+there at all. int widened to i64 in v0.1.96 and that one line was left behind.
+The top-level `match 1 with 1` takes a different path and was always right, and
+**no file in a 148-program parity suite had a literal inside a container**, so
+nothing had ever asked. `bool` and `str` in the same position were already
+correct; only `int` was wrong.
+
+Same shape as v0.1.367, twice over: a widening that did not reach every site, and
+a check that was deleted for the backends that outgrew it.
+
+---
+
 ## v0.1.378 — 2026-09-01
 
 _The FFI boundary, the host services behind it, and a matrix that lied twice
