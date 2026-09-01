@@ -13711,6 +13711,13 @@ let () =
      `--ram` must move the stack (and with it the heap's ceiling) *)
   rv_contains "rv32i: the default layout puts the stack at 0x7E0000"
     "let _ = print_int 1;" "lui sp, 0x7e0";
+  (* The globals start where they always did for a program whose code fits the old
+     fixed 0x200000, which is every program in this suite. They follow the code
+     when it does not -- a 39,719-line interpreter emits 3.97 MB and gets
+     0x500000 -- and that case is verified against that interpreter rather than
+     here, because two megabytes of code is not a unit test. *)
+  rv_contains "rv32i: a small program's globals still start at 0x200000"
+    "let _ = print_int 1;" "lui t0, 0x200";
   Codegen_riscv.ram_bytes := 32 * 1024 * 1024;
   rv_contains "rv32i: --ram moves the stack to the top of RAM"
     "let _ = print_int 1;" "lui sp, 0x1fe0";
