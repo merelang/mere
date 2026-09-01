@@ -250,6 +250,11 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
      | "map_has" -> "rvmap_has" :: v :: acc
      | "map_delete" -> "rvmap_delete" :: v :: acc
      | "map_len" -> "rvmap_len" :: v :: acc
+     | "map_clear" -> "rvmap_clear" :: v :: acc
+     | "map_compact" -> "rvmap_compact" :: v :: acc
+     | "map_recycle" -> "rvmap_recycle" :: v :: acc
+     | "map_bytes" -> "rvmap_bytes" :: v :: acc
+     | "vec_bytes" -> "rvvec_bytes" :: v :: acc
      | "map_iter" -> "rvmap_iter" :: v :: acc
      | _ -> v :: acc)
   | Ast.Int_lit _ | Ast.Bool_lit _ | Ast.Unit_lit
@@ -671,10 +676,10 @@ let emit_binop op rd rs1 rs2 loc =
   | Ast.Mod -> emit_word (enc_r 1 rs2 rs1 6 rd 0x33)
   | Ast.Concat -> err loc "RV32I: internal — string concat is handled in compile_bin"
 
-(* The abort a float operation lowers to while contrib/softfloat is not
-   connected: the tail of `fail` -- write the message, then exit(1). *)
-let emit_float_abort what =
-  let msg = float_op_unsupported_msg what in
+(* An abort with a fixed message: the tail of `fail` -- write it, then exit(1).
+   Used where this backend cannot do a thing at all and refusing at compile time
+   would refuse whole programs for a call they may never make. *)
+let emit_abort msg =
   let label = fresh_label "str_" in
   string_data := (label, mk_str_block msg) :: !string_data;
   emit (LoadAddr (a0, label));
@@ -685,6 +690,8 @@ let emit_float_abort what =
   emit_word (enc_i 93 zero 0 a7 0x13);                   (* li a7, 93 *)
   emit_word (enc_i 1 zero 0 a0 0x13);                    (* li a0, 1 *)
   emit_word (enc_i 0 zero 0 zero 0x73)                   (* ecall (exit) *)
+
+let emit_float_abort what = emit_abort (float_op_unsupported_msg what)
 
 let rec compile_expr (env : env) (e : Ast.expr) : unit =
   (* every subexpression starts out non-tail; the cases below whose value is
@@ -1523,6 +1530,18 @@ and compile_app env e =
     emit_word (enc_i 100 zero 0 a7 0x13);                    (* li a7, 100 *)
     emit_word (enc_i 0 zero 0 zero 0x73);                    (* ecall (present) *)
     emit_word (enc_i 0 zero 0 a0 0x13)                       (* unit *)
+  (* An `extern fn` this target cannot have. `fb_set` / `key` / `present` are
+     matched by name above (they are the three cases just before this one) -- those are MMIO on the machine itself, not calls into
+     a library -- and everything else is a C symbol there is nothing here to link
+     against. Refusing at compile time refuses the whole program for a call it may
+     never make: the Ruby subset interpreter this backend is being carried for
+     declares twelve, seven of them TCP, on paths a script never reaches. So the
+     call aborts, naming the symbol, and a program that does not make it runs. *)
+  | Ast.Var f when Hashtbl.mem externs f ->
+    List.iter (fun arg -> compile_expr env arg) args;
+    emit_abort (Printf.sprintf
+      "RV32I: `%s` is an `extern fn`, and this target has no C library to link \
+       against -- `--bare` hands the program the machine, not a host" f)
   (* Map builtins -> the rv-prelude's rvmap_* helpers (the typer forces the
      Map type on `map_new` by name, so these can't just be shadowed). Types
      are erased at codegen, so the Vec-based repr flows through fine. *)
@@ -1531,6 +1550,17 @@ and compile_app env e =
   | Ast.Var "map_get" when List.length args = 2 -> call_top env "rvmap_get" args
   | Ast.Var "map_has" when List.length args = 2 -> call_top env "rvmap_has" args
   | Ast.Var "map_len" when List.length args = 1 -> call_top env "rvmap_len" args
+  | Ast.Var "map_clear" when List.length args = 1 -> call_top env "rvmap_clear" args
+  | Ast.Var "map_compact" when List.length args = 1 -> call_top env "rvmap_compact" args
+  | Ast.Var "map_recycle" when List.length args = 1 -> call_top env "rvmap_recycle" args
+  | Ast.Var "map_bytes" when List.length args = 1 -> call_top env "rvmap_bytes" args
+  | Ast.Var "vec_bytes" when List.length args = 1 -> call_top env "rvvec_bytes" args
+  (* A Vec here is the backend's own block, not a region arena, so there is
+     nothing to compact and nothing to report -- the same answer map_compact
+     gives, for the same reason. *)
+  | Ast.Var "vec_compact" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i 0 zero 0 a0 0x13)                   (* unit *)
   | Ast.Var "map_delete" when List.length args = 2 -> call_top env "rvmap_delete" args
   | Ast.Var "map_iter" when List.length args = 2 -> call_top env "rvmap_iter" args
   | Ast.Var "show" when List.length args = 1 ->

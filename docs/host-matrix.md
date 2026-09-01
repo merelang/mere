@@ -25,7 +25,7 @@ machine rather than a host.
 | builtin | C | LLVM | Wasm | RV32I |
 |---|:--:|:--:|:--:|:--:|
 | `abs` | yes | yes | yes | yes |
-| `args` | yes | yes | yes | refused |
+| `args` | yes | yes | yes | stub |
 | `assert` | yes | yes | yes | yes |
 | `atan2` | yes | yes | yes | stub |
 | `bit_and` | yes | yes | yes | yes |
@@ -37,7 +37,7 @@ machine rather than a host.
 | `bool_of_str` | yes | yes | yes | refused |
 | `bytebuf_new` | yes | unattributed | refused | refused |
 | `bytes_of_hex` | yes | yes | yes | refused |
-| `bytes_of_str` | yes | yes | yes | refused |
+| `bytes_of_str` | yes | yes | yes | stub |
 | `ceil` | yes | yes | refused | stub |
 | `channel_close` | yes | refused | refused | unattributed |
 | `channel_new` | yes | yes | yes | refused |
@@ -75,7 +75,7 @@ machine rather than a host.
 | `f_pow` | yes | yes | yes | stub |
 | `f_sub` | yes | yes | yes | stub |
 | `fail` | yes | yes | yes | yes |
-| `file_exists` | yes | refused | yes | refused |
+| `file_exists` | yes | refused | yes | stub |
 | `file_mtime` | yes | refused | refused | refused |
 | `file_open` | yes | refused | refused | refused |
 | `file_openrw` | yes | yes | yes | refused |
@@ -120,21 +120,21 @@ machine rather than a host.
 | `pow` | yes | yes | yes | yes |
 | `print` | yes | yes | yes | yes |
 | `print_bool` | yes | yes | yes | yes |
-| `print_bytes` | yes | yes | yes | refused |
+| `print_bytes` | yes | yes | yes | stub |
 | `print_err` | yes | yes | yes | yes |
 | `print_int` | yes | yes | yes | yes |
 | `print_no_nl` | yes | yes | yes | yes |
 | `random_float` | refused | refused | refused | refused |
-| `random_int` | yes | refused | yes | refused |
+| `random_int` | yes | refused | yes | stub |
 | `read_bytes` | yes | refused | refused | refused |
-| `read_file` | yes | yes | yes | refused |
+| `read_file` | yes | yes | yes | stub |
 | `read_file_bytes` | yes | yes | yes | refused |
 | `read_key` | yes | refused | refused | refused |
 | `read_line` | yes | refused | yes | refused |
 | `read_lines` | yes | refused | refused | refused |
-| `read_stdin` | yes | refused | yes | refused |
+| `read_stdin` | yes | refused | yes | stub |
 | `round` | yes | yes | refused | stub |
-| `run` | yes | refused | yes | refused |
+| `run` | yes | refused | yes | stub |
 | `sign` | yes | yes | yes | yes |
 | `sin` | yes | yes | yes | stub |
 | `sleep_ms` | yes | refused | refused | refused |
@@ -172,5 +172,5 @@ machine rather than a host.
 | `utf8_len` | yes | yes | yes | refused |
 | `vec_new` | yes | yes | yes | yes |
 | `write_bytes` | yes | refused | refused | refused |
-| `write_file` | yes | yes | yes | refused |
+| `write_file` | yes | yes | yes | stub |
 | `write_file_bytes` | yes | yes | yes | refused |
