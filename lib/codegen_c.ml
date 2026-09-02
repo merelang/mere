@@ -2430,7 +2430,7 @@ let rec emit_expr (e : Ast.expr) : string =
         "bare", which is the wrong reason for refusing them -- what a hosted
         process does not have is the block, and `args` is the spelling that
         works everywhere. *)
-     | Ast.Var ("__rv_argc" | "__rv_argstr") ->
+     | Ast.Var ("__rv_argc" | "__rv_argstr" | "__rv_word") ->
        unsupported e.Ast.loc
          "__rv_argc / __rv_argstr read the RV32I argument block, which a hosted \
           process does not have — call `args`, which works on every backend"

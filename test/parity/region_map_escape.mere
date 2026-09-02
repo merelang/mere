@@ -1,0 +1,28 @@
+// A Map that lives outside a region, mutated inside it, read after it.
+//
+// The map's cell predates the region; `map_set` allocates a new cons node for
+// the entry. On backends where map internals live in the map's own arena the
+// region is irrelevant. On RV32I the Map is prelude code and its node comes
+// from the bump heap -- so a region that rolls the bump pointer back declares
+// the node reusable while the map still points at it, and the allocations
+// after the region overwrite it. mere-ruby runs every top-level statement
+// inside `region STMT`, which made one `map_set` per statement enough to
+// corrupt its constant table.
+//
+// The allocations after the region are what make the test able to fail: a
+// dangling node whose memory nobody reuses still holds its bytes, and reading
+// it back looks like a pass.
+let m = map_new ();
+let tag = region R {
+  let _ = map_set m "k" ("val" ++ "ue") in
+  "done"
+};
+// reuse pressure: enough fresh blocks to land on any rolled-back node
+let rec churn = fn (i: int) -> fn (acc: str list) ->
+  if i <= 0 then acc else churn (i - 1) (Cons ("block" ++ str_of_int i, acc));
+let junk = churn 50 Nil;
+let rec count = fn (l: str list) -> match l with Nil -> 0 | Cons (_, r) -> 1 + count r;
+let _ = print tag;
+let _ = print (map_get m "k");
+let _ = print_int (count junk);
+let _ = print_int (map_len m);

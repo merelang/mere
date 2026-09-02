@@ -2007,6 +2007,14 @@ let initial_env : env =
        does not is not a builtin, it is an unbound variable. Every other backend
        refuses them by name -- there is no argument block in a hosted process,
        and `args` itself is the portable spelling. *)
+    (* Diagnostic: the machine word a value IS on RV32I -- a pointer for heap
+       things, the number itself for ints. For chasing corruption on the target:
+       "which address is this map cell" has no other spelling. Every other
+       backend refuses it; a program must not branch on representation. *)
+    ("__rv_word",   (let v = fresh_var () in
+                     let id = (match v with Ast.TyVar r -> r.Ast.id | _ -> assert false) in
+                     { constraints = []; quantified = [id];
+                       body = Ast.TyArrow (v, Ast.TyInt) }));
     ("__rv_argc",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
     ("__rv_argstr", mono (Ast.TyArrow (Ast.TyInt, Ast.TyStr)));
     ("read_stdin",  mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
