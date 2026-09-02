@@ -196,6 +196,56 @@ else
   printf '  FAIL  %s (-rv refused it)\n' "$name"; head -3 "$TMP/rverr"; fail=$((fail+1)); rc=1
 fi
 
+# --- the same corpus, at 64 bits ---------------------------------------------
+# rvrun64 is the RV64IM core; the reference stays the C backend, whose int is
+# also 64 bits -- so the width-related known-differences of the 32-bit column
+# (float_edges, str_edges's big-integer lines, coll_edges) vanish here, and the
+# list below is what remains. Same freshness contract in both directions.
+KNOWN_DIFF64="graphql_stack_portable map_compact region_growth str_edges"
+# graphql_stack_portable   polymorphic == is a word comparison (same as 32)
+# map_compact              map_bytes measures an arena that does not exist here
+# region_growth            wants more RAM than the sweep gives it (no reclaim)
+# str_edges                the prelude's string builders are concat-quadratic and
+#                          strbuf is concat-backed: 200k chars = GBs of dead heap.
+#                          The fix is a real byte-buffer strbuf, recorded work.
+RVRUN64=""
+if [ -n "${MEMU:-}" ] && [ -f "$MEMU/riscv-runc/rv64i_run.mere" ]; then
+  if "$MERE" -c "$MEMU/riscv-runc/rv64i_run.mere" > "$TMP/rvrun64.c" 2>"$TMP/err" \
+     && $CC -O2 -w -o "$TMP/rvrun64" "$TMP/rvrun64.c" 2>"$TMP/err"; then
+    RVRUN64="$TMP/rvrun64"
+  else
+    echo "rv_exec: the RV64 emulator did not build; the 64-bit column did not run"
+  fi
+fi
+pass64=0; fail64=0; known64=0
+if [ -n "$RVRUN64" ]; then
+  for p in "$ROOT"/test/parity/*.mere; do
+    name=$(basename "$p" .mere)
+    if "$MERE" -c "$p" > "$TMP/ref.c" 2>/dev/null && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
+      ( ulimit -t 60; "$TMP/ref" ) > "$TMP/i.out.raw" 2>&1
+      grep -a -v '^()$' "$TMP/i.out.raw" > "$TMP/i.out"
+    else continue; fi
+    "$MERE" -rv64 --ram 32 "$p" > "$TMP/prog.bin" 2>/dev/null || continue
+    ( cd "$TMP" && perl -e 'alarm 480; exec @ARGV' ./rvrun64 32 2>/dev/null ) | grep -a -v '^rvrun' > "$TMP/r.out"
+    sed '$d' "$TMP/i.out" > "$TMP/i.trim"
+    expected_diff=no
+    for k in $KNOWN_DIFF64; do [ "$k" = "$name" ] && expected_diff=yes; done
+    if diff -q "$TMP/i.out" "$TMP/r.out" >/dev/null || diff -q "$TMP/i.trim" "$TMP/r.out" >/dev/null
+    then agree=yes; else agree=no; fi
+    if [ "$agree" = yes ] && [ "$expected_diff" = yes ]; then
+      printf '  FAIL  %s@64 is in KNOWN_DIFF64 but now agrees — remove it\n' "$name"
+      fail64=$((fail64 + 1)); rc=1
+    elif [ "$agree" = yes ]; then pass64=$((pass64 + 1))
+    elif [ "$expected_diff" = yes ]; then known64=$((known64 + 1))
+    else
+      printf '  FAIL  %s@64 (RV64 disagrees with the C backend)\n' "$name"
+      diff -a "$TMP/i.out" "$TMP/r.out" | head -6 | sed 's/^/    /'
+      fail64=$((fail64 + 1)); rc=1
+    fi
+  done
+  echo "rv_exec: $pass64 passed, $fail64 failed, $known64 known-different at 64 bits (C backend vs RV64 on the Mere-written CPU)"
+fi
+
 if [ -z "$RVRUN" ]; then
   echo "rv_exec: $pass built, $fail failed — nothing RAN; set MEMU=<memu checkout> for that half"
 else
