@@ -26,6 +26,8 @@ machine rather than a host.
 |---|:--:|:--:|:--:|:--:|
 | `__rv_argc` | refused | refused | refused | yes |
 | `__rv_argstr` | refused | refused | refused | yes |
+| `__rv_clock` | unattributed | refused | refused | yes |
+| `__rv_urandom32` | unattributed | refused | refused | yes |
 | `abs` | yes | yes | yes | yes |
 | `args` | yes | yes | yes | yes |
 | `assert` | yes | yes | yes | yes |
@@ -127,7 +129,7 @@ machine rather than a host.
 | `print_int` | yes | yes | yes | yes |
 | `print_no_nl` | yes | yes | yes | yes |
 | `random_float` | refused | refused | refused | refused |
-| `random_int` | yes | refused | yes | stub |
+| `random_int` | yes | refused | yes | yes |
 | `read_bytes` | yes | refused | refused | refused |
 | `read_file` | yes | yes | yes | stub |
 | `read_file_bytes` | yes | yes | yes | refused |
@@ -165,7 +167,7 @@ machine rather than a host.
 | `substring` | yes | yes | yes | yes |
 | `sum_range` | yes | yes | yes | yes |
 | `tan` | yes | yes | yes | stub |
-| `time` | yes | yes | yes | stub |
+| `time` | yes | yes | yes | yes |
 | `to_lower` | yes | yes | yes | yes |
 | `to_upper` | yes | yes | yes | yes |
 | `tty_raw` | yes | refused | refused | refused |

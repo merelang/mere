@@ -1,0 +1,29 @@
+// `time` and `random_int` on the hosted -rv path, where the emulator answers
+// Linux's clock_gettime64 and getrandom. Their outputs cannot be diffed against
+// another backend -- a clock and an entropy source are nondeterministic by
+// contract -- so this checks PROPERTIES and prints ok/FAIL lines:
+//
+//   * the epoch is sane (after 2023-11, before 2100): a handler that writes
+//     nothing leaves garbage that lands outside this window, and one that
+//     writes zeros lands at 1970
+//   * time does not go backwards across two calls
+//   * random_int 1 is 0, forty draws stay in range, and forty draws are not
+//     all identical -- which is what an ABI transcription error actually looked
+//     like (getrandom's buf is a0, not write()'s a1; zero bytes were filled and
+//     every draw read the same stale word)
+let t1 = time ();
+let _ = print (if t1 > 1700000000.0 && t1 < 4102444800.0 then "ok epoch sane" else "FAIL epoch " ++ str_of_float t1);
+let t2 = time ();
+let _ = print (if t2 >= t1 then "ok time does not go backwards" else "FAIL backwards");
+let r1 = random_int 1;
+let _ = print (if r1 == 0 then "ok n=1 draws 0" else "FAIL n=1");
+let rec draws = fn (i: int) -> fn (seen_diff: bool) -> fn (prev: int) -> fn (inrange: bool) ->
+  if i >= 40 then (seen_diff, inrange)
+  else
+    let r = random_int 1000000 in
+    draws (i + 1) (seen_diff || (i > 0 && r != prev)) r (inrange && r >= 0 && r < 1000000);
+let (diff, inr) = draws 0 false 0 true;
+let _ = print (if inr then "ok 40 draws in range" else "FAIL out of range");
+let _ = print (if diff then "ok draws vary" else "FAIL 40 identical draws");
+// the bound contract is the interpreter's, message included
+let _ = print (try_or (fn (u: unit) -> let _ = random_int 0 in "FAIL n=0 accepted") "ok n=0 refused");

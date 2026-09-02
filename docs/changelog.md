@@ -4,6 +4,56 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.392 — 2026-09-02
+
+_`time` and `random_int` are real on the hosted RV32I path: the emulator answers
+Linux's clock_gettime64 and getrandom, and `Time.now.year` says 2026 on the
+Mere-written CPU._
+
+The hosted `-rv` target already spoke two Linux rv32 syscalls (write 64, exit
+93). It now speaks two more, for the same reason those numbers were chosen: a
+guest written against this machine is not learning a private convention.
+
+* `__rv_clock` -> clock_gettime64 (403), a fresh 4-word block returned as the
+  tuple `(sec_lo, sec_hi, nsec_lo, nsec_hi)` -- a tuple on this backend IS a
+  plain block of fields, so the block the kernel filled is the value.
+* `__rv_urandom32` -> getrandom (278) of one word, through the print scratch
+  buffer, which is dead between print calls.
+
+Both intrinsics REFUSE under `--bare`, at compile time: a machine has devices,
+not syscalls, and inventing a clock or a seed would let a program measure
+nothing and believe it.
+
+On top of them the prelude builds the portable spellings. `time` assembles the
+two unsigned halves of sec in FLOAT space -- softfloat eating its own dogfood --
+which also keeps the answer right past 2038, where the low half goes negative
+on a 32-bit int. `random_int` does rejection sampling over the 31-bit pool,
+because `r % n` favours the low residues whenever n does not divide 2^31, and
+the bound contract (positive, message included) is the interpreter's.
+
+**The gate is properties, not a diff** -- a clock and an entropy source are
+nondeterministic by contract, so `test/rv/host_services.mere` checks that the
+epoch is sane, time does not go backwards, `random_int 1` is 0, forty draws
+stay in range and are not all identical, and `random_int 0` fails with the
+exact message. That last-but-one property is not hypothetical: getrandom's buf
+is a0, NOT write()'s a1 one branch up in the emulator, and the first
+transcription filled zero bytes at address four -- every draw read the same
+stale word, and "forty identical draws" is precisely what the gate said.
+
+The emulator also answers **-ENOSYS for an unknown syscall** now, as Linux
+does. It used to fall through silently: a0 kept whatever it held, and a guest
+calling a syscall this machine had not learned yet read its own argument back
+as the result.
+
+With a real clock, `time_clock` left the known-different list (the freshness
+check flagged it), and mere-ruby's `Time` surfaced a 37-bit ordinal packing
+that had been wrapping silently on 32 bits -- fixed on its side by making the
+ordinal epoch seconds, with the corpus at 162/162.
+
+Matrix: `time` and `random_int` go `stub` -> `yes`; 20 stubs remain.
+
+---
+
 ## v0.1.391 — 2026-09-02
 
 _`float_of_str` / `str_of_float` computed exactly, in integers: Ruby's `0.1` now

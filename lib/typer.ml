@@ -2015,6 +2015,13 @@ let initial_env : env =
                      let id = (match v with Ast.TyVar r -> r.Ast.id | _ -> assert false) in
                      { constraints = []; quantified = [id];
                        body = Ast.TyArrow (v, Ast.TyInt) }));
+    (* The two host services a hosted RV32I program CAN have: the emulator
+       answers Linux's clock_gettime64 and getrandom, so `time` and `random_int`
+       are real there. Internals, like __rv_argc: the portable spellings are
+       `time` and `random_int`, and every other backend refuses these names. *)
+    ("__rv_clock",  mono (Ast.TyArrow (Ast.TyInt,
+                            Ast.TyTuple [Ast.TyInt; Ast.TyInt; Ast.TyInt; Ast.TyInt])));
+    ("__rv_urandom32", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
     ("__rv_argc",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
     ("__rv_argstr", mono (Ast.TyArrow (Ast.TyInt, Ast.TyStr)));
     ("read_stdin",  mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));

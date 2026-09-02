@@ -43,7 +43,7 @@ rc=0; pass=0; fail=0
 # KNOWN DIFFERENCES, by name and reason. A program not in this list that differs
 # fails the gate; a program IN it that stops differing also fails, so the list
 # cannot quietly outlive its reasons.
-KNOWN_DIFF="float_edges str_edges region_growth graphql_stack_portable map_compact time_clock"
+KNOWN_DIFF="float_edges str_edges region_growth graphql_stack_portable map_compact"
 # float_edges/str_edges             64-bit values; this backend's int is 32 bits
 #   (coll_edges and nul_in_str sat here too, on the strength of a 60-second
 #    alarm that was really a measurement of how slow decimal printing is on an
@@ -54,7 +54,6 @@ KNOWN_DIFF="float_edges str_edges region_growth graphql_stack_portable map_compa
 # region_growth                     wants more RAM (and more time) than the sweep gives it
 # graphql_stack_portable            under investigation
 # map_compact                       map_bytes measures an arena; a Vec here has none
-# time_clock                        needs a clock, which a bare machine has none of
 
 RVRUN=""
 if [ -n "${MEMU:-}" ]; then
@@ -124,6 +123,26 @@ if "$MERE" -c "$ROOT/test/rv/region_map_escape.mere" > "$TMP/ref.c" 2>/dev/null 
     else
       printf '  FAIL  %s\n' "$name"; diff "$TMP/i.out" "$TMP/r.out" | head -6 | sed 's/^/    /'
       fail=$((fail+1)); rc=1
+    fi
+  fi
+else
+  printf '  FAIL  %s did not build\n' "$name"; head -2 "$TMP/rverr"; fail=$((fail+1)); rc=1
+fi
+
+# host_services: time and random_int have no other backend to diff against --
+# nondeterministic by contract -- so the program checks properties and this
+# just requires every line to say ok.
+name=host_services
+if "$MERE" -rv "$ROOT/test/rv/host_services.mere" > "$TMP/prog.bin" 2>"$TMP/rverr"; then
+  if [ -z "$RVRUN" ]; then pass=$((pass+1))
+  else
+    ( cd "$TMP" && perl -e 'alarm 60; exec @ARGV' ./rvrun 8 2>/dev/null ) | grep -a -v '^rvrun: ' > "$TMP/r.out"
+    if grep -q FAIL "$TMP/r.out" || ! grep -q "^ok" "$TMP/r.out"; then
+      printf '  FAIL  %s\n' "$name"; head -6 "$TMP/r.out" | sed 's/^/    /'
+      fail=$((fail+1)); rc=1
+    else
+      printf '  ok    %s (%s properties hold)\n' "$name" "$(grep -c '^ok' "$TMP/r.out")"
+      pass=$((pass+1))
     fi
   fi
 else
