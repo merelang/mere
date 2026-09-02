@@ -28,6 +28,7 @@ machine rather than a host.
 | `__rv_argstr` | refused | refused | refused | yes |
 | `__rv_clock` | unattributed | refused | refused | yes |
 | `__rv_urandom32` | unattributed | refused | refused | yes |
+| `__rv_xlen` | unattributed | refused | refused | yes |
 | `abs` | yes | yes | yes | yes |
 | `args` | yes | yes | yes | yes |
 | `assert` | yes | yes | yes | yes |

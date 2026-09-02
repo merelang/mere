@@ -202,7 +202,14 @@ let mk_str_block (s : string) : string =
 let rec li rd v =
   if v >= -2048 && v <= 2047 then
     emit_word (enc_i v zero 0 rd 0x13)                 (* addi rd, x0, v *)
-  else if !xlen <> 64 || (v >= -2147483648 && v <= 2147483647) then begin
+  else if !xlen <> 64 || (let hi = (v + 0x800) asr 12 in hi >= -524288 && hi <= 524287) then begin
+    (* The RV64 guard is on HI, not on v: lui's 20-bit immediate is sign-
+       extended, so the arm is right exactly when hi fits SIGNED 20 bits. A v
+       just under 2^31 rounds hi up to 0x80000 -- out of range -- and the old
+       `v <= 2^31-1` guard let it through: `li 2147483645` materialised
+       -2147483651, and `2147483647 / 5` had a negative numerator before the
+       divide ever ran. Found because print_int of a literal disagreed with
+       print_int of the same value computed. *)
     (* On RV32 every value is a 32-bit bit pattern and the masked lui+addi is
        right for all of them -- including addresses like 0x807E0000, which are
        UNSIGNED there and larger than max signed 32. On RV64 this arm is only
@@ -1644,12 +1651,14 @@ and compile_app env e =
     (match (List.nth args 1).Ast.node with
      | Ast.Int_lit n ->
        compile_expr env (List.nth args 0);
+       (* the width bound is the WIDTH's, not 32's: at 64 a shift count of 40
+          is an ordinary shift, and the saturation points move to 64/63 *)
        if left then begin
-         if n < 0 || n >= 32 then li a0 0
+         if n < 0 || n >= !xlen then li a0 0
          else emit_word (enc_i n a0 1 a0 0x13)                (* slli *)
        end else begin
          if n < 0 then ()                                     (* interp: unchanged *)
-         else emit_word (enc_i (0x400 lor (min n 31)) a0 5 a0 0x13)  (* srai *)
+         else emit_word (enc_i (0x400 lor (min n (!xlen - 1))) a0 5 a0 0x13)  (* srai *)
        end
      | _ ->
        compile_expr env (List.nth args 0); push a0;
@@ -1658,14 +1667,14 @@ and compile_app env e =
        pop a0;                                                (* a0 = value *)
        if left then begin
          emit_word (enc_r 0 a1 a0 1 a0 0x33);                 (* sll  a0, a0, a1 *)
-         emit_word (enc_i 32 a1 3 t0 0x13);                   (* sltiu t0, a1, 32 *)
+         emit_word (enc_i !xlen a1 3 t0 0x13);                (* sltiu t0, a1, xlen *)
          emit_word (enc_r 0x20 t0 zero 0 t0 0x33);            (* sub  t0, x0, t0 *)
          emit_word (enc_r 0 t0 a0 7 a0 0x33)                  (* and  a0, a0, t0 *)
        end else begin
          let l_ok = fresh_label ".shr" in
-         emit_word (enc_i 32 a1 3 t0 0x13);                   (* sltiu t0, a1, 32 *)
+         emit_word (enc_i !xlen a1 3 t0 0x13);                (* sltiu t0, a1, xlen *)
          emit (Branch (1, t0, zero, l_ok));                   (* bnez t0 -> ok *)
-         emit_word (enc_i 31 zero 0 a1 0x13);                 (* li   a1, 31 *)
+         emit_word (enc_i (!xlen - 1) zero 0 a1 0x13);        (* li   a1, xlen-1 *)
          emit (Label l_ok);
          emit_word (enc_r 0x20 a1 a0 5 a0 0x33)               (* sra  a0, a0, a1 *)
        end)
@@ -1892,6 +1901,9 @@ and compile_app env e =
     emit_word (enc_i 0 zero 0 zero 0x73);                (* ecall *)
     li a0 (scratch_base ());
     emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)                     (* lw a0, 0(scratch) *)
+  | Ast.Var "__rv_xlen" when List.length args = 1 ->
+    compile_expr env (List.hd args);                     (* the unit, discarded *)
+    li a0 !xlen
   (* the identity: whatever word the value is, as an int. Diagnostic only. *)
   | Ast.Var "__rv_word" when List.length args = 1 ->
     compile_expr env (List.hd args)

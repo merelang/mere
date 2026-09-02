@@ -330,14 +330,21 @@ let int_of_float = fn (x: float) -> __sf_to_int (__sf_sf_of_float x);
 // -rv path, not shims. Under --bare the intrinsics they call refuse at compile
 // time: a machine has devices, not syscalls.
 let time = fn (u: unit) ->
-  let (slo, shi, nlo, _) = __rv_clock 0 in
-  // sec is two unsigned 32-bit halves; this int is signed 32-bit, so the low
-  // half is corrected into float space rather than reassembled as an int --
-  // which also keeps the answer right past 2038, where the low half goes
-  // negative here.
-  let lo = float_of_int slo + (if slo < 0 then 4294967296.0 else 0.0) in
-  let hi = float_of_int shi * 4294967296.0 in
-  hi + lo + float_of_int nlo / 1000000000.0;
+  // The kernel writes Linux's timespec64 and the CELLS differ by width: on
+  // rv32 they are 32-bit halves (sec lo, sec hi, nsec lo, nsec hi), on rv64
+  // two native words (sec, nsec) and the last two cells are dead. Same
+  // prelude, both machines, one branch on a compile-time constant.
+  let (c0, c1, c2, _) = __rv_clock 0 in
+  if __rv_xlen () == 64 then
+    float_of_int c0 + float_of_int c1 / 1000000000.0
+  else
+    // sec is two unsigned 32-bit halves; this int is signed 32-bit, so the low
+    // half is corrected into float space rather than reassembled as an int --
+    // which also keeps the answer right past 2038, where the low half goes
+    // negative here.
+    let lo = float_of_int c0 + (if c0 < 0 then 4294967296.0 else 0.0) in
+    let hi = float_of_int c1 * 4294967296.0 in
+    hi + lo + float_of_int c2 / 1000000000.0;
 let random_int = fn (n: int) ->
   if n <= 0 then fail ("random_int: bound must be positive (got " ++ str_of_int n ++ ")")
   else
