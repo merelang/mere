@@ -3206,6 +3206,9 @@ let initial_env : env =
     ("__rv_word", ref (rv_only "__rv_word"));
     ("__rv_argc", ref (rv_only "__rv_argc"));
     ("__rv_argstr", ref (rv_only "__rv_argstr"));
+    ("__rv_open_rd", ref (rv_only "__rv_open_rd"));
+    ("__rv_read_all", ref (rv_only "__rv_read_all"));
+    ("__rv_access", ref (rv_only "__rv_access"));
     ("raw_peek8", ref (bare_only "raw_peek8"));
     ("raw_peekw", ref (bare_only "raw_peekw"));
     ("raw_pokew", ref (bare_only "raw_pokew"));

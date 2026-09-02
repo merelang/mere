@@ -2977,12 +2977,23 @@ let () =
   assert_contains "codegen: lifts top-level fn"
     (codegen "let inc = fn x -> x + 1 in inc 5")
     "long long mu_inc(long long mu_x)";
+  (* v0.1.402: the call goes through the direct twin now. A one-argument
+     top-level fn did not get one before -- one parameter has nothing to
+     uncurry -- but the self-tail-call loop transform is only reachable through
+     that form, so single-argument `let rec` compiled to real recursion. The
+     spelling here is incidental; that the call site CALLS the lifted function
+     is the thing being checked, so it is asserted with its argument. *)
   assert_contains "codegen: lifted fn call site"
     (codegen "let inc = fn x -> x + 1 in inc 5")
-    "inc(5LL)";
+    "mu_inc__direct(__da0)";
+  (* v0.1.402: through the direct twin, which a one-argument top-level fn now
+     also gets. This call is NOT in tail position -- it is under a multiply --
+     so it stays a call rather than becoming the loop, which is the half of the
+     transform worth pinning here: only a call the function returns directly
+     may turn into a jump. *)
   assert_contains "codegen: let-rec self-recursion"
     (codegen "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 5")
-    "mu_fact((mu_n - 1LL))";
+    "mu_fact__direct(__da0)";
   assert_contains "codegen: mutual rec emits both forward decls"
     (codegen
        "let rec ev = fn n -> if n == 0 then 1 else od (n - 1)\n\
@@ -3868,10 +3879,14 @@ let () =
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "__c.fn(__c.env, 5LL)";
+  (* v0.1.402: `apply` takes one argument, so its call site now goes through the
+     direct twin like every other arity. What this checks is unchanged and is
+     the interesting half: a top-level fn used as a VALUE is passed as
+     `_as_value`, the closure form, not as a bare function pointer. *)
   assert_contains "codegen: Var of top-level fn in value pos emits _as_value"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "mu_apply(mu_inc_as_value)";
+    "mu_inc_as_value";
 
   (* --- C codegen: first-class fns Phase B (anonymous Fun + captures) ---
      The helpers added to prelude in Phase 36 consume the __anon counter, so
@@ -6467,15 +6482,19 @@ let () =
   check "v0.1.54: user-defined `run` computes via the user fn (interp)"
     (Pipeline.process "let run = fn (x: int) -> x * 2 in run 21")
     "42";
+  (* v0.1.402: through the direct twin, which one-argument top-level fns now get
+     too. Asserted as the user's OWN symbol rather than as a bare `run(21LL)`:
+     the claim is which function the call site names, and `mu_run__direct` is
+     the user's `run` where `__lang_run` would be the shell-exec builtin. *)
   assert_contains "v0.1.54: shadowed `run` calls the user fn in C, not __lang_run"
     (vec_codegen_c "let run = fn (x: int) -> x * 2 in run 21")
-    "run(21LL)";
+    "mu_run__direct(__da0)";
   check "v0.1.54: user-defined `even` shadows the builtin (interp)"
     (Pipeline.process "let even = fn (n: int) -> n + 100 in even 5")
     "105";
   assert_contains "v0.1.54: shadowed `even` calls the user fn in C"
     (vec_codegen_c "let even = fn (n: int) -> n + 100 in even 5")
-    "even(5LL)";
+    "mu_even__direct(__da0)";
 
   (* v0.1.53 (records/modules dogfood): lowercase record type names are the
      ML convention (`type 'a list`, `option`), and `type addr = {...}` was
@@ -13428,7 +13447,13 @@ let () =
        else count (i + 1) acc
      in
      string_of_int (count 0 0))
-    "1";
+    (* Two since v0.1.402, and both are the user's own line 2: a one-argument
+       top-level fn now also gets a direct twin, so its body is emitted twice
+       and each copy is attributed to the line it was written on -- which is
+       what a debugger should see whichever one it steps into. The claim this
+       check exists for is unchanged: nothing that is NOT the user's code names
+       the user's file. *)
+    "2";
   check "c: without -g the emitted C has no directives at all"
     (string_of_bool
        (let prog = Pipeline.parse_program "let _ = print_int 1;" in
@@ -14455,6 +14480,35 @@ let () =
   check "v0.1.268: list_filter keeps its order"
     (Pipeline.process "list_filter [1, 2, 3, 4, 5] (fn (x: int) -> x % 2 == 1)")
     "[1, 3, 5]";
+
+  (* v0.1.402: the C backend's tail-call loop rides on the direct N-ary form,
+     which was gated on `params >= 2` -- one parameter has nothing to uncurry,
+     so it looked pointless to emit. That silently excluded every ONE-argument
+     top-level `let rec` from the loop transform: such functions compiled to
+     real recursion, one C frame per iteration, and ran only because clang's
+     sibling-call optimisation flattened them.
+     That is why this is asserted on the EMITTED CODE and not by running it: at
+     -O2 clang flattens the recursion anyway, so a program that loops far past
+     any stack still passes with the transform missing. The optimiser cannot be
+     the thing that decides whether the language keeps its promise. memu's
+     RISC-V emulator is `let rec drive = fn n -> ... drive (n + 1)`, its depth
+     is the emulated instruction count, and adding a syscall to the same file
+     was enough to change clang's mind. *)
+  assert_contains "v0.1.402: a one-argument top-level self-tail-call is a loop"
+    (codegen "let rec down = fn (n: int) -> if n <= 0 then 0 else down (n - 1);\n\
+              down 5")
+    "__mere_tail";
+  assert_contains "v0.1.402: ...and it jumps rather than calling itself"
+    (codegen "let rec down = fn (n: int) -> if n <= 0 then 0 else down (n - 1);\n\
+              down 5")
+    "goto __mere_tail";
+  (* The two-argument case kept working throughout; asserted alongside so a
+     future change that trades one for the other cannot pass. *)
+  assert_contains "v0.1.402: the two-argument case still loops"
+    (codegen "let rec go = fn (n: int) -> fn (acc: int) ->\n\
+              if n <= 0 then acc else go (n - 1) (acc + n);\n\
+              go 5 0")
+    "goto __mere_tail";
 
   (* v0.1.267 (Q-029): the LLVM backend emits a tail call as `musttail`, which
      LLVM guarantees at every optimisation level. Without it this backend grew

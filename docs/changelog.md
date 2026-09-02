@@ -4,6 +4,106 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.402 — 2026-09-03
+
+_`read_file` and `file_exists` work on the hosted RISC-V target, so the
+interpreter this backend carries can finally be handed a script instead of only
+`-e`. Getting there found a worse bug: a one-argument top-level `let rec`
+compiled to real recursion, and only ran because clang chose to flatten it._
+
+`read_file`, `file_exists`, `write_file`, `run` and `read_stdin` were all
+answered with a stop, on the reasoning that `--bare` hands the program the
+machine and there is no host behind it. That is true of `--bare` and was never
+true of the hosted target, which already asks the host to write and to exit
+through the same Linux-numbered ecalls. The cost was specific: mere-ruby could
+only ever be given a program with `-e`, because reading a `.rb` off disk went
+through `read_file` — so its own 162-program corpus could not be run on the
+machine at all, and the only end-to-end evidence was hand-written one-liners.
+
+Two of them are answered now, through openat(56), read(63), close(57) and
+faccessat(48) — Linux's own numbers, so a binary built this way is servable by
+anything that speaks the ABI and not only by the emulator in this tree. The
+failure is a `fail` and therefore catchable, which is what an interpreter needs
+in order to raise `Errno::ENOENT` of its own; the negative return IS the errno,
+so the message says which. `--bare` still refuses all of them BY NAME, and
+`test/rv/host_read_file_bare.mere` exists to check that it refuses for that
+reason: the first version of that check ran the hosted program under `--bare`
+and passed on "the program needs a top-level main", reading a refusal it had
+caused itself and calling it evidence.
+
+### The bug underneath
+
+Adding the syscall service to memu's emulator turned the whole RV corpus red at
+both widths, with the emulator's own "stack overflow (recursion too deep)". That
+reads exactly like a regression in the compiler under test, and it was not one:
+the same `prog.bin` ran on the previous emulator binary.
+
+The emulator's instruction loop is `let rec drive = fn n -> ... drive (n + 1)`,
+so its recursion depth is the emulated instruction COUNT. It had never been a
+loop. The tail-call transform (Q-029) is reachable only through the direct N-ary
+form — the plain call path never consults `self_tail_goto` — and that form was
+gated on `params >= 2`, because one parameter has nothing to uncurry. The two
+facts composed: every one-argument top-level `let rec` in every program compiled
+to real recursion, one C frame per iteration. They ran anyway, because clang's
+sibling-call optimisation flattened them, and adding code to the same
+translation unit was enough to change its mind.
+
+So the gate is `>= 1` now. The transform is a promise the language makes, and
+the optimiser was the thing deciding whether it was kept. This is a
+`codegen_c` table, so the blast radius is the C backend: an RV binary is
+byte-for-byte the same size as before.
+
+It is pinned on the EMITTED CODE — three unit tests asserting `goto __mere_tail`
+for one- and two-argument shapes — and not only by running something, because at
+-O2 clang flattens the recursion anyway: a program that loops past any stack
+still passes with the transform missing. `test/parity/tail_loop_one_arg.mere`
+loops five million times as the runtime half, and poisoning it
+(`MERE_NO_TAIL_LOOP=1`, -O0) kills it, which is how the pin is known to be a pin.
+
+Five unit-test expectations moved, all of them incidental to this change: four
+call sites now name `mu_f__direct`, and a `-g` line-directive count went from 1
+to 2 because a one-argument function's body is emitted twice. Each was rewritten
+to assert what it means rather than what it happened to spell — "the user's
+`run` is called, not the shell-exec builtin" is now `mu_run__direct(__da0)`.
+
+### What the corpus says now
+
+Running mere-ruby's corpus through `-e` against the C backend: 124 of 162
+identical. The 38 are host services this target still refuses (Dir, ENV,
+require, sockets, Marshal, zlib, OpenSSL, YAML, Date), float transcendentals,
+map and ivar iteration order, and RAM sizing — plus one that is none of those
+and matters more than the rest: a user-defined `<=>` answers 0 where every other
+backend answers -1. Traced, and it is not `<=>`: METHOD-LOCAL VARIABLES LEAK
+BETWEEN INVOCATIONS on this backend. `def f(v); q = v * 10; q; end` followed by a
+method that never binds `q` finds `q` still holding 30. `map_new` is genuinely
+fresh per call, so the leak is further in. Recorded as the next investigation
+rather than guessed at.
+
+### And one of the 38 turned out to be small
+
+A map iterates each distinct key once, in the order the keys were FIRST
+inserted, with that key's most recent value -- on every backend except this one.
+The RV map is an assoc list that `map_set` prepends to, and its iterator walked
+from the head, so it visited keys in REVERSE insertion order. Every value was
+correct, which is why it survived: `map_get`, `map_has` and `map_len` are all
+order-blind, and only a program that prints a WHOLE map can see it. mere-ruby is
+one, because ruby's Hash is insertion-ordered and its `inspect` shows it, and the
+symptom was `{"MRB_B"=>"2", "MRB_A"=>"1"}` for a hash built the other way round.
+
+Reversing the walk alone would have been the trade for the worse -- the right
+order with each key paired with its OLDEST value -- so the walk goes over the
+reversed list while the value still comes from the head end.
+`test/parity/map_iter_order.mere` pins all three shapes: plain order, a re-set
+key keeping its place while taking the new value, and a deleted-then-reinserted
+key going to the end, which is what separates insertion order from sorted order
+and from whatever slot a key happened to fall in.
+
+Gates: 2620 unit tests, parity 160/160, rv_exec 78/0 at 64 bits and 73/0 at 32
+(plus 3/0 for read_file across both widths and the --bare refusal),
+qemu_virt 7/7, rvd_oracle 7/0.
+
+---
+
 ## v0.1.401 — 2026-09-02
 
 _A `try_or`'s catch record saved the catcher's ten callee-saved registers 15

@@ -1,0 +1,47 @@
+// A single-argument top-level `let rec` whose recursive call is in tail position
+// must compile to a LOOP, not to recursion.
+//
+// Why it needs pinning. The C backend's direct N-ary form began as a calling
+// convention -- uncurrying a multi-argument top-level fn -- and was gated on
+// `params >= 2`, since one parameter has nothing to uncurry. The tail-call loop
+// transform (Q-029) is reachable ONLY through that form, so the gate silently
+// excluded every one-argument top-level `let rec` from it. Such functions still
+// RAN, because clang's sibling-call optimisation flattened them, and that is a
+// property of the optimiser rather than of the program: memu's RISC-V emulator
+// is `let rec drive = fn n -> ... drive (n + 1)`, so its recursion depth is the
+// emulated instruction count, and adding a syscall service to the same file was
+// enough to change clang's mind. Every long-running guest then died with the
+// emulator's own "stack overflow (recursion too deep)", reported against every
+// program in the RV corpus at once -- which reads exactly like a regression in
+// the compiler under test.
+//
+// THIS FILE IS THE RUNTIME HALF, AND IT IS THE WEAKER HALF. At -O2 clang
+// flattens the recursion anyway, so no iteration count proves the transform is
+// present on the C backend; and the counts here are bounded by the INTERPRETER,
+// which has no such transform and which the parity harness requires to succeed.
+// The real pin is on the emitted code -- three assertions in test/test_basic.ml
+// that the C carries `goto __mere_tail` -- because the optimiser must not be the
+// thing that decides whether the language keeps its promise. What this file adds
+// is the other three backends at runtime, and a shape for each of the two
+// aliasing cases below.
+let rec count_down = fn (n: int) -> if n <= 0 then 0 else count_down (n - 1);
+let _ = print_int (count_down 200000);
+
+// The accumulating shape too, since it is the one that carries a value through
+// and therefore the one whose parameter aliasing can go wrong: a `let` in the
+// body that shadows the parameter must not be what the jump writes.
+// The carried value COUNTS rather than sums: `acc + n` over 200000 terms is
+// 20,000,100,000, which does not fit this project's 32-bit target and made the
+// RV32 column answer -1474736480 -- a width difference dressed up as a
+// tail-call failure. The loop is what this file is about, so the accumulator
+// has no business being wide.
+let rec sum_to = fn (n: int) -> fn (acc: int) ->
+  if n <= 0 then acc else sum_to (n - 1) (acc + 1);
+let _ = print_int (sum_to 200000 0);
+
+// ...and a one-argument shape whose count the optimiser cannot see, so it
+// cannot collapse the loop to a closed form and pass without looping at all.
+// `str_len` of a literal is opaque enough and needs no host.
+let seed = str_len "0123456789" * 20000;
+let rec walk = fn (n: int) -> if n <= 0 then 7 else walk (n - 1);
+let _ = print_int (walk seed);

@@ -246,6 +246,67 @@ if [ -n "$RVRUN64" ]; then
   echo "rv_exec: $pass64 passed, $fail64 failed, $known64 known-different at 64 bits (C backend vs RV64 on the Mere-written CPU)"
 fi
 
+# host_read_file: `read_file` / `file_exists` on the hosted target, against the
+# C backend. Both sides run IN "$TMP" with the fixtures beside them -- deliberate,
+# because the reference otherwise runs in the repo root and the emulator in a temp
+# dir, and a relative path would then name two different files (or one that only
+# exists on one side, which reads as a backend difference).
+#
+# The fixtures are made here rather than committed: a NUL-bearing and a
+# 20KB file in the tree are awkward, and this way the harness that knows the
+# expected content is the thing that wrote it.
+name=host_read_file
+rfpass=0; rffail=0
+printf 'hello from a real file\nsecond line\n' > "$TMP/rv_fixture.txt"
+printf 'a\000b\000c' > "$TMP/rv_nul.dat"
+: > "$TMP/rv_empty.dat"
+{ printf 'START'; i=0; while [ $i -lt 2000 ]; do printf 'xxxxxxxxxx'; i=$((i+1)); done; printf 'END'; } > "$TMP/rv_big.dat"
+rm -f "$TMP/rv_absent.txt"
+if "$MERE" -c "$ROOT/test/rv/host_read_file.mere" > "$TMP/ref.c" 2>/dev/null \
+   && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
+  ( cd "$TMP" && ulimit -t 60; ./ref ) 2>&1 | grep -a -v '^()$' > "$TMP/i.out"
+  for width in 32 64; do
+    if [ "$width" = 64 ]; then flag=-rv64; emu="$RVRUN64"; else flag=-rv; emu="$RVRUN"; fi
+    if ! "$MERE" $flag --ram 16 "$ROOT/test/rv/host_read_file.mere" > "$TMP/prog.bin" 2>"$TMP/rverr"; then
+      printf '  FAIL  %s:%s did not build\n' "$name" "$width"; head -2 "$TMP/rverr"; rffail=$((rffail+1)); rc=1; continue
+    fi
+    if [ -z "$emu" ]; then rfpass=$((rfpass+1)); continue; fi
+    ( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' "$emu" 16 2>/dev/null ) | grep -a -v '^rvrun' > "$TMP/r.out"
+    if diff -q "$TMP/i.out" "$TMP/r.out" >/dev/null; then
+      printf '  ok    %s:%s (a script on disk, NULs, empty, past one chunk, and a catchable miss)\n' "$name" "$width"
+      rfpass=$((rfpass+1))
+    else
+      printf '  FAIL  %s:%s (RV%s disagrees with the C backend)\n' "$name" "$width" "$width"
+      diff -a "$TMP/i.out" "$TMP/r.out" | head -8 | sed 's/^/    /'
+      rffail=$((rffail+1)); rc=1
+    fi
+  done
+  # --bare must still refuse them: the list `read_file` was on was protecting the
+  # machine-only target, and that reason is still good. A lowering that quietly
+  # gave --bare a filesystem would be wrong in the permissive direction.
+  #
+  # The REASON is checked, not just the refusal. The first version of this ran
+  # host_read_file.mere under --bare and passed -- on "the program needs a
+  # top-level main", because a --bare program must have one. It was reading a
+  # refusal it had caused itself and calling it evidence. host_read_file_bare.mere
+  # exists to have that main, so the only thing left to refuse is the filesystem.
+  if "$MERE" -rv --bare --ram 8 "$ROOT/test/rv/host_read_file_bare.mere" > /dev/null 2>"$TMP/bareerr"; then
+    printf '  FAIL  %s:bare — --bare accepted read_file; a machine has no filesystem\n' "$name"
+    rffail=$((rffail+1)); rc=1
+  elif grep -q "no host filesystem" "$TMP/bareerr"; then
+    printf '  ok    %s:bare (refused by name, not by accident)\n' "$name"
+    rfpass=$((rfpass+1))
+  else
+    printf '  FAIL  %s:bare — refused, but for the wrong reason:\n' "$name"
+    head -1 "$TMP/bareerr" | sed 's/^/    /'
+    rffail=$((rffail+1)); rc=1
+  fi
+else
+  printf '  FAIL  %s: the C reference did not build\n' "$name"; rffail=$((rffail+1)); rc=1
+fi
+echo "rv_exec: $rfpass passed, $rffail failed for read_file (both widths, and --bare still refuses)"
+
+
 if [ -z "$RVRUN" ]; then
   echo "rv_exec: $pass built, $fail failed — nothing RAN; set MEMU=<memu checkout> for that half"
 else
