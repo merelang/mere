@@ -1602,6 +1602,16 @@ and compile_app env e =
     compile_expr env (List.nth args 0); push a0;
     compile_expr env (List.nth args 1);
     emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0=vec, a1=i *)
+    (* Bounds, UNSIGNED, so a negative index is one huge index and the same
+       refusal. This backend never had the check: the test that exists to see
+       it (index_edges) uses literals too wide to compile at 32, so the first
+       machine that could run it was the 64-bit one, and there `vec_get v (-1)`
+       had been quietly reading the word below the buffer. *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t2 0x03);                     (* len *)
+    (let l = fresh_label ".vgok" in
+     emit (Branch (6, a1, t2, l));                           (* bltu i, len -> ok *)
+     emit_abort "vec_get: index out of bounds";
+     emit (Label l));
     emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t0 0x03);                        (* dataptr *)
     emit_word (enc_i (wshift ()) a1 1 t1 0x13);              (* slli t1, i, w *)
     emit_word (enc_r 0 t1 t0 0 t0 0x33);                     (* t0 = dataptr + i*4 *)
@@ -1612,6 +1622,11 @@ and compile_app env e =
     compile_expr env (List.nth args 2);
     emit_word (enc_i 0 a0 0 a2 0x13);                        (* a2 = x *)
     pop a1; pop a0;                                          (* a1=i, a0=vec *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t2 0x03);                     (* len *)
+    (let l = fresh_label ".vsok" in
+     emit (Branch (6, a1, t2, l));                           (* bltu i, len -> ok *)
+     emit_abort "vec_set: index out of bounds";
+     emit (Label l));
     emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t0 0x03);                        (* dataptr *)
     emit_word (enc_i (wshift ()) a1 1 t1 0x13);              (* slli t1, i, w *)
     emit_word (enc_r 0 t1 t0 0 t0 0x33);                     (* addr *)
@@ -2001,6 +2016,18 @@ and compile_app env e =
     emit_word (enc_i (wsz ()) a0 4 a0 0x03)                     (* lbu a0, 4(a0) — first byte *)
   | Ast.Var "chr" when List.length args = 1 ->
     compile_expr env (List.hd args);                     (* a0 = byte value *)
+    (* The contract is [0, 255] and a fail outside it -- which this backend
+       never checked. At 32 bits nothing noticed, because the property test
+       whose random values reach here does not compile there (its literals are
+       too wide); at 64 it ran, and chr of a sixty-bit number quietly stored
+       the low byte while every other backend refused. The message drops the
+       offending number (formatting an int here would need the string runtime
+       mid-primitive); the range and the refusal are the contract. *)
+    let l_ok = fresh_label ".chr_ok" in
+    li t0 256;
+    emit (Branch (6, a0, t0, l_ok));                     (* bltu a0, 256 -> ok *)
+    emit_abort "chr: out of byte range [0, 255]";
+    emit (Label l_ok);
     emit_word (enc_i 0 a0 0 t2 0x13);                    (* mv t2, a0 *)
     alloc_words t0 2;
     li t1 1; emit_word (enc_s (0 * wsz ()) t1 t0 (stf3 ()) 0x23);           (* sw len=1 *)
@@ -2010,6 +2037,11 @@ and compile_app env e =
     compile_expr env (List.nth args 0); push a0;
     compile_expr env (List.nth args 1);
     emit_word (enc_i 0 a0 0 a1 0x13); pop a0;            (* a0=s, a1=i *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t1 0x03);                 (* len *)
+    (let l = fresh_label ".caok" in
+     emit (Branch (6, a1, t1, l));                       (* bltu i, len -> ok *)
+     emit_abort "char_at: index out of range";
+     emit (Label l));
     emit_word (enc_r 0 a1 a0 0 t0 0x33);                 (* add t0, s, i *)
     emit_word (enc_i (wsz ()) t0 4 t0 0x03);                    (* lbu t0, 4(t0) *)
     alloc_words t1 2;
@@ -2530,6 +2562,20 @@ let emit_str_of_int () =
    Matches the interpreter's substring(s, start, end) (end exclusive). Leaf. *)
 let emit_substring () =
   emit (Label "__substring");
+  (* a0 = s, a1 = start, a2 = end. The three refusals, before any arithmetic:
+     start below zero, end past the string, start past end. Unsigned tricks do
+     not compress these -- start and end are independently signed -- so it is
+     three branches, and each lands on the same fail. Absent (as they were),
+     `substring "abc" (-1) 2` read the length header as text. *)
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t2 0x03);                 (* t2 = len s *)
+  (let bad = fresh_label ".subrng" in
+   let ok = fresh_label ".subok" in
+   emit (Branch (4, a1, zero, bad));                     (* start < 0 -> bad *)
+   emit (Branch (4, t2, a2, bad));                       (* len < end -> bad *)
+   emit (Branch (5, a2, a1, ok));                        (* end >= start -> ok *)
+   emit (Label bad);
+   emit_abort "substring: range out of bounds";
+   emit (Label ok));
   emit_word (enc_r 0x20 a1 a2 0 a2 0x33);               (* sub a2, a2, a1 — len = end - start *)
   emit_word (enc_i (wsz () - 1) a2 0 t1 0x13);                     (* round4(len)+4 *)
   emit_word (enc_i (0 - wsz ()) t1 7 t1 0x13);
@@ -2562,14 +2608,14 @@ let emit_strbuf () =
   emit (Label "__strbuf_new");                     (* a0 ignored *)
   emit_word (enc_i 0 gp 0 t0 0x13);                (* t0 = empty str *)
   emit_word (enc_i (wsz ()) gp 0 t1 0x13);                (* t1 = cell *)
-  emit_word (enc_i 8 gp 0 gp 0x13);                (* bump both words first *)
+  emit_word (enc_i (2 * wsz ()) gp 0 gp 0x13);     (* bump BOTH cells -- literal 8 was two words at the old width, the same value-vs-size family as Vec's capacity *)
   emit_oom_check ();
   emit_word (enc_s (0 * wsz ()) zero t0 (stf3 ()) 0x23);              (* [len=0] *)
   emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);                (* cell.str = empty *)
   emit_word (enc_i 0 t1 0 a0 0x13);                (* mv a0, cell *)
   emit_word (enc_i 0 ra 0 zero 0x67);
   emit (Label "__strbuf_push");                    (* a0=buf, a1=s ; non-leaf *)
-  emit_word (enc_i (-8) sp 0 sp 0x13);
+  emit_word (enc_i (0 - 2 * wsz ()) sp 0 sp 0x13);
   emit_word (enc_s (wsz ()) ra sp (stf3 ()) 0x23);                (* save ra *)
   emit_word (enc_s (0 * wsz ()) a0 sp (stf3 ()) 0x23);                (* save buf *)
   emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03);                (* a0 = buf.str (current) *)
@@ -2577,7 +2623,7 @@ let emit_strbuf () =
   emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) t0 0x03);                (* t0 = buf *)
   emit_word (enc_s (0 * wsz ()) a0 t0 (stf3 ()) 0x23);                (* buf.str = new *)
   emit_word (enc_i (wsz ()) sp (ldf3 ()) ra 0x03);                (* restore ra *)
-  emit_word (enc_i 8 sp 0 sp 0x13);
+  emit_word (enc_i (2 * wsz ()) sp 0 sp 0x13);
   emit_word (enc_i 0 ra 0 zero 0x67);
   emit (Label "__strbuf_to_str");                  (* a0=buf -> a0 = str *)
   emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03);
@@ -2789,7 +2835,7 @@ let rec zip_tyenv ps args =
 let emit_agg_eq (fields : (int * Ast.ty) list) =
   let l_false = fresh_label ".eqf" in
   let l_done = fresh_label ".eqd" in
-  emit_word (enc_i (-12) sp 0 sp 0x13);
+  emit_word (enc_i (0 - 3 * wsz ()) sp 0 sp 0x13);
   emit_word (enc_s (2 * wsz ()) ra sp (stf3 ()) 0x23);                     (* save ra *)
   emit_word (enc_s (wsz ()) a0 sp (stf3 ()) 0x23);                     (* save x *)
   emit_word (enc_s (0 * wsz ()) a1 sp (stf3 ()) 0x23);                     (* save y *)
@@ -2805,7 +2851,7 @@ let emit_agg_eq (fields : (int * Ast.ty) list) =
   emit (Label l_false); li a0 0;
   emit (Label l_done);
   emit_word (enc_i (2 * wsz ()) sp (ldf3 ()) ra 0x03);
-  emit_word (enc_i 12 sp 0 sp 0x13);
+  emit_word (enc_i (3 * wsz ()) sp 0 sp 0x13);
   emit_word (enc_i 0 ra 0 zero 0x67)                    (* ret *)
 
 let emit_variant_eq senv (variants : (string * Ast.ty option) list) =
