@@ -1,0 +1,60 @@
+// The decimal conversions, run twice: once where float_of_str is strtod and
+// str_of_float is printf, once on RV32I where both are exact decimal digit
+// arrays. Identical output required; no expected values are written here.
+//
+// Fewer random patterns than the hosted gate (12, not 2000): a full-range
+// conversion builds ~700-digit arrays, a region reclaims nothing on this
+// backend, and each printed value costs on the order of a megabyte of heap --
+// so the count is a RAM budget, measured (300 ran out of a 64 MB machine at
+// pattern 23). The two gates share the generator; the hosted one covers depth,
+// this one covers the target's integer width.
+let t = fn (s: str) ->
+  let x = float_of_str s in
+  print (s ++ " -> " ++ str_of_float x
+    ++ " [" ++ str_of_int (bit_and (bit_shr (float_bits_hi x) 16) 65535)
+    ++ " " ++ str_of_int (bit_and (float_bits_hi x) 65535)
+    ++ " " ++ str_of_int (bit_and (bit_shr (float_bits_lo x) 16) 65535)
+    ++ " " ++ str_of_int (bit_and (float_bits_lo x) 65535) ++ "]");
+let _ = t "0.1";
+let _ = t "0.30000000000000004";
+let _ = t "5e-324";
+let _ = t "1.7976931348623157e308";
+let _ = t "1e16";
+let _ = t "0.000001";
+let _ = t "123456789.123";
+let _ = t "9007199254740993";
+let _ = t "1e23";
+let _ = t "0.500000000000000166533453693773481063544750213623046875";
+let _ = t "1_000.5";
+let _ = t "0x1.23456789abcdefp-3";
+let _ = t ".5";
+let _ = t "-0.0";
+let _ = t "1e400";
+let _ = t "-1e-400";
+let _ = t "inf";
+let _ = t "nan";
+let _ = t "3.141592653589793";
+let _ = print (str_of_float (0.1 + 0.2));
+// 0xFFFFFFFF does not fit this backend's signed 32-bit literal; built instead
+let mask32c = bit_or (bit_shl 65535 16) 65535;
+let st = vec_new ();
+let _ = vec_push st 88172645;
+let _ = vec_push st 362436069;
+let next32 = fn (u: unit) ->
+  let x0 = vec_get st 0 in
+  let x1 = bit_and (bit_xor x0 (bit_shl x0 13)) mask32c;
+  // >> on this backend is ARITHMETIC: a pattern with bit 31 set is a negative
+  // int here, and the shift drags the sign down. A 32-bit value >> 17 has 15
+  // real bits, so the mask keeps exactly those on every backend.
+  let x2 = bit_xor x1 (bit_and (bit_shr x1 17) 32767);
+  let x3 = bit_and (bit_xor x2 (bit_shl x2 5)) mask32c;
+  let _ = vec_set st 0 (vec_get st 1) in
+  let _ = vec_set st 1 x3 in
+  x3;
+let rec rand = fn (i: int) ->
+  if i >= 12 then ()
+  else
+    let x = float_of_bits (next32 ()) (next32 ()) in
+    let _ = print (str_of_float x) in
+    rand (i + 1);
+let _ = rand 0;
