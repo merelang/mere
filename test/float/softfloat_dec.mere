@@ -10,6 +10,13 @@
 import "../../contrib/softfloat/dec.mere";
 import "../../contrib/softfloat/bits.mere";
 
+// str_of_float's NaN string carries a sign that neither IEEE nor the platforms
+// agree on: glibc prints "-nan" for a sign-set NaN, macOS prints "nan" for
+// either, and dec_of_sf canonicalises to "nan". None of that is a property of
+// the conversion under test, so NaN strings are compared sign-insensitively --
+// "-nan" and "nan" are the same answer. Everything else stays byte-exact.
+let _norm = fn (s: str) -> if str_eq s "-nan" then "nan" else s;
+let seq = fn (a: str) -> fn (b: str) -> str_eq (_norm a) (_norm b);
 let chk = fn (tag: str) -> fn (cond: bool) ->
   print ((if cond then "ok " else "FAIL ") ++ tag);
 
@@ -19,9 +26,9 @@ let tstr = fn (s: str) ->
   let x = float_of_str s in
   let y = float_of_sf (sf_of_dec s) in
   let bits_ok = float_bits_hi x == float_bits_hi y && float_bits_lo x == float_bits_lo y in
-  chk (s ++ " -> " ++ got ++ (if str_eq got want then "" else " WANT " ++ want)
+  chk (s ++ " -> " ++ got ++ (if seq got want then "" else " WANT " ++ want)
          ++ (if bits_ok then "" else " BITS-DIFFER"))
-      (str_eq got want && bits_ok);
+      (seq got want && bits_ok);
 
 let _ = tstr "0.1";
 let _ = tstr "0.30000000000000004";
@@ -81,9 +88,9 @@ let rec rand = fn (i: int) -> fn (bad: int) ->
     let x = float_of_bits hi lo in
     let want = str_of_float x in
     let got = dec_of_sf (sf_of_float x) in
-    let _ = (if str_eq got want then () else
+    let _ = (if seq got want then () else
              print ("FAIL hi=" ++ str_of_int hi ++ " lo=" ++ str_of_int lo
                     ++ " got=" ++ got ++ " want=" ++ want)) in
-    rand (i + 1) (if str_eq got want then bad else bad + 1);
+    rand (i + 1) (if seq got want then bad else bad + 1);
 let bad = rand 0 0;
 let _ = chk ("2000 random patterns, " ++ str_of_int bad ++ " disagreed") (bad == 0);

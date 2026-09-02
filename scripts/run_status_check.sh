@@ -43,14 +43,18 @@ while :; do :; done
 SH
 
 # case|command|expected status
-#   137 = 128 + SIGKILL(9), 152 = 128 + SIGXCPU(24) on Linux and macOS alike.
-#   The `exec` rows are the ones that regressed; the plain exit rows are here so
-#   that a wrapper which broke ordinary statuses could not pass either.
+#   137 = 128 + SIGKILL(9), 152 = 128 + SIGXCPU(24). A CPU-limit kill is SIGXCPU
+#   on macOS but SIGKILL on the Linux CI runner (the container caps CPU so the
+#   soft limit is reached as the hard limit, and the kernel sends SIGKILL) --
+#   the SIGNAL differs by platform and is not the thing this gate is about. The
+#   gate is about interp and c AGREEING, so the CPU-limit rows accept either
+#   signal-status via the `KILLED` marker (>128 and equal on both backends);
+#   the SIGKILL rows stay exact, since a self-`kill -9` is 137 everywhere.
 CASES=$(cat <<CASES
 killed_plain|sh $TMP/kill_self.sh|137
 killed_exec|exec sh $TMP/kill_self.sh|137
-cpu_limit_plain|ulimit -t 1; sh $TMP/spin.sh|152
-cpu_limit_exec|ulimit -t 1; exec sh $TMP/spin.sh|152
+cpu_limit_plain|ulimit -t 1; sh $TMP/spin.sh|KILLED
+cpu_limit_exec|ulimit -t 1; exec sh $TMP/spin.sh|KILLED
 exit_zero|exit 0|0
 exit_nonzero|exit 3|3
 CASES
@@ -80,7 +84,15 @@ for row in $(printf '%s\n' "$CASES" | tr ' ' '\001'); do
   got_c=$("$TMP/p.bin" 2>/dev/null | head -1)
 
   ran=$((ran + 1))
-  if [ "$got_i" = "$want" ] && [ "$got_c" = "$want" ]; then
+  ok=no
+  if [ "$want" = "KILLED" ]; then
+    # a CPU-limit kill: both backends must agree AND report a signal death
+    # (>128). The exact signal (SIGXCPU 152 / SIGKILL 137) is the platform's.
+    if [ "$got_i" = "$got_c" ] && [ "$got_i" -gt 128 ] 2>/dev/null; then ok=yes; fi
+  else
+    if [ "$got_i" = "$want" ] && [ "$got_c" = "$want" ]; then ok=yes; fi
+  fi
+  if [ "$ok" = yes ]; then
     echo "PASS $name  interp=$got_i c=$got_c"
   else
     echo "FAIL $name  want=$want interp=$got_i c=$got_c"

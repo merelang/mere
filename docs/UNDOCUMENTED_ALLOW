@@ -1,0 +1,15 @@
+# builtins deliberately absent from the hand-written docs, with why. An entry
+# whose builtin is documented later is an ERROR (scripts/doc_coverage_check.sh),
+# so this stays a list of intentional omissions, not a to-do pile.
+
+# The RV32I/RV64 backend's internal spellings. `args`, `time` and `random_int`
+# are the portable names a program writes; these are what the prelude lowers
+# them to on the -rv path, refused on every other backend. Documenting them
+# would invite a program to branch on the target, which is the opposite of the
+# point -- the portable name works everywhere and these do not.
+__rv_argc     internal: what `args` lowers to on -rv (reads the loader's block)
+__rv_argstr   internal: what `args` lowers to on -rv (one argument as a string)
+__rv_clock    internal: what `time` lowers to on -rv (clock_gettime64)
+__rv_urandom32 internal: what `random_int` draws from on -rv (getrandom)
+__rv_xlen     internal: the machine word width, for the prelude's one width branch
+__rv_word     internal: a value's machine word, for backend diagnostics only

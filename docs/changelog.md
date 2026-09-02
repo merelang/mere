@@ -4,6 +4,42 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.399 — 2026-09-02
+
+_CI had been red since v0.1.357 -- four gates that only fail on Linux, three of
+them added during the red stretch and so never once green there. The macOS dev
+machine hid every one._
+
+* **doc coverage** -- this session's eight new backend builtins were in no doc.
+  `raw_peekw` / `raw_pokew` are real bare-metal accessors and now sit beside
+  `raw_peek8` in the stdlib reference; the six `__rv_*` internals (what `args`,
+  `time`, `random_int` lower to on -rv, plus the two diagnostics) go in
+  `docs/UNDOCUMENTED_ALLOW` with the reason a program must never name them.
+* **first_run_check** -- the README's "139 parity programs" was three behind the
+  142 on disk. The check exists precisely because a number in prose rots; it was
+  right, the prose was stale.
+* **run status** -- a CPU-limit kill is SIGXCPU (152) on macOS but SIGKILL (137)
+  on the CI container, where the CPU cap makes the soft limit the hard one. The
+  gate is about interp and C AGREEING on how a child died, and they do -- both
+  137 there. The exact signal is the platform's, so the two cpu-limit rows now
+  accept any signal death (>128, equal on both backends); the self-`kill -9`
+  rows stay exact at 137.
+* **softfloat** -- the sign and payload of a NaN that an OPERATION produces are
+  unspecified by IEEE 754 and differ by platform: 0.0/0.0 is +nan on ARM/macOS
+  and -nan on x86/Linux. The add/mul/div gates compared those bit-for-bit, so
+  they tested the platform, not the arithmetic. When both hardware and the
+  library return a NaN, that is now agreement. The round-trip gate stays exact
+  -- there no operation makes the NaN, a bit pattern goes in and must come back.
+  And `str_of_float`'s NaN string ("-nan" on glibc, "nan" on macOS, "nan" from
+  our exact printer) is compared sign-insensitively in the decimal gate, for the
+  same reason.
+
+Nothing in the compiler changed; these are the gates learning what is portable
+and what is the host's. The macOS-only-green trap is one this repo has a memory
+about, now paid down for the float and process-status gates.
+
+---
+
 ## v0.1.398 — 2026-09-02
 
 _count_lets undercounted region bodies, and now a hard invariant proves it can
