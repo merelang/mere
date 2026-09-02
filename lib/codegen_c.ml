@@ -2441,6 +2441,7 @@ let rec emit_expr (e : Ast.expr) : string =
         arrived from clang as "type specifier missing" — loud, but about the
         wrong thing. There is no honest physical address in a hosted process. *)
      | Ast.Var ("raw_window" | "raw_peek8" | "raw_peek32"
+               | "raw_peekw" | "raw_pokew"
                | "raw_poke8" | "raw_poke32" | "csr_read" | "csr_write"
                | "set_trap_handler" | "trap_save" | "machine_scratch"
                | "closure_code" | "closure_env" | "raw_base" | "raw_len") ->

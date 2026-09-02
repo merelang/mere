@@ -155,22 +155,19 @@ check examples/riscv_virt_sched.mere 'scheduling two tasks:
 ABABABA
 switched enough, stopping'
 
-# The same board, twice as wide: RV64 is the same backend at xlen 64, and hello
-# exercises the heap, string building, recursion and device windows. QEMU's
-# riscv64 system emulator is the decoder. timer and sched (the trap machinery)
-# and args (whose block layout is written in 4-byte fields by the test itself)
-# are NOT run at 64 yet -- named here so the gap is a listed fact, not a
-# forgotten one; they are the next slice of the RV64 arc.
+# The same board, twice as wide: RV64 is the same backend at xlen 64, and these
+# three cover the heap, string building, recursion, device windows, the trap
+# machinery and the context switcher. QEMU's riscv64 system emulator is the
+# decoder. `args` is still 32-only: its block layout is written in 4-byte
+# fields by the test itself, and the width-independent argv ABI belongs to the
+# hosted RV64 slice.
 QEMU64=$(command -v qemu-system-riscv64 || true)
-if [ -n "$QEMU64" ]; then
-  name=riscv_virt_hello64
-  if "$MERE" -rv64 --bare --load-base 0x80000000 --ram 8 examples/riscv_virt_hello.mere > "$TMP/v64.bin" 2>"$TMP/err"; then
+check64() {
+  name="$(basename "$1" .mere)64"
+  expected="$2"
+  if "$MERE" -rv64 --bare --load-base 0x80000000 --ram 8 "$1" > "$TMP/v64.bin" 2>"$TMP/err"; then
     got64=$(perl -e 'alarm 60; exec @ARGV' "$QEMU64" -M virt -bios none -nographic -kernel "$TMP/v64.bin" 2>/dev/null)
-    want64='hello from qemu virt
-built at run time: 42
-fib 20 = 6765
-mtime advances'
-    if [ "$got64" = "$want64" ]; then
+    if [ "$got64" = "$expected" ]; then
       printf '  ok    %s (%s bytes, RV64)\n' "$name" "$(wc -c < "$TMP/v64.bin" | tr -d ' ')"
       pass=$((pass + 1))
     else
@@ -180,6 +177,19 @@ mtime advances'
   else
     printf '  FAIL  %s (-rv64 refused it)\n' "$name"; head -3 "$TMP/err"; fail=$((fail + 1))
   fi
+}
+if [ -n "$QEMU64" ]; then
+  check64 examples/riscv_virt_hello.mere 'hello from qemu virt
+built at run time: 42
+fib 20 = 6765
+mtime advances'
+  check64 examples/riscv_virt_timer.mere 'tick 1
+tick 2
+tick 3
+three ticks, stopping'
+  check64 examples/riscv_virt_sched.mere 'scheduling two tasks:
+ABABABA
+switched enough, stopping'
 fi
 
 # The parenthetical is a CLAIM, so it only gets made when it is true. Saying
