@@ -52,6 +52,17 @@ let enc_r f7 rs2 rs1 f3 rd op =
    megabyte out, v0.1.384); these are the same lesson for the other fields.
    The failure is an internal error on purpose: user code cannot cause it, only a
    backend that laid out more than a field can say. *)
+(* 32 or 64: one backend, two widths. The instruction FORMATS are identical --
+   what changes is the width a register carries (so LW/SW become LD/SD, f3 2
+   becomes 3), the size of a heap cell and a frame slot (4 -> 8), and how an
+   address is materialised (RV64's lui sign-extends bit 31, so absolute
+   addresses become pc-relative). Two files would drift; one file with a width
+   is the same rule written once. *)
+let xlen = ref 32
+let wsz () = if !xlen = 64 then 8 else 4        (* bytes in a word/cell/slot *)
+let ldf3 () = if !xlen = 64 then 3 else 2       (* LD / LW *)
+let wshift () = if !xlen = 64 then 3 else 2     (* index -> byte offset: slli by this *)
+
 let field_check what bits v =
   let lo = -(1 lsl (bits - 1)) and hi = (1 lsl (bits - 1)) - 1 in
   if v < lo || v > hi then
@@ -153,10 +164,13 @@ let emit_word w = emit (Word w)
 let signed32 (v : int) = if v > 0x7FFFFFFF then v - 0x100000000 else v
 
 let check_int_lit loc n =
-  if n > 2147483647 || n < (-2147483648) then
+  if !xlen <> 64 && (n > 2147483647 || n < (-2147483648)) then
     err loc (Printf.sprintf
       "RV32I: the literal %d does not fit this backend's 32-bit int \
        (-2147483648..2147483647)" n)
+
+
+let stf3 () = if !xlen = 64 then 3 else 2       (* SD / SW *)
 
 let lbl_counter = ref 0
 let fresh_label prefix = incr lbl_counter; prefix ^ string_of_int !lbl_counter
@@ -166,34 +180,53 @@ let fresh_label prefix = incr lbl_counter; prefix ^ string_of_int !lbl_counter
 let string_data : (string * string) list ref = ref []
 let mk_str_block (s : string) : string =
   let len = String.length s in
-  let b = Buffer.create (8 + len) in
-  Buffer.add_char b (Char.chr (len land 0xFF));
-  Buffer.add_char b (Char.chr ((len lsr 8) land 0xFF));
-  Buffer.add_char b (Char.chr ((len lsr 16) land 0xFF));
-  Buffer.add_char b (Char.chr ((len lsr 24) land 0xFF));
+  let w = wsz () in
+  let b = Buffer.create (2 * w + len) in
+  (* the len cell is one WORD, whatever the width -- the reader does `ld` *)
+  for i = 0 to w - 1 do
+    Buffer.add_char b (Char.chr ((len lsr (8 * i)) land 0xFF))
+  done;
   Buffer.add_string b s;
-  let pad = (4 - ((4 + len) land 3)) land 3 in
+  let pad = (w - ((w + len) land (w - 1))) land (w - 1) in
   for _ = 1 to pad do Buffer.add_char b '\000' done;
   Buffer.contents b
 
 (* load a 32-bit immediate into rd *)
-let li rd v =
+(* On RV64, lui+addi produces a SIGN-EXTENDED 32-bit value: `li rd 0x80000000`
+   the 32-bit way materialises 0xFFFFFFFF80000000, which as an address points at
+   nothing and as a value is a different number. Anything outside signed 32 bits
+   is built in 12-bit chunks from the top -- shift left, add the next chunk --
+   with each chunk's sign folded into the one above, because addi sign-extends
+   its immediate. Variable length is fine: these are plain Word items and the
+   layout counts them like any others. *)
+let rec li rd v =
   if v >= -2048 && v <= 2047 then
     emit_word (enc_i v zero 0 rd 0x13)                 (* addi rd, x0, v *)
-  else begin
+  else if !xlen <> 64 || (v >= -2147483648 && v <= 2147483647) then begin
+    (* On RV32 every value is a 32-bit bit pattern and the masked lui+addi is
+       right for all of them -- including addresses like 0x807E0000, which are
+       UNSIGNED there and larger than max signed 32. On RV64 this arm is only
+       right when the sign-extended result IS the value, so it is gated to the
+       signed range and everything else builds in chunks below. *)
     let hi = (v + 0x800) asr 12 in
     let lo = v - (hi lsl 12) in
     emit_word (enc_u (hi land 0xFFFFF) rd 0x37);       (* lui  rd, hi *)
-    emit_word (enc_i lo rd 0 rd 0x13)                  (* addi rd, rd, lo *)
+    if lo <> 0 then emit_word (enc_i lo rd 0 rd 0x13)  (* addi rd, rd, lo *)
+  end else begin
+    let lo = ((v land 0xFFF) lxor 0x800) - 0x800 in    (* low 12, as addi sees them *)
+    let hi = (v - lo) asr 12 in
+    li rd hi;
+    emit_word (enc_i 12 rd 1 rd 0x13);                 (* slli rd, rd, 12 *)
+    if lo <> 0 then emit_word (enc_i lo rd 0 rd 0x13)  (* addi rd, rd, lo *)
   end
 
 (* stack helpers: the memory stack (sp) holds evaluation temporaries *)
 let push rd =
-  emit_word (enc_i (-4) sp 0 sp 0x13);                 (* addi sp, sp, -4 *)
-  emit_word (enc_s 0 rd sp 2 0x23)                     (* sw   rd, 0(sp) *)
+  emit_word (enc_i (0 - wsz ()) sp 0 sp 0x13);         (* addi sp, sp, -w *)
+  emit_word (enc_s (0 * wsz ()) rd sp (stf3 ()) 0x23)                     (* sw   rd, 0(sp) *)
 let pop rd =
-  emit_word (enc_i 0 sp 2 rd 0x03);                    (* lw   rd, 0(sp) *)
-  emit_word (enc_i 4 sp 0 sp 0x13)                     (* addi sp, sp, 4 *)
+  emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) rd 0x03);                    (* lw   rd, 0(sp) *)
+  emit_word (enc_i (wsz ()) sp 0 sp 0x13)              (* addi sp, sp, w *)
 
 (* The heap grows up from globals_base and the stack grows down from the top
    of RAM with nothing in between, so the two collide silently: the bump
@@ -207,7 +240,7 @@ let emit_oom_check () = emit (Branch (7, gp, sp, "__oom"))   (* bgeu gp, sp -> _
    not make any call between this and its field stores (rd/gp are volatile). *)
 let alloc_words rd n =
   emit_word (enc_i 0 gp 0 rd 0x13);                    (* mv   rd, gp *)
-  emit_word (enc_i (n * 4) gp 0 gp 0x13);              (* addi gp, gp, n*4 *)
+  emit_word (enc_i (n * wsz ()) gp 0 gp 0x13);         (* addi gp, gp, n*w *)
   emit_oom_check ()
 
 (* pending lambdas to lift: (label, captured var names, param, body). Filled
@@ -606,7 +639,7 @@ let rec split_tops (e : Ast.expr) : Ast.expr =
 (* env maps a bound name to its fp-relative frame slot index *)
 type env = (string * int) list
 
-let slot_off i = i * 4
+let slot_off i = i * wsz ()
 
 (* count binding introductions to size a function frame (each named binding
    gets a distinct slot — P_var lets and each P_var inside a tuple pattern) *)
@@ -692,18 +725,18 @@ let farjmp = 27                                           (* s11, reserved *)
    needs frame access, and the prologue's parameter spill has the parameter
    itself in t0. *)
 let base_load base rd off =
-  if off >= -2048 && off <= 2047 then emit_word (enc_i off base 2 rd 0x03)
+  if off >= -2048 && off <= 2047 then emit_word (enc_i off base (ldf3 ()) rd 0x03)
   else begin
     li farjmp off;
     emit_word (enc_r 0 farjmp base 0 farjmp 0x33);       (* add s11, base, s11 *)
-    emit_word (enc_i 0 farjmp 2 rd 0x03)                 (* lw rd, 0(s11) *)
+    emit_word (enc_i (0 * wsz ()) farjmp (ldf3 ()) rd 0x03)                 (* lw rd, 0(s11) *)
   end
 let base_store base rs off =
-  if off >= -2048 && off <= 2047 then emit_word (enc_s off rs base 2 0x23)
+  if off >= -2048 && off <= 2047 then emit_word (enc_s off rs base (stf3 ()) 0x23)
   else begin
     li farjmp off;
     emit_word (enc_r 0 farjmp base 0 farjmp 0x33);
-    emit_word (enc_s 0 rs farjmp 2 0x23)                 (* sw rs, 0(s11) *)
+    emit_word (enc_s (0 * wsz ()) rs farjmp (stf3 ()) 0x23)                 (* sw rs, 0(s11) *)
   end
 (* addi rd, base, off at any width -- the prologue's sp adjustment and the
    teardown's sp restore move by the whole frame *)
@@ -755,11 +788,11 @@ let load_to_a0 idx =
 (* top-level value bindings live in a fixed region at globals_base. Load the
    full slot address (li handles any offset, so the global count is unbounded). *)
 let load_global_to_a0 gi =
-  li a0 (globals_base () + (runtime_words + gi) * 4);
-  emit_word (enc_i 0 a0 2 a0 0x03)                                (* lw a0, 0(a0) *)
+  li a0 (globals_base () + (runtime_words + gi) * wsz ());
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)                                (* lw a0, 0(a0) *)
 let store_a0_to_global gi =
-  li t1 (globals_base () + (runtime_words + gi) * 4);
-  emit_word (enc_s 0 a0 t1 2 0x23)                                (* sw a0, 0(t1) *)
+  li t1 (globals_base () + (runtime_words + gi) * wsz ());
+  emit_word (enc_s (0 * wsz ()) a0 t1 (stf3 ()) 0x23)                                (* sw a0, 0(t1) *)
 
 (* --- tail calls ----------------------------------------------------------
    Iteration is recursion here: explicitly, and also under `while`, which the
@@ -806,12 +839,12 @@ let emit_frame_teardown () =
   let sreg_base = !cur_noverflow in
   let fp_slot = !cur_noverflow + nsaved in
   let ra_slot = fp_slot + 1 in
-  let fsz = (ra_slot + 1) * 4 in
+  let fsz = (ra_slot + 1) * wsz () in
   for k = 0 to nsaved - 1 do
-    base_load fp sregs.(k) ((sreg_base + k) * 4)
+    base_load fp sregs.(k) ((sreg_base + k) * wsz ())
   done;
-  base_load fp ra (ra_slot * 4);                        (* lw   ra, ra_slot(fp) *)
-  base_load fp t0 (fp_slot * 4);                        (* lw   t0, fp_slot(fp) — old fp *)
+  base_load fp ra (ra_slot * wsz ());                   (* lw   ra, ra_slot(fp) *)
+  base_load fp t0 (fp_slot * wsz ());                   (* lw   t0, fp_slot(fp) — old fp *)
   base_addi sp fp fsz;                                  (* addi sp, fp, fsz *)
   emit_word (enc_i 0 t0 0 fp 0x13)                      (* addi fp, t0, 0 *)
 
@@ -819,8 +852,8 @@ let emit_frame_teardown () =
    Faults unless [off, off+width) lies inside the window, then leaves the
    absolute address in t0. Clobbers t0/t1/t2 and leaves a1/a2 alone. *)
 let emit_raw_bounds width =
-  emit_word (enc_i 0 a0 2 t0 0x03);                     (* t0 = w.base *)
-  emit_word (enc_i 4 a0 2 t1 0x03);                     (* t1 = w.len *)
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                     (* t0 = w.base *)
+  emit_word (enc_i (wsz ()) a0 (ldf3 ()) t1 0x03);                     (* t1 = w.len *)
   emit_word (enc_i width a1 0 t2 0x13);                 (* t2 = off + width *)
   emit (Branch (6, t1, t2, "__raw_fault"));             (* w.len < off+width -> fault *)
   emit_word (enc_r 0 a1 t0 0 t0 0x33)                   (* t0 = base + off *)
@@ -851,21 +884,21 @@ let emit_binop op rd rs1 rs2 loc =
 let emit_fail_from_a0 () =
   let l_abort = fresh_label ".noCatch" in
   li t0 (fail_frame_addr ());
-  emit_word (enc_i 0 t0 2 t1 0x03);                      (* lw t1, 0(t0) — record *)
+  emit_word (enc_i (0 * wsz ()) t0 (ldf3 ()) t1 0x03);                      (* lw t1, 0(t0) — record *)
   emit (Branch (0, t1, zero, l_abort));                  (* beq t1, x0, abort *)
-  emit_word (enc_i 0 t1 2 t2 0x03);                      (* lw t2, 0(t1) — prev *)
-  emit_word (enc_s 0 t2 t0 2 0x23);                      (* sw prev, 0(&frame) *)
-  emit_word (enc_i 4 t1 2 sp 0x03);                      (* lw sp, 4(t1) *)
-  emit_word (enc_i 8 t1 2 fp 0x03);                      (* lw fp, 8(t1) *)
+  emit_word (enc_i (0 * wsz ()) t1 (ldf3 ()) t2 0x03);                      (* lw t2, 0(t1) — prev *)
+  emit_word (enc_s (0 * wsz ()) t2 t0 (stf3 ()) 0x23);                      (* sw prev, 0(&frame) *)
+  emit_word (enc_i (wsz ()) t1 (ldf3 ()) sp 0x03);                      (* lw sp, 4(t1) *)
+  emit_word (enc_i (2 * wsz ()) t1 (ldf3 ()) fp 0x03);                      (* lw fp, 8(t1) *)
   (* the catcher's own named bindings, which the thunk has been writing over *)
   Array.iteri (fun i r ->
-    emit_word (enc_i (20 + i * 4) t1 2 r 0x03)) sregs;
-  emit_word (enc_i 16 t1 2 a0 0x03);                     (* lw a0, 16(t1) — default *)
-  emit_word (enc_i 12 t1 2 t1 0x03);                     (* lw t1, 12(t1) — catch *)
+    emit_word (enc_i ((20 + i) * wsz ()) t1 (ldf3 ()) r 0x03)) sregs;
+  emit_word (enc_i (4 * wsz ()) t1 (ldf3 ()) a0 0x03);                     (* lw a0, 16(t1) — default *)
+  emit_word (enc_i (3 * wsz ()) t1 (ldf3 ()) t1 0x03);                     (* lw t1, 12(t1) — catch *)
   emit_word (enc_i 0 t1 0 zero 0x67);                    (* jalr x0, t1 *)
   emit (Label l_abort);
-  emit_word (enc_i 0 a0 2 a2 0x03);                      (* lw a2, 0(a0) — len *)
-  emit_word (enc_i 4 a0 0 a1 0x13);                      (* addi a1, a0, 4 *)
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a2 0x03);                      (* lw a2, 0(a0) — len *)
+  emit_word (enc_i (wsz ()) a0 0 a1 0x13);               (* addi a1, a0, w *)
   emit_word (enc_i 64 zero 0 a7 0x13);                   (* li a7, 64 *)
   emit_word (enc_i 0 zero 0 zero 0x73);                  (* ecall (write) *)
   emit_word (enc_i 93 zero 0 a7 0x13);                   (* li a7, 93 *)
@@ -960,7 +993,7 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
             Hashtbl.replace adapters v ();
             alloc_words t1 1;
             emit (LoadAddr (t0, "__adapt_" ^ v));
-            emit_word (enc_s 0 t0 t1 2 0x23);                       (* sw t0, 0(t1) *)
+            emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);                       (* sw t0, 0(t1) *)
             emit_word (enc_i 0 t1 0 a0 0x13)                        (* mv a0, t1 *)
           end
           else if List.mem_assoc v Typer.initial_env then
@@ -1041,14 +1074,14 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     alloc_words t1 n;                                                (* t1 = block ptr *)
     for i = n - 1 downto 0 do
       pop t0;
-      emit_word (enc_s (i * 4) t0 t1 2 0x23)                         (* sw t0, i*4(t1) *)
+      emit_word (enc_s ((i) * wsz ()) t0 t1 (stf3 ()) 0x23)                         (* sw t0, i*4(t1) *)
     done;
     emit_word (enc_i 0 t1 0 a0 0x13)                                 (* mv a0, t1 *)
   | Ast.Constr (name, None) ->
     (* nullary constructor: a 1-word block holding just the tag *)
     let tag = tag_of e.loc name in
     alloc_words t1 1;
-    li t0 tag; emit_word (enc_s 0 t0 t1 2 0x23);                     (* sw t0, 0(t1) *)
+    li t0 tag; emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);                     (* sw t0, 0(t1) *)
     emit_word (enc_i 0 t1 0 a0 0x13)                                 (* mv a0, t1 *)
   | Ast.Constr (name, Some arg) ->
     (* [tag][payload]; payload is one word (an int, or a pointer — a tuple
@@ -1056,8 +1089,8 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     compile_expr env arg; push a0;
     let tag = tag_of e.loc name in
     alloc_words t1 2;
-    pop t0; emit_word (enc_s 4 t0 t1 2 0x23);                        (* sw t0, 4(t1) — payload *)
-    li t0 tag; emit_word (enc_s 0 t0 t1 2 0x23);                     (* sw t0, 0(t1) — tag *)
+    pop t0; emit_word (enc_s (wsz ()) t0 t1 (stf3 ()) 0x23);                        (* sw t0, 4(t1) — payload *)
+    li t0 tag; emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);                     (* sw t0, 0(t1) — tag *)
     emit_word (enc_i 0 t1 0 a0 0x13)                                 (* mv a0, t1 *)
   | Ast.Match (scrut, arms) -> compile_match env scrut arms ~tail:saved_tail
   | Ast.Record_lit (typename, fields) ->
@@ -1070,7 +1103,7 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     ) order;
     let n = List.length order in
     alloc_words t1 n;
-    for i = n - 1 downto 0 do pop t0; emit_word (enc_s (i * 4) t0 t1 2 0x23) done;
+    for i = n - 1 downto 0 do pop t0; emit_word (enc_s ((i) * wsz ()) t0 t1 (stf3 ()) 0x23) done;
     emit_word (enc_i 0 t1 0 a0 0x13)                                (* mv a0, t1 *)
   | Ast.Field_get (obj, field) ->
     compile_expr env obj;                                          (* a0 = record ptr *)
@@ -1080,7 +1113,7 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
       | _ -> err e.loc (Printf.sprintf "RV32I: cannot resolve record type for field `%s`" field)
     in
     let idx = field_index e.loc recname field in
-    emit_word (enc_i (idx * 4) a0 2 a0 0x03)                        (* lw a0, idx*4(a0) *)
+    emit_word (enc_i ((idx) * wsz ()) a0 (ldf3 ()) a0 0x03)                        (* lw a0, idx*4(a0) *)
   | Ast.Annot (a, _) -> tail_pos := saved_tail; compile_expr env a
   | Ast.App (_, _) -> tail_pos := saved_tail; compile_app env e
   | Ast.Fun (param, _, body) ->
@@ -1091,9 +1124,9 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     let k = List.length fvs in
     List.iter (fun name -> load_to_a0 (List.assoc name env); push a0) fvs;
     alloc_words t1 (k + 1);                                         (* [code][cap...] *)
-    for i = k - 1 downto 0 do pop t0; emit_word (enc_s ((i + 1) * 4) t0 t1 2 0x23) done;
+    for i = k - 1 downto 0 do pop t0; emit_word (enc_s ((i + 1) * wsz ()) t0 t1 (stf3 ()) 0x23) done;
     emit (LoadAddr (t0, label));                                    (* t0 = &lambda code *)
-    emit_word (enc_s 0 t0 t1 2 0x23);                               (* sw t0, 0(t1) *)
+    emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);                               (* sw t0, 0(t1) *)
     emit_word (enc_i 0 t1 0 a0 0x13)                                (* mv a0, t1 *)
   | Ast.Let_rec ([ (f, ({ node = Ast.Fun (param, _, fbody); _ }) ) ], body) ->
     (* local recursive closure. Bind f to its own closure BEFORE filling the
@@ -1108,11 +1141,11 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     lambdas := (label, fnexpr_fvs, param, fbody) :: !lambdas;
     let k = List.length fnexpr_fvs in
     alloc_words t1 (k + 1);                                         (* [code][cap...] *)
-    emit (LoadAddr (t0, label)); emit_word (enc_s 0 t0 t1 2 0x23);  (* store code ptr *)
+    emit (LoadAddr (t0, label)); emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);  (* store code ptr *)
     emit_word (enc_i 0 t1 0 a0 0x13); store_a0_to fidx;            (* bind f = block ptr *)
     List.iteri (fun i name ->
       load_to_a0 (List.assoc name env_f);                          (* f resolves to the block ptr *)
-      emit_word (enc_s ((i + 1) * 4) a0 t1 2 0x23)
+      emit_word (enc_s ((i + 1) * wsz ()) a0 t1 (stf3 ()) 0x23)
     ) fnexpr_fvs;
     tail_pos := saved_tail;
     compile_expr env_f body
@@ -1151,8 +1184,8 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     let hi = signed32 (Int64.to_int (Int64.shift_right_logical b 32)) in
     let lo = signed32 (Int64.to_int (Int64.logand b 0xFFFFFFFFL)) in
     alloc_words t1 2;
-    li t0 hi; emit_word (enc_s 0 t0 t1 2 0x23);          (* sw hi, 0(t1) *)
-    li t0 lo; emit_word (enc_s 4 t0 t1 2 0x23);          (* sw lo, 4(t1) *)
+    li t0 hi; emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);          (* sw hi, 0(t1) *)
+    li t0 lo; emit_word (enc_s (wsz ()) t0 t1 (stf3 ()) 0x23);          (* sw lo, 4(t1) *)
     emit_word (enc_i 0 t1 0 a0 0x13)                     (* mv a0, t1 *)
   | Ast.With _ -> err e.loc "RV32I: `with` expressions are not supported yet"
   | Ast.Ref _ -> err e.loc "RV32I: `&` references are not supported yet"
@@ -1168,13 +1201,13 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
       (match List.assoc_opt fname updates with
        | Some ue -> compile_expr env ue                            (* replaced field *)
        | None ->
-         emit_word (enc_i (i * 4) sp 2 a0 0x03);                   (* peek base ptr (i items up) *)
+         emit_word (enc_i ((i) * wsz ()) sp (ldf3 ()) a0 0x03);                   (* peek base ptr (i items up) *)
          let fi = field_index e.loc recname fname in
-         emit_word (enc_i (fi * 4) a0 2 a0 0x03));                 (* copy base.field *)
+         emit_word (enc_i ((fi) * wsz ()) a0 (ldf3 ()) a0 0x03));                 (* copy base.field *)
       push a0
     ) order;
     alloc_words t1 n;
-    for i = n - 1 downto 0 do pop t0; emit_word (enc_s (i * 4) t0 t1 2 0x23) done;
+    for i = n - 1 downto 0 do pop t0; emit_word (enc_s ((i) * wsz ()) t0 t1 (stf3 ()) 0x23) done;
     pop t0;                                                        (* drop base ptr *)
     emit_word (enc_i 0 t1 0 a0 0x13)                               (* mv a0, t1 *)
 
@@ -1245,8 +1278,8 @@ and compile_cmp env op l r =
        both true. *)
     compile_expr env l; push a0;
     compile_expr env r; emit_word (enc_i 0 a0 0 a1 0x13); pop a0;   (* a0=l, a1=r *)
-    emit_word (enc_i 0 a0 2 t0 0x03);                               (* lw t0, 0(l) — tag *)
-    emit_word (enc_i 0 a1 2 t1 0x03);                               (* lw t1, 0(r) — tag *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                               (* lw t0, 0(l) — tag *)
+    emit_word (enc_i (0 * wsz ()) a1 (ldf3 ()) t1 0x03);                               (* lw t1, 0(r) — tag *)
     (match op with
      | Ast.Eq ->
        emit_word (enc_r 0x20 t1 t0 0 a0 0x33);                      (* sub a0, t0, t1 *)
@@ -1368,7 +1401,7 @@ and compile_app env e =
         emit (Jal (zero, "u_" ^ f))          (* the callee returns to our caller *)
       end else begin
         emit (Jal (ra, "u_" ^ f));
-        if arity > 8 then emit_word (enc_i ((arity - 8) * 4) sp 0 sp 0x13)
+        if arity > 8 then emit_word (enc_i ((arity - 8) * wsz ()) sp 0 sp 0x13)
       end
     end
   (* On bare metal there is no host to print to. The print builtins lower to
@@ -1397,8 +1430,8 @@ and compile_app env e =
   | Ast.Var "print" when List.length args = 1 ->
     (* print_endline semantics: write the bytes, then a trailing newline *)
     compile_expr env (List.hd args);                     (* a0 = string ptr *)
-    emit_word (enc_i 0 a0 2 a2 0x03);                    (* lw   a2, 0(a0)  — len *)
-    emit_word (enc_i 4 a0 0 a1 0x13);                    (* addi a1, a0, 4  — bytes *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a2 0x03);                    (* lw   a2, 0(a0)  — len *)
+    emit_word (enc_i (wsz ()) a0 0 a1 0x13);             (* addi a1, a0, w — bytes *)
     emit_word (enc_i 64 zero 0 a7 0x13);                 (* li   a7, 64 *)
     emit_word (enc_i 0 zero 0 zero 0x73);                (* ecall (write string) *)
     li t0 (scratch_base ());                              (* t0 = print scratch *)
@@ -1413,20 +1446,20 @@ and compile_app env e =
      it back on this target even while the arithmetic is not lowered. *)
   | Ast.Var "float_bits_hi" when List.length args = 1 ->
     compile_expr env (List.hd args);
-    emit_word (enc_i 0 a0 2 a0 0x03)                     (* lw a0, 0(a0) *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)                     (* lw a0, 0(a0) *)
   | Ast.Var "float_bits_lo" when List.length args = 1 ->
     compile_expr env (List.hd args);
-    emit_word (enc_i 4 a0 2 a0 0x03)                     (* lw a0, 4(a0) *)
+    emit_word (enc_i (wsz ()) a0 (ldf3 ()) a0 0x03)                     (* lw a0, 4(a0) *)
   | Ast.Var "float_of_bits" when List.length args = 2 ->
     compile_expr env (List.nth args 0); push a0;
     compile_expr env (List.nth args 1); push a0;
     alloc_words t1 2;
-    pop t0; emit_word (enc_s 4 t0 t1 2 0x23);            (* sw lo, 4(t1) *)
-    pop t0; emit_word (enc_s 0 t0 t1 2 0x23);            (* sw hi, 0(t1) *)
+    pop t0; emit_word (enc_s (wsz ()) t0 t1 (stf3 ()) 0x23);            (* sw lo, 4(t1) *)
+    pop t0; emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);            (* sw hi, 0(t1) *)
     emit_word (enc_i 0 t1 0 a0 0x13)                     (* mv a0, t1 *)
   | Ast.Var "str_len" when List.length args = 1 ->
     compile_expr env (List.hd args);
-    emit_word (enc_i 0 a0 2 a0 0x03)                     (* lw a0, 0(a0) — length header *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)                     (* lw a0, 0(a0) — length header *)
   (* A tuple is a block of words with element i at i*4 -- the layout the
      `Ast.Tuple` case builds and the `P_tuple` pattern already reads. `fst` and
      `snd` are that read, so their absence was not a missing mechanism, only a
@@ -1435,10 +1468,10 @@ and compile_app env e =
      did. *)
   | Ast.Var "fst" when List.length args = 1 ->
     compile_expr env (List.hd args);
-    emit_word (enc_i 0 a0 2 a0 0x03)                     (* lw a0, 0(a0) *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)                     (* lw a0, 0(a0) *)
   | Ast.Var "snd" when List.length args = 1 ->
     compile_expr env (List.hd args);
-    emit_word (enc_i 4 a0 2 a0 0x03)                     (* lw a0, 4(a0) *)
+    emit_word (enc_i (wsz ()) a0 (ldf3 ()) a0 0x03)                     (* lw a0, 4(a0) *)
   | Ast.Var "fail" when List.length args = 1 ->
     compile_expr env (List.hd args);                     (* a0 = msg str *)
     emit_fail_from_a0 ()
@@ -1467,34 +1500,34 @@ and compile_app env e =
     alloc_words t1 15;
     push t1;
     li t0 (fail_frame_addr ());
-    emit_word (enc_i 0 t0 2 t2 0x03);                    (* lw t2, 0(t0) — prev *)
-    emit_word (enc_s 0 t2 t1 2 0x23);                    (* sw prev, 0(rec) *)
+    emit_word (enc_i (0 * wsz ()) t0 (ldf3 ()) t2 0x03);                    (* lw t2, 0(t0) — prev *)
+    emit_word (enc_s (0 * wsz ()) t2 t1 (stf3 ()) 0x23);                    (* sw prev, 0(rec) *)
     emit (LoadAddr (t0, l_catch));
-    emit_word (enc_s 12 t0 t1 2 0x23);                   (* sw &catch, 12(rec) *)
+    emit_word (enc_s (3 * wsz ()) t0 t1 (stf3 ()) 0x23);                   (* sw &catch, 12(rec) *)
     pop t1;
     (* sp and fp as they are here: the level both paths return to *)
-    emit_word (enc_s 4 sp t1 2 0x23);                    (* sw sp, 4(rec) *)
-    emit_word (enc_s 8 fp t1 2 0x23);                    (* sw fp, 8(rec) *)
+    emit_word (enc_s (wsz ()) sp t1 (stf3 ()) 0x23);                    (* sw sp, 4(rec) *)
+    emit_word (enc_s (2 * wsz ()) fp t1 (stf3 ()) 0x23);                    (* sw fp, 8(rec) *)
     (* ...and every register a named binding can be in. s11 is not among them: it
        is the far-jump scratch and is dead between jumps. *)
     Array.iteri (fun i r ->
-      emit_word (enc_s (20 + i * 4) r t1 2 0x23)) sregs;
+      emit_word (enc_s ((20 + i) * wsz ()) r t1 (stf3 ()) 0x23)) sregs;
     push t1;
     compile_expr env (List.nth args 1);                  (* a0 = default *)
     pop t1;
-    emit_word (enc_s 16 a0 t1 2 0x23);                   (* sw default, 16(rec) *)
+    emit_word (enc_s (4 * wsz ()) a0 t1 (stf3 ()) 0x23);                   (* sw default, 16(rec) *)
     li t0 (fail_frame_addr ());
-    emit_word (enc_s 0 t1 t0 2 0x23);                    (* install *)
+    emit_word (enc_s (0 * wsz ()) t1 t0 (stf3 ()) 0x23);                    (* install *)
     compile_expr env (List.nth args 0);                  (* a0 = thunk closure *)
     li a1 0;                                             (* the unit argument *)
-    emit_word (enc_i 0 a0 2 t1 0x03);                    (* lw t1, 0(a0) — code *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t1 0x03);                    (* lw t1, 0(a0) — code *)
     emit_word (enc_i 0 t1 0 ra 0x67);                    (* jalr ra, t1 *)
     (* normal return: the record is still installed, so it is where to read the
        previous frame from -- no register had to survive the call. *)
     li t0 (fail_frame_addr ());
-    emit_word (enc_i 0 t0 2 t1 0x03);                    (* lw t1, 0(t0) — rec *)
-    emit_word (enc_i 0 t1 2 t2 0x03);                    (* lw t2, 0(t1) — prev *)
-    emit_word (enc_s 0 t2 t0 2 0x23);                    (* sw prev, 0(&frame) *)
+    emit_word (enc_i (0 * wsz ()) t0 (ldf3 ()) t1 0x03);                    (* lw t1, 0(t0) — rec *)
+    emit_word (enc_i (0 * wsz ()) t1 (ldf3 ()) t2 0x03);                    (* lw t2, 0(t1) — prev *)
+    emit_word (enc_s (0 * wsz ()) t2 t0 (stf3 ()) 0x23);                    (* sw prev, 0(&frame) *)
     emit (Jal (zero, l_after));
     emit (Label l_catch);
     (* fail restored sp/fp, put the default in a0, and uninstalled *)
@@ -1518,15 +1551,15 @@ and compile_app env e =
      does not, and a diagnostic on stdout is a diagnostic in the wrong stream. *)
   | Ast.Var "print_err" when List.length args = 1 ->
     compile_expr env (List.hd args);
-    emit_word (enc_i 0 a0 2 a2 0x03);                    (* lw a2, 0(a0) — len *)
-    emit_word (enc_i 4 a0 0 a1 0x13);                    (* addi a1, a0, 4 *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a2 0x03);                    (* lw a2, 0(a0) — len *)
+    emit_word (enc_i (wsz ()) a0 0 a1 0x13);                    (* addi a1, a0, 4 *)
     li a0 2;                                             (* fd = stderr *)
     emit_word (enc_i 64 zero 0 a7 0x13);                 (* li a7, 64 *)
     emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall (write) *)
   | Ast.Var "print_no_nl" when List.length args = 1 ->
     compile_expr env (List.hd args);
-    emit_word (enc_i 0 a0 2 a2 0x03);                    (* lw a2, 0(a0) — len *)
-    emit_word (enc_i 4 a0 0 a1 0x13);                    (* addi a1, a0, 4 *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a2 0x03);                    (* lw a2, 0(a0) — len *)
+    emit_word (enc_i (wsz ()) a0 0 a1 0x13);                    (* addi a1, a0, 4 *)
     emit_word (enc_i 64 zero 0 a7 0x13);
     emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall *)
   | Ast.Var "str_of_int" when List.length args = 1 ->
@@ -1551,25 +1584,25 @@ and compile_app env e =
     emit (Jal (ra, "__vec_push"))
   | Ast.Var "vec_len" when List.length args = 1 ->
     compile_expr env (List.hd args);
-    emit_word (enc_i 0 a0 2 a0 0x03)                         (* lw a0, 0(vec) — len *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)                         (* lw a0, 0(vec) — len *)
   | Ast.Var "vec_get" when List.length args = 2 ->
     compile_expr env (List.nth args 0); push a0;
     compile_expr env (List.nth args 1);
     emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0=vec, a1=i *)
-    emit_word (enc_i 8 a0 2 t0 0x03);                        (* dataptr *)
-    emit_word (enc_i 2 a1 1 t1 0x13);                        (* slli t1, i, 2 *)
+    emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t0 0x03);                        (* dataptr *)
+    emit_word (enc_i (wshift ()) a1 1 t1 0x13);              (* slli t1, i, w *)
     emit_word (enc_r 0 t1 t0 0 t0 0x33);                     (* t0 = dataptr + i*4 *)
-    emit_word (enc_i 0 t0 2 a0 0x03)                         (* a0 = data[i] *)
+    emit_word (enc_i (0 * wsz ()) t0 (ldf3 ()) a0 0x03)                         (* a0 = data[i] *)
   | Ast.Var "vec_set" when List.length args = 3 ->
     compile_expr env (List.nth args 0); push a0;
     compile_expr env (List.nth args 1); push a0;
     compile_expr env (List.nth args 2);
     emit_word (enc_i 0 a0 0 a2 0x13);                        (* a2 = x *)
     pop a1; pop a0;                                          (* a1=i, a0=vec *)
-    emit_word (enc_i 8 a0 2 t0 0x03);                        (* dataptr *)
-    emit_word (enc_i 2 a1 1 t1 0x13);                        (* slli t1, i, 2 *)
+    emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t0 0x03);                        (* dataptr *)
+    emit_word (enc_i (wshift ()) a1 1 t1 0x13);              (* slli t1, i, w *)
     emit_word (enc_r 0 t1 t0 0 t0 0x33);                     (* addr *)
-    emit_word (enc_s 0 a2 t0 2 0x23);                        (* data[i] = x *)
+    emit_word (enc_s (0 * wsz ()) a2 t0 (stf3 ()) 0x23);                        (* data[i] = x *)
     emit_word (enc_i 0 zero 0 a0 0x13)                       (* return unit (0) *)
   (* --- bitwise -----------------------------------------------------------
      A device driver cannot be written without these: the UART example had to
@@ -1650,7 +1683,7 @@ and compile_app env e =
         (match head.node with Ast.Var v -> v | _ -> "this"));
     let (base, len) =
       match head.node with
-      | Ast.Var "trap_save" -> (trap_save_base (), 32 * 4)
+      | Ast.Var "trap_save" -> (trap_save_base (), 32 * wsz ())
       (* between the handler slot and the print scratch buffer: the reserved
          region's unused middle, which is where task stacks come from *)
       | _ -> (stack_top () + 0x2000, 0xC000)      (* below the trap stack *)
@@ -1659,32 +1692,32 @@ and compile_app env e =
     (* narrow it properly, so a machine window that somehow did not contain
        this still faults rather than being taken at its word *)
     li a1 (base - 0);
-    emit_word (enc_i 0 a0 2 t0 0x03);                      (* t0 = mach.base *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                      (* t0 = mach.base *)
     emit_word (enc_r 0x20 t0 a1 0 a1 0x33);                (* a1 = base - mach.base *)
     li a2 len;
-    emit_word (enc_i 4 a0 2 t1 0x03);                      (* t1 = mach.len *)
+    emit_word (enc_i (wsz ()) a0 (ldf3 ()) t1 0x03);                      (* t1 = mach.len *)
     emit_word (enc_r 0 a2 a1 0 t2 0x33);                   (* t2 = off + len *)
     emit (Branch (6, t1, t2, "__raw_fault"));
     alloc_words t3 2;
     li t4 base;
-    emit_word (enc_s 0 t4 t3 2 0x23);
-    emit_word (enc_s 4 a2 t3 2 0x23);
+    emit_word (enc_s (0 * wsz ()) t4 t3 (stf3 ()) 0x23);
+    emit_word (enc_s (wsz ()) a2 t3 (stf3 ()) 0x23);
     emit_word (enc_i 0 t3 0 a0 0x13)
   (* A closure is [code_ptr][captures...] and the value is that block's address.
      A task is a closure, so starting one means building a context whose PC is
      its code and whose a0 is its env — which is the block itself. *)
   | Ast.Var "raw_base" when List.length args = 1 ->
     compile_expr env (List.hd args);
-    emit_word (enc_i 0 a0 2 a0 0x03)                       (* lw a0, 0(a0) — base *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)                       (* lw a0, 0(a0) — base *)
   | Ast.Var "raw_len" when List.length args = 1 ->
     (* the window's length, so a kernel can partition one it was handed
        (a task's stack at the top, its heap at the bottom) without
        hardcoding the runtime's reserved-region geometry *)
     compile_expr env (List.hd args);
-    emit_word (enc_i 4 a0 2 a0 0x03)                       (* lw a0, 4(a0) — len *)
+    emit_word (enc_i (wsz ()) a0 (ldf3 ()) a0 0x03)                       (* lw a0, 4(a0) — len *)
   | Ast.Var "closure_code" when List.length args = 1 ->
     compile_expr env (List.hd args);
-    emit_word (enc_i 0 a0 2 a0 0x03)                       (* lw a0, 0(a0) *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)                       (* lw a0, 0(a0) *)
   | Ast.Var "closure_env" when List.length args = 1 ->
     compile_expr env (List.hd args)                        (* the pointer itself *)
   | Ast.Var "set_trap_handler" when List.length args = 1 ->
@@ -1695,7 +1728,7 @@ and compile_app env e =
        taking traps. *)
     compile_expr env (List.hd args);                       (* a0 = closure *)
     li t1 (trap_handler_slot ());
-    emit_word (enc_s 0 a0 t1 2 0x23);                      (* sw a0, 0(slot) *)
+    emit_word (enc_s (0 * wsz ()) a0 t1 (stf3 ()) 0x23);                      (* sw a0, 0(slot) *)
     li t1 (trap_save_base ());
     emit_word (enc_i 0x340 t1 1 zero 0x73);                (* csrrw x0, mscratch, t1 *)
     emit (LoadAddr (t1, "__trap_entry"));
@@ -1740,14 +1773,14 @@ and compile_app env e =
     compile_expr env (List.nth args 2);                      (* len *)
     emit_word (enc_i 0 a0 0 a2 0x13);                        (* a2 = len *)
     pop a1; pop a0;                                          (* a1 = off, a0 = w *)
-    emit_word (enc_i 0 a0 2 t0 0x03);                        (* t0 = w.base *)
-    emit_word (enc_i 4 a0 2 t1 0x03);                        (* t1 = w.len *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                        (* t0 = w.base *)
+    emit_word (enc_i (wsz ()) a0 (ldf3 ()) t1 0x03);                        (* t1 = w.len *)
     emit_word (enc_r 0 a2 a1 0 t2 0x33);                     (* t2 = off + len *)
     emit (Branch (6, t1, t2, "__raw_fault"));                (* w.len < off+len -> fault *)
     alloc_words t3 2;
     emit_word (enc_r 0 a1 t0 0 t4 0x33);                     (* t4 = base + off *)
-    emit_word (enc_s 0 t4 t3 2 0x23);                        (* [0] = base *)
-    emit_word (enc_s 4 a2 t3 2 0x23);                        (* [1] = len *)
+    emit_word (enc_s (0 * wsz ()) t4 t3 (stf3 ()) 0x23);                        (* [0] = base *)
+    emit_word (enc_s (wsz ()) a2 t3 (stf3 ()) 0x23);                        (* [1] = len *)
     emit_word (enc_i 0 t3 0 a0 0x13)
   | Ast.Var ("raw_peek8" | "raw_peek32") when List.length args = 2 ->
     let wide = (match head.node with Ast.Var "raw_peek32" -> true | _ -> false) in
@@ -1756,7 +1789,10 @@ and compile_app env e =
     emit_word (enc_i 0 a0 0 a1 0x13);                         (* a1 = off *)
     pop a0;                                                   (* a0 = w *)
     emit_raw_bounds (if wide then 4 else 1);                  (* t0 = base + off *)
-    if wide then emit_word (enc_i 0 t0 2 a0 0x03)             (* lw  a0, 0(t0) *)
+    (* raw_peek32 is 32 BITS BY NAME, on either width: a device register is as
+       wide as the device says, not as wide as the CPU. LWU rather than LW on
+       RV64, so a device value with bit 31 set does not come back negative. *)
+    if wide then emit_word (enc_i 0 t0 (if !xlen = 64 then 6 else 2) a0 0x03)  (* lwu/lw a0 *)
     else emit_word (enc_i 0 t0 4 a0 0x03)                     (* lbu a0, 0(t0) *)
   | Ast.Var ("raw_poke8" | "raw_poke32") when List.length args = 3 ->
     let wide = (match head.node with Ast.Var "raw_poke32" -> true | _ -> false) in
@@ -1766,6 +1802,11 @@ and compile_app env e =
     emit_word (enc_i 0 a0 0 a2 0x13);                         (* a2 = v *)
     pop a1; pop a0;                                           (* a1 = off, a0 = w *)
     emit_raw_bounds (if wide then 4 else 1);                  (* t0 = base + off *)
+    (* same rule for the store: raw_poke32 emits SW on both widths. The blanket
+       f3 parameterisation had turned this into SD, and an 8-byte write to
+       QEMU's test finisher is IGNORED -- the guest printed everything and the
+       machine never powered off, which a pipe through `head` then hid by
+       killing qemu with SIGPIPE. *)
     if wide then emit_word (enc_s 0 a2 t0 2 0x23)             (* sw a2, 0(t0) *)
     else emit_word (enc_s 0 a2 t0 0 0x23);                    (* sb a2, 0(t0) *)
     emit_word (enc_i 0 zero 0 a0 0x13)                        (* unit *)
@@ -1804,12 +1845,12 @@ and compile_app env e =
     push a0;
     alloc_words t1 4;
     push t1;
-    emit_word (enc_i 4 sp 2 a0 0x03);                    (* a0 = clockid (below t1) *)
+    emit_word (enc_i (wsz ()) sp (ldf3 ()) a0 0x03);                    (* a0 = clockid (below t1) *)
     emit_word (enc_i 0 t1 0 a1 0x13);                    (* a1 = block *)
     li a7 403;
     emit_word (enc_i 0 zero 0 zero 0x73);                (* ecall *)
     pop a0;                                              (* a0 = block = the tuple *)
-    emit_word (enc_i 4 sp 0 sp 0x13)                     (* drop the clockid *)
+    emit_word (enc_i (wsz ()) sp 0 sp 0x13)              (* drop the clockid *)
   (* getrandom of one word, via the print scratch buffer -- dead between print
      calls, and this is not a print call. Same --bare refusal, same reason. *)
   | Ast.Var "__rv_urandom32" when List.length args = 1 ->
@@ -1825,19 +1866,19 @@ and compile_app env e =
     li a7 278;
     emit_word (enc_i 0 zero 0 zero 0x73);                (* ecall *)
     li a0 (scratch_base ());
-    emit_word (enc_i 0 a0 2 a0 0x03)                     (* lw a0, 0(scratch) *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)                     (* lw a0, 0(scratch) *)
   (* the identity: whatever word the value is, as an int. Diagnostic only. *)
   | Ast.Var "__rv_word" when List.length args = 1 ->
     compile_expr env (List.hd args)
   | Ast.Var "__rv_argc" when List.length args = 1 ->
     compile_expr env (List.hd args);                         (* the unit, discarded *)
     li t1 (argv_base ());
-    emit_word (enc_i 0 t1 2 t0 0x03);                        (* t0 = magic word *)
+    emit_word (enc_i (0 * wsz ()) t1 (ldf3 ()) t0 0x03);                        (* t0 = magic word *)
     li t2 argv_magic;
     emit_word (enc_i 0 zero 0 a0 0x13);                      (* a0 = 0 *)
     let l_done = fresh_label "argc_done" in
     emit (Branch (1, t0, t2, l_done));                       (* magic absent -> 0 *)
-    emit_word (enc_i 4 t1 2 a0 0x03);                        (* a0 = count *)
+    emit_word (enc_i (wsz ()) t1 (ldf3 ()) a0 0x03);                        (* a0 = count *)
     emit (Label l_done)
   | Ast.Var "__rv_argstr" when List.length args = 1 ->
     compile_expr env (List.hd args);                         (* a0 = i *)
@@ -1847,9 +1888,9 @@ and compile_app env e =
        leaves the index unscaled: index 0 still lands on the first pointer slot
        and reads correctly, and index 1 loads from a misaligned address. A test
        with one argument cannot see it. *)
-    emit_word (enc_i 2 a0 1 a0 0x13);                        (* slli a0, a0, 2 *)
+    emit_word (enc_i (wshift ()) a0 1 a0 0x13);              (* slli a0, a0, w *)
     emit_word (enc_r 0 a0 t1 0 t1 0x33);
-    emit_word (enc_i 8 t1 2 a0 0x03)                         (* a0 = block[2 + i] *)
+    emit_word (enc_i (2 * wsz ()) t1 (ldf3 ()) a0 0x03)                         (* a0 = block[2 + i] *)
   | Ast.Var "key" when List.length args = 1 ->
     (* fantasy-console input: read the held state (0/1) of button n from the
        MMIO key register at KEY_BASE + n. A host emulator refreshes these bytes
@@ -1920,23 +1961,23 @@ and compile_app env e =
      | _ -> err e.loc "RV32I: `show` is only supported on int values")
   | Ast.Var "ord" when List.length args = 1 ->
     compile_expr env (List.hd args);
-    emit_word (enc_i 4 a0 4 a0 0x03)                     (* lbu a0, 4(a0) — first byte *)
+    emit_word (enc_i (wsz ()) a0 4 a0 0x03)                     (* lbu a0, 4(a0) — first byte *)
   | Ast.Var "chr" when List.length args = 1 ->
     compile_expr env (List.hd args);                     (* a0 = byte value *)
     emit_word (enc_i 0 a0 0 t2 0x13);                    (* mv t2, a0 *)
     alloc_words t0 2;
-    li t1 1; emit_word (enc_s 0 t1 t0 2 0x23);           (* sw len=1 *)
-    emit_word (enc_s 4 t2 t0 0 0x23);                    (* sb byte, 4(t0) *)
+    li t1 1; emit_word (enc_s (0 * wsz ()) t1 t0 (stf3 ()) 0x23);           (* sw len=1 *)
+    emit_word (enc_s (wsz ()) t2 t0 0 0x23);                    (* sb byte, 4(t0) *)
     emit_word (enc_i 0 t0 0 a0 0x13)                     (* mv a0, t0 *)
   | Ast.Var "char_at" when List.length args = 2 ->
     compile_expr env (List.nth args 0); push a0;
     compile_expr env (List.nth args 1);
     emit_word (enc_i 0 a0 0 a1 0x13); pop a0;            (* a0=s, a1=i *)
     emit_word (enc_r 0 a1 a0 0 t0 0x33);                 (* add t0, s, i *)
-    emit_word (enc_i 4 t0 4 t0 0x03);                    (* lbu t0, 4(t0) *)
+    emit_word (enc_i (wsz ()) t0 4 t0 0x03);                    (* lbu t0, 4(t0) *)
     alloc_words t1 2;
-    li t2 1; emit_word (enc_s 0 t2 t1 2 0x23);           (* sw len=1 *)
-    emit_word (enc_s 4 t0 t1 0 0x23);                    (* sb byte *)
+    li t2 1; emit_word (enc_s (0 * wsz ()) t2 t1 (stf3 ()) 0x23);           (* sw len=1 *)
+    emit_word (enc_s (wsz ()) t0 t1 0 0x23);                    (* sb byte *)
     emit_word (enc_i 0 t1 0 a0 0x13)                     (* mv a0, t1 *)
   | Ast.Var "str_eq" when List.length args = 2 ->
     compile_expr env (List.nth args 0); push a0;
@@ -1975,7 +2016,7 @@ and compile_indirect ?(tail = false) env head args =
     compile_expr env arg;                               (* a0 = arg *)
     emit_word (enc_i 0 a0 0 a1 0x13);                   (* mv a1, a0 (arg) *)
     pop a0;                                             (* a0 = closure (its own env) *)
-    emit_word (enc_i 0 a0 2 t1 0x03);                   (* lw t1, 0(a0) — code ptr *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t1 0x03);                   (* lw t1, 0(a0) — code ptr *)
     (* only the final application of a curried chain is in tail position; the
        earlier ones still have work to do with their result. This is the shape
        a local `let rec loop = fn ...` takes, so it is the one that matters
@@ -2052,7 +2093,7 @@ and bind_pattern env pat l_fail =
     push a0;
     let idx = !slot_ctr in incr slot_ctr; store_a0_to idx;
     let env = (name, idx) :: env in
-    emit_word (enc_i 0 sp 2 a0 0x03);              (* peek: a0 = the value *)
+    emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) a0 0x03);              (* peek: a0 = the value *)
     let env = bind_pattern env inner l_fail in
     pop t0;                                        (* drop saved value *)
     env
@@ -2060,8 +2101,8 @@ and bind_pattern env pat l_fail =
     push a0;                                       (* park tuple ptr *)
     let env = ref env in
     List.iteri (fun i p ->
-      emit_word (enc_i 0 sp 2 a0 0x03);            (* peek tuple ptr *)
-      emit_word (enc_i (i * 4) a0 2 a0 0x03);      (* a0 = field i *)
+      emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) a0 0x03);            (* peek tuple ptr *)
+      emit_word (enc_i ((i) * wsz ()) a0 (ldf3 ()) a0 0x03);      (* a0 = field i *)
       env := bind_pattern !env p l_fail
     ) pats;
     pop t0;
@@ -2071,20 +2112,20 @@ and bind_pattern env pat l_fail =
     let env = ref env in
     List.iter (fun (fname, fpat) ->
       let fi = field_index pat.Ast.ploc typename fname in
-      emit_word (enc_i 0 sp 2 a0 0x03);            (* peek record ptr *)
-      emit_word (enc_i (fi * 4) a0 2 a0 0x03);     (* a0 = field *)
+      emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) a0 0x03);            (* peek record ptr *)
+      emit_word (enc_i ((fi) * wsz ()) a0 (ldf3 ()) a0 0x03);     (* a0 = field *)
       env := bind_pattern !env fpat l_fail
     ) fpats;
     pop t0;
     !env
   | Ast.P_constr (name, sub) ->
     let tag = tag_of pat.Ast.ploc name in
-    emit_word (enc_i 0 a0 2 t0 0x03);              (* lw t0, 0(a0) — tag *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);              (* lw t0, 0(a0) — tag *)
     li t1 tag; emit (Branch (1, t0, t1, l_fail));  (* bne t0, t1, fail *)
     (match sub with
      | None -> env
      | Some subp ->
-       emit_word (enc_i 4 a0 2 a0 0x03);           (* a0 = payload *)
+       emit_word (enc_i (wsz ()) a0 (ldf3 ()) a0 0x03);           (* a0 = payload *)
        bind_pattern env subp l_fail)
   | Ast.P_or (a, b) ->
     (* Try the first alternative; on mismatch try the second; on both, fail.
@@ -2134,12 +2175,12 @@ let emit_prologue total =
   let sreg_base = noverflow in           (* [overflow][saved s-regs][fp][ra] *)
   let fp_slot = noverflow + nsaved in
   let ra_slot = fp_slot + 1 in
-  let fsz = (ra_slot + 1) * 4 in
+  let fsz = (ra_slot + 1) * wsz () in
   base_addi sp sp (-fsz);                               (* addi sp, sp, -fsz *)
-  base_store sp ra (ra_slot * 4);                       (* sw   ra, ra_slot(sp) *)
-  base_store sp fp (fp_slot * 4);                       (* sw   fp, fp_slot(sp) *)
+  base_store sp ra (ra_slot * wsz ());                  (* sw   ra, ra_slot(sp) *)
+  base_store sp fp (fp_slot * wsz ());                  (* sw   fp, fp_slot(sp) *)
   for k = 0 to nsaved - 1 do
-    base_store sp sregs.(k) ((sreg_base + k) * 4)
+    base_store sp sregs.(k) ((sreg_base + k) * wsz ())
   done;
   emit_word (enc_i 0 sp 0 fp 0x13);                     (* addi fp, sp, 0 *)
   (nsaved, sreg_base, fp_slot, ra_slot, fsz)
@@ -2159,7 +2200,7 @@ let emit_function ~label ~params ~body =
   emit (Label label);
   dbg_line := -1;
   emit (Meta (Printf.sprintf "F %s fsz=%d ra=%d fp=%d params=%d line=%d"
-                label ((total + 2) * 4) ((total + 1) * 4) (total * 4)
+                label ((total + 2) * wsz ()) ((total + 1) * wsz ()) (total * wsz ())
                 nparams (dbg_user_line body.Ast.loc)));
   let fr = emit_prologue total in
   let (_, _, _, _, fsz) = fr in
@@ -2168,11 +2209,11 @@ let emit_function ~label ~params ~body =
        fp + fsz + (i-8)*4 (the prologue subtracted fsz from sp) *)
     let src_into_t0 () =
       if i < 8 then emit_word (enc_i 0 (a0 + i) 0 t0 0x13)          (* mv t0, aI *)
-      else base_load fp t0 (fsz + (i - 8) * 4) in                   (* lw t0, stackarg *)
+      else base_load fp t0 (fsz + (i - 8) * wsz ()) in              (* lw t0, stackarg *)
     match loc_of i with
     | Reg r ->
       if i < 8 then emit_word (enc_i 0 (a0 + i) 0 r 0x13)           (* mv sX, aI *)
-      else base_load fp r (fsz + (i - 8) * 4)                       (* lw sX, stackarg *)
+      else base_load fp r (fsz + (i - 8) * wsz ())                  (* lw sX, stackarg *)
     | Mem slot -> src_into_t0 (); base_store fp t0 (slot_off slot)
   ) params;
   slot_ctr := nparams;
@@ -2189,12 +2230,12 @@ let emit_lambda ~label ~captures ~param ~body =
   emit (Label label);
   dbg_line := -1;
   emit (Meta (Printf.sprintf "F %s fsz=%d ra=%d fp=%d params=1 line=%d"
-                label ((total + 2) * 4) ((total + 1) * 4) (total * 4)
+                label ((total + 2) * wsz ()) ((total + 1) * wsz ()) (total * wsz ())
                 (dbg_user_line body.Ast.loc)));
   let fr = emit_prologue total in
   (* load captured values from the closure env (a0), env[i+1] -> binding i *)
   List.iteri (fun i _ ->
-    emit_word (enc_i ((i + 1) * 4) a0 2 t0 0x03);                  (* lw t0, (i+1)*4(a0) *)
+    emit_word (enc_i ((i + 1) * wsz ()) a0 (ldf3 ()) t0 0x03);    (* lw t0, (i+1)*w(a0) *)
     match loc_of i with
     | Reg r -> emit_word (enc_i 0 t0 0 r 0x13)                     (* mv sX, t0 *)
     | Mem slot -> base_store fp t0 (slot_off slot)
@@ -2218,7 +2259,7 @@ let emit_main ?bare_entry main_body =
   emit (Label "__main");
   dbg_line := -1;
   emit (Meta (Printf.sprintf "F __main fsz=%d ra=%d fp=%d params=0 line=%d"
-                ((total + 2) * 4) ((total + 1) * 4) (total * 4)
+                ((total + 2) * wsz ()) ((total + 1) * wsz ()) (total * wsz ())
                 (dbg_user_line main_body.Ast.loc)));
   let fr = emit_prologue total in
   slot_ctr := 0;
@@ -2238,9 +2279,9 @@ let emit_main ?bare_entry main_body =
    | None -> ()
    | Some entry ->
      alloc_words t1 2;
-     emit_word (enc_s 0 zero t1 2 0x23);                 (* base = 0 *)
+     emit_word (enc_s (0 * wsz ()) zero t1 (stf3 ()) 0x23);                 (* base = 0 *)
      li t0 (machine_len ());
-     emit_word (enc_s 4 t0 t1 2 0x23);                   (* len = RAM and devices *)
+     emit_word (enc_s (wsz ()) t0 t1 (stf3 ()) 0x23);                   (* len = RAM and devices *)
      emit_word (enc_i 0 t1 0 a0 0x13);
      emit (Jal (ra, "u_" ^ entry)));
   emit_epilogue fr
@@ -2252,9 +2293,9 @@ let emit_start () =
   emit_word (enc_i 0 sp 0 fp 0x13);                     (* addi fp, sp, 0 *)
   (* no `try_or` is in scope yet, and `fail` reads this word to find out *)
   li t0 (fail_frame_addr ());
-  emit_word (enc_s 0 zero t0 2 0x23);                   (* sw x0, 0(t0) *)
+  emit_word (enc_s (0 * wsz ()) zero t0 (stf3 ()) 0x23);                   (* sw x0, 0(t0) *)
   (* heap top starts just above the runtime word and the globals region *)
-  li gp (globals_base () + (runtime_words + Hashtbl.length globals_map) * 4);
+  li gp (globals_base () + (runtime_words + Hashtbl.length globals_map) * wsz ());
   emit (Jal (ra, "__main"));                            (* run main *)
   li a7 93;                                             (* exit syscall *)
   li a0 0;
@@ -2309,18 +2350,18 @@ let emit_print_int () =
    allocates via gp and byte-copies both operands' payloads. *)
 let emit_str_concat () =
   emit (Label "__str_concat");
-  emit_word (enc_i 0 a0 2 t0 0x03);                     (* lw t0, 0(a0)  — len1 *)
-  emit_word (enc_i 0 a1 2 t1 0x03);                     (* lw t1, 0(a1)  — len2 *)
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                     (* lw t0, 0(a0)  — len1 *)
+  emit_word (enc_i (0 * wsz ()) a1 (ldf3 ()) t1 0x03);                     (* lw t1, 0(a1)  — len2 *)
   emit_word (enc_r 0 t1 t0 0 t2 0x33);                  (* add t2, t0, t1 — total *)
-  emit_word (enc_i 3 t2 0 t4 0x13);                     (* addi t4, t2, 3 *)
-  emit_word (enc_i (-4) t4 7 t4 0x13);                  (* andi t4, t4, -4 — round4(total) *)
-  emit_word (enc_i 4 t4 0 t4 0x13);                     (* addi t4, t4, 4  — + len word *)
+  emit_word (enc_i (wsz () - 1) t2 0 t4 0x13);                     (* addi t4, t2, 3 *)
+  emit_word (enc_i (0 - wsz ()) t4 7 t4 0x13);                  (* andi t4, t4, -4 — round4(total) *)
+  emit_word (enc_i (wsz ()) t4 0 t4 0x13);                     (* addi t4, t4, 4  — + len word *)
   emit_word (enc_i 0 gp 0 t3 0x13);                     (* mv t3, gp     — result ptr *)
   emit_word (enc_r 0 t4 t3 0 gp 0x33);                  (* add gp, t3, t4  — bump first *)
   emit_oom_check ();
-  emit_word (enc_s 0 t2 t3 2 0x23);                     (* sw t2, 0(t3)  — then the header *)
-  emit_word (enc_i 4 a0 0 t5 0x13);                     (* addi t5, a0, 4  — src1 *)
-  emit_word (enc_i 4 t3 0 t6 0x13);                     (* addi t6, t3, 4  — dst *)
+  emit_word (enc_s (0 * wsz ()) t2 t3 (stf3 ()) 0x23);                     (* sw t2, 0(t3)  — then the header *)
+  emit_word (enc_i (wsz ()) a0 0 t5 0x13);                     (* addi t5, a0, 4  — src1 *)
+  emit_word (enc_i (wsz ()) t3 0 t6 0x13);                     (* addi t6, t3, 4  — dst *)
   emit (Label ".sc_l1");
   emit (Branch (0, t0, zero, ".sc_d1"));                (* beq t0, x0, d1 *)
   emit_word (enc_i 0 t5 0 a2 0x03);                     (* lb a2, 0(t5) *)
@@ -2330,7 +2371,7 @@ let emit_str_concat () =
   emit_word (enc_i (-1) t0 0 t0 0x13);                  (* addi t0, t0, -1 *)
   emit (Jal (zero, ".sc_l1"));
   emit (Label ".sc_d1");
-  emit_word (enc_i 4 a1 0 t5 0x13);                     (* addi t5, a1, 4  — src2 *)
+  emit_word (enc_i (wsz ()) a1 0 t5 0x13);                     (* addi t5, a1, 4  — src2 *)
   emit (Label ".sc_l2");
   emit (Branch (0, t1, zero, ".sc_d2"));                (* beq t1, x0, d2 *)
   emit_word (enc_i 0 t5 0 a2 0x03);                     (* lb a2, 0(t5) *)
@@ -2346,11 +2387,11 @@ let emit_str_concat () =
 (* __str_eq(a0=s1, a1=s2) -> a0 = 1 if byte-equal else 0. Leaf. *)
 let emit_str_eq () =
   emit (Label "__str_eq");
-  emit_word (enc_i 0 a0 2 t0 0x03);                     (* lw t0, 0(a0) — len1 *)
-  emit_word (enc_i 0 a1 2 t1 0x03);                     (* lw t1, 0(a1) — len2 *)
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                     (* lw t0, 0(a0) — len1 *)
+  emit_word (enc_i (0 * wsz ()) a1 (ldf3 ()) t1 0x03);                     (* lw t1, 0(a1) — len2 *)
   emit (Branch (1, t0, t1, ".se_ne"));                  (* bne t0, t1, ne *)
-  emit_word (enc_i 4 a0 0 t2 0x13);                     (* addi t2, a0, 4 *)
-  emit_word (enc_i 4 a1 0 t3 0x13);                     (* addi t3, a1, 4 *)
+  emit_word (enc_i (wsz ()) a0 0 t2 0x13);                     (* addi t2, a0, 4 *)
+  emit_word (enc_i (wsz ()) a1 0 t3 0x13);                     (* addi t3, a1, 4 *)
   emit (Label ".se_loop");
   emit (Branch (0, t0, zero, ".se_eq"));                (* beq t0, x0, eq *)
   emit_word (enc_i 0 t2 0 t4 0x03);                     (* lb t4, 0(t2) *)
@@ -2366,16 +2407,16 @@ let emit_str_eq () =
 (* __str_cmp(a0=s1, a1=s2) -> a0 = <0 / 0 / >0 lexicographically. Leaf. *)
 let emit_str_cmp () =
   emit (Label "__str_cmp");
-  emit_word (enc_i 0 a0 2 t0 0x03);                     (* lw t0, 0(a0) — len1 *)
-  emit_word (enc_i 0 a1 2 t1 0x03);                     (* lw t1, 0(a1) — len2 *)
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                     (* lw t0, 0(a0) — len1 *)
+  emit_word (enc_i (0 * wsz ()) a1 (ldf3 ()) t1 0x03);                     (* lw t1, 0(a1) — len2 *)
   emit_word (enc_i 0 t0 0 t2 0x13);                     (* mv t2, t0  — min = len1 *)
   emit (Branch (5, t2, t1, ".cm_min"));                 (* bge t2, t1 -> min already t1? no *)
   emit (Jal (zero, ".cm_have"));                        (* t2 (=len1) < len1? fallthrough handling *)
   emit (Label ".cm_min");
   emit_word (enc_i 0 t1 0 t2 0x13);                     (* mv t2, t1  — min = len2 (len1>=len2) *)
   emit (Label ".cm_have");
-  emit_word (enc_i 4 a0 0 t3 0x13);                     (* addi t3, a0, 4 *)
-  emit_word (enc_i 4 a1 0 t4 0x13);                     (* addi t4, a1, 4 *)
+  emit_word (enc_i (wsz ()) a0 0 t3 0x13);                     (* addi t3, a0, 4 *)
+  emit_word (enc_i (wsz ()) a1 0 t4 0x13);                     (* addi t4, a1, 4 *)
   emit (Label ".cm_loop");
   emit (Branch (0, t2, zero, ".cm_len"));               (* beq t2, x0 -> compare lengths *)
   emit_word (enc_i 0 t3 4 t5 0x03);                     (* lbu t5, 0(t3) *)
@@ -2428,14 +2469,14 @@ let emit_str_of_int () =
   li t1 (scratch_base ());
   emit_word (enc_i 63 t1 0 t1 0x13);                    (* t1 = END = 0x6003F *)
   emit_word (enc_r 0x20 t2 t1 0 t1 0x33);               (* t1 = END - cursor = len *)
-  emit_word (enc_i 3 t1 0 t4 0x13);                     (* round4(len)+4 *)
-  emit_word (enc_i (-4) t4 7 t4 0x13);
-  emit_word (enc_i 4 t4 0 t4 0x13);
+  emit_word (enc_i (wsz () - 1) t1 0 t4 0x13);                     (* round4(len)+4 *)
+  emit_word (enc_i (0 - wsz ()) t4 7 t4 0x13);
+  emit_word (enc_i (wsz ()) t4 0 t4 0x13);
   emit_word (enc_i 0 gp 0 t3 0x13);                     (* t3 = result = gp *)
   emit_word (enc_r 0 t4 t3 0 gp 0x33);                  (* bump first *)
   emit_oom_check ();
-  emit_word (enc_s 0 t1 t3 2 0x23);                     (* then sw len, 0(t3) *)
-  emit_word (enc_i 4 t3 0 t5 0x13);                     (* dst = t3+4 *)
+  emit_word (enc_s (0 * wsz ()) t1 t3 (stf3 ()) 0x23);                     (* then sw len, 0(t3) *)
+  emit_word (enc_i (wsz ()) t3 0 t5 0x13);                     (* dst = t3+4 *)
   emit (Label ".si_copy");
   emit (Branch (0, t1, zero, ".si_cdone"));             (* beq t1, x0 *)
   emit_word (enc_i 0 t0 0 t6 0x03);                     (* lb t6, 0(t0) *)
@@ -2453,16 +2494,16 @@ let emit_str_of_int () =
 let emit_substring () =
   emit (Label "__substring");
   emit_word (enc_r 0x20 a1 a2 0 a2 0x33);               (* sub a2, a2, a1 — len = end - start *)
-  emit_word (enc_i 3 a2 0 t1 0x13);                     (* round4(len)+4 *)
-  emit_word (enc_i (-4) t1 7 t1 0x13);
-  emit_word (enc_i 4 t1 0 t1 0x13);
+  emit_word (enc_i (wsz () - 1) a2 0 t1 0x13);                     (* round4(len)+4 *)
+  emit_word (enc_i (0 - wsz ()) t1 7 t1 0x13);
+  emit_word (enc_i (wsz ()) t1 0 t1 0x13);
   emit_word (enc_i 0 gp 0 t0 0x13);                     (* t0 = result = gp *)
   emit_word (enc_r 0 t1 t0 0 gp 0x33);                  (* bump first *)
   emit_oom_check ();
-  emit_word (enc_s 0 a2 t0 2 0x23);                     (* then sw len, 0(t0) *)
+  emit_word (enc_s (0 * wsz ()) a2 t0 (stf3 ()) 0x23);                     (* then sw len, 0(t0) *)
   emit_word (enc_r 0 a1 a0 0 t2 0x33);                  (* t2 = s + start *)
-  emit_word (enc_i 4 t2 0 t2 0x13);                     (* src = s+4+start *)
-  emit_word (enc_i 4 t0 0 t3 0x13);                     (* dst = t0+4 *)
+  emit_word (enc_i (wsz ()) t2 0 t2 0x13);                     (* src = s+4+start *)
+  emit_word (enc_i (wsz ()) t0 0 t3 0x13);                     (* dst = t0+4 *)
   emit_word (enc_i 0 a2 0 t4 0x13);                     (* t4 = count *)
   emit (Label ".ss_loop");
   emit (Branch (0, t4, zero, ".ss_done"));
@@ -2483,30 +2524,30 @@ let emit_substring () =
 let emit_strbuf () =
   emit (Label "__strbuf_new");                     (* a0 ignored *)
   emit_word (enc_i 0 gp 0 t0 0x13);                (* t0 = empty str *)
-  emit_word (enc_i 4 gp 0 t1 0x13);                (* t1 = cell *)
+  emit_word (enc_i (wsz ()) gp 0 t1 0x13);                (* t1 = cell *)
   emit_word (enc_i 8 gp 0 gp 0x13);                (* bump both words first *)
   emit_oom_check ();
-  emit_word (enc_s 0 zero t0 2 0x23);              (* [len=0] *)
-  emit_word (enc_s 0 t0 t1 2 0x23);                (* cell.str = empty *)
+  emit_word (enc_s (0 * wsz ()) zero t0 (stf3 ()) 0x23);              (* [len=0] *)
+  emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);                (* cell.str = empty *)
   emit_word (enc_i 0 t1 0 a0 0x13);                (* mv a0, cell *)
   emit_word (enc_i 0 ra 0 zero 0x67);
   emit (Label "__strbuf_push");                    (* a0=buf, a1=s ; non-leaf *)
   emit_word (enc_i (-8) sp 0 sp 0x13);
-  emit_word (enc_s 4 ra sp 2 0x23);                (* save ra *)
-  emit_word (enc_s 0 a0 sp 2 0x23);                (* save buf *)
-  emit_word (enc_i 0 a0 2 a0 0x03);                (* a0 = buf.str (current) *)
+  emit_word (enc_s (wsz ()) ra sp (stf3 ()) 0x23);                (* save ra *)
+  emit_word (enc_s (0 * wsz ()) a0 sp (stf3 ()) 0x23);                (* save buf *)
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03);                (* a0 = buf.str (current) *)
   emit (Jal (ra, "__str_concat"));                 (* a0 = concat(cur, s) *)
-  emit_word (enc_i 0 sp 2 t0 0x03);                (* t0 = buf *)
-  emit_word (enc_s 0 a0 t0 2 0x23);                (* buf.str = new *)
-  emit_word (enc_i 4 sp 2 ra 0x03);                (* restore ra *)
+  emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) t0 0x03);                (* t0 = buf *)
+  emit_word (enc_s (0 * wsz ()) a0 t0 (stf3 ()) 0x23);                (* buf.str = new *)
+  emit_word (enc_i (wsz ()) sp (ldf3 ()) ra 0x03);                (* restore ra *)
   emit_word (enc_i 8 sp 0 sp 0x13);
   emit_word (enc_i 0 ra 0 zero 0x67);
   emit (Label "__strbuf_to_str");                  (* a0=buf -> a0 = str *)
-  emit_word (enc_i 0 a0 2 a0 0x03);
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03);
   emit_word (enc_i 0 ra 0 zero 0x67);
   emit (Label "__strbuf_len");                     (* a0=buf -> a0 = len *)
-  emit_word (enc_i 0 a0 2 a0 0x03);                (* str ptr *)
-  emit_word (enc_i 0 a0 2 a0 0x03);                (* len header *)
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03);                (* str ptr *)
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03);                (* len header *)
   emit_word (enc_i 0 ra 0 zero 0x67)
 
 (* Vec: a mutable growable word array. Cell = [len][cap][dataptr]; dataptr ->
@@ -2514,46 +2555,46 @@ let emit_strbuf () =
    doubling cap). vec_get / vec_set / vec_len are inlined at the call site. *)
 let emit_vec () =
   emit (Label "__vec_new");                        (* a0 ignored *)
-  emit_word (enc_i 4 zero 0 t2 0x13);              (* cap = 4 words *)
+  emit_word (enc_i (wsz ()) zero 0 t2 0x13);              (* cap = 4 words *)
   emit_word (enc_i 0 gp 0 t0 0x13);                (* databuf = gp *)
-  emit_word (enc_i 16 gp 0 gp 0x13);               (* bump 4 words *)
+  emit_word (enc_i (4 * wsz ()) gp 0 gp 0x13);     (* bump 4 cells *)
   emit_word (enc_i 0 gp 0 t1 0x13);                (* cell = gp *)
-  emit_word (enc_i 12 gp 0 gp 0x13);               (* bump 3 words *)
+  emit_word (enc_i (3 * wsz ()) gp 0 gp 0x13);     (* bump 3 cells *)
   emit_oom_check ();
-  emit_word (enc_s 0 zero t1 2 0x23);              (* len = 0 *)
-  emit_word (enc_s 4 t2 t1 2 0x23);                (* cap = 4 *)
-  emit_word (enc_s 8 t0 t1 2 0x23);                (* dataptr *)
+  emit_word (enc_s (0 * wsz ()) zero t1 (stf3 ()) 0x23);              (* len = 0 *)
+  emit_word (enc_s (wsz ()) t2 t1 (stf3 ()) 0x23);                (* cap = 4 *)
+  emit_word (enc_s (2 * wsz ()) t0 t1 (stf3 ()) 0x23);                (* dataptr *)
   emit_word (enc_i 0 t1 0 a0 0x13);
   emit_word (enc_i 0 ra 0 zero 0x67);
   emit (Label "__vec_push");                       (* a0=vec, a1=x ; leaf *)
-  emit_word (enc_i 0 a0 2 t0 0x03);                (* len *)
-  emit_word (enc_i 4 a0 2 t1 0x03);                (* cap *)
-  emit_word (enc_i 8 a0 2 t2 0x03);                (* dataptr *)
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                (* len *)
+  emit_word (enc_i (wsz ()) a0 (ldf3 ()) t1 0x03);                (* cap *)
+  emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t2 0x03);                (* dataptr *)
   emit (Branch (1, t0, t1, ".vp_store"));          (* len != cap -> store *)
   emit_word (enc_i 1 t1 1 t3 0x13);                (* slli t3, cap, 1 = newcap *)
-  emit_word (enc_s 4 t3 a0 2 0x23);                (* cell.cap = newcap *)
-  emit_word (enc_i 2 t3 1 t4 0x13);                (* slli t4, newcap, 2 = bytes *)
+  emit_word (enc_s (wsz ()) t3 a0 (stf3 ()) 0x23);                (* cell.cap = newcap *)
+  emit_word (enc_i (wshift ()) t3 1 t4 0x13);      (* slli t4, newcap, w = bytes *)
   emit_word (enc_i 0 gp 0 t5 0x13);                (* newbuf = gp *)
   emit_word (enc_r 0 t4 gp 0 gp 0x33);             (* gp += bytes *)
   emit_oom_check ();
-  emit_word (enc_s 8 t5 a0 2 0x23);                (* cell.dataptr = newbuf *)
+  emit_word (enc_s (2 * wsz ()) t5 a0 (stf3 ()) 0x23);                (* cell.dataptr = newbuf *)
   emit (Label ".vp_copy");
   emit (Branch (0, t0, zero, ".vp_after"));        (* beq len,x0 -> done *)
-  emit_word (enc_i 0 t2 2 t3 0x03);                (* lw t3, 0(t2) *)
-  emit_word (enc_s 0 t3 t5 2 0x23);                (* sw t3, 0(t5) *)
-  emit_word (enc_i 4 t2 0 t2 0x13);
-  emit_word (enc_i 4 t5 0 t5 0x13);
+  emit_word (enc_i (0 * wsz ()) t2 (ldf3 ()) t3 0x03);                (* lw t3, 0(t2) *)
+  emit_word (enc_s (0 * wsz ()) t3 t5 (stf3 ()) 0x23);                (* sw t3, 0(t5) *)
+  emit_word (enc_i (wsz ()) t2 0 t2 0x13);
+  emit_word (enc_i (wsz ()) t5 0 t5 0x13);
   emit_word (enc_i (-1) t0 0 t0 0x13);
   emit (Jal (zero, ".vp_copy"));
   emit (Label ".vp_after");
-  emit_word (enc_i 0 a0 2 t0 0x03);                (* reload len *)
-  emit_word (enc_i 8 a0 2 t2 0x03);                (* reload dataptr *)
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                (* reload len *)
+  emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t2 0x03);                (* reload dataptr *)
   emit (Label ".vp_store");
-  emit_word (enc_i 2 t0 1 t3 0x13);                (* slli t3, len, 2 *)
+  emit_word (enc_i (wshift ()) t0 1 t3 0x13);      (* slli t3, len, w *)
   emit_word (enc_r 0 t3 t2 0 t3 0x33);             (* t3 = dataptr + len*4 *)
-  emit_word (enc_s 0 a1 t3 2 0x23);                (* databuf[len] = x *)
+  emit_word (enc_s (0 * wsz ()) a1 t3 (stf3 ()) 0x23);                (* databuf[len] = x *)
   emit_word (enc_i 1 t0 0 t0 0x13);                (* len++ *)
-  emit_word (enc_s 0 t0 a0 2 0x23);                (* store len *)
+  emit_word (enc_s (0 * wsz ()) t0 a0 (stf3 ()) 0x23);                (* store len *)
   emit_word (enc_i 0 ra 0 zero 0x67)
 
 (* target of a refutable-let mismatch: abort with exit(2) *)
@@ -2571,8 +2612,8 @@ let emit_oom () =
   let label = "str__oom" in
   string_data := (label, mk_str_block "mere: out of memory (heap reached the stack)\n") :: !string_data;
   emit (LoadAddr (t0, label));
-  emit_word (enc_i 0 t0 2 a2 0x03);                     (* lw   a2, 0(t0) — len *)
-  emit_word (enc_i 4 t0 0 a1 0x13);                     (* addi a1, t0, 4 — bytes *)
+  emit_word (enc_i (0 * wsz ()) t0 (ldf3 ()) a2 0x03);                     (* lw   a2, 0(t0) — len *)
+  emit_word (enc_i (wsz ()) t0 0 a1 0x13);                     (* addi a1, t0, 4 — bytes *)
   emit_word (enc_i 1 zero 0 a0 0x13);                   (* li   a0, 1     — fd *)
   emit_word (enc_i 64 zero 0 a7 0x13);                  (* li   a7, 64    — write *)
   emit_word (enc_i 0 zero 0 zero 0x73);                 (* ecall *)
@@ -2609,33 +2650,33 @@ let emit_trap_entry () =
   (* t0 <- save area, mscratch <- the interrupted t0 *)
   emit_word (enc_i 0x340 t0 1 t0 0x73);                 (* csrrw t0, mscratch, t0 *)
   for i = 1 to 31 do
-    if i <> 5 then emit_word (enc_s (i * 4) i t0 2 0x23) (* sw xI, i*4(t0) *)
+    if i <> 5 then emit_word (enc_s ((i) * wsz ()) i t0 (stf3 ()) 0x23) (* sw xI, i*4(t0) *)
   done;
   emit_word (enc_i 0x340 zero 2 t1 0x73);               (* csrrs t1, mscratch, x0 *)
-  emit_word (enc_s (5 * 4) t1 t0 2 0x23);               (* sw the interrupted t0 *)
+  emit_word (enc_s ((5) * wsz ()) t1 t0 (stf3 ()) 0x23);               (* sw the interrupted t0 *)
   emit_word (enc_i 0x340 t0 1 zero 0x73);               (* csrrw x0, mscratch, t0 *)
   (* Only now is every register safely in the save area, so only now is a
      register free to think with. Checking the depth any earlier would clobber
      one before saving it — which is the very bug this check exists to catch. *)
-  emit_word (enc_i 0x104 t0 2 t1 0x03);                 (* lw t1, depth *)
+  emit_word (enc_i 0x104 t0 (ldf3 ()) t1 0x03);                 (* lw t1, depth *)
   emit (Branch (1, t1, zero, "__trap_nested"));
   emit_word (enc_i 1 zero 0 t1 0x13);
-  emit_word (enc_s 0x104 t1 t0 2 0x23);                 (* depth = 1 *)
+  emit_word (enc_s 0x104 t1 t0 (stf3 ()) 0x23);                 (* depth = 1 *)
   li sp (trap_stack_top ());                            (* the handler's own stack *)
   (* call the registered closure: a0 = its env, a1 = mcause *)
   emit_word (enc_i 0x342 zero 2 a1 0x73);               (* csrrs a1, mcause, x0 *)
   li t1 (trap_handler_slot ());
-  emit_word (enc_i 0 t1 2 a0 0x03);                     (* lw a0, 0(t1) — closure *)
-  emit_word (enc_i 0 a0 2 t2 0x03);                     (* lw t2, 0(a0) — code ptr *)
+  emit_word (enc_i (0 * wsz ()) t1 (ldf3 ()) a0 0x03);                     (* lw a0, 0(t1) — closure *)
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t2 0x03);                     (* lw t2, 0(a0) — code ptr *)
   emit_word (enc_i 0 t2 0 ra 0x67);                     (* jalr ra, t2 *)
   emit_word (enc_i 0x341 a0 1 zero 0x73);               (* csrrw x0, mepc, a0 *)
   (* restore and return *)
   li t0 (trap_save_base ());
-  emit_word (enc_s 0x104 zero t0 2 0x23);               (* depth = 0 *)
+  emit_word (enc_s 0x104 zero t0 (stf3 ()) 0x23);               (* depth = 0 *)
   for i = 1 to 31 do
-    if i <> 5 then emit_word (enc_i (i * 4) t0 2 i 0x03) (* lw xI, i*4(t0) *)
+    if i <> 5 then emit_word (enc_i ((i) * wsz ()) t0 (ldf3 ()) i 0x03) (* lw xI, i*4(t0) *)
   done;
-  emit_word (enc_i (5 * 4) t0 2 t0 0x03);               (* lw t0 last *)
+  emit_word (enc_i ((5) * wsz ()) t0 (ldf3 ()) t0 0x03);               (* lw t0 last *)
   emit_word 0x30200073;                                 (* mret *)
   (* Reached only when a trap arrives inside the handler. The interrupted
      context is already gone at this point — the entry sequence above has
@@ -2648,8 +2689,8 @@ let emit_trap_entry () =
      interrupted context is lost. A handler must not fault (and must not \
      allocate: that is how it usually happens).\n") :: !string_data;
   emit (LoadAddr (t0, label));
-  emit_word (enc_i 0 t0 2 a2 0x03);
-  emit_word (enc_i 4 t0 0 a1 0x13);
+  emit_word (enc_i (0 * wsz ()) t0 (ldf3 ()) a2 0x03);
+  emit_word (enc_i (wsz ()) t0 0 a1 0x13);
   emit_word (enc_i 1 zero 0 a0 0x13);
   emit_word (enc_i 64 zero 0 a7 0x13);
   emit_word (enc_i 0 zero 0 zero 0x73);
@@ -2670,13 +2711,13 @@ let emit_raw_fault () =
   let label = "str__rawfault" in
   string_data := (label, mk_str_block "mere: raw access outside its window\n") :: !string_data;
   emit (LoadAddr (t0, label));
-  emit_word (enc_i 0 t0 2 a2 0x03);                     (* lw   a2, 0(t0) — len *)
-  emit_word (enc_i 4 t0 0 a1 0x13);                     (* addi a1, t0, 4 — bytes *)
+  emit_word (enc_i (0 * wsz ()) t0 (ldf3 ()) a2 0x03);                     (* lw   a2, 0(t0) — len *)
+  emit_word (enc_i (wsz ()) t0 0 a1 0x13);                     (* addi a1, t0, 4 — bytes *)
   emit_word (enc_i 1 zero 0 a0 0x13);
   emit_word (enc_i 64 zero 0 a7 0x13);
   emit_word (enc_i 0 zero 0 zero 0x73);                 (* ecall write *)
   emit_word (enc_i 93 zero 0 a7 0x13);
-  emit_word (enc_i 4 zero 0 a0 0x13);
+  emit_word (enc_i (wsz ()) zero 0 a0 0x13);
   emit_word (enc_i 0 zero 0 zero 0x73)                  (* ecall exit(4) *)
 
 let emit_pat_fail () =
@@ -2702,31 +2743,31 @@ let emit_agg_eq (fields : (int * Ast.ty) list) =
   let l_false = fresh_label ".eqf" in
   let l_done = fresh_label ".eqd" in
   emit_word (enc_i (-12) sp 0 sp 0x13);
-  emit_word (enc_s 8 ra sp 2 0x23);                     (* save ra *)
-  emit_word (enc_s 4 a0 sp 2 0x23);                     (* save x *)
-  emit_word (enc_s 0 a1 sp 2 0x23);                     (* save y *)
+  emit_word (enc_s (2 * wsz ()) ra sp (stf3 ()) 0x23);                     (* save ra *)
+  emit_word (enc_s (wsz ()) a0 sp (stf3 ()) 0x23);                     (* save x *)
+  emit_word (enc_s (0 * wsz ()) a1 sp (stf3 ()) 0x23);                     (* save y *)
   List.iter (fun (i, fty) ->
-    emit_word (enc_i 4 sp 2 t0 0x03);                   (* t0 = x *)
-    emit_word (enc_i (i * 4) t0 2 a0 0x03);             (* a0 = x[i] *)
-    emit_word (enc_i 0 sp 2 t0 0x03);                   (* t0 = y *)
-    emit_word (enc_i (i * 4) t0 2 a1 0x03);             (* a1 = y[i] *)
+    emit_word (enc_i (wsz ()) sp (ldf3 ()) t0 0x03);                   (* t0 = x *)
+    emit_word (enc_i ((i) * wsz ()) t0 (ldf3 ()) a0 0x03);             (* a0 = x[i] *)
+    emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) t0 0x03);                   (* t0 = y *)
+    emit_word (enc_i ((i) * wsz ()) t0 (ldf3 ()) a1 0x03);             (* a1 = y[i] *)
     emit (Jal (ra, request_eq fty));                    (* a0 = eq(x[i], y[i]) *)
     emit (Branch (0, a0, zero, l_false))                (* beqz a0 -> false *)
   ) fields;
   li a0 1; emit (Jal (zero, l_done));
   emit (Label l_false); li a0 0;
   emit (Label l_done);
-  emit_word (enc_i 8 sp 2 ra 0x03);
+  emit_word (enc_i (2 * wsz ()) sp (ldf3 ()) ra 0x03);
   emit_word (enc_i 12 sp 0 sp 0x13);
   emit_word (enc_i 0 ra 0 zero 0x67)                    (* ret *)
 
 let emit_variant_eq senv (variants : (string * Ast.ty option) list) =
   let l_false = fresh_label ".eqf" in
   let l_done = fresh_label ".eqd" in
-  emit_word (enc_i (-4) sp 0 sp 0x13);
-  emit_word (enc_s 0 ra sp 2 0x23);                     (* save ra *)
-  emit_word (enc_i 0 a0 2 t0 0x03);                     (* t0 = tag x *)
-  emit_word (enc_i 0 a1 2 t1 0x03);                     (* t1 = tag y *)
+  emit_word (enc_i (0 - wsz ()) sp 0 sp 0x13);
+  emit_word (enc_s (0 * wsz ()) ra sp (stf3 ()) 0x23);                     (* save ra *)
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                     (* t0 = tag x *)
+  emit_word (enc_i (0 * wsz ()) a1 (ldf3 ()) t1 0x03);                     (* t1 = tag y *)
   emit (Branch (1, t0, t1, l_false));                   (* tags differ -> false *)
   List.iteri (fun k (_ctor, payload) ->
     match payload with
@@ -2734,8 +2775,8 @@ let emit_variant_eq senv (variants : (string * Ast.ty option) list) =
     | Some pty ->
       let l_nk = fresh_label ".eqnk" in
       li t2 k; emit (Branch (1, t0, t2, l_nk));         (* if tag != k, skip *)
-      emit_word (enc_i 4 a1 2 t3 0x03);                 (* t3 = y payload *)
-      emit_word (enc_i 4 a0 2 a0 0x03);                 (* a0 = x payload *)
+      emit_word (enc_i (wsz ()) a1 (ldf3 ()) t3 0x03);                 (* t3 = y payload *)
+      emit_word (enc_i (wsz ()) a0 (ldf3 ()) a0 0x03);                 (* a0 = x payload *)
       emit_word (enc_i 0 t3 0 a1 0x13);                 (* a1 = t3 *)
       emit (Jal (ra, request_eq (subst_ty senv pty)));  (* a0 = eq(payloads) *)
       emit (Jal (zero, l_done));
@@ -2744,8 +2785,8 @@ let emit_variant_eq senv (variants : (string * Ast.ty option) list) =
   li a0 1; emit (Jal (zero, l_done));                   (* matched a nullary ctor *)
   emit (Label l_false); li a0 0;
   emit (Label l_done);
-  emit_word (enc_i 0 sp 2 ra 0x03);
-  emit_word (enc_i 4 sp 0 sp 0x13);
+  emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) ra 0x03);
+  emit_word (enc_i (wsz ()) sp 0 sp 0x13);
   emit_word (enc_i 0 ra 0 zero 0x67)                    (* ret *)
 
 let emit_eq_helper (tag, ty) =
@@ -2853,11 +2894,25 @@ let assemble (prog : item list) : string =
         here := !here + 8
       end
     | LoadAddr (rd, name) ->
-      let a = abs name in
-      let hi = (a + 0x800) asr 12 in
-      let lo = a - (hi lsl 12) in
-      put_word (enc_u (hi land 0xFFFFF) rd 0x37);        (* lui  rd, hi *)
-      put_word (enc_i lo rd 0 rd 0x13);                  (* addi rd, rd, lo *)
+      if !xlen = 64 then begin
+        (* pc-relative: lui SIGN-EXTENDS on RV64, so the absolute form below
+           would put a label at load base 0x80000000 into 0xFFFFFFFF80000000.
+           auipc reaches +/-2GB of here, and everything this program can name
+           lives inside its own image. Same 8 bytes, so the layout is width-
+           independent. *)
+        let d = abs name - (!load_base + !here) in
+        let hi = (d + 0x800) asr 12 in
+        let lo = d - (hi lsl 12) in
+        put_word (enc_u (hi land 0xFFFFF) rd 0x17);      (* auipc rd, hi *)
+        if lo = 0 then put_word (enc_i 0 zero 0 zero 0x13)  (* nop keeps the size *)
+        else put_word (enc_i lo rd 0 rd 0x13)            (* addi rd, rd, lo *)
+      end else begin
+        let a = abs name in
+        let hi = (a + 0x800) asr 12 in
+        let lo = a - (hi lsl 12) in
+        put_word (enc_u (hi land 0xFFFFF) rd 0x37);      (* lui  rd, hi *)
+        put_word (enc_i lo rd 0 rd 0x13)                 (* addi rd, rd, lo *)
+      end;
       here := !here + 8
     | Bytes b -> Buffer.add_string buf b; here := !here + String.length b
   ) prog;

@@ -567,7 +567,15 @@ let () =
      `--ram <MB>` and `--load-base <addr>` in any order. `--bare` means no host
      syscalls beyond the emulator's exit, and the program's top-level `main` is
      handed the machine capability it does its I/O through. *)
-  | _ :: (("-rv" | "-rvs" | "-rvg") as mode) :: (_ :: _ as rest) ->
+  | _ :: (("-rv" | "-rvs" | "-rvg"
+          | "-rv64" | "-rv64s" | "-rv64g") as mode) :: (_ :: _ as rest) ->
+    (* -rv64* is the same backend at xlen 64: LD/SD instead of LW/SW, 8-byte
+       cells, pc-relative addresses (RV64's lui sign-extends, so an absolute
+       0x80000000 built with lui+addi lands at 0xFFFFFFFF80000000). *)
+    if String.length mode > 4 && String.sub mode 0 5 = "-rv64" then
+      Mere.Codegen_riscv.xlen := 64;
+    let mode = if String.length mode > 4 && String.sub mode 0 5 = "-rv64"
+               then "-rv" ^ String.sub mode 5 (String.length mode - 5) else mode in
     (match rv_flags mode rest with
      | Some run -> run ()
      | None -> usage (); exit 1)
