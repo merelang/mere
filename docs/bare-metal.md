@@ -30,8 +30,24 @@ The three flags may come in any order. `-rvg <file>` prints the **debug map** th
 makes source-level debugging possible (see below); it must be given the same flags
 as the `-rv` that produced the binary, since the map records addresses and all
 three of them move addresses. `-rvs` prints an assembly listing and `-rvd`
-disassembles a binary — the disassembler knows the CSR instructions, `mret` and
-`wfi`.
+disassembles a binary — the disassembler covers RV32IM and RV64IM (including
+`ld`/`sd`/`lwu` and the `addiw`/`addw`/`mulw` family), the CSR instructions,
+`mret` and `wfi`.
+
+`sh scripts/rvd_oracle_check.sh` holds that disassembler to
+`riscv64-elf-objdump`, comparing every instruction in the code region of four
+real binaries at both widths — mnemonics throughout, and full operands over the
+load/store family, because a listing is read for its offsets. It skips cleanly
+when no RISC-V objdump is installed, and its summary line names how many cases
+and which widths actually ran.
+
+This gate exists because the disassembler did not have one for a long time, and
+that cost real hours: it is not part of any program's behaviour, so nothing went
+red when it fell behind the backend. Once `-rv64` existed, `ld` and `sd` were
+most of every binary and both read as `?`, leaving 41% of a listing unreadable —
+and `srli x, y, 32` printed as `srai`, which is worse, because a wrong name is
+believed. An instrument with no gate goes quietly wrong exactly when you start
+to depend on it.
 
 ## Memory map
 
