@@ -4,6 +4,77 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.390 — 2026-09-02
+
+_`ruby -e 'puts 1 + 1'` prints 2 on a RISC-V CPU written in Mere. The last bug
+was a region rollback reclaiming a Map's live cons cells._
+
+```
+$ mere -rv --ram 64 main.mere > prog.bin      # mere-ruby, 39,719 lines
+$ rvrun 64 -- -e 'puts 1 + 1'                 # on the Mere-written emulator
+2
+```
+
+Blocks, hashes, classes, methods, ranges, string formatting -- a real slice of
+Ruby -- run end to end on a machine whose every layer is self-written. What
+still stops is the decimal float conversions (`0.1` in Ruby source needs
+`float_of_str`), which were already on the list.
+
+### The bug, and why every earlier layer hid it
+
+`region R { body }` used to park gp and roll it back at the closing brace --
+sound only if nothing that OUTLIVES the region allocates from the bump heap
+inside it. On this backend that premise is false: Map is prelude-lowered Mere
+code, and `map_set m k v` on a map that lives outside the region allocates its
+new cons node INSIDE. The rollback declared the node reusable; the next closure
+allocation overwrote it; the map still pointed at it.
+
+The typer cannot see this. The map is `Map[__heap, ..]` and mutating it is not
+an escape, because on every other backend map internals live in the map's own
+arena -- which is exactly why interp, C, LLVM and Wasm all print the right
+answer for the same program. mere-ruby runs every top-level statement inside
+`region STMT`, so one `map_set` per statement corrupted its constant table, and
+the crash arrived four million instructions later inside `__str_concat`.
+
+So a region on RV32I now reclaims nothing: compile the body, keep the heap.
+Correct and hungrier. The rollback comes back the day prelude structures can
+allocate from a second, persistent bump area -- recorded as design work, and the
+two unit tests that used to pin the rollback now pin its ABSENCE, so that day
+fails them and gets pointed here.
+
+`test/parity/region_map_escape.mere` holds the five-line shape, with the
+allocation churn after the region that a dangling node needs before it can
+testify -- unreused memory still holds its bytes, and reading it back looks like
+a pass. Poisoned by restoring the rollback: `map_get` returns garbage and
+`map_len` returns a memory address, the exact signature mere-ruby showed.
+
+### What it took to find
+
+The chase is a story about instruments, and all of them are now permanent:
+
+* **Every encoder refuses a value that does not fit its field** instead of
+  masking it. The first thing that surfaced: frames beyond ~500 locals had
+  their fp offsets silently wrapped into OTHER SLOTS (`-3484 does not fit 12
+  bits`). Real bug, fixed with two-instruction wide access through s11 -- and
+  not the bug being chased.
+* **`__rv_word`**: the machine word any value is, on the target only. "Which
+  address is this map cell" has no other spelling, and the corruption was
+  finally pinned by printing a tuple's address before and after a statement
+  boundary: 7178284 before, a stack address after.
+* **memu grew a pc ring, a register dump on abnormal halts, a heap/stack
+  invariant watch, and an exact-address store watch** (`rvrun 64 watch <addr>`).
+  The store watch produced the verdict: the same three heap words written once
+  by `rvmap_set` and once, two statements later, by an unrelated closure
+  allocation. Same address, two owners -- the allocator had been rewound.
+
+Hypotheses measured and discarded on the way, in order: the new try_or's s-reg
+saves (disabled them -- byte-identical corruption), the assoc-list Map (104 real
+keys, zero mismatches), map_len itself (correct to 500 entries), deep recursion
+(correct to depth 512), heap/stack collision (the new invariant watch, first
+verified able to fire, saw none), frame width (real, fixed, symptom unchanged).
+
+---
+
 ## v0.1.389 — 2026-09-02
 
 _The parity suite has 142 programs and RV32I had never been run against any of

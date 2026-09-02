@@ -45,10 +45,31 @@ let a7 = 17
 let enc_r f7 rs2 rs1 f3 rd op =
   (f7 lsl 25) lor (rs2 lsl 20) lor (rs1 lsl 15) lor (f3 lsl 12) lor (rd lsl 7) lor op
 
+(* Every encoder REFUSES a value that does not fit its field, instead of masking
+   it. `land 0xFFF` on an out-of-range immediate does not fail -- it encodes a
+   different instruction, and the program computes wrong values as far from the
+   cause as the wrapped offset lands. enc_j learned this first (a jump one
+   megabyte out, v0.1.384); these are the same lesson for the other fields.
+   The failure is an internal error on purpose: user code cannot cause it, only a
+   backend that laid out more than a field can say. *)
+let field_check what bits v =
+  let lo = -(1 lsl (bits - 1)) and hi = (1 lsl (bits - 1)) - 1 in
+  if v < lo || v > hi then
+    failwith (Printf.sprintf
+      "RV32I internal: %s %d does not fit %d bits [%d..%d] -- a code-layout bug \
+       in this backend, not in the program being compiled" what v bits lo hi)
+
 let enc_i imm rs1 f3 rd op =
+  (* SYSTEM (0x73) carries a CSR number in the immediate field, and CSR
+     addresses use all 12 bits UNSIGNED -- 0xC00 is the cycle counter, not -1024.
+     Everything else is a signed offset. *)
+  if op = 0x73 then (if imm < 0 || imm > 0xFFF then
+    failwith (Printf.sprintf "RV32I internal: CSR number %d does not fit 12 bits" imm))
+  else field_check "I-type immediate" 12 imm;
   ((imm land 0xFFF) lsl 20) lor (rs1 lsl 15) lor (f3 lsl 12) lor (rd lsl 7) lor op
 
 let enc_s imm rs2 rs1 f3 op =
+  field_check "S-type offset" 12 imm;
   let i = imm land 0xFFF in
   ((i lsr 5) lsl 25) lor (rs2 lsl 20) lor (rs1 lsl 15) lor (f3 lsl 12)
   lor ((i land 0x1F) lsl 7) lor op
@@ -57,6 +78,7 @@ let enc_u imm20 rd op =
   ((imm20 land 0xFFFFF) lsl 12) lor (rd lsl 7) lor op
 
 let enc_b imm rs2 rs1 f3 op =
+  field_check "B-type offset" 13 imm;
   let i = imm land 0x1FFF in
   let b12 = (i lsr 12) land 1 in
   let b11 = (i lsr 11) land 1 in
@@ -654,6 +676,43 @@ let rec flatten_app (e : Ast.expr) =
    function with more than ten live names spills one more to memory. *)
 let sregs = [| 9; 18; 19; 20; 21; 22; 23; 24; 25; 26 |]   (* s1..s10 *)
 let farjmp = 27                                           (* s11, reserved *)
+
+(* Frame access that survives a frame bigger than an immediate. A function with
+   more than ~500 live bindings has slots past +/-2047 bytes of fp, and
+   `enc_s (slot_off slot)` used to MASK those offsets: the frame wrapped, slot
+   N+512 aliased slot N, and reads answered with other locals' values. mere-ruby
+   has such functions, and watched `map_len` return a stack address that was
+   really somebody's loop counter. The encoders refuse out-of-field values now;
+   these choose the two-instruction form when the one-instruction form cannot
+   say the offset.
+
+   s11 is the scratch, for the same reason it carries far jumps: it is reserved,
+   dead between uses, and belongs to no calling convention here. t0 would not
+   do -- emit_frame_teardown is holding the caller's fp in t0 while it still
+   needs frame access, and the prologue's parameter spill has the parameter
+   itself in t0. *)
+let base_load base rd off =
+  if off >= -2048 && off <= 2047 then emit_word (enc_i off base 2 rd 0x03)
+  else begin
+    li farjmp off;
+    emit_word (enc_r 0 farjmp base 0 farjmp 0x33);       (* add s11, base, s11 *)
+    emit_word (enc_i 0 farjmp 2 rd 0x03)                 (* lw rd, 0(s11) *)
+  end
+let base_store base rs off =
+  if off >= -2048 && off <= 2047 then emit_word (enc_s off rs base 2 0x23)
+  else begin
+    li farjmp off;
+    emit_word (enc_r 0 farjmp base 0 farjmp 0x33);
+    emit_word (enc_s 0 rs farjmp 2 0x23)                 (* sw rs, 0(s11) *)
+  end
+(* addi rd, base, off at any width -- the prologue's sp adjustment and the
+   teardown's sp restore move by the whole frame *)
+let base_addi rd base off =
+  if off >= -2048 && off <= 2047 then emit_word (enc_i off base 0 rd 0x13)
+  else begin
+    li farjmp off;
+    emit_word (enc_r 0 farjmp base 0 rd 0x33)            (* add rd, base, s11 *)
+  end
 let nregs = Array.length sregs
 
 (* per-function frame shape, set by emit_function *)
@@ -687,11 +746,11 @@ let simple_reg (env : env) (e : Ast.expr) : int option =
 let store_a0_to idx =
   match loc_of idx with
   | Reg r -> emit_word (enc_i 0 a0 0 r 0x13)                      (* mv sX, a0 *)
-  | Mem slot -> emit_word (enc_s (slot_off slot) a0 fp 2 0x23)    (* sw a0, slot(fp) *)
+  | Mem slot -> base_store fp a0 (slot_off slot)                  (* sw a0, slot(fp) *)
 let load_to_a0 idx =
   match loc_of idx with
   | Reg r -> emit_word (enc_i 0 r 0 a0 0x13)                      (* mv a0, sX *)
-  | Mem slot -> emit_word (enc_i (slot_off slot) fp 2 a0 0x03)    (* lw a0, slot(fp) *)
+  | Mem slot -> base_load fp a0 (slot_off slot)                   (* lw a0, slot(fp) *)
 
 (* top-level value bindings live in a fixed region at globals_base. Load the
    full slot address (li handles any offset, so the global count is unbounded). *)
@@ -749,11 +808,11 @@ let emit_frame_teardown () =
   let ra_slot = fp_slot + 1 in
   let fsz = (ra_slot + 1) * 4 in
   for k = 0 to nsaved - 1 do
-    emit_word (enc_i ((sreg_base + k) * 4) fp 2 sregs.(k) 0x03)
+    base_load fp sregs.(k) ((sreg_base + k) * 4)
   done;
-  emit_word (enc_i (ra_slot * 4) fp 2 ra 0x03);         (* lw   ra, ra_slot(fp) *)
-  emit_word (enc_i (fp_slot * 4) fp 2 t0 0x03);         (* lw   t0, fp_slot(fp) — old fp *)
-  emit_word (enc_i fsz fp 0 sp 0x13);                   (* addi sp, fp, fsz *)
+  base_load fp ra (ra_slot * 4);                        (* lw   ra, ra_slot(fp) *)
+  base_load fp t0 (fp_slot * 4);                        (* lw   t0, fp_slot(fp) — old fp *)
+  base_addi sp fp fsz;                                  (* addi sp, fp, fsz *)
   emit_word (enc_i 0 t0 0 fp 0x13)                      (* addi fp, t0, 0 *)
 
 (* Shared by the raw peek/poke arms: a0 = the Raw window, a1 = the offset.
@@ -885,7 +944,7 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
      | Some idx ->
        (match loc_of idx with
         | Reg r -> emit_word (enc_i 0 r 0 a0 0x13)                   (* mv  a0, sX *)
-        | Mem slot -> emit_word (enc_i (slot_off slot) fp 2 a0 0x03))(* lw  a0, slot(fp) *)
+        | Mem slot -> base_load fp a0 (slot_off slot))              (* lw  a0, slot(fp) *)
      | None ->
        (match Hashtbl.find_opt globals_map v with
         | Some gi -> load_global_to_a0 gi                         (* top-level value binding *)
@@ -960,7 +1019,7 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     let idx = !slot_ctr in incr slot_ctr;
     (match loc_of idx with
      | Reg r -> emit_word (enc_i 0 a0 0 r 0x13)                      (* mv  sX, a0 *)
-     | Mem slot -> emit_word (enc_s (slot_off slot) a0 fp 2 0x23));  (* sw  a0, slot(fp) *)
+     | Mem slot -> base_store fp a0 (slot_off slot));                (* sw  a0, slot(fp) *)
     tail_pos := saved_tail;
     compile_expr ((name, idx) :: env) body
   | Ast.Let ({ pnode = Ast.P_wild; _ }, rhs, body) ->
@@ -1067,18 +1126,26 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     err e.loc "RV32I: `region R loop` is not supported yet -- the bump rollback \
                here is LIFO, and the loop's carry must survive the rollback"
   | Ast.Region_block (_, body) ->
-    (* LIFO reclamation: park the heap top, run the body, roll back — the
-       same thing the Wasm backend does by saving and restoring __lang_bump.
-       Everything the body allocated becomes reusable at the closing brace,
-       which is what lets a long-running loop hold a flat heap. The body is
-       deliberately NOT in tail position: a tail call out of it would skip
-       the rollback. A value allocated inside and returned out is dangling,
-       exactly as on the other backends — region tagging is what rules it
-       out, not the codegen. *)
-    push gp;
-    compile_expr env body;
-    pop t0;
-    emit_word (enc_i 0 t0 0 gp 0x13)                                (* mv gp, t0 *)
+    (* A region does NOT reclaim on this backend. It used to: park gp, run the
+       body, roll back -- the same LIFO bump rollback the Wasm backend does.
+       That rollback is sound only if nothing that OUTLIVES the region allocates
+       from the bump heap inside it, and on this backend that premise is false:
+       Map and every other prelude-lowered structure is ordinary Mere code whose
+       cons cells come from gp. `map_set m k v` on a map that lives OUTSIDE the
+       region allocated its new node INSIDE, the rollback declared that node
+       reusable, and the next closure allocation overwrote it -- while the map
+       still pointed at it. The typer's region tagging cannot see this: the map
+       is `Map[__heap, ..]` and mutating it is not an escape, because on every
+       other backend map internals live in the map's own arena, not the
+       region. mere-ruby runs each top-level statement inside `region STMT`,
+       so ONE `map_set` per statement was enough to corrupt the interpreter's
+       own constant table, four million instructions before the crash.
+
+       So: compile the body, reclaim nothing. Correct and hungrier -- a region
+       here keeps the flat-heap promise only after prelude structures learn to
+       allocate somewhere a rollback does not touch (a second, persistent bump
+       area), which is real design work and recorded as such. *)
+    compile_expr env body
   | Ast.Float_lit f ->
     let b = Int64.bits_of_float f in
     let hi = signed32 (Int64.to_int (Int64.shift_right_logical b 32)) in
@@ -1723,6 +1790,9 @@ and compile_app env e =
      is typed, rather than here where a wrong tag would be silent. `__rv_argstr`
      copies nothing: what the loader left in the block already has this
      backend's string layout, so the pointer is the string. *)
+  (* the identity: whatever word the value is, as an int. Diagnostic only. *)
+  | Ast.Var "__rv_word" when List.length args = 1 ->
+    compile_expr env (List.hd args)
   | Ast.Var "__rv_argc" when List.length args = 1 ->
     compile_expr env (List.hd args);                         (* the unit, discarded *)
     li t1 (argv_base ());
@@ -2029,11 +2099,11 @@ let emit_prologue total =
   let fp_slot = noverflow + nsaved in
   let ra_slot = fp_slot + 1 in
   let fsz = (ra_slot + 1) * 4 in
-  emit_word (enc_i (-fsz) sp 0 sp 0x13);                (* addi sp, sp, -fsz *)
-  emit_word (enc_s (ra_slot * 4) ra sp 2 0x23);         (* sw   ra, ra_slot(sp) *)
-  emit_word (enc_s (fp_slot * 4) fp sp 2 0x23);         (* sw   fp, fp_slot(sp) *)
+  base_addi sp sp (-fsz);                               (* addi sp, sp, -fsz *)
+  base_store sp ra (ra_slot * 4);                       (* sw   ra, ra_slot(sp) *)
+  base_store sp fp (fp_slot * 4);                       (* sw   fp, fp_slot(sp) *)
   for k = 0 to nsaved - 1 do
-    emit_word (enc_s ((sreg_base + k) * 4) sregs.(k) sp 2 0x23)
+    base_store sp sregs.(k) ((sreg_base + k) * 4)
   done;
   emit_word (enc_i 0 sp 0 fp 0x13);                     (* addi fp, sp, 0 *)
   (nsaved, sreg_base, fp_slot, ra_slot, fsz)
@@ -2062,12 +2132,12 @@ let emit_function ~label ~params ~body =
        fp + fsz + (i-8)*4 (the prologue subtracted fsz from sp) *)
     let src_into_t0 () =
       if i < 8 then emit_word (enc_i 0 (a0 + i) 0 t0 0x13)          (* mv t0, aI *)
-      else emit_word (enc_i (fsz + (i - 8) * 4) fp 2 t0 0x03) in    (* lw t0, stackarg *)
+      else base_load fp t0 (fsz + (i - 8) * 4) in                   (* lw t0, stackarg *)
     match loc_of i with
     | Reg r ->
       if i < 8 then emit_word (enc_i 0 (a0 + i) 0 r 0x13)           (* mv sX, aI *)
-      else emit_word (enc_i (fsz + (i - 8) * 4) fp 2 r 0x03)        (* lw sX, stackarg *)
-    | Mem slot -> src_into_t0 (); emit_word (enc_s (slot_off slot) t0 fp 2 0x23)
+      else base_load fp r (fsz + (i - 8) * 4)                       (* lw sX, stackarg *)
+    | Mem slot -> src_into_t0 (); base_store fp t0 (slot_off slot)
   ) params;
   slot_ctr := nparams;
   tail_pos := true;                       (* the body's value is the function's *)
@@ -2091,12 +2161,12 @@ let emit_lambda ~label ~captures ~param ~body =
     emit_word (enc_i ((i + 1) * 4) a0 2 t0 0x03);                  (* lw t0, (i+1)*4(a0) *)
     match loc_of i with
     | Reg r -> emit_word (enc_i 0 t0 0 r 0x13)                     (* mv sX, t0 *)
-    | Mem slot -> emit_word (enc_s (slot_off slot) t0 fp 2 0x23)
+    | Mem slot -> base_store fp t0 (slot_off slot)
   ) captures;
   (* the argument (a1) -> the param binding (index k) *)
   (match loc_of k with
    | Reg r -> emit_word (enc_i 0 a1 0 r 0x13)                      (* mv sX, a1 *)
-   | Mem slot -> emit_word (enc_s (slot_off slot) a1 fp 2 0x23));
+   | Mem slot -> base_store fp a1 (slot_off slot));
   slot_ctr := k + 1;
   let env = List.mapi (fun i c -> (c, i)) captures @ [(param, k)] in
   tail_pos := true;
