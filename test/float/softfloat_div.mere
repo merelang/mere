@@ -10,6 +10,18 @@
 import "../../contrib/softfloat/div.mere";
 import "../../contrib/softfloat/bits.mere";
 
+// A NaN by its bits: exponent all-ones, fraction nonzero. The SIGN and the
+// PAYLOAD of a NaN that an OPERATION produces are not specified by IEEE 754 and
+// differ by platform -- 0.0/0.0 is +nan on ARM/macOS and -nan on x86/Linux, and
+// which input's payload an add propagates is equally free. So when both the
+// hardware and this library return a NaN, that is agreement; comparing their
+// bits would be testing the platform, not the arithmetic. (The round-trip gate
+// still checks exact NaN bits, because THERE no operation generates the NaN --
+// a bit pattern goes in and must come back unchanged.)
+let _bits_nan = fn (hi: int) -> fn (lo: int) ->
+  bit_and hi 2146435072 == 2146435072
+  && (bit_and hi 1048575 != 0 || lo != 0);
+
 let fails = vec_new ();
 let _ = vec_push fails 0;
 let shown = vec_new ();
@@ -19,7 +31,8 @@ let check = fn (ahi: int) -> fn (alo: int) -> fn (bhi: int) -> fn (blo: int) ->
   let hw = f_div (float_of_bits ahi alo) (float_of_bits bhi blo) in
   let sw = fdiv (sf_of_hi_lo ahi alo) (sf_of_hi_lo bhi blo) in
   let ghi = hi_of_sf sw in let glo = lo_of_sf sw in
-  if ghi == float_bits_hi hw && glo == float_bits_lo hw then () else
+  if (ghi == float_bits_hi hw && glo == float_bits_lo hw)
+     || (_bits_nan ghi glo && _bits_nan (float_bits_hi hw) (float_bits_lo hw)) then () else
     let _ = vec_set fails 0 (vec_get fails 0 + 1) in
     if vec_get shown 0 >= 12 then () else
       let _ = vec_set shown 0 (vec_get shown 0 + 1) in
