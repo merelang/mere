@@ -2029,6 +2029,10 @@ let initial_env : env =
        answers Linux's clock_gettime64 and getrandom, so `time` and `random_int`
        are real there. Internals, like __rv_argc: the portable spellings are
        `time` and `random_int`, and every other backend refuses these names. *)
+    (* The machine's word width in bits, as a compile-time constant. The prelude
+       needs it exactly once: Linux's timespec64 is two 32-bit-cell pairs on
+       rv32 and two native words on rv64, and the same prelude reads both. *)
+    ("__rv_xlen",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
     ("__rv_clock",  mono (Ast.TyArrow (Ast.TyInt,
                             Ast.TyTuple [Ast.TyInt; Ast.TyInt; Ast.TyInt; Ast.TyInt])));
     ("__rv_urandom32", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));

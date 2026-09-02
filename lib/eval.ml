@@ -3200,6 +3200,7 @@ let initial_env : env =
     ("csr_read", ref (bare_only "csr_read"));
     ("csr_write", ref (bare_only "csr_write"));
     ("raw_window", ref (bare_only "raw_window"));
+    ("__rv_xlen", ref (rv_only "__rv_xlen"));
     ("__rv_clock", ref (rv_only "__rv_clock"));
     ("__rv_urandom32", ref (rv_only "__rv_urandom32"));
     ("__rv_word", ref (rv_only "__rv_word"));
