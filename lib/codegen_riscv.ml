@@ -560,7 +560,13 @@ let trap_handler_slot () = stack_top () + 0x1100
    resumes a task holding another task's — or the handler's — values. That failure
    is silent and arrives much later, as a jump through a pointer that used to be
    something else. Counting instead makes it loud at the moment it happens. *)
-let trap_depth_slot () = stack_top () + 0x1104
+(* +0x1110, not +0x1104: the handler slot above is one WORD, which on RV64 is
+   [+0x1100, +0x1108) -- and the register save area below it is 32 words, which
+   on RV64 ends exactly AT +0x1100. The old +0x1104 depth slot sat inside the
+   64-bit handler pointer's upper half, so `depth = 1` quietly set bit 32 of the
+   closure address and the first timer interrupt jumped into nothing. The gap
+   also leaves the save area room to be exactly 32 cells at either width. *)
+let trap_depth_slot () = stack_top () + 0x1110
 (* The handler gets a stack of its own, growing down from here. Running it on the
    interrupted task's stack is how a kernel invites the whole class of problem
    where the handler's frame lands somewhere it should not — and it means the
@@ -1794,6 +1800,25 @@ and compile_app env e =
        RV64, so a device value with bit 31 set does not come back negative. *)
     if wide then emit_word (enc_i 0 t0 (if !xlen = 64 then 6 else 2) a0 0x03)  (* lwu/lw a0 *)
     else emit_word (enc_i 0 t0 4 a0 0x03)                     (* lbu a0, 0(t0) *)
+  (* cell-indexed, word-wide: offset = i * wsz, width = wsz. The scheduler
+     copies register save slots with these and is the same source at 32 and 64. *)
+  | Ast.Var "raw_peekw" when List.length args = 2 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1);
+    emit_word (enc_i (wshift ()) a0 1 a1 0x13);               (* a1 = i * wsz *)
+    pop a0;
+    emit_raw_bounds (wsz ());
+    emit_word (enc_i 0 t0 (ldf3 ()) a0 0x03)                  (* lw/ld a0, 0(t0) *)
+  | Ast.Var "raw_pokew" when List.length args = 3 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1); push a0;
+    compile_expr env (List.nth args 2);
+    emit_word (enc_i 0 a0 0 a2 0x13);                         (* a2 = v *)
+    pop a1; pop a0;
+    emit_word (enc_i (wshift ()) a1 1 a1 0x13);               (* a1 = i * wsz *)
+    emit_raw_bounds (wsz ());
+    emit_word (enc_s 0 a2 t0 (stf3 ()) 0x23);                 (* sw/sd a2, 0(t0) *)
+    emit_word (enc_i 0 zero 0 a0 0x13)                        (* unit *)
   | Ast.Var ("raw_poke8" | "raw_poke32") when List.length args = 3 ->
     let wide = (match head.node with Ast.Var "raw_poke32" -> true | _ -> false) in
     compile_expr env (List.nth args 0); push a0;              (* w *)
@@ -2555,7 +2580,13 @@ let emit_strbuf () =
    doubling cap). vec_get / vec_set / vec_len are inlined at the call site. *)
 let emit_vec () =
   emit (Label "__vec_new");                        (* a0 ignored *)
-  emit_word (enc_i (wsz ()) zero 0 t2 0x13);              (* cap = 4 words *)
+  (* The CONSTANT four, not the word size. The blanket offset-scaling pass
+     turned this `li t2, 4` into `li t2, wsz` because it looked like every other
+     `addi _, _, 4` -- and on RV64 that made the initial capacity 8 above a
+     4-cell buffer, so the first growth never fired and the fifth push wrote
+     through the stale capacity into the cell's own length field. A value and a
+     size can wear the same literal, and only one of them scales. *)
+  emit_word (enc_i 4 zero 0 t2 0x13);                     (* cap = 4 CELLS *)
   emit_word (enc_i 0 gp 0 t0 0x13);                (* databuf = gp *)
   emit_word (enc_i (4 * wsz ()) gp 0 gp 0x13);     (* bump 4 cells *)
   emit_word (enc_i 0 gp 0 t1 0x13);                (* cell = gp *)
@@ -2658,10 +2689,10 @@ let emit_trap_entry () =
   (* Only now is every register safely in the save area, so only now is a
      register free to think with. Checking the depth any earlier would clobber
      one before saving it — which is the very bug this check exists to catch. *)
-  emit_word (enc_i 0x104 t0 (ldf3 ()) t1 0x03);                 (* lw t1, depth *)
+  emit_word (enc_i 0x110 t0 (ldf3 ()) t1 0x03);                 (* lw t1, depth *)
   emit (Branch (1, t1, zero, "__trap_nested"));
   emit_word (enc_i 1 zero 0 t1 0x13);
-  emit_word (enc_s 0x104 t1 t0 (stf3 ()) 0x23);                 (* depth = 1 *)
+  emit_word (enc_s 0x110 t1 t0 (stf3 ()) 0x23);                 (* depth = 1 *)
   li sp (trap_stack_top ());                            (* the handler's own stack *)
   (* call the registered closure: a0 = its env, a1 = mcause *)
   emit_word (enc_i 0x342 zero 2 a1 0x73);               (* csrrs a1, mcause, x0 *)
@@ -2672,7 +2703,7 @@ let emit_trap_entry () =
   emit_word (enc_i 0x341 a0 1 zero 0x73);               (* csrrw x0, mepc, a0 *)
   (* restore and return *)
   li t0 (trap_save_base ());
-  emit_word (enc_s 0x104 zero t0 (stf3 ()) 0x23);               (* depth = 0 *)
+  emit_word (enc_s 0x110 zero t0 (stf3 ()) 0x23);               (* depth = 0 *)
   for i = 1 to 31 do
     if i <> 5 then emit_word (enc_i ((i) * wsz ()) t0 (ldf3 ()) i 0x03) (* lw xI, i*4(t0) *)
   done;
@@ -2717,7 +2748,11 @@ let emit_raw_fault () =
   emit_word (enc_i 64 zero 0 a7 0x13);
   emit_word (enc_i 0 zero 0 zero 0x73);                 (* ecall write *)
   emit_word (enc_i 93 zero 0 a7 0x13);
-  emit_word (enc_i (wsz ()) zero 0 a0 0x13);
+  (* exit(4): a STATUS CODE that happened to be spelled 4 -- the second value
+     the offset-scaling pass mistook for a size (the first was Vec's initial
+     capacity). exit(8) on one width and exit(4) on the other is the kind of
+     difference nothing diffs until a script branches on $?. *)
+  emit_word (enc_i 4 zero 0 a0 0x13);
   emit_word (enc_i 0 zero 0 zero 0x73)                  (* ecall exit(4) *)
 
 let emit_pat_fail () =

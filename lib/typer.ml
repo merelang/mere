@@ -1992,6 +1992,16 @@ let initial_env : env =
                               Ast.TyArrow (Ast.TyInt, Ast.TyCon ("Raw", []))))));
     ("raw_peek8",   mono (Ast.TyArrow (Ast.TyCon ("Raw", []),
                             Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
+    (* CELL-indexed, machine-word-wide access: `raw_peekw w i` reads the i-th
+       WORD of the window, whatever a word is on this machine. The vocabulary a
+       program needs to walk a register save area on either width -- byte
+       offsets with a fixed *4 in the program are how the scheduler example
+       silently stayed 32-bit. *)
+    ("raw_peekw",   mono (Ast.TyArrow (Ast.TyCon ("Raw", []),
+                            Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
+    ("raw_pokew",   mono (Ast.TyArrow (Ast.TyCon ("Raw", []),
+                            Ast.TyArrow (Ast.TyInt,
+                              Ast.TyArrow (Ast.TyInt, Ast.TyUnit)))));
     ("raw_peek32",  mono (Ast.TyArrow (Ast.TyCon ("Raw", []),
                             Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
     ("raw_poke8",   mono (Ast.TyArrow (Ast.TyCon ("Raw", []),

@@ -3206,6 +3206,8 @@ let initial_env : env =
     ("__rv_argc", ref (rv_only "__rv_argc"));
     ("__rv_argstr", ref (rv_only "__rv_argstr"));
     ("raw_peek8", ref (bare_only "raw_peek8"));
+    ("raw_peekw", ref (bare_only "raw_peekw"));
+    ("raw_pokew", ref (bare_only "raw_pokew"));
     ("raw_peek32", ref (bare_only "raw_peek32"));
     ("raw_poke8", ref (bare_only "raw_poke8"));
     ("raw_poke32", ref (bare_only "raw_poke32"));
