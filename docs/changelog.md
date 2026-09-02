@@ -4,6 +4,46 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.397 — 2026-09-02
+
+_75 of 79 runnable corpus programs agree at 64 bits, and rv_exec_check runs both
+widths now. Five more bugs, and the most instructive pair had been unreachable
+at 32 for the same reason they were bugs at all._
+
+* **`chr`, `vec_get`, `vec_set`, `char_at` and `substring` never checked their
+  bounds on this backend.** The test that exists to see exactly that
+  (index_edges, and prop_int's randomized `chr`) uses literals too wide to
+  compile at 32 bits -- so the first machine that could run the test was the
+  64-bit one, where `chr` of a sixty-bit number quietly stored the low byte and
+  `vec_get v (-1)` read the word below the buffer. All five refuse now, with
+  unsigned comparisons so a negative index is one huge index and the same
+  refusal. (And the first version of the checks branched with the operands
+  swapped -- `bltu len, i` -- which refused everything IN bounds; index_edges
+  said so on the next run.)
+* **`__strbuf_new` and `__strbuf_push` had frames spelled `8` -- two words at
+  the old width.** At 64 the push frame moved sp by 8 and stored ra at sp+8:
+  one word ABOVE its own frame, in the caller's stack. Every strbuf call
+  corrupted its caller. This is the third member of the value-vs-size family,
+  wearing a different literal.
+* Same family, one more: `emit_variant_eq`'s three-word frame was `-12`.
+
+The 32-bit column is untouched (2617 unit tests, parity 142, rv_exec 70/5 all
+green), and the four differences left at 64 all have standing causes, named in
+the script: the word-comparison `==`, the arena that does not exist, the RAM the
+sweep does not grant, and the prelude's concat-quadratic string builders --
+that last one now recorded as real work (strbuf wants to be an actual byte
+buffer; today it is `str_concat` in a loop on every push).
+
+**Still open, with evidence attached**: mere-ruby's boot on the 64-bit machine.
+`lv_owner` receives `env = 1` -- a boolean where an environment belongs -- on
+its very first call, so the corruption is upstream of everything probed so far,
+and it is not any of: the strbuf frames (fixed), the map runtime (75 corpus
+programs exercise it), or the tuple-destructure shape (reproduced clean in
+isolation). That is the opening question of the next session, instruments in
+hand.
+
+---
+
 ## v0.1.396 — 2026-09-02
 
 _Hosted RV64: the parity corpus runs on a 64-bit CPU written in Mere, 67
