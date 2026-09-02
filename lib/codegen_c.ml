@@ -2431,10 +2431,13 @@ let rec emit_expr (e : Ast.expr) : string =
         process does not have is the block, and `args` is the spelling that
         works everywhere. *)
      | Ast.Var ("__rv_argc" | "__rv_argstr" | "__rv_word"
-               | "__rv_clock" | "__rv_urandom32" | "__rv_xlen") ->
+               | "__rv_clock" | "__rv_urandom32" | "__rv_xlen"
+               | "__rv_open_rd" | "__rv_read_all" | "__rv_access") ->
        unsupported e.Ast.loc
          "__rv_argc / __rv_argstr read the RV32I argument block, which a hosted \
-          process does not have — call `args`, which works on every backend"
+          process does not have — call `args`, which works on every backend; \
+          __rv_open_rd / __rv_read_all / __rv_access are that backend's raw \
+          openat/read/faccessat — call `read_file` or `file_exists`"
      (* Raw physical memory is RV32I bare-metal only. Without this arm the
         raw_* names fell through to the closure path and emitted a call to an
         undefined `mu_raw_poke8` plus an unknown `Raw` C type, so the refusal
@@ -11529,7 +11532,23 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       | _ -> (List.rev params, body, Ast.walk ty)
     in
     let params, body, ret = peel [(f.param, f.param_ty)] f.body f.return_ty in
-    if List.length params >= 2
+    (* >= 1, not >= 2. The direct form started life as a CALLING CONVENTION --
+       uncurrying an N-ary top-level fn -- and one parameter has nothing to
+       uncurry, so it was skipped. But the self-tail-call loop transform
+       (Q-029) is only reachable through this form: the plain path never
+       consults `self_tail_goto`. The two facts composed, and every
+       ONE-argument top-level `let rec` compiled to REAL recursion -- a C frame
+       per iteration, depth bounded by nothing the language controls.
+       Those functions still ran, on clang's sibling-call optimisation, which is
+       a property of the optimiser and not of the program. memu's RISC-V
+       emulator is `let rec drive = fn n -> ... drive (n + 1)`, so its depth is
+       the emulated instruction COUNT; adding a syscall service to that file was
+       enough to change clang's mind, and every long-running guest then died
+       with "stack overflow (recursion too deep)" -- reported against the whole
+       RV corpus at once, which reads exactly like a regression in the compiler
+       under test. One extra emitted body per single-argument top-level fn is
+       the price of the loop being a promise instead of a hope. *)
+    if List.length params >= 1
        && List.for_all (fun (_, t) -> ty_concrete t) params
        && ty_concrete ret
     then Hashtbl.replace direct_fns f.name

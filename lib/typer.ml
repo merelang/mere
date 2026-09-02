@@ -2038,6 +2038,14 @@ let initial_env : env =
     ("__rv_urandom32", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
     ("__rv_argc",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
     ("__rv_argstr", mono (Ast.TyArrow (Ast.TyInt, Ast.TyStr)));
+    (* The hosted target's file services, spelled the way the syscalls are:
+       openat returns an fd or a NEGATIVE ERRNO, so the prelude can say which
+       one, and faccessat answers 0 or a negative errno rather than a bool. The
+       portable spellings are `read_file` and `file_exists`; the RV prelude
+       builds those out of these, and every other backend refuses these names. *)
+    ("__rv_open_rd", mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
+    ("__rv_read_all", mono (Ast.TyArrow (Ast.TyInt, Ast.TyStr)));
+    ("__rv_access", mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
     ("read_stdin",  mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     (* v0.1.13 (mk dogfood): run a command line via the shell, inherit
        stdio, return its exit code. *)

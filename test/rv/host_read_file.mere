@@ -1,0 +1,60 @@
+// `read_file` and `file_exists` on the hosted RV target, against the C backend.
+//
+// These two were answered with a stop (`__h_todo`) until v0.1.402, on the
+// reasoning that `--bare` hands the program the machine and there is no host to
+// read a file from. That is true of --bare and was never true of the hosted
+// target, which already asks the host to write and to exit through the same
+// Linux-numbered ecalls. The cost was specific and large: the interpreter this
+// backend is carried for could only ever be handed a program with `-e`, because
+// reading a script off disk went through read_file -- so its own 162-program
+// corpus could not be run on the machine at all, and the only end-to-end
+// evidence the backend worked was hand-written one-liners.
+//
+// This cannot live in test/parity/: it needs files on disk, and the parity
+// corpus is programs compared by output alone. scripts/rv_exec_check.sh creates
+// the fixtures and runs BOTH sides in the same directory -- which it has to do
+// deliberately, since the C reference otherwise runs in the repo root and the
+// emulator in a temp dir, and a relative path would mean two different files.
+//
+// What each line is for:
+//   * file_exists both ways -- faccessat, and a false that is really false
+//   * a missing read_file inside try_or -- an interpreter has to be able to turn
+//     this into its own exception (ruby raises Errno::ENOENT), and it cannot do
+//     that if the process is simply gone. The abort used to be uncatchable.
+//   * NUL bytes -- a Mere string is [len][bytes] and carries them; a C-string
+//     round trip would silently truncate at the first one
+//   * an empty file -- zero is a real answer, and the read loop must not read
+//     a chunk before noticing
+//   * a file past one 4096-byte chunk -- the loop, and the length written after
+//   * the head and tail of the big one -- a length that is right while the bytes
+//     landed in the wrong place would pass a length-only check
+let _ = print (if file_exists "rv_fixture.txt" then "exists" else "missing");
+let _ = print (if file_exists "rv_absent.txt" then "exists" else "missing");
+let _ = print (try_or (fn (u: unit) -> read_file "rv_absent.txt") "caught");
+
+let s = read_file "rv_fixture.txt";
+let _ = print ("text len=" ++ str_of_int (str_len s));
+let _ = print s;
+
+let b = read_file "rv_nul.dat";
+let _ = print ("nul len=" ++ str_of_int (str_len b));
+
+let e = read_file "rv_empty.dat";
+let _ = print ("empty len=" ++ str_of_int (str_len e));
+
+let big = read_file "rv_big.dat";
+let _ = print ("big len=" ++ str_of_int (str_len big));
+let _ = print ("big head=" ++ substring big 0 5);
+// substring takes (start, END), not (start, length) -- the first version of
+// this line said `(str_len big - 3) 3`, an invalid range, and the two backends
+// then disagreed about the WORDING of the out-of-bounds message rather than
+// about anything to do with reading a file. The tail is here to catch a length
+// that is right while the bytes landed in the wrong place, so it has to be a
+// range that exists.
+let _ = print ("big tail=" ++ substring big (str_len big - 3) (str_len big));
+
+// Reading the same file twice must give the same answer: the emulator servicing
+// these keeps its own arena and rolls it back on close, so a second open after a
+// close is exactly the path where a bookkeeping slip shows up as a short read.
+let again = read_file "rv_fixture.txt";
+let _ = print (if str_eq again s then "reread same" else "reread DIFFERENT");

@@ -1,0 +1,15 @@
+// `--bare` must still refuse read_file, by name.
+//
+// The refused-host-services list `read_file` used to sit on was protecting the
+// machine-only target: --bare hands `main` the machine as a `Raw` and there is
+// no host behind it to read a file from. Lowering read_file for the HOSTED
+// target must not quietly give --bare a filesystem too -- that is the
+// permissive direction, and the permissive direction is the worse one to be
+// wrong in.
+//
+// This is a separate file from host_read_file.mere because a --bare program has
+// to have a top-level `main` taking a Raw. Without one the compiler refuses it
+// for THAT reason, and a check that reads the refusal without reading its
+// reason passes while testing nothing -- which is exactly what the first
+// version of this gate did.
+let main = fn (m: Raw) -> read_file "anything";
