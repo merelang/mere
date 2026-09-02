@@ -74,13 +74,16 @@ let main = fn (mach: Raw) ->
     let into = if cur == 0 then tcb1 else tcb0 in
     let rec store = fn i ->
       if i > 31 then ()
-      else let _ = vec_set out i (raw_peek32 save (i * 4)) in store (i + 1) in
+      // raw_peekw: the i-th WORD, whatever a word is here. `raw_peek32 (i * 4)`
+      // was this program quietly deciding it would only ever run on a 32-bit
+      // machine -- on RV64 it read half of every register.
+      else let _ = vec_set out i (raw_peekw save i) in store (i + 1) in
     let _ = store 1 in
     let _ = vec_set out 0 (csr_read 0x341) in                  // where it was
     let rec load = fn i ->
       if i > 31 then ()
       else
-        let _ = raw_poke32 save (i * 4) (vec_get into i) in    // gp too: own heaps
+        let _ = raw_pokew save i (vec_get into i) in           // gp too: own heaps
         load (i + 1) in
     let _ = load 1 in
     let _ = vec_set state 0 (1 - cur) in

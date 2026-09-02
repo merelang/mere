@@ -4,6 +4,43 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.395 — 2026-09-02
+
+_The trap machinery and the context switcher run at 64 bits: qemu_virt is seven
+images -- hello, timer and sched at BOTH widths. Three bugs, all one family: a
+value and a size wearing the same literal._
+
+* **The trap save layout collided with itself.** 32 saved registers at 8 bytes
+  end exactly at +0x100 -- where the handler slot lives, now 8 bytes wide, with
+  the old depth word at +0x104 inside its upper half. `depth = 1` set bit 32 of
+  the handler closure's address and the first timer interrupt jumped into
+  nothing. The depth slot moved to +0x110, at both widths.
+* **Vec's initial capacity was the constant 4, not the word size.** The offset-
+  scaling pass turned `li t2, 4` into `li t2, wsz` because it looked like every
+  other `addi _, _, 4`. On RV64 that made cap = 8 above a 4-cell buffer: the
+  first growth never fired and the fifth push wrote through the stale capacity
+  into the cell's own length field. Diagnosing it took one wrong turn that the
+  pinned lesson about boundary values names exactly: a probe pushing 1..5 read
+  v[4] = 5 and looked CORRECT, because the corrupted read returns the length,
+  and the length was also 5.
+* **`exit(4)`'s status code scaled too** -- exit(8) on one width, exit(4) on the
+  other, the kind of difference nothing notices until a script branches on `$?`.
+
+And the scheduler example was itself width-32: it walked the register save area
+with `raw_peek32 save (i * 4)`, which on RV64 reads half of every register. The
+missing vocabulary was CELL-indexed, machine-word-wide access -- `raw_peekw` /
+`raw_pokew` -- and with it the same source runs at both widths.
+
+The lesson the three bugs share, written down where the scaling happened: a size
+scales with the width and a value does not, and a textual pass cannot tell them
+apart -- while the existing width's whole suite stays green, because there the
+substitution is the identity. Only running the NEW width sees it. The audit that
+closed the slice enumerated every `li` from x0 whose immediate had been scaled
+(zero remain) -- and the reverse ledger, operations whose NAME carries a width
+(`raw_peek32`, exit statuses, protocol constants), stays unscaled by contract.
+
+---
+
 ## v0.1.394 — 2026-09-02
 
 _`-rv64`: the same backend, twice as wide. hello runs on qemu-system-riscv64,
