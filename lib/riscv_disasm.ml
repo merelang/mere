@@ -64,10 +64,15 @@ let disasm_word ~pc (inst : int) : string =
     else if rs2 = 0 && f3 = 1 then sp "bnez %s, 0x%x" (r rs1) t
     else sp "%s %s, %s, 0x%x" m (r rs1) (r rs2) t
   | 0x03 ->
-    let m = [| "lb"; "lh"; "lw"; "?"; "lbu"; "lhu"; "?"; "?" |].(f3) in
+    (* f3=3 and f3=6 are RV64's LD and LWU. They read as "?" until -rv64
+       existed, and then they were most of the binary: every slot, cell and
+       field access on the wide target is one of these two, so a listing of
+       RV64 output was mostly question marks -- which is what the width bug in
+       the try_or record's save area had to be read around. *)
+    let m = [| "lb"; "lh"; "lw"; "ld"; "lbu"; "lhu"; "lwu"; "?" |].(f3) in
     sp "%s %s, %d(%s)" m (r rd) (imm_i inst) (r rs1)
   | 0x23 ->
-    let m = [| "sb"; "sh"; "sw"; "?"; "?"; "?"; "?"; "?" |].(f3) in
+    let m = [| "sb"; "sh"; "sw"; "sd"; "?"; "?"; "?"; "?" |].(f3) in
     sp "%s %s, %d(%s)" m (r rs2) (imm_s inst) (r rs1)
   | 0x13 ->
     let i = imm_i inst in
@@ -81,10 +86,38 @@ let disasm_word ~pc (inst : int) : string =
      | 4 -> sp "xori %s, %s, %d" (r rd) (r rs1) i
      | 6 -> sp "ori %s, %s, %d" (r rd) (r rs1) i
      | 7 -> sp "andi %s, %s, %d" (r rd) (r rs1) i
-     | 1 -> sp "slli %s, %s, %d" (r rd) (r rs1) rs2
-     | 5 -> if f7 = 0 then sp "srli %s, %s, %d" (r rd) (r rs1) rs2
-            else sp "srai %s, %s, %d" (r rd) (r rs1) rs2
-     | _ -> ".word 0x%08x")
+     (* shamt is 6 bits on RV64 and 5 on RV32; reading 6 is right for both,
+        because a legal RV32 encoding leaves bit 25 clear. And srli/srai is
+        told apart by bit 30 -- NOT by f7 = 0, which on RV64 is part of the
+        shift amount: `srli x, y, 32` has f7 = 1 and used to print as `srai`. *)
+     | 1 -> sp "slli %s, %s, %d" (r rd) (r rs1) ((inst lsr 20) land 0x3F)
+     | 5 -> if (inst lsr 30) land 1 = 0
+            then sp "srli %s, %s, %d" (r rd) (r rs1) ((inst lsr 20) land 0x3F)
+            else sp "srai %s, %s, %d" (r rd) (r rs1) ((inst lsr 20) land 0x3F)
+     | _ -> sp ".word 0x%08x" inst)
+  (* RV64's 32-bit-result forms. Neither opcode was decoded at all, so every
+     addiw/addw/mulw/divw in the output fell through to `.word` -- and the
+     backend emits them for every narrowing arithmetic op on the wide target. *)
+  | 0x1B ->
+    (match f3 with
+     | 0 -> sp "addiw %s, %s, %d" (r rd) (r rs1) (imm_i inst)
+     | 1 -> sp "slliw %s, %s, %d" (r rd) (r rs1) rs2
+     | 5 -> if (inst lsr 30) land 1 = 0
+            then sp "srliw %s, %s, %d" (r rd) (r rs1) rs2
+            else sp "sraiw %s, %s, %d" (r rd) (r rs1) rs2
+     | _ -> sp ".word 0x%08x" inst)
+  | 0x3B when f7 = 1 ->
+    let m = [| "mulw"; "?"; "?"; "?"; "divw"; "divuw"; "remw"; "remuw" |].(f3) in
+    sp "%s %s, %s, %s" m (r rd) (r rs1) (r rs2)
+  | 0x3B ->
+    (match f3 with
+     | 0 -> if f7 = 0 then sp "addw %s, %s, %s" (r rd) (r rs1) (r rs2)
+            else if rs1 = 0 then sp "negw %s, %s" (r rd) (r rs2)
+            else sp "subw %s, %s, %s" (r rd) (r rs1) (r rs2)
+     | 1 -> sp "sllw %s, %s, %s" (r rd) (r rs1) (r rs2)
+     | 5 -> if f7 = 0 then sp "srlw %s, %s, %s" (r rd) (r rs1) (r rs2)
+            else sp "sraw %s, %s, %s" (r rd) (r rs1) (r rs2)
+     | _ -> sp ".word 0x%08x" inst)
   | 0x33 when f7 = 1 ->
     let m = [| "mul"; "mulh"; "mulhsu"; "mulhu"; "div"; "divu"; "rem"; "remu" |].(f3) in
     sp "%s %s, %s, %s" m (r rd) (r rs1) (r rs2)

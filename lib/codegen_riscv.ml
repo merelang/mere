@@ -725,6 +725,32 @@ let rec flatten_app (e : Ast.expr) =
 let sregs = [| 9; 18; 19; 20; 21; 22; 23; 24; 25; 26 |]   (* s1..s10 *)
 let farjmp = 27                                           (* s11, reserved *)
 
+(* --- the `try_or` catch record: ONE layout, and the allocation DERIVED from it -
+   [prev][sp][fp][catch][default][s1..s10], in WORD indices, both widths.
+   Written by `try_or`, read back by `emit_fail_from_a0` -- two places that used
+   to spell the s-register offsets separately. v0.1.388 wrote the save as
+   `enc_s (20 + i * 4)`: a BYTE offset, words 5..14, exactly filling the 15-word
+   record. The wsz-ification in v0.1.394 rewrote it as `(20 + i) * wsz ()` --
+   the byte 20 became word 20 -- and put the whole save area 15 words PAST the
+   end of the record, on bump space the thunk then allocated for itself. A
+   caught failure restored the catcher's named bindings from whatever the failed
+   thunk had allocated there. `tor_off` is the invariant: an offset outside the
+   record cannot be emitted, and the size cannot drift from the layout because
+   it IS the layout. *)
+let tor_prev = 0
+let tor_sp = 1
+let tor_fp = 2
+let tor_catch = 3
+let tor_default = 4
+let tor_sreg i = 5 + i                     (* s1..s10, one per `sregs` entry *)
+let tor_words = 5 + Array.length sregs     (* the record's size in words *)
+let tor_off i =
+  if i < 0 || i >= tor_words then
+    failwith (Printf.sprintf
+      "mere: internal \xe2\x80\x94 try_or record word %d is outside the %d-word \
+       record; the layout and the allocation disagree" i tor_words);
+  i * wsz ()
+
 (* Frame access that survives a frame bigger than an immediate. A function with
    more than ~500 live bindings has slots past +/-2047 bytes of fp, and
    `enc_s (slot_off slot)` used to MASK those offsets: the frame wrapped, slot
@@ -899,17 +925,18 @@ let emit_binop op rd rs1 rs2 loc =
 let emit_fail_from_a0 () =
   let l_abort = fresh_label ".noCatch" in
   li t0 (fail_frame_addr ());
-  emit_word (enc_i (0 * wsz ()) t0 (ldf3 ()) t1 0x03);                      (* lw t1, 0(t0) — record *)
+  (* t0 is the GLOBAL fail-frame slot, not a record -- its 0 is not tor_prev's *)
+  emit_word (enc_i (0 * wsz ()) t0 (ldf3 ()) t1 0x03);                     (* record *)
   emit (Branch (0, t1, zero, l_abort));                  (* beq t1, x0, abort *)
-  emit_word (enc_i (0 * wsz ()) t1 (ldf3 ()) t2 0x03);                      (* lw t2, 0(t1) — prev *)
-  emit_word (enc_s (0 * wsz ()) t2 t0 (stf3 ()) 0x23);                      (* sw prev, 0(&frame) *)
-  emit_word (enc_i (wsz ()) t1 (ldf3 ()) sp 0x03);                      (* lw sp, 4(t1) *)
-  emit_word (enc_i (2 * wsz ()) t1 (ldf3 ()) fp 0x03);                      (* lw fp, 8(t1) *)
+  emit_word (enc_i (tor_off tor_prev) t1 (ldf3 ()) t2 0x03);               (* prev *)
+  emit_word (enc_s (0 * wsz ()) t2 t0 (stf3 ()) 0x23);                     (* sw prev, 0(&frame) *)
+  emit_word (enc_i (tor_off tor_sp) t1 (ldf3 ()) sp 0x03);                 (* sp *)
+  emit_word (enc_i (tor_off tor_fp) t1 (ldf3 ()) fp 0x03);                 (* fp *)
   (* the catcher's own named bindings, which the thunk has been writing over *)
   Array.iteri (fun i r ->
-    emit_word (enc_i ((20 + i) * wsz ()) t1 (ldf3 ()) r 0x03)) sregs;
-  emit_word (enc_i (4 * wsz ()) t1 (ldf3 ()) a0 0x03);                     (* lw a0, 16(t1) — default *)
-  emit_word (enc_i (3 * wsz ()) t1 (ldf3 ()) t1 0x03);                     (* lw t1, 12(t1) — catch *)
+    emit_word (enc_i (tor_off (tor_sreg i)) t1 (ldf3 ()) r 0x03)) sregs;
+  emit_word (enc_i (tor_off tor_default) t1 (ldf3 ()) a0 0x03);            (* default *)
+  emit_word (enc_i (tor_off tor_catch) t1 (ldf3 ()) t1 0x03);              (* catch *)
   emit_word (enc_i 0 t1 0 zero 0x67);                    (* jalr x0, t1 *)
   emit (Label l_abort);
   emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a2 0x03);                      (* lw a2, 0(a0) — len *)
@@ -1512,25 +1539,25 @@ and compile_app env e =
        right frame and not enough to find the caller's values in it: a catcher
        holding `p = 5` got back whatever the failed callee last put in that
        register. This is what setjmp saves and for the same reason. *)
-    alloc_words t1 15;
+    alloc_words t1 tor_words;
     push t1;
     li t0 (fail_frame_addr ());
     emit_word (enc_i (0 * wsz ()) t0 (ldf3 ()) t2 0x03);                    (* lw t2, 0(t0) — prev *)
-    emit_word (enc_s (0 * wsz ()) t2 t1 (stf3 ()) 0x23);                    (* sw prev, 0(rec) *)
+    emit_word (enc_s (tor_off tor_prev) t2 t1 (stf3 ()) 0x23);              (* prev *)
     emit (LoadAddr (t0, l_catch));
-    emit_word (enc_s (3 * wsz ()) t0 t1 (stf3 ()) 0x23);                   (* sw &catch, 12(rec) *)
+    emit_word (enc_s (tor_off tor_catch) t0 t1 (stf3 ()) 0x23);             (* &catch *)
     pop t1;
     (* sp and fp as they are here: the level both paths return to *)
-    emit_word (enc_s (wsz ()) sp t1 (stf3 ()) 0x23);                    (* sw sp, 4(rec) *)
-    emit_word (enc_s (2 * wsz ()) fp t1 (stf3 ()) 0x23);                    (* sw fp, 8(rec) *)
+    emit_word (enc_s (tor_off tor_sp) sp t1 (stf3 ()) 0x23);                (* sp *)
+    emit_word (enc_s (tor_off tor_fp) fp t1 (stf3 ()) 0x23);                (* fp *)
     (* ...and every register a named binding can be in. s11 is not among them: it
        is the far-jump scratch and is dead between jumps. *)
     Array.iteri (fun i r ->
-      emit_word (enc_s ((20 + i) * wsz ()) r t1 (stf3 ()) 0x23)) sregs;
+      emit_word (enc_s (tor_off (tor_sreg i)) r t1 (stf3 ()) 0x23)) sregs;
     push t1;
     compile_expr env (List.nth args 1);                  (* a0 = default *)
     pop t1;
-    emit_word (enc_s (4 * wsz ()) a0 t1 (stf3 ()) 0x23);                   (* sw default, 16(rec) *)
+    emit_word (enc_s (tor_off tor_default) a0 t1 (stf3 ()) 0x23);           (* default *)
     li t0 (fail_frame_addr ());
     emit_word (enc_s (0 * wsz ()) t1 t0 (stf3 ()) 0x23);                    (* install *)
     compile_expr env (List.nth args 0);                  (* a0 = thunk closure *)

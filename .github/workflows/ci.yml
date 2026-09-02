@@ -152,6 +152,15 @@ jobs:
         continue-on-error: true
         run: sudo apt-get install -y qemu-system-misc
 
+      # Best effort, same argument: rvd_oracle_check.sh holds `mere -rvd` to a
+      # disassembler nobody here wrote, and skips cleanly when it is absent.
+      # The gate exists because the disassembler had none, and fell so far
+      # behind the backend it explains that 41% of a 64-bit listing was
+      # question marks.
+      - name: Install binutils-riscv64 (optional gate — oracle for mere -rvd)
+        continue-on-error: true
+        run: sudo apt-get install -y binutils-riscv64-linux-gnu
+
       # grpcurl is one of the two clients grpc_parity drives. Pinned, like every
       # other oracle here — and it is an ORACLE in the useful sense: it was
       # written by people who never saw this implementation.
@@ -215,6 +224,9 @@ jobs:
           command -v qemu-system-riscv32 >/dev/null 2>&1 \
             && qemu-system-riscv32 --version | head -1 \
             || echo "qemu-system-riscv32 absent: qemu_virt will skip"
+          command -v riscv64-linux-gnu-objdump >/dev/null 2>&1 \
+            && riscv64-linux-gnu-objdump --version | head -1 \
+            || echo "riscv64-linux-gnu-objdump absent: rvd_oracle will skip"
 
       # The build matrix runs this too, but without wat2wasm and node it skips
       # the self-host codegen cross-validation — 2,225 cases there against 2,430
@@ -689,3 +701,12 @@ jobs:
       - name: qemu_virt (vs an emulator nobody here wrote, and one we did)
         if: ${{ !cancelled() }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/qemu_virt.sh
+
+      # The other half of the same argument: qemu_virt checks that the bytes we
+      # emit MEAN what we think, and this checks that the listing we print of
+      # those bytes SAYS what they mean. A disassembler is an instrument, and an
+      # instrument with no gate goes quietly wrong -- this one was 41%
+      # unreadable on the wide target and confidently mis-named srli as srai.
+      - name: rvd_oracle (mere -rvd vs a disassembler nobody here wrote)
+        if: ${{ !cancelled() }}
+        run: OBJDUMP=riscv64-linux-gnu-objdump sh scripts/rvd_oracle_check.sh

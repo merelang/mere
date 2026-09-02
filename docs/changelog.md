@@ -4,6 +4,112 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.401 — 2026-09-02
+
+_A `try_or`'s catch record saved the catcher's ten callee-saved registers 15
+words PAST the end of the record -- onto bump space the failing thunk then
+allocated for itself -- so a caught failure handed the catcher its named
+bindings back as the thunk's garbage. mere-ruby now boots on the 64-bit
+machine._
+
+The record is `[prev][sp][fp][catch][default][s1..s10]` and is allocated with
+`alloc_words 15`: five header words plus one per saved register. v0.1.388
+introduced the save as `enc_s (20 + i * 4)` -- byte 20, words 5..14, exactly
+filling those 15 words. The width parameterization in v0.1.394 rewrote it as
+`(20 + i) * wsz ()`, and **the byte offset 20 became the word index 20**. The
+whole save area moved to words 20..29 of a 15-word record.
+
+What that costs is a matter of ordering. The record is allocated; the registers
+are written 5..14 words above the new heap top; then `default` is evaluated and
+the thunk is called, and every allocation either makes walks over the save
+area. On the unwind, the catcher's names are restored from whatever the thunk
+last put there. `env` in mere-ruby's `run_src` lives in s10 -- the deepest slot
+-- so it took roughly fifteen words of allocation to reach, and came back as 1.
+
+Two earlier investigations had ruled out the frame (v0.1.398's slot invariant
+reports zero overflow) and the ABI (a shadow-stack check over every JAL/JALR
+found no callee failing to restore s1-s10). Both negatives were correct and
+neither could see this: the save is heap-relative, not frame-relative, so no
+fp-slave store ever carries the value; and an unwind is a longjmp, not a
+return, so a function writing its OWN s10 from its OWN code is behaving
+perfectly legally. The thing that answered in one line was the disassembler:
+`lv_set env "self"` begins `mv a0, s10`, which settles "register or memory"
+without tracing a single address.
+
+The layout is now declared once (`tor_prev` .. `tor_sreg`), the allocation is
+DERIVED from it (`tor_words = 5 + Array.length sregs`), and `tor_off` refuses to
+emit an offset outside the record -- so the save side and the restore side
+cannot spell it differently, and the size cannot drift from the layout because
+it IS the layout. The check was added BEFORE the fix and confirmed to fire on
+both widths; a check that has never fired is not known to be a check.
+
+This was broken at 32 bits too, from v0.1.394 on. Every strided offset
+expression that release rewrote was re-derived from the diff: `i * 4`,
+`(i+1)*4`, `(sreg_base+k)*4`, `(total+2)*4`, `(ra_slot+1)*4`, `fsz+(i-8)*4`
+and `32*4` all had word-index addends and are all correct. `20 + i * 4` was
+the only one whose addend was a byte offset. The defect class has one member
+and it is closed -- enumerated, not guessed.
+
+`test/parity/try_or_saves_bindings.mere` pins "the unwind restores the
+registers" and stayed green through all of this: its thunk allocates a few
+words, the save area was fifteen away, and the clobber never reached the
+registers it used. Restoring from the wrong place and restoring from a place
+nothing has overwritten yet print the same thing.
+`test/parity/try_or_save_area.mere` closes that: the catcher holds a live
+binding in every one of the ten registers -- strings, so a clobbered pointer
+cannot read as a plausible number, and integers at distinct powers of two, so
+the sum names which register was lost -- and the thunk allocates past all ten
+slots before failing. A third case gives `default` an allocation of its own,
+since it is evaluated after the save. Compiled with the old offsets, it traps
+at both widths.
+
+A side effect worth naming: the writes are now inside the allocation, so
+`alloc_words`'s own out-of-memory check covers them. Before, near the heap top,
+the save area could be written past the checked limit.
+
+Also in this slice, `mere -rvd` learned to read RV64, and got a gate. It
+printed `?` for f3=3 -- LD and SD, which are most of a 64-bit binary, since
+every slot, cell and field access is one of them -- and did not decode opcodes
+0x1B or 0x3B at all, so every `addiw`/`addw`/`mulw`/`divw` fell through to
+`.word`. Shift amounts are read as 6 bits now and srli/srai is told apart by
+bit 30, which is right at both widths (`srli x, y, 32` has f7 = 1 on RV64 and
+used to print as `srai` -- worse than a `?`, because it is confidently wrong).
+Unreadable lines in a mere-ruby listing: 41.4% before, 11.6% after, and the
+remainder is the rodata blob rather than instructions. The listing being
+unreadable is why this bug had to be found by hand-decoding the same words the
+disassembler exists to print.
+
+That it had no gate is why it drifted. The backend has three -- parity compares
+outputs, rv_exec runs the code, qemu_virt cross-checks the bytes against an
+emulator nobody here wrote -- and all three are about what the compiler EMITS.
+Nothing checked what we PRINT of it, because a disassembler is not part of any
+program's behaviour. `scripts/rvd_oracle_check.sh` closes that with the same
+argument qemu_virt makes: the oracle is `riscv64-elf-objdump`, and a decoder we
+wrote agreeing with itself proves nothing about an encoding. It compares every
+instruction in the code region of four real binaries at both widths -- 1.6k to
+21k instructions each, mnemonics over everything and full operands over the
+load/store family, since a mnemonic-only check passes a listing that prints the
+right instruction with the wrong offset, and an offset is what this slice was
+about. The code region's end is read from the debug map's first string block
+rather than estimated: a guess reached into rodata and the oracle dutifully
+named `fmadd.s` for the one-character literals "C", "G" and "K", whose ASCII
+codes are also the F-extension opcodes. Run against the pre-fix disassembler,
+all four 64-bit rows fail and name the LD/SD gap; all three 32-bit rows pass,
+as they must, so the summary line says which widths and which cases actually
+ran.
+
+**mere-ruby runs Ruby on the Mere-written 64-bit CPU.** Blocks, hashes,
+`begin`/`rescue` with live locals across the rescue, recursion, bignums and
+64-bit integer results all work; `Math.sqrt` does not, and that is the RV
+backend's pre-existing compile-time refusal (softfloat covers the four
+operators, the comparisons and int conversion, at both widths), delivered to
+the program as a catchable failure exactly as designed.
+
+Gates: 2617 unit tests, parity 158/158, rv_exec 76/0 at 64 bits and 71/0 at
+32, qemu_virt 7/7, rvd_oracle 7/0.
+
+---
+
 ## v0.1.400 — 2026-09-02
 
 _The package lock's content hash included `.git`, so the same pinned revision
