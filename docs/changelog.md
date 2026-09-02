@@ -4,6 +4,47 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.398 — 2026-09-02
+
+_count_lets undercounted region bodies, and now a hard invariant proves it can
+never again: a frame's reserved slots must equal the slots its body hands out._
+
+`count_lets` predicts how many binding slots a function needs; the frame is
+sized from that; the body then hands out slots as it compiles. The two are
+separate walks of the same tree, and `count_lets` was missing `Region_block`
+and `Region_loop` -- it fell through to `_ -> 0` for exactly the nodes
+`vars_in` and `free_vars_of` both recurse into. Three walkers, one hole.
+
+A function with bindings inside a `region` therefore sized its frame too small.
+Its highest slots landed BELOW its own stack pointer, in the region a called
+function's frame writes into. At 32 bits it happened to miss anything live; at
+64 bits mere-ruby's `gc_collect` reserved **2 slots and used 17**, and the
+overflow landed on a live binding.
+
+This was not deduced -- it was measured. A temporary check compared
+`!slot_ctr` against `total` at the end of every function: it named
+`gc_collect` (over by 15), `run_while_top` (by 4) and `run_dowhile` (by 5), and
+after the fix it reported zero across the whole parity corpus, the rv corpus,
+and mere-ruby, at both widths. That check is now permanent and a HARD error:
+`count_lets` and the slot walk must agree at every compile, because a frame
+sized too small is silent corruption a long way from its cause, and the two
+walks drifting apart is exactly how it happens.
+
+This is a real 64-bit correctness fix -- any program that calls a
+region-containing function with live bindings in the caller was exposed -- and
+the invariant is the confirmation, not a comment claiming one. The 32-bit
+suite, both parity columns and the softfloat/prelude gates all pass with the
+hard check in place.
+
+_(mere-ruby's own boot on the 64-bit machine is still not through: its `env`
+binding reads as 1 at first use, and that is NOT this bug -- with the fix and
+zero slot-overflow, env is neither stored to a frame slot nor clobbered in a
+register, which points at a save/restore path and is the next investigation.
+Separating it cleanly from the count_lets undercount, with the invariant now
+guarding that whole class, is this version's result.)_
+
+---
+
 ## v0.1.397 — 2026-09-02
 
 _75 of 79 runnable corpus programs agree at 64 bits, and rv_exec_check runs both
