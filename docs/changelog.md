@@ -4,6 +4,52 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.396 — 2026-09-02
+
+_Hosted RV64: the parity corpus runs on a 64-bit CPU written in Mere, 67
+programs agreeing with the C backend -- including the 64-bit-value tests the
+32-bit machine could never hold._
+
+memu grew `rv64i_run.mere`: the same decode structure, device map, syscall
+numbers and halt reasons as the 32-bit core, at a width where the HOST int and
+the register width coincide -- headroom zero. Unsigned comparison is
+`(a xor minint) < (b xor minint)`; logical right shift must clear what the
+host's arithmetic shift dragged in; and the file is compiled-only, because a
+register with bit 63 meaningful does not fit the interpreter's 63-bit int --
+the reverse of the interp-only trap, stated in the header.
+
+Three compiler bugs surfaced, each caught by a differential:
+
+* **`li`'s 32-bit arm was wrong for values just under 2^31.** The guard was on
+  v; the truth is on HI: lui's 20-bit immediate is sign-extended, and a v in
+  [2^31-2048, 2^31) rounds hi up to 0x80000 -- out of signed-20 range.
+  `li 2147483645` materialised -2147483651, and `2147483647 / 5` had a negative
+  numerator before the divide ran. Found because print_int of a literal
+  disagreed with print_int of the same value computed -- and it had made
+  `random_int`'s rejection loop spin forever, every draw rejected against a
+  negative limit.
+* **The shift builtins' saturation points were 32's.** `bit_shl x 40` compiled
+  to `li 0`, on the machine where it is an ordinary shift. The bounds are the
+  width's now, constant and dynamic counts both.
+* **`__rv_clock`'s tuple meant rv32's timespec layout.** Linux's timespec64 is
+  four 32-bit cells there and two native words on rv64, so the prelude's `time`
+  branches once on the new `__rv_xlen` -- a compile-time constant, and the one
+  piece of width the prelude ever needs to see.
+
+Also learned twice over: a Mere program that ends in a bare expression has its
+final value echoed by the C runtime, and an emulator must `exit 0` explicitly or
+every guest's output grows a trailing `()` -- the 32-bit core's closing comment
+says exactly this, and the 64-bit core now ends the same way.
+
+Left named for next time: mere-ruby's own boot traps inside `rvmap_has` on the
+64-bit machine (s-registers holding what looks like string BYTES loaded as
+words), and five smaller corpus differences (index_edges, prop_int, strbuf,
+url_percent, capture_after_call, str_edges) beyond the three with standing
+causes. The 64-bit sweep is manual until those settle; then it joins
+rv_exec_check like the 32-bit one did.
+
+---
+
 ## v0.1.395 — 2026-09-02
 
 _The trap machinery and the context switcher run at 64 bits: qemu_virt is seven
