@@ -42,8 +42,25 @@ let rec gcd = fn (a: int) -> fn (b: int) ->
 // returned from something named random is the kind of wrong that stays quiet.
 let __h_todo = fn (n: str) -> fail ("RV32I: " ++ n ++ " needs a host, and --bare hands the program the machine instead");
 let run = fn (c: str) -> (__h_todo "run" : int);
-let read_file = fn (p: str) -> (__h_todo "read_file" : str);
-let file_exists = fn (p: str) -> (__h_todo "file_exists" : bool);
+
+// read_file / file_exists ARE answered here, through openat/read/close and
+// faccessat -- the same Linux-numbered ecall mechanism `print` and `exit`
+// already use. They were on the list above on the strength of `--bare`, which
+// is true of --bare and was never true of the hosted target, and the cost was
+// specific: the interpreter this backend is carried for could only be handed a
+// program with `-e`, because reading a script off disk went through read_file.
+// Under --bare the codegen refuses these by name, so the machine-only target
+// keeps the property the list was protecting.
+//
+// The error is a `fail` and therefore catchable, which is what an interpreter
+// needs in order to turn it into its own exception -- ruby raises Errno::ENOENT
+// here, and it cannot do that if the process is simply gone. The negative
+// return IS the errno, so the message can say which one.
+let read_file = fn (p: str) ->
+  let fd = __rv_open_rd p in
+  if fd < 0 then fail ("read_file: cannot open " ++ p ++ " (errno " ++ str_of_int (0 - fd) ++ ")")
+  else __rv_read_all fd;
+let file_exists = fn (p: str) -> __rv_access p == 0;
 
 let write_file = fn (p: str) -> fn (c: str) -> (__h_todo "write_file" : unit);
 // `args` is the one host service on this list that is not a host service here:
@@ -227,15 +244,36 @@ let rec _mdel = fn node -> fn k ->
   | Nil -> Nil
   | Cons ((kk, vv), rest) -> if str_eq kk k then _mdel rest k else Cons ((kk, vv), _mdel rest k);
 let rvmap_delete = fn m -> fn k -> vec_set m 0 (_mdel (vec_get m 0) k);
-// map_iter: visit each distinct key's (most recent) value. Dedup via a seen list.
+// map_iter: visit each distinct key ONCE, in the order the keys were FIRST
+// inserted, carrying that key's most recent value. That is what every other
+// backend does, and what a program written against them expects: mere-ruby's
+// Hash is ruby's Hash, which is insertion-ordered, and `h[k] = v` on a key that
+// is already there keeps its place.
+//
+// `rvmap_set` PREPENDS, so the list runs newest-first and the naive walk visited
+// keys in reverse insertion order -- measured against the C backend, which
+// answers `a=99 b=2 c=3` where this answered `a=99 c=3 b=2`. The values were
+// right; only the order was backwards, which is why nothing caught it until an
+// interpreter printed a Hash.
+//
+// So: walk the list REVERSED (oldest first, which is first-insertion order),
+// and take each key's value from the ORIGINAL list, where the newest write is
+// nearest the head. Reversing alone would have paired each key with its OLDEST
+// value -- the right order and the wrong values, a trade for the worse.
+let rec _mrev = fn node -> fn acc ->
+  match node with Nil -> acc | Cons (p, rest) -> _mrev rest (Cons (p, acc));
 let rec _mseen = fn seen -> fn k -> match seen with Nil -> false | Cons (x, rest) -> if str_eq x k then true else _mseen rest k;
-let rec _miter = fn node -> fn f -> fn seen ->
+let rec _miter = fn node -> fn orig -> fn f -> fn seen ->
   match node with
   | Nil -> ()
   | Cons ((kk, vv), rest) ->
-    if _mseen seen kk then _miter rest f seen
-    else let _ = f kk vv in _miter rest f (Cons (kk, seen));
-let rvmap_iter = fn m -> fn f -> _miter (vec_get m 0) f Nil;
+    if _mseen seen kk then _miter rest orig f seen
+    else
+      // vv is this occurrence's value; the live one is whatever _mfind reaches
+      // first from the head. They differ exactly when the key was written twice.
+      let cur = match _mfind orig kk with Some v -> v | None -> vv in
+      let _ = f kk cur in _miter rest orig f (Cons (kk, seen));
+let rvmap_iter = fn m -> fn f -> let l = vec_get m 0 in _miter (_mrev l Nil) l f Nil;
 // The number of DISTINCT keys. `rvmap_set` prepends, so a key set twice is in
 // the list twice and the newer one shadows the older; counting nodes would count
 // the shadowed ones. This is the same walk `_miter` does, with a counter instead

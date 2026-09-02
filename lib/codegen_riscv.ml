@@ -39,6 +39,12 @@ let t6 = 31
 let a0 = 10
 let a1 = 11
 let a2 = 12
+(* a3 is the fourth argument of a call, and of a syscall: openat's mode and
+   faccessat's flags. Named here so those ecalls can zero it explicitly rather
+   than pass whatever happened to be in x13 -- the kernel ignores it for
+   O_RDONLY, and a syscall that only works because an argument is ignored is
+   one that breaks when it stops being. *)
+let a3 = 13
 let a7 = 17
 
 (* --- instruction encoders (mirror the emulator's asm_* / imm_* pair) ----- *)
@@ -1945,6 +1951,48 @@ and compile_app env e =
     emit_word (enc_i 0 zero 0 zero 0x73);                (* ecall *)
     li a0 (scratch_base ());
     emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)                     (* lw a0, 0(scratch) *)
+  (* --- the hosted target's file services -----------------------------------
+     Refused under --bare for the reason the clock and the entropy are: a
+     machine has devices, not syscalls, and there is no filesystem behind a
+     bare RISC-V core. Hosted, these are the same ecall mechanism `print`
+     already uses, with Linux's own numbers -- openat/read/close/faccessat --
+     so a binary built this way is servable by any host that speaks the ABI,
+     not only by the emulator in this tree. *)
+  | Ast.Var "__rv_open_rd" when List.length args = 1 ->
+    if !bare then
+      err e.loc
+        "RV32I --bare: there is no host filesystem -- a machine has devices, \
+         not syscalls, and a `read_file` here would have nothing to read from";
+    compile_expr env (List.hd args);                     (* a0 = path str *)
+    emit (Jal (ra, "__rv_pathz"));                       (* a0 = NUL-terminated *)
+    emit_word (enc_i 0 a0 0 a1 0x13);                    (* a1 = path *)
+    li a0 (-100);                                        (* AT_FDCWD *)
+    li a2 0;                                             (* O_RDONLY *)
+    li a3 0;                                             (* mode, unused *)
+    li a7 56;                                            (* openat *)
+    emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall -> a0 = fd | -errno *)
+  | Ast.Var "__rv_read_all" when List.length args = 1 ->
+    if !bare then
+      err e.loc
+        "RV32I --bare: there is no host filesystem to read from";
+    compile_expr env (List.hd args);                     (* a0 = fd *)
+    emit (Jal (ra, "__rv_slurp"))                        (* a0 = [len][bytes] *)
+  (* faccessat rather than open-and-close: `file_exists` should not need a
+     descriptor, and a path that exists but cannot be opened is still a path
+     that exists -- answering that question with openat would say `false` for a
+     directory the program is about to list. *)
+  | Ast.Var "__rv_access" when List.length args = 1 ->
+    if !bare then
+      err e.loc
+        "RV32I --bare: there is no host filesystem to ask about a path";
+    compile_expr env (List.hd args);                     (* a0 = path str *)
+    emit (Jal (ra, "__rv_pathz"));
+    emit_word (enc_i 0 a0 0 a1 0x13);                    (* a1 = path *)
+    li a0 (-100);                                        (* AT_FDCWD *)
+    li a2 0;                                             (* F_OK *)
+    li a3 0;                                             (* flags *)
+    li a7 48;                                            (* faccessat *)
+    emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall -> a0 = 0 | -errno *)
   | Ast.Var "__rv_xlen" when List.length args = 1 ->
     compile_expr env (List.hd args);                     (* the unit, discarded *)
     li a0 !xlen
@@ -2509,6 +2557,106 @@ let emit_str_concat () =
   emit (Label ".sc_d2");
   emit_word (enc_i 0 t3 0 a0 0x13);                     (* mv a0, t3 *)
   emit_word (enc_i 0 ra 0 zero 0x67)                    (* ret *)
+
+(* --- reading a file on the hosted target ----------------------------------
+   `read_file` was one of the host services this backend answered with a stop
+   (`__h_todo` in rv_prelude), on the reasoning that `--bare` hands the program
+   the machine and there is no host to read a file from. True under --bare, and
+   it is NOT true of the hosted target, which already asks the host to write and
+   to exit through the same Linux-numbered ecalls. What it cost: the interpreter
+   this backend is carried for could only ever be given a program with `-e`,
+   because reading a `.rb` off disk went through read_file. Its own 162-program
+   corpus could not be run on the machine at all -- so the thing the backend
+   exists to carry had no end-to-end gate, only hand-written one-liners.
+
+   Two helpers, because the path has to become a C string first: Mere's is
+   [len][bytes] with no terminator, and openat wants NUL. The print scratch
+   buffer is where it goes -- dead between print calls, and neither of these is
+   one (the same reasoning `__rv_urandom32` uses for the same buffer).
+
+   __rv_pathz(a0 = str) -> a0 = pointer to a NUL-terminated copy. Leaf. *)
+let emit_rv_pathz () =
+  emit (Label "__rv_pathz");
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);   (* t0 = len *)
+  emit_word (enc_i (wsz ()) a0 0 t1 0x13);               (* t1 = src = a0 + w *)
+  li t2 (scratch_base ());
+  emit_word (enc_i 0 t2 0 t3 0x13);                      (* t3 = dst *)
+  emit (Label ".pz_loop");
+  emit (Branch (0, t0, zero, ".pz_done"));
+  emit_word (enc_i 0 t1 0 t4 0x03);                      (* lb t4, 0(t1) *)
+  emit_word (enc_s 0 t4 t3 0 0x23);                      (* sb t4, 0(t3) *)
+  emit_word (enc_i 1 t1 0 t1 0x13);
+  emit_word (enc_i 1 t3 0 t3 0x13);
+  emit_word (enc_i (-1) t0 0 t0 0x13);
+  emit (Jal (zero, ".pz_loop"));
+  emit (Label ".pz_done");
+  emit_word (enc_s 0 zero t3 0 0x23);                    (* sb x0, 0(t3) — the NUL *)
+  emit_word (enc_i 0 t2 0 a0 0x13);                      (* a0 = scratch *)
+  emit_word (enc_i 0 ra 0 zero 0x67)                     (* ret *)
+
+(* __rv_slurp(a0 = fd) -> a0 = a fresh [len][bytes] block holding the whole file,
+   with the fd closed. Reads in 4KB chunks straight onto the heap: the length is
+   not known in advance, and a bump allocator can simply keep going and write the
+   header afterwards.
+
+   The room check is `gp + CHUNK` against sp and it happens BEFORE the read, not
+   after: the kernel writes those bytes, so checking once they have landed checks
+   whether the damage fits. emit_oom_check's own comparison would have been the
+   wrong one here -- it asks whether the heap pointer has reached the stack, and
+   by then a 4KB write has already gone through it.
+
+   The fd and the block base live in stack slots rather than registers across the
+   ecall. The Linux syscall ABI preserves everything but a0, and this emulator
+   writes only a0 -- but a helper that would break if either stopped being true
+   is a helper whose correctness depends on something it does not state. *)
+let rv_read_chunk = 4096
+let emit_rv_slurp () =
+  emit (Label "__rv_slurp");
+  emit_word (enc_i (0 - 2 * wsz ()) sp 0 sp 0x13);       (* addi sp, sp, -2w *)
+  emit_word (enc_s (0 * wsz ()) a0 sp (stf3 ()) 0x23);   (* [sp+0] = fd *)
+  emit_word (enc_i 0 gp 0 t3 0x13);                      (* t3 = block base *)
+  emit_word (enc_s (wsz ()) t3 sp (stf3 ()) 0x23);       (* [sp+w] = base *)
+  emit_word (enc_i (wsz ()) gp 0 gp 0x13);               (* reserve the len cell *)
+  emit_oom_check ();
+  emit (Label ".sl_loop");
+  (* through a register, not an addi immediate: the chunk is 4096 and an I-type
+     immediate stops at 2047. The encoder refused it rather than masking it,
+     which is the whole reason it refuses -- a masked 4096 would have become a
+     small positive offset and the room check would have passed on a lie. *)
+  li t5 rv_read_chunk;
+  emit_word (enc_r 0 t5 gp 0 t4 0x33);                   (* t4 = gp + CHUNK *)
+  emit (Branch (7, t4, sp, "__oom"));                    (* bgeu t4, sp -> oom *)
+  emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) a0 0x03);   (* a0 = fd *)
+  emit_word (enc_i 0 gp 0 a1 0x13);                      (* a1 = buf = heap top *)
+  li a2 rv_read_chunk;                                   (* a2 = count *)
+  li a7 63;                                              (* read *)
+  emit_word (enc_i 0 zero 0 zero 0x73);                  (* ecall *)
+  emit (Branch (4, a0, zero, ".sl_err"));                (* blt a0, x0 -> error *)
+  emit (Branch (0, a0, zero, ".sl_done"));               (* beq a0, x0 -> eof *)
+  emit_word (enc_r 0 a0 gp 0 gp 0x33);                   (* gp += n *)
+  emit (Jal (zero, ".sl_loop"));
+  emit (Label ".sl_done");
+  emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) a0 0x03);   (* a0 = fd *)
+  li a7 57;                                              (* close *)
+  emit_word (enc_i 0 zero 0 zero 0x73);                  (* ecall *)
+  emit_word (enc_i (wsz ()) sp (ldf3 ()) t3 0x03);       (* t3 = base *)
+  emit_word (enc_r 0x20 t3 gp 0 t2 0x33);                (* t2 = gp - base *)
+  emit_word (enc_i (0 - wsz ()) t2 0 t2 0x13);           (* t2 -= w  — the payload length *)
+  emit_word (enc_s (0 * wsz ()) t2 t3 (stf3 ()) 0x23);   (* the header, written last *)
+  emit_word (enc_i (wsz () - 1) gp 0 gp 0x13);           (* round the heap up to a word *)
+  emit_word (enc_i (0 - wsz ()) gp 7 gp 0x13);           (* andi gp, gp, -w *)
+  emit_oom_check ();
+  emit_word (enc_i 0 t3 0 a0 0x13);                      (* a0 = the block *)
+  emit_word (enc_i (2 * wsz ()) sp 0 sp 0x13);           (* addi sp, sp, 2w *)
+  emit_word (enc_i 0 ra 0 zero 0x67);                    (* ret *)
+  (* A read that fails partway is not a short file. Closing and returning what
+     arrived would hand the program a truncated string it cannot tell from the
+     real thing, so this stops -- catchably, like every other `fail`. *)
+  emit (Label ".sl_err");
+  emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) a0 0x03);
+  li a7 57;
+  emit_word (enc_i 0 zero 0 zero 0x73);                  (* close the fd first *)
+  emit_abort "read_file: the host stopped answering partway through the file"
 
 (* __str_eq(a0=s1, a1=s2) -> a0 = 1 if byte-equal else 0. Leaf. *)
 let emit_str_eq () =
@@ -3225,6 +3373,8 @@ let build_items (prog : Ast.program) : item list =
   emit_start ();
   emit_print_int ();
   emit_str_concat ();
+  emit_rv_pathz ();
+  emit_rv_slurp ();
   emit_str_eq ();
   emit_str_cmp ();
   emit_str_of_int ();

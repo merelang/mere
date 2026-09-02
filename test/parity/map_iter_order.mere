@@ -1,0 +1,40 @@
+// A map iterates each distinct key ONCE, in the order the keys were FIRST
+// inserted, carrying that key's most recent value. All four backends, so the
+// order is part of what a Map IS rather than a property of one implementation.
+//
+// It was not. The RV backend's map is an assoc list that `map_set` PREPENDS to,
+// and its iterator walked from the head -- so it visited keys in REVERSE
+// insertion order. The values were all correct, which is why nothing caught it:
+// map_get, map_has and map_len are order-blind, and the only programs that can
+// see the difference are ones that PRINT a whole map. mere-ruby is one --
+// ruby's Hash is insertion-ordered and its `inspect` shows it -- and the
+// difference turned up as `{"MRB_B"=>"2", "MRB_A"=>"1"}` where every other
+// backend said `{"MRB_A"=>"1", "MRB_B"=>"2"}`.
+//
+// Three shapes, because they fail differently:
+//   * plain insertion order
+//   * re-setting an existing key: it keeps its ORIGINAL place and takes the NEW
+//     value. Reversing the walk alone gets the order right and the values wrong
+//     (each key paired with its oldest write), which passes a check that only
+//     looks at the sequence of keys.
+//   * delete then re-insert: that key goes to the END, because it really is a
+//     new insertion. This is the case that separates "insertion order" from
+//     "sorted" and from "whatever slot it fell in".
+let m = map_new ();
+let _ = map_set m "zeta" 1;
+let _ = map_set m "alpha" 2;
+let _ = map_set m "mid" 3;
+let _ = map_set m "beta" 4;
+let _ = print "-- insertion order --";
+let _ = map_iter m (fn (k: str) -> fn (v: int) -> print (k ++ "=" ++ str_of_int v));
+
+let _ = map_set m "alpha" 99;
+let _ = print "-- re-set keeps its place, takes the new value --";
+let _ = map_iter m (fn (k: str) -> fn (v: int) -> print (k ++ "=" ++ str_of_int v));
+
+let _ = map_delete m "mid";
+let _ = map_set m "mid" 7;
+let _ = print "-- deleted then re-inserted goes to the end --";
+let _ = map_iter m (fn (k: str) -> fn (v: int) -> print (k ++ "=" ++ str_of_int v));
+
+let _ = print ("distinct keys = " ++ str_of_int (map_len m));
