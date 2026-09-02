@@ -4,6 +4,59 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.403 — 2026-09-03
+
+_`map_recycle` on the RISC-V backend kept the entries it was contracted to
+clear, so every pooled call frame in mere-ruby arrived still holding the
+previous call's locals — a bare identifier in a Ruby method could resolve to
+another method's variable. One line, and the last silently-wrong value on the
+64-bit machine goes away._
+
+`map_recycle m` is `map_clear` plus give-the-arena-back (v0.1.300). The RV
+map is an assoc list with no arena behind it, and the no-op it had was reasoned
+from that half — nothing to wind back — to skipping the half it CAN do. The
+reasoning even sat next to a correct `map_clear` in the same file. What it cost
+surfaced a long way off: mere-ruby pools its call frames and cleans a dead one
+with a single `map_recycle`, so on this backend every frame from the pool still
+held the previous call's bindings. `def f(v); q = v * 10; q; end` left `q`
+visible to the next method; a Comparable's `n <=> o.n` read both sides from the
+same leaked slot and answered 0 where every other backend answers -1. Nothing
+crashed. The values were plausible; they were merely someone else's.
+
+The diagnosis order is worth recording. The symptom was `<=>` answering 0, and
+`<=>` was innocent: method lookup agreed with the C backend on everything
+(`respond_to?`, `instance_methods`, `method(:x).arity`), `send` reproduced it,
+`[n, o.n]` came back `[2, 2]`, and only BARE identifiers were wrong — `@n` and
+`self.n` were right. That named "a leaked method-local shadowing the reader",
+and a two-method reproducer confirmed locals surviving between invocations.
+`map_new` was checked and is genuinely fresh per call, which left the pool, and
+the pool cleans with exactly one call: `map_recycle`.
+
+`test/parity/map_recycle_clears.mere` pins the clear half on every backend,
+including reuse-after-recycle — a pool does not just clear a map, it hands it
+to a DIFFERENT call that trusts it to be empty. Compiled with the no-op, the
+pin answers `LEAKED q` at both widths; nothing else in the corpus ever recycled
+a map and then asked it anything, which is how a no-op survived under a suite
+this size.
+
+Also here: `rv_exec_check.sh` states its denominator. Programs the backend
+refuses at compile time were dropped with a bare `continue`, so "73 passed"
+read as coverage of the corpus when it was really coverage of the roughly half
+this backend accepts — 70 of 144 at 32 bits and 62 at 64 were skipped,
+invisibly. The summary now counts them and names them. A gate that does not
+state its denominator claims the whole corpus every time it goes green.
+
+mere-ruby's corpus, run as files on the 64-bit machine: 137 of 162 identical,
+up from 135 — corpus 148, the silently-wrong comparison, is one of the two that
+went green. The remaining 25 differences are host services this target still
+refuses, float transcendentals, and emulated speed — every one a refusal or a
+documented gap, none a wrong value.
+
+Gates: 2620 unit tests, parity 161/161, rv_exec 79/0 at 64 bits and 74/0 at 32
+(read_file 3/0), qemu_virt and rvd_oracle unchanged from v0.1.402.
+
+---
+
 ## v0.1.402 — 2026-09-03
 
 _`read_file` and `file_exists` work on the hosted RISC-V target, so the
