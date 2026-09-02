@@ -91,7 +91,7 @@ machine rather than a host.
 | `float_of_bits` | yes | yes | yes | yes |
 | `float_of_f32_bits` | yes | yes | yes | refused |
 | `float_of_int` | yes | yes | yes | yes |
-| `float_of_str` | yes | yes | yes | stub |
+| `float_of_str` | yes | yes | yes | yes |
 | `floor` | yes | yes | refused | stub |
 | `gcd` | yes | yes | yes | yes |
 | `incr` | yes | yes | yes | yes |
@@ -152,7 +152,7 @@ machine rather than a host.
 | `str_index_of` | yes | yes | yes | yes |
 | `str_last_index_of` | yes | yes | yes | refused |
 | `str_len` | yes | yes | yes | yes |
-| `str_of_float` | yes | yes | yes | stub |
+| `str_of_float` | yes | yes | yes | yes |
 | `str_of_int` | yes | yes | yes | yes |
 | `str_repeat` | yes | yes | yes | yes |
 | `str_replace` | yes | yes | yes | yes |

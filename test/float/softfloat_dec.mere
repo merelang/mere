@@ -1,0 +1,89 @@
+// contrib/softfloat/dec against the hardware: `dec_of_sf` must print the same
+// bytes str_of_float prints, and `sf_of_dec` must produce the same BITS
+// float_of_str produces -- on a backend where those two are printf and strtod.
+//
+// A fixed battery for the shapes with names (the %.12g round-trip artifact on
+// subnormals, the classic 1e23, ties-to-even at 2^53+1, hex, underscores,
+// overflow to inf, underflow to signed zero), then two thousand xorshift bit
+// patterns, because the values nobody writes down are the ones a fixed table
+// never covers. Prints one `ok` per agreement, so the runner can count them.
+import "../../contrib/softfloat/dec.mere";
+import "../../contrib/softfloat/bits.mere";
+
+let chk = fn (tag: str) -> fn (cond: bool) ->
+  print ((if cond then "ok " else "FAIL ") ++ tag);
+
+let tstr = fn (s: str) ->
+  let want = str_of_float (float_of_str s) in
+  let got = dec_of_sf (sf_of_dec s) in
+  let x = float_of_str s in
+  let y = float_of_sf (sf_of_dec s) in
+  let bits_ok = float_bits_hi x == float_bits_hi y && float_bits_lo x == float_bits_lo y in
+  chk (s ++ " -> " ++ got ++ (if str_eq got want then "" else " WANT " ++ want)
+         ++ (if bits_ok then "" else " BITS-DIFFER"))
+      (str_eq got want && bits_ok);
+
+let _ = tstr "0.1";
+let _ = tstr "0.30000000000000004";
+let _ = tstr "5e-324";
+let _ = tstr "2.470328229206234e-324";
+let _ = tstr "1.7976931348623157e308";
+let _ = tstr "1.7976931348623159e308";
+let _ = tstr "1e16";
+let _ = tstr "1e15";
+let _ = tstr "0.000001";
+let _ = tstr "0.0001";
+let _ = tstr "123456789.123";
+let _ = tstr "9007199254740993";
+let _ = tstr "9007199254740995";
+let _ = tstr "1e23";
+let _ = tstr "8.98846567431158e307";
+let _ = tstr "0.500000000000000166533453693773481063544750213623046875";
+let _ = tstr "1_000.5";
+let _ = tstr "0x1p4";
+let _ = tstr "0x1.fffffffffffffp1023";
+let _ = tstr "0x1.23456789abcdefp-3";
+let _ = tstr ".5";
+let _ = tstr "5.";
+let _ = tstr "+2.5";
+let _ = tstr "-0.0";
+let _ = tstr "1e400";
+let _ = tstr "-1e-400";
+let _ = tstr "1e1000000";
+let _ = tstr "-1e-1000000";
+let _ = tstr "inf";
+let _ = tstr "-infinity";
+let _ = tstr "nan";
+let _ = tstr "3.141592653589793";
+
+// the parse error is a fail, with the message the interpreter and the C
+// runtime both produce
+let _ = chk "abc refused"
+  (str_eq (try_or (fn (u: unit) -> dec_of_sf (sf_of_dec "abc")) "no") "no");
+
+// xorshift over the whole pattern space
+let st = vec_new ();
+let _ = vec_push st 123456789;
+let _ = vec_push st 362436069;
+let next32 = fn (u: unit) ->
+  let x0 = vec_get st 0 in
+  let x1 = bit_and (bit_xor x0 (bit_shl x0 13)) 4294967295;
+  let x2 = bit_xor x1 (bit_shr x1 17);
+  let x3 = bit_and (bit_xor x2 (bit_shl x2 5)) 4294967295;
+  let _ = vec_set st 0 (vec_get st 1) in
+  let _ = vec_set st 1 x3 in
+  x3;
+let rec rand = fn (i: int) -> fn (bad: int) ->
+  if i >= 2000 then bad
+  else
+    let hi = next32 () in
+    let lo = next32 () in
+    let x = float_of_bits hi lo in
+    let want = str_of_float x in
+    let got = dec_of_sf (sf_of_float x) in
+    let _ = (if str_eq got want then () else
+             print ("FAIL hi=" ++ str_of_int hi ++ " lo=" ++ str_of_int lo
+                    ++ " got=" ++ got ++ " want=" ++ want)) in
+    rand (i + 1) (if str_eq got want then bad else bad + 1);
+let bad = rand 0 0;
+let _ = chk ("2000 random patterns, " ++ str_of_int bad ++ " disagreed") (bad == 0);

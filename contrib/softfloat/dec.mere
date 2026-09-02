@@ -1,0 +1,454 @@
+// contrib/softfloat/dec — between a double's bits and its decimal spelling,
+// in integers.
+//
+// The contract is the one the interpreter and the C runtime already share:
+//
+//   parse:  trim ASCII whitespace, drop '_', then a decimal or hex ("0x..p")
+//           number, or inf / infinity / nan; the WHOLE string must be consumed;
+//           too large is inf, too small is a signed zero; anything else fails
+//           with:  float_of_str: "<s>" is not a valid float
+//   print:  %.{p}g for p = 12..17, stopping at the first p whose output parses
+//           back to the same bits; append ".0" when the result has none of
+//           '.', 'e', 'E', 'n', 'i'  (so integral values print as "42.0" and
+//           "inf" / "nan" / "1e+16" are left alone).
+//
+// Everything here is exact. A double is m * 2^e with m < 2^53, and its decimal
+// expansion terminates: multiplying by 2 never lengthens the fraction, dividing
+// by 2 adds at most one fraction digit. So the working value is an array of
+// base-10 digits, and rounding decisions read real digits instead of guessing.
+//
+// The digit array is a Vec, least significant digit first, with `scale` naming
+// how many of the digits are fraction digits. It is REBUILT by the two scaling
+// operations rather than mutated in place -- shifting a Vec's contents to make
+// room at the small end costs the same copy and earns another way to be wrong.
+// Slow and right first; the day this shows up in a profile, the base can grow
+// from 10 to 10^4 without changing a decision.
+import "limbs.mere";
+import "softfloat.mere";
+import "add.mere";
+import "div.mere";
+
+// ---- the digit array -------------------------------------------------------
+
+// value(d, scale) = sum d[i] * 10^(i - scale), digits LSB first
+let _dc_get = fn d -> fn (i: int) ->
+  if i < 0 || i >= vec_len d then 0 else vec_get d i;
+
+// multiply by 2^k, k <= 13: carry < 2^13 and digit*2^13 + carry < 2^17, safe
+// in a 32-bit int with room to spare
+// IN PLACE: multiplying rewrites digits low to high and only ever APPENDS, so
+// nothing needs to move. This is the hot direction -- parsing a small value
+// multiplies by 2 a thousand times -- and rebuilding the array each pass made
+// one parse allocate hundreds of kilobytes on a backend where a region
+// reclaims nothing.
+let _dc_mul2k = fn d -> fn (k: int) ->
+  let n = vec_len d in
+  let rec go = fn (i: int) -> fn (carry: int) ->
+    if i >= n && carry == 0 then ()
+    else if i < n then
+      let cur = (vec_get d i) * (bit_shl 1 k) + carry in
+      let _ = vec_set d i (cur % 10) in
+      go (i + 1) (cur / 10)
+    else
+      let _ = vec_push d (carry % 10) in
+      go (i + 1) (carry / 10) in
+  let _ = go 0 0 in
+  d;
+
+// divide by 2^k, k <= 13, extending the fraction with the exact remainder:
+// at most k new fraction digits, because dividing by 2 in decimal terminates.
+// Returns (digits, added) -- the caller owns the scale.
+let _dc_div2k = fn d -> fn (k: int) ->
+  let n = vec_len d in
+  let out = vec_new () in
+  // the new fraction digits come from pushing the remainder below the point:
+  // rem * 10 / 2^k, repeatedly, until the remainder is 0 -- k steps at most
+  let rec down = fn (i: int) -> fn (rem: int) ->
+    if i >= n then rem
+    else
+      let cur = rem * 10 + vec_get d (n - 1 - i) in
+      let _ = vec_push out (cur / (bit_shl 1 k)) in     // MSB first, reversed below
+      down (i + 1) (cur % (bit_shl 1 k)) in
+  let rem0 = down 0 0 in
+  let rec ext = fn (rem: int) -> fn (added: int) ->
+    if rem == 0 then added
+    else
+      let cur = rem * 10 in
+      let _ = vec_push out (cur / (bit_shl 1 k)) in
+      ext (cur % (bit_shl 1 k)) (added + 1) in
+  let added = ext rem0 0 in
+  // reverse into LSB-first
+  let m = vec_len out in
+  let fin = vec_new () in
+  let rec rev = fn (i: int) ->
+    if i >= m then () else let _ = vec_push fin (vec_get out (m - 1 - i)) in rev (i + 1) in
+  let _ = rev 0 in
+  (fin, added);
+
+// the highest index holding a nonzero digit, or -1 for zero
+let _dc_top = fn d ->
+  let rec go = fn (i: int) ->
+    if i < 0 then 0 - 1
+    else if vec_get d i != 0 then i
+    else go (i - 1) in
+  go (vec_len d - 1);
+
+// any nonzero digit strictly below index `lim`
+let _dc_dirty_below = fn d -> fn (lim: int) ->
+  let rec go = fn (i: int) ->
+    if i >= lim || i >= vec_len d then false
+    else if vec_get d i != 0 then true
+    else go (i + 1) in
+  go 0;
+
+// the integer part (digits at and above `scale`) as an L6 -- caller has kept it
+// under 18 digits, which is under 60 bits
+let _dc_int_l6 = fn d -> fn (scale: int) ->
+  let hi = vec_len d - 1 in
+  let rec go = fn (i: int) -> fn (acc: L6) ->
+    if i < scale then acc
+    else
+      let t = l6_add (l6_shl acc 3) (l6_shl acc 1) in    // acc * 10
+      go (i - 1) (l6_add t (l6_of_int (vec_get d i))) in
+  go hi l6_zero;
+
+// how many digits the integer part has (0 for a pure fraction)
+let _dc_intdigits = fn d -> fn (scale: int) ->
+  let t = _dc_top d in
+  if t < scale then 0 else t - scale + 1;
+
+// ---- decimal value -> Sf ----------------------------------------------------
+
+// Normalise (digits, scale) * 2^0 until the integer part is EXACTLY 56 bits
+// (53 + pack's three guard bits), tracking the binary exponent; then let pack
+// round. The fraction that remains is sticky. Coarse steps of 13 bits while the
+// integer part is clearly far away, single-bit steps for the landing.
+let _dc_to_sf = fn (sign: int) -> fn d0 -> fn (scale0: int) ->
+  if _dc_top d0 < 0 then (if sign == 1 then neg_zero else zero)
+  else
+    // The leading digit's decimal exponent decides the extremes outright:
+    // 10^309 is already past the largest double twice over, and 10^-330 is
+    // under half the smallest subnormal -- no digits can pull either back.
+    // Without this, "1e1000000" walks a million-digit array to say inf.
+    let x = _dc_top d0 - scale0 in
+    if x >= 310 then (if sign == 1 then neg_inf else inf)
+    else if x <= (0 - 330) then (if sign == 1 then neg_zero else zero)
+    else
+    let rec norm = fn d -> fn (scale: int) -> fn (e2: int) ->
+      let idig = _dc_intdigits d scale in
+      if idig >= 19 then
+        let (nd, added) = _dc_div2k d 13 in
+        norm nd (scale + added) (e2 + 13)
+      else if idig <= 14 then
+        // 14 digits stay under 19 after * 2^13, so this cannot bounce off the
+        // >= 19 arm above -- 15 would, and the two arms would hand the value
+        // back and forth forever
+        let nd = _dc_mul2k d 13 in
+        norm nd scale (e2 - 13)
+      else
+        let bl = l6_bitlen (_dc_int_l6 d scale) in
+        if bl > 56 then
+          let (nd, added) = _dc_div2k d 1 in
+          norm nd (scale + added) (e2 + 1)
+        else if bl < 56 then
+          let nd = _dc_mul2k d 1 in
+          norm nd scale (e2 - 1)
+        else (d, scale, e2) in
+    let (d, scale, e2) = norm d0 scale0 0 in
+    let m56 = _dc_int_l6 d scale in
+    let st = if _dc_dirty_below d scale then 1 else 0 in
+    // pack reads value = s * 2^(e - 1078); here value = m56 * 2^e2
+    pack sign m56 (e2 + 1078) st;
+
+// ---- Sf -> exact decimal ----------------------------------------------------
+
+// the significand's decimal digits, then scaled by 2^(E - 1075) exactly
+let _dc_of_sf = fn (a: Sf) ->
+  let (sig, e) = norm_sig a in
+  let d0 = vec_new () in
+  let _ = vec_push d0 0 in
+  // digits of sig: fold bits in, top first: d = d*2 + bit
+  let rec bits = fn (i: int) -> fn d ->
+    if i < 0 then d
+    else
+      let dd = _dc_mul2k d 1 in
+      let _ = (if l6_bit sig i == 1 then vec_set dd 0 (vec_get dd 0 + 1) else ()) in
+      bits (i - 1) dd in
+  let d1 = bits (l6_bitlen sig - 1) d0 in
+  let sh = e - 1075 in
+  if sh >= 0 then
+    let rec up = fn d -> fn (k: int) ->
+      if k == 0 then d
+      else let s = (if k > 13 then 13 else k) in up (_dc_mul2k d s) (k - s) in
+    (up d1 sh, 0)
+  else
+    let rec down = fn d -> fn (scale: int) -> fn (k: int) ->
+      if k == 0 then (d, scale)
+      else
+        let s = (if k > 13 then 13 else k) in
+        let (nd, added) = _dc_div2k d s in
+        down nd (scale + added) (k - s) in
+    down d1 0 (0 - sh);
+
+// ---- %.{p}g ------------------------------------------------------------------
+
+// round the digit sequence to p significant digits, half to even on the exact
+// tail; returns (digits msb-first as a Vec, decimal exponent X) with the value
+// d[0].d[1..] * 10^X
+let _dc_sigdigits = fn d -> fn (scale: int) -> fn (p: int) ->
+  let top = _dc_top d in
+  let x0 = top - scale in
+  // indices top, top-1, ... ; digit i of the output is d[top - i]
+  let out = vec_new () in
+  let rec take = fn (i: int) ->
+    if i >= p then ()
+    else let _ = vec_push out (_dc_get d (top - i)) in take (i + 1) in
+  let _ = take 0 in
+  let nxt = _dc_get d (top - p) in
+  let dirty = _dc_dirty_below d (top - p) in
+  let roundup =
+    if nxt > 5 then true
+    else if nxt < 5 then false
+    else if dirty then true
+    else bit_and (vec_get out (p - 1)) 1 == 1 in
+  if roundup then
+    let rec carry = fn (i: int) ->
+      if i < 0 then 1                                    // carried past the top
+      else if vec_get out i == 9 then let _ = vec_set out i 0 in carry (i - 1)
+      else let _ = vec_set out i (vec_get out i + 1) in 0 in
+    let c = carry (p - 1) in
+    if c == 1 then
+      // 999.. became 1000..: one digit, then zeros
+      let out2 = vec_new () in
+      let _ = vec_push out2 1 in
+      let rec zs = fn (i: int) -> if i >= p - 1 then () else let _ = vec_push out2 0 in zs (i + 1) in
+      let _ = zs 0 in
+      (out2, x0 + 1)
+    else (out, x0)
+  else (out, x0);
+
+let _dc_digit_ch = fn (n: int) -> chr (48 + n);
+
+// strip trailing zeros of the significant digits (never the first digit)
+let _dc_lastnz = fn dig ->
+  let rec go = fn (i: int) ->
+    if i <= 0 then 0
+    else if vec_get dig i != 0 then i
+    else go (i - 1) in
+  go (vec_len dig - 1);
+
+let _dc_fmt_exp = fn (x: int) ->
+  let mag = if x < 0 then 0 - x else x in
+  let body = str_of_int mag in
+  "e" ++ (if x < 0 then "-" else "+") ++ (if mag < 10 then "0" ++ body else body);
+
+// %.{p}g of a nonzero finite value whose exact digits are (d, scale)
+let _dc_g = fn (sign: int) -> fn d -> fn (scale: int) -> fn (p: int) ->
+  let (dig, x) = _dc_sigdigits d scale p in
+  let last = _dc_lastnz dig in
+  let s0 =
+    if x < (0 - 4) || x >= p then
+      // exponent form: d[.ddd]e±XX
+      let rec frac = fn (i: int) -> fn (acc: str) ->
+        if i > last then acc else frac (i + 1) (acc ++ _dc_digit_ch (vec_get dig i)) in
+      _dc_digit_ch (vec_get dig 0)
+        ++ (if last >= 1 then "." ++ frac 1 "" else "")
+        ++ _dc_fmt_exp x
+    else if x >= 0 then
+      // ddd[.ddd] -- the point sits after digit x
+      let rec go = fn (i: int) -> fn (acc: str) ->
+        if i > last && i > x then acc
+        else
+          let acc2 = (if i == x + 1 then acc ++ "." else acc) in
+          go (i + 1) (acc2 ++ _dc_digit_ch (if i <= last then vec_get dig i else 0)) in
+      go 0 ""
+    else
+      // 0.00ddd -- (-x - 1) zeros between the point and the first digit
+      let rec zs = fn (i: int) -> fn (acc: str) ->
+        if i >= (0 - x) - 1 then acc else zs (i + 1) (acc ++ "0") in
+      let rec go = fn (i: int) -> fn (acc: str) ->
+        if i > last then acc else go (i + 1) (acc ++ _dc_digit_ch (vec_get dig i)) in
+      "0." ++ zs 0 "" ++ go 0 "" in
+  (if sign == 1 then "-" else "") ++ s0;
+
+// ---- the parser --------------------------------------------------------------
+
+let _dc_is_ws = fn (c: str) ->
+  str_eq c " " || str_eq c "\t" || str_eq c "\n" || str_eq c "\r" || str_eq c "\012";
+
+let _dc_digit = fn (c: str) ->
+  let n = ord c in
+  if n >= 48 && n <= 57 then n - 48 else 0 - 1;
+
+let _dc_hexdigit = fn (c: str) ->
+  let n = ord c in
+  if n >= 48 && n <= 57 then n - 48
+  else if n >= 97 && n <= 102 then n - 87
+  else if n >= 65 && n <= 70 then n - 55
+  else 0 - 1;
+
+// trim + drop underscores, in one pass over the raw string
+let _dc_clean = fn (s: str) ->
+  let n = str_len s in
+  let rec lead = fn (i: int) -> if i < n && _dc_is_ws (char_at s i) then lead (i + 1) else i in
+  let rec trail = fn (i: int) -> if i > 0 && _dc_is_ws (char_at s (i - 1)) then trail (i - 1) else i in
+  let a = lead 0 in
+  let b = trail n in
+  let rec go = fn (i: int) -> fn (acc: str) ->
+    if i >= b then acc
+    else
+      let c = char_at s i in
+      go (i + 1) (if str_eq c "_" then acc else acc ++ c) in
+  go a "";
+
+// hex: 0x H [. H] [p±d] -- mantissa bits are the digits, the exponent is a
+// power of two, so this never needs the decimal machinery: collect up to 56
+// bits, everything further is sticky, and pack does the rest.
+let _dc_parse_hex = fn (sign: int) -> fn (t: str) -> fn (fail_s: str) ->
+  let n = str_len t in
+  let rec mant = fn (i: int) -> fn (acc: L6) -> fn (bits: int) -> fn (st: int) ->
+                 fn (fdig: int) -> fn (seen: int) -> fn (dot: int) ->
+    if i >= n then (i, acc, bits, st, fdig, seen, dot)
+    else
+      let c = char_at t i in
+      if str_eq c "." && dot == 0 then mant (i + 1) acc bits st fdig seen 1
+      else
+        let h = _dc_hexdigit c in
+        if h < 0 then (i, acc, bits, st, fdig, seen, dot)
+        else
+          let fd = fdig + (if dot == 1 then 1 else 0) in
+          if bits >= 57 then
+            // No more room: the digit is sticky. An INTEGER digit skipped here
+            // still scales the value by 16, which is fdig - 1 in the exponent
+            // pexp - 4*fdig; a FRACTION digit skipped here scales nothing.
+            mant (i + 1) acc bits (bit_or st (if h != 0 then 1 else 0))
+                 (fdig + (if dot == 1 then 0 else 0 - 1)) seen dot
+          else
+            mant (i + 1) (l6_add (l6_shl acc 4) (l6_of_int h))
+                 (if bits == 0 && h == 0 then 0 else l6_bitlen (l6_add (l6_shl acc 4) (l6_of_int h)))
+                 st fd (seen + 1) dot in
+  let (i1, m, _, st, fdig, seen, _) = mant 0 l6_zero 0 0 0 0 0 in
+  if seen == 0 then fail fail_s else
+  let (i2, pexp) =
+    if i1 < n && (str_eq (char_at t i1) "p" || str_eq (char_at t i1) "P") then
+      let rec pe = fn (i: int) -> fn (acc: int) -> fn (any: int) -> fn (psign: int) ->
+        if i >= n then (if any == 0 then (0 - 1, 0) else (i, psign * acc))
+        else
+          let c = char_at t i in
+          if any == 0 && str_eq c "-" then pe (i + 1) acc 0 (0 - 1)
+          else if any == 0 && str_eq c "+" then pe (i + 1) acc 0 psign
+          else
+            let dg = _dc_digit c in
+            if dg < 0 then (if any == 0 then (0 - 1, 0) else (i, psign * acc))
+            else pe (i + 1) (if acc > 100000 then acc else acc * 10 + dg) (any + 1) psign in
+      pe (i1 + 1) 0 0 1
+    else (i1, 0) in
+  if i2 != n || i2 < 0 then fail fail_s else
+  if l6_is_zero m && st == 0 then (if sign == 1 then neg_zero else zero) else
+  // value = m * 2^(pexp - 4*fdig); normalise m to 56 bits for pack
+  let rec up = fn (v: L6) -> fn (e: int) ->
+    if l6_bitlen v >= 56 then (v, e) else up (l6_shl v 1) (e - 1) in
+  let rec dn = fn (v: L6) -> fn (e: int) -> fn (stx: int) ->
+    if l6_bitlen v <= 56 then (v, e, stx)
+    else let pr = l6_shr_sticky v 1 in dn (fst pr) (e + 1) (bit_or stx (snd pr)) in
+  let (m1, e1) = up m (pexp - 4 * fdig) in
+  let (m2, e2, st2) = dn m1 e1 st in
+  pack sign m2 (e2 + 1078) st2;
+
+// decimal or hex or the named specials; the whole string or nothing
+let sf_of_dec = fn (s: str) ->
+  let fail_s = "float_of_str: \"" ++ s ++ "\" is not a valid float" in
+  let t0 = _dc_clean s in
+  let (sign, t) =
+    if str_len t0 > 0 && str_eq (char_at t0 0) "-" then (1, substring t0 1 (str_len t0))
+    else if str_len t0 > 0 && str_eq (char_at t0 0) "+" then (0, substring t0 1 (str_len t0))
+    else (0, t0) in
+  if str_eq t "inf" || str_eq t "infinity" then (if sign == 1 then neg_inf else inf)
+  else if str_eq t "nan" then nan
+  else if str_len t >= 2 && str_eq (substring t 0 2) "0x" || str_len t >= 2 && str_eq (substring t 0 2) "0X" then
+    _dc_parse_hex sign (substring t 2 (str_len t)) fail_s
+  else
+    let n = str_len t in
+    // digits [. digits] [e±d]; at least one digit somewhere before the e
+    let d = vec_new () in                                // MSB first while reading
+    let rec mant = fn (i: int) -> fn (fdig: int) -> fn (seen: int) -> fn (dot: int) ->
+      if i >= n then (i, fdig, seen)
+      else
+        let c = char_at t i in
+        if str_eq c "." && dot == 0 then mant (i + 1) fdig seen 1
+        else
+          let dg = _dc_digit c in
+          if dg < 0 then (i, fdig, seen)
+          else
+            let _ = vec_push d dg in
+            mant (i + 1) (fdig + (if dot == 1 then 1 else 0)) (seen + 1) dot in
+    let (i1, fdig, seen) = mant 0 0 0 0 in
+    if seen == 0 then fail fail_s else
+    let (i2, dexp) =
+      if i1 < n && (str_eq (char_at t i1) "e" || str_eq (char_at t i1) "E") then
+        let rec pe = fn (i: int) -> fn (acc: int) -> fn (any: int) -> fn (psign: int) ->
+          if i >= n then (if any == 0 then (0 - 1, 0) else (i, psign * acc))
+          else
+            let c = char_at t i in
+            if any == 0 && str_eq c "-" then pe (i + 1) acc 0 (0 - 1)
+            else if any == 0 && str_eq c "+" then pe (i + 1) acc 0 psign
+            else
+              let dg = _dc_digit c in
+              if dg < 0 then (if any == 0 then (0 - 1, 0) else (i, psign * acc))
+              // the exponent saturates: past |10^6| the value is decided by the
+              // digit count alone, and 10^6 digits is not a real input
+              else pe (i + 1) (if acc > 1000000 then acc else acc * 10 + dg) (any + 1) psign in
+        pe (i1 + 1) 0 0 1
+      else (i1, 0) in
+    if i2 != n || i2 < 0 then fail fail_s else
+    // value = digits * 10^(dexp - fdig): LSB-first array, scale from the point
+    let m = vec_len d in
+    let lsb = vec_new () in
+    let rec rev = fn (i: int) ->
+      if i >= m then () else let _ = vec_push lsb (vec_get d (m - 1 - i)) in rev (i + 1) in
+    let _ = rev 0 in
+    let k = dexp - fdig in
+    let topnz = _dc_top lsb in
+    if topnz < 0 then (if sign == 1 then neg_zero else zero)
+    else if topnz + k >= 310 then (if sign == 1 then neg_inf else inf)
+    else if topnz + k <= (0 - 330) then (if sign == 1 then neg_zero else zero)
+    // fold 10^k in: k > 0 appends zeros at the LSB end; k < 0 raises the scale
+    else if k >= 0 then
+      let shifted = vec_new () in
+      let rec zs = fn (i: int) -> if i >= k then () else let _ = vec_push shifted 0 in zs (i + 1) in
+      let _ = zs 0 in
+      let rec cp = fn (i: int) -> if i >= m then () else let _ = vec_push shifted (vec_get lsb i) in cp (i + 1) in
+      let _ = cp 0 in
+      _dc_to_sf sign shifted 0
+    else
+      _dc_to_sf sign lsb (0 - k);
+
+// ---- the printer --------------------------------------------------------------
+
+let _dc_sf_eq = fn (a: Sf) -> fn (b: Sf) ->
+  a.sign == b.sign && a.exp == b.exp
+  && a.f3 == b.f3 && a.f2 == b.f2 && a.f1 == b.f1 && a.f0 == b.f0;
+
+let _dc_has_mark = fn (s: str) ->
+  let rec go = fn (i: int) ->
+    if i >= str_len s then false
+    else
+      let c = char_at s i in
+      if str_eq c "." || str_eq c "e" || str_eq c "E" || str_eq c "n" || str_eq c "i" then true
+      else go (i + 1) in
+  go 0;
+
+let dec_of_sf = fn (a: Sf) ->
+  let s0 =
+    if is_nan a then "nan"
+    else if is_inf a then (if a.sign == 1 then "-inf" else "inf")
+    else if is_zero a then (if a.sign == 1 then "-0" else "0")
+    else
+      let (d, scale) = _dc_of_sf a in
+      let rec go = fn (p: int) ->
+        let s = _dc_g a.sign d scale p in
+        if p >= 17 then s
+        else if _dc_sf_eq (sf_of_dec s) a then s
+        else go (p + 1) in
+      go 12 in
+  if _dc_has_mark s0 then s0 else s0 ++ ".0";

@@ -1,5 +1,11 @@
 // A Map that lives outside a region, mutated inside it, read after it.
 //
+// This lives in test/rv/ and not test/parity/ because the Wasm backend REFUSES
+// the shape outright ("map_set inside a region block ... the Wasm backend
+// reclaims the whole block on exit", memory-model.md 3.5) -- it met this exact
+// hazard first and chose compile-time refusal, where RV32I chooses to keep the
+// heap. Two honest answers; a parity row can only hold one.
+//
 // The map's cell predates the region; `map_set` allocates a new cons node for
 // the entry. On backends where map internals live in the map's own arena the
 // region is irrelevant. On RV32I the Map is prelude code and its node comes

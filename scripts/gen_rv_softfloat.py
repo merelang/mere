@@ -24,7 +24,7 @@ from pathlib import Path
 
 # Dependency order: each file may use what the ones before it defined.
 ORDER = ["limbs.mere", "softfloat.mere", "add.mere", "mul.mere", "div.mere",
-         "conv.mere", "bits.mere"]
+         "conv.mere", "dec.mere", "bits.mere"]
 
 root = Path(sys.argv[1])
 src_dir = root / "contrib" / "softfloat"

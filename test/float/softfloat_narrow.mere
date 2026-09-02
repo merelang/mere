@@ -12,6 +12,7 @@ import "../../contrib/softfloat/add.mere";
 import "../../contrib/softfloat/mul.mere";
 import "../../contrib/softfloat/div.mere";
 import "../../contrib/softfloat/conv.mere";
+import "../../contrib/softfloat/dec.mere";
 import "../../contrib/softfloat/softfloat.mere";
 
 let one = mk 0 1023 0 0 0 0;          // 1.0
@@ -109,3 +110,18 @@ let _ = print_int (l6_to_int (l6_of_int 12345));
 let _ = print_int (mag_limbs (0 - 7)).l0;
 let _ = print_int (of_int 42).exp;
 let _ = print_int (to_int (of_int 42));
+
+// contrib/softfloat/dec: str -> Sf -> str never names a float, so the decimal
+// conversions can be exercised here in full. One value per formatting shape:
+// fixed, fixed-fraction, exponent form, hex input, a special, and a failure
+// message (via try_or -- the parse error is a `fail`). The _dc_* helpers are
+// reached through these two entry points: _dc_get _dc_mul2k _dc_div2k _dc_top
+// _dc_dirty_below _dc_int_l6 _dc_intdigits _dc_to_sf _dc_of_sf _dc_sigdigits
+// _dc_digit_ch _dc_lastnz _dc_fmt_exp _dc_g _dc_is_ws _dc_digit _dc_hexdigit
+// _dc_clean _dc_parse_hex _dc_sf_eq _dc_has_mark
+let _ = print (dec_of_sf (sf_of_dec "0.1"));
+let _ = print (dec_of_sf (sf_of_dec "2500"));
+let _ = print (dec_of_sf (sf_of_dec "1e23"));
+let _ = print (dec_of_sf (sf_of_dec "0x1.8p1"));
+let _ = print (dec_of_sf (sf_of_dec "-inf"));
+let _ = print (try_or (fn (u: unit) -> dec_of_sf (sf_of_dec "abc")) "refused");

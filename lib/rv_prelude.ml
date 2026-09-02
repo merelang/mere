@@ -83,8 +83,8 @@ let print_bytes = fn (b: bytes) -> (__h_todo "print_bytes" : unit);
 //
 // Only the ones a program actually reaches are emitted, so a program that never
 // touches floats pays nothing.
-// What is left after softfloat: the transcendentals, `f_pow`, `f_min`/`f_max`,
-// and the decimal conversions. The message used to say softfloat "is not yet
+// What is left after softfloat: the transcendentals, `f_pow`, and
+// `f_min`/`f_max`. The message used to say softfloat "is not yet
 // injected into the -rv prelude", which stopped being true the day it was --
 // and would have gone on telling every user to go and do the thing that had
 // already been done.
@@ -109,8 +109,7 @@ let exp = fn (a: float) -> (__f_todo "exp" : float);
 let floor = fn (a: float) -> (__f_todo "floor" : float);
 let ceil = fn (a: float) -> (__f_todo "ceil" : float);
 let round = fn (a: float) -> (__f_todo "round" : float);
-let float_of_str = fn (s: str) -> (__f_todo "float_of_str" : float);
-let str_of_float = fn (x: float) -> (__f_todo "str_of_float" : str);
+
 
 // --- misc ----------------------------------------------------------------
 let not = fn b -> if b then false else true;
@@ -329,6 +328,11 @@ let f_gt = fn (a: float) -> fn (b: float) -> __fgt a b;
 let f_ge = fn (a: float) -> fn (b: float) -> __fge a b;
 let float_of_int = fn (n: int) -> __sf_float_of_sf (__sf_of_int n);
 let int_of_float = fn (x: float) -> __sf_to_int (__sf_sf_of_float x);
+// The decimal conversions, from contrib/softfloat/dec: exact digit arrays, so
+// `str_of_float` prints the same shortest-round-trip spelling the interpreter
+// and the C runtime print, and `float_of_str` rounds the same way strtod does.
+let float_of_str = fn (s: str) -> __sf_float_of_sf (__sf_sf_of_dec s);
+let str_of_float = fn (x: float) -> __sf_dec_of_sf (__sf_sf_of_float x);
 |mere}
 
 (* Lines the prelude occupies once it is glued ahead of the user source, so a

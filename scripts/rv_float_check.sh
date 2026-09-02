@@ -70,4 +70,25 @@ else
   diff "$TMP/ref.out" "$TMP/rv.out" | head -20
   rc=1
 fi
+
+# The decimal conversions, same shape: the C binary is strtod/printf, the RV32I
+# binary is the digit arrays, and the outputs must match byte for byte.
+CV="$ROOT/test/float/rv_float_conv.mere"
+"$MERE" -c "$CV" > "$TMP/cv.c" 2>"$TMP/err" || { echo "FAIL rv_float: the C backend refused the conversion gate"; exit 1; }
+$CC -O2 -w -o "$TMP/cvref" "$TMP/cv.c" || exit 1
+"$TMP/cvref" | grep -v '^()$' > "$TMP/cvref.out"
+# --ram 64: each conversion builds exact digit arrays (a full-range double is
+# ~700 digits) and a region reclaims nothing on this backend, so three hundred
+# of them genuinely need tens of MB. 32 ran out at pattern 22.
+"$MERE" -rv --ram 64 "$CV" > "$TMP/prog.bin" 2>"$TMP/err" || {
+  echo "FAIL rv_float: -rv refused the conversion gate"; head -3 "$TMP/err"; exit 1; }
+( cd "$TMP" && perl -e 'alarm 900; exec @ARGV' ./rvrun 64 2>&1 ) | grep -v '^rvrun: ' > "$TMP/cvrv.out"
+CVN=$(grep -c . "$TMP/cvref.out")
+if diff -q "$TMP/cvref.out" "$TMP/cvrv.out" >/dev/null; then
+  echo "ok rv_float: $CVN conversions identical — float_of_str/str_of_float on RV32I equal strtod/printf"
+else
+  echo "FAIL rv_float: a decimal conversion on RV32I disagrees with the hardware"
+  diff "$TMP/cvref.out" "$TMP/cvrv.out" | head -30
+  rc=1
+fi
 exit $rc

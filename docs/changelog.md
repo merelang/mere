@@ -4,6 +4,63 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.391 — 2026-09-02
+
+_`float_of_str` / `str_of_float` computed exactly, in integers: Ruby's `0.1` now
+parses, adds and prints on the Mere-written CPU._
+
+```
+$ rvrun 64 -- -e 'x = 0.1 + 0.2; puts x'
+0.30000000000000004
+$ rvrun 64 -- -e 'puts "%05.2f" % 3.14159'
+03.14
+```
+
+`contrib/softfloat/dec.mere`: a double's decimal expansion is EXACT -- m * 2^e,
+multiplying by two never lengthens the fraction and dividing by two adds at most
+one digit -- so the working value is an array of base-10 digits and every
+rounding decision reads real digits. No tables, no estimates.
+
+The contract is the one the interpreter and the C runtime already share, spelled
+out at the top of the file: trim, drop `_`, decimal or hex or inf/infinity/nan,
+whole string or the exact error message; printing is `%.{p}g` for p = 12..17
+stopping at the first p that parses back to the same bits, `.0` appended when
+the output has none of `.` `e` `E` `n` `i`. The parse side hands `pack` a 56-bit
+significand and a sticky bit and lets the existing rounding do its one job;
+overflow is inf, underflow is a SIGNED zero, and `1e1000000` is decided from the
+leading digit's decimal exponent without building a million-digit array.
+
+**Checked against the machine, not against a table.** The new arm of
+`softfloat_check` runs a fixed battery (the %.12g round-trip artifact on
+subnormals, 1e23, ties-to-even at 2^53+1, hex, the largest finite double) and
+then two thousand xorshift bit patterns, comparing every print against printf
+and every parse against strtod -- zero disagreements, on the interpreter and the
+C backend both. `rv_float_check` runs the same shape on the emulated CPU (twelve
+patterns, not two thousand: a full-range conversion builds ~700-digit arrays, a
+region reclaims nothing on this backend, and the count is a measured RAM
+budget).
+
+Two portability notes earned along the way, both already in this repo's memory
+and both stepped in anyway:
+
+* The battery's xorshift diverged between backends: `>> 17` on a value with bit
+  31 set is an ARITHMETIC shift on RV32I, where that value is negative. The
+  15 real bits are masked now, and the comment says why.
+* `rv_exec_check` flaked at a 60-second alarm, still flaked at 240, and the
+  timeout was never the reason: `nul_in_str`'s output contains a NUL, and grep
+  without `-a` was swallowing lines behind a binary-file heuristic that looks at
+  buffer boundaries. Two programs sat in the known-different list on the
+  strength of that filter; the list's own freshness check is what got them out.
+
+The no-float rule in `softfloat_check` now strips string literals before it
+greps: dec.mere's parse error says "is not a valid float" because that is the
+message the other backends produce, and a string cannot be a type.
+
+Matrix: `float_of_str` and `str_of_float` go `stub` -> `yes`; 22 stubs remain
+(transcendentals, f_pow, f_min/f_max, and the host services).
+
+---
+
 ## v0.1.390 — 2026-09-02
 
 _`ruby -e 'puts 1 + 1'` prints 2 on a RISC-V CPU written in Mere. The last bug
