@@ -155,6 +155,33 @@ check examples/riscv_virt_sched.mere 'scheduling two tasks:
 ABABABA
 switched enough, stopping'
 
+# The same board, twice as wide: RV64 is the same backend at xlen 64, and hello
+# exercises the heap, string building, recursion and device windows. QEMU's
+# riscv64 system emulator is the decoder. timer and sched (the trap machinery)
+# and args (whose block layout is written in 4-byte fields by the test itself)
+# are NOT run at 64 yet -- named here so the gap is a listed fact, not a
+# forgotten one; they are the next slice of the RV64 arc.
+QEMU64=$(command -v qemu-system-riscv64 || true)
+if [ -n "$QEMU64" ]; then
+  name=riscv_virt_hello64
+  if "$MERE" -rv64 --bare --load-base 0x80000000 --ram 8 examples/riscv_virt_hello.mere > "$TMP/v64.bin" 2>"$TMP/err"; then
+    got64=$(perl -e 'alarm 60; exec @ARGV' "$QEMU64" -M virt -bios none -nographic -kernel "$TMP/v64.bin" 2>/dev/null)
+    want64='hello from qemu virt
+built at run time: 42
+fib 20 = 6765
+mtime advances'
+    if [ "$got64" = "$want64" ]; then
+      printf '  ok    %s (%s bytes, RV64)\n' "$name" "$(wc -c < "$TMP/v64.bin" | tr -d ' ')"
+      pass=$((pass + 1))
+    else
+      printf '  FAIL  %s\n    got:\n%s\n' "$name" "$(printf '%s' "$got64" | sed 's/^/      /')"
+      fail=$((fail + 1))
+    fi
+  else
+    printf '  FAIL  %s (-rv64 refused it)\n' "$name"; head -3 "$TMP/err"; fail=$((fail + 1))
+  fi
+fi
+
 # The parenthetical is a CLAIM, so it only gets made when it is true. Saying
 # "agreed on every image" next to a nonzero failure count was the first version
 # of this line, and a summary that contradicts the rows above it is worse than

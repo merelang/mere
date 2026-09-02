@@ -4,6 +4,46 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.394 — 2026-09-02
+
+_`-rv64`: the same backend, twice as wide. hello runs on qemu-system-riscv64,
+byte-identical output to the RV32 run._
+
+One backend, two widths -- an `xlen` knob rather than a second file, because two
+files drift. What actually changes:
+
+* **LW/SW become LD/SD** (149 sites, every one now spelled through `ldf3`/`stf3`)
+  and every cell offset, frame slot, record field and length header scales
+  through `wsz ()` -- at 32 all of it is the identity, and the whole RV32 suite
+  ran unchanged after every pass of the surgery.
+* **`li` learned the 64-bit truth about lui**: it SIGN-EXTENDS. `li rd
+  0x80000000` the 32-bit way materialises 0xFFFFFFFF80000000, which as an
+  address points at nothing. Outside signed 32 bits the value is built in
+  12-bit chunks; on RV32 the masked lui+addi remains, because there every value
+  is a 32-bit pattern and 0x807E0000 is a legal unsigned address -- the first
+  version gated on signed range and the unit suite caught it within seconds.
+* **`LoadAddr` is pc-relative (auipc) on RV64** for the same reason, and the
+  same 8 bytes on both widths, so the layout logic does not care.
+* **`raw_peek32`/`raw_poke32` are 32 bits BY NAME, on either width**: a device
+  register is as wide as the device says, not as wide as the CPU. The blanket
+  f3 parameterisation had quietly turned the finisher poke into an 8-byte
+  store, which QEMU's test device ignores -- the guest printed everything and
+  the machine never powered off, and a pipe through `head` hid it by killing
+  qemu with SIGPIPE. The peek is LWU on RV64, so a device value with bit 31
+  set does not come back negative.
+
+`riscv_virt_hello` -- heap, string building, recursion, device windows --
+compiles with `-rv64 --bare --load-base 0x80000000` and prints the same four
+lines on qemu-system-riscv64 that the RV32 build prints on qemu-system-riscv32
+and on the Mere-written emulator. That is now a row in `qemu_virt.sh`.
+
+Named and not yet done, in the script where the gap lives: `timer` and `sched`
+(the trap machinery) do not run at 64 yet, and `args` writes its block in
+4-byte fields by hand, so it is width-32 by construction. Those are the next
+slice of the arc, along with the RV64 emulator in memu and the hosted path.
+
+---
+
 ## v0.1.393 — 2026-09-02
 
 _The last unexplained RV32I difference has a name: `==` inside a polymorphic
