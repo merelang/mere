@@ -13670,6 +13670,17 @@ let () =
     let mt = Typer.infer !type_env (Ast.desugar_program prog) in
     (prog, mt)
   in
+  let rv_not_contains name src needle =
+    let hay =
+      try
+        let (prog, mt) = rv_typed src in
+        Codegen_riscv.emit_listing ~main_ty:mt prog
+      with e -> "EXCEPTION: " ^ Printexc.to_string e
+    in
+    let nl = String.length needle and hl = String.length hay in
+    let rec loop i = i + nl <= hl && (String.sub hay i nl = needle || loop (i + 1)) in
+    check name (if loop 0 then "PRESENT: " ^ needle else needle) needle
+  in
   let rv_contains name src needle =
     let hay =
       try
@@ -13694,12 +13705,18 @@ let () =
   rv_contains "rv32i: a local `let rec` tail call jumps through the closure"
     "let run = fn n -> let rec loop = fn i -> if i >= n then i else loop (i + 1) in loop 0;\n\
      let _ = print_int (run 10);" "jalr zero, 0(t1)";
-  (* `region R { }` parks the bump pointer and rolls it back at the closing
-     brace, which is what lets a long-running loop hold a flat heap *)
-  rv_contains "rv32i: a region parks the bump pointer"
+  (* `region R { }` reclaims NOTHING on this backend, on purpose: Map and every
+     other prelude-lowered structure allocates its cells from the same bump heap,
+     so the old park-and-roll-back declared a __heap map's new node reusable the
+     moment the region closed -- mere-ruby corrupted its own constant table with
+     one `map_set` per statement. These two assertions used to pin the rollback
+     (`sw gp` / `mv gp, t0`); they now pin its ABSENCE, so the day rollback
+     returns (with a second, persistent bump area for escaping structures)
+     they fail and point here. *)
+  rv_not_contains "rv32i: a region does not park the bump pointer"
     "let f = fn x -> x + 1;\n\
      let _ = print_int (region R { f 41 });" "sw gp, 0(sp)";
-  rv_contains "rv32i: a region restores the bump pointer"
+  rv_not_contains "rv32i: a region does not roll the bump pointer back"
     "let f = fn x -> x + 1;\n\
      let _ = print_int (region R { f 41 });" "mv gp, t0";
   (* the heap grows up and the stack grows down into the same gap; before this

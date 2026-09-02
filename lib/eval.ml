@@ -3200,6 +3200,7 @@ let initial_env : env =
     ("csr_read", ref (bare_only "csr_read"));
     ("csr_write", ref (bare_only "csr_write"));
     ("raw_window", ref (bare_only "raw_window"));
+    ("__rv_word", ref (rv_only "__rv_word"));
     ("__rv_argc", ref (rv_only "__rv_argc"));
     ("__rv_argstr", ref (rv_only "__rv_argstr"));
     ("raw_peek8", ref (bare_only "raw_peek8"));
