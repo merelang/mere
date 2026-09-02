@@ -1790,6 +1790,42 @@ and compile_app env e =
      is typed, rather than here where a wrong tag would be silent. `__rv_argstr`
      copies nothing: what the loader left in the block already has this
      backend's string layout, so the pointer is the string. *)
+  (* clock_gettime64 into a fresh 4-word block, returned as the tuple
+     (sec_lo, sec_hi, nsec_lo, nsec_hi) -- a tuple on this backend IS a plain
+     block of fields, so the block the kernel filled is the value. Refused
+     under --bare: a machine has devices, not syscalls, and inventing a clock
+     would let a program measure nothing and believe it. *)
+  | Ast.Var "__rv_clock" when List.length args = 1 ->
+    if !bare then
+      err e.loc
+        "RV32I --bare: there is no host clock -- read a timer device through \
+         the machine capability instead (the CLINT's mtime on QEMU's virt)";
+    compile_expr env (List.hd args);                     (* a0 = clockid *)
+    push a0;
+    alloc_words t1 4;
+    push t1;
+    emit_word (enc_i 4 sp 2 a0 0x03);                    (* a0 = clockid (below t1) *)
+    emit_word (enc_i 0 t1 0 a1 0x13);                    (* a1 = block *)
+    li a7 403;
+    emit_word (enc_i 0 zero 0 zero 0x73);                (* ecall *)
+    pop a0;                                              (* a0 = block = the tuple *)
+    emit_word (enc_i 4 sp 0 sp 0x13)                     (* drop the clockid *)
+  (* getrandom of one word, via the print scratch buffer -- dead between print
+     calls, and this is not a print call. Same --bare refusal, same reason. *)
+  | Ast.Var "__rv_urandom32" when List.length args = 1 ->
+    if !bare then
+      err e.loc
+        "RV32I --bare: there is no host entropy -- a machine that needs \
+         randomness reads a device for it, and inventing a seed here would be \
+         a stable lie";
+    compile_expr env (List.hd args);                     (* the unit, discarded *)
+    li a0 (scratch_base ());
+    li a1 4;
+    li a2 0;
+    li a7 278;
+    emit_word (enc_i 0 zero 0 zero 0x73);                (* ecall *)
+    li a0 (scratch_base ());
+    emit_word (enc_i 0 a0 2 a0 0x03)                     (* lw a0, 0(scratch) *)
   (* the identity: whatever word the value is, as an int. Diagnostic only. *)
   | Ast.Var "__rv_word" when List.length args = 1 ->
     compile_expr env (List.hd args)
