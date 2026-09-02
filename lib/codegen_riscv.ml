@@ -693,6 +693,8 @@ let rec count_lets (e : Ast.expr) : int =
     + List.fold_left (fun n (pat, guard, body) ->
         n + pvars_in_pattern pat + count_lets body
         + (match guard with Some g -> count_lets g | None -> 0)) 0 arms
+  | Ast.Region_block (_, b) -> count_lets b
+  | Ast.Region_loop (_, _, b) -> count_lets b
   | _ -> 0
 
 let is_top name = Hashtbl.mem tops name
@@ -2289,6 +2291,20 @@ let emit_function ~label ~params ~body =
   tail_pos := true;                       (* the body's value is the function's *)
   compile_expr (List.mapi (fun i p -> (p, i)) params) body;
   tail_pos := false;
+  (* The frame reserved `total` binding slots from count_lets; the body handed
+     out `!slot_ctr`. They MUST agree: a binding whose index exceeds `total`
+     lands at an fp offset past the reserved frame -- below this function's own
+     sp -- where a called function's frame writes over it. count_lets and the
+     slot_ctr walk are two traversals of the same tree, and a node counted by
+     one but not the other is exactly this silent corruption. It hid until 64
+     bits, where mere-ruby's gc_collect reserved 2 slots and used 17 (region
+     bodies were not counted), and the overflow happened to land on a live
+     binding. This check makes the two walks provably agree at every compile. *)
+  if !slot_ctr > total then
+    failwith (Printf.sprintf
+      "RV32I internal: %s reserved %d frame slots but used %d -- count_lets \
+       undercounts a node the slot_ctr walk visits, a backend bug that sizes \
+       the frame too small" label total !slot_ctr);
   emit_epilogue fr
 
 (* a lifted lambda: closure env ptr in a0, the (single) argument in a1.
@@ -2318,6 +2334,20 @@ let emit_lambda ~label ~captures ~param ~body =
   tail_pos := true;
   compile_expr env body;
   tail_pos := false;
+  (* The frame reserved `total` binding slots from count_lets; the body handed
+     out `!slot_ctr`. They MUST agree: a binding whose index exceeds `total`
+     lands at an fp offset past the reserved frame -- below this function's own
+     sp -- where a called function's frame writes over it. count_lets and the
+     slot_ctr walk are two traversals of the same tree, and a node counted by
+     one but not the other is exactly this silent corruption. It hid until 64
+     bits, where mere-ruby's gc_collect reserved 2 slots and used 17 (region
+     bodies were not counted), and the overflow happened to land on a live
+     binding. This check makes the two walks provably agree at every compile. *)
+  if !slot_ctr > total then
+    failwith (Printf.sprintf
+      "RV32I internal: %s reserved %d frame slots but used %d -- count_lets \
+       undercounts a node the slot_ctr walk visits, a backend bug that sizes \
+       the frame too small" label total !slot_ctr);
   emit_epilogue fr
 
 (* __main: initialise the top-level value bindings (in order, into the
