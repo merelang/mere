@@ -1,0 +1,81 @@
+// A `try_or` whose thunk ALLOCATES must still hand the catcher back its own
+// named bindings. On RV32I/RV64 a named binding lives in a callee-saved
+// register, and the save area for those registers is part of the catch RECORD,
+// which lives on the heap -- so an offset that lands outside the record puts the
+// save area on bump space the thunk then allocates for itself, and the unwind
+// restores the catcher's names from the failed thunk's garbage.
+//
+// test/parity/try_or_saves_bindings.mere already pins "the unwind restores the
+// registers", and it stayed green straight through the defect this case exists
+// for: the save area sat 15 words past the end of the record, its thunk
+// allocated a handful of words, and the clobber never reached as far as the
+// registers that catcher was using. Restoring from the WRONG PLACE and restoring
+// from a place nothing has overwritten YET look identical.
+//
+// So this one is written to leave no room for that luck:
+//   - the catcher holds a live binding in EVERY callee-saved register (ten), of
+//     both kinds -- strings that are concatenated afterwards (a clobbered
+//     pointer prints garbage or traps rather than a plausible number) and
+//     integers at distinct powers of two (the sum names exactly which register
+//     was lost, so a failure diagnoses itself)
+//   - the thunk allocates far past every one of those ten slots before failing
+//   - and one case gives the `default` expression an allocation of its own,
+//     because the default is evaluated AFTER the registers are saved: a save
+//     area outside the record is within reach of that allocation too, on the
+//     path where the thunk never runs at all.
+let rec spew = fn (n: int) -> fn (acc: str) ->
+  if n <= 0 then fail ("boom:" ++ str_of_int (str_len acc))
+  else spew (n - 1) (acc ++ "0123456789");
+
+let rec pad = fn (n: int) -> fn (acc: str) ->
+  if n <= 0 then acc else pad (n - 1) (acc ++ "abcdefgh");
+
+// the catcher: ten live names across a thunk that allocates and fails
+let held = fn (u: unit) ->
+  let a = "A" in
+  let b = "B" in
+  let c = "C" in
+  let d = "D" in
+  let e = 1 in
+  let f = 2 in
+  let g = 4 in
+  let h = 8 in
+  let i = 16 in
+  let j = 32 in
+  let v = try_or (fn (z: unit) -> spew 24 "x") (0 - 1) in
+  a ++ b ++ c ++ d ++ "/" ++ str_of_int (e + f + g + h + i + j) ++ "/" ++ str_of_int v;
+
+// the same ten names, but the DEFAULT allocates and the thunk returns normally
+let defaulted = fn (u: unit) ->
+  let a = "E" in
+  let b = "F" in
+  let c = "G" in
+  let d = "H" in
+  let e = 64 in
+  let f = 128 in
+  let g = 256 in
+  let h = 512 in
+  let i = 1024 in
+  let j = 2048 in
+  let v = try_or (fn (z: unit) -> 7) (str_len (pad 24 "y")) in
+  a ++ b ++ c ++ d ++ "/" ++ str_of_int (e + f + g + h + i + j) ++ "/" ++ str_of_int v;
+
+// ...and with the allocating default on the path that DOES fail, so both halves
+// of the record are exercised by one unwind.
+let both = fn (u: unit) ->
+  let a = "I" in
+  let b = "J" in
+  let c = "K" in
+  let d = "L" in
+  let e = 4096 in
+  let f = 8192 in
+  let g = 16384 in
+  let h = 32768 in
+  let i = 65536 in
+  let j = 131072 in
+  let v = try_or (fn (z: unit) -> spew 24 "z") (str_len (pad 24 "w")) in
+  a ++ b ++ c ++ d ++ "/" ++ str_of_int (e + f + g + h + i + j) ++ "/" ++ str_of_int v;
+
+let _ = print (held ());
+let _ = print (defaulted ());
+let _ = print (both ());
