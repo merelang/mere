@@ -4,6 +4,33 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.400 — 2026-09-02
+
+_The package lock's content hash included `.git`, so the same pinned revision
+hashed to a different value on every clone -- the Pages build could never
+satisfy its own integrity check._
+
+`mere install` clones a dependency, `cp -R`s the checkout (`.git` and all) into
+the module dir, and hashes that tree to record in `mere.lock`. The hash walked
+`.git` too: pack files, `FETCH_HEAD`, the index, and reflogs, all carrying
+per-clone timestamps and per-machine packing order. So a coordinate that pins an
+immutable SHA still produced a6a6ddab here, 94aad445 on the next install, and
+593c448a on the CI runner -- and the integrity check, whose whole job is that a
+pinned rev reproduces the same content, could not pass. Pages had been red on
+exactly this since the check was added.
+
+`walk_rel` now skips `.git`. The hash is over the working tree the coordinate
+actually pins, which is reproducible: stable across three re-installs here, and
+now the same bytes CI checks out. `mere.lock` is re-pinned to the content hash
+(4b9a3a99); the rev is unchanged. The docs site (mere SSG + every wat2wasm
+target) builds with it.
+
+A hash meant to prove reproducibility that is itself not reproducible is worse
+than none -- it fails the honest case. Excluding the one directory that is
+machine state, not content, is what makes the guarantee true.
+
+---
+
 ## v0.1.399 — 2026-09-02
 
 _CI had been red since v0.1.357 -- four gates that only fail on Linux, three of

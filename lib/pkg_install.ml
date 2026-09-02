@@ -55,6 +55,15 @@ let rec walk_rel dir prefix =
   Sys.readdir dir
   |> Array.to_list
   |> List.sort compare
+  (* `.git` is git's own internal state, not package content: pack files, refs,
+     FETCH_HEAD, index, and logs carry per-clone timestamps and per-machine
+     packing order. copy_tree brings it along (a plain `cp -R`), so hashing the
+     installed tree hashed all of it -- and the same pinned rev produced a
+     different md5 on every machine and every clone, which made the lock's
+     integrity check impossible to satisfy and kept the Pages build red. The
+     content that a coordinate pins is the working tree; `.git` is skipped so
+     the hash is reproducible. *)
+  |> List.filter (fun name -> name <> ".git")
   |> List.concat_map (fun name ->
          let full = Filename.concat dir name in
          let rel = if prefix = "" then name else prefix ^ "/" ^ name in
