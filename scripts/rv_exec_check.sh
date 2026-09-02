@@ -67,7 +67,7 @@ if [ -n "${MEMU:-}" ]; then
   RVRUN="$TMP/rvrun"
 fi
 
-echoed=0; known=0
+echoed=0; known=0; nocref=0; refused=0; refused_names=""
 for p in "$ROOT"/test/parity/*.mere; do
   name=$(basename "$p" .mere)
   if "$MERE" -c "$p" > "$TMP/ref.c" 2>/dev/null && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
@@ -78,10 +78,16 @@ for p in "$ROOT"/test/parity/*.mere; do
   # kept flaking with no timeout in sight; the timeout was never the reason.
   grep -a -v '^()$' "$TMP/i.out.raw" > "$TMP/i.out"
   else
-    continue        # not a C-backend program; nothing to compare against here
+    nocref=$((nocref+1)); continue   # not a C-backend program; nothing to compare against
   fi
   if "$MERE" -rv --ram 32 "$p" > "$TMP/prog.bin" 2>"$TMP/rverr"; then :; else
-    continue        # refused for a named reason; scripts/host_matrix.sh covers those
+    # Refused for a named reason -- scripts/host_matrix.sh's business, not a
+    # failure here. But COUNTED and NAMED, not silently dropped: this gate's
+    # "N passed" read as coverage of the corpus, and it was really coverage of
+    # the roughly half of it this backend accepts (70 of 144 were skipped
+    # here, invisibly, when this was a bare `continue`). A gate that does not
+    # state its denominator claims the whole corpus every time it goes green.
+    refused=$((refused+1)); refused_names="$refused_names $name"; continue
   fi
   if [ -z "$RVRUN" ]; then pass=$((pass+1)); continue; fi
   ( cd "$TMP" && perl -e 'alarm 480; exec @ARGV' ./rvrun 32 2>/dev/null ) | grep -a -v '^rvrun: ' > "$TMP/r.out"
@@ -217,7 +223,7 @@ if [ -n "${MEMU:-}" ] && [ -f "$MEMU/riscv-runc/rv64i_run.mere" ]; then
     echo "rv_exec: the RV64 emulator did not build; the 64-bit column did not run"
   fi
 fi
-pass64=0; fail64=0; known64=0
+pass64=0; fail64=0; known64=0; refused64=0; refused64_names=""
 if [ -n "$RVRUN64" ]; then
   for p in "$ROOT"/test/parity/*.mere; do
     name=$(basename "$p" .mere)
@@ -225,7 +231,10 @@ if [ -n "$RVRUN64" ]; then
       ( ulimit -t 60; "$TMP/ref" ) > "$TMP/i.out.raw" 2>&1
       grep -a -v '^()$' "$TMP/i.out.raw" > "$TMP/i.out"
     else continue; fi
-    "$MERE" -rv64 --ram 32 "$p" > "$TMP/prog.bin" 2>/dev/null || continue
+    # counted and named, same as the 32-bit sweep: the denominator is the claim
+    if ! "$MERE" -rv64 --ram 32 "$p" > "$TMP/prog.bin" 2>/dev/null; then
+      refused64=$((refused64+1)); refused64_names="$refused64_names $name"; continue
+    fi
     ( cd "$TMP" && perl -e 'alarm 480; exec @ARGV' ./rvrun64 32 2>/dev/null ) | grep -a -v '^rvrun' > "$TMP/r.out"
     sed '$d' "$TMP/i.out" > "$TMP/i.trim"
     expected_diff=no
@@ -244,6 +253,9 @@ if [ -n "$RVRUN64" ]; then
     fi
   done
   echo "rv_exec: $pass64 passed, $fail64 failed, $known64 known-different at 64 bits (C backend vs RV64 on the Mere-written CPU)"
+  echo "rv_exec: $refused64 of the corpus refused by -rv64 at compile time (not run here; host_matrix names the reasons):"
+  echo "$refused64_names" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ' | sed 's/^/rv_exec:   /;s/ $//'
+  echo ""
 fi
 
 # host_read_file: `read_file` / `file_exists` on the hosted target, against the
@@ -312,5 +324,8 @@ if [ -z "$RVRUN" ]; then
 else
   echo "rv_exec: $pass passed, $fail failed, $known known-different (C backend vs RV32I on the Mere-written CPU)"
   echo "rv_exec: $echoed of those matched except the program's own final value, which only a compiled-in main prints"
+  echo "rv_exec: $refused of the corpus refused by -rv at compile time (not run here; host_matrix names the reasons):"
+  echo "$refused_names" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ' | sed 's/^/rv_exec:   /;s/ $//'
+  echo ""
 fi
 exit $rc

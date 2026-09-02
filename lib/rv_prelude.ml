@@ -278,18 +278,29 @@ let rvmap_iter = fn m -> fn f -> let l = vec_get m 0 in _miter (_mrev l Nil) l f
 // the list twice and the newer one shadows the older; counting nodes would count
 // the shadowed ones. This is the same walk `_miter` does, with a counter instead
 // of a callback.
-// The reclamation API, for a map that has no arena. `map_compact` and
-// `map_recycle` exist to return bytes an arena is holding after entries were
-// overwritten or deleted; this representation is an assoc list of ordinary
-// values, so there is nothing behind it to return and a no-op is the honest
-// answer, not a stub. `map_clear` does have work to do.
+// The reclamation API, for a map that has no arena. `map_compact` returns
+// bytes an arena is holding after entries were overwritten or deleted, and
+// KEEPS the entries; this representation is an assoc list of ordinary values,
+// so there is nothing behind it to return and a no-op is the honest answer.
 //
-// `map_bytes` is different: it asks HOW MANY bytes the arena holds, and
-// answering 0 would read as "this map uses no memory" rather than "the question
-// does not apply here". So it stops and says which it is.
+// `map_recycle` is NOT that: its contract is `map_clear` plus the arena
+// wind-back (docs/changelog v0.1.300 -- "semantically map_clear, and on the C
+// backend it also winds the arena back"). This backend had it as a no-op too,
+// reasoning from the half it cannot do to skipping the half it can -- and the
+// cost surfaced a long way off: mere-ruby pools its call frames and cleans a
+// dead frame with ONE map_recycle, so on this backend every recycled frame
+// came back still holding the previous call's locals. A bare identifier in a
+// method then resolved to another method's variable: `def f(v); q = v; end`
+// left `q` visible to the next call, and a Comparable's `n <=> o.n` read both
+// sides from the same leaked slot and answered 0. The wrongness was silent --
+// nothing crashed; values were merely someone else's.
+//
+// `map_bytes` is different again: it asks HOW MANY bytes the arena holds, and
+// answering 0 would read as "this map uses no memory" rather than "the
+// question does not apply here". So it stops and says which it is.
 let rvmap_clear = fn m -> vec_set m 0 Nil;
 let rvmap_compact = fn m -> ();
-let rvmap_recycle = fn m -> ();
+let rvmap_recycle = fn m -> vec_set m 0 Nil;   // clear; the arena half has nothing to do
 let rvvec_bytes = fn v -> fail "RV32I: vec_bytes measures an arena, and a Vec here is a plain block with none -- there is no number to give";
 let rvmap_bytes = fn m -> fail "RV32I: map_bytes measures an arena, and this target's Map is an assoc list with none -- there is no number to give";
 

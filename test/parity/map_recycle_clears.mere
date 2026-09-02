@@ -1,0 +1,34 @@
+// `map_recycle m` is `map_clear` plus give-the-arena-back. The CLEAR half is
+// the contract every backend must keep; the arena half is backend-private
+// bookkeeping (the C backend winds a private arena to a warm seed; a backend
+// whose map has no arena behind it has nothing to wind).
+//
+// Pinned because the two halves came apart once: the RV backend reasoned from
+// "no arena to return" to a full no-op, and every recycled map kept its
+// entries. Nothing in this suite noticed, because nothing recycled a map and
+// then ASKED it anything -- the only caller that did was mere-ruby, whose call
+// frames are pooled and cleaned with one map_recycle each. Every frame from
+// the pool arrived still holding the previous call's locals, so a bare
+// identifier in a Ruby method could resolve to ANOTHER method's variable:
+// `def f(v); q = v; end` left `q` visible to the next call, and a Comparable's
+// `n <=> o.n` read both sides from the same leaked slot and answered 0. Silent
+// both times -- the values were plausible, just someone else's.
+//
+// The reuse-after-recycle half is the load-bearing part: a pool does not just
+// clear a map, it hands it to a DIFFERENT call that trusts it to be empty.
+let m = map_new ();
+let _ = map_set m "q" 30;
+let _ = map_set m "v" 3;
+let _ = print ("before: len=" ++ str_of_int (map_len m));
+let _ = map_recycle m;
+let _ = print ("after: len=" ++ str_of_int (map_len m));
+let _ = print (if map_has m "q" then "LEAKED q" else "q gone");
+let _ = print (if map_has m "v" then "LEAKED v" else "v gone");
+// the next "call" reuses the frame and must see only its own bindings
+let _ = map_set m "n" 7;
+let _ = print ("reused: len=" ++ str_of_int (map_len m) ++ " n=" ++ str_of_int (map_get m "n"));
+let _ = print (if map_has m "q" then "LEAKED q after reuse" else "still clean");
+// and recycling an EMPTY map is a no-op that must not invent entries or fail
+let _ = map_recycle m;
+let _ = map_recycle m;
+let _ = print ("double recycle: len=" ++ str_of_int (map_len m));
