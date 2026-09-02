@@ -4,6 +4,46 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.393 — 2026-09-02
+
+_The last unexplained RV32I difference has a name: `==` inside a polymorphic
+function is a word comparison, because this backend does not monomorphize._
+
+`graphql_stack_portable` returned `{"__type":null}` and "resolved to a type
+\"Post\" that does not exist inside the schema" while every other backend
+printed the right answer. The chase went through the schema parse (identical,
+byte for byte), a probe inside the executor (the type-name list CONTAINS
+"Post", and `list_member` still said no), and ended in the stdlib:
+
+```mere
+let rec list_member = fn xs -> fn v ->
+  ... if h == v then true else list_member t v;
+```
+
+The C backend compiles that function twice -- `mu_member__list_str__` and
+`mu_member__list_int__` -- and the string one compares content. This backend
+compiles it once; at codegen the operand type is still a type variable, and a
+type it cannot see is compared as the 32-bit word. Exact for ints. A POINTER
+for strings and compound values.
+
+Worse than assumed, and measured: it misses even for two IDENTICAL literals,
+because string literals are not interned -- the "Query" in a list and the
+"Query" at a call site are two rodata blocks.
+
+The fix is monomorphization, and that is designed work, not a patch --
+recorded as such. What this version does is make the boundary impossible to
+forget: `test/rv/poly_eq_word.mere` asserts the CURRENT wrong answers, so the
+day the backend learns to specialize, the pin fails and points at itself and
+at the known-different entry to delete. Symmetrical with the KNOWN_DIFF
+freshness check, and for the same reason: a limitation nobody re-measures
+outlives its own fix.
+
+With this, all five remaining known-different programs have named causes:
+two are 64-bit values on a 32-bit int, one wants more RAM than the sweep
+gives it, one measures an arena that does not exist here, and this one.
+
+---
+
 ## v0.1.392 — 2026-09-02
 
 _`time` and `random_int` are real on the hosted RV32I path: the emulator answers

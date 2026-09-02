@@ -52,7 +52,10 @@ KNOWN_DIFF="float_edges str_edges region_growth graphql_stack_portable map_compa
 #    that was cut off mid-print reads as a difference, and the cut moves with
 #    host load, which made the gate FLAKY at 60 and at 240.)
 # region_growth                     wants more RAM (and more time) than the sweep gives it
-# graphql_stack_portable            under investigation
+# graphql_stack_portable            polymorphic == is a word comparison here
+#   (other backends monomorphize; the stdlib's list_member misses a
+#    content-equal string in a different block -- test/rv/poly_eq_word.mere
+#    pins the behaviour and names monomorphization as the fix)
 # map_compact                       map_bytes measures an arena; a Vec here has none
 
 RVRUN=""
@@ -127,6 +130,26 @@ if "$MERE" -c "$ROOT/test/rv/region_map_escape.mere" > "$TMP/ref.c" 2>/dev/null 
   fi
 else
   printf '  FAIL  %s did not build\n' "$name"; head -2 "$TMP/rverr"; fail=$((fail+1)); rc=1
+fi
+
+# poly_eq_word: the pinned known limitation (see the file's header). Its
+# expected output IS the wrong answer, so the pin breaks the day the backend
+# learns to specialize -- symmetrical with the KNOWN_DIFF freshness check.
+name=poly_eq_word
+if "$MERE" -rv "$ROOT/test/rv/poly_eq_word.mere" > "$TMP/prog.bin" 2>"$TMP/rverr"; then
+  if [ -z "$RVRUN" ]; then pass=$((pass+1))
+  else
+    ( cd "$TMP" && perl -e 'alarm 60; exec @ARGV' ./rvrun 8 2>/dev/null ) | grep -a -v '^rvrun: ' > "$TMP/r.out"
+    if grep -q UNEXPECTED "$TMP/r.out"; then
+      printf '  FAIL  %s (the pinned behaviour changed -- read the pin)\n' "$name"
+      grep UNEXPECTED "$TMP/r.out" | sed 's/^/    /'
+      fail=$((fail+1)); rc=1
+    else
+      printf '  ok    %s (known limitation, pinned)\n' "$name"; pass=$((pass+1))
+    fi
+  fi
+else
+  printf '  FAIL  %s did not build\n' "$name"; fail=$((fail+1)); rc=1
 fi
 
 # host_services: time and random_int have no other backend to diff against --
