@@ -102,6 +102,21 @@ else
   echo "softfloat_check: no C compiler — skipping the C arm" >&2
 fi
 
+# The decimal conversions against the hardware's strtod/printf. Compiled via the
+# C backend rather than interpreted: the battery ends with two thousand
+# full-range patterns, and the interpreter takes minutes where the binary takes
+# a second -- a gate nobody runs is not a gate.
+DC="$ROOT/test/float/softfloat_dec.mere"
+"$MERE" -c "$DC" > "$TMP/dec.c" 2>"$TMP/decerr" || { echo "FAIL softfloat: the C backend refused the dec gate"; head -3 "$TMP/decerr"; exit 1; }
+$CC -O2 -w -o "$TMP/dec" "$TMP/dec.c" 2>"$TMP/decerr" || { echo "FAIL softfloat: cc refused the dec gate"; head -3 "$TMP/decerr"; exit 1; }
+"$TMP/dec" > "$TMP/dec.out" 2>&1
+if grep -q FAIL "$TMP/dec.out"; then
+  echo "FAIL softfloat: a decimal conversion disagreed with the hardware"
+  grep FAIL "$TMP/dec.out" | head -5
+  rc=1
+fi
+DCOUNT=$(grep -c '^ok' "$TMP/dec.out")
+
 # The narrow target, checked two ways because the first way over-claimed.
 #
 # (a) Lexically: the library must not mention `float` at all. This is the
@@ -122,7 +137,12 @@ for f in "$ROOT"/contrib/softfloat/*.mere; do
   # -H keeps the filename prefix that the comment filter below matches against,
   # and that a failure message needs in order to say which file. grep drops it
   # when handed a single path, which the six-path version never hit.
-  grep -Hn '\bfloat\b' "$f" | grep -v ':[0-9]*: *//' >> "$TMP/floats" || true
+  # String literals are stripped before the grep: dec.mere's parse error says
+  # "is not a valid float" because that is the message the interpreter and the
+  # C runtime both produce, and a string cannot be a type. The rule is about
+  # the TYPE appearing, and sed removing "..." spans keeps it about that.
+  sed 's/"[^"]*"//g' "$f" | grep -n '\bfloat\b' | grep -v '^[0-9]*: *//' \
+    | sed "s|^|$f:|" >> "$TMP/floats" || true
 done
 if [ -s "$TMP/floats" ]; then
   echo "FAIL softfloat: the library names \`float\`, which RV32I does not have"
@@ -173,5 +193,5 @@ else
 fi
 COUNT=$(printf '%s\n' $NAMES | wc -l | tr -d ' ')
 
-[ "$rc" = 0 ] && echo "ok softfloat: $(grep -c '^ok' "$TMP/interp") checks, interp = C, and all $COUNT exported names compile for RV32I"
+[ "$rc" = 0 ] && echo "ok softfloat: $(grep -c '^ok' "$TMP/interp") checks + $DCOUNT decimal-conversion checks, interp = C, and all $COUNT exported names compile for RV32I"
 exit $rc
