@@ -44,10 +44,7 @@ let __h_todo = fn (n: str) -> fail ("RV32I: " ++ n ++ " needs a host, and --bare
 let run = fn (c: str) -> (__h_todo "run" : int);
 let read_file = fn (p: str) -> (__h_todo "read_file" : str);
 let file_exists = fn (p: str) -> (__h_todo "file_exists" : bool);
-let random_int = fn (n: int) -> (__h_todo "random_int" : int);
-// A clock needs a host to ask. Returning a fixed number would make a program
-// that measures elapsed time report 0 rather than say it cannot measure.
-let time = fn (u: unit) -> (__h_todo "time" : float);
+
 let write_file = fn (p: str) -> fn (c: str) -> (__h_todo "write_file" : unit);
 // `args` is the one host service on this list that is not a host service here:
 // the loader leaves the arguments in RAM and this walks them. A program built
@@ -328,6 +325,31 @@ let f_gt = fn (a: float) -> fn (b: float) -> __fgt a b;
 let f_ge = fn (a: float) -> fn (b: float) -> __fge a b;
 let float_of_int = fn (n: int) -> __sf_float_of_sf (__sf_of_int n);
 let int_of_float = fn (x: float) -> __sf_to_int (__sf_sf_of_float x);
+// The two host services the emulator answers with Linux syscall numbers --
+// clock_gettime64 (403) and getrandom (278) -- so these are REAL on the hosted
+// -rv path, not shims. Under --bare the intrinsics they call refuse at compile
+// time: a machine has devices, not syscalls.
+let time = fn (u: unit) ->
+  let (slo, shi, nlo, _) = __rv_clock 0 in
+  // sec is two unsigned 32-bit halves; this int is signed 32-bit, so the low
+  // half is corrected into float space rather than reassembled as an int --
+  // which also keeps the answer right past 2038, where the low half goes
+  // negative here.
+  let lo = float_of_int slo + (if slo < 0 then 4294967296.0 else 0.0) in
+  let hi = float_of_int shi * 4294967296.0 in
+  hi + lo + float_of_int nlo / 1000000000.0;
+let random_int = fn (n: int) ->
+  if n <= 0 then fail ("random_int: bound must be positive (got " ++ str_of_int n ++ ")")
+  else
+    // rejection sampling over the 31-bit pool: plain `r % n` favours the low
+    // residues whenever n does not divide 2^31, and a random that is measurably
+    // unfair is a bug someone gets to find in production
+    let lim = (2147483647 / n) * n in
+    let rec draw = fn (u: unit) ->
+      let r = bit_and (__rv_urandom32 ()) 2147483647 in
+      if r >= lim then draw () else r % n in
+    draw ();
+
 // The decimal conversions, from contrib/softfloat/dec: exact digit arrays, so
 // `str_of_float` prints the same shortest-round-trip spelling the interpreter
 // and the C runtime print, and `float_of_str` rounds the same way strtod does.
