@@ -1,0 +1,31 @@
+// KNOWN LIMITATION, pinned: `==` inside a POLYMORPHIC function is a word
+// comparison on RV32I.
+//
+// Every other backend monomorphizes -- the C backend compiles
+// mu_member__list_str__ and mu_member__list_int__ as two functions, and the
+// string one compares content. This backend compiles one `u_member`, the
+// operand type is still a type variable at codegen, and a type it cannot see
+// is compared as the 32-bit word: exact for ints, a POINTER for strings and
+// compound values. Two equal strings in different blocks answer false.
+//
+// This is a FALSE NEGATIVE only (equal words are genuinely equal values), and
+// it is why graphql_stack_portable sits in rv_exec's known-different list: its
+// stdlib `list_member (all_type_names defs) rt` missed a name that was there.
+//
+// The fix is monomorphization, recorded as designed work. This file asserts
+// the CURRENT wrong answer, so the day specialization lands, this fails and
+// gets deleted along with the known-diff entry -- the same contract as the
+// KNOWN_DIFF freshness check.
+let rec member = fn xs -> fn v ->
+  match xs with
+  | Nil -> false
+  | Cons (h, t) -> if h == v then true else member t v;
+let names = Cons ("Query", Cons ("Post", Nil));
+let needle = "Po" ++ "st";                     // same content, different block
+let _ = print (if member names needle then "UNEXPECTED: content-equal (monomorphization landed? delete this pin)" else "pinned: word-equality misses a content-equal string");
+// ...and it misses even for two IDENTICAL LITERALS, because this backend does
+// not intern string literals: the "Query" in the list and the "Query" here are
+// two rodata blocks. Measured, not assumed -- the first version of this pin
+// expected the literal to match.
+let _ = print (if member names "Query" then "UNEXPECTED: literals matched (interning or monomorphization landed? re-read the pin)" else "pinned: two identical literals are two blocks");
+let _ = print (if member (Cons (1, Cons (2, Nil))) 2 then "pinned: ints are exact" else "UNEXPECTED: int miss");
