@@ -688,9 +688,11 @@ outside it; every access bounds-checks the offset, and widening faults.
 | `closure_env` | `(unit -> unit) -> int` | Its environment — the value the first argument register must hold when that PC is entered. ABI knowledge, which a kernel has |
 | `set_trap_handler` | `(int -> int) -> unit` | Install a trap handler. The argument is `mcause`; the result is the PC to resume at. Anything else (`mepc` 0x341, `mtval` 0x343) is a `csr_read` away. **A closure, not a named function**: a handler needs the machine capability to do anything useful and an interrupt has no caller to hand it one, so it captures instead. Codegen emits the trampoline that saves the register set and returns with `mret` |
 | `raw_peek8`  | `Raw -> int -> int` | The byte at that offset |
-| `raw_peek32` | `Raw -> int -> int` | The 32-bit word at that offset |
+| `raw_peek32` | `Raw -> int -> int` | The 32-bit word at that offset (unsigned; a device register is 32 bits whatever the CPU width) |
+| `raw_peekw`  | `Raw -> int -> int` | The i-th machine WORD (cell-indexed, xlen-wide) — for walking a register save area at either width |
 | `raw_poke8`  | `Raw -> int -> int -> unit` | Store a byte |
-| `raw_poke32` | `Raw -> int -> int -> unit` | Store a 32-bit word |
+| `raw_poke32` | `Raw -> int -> int -> unit` | Store a 32-bit word (32 bits by name, either width) |
+| `raw_pokew`  | `Raw -> int -> int -> unit` | Store the i-th machine word (cell-indexed, xlen-wide) |
 
 ```
 let putc = fn (uart: Raw) -> fn (c: int) -> raw_poke8 uart 0 c;
