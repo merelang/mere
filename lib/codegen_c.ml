@@ -258,7 +258,8 @@ let synthesize_curried_eta (name : string) (arrow_ty : Ast.ty) (loc : Loc.t)
    arrow types observed at use sites. Each entry causes resolve_fn_types
    to emit N specialized fn_decls (one per arrow) with mangled names,
    and emit_expr's call-site dispatch to pick the right mangled name. *)
-let multi_inst_fns : (string, Ast.ty list) Hashtbl.t = Hashtbl.create 4
+let multi_inst_fns : Monomorph.inst_table ref =
+  ref (Monomorph.empty_inst_table ())
 
 (* module-qualified `M.foo` -> `M__foo` (`.` is illegal in C identifiers);
    nested `A.B.foo` -> `A__B__foo`. Shared by the value and type manglers. *)
@@ -730,32 +731,7 @@ let ty_is_concrete = Monomorph.ty_is_concrete
    emission layer's erasure (ty_tag / c_type_of) already names. *)
 let deep_erase_tyvars = Monomorph.deep_erase_tyvars
 
-(* v0.1.293: the type that `ty_tag` NAMES, which is not always the type handed to it.
-   `ty_tag` erases an unresolved tyvar to `int` -- and a region-parameterised
-   container's unresolved region slot to `__heap` -- so a type `ty_is_concrete`
-   REJECTS can still have its copier named in the emitted C. Registration has to go
-   through this, or the emitted call has no definition. That is what happened to
-   `__mcopy_list_tuple_str_int` (a closure capturing a `list (str, 'a)` whose element
-   type never resolved) and, by the same mechanism, to a trait dictionary's closure
-   field. Erasing with `deep_erase_tyvars` instead is NOT the same thing: it turns the
-   region slot into `int` and would register `Vec_int_int` for what `ty_tag` calls
-   `Vec___heap_int` -- the mpng P5 shape, one type under two names. *)
-let rec ty_as_tagged (t : Ast.ty) : Ast.ty =
-  match Ast.walk t with
-  | Ast.TyVar _ | Ast.TyParam _ -> Ast.TyInt
-  | Ast.TyTuple ts -> Ast.TyTuple (List.map ty_as_tagged ts)
-  | Ast.TyArrow (a, b) -> Ast.TyArrow (ty_as_tagged a, ty_as_tagged b)
-  | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, ty_as_tagged inner)
-  | Ast.TyCon ((("Vec" | "Map" | "StrBuf" | "ByteBuf") as name), (first :: rest)) ->
-    (* Slot 0 is the region. Keep ty_tag's answer for an unresolved one. *)
-    let first =
-      match Ast.walk first with
-      | Ast.TyVar _ | Ast.TyParam _ -> Ast.TyRef (Ast.BorrowedRead, "__heap", Ast.TyUnit)
-      | other -> ty_as_tagged other
-    in
-    Ast.TyCon (name, first :: List.map ty_as_tagged rest)
-  | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map ty_as_tagged args)
-  | t -> t
+let ty_as_tagged = Monomorph.ty_as_tagged
 
 (* v0.1.293: a record's field types AS THE STRUCT EMITTER WILL EMIT THEM -- the one
    place that knows the rule, because three places needed it and two of them had a
@@ -1569,7 +1545,7 @@ let rec emit_expr (e : Ast.expr) : string =
             call path does, from this reference's own type. *)
          let base =
            c_safe_name
-             (Option.value (Monomorph.instance_of multi_inst_fns name e.Ast.ty)
+             (Option.value (Monomorph.instance_of !multi_inst_fns name e.Ast.ty)
                 ~default:name)
          in
          base ^ "_as_value"
@@ -2101,7 +2077,7 @@ let rec emit_expr (e : Ast.expr) : string =
       in
       (* The emitted name for this call: the instance's mangled name when the
          head's type has resolved to a concrete arrow, else the source name. *)
-      let emitted_name n head = Monomorph.instance_of multi_inst_fns n head.Ast.ty in
+      let emitted_name n head = Monomorph.instance_of !multi_inst_fns n head.Ast.ty in
       match spine e0 [] with
       | Some (n, head, args) ->
         (match emitted_name n head with
@@ -2220,7 +2196,7 @@ let rec emit_expr (e : Ast.expr) : string =
           no instance to pick, and the closure paths handle it. *)
        let fn_name =
          c_safe_name
-           (Option.value (Monomorph.instance_of multi_inst_fns name f.Ast.ty)
+           (Option.value (Monomorph.instance_of !multi_inst_fns name f.Ast.ty)
               ~default:name)
        in
        fn_name ^ "(" ^ emit_expr arg ^ ")"
@@ -4294,8 +4270,7 @@ let duplicate_multi_use_local_fns e =
 let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
   let decls, insts =
     of_monomorph (fun () -> Monomorph.resolve_fn_types skels root) in
-  Hashtbl.reset multi_inst_fns;
-  Hashtbl.iter (fun k v -> Hashtbl.replace multi_inst_fns k v) insts;
+  multi_inst_fns := insts;
   decls
 
 (* Lifted-inner-fn signature: captures (with types) prepended to the

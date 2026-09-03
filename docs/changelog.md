@@ -4,6 +4,82 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.409 — 2026-09-03
+
+_All four compiled backends share one monomorphization pass. Porting the last
+two found a real wrong answer in Wasm and a real miscompile in LLVM — each one
+a piece the copy was missing rather than a mistake in it._
+
+The C backend's fixpoint moved to `lib/monomorph.ml` in v0.1.407 and the RISC-V
+backend started using it in v0.1.408. LLVM and Wasm still had their own copies,
+`_llvm`- and `_wasm`-suffixed, and reading them side by side is what this slice
+started from:
+
+| | pristine clones | promotion (single → multi) | resolved bodies in the re-scan | recovery pass |
+|---|---|---|---|---|
+| `monomorph.ml` (C) | yes | yes | yes | yes |
+| `codegen_llvm.ml` | yes | yes | yes | **no** |
+| `codegen_wasm.ml` | **no** | **no** | **no** | yes |
+
+**Wasm answered a polymorphic `==` wrongly.** Those first three absences are one
+bug from a user's side: a helper resolved at int and then reached at str through
+a polymorphic caller that resolves later stayed at int, and the str call got the
+int body. `test/parity/poly_promote_second_type.mere` is that program — written
+from the table above rather than from a symptom, and pinned before anything was
+ported, because a gate only catches the failure someone thought of. It answered
+`str via poly: MISSED` on Wasm where the interpreter, C and LLVM all answered
+`found`.
+
+**LLVM emitted a call to a function it never defined.** No recovery pass meant a
+referenced-but-never-concretized fn was dropped instead of emitted with its
+tyvars erased, so `examples/plugin/plugins/loops_forever.mere` produced IR that
+clang rejected outright: `use of undefined value '@mu_go'`. It had presumably
+never been compiled through LLVM.
+
+Neither copy was *wrong*; each was missing something the C one had grown. That
+is what near-identical copies do — they stop being able to drift together.
+
+**The instance namer travels with the table.** The three `ty_tag`s genuinely
+differ: C's erases a residual tyvar to `int` and defaults a container's
+unresolved region slot to `__heap`, LLVM's raises on both, Wasm's spells Map
+differently and had no case for `bytes` at all. Any of those is a fine symbol
+name inside one backend; what is not fine is the pass naming a specialization
+one way while a call site names it another. So `Monomorph.inst_table` carries
+the `mangle` that produced it, and `instance_of` reads it from there — the
+disagreement is now unrepresentable rather than merely unlikely. `lift_fn_skels`
+takes a `?subset` string, because *that* difference ("... in C subset" /
+"... in Wasm subset") is a message and not a rule.
+
+**One failure got moved rather than fixed, and running it said so.** Making
+Wasm's namer total with `deep_erase_tyvars` got three softfloat programs
+emitting again — and produced invalid WAT: `undefined function variable
+$_dc_mul2k__Vec_int_int__int__Vec_int_int`. Erasing a *region* slot to `int`
+names one type twice, `Vec_int_int` where the region never resolved and
+`Vec___heap_int` where it did. That is the shape the C backend already had a
+name for (mpng P5) and a function for: `ty_as_tagged`, which is now shared and
+which both spellings go through.
+
+Wasm's `ty_tag` also gained `bytes` — simply missing, so it refused to name a
+type the rest of that backend supports. Two programs whose refusal said "I
+cannot name this type" now say what actually stops them (`channel_*` has no
+Wasm lowering). And that refusal now names the type it is refusing, which is how
+the missing case was found at all.
+
+All 17 emission differences were classified by name, not counted: 2 real bug
+fixes, 1 behaviourally identical but more precisely named (LLVM `store_watch`),
+9 measured equal to the interpreter, 2 measured equal to the previous Wasm
+output (host-dependent, so the interpreter cannot arbitrate), 3 refusals that
+now name the real limit, and `test/mount/cases.mere`, which Wasm now refuses —
+consistent with C and LLVM, which have both refused it all along. Wasm accepted
+it through blindness, not capability: its own `make_spec` carried the same
+refusal and never reached it.
+
+Gates: 2620 unit tests, parity 148/148 (+15 failing-programs = 163/163). C,
+RV32 and RV64 emission byte-identical to v0.1.408 across all 765 files (2295
+emissions, 0 differences), so rv_exec stands at 82/0 at 64 bits and 76/0 at 32.
+
+---
+
 ## v0.1.408 — 2026-09-03
 
 _The RISC-V backend monomorphizes. A `==` inside a polymorphic function compares

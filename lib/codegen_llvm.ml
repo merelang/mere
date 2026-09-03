@@ -560,15 +560,16 @@ let rec ty_is_concrete (t : Ast.ty) : bool =
 
 (* Top-level fn binding extracted from main: `let name = fn param -> body in ...`.
    We keep the original Fun expr so we can read its typer-set `.ty`. *)
-type fn_skel = {
+(* Q-103: the same records the shared monomorphization pass returns, so this
+   backend and that pass cannot disagree about a field. *)
+type fn_skel = Monomorph.fn_skel = {
   sname : string;
   sparam : string;
   sbody : Ast.expr;
   sfun : Ast.expr;
 }
 
-(* Fully type-resolved fn declaration. *)
-type fn_decl = {
+type fn_decl = Monomorph.fn_decl = {
   name      : string;
   param     : string;
   body      : Ast.expr;
@@ -651,7 +652,13 @@ let synthesize_curried_eta_llvm (name : string) (arrow_ty : Ast.ty) (loc : Loc.t
    once per instantiation with a mangled name (`base__T1__T2__...`).
    Populated by resolve_fn_types; consulted at call sites by emit_expr
    to dispatch to the correct mangled name. *)
-let multi_inst_fns_llvm : (string, Ast.ty list) Hashtbl.t = Hashtbl.create 4
+(* Q-103: the shared pass's table, carrying the namer that produced the
+   specializations (see Monomorph.inst_table). This backend's names differ from
+   the C backend's in two ways -- its own `ty_tag`, and the uniform `mu_`
+   prefix -- and both are preserved: the pass is handed `mangled_inst_name_llvm`
+   and `mu` is applied to every decl name it returns. *)
+let multi_inst_fns_llvm : Monomorph.inst_table ref =
+  ref (Monomorph.empty_inst_table ())
 
 (* Phase 25.5: mangle a fn name with its concrete arrow type tag. *)
 (* Mere top-level names and the C library share one global namespace in the
@@ -1120,505 +1127,35 @@ let fresh_anon_names () =
 (* Walk the desugared main expression, peeling top-level fn-binding lets
    (P_var of Fun) and let-recs whose bindings are all single-arg fns.
    Returns the skels and the residual main body. *)
-let lift_fn_skels (e : Ast.expr) : fn_skel list * Ast.expr =
-  (* Phase 25.9 (port of codegen_c Phase 24.4): walk through ALL top-level
-     Let chains so a non-Fun Let (e.g., `let path = "/tmp/x"`) doesn't
-     break the chain and block subsequent `let rec` from being lifted.
-     Fun-valued Lets with P_var → extract as skel + drop from body.
-     Other Lets → keep in body + walk rest.
-     Phase 37.A: `let _ = while ... ;` desugars to
-     `Let (P_wild, Let_rec (bs, call_loop), rest)`. Lift the inner
-     Let_rec as top-level skels and replace the value with its body. *)
-  let rec go (e : Ast.expr) =
-    match e.Ast.node with
-    | Ast.Let (pat, value, rest) ->
-      (match pat.Ast.pnode, value.Ast.node with
-       | Ast.P_var name, Ast.Fun (param, _, fn_body) ->
-         let more, rest' = go rest in
-         { sname = name; sparam = param; sbody = fn_body; sfun = value }
-         :: more, rest'
-       | _, Ast.Let_rec (bindings, lr_body) ->
-         let lr_skels =
-           List.map (fun (n, v) ->
-             match v.Ast.node with
-             | Ast.Fun (p, _, fb) ->
-               { sname = n; sparam = p; sbody = fb; sfun = v }
-             | _ ->
-               raise (Codegen_error (v.Ast.loc,
-                 "let rec inside top-level let value must bind a single-arg function")))
-             bindings
-         in
-         let more, rest' = go { e with Ast.node = Ast.Let (pat, lr_body, rest) } in
-         lr_skels @ more, rest'
-       | _ ->
-         let more, rest' = go rest in
-         more, { e with Ast.node = Ast.Let (pat, value, rest') })
-    | Ast.Let_rec (bindings, rest) ->
-      let skels =
-        List.map (fun (n, v) ->
-          match v.Ast.node with
-          | Ast.Fun (p, _, fb) ->
-            { sname = n; sparam = p; sbody = fb; sfun = v }
-          | _ ->
-            raise (Codegen_error (v.Ast.loc,
-              "let rec binding must be a single-arg function in LLVM subset")))
-          bindings
-      in
-      let more, rest' = go rest in
-      skels @ more, rest'
-    | _ -> [], e
-  in
-  go e
+(* Q-103: one implementation, in lib/monomorph.ml. This file's copies of
+   lift_fn_skels / find_concrete_arrow / find_all_concrete_arrows_in /
+   has_unresolved_use_of / specialize_single_use_local_fns /
+   clone_with_fresh_tyvars were the same logic as that module's, and the whole
+   point of the extraction is that they stop being able to drift apart from it
+   independently. (The Wasm copy had already drifted three generations; see
+   test/parity/poly_promote_second_type.mere.) *)
+let of_monomorph : 'a. (unit -> 'a) -> 'a = fun f ->
+  try f () with
+  | Monomorph.Unsupported (loc, what) -> unsupported loc what
+  | Monomorph.Error (loc, msg) -> raise (Codegen_error (loc, msg))
 
-(* Scan `root` for a Var of `name` whose ty walked to a concrete arrow.
-   Used when the binding-site Fun.ty was generalized (let-poly) and we
-   need a monomorphic instantiation. *)
-let find_concrete_arrow (name : string) (root : Ast.expr) : Ast.ty option =
-  let found = ref None in
-  let rec go (e : Ast.expr) =
-    (if !found = None then
-       match e.Ast.node with
-       | Ast.Var n when n = name ->
-         (match e.Ast.ty with
-          | Some t ->
-            let t = Ast.walk t in
-            (match t with
-             | Ast.TyArrow _ when ty_is_concrete t -> found := Some t
-             | _ -> ())
-          | _ -> ())
-       | _ -> ());
-    match e.Ast.node with
-    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
-    | Ast.Unit_lit | Ast.Var _ -> ()
-    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
-    | Ast.App (a, b) -> go a; go b
-    | Ast.Neg a | Ast.Annot (a, _) -> go a
-    | Ast.Let (_, v, b) -> go v; go b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
-    | Ast.With (_, v, b) -> go v; go b
-    | Ast.If (c, t, e_) -> go c; go t; go e_
-    | Ast.Fun (_, _, b) -> go b
-    | Ast.Constr (_, Some a) -> go a
-    | Ast.Constr (_, None) -> ()
-    | Ast.Match (s, arms) ->
-      go s;
-      List.iter (fun (_, g, b) ->
-        (match g with Some ge -> go ge | None -> ()); go b) arms
-    | Ast.Tuple es -> List.iter go es
-    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
-    | Ast.Ref (_, _, a) -> go a
-    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
-    | Ast.Field_get (a, _) -> go a
-    | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
-  in
-  go root;
-  !found
-
-(* Phase 25.5: collect ALL distinct concrete arrow types `name` is called
-   at across the given exprs. Multi-pass resolve uses this to detect
-   multi-instantiation (LLVM port of codegen_c's find_all_concrete_arrows_in). *)
-let find_all_concrete_arrows_in_llvm (name : string) (exprs : Ast.expr list) : Ast.ty list =
-  let seen : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4 in
-  let rec go (e : Ast.expr) =
-    (match e.Ast.node with
-     | Ast.Var n when n = name ->
-       (match e.Ast.ty with
-        | Some t when ty_is_concrete (Ast.walk t) ->
-          let walked = Ast.walk t in
-          (match walked with
-           | Ast.TyArrow _ ->
-             let key = Ast.pp_ty walked in
-             if not (Hashtbl.mem seen key) then Hashtbl.add seen key walked
-           | _ -> ())
-        | _ -> ())
-     | _ -> ());
-    match e.Ast.node with
-    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
-    | Ast.Unit_lit | Ast.Var _ -> ()
-    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
-    | Ast.App (a, b) -> go a; go b
-    | Ast.Neg a | Ast.Annot (a, _) -> go a
-    | Ast.Let (_, v, b) -> go v; go b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
-    | Ast.With (_, v, b) -> go v; go b
-    | Ast.If (c, t, e_) -> go c; go t; go e_
-    (* A fn parameter named `name` shadows the outer `name` we're scanning for;
-       skip the body so a same-named parameter (e.g. `list_fold`'s `f`) is not
-       mistaken for the function under discovery. Matches the C backend — its
-       absence here surfaced once resolved poly-fn bodies entered the scan. *)
-    | Ast.Fun (p, _, b) -> if p = name then () else go b
-    | Ast.Constr (_, Some a) -> go a
-    | Ast.Constr (_, None) -> ()
-    | Ast.Match (s, arms) ->
-      go s;
-      List.iter (fun (_, g, b) ->
-        (match g with Some ge -> go ge | None -> ()); go b) arms
-    | Ast.Tuple es -> List.iter go es
-    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
-    | Ast.Ref (_, _, a) -> go a
-    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
-    | Ast.Field_get (a, _) -> go a
-    | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
-  in
-  List.iter go exprs;
-  Hashtbl.fold (fun _ v acc -> v :: acc) seen []
-
-(* v0.1.99: LLVM port of codegen_c's specialize_single_use_local_fns. See the
-   comment there for the full rationale. Monomorphizes a let-generalized local
-   fn used at exactly one concrete type to that type, as a whole-program
-   pre-pass before resolve_fn_types + inner-fn lifting, so the lifted fn and
-   any generic callees inside its body resolve concretely instead of
-   defaulting a residual TyVar to int. *)
-(* v0.1.182: does this name have a use whose arrow is not concrete yet?
-   `find_all_concrete_arrows_in` only reports uses it can already read, and
-   the single-use specialization below treated "exactly one concrete arrow"
-   as "used at exactly one type". A use sitting inside a polymorphic fn is
-   not concrete yet and is still a use — it resolves later, once that fn is
-   instantiated, and it may resolve to a different type. Specializing on
-   the strength of the one readable arrow fixed the definition at that type
-   and the other instantiation was then emitted with the wrong body. *)
-let has_unresolved_use_of (name : string) (exprs : Ast.expr list) : bool =
-  let found = ref false in
-  let rec go (e : Ast.expr) =
-    (match e.Ast.node with
-     | Ast.Var n when n = name ->
-       (match e.Ast.ty with
-        | Some t when not (ty_is_concrete (Ast.walk t)) -> found := true
-        | None -> found := true
-        | _ -> ())
-     | _ -> ());
-    match e.Ast.node with
-    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
-    | Ast.Unit_lit | Ast.Var _ -> ()
-    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
-    | Ast.App (a, b) -> go a; go b
-    | Ast.Neg a | Ast.Annot (a, _) -> go a
-    | Ast.Let (_, v, b) -> go v; go b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
-    | Ast.With (_, v, b) -> go v; go b
-    | Ast.If (c, t, e_) -> go c; go t; go e_
-    | Ast.Fun (p, _, b) -> if p <> name then go b
-    | Ast.Constr (_, a) -> (match a with Some x -> go x | None -> ())
-    | Ast.Match (s, arms) ->
-      go s; List.iter (fun (_, g, b) ->
-        (match g with Some ge -> go ge | None -> ()); go b) arms
-    | Ast.Tuple es -> List.iter go es
-    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
-    | Ast.Ref (_, _, a) -> go a
-    | Ast.Record_lit (_, fs) -> List.iter (fun (_, v) -> go v) fs
-    | Ast.Field_get (a, _) -> go a
-    | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, v) -> go v) fs
-  in
-  List.iter go exprs; !found
-
-let specialize_single_use_local_fns (root : Ast.expr) : unit =
-  let rec go (e : Ast.expr) =
-    (match e.Ast.node with
-     | Ast.Let ({ Ast.pnode = Ast.P_var n; _ },
-                { Ast.node = Ast.Fun _; ty = Some vty; _ }, body)
-       when not (ty_is_concrete (Ast.walk vty)) ->
-       (match find_all_concrete_arrows_in_llvm n [body] with
-        | [arrow] when not (has_unresolved_use_of n [body]) ->
-          (try Typer.unify Loc.dummy vty arrow with _ -> ())
-        | _ -> ())
-     | Ast.Let_rec (bindings, body) ->
-       (* Single-use specialization for a local `let rec` group, restricted to
-          trait-constrained (dictionary-taking) members (see the C backend's
-          specialize_single_use_local_fns for the full rationale). Excludes each
-          member's own body so a recursive self-call cannot stand in for an
-          external use. *)
-       let is_dict_taking t =
-         match Ast.walk t with
-         | Ast.TyArrow (a, _) ->
-           (match Ast.walk a with
-            | Ast.TyCon (nm, _) ->
-              String.length nm >= 6
-              && String.sub nm (String.length nm - 6) 6 = "__dict"
-            | _ -> false)
-         | _ -> false
-       in
-       List.iter (fun (n, value) ->
-         match value.Ast.ty with
-         | Some vty
-           when not (ty_is_concrete (Ast.walk vty)) && is_dict_taking vty ->
-           let scan_roots =
-             body :: List.filter_map (fun (_, v) ->
-               if v == value then None else Some v) bindings
-           in
-           (match find_all_concrete_arrows_in_llvm n scan_roots with
-            | [arrow] -> (try Typer.unify Loc.dummy vty arrow with _ -> ())
-            | _ -> ())
-         | _ -> ()) bindings
-     | _ -> ());
-    match e.Ast.node with
-    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
-    | Ast.Unit_lit | Ast.Var _ -> ()
-    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
-    | Ast.App (a, b) -> go a; go b
-    | Ast.Neg a | Ast.Annot (a, _) -> go a
-    | Ast.Let (_, v, b) -> go v; go b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
-    | Ast.With (_, v, b) -> go v; go b
-    | Ast.If (c, t, e_) -> go c; go t; go e_
-    | Ast.Fun (_, _, b) -> go b
-    | Ast.Constr (_, Some a) -> go a
-    | Ast.Constr (_, None) -> ()
-    | Ast.Match (s, arms) ->
-      go s;
-      List.iter (fun (_, g, b) ->
-        (match g with Some ge -> go ge | None -> ()); go b) arms
-    | Ast.Tuple es -> List.iter go es
-    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
-    | Ast.Ref (_, _, a) -> go a
-    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
-    | Ast.Field_get (a, _) -> go a
-    | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
-  in
-  go root
-
-(* Phase 25.5: deep-clone an expression with fresh tyvars (LLVM port of
-   codegen_c's clone_with_fresh_tyvars). Used for per-instantiation
-   specialization — each clone gets its own fresh tyvars so we can unify
-   the clone's Fun.ty with a different concrete type independently. *)
-let clone_with_fresh_tyvars_llvm (e : Ast.expr) : Ast.expr =
-  let map : (int, Ast.ty) Hashtbl.t = Hashtbl.create 16 in
-  let rec clone_ty t =
-    match Ast.walk t with
-    | Ast.TyVar v ->
-      (match Hashtbl.find_opt map v.id with
-       | Some fresh -> fresh
-       | None ->
-         let fresh = Typer.fresh_var () in
-         Hashtbl.add map v.id fresh;
-         fresh)
-    | Ast.TyParam _ as t -> t
-    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit) as t -> t
-    | Ast.TyArrow (a, b) -> Ast.TyArrow (clone_ty a, clone_ty b)
-    | Ast.TyTuple ts -> Ast.TyTuple (List.map clone_ty ts)
-    | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map clone_ty args)
-    | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, clone_ty inner)
-  in
-  let clone_ty_opt = function None -> None | Some t -> Some (clone_ty t) in
-  let rec clone_expr (e : Ast.expr) : Ast.expr =
-    { Ast.loc = e.Ast.loc;
-      ty = clone_ty_opt e.Ast.ty;
-      node = clone_node e.Ast.node }
-  and clone_node = function
-    | (Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _
-       | Ast.Str_lit _ | Ast.Unit_lit | Ast.Var _) as n -> n
-    | Ast.Bin (op, a, b) -> Ast.Bin (op, clone_expr a, clone_expr b)
-    | Ast.Cmp (op, a, b) -> Ast.Cmp (op, clone_expr a, clone_expr b)
-    | Ast.Logic (op, a, b) -> Ast.Logic (op, clone_expr a, clone_expr b)
-    | Ast.Neg a -> Ast.Neg (clone_expr a)
-    | Ast.Let (p, v, b) -> Ast.Let (clone_pattern p, clone_expr v, clone_expr b)
-    | Ast.Let_rec (bs, b) ->
-      Ast.Let_rec (List.map (fun (n, e) -> (n, clone_expr e)) bs, clone_expr b)
-    | Ast.With (n, v, b) -> Ast.With (n, clone_expr v, clone_expr b)
-    | Ast.If (c, t, e_) -> Ast.If (clone_expr c, clone_expr t, clone_expr e_)
-    | Ast.Fun (n, t_opt, b) ->
-      Ast.Fun (n, (match t_opt with None -> None | Some t -> Some (clone_ty t)),
-        clone_expr b)
-    | Ast.App (a, b) -> Ast.App (clone_expr a, clone_expr b)
-    | Ast.Annot (a, t) -> Ast.Annot (clone_expr a, clone_ty t)
-    | Ast.Constr (n, Some a) -> Ast.Constr (n, Some (clone_expr a))
-    | Ast.Constr (n, None) -> Ast.Constr (n, None)
-    | Ast.Match (s, arms) ->
-      Ast.Match (clone_expr s,
-        List.map (fun (p, g, b) ->
-          (clone_pattern p,
-           (match g with None -> None | Some e -> Some (clone_expr e)),
-           clone_expr b)) arms)
-    | Ast.Tuple es -> Ast.Tuple (List.map clone_expr es)
-    | Ast.Region_block (n, b) -> Ast.Region_block (n, clone_expr b)
-    | Ast.Region_loop (n, x, b) -> Ast.Region_loop (n, x, clone_expr b)
-    | Ast.Ref (m, r, a) -> Ast.Ref (m, r, clone_expr a)
-    | Ast.Record_lit (n, fs) ->
-      Ast.Record_lit (n, List.map (fun (k, v) -> (k, clone_expr v)) fs)
-    | Ast.Field_get (a, f) -> Ast.Field_get (clone_expr a, f)
-    | Ast.Record_update (a, fs) ->
-      Ast.Record_update (clone_expr a,
-        List.map (fun (k, v) -> (k, clone_expr v)) fs)
-  and clone_pattern p =
-    { Ast.ploc = p.Ast.ploc; pnode = clone_pattern_node p.Ast.pnode }
-  and clone_pattern_node = function
-    | (Ast.P_wild | Ast.P_var _ | Ast.P_int _ | Ast.P_bool _
-       | Ast.P_str _ | Ast.P_unit) as n -> n
-    | Ast.P_constr (c, Some sub) -> Ast.P_constr (c, Some (clone_pattern sub))
-    | Ast.P_constr (c, None) -> Ast.P_constr (c, None)
-    | Ast.P_tuple ps -> Ast.P_tuple (List.map clone_pattern ps)
-    | Ast.P_record (n, fs) ->
-      Ast.P_record (n, List.map (fun (k, v) -> (k, clone_pattern v)) fs)
-    | Ast.P_as (p, n) -> Ast.P_as (clone_pattern p, n)
-    | Ast.P_or (a, b) -> Ast.P_or (clone_pattern a, clone_pattern b)
-  in
-  clone_expr e
+let lift_fn_skels e =
+  of_monomorph (fun () -> Monomorph.lift_fn_skels ~subset:"LLVM subset" e)
+let find_all_concrete_arrows_in_llvm n exprs =
+  of_monomorph (fun () -> Monomorph.find_all_concrete_arrows_in n exprs)
+let specialize_single_use_local_fns e =
+  of_monomorph (fun () -> Monomorph.specialize_single_use_local_fns e)
 
 let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
-  (* Phase 21.2 multi-pass + Phase 25.5 multi-instantiation specialization
-     (LLVM port of Phase 23.3). See codegen_c.ml for design notes. *)
-  let resolved : (string, Ast.ty) Hashtbl.t = Hashtbl.create 16 in
-  let progress = ref true in
-  Hashtbl.reset multi_inst_fns_llvm;
-  let multi_specs : (string, (Ast.ty * Ast.expr) list) Hashtbl.t =
-    Hashtbl.create 4
-  in
-  (* Phase 43: re-scan multi-inst fns each pass to catch chained poly
-     instantiations (see codegen_c.ml for design). *)
-  (* v0.1.28 (B-P2b): keep a PRISTINE clone of every skel before any
-     unification. Single-resolution unifies the original fn's tyvars in place,
-     which destroys the polymorphic skeleton — so a fn first resolved at one
-     type could never be promoted to multi-inst when a second type shows up
-     (e.g. `list_fold` resolved at int from the prelude, then needed at float
-     inside a generic caller whose float instantiation only becomes visible in
-     a later pass). Cloning specs from the pristine copy keeps every
-     instantiation possible at any point in the fixpoint. LLVM port of the C
-     backend's fix. *)
-  let pristine : (string, Ast.expr) Hashtbl.t = Hashtbl.create 8 in
-  List.iter (fun s ->
-    Hashtbl.replace pristine s.sname (clone_with_fresh_tyvars_llvm s.sfun)) skels;
-  let make_spec arrow s =
-    let cloned_fun = clone_with_fresh_tyvars_llvm (Hashtbl.find pristine s.sname) in
-    let clone_fun_ty =
-      match cloned_fun.Ast.ty with
-      | Some t -> Ast.walk t
-      | None -> Ast.TyUnit
-    in
-    (* v0.1.179: this used to swallow the failure, and a spec whose clone
-       will not take the target arrow is a spec whose body belongs to a
-       different type. It was emitted anyway — the declaration got the right
-       signature and the body kept the operations of whatever type the
-       skeleton was already fixed at. Refusing is not the fix; it is the
-       difference between a wrong program and a named one. See
-       test/parity/poly_helper_fixed_and_free.mere. *)
-    (try Typer.unify Loc.dummy clone_fun_ty arrow
-     with _ ->
-       unsupported s.sfun.Ast.loc (Printf.sprintf
-         "unsupported: cannot instantiate `%s` at %s — its skeleton is \
-          already fixed at %s, so this instance would be emitted with the \
-          other one's body. A polymorphic helper called at both a fixed type \
-          and a parameter-derived type, inside a fn used at two types, hits \
-          this."
-         s.sname (Ast.pp_ty (Ast.walk arrow))
-         (Ast.pp_ty (Ast.walk clone_fun_ty))));
-    let cloned_body =
-      match cloned_fun.Ast.node with
-      | Ast.Fun (_, _, b) -> b
-      | _ ->
-        raise (Codegen_error (s.sfun.Ast.loc,
-          "multi-inst clone: expected Fun at root"))
-    in
-    (arrow, cloned_body)
-  in
-  while !progress do
-    progress := false;
-    List.iter (fun s ->
-      let extra_exprs () =
-        Hashtbl.fold (fun _ specs acc ->
-          List.fold_left (fun acc (_, body) -> body :: acc) acc specs
-        ) multi_specs []
-        (* v0.1.28 (B-P2b): also scan the bodies of single-resolved poly fns.
-           A usage of poly fn B inside poly fn A's body only becomes concrete
-           once A resolves — before this, B's arrow-discovery scan never saw
-           it, so B stayed single-instantiated at some OTHER type and the
-           emitted call referenced a non-existent instance. *)
-        @ List.filter_map (fun s2 ->
-            if Hashtbl.mem resolved s2.sname then Some s2.sbody else None)
-            skels
-      in
-      if Hashtbl.mem resolved s.sname then begin
-        (* v0.1.28 (B-P2b): a fn resolved to a single instance may be
-           discovered at a second type later (its other usage sites live in
-           poly-fn bodies that resolve in later passes). Promote it to
-           multi-inst: drop the single resolution and clone one spec per arrow
-           from the pristine skeleton. *)
-        let all = find_all_concrete_arrows_in_llvm s.sname (root :: extra_exprs ()) in
-        let cur = Hashtbl.find resolved s.sname in
-        let cur_str = Ast.pp_ty (Ast.walk cur) in
-        let extra = List.filter (fun a ->
-          Ast.pp_ty (Ast.walk a) <> cur_str) all in
-        let extra =
-          let seen = Hashtbl.create 4 in
-          List.filter (fun a ->
-            let k = Ast.pp_ty (Ast.walk a) in
-            if Hashtbl.mem seen k then false
-            else (Hashtbl.add seen k (); true)) extra
-        in
-        if extra <> [] then begin
-          Hashtbl.remove resolved s.sname;
-          let arrows = cur :: extra in
-          Hashtbl.replace multi_inst_fns_llvm s.sname arrows;
-          Hashtbl.replace multi_specs s.sname
-            (List.map (fun a -> make_spec a s) arrows);
-          progress := true
-        end
-      end
-      else if Hashtbl.mem multi_specs s.sname then begin
-        (* Phase 43 fix (DEFERRED §1.7): re-scan multi-inst fns each pass. *)
-        let all = find_all_concrete_arrows_in_llvm s.sname (root :: extra_exprs ()) in
-        let existing = Hashtbl.find multi_specs s.sname in
-        let existing_arrows = List.map fst existing in
-        let new_arrows = List.filter (fun a ->
-          let a_str = Ast.pp_ty (Ast.walk a) in
-          not (List.exists (fun e -> Ast.pp_ty (Ast.walk e) = a_str) existing_arrows)) all
-        in
-        if new_arrows <> [] then begin
-          let new_specs = List.map (fun a -> make_spec a s) new_arrows in
-          Hashtbl.replace multi_specs s.sname (existing @ new_specs);
-          Hashtbl.replace multi_inst_fns_llvm s.sname (existing_arrows @ new_arrows);
-          progress := true
-        end
-      end
-      else begin
-        let fun_ty =
-          match s.sfun.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit
-        in
-        if ty_is_concrete fun_ty then begin
-          Hashtbl.add resolved s.sname fun_ty;
-          progress := true
-        end else
-          let all = find_all_concrete_arrows_in_llvm s.sname (root :: extra_exprs ()) in
-          match all with
-          | _ :: _ ->
-            if List.length all > 1 then begin
-              Hashtbl.add multi_inst_fns_llvm s.sname all;
-              let specs = List.map (fun arrow -> make_spec arrow s) all in
-              Hashtbl.add multi_specs s.sname specs;
-              progress := true
-            end else begin
-              (try Typer.unify Loc.dummy fun_ty (List.hd all) with _ -> ());
-              Hashtbl.add resolved s.sname (List.hd all);
-              progress := true
-            end
-          | [] -> ()
-      end
-    ) skels
-  done;
-  List.concat_map (fun s ->
-    match Hashtbl.find_opt multi_specs s.sname with
-    | Some specs ->
-      List.map (fun (arrow, cloned_body) ->
-        match Ast.walk arrow with
-        | Ast.TyArrow (p, r) ->
-          { name = mu (mangled_inst_name_llvm s.sname arrow);
-            param = s.sparam;
-            body = cloned_body;
-            param_ty = Ast.walk p;
-            return_ty = Ast.walk r }
-        | other ->
-          raise (Codegen_error (s.sfun.Ast.loc,
-            Printf.sprintf "function `%s` has non-arrow inferred type `%s`"
-              s.sname (Ast.pp_ty other)))
-      ) specs
-    | None ->
-      (match Hashtbl.find_opt resolved s.sname with
-       | None -> []
-       | Some (Ast.TyArrow (p, r)) ->
-         [{ name = mu s.sname; param = s.sparam; body = s.sbody;
-            param_ty = Ast.walk p; return_ty = Ast.walk r }]
-       | Some _ ->
-         raise (Codegen_error (s.sfun.Ast.loc,
-           Printf.sprintf "function `%s` has non-arrow inferred type" s.sname)))
-  ) skels
+  let decls, insts =
+    of_monomorph (fun () ->
+      Monomorph.resolve_fn_types ~mangle:mangled_inst_name_llvm skels root) in
+  multi_inst_fns_llvm := insts;
+  (* Every emitted value name in this backend carries `mu_`; the pass names
+     things in source terms. Applying it here -- rather than inside the namer --
+     keeps `instance_of` answering in source terms too, so the call sites below
+     read exactly as they did: `mu` of whichever name was picked. *)
+  List.map (fun (d : fn_decl) -> { d with name = mu d.name }) decls
 
 (* Phase 25.3: lookup a free var's concrete type by scanning the inner
    fn body. Mirrors codegen_c's lookup_var_ty. *)
@@ -3518,9 +3055,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        in
        (* Phase 25.5: if name is multi-inst, use the mangled spec name. *)
        let dispatch_name =
-         if Hashtbl.mem multi_inst_fns_llvm name then
-           mu (mangled_inst_name_llvm name arrow)
-         else mu name
+         mu (Option.value
+               (Monomorph.instance_of !multi_inst_fns_llvm name (Some arrow))
+               ~default:name)
        in
        let r0 = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = insertvalue %%%s undef, ptr null, 0" r0 cname);
@@ -6386,14 +5923,8 @@ and emit_user_app ?(tail = false) (env : env) (e : Ast.expr) : string =
        the call site's f.ty (the head Var's specific arrow type for this
        use) to pick the mangled name. *)
     let dispatch_name =
-      if Hashtbl.mem multi_inst_fns_llvm name then
-        match f_ty with
-        | Some t ->
-          (match Ast.walk t with
-           | Ast.TyArrow _ as arrow -> mu (mangled_inst_name_llvm name arrow)
-           | _ -> mu name)
-        | None -> mu name
-      else mu name
+      mu (Option.value (Monomorph.instance_of !multi_inst_fns_llvm name f_ty)
+            ~default:name)
     in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call %s @%s(%s %s)" r ret_ty dispatch_name arg_ty av);
@@ -11561,7 +11092,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset inner_lift_closures_emitted_llvm;
   inner_lift_closure_pending_llvm := [];
   Hashtbl.reset toplevel_fn_names;
-  Hashtbl.reset multi_inst_fns_llvm;
+  multi_inst_fns_llvm := Monomorph.empty_inst_table ~mangle:mangled_inst_name_llvm ();
   Hashtbl.reset polymorphic_variants;
   Hashtbl.reset polymorphic_records;
   Hashtbl.reset mono_variant_instances;
@@ -11718,7 +11249,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   (* v0.1.105 (① increment 2): split a local poly fn used at several concrete
      types into one monomorphic copy per type before lifting. The pass is pure
      AST manipulation, so the C backend's implementation is reused. *)
-  let main_expr = Codegen_c.duplicate_multi_use_local_fns main_expr in
+  let main_expr = Monomorph.duplicate_multi_use_local_fns main_expr in
   resolve_vec_let_types main_expr;
   (* v0.1.99: monomorphize single-use local polymorphic fns to their concrete
      use type before skel lifting + fn-type resolution (see the fn comment). *)
@@ -12011,7 +11542,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      and then passed a local that does not exist. *)
   let mangled_names = List.map (fun f -> unmu f.name) fns in
   let multi_base_names =
-    Hashtbl.fold (fun k _ acc -> k :: acc) multi_inst_fns_llvm []
+    Monomorph.multi_names !multi_inst_fns_llvm
   in
   let toplevel_names = mangled_names @ multi_base_names in
   lift_inner_fns_llvm toplevel_names fns;

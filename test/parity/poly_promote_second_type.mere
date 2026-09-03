@@ -1,0 +1,36 @@
+// A polymorphic helper RESOLVED at one type early, then discovered at a SECOND
+// type only after another polymorphic function resolves. The resolver has to
+// drop the first resolution and re-instantiate from a PRISTINE skeleton -- the
+// promotion path.
+//
+// Written from the code rather than from a symptom: the Wasm backend's copy of
+// the monomorphization fixpoint was missing all three of the pieces this needs
+// (the pristine skeleton table, the promotion branch, and the resolved bodies
+// in the per-pass re-scan), so it answered `str via poly: MISSED` where the
+// interpreter, C and LLVM all answer `found`. Nothing in the suite had this
+// shape, which is the only reason a three-generations-old copy of the pass
+// survived under it.
+//
+// Why the ORDER of the declarations matters: `eq2` is visible at int on the
+// first pass, because `use_int` is monomorphic and its body is already
+// concrete. The `eq2` inside `has` is NOT concrete on that pass -- `has` is
+// still polymorphic -- so it only appears once `has` itself resolves at str.
+// A resolver that never looks at an already-resolved function again keeps eq2
+// at int and emits the str call against the int body.
+let eq2 = fn a -> fn b -> a == b;
+
+let use_int = fn n -> eq2 n 1;
+
+let rec has = fn xs -> fn v ->
+  match xs with
+  | Nil -> false
+  | Cons (h, t) -> if eq2 h v then true else has t v;
+
+let names = Cons ("Query", Cons ("Post", Nil));
+let _ = print (if use_int 1 then "int helper: true" else "int helper: FALSE");
+let _ = print (if use_int 2 then "int helper 2: FALSE" else "int helper 2: false");
+// content-equal, different block: an int-bodied eq2 compares the pointers
+let _ = print (if has names ("Po" ++ "st") then "str via poly: found" else "str via poly: MISSED");
+let _ = print (if has names "Absent" then "str via poly absent: WRONGLY FOUND" else "str via poly absent: not found");
+// and a third type through the same helper, to keep the promotion going
+let _ = print (if has (Cons ((1, "a"), Nil)) (1, "a") then "tuple via poly: found" else "tuple via poly: MISSED");
