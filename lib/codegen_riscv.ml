@@ -1295,8 +1295,19 @@ and compile_bin env op l r =
      | _ -> with_operands env l r (fun rl rr -> emit_binop op a0 rl rr l.loc))
 
 and compile_cmp env op l r =
+  (* What type is the left operand? ONE answer, asked once. This function used
+     to ask three different ways -- `l.Ast.ty = Some Ast.TyStr` here, a
+     `resolve_ty` in each of the branches below -- and the structural one is the
+     odd spelling out: a type variable that has been LINKED to str is
+     `Some (TyVar {link = Some TyStr})`, which is not equal to `Some TyStr`.
+     While no polymorphic function was ever specialized on this backend nothing
+     could produce that shape, so the difference could not show. Monomorphizing
+     produces it on the first call: `member`'s cloned body has `h : str` through
+     a link, the string branch did not recognise it, and the specialization
+     landed while the comparison it exists to fix stayed a word compare. *)
+  let lty = match l.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit in
   (* string comparison: compare content, not pointers *)
-  if l.Ast.ty = Some Ast.TyStr then begin
+  if lty = Ast.TyStr then begin
     compile_expr env l; push a0;
     compile_expr env r; emit_word (enc_i 0 a0 0 a1 0x13); pop a0;   (* a0=l, a1=r *)
     (match op with
@@ -1314,7 +1325,7 @@ and compile_cmp env op l r =
      constructors) would need a recursive structural eq — reject them clearly
      rather than silently comparing pointers. Ints/bools/type-variables fall
      through to the integer path below (the only `==` the code needs). *)
-  else if (match (match l.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit) with
+  else if (match lty with
            | Ast.TyCon (n, _) -> Hashtbl.find_opt type_all_nullary n = Some true
            | _ -> false) then begin
     (* ORDERING is here too, not just ==. `derive (Eq, Ord) color` orders by
@@ -1348,19 +1359,18 @@ and compile_cmp env op l r =
   (* structural `==`/`!=` on a compound value (tuple / record / payload-carrying
      variant): compare by value via a generated per-type __eq_<tag> helper *)
   else if (op = Ast.Eq || op = Ast.Ne) &&
-          (let t = (match l.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit) in
-           match t with
+          (match lty with
            | Ast.TyTuple _ -> true
            | Ast.TyCon (n, _) -> Hashtbl.mem type_records n || Hashtbl.mem type_variants n
            | _ -> false) then begin
-    let t = (match l.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit) in
+    let t = lty in
     compile_expr env l; push a0;
     compile_expr env r; emit_word (enc_i 0 a0 0 a1 0x13); pop a0;   (* a0=l, a1=r *)
     emit (Jal (ra, request_eq t));                                 (* a0 = 0/1 *)
     if op = Ast.Ne then emit_word (enc_i 1 a0 4 a0 0x13)           (* xori a0,a0,1 *)
   end
   else begin
-    (match (op, (match l.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit)) with
+    (match (op, lty) with
      | (Ast.Eq | Ast.Ne), Ast.TyArrow _ ->
        err l.loc "RV32I: `==`/`!=` on functions is not supported"
      (* Everything that reaches here is compared as a machine word. For a tuple,
@@ -3456,7 +3466,7 @@ let debug_map (prog : item list) : string =
 
 (* build the symbolic item list for a program (shared by emit_program /
    emit_listing) *)
-let build_items (prog : Ast.program) : item list =
+let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   items := [];
   lbl_counter := 0;
   string_data := [];
@@ -3486,7 +3496,6 @@ let build_items (prog : Ast.program) : item list =
     | Ast.Top_extern (name, _) -> Hashtbl.replace externs name ()
     | _ -> ()
   ) prog.Ast.decls;
-  let full = Ast.desugar_program prog in
   let main_body = split_tops full in
   (* reachability: which top-level fns does the program actually use? *)
   let reachable : (string, unit) Hashtbl.t = Hashtbl.create 64 in
@@ -3581,7 +3590,34 @@ let build_items (prog : Ast.program) : item list =
    stop changing. Two knobs feed each other: wide jumps make the code bigger, and
    a bigger code region moves the globals. Three rounds is the most this needs --
    the loop is bounded anyway, and says so if it does not settle. *)
+(* Q-102: monomorphize, ONCE, before the layout loop below can run the emitter
+   again. This backend reads `.ty` to pick an instruction sequence and has
+   nothing at run time to fall back on -- a value here is an untagged word -- so
+   a `==` inside a polymorphic function compiled to a word comparison: exact for
+   ints, and a comparison of two HEAP POINTERS for strings and compound values.
+   Two equal strings in different blocks answered false, and the stdlib's
+   `list_member` missed names that were there. There is no fix at emit time;
+   handing the emitter one function per concrete instantiation is the fix, and
+   then `compile_cmp` sees TyStr where it used to see a type variable.
+
+   "Once" is not an optimization. The pass UNIFIES TYPE VARIABLES IN PLACE, so
+   it is not idempotent: run over mere-ruby it reported 112 multi-instantiated
+   functions, and a second run over the tree the first one had made concrete
+   reported 500. Its pristine skeleton clones -- the copies that keep every
+   instantiation independently possible -- are taken at the start of a run, so
+   on a second run they are clones of an already-fixed skeleton, which is the
+   exact situation `make_spec` refuses when it can see it. Layout settling has
+   nothing to do with types, and re-running a type pass to decide a jump width
+   is how one becomes the other's bug. (It also cost 3x: the fixpoint is ~64s of
+   mere-ruby's compile, and the loop below runs its body up to three times.) *)
+let prepare_main (prog : Ast.program) : Ast.expr =
+  let full = Ast.desugar_program prog in
+  try Monomorph.specialize_toplevel full with
+  | Monomorph.Unsupported (loc, what) -> err loc ("RV: " ^ what)
+  | Monomorph.Error (loc, msg) -> err loc msg
+
 let build_items_sized (prog : Ast.program) : item list =
+  let full = prepare_main prog in
   far_jumps := false;
   code_span := 0x200000;
   let rec settle round items =
@@ -3603,10 +3639,10 @@ let build_items_sized (prog : Ast.program) : item list =
     else begin
       far_jumps := want_far;
       code_span := want_span;
-      settle (round + 1) (build_items prog)
+      settle (round + 1) (build_items prog full)
     end
   in
-  settle 1 (build_items prog)
+  settle 1 (build_items prog full)
 
 let emit_program ~main_ty (prog : Ast.program) : string =
   ignore main_ty;
