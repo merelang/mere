@@ -4102,8 +4102,17 @@ and emit_user_app (saved_tail : bool) (e : Ast.expr) : unit =
     emit_expr arg;
     let call_op = if saved_tail then "return_call" else "call" in
     emit_instr (Printf.sprintf "%s $%s" call_op li.lifted_name)
+  (* Same rule as the Var arm's `List.assoc_opt name !locals` a few hundred
+     lines up: a local that shadows a top-level fn name is the callee here,
+     not the top-level fn. Guarded on the top-level table alone, this arm
+     direct-called `$h` for a match-pattern `h` bound to a closure of another
+     type -- the LLVM backend had the identical guard and segfaulted; here the
+     one-arg fn read a list as a str and the heap ran away ("out of memory").
+     Falling through takes the closure-call path with the value the pattern
+     bound. *)
   | Ast.App ({ node = Ast.Var name; ty = f_ty; _ }, arg)
-    when Hashtbl.mem toplevel_fn_names name ->
+    when Hashtbl.mem toplevel_fn_names name
+         && not (List.mem_assoc name !locals) ->
     emit_expr arg;
     let dispatch_name =
       Option.value (Monomorph.instance_of !multi_inst_fns_wasm name f_ty)

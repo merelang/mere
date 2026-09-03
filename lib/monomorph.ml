@@ -312,10 +312,19 @@ let find_concrete_arrow (name : string) (e : Ast.expr) : Ast.ty option =
     | Ast.Fun (p, _, b) -> if p = name then () else go b
     | Ast.Constr (_, Some a) -> go a
     | Ast.Constr (_, None) -> ()
+    (* A match-arm PATTERN that binds `name` shadows it for that arm's guard
+       and body exactly as a Fun parameter does -- and unlike a let, an arm
+       can never be the poly fn's own definition, so skipping it hides no
+       use site. Without this, contrib/http/mount's
+       `| Cons (MExact (m, p, _, h), rest) -> route m p h` attributed the
+       pattern-bound `h`'s arrow to a user's top-level `h`, and the two arms'
+       different arrows (`str -> str` / `str list -> str -> str`) made the
+       C, LLVM and Wasm backends refuse a program they had always compiled. *)
     | Ast.Match (s, arms) ->
       go s;
-      List.iter (fun (_, g, b) ->
-        (match g with Some ge -> go ge | None -> ()); go b) arms
+      List.iter (fun (p, g, b) ->
+        if List.mem name (pattern_vars p) then ()
+        else ((match g with Some ge -> go ge | None -> ()); go b)) arms
     | Ast.Tuple es -> List.iter go es
     | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
     | Ast.Ref (_, _, a) -> go a
@@ -417,10 +426,19 @@ let find_all_concrete_arrows_in (name : string) (exprs : Ast.expr list) : Ast.ty
     | Ast.Fun (p, _, b) -> if p = name then () else go b
     | Ast.Constr (_, Some a) -> go a
     | Ast.Constr (_, None) -> ()
+    (* A match-arm PATTERN that binds `name` shadows it for that arm's guard
+       and body exactly as a Fun parameter does -- and unlike a let, an arm
+       can never be the poly fn's own definition, so skipping it hides no
+       use site. Without this, contrib/http/mount's
+       `| Cons (MExact (m, p, _, h), rest) -> route m p h` attributed the
+       pattern-bound `h`'s arrow to a user's top-level `h`, and the two arms'
+       different arrows (`str -> str` / `str list -> str -> str`) made the
+       C, LLVM and Wasm backends refuse a program they had always compiled. *)
     | Ast.Match (s, arms) ->
       go s;
-      List.iter (fun (_, g, b) ->
-        (match g with Some ge -> go ge | None -> ()); go b) arms
+      List.iter (fun (p, g, b) ->
+        if List.mem name (pattern_vars p) then ()
+        else ((match g with Some ge -> go ge | None -> ()); go b)) arms
     | Ast.Tuple es -> List.iter go es
     | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
     | Ast.Ref (_, _, a) -> go a

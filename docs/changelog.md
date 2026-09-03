@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.411 — 2026-09-03
+
+_A match-pattern that binds the same name as a top-level function was two bugs
+at once: the monomorphizer attributed the local's type to the function, and the
+LLVM backend direct-called the function where the local belonged. CI's three
+red gates are green._
+
+`contrib/http/mount`'s `entries` binds `h` in two match arms at two function
+types -- `str -> str` from `MExact`, `str list -> str -> str` from `MPattern` --
+and the test program also defines a top-level `h : str -> str`. Three things
+went wrong with that one name, in order:
+
+* **The monomorphization scans handled shadowing by a fn parameter and not by a
+  match pattern.** `find_concrete_arrow` and the recovery scan walked every arm's
+  body and read the pattern-bound `h`'s arrow as an instantiation of the
+  top-level skeleton `h` -- which is monomorphic -- so the C, LLVM and Wasm
+  backends refused the program ("cannot instantiate `h` at ..."). The scans now
+  skip an arm whose pattern binds the name: unlike a `let`, an arm can never be
+  the polymorphic fn's own definition, so skipping it hides no use site. (A third
+  walker with the same shape, `specialize_single_use_local_fns`, is a plain
+  traversal with no name to shadow and is left alone.)
+* **With the refusal gone, the LLVM backend segfaulted.** Its direct-call arm was
+  guarded by "the name is a top-level fn" alone, while its Var arm already said
+  "if a local shadows a top-level fn, prefer it." So the `MPattern` arm's `h`, a
+  two-argument closure loaded from the payload and then ignored, was emitted as
+  `call @mu_h(<the list>)` -- the one-argument top-level fn -- and the `str` it
+  returned was read as a closure struct and jumped through. The guard now also
+  requires the name not be a local, and the call falls through to the closure
+  path. **The Wasm backend had the identical guard** and the identical bug in a
+  different costume: the one-argument `$h` read the list as a str and the heap
+  ran away ("out of memory"). Same one-line fix, mirroring its own Var arm's
+  `List.assoc_opt name !locals`. Interp and the C backend were right all along.
+* **Why CI only noticed now.** `mount_check.sh` passes when at least two backends
+  run. The C backend had refused this program since the gate was written
+  (2026-08-29); interp and Wasm made two. v0.1.407-409 gave Wasm the shared
+  monomorphizer -- and with it the same refusal -- so the count fell to one and
+  the gate finally said so. Not a regression in the shared pass: the gap was the
+  C backend's, and moving the pass made it universal, and visible.
+
+`test/parity/match_pattern_shadows_toplevel.mere` pins the shape on all four
+backends. Also from this CI pass: the six `__rv_*` internals behind hosted file
+I/O (v0.1.404) are allow-listed for doc coverage with their portable spellings
+named, and the README's parity count is 149, as the check that exists because a
+number in prose rots was right to insist.
+
+---
+
 ## v0.1.410 — 2026-09-03
 
 _Pages went red the moment docs/changelog.md passed 1,000,000 bytes: the site
