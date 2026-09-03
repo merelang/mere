@@ -13,3 +13,14 @@ __rv_clock    internal: what `time` lowers to on -rv (clock_gettime64)
 __rv_urandom32 internal: what `random_int` draws from on -rv (getrandom)
 __rv_xlen     internal: the machine word width, for the prelude's one width branch
 __rv_word     internal: a value's machine word, for backend diagnostics only
+
+# v0.1.404's hosted file I/O on -rv, same rule: `read_file`, `write_file`,
+# `file_exists`, `read_stdin` and `substring` are the portable names; these are
+# what the prelude lowers them to (Linux openat/read/write/faccessat, and the
+# raw substring behind substring's bounds check), refused everywhere else.
+__rv_open_rd       internal: what `read_file` opens with on -rv (openat O_RDONLY)
+__rv_read_all      internal: what `read_file` / `read_stdin` read with on -rv
+__rv_access        internal: what `file_exists` asks on -rv (faccessat)
+__rv_open_wr       internal: what `write_file` opens with on -rv (openat O_WRONLY)
+__rv_write_all     internal: what `write_file` writes with on -rv
+__rv_substring_raw internal: the unchecked substring behind `substring`'s bounds refusal on -rv

@@ -5893,8 +5893,17 @@ and emit_user_app ?(tail = false) (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call %s @%s(%s)" r ret_ty li.lifted_name all_args);
     r
+  (* A LOCAL that shadows a top-level fn name must win here exactly as it
+     does in the Var arm above ("prefer it"). This guard used to test only
+     the top-level table, so a match-pattern `h` bound to a closure of a
+     different type was direct-called as `@mu_h` -- the top-level one-arg
+     fn -- with a list where a str belonged, and its returned str was then
+     read as a closure struct and jumped through: a segfault the
+     monomorphization refusal had been hiding. Falling through takes the
+     generic closure-call path, which loads the value the pattern bound. *)
   | Ast.App ({ node = Ast.Var name; ty = f_ty; _ }, arg)
-    when Hashtbl.mem toplevel_fn_names name ->
+    when Hashtbl.mem toplevel_fn_names name
+         && not (List.mem_assoc name env) ->
     let av = emit_expr env arg in
     let ret_ty =
       match e.Ast.ty with
