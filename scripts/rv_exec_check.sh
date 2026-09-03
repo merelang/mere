@@ -318,6 +318,51 @@ else
 fi
 echo "rv_exec: $rfpass passed, $rffail failed for read_file (both widths, and --bare still refuses)"
 
+# host_write_file: the write half, same contract. stdin is piped from a fixture
+# THE HARNESS WRITES, and the same bytes go to both sides -- read_stdin drains
+# whatever it is given, so feeding the two sides differently would report a
+# backend difference that is really a harness difference. Runs in "$TMP" like
+# the read gate, because the files it writes must land where the other side's
+# read_file will look.
+name=host_write_file
+wfpass=0; wffail=0
+printf 'line1\nline2 for stdin\n' > "$TMP/rv_stdin_fixture"
+if "$MERE" -c "$ROOT/test/rv/host_write_file.mere" > "$TMP/ref.c" 2>/dev/null \
+   && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
+  ( cd "$TMP" && ulimit -t 60; ./ref < rv_stdin_fixture ) 2>&1 | grep -a -v '^()$' > "$TMP/i.out"
+  for width in 32 64; do
+    if [ "$width" = 64 ]; then flag=-rv64; emu="$RVRUN64"; else flag=-rv; emu="$RVRUN"; fi
+    if ! "$MERE" $flag --ram 16 "$ROOT/test/rv/host_write_file.mere" > "$TMP/prog.bin" 2>"$TMP/rverr"; then
+      printf '  FAIL  %s:%s did not build\n' "$name" "$width"; head -2 "$TMP/rverr"; wffail=$((wffail+1)); rc=1; continue
+    fi
+    if [ -z "$emu" ]; then wfpass=$((wfpass+1)); continue; fi
+    ( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' "$emu" 16 < rv_stdin_fixture 2>/dev/null ) | grep -a -v '^rvrun' > "$TMP/r.out"
+    if diff -q "$TMP/i.out" "$TMP/r.out" >/dev/null; then
+      printf '  ok    %s:%s (roundtrip, truncate, NULs, empty, past one chunk, a catchable miss, stdin)\n' "$name" "$width"
+      wfpass=$((wfpass+1))
+    else
+      printf '  FAIL  %s:%s (RV%s disagrees with the C backend)\n' "$name" "$width" "$width"
+      diff -a "$TMP/i.out" "$TMP/r.out" | head -8 | sed 's/^/    /'
+      wffail=$((wffail+1)); rc=1
+    fi
+  done
+  # --bare: same protection as read_file, checked for the same right reason
+  if "$MERE" -rv --bare --ram 8 "$ROOT/test/rv/host_write_file_bare.mere" > /dev/null 2>"$TMP/bareerr"; then
+    printf '  FAIL  %s:bare — --bare accepted write_file; a machine has no filesystem\n' "$name"
+    wffail=$((wffail+1)); rc=1
+  elif grep -q "no host filesystem" "$TMP/bareerr"; then
+    printf '  ok    %s:bare (refused by name, not by accident)\n' "$name"
+    wfpass=$((wfpass+1))
+  else
+    printf '  FAIL  %s:bare — refused, but for the wrong reason:\n' "$name"
+    head -1 "$TMP/bareerr" | sed 's/^/    /'
+    wffail=$((wffail+1)); rc=1
+  fi
+else
+  printf '  FAIL  %s: the C reference did not build\n' "$name"; wffail=$((wffail+1)); rc=1
+fi
+echo "rv_exec: $wfpass passed, $wffail failed for write_file/read_stdin (both widths, and --bare still refuses)"
+
 
 if [ -z "$RVRUN" ]; then
   echo "rv_exec: $pass built, $fail failed — nothing RAN; set MEMU=<memu checkout> for that half"

@@ -2046,6 +2046,10 @@ let initial_env : env =
     ("__rv_open_rd", mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
     ("__rv_read_all", mono (Ast.TyArrow (Ast.TyInt, Ast.TyStr)));
     ("__rv_access", mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
+    ("__rv_open_wr", mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
+    ("__rv_write_all", mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyStr, Ast.TyInt))));
+    ("__rv_substring_raw", mono (Ast.TyArrow (Ast.TyStr,
+        Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyStr)))));
     ("read_stdin",  mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     (* v0.1.13 (mk dogfood): run a command line via the shell, inherit
        stdio, return its exit code. *)
