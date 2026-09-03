@@ -4,6 +4,59 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.407 — 2026-09-03
+
+_Monomorphization moves out of the C backend into `lib/monomorph.ml`, unchanged.
+A refactor is only a refactor if something checks: `scripts/codegen_identical.sh`
+compares two mere binaries byte for byte over every .mere file in the tree._
+
+The pass that turns a polymorphic function used at several concrete types into
+one specialized function per type — the ~265-line fixpoint with its pristine
+skeleton clones, its promotion of a single-resolved fn when a second type shows
+up later, and its per-pass re-scan — lived inside `codegen_c.ml` and was the C
+backend's alone. The RISC-V backend has none of it, which is why a `==` inside a
+polymorphic function compiles to a word comparison there: exact for ints, a
+POINTER comparison for strings and compound values (Q-102, pinned in
+test/rv/poly_eq_word.mere). Sharing the pass is the prerequisite for fixing
+that, and this slice is only the sharing.
+
+Two things had to change for a second backend to be able to call it, and both
+were the reason "just call codegen_c's" was not available:
+
+- It **published into a module global**. `resolve_fn_types` reset and filled
+  `Codegen_c.multi_inst_fns`, so a RISC-V compilation would have written into
+  the C backend's table — invisible in a one-backend process, and real
+  cross-contamination in one that runs several (the LSP). The table is returned
+  now; each backend holds its own.
+- Its refusals were **worded as C's**. `Monomorph` raises `Unsupported` /
+  `Error` without a backend's name, and the caller supplies the wording — so the
+  C backend's messages are unchanged to the byte while the RISC-V backend can
+  say something true about itself.
+
+`mangled_inst_name` (and `ty_tag`, which it is built from) moved with the pass
+rather than being copied, and the instance-picking rule at call sites — "if this
+name is multi-instantiated and this use site's type walks to a concrete arrow,
+name that instance" — is now `Monomorph.instance_of`, called from all three of
+the C backend's dispatch sites instead of written out three times.
+
+**`scripts/codegen_identical.sh`** is the check that this changed nothing.
+"Behaviour is unchanged" is a claim; emitting every backend's output for every
+.mere file in the tree with two binaries and comparing bytes is a check. It is
+stronger than running the behavioural suites and for a different reason than
+"more files": parity compares what a few dozen programs PRINT, so a change in
+emitted code that no test's output depends on is invisible to it. 3820
+emissions (764 files × 5 backends): 2895 byte-identical, 925 refused by both
+with the same message, 0 differences. It also caught the one real mistake in
+this slice — wrapping only the fixpoint left `lift_fn_skels`'s refusal escaping
+as an uncaught OCaml exception instead of a located diagnostic, on
+examples/typed.mere. And it was poisoned to prove it can see: perturbing the
+mangled suffix produced 128 CODE-DIFFs, which also says the corpus exercises
+the moved code rather than stepping around it.
+
+Gates: 2620 unit tests, parity 161/161, rv_exec 80/0 at 64 bits and 75/0 at 32.
+
+---
+
 ## v0.1.406 — 2026-09-03
 
 _StrBuf is a real byte buffer, and the prelude's string builders and splitter
