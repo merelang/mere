@@ -1,0 +1,18 @@
+// A match-arm pattern that binds the SAME NAME as a top-level function, at a
+// different type in each arm. The monomorphization pass attributes concrete
+// arrow types of `Var h` to the top-level skeleton `h` -- unless the `h` it
+// sees is a pattern-bound local. It handled shadowing by a fn parameter and not
+// by a match pattern, so `h` at `str list -> str -> str` (the Pat arm) was
+// taken as an instantiation of the top-level `h : str -> str`, whose skeleton
+// is monomorphic, and the C / LLVM / Wasm backends refused the program. This
+// is contrib/http/mount's `entries` in miniature; the four backends must agree.
+type Route = Exact of (str -> str) | Pat of (str list -> str -> str);
+let h = fn (req: str) -> "x";
+let hp = fn (caps: str list) -> fn (req: str) -> "y";
+let rec names = fn (rs: Route list) ->
+  match rs with
+  | Nil -> ""
+  | Cons (Exact h, rest) -> h "a" ++ names rest
+  | Cons (Pat h, rest) -> h Nil "b" ++ names rest;
+let _ = print (names (Cons (Exact h, Cons (Pat hp, Nil))));
+print (h "direct")
