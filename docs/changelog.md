@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.412 — 2026-09-03
+
+_The three operating-system examples had not compiled since v0.1.367, and no gate
+knew. They compile, they run, and `os_check.sh` runs them from now on._
+
+`examples/riscv_bare_shell.mere` (a two-task kernel with a shell),
+`riscv_bare_user.mere` with `riscv_user_prog.mere` (a kernel that loads a separately
+compiled, ordinary Mere program as a user process and answers its syscalls) and
+`riscv_bare_selfhost.mere` are the programs behind the sentence "an OS on a
+self-made CPU". Each wrote its timer-interrupt cause as the literal
+`2147483655` -- `0x80000007`, the register's top bit plus seven. When v0.1.367
+gave the 32-bit backend a literal check, that number stopped fitting, all three
+stopped compiling, and nothing said so, because nothing ran them: the QEMU gate
+runs hello, timer and sched, and rv_exec runs the parity corpus. The literal check
+was right -- 2147483655 is not a signed 32-bit number -- and the examples were
+saying the wrong thing: it is a bit pattern. They now build it from its parts,
+`bit_or (bit_shl 1 31) 7`, which needs no exemption and says what it means.
+
+`scripts/os_check.sh` builds the three, runs the shell (banner, the command list, a
+survived access fault, a clean halt) and the kernel with its user process (five
+lines and "exited after 9 syscalls") on memu's RV32 core, and compares every line
+that does not depend on how fast stdin arrives. It sits in CI beside qemu_virt on
+the same memu checkout. The fix took one line each; the gate is what the fix
+was missing.
+
+The README also gains pointers to the larger programs written in the language --
+mere-ruby, memu, mbrowse -- next to the benchmark table, since a reader who
+arrives from a talk abstract should find them without knowing the names.
+
+---
+
 ## v0.1.411 — 2026-09-03
 
 _A match-pattern that binds the same name as a top-level function was two bugs

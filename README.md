@@ -33,6 +33,18 @@ Measured against other implementations of the same program
 A reference counter runs whether or not you needed it to. A region block is you saying
 where. On this workload, saying where beats both the collector and hand-written `malloc`.
 
+Larger programs written in Mere, each of which forced something into the language:
+
+- [mere-ruby](https://github.com/284km/mere-ruby) — an interpreter for a subset of Ruby
+  (40,000 lines of Mere), checked against `ruby` itself on 162 corpus programs. It runs on
+  the RISC-V backend, on the CPU below, at both 32 and 64 bits.
+- [memu](https://github.com/284km/memu) — RV32IM and RV64IM cores written in Mere; the
+  RISC-V backend's own machines, diffed against QEMU (`scripts/qemu_virt.sh`). The
+  kernel, shell and user-process examples under `examples/riscv_bare_*` run there
+  (`scripts/os_check.sh`).
+- [mbrowse](https://github.com/284km/mbrowse) — a browser for static pages, TLS to font
+  rasterisation, all in Mere.
+
 **And it is not free, which the same suite says out loud.** Mere with no `region` written
 holds 29x the memory MoonBit does, because nothing is reclaimed by default. The language
 does not decide for you; it makes deciding cheap to write.

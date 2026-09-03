@@ -80,7 +80,12 @@ let user_stack = 12451840;         // 0xBE0000: the top of its 4 MB, as --ram 4 
 let user_heap = 10485760;          // 0xA00000: load_base + 2MB, where its globals start
 let x_gp = 3;
 let interval = 60000;
-let timer_cause = 2147483655;      // 0x80000007
+// mcause for a machine timer interrupt: the interrupt bit is the register's
+// TOP bit, so it is a bit pattern, not a number -- 0x80000007, which as a
+// signed 32-bit literal does not exist. Built from its parts so the backend's
+// literal check (which rightly refuses 2147483655) has nothing to refuse, and
+// the shape says what the value means.
+let timer_cause = bit_or (bit_shl 1 31) 7;
 let sys_ecall = 11;                // environment call from M-mode
 let x_sp = 2;
 let x_a0 = 10;

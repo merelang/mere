@@ -702,6 +702,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/qemu_virt.sh
 
+      # The operating system on that CPU: a two-task kernel with a shell, and a
+      # kernel that runs a separately compiled user program and answers its
+      # syscalls. These are the programs behind "an OS on a self-made CPU", and
+      # nothing ran them -- when a literal check arrived that refused their
+      # 0x80000007 interrupt cause, all three stopped compiling and no gate said
+      # so. This builds them and runs two on the same memu checkout.
+      - name: os_check (the kernel, the shell and a user process, on memu)
+        if: ${{ !cancelled() }}
+        run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/os_check.sh
+
       # The other half of the same argument: qemu_virt checks that the bytes we
       # emit MEAN what we think, and this checks that the listing we print of
       # those bytes SAYS what they mean. A disassembler is an instrument, and an
