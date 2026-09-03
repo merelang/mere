@@ -77,6 +77,33 @@ let rec deep_erase_tyvars (t : Ast.ty) : Ast.ty =
   | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, deep_erase_tyvars inner)
   | t -> t
 
+(* v0.1.293: the type that `ty_tag` NAMES, which is not always the type handed to it.
+   `ty_tag` erases an unresolved tyvar to `int` -- and a region-parameterised
+   container's unresolved region slot to `__heap` -- so a type `ty_is_concrete`
+   REJECTS can still have its copier named in the emitted C. Registration has to go
+   through this, or the emitted call has no definition. That is what happened to
+   `__mcopy_list_tuple_str_int` (a closure capturing a `list (str, 'a)` whose element
+   type never resolved) and, by the same mechanism, to a trait dictionary's closure
+   field. Erasing with `deep_erase_tyvars` instead is NOT the same thing: it turns the
+   region slot into `int` and would register `Vec_int_int` for what `ty_tag` calls
+   `Vec___heap_int` -- the mpng P5 shape, one type under two names. *)
+let rec ty_as_tagged (t : Ast.ty) : Ast.ty =
+  match Ast.walk t with
+  | Ast.TyVar _ | Ast.TyParam _ -> Ast.TyInt
+  | Ast.TyTuple ts -> Ast.TyTuple (List.map ty_as_tagged ts)
+  | Ast.TyArrow (a, b) -> Ast.TyArrow (ty_as_tagged a, ty_as_tagged b)
+  | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, ty_as_tagged inner)
+  | Ast.TyCon ((("Vec" | "Map" | "StrBuf" | "ByteBuf") as name), (first :: rest)) ->
+    (* Slot 0 is the region. Keep ty_tag's answer for an unresolved one. *)
+    let first =
+      match Ast.walk first with
+      | Ast.TyVar _ | Ast.TyParam _ -> Ast.TyRef (Ast.BorrowedRead, "__heap", Ast.TyUnit)
+      | other -> ty_as_tagged other
+    in
+    Ast.TyCon (name, first :: List.map ty_as_tagged rest)
+  | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map ty_as_tagged args)
+  | t -> t
+
 let rec ty_tag (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyInt -> "int"
@@ -192,7 +219,12 @@ type fn_skel = {
 
 (* Walk the desugared main expression, extracting top-level fn bindings.
    Returns (fn skeletons in declaration order, residual main body). *)
-let lift_fn_skels (e : Ast.expr) : fn_skel list * Ast.expr =
+(* `subset` is the backend's name for its own accepted subset, used in the one
+   refusal here that names one ("... in C subset" / "... in Wasm subset"). The
+   pass has no backend, so it cannot know the word; passing it in is what let
+   three identical copies of this function become one without any of them
+   changing what a user reads. *)
+let lift_fn_skels ?(subset = "C subset") (e : Ast.expr) : fn_skel list * Ast.expr =
   let rec go (e : Ast.expr) =
     match e.Ast.node with
     | Ast.Let (pat, value, rest) ->
@@ -234,7 +266,7 @@ let lift_fn_skels (e : Ast.expr) : fn_skel list * Ast.expr =
             { sname = n; sparam = p; sbody = fb; sfun = v }
           | _ ->
             raise (Error (v.Ast.loc,
-              "let rec binding must be a single-arg function in C subset")))
+              ("let rec binding must be a single-arg function in " ^ subset))))
           bindings
       in
       let more, rest' = go rest in
@@ -848,11 +880,32 @@ let duplicate_multi_use_local_fns (root : Ast.expr) : Ast.expr =
    the Fun's own .ty if it's already concrete; otherwise (let-poly
    generalized it) recover a concrete arrow type by scanning the main
    expression for a use-site Var with the same name. *)
-(* The (source name, use-site arrow) -> mangled name mapping, as the pair of
-   things a backend needs: which names are multi-instantiated, and at which
-   arrows. Returned rather than published into a module global -- see the
-   header: a global is how one backend's run would land in another's table. *)
-type inst_table = (string, Ast.ty list) Hashtbl.t
+(* Which names are multi-instantiated and at which arrows -- AND the namer that
+   produced the specializations. The two travel together on purpose.
+   `mangle` is per-backend: the C tagger erases a residual type variable to
+   `int` and defaults a container's unresolved region slot to `__heap`, LLVM's
+   raises on both, and Wasm's spells Map differently. Any of those is a fine
+   name for a symbol inside one backend; what is not fine is the pass naming a
+   specialization one way while a call site names it another, which is an
+   undefined symbol at best. Handing the table the namer that built it makes
+   that disagreement unrepresentable rather than merely unlikely.
+
+   Returned rather than published into a module global -- see the header: a
+   global is how one backend's run would land in another's table. *)
+type inst_table = {
+  arrows : (string, Ast.ty list) Hashtbl.t;
+  mangle : string -> Ast.ty -> string;
+}
+
+let empty_inst_table ?(mangle = mangled_inst_name) () =
+  { arrows = Hashtbl.create 4; mangle }
+
+(* Is this name multi-instantiated? (So there is no single function to hand out
+   as a value, and a direct call has to pick an instance.) *)
+let is_multi (tbl : inst_table) (n : string) : bool = Hashtbl.mem tbl.arrows n
+
+let multi_names (tbl : inst_table) : string list =
+  Hashtbl.fold (fun k _ acc -> k :: acc) tbl.arrows []
 
 (* The emitted name for a reference to `n` whose use site has type `use_ty`.
    `None` means `n` IS multi-instantiated but this use site's type has not
@@ -862,20 +915,21 @@ type inst_table = (string, Ast.ty list) Hashtbl.t
    decides.
 
    Every backend picks its instance HERE. The rule used to be written out at
-   each dispatch site; three copies of one rule is how the copies stop
-   agreeing. *)
+   each dispatch site of each backend; copies of one rule is how the copies
+   stop agreeing. *)
 let instance_of (tbl : inst_table) (n : string) (use_ty : Ast.ty option)
   : string option =
-  if not (Hashtbl.mem tbl n) then Some n
+  if not (Hashtbl.mem tbl.arrows n) then Some n
   else
     match use_ty with
     | Some t ->
       (match Ast.walk t with
-       | Ast.TyArrow _ as arrow -> Some (mangled_inst_name n arrow)
+       | Ast.TyArrow _ as arrow -> Some (tbl.mangle n arrow)
        | _ -> None)
     | None -> None
 
-let resolve_fn_types (skels : fn_skel list) (root : Ast.expr)
+let resolve_fn_types ?(mangle = mangled_inst_name)
+    (skels : fn_skel list) (root : Ast.expr)
   : fn_decl list * inst_table =
   (* Phase 21.1 (DEFERRED §1.7) + 21.2 multi-pass:
      - Each pass tries to resolve each yet-unresolved fn by either (a)
@@ -891,7 +945,7 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr)
        unresolved and are silently filtered out. *)
   let resolved : (string, Ast.ty) Hashtbl.t = Hashtbl.create 16 in
   let progress = ref true in
-  let multi_inst_fns : inst_table = Hashtbl.create 4 in
+  let multi_inst_fns : (string, Ast.ty list) Hashtbl.t = Hashtbl.create 4 in
   let multi_specs : (string, (Ast.ty * Ast.expr) list) Hashtbl.t =
     Hashtbl.create 4
   in
@@ -1051,7 +1105,7 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr)
       let specs =
         let seen = Hashtbl.create 4 in
         List.filter (fun (arrow, _) ->
-          let k = mangled_inst_name s.sname arrow in
+          let k = mangle s.sname arrow in
           if Hashtbl.mem seen k then false
           else (Hashtbl.add seen k (); true)) specs
       in
@@ -1059,7 +1113,7 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr)
       List.map (fun (arrow, cloned_body) ->
         match Ast.walk arrow with
         | Ast.TyArrow (p, r) ->
-          { name = mangled_inst_name s.sname arrow;
+          { name = mangle s.sname arrow;
             param = s.sparam;
             body = cloned_body;
             param_ty = Ast.walk p;
@@ -1122,7 +1176,7 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr)
         | None -> ()
       end) skels
   done;
-  base @ List.rev !recovered, multi_inst_fns
+  base @ List.rev !recovered, { arrows = multi_inst_fns; mangle }
 
 (* --- Q-102: the same answer, as an AST -> AST rewrite ---------------------
    A backend that carries types to emit time picks the instance THERE, from the
@@ -1225,7 +1279,7 @@ let specialize_toplevel (root : Ast.expr) : Ast.expr =
   specialize_single_use_local_fns root;
   let skels, _residual = lift_fn_skels root in
   let decls, insts = resolve_fn_types skels root in
-  if Hashtbl.length insts = 0 then root
+  if Hashtbl.length insts.arrows = 0 then root
   else begin
     let skel_names : (string, unit) Hashtbl.t = Hashtbl.create 16 in
     List.iter (fun s -> Hashtbl.replace skel_names s.sname ()) skels;
