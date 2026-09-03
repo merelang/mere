@@ -1974,9 +1974,42 @@ and compile_app env e =
   | Ast.Var "__rv_read_all" when List.length args = 1 ->
     if !bare then
       err e.loc
-        "RV32I --bare: there is no host filesystem to read from";
+        "RV32I --bare: there is no host to read from -- neither a filesystem \
+         behind read_file nor a stdin behind read_stdin";
     compile_expr env (List.hd args);                     (* a0 = fd *)
     emit (Jal (ra, "__rv_slurp"))                        (* a0 = [len][bytes] *)
+  (* The write half of the same story. O_WRONLY|O_CREAT|O_TRUNC is 0x241 on
+     every Linux target and mode 0644 is what the C backend's write_file
+     creates; truncation is the contract (write_file replaces, it does not
+     append). The negative return is the errno, same as __rv_open_rd. *)
+  | Ast.Var "__rv_open_wr" when List.length args = 1 ->
+    if !bare then
+      err e.loc
+        "RV32I --bare: there is no host filesystem -- a machine has devices, \
+         not syscalls, and a `write_file` here would have nowhere to write";
+    compile_expr env (List.hd args);                     (* a0 = path str *)
+    emit (Jal (ra, "__rv_pathz"));                       (* a0 = NUL-terminated *)
+    emit_word (enc_i 0 a0 0 a1 0x13);                    (* a1 = path *)
+    li a0 (-100);                                        (* AT_FDCWD *)
+    li a2 0x241;                                         (* O_WRONLY|O_CREAT|O_TRUNC *)
+    li a3 0o644;                                         (* mode *)
+    li a7 56;                                            (* openat *)
+    emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall -> a0 = fd | -errno *)
+  (* write the whole str block to the fd, then close it. curried: fd, then str.
+     The payload is written STRAIGHT from the block -- [len][bytes], so a1 is
+     block+w and a2 the header -- no copy and no NUL trouble, because write
+     takes a count where open wanted a terminator. Returns 0, or the first
+     negative errno the kernel answered (the fd is closed either way: an fd
+     that leaks on the error path is a slot gone until exit). *)
+  | Ast.Var "__rv_write_all" when List.length args = 2 ->
+    if !bare then
+      err e.loc
+        "RV32I --bare: there is no host filesystem to write to";
+    compile_expr env (List.hd args);                     (* a0 = fd *)
+    push a0;
+    compile_expr env (List.nth args 1);                  (* a0 = str block *)
+    pop t0;                                              (* t0 = fd *)
+    emit (Jal (ra, "__rv_wall"))                         (* a0 = 0 | -errno *)
   (* faccessat rather than open-and-close: `file_exists` should not need a
      descriptor, and a path that exists but cannot be opened is still a path
      that exists -- answering that question with openat would say `false` for a
@@ -2135,6 +2168,17 @@ and compile_app env e =
     compile_expr env (List.nth args 1);
     emit_word (enc_i 0 a0 0 a1 0x13); pop a0;
     emit (Jal (ra, "__str_cmp"))
+  | Ast.Var "__rv_substring_raw" when List.length args = 3 ->
+    (* the slice itself, reached only through the prelude's `substring` wrapper,
+       which has already checked the range and failed with the C backend's own
+       message. The helper's unsigned check stays in as a backstop -- the wrapper
+       is prelude code and prelude code can be shadowed. *)
+    compile_expr env (List.hd args); push a0;
+    compile_expr env (List.nth args 1); push a0;
+    compile_expr env (List.nth args 2);
+    emit_word (enc_i 0 a0 0 a2 0x13);
+    pop a1; pop a0;
+    emit (Jal (ra, "__substring"))
   | Ast.Var "substring" when List.length args = 3 ->
     compile_expr env (List.nth args 0); push a0;
     compile_expr env (List.nth args 1); push a0;
@@ -2657,6 +2701,52 @@ let emit_rv_slurp () =
   li a7 57;
   emit_word (enc_i 0 zero 0 zero 0x73);                  (* close the fd first *)
   emit_abort "read_file: the host stopped answering partway through the file"
+
+(* __rv_wall(t0 = fd, a0 = [len][bytes] str) -> a0 = 0 | -errno.
+   The write loop for `write_file`: the kernel may write short, so the loop
+   carries a cursor and a remainder rather than trusting one call. fd and the
+   cursor live in stack slots across the ecall, same reasoning as __rv_slurp:
+   the ABI happens to preserve them, and a helper that only works because an
+   unstated thing happens to be true is a helper waiting to stop working. *)
+let emit_rv_wall () =
+  emit (Label "__rv_wall");
+  emit_word (enc_i (0 - 3 * wsz ()) sp 0 sp 0x13);       (* addi sp, sp, -3w *)
+  emit_word (enc_s (0 * wsz ()) t0 sp (stf3 ()) 0x23);   (* [sp+0]  = fd *)
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t1 0x03);   (* t1 = len *)
+  emit_word (enc_s (2 * wsz ()) t1 sp (stf3 ()) 0x23);   (* [sp+2w] = remaining *)
+  emit_word (enc_i (wsz ()) a0 0 t2 0x13);               (* t2 = payload ptr *)
+  emit_word (enc_s (wsz ()) t2 sp (stf3 ()) 0x23);       (* [sp+w]  = cursor *)
+  emit (Label ".wa_loop");
+  emit_word (enc_i (2 * wsz ()) sp (ldf3 ()) t1 0x03);   (* t1 = remaining *)
+  emit (Branch (0, t1, zero, ".wa_done"));               (* beq t1, x0 -> done *)
+  emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) a0 0x03);   (* a0 = fd *)
+  emit_word (enc_i (wsz ()) sp (ldf3 ()) a1 0x03);       (* a1 = cursor *)
+  emit_word (enc_i 0 t1 0 a2 0x13);                      (* a2 = remaining *)
+  emit_word (enc_i 64 zero 0 a7 0x13);                   (* li a7, 64 — write *)
+  emit_word (enc_i 0 zero 0 zero 0x73);                  (* ecall *)
+  emit (Branch (4, a0, zero, ".wa_err"));                (* blt a0, x0 -> error *)
+  emit_word (enc_i (wsz ()) sp (ldf3 ()) t2 0x03);
+  emit_word (enc_r 0 a0 t2 0 t2 0x33);                   (* cursor += n *)
+  emit_word (enc_s (wsz ()) t2 sp (stf3 ()) 0x23);
+  emit_word (enc_i (2 * wsz ()) sp (ldf3 ()) t1 0x03);
+  emit_word (enc_r 0x20 a0 t1 0 t1 0x33);                (* remaining -= n *)
+  emit_word (enc_s (2 * wsz ()) t1 sp (stf3 ()) 0x23);
+  emit (Jal (zero, ".wa_loop"));
+  emit (Label ".wa_done");
+  emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) a0 0x03);   (* a0 = fd *)
+  li a7 57;                                              (* close *)
+  emit_word (enc_i 0 zero 0 zero 0x73);
+  emit_word (enc_i 0 zero 0 a0 0x13);                    (* a0 = 0 *)
+  emit_word (enc_i (3 * wsz ()) sp 0 sp 0x13);
+  emit_word (enc_i 0 ra 0 zero 0x67);                    (* ret *)
+  emit (Label ".wa_err");
+  emit_word (enc_i 0 a0 0 t1 0x13);                      (* t1 = the errno *)
+  emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) a0 0x03);
+  li a7 57;                                              (* close first *)
+  emit_word (enc_i 0 zero 0 zero 0x73);
+  emit_word (enc_i 0 t1 0 a0 0x13);                      (* a0 = -errno *)
+  emit_word (enc_i (3 * wsz ()) sp 0 sp 0x13);
+  emit_word (enc_i 0 ra 0 zero 0x67)                     (* ret *)
 
 (* __str_eq(a0=s1, a1=s2) -> a0 = 1 if byte-equal else 0. Leaf. *)
 let emit_str_eq () =
@@ -3375,6 +3465,7 @@ let build_items (prog : Ast.program) : item list =
   emit_str_concat ();
   emit_rv_pathz ();
   emit_rv_slurp ();
+  emit_rv_wall ();
   emit_str_eq ();
   emit_str_cmp ();
   emit_str_of_int ();

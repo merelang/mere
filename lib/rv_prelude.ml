@@ -30,16 +30,48 @@ let rec gcd = fn (a: int) -> fn (b: int) ->
   let y = if b < 0 then 0 - b else b in
   if y == 0 then x else gcd y (x % y);
 
-// --- host services this target does not have ------------------------------
-// Not a scaffold: `--bare` hands the program the machine, and there is no host
-// to read a file from, run a command through, or draw entropy out of. These stop
-// with a message rather than being refused at compile time, for the reason the
-// `extern fn` calls do -- refusing refuses the whole program for a call it may
-// never make, and the program this backend is being carried for is an
+// substring's range check, with the message the C backend gives: naming the
+// range and the length is what lets a caller see WHICH argument was nonsense,
+// and "out of bounds" (the assembly helper's backstop message) names neither.
+// A wrapper here rather than message-building in assembly: the check is three
+// compares and the message is one concat, both of which are Mere's job. The
+// slice itself stays in the helper, reached through the private raw name.
+let substring = fn (s: str) -> fn (a: int) -> fn (b: int) ->
+  let n = str_len s in
+  if a < 0 || b > n || a > b then
+    fail ("substring: range [" ++ str_of_int a ++ ", " ++ str_of_int b
+          ++ ") invalid for str of length " ++ str_of_int n)
+  else __rv_substring_raw s a b;
+
+// --- host services --------------------------------------------------------
+// The hosted target HAS a host: the same Linux-numbered ecall mechanism that
+// carries print and exit also answers openat/read/write/close/faccessat, so
+// read_file, write_file, file_exists and read_stdin below are real. `--bare`
+// refuses each of those at compile time, by name, in codegen -- a machine has
+// devices, not syscalls, and that half of the old reasoning is still true.
+//
+// What remains on the refused list is refused for its own stated reason, not
+// as leftovers:
+//
+//   run          PERMANENT. `run` hands a command line to a shell and inherits
+//                its stdio. There is no shell on the other side of an ecall --
+//                the emulator could only fake one by running commands ITSELF,
+//                on the host, with the emulator's own privileges, which makes
+//                every guest program a host program. An interpreter that wants
+//                `system` on this target should say the target cannot, which
+//                is what the catchable stop below lets it do.
+//   bytes        the `bytes` TYPE has no representation on this backend at
+//                all; not a host service, same catchable stop for the same
+//                "a program that never builds one runs" reason.
+//
+// These stop with a message rather than being refused at compile time, for the
+// reason the `extern fn` calls do -- refusing refuses the whole program for a
+// call it may never make, and the program this backend is carried for is an
 // interpreter whose scripts mostly touch none of them.
 //
-// `random_int` is here rather than implemented because a deterministic sequence
-// returned from something named random is the kind of wrong that stays quiet.
+// `random_int` is answered by the host's getrandom (see __rv_urandom32), never
+// faked: a deterministic sequence returned from something named random is the
+// kind of wrong that stays quiet.
 let __h_todo = fn (n: str) -> fail ("RV32I: " ++ n ++ " needs a host, and --bare hands the program the machine instead");
 let run = fn (c: str) -> (__h_todo "run" : int);
 
@@ -62,7 +94,16 @@ let read_file = fn (p: str) ->
   else __rv_read_all fd;
 let file_exists = fn (p: str) -> __rv_access p == 0;
 
-let write_file = fn (p: str) -> fn (c: str) -> (__h_todo "write_file" : unit);
+// write_file: openat(O_WRONLY|O_CREAT|O_TRUNC) + a short-write-safe loop +
+// close, all Linux-numbered -- the same reasoning as read_file above, and the
+// same catchability: mere-ruby turns this fail into Errno::EACCES/ENOENT.
+let write_file = fn (p: str) -> fn (c: str) ->
+  let fd = __rv_open_wr p in
+  if fd < 0 then fail ("write_file: cannot open " ++ p ++ " (errno " ++ str_of_int (0 - fd) ++ ")")
+  else
+    let r = __rv_write_all fd c in
+    if r < 0 then fail ("write_file: the host stopped taking bytes for " ++ p ++ " (errno " ++ str_of_int (0 - r) ++ ")")
+    else ();
 // `args` is the one host service on this list that is not a host service here:
 // the loader leaves the arguments in RAM and this walks them. A program built
 // with -rv therefore reads its own command line, and one started by a loader
@@ -72,7 +113,11 @@ let rec __rv_args_go = fn (i: int) -> fn (n: int) ->
   if i >= n then (Nil : str list) else Cons (__rv_argstr i, __rv_args_go (i + 1) n);
 let args = fn (u: unit) -> __rv_args_go 0 (__rv_argc ());
 
-let read_stdin = fn (u: unit) -> (__h_todo "read_stdin" : str);
+// read_stdin: fd 0 through the same slurp read_file uses. The emulator serves
+// read(0) from its own stdin; the close(0) the slurp ends with answers -EBADF
+// there and the slurp ignores close's answer, which is the right amount of
+// caring about closing stdin.
+let read_stdin = fn (u: unit) -> __rv_read_all 0;
 // `bytes` has no representation on this backend at all -- these are not a host
 // service but the type itself, and they are here for the same reason: a program
 // that never builds one runs.
