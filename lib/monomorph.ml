@@ -1123,3 +1123,126 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr)
       end) skels
   done;
   base @ List.rev !recovered, multi_inst_fns
+
+(* --- Q-102: the same answer, as an AST -> AST rewrite ---------------------
+   A backend that carries types to emit time picks the instance THERE, from the
+   use site's recorded type (that is what `instance_of` is for, and what the C
+   backend does at its three dispatch sites). The RISC-V backend cannot: its
+   values are untagged machine words and its emitter reads `.ty` only to choose
+   an instruction sequence. So it needs the answer in the tree instead --
+   specialized functions bound under their mangled names, and every reference
+   that names one already saying so.
+
+   That is all this does: it adds bindings and renames references. The original
+   polymorphic binding stays. A reference this pass could not resolve (its arrow
+   still holds a type variable at the use site) still has to name something, and
+   leaving the original means such a program compiles exactly as it did before
+   instead of failing to find a label. An original that nothing references is
+   dropped by the backend's own reachability, not by this. *)
+
+module StrSet = Set.Make (String)
+
+(* Rewrite every reference that names an instance, honouring shadowing: a local
+   binding of the same name is a DIFFERENT `f`, and renaming its references to a
+   top-level instance is a miscompile. The C backend makes this check at emit
+   time against its own scope tracking; as a tree rewrite the bound set has to
+   be carried. The prelude's `list_fold` parameter `f` against a user's
+   top-level `let f` is the case that made the C backend grow that check, so it
+   is not hypothetical.
+
+   The TOP-LEVEL let chain is deliberately not a binder here. The desugared
+   program IS a chain of `Let`s, so counting them as shadowing would mark every
+   top-level function as shadowed by its own definition and rewrite nothing --
+   green, and doing nothing. `rw_spine` walks that chain; `rw` walks everything
+   under it, where a binder really is one. *)
+let rewrite_instance_refs (tbl : inst_table) (root : Ast.expr) : Ast.expr =
+  let rec rw (bound : StrSet.t) (e : Ast.expr) : Ast.expr =
+    let node =
+      match e.Ast.node with
+      | Ast.Var n when not (StrSet.mem n bound) ->
+        (match instance_of tbl n e.Ast.ty with
+         | Some m -> Ast.Var m
+         | None -> e.Ast.node)
+      | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+      | Ast.Unit_lit | Ast.Var _ -> e.Ast.node
+      | Ast.Bin (op, a, b) -> Ast.Bin (op, rw bound a, rw bound b)
+      | Ast.Cmp (op, a, b) -> Ast.Cmp (op, rw bound a, rw bound b)
+      | Ast.Logic (op, a, b) -> Ast.Logic (op, rw bound a, rw bound b)
+      | Ast.Neg a -> Ast.Neg (rw bound a)
+      | Ast.Annot (a, t) -> Ast.Annot (rw bound a, t)
+      | Ast.App (a, b) -> Ast.App (rw bound a, rw bound b)
+      | Ast.Let (p, v, b) ->
+        Ast.Let (p, rw bound v, rw (bind_pattern bound p) b)
+      | Ast.Let_rec (bs, b) ->
+        let bound' =
+          List.fold_left (fun s (n, _) -> StrSet.add n s) bound bs in
+        Ast.Let_rec (List.map (fun (n, v) -> (n, rw bound' v)) bs, rw bound' b)
+      | Ast.With (n, v, b) -> Ast.With (n, rw bound v, rw (StrSet.add n bound) b)
+      | Ast.If (c, t, el) -> Ast.If (rw bound c, rw bound t, rw bound el)
+      | Ast.Fun (p, t, b) -> Ast.Fun (p, t, rw (StrSet.add p bound) b)
+      | Ast.Constr (c, a) -> Ast.Constr (c, Option.map (rw bound) a)
+      | Ast.Match (s, arms) ->
+        Ast.Match (rw bound s,
+          List.map (fun (p, g, b) ->
+            let b' = bind_pattern bound p in
+            (p, Option.map (rw b') g, rw b' b)) arms)
+      | Ast.Tuple es -> Ast.Tuple (List.map (rw bound) es)
+      | Ast.Region_block (r, b) -> Ast.Region_block (r, rw bound b)
+      | Ast.Region_loop (r, x, b) ->
+        Ast.Region_loop (r, x, rw (StrSet.add x bound) b)
+      | Ast.Ref (m, r, a) -> Ast.Ref (m, r, rw bound a)
+      | Ast.Record_lit (n, fs) ->
+        Ast.Record_lit (n, List.map (fun (k, v) -> (k, rw bound v)) fs)
+      | Ast.Field_get (a, f) -> Ast.Field_get (rw bound a, f)
+      | Ast.Record_update (a, fs) ->
+        Ast.Record_update (rw bound a, List.map (fun (k, v) -> (k, rw bound v)) fs)
+    in
+    { e with Ast.node = node }
+  and bind_pattern bound p =
+    List.fold_left (fun s n -> StrSet.add n s) bound (pattern_vars p)
+  in
+  let rec rw_spine (e : Ast.expr) : Ast.expr =
+    match e.Ast.node with
+    | Ast.Let (p, v, b) ->
+      { e with Ast.node = Ast.Let (p, rw StrSet.empty v, rw_spine b) }
+    | Ast.Let_rec (bs, b) ->
+      { e with Ast.node =
+          Ast.Let_rec (List.map (fun (n, v) -> (n, rw StrSet.empty v)) bs,
+                       rw_spine b) }
+    | _ -> rw StrSet.empty e
+  in
+  rw_spine root
+
+(* Run the whole pass and hand back a program whose polymorphic top-level
+   functions have been replaced, at every use site that names a type, by
+   monomorphic ones. The local-function pre-passes run in the same order the C
+   backend runs them: `specialize_single_use_local_fns` in particular has to
+   come before the fixpoint, because a generic callee used inside a local
+   polymorphic fn only becomes visible to arrow discovery once that local fn's
+   body is concrete. *)
+let specialize_toplevel (root : Ast.expr) : Ast.expr =
+  let root = duplicate_multi_use_local_fns root in
+  specialize_single_use_local_fns root;
+  let skels, _residual = lift_fn_skels root in
+  let decls, insts = resolve_fn_types skels root in
+  if Hashtbl.length insts = 0 then root
+  else begin
+    let skel_names : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+    List.iter (fun s -> Hashtbl.replace skel_names s.sname ()) skels;
+    (* A decl whose name is not a source name IS an instance: the fixpoint
+       names those with `mangled_inst_name` and everything else with the
+       function's own name. *)
+    let instances =
+      List.filter (fun (d : fn_decl) -> not (Hashtbl.mem skel_names d.name))
+        decls in
+    let root = rewrite_instance_refs insts root in
+    List.fold_right (fun (d : fn_decl) acc ->
+      let fn =
+        { Ast.loc = Loc.dummy;
+          ty = Some (Ast.TyArrow (d.param_ty, d.return_ty));
+          node = Ast.Fun (d.param, None,
+                          rewrite_instance_refs insts d.body) } in
+      { Ast.loc = Loc.dummy; ty = acc.Ast.ty;
+        node = Ast.Let ({ Ast.ploc = Loc.dummy; pnode = Ast.P_var d.name },
+                        fn, acc) }) instances root
+  end
