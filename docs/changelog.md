@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.413 — 2026-09-03
+
+_The downstream gate had been green while checking nothing, and when it finally
+checked something it called a timeout a compile failure. Both are fixed; the
+gate now refuses to pass on zero._
+
+`downstream_check` compiles thirteen programs written in Mere -- mere-ruby among
+them -- with `mere -c` from inside each checkout, to ask whether a language
+change broke them. In CI the checkouts come from a clone step that had no
+`if: !cancelled()`, so the moment any earlier gate failed, that step was
+skipped; downstream_check (which does carry the `if:`) then ran against an
+empty directory, reported "13 absent, 0 checked" -- and exited 0. That is how
+the v0.1.410 row was green while mere-ruby was not being compiled by anyone,
+during exactly the hours other gates were red. The script's own header promised
+to count absences loudly; it counted them and then said yes. With MERE_DOWNSTREAM
+set and nothing present, it now fails, in words.
+
+When the clones did arrive (v0.1.412), mere-ruby's 40,000-line `main.mere` hit
+the 180-second wall clock on the runner and the gate said "no longer compiles
+against this compiler" -- bounded.sh's exit 201 was folded into the same
+sentence as a real refusal. The two are now different sentences, and the bound is
+420: the file takes ~68 s to emit C on an M-series laptop and the runner is two
+to three times slower, so 180 sat on the edge.
+
+Measured while here: v0.1.411's monomorphization fix made that particular compile
+~16% slower (58.6 s -> 67.8 s, typer unchanged at 2.1 s, emitted C the same size
+to within 0.2%, a mid-size program unchanged at 0.07 s) -- more work in the
+instantiation fixpoint on the one program with hundreds of polymorphic helpers,
+not more output. Recorded as an observation, not a regression in what is
+emitted.
+
+---
+
 ## v0.1.412 — 2026-09-03
 
 _The three operating-system examples had not compiled since v0.1.367, and no gate
