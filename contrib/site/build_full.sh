@@ -22,6 +22,14 @@ dune exec mere -- install
 
 # 1. Mere SSG: markdown -> HTML + style.css + index + search + sitemap + nojekyll
 #    + copies playground/*.html + *.wat
+# The SSG runs on the interpreter, and its JSON escaper recurses once per
+# character of each document. The interpreter caps call depth at 1,000,000 --
+# a deliberate guard, since a program that deep has already died on every
+# compiled backend -- and docs/changelog.md crossed 1,000,000 bytes at
+# v0.1.40x, so the site build hit the cap and Pages went red. This is the one
+# program that genuinely wants the host's own ceiling (OCaml 5 stacks are heap-
+# allocated, so the depth is real), which is exactly what MERE_MAX_DEPTH is for.
+MERE_MAX_DEPTH="${MERE_MAX_DEPTH:-10000000}" \
 dune exec mere -- contrib/site/build.mere "$INPUT_DIR" "$OUTPUT_DIR" $MODE_FLAG
 
 # 2. Regenerate playground/selfhost-fmt.wat from

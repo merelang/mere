@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.410 — 2026-09-03
+
+_Pages went red the moment docs/changelog.md passed 1,000,000 bytes: the site
+generator escapes each document one character per recursion, on the interpreter,
+whose call-depth cap is exactly 1,000,000._
+
+`escape_json_str` in `contrib/site/build.mere` is a textbook tail-recursive loop
+over a string. The interpreter has no tail-call elimination -- every `App` is an
+OCaml recursion behind a depth counter -- and the counter's default of one
+million is deliberate: a program that deep has already died on every compiled
+backend, so the interpreter stops early and says so. The changelog crossed that
+line at 1,014,387 bytes during v0.1.401-409, and `eval error: stack overflow
+(recursion too deep)` at `loop (i + 1)` was the SSG hitting the guard, not a
+regression -- the same loop overflows identically on v0.1.400.
+
+The guard has a knob for exactly this case, "a program that genuinely wants the
+host's own ceiling": `build_full.sh` now runs the SSG with
+`MERE_MAX_DEPTH=10000000`. OCaml 5 allocates fiber stacks on the heap, so the
+depth is real on the CI runner too; the full site builds locally with it.
+
+Two honest notes. The interpreter's lack of TCO is a real limitation and this is
+a workaround at the one call site that hit it, not a fix of the interpreter. And
+the 32-bit CPU's `count_lets`-class scaling pass from v0.1.394 had a fourth
+casualty found this week by the other session -- `try_or`'s catch record put its
+s1..s10 save area at word 20..29 of a 15-word record, because `(20 + i * 4)` was
+a byte offset whose `20` meant five words -- which is what made mere-ruby boot
+on the 64-bit machine (v0.1.40x). A value and a size wearing the same literal,
+one more time.
+
+---
+
 ## v0.1.409 — 2026-09-03
 
 _All four compiled backends share one monomorphization pass. Porting the last
