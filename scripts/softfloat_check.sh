@@ -50,6 +50,14 @@ if grep -q '^FAIL' "$TMP/conv"; then
   rc=1
 fi
 
+Q="$ROOT/test/float/softfloat_sqrt.mere"
+"$MERE" "$Q" > "$TMP/sqrt" 2>&1 || { echo "FAIL softfloat: the interpreter refused the sqrt gate"; cat "$TMP/sqrt"; exit 1; }
+if grep -q '^FAIL' "$TMP/sqrt"; then
+  echo "FAIL softfloat: a square root did not match the hardware bit for bit"
+  grep '^FAIL' "$TMP/sqrt" | head -8
+  rc=1
+fi
+
 D="$ROOT/test/float/softfloat_div.mere"
 "$MERE" "$D" > "$TMP/div" 2>&1 || { echo "FAIL softfloat: the interpreter refused the div gate"; cat "$TMP/div"; exit 1; }
 if grep -q '^FAIL' "$TMP/div"; then

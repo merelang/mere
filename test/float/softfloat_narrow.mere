@@ -8,6 +8,7 @@
 // in the library appears here, so the coverage claim is checked instead of
 // trusted.
 import "../../contrib/softfloat/limbs.mere";
+import "../../contrib/softfloat/sqrt.mere";
 import "../../contrib/softfloat/add.mere";
 import "../../contrib/softfloat/mul.mere";
 import "../../contrib/softfloat/div.mere";
@@ -103,6 +104,13 @@ let (dq, dst) = divide (sig_limbs_l6 one) (sig_limbs_l6 two);
 let _ = print_int (l6_bitlen dq);
 let _ = print_int dst;
 let _ = print_int (fdiv two one).exp;
+
+// contrib/softfloat/sqrt: the root of an exact square through the public
+// entry, and the radicand-bit/root internals through it (sq_rbit, sq_root are
+// only reachable via fsqrt, so naming fsqrt lowers all three)
+let _ = print_int (fsqrt (of_int 9)).exp;
+let _ = print_int (l6_to_int (fst (sq_root (l6_of_int 4))));
+let _ = print_int (sq_rbit (l6_of_int 1) 58);
 
 // contrib/softfloat/conv, and contrib/softfloat/limbs' two int bridges
 let _ = print_int (l6_of_int 12345).l0;

@@ -2437,8 +2437,12 @@ let rec emit_expr (e : Ast.expr) : string =
        unsupported e.Ast.loc
          "__rv_argc / __rv_argstr read the RV32I argument block, which a hosted \
           process does not have — call `args`, which works on every backend; \
-          __rv_open_rd / __rv_read_all / __rv_access are that backend's raw \
-          openat/read/faccessat — call `read_file` or `file_exists`"
+          __rv_clock / __rv_urandom32 / __rv_xlen are that backend's clock, \
+          entropy and word width — call `time`, `random_int`, or nothing; \
+          __rv_open_rd / __rv_read_all / __rv_access / __rv_open_wr / \
+          __rv_write_all are that backend's raw openat/read/write/faccessat — \
+          call `read_file`, `write_file`, `read_stdin` or `file_exists` — and \
+          __rv_substring_raw is the slice behind its prelude's `substring`"
      (* Raw physical memory is RV32I bare-metal only. Without this arm the
         raw_* names fell through to the closure path and emitted a call to an
         undefined `mu_raw_poke8` plus an unknown `Raw` C type, so the refusal
