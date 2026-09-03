@@ -1,0 +1,58 @@
+// The gate for contrib/softfloat/sqrt, the same shape as div's: the root must
+// be the SAME 64 BITS as the hardware's, on every probe.
+//
+// sqrt can hold that bar where exp and log cannot: the square root of a
+// non-square is irrational, so the true value is never exactly halfway between
+// two doubles, and 56 computed bits plus a nonzero-remainder sticky decide
+// every rounding. FAIL lines name the input and both bit patterns.
+//
+// The probes: the exact squares and near-squares, both subnormal edges, the
+// largest and smallest normals, an irrational sweep (golden-ratio steps reach
+// new significand patterns each round), and a deep-subnormal sweep where the
+// significand has leading zeros to normalise away. sqrt(-0) is -0 by IEEE 754
+// and sits before the sign test in the implementation, so it is pinned here.
+import "../../contrib/softfloat/sqrt.mere";
+import "../../contrib/softfloat/bits.mere";
+
+let same_bits = fn (a: float) -> fn (b: float) ->
+  float_bits_hi a == float_bits_hi b && float_bits_lo a == float_bits_lo b;
+let check = fn (x: float) ->
+  let want = sqrt x in
+  let got = float_of_sf (fsqrt (sf_of_float x)) in
+  if same_bits want got then ()
+  else print ("FAIL sqrt " ++ str_of_float x ++ ": want=" ++ str_of_float want ++ " got=" ++ str_of_float got);
+
+let _ = check 0.0;
+let _ = check 1.0;
+let _ = check 2.0;
+let _ = check 4.0;
+let _ = check 9.0;
+let _ = check 0.25;
+let _ = check 1e300;
+let _ = check 1e-300;
+let _ = check 5e-324;
+let _ = check 2.2250738585072014e-308;
+let _ = check 1.7976931348623157e308;
+let _ = check 3.141592653589793;
+let _ = check 1e16;
+let _ = check 123456789.123456789;
+let _ = (let g = fsqrt (sf_of_float (0.0 - 4.0)) in
+         if is_nan g then () else print "FAIL sqrt(-4): not NaN");
+let _ = (let g = float_of_sf (fsqrt (sf_of_float (0.0 - 0.0))) in
+         if float_bits_hi g == float_bits_hi (0.0 - 0.0) then () else print "FAIL sqrt(-0): not -0");
+let _ = (let g = fsqrt (sf_of_float (0.0 / 0.0)) in
+         if is_nan g then () else print "FAIL sqrt(NaN): not NaN");
+let _ = (let g = float_of_sf (fsqrt (sf_of_float (1.0 / 0.0))) in
+         if g > 1.0e308 && g + g == g then () else print "FAIL sqrt(inf): not inf");
+
+let rec sweep = fn (i: int) -> fn (x: float) ->
+  if i <= 0 then () else
+    let _ = check x in
+    sweep (i - 1) (x * 1.618033988749895 + 0.318309886183791);
+let _ = sweep 2000 0.000001;
+let rec sweep2 = fn (i: int) -> fn (x: float) ->
+  if i <= 0 then () else
+    let _ = check x in
+    sweep2 (i - 1) (x * 3.9999999 + 1.0e-9);
+let _ = sweep2 500 1.0e-310;
+let _ = print "softfloat sqrt: done";

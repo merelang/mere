@@ -30,6 +30,8 @@ probe_for() {
     str_index_of) echo 'let _ = print_int (str_index_of "abc" "b");' ;;
     str_repeat) echo 'let _ = print (str_repeat "ab" 2);' ;;
     str_rev|to_lower|to_upper) echo "let _ = print ($1 \"aB\");" ;;
+    substring) echo 'let _ = print (substring "abcde" 1 3);' ;;
+    pi|e) echo "let _ = print_int (float_bits_hi $1);" ;;
     run) echo 'let _ = print_int (run "true");' ;;
     read_file) echo 'let _ = print (read_file "x");' ;;
     file_exists) echo 'let _ = print_int (if file_exists "x" then 1 else 0);' ;;
@@ -192,32 +194,29 @@ fi
 # `sqrt` and not `f_add`: f_add is computed for real now, so it no longer has a
 # message to check. What must still stop at run time is the set softfloat does
 # not compute.
+# The float functions are REAL now (v0.1.405): sqrt through softfloat's
+# integer root, the transcendentals computed in the prelude. A shim message in
+# that binary would mean a regression to the stub -- so the check inverted.
+# scripts/host_matrix.sh keys on the `RV32I:` prefix to call a cell `stub`
+# rather than `yes`; sqrt carrying one would flip its cell back to a claim the
+# backend now honours for real.
 printf 'let _ = print_int (float_bits_hi (sqrt 2.0));\n' > "$TMP/op2.mere"
 "$MERE" -rv "$TMP/op2.mere" > "$TMP/op2.bin" 2>/dev/null
-if grep -a -q 'softfloat' "$TMP/op2.bin"; then :; else
-  echo "FAIL rv_prelude: the f_add shim's message does not name softfloat"
+if grep -a -q 'RV32I: sqrt' "$TMP/op2.bin"; then
+  echo "FAIL rv_prelude: sqrt carries a shim message again -- it is supposed to be computed"
   rc=1
 fi
-# And the exact phrase scripts/host_matrix.sh keys on to call these cells `stub`
-# rather than `yes`. Rewording it silently turns 27 cells of that matrix into a
-# claim the backend cannot honour, so the phrase is asserted here as well --
-# a poison run reworded it and only the matrix noticed, which made this file's
-# own comment about the coupling untrue.
-# Both shim families must start their message with the prefix
-# scripts/host_matrix.sh keys on to call a cell `stub` rather than `yes`. Losing
-# it silently turns those cells into a claim the backend cannot honour: it
-# happened once, when the host-service shims arrived with a different sentence
-# and nine cells flipped.
-printf 'let _ = print (read_file "x");\n' > "$TMP/op3.mere"
+# The host-service family still HAS a stub -- `run`, permanently (there is no
+# shell on the other side of an ecall) -- and its message must keep the
+# `RV32I:` prefix host_matrix.sh keys on. It happened once that a reworded
+# shim sentence flipped nine matrix cells silently.
+printf 'let _ = print_int (run "true");\n' > "$TMP/op3.mere"
 "$MERE" -rv "$TMP/op3.mere" > "$TMP/op3.bin" 2>/dev/null
-for pair in "op2.bin:float" "op3.bin:host"; do
-  f="$TMP/${pair%%:*}"; what="${pair##*:}"
-  if grep -a -q 'RV32I:' "$f"; then :; else
-    echo "FAIL rv_prelude: the $what shim's message lost the \`RV32I:\` prefix"
-    echo "  (host_matrix.sh keys on it to say \`stub\` instead of \`yes\`)"
-    rc=1
-  fi
-done
+if grep -a -q 'RV32I:' "$TMP/op3.bin"; then :; else
+  echo "FAIL rv_prelude: the host shim's message lost the \`RV32I:\` prefix"
+  echo "  (host_matrix.sh keys on it to say \`stub\` instead of \`yes\`)"
+  rc=1
+fi
 
 # KNOWN, and pinned so it is noticed when it changes: using rvmap_set and
 # rvmap_get on the SAME map fails to type-check, and the message blames the
@@ -283,5 +282,5 @@ fi
 # names are not in this list -- scripts/softfloat_check.sh compiles all of them
 # for RV32I. Saying "all names" here would have covered 76 that this gate never
 # looked at.
-[ "$rc" = 0 ] && echo "ok rv_prelude: all $COUNT hand-written prelude names compile for -rv, the float shims stop at runtime (softfloat's own names: softfloat_check.sh)"
+[ "$rc" = 0 ] && echo "ok rv_prelude: all $COUNT hand-written prelude names compile for -rv, and the float library is computed here (softfloat's own names: softfloat_check.sh)"
 exit $rc
