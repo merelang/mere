@@ -669,7 +669,14 @@ jobs:
       # rather than the one they own (do their tests pass).
       # A clone that fails leaves that repo absent, which the gate counts and
       # names rather than dropping.
+      # `if: !cancelled()` like the gates below it: without it this step is
+      # skipped the moment any earlier gate fails, downstream_check then finds
+      # nothing to check, reports "13 absent, 0 checked" -- and exited 0. That
+      # is how v0.1.410's downstream row was green while mere-ruby was never
+      # compiled at all. The script now refuses to pass on zero, and this step
+      # now runs whenever the gates do.
       - name: Check out the dogfood repositories
+        if: ${{ !cancelled() }}
         continue-on-error: true
         run: |
           mkdir -p "$RUNNER_TEMP/downstream"

@@ -28,7 +28,11 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="$ROOT/_build/default/bin/mere.exe"
 TABLE="$ROOT/test/downstream/REPOS"
-BOUND="${DOWNSTREAM_TIMEOUT:-180}"
+# 420, not 180: mere-ruby's main.mere (40k lines, the strictest reader of the
+# language) takes ~68 s to emit C on an M-series laptop and the CI runner is two
+# to three times slower, so 180 sat on the edge -- and a timeout was reported as
+# "no longer compiles", which it is not (see the 201 branch below).
+BOUND="${DOWNSTREAM_TIMEOUT:-420}"
 DIR="${MERE_DOWNSTREAM:-}"
 [ -x "$MERE" ] || { echo "downstream_check: $MERE not found -- run 'dune build'" >&2; exit 1; }
 [ -f "$TABLE" ] || { echo "downstream_check: $TABLE not found" >&2; exit 1; }
@@ -85,8 +89,17 @@ while read -r repo entry check rest; do
       || echo "  note  $repo -- mere install failed; the check below says what broke"
   fi
   ran=$((ran + 1))
-  if ( cd "$DIR/$repo" && sh "$ROOT/scripts/bounded.sh" "$BOUND" "$MERE" -c "$entry" > /dev/null >/dev/null 2>"$err" ); then
+  ( cd "$DIR/$repo" && sh "$ROOT/scripts/bounded.sh" "$BOUND" "$MERE" -c "$entry" > /dev/null 2>"$err" )
+  rc=$?
+  if [ "$rc" = 0 ]; then
     echo "  ok    $repo ($entry)"
+  elif [ "$rc" = 201 ]; then
+    # bounded.sh's own status: the compiler outlived the wall-clock limit. That
+    # is a different fact from "does not compile", and used to be reported as
+    # the same sentence.
+    echo "FAIL downstream[$repo]: $entry outlived ${BOUND}s of wall clock (a timeout, not a compile failure -- raise DOWNSTREAM_TIMEOUT or make the compiler faster)"
+    echo "        $rest"
+    fails=$((fails + 1))
   else
     echo "FAIL downstream[$repo]: $entry no longer compiles against this compiler"
     echo "        $rest"
@@ -97,6 +110,16 @@ done < "$TABLE"
 
 if [ "$fails" -gt 0 ]; then
   echo "downstream_check: $fails failed, $ran checked, $skipped absent, $deferred deferred"
+  exit 1
+fi
+# A gate that checked nothing must not pass. With MERE_DOWNSTREAM set, every
+# row absent means the checkouts were never made (in CI: the clone step was
+# skipped because an earlier gate had failed), and "13 absent, 0 checked" went
+# out as a success for a whole day while mere-ruby was not being compiled by
+# anyone. The header above promised to count absences loudly; this is the
+# teeth.
+if [ -n "$DIR" ] && [ "$ran" -eq 0 ]; then
+  echo "downstream_check: FAIL — MERE_DOWNSTREAM is set but no repository was present to check ($skipped absent). A gate that checks nothing does not pass."
   exit 1
 fi
 echo "downstream_check: $ran checked, $skipped absent, $deferred deferred"
