@@ -531,6 +531,79 @@ let __sf_fdiv = fn (a: Sf__rv) -> fn (b: Sf__rv) ->
     // q * 2^(Ea - Eb - 56); pack reads s as `significand<<3` with value
     // s * 2^(e - 1078), so e = Ea - Eb + 1022.
     __sf_pack sign q (ea - eb + 1022) st;
+// ---- contrib/softfloat/sqrt.mere ----
+// contrib/softfloat/sqrt — IEEE 754 square root, in integers only.
+//
+// The one operation in this library that is CORRECTLY ROUNDED for free once it
+// is computed in integers at all: sqrt of a non-square is irrational, so the
+// true value is never exactly halfway between two doubles, and 56 result bits
+// plus "was the remainder zero" decide every rounding that a halfway case
+// would otherwise make ambiguous. exp and log do not have that property, which
+// is why they live outside this library and carry a documented tolerance while
+// this file carries none.
+//
+// Digit-by-digit (restoring), like div's long division: 56 result bits, one
+// per round, and the remainder at the end is the sticky. The radicand is the
+// 53-bit significand shifted up 58 places -- 111 or 112 bits, which does NOT
+// fit an L6 -- but the loop never holds it: it consumes two implicit bits per
+// round from the top, and the live values (remainder and trial subtrahend)
+// stay under 2^58, well inside L6's 90 bits. The invariant per round is the
+// schoolbook one:
+//
+//   rem  = (radicand so far) - root^2,  with  rem <= 2*root
+//   next: rem' = 4*rem + (next two radicand bits)
+//         root grows a bit: try (4*root + 1); subtract if it fits.
+//
+// The exponent must be EVEN before any of that, because sqrt halves it: an odd
+// one donates a doubling to the significand (53 -> 54 bits), which is why the
+// radicand is "111 or 112" bits and the first round's pair can be (0, m's top
+// bit).
+
+// bit j of (m << 58), for a radicand consumed two bits at a time from the top.
+// Out of range is 0, which is what the low 58 padding bits are.
+let __sf_sq_rbit = fn (m: L6__rv) -> fn (j: int) ->
+  if j < 58 then 0 else __sf_l6_bit m (j - 58);
+
+// floor(sqrt(m << 58)) as 56 bits, and whether anything was left over.
+let __sf_sq_root = fn (m: L6__rv) ->
+  let rec go = fn (i: int) -> fn (rem: L6__rv) -> fn (root: L6__rv) ->
+    if i < 0 then (root, if __sf_l6_is_zero rem then 0 else 1)
+    else
+      let b1 = __sf_sq_rbit m (2 * i + 1) in
+      let b0 = __sf_sq_rbit m (2 * i) in
+      let rem2 = __sf_l6_add (__sf_l6_shl rem 2) (__sf_l6_of_limbs 0 0 0 0 0 (b1 + b1 + b0)) in
+      let cand = __sf_l6_add (__sf_l6_shl root 2) __sf_l6_one in
+      if __sf_l6_cmp rem2 cand >= 0
+      then go (i - 1) (__sf_l6_sub rem2 cand) (__sf_l6_add (__sf_l6_shl root 1) __sf_l6_one)
+      else go (i - 1) rem2 (__sf_l6_shl root 1) in
+  go 55 __sf_l6_zero __sf_l6_zero;
+
+let __sf_fsqrt = fn (a: Sf__rv) ->
+  if __sf_is_snan a then __sf_quiet a
+  else if __sf_is_nan a then a
+  // sqrt(-0) is -0 and sqrt(+0) is +0: the zero cases come BEFORE the sign
+  // test, because -0 is negative by the sign bit and IEEE 754 still wants it
+  // back unchanged rather than as the NaN every other negative gets.
+  else if __sf_is_zero a then a
+  else if __sf_is_neg a then __sf_nan
+  else if __sf_is_inf a then __sf_inf
+  else
+    let (m0, ea) = __sf_norm_sig a in                 // m0: exactly 53 bits
+    // a = m0 * 2^(ea - 1075) (the same accounting fdiv derives); sqrt halves
+    // the exponent, so make it even by giving the significand the odd bit
+    let t0 = ea - 1075 in
+    // parity without trusting `%` or bit_and on a NEGATIVE int (t0 goes to
+    // -1126 for subnormal inputs, and truncating division makes -5 % 2 answer
+    // -1 where this wants 1): t0 - 2*(t0/2) is 0 or +/-1, and "not 0" is odd
+    let odd = if t0 - (t0 / 2) * 2 == 0 then 0 else 1 in
+    let m = if odd == 1 then __sf_l6_shl m0 1 else m0 in
+    let t = t0 - odd in
+    let u = t / 2 in                             // t is even and / rounds toward zero: exact
+    let (r, st) = __sf_sq_root m in
+    // r = floor(sqrt(m) * 2^29) in 56 bits, i.e. the result already carrying
+    // the three bits pack rounds on; sqrt(a) = sqrt(m) * 2^u = r * 2^(u - 29),
+    // and pack reads s as value s * 2^(e - 1078), so e = u + 1049.
+    __sf_pack 0 r (u + 1049) st;
 // ---- contrib/softfloat/conv.mere ----
 // contrib/softfloat/conv — between a double and the backend's own integer.
 //

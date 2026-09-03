@@ -147,27 +147,7 @@ let print_bytes = fn (b: bytes) -> (__h_todo "print_bytes" : unit);
 // injected into the -rv prelude", which stopped being true the day it was --
 // and would have gone on telling every user to go and do the thing that had
 // already been done.
-let __f_todo = fn (n: str) -> fail ("RV32I: " ++ n ++ " is not computed on this backend -- contrib/softfloat is injected and does the four arithmetic operators, the comparisons and int conversion, but not this");
-let f_min = fn (a: float) -> fn (b: float) -> (__f_todo "f_min" : float);
-let f_max = fn (a: float) -> fn (b: float) -> (__f_todo "f_max" : float);
-// f_add / f_sub / f_mul / f_div / f_neg / f_abs / the four f_ comparisons and
-// float_of_int / int_of_float are real now, at the bottom of this file, next to
-// the softfloat library they call. What stays a stub here is what softfloat does
-// not compute: the transcendentals, `f_pow`, and the decimal conversions. f_min
-// and f_max stay too -- `if a < b then a else b` is *a* definition, but the
-// host's is fmin/fmax with their own NaN rules, and guessing which would put a
-// wrong answer where an honest refusal is.
-let f_pow = fn (a: float) -> fn (b: float) -> (__f_todo "f_pow" : float);
-let atan2 = fn (a: float) -> fn (b: float) -> (__f_todo "atan2" : float);
-let sqrt = fn (a: float) -> (__f_todo "sqrt" : float);
-let sin = fn (a: float) -> (__f_todo "sin" : float);
-let cos = fn (a: float) -> (__f_todo "cos" : float);
-let tan = fn (a: float) -> (__f_todo "tan" : float);
-let log = fn (a: float) -> (__f_todo "log" : float);
-let exp = fn (a: float) -> (__f_todo "exp" : float);
-let floor = fn (a: float) -> (__f_todo "floor" : float);
-let ceil = fn (a: float) -> (__f_todo "ceil" : float);
-let round = fn (a: float) -> (__f_todo "round" : float);
+
 
 
 // --- misc ----------------------------------------------------------------
@@ -455,6 +435,332 @@ let random_int = fn (n: int) ->
 // `str_of_float` prints the same shortest-round-trip spelling the interpreter
 // and the C runtime print, and `float_of_str` rounds the same way strtod does.
 let float_of_str = fn (s: str) -> __sf_float_of_sf (__sf_sf_of_dec s);
+
+// --- the float library, computed here -----------------------------------
+// sqrt goes through contrib/softfloat's integer digit-by-digit root and is
+// CORRECTLY ROUNDED -- the same bits as the hardware, checked by
+// scripts/softfloat_check.sh probe for probe. The transcendentals are computed
+// below in double arithmetic (which softfloat provides on this target) with
+// DOCUMENTED accuracy, measured against libm on 10k-point sweeps:
+//
+//   exp <= 1 ulp | log <= 2 ulp | sin/cos <= ~10 ulp and tan <= ~14 for
+//   |x| <= 1.6e6 (the 3-term reduction's exact range; beyond it they degrade
+//   and huge-argument reduction is out of scope) | atan2 <= 3 ulp |
+//   f_pow: exact-where-exact for integer exponents |y| <= 32 via binary
+//   exponentiation, general case <= ~20 ulp measured, error growing with
+//   |y ln x| (the honest floor without a double-double log)
+//
+// floor / ceil / round / f_min / f_max are EXACT: bit surgery and compares.
+// They cannot follow the libm-linked backends' spelling because there is no
+// libm here; they follow their answers instead, probe for probe, in
+// test/parity/float_lib_edges.mere.
+//
+// Everything is written for BOTH widths: no integer literal at or above 2^31
+// (the 32-bit target refuses it), sign bits made by shifting rather than
+// masking with one, and low-bit clearing via (x >> k) << k, which is fill-
+// agnostic. bit_shr is arithmetic, and every use here is behind a mask or a
+// shift-back, so the fill never reaches a value.
+let __fp_hi_exp = fn (hi: int) -> bit_and (bit_shr hi 20) 2047;
+let __fp_hi_sign = fn (hi: int) -> bit_and (bit_shr hi 31) 1;
+let __fp_is_inf = fn (x: float) -> x == x && x + x == x && (if x == 0.0 then false else true);
+
+// truncate toward zero by clearing fraction bits below the binary point
+let __fp_trunc = fn (x: float) ->
+  let hi = float_bits_hi x in
+  let lo = float_bits_lo x in
+  let e = __fp_hi_exp hi in
+  if e >= 1075 then x
+  else if e < 1023 then float_of_bits (bit_shl (__fp_hi_sign hi) 31) 0
+  else
+    let dropn = 1075 - e in
+    if dropn >= 32 then float_of_bits (bit_shl (bit_shr hi (dropn - 32)) (dropn - 32)) 0
+    else float_of_bits hi (bit_shl (bit_shr lo dropn) dropn);
+let __fp_has_frac = fn (x: float) ->
+  let t = __fp_trunc x in
+  if float_bits_hi t == float_bits_hi x && float_bits_lo t == float_bits_lo x then false else true;
+
+let floor = fn (x: float) ->
+  let t = __fp_trunc x in
+  if __fp_hi_sign (float_bits_hi x) == 1 && __fp_has_frac x then t - 1.0 else t;
+let ceil = fn (x: float) ->
+  let t = __fp_trunc x in
+  if __fp_hi_sign (float_bits_hi x) == 0 && __fp_has_frac x then t + 1.0 else t;
+// half away from zero, decided on the true fraction rather than on x + 0.5,
+// which can round UP in float and push a value below the half over it
+let round = fn (x: float) ->
+  let t = __fp_trunc x in
+  let f = f_abs (x - t) in
+  if f < 0.5 then t
+  else if __fp_hi_sign (float_bits_hi x) == 1 then t - 1.0 else t + 1.0;
+
+// the C backend's exact spelling: a < b ? a : b -- NOT libm's fmin (which
+// answers the other operand for a NaN; this answers b, like the ternary)
+let f_min = fn (a: float) -> fn (b: float) -> if a < b then a else b;
+let f_max = fn (a: float) -> fn (b: float) -> if a > b then a else b;
+
+let sqrt = fn (a: float) -> __sf_float_of_sf (__sf_fsqrt (__sf_sf_of_float a));
+
+// the two float constants the host builtins provide elsewhere; double literals
+// here, which the decimal reader turns into the same bits libm's M_PI has
+let pi = 3.141592653589793;
+let e = 2.718281828459045;
+
+// 2^k by building the exponent field; normal range only, callers split
+let __fp_pow2i = fn (k: int) -> float_of_bits (bit_shl (k + 1023) 20) 0;
+
+let exp = fn (x: float) ->
+  if x != x then x
+  else if x > 709.782712893384 then 1.0 / 0.0
+  else if x < 0.0 - 745.1332191019412 then 0.0
+  else
+    // k = round(x / ln 2); r = x - k ln2 via Cody-Waite (33-bit ln2_hi, so
+    // k * ln2_hi is exact for every k this range allows)
+    let kf = round (x * 1.4426950408889634) in
+    let k = int_of_float kf in
+    let r = (x - kf * 0.6931471803691238) - kf * 1.9082149292705877e-10 in
+    let p = 7.647163731819816e-13 in
+    let p = p * r + 1.1470745597729725e-11 in
+    let p = p * r + 1.6059043836821613e-10 in
+    let p = p * r + 2.08767569878681e-9 in
+    let p = p * r + 2.505210838544172e-8 in
+    let p = p * r + 2.755731922398589e-7 in
+    let p = p * r + 0.0000027557319223985893 in
+    let p = p * r + 0.0000248015873015873 in
+    let p = p * r + 0.0001984126984126984 in
+    let p = p * r + 0.001388888888888889 in
+    let p = p * r + 0.008333333333333333 in
+    let p = p * r + 0.041666666666666664 in
+    let p = p * r + 0.16666666666666666 in
+    let p = p * r + 0.5 in
+    let p = p * r + 1.0 in
+    let p = p * r + 1.0 in
+    if k >= 0 - 1021 && k <= 1023 then p * __fp_pow2i k
+    else if k < 0 - 1021 then (p * __fp_pow2i (k + 512)) * __fp_pow2i (0 - 512)
+    else (p * __fp_pow2i (k - 512)) * __fp_pow2i 512;
+
+// log as a HEAD+TAIL pair, renormalized so |tail| <= ulp(head): f_pow needs the
+// pair (a 1-ulp log error, magnified by y, is the whole ballgame there), and
+// `log` itself is head + tail rounded once
+let __fp_log2p = fn (x: float) ->
+  // subnormals scale into the normal range first, and k pays for it
+  let sub = __fp_hi_exp (float_bits_hi x) == 0 in
+  let x1 = if sub then x * 18014398509481984.0 else x in
+  let k0 = if sub then 0 - 54 else 0 in
+  let hi = float_bits_hi x1 in
+  let lo = float_bits_lo x1 in
+  let e = __fp_hi_exp hi in
+  // m in [1/sqrt2, sqrt2): exponent bits swapped for 1023, halved if high
+  let m0 = float_of_bits (bit_or (bit_and hi 1048575) (bit_shl 1023 20)) lo in
+  let (m, k) = if m0 >= 1.4142135623730951
+               then (m0 * 0.5, k0 + e - 1022)
+               else (m0, k0 + e - 1023) in
+  let s = (m - 1.0) / (m + 1.0) in
+  let w = s * s in
+  // atanh series: log m = 2s (1 + w/3 + ... + w^11/23), last term ~6e-19 rel
+  let p = 0.043478260869565216 in
+  let p = p * w + 0.047619047619047616 in
+  let p = p * w + 0.05263157894736842 in
+  let p = p * w + 0.058823529411764705 in
+  let p = p * w + 0.06666666666666667 in
+  let p = p * w + 0.07692307692307693 in
+  let p = p * w + 0.09090909090909091 in
+  let p = p * w + 0.1111111111111111 in
+  let p = p * w + 0.14285714285714285 in
+  let p = p * w + 0.2 in
+  let p = p * w + 0.3333333333333333 in
+  let lm_tail = 2.0 * s * (w * p) in
+  let kf = float_of_int k in
+  let a = kf * 0.6931471803691238 in
+  let b = 2.0 * s in
+  let h0 = a + b in
+  let t0 = (a - h0 + b) + (kf * 1.9082149292705877e-10 + lm_tail) in
+  let head = h0 + t0 in
+  let tail = h0 - head + t0 in
+  (head, tail);
+let log = fn (x: float) ->
+  if x != x then x
+  else if x < 0.0 then 0.0 / 0.0
+  else if x == 0.0 then 0.0 - 1.0 / 0.0
+  else if __fp_is_inf x then x
+  else
+    let (h, t) = __fp_log2p x in h + t;
+
+let __fp_is_int_f = fn (x: float) ->
+  let t = __fp_trunc x in
+  if float_bits_hi t == float_bits_hi x && float_bits_lo t == float_bits_lo x then true else false;
+let __fp_is_odd_int_f = fn (x: float) ->
+  if __fp_is_int_f x then
+    (let h = x * 0.5 in if __fp_is_int_f h then false else true)
+  else false;
+let rec f_pow = fn (x: float) -> fn (y: float) ->
+  if y == 0.0 then 1.0
+  else if x == 1.0 then 1.0
+  else if x != x then x
+  else if y != y then y
+  else if y == 1.0 then x
+  else
+    let ax = f_abs x in
+    let inf = 1.0 / 0.0 in
+    if x == inf then (if y > 0.0 then inf else 0.0)
+    else if y == inf then (if ax > 1.0 then inf else if ax < 1.0 then 0.0 else 1.0)
+    else if y == 0.0 - inf then (if ax > 1.0 then 0.0 else if ax < 1.0 then inf else 1.0)
+    else if x == 0.0 - inf then
+      (if y > 0.0 then (if __fp_is_odd_int_f y then 0.0 - inf else inf)
+       else (if __fp_is_odd_int_f y then 0.0 - 0.0 else 0.0))
+    else if x == 0.0 then
+      (if y > 0.0 then (if __fp_is_odd_int_f y && __fp_hi_sign (float_bits_hi x) == 1 then 0.0 - 0.0 else 0.0)
+       else (if __fp_is_odd_int_f y && __fp_hi_sign (float_bits_hi x) == 1 then 0.0 - inf else inf))
+    else if x < 0.0 then
+      (if __fp_is_int_f y then
+         (let m = f_pow ax y in if __fp_is_odd_int_f y then 0.0 - m else m)
+       else 0.0 / 0.0)
+    else if y == 0.5 then sqrt x
+    // y = +/-0.5 routes through the CORRECTLY ROUNDED sqrt: pow(9, 0.5) must
+    // print 3.0, and exp(0.5 log 9) is a couple of ulps shy of it. libm's pow
+    // answers the same bits for these (a correctly rounded pow agrees with a
+    // correctly rounded sqrt wherever they overlap).
+    else if y == 0.0 - 0.5 then 1.0 / sqrt x
+    else if __fp_is_int_f y && f_abs y <= 32.0 then
+      // small integer exponent: binary exponentiation -- exact where the
+      // result is exact (2^10, 10^-3), which is the common printed case
+      (let rec go = fn (b: float) -> fn (n: int) -> fn (acc: float) ->
+         if n == 0 then acc
+         else if n - (n / 2) * 2 == 1 then go (b * b) (n / 2) (acc * b)
+         else go (b * b) (n / 2) acc in
+       let n = int_of_float (f_abs y) in
+       let m = go x n 1.0 in
+       if y < 0.0 then 1.0 / m else m)
+    else
+      // exp(y log x) with the product done EXACTLY (Dekker split) over the
+      // two-piece log, so the only inherited error is the log's own
+      let (lh, lt) = __fp_log2p x in
+      let c = lh * 134217729.0 in
+      let lhh = c - (c - lh) in
+      let lhl = lh - lhh in
+      let cy = y * 134217729.0 in
+      let yh = cy - (cy - y) in
+      let yl = y - yh in
+      let ph = y * lh in
+      let perr = yh * lhh - ph + yh * lhl + yl * lhh + yl * lhl in
+      let pl = perr + y * lt in
+      if ph > 710.0 then inf
+      else if ph < 0.0 - 746.0 then 0.0
+      else exp ph * (1.0 + pl);
+
+// pi/2 in four ~33-bit pieces (fdlibm's): n * piece is exact for n < 2^20,
+// which is the documented full-quality range. The subtractions carry their
+// tails through two-sums, so the reduced angle is a PAIR and a near-zero
+// crossing of a large argument keeps its accuracy instead of dying at the
+// double's edge.
+let __fp_pio2_1 = 1.5707963267341256;
+let __fp_pio2_2 = 6.07710050630396e-11;
+let __fp_pio2_2t = 2.0222662487959506e-21;
+let __fp_pio2_3 = 2.0222662487111665e-21;
+let __fp_pio2_3t = 8.4784276603689e-32;
+let __fp_trig_reduce = fn (x: float) ->
+  let nf = round (x * 0.6366197723675814) in
+  let z1 = x - nf * __fp_pio2_1 in
+  let t2 = nf * __fp_pio2_2 in
+  let z2 = z1 - t2 in
+  let e2 = (z1 - z2) - t2 in
+  let t3 = nf * __fp_pio2_3 in
+  let z3 = z2 - t3 in
+  let e3 = (z2 - z3) - t3 in
+  let tail = (e2 + e3) - nf * __fp_pio2_3t in
+  let y0 = z3 + tail in
+  let y1 = z3 - y0 + tail in
+  let n4 = int_of_float (nf - __fp_trunc (nf * 0.25) * 4.0) in
+  (y0, y1, if n4 < 0 then n4 + 4 else n4);
+let __fp_sin_poly = fn (r: float) ->
+  let z = r * r in
+  let p = 2.8114572543455208e-15 in
+  let p = p * z - 7.647163731819816e-13 in
+  let p = p * z + 1.6059043836821613e-10 in
+  let p = p * z - 2.505210838544172e-8 in
+  let p = p * z + 0.0000027557319223985893 in
+  let p = p * z - 0.0001984126984126984 in
+  let p = p * z + 0.008333333333333333 in
+  let p = p * z - 0.16666666666666666 in
+  r + r * (z * p);
+let __fp_cos_poly = fn (r: float) ->
+  let z = r * r in
+  let p = 0.0 - 1.1470745597729725e-11 in
+  let p = p * z + 2.08767569878681e-9 in
+  let p = p * z - 2.755731922398589e-7 in
+  let p = p * z + 0.0000248015873015873 in
+  let p = p * z - 0.001388888888888889 in
+  let p = p * z + 0.041666666666666664 in
+  let p = p * z - 0.5 in
+  1.0 + z * p;
+// sin(y0 + y1) = sin y0 + y1 cos y0 to first order in the tail; the pair
+// matters exactly when the result is TINY (x near a multiple of pi), where the
+// head alone would carry the reduction's rounding as thousands of ulps
+let __fp_sin_pair = fn (y0: float) -> fn (y1: float) ->
+  __fp_sin_poly y0 + y1 * (1.0 - y0 * y0 * 0.5);
+let __fp_cos_pair = fn (y0: float) -> fn (y1: float) ->
+  __fp_cos_poly y0 - y1 * y0;
+let sin = fn (x: float) ->
+  if x != x then x
+  else if __fp_is_inf x then 0.0 / 0.0
+  else if f_abs x < 1.0e-8 then x
+  else
+    let (y0, y1, q) = __fp_trig_reduce x in
+    if q == 0 then __fp_sin_pair y0 y1
+    else if q == 1 then __fp_cos_pair y0 y1
+    else if q == 2 then 0.0 - __fp_sin_pair y0 y1
+    else 0.0 - __fp_cos_pair y0 y1;
+let cos = fn (x: float) ->
+  if x != x then x
+  else if __fp_is_inf x then 0.0 / 0.0
+  else
+    let (y0, y1, q) = __fp_trig_reduce x in
+    if q == 0 then __fp_cos_pair y0 y1
+    else if q == 1 then 0.0 - __fp_sin_pair y0 y1
+    else if q == 2 then 0.0 - __fp_cos_pair y0 y1
+    else __fp_sin_pair y0 y1;
+let tan = fn (x: float) -> sin x / cos x;
+
+// atan by two half-angle reductions, then the alternating series through u^23
+let __fp_atan_core = fn (t: float) ->
+  let big = t > 1.0 in
+  let t1 = if big then 1.0 / t else t in
+  let u1 = t1 / (1.0 + sqrt (1.0 + t1 * t1)) in
+  let u = u1 / (1.0 + sqrt (1.0 + u1 * u1)) in
+  let z = u * u in
+  let q = 0.043478260869565216 in
+  let q = 0.0 - q * z + 0.047619047619047616 in
+  let q = 0.0 - q * z + 0.05263157894736842 in
+  let q = 0.0 - q * z + 0.058823529411764705 in
+  let q = 0.0 - q * z + 0.06666666666666667 in
+  let q = 0.0 - q * z + 0.07692307692307693 in
+  let q = 0.0 - q * z + 0.09090909090909091 in
+  let q = 0.0 - q * z + 0.1111111111111111 in
+  let q = 0.0 - q * z + 0.14285714285714285 in
+  let q = 0.0 - q * z + 0.2 in
+  let q = 0.0 - q * z + 0.3333333333333333 in
+  let a = 4.0 * (u - u * (z * q)) in
+  if big then 1.5707963267948966 - a else a;
+let atan2 = fn (y: float) -> fn (x: float) ->
+  let pi = 3.141592653589793 in
+  if y != y then y else if x != x then x
+  else
+    let ysign = __fp_hi_sign (float_bits_hi y) in
+    let xsign = __fp_hi_sign (float_bits_hi x) in
+    if y == 0.0 then
+      (if xsign == 0 then (if ysign == 1 then 0.0 - 0.0 else 0.0)
+       else (if ysign == 1 then 0.0 - pi else pi))
+    else if x == 0.0 then (if ysign == 1 then 0.0 - 1.5707963267948966 else 1.5707963267948966)
+    else if __fp_is_inf y && __fp_is_inf x then
+      (let base = if xsign == 0 then 0.7853981633974483 else 2.356194490192345 in
+       if ysign == 1 then 0.0 - base else base)
+    else if __fp_is_inf y then (if ysign == 1 then 0.0 - 1.5707963267948966 else 1.5707963267948966)
+    else if __fp_is_inf x then
+      (if xsign == 0 then (if ysign == 1 then 0.0 - 0.0 else 0.0)
+       else (if ysign == 1 then 0.0 - pi else pi))
+    else
+      let a = __fp_atan_core (f_abs (y / x)) in
+      if xsign == 0 then (if ysign == 1 then 0.0 - a else a)
+      else (if ysign == 1 then a - pi else pi - a);
 let str_of_float = fn (x: float) -> __sf_dec_of_sf (__sf_sf_of_float x);
 |mere}
 

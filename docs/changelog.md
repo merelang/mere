@@ -4,6 +4,67 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.405 — 2026-09-03
+
+_The float library is computed on the RISC-V backend: sqrt correctly rounded
+through softfloat's integer digit-by-digit root, the transcendentals in the
+prelude with measured, documented accuracy, and the exact ones exact. Thirteen
+functions stop stopping._
+
+sqrt lives in contrib/softfloat (sqrt.mere) because it can hold that library's
+bar: the root of a non-square is irrational, so the true value is never exactly
+halfway between two doubles, and 56 computed bits plus a nonzero-remainder
+sticky decide every rounding. Restoring digit-by-digit like div's long
+division; the radicand (a 53-bit significand shifted up 58) never exists as a
+value -- the loop consumes two implicit bits per round and its live values stay
+under 2^58, inside L6's 90 bits. An odd exponent donates a doubling to the
+significand first, parity taken WITHOUT trusting `%` on a negative int.
+test/float/softfloat_sqrt.mere holds it to the hardware bit for bit -- exact
+squares, both subnormal edges, the extremes, sqrt(-0) = -0, and golden-ratio
+sweeps -- and the narrow probe now reaches fsqrt so the RV32 arm actually
+compiles it.
+
+exp, log, f_pow, sin, cos, tan and atan2 are prelude Mere over the four
+softfloat operators, with accuracy MEASURED against libm on 10k-point sweeps
+and written where the code is: exp <= 1 ulp, log <= 2, atan2 <= 3, sin/cos <=
+~10 and tan <= ~14 for |x| <= 1.6e6 (the three-piece pi/2 reduction's exact
+range -- the reduced angle is a HEAD+TAIL pair, so a near-zero crossing of a
+large argument keeps its accuracy instead of dying at the double's edge).
+f_pow routes y = +/-0.5 through the correctly rounded sqrt (9 ** 0.5 must
+print 3.0, and exp(0.5 log 9) is two ulps shy), takes small integer exponents
+by binary exponentiation (exact where the result is exact), and otherwise runs
+exp(y log x) with the product done exactly -- Dekker split -- over a
+RENORMALIZED two-piece log, after the first version treated the log series'
+tail (a real 3.4e-3 of the VALUE) as a rounding crumb and answered 0.9^-700
+one percent wrong.
+
+floor, ceil, round, f_min and f_max are exact: bit surgery and compares,
+written width-safe (no literal at or above 2^31, sign bits made by shifting,
+low bits cleared by shift-down-shift-up, which is fill-agnostic). round is
+half-away-from-zero decided on the true fraction, not on x + 0.5, which can
+round up in float and push a value below the half over it. f_min/f_max are the
+C backend's exact ternary, NOT libm's fmin -- those disagree about NaN.
+pi and e are prelude constants now too.
+
+The prelude gate's job reversed here: it used to assert the float shims' stop
+message survived, and now asserts sqrt does NOT carry one -- the stub coming
+back would be the regression. host_matrix flips 13 float cells and 4 file
+cells from stub to yes, and the C backend's refusal for the raw __rv_* names
+now attributes every one of them, so the matrix's probe can name its subject
+instead of reporting `unattributed`.
+
+Measured end to end: mere-ruby's corpus as files on the 64-bit machine is
+142 of 162 identical, up from 137 -- Math.sqrt, x ** 0.5, the numeric tower's
+pi and Float classification all went green. rv_float_check runs the whole
+2880-line softfloat comparison ON the emulator against the machine's own
+doubles: identical.
+
+Gates: 2620 unit tests, parity 161/161, rv_exec 79/0 at 64 bits and 74/0 at
+32, read_file 3/0, write_file/read_stdin 3/0, rv_float 2880 lines identical,
+qemu_virt 7/7, rvd_oracle 7/0, rv_prelude 127 names, softfloat 102 names.
+
+---
+
 ## v0.1.404 — 2026-09-03
 
 _`write_file` and `read_stdin` on the hosted RISC-V target — the write half of
