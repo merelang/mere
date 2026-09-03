@@ -1,0 +1,49 @@
+// `write_file` and `read_stdin` on the hosted RV target, against the C backend.
+// The second half of what v0.1.403's read_file started: with both directions,
+// an interpreter's File.write / gets / STDIN.read are real on this machine.
+//
+// Same harness contract as host_read_file.mere: the fixtures live in the cwd
+// both sides run in, and stdin is piped in by the harness so read_stdin has
+// something to answer (the same bytes for both sides, or the diff means
+// nothing).
+//
+// What each block is for:
+//   * write then read back -- the only test of a writer that does not trust
+//     the writer: the bytes must come back through the INDEPENDENT read path
+//   * overwrite -- O_TRUNC is the contract; a shorter second write must not
+//     leave a tail of the first (this is where append-by-accident shows up)
+//   * NUL bytes and the empty write -- same corners as reading: a C-string
+//     boundary would truncate the one, and a zero-length write must produce
+//     a zero-length file rather than an error
+//   * a write past one 4096-byte chunk -- the loop, on the write side
+//   * an unwritable path -- a CATCHABLE fail naming the errno, so an
+//     interpreter can raise its own exception
+//   * read_stdin -- whole-stream, and a second call answers "" (drained is
+//     drained; a real process gets the same answer)
+let _ = write_file "rv_out.txt" "first version, the longer one";
+let _ = write_file "rv_out.txt" "second";
+let back = read_file "rv_out.txt";
+let _ = print ("overwrite: " ++ back ++ " (len=" ++ str_of_int (str_len back) ++ ")");
+
+let _ = write_file "rv_nul_out.dat" ("a" ++ chr 0 ++ "b");
+let nb = read_file "rv_nul_out.dat";
+let _ = print ("nul roundtrip len=" ++ str_of_int (str_len nb));
+
+let _ = write_file "rv_empty_out.dat" "";
+let _ = print ("empty write len=" ++ str_of_int (str_len (read_file "rv_empty_out.dat")));
+
+let rec grow = fn (n: int) -> fn (acc: str) ->
+  if n <= 0 then acc else grow (n - 1) (acc ++ "0123456789");
+let big = grow 1000 "";
+let _ = write_file "rv_big_out.dat" big;
+let bigback = read_file "rv_big_out.dat";
+let _ = print ("big roundtrip: len=" ++ str_of_int (str_len bigback)
+               ++ " same=" ++ (if str_eq big bigback then "yes" else "NO"));
+
+let _ = print (try_or (fn (u: unit) -> let _ = write_file "no_such_dir/x.txt" "y" in "WROTE?!") "caught");
+
+let stdin1 = read_stdin ();
+let _ = print ("stdin len=" ++ str_of_int (str_len stdin1));
+let _ = print ("stdin first line ok=" ++ (if str_len stdin1 >= 5 then substring stdin1 0 5 else stdin1));
+let stdin2 = read_stdin ();
+let _ = print ("second read_stdin len=" ++ str_of_int (str_len stdin2));

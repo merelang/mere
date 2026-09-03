@@ -1,0 +1,4 @@
+// `--bare` must refuse write_file by name, same shape and same reason as
+// host_read_file_bare.mere: this file exists to have the top-level `main` a
+// --bare program requires, so the only refusal left to give is the filesystem.
+let main = fn (m: Raw) -> write_file "anything" "at all";

@@ -4,6 +4,62 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.404 — 2026-09-03
+
+_`write_file` and `read_stdin` on the hosted RISC-V target — the write half of
+what v0.1.402's read_file started — and substring's range refusal now names the
+range and the length on this backend too._
+
+`write_file` is openat(O_WRONLY|O_CREAT|O_TRUNC, 0644), a short-write-safe
+loop, and close, all Linux-numbered; the failure is a catchable `fail` whose
+negative return IS the errno. `read_stdin` is the same slurp `read_file` uses,
+pointed at fd 0 — the emulator serves read(0) from its own stdin, once, and a
+second read_stdin answers "" exactly as a drained process stdin would.
+
+The emulator buffers a write fd and hands the bytes to the host at close. Two
+of its choices were forced by failures on the way in. The open VALIDATES the
+path by creating the empty file right there — which is what O_CREAT|O_TRUNC
+means anyway — because a bad path discovered at close has nowhere to send its
+bytes, and the uncaught host-side fail took the EMULATOR down: the guest's bad
+path reported as our crash, and the guest's try_or never saw anything. And the
+close swallows late host errors through try_or for the same reason, which is
+also the oracle's own shape: C's write_file checks the open and discards
+fwrite's count and fclose's answer.
+
+`--bare` refuses both by name, and the refusal reason is part of the gate, not
+just the refusal (host_read_file_bare taught that: a missing top-level main
+refuses everything and proves nothing). read_stdin's --bare message no longer
+blames "the filesystem" — there is no host to read from, and stdin is not a
+filesystem.
+
+substring's out-of-range message matches the C backend's now:
+`substring: range [20005, 3) invalid for str of length 20008` where this
+backend used to say "range out of bounds" — which names neither the argument
+that was nonsense nor the length it exceeded. The check moved into the prelude
+(three compares and a concat are Mere's job; the assembly helper keeps its
+unsigned check as a backstop), and the raw slice is reachable only through the
+private name the wrapper calls.
+
+The host-services comment in the prelude was rewritten around what remains,
+because its list had gone stale — it still said there was no host to read a
+file from, one screen above read_file doing exactly that. `run` stays refused
+PERMANENTLY, with its reason stated: there is no shell on the other side of an
+ecall, and an emulator that faked one by running commands itself, on the host,
+with its own privileges, would make every guest program a host program.
+
+test/rv/host_write_file.mere gates the pair against the C backend at both
+widths, in the harness's own cwd, with the SAME stdin piped to both sides —
+feeding them differently would report a backend difference that is really a
+harness difference. Covered: write-then-read-back through the independent read
+path, a shorter second write (O_TRUNC, where append-by-accident shows up), NUL
+bytes, the empty write, a write past one 4096-byte chunk, a catchable miss on a
+bad directory, and the drained second read_stdin.
+
+Gates: 2620 unit tests, parity 161/161, rv_exec 79/0 at 64 bits and 74/0 at 32,
+read_file 3/0, write_file/read_stdin 3/0, qemu_virt 7/7, rvd_oracle 7/0.
+
+---
+
 ## v0.1.403 — 2026-09-03
 
 _`map_recycle` on the RISC-V backend kept the entries it was contracted to
