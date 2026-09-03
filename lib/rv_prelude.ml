@@ -176,18 +176,37 @@ let str_index_of = fn h -> fn n ->
     scan 0;
 let str_contains = fn h -> fn n -> str_index_of h n >= 0;
 
-let rec _srep = fn s -> fn n -> fn acc -> if n <= 0 then acc else _srep s (n - 1) (acc ++ s);
-let str_repeat = fn s -> fn n -> _srep s n "";
+// The builders go through StrBuf, which is a real byte buffer on this backend
+// (amortized O(1) push). They used to fold `++` over an accumulator: correct,
+// and O(n^2) in total allocation -- a 200KB str_repeat allocated ~2GB of dead
+// intermediates on a bump allocator that never frees, which is how
+// str_edges@64 ran out of a 128MB machine.
+let str_repeat = fn s -> fn n ->
+  let b = strbuf_new () in
+  let rec go = fn (i: int) -> if i <= 0 then () else let _ = strbuf_push b s in go (i - 1) in
+  let _ = go n in
+  strbuf_to_str b;
 
-let rec _srev = fn s -> fn i -> fn acc -> if i < 0 then acc else _srev s (i - 1) (acc ++ char_at s i);
-let str_rev = fn s -> _srev s (str_len s - 1) "";
+let str_rev = fn s ->
+  let b = strbuf_new () in
+  let rec go = fn (i: int) -> if i < 0 then () else let _ = strbuf_push b (char_at s i) in go (i - 1) in
+  let _ = go (str_len s - 1) in
+  strbuf_to_str b;
 
 let _lc1 = fn c -> let o = ord c in if o >= 65 && o <= 90 then chr (o + 32) else c;
-let rec _lc = fn s -> fn i -> fn acc -> if i >= str_len s then acc else _lc s (i + 1) (acc ++ _lc1 (char_at s i));
-let to_lower = fn s -> _lc s 0 "";
+let to_lower = fn s ->
+  let b = strbuf_new () in
+  let n = str_len s in
+  let rec go = fn (i: int) -> if i >= n then () else let _ = strbuf_push b (_lc1 (char_at s i)) in go (i + 1) in
+  let _ = go 0 in
+  strbuf_to_str b;
 let _uc1 = fn c -> let o = ord c in if o >= 97 && o <= 122 then chr (o - 32) else c;
-let rec _uc = fn s -> fn i -> fn acc -> if i >= str_len s then acc else _uc s (i + 1) (acc ++ _uc1 (char_at s i));
-let to_upper = fn s -> _uc s 0 "";
+let to_upper = fn s ->
+  let b = strbuf_new () in
+  let n = str_len s in
+  let rec go = fn (i: int) -> if i >= n then () else let _ = strbuf_push b (_uc1 (char_at s i)) in go (i + 1) in
+  let _ = go 0 in
+  strbuf_to_str b;
 
 // whitespace for trim: ' ' \t \n \r \f  (matches OCaml String.trim)
 let _wst = fn c -> let o = ord c in o == 32 || o == 9 || o == 10 || o == 13 || o == 12;
@@ -201,18 +220,38 @@ let rec _sj = fn sep -> fn lst -> fn first -> fn acc ->
   | Cons (x, rest) -> _sj sep rest false (if first then acc ++ x else acc ++ sep ++ x);
 let str_join = fn sep -> fn lst -> _sj sep lst true "";
 
+// find d in s at or after i, WITHOUT materializing the tail: the old shape
+// took `substring s start (str_len s)` per piece, which copies the whole
+// remainder -- splitting a 200KB string into 20001 pieces copied ~2GB of
+// tails. The same quadratic the string builders had, in a different dress.
+let rec _smatch = fn s -> fn d -> fn i -> fn j ->
+  if j >= str_len d then true
+  else if str_eq (char_at s (i + j)) (char_at d j) then _smatch s d i (j + 1)
+  else false;
+let rec _sfind = fn s -> fn d -> fn i ->
+  if i + str_len d > str_len s then 0 - 1
+  else if _smatch s d i 0 then i
+  else _sfind s d (i + 1);
 let rec _ssplit = fn s -> fn d -> fn start ->
-  let rest = substring s start (str_len s) in
-  let idx = str_index_of rest d in
-  if idx < 0 then Cons (rest, Nil)
-  else Cons (substring rest 0 idx, _ssplit s d (start + idx + str_len d));
+  let idx = _sfind s d start in
+  if idx < 0 then Cons (substring s start (str_len s), Nil)
+  else Cons (substring s start idx, _ssplit s d (idx + str_len d));
 let str_split = fn s -> fn d -> if str_len d == 0 then Cons (s, Nil) else _ssplit s d 0;
 
-let rec _srep2 = fn s -> fn old -> fn nw -> fn acc ->
-  let idx = str_index_of s old in
-  if idx < 0 then acc ++ s
-  else _srep2 (substring s (idx + str_len old) (str_len s)) old nw (acc ++ substring s 0 idx ++ nw);
-let str_replace = fn s -> fn old -> fn nw -> if str_len old == 0 then s else _srep2 s old nw "";
+// str_replace through the byte buffer and the offset finder, for both of the
+// old shape's quadratics at once (tail copies AND `acc ++` growth)
+let str_replace = fn s -> fn old -> fn nw ->
+  if str_len old == 0 then s else
+  let b = strbuf_new () in
+  let rec go = fn (start: int) ->
+    let idx = _sfind s old start in
+    if idx < 0 then strbuf_push b (substring s start (str_len s))
+    else
+      let _ = strbuf_push b (substring s start idx) in
+      let _ = strbuf_push b nw in
+      go (idx + str_len old) in
+  let _ = go 0 in
+  strbuf_to_str b;
 
 let str_unescape = fn s ->
   let n = str_len s in

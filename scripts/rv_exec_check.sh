@@ -43,7 +43,12 @@ rc=0; pass=0; fail=0
 # KNOWN DIFFERENCES, by name and reason. A program not in this list that differs
 # fails the gate; a program IN it that stops differing also fails, so the list
 # cannot quietly outlive its reasons.
-KNOWN_DIFF="float_edges str_edges region_growth graphql_stack_portable map_compact"
+# str_edges left BOTH lists in v0.1.406. Its 64-bit entry was the prelude's
+# quadratic string building (fixed: StrBuf is a byte buffer, the splitter finds
+# from an offset). Its 32-bit entry's stated reason -- big-integer lines -- had
+# gone stale under it: the harness's own freshness check demanded the removal,
+# which is exactly the job that check exists to do.
+KNOWN_DIFF="float_edges region_growth graphql_stack_portable map_compact"
 # float_edges/str_edges             64-bit values; this backend's int is 32 bits
 #   (coll_edges and nul_in_str sat here too, on the strength of a 60-second
 #    alarm that was really a measurement of how slow decimal printing is on an
@@ -207,7 +212,12 @@ fi
 # also 64 bits -- so the width-related known-differences of the 32-bit column
 # (float_edges, str_edges's big-integer lines, coll_edges) vanish here, and the
 # list below is what remains. Same freshness contract in both directions.
-KNOWN_DIFF64="graphql_stack_portable map_compact region_growth str_edges"
+# str_edges left this list in v0.1.406: its 64-bit difference was never the
+# int width (that is the THIRTY-TWO-bit reason) -- it was the prelude's string
+# builders and splitter being O(n^2) in total allocation, which walked a 200KB
+# test's heap into the stack. StrBuf is a real byte buffer now and the
+# splitter finds from an offset instead of copying the tail per piece.
+KNOWN_DIFF64="graphql_stack_portable map_compact region_growth"
 # graphql_stack_portable   polymorphic == is a word comparison (same as 32)
 # map_compact              map_bytes measures an arena that does not exist here
 # region_growth            wants more RAM than the sweep gives it (no reclaim)

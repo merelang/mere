@@ -4,6 +4,46 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.406 — 2026-09-03
+
+_StrBuf is a real byte buffer, and the prelude's string builders and splitter
+stop being quadratic in total allocation. str_edges agrees with the C backend
+at 64 bits and leaves the known-different list._
+
+The StrBuf a program gets on the RISC-V backend was a one-word cell whose push
+REPLACED the held string with its concatenation — simple, correct, and O(n²) in
+total allocation. On a bump allocator that never frees, that is not a slowdown
+but a death: test/parity/str_edges builds a 200KB string with str_repeat, which
+allocated ~2GB of dead intermediates and walked the heap into the stack with
+128MB of RAM. That was str_edges's ACTUAL 64-bit difference all along — the
+list's stated reason ("64-bit values; this backend's int is 32 bits") was the
+32-bit column's reason, wearing the other column's name.
+
+StrBuf is [len][cap][dataptr] now, bytes, doubling on growth, amortized O(1)
+push; to_str materializes a fresh block and the buffer stays usable. The
+prelude's builders — str_repeat, str_rev, to_upper, to_lower — go through it.
+
+str_split was the same quadratic in a different dress: it took
+`substring s start (str_len s)` PER PIECE — the whole remaining tail — so
+splitting that 200KB string into 20001 pieces copied ~2GB of tails. It finds
+from an offset now, without materializing anything but the pieces. str_replace
+had BOTH shapes at once (tail copies and `acc ++` growth) and goes through the
+buffer and the offset finder together.
+
+str_edges at 64 bits is now byte-identical to the C backend and is out of
+KNOWN_DIFF64. And out of the 32-bit list too — not by my judgment but by the
+freshness check's: the run after the fix failed with "str_edges is in
+KNOWN_DIFF but now agrees — remove it", meaning the 32-bit entry's stated
+reason (big-integer lines) had gone stale underneath it at some point. That
+check exists for exactly this, and this is the third time today it has caught
+a list outliving its reasons.
+
+Gates: 2620 unit tests, parity 161/161, rv_exec 80/0 at 64 bits and 75/0 at 32
+(str_edges counts as passing in both columns now), rv_float 2880 identical,
+rv_prelude 127 names, softfloat 102 names, qemu_virt 7/7, rvd_oracle 7/0.
+
+---
+
 ## v0.1.405 — 2026-09-03
 
 _The float library is computed on the RISC-V backend: sqrt correctly rounded
