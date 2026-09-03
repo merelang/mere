@@ -2895,37 +2895,104 @@ let emit_substring () =
   emit_word (enc_i 0 t0 0 a0 0x13);                     (* mv a0, t0 *)
   emit_word (enc_i 0 ra 0 zero 0x67)                    (* ret *)
 
-(* StrBuf: a 1-word mutable cell holding a str pointer. strbuf_push replaces
-   the held string with its concatenation (simple, correct; O(n^2) worst case).
-   __strbuf_new(_) -> cell; __strbuf_push(buf, s) mutates; __strbuf_to_str /
-   __strbuf_len read it. *)
+(* StrBuf: a REAL byte buffer -- [len_bytes][cap_bytes][dataptr], amortized
+   O(1) push, like Vec but byte-grained. It was a 1-word cell whose push
+   REPLACED the held string with its concatenation: simple, correct, and
+   O(n^2) in total allocation -- test/parity/str_edges's 200KB str_repeat
+   allocated ~2GB of dead intermediates on a bump allocator that never frees,
+   and walked the heap into the stack with 128MB of RAM. The prelude's string
+   builders (str_repeat / str_rev / to_upper / to_lower) all sit on this.
+
+   __strbuf_new(_) -> cell; __strbuf_push(buf, s) appends s's bytes (doubling
+   the buffer, copying on grow); __strbuf_to_str materializes a fresh
+   [len][bytes] block (the buffer stays usable); __strbuf_len reads the cell. *)
 let emit_strbuf () =
   emit (Label "__strbuf_new");                     (* a0 ignored *)
-  emit_word (enc_i 0 gp 0 t0 0x13);                (* t0 = empty str *)
-  emit_word (enc_i (wsz ()) gp 0 t1 0x13);                (* t1 = cell *)
-  emit_word (enc_i (2 * wsz ()) gp 0 gp 0x13);     (* bump BOTH cells -- literal 8 was two words at the old width, the same value-vs-size family as Vec's capacity *)
+  emit_word (enc_i 0 gp 0 t0 0x13);                (* databuf = gp *)
+  emit_word (enc_i 16 gp 0 gp 0x13);               (* bump 16 BYTES (initial cap) *)
+  emit_word (enc_i 0 gp 0 t1 0x13);                (* cell = gp *)
+  emit_word (enc_i (3 * wsz ()) gp 0 gp 0x13);     (* bump 3 words *)
   emit_oom_check ();
-  emit_word (enc_s (0 * wsz ()) zero t0 (stf3 ()) 0x23);              (* [len=0] *)
-  emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);                (* cell.str = empty *)
-  emit_word (enc_i 0 t1 0 a0 0x13);                (* mv a0, cell *)
+  emit_word (enc_s (0 * wsz ()) zero t1 (stf3 ()) 0x23);              (* len = 0 *)
+  emit_word (enc_i 16 zero 0 t2 0x13);
+  emit_word (enc_s (wsz ()) t2 t1 (stf3 ()) 0x23);                    (* cap = 16 *)
+  emit_word (enc_s (2 * wsz ()) t0 t1 (stf3 ()) 0x23);                (* dataptr *)
+  emit_word (enc_i 0 t1 0 a0 0x13);
   emit_word (enc_i 0 ra 0 zero 0x67);
-  emit (Label "__strbuf_push");                    (* a0=buf, a1=s ; non-leaf *)
-  emit_word (enc_i (0 - 2 * wsz ()) sp 0 sp 0x13);
-  emit_word (enc_s (wsz ()) ra sp (stf3 ()) 0x23);                (* save ra *)
-  emit_word (enc_s (0 * wsz ()) a0 sp (stf3 ()) 0x23);                (* save buf *)
-  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03);                (* a0 = buf.str (current) *)
-  emit (Jal (ra, "__str_concat"));                 (* a0 = concat(cur, s) *)
-  emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) t0 0x03);                (* t0 = buf *)
-  emit_word (enc_s (0 * wsz ()) a0 t0 (stf3 ()) 0x23);                (* buf.str = new *)
-  emit_word (enc_i (wsz ()) sp (ldf3 ()) ra 0x03);                (* restore ra *)
-  emit_word (enc_i (2 * wsz ()) sp 0 sp 0x13);
+  emit (Label "__strbuf_push");                    (* a0=buf, a1=s ; leaf now *)
+  emit_word (enc_i (0 * wsz ()) a1 (ldf3 ()) t6 0x03);                (* t6 = slen *)
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                (* t0 = len *)
+  emit_word (enc_i (wsz ()) a0 (ldf3 ()) t1 0x03);                    (* t1 = cap *)
+  emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t2 0x03);                (* t2 = dataptr *)
+  emit_word (enc_r 0 t6 t0 0 t3 0x33);             (* t3 = need = len + slen *)
+  emit (Branch (5, t1, t3, ".sb_store"));          (* bge cap, need -> store *)
+  (* grow: newcap = cap doubled until >= need *)
+  emit_word (enc_i 0 t1 0 t4 0x13);                (* t4 = newcap = cap *)
+  emit (Label ".sb_grow");
+  emit_word (enc_i 1 t4 1 t4 0x13);                (* slli t4, t4, 1 *)
+  emit (Branch (4, t4, t3, ".sb_grow"));           (* blt newcap, need -> again *)
+  emit_word (enc_s (wsz ()) t4 a0 (stf3 ()) 0x23);                    (* cell.cap = newcap *)
+  emit_word (enc_i 0 gp 0 t5 0x13);                (* newbuf = gp *)
+  emit_word (enc_r 0 t4 gp 0 gp 0x33);             (* gp += newcap bytes *)
+  emit_word (enc_i (wsz () - 1) gp 0 gp 0x13);     (* round the heap back up *)
+  emit_word (enc_i (0 - wsz ()) gp 7 gp 0x13);     (* andi gp, gp, -w *)
+  emit_oom_check ();
+  emit_word (enc_s (2 * wsz ()) t5 a0 (stf3 ()) 0x23);                (* cell.dataptr = newbuf *)
+  (* copy the len live bytes; t2 = old, t5 = new cursor *)
+  emit_word (enc_i 0 t0 0 t1 0x13);                (* t1 = count *)
+  emit (Label ".sb_copy");
+  emit (Branch (0, t1, zero, ".sb_copied"));
+  emit_word (enc_i 0 t2 0 t3 0x03);                (* lb t3, 0(old) *)
+  emit_word (enc_s 0 t3 t5 0 0x23);                (* sb t3, 0(new) *)
+  emit_word (enc_i 1 t2 0 t2 0x13);
+  emit_word (enc_i 1 t5 0 t5 0x13);
+  emit_word (enc_i (-1) t1 0 t1 0x13);
+  emit (Jal (zero, ".sb_copy"));
+  emit (Label ".sb_copied");
+  emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t2 0x03);                (* t2 = new dataptr *)
+  emit (Label ".sb_store");
+  (* append s's bytes at dataptr + len *)
+  emit_word (enc_r 0 t0 t2 0 t2 0x33);             (* t2 = dataptr + len *)
+  emit_word (enc_i (wsz ()) a1 0 t4 0x13);         (* t4 = s payload *)
+  emit_word (enc_i 0 t6 0 t1 0x13);                (* t1 = slen count *)
+  emit (Label ".sb_app");
+  emit (Branch (0, t1, zero, ".sb_done"));
+  emit_word (enc_i 0 t4 0 t3 0x03);                (* lb *)
+  emit_word (enc_s 0 t3 t2 0 0x23);                (* sb *)
+  emit_word (enc_i 1 t4 0 t4 0x13);
+  emit_word (enc_i 1 t2 0 t2 0x13);
+  emit_word (enc_i (-1) t1 0 t1 0x13);
+  emit (Jal (zero, ".sb_app"));
+  emit (Label ".sb_done");
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);
+  emit_word (enc_i (0 * wsz ()) a1 (ldf3 ()) t6 0x03);
+  emit_word (enc_r 0 t6 t0 0 t0 0x33);
+  emit_word (enc_s (0 * wsz ()) t0 a0 (stf3 ()) 0x23);                (* len = need *)
   emit_word (enc_i 0 ra 0 zero 0x67);
-  emit (Label "__strbuf_to_str");                  (* a0=buf -> a0 = str *)
-  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03);
+  emit (Label "__strbuf_to_str");                  (* a0=buf -> a0 = fresh str *)
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                (* t0 = len *)
+  emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t2 0x03);                (* t2 = dataptr *)
+  emit_word (enc_i (wsz () - 1) t0 0 t4 0x13);     (* round len up to words *)
+  emit_word (enc_i (0 - wsz ()) t4 7 t4 0x13);
+  emit_word (enc_i (wsz ()) t4 0 t4 0x13);         (* + the len header *)
+  emit_word (enc_i 0 gp 0 t5 0x13);                (* block = gp *)
+  emit_word (enc_r 0 t4 gp 0 gp 0x33);
+  emit_oom_check ();
+  emit_word (enc_s (0 * wsz ()) t0 t5 (stf3 ()) 0x23);                (* header *)
+  emit_word (enc_i 0 t5 0 a0 0x13);                (* result *)
+  emit_word (enc_i (wsz ()) t5 0 t5 0x13);         (* dst = block + w *)
+  emit (Label ".st_copy");
+  emit (Branch (0, t0, zero, ".st_done"));
+  emit_word (enc_i 0 t2 0 t3 0x03);
+  emit_word (enc_s 0 t3 t5 0 0x23);
+  emit_word (enc_i 1 t2 0 t2 0x13);
+  emit_word (enc_i 1 t5 0 t5 0x13);
+  emit_word (enc_i (-1) t0 0 t0 0x13);
+  emit (Jal (zero, ".st_copy"));
+  emit (Label ".st_done");
   emit_word (enc_i 0 ra 0 zero 0x67);
   emit (Label "__strbuf_len");                     (* a0=buf -> a0 = len *)
-  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03);                (* str ptr *)
-  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03);                (* len header *)
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03);
   emit_word (enc_i 0 ra 0 zero 0x67)
 
 (* Vec: a mutable growable word array. Cell = [len][cap][dataptr]; dataptr ->
