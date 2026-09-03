@@ -48,7 +48,12 @@ rc=0; pass=0; fail=0
 # from an offset). Its 32-bit entry's stated reason -- big-integer lines -- had
 # gone stale under it: the harness's own freshness check demanded the removal,
 # which is exactly the job that check exists to do.
-KNOWN_DIFF="float_edges region_growth graphql_stack_portable map_compact"
+# graphql_stack_portable left BOTH lists in v0.1.408, and again not by my
+# judgment: the run after monomorphization landed failed with "is in KNOWN_DIFF
+# but now agrees -- remove it", at both widths. Its reason (polymorphic == is a
+# word comparison here) was true when written and is not true now, which is the
+# only thing this check is for.
+KNOWN_DIFF="float_edges region_growth map_compact"
 # float_edges/str_edges             64-bit values; this backend's int is 32 bits
 #   (coll_edges and nul_in_str sat here too, on the strength of a 60-second
 #    alarm that was really a measurement of how slow decimal printing is on an
@@ -57,10 +62,6 @@ KNOWN_DIFF="float_edges region_growth graphql_stack_portable map_compact"
 #    that was cut off mid-print reads as a difference, and the cut moves with
 #    host load, which made the gate FLAKY at 60 and at 240.)
 # region_growth                     wants more RAM (and more time) than the sweep gives it
-# graphql_stack_portable            polymorphic == is a word comparison here
-#   (other backends monomorphize; the stdlib's list_member misses a
-#    content-equal string in a different block -- test/rv/poly_eq_word.mere
-#    pins the behaviour and names monomorphization as the fix)
 # map_compact                       map_bytes measures an arena; a Vec here has none
 
 RVRUN=""
@@ -143,25 +144,13 @@ else
   printf '  FAIL  %s did not build\n' "$name"; head -2 "$TMP/rverr"; fail=$((fail+1)); rc=1
 fi
 
-# poly_eq_word: the pinned known limitation (see the file's header). Its
-# expected output IS the wrong answer, so the pin breaks the day the backend
-# learns to specialize -- symmetrical with the KNOWN_DIFF freshness check.
-name=poly_eq_word
-if "$MERE" -rv "$ROOT/test/rv/poly_eq_word.mere" > "$TMP/prog.bin" 2>"$TMP/rverr"; then
-  if [ -z "$RVRUN" ]; then pass=$((pass+1))
-  else
-    ( cd "$TMP" && perl -e 'alarm 60; exec @ARGV' ./rvrun 8 2>/dev/null ) | grep -a -v '^rvrun: ' > "$TMP/r.out"
-    if grep -q UNEXPECTED "$TMP/r.out"; then
-      printf '  FAIL  %s (the pinned behaviour changed -- read the pin)\n' "$name"
-      grep UNEXPECTED "$TMP/r.out" | sed 's/^/    /'
-      fail=$((fail+1)); rc=1
-    else
-      printf '  ok    %s (known limitation, pinned)\n' "$name"; pass=$((pass+1))
-    fi
-  fi
-else
-  printf '  FAIL  %s did not build\n' "$name"; fail=$((fail+1)); rc=1
-fi
+# poly_eq_word was here: a pin whose EXPECTED OUTPUT was the wrong answer, so it
+# would break the day the backend learned to specialize. It broke in v0.1.408
+# and is gone. Its replacement is test/parity/poly_eq_mono.mere, which asserts
+# the RIGHT answer -- so it is swept by the corpus loop above at both widths
+# against the C backend, and by scripts/parity.sh on the other four, instead of
+# needing a bespoke block here. A pin says "this is still wrong"; a test says
+# "this is still right", and only the second one survives being fixed.
 
 # host_services: time and random_int have no other backend to diff against --
 # nondeterministic by contract -- so the program checks properties and this
@@ -217,8 +206,7 @@ fi
 # builders and splitter being O(n^2) in total allocation, which walked a 200KB
 # test's heap into the stack. StrBuf is a real byte buffer now and the
 # splitter finds from an offset instead of copying the tail per piece.
-KNOWN_DIFF64="graphql_stack_portable map_compact region_growth"
-# graphql_stack_portable   polymorphic == is a word comparison (same as 32)
+KNOWN_DIFF64="map_compact region_growth"
 # map_compact              map_bytes measures an arena that does not exist here
 # region_growth            wants more RAM than the sweep gives it (no reclaim)
 # str_edges                the prelude's string builders are concat-quadratic and

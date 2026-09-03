@@ -4,6 +4,87 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.408 — 2026-09-03
+
+_The RISC-V backend monomorphizes. A `==` inside a polymorphic function compares
+values there now instead of machine words, `graphql_stack_portable` leaves the
+known-different list at both widths, and the pin that asserted the wrong answer
+is replaced by a test that asserts the right one. Q-102 closed._
+
+A value on this backend is an untagged machine word, and the emitter reads `.ty`
+only to choose an instruction sequence. So a `==` whose operand type was still a
+type variable at emit time compiled to a word comparison: exact for ints, and a
+comparison of two HEAP POINTERS for strings and compound values. Two equal
+strings in different blocks answered false, and the stdlib's `list_member`
+missed names that were there.
+
+There is no fix at emit time — there is nothing at run time to ask. The fix is
+to hand the emitter monomorphic functions, so `lib/monomorph.ml` (extracted in
+v0.1.407) grew an AST→AST entry point: `specialize_toplevel` binds one function
+per concrete instantiation under its mangled name and rewrites every reference
+whose use-site type names one. The original polymorphic binding stays, because a
+reference whose arrow still holds a type variable has to name something, and
+leaving it means such a program compiles exactly as it did before instead of
+failing to find a label; an original nothing references is dropped by the
+backend's own reachability.
+
+The rewrite honours shadowing, which as a tree rewrite is not free: the
+top-level let chain IS a chain of `Let`s, so counting those as binders would
+mark every top-level function as shadowed by its own definition and rewrite
+nothing — green, and doing nothing. The chain is walked separately from
+everything under it, where a binder really is one.
+
+**The specialization landed on the first try and the pin still printed
+"pinned".** `compile_cmp` asked "what type is the left operand?" three different
+ways, and the string branch was the odd spelling: `l.Ast.ty = Some Ast.TyStr`, a
+structural comparison. A type variable LINKED to str is
+`Some (TyVar {link = Some TyStr})`, which is not equal to `Some TyStr`. While
+nothing on this backend had ever been specialized, nothing could produce that
+shape, so the wrong spelling could not show — it waited for the day it mattered.
+One `lty`, asked once, at the top.
+
+**A type pass was living inside the layout loop.** mere-ruby's RV64 compile went
+from 4s to 208s, so the cost was instrumented rather than guessed at: the pass
+was running three times. `build_items_sized` re-runs the emitter until the jump
+width and the globals' placement stop moving each other, and the pass sat inside
+it. Three times the cost is the smaller half. **The pass is not idempotent** —
+it unifies type variables in place, so the second run reads a tree the first one
+made concrete and answers differently: 112 multi-instantiated functions on the
+first pass over mere-ruby, 500 on the second. And its pristine skeleton clones,
+the copies that keep every instantiation independently possible, are taken at
+the start of a run — so on a second run they are clones of an already-fixed
+skeleton, which is exactly what `make_spec` refuses when it can see it. It runs
+once now, in `prepare_main`, outside the loop. 208s → 63s, which is what the C
+backend has always paid for the same program (60s); this backend was fast
+because it was not doing the work.
+
+Nothing in the test suite could see that one. The pre- and post-hoist emissions
+are byte-identical across all 764 .mere files at both RV widths (954 identical,
+574 refused by both, 0 differences) — mere-ruby itself was the only program in
+reach whose output changed, because nothing smaller is polymorphic enough for a
+second pass to find more instantiations in.
+
+`test/rv/poly_eq_word.mere` is gone, along with its bespoke block in the gate. It
+was a pin whose expected output WAS the wrong answer, so it broke on being
+fixed, as designed. Its replacement, `test/parity/poly_eq_mono.mere`, asserts the
+right answer at str / int / tuple / chained-through-poly instantiations, and
+lives in test/parity so all six implementations answer it instead of one gate
+having a special case. A pin says "this is still wrong"; a test says "this is
+still right", and only the second survives being fixed.
+
+`graphql_stack_portable` left KNOWN_DIFF and KNOWN_DIFF64 — again not by my
+judgment but on the freshness check's demand, which failed at both widths with
+"is in KNOWN_DIFF but now agrees — remove it".
+
+Gates: 2620 unit tests, parity 162/162 (161 + the new test), rv_exec 82/0 at 64
+bits and 76/0 at 32 (both +1: the new test, and graphql_stack_portable moving
+from known-different to passing), known-different down to 2 at 64 and 3 at 32.
+C, LLVM and Wasm emission byte-identical to v0.1.406 across all 764 files.
+mere-ruby's corpus on RV64 is unchanged at 142/162 — none of the remaining 20
+was this bug, which is what the RV64 arc's own classification of them said.
+
+---
+
 ## v0.1.407 — 2026-09-03
 
 _Monomorphization moves out of the C backend into `lib/monomorph.ml`, unchanged.

@@ -1,0 +1,51 @@
+// `==` inside a POLYMORPHIC function, at every instantiation that has a
+// different answer from comparing machine words.
+//
+// This replaces test/rv/poly_eq_word.mere, which pinned the WRONG answer: the
+// RISC-V backend had no monomorphization, so a `==` whose operand type was
+// still a type variable at emit time compiled to a word comparison -- exact for
+// ints, and a comparison of two HEAP POINTERS for strings and compound values.
+// Two equal strings in different blocks answered false, and the stdlib's
+// `list_member` missed names that were there (which is what put
+// graphql_stack_portable in rv_exec's known-different list).
+//
+// It lives in test/parity rather than test/rv on purpose: here every backend
+// answers it, rv_exec sweeps it at both widths against the C backend, and a
+// backend that stops specializing is caught by the answer being wrong rather
+// than by a hand-written expectation somewhere.
+let rec member = fn xs -> fn v ->
+  match xs with
+  | Nil -> false
+  | Cons (h, t) -> if h == v then true else member t v;
+
+let names = Cons ("Query", Cons ("Post", Nil));
+
+// same content, different block: the case word-equality misses
+let needle = "Po" ++ "st";
+let _ = print (if member names needle then "str built: found" else "str built: MISSED");
+
+// two identical literals are two rodata blocks on a backend that does not
+// intern them, so this is a content comparison too, not a pointer one
+let _ = print (if member names "Query" then "str literal: found" else "str literal: MISSED");
+
+let _ = print (if member names "Absent" then "str absent: WRONGLY FOUND" else "str absent: not found");
+
+// the int instantiation must keep working -- it always did, and a fix that
+// refused polymorphic == outright would have broken it
+let _ = print (if member (Cons (1, Cons (2, Nil))) 2 then "int: found" else "int: MISSED");
+let _ = print (if member (Cons (1, Cons (2, Nil))) 3 then "int absent: WRONGLY FOUND" else "int absent: not found");
+
+// a third instantiation of the SAME function, on tuples: structural, and
+// distinct from both of the above
+let pairs = Cons ((1, "a"), Cons ((2, "b"), Nil));
+let _ = print (if member pairs (2, "b") then "tuple: found" else "tuple: MISSED");
+let _ = print (if member pairs (2, "a") then "tuple absent: WRONGLY FOUND" else "tuple absent: not found");
+
+// and one where the polymorphic helper is reached THROUGH another polymorphic
+// helper, which is the shape that needs the fixpoint rather than a single pass
+let rec any_shared = fn xs -> fn ys ->
+  match xs with
+  | Nil -> false
+  | Cons (h, t) -> if member ys h then true else any_shared t ys;
+let _ = print (if any_shared (Cons ("Post", Nil)) names then "chained str: found" else "chained str: MISSED");
+let _ = print (if any_shared (Cons ("Nope", Nil)) names then "chained str absent: WRONGLY FOUND" else "chained str absent: not found");
