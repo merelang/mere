@@ -205,6 +205,31 @@ environment is copied with them). It is containers â€” `Vec`, `Map`, `StrBuf` â€
 that are handles, and a handle copied out of a dead arena is a dangling
 pointer. Build them outside the region, or copy their contents out.
 
+**Where to draw it: around the expression whose answer is small.** On the
+`binarytrees` benchmark, a block around each depth's whole batch peaks at
+28 MiB; a block around the single expression `check (build d)` -- one tree in,
+one int out -- peaks at 5.8 MiB, the same footprint as the Rust program and a
+third of the C program's wall clock, while the naive program holds 169 MiB. The
+loop that calls it stays a tail call because the region wraps the ARGUMENT of
+the recursive call, not the call: `batch d (iters - 1) (acc + (region R {
+check (build d) }))`. Wrapping the whole body of a tail-recursive function
+would nest one open region per iteration instead.
+
+**Do not materialise what you only walk once.** `str_split` on a 1.8 MB text
+builds a 300,000-element list that costs 48 bytes a word -- 14 MB for words
+that are read once and counted. Reading a line at a time inside a per-line
+region (`file_read_line`, or `contrib/stream`) and splitting the line keeps
+the footprint at the table plus one line: the `wordfreq` benchmark's streaming
+row runs in 9.8 MiB where the one-shot program takes 26.9 MiB, and prints the
+same bytes.
+
+**Sort a `Vec`, not a list, when the list is large.** `list_sort_by` is a
+stable merge sort over an immutable list, and an immutable list's merge sort
+allocates about 3n log n cells plus one closure environment per comparison;
+sorting 5,000 pairs allocated 8.3 MB. `vec_sort` is the same stable merge
+sort in place, and its scratch buffer is malloc/free rather than arena, so it
+leaves nothing behind. Both are in the stdlib reference.
+
 ---
 
 ## 8.5. "Update only one element" inside a collection of records

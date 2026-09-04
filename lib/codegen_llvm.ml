@@ -6802,6 +6802,53 @@ let region_runtime_helpers =
       "  ret ptr %top";
       "}";
       "";
+      (* v0.1.414: the in-place growth primitive, the LLVM twin of the C
+         backend's __lang_region_grow. A buffer that is the region's most
+         recent allocation and still fits the current block grows by moving
+         the top pointer; anything else is a fresh allocation plus a copy of
+         the old bytes. Region blocks here are separate arenas (an alloca'd
+         struct per block), so extending an outer container's buffer while a
+         block is open touches only that container's own region. *)
+      "define ptr @__lang_region_grow(ptr %r, ptr %old, i64 %old_n, i64 %new_n) {";
+      "entry:";
+      "  %isnull = icmp eq ptr %old, null";
+      "  %zero = icmp eq i64 %old_n, 0";
+      "  %skip = or i1 %isnull, %zero";
+      "  br i1 %skip, label %fresh, label %check";
+      "check:";
+      "  %o7 = add i64 %old_n, 7";
+      "  %old_al = and i64 %o7, -8";
+      "  %n7 = add i64 %new_n, 7";
+      "  %new_al = and i64 %n7, -8";
+      "  %top_p = getelementptr %__lang_region, ptr %r, i32 0, i32 1";
+      "  %top = load ptr, ptr %top_p";
+      "  %old_end = getelementptr i8, ptr %old, i64 %old_al";
+      "  %attop = icmp eq ptr %old_end, %top";
+      "  br i1 %attop, label %fits, label %fresh";
+      "fits:";
+      "  %base_p = getelementptr %__lang_region, ptr %r, i32 0, i32 0";
+      "  %base = load ptr, ptr %base_p";
+      "  %cap_p = getelementptr %__lang_region, ptr %r, i32 0, i32 2";
+      "  %cap = load i64, ptr %cap_p";
+      "  %limit = getelementptr i8, ptr %base, i64 %cap";
+      "  %new_end = getelementptr i8, ptr %old, i64 %new_al";
+      "  %over = icmp ugt ptr %new_end, %limit";
+      "  br i1 %over, label %fresh, label %inplace";
+      "inplace:";
+      "  store ptr %new_end, ptr %top_p";
+      "  ret ptr %old";
+      "fresh:";
+      "  %p = call ptr @__lang_region_alloc(ptr %r, i64 %new_n)";
+      "  br i1 %skip, label %done, label %copy";
+      "copy:";
+      "  %lt = icmp ult i64 %old_n, %new_n";
+      "  %ncopy = select i1 %lt, i64 %old_n, i64 %new_n";
+      "  call ptr @memcpy(ptr %p, ptr %old, i64 %ncopy)";
+      "  br label %done";
+      "done:";
+      "  ret ptr %p";
+      "}";
+      "";
       "define void @__lang_region_free(ptr %r) {";
       "entry:";
       "  %blocks_p = getelementptr %__lang_region, ptr %r, i32 0, i32 3";
@@ -6871,12 +6918,15 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       Printf.sprintf "  %%esize_p = getelementptr %s, ptr null, i32 1" c_elem;
       "  %esize = ptrtoint ptr %esize_p to i64";
       "  %new_bytes = mul i64 %nc64, %esize";
-      "  %new_buf = call ptr @__lang_region_alloc(ptr %reg, i64 %new_bytes)";
+      (* v0.1.414: grow in place when this buffer is the region's most recent
+         allocation, copy into a fresh one otherwise -- see __lang_region_grow.
+         The old size handed over is the buffer's CAPACITY in bytes, the size
+         it was allocated with, which is what decides whether it ends at top. *)
       Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
       "  %old_buf = load ptr, ptr %dp";
-      "  %old64 = zext i32 %len to i64";
-      "  %old_bytes = mul i64 %old64, %esize";
-      "  call ptr @memcpy(ptr %new_buf, ptr %old_buf, i64 %old_bytes)";
+      "  %cap64 = zext i32 %cap to i64";
+      "  %old_bytes = mul i64 %cap64, %esize";
+      "  %new_buf = call ptr @__lang_region_grow(ptr %reg, ptr %old_buf, i64 %old_bytes, i64 %new_bytes)";
       "  store ptr %new_buf, ptr %dp";
       "  store i32 %new_cap, ptr %cp";
       "  br label %store";

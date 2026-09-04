@@ -1,0 +1,14 @@
+// The Vec-growth probe for scripts/region_slack_check.sh (v0.1.414).
+//
+// Pushes 200,000 ints into one Vec with nothing else allocated in between. The
+// final buffer is 262,144 slots x 8 B = 2 MiB. Before in-place growth every
+// doubling left the previous buffer behind, so the program allocated ~4 MiB
+// for 2 MiB of data; with it, the buffer extends where it sits and the total
+// stays within a few KB of 2 MiB. The gate holds alloc_total under 3 MiB --
+// the old allocator reads ~4 MiB and fails, the new one ~2 MiB and passes.
+let v = vec_new ();
+let rec fill = fn (i: int) ->
+  if i == 200000 then () else let _ = vec_push v i in fill (i + 1);
+let _ = fill 0;
+let _ = print (str_of_int (vec_len v) ++ " " ++ str_of_int (vec_get v 199999));
+exit 0

@@ -929,6 +929,13 @@ satisfy it and hide the very row it was describing.
 | `channel_new` | `unit -> Channel[T]` | see "Channel receive: which of the three blocks" above |
 
 
+**Allocation shape (v0.1.414).** `vec_sort` sorts in place; its scratch buffer is
+malloc/free, so a sort leaves nothing in the arena. `list_sort_by` is the same
+stable merge sort over an immutable list and allocates about 3n log n cells,
+plus one closure environment per comparison (the comparator is curried); on
+5,000 pairs that measured 8.3 MB. For a large list that is sorted once, build
+a `Vec` and use `vec_sort` -- see patterns §8.4.
+
 **`vec_sort : Vec[R, T] -> (T -> T -> int) -> unit`** carries two guarantees that are
 worth stating because a Mere program can observe both (v0.1.349). It is **stable** —
 equal keys keep insertion order — and all four backends run the **same** bottom-up
