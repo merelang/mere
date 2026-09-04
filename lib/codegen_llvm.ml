@@ -400,6 +400,7 @@ let rec llvm_ty_of (t : Ast.ty) : string =
   | Ast.TyCon ("StrBuf", _) ->
     strbuf_used := true;
     "ptr"
+  | Ast.TyCon ("ListBuf", _) -> "ptr"   (* Q-106: one struct for every T *)
   | Ast.TyCon ("Map", args) ->
     (* Phase 15.10: Map[R, K, V] — per-(K, V) monomorphize、K = int / str。 *)
     (match List.map Ast.walk args with
@@ -2889,6 +2890,34 @@ let cast_from_i64 (v : string) (llty : string) : string =
 (* Emit `expr` as a sequence of SSA instructions; return the register (or
    literal) holding the result. Caller is expected to know the expected
    LLVM type from the AST's `.ty` annotation. *)
+(* Q-106: the layout a ListBuf[R, T] splices into -- the node struct of
+   `T list` (`list_<T>_node` for the boxed list), the payload tuple
+   `{ T, ptr }`, and the Cons / Nil tags. Walking `T list` through llvm_ty_of
+   is what gets the instantiation's structs emitted, exactly as any `T list`
+   in the program would. *)
+let lb_layout_llvm (ty_opt : Ast.ty option) (loc : Loc.t) : string * string * int * int =
+  let elem_ty =
+    match Option.map Ast.walk ty_opt with
+    | Some (Ast.TyCon ("ListBuf", [_; et])) ->
+      let et = Ast.walk et in
+      if ty_is_concrete et then et
+      else raise (Codegen_error (loc, "lb_*: ListBuf with unresolved element type"))
+    | _ -> raise (Codegen_error (loc, "lb_* expected a ListBuf value"))
+  in
+  let list_ty = Ast.TyCon ("list", [elem_ty]) in
+  let _ = llvm_ty_of list_ty in
+  let list_mono =
+    if Hashtbl.mem polymorphic_variants "list" then mono_variant_name "list" [elem_ty]
+    else "list"
+  in
+  let node_struct =
+    if is_recursive_variant_name list_mono then list_mono ^ "_node" else list_mono
+  in
+  let tup_struct = tuple_struct_name [elem_ty; Ast.TyCon (list_mono, [])] in
+  let cons_tag = try Hashtbl.find variant_tags "Cons" with Not_found -> 1 in
+  let nil_tag = try Hashtbl.find variant_tags "Nil" with Not_found -> 0 in
+  (node_struct, tup_struct, cons_tag, nil_tag)
+
 let rec emit_expr (env : env) (e : Ast.expr) : string =
   (* Q-029: whether THIS expression is in tail position. Cleared immediately,
      so a sub-expression is not in tail position unless the case below puts it
@@ -4475,6 +4504,112 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        (* Need an SSA value of the expected LLVM type. Use undef literal. *)
        let _ = other in
        "undef")
+  | Ast.App ({ node = Ast.Var "lb_new"; _ }, _arg) ->
+    (* Q-106: { head = null, tail = null, nil = a Nil cell of the target list,
+       depth = the open-block count now, frozen = 0 }. *)
+    (* Every boxed list node is { i32 tag, ptr payload } whatever T is, so the
+       Nil cell needs no element type -- a builder that is never pushed to
+       (T unresolved) still compiles, as it does on the C backend. *)
+    let nil_tag = try Hashtbl.find variant_tags "Nil" with Not_found -> 0 in
+    let b = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 32)" b);
+    let nil = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 16)" nil);
+    emit_instr (Printf.sprintf "  store i32 %d, ptr %s" nil_tag nil);
+    let f i = let r = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = getelementptr %%__lang_listbuf, ptr %s, i32 0, i32 %d" r b i); r in
+    emit_instr (Printf.sprintf "  store ptr null, ptr %s" (f 0));
+    emit_instr (Printf.sprintf "  store ptr null, ptr %s" (f 1));
+    emit_instr (Printf.sprintf "  store ptr %s, ptr %s" nil (f 2));
+    let d = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load i32, ptr @__lang_region_depth" d);
+    emit_instr (Printf.sprintf "  store i32 %s, ptr %s" d (f 3));
+    emit_instr (Printf.sprintf "  store i32 0, ptr %s" (f 4));
+    b
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "lb_push"; _ }, b_e); _ }, val_e) ->
+    (* Q-106: refuse frozen / other-region, then splice a fresh Cons whose
+       payload tuple is { x, nil } onto the tail. *)
+    let (node_struct, tup_struct, cons_tag, _nil_tag) = lb_layout_llvm b_e.Ast.ty b_e.Ast.loc in
+    let elem_ty = match Option.map Ast.walk b_e.Ast.ty with
+      | Some (Ast.TyCon ("ListBuf", [_; et])) -> Ast.walk et
+      | _ -> unsupported e.Ast.loc "lb_push: missing ListBuf type" in
+    let c_elem = llvm_ty_of elem_ty in
+    let b = emit_expr env b_e in
+    let x = emit_expr env val_e in
+    let gep i = let r = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = getelementptr %%__lang_listbuf, ptr %s, i32 0, i32 %d" r b i); r in
+    let l_frozen = fresh_label "lb_frozen" and l_chk = fresh_label "lb_chk"
+    and l_other = fresh_label "lb_other" and l_ok = fresh_label "lb_ok"
+    and l_link = fresh_label "lb_link" and l_head = fresh_label "lb_head"
+    and l_done = fresh_label "lb_done" in
+    let fz = fresh_reg () and isfz = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load i32, ptr %s" fz (gep 4));
+    emit_instr (Printf.sprintf "  %s = icmp ne i32 %s, 0" isfz fz);
+    emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" isfz l_frozen l_chk);
+    emit_instr (l_frozen ^ ":");
+    emit_instr "  call void @__lang_fail_impl(ptr @.lb_frozen_msg)";
+    emit_instr "  unreachable";
+    emit_instr (l_chk ^ ":");
+    let bd = fresh_reg () and cur = fresh_reg () and same = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load i32, ptr %s" bd (gep 3));
+    emit_instr (Printf.sprintf "  %s = load i32, ptr @__lang_region_depth" cur);
+    emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, %s" same bd cur);
+    emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" same l_ok l_other);
+    emit_instr (l_other ^ ":");
+    emit_instr "  call void @__lang_fail_impl(ptr @.lb_region_msg)";
+    emit_instr "  unreachable";
+    emit_instr (l_ok ^ ":");
+    let nil = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" nil (gep 2));
+    let ts_p = fresh_reg () and ts = fresh_reg () and tup = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = getelementptr %%%s, ptr null, i32 1" ts_p tup_struct);
+    emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" ts ts_p);
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %s)" tup ts);
+    let f0 = fresh_reg () and f1 = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = getelementptr %%%s, ptr %s, i32 0, i32 0" f0 tup_struct tup);
+    emit_instr (Printf.sprintf "  store %s %s, ptr %s" c_elem x f0);
+    emit_instr (Printf.sprintf "  %s = getelementptr %%%s, ptr %s, i32 0, i32 1" f1 tup_struct tup);
+    emit_instr (Printf.sprintf "  store ptr %s, ptr %s" nil f1);
+    let ns_p = fresh_reg () and ns = fresh_reg () and node = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = getelementptr %%%s, ptr null, i32 1" ns_p node_struct);
+    emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" ns ns_p);
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %s)" node ns);
+    let ntp = fresh_reg () and npp = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = getelementptr %%%s, ptr %s, i32 0, i32 0" ntp node_struct node);
+    emit_instr (Printf.sprintf "  store i32 %d, ptr %s" cons_tag ntp);
+    emit_instr (Printf.sprintf "  %s = getelementptr %%%s, ptr %s, i32 0, i32 1" npp node_struct node);
+    emit_instr (Printf.sprintf "  store ptr %s, ptr %s" tup npp);
+    let tl_p = gep 1 in
+    let tl = fresh_reg () and hastl = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" tl tl_p);
+    emit_instr (Printf.sprintf "  %s = icmp ne ptr %s, null" hastl tl);
+    emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" hastl l_link l_head);
+    emit_instr (l_link ^ ":");
+    let tpp = fresh_reg () and tp = fresh_reg () and tf1 = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = getelementptr %%%s, ptr %s, i32 0, i32 1" tpp node_struct tl);
+    emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" tp tpp);
+    emit_instr (Printf.sprintf "  %s = getelementptr %%%s, ptr %s, i32 0, i32 1" tf1 tup_struct tp);
+    emit_instr (Printf.sprintf "  store ptr %s, ptr %s" node tf1);
+    emit_instr (Printf.sprintf "  br label %%%s" l_done);
+    emit_instr (l_head ^ ":");
+    emit_instr (Printf.sprintf "  store ptr %s, ptr %s" node (gep 0));
+    emit_instr (Printf.sprintf "  br label %%%s" l_done);
+    emit_instr (l_done ^ ":");
+    emit_instr (Printf.sprintf "  store ptr %s, ptr %s" node tl_p);
+    "0"
+  | Ast.App ({ node = Ast.Var "lb_to_list"; _ }, b_e) ->
+    (* Q-106: freeze and hand out the head, or the builder's Nil when empty. *)
+    let _ = lb_layout_llvm b_e.Ast.ty b_e.Ast.loc in
+    let b = emit_expr env b_e in
+    let gep i = let r = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = getelementptr %%__lang_listbuf, ptr %s, i32 0, i32 %d" r b i); r in
+    emit_instr (Printf.sprintf "  store i32 1, ptr %s" (gep 4));
+    let hd = fresh_reg () and nil = fresh_reg () and isnull = fresh_reg () and res = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" hd (gep 0));
+    emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" nil (gep 2));
+    emit_instr (Printf.sprintf "  %s = icmp eq ptr %s, null" isnull hd);
+    emit_instr (Printf.sprintf "  %s = select i1 %s, ptr %s, ptr %s" res isnull nil hd);
+    res
   | Ast.App ({ node = Ast.Var "vec_new"; _ }, _arg) ->
     (* Phase 15.3: vec_new () — extract the region and element type from
        the result type's TyCon args and call the `@mere_vec_<tag>_new`
@@ -5738,8 +5873,17 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                   "  call void @__lang_region_init(ptr %s, i64 1048576)" region_p);
     let saved = !current_regions in
     current_regions := (name, region_p) :: saved;
+    (* Q-106: count open blocks, for lb_push's region check *)
+    let d0 = fresh_reg () and d1 = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load i32, ptr @__lang_region_depth" d0);
+    emit_instr (Printf.sprintf "  %s = add i32 %s, 1" d1 d0);
+    emit_instr (Printf.sprintf "  store i32 %s, ptr @__lang_region_depth" d1);
     let v = emit_expr env body in
     current_regions := saved;
+    let d2 = fresh_reg () and d3 = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load i32, ptr @__lang_region_depth" d2);
+    emit_instr (Printf.sprintf "  %s = sub i32 %s, 1" d3 d2);
+    emit_instr (Printf.sprintf "  store i32 %s, ptr @__lang_region_depth" d3);
     emit_instr (Printf.sprintf "  call void @__lang_region_free(ptr %s)" region_p);
     v
   | Ast.Ref (_mode, region, inner) ->
@@ -6730,6 +6874,13 @@ let region_runtime_helpers =
        the `prev` link (and keeps the data that follows 16-aligned). *)
     [ "%__lang_region = type { ptr, ptr, i64, ptr }";
       "@__lang_default_region = internal global %__lang_region zeroinitializer";
+      (* Q-106: the in-order list builder -- { head, tail, nil, depth, frozen }.
+         Values on this backend all live in the default region, so a builder
+         can never dangle here; the depth check exists so the program that
+         fails on the C backend (a push while another region is current)
+         fails here too, with the same sentence. *)
+      "%__lang_listbuf = type { ptr, ptr, ptr, i32, i32 }";
+      "@__lang_region_depth = internal global i32 0";
       "";
       (* v0.1.274: malloc's answer used to go unread here, and the next store
          wrote through the null it returned. An allocation that cannot be
@@ -9939,6 +10090,10 @@ let str_concat_helper =
       (* v0.1.274: words for two failures that had none on this backend *)
       "@.strrepeat_msg_h = internal constant { i64, [29 x i8] } { i64 28, [29 x i8] c\"str_repeat: result too large\\00\" }";
       "@.strrepeat_msg = internal alias [29 x i8], getelementptr inbounds ({ i64, [29 x i8] }, ptr @.strrepeat_msg_h, i32 0, i32 1)";
+      "@.lb_frozen_msg_h = internal constant { i64, [66 x i8] } { i64 65, [66 x i8] c\"lb_push: the builder was already turned into a list by lb_to_list\\00\" }";
+      "@.lb_frozen_msg = internal alias [66 x i8], getelementptr inbounds ({ i64, [66 x i8] }, ptr @.lb_frozen_msg_h, i32 0, i32 1)";
+      "@.lb_region_msg_h = internal constant { i64, [61 x i8] } { i64 60, [61 x i8] c\"lb_push: the builder belongs to a region that is not current\\00\" }";
+      "@.lb_region_msg = internal alias [61 x i8], getelementptr inbounds ({ i64, [61 x i8] }, ptr @.lb_region_msg_h, i32 0, i32 1)";
       "@.oom_msg_h = internal constant { i64, [14 x i8] } { i64 13, [14 x i8] c\"out of memory\\00\" }";
       "@.oom_msg = internal alias [14 x i8], getelementptr inbounds ({ i64, [14 x i8] }, ptr @.oom_msg_h, i32 0, i32 1)";
       "@.divzero_msg_h = internal constant { i64, [17 x i8] } { i64 16, [17 x i8] c\"division by zero\\00\" }";

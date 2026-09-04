@@ -496,7 +496,7 @@ let rec is_value (e : Ast.expr) : bool =
 
 let rec ty_mentions_mutable_container (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "Channel"), _) -> true
+  | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "Channel" | "ListBuf"), _) -> true
   | Ast.TyCon (_, args) -> List.exists ty_mentions_mutable_container args
   | Ast.TyArrow (p, r) ->
     ty_mentions_mutable_container p || ty_mentions_mutable_container r
@@ -973,7 +973,7 @@ let rec is_send_v (visiting : string list) (t : Ast.ty) : bool =
      39/1600 SET-then-GET failures in a naive RESP server). OwnedVec is
      NOT here: it is a drop type (single owner, movable), handled below.
      Share by communicating instead: Channel is Send+Sync. *)
-  | Ast.TyCon (("Map" | "Vec" | "StrBuf"), _) -> false
+  | Ast.TyCon (("Map" | "Vec" | "StrBuf" | "ListBuf"), _) -> false
   | Ast.TyCon (name, _) when Hashtbl.mem local_types name -> false
   | Ast.TyCon (name, _) when Hashtbl.mem sync_types name -> true
   | Ast.TyCon (name, args) when Hashtbl.mem drop_types name ->
@@ -996,7 +996,7 @@ let rec is_sync_v (visiting : string list) (t : Ast.ty) : bool =
   | Ast.TyCon ("File", _) -> false             (* FILE* reads are not thread-safe *)
   (* v0.1.29 (mkv dogfood P2): see is_send_v — lock-free region-bound
      containers must not be shared across threads. *)
-  | Ast.TyCon (("Map" | "Vec" | "StrBuf"), _) -> false
+  | Ast.TyCon (("Map" | "Vec" | "StrBuf" | "ListBuf"), _) -> false
   | Ast.TyCon (name, _) when Hashtbl.mem local_types name -> false
   | Ast.TyCon (name, _) when Hashtbl.mem sync_types name -> true
   | Ast.TyCon (name, _) when Hashtbl.mem drop_types name -> false
@@ -1272,6 +1272,51 @@ let vec_len_scheme =
    or `int Vec` (legacy 1-arg postfix, auto-defaults the region to a
    synthetic `__heap`). *)
 let () = Hashtbl.replace types "Vec" 2
+
+(* Q-106 (v0.1.416): ListBuf[R, T] -- a `T list` built IN ORDER.
+
+   An immutable list can only be extended at the front, so code that produces
+   one from first to last either recurses without a tail call (and overflows
+   the stack at tens of thousands of elements) or conses in reverse and
+   reverses at the end -- and in a bump arena every cell of that reversed
+   accumulator is garbage the moment `rev` returns. On the JSON benchmark that
+   was 30 MB of a 105 MB run. `lb_push` appends by writing the previous cell's
+   tail, which is unobservable because no cell is visible until `lb_to_list`
+   hands the head out and freezes the builder. Cells are allocated in the
+   builder's own region and reference the pushed value WITHOUT copying it;
+   that is sound because the runtime refuses a push while a different region
+   is current (a value built inside an inner block could otherwise be linked
+   into a list that outlives it). The type carries the region marker like
+   Vec, so a builder cannot leave its region either. *)
+let _lb_new_elem = fresh_var ()
+let _lb_new_region = fresh_var ()
+let lb_new_scheme =
+  let aid = match _lb_new_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  let rid = match _lb_new_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [aid; rid];
+    body = Ast.TyArrow (Ast.TyUnit,
+      Ast.TyCon ("ListBuf", [_lb_new_region; _lb_new_elem])) }
+
+let _lb_push_elem = fresh_var ()
+let _lb_push_region = fresh_var ()
+let lb_push_scheme =
+  let aid = match _lb_push_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  let rid = match _lb_push_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [aid; rid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("ListBuf", [_lb_push_region; _lb_push_elem]),
+      Ast.TyArrow (_lb_push_elem, Ast.TyUnit)) }
+
+let _lb_to_list_elem = fresh_var ()
+let _lb_to_list_region = fresh_var ()
+let lb_to_list_scheme =
+  let aid = match _lb_to_list_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  let rid = match _lb_to_list_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [aid; rid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("ListBuf", [_lb_to_list_region; _lb_to_list_elem]),
+      Ast.TyCon ("list", [_lb_to_list_elem])) }
+let () = Hashtbl.replace types "ListBuf" 2
 
 (* Q-012 step 3a: concurrency type constructors. `Channel[T]` (arity 1)
    and `ThreadHandle` (arity 0, e.g. `let h : ThreadHandle = spawn (...)`). *)
@@ -2298,6 +2343,10 @@ let initial_env : env =
     ("vec_sort",    vec_sort_scheme);
     ("vec_filter",   vec_filter_scheme);
     ("vec_to_list",  vec_to_list_scheme);
+    (* Q-106: the in-order list builder *)
+    ("lb_new",       lb_new_scheme);
+    ("lb_push",      lb_push_scheme);
+    ("lb_to_list",   lb_to_list_scheme);
     ("vec_to_owned", vec_to_owned_scheme);
     ("owned_vec_to_vec", owned_vec_to_vec_scheme);
     ("owned_vec_new",  owned_vec_new_scheme);
@@ -2702,6 +2751,20 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        let result_ty = Ast.TyCon ("Vec", [marker; fresh_var ()]) in
        (* Force the scheme's region tyvar to bind to our marker by
           unifying through the call. *)
+       unify e.loc tf (Ast.TyArrow (ta, result_ty));
+       result_ty
+     | Ast.Var "lb_new" ->
+       (* Q-106: the builder is bound to the innermost active region at
+          construction, exactly like vec_new, so it cannot leave it. *)
+       let active_region =
+         match !active_regions with
+         | r :: _ -> r
+         | [] -> "__heap"
+       in
+       let marker =
+         Ast.TyRef (Ast.BorrowedRead, active_region, Ast.TyUnit)
+       in
+       let result_ty = Ast.TyCon ("ListBuf", [marker; fresh_var ()]) in
        unify e.loc tf (Ast.TyArrow (ta, result_ty));
        result_ty
      | Ast.Var "read_file_bytes" ->

@@ -1,0 +1,92 @@
+// Q-106: ListBuf -- a list built in order, without the reversed accumulator.
+//
+// lb_push splices a fresh Cons onto the tail; lb_to_list hands the head out
+// and freezes the builder. What every backend must agree on: element order,
+// the empty case, nested builders (a list of lists), strings and tuples as
+// elements, a builder used from inside a function, and the frozen builder
+// refusing a further push with the same sentence everywhere (caught here
+// with try_or, so the program continues).
+
+let rec show_ints = fn (xs: int list) -> fn (acc: str) ->
+  match xs with
+  | Nil -> acc
+  | Cons (h, t) -> show_ints t (acc ++ str_of_int h ++ " ");
+
+// 1. ints, in order
+let b1 = lb_new ();
+let rec fill1 = fn (i: int) -> if i == 50000 then () else let _ = lb_push b1 i in fill1 (i + 1);
+let _ = fill1 0;
+let l1 = lb_to_list b1;
+let rec sum = fn (xs: int list) -> fn (acc: int) ->
+  match xs with | Nil -> acc | Cons (h, t) -> sum t ((acc + h) % 65521);
+let _ = print ("ints " ++ str_of_int (len l1) ++ " " ++ str_of_int (sum l1 0)
+               ++ " head " ++ (match l1 with | Cons (h, _) -> str_of_int h | Nil -> "-"));
+
+// 2. empty (the match pins the element type to int: a builder that is never
+// pushed to has no element type of its own, exactly like an empty Vec)
+let b2 = lb_new ();
+let l2 = lb_to_list b2;
+let _ = print ("empty " ++ str_of_int (len l2) ++ " "
+               ++ (match l2 with | Nil -> "Nil" | Cons (h, _) -> "Cons " ++ str_of_int (h + 1)));
+
+// 3. strings and tuples
+let b3 = lb_new ();
+let _ = lb_push b3 "alpha";
+let _ = lb_push b3 ("be" ++ "ta");
+let _ = lb_push b3 (str_of_int 42);
+let _ = print ("strs " ++ str_join "," (lb_to_list b3));
+let b4 = lb_new ();
+let rec fill4 = fn (i: int) -> if i == 5 then () else let _ = lb_push b4 (i, str_of_int (i * i)) in fill4 (i + 1);
+let _ = fill4 0;
+let rec show4 = fn (xs: (int * str) list) -> fn (acc: str) ->
+  match xs with
+  | Nil -> acc
+  | Cons ((i, s), t) -> show4 t (acc ++ str_of_int i ++ ":" ++ s ++ " ");
+let _ = print ("pairs " ++ show4 (lb_to_list b4) "");
+
+// 4. a list of lists: an inner builder per row, an outer one for the rows
+// (helpers are top-level `let rec`: the LLVM backend does not take an inner one)
+let outer = lb_new ();
+let rec cols = fn (inner) -> fn (r: int) -> fn (c: int) ->
+  if c == r then () else let _ = lb_push inner (r * 10 + c) in cols inner r (c + 1);
+let rec rows = fn (r: int) ->
+  if r == 4 then ()
+  else
+    let inner = lb_new () in
+    let _ = cols inner r 0 in
+    let _ = lb_push outer (lb_to_list inner) in
+    rows (r + 1);
+let _ = rows 0;
+let rec show_rows = fn (rs: (int list) list) -> fn (acc: str) ->
+  match rs with
+  | Nil -> acc
+  | Cons (r, t) -> show_rows t (acc ++ "[" ++ show_ints r "" ++ "] ");
+let _ = print ("rows " ++ show_rows (lb_to_list outer) "");
+
+// 5. pushed from inside a function, in the region the builder was born in
+let rec squares_into = fn (b) -> fn (i: int) -> fn (n: int) ->
+  if i == n then () else let _ = lb_push b (i * i) in squares_into b (i + 1) n;
+let add_squares = fn (b) -> fn (n: int) -> squares_into b 0 n;
+let b5 = lb_new ();
+let _ = add_squares b5 6;
+let _ = print ("squares " ++ show_ints (lb_to_list b5) "");
+
+// 6. a frozen builder refuses; the program goes on
+let b6 = lb_new ();
+let _ = lb_push b6 1;
+let l6 = lb_to_list b6;
+let after = try_or (fn (_: unit) -> let _ = lb_push b6 2 in "pushed") "refused";
+let _ = print ("frozen " ++ after ++ " " ++ str_of_int (len l6));
+
+// 7. a builder inside a region block, used and consumed there; the block answers
+// an int about the list (its length and a checksum over the last three
+// elements), so nothing but a scalar leaves the block
+let rec fill7 = fn (b) -> fn (i: int) ->
+  if i == 1000 then () else let _ = lb_push b (str_of_int i) in fill7 b (i + 1);
+let n7 = region R {
+  let b = lb_new () in
+  let _ = fill7 b 0 in
+  let l = lb_to_list b in
+  len l * 10000 + str_len (str_join "/" (list_drop l 997))
+};
+print ("region " ++ str_of_int n7)

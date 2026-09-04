@@ -232,6 +232,14 @@ program it names `check (build d)`, the one expression above. Treat it as a
 report: every line is a true statement about garbage, and whether that garbage
 matters is yours to decide.
 
+**Build a list in order with `ListBuf`, not with an accumulator you reverse.**
+`lb_new` / `lb_push` / `lb_to_list` produce a `T list` first-to-last for one
+cell per element; the `Cons (x, acc)` + `list_rev` idiom pays a second cell per
+element that is garbage the moment the reverse returns (23 MB on the JSON
+benchmark). Push where the builder was created -- a push from inside a
+`region` block that the builder was not born in is refused, because the cell
+would outlive its value.
+
 **Sort a `Vec`, not a list, when the list is large.** `list_sort_by` is a
 stable merge sort over an immutable list, and an immutable list's merge sort
 allocates about 3n log n cells plus one closure environment per comparison;

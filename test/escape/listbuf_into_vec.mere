@@ -1,0 +1,5 @@
+// A ListBuf built inside a block, pushed into a Vec that outlives it. Same
+// route as vec_into_vec: a container stored through a container.
+let o = vec_new ();
+let _ = region R { let b = lb_new () in let _ = lb_push b 7 in vec_push o b };
+print (str_of_int (len (lb_to_list (vec_get o 0))))

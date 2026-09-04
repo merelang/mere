@@ -4,6 +4,54 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.416 — 2026-09-05
+
+_`ListBuf`: a list built in order, for one cell per element. The JSON parser
+stops allocating the 23 MB it used to reverse and throw away._
+
+An immutable list grows at the front, so code that produces one first-to-last
+has two idioms: recurse without a tail call, which overflows the stack in the
+tens of thousands, or cons in reverse and reverse at the end. In a bump arena
+the second pays twice -- every cell of the reversed accumulator is garbage the
+moment `rev` returns -- and the attribution table for the JSON benchmark
+charged 30 MB of a 105 MB run to exactly that. Wrapping the parser's loops in
+a `region` was tried and dropped: the copy-out multiplies with nesting depth
+and doubles the peak on a document that is one container deep.
+
+`lb_new` / `lb_push` / `lb_to_list` (typer, interpreter, C, LLVM, Wasm; the
+RV32I backend refuses at emit time) append by writing the previous cell's
+tail. Nothing can observe that, because no cell is visible until `lb_to_list`
+hands the head out -- and at that moment the builder freezes. The cells
+reference the pushed values without copying them, which two runtime refusals
+make sound: a push after `lb_to_list`, and a push while a region other than
+the builder's is current (the cell would point at a value that dies with
+that region). Both are the same sentence on every backend and catchable with
+`try_or`; the interpreter, which has no arenas, keeps a region id so it
+refuses the same programs. The type carries the region marker like `Vec`, so
+a builder cannot leave its region or be stored across one -- two new rows in
+`test/escape/ROUTES`, both GATED.
+
+`contrib/json` builds its arrays and objects with it: 105.2 -> 82.2 MB on the
+benchmark document, 101.9 -> 80.0 MiB resident, the same bytes out; the row
+now sits under Go's 90.8 MiB. Parity: `test/parity/list_builder.mere` (order,
+empty, strings and tuples, a list of lists, a push from inside a function, the
+frozen refusal caught, a builder consumed inside a region) and two failing
+programs under `test/parity/fail/` (four backends, one message each).
+Documented in the stdlib reference, the memory model and patterns 8.4; the
+host matrix gains the three rows. The self-hosted Wasm codegen (contrib/codegen)
+learned the three builtins too, since it compiles contrib/json in the test
+suite -- its Nil and Cons tags are allocated lazily, so they travel to the
+helper as arguments.
+
+Found on the way, recorded rather than fixed: the Wasm backend's copy-out of a
+boxed value from a `region` block (`$__mcopy_<T>` for tuples, records and
+variants) still has the 4-byte layout from before the i64 value model, and
+wat2wasm rejects the module; only scalar results ever worked. The parity test
+for the builder answers a scalar from its region section for that reason, and
+the hole is an open question with a reproducing command.
+
+---
+
 ## v0.1.415 — 2026-09-05
 
 _`mere --suggest-regions` says where a `region R { }` would bound the

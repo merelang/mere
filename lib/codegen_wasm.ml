@@ -305,6 +305,9 @@ let extern_fn_decls_wasm : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
    typed structs). The flag is set the first time emit_expr / ty
    inspection sees a Vec value; emit_program emits the helpers iff true. *)
 let vec_used = ref false
+let lb_used = ref false           (* Q-106: the in-order list builder *)
+let lb_frozen_msg_offset = ref 0
+let lb_region_msg_offset = ref 0
 
 (* Phase 15.5: vec_iter / vec_fold reference `(type $cl)` and use
    `call_indirect`, which both require a funcref table to be declared
@@ -743,6 +746,7 @@ let rec ty_tag (t : Ast.ty) : string =
        runtime. Make ty_tag return a value so it can also be used via tuple
        / variant payload types. *)
     "strbuf"
+  | Ast.TyCon ("ListBuf", _) -> "listbuf"   (* Q-106: one runtime for every T *)
   | Ast.TyCon ("Map", [_region; k_ty; v_ty]) ->
     (* Phase 43: In Wasm too, Map is an i32 pointer, so return a ty_tag so
        it can be treated as a carrier in tuple / closure env / variant
@@ -1771,6 +1775,10 @@ let rec emit_expr (e : Ast.expr) : unit =
       raise (Codegen_error (e.Ast.loc,
         "unsupported in Wasm codegen subset: " ^ name
         ^ " as a value (Phase 15.11/15.12: len / vec_to_list only support direct application)"));
+    if not is_shadowed && (name = "lb_new" || name = "lb_push" || name = "lb_to_list") then
+      raise (Codegen_error (e.Ast.loc,
+        "unsupported in Wasm codegen subset: " ^ name
+        ^ " as a value (Q-106: lb_new / lb_push / lb_to_list only support direct application)"));
     if phase38c_emittable then begin
       (* Phase 38.C-5: emit the synthesized eta-expanded Fun chain.
          Inner App nodes hit the existing direct-call fast paths
@@ -3110,6 +3118,21 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_instr "else";
     emit_instr (Printf.sprintf "local.get %d" result_slot);
     emit_instr "end"
+  | Ast.App ({ node = Ast.Var "lb_new"; _ }, _arg) ->
+    (* Q-106: the builder records $__lang_region_depth; lb_push refuses while
+       the depth differs (a block rolls the bump back at its end, so a cell
+       spliced in from inside one would be undone with it). *)
+    lb_used := true;
+    emit_instr "call $mere_lb_new"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "lb_push"; _ }, b_e); _ }, val_e) ->
+    lb_used := true;
+    emit_expr b_e;
+    emit_expr val_e;
+    emit_instr "call $mere_lb_push"
+  | Ast.App ({ node = Ast.Var "lb_to_list"; _ }, b_e) ->
+    lb_used := true;
+    emit_expr b_e;
+    emit_instr "call $mere_lb_to_list"
   | Ast.App ({ node = Ast.Var "vec_new"; _ }, _arg) ->
     (* Phase 15.4: vec_new () — ignore region (Wasm's bump is a single
        global), and since all elements are 4-byte i32 a single runtime
@@ -8750,6 +8773,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   fail_prefix_offset := fresh_str_offset "fail: ";
   divzero_msg_offset := fresh_str_offset "division by zero";
   idx_pre_get_offset := fresh_str_offset "vec_get: index ";
+  lb_frozen_msg_offset := fresh_str_offset "lb_push: the builder was already turned into a list by lb_to_list";
+  lb_region_msg_offset := fresh_str_offset "lb_push: the builder belongs to a region that is not current";
   idx_pre_set_offset := fresh_str_offset "vec_set: index ";
   idx_mid_vec_offset := fresh_str_offset " out of bounds (len = ";
   idx_post_vec_offset := fresh_str_offset ")";
@@ -9695,6 +9720,62 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       \    (i64.extend_i32_u (local.get $acc)))\n"
       nil_tag_v cons_tag_v
   in
+  (* Q-106: the in-order list builder -- 32 bytes { head:i32, tail:i32,
+     depth:i32, frozen:i32, nil:i32 }, cells laid out exactly as
+     $mere_vec_to_list lays them: a 16-byte Cons { tag, payload } whose payload
+     is a 16-byte tuple { f0 = x, f1 = next }. A refusal returns what
+     $__lang_fail returns, the way $mere_vec_get's bounds check does. *)
+  let lb_section =
+    if not !lb_used then "" else
+    Printf.sprintf "
+  (func $mere_lb_new (result i64)
+    (local $b i32) (local $nil i32)
+    (local.set $b (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $b) (i32.const 32)))
+    (local.set $nil (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $nil) (i32.const 16)))
+    (i64.store offset=0 (local.get $nil) (i64.const %d))  ;; nil_tag
+    (i32.store offset=0 (local.get $b) (i32.const 0))
+    (i32.store offset=4 (local.get $b) (i32.const 0))
+    (i32.store offset=8 (local.get $b) (global.get $__lang_region_depth))
+    (i32.store offset=12 (local.get $b) (i32.const 0))
+    (i32.store offset=16 (local.get $b) (local.get $nil))
+    (i64.extend_i32_u (local.get $b)))
+  (func $mere_lb_push (param $b8 i64) (param $x i64) (result i64)
+    (local $b i32) (local $tup i32) (local $node i32) (local $tail i32)
+    (local.set $b (i32.wrap_i64 (local.get $b8)))
+    (if (i32.ne (i32.load offset=12 (local.get $b)) (i32.const 0))
+      (then (return (call $__lang_fail (i64.const %d)))))
+    (if (i32.ne (i32.load offset=8 (local.get $b)) (global.get $__lang_region_depth))
+      (then (return (call $__lang_fail (i64.const %d)))))
+    (local.set $tup (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $tup) (i32.const 16)))
+    (i64.store offset=0 (local.get $tup) (local.get $x))
+    (i64.store offset=8 (local.get $tup)
+      (i64.extend_i32_u (i32.load offset=16 (local.get $b))))
+    (local.set $node (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $node) (i32.const 16)))
+    (i64.store offset=0 (local.get $node) (i64.const %d))  ;; cons_tag
+    (i64.store offset=8 (local.get $node) (i64.extend_i32_u (local.get $tup)))
+    (local.set $tail (i32.load offset=4 (local.get $b)))
+    (if (i32.eqz (local.get $tail))
+      (then (i32.store offset=0 (local.get $b) (local.get $node)))
+      (else
+        (i64.store offset=8
+          (i32.wrap_i64 (i64.load offset=8 (local.get $tail)))
+          (i64.extend_i32_u (local.get $node)))))
+    (i32.store offset=4 (local.get $b) (local.get $node))
+    (i64.const 0))
+  (func $mere_lb_to_list (param $b8 i64) (result i64)
+    (local $b i32) (local $hd i32)
+    (local.set $b (i32.wrap_i64 (local.get $b8)))
+    (i32.store offset=12 (local.get $b) (i32.const 1))
+    (local.set $hd (i32.load offset=0 (local.get $b)))
+    (if (result i64) (i32.eqz (local.get $hd))
+      (then (i64.extend_i32_u (i32.load offset=16 (local.get $b))))
+      (else (i64.extend_i32_u (local.get $hd)))))"
+      nil_tag_v !lb_frozen_msg_offset !lb_region_msg_offset cons_tag_v
+  in
   let vec_to_list_section =
     if not !vec_to_list_used then "" else
     Printf.sprintf "
@@ -10464,7 +10545,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     list_str_runtime_section
     vec_runtime_section
     vec_higher_order_section strbuf_section map_key_eq_section map_runtime_section
-    (args_host_section ^ env_host_section ^ vec_to_list_section) list_len_section
+    (args_host_section ^ env_host_section ^ vec_to_list_section ^ lb_section) list_len_section
     fn_section component_section local_decl indented_body
   |> prune_dead_fail_checks
 
