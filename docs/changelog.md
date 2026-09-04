@@ -4,6 +4,42 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.415 — 2026-09-05
+
+_`mere --suggest-regions` says where a `region R { }` would bound the
+footprint. It infers nothing and changes nothing: it is the compiler naming the
+expression, so that the decision lands in the source, where the language wants
+it visible._
+
+Mere does not reclaim by default, and the design keeps it that way -- a
+reclamation point the source does not show is the implicit memory management
+the principles exclude. What was missing was not the construct but knowing
+where to put it: the binarytrees row went from 169 MiB to 5.5 MiB by wrapping
+one expression, and finding that expression took reading the allocator. The
+report walks the typed program every backend starts from and names two shapes,
+both safe to wrap by construction because what crosses the boundary is a
+scalar and copies out for nothing: a call, comparison or match whose value is
+scalar and one of whose operands is a freshly built heap value (`check (build
+d)`, `str_eq (substring line 0 4) "path"`, `match str_split line " " with`),
+and a non-recursive function whose result is scalar and whose body allocates.
+Recursive bodies are not suggested wholesale -- a region around a tail call
+nests one open arena per iteration -- so the report points at the expression
+inside instead, and it stays quiet inside existing regions, in the prelude,
+and in straight-line top-level code.
+
+Measured on the repository: bench.mere gets two lines, the `check (build d)`
+that mattered and a `print` of a built string; bench_pertree.mere gets only
+the `print`. Across 135 contrib files that compile on their own, 822 lines:
+`print` of a built string 113, `strbuf_push` of a built string 99, `int_of_str
+(substring ...)` 87, a match on a built value 66, `str_eq` against a substring
+41, `map_set` with a built key 27. Every one spot-checked was a true statement
+about garbage; whether the garbage matters is the program's business, which is
+why this is a report and not a warning. `scripts/suggest_check.sh` (in CI)
+holds it to the finding it exists for, and to silence where the region is
+already written.
+
+---
+
 ## v0.1.414 — 2026-09-05
 
 _Containers grow in place. The one-shot benchmarks that were paying twice for

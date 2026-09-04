@@ -220,8 +220,17 @@ builds a 300,000-element list that costs 48 bytes a word -- 14 MB for words
 that are read once and counted. Reading a line at a time inside a per-line
 region (`file_read_line`, or `contrib/stream`) and splitting the line keeps
 the footprint at the table plus one line: the `wordfreq` benchmark's streaming
-row runs in 9.8 MiB where the one-shot program takes 26.9 MiB, and prints the
-same bytes.
+row runs in 4.1 MiB and 23 ms where the one-shot program takes 26.9 MiB and
+29 ms, and prints the same bytes.
+
+**Ask the compiler where.** `mere --suggest-regions file.mere` lists the
+expressions where a `region R { }` would bound the footprint -- calls,
+comparisons and matches whose value is a scalar and whose operand is a
+freshly built heap value, and non-recursive functions with a scalar result and
+an allocating body. It infers nothing and edits nothing; on the binarytrees
+program it names `check (build d)`, the one expression above. Treat it as a
+report: every line is a true statement about garbage, and whether that garbage
+matters is yours to decide.
 
 **Sort a `Vec`, not a list, when the list is large.** `list_sort_by` is a
 stable merge sort over an immutable list, and an immutable list's merge sort
