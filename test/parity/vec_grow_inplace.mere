@@ -1,0 +1,62 @@
+// v0.1.414: container growth in place. A Vec / StrBuf / ByteBuf that is the
+// most recent allocation in its region grows by moving the bump pointer; one
+// that is not grows by copying into a fresh buffer. The program must not be
+// able to tell which happened, so this exercises both paths and prints what
+// the containers hold afterwards -- on every backend, against the interpreter.
+//
+// Each Vec gets one literal element at its binding so the element type is
+// fixed where the Vec is created (the LLVM backend reads it there).
+
+// 1. a Vec grown with nothing allocated in between (the in-place path)
+let v1 = vec_new ();
+let _ = vec_push v1 0;
+let rec fill1 = fn (i: int) ->
+  if i == 100000 then () else let _ = vec_push v1 (i * 7 % 1009) in fill1 (i + 1);
+let _ = fill1 0;
+let rec sum1 = fn (i: int) -> fn (acc: int) ->
+  if i == vec_len v1 then acc else sum1 (i + 1) ((acc + vec_get v1 i) % 65521);
+let _ = print ("v1 " ++ str_of_int (vec_len v1) ++ " " ++ str_of_int (sum1 0 0));
+
+// 2. a Vec grown while other values are allocated between pushes (the copy path)
+let v2 = vec_new ();
+let _ = vec_push v2 0;
+let rec fill2 = fn (i: int) -> fn (acc: str) ->
+  if i == 20000 then acc
+  else
+    let s = str_of_int i ++ "-" in
+    let _ = vec_push v2 (str_len s + i) in
+    fill2 (i + 1) (if i % 4000 == 0 then acc ++ s else acc);
+let tail2 = fill2 0 "";
+let rec sum2 = fn (i: int) -> fn (acc: int) ->
+  if i == vec_len v2 then acc else sum2 (i + 1) ((acc + vec_get v2 i) % 65521);
+let _ = print ("v2 " ++ str_of_int (vec_len v2) ++ " " ++ str_of_int (sum2 0 0) ++ " " ++ tail2);
+
+// 3. two Vecs pushed alternately: neither is at the top for long
+let va = vec_new ();
+let _ = vec_push va 0;
+let vb = vec_new ();
+let _ = vec_push vb 0;
+let rec fill3 = fn (i: int) ->
+  if i == 30000 then ()
+  else let _ = vec_push va i in let _ = vec_push vb (i * 3) in fill3 (i + 1);
+let _ = fill3 0;
+let _ = print ("va/vb " ++ str_of_int (vec_get va 30000) ++ " " ++ str_of_int (vec_get vb 30000)
+               ++ " " ++ str_of_int (vec_get va 12345) ++ " " ++ str_of_int (vec_get vb 12345));
+
+// 4. a StrBuf grown by many small pushes, then one push larger than its capacity
+let sb = strbuf_new ();
+let rec fill4 = fn (i: int) ->
+  if i == 5000 then () else let _ = strbuf_push sb (str_of_int (i % 10)) in fill4 (i + 1);
+let _ = fill4 0;
+let _ = strbuf_push sb (str_repeat "z" 20000);
+let s4 = strbuf_to_str sb;
+let _ = print ("sb " ++ str_of_int (str_len s4) ++ " " ++ substring s4 4990 5010
+               ++ " " ++ substring s4 24990 25000);
+
+// 5. a Vec of strings (elements are copied into the vec's region between growths)
+let v5 = vec_new ();
+let _ = vec_push v5 "w";
+let rec fill5 = fn (i: int) ->
+  if i == 3000 then () else let _ = vec_push v5 ("w" ++ str_of_int i) in fill5 (i + 1);
+let _ = fill5 0;
+print ("v5 " ++ str_of_int (vec_len v5) ++ " " ++ vec_get v5 1 ++ " " ++ vec_get v5 3000)

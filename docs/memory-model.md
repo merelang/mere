@@ -227,6 +227,25 @@ allocation-heavy program (e.g. a per-pixel renderer) silently overran the
 `test/parity/region_growth.mere` (a checksum over ~6 MB of live region
 allocations, matching across all four backends).
 
+**Containers grow in place when they can (v0.1.414).** `vec_push`,
+`strbuf_push` and `bytebuf_push` double their buffer when it fills. In a bump
+arena the old buffer cannot be handed back, so before v0.1.414 a container
+built by pushing cost twice its final size in cumulative allocation -- the
+`matmul` benchmark allocated 12.6 MB for three 2 MiB matrices, to within 248
+bytes of exactly 3 x (2 + 2) MiB. Now, when the buffer being grown is the most
+recent allocation in its region and the current block has room, the bump
+pointer simply moves and the buffer keeps its address; when a large buffer
+lives in a dedicated block of its own (the v0.1.307 policy for allocations
+bigger than a quarter of the bump block), that block is `realloc`'d and the
+chain re-linked; otherwise the growth is a fresh allocation plus a copy, as
+before. The program cannot observe which path ran -- only `alloc_total` and the
+footprint change (matmul 12.6 -> 6.3 MB; a 200,000-int Vec 4 -> 2 MiB, which
+`scripts/region_slack_check.sh` now holds). The C backend does all three; the
+LLVM backend does the in-place path for `Vec`; the Wasm backend does it for
+`Vec` only while no `region` block is open, because its blocks are a rollback
+of the one bump pointer and extending an outer container's buffer into a
+block would be undone with it. A `Map` still copies its arrays on growth.
+
 ---
 
 ## 4. Current state in mere (as of 2026-06-24, Phase 46)
