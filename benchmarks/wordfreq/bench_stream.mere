@@ -14,6 +14,12 @@
 // first sight and nothing else escapes. The ranking is `vec_sort` on the
 // pair vector: in place, stable, and its scratch is malloc/free rather than
 // arena, so the sort leaves nothing behind. Same bytes out.
+//
+// Measured at v0.1.414 (reps 5): 4.1 MiB peak RSS and 23 ms, against 26.9 MiB
+// and 29 ms for bench.mere -- the Rust row's footprint (3.7 MiB) and its wall
+// clock. The first version of this row read 9.8 MiB and 61 ms; the footprint
+// was `list_sort_by` growing one arena to a 15 MB chain, and the time was
+// `file_read_line` reading a byte at a time -- neither was the regions.
 
 let path = match args () with | Cons (p, _) -> p | Nil -> "";
 let counts = map_new ();
