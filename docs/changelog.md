@@ -4,6 +4,21 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.417 — 2026-09-05
+
+_The README's parity count was two behind, and the gate that exists to notice
+that noticed it -- in CI, after v0.1.415 had shipped with the number wrong._
+
+`first_run_check` reads the parity program count out of the README and
+compares it with `test/parity`; v0.1.414 and v0.1.416 each added a program and
+neither release updated the sentence, so the v0.1.415 and v0.1.416 CI runs
+went red on that step alone. 149 -> 151, and the test count beside it
+2617 -> 2620. Nothing else changes. The lesson is the one the gate already
+states: a number in a README rots silently, and the release that adds a
+program is the release that has to move it.
+
+---
+
 ## v0.1.416 — 2026-09-05
 
 _`ListBuf`: a list built in order, for one cell per element. The JSON parser
