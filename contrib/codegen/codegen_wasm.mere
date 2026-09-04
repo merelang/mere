@@ -298,6 +298,8 @@ let is_builtin = fn (n: str) ->
   n == "map_delete" || n == "map_head" ||
   n == "vec_new" || n == "vec_push" || n == "vec_get" || n == "vec_set" ||
   n == "vec_len" ||
+  // Q-106: the in-order list builder
+  n == "lb_new" || n == "lb_push" || n == "lb_to_list" ||
   // Phase 54.33: float ops
   n == "float_of_int" || n == "int_of_float" ||
   n == "f_add" || n == "f_sub" || n == "f_mul" || n == "f_div" ||
@@ -1332,6 +1334,28 @@ let rec emit_expr = fn (e: expr) -> fn (s0: EmitState) ->
         let s1 = note_helper_use "map_head" s0 in
         let s2 = emit_expr x s1 in
         push_instr "call $map_head" s2
+      | EVar "lb_new" ->
+        // Q-106: `lb_new ()` — arg is unit, ignore it. The builder's Nil
+        // cell needs the Nil tag, which this codegen allocates lazily, so
+        // it travels as an argument instead of living in the helper text.
+        let s0 = note_helper_use "lb" s in
+        let (nil_tag, s1) = lookup_or_alloc_variant_tag "Nil" s0 in
+        let s2 = push_instr ("i32.const " ++ show nil_tag) s1 in
+        push_instr "call $mere_lb_new" s2
+      | EVar "lb_to_list" ->
+        let s0 = note_helper_use "lb" s in
+        let s1 = emit_expr x s0 in
+        push_instr "call $mere_lb_to_list" s1
+      | EApp (EVar "lb_push", b_e) ->
+        // `lb_push b x` — splice a Cons { tag, payload -> (x, nil) } onto the
+        // tail. Same cell layout as EConstr / ETuple here: 8-byte node
+        // { tag @0, payload @4 }, 8-byte tuple { f0 @0, f1 @4 }.
+        let s0 = note_helper_use "lb" s in
+        let s1 = emit_expr b_e s0 in
+        let s2 = emit_expr x s1 in
+        let (cons_tag, s3) = lookup_or_alloc_variant_tag "Cons" s2 in
+        let s4 = push_instr ("i32.const " ++ show cons_tag) s3 in
+        push_instr "call $mere_lb_push" s4
       | EVar "vec_new" ->
         // beta: `vec_new ()` — arg is unit, ignore it. All elements are
         // 4-byte i32 so one runtime covers every element type.
@@ -2282,6 +2306,50 @@ let helper_decl_map_head =
 // which the bump arena tolerates). get/set are bounds-checked (trap on
 // out-of-range, matching the OCaml runtime). Emitted as one group when
 // any vec op is used (note_helper_use "vec").
+// Q-106: ListBuf -- 16-byte record { head @0, tail @4, nil @8, frozen @12 }.
+// A push after lb_to_list traps (the OCaml backends fail with a sentence;
+// `fail` lowers to `unreachable` throughout this codegen). There are no
+// region blocks in this codegen, so there is no other-region push to refuse.
+let helper_decl_lb =
+  "  (func $mere_lb_new (param $nil_tag i32) (result i32)\n" ++
+  "    (local $b i32) (local $nil i32)\n" ++
+  "    (local.set $b (global.get $__lang_bump))\n" ++
+  "    (global.set $__lang_bump (i32.add (local.get $b) (i32.const 16)))\n" ++
+  "    (local.set $nil (global.get $__lang_bump))\n" ++
+  "    (global.set $__lang_bump (i32.add (local.get $nil) (i32.const 8)))\n" ++
+  "    (i32.store offset=0 (local.get $nil) (local.get $nil_tag))\n" ++
+  "    (i32.store offset=4 (local.get $nil) (i32.const 0))\n" ++
+  "    (i32.store offset=0 (local.get $b) (i32.const 0))\n" ++
+  "    (i32.store offset=4 (local.get $b) (i32.const 0))\n" ++
+  "    (i32.store offset=8 (local.get $b) (local.get $nil))\n" ++
+  "    (i32.store offset=12 (local.get $b) (i32.const 0))\n" ++
+  "    (local.get $b))\n" ++
+  "  (func $mere_lb_push (param $b i32) (param $x i32) (param $cons_tag i32) (result i32)\n" ++
+  "    (local $tup i32) (local $node i32) (local $tail i32)\n" ++
+  "    (if (i32.ne (i32.load offset=12 (local.get $b)) (i32.const 0))\n" ++
+  "      (then (unreachable)))\n" ++
+  "    (local.set $tup (global.get $__lang_bump))\n" ++
+  "    (global.set $__lang_bump (i32.add (local.get $tup) (i32.const 8)))\n" ++
+  "    (i32.store offset=0 (local.get $tup) (local.get $x))\n" ++
+  "    (i32.store offset=4 (local.get $tup) (i32.load offset=8 (local.get $b)))\n" ++
+  "    (local.set $node (global.get $__lang_bump))\n" ++
+  "    (global.set $__lang_bump (i32.add (local.get $node) (i32.const 8)))\n" ++
+  "    (i32.store offset=0 (local.get $node) (local.get $cons_tag))\n" ++
+  "    (i32.store offset=4 (local.get $node) (local.get $tup))\n" ++
+  "    (local.set $tail (i32.load offset=4 (local.get $b)))\n" ++
+  "    (if (i32.eqz (local.get $tail))\n" ++
+  "      (then (i32.store offset=0 (local.get $b) (local.get $node)))\n" ++
+  "      (else (i32.store offset=4 (i32.load offset=4 (local.get $tail)) (local.get $node))))\n" ++
+  "    (i32.store offset=4 (local.get $b) (local.get $node))\n" ++
+  "    (i32.const 0))\n" ++
+  "  (func $mere_lb_to_list (param $b i32) (result i32)\n" ++
+  "    (local $hd i32)\n" ++
+  "    (i32.store offset=12 (local.get $b) (i32.const 1))\n" ++
+  "    (local.set $hd (i32.load offset=0 (local.get $b)))\n" ++
+  "    (if (result i32) (i32.eqz (local.get $hd))\n" ++
+  "      (then (i32.load offset=8 (local.get $b)))\n" ++
+  "      (else (local.get $hd))))\n";
+
 let helper_decl_vec =
   "  (func $mere_vec_new (result i32)\n" ++
   "    (local $v i32) (local $buf i32)\n" ++
@@ -2877,6 +2945,7 @@ let helper_body = fn (name: str) ->
   else if name == "map_delete" then helper_decl_map_delete
   else if name == "map_head" then helper_decl_map_head
   else if name == "vec" then helper_decl_vec
+  else if name == "lb" then helper_decl_lb
   else if name == "streq" then helper_decl_streq
   else if name == "is_space" then helper_decl_is_space
   else if name == "str_starts_with" then helper_decl_str_starts_with

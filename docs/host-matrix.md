@@ -112,6 +112,7 @@ machine rather than a host.
 | `is_digit` | yes | yes | yes | yes |
 | `is_space` | yes | yes | yes | yes |
 | `join` | yes | yes | yes | unattributed |
+| `lb_new` | yes | yes | yes | refused |
 | `lcm` | yes | yes | yes | unattributed |
 | `list_dir` | yes | refused | refused | refused |
 | `log` | yes | yes | yes | yes |

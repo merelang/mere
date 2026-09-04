@@ -1,0 +1,13 @@
+// Q-106: a ListBuf born in the program-lifetime region, pushed from inside a
+// `region R { }` block. The cell would point at a value that dies with the
+// block, so every backend refuses -- the interpreter by region id, the C
+// backend by the current-region pointer, LLVM and Wasm by open-block depth.
+//
+// Execution mode: 4 backends, compared on exit status + stdout + failure message
+
+let b = lb_new ();
+let _ = lb_push b "outside";
+let _ = print "before";
+let _ = region R { let _ = lb_push b ("in" ++ "side") in 0 };
+let _ = print "unreachable";
+0

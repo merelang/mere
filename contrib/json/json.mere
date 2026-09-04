@@ -29,15 +29,6 @@ type json =
   | JArr  of json list
   | JObj  of (str * json) list;
 
-// === List utilities (rev for accumulator-style parsing) ===
-
-let rec rev_aux = fn (xs, acc) ->
-  match xs with
-  | [] -> acc
-  | [h, ...t] -> rev_aux t (Cons (h, acc));
-
-let rev = fn (xs) -> rev_aux xs Nil;
-
 // === Whitespace skip ===
 
 let rec skip_ws = fn (s: str, i: int) ->
@@ -131,17 +122,23 @@ and parse_array = fn (s: str, i: int) ->
   if i < str_len s && char_at s i == ']'
   then (JArr Nil, i + 1)
   else
-    let rec loop = fn (acc, j) ->
+    // Q-106: the elements go into a ListBuf and come out in order. The
+    // reversed accumulator this used to build -- one cons per element, all
+    // of them garbage the moment `rev` returned -- was 30 MB of a 105 MB run
+    // on the benchmark document.
+    let b = lb_new () in
+    let rec loop = fn (j: int) ->
       let (v, j) = parse_value s j in
+      let _ = lb_push b v in
       let j = skip_ws s j in
       if j >= str_len s then fail "unexpected EOF in array"
       else
         match char_at s j with
-        | ',' -> loop (Cons (v, acc)) (j + 1)
-        | ']' -> (JArr (rev (Cons (v, acc))), j + 1)
+        | ',' -> loop (j + 1)
+        | ']' -> (JArr (lb_to_list b), j + 1)
         | _   -> fail ("expected ',' or ']' at pos " ++ str_of_int j)
     in
-    loop Nil i
+    loop i
 
 and parse_object = fn (s: str, i: int) ->
   let i = expect_char s i '{' in
@@ -149,21 +146,23 @@ and parse_object = fn (s: str, i: int) ->
   if i < str_len s && char_at s i == '}'
   then (JObj Nil, i + 1)
   else
-    let rec loop = fn (acc, j) ->
+    let b = lb_new () in
+    let rec loop = fn (j: int) ->
       let j = skip_ws s j in
       let (key, j) = parse_raw_str s j in
       let j = skip_ws s j in
       let j = expect_char s j ':' in
       let (v, j) = parse_value s j in
+      let _ = lb_push b (key, v) in
       let j = skip_ws s j in
       if j >= str_len s then fail "unexpected EOF in object"
       else
         match char_at s j with
-        | ',' -> loop (Cons ((key, v), acc)) (j + 1)
-        | '}' -> (JObj (rev (Cons ((key, v), acc))), j + 1)
+        | ',' -> loop (j + 1)
+        | '}' -> (JObj (lb_to_list b), j + 1)
         | _   -> fail ("expected ',' or '}' at pos " ++ str_of_int j)
     in
-    loop Nil i;
+    loop i;
 
 // === Top-level entry: parses a single JSON value, allows trailing ws ===
 

@@ -61,6 +61,11 @@ claim = a different question from every other row here. This is `contrib/json`,
 # parser discards -- the reversed accumulators an immutable list needs to be
 # built in order -- and those are the next two numbers, in that order.
 #
+# 82.2 MB at v0.1.416: the parser builds its arrays and objects with ListBuf
+# (Q-106) instead of a reversed accumulator, so the 23 MB of cons cells that
+# existed only to be reversed are not allocated at all. What remains is the
+# tree (69 MB, 5.9x the document) and the document itself.
+#
 # The floor sits well below the current value on purpose. Its job is to catch a
 # meter that stopped seeing its subject, not to argue with the next
 # improvement -- and it has already caught one legitimate halving by being too

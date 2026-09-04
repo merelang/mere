@@ -57,7 +57,7 @@ let scalar_ty t =
 let container_ty t =
   match walk t with
   | TyCon (("Vec" | "OwnedVec" | "Map" | "StrBuf" | "ByteBuf" | "Channel"
-            | "ThreadHandle"), _) -> true
+            | "ThreadHandle" | "ListBuf"), _) -> true
   | TyRef _ -> true
   | _ -> false
 

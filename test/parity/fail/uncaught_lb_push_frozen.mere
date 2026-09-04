@@ -1,0 +1,12 @@
+// Q-106: lb_to_list hands the cells out; a push after that would mutate a
+// list somebody may already be reading, so it is refused.
+//
+// Execution mode: 4 backends, compared on exit status + stdout + failure message
+
+let b = lb_new ();
+let _ = lb_push b 1;
+let l = lb_to_list b;
+let _ = print ("before " ++ str_of_int (len l));
+let _ = lb_push b 2;
+let _ = print "unreachable";
+0

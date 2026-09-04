@@ -936,6 +936,32 @@ plus one closure environment per comparison (the comparator is curried); on
 5,000 pairs that measured 8.3 MB. For a large list that is sorted once, build
 a `Vec` and use `vec_sort` -- see patterns §8.4.
 
+**`ListBuf[R, T]` — a list built in order (v0.1.416).** An immutable list grows
+only at the front, so code that produces one first-to-last either recurses
+without a tail call (and overflows the stack in the tens of thousands) or
+conses in reverse and reverses at the end — and in a bump arena every cell of
+that reversed accumulator is garbage the moment the reverse returns. On the
+JSON benchmark that was 23 MB of a 105 MB run. The builder appends by writing
+the previous cell's tail, which nothing can observe because no cell is visible
+until the list is handed out:
+
+| builtin | type | notes |
+|---|---|---|
+| `lb_new` | `unit -> ListBuf[R, T]` | bound to the innermost active region (or the program-lifetime one), like `vec_new` |
+| `lb_push` | `ListBuf[R, T] -> T -> unit` | appends; the value is referenced, **not copied** |
+| `lb_to_list` | `ListBuf[R, T] -> T list` | hands out the head and **freezes** the builder; an empty builder gives `Nil` |
+
+Two refusals make the no-copy append sound, and they are the same failure on
+every backend (catchable with `try_or`): `lb_push` on a builder that
+`lb_to_list` has frozen — its cells may already be someone's list — and
+`lb_push` while a **different region is current** than the one the builder was
+created in — the cell would point at a value that dies with that region. Push
+where the builder was born; to build inside a block, create the builder inside
+it and let `lb_to_list` copy the list out. A `ListBuf` is a container: it
+cannot leave its region or be stored through another container across one
+(the same escape rules as `Vec`). Not available on the RV32I backend yet
+(refused at emit time).
+
 **`vec_sort : Vec[R, T] -> (T -> T -> int) -> unit`** carries two guarantees that are
 worth stating because a Mere program can observe both (v0.1.349). It is **stable** —
 equal keys keep insertion order — and all four backends run the **same** bottom-up
