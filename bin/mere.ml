@@ -28,6 +28,10 @@ let usage () =
   print_endline "                        mere_lib_init / mere_lib_shutdown / mere_lib_free";
   print_endline "  mere --header <file.mere>";
   print_endline "                        print the C header for that boundary";
+  print_endline "  mere --suggest-regions <file.mere>";
+  print_endline "                        list the expressions where a `region R { }`";
+  print_endline "                        would bound the footprint (a report, not a check:";
+  print_endline "                        nothing is inferred, the source stays explicit)";
   print_endline "  mere -rv <file.mere>  emit a flat RV32IM binary (runs on the Mere RISC-V";
   print_endline "                        emulator; integer subset — see codegen_riscv.ml)";
   print_endline "  mere -rve <expr>      emit an RV32IM binary for an inline expression";
@@ -527,6 +531,24 @@ let () =
     let base = Filename.dirname path in
     set_lib_stem path;
     run_action ~base_dir:base (compile_to_c ~base_dir:base) path source
+  | [_; "--suggest-regions"; path] ->
+    (* Where a `region R { }` would pay. The pass reads the same typed program
+       every backend starts from, and prints candidates as `file:line:col`
+       lines; an empty report prints one line saying so, because a report
+       that prints nothing cannot be told from one that did not run. *)
+    let source = read_file path in
+    let base = Filename.dirname path in
+    run_action ~base_dir:base
+      (fun src ->
+         let open Mere in
+         let (prog, _) = infer_program ~base_dir:base src in
+         match Suggest.report ~path prog with
+         | [] -> "no region candidates: every allocation here either escapes or is already inside a region"
+         | lines ->
+           String.concat "\n" lines
+           ^ Printf.sprintf "\n%d region candidate%s" (List.length lines)
+               (if List.length lines = 1 then "" else "s"))
+      path source
   | [_; "--header"; path] ->
     (* the boundary's C header. A lib-mode emission computes the export list;
        the header falls out of the same computation (Codegen_c.lib_header). *)

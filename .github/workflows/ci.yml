@@ -417,6 +417,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/region_slack_check.sh
 
+      # The region report names the one expression that took binarytrees from
+      # 169 MiB to 5.5 MiB, and stays quiet where the region is already written.
+      # Nothing is inferred: the report is where the language says "here", and
+      # the source is where the decision becomes visible (v0.1.415).
+      - name: suggest_check (the region report names the expression that mattered)
+        if: ${{ !cancelled() }}
+        run: sh scripts/suggest_check.sh
+
       # The enumerated escape table. Every way a region-bound value can reach
       # something that outlives its block, with what each entry point answers
       # -- and the four compiling backends must agree, because two backends
