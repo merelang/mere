@@ -44,6 +44,8 @@
 result_container     GATED  REJECT    REJECT      -           -
 vec_into_map         GATED  REJECT    ACCEPT      -           Q-053
 vec_into_vec         GATED  REJECT    ACCEPT      -           Q-053
+listbuf_out          GATED  REJECT    REJECT      -           -
+listbuf_into_vec     GATED  REJECT    ACCEPT      -           Q-053
 map_into_map         GATED  REJECT    ACCEPT      -           Q-053
 strbuf_into_vec      GATED  REJECT    ACCEPT      -           Q-053
 tuple_into_vec       GATED  REJECT    ACCEPT      -           Q-053

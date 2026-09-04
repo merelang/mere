@@ -1,0 +1,6 @@
+// A ListBuf returned as the block's RESULT. Same route as result_container:
+// the builder carries the region marker in its type, so the result type
+// mentions R and the block rejects it. (The LIST it would build is fine to
+// return -- lb_to_list inside the block copies out like any list.)
+let b = region R { let b = lb_new () in let _ = lb_push b 7 in b };
+print (str_of_int (len (lb_to_list b)))

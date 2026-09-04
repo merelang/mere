@@ -246,6 +246,15 @@ LLVM backend does the in-place path for `Vec`; the Wasm backend does it for
 of the one bump pointer and extending an outer container's buffer into a
 block would be undone with it. A `Map` still copies its arrays on growth.
 
+**Lists can be built in order (v0.1.416).** `ListBuf[R, T]` (`lb_new` /
+`lb_push` / `lb_to_list`, stdlib reference) appends by splicing the previous
+cell's tail, so a list produced first-to-last costs one cell per element
+instead of two -- the reversed accumulator an immutable list otherwise needs
+was 23 MB of the JSON benchmark's 105 MB. Its cells reference the pushed
+values without copying, which is sound because a push is refused while a
+different region is current (and after `lb_to_list` has handed the cells
+out); the builder itself is a container and obeys the escape rules above.
+
 ---
 
 ## 4. Current state in mere (as of 2026-06-24, Phase 46)

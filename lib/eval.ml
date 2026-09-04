@@ -36,6 +36,12 @@ type value =
   | V_tuple of value list
   | V_record of string * (string * value) list
   | V_vec of vecbuf
+  | V_lb of lbuf
+    (* Q-106: an in-order list builder. Items are kept newest-first and
+       reversed once at lb_to_list, which freezes the builder. lb_region is
+       the region id that was current at lb_new: the compiled backends refuse
+       a push while another region is current, and the interpreter has to
+       refuse the same programs the same way, arenas or no arenas. *)
     (* `'a Vec` — region-aware growable vector (Phase 12.1, Q-010
        narrowed -> first implementation stage). Backed by a capacity-carrying
        buffer (`vecbuf` below), so push is amortised O(1).
@@ -109,6 +115,7 @@ and bytebuf = { mutable bb_data : Bytes.t; mutable bb_len : int }
    what bounds the input size a differential gate can afford: 200k pushes took
    74s interpreted and 0.01s compiled. *)
 and vecbuf = { mutable vc_data : value array; mutable vc_len : int }
+and lbuf = { mutable lb_items : value list; mutable lb_frozen : bool; lb_region : int }
 
 and env = (string * value ref) list
 
@@ -116,6 +123,20 @@ let vecbuf_of_array (a : value array) : vecbuf =
   { vc_data = a; vc_len = Array.length a }
 
 let vecbuf_empty () : vecbuf = { vc_data = [||]; vc_len = 0 }
+
+(* Q-106: which region is current, as an integer the interpreter can compare.
+   0 is the program-lifetime region; every `region R { }` entry and every
+   region-loop iteration gets a fresh id and restores the previous one on the
+   way out. Only ListBuf reads it today. *)
+let current_region_id : int ref = ref 0
+let region_id_counter : int ref = ref 0
+let with_fresh_region_id (f : unit -> value) : value =
+  let saved = !current_region_id in
+  incr region_id_counter;
+  current_region_id := !region_id_counter;
+  match f () with
+  | v -> current_region_id := saved; v
+  | exception ex -> current_region_id := saved; raise ex
 
 (* The live prefix as an array. Copy-free when the buffer happens to be exactly
    full, so the result is READ-ONLY -- a caller that mutates must go through
@@ -255,6 +276,8 @@ and to_string = function
   | V_vec arr ->
     let elems = Array.to_list (vecbuf_live arr) in
     "Vec[" ^ String.concat ", " (List.map to_string elems) ^ "]"
+  | V_lb b ->
+    "ListBuf[" ^ String.concat ", " (List.rev_map to_string b.lb_items) ^ "]"
   | V_strbuf buf ->
     "StrBuf[" ^ Ast.escape_string (Buffer.contents buf) ^ "]"
   | V_map m ->
@@ -311,6 +334,8 @@ and to_json_string = function
     "{" ^ String.concat "," parts ^ "}"
   | V_vec arr ->
     "[" ^ String.concat "," (List.map to_json_string (Array.to_list (vecbuf_live arr))) ^ "]"
+  | V_lb b ->
+    "[" ^ String.concat "," (List.rev_map to_json_string b.lb_items) ^ "]"
   | V_strbuf buf -> Ast.escape_string (Buffer.contents buf)
   | V_map m ->
     let parts = List.map (fun k ->
@@ -1457,6 +1482,7 @@ let builtin_len =
   V_builtin ("len", fun v ->
     match v with
     | V_vec arr -> V_int arr.vc_len
+    | V_lb b -> V_int (List.length b.lb_items)
     | V_strbuf buf -> V_int (Buffer.length buf)
     | V_map m -> V_int (Hashtbl.length m.m_tbl)
     | V_str s -> V_int (String.length s)
@@ -1989,6 +2015,40 @@ let builtin_vec_to_list =
         V_constr ("Cons", Some (V_tuple [x; acc]))
       ) (vecbuf_live arr) (V_constr ("Nil", None))
     | _ -> failwith "vec_to_list: expected Vec")
+
+(* Q-106: the in-order list builder. The two refusals are the same sentences
+   the compiled backends print, so a program that fails on one backend fails
+   on all four with the same words. *)
+let builtin_lb_new =
+  V_builtin ("lb_new", fun v ->
+    match v with
+    | V_unit -> V_lb { lb_items = []; lb_frozen = false; lb_region = !current_region_id }
+    | _ -> failwith "lb_new: expected unit")
+
+let builtin_lb_push =
+  V_builtin ("lb_push", fun v ->
+    match v with
+    | V_lb b ->
+      V_builtin ("lb_push_p1", fun x ->
+        if b.lb_frozen then
+          raise (Eval_error (Loc.dummy,
+            "lb_push: the builder was already turned into a list by lb_to_list"));
+        if b.lb_region <> !current_region_id then
+          raise (Eval_error (Loc.dummy,
+            "lb_push: the builder belongs to a region that is not current"));
+        b.lb_items <- x :: b.lb_items;
+        V_unit)
+    | _ -> failwith "lb_push: expected ListBuf")
+
+let builtin_lb_to_list =
+  V_builtin ("lb_to_list", fun v ->
+    match v with
+    | V_lb b ->
+      b.lb_frozen <- true;
+      List.fold_left (fun acc x ->
+        V_constr ("Cons", Some (V_tuple [x; acc]))
+      ) (V_constr ("Nil", None)) b.lb_items
+    | _ -> failwith "lb_to_list: expected ListBuf")
 
 let builtin_vec_to_owned =
   V_builtin ("vec_to_owned", fun v ->
@@ -3359,6 +3419,9 @@ let initial_env : env =
     ("vec_sort",    ref builtin_vec_sort);
     ("vec_filter",   ref builtin_vec_filter);
     ("vec_to_list",  ref builtin_vec_to_list);
+    ("lb_new",       ref builtin_lb_new);
+    ("lb_push",      ref builtin_lb_push);
+    ("lb_to_list",   ref builtin_lb_to_list);
     ("vec_to_owned", ref builtin_vec_to_owned);
     ("owned_vec_to_vec", ref builtin_owned_vec_to_vec);
     ("owned_vec_new",  ref builtin_owned_vec_new);
@@ -4080,15 +4143,18 @@ let rec eval_in (env : env) (e : Ast.expr) =
   | Ast.Region_block (name, body) ->
     (* Phase 2: region scope syntactic + escape check (in typer).  At runtime
        the region is a unit-value placeholder; actual bump-allocation will
-       come with codegen.  *)
-    eval_in ((name, ref V_unit) :: env) body
+       come with codegen. The fresh region id (Q-106) is what lets a ListBuf
+       refuse a cross-region push here the way the arenas make it refuse
+       on the compiled backends. *)
+    with_fresh_region_id (fun () -> eval_in ((name, ref V_unit) :: env) body)
   | Ast.Region_loop (name, x, body) ->
     (* The interpreter has no arenas, so the loop is just a loop: x starts
        None, Continue rebinds it Some, Done exits. The memory behaviour the
        construct exists for (swap arenas, deep-copy the carry) is codegen's. *)
     let rec go carry =
       let cell = ref carry in
-      match eval_in ((x, cell) :: (name, ref V_unit) :: env) body with
+      match with_fresh_region_id (fun () ->
+              eval_in ((x, cell) :: (name, ref V_unit) :: env) body) with
       | V_constr ("Continue", Some c) -> go (V_constr ("Some", Some c))
       | V_constr ("Done", Some d) -> d
       | _ ->

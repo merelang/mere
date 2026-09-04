@@ -1633,6 +1633,12 @@ and compile_app env e =
     compile_expr env (List.hd args); emit (Jal (ra, "__strbuf_to_str"))
   | Ast.Var "strbuf_len" when List.length args = 1 ->
     compile_expr env (List.hd args); emit (Jal (ra, "__strbuf_len"))
+  (* Q-106: the in-order list builder is a cons-cell splice with a runtime
+     region check, and this backend's lists and regions are its own block
+     layout. A clean refusal here, not an "unbound variable". *)
+  | Ast.Var ("lb_new" | "lb_push" | "lb_to_list") ->
+    err e.loc "RV32I: no RV32I lowering for lb_new / lb_push / lb_to_list (ListBuf) yet -- \
+               build the list with an accumulator and list_rev"
   | Ast.Var "vec_new" when List.length args = 1 ->
     compile_expr env (List.hd args); emit (Jal (ra, "__vec_new"))
   | Ast.Var "vec_push" when List.length args = 2 ->

@@ -1306,6 +1306,34 @@ let owned_vec_elem_tag_of (ty_opt : Ast.ty option) (loc : Loc.t) : string =
          "owned_vec_* expected an OwnedVec value")))
   | None -> raise (Codegen_error (loc, "owned_vec_*: missing type info"))
 
+(* Q-106: from a `ListBuf[R, T]` typed expression, the mono name of `T list`
+   (`list_<T>`, whose node struct is `list_<T>_node`) and the Nil tag. The
+   list instantiation is registered the way any `T list` in the program is,
+   so a program that only ever pushes still gets the struct emitted. *)
+let lb_list_of (ty_opt : Ast.ty option) (loc : Loc.t) : string * int =
+  let et =
+    match ty_opt with
+    | Some t ->
+      (match Ast.walk t with
+       | Ast.TyCon ("ListBuf", [_; et]) ->
+         let et = Ast.walk et in
+         if ty_is_concrete et then et
+         else raise (Codegen_error (loc, "lb_*: ListBuf with unresolved element type"))
+       | _ -> raise (Codegen_error (loc, "lb_* expected a ListBuf value")))
+    | None -> raise (Codegen_error (loc, "lb_*: missing type info"))
+  in
+  let list_ty = Ast.TyCon ("list", [et]) in
+  let mono_list =
+    if Hashtbl.mem polymorphic_variants "list" then
+      mono_variant_name "list" [et]
+    else "list"
+  in
+  ignore list_ty;   (* its instantiation is registered by collect_mono_variant_instances *)
+  let nil_tag =
+    try Hashtbl.find variant_tags "Nil"
+    with Not_found -> raise (Codegen_error (loc, "lb_*: no `Nil` constructor")) in
+  (mono_list, nil_tag)
+
 (* Pull the element type out of a `Vec[R, T]` typed expression and
    return its `ty_tag`. Also registers the element type in
    `vec_instances` so the runtime emitter generates the matching
@@ -1441,7 +1469,7 @@ let rec emit_expr (e : Ast.expr) : string =
                  site infers a concrete element type. Use direct application \
                  like `vec_new ()` or write `fn () -> vec_new ()` manually)");
     let is_curried_collection_builtin =
-      name = "vec_push"
+      name = "vec_push" || name = "lb_push"
       || name = "vec_get" || name = "vec_len"
       || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
       || name = "vec_reverse" || name = "vec_concat" || name = "vec_sort"
@@ -3061,6 +3089,35 @@ let rec emit_expr (e : Ast.expr) : string =
           closure. *)
        metrics_used := true;
        Printf.sprintf "__mere_mk_metrics(%s)" (emit_expr arg)
+     | Ast.Var "lb_new" ->
+       (* Q-106: lb_new () -- the builder lives in, and records, the region the
+          typer bound it to (the innermost active one, or the default). Its
+          element type is not needed here: the struct is the same for every T,
+          and the cells it will splice are typed at each lb_push. *)
+       let region_name =
+         match e.Ast.ty with
+         | Some t ->
+           (match Ast.walk t with
+            | Ast.TyCon ("ListBuf", [Ast.TyRef (_, r, Ast.TyUnit); _]) -> r
+            | _ -> unsupported e.loc "lb_new: missing ListBuf result type")
+         | None -> unsupported e.loc "lb_new: missing type info"
+       in
+       let region_var =
+         if region_name = "__heap" then (heap_container_region ())
+         else "__region_" ^ region_name
+       in
+       Printf.sprintf
+         "({ __lang_listbuf* __b = (__lang_listbuf*)__lang_region_alloc(%s, sizeof(__lang_listbuf)); \
+          __b->head = 0; __b->tail = 0; __b->region = %s; __b->len = 0; __b->frozen = 0; __b; })"
+         region_var region_var
+     | Ast.Var "lb_to_list" ->
+       (* Q-106: hand the head out and freeze. An empty builder answers the
+          shared Nil of the instantiation, like every other empty list. *)
+       let (mono_list, nil_tag) = lb_list_of arg.Ast.ty e.Ast.loc in
+       Printf.sprintf
+         "({ __lang_listbuf* __b = %s; __b->frozen = 1; \
+          (%s)(__b->head ? __b->head : (void*)(&%s)); })"
+         (emit_expr arg) mono_list (shared_nullary_sym mono_list nil_tag)
      | Ast.Var "vec_new" ->
        (* Phase 15.1/15.2: vec_new () — extract the region and element type
           from the result type's TyCon args. region = __heap uses the default
@@ -3101,6 +3158,26 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "vec_bytes" ->
        let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
        Printf.sprintf "mere_vec_%s_bytes(%s)" elem_tag (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "lb_push"; _ }, b_e) ->
+       (* Q-106: append by splicing the previous cell's tail. The cell is
+          allocated in the builder's region and points at the value as it is
+          -- no copy -- which the two refusals make sound: a frozen builder has
+          handed its cells out, and a builder whose region is not current
+          would be linking in a value that dies before it does. *)
+       let (mono_list, nil_tag) = lb_list_of b_e.Ast.ty e.Ast.loc in
+       let cons_tag =
+         try Hashtbl.find variant_tags "Cons"
+         with Not_found -> unsupported e.Ast.loc "lb_push: no `Cons` constructor" in
+       Printf.sprintf
+         "({ __lang_listbuf* __b = %s; __auto_type __x = %s; \
+          if (__b->frozen) __lang_fail_impl(\"lb_push: the builder was already turned into a list by lb_to_list\"); \
+          if (__b->region != __lang_current_region) __lang_fail_impl(\"lb_push: the builder belongs to a region that is not current\"); \
+          %s __n = (%s)__lang_region_alloc(__b->region, sizeof(%s_node)); \
+          __n->tag = %d; __n->payload.Cons.f0 = __x; __n->payload.Cons.f1 = (&%s); \
+          if (__b->tail) ((%s)__b->tail)->payload.Cons.f1 = __n; else __b->head = __n; \
+          __b->tail = __n; __b->len++; 0; })"
+         (emit_expr b_e) (emit_expr arg)
+         mono_list mono_list mono_list cons_tag (shared_nullary_sym mono_list nil_tag) mono_list
      | Ast.App ({ node = Ast.Var "vec_push"; _ }, vec_e) ->
        (* `vec_push v x` is curried: App (App (Var "vec_push", v), x).
           The outer App here has inner = App (Var "vec_push", vec_e) and
@@ -3671,7 +3748,7 @@ let rec emit_expr (e : Ast.expr) : string =
       | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> "({ abort(); 0; })"
       | Ast.TyStr -> "({ abort(); \"\"; })"
       | Ast.TyFloat -> "({ abort(); 0.0; })"
-      | Ast.TyCon (("Vec" | "OwnedVec" | "StrBuf" | "Channel" | "Map"), _) ->
+      | Ast.TyCon (("Vec" | "OwnedVec" | "StrBuf" | "Channel" | "Map" | "ListBuf"), _) ->
         (* v0.1.51: pointer-typed containers (mere_vec_T* etc.) zero to
            NULL — is_ptr_ty only covers recursive variants / views. *)
         "({ abort(); 0; })"
@@ -3762,7 +3839,7 @@ let rec emit_expr (e : Ast.expr) : string =
       match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit in
     let rec contains_container t =
       match Ast.walk t with
-      | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf"), _) -> true
+      | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "ListBuf"), _) -> true
       | Ast.TyTuple ts -> List.exists contains_container ts
       | Ast.TyCon (_, args) -> List.exists contains_container args
       | _ -> false
@@ -3823,7 +3900,7 @@ let rec emit_expr (e : Ast.expr) : string =
             "region loop: the carry contains a function -- its captures \
              cannot be deep-copied across arenas yet"
         | Ast.TyCon (("OwnedVec" | "StrBuf" | "ByteBuf" | "Channel"
-                      | "ThreadHandle") as n, _) ->
+                      | "ThreadHandle" | "ListBuf") as n, _) ->
           unsupported e.Ast.loc
             (Printf.sprintf
                "region loop: the carry contains a %s, which cannot be \
@@ -3856,7 +3933,7 @@ let rec emit_expr (e : Ast.expr) : string =
        of containers (their storage would die with the arena). *)
     let rec contains_container t =
       match Ast.walk t with
-      | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf"), _) -> true
+      | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "ListBuf"), _) -> true
       | Ast.TyTuple ts -> List.exists contains_container ts
       | Ast.TyCon (_, args) -> List.exists contains_container args
       | _ -> false
@@ -4093,6 +4170,7 @@ type fn_decl = Monomorph.fn_decl = {
 (* Lang type → C type, restricted to the codegen subset. *)
 let rec c_type_of (t : Ast.ty) : string =
   match Ast.walk t with
+  | Ast.TyCon ("ListBuf", _) -> "__lang_listbuf*"   (* Q-106: one layout for every T *)
   | Ast.TyCon ("Vec", args) ->
     (* Phase 15.2: Vec[R, T] — expand T to a concrete type and produce
        `mere_vec_<tag>*`. args have not been walked yet, so walk them here
@@ -5262,7 +5340,7 @@ let emit_copy_fn (tag : string) (t : Ast.ty) : string =
               char* s = __lang_str_alloc(r, n);\n  \
               memcpy(s, v, n);\n  return s;\n}"
   | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "Channel"
-                | "ThreadHandle"), _) ->
+                | "ThreadHandle" | "ListBuf"), _) ->
     header ^ " { (void)r; return v; }"
   | Ast.TyTuple ts ->
     let steps =
@@ -7366,6 +7444,22 @@ let region_runtime_helpers =
          or NULL for the default region and for an arena already charged. *)
       "  const char* site;";
       "} __lang_region;";
+      "";
+      (* Q-106 (v0.1.416): the in-order list builder. `head`/`tail` are cons
+         cells of the target list type (void* here: the layout of a
+         list_<T>_node is per instantiation, and the splice only needs the
+         addresses). Cells are allocated in `region` -- the builder's own,
+         recorded at lb_new -- and reference the pushed value without copying
+         it, which is sound only because lb_push refuses to run while a
+         different region is current. `frozen` is set by lb_to_list: after the
+         head has been handed out no cell may change. *)
+      "typedef struct {";
+      "  void* head;";
+      "  void* tail;";
+      "  __lang_region* region;";
+      "  long long len;";
+      "  int frozen;";
+      "} __lang_listbuf;";
       "";
       (* v0.1.274: malloc's answer used to go unread. When it said no, the very
          next line wrote through the null it returned, and the program died with
@@ -9556,6 +9650,12 @@ let collect_mono_variant_instances
   in
   let rec walk_ty t =
     match Ast.walk t with
+    | Ast.TyCon ("ListBuf", [_; et]) ->
+      (* Q-106: a builder's cells ARE `T list` cells, so the list's
+         instantiation is needed even in a program that only ever pushes. *)
+      let et = Ast.walk et in
+      walk_ty et;
+      add "list" [et]
     | Ast.TyCon (n, args) ->
       let args' = List.map Ast.walk args in
       List.iter walk_ty args';
@@ -10437,7 +10537,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           | Ast.P_var name, Some vt ->
             (match Ast.walk vt with
              | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _)
-             | Ast.TyCon ("Map", _) | Ast.TyCon ("StrBuf", _) ->
+             | Ast.TyCon ("Map", _) | Ast.TyCon ("StrBuf", _)
+             | Ast.TyCon ("ListBuf", _) ->
                scan_uses name vt body
              | _ -> ())
           | _ -> ())
@@ -10446,7 +10547,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           | Some vt ->
             (match Ast.walk vt with
              | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _)
-             | Ast.TyCon ("Map", _) | Ast.TyCon ("StrBuf", _) ->
+             | Ast.TyCon ("Map", _) | Ast.TyCon ("StrBuf", _)
+             | Ast.TyCon ("ListBuf", _) ->
                scan_uses name vt body
              | _ -> ())
           | None -> ())
