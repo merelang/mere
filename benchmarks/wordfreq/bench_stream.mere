@@ -1,0 +1,60 @@
+// wordfreq, streaming -- the same answer without ever holding the word list.
+//
+// bench.mere reads the file, replaces newlines, splits the whole text into a
+// 300,000-element `str list` and walks it. Measured stage by stage at
+// v0.1.413, that list is 14.4 MB of the program's 25.5 MB (48 bytes per
+// five-letter word: a 16-byte string and a 24-byte cons cell), the newline
+// replacement is another full copy of the text, and sorting 5,000 pairs
+// through `list_sort_by` allocates 8.3 MB more -- an immutable list's merge
+// sort allocates about 3n log n cells, and each comparison allocates the
+// comparator's inner closure. None of it is the hash table.
+//
+// This program reads a line at a time inside a `region R { }`, so each line's
+// words die as soon as they have been counted; the Map copies the key on
+// first sight and nothing else escapes. The ranking is `vec_sort` on the
+// pair vector: in place, stable, and its scratch is malloc/free rather than
+// arena, so the sort leaves nothing behind. Same bytes out.
+
+let path = match args () with | Cons (p, _) -> p | Nil -> "";
+let counts = map_new ();
+let f = file_open path;
+let rec go = fn (u: unit) ->
+  let cont = region R {
+    match file_read_line f with
+    | None -> false
+    | Some line ->
+        let rec tally = fn (ws: str list) ->
+          match ws with
+          | Nil -> ()
+          | Cons (w, rest) ->
+              let _ = if str_eq w "" then ()
+                      else
+                        let prev = if map_has counts w then map_get counts w else 0 in
+                        map_set counts w (prev + 1) in
+              tally rest in
+        let _ = tally (str_split line " ") in
+        true
+  } in
+  if cont then go () else ();
+let _ = go ();
+let _ = file_close f;
+
+let pairs = vec_new ();
+let _ = map_iter counts (fn (w: str) -> fn (c: int) -> vec_push pairs (w, c));
+// count desc, then word asc -- the same order every other implementation uses
+let _ = vec_sort pairs
+  (fn (a: str * int) -> fn (b: str * int) ->
+     if snd a == snd b then (if fst a < fst b then 0 - 1 else if fst a == fst b then 0 else 1)
+     else if snd a > snd b then 0 - 1 else 1);
+let rec total = fn (i: int) -> fn (n: int) ->
+  if i == vec_len pairs then n else total (i + 1) (n + snd (vec_get pairs i));
+let rec show = fn (i: int) ->
+  if i == 10 || i >= vec_len pairs then ()
+  else
+    let p = vec_get pairs i in
+    let _ = print (fst p ++ " " ++ str_of_int (snd p)) in
+    show (i + 1);
+let _ = print ("words " ++ str_of_int (total 0 0)) in
+let _ = print ("unique " ++ str_of_int (map_len counts)) in
+let _ = show 0 in
+exit 0

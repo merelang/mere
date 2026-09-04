@@ -33,7 +33,10 @@ alloc_min = 134217728
 alloc_max = 209715200
 
 # The number the region block exists to control. 32,505,856 B at v0.1.322,
-# halved along with everything else.
+# halved along with everything else. bench_pertree.mere draws the block around
+# one tree instead of one batch and peaks at 3,145,728 B (a depth-16 tree is
+# 1.5 MB of nodes, so the 1 MiB seed grows once); its peak RSS, 5.5-5.8 MiB,
+# is the Rust row's. The ceiling stays where the batch row needs it.
 peak_max = 50331648
 
 # MoonBit needs strconv for the depth argument.

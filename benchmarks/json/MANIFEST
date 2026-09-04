@@ -53,6 +53,14 @@ claim = a different question from every other row here. This is `contrib/json`,
 # the whole time and nothing could name it. Two monomorphic copies are what the
 # compiler can exploit today; see the note in contrib/json/json.mere.
 #
+# 105.2 MB at v0.1.414: parse_keyword compares in place instead of copying the
+# literal out with `substring` (2.4 MB), and parse_num accumulates digits
+# instead of `int_of_str (substring ...)` (4.9 MB). Both found by
+# scripts/alloc_sites.sh, which attributes every allocation to its return
+# address. What remains is 69 MB of tree (5.9x the document) and ~30 MB the
+# parser discards -- the reversed accumulators an immutable list needs to be
+# built in order -- and those are the next two numbers, in that order.
+#
 # The floor sits well below the current value on purpose. Its job is to catch a
 # meter that stopped seeing its subject, not to argue with the next
 # improvement -- and it has already caught one legitimate halving by being too

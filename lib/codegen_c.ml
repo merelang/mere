@@ -7488,6 +7488,71 @@ let region_runtime_helpers =
       "  return p;";
       "}";
       "";
+      (* v0.1.414: grow the most recent allocation in place. A container that
+         doubles its buffer in a bump arena leaves every previous buffer behind
+         -- the arena cannot take them back -- so a Vec built by pushing costs
+         TWICE its final size in cumulative allocation (matmul: 12,583,160 B
+         of allocation for three 2 MiB matrices, which is 3 x (2 + 2) MiB to
+         within 248 bytes). When the buffer being grown is the LAST thing
+         allocated in its region and the current block has room, the bump
+         pointer simply moves: same address, no copy, nothing left behind.
+         Otherwise this is a fresh allocation plus a copy, exactly as before.
+         The program cannot tell the two apart; only alloc_total and the
+         footprint move. `old_n` is the old buffer's ALLOCATION size (its
+         capacity in bytes), which is what decides whether it ends at top.
+         Contract: `old` must be reachable ONLY through the caller (a
+         container's private buffer) -- the realloc path below may move it. *)
+      "static void* __lang_region_grow(__lang_region* r, void* old, size_t old_n, size_t new_n) {";
+      "  int shared = (r == &__lang_default_region);";
+      "  if (old && old_n) {";
+      "    size_t old_al = (old_n + 7) & ~((size_t)7);";
+      "    size_t new_al = (new_n + 7) & ~((size_t)7);";
+      "    if (shared) pthread_mutex_lock(&__lang_default_region_lock);";
+      "    if ((char*)old + old_al == r->top && (char*)old + new_al <= r->base + r->cap) {";
+      "      r->top = (char*)old + new_al;";
+      "      r->alloc_total += new_al - old_al;";
+      "      if (shared) pthread_mutex_unlock(&__lang_default_region_lock);";
+      "      return old;";
+      "    }";
+      (* A buffer too big for the bump block got a DEDICATED block of exactly
+         its size (v0.1.307), chained in behind the bump block -- so it is
+         never at top, and without this every doubling of a large Vec would
+         allocate a fresh dedicated block and leave the old one behind (crc32's
+         vecint row: 65 MB allocated for a 32 MB array, unchanged by the
+         in-place path alone). A block that holds exactly this buffer and
+         nothing else can be realloc'd: the chain is re-linked, `pad` follows
+         the new size, and the old bytes are freed rather than stranded. The
+         test is structural, not a guess: the header must sit right before the
+         buffer, be a block on THIS region's chain, not be the current bump
+         block, and record a capacity equal to the buffer's own size. *)
+      (* Walk the chain rather than peeking at the 16 bytes before `old`: a
+         bump-allocated buffer is preceded by whatever was allocated before
+         it, and a test that reads those bytes as a header is a test that can
+         be fooled by data. Blocks are few (they double), so the walk is
+         cheap; the current bump block is skipped because its first
+         allocation is not alone in it. *)
+      "    __lang_region_block* pred = r->blocks;";
+      "    while (pred && pred->prev) {";
+      "      __lang_region_block* blk = pred->prev;";
+      "      if ((char*)(blk + 1) == (char*)old && blk->pad == old_al) {";
+      "        __lang_region_block* nb =";
+      "          (__lang_region_block*) realloc(blk, sizeof(__lang_region_block) + new_al);";
+      "        if (!nb) __lang_fail_impl(\"out of memory\");";
+      "        nb->pad = new_al;";
+      "        pred->prev = nb;";
+      "        r->alloc_total += new_al - old_al;";
+      "        if (shared) pthread_mutex_unlock(&__lang_default_region_lock);";
+      "        return (void*)(nb + 1);";
+      "      }";
+      "      pred = blk;";
+      "    }";
+      "    if (shared) pthread_mutex_unlock(&__lang_default_region_lock);";
+      "  }";
+      "  void* p = __lang_region_alloc(r, new_n);";
+      "  if (old && old_n) memcpy(p, old, old_n < new_n ? old_n : new_n);";
+      "  return p;";
+      "}";
+      "";
       "/* v0.1.299: total capacity of a region's block chain. Capacity, not";
       "   bump-used: within 2x of used (blocks double), free of hot-path cost,";
       "   and monotone between compactions -- which is all a collection";
@@ -8320,11 +8385,12 @@ let strbuf_runtime =
       "";
       "static int mere_strbuf_push(mere_strbuf* sb, const char* s) {";
       "  int slen = (int)__lang_str_size(s);";
-      "  while (sb->len + slen > sb->cap) {";
+      "  if (sb->len + slen > sb->cap) {";
       "    int new_cap = sb->cap * 2;";
-      "    char* new_data = (char*)__lang_region_alloc(sb->region, sizeof(char) * new_cap);";
-      "    for (int i = 0; i < sb->len; i++) new_data[i] = sb->data[i];";
-      "    sb->data = new_data;";
+      "    while (sb->len + slen > new_cap) new_cap *= 2;";
+      (* v0.1.414: one growth step to the final size, in place when the buffer
+         is the region's most recent allocation (see region_grow). *)
+      "    sb->data = (char*)__lang_region_grow(sb->region, sb->data, (size_t)sb->cap, (size_t)new_cap);";
       "    sb->cap = new_cap;";
       "  }";
       "  for (int i = 0; i < slen; i++) sb->data[sb->len + i] = s[i];";
@@ -8401,9 +8467,9 @@ let bytebuf_runtime =
       "static long long mere_bytebuf_push(mere_bytebuf* bb, long long v) {";
       "  if (bb->len + 1 > bb->cap) {";
       "    long long new_cap = bb->cap * 2 + 16;";
-      "    unsigned char* nd = (unsigned char*)__lang_region_alloc(bb->region, (size_t)new_cap);";
-      "    for (long long i = 0; i < bb->len; i++) nd[i] = bb->data[i];";
-      "    bb->data = nd;";
+      (* v0.1.414: in place when the buffer is the region's most recent
+         allocation (see region_grow). *)
+      "    bb->data = (unsigned char*)__lang_region_grow(bb->region, bb->data, (size_t)bb->cap, (size_t)new_cap);";
       "    bb->cap = new_cap;";
       "  }";
       "  bb->data[bb->len] = (unsigned char)(v & 255);";
@@ -8868,10 +8934,10 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       Printf.sprintf "  x = __mcopy_%s(v->region, x);" tag;
       "  if (v->len == v->cap) {";
       "    int new_cap = v->cap * 2;";
-      Printf.sprintf "    %s* new_data = (%s*)__lang_region_alloc(v->region, sizeof(%s) * new_cap);"
+      (* v0.1.414: in place when this buffer is the region's most recent
+         allocation; a copy into a fresh buffer otherwise (see region_grow). *)
+      Printf.sprintf "    v->data = (%s*)__lang_region_grow(v->region, v->data, sizeof(%s) * (size_t)v->cap, sizeof(%s) * (size_t)new_cap);"
         c_elem c_elem c_elem;
-      "    for (int i = 0; i < v->len; i++) new_data[i] = v->data[i];";
-      "    v->data = new_data;";
       "    v->cap = new_cap;";
       "  }";
       "  v->data[v->len++] = x;";
@@ -11741,18 +11807,21 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                "  if (!f) __lang_fail_impl(path);";
                "  return f;";
                "}";
+               (* v0.1.414: one getline() per line into a per-thread scratch
+                  buffer that is kept across calls, instead of fgetc() per
+                  byte plus a malloc/free pair per line. Measured on the
+                  wordfreq streaming row (25,000 lines, 1.8 MB): the byte
+                  loop cost more than the whole one-shot program. Same
+                  result as before: the newline is dropped, a final line
+                  without one is returned, NULL only at end of file. *)
                "static const char* __lang_file_read_line(FILE* f) {";
-               "  size_t cap = 256, n = 0;";
-               "  char* tmp = (char*)malloc(cap);";
-               "  int c;";
-               "  while ((c = fgetc(f)) != EOF && c != '\\n') {";
-               "    if (n + 1 == cap) { cap *= 2; tmp = (char*)realloc(tmp, cap); }";
-               "    tmp[n++] = (char)c;";
-               "  }";
-               "  if (c == EOF && n == 0) { free(tmp); return NULL; }";
-               "  char* buf = __lang_str_alloc(__lang_current_region, n);";
-               "  memcpy(buf, tmp, n); buf[n] = '\\0';";
-               "  free(tmp);";
+               "  static _Thread_local char* tmp = NULL;";
+               "  static _Thread_local size_t cap = 0;";
+               "  ssize_t n = getline(&tmp, &cap, f);";
+               "  if (n < 0) return NULL;";
+               "  if (n > 0 && tmp[n - 1] == '\\n') n--;";
+               "  char* buf = __lang_str_alloc(__lang_current_region, (size_t)n);";
+               "  memcpy(buf, tmp, (size_t)n); buf[n] = '\\0';";
                "  return buf;";
                "}" ];
            "" ])

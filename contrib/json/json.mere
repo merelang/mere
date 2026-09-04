@@ -52,9 +52,15 @@ let expect_char = fn (s: str, i: int, c: str) ->
 
 // === Atoms ===
 
+// Compares in place: `char_at` hands out a shared one-byte string, so the
+// loop allocates nothing, where `substring s i (i + n) == kw` copied the
+// keyword out of the input once per literal (160,000 copies on the benchmark
+// document -- 2.4 MB that existed only to be compared and dropped).
 let parse_keyword = fn (s: str, i: int, kw: str, value: json) ->
   let n = str_len kw in
-  if i + n <= str_len s && substring s i (i + n) == kw
+  let rec same = fn (j: int) ->
+    j == n || (char_at s (i + j) == char_at kw j && same (j + 1)) in
+  if i + n <= str_len s && same 0
   then (value, i + n)
   else fail ("expected '" ++ kw ++ "' at pos " ++ str_of_int i);
 
@@ -74,8 +80,15 @@ let parse_num = fn (s: str, i: int) ->
     else j
   in
   let end_pos = scan i1 in
+  // Accumulate the digits directly rather than `int_of_str (substring ...)`:
+  // the substring was a 16-byte allocation per number whose only reader was
+  // int_of_str (320,000 of them on the benchmark document).
+  let rec digits = fn (j: int) -> fn (acc: int) ->
+    if j == end_pos then acc else digits (j + 1) (acc * 10 + (ord (char_at s j) - 48)) in
   if end_pos == i1 then fail ("expected digit at pos " ++ str_of_int i1)
-  else (JNum (int_of_str (substring s start end_pos)), end_pos);
+  else
+    let mag = digits i1 0 in
+    (JNum (if i1 == start then mag else 0 - mag), end_pos);
 
 let parse_raw_str = fn (s: str, i: int) ->
   // Returns (content, end_pos).  Handles `\"` `\\` `\n` `\t` `\r` `\/` via

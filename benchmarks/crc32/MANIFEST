@@ -25,4 +25,11 @@ claim = the honest expectation is a TIE with C -- mere lowers to C and the same
 # idiomatic path.
 alloc_min = 4194304
 alloc_max = 8388608
+
+# bench_vecint.mere is unbounded on purpose (it exists to show the cost of the
+# wrong byte API), but its number is still a record: 65.0 MB at v0.1.413 for a
+# 32 MB array of one int per byte, 35.7 MB at v0.1.414 when Vec growth became
+# in place -- the old buffers that used to be left behind are now extended or
+# realloc'd. The 8x over the file is the representation; the 2x on top of that
+# was the allocator, and is gone.
 alloc_unbounded = bench_vecint.mere

@@ -59,6 +59,31 @@ fi
 
 echo "PASS region_slack: cap=$cap alloc_total=$alloc (bound=$bound)"
 
+# --- v0.1.414: container growth in place -------------------------------------
+# test/regionstats/vec_growth_probe.mere pushes 200,000 ints into one Vec and
+# nothing else. The final buffer is 2 MiB. Before in-place growth every
+# doubling left its predecessor in the arena and the program allocated ~4 MiB;
+# with it the buffer extends where it sits and the total is 2 MiB plus a few
+# KB. Both directions again: a reading under the 2 MiB floor means the meter
+# (or the Vec) broke, one over 3 MiB means the growth path copies again.
+"$MERE" -c "$ROOT/test/regionstats/vec_growth_probe.mere" > "$TMP/g.c" 2>"$TMP/g.err" \
+  || { echo "FAIL region_slack (vec growth): mere -c refused the probe"; cat "$TMP/g.err"; exit 1; }
+"$CC" -O2 -w "$TMP/g.c" -o "$TMP/g" 2>"$TMP/gcc.err" \
+  || { echo "FAIL region_slack (vec growth): C compile failed"; cat "$TMP/gcc.err"; exit 1; }
+MERE_REGION_STATS=1 "$TMP/g" >"$TMP/gout" 2>"$TMP/gstats" || {
+  echo "FAIL region_slack (vec growth): probe exited nonzero"; cat "$TMP/gstats"; exit 1; }
+grep -q '^200000 199999$' "$TMP/gout" || {
+  echo "FAIL region_slack (vec growth): probe printed the wrong answer"; cat "$TMP/gout"; exit 1; }
+galloc="$(grep '^region-stats default:' "$TMP/gstats" | sed -n 's/.*alloc_total=\([0-9]*\).*/\1/p')"
+[ -n "$galloc" ] || { echo "FAIL region_slack (vec growth): no region-stats line"; exit 1; }
+gfloor=2097152
+gceil=3145728
+[ "$galloc" -ge "$gfloor" ] || {
+  echo "FAIL region_slack (vec growth): alloc_total=$galloc below the 2 MiB floor -- meter broken"; exit 1; }
+[ "$galloc" -le "$gceil" ] || {
+  echo "FAIL region_slack (vec growth): alloc_total=$galloc exceeds $gceil -- Vec growth copies again"; exit 1; }
+echo "PASS region_slack (vec growth): alloc_total=$galloc (floor=$gfloor ceil=$gceil)"
+
 # --- second probe: delete-churn must not allocate per delete (v0.1.316) ------
 "$MERE" -c "$ROOT/test/regionstats/delete_churn_probe.mere" > "$TMP/d.c" 2>"$TMP/d.err" \
   || { echo "FAIL region_slack: mere -c refused the delete probe"; cat "$TMP/d.err"; exit 1; }

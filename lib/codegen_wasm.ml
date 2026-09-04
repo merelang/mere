@@ -4010,11 +4010,23 @@ let rec emit_expr (e : Ast.expr) : unit =
     let saved = !wasm_tail_pos in
     wasm_tail_pos := false;
     emit_instr "global.get $__lang_bump";      (* mark *)
+    (* v0.1.414: while any block is open, $mere_vec_push must not extend a
+       buffer in place -- the buffer may belong to a container created
+       OUTSIDE the block, and the bump it would extend into is rolled back
+       at the block's end. The depth counter is what push consults. *)
+    emit_instr "global.get $__lang_region_depth";
+    emit_instr "i32.const 1";
+    emit_instr "i32.add";
+    emit_instr "global.set $__lang_region_depth";
     emit_expr body;                             (* [mark, result] *)
     if not unboxed then
       emit_instr (Printf.sprintf "call $__mcopy_%s" rtag);  (* copy 1 (above garbage) *)
     emit_instr "global.set $__rgn_tmp";         (* [mark] *)
     emit_instr "global.set $__lang_bump";       (* release *)
+    emit_instr "global.get $__lang_region_depth";
+    emit_instr "i32.const 1";
+    emit_instr "i32.sub";
+    emit_instr "global.set $__lang_region_depth";
     emit_instr "global.get $__rgn_tmp";
     if not unboxed then
       emit_instr (Printf.sprintf "call $__mcopy_%s" rtag);  (* copy 2 (into enclosing) *)
@@ -6360,26 +6372,42 @@ let vec_runtime = {|
     (local.set $cap (i32.load offset=8 (local.get $v)))
     (if (i32.eq (local.get $len) (local.get $cap))
       (then
-        (local.set $cap (i32.mul (local.get $cap) (i32.const 2)))
-        (local.set $new_buf (global.get $__lang_bump))
-        (global.set $__lang_bump
-          (i32.add (local.get $new_buf)
-                   (i32.mul (local.get $cap) (i32.const 8))))
         (local.set $buf (i32.load offset=0 (local.get $v)))
-        (local.set $i (i32.const 0))
-        (block $copy_end
-          (loop $copy_lp
-            (br_if $copy_end (i32.eq (local.get $i) (local.get $len)))
-            (i64.store
+        ;; v0.1.414: grow in place when this buffer ends exactly at the bump
+        ;; pointer and no region block is open (a block rolls the bump back
+        ;; at its end, so extending an outer container's buffer into it would
+        ;; be undone). Otherwise append a fresh buffer and copy, as before.
+        (if (i32.and
+              (i32.eq (i32.add (local.get $buf)
+                               (i32.mul (local.get $cap) (i32.const 8)))
+                      (global.get $__lang_bump))
+              (i32.eqz (global.get $__lang_region_depth)))
+          (then
+            (global.set $__lang_bump
+              (i32.add (global.get $__lang_bump)
+                       (i32.mul (local.get $cap) (i32.const 8))))
+            (local.set $cap (i32.mul (local.get $cap) (i32.const 2)))
+            (i32.store offset=8 (local.get $v) (local.get $cap)))
+          (else
+            (local.set $cap (i32.mul (local.get $cap) (i32.const 2)))
+            (local.set $new_buf (global.get $__lang_bump))
+            (global.set $__lang_bump
               (i32.add (local.get $new_buf)
-                       (i32.mul (local.get $i) (i32.const 8)))
-              (i64.load
-                (i32.add (local.get $buf)
-                         (i32.mul (local.get $i) (i32.const 8)))))
-            (local.set $i (i32.add (local.get $i) (i32.const 1)))
-            (br $copy_lp)))
-        (i32.store offset=0 (local.get $v) (local.get $new_buf))
-        (i32.store offset=8 (local.get $v) (local.get $cap))))
+                       (i32.mul (local.get $cap) (i32.const 8))))
+            (local.set $i (i32.const 0))
+            (block $copy_end
+              (loop $copy_lp
+                (br_if $copy_end (i32.eq (local.get $i) (local.get $len)))
+                (i64.store
+                  (i32.add (local.get $new_buf)
+                           (i32.mul (local.get $i) (i32.const 8)))
+                  (i64.load
+                    (i32.add (local.get $buf)
+                             (i32.mul (local.get $i) (i32.const 8)))))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br $copy_lp)))
+            (i32.store offset=0 (local.get $v) (local.get $new_buf))
+            (i32.store offset=8 (local.get $v) (local.get $cap))))))
     (local.set $buf (i32.load offset=0 (local.get $v)))
     (i64.store
       (i32.add (local.get $buf)
@@ -10372,6 +10400,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      \  (global $__mere_abi (export \"__mere_abi\") i32 (i32.const 1))\n\
      \  (global $__lang_bump (export \"__lang_bump\") (mut i32) (i32.const %d))\n\
   (global $__rgn_tmp (mut i64) (i64.const 0))\n\
+  (global $__lang_region_depth (mut i32) (i32.const 0))\n\
      \  (global $__lang_char_table i32 (i32.const %d))\n\
      \  (global $__lang_char_table_initialized (mut i32) (i32.const 0))\n\
      \  (global $__lang_fail_flag (mut i32) (i32.const 0))\n\

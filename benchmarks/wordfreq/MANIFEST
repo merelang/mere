@@ -12,3 +12,11 @@ claim = the shape a short-lived program actually has, and the one the region
 # Measured 27,334,672 B at v0.1.316.
 alloc_min = 16777216
 alloc_max = 41943040
+
+# bench_stream.mere holds the same answer in a region per line. Its named
+# arena never grows past the 1 MiB seed block (1,048,576 B at v0.1.414): a
+# line's words fit, and the ranking is `vec_sort`, whose scratch is malloc/free.
+# When the ranking was `list_sort_by` inside a region, that one arena peaked at
+# 15.7 MB for 5,000 pairs -- the ceiling is 2 MiB so a return to that shape, or
+# a line that no longer fits the seed, is announced here.
+peak_max = 2097152

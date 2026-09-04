@@ -4,6 +4,61 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.414 — 2026-09-05
+
+_Containers grow in place. The one-shot benchmarks that were paying twice for
+every buffer stop paying twice, and the suite gains the two rows that show what
+a `region` costs when it is drawn around the right expression._
+
+The cross-language record said Mere's footprint was five to fifty times a
+Rust program's on allocation-heavy rows while its time was never behind, and
+attributing the bytes (`scripts/alloc_sites.sh`, new: every allocation charged
+to its return address, three frames deep) split that into three causes. The
+first is the model working as documented -- the default region never frees --
+and the answer is to write `region` where the garbage is: `binarytrees` with a
+block around each TREE rather than each batch peaks at 5.5 MiB, the Rust row's
+footprint, at a third of the C row's wall clock (`bench_pertree.mere`, one line
+different). The second was the allocator: `vec_push`, `strbuf_push` and
+`bytebuf_push` doubled into a fresh buffer and left the old one in the arena,
+so a container built by pushing cost twice its final size -- `matmul` allocated
+12,583,160 B for three 2 MiB matrices, which is 3 x (2 + 2) MiB to within 248
+bytes. `__lang_region_grow` now extends the buffer where it sits when it is the
+region's most recent allocation, realloc's it when it lives in a dedicated block
+of its own (v0.1.307's policy for large allocations), and copies only when it
+must. matmul 12.6 -> 7.9 MB and 13.5 -> 9.0 MiB resident; the `read_file_bytes`
+row 65 -> 36 MB; a 200,000-int Vec 4 -> 2 MiB, which `region_slack_check.sh`
+now holds in both directions. The C backend does all three paths, LLVM the
+in-place one, Wasm the in-place one only while no `region` block is open --
+its blocks are a rollback of the one bump pointer, and extending an outer
+container's buffer into one would be undone with it. The third cause is
+representation (a boxed variant node is 24 bytes to Rust's 16) and is a design
+question left open, with the numbers next to it.
+
+Two library findings from the same tables. `contrib/json` copied every keyword
+out of the input to compare it and every number out to parse it -- 7.3 MB of
+strings on the benchmark document that existed to be read once; it compares
+and accumulates in place now (112.9 -> 105.2 MB). And the streaming `wordfreq`
+row was twice as slow as the one-shot program not because of its 25,000
+regions but because `file_read_line` read a byte at a time through `fgetc` and
+malloc'd per line; it is one `getline` into a per-thread buffer now. The row's
+ranking is `vec_sort` rather than `list_sort_by` inside a region: an immutable
+list's merge sort allocates about 3n log n cells, and `vec_sort` is the same
+stable sort in place with malloc/free scratch -- the named arena's peak went
+from 15.7 MB to the 1 MiB seed. What was NOT done is also written down: the
+plan to wrap the JSON parser's object loop in a region was dropped when the
+copy-out turned out to multiply with nesting depth and double the peak on a
+document that is one container deep.
+
+Gates: `test/parity/vec_grow_inplace.mere` (both growth paths, alternating
+Vecs, a StrBuf push larger than its capacity, string elements; c / llvm / wasm
+match interp), the vec-growth probe in `region_slack_check.sh`, the matmul
+band tightened to 9 MiB, `peak_max` on the wordfreq row at 2 MiB. Docs: the
+memory model's growth paragraph, patterns section 8.4 on where to draw a
+region and what not to materialise, the stdlib reference on the two sorts'
+allocation shapes.
+
+---
+
 ## v0.1.413 — 2026-09-03
 
 _The downstream gate had been green while checking nothing, and when it finally
