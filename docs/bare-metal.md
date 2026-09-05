@@ -396,3 +396,14 @@ emitting.
   what each one forced
 - [codegen.md](codegen.md) — how the C / LLVM / Wasm backends are built, for
   contrast: this one emits machine code directly
+
+## Vector extension (Q-110, v0.1.426)
+
+`mere -rv` / `-rv64` lower the language's `u8x16` type to RVV 1.0 with VLEN 128,
+LMUL 1 and SEW e8 (e16 only to read a widening reduction), and `bytes` to the
+str block layout. The machine has to have the V extension: memu's
+`riscv-runc` cores do (`rvv_check.py` holds them against QEMU with
+`-cpu rv32,v=true,vlen=128`), and `_start` turns `mstatus.VS` on. A core
+without V executes the same binary up to the first vector instruction and
+traps there as illegal, which is the honest failure. `f64x2` is refused at
+compile time: there is no floating-point unit to put the lanes in.

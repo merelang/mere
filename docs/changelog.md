@@ -4,6 +4,43 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.426 — 2026-09-05
+
+_The RISC-V backends run `u8x16` through the RISC-V Vector extension, and
+have `bytes`. The UTF-8 validator written with sixteen-byte lanes now runs on
+the Mere-written CPU -- `test/range_version/utf8_simd_small.mere` prints the
+same answers on memu's RV32 and RV64 cores as the interpreter._
+
+RVV 1.0, the subset memu implements and holds against QEMU (`-cpu
+rv32,v=true,vlen=128`): VLEN 128, LMUL 1, SEW e8, e16 only to read a widening
+reduction. A `u8x16` value on these targets is a pointer to a 16-byte box on
+the bump heap; an operation sets vl and vtype itself, loads its operands into
+v1 / v2 with `vle8.v`, computes into v3 and stores it into a fresh box with
+`vse8.v`, so no vector register is live across two operations and nothing in
+the ABI knows about vector state. The mapping: `u8x16_and / or / xor` are
+`vand / vor / vxor.vv`, `sub_sat` is `vssubu.vv`, `shr` is `vsrl.vx`, `eq` is
+`vmseq.vv` into v0 then `vmerge.vim` between a zero vector and -1, `swizzle`
+is `vrgather.vv` (an index of 16 or more gives 0, as on Wasm and NEON),
+`shift_in prev cur k` is `vslidedown.vx` by 16-k over prev then `vslideup.vx`
+by k over cur, `any_true` is `vredor.vs` and a non-zero test, `reduce_add` is
+`vwredsumu.vs` read back under e16, `splat` is `vmv.v.x`, `extract` is
+`vslidedown.vx` then `vmv.x.s`. `_start` sets `mstatus.VS`, because a real
+machine traps every vector instruction while the extension is Off (memu has no
+such state; on a core without V the bits are WARL zero). `f64x2` stays refused
+by name: these targets have no floating-point unit.
+
+`bytes` on these targets is the str block -- `[len word][bytes]`, word-padded
+-- so `bytes_of_str` and `str_of_bytes` are the identity and `bytes_concat` is
+`__str_concat`; `bytes_len`, `bytes_get` (checked, unsigned compare), `bytes_slice`
+and `bytes_of_hex` are new runtime helpers. The RV prelude's "bytes_of_str needs
+a host" stub is gone with the reason for it. `test/parity/simd_u8x16.mere` and
+the UTF-8 validator case run on both cores under `scripts/rv_exec_check.sh`
+(MEMU set) and match the C backend's output. The RV disassembler (`mere -rvs`,
+the debugger's listing) names the subset too; it read every vector word as
+`.word`, which is where a reader stops.
+
+---
+
 ## v0.1.425 — 2026-09-05
 
 _`show` and `to_json` of a SIMD value on the C, LLVM and Wasm backends, in the
