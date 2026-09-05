@@ -372,6 +372,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/ctest.sh
 
+      - name: range_version_check (the checked loop is the oracle for Q-108)
+        if: ${{ !cancelled() }}
+        run: sh scripts/range_version_check.sh
+
+      - name: vectorize_check (clang vectorizes the emitted C)
+        if: ${{ !cancelled() }}
+        run: sh scripts/vectorize_check.sh
+
       - name: url_parity (vs node's URL)
         if: ${{ !cancelled() }}
         run: sh scripts/url_parity.sh

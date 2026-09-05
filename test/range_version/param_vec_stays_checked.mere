@@ -1,0 +1,14 @@
+// range-version: copy_into,total
+// `dst` is a parameter, so it is not invariant and its accesses stay checked;
+// `src` is a global and goes unchecked. The loop is still planned.
+let n = 6;
+let src = vec_new ();
+let dst = vec_new ();
+let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push src (i + 1) in let _ = vec_push dst 0 in fill (i + 1);
+let _ = fill 0;
+let rec copy_into = fn (d) -> fn (i: int) ->
+  if i == n then () else let _ = vec_set d i (vec_get src i * 2) in copy_into d (i + 1);
+let _ = copy_into dst 0;
+let rec total = fn (i: int) -> fn (acc: int) ->
+  if i == n then acc else total (i + 1) (acc + vec_get dst i);
+print (str_of_int (total 0 0))

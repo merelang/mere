@@ -496,3 +496,37 @@ type's typedef is followed by three macros --
 `str list` is therefore 16 bytes and a `json` leaf 8, where they were 24 and 16.
 The other backends keep their own node layouts; the parity suite compares
 output, not layout.
+
+## Range-check versioning (Q-108)
+
+A tail-recursive loop that reads a Vec or bytes at its index parameter pays a
+bounds check per element, and on the C and LLVM backends each check is an early
+exit that keeps clang from vectorizing the loop. `Ast.range_version_program`
+(run in `Pipeline.parse_program`, before typing, so every backend sees the
+result) rewrites
+
+```
+let rec f = fn (i: int) -> fn (acc: float) ->
+  if i == n then acc else f (i + 1) (f_add acc (vec_get v i));
+let s = f 0 0.0;
+```
+
+into a sibling `f__rvfast` whose `vec_get v i` is `__vec_get_unchecked v i`
+(likewise `vec_set` -> `__vec_set_unchecked`, `bytes_get` -> `__bytes_get_unchecked`;
+the three are internal names every backend lowers, and the interpreter keeps
+the bounds check under them so it stays the oracle), and a call site `if 0 >= 0 && 0 <= n && n <= vec_len v then f__rvfast 0 0.0
+else f 0 0.0`. The guard true means the removed checks could never have fired;
+false runs the original loop, which fails where it always did.
+
+Conditions, all syntactic: the exit compares the index parameter with pure
+arithmetic over loop-invariant names (or `vec_len` / `bytes_len` of one); every
+self call is a tail call passing `i + 1`; the body has no lambda and calls only
+builtins, itself, loop-safe top-level functions or loop-safe local helpers,
+none of which can change a Vec's length or run code the pass cannot see; the
+call site's arguments are atoms and nothing the guard reads is shadowed there.
+Anything else is left exactly as written. `MERE_NO_RANGE_VERSION=1` disables
+the pass; `MERE_RANGE_VERSION_LOG=1` names each planned loop and dispatched
+call site on stderr. Gates: `scripts/range_version_check.sh` (pass on/off must
+agree on every case in `test/range_version/`, and plan what each case's header
+says) and `scripts/vectorize_check.sh` (the emitted C, compiled by clang, has
+vector arithmetic reachable from `main` with the pass on and none with it off).

@@ -69,7 +69,7 @@ machine rather than a host.
 | `e` | yes | yes | yes | yes |
 | `env_var` | yes | yes | yes | refused |
 | `even` | yes | yes | yes | yes |
-| `exit` | yes | unattributed | yes | yes |
+| `exit` | yes | yes | yes | yes |
 | `exp` | yes | yes | yes | yes |
 | `f32_bits` | yes | yes | yes | refused |
 | `f_abs` | yes | yes | yes | yes |

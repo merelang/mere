@@ -1708,6 +1708,7 @@ let rec emit_expr (e : Ast.expr) : unit =
     let is_curried_collection_builtin =
       name = "vec_push"
       || name = "vec_get" || name = "vec_len"
+      || name = "__vec_get_unchecked" || name = "__vec_set_unchecked"
       || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
       || name = "vec_reverse" || name = "vec_concat" || name = "vec_sort"
       || name = "vec_map" || name = "vec_filter"
@@ -1722,9 +1723,11 @@ let rec emit_expr (e : Ast.expr) : unit =
     let is_phase38c_target =
       name = "owned_vec_push" || name = "owned_vec_get"
       || name = "vec_push" || name = "vec_get"
+      || name = "__vec_get_unchecked"
       || name = "strbuf_push"
       || name = "map_get" || name = "map_has"
       || name = "map_set" || name = "vec_set"
+      || name = "__vec_set_unchecked"
     in
     (* Phase 38.A1: value-ification of single-arg builtins *)
     let is_single_arg_value_builtin =
@@ -2856,6 +2859,8 @@ let rec emit_expr (e : Ast.expr) : unit =
   | Ast.App ({ node = Ast.Var "bytes_len"; _ }, arg) ->
     bytes_used := true; emit_expr arg;
     emit_instr "i32.wrap_i64"; emit_instr "i32.load"; emit_instr "i64.extend_i32_u"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "__bytes_get_unchecked"; _ }, b_e); _ }, i_e) ->
+    bytes_used := true; emit_expr b_e; emit_expr i_e; emit_instr "call $__lang_bytes_get_unchecked"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "bytes_get"; _ }, b_e); _ }, i_e) ->
     bytes_used := true; emit_expr b_e; emit_expr i_e; emit_instr "call $__lang_bytes_get"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "bytes_concat"; _ }, a_e); _ }, b_e) ->
@@ -3149,6 +3154,18 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr vec_e;
     emit_expr val_e;
     emit_instr "call $mere_vec_push"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "__vec_get_unchecked"; _ }, vec_e); _ }, idx_e) ->
+    (* Q-108: see Ast.range_version_program. *)
+    vec_used := true;
+    emit_expr vec_e;
+    emit_expr idx_e;
+    emit_instr "call $mere_vec_get_unchecked"
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "__vec_set_unchecked"; _ }, vec_e); _ }, idx_e); _ }, val_e) ->
+    vec_used := true;
+    emit_expr vec_e;
+    emit_expr idx_e;
+    emit_expr val_e;
+    emit_instr "call $mere_vec_set_unchecked"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_get"; _ }, vec_e); _ }, idx_e) ->
     vec_used := true;
     emit_expr vec_e;
@@ -6473,6 +6490,22 @@ let vec_runtime = {|
       (local.get $x))
     (i32.store offset=4 (local.get $v) (i32.add (local.get $len) (i32.const 1)))
     (i64.extend_i32_s (i32.const 0)))
+  ;; Q-108: unchecked twins for the range-check versioning pass. The loop that
+  ;; calls them checked its whole index range once, before the loop.
+  (func $mere_vec_get_unchecked (param $v8 i64) (param $i8 i64) (result i64)
+    (local $v i32)
+    (local.set $v (i32.wrap_i64 (local.get $v8)))
+    (i64.load
+      (i32.add (i32.load offset=0 (local.get $v))
+               (i32.mul (i32.wrap_i64 (local.get $i8)) (i32.const 8)))))
+  (func $mere_vec_set_unchecked (param $v8 i64) (param $i8 i64) (param $x i64) (result i64)
+    (local $v i32)
+    (local.set $v (i32.wrap_i64 (local.get $v8)))
+    (i64.store
+      (i32.add (i32.load offset=0 (local.get $v))
+               (i32.mul (i32.wrap_i64 (local.get $i8)) (i32.const 8)))
+      (local.get $x))
+    (i64.const 0))
   (func $mere_vec_get (param $v8 i64) (param $i8 i64) (result i64)
     (local $len i32) (local $buf i32)
     (local $v i32)
@@ -6836,6 +6869,10 @@ let bytes_runtime_wasm = {|
     (i32.store (local.get $b) (local.get $len))
     (global.set $__lang_bump (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $len)))
     (i64.extend_i32_s (local.get $b)))
+  (func $__lang_bytes_get_unchecked (param $b8 i64) (param $i8 i64) (result i64)
+    (i64.extend_i32_s
+      (i32.load8_u (i32.add (i32.add (i32.wrap_i64 (local.get $b8)) (i32.const 4))
+                            (i32.wrap_i64 (local.get $i8))))))
   (func $__lang_bytes_get (param $b8 i64) (param $i8 i64) (result i64)
     (local $b i32)
     (local $i i32)

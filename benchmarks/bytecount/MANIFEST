@@ -1,0 +1,14 @@
+name  = bytecount
+shape = 20 passes over 4 MiB of bytes, each counting one byte value
+args  = $DATA/bytes.bin
+claim = the byte-lane twin of axpy for range-check versioning (Q-108):
+        `bytes_get b i` with `bytes_len b` as the bound is exactly the loop
+        shape the pass looks for, and compare-and-count over bytes is what a
+        vectorizer does best. Expected to TIE with C. crc32 next to it is the
+        control: its per-byte work is a table lookup chain that no vectorizer
+        touches, so its time should not move when this one does.
+
+# 4,194,448 B at v0.1.420: the 4 MiB input plus its header. The loop allocates
+# nothing, so the band is tight around the file.
+alloc_min = 4194304
+alloc_max = 6291456

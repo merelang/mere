@@ -1,0 +1,7 @@
+// range-version: count
+// bytes: immutable, so `bytes_len b` as the bound is itself the guard.
+let b = bytes_of_str "banana bandana";
+let rec count = fn (i: int) -> fn (acc: int) ->
+  if i == bytes_len b then acc
+  else count (i + 1) (if bytes_get b i == 97 then acc + 1 else acc);
+print (str_of_int (count 0 0))
