@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.425 — 2026-09-05
+
+_`show` and `to_json` of a SIMD value on the C, LLVM and Wasm backends, in the
+interpreter's spelling -- `f64x2(1.5, 1.5)`, `u8x16[abab...]`, `[1.0, 2.5]`,
+`"0101..."` -- replacing the refusal v0.1.422 put at the call site. And a
+pre-existing divergence found on the way: `to_json 1.5` printed `null` on C
+and Wasm, `1.5` on interp and LLVM._
+
+The two lanes of an f64x2 go through `__lang_str_of_float`, the formatter all
+four backends already share for floats, so the digits agree by construction;
+a u8x16 is 32 hex digits. C: asprintf / snprintf into a Mere str. LLVM: the
+lanes extracted, the formats minted like the tuple ones. Wasm: the box loaded,
+`f64x2.extract_lane` into the float formatter import, and a 16-step hex writer
+into a scratch buffer for the bytes. `test/parity/simd_show.mere` pins all of
+it, plus `to_json 1.5` and `show 2.5`, on interp / C / LLVM / Wasm.
+
+The float `to_json` case had no arm in C's and Wasm's per-type generators and
+fell to the `null` the unit type prints. Both now call the shared formatter.
+
+---
+
 ## v0.1.424 — 2026-09-05
 
 _The u8x16 lane operations a UTF-8 validator needs -- load / from_bytes, and /

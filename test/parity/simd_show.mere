@@ -1,0 +1,9 @@
+// show / to_json of the SIMD types spelled the same on every backend -- and
+// to_json of a plain float, which used to be "null" on C and Wasm.
+let _ = print (show (f64x2_splat 1.5));
+let _ = print (show (f64x2_make 0.25 (f_sub 0.0 2.0)));
+let _ = print (show (u8x16_splat 171));
+let _ = print (to_json (f64x2_make 1.0 2.5));
+let _ = print (to_json (u8x16_splat 1));
+let _ = print (to_json 1.5);
+print (show 2.5)

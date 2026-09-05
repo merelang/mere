@@ -3057,16 +3057,6 @@ let rec emit_expr (e : Ast.expr) : string =
            unsupported e.loc "show: missing arg type info"
        in
        let tag = ty_tag arg_ty in
-       (* Q-109: a SIMD value has no show / to_json on this backend yet. Before this
-          check the three compiled backends printed three different placeholders
-          for the same value; refusing here keeps them answering alike until the
-          printer exists. *)
-       (match arg_ty with
-        | Ast.TySimd k ->
-          unsupported e.loc
-            ("show / to_json of " ^ Ast.pp_ty (Ast.TySimd k)
-             ^ " is not supported on this backend yet -- extract the lanes")
-        | _ -> ());
        Printf.sprintf "show_%s(%s)" tag (emit_expr arg)
      | Ast.Var "to_json" ->
        (* Polymorphic builtin — dispatch to the type-specialized
@@ -3076,12 +3066,6 @@ let rec emit_expr (e : Ast.expr) : string =
          | Some t -> Ast.walk t
          | None -> unsupported e.loc "to_json: missing arg type info"
        in
-       (match arg_ty with
-        | Ast.TySimd k ->
-          unsupported e.loc
-            ("show / to_json of " ^ Ast.pp_ty (Ast.TySimd k)
-             ^ " is not supported on this backend yet -- extract the lanes")
-        | _ -> ());
        Printf.sprintf "to_json_%s(%s)" (ty_tag arg_ty) (emit_expr arg)
      (* v0.1.183: `of_json_like w s` is `of_json s` with the target type
         taken from the witness rather than from an annotation. Here that is
@@ -4818,6 +4802,11 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
        taken. The formatter already exists and is the one the interp, the LLVM
        helper and the Wasm host all share; this only wires it up. *)
     header ^ " { return __lang_str_of_float(v); }"
+  | Ast.TySimd Ast.F64x2 ->
+    (* Q-109 (2d): the interpreter's spelling, lanes through the shared float formatter *)
+    header ^ " { char* buf; asprintf(&buf, \"f64x2(%s, %s)\", __lang_str_of_float(v[0]), __lang_str_of_float(v[1])); return __lang_str_take_cstr(buf); }"
+  | Ast.TySimd Ast.U8x16 ->
+    header ^ " { char buf[40]; memcpy(buf, \"u8x16[\", 6); for (int i = 0; i < 16; i++) snprintf(buf + 6 + 2 * i, 3, \"%02x\", (unsigned)v[i]); buf[38] = ']'; buf[39] = 0; return __lang_str_of_cstr(buf); }"
   | Ast.TyTuple ts ->
     let parts =
       List.mapi (fun i et ->
@@ -4928,6 +4917,15 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
     header ^ " { char* buf; asprintf(&buf, \"\\\"%s\\\"\", __lang_str_escape(v)); return __lang_str_take_cstr(buf); }"
   | Ast.TyUnit ->
     header ^ " { (void)v; return __lang_str_of_cstr(\"null\"); }"
+  | Ast.TyFloat ->
+    (* v0.1.425: to_json of a float printed "null" here and on Wasm, 1.5 on
+       interp and LLVM -- found while giving the SIMD types a printer. The
+       shared formatter is the JSON spelling too. *)
+    header ^ " { return __lang_str_of_float(v); }"
+  | Ast.TySimd Ast.F64x2 ->
+    header ^ " { char* buf; asprintf(&buf, \"[%s, %s]\", __lang_str_of_float(v[0]), __lang_str_of_float(v[1])); return __lang_str_take_cstr(buf); }"
+  | Ast.TySimd Ast.U8x16 ->
+    header ^ " { char buf[36]; buf[0] = '\"'; for (int i = 0; i < 16; i++) snprintf(buf + 1 + 2 * i, 3, \"%02x\", (unsigned)v[i]); buf[33] = '\"'; buf[34] = 0; return __lang_str_of_cstr(buf); }"
   | Ast.TyArrow _ ->
     header ^ " { (void)v; return __lang_str_of_cstr(\"null\"); }"
   | Ast.TyTuple ts ->

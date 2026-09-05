@@ -2168,16 +2168,6 @@ let rec emit_expr (e : Ast.expr) : unit =
       | None -> unsupported e.Ast.loc "show: missing arg type"
     in
     let tag = ty_tag arg_ty in
-       (* Q-109: a SIMD value has no show / to_json on this backend yet. Before this
-          check the three compiled backends printed three different placeholders
-          for the same value; refusing here keeps them answering alike until the
-          printer exists. *)
-       (match arg_ty with
-        | Ast.TySimd k ->
-          unsupported e.Ast.loc
-            ("show / to_json of " ^ Ast.pp_ty (Ast.TySimd k)
-             ^ " is not supported on this backend yet -- extract the lanes")
-        | _ -> ());
     emit_expr arg;
     emit_instr (Printf.sprintf "call $show_%s" tag)
   | Ast.App ({ node = Ast.Var "to_json"; _ }, arg) ->
@@ -2186,12 +2176,6 @@ let rec emit_expr (e : Ast.expr) : unit =
       | Some t -> Ast.walk t
       | None -> unsupported e.Ast.loc "to_json: missing arg type"
     in
-    (match arg_ty with
-     | Ast.TySimd k ->
-       unsupported e.Ast.loc
-         ("show / to_json of " ^ Ast.pp_ty (Ast.TySimd k)
-          ^ " is not supported on this backend yet -- extract the lanes")
-     | _ -> ());
     emit_expr arg;
     emit_instr (Printf.sprintf "call $to_json_%s" (ty_tag arg_ty))
   (* v0.1.183: `of_json_like w s` is `of_json s` with the target type taken
@@ -4528,6 +4512,41 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
        pointer here, so load the f64 and hand it to the shared formatter
        (an env import, which returns an i32 str pointer). *)
     "  (func $show_float (param $x i64) (result i64)\n    \    (i64.extend_i32_u\n    \      (call $__lang_str_of_float\n    \        (f64.load offset=0 align=8 (i32.wrap_i64 (local.get $x))))))"
+  | Ast.TySimd Ast.F64x2 ->
+    (* Q-109 (2d): a SIMD value is a 16-byte box; each lane through the shared
+       float formatter, in the interpreter's spelling. *)
+    let lp = intern_show_str "f64x2(" and cm = intern_show_str ", " and rp = intern_show_str ")" in
+    Printf.sprintf
+      "  (func $show_f64x2 (param $x i64) (result i64)\n\
+      \    (local $v v128)\n\
+      \    (local.set $v (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $x))))\n\
+      \    (call $__lang_str_concat\n\
+      \      (call $__lang_str_concat\n\
+      \        (call $__lang_str_concat (i64.const %d) (i64.extend_i32_u (call $__lang_str_of_float (f64x2.extract_lane 0 (local.get $v)))))\n\
+      \        (call $__lang_str_concat (i64.const %d) (i64.extend_i32_u (call $__lang_str_of_float (f64x2.extract_lane 1 (local.get $v))))))\n\
+      \      (i64.const %d)))" lp cm rp
+  | Ast.TySimd Ast.U8x16 ->
+    let pre = intern_show_str "u8x16[" and post = intern_show_str "]" in
+    Printf.sprintf {|  (func $show_u8x16 (param $x i64) (result i64)
+    (local $v i32) (local $buf i32) (local $i i32) (local $b i32) (local $d i32)
+    (local.set $v (i32.wrap_i64 (local.get $x)))
+    (local.set $buf (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $buf) (i32.const 48)))
+    (local.set $i (i32.const 0))
+    (block $end (loop $lp
+      (br_if $end (i32.ge_u (local.get $i) (i32.const 16)))
+      (local.set $b (i32.load8_u (i32.add (local.get $v) (local.get $i))))
+      (local.set $d (i32.shr_u (local.get $b) (i32.const 4)))
+      (i32.store8 (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 2)))
+        (select (i32.add (local.get $d) (i32.const 48)) (i32.add (local.get $d) (i32.const 87)) (i32.lt_u (local.get $d) (i32.const 10))))
+      (local.set $d (i32.and (local.get $b) (i32.const 15)))
+      (i32.store8 (i32.add (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 2))) (i32.const 1))
+        (select (i32.add (local.get $d) (i32.const 48)) (i32.add (local.get $d) (i32.const 87)) (i32.lt_u (local.get $d) (i32.const 10))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (call $__lang_str_concat
+      (call $__lang_str_concat (i64.const %d) (call $__lang_str_copyn (i64.extend_i32_u (local.get $buf)) (i64.const 32)))
+      (i64.const %d)))|} pre post
   | Ast.TyTuple ts ->
     let comma = intern_show_str ", " in
     let lparen = intern_show_str "(" in
@@ -4759,6 +4778,43 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
     let off = intern_show_str "null" in
     Printf.sprintf
       "  (func $to_json_%s (param $u i64) (result i64) (i64.const %d))" tag off
+  | Ast.TyFloat ->
+    (* v0.1.425: to_json of a float fell to the `_ ->` "null" here (and on C),
+       where interp and LLVM printed the number. Same formatter as show. *)
+    "  (func $to_json_float (param $x i64) (result i64)\n    \    (i64.extend_i32_u\n    \      (call $__lang_str_of_float\n    \        (f64.load offset=0 align=8 (i32.wrap_i64 (local.get $x))))))"
+  | Ast.TySimd Ast.F64x2 ->
+    let lb = intern_show_str "[" and cm = intern_show_str ", " and rb = intern_show_str "]" in
+    Printf.sprintf
+      "  (func $to_json_f64x2 (param $x i64) (result i64)\n\
+      \    (local $v v128)\n\
+      \    (local.set $v (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $x))))\n\
+      \    (call $__lang_str_concat\n\
+      \      (call $__lang_str_concat\n\
+      \        (call $__lang_str_concat (i64.const %d) (i64.extend_i32_u (call $__lang_str_of_float (f64x2.extract_lane 0 (local.get $v)))))\n\
+      \        (call $__lang_str_concat (i64.const %d) (i64.extend_i32_u (call $__lang_str_of_float (f64x2.extract_lane 1 (local.get $v))))))\n\
+      \      (i64.const %d)))" lb cm rb
+  | Ast.TySimd Ast.U8x16 ->
+    let q = intern_show_str "\"" in
+    Printf.sprintf {|  (func $to_json_u8x16 (param $x i64) (result i64)
+    (local $v i32) (local $buf i32) (local $i i32) (local $b i32) (local $d i32)
+    (local.set $v (i32.wrap_i64 (local.get $x)))
+    (local.set $buf (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $buf) (i32.const 48)))
+    (local.set $i (i32.const 0))
+    (block $end (loop $lp
+      (br_if $end (i32.ge_u (local.get $i) (i32.const 16)))
+      (local.set $b (i32.load8_u (i32.add (local.get $v) (local.get $i))))
+      (local.set $d (i32.shr_u (local.get $b) (i32.const 4)))
+      (i32.store8 (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 2)))
+        (select (i32.add (local.get $d) (i32.const 48)) (i32.add (local.get $d) (i32.const 87)) (i32.lt_u (local.get $d) (i32.const 10))))
+      (local.set $d (i32.and (local.get $b) (i32.const 15)))
+      (i32.store8 (i32.add (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 2))) (i32.const 1))
+        (select (i32.add (local.get $d) (i32.const 48)) (i32.add (local.get $d) (i32.const 87)) (i32.lt_u (local.get $d) (i32.const 10))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $lp)))
+    (call $__lang_str_concat
+      (call $__lang_str_concat (i64.const %d) (call $__lang_str_copyn (i64.extend_i32_u (local.get $buf)) (i64.const 32)))
+      (i64.const %d)))|} q q
   | Ast.TyTuple ts ->
     let comma = intern_show_str "," in
     let lb = intern_show_str "[" in
