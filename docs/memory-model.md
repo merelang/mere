@@ -205,7 +205,9 @@ as of v0.1.31 it is the implemented semantics on the C backend:
 
 Backend note: the interpreter is GC-backed (same value semantics, memory
 behaviour trivially fine). The Wasm backend reclaims region blocks as of
-v0.1.37 (mark on the value stack + result copy-out via `$__mcopy_<tag>`),
+v0.1.37 (mark on the value stack + result copy-out via `$__mcopy_<tag>`;
+boxed results -- lists, tuples, records, variants, floats, bytes -- copy out
+correctly since v0.1.418, before which only scalar results assembled),
 with one honest difference from C: there is no per-container storage, so
 instead of copy-on-store, **escaping stores are compile errors** —
 pushing a heap value into a container created outside the block,

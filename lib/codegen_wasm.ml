@@ -869,6 +869,7 @@ let rec add_wasm_copy_deps (t : Ast.ty) : unit =
   else begin
     Hashtbl.add wasm_copy_types tag t;
     match t with
+    | Ast.TyBytes -> bytes_used := true   (* Q-107: the copier calls $__lang_bytes_alloc *)
     | Ast.TyTuple ts -> List.iter add_wasm_copy_deps ts
     | Ast.TyCon (n, args) when Hashtbl.mem Typer.records n ->
       let info = Hashtbl.find Typer.records n in
@@ -5045,28 +5046,51 @@ let emit_copy_fn_wasm (tag : string) (t : Ast.ty) : string =
   | Ast.TyStr ->
     header ^ " (call $__mcopy_str (local.get $v)))"
   | Ast.TyFloat ->
-    (* floats are 8-byte boxes; keep the 8-alignment convention *)
+    (* Q-107 (v0.1.418): a float is an 8-byte box; `$v` is its address widened
+       to i64, so wrap before loading. The old arm loaded through the i64 and
+       returned an i32, and wat2wasm rejected every module that copied a
+       float out of a region. *)
     header ^ "\n" ^
     "    (local $p i32)\n\
     \    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 7)) (i32.const -8)))\n\
     \    (local.set $p (global.get $__lang_bump))\n\
     \    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 8)))\n\
-    \    (f64.store offset=0 align=8 (local.get $p) (f64.load offset=0 align=8 (local.get $v)))\n\
-    \    (local.get $p))"
+    \    (f64.store offset=0 align=8 (local.get $p) (f64.load offset=0 align=8 (i32.wrap_i64 (local.get $v))))\n\
+    \    (i64.extend_i32_u (local.get $p)))"
+  | Ast.TyBytes ->
+    (* Q-107: bytes are { i32 len @0, bytes @4 }; copy through the bytes
+       allocator so the header and alignment are the runtime's own. *)
+    header ^ "\n" ^
+    "    (local $src i32) (local $n i32) (local $b i32) (local $i i32)\n\
+    \    (local.set $src (i32.wrap_i64 (local.get $v)))\n\
+    \    (local.set $n (i32.load (local.get $src)))\n\
+    \    (local.set $b (i32.wrap_i64 (call $__lang_bytes_alloc (i64.extend_i32_u (local.get $n)))))\n\
+    \    (local.set $i (i32.const 0))\n\
+    \    (block $end (loop $lp\n\
+    \      (br_if $end (i32.eq (local.get $i) (local.get $n)))\n\
+    \      (i32.store8 (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))\n\
+    \                  (i32.load8_u (i32.add (i32.add (local.get $src) (i32.const 4)) (local.get $i))))\n\
+    \      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n\
+    \      (br $lp)))\n\
+    \    (i64.extend_i32_u (local.get $b)))"
   | Ast.TyTuple ts ->
+    (* Q-107: a tuple is n slots of 8 bytes (see the Ast.Tuple emission);
+       the arm below used to copy n slots of 4. *)
     let n = List.length ts in
     let stores =
       List.mapi (fun i ft ->
         Printf.sprintf
-          "    (i32.store offset=%d (local.get $p) %s)"
-          (i * 4)
-          (field_copy (Printf.sprintf "(i32.load offset=%d (local.get $v))" (i * 4)) ft))
+          "    (i64.store offset=%d (local.get $p) %s)"
+          (i * 8)
+          (field_copy (Printf.sprintf "(i64.load offset=%d (local.get $src))" (i * 8)) ft))
         ts
     in
     Printf.sprintf
-      "%s\n    (local $p i32)\n    (local.set $p (global.get $__lang_bump))\n    (global.set $__lang_bump (i32.add (local.get $p) (i32.const %d)))\n%s\n    (local.get $p))"
-      header (n * 4) (String.concat "\n" stores)
+      "%s\n    (local $p i32) (local $src i32)\n    (local.set $src (i32.wrap_i64 (local.get $v)))\n    (local.set $p (global.get $__lang_bump))\n    (global.set $__lang_bump (i32.add (local.get $p) (i32.const %d)))\n%s\n    (i64.extend_i32_u (local.get $p)))"
+      header (n * 8) (String.concat "\n" stores)
   | Ast.TyCon (n, args) when Hashtbl.mem Typer.records n ->
+    (* Q-107: a record is one 8-byte slot per declared field, in declaration
+       order (see the Ast.Record_lit emission). *)
     let info = Hashtbl.find Typer.records n in
     let mapping =
       if info.Typer.r_params = [] then []
@@ -5076,15 +5100,21 @@ let emit_copy_fn_wasm (tag : string) (t : Ast.ty) : string =
     let stores =
       List.mapi (fun i ft ->
         Printf.sprintf
-          "    (i32.store offset=%d (local.get $p) %s)"
-          (i * 4)
-          (field_copy (Printf.sprintf "(i32.load offset=%d (local.get $v))" (i * 4)) ft))
+          "    (i64.store offset=%d (local.get $p) %s)"
+          (i * 8)
+          (field_copy (Printf.sprintf "(i64.load offset=%d (local.get $src))" (i * 8)) ft))
         fields
     in
     Printf.sprintf
-      "%s\n    (local $p i32)\n    (local.set $p (global.get $__lang_bump))\n    (global.set $__lang_bump (i32.add (local.get $p) (i32.const %d)))\n%s\n    (local.get $p))"
-      header (nf * 4) (String.concat "\n" stores)
+      "%s\n    (local $p i32) (local $src i32)\n    (local.set $src (i32.wrap_i64 (local.get $v)))\n    (local.set $p (global.get $__lang_bump))\n    (global.set $__lang_bump (i32.add (local.get $p) (i32.const %d)))\n%s\n    (i64.extend_i32_u (local.get $p)))"
+      header (nf * 8) (String.concat "\n" stores)
   | Ast.TyCon (n, args) when Hashtbl.mem Exhaustive.type_variants n ->
+    (* Q-107: a variant node is { i64 tag @0, i64 payload @8 } when any
+       constructor of the type carries a payload, and a bare 8-byte tag
+       otherwise (see the Ast.Constr emission). The payload slot holds an
+       inline scalar, a str pointer, or a pointer to the tuple / record a
+       multi-field constructor was given -- so the per-constructor dispatch
+       hands the slot to that payload type's own copier. *)
     let vs = Hashtbl.find Exhaustive.type_variants n in
     let mapping =
       match vs with
@@ -5095,9 +5125,9 @@ let emit_copy_fn_wasm (tag : string) (t : Ast.ty) : string =
          | _ -> [])
       | [] -> []
     in
-    (* node = [tag][payload]; copy payload per-ctor when boxed *)
+    let has_payload = variant_has_payload n in
     let rec payload_dispatch = function
-      | [] -> "(i32.load offset=4 (local.get $v))"
+      | [] -> "(i64.load offset=8 (local.get $src))"
       | (cname, arg_opt) :: rest ->
         (match arg_opt with
          | None -> payload_dispatch rest
@@ -5109,14 +5139,19 @@ let emit_copy_fn_wasm (tag : string) (t : Ast.ty) : string =
                match Hashtbl.find_opt variant_tags cname with
                | Some t -> t | None -> 0 in
              Printf.sprintf
-               "(if (result i64) (i32.eq (local.get $t) (i32.const %d))\n\
-               \      (then (call $__mcopy_%s (i32.load offset=4 (local.get $v))))\n\
+               "(if (result i64) (i64.eq (local.get $t) (i64.const %d))\n\
+               \      (then (call $__mcopy_%s (i64.load offset=8 (local.get $src))))\n\
                \      (else %s))"
                ctag (ty_tag pty) (payload_dispatch rest))
     in
-    Printf.sprintf
-      "%s\n    (local $p i32) (local $t i32)\n    (local.set $t (i32.load offset=0 (local.get $v)))\n    (local.set $p (global.get $__lang_bump))\n    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 8)))\n    (i32.store offset=0 (local.get $p) (local.get $t))\n    (i32.store offset=4 (local.get $p) %s)\n    (local.get $p))"
-      header (payload_dispatch vs)
+    if has_payload then
+      Printf.sprintf
+        "%s\n    (local $p i32) (local $src i32) (local $t i64)\n    (local.set $src (i32.wrap_i64 (local.get $v)))\n    (local.set $t (i64.load offset=0 (local.get $src)))\n    (local.set $p (global.get $__lang_bump))\n    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 16)))\n    (i64.store offset=0 (local.get $p) (local.get $t))\n    (i64.store offset=8 (local.get $p) %s)\n    (i64.extend_i32_u (local.get $p)))"
+        header (payload_dispatch vs)
+    else
+      Printf.sprintf
+        "%s\n    (local $p i32) (local $src i32)\n    (local.set $src (i32.wrap_i64 (local.get $v)))\n    (local.set $p (global.get $__lang_bump))\n    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 8)))\n    (i64.store offset=0 (local.get $p) (i64.load offset=0 (local.get $src)))\n    (i64.extend_i32_u (local.get $p)))"
+        header
   | _ ->
     (* containers / closures / channels: pointer passthrough (guards
        reject the escaping-store cases) *)
