@@ -34,6 +34,7 @@ probe_for() {
     pi|e) echo "let _ = print_int (float_bits_hi $1);" ;;
     run) echo 'let _ = print_int (run "true");' ;;
     read_file) echo 'let _ = print (read_file "x");' ;;
+    read_bytes) echo 'let _ = print_int (bytes_len (read_bytes "x"));' ;;
     file_exists) echo 'let _ = print_int (if file_exists "x" then 1 else 0);' ;;
     time) echo 'let _ = print_int (float_bits_hi (time ()));' ;;
     random_int) echo 'let _ = print_int (random_int 10);' ;;

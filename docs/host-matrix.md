@@ -140,7 +140,7 @@ machine rather than a host.
 | `print_no_nl` | yes | yes | yes | yes |
 | `random_float` | refused | refused | refused | refused |
 | `random_int` | yes | refused | yes | yes |
-| `read_bytes` | yes | refused | refused | refused |
+| `read_bytes` | yes | refused | refused | yes |
 | `read_file` | yes | yes | yes | yes |
 | `read_file_bytes` | yes | yes | yes | refused |
 | `read_key` | yes | refused | refused | refused |

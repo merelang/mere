@@ -126,6 +126,9 @@ let read_stdin = fn (u: unit) -> __rv_read_all 0;
 // service but the type itself, and they are here for the same reason: a program
 // that never builds one runs.
 let print_bytes = fn (b: bytes) -> (__h_todo "print_bytes" : unit);
+// Q-110 (v0.1.428): a bytes value IS a str block here, so reading a file as
+// bytes is reading it as a str -- the same openat / read / close path.
+let read_bytes = fn (p: str) -> bytes_of_str (read_file p);
 
 // --- floats: a scaffold, and it says so -----------------------------------
 // A float on this target is a two-word block (the two halves of the IEEE 754
