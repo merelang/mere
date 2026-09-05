@@ -2216,6 +2216,27 @@ let emit_struct_fn ?(json = false) (tag : string) (t : Ast.ty) : string =
       emit_instr (Printf.sprintf
                     "  %s = call ptr @__lang_str_of_float(double %%x)" r);
       r
+    | Ast.TySimd Ast.F64x2 ->
+      (* Q-109 (2d): both lanes through the shared float formatter, then one
+         asprintf in the interpreter's spelling (show) or JSON's (to_json). *)
+      let strs = List.map (fun i ->
+        let l = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = extractelement <2 x double> %%x, i32 %d" l i);
+        let s = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_of_float(double %s)" s l);
+        "ptr " ^ s) [0; 1] in
+      mint_show_format (pfx ^ "_f64x2") (if json then "[%s, %s]" else "f64x2(%s, %s)");
+      emit_asprintf (pfx ^ "_f64x2") (String.concat ", " strs)
+    | Ast.TySimd Ast.U8x16 ->
+      let ints = List.init 16 (fun i ->
+        let b = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = extractelement <16 x i8> %%x, i32 %d" b i);
+        let w = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = zext i8 %s to i32" w b);
+        "i32 " ^ w) in
+      let hex = String.concat "" (List.init 16 (fun _ -> "%02x")) in
+      mint_show_format (pfx ^ "_u8x16") (if json then "\"" ^ hex ^ "\"" else "u8x16[" ^ hex ^ "]");
+      emit_asprintf (pfx ^ "_u8x16") (String.concat ", " ints)
     | Ast.TyTuple ts ->
       (* Show each element, then asprintf "(%s, %s, ...)" with them. *)
       let tname = tuple_struct_name ts in
@@ -3518,12 +3539,6 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | Some t -> Ast.walk t
       | None -> unsupported e.Ast.loc "to_json: missing arg type"
     in
-    (match arg_ty with
-     | Ast.TySimd k ->
-       unsupported e.Ast.loc
-         ("show / to_json of " ^ Ast.pp_ty (Ast.TySimd k)
-          ^ " is not supported on this backend yet -- extract the lanes")
-     | _ -> ());
     let av = emit_expr env arg in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @to_json_%s(%s %s)"
@@ -3536,16 +3551,6 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | None -> unsupported e.Ast.loc "show: missing arg type"
     in
     let tag = ty_tag arg_ty in
-       (* Q-109: a SIMD value has no show / to_json on this backend yet. Before this
-          check the three compiled backends printed three different placeholders
-          for the same value; refusing here keeps them answering alike until the
-          printer exists. *)
-       (match arg_ty with
-        | Ast.TySimd k ->
-          unsupported e.Ast.loc
-            ("show / to_json of " ^ Ast.pp_ty (Ast.TySimd k)
-             ^ " is not supported on this backend yet -- extract the lanes")
-        | _ -> ());
     let av = emit_expr env arg in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"

@@ -896,7 +896,7 @@ satisfy it and hide the very row it was describing.
 | `bytes_of_hex` / `hex_of_bytes` | `str -> bytes` / `bytes -> str` | lowercase hex, no separators |
 | `bytes_of_vec` / `vec_of_bytes` | `Vec[R, int] -> bytes` / `bytes -> Vec[R, int]` | the bridge to the integer view |
 
-**`f64x2` / `u8x16` — the 128-bit SIMD types** (Q-109; two doubles, or sixteen bytes, in one value. C: the compiler's vector extension; LLVM: `<2 x double>` / `<16 x i8>`; Wasm: `v128`, boxed; not on -rv yet. Not comparable with `==` or `<` -- compare lanes):
+**`f64x2` / `u8x16` — the 128-bit SIMD types** (Q-109; two doubles, or sixteen bytes, in one value. C: the compiler's vector extension; LLVM: `<2 x double>` / `<16 x i8>`; Wasm: `v128`, boxed; not on -rv yet. Not comparable with `==` or `<` -- compare lanes. `show` prints `f64x2(a, b)` / `u8x16[32 hex digits]`, `to_json` `[a, b]` / a hex string):
 
 | builtin | signature | notes |
 |---|---|---|

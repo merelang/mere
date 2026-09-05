@@ -14922,5 +14922,20 @@ let () =
     (let w = wasm "u8x16_extract (u8x16_sub_sat (u8x16_swizzle (u8x16_splat 1) (u8x16_splat 0)) (u8x16_splat 1)) 0" in
      if has w "i8x16.swizzle" && has w "i8x16.sub_sat_u" then "v128" else "missing") "v128";
 
+  (* v0.1.425 (Q-109, 2d): show / to_json of a SIMD value on the compiled
+     backends, in the interpreter's spelling; and to_json of a float, which C
+     and Wasm printed as "null". *)
+  check "v0.1.425: interp to_json of a float is the number" (Pipeline.process "to_json 1.5") "\"1.5\"";
+  check "v0.1.425: C prints a SIMD value with the shared float formatter"
+    (let c = rv_c "show (f64x2_splat 1.5)" in if has c "f64x2(%s, %s)" && has c "__lang_str_of_float(v[0])" then "printer" else "none") "printer";
+  check "v0.1.425: C to_json of a float is the number, not null"
+    (let c = rv_c "to_json 1.5" in if has c "to_json_float(double v) { return __lang_str_of_float(v); }" then "number" else "null") "number";
+  check "v0.1.425: LLVM mints the SIMD formats"
+    (let l = llvm "let _ = print (show (u8x16_splat 1)) in to_json (f64x2_splat 1.0)" in
+     if has l "@.fmt_show_u8x16" && has l "@.fmt_to_json_f64x2" then "formats" else "none") "formats";
+  check "v0.1.425: Wasm has show_u8x16 and to_json_float"
+    (let w = wasm "let _ = print (show (u8x16_splat 1)) in to_json 1.5" in
+     if has w "(func $show_u8x16" && has w "(func $to_json_float" then "printers" else "none") "printers";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
