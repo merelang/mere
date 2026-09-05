@@ -9,8 +9,10 @@ claim = the shape a short-lived program actually has, and the one the region
         compare hash tables, not languages, and the systems-language question
         is already answered by the Rust row.
 
-# Measured 27,334,672 B at v0.1.316.
-alloc_min = 16777216
+# Measured 27,334,672 B at v0.1.316; 22,806,280 at v0.1.419, when a cons cell
+# went from 24 bytes to 16 (Q-104) -- 300,000 words, 8 bytes each. The
+# streaming row reads 16,745,248 in all.
+alloc_min = 12582912
 alloc_max = 41943040
 
 # bench_stream.mere holds the same answer in a region per line. Its named
