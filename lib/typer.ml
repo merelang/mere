@@ -2425,6 +2425,20 @@ let initial_env : env =
     ("f64x2_store", f64x2_store_scheme);
     ("__f64x2_load_unchecked",  f64x2_load_scheme);
     ("__f64x2_store_unchecked", f64x2_store_scheme);
+    (* Q-109 (2c): the u8x16 lane operations a UTF-8 validator needs. *)
+    ("u8x16_from_bytes", mono (Ast.TyArrow (Ast.TyBytes, Ast.TySimd Ast.U8x16)));
+    ("u8x16_load",       mono (Ast.TyArrow (Ast.TyBytes, Ast.TyArrow (Ast.TyInt, Ast.TySimd Ast.U8x16))));
+    ("__u8x16_load_unchecked", mono (Ast.TyArrow (Ast.TyBytes, Ast.TyArrow (Ast.TyInt, Ast.TySimd Ast.U8x16))));
+    ("u8x16_and",        mono (Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TySimd Ast.U8x16))));
+    ("u8x16_or",         mono (Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TySimd Ast.U8x16))));
+    ("u8x16_xor",        mono (Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TySimd Ast.U8x16))));
+    ("u8x16_sub_sat",    mono (Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TySimd Ast.U8x16))));
+    ("u8x16_eq",         mono (Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TySimd Ast.U8x16))));
+    ("u8x16_swizzle",    mono (Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TySimd Ast.U8x16))));
+    ("u8x16_shr",        mono (Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TyArrow (Ast.TyInt, Ast.TySimd Ast.U8x16))));
+    ("u8x16_shift_in",   mono (Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TyArrow (Ast.TyInt, Ast.TySimd Ast.U8x16)))));
+    ("u8x16_any_true",   mono (Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TyBool)));
+    ("u8x16_reduce_add", mono (Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TyInt)));
   ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =

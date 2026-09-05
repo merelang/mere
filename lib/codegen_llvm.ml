@@ -4745,6 +4745,50 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i32 @mere_vec_float_f64x2_store%s(ptr %s, i64 %s, <2 x double> %s)" r sfx av iv xv);
     "0"
+  | Ast.App ({ node = Ast.Var ("u8x16_any_true" | "u8x16_reduce_add" as op); _ }, v_e) ->
+    simd_used_llvm := true;
+    let vv = emit_expr env v_e in
+    let r = fresh_reg () in
+    (* any_true is a Mere bool, an i1 here; reduce_add an int *)
+    let rt = if op = "u8x16_any_true" then "i1" else "i64" in
+    emit_instr (Printf.sprintf "  %s = call %s @mere_%s(<16 x i8> %s)" r rt op vv); r
+  | Ast.App ({ node = Ast.Var "u8x16_from_bytes"; _ }, b_e) ->
+    simd_used_llvm := true; bytes_used := true;
+    let bv = emit_expr env b_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call <16 x i8> @__lang_u8x16_from_bytes(ptr %s)" r bv); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("u8x16_load" | "__u8x16_load_unchecked" as name); _ }, b_e); _ }, i_e) ->
+    simd_used_llvm := true; bytes_used := true;
+    let bv = emit_expr env b_e in
+    let iv = emit_expr env i_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call <16 x i8> @__lang_u8x16_load%s(ptr %s, i64 %s)" r (if name = "u8x16_load" then "" else "_unchecked") bv iv); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("u8x16_and" | "u8x16_or" | "u8x16_xor" as op); _ }, a_e); _ }, b_e) ->
+    simd_used_llvm := true;
+    let ir_op = match op with "u8x16_and" -> "and" | "u8x16_or" -> "or" | _ -> "xor" in
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = %s <16 x i8> %s, %s" r ir_op av bv); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("u8x16_sub_sat" | "u8x16_eq" | "u8x16_swizzle" as op); _ }, a_e); _ }, b_e) ->
+    simd_used_llvm := true;
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call <16 x i8> @mere_%s(<16 x i8> %s, <16 x i8> %s)" r op av bv); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "u8x16_shr"; _ }, v_e); _ }, k_e) ->
+    simd_used_llvm := true;
+    let vv = emit_expr env v_e in
+    let kv = emit_expr env k_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call <16 x i8> @mere_u8x16_shr(<16 x i8> %s, i64 %s)" r vv kv); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "u8x16_shift_in"; _ }, p_e); _ }, c_e); _ }, k_e) ->
+    simd_used_llvm := true;
+    let pv = emit_expr env p_e in
+    let cv = emit_expr env c_e in
+    let kv = emit_expr env k_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call <16 x i8> @mere_u8x16_shift_in(<16 x i8> %s, <16 x i8> %s, i64 %s)" r pv cv kv); r
   | Ast.App ({ node = Ast.Var "u8x16_splat"; _ }, x_e) ->
     simd_used_llvm := true;
     let xv = emit_expr env x_e in
@@ -9305,6 +9349,102 @@ let simd_runtime_llvm =
       "  %b = shufflevector <16 x i8> %a, <16 x i8> undef, <16 x i32> zeroinitializer";
       "  ret <16 x i8> %b";
       "}";
+      (* Q-109 (2c): u8x16 lane operations. swizzle: an index outside 0..15 gives 0
+         (Wasm's and NEON's rule); LLVM has no generic byte swizzle, so this is a
+         16-step extract / select / insert that the backend pattern-matches to
+         tbl / pshufb where it can. shift_in goes through a 32-byte alloca so the
+         shift can be a runtime value. *)
+      "@.msg_u8x16_shr = private constant [43 x i8] c\"u8x16_shr: shift %lld out of range 0..%lld\\00\"";
+      "@.msg_u8x16_shift_in = private constant [48 x i8] c\"u8x16_shift_in: shift %lld out of range 0..%lld\\00\"";
+      "declare <16 x i8> @llvm.usub.sat.v16i8(<16 x i8>, <16 x i8>)";
+      "declare i8 @llvm.vector.reduce.or.v16i8(<16 x i8>)";
+      "declare i16 @llvm.vector.reduce.add.v16i16(<16 x i16>)";
+      "define <16 x i8> @mere_u8x16_sub_sat(<16 x i8> %a, <16 x i8> %b) {";
+      "entry:";
+      "  %r = call <16 x i8> @llvm.usub.sat.v16i8(<16 x i8> %a, <16 x i8> %b)";
+      "  ret <16 x i8> %r";
+      "}";
+      "define <16 x i8> @mere_u8x16_eq(<16 x i8> %a, <16 x i8> %b) {";
+      "entry:";
+      "  %m = icmp eq <16 x i8> %a, %b";
+      "  %r = sext <16 x i1> %m to <16 x i8>";
+      "  ret <16 x i8> %r";
+      "}";
+      "define <16 x i8> @mere_u8x16_shr(<16 x i8> %v, i64 %k) {";
+      "entry:";
+      "  %lt = icmp slt i64 %k, 0";
+      "  %gt = icmp sgt i64 %k, 7";
+      "  %bad = or i1 %lt, %gt";
+      "  br i1 %bad, label %fail, label %ok";
+      "fail:";
+      "  call void @__lang_fail_idx(ptr @.msg_u8x16_shr, i64 %k, i64 7)";
+      "  unreachable";
+      "ok:";
+      "  %k8 = trunc i64 %k to i8";
+      "  %s0 = insertelement <16 x i8> undef, i8 %k8, i32 0";
+      "  %sv = shufflevector <16 x i8> %s0, <16 x i8> undef, <16 x i32> zeroinitializer";
+      "  %r = lshr <16 x i8> %v, %sv";
+      "  ret <16 x i8> %r";
+      "}";
+      "define <16 x i8> @mere_u8x16_swizzle(<16 x i8> %t, <16 x i8> %idx) {";
+      "entry:";
+      "  %buf = alloca [32 x i8], align 16";
+      "  store <16 x i8> %t, ptr %buf, align 16";
+      "  %z = getelementptr i8, ptr %buf, i64 16";
+      "  store <16 x i8> zeroinitializer, ptr %z, align 16";
+      "  %r0 = call <16 x i8> @__mere_swz_step(ptr %buf, <16 x i8> %idx, <16 x i8> zeroinitializer, i64 0)";
+      "  ret <16 x i8> %r0";
+      "}";
+      "define <16 x i8> @__mere_swz_step(ptr %buf, <16 x i8> %idx, <16 x i8> %acc, i64 %i) {";
+      "entry:";
+      "  %done = icmp eq i64 %i, 16";
+      "  br i1 %done, label %ret, label %body";
+      "body:";
+      "  %ix8 = extractelement <16 x i8> %idx, i64 %i";
+      "  %ix = zext i8 %ix8 to i64";
+      "  %big = icmp ugt i64 %ix, 15";
+      "  %sel = select i1 %big, i64 16, i64 %ix";
+      "  %p = getelementptr i8, ptr %buf, i64 %sel";
+      "  %b = load i8, ptr %p";
+      "  %acc2 = insertelement <16 x i8> %acc, i8 %b, i64 %i";
+      "  %i2 = add i64 %i, 1";
+      "  %r = call <16 x i8> @__mere_swz_step(ptr %buf, <16 x i8> %idx, <16 x i8> %acc2, i64 %i2)";
+      "  ret <16 x i8> %r";
+      "ret:";
+      "  ret <16 x i8> %acc";
+      "}";
+      "define <16 x i8> @mere_u8x16_shift_in(<16 x i8> %prev, <16 x i8> %cur, i64 %k) {";
+      "entry:";
+      "  %lt = icmp slt i64 %k, 0";
+      "  %gt = icmp sgt i64 %k, 16";
+      "  %bad = or i1 %lt, %gt";
+      "  br i1 %bad, label %fail, label %ok";
+      "fail:";
+      "  call void @__lang_fail_idx(ptr @.msg_u8x16_shift_in, i64 %k, i64 16)";
+      "  unreachable";
+      "ok:";
+      "  %buf = alloca [32 x i8], align 16";
+      "  store <16 x i8> %prev, ptr %buf, align 16";
+      "  %hi = getelementptr i8, ptr %buf, i64 16";
+      "  store <16 x i8> %cur, ptr %hi, align 16";
+      "  %off = sub i64 16, %k";
+      "  %p = getelementptr i8, ptr %buf, i64 %off";
+      "  %r = load <16 x i8>, ptr %p, align 1";
+      "  ret <16 x i8> %r";
+      "}";
+      "define i1 @mere_u8x16_any_true(<16 x i8> %v) {";
+      "entry:";
+      "  %o = call i8 @llvm.vector.reduce.or.v16i8(<16 x i8> %v)";
+      "  %nz = icmp ne i8 %o, 0";
+      "  ret i1 %nz";
+      "}";
+      "define i64 @mere_u8x16_reduce_add(<16 x i8> %v) {";
+      "entry:";
+      "  %w = zext <16 x i8> %v to <16 x i16>";
+      "  %s = call i16 @llvm.vector.reduce.add.v16i16(<16 x i16> %w)";
+      "  %r = zext i16 %s to i64";
+      "  ret i64 %r";
+      "}";
       "define i64 @mere_u8x16_extract(<16 x i8> %v, i64 %i) {";
       "entry:";
       "  %lt = icmp slt i64 %i, 0";
@@ -9336,6 +9476,43 @@ let bytes_runtime_llvm =
       "  %data = getelementptr i8, ptr %b, i64 8";
       "  call i64 @write(i32 1, ptr %data, i64 %len)";
       "  ret i64 0";
+      "}";
+      (* Q-109 (2c): sixteen bytes as one <16 x i8>; the data sits after the i64 length *)
+      "@.msg_u8x16_load = private constant [57 x i8] c\"u8x16_load: bytes [%lld, +16) out of bounds (len = %lld)\\00\"";
+      "@.msg_u8x16_from_bytes = private constant [63 x i8] c\"u8x16_from_bytes: bytes [%lld, +16) out of bounds (len = %lld)\\00\"";
+      "define <16 x i8> @__lang_u8x16_load_unchecked(ptr %b, i64 %i) {";
+      "entry:";
+      "  %d = getelementptr i8, ptr %b, i64 8";
+      "  %p = getelementptr i8, ptr %d, i64 %i";
+      "  %r = load <16 x i8>, ptr %p, align 1";
+      "  ret <16 x i8> %r";
+      "}";
+      "define <16 x i8> @__lang_u8x16_load(ptr %b, i64 %i) {";
+      "entry:";
+      "  %len = load i64, ptr %b";
+      "  %lt = icmp slt i64 %i, 0";
+      "  %end = add i64 %i, 16";
+      "  %gt = icmp sgt i64 %end, %len";
+      "  %oob = or i1 %lt, %gt";
+      "  br i1 %oob, label %fail, label %ok";
+      "fail:";
+      "  call void @__lang_fail_idx(ptr @.msg_u8x16_load, i64 %i, i64 %len)";
+      "  unreachable";
+      "ok:";
+      "  %r = call <16 x i8> @__lang_u8x16_load_unchecked(ptr %b, i64 %i)";
+      "  ret <16 x i8> %r";
+      "}";
+      "define <16 x i8> @__lang_u8x16_from_bytes(ptr %b) {";
+      "entry:";
+      "  %len = load i64, ptr %b";
+      "  %short = icmp slt i64 %len, 16";
+      "  br i1 %short, label %fail, label %ok";
+      "fail:";
+      "  call void @__lang_fail_idx(ptr @.msg_u8x16_from_bytes, i64 0, i64 %len)";
+      "  unreachable";
+      "ok:";
+      "  %r = call <16 x i8> @__lang_u8x16_load_unchecked(ptr %b, i64 0)";
+      "  ret <16 x i8> %r";
       "}";
       "define i64 @__lang_bytes_get_unchecked(ptr %b, i64 %i) {";
       "entry:";

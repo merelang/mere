@@ -108,6 +108,30 @@ def gen_json(path, n_records):
     return len(text)
 
 
+
+def gen_utf8(path, n):
+    """Deterministic UTF-8 text: ASCII words, Latin accents, Greek, CJK, Hangul,
+    emoji -- 1- to 4-byte sequences in the proportions text has, cut at a
+    codepoint boundary so the file is well-formed. utf8valid and
+    utf8valid_simd read it; they must agree on it, and they must also agree
+    on a corrupted copy, which the range_version and parity cases hold."""
+    r = lcg(20260905)
+    pieces = [p.encode("utf-8") for p in
+              ["the ", "quick ", "brown ", "fox ", "caf\u00e9 ", "na\u00efve ", "\u00fcber ",
+               "\u03b1\u03b2\u03b3 ", "\u65e5\u672c\u8a9e ", "\u30c6\u30ad\u30b9\u30c8 ", "\ud55c\uae00 ",
+               "\U0001F600 ", "\U0001F680 ", "\u00fcn\u00efc\u00f6d\u00e9 ", "x=1; ", "\n"]]
+    out = bytearray()
+    while len(out) < n:
+        out += pieces[next(r) % len(pieces)]
+    out = out[:n]
+    while out and (out[-1] & 0xC0) == 0x80:
+        out.pop()
+    if out and out[-1] >= 0xC0:
+        out.pop()
+    with open(path, "wb") as f:
+        f.write(bytes(out))
+    return len(out)
+
 def main():
     os.makedirs(DATA, exist_ok=True)
     b = os.path.join(DATA, "bytes.bin")
@@ -125,6 +149,13 @@ def main():
         print("generated %s (%d bytes)" % (w, n))
     else:
         print("kept %s" % w)
+
+    u = os.path.join(DATA, "utf8.txt")
+    if force or not os.path.exists(u):
+        n = gen_utf8(u, 4 * 1024 * 1024)
+        print("generated %s (%d bytes)" % (u, n))
+    else:
+        print("kept %s" % u)
 
     j = os.path.join(DATA, "records.json")
     if force or not os.path.exists(j):

@@ -1,0 +1,51 @@
+// range-version: none
+// The u8x16 UTF-8 validator on a few small inputs (valid text, a truncated
+// sequence, an overlong, a surrogate, and a stray byte). Its block loop exits
+// on `i + 16 > n`, which the pass does not recognise, so nothing is planned;
+// the case is here for the same-answer check of the lane operations across
+// the backends.
+let t_high1 = u8x16_from_bytes (bytes_of_hex "02020202020202028080808021011549");
+let t_low1  = u8x16_from_bytes (bytes_of_hex "e7a383838bcbcbcbcbcbcbcbcbdbcbcb");
+let t_high2 = u8x16_from_bytes (bytes_of_hex "0101010101010101e6aebaba01010101");
+let max_v   = u8x16_from_bytes (bytes_of_hex "ffffffffffffffffffffffffffefdfbf");
+let zeros16 = bytes_of_hex "00000000000000000000000000000000";
+let m80 = u8x16_splat 128;
+let m0f = u8x16_splat 15;
+let mc0 = u8x16_splat 192;
+let one = u8x16_splat 1;
+let check = fn (prev: u8x16) -> fn (input: u8x16) -> fn (err: u8x16) ->
+  if u8x16_any_true (u8x16_and input m80) then
+    let prev1 = u8x16_shift_in prev input 1 in
+    let sc = u8x16_and
+               (u8x16_and (u8x16_swizzle t_high1 (u8x16_shr prev1 4))
+                          (u8x16_swizzle t_low1 (u8x16_and prev1 m0f)))
+               (u8x16_swizzle t_high2 (u8x16_shr input 4)) in
+    let prev2 = u8x16_shift_in prev input 2 in
+    let prev3 = u8x16_shift_in prev input 3 in
+    let is3 = u8x16_sub_sat prev2 (u8x16_splat 96) in
+    let is4 = u8x16_sub_sat prev3 (u8x16_splat 112) in
+    let must23_80 = u8x16_and (u8x16_or is3 is4) m80 in
+    u8x16_or err (u8x16_xor must23_80 sc)
+  else u8x16_or err (u8x16_sub_sat prev max_v);
+let conts = fn (input: u8x16) -> u8x16_reduce_add (u8x16_and (u8x16_eq (u8x16_and input mc0) m80) one);
+let validate = fn (b: bytes) ->
+  let n = bytes_len b in
+  let rec go = fn (i: int) -> fn (prev: u8x16) -> fn (err: u8x16) -> fn (cont: int) ->
+    if i + 16 > n then
+      let r = n - i in
+      let last = u8x16_from_bytes (bytes_concat (bytes_slice b i r) (bytes_slice zeros16 0 (16 - r))) in
+      let err2 = check prev last err in
+      let err3 = u8x16_or err2 (u8x16_sub_sat last max_v) in
+      if u8x16_any_true err3 then -1 else n - (cont + conts last)
+    else
+      let input = u8x16_load b i in
+      go (i + 16) input (check prev input err) (cont + conts input) in
+  go 0 (u8x16_splat 0) (u8x16_splat 0) 0;
+let show_v = fn (label: str) -> fn (b: bytes) -> print (label ++ " " ++ str_of_int (validate b));
+let _ = show_v "ascii" (bytes_of_str "the quick brown fox jumps over the lazy dog");
+let _ = show_v "mixed" (bytes_concat (bytes_of_str "caf") (bytes_concat (bytes_of_hex "c3a9") (bytes_concat (bytes_of_str " ") (bytes_concat (bytes_of_hex "e697a5e69cac") (bytes_concat (bytes_of_str " ") (bytes_of_hex "f09f9880"))))));
+let _ = show_v "truncated" (bytes_concat (bytes_of_str "caf") (bytes_concat (bytes_of_hex "c3a9") (bytes_of_hex "f09f98")));
+let _ = show_v "overlong" (bytes_concat (bytes_of_str "ok ") (bytes_of_hex "c080"));
+let _ = show_v "surrogate" (bytes_concat (bytes_of_str "ok ") (bytes_of_hex "eda080"));
+let _ = show_v "stray" (bytes_concat (bytes_of_str "twenty-two ascii bytes.") (bytes_of_hex "ff"));
+show_v "long" (bytes_of_str "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde")

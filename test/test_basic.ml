@@ -14899,5 +14899,28 @@ let () =
   check "v0.1.423: a stride with an equality exit guards the landing"
     (if has (rv_c stride_src) "__lang_imod((mu_n - 0LL), 2LL) == 0LL" then "landing" else "none") "landing";
 
+  (* v0.1.424 (Q-109, 2c): the u8x16 lane operations. The interpreter fixes the
+     corner rules: swizzle gives 0 for an index outside 0..15, sub_sat saturates
+     at 0, eq is 0xFF per equal lane, shift_in k brings prev's last k bytes in
+     front, reduce_add sums lanes as integers (no wrap at 256). *)
+  let hx h = "u8x16_from_bytes (bytes_of_hex \"" ^ h ^ "\")" in
+  check "v0.1.424: swizzle looks a byte up by nibble; 16.. gives 0"
+    (Pipeline.process ("u8x16_extract (u8x16_swizzle (" ^ hx "000102030405060708090a0b0c0d0e0f" ^ ") (u8x16_splat 3)) 0 * 100 + u8x16_extract (u8x16_swizzle (" ^ hx "000102030405060708090a0b0c0d0e0f" ^ ") (u8x16_splat 20)) 0")) "300";
+  check "v0.1.424: sub_sat saturates at zero" (Pipeline.process "u8x16_extract (u8x16_sub_sat (u8x16_splat 3) (u8x16_splat 200)) 0") "0";
+  check "v0.1.424: eq is 0xFF per equal lane" (Pipeline.process "u8x16_extract (u8x16_eq (u8x16_splat 7) (u8x16_splat 7)) 9") "255";
+  check "v0.1.424: shift_in brings the previous block's tail in front"
+    (Pipeline.process ("u8x16_extract (u8x16_shift_in (" ^ hx "000102030405060708090a0b0c0d0e0f" ^ ") (u8x16_splat 200) 3) 2 * 1000 + u8x16_extract (u8x16_shift_in (" ^ hx "000102030405060708090a0b0c0d0e0f" ^ ") (u8x16_splat 200) 3) 3")) "15200";
+  check "v0.1.424: reduce_add does not wrap at 256" (Pipeline.process "u8x16_reduce_add (u8x16_splat 255)") "4080";
+  check "v0.1.424: shr shifts each byte" (Pipeline.process "u8x16_extract (u8x16_shr (u8x16_splat 200) 4) 0") "12";
+  check "v0.1.424: a 16-byte load past the end fails like an index"
+    (try ignore (Pipeline.process "u8x16_extract (u8x16_load (bytes_of_str \"short\") 0) 0"); "no error"
+     with Eval.Eval_error (_, m) -> if has m "bytes [0, 16) out of bounds" then "range error" else m) "range error";
+  check "v0.1.424: the C backend spells swizzle per architecture"
+    (let c = rv_c "u8x16_extract (u8x16_swizzle (u8x16_splat 1) (u8x16_splat 0)) 0" in
+     if has c "vqtbl1q_u8" && has c "_mm_shuffle_epi8" then "neon+ssse3" else "missing") "neon+ssse3";
+  check "v0.1.424: the Wasm backend uses i8x16.swizzle and sub_sat_u"
+    (let w = wasm "u8x16_extract (u8x16_sub_sat (u8x16_swizzle (u8x16_splat 1) (u8x16_splat 0)) (u8x16_splat 1)) 0" in
+     if has w "i8x16.swizzle" && has w "i8x16.sub_sat_u" then "v128" else "missing") "v128";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

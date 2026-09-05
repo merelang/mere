@@ -1,0 +1,36 @@
+// utf8valid -- is this byte stream well-formed UTF-8, and how many codepoints
+// does it hold? Scalar reference: one state machine over bytes_get. RFC 3629
+// exactly (no overlongs, no surrogates, nothing above U+10FFFF).
+// The forcing kernel for explicit SIMD (Q-109): a validator is what a
+// vectorizer cannot build from this loop, and what 16 byte lanes do well.
+let path = match args () with | Cons (p, _) -> p | Nil -> "";
+if str_eq path "" then print "usage: bench <file>"
+else
+  let b = read_bytes path in
+  let n = bytes_len b in
+  // continuation byte at i within [lo, hi], or -1
+  let cont = fn (i: int) -> fn (lo: int) -> fn (hi: int) ->
+    if i >= n then -1 else let c = bytes_get b i in if c >= lo && c <= hi then c else -1 in
+  let rec go = fn (i: int) -> fn (cps: int) ->
+    if i >= n then cps
+    else
+      let c = bytes_get b i in
+      if c < 128 then go (i + 1) (cps + 1)
+      else if c < 194 then -1
+      else if c < 224 then (if cont (i + 1) 128 191 < 0 then -1 else go (i + 2) (cps + 1))
+      else if c < 240 then
+        let lo = if c == 224 then 160 else 128 in
+        let hi = if c == 237 then 159 else 191 in
+        if cont (i + 1) lo hi < 0 || cont (i + 2) 128 191 < 0 then -1 else go (i + 3) (cps + 1)
+      else if c < 245 then
+        let lo = if c == 240 then 144 else 128 in
+        let hi = if c == 244 then 143 else 191 in
+        if cont (i + 1) lo hi < 0 || cont (i + 2) 128 191 < 0 || cont (i + 3) 128 191 < 0 then -1
+        else go (i + 4) (cps + 1)
+      else -1 in
+  let rec passes = fn (p: int) -> fn (acc: int) ->
+    if p == 20 then acc else passes (p + 1) (acc + go 0 0) in
+  let total = passes 0 0 in
+  let _ = print ("bytes " ++ str_of_int n) in
+  let _ = print (if total < 0 then "invalid" else "valid codepoints " ++ str_of_int (total / 20)) in
+  exit 0
