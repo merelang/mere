@@ -1,5 +1,10 @@
 (* Abstract syntax tree for Lang. *)
 
+(* Q-109: the two fixed-width 128-bit SIMD types. 128 bits is what NEON, SSE2
+   and Wasm's v128 all have, so a program written against them is portable
+   exactly; wider vectors are a different question. *)
+type simd_kind = F64x2 | U8x16
+
 type tyvar = {
   id : int;
   mutable link : ty option;
@@ -17,6 +22,7 @@ and ty =
   | TyFloat
   | TyBool
   | TyStr
+  | TySimd of simd_kind             (* Q-109: f64x2 / u8x16, 128-bit lanes *)
   | TyBytes                         (* immutable raw byte sequence (a first-class binary type).
                                        Like TyStr but length-prefixed, not NUL-
                                        terminated: binary-safe on every backend. *)
@@ -237,6 +243,8 @@ let pp_ty t =
     | TyBool -> "bool"
     | TyStr -> "str"
     | TyBytes -> "bytes"
+    | TySimd F64x2 -> "f64x2"
+    | TySimd U8x16 -> "u8x16"
     | TyUnit -> "unit"
     | TyArrow (a, b) ->
       let sa = aux a in

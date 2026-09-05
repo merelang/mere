@@ -197,7 +197,7 @@ let rec adjust_level lvl t =
   match t with
   | Ast.TyVar ({ link = None; _ } as v) -> if v.level > lvl then v.level <- lvl
   | Ast.TyVar { link = Some t'; _ } -> adjust_level lvl t'
-  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit -> ()
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit -> ()
   | Ast.TyParam _ -> ()
   | Ast.TyCon (_, args) -> List.iter (adjust_level lvl) args
   | Ast.TyArrow (a, b) -> adjust_level lvl a; adjust_level lvl b
@@ -208,7 +208,7 @@ let rec occurs id = function
   | Ast.TyVar v when v.id = id -> true
   | Ast.TyVar { link = Some t; _ } -> occurs id t
   | Ast.TyVar _ -> false
-  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit -> false
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit -> false
   | Ast.TyParam _ -> false
   | Ast.TyCon (_, args) -> List.exists (occurs id) args
   | Ast.TyArrow (a, b) -> occurs id a || occurs id b
@@ -267,6 +267,7 @@ let rec unify loc t1 t2 =
   | Ast.TyBool, Ast.TyBool -> ()
   | Ast.TyStr, Ast.TyStr -> ()
   | Ast.TyBytes, Ast.TyBytes -> ()
+  | Ast.TySimd a, Ast.TySimd b when a = b -> ()
   | Ast.TyUnit, Ast.TyUnit -> ()
   | Ast.TyParam a, Ast.TyParam b when a = b -> ()
   | Ast.TyCon (a, args_a), Ast.TyCon (b, args_b)
@@ -316,7 +317,7 @@ let mono t = { quantified = []; body = t; constraints = [] }
 
 let rec collect_free_vars t acc =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit -> acc
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit -> acc
   | Ast.TyParam _ -> acc
   | Ast.TyVar v -> if List.mem v.id acc then acc else v.id :: acc
   | Ast.TyArrow (a, b) -> collect_free_vars b (collect_free_vars a acc)
@@ -391,7 +392,7 @@ let constraints_for_qs qs =
    generalized, and therefore not reachable from anything outside it. *)
 let rec collect_local_vars lvl t acc =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit -> acc
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit -> acc
   | Ast.TyParam _ -> acc
   | Ast.TyVar v ->
     if v.level > lvl && not (List.mem v.id acc) then v.id :: acc else acc
@@ -405,7 +406,7 @@ let rec collect_local_vars lvl t acc =
    reads as belonging to the enclosing scope — which it now does. *)
 let rec demote_unquantified lvl qs t =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit -> ()
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit -> ()
   | Ast.TyParam _ -> ()
   | Ast.TyVar v -> if not (List.mem v.id qs) && v.level > lvl then v.level <- lvl
   | Ast.TyArrow (a, b) -> demote_unquantified lvl qs a; demote_unquantified lvl qs b
@@ -511,7 +512,7 @@ let instantiate_with_map sch =
   let mapping = List.map (fun id -> (id, fresh_var ())) sch.quantified in
   let rec subst t =
     match Ast.walk t with
-    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit) as t -> t
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit) as t -> t
     | Ast.TyParam _ as t -> t
     | Ast.TyVar v as orig ->
       (try List.assoc v.id mapping with Not_found -> orig)
@@ -603,7 +604,7 @@ let rec mentions_region (name : string) (t : Ast.ty) : bool =
   | Ast.TyArrow (a, b) -> mentions_region name a || mentions_region name b
   | Ast.TyTuple ts -> List.exists (mentions_region name) ts
   | Ast.TyCon (_, args) -> List.exists (mentions_region name) args
-  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit
   | Ast.TyParam _ | Ast.TyVar _ -> false
 
 (* Q-053: a region name that got into a binding which OUTLIVES the block.
@@ -644,7 +645,7 @@ let freshen_params t =
   let rec aux t =
     match Ast.walk t with
     | Ast.TyParam p -> lookup p
-    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit | Ast.TyVar _) as t -> t
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit | Ast.TyVar _) as t -> t
     | Ast.TyArrow (a, b) -> Ast.TyArrow (aux a, aux b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map aux ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map aux args)
@@ -691,7 +692,7 @@ let rec mentions_region_in_value ?(seen : string list = []) (name : string)
   | Ast.TyCon (n, args) ->
     List.exists (mentions_region_in_value ~seen name) args
     || (not (List.mem n seen) && declared_mentions_region ~seen:(n :: seen) name n)
-  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit
   | Ast.TyParam _ | Ast.TyVar _ -> false
 
 (* The field types of a record and the payload types of a variant's
@@ -749,7 +750,7 @@ let rec subst_region (from_name : string) (to_name : string) (t : Ast.ty) : Ast.
   | Ast.TyTuple ts -> Ast.TyTuple (List.map (subst_region from_name to_name) ts)
   | Ast.TyCon (n, args) ->
     Ast.TyCon (n, List.map (subst_region from_name to_name) args)
-  | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit
+  | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit
     | Ast.TyParam _ | Ast.TyVar _) as t -> t
 
 let register_type type_name params variants =
@@ -829,7 +830,7 @@ let rec contains_drop_type (t : Ast.ty) : bool =
   | Ast.TyTuple ts -> List.exists contains_drop_type ts
   | Ast.TyRef (_, _, inner) -> contains_drop_type inner
   | Ast.TyArrow _ -> false
-  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit
   | Ast.TyParam _ | Ast.TyVar _ -> false
 
 (* === Q-012: Send / Sync trait predicates (concurrency narrowing §D) ===
@@ -919,7 +920,7 @@ let rec subst_type_params (m : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
   | Ast.TyTuple ts -> Ast.TyTuple (List.map (subst_type_params m) ts)
   | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map (subst_type_params m) args)
   | Ast.TyRef (mode, r, inner) -> Ast.TyRef (mode, r, subst_type_params m inner)
-  | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit | Ast.TyVar _) as t0 -> t0
+  | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit | Ast.TyVar _) as t0 -> t0
 
 (* The concrete types contained in a user-declared record's fields or a
    variant's constructor payloads, with the type's parameters substituted by
@@ -956,7 +957,7 @@ let nominal_contents (name : string) (args : Ast.ty list) : Ast.ty list option =
    optimistic here — spawn-capture analysis rejects unresolved captures. *)
 let rec is_send_v (visiting : string list) (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit -> true
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit -> true
   | Ast.TyArrow _ -> true
   | Ast.TyRef _ -> false                       (* region borrow: thread-local *)
   | Ast.TyTuple ts -> List.for_all (is_send_v visiting) ts
@@ -986,7 +987,7 @@ let rec is_send_v (visiting : string list) (t : Ast.ty) : bool =
 
 let rec is_sync_v (visiting : string list) (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit -> true
+  | Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit -> true
   | Ast.TyArrow _ -> true
   | Ast.TyRef _ -> false
   | Ast.TyTuple ts -> List.for_all (is_sync_v visiting) ts
@@ -1044,7 +1045,7 @@ let instantiate_constr (info : constr_info) =
     match Ast.walk t with
     | Ast.TyParam p ->
       (try List.assoc p mapping with Not_found -> t)
-    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit | Ast.TyVar _) as t -> t
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit | Ast.TyVar _) as t -> t
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
@@ -1062,7 +1063,7 @@ let instantiate_record name (info : record_info) =
     match Ast.walk t with
     | Ast.TyParam p ->
       (try List.assoc p mapping with Not_found -> t)
-    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit | Ast.TyVar _) as t -> t
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit | Ast.TyVar _) as t -> t
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
@@ -2387,6 +2388,13 @@ let initial_env : env =
     ("__vec_get_unchecked",   vec_get_scheme);
     ("__vec_set_unchecked",   vec_set_scheme);
     ("__bytes_get_unchecked", mono (Ast.TyArrow (Ast.TyBytes, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
+    (* Q-109: the 128-bit SIMD types' seed operations -- enough to build a value
+       and read it back on every backend. The lane operations come with the
+       kernels that need them. *)
+    ("f64x2_splat",   mono (Ast.TyArrow (Ast.TyFloat, Ast.TySimd Ast.F64x2)));
+    ("f64x2_extract", mono (Ast.TyArrow (Ast.TySimd Ast.F64x2, Ast.TyArrow (Ast.TyInt, Ast.TyFloat))));
+    ("u8x16_splat",   mono (Ast.TyArrow (Ast.TyInt, Ast.TySimd Ast.U8x16)));
+    ("u8x16_extract", mono (Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
   ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =
@@ -2498,7 +2506,11 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
           `==` work through tyvars all along; `<` now joins it, which in
           turn makes the prelude's list_sort / list_max / list_min
           generic for free. *)
-       unify a.loc ta tb
+       unify a.loc ta tb;
+       (match Ast.walk ta with
+        | Ast.TySimd k ->
+          raise (Type_error (e.loc, Ast.pp_ty (Ast.TySimd k) ^ " has no ordering -- compare its lanes"))
+        | _ -> ())
      | Ast.Eq | Ast.Ne ->
        (* Symmetric: lhs is the "first observed" type. *)
        unify e.loc ta tb;
@@ -2514,6 +2526,11 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        (match Ast.walk ta with
         | Ast.TyArrow _ ->
           raise (Type_error (e.loc, "functions are not comparable with == / !="))
+        | Ast.TySimd k ->
+          (* Q-109: lane-wise equality is a vector (`u8x16_eq`), not a bool; a
+             whole-vector `==` would have to pick one meaning. Refused here, so
+             every backend answers the same way. *)
+          raise (Type_error (e.loc, Ast.pp_ty (Ast.TySimd k) ^ " is not comparable with == / != -- compare its lanes"))
         | _ -> ()));
     Ast.TyBool
   | Ast.Logic (_, a, b) ->

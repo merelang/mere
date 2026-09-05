@@ -88,7 +88,7 @@ let mk_pat pnode = { ploc = Loc.dummy; pnode }
 let rec subst_param param target (t : ty) : ty =
   match t with
   | TyParam p -> if p = param then target else t
-  | TyInt | TyFloat | TyBool | TyStr | TyBytes | TyUnit | TyVar _ -> t
+  | TyInt | TyFloat | TyBool | TyStr | TyBytes | TySimd _ | TyUnit | TyVar _ -> t
   | TyArrow (a, b) -> TyArrow (subst_param param target a, subst_param param target b)
   | TyTuple ts -> TyTuple (List.map (subst_param param target) ts)
   | TyCon (n, args) -> TyCon (n, List.map (subst_param param target) args)
@@ -254,7 +254,7 @@ let elaborate (prog : program) : program =
       let rec go t =
         match Ast.walk t with
         | TyParam p -> p = param
-        | TyInt | TyFloat | TyBool | TyStr | TyBytes | TyUnit -> false
+        | TyInt | TyFloat | TyBool | TyStr | TyBytes | TySimd _ | TyUnit -> false
         | TyVar _ -> false
         | TyArrow (a, b) -> go a || go b
         | TyTuple ts -> List.exists go ts

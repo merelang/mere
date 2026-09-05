@@ -90,6 +90,7 @@ let boxed_variant name =
 let rec heap_ty ?(seen = []) t =
   match walk t with
   | TyStr | TyBytes | TyArrow _ -> true
+  | TySimd _ -> false   (* a 16-byte value, by value *)
   | TyCon (name, args) as c ->
     if container_ty c then false
     else if boxed_variant name then true

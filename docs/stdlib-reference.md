@@ -896,6 +896,15 @@ satisfy it and hide the very row it was describing.
 | `bytes_of_hex` / `hex_of_bytes` | `str -> bytes` / `bytes -> str` | lowercase hex, no separators |
 | `bytes_of_vec` / `vec_of_bytes` | `Vec[R, int] -> bytes` / `bytes -> Vec[R, int]` | the bridge to the integer view |
 
+**`f64x2` / `u8x16` — the 128-bit SIMD types** (Q-109; two doubles, or sixteen bytes, in one value. C: the compiler's vector extension; LLVM: `<2 x double>` / `<16 x i8>`; Wasm: `v128`, boxed; not on -rv yet. Not comparable with `==` or `<` -- compare lanes):
+
+| builtin | signature | notes |
+|---|---|---|
+| `f64x2_splat` | `float -> f64x2` | both lanes the argument |
+| `f64x2_extract` | `f64x2 -> int -> float` | lane 0 or 1; another index fails like an out-of-range `vec_get` |
+| `u8x16_splat` | `int -> u8x16` | the low 8 bits in every lane |
+| `u8x16_extract` | `u8x16 -> int -> int` | lane 0..15, as 0-255 |
+
 **`Vec` — the rest of the family** (`vec_new` / `push` / `get` / `set` / `len` / `iter` / `map` / `filter` / `fold` / `sort` / `to_list` / `to_owned` are covered in language-reference and the tutorial):
 
 | builtin | signature | notes |
