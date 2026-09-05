@@ -11900,6 +11900,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "#include <stdio.h>";
       "#include <stdlib.h>";
       "#include <string.h>";
+      (* v0.1.431: the tagged variant pointers (v0.1.419) cast through uintptr_t.
+         macOS headers bring the typedef in transitively; glibc does not, so every
+         C-backend program failed to compile on Linux while compiling here. *)
+      "#include <stdint.h>";
       "#include <setjmp.h>";
       "#include <signal.h>";   (* v0.1.271: name a stack overflow *)
       "#include <math.h>";  (* Phase 34.4: sqrt / sin / cos / tan / pow / atan2 *)
