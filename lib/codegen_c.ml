@@ -3057,6 +3057,16 @@ let rec emit_expr (e : Ast.expr) : string =
            unsupported e.loc "show: missing arg type info"
        in
        let tag = ty_tag arg_ty in
+       (* Q-109: a SIMD value has no show / to_json on this backend yet. Before this
+          check the three compiled backends printed three different placeholders
+          for the same value; refusing here keeps them answering alike until the
+          printer exists. *)
+       (match arg_ty with
+        | Ast.TySimd k ->
+          unsupported e.loc
+            ("show / to_json of " ^ Ast.pp_ty (Ast.TySimd k)
+             ^ " is not supported on this backend yet -- extract the lanes")
+        | _ -> ());
        Printf.sprintf "show_%s(%s)" tag (emit_expr arg)
      | Ast.Var "to_json" ->
        (* Polymorphic builtin — dispatch to the type-specialized
@@ -3066,6 +3076,12 @@ let rec emit_expr (e : Ast.expr) : string =
          | Some t -> Ast.walk t
          | None -> unsupported e.loc "to_json: missing arg type info"
        in
+       (match arg_ty with
+        | Ast.TySimd k ->
+          unsupported e.loc
+            ("show / to_json of " ^ Ast.pp_ty (Ast.TySimd k)
+             ^ " is not supported on this backend yet -- extract the lanes")
+        | _ -> ());
        Printf.sprintf "to_json_%s(%s)" (ty_tag arg_ty) (emit_expr arg)
      (* v0.1.183: `of_json_like w s` is `of_json s` with the target type
         taken from the witness rather than from an annotation. Here that is
@@ -3246,6 +3262,12 @@ let rec emit_expr (e : Ast.expr) : string =
        let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
        Printf.sprintf "mere_vec_%s_push(%s, %s)"
          elem_tag (emit_expr vec_e) (emit_expr arg)
+     | Ast.Var "f64x2_splat" -> Printf.sprintf "mere_f64x2_splat(%s)" (emit_expr arg)
+     | Ast.Var "u8x16_splat" -> Printf.sprintf "mere_u8x16_splat(%s)" (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "f64x2_extract"; _ }, v_e) ->
+       Printf.sprintf "mere_f64x2_extract(%s, %s)" (emit_expr v_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "u8x16_extract"; _ }, v_e) ->
+       Printf.sprintf "mere_u8x16_extract(%s, %s)" (emit_expr v_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "__vec_get_unchecked"; _ }, vec_e) ->
        (* Q-108: the loop's range was checked once before it (Ast.range_version). *)
        let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
@@ -4346,6 +4368,8 @@ let rec c_type_of (t : Ast.ty) : string =
   | Ast.TyBytes -> "mere_bytes*"  (* pointer to a length-prefixed
                                      buffer { long long len; unsigned char data[] } —
                                      binary-safe (not NUL-terminated like str). *)
+  | Ast.TySimd Ast.F64x2 -> "mere_f64x2"   (* Q-109: clang/gcc vector extension, 16 bytes by value *)
+  | Ast.TySimd Ast.U8x16 -> "mere_u8x16"
   | Ast.TyUnit -> "int"  (* unit becomes int 0; keeps return-type uniform *)
   | Ast.TyVar _ | Ast.TyParam _ -> "long long"  (* residual tyvar: dead or
       unconstrained — erased to int's representation (see ty_tag) *)
@@ -5397,7 +5421,7 @@ let emit_copy_fn (tag : string) (t : Ast.ty) : string =
     Printf.sprintf "static %s __mcopy_%s(__lang_region* r, %s v)" cty tag cty
   in
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyBool | Ast.TyFloat | Ast.TyUnit ->
+  | Ast.TyInt | Ast.TyBool | Ast.TyFloat | Ast.TyUnit | Ast.TySimd _ ->
     header ^ " { (void)r; return v; }"
   | Ast.TyArrow _ ->
     (* v0.1.290: deep-copy the env through the copier the closure carries, so a
@@ -5495,7 +5519,7 @@ let emit_deep_copy_fn (tag : string) (t : Ast.ty) : string =
     Printf.sprintf "static %s __mdeep_%s(__lang_region* r, %s v)" cty tag cty
   in
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyBool | Ast.TyFloat | Ast.TyUnit ->
+  | Ast.TyInt | Ast.TyBool | Ast.TyFloat | Ast.TyUnit | Ast.TySimd _ ->
     header ^ " { (void)r; return v; }"
   | Ast.TyStr ->
     header ^ " {\n  size_t n = __lang_str_size(v);\n  \
@@ -11838,6 +11862,27 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          user's knob. clang, the toolchain this project builds with, honors
          it.) *)
       "#pragma STDC FP_CONTRACT OFF";
+      (* Q-109: the two 128-bit SIMD types, as the C compiler's vector extension.
+         clang and gcc lower them to NEON / SSE2 registers; element access with
+         a runtime index is part of the extension. The lane check lives here so
+         the failure is the interpreter's, and the declaration of __lang_fail_idx
+         is repeated because this text precedes the runtime that defines it. *)
+      "typedef double mere_f64x2 __attribute__((vector_size(16)));";
+      "typedef unsigned char mere_u8x16 __attribute__((vector_size(16)));";
+      "__attribute__((noreturn)) static void __lang_fail_idx(const char*, long long, long long);";
+      "static inline mere_f64x2 mere_f64x2_splat(double x) { mere_f64x2 v = { x, x }; return v; }";
+      "static inline double mere_f64x2_extract(mere_f64x2 v, long long i) {";
+      "  if (i < 0 || i >= 2) __lang_fail_idx(\"f64x2_extract: lane %lld out of range (lanes = %lld)\", i, 2LL);";
+      "  return v[i];";
+      "}";
+      "static inline mere_u8x16 mere_u8x16_splat(long long x) {";
+      "  unsigned char b = (unsigned char)(x & 0xFF);";
+      "  mere_u8x16 v = { b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b }; return v;";
+      "}";
+      "static inline long long mere_u8x16_extract(mere_u8x16 v, long long i) {";
+      "  if (i < 0 || i >= 16) __lang_fail_idx(\"u8x16_extract: lane %lld out of range (lanes = %lld)\", i, 16LL);";
+      "  return (long long)v[i];";
+      "}";
       "";
       (* the static string literals, filled in after the unit is generated *)
       str_literal_marker;

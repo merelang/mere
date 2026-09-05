@@ -530,3 +530,14 @@ call site on stderr. Gates: `scripts/range_version_check.sh` (pass on/off must
 agree on every case in `test/range_version/`, and plan what each case's header
 says) and `scripts/vectorize_check.sh` (the emitted C, compiled by clang, has
 vector arithmetic reachable from `main` with the pass on and none with it off).
+
+## SIMD types (Q-109)
+
+`f64x2` and `u8x16` are fixed 128-bit values -- the width NEON, SSE2 and
+Wasm's `v128` share. C lowers them to the compiler's `vector_size(16)` type,
+LLVM to `<2 x double>` / `<16 x i8>`, Wasm to a 16-byte box holding a `v128`
+(this backend keeps every value in an i64 slot), the interpreter to
+`V_f64x2` / `V_u8x16`. The RISC-V backends refuse them by name until the V
+extension exists. `==` and `<` on them are type errors: compare lanes. The
+operations are listed in the stdlib reference; the interpreter defines lane
+order and the failure on a lane index outside the vector.
