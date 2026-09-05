@@ -14752,5 +14752,63 @@ let () =
      in
      if has c "int main(" then "main" else "no-main") "main";
 
+  (* v0.1.420 (Q-108): range-check versioning. A tail-recursive loop that reads
+     invariant containers at its index parameter gets a copy with the bounds
+     checks removed, and each call site with atomic arguments checks the whole
+     index range once and picks the copy. The interpreter keeps the checks
+     under the unchecked names, so it is the oracle here. *)
+  let rv_src = "let n = 8;\nlet v = vec_new ();\n\
+                let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v (i * 3) in fill (i + 1);\n\
+                let _ = fill 0;\n\
+                let rec total = fn (i: int) -> fn (acc: int) -> if i == n then acc else total (i + 1) (acc + vec_get v i);\n\
+                total 0 0" in
+  let planned src =
+    ignore (Pipeline.parse_program src);
+    String.concat "," (List.sort compare !Ast.range_versioned) in
+  let rv_c src =
+    let prog = Pipeline.parse_program src in
+    let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+    Codegen_c.emit_program ~main_ty prog in
+  check "v0.1.420: a loop over an invariant Vec at its index is planned" (planned rv_src) "total";
+  check "v0.1.420: the loop that pushes (fill) is left alone"
+    (if List.mem "fill" !Ast.range_versioned then "planned" else "left") "left";
+  check "v0.1.420: the program computes the same with the pass off"
+    (let on = Pipeline.process rv_src in
+     Ast.range_version_enabled := false;
+     let off = (try Pipeline.process rv_src with e -> Ast.range_version_enabled := true; raise e) in
+     Ast.range_version_enabled := true;
+     if on = off then "same:" ^ on else "on=" ^ on ^ " off=" ^ off) "same:84";
+  check "v0.1.420: the fast copy reads through the unchecked twin on C"
+    (if has (rv_c rv_src) "mere_vec_int_get_unchecked(" then "unchecked" else "checked") "unchecked";
+  check "v0.1.420: the call site dispatches to the fast copy"
+    (if has (rv_c rv_src) "mu_total__rvfast" then "dispatch" else "none") "dispatch";
+  check "v0.1.420: the original loop is still emitted, checks and all"
+    (if has (rv_c rv_src) "mere_vec_int_get(" then "kept" else "gone") "kept";
+  check "v0.1.420: a Vec pushed inside the loop is not versioned"
+    (planned "let n = 4;\nlet v = vec_new ();\n\
+              let rec grow = fn (i: int) -> if i == n then () else let _ = vec_push v i in grow (i + 1);\n\
+              let _ = grow 0;\nvec_len v") "";
+  check "v0.1.420: a lambda in the body blocks it (it could reach the Vec)"
+    (planned "let n = 4;\nlet v = vec_new ();\nlet _ = vec_push v 1;\nlet _ = vec_push v 2;\nlet _ = vec_push v 3;\nlet _ = vec_push v 4;\n\
+              let rec total = fn (i: int) -> fn (acc: int) -> if i == n then acc else total (i + 1) (acc + list_sum (list_map (Cons (vec_get v i, Nil)) (fn (x: int) -> x)));\n\
+              total 0 0") "";
+  check "v0.1.420: a bound that is arithmetic over invariants is accepted"
+    (planned "let n = 8;\nlet v = vec_new ();\n\
+              let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v i in fill (i + 1);\n\
+              let _ = fill 0;\n\
+              let rec total = fn (i: int) -> fn (acc: int) -> if i == n - 1 then acc else total (i + 1) (acc + vec_get v i);\n\
+              total 0 0") "total";
+  check "v0.1.420: bytes at the index, bytes_len as the bound"
+    (planned "let b = bytes_of_str \"banana\";\n\
+              let rec count = fn (i: int) -> fn (acc: int) -> if i == bytes_len b then acc else count (i + 1) (if bytes_get b i == 97 then acc + 1 else acc);\n\
+              count 0 0") "count";
+  check "v0.1.420: MERE_NO_RANGE_VERSION is read at startup into a flag the tests can flip"
+    (if !Ast.range_version_enabled then "on" else "off") "on";
+  (* v0.1.420 (Q-111): `exit n` has an LLVM lowering. Its type is the bottom 'a,
+     and the generic closure-call path died in ty_tag on it -- every program in
+     benchmarks/ ends with `exit 0`, so none of them built on this backend. *)
+  check "v0.1.420 (Q-111): a program ending in `exit 0` lowers on LLVM"
+    (if has (llvm "let _ = print \"x\";\nexit 0") "call void @exit(i32" then "lowered" else "missing") "lowered";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

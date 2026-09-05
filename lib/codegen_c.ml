@@ -1523,6 +1523,7 @@ let rec emit_expr (e : Ast.expr) : string =
     let is_curried_collection_builtin =
       name = "vec_push" || name = "lb_push"
       || name = "vec_get" || name = "vec_len"
+      || name = "__vec_get_unchecked" || name = "__vec_set_unchecked"
       || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
       || name = "vec_reverse" || name = "vec_concat" || name = "vec_sort"
       || name = "vec_map" || name = "vec_filter"
@@ -1544,10 +1545,12 @@ let rec emit_expr (e : Ast.expr) : string =
       (* 2-arg curried (38.C-1 / 38.C-2) *)
       name = "owned_vec_push" || name = "owned_vec_get"
       || name = "vec_push" || name = "vec_get"
+      || name = "__vec_get_unchecked"
       || name = "strbuf_push"
       || name = "map_get" || name = "map_has"
       (* 3-arg curried (38.C-3) *)
       || name = "map_set" || name = "vec_set"
+      || name = "__vec_set_unchecked"
     in
     let try_eta () =
       match e.Ast.ty with
@@ -2470,6 +2473,9 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.App ({ node = Ast.Var "write_bytes"; _ }, path_e) ->
        bytes_used := true;
        Printf.sprintf "__lang_write_bytes(%s, %s)" (emit_expr path_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "__bytes_get_unchecked"; _ }, b_e) ->
+       bytes_used := true;
+       Printf.sprintf "__lang_bytes_get_unchecked(%s, %s)" (emit_expr b_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "bytes_get"; _ }, b_e) ->
        bytes_used := true;
        Printf.sprintf "__lang_bytes_get(%s, %s)" (emit_expr b_e) (emit_expr arg)
@@ -3240,6 +3246,11 @@ let rec emit_expr (e : Ast.expr) : string =
        let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
        Printf.sprintf "mere_vec_%s_push(%s, %s)"
          elem_tag (emit_expr vec_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "__vec_get_unchecked"; _ }, vec_e) ->
+       (* Q-108: the loop's range was checked once before it (Ast.range_version). *)
+       let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+       Printf.sprintf "mere_vec_%s_get_unchecked(%s, %s)"
+         elem_tag (emit_expr vec_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "vec_get"; _ }, vec_e) ->
        (* `vec_get v i` curried. *)
        let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
@@ -3269,6 +3280,10 @@ let rec emit_expr (e : Ast.expr) : string =
             __acc = __inner.fn(__inner.env, mere_vec_%s_get(__vc, __i)); \
           } __acc; })"
          (emit_expr vec_e) (emit_expr acc_e) (emit_expr arg) elem_tag
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "__vec_set_unchecked"; _ }, vec_e); _ }, idx_e) ->
+       let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+       Printf.sprintf "mere_vec_%s_set_unchecked(%s, %s, %s)"
+         elem_tag (emit_expr vec_e) (emit_expr idx_e) (emit_expr arg)
      | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_set"; _ }, vec_e); _ }, idx_e) ->
        (* `vec_set v i x`: outer App arg = x, inner App arg = i, innermost = v.
           Phase 15.5: dispatch to per-T `mere_vec_<tag>_set` runtime helper. *)
@@ -8508,7 +8523,8 @@ let bytes_runtime ~arena =
       "static long long __lang_bytes_get(mere_bytes* b, long long i) {";
       "  if (i < 0 || i >= b->len) __lang_fail_impl(\"bytes_get: index out of range\");";
       "  return (long long)b->data[i];";
-      "}" ])
+      "}";
+      "static long long __lang_bytes_get_unchecked(mere_bytes* b, long long i) { return (long long)b->data[i]; }" ])
 
 (* bytes <-> Vec[int] bridge. Emitted only when the bridge is used (so it can
    safely reference mere_vec_int), and injected after both the vec_int runtime
@@ -9142,6 +9158,16 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  }";
       Printf.sprintf "  x = __mcopy_%s(v->region, x);" tag;
       "  v->data[i] = x;";
+      "  return 0; /* unit */";
+      "}";
+      "";
+      (* Q-108: the twins the range-check versioning pass calls. No check, so a
+         loop over them has one exit and clang can vectorize it. *)
+      Printf.sprintf "static %s %s_get_unchecked(%s* v, long long i) { return v->data[i]; }"
+        c_elem struct_name struct_name;
+      Printf.sprintf "static int %s_set_unchecked(%s* v, long long i, %s x) {"
+        struct_name struct_name c_elem;
+      Printf.sprintf "  v->data[i] = __mcopy_%s(v->region, x);" tag;
       "  return 0; /* unit */";
       "}" ]
 

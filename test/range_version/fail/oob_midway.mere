@@ -1,0 +1,11 @@
+// range-version: total
+// n is larger than the Vec: the guard is false, the checked loop runs, prints
+// 0..8 and fails at index 8 -- on every backend, with the pass on or off.
+let n = 12;
+let v = vec_new ();
+let rec fill = fn (i: int) -> if i == 8 then () else let _ = vec_push v (i * 3) in fill (i + 1);
+let _ = fill 0;
+let _ = print "before";
+let rec total = fn (i: int) -> fn (acc: int) ->
+  if i == n then acc else let _ = print (str_of_int i) in total (i + 1) (acc + vec_get v i);
+print (str_of_int (total 0 0))

@@ -3414,6 +3414,10 @@ let initial_env : env =
     ("vec_map",  ref builtin_vec_map);
     ("vec_fold", ref builtin_vec_fold);
     ("vec_set",  ref builtin_vec_set);
+    (* Q-108: the interpreter is the oracle, so the "unchecked" names keep the check. *)
+    ("__vec_get_unchecked", ref builtin_vec_get);
+    ("__vec_set_unchecked", ref builtin_vec_set);
+    ("__bytes_get_unchecked", ref builtin_bytes_get);
     ("vec_reverse", ref builtin_vec_reverse);
     ("vec_concat",  ref builtin_vec_concat);
     ("vec_sort",    ref builtin_vec_sort);

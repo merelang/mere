@@ -35,7 +35,7 @@ let host_builtins_without_llvm_lowering =
        the list exists to close, reopened by a later feature. *)
     "read_bytes"; "write_bytes";
     "read_line"; "read_stdin"; "read_key";
-    "tty_raw"; "tty_restore"; "exit";
+    "tty_raw"; "tty_restore";
     "read_lines";
     "run";
     "file_exists"; "random_int"; "random_float";
@@ -157,7 +157,8 @@ let rec ty_tag (t : Ast.ty) : string =
     ty_tag inner
   | other ->
     raise (Codegen_error (Loc.dummy,
-      Printf.sprintf "unsupported LLVM codegen type element: %s" (Ast.pp_ty other)))
+      Printf.sprintf "unsupported LLVM codegen type element: %s%s" (Ast.pp_ty other)
+        (if Sys.getenv_opt "MERE_TYTAG_TRACE" <> None then "\n" ^ Printexc.raw_backtrace_to_string (Printexc.get_callstack 30) else "")))
 
 let tuple_struct_name (elems : Ast.ty list) : string =
   "tuple_" ^ String.concat "_" (List.map ty_tag elems)
@@ -2991,6 +2992,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let is_curried_collection_builtin =
       name = "vec_push"
       || name = "vec_get" || name = "vec_len"
+      || name = "__vec_get_unchecked" || name = "__vec_set_unchecked"
       || name = "vec_set" || name = "vec_iter" || name = "vec_fold"
       || name = "vec_reverse" || name = "vec_concat" || name = "vec_sort"
       || name = "vec_map" || name = "vec_filter"
@@ -3005,9 +3007,11 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let is_phase38c_target =
       name = "owned_vec_push" || name = "owned_vec_get"
       || name = "vec_push" || name = "vec_get"
+      || name = "__vec_get_unchecked"
       || name = "strbuf_push"
       || name = "map_get" || name = "map_has"
       || name = "map_set" || name = "vec_set"
+      || name = "__vec_set_unchecked"
     in
     let try_eta_llvm () =
       match e.Ast.ty with
@@ -3838,6 +3842,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let av = emit_expr env arg in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = load i64, ptr %s" r av); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "__bytes_get_unchecked"; _ }, b_e); _ }, i_e) ->
+    bytes_used := true;
+    let bv = emit_expr env b_e in
+    let iv = emit_expr env i_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_bytes_get_unchecked(ptr %s, i64 %s)" r bv iv); r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "bytes_get"; _ }, b_e); _ }, i_e) ->
     bytes_used := true;
     let bv = emit_expr env b_e in
@@ -4463,6 +4473,19 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  store i32 %s, ptr @__lang_fail_jmpbuf_set" saved_set_reg);
     emit_instr (Printf.sprintf "  call ptr @memcpy(ptr @__lang_fail_jmpbuf, ptr %s, i64 200)" saved_buf_reg);
     result_reg
+  | Ast.App ({ node = Ast.Var "exit"; _ }, arg) ->
+    (* Q-111: `exit n` -- libc exit, noreturn. Its result type is the bottom
+       'a, which is why this used to fall through to the generic closure call
+       and die in ty_tag on a type variable ("unsupported LLVM codegen type
+       element: 'a") -- every benchmarks/ program ends this way, so none of them
+       could be built by this backend. The value is never read: undef is legal
+       at any first-class type. Mirrors the C backend (v0.1.?? `exit`) and
+       `fail` below. *)
+    let av = emit_expr env arg in
+    let t = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" t av);
+    emit_instr (Printf.sprintf "  call void @exit(i32 %s)" t);
+    "undef"
   | Ast.App ({ node = Ast.Var "fail"; _ }, arg) ->
     let result_ty =
       match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt
@@ -4661,6 +4684,28 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                   "  %s = call i32 @mere_vec_%s_push(ptr %s, %s %s)"
                   r elem_tag av (llvm_ty_of elem_ty) xv);
     "0"  (* vec_push : ... -> unit; return the i64 unit value *)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "__vec_get_unchecked"; _ }, vec_e); _ }, idx_e) ->
+    (* Q-108: see Ast.range_version_program. *)
+    let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+    let elem_ty = Hashtbl.find vec_instances elem_tag in
+    let av = emit_expr env vec_e in
+    let iv = emit_expr env idx_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call %s @mere_vec_%s_get_unchecked(ptr %s, i64 %s)"
+                  r (llvm_ty_of elem_ty) elem_tag av iv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "__vec_set_unchecked"; _ }, vec_e); _ }, idx_e); _ }, val_e) ->
+    let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
+    let elem_ty = Hashtbl.find vec_instances elem_tag in
+    let av = emit_expr env vec_e in
+    let iv = emit_expr env idx_e in
+    let xv = emit_expr env val_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call i32 @mere_vec_%s_set_unchecked(ptr %s, i64 %s, %s %s)"
+                  r elem_tag av iv (llvm_ty_of elem_ty) xv);
+    "0"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_get"; _ }, vec_e); _ }, idx_e) ->
     let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
     let elem_ty = Hashtbl.find vec_instances elem_tag in
@@ -7121,6 +7166,25 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       "  ret i64 %len";
       "}";
       "";
+      (* Q-108: unchecked twins for the range-check versioning pass. *)
+      Printf.sprintf "define %s @mere_vec_%s_get_unchecked(ptr %%v, i64 %%i) {" c_elem tag;
+      "entry:";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
+      "  %data = load ptr, ptr %dp";
+      Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i64 %%i" c_elem;
+      Printf.sprintf "  %%val = load %s, ptr %%slot" c_elem;
+      Printf.sprintf "  ret %s %%val" c_elem;
+      "}";
+      "";
+      Printf.sprintf "define i32 @mere_vec_%s_set_unchecked(ptr %%v, i64 %%i, %s %%x) {" tag c_elem;
+      "entry:";
+      Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
+      "  %data = load ptr, ptr %dp";
+      Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i64 %%i" c_elem;
+      Printf.sprintf "  store %s %%x, ptr %%slot" c_elem;
+      "  ret i32 0";
+      "}";
+      "";
       (* Phase 15.5: vec_set v i x — in-place mutation. *)
       Printf.sprintf "define i32 @mere_vec_%s_set(ptr %%v, i64 %%i, %s %%x) {" tag c_elem;
       "entry:";
@@ -9084,6 +9148,14 @@ let bytes_runtime_llvm =
       "  %data = getelementptr i8, ptr %b, i64 8";
       "  call i64 @write(i32 1, ptr %data, i64 %len)";
       "  ret i64 0";
+      "}";
+      "define i64 @__lang_bytes_get_unchecked(ptr %b, i64 %i) {";
+      "entry:";
+      "  %d = getelementptr i8, ptr %b, i64 8";
+      "  %p = getelementptr i8, ptr %d, i64 %i";
+      "  %c = load i8, ptr %p";
+      "  %r = zext i8 %c to i64";
+      "  ret i64 %r";
       "}";
       "define i64 @__lang_bytes_get(ptr %b, i64 %i) {";
       "entry:";

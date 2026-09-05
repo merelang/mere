@@ -1649,6 +1649,27 @@ and compile_app env e =
   | Ast.Var "vec_len" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)                         (* lw a0, 0(vec) — len *)
+  | Ast.Var "__vec_get_unchecked" when List.length args = 2 ->
+    (* Q-108: the range-check versioning pass checked the loop's whole index
+       range before the loop, so this twin carries no bounds check. *)
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1);
+    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0=vec, a1=i *)
+    emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t0 0x03);     (* dataptr *)
+    emit_word (enc_i (wshift ()) a1 1 t1 0x13);              (* slli t1, i, w *)
+    emit_word (enc_r 0 t1 t0 0 t0 0x33);                     (* t0 = dataptr + i*w *)
+    emit_word (enc_i (0 * wsz ()) t0 (ldf3 ()) a0 0x03)      (* a0 = data[i] *)
+  | Ast.Var "__vec_set_unchecked" when List.length args = 3 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1); push a0;
+    compile_expr env (List.nth args 2);
+    emit_word (enc_i 0 a0 0 a2 0x13);                        (* a2 = x *)
+    pop a1; pop a0;                                          (* a1=i, a0=vec *)
+    emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t0 0x03);     (* dataptr *)
+    emit_word (enc_i (wshift ()) a1 1 t1 0x13);              (* slli t1, i, w *)
+    emit_word (enc_r 0 t1 t0 0 t0 0x33);                     (* addr *)
+    emit_word (enc_s (0 * wsz ()) a2 t0 (stf3 ()) 0x23);     (* data[i] = x *)
+    emit_word (enc_i 0 zero 0 a0 0x13)                       (* return unit (0) *)
   | Ast.Var "vec_get" when List.length args = 2 ->
     compile_expr env (List.nth args 0); push a0;
     compile_expr env (List.nth args 1);

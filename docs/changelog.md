@@ -4,6 +4,70 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.420 — 2026-09-05
+
+_A loop over a Vec checks its whole index range once, before the loop, and
+runs an unchecked copy when the check passes -- so the loop has one exit and
+clang vectorizes it. axpy over two `Vec[R, float]`s went from 2.8x hand-written
+C to a tie; the checked loop is kept and runs whenever the range check fails,
+so no program prints or fails differently._
+
+Measured first (note 196 in the design notes): the gap between Mere's C and
+hand-written C on `c[i] = c[i] + alpha * a[i]` was 2.8x, and SIMD was only
+1.3-1.4x of it. The rest was the shape of `mere_vec_*_get/set`: a bounds check
+per element is an early exit per access, three of them in that loop, and clang
+neither vectorizes a loop with several early exits nor hoists the `data` /
+`len` loads that sit behind them. Removing the checks by hand from the emitted
+C made clang vectorize it and tie C.
+
+**Range-check versioning** (`Ast.range_version_program`, Q-108) does that
+removal soundly. It runs where `par_map` is lowered, before typing, on every
+backend at once. A `let rec f = fn (i: int) -> ... if i == n then base else
+step` whose step tail-calls `f (i + 1)` and whose body reads `vec_get v i` /
+`vec_set v i x` / `bytes_get b i` on loop-invariant containers gets a sibling
+`f__rvfast` with those accesses replaced by `__vec_get_unchecked` /
+`__vec_set_unchecked` / `__bytes_get_unchecked`; each saturated call site with
+atomic arguments becomes `if i >= 0 && i <= n && n <= vec_len v && ... then
+f__rvfast i .. else f i ..`. The guard true means no removed check could ever
+have fired; the guard false runs the original code. The pass gives up -- and
+the case stays exactly as written -- when the exit bound is not pure
+arithmetic over invariants, when the body has a lambda or calls anything that
+is not a builtin, a loop-safe top-level function or a loop-safe local helper
+(a builtin that takes a function counts as unsafe, derived from the typer's
+environment), when anything could change a Vec's length, or when a name it
+relies on is rebound. A call site whose arguments are not atoms, or where the
+loop's name or the guard's operands are shadowed, is left to the checked loop.
+`MERE_NO_RANGE_VERSION=1` turns the pass off; `MERE_RANGE_VERSION_LOG=1` names
+every planned loop and every dispatched call site on stderr.
+
+The three unchecked builtins exist on every backend; the interpreter keeps the
+check under them, so it stays the oracle. Two gates: `scripts/range_version_check.sh`
+runs `test/range_version/` (eleven cases, poison and a mid-loop failure among
+them) through interp / C / LLVM / Wasm with the pass on and off and requires
+the pass to have planned exactly what each case's header names;
+`scripts/vectorize_check.sh` counts vector arithmetic in the functions
+reachable from `main` of the emitted C -- at least one with the pass on, none
+with it off. "Reachable from main" because the first measurement counted in
+the function named like the loop and read 0 while the copy clang had inlined
+was vectorized elsewhere.
+
+Two side findings. `exit 0` did not build on the LLVM backend (Q-111): its
+type is the bottom `'a`, the generic closure-call path asked `ty_tag` for it,
+and every `benchmarks/*/bench.mere` ends that way. It has a lowering now. And
+a shell gate that toggled the pass with `VAR=1 shell_function` had the
+assignment persist -- POSIX mode -- and reported "planned: none" everywhere
+while staying green; the gate now checks what was planned against what the
+case expects, and toggles through `env` on the command.
+
+crc32's byte loop is planned too (its helper `crc_byte` has a local loop of
+its own, which a loop-safe check that looked only at top-level functions had
+called unsafe), but the per-byte work dominates and its time does not move.
+matmul's inner loops index `a[i * n + k]`, not the induction variable, and are
+not touched: affine indices are the next slice. parity 152/152,
+range_version_check 11/11, vectorize_check on: 8 / off: 0.
+
+---
+
 ## v0.1.419 — 2026-09-05
 
 _A boxed variant node loses its tag word on the C backend: the tag rides in

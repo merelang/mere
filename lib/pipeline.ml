@@ -94,12 +94,27 @@ let parse_program ?(prelude = true) ?base_dir ?(search_paths = []) s =
     List.filter (fun n -> not (List.mem n prelude_bound))
       (List.map fst Typer.initial_env)
   in
+  (* Q-108: the builtins whose arguments include a function are the ones that can
+     run code the range-check versioning pass cannot see (a closure that pushes to
+     the very Vec the loop reads). Derived from the typer's environment, not
+     listed by hand: a table of names goes stale, the environment does not. *)
+  let higher_order_builtins =
+    let rec has_fn_param (t : Ast.ty) =
+      match Ast.walk t with
+      | Ast.TyArrow (p, r) ->
+        (match Ast.walk p with Ast.TyArrow _ -> true | _ -> false) || has_fn_param r
+      | _ -> false
+    in
+    List.filter_map (fun (n, (sch : Typer.scheme)) -> if has_fn_param sch.Typer.body then Some n else None)
+      Typer.initial_env
+  in
   let prog =
     Ast.uniquify_toplevel_shadows ~shadowable
       (Ast.reserve_toplevel_main
         (Ast.uniquify_inner_fns_program
-          (Ast.lower_par_map_program
-            { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls })))
+          (Ast.range_version_program ~unsafe_builtins:higher_order_builtins
+            (Ast.lower_par_map_program
+              { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls }))))
   in
   (* Tell the typer what this program declares, here rather than only when the
      declarations are later walked. What types exist is a fact about the program, and

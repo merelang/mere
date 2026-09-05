@@ -1,0 +1,20 @@
+// bytecount -- twenty passes over a byte stream, each counting the bytes equal
+// to a value that changes per pass; the sum of the counts is the answer. The
+// byte-lane twin of axpy for range-check versioning (Q-108): `bytes_get b i`
+// with `bytes_len b` as the bound is exactly the shape the pass looks for, and
+// a compare-and-count over bytes is what a vectorizer does best. Expected to
+// TIE with C.
+let path = match args () with | Cons (p, _) -> p | Nil -> "";
+if str_eq path "" then print "usage: bench <file>"
+else
+  let b = read_bytes path in
+  let n = bytes_len b in
+  let rec count = fn (i: int) -> fn (t: int) -> fn (acc: int) ->
+    if i == n then acc
+    else count (i + 1) t (if bytes_get b i == t then acc + 1 else acc) in
+  let rec passes = fn (p: int) -> fn (acc: int) ->
+    if p == 20 then acc else passes (p + 1) (acc + count 0 ((p * 13) % 256) 0) in
+  let total = passes 0 0 in
+  let _ = print ("bytes " ++ str_of_int n) in
+  let _ = print ("count " ++ str_of_int total) in
+  exit 0
