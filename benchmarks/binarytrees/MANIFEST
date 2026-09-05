@@ -29,11 +29,16 @@ claim = the shape the region model is built around, and the one where its two
 # changes is peak. Contrast churn, where the same idea costs 44% MORE
 # cumulative allocation, because a loop has to deep-copy its live set into
 # every new generation and a block only has to copy its answer.
-alloc_min = 134217728
-alloc_max = 209715200
+# 117,092,664 B at v0.1.419: a Branch node is 16 bytes instead of 24 -- the tag
+# moved into the pointer's low bits (Q-104), so the node is the payload alone.
+# Two thirds of the previous number, to the byte. The floor caught the change
+# as a breach again, which is its job; it moves down with the layout.
+alloc_min = 100663296
+alloc_max = 134217728
 
 # The number the region block exists to control. 32,505,856 B at v0.1.322,
-# halved along with everything else. bench_pertree.mere draws the block around
+# halved along with everything else; the per-tree row's arena stays at the
+# 1 MiB seed from v0.1.419 (a depth-16 tree is 1.0 MB of 16-byte nodes). bench_pertree.mere draws the block around
 # one tree instead of one batch and peaks at 3,145,728 B (a depth-16 tree is
 # 1.5 MB of nodes, so the 1 MiB seed grows once); its peak RSS, 5.5-5.8 MiB,
 # is the Rust row's. The ceiling stays where the batch row needs it.

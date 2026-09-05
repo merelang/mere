@@ -4,6 +4,49 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.419 — 2026-09-05
+
+_A boxed variant node loses its tag word on the C backend: the tag rides in
+the pointer's low bits. A cons cell is 16 bytes instead of 24, a one-word node
+8 instead of 16, and the three benchmarks that are mostly nodes drop by the
+arithmetic -- binarytrees 175.6 -> 117.1 MB allocated, json 82.2 -> 66.8, a
+str list 24 -> 16 bytes a word._
+
+Every region allocation is 8-aligned, so a pointer carries three free bits. A
+recursive variant with at most eight constructors now keeps its tag there: the
+node is the payload union alone, the value is `node | tag`, and a nullary
+constructor is the tag OR'd onto the type's shared static -- no allocation,
+never NULL. A type with more than eight constructors keeps the old
+`{ int tag; union payload; }` node. Generated code never spells the layout:
+three macros emitted beside each boxed type's typedef -- `T__tag(v)`,
+`T__node(v)`, `T__mk(t, p)` -- answer the tag, the node, and the value, and the
+choice is made once, where the type is declared. Construction, pattern tests,
+`show` / `to_json` / `==` / `cmp`, the region copiers, `len` on a list,
+`vec_to_list`, the list builder, `of_json` and the hand-written `str list`
+runtime (`str_split`, `str_join`, `args`, `read_lines`, `list_dir`, the UTF-8
+splitter) all go through them. The copiers also stop re-allocating a nullary
+node: the static outlives every arena, so it is handed back as it is.
+
+This was the last of the three causes the footprint arc named (the default
+region never frees; buffers left behind on growth; representation), and the
+one held open as a design question: whether a 33% denser node was worth
+touching every site that knew the layout. The sites are now ten, and they all
+say the same three words. Measured against the other languages' rows:
+binarytrees at 118.7 MiB resident naive (was 169.1) and json under Ruby's
+73.9 MiB once resident numbers are re-recorded. The interpreter, LLVM, Wasm and
+RV32I backends keep their own layouts -- the parity suite compares what
+programs print, not how they are laid out, and every one of the 152 programs
+still prints the same bytes on all four.
+
+Bands: binarytrees [96, 128] MiB, json [48, 96] MiB, wordfreq's floor at
+12 MiB -- each floor caught the drop as a breach first, which is what a floor
+is for. Downstream: mere-ruby, forty thousand lines with many variants past
+the eight-constructor line, compiles to 19.6 MB of C under the new layout,
+that C compiles, and its 180-program corpus matches the reference Ruby to the
+byte -- the old and the packed layouts side by side in one program.
+
+---
+
 ## v0.1.418 — 2026-09-05
 
 _A Wasm `region` block can hand out a list, a tuple, a record, a variant, a

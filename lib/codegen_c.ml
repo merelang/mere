@@ -333,6 +333,49 @@ let recursive_variants : (string, unit) Hashtbl.t = Hashtbl.create 4
 let is_recursive_variant (name : string) : bool =
   Hashtbl.mem recursive_variants name
 
+(* Q-104 (v0.1.419): PACKED boxed variants. A boxed (recursive) variant used
+   to be a pointer to `{ int tag; union payload; }`, and the tag word plus its
+   alignment padding made a two-pointer node 24 bytes where Rust's is 16 and a
+   one-word node 16 where 8 would do. Every region allocation is 8-aligned,
+   so a pointer has three free low bits, and a variant with at most eight
+   constructors keeps its tag THERE: the node is the payload union alone, the
+   value is `node | tag`, and a nullary constructor is the tag OR'd onto the
+   type's shared static (no allocation, never NULL). A variant with more than
+   eight constructors keeps the old layout. Either way, generated code never
+   spells the layout: it goes through three macros emitted next to each boxed
+   type's typedef --
+     T__tag(v)    the constructor tag of value v
+     T__node(v)   the node pointer (payload access: T__node(v)->payload.C)
+     T__mk(t, p)  the value for node p with tag t
+   -- so the choice is made once, where the type is declared. Measured on the
+   json benchmark: the tree was 69 MB of the run at 24-byte kv cells and
+   16-byte leaf nodes; it is what the arithmetic says at 24 and 8. *)
+let packed_variants : (string, unit) Hashtbl.t = Hashtbl.create 16
+let is_packed_variant (name : string) : bool = Hashtbl.mem packed_variants name
+
+let variant_access_macros (mono_name : string) (node_name : string) (nctors : int) : string =
+  if nctors <= 8 then begin
+    Hashtbl.replace packed_variants mono_name ();
+    Printf.sprintf
+      "#define %s__tag(v) ((int)(((uintptr_t)(v)) & (uintptr_t)7))\n\
+       #define %s__node(v) ((%s*)(((uintptr_t)(v)) & ~(uintptr_t)7))\n\
+       #define %s__mk(t, p) ((%s)(((uintptr_t)(p)) | (uintptr_t)(t)))"
+      mono_name mono_name node_name mono_name mono_name
+  end else
+    Printf.sprintf
+      "#define %s__tag(v) ((v)->tag)\n\
+       #define %s__node(v) (v)\n\
+       #define %s__mk(t, p) ({ %s* __mkp = (p); __mkp->tag = (t); (%s)__mkp; })"
+      mono_name mono_name mono_name node_name mono_name
+
+(* The tag / payload of a variant value in emitted C: through the macros for
+   a boxed type, by field for a value-struct type. *)
+let vtag_c (cty : string) (is_ptr : bool) (v : string) : string =
+  if is_ptr then Printf.sprintf "%s__tag(%s)" cty v else Printf.sprintf "%s.tag" v
+let vpay_c (cty : string) (is_ptr : bool) (v : string) (cname : string) : string =
+  if is_ptr then Printf.sprintf "%s__node(%s)->payload.%s" cty v cname
+  else Printf.sprintf "%s.payload.%s" v cname
+
 (* Polymorphic variant declarations: stored here at emit_variant_typedef
    time when params != [], then specialized at collect/emit time per
    concrete instantiation. *)
@@ -799,6 +842,15 @@ let is_view_type (v_ty : Ast.ty) : bool =
 (* Whether the value at type `v_ty` is represented as a pointer (for
    recursive variants, mono or polymorphic, or views). Used by pattern
    compiler and field access to choose `->` vs `.` accessors. *)
+(* The C name of a variant type (mono name for a polymorphic instance): what
+   the access macros are prefixed with. *)
+let mono_cty_of (v_ty : Ast.ty) : string =
+  match Ast.walk v_ty with
+  | Ast.TyCon (n, args) ->
+    if Hashtbl.mem polymorphic_variants n then mono_variant_name n (List.map Ast.walk args)
+    else n
+  | _ -> "?"
+
 let is_ptr_ty (v_ty : Ast.ty) : bool =
   if is_view_type v_ty then true
   else
@@ -3116,8 +3168,8 @@ let rec emit_expr (e : Ast.expr) : string =
        let (mono_list, nil_tag) = lb_list_of arg.Ast.ty e.Ast.loc in
        Printf.sprintf
          "({ __lang_listbuf* __b = %s; __b->frozen = 1; \
-          (%s)(__b->head ? __b->head : (void*)(&%s)); })"
-         (emit_expr arg) mono_list (shared_nullary_sym mono_list nil_tag)
+          __b->head ? (%s)__b->head : %s__mk(%d, &%s); })"
+         (emit_expr arg) mono_list mono_list nil_tag (shared_nullary_sym mono_list nil_tag)
      | Ast.Var "vec_new" ->
        (* Phase 15.1/15.2: vec_new () — extract the region and element type
           from the result type's TyCon args. region = __heap uses the default
@@ -3172,12 +3224,15 @@ let rec emit_expr (e : Ast.expr) : string =
          "({ __lang_listbuf* __b = %s; __auto_type __x = %s; \
           if (__b->frozen) __lang_fail_impl(\"lb_push: the builder was already turned into a list by lb_to_list\"); \
           if (__b->region != __lang_current_region) __lang_fail_impl(\"lb_push: the builder belongs to a region that is not current\"); \
-          %s __n = (%s)__lang_region_alloc(__b->region, sizeof(%s_node)); \
-          __n->tag = %d; __n->payload.Cons.f0 = __x; __n->payload.Cons.f1 = (&%s); \
-          if (__b->tail) ((%s)__b->tail)->payload.Cons.f1 = __n; else __b->head = __n; \
+          %s_node* __n = (%s_node*)__lang_region_alloc(__b->region, sizeof(%s_node)); \
+          __n->payload.Cons.f0 = __x; __n->payload.Cons.f1 = %s__mk(%d, &%s); \
+          %s __nv = %s__mk(%d, __n); \
+          if (__b->tail) ((%s_node*)__b->tail)->payload.Cons.f1 = __nv; else __b->head = (void*)__nv; \
           __b->tail = __n; __b->len++; 0; })"
          (emit_expr b_e) (emit_expr arg)
-         mono_list mono_list mono_list cons_tag (shared_nullary_sym mono_list nil_tag) mono_list
+         mono_list mono_list mono_list
+         mono_list nil_tag (shared_nullary_sym mono_list nil_tag)
+         mono_list mono_list cons_tag mono_list
      | Ast.App ({ node = Ast.Var "vec_push"; _ }, vec_e) ->
        (* `vec_push v x` is curried: App (App (Var "vec_push", v), x).
           The outer App here has inner = App (Var "vec_push", vec_e) and
@@ -3378,21 +3433,18 @@ let rec emit_expr (e : Ast.expr) : string =
        in
        Printf.sprintf
          "({ __auto_type __v = %s; \
-          %s __acc = (%s)__lang_region_alloc(__lang_current_region, sizeof(%s_node)); \
-          __acc->tag = %d; \
+          %s __acc = %s__mk(%d, &%s); \
           for (int __i = __v->len - 1; __i >= 0; __i--) { \
-            %s __new_node = (%s)__lang_region_alloc(__lang_current_region, sizeof(%s_node)); \
-            __new_node->tag = %d; \
+            %s_node* __new_node = (%s_node*)__lang_region_alloc(__lang_current_region, sizeof(%s_node)); \
             __new_node->payload.Cons.f0 = mere_vec_%s_get(__v, __i); \
             __new_node->payload.Cons.f1 = __acc; \
-            __acc = __new_node; \
+            __acc = %s__mk(%d, __new_node); \
           } __acc; })"
          (emit_expr arg)
+         mono_list mono_list nil_tag (shared_nullary_sym mono_list nil_tag)
          mono_list mono_list mono_list
-         nil_tag
-         mono_list mono_list mono_list
-         cons_tag
          t_tag
+         mono_list cons_tag
          |> fun s -> ignore tup_name; s
      | Ast.Var "vec_to_owned" ->
        (* Phase 15.7: vec_to_owned v — deep-copy a Vec in a region into a heap
@@ -3446,17 +3498,18 @@ let rec emit_expr (e : Ast.expr) : string =
            took the cons-walking branch, and the C it emitted (`->payload.Cons`
            on an option) did not compile at all. The interpreter refuses this at
            runtime; the backend can see it is impossible before running. *)
-        | Ast.TyCon (n, _) when Hashtbl.mem polymorphic_variants n
+        | Ast.TyCon (n, largs) when Hashtbl.mem polymorphic_variants n
                              && (let (_, ctors) = Hashtbl.find polymorphic_variants n in
                                  List.mem_assoc "Cons" ctors && List.mem_assoc "Nil" ctors) ->
           (* Phase 15.12: `len` on `T list` (Nil/Cons chain). Walk the
              cons chain counting. Works for any user-declared
              `type 'a list = Nil | Cons of 'a * 'a list`-shaped variant. *)
           let cons_tag = Hashtbl.find variant_tags "Cons" in
+          let mono = mono_variant_name n (List.map Ast.walk largs) in
           Printf.sprintf
             "({ __auto_type __l = %s; long long __n = 0; \
-             while (__l->tag == %d) { __n++; __l = __l->payload.Cons.f1; } __n; })"
-            (emit_expr arg) cons_tag
+             while (%s__tag(__l) == %d) { __n++; __l = %s__node(__l)->payload.Cons.f1; } __n; })"
+            (emit_expr arg) mono cons_tag mono
         | _ ->
           unsupported e.loc
             "len: arg type has no codegen-defined length (use vec_len / strbuf_len / map_len / str_len for specific types)")
@@ -3709,12 +3762,13 @@ let rec emit_expr (e : Ast.expr) : string =
            every arena, which is what makes it safe to hand across a region
            boundary; the copiers still copy it, so no invariant about where a
            nullary node lives is being relied on anywhere. *)
-        Printf.sprintf "(&%s)" (shared_nullary_sym actual_type_name tag)
+        Printf.sprintf "%s__mk(%d, &%s)" actual_type_name tag
+          (shared_nullary_sym actual_type_name tag)
       | Some arg_c ->
         Printf.sprintf
           "({ %s* __p = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); \
-           __p->tag = %d; __p->payload.%s = %s; __p; })"
-          node node node tag name arg_c
+           __p->payload.%s = %s; %s__mk(%d, __p); })"
+          node node node name arg_c actual_type_name tag
     else
       let payload_str =
         match arg_c_opt with
@@ -4094,8 +4148,11 @@ and compile_pattern (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
       with Not_found ->
         unsupported pat.Ast.ploc ("unknown constructor in pattern: " ^ raw_cname)
     in
-    let dot = if is_ptr_ty v_ty then "->" else "." in
-    let tag_test = Printf.sprintf "(%s)%stag == %d" v_c dot tag in
+    let is_ptr = is_ptr_ty v_ty in
+    let cty = mono_cty_of v_ty in
+    let tag_test =
+      if is_ptr then Printf.sprintf "%s__tag(%s) == %d" cty v_c tag
+      else Printf.sprintf "(%s).tag == %d" v_c tag in
     (match sub_opt with
      | None -> (tag_test, "")
      | Some sub ->
@@ -4106,7 +4163,9 @@ and compile_pattern (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
            unsupported pat.Ast.ploc
              ("missing payload type for " ^ cname)
        in
-       let sub_v = Printf.sprintf "(%s)%spayload.%s" v_c dot cname in
+       let sub_v =
+         if is_ptr then Printf.sprintf "%s__node(%s)->payload.%s" cty v_c cname
+         else Printf.sprintf "(%s).payload.%s" v_c cname in
        let (sub_test, sub_bind) = compile_pattern sub sub_v payload_ty in
        let combined_test =
          if sub_test = "1" then tag_test
@@ -4712,25 +4771,25 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
     let elem_show = "show_" ^ ty_tag (Ast.walk elem_ty) in
     Printf.sprintf
       "%s {\n  \
-         if (v->tag == 0) return __lang_str_of_cstr(\"[]\");\n  \
+         if (%s__tag(v) == 0) return __lang_str_of_cstr(\"[]\");\n  \
          const char* __acc = \"[\";\n  \
          %s __cur = v;\n  \
          int __first = 1;\n  \
-         while (__cur->tag == 1) {\n  \
+         while (%s__tag(__cur) == 1) {\n  \
            char* __buf;\n  \
            if (__first) {\n  \
-             asprintf(&__buf, \"%%s%%s\", __acc, %s(__cur->payload.Cons.f0));\n  \
+             asprintf(&__buf, \"%%s%%s\", __acc, %s(%s__node(__cur)->payload.Cons.f0));\n  \
            } else {\n  \
-             asprintf(&__buf, \"%%s, %%s\", __acc, %s(__cur->payload.Cons.f0));\n  \
+             asprintf(&__buf, \"%%s, %%s\", __acc, %s(%s__node(__cur)->payload.Cons.f0));\n  \
            }\n  \
            if (!__first) free((void*)__acc);\n  \
            __acc = __buf;\n  \
-           __cur = __cur->payload.Cons.f1;\n  \
+           __cur = %s__node(__cur)->payload.Cons.f1;\n  \
            __first = 0;\n  \
          }\n  \
          char* __buf; asprintf(&__buf, \"%%s]\", __acc); if (!__first) free((void*)__acc); return __lang_str_take_cstr(__buf);\n\
        }"
-      header cty elem_show elem_show
+      header cty cty cty elem_show cty elem_show cty cty
   | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
     let info = Hashtbl.find Typer.records name in
     let fields_parts =
@@ -4763,7 +4822,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
           Typer.constructors []
     in
     let is_ptr = is_recursive_variant cty in
-    let dot = if is_ptr then "->" else "." in
+    let vt = vtag_c cty is_ptr "v" in
     let cases =
       List.map (fun (cname, arg_opt) ->
         let tag_n =
@@ -4771,12 +4830,12 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
         in
         match arg_opt with
         | None ->
-          Printf.sprintf "  if (v%stag == %d) return __lang_str_of_cstr(\"%s\");"
-            dot tag_n cname
+          Printf.sprintf "  if (%s == %d) return __lang_str_of_cstr(\"%s\");"
+            vt tag_n cname
         | Some ty ->
           Printf.sprintf
-            "  if (v%stag == %d) { char* buf; asprintf(&buf, \"%s %%s\", show_%s(v%spayload.%s)); return __lang_str_take_cstr(buf); }"
-            dot tag_n cname (ty_tag ty) dot cname)
+            "  if (%s == %d) { char* buf; asprintf(&buf, \"%s %%s\", show_%s(%s)); return __lang_str_take_cstr(buf); }"
+            vt tag_n cname (ty_tag ty) (vpay_c cty is_ptr "v" cname))
         variants
     in
     Printf.sprintf "%s {\n%s\n  return __lang_str_of_cstr(\"<unknown>\");\n}"
@@ -4818,34 +4877,33 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
     let elem = "to_json_" ^ ty_tag (Ast.walk elem_ty) in
     Printf.sprintf
       "%s {\n  \
-         if (v->tag == 0) return __lang_str_of_cstr(\"[]\");\n  \
+         if (%s__tag(v) == 0) return __lang_str_of_cstr(\"[]\");\n  \
          const char* __acc = \"[\";\n  \
          %s __cur = v;\n  \
          int __first = 1;\n  \
-         while (__cur->tag == 1) {\n  \
+         while (%s__tag(__cur) == 1) {\n  \
            char* __buf;\n  \
            if (__first) {\n  \
-             asprintf(&__buf, \"%%s%%s\", __acc, %s(__cur->payload.Cons.f0));\n  \
+             asprintf(&__buf, \"%%s%%s\", __acc, %s(%s__node(__cur)->payload.Cons.f0));\n  \
            } else {\n  \
-             asprintf(&__buf, \"%%s,%%s\", __acc, %s(__cur->payload.Cons.f0));\n  \
+             asprintf(&__buf, \"%%s,%%s\", __acc, %s(%s__node(__cur)->payload.Cons.f0));\n  \
            }\n  \
            if (!__first) free((void*)__acc);\n  \
            __acc = __buf;\n  \
-           __cur = __cur->payload.Cons.f1;\n  \
+           __cur = %s__node(__cur)->payload.Cons.f1;\n  \
            __first = 0;\n  \
          }\n  \
          char* __buf; asprintf(&__buf, \"%%s]\", __acc); if (!__first) free((void*)__acc); return __lang_str_take_cstr(__buf);\n\
        }"
-      header cty elem elem
+      header cty cty cty elem cty elem cty cty
   | Ast.TyCon ("option", [inner]) ->
     (* option is a transparent JSON nullable: None -> null, Some x -> x.
        Matches the interpreter and keeps of_json round-trip. *)
     let is_ptr = is_recursive_variant cty in
-    let dot = if is_ptr then "->" else "." in
     let none_tag = try Hashtbl.find variant_tags "None" with Not_found -> 0 in
     Printf.sprintf
-      "%s {\n  if (v%stag == %d) return __lang_str_of_cstr(\"null\");\n  return to_json_%s(v%spayload.Some);\n}"
-      header dot none_tag (ty_tag (Ast.walk inner)) dot
+      "%s {\n  if (%s == %d) return __lang_str_of_cstr(\"null\");\n  return to_json_%s(%s);\n}"
+      header (vtag_c cty is_ptr "v") none_tag (ty_tag (Ast.walk inner)) (vpay_c cty is_ptr "v" "Some")
   | Ast.TyCon (name, _) when Hashtbl.mem Typer.records name ->
     let info = Hashtbl.find Typer.records name in
     let fields_parts =
@@ -4874,7 +4932,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
           Typer.constructors []
     in
     let is_ptr = is_recursive_variant cty in
-    let dot = if is_ptr then "->" else "." in
+    let vt = vtag_c cty is_ptr "v" in
     let cases =
       List.map (fun (cname, arg_opt) ->
         let tag_n =
@@ -4882,12 +4940,12 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
         in
         match arg_opt with
         | None ->
-          Printf.sprintf "  if (v%stag == %d) return __lang_str_of_cstr(\"\\\"%s\\\"\");"
-            dot tag_n cname
+          Printf.sprintf "  if (%s == %d) return __lang_str_of_cstr(\"\\\"%s\\\"\");"
+            vt tag_n cname
         | Some ty ->
           Printf.sprintf
-            "  if (v%stag == %d) { char* buf; asprintf(&buf, \"{\\\"%s\\\":%%s}\", to_json_%s(v%spayload.%s)); return __lang_str_take_cstr(buf); }"
-            dot tag_n cname (ty_tag ty) dot cname)
+            "  if (%s == %d) { char* buf; asprintf(&buf, \"{\\\"%s\\\":%%s}\", to_json_%s(%s)); return __lang_str_take_cstr(buf); }"
+            vt tag_n cname (ty_tag ty) (vpay_c cty is_ptr "v" cname))
         variants
     in
     Printf.sprintf "%s {\n%s\n  return __lang_str_of_cstr(\"null\");\n}"
@@ -5057,9 +5115,10 @@ let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
     if is_ptr then
       let node = cty ^ "_node" in
       Printf.sprintf
-        "({ %s* __p = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); __p->tag = %d%s; __p; })"
-        node node node tag_n
-        (match arg_c_opt with None -> "" | Some a -> "; __p->payload." ^ cname ^ " = " ^ a)
+        "({ %s* __p = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); %s%s__mk(%d, __p); })"
+        node node node
+        (match arg_c_opt with None -> "" | Some a -> "__p->payload." ^ cname ^ " = " ^ a ^ "; ")
+        cty tag_n
     else
       Printf.sprintf "((%s){.tag = %d%s})" cty tag_n
         (match arg_c_opt with None -> "" | Some a -> ", .payload." ^ cname ^ " = " ^ a)
@@ -5087,14 +5146,13 @@ let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
       let node = cty ^ "_node" in
       Printf.sprintf
         "  if (j->kind != MJ_ARR) __mj_die(\"expected a JSON array\");\n  \
-         %s __acc = ({ %s* __nil = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); __nil->tag = %d; __nil; });\n  \
+         %s __acc = %s__mk(%d, &%s);\n  \
          for (int __i = j->len - 1; __i >= 0; __i--) {\n    \
            %s* __n = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s));\n    \
-           __n->tag = %d;\n    \
            __n->payload.Cons.f0 = __ojnode_%s(j->items[__i]);\n    \
            __n->payload.Cons.f1 = __acc;\n    \
-           __acc = __n;\n  }\n  return __acc;"
-        cty node node node nil_tag node node node cons_tag elem_tag
+           __acc = %s__mk(%d, __n);\n  }\n  return __acc;"
+        cty cty nil_tag (shared_nullary_sym cty nil_tag) node node node elem_tag cty cons_tag
     | Ast.TyCon ("option", [inner]) ->
       let inner_tag = ty_tag (Ast.walk inner) in
       let none_tag = try Hashtbl.find variant_tags "None" with Not_found -> 0 in
@@ -5230,7 +5288,6 @@ let emit_eq_fn (tag : string) (t : Ast.ty) : string =
           Typer.constructors []
     in
     let is_ptr = is_recursive_variant cty in
-    let dot = if is_ptr then "->" else "." in
     let cases =
       List.filter_map (fun (cname, arg_opt) ->
         match arg_opt with
@@ -5238,12 +5295,13 @@ let emit_eq_fn (tag : string) (t : Ast.ty) : string =
         | Some ty ->
           let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
           Some (Printf.sprintf
-            "  if (a%stag == %d) return eq_%s(a%spayload.%s, b%spayload.%s);"
-            dot tag_n (ty_tag ty) dot cname dot cname))
+            "  if (%s == %d) return eq_%s(%s, %s);"
+            (vtag_c cty is_ptr "a") tag_n (ty_tag ty)
+            (vpay_c cty is_ptr "a" cname) (vpay_c cty is_ptr "b" cname)))
         variants
     in
-    Printf.sprintf "%s {\n  if (a%stag != b%stag) return 0;\n%s\n  return 1;\n}"
-      header dot dot (String.concat "\n" cases)
+    Printf.sprintf "%s {\n  if (%s != %s) return 0;\n%s\n  return 1;\n}"
+      header (vtag_c cty is_ptr "a") (vtag_c cty is_ptr "b") (String.concat "\n" cases)
   | _ -> header ^ " { (void)a; (void)b; return 0; }"
 
 let emit_eq_fn_forward_decl (tag : string) (t : Ast.ty) : string =
@@ -5292,7 +5350,7 @@ let emit_cmp_fn (tag : string) (t : Ast.ty) : string =
           Typer.constructors []
     in
     let is_ptr = is_recursive_variant cty in
-    let dot = if is_ptr then "->" else "." in
+    let ta = vtag_c cty is_ptr "a" and tb = vtag_c cty is_ptr "b" in
     let cases =
       List.filter_map (fun (cname, arg_opt) ->
         match arg_opt with
@@ -5300,13 +5358,13 @@ let emit_cmp_fn (tag : string) (t : Ast.ty) : string =
         | Some ty ->
           let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
           Some (Printf.sprintf
-            "  if (a%stag == %d) return cmp_%s(a%spayload.%s, b%spayload.%s);"
-            dot tag_n (ty_tag ty) dot cname dot cname))
+            "  if (%s == %d) return cmp_%s(%s, %s);"
+            ta tag_n (ty_tag ty) (vpay_c cty is_ptr "a" cname) (vpay_c cty is_ptr "b" cname)))
         variants
     in
     Printf.sprintf
-      "%s {\n  if (a%stag != b%stag) return (a%stag > b%stag) - (a%stag < b%stag);\n%s\n  return 0;\n}"
-      header dot dot dot dot dot dot (String.concat "\n" cases)
+      "%s {\n  if (%s != %s) return (%s > %s) - (%s < %s);\n%s\n  return 0;\n}"
+      header ta tb ta tb ta tb (String.concat "\n" cases)
   | _ -> header ^ " { (void)a; (void)b; return 0; }"
 
 let emit_cmp_fn_forward_decl (tag : string) (t : Ast.ty) : string =
@@ -5367,21 +5425,27 @@ let emit_copy_fn (tag : string) (t : Ast.ty) : string =
     in
     if is_recursive_variant cty then
       (* Heap node: re-allocate the node in r, then copy the payload. *)
+      (* Q-104: a nullary node is the type's shared static and outlives every
+         arena, so it is returned as it is; a payload node is re-allocated
+         from the untagged source and the value re-tagged. *)
       let cases =
         List.filter_map (fun (cname, arg_opt) ->
+          let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
           match arg_opt with
-          | None -> None
+          | None -> Some (Printf.sprintf "  if (__t == %d) return v;" tag_n)
           | Some ty ->
-            let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
             Some (Printf.sprintf
-              "  if (p->tag == %d) p->payload.%s = __mcopy_%s(r, p->payload.%s);"
+              "  if (__t == %d) p->payload.%s = __mcopy_%s(r, p->payload.%s);"
               tag_n cname (ty_tag ty) cname))
           variants
       in
+      let nullary_returns = List.filter (fun c -> String.length c > 0 && (try ignore (Str.search_forward (Str.regexp_string "return v;") c 0); true with Not_found -> false)) cases in
+      let payload_steps = List.filter (fun c -> not (List.mem c nullary_returns)) cases in
       Printf.sprintf
-        "%s {\n  %s_node* p = (%s_node*)__lang_region_alloc(r, sizeof(%s_node));\n  \
-         *p = *v;\n%s\n  return p;\n}"
-        header cty cty cty (String.concat "\n" cases)
+        "%s {\n  int __t = %s__tag(v);\n%s\n  %s_node* p = (%s_node*)__lang_region_alloc(r, sizeof(%s_node));\n  \
+         *p = *%s__node(v);\n%s\n  return %s__mk(__t, p);\n}"
+        header cty (String.concat "\n" nullary_returns) cty cty cty cty
+        (String.concat "\n" payload_steps) cty
     else
       let cases =
         List.filter_map (fun (cname, arg_opt) ->
@@ -5468,21 +5532,27 @@ let emit_deep_copy_fn (tag : string) (t : Ast.ty) : string =
           Typer.constructors []
     in
     if is_recursive_variant cty then
+      (* Q-104: a nullary node is the type's shared static and outlives every
+         arena, so it is returned as it is; a payload node is re-allocated
+         from the untagged source and the value re-tagged. *)
       let cases =
         List.filter_map (fun (cname, arg_opt) ->
+          let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
           match arg_opt with
-          | None -> None
+          | None -> Some (Printf.sprintf "  if (__t == %d) return v;" tag_n)
           | Some ty ->
-            let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
             Some (Printf.sprintf
-              "  if (p->tag == %d) p->payload.%s = __mdeep_%s(r, p->payload.%s);"
+              "  if (__t == %d) p->payload.%s = __mdeep_%s(r, p->payload.%s);"
               tag_n cname (ty_tag ty) cname))
           variants
       in
+      let nullary_returns = List.filter (fun c -> String.length c > 0 && (try ignore (Str.search_forward (Str.regexp_string "return v;") c 0); true with Not_found -> false)) cases in
+      let payload_steps = List.filter (fun c -> not (List.mem c nullary_returns)) cases in
       Printf.sprintf
-        "%s {\n  %s_node* p = (%s_node*)__lang_region_alloc(r, sizeof(%s_node));\n  \
-         *p = *v;\n%s\n  return p;\n}"
-        header cty cty cty (String.concat "\n" cases)
+        "%s {\n  int __t = %s__tag(v);\n%s\n  %s_node* p = (%s_node*)__lang_region_alloc(r, sizeof(%s_node));\n  \
+         *p = *%s__node(v);\n%s\n  return %s__mk(__t, p);\n}"
+        header cty (String.concat "\n" nullary_returns) cty cty cty cty
+        (String.concat "\n" payload_steps) cty
     else
       let cases =
         List.filter_map (fun (cname, arg_opt) ->
@@ -8706,8 +8776,7 @@ let str_list_helpers () =
       "}";
       "static list_str __lang_utf8_chars(const char* s) {";
       "  int n = (int)__lang_str_size(s);";
-      "  list_str acc = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
-      "  acc->tag = 0;";
+      "  list_str acc = list_str__mk(0, &__mshared_list_str_t0);";
       "  int end = n;";
       "  while (end > 0) {";
       "    int st = end - 1;";
@@ -8716,11 +8785,10 @@ let str_list_helpers () =
       "    char* tok = __lang_str_alloc(__lang_current_region, (size_t)l);";
       "    memcpy(tok, s + st, (size_t)l);";
       "    tok[l] = '\\0';";
-      "    list_str cons = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
-      "    cons->tag = 1;";
+      "    struct list_str_node* cons = (struct list_str_node*)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "    cons->payload.Cons.f0 = tok;";
       "    cons->payload.Cons.f1 = acc;";
-      "    acc = cons;";
+      "    acc = list_str__mk(1, cons);";
       "    end = st;";
       "  }";
       "  return acc;";
@@ -8728,15 +8796,13 @@ let str_list_helpers () =
       "static list_str __lang_str_split(const char* s, const char* delim) {";
       "  size_t slen = __lang_str_size(s);";
       "  size_t dlen = __lang_str_size(delim);";
-      "  list_str nil_node = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
-      "  nil_node->tag = 0;";
+      "  list_str nil_node = list_str__mk(0, &__mshared_list_str_t0);";
       "  if (dlen == 0) {";
       "    /* empty delim: return the whole string as a single element (matches interp) */";
-      "    list_str cons = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
-      "    cons->tag = 1;";
+      "    struct list_str_node* cons = (struct list_str_node*)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "    cons->payload.Cons.f0 = s;";
       "    cons->payload.Cons.f1 = nil_node;";
-      "    return cons;";
+      "    return list_str__mk(1, cons);";
       "  }";
       "  /* count tokens */";
       "  size_t n = 1;";
@@ -8745,10 +8811,9 @@ let str_list_helpers () =
       "    else i++;";
       "  }";
       "  /* allocate cons cells */";
-      "  list_str* cells = (list_str*)__lang_region_alloc(__lang_current_region, n * sizeof(list_str));";
+      "  struct list_str_node** cells = (struct list_str_node**)__lang_region_alloc(__lang_current_region, n * sizeof(struct list_str_node*));";
       "  for (size_t k = 0; k < n; k++) {";
-      "    cells[k] = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
-      "    cells[k]->tag = 1;";
+      "    cells[k] = (struct list_str_node*)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "  }";
       "  /* fill tokens + link */";
       "  size_t start = 0, idx = 0;";
@@ -8759,7 +8824,7 @@ let str_list_helpers () =
       "      memcpy(tok, s + start, tlen);";
       "      tok[tlen] = '\\0';";
       "      cells[idx]->payload.Cons.f0 = tok;";
-      "      cells[idx]->payload.Cons.f1 = cells[idx + 1];";
+      "      cells[idx]->payload.Cons.f1 = list_str__mk(1, cells[idx + 1]);";
       "      idx++;";
       "      start = i + dlen;";
       "      i = start;";
@@ -8772,27 +8837,27 @@ let str_list_helpers () =
       "  tok[tlen] = '\\0';";
       "  cells[idx]->payload.Cons.f0 = tok;";
       "  cells[idx]->payload.Cons.f1 = nil_node;";
-      "  return cells[0];";
+      "  return list_str__mk(1, cells[0]);";
       "}";
       "";
       "/* Phase 24.3: str_join sep xs — concat list_str elements with sep. */";
       "static const char* __lang_str_join(const char* sep, list_str xs) {";
-      "  if (xs->tag == 0) return __lang_str_of_cstr(\"\");";
+      "  if (list_str__tag(xs) == 0) return __lang_str_of_cstr(\"\");";
       "  size_t seplen = __lang_str_size(sep);";
       "  size_t total = 0;";
       "  int first = 1;";
       "  list_str cur = xs;";
-      "  while (cur->tag == 1) {";
+      "  while (list_str__tag(cur) == 1) {";
       "    if (!first) total += seplen;";
-      "    total += __lang_str_size(cur->payload.Cons.f0);";
+      "    total += __lang_str_size(list_str__node(cur)->payload.Cons.f0);";
       "    first = 0;";
-      "    cur = cur->payload.Cons.f1;";
+      "    cur = list_str__node(cur)->payload.Cons.f1;";
       "  }";
       "  char* r = __lang_str_alloc(__lang_current_region, total);";
       "  size_t pos = 0;";
       "  first = 1;";
       "  cur = xs;";
-      "  while (cur->tag == 1) {";
+      "  while (list_str__tag(cur) == 1) {";
       "    if (!first) {";
       "      memcpy(r + pos, sep, seplen);";
       "      pos += seplen;";
@@ -8802,11 +8867,11 @@ let str_list_helpers () =
          full length and copied only up to the NUL. The total was right and the
          bytes after the NUL were the allocator's zeros. One function, two
          notions of how long a string is. *)
-      "    size_t l = __lang_str_size(cur->payload.Cons.f0);";
-      "    memcpy(r + pos, cur->payload.Cons.f0, l);";
+      "    size_t l = __lang_str_size(list_str__node(cur)->payload.Cons.f0);";
+      "    memcpy(r + pos, list_str__node(cur)->payload.Cons.f0, l);";
       "    pos += l;";
       "    first = 0;";
-      "    cur = cur->payload.Cons.f1;";
+      "    cur = list_str__node(cur)->payload.Cons.f1;";
       "  }";
       "  r[pos] = '\\0';";
       "  return r;";
@@ -8835,16 +8900,14 @@ let str_list_helpers () =
       "  }";
       "  closedir(d);";
       "  qsort(arr, n, sizeof(char*), __lang_list_dir_qsort);";
-      "  list_str nil_node = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
-      "  nil_node->tag = 0;";
+      "  list_str nil_node = list_str__mk(0, &__mshared_list_str_t0);";
       "  list_str head = nil_node;";
       "  for (size_t k = 0; k < n; k++) {";
       "    size_t i = n - 1 - k;";
-      "    list_str cons = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
-      "    cons->tag = 1;";
+      "    struct list_str_node* cons = (struct list_str_node*)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "    cons->payload.Cons.f0 = arr[i];";
       "    cons->payload.Cons.f1 = head;";
-      "    head = cons;";
+      "    head = list_str__mk(1, cons);";
       "  }";
       "  free(arr);";
       "  return head;";
@@ -8856,19 +8919,17 @@ let str_list_helpers () =
       lib_static () ^ "int __lang_argc = 0;";
       lib_static () ^ "char** __lang_argv = 0;";
       "static list_str __lang_args(void) {";
-      "  list_str head = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
-      "  head->tag = 0;";
+      "  list_str head = list_str__mk(0, &__mshared_list_str_t0);";
       "  for (int k = 1; k < __lang_argc; k++) {";
       "    int i = __lang_argc - k;  /* reverse so argv[1] ends up first */";
       "    const char* a = __lang_argv[i];";
       "    size_t nlen = strlen(a);";
       "    char* copy = __lang_str_alloc(__lang_current_region, nlen);";
       "    memcpy(copy, a, nlen + 1);";
-      "    list_str cons = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
-      "    cons->tag = 1;";
+      "    struct list_str_node* cons = (struct list_str_node*)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "    cons->payload.Cons.f0 = copy;";
       "    cons->payload.Cons.f1 = head;";
-      "    head = cons;";
+      "    head = list_str__mk(1, cons);";
       "  }";
       "  return head;";
       "}" ]
@@ -8886,8 +8947,7 @@ let read_lines_helper =
       (* v0.1.284: read_file returns a header-carrying str, so ask it its size
          rather than scanning for a NUL that the file is allowed to contain. *)
       "  size_t n = __lang_str_size(content);";
-      "  list_str acc = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
-      "  acc->tag = 0;";
+      "  list_str acc = list_str__mk(0, &__mshared_list_str_t0);";
       "  if (n == 0) return acc;";
       "  /* effective length drops one trailing newline, matching input_line */";
       "  size_t i = (content[n - 1] == '\\n') ? n - 1 : n;";
@@ -8898,11 +8958,10 @@ let read_lines_helper =
       "    char* tok = __lang_str_alloc(__lang_current_region, len);";
       "    memcpy(tok, content + st, len);";
       "    tok[len] = '\\0';";
-      "    list_str cons = (list_str)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
-      "    cons->tag = 1;";
+      "    struct list_str_node* cons = (struct list_str_node*)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "    cons->payload.Cons.f0 = tok;";
       "    cons->payload.Cons.f1 = acc;";
-      "    acc = cons;";
+      "    acc = list_str__mk(1, cons);";
       "    if (st == 0) break;";
       "    i = st - 1;  /* skip the '\\n' */";
       "  }";
@@ -10089,8 +10148,9 @@ let emit_variant_typedef (name : string) (params : string list)
   in
   if recursive then
     Printf.sprintf
-      "typedef struct %s %s;\ntypedef %s* %s;"
+      "typedef struct %s %s;\ntypedef %s* %s;\n%s"
       node_name node_name node_name name
+      (variant_access_macros name node_name (List.length variants))
   else begin
     let _ = body in
     (* Non-recursive variants also split into forward + body so closures
@@ -10144,8 +10204,11 @@ let shared_nullary_defs (mono_name : string) (node_name : string)
           (match Hashtbl.find_opt variant_tags cn with
            | None -> None
            | Some tag ->
-             Some (Printf.sprintf "static struct %s %s = { .tag = %d };"
-                     node_name (shared_nullary_sym mono_name tag) tag)))
+             Some (if is_packed_variant mono_name
+                   then Printf.sprintf "static struct %s %s;"
+                          node_name (shared_nullary_sym mono_name tag)
+                   else Printf.sprintf "static struct %s %s = { .tag = %d };"
+                          node_name (shared_nullary_sym mono_name tag) tag)))
         variants
     in
     if defs = [] then "" else "\n" ^ String.concat "\n" defs
@@ -10174,8 +10237,9 @@ let emit_mono_variant_typedef (variant_name : string) (args : Ast.ty list) : str
   in
   let _ = body in
   if recursive then
-    Printf.sprintf "typedef struct %s %s;\ntypedef %s* %s;"
+    Printf.sprintf "typedef struct %s %s;\ntypedef %s* %s;\n%s"
       node_name node_name node_name mono_name
+      (variant_access_macros mono_name node_name (List.length svariants))
   else
     Printf.sprintf "typedef struct %s %s;" node_name node_name
 
@@ -10199,6 +10263,9 @@ let emit_mono_variant_struct_body (variant_name : string) (args : Ast.ty list)
   in
   let body =
     if payload_arms = [] then "  int tag;"
+    else if is_packed_variant mono_name then
+      (* Q-104: the tag lives in the pointer; the node is the payload alone *)
+      "  union {\n" ^ String.concat "\n" payload_arms ^ "\n  } payload;"
     else
       "  int tag;\n  union {\n" ^ String.concat "\n" payload_arms ^
       "\n  } payload;"
@@ -10226,6 +10293,8 @@ let emit_variant_struct_body (name : string)
     in
     let body =
       if payload_arms = [] then "  int tag;"
+      else if is_packed_variant name then
+        "  union {\n" ^ String.concat "\n" payload_arms ^ "\n  } payload;"
       else
         "  int tag;\n  union {\n" ^ String.concat "\n" payload_arms ^
         "\n  } payload;"

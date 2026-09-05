@@ -3605,7 +3605,7 @@ let () =
        show [1, 2, 3]")
     (* v0.1.156: the empty-list case returns a real Mere str rather than a
        bare C literal, which has no length word in front of it. *)
-    "if (v->tag == 0) return __lang_str_of_cstr(\"[]\")";
+    "if (list_int__tag(v) == 0) return __lang_str_of_cstr(\"[]\")";
   assert_contains "codegen: list show separator is \", \""
     (codegen_with_decls
       "type 'a list = Nil | Cons of 'a * 'a list;\n\
@@ -3950,7 +3950,7 @@ let () =
          | CgNil4 -> 0\n\
          | CgCons4 (h, t) -> h + sum t\n\
        in sum (CgCons4 (1, CgNil4))")
-    "->tag == 0";
+    "CgList4__tag(";
   let cg5_out =
     codegen_with_decls
       "type CgList5 = CgNil5 | CgCons5 of int * CgList5;\n\
@@ -7674,7 +7674,7 @@ let () =
     (let prog = Pipeline.parse_program v2l_src in
      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
      Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
-    "__l = __l->payload.Cons.f1";
+    "__l = list_int__node(__l)->payload.Cons.f1";
   assert_contains "len-on-list: LLVM codegen emits @mere_list_int_len"
     (let prog = Pipeline.parse_program v2l_src in
      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in

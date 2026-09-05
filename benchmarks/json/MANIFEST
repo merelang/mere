@@ -66,9 +66,13 @@ claim = a different question from every other row here. This is `contrib/json`,
 # existed only to be reversed are not allocated at all. What remains is the
 # tree (69 MB, 5.9x the document) and the document itself.
 #
+# 66.8 MB at v0.1.419: every json node and cons cell lost its tag word
+# (Q-104) -- kv cells 32 -> 24 bytes, leaf nodes 16 -> 8, array cells 24 -> 16.
+# The tree is now ~54 MB for an 11.8 MB document, 4.6x.
+#
 # The floor sits well below the current value on purpose. Its job is to catch a
 # meter that stopped seeing its subject, not to argue with the next
 # improvement -- and it has already caught one legitimate halving by being too
 # close (binarytrees, v0.1.322).
-alloc_min = 67108864
-alloc_max = 167772160
+alloc_min = 50331648
+alloc_max = 100663296
