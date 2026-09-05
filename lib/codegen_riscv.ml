@@ -38,6 +38,8 @@ let t5 = 30
 let t6 = 31
 let a0 = 10
 let a1 = 11
+let a4 = 14
+let a5 = 15
 let a2 = 12
 (* a3 is the fourth argument of a call, and of a syscall: openat's mode and
    faccessat's flags. Named here so those ecalls can zero it explicitly rather
@@ -256,6 +258,36 @@ let alloc_words rd n =
   emit_word (enc_i (n * wsz ()) gp 0 gp 0x13);         (* addi gp, gp, n*w *)
   emit_oom_check ()
 
+(* --- Q-110: the RVV 1.0 subset this backend emits for u8x16 ----------------
+   VLEN = 128, LMUL = 1, SEW = e8 (e16 only to read a widening reduction), the
+   subset memu's cores implement and rvv_check.py holds against QEMU. A u8x16
+   VALUE is a pointer to a 16-byte box on the bump heap; an operation loads its
+   operands into v1 / v2, computes into v3 and boxes the result, so no vector
+   register is live across two operations and the ABI needs no vector state.
+   Every operation sets vl / vtype itself (`vsetivli x0, 16, e8`), so a
+   program's other code never has to. *)
+let enc_opv f6 vm vs2 vs1 f3 vd =
+  (f6 lsl 26) lor (vm lsl 25) lor (vs2 lsl 20) lor (vs1 lsl 15) lor (f3 lsl 12) lor (vd lsl 7) lor 0x57
+let enc_vsetivli rd uimm zimm =
+  (1 lsl 31) lor (1 lsl 30) lor ((zimm land 0x3FF) lsl 20) lor ((uimm land 0x1F) lsl 15) lor (7 lsl 12) lor (rd lsl 7) lor 0x57
+let enc_vle8 vd rs1 = (1 lsl 25) lor (rs1 lsl 15) lor (vd lsl 7) lor 0x07
+let enc_vse8 vs3 rs1 = (1 lsl 25) lor (rs1 lsl 15) lor (vs3 lsl 7) lor 0x27
+let v_setvl_e8 () = emit_word (enc_vsetivli zero 16 0)              (* vl = 16, e8, m1 *)
+let v_setvl_e16 () = emit_word (enc_vsetivli zero 8 8)              (* vl = 8, e16, m1 *)
+let v_load vd rs1 = emit_word (enc_vle8 vd rs1)
+(* box v(vs) into a fresh 16-byte block, pointer in a0 *)
+let v_box vs =
+  alloc_words a0 (16 / wsz ());
+  emit_word (enc_vse8 vs a0)
+let opiv_vv f6 vd vs2 vs1 = emit_word (enc_opv f6 1 vs2 vs1 0 vd)
+let opiv_vx f6 vd vs2 rs1 = emit_word (enc_opv f6 1 vs2 rs1 4 vd)
+let opiv_vi f6 vd vs2 imm5 = emit_word (enc_opv f6 1 vs2 (imm5 land 0x1F) 3 vd)
+let opm_vv f6 vd vs2 vs1 = emit_word (enc_opv f6 1 vs2 vs1 2 vd)
+let v_mv_x_s rd vs2 = emit_word (enc_opv 16 1 vs2 0 2 rd)          (* vmv.x.s rd, vs2 *)
+(* a0 = box a, a1 = box b -> v1, v2 loaded, vl set *)
+let v_load_pair () =
+  v_setvl_e8 (); v_load 1 a0; v_load 2 a1
+
 (* pending lambdas to lift: (label, captured var names, param, body). Filled
    by the Fun case, drained (and possibly extended) by build_items. *)
 let lambdas : (string * string list * string * Ast.expr) list ref = ref []
@@ -446,10 +478,10 @@ let rec ty_tag (t : Ast.ty) : string =
   match resolve_ty t with
   | Ast.TyInt -> "int" | Ast.TyBool -> "bool" | Ast.TyStr -> "str"
   | Ast.TyUnit -> "unit" | Ast.TyFloat -> "float" | Ast.TyBytes -> "bytes"
-  | Ast.TySimd k ->
-    (* Q-109: no vector unit on this target (the V extension is Q-110); the
-       refusal names the type rather than falling into a word-sized layout. *)
-    err Loc.dummy ("RV32I: the SIMD type " ^ Ast.pp_ty (Ast.TySimd k) ^ " is not supported yet")
+  | Ast.TySimd Ast.U8x16 -> "u8x16"   (* Q-110: a pointer to a 16-byte box; the lanes live in RVV registers only inside an operation *)
+  | Ast.TySimd Ast.F64x2 ->
+    (* no float unit here (floats are softfloat), so two-lane doubles stay refused by name *)
+    err Loc.dummy "RV32I: the SIMD type f64x2 is not supported (this target has no floating-point unit)"
   | Ast.TyTuple ts -> "t" ^ String.concat "_" (List.map ty_tag ts) ^ "_"
   | Ast.TyCon (n, []) -> n
   | Ast.TyCon (n, args) -> n ^ "_" ^ String.concat "_" (List.map ty_tag args) ^ "_"
@@ -1653,6 +1685,153 @@ and compile_app env e =
   | Ast.Var "vec_len" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)                         (* lw a0, 0(vec) — len *)
+  (* ---- Q-110: bytes on this target -- the str block layout ([len word][bytes],
+     word-padded), so bytes_of_str / str_of_bytes are the identity and
+     bytes_concat is __str_concat. *)
+  | Ast.Var ("bytes_of_str" | "str_of_bytes") when List.length args = 1 ->
+    compile_expr env (List.hd args)
+  | Ast.Var "bytes_len" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)                          (* len word *)
+  | Ast.Var ("bytes_get" | "__bytes_get_unchecked" as name) when List.length args = 2 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1);
+    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0 = bytes, a1 = i *)
+    (if name = "bytes_get" then begin
+       emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t2 0x03);                      (* len *)
+       let l = fresh_label ".bgok" in
+       emit (Branch (6, a1, t2, l));                         (* bltu i, len -> ok (negative is huge) *)
+       emit_abort "bytes_get: index out of range";
+       emit (Label l)
+     end);
+    emit_word (enc_r 0 a1 a0 0 t0 0x33);                     (* t0 = bytes + i *)
+    emit_word (enc_i (wsz ()) t0 4 a0 0x03)                  (* lbu a0, w(t0) *)
+  | Ast.Var "bytes_concat" when List.length args = 2 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1);
+    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;
+    emit (Jal (ra, "__str_concat"))
+  | Ast.Var "bytes_slice" when List.length args = 3 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1); push a0;
+    compile_expr env (List.nth args 2);
+    emit_word (enc_i 0 a0 0 a2 0x13);                        (* a2 = n *)
+    pop a1; pop a0;                                          (* a1 = i, a0 = bytes *)
+    emit (Jal (ra, "__bytes_slice"))
+  | Ast.Var "bytes_of_hex" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit (Jal (ra, "__bytes_of_hex"))
+  (* ---- Q-110: u8x16 through the RVV subset *)
+  | Ast.Var "u8x16_splat" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    v_setvl_e8 (); opiv_vx 23 3 0 a0;                        (* vmv.v.x v3, a0 *)
+    v_box 3
+  | Ast.Var "u8x16_extract" when List.length args = 2 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1);
+    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0 = box, a1 = lane *)
+    li t2 16;
+    (let l = fresh_label ".vxok" in
+     emit (Branch (6, a1, t2, l));                           (* bltu lane, 16 -> ok *)
+     emit_abort "u8x16_extract: lane out of range (lanes = 16)";
+     emit (Label l));
+    v_setvl_e8 (); v_load 1 a0;
+    opiv_vx 15 3 1 a1;                                       (* vslidedown.vx v3, v1, lane *)
+    v_mv_x_s a0 3
+  | Ast.Var "u8x16_from_bytes" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                      (* len *)
+    li t1 16;
+    (let l = fresh_label ".vfok" in
+     emit (Branch (7, t0, t1, l));                           (* bgeu len, 16 -> ok *)
+     emit_abort "u8x16_from_bytes: bytes [0, +16) out of bounds";
+     emit (Label l));
+    emit_word (enc_i (wsz ()) a0 0 t2 0x13);                 (* t2 = &bytes[0] *)
+    v_setvl_e8 (); v_load 1 t2; v_box 1
+  | Ast.Var ("u8x16_load" | "__u8x16_load_unchecked" as name) when List.length args = 2 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1);
+    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0 = bytes, a1 = i *)
+    (if name = "u8x16_load" then begin
+       emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                    (* len *)
+       emit_word (enc_i 16 a1 0 t1 0x13);                    (* t1 = i + 16 *)
+       let l = fresh_label ".vlok" in
+       emit (Branch (7, t0, t1, l));                         (* bgeu len, i+16 -> ok *)
+       emit_abort "u8x16_load: bytes [i, +16) out of bounds";
+       emit (Label l);
+       let l2 = fresh_label ".vlok2" in
+       emit (Branch (5, a1, zero, l2));                      (* bge i, 0 -> ok *)
+       emit_abort "u8x16_load: bytes [i, +16) out of bounds";
+       emit (Label l2)
+     end);
+    emit_word (enc_r 0 a1 a0 0 t2 0x33);                     (* t2 = bytes + i *)
+    emit_word (enc_i (wsz ()) t2 0 t2 0x13);                 (* t2 += w *)
+    v_setvl_e8 (); v_load 1 t2; v_box 1
+  | Ast.Var ("u8x16_and" | "u8x16_or" | "u8x16_xor" | "u8x16_sub_sat" | "u8x16_swizzle" as op)
+    when List.length args = 2 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1);
+    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0 = box a, a1 = box b *)
+    v_load_pair ();
+    (match op with
+     | "u8x16_and" -> opiv_vv 9 3 1 2
+     | "u8x16_or" -> opiv_vv 10 3 1 2
+     | "u8x16_xor" -> opiv_vv 11 3 1 2
+     | "u8x16_sub_sat" -> opiv_vv 34 3 1 2                   (* vssubu.vv *)
+     | _ -> opiv_vv 12 3 1 2);                               (* vrgather.vv v3, table = v1, idx = v2 *)
+    v_box 3
+  | Ast.Var "u8x16_eq" when List.length args = 2 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1);
+    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;
+    v_load_pair ();
+    opiv_vv 24 0 1 2;                                        (* vmseq.vv v0, v1, v2 -> mask *)
+    opiv_vi 23 4 0 0;                                        (* vmv.v.i v4, 0 *)
+    emit_word (enc_opv 23 0 4 31 3 3);                       (* vmerge.vim v3, v4, -1, v0 *)
+    v_box 3
+  | Ast.Var "u8x16_shr" when List.length args = 2 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1);
+    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0 = box, a1 = k *)
+    li t2 8;
+    (let l = fresh_label ".vsok" in
+     emit (Branch (6, a1, t2, l));                           (* bltu k, 8 -> ok *)
+     emit_abort "u8x16_shr: shift out of range 0..7";
+     emit (Label l));
+    v_setvl_e8 (); v_load 1 a0;
+    opiv_vx 40 3 1 a1;                                       (* vsrl.vx v3, v1, k *)
+    v_box 3
+  | Ast.Var "u8x16_shift_in" when List.length args = 3 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1); push a0;
+    compile_expr env (List.nth args 2);
+    emit_word (enc_i 0 a0 0 a2 0x13);                        (* a2 = k *)
+    pop a1; pop a0;                                          (* a1 = cur, a0 = prev *)
+    li t2 17;
+    (let l = fresh_label ".viok" in
+     emit (Branch (6, a2, t2, l));                           (* bltu k, 17 -> ok *)
+     emit_abort "u8x16_shift_in: shift out of range 0..16";
+     emit (Label l));
+    li t0 16;
+    emit_word (enc_r 0x20 a2 t0 0 t0 0x33);                  (* t0 = 16 - k *)
+    v_load_pair ();
+    opiv_vx 15 3 1 t0;                                       (* vslidedown.vx v3, prev, 16-k *)
+    opiv_vx 14 3 2 a2;                                       (* vslideup.vx   v3, cur, k *)
+    v_box 3
+  | Ast.Var "u8x16_any_true" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    v_setvl_e8 (); v_load 1 a0;
+    opiv_vi 23 5 0 0;                                        (* vmv.v.i v5, 0 *)
+    opm_vv 2 3 1 5;                                          (* vredor.vs v3, v1, v5 *)
+    v_mv_x_s a0 3;
+    emit_word (enc_r 0 a0 zero 3 a0 0x33)                    (* sltu a0, x0, a0  (snez) *)
+  | Ast.Var "u8x16_reduce_add" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    v_setvl_e8 (); v_load 1 a0;
+    opiv_vi 23 5 0 0;                                        (* vmv.v.i v5, 0 *)
+    opiv_vv 48 3 1 5;                                        (* vwredsumu.vs v3, v1, v5 (e16 result) *)
+    v_setvl_e16 ();
+    v_mv_x_s a0 3
   | Ast.Var "__vec_get_unchecked" when List.length args = 2 ->
     (* Q-108: the range-check versioning pass checked the loop's whole index
        range before the loop, so this twin carries no bounds check. *)
@@ -2555,6 +2734,11 @@ let emit_start () =
   emit_word (enc_s (0 * wsz ()) zero t0 (stf3 ()) 0x23);                   (* sw x0, 0(t0) *)
   (* heap top starts just above the runtime word and the globals region *)
   li gp (globals_base () + (runtime_words + Hashtbl.length globals_map) * wsz ());
+  (* Q-110: mstatus.VS = Initial. A real machine (QEMU) traps every vector
+     instruction while the extension is Off; memu keeps no such state and the
+     write is harmless there, and on a core without V the bits are WARL zero. *)
+  li t0 0x200;
+  emit_word (enc_i 0x300 t0 2 zero 0x73);               (* csrrs x0, mstatus, t0 *)
   emit (Jal (ra, "__main"));                            (* run main *)
   li a7 93;                                             (* exit syscall *)
   li a0 0;
@@ -2808,6 +2992,90 @@ let emit_str_eq () =
   emit (Jal (zero, ".se_loop"));
   emit (Label ".se_eq"); li a0 1; emit_word (enc_i 0 ra 0 zero 0x67);
   emit (Label ".se_ne"); li a0 0; emit_word (enc_i 0 ra 0 zero 0x67)
+
+(* __bytes_slice(a0=bytes, a1=i, a2=n) -> a0 = a fresh block with bytes [i, i+n).
+   Q-110. Refuses a range outside the block, as the other backends do. Leaf. *)
+let emit_bytes_slice () =
+  emit (Label "__bytes_slice");
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);       (* t0 = len *)
+  emit (Branch (4, a1, zero, ".bs_bad"));                    (* blt i, 0 -> bad *)
+  emit (Branch (4, a2, zero, ".bs_bad"));                    (* blt n, 0 -> bad *)
+  emit_word (enc_r 0 a2 a1 0 t1 0x33);                       (* t1 = i + n *)
+  emit (Branch (6, t0, t1, ".bs_bad"));                      (* bltu len, i+n -> bad *)
+  emit_word (enc_i (wsz () - 1) a2 0 t4 0x13);               (* round n up to a word *)
+  emit_word (enc_i (0 - wsz ()) t4 7 t4 0x13);
+  emit_word (enc_i (wsz ()) t4 0 t4 0x13);                   (* + the len word *)
+  emit_word (enc_i 0 gp 0 t3 0x13);                          (* t3 = result *)
+  emit_word (enc_r 0 t4 t3 0 gp 0x33);                       (* bump *)
+  emit_oom_check ();
+  emit_word (enc_s (0 * wsz ()) a2 t3 (stf3 ()) 0x23);       (* header = n *)
+  emit_word (enc_r 0 a1 a0 0 t5 0x33);                       (* t5 = bytes + i *)
+  emit_word (enc_i (wsz ()) t5 0 t5 0x13);                   (* src = &bytes[i] *)
+  emit_word (enc_i (wsz ()) t3 0 t6 0x13);                   (* dst *)
+  emit (Label ".bs_loop");
+  emit (Branch (0, a2, zero, ".bs_done"));
+  emit_word (enc_i 0 t5 0 t2 0x03);                          (* lb *)
+  emit_word (enc_s 0 t2 t6 0 0x23);                          (* sb *)
+  emit_word (enc_i 1 t5 0 t5 0x13);
+  emit_word (enc_i 1 t6 0 t6 0x13);
+  emit_word (enc_i (-1) a2 0 a2 0x13);
+  emit (Jal (zero, ".bs_loop"));
+  emit (Label ".bs_done");
+  emit_word (enc_i 0 t3 0 a0 0x13);
+  emit_word (enc_i 0 ra 0 zero 0x67);
+  emit (Label ".bs_bad");
+  emit_abort "bytes_slice: range invalid for these bytes"
+
+(* __bytes_of_hex(a0=str) -> a0 = a fresh block of len/2 bytes. Q-110. Two hex
+   digits (either case) per byte; an odd length or a non-digit is a failure. Leaf. *)
+let emit_bytes_of_hex () =
+  emit (Label "__bytes_of_hex");
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);       (* t0 = len *)
+  emit_word (enc_i 1 t0 7 t1 0x13);                          (* t1 = len & 1 *)
+  emit (Branch (1, t1, zero, ".bh_bad"));                    (* odd -> bad *)
+  emit_word (enc_i 1 t0 5 a2 0x13);                          (* a2 = n = len >> 1 *)
+  emit_word (enc_i (wsz () - 1) a2 0 t4 0x13);
+  emit_word (enc_i (0 - wsz ()) t4 7 t4 0x13);
+  emit_word (enc_i (wsz ()) t4 0 t4 0x13);
+  emit_word (enc_i 0 gp 0 t3 0x13);                          (* t3 = result *)
+  emit_word (enc_r 0 t4 t3 0 gp 0x33);
+  emit_oom_check ();
+  emit_word (enc_s (0 * wsz ()) a2 t3 (stf3 ()) 0x23);       (* header = n *)
+  emit_word (enc_i (wsz ()) a0 0 t5 0x13);                   (* src *)
+  emit_word (enc_i (wsz ()) t3 0 t6 0x13);                   (* dst *)
+  emit (Label ".bh_loop");
+  emit (Branch (0, a2, zero, ".bh_done"));
+  (* high digit *)
+  emit_word (enc_i 0 t5 4 t2 0x03);                          (* lbu t2 *)
+  emit (Jal (a5, ".bh_digit"));                              (* t2 -> value in t2, or bad; a5 is the link, ra is the caller's *)
+  emit_word (enc_i 4 t2 1 t1 0x13);                          (* t1 = hi << 4 *)
+  emit_word (enc_i 1 t5 4 t2 0x03);                          (* lbu t2, 1(src) *)
+  emit (Jal (a5, ".bh_digit"));
+  emit_word (enc_r 0 t2 t1 6 t2 0x33);                       (* t2 = t1 | lo *)
+  emit_word (enc_s 0 t2 t6 0 0x23);                          (* sb *)
+  emit_word (enc_i 2 t5 0 t5 0x13);
+  emit_word (enc_i 1 t6 0 t6 0x13);
+  emit_word (enc_i (-1) a2 0 a2 0x13);
+  emit (Jal (zero, ".bh_loop"));
+  emit (Label ".bh_done");
+  emit_word (enc_i 0 t3 0 a0 0x13);
+  emit_word (enc_i 0 ra 0 zero 0x67);
+  (* .bh_digit: t2 = ascii -> t2 = 0..15, else .bh_bad. Uses a3 as scratch. *)
+  emit (Label ".bh_digit");
+  emit_word (enc_i (-48) t2 0 a3 0x13);                      (* a3 = c - '0' *)
+  li a4 10;
+  emit (Branch (6, a3, a4, ".bh_dec"));                      (* bltu a3, 10 -> decimal *)
+  emit_word (enc_i 32 t2 6 a3 0x13);                         (* a3 = c | 0x20 (lower) *)
+  emit_word (enc_i (-87) a3 0 a3 0x13);                      (* a3 = c - 'a' + 10 *)
+  li a4 10;
+  emit (Branch (4, a3, a4, ".bh_bad"));                      (* blt a3, 10 -> bad (below 'a') *)
+  li a4 16;
+  emit (Branch (7, a3, a4, ".bh_bad"));                      (* bgeu a3, 16 -> bad *)
+  emit (Label ".bh_dec");
+  emit_word (enc_i 0 a3 0 t2 0x13);                          (* t2 = value *)
+  emit_word (enc_i 0 a5 0 zero 0x67);                        (* jalr x0, 0(a5) *)
+  emit (Label ".bh_bad");
+  emit_abort "bytes_of_hex: not a hex string"
 
 (* __str_cmp(a0=s1, a1=s2) -> a0 = <0 / 0 / >0 lexicographically. Leaf. *)
 let emit_str_cmp () =
@@ -3575,6 +3843,8 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   emit_rv_wall ();
   emit_str_eq ();
   emit_str_cmp ();
+  emit_bytes_slice ();
+  emit_bytes_of_hex ();
   emit_str_of_int ();
   emit_substring ();
   emit_strbuf ();

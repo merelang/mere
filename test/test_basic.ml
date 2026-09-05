@@ -14937,5 +14937,30 @@ let () =
     (let w = wasm "let _ = print (show (u8x16_splat 1)) in to_json 1.5" in
      if has w "(func $show_u8x16" && has w "(func $to_json_float" then "printers" else "none") "printers";
 
+  (* v0.1.426 (Q-110): u8x16 on the RISC-V backends through the RISC-V Vector
+     extension, and bytes as the str block. The lane operations compile where
+     they were refused by name; the words they emit are the RVV encodings memu
+     runs and rvv_check.py holds against QEMU. f64x2 stays refused (no float
+     unit). The interpreter-vs-memu agreement itself is scripts/rv_exec_check.sh
+     with MEMU set; what a unit test can hold is the emission. *)
+  let rv_bin src = let (prog, mt) = rv_typed src in Codegen_riscv.emit_program ~main_ty:mt prog in
+  let has_word bin w =
+    let b = Bytes.create 4 in
+    Bytes.set b 0 (Char.chr (w land 0xFF)); Bytes.set b 1 (Char.chr ((w lsr 8) land 0xFF));
+    Bytes.set b 2 (Char.chr ((w lsr 16) land 0xFF)); Bytes.set b 3 (Char.chr ((w lsr 24) land 0xFF));
+    has bin (Bytes.to_string b) in
+  rv_err_contains "v0.1.426: a u8x16 program compiles for RV32I"
+    "print_int (u8x16_extract (u8x16_splat 7) 3)" "(compiled without error)";
+  check "v0.1.426: the emission sets vl with vsetivli x0, 16, e8"
+    (if has_word (rv_bin "print_int (u8x16_extract (u8x16_splat 7) 3)") 0xC0087057 then "vsetivli" else "none") "vsetivli";
+  check "v0.1.426: u8x16_and is vand.vv v3, v1, v2"
+    (if has_word (rv_bin "print_int (u8x16_extract (u8x16_and (u8x16_splat 6) (u8x16_splat 3)) 0)") 0x261101d7 then "vand" else "none") "vand";
+  check "v0.1.426: _start turns mstatus.VS on"
+    (if has_word (rv_bin "print_int 1") 0x3002A073 then "csrrs" else "none") "csrrs";
+  rv_err_contains "v0.1.426: bytes compile for RV32I (of_hex, get, len, slice, concat)"
+    "let b = bytes_concat (bytes_of_hex \"0a0b\") (bytes_slice (bytes_of_str \"xyz\") 1 2);\nprint_int (bytes_len b * 1000 + bytes_get b 2)" "(compiled without error)";
+  rv_err_contains "v0.1.426: f64x2 is refused by name on RV32I"
+    "print_int (u8x16_extract (u8x16_splat 1) 0) ; f64x2_extract (f64x2_splat 1.0) 0" "f64x2";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
