@@ -72,6 +72,7 @@ machine rather than a host.
 | `exit` | yes | yes | yes | yes |
 | `exp` | yes | yes | yes | yes |
 | `f32_bits` | yes | yes | yes | refused |
+| `f64x2_make` | yes | yes | yes | refused |
 | `f64x2_splat` | yes | yes | yes | refused |
 | `f_abs` | yes | yes | yes | yes |
 | `f_add` | yes | yes | yes | yes |

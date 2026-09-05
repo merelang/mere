@@ -1133,7 +1133,7 @@ let rv_subst_index ~(idx : string) ~(by : expr) (ie : expr) : expr =
 
 (* One unchecked access the fast copy makes: which container, of which kind,
    at which index expression (in terms of the index parameter). *)
-type rv_access = { acc_container : string; acc_bytes : bool; acc_index : expr }
+type rv_access = { acc_container : string; acc_bytes : bool; acc_index : expr; acc_width : int }
 
 (* Rewrite the qualifying accesses on invariant containers, and every
    `Var self` into `Var self'`. Returns the rewritten expression and the
@@ -1143,7 +1143,7 @@ let rv_rewrite ~(self : string) ~(self' : string) ~(idx : string)
   let accs = ref [] in
   let note a =
     if not (List.exists (fun b -> b.acc_container = a.acc_container && b.acc_bytes = a.acc_bytes
-                                  && pp b.acc_index = pp a.acc_index) !accs)
+                                  && b.acc_width = a.acc_width && pp b.acc_index = pp a.acc_index) !accs)
     then accs := a :: !accs
   in
   let qualifies v ie = invariant v && rv_index_monotonic ~idx ~invariant ie in
@@ -1152,15 +1152,24 @@ let rv_rewrite ~(self : string) ~(self' : string) ~(idx : string)
     | Var n when n = self -> { e with node = Var self' }
     | App ({ node = App ({ node = Var "vec_get"; loc = l1; ty = t1 }, ({ node = Var v; _ } as ve)); loc = l2; ty = t2 }, ie)
       when qualifies v ie ->
-      note { acc_container = v; acc_bytes = false; acc_index = ie };
+      note { acc_container = v; acc_bytes = false; acc_index = ie; acc_width = 1 };
       { e with node = App ({ node = App ({ node = Var "__vec_get_unchecked"; loc = l1; ty = t1 }, ve); loc = l2; ty = t2 }, ie) }
     | App ({ node = App ({ node = App ({ node = Var "vec_set"; loc = l1; ty = t1 }, ({ node = Var v; _ } as ve)); loc = l2; ty = t2 }, ie); loc = l3; ty = t3 }, x)
       when qualifies v ie ->
-      note { acc_container = v; acc_bytes = false; acc_index = ie };
+      note { acc_container = v; acc_bytes = false; acc_index = ie; acc_width = 1 };
       { e with node = App ({ node = App ({ node = App ({ node = Var "__vec_set_unchecked"; loc = l1; ty = t1 }, ve); loc = l2; ty = t2 }, ie); loc = l3; ty = t3 }, go x) }
+    (* Q-109 (2b): a two-lane load / store covers [ie, ie + 2) *)
+    | App ({ node = App ({ node = Var "f64x2_load"; loc = l1; ty = t1 }, ({ node = Var v; _ } as ve)); loc = l2; ty = t2 }, ie)
+      when qualifies v ie ->
+      note { acc_container = v; acc_bytes = false; acc_index = ie; acc_width = 2 };
+      { e with node = App ({ node = App ({ node = Var "__f64x2_load_unchecked"; loc = l1; ty = t1 }, ve); loc = l2; ty = t2 }, ie) }
+    | App ({ node = App ({ node = App ({ node = Var "f64x2_store"; loc = l1; ty = t1 }, ({ node = Var v; _ } as ve)); loc = l2; ty = t2 }, ie); loc = l3; ty = t3 }, x)
+      when qualifies v ie ->
+      note { acc_container = v; acc_bytes = false; acc_index = ie; acc_width = 2 };
+      { e with node = App ({ node = App ({ node = App ({ node = Var "__f64x2_store_unchecked"; loc = l1; ty = t1 }, ve); loc = l2; ty = t2 }, ie); loc = l3; ty = t3 }, go x) }
     | App ({ node = App ({ node = Var "bytes_get"; loc = l1; ty = t1 }, ({ node = Var b; _ } as be)); loc = l2; ty = t2 }, ie)
       when qualifies b ie ->
-      note { acc_container = b; acc_bytes = true; acc_index = ie };
+      note { acc_container = b; acc_bytes = true; acc_index = ie; acc_width = 1 };
       { e with node = App ({ node = App ({ node = Var "__bytes_get_unchecked"; loc = l1; ty = t1 }, be); loc = l2; ty = t2 }, ie) }
     | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit | Var _ -> e
     | Neg a -> { e with node = Neg (go a) }
@@ -1191,16 +1200,23 @@ let rv_rewrite ~(self : string) ~(self' : string) ~(idx : string)
 
 (* All self calls in `step` are saturated (arity k), in tail position, and pass
    `idx + 1` at position `ipos`. Returns false if any self call sits elsewhere. *)
-let rv_step_ok ~(self : string) ~(idx : string) ~(ipos : int) ~(arity : int) (step : expr) : bool =
+let rv_step_ok ~(self : string) ~(idx : string) ~(ipos : int) ~(arity : int) (step : expr) : int option =
   let rec count (e : expr) : int =
     (match e.node with Var n when n = self -> 1 | _ -> 0)
     + List.fold_left (fun acc c -> acc + count c) 0 (children e)
   in
+  (* the index advances by the same positive literal in every self call *)
+  let stride = ref 0 in
   let is_incr (a : expr) =
-    match a.node with
-    | Bin (Add, { node = Var i; _ }, { node = Int_lit 1; _ })
-    | Bin (Add, { node = Int_lit 1; _ }, { node = Var i; _ }) -> i = idx
-    | _ -> false
+    let c =
+      match a.node with
+      | Bin (Add, { node = Var i; _ }, { node = Int_lit c; _ })
+      | Bin (Add, { node = Int_lit c; _ }, { node = Var i; _ }) when i = idx && c >= 1 -> c
+      | _ -> 0
+    in
+    if c = 0 then false
+    else if !stride = 0 then (stride := c; true)
+    else !stride = c
   in
   (* number of self calls found in tail position that are well-formed *)
   let rec tail (e : expr) : int option =
@@ -1230,8 +1246,8 @@ let rv_step_ok ~(self : string) ~(idx : string) ~(ipos : int) ~(arity : int) (st
     | _ -> if count e = 0 then Some 0 else None
   in
   match tail step with
-  | Some n -> n = count step && n >= 1
-  | None -> false
+  | Some n when n = count step && n >= 1 -> Some !stride
+  | _ -> None
 
 (* A versioned loop: the fast copy, and how to dispatch to it at a call site. *)
 type rv_plan = {
@@ -1285,18 +1301,20 @@ let rv_plan_binding ~(loop_safe : string list) ~(unsafe_builtins : string list)
         | _, Var i when List.mem i pnames && bound_ok l -> Some (i, l)
         | _ -> None
       in
+      (* the fourth component: is the exit an EQUALITY test? With a stride above
+         one such a loop only stops if it lands exactly on the bound *)
       match cond.node with
-      | Cmp (Eq, l, r) -> Option.map (fun (i, n) -> (i, n, true)) (sides l r)
-      | Cmp (Ne, l, r) -> Option.map (fun (i, n) -> (i, n, false)) (sides l r)
+      | Cmp (Eq, l, r) -> Option.map (fun (i, n) -> (i, n, true, true)) (sides l r)
+      | Cmp (Ne, l, r) -> Option.map (fun (i, n) -> (i, n, false, true)) (sides l r)
       | Cmp (Ge, ({ node = Var _; _ } as l), r) | Cmp (Le, r, ({ node = Var _; _ } as l)) ->
-        Option.map (fun (i, n) -> (i, n, true)) (sides l r)
+        Option.map (fun (i, n) -> (i, n, true, false)) (sides l r)
       | Cmp (Lt, ({ node = Var _; _ } as l), r) | Cmp (Gt, r, ({ node = Var _; _ } as l)) ->
-        Option.map (fun (i, n) -> (i, n, false)) (sides l r)
+        Option.map (fun (i, n) -> (i, n, false, false)) (sides l r)
       | _ -> None
     in
     (match pick with
      | None -> None
-     | Some (idx, bound, exit_when_true) ->
+     | Some (idx, bound, exit_when_true, eq_exit) ->
        let base, step = if exit_when_true then (a, b) else (b, a) in
        let ipos = let rec find k = function [] -> -1 | p :: ps -> if p = idx then k else find (k + 1) ps in find 0 pnames in
        let arity = List.length params in
@@ -1317,8 +1335,10 @@ let rv_plan_binding ~(loop_safe : string list) ~(unsafe_builtins : string list)
        if not (self_free base && self_free cond) then None
        else if rv_has_fun_below body then None
        else if not (rv_body_safe ~ok_head body) then None
-       else if not (rv_step_ok ~self:name ~idx ~ipos ~arity step) then None
-       else begin
+       else
+       match rv_step_ok ~self:name ~idx ~ipos ~arity step with
+       | None -> None
+       | Some stride -> begin
          let fast = name ^ "__rvfast" in
          let fast_body, accs = rv_rewrite ~self:name ~self':fast ~idx ~invariant body in
          if accs = [] then None
@@ -1334,13 +1354,16 @@ let rv_plan_binding ~(loop_safe : string list) ~(unsafe_builtins : string list)
            let guard (iarg : expr) =
              let conj x y = mk (Logic (And, x, y)) in
              let len_of a = mk (App (var (if a.acc_bytes then "bytes_len" else "vec_len"), var a.acc_container)) in
-             (* the plain index: the range [i0, N-1] is inside [0, len) iff N <= len
+             (* an access of width w at e: [e, e + w) must lie in [0, len).
+                the plain index: every visited i is <= N-1, so N - 1 + w <= len
                 (i0 >= 0 is checked once, below) *)
-             let simple a = mk (Cmp (Le, rv_clone bound, len_of a)) in
-             (* a monotonic index: both endpoints in [0, len) *)
+             let plus_w e w = if w = 1 then e else mk (Bin (Add, e, mk (Int_lit (w - 1)))) in
+             let simple a = mk (Cmp (Le, plus_w (rv_clone bound) a.acc_width, len_of a)) in
+             (* a monotonic index: both endpoints, each with its width *)
              let endpoint a at =
                let v = rv_subst_index ~idx ~by:at a.acc_index in
-               conj (mk (Cmp (Ge, v, mk (Int_lit 0)))) (mk (Cmp (Lt, rv_subst_index ~idx ~by:at a.acc_index, len_of a)))
+               let v_end = mk (Bin (Add, rv_subst_index ~idx ~by:at a.acc_index, mk (Int_lit a.acc_width))) in
+               conj (mk (Cmp (Ge, v, mk (Int_lit 0)))) (mk (Cmp (Le, v_end, len_of a)))
              in
              let last = mk (Bin (Sub, rv_clone bound, mk (Int_lit 1))) in
              let per_access a =
@@ -1348,9 +1371,17 @@ let rv_plan_binding ~(loop_safe : string list) ~(unsafe_builtins : string list)
                | Var v when v = idx -> simple a
                | _ -> conj (endpoint a iarg) (endpoint a last)
              in
+             (* a stride above one with an equality exit: the loop stops only if it
+                lands on the bound exactly; otherwise the ORIGINAL runs past it and
+                fails on the first access beyond, so the fast copy may not run *)
+             let landing =
+               if stride > 1 && eq_exit then
+                 [ mk (Cmp (Eq, mk (Bin (Mod, mk (Bin (Sub, rv_clone bound, rv_clone iarg)), mk (Int_lit stride))), mk (Int_lit 0))) ]
+               else []
+             in
              List.fold_left conj
                (conj (mk (Cmp (Ge, rv_clone iarg, mk (Int_lit 0)))) (mk (Cmp (Le, rv_clone iarg, rv_clone bound))))
-               (List.map per_access accs)
+               (landing @ List.map per_access accs)
            in
            if !range_version_log then prerr_endline ("range-version: " ^ name);
            range_versioned := name :: !range_versioned;
@@ -1400,7 +1431,7 @@ let range_version_program ~(unsafe_builtins : string list) (prog : program) : pr
         | Top_let_rec bs -> List.map fst bs
         | _ -> []) prog.decls)
     in
-    let relied = [ "vec_get"; "vec_set"; "bytes_get"; "vec_len"; "bytes_len" ] in
+    let relied = [ "vec_get"; "vec_set"; "bytes_get"; "vec_len"; "bytes_len"; "f64x2_load"; "f64x2_store" ] in
     let all_bound =
       !user_bound
       @ List.concat_map rv_bound_names (List.concat_map decl_exprs prog.decls @ [ prog.main ]) in

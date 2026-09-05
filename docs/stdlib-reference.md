@@ -904,6 +904,11 @@ satisfy it and hide the very row it was describing.
 | `f64x2_extract` | `f64x2 -> int -> float` | lane 0 or 1; another index fails like an out-of-range `vec_get` |
 | `u8x16_splat` | `int -> u8x16` | the low 8 bits in every lane |
 | `u8x16_extract` | `u8x16 -> int -> int` | lane 0..15, as 0-255 |
+| `f64x2_make` | `float -> float -> f64x2` | lane 0, lane 1 |
+| `f64x2_add` / `f64x2_sub` / `f64x2_mul` / `f64x2_div` | `f64x2 -> f64x2 -> f64x2` | lane-wise |
+| `f64x2_reduce_add` | `f64x2 -> float` | lane 0 + lane 1, in that order |
+| `f64x2_load` | `Vec[R, float] -> int -> f64x2` | lanes `[i, i+2)` of the Vec; past the end fails like `vec_get` |
+| `f64x2_store` | `Vec[R, float] -> int -> f64x2 -> unit` | the two lanes into `[i, i+2)` |
 
 **`Vec` — the rest of the family** (`vec_new` / `push` / `get` / `set` / `len` / `iter` / `map` / `filter` / `fold` / `sort` / `to_list` / `to_owned` are covered in language-reference and the tutorial):
 
