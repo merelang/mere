@@ -284,9 +284,6 @@ let opiv_vx f6 vd vs2 rs1 = emit_word (enc_opv f6 1 vs2 rs1 4 vd)
 let opiv_vi f6 vd vs2 imm5 = emit_word (enc_opv f6 1 vs2 (imm5 land 0x1F) 3 vd)
 let opm_vv f6 vd vs2 vs1 = emit_word (enc_opv f6 1 vs2 vs1 2 vd)
 let v_mv_x_s rd vs2 = emit_word (enc_opv 16 1 vs2 0 2 rd)          (* vmv.x.s rd, vs2 *)
-(* a0 = box a, a1 = box b -> v1, v2 loaded, vl set *)
-let v_load_pair () =
-  v_setvl_e8 (); v_load 1 a0; v_load 2 a1
 
 (* pending lambdas to lift: (label, captured var names, param, body). Filled
    by the Fun case, drained (and possibly extended) by build_items. *)
@@ -1032,6 +1029,202 @@ let check_map_key loc (key : Ast.expr) =
           keys are correct here (a tuple or constructor key would be compared by \
           reading its first word as a length)" (Formatter.fmt_ty other)))
 
+(* --- SIMD register residency (Q-112) -------------------------------------
+   A u8x16 expression tree is evaluated in v1..v7 and boxed once, at its root,
+   instead of once per builtin. Operands that are not vector builtins -- boxed
+   variables, calls, scalar arguments -- are evaluated first, in source order,
+   and pushed, so no call runs while a vector value is live in a register (a
+   callee's own vector code would clobber it). A let-bound u8x16 used only as
+   an operand of vector builtins lives in v8..v15 when no call can run between
+   its binding and its last use; env records it as the negative slot -r. *)
+type vnode =
+  | V_leaf of Ast.expr             (* compiled by compile_expr, pushed *)
+  | V_reg of int                   (* let-bound u8x16 resident in v8..v15 *)
+  | V_op of string * vnode list    (* vector builtin, operands in source order *)
+
+let rv_simd_result_ops =
+  [ ("u8x16_splat", 1); ("u8x16_from_bytes", 1); ("u8x16_load", 2); ("__u8x16_load_unchecked", 2);
+    ("u8x16_and", 2); ("u8x16_or", 2); ("u8x16_xor", 2); ("u8x16_sub_sat", 2); ("u8x16_eq", 2);
+    ("u8x16_swizzle", 2); ("u8x16_shr", 2); ("u8x16_shift_in", 3) ]
+let rv_simd_scalar_ops = [ ("u8x16_extract", 2); ("u8x16_any_true", 1); ("u8x16_reduce_add", 1) ]
+
+(* a name that still means the builtin here (no user binding shadows it) *)
+let rv_is_builtin_head (env : env) n =
+  not (List.mem_assoc n env || Hashtbl.mem globals_map n || is_top n)
+
+(* the builtin names the typer knows; a head outside this list is user code,
+   whether or not this scope has bound it yet (an inner `let h = fn ...` is
+   bound after the analysis runs) *)
+let rv_builtin_names = List.map fst Typer.initial_env
+
+(* builtins that call back into user code (vec_map, list_fold, ...) *)
+let rv_higher_order =
+  let rec has_fn_param (t : Ast.ty) =
+    match Ast.walk t with
+    | Ast.TyArrow (p, r) -> (match Ast.walk p with Ast.TyArrow _ -> true | _ -> false) || has_fn_param r
+    | _ -> false in
+  let names = List.filter_map (fun (n, (sch : Typer.scheme)) ->
+      if has_fn_param sch.Typer.body then Some n else None) Typer.initial_env in
+  fun n -> List.mem n names
+
+(* registers an op needs from its destination upwards: two vector operands
+   take the destination and the one above it *)
+let vneed op =
+  match op with
+  | "u8x16_and" | "u8x16_or" | "u8x16_xor" | "u8x16_sub_sat" | "u8x16_swizzle" | "u8x16_eq"
+  | "u8x16_shift_in" -> 2
+  | _ -> 1
+
+(* budget = vector registers free from the destination upwards; a plan with
+   budget b at destination vd touches vd..vd+b-1 only. An operand that does
+   not fit, or is not a vector builtin, is a leaf (boxed) *)
+let rec vplan (env : env) (budget : int) (a : Ast.expr) : vnode =
+  match a.Ast.node with
+  | Ast.Var n when (match List.assoc_opt n env with Some i -> i < 0 | None -> false) ->
+    V_reg (- (List.assoc n env))
+  | Ast.App _ when budget >= 1 ->
+    let (h, args) = flatten_app a in
+    (match h.Ast.node with
+     | Ast.Var op when rv_is_builtin_head env op
+                      && List.assoc_opt op rv_simd_result_ops = Some (List.length args)
+                      && budget >= vneed op ->
+       vplan_op env budget op args
+     | _ -> V_leaf a)
+  | _ -> V_leaf a
+and vplan_op env budget op args =
+  match op, args with
+  | ("u8x16_and" | "u8x16_or" | "u8x16_xor" | "u8x16_sub_sat" | "u8x16_swizzle" | "u8x16_eq"), [x; y] ->
+    V_op (op, [vplan env budget x; vplan env (budget - 1) y])
+  | "u8x16_shift_in", [p; c; k] -> V_op (op, [vplan env budget p; vplan env (budget - 1) c; V_leaf k])
+  | "u8x16_shr", [x; k] -> V_op (op, [vplan env budget x; V_leaf k])
+  | _ -> V_op (op, List.map (fun x -> V_leaf x) args)
+
+let rec vleaves = function
+  | V_leaf e -> [e]
+  | V_reg _ -> []
+  | V_op (_, ns) -> List.concat_map vleaves ns
+
+(* May a call run while `name`, a vector-register local, is still to be read?
+   Each subtree yields (uses, calls, bad) in evaluation order; bad means some
+   path has a call before a later use. Sequencing: a call in the first part
+   makes a use in the second part bad; branches are alternatives; a loop body
+   is sequenced with itself. *)
+let rv_live_across_call (env : env) (name : string) (body : Ast.expr) : bool =
+  let is_call (e : Ast.expr) =
+    match e.Ast.node with
+    | Ast.App _ ->
+      let (h, args) = flatten_app e in
+      (match h.Ast.node with
+       | Ast.Var n ->
+         not (List.mem n rv_builtin_names) || not (rv_is_builtin_head env n) || rv_higher_order n
+         || List.exists (fun (x : Ast.expr) ->
+                match x.Ast.ty with
+                | Some t -> (match Ast.walk t with Ast.TyArrow _ -> true | _ -> false)
+                | None -> false) args
+       | _ -> true)
+    | _ -> false in
+  let seq (u1, c1, b1) (u2, c2, b2) = (u1 || u2, c1 || c2, b1 || b2 || (c1 && u2)) in
+  let alt (u1, c1, b1) (u2, c2, b2) = (u1 || u2, c1 || c2, b1 || b2) in
+  let none = (false, false, false) in
+  let call = (false, true, false) in
+  let rec walk (e : Ast.expr) =
+    match e.Ast.node with
+    | Ast.Var n when n = name -> (true, false, false)
+    | Ast.Fun _ -> none                       (* not run here; a capture was excluded upstream *)
+    | Ast.If (c, t, f) -> seq (walk c) (alt (walk t) (walk f))
+    | Ast.Match (s, arms) ->
+      seq (walk s)
+        (List.fold_left (fun acc (_, g, b) ->
+             alt acc (seq (match g with Some gg -> walk gg | None -> none) (walk b))) none arms)
+    | Ast.Region_loop (_, _, b) -> let r = walk b in seq r r
+    | Ast.Let_rec (bs, b) ->
+      let defs = List.fold_left (fun acc (_, v) ->
+          seq acc (match v.Ast.node with Ast.Fun _ -> none | _ -> call)) none bs in
+      seq defs (walk b)
+    | Ast.App _ ->
+      let (h, args) = flatten_app e in
+      let r = List.fold_left (fun acc a -> seq acc (walk a)) (walk h) args in
+      if is_call e then seq r call else r
+    | _ -> List.fold_left (fun acc c -> seq acc (walk c)) none (Ast.children e)
+  in
+  let (_, _, bad) = walk body in bad
+
+let vrelease n = if n > 0 then emit_word (enc_i (n * wsz ()) sp 0 sp 0x13)    (* addi sp, sp, n*w *)
+
+(* phase 2: the leaves are on the stack (leaf k at n-1-k words from sp); the
+   destination and the registers above it are free; nothing here calls *)
+let vgen (n : int) (node : vnode) (vd0 : int) : unit =
+  let k = ref 0 in
+  let leaf_load rd = base_load sp rd ((n - 1 - !k) * wsz ()); incr k in
+  let check_lt rs bound msg =
+    li t2 bound;
+    let l = fresh_label ".vok" in
+    emit (Branch (6, rs, t2, l));                                        (* bltu rs, bound -> ok *)
+    emit_abort msg;
+    emit (Label l) in
+  let rec gen node vd =
+    match node with
+    | V_reg r -> emit_word (enc_opv 23 1 0 r 0 vd)                        (* vmv.v.v vd, vr *)
+    | V_leaf _ -> leaf_load t2; v_load vd t2                               (* a box pointer *)
+    | V_op ("u8x16_splat", [_]) -> leaf_load a0; opiv_vx 23 vd 0 a0        (* vmv.v.x vd, a0 *)
+    | V_op ("u8x16_from_bytes", [_]) ->
+      leaf_load a0;
+      emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                  (* len *)
+      li t1 16;
+      (let l = fresh_label ".vfok" in
+       emit (Branch (7, t0, t1, l));                                        (* bgeu len, 16 -> ok *)
+       emit_abort "u8x16_from_bytes: bytes [0, +16) out of bounds";
+       emit (Label l));
+      emit_word (enc_i (wsz ()) a0 0 t2 0x13);                             (* t2 = &bytes[0] *)
+      v_load vd t2
+    | V_op (("u8x16_load" | "__u8x16_load_unchecked") as name, [_; _]) ->
+      leaf_load a0; leaf_load a1;                                          (* a0 = bytes, a1 = i *)
+      (if name = "u8x16_load" then begin
+         emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                (* len *)
+         emit_word (enc_i 16 a1 0 t1 0x13);                                (* t1 = i + 16 *)
+         let l = fresh_label ".vlok" in
+         emit (Branch (7, t0, t1, l));                                      (* bgeu len, i+16 -> ok *)
+         emit_abort "u8x16_load: bytes [i, +16) out of bounds";
+         emit (Label l);
+         let l2 = fresh_label ".vlok2" in
+         emit (Branch (5, a1, zero, l2));                                   (* bge i, 0 -> ok *)
+         emit_abort "u8x16_load: bytes [i, +16) out of bounds";
+         emit (Label l2)
+       end);
+      emit_word (enc_r 0 a1 a0 0 t2 0x33);                                 (* t2 = bytes + i *)
+      emit_word (enc_i (wsz ()) t2 0 t2 0x13);                             (* t2 += w *)
+      v_load vd t2
+    | V_op (("u8x16_and" | "u8x16_or" | "u8x16_xor" | "u8x16_sub_sat") as op, [x; y]) ->
+      gen x vd; gen y (vd + 1);
+      let f6 = match op with "u8x16_and" -> 9 | "u8x16_or" -> 10 | "u8x16_xor" -> 11 | _ -> 34 in
+      opiv_vv f6 vd vd (vd + 1)                                            (* vssubu.vv for sub_sat *)
+    | V_op ("u8x16_swizzle", [x; y]) ->
+      gen x vd; gen y (vd + 1);
+      (* vrgather's destination may overlap neither source: go through v0 *)
+      opiv_vv 12 0 vd (vd + 1);                                            (* vrgather.vv v0, table, idx *)
+      emit_word (enc_opv 23 1 0 0 0 vd)                                    (* vmv.v.v vd, v0 *)
+    | V_op ("u8x16_eq", [x; y]) ->
+      gen x vd; gen y (vd + 1);
+      opiv_vv 24 0 vd (vd + 1);                                            (* vmseq.vv v0, x, y -> mask *)
+      opiv_vi 23 vd 0 0;                                                   (* vmv.v.i vd, 0 *)
+      emit_word (enc_opv 23 0 vd 31 3 vd)                                  (* vmerge.vim vd, vd, -1, v0 *)
+    | V_op ("u8x16_shr", [x; _]) ->
+      gen x vd; leaf_load a1;
+      check_lt a1 8 "u8x16_shr: shift out of range 0..7";
+      opiv_vx 40 vd vd a1                                                  (* vsrl.vx vd, vd, k *)
+    | V_op ("u8x16_shift_in", [p; c; _]) ->
+      gen p vd; gen c (vd + 1); leaf_load a2;
+      check_lt a2 17 "u8x16_shift_in: shift out of range 0..16";
+      li t0 16;
+      emit_word (enc_r 0x20 a2 t0 0 t0 0x33);                              (* t0 = 16 - k *)
+      opiv_vx 15 0 vd t0;                                                  (* vslidedown.vx v0, prev, 16-k *)
+      opiv_vx 14 0 (vd + 1) a2;                                            (* vslideup.vx   v0, cur, k *)
+      emit_word (enc_opv 23 1 0 0 0 vd)                                    (* vmv.v.v vd, v0 *)
+    | V_op (op, _) -> failwith ("riscv: malformed vector plan for " ^ op)
+  in
+  v_setvl_e8 ();
+  gen node vd0
+
 let rec compile_expr (env : env) (e : Ast.expr) : unit =
   (* every subexpression starts out non-tail; the cases below whose value is
      this expression's value put `saved_tail` back before recursing *)
@@ -1131,6 +1324,20 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     tail_pos := saved_tail;
     compile_expr env e2;
     emit (Label l_end)
+  | Ast.Let ({ pnode = Ast.P_var name; _ }, rhs, body)
+    when (match rhs.Ast.ty with
+          | Some t -> (match Ast.walk t with Ast.TySimd Ast.U8x16 -> true | _ -> false)
+          | None -> false)
+      && List.length (List.filter (fun (_, i) -> i < 0) env) < 8
+      && Ast.simd_operand_only name body
+      && not (rv_live_across_call env name body) ->
+    (* Q-112: the value lives in a vector register for the whole body *)
+    let r = 8 + List.length (List.filter (fun (_, i) -> i < 0) env) in
+    let n = compile_simd_tree env (vplan env 7 rhs) in
+    vrelease n;
+    emit_word (enc_opv 23 1 0 1 0 r);                                (* vmv.v.v vr, v1 *)
+    tail_pos := saved_tail;
+    compile_expr ((name, - r) :: env) body
   | Ast.Let ({ pnode = Ast.P_var name; _ }, rhs, body) ->
     compile_expr env rhs;
     let idx = !slot_ctr in incr slot_ctr;
@@ -1465,6 +1672,50 @@ and compile_logic env op l r =
      emit (Label l_true); li a0 1;
      emit (Label l_end))
 
+(* phase 1 then phase 2 for a vector plan: the result is in v1; returns the
+   number of words pushed, to be released with vrelease *)
+and compile_simd_tree env (node : vnode) : int =
+  let leaves = vleaves node in
+  List.iter (fun l -> compile_expr env l; push a0) leaves;
+  let n = List.length leaves in
+  vgen n node 1;
+  n
+and compile_simd_root env op args =
+  if List.mem_assoc op rv_simd_result_ops then begin
+    let n = compile_simd_tree env (vplan_op env 7 op args) in
+    vrelease n; v_box 1
+  end else
+    match op, args with
+    | "u8x16_extract", [v; lane] ->
+      let node = vplan env 7 v in
+      let leaves = vleaves node @ [lane] in
+      List.iter (fun l -> compile_expr env l; push a0) leaves;
+      let n = List.length leaves in
+      vgen n node 1;                                                     (* the lane is the last push *)
+      base_load sp a1 0;
+      li t2 16;
+      (let l = fresh_label ".vxok" in
+       emit (Branch (6, a1, t2, l));                                     (* bltu lane, 16 -> ok *)
+       emit_abort "u8x16_extract: lane out of range (lanes = 16)";
+       emit (Label l));
+      opiv_vx 15 2 1 a1;                                                 (* vslidedown.vx v2, v1, lane *)
+      v_mv_x_s a0 2;
+      vrelease n
+    | "u8x16_any_true", [v] ->
+      let n = compile_simd_tree env (vplan env 7 v) in
+      opiv_vi 23 2 0 0;                                                  (* vmv.v.i v2, 0 *)
+      opm_vv 2 2 1 2;                                                    (* vredor.vs v2, v1, v2 *)
+      v_mv_x_s a0 2;
+      emit_word (enc_r 0 a0 zero 3 a0 0x33);                             (* sltu a0, x0, a0  (snez) *)
+      vrelease n
+    | "u8x16_reduce_add", [v] ->
+      let n = compile_simd_tree env (vplan env 7 v) in
+      opiv_vi 23 2 0 0;                                                  (* vmv.v.i v2, 0 *)
+      opiv_vv 48 2 1 2;                                                  (* vwredsumu.vs v2, v1, v2 (e16 result) *)
+      v_setvl_e16 ();
+      v_mv_x_s a0 2;
+      vrelease n
+    | _ -> failwith ("riscv: malformed vector root " ^ op)
 and compile_app env e =
   let tail_here = !tail_pos in
   tail_pos := false;
@@ -1725,116 +1976,10 @@ and compile_app env e =
     compile_expr env (List.hd args);
     emit (Jal (ra, "__hex_of_bytes"))
   (* ---- Q-110: u8x16 through the RVV subset *)
-  | Ast.Var "u8x16_splat" when List.length args = 1 ->
-    compile_expr env (List.hd args);
-    v_setvl_e8 (); opiv_vx 23 3 0 a0;                        (* vmv.v.x v3, a0 *)
-    v_box 3
-  | Ast.Var "u8x16_extract" when List.length args = 2 ->
-    compile_expr env (List.nth args 0); push a0;
-    compile_expr env (List.nth args 1);
-    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0 = box, a1 = lane *)
-    li t2 16;
-    (let l = fresh_label ".vxok" in
-     emit (Branch (6, a1, t2, l));                           (* bltu lane, 16 -> ok *)
-     emit_abort "u8x16_extract: lane out of range (lanes = 16)";
-     emit (Label l));
-    v_setvl_e8 (); v_load 1 a0;
-    opiv_vx 15 3 1 a1;                                       (* vslidedown.vx v3, v1, lane *)
-    v_mv_x_s a0 3
-  | Ast.Var "u8x16_from_bytes" when List.length args = 1 ->
-    compile_expr env (List.hd args);
-    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                      (* len *)
-    li t1 16;
-    (let l = fresh_label ".vfok" in
-     emit (Branch (7, t0, t1, l));                           (* bgeu len, 16 -> ok *)
-     emit_abort "u8x16_from_bytes: bytes [0, +16) out of bounds";
-     emit (Label l));
-    emit_word (enc_i (wsz ()) a0 0 t2 0x13);                 (* t2 = &bytes[0] *)
-    v_setvl_e8 (); v_load 1 t2; v_box 1
-  | Ast.Var ("u8x16_load" | "__u8x16_load_unchecked" as name) when List.length args = 2 ->
-    compile_expr env (List.nth args 0); push a0;
-    compile_expr env (List.nth args 1);
-    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0 = bytes, a1 = i *)
-    (if name = "u8x16_load" then begin
-       emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                    (* len *)
-       emit_word (enc_i 16 a1 0 t1 0x13);                    (* t1 = i + 16 *)
-       let l = fresh_label ".vlok" in
-       emit (Branch (7, t0, t1, l));                         (* bgeu len, i+16 -> ok *)
-       emit_abort "u8x16_load: bytes [i, +16) out of bounds";
-       emit (Label l);
-       let l2 = fresh_label ".vlok2" in
-       emit (Branch (5, a1, zero, l2));                      (* bge i, 0 -> ok *)
-       emit_abort "u8x16_load: bytes [i, +16) out of bounds";
-       emit (Label l2)
-     end);
-    emit_word (enc_r 0 a1 a0 0 t2 0x33);                     (* t2 = bytes + i *)
-    emit_word (enc_i (wsz ()) t2 0 t2 0x13);                 (* t2 += w *)
-    v_setvl_e8 (); v_load 1 t2; v_box 1
-  | Ast.Var ("u8x16_and" | "u8x16_or" | "u8x16_xor" | "u8x16_sub_sat" | "u8x16_swizzle" as op)
-    when List.length args = 2 ->
-    compile_expr env (List.nth args 0); push a0;
-    compile_expr env (List.nth args 1);
-    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0 = box a, a1 = box b *)
-    v_load_pair ();
-    (match op with
-     | "u8x16_and" -> opiv_vv 9 3 1 2
-     | "u8x16_or" -> opiv_vv 10 3 1 2
-     | "u8x16_xor" -> opiv_vv 11 3 1 2
-     | "u8x16_sub_sat" -> opiv_vv 34 3 1 2                   (* vssubu.vv *)
-     | _ -> opiv_vv 12 3 1 2);                               (* vrgather.vv v3, table = v1, idx = v2 *)
-    v_box 3
-  | Ast.Var "u8x16_eq" when List.length args = 2 ->
-    compile_expr env (List.nth args 0); push a0;
-    compile_expr env (List.nth args 1);
-    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;
-    v_load_pair ();
-    opiv_vv 24 0 1 2;                                        (* vmseq.vv v0, v1, v2 -> mask *)
-    opiv_vi 23 4 0 0;                                        (* vmv.v.i v4, 0 *)
-    emit_word (enc_opv 23 0 4 31 3 3);                       (* vmerge.vim v3, v4, -1, v0 *)
-    v_box 3
-  | Ast.Var "u8x16_shr" when List.length args = 2 ->
-    compile_expr env (List.nth args 0); push a0;
-    compile_expr env (List.nth args 1);
-    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0 = box, a1 = k *)
-    li t2 8;
-    (let l = fresh_label ".vsok" in
-     emit (Branch (6, a1, t2, l));                           (* bltu k, 8 -> ok *)
-     emit_abort "u8x16_shr: shift out of range 0..7";
-     emit (Label l));
-    v_setvl_e8 (); v_load 1 a0;
-    opiv_vx 40 3 1 a1;                                       (* vsrl.vx v3, v1, k *)
-    v_box 3
-  | Ast.Var "u8x16_shift_in" when List.length args = 3 ->
-    compile_expr env (List.nth args 0); push a0;
-    compile_expr env (List.nth args 1); push a0;
-    compile_expr env (List.nth args 2);
-    emit_word (enc_i 0 a0 0 a2 0x13);                        (* a2 = k *)
-    pop a1; pop a0;                                          (* a1 = cur, a0 = prev *)
-    li t2 17;
-    (let l = fresh_label ".viok" in
-     emit (Branch (6, a2, t2, l));                           (* bltu k, 17 -> ok *)
-     emit_abort "u8x16_shift_in: shift out of range 0..16";
-     emit (Label l));
-    li t0 16;
-    emit_word (enc_r 0x20 a2 t0 0 t0 0x33);                  (* t0 = 16 - k *)
-    v_load_pair ();
-    opiv_vx 15 3 1 t0;                                       (* vslidedown.vx v3, prev, 16-k *)
-    opiv_vx 14 3 2 a2;                                       (* vslideup.vx   v3, cur, k *)
-    v_box 3
-  | Ast.Var "u8x16_any_true" when List.length args = 1 ->
-    compile_expr env (List.hd args);
-    v_setvl_e8 (); v_load 1 a0;
-    opiv_vi 23 5 0 0;                                        (* vmv.v.i v5, 0 *)
-    opm_vv 2 3 1 5;                                          (* vredor.vs v3, v1, v5 *)
-    v_mv_x_s a0 3;
-    emit_word (enc_r 0 a0 zero 3 a0 0x33)                    (* sltu a0, x0, a0  (snez) *)
-  | Ast.Var "u8x16_reduce_add" when List.length args = 1 ->
-    compile_expr env (List.hd args);
-    v_setvl_e8 (); v_load 1 a0;
-    opiv_vi 23 5 0 0;                                        (* vmv.v.i v5, 0 *)
-    opiv_vv 48 3 1 5;                                        (* vwredsumu.vs v3, v1, v5 (e16 result) *)
-    v_setvl_e16 ();
-    v_mv_x_s a0 3
+  | Ast.Var op when List.assoc_opt op rv_simd_result_ops = Some (List.length args)
+                 || List.assoc_opt op rv_simd_scalar_ops = Some (List.length args) ->
+    (* Q-112: the whole u8x16 expression tree, in vector registers *)
+    compile_simd_root env op args
   | Ast.Var "__vec_get_unchecked" when List.length args = 2 ->
     (* Q-108: the range-check versioning pass checked the loop's whole index
        range before the loop, so this twin carries no bounds check. *)

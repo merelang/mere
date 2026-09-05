@@ -549,3 +549,8 @@ against QEMU): a 16-byte box, loaded into v1 / v2 by `vle8.v`, computed into v3,
 stored into a fresh box by `vse8.v`. `f64x2` stays refused there: no float unit. `==` and `<` on them are type errors: compare lanes. The
 operations are listed in the stdlib reference; the interpreter defines lane
 order and the failure on a lane index outside the vector.
+
+On the RISC-V backends the same idea uses the vector registers (v0.1.430): a
+`u8x16` expression tree is evaluated in `v1`..`v7` and boxed once at its
+root, and a let-bound `u8x16` used only as an operand lives in `v8`..`v15`
+when no call can run before its last use. See `bare-metal.md`.
