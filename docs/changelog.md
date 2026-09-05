@@ -36,7 +36,7 @@ clang vectorizes it. axpy over two `Vec[R, float]`s went from 2.8x hand-written
 C to a tie; the checked loop is kept and runs whenever the range check fails,
 so no program prints or fails differently._
 
-Measured first (note 196 in the design notes): the gap between Mere's C and
+Measured first: the gap between Mere's C and
 hand-written C on `c[i] = c[i] + alpha * a[i]` was 2.8x, and SIMD was only
 1.3-1.4x of it. The rest was the shape of `mere_vec_*_get/set`: a bounds check
 per element is an early exit per access, three of them in that loop, and clang
