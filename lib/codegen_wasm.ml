@@ -3189,6 +3189,16 @@ let rec emit_expr (e : Ast.expr) : unit =
   | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var ("f64x2_store" | "__f64x2_store_unchecked" as name); _ }, v_e); _ }, i_e); _ }, x_e) ->
     simd_used := true; vec_used := true; emit_expr v_e; emit_expr i_e; emit_expr x_e;
     emit_instr (if name = "f64x2_store" then "call $mere_f64x2_store" else "call $mere_f64x2_store_unchecked")
+  | Ast.App ({ node = Ast.Var ("u8x16_any_true" | "u8x16_reduce_add" | "u8x16_from_bytes" as op); _ }, v_e) ->
+    simd_used := true; if op = "u8x16_from_bytes" then bytes_used := true;
+    emit_expr v_e; emit_instr ("call $mere_" ^ op)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("u8x16_load" | "__u8x16_load_unchecked" as name); _ }, b_e); _ }, i_e) ->
+    simd_used := true; bytes_used := true; emit_expr b_e; emit_expr i_e;
+    emit_instr (if name = "u8x16_load" then "call $mere_u8x16_load" else "call $mere_u8x16_load_unchecked")
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("u8x16_and" | "u8x16_or" | "u8x16_xor" | "u8x16_sub_sat" | "u8x16_eq" | "u8x16_swizzle" | "u8x16_shr" as op); _ }, a_e); _ }, b_e) ->
+    simd_used := true; emit_expr a_e; emit_expr b_e; emit_instr ("call $mere_" ^ op)
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "u8x16_shift_in"; _ }, p_e); _ }, c_e); _ }, k_e) ->
+    simd_used := true; emit_expr p_e; emit_expr c_e; emit_expr k_e; emit_instr "call $mere_u8x16_shift_in"
   | Ast.App ({ node = Ast.Var "u8x16_splat"; _ }, x_e) ->
     simd_used := true; emit_expr x_e; emit_instr "call $mere_u8x16_splat"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "f64x2_extract"; _ }, v_e); _ }, i_e) ->
@@ -6993,6 +7003,53 @@ let simd_runtime_wasm () =
                           (i64.extend_i32_s (i32.load offset=4 (i32.wrap_i64 (local.get $v8))))))
       (then (return (call $__lang_fail (i64.const %d)))))
     (call $mere_f64x2_store_unchecked (local.get $v8) (local.get $i8) (local.get $x8)))
+  ;; u8x16 lane operations (2c). Boxed v128 in, boxed v128 out; bytes are
+  ;; { i32 len @0, data @4 }.
+  (func $mere_u8x16_and (param $a8 i64) (param $b8 i64) (result i64)
+    (call $__mere_box_v128 (v128.and (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $a8))) (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $b8))))))
+  (func $mere_u8x16_or (param $a8 i64) (param $b8 i64) (result i64)
+    (call $__mere_box_v128 (v128.or (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $a8))) (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $b8))))))
+  (func $mere_u8x16_xor (param $a8 i64) (param $b8 i64) (result i64)
+    (call $__mere_box_v128 (v128.xor (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $a8))) (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $b8))))))
+  (func $mere_u8x16_sub_sat (param $a8 i64) (param $b8 i64) (result i64)
+    (call $__mere_box_v128 (i8x16.sub_sat_u (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $a8))) (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $b8))))))
+  (func $mere_u8x16_eq (param $a8 i64) (param $b8 i64) (result i64)
+    (call $__mere_box_v128 (i8x16.eq (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $a8))) (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $b8))))))
+  (func $mere_u8x16_swizzle (param $t8 i64) (param $i8 i64) (result i64)
+    (call $__mere_box_v128 (i8x16.swizzle (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $t8))) (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $i8))))))
+  (func $mere_u8x16_shr (param $v8 i64) (param $k i64) (result i64)
+    (if (i32.or (i64.lt_s (local.get $k) (i64.const 0)) (i64.gt_s (local.get $k) (i64.const 7)))
+      (then (return (call $__lang_fail (i64.const %d)))))
+    (call $__mere_box_v128 (i8x16.shr_u (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $v8))) (i32.wrap_i64 (local.get $k)))))
+  (func $mere_u8x16_shift_in (param $p8 i64) (param $c8 i64) (param $k i64) (result i64)
+    (local $buf i32)
+    (if (i32.or (i64.lt_s (local.get $k) (i64.const 0)) (i64.gt_s (local.get $k) (i64.const 16)))
+      (then (return (call $__lang_fail (i64.const %d)))))
+    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 15)) (i32.const -16)))
+    (local.set $buf (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $buf) (i32.const 32)))
+    (v128.store offset=0 align=16 (local.get $buf) (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $p8))))
+    (v128.store offset=16 align=16 (local.get $buf) (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $c8))))
+    (call $__mere_box_v128 (v128.load align=1 (i32.add (local.get $buf) (i32.sub (i32.const 16) (i32.wrap_i64 (local.get $k)))))))
+  (func $mere_u8x16_any_true (param $v8 i64) (result i64)
+    (i64.extend_i32_u (v128.any_true (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $v8))))))
+  (func $mere_u8x16_reduce_add (param $v8 i64) (result i64)
+    (local $x v128)
+    (local.set $x (i32x4.extadd_pairwise_i16x8_u (i16x8.extadd_pairwise_i8x16_u (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $v8))))))
+    (i64.extend_i32_u
+      (i32.add (i32.add (i32x4.extract_lane 0 (local.get $x)) (i32x4.extract_lane 1 (local.get $x)))
+               (i32.add (i32x4.extract_lane 2 (local.get $x)) (i32x4.extract_lane 3 (local.get $x))))))
+  (func $mere_u8x16_load_unchecked (param $b8 i64) (param $i8 i64) (result i64)
+    (call $__mere_box_v128 (v128.load align=1 (i32.add (i32.add (i32.wrap_i64 (local.get $b8)) (i32.const 4)) (i32.wrap_i64 (local.get $i8))))))
+  (func $mere_u8x16_load (param $b8 i64) (param $i8 i64) (result i64)
+    (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0))
+                (i64.gt_s (i64.add (local.get $i8) (i64.const 16)) (i64.extend_i32_s (i32.load (i32.wrap_i64 (local.get $b8))))))
+      (then (return (call $__lang_fail (i64.const %d)))))
+    (call $mere_u8x16_load_unchecked (local.get $b8) (local.get $i8)))
+  (func $mere_u8x16_from_bytes (param $b8 i64) (result i64)
+    (if (i32.lt_s (i32.load (i32.wrap_i64 (local.get $b8))) (i32.const 16))
+      (then (return (call $__lang_fail (i64.const %d)))))
+    (call $mere_u8x16_load_unchecked (local.get $b8) (i64.const 0)))
   (func $mere_u8x16_splat (param $x i64) (result i64)
     (local $p i32)
     (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 15)) (i32.const -16)))
@@ -7004,7 +7061,7 @@ let simd_runtime_wasm () =
     (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0)) (i64.ge_s (local.get $i8) (i64.const 16)))
       (then (return (call $__lang_fail (i64.const %d)))))
     (i64.extend_i32_u (i32.load8_u (i32.add (i32.wrap_i64 (local.get $v8)) (i32.wrap_i64 (local.get $i8))))))
-|} !simd_lane_msg_offset !simd_range_msg_offset !simd_range_msg_offset !simd_lane_msg_offset
+|} !simd_lane_msg_offset !simd_range_msg_offset !simd_range_msg_offset !simd_lane_msg_offset !simd_lane_msg_offset !simd_range_msg_offset !simd_range_msg_offset !simd_lane_msg_offset
 
 let bytes_runtime_wasm = {|
   (func $__lang_bytes_alloc (param $len8 i64) (result i64)

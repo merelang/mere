@@ -1612,6 +1612,75 @@ let builtin_f64x2_store =
           | _ -> failwith "f64x2_store: expected int index"))
     | _ -> failwith "f64x2_store: expected Vec")
 
+(* Q-109 (2c): u8x16 lane operations, on 16-byte OCaml Bytes. The interpreter
+   is the oracle: swizzle gives 0 for an index outside 0..15 (Wasm's and NEON's
+   rule), shift_in k brings the last k bytes of prev in front of cur, sub_sat
+   saturates at 0, eq gives 0xFF per equal lane, reduce_add sums the lanes as
+   integers, shr shifts each byte right by k (0..7). *)
+let u8x16_of who v = match v with V_u8x16 b -> b | _ -> failwith (who ^ ": expected u8x16")
+let u8x16_map2 name f =
+  V_builtin (name, fun a ->
+    V_builtin (name ^ "_p1", fun b ->
+      let x = u8x16_of name a and y = u8x16_of name b in
+      V_u8x16 (Bytes.init 16 (fun i -> Char.chr (f (Char.code (Bytes.get x i)) (Char.code (Bytes.get y i)))))))
+let builtin_u8x16_and = u8x16_map2 "u8x16_and" ( land )
+let builtin_u8x16_or  = u8x16_map2 "u8x16_or" ( lor )
+let builtin_u8x16_xor = u8x16_map2 "u8x16_xor" ( lxor )
+let builtin_u8x16_sub_sat = u8x16_map2 "u8x16_sub_sat" (fun a b -> if a > b then a - b else 0)
+let builtin_u8x16_eq = u8x16_map2 "u8x16_eq" (fun a b -> if a = b then 0xFF else 0)
+let builtin_u8x16_swizzle =
+  V_builtin ("u8x16_swizzle", fun t ->
+    V_builtin ("u8x16_swizzle_p1", fun idx ->
+      let tb = u8x16_of "u8x16_swizzle" t and ib = u8x16_of "u8x16_swizzle" idx in
+      V_u8x16 (Bytes.init 16 (fun i ->
+        let j = Char.code (Bytes.get ib i) in
+        if j < 16 then Bytes.get tb j else Char.chr 0))))
+let builtin_u8x16_shr =
+  V_builtin ("u8x16_shr", fun v ->
+    V_builtin ("u8x16_shr_p1", fun k ->
+      let b = u8x16_of "u8x16_shr" v in
+      match k with
+      | V_int k when k >= 0 && k <= 7 ->
+        V_u8x16 (Bytes.init 16 (fun i -> Char.chr ((Char.code (Bytes.get b i)) lsr k)))
+      | V_int k -> raise (Eval_error (Loc.dummy, Printf.sprintf "u8x16_shr: shift %d out of range 0..7" k))
+      | _ -> failwith "u8x16_shr: expected int shift"))
+let builtin_u8x16_shift_in =
+  V_builtin ("u8x16_shift_in", fun p ->
+    V_builtin ("u8x16_shift_in_p1", fun c ->
+      V_builtin ("u8x16_shift_in_p2", fun k ->
+        let pb = u8x16_of "u8x16_shift_in" p and cb = u8x16_of "u8x16_shift_in" c in
+        match k with
+        | V_int k when k >= 0 && k <= 16 ->
+          V_u8x16 (Bytes.init 16 (fun i -> if i < k then Bytes.get pb (16 - k + i) else Bytes.get cb (i - k)))
+        | V_int k -> raise (Eval_error (Loc.dummy, Printf.sprintf "u8x16_shift_in: shift %d out of range 0..16" k))
+        | _ -> failwith "u8x16_shift_in: expected int shift")))
+let builtin_u8x16_any_true =
+  V_builtin ("u8x16_any_true", fun v ->
+    let b = u8x16_of "u8x16_any_true" v in
+    V_bool (Bytes.exists (fun ch -> ch <> '\000') b))
+let builtin_u8x16_reduce_add =
+  V_builtin ("u8x16_reduce_add", fun v ->
+    let b = u8x16_of "u8x16_reduce_add" v in
+    V_int (Bytes.fold_left (fun acc ch -> acc + Char.code ch) 0 b))
+let u8x16_range who len i =
+  if i < 0 || i + 16 > len then
+    raise (Eval_error (Loc.dummy,
+      Printf.sprintf "%s: bytes [%d, %d) out of bounds (len = %d)" who i (i + 16) len))
+let builtin_u8x16_from_bytes =
+  V_builtin ("u8x16_from_bytes", fun v ->
+    match v with
+    | V_bytes s -> u8x16_range "u8x16_from_bytes" (String.length s) 0; V_u8x16 (Bytes.of_string (String.sub s 0 16))
+    | _ -> failwith "u8x16_from_bytes: expected bytes")
+let builtin_u8x16_load =
+  V_builtin ("u8x16_load", fun v ->
+    match v with
+    | V_bytes s ->
+      V_builtin ("u8x16_load_p1", fun idx ->
+        match idx with
+        | V_int i -> u8x16_range "u8x16_load" (String.length s) i; V_u8x16 (Bytes.of_string (String.sub s i 16))
+        | _ -> failwith "u8x16_load: expected int index")
+    | _ -> failwith "u8x16_load: expected bytes")
+
 let builtin_vec_get =
   V_builtin ("vec_get", fun v ->
     match v with
@@ -3527,6 +3596,19 @@ let initial_env : env =
     ("f64x2_store", ref builtin_f64x2_store);
     ("__f64x2_load_unchecked", ref builtin_f64x2_load);
     ("__f64x2_store_unchecked", ref builtin_f64x2_store);
+    ("u8x16_from_bytes", ref builtin_u8x16_from_bytes);
+    ("u8x16_load", ref builtin_u8x16_load);
+    ("__u8x16_load_unchecked", ref builtin_u8x16_load);
+    ("u8x16_and", ref builtin_u8x16_and);
+    ("u8x16_or", ref builtin_u8x16_or);
+    ("u8x16_xor", ref builtin_u8x16_xor);
+    ("u8x16_sub_sat", ref builtin_u8x16_sub_sat);
+    ("u8x16_eq", ref builtin_u8x16_eq);
+    ("u8x16_swizzle", ref builtin_u8x16_swizzle);
+    ("u8x16_shr", ref builtin_u8x16_shr);
+    ("u8x16_shift_in", ref builtin_u8x16_shift_in);
+    ("u8x16_any_true", ref builtin_u8x16_any_true);
+    ("u8x16_reduce_add", ref builtin_u8x16_reduce_add);
     ("vec_reverse", ref builtin_vec_reverse);
     ("vec_concat",  ref builtin_vec_concat);
     ("vec_sort",    ref builtin_vec_sort);

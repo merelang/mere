@@ -1,0 +1,55 @@
+// utf8valid_simd -- the validator of utf8valid written with u8x16 lanes: the
+// Keiser-Lemire method (three nibble-indexed lookup tables classify each byte
+// against the one before it; a saturating subtract finds the 3- and 4-byte
+// leads two and three bytes back; the two answers must agree). Sixteen bytes
+// per step. The forcing kernel for explicit SIMD (Q-109): no vectorizer builds
+// this from the scalar state machine.
+let path = match args () with | Cons (p, _) -> p | Nil -> "";
+if str_eq path "" then print "usage: bench <file>"
+else
+  let b = read_bytes path in
+  let n = bytes_len b in
+  // the classification tables (index = a nibble), and the "ends mid-sequence" pattern
+  let t_high1 = u8x16_from_bytes (bytes_of_hex "02020202020202028080808021011549") in
+  let t_low1  = u8x16_from_bytes (bytes_of_hex "e7a383838bcbcbcbcbcbcbcbcbdbcbcb") in
+  let t_high2 = u8x16_from_bytes (bytes_of_hex "0101010101010101e6aebaba01010101") in
+  let max_v   = u8x16_from_bytes (bytes_of_hex "ffffffffffffffffffffffffffefdfbf") in
+  let zeros16 = bytes_of_hex "00000000000000000000000000000000" in
+  let m80 = u8x16_splat 128 in
+  let m0f = u8x16_splat 15 in
+  let mc0 = u8x16_splat 192 in
+  let one = u8x16_splat 1 in
+  // one block: the accumulated error vector after it
+  let check = fn (prev: u8x16) -> fn (input: u8x16) -> fn (err: u8x16) ->
+    if u8x16_any_true (u8x16_and input m80) then
+      let prev1 = u8x16_shift_in prev input 1 in
+      let sc = u8x16_and
+                 (u8x16_and (u8x16_swizzle t_high1 (u8x16_shr prev1 4))
+                            (u8x16_swizzle t_low1 (u8x16_and prev1 m0f)))
+                 (u8x16_swizzle t_high2 (u8x16_shr input 4)) in
+      let prev2 = u8x16_shift_in prev input 2 in
+      let prev3 = u8x16_shift_in prev input 3 in
+      let is3 = u8x16_sub_sat prev2 (u8x16_splat 96) in
+      let is4 = u8x16_sub_sat prev3 (u8x16_splat 112) in
+      let must23_80 = u8x16_and (u8x16_or is3 is4) m80 in
+      u8x16_or err (u8x16_xor must23_80 sc)
+    else u8x16_or err (u8x16_sub_sat prev max_v) in
+  // continuation bytes in a block (10xxxxxx), to count codepoints
+  let conts = fn (input: u8x16) -> u8x16_reduce_add (u8x16_and (u8x16_eq (u8x16_and input mc0) m80) one) in
+  let rec go = fn (i: int) -> fn (prev: u8x16) -> fn (err: u8x16) -> fn (cont: int) ->
+    if i + 16 > n then
+      // the tail, zero-padded to a block: a lead byte followed by zeros is flagged
+      let r = n - i in
+      let last = u8x16_from_bytes (bytes_concat (bytes_slice b i r) (bytes_slice zeros16 0 (16 - r))) in
+      let err2 = check prev last err in
+      let err3 = u8x16_or err2 (u8x16_sub_sat last max_v) in
+      if u8x16_any_true err3 then -1 else n - (cont + conts last)
+    else
+      let input = u8x16_load b i in
+      go (i + 16) input (check prev input err) (cont + conts input) in
+  let rec passes = fn (p: int) -> fn (acc: int) ->
+    if p == 20 then acc else passes (p + 1) (acc + go 0 (u8x16_splat 0) (u8x16_splat 0) 0) in
+  let total = passes 0 0 in
+  let _ = print ("bytes " ++ str_of_int n) in
+  let _ = print (if total < 0 then "invalid" else "valid codepoints " ++ str_of_int (total / 20)) in
+  exit 0

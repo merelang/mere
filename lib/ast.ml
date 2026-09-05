@@ -1167,6 +1167,10 @@ let rv_rewrite ~(self : string) ~(self' : string) ~(idx : string)
       when qualifies v ie ->
       note { acc_container = v; acc_bytes = false; acc_index = ie; acc_width = 2 };
       { e with node = App ({ node = App ({ node = App ({ node = Var "__f64x2_store_unchecked"; loc = l1; ty = t1 }, ve); loc = l2; ty = t2 }, ie); loc = l3; ty = t3 }, go x) }
+    | App ({ node = App ({ node = Var "u8x16_load"; loc = l1; ty = t1 }, ({ node = Var b; _ } as be)); loc = l2; ty = t2 }, ie)
+      when qualifies b ie ->
+      note { acc_container = b; acc_bytes = true; acc_index = ie; acc_width = 16 };
+      { e with node = App ({ node = App ({ node = Var "__u8x16_load_unchecked"; loc = l1; ty = t1 }, be); loc = l2; ty = t2 }, ie) }
     | App ({ node = App ({ node = Var "bytes_get"; loc = l1; ty = t1 }, ({ node = Var b; _ } as be)); loc = l2; ty = t2 }, ie)
       when qualifies b ie ->
       note { acc_container = b; acc_bytes = true; acc_index = ie; acc_width = 1 };
@@ -1431,7 +1435,7 @@ let range_version_program ~(unsafe_builtins : string list) (prog : program) : pr
         | Top_let_rec bs -> List.map fst bs
         | _ -> []) prog.decls)
     in
-    let relied = [ "vec_get"; "vec_set"; "bytes_get"; "vec_len"; "bytes_len"; "f64x2_load"; "f64x2_store" ] in
+    let relied = [ "vec_get"; "vec_set"; "bytes_get"; "vec_len"; "bytes_len"; "f64x2_load"; "f64x2_store"; "u8x16_load" ] in
     let all_bound =
       !user_bound
       @ List.concat_map rv_bound_names (List.concat_map decl_exprs prog.decls @ [ prog.main ]) in

@@ -3264,6 +3264,19 @@ let rec emit_expr (e : Ast.expr) : string =
          elem_tag (emit_expr vec_e) (emit_expr arg)
      | Ast.Var "f64x2_splat" -> Printf.sprintf "mere_f64x2_splat(%s)" (emit_expr arg)
      | Ast.Var "f64x2_reduce_add" -> Printf.sprintf "mere_f64x2_reduce_add(%s)" (emit_expr arg)
+     | Ast.Var "u8x16_any_true" -> Printf.sprintf "mere_u8x16_any_true(%s)" (emit_expr arg)
+     | Ast.Var "u8x16_reduce_add" -> Printf.sprintf "mere_u8x16_reduce_add(%s)" (emit_expr arg)
+     | Ast.Var "u8x16_from_bytes" -> bytes_used := true; Printf.sprintf "__lang_u8x16_from_bytes(%s)" (emit_expr arg)
+     | Ast.App ({ node = Ast.Var ("u8x16_load" | "__u8x16_load_unchecked" as name); _ }, b_e) ->
+       bytes_used := true;
+       Printf.sprintf "__lang_u8x16_load%s(%s, %s)" (if name = "u8x16_load" then "" else "_unchecked") (emit_expr b_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var ("u8x16_and" | "u8x16_or" | "u8x16_xor" as op); _ }, a_e) ->
+       let c_op = match op with "u8x16_and" -> "&" | "u8x16_or" -> "|" | _ -> "^" in
+       Printf.sprintf "((%s) %s (%s))" (emit_expr a_e) c_op (emit_expr arg)
+     | Ast.App ({ node = Ast.Var ("u8x16_sub_sat" | "u8x16_eq" | "u8x16_swizzle" | "u8x16_shr" as op); _ }, a_e) ->
+       Printf.sprintf "mere_%s(%s, %s)" op (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "u8x16_shift_in"; _ }, p_e); _ }, c_e) ->
+       Printf.sprintf "mere_u8x16_shift_in(%s, %s, %s)" (emit_expr p_e) (emit_expr c_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "f64x2_make"; _ }, a_e) ->
        Printf.sprintf "mere_f64x2_make(%s, %s)" (emit_expr a_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var ("f64x2_add" | "f64x2_sub" | "f64x2_mul" | "f64x2_div" as op); _ }, a_e) ->
@@ -8561,7 +8574,17 @@ let bytes_runtime ~arena =
       "  if (i < 0 || i >= b->len) __lang_fail_impl(\"bytes_get: index out of range\");";
       "  return (long long)b->data[i];";
       "}";
-      "static long long __lang_bytes_get_unchecked(mere_bytes* b, long long i) { return (long long)b->data[i]; }" ])
+      "static long long __lang_bytes_get_unchecked(mere_bytes* b, long long i) { return (long long)b->data[i]; }";
+      (* Q-109 (2c): sixteen bytes as one u8x16 *)
+      "static mere_u8x16 __lang_u8x16_load_unchecked(mere_bytes* b, long long i) { mere_u8x16 r; memcpy(&r, b->data + i, 16); return r; }";
+      "static mere_u8x16 __lang_u8x16_load(mere_bytes* b, long long i) {";
+      "  if (i < 0 || i + 16 > b->len) __lang_fail_idx(\"u8x16_load: bytes [%lld, +16) out of bounds (len = %lld)\", i, b->len);";
+      "  return __lang_u8x16_load_unchecked(b, i);";
+      "}";
+      "static mere_u8x16 __lang_u8x16_from_bytes(mere_bytes* b) {";
+      "  if (b->len < 16) __lang_fail_idx(\"u8x16_from_bytes: bytes [%lld, +16) out of bounds (len = %lld)\", 0LL, b->len);";
+      "  return __lang_u8x16_load_unchecked(b, 0);";
+      "}" ])
 
 (* bytes <-> Vec[int] bridge. Emitted only when the bridge is used (so it can
    safely reference mere_vec_int), and injected after both the vec_int runtime
@@ -11915,6 +11938,68 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "}";
       "static inline mere_f64x2 mere_f64x2_make(double a, double b) { mere_f64x2 v = { a, b }; return v; }";
       "static inline double mere_f64x2_reduce_add(mere_f64x2 v) { return v[0] + v[1]; }";
+      (* Q-109 (2c): u8x16 lane operations. Portable through the vector extension
+         where it reaches (arithmetic, compares, shifts, shufflevector for a
+         constant shift_in); a byte table lookup (swizzle) is the one operation
+         with no generic spelling, so it is NEON / SSSE3 / scalar by #if. *)
+      "#if defined(__aarch64__) || defined(__ARM_NEON)";
+      "#include <arm_neon.h>";
+      "#elif defined(__SSSE3__)";
+      "#include <immintrin.h>";
+      "#endif";
+      "typedef signed char mere_i8x16 __attribute__((vector_size(16)));";
+      "static inline mere_u8x16 mere_u8x16_sub_sat(mere_u8x16 a, mere_u8x16 b) {";
+      "#if __has_builtin(__builtin_elementwise_sub_sat)";
+      "  return __builtin_elementwise_sub_sat(a, b);";
+      "#else";
+      "  mere_u8x16 r; for (int i = 0; i < 16; i++) r[i] = a[i] > b[i] ? a[i] - b[i] : 0; return r;";
+      "#endif";
+      "}";
+      "static inline mere_u8x16 mere_u8x16_eq(mere_u8x16 a, mere_u8x16 b) { return (mere_u8x16)(a == b); }";
+      "static inline mere_u8x16 mere_u8x16_shr(mere_u8x16 v, long long k) {";
+      "  if (k < 0 || k > 7) __lang_fail_idx(\"u8x16_shr: shift %lld out of range 0..%lld\", k, 7LL);";
+      "  return v >> (unsigned char)k;";
+      "}";
+      "static inline mere_u8x16 mere_u8x16_swizzle(mere_u8x16 t, mere_u8x16 idx) {";
+      "#if defined(__aarch64__) || defined(__ARM_NEON)";
+      "  return (mere_u8x16)vqtbl1q_u8((uint8x16_t)t, (uint8x16_t)idx);";
+      "#elif defined(__SSSE3__)";
+      "  /* pshufb zeroes a lane whose index has bit 7 set; an index of 16..127 would otherwise wrap */";
+      "  __m128i i = (__m128i)idx;";
+      "  __m128i big = _mm_cmpgt_epi8(i, _mm_set1_epi8(15));";
+      "  return (mere_u8x16)_mm_shuffle_epi8((__m128i)t, _mm_or_si128(i, big));";
+      "#else";
+      "  mere_u8x16 r; for (int i = 0; i < 16; i++) r[i] = idx[i] < 16 ? t[idx[i]] : 0; return r;";
+      "#endif";
+      "}";
+      "static inline mere_u8x16 mere_u8x16_shift_in(mere_u8x16 prev, mere_u8x16 cur, long long k) {";
+      "  switch (k) {";
+      "    case 0: return cur;";
+      "    case 1: return __builtin_shufflevector(prev, cur, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30);";
+      "    case 2: return __builtin_shufflevector(prev, cur, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29);";
+      "    case 3: return __builtin_shufflevector(prev, cur, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28);";
+      "    case 4: return __builtin_shufflevector(prev, cur, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27);";
+      "    case 5: return __builtin_shufflevector(prev, cur, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26);";
+      "    case 6: return __builtin_shufflevector(prev, cur, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25);";
+      "    case 7: return __builtin_shufflevector(prev, cur, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24);";
+      "    case 8: return __builtin_shufflevector(prev, cur, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23);";
+      "    case 9: return __builtin_shufflevector(prev, cur, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22);";
+      "    case 10: return __builtin_shufflevector(prev, cur, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21);";
+      "    case 11: return __builtin_shufflevector(prev, cur, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20);";
+      "    case 12: return __builtin_shufflevector(prev, cur, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19);";
+      "    case 13: return __builtin_shufflevector(prev, cur, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18);";
+      "    case 14: return __builtin_shufflevector(prev, cur, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17);";
+      "    case 15: return __builtin_shufflevector(prev, cur, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);";
+      "    case 16: return prev;";
+      "    default: __lang_fail_idx(\"u8x16_shift_in: shift %lld out of range 0..%lld\", k, 16LL);";
+      "  }";
+      "}";
+      "static inline int mere_u8x16_any_true(mere_u8x16 v) {";
+      "  unsigned long long lo, hi; memcpy(&lo, &v, 8); memcpy(&hi, (const char*)&v + 8, 8); return (lo | hi) != 0;";
+      "}";
+      "static inline long long mere_u8x16_reduce_add(mere_u8x16 v) {";
+      "  long long s = 0; for (int i = 0; i < 16; i++) s += v[i]; return s;";
+      "}";
       "static inline long long mere_u8x16_extract(mere_u8x16 v, long long i) {";
       "  if (i < 0 || i >= 16) __lang_fail_idx(\"u8x16_extract: lane %lld out of range (lanes = %lld)\", i, 16LL);";
       "  return (long long)v[i];";

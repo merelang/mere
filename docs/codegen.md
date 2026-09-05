@@ -513,7 +513,8 @@ let s = f 0 0.0;
 
 into a sibling `f__rvfast` whose `vec_get v i` is `__vec_get_unchecked v i`
 (likewise `vec_set` -> `__vec_set_unchecked`, `bytes_get` -> `__bytes_get_unchecked`,
-`f64x2_load` / `f64x2_store` -> `__f64x2_load_unchecked` / `__f64x2_store_unchecked`;
+`f64x2_load` / `f64x2_store` -> `__f64x2_load_unchecked` / `__f64x2_store_unchecked`,
+`u8x16_load` -> `__u8x16_load_unchecked`;
 the three are internal names every backend lowers, and the interpreter keeps
 the bounds check under them so it stays the oracle), and a call site `if 0 >= 0 && 0 <= n && n <= vec_len v then f__rvfast 0 0.0
 else f 0 0.0`. The guard true means the removed checks could never have fired;
