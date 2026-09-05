@@ -4,6 +4,28 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.430 — 2026-09-05
+
+**RISC-V keeps SIMD values in vector registers (Q-112).** A `u8x16`
+expression tree is now evaluated in `v1`..`v7` and boxed once, at its root,
+where before every builtin loaded its operands from their boxes and stored
+its result into a fresh 16-byte block. Operands that are not vector builtins
+(boxed variables, calls, scalar arguments) are evaluated first, in source
+order, onto the stack, so no call runs while a vector value is live in a
+register. A let-bound `u8x16` that is used only as an operand of vector
+builtins lives in `v8`..`v15` when no call can run between its binding and
+its last use (a tail call after the last use is fine; a call before it keeps
+the value boxed). The builtins with a scalar result (`u8x16_extract`,
+`u8x16_any_true`, `u8x16_reduce_add`) read their operand tree from the
+registers and never box. The UTF-8 validator's step, which bound seven
+`u8x16` values per 16 bytes, no longer allocates for them: its RV32
+listing goes from 43 box stores to 16 (the values carried into the next
+iteration are call arguments, so they are still boxed), and the 64 KiB
+validation runs about 10% faster on the Mere-written RV32 and RV64 cores.
+
+The SIMD builtin name tables and the operand-only test moved from the Wasm
+backend into `Ast` so both backends share one definition.
+
 ## v0.1.429 — 2026-09-05
 
 _On the Wasm backend a SIMD value now travels unboxed: a v128 on the stack

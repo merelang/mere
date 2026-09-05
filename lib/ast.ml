@@ -1540,3 +1540,34 @@ let range_version_program ~(unsafe_builtins : string list) (prog : program) : pr
       { decls; main = transform ~shadow:outer0 (rv_apply_plans !plans prog.main) }
     end
   end
+
+(* --- SIMD builtin names, shared by the backends that keep vector values out
+   of their boxes (Wasm v128 locals, RISC-V vector registers) --------------- *)
+let simd_result_ops = [ "f64x2_splat"; "f64x2_make"; "f64x2_add"; "f64x2_sub"; "f64x2_mul"; "f64x2_div";
+                        "f64x2_load"; "__f64x2_load_unchecked";
+                        "u8x16_splat"; "u8x16_from_bytes"; "u8x16_load"; "__u8x16_load_unchecked";
+                        "u8x16_and"; "u8x16_or"; "u8x16_xor"; "u8x16_sub_sat"; "u8x16_eq"; "u8x16_swizzle";
+                        "u8x16_shr"; "u8x16_shift_in" ]
+let simd_scalar_ops = [ "f64x2_extract"; "f64x2_reduce_add"; "f64x2_store"; "__f64x2_store_unchecked";
+                        "u8x16_extract"; "u8x16_any_true"; "u8x16_reduce_add" ]
+let simd_head (e : expr) : string option =
+  let h, _ = rv_spine e in
+  match h.node with
+  | Var n when List.mem n simd_result_ops || List.mem n simd_scalar_ops -> Some n
+  | _ -> None
+(* `name` is used in `body` only as a direct operand of a SIMD builtin, never
+   under a lambda (a capture would need the box) and never anywhere else. *)
+let simd_operand_only (name : string) (body : expr) : bool =
+  let rec mentions (e : expr) =
+    (match e.node with Var n when n = name -> true | _ -> false)
+    || List.exists mentions (children e) in
+  let rec ok (e : expr) : bool =
+    match e.node with
+    | Var n when n = name -> false
+    | Fun (_, _, b) -> not (mentions b)
+    | App _ when simd_head e <> None ->
+      let _, args = rv_spine e in
+      List.for_all (fun a -> match a.node with Var n when n = name -> true | _ -> ok a) args
+    | _ -> List.for_all ok (children e)
+  in
+  ok body

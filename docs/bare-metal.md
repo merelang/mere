@@ -407,3 +407,13 @@ str block layout. The machine has to have the V extension: memu's
 without V executes the same binary up to the first vector instruction and
 traps there as illegal, which is the honest failure. `f64x2` is refused at
 compile time: there is no floating-point unit to put the lanes in.
+
+### Register residency (v0.1.430)
+
+A `u8x16` expression tree is evaluated in `v1`..`v7` and boxed once, at its
+root. The operands that are not vector builtins -- boxed variables, calls,
+scalar arguments -- are evaluated first, in source order, onto the stack, so
+no call runs while a vector value is live in a register. A let-bound `u8x16`
+used only as an operand of vector builtins lives in `v8`..`v15` when no call
+can run between its binding and its last use; otherwise it is boxed as
+before. The builtins with a scalar result never box their operand tree.
