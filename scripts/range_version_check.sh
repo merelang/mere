@@ -116,7 +116,16 @@ for f in "$ROOT"/test/range_version/*.mere "$ROOT"/test/range_version/fail/*.mer
     done
   fi
   if [ -z "$problems" ]; then pass=$((pass + 1)); echo "  ok    $case_name  (planned: ${planned:-none}; dispatched: ${called:-none})"
-  else failn=$((failn + 1)); echo "  FAIL  $case_name :$problems"; fi
+  else
+    failn=$((failn + 1)); echo "  FAIL  $case_name :$problems"
+    # say why: the leg's exit status, its stderr, and the first lines that differ
+    for leg in $problems; do
+      l=$(echo "$leg" | sed 's/^LLVM(\(.*\))/ll_\1/; s/^C(\(.*\))/c_\1/; s/-nocompile$//')
+      [ -f "$tmp/$l.rc" ] && echo "        $leg: rc=$(cat "$tmp/$l.rc") (ref rc=$(cat "$tmp/ref.rc")) err: $(head -c 240 "$tmp/$l.err" | tr '\n' ' ')"
+      [ -f "$tmp/$l.out" ] && diff "$tmp/ref.out" "$tmp/$l.out" 2>/dev/null | head -4 | sed 's/^/        /'
+      [ -f "$tmp/cc.err" ] && [ -s "$tmp/cc.err" ] && echo "        cc: $(head -c 240 "$tmp/cc.err" | tr '\n' ' ')"
+    done
+  fi
 done
 [ $have_wat = 1 ] || echo "  (wasm leg skipped: wat2wasm or node absent)"
 [ $have_ll = 1 ] || echo "  (LLVM leg skipped: clang absent)"

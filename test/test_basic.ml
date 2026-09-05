@@ -15078,5 +15078,21 @@ let () =
      if inc < 0 then "no include" else if use < 0 then "no uintptr_t use" else if inc < use then "include first" else "use first")
     "include first";
 
+  (* v0.1.432 (Q-113): a vector stored into or loaded from heap memory carries
+     the heap's alignment. Without it LLVM assumes 16, x86 emits movaps, and an
+     8-aligned box faults -- only on real x86 (arm64 and Rosetta do not fault). *)
+  check "v0.1.432: every vector load/store in the IR states an alignment"
+    (let ll =
+       let prog = Pipeline.parse_program "let f = fn (v: u8x16) -> fn (i: int) -> u8x16_extract v i;\nprint_int (f (u8x16_splat 7) 3)" in
+       let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+       Codegen_llvm.emit_program ~main_ty prog in
+     let has sub line = let n = String.length sub and m = String.length line in
+       let rec go i = i + n <= m && (String.sub line i n = sub || go (i + 1)) in go 0 in
+     let lines = String.split_on_char '\n' ll in
+     let vec = List.filter (fun l -> has "= load <" l || has "  store <" l) lines in
+     let bare = List.filter (fun l -> not (has ", align " l)) vec in
+     Printf.sprintf "vector ops:%s bare:%d" (if vec = [] then "none" else "some") (List.length bare))
+    "vector ops:some bare:0";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

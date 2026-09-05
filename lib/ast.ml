@@ -1030,34 +1030,44 @@ let rv_body_safe ~(ok_head : string -> bool) (body : expr) : bool =
    stale: no lambda, every call head a builtin or another loop-safe top-level
    function (fixpoint over the program). *)
 let rv_loop_safe_toplevels ~(unsafe_builtins : string list) (prog : program) : string list =
-  let fns =
-    List.concat_map (fun d ->
-      match d with
-      | Top_let ({ pnode = P_var n; _ }, v) -> [ (n, v) ]
-      | Top_let_rec bs -> bs
-      | _ -> []) prog.decls
-  in
-  let names = List.map fst fns in
-  let user_bound = names in
-  let safe = ref names in
-  let is_builtin n = not (List.mem n user_bound) in
+  (* hashtables throughout: this used to be List.assoc / List.mem over every
+     top-level name for every top-level name, and a program of 16000 bindings
+     spent seconds here (the infer_scaling gate caught it) *)
+  let fns = Hashtbl.create 64 in
+  let order = ref [] in
+  List.iter (fun d ->
+    match d with
+    | Top_let ({ pnode = P_var n; _ }, v) -> Hashtbl.replace fns n v; order := n :: !order
+    | Top_let_rec bs -> List.iter (fun (n, v) -> Hashtbl.replace fns n v; order := n :: !order) bs
+    | _ -> ()) prog.decls;
+  let names = List.rev !order in
+  let is_builtin n = not (Hashtbl.mem fns n) in
+  let safe = Hashtbl.create 64 in
+  List.iter (fun n -> Hashtbl.replace safe n ()) names;
+  (* the per-function facts do not change between rounds *)
+  let facts = Hashtbl.create 64 in
+  List.iter (fun n ->
+    let _, inner = rv_peel_funs (Hashtbl.find fns n) in
+    Hashtbl.replace facts n (inner, rv_bound_names inner)) names;
   let step () =
-    let before = List.length !safe in
-    safe := List.filter (fun n ->
-      let body = List.assoc n fns in
-      let _, inner = rv_peel_funs body in
-      let locals = rv_bound_names inner in
-      let ok_head h =
-        (h = n)
-        || (is_builtin h && not (List.mem h locals)
-            && not (List.mem h rv_len_changing) && not (List.mem h unsafe_builtins))
-        || (List.mem h !safe && not (List.mem h locals))
-      in
-      not (rv_has_fun_below inner) && rv_body_safe ~ok_head inner) !safe;
-    List.length !safe <> before
+    let dropped = ref false in
+    List.iter (fun n ->
+      if Hashtbl.mem safe n then begin
+        let inner, locals = Hashtbl.find facts n in
+        let ok_head h =
+          (h = n)
+          || (is_builtin h && not (List.mem h locals)
+              && not (List.mem h rv_len_changing) && not (List.mem h unsafe_builtins))
+          || (Hashtbl.mem safe h && not (List.mem h locals))
+        in
+        if not (not (rv_has_fun_below inner) && rv_body_safe ~ok_head inner) then begin
+          Hashtbl.remove safe n; dropped := true
+        end
+      end) names;
+    !dropped
   in
   while step () do () done;
-  !safe
+  List.filter (Hashtbl.mem safe) names
 
 (* Generic scope-tracking map: `f shadow e` may replace a node; otherwise the
    children are visited with `shadow` extended by whatever the node binds. *)
