@@ -1,5 +1,5 @@
 // axpy reference: same LCG, same unfused arithmetic (-ffp-contract=off in the
-// MANIFEST, as for matmul), same twenty passes, same bit-pattern output.
+// MANIFEST, as for matmul), same hundred passes, same bit-pattern output.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +15,7 @@ int main(int argc, char **argv) {
   mk(a, n, 20260905);
   mk(c, n, 77770707);
   double alpha = 1.5;
-  for (int r = 0; r < 20; r++)
+  for (int r = 0; r < 100; r++)
     for (long long i = 0; i < n; i++) c[i] = c[i] + alpha * a[i];
   double s = 0.0;
   for (long long i = 0; i < n; i++) s = s + c[i];

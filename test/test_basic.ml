@@ -14810,5 +14810,42 @@ let () =
   check "v0.1.420 (Q-111): a program ending in `exit 0` lowers on LLVM"
     (if has (llvm "let _ = print \"x\";\nexit 0") "call void @exit(i32" then "lowered" else "missing") "lowered";
 
+  (* v0.1.421 (Q-108, affine indices): an access whose index is monotonic in
+     the loop parameter -- `i * n + k`, `k * n + j`, `n - 1 - i` -- qualifies
+     too; the guard checks both endpoints of each such index. matmul's inner
+     loop is the forcing case. `%` (not monotonic) and `/` (a division the
+     guard would run ahead of the loop) are refused. *)
+  let mm_src = "let n = 4;\nlet a = vec_new ();\nlet b = vec_new ();\n\
+                let rec fill = fn (i: int) -> if i == n * n then () else let _ = vec_push a i in let _ = vec_push b (i * 2) in fill (i + 1);\n\
+                let _ = fill 0;\n\
+                let cell = fn (i: int) -> fn (j: int) ->\n\
+                  let rec dot = fn (k: int) -> fn (acc: int) -> if k == n then acc else dot (k + 1) (acc + vec_get a (i * n + k) * vec_get b (k * n + j)) in\n\
+                  dot 0 0;\n\
+                cell 1 2" in
+  check "v0.1.421: an affine index in the loop parameter is planned" (planned mm_src) "dot";
+  check "v0.1.421: the affine case computes the same with the pass off"
+    (let on = Pipeline.process mm_src in
+     Ast.range_version_enabled := false;
+     let off = (try Pipeline.process mm_src with e -> Ast.range_version_enabled := true; raise e) in
+     Ast.range_version_enabled := true;
+     if on = off then "same:" ^ on else "on=" ^ on ^ " off=" ^ off) "same:392";
+  check "v0.1.421: the fast copy of a local loop is lifted and reads unchecked"
+    (let c = rv_c mm_src in
+     (* `dot` is local to `cell`, so its fast copy is an inner-lifted function:
+        the name carries the __rvfast suffix but not the mu_ prefix. *)
+     if has c "mere_vec_int_get_unchecked(" && has c "dot__rvfast" then "lifted" else "none") "lifted";
+  check "v0.1.421: a decreasing index (n - 1 - i) is planned"
+    (planned "let n = 8;\nlet v = vec_new ();\n\
+              let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v i in fill (i + 1);\n\
+              let _ = fill 0;\n\
+              let rec rev = fn (i: int) -> fn (acc: int) -> if i == n then acc else rev (i + 1) (acc + vec_get v (n - 1 - i));\n\
+              rev 0 0") "rev";
+  check "v0.1.421: `i % n` and `i / 2` do not qualify"
+    (planned "let n = 8;\nlet v = vec_new ();\n\
+              let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v i in fill (i + 1);\n\
+              let _ = fill 0;\n\
+              let rec wrap = fn (i: int) -> fn (acc: int) -> if i == n then acc else wrap (i + 1) (acc + vec_get v (i % n) + vec_get v (i / 2));\n\
+              wrap 0 0") "";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
