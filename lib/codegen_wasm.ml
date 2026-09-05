@@ -133,34 +133,10 @@ let fresh_local_v128 () =
   local_types := !local_types @ ["v128"];
   n
 let simd_locals : (string * int) list ref = ref []
-let simd_result_ops = [ "f64x2_splat"; "f64x2_make"; "f64x2_add"; "f64x2_sub"; "f64x2_mul"; "f64x2_div";
-                        "f64x2_load"; "__f64x2_load_unchecked";
-                        "u8x16_splat"; "u8x16_from_bytes"; "u8x16_load"; "__u8x16_load_unchecked";
-                        "u8x16_and"; "u8x16_or"; "u8x16_xor"; "u8x16_sub_sat"; "u8x16_eq"; "u8x16_swizzle";
-                        "u8x16_shr"; "u8x16_shift_in" ]
-let simd_scalar_ops = [ "f64x2_extract"; "f64x2_reduce_add"; "f64x2_store"; "__f64x2_store_unchecked";
-                        "u8x16_extract"; "u8x16_any_true"; "u8x16_reduce_add" ]
-let simd_head (e : Ast.expr) : string option =
-  let h, _ = Ast.rv_spine e in
-  match h.Ast.node with
-  | Ast.Var n when List.mem n simd_result_ops || List.mem n simd_scalar_ops -> Some n
-  | _ -> None
-(* `name` is used in `body` only as a direct operand of a SIMD builtin, never
-   under a lambda (a capture would need the box) and never anywhere else. *)
-let simd_operand_only (name : string) (body : Ast.expr) : bool =
-  let rec mentions (e : Ast.expr) =
-    (match e.Ast.node with Ast.Var n when n = name -> true | _ -> false)
-    || List.exists mentions (Ast.children e) in
-  let rec ok (e : Ast.expr) : bool =
-    match e.Ast.node with
-    | Ast.Var n when n = name -> false
-    | Ast.Fun (_, _, b) -> not (mentions b)
-    | Ast.App _ when simd_head e <> None ->
-      let _, args = Ast.rv_spine e in
-      List.for_all (fun a -> match a.Ast.node with Ast.Var n when n = name -> true | _ -> ok a) args
-    | _ -> List.for_all ok (Ast.children e)
-  in
-  ok body
+let simd_result_ops = Ast.simd_result_ops
+let simd_scalar_ops = Ast.simd_scalar_ops
+let simd_head = Ast.simd_head
+let simd_operand_only = Ast.simd_operand_only
 
 (* String literals live in linear memory. Each Str_lit is laid out
    sequentially starting at `str_initial_offset` (we reserve the first

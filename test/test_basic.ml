@@ -14953,8 +14953,8 @@ let () =
     "print_int (u8x16_extract (u8x16_splat 7) 3)" "(compiled without error)";
   check "v0.1.426: the emission sets vl with vsetivli x0, 16, e8"
     (if has_word (rv_bin "print_int (u8x16_extract (u8x16_splat 7) 3)") 0xC0087057 then "vsetivli" else "none") "vsetivli";
-  check "v0.1.426: u8x16_and is vand.vv v3, v1, v2"
-    (if has_word (rv_bin "print_int (u8x16_extract (u8x16_and (u8x16_splat 6) (u8x16_splat 3)) 0)") 0x261101d7 then "vand" else "none") "vand";
+  check "v0.1.426: u8x16_and is vand.vv v1, v1, v2 (tree registers since v0.1.430)"
+    (if has_word (rv_bin "print_int (u8x16_extract (u8x16_and (u8x16_splat 6) (u8x16_splat 3)) 0)") 0x261100d7 then "vand" else "none") "vand";
   check "v0.1.426: _start turns mstatus.VS on"
     (if has_word (rv_bin "print_int 1") 0x3002A073 then "csrrs" else "none") "csrrs";
   rv_err_contains "v0.1.426: bytes compile for RV32I (of_hex, get, len, slice, concat)"
@@ -15026,6 +15026,42 @@ let () =
   check "v0.1.429: a SIMD value that escapes (passed to a function) is boxed"
     (let w = wasm "let f = fn (x: u8x16) -> u8x16_extract x 0 in let a = u8x16_splat 9 in f a + f (u8x16_splat 1)" in
      if has w "call $__mere_box_v128" then "boxed" else "not boxed") "boxed";
+
+  (* v0.1.430 (Q-112): u8x16 expression trees on RISC-V are evaluated in the
+     vector registers and boxed once, at the root; a let-bound value used only
+     as an operand lives in v8..v15 when no call runs before its last use. The
+     store into a fresh box is the vse8.v to a0 that v_box emits, so its count
+     is the number of boxes the program makes. The lets sit inside a function:
+     a top-level `let ... in` is a global on this backend. *)
+  (let rv_typed src =
+     let prog = Pipeline.parse_program src in
+     let type_env = ref Typer.initial_env in
+     let mt = Typer.infer !type_env (Ast.desugar_program prog) in
+     (prog, mt) in
+   let rv_bin src = let (prog, mt) = rv_typed src in Codegen_riscv.emit_program ~main_ty:mt prog in
+   let words bin =
+     let n = String.length bin / 4 in
+     List.init n (fun i ->
+         Char.code bin.[4 * i] lor (Char.code bin.[4 * i + 1] lsl 8)
+         lor (Char.code bin.[4 * i + 2] lsl 16) lor (Char.code bin.[4 * i + 3] lsl 24)) in
+   let boxes src = List.length (List.filter (fun w -> w land 0xFE0FF07F = 0x02050027) (words (rv_bin src))) in
+   let opv f6 vm vs2 vs1 f3 vd =
+     (f6 lsl 26) lor (vm lsl 25) lor (vs2 lsl 20) lor (vs1 lsl 15) lor (f3 lsl 12) lor (vd lsl 7) lor 0x57 in
+   let has_word src w = List.mem w (words (rv_bin src)) in
+   check "v0.1.430: a u8x16 tree with a scalar root makes no box"
+     (string_of_int (boxes "print_int (u8x16_reduce_add (u8x16_and (u8x16_or (u8x16_splat 1) (u8x16_splat 2)) (u8x16_splat 3)))")) "0";
+   check "v0.1.430: let-bound operands live in v8 and v9"
+     (let src = "let g = fn (k: int) -> let a = u8x16_splat k in let b = u8x16_splat 2 in u8x16_reduce_add (u8x16_and a b);\nprint_int (g 3)" in
+      Printf.sprintf "boxes:%d v8:%b v9:%b" (boxes src) (has_word src (opv 23 1 0 1 0 8)) (has_word src (opv 23 1 0 1 0 9)))
+     "boxes:0 v8:true v9:true";
+   check "v0.1.430: a call after the last use leaves the value in its register"
+     (string_of_int (boxes "let f = fn (x: int) -> x + 1;\nlet g = fn (k: int) -> let a = u8x16_splat k in let s = u8x16_reduce_add a in f s;\nprint_int (g 1)")) "0";
+   check "v0.1.430: a call before the last use keeps the value boxed"
+     (string_of_int (boxes "let f = fn (x: int) -> x + 1;\nlet g = fn (k: int) -> let a = u8x16_splat k in let s = f 3 in u8x16_reduce_add a + s;\nprint_int (g 1)")) "1";
+   check "v0.1.430: shift_in, swizzle, eq, shr and extract stay in registers"
+     (string_of_int (boxes "let g = fn (k: int) -> let a = u8x16_splat k in let b = u8x16_shift_in a (u8x16_splat 9) 3 in let c = u8x16_swizzle b (u8x16_splat 1) in u8x16_extract (u8x16_eq c b) 0 + u8x16_reduce_add (u8x16_shr c 1);\nprint_int (g 7)")) "0";
+   check "v0.1.430: a call through a closure bound inside the body counts as a call"
+     (string_of_int (boxes "let g = fn (k: int) -> let a = u8x16_splat k in let h = fn (x: int) -> x + 1 in let s = h 3 in u8x16_reduce_add a + s;\nprint_int (g 1)")) "1");
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
