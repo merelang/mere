@@ -914,7 +914,7 @@ let decl_exprs (d : top_decl) : expr list =
    loop-invariant containers pays a bounds check per element, and on the C and
    LLVM backends those checks are early exits that stop clang from vectorizing
    the loop (measured: axpy at 2.8x hand-written C, the check's shape and not
-   SIMD being most of the gap — note 196). This pass checks the WHOLE index
+   SIMD being most of the gap). This pass checks the WHOLE index
    range once, before the loop, and runs one of two copies of the loop:
 
      let rec f = fn i -> fn p ->
