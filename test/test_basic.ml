@@ -15063,5 +15063,20 @@ let () =
    check "v0.1.430: a call through a closure bound inside the body counts as a call"
      (string_of_int (boxes "let g = fn (k: int) -> let a = u8x16_splat k in let h = fn (x: int) -> x + 1 in let s = h 3 in u8x16_reduce_add a + s;\nprint_int (g 1)")) "1");
 
+  (* v0.1.431: the tagged variant pointers cast through uintptr_t, and glibc
+     does not define it without <stdint.h>. The header must come before the
+     first use, in every program that has a boxed variant. *)
+  check "v0.1.431: the C prelude includes <stdint.h> before the first uintptr_t"
+    (let codegen s =
+       let prog = Pipeline.parse_program s in
+       let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+       Codegen_c.emit_program ~main_ty prog in
+     let c = codegen "type t = A of int | B of int * int;\nmatch A 1 with A n -> print_int n | B (a, b) -> print_int (a + b)" in
+     let find sub = let n = String.length sub in
+       let rec go i = if i + n > String.length c then -1 else if String.sub c i n = sub then i else go (i + 1) in go 0 in
+     let inc = find "#include <stdint.h>" and use = find "uintptr_t" in
+     if inc < 0 then "no include" else if use < 0 then "no uintptr_t use" else if inc < use then "include first" else "use first")
+    "include first";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
