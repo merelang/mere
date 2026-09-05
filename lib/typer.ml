@@ -2380,6 +2380,13 @@ let initial_env : env =
     ("vec_push",   vec_push_scheme);
     ("vec_get",    vec_get_scheme);
     ("vec_len",    vec_len_scheme);
+    (* Q-108: what the range-check versioning pass (Ast.range_version_program)
+       lowers `vec_get` / `vec_set` / `bytes_get` to once a loop's whole index
+       range has been checked before the loop. Same types as the checked
+       builtins; the interpreter keeps them checked; never written by hand. *)
+    ("__vec_get_unchecked",   vec_get_scheme);
+    ("__vec_set_unchecked",   vec_set_scheme);
+    ("__bytes_get_unchecked", mono (Ast.TyArrow (Ast.TyBytes, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
   ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =

@@ -1,0 +1,12 @@
+// range-version: go
+// A local loop inside a function, capturing a parameter (`w`) as well as the
+// globals. The fast copy is a sibling `let rec` with the same captures.
+let n = 8;
+let v = vec_new ();
+let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v (i * 3) in fill (i + 1);
+let _ = fill 0;
+let sum_all = fn (w: int) ->
+  let rec go = fn (i: int) -> fn (acc: int) ->
+    if i == n then acc else go (i + 1) (acc + vec_get v i + w) in
+  go 0 0;
+print (str_of_int (sum_all 1))

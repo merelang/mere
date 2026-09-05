@@ -907,3 +907,504 @@ let decl_exprs (d : top_decl) : expr list =
   | Top_view _ | Top_extern _ | Top_extern_type _ | Top_drop _
   | Top_sync _ | Top_local _ | Top_ctor_alias _ | Top_record_alias _
   | Top_trait _ | Top_impl _ -> []
+
+(* ---- Q-108: range-check versioning ----------------------------------------
+   A tail-recursive loop `let rec f = fn (i: int) -> ... if i == n then base else
+   step` whose body reads `vec_get v i` / `vec_set v i x` / `bytes_get b i` on
+   loop-invariant containers pays a bounds check per element, and on the C and
+   LLVM backends those checks are early exits that stop clang from vectorizing
+   the loop (measured: axpy at 2.8x hand-written C, the check's shape and not
+   SIMD being most of the gap — note 196). This pass checks the WHOLE index
+   range once, before the loop, and runs one of two copies of the loop:
+
+     let rec f = fn i -> fn p ->
+       if i >= 0 && i <= n && n <= vec_len v && ... then f__rvfast i p else f__rvslow i p
+     and f__rvfast = <body with the conforming accesses unchecked, self-calls -> f__rvfast>
+     and f__rvslow = <the original body, self-calls -> f__rvslow>
+
+   The guard true means every access of every iteration i..n-1 is in range, so
+   the checks it removes could never have fired; the guard false runs the
+   original code, which fails at the same iteration with the same message. The
+   pass never changes what a program prints or how it fails.
+
+   What it needs to be sure of, all syntactic (this runs before typing):
+     1. the exit test compares the index parameter with a loop-invariant bound
+        (an int literal, a variable bound outside the fn, or `vec_len` /
+        `bytes_len` of an invariant container);
+     2. every self call in the step is in tail position and passes exactly
+        `i + 1` for the index;
+     3. the body has no lambda, calls only builtins, itself, or top-level
+        functions that are themselves loop-safe (transitively), and none of
+        those calls can change a Vec's length or run code the pass cannot see
+        (a builtin that takes a function — `unsafe_builtins`, derived from the
+        typer's environment by the caller);
+     4. the body rebinds none of the names it relies on.
+   An access that does not fit (a different index, a container passed as a
+   parameter) simply stays checked in both copies. `while` loops (no index
+   parameter) are not touched. MERE_NO_RANGE_VERSION=1 turns the pass off;
+   MERE_RANGE_VERSION_LOG=1 names each rewritten function on stderr, so a gate
+   can tell "did not fire" from "fired and was harmless". *)
+let range_version_enabled = ref (Sys.getenv_opt "MERE_NO_RANGE_VERSION" = None)
+let range_version_log = ref (Sys.getenv_opt "MERE_RANGE_VERSION_LOG" <> None)
+let range_versioned : string list ref = ref []
+
+let rv_len_changing = [ "vec_push"; "vec_compact"; "vec_to_owned"; "owned_vec_to_vec"; "lb_push" ]
+
+let rec rv_bound_names (e : expr) : string list =
+  let here =
+    match e.node with
+    | Let (p, _, _) -> pattern_vars p
+    | Let_rec (bs, _) -> List.map fst bs
+    | Fun (x, _, _) -> [x]
+    | With (n, _, _) -> [n]
+    | Match (_, arms) -> List.concat_map (fun (p, _, _) -> pattern_vars p) arms
+    | Region_loop (_, x, _) -> [x]
+    | _ -> []
+  in
+  here @ List.concat_map rv_bound_names (children e)
+
+let rec rv_peel_funs (e : expr) : (string * ty option) list * expr =
+  match e.node with
+  | Fun (x, t, b) -> let ps, body = rv_peel_funs b in ((x, t) :: ps, body)
+  | _ -> ([], e)
+
+(* A lambda anywhere below e -- except the Fun chain that IS a local `let rec`
+   helper's definition, whose body is judged on its own by rv_body_safe. *)
+let rec rv_has_fun_below (e : expr) : bool =
+  match e.node with
+  | Fun _ -> true
+  | Let_rec (bs, b) ->
+    List.exists (fun (_, v) -> let _, inner = rv_peel_funs v in rv_has_fun_below inner) bs
+    || rv_has_fun_below b
+  | _ -> List.exists rv_has_fun_below (children e)
+
+(* Peel `f a1 a2 ... ak` into (head, [a1; ...; ak]). *)
+let rec rv_spine (e : expr) : expr * expr list =
+  match e.node with
+  | App (f, a) -> let h, args = rv_spine f in (h, args @ [a])
+  | _ -> (e, [])
+
+(* Every call head in e is a Var that `ok_head` accepts, and no call is to a
+   length-changing or unsafe builtin. Calls appear as App spines; the spine's
+   arguments are checked recursively. *)
+let rec rv_calls_ok ~(ok_head : string -> bool) (e : expr) : bool =
+  match e.node with
+  | App _ ->
+    let h, args = rv_spine e in
+    (match h.node with
+     | Var name -> ok_head name && List.for_all (rv_calls_ok ~ok_head) args
+     | _ -> false)
+  | _ -> List.for_all (rv_calls_ok ~ok_head) (children e)
+
+(* The `let rec` bindings anywhere inside e (a helper loop a body may call). *)
+let rec rv_local_recs (e : expr) : (string * expr) list =
+  (match e.node with Let_rec (bs, _) -> bs | _ -> [])
+  @ List.concat_map rv_local_recs (children e)
+
+(* `rv_calls_ok`, where a call to a local `let rec` helper is also fine when that
+   helper's own body passes (no lambda, safe calls) -- a fixpoint over the local
+   recs, starting from "all safe" and removing until nothing changes. *)
+let rv_body_safe ~(ok_head : string -> bool) (body : expr) : bool =
+  let recs = rv_local_recs body in
+  let safe = ref (List.map fst recs) in
+  let ok h = ok_head h || List.mem h !safe in
+  let step () =
+    let before = List.length !safe in
+    safe := List.filter (fun n ->
+      let _, inner = rv_peel_funs (List.assoc n recs) in
+      not (rv_has_fun_below inner) && rv_calls_ok ~ok_head:ok inner) !safe;
+    List.length !safe <> before
+  in
+  while step () do () done;
+  rv_calls_ok ~ok_head:ok body
+
+(* Top-level functions whose bodies a loop may call without the guard going
+   stale: no lambda, every call head a builtin or another loop-safe top-level
+   function (fixpoint over the program). *)
+let rv_loop_safe_toplevels ~(unsafe_builtins : string list) (prog : program) : string list =
+  let fns =
+    List.concat_map (fun d ->
+      match d with
+      | Top_let ({ pnode = P_var n; _ }, v) -> [ (n, v) ]
+      | Top_let_rec bs -> bs
+      | _ -> []) prog.decls
+  in
+  let names = List.map fst fns in
+  let user_bound = names in
+  let safe = ref names in
+  let is_builtin n = not (List.mem n user_bound) in
+  let step () =
+    let before = List.length !safe in
+    safe := List.filter (fun n ->
+      let body = List.assoc n fns in
+      let _, inner = rv_peel_funs body in
+      let locals = rv_bound_names inner in
+      let ok_head h =
+        (h = n)
+        || (is_builtin h && not (List.mem h locals)
+            && not (List.mem h rv_len_changing) && not (List.mem h unsafe_builtins))
+        || (List.mem h !safe && not (List.mem h locals))
+      in
+      not (rv_has_fun_below inner) && rv_body_safe ~ok_head inner) !safe;
+    List.length !safe <> before
+  in
+  while step () do () done;
+  !safe
+
+(* Rewrite the conforming accesses of `idx` on invariant containers, and every
+   `Var self` into `Var self'`. Returns the rewritten expression and the
+   containers whose accesses it made unchecked (vecs, bytes). *)
+let rv_rewrite ~(self : string) ~(self' : string) ~(idx : string)
+    ~(invariant : string -> bool) (e : expr) : expr * string list * string list =
+  let vecs = ref [] and bytes = ref [] in
+  let note r v = if not (List.mem v !r) then r := v :: !r in
+  let rec go (e : expr) : expr =
+    match e.node with
+    | Var n when n = self -> { e with node = Var self' }
+    | App ({ node = App ({ node = Var "vec_get"; loc = l1; ty = t1 }, ({ node = Var v; _ } as ve)); loc = l2; ty = t2 },
+           { node = Var i; _ })
+      when i = idx && invariant v ->
+      note vecs v;
+      { e with node = App ({ node = App ({ node = Var "__vec_get_unchecked"; loc = l1; ty = t1 }, ve); loc = l2; ty = t2 },
+                           (match e.node with App (_, a) -> a | _ -> assert false)) }
+    | App ({ node = App ({ node = App ({ node = Var "vec_set"; loc = l1; ty = t1 }, ({ node = Var v; _ } as ve)); loc = l2; ty = t2 },
+                         ({ node = Var i; _ } as ie)); loc = l3; ty = t3 }, x)
+      when i = idx && invariant v ->
+      note vecs v;
+      { e with node = App ({ node = App ({ node = App ({ node = Var "__vec_set_unchecked"; loc = l1; ty = t1 }, ve); loc = l2; ty = t2 }, ie); loc = l3; ty = t3 }, go x) }
+    | App ({ node = App ({ node = Var "bytes_get"; loc = l1; ty = t1 }, ({ node = Var b; _ } as be)); loc = l2; ty = t2 },
+           { node = Var i; _ })
+      when i = idx && invariant b ->
+      note bytes b;
+      { e with node = App ({ node = App ({ node = Var "__bytes_get_unchecked"; loc = l1; ty = t1 }, be); loc = l2; ty = t2 },
+                           (match e.node with App (_, a) -> a | _ -> assert false)) }
+    | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit | Var _ -> e
+    | Neg a -> { e with node = Neg (go a) }
+    | Bin (op, a, b) -> { e with node = Bin (op, go a, go b) }
+    | Cmp (op, a, b) -> { e with node = Cmp (op, go a, go b) }
+    | Logic (op, a, b) -> { e with node = Logic (op, go a, go b) }
+    | Let (p, v, b) -> { e with node = Let (p, go v, go b) }
+    | Let_rec (bs, b) -> { e with node = Let_rec (List.map (fun (n, v) -> (n, go v)) bs, go b) }
+    | With (n, v, b) -> { e with node = With (n, go v, go b) }
+    | If (c, t, el) -> { e with node = If (go c, go t, go el) }
+    | Fun (p, t, b) -> { e with node = Fun (p, t, go b) }
+    | App (f, a) -> { e with node = App (go f, go a) }
+    | Annot (a, t) -> { e with node = Annot (go a, t) }
+    | Constr (n, Some a) -> { e with node = Constr (n, Some (go a)) }
+    | Constr (_, None) -> e
+    | Match (s, arms) ->
+      { e with node = Match (go s, List.map (fun (p, g, b) -> (p, Option.map go g, go b)) arms) }
+    | Tuple es -> { e with node = Tuple (List.map go es) }
+    | Region_block (n, b) -> { e with node = Region_block (n, go b) }
+    | Region_loop (n, x, b) -> { e with node = Region_loop (n, x, go b) }
+    | Ref (m, r, a) -> { e with node = Ref (m, r, go a) }
+    | Record_lit (n, fs) -> { e with node = Record_lit (n, List.map (fun (f, x) -> (f, go x)) fs) }
+    | Field_get (a, f) -> { e with node = Field_get (go a, f) }
+    | Record_update (a, fs) -> { e with node = Record_update (go a, List.map (fun (f, x) -> (f, go x)) fs) }
+  in
+  let e' = go e in
+  (e', List.rev !vecs, List.rev !bytes)
+
+(* All self calls in `step` are saturated (arity k), in tail position, and pass
+   `idx + 1` at position `ipos`. Returns false if any self call sits elsewhere. *)
+let rv_step_ok ~(self : string) ~(idx : string) ~(ipos : int) ~(arity : int) (step : expr) : bool =
+  let rec count (e : expr) : int =
+    (match e.node with Var n when n = self -> 1 | _ -> 0)
+    + List.fold_left (fun acc c -> acc + count c) 0 (children e)
+  in
+  let is_incr (a : expr) =
+    match a.node with
+    | Bin (Add, { node = Var i; _ }, { node = Int_lit 1; _ })
+    | Bin (Add, { node = Int_lit 1; _ }, { node = Var i; _ }) -> i = idx
+    | _ -> false
+  in
+  (* number of self calls found in tail position that are well-formed *)
+  let rec tail (e : expr) : int option =
+    match e.node with
+    | App _ ->
+      let h, args = rv_spine e in
+      (match h.node with
+       | Var n when n = self ->
+         if List.length args = arity && is_incr (List.nth args ipos)
+            && List.for_all (fun a -> count a = 0) args
+         then Some 1 else None
+       | _ -> if count e = 0 then Some 0 else None)
+    | Let (_, v, b) -> if count v = 0 then tail b else None
+    | Let_rec (bs, b) -> if List.for_all (fun (_, v) -> count v = 0) bs then tail b else None
+    | With (_, v, b) -> if count v = 0 then tail b else None
+    | If (c, t, el) ->
+      if count c <> 0 then None
+      else (match tail t, tail el with Some a, Some b -> Some (a + b) | _ -> None)
+    | Match (s, arms) ->
+      if count s <> 0 then None
+      else List.fold_left (fun acc (_, g, b) ->
+        match acc, g with
+        | Some n, None -> (match tail b with Some m -> Some (n + m) | None -> None)
+        | Some n, Some ge -> if count ge = 0 then (match tail b with Some m -> Some (n + m) | None -> None) else None
+        | None, _ -> None) (Some 0) arms
+    | Region_block (_, b) -> tail b
+    | _ -> if count e = 0 then Some 0 else None
+  in
+  match tail step with
+  | Some n -> n = count step && n >= 1
+  | None -> false
+
+(* A versioned loop: the fast copy, and how to dispatch to it at a call site. *)
+type rv_plan = {
+  rv_name : string;
+  rv_fast : string * expr;
+  rv_arity : int;
+  rv_ipos : int;
+  rv_guard : expr -> expr;        (* the guard, from the index argument at the call site *)
+  rv_guard_names : string list;   (* what the guard reads: the bound and the containers *)
+}
+
+(* Generic scope-tracking map: `f shadow e` may replace a node; otherwise the
+   children are visited with `shadow` extended by whatever the node binds. *)
+let rec rv_map_scoped ~(shadow : string list) (f : string list -> expr -> expr option) (e : expr) : expr =
+  match f shadow e with
+  | Some e' -> e'
+  | None ->
+    let g sh x = rv_map_scoped ~shadow:sh f x in
+    match e.node with
+    | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit | Var _ -> e
+    | Neg a -> { e with node = Neg (g shadow a) }
+    | Bin (op, a, b) -> { e with node = Bin (op, g shadow a, g shadow b) }
+    | Cmp (op, a, b) -> { e with node = Cmp (op, g shadow a, g shadow b) }
+    | Logic (op, a, b) -> { e with node = Logic (op, g shadow a, g shadow b) }
+    | Let (p, v, b) -> { e with node = Let (p, g shadow v, g (pattern_vars p @ shadow) b) }
+    | Let_rec (bs, b) ->
+      let sh = List.map fst bs @ shadow in
+      { e with node = Let_rec (List.map (fun (n, v) -> (n, g sh v)) bs, g sh b) }
+    | With (n, v, b) -> { e with node = With (n, g shadow v, g (n :: shadow) b) }
+    | If (c, t, el) -> { e with node = If (g shadow c, g shadow t, g shadow el) }
+    | Fun (x, t, b) -> { e with node = Fun (x, t, g (x :: shadow) b) }
+    | App (a, b) -> { e with node = App (g shadow a, g shadow b) }
+    | Annot (a, t) -> { e with node = Annot (g shadow a, t) }
+    | Constr (n, Some a) -> { e with node = Constr (n, Some (g shadow a)) }
+    | Constr (_, None) -> e
+    | Match (sc, arms) ->
+      { e with node = Match (g shadow sc,
+        List.map (fun (p, gd, b) -> let sh = pattern_vars p @ shadow in (p, Option.map (g sh) gd, g sh b)) arms) }
+    | Tuple es -> { e with node = Tuple (List.map (g shadow) es) }
+    | Region_block (n, b) -> { e with node = Region_block (n, g shadow b) }
+    | Region_loop (n, x, b) -> { e with node = Region_loop (n, x, g (x :: shadow) b) }
+    | Ref (m, r, a) -> { e with node = Ref (m, r, g shadow a) }
+    | Record_lit (n, fs) -> { e with node = Record_lit (n, List.map (fun (fl, x) -> (fl, g shadow x)) fs) }
+    | Field_get (a, fl) -> { e with node = Field_get (g shadow a, fl) }
+    | Record_update (a, fs) -> { e with node = Record_update (g shadow a, List.map (fun (fl, x) -> (fl, g shadow x)) fs) }
+
+(* A structural copy with every `ty` cleared: `expr.ty` is mutable and set by
+   the typer, so a subtree the pass places twice (the bound in a guard, an
+   atomic argument in both branches of a dispatch) gets its own nodes. *)
+let rv_clone (e : expr) : expr =
+  rv_map_scoped ~shadow:[] (fun _ e ->
+    match e.node with
+    | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit | Var _ -> Some { e with ty = None }
+    | _ -> None) e
+
+(* Analyse one `let rec name = value` and plan its fast copy, or None. *)
+let rv_plan_binding ~(loop_safe : string list) ~(unsafe_builtins : string list)
+    ~(user_bound : string list) ~(outer : string list)
+    ((name, value) : string * expr) : rv_plan option =
+  let params, body = rv_peel_funs value in
+  if params = [] then None else
+  let pnames = List.map fst params in
+  let locals = rv_bound_names body in
+  let relied n = n = name || List.mem n pnames in
+  if List.exists relied locals then None else
+  match body.node with
+  | If (cond, a, b) ->
+    let invariant v =
+      not (List.mem v pnames) && not (List.mem v locals)
+      && (List.mem v outer || List.mem v user_bound)
+    in
+    (* the bound: pure arithmetic over invariants (`n`, `n * n`, `vec_len v - 1`) --
+       it is duplicated into the guard, so it must have no effect and no call *)
+    let rec bound_ok (n : expr) =
+      match n.node with
+      | Int_lit _ -> true
+      | Var v -> invariant v
+      | App ({ node = Var ("vec_len" | "bytes_len"); _ }, { node = Var v; _ }) -> invariant v
+      | Bin ((Add | Sub | Mul | Div | Mod), a, b) -> bound_ok a && bound_ok b
+      | Neg a -> bound_ok a
+      | _ -> false
+    in
+    let rec bound_vars (n : expr) : string list =
+      match n.node with
+      | Var v -> [ v ]
+      | App (_, { node = Var v; _ }) -> [ v ]
+      | Bin (_, a, b) -> bound_vars a @ bound_vars b
+      | Neg a -> bound_vars a
+      | _ -> []
+    in
+    let pick =
+      let sides (l : expr) (r : expr) =
+        match l.node, r.node with
+        | Var i, _ when List.mem i pnames && bound_ok r -> Some (i, r)
+        | _, Var i when List.mem i pnames && bound_ok l -> Some (i, l)
+        | _ -> None
+      in
+      match cond.node with
+      | Cmp (Eq, l, r) -> Option.map (fun (i, n) -> (i, n, true)) (sides l r)
+      | Cmp (Ne, l, r) -> Option.map (fun (i, n) -> (i, n, false)) (sides l r)
+      | Cmp (Ge, ({ node = Var _; _ } as l), r) | Cmp (Le, r, ({ node = Var _; _ } as l)) ->
+        Option.map (fun (i, n) -> (i, n, true)) (sides l r)
+      | Cmp (Lt, ({ node = Var _; _ } as l), r) | Cmp (Gt, r, ({ node = Var _; _ } as l)) ->
+        Option.map (fun (i, n) -> (i, n, false)) (sides l r)
+      | _ -> None
+    in
+    (match pick with
+     | None -> None
+     | Some (idx, bound, exit_when_true) ->
+       let base, step = if exit_when_true then (a, b) else (b, a) in
+       let ipos = let rec find k = function [] -> -1 | p :: ps -> if p = idx then k else find (k + 1) ps in find 0 pnames in
+       let arity = List.length params in
+       let is_builtin h =
+         not (List.mem h user_bound) && not (List.mem h locals)
+         && not (List.mem h pnames) && not (List.mem h outer) in
+       let ok_head h =
+         h = name
+         || (is_builtin h && not (List.mem h rv_len_changing) && not (List.mem h unsafe_builtins))
+         || (List.mem h loop_safe && not (List.mem h locals) && not (List.mem h pnames))
+       in
+       let self_free e =
+         let rec c (e : expr) =
+           (match e.node with Var n when n = name -> 1 | _ -> 0)
+           + List.fold_left (fun acc x -> acc + c x) 0 (children e) in
+         c e = 0
+       in
+       if not (self_free base && self_free cond) then None
+       else if rv_has_fun_below body then None
+       else if not (rv_body_safe ~ok_head body) then None
+       else if not (rv_step_ok ~self:name ~idx ~ipos ~arity step) then None
+       else begin
+         let fast = name ^ "__rvfast" in
+         let fast_body, vecs, bytes = rv_rewrite ~self:name ~self':fast ~idx ~invariant body in
+         if vecs = [] && bytes = [] then None
+         else begin
+           let mk node = { loc = value.loc; ty = None; node } in
+           let var n = mk (Var n) in
+           let rec wrap ps b = match ps with [] -> b | (x, t) :: rest -> mk (Fun (x, t, wrap rest b)) in
+           let bound_names = bound_vars bound in
+           let guard (iarg : expr) =
+             let conj x y = mk (Logic (And, x, y)) in
+             let len_ok fn c = mk (Cmp (Le, rv_clone bound, mk (App (var fn, var c)))) in
+             List.fold_left conj
+               (conj (mk (Cmp (Ge, rv_clone iarg, mk (Int_lit 0)))) (mk (Cmp (Le, rv_clone iarg, rv_clone bound))))
+               (List.map (len_ok "vec_len") vecs @ List.map (len_ok "bytes_len") bytes)
+           in
+           if !range_version_log then prerr_endline ("range-version: " ^ name);
+           range_versioned := name :: !range_versioned;
+           Some { rv_name = name; rv_fast = (fast, wrap params fast_body); rv_arity = arity;
+                  rv_ipos = ipos; rv_guard = guard; rv_guard_names = bound_names @ vecs @ bytes }
+         end
+       end)
+  | _ -> None
+
+(* Rewrite the saturated call sites of the planned loops in e. Only a call whose
+   arguments are atoms is dispatched (they are duplicated into both branches, so
+   they must have no effect and no cost), and only where neither the loop's name
+   nor anything the guard reads is shadowed on the way down. Everything else is
+   left alone and simply runs the original (checked) loop. *)
+let rv_apply_plans (plans : rv_plan list) (e : expr) : expr =
+  let atomic (a : expr) =
+    match a.node with
+    | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit | Var _ -> true
+    | Neg { node = Int_lit _; _ } -> true
+    | _ -> false
+  in
+  rv_map_scoped ~shadow:[] (fun shadow e ->
+    match e.node with
+    | App _ ->
+      let h, args = rv_spine e in
+      (match h.node with
+       | Var n when not (List.mem n shadow) ->
+         (match List.find_opt (fun p -> p.rv_name = n) plans with
+          | Some p when List.length args = p.rv_arity && List.for_all atomic args
+                        && not (List.exists (fun g -> List.mem g shadow) p.rv_guard_names) ->
+            if !range_version_log then prerr_endline ("range-version: " ^ n ^ " @call");
+            let mk node = { loc = e.loc; ty = None; node } in
+            let fast_call =
+              List.fold_left (fun acc a -> mk (App (acc, rv_clone a))) (mk (Var (fst p.rv_fast))) args in
+            Some (mk (If (p.rv_guard (List.nth args p.rv_ipos), fast_call, e)))
+          | _ -> None)
+       | _ -> None)
+    | _ -> None) e
+
+let range_version_program ~(unsafe_builtins : string list) (prog : program) : program =
+  range_versioned := [];
+  if not !range_version_enabled then prog else begin
+    let user_bound =
+      ref (List.concat_map (fun d ->
+        match d with
+        | Top_let (p, _) -> pattern_vars p
+        | Top_let_rec bs -> List.map fst bs
+        | _ -> []) prog.decls)
+    in
+    let relied = [ "vec_get"; "vec_set"; "bytes_get"; "vec_len"; "bytes_len" ] in
+    let all_bound =
+      !user_bound
+      @ List.concat_map rv_bound_names (List.concat_map decl_exprs prog.decls @ [ prog.main ]) in
+    if List.exists (fun n -> List.mem n all_bound) relied then prog else begin
+      let loop_safe = ref (rv_loop_safe_toplevels ~unsafe_builtins prog) in
+      (* local loops: `let rec f = .. in body` becomes
+         `let rec f__rvfast = .. in let rec f = .. in <body with dispatching call sites>` *)
+      let rec transform ~(shadow : string list) (e : expr) : expr =
+        rv_map_scoped ~shadow (fun shadow e ->
+          match e.node with
+          | Let_rec ([ (name, value) ], body) ->
+            let sh = name :: shadow in
+            let value = transform ~shadow:sh value in
+            let body = transform ~shadow:sh body in
+            (match rv_plan_binding ~loop_safe:!loop_safe ~unsafe_builtins ~user_bound:!user_bound
+                     ~outer:sh (name, value) with
+             | Some plan ->
+               let mk node = { loc = e.loc; ty = None; node } in
+               Some { e with node = Let_rec ([ plan.rv_fast ],
+                        mk (Let_rec ([ (name, value) ], rv_apply_plans [ plan ] body))) }
+             | None -> Some { e with node = Let_rec ([ (name, value) ], body) })
+          | _ -> None) e
+      in
+      let plans = ref [] in
+      let outer0 = !user_bound in
+      let decls =
+        List.concat_map (fun d ->
+          let binders =
+            match d with
+            | Top_let (p, _) -> pattern_vars p
+            | Top_let_rec bs -> List.map fst bs
+            | _ -> []
+          in
+          (* a top-level binding of a loop's name, or of something its guard reads,
+             shadows that plan for everything after it -- the plan this very decl
+             creates is added afterwards, so it is not filtered against itself *)
+          let live_plans =
+            List.filter (fun p ->
+              not (List.mem p.rv_name binders)
+              && not (List.exists (fun g -> List.mem g binders) p.rv_guard_names)) !plans
+          in
+          let out =
+            match d with
+            | Top_let (p, v) -> [ Top_let (p, transform ~shadow:outer0 (rv_apply_plans !plans v)) ]
+            | Top_let_rec [ (name, value) ] ->
+              let value = transform ~shadow:outer0 (rv_apply_plans !plans value) in
+              (match rv_plan_binding ~loop_safe:!loop_safe ~unsafe_builtins ~user_bound:!user_bound
+                       ~outer:outer0 (name, value) with
+               | Some plan ->
+                 let fast = fst plan.rv_fast in
+                 user_bound := fast :: !user_bound;
+                 if List.mem name !loop_safe then loop_safe := fast :: !loop_safe;
+                 plans := plan :: live_plans;
+                 [ Top_let_rec [ plan.rv_fast ]; Top_let_rec [ (name, value) ] ]
+               | None -> plans := live_plans; [ Top_let_rec [ (name, value) ] ])
+            | Top_let_rec bs ->
+              [ Top_let_rec (List.map (fun (n, v) -> (n, transform ~shadow:outer0 (rv_apply_plans !plans v))) bs) ]
+            | d -> [ d ]
+          in
+          (match d with Top_let_rec [ _ ] -> () | _ -> plans := live_plans);
+          out) prog.decls
+      in
+      { decls; main = transform ~shadow:outer0 (rv_apply_plans !plans prog.main) }
+    end
+  end
