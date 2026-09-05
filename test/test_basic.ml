@@ -14847,5 +14847,29 @@ let () =
               let rec wrap = fn (i: int) -> fn (acc: int) -> if i == n then acc else wrap (i + 1) (acc + vec_get v (i % n) + vec_get v (i / 2));\n\
               wrap 0 0") "";
 
+  (* v0.1.422 (Q-109): the two 128-bit SIMD types, f64x2 and u8x16, with the
+     four seed operations that build a value and read a lane back on every
+     backend. The interpreter is the oracle for lane order, the low-8-bits rule
+     of u8x16_splat, the lane-range failure, and the two refusals (== and <). *)
+  check "v0.1.422: f64x2_splat fills both lanes" (Pipeline.process "f64x2_extract (f64x2_splat 2.5) 1") "2.5";
+  check "v0.1.422: u8x16_splat keeps the low 8 bits" (Pipeline.process "u8x16_extract (u8x16_splat 300) 15") "44";
+  check "v0.1.422: show of a SIMD value names the type and its lanes"
+    (Pipeline.process "show (f64x2_splat 1.5)") "\"f64x2(1.5, 1.5)\"";
+  check "v0.1.422: a lane outside 0..lanes-1 fails like an index"
+    (try ignore (Pipeline.process "f64x2_extract (f64x2_splat 1.0) 2"); "no error"
+     with Eval.Eval_error (_, m) -> if has m "lane 2 out of range" then "lane error" else m) "lane error";
+  check "v0.1.422: == on a SIMD value is refused by the typer"
+    (try ignore (Pipeline.process "f64x2_splat 1.0 == f64x2_splat 1.0"); "accepted"
+     with Typer.Type_error (_, m) -> if has m "not comparable" then "refused" else m) "refused";
+  check "v0.1.422: the C backend uses the compiler's vector extension"
+    (let c = rv_c "let v = f64x2_splat 2.5;\nf64x2_extract v 1" in
+     if has c "mere_f64x2_splat(" && has c "vector_size(16)" then "vector" else "scalar") "vector";
+  check "v0.1.422: the LLVM backend uses first-class vector types"
+    (if has (llvm "let v = f64x2_splat 2.5;\nf64x2_extract v 1") "<2 x double>" then "vector" else "scalar") "vector";
+  check "v0.1.422: the Wasm backend uses v128"
+    (if has (wasm "let v = f64x2_splat 2.5;\nf64x2_extract v 1") "f64x2.splat" then "v128" else "scalar") "v128";
+  check "v0.1.422: the types spell themselves"
+    (Ast.pp_ty (Ast.TySimd Ast.F64x2) ^ "/" ^ Ast.pp_ty (Ast.TySimd Ast.U8x16)) "f64x2/u8x16";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

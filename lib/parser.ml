@@ -165,7 +165,7 @@ let substitute_params params args body =
     match t with
     | Ast.TyParam p ->
       (try List.assoc p mapping with Not_found -> t)
-    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit | Ast.TyVar _) -> t
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit | Ast.TyVar _) -> t
     | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
@@ -180,7 +180,7 @@ let expand_alias_or_tycon name args =
   | _ -> Ast.TyCon (name, args)
 
 let is_primitive_type_name = function
-  | "int" | "float" | "bool" | "str" | "bytes" | "unit" -> true
+  | "int" | "float" | "bool" | "str" | "bytes" | "unit" | "f64x2" | "u8x16" -> true
   | _ -> false
 
 let rec parse_program_internal tokens =
@@ -271,6 +271,8 @@ let rec parse_program_internal tokens =
     | (_, T_ident "bool") :: rest -> Ast.TyBool, rest
     | (_, T_ident "str") :: rest -> Ast.TyStr, rest
     | (_, T_ident "bytes") :: rest -> Ast.TyBytes, rest
+    | (_, T_ident "f64x2") :: rest -> Ast.TySimd Ast.F64x2, rest
+    | (_, T_ident "u8x16") :: rest -> Ast.TySimd Ast.U8x16, rest
     | (_, T_ident "unit") :: rest -> Ast.TyUnit, rest
     | (_, T_ident name) :: (_, T_lbracket) :: rest
       when starts_with_upper name ->

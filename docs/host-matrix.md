@@ -72,6 +72,7 @@ machine rather than a host.
 | `exit` | yes | yes | yes | yes |
 | `exp` | yes | yes | yes | yes |
 | `f32_bits` | yes | yes | yes | refused |
+| `f64x2_splat` | yes | yes | yes | refused |
 | `f_abs` | yes | yes | yes | yes |
 | `f_add` | yes | yes | yes | yes |
 | `f_div` | yes | yes | yes | yes |
@@ -180,6 +181,7 @@ machine rather than a host.
 | `to_upper` | yes | yes | yes | yes |
 | `tty_raw` | yes | refused | refused | refused |
 | `tty_restore` | yes | refused | refused | refused |
+| `u8x16_splat` | yes | yes | yes | refused |
 | `utf8_chars` | yes | yes | yes | refused |
 | `utf8_len` | yes | yes | yes | refused |
 | `vec_new` | yes | yes | yes | yes |

@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.422 — 2026-09-05
+
+_Two 128-bit SIMD types, `f64x2` and `u8x16`, reach every backend with the four
+operations that build a value and read a lane back. The lane operations come
+with the kernels that need them; this slice is the type itself._
+
+Why 128 bits: it is what NEON, SSE2 and Wasm's `v128` all have, so a program
+written against these two types is portable exactly. Why now: range-check
+versioning (v0.1.420) gets clang to vectorize the loops clang can vectorize;
+what it cannot -- a UTF-8 validator, a JSON structural scan, anything that is
+a byte-lane trick -- needs the lanes spelled out, and on Wasm, whose text this
+compiler assembles with no optimizer in between, there was never another way.
+
+`Ast.TySimd (F64x2 | U8x16)`. C: the compiler's `vector_size(16)` extension,
+by value. LLVM: `<2 x double>` / `<16 x i8>`, first-class. Wasm: `v128`, held
+as a 16-byte box because this backend keeps every value in an i64 slot (as it
+does floats). Interpreter: `V_f64x2` / `V_u8x16`, the oracle for lane order,
+for `u8x16_splat` keeping the low 8 bits, for the lane-range failure and for
+`show` (`f64x2(1.5, 1.5)`, `u8x16[00..]`). RV32IM/RV64IM refuse the type by
+name (the V extension is Q-110). `==` and `<` on a SIMD value are refused by
+the typer: lane-wise equality is a vector, not a bool, and a whole-vector
+answer would have to pick one meaning -- so every backend answers the same.
+`f64x2_splat` / `f64x2_extract` / `u8x16_splat` / `u8x16_extract`;
+`test/parity/simd_seed.mere` runs them on interp / C / LLVM / Wasm.
+`show` of a SIMD value on the compiled backends is a clean refusal for now.
+
+---
+
 ## v0.1.421 — 2026-09-05
 
 _Range-check versioning reaches matmul's inner loop: an access whose index is

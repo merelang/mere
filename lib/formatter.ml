@@ -121,7 +121,7 @@ let rec fmt_ty ?(prec = 0) t =
   let t = walk t in
   match t with
   | TyInt -> "int" | TyFloat -> "float" | TyBool -> "bool"
-  | TyStr -> "str" | TyBytes -> "bytes" | TyUnit -> "unit"
+  | TyStr -> "str" | TyBytes -> "bytes" | TySimd F64x2 -> "f64x2" | TySimd U8x16 -> "u8x16" | TyUnit -> "unit"
   | TyVar v -> Printf.sprintf "'_t%d" v.id
   | TyParam p -> "'" ^ p
   | TyArrow (a, b) ->

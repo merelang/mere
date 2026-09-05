@@ -142,6 +142,8 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyBool -> "bool"
   | Ast.TyStr -> "str"
   | Ast.TyBytes -> "bytes"   (* the binary type *)
+  | Ast.TySimd Ast.F64x2 -> "f64x2"
+  | Ast.TySimd Ast.U8x16 -> "u8x16"
   | Ast.TyUnit -> "unit"
   | Ast.TyFloat -> "float"   (* Phase 43.1: allow float to be used as an fn signature tag *)
   | Ast.TyTuple ts -> "tuple_" ^ String.concat "_" (List.map ty_tag ts)
@@ -218,6 +220,7 @@ let owned_vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 (* Phase 15.9: StrBuf[R] usage flag — non-polymorphic, single runtime. *)
 let strbuf_used = ref false
 let bytes_used = ref false  (* gate bytes_runtime_llvm *)
+let simd_used_llvm = ref false  (* Q-109: gate simd_runtime_llvm *)
 let bytes_vec_used = ref false  (* gate the bytes <-> Vec[int] bridge runtime *)
 (* Phase 25.9: stdlib catchup — emit each helper only when used. *)
 let str_split_used_llvm = ref false
@@ -354,7 +357,7 @@ let mono_variant_is_recursive
 (* Probe: is the type fully resolved (no tyvars / params / floats)? *)
 let rec ty_is_concrete (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit | Ast.TyFloat -> true
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit | Ast.TyFloat -> true
   | Ast.TyTuple ts -> List.for_all ty_is_concrete ts
   | Ast.TyArrow (a, b) -> ty_is_concrete a && ty_is_concrete b
   | Ast.TyCon (_, args) -> List.for_all ty_is_concrete args
@@ -444,6 +447,8 @@ let rec llvm_ty_of (t : Ast.ty) : string =
   | Ast.TyFloat -> "double"  (* Phase 34.2: IEEE 754 double *)
   | Ast.TyStr -> "ptr"
   | Ast.TyBytes -> "ptr"  (* pointer to [i64 len][bytes...] *)
+  | Ast.TySimd Ast.F64x2 -> "<2 x double>"   (* Q-109: first-class vector types, by value *)
+  | Ast.TySimd Ast.U8x16 -> "<16 x i8>"
   | Ast.TyUnit -> "i64"  (* unit becomes int 0 *)
   (* v0.1.163: a File handle travels as i64 like every other Mere value —
      lifted inner functions type all their parameters uniformly, so a raw
@@ -553,7 +558,7 @@ let fresh_str_global (s : string) : string =
 
 let rec ty_is_concrete (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit | Ast.TyFloat -> true
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit | Ast.TyFloat -> true
   | Ast.TyTuple ts -> List.for_all ty_is_concrete ts
   | Ast.TyArrow (a, b) -> ty_is_concrete a && ty_is_concrete b
   | Ast.TyCon (_, args) -> List.for_all ty_is_concrete args
@@ -1007,7 +1012,7 @@ let rec tail_does_not_return_v_llvm (v : string) (e : Ast.expr) : bool =
 
 let rec is_trivial_ty_llvm (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit | Ast.TyFloat -> true
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit | Ast.TyFloat -> true
   | Ast.TyTuple ts -> List.for_all is_trivial_ty_llvm ts
   | _ -> false
 
@@ -3513,6 +3518,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | Some t -> Ast.walk t
       | None -> unsupported e.Ast.loc "to_json: missing arg type"
     in
+    (match arg_ty with
+     | Ast.TySimd k ->
+       unsupported e.Ast.loc
+         ("show / to_json of " ^ Ast.pp_ty (Ast.TySimd k)
+          ^ " is not supported on this backend yet -- extract the lanes")
+     | _ -> ());
     let av = emit_expr env arg in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @to_json_%s(%s %s)"
@@ -3525,6 +3536,16 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | None -> unsupported e.Ast.loc "show: missing arg type"
     in
     let tag = ty_tag arg_ty in
+       (* Q-109: a SIMD value has no show / to_json on this backend yet. Before this
+          check the three compiled backends printed three different placeholders
+          for the same value; refusing here keeps them answering alike until the
+          printer exists. *)
+       (match arg_ty with
+        | Ast.TySimd k ->
+          unsupported e.Ast.loc
+            ("show / to_json of " ^ Ast.pp_ty (Ast.TySimd k)
+             ^ " is not supported on this backend yet -- extract the lanes")
+        | _ -> ());
     let av = emit_expr env arg in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @show_%s(%s %s)"
@@ -4684,6 +4705,28 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                   "  %s = call i32 @mere_vec_%s_push(ptr %s, %s %s)"
                   r elem_tag av (llvm_ty_of elem_ty) xv);
     "0"  (* vec_push : ... -> unit; return the i64 unit value *)
+  | Ast.App ({ node = Ast.Var "f64x2_splat"; _ }, x_e) ->
+    simd_used_llvm := true;
+    let xv = emit_expr env x_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call <2 x double> @mere_f64x2_splat(double %s)" r xv); r
+  | Ast.App ({ node = Ast.Var "u8x16_splat"; _ }, x_e) ->
+    simd_used_llvm := true;
+    let xv = emit_expr env x_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call <16 x i8> @mere_u8x16_splat(i64 %s)" r xv); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "f64x2_extract"; _ }, v_e); _ }, i_e) ->
+    simd_used_llvm := true;
+    let vv = emit_expr env v_e in
+    let iv = emit_expr env i_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call double @mere_f64x2_extract(<2 x double> %s, i64 %s)" r vv iv); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "u8x16_extract"; _ }, v_e); _ }, i_e) ->
+    simd_used_llvm := true;
+    let vv = emit_expr env v_e in
+    let iv = emit_expr env i_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @mere_u8x16_extract(<16 x i8> %s, i64 %s)" r vv iv); r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "__vec_get_unchecked"; _ }, vec_e); _ }, idx_e) ->
     (* Q-108: see Ast.range_version_program. *)
     let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
@@ -9132,6 +9175,54 @@ let emit_map_runtime_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
 (* bytes runtime. A bytes value is a `ptr` to [i64 len][i8..],
    binary-safe. Allocations use @__lang_default_region (matching the str
    helpers). Loops use allocas to avoid hand-written phi. *)
+(* Q-109: the SIMD seed operations. Vectors are first-class IR values, so
+   splat is insertelement + shufflevector and extract is extractelement behind
+   a lane check whose failure is the interpreter's. *)
+let simd_runtime_llvm =
+  String.concat "\n"
+    [ "@.idxfmt_f64x2 = private constant [53 x i8] c\"f64x2_extract: lane %lld out of range (lanes = %lld)\\00\"";
+      "@.idxfmt_u8x16 = private constant [53 x i8] c\"u8x16_extract: lane %lld out of range (lanes = %lld)\\00\"";
+      "define <2 x double> @mere_f64x2_splat(double %x) {";
+      "entry:";
+      "  %a = insertelement <2 x double> undef, double %x, i32 0";
+      "  %b = shufflevector <2 x double> %a, <2 x double> undef, <2 x i32> zeroinitializer";
+      "  ret <2 x double> %b";
+      "}";
+      "define double @mere_f64x2_extract(<2 x double> %v, i64 %i) {";
+      "entry:";
+      "  %lt = icmp slt i64 %i, 0";
+      "  %ge = icmp sge i64 %i, 2";
+      "  %oob = or i1 %lt, %ge";
+      "  br i1 %oob, label %fail, label %ok";
+      "fail:";
+      "  call void @__lang_fail_idx(ptr @.idxfmt_f64x2, i64 %i, i64 2)";
+      "  unreachable";
+      "ok:";
+      "  %r = extractelement <2 x double> %v, i64 %i";
+      "  ret double %r";
+      "}";
+      "define <16 x i8> @mere_u8x16_splat(i64 %x) {";
+      "entry:";
+      "  %t = trunc i64 %x to i8";
+      "  %a = insertelement <16 x i8> undef, i8 %t, i32 0";
+      "  %b = shufflevector <16 x i8> %a, <16 x i8> undef, <16 x i32> zeroinitializer";
+      "  ret <16 x i8> %b";
+      "}";
+      "define i64 @mere_u8x16_extract(<16 x i8> %v, i64 %i) {";
+      "entry:";
+      "  %lt = icmp slt i64 %i, 0";
+      "  %ge = icmp sge i64 %i, 16";
+      "  %oob = or i1 %lt, %ge";
+      "  br i1 %oob, label %fail, label %ok";
+      "fail:";
+      "  call void @__lang_fail_idx(ptr @.idxfmt_u8x16, i64 %i, i64 16)";
+      "  unreachable";
+      "ok:";
+      "  %b = extractelement <16 x i8> %v, i64 %i";
+      "  %r = zext i8 %b to i64";
+      "  ret i64 %r";
+      "}" ]
+
 let bytes_runtime_llvm =
   String.concat "\n"
     [ "@__lang_hexdig = private constant [16 x i8] c\"0123456789abcdef\"";
@@ -12100,6 +12191,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        else owned_vec_registry_runtime_llvm :: "" :: owned_vec_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime_llvm; ""] else [])
     @ (if !bytes_used then [bytes_runtime_llvm; ""] else [])
+    @ (if !simd_used_llvm then [simd_runtime_llvm; ""] else [])
     @ (if !bytes_vec_used then [bytes_vec_bridge_runtime_llvm; ""] else [])
     @ (if !str_count_used_llvm then [str_count_runtime_llvm; ""] else [])
     @ (if !env_var_used_llvm then [env_var_runtime_llvm; ""] else [])

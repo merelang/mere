@@ -446,6 +446,10 @@ let rec ty_tag (t : Ast.ty) : string =
   match resolve_ty t with
   | Ast.TyInt -> "int" | Ast.TyBool -> "bool" | Ast.TyStr -> "str"
   | Ast.TyUnit -> "unit" | Ast.TyFloat -> "float" | Ast.TyBytes -> "bytes"
+  | Ast.TySimd k ->
+    (* Q-109: no vector unit on this target (the V extension is Q-110); the
+       refusal names the type rather than falling into a word-sized layout. *)
+    err Loc.dummy ("RV32I: the SIMD type " ^ Ast.pp_ty (Ast.TySimd k) ^ " is not supported yet")
   | Ast.TyTuple ts -> "t" ^ String.concat "_" (List.map ty_tag ts) ^ "_"
   | Ast.TyCon (n, []) -> n
   | Ast.TyCon (n, args) -> n ^ "_" ^ String.concat "_" (List.map ty_tag args) ^ "_"

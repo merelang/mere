@@ -26,6 +26,8 @@ type value =
   | V_bool of bool
   | V_str of string
   | V_bytes of string
+  | V_f64x2 of float * float           (* Q-109 *)
+  | V_u8x16 of Bytes.t                 (* 16 bytes *)
     (* immutable raw byte sequence (a first-class binary type). Held as an OCaml string
        (which carries NULs), so binary-safe; distinct from V_str at the type
        level so codegen picks the length-prefixed representation. *)
@@ -248,6 +250,8 @@ let rec try_as_list = function
 and to_string = function
   | V_int n -> string_of_int n
   | V_bytes s -> "bytes[" ^ hex_of_string s ^ "]"
+  | V_f64x2 (a, b) -> "f64x2(" ^ format_float a ^ ", " ^ format_float b ^ ")"
+  | V_u8x16 bs -> "u8x16[" ^ hex_of_string (Bytes.to_string bs) ^ "]"
   | V_bytebuf b -> "bytebuf[" ^ hex_of_string (Bytes.sub_string b.bb_data 0 b.bb_len) ^ "]"
   | V_float f -> format_float f
   | V_bool b -> if b then "true" else "false"
@@ -300,6 +304,8 @@ and to_string = function
 and to_json_string = function
   | V_int n -> string_of_int n
   | V_bytes s -> "\"" ^ hex_of_string s ^ "\""  (* JSON has no byte type: hex string *)
+  | V_f64x2 (a, b) -> "[" ^ to_json_string (V_float a) ^ ", " ^ to_json_string (V_float b) ^ "]"
+  | V_u8x16 bs -> "\"" ^ hex_of_string (Bytes.to_string bs) ^ "\""
   | V_bytebuf b ->
     "\"" ^ hex_of_string (Bytes.sub_string b.bb_data 0 b.bb_len) ^ "\""
   | V_float f -> format_float f
@@ -1516,6 +1522,40 @@ let builtin_vec_push =
         vecbuf_push arr x;
         V_unit)
     | _ -> failwith "vec_push: expected Vec")
+
+(* Q-109: SIMD seed builtins. The interpreter is the oracle for lane order and
+   for the failure on a lane index outside 0..lanes-1. u8x16_splat keeps the
+   low 8 bits, as `bytes_of_vec` does for an element. *)
+let lane_check who lanes i =
+  if i < 0 || i >= lanes then
+    raise (Eval_error (Loc.dummy,
+      Printf.sprintf "%s: lane %d out of range (lanes = %d)" who i lanes))
+let builtin_f64x2_splat =
+  V_builtin ("f64x2_splat", fun v ->
+    match v with V_float x -> V_f64x2 (x, x) | _ -> failwith "f64x2_splat: expected float")
+let builtin_f64x2_extract =
+  V_builtin ("f64x2_extract", fun v ->
+    match v with
+    | V_f64x2 (a, b) ->
+      V_builtin ("f64x2_extract_p1", fun idx ->
+        match idx with
+        | V_int i -> lane_check "f64x2_extract" 2 i; V_float (if i = 0 then a else b)
+        | _ -> failwith "f64x2_extract: expected int lane")
+    | _ -> failwith "f64x2_extract: expected f64x2")
+let builtin_u8x16_splat =
+  V_builtin ("u8x16_splat", fun v ->
+    match v with
+    | V_int x -> V_u8x16 (Bytes.make 16 (Char.chr (x land 0xFF)))
+    | _ -> failwith "u8x16_splat: expected int")
+let builtin_u8x16_extract =
+  V_builtin ("u8x16_extract", fun v ->
+    match v with
+    | V_u8x16 bs ->
+      V_builtin ("u8x16_extract_p1", fun idx ->
+        match idx with
+        | V_int i -> lane_check "u8x16_extract" 16 i; V_int (Char.code (Bytes.get bs i))
+        | _ -> failwith "u8x16_extract: expected int lane")
+    | _ -> failwith "u8x16_extract: expected u8x16")
 
 let builtin_vec_get =
   V_builtin ("vec_get", fun v ->
@@ -3418,6 +3458,10 @@ let initial_env : env =
     ("__vec_get_unchecked", ref builtin_vec_get);
     ("__vec_set_unchecked", ref builtin_vec_set);
     ("__bytes_get_unchecked", ref builtin_bytes_get);
+    ("f64x2_splat", ref builtin_f64x2_splat);
+    ("f64x2_extract", ref builtin_f64x2_extract);
+    ("u8x16_splat", ref builtin_u8x16_splat);
+    ("u8x16_extract", ref builtin_u8x16_extract);
     ("vec_reverse", ref builtin_vec_reverse);
     ("vec_concat",  ref builtin_vec_concat);
     ("vec_sort",    ref builtin_vec_sort);
@@ -3510,6 +3554,8 @@ let rec value_eq a b =
   | V_float x, V_float y -> x = y
   | V_bool x, V_bool y -> x = y
   | V_str x, V_str y -> x = y
+  | V_f64x2 (a, b), V_f64x2 (c, d) -> a = c && b = d
+  | V_u8x16 x, V_u8x16 y -> Bytes.equal x y
   | V_unit, V_unit -> true
   | V_tuple xs, V_tuple ys when List.length xs = List.length ys ->
     List.for_all2 value_eq xs ys

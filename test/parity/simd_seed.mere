@@ -1,0 +1,6 @@
+let v = f64x2_splat 2.5;
+let b = u8x16_splat 300;
+let _ = print (str_of_float (f64x2_extract v 0));
+let _ = print (str_of_float (f64x2_extract v 1));
+let _ = print (str_of_int (u8x16_extract b 15));
+print (str_of_int (u8x16_extract b 0 + 1))

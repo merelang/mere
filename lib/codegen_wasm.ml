@@ -180,6 +180,7 @@ let idx_post_vec_offset = ref 0
 let idx_pre_charat_offset = ref 0
 let idx_mid_charat_offset = ref 0
 let bytes_get_msg_offset = ref 0
+let simd_lane_msg_offset = ref 0   (* Q-109 *)
 let bytes_slice_msg_offset = ref 0
 let rand_pre_offset = ref 0
 let rand_post_offset = ref 0
@@ -318,6 +319,7 @@ let vec_higher_order_used = ref false
 (* Phase 15.9: StrBuf[R] usage flag — runtime is single non-polymorphic. *)
 let strbuf_used = ref false
 let bytes_used = ref false  (* gate the Wasm bytes runtime *)
+let simd_used = ref false  (* Q-109: gate simd_runtime_wasm *)
 let bytes_vec_used = ref false  (* gate the bytes <-> Vec[int] bridge *)
 
 (* Phase 16.3: Logger / Metrics builtin usage flags. *)
@@ -767,6 +769,8 @@ let rec ty_tag (t : Ast.ty) : string =
      spelling as C and LLVM. Found because the improved refusal below finally
      says WHICH type it cannot name. *)
   | Ast.TyBytes -> "bytes"
+  | Ast.TySimd Ast.F64x2 -> "f64x2"
+  | Ast.TySimd Ast.U8x16 -> "u8x16"
   | Ast.TyTuple ts -> "tuple_" ^ String.concat "_" (List.map ty_tag ts)
   | Ast.TyArrow (p, r) -> "closure_" ^ ty_tag p ^ "_" ^ ty_tag r
   | Ast.TyCon (name, []) -> name
@@ -788,7 +792,7 @@ let rec ty_tag (t : Ast.ty) : string =
 
 let rec ty_is_concrete (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit | Ast.TyFloat -> true
+  | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit | Ast.TyFloat -> true
   | Ast.TyTuple ts -> List.for_all ty_is_concrete ts
   | Ast.TyArrow (a, b) -> ty_is_concrete a && ty_is_concrete b
   | Ast.TyCon (_, args) -> List.for_all ty_is_concrete args
@@ -1109,7 +1113,7 @@ let clone_with_fresh_tyvars_wasm (e : Ast.expr) : Ast.expr =
          Hashtbl.add map v.id fresh;
          fresh)
     | Ast.TyParam _ as t -> t
-    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TyUnit) as t -> t
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit) as t -> t
     | Ast.TyArrow (a, b) -> Ast.TyArrow (clone_ty a, clone_ty b)
     | Ast.TyTuple ts -> Ast.TyTuple (List.map clone_ty ts)
     | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map clone_ty args)
@@ -2163,6 +2167,16 @@ let rec emit_expr (e : Ast.expr) : unit =
       | None -> unsupported e.Ast.loc "show: missing arg type"
     in
     let tag = ty_tag arg_ty in
+       (* Q-109: a SIMD value has no show / to_json on this backend yet. Before this
+          check the three compiled backends printed three different placeholders
+          for the same value; refusing here keeps them answering alike until the
+          printer exists. *)
+       (match arg_ty with
+        | Ast.TySimd k ->
+          unsupported e.Ast.loc
+            ("show / to_json of " ^ Ast.pp_ty (Ast.TySimd k)
+             ^ " is not supported on this backend yet -- extract the lanes")
+        | _ -> ());
     emit_expr arg;
     emit_instr (Printf.sprintf "call $show_%s" tag)
   | Ast.App ({ node = Ast.Var "to_json"; _ }, arg) ->
@@ -2171,6 +2185,12 @@ let rec emit_expr (e : Ast.expr) : unit =
       | Some t -> Ast.walk t
       | None -> unsupported e.Ast.loc "to_json: missing arg type"
     in
+    (match arg_ty with
+     | Ast.TySimd k ->
+       unsupported e.Ast.loc
+         ("show / to_json of " ^ Ast.pp_ty (Ast.TySimd k)
+          ^ " is not supported on this backend yet -- extract the lanes")
+     | _ -> ());
     emit_expr arg;
     emit_instr (Printf.sprintf "call $to_json_%s" (ty_tag arg_ty))
   (* v0.1.183: `of_json_like w s` is `of_json s` with the target type taken
@@ -3154,6 +3174,14 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr vec_e;
     emit_expr val_e;
     emit_instr "call $mere_vec_push"
+  | Ast.App ({ node = Ast.Var "f64x2_splat"; _ }, x_e) ->
+    simd_used := true; emit_expr x_e; emit_instr "call $mere_f64x2_splat"
+  | Ast.App ({ node = Ast.Var "u8x16_splat"; _ }, x_e) ->
+    simd_used := true; emit_expr x_e; emit_instr "call $mere_u8x16_splat"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "f64x2_extract"; _ }, v_e); _ }, i_e) ->
+    simd_used := true; emit_expr v_e; emit_expr i_e; emit_instr "call $mere_f64x2_extract"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "u8x16_extract"; _ }, v_e); _ }, i_e) ->
+    simd_used := true; emit_expr v_e; emit_expr i_e; emit_instr "call $mere_u8x16_extract"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "__vec_get_unchecked"; _ }, vec_e); _ }, idx_e) ->
     (* Q-108: see Ast.range_version_program. *)
     vec_used := true;
@@ -5074,6 +5102,16 @@ let emit_copy_fn_wasm (tag : string) (t : Ast.ty) : string =
     \    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 8)))\n\
     \    (f64.store offset=0 align=8 (local.get $p) (f64.load offset=0 align=8 (i32.wrap_i64 (local.get $v))))\n\
     \    (i64.extend_i32_u (local.get $p)))"
+  | Ast.TySimd _ ->
+    (* Q-109: a SIMD value is a 16-byte box (this backend holds every value in
+       an i64 slot); copy the 16 bytes into a fresh 16-aligned box. *)
+    header ^ "\n" ^
+    "    (local $p i32)\n\
+    \    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 15)) (i32.const -16)))\n\
+    \    (local.set $p (global.get $__lang_bump))\n\
+    \    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 16)))\n\
+    \    (v128.store offset=0 align=16 (local.get $p) (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $v))))\n\
+    \    (i64.extend_i32_u (local.get $p)))"
   | Ast.TyBytes ->
     (* Q-107: bytes are { i32 len @0, bytes @4 }; copy through the bytes
        allocator so the header and alignment are the runtime's own. *)
@@ -6859,6 +6897,42 @@ let vec_higher_order_runtime = {|
 (* bytes runtime. A bytes value is an i32 pointer to
    [i32 len][bytes...] in linear memory (fits the uniform i32 value model like
    str). bytes_alloc aligns the bump to 4 so the len header is aligned. *)
+(* Q-109: SIMD values are 16-byte boxes in linear memory (every Mere value here
+   is an i64 slot); floats are 8-byte boxes. The lane check fails through
+   $__lang_fail with one shared message. *)
+let simd_runtime_wasm () =
+  Printf.sprintf {|
+  (func $mere_f64x2_splat (param $x8 i64) (result i64)
+    (local $p i32)
+    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 15)) (i32.const -16)))
+    (local.set $p (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 16)))
+    (v128.store offset=0 align=16 (local.get $p)
+      (f64x2.splat (f64.load offset=0 align=8 (i32.wrap_i64 (local.get $x8)))))
+    (i64.extend_i32_u (local.get $p)))
+  (func $mere_f64x2_extract (param $v8 i64) (param $i8 i64) (result i64)
+    (local $p i32)
+    (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0)) (i64.ge_s (local.get $i8) (i64.const 2)))
+      (then (return (call $__lang_fail (i64.const %d)))))
+    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 7)) (i32.const -8)))
+    (local.set $p (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 8)))
+    (f64.store offset=0 align=8 (local.get $p)
+      (f64.load align=8 (i32.add (i32.wrap_i64 (local.get $v8)) (i32.mul (i32.wrap_i64 (local.get $i8)) (i32.const 8)))))
+    (i64.extend_i32_u (local.get $p)))
+  (func $mere_u8x16_splat (param $x i64) (result i64)
+    (local $p i32)
+    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 15)) (i32.const -16)))
+    (local.set $p (global.get $__lang_bump))
+    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 16)))
+    (v128.store offset=0 align=16 (local.get $p) (i8x16.splat (i32.wrap_i64 (local.get $x))))
+    (i64.extend_i32_u (local.get $p)))
+  (func $mere_u8x16_extract (param $v8 i64) (param $i8 i64) (result i64)
+    (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0)) (i64.ge_s (local.get $i8) (i64.const 16)))
+      (then (return (call $__lang_fail (i64.const %d)))))
+    (i64.extend_i32_u (i32.load8_u (i32.add (i32.wrap_i64 (local.get $v8)) (i32.wrap_i64 (local.get $i8))))))
+|} !simd_lane_msg_offset !simd_lane_msg_offset
+
 let bytes_runtime_wasm = {|
   (func $__lang_bytes_alloc (param $len8 i64) (result i64)
     (local $b i32)
@@ -8819,6 +8893,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   Hashtbl.reset fn_closure_table_idx;
   Hashtbl.reset eta_adapters_wasm;
   Hashtbl.reset show_types;
+  simd_used := false;
   Hashtbl.reset to_json_types;
   Hashtbl.reset of_json_types;
   Hashtbl.reset of_json_opt_types;
@@ -8853,6 +8928,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   idx_pre_charat_offset := fresh_str_offset "char_at: index ";
   idx_mid_charat_offset := fresh_str_offset " out of range (len=";
   bytes_get_msg_offset := fresh_str_offset "bytes_get: index out of range";
+  simd_lane_msg_offset := fresh_str_offset "lane index out of range (f64x2 has 2 lanes, u8x16 has 16)";
   bytes_slice_msg_offset := fresh_str_offset "bytes_slice: range out of bounds";
   rand_pre_offset := fresh_str_offset "random_int: bound must be positive (got ";
   rand_post_offset := fresh_str_offset ")";
@@ -9687,6 +9763,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   let strbuf_section =
     (if !strbuf_used then strbuf_runtime_wasm else "")
     ^ (if !bytes_used then bytes_runtime_wasm else "")
+    ^ (if !simd_used then simd_runtime_wasm () else "")
     ^ (if !bytes_vec_used then bytes_vec_bridge_runtime_wasm else "") in
   (* Phase 15.14: emit per-K key-eq helper + per-K map runtime for each K
      in map_key_types. *)

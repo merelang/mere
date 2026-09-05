@@ -279,6 +279,7 @@ let print_show eval_env type_env name =
 let rec is_serializable = function
   | Eval.V_int _ | Eval.V_float _ | Eval.V_bool _
   | Eval.V_str _ | Eval.V_unit -> true
+  | Eval.V_f64x2 _ | Eval.V_u8x16 _ -> true   (* Q-109: plain values *)
   | Eval.V_closure _ | Eval.V_builtin _ | Eval.V_file _ | Eval.V_rwfile _ -> false
   | Eval.V_vec _ | Eval.V_lb _ | Eval.V_strbuf _ | Eval.V_map _ -> false
   | Eval.V_bytes _ -> false  (* no bytes literal syntax; :save can't round-trip it *)
