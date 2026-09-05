@@ -473,3 +473,26 @@ and the trap trampoline.
 ---
 
 Bottom line: codegen is the implementation stage that makes Mere "the language it's designed to be." It's the phase where the "once native codegen is in place..." prose in the design docs becomes actual code.
+
+## Boxed variants on the C backend: the tag lives in the pointer (v0.1.419)
+
+A recursive variant value is a pointer to a region-allocated node. Since
+v0.1.419 the node holds the payload union only; the constructor tag rides in
+the pointer's three low bits (every region allocation is 8-aligned), a nullary
+constructor is the tag OR'd onto a per-type shared static, and a type with more
+than eight constructors keeps the earlier `{ int tag; union payload; }` node
+with an untagged pointer. Emitted C never writes the layout out: each boxed
+type's typedef is followed by three macros --
+
+```c
+#define T__tag(v)    /* the constructor tag of value v            */
+#define T__node(v)   /* the node pointer: T__node(v)->payload.C   */
+#define T__mk(t, p)  /* the value for node p under constructor t  */
+```
+
+-- and construction, pattern tests, the derive family (`show`, `to_json`,
+`eq`, `cmp`), the region copiers, `len`, `vec_to_list`, the list builder,
+`of_json` and the `str list` runtime all go through them. A cons cell of a
+`str list` is therefore 16 bytes and a `json` leaf 8, where they were 24 and 16.
+The other backends keep their own node layouts; the parity suite compares
+output, not layout.
