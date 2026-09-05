@@ -47,8 +47,8 @@ machine rather than a host.
 | `bit_xor` | yes | yes | yes | yes |
 | `bool_of_str` | yes | yes | yes | refused |
 | `bytebuf_new` | yes | unattributed | refused | refused |
-| `bytes_of_hex` | yes | yes | yes | refused |
-| `bytes_of_str` | yes | yes | yes | stub |
+| `bytes_of_hex` | yes | yes | yes | yes |
+| `bytes_of_str` | yes | yes | yes | yes |
 | `ceil` | yes | yes | refused | yes |
 | `channel_close` | yes | refused | refused | unattributed |
 | `channel_new` | yes | yes | yes | refused |
@@ -182,7 +182,7 @@ machine rather than a host.
 | `to_upper` | yes | yes | yes | yes |
 | `tty_raw` | yes | refused | refused | refused |
 | `tty_restore` | yes | refused | refused | refused |
-| `u8x16_splat` | yes | yes | yes | refused |
+| `u8x16_splat` | yes | yes | yes | yes |
 | `utf8_chars` | yes | yes | yes | refused |
 | `utf8_len` | yes | yes | yes | refused |
 | `vec_new` | yes | yes | yes | yes |

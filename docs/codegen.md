@@ -543,7 +543,9 @@ vector arithmetic reachable from `main` with the pass on and none with it off).
 Wasm's `v128` share. C lowers them to the compiler's `vector_size(16)` type,
 LLVM to `<2 x double>` / `<16 x i8>`, Wasm to a 16-byte box holding a `v128`
 (this backend keeps every value in an i64 slot), the interpreter to
-`V_f64x2` / `V_u8x16`. The RISC-V backends refuse them by name until the V
-extension exists. `==` and `<` on them are type errors: compare lanes. The
+`V_f64x2` / `V_u8x16`. The RISC-V backends run `u8x16` through the RISC-V
+Vector extension (VLEN 128, e8, m1 -- the subset memu implements and checks
+against QEMU): a 16-byte box, loaded into v1 / v2 by `vle8.v`, computed into v3,
+stored into a fresh box by `vse8.v`. `f64x2` stays refused there: no float unit. `==` and `<` on them are type errors: compare lanes. The
 operations are listed in the stdlib reference; the interpreter defines lane
 order and the failure on a lane index outside the vector.

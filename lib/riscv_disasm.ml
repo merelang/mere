@@ -149,6 +149,54 @@ let disasm_word ~pc (inst : int) : string =
     else if inst = 0x73 then "ecall"
     else "ebreak"
   | 0x0F -> "fence"
+  (* Q-110: the RVV subset the backend emits and memu runs. The listing used to
+     show every one of them as `.word`, which is where a reader stops. *)
+  | 0x07 when f3 = 0 && (inst lsr 26) = 0 && rs2 = 0 -> sp "vle8.v v%d, (%s)" rd (r rs1)
+  | 0x27 when f3 = 0 && (inst lsr 26) = 0 && rs2 = 0 -> sp "vse8.v v%d, (%s)" rd (r rs1)
+  | 0x57 ->
+    let f6 = (inst lsr 26) land 0x3F in
+    let vm = (inst lsr 25) land 1 in
+    let vtype z =
+      let sew = [| "e8"; "e16"; "e32"; "e64"; "?"; "?"; "?"; "?" |].((z lsr 3) land 7) in
+      let lmul = [| "m1"; "m2"; "m4"; "m8"; "?"; "mf8"; "mf4"; "mf2" |].(z land 7) in
+      sew ^ ", " ^ lmul in
+    let mask = if vm = 1 then "" else ", v0.t" in
+    let name_i = function
+      | 0 -> Some "vadd" | 2 -> Some "vsub" | 9 -> Some "vand" | 10 -> Some "vor" | 11 -> Some "vxor"
+      | 12 -> Some "vrgather" | 14 -> Some "vslideup" | 15 -> Some "vslidedown"
+      | 24 -> Some "vmseq" | 34 -> Some "vssubu" | 40 -> Some "vsrl" | 48 -> Some "vwredsumu" | _ -> None in
+    (match f3 with
+     | 7 ->
+       if (inst lsr 31) land 1 = 0 then sp "vsetvli %s, %s, %s" (r rd) (r rs1) (vtype ((inst lsr 20) land 0x7FF))
+       else if (inst lsr 30) land 1 = 1 then sp "vsetivli %s, %d, %s" (r rd) rs1 (vtype ((inst lsr 20) land 0x3FF))
+       else sp "vsetvl %s, %s, %s" (r rd) (r rs1) (r rs2)
+     | 0 ->
+       (match f6 with
+        | 23 -> if vm = 1 then sp "vmv.v.v v%d, v%d" rd rs1 else sp "vmerge.vvm v%d, v%d, v%d, v0" rd rs2 rs1
+        | 48 -> sp "vwredsumu.vs v%d, v%d, v%d" rd rs2 rs1
+        | _ -> (match name_i f6 with
+                | Some n -> sp "%s.vv v%d, v%d, v%d%s" n rd rs2 rs1 mask
+                | None -> sp ".word 0x%08x" inst))
+     | 4 ->
+       (match f6 with
+        | 23 -> if vm = 1 then sp "vmv.v.x v%d, %s" rd (r rs1) else sp "vmerge.vxm v%d, v%d, %s, v0" rd rs2 (r rs1)
+        | _ -> (match name_i f6 with
+                | Some n -> sp "%s.vx v%d, v%d, %s%s" n rd rs2 (r rs1) mask
+                | None -> sp ".word 0x%08x" inst))
+     | 3 ->
+       let imm = sext rs1 5 in
+       (match f6 with
+        | 23 -> if vm = 1 then sp "vmv.v.i v%d, %d" rd imm else sp "vmerge.vim v%d, v%d, %d, v0" rd rs2 imm
+        | _ -> (match name_i f6 with
+                | Some n -> sp "%s.vi v%d, v%d, %d%s" n rd rs2 imm mask
+                | None -> sp ".word 0x%08x" inst))
+     | 2 ->
+       (match f6 with
+        | 0 -> sp "vredsum.vs v%d, v%d, v%d" rd rs2 rs1
+        | 2 -> sp "vredor.vs v%d, v%d, v%d" rd rs2 rs1
+        | 16 when rs1 = 0 -> sp "vmv.x.s %s, v%d" (r rd) rs2
+        | _ -> sp ".word 0x%08x" inst)
+     | _ -> sp ".word 0x%08x" inst)
   | _ -> sp ".word 0x%08x" inst
 
 (* disassemble a whole flat binary: `addr: word  mnemonic` per line *)
