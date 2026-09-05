@@ -1,0 +1,10 @@
+// range-version: none
+// `i % n` is not monotonic and `i / 2` would put a division in the guard, ahead
+// of the loop's own effects. Neither access qualifies, so nothing is planned.
+let n = 8;
+let v = vec_new ();
+let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v (i + 1) in fill (i + 1);
+let _ = fill 0;
+let rec wrap = fn (i: int) -> fn (acc: int) ->
+  if i == n * 2 then acc else wrap (i + 1) (acc + vec_get v (i % n) + vec_get v (i / 2));
+print (str_of_int (wrap 0 0))

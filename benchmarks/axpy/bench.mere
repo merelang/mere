@@ -1,16 +1,19 @@
-// axpy -- c[i] = c[i] + alpha * a[i] over two Vec[R, float]s, twenty passes,
+// axpy -- c[i] = c[i] + alpha * a[i] over two Vec[R, float]s, a hundred passes,
 // then a checksum. The row that forced range-check versioning (Q-108): with a
 // bounds check per element the loop has three early exits and clang leaves it
 // scalar; with the range checked once before the loop it is vectorized, and
-// the honest expectation is a TIE with C. Memory-bound at this size, so SIMD
-// itself is worth ~1.3x here; the check's shape was the rest of the gap.
+// the passes TIE with C. Memory-bound at this size, so SIMD itself is worth
+// ~1.3x here; the check's shape was the rest of the gap. What the row carries
+// above C is building the two Vecs by vec_push (about 10 ms at v0.1.421: the
+// LCG plus the buffer's growth steps), which the C row does into a malloc'd
+// array -- so the pass count is high enough for the loop to be the number.
 //
 // Same LCG, same non-dyadic inputs and same bit-pattern output as matmul, for
 // the same reason: the answer has to be the same bytes on every row before any
 // time is reported, and a formatted double hides the bits where fusion or a
 // different summation order would show.
 let n = match args () with | Cons (a, _) -> int_of_str a | Nil -> 2000000;
-let reps = 20;
+let reps = 100;
 
 let mk = fn (seed: int) ->
   let v = vec_new () in

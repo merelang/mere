@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.421 — 2026-09-05
+
+_Range-check versioning reaches matmul's inner loop: an access whose index is
+affine in the loop parameter -- `a[i * n + k]`, `b[k * n + j]`, `v[n - 1 - i]`
+-- qualifies, and the guard checks both endpoints of each such index._
+
+v0.1.420 only versioned an access at exactly the loop parameter. A monotonic
+function of k over k in [i0, N-1] takes its values between its two endpoints,
+so for an index that is `+`, `-`, `*` and unary minus over the parameter (once)
+and invariants, checking `0 <= e(i0) < len` and `0 <= e(N-1) < len` checks
+every iteration. `%` is refused because it is not monotonic; `/` because the
+guard would evaluate it before the loop, moving a division by zero ahead of the
+loop's own effects. `test/range_version/affine_index.mere` (the matmul shape),
+`affine_reverse.mere` and `poison_modulo_index.mere` pin the three answers;
+range_version_check 14/14. matmul's `dot` is now planned and dispatched (its
+fast copy is inner-lifted three levels deep) and its time does not move:
+144 ms against C's 132, the same as before, because the inner loop is a
+floating-point reduction clang will not reorder and two removed checks vanish
+under the multiply-adds. The passes of `benchmarks/axpy` tie C (80 extra
+passes: 50 ms on both rows); the 10 ms the row carries above C is building
+the two Vecs by `vec_push`, so the row now runs a hundred passes and says so.
+
+---
+
 ## v0.1.420 — 2026-09-05
 
 _A loop over a Vec checks its whole index range once, before the loop, and

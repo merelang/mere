@@ -1051,33 +1051,109 @@ let rv_loop_safe_toplevels ~(unsafe_builtins : string list) (prog : program) : s
   while step () do () done;
   !safe
 
-(* Rewrite the conforming accesses of `idx` on invariant containers, and every
+(* Generic scope-tracking map: `f shadow e` may replace a node; otherwise the
+   children are visited with `shadow` extended by whatever the node binds. *)
+let rec rv_map_scoped ~(shadow : string list) (f : string list -> expr -> expr option) (e : expr) : expr =
+  match f shadow e with
+  | Some e' -> e'
+  | None ->
+    let g sh x = rv_map_scoped ~shadow:sh f x in
+    match e.node with
+    | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit | Var _ -> e
+    | Neg a -> { e with node = Neg (g shadow a) }
+    | Bin (op, a, b) -> { e with node = Bin (op, g shadow a, g shadow b) }
+    | Cmp (op, a, b) -> { e with node = Cmp (op, g shadow a, g shadow b) }
+    | Logic (op, a, b) -> { e with node = Logic (op, g shadow a, g shadow b) }
+    | Let (p, v, b) -> { e with node = Let (p, g shadow v, g (pattern_vars p @ shadow) b) }
+    | Let_rec (bs, b) ->
+      let sh = List.map fst bs @ shadow in
+      { e with node = Let_rec (List.map (fun (n, v) -> (n, g sh v)) bs, g sh b) }
+    | With (n, v, b) -> { e with node = With (n, g shadow v, g (n :: shadow) b) }
+    | If (c, t, el) -> { e with node = If (g shadow c, g shadow t, g shadow el) }
+    | Fun (x, t, b) -> { e with node = Fun (x, t, g (x :: shadow) b) }
+    | App (a, b) -> { e with node = App (g shadow a, g shadow b) }
+    | Annot (a, t) -> { e with node = Annot (g shadow a, t) }
+    | Constr (n, Some a) -> { e with node = Constr (n, Some (g shadow a)) }
+    | Constr (_, None) -> e
+    | Match (sc, arms) ->
+      { e with node = Match (g shadow sc,
+        List.map (fun (p, gd, b) -> let sh = pattern_vars p @ shadow in (p, Option.map (g sh) gd, g sh b)) arms) }
+    | Tuple es -> { e with node = Tuple (List.map (g shadow) es) }
+    | Region_block (n, b) -> { e with node = Region_block (n, g shadow b) }
+    | Region_loop (n, x, b) -> { e with node = Region_loop (n, x, g (x :: shadow) b) }
+    | Ref (m, r, a) -> { e with node = Ref (m, r, g shadow a) }
+    | Record_lit (n, fs) -> { e with node = Record_lit (n, List.map (fun (fl, x) -> (fl, g shadow x)) fs) }
+    | Field_get (a, fl) -> { e with node = Field_get (g shadow a, fl) }
+    | Record_update (a, fs) -> { e with node = Record_update (g shadow a, List.map (fun (fl, x) -> (fl, g shadow x)) fs) }
+
+(* A structural copy with every `ty` cleared: `expr.ty` is mutable and set by
+   the typer, so a subtree the pass places twice (the bound in a guard, an
+   atomic argument in both branches of a dispatch) gets its own nodes. *)
+let rv_clone (e : expr) : expr =
+  rv_map_scoped ~shadow:[] (fun _ e ->
+    match e.node with
+    | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit | Var _ -> Some { e with ty = None }
+    | _ -> None) e
+
+(* An access `vec_get v ie` qualifies when `ie` is MONOTONIC in the index
+   parameter: the parameter occurs exactly once, every other leaf is an int
+   literal or an invariant name, and the operators are +, - and * (and unary
+   minus) only. A monotonic function of k over k in [i0, N-1] takes values
+   between its two endpoints, so checking the endpoints checks every access
+   (matmul: `a[i * n + k]`, `b[k * n + j]`). / and % are refused: they are not
+   monotonic (%), and the guard would evaluate them before the loop, moving a
+   division-by-zero ahead of the loop's own effects (/). *)
+let rv_index_monotonic ~(idx : string) ~(invariant : string -> bool) (ie : expr) : bool =
+  let rec occ (e : expr) : int =
+    match e.node with
+    | Var v when v = idx -> 1
+    | Var v -> if invariant v then 0 else 1000
+    | Int_lit _ -> 0
+    | Neg a -> occ a
+    | Bin ((Add | Sub | Mul), a, b) -> occ a + occ b
+    | _ -> 1000
+  in
+  occ ie = 1
+
+(* `ie` with the index parameter replaced by `by` (a fresh copy each time). *)
+let rv_subst_index ~(idx : string) ~(by : expr) (ie : expr) : expr =
+  rv_map_scoped ~shadow:[] (fun _ e ->
+    match e.node with
+    | Var v when v = idx -> Some (rv_clone by)
+    | Var _ | Int_lit _ -> Some { e with ty = None }
+    | _ -> None) ie
+
+(* One unchecked access the fast copy makes: which container, of which kind,
+   at which index expression (in terms of the index parameter). *)
+type rv_access = { acc_container : string; acc_bytes : bool; acc_index : expr }
+
+(* Rewrite the qualifying accesses on invariant containers, and every
    `Var self` into `Var self'`. Returns the rewritten expression and the
-   containers whose accesses it made unchecked (vecs, bytes). *)
+   accesses it made unchecked, one per distinct (container, index) pair. *)
 let rv_rewrite ~(self : string) ~(self' : string) ~(idx : string)
-    ~(invariant : string -> bool) (e : expr) : expr * string list * string list =
-  let vecs = ref [] and bytes = ref [] in
-  let note r v = if not (List.mem v !r) then r := v :: !r in
+    ~(invariant : string -> bool) (e : expr) : expr * rv_access list =
+  let accs = ref [] in
+  let note a =
+    if not (List.exists (fun b -> b.acc_container = a.acc_container && b.acc_bytes = a.acc_bytes
+                                  && pp b.acc_index = pp a.acc_index) !accs)
+    then accs := a :: !accs
+  in
+  let qualifies v ie = invariant v && rv_index_monotonic ~idx ~invariant ie in
   let rec go (e : expr) : expr =
     match e.node with
     | Var n when n = self -> { e with node = Var self' }
-    | App ({ node = App ({ node = Var "vec_get"; loc = l1; ty = t1 }, ({ node = Var v; _ } as ve)); loc = l2; ty = t2 },
-           { node = Var i; _ })
-      when i = idx && invariant v ->
-      note vecs v;
-      { e with node = App ({ node = App ({ node = Var "__vec_get_unchecked"; loc = l1; ty = t1 }, ve); loc = l2; ty = t2 },
-                           (match e.node with App (_, a) -> a | _ -> assert false)) }
-    | App ({ node = App ({ node = App ({ node = Var "vec_set"; loc = l1; ty = t1 }, ({ node = Var v; _ } as ve)); loc = l2; ty = t2 },
-                         ({ node = Var i; _ } as ie)); loc = l3; ty = t3 }, x)
-      when i = idx && invariant v ->
-      note vecs v;
+    | App ({ node = App ({ node = Var "vec_get"; loc = l1; ty = t1 }, ({ node = Var v; _ } as ve)); loc = l2; ty = t2 }, ie)
+      when qualifies v ie ->
+      note { acc_container = v; acc_bytes = false; acc_index = ie };
+      { e with node = App ({ node = App ({ node = Var "__vec_get_unchecked"; loc = l1; ty = t1 }, ve); loc = l2; ty = t2 }, ie) }
+    | App ({ node = App ({ node = App ({ node = Var "vec_set"; loc = l1; ty = t1 }, ({ node = Var v; _ } as ve)); loc = l2; ty = t2 }, ie); loc = l3; ty = t3 }, x)
+      when qualifies v ie ->
+      note { acc_container = v; acc_bytes = false; acc_index = ie };
       { e with node = App ({ node = App ({ node = App ({ node = Var "__vec_set_unchecked"; loc = l1; ty = t1 }, ve); loc = l2; ty = t2 }, ie); loc = l3; ty = t3 }, go x) }
-    | App ({ node = App ({ node = Var "bytes_get"; loc = l1; ty = t1 }, ({ node = Var b; _ } as be)); loc = l2; ty = t2 },
-           { node = Var i; _ })
-      when i = idx && invariant b ->
-      note bytes b;
-      { e with node = App ({ node = App ({ node = Var "__bytes_get_unchecked"; loc = l1; ty = t1 }, be); loc = l2; ty = t2 },
-                           (match e.node with App (_, a) -> a | _ -> assert false)) }
+    | App ({ node = App ({ node = Var "bytes_get"; loc = l1; ty = t1 }, ({ node = Var b; _ } as be)); loc = l2; ty = t2 }, ie)
+      when qualifies b ie ->
+      note { acc_container = b; acc_bytes = true; acc_index = ie };
+      { e with node = App ({ node = App ({ node = Var "__bytes_get_unchecked"; loc = l1; ty = t1 }, be); loc = l2; ty = t2 }, ie) }
     | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit | Var _ -> e
     | Neg a -> { e with node = Neg (go a) }
     | Bin (op, a, b) -> { e with node = Bin (op, go a, go b) }
@@ -1092,8 +1168,8 @@ let rv_rewrite ~(self : string) ~(self' : string) ~(idx : string)
     | Annot (a, t) -> { e with node = Annot (go a, t) }
     | Constr (n, Some a) -> { e with node = Constr (n, Some (go a)) }
     | Constr (_, None) -> e
-    | Match (s, arms) ->
-      { e with node = Match (go s, List.map (fun (p, g, b) -> (p, Option.map go g, go b)) arms) }
+    | Match (sc, arms) ->
+      { e with node = Match (go sc, List.map (fun (p, g, b) -> (p, Option.map go g, go b)) arms) }
     | Tuple es -> { e with node = Tuple (List.map go es) }
     | Region_block (n, b) -> { e with node = Region_block (n, go b) }
     | Region_loop (n, x, b) -> { e with node = Region_loop (n, x, go b) }
@@ -1103,7 +1179,7 @@ let rv_rewrite ~(self : string) ~(self' : string) ~(idx : string)
     | Record_update (a, fs) -> { e with node = Record_update (go a, List.map (fun (f, x) -> (f, go x)) fs) }
   in
   let e' = go e in
-  (e', List.rev !vecs, List.rev !bytes)
+  (e', List.rev !accs)
 
 (* All self calls in `step` are saturated (arity k), in tail position, and pass
    `idx + 1` at position `ipos`. Returns false if any self call sits elsewhere. *)
@@ -1158,50 +1234,6 @@ type rv_plan = {
   rv_guard : expr -> expr;        (* the guard, from the index argument at the call site *)
   rv_guard_names : string list;   (* what the guard reads: the bound and the containers *)
 }
-
-(* Generic scope-tracking map: `f shadow e` may replace a node; otherwise the
-   children are visited with `shadow` extended by whatever the node binds. *)
-let rec rv_map_scoped ~(shadow : string list) (f : string list -> expr -> expr option) (e : expr) : expr =
-  match f shadow e with
-  | Some e' -> e'
-  | None ->
-    let g sh x = rv_map_scoped ~shadow:sh f x in
-    match e.node with
-    | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit | Var _ -> e
-    | Neg a -> { e with node = Neg (g shadow a) }
-    | Bin (op, a, b) -> { e with node = Bin (op, g shadow a, g shadow b) }
-    | Cmp (op, a, b) -> { e with node = Cmp (op, g shadow a, g shadow b) }
-    | Logic (op, a, b) -> { e with node = Logic (op, g shadow a, g shadow b) }
-    | Let (p, v, b) -> { e with node = Let (p, g shadow v, g (pattern_vars p @ shadow) b) }
-    | Let_rec (bs, b) ->
-      let sh = List.map fst bs @ shadow in
-      { e with node = Let_rec (List.map (fun (n, v) -> (n, g sh v)) bs, g sh b) }
-    | With (n, v, b) -> { e with node = With (n, g shadow v, g (n :: shadow) b) }
-    | If (c, t, el) -> { e with node = If (g shadow c, g shadow t, g shadow el) }
-    | Fun (x, t, b) -> { e with node = Fun (x, t, g (x :: shadow) b) }
-    | App (a, b) -> { e with node = App (g shadow a, g shadow b) }
-    | Annot (a, t) -> { e with node = Annot (g shadow a, t) }
-    | Constr (n, Some a) -> { e with node = Constr (n, Some (g shadow a)) }
-    | Constr (_, None) -> e
-    | Match (sc, arms) ->
-      { e with node = Match (g shadow sc,
-        List.map (fun (p, gd, b) -> let sh = pattern_vars p @ shadow in (p, Option.map (g sh) gd, g sh b)) arms) }
-    | Tuple es -> { e with node = Tuple (List.map (g shadow) es) }
-    | Region_block (n, b) -> { e with node = Region_block (n, g shadow b) }
-    | Region_loop (n, x, b) -> { e with node = Region_loop (n, x, g (x :: shadow) b) }
-    | Ref (m, r, a) -> { e with node = Ref (m, r, g shadow a) }
-    | Record_lit (n, fs) -> { e with node = Record_lit (n, List.map (fun (fl, x) -> (fl, g shadow x)) fs) }
-    | Field_get (a, fl) -> { e with node = Field_get (g shadow a, fl) }
-    | Record_update (a, fs) -> { e with node = Record_update (g shadow a, List.map (fun (fl, x) -> (fl, g shadow x)) fs) }
-
-(* A structural copy with every `ty` cleared: `expr.ty` is mutable and set by
-   the typer, so a subtree the pass places twice (the bound in a guard, an
-   atomic argument in both branches of a dispatch) gets its own nodes. *)
-let rv_clone (e : expr) : expr =
-  rv_map_scoped ~shadow:[] (fun _ e ->
-    match e.node with
-    | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit | Var _ -> Some { e with ty = None }
-    | _ -> None) e
 
 (* Analyse one `let rec name = value` and plan its fast copy, or None. *)
 let rv_plan_binding ~(loop_safe : string list) ~(unsafe_builtins : string list)
@@ -1280,24 +1312,42 @@ let rv_plan_binding ~(loop_safe : string list) ~(unsafe_builtins : string list)
        else if not (rv_step_ok ~self:name ~idx ~ipos ~arity step) then None
        else begin
          let fast = name ^ "__rvfast" in
-         let fast_body, vecs, bytes = rv_rewrite ~self:name ~self':fast ~idx ~invariant body in
-         if vecs = [] && bytes = [] then None
+         let fast_body, accs = rv_rewrite ~self:name ~self':fast ~idx ~invariant body in
+         if accs = [] then None
          else begin
            let mk node = { loc = value.loc; ty = None; node } in
            let var n = mk (Var n) in
            let rec wrap ps b = match ps with [] -> b | (x, t) :: rest -> mk (Fun (x, t, wrap rest b)) in
-           let bound_names = bound_vars bound in
+           let rec expr_vars (e : expr) : string list =
+             match e.node with Var v -> [ v ] | _ -> List.concat_map expr_vars (children e) in
+           let guard_names =
+             bound_vars bound
+             @ List.concat_map (fun a -> a.acc_container :: expr_vars a.acc_index) accs in
            let guard (iarg : expr) =
              let conj x y = mk (Logic (And, x, y)) in
-             let len_ok fn c = mk (Cmp (Le, rv_clone bound, mk (App (var fn, var c)))) in
+             let len_of a = mk (App (var (if a.acc_bytes then "bytes_len" else "vec_len"), var a.acc_container)) in
+             (* the plain index: the range [i0, N-1] is inside [0, len) iff N <= len
+                (i0 >= 0 is checked once, below) *)
+             let simple a = mk (Cmp (Le, rv_clone bound, len_of a)) in
+             (* a monotonic index: both endpoints in [0, len) *)
+             let endpoint a at =
+               let v = rv_subst_index ~idx ~by:at a.acc_index in
+               conj (mk (Cmp (Ge, v, mk (Int_lit 0)))) (mk (Cmp (Lt, rv_subst_index ~idx ~by:at a.acc_index, len_of a)))
+             in
+             let last = mk (Bin (Sub, rv_clone bound, mk (Int_lit 1))) in
+             let per_access a =
+               match a.acc_index.node with
+               | Var v when v = idx -> simple a
+               | _ -> conj (endpoint a iarg) (endpoint a last)
+             in
              List.fold_left conj
                (conj (mk (Cmp (Ge, rv_clone iarg, mk (Int_lit 0)))) (mk (Cmp (Le, rv_clone iarg, rv_clone bound))))
-               (List.map (len_ok "vec_len") vecs @ List.map (len_ok "bytes_len") bytes)
+               (List.map per_access accs)
            in
            if !range_version_log then prerr_endline ("range-version: " ^ name);
            range_versioned := name :: !range_versioned;
            Some { rv_name = name; rv_fast = (fast, wrap params fast_body); rv_arity = arity;
-                  rv_ipos = ipos; rv_guard = guard; rv_guard_names = bound_names @ vecs @ bytes }
+                  rv_ipos = ipos; rv_guard = guard; rv_guard_names = guard_names }
          end
        end)
   | _ -> None
