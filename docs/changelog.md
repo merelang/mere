@@ -4,6 +4,22 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.431 — 2026-09-06
+
+**The emitted C includes `<stdint.h>`.** Since v0.1.419 a boxed variant's tag
+rides in its pointer, and the `X__tag` / `X__node` / `X__mk` macros cast
+through `uintptr_t`. The prelude never included `<stdint.h>` itself: the
+SIMD section's `<arm_neon.h>` (arm64) and `<immintrin.h>` (x86 with SSSE3)
+bring it in, so every development machine and an arm64 Linux compiled the
+output, while the scalar fallback taken on a baseline x86-64 -- the CI
+runner -- left the typedef undeclared and every C-backend program failed
+to compile there, taking every CI gate that compiles C with it (parity,
+ctest, proto_parity, the memu emulator for os_check, ...). CI had been red
+since v0.1.419; the build matrix stayed green because it compiles no
+emitted C. Reproduced with `clang -U__aarch64__` on the emitted C, and a
+unit test now asserts the header is in the prelude before the first
+`uintptr_t`.
+
 ## v0.1.430 — 2026-09-05
 
 **RISC-V keeps SIMD values in vector registers (Q-112).** A `u8x16`
