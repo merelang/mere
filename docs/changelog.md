@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.429 — 2026-09-05
+
+_On the Wasm backend a SIMD value now travels unboxed: a v128 on the stack
+between operations, a v128 local for a let-bound value that is only ever an
+operand, and a 16-byte box only when the value becomes a Mere value -- a
+function argument, a result, a field. Every operation used to box its result._
+
+`emit_simd_v` leaves a v128 on the stack for any SIMD-valued expression: the
+lane operations inline (`v128.and`, `i8x16.sub_sat_u`, `f64x2.mul`, ...), the
+loads and the shifts through `_v` runtime variants that take and return v128,
+and anything else -- a parameter, a call's result -- through the box it already
+is. A `let` whose value is SIMD-typed and whose name appears only as a direct
+operand of SIMD builtins (never under a lambda, never anywhere else) gets a
+v128 local instead of a box. `show`, `to_json`, `==`-refusal and the
+interpreter's answers are untouched; the seven SIMD programs in the parity and
+range-version corpora print the same bytes as before.
+
+What it buys, measured by where the bump arena runs out (nothing is freed on
+this backend): `axpy_simd` went from failing at n = 20,000 (a hundred passes)
+to passing at 50,000; the in-program UTF-8 validator from 64 KiB to 256 KiB
+(twenty passes). What it does not buy: the per-iteration boxes that remain --
+a vector passed to a function or returned from one -- so 1 MiB still runs out.
+Wrapping the step in `region R { ... }` was tried and does not rescue it
+either: the region frees the step's scratch, but the values carried to the
+next iteration are copied out of it, and those copies are the per-iteration
+allocation. A v128 that crosses a function boundary without a box would change
+this backend's value model (every value an i64 slot), and is not this slice.
+
+---
+
 ## v0.1.428 — 2026-09-05
 
 _The two bytes builtins the UTF-8 benchmark programs still needed on the
