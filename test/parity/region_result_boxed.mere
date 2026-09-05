@@ -1,0 +1,61 @@
+// Q-107 (v0.1.418): a region block whose RESULT is a boxed value -- a list, a
+// tuple, a record, a variant with a tuple payload, an option, a float, a list
+// of records, bytes. Each block allocates scratch of its own kind so the arena
+// is not trivially empty, and the copied-out value is read AFTER the block on
+// every backend. The Wasm backend's copiers for every one of these still had
+// the 4-byte layout from before the i64 value model and wat2wasm rejected the
+// module; only scalar results had ever left a Wasm region block.
+
+type tree = Leaf | Branch of tree * tree;
+type rec_t = { name: str, n: int };
+type shape = Dot | Seg of int * str | Tag of str;
+
+let rec check = fn (t: tree) ->
+  match t with | Leaf -> 1 | Branch (l, r) -> 1 + check l + check r;
+
+let rec fill = fn (b) -> fn (i: int) ->
+  if i == 200 then () else let _ = lb_push b (str_of_int (i * 3)) in fill b (i + 1);
+
+// 1. a str list built in the block
+let l1 = region R {
+  let b = lb_new () in
+  let _ = fill b 0 in
+  lb_to_list b
+};
+let _ = print ("list " ++ str_of_int (len l1) ++ " " ++ str_join "/" (list_drop l1 197));
+
+// 2. a tuple with a string built in the block
+let t2 = region R { (7, "seven" ++ "!", str_len ("abc" ++ "de")) };
+let (a2, s2, n2) = t2;
+let _ = print ("tuple " ++ str_of_int a2 ++ " " ++ s2 ++ " " ++ str_of_int n2);
+
+// 3. a record
+let r3 = region R { rec_t { name = "na" ++ "me", n = str_len ("xyz" ++ "w") } };
+let _ = print ("record " ++ r3.name ++ " " ++ str_of_int r3.n);
+
+// 4. a recursive variant with a tuple payload, built and walked
+let rec build = fn (d: int) -> if d == 0 then Leaf else Branch (build (d - 1), build (d - 1));
+let t4 = region R { build 6 };
+let _ = print ("tree " ++ str_of_int (check t4));
+
+// 5. a non-recursive variant with a str payload, and a mixed one
+let o5 = region R { Some (str_of_int 42) };
+let _ = print ("option " ++ (match o5 with | Some s -> s | None -> "-"));
+let s5 = region R { Seg (3, "se" ++ "g") };
+let _ = print ("shape " ++ (match s5 with | Dot -> "dot" | Seg (k, s) -> s ++ str_of_int k | Tag s -> s));
+let d5 = region R { Dot };
+let _ = print ("nullary " ++ (match d5 with | Dot -> "dot" | Seg (_, _) -> "seg" | Tag _ -> "tag"));
+
+// 6. a float
+let f6 = region R { f_mul (float_of_int (str_len ("ab" ++ "c"))) 1.5 };
+let _ = print ("float " ++ str_of_float f6);
+
+// 7. a list of records
+let l7 = region R { [rec_t { name = "a" ++ "1", n = 1 }, rec_t { name = "b" ++ "2", n = 2 }] };
+let rec names = fn (rs: rec_t list) -> fn (acc: str) ->
+  match rs with | Nil -> acc | Cons (r, t) -> names t (acc ++ r.name ++ str_of_int r.n ++ " ");
+let _ = print ("records " ++ names l7 "");
+
+// 8. bytes
+let b8 = region R { bytes_of_str ("by" ++ "tes") };
+print ("bytes " ++ str_of_int (bytes_len b8) ++ " " ++ str_of_int (bytes_get b8 4))
