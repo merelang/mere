@@ -41,6 +41,7 @@
 #
 # section                        marker                    mode       program
 file_io_used                     __lang_read_file_h        wasm       test/parity/file_pio.mere
+lb_used                          mere_lb_push              wasm       test/parity/list_builder.mere
 list_len_used                    mere_list_len             wasm       test/parity/list_len.mere
 logger_used                      __mere_logger_info_fn     wasm       test/parity/logger_metrics_caps.mere
 metrics_used                     __mere_metrics_inc_fn     wasm       test/parity/logger_metrics_caps.mere
@@ -66,6 +67,7 @@ llvm:bytes_vec_bridge_runtime    __lang_bytes_of_vec       llvm       test/parit
 llvm:env_var_runtime             __lang_env_var            llvm       test/parity/env_var.mere
 llvm:file_pio_runtime            __lang_file_openrw        llvm       test/parity/file_pio.mere
 llvm:logger_runtime              __mere_logger_info_fn     llvm       test/parity/logger_metrics_caps.mere
+llvm:simd_runtime                mere_u8x16_splat          llvm       test/parity/simd_u8x16.mere
 llvm:metrics_runtime             __mere_metrics_inc_fn     llvm       test/parity/logger_metrics_caps.mere
 llvm:str_count_runtime           __lang_str_count          llvm       test/parity/prop_str.mere
 llvm:str_join_runtime            __lang_str_join           llvm       test/parity/coll_edges.mere

@@ -12655,4 +12655,19 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       in
       parts @ header @ per_fn @ [ "" ]
   in
+  (* Q-113: a vector that moves through heap memory must say the heap's alignment.
+     The bump allocator hands out 8-byte aligned boxes; a `store <16 x i8>` with
+     no alignment claims the type's natural 16, which x86 turns into movaps and
+     a fault on an 8-aligned box. arm64 and Rosetta do not fault, so this passed
+     on every development machine and failed only on the CI runner. Every vector
+     load/store without an explicit alignment gets `align 8` here, in one place,
+     rather than at the 50 sites that emit loads and stores. *)
+  let has sub line =
+    let n = String.length sub and m = String.length line in
+    let rec go i = i + n <= m && (String.sub line i n = sub || go (i + 1)) in
+    go 0 in
+  let vector_align line =
+    if (has "= load <" line || has "  store <" line) && not (has ", align " line)
+    then line ^ ", align 8" else line in
   String.concat "\n" parts
+  |> String.split_on_char '\n' |> List.map vector_align |> String.concat "\n"
