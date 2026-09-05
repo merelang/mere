@@ -1,0 +1,12 @@
+name  = utf8valid
+shape = is 4 MiB of text well-formed UTF-8, and how many codepoints: a byte state machine, 20 passes
+args  = $DATA/utf8.txt
+claim = the scalar baseline for explicit SIMD (Q-109). One state machine over
+        bytes_get, RFC 3629 exactly (no overlongs, no surrogates, nothing above
+        U+10FFFF); the C row is the same machine. Expected to TIE with C, and it
+        is the number utf8valid_simd has to beat: a validator is what no
+        vectorizer builds from this loop, and what sixteen byte lanes do well.
+
+# 4,194,320 B at v0.1.424: the 4 MiB input and its header; the loop allocates nothing.
+alloc_min = 4194304
+alloc_max = 6291456

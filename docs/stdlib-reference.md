@@ -909,6 +909,15 @@ satisfy it and hide the very row it was describing.
 | `f64x2_reduce_add` | `f64x2 -> float` | lane 0 + lane 1, in that order |
 | `f64x2_load` | `Vec[R, float] -> int -> f64x2` | lanes `[i, i+2)` of the Vec; past the end fails like `vec_get` |
 | `f64x2_store` | `Vec[R, float] -> int -> f64x2 -> unit` | the two lanes into `[i, i+2)` |
+| `u8x16_from_bytes` / `u8x16_load` | `bytes -> u8x16` / `bytes -> int -> u8x16` | the first 16 bytes / bytes `[i, i+16)`; short fails like an index |
+| `u8x16_and` / `u8x16_or` / `u8x16_xor` | `u8x16 -> u8x16 -> u8x16` | bitwise, lane-wise |
+| `u8x16_sub_sat` | `u8x16 -> u8x16 -> u8x16` | unsigned subtract saturating at 0 |
+| `u8x16_eq` | `u8x16 -> u8x16 -> u8x16` | 0xFF where the lanes are equal, else 0 |
+| `u8x16_swizzle` | `u8x16 -> u8x16 -> u8x16` | table, indices: lane i = table[idx[i]], or 0 when idx[i] > 15 (pshufb / tbl / i8x16.swizzle) |
+| `u8x16_shr` | `u8x16 -> int -> u8x16` | each byte shifted right by 0..7 |
+| `u8x16_shift_in` | `u8x16 -> u8x16 -> int -> u8x16` | `prev cur k`: the last k bytes of prev, then the first 16-k of cur |
+| `u8x16_any_true` | `u8x16 -> bool` | any lane non-zero |
+| `u8x16_reduce_add` | `u8x16 -> int` | the lanes summed as integers (0..4080) |
 
 **`Vec` — the rest of the family** (`vec_new` / `push` / `get` / `set` / `len` / `iter` / `map` / `filter` / `fold` / `sort` / `to_list` / `to_owned` are covered in language-reference and the tutorial):
 

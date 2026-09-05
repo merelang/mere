@@ -1,0 +1,20 @@
+name  = utf8valid_simd
+shape = the utf8valid row with u8x16 lanes (Keiser-Lemire), 16 bytes per step, 20 passes
+args  = $DATA/utf8.txt
+claim = the row that justifies explicit SIMD (Q-109). Three nibble-indexed
+        lookup tables classify each byte against the one before it, a
+        saturating subtract finds the 3- and 4-byte leads two and three bytes
+        back, and the two answers must agree; sixteen bytes per step. The C row
+        is the SCALAR state machine on purpose -- what a C programmer writes
+        without intrinsics -- so this row against utf8valid is "lanes vs no
+        lanes" in the same language, and against C is "Mere with lanes vs C
+        without". Same answer as both, or the row is wrong. Measured at
+        v0.1.424 (run.py, median of 3): 29 ms against utf8valid's 72 ms and
+        C's 54 ms -- two and a half times the scalar Mere, nearly twice scalar
+        C; the loop alone is about 3x and 2.5x. The expectation is to stay
+        AHEAD of both by 2x or more.
+
+# The same 4 MiB input; the constant tables and the per-block vectors are
+# 16-byte values by value on the C backend, so nothing else allocates.
+alloc_min = 4194304
+alloc_max = 6291456

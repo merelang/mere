@@ -1,0 +1,25 @@
+// u8x16 lane operations across the backends: from_bytes / load / and / or /
+// xor / sub_sat / eq / swizzle / shr / shift_in / any_true / reduce_add, with
+// the values printed lane by lane through u8x16_extract.
+let t = u8x16_from_bytes (bytes_of_hex "000102030405060708090a0b0c0d0e0f");
+let b = bytes_of_str "0123456789abcdefXYZ";
+let v = u8x16_load b 3;
+let idx = u8x16_from_bytes (bytes_of_hex "0f0e0d0c0b0a09080706050403020100");
+let sw = u8x16_swizzle t idx;
+let _ = print (str_of_int (u8x16_extract sw 0) ++ " " ++ str_of_int (u8x16_extract sw 15));
+let big = u8x16_swizzle t (u8x16_splat 20);
+let _ = print (str_of_int (u8x16_extract big 5));
+let s = u8x16_sub_sat (u8x16_splat 10) (u8x16_from_bytes (bytes_of_hex "05050505050505050505050505050505"));
+let _ = print (str_of_int (u8x16_extract s 0));
+let z = u8x16_sub_sat (u8x16_splat 3) (u8x16_splat 200);
+let _ = print (str_of_int (u8x16_extract z 7));
+let e = u8x16_eq v (u8x16_splat 55);
+let _ = print (str_of_int (u8x16_extract e 0) ++ " " ++ str_of_int (u8x16_extract e 1));
+let _ = print (str_of_int (u8x16_reduce_add (u8x16_and e (u8x16_splat 1))));
+let sh = u8x16_shr (u8x16_splat 200) 4;
+let _ = print (str_of_int (u8x16_extract sh 3));
+let si = u8x16_shift_in t v 3;
+let _ = print (str_of_int (u8x16_extract si 0) ++ " " ++ str_of_int (u8x16_extract si 2) ++ " " ++ str_of_int (u8x16_extract si 3) ++ " " ++ str_of_int (u8x16_extract si 15));
+let _ = print (if u8x16_any_true (u8x16_xor v v) then "some" else "none");
+let _ = print (if u8x16_any_true (u8x16_or (u8x16_splat 0) (u8x16_splat 8)) then "some" else "none");
+print (str_of_int (u8x16_reduce_add (u8x16_splat 255)))

@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.424 — 2026-09-05
+
+_The u8x16 lane operations a UTF-8 validator needs -- load / from_bytes, and /
+or / xor, sub_sat, eq, swizzle, shr, shift_in, any_true, reduce_add -- on every
+backend, and the validator itself: `benchmarks/utf8valid_simd` (Keiser-Lemire,
+sixteen bytes per step) against `benchmarks/utf8valid` (the scalar state
+machine) and C._
+
+This is the row explicit lanes were for. No vectorizer builds a UTF-8 validator
+from a byte state machine; three nibble-indexed table lookups, a saturating
+subtract two and three bytes back, and a compare of the two answers do it
+sixteen bytes at a time. The operation set was derived from that algorithm and
+from axpy, not listed by hand, and it is what the stdlib reference now has.
+
+The one operation with no portable spelling is the byte table lookup
+(`u8x16_swizzle`): NEON `tbl`, SSSE3 `pshufb`, Wasm `i8x16.swizzle`. C emits
+all three behind `#if`, with a scalar loop after them, and normalises pshufb's
+"index 16..127 wraps" to Wasm's and NEON's "gives 0" by setting bit 7 on such
+indices first. LLVM IR has no generic swizzle either; there it is a 16-step
+extract / select / insert the backend pattern-matches where it can.
+`u8x16_shift_in` (the previous block's last k bytes in front of the current
+one) is a constant shufflevector per k on C, and a 32-byte scratch read at
+offset 16-k on LLVM and Wasm, so k may be a runtime value.
+
+The interpreter fixes the corner rules and the compiled backends match it:
+sub_sat saturates at 0, eq gives 0xFF per equal lane, swizzle gives 0 outside
+0..15, reduce_add sums as integers (4080 for sixteen 255s), a 16-byte load
+past the end fails like an index. `test/parity/simd_u8x16.mere` exercises each
+lane by lane; `test/range_version/utf8_simd_small.mere` runs the validator on
+valid text, a truncated sequence, an overlong, a surrogate and a stray byte,
+on interp / C / LLVM / Wasm. `gen_data.py` now writes `utf8.txt` (4 MiB of
+mixed 1- to 4-byte text, cut at a codepoint boundary) for the two rows.
+
+The number, from `benchmarks/run.py` (median of three, twenty passes over the
+4 MiB of `utf8.txt`): `utf8valid` (the scalar Mere state machine) 72 ms, C's
+scalar machine 54 ms, `utf8valid_simd` 29 ms -- two and a half times the
+scalar Mere and nearly twice C (the loop alone, without process startup, is
+about 3x and 2.5x), with the same answer on every input including the
+corrupted ones. That
+is what the two types were added for, and it is the opposite of axpy_simd's
+result: lanes pay where the vectorizer cannot follow, not where it already
+does.
+
+---
+
 ## v0.1.423 — 2026-09-05
 
 _The f64x2 lane operations -- make, add / sub / mul / div, reduce_add, and
