@@ -15006,5 +15006,26 @@ let () =
   check "v0.1.428: the RV prelude defines read_bytes over read_file"
     (if has Rv_prelude.contents "let read_bytes = fn (p: str) -> bytes_of_str (read_file p);" then "defined" else "missing") "defined";
 
+  (* v0.1.429 (Q-109): SIMD values on Wasm travel unboxed -- v128 on the stack
+     between operations and in v128 locals for a let-bound value used only as an
+     operand -- and are boxed once, when they become a Mere value. *)
+  check "v0.1.429: an operation chain boxes once, at the end"
+    (let w = wasm "let a = u8x16_splat 1 in u8x16_extract (u8x16_and (u8x16_or a (u8x16_splat 2)) (u8x16_splat 3)) 0" in
+     (* only $main is the program: the runtime text defines boxed $mere_u8x16_*
+        helpers whose bodies box and use v128.and / v128.or as well *)
+     let find_from sub i = let n = String.length sub in
+       let rec go k = if k + n > String.length w then String.length w else if String.sub w k n = sub then k else go (k + 1) in go i in
+     let i = find_from "(func $main" 0 in
+     let j = find_from "\n  (func " (i + 1) in
+     let m = String.sub w i (j - i) in
+     let count needle = let n = String.length needle in let rec go i acc = if i + n > String.length m then acc else go (i + 1) (if String.sub m i n = needle then acc + 1 else acc) in go 0 0 in
+     Printf.sprintf "box:%d and:%d or:%d" (count "call $__mere_box_v128") (count "v128.and") (count "v128.or")) "box:0 and:1 or:1";
+  check "v0.1.429: a let-bound SIMD operand lives in a v128 local"
+    (let w = wasm "let a = u8x16_splat 1 in let b = u8x16_xor a (u8x16_splat 2) in u8x16_reduce_add (u8x16_and a b)" in
+     if has w "(local v128)" || has w "v128)" then "v128 local" else "boxed") "v128 local";
+  check "v0.1.429: a SIMD value that escapes (passed to a function) is boxed"
+    (let w = wasm "let f = fn (x: u8x16) -> u8x16_extract x 0 in let a = u8x16_splat 9 in f a + f (u8x16_splat 1)" in
+     if has w "call $__mere_box_v128" then "boxed" else "not boxed") "boxed";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
