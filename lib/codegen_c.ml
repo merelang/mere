@@ -3263,6 +3263,19 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "mere_vec_%s_push(%s, %s)"
          elem_tag (emit_expr vec_e) (emit_expr arg)
      | Ast.Var "f64x2_splat" -> Printf.sprintf "mere_f64x2_splat(%s)" (emit_expr arg)
+     | Ast.Var "f64x2_reduce_add" -> Printf.sprintf "mere_f64x2_reduce_add(%s)" (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "f64x2_make"; _ }, a_e) ->
+       Printf.sprintf "mere_f64x2_make(%s, %s)" (emit_expr a_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var ("f64x2_add" | "f64x2_sub" | "f64x2_mul" | "f64x2_div" as op); _ }, a_e) ->
+       (* the vector extension's arithmetic is lane-wise *)
+       let c_op = match op with "f64x2_add" -> "+" | "f64x2_sub" -> "-" | "f64x2_mul" -> "*" | _ -> "/" in
+       Printf.sprintf "((%s) %s (%s))" (emit_expr a_e) c_op (emit_expr arg)
+     | Ast.App ({ node = Ast.Var ("f64x2_load" | "__f64x2_load_unchecked" as name); _ }, v_e) ->
+       let sfx = if name = "f64x2_load" then "" else "_unchecked" in
+       Printf.sprintf "mere_vec_float_f64x2_load%s(%s, %s)" sfx (emit_expr v_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var ("f64x2_store" | "__f64x2_store_unchecked" as name); _ }, v_e); _ }, i_e) ->
+       let sfx = if name = "f64x2_store" then "" else "_unchecked" in
+       Printf.sprintf "mere_vec_float_f64x2_store%s(%s, %s, %s)" sfx (emit_expr v_e) (emit_expr i_e) (emit_expr arg)
      | Ast.Var "u8x16_splat" -> Printf.sprintf "mere_u8x16_splat(%s)" (emit_expr arg)
      | Ast.App ({ node = Ast.Var "f64x2_extract"; _ }, v_e) ->
        Printf.sprintf "mere_f64x2_extract(%s, %s)" (emit_expr v_e) (emit_expr arg)
@@ -9102,7 +9115,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
   let c_elem = c_type_of elem_ty in
   let struct_name = "mere_vec_" ^ tag in
   String.concat "\n"
-    [ Printf.sprintf "typedef struct %s {" struct_name;
+    ([ Printf.sprintf "typedef struct %s {" struct_name;
       Printf.sprintf "  %s* data;" c_elem;
       "  int len;";
       "  int cap;";
@@ -9194,6 +9207,27 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       Printf.sprintf "  v->data[i] = __mcopy_%s(v->region, x);" tag;
       "  return 0; /* unit */";
       "}" ]
+    @ (if tag <> "float" then [] else [
+      "";
+      (* Q-109 (2b): two consecutive lanes of a float Vec as one f64x2, and
+         back. Lane by lane through `double*`, not memcpy: clang merges the
+         two into one vector load / store either way, but a memcpy may alias
+         anything and made it reload `v->data` on every iteration, where a
+         store of doubles cannot touch a `double*` field. *)
+      "static mere_f64x2 mere_vec_float_f64x2_load(mere_vec_float* v, long long i) {";
+      "  if (i < 0 || i + 2 > (long long)v->len) __lang_fail_idx(\"f64x2_load: lanes [%lld, +2) out of bounds (len = %lld)\", i, (long long)v->len);";
+      "  const double* p = v->data + i; mere_f64x2 r = { p[0], p[1] }; return r;";
+      "}";
+      "static mere_f64x2 mere_vec_float_f64x2_load_unchecked(mere_vec_float* v, long long i) {";
+      "  const double* p = v->data + i; mere_f64x2 r = { p[0], p[1] }; return r;";
+      "}";
+      "static int mere_vec_float_f64x2_store(mere_vec_float* v, long long i, mere_f64x2 x) {";
+      "  if (i < 0 || i + 2 > (long long)v->len) __lang_fail_idx(\"f64x2_store: lanes [%lld, +2) out of bounds (len = %lld)\", i, (long long)v->len);";
+      "  double* p = v->data + i; p[0] = x[0]; p[1] = x[1]; return 0;";
+      "}";
+      "static int mere_vec_float_f64x2_store_unchecked(mere_vec_float* v, long long i, mere_f64x2 x) {";
+      "  double* p = v->data + i; p[0] = x[0]; p[1] = x[1]; return 0;";
+      "}" ]))
 
 let main_format_of (t : Ast.ty) : string option =
   match Ast.walk t with
@@ -11879,6 +11913,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "  unsigned char b = (unsigned char)(x & 0xFF);";
       "  mere_u8x16 v = { b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b }; return v;";
       "}";
+      "static inline mere_f64x2 mere_f64x2_make(double a, double b) { mere_f64x2 v = { a, b }; return v; }";
+      "static inline double mere_f64x2_reduce_add(mere_f64x2 v) { return v[0] + v[1]; }";
       "static inline long long mere_u8x16_extract(mere_u8x16 v, long long i) {";
       "  if (i < 0 || i >= 16) __lang_fail_idx(\"u8x16_extract: lane %lld out of range (lanes = %lld)\", i, 16LL);";
       "  return (long long)v[i];";

@@ -14871,5 +14871,33 @@ let () =
   check "v0.1.422: the types spell themselves"
     (Ast.pp_ty (Ast.TySimd Ast.F64x2) ^ "/" ^ Ast.pp_ty (Ast.TySimd Ast.U8x16)) "f64x2/u8x16";
 
+  (* v0.1.423 (Q-109, 2b): the f64x2 lane operations, and range-check versioning
+     over a stride and a two-lane access. *)
+  check "v0.1.423: lane-wise add" (Pipeline.process "f64x2_extract (f64x2_add (f64x2_make 1.5 2.5) (f64x2_splat 1.0)) 1") "3.5";
+  check "v0.1.423: reduce_add is lane 0 + lane 1" (Pipeline.process "f64x2_reduce_add (f64x2_make 1.5 2.5)") "4.0";
+  check "v0.1.423: load two lanes from a float Vec, store them back"
+    (Pipeline.process "let v = vec_new ();\nlet _ = vec_push v 1.0;\nlet _ = vec_push v 2.0;\nlet _ = vec_push v 3.0;\n\
+                       let _ = f64x2_store v 1 (f64x2_mul (f64x2_load v 1) (f64x2_splat 10.0));\nvec_get v 2") "30.0";
+  check "v0.1.423: a two-lane load past the end fails like an index"
+    (try ignore (Pipeline.process "let v = vec_new ();\nlet _ = vec_push v 1.0;\nf64x2_extract (f64x2_load v 0) 0"); "no error"
+     with Eval.Eval_error (_, m) -> if has m "lanes [0, 2) out of bounds" then "range error" else m) "range error";
+  let stride_src = "let n = 8;\nlet v = vec_new ();\n\
+                    let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v (float_of_int i) in fill (i + 1);\n\
+                    let _ = fill 0;\n\
+                    let rec dbl = fn (i: int) -> if i == n then () else let _ = f64x2_store v i (f64x2_mul (f64x2_load v i) (f64x2_splat 2.0)) in dbl (i + 2);\n\
+                    let _ = dbl 0;\n\
+                    vec_get v 7" in
+  check "v0.1.423: a stride-2 loop over two-lane accesses is planned" (planned stride_src) "dbl";
+  check "v0.1.423: and computes the same with the pass off"
+    (let on = Pipeline.process stride_src in
+     Ast.range_version_enabled := false;
+     let off = (try Pipeline.process stride_src with e -> Ast.range_version_enabled := true; raise e) in
+     Ast.range_version_enabled := true;
+     if on = off then "same:" ^ on else "on=" ^ on ^ " off=" ^ off) "same:14.0";
+  check "v0.1.423: the fast copy loads unchecked two lanes"
+    (if has (rv_c stride_src) "mere_vec_float_f64x2_load_unchecked(" then "unchecked" else "checked") "unchecked";
+  check "v0.1.423: a stride with an equality exit guards the landing"
+    (if has (rv_c stride_src) "__lang_imod((mu_n - 0LL), 2LL) == 0LL" then "landing" else "none") "landing";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

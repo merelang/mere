@@ -1557,6 +1557,61 @@ let builtin_u8x16_extract =
         | _ -> failwith "u8x16_extract: expected int lane")
     | _ -> failwith "u8x16_extract: expected u8x16")
 
+(* Q-109 (2b): f64x2 lane operations. Lane order is the Vec's order; a load of
+   lanes [i, i+2) outside the Vec fails like vec_get does. *)
+let f64x2_of who v =
+  match v with V_f64x2 (a, b) -> (a, b) | _ -> failwith (who ^ ": expected f64x2")
+let f64x2_binop name f =
+  V_builtin (name, fun a ->
+    V_builtin (name ^ "_p1", fun b ->
+      let (a0, a1) = f64x2_of name a and (b0, b1) = f64x2_of name b in
+      V_f64x2 (f a0 b0, f a1 b1)))
+let builtin_f64x2_add = f64x2_binop "f64x2_add" ( +. )
+let builtin_f64x2_sub = f64x2_binop "f64x2_sub" ( -. )
+let builtin_f64x2_mul = f64x2_binop "f64x2_mul" ( *. )
+let builtin_f64x2_div = f64x2_binop "f64x2_div" ( /. )
+let builtin_f64x2_make =
+  V_builtin ("f64x2_make", fun a ->
+    V_builtin ("f64x2_make_p1", fun b ->
+      match a, b with
+      | V_float x, V_float y -> V_f64x2 (x, y)
+      | _ -> failwith "f64x2_make: expected two floats"))
+let builtin_f64x2_reduce_add =
+  V_builtin ("f64x2_reduce_add", fun v ->
+    let (a, b) = f64x2_of "f64x2_reduce_add" v in V_float (a +. b))
+let f64x2_range who (arr : vecbuf) i =
+  if i < 0 || i + 2 > arr.vc_len then
+    raise (Eval_error (Loc.dummy,
+      Printf.sprintf "%s: lanes [%d, %d) out of bounds (len = %d)" who i (i + 2) arr.vc_len))
+let builtin_f64x2_load =
+  V_builtin ("f64x2_load", fun v ->
+    match v with
+    | V_vec arr ->
+      V_builtin ("f64x2_load_p1", fun idx ->
+        match idx with
+        | V_int i ->
+          f64x2_range "f64x2_load" arr i;
+          (match arr.vc_data.(i), arr.vc_data.(i + 1) with
+           | V_float a, V_float b -> V_f64x2 (a, b)
+           | _ -> failwith "f64x2_load: expected float elements")
+        | _ -> failwith "f64x2_load: expected int index")
+    | _ -> failwith "f64x2_load: expected Vec")
+let builtin_f64x2_store =
+  V_builtin ("f64x2_store", fun v ->
+    match v with
+    | V_vec arr ->
+      V_builtin ("f64x2_store_p1", fun idx ->
+        V_builtin ("f64x2_store_p2", fun x ->
+          match idx with
+          | V_int i ->
+            f64x2_range "f64x2_store" arr i;
+            let (a, b) = f64x2_of "f64x2_store" x in
+            arr.vc_data.(i) <- V_float a;
+            arr.vc_data.(i + 1) <- V_float b;
+            V_unit
+          | _ -> failwith "f64x2_store: expected int index"))
+    | _ -> failwith "f64x2_store: expected Vec")
+
 let builtin_vec_get =
   V_builtin ("vec_get", fun v ->
     match v with
@@ -3462,6 +3517,16 @@ let initial_env : env =
     ("f64x2_extract", ref builtin_f64x2_extract);
     ("u8x16_splat", ref builtin_u8x16_splat);
     ("u8x16_extract", ref builtin_u8x16_extract);
+    ("f64x2_make", ref builtin_f64x2_make);
+    ("f64x2_add", ref builtin_f64x2_add);
+    ("f64x2_sub", ref builtin_f64x2_sub);
+    ("f64x2_mul", ref builtin_f64x2_mul);
+    ("f64x2_div", ref builtin_f64x2_div);
+    ("f64x2_reduce_add", ref builtin_f64x2_reduce_add);
+    ("f64x2_load", ref builtin_f64x2_load);
+    ("f64x2_store", ref builtin_f64x2_store);
+    ("__f64x2_load_unchecked", ref builtin_f64x2_load);
+    ("__f64x2_store_unchecked", ref builtin_f64x2_store);
     ("vec_reverse", ref builtin_vec_reverse);
     ("vec_concat",  ref builtin_vec_concat);
     ("vec_sort",    ref builtin_vec_sort);

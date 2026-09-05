@@ -1,0 +1,10 @@
+// range-version: walk
+// Stride 3 from 1 with an equality exit at 7: 1, 4, 7 -- the loop lands on the
+// bound, the guard's landing test (7 - 1) % 3 == 0 is true, the fast copy runs.
+let n = 8;
+let v = vec_new ();
+let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v i in fill (i + 1);
+let _ = fill 0;
+let rec walk = fn (i: int) -> fn (acc: int) ->
+  if i == 7 then acc else walk (i + 3) (acc + vec_get v i);
+print (str_of_int (walk 1 0))

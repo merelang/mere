@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.423 — 2026-09-05
+
+_The f64x2 lane operations -- make, add / sub / mul / div, reduce_add, and
+load / store of two consecutive lanes of a `Vec[R, float]` -- on every
+backend, and range-check versioning extended to a stride and a two-lane
+access, so an explicit-SIMD axpy has one exit per iteration too._
+
+`f64x2_load v i` reads lanes `[i, i+2)` and fails past the end as `vec_get`
+does; `f64x2_store` writes them. C: a `memcpy` of 16 bytes the compiler turns
+into one vector load or store (the buffer is only 8-aligned). LLVM: `load /
+store <2 x double>, align 8`. Wasm: a float Vec's slots hold POINTERS to 8-byte
+float boxes, so a lane load gathers two boxes and a lane store boxes two
+doubles -- correct, and the reason Wasm's number for this row will not be C's
+until the value model changes. Arithmetic is lane-wise; `f64x2_reduce_add` is
+lane 0 + lane 1, in that order, on every backend.
+
+Range-check versioning (v0.1.420) now accepts a self call that advances the
+index by any one positive literal, and an access of width two: the guard
+checks `[e, e + 2)` at both endpoints. A stride above one with an EQUALITY
+exit needs one more conjunct -- that the loop lands on the bound exactly --
+because the original would otherwise run past it and fail on the first access
+beyond, and the fast copy must not read what the original would have refused.
+`test/range_version/simd_stride2.mere` and `poison_stride_miss.mere` pin both
+sides; `test/parity/simd_f64x2.mere` runs the operations on interp / C / LLVM
+/ Wasm.
+
+`benchmarks/axpy_simd` is the axpy row with explicit lanes, and it is SLOWER:
+0.12 s against the auto-vectorized axpy row's 0.08 s and C's 0.07 s. Its loop
+body is the minimal one (two vector loads, fmul, fadd, one store, the counter)
+-- the first version reloaded `v->data` every iteration because the lane
+accessors went through memcpy, which may alias anything; lane-by-lane
+`double*` accesses fixed that and did not move the time. What is left is
+width: clang vectorizes the scalar loop at VF 2 with an interleave of 4, eight
+doubles per iteration, and two per step is a quarter of the loads in flight on
+a memory-bound loop. Unrolling the Mere source by hand to four per step gives
+0.10 s. The MANIFEST says so: explicit 128-bit lanes are for the kernels the
+auto-vectorizer cannot build (the byte-lane ones, next slice), not for beating
+it where it already works.
+
+Known limit, pre-existing in kind: on Wasm every SIMD value and every lane is
+a box in the bump arena, so a long SIMD loop exhausts memory where the scalar
+one (fewer, smaller boxes) still fits -- `axpy_simd` at n = 20000 x 100 runs
+out where `axpy` does not. A register-resident v128 in that backend is the fix,
+and is not this slice.
+
+---
+
 ## v0.1.422 — 2026-09-05
 
 _Two 128-bit SIMD types, `f64x2` and `u8x16`, reach every backend with the four
