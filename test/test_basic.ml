@@ -14960,7 +14960,7 @@ let () =
   rv_err_contains "v0.1.426: bytes compile for RV32I (of_hex, get, len, slice, concat)"
     "let b = bytes_concat (bytes_of_hex \"0a0b\") (bytes_slice (bytes_of_str \"xyz\") 1 2);\nprint_int (bytes_len b * 1000 + bytes_get b 2)" "(compiled without error)";
   rv_err_contains "v0.1.426: f64x2 is refused by name on RV32I"
-    "print_int (u8x16_extract (u8x16_splat 1) 0) ; f64x2_extract (f64x2_splat 1.0) 0" "f64x2";
+    "let x = f64x2_extract (f64x2_splat 1.0) 0;\nprint_int 1" "f64x2";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
