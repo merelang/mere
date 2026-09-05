@@ -125,6 +125,42 @@ let fresh_local_f64 () =
   incr local_counter;
   local_types := !local_types @ ["f64"];
   n
+(* Q-109 (v0.1.429): a v128 local. A let-bound SIMD value that is only ever an
+   operand of SIMD builtins lives here, unboxed; see emit_simd_v. *)
+let fresh_local_v128 () =
+  let n = !local_counter in
+  incr local_counter;
+  local_types := !local_types @ ["v128"];
+  n
+let simd_locals : (string * int) list ref = ref []
+let simd_result_ops = [ "f64x2_splat"; "f64x2_make"; "f64x2_add"; "f64x2_sub"; "f64x2_mul"; "f64x2_div";
+                        "f64x2_load"; "__f64x2_load_unchecked";
+                        "u8x16_splat"; "u8x16_from_bytes"; "u8x16_load"; "__u8x16_load_unchecked";
+                        "u8x16_and"; "u8x16_or"; "u8x16_xor"; "u8x16_sub_sat"; "u8x16_eq"; "u8x16_swizzle";
+                        "u8x16_shr"; "u8x16_shift_in" ]
+let simd_scalar_ops = [ "f64x2_extract"; "f64x2_reduce_add"; "f64x2_store"; "__f64x2_store_unchecked";
+                        "u8x16_extract"; "u8x16_any_true"; "u8x16_reduce_add" ]
+let simd_head (e : Ast.expr) : string option =
+  let h, _ = Ast.rv_spine e in
+  match h.Ast.node with
+  | Ast.Var n when List.mem n simd_result_ops || List.mem n simd_scalar_ops -> Some n
+  | _ -> None
+(* `name` is used in `body` only as a direct operand of a SIMD builtin, never
+   under a lambda (a capture would need the box) and never anywhere else. *)
+let simd_operand_only (name : string) (body : Ast.expr) : bool =
+  let rec mentions (e : Ast.expr) =
+    (match e.Ast.node with Ast.Var n when n = name -> true | _ -> false)
+    || List.exists mentions (Ast.children e) in
+  let rec ok (e : Ast.expr) : bool =
+    match e.Ast.node with
+    | Ast.Var n when n = name -> false
+    | Ast.Fun (_, _, b) -> not (mentions b)
+    | Ast.App _ when simd_head e <> None ->
+      let _, args = Ast.rv_spine e in
+      List.for_all (fun a -> match a.Ast.node with Ast.Var n when n = name -> true | _ -> ok a) args
+    | _ -> List.for_all ok (Ast.children e)
+  in
+  ok body
 
 (* String literals live in linear memory. Each Str_lit is laid out
    sequentially starting at `str_initial_offset` (we reserve the first
@@ -1625,7 +1661,41 @@ let app_head_user_bound_wasm (x : Ast.expr) : bool =
   | _ -> false
 
 (* Emit `expr` so its result lands on top of the Wasm operand stack. *)
-let rec emit_expr (e : Ast.expr) : unit =
+let rec emit_simd_v (e : Ast.expr) : unit =
+  (* leaves a v128 on the stack; the boxed fallback covers parameters, call
+     results and anything else that already is a Mere value *)
+  let unbox () = emit_instr "i32.wrap_i64"; emit_instr "v128.load offset=0 align=16" in
+  let f64_of_boxed x = emit_expr x; emit_instr "i32.wrap_i64"; emit_instr "f64.load offset=0 align=8" in
+  match e.Ast.node with
+  | Ast.Var n when List.mem_assoc n !simd_locals ->
+    emit_instr (Printf.sprintf "local.get %d" (List.assoc n !simd_locals))
+  | Ast.App ({ node = Ast.Var "u8x16_splat"; _ }, x) -> emit_expr x; emit_instr "i32.wrap_i64"; emit_instr "i8x16.splat"
+  | Ast.App ({ node = Ast.Var "f64x2_splat"; _ }, x) -> f64_of_boxed x; emit_instr "f64x2.splat"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "f64x2_make"; _ }, a); _ }, b) ->
+    f64_of_boxed a; emit_instr "f64x2.splat"; f64_of_boxed b; emit_instr "f64x2.replace_lane 1"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("f64x2_add" | "f64x2_sub" | "f64x2_mul" | "f64x2_div" as op); _ }, a); _ }, b) ->
+    emit_simd_v a; emit_simd_v b;
+    emit_instr (match op with "f64x2_add" -> "f64x2.add" | "f64x2_sub" -> "f64x2.sub" | "f64x2_mul" -> "f64x2.mul" | _ -> "f64x2.div")
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("u8x16_and" | "u8x16_or" | "u8x16_xor" | "u8x16_sub_sat" | "u8x16_eq" | "u8x16_swizzle" as op); _ }, a); _ }, b) ->
+    emit_simd_v a; emit_simd_v b;
+    emit_instr (match op with
+      | "u8x16_and" -> "v128.and" | "u8x16_or" -> "v128.or" | "u8x16_xor" -> "v128.xor"
+      | "u8x16_sub_sat" -> "i8x16.sub_sat_u" | "u8x16_eq" -> "i8x16.eq" | _ -> "i8x16.swizzle")
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "u8x16_shr"; _ }, v); _ }, k) ->
+    emit_simd_v v; emit_expr k; emit_instr "call $mere_u8x16_shr_v"
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "u8x16_shift_in"; _ }, p); _ }, c); _ }, k) ->
+    emit_simd_v p; emit_simd_v c; emit_expr k; emit_instr "call $mere_u8x16_shift_in_v"
+  | Ast.App ({ node = Ast.Var "u8x16_from_bytes"; _ }, b) ->
+    bytes_used := true; emit_expr b; emit_instr "call $mere_u8x16_from_bytes_v"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("u8x16_load" | "__u8x16_load_unchecked" as name); _ }, b); _ }, i) ->
+    bytes_used := true; emit_expr b; emit_expr i;
+    emit_instr (if name = "u8x16_load" then "call $mere_u8x16_load_v" else "call $mere_u8x16_load_unchecked_v")
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("f64x2_load" | "__f64x2_load_unchecked" as name); _ }, v); _ }, i) ->
+    vec_used := true; emit_expr v; emit_expr i;
+    emit_instr (if name = "f64x2_load" then "call $mere_f64x2_load_v" else "call $mere_f64x2_load_unchecked_v")
+  | _ -> emit_expr e; unbox ()
+
+and emit_expr (e : Ast.expr) : unit =
   (* Snapshot inbound tail-position + top-level-body flags. All
      descendant emit_expr calls default back to non-tail / non-top;
      tail-preserving nodes (If branches, Let body, Match arm bodies)
@@ -2072,6 +2142,22 @@ let rec emit_expr (e : Ast.expr) : unit =
        wasm_tail_pos := saved_tail;
        wasm_in_top_level_body := saved_top;
        emit_expr body
+     | Ast.P_var name
+       when (match value.Ast.ty with Some t -> (match Ast.walk t with Ast.TySimd _ -> true | _ -> false) | None -> false)
+            && not (saved_top && Hashtbl.mem top_globals_wasm name)
+            && simd_operand_only name body ->
+       (* Q-109 (v0.1.429): unboxed in a v128 local; every use is an operand of a
+          SIMD builtin, which emit_simd_v reads from the local *)
+       simd_used := true;
+       let slot = fresh_local_v128 () in
+       emit_simd_v value;
+       emit_instr (Printf.sprintf "local.set %d" slot);
+       let prev_s = !simd_locals in
+       simd_locals := (name, slot) :: prev_s;
+       wasm_tail_pos := saved_tail;
+       wasm_in_top_level_body := saved_top;
+       emit_expr body;
+       simd_locals := prev_s
      | Ast.P_var name ->
        let slot = fresh_local () in
        emit_expr value;
@@ -3159,36 +3245,28 @@ let rec emit_expr (e : Ast.expr) : unit =
     emit_expr vec_e;
     emit_expr val_e;
     emit_instr "call $mere_vec_push"
-  | Ast.App ({ node = Ast.Var "f64x2_splat"; _ }, x_e) ->
-    simd_used := true; emit_expr x_e; emit_instr "call $mere_f64x2_splat"
-  | Ast.App ({ node = Ast.Var "f64x2_reduce_add"; _ }, v_e) ->
-    simd_used := true; emit_expr v_e; emit_instr "call $mere_f64x2_reduce_add"
-  | Ast.App ({ node = Ast.App ({ node = Ast.Var "f64x2_make"; _ }, a_e); _ }, b_e) ->
-    simd_used := true; emit_expr a_e; emit_expr b_e; emit_instr "call $mere_f64x2_make"
-  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("f64x2_add" | "f64x2_sub" | "f64x2_mul" | "f64x2_div" as op); _ }, a_e); _ }, b_e) ->
-    simd_used := true; emit_expr a_e; emit_expr b_e; emit_instr ("call $mere_" ^ op)
-  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("f64x2_load" | "__f64x2_load_unchecked" as name); _ }, v_e); _ }, i_e) ->
-    simd_used := true; vec_used := true; emit_expr v_e; emit_expr i_e;
-    emit_instr (if name = "f64x2_load" then "call $mere_f64x2_load" else "call $mere_f64x2_load_unchecked")
-  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var ("f64x2_store" | "__f64x2_store_unchecked" as name); _ }, v_e); _ }, i_e); _ }, x_e) ->
-    simd_used := true; vec_used := true; emit_expr v_e; emit_expr i_e; emit_expr x_e;
-    emit_instr (if name = "f64x2_store" then "call $mere_f64x2_store" else "call $mere_f64x2_store_unchecked")
-  | Ast.App ({ node = Ast.Var ("u8x16_any_true" | "u8x16_reduce_add" | "u8x16_from_bytes" as op); _ }, v_e) ->
-    simd_used := true; if op = "u8x16_from_bytes" then bytes_used := true;
-    emit_expr v_e; emit_instr ("call $mere_" ^ op)
-  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("u8x16_load" | "__u8x16_load_unchecked" as name); _ }, b_e); _ }, i_e) ->
-    simd_used := true; bytes_used := true; emit_expr b_e; emit_expr i_e;
-    emit_instr (if name = "u8x16_load" then "call $mere_u8x16_load" else "call $mere_u8x16_load_unchecked")
-  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("u8x16_and" | "u8x16_or" | "u8x16_xor" | "u8x16_sub_sat" | "u8x16_eq" | "u8x16_swizzle" | "u8x16_shr" as op); _ }, a_e); _ }, b_e) ->
-    simd_used := true; emit_expr a_e; emit_expr b_e; emit_instr ("call $mere_" ^ op)
-  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "u8x16_shift_in"; _ }, p_e); _ }, c_e); _ }, k_e) ->
-    simd_used := true; emit_expr p_e; emit_expr c_e; emit_expr k_e; emit_instr "call $mere_u8x16_shift_in"
-  | Ast.App ({ node = Ast.Var "u8x16_splat"; _ }, x_e) ->
-    simd_used := true; emit_expr x_e; emit_instr "call $mere_u8x16_splat"
+  (* Q-109 (v0.1.429): every SIMD builtin goes through emit_simd_v, which leaves
+     a v128 on the stack; a SIMD-valued expression is boxed exactly once, here,
+     when it becomes a Mere value. Before this each operation allocated a
+     16-byte box for its result and the validator's inner step allocated a
+     dozen per sixteen bytes. *)
+  | Ast.App _ when (match simd_head e with Some n -> List.mem n simd_result_ops | None -> false) ->
+    simd_used := true;
+    emit_simd_v e;
+    emit_instr "call $__mere_box_v128"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "f64x2_extract"; _ }, v_e); _ }, i_e) ->
-    simd_used := true; emit_expr v_e; emit_expr i_e; emit_instr "call $mere_f64x2_extract"
+    simd_used := true; emit_simd_v v_e; emit_expr i_e; emit_instr "call $mere_f64x2_extract_v"
+  | Ast.App ({ node = Ast.Var "f64x2_reduce_add"; _ }, v_e) ->
+    simd_used := true; emit_simd_v v_e; emit_instr "call $mere_f64x2_reduce_add_v"
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var ("f64x2_store" | "__f64x2_store_unchecked" as name); _ }, v_e); _ }, i_e); _ }, x_e) ->
+    simd_used := true; vec_used := true; emit_expr v_e; emit_expr i_e; emit_simd_v x_e;
+    emit_instr (if name = "f64x2_store" then "call $mere_f64x2_store_v" else "call $mere_f64x2_store_unchecked_v")
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "u8x16_extract"; _ }, v_e); _ }, i_e) ->
-    simd_used := true; emit_expr v_e; emit_expr i_e; emit_instr "call $mere_u8x16_extract"
+    simd_used := true; emit_simd_v v_e; emit_expr i_e; emit_instr "call $mere_u8x16_extract_v"
+  | Ast.App ({ node = Ast.Var "u8x16_any_true"; _ }, v_e) ->
+    simd_used := true; emit_simd_v v_e; emit_instr "v128.any_true"; emit_instr "i64.extend_i32_u"
+  | Ast.App ({ node = Ast.Var "u8x16_reduce_add"; _ }, v_e) ->
+    simd_used := true; emit_simd_v v_e; emit_instr "call $mere_u8x16_reduce_add_v"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "__vec_get_unchecked"; _ }, vec_e); _ }, idx_e) ->
     (* Q-108: see Ast.range_version_program. *)
     vec_used := true;
@@ -4250,6 +4328,7 @@ let emit_fn_def (f : fn_decl) : string =
      read local_types, but the fn emitters hardcoded i32. *)
   local_types := [];
   locals := [(f.param, 0)];
+  simd_locals := [];
   let saved_tail = !wasm_tail_pos in
   let saved_unwind = !fail_unwind_on in
   wasm_tail_pos := true;
@@ -7106,6 +7185,79 @@ let simd_runtime_wasm () =
     (if (i32.lt_s (i32.load (i32.wrap_i64 (local.get $b8))) (i32.const 16))
       (then (return (call $__lang_fail (i64.const %d)))))
     (call $mere_u8x16_load_unchecked (local.get $b8) (i64.const 0)))
+  ;; v128-in / v128-out variants (v0.1.429): what emit_simd_v calls. The boxed
+  ;; ones above stay for the interpreter-shaped call paths that still use them.
+  (func $mere_u8x16_shr_v (param $x v128) (param $k i64) (result v128)
+    (if (i32.or (i64.lt_s (local.get $k) (i64.const 0)) (i64.gt_s (local.get $k) (i64.const 7)))
+      (then (drop (call $__lang_fail (i64.const %d)))))
+    (i8x16.shr_u (local.get $x) (i32.wrap_i64 (local.get $k))))
+  (func $mere_u8x16_shift_in_v (param $p v128) (param $c v128) (param $k i64) (result v128)
+    (local $buf i32)
+    (if (i32.or (i64.lt_s (local.get $k) (i64.const 0)) (i64.gt_s (local.get $k) (i64.const 16)))
+      (then (drop (call $__lang_fail (i64.const %d)))))
+    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 15)) (i32.const -16)))
+    (local.set $buf (global.get $__lang_bump))
+    (v128.store offset=0 align=16 (local.get $buf) (local.get $p))
+    (v128.store offset=16 align=16 (local.get $buf) (local.get $c))
+    (v128.load align=1 (i32.add (local.get $buf) (i32.sub (i32.const 16) (i32.wrap_i64 (local.get $k))))))
+  (func $mere_u8x16_load_unchecked_v (param $b8 i64) (param $i8 i64) (result v128)
+    (v128.load align=1 (i32.add (i32.add (i32.wrap_i64 (local.get $b8)) (i32.const 4)) (i32.wrap_i64 (local.get $i8)))))
+  (func $mere_u8x16_load_v (param $b8 i64) (param $i8 i64) (result v128)
+    (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0))
+                (i64.gt_s (i64.add (local.get $i8) (i64.const 16)) (i64.extend_i32_s (i32.load (i32.wrap_i64 (local.get $b8))))))
+      (then (drop (call $__lang_fail (i64.const %d)))))
+    (call $mere_u8x16_load_unchecked_v (local.get $b8) (local.get $i8)))
+  (func $mere_u8x16_from_bytes_v (param $b8 i64) (result v128)
+    (if (i32.lt_s (i32.load (i32.wrap_i64 (local.get $b8))) (i32.const 16))
+      (then (drop (call $__lang_fail (i64.const %d)))))
+    (call $mere_u8x16_load_unchecked_v (local.get $b8) (i64.const 0)))
+  (func $mere_u8x16_extract_v (param $x v128) (param $i8 i64) (result i64)
+    (local $p i32)
+    (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0)) (i64.ge_s (local.get $i8) (i64.const 16)))
+      (then (drop (call $__lang_fail (i64.const %d)))))
+    (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 15)) (i32.const -16)))
+    (local.set $p (global.get $__lang_bump))
+    (v128.store offset=0 align=16 (local.get $p) (local.get $x))
+    (i64.extend_i32_u (i32.load8_u (i32.add (local.get $p) (i32.wrap_i64 (local.get $i8))))))
+  (func $mere_u8x16_reduce_add_v (param $x v128) (result i64)
+    (local $y v128)
+    (local.set $y (i32x4.extadd_pairwise_i16x8_u (i16x8.extadd_pairwise_i8x16_u (local.get $x))))
+    (i64.extend_i32_u
+      (i32.add (i32.add (i32x4.extract_lane 0 (local.get $y)) (i32x4.extract_lane 1 (local.get $y)))
+               (i32.add (i32x4.extract_lane 2 (local.get $y)) (i32x4.extract_lane 3 (local.get $y))))))
+  (func $mere_f64x2_extract_v (param $x v128) (param $i8 i64) (result i64)
+    (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0)) (i64.ge_s (local.get $i8) (i64.const 2)))
+      (then (drop (call $__lang_fail (i64.const %d)))))
+    (call $__mere_box_f64
+      (if (result f64) (i64.eqz (local.get $i8))
+        (then (f64x2.extract_lane 0 (local.get $x)))
+        (else (f64x2.extract_lane 1 (local.get $x))))))
+  (func $mere_f64x2_reduce_add_v (param $x v128) (result i64)
+    (call $__mere_box_f64 (f64.add (f64x2.extract_lane 0 (local.get $x)) (f64x2.extract_lane 1 (local.get $x)))))
+  (func $mere_f64x2_load_unchecked_v (param $v8 i64) (param $i8 i64) (result v128)
+    (local $slot i32)
+    (local.set $slot (i32.add (i32.load offset=0 (i32.wrap_i64 (local.get $v8))) (i32.mul (i32.wrap_i64 (local.get $i8)) (i32.const 8))))
+    (f64x2.replace_lane 1
+      (f64x2.splat (f64.load offset=0 align=8 (i32.wrap_i64 (i64.load offset=0 (local.get $slot)))))
+      (f64.load offset=0 align=8 (i32.wrap_i64 (i64.load offset=8 (local.get $slot))))))
+  (func $mere_f64x2_load_v (param $v8 i64) (param $i8 i64) (result v128)
+    (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0))
+                (i64.gt_s (i64.add (local.get $i8) (i64.const 2))
+                          (i64.extend_i32_s (i32.load offset=4 (i32.wrap_i64 (local.get $v8))))))
+      (then (drop (call $__lang_fail (i64.const %d)))))
+    (call $mere_f64x2_load_unchecked_v (local.get $v8) (local.get $i8)))
+  (func $mere_f64x2_store_unchecked_v (param $v8 i64) (param $i8 i64) (param $x v128) (result i64)
+    (local $slot i32)
+    (local.set $slot (i32.add (i32.load offset=0 (i32.wrap_i64 (local.get $v8))) (i32.mul (i32.wrap_i64 (local.get $i8)) (i32.const 8))))
+    (i64.store offset=0 (local.get $slot) (call $__mere_box_f64 (f64x2.extract_lane 0 (local.get $x))))
+    (i64.store offset=8 (local.get $slot) (call $__mere_box_f64 (f64x2.extract_lane 1 (local.get $x))))
+    (i64.const 0))
+  (func $mere_f64x2_store_v (param $v8 i64) (param $i8 i64) (param $x v128) (result i64)
+    (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0))
+                (i64.gt_s (i64.add (local.get $i8) (i64.const 2))
+                          (i64.extend_i32_s (i32.load offset=4 (i32.wrap_i64 (local.get $v8))))))
+      (then (drop (call $__lang_fail (i64.const %d)))))
+    (call $mere_f64x2_store_unchecked_v (local.get $v8) (local.get $i8) (local.get $x)))
   (func $mere_u8x16_splat (param $x i64) (result i64)
     (local $p i32)
     (global.set $__lang_bump (i32.and (i32.add (global.get $__lang_bump) (i32.const 15)) (i32.const -16)))
@@ -7117,7 +7269,9 @@ let simd_runtime_wasm () =
     (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0)) (i64.ge_s (local.get $i8) (i64.const 16)))
       (then (return (call $__lang_fail (i64.const %d)))))
     (i64.extend_i32_u (i32.load8_u (i32.add (i32.wrap_i64 (local.get $v8)) (i32.wrap_i64 (local.get $i8))))))
-|} !simd_lane_msg_offset !simd_range_msg_offset !simd_range_msg_offset !simd_lane_msg_offset !simd_lane_msg_offset !simd_range_msg_offset !simd_range_msg_offset !simd_lane_msg_offset
+|} !simd_lane_msg_offset !simd_range_msg_offset !simd_range_msg_offset !simd_lane_msg_offset !simd_lane_msg_offset !simd_range_msg_offset !simd_range_msg_offset
+   !simd_lane_msg_offset !simd_lane_msg_offset !simd_range_msg_offset !simd_range_msg_offset !simd_lane_msg_offset !simd_lane_msg_offset !simd_range_msg_offset !simd_range_msg_offset
+   !simd_lane_msg_offset
 
 let bytes_runtime_wasm = {|
   (func $__lang_bytes_alloc (param $len8 i64) (result i64)
