@@ -1,15 +1,19 @@
 name  = axpy
-shape = c[i] = c[i] + alpha * a[i] over two float Vecs, 20 passes, 2,000,000 elements
+shape = c[i] = c[i] + alpha * a[i] over two float Vecs, 100 passes, 2,000,000 elements
 args  = 2000000
 cflags = -ffp-contract=off
 claim = the row that forced range-check versioning (Q-108). With a bounds check
         per element the loop has three early exits and clang leaves it scalar:
         2.8x hand-written C at v0.1.415. With the whole index range checked once
-        before the loop (v0.1.420) clang vectorizes it and the expectation is a
-        TIE with C. Memory-bound at this size, so SIMD itself is worth about 1.3x
-        here; the check's shape was the rest of the gap, which is the point the
-        row exists to make. Same LCG, unfused arithmetic and bit-pattern output
-        as matmul, and for the same reasons (see its MANIFEST).
+        before the loop (v0.1.420) clang vectorizes it and the PASSES TIE C:
+        measured 80 extra passes cost 50 ms on both rows. What Mere carries above
+        C is building the two Vecs by vec_push -- about 10 ms, the LCG plus the
+        buffer's growth steps, where the C row writes into a malloc'd array. The
+        pass count is a hundred so the loop, not the construction, is the number.
+        Memory-bound at this size, so SIMD itself is worth about 1.3x here; the
+        check's shape was the rest of the gap, which is the point the row exists
+        to make. Same LCG, unfused arithmetic and bit-pattern output as matmul,
+        and for the same reasons (see its MANIFEST).
 
 # 36,700,448 B at v0.1.420: two 2,000,000-element float Vecs built by vec_push
 # (16 MiB each once grown) plus the growth steps. Nothing else allocates: the

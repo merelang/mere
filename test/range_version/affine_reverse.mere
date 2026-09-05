@@ -1,0 +1,9 @@
+// range-version: rev_sum
+// A decreasing index (`n - 1 - i`): still monotonic, so the endpoints bound it.
+let n = 8;
+let v = vec_new ();
+let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v (i * i) in fill (i + 1);
+let _ = fill 0;
+let rec rev_sum = fn (i: int) -> fn (acc: int) ->
+  if i == n then acc else rev_sum (i + 1) (acc * 3 + vec_get v (n - 1 - i));
+print (str_of_int (rev_sum 0 0))
