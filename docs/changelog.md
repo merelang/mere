@@ -4,6 +4,35 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.432 — 2026-09-06
+
+Three more Linux-only CI failures, visible once v0.1.431 let the C gates
+compile again.
+
+**Vectors through heap memory state their alignment (Q-113).** A `u8x16`
+captured by a closure or stored in a record is written with `store <16 x
+i8>`; with no alignment LLVM assumes the type's natural 16, x86 emits
+`movaps`, and the bump allocator's 8-aligned box faults. arm64 does not
+fault and neither does Rosetta, so the range-version corpus program
+`utf8_simd_small` passed on every development machine and on an x86-64
+container, and failed only on the CI runner. The LLVM backend now appends
+`align 8` to every vector load and store that does not state one, in one
+place at the end of emission; a unit test asserts no bare vector memory
+operation is left.
+
+**The loop-safety fixpoint is linear.** `rv_loop_safe_toplevels` looked
+every top-level name up in a list for every top-level name, so a program of
+16000 bindings spent 2.5 s in it and the `infer_scaling` gate (which bounds
+type inference at 20x for 8x the bindings) read 35-42x. Hashtables; the
+gate reads 4x again.
+
+**SECTIONS rows for two gated runtime sections.** `lb_used` (the list
+builder, v0.1.416) and `llvm:simd_runtime` (v0.1.423) had no row in
+`test/parity/SECTIONS`, so `section_coverage` failed.
+
+**`range_version_check` says why a leg failed**: exit status, stderr, the
+first differing lines, and the compiler's complaint.
+
 ## v0.1.431 — 2026-09-06
 
 **The emitted C includes `<stdint.h>`.** Since v0.1.419 a boxed variant's tag
