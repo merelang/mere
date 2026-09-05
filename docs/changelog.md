@@ -4,6 +4,33 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.418 — 2026-09-05
+
+_A Wasm `region` block can hand out a list, a tuple, a record, a variant, a
+float or bytes. Until now only a scalar had ever left one: the copiers for
+everything else were written for the 4-byte value model and wat2wasm rejected
+the module._
+
+`$__mcopy_<T>` is what carries a block's result into the enclosing arena
+before the bump pointer rolls back. Its tuple, record and variant arms still
+loaded and stored 4-byte slots at 4-byte offsets, its float arm loaded a
+double through an i64 and returned an i32, and bytes had no arm at all --
+none of it had run since values widened to i64 (v0.1.153), because no test
+returned a boxed value from a Wasm region block, and the first program that
+did (the ListBuf parity test, v0.1.416) was rewritten around it and the hole
+filed as a question. This is the answer: every arm now reads the layouts the
+emitters actually produce -- 8-byte slots for tuples and records, a 16-byte
+`{ tag, payload }` node (or a bare 8-byte tag) for variants with the payload
+handed to its own type's copier, an aligned 8-byte box for floats, and a
+header-plus-bytes copy through the bytes allocator.
+
+`test/parity/region_result_boxed.mere` returns each kind from a block that
+also allocated scratch, reads it afterwards, and matches on c / llvm / wasm
+against the interpreter. The question's reproducing command
+(`region R { Cons ("a" ++ "b", Nil) }`) assembles and prints 1.
+
+---
+
 ## v0.1.417 — 2026-09-05
 
 _The README's parity count was two behind, and the gate that exists to notice
