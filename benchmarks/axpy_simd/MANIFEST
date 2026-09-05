@@ -1,0 +1,23 @@
+name  = axpy_simd
+shape = the axpy row with explicit f64x2 lanes: two elements per step, 100 passes, 2,000,000 elements
+args  = 2000000
+cflags = -ffp-contract=off
+claim = explicit lanes are for what the auto-vectorizer cannot do; this row
+        measures what they cost where it CAN. The axpy row's loop is vectorized
+        by clang once range-check versioning has removed the per-element
+        checks (v0.1.420): VF 2, interleave 4 -- eight doubles per iteration.
+        This row writes the same loop with f64x2_load / f64x2_mul / f64x2_add /
+        f64x2_store, one vector (two doubles) per step, and the versioning pass
+        covers the stride and the two-lane access (v0.1.423), so its loop body
+        is the minimal one -- two loads, fmul, fadd, one store, the counter --
+        and it is still slower: 0.12 s against the auto-vectorized 0.08 s and
+        C's 0.07 s at v0.1.423, because two lanes per step is a quarter of the
+        work in flight. Unrolling the Mere source by hand to four doubles per
+        step gives 0.10 s. So the honest expectation for this row is BEHIND
+        axpy and C by about 1.5x, and the day it ties is the day this backend
+        learned to unroll (or the kernel was written wider). The number that
+        justifies explicit lanes is utf8valid_simd, not this one.
+
+# The same two Vecs as axpy: 36,700,448 B at v0.1.420. Nothing else allocates.
+alloc_min = 33554432
+alloc_max = 50331648

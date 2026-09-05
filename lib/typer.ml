@@ -1260,6 +1260,25 @@ let vec_get_scheme =
       Ast.TyCon ("Vec", [_vec_get_region; _vec_get_elem]),
       Ast.TyArrow (Ast.TyInt, _vec_get_elem)) }
 
+(* Q-109 (2b): two consecutive lanes of a `Vec[R, float]` as one f64x2, and back.
+   Region-quantified like vec_get; the element type is fixed to float. *)
+let _f64x2_load_region = fresh_var ()
+let f64x2_load_scheme =
+  let rid = match _f64x2_load_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Vec", [_f64x2_load_region; Ast.TyFloat]),
+      Ast.TyArrow (Ast.TyInt, Ast.TySimd Ast.F64x2)) }
+let _f64x2_store_region = fresh_var ()
+let f64x2_store_scheme =
+  let rid = match _f64x2_store_region with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Vec", [_f64x2_store_region; Ast.TyFloat]),
+      Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TySimd Ast.F64x2, Ast.TyUnit))) }
+let f64x2_binop_scheme =
+  mono (Ast.TyArrow (Ast.TySimd Ast.F64x2, Ast.TyArrow (Ast.TySimd Ast.F64x2, Ast.TySimd Ast.F64x2)))
+
 let _vec_len_elem = fresh_var ()
 let _vec_len_region = fresh_var ()
 let vec_len_scheme =
@@ -2395,6 +2414,17 @@ let initial_env : env =
     ("f64x2_extract", mono (Ast.TyArrow (Ast.TySimd Ast.F64x2, Ast.TyArrow (Ast.TyInt, Ast.TyFloat))));
     ("u8x16_splat",   mono (Ast.TyArrow (Ast.TyInt, Ast.TySimd Ast.U8x16)));
     ("u8x16_extract", mono (Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
+    (* Q-109 (2b): the f64x2 lane operations axpy needs. *)
+    ("f64x2_make",  mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TySimd Ast.F64x2))));
+    ("f64x2_add",   f64x2_binop_scheme);
+    ("f64x2_sub",   f64x2_binop_scheme);
+    ("f64x2_mul",   f64x2_binop_scheme);
+    ("f64x2_div",   f64x2_binop_scheme);
+    ("f64x2_reduce_add", mono (Ast.TyArrow (Ast.TySimd Ast.F64x2, Ast.TyFloat)));
+    ("f64x2_load",  f64x2_load_scheme);
+    ("f64x2_store", f64x2_store_scheme);
+    ("__f64x2_load_unchecked",  f64x2_load_scheme);
+    ("__f64x2_store_unchecked", f64x2_store_scheme);
   ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =

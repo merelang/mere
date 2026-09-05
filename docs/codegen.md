@@ -512,7 +512,8 @@ let s = f 0 0.0;
 ```
 
 into a sibling `f__rvfast` whose `vec_get v i` is `__vec_get_unchecked v i`
-(likewise `vec_set` -> `__vec_set_unchecked`, `bytes_get` -> `__bytes_get_unchecked`;
+(likewise `vec_set` -> `__vec_set_unchecked`, `bytes_get` -> `__bytes_get_unchecked`,
+`f64x2_load` / `f64x2_store` -> `__f64x2_load_unchecked` / `__f64x2_store_unchecked`;
 the three are internal names every backend lowers, and the interpreter keeps
 the bounds check under them so it stays the oracle), and a call site `if 0 >= 0 && 0 <= n && n <= vec_len v then f__rvfast 0 0.0
 else f 0 0.0`. The guard true means the removed checks could never have fired;
@@ -520,7 +521,11 @@ false runs the original loop, which fails where it always did.
 
 Conditions, all syntactic: the exit compares the index parameter with pure
 arithmetic over loop-invariant names (or `vec_len` / `bytes_len` of one); every
-self call is a tail call passing `i + 1`; the body has no lambda and calls only
+self call is a tail call passing `i + c` for one positive literal `c` (with
+`c > 1` and an equality exit the guard also requires the loop to land on the
+bound exactly, since the original would otherwise run past it); an access may
+be at any index that is monotonic in `i` (`i * n + k`), and a two-lane access
+counts its width; the body has no lambda and calls only
 builtins, itself, loop-safe top-level functions or loop-safe local helpers,
 none of which can change a Vec's length or run code the pass cannot see; the
 call site's arguments are atoms and nothing the guard reads is shadowed there.

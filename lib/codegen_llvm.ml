@@ -4710,6 +4710,41 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let xv = emit_expr env x_e in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call <2 x double> @mere_f64x2_splat(double %s)" r xv); r
+  | Ast.App ({ node = Ast.Var "f64x2_reduce_add"; _ }, v_e) ->
+    simd_used_llvm := true;
+    let vv = emit_expr env v_e in
+    let a = fresh_reg () and b = fresh_reg () and r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractelement <2 x double> %s, i32 0" a vv);
+    emit_instr (Printf.sprintf "  %s = extractelement <2 x double> %s, i32 1" b vv);
+    emit_instr (Printf.sprintf "  %s = fadd double %s, %s" r a b); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "f64x2_make"; _ }, a_e); _ }, b_e) ->
+    simd_used_llvm := true;
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let t = fresh_reg () and r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = insertelement <2 x double> undef, double %s, i32 0" t av);
+    emit_instr (Printf.sprintf "  %s = insertelement <2 x double> %s, double %s, i32 1" r t bv); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("f64x2_add" | "f64x2_sub" | "f64x2_mul" | "f64x2_div" as op); _ }, a_e); _ }, b_e) ->
+    simd_used_llvm := true;
+    let ir_op = match op with "f64x2_add" -> "fadd" | "f64x2_sub" -> "fsub" | "f64x2_mul" -> "fmul" | _ -> "fdiv" in
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = %s <2 x double> %s, %s" r ir_op av bv); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("f64x2_load" | "__f64x2_load_unchecked" as name); _ }, v_e); _ }, i_e) ->
+    let sfx = if name = "f64x2_load" then "" else "_unchecked" in
+    let av = emit_expr env v_e in
+    let iv = emit_expr env i_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call <2 x double> @mere_vec_float_f64x2_load%s(ptr %s, i64 %s)" r sfx av iv); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var ("f64x2_store" | "__f64x2_store_unchecked" as name); _ }, v_e); _ }, i_e); _ }, x_e) ->
+    let sfx = if name = "f64x2_store" then "" else "_unchecked" in
+    let av = emit_expr env v_e in
+    let iv = emit_expr env i_e in
+    let xv = emit_expr env x_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i32 @mere_vec_float_f64x2_store%s(ptr %s, i64 %s, <2 x double> %s)" r sfx av iv xv);
+    "0"
   | Ast.App ({ node = Ast.Var "u8x16_splat"; _ }, x_e) ->
     simd_used_llvm := true;
     let xv = emit_expr env x_e in
@@ -7118,7 +7153,7 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
   let c_elem = llvm_ty_of elem_ty in
   let struct_name = "mere_vec_" ^ tag in
   String.concat "\n"
-    [ (* struct { ptr data; i32 len; i32 cap; ptr region } — 24 bytes. *)
+    ([ (* struct { ptr data; i32 len; i32 cap; ptr region } — 24 bytes. *)
       Printf.sprintf "%%%s = type { ptr, i32, i32, ptr }" struct_name;
       "";
       (* new *)
@@ -7227,7 +7262,69 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       Printf.sprintf "  store %s %%x, ptr %%slot" c_elem;
       "  ret i32 0";
       "}";
-      "";
+      "" ]
+    @ (if tag <> "float" then [] else [
+      (* Q-109 (2b): two consecutive lanes of the float Vec as one <2 x double>. *)
+      "@.idxfmt_f64x2load = private constant [56 x i8] c\"f64x2_load: lanes [%lld, +2) out of bounds (len = %lld)\\00\"";
+      "@.idxfmt_f64x2store = private constant [57 x i8] c\"f64x2_store: lanes [%lld, +2) out of bounds (len = %lld)\\00\"";
+      "define <2 x double> @mere_vec_float_f64x2_load(ptr %v, i64 %i) {";
+      "entry:";
+      "  %lp = getelementptr %mere_vec_float, ptr %v, i32 0, i32 1";
+      "  %len32 = load i32, ptr %lp";
+      "  %len = sext i32 %len32 to i64";
+      "  %lt = icmp slt i64 %i, 0";
+      "  %end = add i64 %i, 2";
+      "  %gt = icmp sgt i64 %end, %len";
+      "  %oob = or i1 %lt, %gt";
+      "  br i1 %oob, label %fail, label %ok";
+      "fail:";
+      "  call void @__lang_fail_idx(ptr @.idxfmt_f64x2load, i64 %i, i64 %len)";
+      "  unreachable";
+      "ok:";
+      "  %dp = getelementptr %mere_vec_float, ptr %v, i32 0, i32 0";
+      "  %data = load ptr, ptr %dp";
+      "  %slot = getelementptr double, ptr %data, i64 %i";
+      "  %r = load <2 x double>, ptr %slot, align 8";
+      "  ret <2 x double> %r";
+      "}";
+      "define <2 x double> @mere_vec_float_f64x2_load_unchecked(ptr %v, i64 %i) {";
+      "entry:";
+      "  %dp = getelementptr %mere_vec_float, ptr %v, i32 0, i32 0";
+      "  %data = load ptr, ptr %dp";
+      "  %slot = getelementptr double, ptr %data, i64 %i";
+      "  %r = load <2 x double>, ptr %slot, align 8";
+      "  ret <2 x double> %r";
+      "}";
+      "define i32 @mere_vec_float_f64x2_store(ptr %v, i64 %i, <2 x double> %x) {";
+      "entry:";
+      "  %lp = getelementptr %mere_vec_float, ptr %v, i32 0, i32 1";
+      "  %len32 = load i32, ptr %lp";
+      "  %len = sext i32 %len32 to i64";
+      "  %lt = icmp slt i64 %i, 0";
+      "  %end = add i64 %i, 2";
+      "  %gt = icmp sgt i64 %end, %len";
+      "  %oob = or i1 %lt, %gt";
+      "  br i1 %oob, label %fail, label %ok";
+      "fail:";
+      "  call void @__lang_fail_idx(ptr @.idxfmt_f64x2store, i64 %i, i64 %len)";
+      "  unreachable";
+      "ok:";
+      "  %dp = getelementptr %mere_vec_float, ptr %v, i32 0, i32 0";
+      "  %data = load ptr, ptr %dp";
+      "  %slot = getelementptr double, ptr %data, i64 %i";
+      "  store <2 x double> %x, ptr %slot, align 8";
+      "  ret i32 0";
+      "}";
+      "define i32 @mere_vec_float_f64x2_store_unchecked(ptr %v, i64 %i, <2 x double> %x) {";
+      "entry:";
+      "  %dp = getelementptr %mere_vec_float, ptr %v, i32 0, i32 0";
+      "  %data = load ptr, ptr %dp";
+      "  %slot = getelementptr double, ptr %data, i64 %i";
+      "  store <2 x double> %x, ptr %slot, align 8";
+      "  ret i32 0";
+      "}";
+      "" ])
+    @ [
       (* Phase 15.5: vec_set v i x — in-place mutation. *)
       Printf.sprintf "define i32 @mere_vec_%s_set(ptr %%v, i64 %%i, %s %%x) {" tag c_elem;
       "entry:";
@@ -7247,7 +7344,7 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i64 %%i" c_elem;
       Printf.sprintf "  store %s %%x, ptr %%slot" c_elem;
       "  ret i32 0";
-      "}" ]
+      "}" ])
 
 (* Phase 19.3: vec_reverse helper — in-place swap loop. *)
 let emit_vec_reverse_helper_llvm (elem_ty : Ast.ty) : string =
