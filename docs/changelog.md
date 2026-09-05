@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.427 — 2026-09-05
+
+_A soundness hole in range-check versioning, closed: the loop's EXIT branch
+runs with the index already outside the guarded range, and its accesses were
+being made unchecked along with the step's. `if i == n then vec_get v i else
+...` read `v[n]` unchecked in the compiled fast copy and printed 46 where the
+interpreter failed. Only the step is rewritten now._
+
+Found writing the arc's retrospective, not by a gate: no case in
+`test/range_version/` had an access in the exit branch, so the on/off
+comparison that exists exactly for this never saw it. `fail/exit_branch_access`
+holds it now, and a unit test reads the fast copy's C to see one checked and
+one unchecked access. The lesson is the one the gate already knew: the checked
+loop is the oracle only over the cases someone wrote.
+
+Also: the exit test may carry the stride -- `i + 16 > n`, `i + c >= n`, and
+the mirrored `n < i + c` forms -- with the offset moved onto the bound, and
+`i > n` / `i <= n` / `n >= i` are normalised to the `>=` / `<` shapes the guard
+was written for. A sixteen-byte block loop over `u8x16_load` is planned and
+dispatched (`test/range_version/block_loop_exit`); the UTF-8 validator's block
+loop is planned too (its call site passes computed vectors, so it runs the
+checked loop, and says so). range_version_check 20/20.
+
+---
+
 ## v0.1.426 — 2026-09-05
 
 _The RISC-V backends run `u8x16` through the RISC-V Vector extension, and

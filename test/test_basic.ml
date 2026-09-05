@@ -14962,5 +14962,40 @@ let () =
   rv_err_contains "v0.1.426: f64x2 is refused by name on RV32I"
     "let x = f64x2_extract (f64x2_splat 1.0) 0;\nprint_int 1" "f64x2";
 
+  (* v0.1.427 (Q-108): a soundness hole in range-check versioning, and the
+     `i + c` exit forms. The exit branch runs with the index outside the guarded
+     range, so its accesses must stay checked; the first version rewrote the
+     whole body. *)
+  let exit_src = "let n = 4;\nlet v = vec_new ();\n\
+                  let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v (i + 10) in fill (i + 1);\n\
+                  let _ = fill 0;\n\
+                  let rec walk = fn (i: int) -> fn (acc: int) -> if i == n then acc + vec_get v i else walk (i + 1) (acc + vec_get v i);\n\
+                  walk 0 0" in
+  check "v0.1.427: the loop is still planned (the step's access qualifies)" (planned exit_src) "walk";
+  check "v0.1.427: the exit branch's access stays checked in the fast copy"
+    (let c = rv_c exit_src in
+     (* the fast copy's body: one checked read (exit), one unchecked read (step) *)
+     let needle = "static long long mu_walk__rvfast__direct(long long mu_i, long long mu_acc) {" in
+     let i =
+       let nl = String.length needle and cl = String.length c in
+       let rec find k = if k + nl > cl then -1 else if String.sub c k nl = needle then k else find (k + 1) in
+       find 0 in
+     if i < 0 then "no fast copy" else
+     let body = String.sub c i (min 700 (String.length c - i)) in
+     if has body "mere_vec_int_get(mu_v, mu_i)" && has body "mere_vec_int_get_unchecked(mu_v, mu_i)" then "checked exit, unchecked step" else "wrong") "checked exit, unchecked step";
+  check "v0.1.427: interp and the pass agree that the exit read fails"
+    (let on = (try ignore (Pipeline.process exit_src); "ran" with Eval.Eval_error (_, m) -> if has m "index 4 out of bounds" then "fails at 4" else m) in on) "fails at 4";
+  check "v0.1.427: an `i + 16 > n` exit is recognised"
+    (planned "let b = bytes_of_str \"0123456789abcdef0123456789abcdefXYZ\";\nlet n = bytes_len b;\nlet z = u8x16_splat 0;\n\
+              let rec blocks = fn (i: int) -> fn (acc: u8x16) -> if i + 16 > n then acc else blocks (i + 16) (u8x16_xor acc (u8x16_load b i));\n\
+              u8x16_extract (blocks 0 z) 0") "blocks";
+  check "v0.1.427: `n > i` (continue) and `i <= n` (continue) are recognised too"
+    (planned "let n = 8;\nlet v = vec_new ();\n\
+              let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v i in fill (i + 1);\n\
+              let _ = fill 0;\n\
+              let rec a = fn (i: int) -> fn (acc: int) -> if n > i then a (i + 1) (acc + vec_get v i) else acc;\n\
+              let rec b = fn (i: int) -> fn (acc: int) -> if i <= n - 1 then b (i + 1) (acc + vec_get v i) else acc;\n\
+              a 0 0 + b 0 0") "a,b";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

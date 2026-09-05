@@ -1299,21 +1299,52 @@ let rv_plan_binding ~(loop_safe : string list) ~(unsafe_builtins : string list)
       | _ -> []
     in
     let pick =
-      let sides (l : expr) (r : expr) =
-        match l.node, r.node with
-        | Var i, _ when List.mem i pnames && bound_ok r -> Some (i, r)
-        | _, Var i when List.mem i pnames && bound_ok l -> Some (i, l)
+      (* the index side is `i` or `i + c` (c a literal, either order); the offset
+         moves onto the bound, so `i + 16 > n` is `i > n - 16`. Returns
+         (i, bound, index_on_left) *)
+      let mk_e node = { loc = cond.loc; ty = None; node } in
+      let index_side (e : expr) : (string * int) option =
+        match e.node with
+        | Var i when List.mem i pnames -> Some (i, 0)
+        | Bin (Add, { node = Var i; _ }, { node = Int_lit c; _ })
+        | Bin (Add, { node = Int_lit c; _ }, { node = Var i; _ }) when List.mem i pnames -> Some (i, c)
         | _ -> None
       in
-      (* the fourth component: is the exit an EQUALITY test? With a stride above
-         one such a loop only stops if it lands exactly on the bound *)
+      let shifted (n : expr) c = if c = 0 then n else mk_e (Bin (Sub, n, mk_e (Int_lit c))) in
+      let sides (l : expr) (r : expr) =
+        match index_side l, index_side r with
+        | Some (i, c), None when bound_ok r -> Some (i, shifted r c, true)
+        | None, Some (i, c) when bound_ok l -> Some (i, shifted l c, false)
+        | _ -> None
+      in
+      let plus1 (n : expr) = mk_e (Bin (Add, n, mk_e (Int_lit 1))) in
+      (* result: (i, bound, exit_when_true, eq_exit). Every accepted shape visits
+         i <= bound - 1 in the step, which is what the guard relies on:
+         `i >= N` / `i == N` / `i != N` exit, `i < N` continues; `i > N` is
+         `i >= N + 1` and `i <= N` continues as `i < N + 1`. *)
       match cond.node with
-      | Cmp (Eq, l, r) -> Option.map (fun (i, n) -> (i, n, true, true)) (sides l r)
-      | Cmp (Ne, l, r) -> Option.map (fun (i, n) -> (i, n, false, true)) (sides l r)
-      | Cmp (Ge, ({ node = Var _; _ } as l), r) | Cmp (Le, r, ({ node = Var _; _ } as l)) ->
-        Option.map (fun (i, n) -> (i, n, true, false)) (sides l r)
-      | Cmp (Lt, ({ node = Var _; _ } as l), r) | Cmp (Gt, r, ({ node = Var _; _ } as l)) ->
-        Option.map (fun (i, n) -> (i, n, false, false)) (sides l r)
+      | Cmp (Eq, l, r) -> Option.map (fun (i, n, _) -> (i, n, true, true)) (sides l r)
+      | Cmp (Ne, l, r) -> Option.map (fun (i, n, _) -> (i, n, false, true)) (sides l r)
+      | Cmp (Ge, l, r) ->
+        (match sides l r with
+         | Some (i, n, true) -> Some (i, n, true, false)          (* i >= n : exit *)
+         | Some (i, n, false) -> Some (i, plus1 n, false, false)  (* n >= i : continue while i < n + 1 *)
+         | None -> None)
+      | Cmp (Gt, l, r) ->
+        (match sides l r with
+         | Some (i, n, true) -> Some (i, plus1 n, true, false)    (* i > n : exit when i >= n + 1 *)
+         | Some (i, n, false) -> Some (i, n, false, false)        (* n > i : continue while i < n *)
+         | None -> None)
+      | Cmp (Le, l, r) ->
+        (match sides l r with
+         | Some (i, n, true) -> Some (i, plus1 n, false, false)   (* i <= n : continue while i < n + 1 *)
+         | Some (i, n, false) -> Some (i, n, true, false)         (* n <= i : exit *)
+         | None -> None)
+      | Cmp (Lt, l, r) ->
+        (match sides l r with
+         | Some (i, n, true) -> Some (i, n, false, false)         (* i < n : continue *)
+         | Some (i, n, false) -> Some (i, plus1 n, true, false)   (* n < i : exit when i >= n + 1 *)
+         | None -> None)
       | _ -> None
     in
     (match pick with
@@ -1344,7 +1375,15 @@ let rv_plan_binding ~(loop_safe : string list) ~(unsafe_builtins : string list)
        | None -> None
        | Some stride -> begin
          let fast = name ^ "__rvfast" in
-         let fast_body, accs = rv_rewrite ~self:name ~self':fast ~idx ~invariant body in
+         (* Only the STEP branch is rewritten. The exit branch runs with the index
+            already outside [i0, N-1] -- `if i == n then vec_get v i else ...`
+            reads v[n] there -- and the guard says nothing about that access,
+            so it keeps its check. (Found by the exit-branch poison, after the
+            first version rewrote the whole body.) The exit branch is self-free,
+            so it needs no renaming either. *)
+         let step', accs = rv_rewrite ~self:name ~self':fast ~idx ~invariant step in
+         let fast_body =
+           { body with node = (if exit_when_true then If (cond, base, step') else If (cond, step', base)) } in
          if accs = [] then None
          else begin
            let mk node = { loc = value.loc; ty = None; node } in
