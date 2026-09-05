@@ -1,9 +1,10 @@
-// range-version: none
+// range-version: go
+// no-dispatch: go
 // The u8x16 UTF-8 validator on a few small inputs (valid text, a truncated
 // sequence, an overlong, a surrogate, and a stray byte). Its block loop exits
-// on `i + 16 > n`, which the pass does not recognise, so nothing is planned;
-// the case is here for the same-answer check of the lane operations across
-// the backends.
+// on `i + 16 > n`, which the pass recognises since v0.1.427; the call site
+// passes computed vectors, so it is left to the checked loop, and the case is
+// here for the same-answer check of the lane operations across the backends.
 let t_high1 = u8x16_from_bytes (bytes_of_hex "02020202020202028080808021011549");
 let t_low1  = u8x16_from_bytes (bytes_of_hex "e7a383838bcbcbcbcbcbcbcbcbdbcbcb");
 let t_high2 = u8x16_from_bytes (bytes_of_hex "0101010101010101e6aebaba01010101");

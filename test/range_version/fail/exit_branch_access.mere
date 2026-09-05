@@ -1,0 +1,14 @@
+// range-version: walk
+// The exit branch reads v[n], one past the end. The guard covers the step's
+// iterations, not the exit, so that access must stay checked in the fast copy:
+// every backend fails here, pass on or off. (The first version of the pass
+// rewrote the whole body and printed 46 from the compiled copy where the
+// interpreter failed.)
+let n = 4;
+let v = vec_new ();
+let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v (i + 10) in fill (i + 1);
+let _ = fill 0;
+let _ = print "before";
+let rec walk = fn (i: int) -> fn (acc: int) ->
+  if i == n then acc + vec_get v i else walk (i + 1) (acc + vec_get v i);
+print (str_of_int (walk 0 0))

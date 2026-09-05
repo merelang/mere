@@ -1,0 +1,11 @@
+// range-version: blocks
+// A block loop: sixteen bytes per step, exiting on `i + 16 > n`. The pass moves
+// the 16 onto the bound (`i > n - 16`, i.e. `i >= n - 15`) and the two-lane...
+// sixteen-lane load is checked once for the whole range.
+let b = bytes_of_str "0123456789abcdef0123456789abcdefXYZ";
+let n = bytes_len b;
+let z = u8x16_splat 0;
+let rec blocks = fn (i: int) -> fn (acc: u8x16) ->
+  if i + 16 > n then acc else blocks (i + 16) (u8x16_xor acc (u8x16_load b i));
+let r = blocks 0 z;
+print (str_of_int (u8x16_extract r 0) ++ " " ++ str_of_int (u8x16_extract r 15) ++ " " ++ str_of_int (u8x16_reduce_add r))
