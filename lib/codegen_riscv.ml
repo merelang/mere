@@ -1721,6 +1721,9 @@ and compile_app env e =
   | Ast.Var "bytes_of_hex" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit (Jal (ra, "__bytes_of_hex"))
+  | Ast.Var "hex_of_bytes" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit (Jal (ra, "__hex_of_bytes"))
   (* ---- Q-110: u8x16 through the RVV subset *)
   | Ast.Var "u8x16_splat" when List.length args = 1 ->
     compile_expr env (List.hd args);
@@ -3077,6 +3080,46 @@ let emit_bytes_of_hex () =
   emit (Label ".bh_bad");
   emit_abort "bytes_of_hex: not a hex string"
 
+(* __hex_of_bytes(a0=bytes) -> a0 = a fresh str of 2n lowercase hex digits. Q-110. Leaf. *)
+let emit_hex_of_bytes () =
+  emit (Label "__hex_of_bytes");
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);       (* t0 = n *)
+  emit_word (enc_i 1 t0 1 a2 0x13);                          (* a2 = 2n *)
+  emit_word (enc_i (wsz () - 1) a2 0 t4 0x13);               (* round 2n up to a word, + len word *)
+  emit_word (enc_i (0 - wsz ()) t4 7 t4 0x13);
+  emit_word (enc_i (wsz ()) t4 0 t4 0x13);
+  emit_word (enc_i 0 gp 0 t3 0x13);                          (* t3 = result *)
+  emit_word (enc_r 0 t4 t3 0 gp 0x33);
+  emit_oom_check ();
+  emit_word (enc_s (0 * wsz ()) a2 t3 (stf3 ()) 0x23);       (* header = 2n *)
+  emit_word (enc_i (wsz ()) a0 0 t5 0x13);                   (* src *)
+  emit_word (enc_i (wsz ()) t3 0 t6 0x13);                   (* dst *)
+  emit (Label ".hb_loop");
+  emit (Branch (0, t0, zero, ".hb_done"));
+  emit_word (enc_i 0 t5 4 t2 0x03);                          (* lbu t2 = byte *)
+  emit_word (enc_i 4 t2 5 a3 0x13);                          (* a3 = byte >> 4 *)
+  emit (Jal (a5, ".hb_digit"));                              (* a3 -> ascii in a3 *)
+  emit_word (enc_s 0 a3 t6 0 0x23);                          (* sb hi *)
+  emit_word (enc_i 15 t2 7 a3 0x13);                         (* a3 = byte & 15 *)
+  emit (Jal (a5, ".hb_digit"));
+  emit_word (enc_s 1 a3 t6 0 0x23);                          (* sb lo *)
+  emit_word (enc_i 1 t5 0 t5 0x13);
+  emit_word (enc_i 2 t6 0 t6 0x13);
+  emit_word (enc_i (-1) t0 0 t0 0x13);
+  emit (Jal (zero, ".hb_loop"));
+  emit (Label ".hb_done");
+  emit_word (enc_i 0 t3 0 a0 0x13);
+  emit_word (enc_i 0 ra 0 zero 0x67);
+  (* .hb_digit: a3 = 0..15 -> ascii '0'..'9' 'a'..'f'; link in a5 *)
+  emit (Label ".hb_digit");
+  li a4 10;
+  emit (Branch (4, a3, a4, ".hb_dec"));                      (* blt a3, 10 -> decimal *)
+  emit_word (enc_i 87 a3 0 a3 0x13);                         (* 'a' - 10 = 87 *)
+  emit_word (enc_i 0 a5 0 zero 0x67);
+  emit (Label ".hb_dec");
+  emit_word (enc_i 48 a3 0 a3 0x13);                         (* '0' *)
+  emit_word (enc_i 0 a5 0 zero 0x67)
+
 (* __str_cmp(a0=s1, a1=s2) -> a0 = <0 / 0 / >0 lexicographically. Leaf. *)
 let emit_str_cmp () =
   emit (Label "__str_cmp");
@@ -3845,6 +3888,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   emit_str_cmp ();
   emit_bytes_slice ();
   emit_bytes_of_hex ();
+  emit_hex_of_bytes ();
   emit_str_of_int ();
   emit_substring ();
   emit_strbuf ();

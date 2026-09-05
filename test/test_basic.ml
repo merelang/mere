@@ -14997,5 +14997,14 @@ let () =
               let rec b = fn (i: int) -> fn (acc: int) -> if i <= n - 1 then b (i + 1) (acc + vec_get v i) else acc;\n\
               a 0 0 + b 0 0") "a,b";
 
+  (* v0.1.428 (Q-110): hex_of_bytes and read_bytes on the RISC-V backends -- the
+     last two bytes builtins the UTF-8 benchmark programs use, so the benchmark
+     itself runs on the Mere-written CPU. *)
+  rv_err_contains "v0.1.428: hex_of_bytes compiles for RV32I" "print (hex_of_bytes (bytes_of_str \"AZ\"))" "(compiled without error)";
+  (* rv_typed does not prepend the RV prelude (`mere -rv` does), so the prelude
+     itself is what this test reads: read_bytes is defined there over read_file. *)
+  check "v0.1.428: the RV prelude defines read_bytes over read_file"
+    (if has Rv_prelude.contents "let read_bytes = fn (p: str) -> bytes_of_str (read_file p);" then "defined" else "missing") "defined";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

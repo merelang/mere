@@ -4,6 +4,25 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.428 — 2026-09-05
+
+_The two bytes builtins the UTF-8 benchmark programs still needed on the
+RISC-V backends: `hex_of_bytes` (a new runtime helper) and `read_bytes` (a file
+read as bytes is a file read as a str here, so the RV prelude defines it over
+`read_file`). `benchmarks/utf8valid_simd/bench.mere` itself now runs on memu's
+RV32 core, on a file, and prints the C backend's answer._
+
+Measured on a 64 KiB slice of `utf8.txt`, twenty passes, `--ram 256`: both
+`utf8valid` and `utf8valid_simd` print the C backend's `valid codepoints 44112`
+on the emulated CPU (2.75 s and 1.85 s of emulation). The 4 MiB file does not
+fit: neither backend reclaims here -- the scalar validator's curried `cont`
+helper allocates closures per byte and the lane version boxes every vector
+result -- so a run is bounded by RAM, which is the next thing to fix on this
+target (keep vector values in registers across an expression, as the Wasm
+backend now does).
+
+---
+
 ## v0.1.427 — 2026-09-05
 
 _A soundness hole in range-check versioning, closed: the loop's EXIT branch
