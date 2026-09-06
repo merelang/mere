@@ -524,11 +524,35 @@ parser in the target language, and LLVM has no hand-written one.
 
 | Name | Type | Description |
 |---|---|---|
-| `to_json` ★ | `'a -> str` | Serialize any value to JSON structurally |
-| `of_json` ★ | `str -> 'a` | Parse JSON into a typed value; **fails fast** on error (trusted input) |
+| `to_json` ★ | `'a -> str` | Serialize any value to JSON structurally — **including containers**, which `of_json` cannot read back (see below) |
+| `of_json` ★ | `str -> 'a` | Parse JSON into a typed value; **fails fast** on error (trusted input). **Not containers** |
 | `of_json_opt` ★ | `str -> 'a option` | Same, but returns `None` on any error (safe for untrusted input) |
 | `of_json_like` ★ | `'a -> str -> 'a` | Target type from a witness value instead of an annotation (v0.1.183) |
 | `of_json_opt_like` ★ | `'a -> str -> 'a option` | The non-crashing witness form |
+
+### The pair is not symmetric: containers write but do not read
+
+`to_json` serialises a `Vec` as an array and a `Map` as an object, and
+`of_json` decodes neither. Measured at v0.1.440:
+
+| value | `to_json` | `of_json` round-trip |
+|---|---|---|
+| int / float / str / tuple / option / list / variant / record | yes | **yes** |
+| `Vec` | `[1]` | `of_json: expected a variant value for Vec` |
+| `Map` | `{"1":"a"}` | `of_json: k is not a case of Map` |
+| `StrBuf` | `"x"` | `of_json: x is not a case of StrBuf` |
+
+The witness form says why in its own words: *"the witness must be a record, a
+constructor, a tuple or a scalar — a closure or a handle cannot say what to
+decode into"*. A container is a handle with identity and a region, and a
+decoder would have to choose both.
+
+This matters most where it is least expected: a program that checkpoints its
+state to resume after a crash finds that the state it wants to save is a
+`Map`, writes it happily, and cannot read it back. The way through is to keep
+the checkpointed state in the shapes that round-trip -- lists of tuples,
+records, variants -- and rebuild the containers from them on resume.
+`test/durable/fold.mere` does exactly that.
 
 ### Decoding inside a polymorphic function
 
