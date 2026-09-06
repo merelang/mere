@@ -9,26 +9,25 @@
 # compares what a program prints, and this is a difference in what a program
 # HOLDS.
 #
-# Measured 2026-09-06 (v0.1.437), 100 iterations at depth 16:
+# Measured at 100 iterations, depth 16:
 #
-#   C     2.5 MB, flat from 40 iterations to 100          reclaims
-#   Wasm  completes, and unreclaimed it would need ~105   reclaims
-#         MB of a fixed 64 MiB linear memory
-#   LLVM  127 MB at 40 iterations, 316 MB at 100          DOES NOT reclaim
+#              v0.1.437          v0.1.443
+#   C          2.5 MB flat       2.5 MB flat       reclaims
+#   Wasm       completes         completes         reclaims (unreclaimed needs
+#                                                  ~105 MB of a fixed 64 MiB)
+#   LLVM       127 -> 316 MB     5.8 MB flat       reclaims as of v0.1.443
 #
-# The LLVM backend allocates every value in @__lang_default_region regardless
-# of the region blocks around it: its `region R { }` is an alloca that only
-# explicitly region-typed things (`&R v`, views, containers whose typer region
-# is R) are placed in, and it has no per-type copy-out (the C backend emits 42
-# __mcopy sites; the LLVM backend emits none). The documentation is honest
-# about this by omission -- memory-model.md §3.5 says "on the C backend" and
-# the backend note names interp and Wasm -- but nothing measured it, so the
-# size of the gap was not written down anywhere.
+# THE LLVM COLUMN IS WHY THIS FILE EXISTS. When it was written the backend
+# allocated every value in @__lang_default_region whatever region blocks were
+# around it, and had no per-type copy-out; the gate pinned that as a KNOWN gap
+# and was written to go red if the gap ever closed, rather than pass quietly
+# and leave its own table wrong. v0.1.443 closed it, the gate went red, and
+# this table is the update it asked for.
 #
-# THIS GATE ALSO FAILS WHEN THE GAP CLOSES. The LLVM leg asserts that the
-# footprint still grows with iterations. If someone gives the LLVM backend a
-# current region, that assertion goes red and says so, rather than passing
-# quietly and leaving the table above wrong.
+# What the LLVM leg asserts now is the opposite of what it asserted then: the
+# footprint must NOT follow the iteration count. Same shape of check, other
+# direction -- which is the point of having written the first one as a
+# measurement rather than as a permission.
 #
 # Peak RSS is quantised and only roughly reproducible, so every comparison here
 # is a RATIO with a wide band, never an absolute number.
@@ -91,21 +90,23 @@ else
   checked=$((checked + 1))
 fi
 
-# ---- LLVM does not reclaim: pinned, and the pin fails when it is fixed ----
+# ---- LLVM reclaims too, as of v0.1.443 -----------------------------------
 
 l_small="$(peak "$TMP/lbin" $SMALL $DEPTH)"
 l_big="$(peak "$TMP/lbin" $BIG $DEPTH)"
 if [ -n "$l_small" ] && [ -n "$l_big" ]; then
-  if [ "$(( l_big * 10 ))" -lt "$(( l_small * 15 ))" ]; then
-    echo "FAIL region_reclaim/LLVM: peak went $l_small -> $l_big for ${SMALL} -> ${BIG} iterations, which is FLAT."
-    echo "  The LLVM backend appears to reclaim region blocks now. That is good news and this gate is where it is recorded:"
-    echo "  update the table in this script and the backend note in docs/memory-model.md, then relax this check."
+  if [ "$(( l_big * 10 ))" -gt "$(( l_small * 20 ))" ]; then
+    echo "FAIL region_reclaim/LLVM: peak went $l_small -> $l_big for ${SMALL} -> ${BIG} iterations."
+    echo "  The footprint is following the iteration count again, which is what v0.1.443 stopped:"
+    echo "  values are reaching @__lang_default_region instead of the current region, or a block is not"
+    echo "  making itself current. See @__lang_alloc and the Region_block arm in codegen_llvm.ml."
     fail=1
   fi
   checked=$((checked + 1))
-  # and it is much worse than C, which is the number worth having
-  if [ "$(( l_big / 1048576 ))" -lt "$(( c_big / 1048576 * 4 ))" ]; then
-    echo "FAIL region_reclaim/LLVM: LLVM peak $l_big is not far above C's $c_big — the recorded gap has changed shape"
+  # Within a small factor of C. Not equal: the two runtimes size their blocks
+  # differently, and a band that demanded equality would be measuring that.
+  if [ "$l_big" -gt "$(( c_big * 8 ))" ]; then
+    echo "FAIL region_reclaim/LLVM: LLVM peak $l_big is more than 8x C's $c_big — flat, but holding far more per iteration"
     fail=1
   fi
   checked=$((checked + 1))
@@ -133,7 +134,7 @@ if [ "$checked" -lt 4 ]; then
 fi
 
 if [ "$fail" = 0 ]; then
-  echo "PASS region_reclaim: $checked checks — C flat at $(( c_big / 1048576 )) MB, LLVM $(( l_small / 1048576 )) -> $(( l_big / 1048576 )) MB (known: no current region), Wasm completes inside 64 MiB"
+  echo "PASS region_reclaim: $checked checks — C flat at $(( c_big / 1048576 )) MB, LLVM flat at $(( l_big / 1048576 )) MB, Wasm completes inside 64 MiB"
   exit 0
 fi
 exit 1
