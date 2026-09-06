@@ -1,0 +1,28 @@
+// The program that asks whether `region R { }` actually returns memory.
+//
+// A tree is built inside the block and only a scalar leaves it, so an
+// implementation that reclaims holds one tree at a time however many
+// iterations run, and one that does not holds all of them. The answer is the
+// same either way -- which is exactly why the parity suite, which compares
+// what a program prints, cannot see the difference.
+//
+// Usage: pertree <iterations> <depth>
+// If the region reclaims, the footprint is one tree; if it does not, it is N.
+type tree = Leaf | Node of tree * tree;
+
+let rec build = fn (d: int) ->
+  if d == 0 then Leaf else Node (build (d - 1), build (d - 1));
+let rec check = fn (t: tree) ->
+  match t with | Leaf -> 1 | Node (l, r) -> 1 + check l + check r;
+
+let argv = args ();
+let n = match argv with | Cons (a, _) -> int_of_str a | Nil -> 40;
+let d = match argv with | Cons (_, Cons (b, _)) -> int_of_str b | Nil -> 16;
+
+let rec go = fn (i: int) -> fn (acc: int) ->
+  if i == 0 then acc
+  else
+    let one = region R { check (build d) } in
+    go (i - 1) (acc + one);
+let _ = print (str_of_int (go n 0)) in
+exit 0
