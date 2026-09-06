@@ -1,0 +1,81 @@
+// A job runner whose PROGRESS is durable: killed at any moment, the next
+// process picks up where this one stopped.
+//
+// Nothing in this repository had this shape. There are durable stores
+// (contrib/store/kvlog.mere) and there are long runs, but no program whose
+// own progress survives being killed -- so the pieces had never been put
+// together and the question "what does a crash cost here" had no answer.
+//
+// What is durable is the PROGRESS, not the computation: a job that was
+// running when the process died is run again from its start. That is the
+// cheap half, and it is the half a batch of independent jobs needs.
+//
+// Usage: jobs <logpath> <njobs> <work> <mode>
+//   mode 0 = durable: each finished job is appended to the log and fsynced,
+//            and a restart replays the log and skips what is already there
+//   mode 1 = not durable: no log, every process starts from job 0. The
+//            negative control -- under the same kill schedule this one never
+//            finishes, which is the whole claim stated as a difference.
+//
+// Prints, when every job is done:
+//   answer <sum of results>     the same number however many times it died
+//   ran <n>                     jobs THIS process executed, so the gate can
+//                               tell a resumed run from a fresh one, and can
+//                               tell that a kill actually interrupted work
+
+import "../../contrib/store/kvlog.mere";
+
+let argv = args ();
+let sarg = fn (k: int) -> fn (d: str) ->
+  let rec go = fn (xs: str list) -> fn (i: int) ->
+    match xs with
+    | Nil -> d
+    | Cons (a, rest) -> if i == k then a else go rest (i + 1) in
+  go argv 0;
+let iarg = fn (k: int) -> fn (d: int) ->
+  let s = sarg k "" in
+  if str_eq s "" then d else int_of_str s;
+
+let path = sarg 0 "/tmp/mere_jobs.log";
+let njobs = iarg 1 8;
+let work = iarg 2 200000;
+let mode = iarg 3 0;
+
+// Deterministic, and slow enough that a kill can land inside it.
+let compute = fn (j: int) ->
+  let rec go = fn (i: int) -> fn (acc: int) ->
+    if i == 0 then acc
+    else go (i - 1) ((acc * 31 + j + i) % 1000003) in
+  go work (j + 1);
+
+let done_map = map_new ();
+let _ =
+  if mode == 1 then ()
+  else
+    let rec load = fn (l: (str * str) list) ->
+      match l with
+      | Nil -> ()
+      | Cons ((k, v), rest) -> let _ = map_set done_map k v in load rest in
+    load (kvlog_all path);
+
+let ran = vec_new ();
+let _ = vec_push ran 0;
+
+let rec run = fn (j: int) -> fn (acc: int) ->
+  if j == njobs then acc
+  else
+    let key = str_of_int j in
+    if mode == 0 && map_has done_map key then
+      run (j + 1) (acc + int_of_str (map_get done_map key))
+    else
+      let v = compute j in
+      // The record lands BEFORE the next job starts, so a kill between them
+      // cannot lose it. fsync is inside kvlog_set.
+      let _ = if mode == 0 then kvlog_set path key (str_of_int v) else () in
+      let _ = vec_set ran 0 (vec_get ran 0 + 1) in
+      run (j + 1) (acc + v);
+
+let answer = run 0 0;
+let _ = print ("answer " ++ str_of_int answer) in
+let _ = print ("ran " ++ str_of_int (vec_get ran 0)) in
+exit 0
