@@ -237,6 +237,7 @@ $ dune exec ./bin/mere.exe -e '
 - **[Patterns / cookbook](docs/patterns.md)** — common idioms
 - **[Memory model](docs/memory-model.md)** — memory management options, region/view, current and future
 - **[Codegen](docs/codegen.md)** — three-backend (C / LLVM IR / Wasm) strategy + per-slice table
+- **[SIMD](docs/simd.md)** — the two paths (range-check versioning, and the `f64x2` / `u8x16` types), when lanes pay and when they do not, the measured rows
 - **[Language server](docs/lsp.md)** — `mere lsp`: diagnostics, hover, go to definition and completion in your editor, from the same check the compiler runs ([VS Code extension](https://github.com/merelang/mere-vscode))
 - **[Bare metal](docs/bare-metal.md)** — the RV32I backend: `--bare`, the memory map, raw memory as a capability, traps, tasks, a user process, and the debug map behind source-level debugging
 - **[HTTP demos](docs/http-demos.md)** — twelve `examples/http_*.mere` servers, catalog + patterns
