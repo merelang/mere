@@ -1,0 +1,46 @@
+// v0.1.433: a function defined INSIDE a region body, allocating a container.
+//
+// The body's `__region_R` is a C local of the enclosing function, but an inner
+// fn is lifted to its own top-level C function where that local does not
+// exist. C spliced the name anyway and emitted a translation unit clang
+// rejects ("use of undeclared identifier '__region_R'") -- a miscompile the
+// parity harness could not see, because no case had ever put a container
+// constructor inside an inner fn inside a region. interp and wasm ran it
+// correctly the whole time; llvm refuses it by name, which is why this case is
+// UNSUP there rather than a fourth answer.
+//
+// Three constructors, because the emission site is copied per container type
+// and a fix that reaches one reaches only one.
+
+let block = region R {
+  let mk_buf = fn (k: int) ->
+    let b = strbuf_new () in
+    let _ = strbuf_push b "ab" in
+    let _ = strbuf_push b (str_of_int k) in
+    strbuf_len b in
+  let mk_vec = fn (k: int) ->
+    let v = vec_new () in
+    let _ = vec_push v k in
+    let _ = vec_push v (k + 1) in
+    vec_len v in
+  let mk_map = fn (k: int) ->
+    let m = map_new () in
+    let _ = map_set m k "x" in
+    let _ = map_set m (k + 1) "y" in
+    map_len m in
+  mk_buf 7 + mk_vec 7 + mk_map 7
+};
+
+// The same shape one level deeper: an inner fn calling an inner fn, so the
+// lifted body is reached through another lifted body rather than directly.
+let nested = region S {
+  let inner = fn (k: int) ->
+    let b = strbuf_new () in
+    let _ = strbuf_push b (str_of_int k) in
+    strbuf_len b in
+  let outer = fn (k: int) -> inner k + inner (k * 10) in
+  outer 5
+};
+
+let _ = print ("block " ++ str_of_int block) in
+print ("nested " ++ str_of_int nested)

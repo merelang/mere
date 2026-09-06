@@ -4,6 +4,44 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.433 — 2026-09-06
+
+**A function defined inside a `region` body could not allocate a
+container on the C backend.** `region R { ... }` binds `__region_R` as a
+local of the enclosing C function, and a container constructor in the
+body names it. An inner fn is lifted to its own top-level C function,
+where that local does not exist -- and the emitter spliced the name
+anyway, producing a translation unit clang rejects with `use of
+undeclared identifier '__region_R'`. Nine emission sites did it
+(`vec_new`, `map_new`, `strbuf_new`, `bytebuf_new`, `lb_new`,
+`vec_of_bytes`, `read_file_bytes`, `file_pread`, and the vec-returning
+byte reader), because the rule was written out at each of them.
+
+It is now written once. `region_var_of` answers the C local when the
+region has one in scope and the RUNTIME current region when it does
+not -- the block makes itself current for its body, so inside the block
+the two are the same pointer, and when the helper escapes and runs
+somewhere else the current region is the one actually live at the call,
+which is the answer a lexical name cannot give.
+
+The trigger was narrow enough to hide: an inner fn that allocates a
+*string* was fine (strings already follow the current region), one that
+allocates nothing was fine, and a *top-level* fn called from the body
+was fine (it receives the region at run time). Only a container
+constructor inside a function defined in the body reached it -- so
+`region R { check (build d) }`, the shape the footprint work used
+throughout, never did. The interpreter and Wasm ran these programs
+correctly the whole time and LLVM refuses them by name, which made the C
+backend the only one that answered with a build failure.
+
+`&R v` now refuses an out-of-scope `R` instead of splicing it, with the
+same message LLVM gives: that construct names its arena explicitly, so
+redirecting it to the current region would answer a question the program
+did not ask.
+
+`test/parity/region_inner_fn_container.mere` covers three constructors
+and a two-level nesting; parity is 157 programs.
+
 ## v0.1.432 — 2026-09-06
 
 Three more Linux-only CI failures, visible once v0.1.431 let the C gates

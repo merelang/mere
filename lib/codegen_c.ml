@@ -84,6 +84,40 @@ let lib_static () = if !lib_mode then "static " else ""
 let heap_container_region () =
   if !lib_mode then "__lang_current_region" else "(&__lang_default_region)"
 
+(* v0.1.433: which named regions have a C local at the point being emitted.
+   A `region R { ... }` binds `__region_R` as a local of the enclosing C
+   function, so a container constructor inside the body can name it -- but an
+   inner fn defined in that body is LIFTED to its own top-level C function,
+   where that local does not exist. Emitting the name there produced C that
+   clang rejects (`use of undeclared identifier '__region_R'`), while the
+   interpreter and Wasm ran the same program correctly and LLVM refused it
+   with a message. The name is pushed while the body is emitted and popped
+   after; lifted bodies are emitted from a separate pass, so the stack is
+   empty there, which is exactly the condition being detected.
+
+   The fallback is the RUNTIME current region, not a refusal: a region block
+   makes itself current for its body, so inside the block the two are the same
+   pointer. When the helper escapes and is called from elsewhere, the current
+   region is the one actually live at the call, which is the answer a lexical
+   name cannot give (the same conclusion the str-lifetime work reached: a
+   lexical rule cannot guarantee a runtime region). *)
+let region_scope : string list ref = ref []
+
+let with_region_scope (name : string) (f : unit -> 'a) : 'a =
+  region_scope := name :: !region_scope;
+  let restore () = region_scope := List.tl !region_scope in
+  (match f () with
+   | v -> restore (); v
+   | exception ex -> restore (); raise ex)
+
+(* The C expression for a container's region marker. `__heap` is the default
+   region (or the current one in --lib mode); a named region uses its C local
+   when one is in scope and the current region when it is not. *)
+let region_var_of (name : string) : string =
+  if name = "__heap" then heap_container_region ()
+  else if List.mem name !region_scope then "__region_" ^ name
+  else "__lang_current_region"
+
 (* A position that names a file is not from the source being compiled — it came
    from the prelude or from an `import`, and claiming it as a line of this file
    would point a debugger at the wrong text. That check is the whole rule, and it
@@ -2497,7 +2531,7 @@ let rec emit_expr (e : Ast.expr) : string =
        let region_var =
          match Option.map Ast.walk e.Ast.ty with
          | Some (Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); _])) ->
-           if r = "__heap" then (heap_container_region ()) else "__region_" ^ r
+           region_var_of r
          | _ -> (heap_container_region ())
        in
        Printf.sprintf "__lang_vec_of_bytes(%s, %s)" (emit_expr arg) region_var
@@ -2753,8 +2787,7 @@ let rec emit_expr (e : Ast.expr) : string =
             | Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); _]) ->
               if not (Hashtbl.mem vec_instances "int") then
                 Hashtbl.add vec_instances "int" Ast.TyInt;
-              if r = "__heap" then (heap_container_region ())
-              else "__region_" ^ r
+              region_var_of r
             | _ ->
               if not (Hashtbl.mem vec_instances "int") then
                 Hashtbl.add vec_instances "int" Ast.TyInt;
@@ -2776,8 +2809,7 @@ let rec emit_expr (e : Ast.expr) : string =
             | Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); _]) ->
               if not (Hashtbl.mem vec_instances "int") then
                 Hashtbl.add vec_instances "int" Ast.TyInt;
-              if r = "__heap" then (heap_container_region ())
-              else "__region_" ^ r
+              region_var_of r
             | _ ->
               if not (Hashtbl.mem vec_instances "int") then
                 Hashtbl.add vec_instances "int" Ast.TyInt;
@@ -3161,8 +3193,7 @@ let rec emit_expr (e : Ast.expr) : string =
          | None -> unsupported e.loc "lb_new: missing type info"
        in
        let region_var =
-         if region_name = "__heap" then (heap_container_region ())
-         else "__region_" ^ region_name
+         region_var_of region_name
        in
        Printf.sprintf
          "({ __lang_listbuf* __b = (__lang_listbuf*)__lang_region_alloc(%s, sizeof(__lang_listbuf)); \
@@ -3203,8 +3234,7 @@ let rec emit_expr (e : Ast.expr) : string =
             thread-local current region defeats sibling-call optimization,
             and deep tail loops with per-iteration regions overflowed the
             stack). The default region stays a static struct. *)
-         if region_name = "__heap" then (heap_container_region ())
-         else "__region_" ^ region_name
+         region_var_of region_name
        in
        Printf.sprintf "mere_vec_%s_new(%s)" elem_tag region_var
      | Ast.Var "vec_len" ->
@@ -3577,8 +3607,7 @@ let rec emit_expr (e : Ast.expr) : string =
             thread-local current region defeats sibling-call optimization,
             and deep tail loops with per-iteration regions overflowed the
             stack). The default region stays a static struct. *)
-         if region_name = "__heap" then (heap_container_region ())
-         else "__region_" ^ region_name
+         region_var_of region_name
        in
        Printf.sprintf "mere_map_%s_%s_new(%s)" k_tag v_tag region_var
      | Ast.Var "map_len" ->
@@ -3646,8 +3675,7 @@ let rec emit_expr (e : Ast.expr) : string =
             thread-local current region defeats sibling-call optimization,
             and deep tail loops with per-iteration regions overflowed the
             stack). The default region stays a static struct. *)
-         if region_name = "__heap" then (heap_container_region ())
-         else "__region_" ^ region_name
+         region_var_of region_name
        in
        Printf.sprintf "mere_strbuf_new(%s)" region_var
      | Ast.Var "strbuf_len" ->
@@ -3666,8 +3694,7 @@ let rec emit_expr (e : Ast.expr) : string =
          | None -> "__heap"
        in
        let region_var =
-         if region_name = "__heap" then (heap_container_region ())
-         else "__region_" ^ region_name
+         region_var_of region_name
        in
        Printf.sprintf "mere_bytebuf_new(%s, %s)" region_var (emit_expr arg)
      | Ast.Var "bytebuf_len" ->
@@ -3715,8 +3742,7 @@ let rec emit_expr (e : Ast.expr) : string =
             thread-local current region defeats sibling-call optimization,
             and deep tail loops with per-iteration regions overflowed the
             stack). The default region stays a static struct. *)
-         if region_name = "__heap" then (heap_container_region ())
-         else "__region_" ^ region_name
+         region_var_of region_name
        in
        (* Result is Vec[R, T] — register element type for runtime emission. *)
        (try
@@ -3966,7 +3992,8 @@ let rec emit_expr (e : Ast.expr) : string =
        __auto_type __r_out = __mcopy_%s(__lang_current_region, __r_result); \
        __lang_region_block_release(%s); \
        __r_out; })"
-      region_var name name region_var (emit_expr body) name rtag
+      region_var name name region_var
+      (with_region_scope name (fun () -> emit_expr body)) name rtag
       region_var
   | Ast.Region_loop (name, x, body) ->
     (* `region R loop x { body }` -- the hand-over-hand swap the block above
@@ -4085,7 +4112,7 @@ let rec emit_expr (e : Ast.expr) : string =
       flow_cty
       name name
       xc xc
-      (emit_expr body)
+      (with_region_scope name (fun () -> emit_expr body))
       cont_tag
       name
       ctag
@@ -4095,6 +4122,12 @@ let rec emit_expr (e : Ast.expr) : string =
     (* `&R v` — allocate v in region R's bump buffer and return a
        pointer of type `T*`. Uses typeof / __auto_type so we don't need
        to thread the inner type's C representation through. *)
+    (* `&R v` names its region explicitly, so an out-of-scope R is a refusal
+       rather than a redirect to the current region: the program asked for that
+       arena by name. LLVM already answers this way ("&R: region not in
+       scope"); C used to splice the name and emit unbuildable code. *)
+    if not (List.mem region !region_scope) then
+      unsupported e.Ast.loc ("&R: region not in scope: " ^ region);
     let region_var = "__region_" ^ region in
     Printf.sprintf
       "({ __auto_type __ref_v = (%s); \
