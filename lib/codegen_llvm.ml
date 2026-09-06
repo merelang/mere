@@ -313,6 +313,16 @@ let to_json_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 let eq_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 let cmp_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 
+(* v0.1.443 (Q-116): types that need an `@__mcopy_<tag>` — a deep copy into a
+   named region. A `region R { }` makes itself current for its body, so the
+   body's values live in it; the result has to be copied into the ENCLOSING
+   region before the block is released, or it dangles. The C backend has had
+   this since v0.1.31 and the Wasm backend since v0.1.37; this backend had
+   neither, which is why its values stayed in the default region and its
+   region blocks reclaimed almost nothing. Keyed by ty_tag, holding the
+   transitive closure, exactly like eq_types. *)
+let copy_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
 let is_recursive_variant_name (name : string) : bool =
   Hashtbl.mem recursive_variants name
 
@@ -2007,6 +2017,72 @@ let rec add_struct_deep_type (tbl : (string, Ast.ty) Hashtbl.t) (t : Ast.ty) : u
     end
 
 let add_eq_type t = add_struct_deep_type eq_types t
+(* v0.1.443 (Q-116): which region-block results get copied out, decided once
+   and consulted by both the collection pre-pass and the emitter -- a rule
+   written in two places becomes two rules.
+
+   `Refuse`    a container (identity: a copy would be a different object) or a
+               closure (its captured environment lives in the block and this
+               backend has no environment copier). The C backend refuses
+               containers here too.
+   `NoCopy`    the type never resolved. The only values that reach a region
+               boundary without a concrete type are the shared nullary nodes
+               of a boxed variant (v0.1.322) -- one static per constructor,
+               living outside every arena -- so there is nothing to copy and
+               nothing to dangle. `region A { Nil }` is the case.
+   `Copy`      everything else. *)
+type region_result_plan = Refuse of string | NoCopy | Copy
+
+let rec ty_has_container t =
+  match Ast.walk t with
+  | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "ListBuf" | "Channel"), _) -> true
+  | Ast.TyTuple ts -> List.exists ty_has_container ts
+  | Ast.TyCon (_, args) -> List.exists ty_has_container args
+  | _ -> false
+
+let rec ty_has_arrow t =
+  match Ast.walk t with
+  | Ast.TyArrow _ -> true
+  | Ast.TyTuple ts -> List.exists ty_has_arrow ts
+  | Ast.TyCon (_, args) -> List.exists ty_has_arrow args
+  | _ -> false
+
+let region_result_plan (t : Ast.ty) : region_result_plan =
+  if ty_has_container t then
+    Refuse "a region block cannot return a Map / Vec / OwnedVec / StrBuf — the \
+            container's storage is reclaimed with the block. Return a plain \
+            value, or create the container outside the block and store into it."
+  else if ty_has_arrow t then
+    Refuse "a region block cannot return a function on this backend — the \
+            closure's captured environment is allocated in the block and is \
+            reclaimed with it."
+  else if not (ty_is_concrete t) then NoCopy
+  else Copy
+
+(* v0.1.443 (Q-115): where a container whose typer region is `name` goes.
+   `__heap` is the default region. A named region uses its SSA pointer when the
+   block is lexically here, and the RUNTIME current region when it is not --
+   which happens inside a function defined in a region body, since that
+   function is emitted on its own and the block's register does not reach it.
+   Before this the backend answered that question two different ways in seven
+   places: three fell back to the default region (safe, but never returned) and
+   four refused outright, so `region R { let f = fn .. -> vec_new () .. }`
+   compiled on the interpreter, on C (v0.1.433) and on Wasm, and was rejected
+   here. The C backend folded the same rule into one function; this is that
+   function. *)
+let region_ptr_for (name : string) : string =
+  if name = "__heap" then "@__lang_default_region"
+  else match List.assoc_opt name !current_regions with
+    | Some reg -> reg
+    | None ->
+      let r = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = load ptr, ptr @__lang_current_region" r);
+      r
+
+let add_copy_type t =
+  match region_result_plan t with
+  | Copy -> add_struct_deep_type copy_types t
+  | Refuse _ | NoCopy -> ()
 let add_cmp_type t = add_struct_deep_type cmp_types t
 
 let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
@@ -2061,6 +2137,12 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
 let collect_eq_cmp_types (root : Ast.expr) (fns : fn_decl list) : unit =
   let rec walk_expr (e : Ast.expr) =
     (match e.Ast.node with
+     (* v0.1.443 (Q-116): a region block copies its result out, so the result
+        type needs an @__mcopy_. Registered in this pre-pass rather than while
+        emitting the block, because the per-type functions are emitted BEFORE
+        the expression bodies that use them. *)
+     | Ast.Region_block (_, _) ->
+       (match e.Ast.ty with Some t -> add_copy_type t | None -> ())
      | Ast.Cmp (op, a, _) ->
        let a_ty = match a.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt in
        if llvm_needs_struct_eq a_ty then
@@ -2681,6 +2763,148 @@ let emit_eq_fn (tag : string) (t : Ast.ty) : string =
   instrs := saved_instrs; reg_counter := saved_reg; label_counter := saved_lbl;
   Printf.sprintf "define i1 @eq_%s(%s %%a, %s %%b) {\n%s\n}" tag pty pty body
 
+(* v0.1.443 (Q-116): `define <ty> @__mcopy_<tag>(ptr %r, <ty> %v)` — a deep
+   copy of %v into region %r. The sibling of eq_<tag>: same structural walk,
+   allocating instead of comparing.
+
+   Scalars are returned unchanged: they live in registers, not in any region.
+   A str carries its length in the eight bytes before its pointer, and `bytes`
+   is a length word followed by its bytes, so both are one allocation and one
+   memcpy. Tuples and records are first-class aggregates here, so the copy is
+   an insertvalue chain over copied fields; only their pointer-shaped fields
+   cost anything. A recursive variant is a pointer to a node and gets a new
+   node; a non-recursive one is an aggregate like a tuple.
+
+   Containers are NOT copied and must not reach here -- a Vec or a Map has
+   identity, and duplicating it would silently give the caller a different
+   object. The region block refuses them as results, the same refusal the C
+   backend makes, so this arm is unreachable rather than lenient. *)
+let emit_mcopy_fn (tag : string) (t : Ast.ty) : string =
+  let saved_instrs = !instrs in
+  let saved_reg = !reg_counter and saved_lbl = !label_counter in
+  reg_counter := 0; label_counter := 0; instrs := [];
+  let pty = llvm_ty_of t in
+  emit_instr "entry:";
+  (match Ast.walk t with
+   | Ast.TyInt | Ast.TyUnit | Ast.TyBool | Ast.TyFloat | Ast.TySimd _ ->
+     emit_instr (Printf.sprintf "  ret %s %%v" pty)
+   | Ast.TyStr ->
+     let n = fresh_reg () and d = fresh_reg () and n1 = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = call i64 @__lang_str_size(ptr %%v)" n);
+     emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_alloc_in(ptr %%r, i64 %s)" d n);
+     emit_instr (Printf.sprintf "  %s = add i64 %s, 1" n1 n);
+     emit_instr (Printf.sprintf "  call ptr @memcpy(ptr %s, ptr %%v, i64 %s)" d n1);
+     emit_instr (Printf.sprintf "  ret ptr %s" d)
+   | Ast.TyBytes ->
+     (* [i64 len][len bytes]; the pointer is to the length word. *)
+     let n = fresh_reg () and sz = fresh_reg () and d = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = load i64, ptr %%v" n);
+     emit_instr (Printf.sprintf "  %s = add i64 %s, 8" sz n);
+     emit_instr (Printf.sprintf "  %s = call ptr @__lang_region_alloc(ptr %%r, i64 %s)" d sz);
+     emit_instr (Printf.sprintf "  call ptr @memcpy(ptr %s, ptr %%v, i64 %s)" d sz);
+     emit_instr (Printf.sprintf "  ret ptr %s" d)
+   | Ast.TyTuple ts ->
+     let tname = tuple_struct_name ts in
+     let acc = ref "undef" in
+     List.iteri (fun i et ->
+       let f = fresh_reg () and c = fresh_reg () and nx = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%v, %d" f tname i);
+       emit_instr (Printf.sprintf "  %s = call %s @__mcopy_%s(ptr %%r, %s %s)"
+                     c (llvm_ty_of et) (ty_tag et) (llvm_ty_of et) f);
+       emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, %s %s, %d"
+                     nx tname !acc (llvm_ty_of et) c i);
+       acc := nx) ts;
+     emit_instr (Printf.sprintf "  ret %%%s %s" tname !acc)
+   | _ when record_fields_of t <> None ->
+     let (aggname, fields) = Option.get (record_fields_of t) in
+     let acc = ref "undef" in
+     List.iteri (fun i (_, ft) ->
+       let f = fresh_reg () and c = fresh_reg () and nx = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%v, %d" f aggname i);
+       emit_instr (Printf.sprintf "  %s = call %s @__mcopy_%s(ptr %%r, %s %s)"
+                     c (llvm_ty_of ft) (ty_tag ft) (llvm_ty_of ft) f);
+       emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, %s %s, %d"
+                     nx aggname !acc (llvm_ty_of ft) c i);
+       acc := nx) fields;
+     emit_instr (Printf.sprintf "  ret %%%s %s" aggname !acc)
+   | _ when variant_shape_of t <> None ->
+     let (_, mono, recursive, variants) = Option.get (variant_shape_of t) in
+     let node_ty = "%" ^ mono ^ "_node" in
+     let vtag = variant_tag_reg mono recursive "%v" in
+     if recursive then begin
+       (* one node, then the payload of whichever constructor this is *)
+       let szp = fresh_reg () and sz = fresh_reg () and d = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr null, i32 1" szp node_ty);
+       emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" sz szp);
+       emit_instr (Printf.sprintf "  %s = call ptr @__lang_region_alloc(ptr %%r, i64 %s)" d sz);
+       let tp = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 0" tp node_ty d);
+       emit_instr (Printf.sprintf "  store i32 %s, ptr %s" vtag tp);
+       List.iteri (fun ctor_tag (_, arg_opt) ->
+         match arg_opt with
+         | None -> ()
+         | Some ptyp ->
+           let arm = fresh_label "mc_arm_" and next = fresh_label "mc_next_" in
+           let c = fresh_reg () in
+           emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, %d" c vtag ctor_tag);
+           emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" c arm next);
+           emit_label arm;
+           let pv = variant_payload_reg mono recursive "%v" ptyp in
+           let cp = fresh_reg () in
+           emit_instr (Printf.sprintf "  %s = call %s @__mcopy_%s(ptr %%r, %s %s)"
+                         cp (llvm_ty_of ptyp) (ty_tag ptyp) (llvm_ty_of ptyp) pv);
+           (* the payload lives in a box the node points at, so the copy needs
+              a box of its own in the destination region *)
+           let bsp = fresh_reg () and bs = fresh_reg () and bx = fresh_reg () in
+           emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr null, i32 1"
+                         bsp (llvm_ty_of ptyp));
+           emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" bs bsp);
+           emit_instr (Printf.sprintf "  %s = call ptr @__lang_region_alloc(ptr %%r, i64 %s)" bx bs);
+           emit_instr (Printf.sprintf "  store %s %s, ptr %s" (llvm_ty_of ptyp) cp bx);
+           let dp = fresh_reg () in
+           emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 1" dp node_ty d);
+           emit_instr (Printf.sprintf "  store ptr %s, ptr %s" bx dp);
+           emit_instr (Printf.sprintf "  ret ptr %s" d);
+           emit_label next) variants;
+       emit_instr (Printf.sprintf "  ret ptr %s" d)
+     end else begin
+       let acc = ref (Printf.sprintf "insertvalue %%%s undef, i32 %s, 0" mono vtag) in
+       let a0 = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = %s" a0 !acc);
+       acc := a0;
+       List.iteri (fun ctor_tag (_, arg_opt) ->
+         match arg_opt with
+         | None -> ()
+         | Some ptyp ->
+           let arm = fresh_label "mc_arm_" and next = fresh_label "mc_next_" in
+           let c = fresh_reg () in
+           emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, %d" c vtag ctor_tag);
+           emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" c arm next);
+           emit_label arm;
+           let pv = variant_payload_reg mono recursive "%v" ptyp in
+           let cp = fresh_reg () and full = fresh_reg () in
+           emit_instr (Printf.sprintf "  %s = call %s @__mcopy_%s(ptr %%r, %s %s)"
+                         cp (llvm_ty_of ptyp) (ty_tag ptyp) (llvm_ty_of ptyp) pv);
+           let bsp = fresh_reg () and bs = fresh_reg () and bx = fresh_reg () in
+           emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr null, i32 1"
+                         bsp (llvm_ty_of ptyp));
+           emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" bs bsp);
+           emit_instr (Printf.sprintf "  %s = call ptr @__lang_region_alloc(ptr %%r, i64 %s)" bx bs);
+           emit_instr (Printf.sprintf "  store %s %s, ptr %s" (llvm_ty_of ptyp) cp bx);
+           emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, ptr %s, 1"
+                         full mono !acc bx);
+           emit_instr (Printf.sprintf "  ret %%%s %s" mono full);
+           emit_label next) variants;
+       emit_instr (Printf.sprintf "  ret %%%s %s" mono !acc)
+     end
+   | _ ->
+     (* Arrows and anything else structural reach here only if the region
+        block's own refusal let them through, which would be a bug there. *)
+     emit_instr (Printf.sprintf "  ret %s %%v" pty));
+  let body = String.concat "\n" (List.rev !instrs) in
+  instrs := saved_instrs; reg_counter := saved_reg; label_counter := saved_lbl;
+  Printf.sprintf "define %s @__mcopy_%s(ptr %%r, %s %%v) {\n%s\n}" pty tag pty body
+
 (* `define i64 @cmp_<tag>(%ty %a, %ty %b)` — structural compare (<0/0/>0),
    lexicographic, matching the interpreter's value_compare and C's cmp_<tag>. *)
 let emit_cmp_fn (tag : string) (t : Ast.ty) : string =
@@ -3161,7 +3385,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                            size_int size_r);
              let env_p = fresh_reg () in
              emit_instr (Printf.sprintf
-                           "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %s)"
+                           "  %s = call ptr @__lang_alloc(i64 %s)"
                            env_p size_int);
              (* Store each capture into an env field *)
              List.iteri (fun i (cn, cty) ->
@@ -3759,9 +3983,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let region_reg =
       match Option.map Ast.walk e.Ast.ty with
       | Some (Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); _])) ->
-        if r = "__heap" then "@__lang_default_region"
-        else (match List.assoc_opt r !current_regions with
-              | Some reg -> reg | None -> "@__lang_default_region")
+        region_ptr_for r
       | _ -> "@__lang_default_region"
     in
     let f = emit_expr env ch_e in
@@ -3905,9 +4127,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let region_reg =
       match Option.map Ast.walk e.Ast.ty with
       | Some (Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); _])) ->
-        if r = "__heap" then "@__lang_default_region"
-        else (match List.assoc_opt r !current_regions with
-              | Some reg -> reg | None -> "@__lang_default_region")
+        region_ptr_for r
       | _ -> "@__lang_default_region"
     in
     let bv = emit_expr env arg in
@@ -4393,9 +4613,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let region_reg =
       match Option.map Ast.walk e.Ast.ty with
       | Some (Ast.TyCon ("Vec", [Ast.TyRef (_, r, Ast.TyUnit); _])) ->
-        if r = "__heap" then "@__lang_default_region"
-        else (match List.assoc_opt r !current_regions with
-              | Some reg -> reg | None -> "@__lang_default_region")
+        region_ptr_for r
       | _ -> "@__lang_default_region"
     in
     let pv = emit_expr env path_e in
@@ -4561,9 +4779,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        (T unresolved) still compiles, as it does on the C backend. *)
     let nil_tag = try Hashtbl.find variant_tags "Nil" with Not_found -> 0 in
     let b = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 32)" b);
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_alloc(i64 32)" b);
     let nil = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 16)" nil);
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_alloc(i64 16)" nil);
     emit_instr (Printf.sprintf "  store i32 %d, ptr %s" nil_tag nil);
     let f i = let r = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = getelementptr %%__lang_listbuf, ptr %s, i32 0, i32 %d" r b i); r in
@@ -4613,7 +4831,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let ts_p = fresh_reg () and ts = fresh_reg () and tup = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = getelementptr %%%s, ptr null, i32 1" ts_p tup_struct);
     emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" ts ts_p);
-    emit_instr (Printf.sprintf "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %s)" tup ts);
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_alloc(i64 %s)" tup ts);
     let f0 = fresh_reg () and f1 = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = getelementptr %%%s, ptr %s, i32 0, i32 0" f0 tup_struct tup);
     emit_instr (Printf.sprintf "  store %s %s, ptr %s" c_elem x f0);
@@ -4622,7 +4840,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let ns_p = fresh_reg () and ns = fresh_reg () and node = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = getelementptr %%%s, ptr null, i32 1" ns_p node_struct);
     emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" ns ns_p);
-    emit_instr (Printf.sprintf "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %s)" node ns);
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_alloc(i64 %s)" node ns);
     let ntp = fresh_reg () and npp = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = getelementptr %%%s, ptr %s, i32 0, i32 0" ntp node_struct node);
     emit_instr (Printf.sprintf "  store i32 %d, ptr %s" cons_tag ntp);
@@ -4675,12 +4893,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
              if not (Hashtbl.mem vec_instances tag) then
                Hashtbl.add vec_instances tag et;
              let region_ptr =
-               if r = "__heap" then "@__lang_default_region"
-               else match List.assoc_opt r !current_regions with
-                 | Some reg -> reg
-                 | None ->
-                   unsupported e.Ast.loc
-                     ("vec_new: region not in scope: " ^ r)
+               region_ptr_for r
              in
              (region_ptr, tag)
            end else unsupported e.Ast.loc "vec_new: unresolved element type"
@@ -4905,12 +5118,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | None -> "__heap"
     in
     let region_reg =
-      if region_name = "__heap" then "@__lang_default_region"
-      else match List.assoc_opt region_name !current_regions with
-        | Some reg -> reg
-        | None ->
-          unsupported e.Ast.loc
-            ("strbuf_new: region not in scope: " ^ region_name)
+      region_ptr_for region_name
     in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
@@ -5027,12 +5235,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | None -> "__heap"
     in
     let region_reg =
-      if region_name = "__heap" then "@__lang_default_region"
-      else match List.assoc_opt region_name !current_regions with
-        | Some reg -> reg
-        | None ->
-          unsupported e.Ast.loc
-            ("map_new: region not in scope: " ^ region_name)
+      region_ptr_for region_name
     in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
@@ -5194,12 +5397,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | None -> "__heap"
     in
     let region_reg =
-      if region_name = "__heap" then "@__lang_default_region"
-      else match List.assoc_opt region_name !current_regions with
-        | Some reg -> reg
-        | None ->
-          unsupported e.Ast.loc
-            ("owned_vec_to_vec: region not in scope: " ^ region_name)
+      region_ptr_for region_name
     in
     let ov = emit_expr env owned_e in
     let r = fresh_reg () in
@@ -5598,7 +5796,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" size size_p);
         let p = fresh_reg () in
         emit_instr (Printf.sprintf
-                      "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %s)"
+                      "  %s = call ptr @__lang_alloc(i64 %s)"
                       p size);
         emit_instr (Printf.sprintf "  store %s %s, ptr %s" pty_llvm av p);
         Some p
@@ -5616,7 +5814,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" size size_p);
       let p = fresh_reg () in
       emit_instr (Printf.sprintf
-                    "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %s)"
+                    "  %s = call ptr @__lang_alloc(i64 %s)"
                     p size);
       let tag_p = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 0"
@@ -6010,7 +6208,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" size size_p);
       let env_p = fresh_reg () in
       emit_instr (Printf.sprintf
-                    "  %s = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %s)"
+                    "  %s = call ptr @__lang_alloc(i64 %s)"
                     env_p size);
       List.iteri (fun i (cname, cty) ->
         let cv =
@@ -6039,12 +6237,28 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     (* Allocate a fresh region locally, run body within it, free at exit.
        The region's SSA ptr is pushed onto current_regions so Ref / view
        constructions inside body find it by name. *)
+    (* v0.1.443 (Q-116): the block's result is copied into the enclosing
+       region before the block is released, so the result type (and every type
+       inside it) needs an @__mcopy_. Containers are refused rather than
+       copied: a Vec or a Map has identity, and handing back a duplicate would
+       be a different object wearing the same name. The C backend refuses them
+       here for the same reason. *)
+    let result_ty =
+      match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit in
+    let plan = region_result_plan result_ty in
+    (match plan with Refuse msg -> unsupported e.Ast.loc msg | _ -> ());
     let region_p = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = alloca %%__lang_region" region_p);
     emit_instr (Printf.sprintf
                   "  call void @__lang_region_init(ptr %s, i64 1048576)" region_p);
     let saved = !current_regions in
     current_regions := (name, region_p) :: saved;
+    (* v0.1.443 (Q-116): the block is current for its body, so ordinary value
+       allocations land in it and go away with it. Saved in an SSA register
+       rather than a stack slot: the body cannot re-enter this block. *)
+    let saved_cur = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load ptr, ptr @__lang_current_region" saved_cur);
+    emit_instr (Printf.sprintf "  store ptr %s, ptr @__lang_current_region" region_p);
     (* Q-106: count open blocks, for lb_push's region check *)
     let d0 = fresh_reg () and d1 = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = load i32, ptr @__lang_region_depth" d0);
@@ -6052,12 +6266,25 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  store i32 %s, ptr @__lang_region_depth" d1);
     let v = emit_expr env body in
     current_regions := saved;
+    emit_instr (Printf.sprintf "  store ptr %s, ptr @__lang_current_region" saved_cur);
+    (* Out of the dying block and into the region that was current when it
+       started -- which is where the caller will look for it. *)
+    let out =
+      match plan with
+      | Copy ->
+        let o = fresh_reg () in
+        let rty = llvm_ty_of result_ty in
+        emit_instr (Printf.sprintf "  %s = call %s @__mcopy_%s(ptr %s, %s %s)"
+                      o rty (ty_tag result_ty) saved_cur rty v);
+        o
+      | NoCopy | Refuse _ -> v
+    in
     let d2 = fresh_reg () and d3 = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = load i32, ptr @__lang_region_depth" d2);
     emit_instr (Printf.sprintf "  %s = sub i32 %s, 1" d3 d2);
     emit_instr (Printf.sprintf "  store i32 %s, ptr @__lang_region_depth" d3);
     emit_instr (Printf.sprintf "  call void @__lang_region_free(ptr %s)" region_p);
-    v
+    out
   | Ast.Ref (_mode, region, inner) ->
     (* `&R v` — region-allocate a copy of `v` and return ptr. *)
     let v = emit_expr env inner in
@@ -6562,8 +6789,19 @@ let runtime_decls =
          runtime makes keep working for NUL-free strings. *)
       "define ptr @__lang_str_alloc(i64 %len) {";
       "entry:";
+      "  %cur = load ptr, ptr @__lang_current_region";
+      "  %p = call ptr @__lang_str_alloc_in(ptr %cur, i64 %len)";
+      "  ret ptr %p";
+      "}";
+      "";
+      (* v0.1.443 (Q-116): the same allocation with the region named, which is
+         what a copy OUT of a region needs -- the destination is the enclosing
+         region, not the current one, because the current one is the block
+         being left. *)
+      "define ptr @__lang_str_alloc_in(ptr %r, i64 %len) {";
+      "entry:";
       "  %sz = add i64 %len, 9";
-      "  %h = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %sz)";
+      "  %h = call ptr @__lang_region_alloc(ptr %r, i64 %sz)";
       "  store i64 %len, ptr %h";
       "  %p = getelementptr i8, ptr %h, i64 8";
       "  %e = getelementptr i8, ptr %p, i64 %len";
@@ -7053,6 +7291,15 @@ let region_runtime_helpers =
          fails here too, with the same sentence. *)
       "%__lang_listbuf = type { ptr, ptr, ptr, i32, i32 }";
       "@__lang_region_depth = internal global i32 0";
+      (* v0.1.443 (Q-116): where an ordinary VALUE allocation goes. Until now
+         every string, cons cell, tuple and variant node named
+         @__lang_default_region directly, in forty places, so a `region R { }`
+         reclaimed only what was explicitly bound to it -- and the same program
+         that costs 2.5 MB on the C backend cost 316 MB here. A block makes
+         itself current for its body and puts it back afterwards; the rule
+         lives in @__lang_alloc rather than at each allocation site, because a
+         rule written out forty times becomes forty rules. *)
+      "@__lang_current_region = internal global ptr @__lang_default_region";
       "";
       (* v0.1.274: malloc's answer used to go unread here, and the next store
          wrote through the null it returned. An allocation that cannot be
@@ -7087,6 +7334,14 @@ let region_runtime_helpers =
       "  store ptr null, ptr %blocks_p";
       "  call void @__lang_region_add_block(ptr %r, i64 %cap)";
       "  ret void";
+      "}";
+      "";
+      (* v0.1.443 (Q-116): the one place that decides where a value goes. *)
+      "define ptr @__lang_alloc(i64 %n) {";
+      "entry:";
+      "  %cur = load ptr, ptr @__lang_current_region";
+      "  %p = call ptr @__lang_region_alloc(ptr %cur, i64 %n)";
+      "  ret ptr %p";
       "}";
       "";
       "define ptr @__lang_region_alloc(ptr %r, i64 %n) {";
@@ -8154,7 +8409,7 @@ let emit_vec_to_list_helper_llvm (elem_ty : Ast.ty) (list_ty : Ast.ty)
       (* Allocate Nil node *)
       Printf.sprintf "  %%node_size_p = getelementptr %%%s, ptr null, i32 1" node_struct;
       "  %node_size = ptrtoint ptr %node_size_p to i64";
-      "  %nil = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %node_size)";
+      "  %nil = call ptr @__lang_alloc(i64 %node_size)";
       Printf.sprintf "  %%nil_tp = getelementptr %%%s, ptr %%nil, i32 0, i32 0" node_struct;
       Printf.sprintf "  store i32 %d, ptr %%nil_tp" nil_tag;
       (* Loop *)
@@ -8172,7 +8427,7 @@ let emit_vec_to_list_helper_llvm (elem_ty : Ast.ty) (list_ty : Ast.ty)
       "body:";
       Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i32 %%i" c_elem;
       Printf.sprintf "  %%elem = load %s, ptr %%slot" c_elem;
-      "  %new_node = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %node_size)";
+      "  %new_node = call ptr @__lang_alloc(i64 %node_size)";
       Printf.sprintf "  %%ntp = getelementptr %%%s, ptr %%new_node, i32 0, i32 0" node_struct;
       Printf.sprintf "  store i32 %d, ptr %%ntp" cons_tag;
       (* v0.1.153: the payload field is a POINTER to the tuple (the Phase 24
@@ -8182,7 +8437,7 @@ let emit_vec_to_list_helper_llvm (elem_ty : Ast.ty) (list_ty : Ast.ty)
       Printf.sprintf "  %%npp = getelementptr %%%s, ptr %%new_node, i32 0, i32 1" node_struct;
       Printf.sprintf "  %%tup_size_p = getelementptr %%%s, ptr null, i32 1" tup_struct;
       "  %tup_size = ptrtoint ptr %tup_size_p to i64";
-      "  %tup = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %tup_size)";
+      "  %tup = call ptr @__lang_alloc(i64 %tup_size)";
       Printf.sprintf "  %%f0 = getelementptr %%%s, ptr %%tup, i32 0, i32 0" tup_struct;
       Printf.sprintf "  store %s %%elem, ptr %%f0" c_elem;
       Printf.sprintf "  %%f1 = getelementptr %%%s, ptr %%tup, i32 0, i32 1" tup_struct;
@@ -9488,7 +9743,7 @@ let bytes_runtime_llvm =
       "define ptr @__lang_bytes_alloc(i64 %len) {";
       "entry:";
       "  %sz = add i64 %len, 8";
-      "  %b = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %sz)";
+      "  %b = call ptr @__lang_alloc(i64 %sz)";
       "  store i64 %len, ptr %b";
       "  ret ptr %b";
       "}";
@@ -10958,7 +11213,7 @@ let str_split_runtime_llvm =
       "entry:";
       "  %sz_p = getelementptr %list_str_node, ptr null, i32 1";
       "  %sz = ptrtoint ptr %sz_p to i64";
-      "  %p = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %sz)";
+      "  %p = call ptr @__lang_alloc(i64 %sz)";
       "  %tp = getelementptr %list_str_node, ptr %p, i32 0, i32 0";
       "  store i32 0, ptr %tp";
       "  ret ptr %p";
@@ -10969,13 +11224,13 @@ let str_split_runtime_llvm =
       "entry:";
       "  %sz_p = getelementptr %list_str_node, ptr null, i32 1";
       "  %sz = ptrtoint ptr %sz_p to i64";
-      "  %p = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %sz)";
+      "  %p = call ptr @__lang_alloc(i64 %sz)";
       "  %tp = getelementptr %list_str_node, ptr %p, i32 0, i32 0";
       "  store i32 1, ptr %tp";
       (* Box the payload (tuple). *)
       "  %psz_p = getelementptr %tuple_str_list_str, ptr null, i32 1";
       "  %psz = ptrtoint ptr %psz_p to i64";
-      "  %pl = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %psz)";
+      "  %pl = call ptr @__lang_alloc(i64 %psz)";
       "  %f0p = getelementptr %tuple_str_list_str, ptr %pl, i32 0, i32 0";
       "  store ptr %head, ptr %f0p";
       "  %f1p = getelementptr %tuple_str_list_str, ptr %pl, i32 0, i32 1";
@@ -11158,8 +11413,8 @@ let str_split_runtime_llvm =
       "alloc_arrays:";
       "  %n_tokens = add i64 %count, 1";
       "  %n_bytes = mul i64 %n_tokens, 8";
-      "  %starts = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %n_bytes)";
-      "  %lens = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %n_bytes)";
+      "  %starts = call ptr @__lang_alloc(i64 %n_bytes)";
+      "  %lens = call ptr @__lang_alloc(i64 %n_bytes)";
       "  br label %fill_loop";
       (* Pass 2: extract tokens, store (start, len) into arrays. *)
       "fill_loop:";
@@ -11493,7 +11748,7 @@ let env_var_runtime_llvm =
       "  %s = call ptr @__lang_str_of_cstr(ptr %c)";
       "  %box_sz_p = getelementptr ptr, ptr null, i32 1";
       "  %box_sz = ptrtoint ptr %box_sz_p to i64";
-      "  %box = call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %box_sz)";
+      "  %box = call ptr @__lang_alloc(i64 %box_sz)";
       "  store ptr %s, ptr %box";
       "  %a0 = insertvalue %option_str undef, i32 1, 0";
       "  %a1 = insertvalue %option_str %a0, ptr %box, 1";
@@ -11774,6 +12029,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset show_types;
   Hashtbl.reset to_json_types;
   Hashtbl.reset eq_types;
+  Hashtbl.reset copy_types;
   Hashtbl.reset cmp_types;
   Hashtbl.reset vec_instances;
   Hashtbl.reset vec_iter_instances;
@@ -12202,6 +12458,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let eq_cmp_fn_defs =
     Hashtbl.fold (fun tag t acc -> emit_eq_fn tag t :: acc) eq_types []
     @ Hashtbl.fold (fun tag t acc -> emit_cmp_fn tag t :: acc) cmp_types []
+    @ Hashtbl.fold (fun tag t acc -> emit_mcopy_fn tag t :: acc) copy_types []
   in
   (* Phase 25.3: lift inner fns to top-level. Must run BEFORE
      emit_fn_def so emit_expr can see inner_lifts_llvm during body emit.

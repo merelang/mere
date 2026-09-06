@@ -4426,13 +4426,17 @@ let () =
     (llvm "1 + 2")
     "call void @__lang_region_free(ptr @__lang_default_region)";
   (* v0.1.264: concat allocates through str_alloc, which is where the header
-     is written; the region call moved in there with it. *)
-  assert_contains "llvm: str_alloc uses default region"
+     is written; the region call moved in there with it.
+     v0.1.443 (Q-116): and then str_alloc stopped naming a region at all --
+     it asks @__lang_alloc, which reads the CURRENT one, so a `region R { }`
+     reclaims the strings its body made. The default region is still where
+     that points outside any block. *)
+  assert_contains "llvm: str_alloc allocates through the current region"
     (llvm "\"a\" ++ \"b\"")
-    "call ptr @__lang_region_alloc(ptr @__lang_default_region, i64 %sz)";
-  assert_contains "llvm: closure env alloc uses default region"
+    "call ptr @__lang_alloc(i64 %sz)";
+  assert_contains "llvm: closure env alloc goes through the current region"
     (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
-    "call ptr @__lang_region_alloc(ptr @__lang_default_region, i64";
+    "call ptr @__lang_alloc(i64";
   assert_no_contains "llvm: closure env no longer uses bare malloc"
     (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
     "= call ptr @malloc(i64 %t";
@@ -4493,7 +4497,7 @@ let () =
     (llvm_with_decls
       "type LCgIList2 = LCgINil2 | LCgICons2 of int * LCgIList2;\n\
        LCgICons2 (1, LCgINil2)")
-    "call ptr @__lang_region_alloc(ptr @__lang_default_region, i64";
+    "call ptr @__lang_alloc(i64";
   assert_contains "llvm: recursive Match loads tag via GEP"
     (llvm_with_decls
       "type LCgIList3 = LCgINil3 | LCgICons3 of int * LCgIList3;\n\
