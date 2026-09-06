@@ -23,9 +23,21 @@
 # code and ends cleanly fails here), and a program that ends without `exit`
 # (so the check has a negative: it must not report 7 for everything).
 #
-# Backends: interp, C, LLVM, Wasm. Component mode still traps on exit (its env
-# host imports are dropped and routing through wasi proc_exit is Q-114's second
-# half), which is why --component is not in this table.
+# Backends: interp, C, LLVM, Wasm, and -- when the toolchain is present -- a
+# command component through wasi.
+#
+# THE COMPONENT LEG ASSERTS A DIFFERENT THING ON PURPOSE. A command component
+# ends through `wasi:cli/exit`, whose signature is `exit: func(status: result)`:
+# success or failure, with no number in it. So `exit 0` gives 0 and `exit 7`
+# gives 1, and the 1 is the interface's limit rather than this compiler's. The
+# leg pins both, because "exit 7 gives 1" is only acceptable while the reason
+# is written down next to it -- and if a future wasi carries a status, this is
+# where that shows up as a red gate.
+#
+# A reactor component still traps: it has no adapter and no process to end.
+# And a program whose main expression IS the exit (`... in exit 7`, whose type
+# is 'a) is emitted as a reactor rather than a command, so it never reaches
+# this path at all.
 #
 # Usage:
 #   sh scripts/exit_status_check.sh
@@ -94,6 +106,39 @@ run_case exit_zero    'let _ = print "before" in exit 0'      0
 run_case exit_nonzero 'let _ = print "before" in exit 7'      7
 run_case no_exit      'print "before"'                        0
 
+# ---- the command component, through wasi ---------------------------------
+#
+# `exit` has to be a statement here, not the tail: a program whose main
+# expression is `exit n` has type 'a, and the component emitter only builds the
+# command shape for unit / int.
+
+comp_checked=0
+if command -v wasm-tools >/dev/null 2>&1 && command -v wasmtime >/dev/null 2>&1; then
+  for pair in "0 0" "7 1"; do
+    set -- $pair
+    code=$1; want=$2
+    printf 'let _ = print "before" in\nlet _ = exit %s in\n()\n' "$code" > "$TMP/comp$code.mere"
+    if MERE="$MERE" bash "$ROOT/scripts/build-component.sh" "$TMP/comp$code.mere" "$TMP/comp$code.wasm" >/dev/null 2>&1; then
+      wasmtime run "$TMP/comp$code.wasm" >/dev/null 2>&1; crc=$?
+      if [ "$crc" != "$want" ]; then
+        if [ "$code" = 7 ]; then
+          echo "FAIL component: exit 7 gave $crc, expected 1 — wasi:cli/exit is func(status: result) and carries no number. If a status arrived, say so here and in Q-114."
+        else
+          echo "FAIL component: exit 0 gave $crc, expected 0"
+        fi
+        fail=1
+      fi
+      comp_checked=$((comp_checked + 1))
+      checked=$((checked + 1))
+    else
+      echo "exit_status_check: the component leg did not build (no wasi adapter?) — not measured"
+      break
+    fi
+  done
+else
+  echo "exit_status_check: no wasm-tools/wasmtime — the component leg is not measured"
+fi
+
 # A gate that checked nothing would print the same success line as one that
 # checked everything (a skipped toolchain is how that happens), so the count is
 # part of the verdict.
@@ -103,7 +148,11 @@ if [ "$checked" -lt 6 ]; then
 fi
 
 if [ "$fail" = 0 ]; then
-  echo "PASS exit_status_check: $checked backend runs, exit codes agree"
+  if [ "$comp_checked" -gt 0 ]; then
+    echo "PASS exit_status_check: $checked backend runs, exit codes agree (component leg included: 0 -> 0, 7 -> 1, which is all wasi:cli/exit can say)"
+  else
+    echo "PASS exit_status_check: $checked backend runs, exit codes agree (component leg not measured)"
+  fi
   exit 0
 fi
 exit 1

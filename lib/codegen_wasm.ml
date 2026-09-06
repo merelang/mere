@@ -3106,7 +3106,18 @@ and emit_expr (e : Ast.expr) : unit =
        the import does not return, and the block has to be well typed either
        way. In component mode there is no `env` host, so the old drop-and-trap
        stays -- and with it the old answer. *)
-    if !wasm_component_any then begin
+    if !wasm_component_command then begin
+      (* v0.1.439 (Q-114, second half): a command component has a wasi adapter
+         under it, and wasi owns a process. proc_exit does not return. *)
+      wasm_exit_used := true;
+      emit_expr code_e;
+      emit_instr "i32.wrap_i64";
+      emit_instr "call $__lang_proc_exit";
+      emit_instr "unreachable"
+    end else if !wasm_component_any then begin
+      (* A reactor component has no adapter and no process to end: there is
+         nothing to hand the status to, so the trap stays and is documented
+         rather than papered over. *)
       emit_expr code_e;
       emit_instr "drop";
       emit_instr "unreachable"
@@ -10443,6 +10454,13 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       (* time() support: import wasi clock_time_get and emit a real
          $__lang_time (realtime epoch nanoseconds -> f64 seconds) in place of
          the f64.const 0 stub. Gated on wasm_time_used. *)
+      (* v0.1.439 (Q-114): `exit n` in a command component ends the process
+         through wasi rather than trapping. Gated on use, like every other
+         import here. *)
+      let exit_import =
+        if not !wasm_exit_used then "" else
+        "  (import \"wasi_snapshot_preview1\" \"proc_exit\" (func $__lang_proc_exit (param i32)))\n"
+      in
       let clock_import =
         if not !wasm_time_used then "" else
         "  (import \"wasi_snapshot_preview1\" \"clock_time_get\" (func $clock_time_get (param i32 i64 i32) (result i32)))\n"
@@ -10842,6 +10860,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       "  (import \"wasi_snapshot_preview1\" \"fd_write\" (func $fd_write (param i32 i32 i32 i32) (result i32)))\n"
       ^ socket_imports
       ^ args_imports
+      ^ exit_import
       ^ clock_import
       ^ env_imports
       ^ stdin_import
