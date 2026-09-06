@@ -425,6 +425,15 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/region_slack_check.sh
 
+      # Progress that survives SIGKILL. The gate counts the attempts that were
+      # killed WHILE STILL WORKING and fails if there were none (a kill that
+      # lands after the program finished proves nothing), and runs the same
+      # kill schedule against the same program with its log turned off, which
+      # must never finish.
+      - name: durable_check (a killed run resumes, and the kills are real)
+        if: ${{ !cancelled() }}
+        run: sh scripts/durable_check.sh
+
       # Recomputing only what changed: two consumers against the free oracle
       # (recompute everything), the exact node count rather than a bound, and
       # two negative controls that run as part of the gate -- an engine with
