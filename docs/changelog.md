@@ -4,6 +4,64 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.443 — 2026-09-06
+
+**The LLVM backend reclaims region blocks: 316 MB becomes 5.8 MB
+(Q-116, Q-115).** v0.1.438 measured the gap and pinned it; this closes
+it.
+
+Three pieces, in the order they had to happen:
+
+**A current region.** `@__lang_current_region` is a global, and
+`@__lang_alloc(i64)` reads it -- so the rule about where a value goes is
+written **once** instead of at each of the nineteen allocation sites that
+named `@__lang_default_region` directly. A `region R { }` stores itself
+there for its body and puts the old value back afterwards.
+
+**A copy-out.** With values living in the block, the block's result has
+to leave before the block is released. `@__mcopy_<tag>` is the sibling of
+the existing `@eq_<tag>`: the same structural walk, allocating into a
+named region instead of comparing. Scalars pass through; a str is one
+allocation and one memcpy (its length is the eight bytes before its
+pointer); `bytes` likewise; tuples and records rebuild the aggregate over
+copied fields; a variant gets a new node **and a new payload box**, which
+is where the first version was wrong -- both representations keep the
+payload behind a pointer, and inserting the value directly is a type
+error LLVM catches.
+
+Two results are refused, by the same rule the C backend uses: a
+**container** (identity -- a copy would be a different object; C has
+refused this since v0.1.31, and `examples/todo_app.mere` now gets the
+same answer from both backends instead of compiling here and not there)
+and a **function** (its captured environment is in the block, and this
+backend has no environment copier). A result whose type never resolved
+is not copied: the only values that reach a region boundary without a
+concrete type are the shared nullary nodes of a boxed variant (v0.1.322),
+which live outside every arena. `region A { Nil }` is that case.
+
+**One rule for containers (Q-115).** Where a container whose typer region
+is `R` goes was answered **two different ways in seven places** here:
+three fell back to the default region, four refused outright. Now all
+seven ask `region_ptr_for`, which gives the block's pointer when the
+block is lexically present and the runtime current region when it is not
+-- which is the case inside a function defined in a region body, since
+that function is emitted on its own. `test/parity/region_inner_fn_container.mere`
+was UNSUP on LLVM since v0.1.433 and now **matches**; `&R v` and view
+literals still refuse an out-of-scope region, because those name their
+arena explicitly, exactly as on C.
+
+**Evidence.** `region_reclaim_check` flat at 5.8 MB and red again if the
+values go back to the default region (poisoned: 127 -> 316 MB, the
+original figures). Every result shape -- str, tuple, list, variant,
+nullary, record, option, nested -- byte-identical across interp / C /
+LLVM and **clean under AddressSanitizer**, which is what caught the
+missing copy-out in the first place. `codegen_identical` against the
+previous binary: **2451 emissions over C, Wasm and RV32, zero
+differences** -- the change is LLVM's alone. Parity 159/0, tests 2693/0.
+
+Three unit tests that asserted "uses default region" now assert the new
+spelling; they are the gate for this working, and they fired.
+
 ## v0.1.442 — 2026-09-06
 
 **The `exit` runtime section had no program.** v0.1.434 added a gated

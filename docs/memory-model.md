@@ -206,18 +206,28 @@ as of v0.1.31 it is the implemented semantics on the C backend:
 Backend note: the interpreter is GC-backed (same value semantics, memory
 behaviour trivially fine).
 
-**The LLVM backend does not do this.** It has no current region: every value
-allocation names `@__lang_default_region` whatever region blocks are around it,
-and its `region R { }` is a stack `alloca` that only explicitly region-typed
-things go into (`&R v`, views, and containers whose typer region is the block's).
-It emits no per-type copy-out, because nothing it holds needs copying out.
-Measured at v0.1.437 on `test/regionreclaim/pertree.mere` -- a tree built inside
-a region block, only a scalar leaving it -- 100 iterations at depth 16 cost
-**2.5 MB on C and 316 MB on LLVM**, and the LLVM figure grows with the iteration
-count while the C one is flat. Both print the same answer, which is why the
-parity suite never saw it: parity compares what a program prints, and this is a
-difference in what it holds. `scripts/region_reclaim_check.sh` measures the gap
-per backend and fails if it closes, so this paragraph cannot go stale quietly.
+The LLVM backend gained the same semantics in **v0.1.443**. It had none of it
+before: every value allocation named `@__lang_default_region` whatever region
+blocks were around it, `region R { }` was a stack `alloca` that only explicitly
+region-typed things went into, and there was no per-type copy-out because
+nothing it held needed copying out. On `test/regionreclaim/pertree.mere` -- a
+tree built inside a region block, only a scalar leaving it -- 100 iterations at
+depth 16 cost **2.5 MB on C and 316 MB on LLVM**; it is 5.8 MB now, and flat in
+the iteration count like C's.
+
+Both printed the same answer throughout, which is why the parity suite never
+saw it: parity compares what a program prints, and this was a difference in
+what it held. `scripts/region_reclaim_check.sh` is the gate that does see it,
+and it was written to fail **either way** -- it pinned the gap while the gap
+existed, went red when v0.1.443 closed it, and now pins the reclamation.
+
+Two things the LLVM backend refuses as region-block results, both by the same
+rule the C backend uses: a **container** (identity -- a copy would be a
+different object) and a **function** (its captured environment lives in the
+block, and this backend has no environment copier). A result whose type never
+resolved is not copied at all, because the only values that reach a region
+boundary without a concrete type are the shared nullary nodes of a boxed
+variant, which live outside every arena.
 
 The Wasm backend reclaims region blocks as of v0.1.37 (mark on the value stack + result copy-out via `$__mcopy_<tag>`;
 boxed results -- lists, tuples, records, variants, floats, bytes -- copy out
