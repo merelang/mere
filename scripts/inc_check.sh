@@ -143,9 +143,40 @@ else
   echo "inc_check: no C compiler — the compiled half is not being measured"
 fi
 
+# ---- the engine inside a region loop -------------------------------------
+#
+# contrib/inc holds every superseded value forever, because the default region
+# does not give memory back. `region R loop` is the language's answer, and
+# test/inc/agg_region.mere carries the whole engine through one. What is
+# checked here is only that it still computes the right answer: the price is a
+# measurement, recorded in the design notes, not a threshold to guard.
+
+r_want="$(answers "$MERE" "$AGG" 64 8 5 1 | tail -1)"
+r_got="$(answers "$MERE" "$ROOT/test/inc/agg_region.mere" 64 8 5 2 | tail -1)"
+if [ "$r_got" = "$r_want" ] && [ -n "$r_want" ]; then :; else
+  echo "FAIL agg_region/interp: carried through a region loop the engine answers '$r_got', plain it answers '$r_want'"
+  fail=1
+fi
+checked=$((checked + 1))
+
+if [ -n "$CC" ]; then
+  if "$MERE" -c "$ROOT/test/inc/agg_region.mere" > "$TMP/aggr.c" 2>"$TMP/aggr.err" &&
+     $CC -O1 -w "$TMP/aggr.c" -o "$TMP/aggr.bin" 2>>"$TMP/aggr.err"; then
+    c_got="$(answers "$TMP/aggr.bin" 64 8 5 2 | tail -1)"
+    if [ "$c_got" = "$r_want" ]; then :; else
+      echo "FAIL agg_region/C: compiled region loop answers '$c_got', expected '$r_want'"
+      fail=1
+    fi
+    checked=$((checked + 1))
+  else
+    echo "FAIL agg_region/C: did not build — $(head -1 "$TMP/aggr.err")"
+    fail=1
+  fi
+fi
+
 # A gate whose subject failed to build reports fewer checks, not fewer
 # failures, so the count is part of the verdict.
-if [ "$checked" -lt 8 ]; then
+if [ "$checked" -lt 10 ]; then
   echo "FAIL inc_check: only $checked checks ran"
   exit 1
 fi
