@@ -204,8 +204,22 @@ as of v0.1.31 it is the implemented semantics on the C backend:
   is the ergonomic path a streaming line tool wants.
 
 Backend note: the interpreter is GC-backed (same value semantics, memory
-behaviour trivially fine). The Wasm backend reclaims region blocks as of
-v0.1.37 (mark on the value stack + result copy-out via `$__mcopy_<tag>`;
+behaviour trivially fine).
+
+**The LLVM backend does not do this.** It has no current region: every value
+allocation names `@__lang_default_region` whatever region blocks are around it,
+and its `region R { }` is a stack `alloca` that only explicitly region-typed
+things go into (`&R v`, views, and containers whose typer region is the block's).
+It emits no per-type copy-out, because nothing it holds needs copying out.
+Measured at v0.1.437 on `test/regionreclaim/pertree.mere` -- a tree built inside
+a region block, only a scalar leaving it -- 100 iterations at depth 16 cost
+**2.5 MB on C and 316 MB on LLVM**, and the LLVM figure grows with the iteration
+count while the C one is flat. Both print the same answer, which is why the
+parity suite never saw it: parity compares what a program prints, and this is a
+difference in what it holds. `scripts/region_reclaim_check.sh` measures the gap
+per backend and fails if it closes, so this paragraph cannot go stale quietly.
+
+The Wasm backend reclaims region blocks as of v0.1.37 (mark on the value stack + result copy-out via `$__mcopy_<tag>`;
 boxed results -- lists, tuples, records, variants, floats, bytes -- copy out
 correctly since v0.1.418, before which only scalar results assembled),
 with one honest difference from C: there is no per-container storage, so

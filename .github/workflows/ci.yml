@@ -425,6 +425,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/region_slack_check.sh
 
+      # Does `region R { }` actually return memory, per backend? Same program,
+      # same answer, three footprints -- which is why parity cannot see this.
+      # The LLVM leg is a pin on a KNOWN gap and fails if the gap closes, so
+      # the recorded numbers cannot go stale quietly.
+      - name: region_reclaim_check (a region block returns memory, or is recorded as not doing so)
+        if: ${{ !cancelled() }}
+        run: sh scripts/region_reclaim_check.sh
+
       # Progress that survives SIGKILL. The gate counts the attempts that were
       # killed WHILE STILL WORKING and fails if there were none (a kill that
       # lands after the program finished proves nothing), and runs the same
