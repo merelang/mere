@@ -4,6 +4,22 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.442 — 2026-09-06
+
+**The `exit` runtime section had no program.** v0.1.434 added a gated
+Wasm import for `exit` and v0.1.439 a second one for command components;
+`scripts/section_coverage.sh` says a gated section with no program that
+asks for it is untested code that looks tested, and it was right --
+`wasm_exit_used` had no row. `test/parity/exit_zero.mere` is that
+program, and it is the only parity program that calls `exit` at all, so
+the ordinary suite now also compares the status of a program that says it
+succeeded. Parity is 159 programs.
+
+A nonzero status still cannot live in the parity corpus: the harness
+skips any program the interpreter does not exit 0 on, and its failure
+section is built for programs that fail with a diagnostic.
+`scripts/exit_status_check.sh` covers that half.
+
 ## v0.1.441 — 2026-09-06
 
 **Durable computation, and the asymmetry that shapes it.**

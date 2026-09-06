@@ -50,6 +50,7 @@ wasm_args_used                   __lang_args               wasm       test/parit
 wasm_args_host_used              __lang_args_host          wasm       test/parity/args_empty.mere
 wasm_env_host_used               __lang_env_var_host       wasm       test/parity/env_var_host.mere
 wasm_time_used                   __lang_time               wasm       test/parity/arith.mere
+wasm_exit_used                   __lang_exit_h             wasm       test/parity/exit_zero.mere
 wasm_env_used                    __lang_env_var            component  test/component/env_var.mere
 wasm_stdin_used                  __lang_read_stdin         component  test/component/read_stdin.mere
 wasm_socket_ffi                  sock_instnet              component  test/component/socket_ffi_shape.mere
