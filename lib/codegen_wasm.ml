@@ -3269,6 +3269,8 @@ and emit_expr (e : Ast.expr) : unit =
     simd_used := true; emit_simd_v v_e; emit_instr "v128.any_true"; emit_instr "i64.extend_i32_u"
   | Ast.App ({ node = Ast.Var "u8x16_reduce_add"; _ }, v_e) ->
     simd_used := true; emit_simd_v v_e; emit_instr "call $mere_u8x16_reduce_add_v"
+  | Ast.App ({ node = Ast.Var "u8x16_first_true"; _ }, v_e) ->
+    simd_used := true; emit_simd_v v_e; emit_instr "call $mere_u8x16_first_true_v"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "__vec_get_unchecked"; _ }, vec_e); _ }, idx_e) ->
     (* Q-108: see Ast.range_version_program. *)
     vec_used := true;
@@ -7221,6 +7223,19 @@ let simd_runtime_wasm () =
     (local.set $p (global.get $__lang_bump))
     (v128.store offset=0 align=16 (local.get $p) (local.get $x))
     (i64.extend_i32_u (i32.load8_u (i32.add (local.get $p) (i32.wrap_i64 (local.get $i8))))))
+  (func $mere_u8x16_first_true_v (param $x v128) (result i64)
+    (local $m i32)
+    ;; v0.1.435: i8x16.bitmask reads each lane's HIGH BIT, and the question here
+    ;; is whether the lane is non-zero -- 0x01 is a true lane with its high bit
+    ;; clear. So the mask is built from "lane == 0" and inverted, and the answer
+    ;; is the count of trailing zeros in it.
+    (local.set $m
+      (i32.and (i32.xor (i8x16.bitmask (i8x16.eq (local.get $x) (i8x16.splat (i32.const 0))))
+                        (i32.const -1))
+               (i32.const 65535)))
+    (if (result i64) (i32.eqz (local.get $m))
+      (then (i64.const -1))
+      (else (i64.extend_i32_u (i32.ctz (local.get $m))))))
   (func $mere_u8x16_reduce_add_v (param $x v128) (result i64)
     (local $y v128)
     (local.set $y (i32x4.extadd_pairwise_i16x8_u (i16x8.extadd_pairwise_i8x16_u (local.get $x))))

@@ -1559,7 +1559,8 @@ let simd_result_ops = [ "f64x2_splat"; "f64x2_make"; "f64x2_add"; "f64x2_sub"; "
                         "u8x16_and"; "u8x16_or"; "u8x16_xor"; "u8x16_sub_sat"; "u8x16_eq"; "u8x16_swizzle";
                         "u8x16_shr"; "u8x16_shift_in" ]
 let simd_scalar_ops = [ "f64x2_extract"; "f64x2_reduce_add"; "f64x2_store"; "__f64x2_store_unchecked";
-                        "u8x16_extract"; "u8x16_any_true"; "u8x16_reduce_add" ]
+                        "u8x16_extract"; "u8x16_any_true"; "u8x16_reduce_add";
+                        "u8x16_first_true" ]
 let simd_head (e : expr) : string option =
   let h, _ = rv_spine e in
   match h.node with

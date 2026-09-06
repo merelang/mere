@@ -1,0 +1,30 @@
+// v0.1.435: u8x16_first_true — the lowest non-zero lane, or -1.
+//
+// The op set for u8x16 was derived from one algorithm (the UTF-8 validator),
+// which only ever asks "did anything match" and "how many": `any_true` and
+// `reduce_add`. A search has to know WHERE, and without that a matching block
+// costs sixteen scalar loads -- enough that a SIMD prefilter loses to the
+// scalar loop once hits are dense.
+//
+// The cases that separate the three plausible lowerings: an empty vector
+// (-1 rather than 0 or 16), a lane that is non-zero with its HIGH BIT CLEAR
+// (a raw movemask answers -1 here, which is the wrong answer), the last lane
+// (15, not 16 and not -1), and the shape it is actually used in,
+// `first_true (eq a b)`.
+let zero = u8x16_splat 0;
+let ones = u8x16_splat 1;                       // non-zero, high bit clear
+let hi = u8x16_splat 128;                       // high bit set
+// `shift_in prev cur k` = the last k bytes of prev, then the first 16-k of
+// cur. So this one puts a single non-zero byte in lane 0 ...
+let first = u8x16_shift_in ones zero 1;
+// ... and this one puts it in lane 15, which is the case that separates "the
+// last lane" from "no lane at all" -- both would be a bare 16 or -1 confusion.
+let last = u8x16_shift_in zero ones 15;
+
+let _ = print ("empty " ++ str_of_int (u8x16_first_true zero)) in
+let _ = print ("low-bit " ++ str_of_int (u8x16_first_true ones)) in
+let _ = print ("high-bit " ++ str_of_int (u8x16_first_true hi)) in
+let _ = print ("first-lane " ++ str_of_int (u8x16_first_true first)) in
+let _ = print ("last-lane " ++ str_of_int (u8x16_first_true last)) in
+let _ = print ("eq-hit " ++ str_of_int (u8x16_first_true (u8x16_eq ones ones))) in
+print ("eq-miss " ++ str_of_int (u8x16_first_true (u8x16_eq ones hi)))

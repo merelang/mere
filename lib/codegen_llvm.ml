@@ -4750,7 +4750,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i32 @mere_vec_float_f64x2_store%s(ptr %s, i64 %s, <2 x double> %s)" r sfx av iv xv);
     "0"
-  | Ast.App ({ node = Ast.Var ("u8x16_any_true" | "u8x16_reduce_add" as op); _ }, v_e) ->
+  | Ast.App ({ node = Ast.Var ("u8x16_any_true" | "u8x16_reduce_add" | "u8x16_first_true" as op); _ }, v_e) ->
     simd_used_llvm := true;
     let vv = emit_expr env v_e in
     let r = fresh_reg () in
@@ -9363,6 +9363,7 @@ let simd_runtime_llvm =
       "@.msg_u8x16_shift_in = private constant [48 x i8] c\"u8x16_shift_in: shift %lld out of range 0..%lld\\00\"";
       "declare <16 x i8> @llvm.usub.sat.v16i8(<16 x i8>, <16 x i8>)";
       "declare i8 @llvm.vector.reduce.or.v16i8(<16 x i8>)";
+      "declare i16 @llvm.cttz.i16(i16, i1)";
       "declare i16 @llvm.vector.reduce.add.v16i16(<16 x i16>)";
       "define <16 x i8> @mere_u8x16_sub_sat(<16 x i8> %a, <16 x i8> %b) {";
       "entry:";
@@ -9442,6 +9443,22 @@ let simd_runtime_llvm =
       "  %o = call i8 @llvm.vector.reduce.or.v16i8(<16 x i8> %v)";
       "  %nz = icmp ne i8 %o, 0";
       "  ret i1 %nz";
+      "}";
+      (* v0.1.435: the index of the first non-zero lane, or -1. The comparison
+         against zero is what makes this "non-zero lane" rather than "lane with
+         its high bit set", which is what a raw movemask would answer. *)
+      "define i64 @mere_u8x16_first_true(<16 x i8> %v) {";
+      "entry:";
+      "  %nz = icmp ne <16 x i8> %v, zeroinitializer";
+      "  %bm = bitcast <16 x i1> %nz to i16";
+      "  %none = icmp eq i16 %bm, 0";
+      "  br i1 %none, label %L_none, label %L_some";
+      "L_some:";
+      "  %t = call i16 @llvm.cttz.i16(i16 %bm, i1 true)";
+      "  %r = zext i16 %t to i64";
+      "  ret i64 %r";
+      "L_none:";
+      "  ret i64 -1";
       "}";
       "define i64 @mere_u8x16_reduce_add(<16 x i8> %v) {";
       "entry:";
