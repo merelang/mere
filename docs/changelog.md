@@ -4,6 +4,43 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.440 — 2026-09-06
+
+**What it costs to bound an incremental cache with the tool the language
+already has.** `contrib/inc` holds every superseded value forever,
+because the default region does not give memory back --
+`test/inc/agg.mere` retains about 756 bytes per edit where the useful
+change is roughly 200. `region R loop` is the answer the language
+offers: deep-copy the carry into a fresh arena every N edits, release the
+old one whole. `test/inc/agg_region.mere` carries the entire engine
+through one.
+
+1024 leaves, 2000 edits, same answer either way:
+
+| | cumulative allocation | peak arena |
+|---|---|---|
+| the engine, no region | 2.16 MB, **none of it returned** | — |
+| `region R loop`, one generation | 1.67 MB | 3.1 MB |
+| every 500 edits | 3.07 MB | 1.0 MB |
+| every 100 edits | 10.5 MB | 1.0 MB |
+| every 25 edits | **38.6 MB** | 1.0 MB |
+
+**The construct is priced by the live set, and here the live set is the
+whole cache.** Reclaiming four times as often costs nearly four times the
+allocation, because each generation copies everything that is still
+alive, and in an incremental cache everything is still alive -- the
+garbage from one edit is two strings. `benchmarks/churn` is the same
+construct on the opposite shape (a bounded live set, unbounded garbage)
+and pays a 1.44x premium for 20x less resident; this shape pays 18x at
+one generation per 25 edits.
+
+That is not a bug in either. It is the trade the construct offers,
+stated in both directions now that both shapes have been measured.
+
+`scripts/inc_check.sh` checks only that the carried engine still computes
+the right answer, on interp and compiled. The price above is a
+measurement, not a threshold to guard.
+
 ## v0.1.439 — 2026-09-06
 
 **A command component ends through wasi, and the status it can carry is
