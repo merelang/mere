@@ -918,6 +918,7 @@ satisfy it and hide the very row it was describing.
 | `u8x16_shift_in` | `u8x16 -> u8x16 -> int -> u8x16` | `prev cur k`: the last k bytes of prev, then the first 16-k of cur |
 | `u8x16_any_true` | `u8x16 -> bool` | any lane non-zero |
 | `u8x16_reduce_add` | `u8x16 -> int` | the lanes summed as integers (0..4080) |
+| `u8x16_first_true` | `u8x16 -> int` | the lowest lane that is non-zero, or -1. Non-zero, not "high bit set" -- `u8x16_first_true (u8x16_eq a b)` is the first lane where they match. **Not on the RV32IM/RV64IM backends** (the two RVV instructions it needs, `vmsne.vi` and `vfirst.m`, are outside the emulator's subset); it is refused there by name |
 
 **`Vec` — the rest of the family** (`vec_new` / `push` / `get` / `set` / `len` / `iter` / `map` / `filter` / `fold` / `sort` / `to_list` / `to_owned` are covered in language-reference and the tutorial):
 

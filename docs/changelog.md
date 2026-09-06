@@ -4,6 +4,52 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.435 — 2026-09-06
+
+**`u8x16_first_true` — the lowest non-zero lane, or -1.** The `u8x16`
+operation set was derived from one algorithm, the UTF-8 validator, which
+only ever asks whether anything matched (`any_true`) and how many
+(`reduce_add`). It never needs to know *which* lane, so nothing returned
+a position -- and a second consumer immediately does: a literal
+prefilter, the loop a grep runs before trying the regex, has to know
+where the candidate is.
+
+Measured on a 2 MiB buffer, finding every occurrence of one byte (best
+of three, seconds):
+
+| one hit every | scalar | u8x16 + scalar rescan | u8x16 + `first_true` |
+|---|---|---|---|
+| 4096 B | 0.69 | 0.10 | 0.08 |
+| 256 B | 0.79 | 0.12 | 0.10 |
+| 64 B | 0.74 | 0.20 | 0.13 |
+| 32 B | 0.77 | 0.31 | 0.19 |
+| 16 B | 0.86 | 0.52 | 0.68 |
+
+Without a lane index a matching block costs up to sixteen scalar loads,
+so the fallback degrades toward the scalar loop exactly as hits get
+denser -- and at one hit per 16 bytes, where every block matches, the
+vector work stops paying at all and `first_true` is the slowest of the
+three. That last row is the boundary, and it is in the table rather than
+left out.
+
+The semantics is **non-zero**, not "high bit set", which is what a raw
+movemask answers: a lane holding 1 is true here. `u8x16_eq` produces
+0xFF lanes so the common `first_true (u8x16_eq a b)` is unaffected,
+but every other producer would have been. C uses two 64-bit words and a
+trailing-zero count on little-endian targets and a lane loop elsewhere;
+LLVM compares against zero and counts trailing zeros of the resulting
+mask; Wasm builds the mask from "lane == 0" and inverts it, because
+`i8x16.bitmask` is a high-bit instruction.
+
+**Not on the RISC-V backends.** The lowering is two RVV instructions
+(`vmsne.vi` then `vfirst.m`), both outside the subset the emulator
+implements; the backend refuses the name with the message it already
+gives for a builtin it cannot lower.
+
+`test/parity/simd_first_true.mere` covers the empty vector, a lane that
+is non-zero with its high bit clear, lane 0, lane 15, and both outcomes
+of the `eq` shape. Parity is 158 programs.
+
 ## v0.1.434 — 2026-09-06
 
 **`exit n` ends the program with n on the Wasm backend too (Q-114).** The
