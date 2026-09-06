@@ -116,6 +116,11 @@ compiled ones, for that reason.
 | `binarytrees` | allocate a great many small nodes, walk them, discard them | The row that **splits**. Bump allocation with no collector to trace should win on time; never handing anything back should lose on footprint. `bench_region.mere` is the language's answer and here it costs nothing — a block copies only its result out. `bench_pertree.mere` draws the same block around one tree instead of one batch: 5.8 MiB, the Rust row's footprint, at a third of the C row's wall clock. |
 | `matmul` | dense double-precision multiply-accumulate, 512x512 | The **floating-point** axis, which nothing else here touches — and the one where getting the implementations to agree was most of the work. Expected to tie C, and exists to notice the day it stops. |
 | `json` | parse with the ecosystem's parser, then walk the whole tree | A **different question**: `contrib/json` is written in Mere, and every other row's parser is native code shipped with its runtime. "A language plus what its ecosystem hands you" is a real question, and not the one the rest of the suite answers. Read it twice — subtract startup and the ordering changes. |
+| `axpy` | `c[i] = c[i] + alpha * a[i]` over two `Vec[R, float]`s, 2,000,000 elements, 100 passes | The row that forced **range-check versioning** (v0.1.420). With a bounds check on every element clang could not vectorize it and Mere was 2.8x C; with the whole index range checked once before the loop, the passes tie C. |
+| `axpy_simd` | the same axpy with explicit `f64x2` lanes | Explicit lanes where the auto-vectorizer already does the job. Expected to **lose** to `axpy`, and it does: two lanes per step against the eight the vectorizer unrolls to. |
+| `bytecount` | count a byte over a `bytes` buffer | The byte-lane twin of `axpy` for range-check versioning. Expected to **tie with C**, and it does. |
+| `utf8valid` | RFC 3629 validation, one state machine over `bytes_get`, 4 MiB, 20 passes | The scalar baseline for explicit SIMD; the C row is the same machine. |
+| `utf8valid_simd` | the same validation with `u8x16` lanes (Keiser-Lemire), 16 bytes per step | The row that **justifies explicit SIMD**: what no auto-vectorizer builds from a state machine. Against `utf8valid` it is lanes against no lanes in one language; against the scalar C row it is Mere with lanes against what a C programmer writes without intrinsics. |
 
 Every benchmark's `MANIFEST` carries a `claim` that says what the workload is
 supposed to show, including the ones where the answer is unflattering. A suite
@@ -125,6 +130,39 @@ Where a reference implementation is deliberately absent, the MANIFEST says so
 and why — `wordfreq` has no C row because hand-rolling a hash table in C would
 compare hash tables rather than languages, and Rust's `HashMap` already answers
 the systems-language question.
+
+## The SIMD rows: lanes against no lanes
+
+The five rows above were added in v0.1.420-424 to answer one question with
+numbers: what does SIMD buy Mere, and where? Measured with
+`python3 benchmarks/run.py <row> --reps 3` on the development machine
+(macOS/arm64, Apple clang 21); the C rows are compiled by the same clang at
+`-O2`.
+
+| row | scalar Mere | Mere with lanes | hand-written C | what it says |
+|---|---|---|---|---|
+| `axpy` (float, per element) | 2.8x C with a bounds check per element (v0.1.415) | auto-vectorized after range-check versioning: 83 ms (v0.1.421) | 73 ms | the passes tie C at 50 ms each side; the 10 ms Mere carries is building the two Vecs by `vec_push`. Of the 2.8x, SIMD was 1.3-1.4x and the rest was the shape of the bounds check |
+| `bytecount` (byte lane) | 23 ms | 21 ms | 21 ms | a tie: the shape the auto-vectorizer does best |
+| `matmul` 512 | 144 ms | 144 ms | 132 ms | unchanged: without fast-math clang does not vectorize a floating-point reduction, so nothing here helps |
+| `axpy_simd` (explicit `f64x2`) | the auto-vectorized `axpy`, 0.08 s | 0.12 s (129 ms by `run.py`) | 0.07 s | a loss: two lanes per step against the vectorizer's VF2 x IC4 |
+| `utf8valid` (4 MiB x 20 passes) | 72 ms | 29 ms (`utf8valid_simd`) | 54 ms (scalar) | the justification: 2.5x the scalar Mere machine and 1.9x scalar C, about 4 GB/s. A single unrepeated run read 0.02 s / 0.06 s / 0.05 s |
+| the same validator on the Mere-written RV32 core (64 KiB x 20 passes, memu) | 2.75 s | 1.85 s (RVV 1.0, v0.1.426) | - | 1.5x on a CPU the language wrote for itself |
+| `utf8valid_simd` on RV32, boxes vs registers (64 KiB, v0.1.430) | 43 box stores, 0.90-1.0 s | 16 box stores, 0.80-0.84 s | - | about 10%; memu interprets, so this is instruction count |
+
+Wasm has no optimizer behind it (the text is assembled and run as written), so
+its SIMD numbers are recorded as memory rather than time: keeping SIMD values
+unboxed (v0.1.429) moved the out-of-memory threshold of `axpy_simd` from 20,000
+to 50,000 elements and of an in-program UTF-8 validation from 64 KiB to 256 KiB
+of input. A long-running SIMD loop still allocates per iteration for the values
+it carries between iterations.
+
+What is not measured here: the LLVM backend on the UTF-8 rows (it has no
+lowering for `read_bytes`, so those two `bench.mere` files do not run under
+`-ll`), Wasm on time, and a pinned RVV-on / RVV-off pair on the RISC-V core.
+The summary the numbers support: **auto-vectorization is free once the bounds
+checks are hoisted, and it wins wherever it applies; explicit lanes pay only
+where no vectorizer can build the loop -- byte-lane table lookups like UTF-8
+validation -- and lose where one can.**
 
 ## Reading a sweep
 
