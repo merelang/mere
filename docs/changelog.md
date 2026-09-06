@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.439 — 2026-09-06
+
+**A command component ends through wasi, and the status it can carry is
+one bit (Q-114, second half).** v0.1.434 gave the ordinary Wasm build a
+host import for `exit`; a component has no `env` host, so it kept
+trapping. A command component does have a wasi adapter under it, and
+`wasi_snapshot_preview1.proc_exit` now ends it.
+
+What that buys is exactly `exit 0`, and the reason is in the component's
+own WIT: `wasi:cli/exit` is `exit: func(status: result)` -- success or
+failure, with no number in it. So `exit 0` gives 0 and `exit 7` gives 1.
+The 1 is the interface's limit, not this compiler's, and
+`scripts/exit_status_check.sh` pins both values with that reason written
+next to them, so a future wasi that carries a status turns the gate red
+instead of passing quietly.
+
+Two shapes still trap, and both are honest. A **reactor** component has
+no adapter and no process to end. And a program whose main expression IS
+the exit -- `... in exit 7`, whose type is `'a` -- is emitted as a
+reactor rather than a command, because the command shape is only built
+for `unit` and `int`; `exit` has to be a statement to reach the wasi
+path.
+
+Poisoned by putting the trap back: both component legs report 134.
+
 ## v0.1.438 — 2026-09-06
 
 **`region R { }` does not return memory on the LLVM backend, and now
