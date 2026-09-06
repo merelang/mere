@@ -54,10 +54,45 @@ trap 'rm -rf "$TMP"' EXIT
 fail=0
 checked=0
 
-peak() {
-  # maximum resident set size in bytes, via the shell's own time(1)
-  /usr/bin/time -l "$@" 2>&1 >/dev/null | awk '/maximum resident/{print $1}'
+# Peak RSS in BYTES, measured by a wrapper this gate compiles itself.
+#
+# /usr/bin/time is not a portable answer: its resident-set flag is -l on the
+# BSDs and -v on GNU, the label differs with it, and the Ubuntu image the CI
+# runs on does not ship the binary at all -- which is how the first version of
+# this gate passed here and failed there. getrusage(RUSAGE_CHILDREN) is POSIX
+# and needs no package; the only platform difference left is the UNIT of
+# ru_maxrss, and that is a compile-time question the C file answers rather than
+# something the shell guesses.
+cat > "$TMP/peak.c" <<'CEOF'
+#include <stdio.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+  if (argc < 2) return 2;
+  pid_t p = fork();
+  if (p == 0) {
+    freopen("/dev/null", "w", stdout);
+    execv(argv[1], &argv[1]);
+    _exit(127);
+  }
+  int st = 0;
+  if (waitpid(p, &st, 0) < 0) return 2;
+  struct rusage ru;
+  if (getrusage(RUSAGE_CHILDREN, &ru) < 0) return 2;
+#ifdef __APPLE__
+  long long bytes = (long long)ru.ru_maxrss;
+#else
+  long long bytes = (long long)ru.ru_maxrss * 1024;
+#endif
+  fprintf(stderr, "%lld\n", bytes);
+  return WIFEXITED(st) ? WEXITSTATUS(st) : 1;
 }
+CEOF
+$CC -O1 -w "$TMP/peak.c" -o "$TMP/peak" 2>/dev/null || {
+  echo "FAIL region_reclaim: could not build the peak-RSS wrapper"; exit 1; }
+
+peak() { "$TMP/peak" "$@" 2>&1 >/dev/null | tail -1; }
 answer() { "$@" 2>/dev/null | head -1; }
 
 "$MERE" -c "$SRC" > "$TMP/c.c" 2>/dev/null && $CC -O2 -w "$TMP/c.c" -o "$TMP/cbin" 2>/dev/null || {
@@ -80,7 +115,7 @@ checked=$((checked + 1))
 c_small="$(peak "$TMP/cbin" $SMALL $DEPTH)"
 c_big="$(peak "$TMP/cbin" $BIG $DEPTH)"
 if [ -z "$c_small" ] || [ -z "$c_big" ]; then
-  echo "FAIL region_reclaim: could not read peak RSS (is /usr/bin/time -l available?)"
+  echo "FAIL region_reclaim: the peak-RSS wrapper returned nothing"
   fail=1
 else
   if [ "$(( c_big * 10 ))" -gt "$(( c_small * 20 ))" ]; then
