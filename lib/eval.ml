@@ -1662,6 +1662,16 @@ let builtin_u8x16_reduce_add =
   V_builtin ("u8x16_reduce_add", fun v ->
     let b = u8x16_of "u8x16_reduce_add" v in
     V_int (Bytes.fold_left (fun acc ch -> acc + Char.code ch) 0 b))
+(* v0.1.435: the index of the first non-zero lane, or -1. `any_true` says a
+   block matched and `reduce_add` says how many; neither says WHERE, and a
+   search needs where. Without it a hit block costs sixteen scalar loads, which
+   is why a SIMD prefilter LOSES to the scalar loop once hits are dense. *)
+let builtin_u8x16_first_true =
+  V_builtin ("u8x16_first_true", fun v ->
+    let b = u8x16_of "u8x16_first_true" v in
+    let rec go i = if i >= 16 then -1
+                   else if Bytes.get b i <> '\000' then i else go (i + 1) in
+    V_int (go 0))
 let u8x16_range who len i =
   if i < 0 || i + 16 > len then
     raise (Eval_error (Loc.dummy,
@@ -3608,6 +3618,7 @@ let initial_env : env =
     ("u8x16_shr", ref builtin_u8x16_shr);
     ("u8x16_shift_in", ref builtin_u8x16_shift_in);
     ("u8x16_any_true", ref builtin_u8x16_any_true);
+    ("u8x16_first_true", ref builtin_u8x16_first_true);
     ("u8x16_reduce_add", ref builtin_u8x16_reduce_add);
     ("vec_reverse", ref builtin_vec_reverse);
     ("vec_concat",  ref builtin_vec_concat);

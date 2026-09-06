@@ -3279,6 +3279,7 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "f64x2_splat" -> Printf.sprintf "mere_f64x2_splat(%s)" (emit_expr arg)
      | Ast.Var "f64x2_reduce_add" -> Printf.sprintf "mere_f64x2_reduce_add(%s)" (emit_expr arg)
      | Ast.Var "u8x16_any_true" -> Printf.sprintf "mere_u8x16_any_true(%s)" (emit_expr arg)
+     | Ast.Var "u8x16_first_true" -> Printf.sprintf "mere_u8x16_first_true(%s)" (emit_expr arg)
      | Ast.Var "u8x16_reduce_add" -> Printf.sprintf "mere_u8x16_reduce_add(%s)" (emit_expr arg)
      | Ast.Var "u8x16_from_bytes" -> bytes_used := true; Printf.sprintf "__lang_u8x16_from_bytes(%s)" (emit_expr arg)
      | Ast.App ({ node = Ast.Var ("u8x16_load" | "__u8x16_load_unchecked" as name); _ }, b_e) ->
@@ -12031,6 +12032,22 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "}";
       "static inline int mere_u8x16_any_true(mere_u8x16 v) {";
       "  unsigned long long lo, hi; memcpy(&lo, &v, 8); memcpy(&hi, (const char*)&v + 8, 8); return (lo | hi) != 0;";
+      "}";
+      (* v0.1.435: the index of the first non-zero lane, or -1. The bytes of the
+         vector are read as two 64-bit words and the count of trailing zero BITS
+         divided by 8 is the lane -- which is only the first lane on a
+         little-endian target, so the portable loop is kept for anything else
+         rather than assumed away. *)
+      "static inline long long mere_u8x16_first_true(mere_u8x16 v) {";
+      "#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__";
+      "  unsigned long long lo, hi; memcpy(&lo, &v, 8); memcpy(&hi, (const char*)&v + 8, 8);";
+      "  if (lo) return (long long)(__builtin_ctzll(lo) >> 3);";
+      "  if (hi) return (long long)(8 + (__builtin_ctzll(hi) >> 3));";
+      "  return -1;";
+      "#else";
+      "  for (int i = 0; i < 16; i++) if (v[i]) return (long long)i;";
+      "  return -1;";
+      "#endif";
       "}";
       "static inline long long mere_u8x16_reduce_add(mere_u8x16 v) {";
       "  long long s = 0; for (int i = 0; i < 16; i++) s += v[i]; return s;";

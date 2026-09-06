@@ -2439,6 +2439,7 @@ let initial_env : env =
     ("u8x16_shift_in",   mono (Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TyArrow (Ast.TyInt, Ast.TySimd Ast.U8x16)))));
     ("u8x16_any_true",   mono (Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TyBool)));
     ("u8x16_reduce_add", mono (Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TyInt)));
+    ("u8x16_first_true",  mono (Ast.TyArrow (Ast.TySimd Ast.U8x16, Ast.TyInt)));
   ]
 
 let rec infer (env : env) (e : Ast.expr) : Ast.ty =
