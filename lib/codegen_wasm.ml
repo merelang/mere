@@ -363,6 +363,11 @@ let file_pio_used = ref false
    (--component on a unit/CLI program). Command components get real WASI via
    the wasi_snapshot_preview1 adapter; args() returns the actual argv. *)
 let wasm_component_command = ref false
+
+(* True while emitting ANY component (command or reactor). The `env` host
+   imports are dropped in that shape, so an emission that would reach for one
+   has to take its other path. *)
+let wasm_component_any = ref false
 let wasm_args_host_used = ref false
 let wasm_run_host_used = ref false
 let wasm_env_host_used = ref false
@@ -371,6 +376,15 @@ let wasm_args_used = ref false  (* command component called args() -> emit $__la
 let wasm_time_used = ref false  (* command component called time() -> real $__lang_time via wasi clock_time_get *)
 let wasm_env_used = ref false  (* command component called env_var() -> emit $__lang_env_var + wasi environ imports *)
 let wasm_stdin_used = ref false  (* command component called read_stdin() -> emit $__lang_read_stdin + wasi fd_read import *)
+(* v0.1.434 (Q-114): the program called `exit` and this module gets its host
+   functions from `env` (the ordinary Wasm build, not a component). Wasm has no
+   process, so the status has to leave through the host; without this the
+   emission was a bare `unreachable`, which every host reports as a trap -- so
+   `exit 0` returned 1, and so did `exit 3`. Gated on use, so a page whose
+   program never calls exit needs no new import. Component mode keeps the trap:
+   its env imports are dropped and routing exit through wasi `proc_exit` is a
+   separate question (Q-114). *)
+let wasm_exit_used = ref false
 (* Phase 3 sockets: a command component that declares the mhttp-style socket /
    raw-memory externs (tcp_connect/read/write/close, mem_alloc/get_u8/copy_str/
    to_str, str_ptr) gets in-module _h helpers backed by p2 wasi:sockets +
@@ -3087,10 +3101,22 @@ and emit_expr (e : Ast.expr) : unit =
 
   | Ast.App ({ node = Ast.Var "exit"; _ }, code_e)
     when not (user_shadows_wasm "exit") ->
-    (* no process to exit — evaluate the code for effect, then trap. *)
-    emit_expr code_e;
-    emit_instr "drop";
-    emit_instr "unreachable"
+    (* v0.1.434 (Q-114): the status leaves through the host, which owns a
+       process. The `unreachable` after the call is what ends this function:
+       the import does not return, and the block has to be well typed either
+       way. In component mode there is no `env` host, so the old drop-and-trap
+       stays -- and with it the old answer. *)
+    if !wasm_component_any then begin
+      emit_expr code_e;
+      emit_instr "drop";
+      emit_instr "unreachable"
+    end else begin
+      wasm_exit_used := true;
+      emit_expr code_e;
+      emit_instr "i32.wrap_i64";
+      emit_instr "call $__lang_exit_h";
+      emit_instr "unreachable"
+    end
   | Ast.App ({ node = Ast.Var "read_file"; _ }, path_e) ->
     (* Phase 26.5: WASI-lite — read_file delegated to host import. *)
     file_io_used := true;
@@ -9193,11 +9219,13 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   debug_fn_lines := [];
   wasm_component_command :=
     component && (match Ast.walk main_ty with Ast.TyUnit | Ast.TyInt -> true | _ -> false);
+  wasm_component_any := component;
   wasm_args_used := false;
   wasm_args_host_used := false;
   wasm_time_used := false;
   wasm_env_used := false;
   wasm_stdin_used := false;
+  wasm_exit_used := false;
   wasm_socket_ffi := false;
   print_no_nl_used := false;
   print_err_used := false;
@@ -9837,6 +9865,9 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     ^ (if !file_bytes_io_used then
       "  (import \"env\" \"read_file_bytes\" (func $read_file_bytes_h (param i32) (result i32)))\n\
       \  (import \"env\" \"write_file_bytes\" (func $write_file_bytes_h (param i32) (param i32) (result i32)))\n"
+    else "")
+    ^ (if !wasm_exit_used then
+      "  (import \"env\" \"exit_proc\" (func $__lang_exit_h (param i32)))\n"
     else "")
     ^ (if !wasm_args_host_used then
       "  (import \"env\" \"arg_count\" (func $arg_count_h (result i32)))\n\

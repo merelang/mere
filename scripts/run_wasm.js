@@ -385,6 +385,14 @@ const wasmPath = process.argv[2];
       // the host's half of the hole was invisible behind the compiler's.
       return writeStr(v);
     },
+    // v0.1.434 (Q-114): the module has no process; `exit n` calls this and
+    // does not come back. Until now `exit` was a bare trap here, so a program
+    // that ended with `exit 0` reported failure and one that chose a status
+    // reported 1. stdout is written synchronously by env.puts, so there is
+    // nothing buffered to flush before leaving.
+    exit_proc: (code) => {
+      process.exit(code | 0);
+    },
     setenv: (namePtr, valuePtr, _overwrite) => {
       const name = readCStr(namePtr);
       const value = readCStr(valuePtr);
