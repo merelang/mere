@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.437 — 2026-09-06
+
+**A program whose progress survives being killed.** The pieces existed --
+`contrib/store/kvlog.mere` is an append-only store with an fsync per
+write, and its replay already stops at a record torn half-way through an
+append -- but nothing had put them together, so "what does a crash cost
+here" had no answer. `test/durable/jobs.mere` runs N independent jobs,
+appends each finished one, and on restart replays the log and skips what
+is already there. What is durable is the progress, not the computation: a
+job that was running when the process died runs again from its start.
+
+`scripts/durable_check.sh` kills it with SIGKILL, repeatedly, and
+requires three things rather than one. The resumed answer must equal an
+uninterrupted reference run. **At least one attempt must have been killed
+while it was still working** -- a kill that lands after the program
+finished proves nothing, and without this check a machine fast enough to
+finish inside the delay would report success while testing nothing. And
+the same kill schedule, run against the same program with its log turned
+off, must **never** finish; if it does, the schedule is not interrupting
+anything and the first two checks were passing for the wrong reason.
+
+Two poisons: never recording progress, and recording only every other
+job. Both turn the gate red.
+
 ## v0.1.436 — 2026-09-06
 
 **`contrib/inc` — recompute only what changed.** Every program in this
