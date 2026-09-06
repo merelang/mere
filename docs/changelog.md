@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.444 — 2026-09-06
+
+**`region_reclaim_check` measured peak RSS with a tool the CI runner does
+not have.** It shelled out to `/usr/bin/time -l`, which is the BSD
+spelling; GNU wants `-v` and labels the line differently, and the Ubuntu
+image the gates run on **does not ship the binary at all**. Green here,
+red there, on the first push after the gate was added.
+
+It now compiles its own wrapper around
+`getrusage(RUSAGE_CHILDREN)` — POSIX, no package — and the one platform
+difference that remains, whether `ru_maxrss` is bytes or kilobytes, is a
+compile-time question the C file answers instead of something the shell
+guesses. Checked on both: the same program reports 18.2 / 68.5 / 269.8 MB
+for a 16 / 64 / 256 MB working set on macOS and on the Linux CI image,
+within a few KB of each other.
+
+The gate's own "only 2 checks ran" guard is what turned this into a red
+CI line rather than a pass that measured nothing.
+
+_(The first attempt to verify the Linux side reported 3.2 MB for a 256 MB
+program, which looked like a broken wrapper and was a broken test: the
+`memset` into a `malloc` nothing read had been optimised away. The
+instrument was right and the subject was not.)_
+
 ## v0.1.443 — 2026-09-06
 
 **The LLVM backend reclaims region blocks: 316 MB becomes 5.8 MB
