@@ -36,7 +36,7 @@ where. On this workload, saying where beats both the collector and hand-written 
 Larger programs written in Mere, each of which forced something into the language:
 
 - [mere-ruby](https://github.com/284km/mere-ruby) — an interpreter for a subset of Ruby
-  (40,000 lines of Mere), checked against `ruby` itself on 162 corpus programs. It runs on
+  (45,000 lines of Mere), checked against `ruby` itself on a 190-program corpus. It runs on
   the RISC-V backend, on the CPU below, at both 32 and 64 bits.
 - [memu](https://github.com/284km/memu) — RV32IM and RV64IM cores written in Mere; the
   RISC-V backend's own machines, diffed against QEMU (`scripts/qemu_virt.sh`). The
@@ -154,8 +154,9 @@ Former tentative name: `lang-ml` (finalized as Mere on 2026-06-19).
 | Modules | `module M { ... }` (nestable), `M.f` references, internal short-name rewrite, `open M;`, type/record decls allowed inside modules |
 | import | `import "./path";` pulls in another file (importer-relative + canonical) |
 | Collections | `Vec[R, T]` / `OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]` + higher-order API (iter/map/fold/filter/to_list/to_owned) — **insertion-order Map iter** (Phase 27.1) |
-| stdlib | 90+ builtins: I/O / conversion / strings (`str_split` / `str_join` / `str_compare` / `str_index_of` etc.) / numerics / polymorphic helpers / float / errors / Logger / Metrics |
-| codegen | C / LLVM IR / Wasm (WAT) backends at parity, plus a fifth that emits **RV32IM machine code directly** — no assembler, no linker, and `--bare` for no operating system either ([bare-metal.md](docs/bare-metal.md)) + Wasm runtime validation (details in [codegen.md](docs/codegen.md)). Q-010 collections (4 kinds) + higher-order API + conversions + `len` ad-hoc poly + per-instantiation specialization of polymorphic user let-rec (Phase 23.3 / 25.5 / 26.4) + inner-fn lifting (Phase 25.3 / 26.3) + top-level value bindings globalized to file scope (Phase 30.2). |
+| stdlib | 220+ builtins: I/O / conversion / strings (`str_split` / `str_join` / `str_compare` / `str_index_of` etc.) / numerics / polymorphic helpers / float / errors / Logger / Metrics |
+| codegen | C / LLVM IR / Wasm (WAT) backends at parity, plus a fifth that emits **RV32IM and RV64IM machine code directly** — no assembler, no linker, and `--bare` for no operating system either ([bare-metal.md](docs/bare-metal.md)) + Wasm runtime validation (details in [codegen.md](docs/codegen.md)). Q-010 collections (4 kinds) + higher-order API + conversions + `len` ad-hoc poly + per-instantiation specialization of polymorphic user let-rec (Phase 23.3 / 25.5 / 26.4) + inner-fn lifting (Phase 25.3 / 26.3) + top-level value bindings globalized to file scope (Phase 30.2). |
+| SIMD | range-check versioning hoists a loop's bounds checks so clang vectorizes the emitted C, and 128-bit types `f64x2` / `u8x16` put lanes in your hands on every backend (`u8x16` on RISC-V through the V extension) — [simd.md](docs/simd.md) has what pays and what does not |
 | FFI | `extern fn <name>: <ty>;` calls libc functions from all 4 backends (interp + C / LLVM / Wasm). Curried multi-arg; types int / bool / str / unit (Phase 32). |
 | REPL | persistent env, multi-line input, `:type` `:env` `:show NAME` `:load FILE` `:reset` `:help` |
 | Error UX | Rust-style multi-line code frame, ANSI colors (TTY only), Levenshtein-based typo suggestions (including record fields and qualified names), type-conversion hints |
@@ -236,7 +237,7 @@ $ dune exec ./bin/mere.exe -e '
 - **[Stdlib reference](docs/stdlib-reference.md)** — builtin tables
 - **[Patterns / cookbook](docs/patterns.md)** — common idioms
 - **[Memory model](docs/memory-model.md)** — memory management options, region/view, current and future
-- **[Codegen](docs/codegen.md)** — three-backend (C / LLVM IR / Wasm) strategy + per-slice table
+- **[Codegen](docs/codegen.md)** — the compiled backends' shared strategy (C / LLVM IR / Wasm) + per-slice table; the RISC-V backend has its own page below
 - **[SIMD](docs/simd.md)** — the two paths (range-check versioning, and the `f64x2` / `u8x16` types), when lanes pay and when they do not, the measured rows
 - **[Language server](docs/lsp.md)** — `mere lsp`: diagnostics, hover, go to definition and completion in your editor, from the same check the compiler runs ([VS Code extension](https://github.com/merelang/mere-vscode))
 - **[Bare metal](docs/bare-metal.md)** — the RV32I backend: `--bare`, the memory map, raw memory as a capability, traps, tasks, a user process, and the debug map behind source-level debugging

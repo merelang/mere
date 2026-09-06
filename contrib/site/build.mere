@@ -430,7 +430,7 @@ let section_order = [
   ("Build something real",
     ["tutorial-rest-api", "tutorial-redis-client", "tutorial-type-inference"]),
   ("Reference", ["language-reference", "stdlib-reference", "patterns", "reserved-names"]),
-  ("Guides", ["memory-model", "packages", "db", "http-demos", "codegen"]),
+  ("Guides", ["memory-model", "packages", "db", "http-demos", "codegen", "simd", "bare-metal", "lsp"]),
   ("Project", ["changelog"])
 ];
 
