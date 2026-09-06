@@ -4,6 +4,42 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.438 — 2026-09-06
+
+**`region R { }` does not return memory on the LLVM backend, and now
+there is a number for it (Q-116).** The backend has no current region:
+every value allocation names `@__lang_default_region` however many region
+blocks are around it, and `region R { }` is a stack `alloca` that only
+explicitly region-typed things go into. It emits no per-type copy-out
+either -- 42 `__mcopy` sites on the C backend, none here -- because
+nothing it holds needed copying out.
+
+`test/regionreclaim/pertree.mere` builds a tree inside a region block and
+lets only a scalar out. At 100 iterations and depth 16:
+
+| backend | 40 iterations | 100 iterations | |
+|---|---|---|---|
+| C | 2.5 MB | 2.5 MB | reclaims (flat in the iteration count) |
+| Wasm | — | completes | reclaims (unreclaimed needs ~105 MB of a fixed 64 MiB) |
+| LLVM | 127 MB | 316 MB | **does not reclaim** |
+
+**All three print the same answer**, which is why the parity suite never
+saw this: parity compares what a program prints, and this is a difference
+in what it holds. The documentation was honest by omission --
+memory-model.md said "on the C backend" and its backend note named interp
+and Wasm -- but a limitation nobody states out loud and nobody measures is
+one a reader will assume away. It is now stated, with the measurement.
+
+`scripts/region_reclaim_check.sh` asserts C's flatness, Wasm's
+completion, and LLVM's growth. **The LLVM leg fails if the gap closes**,
+printing what to update, so the numbers above cannot go stale quietly.
+Every comparison is a ratio with a wide band, because peak RSS is
+quantised.
+
+Not fixed here. Giving the LLVM backend a current region plus a per-type
+copy-out is the C backend's v0.1.31 arc over again, and it wants to be
+its own.
+
 ## v0.1.437 — 2026-09-06
 
 **A program whose progress survives being killed.** The pieces existed --
