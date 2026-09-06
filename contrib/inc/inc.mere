@@ -1,0 +1,150 @@
+// contrib/inc/inc.mere — recomputing only what changed.
+//
+// Every program in this repository computes its answer in one pass. That is
+// the right shape for a compiler, a renderer or a report, and it is the shape
+// the region model is built for: allocate freely, answer, exit. This module is
+// for the other shape — a long-lived process that is asked the same question
+// again and again with a small edit in between, where computing the whole
+// answer each time is the cost being avoided.
+//
+// What it is: a cache with a declared dependency graph and an invalidation
+// walk. What it is NOT: a tracing engine. Dependencies are DECLARED
+// (`inc_declare node deps`) rather than recorded by watching a computation
+// read them. Tracing needs the computing function to call back into the
+// engine, which makes the engine higher-order and the consumer's compute
+// function a closure over the handle; that is a different design with a
+// different set of failures, and this one is the half that can be measured
+// first.
+//
+// Public API:
+//
+//   inc_new     : int -> Inc                    (the argument is ignored)
+//   inc_declare : Inc -> int -> int list -> unit    node reads these nodes
+//   inc_touch   : Inc -> int -> unit                an input changed
+//   inc_put     : Inc -> int -> str -> unit         store a computed value
+//   inc_peek    : Inc -> int -> str                 the cached value
+//   inc_is_dirty: Inc -> int -> bool
+//   inc_order   : Inc -> int list                   dirty nodes, dependencies first
+//   inc_recomputes : Inc -> int                     how many inc_put calls
+//
+// A handle is a tuple of containers rather than a record, because a record
+// would need a region parameter and a tuple infers one (the same reason
+// contrib/state/store.mere gives). Every helper takes the handle explicitly:
+// a `let rec` that captures a container is refused by the compiled backends
+// (contrib/store/kvlog.mere records the same constraint).
+//
+//   vals   : Map[R, int, str]       the cache
+//   dirty  : Map[R, int, int]       1 = must be recomputed
+//   deps   : Map[R, int, int list]  what each node reads
+//   rdeps  : Map[R, int, int list]  who reads each node -- the reverse edge is
+//                                   what makes invalidation cost the affected
+//                                   subgraph instead of the whole graph
+//   nodes  : Vec[R, int]            declaration order, so the graph can be walked
+//   stats  : Vec[R, int]            [0] = recomputations. The engine counts
+//                                   them, not the consumer: a number the
+//                                   subject reports about itself is the one
+//                                   thing a gate here cannot take on trust.
+
+let inc_new = fn (u: int) ->
+  let stats = vec_new () in
+  let _ = vec_push stats 0 in
+  (map_new (), map_new (), map_new (), map_new (), vec_new (), stats);
+
+// ---- accessors (the tuple is destructured in one place per field) --------
+
+let inc_vals = fn (g) -> match g with | (v, d, dp, rd, n, s) -> v;
+let inc_dirtymap = fn (g) -> match g with | (v, d, dp, rd, n, s) -> d;
+let inc_deps = fn (g) -> match g with | (v, d, dp, rd, n, s) -> dp;
+let inc_rdeps = fn (g) -> match g with | (v, d, dp, rd, n, s) -> rd;
+let inc_nodes = fn (g) -> match g with | (v, d, dp, rd, n, s) -> n;
+let inc_stats = fn (g) -> match g with | (v, d, dp, rd, n, s) -> s;
+
+let inc_recomputes = fn (g) -> vec_get (inc_stats g) 0;
+
+// ---- declaration --------------------------------------------------------
+
+let inc_add_rdep = fn (rd) -> fn (from: int) -> fn (to_: int) ->
+  let prev = if map_has rd from then map_get rd from else Nil in
+  map_set rd from (Cons (to_, prev));
+
+let inc_declare = fn (g) -> fn (node: int) -> fn (ds: int list) ->
+  let _ = map_set (inc_deps g) node ds in
+  let _ = if map_has (inc_vals g) node then () else vec_push (inc_nodes g) node in
+  let _ = map_set (inc_dirtymap g) node 1 in
+  let rd = inc_rdeps g in
+  let rec link = fn (l: int list) ->
+    match l with
+    | Nil -> ()
+    | Cons (d, rest) -> let _ = inc_add_rdep rd d node in link rest in
+  link ds;
+
+// ---- invalidation -------------------------------------------------------
+//
+// Marking a node dirty marks everyone who reads it, and so on. A node that is
+// already dirty stops the walk: without that, a diamond in the graph is
+// walked once per path into it, and a chain of diamonds is exponential.
+
+let rec inc_touch = fn (g) -> fn (node: int) ->
+  if map_has (inc_dirtymap g) node && map_get (inc_dirtymap g) node == 1 then ()
+  else
+    let _ = map_set (inc_dirtymap g) node 1 in
+    let rd = inc_rdeps g in
+    let readers = if map_has rd node then map_get rd node else Nil in
+    let rec go = fn (l: int list) ->
+      match l with
+      | Nil -> ()
+      | Cons (r, rest) -> let _ = inc_touch g r in go rest in
+    go readers;
+
+let inc_is_dirty = fn (g) -> fn (node: int) ->
+  map_has (inc_dirtymap g) node && map_get (inc_dirtymap g) node == 1;
+
+// ---- values -------------------------------------------------------------
+
+let inc_put = fn (g) -> fn (node: int) -> fn (v: str) ->
+  let _ = map_set (inc_vals g) node v in
+  let _ = map_set (inc_dirtymap g) node 0 in
+  let s = inc_stats g in
+  vec_set s 0 (vec_get s 0 + 1);
+
+let inc_peek = fn (g) -> fn (node: int) ->
+  if map_has (inc_vals g) node then map_get (inc_vals g) node else "";
+
+// ---- the order to recompute in ------------------------------------------
+//
+// Depth-first over the dirty nodes, following `deps`, emitting a node after
+// everything it reads. So a consumer that walks this list and calls inc_put
+// on each node always sees fresh values under it via inc_peek.
+//
+// `seen` is 1 while a node is on the stack and 2 once emitted; a node found
+// with 1 is a cycle, and a cycle is left out rather than diagnosed -- this
+// module has no error channel, and a consumer that declares one has a bug
+// this module cannot fix for it.
+
+let rec inc_visit = fn (g) -> fn (seen) -> fn (out) -> fn (node: int) ->
+  if map_has seen node then ()
+  else
+    let _ = map_set seen node 1 in
+    let ds = if map_has (inc_deps g) node then map_get (inc_deps g) node else Nil in
+    let rec go = fn (l: int list) ->
+      match l with
+      | Nil -> ()
+      | Cons (d, rest) ->
+        let _ = if inc_is_dirty g d then inc_visit g seen out d else () in
+        go rest in
+    let _ = go ds in
+    let _ = map_set seen node 2 in
+    vec_push out node;
+
+let inc_order = fn (g) ->
+  let seen = map_new () in
+  let out = vec_new () in
+  let ns = inc_nodes g in
+  let rec go = fn (i: int) ->
+    if i >= vec_len ns then ()
+    else
+      let node = vec_get ns i in
+      let _ = if inc_is_dirty g node then inc_visit g seen out node else () in
+      go (i + 1) in
+  let _ = go 0 in
+  vec_to_list out;
