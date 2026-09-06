@@ -4,6 +4,44 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.436 — 2026-09-06
+
+**`contrib/inc` — recompute only what changed.** Every program in this
+repository computes its answer in one pass, which is the right shape for
+a compiler or a renderer and the shape the region model is built for.
+The other shape -- a long-lived process asked the same question again
+after a small edit -- had no library and no measurement. This is the
+smaller half of one: a cache with a **declared** dependency graph
+(`inc_declare`), an invalidation walk over the reverse edges
+(`inc_touch`), and a topological order over the dirty subgraph
+(`inc_order`). Dependencies are not traced; tracing needs the engine to
+call back into the consumer's compute function, which is a different
+design with a different set of failures.
+
+Two consumers in `test/inc/`, because one cannot show whether an engine
+generalises: an aggregate (leaves, groups, root) and a build graph
+(headers read by many objects, archives, one binary). On 256 leaves and
+20 edits the engine recomputes **333 nodes of the 5733** a from-scratch
+implementation would, and the count is asserted **exactly** -- one settle
+over the graph, then three nodes per edit -- rather than as a bound,
+which would have passed for a range of wrong engines.
+
+**The gate carries its own negative controls** (`scripts/inc_check.sh`).
+Mode 2 stores a new input value and never tells its readers; the gate
+requires it to *differ* from the oracle, so the comparison is known to be
+able to fail. Mode 3 recomputes every node on every edit; the gate
+requires its output to *match* the oracle, which is the point --
+comparing answers cannot tell an incremental engine from a cache that
+always misses, and only the count can.
+
+**A hole the poison found.** Emitting a node before the nodes it reads
+passed the whole gate. Both consumers declared their graphs bottom-up, so
+walking the declaration list already produced a correct order and the
+topological walk was never load-bearing. The build graph now declares
+top-down -- binary, archives, objects, headers, which is how a build file
+reads anyway -- and the same poison is caught. The gate ran two poisons;
+one of them was invisible until a consumer changed.
+
 ## v0.1.435 — 2026-09-06
 
 **`u8x16_first_true` — the lowest non-zero lane, or -1.** The `u8x16`

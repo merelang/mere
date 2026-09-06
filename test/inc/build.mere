@@ -1,0 +1,143 @@
+// Consumer B for contrib/inc: a build graph, which is a different SHAPE from
+// the aggregate, not a second instance of it.
+//
+//   headers  <- objects (each reads two headers)  <- archives <- one binary
+//
+// The differences that matter: a header is read by MANY objects, so one edit
+// invalidates a fan rather than a path; an object is reachable from the binary
+// by more than one route, so the walk has to stop at a node it has already
+// marked; and the graph is irregular, so a topological order is a real
+// question rather than "leaves, then groups, then root".
+//
+// One consumer cannot show whether an engine generalises. This is the second.
+//
+// It declares the graph TOP DOWN -- the binary, then the archives, then the
+// objects, then the headers -- which is how a build file reads and is the
+// opposite of the aggregate's bottom-up declaration. That is not decoration:
+// when nodes are declared in dependency order, the engine's topological walk
+// is never load-bearing, because iterating the declaration list already
+// produces a correct order. A poisoned walk that emitted a node before what it
+// reads passed the gate until this consumer declared the other way round.
+//
+// Usage: build <headers> <objects> <archives> <edits> <mode>
+
+import "../../contrib/inc/inc.mere";
+
+let argv = args ();
+let arg = fn (k: int) -> fn (d: int) ->
+  let rec go = fn (xs: str list) -> fn (i: int) ->
+    match xs with
+    | Nil -> d
+    | Cons (a, rest) -> if i == k then int_of_str a else go rest (i + 1) in
+  go argv 0;
+
+let nh = arg 0 8;
+let no = arg 1 32;
+let na = arg 2 4;
+let edits = arg 3 10;
+let mode = arg 4 0;
+
+let obj0 = nh;
+let arc0 = nh + no;
+let bin = nh + no + na;
+
+let hsrc = vec_new ();
+let _ =
+  let rec fill = fn (i: int) ->
+    if i == nh then () else let _ = vec_push hsrc 1 in fill (i + 1) in
+  fill 0;
+
+let h_text = fn (i: int) -> "h" ++ str_of_int (vec_get hsrc i);
+let obj_h1 = fn (o: int) -> o % nh;
+let obj_h2 = fn (o: int) -> (o * 7 + 3) % nh;
+let arc_of = fn (o: int) -> o % na;
+
+// ---- from scratch -----------------------------------------------------
+
+let full_obj = fn (o: int) -> h_text (obj_h1 o) ++ h_text (obj_h2 o);
+let full_arc = fn (a: int) ->
+  let b = strbuf_new () in
+  let rec go = fn (o: int) ->
+    if o == no then ()
+    else let _ = if arc_of o == a then strbuf_push b (full_obj o) else () in go (o + 1) in
+  let _ = go 0 in
+  strbuf_to_str b;
+let full_bin = fn (u: int) ->
+  let rec go = fn (a: int) -> fn (acc: int) ->
+    if a == na then acc else go (a + 1) (acc + str_len (full_arc a)) in
+  go 0 0;
+
+// ---- the engine -------------------------------------------------------
+
+let eng = inc_new 0;
+
+let _ =
+  if mode == 0 then ()
+  else
+    let rec aids = fn (a: int) -> fn (acc: int list) ->
+      if a == 0 then acc else aids (a - 1) (Cons (arc0 + a - 1, acc)) in
+    let _ = inc_declare eng bin (aids na Nil) in
+    let rec dec_a = fn (a: int) ->
+      if a == na then ()
+      else
+        let rec ids = fn (o: int) -> fn (acc: int list) ->
+          if o == 0 then acc
+          else ids (o - 1) (if arc_of (o - 1) == a then Cons (obj0 + o - 1, acc) else acc) in
+        let _ = inc_declare eng (arc0 + a) (ids no Nil) in
+        dec_a (a + 1) in
+    let _ = dec_a 0 in
+    let rec dec_o = fn (o: int) ->
+      if o == no then ()
+      else
+        let _ = inc_declare eng (obj0 + o) (Cons (obj_h1 o, Cons (obj_h2 o, Nil))) in
+        dec_o (o + 1) in
+    let _ = dec_o 0 in
+    let rec dec_h = fn (i: int) ->
+      if i == nh then () else let _ = inc_declare eng i Nil in dec_h (i + 1) in
+    dec_h 0;
+
+let recompute = fn (node: int) ->
+  if node < obj0 then h_text node
+  else if node < arc0 then
+    let o = node - obj0 in
+    inc_peek eng (obj_h1 o) ++ inc_peek eng (obj_h2 o)
+  else if node < bin then
+    let a = node - arc0 in
+    let b = strbuf_new () in
+    let rec go = fn (o: int) ->
+      if o == no then ()
+      else let _ = if arc_of o == a then strbuf_push b (inc_peek eng (obj0 + o)) else () in
+           go (o + 1) in
+    let _ = go 0 in
+    strbuf_to_str b
+  else
+    let rec go = fn (a: int) -> fn (acc: int) ->
+      if a == na then acc else go (a + 1) (acc + str_len (inc_peek eng (arc0 + a))) in
+    str_of_int (go 0 0);
+
+let settle = fn (u: int) ->
+  let rec go = fn (l: int list) ->
+    match l with
+    | Nil -> ()
+    | Cons (node, rest) -> let _ = inc_put eng node (recompute node) in go rest in
+  let _ = go (inc_order eng) in
+  int_of_str (inc_peek eng bin);
+
+let next_seed = fn (s: int) -> (s * 1103515245 + 12345) % 2147483648;
+
+let rec run = fn (j: int) -> fn (seed: int) ->
+  if j == edits then ()
+  else
+    let s = next_seed seed in
+    let h = s % nh in
+    let _ = vec_set hsrc h (s % 97) in
+    let answer =
+      if mode == 0 then full_bin 0
+      else let _ = inc_touch eng h in settle 0 in
+    let _ = print ("bin " ++ str_of_int answer) in
+    run (j + 1) s;
+
+let _ = if mode == 0 then () else let _ = settle 0 in ();
+let _ = run 0 999 in
+let _ = print ("recomputes " ++ str_of_int (if mode == 0 then 0 else inc_recomputes eng)) in
+exit 0

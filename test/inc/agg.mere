@@ -1,0 +1,150 @@
+// Consumer A for contrib/inc: a two-level aggregate.
+//
+// n leaves, one group per g leaves, one root over the groups. An edit changes
+// one leaf, so the work that is actually needed is one leaf, one group and the
+// root -- three nodes out of n + n/g + 1.
+//
+// Usage: agg <n> <g> <edits> <mode>
+//   0 = recompute everything (the oracle)
+//   1 = the engine
+//   2 = the engine with invalidation DROPPED -- the leaf's new value is stored
+//       and nobody is told, so the root goes stale. A negative control: the
+//       gate runs this and requires it to DIFFER from mode 0. A comparison
+//       that cannot fail is not a comparison.
+//   3 = the engine recomputing EVERY node on every edit. Its output is
+//       identical to mode 0, which is the point: comparing answers cannot
+//       tell an incremental engine from a cache that always misses. Only the
+//       recomputation count can, which is why the engine keeps it.
+//
+// Both modes print the same transcript. That is the oracle: the incremental
+// answer has to equal the answer from scratch after EVERY edit, not just at
+// the end, because an invalidation that is one edit late is still wrong and
+// still converges.
+
+import "../../contrib/inc/inc.mere";
+
+let argv = args ();
+let arg = fn (k: int) -> fn (d: int) ->
+  let rec go = fn (xs: str list) -> fn (i: int) ->
+    match xs with
+    | Nil -> d
+    | Cons (a, rest) -> if i == k then int_of_str a else go rest (i + 1) in
+  go argv 0;
+
+let n = arg 0 256;
+let g = arg 1 16;
+let edits = arg 2 20;
+let mode = arg 3 0;
+
+let ngroups = (n + g - 1) / g;
+let root_id = n + ngroups;
+
+// the inputs
+let base = vec_new ();
+let _ =
+  let rec fill = fn (i: int) ->
+    if i == n then () else let _ = vec_push base 1 in fill (i + 1) in
+  fill 0;
+
+let group_hi = fn (gi: int) -> let hi = gi * g + g in if hi > n then n else hi;
+let leaf_text = fn (i: int) -> "L" ++ str_of_int (vec_get base i);
+
+// ---- mode 0: from scratch, every time --------------------------------
+
+let full_group = fn (gi: int) ->
+  let b = strbuf_new () in
+  let hi = group_hi gi in
+  let rec go = fn (i: int) ->
+    if i == hi then () else let _ = strbuf_push b (leaf_text i) in go (i + 1) in
+  let _ = go (gi * g) in
+  strbuf_to_str b;
+
+let full_root = fn (u: int) ->
+  let rec go = fn (gi: int) -> fn (acc: int) ->
+    if gi == ngroups then acc else go (gi + 1) (acc + str_len (full_group gi)) in
+  go 0 0;
+
+// ---- mode 1: the engine ----------------------------------------------
+
+let eng = inc_new 0;
+
+let _ =
+  if mode == 0 then ()
+  else
+    // leaves read nothing; a group reads its leaves; the root reads the groups
+    let rec dec_leaves = fn (i: int) ->
+      if i == n then () else let _ = inc_declare eng i Nil in dec_leaves (i + 1) in
+    let _ = dec_leaves 0 in
+    let rec dec_groups = fn (gi: int) ->
+      if gi == ngroups then ()
+      else
+        let hi = group_hi gi in
+        let rec ids = fn (i: int) -> fn (acc: int list) ->
+          if i == gi * g then acc else ids (i - 1) (Cons (i - 1, acc)) in
+        let _ = inc_declare eng (n + gi) (ids hi Nil) in
+        dec_groups (gi + 1) in
+    let _ = dec_groups 0 in
+    let rec gids = fn (gi: int) -> fn (acc: int list) ->
+      if gi == 0 then acc else gids (gi - 1) (Cons (n + gi - 1, acc)) in
+    inc_declare eng root_id (gids ngroups Nil);
+
+// recompute one node from the values under it -- the only place that knows
+// what a node MEANS, which is why the engine does not need to
+let recompute = fn (node: int) ->
+  if node < n then leaf_text node
+  else if node < root_id then
+    let gi = node - n in
+    let hi = group_hi gi in
+    let b = strbuf_new () in
+    let rec go = fn (i: int) ->
+      if i == hi then () else let _ = strbuf_push b (inc_peek eng i) in go (i + 1) in
+    let _ = go (gi * g) in
+    strbuf_to_str b
+  else
+    let rec go = fn (gi: int) -> fn (acc: int) ->
+      if gi == ngroups then acc else go (gi + 1) (acc + str_len (inc_peek eng (n + gi))) in
+    str_of_int (go 0 0);
+
+let touch_all = fn (u: int) ->
+  let rec go = fn (k: int) ->
+    if k > root_id then () else let _ = inc_touch eng k in go (k + 1) in
+  go 0;
+
+let settle = fn (u: int) ->
+  let rec go = fn (l: int list) ->
+    match l with
+    | Nil -> ()
+    | Cons (node, rest) -> let _ = inc_put eng node (recompute node) in go rest in
+  let _ = go (inc_order eng) in
+  int_of_str (inc_peek eng root_id);
+
+// ---- the edit stream (identical in both modes) ------------------------
+
+let next_seed = fn (s: int) -> (s * 1103515245 + 12345) % 2147483648;
+
+let rec run = fn (j: int) -> fn (seed: int) ->
+  if j == edits then ()
+  else
+    let s = next_seed seed in
+    let i = s % n in
+    let _ = vec_set base i (s % 97) in
+    let answer =
+      if mode == 0 then full_root 0
+      else if mode == 2 then
+        // the value is written, the readers are never told
+        let _ = inc_put eng i (leaf_text i) in
+        settle 0
+      else if mode == 3 then
+        // everything is dirty, every time
+        let _ = touch_all 0 in
+        settle 0
+      else
+        let _ = inc_touch eng i in
+        settle 0 in
+    let _ = print ("root " ++ str_of_int answer) in
+    run (j + 1) s;
+
+let _ = if mode == 0 then () else let _ = settle 0 in ();
+let _ = run 0 12345 in
+let _ = print ("recomputes " ++ str_of_int (if mode == 0 then 0 else inc_recomputes eng)) in
+exit 0
