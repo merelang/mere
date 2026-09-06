@@ -128,8 +128,80 @@ if [ "$CTRL_KILLED" -lt "$ATTEMPTS" ]; then
   fail=1
 fi
 
+# ---- durable COMPUTATION, not just durable progress ----------------------
+#
+# jobs.mere records finished jobs, so what survives is a boundary between
+# pieces. fold.mere is one computation with a running state, checkpointed
+# part-way through: what survives is a point INSIDE the work. The gate asks
+# the same three questions, and one more that only makes sense here -- the
+# resumed process must report starting somewhere other than zero, which is
+# what tells a resume from a restart that happened to be fast.
+
+FBIN="$TMP/fold"
+FLOG="$TMP/fold.log"
+FN=4000; FWORK=60000; FCKPT=200
+
+if "$MERE" -c "$ROOT/test/durable/fold.mere" > "$TMP/fold.c" 2>"$TMP/fold.err" &&
+   $CC -O2 -w "$TMP/fold.c" -o "$FBIN" 2>>"$TMP/fold.err"; then
+
+  fref="$("$FBIN" "$FLOG" $FN $FWORK $FCKPT 0 2>&1 | awk '/^answer /{print $2, $3}')"
+  rm -f "$FLOG"
+  [ -n "$fref" ] || { echo "FAIL durable_check/fold: the reference run printed no answer"; fail=1; }
+
+  run_fold_killed() {
+    : > "$TMP/fkilled"; : > "$TMP/ffrom"
+    _n=0
+    while [ $_n -lt $ATTEMPTS ]; do
+      _n=$((_n + 1))
+      "$FBIN" "$1" $FN $FWORK $FCKPT "$2" > "$TMP/fatt.out" 2>&1 &
+      _pid=$!
+      nap 0.30
+      if kill -0 "$_pid" 2>/dev/null; then
+        kill -9 "$_pid" 2>/dev/null; echo x >> "$TMP/fkilled"; wait "$_pid" 2>/dev/null
+      else
+        wait "$_pid" 2>/dev/null
+        awk '/^from /{print $2}' "$TMP/fatt.out" >> "$TMP/ffrom"
+        _a="$(awk '/^answer /{print $2, $3}' "$TMP/fatt.out")"
+        if [ -n "$_a" ]; then echo "$_a"; return 0; fi
+      fi
+    done
+    return 1
+  }
+
+  rm -f "$FLOG"
+  fgot="$(run_fold_killed "$FLOG" 0)" || fgot=""
+  fkilled="$(wc -l < "$TMP/fkilled" | tr -d ' ')"
+  ffrom="$(tail -1 "$TMP/ffrom" 2>/dev/null)"
+
+  if [ -z "$fgot" ]; then
+    echo "FAIL durable_check/fold: the checkpointing fold never finished in $ATTEMPTS attempts"
+    fail=1
+  elif [ "$fgot" != "$fref" ]; then
+    echo "FAIL durable_check/fold: resumed answer '$fgot', uninterrupted answer '$fref'"
+    fail=1
+  fi
+  if [ "$fkilled" -lt 1 ]; then
+    echo "FAIL durable_check/fold: no attempt was killed while working — the schedule tested nothing"
+    fail=1
+  fi
+  # The one question only a mid-computation checkpoint can be asked.
+  if [ -z "$ffrom" ] || [ "$ffrom" = 0 ]; then
+    echo "FAIL durable_check/fold: the run that finished started at index '${ffrom:-none}' — it restarted rather than resumed, so the checkpoint carried nothing"
+    fail=1
+  fi
+
+  fctrl="$(run_fold_killed "$TMP/unused_fold.log" 1)" || fctrl=""
+  if [ -n "$fctrl" ]; then
+    echo "FAIL durable_check/fold: the run with checkpointing off ALSO finished — the kills are not interrupting the fold"
+    fail=1
+  fi
+else
+  echo "FAIL durable_check/fold: did not build — $(head -1 "$TMP/fold.err")"
+  fail=1
+fi
+
 if [ "$fail" = 0 ]; then
-  echo "PASS durable_check: resumed to $GOT after $KILLED_WORKING kills mid-work; the same schedule never lets the no-log control finish"
+  echo "PASS durable_check: jobs resumed to $GOT after $KILLED_WORKING kills mid-work; fold resumed mid-computation from index $ffrom; neither control ever finishes"
   exit 0
 fi
 exit 1
