@@ -425,6 +425,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/region_slack_check.sh
 
+      # Recomputing only what changed: two consumers against the free oracle
+      # (recompute everything), the exact node count rather than a bound, and
+      # two negative controls that run as part of the gate -- an engine with
+      # invalidation dropped (must differ from the oracle) and one that
+      # recomputes everything every time (must MATCH it, which is why the
+      # count is checked at all).
+      - name: inc_check (contrib/inc recomputes the right nodes, and only those)
+        if: ${{ !cancelled() }}
+        run: sh scripts/inc_check.sh
+
       # A program's exit status is part of its answer. The Wasm backend used to
       # drop the code and trap, so `exit 0` reported failure on every host that
       # runs these modules -- and no parity program called `exit`, so the whole
