@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.441 — 2026-09-06
+
+**Durable computation, and the asymmetry that shapes it.**
+`test/durable/jobs.mere` (v0.1.437) records finished jobs, so what
+survives a kill is a boundary between pieces -- which only helps when the
+work divides into independent ones. `test/durable/fold.mere` is one
+computation with a running state, checkpointed part-way through and
+resumed mid-stream.
+
+Writing it turned up a documentation defect. `to_json` was described as
+serialising *any* value, and it does -- a `Vec` becomes an array, a `Map`
+an object -- but **`of_json` reads back neither**:
+
+| value | `to_json` | round-trip |
+|---|---|---|
+| int / float / str / tuple / option / list / variant / record | yes | **yes** |
+| `Vec` | `[1]` | `of_json: expected a variant value for Vec` |
+| `Map` | `{"1":"a"}` | `of_json: k is not a case of Map` |
+| `StrBuf` | `"x"` | `of_json: x is not a case of StrBuf` |
+
+The witness form already says why in its own words -- *"a closure or a
+handle cannot say what to decode into"* -- but nothing said the pair was
+one-directional for containers, and the place it bites is exactly a
+program that checkpoints: the state it wants to save is a `Map`, it saves
+it happily, and it cannot read it back. `docs/stdlib-reference.md` now
+carries the table and the way through (keep checkpointed state in the
+shapes that round-trip; rebuild containers from them on resume), which is
+what `fold.mere` does.
+
+`scripts/durable_check.sh` gains the fold and one question that only a
+mid-computation checkpoint can be asked: **the run that finishes must
+report starting somewhere other than zero.** Without it, a resume and a
+restart that happened to be fast look the same. Poisoned by checkpointing
+the index but not the accumulator, the gate names the difference.
+
 ## v0.1.440 — 2026-09-06
 
 **What it costs to bound an incremental cache with the tool the language

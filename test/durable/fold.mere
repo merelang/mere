@@ -1,0 +1,88 @@
+// Durable COMPUTATION, not durable progress.
+//
+// test/durable/jobs.mere records finished jobs, so a job that was running when
+// the process died starts over. That is the cheap half and it only works when
+// the work divides into independent pieces. This is the other half: one
+// computation with a running state, checkpointed part-way through, resumed
+// mid-stream.
+//
+// The state is deliberately in the shapes that survive JSON: a tuple of the
+// index, the accumulator, and a small list of the largest values seen. That is
+// not a stylistic choice -- `to_json` serialises a Vec or a Map happily and
+// `of_json` cannot read either back (see docs/stdlib-reference.md). A program
+// that checkpoints has to hold its state in what round-trips, and rebuild any
+// container it wants from that on resume.
+//
+// Usage: fold <logpath> <n> <work> <ckpt> <mode>
+//   mode 0 = checkpointing, resumes from the log
+//   mode 1 = no checkpoint. The negative control: under the same kill
+//            schedule it starts from zero every time and never finishes.
+//
+// Prints when the fold reaches n:
+//   answer <acc> <top>     the same values however many times it died
+//   from <i>               the index this process STARTED at, so the gate can
+//                          see that a restart resumed rather than restarted
+
+import "../../contrib/store/kvlog.mere";
+
+let argv = args ();
+let sarg = fn (k: int) -> fn (d: str) ->
+  let rec go = fn (xs: str list) -> fn (i: int) ->
+    match xs with
+    | Nil -> d
+    | Cons (a, rest) -> if i == k then a else go rest (i + 1) in
+  go argv 0;
+let iarg = fn (k: int) -> fn (d: int) ->
+  let s = sarg k "" in
+  if str_eq s "" then d else int_of_str s;
+
+let path = sarg 0 "/tmp/mere_fold.log";
+let n = iarg 1 4000;
+let work = iarg 2 20000;
+let ckpt = iarg 3 200;
+let mode = iarg 4 0;
+
+// one step's work: expensive enough that a kill lands inside the fold
+let step_value = fn (i: int) ->
+  let rec go = fn (k: int) -> fn (acc: int) ->
+    if k == 0 then acc else go (k - 1) ((acc * 31 + i + k) % 1000003) in
+  go work i;
+
+// keep the three largest values seen, descending
+let rec insert_top = fn (v: int) -> fn (l: int list) -> fn (room: int) ->
+  if room == 0 then Nil
+  else
+    match l with
+    | Nil -> Cons (v, Nil)
+    | Cons (h, rest) ->
+      if v > h then Cons (v, insert_top h rest (room - 1))
+      else Cons (h, insert_top v rest (room - 1));
+
+// the checkpointed state, in shapes of_json can read back
+let start =
+  if mode == 1 then (0, 0, Nil)
+  else
+    let saved = kvlog_get path "state" in
+    if str_eq saved "" then (0, 0, Nil)
+    else (of_json saved : (int * int * int list));
+
+let started_at = match start with | (i, a, t) -> i;
+
+let rec run = fn (i: int) -> fn (acc: int) -> fn (top: int list) ->
+  if i == n then (acc, top)
+  else
+    let v = step_value i in
+    let acc2 = (acc + v) % 1000000007 in
+    let top2 = insert_top v top 3 in
+    // The checkpoint lands BEFORE the step after it, so a kill between them
+    // rewinds to a state that was actually reached. fsync is inside kvlog_set.
+    let _ =
+      if mode == 0 && (i + 1) % ckpt == 0 then
+        kvlog_set path "state" (to_json (i + 1, acc2, top2))
+      else () in
+    run (i + 1) acc2 top2;
+
+let out = match start with | (i0, a0, t0) -> run i0 a0 t0;
+let _ = print ("answer " ++ str_of_int (fst out) ++ " " ++ to_json (snd out)) in
+let _ = print ("from " ++ str_of_int started_at) in
+exit 0
