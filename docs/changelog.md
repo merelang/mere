@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.434 — 2026-09-06
+
+**`exit n` ends the program with n on the Wasm backend too (Q-114).** The
+emission was "evaluate the code, drop it, `unreachable`" -- there is no
+process inside a module, so the status had nowhere to go. Every host
+reports that trap as a failure, which made `exit 0` -- a program saying
+it succeeded -- come back as 1, and turned `exit 3` into 1 as well. The
+status now leaves through a host import (`env.exit_proc`), emitted only
+for programs that call `exit`, so a page whose program never does needs
+no new import. `scripts/run_wasm.js` provides it. Component mode keeps
+the old trap: its `env` imports are dropped, and routing exit through
+wasi `proc_exit` is the second half of Q-114.
+
+**What hid it.** The parity suite compares stdout, and its failure
+section compares the status of programs that *fail*, where the
+diagnostic is the last line of stdout on Wasm and the first line of
+stderr elsewhere. A program that exits with a status and no diagnostic
+fits neither shape. And there was nothing to fit: of 157 parity
+programs, **none called `exit`** -- nor does any example or contrib
+module reachable from a Wasm build, which is why no browser page is
+affected by the new import. The builtin was simply outside everything
+the differential suite ran.
+
+`scripts/exit_status_check.sh` compares the number and nothing else,
+across interp / C / LLVM / Wasm, for `exit 0`, `exit 7` and a program
+with no `exit` at all (so a gate that reported 7 for everything would
+fail). It counts its own backend runs and fails when a missing toolchain
+would have left it green while measuring less than it claims. Run
+against the previous binary it names both regressions.
+
 ## v0.1.433 — 2026-09-06
 
 **A function defined inside a `region` body could not allocate a
