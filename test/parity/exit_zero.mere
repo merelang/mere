@@ -1,0 +1,16 @@
+// v0.1.434: `exit 0` is a program saying it succeeded, and on the Wasm
+// backend it used to come back as 1 -- the emission dropped the code and
+// trapped, and every host reads a trap as a failure.
+//
+// This file is here for two reasons at once. It is the only parity program
+// that calls `exit`, so it is what reaches the gated `wasm_exit_used` runtime
+// section (test/parity/SECTIONS); and the parity harness compares exit status
+// against the interpreter's, so it is also where a backend that turns a
+// successful exit into a failure is caught by the ordinary suite rather than
+// only by scripts/exit_status_check.sh.
+//
+// A nonzero status cannot live here: the harness SKIPs any program the
+// interpreter does not exit 0 on, and its failure section is built for
+// programs that fail with a diagnostic. exit_status_check covers that half.
+let _ = print "done" in
+exit 0
