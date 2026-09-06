@@ -15094,5 +15094,29 @@ let () =
      Printf.sprintf "vector ops:%s bare:%d" (if vec = [] then "none" else "some") (List.length bare))
     "vector ops:some bare:0";
 
+  (* v0.1.433: an inner fn is lifted out of the region body into its own C
+     function, where the body's `__region_R` local does not exist. Emitting the
+     name there produced C that does not compile. This checks the spelling the
+     emitter chose; that the result BUILDS AND RUNS is
+     test/parity/region_inner_fn_container.mere, because a text check cannot
+     answer a build failure -- it can only say which text was emitted. *)
+  check "v0.1.433: a lifted fn's container reaches for the current region"
+    (let c =
+       let prog = Pipeline.parse_program
+         "let a = region R { let f = fn (k: int) -> let b = strbuf_new () in let _ = strbuf_push b \"x\" in strbuf_len b in f 2 };\nprint_int a" in
+       let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+       Codegen_c.emit_program ~main_ty prog in
+     let count sub =
+       let n = String.length sub and m = String.length c in
+       let rec go i acc =
+         if i + n > m then acc
+         else go (i + 1) (if String.sub c i n = sub then acc + 1 else acc) in
+       go 0 0 in
+     Printf.sprintf "lifted:%s current:%d local:%d"
+       (if count "__lifted_f_0" > 0 then "yes" else "no")
+       (count "mere_strbuf_new(__lang_current_region)")
+       (count "mere_strbuf_new(__region_R)"))
+    "lifted:yes current:1 local:0";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
