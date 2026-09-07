@@ -1,0 +1,88 @@
+// mat4xvec4, explicit f64x2 lanes -- the same arithmetic as `bench.mere`, two
+// output components per vector instead of one.
+//
+// A vec4 is two f64x2: the low pair is (x, y) and the high pair is (z, w). A
+// column of the matrix splits the same way, and the transform becomes
+//
+//     r_lo = c0_lo*x + c1_lo*y + c2_lo*z + c3_lo*w
+//     r_hi = c0_hi*x + c1_hi*y + c2_hi*z + c3_hi*w
+//
+// with the vertex components broadcast. Lane 0 of r_lo performs exactly the
+// multiplies and adds, in exactly the order, that `bench.mere` performs for
+// rx -- column 0, then 1, then 2, then 3. The same holds lane for lane and
+// accumulator for accumulator, so THE TWO PROGRAMS MUST PRINT THE SAME BYTES,
+// and the runner checks that rather than trusting this paragraph. Nothing here
+// needs fast-math or any license to reassociate: the reduction that stops
+// `matmul` runs ACROSS the four columns, which is the direction the lanes are
+// not.
+//
+// The count is halved rather than the work: eight multiplies and six adds per
+// vertex against sixteen and twelve. Two lanes is the whole gain available on
+// a 128-bit vector of doubles -- the width this row would rather have is four
+// f32 lanes, which the language does not have yet, and this row is the
+// measurement that says whether that is worth adding.
+
+let n = match args () with | Cons (a, _) -> int_of_str a | Nil -> 20000;
+let reps = 5000;
+
+let mk = fn (count: int) -> fn (seed: int) ->
+  let v = vec_new () in
+  let rec fill = fn (i: int) -> fn (x: int) ->
+    if i == count then ()
+    else
+      let x2 = (1103515245 * x + 12345) % 2147483648 in
+      let _ = vec_push v (f_div (float_of_int (x2 % 2001 - 1000)) 1000.0) in
+      fill (i + 1) x2 in
+  let _ = fill 0 seed in
+  v;
+
+let mat = mk 16 20260907;
+let vs = mk (4 * n) 77770707;
+
+// Column j of the matrix is mat[4*j .. 4*j+3]; _lo is rows 0 and 1, _hi rows
+// 2 and 3. Built once, outside the loop.
+let c0_lo = f64x2_make (vec_get mat 0) (vec_get mat 1);
+let c0_hi = f64x2_make (vec_get mat 2) (vec_get mat 3);
+let c1_lo = f64x2_make (vec_get mat 4) (vec_get mat 5);
+let c1_hi = f64x2_make (vec_get mat 6) (vec_get mat 7);
+let c2_lo = f64x2_make (vec_get mat 8) (vec_get mat 9);
+let c2_hi = f64x2_make (vec_get mat 10) (vec_get mat 11);
+let c3_lo = f64x2_make (vec_get mat 12) (vec_get mat 13);
+let c3_hi = f64x2_make (vec_get mat 14) (vec_get mat 15);
+
+let rec pass = fn (i: int) -> fn (alo: f64x2) -> fn (ahi: f64x2) ->
+  if i == n then (alo, ahi)
+  else
+    let sx = f64x2_splat (vec_get vs (4 * i)) in
+    let sy = f64x2_splat (vec_get vs (4 * i + 1)) in
+    let sz = f64x2_splat (vec_get vs (4 * i + 2)) in
+    let sw = f64x2_splat (vec_get vs (4 * i + 3)) in
+    let rlo = f64x2_add (f64x2_add (f64x2_add (f64x2_mul c0_lo sx)
+                                              (f64x2_mul c1_lo sy))
+                                   (f64x2_mul c2_lo sz))
+                        (f64x2_mul c3_lo sw) in
+    let rhi = f64x2_add (f64x2_add (f64x2_add (f64x2_mul c0_hi sx)
+                                              (f64x2_mul c1_hi sy))
+                                   (f64x2_mul c2_hi sz))
+                        (f64x2_mul c3_hi sw) in
+    pass (i + 1) (f64x2_add alo rlo) (f64x2_add ahi rhi);
+
+let rec rep = fn (r: int) -> fn (alo: f64x2) -> fn (ahi: f64x2) ->
+  if r == reps then (alo, ahi)
+  else
+    let (blo, bhi) = pass 0 alo ahi in
+    rep (r + 1) blo bhi;
+
+let (alo, ahi) = rep 0 (f64x2_splat 0.0) (f64x2_splat 0.0);
+
+// Back to scalars in the same order the scalar row sums them: x, y, z, w.
+let sx = f64x2_extract alo 0;
+let sy = f64x2_extract alo 1;
+let sz = f64x2_extract ahi 0;
+let sw = f64x2_extract ahi 1;
+let s = f_add (f_add (f_add sx sy) sz) sw;
+
+let _ = print ("n " ++ str_of_int n) in
+let _ = print ("checksum " ++ str_of_int (float_bits_hi s)
+               ++ " " ++ str_of_int (float_bits_lo s)) in
+exit 0

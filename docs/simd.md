@@ -175,6 +175,7 @@ of eight.
 | iterations independent, or the dependence made local to a few neighbouring bytes | the previous iteration's result is the next one's input (state machines, recursive reductions) |
 | contiguous index; tables of at most 16 entries | data-dependent index into a large table (gather) |
 | integer and bit operations; branches expressible as masks | floating-point reductions in a fixed order; data-dependent early exits |
+| floating point where the lanes are the axis the reduction is *not* on (`mat4xvec4`) | floating point where the compiler's choice of axis puts the reduction back in the lanes |
 | byte lanes; many operations per byte | two lanes; memory-bound bodies; an allocation or a call inside the loop |
 
 ## 4. Measured
@@ -186,6 +187,9 @@ The full table with conditions is in
   The 10 ms Mere still carries is building the two Vecs by `vec_push`.
 - `bytecount`: ties C (21 ms).
 - `matmul`: unchanged (144 ms against 132 ms) -- a floating-point reduction.
+- `mat4xvec4`: 206 ms scalar, **140 ms** with `f64x2`, 200 ms C -- the one
+  floating-point row where explicit lanes pay, and bit-identical to the scalar
+  spelling. See the next paragraph for why it is not a contradiction of `matmul`.
 - `axpy_simd`: loses to the auto-vectorized `axpy` (0.12 s against 0.08 s).
 - `utf8valid` 72 ms, `utf8valid_simd` 29 ms, scalar C 54 ms: 2.5x the scalar
   Mere machine and 1.9x scalar C, about 4 GB/s.
@@ -196,9 +200,19 @@ The full table with conditions is in
 ## 5. Choosing
 
 Write element-wise integer loops plainly; versioning and clang make them tie
-C. Floating-point element-wise loops are also served by the automatic path,
-and floating-point reductions are served by neither. Reach for `u8x16` when
-a byte-processing loop is slow *and* its dependence on the previous byte can
-be rewritten as a lookup on the combination of neighbouring bytes -- UTF-8
-validation, JSON structural scanning, base64. `f64x2` written by hand pays
-only where the auto-vectorizer cannot see the loop at all.
+C. Reach for `u8x16` when a byte-processing loop is slow *and* its dependence
+on the previous byte can be rewritten as a lookup on the combination of
+neighbouring bytes -- UTF-8 validation, JSON structural scanning, base64.
+
+For floating point the rule is not "reductions lose", which is how `matmul`
+alone reads. **It is that the lanes have to be on an axis the reduction is not
+on, and the compiler does not always pick that axis for you.** `matmul` sums
+along the only axis it has, so nothing helps. A vertex transform sums down the
+four columns while iterating over vertices, so it has two axes -- and clang,
+given the scalar program, lanes the *vertices*, which puts the cross-vertex
+accumulation back in the lane direction and makes it pay four lane extracts
+and eight scalar adds per pair. Writing the four *components* in lanes by hand
+makes the accumulation lane-parallel and is 1.44x that, and faster than C
+(`mat4xvec4`). So: if a floating-point loop has more than one axis, check
+which one the compiler put in the lanes before concluding the automatic path
+has served it.
