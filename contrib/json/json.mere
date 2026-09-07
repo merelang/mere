@@ -21,13 +21,34 @@
 
 module Json {
 
+// JSON has ONE number type and this has two, which is a deliberate choice and
+// not an oversight. A number written with a decimal point or an exponent
+// becomes `JFloat`; one written as an integer stays `JNum`, an int.
+//
+// Why not a single `JFloat` for everything: (1) it would silently change every
+// existing reader of `JNum`, (2) `to_json_str` would stop round-tripping --
+// `12` would come back as `12.0` -- and (3) the documents this parser is
+// actually pointed at distinguish the two. An array index, a byte offset and a
+// glTF accessor's `count` are integers and must stay exact; a colour component
+// and a node's translation are not. A reader that does not care can call
+// `as_float`, which widens either.
 type json =
   | JNull
   | JBool of bool
-  | JNum  of int
-  | JStr  of str
-  | JArr  of json list
-  | JObj  of (str * json) list;
+  | JNum   of int
+  | JFloat of float
+  | JStr   of str
+  | JArr   of json list
+  | JObj   of (str * json) list;
+
+// Either flavour of number as a double, for the readers that do not care which
+// way it was written. An int above 2^53 loses precision here, which is the same
+// thing JSON itself does to it.
+let as_float = fn (v: json) ->
+  match v with
+  | JNum n -> float_of_int n
+  | JFloat f -> f
+  | _ -> fail "as_float: not a number";
 
 // === Whitespace skip ===
 
@@ -70,16 +91,53 @@ let parse_num = fn (s: str, i: int) ->
     else if is_digit (char_at s j) then scan (j + 1)
     else j
   in
-  let end_pos = scan i1 in
-  // Accumulate the digits directly rather than `int_of_str (substring ...)`:
-  // the substring was a 16-byte allocation per number whose only reader was
-  // int_of_str (320,000 of them on the benchmark document).
-  let rec digits = fn (j: int) -> fn (acc: int) ->
-    if j == end_pos then acc else digits (j + 1) (acc * 10 + (ord (char_at s j) - 48)) in
-  if end_pos == i1 then fail ("expected digit at pos " ++ str_of_int i1)
+  let int_end = scan i1 in
+  if int_end == i1 then fail ("expected digit at pos " ++ str_of_int i1)
   else
-    let mag = digits i1 0 in
-    (JNum (if i1 == start then mag else 0 - mag), end_pos);
+    // Where the number stops being an integer. JSON's grammar is
+    // int [frac] [exp]; the presence of either tail is what decides which
+    // constructor this is, not the value -- `1.0` is a JFloat and `1` is a
+    // JNum, so writing the document back out gives the bytes that came in.
+    // A fraction needs at least one digit after the point. JSON says so, and
+    // an earlier version of this did not check it: `1.` parsed as 1.0, where
+    // the integer-only parser this replaced rejected it by leaving the '.'
+    // behind for the caller to trip over. A parser that gets more permissive
+    // while gaining a feature has made the language it accepts a secret.
+    let frac_end =
+      if int_end < str_len s && char_at s int_end == '.' then
+        let d = scan (int_end + 1) in
+        if d == int_end + 1 then fail ("expected digit after '.' at pos " ++ str_of_int (int_end + 1))
+        else d
+      else int_end in
+    let exp_end =
+      if frac_end < str_len s
+         && (char_at s frac_end == 'e' || char_at s frac_end == 'E')
+      then
+        let after_e = frac_end + 1 in
+        let after_sign =
+          if after_e < str_len s
+             && (char_at s after_e == '+' || char_at s after_e == '-')
+          then after_e + 1 else after_e in
+        let d = scan after_sign in
+        if d == after_sign then fail ("expected digit after exponent at pos " ++ str_of_int after_sign)
+        else d
+      else frac_end in
+    if exp_end == int_end then
+      // The integer path, unchanged: accumulate the digits directly rather than
+      // `int_of_str (substring ...)`, because the substring was a 16-byte
+      // allocation per number whose only reader was int_of_str (320,000 of them
+      // on the benchmark document).
+      let rec digits = fn (j: int) -> fn (acc: int) ->
+        if j == int_end then acc else digits (j + 1) (acc * 10 + (ord (char_at s j) - 48)) in
+      let mag = digits i1 0 in
+      (JNum (if i1 == start then mag else 0 - mag), int_end)
+    else
+      // The float path DOES take the substring. It could be avoided the same
+      // way, but only by writing a decimal-to-binary conversion by hand and
+      // getting the rounding right twice; `float_of_str` is the one the rest of
+      // the language already agrees on. The allocation is per fractional
+      // number, and the document that motivated the integer fast path has none.
+      (JFloat (float_of_str (substring s start exp_end)), exp_end);
 
 let parse_raw_str = fn (s: str, i: int) ->
   // Returns (content, end_pos).  Handles `\"` `\\` `\n` `\t` `\r` `\/` via
@@ -210,6 +268,13 @@ let rec write_json = fn (sb) -> fn (v) ->
   | JNull -> strbuf_push sb "null"
   | JBool b -> strbuf_push sb (if b then "true" else "false")
   | JNum n -> strbuf_push sb (show n)
+  // `str_of_float` prints a form JSON accepts, including the exponent one, and
+  // round-trips through `float_of_str`. It cannot print an infinity or a NaN
+  // here because neither can be parsed from valid JSON -- the one way in is an
+  // overflowing literal like 1e400, which `float_of_str` turns into an infinity
+  // and this would then write as `inf`, which is not JSON. Left as it is
+  // because refusing at write time would be refusing in the wrong place.
+  | JFloat f -> strbuf_push sb (str_of_float f)
   | JStr s ->
       let __ = strbuf_push sb "\"" in
       let __ = strbuf_push sb (escape_str s) in
