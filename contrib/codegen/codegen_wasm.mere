@@ -292,7 +292,7 @@ let is_builtin = fn (n: str) ->
   n == "strbuf_new" || n == "strbuf_push" ||
   n == "strbuf_to_str" || n == "strbuf_len" ||
   n == "not" || n == "str_eq" || n == "read_file" || n == "write_file" ||
-  n == "str_of_float" ||
+  n == "str_of_float" || n == "float_of_str" ||
   n == "chr" ||
   n == "map_new" || n == "map_set" || n == "map_get" || n == "map_has" ||
   n == "map_delete" || n == "map_head" ||
@@ -1085,6 +1085,22 @@ let rec emit_expr = fn (e: expr) -> fn (s0: EmitState) ->
         let s1 = note_helper_use "show_int" s in
         let s2 = emit_expr x s1 in
         push_instr "call $show_int" s2
+      | EVar "float_of_str" ->
+        // v0.1.447: `float_of_str` TRAPS here, and that is the honest lowering
+        // rather than a placeholder. Every value in this codegen is an i32, so
+        // there is no double to return; `str_of_float` above gets away with
+        // borrowing show_int because a wrong-looking string is visible, but a
+        // wrong NUMBER is not -- contrib/json would read 0.8 as 0 and the
+        // document would be silently different.
+        //
+        // The module still validates, which is what keeps contrib/json inside
+        // the self-host codegen's coverage: everything else in that file is
+        // compiled and checked, and only this operation is a trap. When this
+        // codegen grows real floats, this arm is where they arrive.
+        let s1 = emit_expr x s in
+        let s2 = push_instr "drop" s1 in
+        let s3 = push_instr "unreachable" s2 in
+        push_instr "i32.const 0" s3
       | EVar "str_len" ->
         // Stage 53j: `str_len s` → `$__lang_strlen` (the same helper
         // str_concat uses internally; both pull "strlen").

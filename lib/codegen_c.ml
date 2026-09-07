@@ -3900,8 +3900,14 @@ let rec emit_expr (e : Ast.expr) : string =
       | Ast.TyTuple ts ->
         Printf.sprintf "({ abort(); (%s){0}; })" (tuple_struct_name ts)
       | Ast.TyCon (n, args) ->
+        (* `flatten_module_dots` for the same reason ty_tag needs it: a `type`
+           declared inside a `module` is `M.t`, and a dot is not a C identifier.
+           This is the second place that built a type name without it -- the
+           first was the closure tag -- and it only shows up when a match whose
+           arms are exhaustive-by-construction returns such a record, because
+           that is when this unreachable branch gets a type to name. *)
         let c_n =
-          if args = [] then n
+          if args = [] then flatten_module_dots n
           else mono_variant_name n (List.map Ast.walk args)
         in
         Printf.sprintf "({ abort(); (%s){0}; })" c_n

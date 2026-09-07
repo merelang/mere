@@ -119,7 +119,14 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyArrow (p, r) ->
     (* Recursive arrow → use the same naming used by closure_struct_name. *)
     "closure_" ^ ty_tag p ^ "_" ^ ty_tag r
-  | Ast.TyCon (name, []) -> name
+  (* A module-qualified type name carries a dot, which is not a C identifier and
+     not a Wasm or LLVM one either. The record's own typedef is mangled through
+     `flatten_module_dots`, but this tag was not, so a CLOSURE whose parameter or
+     result is such a record was named `closure_int_M.t` and the emitted C did
+     not compile. Found by pointing a glTF reader at it: a `type` declared
+     inside a `module` and returned from a function. `mere -c` emitted happily
+     and clang refused, which is the shape a codegen gate has to be run to see. *)
+  | Ast.TyCon (name, []) -> flatten_module_dots name
   (* StrBuf[R] and ByteBuf[R] lower to one C type each — `mere_strbuf*`,
      `mere_bytebuf*` — which does not depend on the region: the region is a
      pointer inside the struct. So the region does not belong in the tag either,
@@ -146,7 +153,7 @@ let rec ty_tag (t : Ast.ty) : string =
       | 0, (Ast.TyVar _ | Ast.TyParam _) when region_parameterised -> "__heap"
       | _ -> ty_tag a
     in
-    name ^ "_" ^ String.concat "_" (List.mapi tag_arg args)
+    flatten_module_dots name ^ "_" ^ String.concat "_" (List.mapi tag_arg args)
   | Ast.TyRef (_, r, Ast.TyUnit) ->
     (* Region marker — use the region name itself as the tag. *)
     r
