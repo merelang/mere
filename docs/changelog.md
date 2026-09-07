@@ -4,6 +4,52 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.447 — 2026-09-07
+
+**A `type` declared inside a `module` produced C that did not compile**, in two
+different places, and `mere -c` emitted both of them happily. A dot is not an
+identifier in C, in LLVM IR or in a Wasm name; the record's own typedef was
+mangled to `M__t` and these two were not.
+
+The first is `ty_tag`, which names a closure from the tags of its parameter and
+result: a function value of type `int -> M.t` was named `closure_int_M.t`. The
+same three lines were written in `Monomorph`, `codegen_wasm` and `codegen_llvm`
+and all three were wrong.
+
+The second needed a different shape to reach. A `match` whose arms cover every
+case still emits an unreachable fallback, and that fallback names the result
+type to build a zero of it — `(M.t){0}`. So a match RETURNING such a record was
+broken where one merely mentioning it was fine.
+
+**Neither shows up unless the function is used as a VALUE.** Calling `M.mk`
+directly never materialises a closure type, so a program can use
+module-qualified records all day without meeting the first; the second needs a
+total match returning one. Both were found by pointing a glTF reader at the
+language: a `type` inside a `module`, handed to a higher-order function.
+`test/parity/module_qualified_record_closure.mere` pins all three tag-building
+paths (closure, container, tuple) plus the match fallback.
+
+**And the self-hosted Wasm codegen had to be told about `float_of_str`**, which
+v0.1.446 made `contrib/json` depend on. That codegen keeps a hand-written list
+of the builtins it knows and lowers every value as an i32, so a float has
+nowhere to go; the list going stale the moment the language gained a use for
+one is the shape a hand-maintained list has.
+
+It lowers to a TRAP rather than to a placeholder, and the difference matters.
+`str_of_float` next to it borrows `show_int` and prints a bit pattern, which is
+wrong in a way you can see. A `float_of_str` that borrowed `int_of_str` would
+read `0.8` as `0` and hand back a document that is silently different. The
+module still validates, so `contrib/json` stays inside that codegen's coverage
+— everything else in the file is compiled and checked, and only this one
+operation is an `unreachable`.
+
+_(A third thing was noticed and not fixed: from outside the module, that type
+cannot be named in an annotation at all — `M.t` and `t` are both rejected
+against what `M.mk` returns, and the error says they are different named types.
+`show` prints it as `M.t`. That is a typer question and not a codegen one.)_
+
+---
+
 ## v0.1.446 — 2026-09-07
 
 **`contrib/json` could not parse a number with a decimal point.** Found by

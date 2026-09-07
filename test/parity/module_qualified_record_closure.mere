@@ -1,0 +1,57 @@
+// A record type declared INSIDE a module, reaching a closure type's name.
+//
+// `type t` inside `module M` is `M.t`, and a dot is not an identifier in C, in
+// LLVM IR or in a Wasm name. The record's own typedef was mangled -- `M__t` --
+// but `ty_tag`, which builds the name of a CLOSURE from the tags of its
+// parameter and result, was not: a function value of type `int -> M.t` was
+// named `closure_int_M.t`, and the emitted C did not compile. All three
+// backends had the same line written three times, and all three were wrong.
+//
+// THE SHAPE MATTERS AND IS EASY TO MISS. Calling `M.mk` directly never
+// materialises a closure type, so a program can use module-qualified records
+// all day without meeting this. It needs the function to be passed as a VALUE
+// -- here to `apply`, which is what a map or a callback does -- and that is why
+// it survived until a glTF reader put a `type` inside a `module` and handed the
+// constructor to something.
+//
+// Found by the m3d dogfood at v0.1.446. `mere -c` emitted happily and clang
+// refused it, which is a reminder that emitting is not compiling.
+module M {
+  type t = { a: int, b: float };
+  let mk = fn (x: int) -> t { a = x, b = float_of_int x * 0.5 };
+}
+
+// Through a higher-order function, so the closure type has to be named.
+let apply = fn (f) -> fn (x: int) -> f x;
+let r = apply M.mk 7;
+let _ = print (str_of_int r.a ++ " " ++ str_of_float r.b);
+
+// Through a container, so the tag goes through the polymorphic branch of the
+// same function rather than the nullary one. `show` and not a field access:
+// naming this type in an annotation from outside its module turns out not to
+// work -- `M.t` and `t` are both rejected against the type `M.mk` returns --
+// which is a separate question from this one and is recorded in the language's
+// open questions rather than worked around here.
+let v = vec_new ();
+let _ = vec_push v (M.mk 1);
+let _ = vec_push v (M.mk 2);
+let _ = print (show (vec_get v 1));
+
+// And as a tuple element, a third place the tag is built.
+let pair = (M.mk 5, M.mk 6);
+let _ = print (show (fst pair));
+
+// A SECOND PLACE built the same name without mangling it, and it needed a
+// different shape to reach: a `match` whose arms cover every case still emits
+// an unreachable fallback, and that fallback names the result type to build a
+// zero of it -- `(M.t){0}`. So a match RETURNING a module-qualified record was
+// broken where one merely mentioning it was fine. Found the same day as the
+// first, by the same reader, one clang error later.
+let pick = fn (which: int) ->
+  match which with
+  | 0 -> M.mk 10
+  | 1 -> M.mk 20
+  | _ -> M.mk 30;
+let _ = print (show (pick 1));
+
+print "ok"
