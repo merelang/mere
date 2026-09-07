@@ -180,7 +180,7 @@ let expand_alias_or_tycon name args =
   | _ -> Ast.TyCon (name, args)
 
 let is_primitive_type_name = function
-  | "int" | "float" | "bool" | "str" | "bytes" | "unit" | "f64x2" | "u8x16" -> true
+  | "int" | "float" | "bool" | "str" | "bytes" | "unit" | "f64x2" | "u8x16" | "f32x4" -> true
   | _ -> false
 
 let rec parse_program_internal tokens =
@@ -273,6 +273,7 @@ let rec parse_program_internal tokens =
     | (_, T_ident "bytes") :: rest -> Ast.TyBytes, rest
     | (_, T_ident "f64x2") :: rest -> Ast.TySimd Ast.F64x2, rest
     | (_, T_ident "u8x16") :: rest -> Ast.TySimd Ast.U8x16, rest
+    | (_, T_ident "f32x4") :: rest -> Ast.TySimd Ast.F32x4, rest
     | (_, T_ident "unit") :: rest -> Ast.TyUnit, rest
     | (_, T_ident name) :: (_, T_lbracket) :: rest
       when starts_with_upper name ->

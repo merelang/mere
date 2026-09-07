@@ -144,6 +144,7 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyBytes -> "bytes"   (* the binary type *)
   | Ast.TySimd Ast.F64x2 -> "f64x2"
   | Ast.TySimd Ast.U8x16 -> "u8x16"
+  | Ast.TySimd Ast.F32x4 -> "f32x4"
   | Ast.TyUnit -> "unit"
   | Ast.TyFloat -> "float"   (* Phase 43.1: allow float to be used as an fn signature tag *)
   | Ast.TyTuple ts -> "tuple_" ^ String.concat "_" (List.map ty_tag ts)
@@ -458,6 +459,7 @@ let rec llvm_ty_of (t : Ast.ty) : string =
   | Ast.TyStr -> "ptr"
   | Ast.TyBytes -> "ptr"  (* pointer to [i64 len][bytes...] *)
   | Ast.TySimd Ast.F64x2 -> "<2 x double>"   (* Q-109: first-class vector types, by value *)
+  | Ast.TySimd Ast.F32x4 -> "<4 x float>"
   | Ast.TySimd Ast.U8x16 -> "<16 x i8>"
   | Ast.TyUnit -> "i64"  (* unit becomes int 0 *)
   (* v0.1.163: a File handle travels as i64 like every other Mere value —
@@ -2309,6 +2311,20 @@ let emit_struct_fn ?(json = false) (tag : string) (t : Ast.ty) : string =
         "ptr " ^ s) [0; 1] in
       mint_show_format (pfx ^ "_f64x2") (if json then "[%s, %s]" else "f64x2(%s, %s)");
       emit_asprintf (pfx ^ "_f64x2") (String.concat ", " strs)
+    | Ast.TySimd Ast.F32x4 ->
+      (* Each lane widens to a double before the shared formatter -- the same
+         value f32x4_extract returns, so show and extract agree by construction. *)
+      let strs = List.map (fun i ->
+        let l = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = extractelement <4 x float> %%x, i32 %d" l i);
+        let d = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = fpext float %s to double" d l);
+        let s = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_of_float(double %s)" s d);
+        "ptr " ^ s) [0; 1; 2; 3] in
+      mint_show_format (pfx ^ "_f32x4")
+        (if json then "[%s, %s, %s, %s]" else "f32x4(%s, %s, %s, %s)");
+      emit_asprintf (pfx ^ "_f32x4") (String.concat ", " strs)
     | Ast.TySimd Ast.U8x16 ->
       let ints = List.init 16 (fun i ->
         let b = fresh_reg () in
@@ -4949,6 +4965,46 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let bv = emit_expr env b_e in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = %s <2 x double> %s, %s" r ir_op av bv); r
+  (* Q-109 (2d): f32x4. `fptrunc` on the way in and `fpext` on the way out are
+     LLVM's round-to-nearest-even conversions, so the rounding is the target's
+     and is not written here (the delegation f32_bits makes, Q-038). *)
+  | Ast.App ({ node = Ast.Var "f32x4_splat"; _ }, x_e) ->
+    simd_used_llvm := true;
+    let xv = emit_expr env x_e in
+    let f = fresh_reg () and a = fresh_reg () and r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = fptrunc double %s to float" f xv);
+    emit_instr (Printf.sprintf "  %s = insertelement <4 x float> undef, float %s, i32 0" a f);
+    emit_instr (Printf.sprintf "  %s = shufflevector <4 x float> %s, <4 x float> undef, <4 x i32> zeroinitializer" r a); r
+  | Ast.App ({ node = Ast.Var "f32x4_reduce_add"; _ }, v_e) ->
+    (* Left to right at lane precision, then one widening -- the order the type
+       entry fixes, so the four backends print the same bits. *)
+    simd_used_llvm := true;
+    let vv = emit_expr env v_e in
+    let l = List.map (fun i ->
+      let x = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = extractelement <4 x float> %s, i32 %d" x vv i); x) [0; 1; 2; 3] in
+    let s1 = fresh_reg () and s2 = fresh_reg () and s3 = fresh_reg () and r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = fadd float %s, %s" s1 (List.nth l 0) (List.nth l 1));
+    emit_instr (Printf.sprintf "  %s = fadd float %s, %s" s2 s1 (List.nth l 2));
+    emit_instr (Printf.sprintf "  %s = fadd float %s, %s" s3 s2 (List.nth l 3));
+    emit_instr (Printf.sprintf "  %s = fpext float %s to double" r s3); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "f32x4_make"; _ }, a_e); _ }, b_e); _ }, c_e); _ }, d_e) ->
+    simd_used_llvm := true;
+    let vs = List.map (fun e -> emit_expr env e) [a_e; b_e; c_e; d_e] in
+    let acc = ref "undef" in
+    List.iteri (fun i v ->
+      let f = fresh_reg () and t = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = fptrunc double %s to float" f v);
+      emit_instr (Printf.sprintf "  %s = insertelement <4 x float> %s, float %s, i32 %d" t !acc f i);
+      acc := t) vs;
+    !acc
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("f32x4_add" | "f32x4_sub" | "f32x4_mul" | "f32x4_div" as op); _ }, a_e); _ }, b_e) ->
+    simd_used_llvm := true;
+    let ir_op = match op with "f32x4_add" -> "fadd" | "f32x4_sub" -> "fsub" | "f32x4_mul" -> "fmul" | _ -> "fdiv" in
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = %s <4 x float> %s, %s" r ir_op av bv); r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var ("f64x2_load" | "__f64x2_load_unchecked" as name); _ }, v_e); _ }, i_e) ->
     let sfx = if name = "f64x2_load" then "" else "_unchecked" in
     let av = emit_expr env v_e in
@@ -5018,6 +5074,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let iv = emit_expr env i_e in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call double @mere_f64x2_extract(<2 x double> %s, i64 %s)" r vv iv); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "f32x4_extract"; _ }, v_e); _ }, i_e) ->
+    simd_used_llvm := true;
+    let vv = emit_expr env v_e in
+    let iv = emit_expr env i_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call double @mere_f32x4_extract(<4 x float> %s, i64 %s)" r vv iv); r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "u8x16_extract"; _ }, v_e); _ }, i_e) ->
     simd_used_llvm := true;
     let vv = emit_expr env v_e in
@@ -9582,6 +9644,21 @@ let emit_map_runtime_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
 let simd_runtime_llvm =
   String.concat "\n"
     [ "@.idxfmt_f64x2 = private constant [53 x i8] c\"f64x2_extract: lane %lld out of range (lanes = %lld)\\00\"";
+      "@.idxfmt_f32x4 = private constant [53 x i8] c\"f32x4_extract: lane %lld out of range (lanes = %lld)\\00\"";
+      "define double @mere_f32x4_extract(<4 x float> %v, i64 %i) {";
+      "entry:";
+      "  %lt = icmp slt i64 %i, 0";
+      "  %ge = icmp sge i64 %i, 4";
+      "  %oob = or i1 %lt, %ge";
+      "  br i1 %oob, label %fail, label %ok";
+      "fail:";
+      "  call void @__lang_fail_idx(ptr @.idxfmt_f32x4, i64 %i, i64 4)";
+      "  unreachable";
+      "ok:";
+      "  %l = extractelement <4 x float> %v, i64 %i";
+      "  %r = fpext float %l to double";
+      "  ret double %r";
+      "}";
       "@.idxfmt_u8x16 = private constant [53 x i8] c\"u8x16_extract: lane %lld out of range (lanes = %lld)\\00\"";
       "define <2 x double> @mere_f64x2_splat(double %x) {";
       "entry:";

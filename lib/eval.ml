@@ -27,6 +27,11 @@ type value =
   | V_str of string
   | V_bytes of string
   | V_f64x2 of float * float           (* Q-109 *)
+  | V_f32x4 of float * float * float * float
+    (* Q-109 (2d). Every component is held as a double that IS exactly
+       representable as a float32 -- the narrowing happens on the way in and
+       after every operation, so what is stored is always what the hardware
+       lane would hold. *)
   | V_u8x16 of Bytes.t                 (* 16 bytes *)
     (* immutable raw byte sequence (a first-class binary type). Held as an OCaml string
        (which carries NULs), so binary-safe; distinct from V_str at the type
@@ -251,6 +256,9 @@ and to_string = function
   | V_int n -> string_of_int n
   | V_bytes s -> "bytes[" ^ hex_of_string s ^ "]"
   | V_f64x2 (a, b) -> "f64x2(" ^ format_float a ^ ", " ^ format_float b ^ ")"
+  | V_f32x4 (a, b, c, d) ->
+    "f32x4(" ^ format_float a ^ ", " ^ format_float b ^ ", "
+            ^ format_float c ^ ", " ^ format_float d ^ ")"
   | V_u8x16 bs -> "u8x16[" ^ hex_of_string (Bytes.to_string bs) ^ "]"
   | V_bytebuf b -> "bytebuf[" ^ hex_of_string (Bytes.sub_string b.bb_data 0 b.bb_len) ^ "]"
   | V_float f -> format_float f
@@ -305,6 +313,8 @@ and to_json_string = function
   | V_int n -> string_of_int n
   | V_bytes s -> "\"" ^ hex_of_string s ^ "\""  (* JSON has no byte type: hex string *)
   | V_f64x2 (a, b) -> "[" ^ to_json_string (V_float a) ^ ", " ^ to_json_string (V_float b) ^ "]"
+  | V_f32x4 (a, b, c, d) ->
+    "[" ^ String.concat ", " (List.map (fun x -> to_json_string (V_float x)) [a; b; c; d]) ^ "]"
   | V_u8x16 bs -> "\"" ^ hex_of_string (Bytes.to_string bs) ^ "\""
   | V_bytebuf b ->
     "\"" ^ hex_of_string (Bytes.sub_string b.bb_data 0 b.bb_len) ^ "\""
@@ -1530,6 +1540,59 @@ let lane_check who lanes i =
   if i < 0 || i >= lanes then
     raise (Eval_error (Loc.dummy,
       Printf.sprintf "%s: lane %d out of range (lanes = %d)" who i lanes))
+(* Q-109 (2d): f32x4. `f32` is the narrowing, and it is the only thing in here
+   that is not obvious: OCaml has no float32, so a lane is a double put through
+   the 32-bit pattern and back. Doing the arithmetic in double and narrowing
+   afterwards gives the SAME answer a real f32 add/sub/mul/div gives -- double
+   rounding is harmless when the wide format carries at least 2p+2 bits and 53
+   is comfortably past 24*2+2 -- which is what lets this interpreter be the
+   oracle for backends that use real 32-bit lanes. *)
+let f32 (x : float) : float = Int32.float_of_bits (Int32.bits_of_float x)
+let f32x4_of who v =
+  match v with
+  | V_f32x4 (a, b, c, d) -> (a, b, c, d)
+  | _ -> failwith (who ^ ": expected f32x4")
+let f32x4_binop name f =
+  V_builtin (name, fun a ->
+    V_builtin (name ^ "_p1", fun b ->
+      let (a0, a1, a2, a3) = f32x4_of name a and (b0, b1, b2, b3) = f32x4_of name b in
+      V_f32x4 (f32 (f a0 b0), f32 (f a1 b1), f32 (f a2 b2), f32 (f a3 b3))))
+let builtin_f32x4_add = f32x4_binop "f32x4_add" ( +. )
+let builtin_f32x4_sub = f32x4_binop "f32x4_sub" ( -. )
+let builtin_f32x4_mul = f32x4_binop "f32x4_mul" ( *. )
+let builtin_f32x4_div = f32x4_binop "f32x4_div" ( /. )
+let builtin_f32x4_splat =
+  V_builtin ("f32x4_splat", fun v ->
+    match v with
+    | V_float x -> let y = f32 x in V_f32x4 (y, y, y, y)
+    | _ -> failwith "f32x4_splat: expected float")
+let builtin_f32x4_make =
+  V_builtin ("f32x4_make", fun a ->
+    V_builtin ("f32x4_make_p1", fun b ->
+      V_builtin ("f32x4_make_p2", fun c ->
+        V_builtin ("f32x4_make_p3", fun d ->
+          match a, b, c, d with
+          | V_float w, V_float x, V_float y, V_float z ->
+            V_f32x4 (f32 w, f32 x, f32 y, f32 z)
+          | _ -> failwith "f32x4_make: expected four floats"))))
+let builtin_f32x4_extract =
+  V_builtin ("f32x4_extract", fun v ->
+    match v with
+    | V_f32x4 (a, b, c, d) ->
+      V_builtin ("f32x4_extract_p1", fun idx ->
+        match idx with
+        | V_int i ->
+          lane_check "f32x4_extract" 4 i;
+          V_float (List.nth [a; b; c; d] i)
+        | _ -> failwith "f32x4_extract: expected int lane")
+    | _ -> failwith "f32x4_extract: expected f32x4")
+(* Left to right at lane precision, as the type entry specifies: a pairwise
+   tree would round differently and every backend has to agree. *)
+let builtin_f32x4_reduce_add =
+  V_builtin ("f32x4_reduce_add", fun v ->
+    let (a, b, c, d) = f32x4_of "f32x4_reduce_add" v in
+    V_float (f32 (f32 (f32 (a +. b) +. c) +. d)))
+
 let builtin_f64x2_splat =
   V_builtin ("f64x2_splat", fun v ->
     match v with V_float x -> V_f64x2 (x, x) | _ -> failwith "f64x2_splat: expected float")
@@ -3594,6 +3657,14 @@ let initial_env : env =
     ("__bytes_get_unchecked", ref builtin_bytes_get);
     ("f64x2_splat", ref builtin_f64x2_splat);
     ("f64x2_extract", ref builtin_f64x2_extract);
+    ("f32x4_splat", ref builtin_f32x4_splat);
+    ("f32x4_extract", ref builtin_f32x4_extract);
+    ("f32x4_make", ref builtin_f32x4_make);
+    ("f32x4_add", ref builtin_f32x4_add);
+    ("f32x4_sub", ref builtin_f32x4_sub);
+    ("f32x4_mul", ref builtin_f32x4_mul);
+    ("f32x4_div", ref builtin_f32x4_div);
+    ("f32x4_reduce_add", ref builtin_f32x4_reduce_add);
     ("u8x16_splat", ref builtin_u8x16_splat);
     ("u8x16_extract", ref builtin_u8x16_extract);
     ("f64x2_make", ref builtin_f64x2_make);

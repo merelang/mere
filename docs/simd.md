@@ -80,10 +80,10 @@ interpreter, C, LLVM and Wasm, and the set of planned loops must match the
 clang for its vectorization remarks on the emitted C of `axpy` and requires
 vector arithmetic reachable from `main` with the pass on and none with it off.
 
-## 2. The explicit path: `f64x2` and `u8x16`
+## 2. The explicit path: `f64x2`, `f32x4` and `u8x16`
 
-Two 128-bit value types (v0.1.422-425): `f64x2` is two doubles, `u8x16` is
-sixteen bytes. They are ordinary values -- let-bound, passed, returned,
+Three 128-bit value types (v0.1.422-425, v0.1.445): `f64x2` is two doubles,
+`f32x4` is four floats, `u8x16` is sixteen bytes. They are ordinary values -- let-bound, passed, returned,
 captured, put in records -- and every operation on them is a builtin. There
 are no operators: `f64x2_add a b`, not `a + b`. `==` and `<` on a SIMD value
 are refused by the type checker; `show` and `to_json` work
@@ -92,7 +92,7 @@ are refused by the type checker; `show` and `to_json` work
 The builtins, with signatures and lane semantics, are tabled in
 [stdlib-reference.md](stdlib-reference.md) under "the 128-bit SIMD types":
 for `f64x2` splat / make / extract / add / sub / mul / div / reduce_add /
-load / store; for `u8x16` splat / extract / from_bytes / load / and / or /
+load / store; for `f32x4` the same without load and store; for `u8x16` splat / extract / from_bytes / load / and / or /
 xor / sub_sat / eq / swizzle / shr / shift_in / any_true / reduce_add. The
 loads are bounds-checked like `vec_get` (`u8x16_load b i` needs `[i, i+16)`
 inside `b`), and inside a versioned loop they become the unchecked twins like
@@ -117,13 +117,13 @@ if u8x16_any_true (u8x16_and input m80) then
 
 Where the types run:
 
-| backend | `f64x2` | `u8x16` | representation |
+| backend | `f64x2` / `f32x4` | `u8x16` | representation |
 |---|---|---|---|
 | interpreter | yes | yes | the oracle every other backend is compared against |
 | C | yes | yes | clang's `vector_size(16)` types; swizzle by `#if` (NEON `vqtbl1q_u8` / SSSE3 `_mm_shuffle_epi8` / scalar) |
 | LLVM IR | yes | yes | `<2 x double>` / `<16 x i8>`; vectors through heap memory carry `align 8` (the allocator's guarantee) |
 | Wasm | yes | yes | `v128`; a value stays unboxed on the stack and in `v128` locals inside an expression, and is boxed into a 16-byte block only when it escapes (a call argument, a record field, a capture) |
-| RISC-V (RV32IM / RV64IM) | refused | yes, RVV 1.0 (`vsetivli`, `vle8`/`vse8`, integer and mask ops, `vrgather`, `vslideup`/`vslidedown`, `vredor`, `vwredsumu`) | an expression tree is evaluated in `v1`..`v7` and boxed once at its root; a let-bound value used only as an operand lives in `v8`..`v15` when no call can run before its last use |
+| RISC-V (RV32IM / RV64IM) | refused (`f32x4` too) | yes, RVV 1.0 (`vsetivli`, `vle8`/`vse8`, integer and mask ops, `vrgather`, `vslideup`/`vslidedown`, `vredor`, `vwredsumu`) | an expression tree is evaluated in `v1`..`v7` and boxed once at its root; a let-bound value used only as an operand lives in `v8`..`v15` when no call can run before its last use |
 
 The cost to know about is the box. On Wasm and RISC-V a SIMD value that
 crosses a call or a data structure is a heap allocation, and neither backend
@@ -190,6 +190,12 @@ The full table with conditions is in
 - `mat4xvec4`: 206 ms scalar, **140 ms** with `f64x2`, 200 ms C -- the one
   floating-point row where explicit lanes pay, and bit-identical to the scalar
   spelling. See the next paragraph for why it is not a contradiction of `matmul`.
+- `mat4xvec4_f32`: the same kernel with `f32x4`, **100 ms** against C's scalar
+  single-precision 131 ms -- four lanes against the f64 row's two, 1.37x it and
+  1.9x the scalar double row. Eight vector operations per vertex against
+  sixteen is a ceiling of 2x, so most of it arrives. A separate row and not a
+  variant of the one above, because single and double precision are different
+  answers and only the wall clock is comparable.
 - `axpy_simd`: loses to the auto-vectorized `axpy` (0.12 s against 0.08 s).
 - `utf8valid` 72 ms, `utf8valid_simd` 29 ms, scalar C 54 ms: 2.5x the scalar
   Mere machine and 1.9x scalar C, about 4 GB/s.
@@ -203,6 +209,13 @@ Write element-wise integer loops plainly; versioning and clang make them tie
 C. Reach for `u8x16` when a byte-processing loop is slow *and* its dependence
 on the previous byte can be rewritten as a lookup on the combination of
 neighbouring bytes -- UTF-8 validation, JSON structural scanning, base64.
+
+`f32x4`'s lanes are single precision while the language's scalar `float` is a
+double, so it converts at the boundary in both directions (round-to-nearest-even,
+the backend's own). That is a real cost when a kernel crosses the boundary often
+and free when it does not -- `mat4xvec4_f32` narrows sixteen matrix entries once
+and four vertex components per vertex, and still wins. It has no `load` or
+`store` on purpose; see the stdlib entry.
 
 For floating point the rule is not "reductions lose", which is how `matmul`
 alone reads. **It is that the lanes have to be on an axis the reduction is not

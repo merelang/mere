@@ -476,6 +476,11 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyInt -> "int" | Ast.TyBool -> "bool" | Ast.TyStr -> "str"
   | Ast.TyUnit -> "unit" | Ast.TyFloat -> "float" | Ast.TyBytes -> "bytes"
   | Ast.TySimd Ast.U8x16 -> "u8x16"   (* Q-110: a pointer to a 16-byte box; the lanes live in RVV registers only inside an operation *)
+  | Ast.TySimd Ast.F32x4 ->
+    (* Same reason as f64x2 below: RVV's f32 element width would need a float
+       unit this target does not have. contrib/softfloat is a library, not a
+       lane. *)
+    err Loc.dummy "RV32I: the SIMD type f32x4 is not supported (this target has no floating-point unit)"
   | Ast.TySimd Ast.F64x2 ->
     (* no float unit here (floats are softfloat), so two-lane doubles stay refused by name *)
     err Loc.dummy "RV32I: the SIMD type f64x2 is not supported (this target has no floating-point unit)"

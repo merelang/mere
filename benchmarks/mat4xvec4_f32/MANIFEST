@@ -1,0 +1,56 @@
+name  = mat4xvec4_f32
+shape = the mat4xvec4 kernel at single precision, 20,000 vertices, 5000 passes
+args  = 20000
+cflags = -ffp-contract=off
+claim = FOUR LANES INSTEAD OF TWO, on the kernel where two already paid.
+        mat4xvec4 showed that explicit floating-point lanes beat both the
+        scalar Mere row and C when the lanes are on the axis the reduction is
+        not on. f64x2 is only two lanes wide, which is the whole width a
+        128-bit vector of doubles has; this row is the same kernel with the
+        lanes single precision, so a vec4 fits in ONE vector and a vertex costs
+        four multiplies, three adds and one accumulate -- eight vector
+        operations against the sixteen the f64 row needs. Eight against sixteen
+        is the ceiling; the number says how much of it arrives.
+        ---
+        THIS ROW'S ANSWER IS NOT COMPARABLE WITH mat4xvec4'S. They are
+        different computations -- single against double precision -- not two
+        spellings of one, and that is why this is a separate directory rather
+        than a bench_*.mere beside it: run.py's same-answer rule is per
+        directory, and it would be wrong here and right there. What IS
+        comparable is the WALL CLOCK, because the two kernels have the same
+        shape, the same inputs, the same pass count and the same accumulation
+        order; the README carries the pair.
+        ---
+        Within this directory the same-answer rule applies as usual, and here
+        it means C's `float` and Rust's `f32` doing the arithmetic in the same
+        order as Mere's lanes, including the final fold: f32x4_reduce_add is
+        specified left to right at lane precision, and both reference rows fold
+        their four accumulators the same way.
+        ---
+        The f32 accumulator does NOT saturate, which was measured rather than
+        assumed -- the checksum still changes between 4999 and 5000 passes, so
+        every pass reaches the answer and the same-answer check is live. Had it
+        saturated, a wrong implementation could have agreed with a right one by
+        both running out of mantissa, which is the shape of a check that passes
+        for the wrong reason.
+        ---
+        Same floating-point discipline as the rest of the suite. Unfused: Mere
+        emits `#pragma STDC FP_CONTRACT OFF`, the C row carries
+        -ffp-contract=off above, Rust does not contract without mul_add.
+        Non-dyadic inputs (divided by 1000) so the arithmetic rounds. The
+        answer is the IEEE-754 pattern of the widened accumulator, because a
+        formatted double hides the low bits.
+        ---
+        No Go row: Go has no 128-bit vector type a program can write, so the
+        comparison it would make -- scalar float32 against explicit lanes -- is
+        the one the C and Rust rows already make. No Node, Ruby or Python row,
+        for the reason mat4xvec4 gives: none of the three has an unboxed
+        single-precision array with 28 operations per element.
+
+# 1,048,952 B at v0.1.444 -- the same two Vecs as mat4xvec4, because the inputs
+# are still doubles: the narrowing happens at the lane, not in the buffer. That
+# a single-precision kernel does not halve its memory here is a fact about the
+# input representation and is the first thing a `bytes`-backed vertex buffer
+# would change (Q-123).
+alloc_min = 786432
+alloc_max = 1310720

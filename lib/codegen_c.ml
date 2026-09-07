@@ -3278,6 +3278,8 @@ let rec emit_expr (e : Ast.expr) : string =
          elem_tag (emit_expr vec_e) (emit_expr arg)
      | Ast.Var "f64x2_splat" -> Printf.sprintf "mere_f64x2_splat(%s)" (emit_expr arg)
      | Ast.Var "f64x2_reduce_add" -> Printf.sprintf "mere_f64x2_reduce_add(%s)" (emit_expr arg)
+     | Ast.Var "f32x4_splat" -> Printf.sprintf "mere_f32x4_splat(%s)" (emit_expr arg)
+     | Ast.Var "f32x4_reduce_add" -> Printf.sprintf "mere_f32x4_reduce_add(%s)" (emit_expr arg)
      | Ast.Var "u8x16_any_true" -> Printf.sprintf "mere_u8x16_any_true(%s)" (emit_expr arg)
      | Ast.Var "u8x16_first_true" -> Printf.sprintf "mere_u8x16_first_true(%s)" (emit_expr arg)
      | Ast.Var "u8x16_reduce_add" -> Printf.sprintf "mere_u8x16_reduce_add(%s)" (emit_expr arg)
@@ -3307,6 +3309,13 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "u8x16_splat" -> Printf.sprintf "mere_u8x16_splat(%s)" (emit_expr arg)
      | Ast.App ({ node = Ast.Var "f64x2_extract"; _ }, v_e) ->
        Printf.sprintf "mere_f64x2_extract(%s, %s)" (emit_expr v_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "f32x4_extract"; _ }, v_e) ->
+       Printf.sprintf "mere_f32x4_extract(%s, %s)" (emit_expr v_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "f32x4_make"; _ }, a_e); _ }, b_e); _ }, c_e) ->
+       Printf.sprintf "mere_f32x4_make(%s, %s, %s, %s)" (emit_expr a_e) (emit_expr b_e) (emit_expr c_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var ("f32x4_add" | "f32x4_sub" | "f32x4_mul" | "f32x4_div" as op); _ }, a_e) ->
+       let c_op = match op with "f32x4_add" -> "+" | "f32x4_sub" -> "-" | "f32x4_mul" -> "*" | _ -> "/" in
+       Printf.sprintf "((%s) %s (%s))" (emit_expr a_e) c_op (emit_expr arg)
      | Ast.App ({ node = Ast.Var "u8x16_extract"; _ }, v_e) ->
        Printf.sprintf "mere_u8x16_extract(%s, %s)" (emit_expr v_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "__vec_get_unchecked"; _ }, vec_e) ->
@@ -4414,6 +4423,7 @@ let rec c_type_of (t : Ast.ty) : string =
                                      binary-safe (not NUL-terminated like str). *)
   | Ast.TySimd Ast.F64x2 -> "mere_f64x2"   (* Q-109: clang/gcc vector extension, 16 bytes by value *)
   | Ast.TySimd Ast.U8x16 -> "mere_u8x16"
+  | Ast.TySimd Ast.F32x4 -> "mere_f32x4"
   | Ast.TyUnit -> "int"  (* unit becomes int 0; keeps return-type uniform *)
   | Ast.TyVar _ | Ast.TyParam _ -> "long long"  (* residual tyvar: dead or
       unconstrained — erased to int's representation (see ty_tag) *)
@@ -4839,6 +4849,11 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
   | Ast.TySimd Ast.F64x2 ->
     (* Q-109 (2d): the interpreter's spelling, lanes through the shared float formatter *)
     header ^ " { char* buf; asprintf(&buf, \"f64x2(%s, %s)\", __lang_str_of_float(v[0]), __lang_str_of_float(v[1])); return __lang_str_take_cstr(buf); }"
+  | Ast.TySimd Ast.F32x4 ->
+    (* A lane is a float and the shared formatter takes a double, so each one
+       widens on the way to it -- exactly the value f32x4_extract would hand
+       back, so `show` and `extract` cannot disagree about a lane. *)
+    header ^ " { char* buf; asprintf(&buf, \"f32x4(%s, %s, %s, %s)\", __lang_str_of_float((double)v[0]), __lang_str_of_float((double)v[1]), __lang_str_of_float((double)v[2]), __lang_str_of_float((double)v[3])); return __lang_str_take_cstr(buf); }"
   | Ast.TySimd Ast.U8x16 ->
     header ^ " { char buf[40]; memcpy(buf, \"u8x16[\", 6); for (int i = 0; i < 16; i++) snprintf(buf + 6 + 2 * i, 3, \"%02x\", (unsigned)v[i]); buf[38] = ']'; buf[39] = 0; return __lang_str_of_cstr(buf); }"
   | Ast.TyTuple ts ->
@@ -4958,6 +4973,8 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
     header ^ " { return __lang_str_of_float(v); }"
   | Ast.TySimd Ast.F64x2 ->
     header ^ " { char* buf; asprintf(&buf, \"[%s, %s]\", __lang_str_of_float(v[0]), __lang_str_of_float(v[1])); return __lang_str_take_cstr(buf); }"
+  | Ast.TySimd Ast.F32x4 ->
+    header ^ " { char* buf; asprintf(&buf, \"[%s, %s, %s, %s]\", __lang_str_of_float((double)v[0]), __lang_str_of_float((double)v[1]), __lang_str_of_float((double)v[2]), __lang_str_of_float((double)v[3])); return __lang_str_take_cstr(buf); }"
   | Ast.TySimd Ast.U8x16 ->
     header ^ " { char buf[36]; buf[0] = '\"'; for (int i = 0; i < 16; i++) snprintf(buf + 1 + 2 * i, 3, \"%02x\", (unsigned)v[i]); buf[33] = '\"'; buf[34] = 0; return __lang_str_of_cstr(buf); }"
   | Ast.TyArrow _ ->
@@ -11974,6 +11991,24 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "}";
       "static inline mere_f64x2 mere_f64x2_make(double a, double b) { mere_f64x2 v = { a, b }; return v; }";
       "static inline double mere_f64x2_reduce_add(mere_f64x2 v) { return v[0] + v[1]; }";
+      (* Q-109 (2d): f32x4. The lanes are single precision and the language's
+         scalar float is a double, so every boundary here is a C conversion --
+         and C's double-to-float conversion IS round-to-nearest-even, which is
+         why nothing here hand-writes a rounding (the same delegation f32_bits
+         makes, Q-038). reduce_add adds left to right at LANE precision, the
+         order the type entry specifies and the other three backends use. *)
+      "typedef float mere_f32x4 __attribute__((vector_size(16)));";
+      "static inline mere_f32x4 mere_f32x4_splat(double x) { float f = (float)x; mere_f32x4 v = { f, f, f, f }; return v; }";
+      "static inline mere_f32x4 mere_f32x4_make(double a, double b, double c, double d) {";
+      "  mere_f32x4 v = { (float)a, (float)b, (float)c, (float)d }; return v;";
+      "}";
+      "static inline double mere_f32x4_extract(mere_f32x4 v, long long i) {";
+      "  if (i < 0 || i >= 4) __lang_fail_idx(\"f32x4_extract: lane %lld out of range (lanes = %lld)\", i, 4LL);";
+      "  return (double)v[i];";
+      "}";
+      "static inline double mere_f32x4_reduce_add(mere_f32x4 v) {";
+      "  float s = v[0] + v[1]; s = s + v[2]; s = s + v[3]; return (double)s;";
+      "}";
       (* Q-109 (2c): u8x16 lane operations. Portable through the vector extension
          where it reaches (arithmetic, compares, shifts, shufflevector for a
          constant shift_in); a byte table lookup (swizzle) is the one operation
