@@ -113,12 +113,12 @@ let rec json_to_gvalue = fn (j: json) ->
   match j with
   | JNull -> GNull
   | JBool b -> GBool b
-  // `contrib/json`'s `JNum` is an INT, not a float — a stated limitation of that
-  // parser, and it happens to be what GraphQL variables mostly are. A fractional
-  // variable would need a `json` that can hold one, which is that library's problem
-  // and not this file's; saying so is better than converting an int to a float and
-  // pretending the range came from the request.
+  // `contrib/json` keeps the two apart: a number written as an integer is
+  // `JNum` and one written with a point or an exponent is `JFloat`, which maps
+  // onto GraphQL's own Int and Float without this file having to guess. Until
+  // v0.1.446 the parser had no float at all and this comment said so.
   | JNum n -> GInt n
+  | JFloat f -> GFloat f
   | JStr s -> GStr s
   | JArr xs -> GList (list_map xs json_to_gvalue)
   | JObj fs -> GObj (list_map fs (fn (kv) -> let (k, v) = kv in (k, json_to_gvalue v)));

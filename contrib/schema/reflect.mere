@@ -70,6 +70,11 @@ let schema_text = fn (rec_) -> fn (name: str) ->
   match schema_lookup (schema_json rec_) name with
   | Json.JStr s -> s
   | Json.JNum n -> show n
+  // v0.1.446: `json` gained JFloat. Without this arm a fractional value fell to
+  // the wildcard below and became the empty string -- a catch-all returning a
+  // default answers wrongly for every kind it has not been told about, and the
+  // kind arrived without it having to change.
+  | Json.JFloat f -> str_of_float f
   | Json.JBool b -> if b then "1" else "0"
   | _ -> "";
 
@@ -97,6 +102,9 @@ let schema_with = fn (rec_) -> fn (name: str) -> fn (v: str) ->
     else
       match schema_lookup (schema_json rec_) name with
       | Json.JNum _ -> Cons (Json.JNum n, Nil)
+      // A column the schema shows as fractional gets the string parsed as one;
+      // `try_or` keeps a non-numeric input from raising, as it does for ints.
+      | Json.JFloat _ -> Cons (Json.JFloat (try_or (fn () -> float_of_str (str_trim v)) 0.0), Nil)
       | Json.JBool _ -> Cons (Json.JBool (str_eq v "1"), Nil)
       | Json.JStr _ -> Cons (Json.JStr v, Nil)
       | _ -> Cons (Json.JStr v, Cons (Json.JNum n, Cons (Json.JNull, Nil))) in

@@ -83,6 +83,7 @@ let jstr_of = fn (v: Json.json) ->
   match v with
   | Json.JStr s -> s
   | Json.JNum n -> show n
+  | Json.JFloat f -> str_of_float f
   | _ -> ""
 in
 
