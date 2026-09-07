@@ -149,8 +149,12 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyFloat -> "float"   (* Phase 43.1: allow float to be used as an fn signature tag *)
   | Ast.TyTuple ts -> "tuple_" ^ String.concat "_" (List.map ty_tag ts)
   | Ast.TyArrow (p, r) -> "closure_" ^ ty_tag p ^ "_" ^ ty_tag r
-  | Ast.TyCon (name, []) -> name
-  | Ast.TyCon (name, args) -> name ^ "_" ^ String.concat "_" (List.map ty_tag args)
+  (* Module-qualified, so the name carries a dot, which is not an identifier in
+     this backend's output either. Mangled the same way the C backend does --
+     see the note on Monomorph.ty_tag; the bug was found there and this is the
+     same code written twice. *)
+  | Ast.TyCon (name, []) -> Monomorph.flatten_module_dots name
+  | Ast.TyCon (name, args) -> Monomorph.flatten_module_dots name ^ "_" ^ String.concat "_" (List.map ty_tag args)
   | Ast.TyRef (_, r, Ast.TyUnit) ->
     (* Region marker — use the region name itself as the tag (same as codegen_c). *)
     r
