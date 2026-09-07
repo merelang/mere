@@ -920,7 +920,9 @@ satisfy it and hide the very row it was describing.
 | `bytes_of_hex` / `hex_of_bytes` | `str -> bytes` / `bytes -> str` | lowercase hex, no separators |
 | `bytes_of_vec` / `vec_of_bytes` | `Vec[R, int] -> bytes` / `bytes -> Vec[R, int]` | the bridge to the integer view |
 
-**`f64x2` / `u8x16` — the 128-bit SIMD types** (Q-109; two doubles, or sixteen bytes, in one value. C: the compiler's vector extension; LLVM: `<2 x double>` / `<16 x i8>`; Wasm: `v128`, boxed; RV32IM / RV64IM: `u8x16` only, as a 16-byte box through the RISC-V Vector extension (v0.1.426), `f64x2` refused. Not comparable with `==` or `<` -- compare lanes. `show` prints `f64x2(a, b)` / `u8x16[32 hex digits]`, `to_json` `[a, b]` / a hex string):
+**`f64x2` / `f32x4` / `u8x16` — the 128-bit SIMD types** (Q-109; two doubles, four floats, or sixteen bytes in one value. C: the compiler's vector extension; LLVM: `<2 x double>` / `<4 x float>` / `<16 x i8>`; Wasm: `v128`, boxed only when it escapes; RV32IM / RV64IM: `u8x16` only, as a 16-byte box through the RISC-V Vector extension (v0.1.426) -- `f64x2` and `f32x4` are refused there, which is the floating-point unit it does not have. Not comparable with `==` or `<` -- compare lanes. `show` prints `f64x2(a, b)` / `f32x4(a, b, c, d)` / `u8x16[32 hex digits]`, `to_json` `[a, b]` / `[a, b, c, d]` / a hex string.
+
+**`f32x4` is the one whose boundary converts.** Its lanes are single precision and the language's scalar `float` is a double, so a value is narrowed going in and widened coming out, and both conversions are the backend's own round-to-nearest-even -- the delegation `f32_bits` makes (Q-038). A double with no float32 becomes an infinity rather than wrapping. The arithmetic between the conversions is f32: `f32x4_add (f32x4_splat 1.0) (f32x4_splat 0.1)` is not `1.1`, it is the float32 nearest it. There is deliberately **no `f32x4_load` / `f32x4_store`**: for `f64x2` a load is a load because `Vec[R, float]` already holds doubles, but the same spelling on f32 lanes would be a narrowing conversion of four doubles wearing the name of a load, and a caller that wants four real f32 lanes off a buffer wants them from `bytes`. Two different right answers, so neither is defined until a caller settles it):
 
 | builtin | signature | notes |
 |---|---|---|
@@ -933,6 +935,11 @@ satisfy it and hide the very row it was describing.
 | `f64x2_reduce_add` | `f64x2 -> float` | lane 0 + lane 1, in that order |
 | `f64x2_load` | `Vec[R, float] -> int -> f64x2` | lanes `[i, i+2)` of the Vec; past the end fails like `vec_get` |
 | `f64x2_store` | `Vec[R, float] -> int -> f64x2 -> unit` | the two lanes into `[i, i+2)` |
+| `f32x4_splat` | `float -> f32x4` | all four lanes, narrowed to f32 |
+| `f32x4_make` | `float -> float -> float -> float -> f32x4` | lanes 0..3, each narrowed |
+| `f32x4_extract` | `f32x4 -> int -> float` | lane 0..3, widened back to a double; another index fails like an out-of-range `vec_get` |
+| `f32x4_add` / `f32x4_sub` / `f32x4_mul` / `f32x4_div` | `f32x4 -> f32x4 -> f32x4` | lane-wise, at f32 precision |
+| `f32x4_reduce_add` | `f32x4 -> float` | `(((l0 + l1) + l2) + l3)`, each add at **lane** precision, widened once at the end. The order is part of the answer -- a pairwise tree rounds differently -- so it is fixed here and every backend does this |
 | `u8x16_from_bytes` / `u8x16_load` | `bytes -> u8x16` / `bytes -> int -> u8x16` | the first 16 bytes / bytes `[i, i+16)`; short fails like an index |
 | `u8x16_and` / `u8x16_or` / `u8x16_xor` | `u8x16 -> u8x16 -> u8x16` | bitwise, lane-wise |
 | `u8x16_sub_sat` | `u8x16 -> u8x16 -> u8x16` | unsigned subtract saturating at 0 |

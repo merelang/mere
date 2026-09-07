@@ -1,0 +1,72 @@
+// mat4xvec4_f32 -- the mat4xvec4 kernel at single precision, four lanes at a
+// time instead of two. Same matrix, same vertices, same column-major order,
+// same number of passes; the only difference is the width of a lane, which is
+// the whole question this row exists to answer.
+//
+// A vec4 fits in ONE f32x4, so a vertex is four multiplies and three adds plus
+// one accumulate -- eight vector operations against the sixteen the f64x2 row
+// needs for the same vertex. That is the arithmetic ceiling on what four lanes
+// can buy; whether the ceiling is reached is what the number says.
+//
+// THE ANSWER IS NOT THE f64 ROW'S ANSWER and must not be compared to it: these
+// are different computations, not two spellings of one, which is why this is a
+// separate directory rather than a bench_*.mere next to it. Within this
+// directory the rule is the usual one -- every implementation prints the same
+// bytes, and here that means C's `float` and Rust's `f32` doing the same
+// arithmetic in the same order as Mere's lanes.
+//
+// Unfused as everywhere else in the suite: Mere emits `#pragma STDC
+// FP_CONTRACT OFF`, the C row carries -ffp-contract=off, and Rust does not
+// contract without mul_add. Inputs are non-dyadic (divided by 1000) so the
+// arithmetic actually rounds, and the answer is printed as the two halves of
+// the IEEE-754 pattern of the widened accumulator.
+
+let n = match args () with | Cons (a, _) -> int_of_str a | Nil -> 20000;
+let reps = 5000;
+
+let mk = fn (count: int) -> fn (seed: int) ->
+  let v = vec_new () in
+  let rec fill = fn (i: int) -> fn (x: int) ->
+    if i == count then ()
+    else
+      let x2 = (1103515245 * x + 12345) % 2147483648 in
+      let _ = vec_push v (f_div (float_of_int (x2 % 2001 - 1000)) 1000.0) in
+      fill (i + 1) x2 in
+  let _ = fill 0 seed in
+  v;
+
+let mat = mk 16 20260907;
+let vs = mk (4 * n) 77770707;
+
+// Column j is mat[4*j .. 4*j+3], all four rows in one vector. Each entry is a
+// double on the way in and the lane narrows it -- round-to-nearest-even, the
+// backend's own conversion.
+let c0 = f32x4_make (vec_get mat 0)  (vec_get mat 1)  (vec_get mat 2)  (vec_get mat 3);
+let c1 = f32x4_make (vec_get mat 4)  (vec_get mat 5)  (vec_get mat 6)  (vec_get mat 7);
+let c2 = f32x4_make (vec_get mat 8)  (vec_get mat 9)  (vec_get mat 10) (vec_get mat 11);
+let c3 = f32x4_make (vec_get mat 12) (vec_get mat 13) (vec_get mat 14) (vec_get mat 15);
+
+let rec pass = fn (i: int) -> fn (acc: f32x4) ->
+  if i == n then acc
+  else
+    let sx = f32x4_splat (vec_get vs (4 * i)) in
+    let sy = f32x4_splat (vec_get vs (4 * i + 1)) in
+    let sz = f32x4_splat (vec_get vs (4 * i + 2)) in
+    let sw = f32x4_splat (vec_get vs (4 * i + 3)) in
+    let r = f32x4_add (f32x4_add (f32x4_add (f32x4_mul c0 sx) (f32x4_mul c1 sy))
+                                 (f32x4_mul c2 sz))
+                      (f32x4_mul c3 sw) in
+    pass (i + 1) (f32x4_add acc r);
+
+let rec rep = fn (r: int) -> fn (acc: f32x4) ->
+  if r == reps then acc else rep (r + 1) (pass 0 acc);
+
+let acc = rep 0 (f32x4_splat 0.0);
+// reduce_add is left to right at lane precision, then widened once -- the C
+// and Rust rows fold their four accumulators the same way.
+let s = f32x4_reduce_add acc;
+
+let _ = print ("n " ++ str_of_int n) in
+let _ = print ("checksum " ++ str_of_int (float_bits_hi s)
+               ++ " " ++ str_of_int (float_bits_lo s)) in
+exit 0

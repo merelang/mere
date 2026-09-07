@@ -4,6 +4,55 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.445 — 2026-09-07
+
+**`f32x4`, the third 128-bit SIMD type.** Four single-precision lanes, on
+all four backends that have a floating-point unit: the C backend's vector
+extension, LLVM's `<4 x float>`, Wasm's `v128`, and the interpreter as the
+oracle. RV32IM / RV64IM refuse it by name, the same way they refuse
+`f64x2` and for the same reason.
+
+Eight builtins — `splat`, `make`, `extract`, `add`, `sub`, `mul`, `div`,
+`reduce_add`. **No `load` or `store`, deliberately.** For `f64x2` a load
+is a load, because `Vec[R, float]` already holds doubles; the same
+spelling on f32 lanes would be a narrowing conversion of four doubles
+wearing the name of a load, and the caller that actually wants four f32
+lanes off a buffer wants them from `bytes`. Two different right answers
+is not a thing to guess at before a caller exists, so the name is simply
+unbound.
+
+**The lanes are single precision and the language's scalar `float` is a
+double**, so this is the one SIMD type whose boundary converts: narrowed
+going in, widened coming out, both the backend's own round-to-nearest-even
+— the delegation `f32_bits` already makes (Q-038). A value with no float32
+becomes an infinity rather than wrapping. `f32x4_reduce_add` is specified
+left to right at LANE precision, `(((l0 + l1) + l2) + l3)`, because a
+pairwise tree rounds differently and four backends have to agree.
+
+`test/parity/simd_f32x4.mere` holds all of that across interp, C, LLVM and
+Wasm in IEEE-754 bit patterns. Its two discriminating lines were both
+WRONG when first written and were fixed against an independent float32
+model before being committed: `(1, 1e-8, 1e-8, 1)` gives 2.0 whether the
+reduction is left-to-right or pairwise, and the chain that was supposed to
+separate lane-precision arithmetic from "compute in doubles, narrow once"
+did not separate them either. The file now uses `(1, 3e-8, 3e-8, 3e-8)`
+and `(1 + 0.1) - 1`, which do — and a poison (the interpreter's reduction
+switched to pairwise) was run to confirm the gate goes red.
+
+**`benchmarks/mat4xvec4_f32`**: the `mat4xvec4` kernel at single
+precision. A vec4 fits in one `f32x4`, so a vertex costs eight vector
+operations against the f64 row's sixteen — a ceiling of 2x, of which
+1.37x arrives: **100 ms against the f64x2 row's 137 ms**, 1.9x the scalar
+double row, and ahead of C's scalar `float` at 131 ms. Its answer is
+single precision and therefore not the f64 row's answer, so it is a
+separate directory: run.py's same-answer rule is per directory and is
+correct in both. The f32 accumulator does not saturate, which was measured
+(the checksum still moves between 4999 and 5000 passes) rather than
+assumed — a saturated one would have let a wrong implementation agree with
+a right one by both running out of mantissa.
+
+---
+
 ## v0.1.444 — 2026-09-06
 
 **`region_reclaim_check` measured peak RSS with a tool the CI runner does

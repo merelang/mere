@@ -798,6 +798,7 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyBytes -> "bytes"
   | Ast.TySimd Ast.F64x2 -> "f64x2"
   | Ast.TySimd Ast.U8x16 -> "u8x16"
+  | Ast.TySimd Ast.F32x4 -> "f32x4"
   | Ast.TyTuple ts -> "tuple_" ^ String.concat "_" (List.map ty_tag ts)
   | Ast.TyArrow (p, r) -> "closure_" ^ ty_tag p ^ "_" ^ ty_tag r
   | Ast.TyCon (name, []) -> name
@@ -1666,6 +1667,19 @@ let rec emit_simd_v (e : Ast.expr) : unit =
   | Ast.App ({ node = Ast.App ({ node = Ast.Var ("f64x2_add" | "f64x2_sub" | "f64x2_mul" | "f64x2_div" as op); _ }, a); _ }, b) ->
     emit_simd_v a; emit_simd_v b;
     emit_instr (match op with "f64x2_add" -> "f64x2.add" | "f64x2_sub" -> "f64x2.sub" | "f64x2_mul" -> "f64x2.mul" | _ -> "f64x2.div")
+  (* Q-109 (2d): f32x4. `f32.demote_f64` on the way in is Wasm's
+     round-to-nearest-even, so the narrowing is the engine's and not written
+     here -- the delegation f32_bits makes (Q-038). *)
+  | Ast.App ({ node = Ast.Var "f32x4_splat"; _ }, x) ->
+    f64_of_boxed x; emit_instr "f32.demote_f64"; emit_instr "f32x4.splat"
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "f32x4_make"; _ }, a); _ }, b); _ }, c); _ }, d) ->
+    f64_of_boxed a; emit_instr "f32.demote_f64"; emit_instr "f32x4.splat";
+    List.iteri (fun i e ->
+      f64_of_boxed e; emit_instr "f32.demote_f64";
+      emit_instr (Printf.sprintf "f32x4.replace_lane %d" (i + 1))) [b; c; d]
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("f32x4_add" | "f32x4_sub" | "f32x4_mul" | "f32x4_div" as op); _ }, a); _ }, b) ->
+    emit_simd_v a; emit_simd_v b;
+    emit_instr (match op with "f32x4_add" -> "f32x4.add" | "f32x4_sub" -> "f32x4.sub" | "f32x4_mul" -> "f32x4.mul" | _ -> "f32x4.div")
   | Ast.App ({ node = Ast.App ({ node = Ast.Var ("u8x16_and" | "u8x16_or" | "u8x16_xor" | "u8x16_sub_sat" | "u8x16_eq" | "u8x16_swizzle" as op); _ }, a); _ }, b) ->
     emit_simd_v a; emit_simd_v b;
     emit_instr (match op with
@@ -3271,6 +3285,10 @@ and emit_expr (e : Ast.expr) : unit =
     simd_used := true; emit_simd_v v_e; emit_expr i_e; emit_instr "call $mere_f64x2_extract_v"
   | Ast.App ({ node = Ast.Var "f64x2_reduce_add"; _ }, v_e) ->
     simd_used := true; emit_simd_v v_e; emit_instr "call $mere_f64x2_reduce_add_v"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "f32x4_extract"; _ }, v_e); _ }, i_e) ->
+    simd_used := true; emit_simd_v v_e; emit_expr i_e; emit_instr "call $mere_f32x4_extract_v"
+  | Ast.App ({ node = Ast.Var "f32x4_reduce_add"; _ }, v_e) ->
+    simd_used := true; emit_simd_v v_e; emit_instr "call $mere_f32x4_reduce_add_v"
   | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var ("f64x2_store" | "__f64x2_store_unchecked" as name); _ }, v_e); _ }, i_e); _ }, x_e) ->
     simd_used := true; vec_used := true; emit_expr v_e; emit_expr i_e; emit_simd_v x_e;
     emit_instr (if name = "f64x2_store" then "call $mere_f64x2_store_v" else "call $mere_f64x2_store_unchecked_v")
@@ -4619,6 +4637,24 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
       \        (call $__lang_str_concat (i64.const %d) (i64.extend_i32_u (call $__lang_str_of_float (f64x2.extract_lane 0 (local.get $v)))))\n\
       \        (call $__lang_str_concat (i64.const %d) (i64.extend_i32_u (call $__lang_str_of_float (f64x2.extract_lane 1 (local.get $v))))))\n\
       \      (i64.const %d)))" lp cm rp
+  | Ast.TySimd Ast.F32x4 ->
+    (* Each lane is promoted to a double before the shared formatter, which is
+       the value f32x4_extract returns -- show and extract cannot disagree. *)
+    let lp = intern_show_str "f32x4(" and cm = intern_show_str ", " and rp = intern_show_str ")" in
+    let lane i =
+      Printf.sprintf
+        "(i64.extend_i32_u (call $__lang_str_of_float (f64.promote_f32 (f32x4.extract_lane %d (local.get $v)))))" i in
+    Printf.sprintf
+      "  (func $show_f32x4 (param $x i64) (result i64)\n\
+      \    (local $v v128)\n\
+      \    (local.set $v (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $x))))\n\
+      \    (call $__lang_str_concat (call $__lang_str_concat (call $__lang_str_concat (call $__lang_str_concat\n\
+      \      (call $__lang_str_concat (i64.const %d) %s)\n\
+      \      (call $__lang_str_concat (i64.const %d) %s))\n\
+      \      (call $__lang_str_concat (i64.const %d) %s))\n\
+      \      (call $__lang_str_concat (i64.const %d) %s))\n\
+      \      (i64.const %d)))"
+      lp (lane 0) cm (lane 1) cm (lane 2) cm (lane 3) rp
   | Ast.TySimd Ast.U8x16 ->
     let pre = intern_show_str "u8x16[" and post = intern_show_str "]" in
     Printf.sprintf {|  (func $show_u8x16 (param $x i64) (result i64)
@@ -4887,6 +4923,22 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
       \        (call $__lang_str_concat (i64.const %d) (i64.extend_i32_u (call $__lang_str_of_float (f64x2.extract_lane 0 (local.get $v)))))\n\
       \        (call $__lang_str_concat (i64.const %d) (i64.extend_i32_u (call $__lang_str_of_float (f64x2.extract_lane 1 (local.get $v))))))\n\
       \      (i64.const %d)))" lb cm rb
+  | Ast.TySimd Ast.F32x4 ->
+    let lb = intern_show_str "[" and cm = intern_show_str ", " and rb = intern_show_str "]" in
+    let lane i =
+      Printf.sprintf
+        "(i64.extend_i32_u (call $__lang_str_of_float (f64.promote_f32 (f32x4.extract_lane %d (local.get $v)))))" i in
+    Printf.sprintf
+      "  (func $to_json_f32x4 (param $x i64) (result i64)\n\
+      \    (local $v v128)\n\
+      \    (local.set $v (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $x))))\n\
+      \    (call $__lang_str_concat (call $__lang_str_concat (call $__lang_str_concat (call $__lang_str_concat\n\
+      \      (call $__lang_str_concat (i64.const %d) %s)\n\
+      \      (call $__lang_str_concat (i64.const %d) %s))\n\
+      \      (call $__lang_str_concat (i64.const %d) %s))\n\
+      \      (call $__lang_str_concat (i64.const %d) %s))\n\
+      \      (i64.const %d)))"
+      lb (lane 0) cm (lane 1) cm (lane 2) cm (lane 3) rb
   | Ast.TySimd Ast.U8x16 ->
     let q = intern_show_str "\"" in
     Printf.sprintf {|  (func $to_json_u8x16 (param $x i64) (result i64)
@@ -7297,9 +7349,32 @@ let simd_runtime_wasm () =
     (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0)) (i64.ge_s (local.get $i8) (i64.const 16)))
       (then (return (call $__lang_fail (i64.const %d)))))
     (i64.extend_i32_u (i32.load8_u (i32.add (i32.wrap_i64 (local.get $v8)) (i32.wrap_i64 (local.get $i8))))))
+  ;; Q-109 (2d): f32x4, unboxed. `f64.promote_f32` on the way out is the
+  ;; widening the type entry specifies; reduce_add adds left to right at LANE
+  ;; precision and promotes once, so the four backends print the same bits.
+  (func $mere_f32x4_extract_v (param $x v128) (param $i8 i64) (result i64)
+    (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0)) (i64.ge_s (local.get $i8) (i64.const 4)))
+      (then (drop (call $__lang_fail (i64.const %d)))))
+    (call $__mere_box_f64
+      (f64.promote_f32
+        (if (result f32) (i64.eqz (local.get $i8))
+          (then (f32x4.extract_lane 0 (local.get $x)))
+          (else (if (result f32) (i64.eq (local.get $i8) (i64.const 1))
+            (then (f32x4.extract_lane 1 (local.get $x)))
+            (else (if (result f32) (i64.eq (local.get $i8) (i64.const 2))
+              (then (f32x4.extract_lane 2 (local.get $x)))
+              (else (f32x4.extract_lane 3 (local.get $x)))))))))))
+  (func $mere_f32x4_reduce_add_v (param $x v128) (result i64)
+    (call $__mere_box_f64
+      (f64.promote_f32
+        (f32.add
+          (f32.add
+            (f32.add (f32x4.extract_lane 0 (local.get $x)) (f32x4.extract_lane 1 (local.get $x)))
+            (f32x4.extract_lane 2 (local.get $x)))
+          (f32x4.extract_lane 3 (local.get $x))))))
 |} !simd_lane_msg_offset !simd_range_msg_offset !simd_range_msg_offset !simd_lane_msg_offset !simd_lane_msg_offset !simd_range_msg_offset !simd_range_msg_offset
    !simd_lane_msg_offset !simd_lane_msg_offset !simd_range_msg_offset !simd_range_msg_offset !simd_lane_msg_offset !simd_lane_msg_offset !simd_range_msg_offset !simd_range_msg_offset
-   !simd_lane_msg_offset
+   !simd_lane_msg_offset !simd_lane_msg_offset
 
 let bytes_runtime_wasm = {|
   (func $__lang_bytes_alloc (param $len8 i64) (result i64)
@@ -9298,7 +9373,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   idx_pre_charat_offset := fresh_str_offset "char_at: index ";
   idx_mid_charat_offset := fresh_str_offset " out of range (len=";
   bytes_get_msg_offset := fresh_str_offset "bytes_get: index out of range";
-  simd_lane_msg_offset := fresh_str_offset "lane index out of range (f64x2 has 2 lanes, u8x16 has 16)";
+  simd_lane_msg_offset := fresh_str_offset "lane index out of range (f32x4 has 4 lanes, f64x2 has 2, u8x16 has 16)";
   simd_range_msg_offset := fresh_str_offset "f64x2_load / f64x2_store: lanes out of bounds for the Vec";
   bytes_slice_msg_offset := fresh_str_offset "bytes_slice: range out of bounds";
   rand_pre_offset := fresh_str_offset "random_int: bound must be positive (got ";

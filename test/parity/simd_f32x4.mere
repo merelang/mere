@@ -1,0 +1,80 @@
+// f32x4 across the backends. THE POINT OF THIS FILE IS THE NARROWING: the
+// lanes are single precision and the language's scalar float is a double, so
+// every value that goes in is rounded and every value that comes out is
+// widened, and a backend that skips either would still print plausible numbers.
+// So the constants here are chosen to have no float32 -- 0.1 and 1/3 and 1e40
+// -- and the answers are printed as IEEE-754 bit patterns, where a missing
+// rounding is visible and a formatted double would hide it.
+let bits = fn (x: float) -> str_of_int (float_bits_hi x) ++ " " ++ str_of_int (float_bits_lo x);
+
+// 0.1 has no float32: the lane holds 0.100000001490116119384765625, and
+// extracting it must give back exactly that double and not 0.1.
+let a = f32x4_splat 0.1;
+let _ = print ("splat  " ++ bits (f32x4_extract a 0));
+let _ = print ("show   " ++ show a);
+
+// Distinct lanes, so an implementation that splats where it should insert is
+// caught, and lane order is pinned rather than assumed.
+let m = f32x4_make 1.0 0.1 (0.0 - 2.5) 3.0;
+let _ = print ("lane0  " ++ bits (f32x4_extract m 0));
+let _ = print ("lane1  " ++ bits (f32x4_extract m 1));
+let _ = print ("lane2  " ++ bits (f32x4_extract m 2));
+let _ = print ("lane3  " ++ bits (f32x4_extract m 3));
+let _ = print ("json   " ++ to_json m);
+
+// Arithmetic AT LANE PRECISION. A single operation cannot show this: 1/3 in
+// f32 lanes and 1/3 in doubles narrowed once give the same bits, and so does
+// almost every one-operation expression. It takes a CHAIN, and not just any
+// chain -- (1 + 0.1) - 1 is one that separates them, because the intermediate
+// 1.1 has to round before the subtraction can lose it. Narrowing after every
+// operation gives 0.10000002384185791 and narrowing once at the end gives
+// 0.10000000149011612, so this line is the difference between a backend with
+// real 32-bit lanes and one quietly doing the work in doubles. (Both were
+// checked against a float32 model before this comment was written -- the first
+// version of this file claimed a chain that did NOT separate them.)
+let one_third = f32x4_div (f32x4_splat 1.0) (f32x4_splat 3.0);
+let _ = print ("div    " ++ bits (f32x4_extract one_third 0));
+let chain = f32x4_sub (f32x4_add (f32x4_splat 1.0) (f32x4_splat 0.1)) (f32x4_splat 1.0);
+let _ = print ("chain  " ++ bits (f32x4_extract chain 0));
+
+// reduce_add is specified left to right at lane precision: (((l0+l1)+l2)+l3).
+// A pairwise tree ((l0+l1)+(l2+l3)) is the plausible other implementation and
+// these four separate the two: left to right, each 3e-8 is below half an ulp
+// of 1.0 and disappears, giving 1.0; pairwise, the two 3e-8 add first, clear
+// the threshold together, and give 1.0000001192092896. Inputs like
+// (1, 1e-8, 1e-8, 1) -- which this file used at first -- give 2.0 both ways
+// and would have made this line a decoration.
+let r = f32x4_reduce_add (f32x4_make 1.0 3e-8 3e-8 3e-8);
+let _ = print ("reduce " ++ bits r);
+
+// A value with no float32 at all becomes an infinity rather than wrapping --
+// the same rule f32_bits follows (Q-038), stated here so it stays true.
+let _ = print ("over   " ++ bits (f32x4_extract (f32x4_splat 1e40) 3));
+let _ = print ("under  " ++ bits (f32x4_extract (f32x4_splat 1e-60) 0));
+
+// Negative zero survives the round trip in the lane, and is not observable by
+// comparison -- atan2 is the one channel that separates it (Q-038).
+let nz = f32x4_extract (f32x4_splat (0.0 * (0.0 - 1.0))) 0;
+let _ = print ("negzero " ++ bits nz ++ " atan2 " ++ str_of_float (atan2 nz (0.0 - 1.0)));
+
+// A lane value that ESCAPES. Everything above is one expression at a time,
+// which is the case the Wasm and RISC-V backends keep in a register; a value
+// that crosses a call, sits in a record, or is captured by a closure has to be
+// boxed instead, and that is a different code path that the arithmetic above
+// cannot reach. (v0.1.429's unboxing is exactly this distinction.)
+type pair = { lo: f32x4, hi: f32x4 };
+let scale = fn (v: f32x4) -> fn (k: float) -> f32x4_mul v (f32x4_splat k);
+let p = pair { lo = f32x4_make 1.0 0.1 2.0 3.0, hi = f32x4_splat 0.25 };
+let _ = print ("field  " ++ bits (f32x4_extract p.lo 1));
+let _ = print ("call   " ++ bits (f32x4_extract (scale p.lo 0.1) 1));
+let _ = print ("tuple  " ++ bits (f32x4_extract (snd (1, f32x4_splat 0.1)) 0));
+
+// Captured by a closure, and carried across iterations of a recursion -- the
+// shape the mat4xvec4_f32 kernel has, where the columns are captured and the
+// accumulator is the loop's carry.
+let base = f32x4_make 1.0 0.1 0.01 0.001;
+let rec acc = fn (i: int) -> fn (a: f32x4) ->
+  if i == 0 then a else acc (i - 1) (f32x4_add a base);
+let _ = print ("carry  " ++ bits (f32x4_extract (acc 10 (f32x4_splat 0.0)) 1));
+
+print "ok"
