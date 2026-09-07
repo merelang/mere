@@ -1,0 +1,112 @@
+name  = mat4xvec4
+shape = 20,000 vertices through one 4x4 matrix, 5000 passes
+args  = 20000
+cflags = -ffp-contract=off
+claim = THE ROW WHERE EXPLICIT FLOATING-POINT LANES PAY. Until this one the
+        suite could not show that: matmul is a fixed-order reduction and is
+        unchanged by range-check versioning because floating-point addition
+        does not reassociate, and axpy_simd loses to the auto-vectorizer
+        because two lanes per step is a quarter of the work in flight. The
+        justification for explicit SIMD was carried entirely by utf8valid_simd,
+        on byte lanes.
+        ---
+        A vertex transform is the same multiply and add as matmul and it does
+        NOT need any license to reorder, because the sum runs down the columns:
+        r = c0*v.x + c1*v.y + c2*v.z + c3*v.w. Each of the four output lanes
+        accumulates column 0, 1, 2, 3, which is the order the scalar program
+        accumulates them in too. So bench_simd.mere is not an approximation of
+        bench.mere -- it is the same arithmetic, and the two print the same
+        bytes. That identity is the point of the row and the runner enforces
+        it: a change that makes the lanes faster by changing the answer fails
+        here rather than looking like a win.
+        ---
+Measured at v0.1.444 on arm64 (Apple clang 21), median of five:
+        scalar 206 ms, f64x2 143 ms, C 201 ms, Rust 340 ms, Go 280 ms. The
+        lanes are 1.44x the scalar Mere program and ahead of C.
+        ---
+        THE DISASSEMBLY SAYS SOMETHING BETTER THAN "clang cannot vectorize
+        this", and it is worth reading before trusting the number. Both Mere
+        loops are vectorized; they differ in WHICH AXIS IS IN THE LANES. clang,
+        given the scalar program, puts TWO VERTICES in the lanes: the versioned
+        kernel opens with `ld4.2d {v28,v29,v30,v31}` -- a de-interleaving load
+        that lands (x0,x1) (y0,y1) (z0,z1) (w0,w1) -- and does the transform as
+        16 fmul.2d and 12 fadd.2d for the pair. But the accumulator is a sum
+        ACROSS vertices in a fixed order, so with vertices in the lanes that
+        sum is back in the lane direction: the loop then spends four `mov
+        d9, v8[1]` lane extracts and EIGHT SCALAR fadd putting the pair back
+        together. That is matmul's problem, reintroduced by the choice of axis.
+        The explicit program puts the four COMPONENTS in the lanes instead, so
+        accumulating across vertices is lane-parallel and nothing is unpacked:
+        23 instructions, 8 fmul.2d, 8 fadd.2d, two of which are the
+        accumulators, and not one scalar floating-point instruction.
+        ---
+        Note what this does NOT say. Per vertex the two loops are almost the
+        same SIZE -- 21.5 instructions against 23 -- so the 1.44x is not an
+        instruction count, and anyone reporting it as one is reporting a
+        coincidence. What the lane version removes is the unpack and the
+        scalar tail on the accumulator's dependency path. That reading is the
+        disassembly's, and the disassembly is committed above; the attribution
+        of the milliseconds to it is not separately proven here.
+        ---
+        The C row is the scalar program, which is what a C programmer writes
+        without intrinsics -- the same comparison utf8valid_simd makes. clang
+        vectorizes it the same way it vectorizes Mere's scalar row, and its hot
+        loop carries the same eight scalar fadd. A C row written with NEON
+        intrinsics would be the Mere lane row and is not what this measures.
+        ---
+        The size is deliberately CACHE-RESIDENT: 20,000 vertices is 640 KB, and
+        the passes are what make the row long enough to time. This row is about
+        arithmetic throughput, and a working set that did not fit would measure
+        the memory system instead -- which is what axpy is for. The number is
+        therefore "this kernel with its data in cache" and not a claim about
+        streaming a real vertex buffer.
+        ---
+        Same floating-point discipline as matmul, for the same reasons. Unfused
+        everywhere: Mere emits `#pragma STDC FP_CONTRACT OFF` itself, the C row
+        carries -ffp-contract=off above, the Go row carries the float64()
+        conversions its spec names, and Rust does not contract without an
+        explicit mul_add. Inputs are non-dyadic (divided by 1000, not 1024) so
+        the arithmetic actually rounds. The answer is printed as the two halves
+        of the IEEE-754 pattern, because a formatted double hides the low bits.
+        Four accumulators rather than one: a single running sum would be one
+        serial dependency chain and would time the latency of an add.
+        ---
+        WASM, WHERE THE NUMBER IS MEMORY AND NOT TIME. That backend has no
+        optimizer behind it -- the text is assembled and run as written -- so
+        the same two programs are recorded here the way note-196's SIMD rows
+        are: by where they run out of memory. Counted in the emitted WAT, the
+        scalar kernel does 32 `f64.store` and 65 bump-allocator advances PER
+        VERTEX, because on Wasm every double that crosses a call or a data
+        structure is a heap box and this loop carries four accumulators and
+        four components. The lane kernel does ZERO f64.store, zero v128.store
+        and ONE bump advance: since v0.1.429 a SIMD value stays in a v128 local
+        unless it escapes, and here nothing does. So on Wasm the explicit lanes
+        do not pay a boxing tax, they AVOID one -- the opposite of what the
+        f64x2 rows on this backend usually show. Measured out-of-memory
+        thresholds at 10,000 vertices: the scalar row survives 17 passes and
+        fails at 18, the lane row survives 75 and fails at 80 -- 4.4x further.
+        That ratio is smaller than the 65:1 in static allocations would
+        predict, so something outside this kernel is allocating too; it is
+        recorded as measured and not explained here.
+        ---
+        No Node, Ruby or Python row. The kernel is 28 floating-point operations
+        per vertex over an unboxed array of doubles, and none of the three has
+        one -- a JavaScript Float64Array row would be a fair fight, but the
+        Ruby and Python rows would be timing their boxed-float allocators and
+        would take minutes. What this row exists to compare is one language's
+        two spellings of the same arithmetic against native code.
+
+# Two Vecs: the 16-element matrix and 4 x 20,000 = 80,000 doubles of vertices,
+# 640 KB, built by vec_push with growth in place (v0.1.414). Nothing else
+# allocates -- the kernel's accumulators are locals and the loop is a tail
+# call. Set from the measurement below at v0.1.444; a reading under the floor
+# means the meter broke, which is the failure a one-sided band cannot see.
+#
+# 1,048,952 B at v0.1.444, and IDENTICAL for the scalar and the f64x2 rows --
+# which is itself the check that the C backend keeps f64x2 in a register
+# (clang's vector_size(16)) rather than boxing it, the way Wasm and RISC-V do.
+# 640 KB of vertices rounded up to the 1 MiB the Vec's growth lands on, plus
+# 376 B. The ceiling is set under twice the reading so that doubling garbage
+# cannot come back unannounced.
+alloc_min = 786432
+alloc_max = 1310720

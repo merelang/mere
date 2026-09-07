@@ -1,0 +1,97 @@
+// mat4xvec4 -- transforming vertices by one 4x4 matrix, the shape 3D actually
+// runs, written scalar. `bench_simd.mere` next to it is the same arithmetic in
+// explicit f64x2 lanes, and the two must print the same bytes.
+//
+// WHY THIS ROW EXISTS. `matmul` is the suite's other floating-point row and it
+// is unchanged by range-check versioning: `acc = acc + a[k] * b[k][j]` is a
+// reduction in a fixed order, floating-point addition does not reassociate, and
+// without fast-math no compiler may vectorize it. That is a true statement
+// about a dot product and it is routinely repeated as if it were a statement
+// about matrix arithmetic. It is not. A vertex transform is the same multiply
+// and add and it vectorizes without any license to reorder, because it is
+// written down the columns:
+//
+//     r = c0*v.x + c1*v.y + c2*v.z + c3*v.w
+//
+// Each column is a vec4 and each of the four output lanes accumulates in the
+// same order it would scalar -- column 0, then 1, then 2, then 3. So lanes here
+// are not an approximation of the scalar answer, they are the scalar answer,
+// and the check is BIT IDENTITY rather than a tolerance. That is the property
+// this row is here to hold: the day the two spellings disagree, one of them is
+// wrong.
+//
+// Same discipline as `matmul`, for the same reasons. Unfused: Mere emits
+// `#pragma STDC FP_CONTRACT OFF` and the C row carries `-ffp-contract=off`, so
+// `a*b + c` rounds twice everywhere. Non-dyadic inputs (a division by 1000, not
+// by 1024) so the arithmetic actually rounds -- values that happened to be
+// exact would agree whether or not anything fused. The answer is printed as the
+// two halves of the IEEE-754 pattern, because a formatted double hides the low
+// bits, which is where a reordering shows up.
+//
+// The matrix is column-major, m[4*j + i] = row i of column j, which is glTF's
+// layout and OpenGL's. Four accumulators rather than one: a single running sum
+// would be one serial dependency chain through the whole loop and would time
+// the latency of an add rather than the transform.
+
+let n = match args () with | Cons (a, _) -> int_of_str a | Nil -> 20000;
+let reps = 5000;
+
+// One LCG for both the matrix and the vertices. `f_div` by 1000.0 lands every
+// entry off the dyadic grid.
+let mk = fn (count: int) -> fn (seed: int) ->
+  let v = vec_new () in
+  let rec fill = fn (i: int) -> fn (x: int) ->
+    if i == count then ()
+    else
+      let x2 = (1103515245 * x + 12345) % 2147483648 in
+      let _ = vec_push v (f_div (float_of_int (x2 % 2001 - 1000)) 1000.0) in
+      fill (i + 1) x2 in
+  let _ = fill 0 seed in
+  v;
+
+let mat = mk 16 20260907;
+let vs = mk (4 * n) 77770707;
+
+let m0  = vec_get mat 0;  let m1  = vec_get mat 1;
+let m2  = vec_get mat 2;  let m3  = vec_get mat 3;
+let m4  = vec_get mat 4;  let m5  = vec_get mat 5;
+let m6  = vec_get mat 6;  let m7  = vec_get mat 7;
+let m8  = vec_get mat 8;  let m9  = vec_get mat 9;
+let m10 = vec_get mat 10; let m11 = vec_get mat 11;
+let m12 = vec_get mat 12; let m13 = vec_get mat 13;
+let m14 = vec_get mat 14; let m15 = vec_get mat 15;
+
+// One pass over every vertex. Each output component is accumulated column by
+// column, ascending -- the order is part of the answer.
+let rec pass = fn (i: int) -> fn (ax: float) -> fn (ay: float) ->
+                fn (az: float) -> fn (aw: float) ->
+  if i == n then (ax, ay, az, aw)
+  else
+    let x = vec_get vs (4 * i) in
+    let y = vec_get vs (4 * i + 1) in
+    let z = vec_get vs (4 * i + 2) in
+    let w = vec_get vs (4 * i + 3) in
+    let rx = f_add (f_add (f_add (f_mul m0 x) (f_mul m4 y)) (f_mul m8 z))
+                   (f_mul m12 w) in
+    let ry = f_add (f_add (f_add (f_mul m1 x) (f_mul m5 y)) (f_mul m9 z))
+                   (f_mul m13 w) in
+    let rz = f_add (f_add (f_add (f_mul m2 x) (f_mul m6 y)) (f_mul m10 z))
+                   (f_mul m14 w) in
+    let rw = f_add (f_add (f_add (f_mul m3 x) (f_mul m7 y)) (f_mul m11 z))
+                   (f_mul m15 w) in
+    pass (i + 1) (f_add ax rx) (f_add ay ry) (f_add az rz) (f_add aw rw);
+
+let rec rep = fn (r: int) -> fn (ax: float) -> fn (ay: float) ->
+               fn (az: float) -> fn (aw: float) ->
+  if r == reps then (ax, ay, az, aw)
+  else
+    let (bx, by, bz, bw) = pass 0 ax ay az aw in
+    rep (r + 1) bx by bz bw;
+
+let (sx, sy, sz, sw) = rep 0 0.0 0.0 0.0 0.0;
+let s = f_add (f_add (f_add sx sy) sz) sw;
+
+let _ = print ("n " ++ str_of_int n) in
+let _ = print ("checksum " ++ str_of_int (float_bits_hi s)
+               ++ " " ++ str_of_int (float_bits_lo s)) in
+exit 0

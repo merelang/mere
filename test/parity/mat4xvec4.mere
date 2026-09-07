@@ -1,0 +1,85 @@
+// mat4 x vec4 two ways, on every backend: the scalar transform and the same
+// arithmetic in f64x2 lanes. The vec4 is (x, y) and (z, w); a matrix column
+// splits the same way, and each output lane accumulates column 0, 1, 2, 3 --
+// the order the scalar program uses -- so the two are not near each other,
+// they are EQUAL, and this file prints both patterns so a backend that lanes
+// them differently is a DIFF rather than a rounding story.
+//
+// Printed as IEEE-754 halves, not as digits: a formatted double hides the low
+// bits, which is where a reordering or a contraction would show. Inputs are
+// non-dyadic (divided by 1000) so the arithmetic actually rounds -- values
+// that happened to be exact would agree for the wrong reason.
+let n = 8;
+
+let mk = fn (count: int) -> fn (seed: int) ->
+  let v = vec_new () in
+  let rec fill = fn (i: int) -> fn (x: int) ->
+    if i == count then ()
+    else
+      let x2 = (1103515245 * x + 12345) % 2147483648 in
+      let _ = vec_push v (f_div (float_of_int (x2 % 2001 - 1000)) 1000.0) in
+      fill (i + 1) x2 in
+  let _ = fill 0 seed in
+  v;
+
+let mat = mk 16 20260907;
+let vs = mk (4 * n) 77770707;
+
+let m0  = vec_get mat 0;  let m1  = vec_get mat 1;
+let m2  = vec_get mat 2;  let m3  = vec_get mat 3;
+let m4  = vec_get mat 4;  let m5  = vec_get mat 5;
+let m6  = vec_get mat 6;  let m7  = vec_get mat 7;
+let m8  = vec_get mat 8;  let m9  = vec_get mat 9;
+let m10 = vec_get mat 10; let m11 = vec_get mat 11;
+let m12 = vec_get mat 12; let m13 = vec_get mat 13;
+let m14 = vec_get mat 14; let m15 = vec_get mat 15;
+
+let rec spass = fn (i: int) -> fn (ax: float) -> fn (ay: float) ->
+                 fn (az: float) -> fn (aw: float) ->
+  if i == n then (ax, ay, az, aw)
+  else
+    let x = vec_get vs (4 * i) in
+    let y = vec_get vs (4 * i + 1) in
+    let z = vec_get vs (4 * i + 2) in
+    let w = vec_get vs (4 * i + 3) in
+    let rx = f_add (f_add (f_add (f_mul m0 x) (f_mul m4 y)) (f_mul m8 z)) (f_mul m12 w) in
+    let ry = f_add (f_add (f_add (f_mul m1 x) (f_mul m5 y)) (f_mul m9 z)) (f_mul m13 w) in
+    let rz = f_add (f_add (f_add (f_mul m2 x) (f_mul m6 y)) (f_mul m10 z)) (f_mul m14 w) in
+    let rw = f_add (f_add (f_add (f_mul m3 x) (f_mul m7 y)) (f_mul m11 z)) (f_mul m15 w) in
+    spass (i + 1) (f_add ax rx) (f_add ay ry) (f_add az rz) (f_add aw rw);
+
+let c0_lo = f64x2_make m0 m1;   let c0_hi = f64x2_make m2 m3;
+let c1_lo = f64x2_make m4 m5;   let c1_hi = f64x2_make m6 m7;
+let c2_lo = f64x2_make m8 m9;   let c2_hi = f64x2_make m10 m11;
+let c3_lo = f64x2_make m12 m13; let c3_hi = f64x2_make m14 m15;
+
+let rec vpass = fn (i: int) -> fn (alo: f64x2) -> fn (ahi: f64x2) ->
+  if i == n then (alo, ahi)
+  else
+    let sx = f64x2_splat (vec_get vs (4 * i)) in
+    let sy = f64x2_splat (vec_get vs (4 * i + 1)) in
+    let sz = f64x2_splat (vec_get vs (4 * i + 2)) in
+    let sw = f64x2_splat (vec_get vs (4 * i + 3)) in
+    let rlo = f64x2_add (f64x2_add (f64x2_add (f64x2_mul c0_lo sx) (f64x2_mul c1_lo sy))
+                                   (f64x2_mul c2_lo sz)) (f64x2_mul c3_lo sw) in
+    let rhi = f64x2_add (f64x2_add (f64x2_add (f64x2_mul c0_hi sx) (f64x2_mul c1_hi sy))
+                                   (f64x2_mul c2_hi sz)) (f64x2_mul c3_hi sw) in
+    vpass (i + 1) (f64x2_add alo rlo) (f64x2_add ahi rhi);
+
+let (sx, sy, sz, sw) = spass 0 0.0 0.0 0.0 0.0;
+let ss = f_add (f_add (f_add sx sy) sz) sw;
+
+let (alo, ahi) = vpass 0 (f64x2_splat 0.0) (f64x2_splat 0.0);
+let vs0 = f64x2_extract alo 0;
+let vs1 = f64x2_extract alo 1;
+let vs2 = f64x2_extract ahi 0;
+let vs3 = f64x2_extract ahi 1;
+let vv = f_add (f_add (f_add vs0 vs1) vs2) vs3;
+
+let _ = print ("scalar " ++ str_of_int (float_bits_hi ss) ++ " " ++ str_of_int (float_bits_lo ss)) in
+let _ = print ("lanes  " ++ str_of_int (float_bits_hi vv) ++ " " ++ str_of_int (float_bits_lo vv)) in
+// The identity itself, so a reader of the output does not have to compare two
+// long numbers by eye and a backend cannot pass by printing the same wrong
+// pair twice in a row that happens to match the interpreter's wrong pair.
+print (if float_bits_hi ss == float_bits_hi vv && float_bits_lo ss == float_bits_lo vv
+       then "identical" else "DIFFERENT")
