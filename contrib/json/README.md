@@ -8,7 +8,7 @@ matching with zero external dependencies.
 
 | file | export | lines |
 |---|---|---|
-| `json.mere` | `module Json { type json = JNull \| JBool \| JNum \| JStr \| JArr \| JObj; parse_json: str -> json }` | ~180 |
+| `json.mere` | `module Json { type json = JNull \| JBool \| JNum \| JFloat \| JStr \| JArr \| JObj; parse_json: str -> json; as_float: json -> float }` | ~220 |
 | `writer.mere` | `type json` (top-level) + `module JsonWriter { to_json_str, to_pretty_str }` | ~135 |
 
 ## Usage (before pkg manager lands)
@@ -43,10 +43,43 @@ mode for now).
 
 ## Coverage
 
-- atoms: `null` / `true` / `false` / int (negative OK) / string
+- atoms: `null` / `true` / `false` / number / string
 - composite: array / object
 - escape: `\"` `\\` `\n` `\t` `\r` `\/` decoded via `str_unescape`
-- **Unsupported** (extension driven by issues): float / unicode `\uXXXX` / exponential notation
+- **Unsupported**: unicode `\uXXXX`
+
+### Two number constructors, on purpose
+
+JSON has one number type and this has two. A number written with a decimal
+point or an exponent parses as `JFloat of float`; one written as an integer
+stays `JNum of int`. **Which one you get is decided by how the number was
+written, not by its value** — `1.0` is a `JFloat` and `1` is a `JNum`.
+
+Three reasons, and the third is the one that decided it:
+
+1. A single float constructor would silently change every existing reader.
+2. `to_json_str` would stop round-tripping: `12` would come back as `12.0`.
+3. The documents this is pointed at distinguish the two. An array index, a byte
+   offset and a glTF accessor's `count` are integers and have to stay exact; a
+   colour component and a node's translation are not.
+
+`Json.as_float` widens either, for readers that do not care.
+
+**Adding `JFloat` made every existing `match` over `json` non-exhaustive**, and
+the three in this tree were updated with it. Be aware that only the interpreter
+prints that warning — `mere -c`, `-ll` and `-t` are silent — so a `match` in
+your own code that this constructor broke will compile and then fail at
+runtime, and a wildcard arm returning a default will answer wrongly instead.
+
+### Deviations from strict JSON
+
+- **Leading zeros are accepted**: `01` parses as `1` where the grammar forbids
+  it. Pre-existing, and left alone by the v0.1.446 float work rather than
+  changed as a side effect of it — a parser getting *stricter* is a separate
+  decision from a parser getting a feature, and belongs in its own change.
+- An overflowing literal such as `1e400` becomes an infinity, which
+  `to_json_str` would then write as `inf`, which is not JSON. Refusing at write
+  time would be refusing in the wrong place.
 
 ## Known gotchas
 

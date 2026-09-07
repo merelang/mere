@@ -10674,6 +10674,42 @@ let () =
   check "P3: json parser+writer compose (array round-trip)"
     (json_eval "Json.to_json_str (Json.parse_json \"[1, 2, 3]\")")
     "[1,2,3]";
+  (* v0.1.446 (m3d dogfood): the parser had NO FLOAT. glTF is unreadable
+     without one -- every colour, translation and accessor bound in the format
+     is fractional -- and the limitation was known and written down in
+     examples/graphql_server.mere rather than fixed.
+
+     `JFloat` is a SECOND number constructor and not a replacement, so that
+     `12` still round-trips as `12` rather than `12.0`, and so that the seven
+     existing readers of `JNum` keep working. Which one a number becomes is
+     decided by how it is WRITTEN -- a point or an exponent -- and not by its
+     value, which is what makes the round-trip exact.
+
+     Arrays and not objects in these cases: a literal `{` inside a Mere string
+     is interpolation syntax and has to be escaped, and the brace has nothing
+     to do with how a number is read. *)
+  check "json: integers and fractions round-trip as written"
+    (json_eval "Json.to_json_str (Json.parse_json \"[0.8, 12, 1.0]\")")
+    "[0.8,12,1.0]";
+  check "json: exponents, signs and negative zero survive"
+    (json_eval "Json.to_json_str (Json.parse_json \"[1e3, 2.5e-8, -0.5, -0.0, 1E+5]\")")
+    "[1000.0,2.5e-08,-0.5,-0.0,100000.0]";
+  (* `as_float` is for readers that do not care which way it was written. *)
+  check "json: as_float widens either constructor"
+    (json_eval "str_of_float (Json.as_float (Json.parse_json \"12\")) ++ \" \" ++ str_of_float (Json.as_float (Json.parse_json \"0.5\"))")
+    "12.0 0.5";
+  (* AND IT MUST NOT HAVE GOT MORE PERMISSIVE. Gaining a feature is the moment a
+     parser quietly starts accepting things it used to reject: the first version
+     of this took `1.` as 1.0, where the integer-only parser it replaced left the
+     '.' behind and failed. JSON requires a digit on both sides of the point and
+     after the exponent. *)
+  List.iter (fun bad ->
+    check (Printf.sprintf "json: %s is still refused" bad)
+      (try ignore (json_eval (Printf.sprintf "Json.to_json_str (Json.parse_json \"[%s]\")" bad));
+           "accepted"
+       with _ -> "refused")
+      "refused")
+    ["1."; "1e"; "1.e5"; "1.5e"; "1e+"];
   (* v0.1.35 (mtest dogfood): contrib/test is a pure module now — its demo
      main used to live at the bottom of the library file, so every importer
      RAN it. And its generic assert_eq works THROUGH a type variable (the

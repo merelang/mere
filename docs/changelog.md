@@ -4,6 +4,64 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.446 — 2026-09-07
+
+**`contrib/json` could not parse a number with a decimal point.** Found by
+pointing a glTF loader at it: every colour, every node translation and every
+accessor bound in that format is fractional, so the format was simply
+unreadable. The limitation was already known — `examples/graphql_server.mere`
+carried a comment saying `JNum` is an int and that a fractional variable
+"would need a `json` that can hold one, which is that library's problem" — and
+had been left there.
+
+`JFloat of float` is a SECOND number constructor, not a replacement. Which one
+a number becomes is decided by how it is WRITTEN, a point or an exponent, and
+not by its value: `1.0` is a `JFloat` and `1` is a `JNum`. Three reasons, and
+the third decided it — a single float type would change every existing reader,
+`to_json_str` would stop round-tripping (`12` coming back as `12.0`), and the
+documents this is pointed at genuinely distinguish the two: an array index, a
+byte offset and a glTF `count` have to stay exact where a colour component does
+not. `Json.as_float` widens either for readers that do not care.
+
+**It must not have got more permissive, and the first version had.** `1.`
+parsed as 1.0, where the integer-only parser it replaced left the `.` behind
+and failed. JSON wants a digit on both sides of the point and after the
+exponent; five malformed literals are now pinned as refused, next to the ones
+pinned as accepted.
+
+**Adding a constructor made every existing `match` over `json` non-exhaustive,
+and the three in this tree were wrong in two different ways.**
+`contrib/schema/reflect.mere` had a wildcard returning `""`, so a fractional
+value silently became the empty string — a catch-all answers wrongly for every
+kind it has not been told about, and the kind arrived without it having to
+change. `examples/graphql_server.mere` had no wildcard and would have failed at
+runtime; it now maps `JFloat` onto the `GFloat` that GraphQL's own value type
+already had.
+
+Which surfaced something worth a question of its own: **the non-exhaustive-match
+warning is printed by the interpreter and by nothing else.** `mere -c`, `-ll`
+and `-t` are silent. The downstream gate — `mere -c` over twelve dogfood
+repositories — therefore cannot see a `match` that a new constructor just
+broke, in either of the two ways above. The three in this tree were found by
+reading, not by a gate. Recorded rather than fixed here, because making the
+warning reach the other entry points is a change to those entry points and not
+to a JSON library.
+
+All thirteen downstream repositories still compile, and that is a weaker
+statement than it sounds. The two that use this library — `mq` and `mere-blog`
+— VENDOR it at a pinned revision, so the change has not reached them: they are
+green because they are still reading the old copy. `mq` is a jq-lite whose
+serialiser has no wildcard arm, so when it updates the pin it will fail at
+runtime on a fractional number, and by the paragraph above nothing will warn
+it. Deferred, not avoided, and written down here so the next person to bump
+that pin meets this sentence.
+
+Leading zeros are still accepted (`01` parses as `1`) where the grammar forbids
+them. Pre-existing, and deliberately not changed as a side effect: a parser
+getting stricter is a separate decision from a parser getting a feature.
+
+---
+
 ## v0.1.445 — 2026-09-07
 
 **`f32x4`, the third 128-bit SIMD type.** Four single-precision lanes, on
