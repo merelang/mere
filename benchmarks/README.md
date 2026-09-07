@@ -121,6 +121,7 @@ compiled ones, for that reason.
 | `bytecount` | count a byte over a `bytes` buffer | The byte-lane twin of `axpy` for range-check versioning. Expected to **tie with C**, and it does. |
 | `utf8valid` | RFC 3629 validation, one state machine over `bytes_get`, 4 MiB, 20 passes | The scalar baseline for explicit SIMD; the C row is the same machine. |
 | `utf8valid_simd` | the same validation with `u8x16` lanes (Keiser-Lemire), 16 bytes per step | The row that **justifies explicit SIMD**: what no auto-vectorizer builds from a state machine. Against `utf8valid` it is lanes against no lanes in one language; against the scalar C row it is Mere with lanes against what a C programmer writes without intrinsics. |
+| `mat4xvec4` | 20,000 vertices through one 4x4 matrix, 5000 passes, scalar and with explicit `f64x2` lanes | The row where **explicit floating-point lanes pay** — the thing `matmul` and `axpy_simd` between them could not show. A vertex transform is matmul's multiply and add, but summed down the columns, so each output lane accumulates in the order the scalar program does: the two spellings print the **same bytes**, and the runner enforces that. The lanes are 1.44x the scalar Mere row and ahead of C. |
 
 Every benchmark's `MANIFEST` carries a `claim` that says what the workload is
 supposed to show, including the ones where the answer is unflattering. A suite
@@ -133,7 +134,7 @@ the systems-language question.
 
 ## The SIMD rows: lanes against no lanes
 
-The five rows above were added in v0.1.420-424 to answer one question with
+The rows above were added in v0.1.420-424 and v0.1.444 to answer one question with
 numbers: what does SIMD buy Mere, and where? Measured with
 `python3 benchmarks/run.py <row> --reps 3` on the development machine
 (macOS/arm64, Apple clang 21); the C rows are compiled by the same clang at
@@ -145,6 +146,7 @@ numbers: what does SIMD buy Mere, and where? Measured with
 | `bytecount` (byte lane) | 23 ms | 21 ms | 21 ms | a tie: the shape the auto-vectorizer does best |
 | `matmul` 512 | 144 ms | 144 ms | 132 ms | unchanged: without fast-math clang does not vectorize a floating-point reduction, so nothing here helps |
 | `axpy_simd` (explicit `f64x2`) | the auto-vectorized `axpy`, 0.08 s | 0.12 s (129 ms by `run.py`) | 0.07 s | a loss: two lanes per step against the vectorizer's VF2 x IC4 |
+| `mat4xvec4` (explicit `f64x2`, v0.1.444) | 206 ms | **140 ms** | 200 ms | the win, and on floats: 1.44x the scalar Mere row and ahead of C. Both are vectorized — they differ in WHICH AXIS is in the lanes. clang lanes the scalar program across **vertices** (`ld4.2d`), which puts the cross-vertex accumulation back in the lane direction and costs four lane extracts and eight scalar `fadd`; the explicit program lanes the four **components**, so the accumulation is lane-parallel and nothing is unpacked. Per vertex the two loops are almost the same size (21.5 against 23 instructions), so this is not an instruction count |
 | `utf8valid` (4 MiB x 20 passes) | 72 ms | 29 ms (`utf8valid_simd`) | 54 ms (scalar) | the justification: 2.5x the scalar Mere machine and 1.9x scalar C, about 4 GB/s. A single unrepeated run read 0.02 s / 0.06 s / 0.05 s |
 | the same validator on the Mere-written RV32 core (64 KiB x 20 passes, memu) | 2.75 s | 1.85 s (RVV 1.0, v0.1.426) | - | 1.5x on a CPU the language wrote for itself |
 | `utf8valid_simd` on RV32, boxes vs registers (64 KiB, v0.1.430) | 43 box stores, 0.90-1.0 s | 16 box stores, 0.80-0.84 s | - | about 10%; memu interprets, so this is instruction count |
@@ -154,7 +156,12 @@ its SIMD numbers are recorded as memory rather than time: keeping SIMD values
 unboxed (v0.1.429) moved the out-of-memory threshold of `axpy_simd` from 20,000
 to 50,000 elements and of an in-program UTF-8 validation from 64 KiB to 256 KiB
 of input. A long-running SIMD loop still allocates per iteration for the values
-it carries between iterations.
+it carries between iterations — but not always more than the scalar program does.
+Counted in the emitted WAT, `mat4xvec4` does 32 `f64.store` and 65 bump-allocator
+advances per vertex scalar, against zero stores and one advance with lanes: four
+accumulators and four components are each a heap box on this backend, and a `f64x2`
+that never escapes is not. Its measured out-of-memory threshold at 10,000 vertices is
+17 passes scalar and 75 with lanes.
 
 What is not measured here: the LLVM backend on the UTF-8 rows (it has no
 lowering for `read_bytes`, so those two `bench.mere` files do not run under
