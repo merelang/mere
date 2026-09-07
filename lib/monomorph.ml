@@ -112,6 +112,7 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyBytes -> "bytes"
   | Ast.TySimd Ast.F64x2 -> "f64x2"
   | Ast.TySimd Ast.U8x16 -> "u8x16"
+  | Ast.TySimd Ast.F32x4 -> "f32x4"
   | Ast.TyUnit -> "unit"
   | Ast.TyFloat -> "float"   (* Phase 43.1: allow float to be used in fn signature tags *)
   | Ast.TyTuple ts -> "tuple_" ^ String.concat "_" (List.map ty_tag ts)

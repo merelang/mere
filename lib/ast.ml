@@ -1,9 +1,15 @@
 (* Abstract syntax tree for Lang. *)
 
-(* Q-109: the two fixed-width 128-bit SIMD types. 128 bits is what NEON, SSE2
+(* Q-109: the fixed-width 128-bit SIMD types. 128 bits is what NEON, SSE2
    and Wasm's v128 all have, so a program written against them is portable
-   exactly; wider vectors are a different question. *)
-type simd_kind = F64x2 | U8x16
+   exactly; wider vectors are a different question.
+
+   F32x4's LANES ARE SINGLE PRECISION while the language's scalar float is a
+   double, so it is the one kind whose boundary converts: a lane is written
+   from a float and read back as one, and both directions are the backend's
+   own double/float conversion -- round-to-nearest-even -- for the same reason
+   `f32_bits` delegates it (Q-038). The arithmetic in between is f32. *)
+type simd_kind = F64x2 | U8x16 | F32x4
 
 type tyvar = {
   id : int;
@@ -245,6 +251,7 @@ let pp_ty t =
     | TyBytes -> "bytes"
     | TySimd F64x2 -> "f64x2"
     | TySimd U8x16 -> "u8x16"
+    | TySimd F32x4 -> "f32x4"
     | TyUnit -> "unit"
     | TyArrow (a, b) ->
       let sa = aux a in
@@ -1555,10 +1562,12 @@ let range_version_program ~(unsafe_builtins : string list) (prog : program) : pr
    of their boxes (Wasm v128 locals, RISC-V vector registers) --------------- *)
 let simd_result_ops = [ "f64x2_splat"; "f64x2_make"; "f64x2_add"; "f64x2_sub"; "f64x2_mul"; "f64x2_div";
                         "f64x2_load"; "__f64x2_load_unchecked";
+                        "f32x4_splat"; "f32x4_make"; "f32x4_add"; "f32x4_sub"; "f32x4_mul"; "f32x4_div";
                         "u8x16_splat"; "u8x16_from_bytes"; "u8x16_load"; "__u8x16_load_unchecked";
                         "u8x16_and"; "u8x16_or"; "u8x16_xor"; "u8x16_sub_sat"; "u8x16_eq"; "u8x16_swizzle";
                         "u8x16_shr"; "u8x16_shift_in" ]
 let simd_scalar_ops = [ "f64x2_extract"; "f64x2_reduce_add"; "f64x2_store"; "__f64x2_store_unchecked";
+                        "f32x4_extract"; "f32x4_reduce_add";
                         "u8x16_extract"; "u8x16_any_true"; "u8x16_reduce_add";
                         "u8x16_first_true" ]
 let simd_head (e : expr) : string option =

@@ -1278,6 +1278,8 @@ let f64x2_store_scheme =
       Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TySimd Ast.F64x2, Ast.TyUnit))) }
 let f64x2_binop_scheme =
   mono (Ast.TyArrow (Ast.TySimd Ast.F64x2, Ast.TyArrow (Ast.TySimd Ast.F64x2, Ast.TySimd Ast.F64x2)))
+let f32x4_binop_scheme =
+  mono (Ast.TyArrow (Ast.TySimd Ast.F32x4, Ast.TyArrow (Ast.TySimd Ast.F32x4, Ast.TySimd Ast.F32x4)))
 
 let _vec_len_elem = fresh_var ()
 let _vec_len_region = fresh_var ()
@@ -2425,6 +2427,31 @@ let initial_env : env =
     ("f64x2_store", f64x2_store_scheme);
     ("__f64x2_load_unchecked",  f64x2_load_scheme);
     ("__f64x2_store_unchecked", f64x2_store_scheme);
+    (* Q-109 (2d): f32x4. The scalar side of every one of these is `float`,
+       which is a double -- the lanes are single precision, so a value narrows
+       going in and widens coming out, and both conversions are the backend's
+       own (round-to-nearest-even), the way `f32_bits` delegates it (Q-038).
+       THERE IS DELIBERATELY NO `f32x4_load` / `f32x4_store`. For f64x2 a load
+       is a load: `Vec[R, float]` already holds doubles. For f32x4 the same
+       spelling would be a narrowing CONVERSION of four doubles wearing the
+       name of a load, and the caller that actually wants four f32 lanes off a
+       buffer -- a vertex attribute, say -- wants them from `bytes`, which has
+       no f64x2 precedent to copy. Two different right answers is not a thing
+       to guess at before a caller exists, so neither is defined and the name
+       is simply unbound. *)
+    ("f32x4_splat",   mono (Ast.TyArrow (Ast.TyFloat, Ast.TySimd Ast.F32x4)));
+    ("f32x4_extract", mono (Ast.TyArrow (Ast.TySimd Ast.F32x4, Ast.TyArrow (Ast.TyInt, Ast.TyFloat))));
+    ("f32x4_make",  mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat,
+                          Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TySimd Ast.F32x4))))));
+    ("f32x4_add",   f32x4_binop_scheme);
+    ("f32x4_sub",   f32x4_binop_scheme);
+    ("f32x4_mul",   f32x4_binop_scheme);
+    ("f32x4_div",   f32x4_binop_scheme);
+    (* Left to right at LANE precision: (((l0 + l1) + l2) + l3), each add an
+       f32 add, then widened once. The order is part of the answer -- a
+       pairwise tree would round differently -- so it is specified here and
+       every backend does the same thing. *)
+    ("f32x4_reduce_add", mono (Ast.TyArrow (Ast.TySimd Ast.F32x4, Ast.TyFloat)));
     (* Q-109 (2c): the u8x16 lane operations a UTF-8 validator needs. *)
     ("u8x16_from_bytes", mono (Ast.TyArrow (Ast.TyBytes, Ast.TySimd Ast.U8x16)));
     ("u8x16_load",       mono (Ast.TyArrow (Ast.TyBytes, Ast.TyArrow (Ast.TyInt, Ast.TySimd Ast.U8x16))));
