@@ -4,6 +4,42 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.449 — 2026-09-08
+
+**A chain of `let`s no longer nests in the emitted C.** Each one used to become its own
+statement expression — `({ a; ({ b; ({ c; ... }) }) })` — so the bracket depth of the
+result grew with the LENGTH OF THE CHAIN, about two levels per binding. Clang's default
+limit is 256 and Ubuntu's clang 18 enforces it where Apple's clang does not, which is
+why programs built here and failed there: m3d's `main` sat at 533 with its CI red at the
+first gate for the life of that project, and mere-ruby's CI carries
+`-fbracket-depth=4096` for the same reason. **A tax rediscovered per repository is one
+the compiler should not be charging.**
+
+The chain now collects into one `({ s1 s2 s3 ... final; })`. Three things keep it
+honest: a name already bound in the chain ends the run (two declarations of `mu_x` in
+one C scope is not the same program), anything that is not a plain binding — a tuple or
+constructor pattern, an owned-vec binding that wants a scope-end free, a global whose
+initializer is not the recorded one — keeps its old emission with the chain resuming
+underneath it, and the guard only fires when the FIRST link is flattenable, so the two
+paths are mutually exclusive rather than two spellings of one thing.
+
+Measured: m3d's emitted C went **533 → 259** deep, a fifty-binding recursive probe went
+108 → 22, and **the frame did not grow** — same `sub $0x10,%rsp`, same 32,000 recursion
+levels at a 1 MB stack, which is the thing that would have made this a bad trade. All 50
+of m3d's pictures are byte-identical; mere-ruby builds and its 204-program corpus still
+matches ruby 4.0.6 exactly. parity 163 passed, 0 failed.
+
+**What is still deep, named rather than left to be found:** m3d stops at 259 because of
+ONE construct — a 64-element list literal, which is a right-nested chain of `Cons`
+constructors at four levels each — and mere-ruby at 490 because of the prelude's
+`"..." ++ "..."` chain, which is right-nested `__lang_str_concat` calls. Both are the
+same shape as the `let` chain and neither is fixed here; what would fix them generally
+is a depth-limited hoist of right-nested applications, which changes evaluation order
+from C's unspecified argument order to a fixed one and is therefore a decision rather
+than a repair.
+
+---
+
 ## v0.1.448 — 2026-09-08
 
 **A closure call that returns a struct was miscompiled on x86-64, and only there.**
