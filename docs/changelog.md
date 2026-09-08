@@ -4,6 +4,56 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.452 — 2026-09-08
+
+**A container the callee built does not survive its call in `--lib` mode, and the
+comment that said it did was wrong.** Investigating Q-127 turned up a defect rather than
+a design question. A host that calls an exported function which stores a returned `Vec`
+into module state, then makes one more call, reads back **garbage**:
+
+```
+before 700       (stored, read straight back — fine)
+after  -1        (one more call reused the arena)
+```
+
+v0.1.311 stopped pinning `__heap` containers to the default region in `--lib` mode
+because the process outlives every call and the pin was a 512 B/call leak; the boundary's
+rule is that containers cannot cross it. **For a container created in a NAMED region the
+compiler already enforces exactly that**, by name:
+
+```
+region escape: `cache` now holds a value from region `A`, which is freed at the end of
+this block ... build it outside the block, or copy its contents out
+```
+
+It cannot say that here, and the reason is the one Q-127 named: **`__heap` means two
+things.** It is the default region during module init and the per-call region during a
+call, so the escape check reads it as "outlives everything" while the lowering puts the
+value in memory the call reclaims.
+
+**The store does not rescue it either, and this is the part that was written down
+wrongly.** The comment on `heap_container_region` claimed copy-on-store carried the
+contents to safety. Copy-on-store does not copy CONTAINERS: containers are shared by
+identity in this language — mutate one through either name and both see it, in all four
+backends, which is what the interpreter says too — so `__mcopy_Vec_<T>` is generated as
+the identity function *by design*. It copies the strings and records inside; the
+container itself is a pointer, and the pointer is into the arena that just went away.
+
+**Nothing is silently changed here.** Both sides are now pinned in `scripts/lib_check.sh`,
+because they are mutually exclusive as the design stands and the gate should say so:
+section 8 already required that repeated calls do not grow the default region (pinning
+the leak fix), and **section 9 now requires that the callee-built container still reads
+back wrong** — and fails, loudly, with instructions, the moment it reads back right.
+Poisoned both ways: making `__heap` default-region again (the obvious "fix") is caught by
+section 8 as 123 MB over 50,000 calls, and a probe that stores an int instead of a
+container is caught by section 9 as "the gap looks closed".
+
+That pair is the finding. **You cannot close this by choosing a region; the two
+requirements meet only where `__heap` stops meaning both things**, which is Q-127's
+call-site instantiation and a larger change than a slice.
+
+---
+
 ## v0.1.451 — 2026-09-08
 
 **`mere -ll` emitted a `musttail` that clang would not build — and only at `-O0`.** LLVM
