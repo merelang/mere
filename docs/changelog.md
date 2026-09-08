@@ -29,14 +29,23 @@ levels at a 1 MB stack, which is the thing that would have made this a bad trade
 of m3d's pictures are byte-identical; mere-ruby builds and its 204-program corpus still
 matches ruby 4.0.6 exactly. parity 163 passed, 0 failed.
 
-**What is still deep, named rather than left to be found:** m3d stops at 259 because of
-ONE construct — a 64-element list literal, which is a right-nested chain of `Cons`
-constructors at four levels each — and mere-ruby at 490 because of the prelude's
-`"..." ++ "..."` chain, which is right-nested `__lang_str_concat` calls. Both are the
-same shape as the `let` chain and neither is fixed here; what would fix them generally
-is a depth-limited hoist of right-nested applications, which changes evaluation order
-from C's unspecified argument order to a fixed one and is therefore a decision rather
-than a repair.
+***Correction, same day: the numbers above are from a hand-written bracket counter, and
+clang does not count the way it does.*** Asked properly — `clang -fsyntax-only
+-fbracket-depth=256`, which is what a stock clang enforces — **m3d's emitted C now
+compiles, and did not before**, and it builds on the CI image (Ubuntu clang 18) with no
+flag at all. So for m3d this is not a reduction, it is the end of the tax:
+`scripts/ccflags.sh` there keeps the flag only as a guard.
+
+**mere-ruby still needs it**, and the cause is named: the prelude's `"..." ++ "..."` is a
+right-nested chain of `__lang_str_concat` calls, the same shape as the `let` chain and
+untouched here. A 64-element list literal (right-nested `Cons`) is the other one, and it
+is now under the limit rather than over it. What would fix those generally is a
+depth-limited hoist of right-nested applications, which fixes an evaluation order C
+leaves unspecified — a decision rather than a repair.
+
+**And the measurement lesson is the reusable part:** a metric you wrote yourself is not
+the one the tool enforces. The counter said 533 → 259 and read "still over 256"; the
+compiler said "was an error, is not". Ask the thing that will refuse you.
 
 ---
 
