@@ -78,9 +78,18 @@ let lib_static () = if !lib_mode then "static " else ""
    a transaction -- results are copied out, containers cannot cross -- so
    `__heap` containers follow the CURRENT region instead: the per-call region
    during an export call (reclaimed at return), the default region during
-   module init (module state persists). Stores into longer-lived containers
-   still copy their contents (v0.1.31 copy-on-store), so a call-local value
-   stored into module state survives the call's region. *)
+   module init (module state persists).
+
+   THAT TRADE HAS A HOLE, AND IT IS OPEN (Q-127). A container the callee built and
+   the caller stored into module state does NOT survive the call: this comment used
+   to claim copy-on-store saved it, and copy-on-store does not copy CONTAINERS --
+   they are shared by identity in this language, so `__mcopy_Vec_<T>` is the identity
+   function by design (it copies the strings and records inside, not the container).
+   For a container created in a NAMED region the compiler refuses the store by name;
+   it cannot here, because `__heap` means the default region during module init and
+   the per-call region during a call, and the escape check reads it as the first.
+   `scripts/lib_check.sh` pins both sides -- that calls stay transactions, and that
+   this store still reads back garbage -- so neither can change unnoticed. *)
 let heap_container_region () =
   if !lib_mode then "__lang_current_region" else "(&__lang_default_region)"
 
