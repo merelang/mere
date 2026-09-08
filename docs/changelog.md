@@ -4,6 +4,76 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.451 — 2026-09-08
+
+**`mere -ll` emitted a `musttail` that clang would not build — and only at `-O0`.** LLVM
+has to keep `musttail` at every optimisation level, and past a return width the target
+cannot forward it stops with
+
+```
+fatal error: error in backend: failed to perform tail call elimination
+                               on a call site marked musttail
+```
+
+`-O1` and above optimise the call away before that check, so the failure lived exactly
+where the build is unoptimised: `parity.sh`'s LLVM column, the first thing a reader
+types (`clang out.ll`), and **any sanitiser run** — which is why ASan was given up on
+during the Q-129 hunt rather than pointed at the miscompile it would have named.
+
+**The width is the ABI's, not the IR's.** Swept 1..20 8-byte fields, self tail call
+returning the record:
+
+| | forwards up to | first refusal |
+|---|---|---|
+| arm64 (Apple clang 21) | 8 leaves (64 B) | 9 |
+| **x86-64 (Ubuntu clang 18.1.3)** | **4 leaves (32 B)** | 5 |
+
+So the emitter now marks `musttail` only when the return is **at most four leaves**, the
+smaller of the two — and the size it uses is an **upper bound rather than a layout
+model**: every scalar this backend emits is at most 8 bytes and at most 8-aligned, so
+leaves × 8 can never come out under the real size, padding included. Over-counting costs
+a `musttail`; under-counting would emit IR the target refuses, so anything the counter
+does not recognise counts as too big.
+
+**The price, stated.** A self tail call whose return is wider than 32 bytes is no longer
+constant-space **on the LLVM backend**: a 12-double accumulator that looped forever at
+`-O2` now reports `stack overflow (recursion too deep)`. Three things make that the
+better side of the trade. The C backend — the default, and what every gate builds — turns
+self tail calls into a `goto` and is untouched. Q-129 had *already* taken the tail call
+away from every aggregate return that did not go through this one branch (`tail` on an
+sret call is what produced NaN on x86-64), so the guarantee was never general. And a
+named stack overflow is a worse day than an unbounded loop but a much better one than a
+compiler that dies.
+
+**Nothing in the corpus was returning one.** Every aggregate-returning `musttail` in all
+167 parity programs — 32 of 2066 sites — is a two-leaf `{ i32, ptr }` or `{ ptr, i64 }`,
+all of which keep it. The whole class of wide returns had **no witness at all**, which is
+why a compiler-killing IR shape survived: `test/parity/wide_record_tail_return.mere` is
+that witness now, and on v0.1.450 it fails to build.
+
+`scripts/musttail_budget_check.sh` asks **in both directions**, because a bound with only
+one is a number that outlives its reason: with the shipped budget every return width from
+1 to 20 must build at `-O0`, and with `MERE_MUSTTAIL_LEAF_BUDGET` raised — which makes the
+emitter produce the very `musttail` the bound is refusing — the target is asked where its
+own line is and compared against the pinned table above. **If LLVM learns to forward
+more, this fails and says the budget can go up.** Both directions were poisoned: raising
+the shipped budget past the line reproduces the refusal for widths 9..20, and a wrong
+table entry is reported as stale.
+
+**Who could not be built, concretely:** three of m3d's LLVM-capable tests —
+`linalg_dump`, `linalg_props` and **`shade_props`** — were refused at `-O0` on
+v0.1.450, all three on `musttail call %mat4` (16 doubles). `shade_props` is the file
+whose x86-64 NaN was Q-129: the sanitiser that would have named that miscompile could
+not be pointed at it, because the build it needs was the one that did not exist. All
+three now build at `-O0` under ASan + UBSan, run clean, and agree with the interpreter.
+
+Swept the whole parity corpus the same way: **148 programs built and ran under
+ASan + UBSan with output identical to the unsanitised `-O0` build**, 0 differences, 0
+build failures (19 do not emit LLVM at all — the backend's documented refusals).
+`dune runtest` 2713 passed / 0 failed, parity 184 passed / 0 failed.
+
+---
+
 ## v0.1.450 — 2026-09-08
 
 **The C compiler was choosing the order the operands ran in, and gcc chose the opposite
