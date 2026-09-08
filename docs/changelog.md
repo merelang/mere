@@ -4,6 +4,40 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.448 — 2026-09-08
+
+**A closure call that returns a struct was miscompiled on x86-64, and only there.**
+Nine calls of the same expression: the first eight answered correctly and every one
+after that answered NaN. Right at -O0, wrong at -O1 and above; right on arm64 (macOS
+and Linux both), wrong on x86-64 (Linux and Rosetta both); the C backend right
+everywhere. That shape — same input, same code, a cliff after the eighth call — reads
+as state rather than arithmetic, and it was neither.
+
+**LLVM's `tailcallelim` marks ordinary calls `tail`.** On x86-64 a three-double struct
+is returned through memory (sret) rather than in registers, and a `tail`-marked
+indirect call returning one is where it broke. Bisected to that single pass: `opt
+-passes=tailcallelim` ALONE on unoptimised IR reproduces it, and `inline,tailcallelim`
+does not. The fix is to emit **`notail` on indirect calls whose return type is an
+aggregate** — the two places this backend calls through a closure pointer. It costs
+nothing: those are calls in value position, and the ones that must stay constant-space
+go through the `musttail` branch, which is unchanged.
+
+**It was found from outside.** [m3d](https://github.com/284km/m3d)'s shading properties
+agree across four backends on the developer's machine and failed on CI, which is the
+first thing that had ever compiled this language's LLVM output for x86-64 and run it.
+The minimal case is 17 lines and is now `test/parity/tailcall_aggregate_return.mere` —
+a regression test for the CI machine rather than for the laptop: it passes trivially on
+arm64 and is the whole point on x86-64.
+
+**What this does not fix, said plainly**: `mere -ll` output still fails to build at -O0
+on x86-64 with "failed to perform tail call elimination on a call site marked musttail",
+which is the same aggregate-return ABI meeting `musttail`'s guarantee. That one is a
+trade-off rather than a bug fix — dropping `musttail` for aggregate returns would cost
+the constant-space guarantee on arm64, where it works — so it is recorded and not
+guessed at.
+
+---
+
 ## v0.1.447 — 2026-09-07
 
 **A `type` declared inside a `module` produced C that did not compile**, in two

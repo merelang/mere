@@ -4713,8 +4713,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let fnp_reg = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1" fnp_reg cl_struct_name fn_v);
     let ok_result_reg = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call %s %s(ptr %s, i32 0)"
-                  ok_result_reg result_ty fnp_reg env_reg);
+    (* Same rule as the indirect call in `emit_user_app`: an aggregate return through
+       a function pointer must not be marked `tail` by tailcallelim (Q-129). *)
+    let notail_try =
+      if String.length result_ty > 0 && result_ty.[0] = '%' then "notail " else "" in
+    emit_instr (Printf.sprintf "  %s = %scall %s %s(ptr %s, i32 0)"
+                  ok_result_reg notail_try result_ty fnp_reg env_reg);
     let l_try_ok_end = fresh_label "try_ok_end_" in
     emit_instr (Printf.sprintf "  br label %%%s" l_try_ok_end);
     emit_label l_try_ok_end;
@@ -6650,8 +6654,21 @@ and emit_user_app ?(tail = false) (env : env) (e : Ast.expr) : string =
       llvm_returned := true;
       r
     end else begin
-      emit_instr (Printf.sprintf "  %s = call %s %s(ptr %s, %s %s)"
-                    r ret_ty fn_reg env_reg arg_ty av);
+      (* NOTAIL WHEN THE RETURN IS AN AGGREGATE, and this is a miscompile and not a
+         preference. LLVM's `tailcallelim` marks ordinary calls `tail`; on x86-64 a
+         struct of three doubles comes back through memory (sret) rather than in
+         registers, and a `tail`-marked indirect call returning one produced NaN from
+         the ninth call onward -- correct on arm64, correct at -O0, wrong at -O1 and
+         above. Found through m3d, whose shading properties failed on x86-64 only;
+         bisected to `opt -passes=tailcallelim` ALONE on unoptimised IR, and fixed by
+         exactly this marker. `notail` costs nothing here: these are closure calls in
+         value position, which the backend was not going to turn into jumps anyway --
+         the ones that must stay constant-space go through the `musttail` branch above.
+         Recorded as Q-129. *)
+      let notail =
+        if String.length ret_ty > 0 && ret_ty.[0] = '%' then "notail " else "" in
+      emit_instr (Printf.sprintf "  %s = %scall %s %s(ptr %s, %s %s)"
+                    r notail ret_ty fn_reg env_reg arg_ty av);
       r
     end
   | _ -> unsupported e.Ast.loc "emit_user_app: not an application"

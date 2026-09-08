@@ -1,0 +1,38 @@
+// A CLOSURE CALL THAT RETURNS A STRUCT, made nine times.
+//
+// This is here because of a MISCOMPILE THAT ONLY x86-64 COULD SEE, and this machine's
+// parity run cannot: on arm64 a three-double struct comes back in registers, on x86-64
+// it comes back through memory (sret). LLVM's `tailcallelim` marks ordinary calls
+// `tail`, and a `tail`-marked indirect call returning that struct produced NaN from the
+// NINTH call onward -- right at -O0, wrong at -O1 and above, right on arm64, wrong on
+// x86-64. The C backend was correct throughout.
+//
+// The eight is not decoration: the first eight calls of the same expression answered
+// correctly and every later one answered NaN, which is what made it look like state
+// rather than arithmetic. It was found through m3d, whose shading properties failed on
+// x86-64 only, bisected to `opt -passes=tailcallelim` ALONE on unoptimised IR, and
+// fixed by emitting `notail` on indirect calls whose return type is an aggregate.
+//
+// So this case is a regression test FOR THE CI MACHINE rather than for the developer's:
+// it passes trivially on arm64 and is the whole point on x86-64. Recorded as Q-129.
+type v3 = { x: float, y: float, z: float };
+
+let scale = fn (a: v3) -> fn (k: float) -> v3 { x = a.x * k, y = a.y * k, z = a.z * k };
+let dot = fn (a: v3) -> fn (b: v3) -> a.x * b.x + a.y * b.y + a.z * b.z;
+let normalize = fn (a: v3) -> scale a (1.0 / sqrt (dot a a));
+
+// Curried, and the last thing it does is call through a closure that returns a v3.
+let f = fn (m: float) -> fn (nn: v3) -> fn (li: v3) ->
+  let l = normalize (v3 { x = 0.0 - li.x, y = 0.0 - li.y, z = 0.0 - li.z }) in
+  v3 { x = dot nn l * m, y = 0.0, z = 0.0 };
+
+let n = v3 { x = 0.0, y = 0.0, z = 1.0 };
+let li = v3 { x = 0.0 - 0.3, y = 0.0 - 0.4, z = 0.0 - 0.866 };
+// The call site is itself inside a closure, which the miscompile needed.
+let at = fn (m: float) -> (f m n li).x;
+
+let rec loop = fn (i: int) -> fn (acc: float) ->
+  if i >= 12 then acc else loop (i + 1) (acc + at 0.4);
+// Twelve of them: any run where the ninth onward are NaN prints nan here.
+let _ = print (str_of_float (loop 0 0.0));
+0
