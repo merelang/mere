@@ -15158,5 +15158,89 @@ let () =
        (count "mere_strbuf_new(__region_R)"))
     "lifted:yes current:1 local:0";
 
+  (* v0.1.450 (Q-130 / Q-128): OPERANDS ARE SEQUENCED, CASCADES ARE FLATTENED.
+     Two reasons, and the emitter applies each only where it is owed:
+       - order: C leaves the order of `a ++ b` unspecified and gcc chose right-to-left,
+         so a chain with two operands that can have effects is bound to temporaries;
+       - depth: a chain or cascade nests one bracket per link, and clang stops at 256.
+     These are text checks -- what runs is test/parity/eval_order_operands.mere,
+     logic_chain_short_circuit.mere and if_cascade_call_conditions.mere, and what
+     answers "does clang accept it" is scripts/bracket_depth_check.sh, because only the
+     compiler that imposes the limit can say whether a program is under it. *)
+  (let codegen s =
+     let prog = Pipeline.parse_program s in
+     let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_c.emit_program ~main_ty prog in
+   let find c sub =
+     let n = String.length sub and m = String.length c in
+     let rec go i = if i + n > m then -1 else if String.sub c i n = sub then i else go (i + 1) in
+     go 0 in
+   let count c sub =
+     let n = String.length sub and m = String.length c in
+     let rec go i acc =
+       if i + n > m then acc
+       else go (i + 1) (if String.sub c i n = sub then acc + 1 else acc) in
+     go 0 0 in
+   (* The PRELUDE writes chains and cascades of its own -- the East-Asian-width table is
+      a hundred-link `||` -- so a marker looked for in the whole file answers about the
+      prelude, not about the probe. Every check below starts at the probe's own code. *)
+   let from c marker = let i = find c marker in if i < 0 then "" else String.sub c i (String.length c - i) in
+   let has c sub = count c sub > 0 in
+   let p_decl = "let p = fn (s: str) -> let _ = print s in s;\n" in
+   check "v0.1.450: two operands that can have effects are bound before they combine"
+     (let c = from (codegen (p_decl ^ "print (p \"a\" ++ p \"b\")")) "int main(" in
+      if c = "" then "no main" else if has c "__lang_str_concat(__bc" then "sequenced" else "nested")
+     "sequenced";
+   check "v0.1.450: one effectful operand is not worth a temporary"
+     (let c = from (codegen (p_decl ^ "let x = \"a\";\nprint (x ++ p \"b\")")) "int main(" in
+      if c = "" then "no main" else if has c "__lang_str_concat(mu_x, ({" then "nested" else "sequenced")
+     "nested";
+   check "v0.1.450: plain arithmetic keeps its shape"
+     (let c = codegen "let f = fn (n: int) -> n * n * n + n;\nprint_int (f 3)" in
+      if has c "((mu_n * mu_n) * mu_n)" then "nested" else "sequenced")
+     "nested";
+   check "v0.1.450: a long chain is sequenced even when nothing in it has effects"
+     (let lits = String.concat " ++ "
+        (List.init 20 (fun i -> Printf.sprintf "\"s%d\"" i)) in
+      let c = from (codegen (Printf.sprintf "print (%s)" lits)) "int main(" in
+      if count c "__lang_str_concat(__bc" >= 19 then "sequenced" else "nested")
+     "sequenced";
+   check "v0.1.450: a long `&&` chain becomes conditionals, keeping the skip"
+     (let cs = String.concat " && "
+        (List.init 10 (fun i -> Printf.sprintf "(n > %d)" i)) in
+      let c = from (codegen (Printf.sprintf
+        "let f = fn (n: int) -> if %s then 1 else 0;\nprint_int (f 3)" cs)) "mu_f__direct(long long mu_n)" in
+      Printf.sprintf "stepwise:%b plain:%b"
+        (has c "? 1 : 0) : 0;") (has c "((mu_n > 0LL) && (mu_n > 1LL))"))
+     "stepwise:true plain:false";
+   check "v0.1.450: a short `&&` chain is left alone"
+     (let c = from (codegen "let f = fn (n: int) -> if n > 0 && n > 1 && n > 2 then 1 else 0;\nprint_int (f 3)")
+        "mu_f__direct(long long mu_n)" in
+      if has c "((mu_n > 0LL) && (mu_n > 1LL))" then "plain" else "flattened")
+     "plain";
+   check "v0.1.450: a long else-if cascade is written as statements"
+     (let arms = String.concat ""
+        (List.init 9 (fun i -> Printf.sprintf " else if n == %d then %d" (i + 1) (i + 1))) in
+      let c = from (codegen (Printf.sprintf
+        "let f = fn (n: int) -> if n == 0 then 0%s else 99;\nprint_int (f 3)" arms))
+        "mu_f__direct(long long mu_n)" in
+      if has c "} else if (" then "statements" else "ternaries")
+     "statements";
+   check "v0.1.450: a short cascade stays a ternary"
+     (let c = from (codegen "let f = fn (n: int) -> if n == 0 then 0 else if n == 1 then 1 else 99;\nprint_int (f 3)")
+        "mu_f__direct(long long mu_n)" in
+      if has c "} else if (" then "statements" else "ternaries")
+     "ternaries";
+   (* The paren that must not be trimmed: in `if (X)` the paren is the `if`'s own, so a
+      condition emitted as a statement expression has to keep the pair around it. *)
+   check "v0.1.450: a cascade condition that is a call keeps its own parens"
+     (let arms = String.concat ""
+        (List.init 9 (fun i -> Printf.sprintf " else if q %d then %d" (i + 1) (i + 1))) in
+      let c = from (codegen (Printf.sprintf
+        "let q = fn (n: int) -> n > 0;\nlet f = fn (n: int) -> if q 0 then 0%s else 99;\nprint_int (f 3)" arms))
+        "mu_f__direct(long long mu_n)" in
+      Printf.sprintf "kept:%b bare:%b" (has c "if (({") (has c "if ({"))
+     "kept:true bare:false");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
