@@ -1,0 +1,40 @@
+// AN `else if` CASCADE WHOSE CONDITIONS ARE CALLS.
+//
+// v0.1.450 writes a cascade of eight arms or more as statements instead of nested
+// ternaries, so it stops nesting one bracket per arm. Two things about that only show
+// up when the conditions are CALLS rather than comparisons:
+//
+//   - a call to a user function is emitted as a statement expression, `({ ... })`, and
+//     `if ({ ... })` DOES NOT PARSE: the paren belongs to the `if`, so the brace lands
+//     where C wants an expression. It has to stay `if (({ ... }))`. The first version
+//     of this change stripped that paren as redundant -- every hand-written test still
+//     passed, and the mere-ruby prelude stopped compiling.
+//   - the conditions must run in order and stop at the first true one.
+//
+// So the predicates print, and the expected output is the trace, not just the answer.
+let seen = fn (s: str) -> fn (v: bool) -> let _ = print s in v;
+let is1 = fn (n: int) -> seen "?1" (n == 1);
+let is2 = fn (n: int) -> seen "?2" (n == 2);
+let is3 = fn (n: int) -> seen "?3" (n == 3);
+let is4 = fn (n: int) -> seen "?4" (n == 4);
+let is5 = fn (n: int) -> seen "?5" (n == 5);
+let is6 = fn (n: int) -> seen "?6" (n == 6);
+let is7 = fn (n: int) -> seen "?7" (n == 7);
+let is8 = fn (n: int) -> seen "?8" (n == 8);
+let is9 = fn (n: int) -> seen "?9" (n == 9);
+let is10 = fn (n: int) -> seen "?10" (n == 10);
+let name = fn (n: int) -> if is1 n then "v1"
+  else if is2 n then "v2"
+  else if is3 n then "v3"
+  else if is4 n then "v4"
+  else if is5 n then "v5"
+  else if is6 n then "v6"
+  else if is7 n then "v7"
+  else if is8 n then "v8"
+  else if is9 n then "v9"
+  else if is10 n then "v10"
+  else "none";
+let rec go = fn (i: int) -> fn (acc: str) ->
+  if i > 11 then acc else go (i + 1) (acc ++ name i ++ ",");
+let _ = print (go 1 "");
+0

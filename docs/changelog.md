@@ -4,6 +4,80 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.450 — 2026-09-08
+
+**The C compiler was choosing the order the operands ran in, and gcc chose the opposite
+of everything else.** `p "one" ++ p "two" ++ p "three"`, where each operand prints,
+printed one/two/three under the interpreter, the LLVM backend and clang — and
+**three/two/one** from the same emitted C built with gcc. Argument evaluation order is
+unspecified in C; the backend had already decided this for calls (every argument is
+bound to a `__da` temporary before the call) and had simply never decided it for
+operators. `parity.sh` builds with clang unless `CC` says otherwise, so nothing here
+could see it.
+
+**And the same nesting was the rest of the bracket-depth tax.** `a ++ b ++ c` is
+`concat(concat(a, b), c)`: one bracket per link. So is `(((a && b) && c) …)`, and so is
+`if … else if …`, which becomes `(c1 ? x : (c2 ? y : …))`. Clang stops at 256 and
+mere-ruby's prelude writes all three in the hundreds — which is why v0.1.449 fixed the
+`let` chain and mere-ruby still needed `-fbracket-depth=4096`.
+
+One change answers both. A chain is emitted as one statement expression with a
+temporary per step, and a long `else if` cascade is emitted **as statements**, where
+each `if` closes before the next opens:
+
+```c
+/* a ++ b ++ c            */ ({ __auto_type t0 = A; __auto_type t1 = B;
+                                __auto_type t2 = concat(t0,t1); … t4; })
+/* a && b && … (10 links) */ ({ int t0 = A; int t1 = t0 ? (B) : 0; … t9; })
+/* if … else if … (10)    */ ({ T r; if (c1) { r = x; } else if (c2) { r = y; } … r; })
+```
+
+**Each rule fires only where it is owed**, so ordinary code keeps its shape: `n * n * n`
+is still `((n * n) * n)`, a chain with one effectful operand is still nested, and a
+two-arm `if` is still a ternary. Sequencing costs a temporary; a chain gets one when it
+has **two or more operands that can have effects** (nothing to order against, with one)
+or when it is **eight links or longer** (the depth reason, which holds even for a chain
+of string literals). `&&` and `||` are never sequenced — the whole point of them is that
+the right side may not run — they are rewritten into conditionals that keep the skip,
+and `logic_chain_short_circuit.mere` prints from inside every operand to say so.
+
+Measured, all by asking the tool that imposes the limit rather than counting brackets:
+
+| | before | after |
+|---|---|---|
+| gcc, `p"one" ++ p"two" ++ p"three"` | `three two one` | `one two three` |
+| 300-link `++` chain, `clang -fbracket-depth=256` | refused | accepted |
+| **mere-ruby**, 154k lines of emitted C, same question | refused (one line, 524 kB) | **accepted** |
+
+So **mere-ruby no longer needs `-fbracket-depth` either** — the flag that started as
+m3d's and was then rediscovered per repository is now unnecessary in both. Built at HEAD
+with no flag, its 204-program corpus matches ruby 4.0.6 on all 204, and bootstraptest
+reads pass=1628 fail=27 err=41 against pass=1627 fail=27 err=41 for the same tree built
+with v0.1.449 — the same failures, the extra pass being one pair the reference
+reproduced on this run and not the last (the harness counts those as drift and leaves
+them out of the denominator, which moved 1696 → 1697).
+
+`dune runtest` 2710 passed / 0 failed. parity 183 passed / 0 failed, including the three
+new cases. **m3d renders all 50 models byte-identically** to the v0.1.449 build, which is
+also what says its reference gate's one red model was the browser and not this change.
+
+**The bug the hand-written tests could not find** is worth naming: conditions arrive
+already parenthesised, so the cascade trimmed the redundant pair — and a condition that
+is a CALL is emitted as `({ … })`, where in `if (X)` the paren belongs to the `if`. The
+brace then lands where C wants an expression and the file stops parsing. Every synthetic
+cascade in the test suite compared integers, so every one of them passed; mere-ruby's
+prelude, which dispatches on predicates, did not. `test/parity/if_cascade_call_conditions.mere`
+is that shape, written down.
+
+`scripts/bracket_depth_check.sh` is the new gate and it asks rather than counts:
+`clang -fsyntax-only -fbracket-depth=256` on three generated 300-link shapes, with the
+same files at `-fbracket-depth=4` required to be REFUSED so a probe that failed to emit
+cannot read as a pass — and the order half builds the same C with **every** compiler on
+the machine, because one compiler cannot disagree with itself. Recorded as Q-130, and
+it closes Q-128.
+
+---
+
 ## v0.1.449 — 2026-09-08
 
 **A chain of `let`s no longer nests in the emitted C.** Each one used to become its own

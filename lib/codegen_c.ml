@@ -1456,6 +1456,122 @@ let channel_elem_tag (t : Ast.ty option) : string =
     raise (Codegen_error (Loc.dummy,
       "channel operation: element type is not a resolved Channel[T]"))
 
+(* Q-130 helpers: the left spine of a binary chain, whether it is worth sequencing,
+   and how one step is written.
+
+   `bin_may_effect` is deliberately CONSERVATIVE and small: a literal, a variable, a
+   field of one, and the wrappers that do not evaluate anything are effect-free;
+   everything else is assumed to be able to print, allocate or fail. Getting this wrong
+   in the cautious direction costs a temporary; getting it wrong the other way would
+   put an unspecified order back. *)
+let rec bin_may_effect (e : Ast.expr) : bool =
+  match e.Ast.node with
+  | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _ | Ast.Unit_lit
+  | Ast.Var _ -> false
+  | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _) -> bin_may_effect a
+  | _ -> true
+
+let rec bin_spine (e : Ast.expr)
+  : Ast.expr * (Ast.binop * Ast.expr * Ast.expr) list =
+  match e.Ast.node with
+  | Ast.Bin (op, a, b) ->
+    let (leftmost, links) = bin_spine a in
+    (leftmost, links @ [(op, b, e)])
+  | _ -> (e, [])
+
+(* Two independent reasons to sequence, and a chain needs only one of them.
+
+   ORDER: two or more operands that can have effects. With one, there is nothing for it
+   to be ordered against and the plain nesting is both correct and easier to read.
+   DEPTH: a long chain, whatever it is made of. `"a" ++ "b" ++ ...` is pure and still
+   nests one bracket per link, which is how the mere-ruby prelude reached clang's limit.
+   Eight is above anything written by hand and well below anything generated. *)
+let bin_chain_depth_limit = 8
+
+let bin_wants_sequencing (e : Ast.expr) : bool =
+  match e.Ast.node with
+  | Ast.Bin _ ->
+    let (leftmost, links) = bin_spine e in
+    let effectful =
+      List.fold_left (fun acc (_, rhs, _) -> if bin_may_effect rhs then acc + 1 else acc)
+        (if bin_may_effect leftmost then 1 else 0) links in
+    effectful >= 2 || List.length links >= bin_chain_depth_limit
+  | _ -> false
+
+(* `&&` / `||` nest one bracket per link too, and the mere-ruby prelude writes
+   membership tests two hundred conjuncts long. They cannot be sequenced the way
+   arithmetic is -- the whole point of these operators is that the right side may never
+   run -- so each step is written as a conditional that keeps the skip:
+   `t1 = t0 ? (b) : 0` for `&&`, `t1 = t0 ? 1 : (b)` for `||`. Depth 1 per link, and the
+   same operand goes unevaluated as before. Only length justifies it, so short chains,
+   which are almost all of them, keep the plain shape. *)
+let rec logic_spine (e : Ast.expr)
+  : Ast.expr * (Ast.logicop * Ast.expr) list =
+  match e.Ast.node with
+  | Ast.Logic (op, a, b) ->
+    let (leftmost, links) = logic_spine a in
+    (leftmost, links @ [(op, b)])
+  | _ -> (e, [])
+
+let logic_wants_sequencing (e : Ast.expr) : bool =
+  match e.Ast.node with
+  | Ast.Logic _ -> List.length (snd (logic_spine e)) >= bin_chain_depth_limit
+  | _ -> false
+
+(* c_type_of is defined much further down (it needs the monomorphisation tables), and
+   the if-cascade below has to NAME the type of its result. Same trick the inner-lift
+   closures use for the same reason: a ref filled in once c_type_of exists. *)
+let c_type_of_fwd : (Ast.ty -> string) ref = ref (fun _ -> raise Exit)
+
+(* A chain of `else if`. `if a then x else if b then y else ... ` nests one bracket per
+   arm as `(a ? x : (b ? y : ...))`, and the mere-ruby prelude dispatches on method name
+   through cascades hundreds of arms long -- which is what was left of the bracket-depth
+   problem after the operator chains were sequenced. Written as statements the same
+   cascade is FLAT: each `if` closes before the next one opens. *)
+let rec if_cascade (e : Ast.expr) : (Ast.expr * Ast.expr) list * Ast.expr =
+  match e.Ast.node with
+  | Ast.If (c, t, els) ->
+    let (arms, final) = if_cascade els in
+    ((c, t) :: arms, final)
+  | _ -> ([], e)
+
+(* Conditions arrive already wrapped, and `if ((a == b))` is what clang warns about
+   with -Wparentheses-equality. Drop one redundant outer pair when there is one. *)
+let unparen (s : string) : string =
+  let n = String.length s in
+  if n >= 2 && s.[0] = '(' && s.[n-1] = ')' then begin
+    let d = ref 0 and ok = ref true in
+    String.iteri (fun i c ->
+      if c = '(' then incr d
+      else if c = ')' then begin
+        decr d;
+        if !d = 0 && i < n - 1 then ok := false
+      end) s;
+    (* Not for a statement expression: in `if (X)` the paren belongs to the `if`, so
+       `({ ... })` must keep its own or the brace starts where an expression should. *)
+    if !ok && !d = 0 && s.[1] <> '{' then String.sub s 1 (n - 2) else s
+  end else s
+
+let bin_tmp_counter = ref 0
+let fresh_bin_tmp () =
+  incr bin_tmp_counter;
+  Printf.sprintf "__bc%d" !bin_tmp_counter
+
+(* One step of a sequenced chain, written the way the unsequenced arms below write it:
+   `++` goes through the concat helper, integer / and % through the checked ones, and
+   everything else is the C operator. *)
+let emit_bin_apply (op : Ast.binop) (node : Ast.expr) (l : string) (r : string) : string =
+  match op with
+  | Ast.Concat -> Printf.sprintf "__lang_str_concat(%s, %s)" l r
+  | (Ast.Div | Ast.Mod) when
+      (match node.Ast.node with
+       | Ast.Bin (_, a, _) ->
+         (match a.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt) = Ast.TyInt
+       | _ -> false) ->
+    Printf.sprintf "%s(%s, %s)"
+      (if op = Ast.Div then "__lang_idiv" else "__lang_imod") l r
+  | _ -> Printf.sprintf "(%s %s %s)" l (binop_to_c op) r
+
 (* Translate one Lang expression to a C expression string. *)
 let rec emit_expr (e : Ast.expr) : string =
   (* Q-029: tail position belongs to where this expression sits, so take it
@@ -1751,6 +1867,46 @@ let rec emit_expr (e : Ast.expr) : string =
        else c_safe_name name))
   | Ast.Annot (inner, _) -> c_tail_pos := __in_tail; emit_expr inner
   | Ast.Neg a -> "(-" ^ emit_expr a ^ ")"
+  (* Q-130 / Q-128: A CHAIN OF BINARY OPERATORS IS SEQUENCED, NOT NESTED.
+
+     Two problems, one shape. `a ++ b ++ c` used to come out as
+     `concat(concat(A, B), C)` with A, B and C as statement expressions, and that is
+     wrong twice over:
+
+     THE ORDER IS THE C COMPILER'S. Argument evaluation order is unspecified in C, and
+     the compilers disagree: with side effects in each operand, clang runs them left to
+     right (which is what the interpreter does) and GCC RUNS THEM RIGHT TO LEFT. That is
+     a parity difference this project could not see, because `parity.sh` compiles with
+     clang. A user call was never exposed to it -- `emit_user_app` already binds each
+     argument to a `__da` temporary first -- so this is bringing operators into line with
+     a decision the backend had already made, not making a new one.
+
+     THE NESTING IS THE CHAIN'S LENGTH. One level per link, so a long `++` chain (the
+     mere-ruby prelude builds one per module) walks past clang's 256-bracket limit.
+
+     So the left spine is collected and emitted as one statement expression with a
+     temporary per step. WHEN IT IS NOT WORTH IT, THE OLD SHAPE STAYS: a single operator
+     whose operands cannot have effects (literals, variables, a field of one) is emitted
+     exactly as before, which keeps ordinary arithmetic readable and shallow. `&&` and
+     `||` are `Ast.Logic`, a separate node, and are NOT sequenced this way -- that would
+     evaluate a right-hand side the program says to skip. They have their own arm below,
+     which flattens the same nesting into conditionals that keep the skip. *)
+  | Ast.Bin _ when bin_wants_sequencing e ->
+    let (leftmost, links) = bin_spine e in
+    let parts = ref [] in
+    let cur = ref (
+      let v = emit_expr leftmost in
+      let t = fresh_bin_tmp () in
+      parts := Printf.sprintf "__auto_type %s = %s;" t v :: !parts; t) in
+    List.iter (fun (op, rhs, node) ->
+      let rv = emit_expr rhs in
+      let rt = fresh_bin_tmp () in
+      parts := Printf.sprintf "__auto_type %s = %s;" rt rv :: !parts;
+      let combined = emit_bin_apply op node !cur rt in
+      let ct = fresh_bin_tmp () in
+      parts := Printf.sprintf "__auto_type %s = %s;" ct combined :: !parts;
+      cur := ct) links;
+    Printf.sprintf "({ %s %s; })" (String.concat " " (List.rev !parts)) !cur
   | Ast.Bin (Ast.Concat, a, b) ->
     "__lang_str_concat(" ^ emit_expr a ^ ", " ^ emit_expr b ^ ")"
   (* Integer / and % go through a helper that checks the divisor; see the note on
@@ -1790,8 +1946,57 @@ let rec emit_expr (e : Ast.expr) : string =
          (ty_tag ty) (emit_expr a) (emit_expr b) (cmpop_to_c op)
      | _ ->
        "(" ^ emit_expr a ^ " " ^ cmpop_to_c op ^ " " ^ emit_expr b ^ ")")
+  | Ast.Logic _ when logic_wants_sequencing e ->
+    let (leftmost, links) = logic_spine e in
+    let parts = ref [] in
+    let t0 = fresh_bin_tmp () in
+    parts := Printf.sprintf "int %s = (%s);" t0 (emit_expr leftmost) :: !parts;
+    let cur = ref t0 in
+    List.iter (fun (op, rhs) ->
+      let t = fresh_bin_tmp () in
+      let step = match op with
+        | Ast.And -> Printf.sprintf "int %s = %s ? ((%s) ? 1 : 0) : 0;" t !cur (emit_expr rhs)
+        | Ast.Or  -> Printf.sprintf "int %s = %s ? 1 : ((%s) ? 1 : 0);" t !cur (emit_expr rhs) in
+      parts := step :: !parts;
+      cur := t) links;
+    Printf.sprintf "({ %s %s; })" (String.concat " " (List.rev !parts)) !cur
   | Ast.Logic (op, a, b) ->
     "(" ^ emit_expr a ^ " " ^ logicop_to_c op ^ " " ^ emit_expr b ^ ")"
+  (* A LONG else-if cascade, written as statements so it stops nesting. The result
+     needs a declared type, so a cascade whose type the backend cannot name (an
+     unresolved tyvar reaching c_type_of) simply keeps the nested form.
+
+     THE ARMS ARE EMITTED IN THE ORDER THE NESTED FORM EMITTED THEM -- innermost else
+     first, then each (then, cond) pair from the last arm back to the first. emit_expr
+     interns strings and numbers closures as it goes, so that order is part of the
+     program, not a detail (see the note on the nested arm below). *)
+  | Ast.If _ when
+      (match e.Ast.node with
+       | Ast.If (_, _, els) ->
+         (match els.Ast.node with Ast.If _ -> true | _ -> false)
+       | _ -> false)
+      && List.length (fst (if_cascade e)) >= bin_chain_depth_limit
+      && (match e.Ast.ty with
+          | Some t -> (try ignore (!c_type_of_fwd t); true with _ -> false)
+          | None -> false) ->
+    let (arms, final) = if_cascade e in
+    let c_ty = !c_type_of_fwd (match e.Ast.ty with Some t -> t | None -> Ast.TyUnit) in
+    c_tail_pos := __in_tail;
+    let final_c = emit_expr final in
+    let emitted = ref [] in
+    List.iter (fun (c, t) ->
+      c_tail_pos := __in_tail;
+      let t_c = emit_expr t in
+      let c_c = emit_expr c in
+      emitted := (c_c, t_c) :: !emitted) (List.rev arms);
+    let r = fresh_bin_tmp () in
+    let buf = Buffer.create 256 in
+    Buffer.add_string buf (Printf.sprintf "({ %s %s; " c_ty r);
+    List.iter (fun (c_c, t_c) ->
+      Buffer.add_string buf (Printf.sprintf "if (%s) { %s = %s; } else " (unparen c_c) r t_c))
+      !emitted;
+    Buffer.add_string buf (Printf.sprintf "{ %s = %s; } %s; })" r final_c r);
+    Buffer.contents buf
   | Ast.If (cond, then_, else_) ->
     (* The operands are emitted else / then / cond, which is the order the
        original `^` chain evaluated them in (OCaml takes the right argument
@@ -1806,7 +2011,7 @@ let rec emit_expr (e : Ast.expr) : string =
     "(" ^ cond_c ^ " ? " ^ then_c ^ " : " ^ else_c ^ ")"
   | Ast.Let (pat0, value0, _) when
       (* Q-128: A CHAIN OF `let`s BECOMES ONE STATEMENT EXPRESSION, NOT A TOWER OF THEM.
-         
+
          Each `let` emits `({ bind; body; })`, so `let a = .. in let b = .. in ...`
          emitted `({ a; ({ b; ({ c; ... }) }) })` and the bracket nesting of the result
          grew with the LENGTH OF THE CHAIN -- about two levels per binding, measured.
@@ -1816,20 +2021,20 @@ let rec emit_expr (e : Ast.expr) : string =
          mere-ruby's CI carries `-fbracket-depth=4096` for the same reason. A generated
          table (256 `vec_push`es in one chain) does it inside a single value, so this
          cannot be fixed at the top level alone.
-         
+
          So the chain is collected into one `({ s1 s2 s3 ... final; })`. Three things
          keep it honest:
-         
+
          SHADOWING STOPS IT. `let x = 1 in let x = x + 1 in ...` cannot become two
          declarations of `mu_x` in one C scope, so a name already bound in this chain
          ends the run and the rest nests as before -- one level, where the old shape
          had one per binding.
-         
+
          SO DOES ANYTHING THAT IS NOT A PLAIN BINDING: a tuple or constructor pattern,
          an owned-vec binding that wants a scope-end free, a global whose initializer is
          not the one recorded. Those keep their old emission exactly, and the chain
          resumes underneath them.
-         
+
          AND THE FIRST LINK DECIDES. If it is not flattenable this guard does not fire
          at all and the original code below runs unchanged, which is what makes the two
          paths mutually exclusive rather than two spellings of the same thing. *)
@@ -4580,6 +4785,9 @@ type fn_skel = Monomorph.fn_skel = {
    wrapping only the fixpoint turned that refusal from a diagnostic with a
    source location into an uncaught OCaml exception. The byte-comparison gate
    named the file. *)
+(* The if-cascade in emit_expr can name a C type now. *)
+let () = c_type_of_fwd := c_type_of
+
 let of_monomorph : 'a. (unit -> 'a) -> 'a = fun f ->
   try f () with
   | Monomorph.Unsupported (loc, what) -> unsupported loc what
