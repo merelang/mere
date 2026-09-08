@@ -1804,6 +1804,96 @@ let rec emit_expr (e : Ast.expr) : string =
     let then_c = emit_expr then_ in
     let cond_c = emit_expr cond in
     "(" ^ cond_c ^ " ? " ^ then_c ^ " : " ^ else_c ^ ")"
+  | Ast.Let (pat0, value0, _) when
+      (* Q-128: A CHAIN OF `let`s BECOMES ONE STATEMENT EXPRESSION, NOT A TOWER OF THEM.
+         
+         Each `let` emits `({ bind; body; })`, so `let a = .. in let b = .. in ...`
+         emitted `({ a; ({ b; ({ c; ... }) }) })` and the bracket nesting of the result
+         grew with the LENGTH OF THE CHAIN -- about two levels per binding, measured.
+         Clang's default limit is 256 and Ubuntu's clang 18 enforces it where Apple's
+         does not, so programs built on a Mac and failed on Linux: m3d's `main` sat at
+         533 and its CI was red at the first gate for the life of the project, and
+         mere-ruby's CI carries `-fbracket-depth=4096` for the same reason. A generated
+         table (256 `vec_push`es in one chain) does it inside a single value, so this
+         cannot be fixed at the top level alone.
+         
+         So the chain is collected into one `({ s1 s2 s3 ... final; })`. Three things
+         keep it honest:
+         
+         SHADOWING STOPS IT. `let x = 1 in let x = x + 1 in ...` cannot become two
+         declarations of `mu_x` in one C scope, so a name already bound in this chain
+         ends the run and the rest nests as before -- one level, where the old shape
+         had one per binding.
+         
+         SO DOES ANYTHING THAT IS NOT A PLAIN BINDING: a tuple or constructor pattern,
+         an owned-vec binding that wants a scope-end free, a global whose initializer is
+         not the one recorded. Those keep their old emission exactly, and the chain
+         resumes underneath them.
+         
+         AND THE FIRST LINK DECIDES. If it is not flattenable this guard does not fire
+         at all and the original code below runs unchanged, which is what makes the two
+         paths mutually exclusive rather than two spellings of the same thing. *)
+      (match pat0.pnode, value0.Ast.node with
+       | Ast.P_var n, Ast.Fun _ -> Hashtbl.mem inner_lifts n
+       | Ast.P_var n, _ ->
+         (not (Hashtbl.mem top_globals n))
+         && (match value0.Ast.node with
+             | Ast.App ({ Ast.node = Ast.Var "owned_vec_new"; _ }, _) -> false
+             | _ -> true)
+       | (Ast.P_wild | Ast.P_unit), _ -> true
+       | _ -> false) ->
+    let stmts = ref [] in
+    let bound : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+    let prev_types = !current_var_types in
+    let prev_subst = !current_env_subst in
+    let rec chain (cur : Ast.expr) : string =
+      match cur.Ast.node with
+      | Ast.Let (pat, value, body) ->
+        (match pat.Ast.pnode with
+         | Ast.P_var name when
+             (match value.Ast.node with Ast.Fun _ -> true | _ -> false)
+             && Hashtbl.mem inner_lifts name ->
+           c_tail_pos := __in_tail; chain body
+         | Ast.P_var name
+           when (not (Hashtbl.mem bound name))
+                && (not (Hashtbl.mem top_globals name))
+                && (match value.Ast.node with
+                    | Ast.App ({ Ast.node = Ast.Var "owned_vec_new"; _ }, _) -> false
+                    | _ -> true) ->
+           c_tail_pos := false;
+           let value_c = emit_expr value in
+           let bind_ty =
+             match value.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt in
+           current_var_types := (name, bind_ty) :: !current_var_types;
+           current_env_subst :=
+             List.filter (fun (n, _) -> n <> name) !current_env_subst;
+           Hashtbl.replace bound name ();
+           let safe = c_safe_name name in
+           let tmp = flatten_module_dots name in
+           (* The two-step form the nested shape uses, for the same reason: the
+              initializer of `let xs = f xs` must still read the OUTER xs. *)
+           stmts := Printf.sprintf
+             "__auto_type __let_tmp_%s = %s; __auto_type %s = __let_tmp_%s;"
+             tmp value_c safe tmp :: !stmts;
+           c_tail_pos := __in_tail; chain body
+         | Ast.P_wild | Ast.P_unit ->
+           c_tail_pos := false;
+           let value_c = emit_expr value in
+           stmts := Printf.sprintf "(void)(%s);" value_c :: !stmts;
+           c_tail_pos := __in_tail; chain body
+         | _ -> c_tail_pos := __in_tail; emit_expr cur)
+      | _ -> c_tail_pos := __in_tail; emit_expr cur
+    in
+    let final =
+      try chain e
+      with ex ->
+        current_var_types := prev_types; current_env_subst := prev_subst; raise ex
+    in
+    current_var_types := prev_types;
+    current_env_subst := prev_subst;
+    if !stmts = [] then final
+    else Printf.sprintf "({ %s %s; })"
+           (String.concat " " (List.rev !stmts)) final
   | Ast.Let (pat, value, body) ->
     (match pat.pnode with
      | Ast.P_var name when
@@ -11328,7 +11418,82 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   (* main's own inner-lifted fns live under host "$main" (see lift_inner_fns). *)
   set_inner_lifts_for_host "$main";
-  let main_body = emit_expr body_expr in
+  (* Q-128: THE TOP-LEVEL `let` CHAIN IS EMITTED AS STATEMENTS, NOT AS NESTING.
+     
+     Every `let` becomes a GCC/Clang statement expression `({ ...; body; })`, and a
+     chain of them nests: `({ a; ({ b; ({ c; ... }) }) })`. So the bracket depth of the
+     emitted `main` grew with the number of top-level bindings in the program AND in
+     everything it imports -- about two levels per binding, measured. Clang's default
+     limit is 256: Ubuntu's clang 18 enforces it, Apple's clang does not, and gcc has no
+     such limit, so a program built here and failed there. m3d sat at 533 and its CI was
+     red at the first gate for the life of the project; mere-ruby's CI carries
+     `-fbracket-depth=4096` for the same reason. A tax rediscovered per repository is a
+     tax the compiler should not be charging.
+     
+     The chain is walked HERE rather than inside `emit_expr`, because the nesting is
+     only a problem at the top level -- inside a function body the depth is bounded by
+     that body -- and because a flag threaded through the recursion would have to be
+     cleared by every case that descends into something else.
+     
+     WHAT IS NOT FLATTENED FALLS BACK TO THE OLD SHAPE, whole: an owned-vec binding that
+     wants a scope-end free (the free would move to the end of main), and any pattern
+     other than a variable, a wildcard or a unit. When the walk meets one it stops and
+     hands the REST of the chain to `emit_expr`, so the result is always at least as
+     shallow as before and never differently behaved. *)
+  let flat_stmts = ref [] in
+  let push_stmt s = flat_stmts := s :: !flat_stmts in
+  let top_tail = !c_tail_pos in
+  let rec flatten_top (e : Ast.expr) : string =
+    match e.Ast.node with
+    | Ast.Let (pat, value, body) ->
+      (match pat.Ast.pnode with
+       (* An inner fn that the pre-pass lifted out: the binding has no value here. *)
+       | Ast.P_var name when
+           (match value.Ast.node with Ast.Fun _ -> true | _ -> false)
+           && Hashtbl.mem inner_lifts name ->
+         c_tail_pos := top_tail;
+         flatten_top body
+       | Ast.P_var name
+         when (not (Hashtbl.mem top_globals name))
+              && not (match value.Ast.node with
+                      | Ast.App ({ Ast.node = Ast.Var "owned_vec_new"; _ }, _) -> true
+                      | _ -> false) ->
+         c_tail_pos := false;
+         let value_c = emit_expr value in
+         let bind_ty =
+           match value.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt in
+         current_var_types := (name, bind_ty) :: !current_var_types;
+         current_env_subst :=
+           List.filter (fun (n, _) -> n <> name) !current_env_subst;
+         let safe = c_safe_name name in
+         let tmp = flatten_module_dots name in
+         (* The same two-step shape the nested form uses, and for the same reason:
+            `let xs = f xs` must read the OUTER xs in its own initializer. *)
+         push_stmt (Printf.sprintf
+           "  __auto_type __let_tmp_%s = %s; __auto_type %s = __let_tmp_%s;"
+           tmp value_c safe tmp);
+         c_tail_pos := top_tail;
+         flatten_top body
+       (* A binding promoted to file scope: assign, do not declare. *)
+       | Ast.P_var name
+         when Hashtbl.mem top_globals name
+              && List.memq value !top_global_init_values ->
+         c_tail_pos := false;
+         let value_c = emit_expr value in
+         push_stmt (Printf.sprintf "  %s = %s;" (c_safe_name name) value_c);
+         c_tail_pos := top_tail;
+         flatten_top body
+       | Ast.P_wild | Ast.P_unit ->
+         c_tail_pos := false;
+         let value_c = emit_expr value in
+         push_stmt (Printf.sprintf "  (void)(%s);" value_c);
+         c_tail_pos := top_tail;
+         flatten_top body
+       | _ -> c_tail_pos := top_tail; emit_expr e)
+    | _ -> c_tail_pos := top_tail; emit_expr e
+  in
+  let main_body = flatten_top body_expr in
+  let main_flat_stmts = List.rev !flat_stmts in
   (* Phase 15.5: main_body may contain anonymous `Fun` nodes that push
      additional closure adapters onto pending_closures (e.g.,
      `vec_iter v (fn x -> ...)`). Drain again so the env typedefs and
@@ -12543,6 +12708,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         "  atexit(__lang_region_stats_report);";
         (if top_global_inits = [] then ""
          else String.concat "\n" top_global_inits);
+        (* Q-128: the top-level bindings, one C statement each, ahead of the
+           expression that is the program's value. *)
+        (if main_flat_stmts = [] then "" else String.concat "\n" main_flat_stmts);
         main_stmt;
         (* Phase 15.8: free all OwnedVec allocations registered during run. *)
         (if Hashtbl.length owned_vec_instances > 0
