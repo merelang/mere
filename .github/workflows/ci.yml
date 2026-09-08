@@ -546,6 +546,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/bracket_depth_check.sh
 
+      # A `musttail` the target cannot honour is a build that DIES, and only at -O0
+      # (v0.1.451). The width where that starts is ABI-dependent -- x86-64 stops at
+      # half of what arm64 forwards -- so this runner is the one that sees the
+      # binding number, and the gate fails if the pinned table drifts either way.
+      - name: musttail_budget_check (a musttail the target can keep)
+        if: ${{ !cancelled() }}
+        run: sh scripts/musttail_budget_check.sh
+
       - name: selfhost_check
         if: ${{ !cancelled() }}
         run: sh scripts/selfhost_check.sh

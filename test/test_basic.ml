@@ -15242,5 +15242,40 @@ let () =
       Printf.sprintf "kept:%b bare:%b" (has c "if (({") (has c "if ({"))
      "kept:true bare:false");
 
+  (* v0.1.451: `musttail` is a promise LLVM must keep at -O0 too, and past a return
+     width that depends on the ABI the target cannot keep it -- the BUILD dies. The
+     emitter stops at four 8-byte leaves, the smaller of the two measured lines.
+     What runs is test/parity/wide_record_tail_return.mere; what asks the target where
+     its own line is (and notices when the bound goes stale in either direction) is
+     scripts/musttail_budget_check.sh. This only checks the emitter's own decision. *)
+  (let ll n =
+     let fields = String.concat ", " (List.init n (fun i -> Printf.sprintf "f%d: float" i)) in
+     let init = String.concat ", " (List.init n (fun i -> Printf.sprintf "f%d = x" i)) in
+     let src = Printf.sprintf
+       "type w = { %s };\nlet rec go = fn (i: int) -> fn (x: float) -> if i <= 0 then w { %s } else go (i - 1) (x + 1.0);\nlet r = go 10 0.0;\nlet _ = print (str_of_float r.f0);\n0"
+       fields init in
+     let prog = Pipeline.parse_program src in
+     let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_llvm.emit_program ~main_ty prog in
+   let has c sub =
+     let n = String.length sub and m = String.length c in
+     let rec go i = i + n <= m && (String.sub c i n = sub || go (i + 1)) in
+     go 0 in
+   check "v0.1.451: a narrow aggregate return still gets musttail"
+     (Printf.sprintf "1:%b 2:%b 4:%b"
+        (has (ll 1) "musttail call %w") (has (ll 2) "musttail call %w")
+        (has (ll 4) "musttail call %w"))
+     "1:true 2:true 4:true";
+   check "v0.1.451: a return past the budget does not"
+     (Printf.sprintf "5:%b 8:%b 12:%b"
+        (has (ll 5) "musttail call %w") (has (ll 8) "musttail call %w")
+        (has (ll 12) "musttail call %w"))
+     "5:false 8:false 12:false";
+   (* And it must land on the notail branch, not on a bare `call`: `tail` on an sret
+      call is the Q-129 miscompile, so the wide ones need the marker that forbids it. *)
+   check "v0.1.451: the wide return goes to the notail branch"
+     (if has (ll 12) "notail call %w" then "notail" else "bare call")
+     "notail");
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
