@@ -506,6 +506,60 @@ let record_fields (name : string) : (string * Ast.ty) list =
     raise (Codegen_error (Loc.dummy,
       Printf.sprintf "unknown record type `%s` at LLVM codegen" name))
 
+(* HOW BIG A RETURNED VALUE IS, AT MOST -- the number the musttail decision needs.
+
+   `musttail` is a promise LLVM has to keep at every optimisation level, and it cannot
+   keep it for every return: past a size that depends on the ABI the value comes back
+   through memory in a way the target cannot forward, and the build DIES with
+   "failed to perform tail call elimination on a call site marked musttail". Measured,
+   returning a struct of N doubles from a self tail call at -O0:
+
+     4 doubles (32B): both     8 (64B): arm64 yes, x86-64 NO     12 (96B): neither
+
+   -O1 and above optimise the call away before that check, so the failure is a -O0 one
+   -- which is exactly the build a sanitiser needs, and why ASan was given up on during
+   the Q-129 hunt.
+
+   So the emitter needs a SIZE, and this is an UPPER BOUND rather than a layout model:
+   every scalar this backend emits is at most 8 bytes and at most 8-aligned, so the leaf
+   count times 8 can never come out below the real size, padding included. Over-counting
+   costs a musttail; under-counting would emit IR the target refuses, so anything not
+   recognised counts as too big. The bound itself is measured, not derived -- see
+   scripts/musttail_budget_check.sh, which asks both ABIs where the line actually is. *)
+let rec llvm_ret_leaves (t : Ast.ty) : int =
+  let t = Ast.walk t in
+  let ty = llvm_ty_of t in
+  if String.length ty = 0 || ty.[0] <> '%' then 1   (* i64 / double / ptr / i1 *)
+  else match t with
+    | Ast.TyTuple ts -> List.fold_left (fun a x -> a + llvm_ret_leaves x) 0 ts
+    | Ast.TyArrow _ -> 2                              (* closure { ptr, ptr } *)
+    | Ast.TyCon (name, args) when Hashtbl.mem polymorphic_records name ->
+      let (params, fields) = Hashtbl.find polymorphic_records name in
+      (try
+         let mapping = List.combine params (List.map Ast.walk args) in
+         List.fold_left
+           (fun a (_, ft) -> a + llvm_ret_leaves (subst_params mapping ft)) 0 fields
+       with _ -> max_int / 16)
+    | Ast.TyCon (name, []) when Hashtbl.mem Typer.records name ->
+      List.fold_left (fun a (_, ft) -> a + llvm_ret_leaves ft) 0 (record_fields name)
+    | Ast.TyCon _ -> 2   (* a variant is { i32, ptr } or { i32 } *)
+    | _ -> max_int / 16
+
+(* Four leaves = 32 bytes, the largest return both measured ABIs still forward at -O0
+   (swept 1..20 on both: x86-64 stops after 4, arm64 after 8, so the minimum is the
+   number that ships). Every aggregate return in the parity suite is two leaves, so this
+   keeps all of them and only gives up on the wide records that could not have built.
+
+   The env var is not a tuning knob for programs -- it exists so a gate can ask the
+   OTHER question. With the budget raised the emitter produces the `musttail` this bound
+   is refusing, and the target can be asked where its own line actually is; a bound
+   nobody can re-measure is a number that outlives its reason. See
+   scripts/musttail_budget_check.sh, which asks in both directions. *)
+let musttail_leaf_budget =
+  match Sys.getenv_opt "MERE_MUSTTAIL_LEAF_BUDGET" with
+  | Some v -> (try int_of_string (String.trim v) with _ -> 4)
+  | None -> 4
+
 let field_index (record_name : string) (field_name : string) : int =
   let fields = record_fields record_name in
   let rec idx i = function
@@ -6645,6 +6699,14 @@ and emit_user_app ?(tail = false) (env : env) (e : Ast.expr) : string =
       (not no_tail_call) && tail
       && (match !llvm_current_sig with
           | Some (r_ty, args) -> r_ty = ret_ty && args = ["ptr"; arg_ty]
+          | None -> false)
+      (* ...AND THE RETURN HAS TO FIT. A `musttail` LLVM cannot honour is not a slower
+         program, it is a build that dies -- see llvm_ret_leaves. Wide aggregate returns
+         fall through to the `notail` branch below, which is where Q-129 put them
+         anyway: `tail` on an sret call is what produced NaN on x86-64, so there was
+         never a version of this where a wide aggregate return got a tail call. *)
+      && (match e.Ast.ty with
+          | Some t -> llvm_ret_leaves t <= musttail_leaf_budget
           | None -> false)
     in
     if can_musttail then begin

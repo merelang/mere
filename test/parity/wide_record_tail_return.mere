@@ -1,0 +1,26 @@
+// A TAIL CALL THAT RETURNS A WIDE RECORD -- which the LLVM backend used to mark
+// `musttail`, and which clang then refused to build at -O0:
+//
+//   fatal error: error in backend: failed to perform tail call elimination
+//                                  on a call site marked musttail
+//
+// LLVM has to keep `musttail` at every optimisation level, and past a size that depends
+// on the ABI the return comes back through memory in a way the target cannot forward.
+// -O1 and above optimise the call away before the check, so the failure is a -O0 one --
+// and -O0 is what parity.sh builds, what a sanitiser needs, and what a reader trying
+// `clang out.ll` types first. Measured: x86-64 stops after 4 8-byte leaves, arm64 after
+// 8, so v0.1.451 stops marking `musttail` past four and this file is the witness.
+//
+// It is deliberately SHALLOW. Without `musttail` this recursion is no longer
+// constant-space on the LLVM backend (the C backend turns self tail calls into a goto
+// and is unaffected), which is the price of the bound; scripts/musttail_budget_check.sh
+// is where that price is measured and where the bound is re-asked in both directions.
+type wide = { f0: float, f1: float, f2: float, f3: float, f4: float, f5: float, f6: float, f7: float, f8: float, f9: float, f10: float, f11: float };
+
+let rec go = fn (i: int) -> fn (x: float) ->
+  if i <= 0 then wide { f0 = x + 0.0, f1 = x + 1.0, f2 = x + 2.0, f3 = x + 3.0, f4 = x + 4.0, f5 = x + 5.0, f6 = x + 6.0, f7 = x + 7.0, f8 = x + 8.0, f9 = x + 9.0, f10 = x + 10.0, f11 = x + 11.0 } else go (i - 1) (x + 1.0);
+
+let r = go 1000 0.0;
+let _ = print (str_of_float r.f0);
+let _ = print (str_of_float r.f11);
+0
