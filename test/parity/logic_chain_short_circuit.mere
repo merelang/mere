@@ -1,0 +1,23 @@
+// A LONG `&&` / `||` CHAIN STILL STOPS WHERE IT SHOULD.
+//
+// v0.1.450 flattens chains of eight links or more, because `(((a && b) && c) ...)`
+// nests one bracket per link and clang refuses past 256 -- the mere-ruby prelude
+// writes membership tests two hundred conjuncts long. The flattened form must keep
+// the one property these operators exist for: the right side may never run. Each step
+// is written `t1 = t0 ? (b) : 0` for `&&` and `t1 = t0 ? 1 : (b)` for `||`, so the
+// skip is still a skip -- and this file is here to say so out loud, by printing from
+// inside every operand and comparing what got printed.
+let t = fn (s: str) -> fn (v: bool) -> let _ = print s in v;
+// Ten links. The third is false, so d..j must never print.
+let r = t "a" true && t "b" true && t "c" false && t "d" true && t "e" true
+        && t "f" true && t "g" true && t "h" true && t "i" true && t "j" true;
+let _ = print (if r then "true" else "false");
+// Ten links. The second is true, so C..J must never print.
+let q = t "A" false || t "B" true || t "C" true || t "D" true || t "E" true
+        || t "F" true || t "G" true || t "H" true || t "I" true || t "J" true;
+let _ = print (if q then "true" else "false");
+// And a chain that runs to the end, mixing both operators.
+let z = t "1" true && t "2" true || t "3" true && t "4" false
+        || t "5" false || t "6" false || t "7" false || t "8" false || t "9" true;
+let _ = print (if z then "true" else "false");
+0

@@ -1,0 +1,19 @@
+// THE ORDER OF THE OPERANDS OF `++`, WHICH C DOES NOT FIX.
+//
+// Argument evaluation order is unspecified in C, and the two compilers disagree:
+// clang runs the operands of `a ++ b ++ c` left to right, GCC RUNS THEM RIGHT TO LEFT.
+// So before v0.1.450 this program printed one/two/three under the interpreter and
+// three/two/one from the same C source built with gcc -- a parity difference the
+// harness could not see, because it builds with clang unless CC says otherwise.
+//
+// The backend had already made this decision for calls (each argument is bound to a
+// `__da` temporary first); v0.1.450 extends it to operator chains, which are now
+// emitted as one statement expression with a temporary per step.
+//
+// Run this file with CC=gcc to exercise the case that found it. Recorded as Q-130.
+let p = fn (s: str) -> let _ = print s in s;
+let _ = print (p "one" ++ p "two" ++ p "three");
+// Arithmetic too: the operands are calls, so the same rule applies.
+let q = fn (n: int) -> let _ = print_int n in n;
+let _ = print_int (q 1 + q 2 * q 3 - q 4);
+0

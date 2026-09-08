@@ -536,6 +536,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/fp_contract_check.sh
 
+      # The emitted C must fit inside clang's nesting limit and must evaluate
+      # operands in the interpreter's order (v0.1.450). Both used to be left to
+      # the C compiler: Apple's clang allows nesting that Ubuntu's refuses, and
+      # gcc evaluates `a ++ b` right to left where clang goes left to right.
+      # This runner has BOTH compilers, which is the point -- one compiler
+      # cannot disagree with itself.
+      - name: bracket_depth_check (nesting limit + operand order)
+        if: ${{ !cancelled() }}
+        run: sh scripts/bracket_depth_check.sh
+
       - name: selfhost_check
         if: ${{ !cancelled() }}
         run: sh scripts/selfhost_check.sh
