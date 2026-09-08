@@ -312,4 +312,80 @@ abuse_out="$("$TMP/abuse" 2>&1)"; abuse_rc=$?
 echo "$abuse_out" | grep -q "lifecycle ok" || { echo "FAIL lib_check: abuse host output"; echo "$abuse_out"; exit 1; }
 echo "$abuse_out" | grep -q "AddressSanitizer" && { echo "FAIL lib_check: ASan finding in lifecycle abuse"; echo "$abuse_out"; exit 1; }
 
-echo "lib_check: ok (boundary exact, header-built host, str/bytes round-trip, fail -> status, calls are transactions, 8-thread clean, lifecycle abuse clean)"
+# 9. A KNOWN GAP, PINNED IN BOTH DIRECTIONS: a container that outlives its call.
+#
+# v0.1.311 stopped pinning `__heap` containers to the default region in --lib mode,
+# because the process outlives every call and the pin was a 512 B/call leak. The
+# boundary's rule is that containers cannot cross it -- results are copied out -- and
+# for a container CREATED IN A NAMED REGION the compiler enforces exactly that:
+#
+#   region escape: `cache` now holds a value from region `A`, which is freed at the
+#   end of this block ... build it outside the block, or copy its contents out
+#
+# It cannot say that here. A container a FUNCTION RETURNED carries the marker `__heap`,
+# and `__heap` means two different things in --lib mode -- the default region during
+# module init, the per-call region during a call -- so the escape check reads it as
+# "outlives everything" while the lowering puts it in memory the call reclaims. The
+# store does not save it either: containers are SHARED BY IDENTITY in this language
+# (mutating one through either name is visible through the other, in all four
+# backends), so `__mcopy_Vec_<T>` is the identity function by design and copies
+# nothing. Strings and records inside are copied; the container itself is a pointer.
+#
+# So this program stores a callee-built Vec into module state and reads it back after
+# another call has reused the arena, and it reads BACK GARBAGE. That is a real defect,
+# not a design choice, and it is recorded here rather than left unknown: the check
+# below requires the value to be wrong, and FAILS THE MOMENT IT IS RIGHT, at which
+# point this section is what says the gap closed and should be deleted. See Q-127.
+cat > "$TMP/gap.mere" <<'MERE'
+let store = vec_new ();
+let build = fn (n: int) ->
+  let v = vec_new () in
+  let _ = vec_push v (n * 100) in
+  v;
+let remember = fn (n: int) -> let _ = vec_push store (build n) in vec_len store;
+let churn = fn (k: int) ->
+  let junk = vec_new () in
+  let rec fill = fn (i: int) -> if i >= 8192 then 0 else let _ = vec_push junk (0 - 1) in fill (i + 1) in
+  fill 0;
+let readback = fn (i: int) -> let got = vec_get store 0 in vec_get got 0;
+MERE
+"$MERE" --header "$TMP/gap.mere" > "$TMP/gap.h" 2>/dev/null \
+  || { echo "FAIL lib_check: mere --header refused the known-gap probe"; exit 1; }
+"$MERE" -c --lib "$TMP/gap.mere" > "$TMP/gap.c" 2>"$TMP/gap.err" \
+  || { echo "FAIL lib_check: mere -c --lib refused the known-gap probe"; sed -n '1,4p' "$TMP/gap.err"; exit 1; }
+cat > "$TMP/gap_host.c" <<'C'
+#include <stdio.h>
+#include "gap.h"
+int main(void) {
+  long long r = 0; mere_buf err;
+  mere_lib_init();
+  if (mere_gap_remember(7, &r, &err) != MERE_OK) { printf("remember failed\n"); return 3; }
+  if (mere_gap_readback(0, &r, &err) != MERE_OK) { printf("readback failed\n"); return 3; }
+  printf("before %lld\n", r);
+  if (mere_gap_churn(0, &r, &err) != MERE_OK) { printf("churn failed\n"); return 3; }
+  if (mere_gap_readback(0, &r, &err) != MERE_OK) { printf("readback failed\n"); return 3; }
+  printf("after %lld\n", r);
+  mere_lib_shutdown();
+  return 0;
+}
+C
+"$CC" -O0 -w -I"$TMP" "$TMP/gap_host.c" "$TMP/gap.c" -o "$TMP/gap_host" 2>"$TMP/gap_cc.err" \
+  || { echo "FAIL lib_check: known-gap host build failed"; sed -n '1,3p' "$TMP/gap_cc.err"; exit 1; }
+gap_out="$("$TMP/gap_host" 2>&1)" || { echo "FAIL lib_check: known-gap host crashed"; echo "$gap_out"; exit 1; }
+gap_before="$(echo "$gap_out" | sed -n 's/^before //p')"
+gap_after="$(echo "$gap_out" | sed -n 's/^after //p')"
+# Before the churn the value is simply there; that half must hold, or the probe is
+# measuring something other than the gap.
+[ "$gap_before" = "700" ] || {
+  echo "FAIL lib_check: the known-gap probe read $gap_before before the churn, not 700"
+  echo "    The probe is broken, not the gap: it is supposed to store a good value first."
+  exit 1; }
+if [ "$gap_after" = "700" ]; then
+  echo "FAIL lib_check: a callee-built container now SURVIVES its call ($gap_after)"
+  echo "    Q-127's --lib gap looks closed. Confirm it, then delete section 9 of this"
+  echo "    gate and say so in the changelog -- a known gap nobody re-reads is a lie."
+  exit 1
+fi
+echo "lib_check: known gap (Q-127) still present: a callee-built container read back $gap_after, not 700"
+
+echo "lib_check: ok (boundary exact, header-built host, str/bytes round-trip, fail -> status, calls are transactions, 8-thread clean, lifecycle abuse clean, Q-127 gap pinned)"
