@@ -538,8 +538,11 @@ let region_params_bound = ref false
    this, one emit would leave every later run's variables already linked and stop the
    table recording new ones. Every pipeline entry point calls it beside
    `reset_send_constraints`, which is per-program for the same reason. *)
+let reset_region_params_extra : (unit -> unit) ref = ref (fun () -> ())
+
 let reset_region_params () =
   Hashtbl.reset region_param_vars;
+  !reset_region_params_extra ();
   region_params_bound := false
 
 let record_region_params (sch : scheme) : unit =
@@ -556,6 +559,76 @@ let is_region_param_name (n : string) : bool =
 
 (* Returns how many it named, because "the pass ran" and "the pass did anything" are
    different claims and only the second one is worth a gate. *)
+(* Q-127: THE SCHEMES OF THE TOP-LEVEL BINDINGS, kept because the backends cannot get
+   the region out of a type.
+
+   `Monomorph.erase_container_regions` replaces every container's region with `__heap`
+   before a fn_decl's types are stored -- deliberately, so that a region never splits an
+   instance. So `Vec[__rp7, int]` and `Vec[A, int]` reach the backend as the same
+   `mere_vec_int*`, and a backend walking `d_params` finds no region parameter to declare
+   and no region argument to pass. That is not a bug to fix in the eraser: the eraser is
+   why `Typer.unify` at a monomorphisation site does not fail on two different region
+   names.
+
+   So the region rides beside the type instead of inside it, keyed by the SOURCE name --
+   which is a property of the function's scheme anyway, not of any one instance. A call
+   site has that name: `Monomorph.instance_of` is handed it before it mangles anything. *)
+let top_schemes : (string, scheme) Hashtbl.t = Hashtbl.create 64
+
+let record_top_scheme (name : string) (sch : scheme) : unit =
+  Hashtbl.replace top_schemes name sch
+
+(* Per program, for the reason `reset_region_params` is. Called from there -- it is
+   defined above this, so the two halves of one reset are wired together here. *)
+let () = reset_region_params_extra := (fun () -> Hashtbl.reset top_schemes)
+
+(* The region parameters of a top-level function, in the order both ends walk its type:
+   parameters left to right, then the result. Neither the declaration nor the call site
+   stores an order -- they agree because they read the same scheme the same way.
+
+   Answers nothing until `bind_region_params` has run, which is deliberate: before that a
+   region parameter is an unlinked variable and naming one would be a guess. *)
+let region_params_for (name : string) : string list =
+  match Hashtbl.find_opt top_schemes name with
+  | None -> []
+  | Some sch ->
+    let acc = ref [] in
+    let add n = if not (List.mem n !acc) then acc := !acc @ [n] in
+    let rec go t =
+      match Ast.walk t with
+      | Ast.TyRef (_, r, Ast.TyUnit) when is_region_param_name r -> add r
+      | Ast.TyCon (_, args) -> List.iter go args
+      | Ast.TyTuple ts -> List.iter go ts
+      | Ast.TyArrow (a, b) -> go a; go b
+      | Ast.TyRef (_, _, inner) -> go inner
+      | _ -> ()
+    in
+    go sch.body; !acc
+
+(* What one call site hands over for each of them: the scheme says WHERE the region sits,
+   this use's own type says WHAT is there. The answer is a region this caller can already
+   name -- a block it is inside, one of its own region parameters, or `__heap`. *)
+let region_args_for (name : string) (use_ty : Ast.ty option) : (string * string) list =
+  match Hashtbl.find_opt top_schemes name, use_ty with
+  | Some sch, Some inst ->
+    let acc = ref [] in
+    let rec go d i =
+      match Ast.walk d, Ast.walk i with
+      | Ast.TyRef (_, r, Ast.TyUnit), Ast.TyRef (_, r', Ast.TyUnit)
+        when is_region_param_name r ->
+        if not (List.mem_assoc r !acc) then acc := !acc @ [(r, r')]
+      | Ast.TyArrow (a, b), Ast.TyArrow (a', b') -> go a a'; go b b'
+      | Ast.TyTuple ts, Ast.TyTuple ts' when List.length ts = List.length ts' ->
+        List.iter2 go ts ts'
+      | Ast.TyCon (n, xs), Ast.TyCon (n', xs')
+        when n = n' && List.length xs = List.length xs' -> List.iter2 go xs xs'
+      | Ast.TyRef (_, _, a), Ast.TyRef (_, _, a') -> go a a'
+      | _ -> ()
+    in
+    go sch.body inst;
+    !acc
+  | _ -> []
+
 let bind_region_params () : int =
   region_params_bound := true;
   let n = ref 0 in
@@ -3049,6 +3122,15 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
          dictionary parameter through it, just as it does for top-level ones. *)
       if sch.constraints <> [] then
         trait_local_constrained := (value, sch.constraints) :: !trait_local_constrained;
+      (* Q-127: RECORDED HERE AND NOT ONLY AT `Pipeline`'s TOP-LEVEL `let`, because the
+         compiling path does not have a top-level `let`: `desugar_program` turns every
+         one into a nested `Let`, so this case is where a top-level function's scheme is
+         actually made. Keying on the source name means an inner `let f` can shadow an
+         outer one in the table -- harmless, because the declaration and the call site
+         read the SAME entry and so still agree on how many regions travel and in what
+         order; the worst case is a function whose parameters go unused and whose body
+         falls back to the default region, which is where it was. *)
+      record_top_scheme n sch;
       (n, sch) :: acc
     ) env bindings in
     infer env' body
@@ -3075,6 +3157,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
       if sch.constraints <> [] then
         trait_local_constrained :=
           (value, sch.constraints) :: !trait_local_constrained;
+      record_top_scheme n sch;
       (n, sch) :: acc
     ) env bindings alphas in
     infer env' body

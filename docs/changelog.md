@@ -4,6 +4,81 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.464 — 2026-09-09
+
+**Q-127's remaining half, closed on the C backend: a function allocates where its caller
+decided, because the caller hands it the region.**
+
+```
+mu_deep__direct(__region_A, __da0)      the call written inside `region A { }`
+mu_wrap__direct(__rp1352, __da0)        deep forwards its own parameter
+mu_build__direct(__rp1350, __da0)       wrap forwards its own
+  mere_vec_int_new(__rp1345)            and build allocates in what it was handed
+```
+
+Three frames down, and no rule for chains: `wrap` instantiates `build` at *`wrap`'s own*
+quantified variable, so reading the call site inside `wrap` gives `wrap`'s parameter.
+Unification did the propagation; the backend only reads it.
+
+**This is the change that broke m3d for three versions, done the other way round.**
+v0.1.453 let the callee's BODY reach for whatever region was current at run time, which
+in a chain is the block around the outermost call while every type said the default
+region. Here the CALL SITE reads what it bound and passes it, so the type and the value
+say the same thing — and where nothing bound it, what gets passed is the default region,
+explicitly.
+
+| `test/regionreclaim/percall.mere`, 10 → 100 iterations | before | after |
+|---|---|---|
+| C | 9 → **80 MB** | 2.7 → **4.3 MB**, flat |
+| LLVM | 9 → 80 MB | unchanged — not taught yet |
+
+### Where it had to be keyed, which is the part that took two attempts
+
+A first attempt read the region parameters out of the fn_decl's types and emitted nothing
+at all: **`Monomorph.erase_container_regions` replaces every container's region with
+`__heap`** before those types are stored, deliberately, so a region never splits an
+instance and `Typer.unify` at a monomorphisation site does not fail on two different
+region names. Preserving `__rp` there instead just moves the failure into unify.
+
+So the region rides *beside* the type, keyed by the **source** name — which is what it is
+a property of anyway. A call site already has that name; `Monomorph.instance_of` is handed
+it before it mangles anything. A declaration only has the mangled name, so the map is
+rebuilt from the table that produced it, rather than by adding a field to `fn_decl` that
+a second place would have to keep agreeing with.
+
+And the schemes are recorded at the **inner `Let`**, not at Pipeline's top-level one: the
+compiling path has no top-level `let`, because `desugar_program` turns every one into a
+nested `Let`. The first version recorded in the place that reads like the right place and
+recorded nothing.
+
+### What was checked, and what did not move
+
+- **m3d**, the program that killed v0.1.453: linalg, gltf, raster, shade, questions,
+  render_props, **northstar (50 images)**, bench, and **reference_check (49 models against
+  three.js)** all pass.
+- **The escape check still refuses the dangerous shape**, and nothing new was written for
+  it: `test/escape/callee_built_into_vec.mere` is GATED on all four backends and the
+  interpreter, because the call site binds `build`'s region to A and storing into
+  something that outlives the block is a type error by name. That is the whole argument
+  for passing the region rather than guessing it — the type follows the value.
+- **The self-tail-call loop is intact.** Region parameters lead, so a goto that reassigns
+  only the tracked parameters leaves them alone; the call site declines the goto if a call
+  would hand one back changed. 20M iterations at -O0 still run in constant stack.
+- 13 downstream repositories still type-check. parity 174 / 0. `dune runtest` 2717 / 0.
+- **m3d's own 0.7 MB a frame is unchanged, and the emitted C says why**: 116 `__rp`
+  occurrences, and **not one call site passes a real block** — all 57 pass the default
+  region. The eight call sites its own `--dump-region-params` reports as inside a block do
+  not reach the `__direct` path. That is a precision gap to measure next, not a
+  correctness one, and it is stated here rather than left for someone to discover from the
+  bench number not moving.
+
+`region_reclaim_check` now asserts C reclaims and **LLVM still does not**, so the leg goes
+red when LLVM is taught too. `region_params_check` asserts the C output *contains* a
+region argument — "no `__rp` anywhere" was true when nothing passed one and would stay
+true if the region stopped reaching the callee.
+
+---
+
 ## v0.1.463 — 2026-09-09
 
 **The region parameters have names now, and nothing passes one — which is the whole
