@@ -1,0 +1,29 @@
+// A RECORD FIELD HOLDING A CONTAINER, which used to be a type error.
+//
+// `type box = { v: Vec[R, float] }` answered
+// `type error: expected &R unit, got &__heap unit`: the field's declared region was the
+// rigid name R and `vec_new ()` produced the rigid name `__heap`, and two rigid names
+// do not unify. A function taking or returning a `Vec` worked, because a function's
+// signature can be generalised over the region and a record's field cannot -- so the
+// shape a record wanted was the one shape that could not be written.
+//
+// Q-127 made the marker a VARIABLE until something decides it, and here the field's
+// declaration is what decides it. `ByteBuf` always worked and was the exception that
+// gave it away: its region is erased from the tag, so the mismatch never arose.
+//
+// m3d carried the workaround -- a framebuffer wants a colour buffer AND a depth buffer,
+// so `Target.make` returned the pair and every function took the two together. Recorded
+// there as Q-8.
+type box = { v: Vec[R, float], w: Vec[R, int] };
+
+let mk = fn (n: int) ->
+  let a = vec_new () in
+  let b = vec_new () in
+  let _ = vec_push a 1.5 in
+  let _ = vec_push b n in
+  box { v = a, w = b };
+
+let x = mk 7;
+let _ = print_int (vec_len x.v + vec_len x.w);
+let _ = print (str_of_float (vec_get x.v 0));
+print_int (vec_get x.w 0)

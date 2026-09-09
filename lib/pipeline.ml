@@ -302,6 +302,73 @@ let warn_declared_types () =
     (fun i (name, loc) -> if i < mine then warn_reserved_type_name loc name)
     all
 
+(* A TOP-LEVEL `let`, TYPED ONCE. There are two callers -- `process_decls`, which the
+   interpreter walks, and `infer_program_inner`, which every backend starts from -- and
+   they had the same eight lines written out twice. They had also drifted: neither
+   applied the value restriction that `Typer`'s inner `let` has had since Phase 36, and
+   fixing one would have left the other. *)
+let infer_top_let outer_env (value : Ast.expr) : Ast.ty =
+  (* Q-127: IN `--lib` MODE AN EXPORTED CALL *IS* A REGION. The boundary opens one per
+     call and releases it at return -- that is what makes a call a transaction, and what
+     v0.1.311 measured. Typing the body inside it is what lets the escape check see the
+     store v0.1.452 pinned as a gap: a container the call builds lives in the call's
+     arena, and putting one into module state keeps a pointer into memory the next call
+     reuses. It read back garbage; it is a type error now, with the message a `region`
+     block gets.
+
+     Only a FUNCTION body. A top-level `let x = <expr>` runs during module init, where
+     the current region is the default one, so wrapping it would claim a lifetime it
+     does not have. *)
+  let wrap =
+    !Typer.lib_boundary
+    && (match value.Ast.node with Ast.Fun _ -> true | _ -> false)
+  in
+  if not wrap then Typer.infer outer_env value
+  else begin
+    Typer.active_regions := Typer.call_region_name :: !Typer.active_regions;
+    let restore () = Typer.active_regions := List.tl !Typer.active_regions in
+    let t =
+      match Typer.infer outer_env value with
+      | t -> restore (); t
+      | exception ex -> restore (); raise ex
+    in
+    (* The block's own check, run by hand: there is no `Region_block` node here to hang
+       it on, and without it the boundary would be the one place the escape rule does
+       not reach. *)
+    (match Typer.region_leaked_into_env Typer.call_region_name outer_env with
+     | Some bind ->
+       raise (Typer.Type_error (value.Ast.loc,
+         Printf.sprintf
+           "region escape across the library boundary: `%s` now holds a value built \
+            during a call, which is freed when that call returns (its type became \
+            `%s`). Each exported call runs in its own region -- build it at module \
+            init, or copy its contents out"
+           bind (Ast.pp_ty (Ast.walk (List.assoc bind outer_env).Typer.body))))
+     | None -> ());
+    t
+  end
+
+(* THE VALUE RESTRICTION, WHICH ONLY THE INNER `let` HAD. `Typer`'s Let case has had the
+   narrow rule since Phase 36 -- a binding whose value is not syntactically a value and
+   whose type mentions a MUTABLE CONTAINER stays monomorphic, because generalising one
+   container into `forall`-many is unsound: each use instantiates its own element type
+   and they stop agreeing. Top level never had it, and while every region settled on
+   `__heap` the difference did not show. Q-127 made it show: `let store = vec_new ()`
+   was generalised over its REGION, so each use instantiated a different one for a
+   container there is only one of. *)
+let top_let_scheme outer_env (value : Ast.expr) (ty : Ast.ty) : Typer.scheme =
+  if Typer.is_value value || not (Typer.ty_mentions_mutable_container ty)
+  then Typer.generalize outer_env ty
+  else begin
+    Typer.adjust_level !Typer.cur_level ty;
+    (* Nothing here is quantified, so no region in it is a call site's to decide: this
+       binding is made ONCE and outlives every call. `generalize` does the same for the
+       bindings it handles. At the top level there is no enclosing binding to quantify
+       it later, which is why this is right here and wrong at an inner `let`. *)
+    Typer.unmark_non_quantified_regions [] ty;
+    Typer.mono ty
+  end
+
 let process_decls eval_env type_env decls =
   warn_declared_types ();
   List.iter (fun decl ->
@@ -312,7 +379,7 @@ let process_decls eval_env type_env decls =
       (* Pattern variables belong to this binding — see Typer's Let case. *)
       let bindings =
         Typer.enter_level (fun () ->
-          let t = Typer.infer outer_env value in
+          let t = infer_top_let outer_env value in
           Typer.check_pattern pat t) in
       let v = Eval.eval_in !eval_env value in
       (match Eval.match_pattern pat v with
@@ -323,8 +390,7 @@ let process_decls eval_env type_env decls =
          eval_env := List.fold_left (fun acc (n, v) -> (n, ref v) :: acc)
                        !eval_env val_bindings);
       type_env := List.fold_left (fun acc (n, ty) ->
-        let sch = Typer.generalize outer_env ty in
-        (n, sch) :: acc) outer_env bindings
+        (n, top_let_scheme outer_env value ty) :: acc) outer_env bindings
     | Ast.Top_let_rec bindings ->
       List.iter (fun (n, value) ->
         warn_reserved_name value.Ast.loc n) bindings;
@@ -605,11 +671,10 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
       warn_reserved_in_pattern pat;
       guard_decl (Some pat) [] (fun () ->
         let outer_env = !type_env in
-        let t = Typer.enter_level (fun () -> Typer.infer outer_env value) in
+        let t = Typer.enter_level (fun () -> infer_top_let outer_env value) in
         let bindings = Typer.check_pattern pat t in
         type_env := List.fold_left (fun acc (n, ty) ->
-          let sch = Typer.generalize outer_env ty in
-          (n, sch) :: acc) outer_env bindings)
+          (n, top_let_scheme outer_env value ty) :: acc) outer_env bindings)
     | Ast.Top_let_rec bindings ->
       List.iter (fun (n, value) ->
         warn_reserved_name value.Ast.loc n) bindings;

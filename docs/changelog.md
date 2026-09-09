@@ -4,6 +4,74 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.455 — 2026-09-09
+
+**An exported call *is* a region, and the typer knows it now.** `mere -c --lib` compiles
+a shared library whose boundary opens a region per call and releases it at return — that
+is what makes a call a transaction, and it is why v0.1.311 stopped pinning containers to
+the default region there. Nothing enforced the other half of that bargain: a host that
+stored a callee-built container into module state and then made one more call read back
+**garbage**, because the arena had been reused. Pinned as a known gap in v0.1.452, with
+the instruction that whoever closed it should delete the pin and say so.
+
+It is closed, and not by choosing a region. A top-level function's body is now typed
+inside the call's region, so the store is the same mistake as carrying a value out of a
+`region` block and gets the same treatment:
+
+```
+region escape across the library boundary: `store` now holds a value built during a
+call, which is freed when that call returns (its type became `Vec['a, Vec[__call, int]]`).
+Each exported call runs in its own region -- build it at module init, or copy its
+contents out
+```
+
+`lib_check` keeps its section and checks the new claim in both directions: the store is
+refused **and names the binding**, while a call that builds containers and keeps none is
+still accepted with them in the call's own arena. A gate that refused everything would
+pass the first half and be useless.
+
+**And the mode-dependent answer is gone.** `heap_container_region` said "the current
+region" in `--lib` mode and "the default region" otherwise; Q-127 makes that
+unnecessary and, with it, wrong. A container a CALL builds now carries `__caller`, which
+is the current region already, so the leak that special case existed for stays fixed by
+the general rule. What is left as `__heap` belongs to something outliving the call —
+module state, or a pass-through — and sending those to the per-call arena was the defect
+itself.
+
+### Two things fell out that were on m3d's list, not on this one
+
+**`bytebuf_new` never bound its region to the block it was written in.** Unlike
+`vec_new`, `map_new` and `strbuf_new` it was a plain polymorphic scheme, so the marker
+stayed open and settled on the default region — which is never freed. m3d measured that
+as row 1 of its Q-10 table and paid for it twice, allocating its render target once and
+clearing it per frame because a `region` around a frame reclaimed none of it. It binds
+like every other container constructor now: **676 MB → 268 MB** on Q-10's own
+measurement (200 iterations of a 4 MB buffer inside a block). `test/parity/region_bytebuf_reclaimed.mere`.
+
+**A record field can hold a `Vec` now** (m3d's Q-8). `type box = { v: Vec[R, float] }`
+answered `expected &R unit, got &__heap unit`: the field's declared region was the rigid
+name R and `vec_new ()` produced the rigid name `__heap`, and two rigid names do not
+unify. A function taking or returning one worked, because a signature can be generalised
+over the region and a field cannot — so the shape a record wanted was the one shape that
+could not be written. With the marker a variable until something decides it, the field's
+declaration is what decides it. `ByteBuf` always worked and was the exception that gave
+it away: its region is erased from the tag, so the mismatch never arose.
+`test/parity/record_holds_containers.mere`.
+
+### The top-level `let`, typed once
+
+`Pipeline` had the same eight lines twice — `process_decls`, which the interpreter walks,
+and `infer_program_inner`, which every backend starts from — and they had drifted:
+neither applied the value restriction `Typer`'s inner `let` has had since Phase 36. While
+every region settled on `__heap` that did not show. Q-127 made it show:
+`let store = vec_new ()` was generalised over its REGION, so each use instantiated a
+different one for a container there is only one of. One function now, called from both.
+
+parity 171 passed / 0 failed. `dune runtest` 2715 / 0. All 29 Mere programs in the
+dogfood corpus type-check unchanged.
+
+---
+
 ## v0.1.454 — 2026-09-09
 
 **A function written inside one region and called from a region nested inside it

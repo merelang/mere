@@ -709,6 +709,19 @@ let views : (string, view_info) Hashtbl.t = Hashtbl.create 8
 (* Stack of currently-open region names (innermost first), maintained by
    Region_block during inference. Used to enforce that view construction
    happens inside a region. *)
+(* Q-127: `mere -c --lib` compiles a SHARED LIBRARY, and its boundary makes every
+   exported call a transaction -- the wrapper opens a region, runs the call and releases
+   it. That is a fact about lifetimes, so the typer has to know it: a container a call
+   builds lives in the call's arena, and storing one into module state is the same
+   mistake as carrying one out of a `region` block. Set from the CLI before inference;
+   `Codegen_c.lib_mode` is this ref under its old name. *)
+let lib_boundary = ref false
+
+(* The name the boundary's per-call arena is typed under. Not a source region -- no
+   `region` block writes it -- so it cannot collide with one, and it reads as itself in
+   a diagnostic. *)
+let call_region_name = "__call"
+
 let active_regions : string list ref = ref []
 
 let generalize env t =
@@ -2847,6 +2860,13 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
              local to the next binding out and be quantified by it — the one
              direction of this change that would be unsound. *)
           adjust_level !cur_level t;
+          (* Q-127: NOT unmarked here, unlike Pipeline's Top_let. The value restriction
+             says this BINDING does not generalise; it says nothing about whether the
+             region belongs to a call site, because an ENCLOSING binding can still
+             quantify it -- `let build = fn n -> let v = vec_new () in .. v` is exactly
+             that shape, and unmarking at the inner `let` pinned `build`'s container to
+             the default region again. At the top level there is no enclosing binding,
+             which is why the rule differs there and only there. *)
           mono t
         end
       in
@@ -3058,6 +3078,26 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        let marker = current_region_marker () in
        let result_ty = Ast.TyCon ("Vec", [marker; Ast.TyInt]) in
        unify e.loc ta Ast.TyStr;
+       unify e.loc tf (Ast.TyArrow (ta, result_ty));
+       result_ty
+     (* Q-127 / m3d Q-10: `bytebuf_new` and `bytebuf_of_bytes` never bound their
+        region to the block they were written in -- they were plain polymorphic
+        schemes, so the marker stayed open and settled on the default region. m3d
+        measured that as row 1 of its Q-10 table ("a `bytebuf_new` written INSIDE
+        `region R { }` still comes out as the default region") and paid for it by
+        allocating its render target once and clearing it per frame. In `--lib` mode
+        it was the per-call leak the v0.1.311 workaround was covering. They bind the
+        same way every other container constructor does now. *)
+     | Ast.Var "bytebuf_new" ->
+       let marker = current_region_marker () in
+       let result_ty = Ast.TyCon ("ByteBuf", [marker]) in
+       unify e.loc ta Ast.TyInt;
+       unify e.loc tf (Ast.TyArrow (ta, result_ty));
+       result_ty
+     | Ast.Var "bytebuf_of_bytes" ->
+       let marker = current_region_marker () in
+       let result_ty = Ast.TyCon ("ByteBuf", [marker]) in
+       unify e.loc ta Ast.TyBytes;
        unify e.loc tf (Ast.TyArrow (ta, result_ty));
        result_ty
      | Ast.Var "strbuf_new" ->
