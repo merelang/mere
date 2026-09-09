@@ -2189,7 +2189,9 @@ let region_result_plan (t : Ast.ty) : region_result_plan =
    here. The C backend folded the same rule into one function; this is that
    function. *)
 let region_ptr_for (name : string) : string =
-  if name = "__heap" then "@__lang_default_region"
+  (* Q-127 stage 2: see the note in codegen_c's region_var_of -- `__rpN` is a region
+     parameter nobody passes yet, so it is the default region. *)
+  if name = "__heap" || Typer.is_region_param_name name then "@__lang_default_region"
   else match List.assoc_opt name !current_regions with
     | Some reg -> reg
     | None ->
@@ -12299,6 +12301,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
 
      One rule in `Typer`, rather than eighteen backend patterns that each have to
      remember what a variable in that slot means. *)
+  (* Q-127 stage 2: NAME THE REGION PARAMETERS FIRST. A quantified allocation region
+     that a call site could decide gets `__rpN`; everything still undecided after that
+     is the default region, as before. Order matters: binding after the defaulting pass
+     would find nothing left to name. *)
+  ignore (Typer.bind_region_params ());
   Typer.default_container_regions prog.main;
   List.iter (fun d ->
     match d with
