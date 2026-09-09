@@ -9397,6 +9397,11 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
 
      One rule in `Typer`, rather than eighteen backend patterns that each have to
      remember what a variable in that slot means. *)
+  (* Q-127 stage 2: NAME THE REGION PARAMETERS FIRST. A quantified allocation region
+     that a call site could decide gets `__rpN`; everything still undecided after that
+     is the default region, as before. Order matters: binding after the defaulting pass
+     would find nothing left to name. *)
+  ignore (Typer.bind_region_params ());
   Typer.default_container_regions prog.main;
   List.iter (fun d ->
     match d with

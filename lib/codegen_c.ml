@@ -130,7 +130,11 @@ let regions_of_captures (caps : (string * Ast.ty) list) : string list =
     then Some (String.sub n 9 (String.length n - 9)) else None) caps
 
 let region_var_of (name : string) : string =
-  if name = "__heap" then heap_container_region ()
+  (* Q-127 stage 2: `__rpN` is a REGION PARAMETER -- a quantified allocation region a
+     call site would decide, named at emit time so the body has something to allocate
+     through. Nothing passes one yet, so it means what an undecided region has always
+     meant: the default region. When the argument exists this is where it is read. *)
+  if name = "__heap" || Typer.is_region_param_name name then heap_container_region ()
   else if List.mem name !region_scope then "__region_" ^ name
   (* Q-131: THE REGION TRAVELS WITH THE FUNCTION. A lifted body is not lexically
      inside the block it was written in, so `region_scope` is empty here -- and
@@ -11015,6 +11019,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
 
      One rule in `Typer`, rather than eighteen backend patterns that each have to
      remember what a variable in that slot means. *)
+  (* Q-127 stage 2: NAME THE REGION PARAMETERS FIRST. A quantified allocation region
+     that a call site could decide gets `__rpN`; everything still undecided after that
+     is the default region, as before. Order matters: binding after the defaulting pass
+     would find nothing left to name. *)
+  ignore (Typer.bind_region_params ());
   Typer.default_container_regions prog.main;
   List.iter (fun d ->
     match d with

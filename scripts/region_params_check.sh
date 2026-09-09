@@ -64,12 +64,13 @@ expect chain     "# 3 region-parameterised, 3 ok, 0 value-used, 0 partial"
 # handed down. If those two lines ever read `?` the propagation is gone -- and the whole
 # reason the fix is a hidden argument rather than "the body asks what region is current"
 # is that v0.1.453 did the latter and m3d could not render a second frame.
-chain_got="$("$MERE" --dump-region-params "$ROOT/test/regionparams/chain.mere" 2>&1 | grep -e '^@' -e '^#sites')"
+chain_got="$("$MERE" --dump-region-params "$ROOT/test/regionparams/chain.mere" 2>&1 | grep -e '^@' -e '^#sites' -e '^#bound')"
 chain_want='@wrap -> build : ^param
 @deep -> wrap : ^param
 @<pattern> -> deep : ?
 @<pattern> -> deep : A
-#sites 1 named, 2 forwarded, 1 undecided'
+#sites 1 named, 2 forwarded, 1 undecided
+#bound 3'
 if [ "$chain_got" != "$chain_want" ]; then
   echo "FAIL region_params[chain-sites]: the call sites no longer read as they must."
   echo "  want:"; printf '%s\n' "$chain_want" | sed 's/^/    /'
@@ -140,6 +141,22 @@ if [ -n "$unexpected" ]; then
   fails=$((fails + 1))
 fi
 checks=$((checks + 1))
+
+# ---- and naming them changes nothing yet -----------------------------------
+#
+# The variables are named at emit time so a body has something to allocate through, but
+# nothing passes one, so every `__rpN` still lowers to the default region. A name that
+# reached the output as an identifier would be a C compiler error, or worse an LLVM
+# `use of undefined value` -- which is exactly the shape v0.1.459 fixed, arrived at by
+# assuming a name in a type is a name in scope. So: three backends, zero occurrences.
+for be in -c -ll -w; do
+  n="$("$MERE" $be "$ROOT/test/regionparams/chain.mere" 2>/dev/null | grep -c '__rp' || true)"
+  if [ "$n" != 0 ]; then
+    echo "FAIL region_params[emit$be]: $n occurrence(s) of a region-parameter name reached the emitted code, and nothing defines one yet"
+    fails=$((fails + 1))
+  fi
+  checks=$((checks + 1))
+done
 
 # A sweep that examined nothing agrees with every claim.
 if [ "$files" -lt 200 ]; then
