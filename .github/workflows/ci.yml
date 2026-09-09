@@ -433,6 +433,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/region_reclaim_check.sh
 
+      # How big Q-127's remaining half is, measured on the corpus rather than
+      # guessed: which functions would take a hidden region argument, and which
+      # cannot take one at all.
+      - name: region_params_check (the size of the change Q-127 still needs)
+        if: ${{ !cancelled() }}
+        run: sh scripts/region_params_check.sh
+
       # Progress that survives SIGKILL. The gate counts the attempts that were
       # killed WHILE STILL WORKING and fails if there were none (a kill that
       # lands after the program finished proves nothing), and runs the same

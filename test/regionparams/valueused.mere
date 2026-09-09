@@ -1,0 +1,6 @@
+// `mk` is passed to a higher-order function, so it becomes a closure value, and a
+// closure's ABI has no room for a hidden region. Disqualified: it keeps today's
+// behaviour, the default region, which is over-strict and never unsound.
+let mk = fn (n: int) -> let v = vec_new () in let _ = vec_push v n in v;
+let apply = fn (f) -> fn (n: int) -> f n;
+print_int (vec_len (apply mk 1))

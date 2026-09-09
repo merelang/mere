@@ -1,0 +1,8 @@
+// Every occurrence is a SATURATED call, so a hidden region argument has somewhere to go.
+// `wrap` is here because the parameter propagates: it does not allocate itself, but the
+// container it returns is one `build` made, so its own scheme quantifies that region and
+// it would pass its argument down. A chain is exactly what v0.1.453 got wrong.
+let build = fn (n: int) -> let v = vec_new () in let _ = vec_push v n in v;
+let wrap = fn (n: int) -> build n;
+let _ = print_int (vec_len (wrap 3));
+print_int (vec_len (build 4))
