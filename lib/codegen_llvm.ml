@@ -2197,6 +2197,25 @@ let region_ptr_for (name : string) : string =
       emit_instr (Printf.sprintf "  %s = load ptr, ptr @__lang_current_region" r);
       r
 
+(* A capture named `__region_R` is not a variable. It is the region parameter
+   v0.1.453 gave lifted bodies, and the value to pass for it is whatever SSA
+   register the enclosing `region R { }` allocated -- `current_regions` knows,
+   `env` never will.
+
+   THE C BACKEND DID NOT NEED THIS AND THAT IS WHY IT WAS MISSED: there the
+   block's arena is a C local literally called `__region_R`, so emitting the
+   capture's own name as the argument happens to name the right thing. Here the
+   block's arena is `%t7` or whatever `fresh_reg` produced, and emitting
+   `%__region_R` produced `use of undefined value` -- invalid IR, so the program
+   did not build at all on this backend while building fine on the other three.
+   Found by poisoning region_reclaim_check with a lexically-written loop. *)
+let region_capture_name (cn : string) : string option =
+  let pre = "__region_" in
+  let n = String.length pre in
+  if String.length cn > n && String.sub cn 0 n = pre
+  then Some (String.sub cn n (String.length cn - n))
+  else None
+
 let add_copy_type t =
   match region_result_plan t with
   | Copy -> add_struct_deep_type copy_types t
@@ -3525,12 +3544,15 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                  match List.assoc_opt cn env with
                  | Some r -> r
                  | None ->
-                   (* Free variable: can't resolve from an outer scope, so
-                      mark as unsupported. This is a limitation on the
-                      synthesize side (Phase 39.A2 MVP). *)
-                   unsupported e.Ast.loc
-                     ("inner-lifted fn `" ^ name
-                      ^ "`: cannot resolve capture `" ^ cn ^ "` (Phase 39.A2 MVP)")
+                   (match region_capture_name cn with
+                    | Some r -> region_ptr_for r
+                    | None ->
+                      (* Free variable: can't resolve from an outer scope, so
+                         mark as unsupported. This is a limitation on the
+                         synthesize side (Phase 39.A2 MVP). *)
+                      unsupported e.Ast.loc
+                        ("inner-lifted fn `" ^ name
+                         ^ "`: cannot resolve capture `" ^ cn ^ "` (Phase 39.A2 MVP)"))
                in
                let gep = fresh_reg () in
                emit_instr (Printf.sprintf
@@ -6620,7 +6642,10 @@ and emit_user_app ?(tail = false) (env : env) (e : Ast.expr) : string =
             emit_instr (Printf.sprintf "  %s = load %s, ptr @%s"
                           r (llvm_ty_of cty) (mu cn));
             r
-          | None -> "%" ^ llvm_safe_local cn  (* fallback *)
+          | None ->
+            (match region_capture_name cn with
+             | Some r -> region_ptr_for r
+             | None -> "%" ^ llvm_safe_local cn  (* fallback *))
         in
         Printf.sprintf "%s %s" (llvm_ty_of cty) cv
       ) li.captures

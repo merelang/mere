@@ -4,6 +4,77 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.459 — 2026-09-09
+
+**A poison written to test a gate indicted the LLVM backend instead**, and the gate it
+was testing is the one that pins the half of Q-127 that is still open.
+
+### The measurement first
+
+`region_reclaim_check` asks whether a `region` block returns memory. It has always asked
+about a TREE built inside the block — a variant, which comes from the current region and
+is reclaimed. `test/regionreclaim/percall.mere` asks the other question, the one Q-127 is
+about: a **container built by a function and returned**, with only a scalar leaving the
+block, exactly as before.
+
+| | 10 iterations | 100 iterations |
+|---|---|---|
+| C | 9 MB | **80 MB** |
+| LLVM | 9 MB | **80 MB** |
+| Wasm | — | completes inside its fixed 64 MiB |
+
+C and LLVM hold every one of them: a container's region is in its TYPE, and a function's
+body allocates through the region variable in its own scheme, which the call site does
+not bind because the two hold different copies. The type says the block; the value is in
+the default region. Over-strict, never unsound — and it is the 0.7 MB a frame m3d pays.
+The leg asserts that this is STILL SO, so that whoever closes it finds out from a gate
+rather than from a paragraph. v0.1.443's LLVM leg is the precedent for writing it that
+way round.
+
+Wasm reclaims it, and not by being cleverer: one bump for every region, nothing stores
+this vector into anything older than the block, so nothing raises the high-water mark
+(v0.1.458) and the rollback takes it. Right answer, unrelated reason — so the three legs
+assert three separate claims rather than that the backends agree.
+
+### What the poison found
+
+Poisoning that leg means making the allocation lexical, which is what a fix would look
+like. The poisoned program **did not build on LLVM**:
+
+```
+use of undefined value '%__region_R'
+  %t5 = call i64 @__lifted_f_0(ptr %__region_R, i64 %d, ptr %t4, i64 0)
+```
+
+v0.1.453 gave a lifted inner function its enclosing region as a leading parameter, so a
+body called from a nested block allocates where it was WRITTEN rather than wherever is
+current (Q-131). The parameter is named `__region_R` — and on the C backend the block's
+arena local is *also* called `__region_R`, so emitting the capture's own name as the
+argument happens to name the right thing. LLVM calls the arena `%t4`. Emitting
+`%__region_R` there is invalid IR.
+
+**`mere -ll` exited 0 the whole time.** Only the assembler objected, and only if somebody
+ran it. The shape needs a `let rec` inside a `region` block inside a FUNCTION: every
+existing region/inner-fn parity case puts its block at the top level, where the two
+naming conventions coincide. Five versions.
+
+Fixed by resolving a `__region_*` capture through `current_regions` — the same place
+`region_ptr_for` looks — at both sites that build capture arguments, the direct lifted
+call and the closure env. `test/parity/region_inner_rec_in_fn.mere` is the nine-line
+shape, confirmed to fail on a build of 2f1e180 with exactly that message.
+
+### And the gate's own bug, which the same poison showed
+
+When the percall legs could not build, the section skipped and the PASS line then read
+its own unset variables: `set -u` killed the run with a shell error instead of a
+sentence. A leg that quietly does not run reports the question answered. Build failures
+are named failures now, the C and LLVM legs are separated so the message says which, and
+the run needs 7 checks rather than 4.
+
+parity 174 passed / 0 failed. `dune runtest` 2717 / 0. region_reclaim 8 checks.
+
+---
+
 ## v0.1.458 — 2026-09-09
 
 **Q-132 closed, one day after the witness that found it — and it was twice as big as
