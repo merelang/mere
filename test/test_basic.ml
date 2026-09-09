@@ -5150,18 +5150,32 @@ let () =
     (wasm "region R { 42 }") "global.set $__rgn_tmp";
   assert_contains "wasm: region block copies a boxed result out"
     (wasm "str_len (region R { \"a\" ++ \"b\" })") "call $__mcopy_str";
-  (* Escaping stores are compile errors, not dangling pointers. The message has to say
-     "unsupported in ... codegen subset", and not because the phrase is prettier:
-     `scripts/parity.sh` reads it to tell a DOCUMENTED LIMIT from a backend that fell
-     over. Worded as "not supported yet" this deliberate refusal was tallied as an
-     EMITFAIL, and the first parity case to store into an outer container from inside a
-     block made the harness red for a program it had correctly refused. *)
-  check_raises_containing "wasm: storing a heap value from inside a region is rejected"
+  (* Q-132: THIS TEST USED TO ASSERT THE OPPOSITE, and the refusal it pinned was both
+     over-strict and not the rule it claimed to be. It rejected a store into a container
+     from outside the block on the ground that the block reclaims its whole range; the
+     same store performed by a callee went straight through and corrupted memory, and its
+     unboxed-element exemption let the reallocated BUFFER dangle. A guard that has to be
+     right about every store in the program cannot be syntactic. Now the block gives up
+     the part of its range something outside can still reach, and the store compiles. *)
+  assert_contains "wasm: a store into a container older than the block compiles"
+    (wasm "let v = vec_new () in \
+           let _ = region R { vec_push v (\"a\" ++ \"b\") } in \
+           vec_len v")
+    "call $__lang_protect";
+  assert_contains "wasm: and the block's release is bounded by the high-water mark"
+    (wasm "region R { 42 }") "global.get $__lang_hwm";
+  (* What is still refused, and the message has to say "unsupported in ... codegen
+     subset" -- not because the phrase is prettier: `scripts/parity.sh` reads it to tell a
+     DOCUMENTED LIMIT from a backend that fell over. Worded as "not supported yet" this
+     deliberate refusal was tallied as an EMITFAIL, and the first parity case to hit it
+     made the harness red for a program it had correctly refused. A mark cannot help
+     here: another thread reads the value on no schedule of ours. *)
+  check_raises_containing "wasm: handing a block-allocated value to a thread is rejected"
     "unsupported in Wasm codegen subset"
     (fun () ->
-      wasm "let v = vec_new () in \
-            let _ = region R { vec_push v (\"a\" ++ \"b\") } in \
-            vec_len v");
+      wasm "let c = channel_new () in \
+            let _ = region R { channel_send c (\"a\" ++ \"b\") } in \
+            0");
 
   (* --- Diagnostic format (Phase 7.1) ---
      Multi-line code frame with line numbers + caret with inline message. *)

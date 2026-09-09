@@ -232,12 +232,27 @@ variant, which live outside every arena.
 The Wasm backend reclaims region blocks as of v0.1.37 (mark on the value stack + result copy-out via `$__mcopy_<tag>`;
 boxed results -- lists, tuples, records, variants, floats, bytes -- copy out
 correctly since v0.1.418, before which only scalar results assembled),
-with one honest difference from C: there is no per-container storage, so
-instead of copy-on-store, **escaping stores are compile errors** —
-pushing a heap value into a container created outside the block,
-`map_set` / `strbuf_push` on outer containers, `channel_send`, `spawn`,
-and closure-registering externs are rejected inside a region block
-(containers created inside the block mutate freely and die with it).
+with one honest difference from C: there is no per-container storage, and
+therefore no copy-on-store. Until v0.1.458 the answer to that was to make
+**escaping stores compile errors**. It was the wrong answer twice over — the
+same store performed by a *callee* went through and corrupted memory, and the
+exemption for unboxed elements let the container's reallocated *buffer* dangle
+instead of the element (Q-132) — because a guard that has to be right about
+every store in the program cannot be syntactic.
+
+The answer now is a **high-water mark**. A store into a container that predates
+the innermost open block raises `$__lang_hwm` to the current bump, and the
+block's exit restores `max(its mark, hwm)` instead of its mark. Sound because
+the value stored, and any buffer the store reallocated, were allocated before
+that point and lie below the bump; conservative because the block keeps its
+other garbage too — which is what the C backend does with a `__heap` value
+anyway, namely never free it. It costs one global compare when no block is
+open, and nothing at all for a block that touches only its own containers.
+
+What is still refused inside a region block is what a mark cannot help with:
+`channel_send`, `spawn`, and closure-registering externs. Those hand the value
+to another thread or to the host, on no schedule ordered with the block's exit.
+
 Measured: the playground 2048 with a per-move region holds its bump
 pointer constant across 30,000 moves.
 
