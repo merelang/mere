@@ -4,6 +4,57 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.466 — 2026-09-09
+
+**The LLVM backend passes the region too, so Q-127's remaining half is closed on both
+compiled backends.**
+
+```
+define ptr @mu_deep__int__Vec_int(ptr %__rp1352, i64 %n)
+  call ptr @mu_deep__int__Vec_int(ptr %t6, i64 2)                 inside `region A { }`
+  call ptr @mu_deep__int__Vec_int(ptr @__lang_default_region, ..) outside it
+```
+
+| `test/regionreclaim/percall.mere`, 10 → 100 iterations | before | after |
+|---|---|---|
+| C (v0.1.464) | 9 → 80 MB | 2.7 → **4.3 MB** |
+| LLVM (here) | 9 → 80 MB | 3.3 → **3.3 MB** |
+
+Both legs of `region_reclaim_check` assert FLAT now. Between the two versions the LLVM
+leg asserted the OLD behaviour and went red the moment it changed, which is how the
+table got updated instead of quietly rotting — and it is what told me each half had
+landed.
+
+### It is not the same hook, because this backend has no uncurried twin
+
+The C backend hangs the region arguments on `__direct`, the N-ary form of a curried
+top-level function. **LLVM has no such form**: a top-level function is
+`define T @f(P %param)`, one parameter, and a saturated multi-argument call goes through
+closures. What it does have is a direct call for the *first* application, so the region
+arguments lead there — and the innermost body of a curried function is a separate
+`define` that cannot see them, so `region_var_of`'s fallback answers the default region
+for it. Sound, and it reclaims less for multi-argument functions than C does.
+
+The closure adapter hands over the default region explicitly, because a closure value has
+nowhere to carry one — which is also what any call site reaching a function that way will
+have settled on.
+
+### The bug that made it look like the region was not reaching the callee
+
+The first version emitted nothing at all, and the reason is worth keeping: **every decl
+name in this backend carries a uniform `mu_` prefix, and the table that made the mangled
+part does not.** So `source_name_of_llvm` missed every name, `region_params_for` answered
+the empty list, and the output was byte-identical to before — indistinguishable from the
+region genuinely not reaching the callee. A lookup that fails silently and a mechanism
+that does not apply produce the same emitted code.
+
+parity 174 / 0. `dune runtest` 2717 / 0. escape 20 routes, 0 holes. 13 downstream
+repositories type-check. m3d: linalg, gltf, raster, shade, questions, northstar (50
+images) and bench all pass — and its own 0.7 MB a frame is unchanged, for the reason
+v0.1.465 recorded: it has one `region` block and no call site inside one.
+
+---
+
 ## v0.1.465 — 2026-09-09
 
 **A correction to yesterday's own measurement: `__heap` is a `TyRef` and is not a block,
