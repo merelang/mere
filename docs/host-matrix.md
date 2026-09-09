@@ -46,7 +46,7 @@ machine rather than a host.
 | `bit_shr` | yes | yes | yes | yes |
 | `bit_xor` | yes | yes | yes | yes |
 | `bool_of_str` | yes | yes | yes | refused |
-| `bytebuf_new` | yes | unattributed | refused | refused |
+| `bytebuf_new` | yes | refused | refused | refused |
 | `bytes_of_hex` | yes | yes | yes | yes |
 | `bytes_of_str` | yes | yes | yes | yes |
 | `ceil` | yes | yes | refused | yes |
