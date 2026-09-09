@@ -4140,6 +4140,21 @@ let build_items_sized (prog : Ast.program) : item list =
   settle 1 (build_items prog full)
 
 let emit_program ~main_ty (prog : Ast.program) : string =
+  (* Q-127: SETTLE EVERY UNDECIDED CONTAINER REGION BEFORE ANYTHING READS ONE.
+     A slot can hold a variable up to here, so that a call site inside a `region` block
+     can decide it; what is left means nobody did. An ALLOCATION region nobody decided
+     becomes `__caller` (the runtime current region -- a call does not change it, so
+     inside the callee that is exactly the region open around the call); anything else
+     becomes `__heap`. One rule in `Typer`, rather than eighteen backend patterns that
+     each have to remember what a variable in that slot means. *)
+  Typer.default_container_regions prog.main;
+  List.iter (fun d ->
+    match d with
+    | Ast.Top_let (_, v) -> Typer.default_container_regions v
+    | Ast.Top_let_rec bs -> List.iter (fun (_, v) -> Typer.default_container_regions v) bs
+    | _ -> ()) prog.decls;
+
+
   ignore main_ty;
   assemble (build_items_sized prog)
 

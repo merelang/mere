@@ -4,6 +4,96 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.453 — 2026-09-09
+
+**A container a function built landed in a region nothing frees, and a `region` block
+around the call reclaimed none of it.** `let build = fn n -> let v = vec_new () in .. v`
+came out as `int -> Vec[__heap, int]`: the container's region was decided when the
+FUNCTION BODY was checked, where no region is open, so every call site got the same
+answer — the default region, which is never freed. Two hundred iterations of a
+half-million-element `Vec` built through a call inside `region R { }` reached
+**822 MB**; m3d measured the same thing as 0.7 MB a frame and had to work around it
+twice. Recorded as Q-127.
+
+**The region is now decided by the CALL SITE.** Outside a `region` block the marker
+starts as a variable rather than the name `__heap`, the binding generalises over it, and
+each call binds its own copy to whichever region is open around that call. The same
+program is **10 MB**, and the other half arrives with it: carrying such a container out
+of the block is a **type error**, reported by the escape check that was already there —
+
+```
+region escape: `cache` now holds a value from region `A`, which is freed at the end
+of this block (its type became `Vec['a, Vec[A, int]]`)
+```
+
+**Nothing new checks anything. The type stopped lying**, and a check written for
+`region R { let v = vec_new () in .. }` in v0.1.291 started seeing the case it was
+always about.
+
+### Quantified AND allocation, which the first attempt got wrong
+
+Only a region a call ALLOCATES INTO is the call site's to decide. `let id = fn (v) -> v`
+passes its argument's region through and touching it would be wrong, and the difference
+is not always visible in the type: mere-ruby's frame pool returns either a pooled map or
+a fresh one, so the fresh `map_new`'s variable is UNIFIED with the global pool's, and
+which of the two survives is unification's business. Binding it retyped the global as
+living in the block, and the escape check reported it — correctly by its own lights.
+
+Level discipline already separates them: a variable shared with the environment is not
+local to the binding, so `generalize` declines to quantify it. Every marked variable
+generalisation declines is unmarked there, once, and non-local never goes back. With
+that, **all 29 Mere programs in the dogfood corpus type-check unchanged** — including
+m3d, whose frame loop had already been written to this discipline ("a value created in
+this region could not be stored in a cache that outlives it. Hence the warm pass above,
+out here, and a lookup inside that never writes").
+
+### No hidden argument, because a call does not change the current region
+
+A region left undecided settles on `__caller`, which the backends lower to the RUNTIME
+CURRENT REGION. That is not an approximation: the current region changes at a `region`
+block and nowhere else, so inside the callee it is exactly the region that was open
+around the call — the same one the typer bound the caller's copy to. The two agree by
+construction rather than by a rule written twice, and a function called from three
+regions needs one body, not three.
+
+**The alternative was measured and rejected.** Specialising per region needs the region
+to distinguish instances, and the region is deliberately not part of the C type
+(`Vec[R, T]` and `Vec[__heap, T]` are both `mere_vec_<T>*`, the region a pointer inside
+the struct). Those two requirements are not compatible: every attempt fixed one and
+broke the other. Written up in aidocs.
+
+### The tag stopped naming the region, in all four backends
+
+`ty_tag` kept the region for `Vec` and `Map` while already dropping it for `StrBuf` and
+`ByteBuf` — and the note on that exclusion said why: it "removes the whole class of
+mismatch where one spelling resolved the marker and the other did not". With three
+spellings in play the class came back immediately, as `%tuple_Vec___caller_str..`
+against `%tuple_Vec___heap_str..` in the same LLVM function. The region is out of the
+tag everywhere now, and arrows are compared and unified modulo container regions for
+the same reason.
+
+**That cuts both ways on size, and both directions are the same cause.** mere-ruby's
+emitted C is **2.8% smaller** (633 KB) because instances differing only by a region
+collapse into one; `examples/live` is 3.9% larger and m3d 1.5%, because a generic helper
+whose only unresolved variable was a region used to be *unnameable* and therefore
+silently dropped — an accidental dead-code pass that this removes. The `wasm_live` band
+moved for that reason; there is no reachability pruning for top-level functions, and
+until now an accident was standing in for one.
+
+### Also
+
+- `test/escape/ROUTES`: `via_fn_arg`'s interp column moves REJECT → ACCEPT, which is the
+  eight other store-into-an-outer-container rows' answer. It was the odd one out because
+  a rigid `__heap` made its annotation fail to unify — the interpreter rejected it with a
+  message about nothing. The COMPILED column improved: that confused unification error is
+  now the escape check naming the binding and the region.
+- The LLVM backend's private `close_open_regions` is the shared pass now. It answered the
+  same question with one fewer case.
+
+parity 184 passed / 0 failed. `dune runtest` 2715 / 0. Every gate green.
+
+---
+
 ## v0.1.452 — 2026-09-08
 
 **A container the callee built does not survive its call in `--lib` mode, and the

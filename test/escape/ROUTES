@@ -40,6 +40,18 @@
 # TERMINATES, since `type t = T of t` names itself in its own declaration and
 # the fix follows declarations now.
 #
+# WHY `via_fn_arg`'s INTERP COLUMN MOVED (Q-127, v0.1.453). It read REJECT and now
+# reads ACCEPT, which is not a loss: it is the eight other "store into an outer
+# container" rows' answer, and this row was the odd one out for a reason that had
+# nothing to do with escape. The program annotates `dst: Vec[__heap, Vec[R, int]]`,
+# and while `vec_new ()` produced a RIGID `__heap` the annotation failed to unify --
+# `expected __heap, got &__heap unit` -- so the interpreter rejected the program with
+# a message about nothing. Now the marker is decided at the call site, the annotation
+# unifies, and the interpreter does what it does for every other route here: it has no
+# arenas, so nothing dangles and it runs. The COMPILED column is the one that changed
+# for the better: it used to be that same confused unification error and is now the
+# escape check naming `o` and region R.
+#
 # route              kind   compiled  interp      unreadable  q
 result_container     GATED  REJECT    REJECT      -           -
 vec_into_map         GATED  REJECT    ACCEPT      -           Q-053
@@ -49,7 +61,7 @@ listbuf_into_vec     GATED  REJECT    ACCEPT      -           Q-053
 map_into_map         GATED  REJECT    ACCEPT      -           Q-053
 strbuf_into_vec      GATED  REJECT    ACCEPT      -           Q-053
 tuple_into_vec       GATED  REJECT    ACCEPT      -           Q-053
-via_fn_arg           GATED  REJECT    REJECT      -           Q-053
+via_fn_arg           GATED  REJECT    ACCEPT      -           Q-053
 loop_store_outer     GATED  REJECT    ACCEPT      -           Q-053
 record_field         GATED  REJECT    UNREADABLE  -           Q-067
 variant_payload      GATED  REJECT    ACCEPT      -           Q-067

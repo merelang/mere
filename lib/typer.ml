@@ -428,88 +428,62 @@ let level_check_failures = ref 0
    decide whether a closure has to carry a copier for its env. *)
 let saw_region_block = ref false
 
-let generalize env t =
-  let send_ids = pending_send_ids () in
-  (* A variable is generalizable when it was created inside this binding and is
-     not pinned by a pending Send obligation.
+(* The container types whose FIRST type argument is a region. Written once. *)
+let region_parameterised_names = ["Vec"; "Map"; "StrBuf"; "ByteBuf"; "ListBuf"]
 
-     This used to ask the environment instead: collect every free variable of
-     every scheme in scope and quantify what was not among them. That is the
-     textbook definition and it is O(env) per binding, so type-checking N
-     top-level bindings cost O(N^2) — 16k bindings took 1.7s, and the LSP, which
-     re-checks the whole file on every keystroke, took 5.3s per keystroke on a
-     22k-line file. Levels answer the same question in O(|t|). *)
-  let local = collect_local_vars !cur_level t [] in
-  let qs = List.filter (fun id -> not (List.mem id send_ids)) local in
-  (* A variable this binding declined to quantify — pinned by a Send obligation —
-     outlives the binding, so it must stop claiming to be local or the next
-     binding out would quantify it. *)
-  if List.length qs <> List.length local then
-    demote_unquantified !cur_level qs t;
-  if level_check then begin
-    let env_free = env_free_vars env in
-    let qs_old = List.filter (fun id ->
-      not (List.mem id env_free) && not (List.mem id send_ids))
-      (collect_free_vars t []) in
-    if List.sort compare qs <> List.sort compare qs_old then begin
-      incr level_check_failures;
-      Printf.eprintf
-        "MERE_LEVEL_CHECK: generalize %s at level %d: levels gave [%s], \
-         environment scan gave [%s]\n%!"
-        (Ast.pp_ty t) !cur_level
-        (String.concat ";" (List.map string_of_int (List.sort compare qs)))
-        (String.concat ";" (List.map string_of_int (List.sort compare qs_old)));
-      if Sys.getenv_opt "MERE_LEVEL_CHECK_TRACE" <> None then
-        prerr_string (Printexc.raw_backtrace_to_string
-                        (Printexc.get_callstack 12))
-    end
-  end;
-  { constraints = constraints_for_qs qs; quantified = qs; body = t }
+let alloc_region_ids : (int, unit) Hashtbl.t = Hashtbl.create 64
 
-(* Phase 36 (DEFERRED §1.13 fix): narrow value restriction.
-   `let x = e in ...` should only generalize x's type if e is syntactically
-   a value OR x's inferred type doesn't involve a **mutable container**
-   (Map / Vec / OwnedVec / StrBuf).
-
-   The motivating bug: `let m = map_new ()` generalizes m to
-   `forall 'k 'v. Map[..., 'k, 'v]`, each use site instantiates fresh tyvars,
-   and `map_set m "k" 1` doesn't propagate V=int to `map_get m "k"` — the
-   latter gets a fresh 'v that leaks to codegen.
-
-   We use a narrow rule (vs OCaml's strict value restriction) because Mere
-   has many higher-order combinators like `const 7` where the user expects
-   `always7 "x" + always7 1` to work polymorphically. Restricting only
-   container types fixes the unsoundness without breaking these idioms. *)
-let rec is_value (e : Ast.expr) : bool =
-  match e.Ast.node with
-  | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _
-  | Ast.Str_lit _ | Ast.Unit_lit -> true
-  | Ast.Var _ -> true
-  | Ast.Fun _ -> true
-  | Ast.Tuple es -> List.for_all is_value es
-  | Ast.Constr (_, None) -> true
-  | Ast.Constr (_, Some inner) -> is_value inner
-  | Ast.Record_lit (_, fields) ->
-    List.for_all (fun (_, v) -> is_value v) fields
-  | Ast.Annot (inner, _) -> is_value inner
-  | Ast.Ref (_, _, inner) -> is_value inner
-  | _ -> false
-
-let rec ty_mentions_mutable_container (t : Ast.ty) : bool =
+let mark_alloc_region (t : Ast.ty) : unit =
   match Ast.walk t with
-  | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "Channel" | "ListBuf"), _) -> true
-  | Ast.TyCon (_, args) -> List.exists ty_mentions_mutable_container args
-  | Ast.TyArrow (p, r) ->
-    ty_mentions_mutable_container p || ty_mentions_mutable_container r
-  | Ast.TyTuple ts -> List.exists ty_mentions_mutable_container ts
-  | Ast.TyRef (_, _, inner) -> ty_mentions_mutable_container inner
+  | Ast.TyVar v -> Hashtbl.replace alloc_region_ids v.Ast.id ()
+  | _ -> ()
+
+let is_alloc_region (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyVar v -> Hashtbl.mem alloc_region_ids v.Ast.id
   | _ -> false
 
-(* Instantiate a scheme, also returning the (quantified-id -> fresh var)
-   mapping so callers (trait-constraint elaboration) can find the fresh
-   variable a constrained type parameter resolved to. *)
+(* THE OTHER HALF OF "QUANTIFIED AND ALLOCATION", and the half that has to be enforced.
+
+   A variable made by `current_region_marker` starts out marked, but it can afterwards
+   be UNIFIED with something that belongs to the environment -- and then it is no longer
+   this binding's to decide. mere-ruby's frame pool is the case: `frame_pool_get` hands
+   back either a pooled map or a fresh one, so the fresh `map_new`'s region variable
+   unifies with the global pool's element region. Which of the two ends up as the
+   representative is unification's business, not ours, so the mark can survive on a
+   variable that is shared with a global -- and binding it at a call site retyped the
+   GLOBAL as living in the block. The escape check then reported it, correctly by its
+   own lights, as an escape.
+
+   Level discipline already knows the answer: a variable shared with the environment is
+   not local to the binding, so `generalize` does not quantify it. So every marked
+   variable in a binding's type that generalisation declined to quantify is unmarked
+   here, once and for all -- non-local is a property that never goes back. *)
+let unmark_non_quantified_regions (qs : int list) (t : Ast.ty) : unit =
+  let rec go t =
+    match Ast.walk t with
+    | Ast.TyCon (n, (slot0 :: rest)) when List.mem n region_parameterised_names ->
+      (match Ast.walk slot0 with
+       | Ast.TyVar v when not (List.mem v.Ast.id qs) ->
+         Hashtbl.remove alloc_region_ids v.Ast.id
+       | other -> go other);
+      List.iter go rest
+    | Ast.TyCon (_, args) -> List.iter go args
+    | Ast.TyTuple ts -> List.iter go ts
+    | Ast.TyArrow (a, b) -> go a; go b
+    | Ast.TyRef (_, _, inner) -> go inner
+    | _ -> ()
+  in
+  go t
+
 let instantiate_with_map sch =
   let mapping = List.map (fun id -> (id, fresh_var ())) sch.quantified in
+  (* Q-127: an allocation region stays one in every copy. The mark is what the call
+     site looks for, and each use of a region-polymorphic function gets its own
+     variable, so the mark has to travel with them or only the first use could be
+     decided. *)
+  List.iter (fun (id, fresh) ->
+    if Hashtbl.mem alloc_region_ids id then mark_alloc_region fresh) mapping;
   let rec subst t =
     match Ast.walk t with
     | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit) as t -> t
@@ -736,6 +710,233 @@ let views : (string, view_info) Hashtbl.t = Hashtbl.create 8
    Region_block during inference. Used to enforce that view construction
    happens inside a region. *)
 let active_regions : string list ref = ref []
+
+let generalize env t =
+  let send_ids = pending_send_ids () in
+  (* A variable is generalizable when it was created inside this binding and is
+     not pinned by a pending Send obligation.
+
+     This used to ask the environment instead: collect every free variable of
+     every scheme in scope and quantify what was not among them. That is the
+     textbook definition and it is O(env) per binding, so type-checking N
+     top-level bindings cost O(N^2) — 16k bindings took 1.7s, and the LSP, which
+     re-checks the whole file on every keystroke, took 5.3s per keystroke on a
+     22k-line file. Levels answer the same question in O(|t|). *)
+  let local = collect_local_vars !cur_level t [] in
+  let qs = List.filter (fun id -> not (List.mem id send_ids)) local in
+  (* Q-127: a marked region this binding will not quantify belongs to something that
+     outlives it, so the call site must not decide it. See the note on
+     `unmark_non_quantified_regions`. *)
+  unmark_non_quantified_regions qs t;
+  (* A variable this binding declined to quantify — pinned by a Send obligation —
+     outlives the binding, so it must stop claiming to be local or the next
+     binding out would quantify it. *)
+  if List.length qs <> List.length local then
+    demote_unquantified !cur_level qs t;
+  if level_check then begin
+    let env_free = env_free_vars env in
+    let qs_old = List.filter (fun id ->
+      not (List.mem id env_free) && not (List.mem id send_ids))
+      (collect_free_vars t []) in
+    if List.sort compare qs <> List.sort compare qs_old then begin
+      incr level_check_failures;
+      Printf.eprintf
+        "MERE_LEVEL_CHECK: generalize %s at level %d: levels gave [%s], \
+         environment scan gave [%s]\n%!"
+        (Ast.pp_ty t) !cur_level
+        (String.concat ";" (List.map string_of_int (List.sort compare qs)))
+        (String.concat ";" (List.map string_of_int (List.sort compare qs_old)));
+      if Sys.getenv_opt "MERE_LEVEL_CHECK_TRACE" <> None then
+        prerr_string (Printexc.raw_backtrace_to_string
+                        (Printexc.get_callstack 12))
+    end
+  end;
+  { constraints = constraints_for_qs qs; quantified = qs; body = t }
+
+(* Phase 36 (DEFERRED §1.13 fix): narrow value restriction.
+   `let x = e in ...` should only generalize x's type if e is syntactically
+   a value OR x's inferred type doesn't involve a **mutable container**
+   (Map / Vec / OwnedVec / StrBuf).
+
+   The motivating bug: `let m = map_new ()` generalizes m to
+   `forall 'k 'v. Map[..., 'k, 'v]`, each use site instantiates fresh tyvars,
+   and `map_set m "k" 1` doesn't propagate V=int to `map_get m "k"` — the
+   latter gets a fresh 'v that leaks to codegen.
+
+   We use a narrow rule (vs OCaml's strict value restriction) because Mere
+   has many higher-order combinators like `const 7` where the user expects
+   `always7 "x" + always7 1` to work polymorphically. Restricting only
+   container types fixes the unsoundness without breaking these idioms. *)
+let rec is_value (e : Ast.expr) : bool =
+  match e.Ast.node with
+  | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _
+  | Ast.Str_lit _ | Ast.Unit_lit -> true
+  | Ast.Var _ -> true
+  | Ast.Fun _ -> true
+  | Ast.Tuple es -> List.for_all is_value es
+  | Ast.Constr (_, None) -> true
+  | Ast.Constr (_, Some inner) -> is_value inner
+  | Ast.Record_lit (_, fields) ->
+    List.for_all (fun (_, v) -> is_value v) fields
+  | Ast.Annot (inner, _) -> is_value inner
+  | Ast.Ref (_, _, inner) -> is_value inner
+  | _ -> false
+
+let rec ty_mentions_mutable_container (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "Channel" | "ListBuf"), _) -> true
+  | Ast.TyCon (_, args) -> List.exists ty_mentions_mutable_container args
+  | Ast.TyArrow (p, r) ->
+    ty_mentions_mutable_container p || ty_mentions_mutable_container r
+  | Ast.TyTuple ts -> List.exists ty_mentions_mutable_container ts
+  | Ast.TyRef (_, _, inner) -> ty_mentions_mutable_container inner
+  | _ -> false
+
+(* Instantiate a scheme, also returning the (quantified-id -> fresh var)
+   mapping so callers (trait-constraint elaboration) can find the fresh
+   variable a constrained type parameter resolved to. *)
+(* Q-127: WHICH REGION VARIABLES ARE *ALLOCATIONS*, and why that is a smaller set
+   than "region variables".
+
+   A container's region slot can hold a variable for two different reasons, and only
+   one of them is the call site's to decide:
+
+     ALLOCATION  `let build = fn n -> let v = vec_new () in .. v` -- the container is
+                 MADE during the call, so it belongs in whatever region the caller is
+                 standing in. This is the set recorded here.
+     PASS-THROUGH `let id = fn (v: Vec[r, a]) -> v` -- the region came from the
+                 argument and is already decided; touching it would be wrong.
+
+   The distinction is what a first attempt got wrong. mere-ruby's frame pool
+   (`frame_pool_get` returns either a pooled map or a fresh one) has a region variable
+   SHARED with the global pool, and binding it at the call site retyped the global as
+   living in the block -- reported, correctly by its own lights, as an escape. Level
+   discipline already separates the two: a variable shared with something in the
+   environment is not local to the binding, so `generalize` does not quantify it, and
+   an unquantified variable never reaches instantiation. So the rule is
+   QUANTIFIED AND ALLOCATION, and the "quantified" half is free.
+
+   Kept as ids in a global table rather than as a field on `scheme`, because the set is
+   exactly a subset of `quantified` and the ids are unique for the life of the process
+   (one monotonic counter, no reuse). Nothing else has to change shape to carry it. *)
+(* THE REGION A CONTAINER IS BORN IN, as a type rather than a name.
+
+   Inside `region R { }` it is R, and nothing about that changes. Outside one it used
+   to be the rigid name `__heap`, and that is where Q-127 lived: a container allocated
+   in a FUNCTION BODY had its region decided when the body was checked, not when the
+   function was called, so `let build = fn n -> vec_new () ..` came out as
+   `int -> Vec[__heap, int]` and EVERY call site got the same answer. `__heap` lowers to
+   the default region, which is never freed, so a `region` block around a call that
+   builds a container reclaimed nothing -- measured in m3d as 0.7 MB a frame.
+
+   A fresh variable instead lets the binding generalise over it, and the CALL SITE
+   decides. Left undecided to the end it still settles on `__heap`, so a program with
+   no region blocks is unchanged. *)
+let current_region_marker () : Ast.ty =
+  match !active_regions with
+  | r :: _ -> Ast.TyRef (Ast.BorrowedRead, r, Ast.TyUnit)
+  | [] ->
+    let v = fresh_var () in
+    mark_alloc_region v;
+    v
+
+let region_parameterised = region_parameterised_names
+
+(* Q-127: the call site decides where the callee's containers live.
+
+   Every allocation region in what this call returns is bound to the region open around
+   the call. `region R { let v = build 7 in .. }` therefore gives `v : Vec[R, int]`,
+   which means two things at once: the value is allocated in R's arena and reclaimed
+   with it, and carrying it out of the block is a TYPE ERROR that the existing escape
+   check already knows how to report by name. Nothing new checks anything; the type
+   stopped lying.
+
+   WHEN NO REGION IS OPEN, NOTHING IS DECIDED HERE. Binding to `__heap` at such a call
+   site would re-pin the caller: `let wrap = fn n -> build n` would come out rigid and a
+   `region` block around a call to `wrap` would be back where it started. Left open, the
+   variable is still marked, so it generalises and the next call site out gets the same
+   chance.
+
+   AN ARROW RESULT IS LEFT ALONE. A partial application has allocated nothing yet, and
+   the region it will allocate in belongs to the call that finishes it -- which may be
+   inside a different block entirely. *)
+let bind_alloc_regions_to_active (t : Ast.ty) : unit =
+  match !active_regions with
+  | [] -> ()
+  | r :: _ ->
+    let marker = Ast.TyRef (Ast.BorrowedRead, r, Ast.TyUnit) in
+    let rec go t =
+      match Ast.walk t with
+      | Ast.TyCon (n, (slot0 :: rest)) when List.mem n region_parameterised ->
+        (match Ast.walk slot0 with
+         | Ast.TyVar v when Hashtbl.mem alloc_region_ids v.Ast.id ->
+           v.Ast.link <- Some marker
+         | other -> go other);
+        List.iter go rest
+      | Ast.TyCon (_, args) -> List.iter go args
+      | Ast.TyTuple ts -> List.iter go ts
+      | Ast.TyRef (_, _, inner) -> go inner
+      | Ast.TyArrow _ -> ()
+      | _ -> ()
+    in
+    go t
+
+(* Q-127: the invariant every backend relies on -- a container's region slot is a NAME
+   by the time one reads it.
+
+   Between `current_region_marker` and here a slot can hold a variable, so that a call
+   site inside a `region` block can decide it. Once nobody has, it means the default
+   region, which is what `__heap` has always meant. Settling it in one place beats
+   teaching four backends to read a variable: they pattern-match `TyRef (_, r, TyUnit)`
+   in that slot in eighteen places between them, and eighteen copies of the same rule is
+   how one rule becomes three.
+
+   IT REBUILDS AS WELL AS LINKING, and needs both. Linking fixes every holder that is
+   not an AST node -- a `fn_decl`'s `param_ty`, a scheme, a closure-env table. Rebuilding
+   fixes the READERS, because `Ast.walk` follows links only at the root: a `Vec` whose
+   slot 0 is a variable pointing at `&__heap unit` still presents as
+   `TyCon ("Vec", [TyVar ..; ..])`, and none of those eighteen patterns match it. *)
+let rec resolve_regions_ty (t : Ast.ty) : Ast.ty =
+  match Ast.walk t with
+  | Ast.TyCon (n, (slot0 :: rest)) when List.mem n region_parameterised ->
+    let slot0 =
+      match Ast.walk slot0 with
+      (* AN ALLOCATION REGION NOBODY DECIDED IS THE CALLER'S, and that is a different
+         answer from `__heap`. It reaches the backends as `__caller`, which they lower
+         to the RUNTIME CURRENT REGION -- and that is not an approximation: a call does
+         not change the current region, so inside the callee it is exactly the region
+         that was open around the call, which is what the typer bound the caller's copy
+         of this variable to. The two agree by construction rather than by a rule
+         written down twice.
+
+         It is also right when nobody bound it at all. Either the variable never
+         reaches the signature -- so the container is purely local to the call and
+         cannot escape it -- or every call site was outside a region, where the current
+         region IS the default one. *)
+      | Ast.TyVar v when Hashtbl.mem alloc_region_ids v.Ast.id ->
+        let caller = Ast.TyRef (Ast.BorrowedRead, "__caller", Ast.TyUnit) in
+        v.Ast.link <- Some caller;
+        caller
+      (* Anything else undecided is a pass-through nobody supplied: the default region,
+         which is what `__heap` has always meant. *)
+      | Ast.TyVar v ->
+        let heap = Ast.TyRef (Ast.BorrowedRead, "__heap", Ast.TyUnit) in
+        v.Ast.link <- Some heap;
+        heap
+      | other -> resolve_regions_ty other
+    in
+    Ast.TyCon (n, slot0 :: List.map resolve_regions_ty rest)
+  | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map resolve_regions_ty args)
+  | Ast.TyTuple ts -> Ast.TyTuple (List.map resolve_regions_ty ts)
+  | Ast.TyArrow (a, b) -> Ast.TyArrow (resolve_regions_ty a, resolve_regions_ty b)
+  | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, resolve_regions_ty inner)
+  | other -> other
+
+let rec default_container_regions (e : Ast.expr) : unit =
+  (match e.Ast.ty with
+   | Some t -> e.Ast.ty <- Some (resolve_regions_ty t)
+   | None -> ());
+  List.iter default_container_regions (Ast.children e)
 
 (* Substitute a region name in a type. Used when instantiating a view's
    declared field types at construction time. *)
@@ -2836,14 +3037,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        record_send_bound e.loc (Ast.walk b);
        Ast.TyCon ("list", [b])
      | Ast.Var "vec_new" ->
-       let active_region =
-         match !active_regions with
-         | r :: _ -> r
-         | [] -> "__heap"
-       in
-       let marker =
-         Ast.TyRef (Ast.BorrowedRead, active_region, Ast.TyUnit)
-       in
+       let marker = current_region_marker () in
        let result_ty = Ast.TyCon ("Vec", [marker; fresh_var ()]) in
        (* Force the scheme's region tyvar to bind to our marker by
           unifying through the call. *)
@@ -2852,14 +3046,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
      | Ast.Var "lb_new" ->
        (* Q-106: the builder is bound to the innermost active region at
           construction, exactly like vec_new, so it cannot leave it. *)
-       let active_region =
-         match !active_regions with
-         | r :: _ -> r
-         | [] -> "__heap"
-       in
-       let marker =
-         Ast.TyRef (Ast.BorrowedRead, active_region, Ast.TyUnit)
-       in
+       let marker = current_region_marker () in
        let result_ty = Ast.TyCon ("ListBuf", [marker; fresh_var ()]) in
        unify e.loc tf (Ast.TyArrow (ta, result_ty));
        result_ty
@@ -2868,39 +3055,18 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
           the returned int vec lives in the innermost active region
           (or __heap). Without this the region tyvar stays unresolved
           and fns taking the vec are never emitted by the C backend. *)
-       let active_region =
-         match !active_regions with
-         | r :: _ -> r
-         | [] -> "__heap"
-       in
-       let marker =
-         Ast.TyRef (Ast.BorrowedRead, active_region, Ast.TyUnit)
-       in
+       let marker = current_region_marker () in
        let result_ty = Ast.TyCon ("Vec", [marker; Ast.TyInt]) in
        unify e.loc ta Ast.TyStr;
        unify e.loc tf (Ast.TyArrow (ta, result_ty));
        result_ty
      | Ast.Var "strbuf_new" ->
-       let active_region =
-         match !active_regions with
-         | r :: _ -> r
-         | [] -> "__heap"
-       in
-       let marker =
-         Ast.TyRef (Ast.BorrowedRead, active_region, Ast.TyUnit)
-       in
+       let marker = current_region_marker () in
        let result_ty = Ast.TyCon ("StrBuf", [marker]) in
        unify e.loc tf (Ast.TyArrow (ta, result_ty));
        result_ty
      | Ast.Var "map_new" ->
-       let active_region =
-         match !active_regions with
-         | r :: _ -> r
-         | [] -> "__heap"
-       in
-       let marker =
-         Ast.TyRef (Ast.BorrowedRead, active_region, Ast.TyUnit)
-       in
+       let marker = current_region_marker () in
        let result_ty =
          Ast.TyCon ("Map", [marker; fresh_var (); fresh_var ()]) in
        unify e.loc tf (Ast.TyArrow (ta, result_ty));
@@ -2908,14 +3074,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
      | Ast.Var "owned_vec_to_vec" ->
        (* Phase 12.12: the region for OwnedVec -> Vec is injected from
           active_regions. Outside any region, it becomes __heap. *)
-       let active_region =
-         match !active_regions with
-         | r :: _ -> r
-         | [] -> "__heap"
-       in
-       let marker =
-         Ast.TyRef (Ast.BorrowedRead, active_region, Ast.TyUnit)
-       in
+       let marker = current_region_marker () in
        let elem = fresh_var () in
        let result_ty = Ast.TyCon ("Vec", [marker; elem]) in
        (* arg must unify with OwnedVec[T], so construct a function type
@@ -2931,12 +3090,17 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        (* tf is a concrete arrow: unify param ↔ arg directly so the
           error reads "expected <param>, got <arg>" at the arg's loc. *)
        unify arg.loc param_ty ta;
+       (* Q-127: whatever this call allocates, it allocates now -- in the region open
+          around the call, not the one that happened to be open where the callee was
+          written. *)
+       bind_alloc_regions_to_active ret_ty;
        ret_ty
      | Ast.TyVar _ ->
        (* fn type is still a free tyvar — fall back to whole-arrow unify
           (which then specializes the tyvar to (arg → result)). *)
        let result = fresh_var () in
        unify e.loc tf (Ast.TyArrow (ta, result));
+       bind_alloc_regions_to_active result;
        result
      | _ ->
        (* Calling a concrete non-arrow value — most often "extra
