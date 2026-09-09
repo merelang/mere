@@ -1,0 +1,29 @@
+// THE SAME HOLE, REACHED THROUGH A CLOSURE VALUE rather than a direct call.
+//
+// `mk` is written in R and passed to `apply` as a VALUE, so the backends take their
+// closure path instead of the inner-lift one -- and it is CALLED from inside S. The
+// container it makes is typed `Vec[R, int]` and `cache`, in R, holds it; the arena has
+// to agree, or the value dies when S ends. Before v0.1.454 the closure reached for the
+// runtime current region at the call, which is S.
+//
+// Kept beside region_inner_fn_nested.mere because the two go down different machinery:
+// that one is an inner-lifted function with the region as a leading parameter, this one
+// is a closure with the region in its environment. Fixing either leaves the other.
+//
+// T's 4096 pushes are what turns "dangling" into a wrong ANSWER: the arena is reused,
+// not freed, so without something written over it the stale bytes read back correctly.
+let apply = fn (f) -> fn (n: int) -> f n;
+let rec fill = fn (j) -> fn (i: int) ->
+  if i >= 4096 then 0 else let _ = vec_push j (0 - 1) in fill j (i + 1);
+let _ = region R {
+  // Made in R and passed as a VALUE, so it is a closure rather than a lifted fn --
+  // and it is CALLED from S.
+  let mk = fn (n: int) -> let v = vec_new () in let _ = vec_push v n in v in
+  let cache = vec_new () in
+  let _ = region S { vec_push cache (apply mk 700) } in
+  let _ = region T { let junk = vec_new () in fill junk 0 } in
+  let got = vec_get cache 0 in
+  let _ = print_int (vec_len got) in
+  print_int (vec_get got 0)
+};
+0

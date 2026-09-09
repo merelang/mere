@@ -5150,9 +5150,14 @@ let () =
     (wasm "region R { 42 }") "global.set $__rgn_tmp";
   assert_contains "wasm: region block copies a boxed result out"
     (wasm "str_len (region R { \"a\" ++ \"b\" })") "call $__mcopy_str";
-  (* Escaping stores are compile errors, not dangling pointers. *)
+  (* Escaping stores are compile errors, not dangling pointers. The message has to say
+     "unsupported in ... codegen subset", and not because the phrase is prettier:
+     `scripts/parity.sh` reads it to tell a DOCUMENTED LIMIT from a backend that fell
+     over. Worded as "not supported yet" this deliberate refusal was tallied as an
+     EMITFAIL, and the first parity case to store into an outer container from inside a
+     block made the harness red for a program it had correctly refused. *)
   check_raises_containing "wasm: storing a heap value from inside a region is rejected"
-    "not supported yet"
+    "unsupported in Wasm codegen subset"
     (fun () ->
       wasm "let v = vec_new () in \
             let _ = region R { vec_push v (\"a\" ++ \"b\") } in \
@@ -15171,13 +15176,22 @@ let () =
      Printf.sprintf "vector ops:%s bare:%d" (if vec = [] then "none" else "some") (List.length bare))
     "vector ops:some bare:0";
 
-  (* v0.1.433: an inner fn is lifted out of the region body into its own C
-     function, where the body's `__region_R` local does not exist. Emitting the
-     name there produced C that does not compile. This checks the spelling the
-     emitter chose; that the result BUILDS AND RUNS is
-     test/parity/region_inner_fn_container.mere, because a text check cannot
-     answer a build failure -- it can only say which text was emitted. *)
-  check "v0.1.433: a lifted fn's container reaches for the current region"
+  (* v0.1.433 + Q-131: an inner fn is lifted out of the region body into its own C
+     function, where the body's `__region_R` local does not exist. Emitting the name
+     there produced C that does not compile, so v0.1.433 made it reach for the RUNTIME
+     CURRENT REGION instead -- "the answer a lexical name cannot give".
+     
+     THAT ANSWER WAS WRONG, and Q-131 is the case that shows it: called from a block
+     NESTED inside its own, the lifted body allocated in the inner block while its type
+     said the outer one, and the value died with the inner block
+     (`region R { let mk = .. in region S { .. mk 700 .. } }` read back 4096 / -1 where
+     the interpreter read 1 / 700). The region travels with the function now -- captured
+     under the name the block's local already has -- so a lexical name CAN give the
+     answer, provided it is carried rather than looked up. The counts below flip
+     accordingly. What builds and runs is test/parity/region_inner_fn_container.mere and
+     test/parity/region_inner_fn_nested.mere; a text check can only say which text was
+     emitted. *)
+  check "Q-131: a lifted fn's container names the region it captured"
     (let c =
        let prog = Pipeline.parse_program
          "let a = region R { let f = fn (k: int) -> let b = strbuf_new () in let _ = strbuf_push b \"x\" in strbuf_len b in f 2 };\nprint_int a" in
@@ -15189,11 +15203,12 @@ let () =
          if i + n > m then acc
          else go (i + 1) (if String.sub c i n = sub then acc + 1 else acc) in
        go 0 0 in
-     Printf.sprintf "lifted:%s current:%d local:%d"
+     Printf.sprintf "lifted:%s current:%d captured:%d param:%s"
        (if count "__lifted_f_0" > 0 then "yes" else "no")
        (count "mere_strbuf_new(__lang_current_region)")
-       (count "mere_strbuf_new(__region_R)"))
-    "lifted:yes current:1 local:0";
+       (count "mere_strbuf_new(__region_R)")
+       (if count "__lang_region* __region_R" > 0 then "yes" else "no"))
+    "lifted:yes current:0 captured:1 param:yes";
 
   (* v0.1.450 (Q-130 / Q-128): OPERANDS ARE SEQUENCED, CASCADES ARE FLATTENED.
      Two reasons, and the emitter applies each only where it is owed:
