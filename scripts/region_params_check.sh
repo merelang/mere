@@ -54,11 +54,32 @@ expect() {  # expect <fixture> <expected summary line>
 expect ok        "# 2 region-parameterised, 2 ok, 0 value-used, 0 partial"
 expect valueused "# 1 region-parameterised, 0 ok, 1 value-used, 0 partial"
 expect partial   "# 1 region-parameterised, 0 ok, 0 value-used, 1 partial"
+expect chain     "# 3 region-parameterised, 3 ok, 0 value-used, 0 partial"
 
-# The `ok` fixture also pins the CHAIN: `wrap` does not allocate, it returns what `build`
-# made, so its scheme quantifies that region too and it would pass its argument down. If
-# the analysis ever stops seeing through a call it reports 1 here instead of 2, and the
-# thing it stopped seeing is the shape v0.1.453 was wrong about.
+# ---- THE CHAIN, asserted line by line --------------------------------------
+#
+# This is the one the rest of Q-127 turns on. `wrap` and `deep` do not allocate; they
+# return what `build` made, and the call site inside each of them must read the CALLER's
+# own region parameter, so the outermost block's region reaches `build`'s body by being
+# handed down. If those two lines ever read `?` the propagation is gone -- and the whole
+# reason the fix is a hidden argument rather than "the body asks what region is current"
+# is that v0.1.453 did the latter and m3d could not render a second frame.
+chain_got="$("$MERE" --dump-region-params "$ROOT/test/regionparams/chain.mere" 2>&1 | grep -e '^@' -e '^#sites')"
+chain_want='@wrap -> build : ^param
+@deep -> wrap : ^param
+@<pattern> -> deep : ?
+@<pattern> -> deep : A
+#sites 1 named, 2 forwarded, 1 undecided'
+if [ "$chain_got" != "$chain_want" ]; then
+  echo "FAIL region_params[chain-sites]: the call sites no longer read as they must."
+  echo "  want:"; printf '%s\n' "$chain_want" | sed 's/^/    /'
+  echo "  got:";  printf '%s\n' "$chain_got"  | sed 's/^/    /'
+  fails=$((fails + 1))
+fi
+checks=$((checks + 1))
+
+# The `ok` fixture also pins that the analysis follows a call at all: `wrap` does not
+# allocate, it returns what `build` made, so its scheme quantifies that region too.
 if [ "$("$MERE" --dump-region-params "$ROOT/test/regionparams/ok.mere" 2>&1 | grep -c '^wrap	')" != 1 ]; then
   echo "FAIL region_params[chain]: wrap no longer takes a region parameter -- the analysis stopped following a call"
   fails=$((fails + 1))
@@ -92,7 +113,11 @@ unexpected=""
 for f in "$ROOT"/examples/*.mere; do
   n="$(basename "$f" .mere)"
   if out="$("$MERE" --dump-region-params "$f" 2>"$TMPERR")"; then
-    set -- $(printf '%s\n' "$out" | grep '^#' | head -1 | sed 's/[^0-9]/ /g')
+    # `# ` and not `^#`: the report also emits `#sites ...`, and taking the first
+    # hash line silently counted the wrong one -- 289 call sites read as 289
+    # value-used functions, which is the sort of number a summary line will print
+    # without blinking.
+    set -- $(printf '%s\n' "$out" | grep '^# ' | head -1 | sed 's/[^0-9]/ /g')
     tot=$((tot + ${1:-0})); ok=$((ok + ${2:-0})); vu=$((vu + ${3:-0})); pa=$((pa + ${4:-0}))
     files=$((files + 1))
     case " $known_skips " in *" $n "*)

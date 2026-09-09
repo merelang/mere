@@ -1,0 +1,28 @@
+// THE CHAIN, which is the shape v0.1.453 got wrong and the reason the fix has to be a
+// hidden ARGUMENT rather than a rule about the runtime current region.
+//
+// `build` allocates. `wrap` and `deep` do not -- they return what `build` made, so their
+// own schemes quantify that region too. v0.1.453 let `build`'s BODY reach for whatever
+// region was current when it ran, which for a chain is the block around the OUTERMOST
+// call, while every type involved said the default region. m3d stored the result in a
+// cache that outlived the frame and segfaulted from the second frame on.
+//
+// Read as an argument instead, each of the four call sites below has an answer already:
+//
+//   wrap -> build   ^param   forward the caller's own region parameter
+//   deep -> wrap    ^param   again, one level further out
+//   <top> -> deep   ?        no block here: the default region, which is today
+//   <top> -> deep   A        inside `region A { }`: pass __region_A
+//
+// NOTHING IMPLEMENTS CHAINS. `wrap` instantiates `build` at `wrap`'s own quantified
+// variable, so reading the call site inside `wrap` gives `wrap`'s parameter -- that is
+// unification, not a rule someone wrote. The two `^param` lines are what this fixture
+// exists to keep true: if they ever read `?`, the propagation is gone and the change
+// this measures cannot work.
+let build = fn (n: int) -> let v = vec_new () in let _ = vec_push v n in v;
+let wrap = fn (n: int) -> build n;
+let deep = fn (n: int) -> wrap n;
+
+let _ = print_int (vec_len (deep 1));
+let _ = region A { print_int (vec_len (deep 2)) };
+0
