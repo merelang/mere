@@ -4102,7 +4102,14 @@ and emit_expr (e : Ast.expr) : unit =
     let reject loc what =
       raise (Codegen_error (loc,
         Printf.sprintf
-          "wasm: %s inside a region block is not supported yet (for a \
+          (* "unsupported in ... codegen subset" is not decoration: it is the
+             phrase `scripts/parity.sh` reads to tell a DOCUMENTED LIMIT from a
+             backend that fell over. Worded as "not supported yet", this refusal
+             -- which is deliberate and explained right here -- was tallied as an
+             EMITFAIL and made the harness red for a case it had correctly
+             refused. Found by the first parity case that stores into an outer
+             container from inside a block. *)
+          "unsupported in Wasm codegen subset: %s inside a region block (for a \
            container created outside the block) — the Wasm backend \
            reclaims the whole block on exit and has no per-container \
            storage to copy into (see memory-model.md section 3.5)"

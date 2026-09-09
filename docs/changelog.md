@@ -4,6 +4,60 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.454 — 2026-09-09
+
+**A function written inside one region and called from a region nested inside it
+allocated in the wrong arena, and the value died with the inner block.** Q-131, found
+while designing Q-127's fix and confirmed with a witness:
+
+```mere
+region R {
+  let mk = fn (n) -> let v = vec_new () in .. v in   // typed Vec[R, int]
+  let cache = vec_new () in                          // Vec[R, Vec[R, int]]
+  let _ = region S { vec_push cache (mk 700) } in    // mk's body ran with S current
+  ..                                                 // interp 1 / 700, C 4096 / -1
+}
+```
+
+Every type here is consistent and the escape check is right to say nothing: the value is
+typed R and stored in R. What was wrong was the ARENA. `mk` is lifted out of the block
+into its own function, so the block's `__region_R` local does not reach it, and v0.1.433
+made it fall back on the RUNTIME CURRENT REGION — "the answer a lexical name cannot
+give". At the call the current region is S, not R.
+
+**The region travels with the function now.** A lifted body takes each region block it
+was written inside as an ordinary capture, named `__region_R` — which is already the C
+local the block binds, so the parameter, the argument the call site passes and what
+`region_var_of` answers are one string. Typed as the region marker, which `c_type_of`
+lowers to `__lang_region*`; the env struct, the closure adapter, the `__direct` twin and
+the transitive capture fixpoint all treat it as a capture and need to know nothing about
+regions. A lexical name CAN give the answer, provided it is carried rather than looked
+up.
+
+**Two paths, two witnesses, because fixing either leaves the other.** The C backend
+lifts `let mk = fn ..` inside a block to a function with a leading region parameter;
+the LLVM backend makes it an anonymous closure and carries the region in its
+environment. `test/parity/region_inner_fn_nested.mere` is the first,
+`region_closure_value_nested.mere` — the same function passed as a VALUE — is the
+second. Poisoned separately: removing the C capture makes the first read 4096, removing
+the LLVM one makes the second read 4294967295.
+
+Both witnesses end with a third block that writes 4096 words over the arena. Without it
+the stale bytes read back correctly and the bug looks absent — the arena is REUSED, not
+freed, which is also why a sanitiser cannot see it: it is one live allocation.
+
+### Also
+
+- The Wasm backend's refusal for a store into an outer container from inside a block now
+  says "unsupported in Wasm codegen subset". The phrase is not decoration: `parity.sh`
+  reads it to tell a documented limit from a backend that fell over, and worded as "not
+  supported yet" this deliberate refusal was tallied as an EMITFAIL — the first parity
+  case to exercise it made the harness red for a program it had correctly refused.
+
+parity 169 passed / 0 failed. `dune runtest` 2715 / 0.
+
+---
+
 ## v0.1.453 — 2026-09-09
 
 **A container a function built landed in a region nothing frees, and a `region` block

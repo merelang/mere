@@ -122,9 +122,35 @@ let with_region_scope (name : string) (f : unit -> 'a) : 'a =
 (* The C expression for a container's region marker. `__heap` is the default
    region (or the current one in --lib mode); a named region uses its C local
    when one is in scope and the current region when it is not. *)
+(* Set while a lifted body is emitted: the regions it captured, so `region_var_of`
+   answers with the capture instead of falling back on the runtime current region.
+   Empty everywhere else. *)
+let current_env_subst : (string * string) list ref = ref []
+
+let captured_regions : string list ref = ref []
+
+(* The region names in a capture list. Derived rather than stored: `__region_` is a
+   prefix no source name can have, so the list of captures already says which of them
+   are regions and a parallel field could only disagree with it. *)
+let regions_of_captures (caps : (string * Ast.ty) list) : string list =
+  List.filter_map (fun (n, _) ->
+    if String.length n > 9 && String.sub n 0 9 = "__region_"
+    then Some (String.sub n 9 (String.length n - 9)) else None) caps
+
 let region_var_of (name : string) : string =
   if name = "__heap" then heap_container_region ()
   else if List.mem name !region_scope then "__region_" ^ name
+  (* Q-131: THE REGION TRAVELS WITH THE FUNCTION. A lifted body is not lexically
+     inside the block it was written in, so `region_scope` is empty here -- and
+     falling back on the runtime current region is wrong the moment the function is
+     CALLED from a block nested inside its own: `region R { let mk = .. in region S {
+     .. mk 700 .. } }` allocated in S while the type said R, and the value died with S.
+     The region is captured instead, under the name the block's local already has, so
+     the answer is the same string whether it comes from the local or the capture. *)
+  else if List.mem name !captured_regions then
+    (match List.assoc_opt ("__region_" ^ name) !current_env_subst with
+     | Some s -> s          (* reached through a closure env *)
+     | None -> "__region_" ^ name)   (* an ordinary leading parameter *)
   else "__lang_current_region"
 
 (* A position that names a file is not from the source being compiled — it came
@@ -331,7 +357,14 @@ let flatten_module_dots = Monomorph.flatten_module_dots
    raw. Keeping types raw avoids disturbing that (recursive-pointer) machinery;
    type-name collisions with C have never occurred and would be a contained fix. *)
 let c_safe_name (n : string) : string =
-  "mu_" ^ flatten_module_dots n
+  (* Q-131: A REGION CAPTURE IS ALREADY A C NAME. `__region_R` is the local a
+     `region R { }` binds, and a lifted inner fn takes it as a capture under exactly
+     that name -- so the parameter, the argument the call site passes and the name
+     `region_var_of` produces are one string. Prefixing it would make them three, and
+     the prefix buys nothing here: the name is the compiler's, not the user's, and
+     `__` is not a spelling a source identifier can reach. *)
+  if String.length n > 9 && String.sub n 0 9 = "__region_" then n
+  else "mu_" ^ flatten_module_dots n
 
 (* Record FIELD identifiers. A field is a user name and C keywords are not available as
    member declarators -- `type t = { short: str }` emitted `const char* short;`, which is a
@@ -685,7 +718,6 @@ let pending_closures : closure_emission list ref = ref []
 (* Substitution map used inside an adapter body to rewrite captured Var
    references to env-pointer accesses (`x` → `__env_self->x`). Saved/
    restored around adapter emission so nested closures stack cleanly. *)
-let current_env_subst : (string * string) list ref = ref []
 
 (* When the typer's recorded .ty on a Fun is still polymorphic (because
    the enclosing fn was let-poly generalized), fall back to the type
@@ -4739,6 +4771,13 @@ let rec c_type_of (t : Ast.ty) : string =
       unconstrained — erased to int's representation (see ty_tag) *)
   | Ast.TyTuple ts -> tuple_struct_name ts
   | Ast.TyArrow (p, r) -> closure_struct_name p r
+  (* Q-131: THE MARKER TYPE IS A REGION POINTER. `TyRef (_, R, TyUnit)` is how the
+     typer spells "the region R" -- it is what sits in a container's first slot, and
+     `ty_tag` already reads it as the region's name. Giving it a C type is what lets a
+     region be CAPTURED like any other value: a lifted inner fn takes `__region_R` as
+     an ordinary capture and everything downstream (the env struct, the adapter, the
+     direct call) works without knowing it is a region. *)
+  | Ast.TyRef (_, _, Ast.TyUnit) -> "__lang_region*"
   | Ast.TyRef (_, _, inner) ->
     (* `&R T` at runtime is a pointer into the region's buffer; the
        region name is dropped (escape check at the typer guarantees the
@@ -4922,10 +4961,16 @@ let emit_lifted_fn (f : lifted_fn) : string =
       (List.map format_param (f.l_captures @ [(f.l_param, f.l_param_ty)]))
   in
   let all_bindings = f.l_captures @ [(f.l_param, f.l_param_ty)] in
+  (* Q-131: the regions this body captured, so `region_var_of` answers with the
+     capture instead of falling back on the runtime current region -- which is a
+     different arena the moment this is called from a block nested inside its own. *)
+  let saved_caps = !captured_regions in
+  captured_regions := regions_of_captures f.l_captures @ saved_caps;
   let body_c, tail_used =
-    with_self_tail f.l_name all_bindings (fun () ->
-      with_var_types all_bindings (fun () ->
-        with_expected_ty f.l_return_ty (fun () -> emit_expr f.l_body)))
+    Fun.protect ~finally:(fun () -> captured_regions := saved_caps) (fun () ->
+      with_self_tail f.l_name all_bindings (fun () ->
+        with_var_types all_bindings (fun () ->
+          with_expected_ty f.l_return_ty (fun () -> emit_expr f.l_body))))
   in
   Printf.sprintf "%s%s %s(%s) {\n%s%s  return %s;\n}\n%s"
     (lib_static ())
@@ -9662,6 +9707,38 @@ let lift_inner_fns
   let builtin_names = List.map fst Typer.initial_env in
   let extern_names = Hashtbl.fold (fun k _ acc -> k :: acc) extern_fn_decls [] in
   let known = ref (toplevel_names @ builtin_names @ extern_names) in
+  (* Q-131: WHICH REGION BLOCKS THIS FUNCTION IS WRITTEN INSIDE. Pushed and popped by
+     the walk below, which is single-threaded, so a ref is the whole mechanism -- and it
+     avoids threading a tenth argument through a twenty-case traversal. *)
+  let lifting_regions : string list ref = ref [] in
+  (* The regions a body actually reaches for: the names in its containers' region slots.
+     Capturing every enclosing block instead would work and would carry parameters
+     nothing reads. *)
+  let regions_needed_by (body : Ast.expr) : string list =
+    let found = ref [] in
+    let rec ty_go t =
+      match Ast.walk t with
+      | Ast.TyCon (n, (slot0 :: rest))
+        when List.mem n Typer.region_parameterised_names ->
+        (match Ast.walk slot0 with
+         | Ast.TyRef (_, r, Ast.TyUnit) ->
+           if List.mem r !lifting_regions && not (List.mem r !found) then
+             found := r :: !found
+         | other -> ty_go other);
+        List.iter ty_go rest
+      | Ast.TyCon (_, args) -> List.iter ty_go args
+      | Ast.TyTuple ts -> List.iter ty_go ts
+      | Ast.TyArrow (a, b) -> ty_go a; ty_go b
+      | Ast.TyRef (_, _, inner) -> ty_go inner
+      | _ -> ()
+    in
+    let rec go (e : Ast.expr) =
+      (match e.Ast.ty with Some t -> ty_go t | None -> ());
+      List.iter go (Ast.children e)
+    in
+    go body;
+    List.rev !found
+  in
   let lift_one host_param host_locals n p fn_body value_loc value_ty =
     (* Phase 24.1: subtract host_locals from `known` so that builtins
        shadowed by a local `let` in the host fn (e.g., `let len = ...`)
@@ -9683,6 +9760,19 @@ let lift_inner_fns
       List.map (fun fv ->
         let ty = lookup_var_ty fn_body fv in
         (fv, ty)) body_fvs
+    in
+    (* Q-131: THE REGION IS A CAPTURE LIKE ANY OTHER. Named `__region_R`, which is
+       already the C local a `region R { }` binds, so the parameter here, the argument
+       the call site passes and what `region_var_of` produces inside the body are one
+       string. Typed as the region MARKER, which `c_type_of` lowers to
+       `__lang_region*`. Everything downstream -- the env struct, the closure adapter,
+       the `__direct` twin, the transitive capture fixpoint -- treats it as an ordinary
+       capture and needs to know nothing about regions. *)
+    let captures =
+      List.map (fun r ->
+        ("__region_" ^ r, Ast.TyRef (Ast.BorrowedRead, r, Ast.TyUnit)))
+        (regions_needed_by fn_body)
+      @ captures
     in
     (* Phase 24.1: previously restricted captures to primitive types
        (int / bool / str / unit). Anonymous closures (pending_closures
@@ -9838,7 +9928,13 @@ let lift_inner_fns
         (match g with Some ge -> walker host_param host_locals ge | None -> ());
         walker host_param host_locals b) arms
     | Ast.Tuple es -> List.iter (walker host_param host_locals) es
-    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walker host_param host_locals b
+    | Ast.Region_block (rn, b) | Ast.Region_loop (rn, _, b) ->
+      (* Q-131: a fn lifted out of here has to take the block's region with it. *)
+      lifting_regions := rn :: !lifting_regions;
+      let restore () = lifting_regions := List.tl !lifting_regions in
+      (match walker host_param host_locals b with
+       | () -> restore ()
+       | exception ex -> restore (); raise ex)
     | Ast.Ref (_, _, a) -> walker host_param host_locals a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walker host_param host_locals e) fs
     | Ast.Field_get (a, _) -> walker host_param host_locals a
