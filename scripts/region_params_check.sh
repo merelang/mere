@@ -36,6 +36,8 @@ MERE=${MERE:-$ROOT/_build/default/bin/mere.exe}
 
 fails=0
 checks=0
+TMPERR="$(mktemp)"
+trap 'rm -f "$TMPERR"' EXIT
 
 expect() {  # expect <fixture> <expected summary line>
   got="$("$MERE" --dump-region-params "$ROOT/test/regionparams/$1.mere" 2>&1 | grep '^#' | tail -1)"
@@ -65,21 +67,31 @@ checks=$((checks + 1))
 
 # ---- the corpus, as a measurement with a floor -----------------------------
 #
-# Programs that do not type-check standalone are listed BY NAME rather than counted:
-# a count lets a newly-broken example replace a previously-broken one in silence.
+# FAILURES ARE CLASSIFIED BY REASON, NOT LISTED BY NAME, and the first version of
+# this got that wrong in the way that is easiest to miss: the list was written from
+# what failed ON MY MACHINE. Three http examples import
+# `github.com/284km/mere-markdown/...`, which resolves out of `.mere_modules/` --
+# git-ignored, populated by `mere install`, present here and absent on the runner.
+# So the gate passed locally and failed on CI naming three files, and the list it
+# was checking against was a photograph of one machine's state.
+#
+# An unresolvable import is a fact about the CHECKOUT, so it is skipped and counted.
+# Anything else is a fact about the PROGRAM, so it must be on the list below, which
+# holds only failures that are deliberate. And an unexpected one prints the
+# compiler's own first line: "stopped type-checking" without a reason cost a
+# thirty-three-minute CI round trip to ask what the reason was.
+#
 # borrow_modes_typeerror  a type error on purpose
 # brackets_balance        a lexer limit on purpose ("..." inside {...} interpolation)
 # list_lib                a parse limit on purpose
 # template_engine         the same lexer limit
-# stream_lines            imports `contrib/...` relative to the REPO ROOT, and this
-#                         resolves imports relative to the FILE, as running it does
-known_skips="borrow_modes_typeerror brackets_balance list_lib template_engine stream_lines"
+known_skips="borrow_modes_typeerror brackets_balance list_lib template_engine"
 
-tot=0; ok=0; vu=0; pa=0; files=0
+tot=0; ok=0; vu=0; pa=0; files=0; unresolved=0
 unexpected=""
 for f in "$ROOT"/examples/*.mere; do
   n="$(basename "$f" .mere)"
-  if out="$("$MERE" --dump-region-params "$f" 2>/dev/null)"; then
+  if out="$("$MERE" --dump-region-params "$f" 2>"$TMPERR")"; then
     set -- $(printf '%s\n' "$out" | grep '^#' | head -1 | sed 's/[^0-9]/ /g')
     tot=$((tot + ${1:-0})); ok=$((ok + ${2:-0})); vu=$((vu + ${3:-0})); pa=$((pa + ${4:-0}))
     files=$((files + 1))
@@ -87,16 +99,19 @@ for f in "$ROOT"/examples/*.mere; do
       echo "FAIL region_params[$n]: listed as a known skip but it type-checks now — remove it from the list"
       fails=$((fails + 1)) ;;
     esac
+  elif grep -q 'cannot resolve path' "$TMPERR"; then
+    unresolved=$((unresolved + 1))
   else
     case " $known_skips " in
       *" $n "*) ;;
-      *) unexpected="$unexpected $n" ;;
+      *) unexpected="$unexpected $n"
+         echo "  $n: $(head -1 "$TMPERR" | cut -c1-100)" ;;
     esac
   fi
 done
 
 if [ -n "$unexpected" ]; then
-  echo "FAIL region_params: examples that stopped type-checking and are not on the known list:$unexpected"
+  echo "FAIL region_params: examples that stopped type-checking for a reason that is not a missing import and not on the known list:$unexpected"
   fails=$((fails + 1))
 fi
 checks=$((checks + 1))
@@ -112,4 +127,4 @@ if [ "$fails" -gt 0 ]; then
   echo "region_params_check: $fails problem(s)"
   exit 1
 fi
-echo "PASS region_params_check: $checks checks — over $files examples, $tot functions would take a region parameter ($ok ok, $vu value-used, $pa partial)"
+echo "PASS region_params_check: $checks checks — over $files examples ($unresolved skipped for an unvendored import), $tot functions would take a region parameter ($ok ok, $vu value-used, $pa partial)"
