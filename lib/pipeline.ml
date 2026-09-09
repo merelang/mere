@@ -694,6 +694,14 @@ let region_param_report ?base_dir ?(search_paths = []) s =
   let n_named = ref 0 and n_undecided = ref 0 and n_forwarded = ref 0 in
   let render caller_params t =
     match Ast.walk t with
+    (* `__heap` IS A `TyRef` AND IS NOT A BLOCK. Counting it as one is what the first
+       version of this did, and it reported m3d as having eight call sites inside a
+       `region` block. m3d has one region block in the whole program, in the window
+       path, and the bench that measures its per-frame growth does not go through it.
+       A count that cannot tell "the default region" from "a region" answers the
+       question this report exists to ask with the wrong number, and the emitted C is
+       what disagreed with it. *)
+    | Ast.TyRef (_, "__heap", Ast.TyUnit) -> incr n_undecided; "__heap"
     | Ast.TyRef (_, r, Ast.TyUnit) -> incr n_named; r
     | Ast.TyVar v when List.mem v.Ast.id caller_params -> incr n_forwarded; "^" ^ "param"
     | Ast.TyVar _ -> incr n_undecided; "?"

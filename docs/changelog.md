@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.465 — 2026-09-09
+
+**A correction to yesterday's own measurement: `__heap` is a `TyRef` and is not a block,
+and the report was counting it as one.** v0.1.462 said m3d had eight call sites inside a
+`region` block. It has **zero**. So does the 286-program examples corpus.
+
+The classifier's first arm matched any `TyRef (_, r, TyUnit)` and called it named, which
+`__heap` — the default region — satisfies. The emitted C is what disagreed: 116 region
+parameters declared and forwarded in m3d, and not one call site passing a real block.
+
+| corrected | named | forwarded | undecided |
+|---|---|---|---|
+| m3d | **0** | 142 | 190 |
+| 286 examples | **0** | 10 | 289 |
+
+**m3d has one `region` block in the whole program** (`src/view.mere:197`, in the window
+path), and the bench that measures its 0.7 MB a frame renders through `--out`, which does
+not go through it. So v0.1.464's closing note — "a precision gap to measure next" — was
+wrong about what the gap is: the region-passing machinery is not missing anything on m3d,
+m3d is not asking it for anything. The 0.7 MB a frame has been waiting on a `region`
+block that the measured path never opens.
+
+That is a better problem to have, and it is m3d's to try: put the frame loop in a block
+and see whether the number moves. What this repository can say is that the mechanism
+works — `test/regionparams/chain.mere` carries a block's arena three frames down, and
+`test/regionreclaim/percall.mere` went from 80 MB to 4.3 MB on the strength of it.
+
+A measurement that cannot tell "the default region" from "a region" answers the question
+it exists to ask with the wrong number, and it did so for three versions.
+
+`dune runtest` 2717 / 0. The chain fixture's line is unchanged (`1 named, 2 forwarded,
+1 undecided`), which is what says the correction did not move the case that matters.
+
+---
+
 ## v0.1.464 — 2026-09-09
 
 **Q-127's remaining half, closed on the C backend: a function allocates where its caller
