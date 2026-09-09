@@ -461,6 +461,7 @@ let process_decls eval_env type_env decls =
 let process ?base_dir ?(search_paths = []) s =
   Exhaustive.reset ();
   Typer.reset_send_constraints ();
+  Typer.reset_region_params ();
   let prog = Trait_elab.elaborate (parse_program ?base_dir ~search_paths s) in
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
@@ -487,6 +488,7 @@ let process ?base_dir ?(search_paths = []) s =
 let exhaustiveness_warnings s =
   Exhaustive.reset ();
   Typer.reset_send_constraints ();
+  Typer.reset_region_params ();
   let prog = Trait_elab.elaborate (parse_program s) in
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
@@ -497,6 +499,7 @@ let exhaustiveness_warnings s =
 let type_of s =
   Exhaustive.reset ();
   Typer.reset_send_constraints ();
+  Typer.reset_region_params ();
   let prog = Trait_elab.elaborate (parse_program s) in
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
@@ -580,6 +583,7 @@ let type_of s =
 let region_param_report ?base_dir ?(search_paths = []) s =
   Exhaustive.reset ();
   Typer.reset_send_constraints ();
+  Typer.reset_region_params ();
   let prog = Trait_elab.elaborate (parse_program ?base_dir ~search_paths s) in
   let type_env = ref Typer.initial_env in
   let base_names = List.map fst Typer.initial_env in
@@ -742,6 +746,11 @@ let region_param_report ?base_dir ?(search_paths = []) s =
   Buffer.add_string buf
     (Printf.sprintf "#sites %d named, %d forwarded, %d undecided\n"
        !n_named !n_forwarded !n_undecided);
+  (* Run the pass the backends run, and say how many variables it actually named.
+     "The pass ran" and "the pass did anything" are different claims; a gate that
+     cannot tell them apart passes on a binding that binds nothing. This is last
+     because it LINKS variables -- nothing above may run after it. *)
+  Buffer.add_string buf (Printf.sprintf "#bound %d\n" (Typer.bind_region_params ()));
   Buffer.add_string buf
     (Printf.sprintf "# %d region-parameterised, %d ok, %d value-used, %d partial\n"
        !total !ok !vused !partial);
@@ -750,6 +759,7 @@ let region_param_report ?base_dir ?(search_paths = []) s =
 let process_typed s =
   Exhaustive.reset ();
   Typer.reset_send_constraints ();
+  Typer.reset_region_params ();
   let prog = Trait_elab.elaborate (parse_program s) in
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
@@ -777,6 +787,7 @@ let rec infer_program ?base_dir ?(search_paths = []) ?on_error source =
 
 and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
   Typer.reset_send_constraints ();
+  Typer.reset_region_params ();
   let prog =
     Trait_elab.elaborate
       (parse_program ?base_dir ~search_paths source)

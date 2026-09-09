@@ -494,16 +494,16 @@ let unmark_non_quantified_regions (qs : int list) (t : Ast.ty) : unit =
 
    Order is the order they appear in the type, so it can serve as the parameter order
    later without anyone having to agree on one twice. *)
-let scheme_region_params (sch : scheme) : int list =
+let scheme_region_param_vars (sch : scheme) : (int * Ast.ty) list =
   let acc = ref [] in
-  let add id = if not (List.mem id !acc) then acc := id :: !acc in
+  let add id v = if not (List.mem_assoc id !acc) then acc := (id, v) :: !acc in
   let rec go t =
     match Ast.walk t with
     | Ast.TyCon (n, (slot0 :: rest)) when List.mem n region_parameterised_names ->
       (match Ast.walk slot0 with
-       | Ast.TyVar v
+       | Ast.TyVar v as tv
          when List.mem v.Ast.id sch.quantified
-              && Hashtbl.mem alloc_region_ids v.Ast.id -> add v.Ast.id
+              && Hashtbl.mem alloc_region_ids v.Ast.id -> add v.Ast.id tv
        | other -> go other);
       List.iter go rest
     | Ast.TyCon (_, args) -> List.iter go args
@@ -514,6 +514,58 @@ let scheme_region_params (sch : scheme) : int list =
   in
   go sch.body;
   List.rev !acc
+
+let scheme_region_params (sch : scheme) : int list =
+  List.map fst (scheme_region_param_vars sch)
+
+(* Q-127 STAGE 2: THE VARIABLES THAT WILL CARRY A REGION AT RUN TIME, and why they are
+   named at EMIT time rather than when they are found.
+
+   A region parameter is a quantified allocation variable that appears in the scheme's
+   type, so a call site can decide it. Linking it to a name the moment it is found would
+   be wrong: `instantiate_with_map` reads through `Ast.walk`, so a linked variable stops
+   being copied per use and every call site would share one region. The variables are
+   collected as each binding generalises and given their names once, after all inference
+   is over, from `bind_region_params`.
+
+   The name is derived from the variable's own id, so the declaration and the call site
+   do not have to agree on a numbering scheme -- they agree because it is the same
+   variable. Order, where it matters, comes from walking the type, which both ends do. *)
+let region_param_vars : (int, Ast.ty) Hashtbl.t = Hashtbl.create 32
+let region_params_bound = ref false
+
+(* Per-program state, and the LSP re-checks the same process on every keystroke: without
+   this, one emit would leave every later run's variables already linked and stop the
+   table recording new ones. Every pipeline entry point calls it beside
+   `reset_send_constraints`, which is per-program for the same reason. *)
+let reset_region_params () =
+  Hashtbl.reset region_param_vars;
+  region_params_bound := false
+
+let record_region_params (sch : scheme) : unit =
+  if not !region_params_bound then
+    List.iter (fun (id, v) -> Hashtbl.replace region_param_vars id v)
+      (scheme_region_param_vars sch)
+
+let region_param_name (id : int) : string = Printf.sprintf "__rp%d" id
+
+(* Is this region name one of those? The backends ask, because such a name is not a
+   `region R { }` any source wrote. *)
+let is_region_param_name (n : string) : bool =
+  String.length n > 4 && String.sub n 0 4 = "__rp"
+
+(* Returns how many it named, because "the pass ran" and "the pass did anything" are
+   different claims and only the second one is worth a gate. *)
+let bind_region_params () : int =
+  region_params_bound := true;
+  let n = ref 0 in
+  Hashtbl.iter (fun id v ->
+    match v with
+    | Ast.TyVar r when r.Ast.link = None ->
+      r.Ast.link <- Some (Ast.TyRef (Ast.BorrowedRead, region_param_name id, Ast.TyUnit));
+      incr n
+    | _ -> ()) region_param_vars;
+  !n
 
 (* WHAT A CALL SITE WOULD PASS, read off the two types it already has.
 
@@ -845,7 +897,9 @@ let generalize env t =
                         (Printexc.get_callstack 12))
     end
   end;
-  { constraints = constraints_for_qs qs; quantified = qs; body = t }
+  let sch = { constraints = constraints_for_qs qs; quantified = qs; body = t } in
+  record_region_params sch;
+  sch
 
 (* Phase 36 (DEFERRED §1.13 fix): narrow value restriction.
    `let x = e in ...` should only generalize x's type if e is syntactically

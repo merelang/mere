@@ -4,6 +4,48 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.463 — 2026-09-09
+
+**The region parameters have names now, and nothing passes one — which is the whole
+point of shipping it separately.** The change that closes Q-127's remaining half moves a
+function's allocations from the default region into whatever region its caller decided.
+That is the change that broke m3d for three versions. So the plumbing goes first, on its
+own, where "did anything move?" has the answer *no* and can be checked.
+
+A quantified allocation region that appears in a scheme's type — one a call site could
+decide — is linked at emit time to `__rpN`, where N is the variable's own id. Everything
+still undecided after that becomes the default region, exactly as before. And `__rpN`
+*also* lowers to the default region, so the emitted code is unchanged.
+
+Why the name comes at emit time and not when the variable is found: `instantiate_with_map`
+reads through `Ast.walk`, so a linked variable stops being copied per use, and every call
+site would end up sharing one region. It has to be after all inference is over.
+
+Why the name is the variable's own id and not a per-function index: the declaration and
+the call site then do not have to agree on a numbering — they agree because it is the
+same variable. Order, where it will matter, comes from walking the type, which both ends
+already do.
+
+### What is checked, since nothing observable changed
+
+- **`#bound 3`** on the chain fixture. "The pass ran" and "the pass did anything" are
+  different claims and only the second is worth a gate; poisoned by making the pass link
+  nothing, and it says so.
+- **Zero occurrences of `__rp` in the emitted C, LLVM IR and WAT.** A name in a type that
+  reaches the output as an identifier is a compile error, or an LLVM `use of undefined
+  value` — which is precisely the bug v0.1.459 fixed, arrived at by assuming a name in a
+  type is a name in scope. Three backends, asserted separately.
+- The table is **reset per program**, beside `reset_send_constraints`, for the same
+  reason: the LSP re-checks the same process on every keystroke, and one emit would
+  otherwise leave every later run's variables already linked and stop new ones being
+  recorded.
+
+`dune runtest` 2717 / 0. parity 174 / 0. region_reclaim 8 checks — still recording that a
+callee-built container is NOT reclaimed on C and LLVM, which is the thing the next slice
+is supposed to change.
+
+---
+
 ## v0.1.462 — 2026-09-09
 
 **The mechanism the rest of Q-127 turns on, validated before anything is built on it —
