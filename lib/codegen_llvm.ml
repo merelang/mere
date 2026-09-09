@@ -744,6 +744,31 @@ let synthesize_curried_eta_llvm (name : string) (arrow_ty : Ast.ty) (loc : Loc.t
    the C backend's in two ways -- its own `ty_tag`, and the uniform `mu_`
    prefix -- and both are preserved: the pass is handed `mangled_inst_name_llvm`
    and `mu` is applied to every decl name it returns. *)
+(* Q-127: the region parameters the function being emitted declares. A `__rpN` names an
+   SSA parameter only inside that function; anywhere else -- a closure adapter, a lifted
+   body, an inner define -- there is none, and answering with the name produces `use of
+   undefined value`, which is exactly the bug v0.1.459 fixed. So: a list to consult, and
+   the default region when it is not on it. *)
+let current_region_params_llvm : string list ref = ref []
+
+(* Rebuilt each run from the table that made the mangled names -- see the same map in
+   codegen_c. Region parameters are keyed by SOURCE name because Monomorph erases a
+   container's region before a fn_decl's types are stored. *)
+let source_of_instance_llvm : (string, string) Hashtbl.t = Hashtbl.create 32
+
+let source_name_of_llvm (iname : string) : string =
+  (* EVERY DECL NAME IN THIS BACKEND CARRIES THE UNIFORM `mu_` PREFIX and the table that
+     made the mangled part does not, so the lookup has to strip it first. Without that
+     the map missed every name, `region_params_for` answered the empty list, and the
+     whole change emitted nothing -- which looked exactly like the region not reaching
+     the callee rather than like a lookup failing. *)
+  let n =
+    if String.length iname > 3 && String.sub iname 0 3 = "mu_"
+    then String.sub iname 3 (String.length iname - 3)
+    else iname
+  in
+  match Hashtbl.find_opt source_of_instance_llvm n with Some b -> b | None -> n
+
 let multi_inst_fns_llvm : Monomorph.inst_table ref =
   ref (Monomorph.empty_inst_table ())
 
@@ -1268,6 +1293,12 @@ let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
     of_monomorph (fun () ->
       Monomorph.resolve_fn_types ~mangle:mangled_inst_name_llvm skels root) in
   multi_inst_fns_llvm := insts;
+  (* Q-127: instance -> source, from the table that made the names. *)
+  Hashtbl.reset source_of_instance_llvm;
+  Hashtbl.iter (fun base arrows ->
+    List.iter (fun a ->
+      Hashtbl.replace source_of_instance_llvm (insts.Monomorph.mangle base a) base) arrows)
+    insts.Monomorph.arrows;
   (* Every emitted value name in this backend carries `mu_`; the pass names
      things in source terms. Applying it here -- rather than inside the namer --
      keeps `instance_of` answering in source terms too, so the call sites below
@@ -2189,9 +2220,10 @@ let region_result_plan (t : Ast.ty) : region_result_plan =
    here. The C backend folded the same rule into one function; this is that
    function. *)
 let region_ptr_for (name : string) : string =
-  (* Q-127 stage 2: see the note in codegen_c's region_var_of -- `__rpN` is a region
-     parameter nobody passes yet, so it is the default region. *)
-  if name = "__heap" || Typer.is_region_param_name name then "@__lang_default_region"
+  if Typer.is_region_param_name name then
+    (if List.mem name !current_region_params_llvm then "%" ^ name
+     else "@__lang_default_region")
+  else if name = "__heap" then "@__lang_default_region"
   else match List.assoc_opt name !current_regions with
     | Some reg -> reg
     | None ->
@@ -6703,8 +6735,16 @@ and emit_user_app ?(tail = false) (env : env) (e : Ast.expr) : string =
       mu (Option.value (Monomorph.instance_of !multi_inst_fns_llvm name f_ty)
             ~default:name)
     in
+    (* Q-127: the callee's region arguments lead, read out of its scheme against this
+       call's own type -- the same pair of walks the C backend does, and the same
+       source-keyed lookup, because a fn_decl's types have had their regions erased. *)
+    let rargs =
+      List.map (fun (_, actual) -> "ptr " ^ region_ptr_for actual)
+        (Typer.region_args_for name f_ty)
+    in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call %s @%s(%s %s)" r ret_ty dispatch_name arg_ty av);
+    emit_instr (Printf.sprintf "  %s = call %s @%s(%s)" r ret_ty dispatch_name
+                  (String.concat ", " (rargs @ [Printf.sprintf "%s %s" arg_ty av])));
     r
   | Ast.App (f, arg) ->
     (* Closure dispatch via the closure value's fn pointer. *)
@@ -6968,8 +7008,15 @@ let emit_lifted_fn_llvm (lf : lifted_fn_llvm) : string =
 let emit_closure_adapter (f : fn_decl) : string =
   let pt = llvm_ty_of f.param_ty in
   let rt = llvm_ty_of f.return_ty in
+  (* Q-127: a closure has nowhere to carry a region, so the adapter hands over the
+     default one -- which is what this call site's own type will have settled on, since
+     nothing could bind a region through a closure value. *)
+  let rargs =
+    List.map (fun _ -> "ptr @__lang_default_region")
+      (Typer.region_params_for (source_name_of_llvm f.name)) in
   let inner_call =
-    Printf.sprintf "  %%r = call %s @%s(%s %%x)" rt f.name pt
+    Printf.sprintf "  %%r = call %s @%s(%s)" rt f.name
+      (String.concat ", " (rargs @ [Printf.sprintf "%s %%x" pt]))
   in
   Printf.sprintf
     "define %s @%s_closure_fn(ptr %%env_unused, %s %%x) {\nentry:\n%s\n  ret %s %%r\n}"
@@ -6980,6 +7027,7 @@ let emit_closure_adapter (f : fn_decl) : string =
 let emit_fn_def (f : fn_decl) : string =
   reg_counter := 0;
   label_counter := 0;
+  let rps = Typer.region_params_for (source_name_of_llvm f.name) in
   let saved = !instrs in
   let saved_types = !current_var_types in
   let saved_exp = !current_expected_ty in
@@ -7010,7 +7058,12 @@ let emit_fn_def (f : fn_decl) : string =
    | None -> debug_loc_suffix := "");
   llvm_tail_pos := true;
   llvm_returned := false;
-  let rv = emit_expr env f.body in
+  (* Q-127: in scope for the body, and only for it. *)
+  let saved_rps = !current_region_params_llvm in
+  current_region_params_llvm := rps;
+  let rv =
+    Fun.protect ~finally:(fun () -> current_region_params_llvm := saved_rps)
+      (fun () -> emit_expr env f.body) in
   if !llvm_returned then llvm_returned := false
   else emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of f.return_ty) rv);
   debug_loc_suffix := saved_suffix;
@@ -7019,9 +7072,11 @@ let emit_fn_def (f : fn_decl) : string =
   current_var_types := saved_types;
   current_expected_ty := saved_exp;
   current_host_fn_llvm := saved_host;
-  Printf.sprintf "define %s @%s(%s %%%s)%s {\n%s\n}"
-    (llvm_ty_of f.return_ty) f.name (llvm_ty_of f.param_ty)
-    (llvm_safe_local f.param)
+  Printf.sprintf "define %s @%s(%s)%s {\n%s\n}"
+    (llvm_ty_of f.return_ty) f.name
+    (String.concat ", "
+       (List.map (fun r -> "ptr %" ^ r) rps
+        @ [Printf.sprintf "%s %%%s" (llvm_ty_of f.param_ty) (llvm_safe_local f.param)]))
     (match dbg with
      | Some n -> Printf.sprintf " !dbg !%d" (dbg_subprogram_id n)
      | None -> "")

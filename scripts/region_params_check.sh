@@ -144,20 +144,22 @@ checks=$((checks + 1))
 
 # ---- who actually passes one ------------------------------------------------
 #
-# The names are given to every backend; only the C one passes an argument for them so
-# far (v0.1.464). So the C output MUST contain them -- a positive check, because "no
-# __rp anywhere" was true when nothing passed one and would go on being true if the
-# region stopped reaching the callee -- and the other two must NOT, because a name in a
-# type that reaches the output as an identifier is a compile error, or an LLVM `use of
-# undefined value`, which is the bug v0.1.459 fixed by assuming a name in a type is a
-# name in scope.
-n="$("$MERE" -c "$ROOT/test/regionparams/chain.mere" 2>/dev/null | grep -c '__rp' || true)"
-if [ "$n" = 0 ]; then
-  echo "FAIL region_params[emit-c]: the C backend passes no region argument at all — the region has stopped reaching the callee"
-  fails=$((fails + 1))
-fi
-checks=$((checks + 1))
-for be in -ll -w; do
+# The names are given to every backend; the two COMPILED ones pass an argument for them
+# (C in v0.1.464, LLVM in v0.1.466). So their output MUST contain them -- a positive
+# check, because "no __rp anywhere" was true when nothing passed one and would go on
+# being true if the region stopped reaching the callee. Wasm must NOT: it declares none,
+# and a name in a type that reaches the output as an identifier is a compile error, or
+# an LLVM `use of undefined value`, which is the bug v0.1.459 fixed by assuming a name
+# in a type is a name in scope.
+for be in -c -ll; do
+  n="$("$MERE" $be "$ROOT/test/regionparams/chain.mere" 2>/dev/null | grep -c '__rp' || true)"
+  if [ "$n" = 0 ]; then
+    echo "FAIL region_params[emit$be]: this backend passes no region argument at all — the region has stopped reaching the callee"
+    fails=$((fails + 1))
+  fi
+  checks=$((checks + 1))
+done
+for be in -w; do
   n="$("$MERE" $be "$ROOT/test/regionparams/chain.mere" 2>/dev/null | grep -c '__rp' || true)"
   if [ "$n" != 0 ]; then
     echo "FAIL region_params[emit$be]: $n occurrence(s) of a region-parameter name reached the emitted code, and this backend declares none"
