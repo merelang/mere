@@ -171,13 +171,17 @@ fi
 # call site bound a different copy -- the type said the block, the value was in the
 # default region.
 #
-# v0.1.464 passes the region IN, as a leading argument, on the C backend. C went from
-# 9 -> 80 MB to 2.7 -> 4.3 MB across the same 10 -> 100 iterations, and stopped
-# following the count. THE LLVM BACKEND STILL GROWS, because it has not been taught to
-# pass one yet, so its leg asserts the OLD behaviour and will go red when that changes.
-# Two legs, opposite directions, and the one that is red-when-fixed is how the table
-# gets updated instead of quietly rotting -- v0.1.443's LLVM leg is the precedent, and
-# this leg was itself the thing that told me the C fix had landed.
+# v0.1.464 passes the region IN, as a leading argument, on the C backend, and v0.1.466
+# does the same on LLVM. Across the same 10 -> 100 iterations:
+#
+#            before        after
+#   C        9 -> 80 MB    2.7 -> 4.3 MB
+#   LLVM     9 -> 80 MB    3.3 -> 3.3 MB
+#
+# Both legs now assert FLAT. Between those two versions the LLVM leg asserted the old
+# behaviour and went red the moment it changed, which is how this table got updated
+# instead of quietly rotting -- v0.1.443's LLVM leg is the precedent, and this one was
+# itself what told me each half had landed.
 #
 # The Wasm leg asserts completion, for an unrelated reason: one bump for every region,
 # nothing stores this vector into anything older than the block, so no high-water mark
@@ -233,12 +237,12 @@ else
         fail=1
       fi
       checked=$((checked + 1))
-      # LLVM does not, yet. Red when it does, so this table is updated rather than stale.
-      if [ "$pc_l_big" -lt "$(( pc_l_small * 3 ))" ]; then
-        echo "FAIL region_reclaim/percall/LLVM: peak went $pc_l_small -> $pc_l_big — that is FLAT."
-        echo "  The LLVM backend now reclaims a callee-built container too, which is the"
-        echo "  other half of Q-127 closing. Update this leg and OPEN_QUESTIONS rather than"
-        echo "  deleting it."
+      # LLVM too, since v0.1.466.
+      if [ "$(( pc_l_big * 10 ))" -gt "$(( pc_l_small * 20 ))" ]; then
+        echo "FAIL region_reclaim/percall/LLVM: peak went $pc_l_small -> $pc_l_big for ${PCSMALL} -> ${PCBIG} iterations."
+        echo "  A callee-built container has stopped being reclaimed on the LLVM backend."
+        echo "  The region is no longer reaching the callee: see emit_fn_def's rps and"
+        echo "  Typer.region_args_for at the 1-argument direct call site."
         fail=1
       fi
       checked=$((checked + 1))
@@ -264,7 +268,7 @@ if [ "$checked" -lt 7 ]; then
 fi
 
 if [ "$fail" = 0 ]; then
-  echo "PASS region_reclaim: $checked checks — C flat at $(( c_big / 1048576 )) MB, LLVM flat at $(( l_big / 1048576 )) MB, Wasm completes inside 64 MiB; a callee-built container is reclaimed on C ($(( pc_c_small / 1048576 )) -> $(( pc_c_big / 1048576 )) MB) and Wasm, and still not on LLVM (Q-127)"
+  echo "PASS region_reclaim: $checked checks — C flat at $(( c_big / 1048576 )) MB, LLVM flat at $(( l_big / 1048576 )) MB, Wasm completes inside 64 MiB; a callee-built container is reclaimed on C ($(( pc_c_small / 1048576 )) -> $(( pc_c_big / 1048576 )) MB), LLVM ($(( pc_l_small / 1048576 )) -> $(( pc_l_big / 1048576 )) MB) and Wasm (Q-127 closed on both compiled backends)"
   exit 0
 fi
 exit 1

@@ -138,6 +138,32 @@ as of v0.1.31 it is the implemented semantics on the C backend:
   everything the body allocates is reclaimed when the block exits.
   Container structs (Vec / Map / StrBuf) stay in their own binding region
   — they carry identity and must not die with a scratch block.
+- **A container a FUNCTION builds follows the region its CALLER decided
+  (v0.1.464, C backend).** A container's region lives in its type, and a
+  function's body used to allocate through the region variable in its own
+  scheme, which the call site never bound: the type said the caller's
+  block, the value went to the default region. The region is now passed
+  IN, as leading `__lang_region*` arguments on the uncurried `__direct`
+  twin, and a call site hands over what it bound — a block it is inside,
+  one of its own region parameters (which is how a chain reaches a body
+  three calls down), or the default region where nothing decided.
+
+  What this is NOT is the callee asking what region is current at run
+  time. That was tried in v0.1.453 and is unsound for a chain of calls,
+  because the body and the call site hold different copies of the
+  variable; m3d could not render a second frame, and v0.1.456 withdrew it.
+  Passing it in makes the type and the value say the same thing, so
+  carrying the result out of the block stays the type error it already
+  was.
+
+  **Per backend**: the C backend passes it. The **LLVM** backend does not
+  yet — it has no uncurried twin to hang the argument on, so its
+  `region_reclaim_check` leg asserts the old behaviour and goes red when
+  it is taught. **Wasm** needs nothing: it has one bump for every region,
+  and what keeps a callee's allocation alive there is the high-water mark
+  (Q-132), not a region argument. **RV32I** needs nothing either: it does
+  not reclaim regions at all. Those two are not "unimplemented" — there is
+  no argument for them to pass.
 - **Closure environments follow the current region too (v0.1.290).** They
   used to be allocated in the default (program-lifetime) region for one
   reason: a closure's env is a type-erased `void*`, so nothing could copy
