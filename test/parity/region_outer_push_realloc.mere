@@ -1,0 +1,35 @@
+// THE OTHER HALF OF Q-132, and the half a guard had an EXEMPTION for.
+//
+// The Wasm backend used to refuse a `vec_push` into a container from outside the block
+// -- but only when the element was boxed, on the ground that an unboxed element is an
+// immediate and cannot dangle. The element cannot. THE BUFFER CAN: `vec_push` grows a
+// full container by allocating a new buffer, that allocation comes off the same bump
+// every region shares, and the block's exit rolled it back. So a container of plain
+// ints, pushed to from inside a block, came out holding whatever the next block wrote.
+// Wasm printed -7 here where the interpreter and C print 1199.
+//
+// The exemption was true about the value and false about the container, which is why
+// this case pushes ENOUGH TIMES TO REALLOCATE. Four pushes would have passed.
+//
+// It is a separate program from region_chain_callee_alloc.mere because it is a separate
+// mechanism -- that one is about the value being stored, this one about the buffer the
+// store moves -- and one program that happens to exercise both would report a fix to
+// either as a fix to the case.
+let cache = vec_new ();
+let _ = vec_push cache 1;
+
+let _ = region A {
+  let rec go = fn (i: int) ->
+    if i >= 200 then 0 else let _ = vec_push cache (i + 1000) in go (i + 1) in
+  go 0
+};
+
+// Overwrite whatever A used, with a value nothing above could produce.
+let _ = region B {
+  let junk = vec_new () in
+  let rec f = fn (i: int) -> if i >= 400 then 0 else let _ = vec_push junk (0 - 7) in f (i + 1) in
+  f 0
+};
+
+let _ = print_int (vec_len cache);
+print_int (vec_get cache 200)
