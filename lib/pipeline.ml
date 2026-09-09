@@ -390,7 +390,11 @@ let process_decls eval_env type_env decls =
          eval_env := List.fold_left (fun acc (n, v) -> (n, ref v) :: acc)
                        !eval_env val_bindings);
       type_env := List.fold_left (fun acc (n, ty) ->
-        (n, top_let_scheme outer_env value ty) :: acc) outer_env bindings
+        let sch = top_let_scheme outer_env value ty in
+        (* Q-127: the backends cannot read a region out of a fn_decl's types -- Monomorph
+           erases it. They read it out of the scheme, by source name. *)
+        Typer.record_top_scheme n sch;
+        (n, sch) :: acc) outer_env bindings
     | Ast.Top_let_rec bindings ->
       List.iter (fun (n, value) ->
         warn_reserved_name value.Ast.loc n) bindings;
@@ -414,6 +418,7 @@ let process_decls eval_env type_env decls =
       eval_env := env_eval;
       type_env := List.fold_left2 (fun acc (n, _) a ->
         let sch = Typer.generalize outer_env a in
+        Typer.record_top_scheme n sch;
         (n, sch) :: acc
       ) outer_env bindings alphas
     | Ast.Top_type (name, params, variants) ->
@@ -515,7 +520,11 @@ let type_of s =
           let t = infer_top_let outer_env value in
           Typer.check_pattern pat t) in
       type_env := List.fold_left (fun acc (n, ty) ->
-        (n, top_let_scheme outer_env value ty) :: acc) outer_env bindings;
+        let sch = top_let_scheme outer_env value ty in
+        (* Q-127: the backends cannot read a region out of a fn_decl's types -- Monomorph
+           erases it. They read it out of the scheme, by source name. *)
+        Typer.record_top_scheme n sch;
+        (n, sch) :: acc) outer_env bindings;
       eval_env := !eval_env  (* unused *)
     | Ast.Top_let_rec bindings ->
       List.iter (fun (n, value) ->
@@ -532,6 +541,7 @@ let type_of s =
       ) bindings alphas;
       type_env := List.fold_left2 (fun acc (n, _) a ->
         let sch = Typer.generalize outer_env a in
+        Typer.record_top_scheme n sch;
         (n, sch) :: acc
       ) outer_env bindings alphas
     | Ast.Top_type (name, params, variants) ->
@@ -597,7 +607,11 @@ let region_param_report ?base_dir ?(search_paths = []) s =
           let t = infer_top_let outer_env value in
           Typer.check_pattern pat t) in
       type_env := List.fold_left (fun acc (n, ty) ->
-        (n, top_let_scheme outer_env value ty) :: acc) outer_env bindings
+        let sch = top_let_scheme outer_env value ty in
+        (* Q-127: the backends cannot read a region out of a fn_decl's types -- Monomorph
+           erases it. They read it out of the scheme, by source name. *)
+        Typer.record_top_scheme n sch;
+        (n, sch) :: acc) outer_env bindings
     | Ast.Top_let_rec bindings ->
       let outer_env = !type_env in
       let alphas =
@@ -608,7 +622,9 @@ let region_param_report ?base_dir ?(search_paths = []) s =
         let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
         Typer.unify value.Ast.loc alpha t) bindings alphas;
       type_env := List.fold_left2 (fun acc (n, _) a ->
-        (n, Typer.generalize outer_env a) :: acc) outer_env bindings alphas
+        let sch = Typer.generalize outer_env a in
+        Typer.record_top_scheme n sch;
+        (n, sch) :: acc) outer_env bindings alphas
     | Ast.Top_type (name, params, variants) -> Typer.register_type name params variants
     | Ast.Top_record (name, params, fields) -> Typer.register_record name params fields
     | Ast.Top_view (name, region, fields) -> Typer.register_view name region fields
@@ -751,6 +767,15 @@ let region_param_report ?base_dir ?(search_paths = []) s =
      cannot tell them apart passes on a binding that binds nothing. This is last
      because it LINKS variables -- nothing above may run after it. *)
   Buffer.add_string buf (Printf.sprintf "#bound %d\n" (Typer.bind_region_params ()));
+  (* And the same question asked the way the BACKENDS will ask it: by source name, out of
+     the scheme, because a fn_decl's types have had their regions erased by then. If these
+     two disagree the backends are reading a different answer from the one measured here. *)
+  Buffer.add_string buf
+    (Printf.sprintf "#byname %d\n"
+       (List.length
+          (List.filter (fun (n, _) ->
+               not (List.mem n base_names) && Typer.region_params_for n <> [])
+             (List.rev !type_env))));
   Buffer.add_string buf
     (Printf.sprintf "# %d region-parameterised, %d ok, %d value-used, %d partial\n"
        !total !ok !vused !partial);

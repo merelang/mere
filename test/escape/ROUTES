@@ -94,3 +94,4 @@ scalar_out           SAFE   ACCEPT    ACCEPT      -           -
 recursive_type       SAFE   ACCEPT    ACCEPT      -           -
 fn_over_carry        SAFE   ACCEPT    ACCEPT      ll,w,rv     -
 callee_alloc_chain   SAFE   ACCEPT    ACCEPT      -           Q-132
+callee_built_into_vec GATED  REJECT    REJECT      -           Q-127
