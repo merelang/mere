@@ -509,11 +509,10 @@ let type_of s =
       (* Pattern variables belong to this binding — see Typer's Let case. *)
       let bindings =
         Typer.enter_level (fun () ->
-          let t = Typer.infer outer_env value in
+          let t = infer_top_let outer_env value in
           Typer.check_pattern pat t) in
       type_env := List.fold_left (fun acc (n, ty) ->
-        let sch = Typer.generalize outer_env ty in
-        (n, sch) :: acc) outer_env bindings;
+        (n, top_let_scheme outer_env value ty) :: acc) outer_env bindings;
       eval_env := !eval_env  (* unused *)
     | Ast.Top_let_rec bindings ->
       List.iter (fun (n, value) ->

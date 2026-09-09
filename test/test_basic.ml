@@ -7036,17 +7036,13 @@ let () =
   in
   assert_no_contains "inner-lift: sibling helper's nested-fn locals don't leak into caller"
     c_nested_helper "long long hv, long long k)";
-  (* Q-127: A CONTAINER ALLOCATED WHERE NO REGION IS OPEN REACHES FOR THE CURRENT ONE,
-     which at the top level IS the default arena -- the runtime initialises it there, and
-     the check below says so rather than leaving it implied. The name changed because
-     the same code can now be reached from inside a `region` block through a call, and
-     the right answer there is the block's arena; a call does not change the current
-     region, so one emission serves both. *)
-  assert_contains "vec: C codegen wires vec_new outside region to the current arena"
-    c_src_default_region "mere_vec_int_new(__lang_current_region)";
-  assert_contains "vec: and the current arena starts out as the default one"
-    c_src_default_region
-    "__lang_region* __lang_current_region = &__lang_default_region;";
+  (* An UNDECIDED region is the default arena. Q-127 made it the runtime CURRENT arena
+     for a while, on the argument that a call does not change the current region -- see
+     the note on `resolve_regions_ty`, and m3d, which segfaulted from the second frame
+     because a body and its call site hold different copies of the variable and only one
+     of them was bound. *)
+  assert_contains "vec: C codegen wires vec_new outside region to the default arena"
+    c_src_default_region "mere_vec_int_new((&__lang_default_region))";
   assert_contains "vec: C codegen routes vec_push to runtime helper"
     c_src_default_region "mere_vec_int_push";
   assert_contains "vec: C codegen routes vec_len to runtime helper"
@@ -14803,25 +14799,46 @@ let () =
     (let c = lib_c "let f = fn (n: int) ->\n  let v = vec_new () in\n  let _ = vec_push v n in vec_len v;\n0" in
      if has c "mere_vec_int_new(__lang_current_region)" then "current" else "default")
     "current";
-  (* Q-127 CLOSED THE GAP BETWEEN THE TWO MODES. This used to be the other half of the
-     pair above: lib mode moved a function's containers to the current region and a
-     plain program did not, which is precisely why a `region` block around a call
-     reclaimed nothing. Both now reach for the current region, because the container is
-     allocated DURING THE CALL and that is the region the caller is standing in. In a
-     plain program with no region block, the current region is the default one, so the
-     old claim still holds where it was true -- and it is checked by the pair below
-     rather than by a name that no longer distinguishes the two modes. *)
-  check "v0.1.311 + Q-127: a function's containers follow the caller in both modes"
+  (* ...AND THAT IS ONLY SAFE BECAUSE THE OTHER HALF IS A TYPE ERROR (v0.1.455). Sending
+     a call's containers to the call's arena needs "none of them outlives the call" to be
+     enforced, and until then a container stored into module state read back garbage. An
+     exported function's body is typed inside the call's region, so the store is refused
+     by name. The pair is checked end to end in scripts/lib_check.sh; this is the
+     emitter's half. *)
+  check "v0.1.455: and a container that would outlive the call is refused"
+    (let saved = !Codegen_c.lib_mode in
+     Codegen_c.lib_mode := true;
+     let r =
+       try
+         let src =
+           "let store = vec_new ();\n            let build = fn (n: int) -> let v = vec_new () in let _ = vec_push v n in v;\n            let keep = fn (n: int) -> let _ = vec_push store (build n) in vec_len store;\n0" in
+         (* Through Pipeline, not `Typer.infer` directly: the boundary wrap lives in
+            `Pipeline.infer_top_let`, which is what every backend goes through. *)
+         let _ = Pipeline.infer_program src in
+         "accepted"
+       with Typer.Type_error (_, m) ->
+         let has_sub sub =
+           let n = String.length sub and l = String.length m in
+           let rec go i = i + n <= l && (String.sub m i n = sub || go (i + 1)) in go 0 in
+         if has_sub "across the library boundary" && has_sub "store" then "refused"
+         else "refused for another reason"
+     in
+     Codegen_c.lib_mode := saved; r)
+    "refused";
+  (* THE TWO MODES STILL DIFFER, and Q-127 did not change that. A plain program's
+     function-body container goes to the default region: a body and its call site hold
+     different copies of the region variable, and only the call site's is bound, so the
+     body has nothing to allocate into but the default arena. Making it reach for the
+     RUNTIME current one instead is what m3d's segfault ruled out. *)
+  check "v0.1.311: without --lib, a function's containers stay in the default region"
     (let c =
        let prog = Pipeline.parse_program
          "let f = fn (n: int) ->\n  let v = vec_new () in\n  let _ = vec_push v n in vec_len v;\nf 1" in
        let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
        Codegen_c.emit_program ~main_ty prog
      in
-     Printf.sprintf "%b %b"
-       (has c "mere_vec_int_new(__lang_current_region)")
-       (has c "__lang_region* __lang_current_region = &__lang_default_region;"))
-    "true true";
+     if has c "mere_vec_int_new((&__lang_default_region))" then "default" else "moved")
+    "default";
   check "v0.1.312: init is re-armable (a flag, not pthread_once)"
     (if has lib_demo "static int __mere_lib_live = 0;"
         && not (has lib_demo "pthread_once")
