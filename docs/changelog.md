@@ -4,6 +4,38 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.461 — 2026-09-09
+
+**A correction to v0.1.460's gate, and the thing it got wrong is the oldest one in the
+book: its known-failure list was a photograph of this machine.**
+
+`region_params_check` sweeps `examples/` and requires every program that does not
+type-check to be on a list, by name, so that a newly-broken example cannot quietly
+replace a previously-broken one. The list was written from what failed here. Three
+`http_*` examples import `github.com/284km/mere-markdown/...`, which resolves out of
+`.mere_modules/` — git-ignored, populated by `mere install`, **present on this machine
+and absent on the runner**. Green here, red on CI, naming three files.
+
+**Failures are classified by REASON now.** An unresolvable import is a fact about the
+checkout, so it is skipped and counted; anything else is a fact about the program and
+must be on the list, which now holds only the four deliberate ones (a type error, two
+lexer limits, a parse limit). `stream_lines`, which imports `contrib/` relative to the
+repo root, stops needing a name — it is an import skip like the others.
+
+Verified by reproducing the runner rather than by reasoning about it: with
+`.mere_modules/` moved aside the gate still passes and reports **283 examples, 4 skipped,
+102 functions**, against **286, 1, 110** with it. Both are true; neither is a failure.
+
+**And an unexpected failure now prints the compiler's first line.** "stopped
+type-checking" with no reason cost a thirty-three-minute CI round trip to ask what the
+reason was — a refusal has to name what it refused, and that applies to a gate's refusals
+too.
+
+The measurement itself is unchanged: nothing is `value-used` or `partial` in either
+corpus.
+
+---
+
 ## v0.1.460 — 2026-09-09
 
 **Q-127 stage 1: the size of the change, measured instead of guessed.** Nothing compiles
