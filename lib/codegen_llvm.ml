@@ -6387,12 +6387,58 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | _ -> unsupported e.Ast.loc "anonymous fn has non-arrow type"
     in
     let raw_fvs = free_vars fn_body [param] in
+    (* THE CAPTURES OF A LIFTED FUNCTION THIS CLOSURE CALLS HAVE TO RIDE IN ITS ENV TOO,
+       or the call inside the adapter names values the adapter does not have --
+       `use of undefined value '%v'`, invalid IR, so the program does not build at all.
+       The C backend has had this since Phase 45; this backend never did, and it took a
+       closure written inside a `region` block calling an inner function that allocates
+       to produce one. Both halves matter: the lifted function may be FREE in this body
+       or DEFINED INSIDE it, and its captures include the region a lifted body is given
+       (Q-131), which is not a variable and so is typed here rather than looked up.
+
+       A region the body itself OPENS is excluded: the closure value is built outside
+       that block, where the region does not exist yet. *)
+    let is_region_cap n =
+      String.length n > 9 && String.sub n 0 9 = "__region_" in
+    let lifted_caps =
+      let acc = ref [] in
+      let add n =
+        match Hashtbl.find_opt inner_lifts_llvm n with
+        | Some li ->
+          List.iter (fun (cn, _) ->
+            if not (List.mem cn !acc) then acc := !acc @ [cn]) li.captures
+        | None -> ()
+      in
+      let rec go (e : Ast.expr) =
+        (match e.Ast.node with
+         | Ast.Var n -> add n
+         | Ast.Let (pat, _, _) ->
+           (match pat.Ast.pnode with Ast.P_var n -> add n | _ -> ())
+         | Ast.Let_rec (bs, _) -> List.iter (fun (n, _) -> add n) bs
+         | _ -> ());
+        List.iter go (Ast.children e)
+      in
+      go fn_body;
+      List.filter (fun n ->
+        if is_region_cap n then
+          List.mem_assoc (String.sub n 9 (String.length n - 9)) !current_regions
+        else n <> param && List.mem_assoc n !current_var_types) !acc
+    in
+    let seen = Hashtbl.create 8 in
     let fvs =
-      List.filter (fun n -> List.mem_assoc n !current_var_types) raw_fvs
+      List.filter (fun n ->
+        (List.mem_assoc n !current_var_types || is_region_cap n)
+        && not (Hashtbl.mem seen n)
+        && (Hashtbl.add seen n (); true))
+        (raw_fvs @ lifted_caps)
     in
     let captures =
       List.map (fun fv ->
         let cty =
+          if is_region_cap fv then
+            Ast.TyRef (Ast.BorrowedRead,
+                       String.sub fv 9 (String.length fv - 9), Ast.TyUnit)
+          else
           match List.assoc_opt fv !current_var_types with
           | Some t when ty_is_concrete t -> Ast.walk t
           | _ ->

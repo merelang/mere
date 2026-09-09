@@ -2450,10 +2450,71 @@ let rec emit_expr (e : Ast.expr) : string =
         | Some li -> List.map fst li.captures
         | None -> []) raw_fvs
     in
+    (* Q-131: A REGION CAPTURE IS NOT A VARIABLE, and the filter below is about
+       variables. `lifted_callee_caps` correctly pulls `__region_R` in from a lifted
+       callee -- and then `List.mem_assoc n !current_var_types` dropped it again,
+       because no binding of that name exists. The call inside this closure still
+       passed the name, so the adapter referred to a C local it did not have:
+       `use of undeclared identifier '__region_SC'`, and the program did not build.
+
+       Present since v0.1.453, and it took the first program to write a closure inside
+       a `region` block that calls an inner function which allocates -- m3d, putting a
+       block around its frame's working set. `regions_needed_by` cannot see this shape
+       either: it reads the closure's own TYPES, and a closure that merely calls the
+       allocating function need not mention the region in any of them. *)
+    let is_region_cap n =
+      String.length n > 9 && String.sub n 0 9 = "__region_" in
+    (* AND THE LIFTED FUNCTION MAY BE DEFINED INSIDE THIS CLOSURE, not free in it, which
+       is the shape m3d hit: the walk callback contains `let rec prims = ..`, `prims` is
+       lifted out with `__region_SC` prepended, and the call to it sits in the closure's
+       own body. `lifted_callee_caps` above only looks at FREE names, so it does not see
+       it; `regions_needed_by` (the lifted-fn path) would not either, since it reads
+       types and this closure's types need not mention the region.
+
+       So: every name this body mentions or binds that has been lifted, and the regions
+       its captures carry. Names, not types -- the question is which arguments the call
+       sites in here will emit, and that is decided by the callee's capture list. *)
+    let inner_lift_region_caps =
+      let acc = ref [] in
+      let add n =
+        match Hashtbl.find_opt inner_lifts n with
+        | Some li ->
+          List.iter (fun (cn, _) ->
+            if is_region_cap cn && not (List.mem cn !acc) then acc := cn :: !acc)
+            li.captures
+        | None -> ()
+      in
+      let rec go (e : Ast.expr) =
+        (match e.Ast.node with
+         | Ast.Var n -> add n
+         | Ast.Let (pat, _, _) ->
+           (match pat.Ast.pnode with Ast.P_var n -> add n | _ -> ())
+         | Ast.Let_rec (bs, _) -> List.iter (fun (n, _) -> add n) bs
+         | _ -> ());
+        List.iter go (Ast.children e)
+      in
+      go fn_body; List.rev !acc
+    in
+    (* AND ONLY REGIONS THAT EXIST WHERE THIS CLOSURE IS BUILT. A body that OPENS a block
+       mentions lifted functions needing that block's region, and the closure value is
+       constructed outside it -- `one_frame_into` is exactly that: its body contains the
+       `region SC { }`, and the curried closure form of it is built at the top level,
+       where SC does not exist. Capturing it there emitted
+       `__env->__region_SC = __region_SC;` with nothing to read.
+       In scope means what `region_var_of` means by it: a block open around this point,
+       or a region already arriving as a capture. *)
+    let region_in_scope cn =
+      let r = String.sub cn 9 (String.length cn - 9) in
+      List.mem r !region_scope || List.mem r !captured_regions
+    in
+    let lifted_callee_caps =
+      List.filter (fun n -> not (is_region_cap n) || region_in_scope n)
+        (lifted_callee_caps @ inner_lift_region_caps)
+    in
     let seen = Hashtbl.create 8 in
     let fvs =
       List.filter (fun n ->
-        List.mem_assoc n !current_var_types
+        (List.mem_assoc n !current_var_types || is_region_cap n)
         && not (Hashtbl.mem seen n)
         && (Hashtbl.add seen n (); true))
         (raw_fvs @ lifted_callee_caps)
@@ -2462,9 +2523,13 @@ let rec emit_expr (e : Ast.expr) : string =
        fall back to scanning Var nodes in the body (which may be
        polymorphic if the host fn was generalized). *)
     let cap_ty_of fv =
-      match List.assoc_opt fv !current_var_types with
-      | Some t when ty_is_concrete t -> Ast.walk t
-      | _ -> lookup_var_ty fn_body fv
+      if is_region_cap fv then
+        Ast.TyRef (Ast.BorrowedRead,
+                   String.sub fv 9 (String.length fv - 9), Ast.TyUnit)
+      else
+        match List.assoc_opt fv !current_var_types with
+        | Some t when ty_is_concrete t -> Ast.walk t
+        | _ -> lookup_var_ty fn_body fv
     in
     let captures = List.map (fun fv -> (fv, cap_ty_of fv)) fvs in
     let adapter_name, env_name = fresh_anon_names () in
@@ -6131,12 +6196,21 @@ let emit_closure_adapter (ce : closure_emission) : string =
   in
   let prev = !current_env_subst in
   current_env_subst := env_subst;
+  (* Q-131: the regions this closure carries in its env, so `region_var_of` answers with
+     `(__env_self->__region_R)` rather than a local this adapter does not have. And no
+     region PARAMETERS: an adapter declares none (Q-127). *)
   let var_bindings =
     ce.ce_env_fields @ [(ce.ce_param, ce.ce_param_ty)]
   in
+  let prev_caps = !captured_regions in
+  let prev_rps = !current_region_params in
+  captured_regions := regions_of_captures ce.ce_env_fields @ prev_caps;
+  current_region_params := [];
   let body_c =
-    with_var_types var_bindings (fun () ->
-      with_expected_ty ce.ce_return_ty (fun () -> emit_expr ce.ce_body))
+    Fun.protect ~finally:(fun () ->
+        captured_regions := prev_caps; current_region_params := prev_rps) (fun () ->
+      with_var_types var_bindings (fun () ->
+        with_expected_ty ce.ce_return_ty (fun () -> emit_expr ce.ce_body)))
   in
   current_env_subst := prev;
   let env_unpack =
