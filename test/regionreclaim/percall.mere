@@ -1,0 +1,39 @@
+// THE HALF OF Q-127 THAT IS STILL OPEN, as a measurement rather than a paragraph.
+//
+// pertree.mere asks whether a `region` block returns memory. It does -- for what is
+// written inside it, and for the variants and strings a callee builds, which come from
+// the current region. This file asks the other question: a CONTAINER built by a function
+// and returned. Only a scalar leaves the block, exactly as in pertree, so an
+// implementation that reclaims holds one vector however many iterations run.
+//
+// C and LLVM hold all of them. A container's region lives in its TYPE, and a function's
+// body allocates through the region variable in its own scheme -- which the call site
+// does not bind, because the body and the call site hold different copies. v0.1.453
+// tried to close that by settling the body's copy on the runtime current region; m3d
+// segfaulted from its second frame and v0.1.456 withdrew it. Making the body allocate
+// where its type says needs the region passed IN, as a hidden argument, and that does
+// not exist yet.
+//
+// Wasm reclaims it, and not by being cleverer: it has one bump for every region, the
+// vector is not stored into anything older than the block, so nothing raises the
+// high-water mark and the rollback takes it. Right answer, different reason -- which is
+// why the gate asserts the three legs separately instead of asserting they agree.
+//
+// Usage: percall <iterations> <elements>
+let build = fn (n: int) ->
+  let v = vec_new () in
+  let rec fill = fn (i: int) -> if i >= n then 0 else let _ = vec_push v i in fill (i + 1) in
+  let _ = fill 0 in
+  v;
+
+let argv = args ();
+let n = match argv with | Cons (a, _) -> int_of_str a | Nil -> 40;
+let d = match argv with | Cons (_, Cons (b, _)) -> int_of_str b | Nil -> 100000;
+
+let rec go = fn (i: int) -> fn (acc: int) ->
+  if i == 0 then acc
+  else
+    let one = region R { vec_len (build d) } in
+    go (i - 1) (acc + one);
+let _ = print (str_of_int (go n 0)) in
+exit 0

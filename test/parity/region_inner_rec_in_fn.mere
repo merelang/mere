@@ -1,0 +1,30 @@
+// A `let rec` INSIDE A REGION BLOCK INSIDE A FUNCTION, which the LLVM backend emitted
+// as invalid IR for five versions.
+//
+// v0.1.453 gave a lifted inner function its enclosing region as a leading parameter, so
+// that a body called from a nested block allocates in the block it was WRITTEN in rather
+// than the one that happens to be current (Q-131). The parameter is named `__region_R`,
+// and on the C backend that name is also what the block's arena local is called -- so
+// emitting the capture's own name as the argument happened to name the right thing.
+//
+// LLVM names the block's arena `%t7`, or whatever `fresh_reg` produced. Emitting
+// `%__region_R` there produced `use of undefined value` -- INVALID IR, so this program
+// did not build at all on that backend while building and running fine on the other
+// three. `mere -ll` still exited 0; only the assembler said anything, and only if
+// somebody ran it.
+//
+// The existing region/inner-fn parity cases did not catch it because their blocks are at
+// the top level, where the two naming conventions coincide. This one puts the block
+// inside a function, which is the shape that separates them. Found by poisoning
+// region_reclaim_check -- the poison was supposed to test the gate, and indicted the
+// backend instead.
+let run = fn (d: int) ->
+  region R {
+    let v = vec_new () in
+    let rec f = fn (j: int) -> if j >= d then 0 else let _ = vec_push v j in f (j + 1) in
+    let _ = f 0 in
+    vec_len v
+  };
+
+let _ = print_int (run 5);
+print_int (run 12)
