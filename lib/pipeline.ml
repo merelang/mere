@@ -661,6 +661,65 @@ let region_param_report ?base_dir ?(search_paths = []) s =
     | _ -> ()) prog.decls;
   value prog.main;
 
+  (* WHAT EACH CALL SITE WOULD PASS. The report above says which functions would take a
+     hidden region argument; this says whether the value to pass is actually recoverable
+     at every call, which is the mechanism the change turns on. Three answers:
+       R          a `region R { }` the call is inside -- pass `__region_R`
+       ?          nobody decided -- pass the default region, which is today's behaviour
+       ^<caller>  the ENCLOSING function's own region parameter: pass it straight down.
+                  This is how a chain propagates, and nothing here implements chains --
+                  unification did it, because the inner call instantiated the callee at
+                  the caller's own variable. *)
+  let sites = Buffer.create 256 in
+  let n_named = ref 0 and n_undecided = ref 0 and n_forwarded = ref 0 in
+  let render caller_params t =
+    match Ast.walk t with
+    | Ast.TyRef (_, r, Ast.TyUnit) -> incr n_named; r
+    | Ast.TyVar v when List.mem v.Ast.id caller_params -> incr n_forwarded; "^" ^ "param"
+    | Ast.TyVar _ -> incr n_undecided; "?"
+    | other -> incr n_undecided; Ast.pp_ty other
+  in
+  let rec walk_calls caller caller_params (e : Ast.expr) : unit =
+    (match e.Ast.node with
+     | Ast.App _ ->
+       let rec head ex acc =
+         match ex.Ast.node with
+         | Ast.App (f, a) -> head f (a :: acc)
+         | Ast.Var n -> Some (n, ex, acc)
+         | _ -> None
+       in
+       (match head e [] with
+        | Some (n, vnode, _) ->
+          (match List.assoc_opt n !type_env, vnode.Ast.ty with
+           | Some sch, Some inst when Typer.scheme_region_params sch <> [] ->
+             let got = Typer.region_args_at sch inst in
+             if got <> [] then
+               Buffer.add_string sites
+                 (Printf.sprintf "@%s -> %s : %s\n" caller n
+                    (String.concat " " (List.map (fun (_, t) -> render caller_params t) got)))
+           | _ -> ())
+        | None -> ())
+     | _ -> ());
+    List.iter (walk_calls caller caller_params) (Ast.children e)
+  in
+  List.iter (fun decl ->
+    match decl with
+    | Ast.Top_let (pat, v) ->
+      let caller =
+        match pat.Ast.pnode with Ast.P_var n -> n | _ -> "<pattern>" in
+      let ps =
+        match List.assoc_opt caller !type_env with
+        | Some sch -> Typer.scheme_region_params sch
+        | None -> [] in
+      walk_calls caller ps v
+    | Ast.Top_let_rec bs ->
+      List.iter (fun (n, v) ->
+        let ps = match List.assoc_opt n !type_env with
+          | Some sch -> Typer.scheme_region_params sch | None -> [] in
+        walk_calls n ps v) bs
+    | _ -> ()) prog.decls;
+  walk_calls "<main>" [] prog.main;
+
   let buf = Buffer.create 1024 in
   let total = ref 0 and ok = ref 0 and vused = ref 0 and partial = ref 0 in
   List.iter (fun (name, (sch : Typer.scheme)) ->
@@ -679,6 +738,10 @@ let region_param_report ?base_dir ?(search_paths = []) s =
           (Printf.sprintf "%s\t%d\t%d\t%s\n" name (List.length rps) arity status)
       end
     end) (List.rev !type_env);
+  Buffer.add_string buf (Buffer.contents sites);
+  Buffer.add_string buf
+    (Printf.sprintf "#sites %d named, %d forwarded, %d undecided\n"
+       !n_named !n_forwarded !n_undecided);
   Buffer.add_string buf
     (Printf.sprintf "# %d region-parameterised, %d ok, %d value-used, %d partial\n"
        !total !ok !vused !partial);
