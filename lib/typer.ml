@@ -515,6 +515,42 @@ let scheme_region_params (sch : scheme) : int list =
   go sch.body;
   List.rev !acc
 
+(* WHAT A CALL SITE WOULD PASS, read off the two types it already has.
+
+   This is the mechanism the rest of Q-127 turns on, so it is worth saying why it needs
+   no side table. `instantiate_with_map` builds a fresh copy of every quantified variable
+   at each use, and `infer` stores the instantiated type on the `Var` node. So the
+   scheme's body and that node's type have the SAME SHAPE, and walking them in step reads
+   off what each quantified region variable became at this particular call.
+
+   The three answers are the three things a hidden region argument could be: a region
+   NAME (a `region R { }` the call is inside, bound by `bind_instantiated_alloc_regions`),
+   an unlinked VARIABLE (nobody decided; `resolve_regions_ty` will make it the default
+   region), or one of the ENCLOSING function's own quantified variables -- which is the
+   interesting one, because it is how a chain propagates without anyone writing a rule
+   for chains. `let wrap = fn n -> build n` instantiates `build` at `wrap`'s own variable,
+   so reading the call site inside `wrap` gives `wrap`'s parameter. Unification did it.
+
+   That is the difference from v0.1.453, in one line: there the BODY guessed the runtime
+   current region; here the CALL SITE reads what it bound and passes it. *)
+let region_args_at (sch : scheme) (inst : Ast.ty) : (int * Ast.ty) list =
+  let out = ref [] in
+  let rec go s i =
+    match Ast.walk s, Ast.walk i with
+    | Ast.TyVar v, other
+      when List.mem v.Ast.id sch.quantified && Hashtbl.mem alloc_region_ids v.Ast.id ->
+      if not (List.mem_assoc v.Ast.id !out) then out := (v.Ast.id, other) :: !out
+    | Ast.TyArrow (a, b), Ast.TyArrow (a', b') -> go a a'; go b b'
+    | Ast.TyTuple ts, Ast.TyTuple ts' when List.length ts = List.length ts' ->
+      List.iter2 go ts ts'
+    | Ast.TyCon (n, args), Ast.TyCon (n', args')
+      when n = n' && List.length args = List.length args' -> List.iter2 go args args'
+    | Ast.TyRef (_, _, a), Ast.TyRef (_, _, a') -> go a a'
+    | _ -> ()
+  in
+  go sch.body inst;
+  List.rev !out
+
 (* How many arguments a scheme's type takes before it stops being an arrow. A hidden
    region argument can only be passed where the call is SATURATED, so this is what a
    partial application has to be compared against. *)

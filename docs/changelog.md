@@ -4,6 +4,61 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.462 — 2026-09-09
+
+**The mechanism the rest of Q-127 turns on, validated before anything is built on it —
+and it needs no new machinery, because unification already did the hard part.**
+
+The remaining half of Q-127 is closed by passing a function's allocation region in as a
+hidden argument. The question that decides whether that is writable at all is: at a call
+site, what would you pass? `mere --dump-region-params` now answers it, per call:
+
+```
+@wrap -> build : ^param        forward the caller's own region parameter
+@deep -> wrap  : ^param        again, one level out
+@<top> -> deep : ?             no block here -- the default region, which is today
+@<top> -> deep : A             inside `region A { }` -- pass __region_A
+```
+
+**No side table, and no rule for chains.** `instantiate_with_map` makes a fresh copy of
+each quantified variable per use and `infer` stores the instantiated type on the `Var`
+node, so the scheme's body and that node's type have the same shape: walking them in step
+reads off what each region variable became. And `wrap` instantiates `build` at *`wrap`'s
+own* quantified variable, so the call site inside `wrap` reads `wrap`'s parameter. The
+chain propagates because unification propagated it.
+
+That is the whole difference from v0.1.453, in one line: there the BODY guessed the
+runtime current region, which is wrong for a chain and cost three released versions and
+m3d's second frame. Here the CALL SITE reads what it bound and hands it down.
+
+### The numbers, on programs that exist
+
+| | named (a real block) | forwarded (down a chain) | undecided (default region) |
+|---|---|---|---|
+| **m3d** | 8 | **142** | 182 |
+| 286 examples | 0 | 10 | 289 |
+
+m3d is the program that killed v0.1.453, and `Acc.floats` — the function whose allocation
+did it — is in its list with one region parameter and status `ok`. Eight call sites would
+actually change behaviour; 142 exist to carry the answer to them. The examples corpus has
+no named sites at all, because almost none of it opens a `region` block: for most
+programs this change is inert, which the earlier "110 functions, all ok" number could not
+have told you on its own.
+
+`test/regionparams/chain.mere` pins those four lines exactly, and the gate was poisoned by
+inlining one link — the two `^param` lines vanish and it says so.
+
+### And a counting bug in the gate, found by its own new output
+
+The corpus sweep read the first `#` line of the report to get its totals. The report now
+emits `#sites ...` before the summary, so the sweep started counting 289 call sites as 289
+`value-used` functions and printed it without blinking. It reads `^# ` now. A summary line
+will state whatever it is handed.
+
+`dune runtest` 2717 / 0. parity 174 / 0.
+
+---
+
 ## v0.1.461 — 2026-09-09
 
 **A correction to v0.1.460's gate, and the thing it got wrong is the oldest one in the
