@@ -4062,10 +4062,10 @@ and emit_expr (e : Ast.expr) : unit =
           into the enclosing allocation range; the two ranges cannot
           overlap because the first copy sits above everything the
           body allocated);
-       2. escaping STORES are rejected up front (see the guard below):
-          the Wasm backend has no per-container storage yet, so
-          pushing a heap value into an outer container from inside a
-          block would dangle — that is a compile error, not a leak;
+       2. a STORE into a container older than the block stops the release
+          short of it (`$__lang_protect`). This used to be a refusal, and
+          Q-132 is what that refusal missed: a callee's store, and the
+          reallocated buffer behind an unboxed one;
        3. escaping CLOSURES are rejected via the result type and
           extern-callback checks (closure envs allocate in the block).
        Found by the 2048 dogfood: ~8.4 KB of per-move garbage hit the
@@ -4094,11 +4094,30 @@ and emit_expr (e : Ast.expr) : unit =
         "wasm: a region block cannot return a closure, container, or \
          borrow — its storage is reclaimed with the block (the Wasm \
          backend copies out plain values only; see memory-model.md section 3.5)"));
-    (* Guard: no ESCAPING stores / callback registrations inside. A
-       container CREATED inside the block is fine to mutate — its storage
-       dies with the block (and the result-type check above stops it from
-       escaping). What must be rejected is pushing block-allocated heap
-       values into containers from OUTSIDE the block. *)
+    (* Guard: no callback registrations and no handing a block-allocated value
+       to another thread.
+
+       Q-132 TOOK THE STORES OUT OF THIS LIST, and it is worth saying why, because
+       the refusal was right when it was written. It rejected `vec_push` /
+       `vec_set` / `map_set` / `strbuf_push` into a container from OUTSIDE the
+       block, on the stated ground that "the Wasm backend reclaims the whole block
+       on exit and has no per-container storage to copy into". The first half of
+       that sentence is no longer true: a store into a container that predates the
+       block raises a high-water mark and the block does not reclaim past it (see
+       `$__lang_protect`). So the store is sound, and refusing it was refusing a
+       program three other backends run.
+
+       It was also never the whole rule. It only fired on stores it could SEE, and
+       the same store performed by a callee three frames down went through and
+       corrupted memory; and its `elem_boxed` exemption let `vec_push outer <int>`
+       through, where the reallocated BUFFER dangled instead of the element. Both
+       are what Q-132 is. A guard that has to be right about every store in the
+       program cannot be syntactic.
+
+       What stays is what the mark cannot help with: a value handed to ANOTHER
+       THREAD, or registered as a callback the host may run later. Neither is
+       ordered with respect to the block's exit, so not-reclaiming does not make
+       them safe. *)
     let reject loc what =
       raise (Codegen_error (loc,
         Printf.sprintf
@@ -4109,49 +4128,22 @@ and emit_expr (e : Ast.expr) : unit =
              EMITFAIL and made the harness red for a case it had correctly
              refused. Found by the first parity case that stores into an outer
              container from inside a block. *)
-          "unsupported in Wasm codegen subset: %s inside a region block (for a \
-           container created outside the block) — the Wasm backend \
-           reclaims the whole block on exit and has no per-container \
-           storage to copy into (see memory-model.md section 3.5)"
+          "unsupported in Wasm codegen subset: %s inside a region block — the \
+           value would be read after the block, by another thread or by the \
+           host, and neither is ordered with the block's exit. A store into a \
+           container older than the block is fine and no longer refused (Q-132: \
+           the block gives up that part of its range instead); this is not a \
+           store (see memory-model.md section 3.5)"
           what))
     in
-    let local_containers : (string, unit) Hashtbl.t = Hashtbl.create 4 in
     let rec app_spine (ex : Ast.expr) (acc : Ast.expr list) =
       match ex.Ast.node with
       | Ast.App (f, a) -> app_spine f (a :: acc)
       | Ast.Var n -> Some (n, acc)
       | _ -> None
     in
-    let is_local_container (ex : Ast.expr) =
-      match ex.Ast.node with
-      | Ast.Var n -> Hashtbl.mem local_containers n
-      | _ -> false
-    in
-    let elem_boxed (ve : Ast.expr) =
-      match ve.Ast.ty with
-      | Some t ->
-        (match Ast.walk t with
-         | Ast.TyCon (("Vec" | "OwnedVec"), [_; et])
-         | Ast.TyCon (("Vec" | "OwnedVec"), [et]) ->
-           (match Ast.walk et with
-            | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> false
-            | _ -> true)
-         | _ -> true)
-      | None -> true
-    in
     let rec guard (ex : Ast.expr) : unit =
       (match app_spine ex [] with
-       | Some (("vec_push" | "owned_vec_push"), (ve :: _ as args))
-         when List.length args >= 2 ->
-         if not (is_local_container ve) && elem_boxed ve then
-           reject ex.Ast.loc "vec_push of a heap value"
-       | Some ("vec_set", (ve :: _ as args)) when List.length args >= 3 ->
-         if not (is_local_container ve) && elem_boxed ve then
-           reject ex.Ast.loc "vec_set of a heap value"
-       | Some ("map_set", (me :: _ as args)) when List.length args >= 3 ->
-         if not (is_local_container me) then reject ex.Ast.loc "map_set"
-       | Some ("strbuf_push", (be :: _ as args)) when List.length args >= 2 ->
-         if not (is_local_container be) then reject ex.Ast.loc "strbuf_push"
        | Some (("channel_send"), args) when List.length args >= 2 ->
          reject ex.Ast.loc "channel_send"
        | Some ("spawn", args) when List.length args >= 1 ->
@@ -4182,14 +4174,7 @@ and emit_expr (e : Ast.expr) : unit =
        | Ast.App (a, b) -> guard a; guard b
        | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _)
        | Ast.Ref (_, _, a) | Ast.Region_block (_, a) | Ast.Region_loop (_, _, a) -> guard a
-       | Ast.Let (pat, v, b) ->
-         guard v;
-         (match pat.Ast.pnode, app_spine v [] with
-          | Ast.P_var n, Some (("vec_new" | "map_new" | "strbuf_new"
-                                | "owned_vec_new"), _) ->
-            Hashtbl.replace local_containers n ()
-          | _ -> ());
-         guard b
+       | Ast.Let (_, v, b) -> guard v; guard b
        | Ast.With (_, v, b) -> guard v; guard b
        | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> guard v) bs; guard b
        | Ast.If (c, t, f) -> guard c; guard t; guard f
@@ -4216,7 +4201,18 @@ and emit_expr (e : Ast.expr) : unit =
     in
     let saved = !wasm_tail_pos in
     wasm_tail_pos := false;
-    emit_instr "global.get $__lang_bump";      (* mark *)
+    (* Q-132: the mark goes in a LOCAL, not just on the operand stack, because
+       the release is no longer `bump := mark`. It is `bump := max(mark, hwm)`,
+       and the block also has to publish its mark so a store can tell a
+       container that predates it from one it made -- see `$__lang_protect`. *)
+    let mark_slot = fresh_local_i32 () in
+    let outer_mark_slot = fresh_local_i32 () in
+    emit_instr "global.get $__lang_bump";
+    emit_instr (Printf.sprintf "local.set %d" mark_slot);
+    emit_instr "global.get $__lang_block_mark";
+    emit_instr (Printf.sprintf "local.set %d" outer_mark_slot);
+    emit_instr (Printf.sprintf "local.get %d" mark_slot);
+    emit_instr "global.set $__lang_block_mark";
     (* v0.1.414: while any block is open, $mere_vec_push must not extend a
        buffer in place -- the buffer may belong to a container created
        OUTSIDE the block, and the bump it would extend into is rolled back
@@ -4225,11 +4221,21 @@ and emit_expr (e : Ast.expr) : unit =
     emit_instr "i32.const 1";
     emit_instr "i32.add";
     emit_instr "global.set $__lang_region_depth";
-    emit_expr body;                             (* [mark, result] *)
+    emit_expr body;                             (* [result] *)
     if not unboxed then
       emit_instr (Printf.sprintf "call $__mcopy_%s" rtag);  (* copy 1 (above garbage) *)
-    emit_instr "global.set $__rgn_tmp";         (* [mark] *)
-    emit_instr "global.set $__lang_bump";       (* release *)
+    emit_instr "global.set $__rgn_tmp";
+    (* release: back to the mark, unless a store made part of this block
+       reachable from outside it, in which case back to that high-water mark. *)
+    emit_instr "global.get $__lang_hwm";
+    emit_instr (Printf.sprintf "local.get %d" mark_slot);
+    emit_instr "global.get $__lang_hwm";
+    emit_instr (Printf.sprintf "local.get %d" mark_slot);
+    emit_instr "i32.gt_u";
+    emit_instr "select";
+    emit_instr "global.set $__lang_bump";
+    emit_instr (Printf.sprintf "local.get %d" outer_mark_slot);
+    emit_instr "global.set $__lang_block_mark";
     emit_instr "global.get $__lang_region_depth";
     emit_instr "i32.const 1";
     emit_instr "i32.sub";
@@ -5461,6 +5467,39 @@ let emit_copy_fn_wasm (tag : string) (t : Ast.ty) : string =
    str_concat both work on the linear memory. The bump pointer is a
    mutable global; concat advances it after copying the result. *)
 let runtime_helpers = {|
+  ;; Q-132: WHY A REGION BLOCK SOMETIMES CANNOT ROLL THE BUMP ALL THE WAY BACK.
+  ;;
+  ;; Every region in this backend shares ONE bump pointer, so an allocation made
+  ;; anywhere during a block -- by a callee three frames down, with a type that
+  ;; says the DEFAULT region -- sits inside the block's range and the rollback
+  ;; takes it. The C backend has a separate default region and does not lose it;
+  ;; this one had nowhere else to put it, and the value came back as whatever the
+  ;; next block wrote. That was true for a container built by a callee, for a
+  ;; string built by one, and (through the reallocated buffer) for a plain
+  ;; `vec_push` of an int into a container older than the block.
+  ;;
+  ;; There is nowhere else to put it here either. So the block gives up the part
+  ;; of its range that something outside can still reach: a store into a
+  ;; container that PREDATES the block raises a high-water mark to the current
+  ;; bump, and the block's exit rolls back to max(its mark, that mark).
+  ;;
+  ;; Sound because the value being stored, and any buffer the store reallocated,
+  ;; were allocated before this point and so lie below the bump. Conservative
+  ;; because it keeps the block's other garbage too -- which is what the C
+  ;; backend does with a `__heap` value anyway: never frees it. Costs nothing
+  ;; when no block is open (one global compare) and nothing when a block only
+  ;; touches its own containers.
+  ;;
+  ;; `$__lang_block_mark` is the INNERMOST open block's mark, saved and restored
+  ;; per block. A container from an enclosing block reads as older than the inner
+  ;; one and is protected -- conservative in the same direction.
+  (func $__lang_protect (param $c8 i64)
+    (if (i32.and (i32.ne (global.get $__lang_region_depth) (i32.const 0))
+                 (i32.lt_u (i32.wrap_i64 (local.get $c8))
+                           (global.get $__lang_block_mark)))
+      (then
+        (if (i32.gt_u (global.get $__lang_bump) (global.get $__lang_hwm))
+          (then (global.set $__lang_hwm (global.get $__lang_bump)))))))
   ;; byte-safe str: linear-memory layout is [i32 len][len bytes]['\0'].
   ;; A `str` value is the address of byte0; the 4-byte length header sits
   ;; immediately before it (addr-4). NUL-free strings stay C/host-interop
@@ -6772,6 +6811,7 @@ let vec_runtime = {|
                (i32.mul (local.get $len) (i32.const 8)))
       (local.get $x))
     (i32.store offset=4 (local.get $v) (i32.add (local.get $len) (i32.const 1)))
+    (call $__lang_protect (local.get $v8))
     (i64.extend_i32_s (i32.const 0)))
   ;; Q-108: unchecked twins for the range-check versioning pass. The loop that
   ;; calls them checked its whole index range once, before the loop.
@@ -6788,6 +6828,7 @@ let vec_runtime = {|
       (i32.add (i32.load offset=0 (local.get $v))
                (i32.mul (i32.wrap_i64 (local.get $i8)) (i32.const 8)))
       (local.get $x))
+    (call $__lang_protect (local.get $v8))
     (i64.const 0))
   (func $mere_vec_get (param $v8 i64) (param $i8 i64) (result i64)
     (local $len i32) (local $buf i32)
@@ -6831,6 +6872,7 @@ let vec_runtime = {|
     (i64.store
       (i32.add (local.get $buf) (i32.mul (local.get $i) (i32.const 8)))
       (local.get $x))
+    (call $__lang_protect (local.get $v8))
     (i64.extend_i32_s (i32.const 0)))
   ;; Phase 15.7: OwnedVec helpers — in Wasm all values are i32 and the
   ;; bump allocator is also shared, so the runtime representations of Vec
@@ -7646,6 +7688,7 @@ let strbuf_runtime_wasm = {|
         (br $cp2_lp)))
     (i32.store offset=4 (local.get $sb)
       (i32.add (local.get $len) (local.get $slen)))
+    (call $__lang_protect (local.get $sb8))
     (i64.extend_i32_s (i32.const 0)))
   (func $mere_strbuf_to_str (param $sb8 i64) (result i64)
     (local $len i32) (local $out i32) (local $buf i32) (local $i i32)
@@ -7843,6 +7886,7 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
               (i32.add (local.get $values)
                        (i32.mul (local.get $i) (i32.const 8)))
               (local.get $v))
+            (call $__lang_protect (local.get $m8))
             (return (i64.const 0))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $scan_lp)))
@@ -7887,6 +7931,7 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
       (local.get $v))
     (i32.store offset=8 (local.get $m)
       (i32.add (local.get $len) (i32.const 1)))
+    (call $__lang_protect (local.get $m8))
     (i64.const 0))
   (func $mere_map_%s_get (param $m8 i64) (param $k i64) (result i64)
     (local $m i32)
@@ -8200,6 +8245,7 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
                 (local.get $k)))
             (then
               (i64.store (i32.add (local.get $values) (i32.mul (local.get $occ) (i32.const 8))) (local.get $v))
+              (call $__lang_protect (local.get $m8))
               (return (i64.const 0))))))
       (local.set $s (i32.and (i32.add (local.get $s) (i32.const 1)) (local.get $icm1)))
       (br $probe)))
@@ -8265,6 +8311,7 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
     (if (i32.ge_s (i32.mul (i32.load offset=32 (local.get $m)) (i32.const 10))
                   (i32.mul (local.get $idxcap) (i32.const 7)))
       (then (call $mere_map_%s_reindex (local.get $m) (i32.mul (local.get $idxcap) (i32.const 2)))))
+    (call $__lang_protect (local.get $m8))
     (i64.const 0))
   (func $mere_map_%s_get (param $m8 i64) (param $k i64) (result i64)
     (local $m i32)
@@ -11130,6 +11177,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      \  (global $__lang_bump (export \"__lang_bump\") (mut i32) (i32.const %d))\n\
   (global $__rgn_tmp (mut i64) (i64.const 0))\n\
   (global $__lang_region_depth (mut i32) (i32.const 0))\n\
+  (global $__lang_block_mark (mut i32) (i32.const 0))\n\
+  (global $__lang_hwm (mut i32) (i32.const 0))\n\
      \  (global $__lang_char_table i32 (i32.const %d))\n\
      \  (global $__lang_char_table_initialized (mut i32) (i32.const 0))\n\
      \  (global $__lang_fail_flag (mut i32) (i32.const 0))\n\

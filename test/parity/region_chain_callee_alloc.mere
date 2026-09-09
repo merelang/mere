@@ -29,13 +29,14 @@
 // looks absent. ASan is blind to it too: the arena is one live allocation. The value it
 // scribbles is deliberately unmistakable rather than -1.
 //
-// THE WASM COLUMN IS PINNED TO -424242 AND THAT IS A BUG, NOT A LEGITIMATE DIFFERENCE.
-// Wasm has ONE bump pointer for every region, so an allocation made anywhere during a
-// block -- by a callee, three frames down, with a type that says the default region --
-// is inside the block's range and is rolled back with it. The backend's guard rejects
-// escaping stores it can SEE, and it cannot see through a call. Recorded as Q-132, with
-// a HOLE row in test/escape/ROUTES. When Wasm stops answering this way the pin goes
-// stale and this gate says so.
+// WASM ANSWERED -424242 HERE FOR ONE AFTERNOON, and that is why this file has four
+// matching columns rather than three and a pin. Wasm has ONE bump pointer for every
+// region, so an allocation made anywhere during a block -- by a callee, three frames
+// down, with a type that says the default region -- was inside the block's range and
+// was rolled back with it. The backend's guard rejected escaping stores it could SEE
+// and could not see through a call. Recorded as Q-132 and pinned to the wrong answer;
+// the fix (v0.1.458) gave the block a high-water mark, the pin went stale, and parity
+// said so by name. The pin is gone and this case is an ordinary four-way MATCH.
 let cache = vec_new ();
 let leaf = fn (n: int) -> let v = vec_new () in let _ = vec_push v n in v;
 let fill_cache = fn (n: int) -> vec_push cache (leaf n);

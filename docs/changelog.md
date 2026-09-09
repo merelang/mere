@@ -4,6 +4,74 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.458 — 2026-09-09
+
+**Q-132 closed, one day after the witness that found it — and it was twice as big as
+that witness showed.** Every region in the Wasm backend shares ONE bump pointer, so an
+allocation made anywhere during a block is inside the block's range and the rollback
+takes it, whatever the value's type says about where it lives. Three shapes, all
+measured against v0.1.457:
+
+| written as | interp / C | Wasm at v0.1.457 |
+|---|---|---|
+| a callee builds a `Vec` and stores it in an outer container | `700` | `-424242` |
+| a callee builds a **string** and stores it | `v700` | raw memory, pages of it |
+| `vec_push outer <int>` **written inside the block**, past its capacity | `1199` | `-7` |
+
+The third is the one that matters for how this was missed. The backend *did* refuse
+escaping stores — but the refusal was syntactic, so it never saw the first two (the
+store is three frames down, not in the block), and it **exempted unboxed elements** on
+the ground that an int cannot dangle. The int cannot. The **buffer** can: `vec_push`
+grows a full container by allocating, that allocation comes off the same bump, and the
+rollback took it. The exemption was true about the value and false about the container.
+
+### The fix is to stop reclaiming, not to keep refusing
+
+A store into a container that **predates the innermost open block** raises a high-water
+mark to the current bump; the block's exit restores `max(its mark, hwm)`. Sound because
+the value stored, and any buffer the store reallocated, were allocated before that point
+and lie below the bump. Conservative because the block keeps its other garbage too —
+which is exactly what the C backend does with a `__heap` value: never frees it. So this
+makes Wasm agree with the semantics the types already claimed, rather than inventing new
+ones. One global compare when no block is open; nothing for a block that touches only
+its own containers. `region_reclaim` is unchanged: C flat at 2 MB, LLVM flat at 5 MB,
+Wasm inside 64 MiB.
+
+**And the refusal is gone**, because its stated reason — "the backend reclaims the whole
+block on exit and has no per-container storage to copy into" — is no longer true, and
+because a guard that has to be right about every store in the program cannot be
+syntactic. What is still refused is what a mark cannot help with: `channel_send`,
+`spawn`, and closure-registering externs hand the value to another thread or to the
+host, on no schedule ordered with the block's exit.
+
+### Five things the gates said, in the order they said them
+
+1. **`test/parity/region_chain_callee_alloc.wasm.expected` went stale within the day.**
+   It was installed the previous version to pin the wrong answer; parity's reply to the
+   fix was `wasm matches now — delete the stale pin`. Deleted.
+2. **`test/escape/ROUTES` has no open holes again** — `callee_alloc_chain` is promoted
+   from HOLE to SAFE. Its row read ACCEPT everywhere the whole time, which is the lesson
+   kept in the header: when four backends agree on a *verdict*, that is not four
+   backends agreeing.
+3. **Three routes stopped being unreadable on Wasm.** `str_out`, `variant_of_str` and
+   `closure_out` had all been refused by the store guard too, so their `-w` column was
+   recording a subset limit rather than a verdict. The gate caught the stale listings.
+4. **Two parity programs gained a fourth backend**: `region_closure_value_nested` and
+   `region_inner_fn_nested` — the Q-131 witnesses — were Wasm-UNSUP only because of the
+   guard. Wasm's blind spot is 12 of 173, down from 14 of 172.
+5. **A unit test asserted the opposite** and now asserts the store compiles, with the
+   refusal it used to pin re-pointed at `channel_send`, which still needs it.
+
+`test/parity/region_outer_push_realloc.mere` is new and is the third row of that table:
+a separate program from the chain witness because it is a separate mechanism — that one
+is about the value stored, this one about the buffer the store moves. Both were run
+against a build of 5fca98b to confirm they fail there (`-424242`, `-7`) and pass here.
+
+parity 173 passed / 0 failed, no declared divergences. `dune runtest` 2717 / 0.
+escape_check 19 routes, 0 open holes.
+
+---
+
 ## v0.1.457 — 2026-09-09
 
 **The witness this repository did not have — and it found a live bug on its first run.**
