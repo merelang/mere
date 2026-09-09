@@ -1,0 +1,22 @@
+// A `bytebuf_new` WRITTEN INSIDE A REGION BLOCK BELONGS TO THAT BLOCK.
+//
+// It did not. `bytebuf_new` was a plain polymorphic scheme -- unlike `vec_new`,
+// `map_new` and `strbuf_new`, it never bound its region to the block it was written in
+// -- so the marker stayed open and settled on the default region, which is never freed.
+// m3d measured it as row 1 of its Q-10 table and paid for it twice: the render target
+// is allocated once and cleared per frame rather than made per frame, because a
+// `region` around a frame reclaimed none of it.
+//
+// The buffer is read after the block so the value has to be real, and the loop runs the
+// block enough times that the old behaviour is a measurement rather than an opinion:
+// 200 x 4 MB reached 770 MB of peak RSS where one iteration was 5 MB.
+let one = fn (i: int) -> region R {
+  let b = bytebuf_new 0 in
+  let _ = bytebuf_push b 65 in
+  let _ = bytebuf_push b (66 + i) in
+  bytebuf_get b 1
+};
+
+let rec go = fn (k: int) -> fn (acc: int) ->
+  if k <= 0 then acc else go (k - 1) (acc + one k);
+print_int (go 200 0)

@@ -54,7 +54,7 @@ let debug_file : string option ref = ref None
    names are the ONLY external symbols and a host can load two Mere libraries
    without their internals colliding. `lib_stem` prefixes the wrappers
    (`mere_<stem>_<fn>`); the driver sets it from the source filename. *)
-let lib_mode : bool ref = ref false
+let lib_mode = Typer.lib_boundary   (* Q-127: one flag, named in Typer *)
 let lib_stem : string ref = ref "lib"
 
 (* `mere --header` prints the C header for the --lib boundary. The exports are
@@ -68,30 +68,23 @@ let lib_header : string ref = ref ""
    standalone program but must not leak out of a library *)
 let lib_static () = if !lib_mode then "static " else ""
 
-(* v0.1.311: the region a container whose region variable erased to `__heap`
-   is created in. A standalone program pins these to the default region
-   (v0.1.31: a container carries identity and may outlive any block, and the
-   program dies with the process anyway). In lib mode that pin is the leak:
-   the process outlives every call, so each call's containers accumulate in
-   a region nothing reclaims (measured 512 B/call for a small Vec, 1.5 KB/call
-   for a small Map -- 226 MB over 100k calls). The boundary makes every call
-   a transaction -- results are copied out, containers cannot cross -- so
-   `__heap` containers follow the CURRENT region instead: the per-call region
-   during an export call (reclaimed at return), the default region during
-   module init (module state persists).
+(* v0.1.311 + Q-127: WHERE A CONTAINER WHOSE REGION IS `__heap` IS ALLOCATED.
 
-   THAT TRADE HAS A HOLE, AND IT IS OPEN (Q-127). A container the callee built and
-   the caller stored into module state does NOT survive the call: this comment used
-   to claim copy-on-store saved it, and copy-on-store does not copy CONTAINERS --
-   they are shared by identity in this language, so `__mcopy_Vec_<T>` is the identity
-   function by design (it copies the strings and records inside, not the container).
-   For a container created in a NAMED region the compiler refuses the store by name;
-   it cannot here, because `__heap` means the default region during module init and
-   the per-call region during a call, and the escape check reads it as the first.
-   `scripts/lib_check.sh` pins both sides -- that calls stay transactions, and that
-   this store still reads back garbage -- so neither can change unnoticed. *)
-let heap_container_region () =
-  if !lib_mode then "__lang_current_region" else "(&__lang_default_region)"
+   The default region, in every mode. It used to be the CURRENT region in `--lib` mode,
+   because the pin was a 512 B/call leak there -- the process outlives every call, so
+   each call's containers accumulated in a region nothing reclaims (226 MB over 100k
+   calls). Q-127 makes that special case unnecessary and, with it, wrong:
+
+     - a container a CALL builds now carries `__caller`, which is the current region
+       already, so the leak stays fixed by the general rule rather than by a mode;
+     - what is left as `__heap` is a container that belongs to something OUTLIVING the
+       call -- module state, or a pass-through the caller supplied. Sending those to
+       the per-call region is exactly the defect v0.1.452 pinned: stored into module
+       state, one read back garbage after the next call reused the arena.
+
+   So the mode-dependent answer is gone, and the two cases it was conflating are told
+   apart by the type instead. *)
+let heap_container_region () = "(&__lang_default_region)"
 
 (* v0.1.433: which named regions have a C local at the point being emitted.
    A `region R { ... }` binds `__region_R` as a local of the enclosing C
