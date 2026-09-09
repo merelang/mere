@@ -12262,11 +12262,18 @@ let channel_runtime_llvm =
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   (* Q-127: SETTLE EVERY UNDECIDED CONTAINER REGION BEFORE ANYTHING READS ONE.
      A slot can hold a variable up to here, so that a call site inside a `region` block
-     can decide it; what is left means nobody did. An ALLOCATION region nobody decided
-     becomes `__caller` (the runtime current region -- a call does not change it, so
-     inside the callee that is exactly the region open around the call); anything else
-     becomes `__heap`. One rule in `Typer`, rather than eighteen backend patterns that
-     each have to remember what a variable in that slot means. *)
+     can decide it; what is left means nobody did, and it becomes `__heap`.
+
+     IT BECAME `__caller` FOR THREE VERSIONS (v0.1.453-455) -- the runtime current
+     region, on the argument that a call does not change it, so inside the callee that
+     is the region open around the call. False for a CHAIN of calls: the body and the
+     call site hold different copies of the region variable, only the outermost is
+     bound, and lowering the unbound one to the current region put values in an arena
+     no type mentioned. m3d segfaulted from its second frame. Withdrawn in v0.1.456;
+     an undecided allocation region is the default region, as it always was.
+
+     One rule in `Typer`, rather than eighteen backend patterns that each have to
+     remember what a variable in that slot means. *)
   Typer.default_container_regions prog.main;
   List.iter (fun d ->
     match d with
@@ -12474,9 +12481,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      touched; an open ELEMENT type is a genuinely polymorphic value and
      still refused. *)
   (* v0.1.166 + Q-127: this used to be a private copy that closed every open region
-     on `__heap`. It is now the shared pass, which also knows that an ALLOCATION region
-     means the caller's -- keeping one answer for what an open slot means instead of
-     two that only agreed while `__caller` did not exist. *)
+     on `__heap`. It is now the shared pass -- one answer for what an open slot means
+     instead of two that only agreed by accident. (For three versions the shared pass
+     answered `__caller` for allocation regions; v0.1.456 withdrew that and the answer
+     is `__heap` again. The reason to share the pass is unchanged.) *)
   let close_open_regions (e : Ast.expr) : unit =
     Typer.default_container_regions e
   in

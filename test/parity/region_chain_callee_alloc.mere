@@ -1,0 +1,52 @@
+// THE WITNESS THIS REPOSITORY DID NOT HAVE, and three released versions went out
+// without it. v0.1.453 settled an undecided allocation region on the CALLER's -- which
+// the backends lower to the runtime current region -- on the argument that a call does
+// not change the current region, so inside the callee it must be the region open around
+// the call. `dune runtest`, parity, every gate and all 29 dogfood type-checks were green
+// and m3d could not render a second frame. Withdrawn in v0.1.456. Verified: built at
+// 62e1858 (v0.1.455), this program prints 700 on the interpreter and -424242 on C.
+//
+// WHAT SEPARATES THE TWO ANSWERS IS A CHAIN, and the shape below is the smallest one:
+//
+//   * `cache` is a TOP-LEVEL container, so its element region is a monomorphic variable
+//     shared with a global. The call-site rule only binds a callee's QUANTIFIED
+//     allocation regions -- a refinement that exists because binding a shared one
+//     retypes the global (mere-ruby's frame pool was the false positive that found it).
+//     So nothing binds this one.
+//   * `leaf` allocates. Its region reaches `cache`'s through `fill_cache`, so it is that
+//     same unquantified variable, and it stays undecided all the way to codegen.
+//   * `top 700` is the only call written inside `region A { }`. The allocation happens
+//     three frames down, where no region is lexically active.
+//
+// Settled on `__heap` -- what it means today -- the value goes to the default region and
+// survives the block, which is what the interpreter, C and LLVM all print. Settled on
+// the runtime current region it goes into A's arena, `region B` reuses that arena, and
+// the read comes back as whatever B left there. The type says neither: it says `__heap`
+// in both cases, so no escape check can fire. Only running it tells them apart.
+//
+// `region B` is not decoration. An arena is REUSED rather than freed, so without a
+// second block that allocates over it the stale pointer still reads 700 and the bug
+// looks absent. ASan is blind to it too: the arena is one live allocation. The value it
+// scribbles is deliberately unmistakable rather than -1.
+//
+// THE WASM COLUMN IS PINNED TO -424242 AND THAT IS A BUG, NOT A LEGITIMATE DIFFERENCE.
+// Wasm has ONE bump pointer for every region, so an allocation made anywhere during a
+// block -- by a callee, three frames down, with a type that says the default region --
+// is inside the block's range and is rolled back with it. The backend's guard rejects
+// escaping stores it can SEE, and it cannot see through a call. Recorded as Q-132, with
+// a HOLE row in test/escape/ROUTES. When Wasm stops answering this way the pin goes
+// stale and this gate says so.
+let cache = vec_new ();
+let leaf = fn (n: int) -> let v = vec_new () in let _ = vec_push v n in v;
+let fill_cache = fn (n: int) -> vec_push cache (leaf n);
+let mid = fn (n: int) -> fill_cache n;
+let top = fn (n: int) -> mid n;
+
+// Enough pushes to walk past the first chunk of the arena A used.
+let rec scribble = fn (v) -> fn (i: int) ->
+  if i >= 4096 then 0 else let _ = vec_push v (0 - 424242) in scribble v (i + 1);
+
+let _ = region A { top 700 };
+let _ = region B { let junk = vec_new () in scribble junk 0 };
+
+print_int (vec_get (vec_get cache 0) 0)

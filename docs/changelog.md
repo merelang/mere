@@ -4,6 +4,74 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.457 — 2026-09-09
+
+**The witness this repository did not have — and it found a live bug on its first run.**
+v0.1.456's lesson was that three released versions shipped a memory-safety change whose
+only witness lived in another repository. `dune runtest`, parity, every gate and all 29
+dogfood type-checks were green while m3d could not render a second frame. The obvious
+follow-up is not a note; it is the program.
+
+`test/parity/region_chain_callee_alloc.mere` is that program, and it is small:
+
+```
+let cache = vec_new ();                                 -- top-level, so its region
+let leaf = fn (n: int) -> .. vec_new () ..;             --   variable is not quantified
+let fill_cache = fn (n: int) -> vec_push cache (leaf n);
+let mid = fn (n: int) -> fill_cache n;
+let top = fn (n: int) -> mid n;
+let _ = region A { top 700 };                           -- the block holds ONE call
+let _ = region B { .. 4096 pushes of -424242 .. };      -- reuse A's arena
+print_int (vec_get (vec_get cache 0) 0)
+```
+
+The allocation happens three frames below the block, where no region is lexically
+active, and it reaches a container that outlives the block. **Built at 62e1858
+(v0.1.455) this prints 700 on the interpreter and -424242 on C** — the value the second
+block scribbled, read through a pointer into the first block's reclaimed arena. At HEAD
+both print 700. The type says `__heap` either way, so no escape check can fire on it;
+only running it separates the two answers, which is exactly why nothing here separated
+them for three versions.
+
+`region B` is not decoration. An arena is REUSED rather than freed, so with only one
+block the stale pointer still reads 700 and the bug looks absent — and ASan is blind to
+it, because the arena is one live allocation.
+
+### And Wasm answers -424242 today. That is Q-132.
+
+The Wasm backend has **one bump pointer for every region**, so an allocation made
+anywhere during a block — by a callee, three frames down, with a type that says the
+default region — sits inside the block's range and is rolled back with it. The backend
+does reject escaping stores, loudly and by name, but its guard reads the block's own
+body: **it cannot see an escape a callee performs.**
+
+Not fixed here, because a fix is either per-region storage in Wasm or a call-graph-aware
+guard, and both are a slice of their own. It is PINNED twice instead, in the two places
+that can each detect it being fixed:
+
+- `test/parity/region_chain_callee_alloc.wasm.expected` holds `-424242` exactly. Any
+  other output is a DIFF, and the right output makes the pin stale, which parity reports
+  as a failure telling you to delete it.
+- `test/escape/ROUTES` gains `callee_alloc_chain HOLE ACCEPT ACCEPT - Q-132` — **the
+  first open hole that table has held.** It is unlike the others: the row reads ACCEPT
+  everywhere because the TYPE rule is right (nothing escapes, on the reading the types
+  have) and three of four backends implement that reading. The hole is in one backend's
+  storage model, which a verdict column cannot show. The header now says so.
+
+### Five comments that claimed the withdrawn behaviour
+
+`emit_program` in all four compiled backends said an undecided allocation region "becomes
+`__caller` (the runtime current region ...)". It does not, since v0.1.456. So did the
+shared-pass note in `codegen_llvm` and the Q-127 note in `test_basic`. All five now state
+what the code does and, briefly, what it did and why that was withdrawn — a comment
+describing behaviour the code no longer has is the failure mode m3d's own
+"this would stop compiling" note had just been caught in.
+
+parity 172 passed / 0 failed (one declared divergence: wasm/region_chain_callee_alloc).
+`dune runtest` 2715 / 0. escape_check 19 routes, 1 open hole.
+
+---
+
 ## v0.1.456 — 2026-09-09
 
 **A CORRECTION to v0.1.453, and the claim it withdraws is the headline one.** Q-127 said

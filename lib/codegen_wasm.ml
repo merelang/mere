@@ -9338,11 +9338,18 @@ let prune_dead_fail_checks (wat : string) : string =
 let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program) : string =
   (* Q-127: SETTLE EVERY UNDECIDED CONTAINER REGION BEFORE ANYTHING READS ONE.
      A slot can hold a variable up to here, so that a call site inside a `region` block
-     can decide it; what is left means nobody did. An ALLOCATION region nobody decided
-     becomes `__caller` (the runtime current region -- a call does not change it, so
-     inside the callee that is exactly the region open around the call); anything else
-     becomes `__heap`. One rule in `Typer`, rather than eighteen backend patterns that
-     each have to remember what a variable in that slot means. *)
+     can decide it; what is left means nobody did, and it becomes `__heap`.
+
+     IT BECAME `__caller` FOR THREE VERSIONS (v0.1.453-455) -- the runtime current
+     region, on the argument that a call does not change it, so inside the callee that
+     is the region open around the call. False for a CHAIN of calls: the body and the
+     call site hold different copies of the region variable, only the outermost is
+     bound, and lowering the unbound one to the current region put values in an arena
+     no type mentioned. m3d segfaulted from its second frame. Withdrawn in v0.1.456;
+     an undecided allocation region is the default region, as it always was.
+
+     One rule in `Typer`, rather than eighteen backend patterns that each have to
+     remember what a variable in that slot means. *)
   Typer.default_container_regions prog.main;
   List.iter (fun d ->
     match d with
