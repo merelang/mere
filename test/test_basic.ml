@@ -7031,8 +7031,17 @@ let () =
   in
   assert_no_contains "inner-lift: sibling helper's nested-fn locals don't leak into caller"
     c_nested_helper "long long hv, long long k)";
-  assert_contains "vec: C codegen wires vec_new outside region to default arena"
-    c_src_default_region "mere_vec_int_new((&__lang_default_region))";
+  (* Q-127: A CONTAINER ALLOCATED WHERE NO REGION IS OPEN REACHES FOR THE CURRENT ONE,
+     which at the top level IS the default arena -- the runtime initialises it there, and
+     the check below says so rather than leaving it implied. The name changed because
+     the same code can now be reached from inside a `region` block through a call, and
+     the right answer there is the block's arena; a call does not change the current
+     region, so one emission serves both. *)
+  assert_contains "vec: C codegen wires vec_new outside region to the current arena"
+    c_src_default_region "mere_vec_int_new(__lang_current_region)";
+  assert_contains "vec: and the current arena starts out as the default one"
+    c_src_default_region
+    "__lang_region* __lang_current_region = &__lang_default_region;";
   assert_contains "vec: C codegen routes vec_push to runtime helper"
     c_src_default_region "mere_vec_int_push";
   assert_contains "vec: C codegen routes vec_len to runtime helper"
@@ -7303,8 +7312,18 @@ let () =
   check_raises "vec[R, T]: Vec from region R cannot escape"
     (fun () ->
       Pipeline.process "region R { vec_new () }");
-  check "vec[R, T]: vec_new outside region defaults to __heap"
-    (Pipeline.type_of "vec_new ()") "Vec[__heap, 'a]";
+  (* Q-127: OUTSIDE A REGION THE MARKER IS UNDECIDED, NOT `__heap`. It is settled before
+     any backend reads it -- on `__caller` when the container is ALLOCATED here (the
+     caller's region, which at the top level is the default one) and on `__heap`
+     otherwise -- but it is left open until then so that a CALL SITE inside a `region`
+     block can decide it. A rigid `__heap` here is what pinned a function's containers
+     to the default region at the point the FUNCTION was checked, which was Q-127. *)
+  check "vec[R, T]: vec_new outside a region leaves the region undecided"
+    (Pipeline.type_of "vec_new ()") "Vec['b, 'a]";
+  check "vec[R, T]: and a call inside a region decides it there"
+    (Pipeline.type_of
+       "let build = fn (n: int) -> let v = vec_new () in let _ = vec_push v n in v;\n        fn () -> region R { vec_len (build 1) }")
+    "(unit -> int)";
 
   (* --- Phase 12.5: OwnedVec[T] (Q-010 narrowed (b) — separated type) --- *)
   check "owned_vec: owned_vec_new : unit -> 'a OwnedVec"
@@ -7378,8 +7397,8 @@ let () =
   (* Phase 12.7: region binding via active_regions *)
   check_raises "strbuf: cannot escape region (StrBuf[R] tagged in)"
     (fun () -> Pipeline.process "region R { strbuf_new () }");
-  check "strbuf: outside region defaults to __heap"
-    (Pipeline.type_of "strbuf_new ()") "StrBuf[__heap]";
+  check "strbuf: outside a region leaves the region undecided (Q-127)"
+    (Pipeline.type_of "strbuf_new ()") "StrBuf['a]";
   check "strbuf: inside region R binds to R"
     (Pipeline.type_of
        "fn () -> region R { let b = strbuf_new () in strbuf_len b }")
@@ -7506,8 +7525,8 @@ let () =
   check_raises "map: cannot escape region"
     (fun () ->
       Pipeline.process "region R { map_new () }");
-  check "map: outside region defaults to __heap"
-    (Pipeline.type_of "map_new ()") "Map[__heap, 'b, 'a]";
+  check "map: outside a region leaves the region undecided (Q-127)"
+    (Pipeline.type_of "map_new ()") "Map['c, 'b, 'a]";
   check "map: polymorphic len works on Map"
     (Pipeline.process
        "let m = map_new () in { map_set m \"a\" 1; map_set m \"b\" 2; len m }") "2";
@@ -13655,11 +13674,19 @@ let () =
      let _ = vec_push v 5;\n\
      let _ = print_int (vec_get (f v) 0);"
   in
-  check "c: an unresolved region marker tags as the default region, not as int"
+  (* Q-127 made this stronger than it was. The bug was TWO NAMES FOR ONE TYPE -- an
+     unresolved region marker tagged as `int` in one place and as `__heap` in another,
+     so a forward declaration named something nobody defined. The region is no longer in
+     the tag at all (`Vec[R, T]`, `Vec[__heap, T]` and `Vec[__caller, T]` are one C type,
+     `mere_vec_<T>*`, with the region a pointer inside the struct), so the split cannot
+     be spelled: NEITHER old name can appear, and the one that does mentions only the
+     element. *)
+  check "c: a container's tag names its element and not its region"
     (let c = codegen p5_src in
-     Printf.sprintf "%b %b"
-       (contains c "closure_Vec___heap_int") (contains c "closure_Vec_int_int"))
-    "true false";
+     Printf.sprintf "%b %b %b"
+       (contains c "closure_Vec___heap_int") (contains c "closure_Vec_int_int")
+       (contains c "closure_Vec_int_Vec_int"))
+    "false false true";
 
   (* P6: a `let rec`'s names leaked into `known` and stayed there, so a *later*
      function's parameter of the same name was taken for one of them and never
@@ -14771,15 +14798,25 @@ let () =
     (let c = lib_c "let f = fn (n: int) ->\n  let v = vec_new () in\n  let _ = vec_push v n in vec_len v;\n0" in
      if has c "mere_vec_int_new(__lang_current_region)" then "current" else "default")
     "current";
-  check "v0.1.311: without --lib, __heap containers stay in the default region"
+  (* Q-127 CLOSED THE GAP BETWEEN THE TWO MODES. This used to be the other half of the
+     pair above: lib mode moved a function's containers to the current region and a
+     plain program did not, which is precisely why a `region` block around a call
+     reclaimed nothing. Both now reach for the current region, because the container is
+     allocated DURING THE CALL and that is the region the caller is standing in. In a
+     plain program with no region block, the current region is the default one, so the
+     old claim still holds where it was true -- and it is checked by the pair below
+     rather than by a name that no longer distinguishes the two modes. *)
+  check "v0.1.311 + Q-127: a function's containers follow the caller in both modes"
     (let c =
        let prog = Pipeline.parse_program
          "let f = fn (n: int) ->\n  let v = vec_new () in\n  let _ = vec_push v n in vec_len v;\nf 1" in
        let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
        Codegen_c.emit_program ~main_ty prog
      in
-     if has c "mere_vec_int_new((&__lang_default_region))" then "default" else "moved")
-    "default";
+     Printf.sprintf "%b %b"
+       (has c "mere_vec_int_new(__lang_current_region)")
+       (has c "__lang_region* __lang_current_region = &__lang_default_region;"))
+    "true true";
   check "v0.1.312: init is re-armable (a flag, not pthread_once)"
     (if has lib_demo "static int __mere_lib_live = 0;"
         && not (has lib_demo "pthread_once")

@@ -133,6 +133,15 @@ let rec ty_tag (t : Ast.ty) : string =
      and leaving it out removes the whole class of mismatch where one spelling
      resolved the marker and the other did not. *)
   | Ast.TyCon (("StrBuf" | "ByteBuf") as name, _) -> name
+  (* Q-127: AND THE SAME FOR Vec AND Map, for the reason just given. `Vec[R, T]` and
+     `Vec[__heap, T]` lower to ONE C type -- `mere_vec_<T>*`, built by `c_type_of` from
+     the ELEMENT alone, with the region a pointer inside the struct. A tag that keeps
+     the region therefore splits one type into two NAMES, and every place that computes
+     the name at a different moment can pick a different one. That was survivable while
+     an undecided region slot was rare; Q-127 makes them ordinary (and adds a third
+     spelling, `__caller`), so the split had to go. *)
+  | Ast.TyCon ("Vec", [_region; elem]) -> "Vec_" ^ ty_tag elem
+  | Ast.TyCon ("Map", [_region; k; v]) -> "Map_" ^ ty_tag k ^ "_" ^ ty_tag v
   | Ast.TyCon (name, args) ->
     (* Polymorphic instantiation (e.g., `int list` → `list_int`).
        Phase 15.1: for Vec[R, T]'s region marker (TyRef _ R TyUnit),
@@ -289,6 +298,32 @@ let lift_fn_skels ?(subset = "C subset") (e : Ast.expr) : fn_skel list * Ast.exp
    `.ty` walks to a concrete arrow type. Used to recover a monomorphic
    instantiation when the binding-site Fun.ty is left polymorphic by
    let-poly generalization. *)
+(* Q-127: TWO ARROWS THAT DIFFER ONLY BY A REGION ARE ONE INSTANTIATION.
+
+   Which specialisation a use site asks for is a question about C types, and a
+   container's region is not one of them: `Vec[R, T]`, `Vec[__heap, T]` and
+   `Vec[__caller, T]` are all `mere_vec_<T>*`, with the region a pointer inside the
+   struct (which is why `ty_tag` leaves it out). Left in, the three spellings look like
+   three instantiations -- and worse, the skeleton settles on one of them while a use
+   site says another, so unifying the clone against the arrow fails outright:
+   "cannot instantiate `ev` at Map[__caller, ..] -- its skeleton is already fixed at
+   Map[__heap, ..]".
+
+   So every arrow this module discovers is normalised first. The BODIES are untouched:
+   a clone keeps whatever its own allocations said, which is where the region actually
+   matters, and this only settles what the arrow is compared and unified as. *)
+let rec erase_container_regions (t : Ast.ty) : Ast.ty =
+  match Ast.walk t with
+  | Ast.TyCon ((("Vec" | "Map" | "StrBuf" | "ByteBuf" | "ListBuf") as n), (_r :: rest)) ->
+    Ast.TyCon (n, Ast.TyRef (Ast.BorrowedRead, "__heap", Ast.TyUnit)
+                  :: List.map erase_container_regions rest)
+  | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map erase_container_regions args)
+  | Ast.TyTuple ts -> Ast.TyTuple (List.map erase_container_regions ts)
+  | Ast.TyArrow (a, b) ->
+    Ast.TyArrow (erase_container_regions a, erase_container_regions b)
+  | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, erase_container_regions inner)
+  | other -> other
+
 let find_concrete_arrow (name : string) (e : Ast.expr) : Ast.ty option =
   let found = ref None in
   let rec go (e : Ast.expr) =
@@ -298,7 +333,7 @@ let find_concrete_arrow (name : string) (e : Ast.expr) : Ast.ty option =
          (match e.Ast.ty with
           | Some t when ty_is_concrete (Ast.walk t) ->
             (match Ast.walk t with
-             | Ast.TyArrow _ as ar -> found := Some ar
+             | Ast.TyArrow _ as ar -> found := Some (erase_container_regions ar)
              | _ -> ())
           | _ -> ())
        | _ -> ());
@@ -361,7 +396,9 @@ let find_live_arrow (name : string) (skel_names : (string, unit) Hashtbl.t)
        | Ast.Var n when n = name ->
          (match e.Ast.ty with
           | Some t ->
-            (match Ast.walk t with Ast.TyArrow _ as ar -> found := Some ar | _ -> ())
+            (match Ast.walk t with
+             | Ast.TyArrow _ as ar -> found := Some (erase_container_regions ar)
+             | _ -> ())
           | None -> ())
        | _ -> ());
       match e.Ast.node with
@@ -413,7 +450,7 @@ let find_all_concrete_arrows_in (name : string) (exprs : Ast.expr list) : Ast.ty
      | Ast.Var n when n = name ->
        (match e.Ast.ty with
         | Some t when ty_is_concrete (Ast.walk t) ->
-          let walked = Ast.walk t in
+          let walked = erase_container_regions (Ast.walk t) in
           (match walked with
            | Ast.TyArrow _ ->
              let key = Ast.pp_ty walked in
@@ -536,7 +573,7 @@ let specialize_single_use_local_fns (root : Ast.expr) : unit =
        when not (ty_is_concrete (Ast.walk vty)) ->
        (match find_all_concrete_arrows_in n [body] with
         | [arrow] when not (has_unresolved_use_of n [body]) ->
-          (try Typer.unify Loc.dummy vty arrow with _ -> ())
+          (try Typer.unify Loc.dummy (erase_container_regions vty) arrow with _ -> ())
         | _ -> ());
        let _ = value in ()
      | Ast.Let_rec (bindings, body) ->
@@ -572,7 +609,7 @@ let specialize_single_use_local_fns (root : Ast.expr) : unit =
                if v == value then None else Some v) bindings
            in
            (match find_all_concrete_arrows_in n scan_roots with
-            | [arrow] -> (try Typer.unify Loc.dummy vty arrow with _ -> ())
+            | [arrow] -> (try Typer.unify Loc.dummy (erase_container_regions vty) arrow with _ -> ())
             | _ -> ())
          | _ -> ()) bindings
      | _ -> ());
@@ -824,7 +861,7 @@ let duplicate_multi_use_local_fns (root : Ast.expr) : Ast.expr =
         List.fold_right (fun (nm, arr) acc ->
           let cl = clone_with_fresh_tyvars value in
           (match cl.Ast.ty with
-           | Some t -> (try Typer.unify Loc.dummy t arr with _ -> ())
+           | Some t -> (try Typer.unify Loc.dummy (erase_container_regions t) arr with _ -> ())
            | None -> ());
           mk (Ast.Let ({ Ast.ploc = Loc.dummy; pnode = Ast.P_var nm },
                        go cl, acc))) named body'
@@ -860,7 +897,7 @@ let duplicate_multi_use_local_fns (root : Ast.expr) : Ast.expr =
         List.fold_right (fun (nm, arr) acc ->
           let cl = clone_with_fresh_tyvars value in
           (match cl.Ast.ty with
-           | Some t -> (try Typer.unify Loc.dummy t arr with _ -> ())
+           | Some t -> (try Typer.unify Loc.dummy (erase_container_regions t) arr with _ -> ())
            | None -> ());
           (* Redirect the recursive self-call f -> nm inside the copy. *)
           let cl = rewrite_uses f (fun _ -> Some nm) cl in
@@ -991,6 +1028,11 @@ let resolve_fn_types ?(mangle = mangled_inst_name)
      in 2 paths (initial scan + re-scan of existing multi_specs entries
      when new instantiations are discovered). *)
   let make_spec arrow s =
+    (* Q-127: normalise here too, not only where arrows are discovered. An arrow can
+       reach this from a table filled on an earlier pass, and the one thing this
+       function must not do is refuse an instantiation over a spelling that does not
+       reach the C type. *)
+    let arrow = erase_container_regions arrow in
     let cloned_fun = clone_with_fresh_tyvars (Hashtbl.find pristine s.sname) in
     let clone_fun_ty =
       match cloned_fun.Ast.ty with
@@ -1004,7 +1046,7 @@ let resolve_fn_types ?(mangle = mangled_inst_name)
        skeleton was already fixed at. Refusing is not the fix; it is the
        difference between a wrong program and a named one. See
        test/parity/poly_helper_fixed_and_free.mere. *)
-    (try Typer.unify Loc.dummy clone_fun_ty arrow
+    (try Typer.unify Loc.dummy (erase_container_regions clone_fun_ty) arrow
      with _ ->
        unsupported s.sfun.Ast.loc (Printf.sprintf
          "unsupported: cannot instantiate `%s` at %s — its skeleton is \
@@ -1013,7 +1055,7 @@ let resolve_fn_types ?(mangle = mangled_inst_name)
           and a parameter-derived type, inside a fn used at two types, hits \
           this."
          s.sname (Ast.pp_ty (Ast.walk arrow))
-         (Ast.pp_ty (Ast.walk clone_fun_ty))));
+         (Ast.pp_ty (erase_container_regions clone_fun_ty))));
     let cloned_body =
       match cloned_fun.Ast.node with
       | Ast.Fun (_, _, b) -> b
@@ -1110,7 +1152,7 @@ let resolve_fn_types ?(mangle = mangled_inst_name)
               Hashtbl.add multi_specs s.sname specs;
               progress := true
             end else begin
-              (try Typer.unify Loc.dummy fun_ty (List.hd all) with _ -> ());
+              (try Typer.unify Loc.dummy (erase_container_regions fun_ty) (List.hd all) with _ -> ());
               Hashtbl.add resolved s.sname (List.hd all);
               progress := true
             end

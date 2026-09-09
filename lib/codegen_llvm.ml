@@ -153,6 +153,16 @@ let rec ty_tag (t : Ast.ty) : string =
      this backend's output either. Mangled the same way the C backend does --
      see the note on Monomorph.ty_tag; the bug was found there and this is the
      same code written twice. *)
+  (* Q-127: A CONTAINER'S TAG NAMES ITS ELEMENT, NOT ITS REGION. `Vec[R, T]`,
+     `Vec[__heap, T]` and `Vec[__caller, T]` are one type here -- a pointer, with the
+     region inside the struct -- so a tag that keeps the region gives one type several
+     names, and the places that compute the name at different moments pick different
+     ones. (`Monomorph.ty_tag` says the same; the bug was found there first, on
+     StrBuf / ByteBuf, and Q-127 made undecided and caller-relative regions ordinary
+     enough that Vec and Map had to follow.) *)
+  | Ast.TyCon ((("Vec" | "Map" | "StrBuf" | "ByteBuf" | "ListBuf") as name), (_r :: rest)) ->
+    Monomorph.flatten_module_dots name
+    ^ String.concat "" (List.map (fun a -> "_" ^ ty_tag a) rest)
   | Ast.TyCon (name, []) -> Monomorph.flatten_module_dots name
   | Ast.TyCon (name, args) -> Monomorph.flatten_module_dots name ^ "_" ^ String.concat "_" (List.map ty_tag args)
   | Ast.TyRef (_, r, Ast.TyUnit) ->
@@ -12166,6 +12176,21 @@ let channel_runtime_llvm =
       "}" ]
 
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
+  (* Q-127: SETTLE EVERY UNDECIDED CONTAINER REGION BEFORE ANYTHING READS ONE.
+     A slot can hold a variable up to here, so that a call site inside a `region` block
+     can decide it; what is left means nobody did. An ALLOCATION region nobody decided
+     becomes `__caller` (the runtime current region -- a call does not change it, so
+     inside the callee that is exactly the region open around the call); anything else
+     becomes `__heap`. One rule in `Typer`, rather than eighteen backend patterns that
+     each have to remember what a variable in that slot means. *)
+  Typer.default_container_regions prog.main;
+  List.iter (fun d ->
+    match d with
+    | Ast.Top_let (_, v) -> Typer.default_container_regions v
+    | Ast.Top_let_rec bs -> List.iter (fun (_, v) -> Typer.default_container_regions v) bs
+    | _ -> ()) prog.decls;
+
+
   debug_subprograms := [];
   debug_loc_suffix := "";
   reg_counter := 0;
@@ -12364,48 +12389,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      Only the region position of the region-parameterised containers is
      touched; an open ELEMENT type is a genuinely polymorphic value and
      still refused. *)
+  (* v0.1.166 + Q-127: this used to be a private copy that closed every open region
+     on `__heap`. It is now the shared pass, which also knows that an ALLOCATION region
+     means the caller's -- keeping one answer for what an open slot means instead of
+     two that only agreed while `__caller` did not exist. *)
   let close_open_regions (e : Ast.expr) : unit =
-    let rec close_ty (t : Ast.ty) =
-      match Ast.walk t with
-      | Ast.TyCon (("Vec" | "Map" | "StrBuf"), region :: rest) ->
-        (match Ast.walk region with
-         | Ast.TyVar v when v.Ast.link = None ->
-           v.Ast.link <- Some (Ast.TyRef (Ast.BorrowedRead, "__heap", Ast.TyUnit))
-         | other -> close_ty other);
-        List.iter close_ty rest
-      | Ast.TyCon (_, args) -> List.iter close_ty args
-      | Ast.TyArrow (a, b) -> close_ty a; close_ty b
-      | Ast.TyTuple ts -> List.iter close_ty ts
-      | Ast.TyRef (_, _, inner) -> close_ty inner
-      | _ -> ()
-    in
-    let rec go (x : Ast.expr) =
-      (match x.Ast.ty with Some t -> close_ty t | None -> ());
-      match x.Ast.node with
-      | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
-      | Ast.Unit_lit | Ast.Var _ -> ()
-      | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
-      | Ast.App (a, b) -> go a; go b
-      | Ast.Neg a | Ast.Annot (a, _) -> go a
-      | Ast.Let (_, v, b) -> go v; go b
-      | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
-      | Ast.With (_, v, b) -> go v; go b
-      | Ast.If (c, t, e_) -> go c; go t; go e_
-      | Ast.Fun (_, _, b) -> go b
-      | Ast.Constr (_, Some a) -> go a
-      | Ast.Constr (_, None) -> ()
-      | Ast.Match (sc, arms) ->
-        go sc;
-        List.iter (fun (_, g, b) ->
-          (match g with Some ge -> go ge | None -> ()); go b) arms
-      | Ast.Tuple es -> List.iter go es
-      | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
-      | Ast.Ref (_, _, a) -> go a
-      | Ast.Record_lit (_, fs) -> List.iter (fun (_, x2) -> go x2) fs
-      | Ast.Field_get (a, _) -> go a
-      | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, x2) -> go x2) fs
-    in
-    go e
+    Typer.default_container_regions e
   in
   close_open_regions main_expr;
   let skels, body_expr = lift_fn_skels main_expr in

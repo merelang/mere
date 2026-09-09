@@ -776,6 +776,15 @@ let rec ty_tag (t : Ast.ty) : string =
        / variant payload types. *)
     "strbuf"
   | Ast.TyCon ("ListBuf", _) -> "listbuf"   (* Q-106: one runtime for every T *)
+  (* Q-127: A CONTAINER'S TAG NAMES ITS ELEMENT, NOT ITS REGION. `Vec[R, T]`,
+     `Vec[__heap, T]` and `Vec[__caller, T]` are one type here -- a pointer, with the
+     region inside the struct -- so a tag that keeps the region gives one type several
+     names, and the places that compute the name at different moments pick different
+     ones. (`Monomorph.ty_tag` says the same; the bug was found there first, on
+     StrBuf / ByteBuf, and Q-127 made undecided and caller-relative regions ordinary
+     enough that Vec and Map had to follow.) *)
+  | Ast.TyCon ("Vec", [_region; elem]) -> "Vec_" ^ ty_tag elem
+  | Ast.TyCon ("ByteBuf", _) -> "ByteBuf"
   | Ast.TyCon ("Map", [_region; k_ty; v_ty]) ->
     (* Phase 43: In Wasm too, Map is an i32 pointer, so return a ty_tag so
        it can be treated as a carrier in tuple / closure env / variant
@@ -9320,6 +9329,21 @@ let prune_dead_fail_checks (wat : string) : string =
   Buffer.contents buf
 
 let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program) : string =
+  (* Q-127: SETTLE EVERY UNDECIDED CONTAINER REGION BEFORE ANYTHING READS ONE.
+     A slot can hold a variable up to here, so that a call site inside a `region` block
+     can decide it; what is left means nobody did. An ALLOCATION region nobody decided
+     becomes `__caller` (the runtime current region -- a call does not change it, so
+     inside the callee that is exactly the region open around the call); anything else
+     becomes `__heap`. One rule in `Typer`, rather than eighteen backend patterns that
+     each have to remember what a variable in that slot means. *)
+  Typer.default_container_regions prog.main;
+  List.iter (fun d ->
+    match d with
+    | Ast.Top_let (_, v) -> Typer.default_container_regions v
+    | Ast.Top_let_rec bs -> List.iter (fun (_, v) -> Typer.default_container_regions v) bs
+    | _ -> ()) prog.decls;
+
+
   ignore main_ty;
   debug_fn_lines := [];
   wasm_component_command :=
