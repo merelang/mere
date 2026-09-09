@@ -10913,6 +10913,21 @@ let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
       "}" ]
 
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
+  (* Q-127: SETTLE EVERY UNDECIDED CONTAINER REGION BEFORE ANYTHING READS ONE.
+     A slot can hold a variable up to here, so that a call site inside a `region` block
+     can decide it; what is left means nobody did. An ALLOCATION region nobody decided
+     becomes `__caller` (the runtime current region -- a call does not change it, so
+     inside the callee that is exactly the region open around the call); anything else
+     becomes `__heap`. One rule in `Typer`, rather than eighteen backend patterns that
+     each have to remember what a variable in that slot means. *)
+  Typer.default_container_regions prog.main;
+  List.iter (fun d ->
+    match d with
+    | Ast.Top_let (_, v) -> Typer.default_container_regions v
+    | Ast.Top_let_rec bs -> List.iter (fun (_, v) -> Typer.default_container_regions v) bs
+    | _ -> ()) prog.decls;
+
+
   (* Variant typedefs come from Top_type decls. Walk prog.decls (NOT the
      desugared main, which drops type decls) and emit a tagged-union
      struct for each declared variant type. This also populates
