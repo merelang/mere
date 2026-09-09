@@ -4,6 +4,59 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.460 — 2026-09-09
+
+**Q-127 stage 1: the size of the change, measured instead of guessed.** Nothing compiles
+differently. `mere --dump-region-params` lists, per function, how many hidden region
+arguments closing Q-127's remaining half would give it — and whether it can take one at
+all.
+
+The remaining half is that a function's body allocates through the region variable in
+its own scheme while the call site binds a different copy: the type says the block, the
+value is in the default region. Passing the region IN is what makes those the same
+variable. v0.1.453 tried letting the body GUESS the runtime current region instead, and
+m3d's second frame is what said that is unsound for a chain, three released versions
+later. So the next attempt starts from a number, not an impression.
+
+### What it reports, and what it costs to be wrong about
+
+| status | meaning |
+|---|---|
+| `ok` | every occurrence is a saturated call, so an argument has somewhere to go |
+| `value-used` | the name is used as a value, becomes a closure, and a closure's ABI has no room for a region |
+| `partial` | every occurrence is a call, but one passes too few arguments; the region belongs to the saturated call |
+
+Disqualified is not an error — those keep today's default region, which is over-strict
+and never unsound. So the `ok` fraction is the fraction of the problem the change would
+actually solve.
+
+### The numbers
+
+**Over 286 example programs: 110 functions would take a region parameter, all 110 `ok`.**
+On m3d — the program that killed v0.1.453, and the only one here with a call chain deep
+enough to have done it — **40, all 40 `ok`.** `memo_fib` reports zero, which is the other
+half of the answer: for most programs this change is inert.
+
+That nothing is disqualified in either corpus is a result and not an absence of a
+detector: `test/regionparams/valueused.mere` and `partial.mere` exist so that both ways
+of saying no are seen to fire, and both were poisoned.
+
+### Also
+
+`--dump-region-params` resolves imports relative to the FILE, the way running a program
+does rather than the way `-t` does. Two examples that `-t` cannot read type-check under
+it; one that imports `contrib/` relative to the repo root cannot, and is on the gate's
+known list by name with the reason. A count would have let a newly-broken example
+replace a previously-broken one in silence.
+
+`scripts/region_params_check.sh` is in CI. Three fixtures are the check; the corpus sweep
+is the measurement, with a floor on how many files it examined — a sweep that examined
+nothing agrees with every claim.
+
+`dune runtest` 2717 / 0. parity 174 / 0.
+
+---
+
 ## v0.1.459 — 2026-09-09
 
 **A poison written to test a gate indicted the LLVM backend instead**, and the gate it

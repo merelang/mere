@@ -611,6 +611,14 @@ let () =
   | [_; "-t"; path] ->
     let source = read_file path in
     run_action Mere.Pipeline.type_of path source
+  (* Q-127 stage 1: which functions would take a hidden region argument, and which
+     cannot. A measurement, not a compilation mode -- see Pipeline.region_param_report. *)
+  | [_; "--dump-region-params"; path] ->
+    let source = read_file path in
+    let base = Filename.dirname path in
+    run_action ~base_dir:base
+      (Mere.Pipeline.region_param_report ~base_dir:base ~search_paths:!search_paths)
+      path source
   | [_; path] when String.length path > 0 && path.[0] = '-' ->
     Printf.eprintf "error: unknown flag `%s`\n\n" path;
     usage ();

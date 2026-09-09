@@ -1,0 +1,6 @@
+// Applied with fewer arguments than its type takes. The region belongs to the saturated
+// call; by the time the partial one runs, a value has already been built with nowhere to
+// have put it. Disqualified for the same reason as a value use, one step later.
+let build2 = fn (a: int) -> fn (b: int) -> let v = vec_new () in let _ = vec_push v (a + b) in v;
+let p = build2 1;
+print_int (vec_len (p 2))
