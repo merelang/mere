@@ -62,6 +62,20 @@ nothing in this repository runs. `dune runtest`, parity, every gate and all 29 d
 programs' type-checks were green while three released versions could not render a second
 frame. The bench that would have caught it is in m3d's repository, not this one.
 
+### One cell in the host matrix stopped being about something else
+
+`bytebuf_new`'s LLVM cell has read `unattributed` since 2026-08-30, when that value was
+invented for a probe that cannot reach its subject. It was one: `let _ = bytebuf_new 1; 0`
+never got as far as the backend's host-builtin check, because the `ByteBuf`'s region slot
+was still a type variable and `ty_tag` refused THAT first — `unsupported LLVM codegen type
+element: 'a`. The message matched `unsupported` and named no builtin, so the harness
+correctly said the cell was about something else.
+
+Defaulting an undecided region settles the slot, the probe reaches its subject, and LLVM
+refuses in its own name: `bytebuf_new has no LLVM lowering yet (host builtin)`. `refused`.
+Fourteen rows still have such a cell; this one was hiding behind a type the backend could
+not spell.
+
 parity 171 passed / 0 failed. `dune runtest` 2715 / 0. m3d's four bench models run.
 
 ---
