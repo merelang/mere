@@ -26,12 +26,20 @@
 #              about escape (a documented codegen subset limit). Their answer
 #              is not a verdict and the gate does not read it as one.
 #
-# THERE ARE NO OPEN HOLES TODAY, and the HOLE machinery stays anyway. It is how
-# the next one gets recorded instead of argued about: a route that dangles is a
-# row with a Q number, not an absence from the file. If a HOLE row starts being
-# rejected, this gate FAILS until someone promotes it by hand -- a table that
-# silently agrees with whatever the compiler currently does is not checking
-# anything, and that is exactly how it caught Q-067 being closed.
+# THERE IS ONE OPEN HOLE (Q-132), and it is the machinery doing its job: a route
+# that dangles is a row with a Q number, not an absence from the file. If a HOLE
+# row starts being rejected, this gate FAILS until someone promotes it by hand --
+# a table that silently agrees with whatever the compiler currently does is not
+# checking anything, and that is exactly how it caught Q-067 being closed.
+#
+# Q-132 IS UNLIKE THE OTHER HOLES THIS TABLE HAS HELD, and the difference is worth
+# stating because the row reads ACCEPT everywhere. The TYPE rule is right here --
+# nothing escapes, on the reading the types have -- and three of the four backends
+# implement that reading. Wasm has one bump pointer for every region, so a callee's
+# allocation lands inside the open block's range whatever its type says, and the
+# block's rollback takes it. So the hole is not in the rule, it is in one backend's
+# storage model, and the verdict columns cannot show it. The value it produces is
+# pinned instead, in test/parity/region_chain_callee_alloc.wasm.expected.
 #
 # THREE OF THE SAFE ROWS ARE THERE TO STOP AN OVER-PLUG. `variant_of_str` is
 # the claim v0.1.323 correctly made, which the Q-067 fix must not swallow;
@@ -75,3 +83,4 @@ closure_out          SAFE   ACCEPT    ACCEPT      w,rv        -
 scalar_out           SAFE   ACCEPT    ACCEPT      -           -
 recursive_type       SAFE   ACCEPT    ACCEPT      -           -
 fn_over_carry        SAFE   ACCEPT    ACCEPT      ll,w,rv     -
+callee_alloc_chain   HOLE   ACCEPT    ACCEPT      -           Q-132
