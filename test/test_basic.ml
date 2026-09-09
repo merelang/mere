@@ -7313,12 +7313,18 @@ let () =
   check_raises "vec[R, T]: Vec from region R cannot escape"
     (fun () ->
       Pipeline.process "region R { vec_new () }");
-  (* Q-127: OUTSIDE A REGION THE MARKER IS UNDECIDED, NOT `__heap`. It is settled before
-     any backend reads it -- on `__caller` when the container is ALLOCATED here (the
-     caller's region, which at the top level is the default one) and on `__heap`
-     otherwise -- but it is left open until then so that a CALL SITE inside a `region`
-     block can decide it. A rigid `__heap` here is what pinned a function's containers
-     to the default region at the point the FUNCTION was checked, which was Q-127. *)
+  (* Q-127: OUTSIDE A REGION THE MARKER IS UNDECIDED, NOT `__heap`. It is settled on
+     `__heap` before any backend reads it, but it is left open until then so that a
+     CALL SITE inside a `region` block can decide it. A rigid `__heap` here is what
+     pinned a function's containers to the default region at the point the FUNCTION was
+     checked, which was Q-127.
+
+     v0.1.453-455 settled an ALLOCATION region on `__caller` instead -- the runtime
+     current region -- and v0.1.456 withdrew it: in a chain of calls the body and the
+     call site hold different copies of the variable, so the one the body allocates
+     through is bound by nobody. What the openness still buys is the TYPE: a record
+     field, or a call inside a block, can decide the region, and carrying the result
+     out of the block is then a type error. *)
   check "vec[R, T]: vec_new outside a region leaves the region undecided"
     (Pipeline.type_of "vec_new ()") "Vec['b, 'a]";
   check "vec[R, T]: and a call inside a region decides it there"

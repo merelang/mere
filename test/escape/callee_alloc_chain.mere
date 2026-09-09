@@ -1,0 +1,33 @@
+// ROUTE: a CALLEE allocates, three frames below a `region` block, into a container
+// that outlives the block. Nothing here is written inside the block except the call.
+//
+// HOLE (Q-132), and only on Wasm. The type of every value involved says the default
+// region, and on the interpreter, C and LLVM that is where the value is -- so it
+// survives `region A` and this program prints 700. Wasm has ONE bump pointer for all
+// regions, so `leaf`'s allocation lands inside A's range whatever its type says, and
+// A's rollback takes it: the read comes back as whatever `region B` scribbled.
+//
+// The Wasm backend does reject escaping stores from inside a block -- but its guard is
+// SYNTACTIC and this store is not in the block, it is three calls down. A guard that
+// only reads the block's own body cannot see an escape a callee performs.
+//
+// The row is ACCEPT on every backend because the verdict is about the TYPE rule, and
+// the type rule is right: nothing here escapes anything, on the reading the types have.
+// The hole is that one backend does not implement that reading. When it does, this row
+// must be promoted -- see the header.
+//
+// The value-level version of this, with the wrong answer pinned, is
+// test/parity/region_chain_callee_alloc.mere.
+let cache = vec_new ();
+let leaf = fn (n: int) -> let v = vec_new () in let _ = vec_push v n in v;
+let fill_cache = fn (n: int) -> vec_push cache (leaf n);
+let mid = fn (n: int) -> fill_cache n;
+let top = fn (n: int) -> mid n;
+
+let rec scribble = fn (v) -> fn (i: int) ->
+  if i >= 4096 then 0 else let _ = vec_push v (0 - 424242) in scribble v (i + 1);
+
+let _ = region A { top 700 };
+let _ = region B { let junk = vec_new () in scribble junk 0 };
+
+print_int (vec_get (vec_get cache 0) 0)
