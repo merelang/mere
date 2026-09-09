@@ -163,26 +163,26 @@ if command -v wat2wasm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   fi
 fi
 
-# ---- percall: the half of Q-127 that is still open, PINNED OPEN ----------
+# ---- percall: Q-127's remaining half, closed on C and open on LLVM --------
 #
-# Same shape as pertree, but the thing built inside the block is a CONTAINER
-# returned by a function. C and LLVM do not reclaim it: a container's region is
-# in its type, the body allocates through its own scheme's copy of that region
-# variable, and the call site binds a different copy. The type says the block;
-# the value is in the default region. Over-strict, never unsound -- and it is
-# the 0.7 MB a frame m3d still pays.
+# Same shape as pertree, but the thing built inside the block is a CONTAINER returned
+# by a function. It used to grow on both compiled backends: a container's region is in
+# its type, the body allocated through its own scheme's copy of that variable, and the
+# call site bound a different copy -- the type said the block, the value was in the
+# default region.
 #
-# This leg asserts that it is STILL SO, which is the only kind of pin that can
-# tell anyone when it stops. v0.1.443 is the precedent: the LLVM leg above was
-# written to record a gap and go red when the gap closed, and that is how its
-# table got updated instead of quietly rotting. If someone gives a callee the
-# caller's region -- by passing it in, which is the only way left after v0.1.456
-# withdrew the current-region reading -- these two comparisons fail and say so.
+# v0.1.464 passes the region IN, as a leading argument, on the C backend. C went from
+# 9 -> 80 MB to 2.7 -> 4.3 MB across the same 10 -> 100 iterations, and stopped
+# following the count. THE LLVM BACKEND STILL GROWS, because it has not been taught to
+# pass one yet, so its leg asserts the OLD behaviour and will go red when that changes.
+# Two legs, opposite directions, and the one that is red-when-fixed is how the table
+# gets updated instead of quietly rotting -- v0.1.443's LLVM leg is the precedent, and
+# this leg was itself the thing that told me the C fix had landed.
 #
-# The Wasm leg asserts the opposite, because Wasm gets the right answer for an
-# unrelated reason: one bump for every region, nothing stores this vector into
-# anything older than the block, so no high-water mark is raised and the
-# rollback takes it (Q-132). Three legs, three separate claims.
+# The Wasm leg asserts completion, for an unrelated reason: one bump for every region,
+# nothing stores this vector into anything older than the block, so no high-water mark
+# is raised (Q-132) and the rollback takes it. Three legs, three separate claims -- and
+# all three must still agree on the ANSWER, which is checked first.
 
 PCSRC="$ROOT/test/regionreclaim/percall.mere"
 PCSMALL=10
@@ -195,7 +195,7 @@ PCN=100000
 # first time it was poisoned, and it was the poison's real finding.
 pc_c_small=0; pc_c_big=0
 if [ ! -f "$PCSRC" ]; then
-  echo "FAIL region_reclaim/percall: $PCSRC is missing — the leg that pins Q-127 open cannot run"
+  echo "FAIL region_reclaim/percall: $PCSRC is missing — the leg that measures Q-127 cannot run"
   fail=1
 else
   if ! ("$MERE" -c "$PCSRC" > "$TMP/pc.c" 2>/dev/null && $CC -O2 -w "$TMP/pc.c" -o "$TMP/pcbin" 2>/dev/null); then
@@ -205,26 +205,40 @@ else
     echo "FAIL region_reclaim/percall: the LLVM leg did not build (emitting is not building — mere -ll exits 0 on IR the assembler rejects)"
     fail=1
   else
+    # Same computation first: two footprints are not comparable until the two
+    # programs agree about what they computed.
+    pa_c="$(answer "$TMP/pcbin" $PCSMALL $PCN)"
+    pa_l="$(answer "$TMP/pclbin" $PCSMALL $PCN)"
+    if [ "$pa_c" != "$pa_l" ] || [ -z "$pa_c" ]; then
+      echo "FAIL region_reclaim/percall: C says '$pa_c' and LLVM says '$pa_l' — passing the region in changed an ANSWER, which it must never do"
+      fail=1
+    fi
+    checked=$((checked + 1))
+
     pc_c_small="$(peak "$TMP/pcbin" $PCSMALL $PCN)"
     pc_c_big="$(peak "$TMP/pcbin" $PCBIG $PCN)"
+    pc_l_small="$(peak "$TMP/pclbin" $PCSMALL $PCN)"
     pc_l_big="$(peak "$TMP/pclbin" $PCBIG $PCN)"
-    if [ -z "$pc_c_small" ] || [ -z "$pc_c_big" ] || [ -z "$pc_l_big" ]; then
+    if [ -z "$pc_c_small" ] || [ -z "$pc_c_big" ] || [ -z "$pc_l_big" ] || [ -z "$pc_l_small" ]; then
       echo "FAIL region_reclaim/percall: the peak-RSS wrapper returned nothing"
       fail=1
       pc_c_small=0; pc_c_big=0
     else
-      # Still open: ten times the iterations must still cost several times the
-      # memory. A factor of 3 is well under the ~8x it actually costs and well
-      # over the noise, so this fires on a fix and not on a quiet machine.
-      if [ "$pc_c_big" -lt "$(( pc_c_small * 3 ))" ]; then
+      # C reclaims: ten times the iterations must not cost twice the memory.
+      if [ "$(( pc_c_big * 10 ))" -gt "$(( pc_c_small * 20 ))" ]; then
         echo "FAIL region_reclaim/percall/C: peak went $pc_c_small -> $pc_c_big for ${PCSMALL} -> ${PCBIG} iterations."
-        echo "  That is FLAT, which means a callee-built container is now reclaimed by the caller's block."
-        echo "  Q-127's remaining half has closed: update this leg and OPEN_QUESTIONS rather than deleting it."
+        echo "  A callee-built container has stopped being reclaimed by the caller's block."
+        echo "  The region is no longer reaching the callee: see direct_region_params /"
+        echo "  Typer.region_args_for, and check that the call still takes the __direct path."
         fail=1
       fi
       checked=$((checked + 1))
-      if [ "$pc_l_big" -lt "$(( pc_c_small * 3 ))" ]; then
-        echo "FAIL region_reclaim/percall/LLVM: LLVM is flat where C is not — the two backends no longer agree about Q-127."
+      # LLVM does not, yet. Red when it does, so this table is updated rather than stale.
+      if [ "$pc_l_big" -lt "$(( pc_l_small * 3 ))" ]; then
+        echo "FAIL region_reclaim/percall/LLVM: peak went $pc_l_small -> $pc_l_big — that is FLAT."
+        echo "  The LLVM backend now reclaims a callee-built container too, which is the"
+        echo "  other half of Q-127 closing. Update this leg and OPEN_QUESTIONS rather than"
+        echo "  deleting it."
         fail=1
       fi
       checked=$((checked + 1))
@@ -250,7 +264,7 @@ if [ "$checked" -lt 7 ]; then
 fi
 
 if [ "$fail" = 0 ]; then
-  echo "PASS region_reclaim: $checked checks — C flat at $(( c_big / 1048576 )) MB, LLVM flat at $(( l_big / 1048576 )) MB, Wasm completes inside 64 MiB; a callee-built container is still NOT reclaimed on C/LLVM ($(( pc_c_small / 1048576 )) -> $(( pc_c_big / 1048576 )) MB, Q-127) and is on Wasm"
+  echo "PASS region_reclaim: $checked checks — C flat at $(( c_big / 1048576 )) MB, LLVM flat at $(( l_big / 1048576 )) MB, Wasm completes inside 64 MiB; a callee-built container is reclaimed on C ($(( pc_c_small / 1048576 )) -> $(( pc_c_big / 1048576 )) MB) and Wasm, and still not on LLVM (Q-127)"
   exit 0
 fi
 exit 1

@@ -129,12 +129,21 @@ let regions_of_captures (caps : (string * Ast.ty) list) : string list =
     if String.length n > 9 && String.sub n 0 9 = "__region_"
     then Some (String.sub n 9 (String.length n - 9)) else None) caps
 
+(* Q-127: the region parameters of the function being emitted, if it declares any.
+
+   `__rpN` names a C parameter only INSIDE the function whose scheme quantified it.
+   Everywhere else -- the curried twin of the same function, a closure adapter, a lifted
+   body that merely mentions the type -- no such parameter exists, and answering with the
+   name would put an undeclared identifier in the output. That is the shape of the LLVM
+   bug v0.1.459 fixed, so this is a list to consult rather than a prefix to trust. The
+   fallback is the default region: what the name meant before anything passed one, and
+   what those other forms' call sites will have settled on anyway. *)
+let current_region_params : string list ref = ref []
+
 let region_var_of (name : string) : string =
-  (* Q-127 stage 2: `__rpN` is a REGION PARAMETER -- a quantified allocation region a
-     call site would decide, named at emit time so the body has something to allocate
-     through. Nothing passes one yet, so it means what an undecided region has always
-     meant: the default region. When the argument exists this is where it is read. *)
-  if name = "__heap" || Typer.is_region_param_name name then heap_container_region ()
+  if Typer.is_region_param_name name then
+    (if List.mem name !current_region_params then name else heap_container_region ())
+  else if name = "__heap" then heap_container_region ()
   else if List.mem name !region_scope then "__region_" ^ name
   (* Q-131: THE REGION TRAVELS WITH THE FUNCTION. A lifted body is not lexically
      inside the block it was written in, so `region_scope` is empty here -- and
@@ -206,6 +215,22 @@ type direct_fn_info = {
   d_ret    : Ast.ty;
 }
 let direct_fns : (string, direct_fn_info) Hashtbl.t = Hashtbl.create 16
+
+(* Q-127: WHICH SOURCE FUNCTION AN EMITTED INSTANCE CAME FROM.
+
+   Region parameters belong to a function's SCHEME, so they are keyed by its source name
+   -- the fn_decl's own types cannot carry them, because Monomorph erases a container's
+   region before storing them so that a region never splits an instance.
+
+   A call site already has the source name: `Monomorph.instance_of` is handed it before
+   it mangles anything. A DECLARATION only has the mangled name, so the map is rebuilt
+   from the table that produced it -- no new field on `fn_decl`, and no second place that
+   has to agree about how a name is made. Names that are not multi-instantiated are their
+   own source. *)
+let source_of_instance : (string, string) Hashtbl.t = Hashtbl.create 32
+
+let source_name_of (iname : string) : string =
+  match Hashtbl.find_opt source_of_instance iname with Some b -> b | None -> iname
 
 (* Distinct string literals, in the order first seen: each becomes one static
    constant carrying the length header this backend's strings expect. Reset per
@@ -2537,7 +2562,7 @@ let rec emit_expr (e : Ast.expr) : string =
                 && not (Hashtbl.mem inner_lifts n)
                 && not (List.mem_assoc n !current_var_types)
                 && not (List.mem_assoc n !current_env_subst) ->
-           Some (c_safe_name ename, args)
+           Some (c_safe_name ename, n, head, args)
          | _ -> None)
       | _ -> None
     in
@@ -2564,12 +2589,31 @@ let rec emit_expr (e : Ast.expr) : string =
       | _ -> None
     in
     (match collect_direct (Ast.{ node = Ast.App (f, arg); ty = e.ty; loc = e.loc }) with
-     | Some (base, args) ->
+     | Some (base, src, head, args) ->
        (* Statement-expr temporaries pin the interpreter's left-to-right
           argument evaluation order (C argument order is unspecified). *)
        let args_c = List.map emit_expr args in
        let callee = base ^ "__direct" in
-       (match (if __in_tail then self_tail_goto callee args_c else None) with
+       (* Q-127: the callee's region arguments lead, in the order its scheme is walked --
+          the same walk the declaration does, so neither end stores an order. Each is a
+          region THIS caller can name: a block it is inside, one of its own region
+          parameters (which is how the outermost block's region reaches a body three
+          calls down), or the default region. They are names, not expressions, so they
+          need no temporary and have no evaluation order. *)
+       let rpairs = Typer.region_args_for src head.Ast.ty in
+       let rargs = List.map (fun (_, actual) -> region_var_of actual) rpairs in
+       (* A self-tail call becomes a goto, which reassigns only the parameters
+          `with_self_tail` tracks. The region parameters are not among them, so the goto
+          is only correct while this call hands each of them BACK UNCHANGED -- the
+          ordinary case. Recursing from inside a nested block, with a different region,
+          has to stay a real call. *)
+       let regions_unchanged =
+         List.for_all (fun (want, _) -> List.mem want !current_region_params)
+           rpairs
+         && List.for_all2 (fun (want, _) got -> want = got) rpairs rargs
+       in
+       (match (if __in_tail && regions_unchanged then self_tail_goto callee args_c
+               else None) with
         | Some g -> g
         | None ->
           let tmps =
@@ -2579,7 +2623,7 @@ let rec emit_expr (e : Ast.expr) : string =
           Printf.sprintf "({ %s %s(%s); })"
             (String.concat " " tmps) callee
             (String.concat ", "
-               (List.mapi (fun i _ -> Printf.sprintf "__da%d" i) args)))
+               (rargs @ List.mapi (fun i _ -> Printf.sprintf "__da%d" i) args)))
      | None ->
     (match collect_inner_direct (Ast.{ node = Ast.App (f, arg); ty = e.ty; loc = e.loc }) with
      | Some (n, args) ->
@@ -4962,8 +5006,14 @@ let emit_lifted_fn (f : lifted_fn) : string =
      different arena the moment this is called from a block nested inside its own. *)
   let saved_caps = !captured_regions in
   captured_regions := regions_of_captures f.l_captures @ saved_caps;
+  (* Q-127: a lifted body declares no region parameters of its own. If the enclosing
+     `__direct` left its list in scope, a `__rpN` here would name a parameter this
+     function does not have. Regions reach a lifted body as CAPTURES (Q-131). *)
+  let saved_rps = !current_region_params in
+  current_region_params := [];
   let body_c, tail_used =
-    Fun.protect ~finally:(fun () -> captured_regions := saved_caps) (fun () ->
+    Fun.protect ~finally:(fun () ->
+        captured_regions := saved_caps; current_region_params := saved_rps) (fun () ->
       with_self_tail f.l_name all_bindings (fun () ->
         with_var_types all_bindings (fun () ->
           with_expected_ty f.l_return_ty (fun () -> emit_expr f.l_body))))
@@ -4980,13 +5030,28 @@ let emit_lifted_fn (f : lifted_fn) : string =
    parameter — no closure envs, no region-lock traffic. Anonymous lambdas
    inside the body are queued again under fresh names (mild code-size cost);
    inner-lifted fns are only *dispatched* here, never re-lifted. *)
+(* Q-127: the region parameters this twin declares. They LEAD, so a self-tail call --
+   which reassigns only the parameters `with_self_tail` tracks -- leaves them alone. That
+   is right: a function recursing allocates where it was told to. The one case it is not
+   right for, recursing from inside a nested block with a different region, is kept out
+   of the goto path at the call site. *)
+let direct_region_params (name : string) : string list =
+  Typer.region_params_for (source_name_of name)
+
 let emit_direct_fn (name : string) (info : direct_fn_info) : string =
   set_inner_lifts_for_host name;
-  let params_c = String.concat ", " (List.map format_param info.d_params) in
+  let rps = direct_region_params name in
+  let params_c =
+    String.concat ", "
+      (List.map (fun r -> "__lang_region* " ^ r) rps
+       @ List.map format_param info.d_params) in
+  let saved_rps = !current_region_params in
+  current_region_params := rps;
   let body_c, tail_used =
-    with_self_tail (c_safe_name name ^ "__direct") info.d_params (fun () ->
-      with_var_types info.d_params (fun () ->
-        with_expected_ty info.d_ret (fun () -> emit_expr info.d_body)))
+    Fun.protect ~finally:(fun () -> current_region_params := saved_rps) (fun () ->
+      with_self_tail (c_safe_name name ^ "__direct") info.d_params (fun () ->
+        with_var_types info.d_params (fun () ->
+          with_expected_ty info.d_ret (fun () -> emit_expr info.d_body))))
   in
   Printf.sprintf "static %s %s__direct(%s) {\n%s%s  return %s;\n}\n%s"
     (c_type_of info.d_ret) (c_safe_name name) params_c
@@ -4998,7 +5063,9 @@ let emit_direct_fn_forward_decl (name : string) (info : direct_fn_info) : string
   Printf.sprintf "static %s %s__direct(%s);"
     (c_type_of info.d_ret) (c_safe_name name)
     (String.concat ", "
-       (List.map (fun (_, t) -> c_type_of t) info.d_params))
+       (List.map (fun r -> "__lang_region* /* " ^ r ^ " */")
+          (direct_region_params name)
+        @ List.map (fun (_, t) -> c_type_of t) info.d_params))
 
 let emit_fn_forward_decl (f : fn_decl) : string =
   Printf.sprintf "%s%s %s(%s);"
@@ -11354,6 +11421,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     then Hashtbl.replace direct_fns f.name
            { d_params = params; d_body = body; d_ret = ret }
   ) fns;
+  (* Q-127: rebuild instance -> source from the table that made the names. *)
+  Hashtbl.reset source_of_instance;
+  (let tbl = !multi_inst_fns in
+   Hashtbl.iter (fun base arrows ->
+     List.iter (fun a ->
+       Hashtbl.replace source_of_instance (tbl.Monomorph.mangle base a) base) arrows)
+     tbl.Monomorph.arrows);
   (* Polymorphic variant monomorphization: collect concrete
      instantiations from the AST + fn signatures, then emit specialized
      typedefs (forward+ptr for recursive instances, full struct for

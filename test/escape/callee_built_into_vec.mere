@@ -1,0 +1,20 @@
+// ROUTE: a CALLEE builds the container, and the block stores it into one that outlives
+// the block. The twin of callee_alloc_chain, which is SAFE because nothing escapes there.
+//
+// GATED, and it is the safety property the region-passing change (v0.1.464) depends on.
+// That change makes `build 7` allocate in A's arena rather than the default region, so a
+// pointer to it surviving the block would now dangle where before it merely leaked. The
+// check that stops it is the one that was already there: the call site binds `build`'s
+// region to A, so `sink`'s element type mentions A, and storing into something that
+// outlives the block is a type error by name.
+//
+// Nothing new was written for this. The point of passing the region IN rather than
+// letting the body guess it -- which is what v0.1.453 did, and what m3d's second frame
+// disproved -- is exactly that the TYPE follows the value, so the check that already
+// exists is the check that applies.
+let build = fn (n: int) -> let v = vec_new () in let _ = vec_push v n in v;
+let sink = vec_new ();
+
+let _ = region A { vec_push sink (build 7) };
+
+print_int (vec_len sink)
