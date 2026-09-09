@@ -1,0 +1,35 @@
+// A FUNCTION DEFINED IN ONE REGION, CALLED FROM A REGION NESTED INSIDE IT.
+//
+// `mk` is written inside `region R`, so the container it builds is typed `Vec[R, int]`
+// and `cache`, also in R, can hold it: the types are consistent and the escape check is
+// right to say nothing. What was wrong was the ARENA. `mk` is lifted to its own
+// function, so the block's `__region_R` local does not reach it, and the backend fell
+// back on the RUNTIME CURRENT REGION -- which at the call is S, not R. The value went
+// into S's arena, S ended, T reused it, and the read came back as T's filler.
+//
+//   interp   1 / 700          (no arenas, so nothing to get wrong)
+//   C        4096 / -1        (before v0.1.454)
+//
+// The fix is the same shape as Q-127's: the region travels as a VALUE. A lifted body
+// takes the region blocks it was written inside as captures, like any other free
+// variable, so `mk` allocates in R wherever it is called from.
+//
+// T's filler is 4096 pushes because the arena is REUSED, not freed: without something
+// written over it the stale bytes read back correctly and the bug looks absent.
+// A sanitiser cannot see it either -- the arena is one live allocation.
+// The filler is a TOP-LEVEL `let rec` so the LLVM backend can take this file too --
+// it refuses a `let rec` inside an expression, and this case is about a hole that
+// backend has as well.
+let rec fill = fn (j) -> fn (i: int) ->
+  if i >= 4096 then 0 else let _ = vec_push j (0 - 1) in fill j (i + 1);
+
+let _ = region R {
+  let mk = fn (n: int) -> let v = vec_new () in let _ = vec_push v n in v in
+  let cache = vec_new () in
+  let _ = region S { vec_push cache (mk 700) } in
+  let _ = region T { let junk = vec_new () in fill junk 0 } in
+  let got = vec_get cache 0 in
+  let _ = print_int (vec_len got) in
+  print_int (vec_get got 0)
+};
+0

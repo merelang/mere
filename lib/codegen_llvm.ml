@@ -881,6 +881,36 @@ let current_expected_ty : Ast.ty option ref = ref None
    exit so `&R v` / view literals can find the right region. *)
 let current_regions : (string * string) list ref = ref []
 
+(* Q-131: the region blocks the lifting walk is currently inside. A ref rather than a
+   tenth parameter through a twenty-case traversal; the walk is single-threaded. *)
+let lifting_regions_llvm : string list ref = ref []
+
+(* The regions a body actually reaches for: the names in its containers' region slots.
+   Capturing every enclosing block would work and would carry parameters nothing reads. *)
+let regions_needed_by_llvm (enclosing : string list) (body : Ast.expr) : string list =
+  let found = ref [] in
+  let rec ty_go t =
+    match Ast.walk t with
+    | Ast.TyCon (n, (slot0 :: rest))
+      when List.mem n Typer.region_parameterised_names ->
+      (match Ast.walk slot0 with
+       | Ast.TyRef (_, r, Ast.TyUnit) ->
+         if List.mem r enclosing && not (List.mem r !found) then found := r :: !found
+       | other -> ty_go other);
+      List.iter ty_go rest
+    | Ast.TyCon (_, args) -> List.iter ty_go args
+    | Ast.TyTuple ts -> List.iter ty_go ts
+    | Ast.TyArrow (a, b) -> ty_go a; ty_go b
+    | Ast.TyRef (_, _, inner) -> ty_go inner
+    | _ -> ()
+  in
+  let rec go (e : Ast.expr) =
+    (match e.Ast.ty with Some t -> ty_go t | None -> ());
+    List.iter go (Ast.children e)
+  in
+  go body;
+  List.rev !found
+
 (* For a pattern matched against a scrutinee of type `scrut_ty` and
    payload of type `payload_ty` (if any), produce the (name, concrete-ty)
    bindings introduced by the pattern. Used to update current_var_types
@@ -1359,6 +1389,18 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
 
         (fv, ty)) body_fvs
     in
+    (* Q-131: THE REGION IS A CAPTURE LIKE ANY OTHER, the same as the C backend does it
+       and for the same reason: a lifted body is not lexically inside the block it was
+       written in, and reaching for the runtime current region gives a DIFFERENT arena
+       once this is called from a block nested inside its own. Named `__region_R`, typed
+       as the region marker (`llvm_ty_of` already lowers every `TyRef` to `ptr`), so the
+       parameter, the argument and what `region_ptr_for` answers are one SSA name. *)
+    let captures =
+      List.map (fun r ->
+        ("__region_" ^ r, Ast.TyRef (Ast.BorrowedRead, r, Ast.TyUnit)))
+        (regions_needed_by_llvm !lifting_regions_llvm fn_body)
+      @ captures
+    in
     let lifted_name = fresh_inner_name_llvm n in
     let return_ty, param_ty =
       match value_ty with
@@ -1431,7 +1473,13 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
         (match g with Some ge -> walk host_param host_locals ge | None -> ());
         walk host_param host_locals b) arms
     | Ast.Tuple es -> List.iter (walk host_param host_locals) es
-    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walk host_param host_locals b
+    | Ast.Region_block (rn, b) | Ast.Region_loop (rn, _, b) ->
+      (* Q-131: a fn lifted out of here has to take the block's region with it. *)
+      lifting_regions_llvm := rn :: !lifting_regions_llvm;
+      let restore () = lifting_regions_llvm := List.tl !lifting_regions_llvm in
+      (match walk host_param host_locals b with
+       | () -> restore ()
+       | exception ex -> restore (); raise ex)
     | Ast.Ref (_, _, a) -> walk host_param host_locals a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk host_param host_locals e) fs
     | Ast.Field_get (a, _) -> walk host_param host_locals a
@@ -6306,6 +6354,17 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         in
         (fv, cty)) fvs
     in
+    (* Q-131: A CLOSURE CARRIES THE REGION IT WAS MADE IN. Its body runs wherever the
+       closure is called -- which is a different block, or none -- so reaching for the
+       runtime current region there answers about the caller instead of about the
+       region the value's TYPE names. Captured at construction, where the block's
+       pointer is in scope, under the same `__region_R` name the lifted-fn path uses. *)
+    let captures =
+      List.map (fun r ->
+        ("__region_" ^ r, Ast.TyRef (Ast.BorrowedRead, r, Ast.TyUnit)))
+        (regions_needed_by_llvm (List.map fst !current_regions) fn_body)
+      @ captures
+    in
     let adapter_name, env_name = fresh_anon_names () in
     pending_closures := {
       ce_adapter_name = adapter_name;
@@ -6346,6 +6405,11 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                     env_p size);
       List.iteri (fun i (cname, cty) ->
         let cv =
+          (* A region capture is not a variable: its value is the block's pointer,
+             which `region_ptr_for` already knows how to produce here. *)
+          if String.length cname > 9 && String.sub cname 0 9 = "__region_" then
+            region_ptr_for (String.sub cname 9 (String.length cname - 9))
+          else
           match List.assoc_opt cname env with
           | Some v -> v
           | None -> unsupported e.Ast.loc ("capture not in scope: " ^ cname)
@@ -6778,6 +6842,15 @@ let emit_anon_adapter (ce : closure_emission) : string =
       (cname, v)) ce.ce_env_fields
   in
   let env = (ce.ce_param, "%" ^ llvm_safe_local ce.ce_param) :: cap_env in
+  (* Q-131: the regions this closure captured are in scope again, by the register they
+     were loaded into, so `region_ptr_for` answers with them rather than with whatever
+     region happens to be current where the closure was called. *)
+  let saved_regions_anon = !current_regions in
+  current_regions :=
+    List.filter_map (fun (n, v) ->
+      if String.length n > 9 && String.sub n 0 9 = "__region_"
+      then Some (String.sub n 9 (String.length n - 9), v) else None) cap_env
+    @ saved_regions_anon;
   current_var_types :=
     (ce.ce_param, ce.ce_param_ty) ::
     List.map (fun (n, t) -> (n, t)) ce.ce_env_fields;
@@ -6802,6 +6875,7 @@ let emit_anon_adapter (ce : closure_emission) : string =
   instrs := saved_instrs;
   reg_counter := saved_reg;
   label_counter := saved_lbl;
+  current_regions := saved_regions_anon;
   current_var_types := saved_vt;
   current_expected_ty := saved_exp;
   current_host_fn_llvm := saved_host;
@@ -6830,6 +6904,15 @@ let emit_lifted_fn_llvm (lf : lifted_fn_llvm) : string =
     List.map (fun (n, _) -> (n, "%" ^ n)) lf.l_captures
     @ [(lf.l_param, "%" ^ llvm_safe_local lf.l_param)]
   in
+  (* Q-131: a captured region is in scope here under its own SSA name, so
+     `region_ptr_for` finds it exactly the way it finds a block's own pointer. *)
+  let saved_regions = !current_regions in
+  current_regions :=
+    List.filter_map (fun (n, _) ->
+      if String.length n > 9 && String.sub n 0 9 = "__region_"
+      then Some (String.sub n 9 (String.length n - 9), "%" ^ n) else None)
+      lf.l_captures
+    @ saved_regions;
   current_var_types :=
     List.map (fun (n, t) -> (n, t)) lf.l_captures
     @ [(lf.l_param, lf.l_param_ty)];
@@ -6840,6 +6923,7 @@ let emit_lifted_fn_llvm (lf : lifted_fn_llvm) : string =
   else emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of lf.l_return_ty) rv);
   let body = String.concat "\n" (List.rev !instrs) in
   instrs := saved_instrs;
+  current_regions := saved_regions;
   current_var_types := saved_vt;
   current_expected_ty := saved_exp;
   current_host_fn_llvm := saved_host;
