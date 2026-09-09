@@ -557,6 +557,133 @@ let type_of s =
   ) prog.decls;
   Ast.pp_ty (Typer.infer !type_env prog.main)
 
+(* Q-127 STAGE 1, THE MEASUREMENT. Nothing here changes what is compiled.
+
+   The open half of Q-127 is closed by passing a function's allocation region IN as a
+   hidden leading argument, so that the body allocates where the call site decided
+   instead of guessing (which is what v0.1.453 did, and what m3d's second frame
+   disproved). Before writing that, this reports how many functions it would touch and
+   how many are disqualified, on real programs -- because "how big is this change"
+   answered from the code is a guess and answered from the corpus is a number.
+
+   A function is DISQUALIFIED when a hidden argument has nowhere to go:
+
+     value-used   the name appears somewhere other than the head of an application,
+                  so it becomes a closure value, and a closure's ABI has no room for
+                  a region without changing every closure in the language.
+     partial      every occurrence is a call, but at least one passes fewer arguments
+                  than the type takes. The region belongs to the SATURATED call, and
+                  the partial one has already built a value by then.
+
+   Disqualified is not an error: those keep today's behaviour, which is the default
+   region -- over-strict, never unsound. *)
+let region_param_report ?base_dir ?(search_paths = []) s =
+  Exhaustive.reset ();
+  Typer.reset_send_constraints ();
+  let prog = Trait_elab.elaborate (parse_program ?base_dir ~search_paths s) in
+  let type_env = ref Typer.initial_env in
+  let base_names = List.map fst Typer.initial_env in
+  List.iter (fun decl ->
+    match decl with
+    | Ast.Top_let (pat, value) ->
+      warn_reserved_in_pattern pat;
+      let outer_env = !type_env in
+      let bindings =
+        Typer.enter_level (fun () ->
+          let t = infer_top_let outer_env value in
+          Typer.check_pattern pat t) in
+      type_env := List.fold_left (fun acc (n, ty) ->
+        (n, top_let_scheme outer_env value ty) :: acc) outer_env bindings
+    | Ast.Top_let_rec bindings ->
+      let outer_env = !type_env in
+      let alphas =
+        Typer.enter_level (fun () -> List.map (fun _ -> Typer.fresh_var ()) bindings) in
+      let env_rec = List.fold_left2 (fun acc (n, _) a ->
+        (n, Typer.mono a) :: acc) outer_env bindings alphas in
+      List.iter2 (fun (_, value) alpha ->
+        let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
+        Typer.unify value.Ast.loc alpha t) bindings alphas;
+      type_env := List.fold_left2 (fun acc (n, _) a ->
+        (n, Typer.generalize outer_env a) :: acc) outer_env bindings alphas
+    | Ast.Top_type (name, params, variants) -> Typer.register_type name params variants
+    | Ast.Top_record (name, params, fields) -> Typer.register_record name params fields
+    | Ast.Top_view (name, region, fields) -> Typer.register_view name region fields
+    | Ast.Top_drop name -> Typer.register_drop_type name
+    | Ast.Top_sync name -> Typer.register_sync_type name
+    | Ast.Top_local name -> Typer.register_local_type name
+    | Ast.Top_extern (name, ty) -> type_env := (name, Typer.mono ty) :: !type_env
+    | Ast.Top_extern_type type_name -> Typer.register_type type_name [] []
+    | Ast.Top_ctor_alias (alias, target) -> Typer.alias_ctor alias target
+    | Ast.Top_record_alias (alias, target) -> Typer.alias_record alias target
+    | Ast.Top_signature _ | Ast.Top_type_alias _
+    | Ast.Top_trait _ | Ast.Top_impl _ -> ()) prog.decls;
+  let _ = Typer.infer !type_env prog.main in
+
+  (* How each name is USED, over the whole program including every decl's body.
+     `head` is the spine head of an application; everything else is a value use. *)
+  let value_used : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+  let applied_with : (string, int) Hashtbl.t = Hashtbl.create 64 in
+  let note_app n k =
+    let cur = match Hashtbl.find_opt applied_with n with Some c -> c | None -> max_int in
+    Hashtbl.replace applied_with n (min cur k)
+  in
+  let rec spine (e : Ast.expr) (k : int) : unit =
+    match e.Ast.node with
+    | Ast.App (f, a) -> value a; spine f (k + 1)
+    | Ast.Var n when k > 0 -> note_app n k
+    | _ -> value e
+  and value (e : Ast.expr) : unit =
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit -> ()
+    | Ast.Var n -> Hashtbl.replace value_used n ()
+    | Ast.App _ -> spine e 0
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) -> value a; value b
+    | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _) | Ast.Ref (_, _, a)
+    | Ast.Region_block (_, a) | Ast.Region_loop (_, _, a) | Ast.Fun (_, _, a) -> value a
+    | Ast.Let (_, v, b) | Ast.With (_, v, b) -> value v; value b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> value v) bs; value b
+    | Ast.If (c, t, f) -> value c; value t; value f
+    | Ast.Constr (_, Some a) -> value a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (sc, arms) ->
+      value sc;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> value ge | None -> ()); value b) arms
+    | Ast.Tuple es -> List.iter value es
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, x) -> value x) fs
+    | Ast.Record_update (a, fs) -> value a; List.iter (fun (_, x) -> value x) fs
+  in
+  List.iter (fun decl ->
+    match decl with
+    | Ast.Top_let (_, v) -> value v
+    | Ast.Top_let_rec bs -> List.iter (fun (_, v) -> value v) bs
+    | _ -> ()) prog.decls;
+  value prog.main;
+
+  let buf = Buffer.create 1024 in
+  let total = ref 0 and ok = ref 0 and vused = ref 0 and partial = ref 0 in
+  List.iter (fun (name, (sch : Typer.scheme)) ->
+    if not (List.mem name base_names) then begin
+      let rps = Typer.scheme_region_params sch in
+      if rps <> [] then begin
+        incr total;
+        let arity = Typer.ty_arity sch.body in
+        let status =
+          if Hashtbl.mem value_used name then (incr vused; "value-used")
+          else match Hashtbl.find_opt applied_with name with
+            | Some k when k < arity -> incr partial; "partial"
+            | _ -> incr ok; "ok"
+        in
+        Buffer.add_string buf
+          (Printf.sprintf "%s\t%d\t%d\t%s\n" name (List.length rps) arity status)
+      end
+    end) (List.rev !type_env);
+  Buffer.add_string buf
+    (Printf.sprintf "# %d region-parameterised, %d ok, %d value-used, %d partial\n"
+       !total !ok !vused !partial);
+  Buffer.contents buf
+
 let process_typed s =
   Exhaustive.reset ();
   Typer.reset_send_constraints ();

@@ -476,6 +476,51 @@ let unmark_non_quantified_regions (qs : int list) (t : Ast.ty) : unit =
   in
   go t
 
+(* Q-127 STAGE 1: WHICH OF A SCHEME'S QUANTIFIED VARIABLES WOULD BECOME A HIDDEN
+   REGION PARAMETER.
+
+   The half of Q-127 that is still open is that a function's body allocates through
+   the region variable in its own scheme, and the call site binds a different copy.
+   Passing the region IN as a leading argument is what makes the two the same thing --
+   `__caller` (v0.1.453) made the body GUESS instead, which is unsound for a chain and
+   was withdrawn in v0.1.456.
+
+   This function answers, for one scheme, which variables such an argument would carry:
+   the ones that are QUANTIFIED (so the call site owns them), are marked as ALLOCATION
+   regions (so the body really allocates through them, rather than merely passing a
+   container along), and sit in a container's region slot. Nothing reads it yet -- it is
+   here so the size and shape of that change can be measured on real programs before any
+   of it is written. `mere --dump-region-params` prints it.
+
+   Order is the order they appear in the type, so it can serve as the parameter order
+   later without anyone having to agree on one twice. *)
+let scheme_region_params (sch : scheme) : int list =
+  let acc = ref [] in
+  let add id = if not (List.mem id !acc) then acc := id :: !acc in
+  let rec go t =
+    match Ast.walk t with
+    | Ast.TyCon (n, (slot0 :: rest)) when List.mem n region_parameterised_names ->
+      (match Ast.walk slot0 with
+       | Ast.TyVar v
+         when List.mem v.Ast.id sch.quantified
+              && Hashtbl.mem alloc_region_ids v.Ast.id -> add v.Ast.id
+       | other -> go other);
+      List.iter go rest
+    | Ast.TyCon (_, args) -> List.iter go args
+    | Ast.TyTuple ts -> List.iter go ts
+    | Ast.TyArrow (a, b) -> go a; go b
+    | Ast.TyRef (_, _, inner) -> go inner
+    | _ -> ()
+  in
+  go sch.body;
+  List.rev !acc
+
+(* How many arguments a scheme's type takes before it stops being an arrow. A hidden
+   region argument can only be passed where the call is SATURATED, so this is what a
+   partial application has to be compared against. *)
+let rec ty_arity (t : Ast.ty) : int =
+  match Ast.walk t with Ast.TyArrow (_, b) -> 1 + ty_arity b | _ -> 0
+
 let instantiate_with_map sch =
   let mapping = List.map (fun id -> (id, fresh_var ())) sch.quantified in
   (* Q-127: an allocation region stays one in every copy. The mark is what the call
