@@ -873,6 +873,35 @@ let region_parameterised = region_parameterised_names
    AN ARROW RESULT IS LEFT ALONE. A partial application has allocated nothing yet, and
    the region it will allocate in belongs to the call that finishes it -- which may be
    inside a different block entirely. *)
+(* EVERY ALLOCATION REGION THIS REFERENCE INSTANTIATED, not only the ones its result
+   type happens to show.
+
+   The first version walked the RESULT of a call, which is sound for what it covers and
+   silently misses the case that matters. A chain of ordinary calls -- `render_at` calls
+   `one_frame_into` calls `attr` calls `Acache.floats`, none of them written inside a
+   `region` -- binds nothing at any level, because none of those call sites is lexically
+   inside a block. The innermost allocation therefore stays undecided, lowers to the
+   RUNTIME current region, and at runtime that is the block the outermost call was made
+   from. The type said "undecided", the arena said "the frame's", and the escape check
+   had nothing to look at: m3d's accessor cache stored a frame-region Vec into a cache
+   that outlives the frame and read it back after the arena was reused.
+
+   So the binding happens where the instantiation does. A reference to a
+   region-polymorphic function, evaluated inside a block, allocates in that block --
+   whether or not the allocation is visible in its type. What is invisible cannot
+   escape on its own, so binding it costs nothing; what is visible now carries the
+   block's name into the caller's types, where the escape check reads it. *)
+let bind_instantiated_alloc_regions (mapping : (int * Ast.ty) list) : unit =
+  match !active_regions with
+  | [] -> ()
+  | r :: _ ->
+    let marker = Ast.TyRef (Ast.BorrowedRead, r, Ast.TyUnit) in
+    List.iter (fun (id, fresh) ->
+      if Hashtbl.mem alloc_region_ids id then
+        match Ast.walk fresh with
+        | Ast.TyVar v when v.Ast.link = None -> v.Ast.link <- Some marker
+        | _ -> ()) mapping
+
 let bind_alloc_regions_to_active (t : Ast.ty) : unit =
   match !active_regions with
   | [] -> ()
@@ -914,24 +943,30 @@ let rec resolve_regions_ty (t : Ast.ty) : Ast.ty =
   | Ast.TyCon (n, (slot0 :: rest)) when List.mem n region_parameterised ->
     let slot0 =
       match Ast.walk slot0 with
-      (* AN ALLOCATION REGION NOBODY DECIDED IS THE CALLER'S, and that is a different
-         answer from `__heap`. It reaches the backends as `__caller`, which they lower
-         to the RUNTIME CURRENT REGION -- and that is not an approximation: a call does
-         not change the current region, so inside the callee it is exactly the region
-         that was open around the call, which is what the typer bound the caller's copy
-         of this variable to. The two agree by construction rather than by a rule
-         written down twice.
+      (* AN UNDECIDED REGION IS THE DEFAULT ONE -- ALLOCATION OR NOT.
 
-         It is also right when nobody bound it at all. Either the variable never
-         reaches the signature -- so the container is purely local to the call and
-         cannot escape it -- or every call site was outside a region, where the current
-         region IS the default one. *)
-      | Ast.TyVar v when Hashtbl.mem alloc_region_ids v.Ast.id ->
-        let caller = Ast.TyRef (Ast.BorrowedRead, "__caller", Ast.TyUnit) in
-        v.Ast.link <- Some caller;
-        caller
-      (* Anything else undecided is a pass-through nobody supplied: the default region,
-         which is what `__heap` has always meant. *)
+         This settled an allocation region on `__caller` for a while, which the backends
+         lowered to the RUNTIME CURRENT REGION, on the argument that a call does not
+         change the current region, so inside the callee it must be the region open
+         around the call. THE ARGUMENT IS FALSE FOR A CHAIN OF CALLS, and m3d is the
+         witness: `render_at` calls `one_frame_into` calls `attr` calls `Acache.floats`
+         calls `Acc.floats`, and only the outermost of those is written inside a
+         `region` block, so only its copy of the variable is bound. `Acc.floats`'s BODY
+         allocates through the scheme's own variable, which nothing bound -- and
+         lowering that to the current region put the value in the frame's arena while
+         the caller's type said the default one. Stored in a cache that outlives the
+         frame and read back after the arena was reused: a segfault from the second
+         frame on.
+
+         The body and the call site are DIFFERENT COPIES of the variable, so the only
+         ways to make a body allocate where its caller decided are to pass the region in
+         or to specialise per region. Until one of those exists, undecided means the
+         default region -- which is what it has always meant, and is safe.
+
+         The binding at the call site still does its other job: the CALLER's type names
+         the block, so carrying the value out of the block is a type error. Being typed
+         to a region the value does not actually live in is over-strict and never
+         unsound; the other way round is what this replaces. *)
       | Ast.TyVar v ->
         let heap = Ast.TyRef (Ast.BorrowedRead, "__heap", Ast.TyUnit) in
         v.Ast.link <- Some heap;
@@ -2699,6 +2734,9 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
     (match List.assoc_opt name env with
      | Some sch ->
        let ity, mapping = instantiate_with_map sch in
+       (* Q-127: this reference is being evaluated HERE, so whatever it allocates is
+          allocated here -- see `bind_instantiated_alloc_regions`. *)
+       bind_instantiated_alloc_regions mapping;
        (if sch.constraints <> [] then
           let cs =
             List.filter_map (fun (tr, vid) ->

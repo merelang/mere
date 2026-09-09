@@ -4,6 +4,68 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.456 — 2026-09-09
+
+**A CORRECTION to v0.1.453, and the claim it withdraws is the headline one.** Q-127 said
+a container a function builds should live in the region the CALLER is standing in, and
+settled an undecided allocation region on `__caller`, which the backends lowered to the
+runtime current region. The argument was that a call does not change the current region,
+so inside the callee it must be the region open around the call. **That is false for a
+chain of calls**, and m3d is the witness:
+
+```
+region FR { render_at o }      -- render_at -> one_frame_into -> attr
+                               --   -> Acache.floats -> Acc.floats
+```
+
+Only the outermost of those is written inside a block, so only its copy of the region
+variable is bound. `Acc.floats`'s BODY allocates through the scheme's own variable, which
+nothing bound — and lowering that to the current region put the value in the frame's
+arena while every type involved said the default one. m3d stored it in a cache that
+outlives the frame and read it back after the arena was reused: **a segfault from the
+second frame on**, in v0.1.453, 454 and 455.
+
+The body and the call site hold DIFFERENT COPIES of the variable. The only ways to make
+a body allocate where its caller decided are to pass the region in or to specialise per
+region, and neither exists yet. So an undecided region is the default region again —
+what it has always meant, and safe. **`region R { let v = build .. }` reclaims nothing
+again**: the 822 MB → 10 MB measurement is withdrawn.
+
+### What survives, and it is not nothing
+
+**The types still name the block, so the escape check still fires.** Binding at the call
+site was doing two jobs and only one of them was unsound. Carrying a callee-built
+container out of a `region` block is a type error, reported by the check that was
+already there — being typed to a region the value does not actually live in is
+over-strict and never unsound, which is the direction this now errs in.
+
+**Every GATED route in `test/escape/ROUTES` is REJECT on the interpreter too.** Ten of
+them read ACCEPT before, with the honest explanation that the interpreter has no arenas
+so nothing dangles there — but the escape rule is a TYPE rule, and one the toolchain only
+half applies is a rule with a hole. The hole was at the top level: `let o = vec_new ()`
+was generalised over its region, so a store inside a block bound a COPY and `o`'s own
+type never mentioned the block. Giving the top-level `let` the value restriction the
+inner one has had since Phase 36 makes it one variable and the check fires. One program,
+one answer.
+
+**And that restriction now exists in one place.** `Pipeline` had the top-level `let`
+written out THREE times — `process_decls`, `infer_program_inner`, `type_of` — and they
+had drifted; the interpreter and `-t` disagreed about the same program for a while today
+because two of them had it and one did not.
+
+### The lesson, since it cost three versions
+
+The premise was checked against a witness that did not distinguish it: a call made
+directly inside a block, where the runtime current region and the caller's binding
+coincide. The case that separates them needs a CHAIN, and the corpus had one — m3d — that
+nothing in this repository runs. `dune runtest`, parity, every gate and all 29 dogfood
+programs' type-checks were green while three released versions could not render a second
+frame. The bench that would have caught it is in m3d's repository, not this one.
+
+parity 171 passed / 0 failed. `dune runtest` 2715 / 0. m3d's four bench models run.
+
+---
+
 ## v0.1.455 — 2026-09-09
 
 **An exported call *is* a region, and the typer knows it now.** `mere -c --lib` compiles

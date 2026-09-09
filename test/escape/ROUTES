@@ -40,31 +40,35 @@
 # TERMINATES, since `type t = T of t` names itself in its own declaration and
 # the fix follows declarations now.
 #
-# WHY `via_fn_arg`'s INTERP COLUMN MOVED (Q-127, v0.1.453). It read REJECT and now
-# reads ACCEPT, which is not a loss: it is the eight other "store into an outer
-# container" rows' answer, and this row was the odd one out for a reason that had
-# nothing to do with escape. The program annotates `dst: Vec[__heap, Vec[R, int]]`,
-# and while `vec_new ()` produced a RIGID `__heap` the annotation failed to unify --
-# `expected __heap, got &__heap unit` -- so the interpreter rejected the program with
-# a message about nothing. Now the marker is decided at the call site, the annotation
-# unifies, and the interpreter does what it does for every other route here: it has no
-# arenas, so nothing dangles and it runs. The COMPILED column is the one that changed
-# for the better: it used to be that same confused unification error and is now the
-# escape check naming `o` and region R.
+# THE INTERP COLUMN IS NOW REJECT FOR EVERY GATED ROW (Q-127, v0.1.456), and that is
+# the interesting change in this table. It used to read ACCEPT for ten of them, with
+# the honest explanation that the interpreter has no arenas so nothing dangles there --
+# but the escape rule is a TYPE rule, and a type rule that only one half of the
+# toolchain applies is a rule with a hole in it. The hole was at the TOP LEVEL: a
+# top-level `let o = vec_new ()` was generalised over its region, so `vec_push o ..`
+# inside a block bound a COPY of the variable and `o`'s own type never mentioned the
+# block. Giving the top-level `let` the value restriction the inner one has had since
+# Phase 36 makes it one variable, the region reaches `o`'s type, and the check that was
+# always meant to fire does.
+#
+# So the header's old warning -- "one program gets two answers from one toolchain" --
+# no longer describes this file. It is left standing below because it describes why the
+# machinery is shaped the way it is, and because the reverse case (a backend refusing
+# what the typer allows) is still possible and still recorded.
 #
 # route              kind   compiled  interp      unreadable  q
 result_container     GATED  REJECT    REJECT      -           -
-vec_into_map         GATED  REJECT    ACCEPT      -           Q-053
-vec_into_vec         GATED  REJECT    ACCEPT      -           Q-053
+vec_into_map         GATED  REJECT    REJECT      -           Q-053
+vec_into_vec         GATED  REJECT    REJECT      -           Q-053
 listbuf_out          GATED  REJECT    REJECT      -           -
-listbuf_into_vec     GATED  REJECT    ACCEPT      -           Q-053
-map_into_map         GATED  REJECT    ACCEPT      -           Q-053
-strbuf_into_vec      GATED  REJECT    ACCEPT      -           Q-053
-tuple_into_vec       GATED  REJECT    ACCEPT      -           Q-053
-via_fn_arg           GATED  REJECT    ACCEPT      -           Q-053
-loop_store_outer     GATED  REJECT    ACCEPT      -           Q-053
-record_field         GATED  REJECT    UNREADABLE  -           Q-067
-variant_payload      GATED  REJECT    ACCEPT      -           Q-067
+listbuf_into_vec     GATED  REJECT    REJECT      -           Q-053
+map_into_map         GATED  REJECT    REJECT      -           Q-053
+strbuf_into_vec      GATED  REJECT    REJECT      -           Q-053
+tuple_into_vec       GATED  REJECT    REJECT      -           Q-053
+via_fn_arg           GATED  REJECT    REJECT      -           Q-053
+loop_store_outer     GATED  REJECT    REJECT      -           Q-053
+record_field         GATED  REJECT    REJECT       -           Q-067
+variant_payload      GATED  REJECT    REJECT      -           Q-067
 str_out              SAFE   ACCEPT    ACCEPT      w           -
 variant_of_str       SAFE   ACCEPT    ACCEPT      w           -
 closure_out          SAFE   ACCEPT    ACCEPT      w,rv        -
