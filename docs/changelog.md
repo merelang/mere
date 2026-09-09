@@ -4,6 +4,55 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.467 — 2026-09-10
+
+**A closure written inside a `region` block that calls an inner function which allocates
+did not compile, on both compiled backends, and had not since v0.1.453.** Not "compiled
+wrongly" — the emitted C and the emitted IR named values that were not there:
+
+```
+error: use of undeclared identifier '__region_SC'      (C)
+error: use of undefined value '%v'                     (LLVM)
+```
+
+v0.1.453 gave a lifted inner function its enclosing region as a leading argument, so a
+body called from a nested block allocates where it was written (Q-131). A closure that
+CALLS such a function has to carry that argument in its env. The C backend already pulled
+a lifted callee's captures into the closure's env — **and then filtered them by
+`List.mem_assoc n current_var_types`, which a region name never satisfies, because it is
+not a variable.** The one capture that mattered was the one dropped. The LLVM backend had
+no such pulling at all, so it lost ordinary captures too.
+
+**Three parts, and only the first is obvious:**
+
+1. a region capture is not a variable, so it must be let through that filter and typed
+   as the region marker rather than looked up;
+2. the lifted function may be **defined inside the closure** rather than free in it
+   (m3d's `let rec prims` inside its walk callback), so the scan is over every name the
+   body mentions *or binds*, not over its free variables;
+3. a region the body **opens** must not be captured — `one_frame_into` contains the
+   `region SC { }`, and the curried closure form of it is built at the top level where SC
+   does not exist. Widening the scan without this emitted
+   `__env->__region_SC = __region_SC;` with nothing to read.
+
+### Why it took thirteen versions
+
+It needs all three at once: a `region` block, a closure written inside it, and an inner
+function the closure calls that allocates. Nothing in 175 parity programs, 286 examples or
+13 downstream repositories had written that. **m3d did, the first time it put a block
+around its frame's working set** — which only became worth doing once v0.1.458 and
+v0.1.464/466 made a block reclaim what a callee allocates. The feature's first real user
+found the hole its own machinery had left.
+
+`test/parity/region_closure_calls_lifted.mere` is the shape, in eleven lines. It fails on
+a build of v0.1.457 with the same message, so this is not something today's region-passing
+introduced.
+
+parity 175 / 0. `dune runtest` 2717 / 0. escape 20 routes, 0 holes. 13 downstream
+repositories type-check. region_reclaim 9 checks, region_params 11.
+
+---
+
 ## v0.1.466 — 2026-09-09
 
 **The LLVM backend passes the region too, so Q-127's remaining half is closed on both

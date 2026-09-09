@@ -1,0 +1,37 @@
+// A CLOSURE INSIDE A REGION BLOCK THAT CALLS AN INNER FUNCTION WHICH ALLOCATES, which
+// the C backend emitted as C that does not compile for thirteen versions.
+//
+// v0.1.453 gave a lifted inner function its enclosing region as a leading argument, so a
+// body called from a nested block allocates where it was written (Q-131). A closure that
+// CALLS such a function has to carry that region in its env, or the call inside the
+// adapter names a C local the adapter does not have:
+//
+//   error: use of undeclared identifier '__region_SC'
+//
+// The capture list did pull the callee's captures in -- and then filtered them by
+// `List.mem_assoc n current_var_types`, which a region name never satisfies, because it
+// is not a variable. So the one capture that mattered was the one dropped.
+//
+// It survived thirteen versions because it needs all three at once: a `region` block, a
+// closure written inside it, and an inner function the closure calls that allocates. The
+// first program to write that was m3d, putting a block around its frame's working set --
+// and its own gate said `the emitted C did not compile`, which is the loud kind of
+// failure, unlike the emitted-but-wrong ones this file mostly guards.
+//
+// The other half of the same fix is not visible here: the lifted function may be defined
+// INSIDE the closure rather than free in it (m3d's `let rec prims`), and a region a body
+// OPENS must not be captured at all, because the closure value is built outside it.
+let each = fn (f) -> fn (n: int) -> f n;
+
+let run = fn (n: int) -> region SC {
+  let v = vec_new () in
+  let rec helper = fn (i: int) ->
+    let w = vec_new () in
+    let _ = vec_push w i in
+    vec_push v (vec_len w) in
+  let _ = each (fn (i: int) -> helper i) n in
+  vec_len v
+};
+
+let _ = print_int (run 3);
+print_int (run 7)
