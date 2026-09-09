@@ -163,13 +163,94 @@ if command -v wat2wasm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   fi
 fi
 
-if [ "$checked" -lt 4 ]; then
+# ---- percall: the half of Q-127 that is still open, PINNED OPEN ----------
+#
+# Same shape as pertree, but the thing built inside the block is a CONTAINER
+# returned by a function. C and LLVM do not reclaim it: a container's region is
+# in its type, the body allocates through its own scheme's copy of that region
+# variable, and the call site binds a different copy. The type says the block;
+# the value is in the default region. Over-strict, never unsound -- and it is
+# the 0.7 MB a frame m3d still pays.
+#
+# This leg asserts that it is STILL SO, which is the only kind of pin that can
+# tell anyone when it stops. v0.1.443 is the precedent: the LLVM leg above was
+# written to record a gap and go red when the gap closed, and that is how its
+# table got updated instead of quietly rotting. If someone gives a callee the
+# caller's region -- by passing it in, which is the only way left after v0.1.456
+# withdrew the current-region reading -- these two comparisons fail and say so.
+#
+# The Wasm leg asserts the opposite, because Wasm gets the right answer for an
+# unrelated reason: one bump for every region, nothing stores this vector into
+# anything older than the block, so no high-water mark is raised and the
+# rollback takes it (Q-132). Three legs, three separate claims.
+
+PCSRC="$ROOT/test/regionreclaim/percall.mere"
+PCSMALL=10
+PCBIG=100
+PCN=100000
+# Not "if it builds": a leg that quietly does not run is a leg that reports the
+# question answered. The first version of this section skipped on a build failure
+# and then referenced its own unset variables in the PASS line, so `set -u` killed
+# the gate with a shell error instead of a sentence -- which is how it behaved the
+# first time it was poisoned, and it was the poison's real finding.
+pc_c_small=0; pc_c_big=0
+if [ ! -f "$PCSRC" ]; then
+  echo "FAIL region_reclaim/percall: $PCSRC is missing — the leg that pins Q-127 open cannot run"
+  fail=1
+else
+  if ! ("$MERE" -c "$PCSRC" > "$TMP/pc.c" 2>/dev/null && $CC -O2 -w "$TMP/pc.c" -o "$TMP/pcbin" 2>/dev/null); then
+    echo "FAIL region_reclaim/percall: the C leg did not build"
+    fail=1
+  elif ! ("$MERE" -ll "$PCSRC" > "$TMP/pc.ll" 2>/dev/null && $CC -O2 -w "$TMP/pc.ll" -o "$TMP/pclbin" 2>/dev/null); then
+    echo "FAIL region_reclaim/percall: the LLVM leg did not build (emitting is not building — mere -ll exits 0 on IR the assembler rejects)"
+    fail=1
+  else
+    pc_c_small="$(peak "$TMP/pcbin" $PCSMALL $PCN)"
+    pc_c_big="$(peak "$TMP/pcbin" $PCBIG $PCN)"
+    pc_l_big="$(peak "$TMP/pclbin" $PCBIG $PCN)"
+    if [ -z "$pc_c_small" ] || [ -z "$pc_c_big" ] || [ -z "$pc_l_big" ]; then
+      echo "FAIL region_reclaim/percall: the peak-RSS wrapper returned nothing"
+      fail=1
+      pc_c_small=0; pc_c_big=0
+    else
+      # Still open: ten times the iterations must still cost several times the
+      # memory. A factor of 3 is well under the ~8x it actually costs and well
+      # over the noise, so this fires on a fix and not on a quiet machine.
+      if [ "$pc_c_big" -lt "$(( pc_c_small * 3 ))" ]; then
+        echo "FAIL region_reclaim/percall/C: peak went $pc_c_small -> $pc_c_big for ${PCSMALL} -> ${PCBIG} iterations."
+        echo "  That is FLAT, which means a callee-built container is now reclaimed by the caller's block."
+        echo "  Q-127's remaining half has closed: update this leg and OPEN_QUESTIONS rather than deleting it."
+        fail=1
+      fi
+      checked=$((checked + 1))
+      if [ "$pc_l_big" -lt "$(( pc_c_small * 3 ))" ]; then
+        echo "FAIL region_reclaim/percall/LLVM: LLVM is flat where C is not — the two backends no longer agree about Q-127."
+        fail=1
+      fi
+      checked=$((checked + 1))
+    fi
+  fi
+  if command -v wat2wasm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+    if "$MERE" -w "$PCSRC" > "$TMP/pw.wat" 2>/dev/null &&
+       wat2wasm --enable-tail-call "$TMP/pw.wat" -o "$TMP/pw.wasm" 2>/dev/null; then
+      pc_w="$(node "$ROOT/scripts/run_wasm.js" "$TMP/pw.wasm" $PCBIG $PCN 2>/dev/null | head -1)"
+      # Unreclaimed this needs ~80 MB of a fixed 64 MiB, so completing is the proof.
+      if [ "$pc_w" != "10000000" ]; then
+        echo "FAIL region_reclaim/percall/Wasm: got '$pc_w', expected 10000000 — Wasm stopped reclaiming a callee-built container, or ran out of its fixed 64 MiB"
+        fail=1
+      fi
+      checked=$((checked + 1))
+    fi
+  fi
+fi
+
+if [ "$checked" -lt 7 ]; then
   echo "FAIL region_reclaim: only $checked checks ran"
   exit 1
 fi
 
 if [ "$fail" = 0 ]; then
-  echo "PASS region_reclaim: $checked checks — C flat at $(( c_big / 1048576 )) MB, LLVM flat at $(( l_big / 1048576 )) MB, Wasm completes inside 64 MiB"
+  echo "PASS region_reclaim: $checked checks — C flat at $(( c_big / 1048576 )) MB, LLVM flat at $(( l_big / 1048576 )) MB, Wasm completes inside 64 MiB; a callee-built container is still NOT reclaimed on C/LLVM ($(( pc_c_small / 1048576 )) -> $(( pc_c_big / 1048576 )) MB, Q-127) and is on Wasm"
   exit 0
 fi
 exit 1
