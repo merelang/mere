@@ -70,21 +70,20 @@ let lib_static () = if !lib_mode then "static " else ""
 
 (* v0.1.311 + Q-127: WHERE A CONTAINER WHOSE REGION IS `__heap` IS ALLOCATED.
 
-   The default region, in every mode. It used to be the CURRENT region in `--lib` mode,
-   because the pin was a 512 B/call leak there -- the process outlives every call, so
-   each call's containers accumulated in a region nothing reclaims (226 MB over 100k
-   calls). Q-127 makes that special case unnecessary and, with it, wrong:
+   The default region -- except in `--lib` mode, where it is the CURRENT one. The
+   process outlives every exported call there, so pinning to the default region is a
+   512 B/call leak: 226 MB over 100k calls, measured. The boundary makes every call a
+   transaction, and this is what makes the containers a call builds go with it.
 
-     - a container a CALL builds now carries `__caller`, which is the current region
-       already, so the leak stays fixed by the general rule rather than by a mode;
-     - what is left as `__heap` is a container that belongs to something OUTLIVING the
-       call -- module state, or a pass-through the caller supplied. Sending those to
-       the per-call region is exactly the defect v0.1.452 pinned: stored into module
-       state, one read back garbage after the next call reused the arena.
-
-   So the mode-dependent answer is gone, and the two cases it was conflating are told
-   apart by the type instead. *)
-let heap_container_region () = "(&__lang_default_region)"
+   THE HALF THAT WAS MISSING IS NOW A TYPE ERROR. Sending a call's containers to the
+   call's arena is only safe if none of them outlives the call, and until v0.1.455
+   nothing said so: a container stored into module state read back garbage after the
+   next call reused the arena (v0.1.452 pinned that). An exported function's body is
+   typed inside the call's region now, so that store is refused by name -- see
+   `Pipeline.infer_top_let`. The leak fix and the safety belong together; neither is
+   sound on its own. *)
+let heap_container_region () =
+  if !lib_mode then "__lang_current_region" else "(&__lang_default_region)"
 
 (* v0.1.433: which named regions have a C local at the point being emitted.
    A `region R { ... }` binds `__region_R` as a local of the enclosing C
