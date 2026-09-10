@@ -45,10 +45,14 @@
 #   5. THE ESCAPE HATCH. `--allow-nonexhaustive` builds the program in item 1
 #      and says `warning` instead.
 #
-#   6. THE APPROXIMATE CHECK IS STILL A WARNING. `match n with | 0 -> ...` over
-#      an int cannot name a missing case -- that arm of the checker is an
-#      admitted approximation -- so it must not stop a build. Promoting it
-#      would demand a `_` arm on every match over a scalar.
+#   6. AN OPEN-SIGNATURE MISS IS STILL A WARNING. `match n with | 0 -> ...` over
+#      an int is missing a value, and since v0.1.472 the checker NAMES one
+#      (`missing 1`) instead of only saying a wildcard is absent. It stays a
+#      warning all the same: promoting it would refuse every match over a
+#      scalar that has no `_` arm, and -- more immediately -- the two parity
+#      cases that hold the RUNTIME behaviour of a fallthrough are compiled by
+#      exactly this permission. A complete checker and a reachable fallthrough
+#      cannot both be tested without a flag.
 #
 # The subject is integer-only so that all five backends, RV32IM included, can
 # take it.
@@ -291,8 +295,15 @@ for flag in "" -c; do
     echo "FAIL scalar: $path_name refused a match over an int, where the checker cannot name a case (exit $rc)"
     sed -n '1,8p' "$TMP/s.err"
     fail=1
-  elif ! grep -q "no wildcard arm" "$TMP/s.err"; then
+  elif ! grep -q "non-exhaustive match" "$TMP/s.err"; then
     echo "FAIL scalar: $path_name said nothing about a match over an int with no wildcard"
+    fail=1
+  elif ! grep -q "missing 2" "$TMP/s.err"; then
+    # The VALUE, not just the absence: the subject covers 0 and 1, so 2 is what
+    # is missing, and
+    # a checker that can only say "no wildcard arm" is one that has not looked.
+    echo "FAIL scalar: $path_name did not name the value that is missing:"
+    sed -n '1,4p' "$TMP/s.err"
     fail=1
   fi
 done

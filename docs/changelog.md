@@ -4,6 +4,89 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.472 — 2026-09-10
+
+**The exhaustiveness check looks inside patterns now.** It compared TOP-LEVEL constructors,
+which answers the common question and is blind to a whole class: `| Cons (TId nm, r)` and
+`| Cons (TP lp, r)` between them "cover" `Cons`, so a third token kind in that position was
+never reported. What replaces the four hand-written branches is the standard usefulness
+algorithm (Maranget), which this pattern language fits without ceremony — no ranges, no
+array patterns, no lazy patterns, a constructor carries at most one sub-pattern.
+
+Exhaustiveness is usefulness of an all-wildcard row against the matrix of arms, and asking
+it that way produces a **witness**: an actual value the match does not handle. The message
+prints the witness and the `help:` arm is built from it, so the arm comes out of the same
+computation that found the problem instead of being assembled next to it.
+
+```
+warning: non-exhaustive match (missing Cons (_, Nil))
+  = help: | Cons (a1, Nil) -> ...
+```
+
+That is this repository's own `benchmarks/churn/bench.mere`: an arm for two arguments, an
+arm for none, and nothing for one.
+
+### The count, and a correction to v0.1.470's account of it
+
+v0.1.470 reported **269** candidate sites here from a syntactic sweep and said the first two
+read by hand were both real holes. Running the actual algorithm over the same 838 files
+finds **four** — all of them the same one-element-list hole, in two benchmarks and two
+region-reclaim tests — and every downstream repository clean, `mere-ruby`'s 51,000 lines
+included. 269 was a loose upper bound on a necessary-but-not-sufficient shape.
+
+And one of the two hand-read sites was a misreading, corrected in that entry: `contrib/db/
+redis_cluster.mere` has a third arm, `| Cons (_, rest) ->`, that the first pass did not
+read. Its match is exhaustive. Which is the argument for computing the answer rather than
+eyeballing the shape — twice over, since the eyeballing is what produced both wrong numbers.
+
+### What it can say that the old check could not
+
+- **Inside a constructor.** `| Cons (0, Cons (b, _))` with `| Nil` is missing more than a
+  `Cons`; the witness says which shape.
+- **A value, where it used to report an absence.** `match n with | 0 -> … | 1 -> …` was
+  "no wildcard arm for int" and is now `missing 2`. A str witness is one character longer
+  than the longest the column holds; a tuple with a literal component reads `(1, _)`
+  instead of `(_, _)`, which claimed the pair the arm does handle.
+- **Records by declared field**, with an omitted field read as a wildcard — both forms are
+  legal source — and **bool and unit** as the finite types they are, at any depth.
+
+The arm is not the witness verbatim. A wildcard in the witness is a position the arm should
+BIND, so the headline reads `Triangle (_, _)` and the arm reads `| Triangle (a1, a2) -> ...`;
+a literal in the witness becomes a binder too, because `| 1 -> ...` for "missing 1" leaves
+everything except 1 uncovered, and an arm that is a bare binder prints as `| _ -> ...`.
+`scripts/exhaustive_check.sh` pastes the arm back into the program and uses every name it
+introduces, which is what caught the first version of this printing `| Triangle _ -> ...`.
+
+### What stayed the same, deliberately
+
+**The error is still a single top-level constructor with an unconstrained payload**, which
+is exactly what v0.1.468 refused. Nested findings and open-signature findings are warnings.
+That is a migration switch rather than a principle, and it is a property of the witness, so
+there is no second checker kept around to ask: `witness_is_shallow`.
+
+Two things it buys. The four real holes can be fixed before the class is promoted. And the
+two parity cases that hold the RUNTIME behaviour of a fallthrough are compiled by exactly
+this permission — with a complete checker and no permission, no compiling program can reach
+a fallthrough, so its behaviour becomes untestable without a flag `scripts/parity.sh` has no
+hook for. Promotion is: fix four sites, give the harness a per-file flag, then flip.
+
+**The same-named-type guard is generalised** to any column rather than the top level.
+Two modules that each declare `type t` share one entry in the variant registry, so a match
+over the first type would be judged against the second's constructors; an arm naming a
+constructor the entry does not have is the evidence that the entry is about another type,
+and the match is DECLINED — v0.1.468 chose silence there and it is still the right answer.
+
+**The dependencies it needed** were two pushes the registry never made: a type's declared
+parameters, without which a polymorphic payload cannot be instantiated (`Some` of an
+`int opt` is `int`), and the record field list. Both come from `Typer`, whose dependency on
+this file is one-way, so they arrive the way the variant list already did.
+
+The search is bounded at 20000 constructor specialisations and declines rather than hangs.
+
+Unit 2732/0, parity 194/0, `exhaustive_check` 31, `check_cmd_check` 883.
+
+---
+
 ## v0.1.471 — 2026-09-10
 
 **A producer that outruns its consumer past 65536 queued messages succeeds on the
@@ -115,9 +198,17 @@ both cases against the C backend under the emulator, which is the comparison
 **The checker's blind spot.** It compares TOP-LEVEL constructors only, so
 `Cons (TId nm, r)` and `Cons (TP lp, r)` between them "cover" `Cons` and a third token kind
 falls through. Swept: **269 such sites in this repository** (of 38,088 matches), 162 in
-mere-ruby, 127 in mbrowse. The first two examined by hand were both real holes —
-`benchmarks/churn/bench.mere` has no arm for a one-element argument list, and
-`contrib/db/redis_cluster.mere` none for a reply of the wrong shape. Closing it is the
+mere-ruby, 127 in mbrowse.
+
+> **v0.1.472 corrected the two sentences that followed.** They said the first two sites
+> examined by hand were both real holes. One was — `benchmarks/churn/bench.mere` has no
+> arm for a one-element argument list. The other was a misreading:
+> `contrib/db/redis_cluster.mere` has a third arm, `| Cons (_, rest) ->`, that the first
+> pass did not read, and its match is exhaustive. And 269 was a loose upper bound on a
+> necessary-but-not-sufficient shape: running the real algorithm over the same 838 files
+> finds **four**, all the same hole, and every downstream repository clean.
+
+Closing it is the
 standard usefulness algorithm, which this pattern language fits (no ranges, no arrays, no
 lazy patterns) and which needs two things the registry does not push yet — a type's
 declared params, to instantiate a polymorphic payload, and the record field types. That is
