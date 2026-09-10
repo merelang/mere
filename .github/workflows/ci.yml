@@ -467,6 +467,17 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/exit_status_check.sh
 
+      # `mere check` must accept exactly what the compile path accepts. The
+      # hazard is that it becomes a second `mere -t` -- a fast answer to a
+      # different question, which is what -t already is (it exits 0 on
+      # examples/borrow_conflict.mere and every backend refuses that file). So
+      # the check is a differential over the whole examples tree rather than a
+      # handful of picked cases, plus the named row that only the backend flags
+      # can see.
+      - name: check_cmd_check (`mere check` agrees with the compile path)
+        if: ${{ !cancelled() }}
+        run: sh scripts/check_cmd_check.sh
+
       # A `match` with no arm for a case was a warning printed from inside the
       # interpreter's path -- so `-c`, `-ll`, `-w` and `-rv` said nothing and
       # exited 0, and each invented a value for the fallthrough. The refusal is
