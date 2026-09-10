@@ -2621,7 +2621,21 @@ and compile_match env scrut arms ~tail =
     load_to_a0 spidx;
     emit_word (enc_i 0 a0 0 sp 0x13)               (* mv sp, a0 *)
   ) arms;
-  emit (Label l_end)   (* typer guarantees exhaustiveness, so some arm matched *)
+  (* No arm matched. The last mismatch falls through to exactly here, and every
+     arm that DID match jumped over it to l_end.
+     The comment this replaces said "typer guarantees exhaustiveness, so some
+     arm matched". It does not: a match over an int or a str with no wildcard
+     arm is a WARNING and not an error (see `Exhaustive.check_match`'s last
+     case, where the checker cannot name a missing case), so such a program
+     compiles and reaches this point. What was here was worse than a trap — the
+     unpark above has just left the saved stack pointer in a0, so the match
+     evaluated to a STACK ADDRESS and the program carried on with it. Of the
+     four backends this was the only one that really did invent a value.
+     `emit_abort` is the one this file already uses for a compile-time-known
+     message: it names the failure, exits 1, and is catchable by `try_or` — the
+     three properties the other three backends now agree on. *)
+  emit_abort "no matching arm in match";
+  emit (Label l_end)
 
 (* Test the pattern against the value in a0; branch to l_fail on mismatch,
    bind its variables on match, and return the extended env. Supports the

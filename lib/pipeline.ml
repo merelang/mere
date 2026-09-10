@@ -209,9 +209,18 @@ let warn loc msg = warnings := (loc, msg) :: !warnings
    taught about once (see the note on `post`). Before this, a non-exhaustive
    match was a line on the interpreter's stderr and *nothing at all* under
    `-c` / `-ll` / `-w` / `-rv`: the four backends that produce the artifact were
-   the four that did not mention it. A fallthrough has no value to return, so
-   each of them invented one — which is the failure mode this check exists to
-   name, arriving as a wrong answer instead. *)
+   the four that did not mention it.
+
+   v0.1.470 corrects what this note said about the consequence. It said each
+   backend "invented" a value and the answer came back wrong. MEASURED, on a
+   program that actually reaches the missing arm: the interpreter raises
+   `no matching arm in match` and points at the line, C and LLVM ran a bare
+   `abort()` (exit 134, no output), Wasm executed `unreachable` (exit 1, no
+   output), and only RV32IM really did carry on with a value — the saved stack
+   pointer. So the failure was LATE AND MUTE on three of the four rather than
+   wrong, which is a smaller claim than the one written here and still reason
+   enough to move it to compile time. The runtime half is now one answer on all
+   five paths; see the note in `Codegen_c`'s fallthrough. *)
 let enforce_exhaustive () =
   let (ws, es) = Exhaustive.classify () in
   List.iter (fun (loc, msg) -> warn loc msg) ws;

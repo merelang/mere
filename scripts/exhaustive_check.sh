@@ -7,11 +7,18 @@
 # warning was printed from inside `Pipeline.process` -- which is to say on the
 # interpreter's path and nowhere else. `-c`, `-ll`, `-w` and `-rv` said nothing
 # at all and exited 0: the four backends that produce the artifact were the four
-# that never mentioned it. A `match` with no arm for a case has no value to
-# return, so each backend invented one, and the answer came back wrong instead
-# of refused. The edit that provokes this is the ordinary one -- a case added to
-# a type, every `match` over it left as it was -- so the check has to be on the
-# path the person or the agent is actually using.
+# that never mentioned it. The edit that provokes this is the ordinary one -- a
+# case added to a type, every `match` over it left as it was -- so the check has
+# to be on the path the person or the agent is actually using.
+#
+# WHAT THIS HEADER USED TO CLAIM, and what measuring found instead. It said each
+# backend "invented" a value for the fallthrough and the answer came back wrong.
+# On a program that actually reaches the missing arm: the interpreter names the
+# failure and points at the line, C and LLVM ran a bare `abort()` (exit 134, no
+# output), Wasm executed `unreachable` (exit 1, no output), and only RV32IM
+# carried on with a value. The failure was LATE AND MUTE, not wrong, on three of
+# the four. v0.1.470 made the runtime half one answer everywhere; the gate for
+# THAT is `test/parity/fail/uncaught_nonexhaustive.mere` and its caught twin.
 #
 # WHAT IT CHECKS.
 #

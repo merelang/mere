@@ -4317,19 +4317,41 @@ let rec emit_expr (e : Ast.expr) : string =
     let arms = List.concat_map expand_or arms in
     (* Phase 22.5 fix: non-exhaustive fallthrough — emit a value of the
        MATCH result type, not always `0` (int). Otherwise tuple/record
-       returning matches break with "incompatible operand types". *)
+       returning matches break with "incompatible operand types".
+
+       v0.1.470: through `__lang_fail_impl`, not `abort()`. The zero after it is
+       unreachable and only there to give the statement expression the match's
+       type; what changed is the three things the bare abort got wrong — the
+       same three this backend already fixed for `fail` itself, and the RV
+       backend for its aborts:
+
+         - it said NOTHING. exit 134, no output. The interpreter names the same
+           failure `no matching arm in match` and points at the line. "No
+           message" is the failure shape this language has spent the most
+           effort removing (see the SIGSEGV handler's note).
+         - the STATUS disagreed. 134/SIGABRT here and on LLVM, 1 on the
+           interpreter and on Wasm. `__lang_fail_impl` exits 1, for the reason
+           written beside it.
+         - it was NOT CATCHABLE. `try_or` around a match that falls through
+           returned the default on the interpreter and was killed here — one
+           program, two answers.
+
+       The message carries no `fail: ` tag: that tag belongs to the `fail`
+       builtin, and this is the backend's own failure, which the interpreter
+       does not tag either. `test/parity/fail/uncaught_nonexhaustive.mere`
+       holds all three properties across the four backends. *)
     let match_result_ty =
       match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt
     in
     let fallthrough_default =
       match match_result_ty with
-      | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> "({ abort(); 0; })"
-      | Ast.TyStr -> "({ abort(); \"\"; })"
-      | Ast.TyFloat -> "({ abort(); 0.0; })"
+      | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> "({ __lang_fail_impl(\"no matching arm in match\"); 0; })"
+      | Ast.TyStr -> "({ __lang_fail_impl(\"no matching arm in match\"); \"\"; })"
+      | Ast.TyFloat -> "({ __lang_fail_impl(\"no matching arm in match\"); 0.0; })"
       | Ast.TyCon (("Vec" | "OwnedVec" | "StrBuf" | "Channel" | "Map" | "ListBuf"), _) ->
         (* v0.1.51: pointer-typed containers (mere_vec_T* etc.) zero to
            NULL — is_ptr_ty only covers recursive variants / views. *)
-        "({ abort(); 0; })"
+        "({ __lang_fail_impl(\"no matching arm in match\"); 0; })"
       | t when is_ptr_ty t ->
         (* v0.1.51: pointer-represented result types (Vec / Map /
            recursive variants / views) zero to NULL. The old code ran a
@@ -4337,9 +4359,9 @@ let rec emit_expr (e : Ast.expr) : string =
            `(Vec___heap_int){0}`, an undeclared struct name, instead of
            the real `mere_vec_int*`. Found by the gzip inflate probe's
            `vec_of` (`match ... | Nil -> v` returning a Vec). *)
-        "({ abort(); 0; })"
+        "({ __lang_fail_impl(\"no matching arm in match\"); 0; })"
       | Ast.TyTuple ts ->
-        Printf.sprintf "({ abort(); (%s){0}; })" (tuple_struct_name ts)
+        Printf.sprintf "({ __lang_fail_impl(\"no matching arm in match\"); (%s){0}; })" (tuple_struct_name ts)
       | Ast.TyCon (n, args) ->
         (* `flatten_module_dots` for the same reason ty_tag needs it: a `type`
            declared inside a `module` is `M.t`, and a dot is not a C identifier.
@@ -4351,8 +4373,8 @@ let rec emit_expr (e : Ast.expr) : string =
           if args = [] then flatten_module_dots n
           else mono_variant_name n (List.map Ast.walk args)
         in
-        Printf.sprintf "({ abort(); (%s){0}; })" c_n
-      | _ -> "({ abort(); 0; })"
+        Printf.sprintf "({ __lang_fail_impl(\"no matching arm in match\"); (%s){0}; })" c_n
+      | _ -> "({ __lang_fail_impl(\"no matching arm in match\"); 0; })"
     in
     (* Emit nested ternaries — each arm's body is wrapped in a
        statement expression so the pattern bindings are in scope for
