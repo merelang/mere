@@ -1210,7 +1210,60 @@ let rec subst_region (from_name : string) (to_name : string) (t : Ast.ty) : Ast.
   | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit
     | Ast.TyParam _ | Ast.TyVar _) as t -> t
 
+(* A type name declared twice in ONE compilation with a DIFFERENT constructor
+   set.
+
+   Redeclaring a type IDENTICALLY is ordinary here and stays so: twelve files in
+   this tree restate `'a opt` or `'a list` for self-containment, and the two
+   declarations describe the same type, so nothing is lost. A CONFLICTING
+   redeclaration is the hole this closes. `types` and
+   `Exhaustive.type_variants` are keyed by the bare name and the SECOND
+   declaration wins for the type's identity, while the FIRST declaration's
+   constructors stay usable (they are keyed by constructor name) -- so a match
+   over the first type is judged against the second type's cases, `==` compares
+   values of two different types as one, and a function annotated with the name
+   accepts either.
+
+   Measured before making it an error: zero conflicting redeclarations across
+   945 files in this tree and six downstream repositories. Fifteen type names
+   ARE declared with different shapes across the ecosystem (`tree` in three
+   shapes across ten files, `expr` in four), but each shape is a different
+   program and the registries are reset per compilation, so none of them is a
+   collision.
+
+   Two modules that each declare `type t` was the visible symptom -- module
+   types are registered globally and unqualified on purpose, so it is the same
+   hole and not a module one. That is why the fix is here and not in the
+   parser's module handling: the general case covers it, and DEFERRED §4.1
+   (namespacing module types) is a different and larger change that this does
+   not need. *)
+let type_redecls : (string * string * string) list ref = ref []
+let reset_type_redecls () = type_redecls := []
+
+(* De-duplicated: `register_type` runs from the declaration walk, from the pass
+   over the desugared program, and from `register_declared_types`, so one
+   conflict was reported three times. *)
+let take_type_redecls () =
+  let seen = Hashtbl.create 8 in
+  let out =
+    List.filter (fun (n, a, b) ->
+      let key = (n, (if a < b then a else b), (if a < b then b else a)) in
+      if Hashtbl.mem seen key then false else (Hashtbl.add seen key (); true))
+      (List.rev !type_redecls)
+  in
+  type_redecls := []; out
+
+let shape_of variants =
+  String.concat " | "
+    (List.sort compare
+       (List.map (fun (c, payload) ->
+          c ^ (match payload with None -> "" | Some _ -> " of _")) variants))
+
 let register_type type_name params variants =
+  (match Hashtbl.find_opt Exhaustive.type_variants type_name with
+   | Some prev when variants <> [] && prev <> [] && shape_of prev <> shape_of variants ->
+     type_redecls := (type_name, shape_of prev, shape_of variants) :: !type_redecls
+   | _ -> ());
   Hashtbl.replace types type_name (List.length params);
   (* The params go with the variants: the exhaustiveness checker instantiates a
      polymorphic payload against a use site's type arguments, and cannot do it
@@ -1352,6 +1405,10 @@ let reset_type_registries () =
      harness and the language server both do -- and a program with no region
      block would emit the closure shape of whatever was compiled before it. *)
   saw_region_block := false;
+  (* The exhaustiveness checker's own registries are per-compilation too, and
+     were not being cleared -- see the note on `Exhaustive.reset_registries`. *)
+  Exhaustive.reset_registries ();
+  reset_type_redecls ();
   match !builtin_snapshot with
   | None ->
     builtin_snapshot :=
