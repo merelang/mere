@@ -1212,7 +1212,10 @@ let rec subst_region (from_name : string) (to_name : string) (t : Ast.ty) : Ast.
 
 let register_type type_name params variants =
   Hashtbl.replace types type_name (List.length params);
-  Exhaustive.register_variants type_name variants;
+  (* The params go with the variants: the exhaustiveness checker instantiates a
+     polymorphic payload against a use site's type arguments, and cannot do it
+     from the constructor list alone. *)
+  Exhaustive.register_variants ~params type_name variants;
   List.iter (fun (cname, payload) ->
     Hashtbl.replace constructors cname
       { params; arg = payload; type_name }
@@ -1220,6 +1223,8 @@ let register_type type_name params variants =
 
 let register_record type_name params fields =
   Hashtbl.replace types type_name (List.length params);
+  (* Same reason, for the columns a record pattern opens up. *)
+  Exhaustive.register_record_decl type_name params fields;
   Hashtbl.replace records type_name { r_params = params; r_fields = fields }
 
 (* Phase 18.1 / DEFERRED §4.1 remaining: register `alias` as a constructor with
