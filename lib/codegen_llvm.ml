@@ -11200,6 +11200,8 @@ let str_concat_helper =
       "@.lb_frozen_msg = internal alias [66 x i8], getelementptr inbounds ({ i64, [66 x i8] }, ptr @.lb_frozen_msg_h, i32 0, i32 1)";
       "@.lb_region_msg_h = internal constant { i64, [61 x i8] } { i64 60, [61 x i8] c\"lb_push: the builder belongs to a region that is not current\\00\" }";
       "@.lb_region_msg = internal alias [61 x i8], getelementptr inbounds ({ i64, [61 x i8] }, ptr @.lb_region_msg_h, i32 0, i32 1)";
+      "@.chanfull_msg_h = internal constant { i64, [73 x i8] } { i64 72, [73 x i8] c\"channel_send: this backend's channel holds 65536 messages and it is full\\00\" }";
+      "@.chanfull_msg = internal alias [73 x i8], getelementptr inbounds ({ i64, [73 x i8] }, ptr @.chanfull_msg_h, i32 0, i32 1)";
       "@.nomatch_msg_h = internal constant { i64, [25 x i8] } { i64 24, [25 x i8] c\"no matching arm in match\\00\" }";
       "@.nomatch_msg = internal alias [25 x i8], getelementptr inbounds ({ i64, [25 x i8] }, ptr @.nomatch_msg_h, i32 0, i32 1)";
       "@.oom_msg_h = internal constant { i64, [14 x i8] } { i64 13, [14 x i8] c\"out of memory\\00\" }";
@@ -12340,9 +12342,20 @@ let channel_runtime_llvm =
       "  %capp = getelementptr %mere_channel, ptr %ch, i32 0, i32 2";
       "  %cap = load i32, ptr %capp";
       "  %full = icmp sge i32 %len, %cap";
-      "  br i1 %full, label %oom, label %ok";
-      "oom:";
-      "  call void @abort()";
+      "  br i1 %full, label %full_chan, label %ok";
+      (* v0.1.471: this buffer is FIXED at 65536 slots and the C backend's
+         grows (it doubles and copies, carrying each message's region with it),
+         so a producer that outruns its consumer past 65536 queued messages
+         succeeds on the interpreter and on C and dies here. That is a real
+         divergence and it stays one — growing this would also need the per-
+         message region array the C channel has and this struct does not.
+         What is fixed is that it no longer dies MUTE: the label said `oom`
+         when the condition is capacity, and `abort()` gave exit 134 with the
+         buffered stdout lost, so the program that queued 70000 messages
+         printed nothing at all. Named, exit 1, and catchable by `try_or`, the
+         way every other refusal in this file is. *)
+      "full_chan:";
+      "  call void @__lang_fail_impl(ptr @.chanfull_msg)";
       "  unreachable";
       "ok:";
       "  %headp = getelementptr %mere_channel, ptr %ch, i32 0, i32 3";

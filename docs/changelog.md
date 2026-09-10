@@ -4,6 +4,38 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.471 — 2026-09-10
+
+**A producer that outruns its consumer past 65536 queued messages succeeds on the
+interpreter and on C, and died on LLVM with no output at all.** Found by sweeping the
+remaining bare `abort()` sites after v0.1.470 rather than by hitting it: six were left in
+the LLVM backend, four of them `show` / `eq_` / `cmp_` walking variants they generated the
+arms for — internal invariants — and two reachable from a program.
+
+```
+let c = channel_new ();
+let rec fill = fn (i: int) -> if i > 70000 then i else let _ = channel_send c i in fill (i + 1);
+```
+
+| | |
+|---|---|
+| interpreter | queues 70000, exit 0 |
+| C | queues 70000, exit 0 — its buffer doubles and copies, carrying each message's region |
+| LLVM **was** | **exit 134, nothing on stdout or stderr** |
+| LLVM now | `channel_send: this backend's channel holds 65536 messages and it is full`, exit 1, caught by `try_or` |
+
+The buffer here is fixed at 65536 slots and its own comment says so. **The divergence
+stays**: growing it needs the per-message region array the C channel has and this struct
+does not, which is a different slice. What is fixed is that it no longer dies mute — the
+label said `oom` when the condition is capacity, and `abort()` took the buffered stdout
+with it, so a program that had queued 70000 messages printed nothing. Named, exit 1, and
+catchable, which is what every other refusal in that file already was.
+
+`try_or` around the fill now returns `-1` on LLVM and `70001` on C. Both are legible; one
+of them used to be a signal.
+
+---
+
 ## v0.1.470 — 2026-09-10
 
 **A `match` that falls through gave four answers, and the note in v0.1.468 said the wrong
