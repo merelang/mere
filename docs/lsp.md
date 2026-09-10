@@ -67,11 +67,17 @@ The buffer is what gets checked, not the file on disk — an editor owns a file
 while it is open. But `import` still resolves against the **file's** directory,
 taken from the document URI, so imports work in an unsaved buffer.
 
-**Warnings are diagnostics too** (severity 2): a non-exhaustive `match`, a
-top-level name that collides with a C keyword. They used to be printed to stderr
-from inside the compiler, which is fine for a terminal and useless to anything
-else — an editor cannot underline a line written to a stream it is not reading.
-The pipeline hands them over as data now and the CLI does its own printing.
+**Warnings are diagnostics too** (severity 2): a top-level name that collides
+with a C keyword, a `match` over a scalar with no wildcard arm. They used to be
+printed to stderr from inside the compiler, which is fine for a terminal and
+useless to anything else — an editor cannot underline a line written to a stream
+it is not reading. The pipeline hands them over as data now and the CLI does its
+own printing.
+
+**A `match` missing a named case is severity 1**, not 2 (v0.1.468): the compiler
+refuses to build it, and an editor that draws it as a warning is describing a
+program that will not compile. The `help:` lines carrying the arm to add travel
+in the message, after the first newline.
 
 **An error inside an `import`** — of any kind — is published against **that
 file's** URI,

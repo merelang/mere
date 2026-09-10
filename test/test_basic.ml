@@ -1531,7 +1531,8 @@ let () =
       "type 'a opt = None | Some of 'a;
        match Some 5 with
        | Some 0 | Some 1 -> \"low\"
-       | Some n -> show n") "\"5\"";
+       | Some n -> show n
+       | None -> \"none\"") "\"5\"";
   check_raises "or-pattern with conflicting bindings"
     (fun () -> Pipeline.process
       "type T = A of int | B of str;
@@ -2333,6 +2334,22 @@ let () =
   let warnings_of s =
     String.concat " | " (Pipeline.exhaustiveness_warnings s)
   in
+  (* A finding that names a case carries the arm to write and then the hole,
+     and both are asserted rather than the headline alone: the hint is the
+     half a caller acts on, and a hint that stopped being valid Mere would
+     otherwise change nothing here. `arm` covers the whole `help:` block, so a
+     match missing three cases states all three. *)
+  let missing_at pos cases arm =
+    Printf.sprintf
+      "%s: error: non-exhaustive match (missing %s)\n%s\n\
+       note: or `| _ -> fail \"todo\"` to compile before writing them"
+      pos cases arm
+  in
+  let no_wildcard_at pos ty_hint =
+    Printf.sprintf
+      "%s: warning: non-exhaustive match (no wildcard arm%s)\nhelp: | _ -> ..."
+      pos ty_hint
+  in
   check "exhaustive: both bool branches → no warning"
     (warnings_of
       "match true with | true -> 1 | false -> 0") "";
@@ -2372,7 +2389,7 @@ let () =
     (Pipeline.process "utf8_len \"😀🎉\"") "2";
   check "non-exhaustive: bool missing false"
     (warnings_of "match true with | true -> 1")
-    "line 1, col 1: warning: non-exhaustive match (missing false)";
+    (missing_at "line 1, col 1" "false" "help: | false -> ...");
   (* v0.1.32 (S-2): product-space check for tuple scrutinees. A tuple of
      variants covered arm-by-arm is exhaustive even though no single arm
      is total (the generic pairing heap's merge shape); a genuinely
@@ -2390,7 +2407,8 @@ let () =
        match (Greenq, Greenq) with \
        | (Redq, _) -> 1 \
        | (Greenq, Redq) -> 2")
-    "line 1, col 26: warning: non-exhaustive match (missing (Greenq, Greenq))";
+    (missing_at "line 1, col 26" "(Greenq, Greenq)"
+       "help: | (Greenq, Greenq) -> ...");
   check "exhaustive: tuple of bools covered pairwise"
     (warnings_of
       "match (true, false) with \
@@ -2401,17 +2419,17 @@ let () =
     (warnings_of
       "type 'a opt = None | Some of 'a;
        match Some 5 with | Some n -> n")
-    "line 2, col 8: warning: non-exhaustive match (missing None)";
+    (missing_at "line 2, col 8" "None" "help: | None -> ...");
   check "non-exhaustive: opt missing Some"
     (warnings_of
       "type 'a opt = None | Some of 'a;
        match (None : int opt) with | None -> 0")
-    "line 2, col 8: warning: non-exhaustive match (missing Some _)";
+    (missing_at "line 2, col 8" "Some _" "help: | Some a -> ...");
   check "non-exhaustive: variant 3rd missing"
     (warnings_of
       "type Color = Red | Green | Blue;
        match Red with | Red -> 0 | Green -> 1")
-    "line 2, col 8: warning: non-exhaustive match (missing Blue)";
+    (missing_at "line 2, col 8" "Blue" "help: | Blue -> ...");
   check "guarded arm doesn't count as exhaustive"
     (* a guarded arm may be false at runtime, so we conservatively treat it as not covering *)
     (warnings_of
@@ -2419,7 +2437,7 @@ let () =
        match Some 5 with
        | None -> 0
        | Some n when n > 0 -> n")
-    "line 2, col 8: warning: non-exhaustive match (missing Some _)";
+    (missing_at "line 2, col 8" "Some _" "help: | Some a -> ...");
   check "or-pattern covers both variants"
     (warnings_of
       "type Sign = Pos | Neg | Zero;
@@ -2430,6 +2448,73 @@ let () =
        match Some 5 with
        | None          -> 0
        | Some n as all -> n") "";
+
+  (* --- a missing case is an error, and it carries the arm to write ---------
+     `scripts/exhaustive_check.sh` is the other half of this: it holds the
+     refusal on all five paths and pastes the arm back in, which is the part
+     that cannot be asserted from inside the library. What is asserted here is
+     the shape of what gets printed. *)
+
+  (* One finding for the match, not one per case: three separate lines about
+     one `match` had to be read together to learn that they were one edit. *)
+  check "non-exhaustive: every missing case in one finding"
+    (warnings_of
+      "type node = NChar of str | NDot | NStar of node;
+       match NDot with | NChar c -> 1")
+    (missing_at "line 2, col 8" "NDot, NStar _"
+       "help: | NDot -> ...\nhelp: | NStar a -> ...");
+
+  (* A tuple payload is destructured positionally, and one name per component:
+     `| Triangle a -> ...` parses but cannot reach either float. *)
+  check "non-exhaustive: a tuple payload gets one name per component"
+    (warnings_of
+      "type shape = Circle of float | Triangle of float * float;
+       match Circle 1.0 with | Circle r -> r")
+    (missing_at "line 2, col 8" "Triangle _"
+       "help: | Triangle (a1, a2) -> ...");
+
+  (* Two modules declaring `type t` share one entry in the variant registry,
+     because it keys on the bare name. This match is complete, and reporting
+     `Z` — a constructor of the OTHER `t` — is what made a correct program
+     fail to build once the finding became an error. *)
+  check "non-exhaustive: a constructor from a same-named type is not reported"
+    (warnings_of
+      "module Foo { type t = X | Y; };
+       module Bar { type t = X | Z; };
+       let a = Foo.X in
+       match a with | Foo.X -> 1 | Foo.Y -> 2") "";
+  check "module: 2 modules same ctor + qualified pattern match still runs"
+    (Pipeline.process
+       "module Foo { type t = X | Y; };\n\
+        module Bar { type t = X | Z; };\n\
+        let a = Foo.X in let b = Bar.X in\n\
+        (match a with | Foo.X -> 1 | Foo.Y -> 2) + (match b with | Bar.X -> 10 | Bar.Z -> 20)")
+    "11";
+  (* The half of that collision still answered wrongly, kept as a row rather
+     than left as an absence: when one type's constructors are a SUBSET of the
+     other's, every arm is found in the entry and the extra one is reported.
+     Telling them apart needs the registry keyed on the qualified type name.
+     This asserts today's wrong answer on purpose — the day the registry is
+     fixed, this check fails and says where to look. *)
+  check "non-exhaustive: KNOWN HOLE — a subset collision still reports the other type's case"
+    (warnings_of
+      "module Ga { type u = P | Q; };
+       module Gb { type u = P | Q | R; };
+       let a = Ga.P in
+       match a with | Ga.P -> 1 | Ga.Q -> 2")
+    (missing_at "line 4, col 8" "R" "help: | R -> ...");
+
+  (* The hole the note offers, at the library level: `fail` is typed `'a`, so
+     an arm returning it covers the rest of the match. The compiled backends
+     taking it too is `exhaustive_check.sh`'s item 4. *)
+  check "non-exhaustive: `| _ -> fail \"todo\"` is accepted as the hole"
+    (warnings_of
+      "type shape = Circle of int | Square of int | Triangle of int * int;
+       match Circle 2 with | Circle r -> r | _ -> fail \"todo\"") "";
+  check "non-exhaustive: the hole runs the arms that are written"
+    (Pipeline.process
+      "type shape = Circle of int | Square of int | Triangle of int * int;
+       match Circle 2 with | Circle r -> r * r | _ -> fail \"todo\"") "4";
 
   (* --- Phase 37.A: `while` at top-level (Let_rec lifting from Let value) --- *)
   check "Phase 37.A: while at top-level via Map mutable container (interp)"
@@ -2450,7 +2535,7 @@ let () =
     (warnings_of "match ((1, 2), 3) with | ((a, b), c) -> a + b + c") "";
   check "Phase 2: tuple with literal sub-pattern is NOT total"
     (warnings_of "match (1, 2) with | (0, b) -> b")
-    "line 1, col 1: warning: non-exhaustive match (no wildcard arm for tuple)";
+    (no_wildcard_at "line 1, col 1" " for tuple");
   check "Phase 2: record destructure is total"
     (warnings_of
       "type Pt = { x: int, y: int };
@@ -2458,10 +2543,10 @@ let () =
        match p with | Pt { x = a, y = b } -> a + b") "";
   check "Phase 2: int match without wildcard gets type hint"
     (warnings_of "match 42 with | 0 -> \"zero\"")
-    "line 1, col 1: warning: non-exhaustive match (no wildcard arm for int)";
+    (no_wildcard_at "line 1, col 1" " for int");
   check "Phase 2: str match without wildcard gets type hint"
     (warnings_of "match \"hi\" with | \"hello\" -> 1")
-    "line 1, col 1: warning: non-exhaustive match (no wildcard arm for str)";
+    (no_wildcard_at "line 1, col 1" " for str");
 
   (* --- region / &R T : Phase 1 (syntactic only) --- *)
   check "region block basic"
@@ -13235,15 +13320,18 @@ let () =
           let name = fn (c: color) -> match c with | Red -> \"r\";\n\
           let _ = print (name Red);\n")
   in
+  (* Severity 1, not 2: a missing case the checker can name is what the
+     compiler now refuses to build, and an editor that draws it as a warning is
+     describing a program that will not compile. *)
   check "warnings: a non-exhaustive match is a diagnostic, not a line on stderr"
     (match published out with
      | [ (_, [ (sev, msg) ]) ] ->
-       let head = "warning: non-exhaustive match" in
+       let head = "error: non-exhaustive match" in
        let hl = String.length head in
        Printf.sprintf "%d %b" sev
          (String.length msg >= hl && String.sub msg 0 hl = head)
-     | _ -> "(not one warning)")
-    "2 true";
+     | _ -> "(not one diagnostic)")
+    "1 true";
   (* The message used to carry its own `line L, col C:` prefix, which read as
      `warning: line 3, col 29: warning: ...` once something else added the kind. *)
   check "warnings: the position is data, not text repeated inside the message"

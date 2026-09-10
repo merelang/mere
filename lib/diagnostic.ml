@@ -19,6 +19,12 @@ let cyan s = ansi "36" s
 let bold s = ansi "1" s
 let bold_red s = if !use_color then "\027[1;31m" ^ s ^ "\027[0m" else s
 let bold_cyan s = if !use_color then "\027[1;36m" ^ s ^ "\027[0m" else s
+let bold_yellow s = if !use_color then "\027[1;33m" ^ s ^ "\027[0m" else s
+
+(* A warning and an error are the same shape and were the same colour, which is
+   how a terminal showing both made them one class of thing. The kind is the
+   only word that distinguishes them, so it is the word that is coloured. *)
+let kind_color kind = if kind = "warning" then bold_yellow else bold_red
 
 let split_lines (s : string) : string array =
   String.split_on_char '\n' s |> Array.of_list
@@ -54,13 +60,14 @@ let format ~source ~filename loc kind msg =
   let { Loc.line; col; width; _ } = loc in
   let headline, extras = split_msg msg in
   let caret_glyphs = max 1 width in
+  let kind_hl = kind_color kind in
   if line = 0 then
     let extra_block =
       if extras = [] then ""
       else "\n" ^ String.concat "\n" (List.map render_extra extras)
     in
     Printf.sprintf "%s: %s: %s%s"
-      filename (bold_red kind) headline extra_block
+      filename (kind_hl kind) headline extra_block
   else begin
     let lines = split_lines source in
     let last_idx = Array.length lines - 1 in
@@ -76,7 +83,7 @@ let format ~source ~filename loc kind msg =
     let arrow = blue "-->" in
     let buf = Buffer.create 256 in
     Buffer.add_string buf
-      (Printf.sprintf "%s: %s\n" (bold_red kind) headline);
+      (Printf.sprintf "%s: %s\n" (kind_hl kind) headline);
     Buffer.add_string buf
       (Printf.sprintf "%s %s %s:%d:%d\n" blank_gutter arrow filename line col);
     Buffer.add_string buf (Printf.sprintf "%s %s\n" blank_gutter bar);
@@ -87,7 +94,7 @@ let format ~source ~filename loc kind msg =
            (blue (pad_num line_no)) bar lines.(i));
       if line_no = line then begin
         let caret_pad = String.make (max 0 (col - 1)) ' ' in
-        let carets = bold_red (String.make caret_glyphs '^') in
+        let carets = kind_hl (String.make caret_glyphs '^') in
         Buffer.add_string buf
           (Printf.sprintf "%s %s %s%s %s\n"
              blank_gutter bar caret_pad carets headline)
