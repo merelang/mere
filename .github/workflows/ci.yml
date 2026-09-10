@@ -467,6 +467,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/exit_status_check.sh
 
+      # A `match` with no arm for a case was a warning printed from inside the
+      # interpreter's path -- so `-c`, `-ll`, `-w` and `-rv` said nothing and
+      # exited 0, and each invented a value for the fallthrough. The refusal is
+      # held on all five paths here, and the arm the error prints is pasted
+      # back into the program and run, so a hint that stops being valid Mere
+      # goes red rather than being merely wrong.
+      - name: exhaustive_check (a missing case is refused on every path)
+        if: ${{ !cancelled() }}
+        run: sh scripts/exhaustive_check.sh
+
       # The region report names the one expression that took binarytrees from
       # 169 MiB to 5.5 MiB, and stays quiet where the region is already written.
       # Nothing is inferred: the report is where the language says "here", and

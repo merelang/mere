@@ -524,16 +524,35 @@ match char_at s i with
 | _   -> ...
 ```
 
-### 3. ~~Match exhaustiveness is checked at runtime~~ → Phase 1 added warnings
+### 3. ~~Match exhaustiveness is checked at runtime~~ → ~~Phase 1 added warnings~~ → a missing case is an error
 
 ```
 match opt with
 | Some n -> n
-// stderr: "line X, col Y: warning: non-exhaustive match (missing None)"
-// Evaluation proceeds, but a runtime Eval_error occurs if None arrives
+```
+```
+error: non-exhaustive match (missing None)
+  --> opt.mere:1:1
+  |
+1 | match opt with
+  | ^^^^^ non-exhaustive match (missing None)
+  |
+  = help: | None -> ...
+  = note: or `| _ -> fail "todo"` to compile before writing them
 ```
 
-Exhaustiveness for bool and variants is detected at compile time as a warning. int/str/tuple/record still need a wildcard arm. To enforce full coverage, write `| _ -> default` or `| None -> fail "..."`.
+A missing case that the checker can name stops the build, on every path — the
+interpreter and all four backends. The error names every case the `match` is
+missing, and the `help:` lines are the arms to add.
+
+Write the arm, or take the hole the note offers: `fail` is typed `'a`, so
+`| _ -> fail "todo"` satisfies the match and lets the rest of the file compile
+while the arms are written. `--allow-nonexhaustive` downgrades the error to a
+warning for a whole run, which is for a tree mid-port rather than for a fix.
+
+int / str / float / tuple / record still need a wildcard arm, and its absence is
+a **warning**: there the checker cannot name what is missing, so it does not
+claim to.
 
 ### 4. Record update needs the base's type
 

@@ -5,7 +5,26 @@
    tuple, record) are not checked yet — they require a wildcard or var arm
    to be safe in any case.
 
-   Warnings are returned as strings; the caller (Pipeline) prints them. *)
+   Findings are returned as data (`finding`), and `classify` splits them into
+   the ones that stop a build and the ones that do not. A finding carries the
+   arm to add, because the edit that provokes this check is almost always the
+   same one — a case added to a type, and a `match` on it left as it was — and
+   the next thing anyone does with the message is write the arm it names. *)
+
+(* A missing case, and what to write for it.
+
+   `f_error` is the difference between a finding that names a case and one that
+   only suspects there is one. Naming `Triangle _` is a fact the checker can
+   prove from the type declaration, so it stops the build; "no wildcard arm for
+   int" is this file's own approximation (see `check_match`'s last arm) and
+   stays a warning, because turning it into an error would demand a `_` arm
+   everywhere rather than name anything. *)
+type finding = {
+  f_loc : Loc.t;
+  f_msg : string;         (* the headline, without the position in it *)
+  f_hint : string list;   (* `help:` / `note:` lines, rendered under the frame *)
+  f_error : bool;
+}
 
 (* Variant registry: variant-type name -> full list of (cname, payload).
    Populated by Typer.register_type (one-way dependency: Typer -> Exhaustive). *)
@@ -115,13 +134,50 @@ let show_comp_case = function
 
 let max_product_combos = 1024
 
-(* Check a Match expression.  Returns a list of warning strings (empty if
-   the match is judged exhaustive).  `loc` is the location of the match
-   expression for error reporting. *)
+(* How a missing constructor is named in the headline: `Some _` rather than
+   `Some`, so the payload is visible without going to the declaration. *)
+let show_ctor (cname, payload) =
+  match payload with None -> cname | Some _ -> cname ^ " _"
+
+(* The arm to write for a missing constructor, as Mere source. A tuple payload
+   is destructured positionally (`Triangle of float * float` takes
+   `| Triangle (a1, a2) ->`), which is the form the language reference uses and
+   the only one that binds every component. *)
+let arm_of_ctor (cname, payload) =
+  match payload with
+  | None -> Printf.sprintf "| %s -> ..." cname
+  | Some t ->
+    (match Ast.walk t with
+     | Ast.TyTuple ts ->
+       let names = List.mapi (fun i _ -> Printf.sprintf "a%d" (i + 1)) ts in
+       Printf.sprintf "| %s (%s) -> ..." cname (String.concat ", " names)
+     | _ -> Printf.sprintf "| %s a -> ..." cname)
+
+(* One finding per match, listing every case it is missing.
+
+   Not one per case: the fix is a single edit to a single `match`, and a match
+   missing seven constructors used to be seven separate lines that had to be
+   read together to find out that. The headline names them all; the hint spells
+   out an arm for each, and then the hole — `fail` is typed `'a`, so an arm
+   returning it satisfies any match — that lets the rest of the file keep
+   compiling while they are written. *)
+let missing_finding loc (shown : string list) (arms : string list) =
+  { f_loc = loc;
+    f_msg =
+      Printf.sprintf "non-exhaustive match (missing %s)"
+        (String.concat ", " shown);
+    f_hint =
+      List.map (fun a -> "help: " ^ a) arms
+      @ [ "note: or `| _ -> fail \"todo\"` to compile before writing them" ];
+    f_error = true }
+
+(* Check a Match expression.  Returns the findings for it (empty if the match
+   is judged exhaustive).  `loc` is the location of the match expression for
+   error reporting. *)
 let check_match (loc : Loc.t)
                 (scrut_ty : Ast.ty)
                 (arms : (Ast.pattern * Ast.expr option * Ast.expr) list)
-              : string list =
+              : finding list =
   (* An arm with a guard cannot be relied upon to cover its pattern fully —
      the guard might be false at runtime.  So for coverage purposes we only
      consider arms with `guard = None`. *)
@@ -137,12 +193,12 @@ let check_match (loc : Loc.t)
     | Ast.TyBool ->
       let seen = List.concat_map top_level_bools unguarded_arms in
       let missing = List.filter (fun b -> not (List.mem b seen)) [true; false] in
-      List.map (fun b ->
-        Printf.sprintf
-          "%s: warning: non-exhaustive match (missing %s)"
-          (Loc.to_string loc)
-          (if b then "true" else "false")
-      ) missing
+      if missing = [] then []
+      else
+        [ missing_finding loc
+            (List.map string_of_bool missing)
+            (List.map (fun b ->
+               Printf.sprintf "| %s -> ..." (string_of_bool b)) missing) ]
     | Ast.TyCon (type_name, _)
       when Hashtbl.mem type_variants type_name ->
       let variants = Hashtbl.find type_variants type_name in
@@ -150,15 +206,32 @@ let check_match (loc : Loc.t)
       let missing =
         List.filter (fun (vname, _) -> not (List.mem vname seen)) variants
       in
-      List.map (fun (vname, payload) ->
-        let p_str = match payload with
-          | None -> ""
-          | Some _ -> " _"
-        in
-        Printf.sprintf
-          "%s: warning: non-exhaustive match (missing %s%s)"
-          (Loc.to_string loc) vname p_str
-      ) missing
+      (* The registry keys on the BARE type name, so two modules that each
+         declare `type t` share one entry and the second declaration overwrites
+         the first. A match over the first type was then judged against the
+         second's constructors, and reported `Z` missing from a match covering
+         `X | Y` completely — harmless while this was a warning nobody read,
+         and a rejected correct program once it stopped being one.
+
+         An arm naming a constructor the entry does not have is the evidence
+         that the entry is about a different type, so nothing is reported: a
+         case named out of the wrong declaration is worse than no case at all.
+
+         What this does NOT catch is the collision where one type's
+         constructors are a subset of the other's (`X | Y` against
+         `X | Y | Z`) — every arm is then found in the entry and the extra
+         constructor is reported as missing. Telling those apart needs the
+         registry keyed on the qualified name, which is a change to what the
+         typer calls a type rather than to this file. `test_basic.ml` holds
+         both cases, so the day that lands, the second one starts failing. *)
+      let entry_describes_scrutinee =
+        List.for_all (fun c -> List.mem_assoc c variants) seen
+      in
+      if missing = [] || not entry_describes_scrutinee then []
+      else
+        [ missing_finding loc
+            (List.map show_ctor missing)
+            (List.map arm_of_ctor missing) ]
     | Ast.TyTuple ts
       when (let spaces = List.map comp_space ts in
             List.for_all (fun s -> s <> None) spaces
@@ -196,10 +269,13 @@ let check_match (loc : Loc.t)
       (match missing with
        | [] -> []
        | combo :: _ ->
-         [Printf.sprintf
-            "%s: warning: non-exhaustive match (missing (%s))"
-            (Loc.to_string loc)
-            (String.concat ", " (List.map show_comp_case combo))])
+         (* One combination, by example: the product can be large, and a
+            person who writes the arm for this one is told about the next. *)
+         let shown =
+           Printf.sprintf "(%s)"
+             (String.concat ", " (List.map show_comp_case combo))
+         in
+         [ missing_finding loc [shown] [Printf.sprintf "| %s -> ..." shown] ])
     | other_ty ->
       (* Phase 2: for other types (int, str, float, tuple, record, etc.),
          patterns are typically exhaustive only with a wildcard arm.  When
@@ -214,68 +290,82 @@ let check_match (loc : Loc.t)
         | Ast.TyCon (n, _) -> " for " ^ n
         | _ -> ""
       in
-      [Printf.sprintf
-         "%s: warning: non-exhaustive match (no wildcard arm%s)"
-         (Loc.to_string loc) ty_hint]
-
-(* Global mutable accumulator: Typer's infer pass appends warnings here
-   as it visits Match nodes (it already has the scrutinee type at that point,
-   so checking is essentially free).  Pipeline resets at start, reads at end.
-
-   Using a ref is pragmatic — threading a warnings argument through every
-   Typer entry point would be invasive. *)
-let warnings : string list ref = ref []
+      [ { f_loc = loc;
+          f_msg =
+            Printf.sprintf "non-exhaustive match (no wildcard arm%s)" ty_hint;
+          f_hint = [ "help: | _ -> ..." ];
+          (* Not an error: this arm is reached because the checker does not
+             know the scrutinee's cases, so it cannot tell a match that is
+             missing one from a match over a type it has no model of. *)
+          f_error = false } ]
 
 (* Phase 21.2: deferred matches.  Storing the triple lets us re-walk the
    scrutinee type AFTER all typer unification has completed, so a Match
    whose scrut_ty is initially a fresh tyvar (e.g., the param `xs` of a
    poly let-rec, only later unified to `'a list` by the patterns) is
-   judged against its final concrete type rather than an unresolved one. *)
+   judged against its final concrete type rather than an unresolved one.
+
+   Using a ref is pragmatic — threading an accumulator through every Typer
+   entry point would be invasive. *)
 let deferred : (Loc.t * Ast.ty * (Ast.pattern * Ast.expr option * Ast.expr) list) list ref =
   ref []
 
-let reset () =
-  warnings := [];
-  deferred := []
-
-(* The warnings, each with the position it is about, and without the position
-   repeated inside the text. A language server needs the position as data to draw
-   the underline; the formatted line is what a terminal wants, and that is what
-   `take` still produces.
-
-   Two things this does that the string form did not have to. The message is
-   stripped of the `line L, col C: warning: ` prefix `check_match` builds into it,
-   because a caller that has the position will render its own. And the list is
-   de-duplicated: type inference visits a declaration's body once as a
-   declaration and again as part of the desugared program, so a match inside one
-   is recorded twice, and a warning shown twice is a bug report waiting to
-   happen. *)
-let strip_prefix (loc : Loc.t) (msg : string) : string =
-  let prefix = Loc.to_string loc ^ ": warning: " in
-  let pl = String.length prefix in
-  if String.length msg >= pl && String.sub msg 0 pl = prefix
-  then String.sub msg pl (String.length msg - pl)
-  else msg
-
-let take_located () =
-  (* Run deferred checks now that typing is done — scrut tys have walked. *)
-  let ws_def =
-    List.concat_map (fun (loc, scrut_ty, arms) ->
-      List.map (fun m -> (loc, strip_prefix loc m)) (check_match loc scrut_ty arms)
-    ) (List.rev !deferred)
-  in
-  let ws = List.map (fun m -> (Loc.dummy, m)) (List.rev !warnings) @ ws_def in
-  warnings := [];
-  deferred := [];
-  let seen = Hashtbl.create 16 in
-  List.filter (fun w ->
-    if Hashtbl.mem seen w then false else (Hashtbl.add seen w (); true)) ws
-
-let take () =
-  List.map (fun (loc, msg) ->
-    if loc.Loc.line = 0 then msg
-    else Printf.sprintf "%s: warning: %s" (Loc.to_string loc) msg)
-    (take_located ())
+let reset () = deferred := []
 
 let record_match loc scrut_ty arms =
   deferred := (loc, scrut_ty, arms) :: !deferred
+
+(* Every finding, in source order, drained.
+
+   The checks run here rather than where the match was visited because only now
+   have the scrutinee types walked. The list is de-duplicated: type inference
+   visits a declaration's body once as a declaration and again as part of the
+   desugared program, so a match inside one is recorded twice, and the same
+   complaint shown twice is a bug report waiting to happen. *)
+let all_findings () : finding list =
+  let fs =
+    List.concat_map (fun (loc, scrut_ty, arms) -> check_match loc scrut_ty arms)
+      (List.rev !deferred)
+  in
+  deferred := [];
+  let seen = Hashtbl.create 16 in
+  List.filter (fun f ->
+    let key = (f.f_loc, f.f_msg) in
+    if Hashtbl.mem seen key then false
+    else (Hashtbl.add seen key (); true)) fs
+
+(* Headline and hints as one string, which is the shape `Diagnostic.format`
+   takes: the first line goes beside the caret, and every line after it is
+   rendered under the code frame. A language server wants the position as data
+   to draw its underline, so the position is never inside the text. *)
+let text (f : finding) : string = String.concat "\n" (f.f_msg :: f.f_hint)
+
+(* Drained and split: (warnings, errors). *)
+let classify () : (Loc.t * string) list * (Loc.t * string) list =
+  let (ws, es) = List.partition (fun f -> not f.f_error) (all_findings ()) in
+  let render = List.map (fun f -> (f.f_loc, text f)) in
+  (render ws, render es)
+
+(* Raised by the paths that would otherwise run or emit the program. Carries
+   every error-severity finding, not the first: a file whose type gained a case
+   usually has more than one match over it, and reporting one while three are
+   visible is how the second one gets found by a wrong answer instead. *)
+exception Non_exhaustive of (Loc.t * string) list
+
+(* `--allow-nonexhaustive`: report them as warnings and carry on. For a tree
+   mid-port, where the arms are known to be missing and the point of the run is
+   to see how far it gets. Not the default, because the fallthrough it permits
+   has no value to produce and every backend invents a different one. *)
+let allow = ref false
+
+(* Both severities as formatted lines, each labelled with the verdict it
+   carries. The one caller is `Pipeline.exhaustiveness_warnings`, which is how
+   the unit tests read a finding; everything that acts on one goes through
+   `classify`, so that the severity is a value and not a word to be parsed back
+   out of a string. *)
+let take () =
+  List.map (fun f ->
+    let kind = if f.f_error then "error" else "warning" in
+    if f.f_loc.Loc.line = 0 then text f
+    else Printf.sprintf "%s: %s: %s" (Loc.to_string f.f_loc) kind (text f))
+    (all_findings ())

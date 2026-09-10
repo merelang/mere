@@ -63,6 +63,14 @@ let usage () =
   print_endline "  MERE_PATH             colon-separated env var, same effect";
   print_endline "                        (evaluated after any -I flags).";
   print_endline "";
+  print_endline "Checks:";
+  print_endline "  --allow-nonexhaustive a `match` missing a named case is an";
+  print_endline "                        error on every path that runs or emits";
+  print_endline "                        the program; this downgrades it to a";
+  print_endline "                        warning. For a tree mid-port. The arm";
+  print_endline "                        the error names, or `| _ -> fail \"todo\"`,";
+  print_endline "                        is the fix.";
+  print_endline "";
   print_endline "Docs: docs/tutorial.md / docs/language-reference.md / docs/stdlib-reference.md";
   print_endline "Examples: examples/ (280 .mere files; see examples/README.md for category index)"
 
@@ -149,11 +157,31 @@ let run_action ?(rv = false) ?base_dir action label source =
   in
   (* Warnings the check collected. They used to be printed from inside the
      pipeline, which meant nothing but a terminal could ever see them; now the
-     pipeline hands them over and the CLI decides how they look. *)
+     pipeline hands them over and the CLI decides how they look.
+
+     Through the same renderer the errors use, which it was not: a warning was a
+     bare `line 4, col 3: warning: ...` while a parse error two lines above it
+     got the file, the source line and the caret. The position of a warning is
+     as much use as the position of an error, and a `help:` line the message
+     carries is only rendered by this path. *)
   let print_warnings () =
     List.iter (fun (loc, msg) ->
-      Printf.eprintf "%s: warning: %s\n%!" (Mere.Loc.to_string loc) msg)
+      let (src, name, loc) = locate loc in
+      prerr_endline (render ~source:src ~filename:name loc "warning" msg))
       (Mere.Pipeline.take_warnings ())
+  in
+  (* Every match that is missing a named case, reported together, before
+     anything is run or emitted. `report_syntax` does the same for the parse. *)
+  let report_nonexhaustive findings =
+    let blocks =
+      List.map (fun (loc, msg) ->
+        let (src, name, loc) = locate loc in
+        render ~source:src ~filename:name loc "error" msg) findings
+    in
+    prerr_endline (String.concat "\n\n" blocks);
+    if List.length findings > 1 then
+      Printf.eprintf "\n%d errors\n" (List.length findings);
+    exit 1
   in
   (* The same courtesy for type errors that `report_syntax` does for syntax ones:
      the compile stopped at the first, but the file may have four. Re-check with
@@ -195,6 +223,8 @@ let run_action ?(rv = false) ?base_dir action label source =
          ~filename:file loc "parse error" msg);
     exit 1
   | Mere.Parser.Parse_error (loc, msg) -> report_syntax loc msg
+  | Mere.Exhaustive.Non_exhaustive findings ->
+    print_warnings (); report_nonexhaustive findings
   | Mere.Eval.Eval_error (loc, msg) -> report loc "eval error" msg
   | Mere.Typer.Type_error (loc, msg) -> print_warnings (); report_type loc msg
   | Mere.Trait_elab.Trait_error (loc, msg) -> report loc "trait error" msg
@@ -450,6 +480,8 @@ let preprocess_argv () : string array =
     | "-I" :: d :: rest -> walk kept (d :: dirs) rest
     | "--component" :: rest -> component_flag := true; walk kept dirs rest
     | "--lib" :: rest -> Mere.Codegen_c.lib_mode := true; walk kept dirs rest
+    | "--allow-nonexhaustive" :: rest ->
+      Mere.Exhaustive.allow := true; walk kept dirs rest
     | tok :: rest -> walk (tok :: kept) dirs rest
   in
   let (kept, dashI_dirs) = walk [] [] argv in

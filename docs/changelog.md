@@ -4,6 +4,116 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.468 — 2026-09-10
+
+**A `match` missing a case was a warning, and the warning was printed from inside the
+interpreter's path — so `-c`, `-ll`, `-w` and `-rv` said nothing at all and exited 0.**
+The four backends that produce the artifact were the four that never mentioned it.
+
+```
+type shape = Circle of float | Square of float | Triangle of float * float;   // the edit
+let area = fn (s: shape) ->
+  match s with
+  | Circle r -> 3.14159 * r * r
+  | Square w -> w * w;                                                        // untouched
+```
+
+Before: `mere shape.mere` printed one line of warning above the answer and exited 0;
+`mere -c shape.mere` emitted C and exited 0. A `match` with no arm for a case has no
+value to return, so each backend filled the fallthrough in with one of its own, and the
+answer came back **wrong instead of refused**. This is the ordinary edit — a case added
+to a type, every `match` over it left as it was — which is exactly why the check has to
+be on the path the person or the agent is actually using.
+
+After, on all five:
+
+```
+error: non-exhaustive match (missing Triangle _)
+  --> shape.mere:4:3
+  |
+3 | let area = fn (s: shape) ->
+4 |   match s with
+  |   ^^^^^ non-exhaustive match (missing Triangle _)
+5 |   | Circle r -> 3.14159 * r * r
+  |
+  = help: | Triangle (a1, a2) -> ...
+  = note: or `| _ -> fail "todo"` to compile before writing them
+```
+
+**The arm is the message.** The edit that provokes this check is almost always the same
+one, and the next thing anyone does with the error is write the arm it names — so the
+error writes it, one `help:` line per missing case, and then the hole: `fail` is typed
+`'a`, so `| _ -> fail "todo"` satisfies any match and the rest of the file keeps
+compiling while the arms are filled in. One finding per `match`, not one per case: a
+`match` missing seven constructors used to be seven separate lines that had to be read
+together to discover they were one edit.
+
+**What stayed a warning, deliberately.** `no wildcard arm for int` is not promoted. That
+arm of the checker is an admitted approximation — it fires because the scrutinee's cases
+are unknown, so it cannot tell a `match` that is missing one from a `match` over a type it
+has no model of, and making it an error would demand `| _ ->` on every match over a
+scalar rather than point at anything. The split is exactly "can the checker name the case":
+if it can, the build stops; if it cannot, it says so and carries on. `--allow-nonexhaustive`
+downgrades the errors too, for a tree mid-port.
+
+Warnings now go through the same renderer the errors use, which they did not: a warning was
+a bare `line 4, col 3: warning: ...` while a parse error two lines above it got the file,
+the source line and the caret. And `warning` is yellow where `error` is red — they were
+the same colour, which is how a terminal showing both made them one class of thing.
+
+### What promoting it found
+
+**Three latent fallthroughs in this repository, and one of them was an arm the parser had
+given to the wrong `match`.** `contrib/regex`'s `match_re` ends with
+
+```
+  | _ -> match_seq (Cons (pat, Nil)) s 0;
+```
+
+written for `match pat with` — and parsed as a third arm of the nested `match atoms with`,
+which already had a `_` arm above it. So the arm was dead code, the outer `match` had one
+arm for seven constructors, and `match_re (RChar "a") "a"` reached a fallthrough instead of
+the answer written for it four lines below. Parenthesising the inner match is the whole fix;
+the `RSeq` path is unchanged and `examples/regex_demo.mere` still reports all 21 cases `ok`.
+`benchmarks/json/bench.mere` had no arm for `JFloat` in a walk whose job is to count every
+node — unreachable for the document the MANIFEST pins, and a number invented for any other.
+
+**A false positive that had been hiding behind the warning.** Two modules that each declare
+`type t` share one entry in the variant registry, because it keys on the bare name — so a
+complete `match` over the first type was judged against the second's constructors and told
+to add `Z`. Harmless while nobody read the warning; a rejected correct program the moment it
+became an error. An arm naming a constructor the entry does not have is the evidence that
+the entry belongs to another type, so the check now declines instead of naming a case out of
+the wrong declaration. v0.1.284 fixed the other half of this (a qualified constructor `M.Leaf`
+normalised to its bare segment); this is the type-name side of the same collision. The half
+still answered wrongly — one type's constructors a *subset* of the other's, where every arm
+is found and the extra one is reported — is a row in `test_basic.ml` asserting today's wrong
+answer, so the day the registry is keyed on the qualified name, that check goes red and says
+where to look.
+
+**Outside this repository: four sites in `mere-ruby`, across three files** — `eval_e` has no
+arm for `EKwSplat` (the parser builds it in ten places) and `parse_x_target1` none for `Nil`.
+Each is a Ruby-semantics question rather than a mechanical fix, and each is a silent wrong
+answer today on all five backends. `--allow-nonexhaustive` builds all three files meanwhile.
+
+### Gate
+
+`scripts/exhaustive_check.sh` (31 checks). It holds the refusal on interp / C / LLVM / Wasm /
+RV32IM — the shape of the bug was "one path checks, four do not", so a gate on one path would
+have been the bug again — and it **reads the arm out of the compiler's own output, splices it
+back into the program, and runs it**. A hint nobody can paste is worse than no hint, and a
+remembered string here would not notice the day the pattern syntax it prints stops parsing:
+dropping the parens from the tuple-payload arm turns this red with the parse error to prove
+it. It also carries the negatives — a `match` with every arm written must build *and be
+silent* on all five paths, `| _ -> fail "todo"` must build and run on the compiled backends
+too, and a `match` over an int must not stop a build.
+
+Swept: 838 `.mere` files here plus 113 across six downstream repositories. With and without
+`--allow-nonexhaustive` the mere tree gives the same 769 ok / 69 pre-existing failures, so
+nothing in it is refused by this change that was not refused before. Unit suite 2724/0.
+
+---
+
 ## v0.1.467 — 2026-09-10
 
 **A closure written inside a `region` block that calls an inner function which allocates
