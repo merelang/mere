@@ -554,9 +554,10 @@ int / str / float still need a wildcard arm, and its absence is a **warning** �
 but since v0.1.472 the warning names a value rather than only the absence
 (`match n with | 0 -> … | 1 -> …` is `missing 2`), and the same algorithm looks
 INSIDE patterns, so a payload that is itself refutable is no longer a blind
-spot: `| Cons (_, Cons (b, _))` with `| Nil` is `missing Cons (_, Nil)`. Those
-nested findings are warnings for now, which is a migration and not a
-principle.
+spot: `| Cons (_, Cons (b, _))` with `| Nil` is `missing Cons (_, Nil)` — and
+that one is an **error**, because a witness built from finite signatures names
+a shape and the fix is the arm it prints. The scalar case stays a warning: its
+only fix is the catch-all this page already tells you to write.
 
 ### 4. Record update needs the base's type
 

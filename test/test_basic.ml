@@ -2532,7 +2532,7 @@ let () =
       "match (Nil : int list) with
        | Cons (_, Cons (b, _)) -> b
        | Nil -> 0")
-    (missing_warn_at "line 1, col 1" "Cons (_, Nil)" "help: | Cons (a1, Nil) -> ...");
+    (missing_at "line 1, col 1" "Cons (_, Nil)" "help: | Cons (a1, Nil) -> ...");
   (* And it must not cry wolf: the same shape with the one-element case written
      is exhaustive, which is the arrangement most of the 269 syntactic
      candidates turned out to have. *)
@@ -2576,7 +2576,7 @@ let () =
       "type Flag = { on: bool, off: bool };
        let f = Flag { on = true, off = false } in
        match f with | Flag { on = true } -> 1 | Flag { on = false, off = true } -> 2")
-    (missing_warn_at "line 3, col 8" "Flag { on = false, off = false }"
+    (missing_at "line 3, col 8" "Flag { on = false, off = false }"
        "help: | Flag { on = false, off = false } -> ...");
 
   (* Bool, at depth: `Some true` and `None` leave `Some false`. *)
@@ -2584,7 +2584,7 @@ let () =
     (warnings_of
       "type 'a opt = None | Some of 'a;
        match (None : bool opt) with | Some true -> 1 | None -> 0")
-    (missing_warn_at "line 2, col 8" "Some false" "help: | Some false -> ...");
+    (missing_at "line 2, col 8" "Some false" "help: | Some false -> ...");
 
   (* --- Phase 37.A: `while` at top-level (Let_rec lifting from Let value) --- *)
   check "Phase 37.A: while at top-level via Map mutable container (interp)"

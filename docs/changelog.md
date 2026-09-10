@@ -4,6 +4,56 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.473 — 2026-09-10
+
+**The four real holes are fixed, and a nested missing case is an error.** v0.1.472 shipped
+the usefulness algorithm with its new findings as warnings and called that a migration
+switch. Measuring is what made a better line available: the whole ecosystem had four holes,
+they were all the same one, and fixing them took four lines.
+
+All four are the same idiom — reading an optional second command-line argument:
+
+```mere
+let live = match argv with | Cons (_, Cons (b, _)) -> int_of_str b | Nil -> 2000;
+```
+
+With exactly ONE argument neither arm matches. The default is what an absent second
+argument means, and one argument is as absent as none, so the arm is `| _ ->`. Two
+benchmarks (`churn/bench.mere`, `churn/bench_regionloop.mere`) and two region-reclaim
+tests. `benchmarks/churn/MANIFEST` passes two arguments always, so the measured path is
+unchanged; what changed is that the one-argument invocation now returns the default instead
+of falling through.
+
+### The line, which is now a property rather than a phase
+
+Not "what the old checker could express". Two classes of witness, and they differ in kind:
+
+| witness | what it names | fix | verdict |
+|---|---|---|---|
+| `Cons (_, Nil)`, `Some false`, `Triangle (_, _)`, `Flag { on = false, off = false }` | a **shape**, from finite signatures only | the arm the error prints | **error** |
+| `missing 2`, `missing "bbx"`, `missing (1, _)`, `missing _` | a **value** out of an infinite domain | `| _ -> …` | warning |
+
+The second row's only fix is the catch-all the language reference already asks for at every
+match over a scalar, so refusing the program adds nothing the warning did not say. The
+first row's finding carries information the person did not have. `witness_has_open_literal`
+is the whole predicate.
+
+It also keeps `test/parity/nonexhaustive_caught.mere` and its `fail/` twin compiling, which
+matters more than it sounds: they hold the RUNTIME behaviour of a fallthrough, and if every
+named miss were refused, no compiling program could reach one. The per-file flag hook
+`scripts/parity.sh` would have needed is not needed.
+
+### After both
+
+**Zero findings of either severity across 838 files here and 118 across sixteen downstream
+repositories**, `mere-ruby`'s 51,000 lines included. The promotion cost nothing because the
+measurement came first.
+
+Unit 2732/0, parity 194/0, `exhaustive_check` 31, `check_cmd_check` 883, `bench_check` and
+`region_reclaim_check` green on the four edited files.
+
+---
+
 ## v0.1.472 — 2026-09-10
 
 **The exhaustiveness check looks inside patterns now.** It compared TOP-LEVEL constructors,
