@@ -2345,10 +2345,13 @@ let () =
        note: or `| _ -> fail \"todo\"` to compile before writing them"
       pos cases arm
   in
-  let no_wildcard_at pos ty_hint =
+  (* A witness the checker can name but does not stop the build for: an open
+     signature (int / str / float) where promoting it would demand `| _ ->` on
+     every match over a scalar. Since v0.1.472 it names the value rather than
+     saying only that a wildcard is absent. *)
+  let missing_warn_at pos cases arm =
     Printf.sprintf
-      "%s: warning: non-exhaustive match (no wildcard arm%s)\nhelp: | _ -> ..."
-      pos ty_hint
+      "%s: warning: non-exhaustive match (missing %s)\n%s" pos cases arm
   in
   check "exhaustive: both bool branches → no warning"
     (warnings_of
@@ -2424,7 +2427,7 @@ let () =
     (warnings_of
       "type 'a opt = None | Some of 'a;
        match (None : int opt) with | None -> 0")
-    (missing_at "line 2, col 8" "Some _" "help: | Some a -> ...");
+    (missing_at "line 2, col 8" "Some _" "help: | Some a1 -> ...");
   check "non-exhaustive: variant 3rd missing"
     (warnings_of
       "type Color = Red | Green | Blue;
@@ -2437,7 +2440,7 @@ let () =
        match Some 5 with
        | None -> 0
        | Some n when n > 0 -> n")
-    (missing_at "line 2, col 8" "Some _" "help: | Some a -> ...");
+    (missing_at "line 2, col 8" "Some _" "help: | Some a1 -> ...");
   check "or-pattern covers both variants"
     (warnings_of
       "type Sign = Pos | Neg | Zero;
@@ -2462,7 +2465,7 @@ let () =
       "type node = NChar of str | NDot | NStar of node;
        match NDot with | NChar c -> 1")
     (missing_at "line 2, col 8" "NDot, NStar _"
-       "help: | NDot -> ...\nhelp: | NStar a -> ...");
+       "help: | NDot -> ...\nhelp: | NStar a1 -> ...");
 
   (* A tuple payload is destructured positionally, and one name per component:
      `| Triangle a -> ...` parses but cannot reach either float. *)
@@ -2470,7 +2473,7 @@ let () =
     (warnings_of
       "type shape = Circle of float | Triangle of float * float;
        match Circle 1.0 with | Circle r -> r")
-    (missing_at "line 2, col 8" "Triangle _"
+    (missing_at "line 2, col 8" "Triangle (_, _)"
        "help: | Triangle (a1, a2) -> ...");
 
   (* Two modules declaring `type t` share one entry in the variant registry,
@@ -2516,6 +2519,73 @@ let () =
       "type shape = Circle of int | Square of int | Triangle of int * int;
        match Circle 2 with | Circle r -> r * r | _ -> fail \"todo\"") "4";
 
+  (* --- what the usefulness algorithm can say that the old check could not ---
+     v0.1.472. The old check compared TOP-LEVEL constructors, so an arm's
+     refutable payload was invisible to it; these are the cases that were
+     silent before. *)
+
+  (* The hole this found in this repository's own benchmarks: an arm for two
+     elements, an arm for none, and nothing for one. `Cons` is named, so the
+     old check called the match exhaustive. *)
+  check "nested: a one-element list falls between the arms"
+    (warnings_of
+      "match (Nil : int list) with
+       | Cons (_, Cons (b, _)) -> b
+       | Nil -> 0")
+    (missing_warn_at "line 1, col 1" "Cons (_, Nil)" "help: | Cons (a1, Nil) -> ...");
+  (* And it must not cry wolf: the same shape with the one-element case written
+     is exhaustive, which is the arrangement most of the 269 syntactic
+     candidates turned out to have. *)
+  check "nested: the one-element arm written is exhaustive"
+    (warnings_of
+      "match (Nil : int list) with
+       | Cons (_, Cons (b, _)) -> b
+       | Cons (a, Nil) -> a
+       | Nil -> 0") "";
+  (* A catch-all inside the constructor covers the rest of its payload space --
+     `contrib/db/redis_cluster.mere`'s third arm, which a first reading missed
+     and the algorithm does not. *)
+  check "nested: a catch-all inside the constructor is enough"
+    (warnings_of
+      "match (Nil : int list) with
+       | Cons (0, Cons (b, _)) -> b
+       | Cons (_, rest) -> 1
+       | Nil -> 0") "";
+
+  (* An open signature names a VALUE now. `missing _` said only that a
+     wildcard was absent; a value says which one, and the arm still has to be
+     the catch-all because covering just that value covers nothing else. *)
+  check "open signature: the missing int is named"
+    (warnings_of "match 42 with | 0 -> \"zero\" | 1 -> \"one\"")
+    (missing_warn_at "line 1, col 1" "2" "help: | _ -> ...");
+  check "open signature: the missing str is one character longer"
+    (warnings_of "match \"hi\" with | \"a\" -> 1 | \"bb\" -> 2")
+    (missing_warn_at "line 1, col 1" "\"bbx\"" "help: | _ -> ...");
+  (* A column with no literals in it has no value to name, and the sentence
+     that branch always printed is the honest one. *)
+  check "open signature: nothing to name reads as the old sentence"
+    (warnings_of "type Box = { v: int };
+       let b = Box { v = 1 } in
+       match b with | Box { v = 0 } -> 1")
+    (missing_warn_at "line 3, col 8" "Box { v = 1 }" "help: | Box { v = a1 } -> ...");
+
+  (* Records: declaration order, and a field the pattern leaves out is a
+     wildcard. Both forms are legal source and the columns have to line up. *)
+  check "nested: a record field's own cases are checked"
+    (warnings_of
+      "type Flag = { on: bool, off: bool };
+       let f = Flag { on = true, off = false } in
+       match f with | Flag { on = true } -> 1 | Flag { on = false, off = true } -> 2")
+    (missing_warn_at "line 3, col 8" "Flag { on = false, off = false }"
+       "help: | Flag { on = false, off = false } -> ...");
+
+  (* Bool, at depth: `Some true` and `None` leave `Some false`. *)
+  check "nested: a bool inside a constructor"
+    (warnings_of
+      "type 'a opt = None | Some of 'a;
+       match (None : bool opt) with | Some true -> 1 | None -> 0")
+    (missing_warn_at "line 2, col 8" "Some false" "help: | Some false -> ...");
+
   (* --- Phase 37.A: `while` at top-level (Let_rec lifting from Let value) --- *)
   check "Phase 37.A: while at top-level via Map mutable container (interp)"
     (Pipeline.process
@@ -2535,7 +2605,7 @@ let () =
     (warnings_of "match ((1, 2), 3) with | ((a, b), c) -> a + b + c") "";
   check "Phase 2: tuple with literal sub-pattern is NOT total"
     (warnings_of "match (1, 2) with | (0, b) -> b")
-    (no_wildcard_at "line 1, col 1" " for tuple");
+    (missing_warn_at "line 1, col 1" "(1, _)" "help: | (a1, a2) -> ...");
   check "Phase 2: record destructure is total"
     (warnings_of
       "type Pt = { x: int, y: int };
@@ -2543,10 +2613,10 @@ let () =
        match p with | Pt { x = a, y = b } -> a + b") "";
   check "Phase 2: int match without wildcard gets type hint"
     (warnings_of "match 42 with | 0 -> \"zero\"")
-    (no_wildcard_at "line 1, col 1" " for int");
+    (missing_warn_at "line 1, col 1" "1" "help: | _ -> ...");
   check "Phase 2: str match without wildcard gets type hint"
     (warnings_of "match \"hi\" with | \"hello\" -> 1")
-    (no_wildcard_at "line 1, col 1" " for str");
+    (missing_warn_at "line 1, col 1" "\"hellox\"" "help: | _ -> ...");
 
   (* --- region / &R T : Phase 1 (syntactic only) --- *)
   check "region block basic"

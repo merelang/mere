@@ -550,9 +550,13 @@ Write the arm, or take the hole the note offers: `fail` is typed `'a`, so
 while the arms are written. `--allow-nonexhaustive` downgrades the error to a
 warning for a whole run, which is for a tree mid-port rather than for a fix.
 
-int / str / float / tuple / record still need a wildcard arm, and its absence is
-a **warning**: there the checker cannot name what is missing, so it does not
-claim to.
+int / str / float still need a wildcard arm, and its absence is a **warning** —
+but since v0.1.472 the warning names a value rather than only the absence
+(`match n with | 0 -> … | 1 -> …` is `missing 2`), and the same algorithm looks
+INSIDE patterns, so a payload that is itself refutable is no longer a blind
+spot: `| Cons (_, Cons (b, _))` with `| Nil` is `missing Cons (_, Nil)`. Those
+nested findings are warnings for now, which is a migration and not a
+principle.
 
 ### 4. Record update needs the base's type
 

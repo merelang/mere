@@ -244,7 +244,13 @@ let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
   | Mere.Parser.Parse_error (loc, msg) -> report_syntax loc msg
   | Mere.Exhaustive.Non_exhaustive findings ->
     print_warnings (); report_nonexhaustive findings
-  | Mere.Eval.Eval_error (loc, msg) -> report loc "eval error" msg
+  | Mere.Eval.Eval_error (loc, msg) ->
+    (* print_warnings FIRST, which this handler did not do. A program that
+       reaches a fallthrough at runtime is usually one the checker warned
+       about, and the warning is the sentence that explains the eval error --
+       `no matching arm in match` above `missing 1` reads as two problems and
+       is one. Every other handler here already prints them. *)
+    print_warnings (); report loc "eval error" msg
   | Mere.Typer.Type_error (loc, msg) -> print_warnings (); report_type loc msg
   | Mere.Trait_elab.Trait_error (loc, msg) -> report loc "trait error" msg
   | Mere.Codegen_c.Codegen_error (loc, msg) -> report loc "codegen error" msg
