@@ -201,6 +201,24 @@ let reset_warnings () = warnings := []
 let take_warnings () = let ws = List.rev !warnings in warnings := []; ws
 let warn loc msg = warnings := (loc, msg) :: !warnings
 
+(* Drain the exhaustiveness findings on a path that is about to run or emit the
+   program, and stop it if any of them names a case.
+
+   This is called from `process` and from `infer_program_inner`'s `post`, which
+   is to say from both sides of the same fork the compile path already had to be
+   taught about once (see the note on `post`). Before this, a non-exhaustive
+   match was a line on the interpreter's stderr and *nothing at all* under
+   `-c` / `-ll` / `-w` / `-rv`: the four backends that produce the artifact were
+   the four that did not mention it. A fallthrough has no value to return, so
+   each of them invented one — which is the failure mode this check exists to
+   name, arriving as a wrong answer instead. *)
+let enforce_exhaustive () =
+  let (ws, es) = Exhaustive.classify () in
+  List.iter (fun (loc, msg) -> warn loc msg) ws;
+  if es <> [] then
+    if !Exhaustive.allow then List.iter (fun (loc, msg) -> warn loc msg) es
+    else raise (Exhaustive.Non_exhaustive es)
+
 let warn_reserved_name (loc : Loc.t) name =
   (* Not for the prelude's own declarations. They are prepended to every program,
      so a warning about one fires on every compile, and the user cannot rename a
@@ -484,7 +502,10 @@ let process ?base_dir ?(search_paths = []) s =
      Runs on the desugared program (same shape as check_borrows) so it
      sees resolved node types and full lexical scope. *)
   Move_check.check (Ast.desugar_program prog);
-  List.iter prerr_endline (Exhaustive.take ());
+  (* Before the eval, not after it: the findings used to be printed here and the
+     program run anyway, so the one message about the missing arm arrived above
+     the wrong answer it was explaining. *)
+  enforce_exhaustive ();
   let v = Eval.eval_in !eval_env prog.main in
   Eval.to_string v
 
@@ -821,6 +842,10 @@ let rec infer_program ?base_dir ?(search_paths = []) ?on_error source =
 and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
   Typer.reset_send_constraints ();
   Typer.reset_region_params ();
+  (* The compile path never reset this — it worked only because nothing drained
+     it either, and a second `infer_program` in one process would have been
+     judged against the first one's matches. *)
+  Exhaustive.reset ();
   let prog =
     Trait_elab.elaborate
       (parse_program ?base_dir ~search_paths source)
@@ -973,7 +998,14 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
     Typer.check_borrows [] desugared;
     Move_check.check desugared
   in
-  (if not recovering then post ()
+  (if not recovering then begin
+     post ();
+     (* Last, and only here: a recovering caller wants the findings as data
+        with the rest of the diagnostics (`check` drains them itself), and one
+        judged against a program that did not type-check is guesswork about a
+        scrutinee whose type never resolved. *)
+     enforce_exhaustive ()
+   end
    else
      try post () with
      | Typer.Type_error (loc, msg) | Trait_elab.Trait_error (loc, msg) ->
@@ -1033,9 +1065,16 @@ let check ?base_dir ?(search_paths = []) (source : string)
           a position in this text. Warnings are only worth reporting once the
           file checks: while it does not, they are noise about code the person is
           in the middle of writing. *)
+       (* A named missing case is an error here too, and carries the severity
+          that says so: an editor that draws it as a hint is describing a
+          program the compiler will refuse. *)
+       let (ex_ws, ex_es) = Exhaustive.classify () in
        let ws =
          List.map warning (take_warnings ())
-         @ List.map (fun (loc, msg) -> warning (loc, msg)) (Exhaustive.take_located ())
+         @ List.map warning ex_ws
+         @ List.map (fun (loc, msg) ->
+             { d_loc = loc; d_kind = "error"; d_msg = msg;
+               d_severity = Error; d_file = None }) ex_es
        in
        (* One entry per distinct complaint: the declaration loop and the pass over
           the desugared program see the same nodes, so the same error arrives

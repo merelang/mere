@@ -22,6 +22,13 @@ let rec walk_v = fn (v: Json.json) -> fn (n: int) -> fn (i: int) -> fn (l: int) 
   | Json.JNull -> (n + 1, i, l)
   | Json.JBool b -> (n + 1, i + (if b then 1 else 0), l)
   | Json.JNum x -> (n + 1, i + x, l)
+  // One node, contributing to neither sum: `i` adds up integers and `l` adds
+  // up string lengths, and a float belongs to neither. The MANIFEST pins the
+  // document to integer literals, so this arm is not reached by the input this
+  // benchmark is timed on -- it is here because the arm that was missing made
+  // a fallthrough, and a walk whose job is to count every node cannot answer
+  // a node it has no arm for with a number it invented.
+  | Json.JFloat _ -> (n + 1, i, l)
   | Json.JStr s -> (n + 1, i, l + str_len s)
   | Json.JArr xs -> walk_l xs (n + 1) i l
   | Json.JObj kvs -> walk_o kvs (n + 1) i l

@@ -196,23 +196,32 @@ and match_seq = fn (atoms: regex list) -> fn (s: str) -> fn (i: int) ->
 
 // whole-string match: respects ^ and $ anchors, otherwise tries any
 // starting position in 0..n
+// The inner match is parenthesised, and that is the whole fix: without the
+// parens, `| _ -> match_seq (Cons (pat, Nil)) s 0` was parsed as a THIRD arm
+// of `match atoms with` -- which already has a `_` arm above it, so the arm
+// written for the outer match was dead code, and `match pat with` had one arm
+// for seven constructors. A `match_re (RChar "a") "a"` therefore reached a
+// fallthrough instead of the answer written for it right here.
+//
+// Nothing about the `RSeq` path changes; the arm that was already written is
+// now the one that runs for everything else.
 let match_re = fn (pat: regex) -> fn (s: str) ->
   match pat with
   | RSeq atoms ->
-    match atoms with
-    | Nil -> true
-    | Cons (RStart, rest) ->
-      // ^ anchored — only position 0
-      match_seq rest s 0
-    | _ ->
-      // try matching from every starting position
-      let n = str_len s in
-      let rec try_pos = fn (i: int) ->
-        if i > n then false
-        else if match_seq atoms s i then true
-        else try_pos (i + 1)
-      in
-      try_pos 0
+    (match atoms with
+     | Nil -> true
+     | Cons (RStart, rest) ->
+       // ^ anchored — only position 0
+       match_seq rest s 0
+     | _ ->
+       // try matching from every starting position
+       let n = str_len s in
+       let rec try_pos = fn (i: int) ->
+         if i > n then false
+         else if match_seq atoms s i then true
+         else try_pos (i + 1)
+       in
+       try_pos 0)
   | _ -> match_seq (Cons (pat, Nil)) s 0;
 
 };   // end of `module Regex`
