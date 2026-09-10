@@ -17,7 +17,12 @@ let rec check = fn (t: tree) ->
 
 let argv = args ();
 let n = match argv with | Cons (a, _) -> int_of_str a | Nil -> 40;
-let d = match argv with | Cons (_, Cons (b, _)) -> int_of_str b | Nil -> 16;
+// `| _ ->`, not `| Nil ->`: with exactly ONE argument neither arm matched and
+// the match fell through -- the default is what an absent second argument
+// means, and one argument is as absent as none. Found by the exhaustiveness
+// checker once it started looking inside patterns (v0.1.472); the top-level
+// `Cons` was named, so the old check called this exhaustive.
+let d = match argv with | Cons (_, Cons (b, _)) -> int_of_str b | _ -> 16;
 
 let rec go = fn (i: int) -> fn (acc: int) ->
   if i == 0 then acc

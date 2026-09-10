@@ -13,7 +13,12 @@ let pad = "------------------------------------------";
 
 let argv = args ();
 let n = match argv with | Cons (a, _) -> int_of_str a | Nil -> 200000;
-let live = match argv with | Cons (_, Cons (b, _)) -> int_of_str b | Nil -> 2000;
+// `| _ ->`, not `| Nil ->`: with exactly ONE argument neither arm matched and
+// the match fell through -- the default is what an absent second argument
+// means, and one argument is as absent as none. Found by the exhaustiveness
+// checker once it started looking inside patterns (v0.1.472); the top-level
+// `Cons` was named, so the old check called this exhaustive.
+let live = match argv with | Cons (_, Cons (b, _)) -> int_of_str b | _ -> 2000;
 
 let m = map_new ();
 

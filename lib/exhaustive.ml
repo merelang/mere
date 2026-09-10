@@ -459,45 +459,52 @@ let show_arm (p : Ast.pattern) : string =
   in
   go p
 
-(* Is this witness one the OLD checker could have expressed -- a single
-   top-level constructor whose payload is all wildcards?
+(* Which findings stop a build.
 
-   That is the line between an error and a warning, and it is a migration
-   switch rather than a principle. v0.1.468 made a named missing case an error
-   and the ecosystem was 19 sites; the nested cases this algorithm newly finds
-   number in the hundreds, each of them a decision about what the missing arm
-   should DO. They are warnings until that work is done, and this predicate is
-   how the two are told apart without keeping a second checker around to ask. *)
-let rec all_wild (p : Ast.pattern) =
+   v0.1.472 introduced this as a migration switch -- "what the old checker could
+   have expressed" -- and measuring made a better line available. The whole
+   ecosystem had four nested holes and they are fixed, so the question is no
+   longer how many sites a promotion would cost. It is which findings are worth
+   refusing a program over, and the two classes differ in kind:
+
+     - A witness built only from constructors of FINITE signatures -- variants,
+       bool, unit, tuples, records -- names a SHAPE. `Cons (_, Nil)` says a
+       one-element list falls between the arms, and the fix is that arm. The
+       finding carries information the person did not have.
+
+     - A witness containing an int / str / float literal, or that is a bare
+       wildcard, has its decisive position in an INFINITE domain. `missing 2`
+       for `| 0 -> … | 1 -> …` is true and the only arm that closes it is
+       `| _ -> …`, which the language reference already asks for at every match
+       over a scalar. Refusing the program adds nothing to what the warning
+       said; it only changes the severity.
+
+   So the first is an error and the second is a warning, and that is a property
+   of the witness rather than a phase of a migration. It also keeps
+   `test/parity/nonexhaustive_caught.mere` and its fail/ twin compiling: they
+   hold the RUNTIME behaviour of a fallthrough, and a complete checker with no
+   permission would make that behaviour unreachable from any compiling program. *)
+let rec witness_has_open_literal (p : Ast.pattern) =
   match p.Ast.pnode with
-  | Ast.P_wild -> true
-  | Ast.P_tuple ps -> List.for_all all_wild ps
+  | Ast.P_int _ | Ast.P_str _ -> true
+  | Ast.P_constr (_, Some sub) -> witness_has_open_literal sub
+  | Ast.P_tuple ps -> List.exists witness_has_open_literal ps
+  | Ast.P_record (_, fs) -> List.exists (fun (_, q) -> witness_has_open_literal q) fs
   | _ -> false
 
-let rec witness_is_shallow (p : Ast.pattern) =
+let witness_is_error (p : Ast.pattern) =
   match p.Ast.pnode with
-  | Ast.P_constr (_, None) -> true
-  | Ast.P_constr (_, Some sub) -> all_wild sub
-  | Ast.P_bool _ | Ast.P_unit -> true
-  (* A tuple of them too: `(Greenq, Greenq)` is a combination the old
-     product-space check named and made an error, and it is as concrete as a
-     single constructor is. *)
-  | Ast.P_tuple ps -> List.for_all witness_is_shallow ps
-  | _ -> false
+  | Ast.P_wild -> false            (* nothing named: the sentence, not a refusal *)
+  | _ -> not (witness_has_open_literal p)
 
-(* One finding per match, carrying the witness and the arm to write.
-
-   The hint spells the arm out and then the hole: `fail` is typed `'a`, so
-   `| _ -> fail "todo"` satisfies any match and the rest of the file keeps
-   compiling while the arm is written. *)
 (* Every constructor of the scrutinee's own type that no arm names.
 
    The algorithm returns ONE witness, which is the right answer to "is this
    exhaustive" and the wrong shape for the edit that provokes it: a case added
    to a type leaves several `match`es missing several constructors each, and
    being told about one of them per compile is three compiles to learn one
-   thing. So when the witness is a shallow top-level constructor, the whole
-   absent set is listed beside it -- which is what the top-level column
+   thing. So when the finding is an error, the whole absent set of the
+   scrutinee's own type is listed beside the witness -- which is what the top-level column
    already knows, and what this file did before the algorithm replaced it. *)
 let absent_top_level (scrut_ty : Ast.ty)
                      (rows : Ast.pattern list list) : Ast.pattern list =
@@ -583,9 +590,13 @@ let check_match (loc : Loc.t)
   | _ when !declined -> []
   | None -> []
   | Some [w] ->
-    let shallow = witness_is_shallow w in
-    let also = if shallow then absent_top_level scrut_ty unguarded else [] in
-    [ witness_finding loc scrut_ty w shallow also ]
+    let is_error = witness_is_error w in
+    (* `absent_top_level` is self-limiting: it answers with the constructors of
+       the scrutinee's own type that no arm names, so a nested witness like
+       `Cons (_, Nil)` -- whose top-level constructors are all present -- adds
+       nothing and the finding stays about the one shape. *)
+    let also = if is_error then absent_top_level scrut_ty unguarded else [] in
+    [ witness_finding loc scrut_ty w is_error also ]
   | Some _ -> []
 
 (* Phase 21.2: deferred matches.  Storing the triple lets us re-walk the
