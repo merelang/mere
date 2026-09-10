@@ -221,7 +221,47 @@ let warn loc msg = warnings := (loc, msg) :: !warnings
    wrong, which is a smaller claim than the one written here and still reason
    enough to move it to compile time. The runtime half is now one answer on all
    five paths; see the note in `Codegen_c`'s fallthrough. *)
+(* Raised on the paths that would otherwise run or emit the program: a type
+   declared twice with different constructors leaves the compiler holding one
+   model for two types, and everything downstream -- exhaustiveness, `==`,
+   codegen's variant tags -- answers from whichever declaration came last. See
+   the note on `Typer.type_redecls` for what was measured before making this an
+   error rather than a warning (zero sites in 945 files).
+
+   No position: `Ast.Top_type` carries none, so there is no line to point at.
+   The message names the type and both constructor sets instead, which is what
+   a reader needs to find the two declarations. *)
+exception Type_redeclared of (string * string * string) list
+
+let redecl_message (name, a, b) =
+  String.concat "\n"
+    [ Printf.sprintf
+        "type `%s` is declared twice with different constructors (`%s` and `%s`)"
+        name a b;
+      "help: a type may be restated identically — twelve files here restate `'a list`";
+      "help: — but two different types cannot share a name. The second wins for the";
+      "help: name while the first's constructors stay usable, so a `match` over one";
+      "help: is checked against the other. Rename one of them." ]
+
+(* So that an uncaught one, and `Printexc.to_string` generally, say what it is
+   rather than `Type_redeclared(_)`. The host runtime's words are not the
+   language's -- the same reason the CLI translates Out_of_memory and
+   Stack_overflow. *)
+let () =
+  Printexc.register_printer (function
+    | Type_redeclared rs ->
+      Some (String.concat "; " (List.map (fun (n, a, b) ->
+        Printf.sprintf "type `%s` is declared twice with different constructors (`%s` and `%s`)"
+          n a b) rs))
+    | _ -> None)
+
+let enforce_type_redecls () =
+  match Typer.take_type_redecls () with
+  | [] -> ()
+  | rs -> raise (Type_redeclared rs)
+
 let enforce_exhaustive () =
+  enforce_type_redecls ();
   let (ws, es) = Exhaustive.classify () in
   List.iter (fun (loc, msg) -> warn loc msg) ws;
   if es <> [] then
@@ -1077,6 +1117,15 @@ let check ?base_dir ?(search_paths = []) (source : string)
        (* A named missing case is an error here too, and carries the severity
           that says so: an editor that draws it as a hint is describing a
           program the compiler will refuse. *)
+       (* A conflicting redeclaration is an error here too: an editor that does
+          not show it is describing a program the compiler will refuse. No
+          position, because `Top_type` carries none. *)
+       let redecls =
+         List.map (fun r ->
+           { d_loc = Loc.dummy; d_kind = "type error"; d_msg = redecl_message r;
+             d_severity = Error; d_file = None })
+           (Typer.take_type_redecls ())
+       in
        let (ex_ws, ex_es) = Exhaustive.classify () in
        let ws =
          List.map warning (take_warnings ())
@@ -1084,6 +1133,7 @@ let check ?base_dir ?(search_paths = []) (source : string)
          @ List.map (fun (loc, msg) ->
              { d_loc = loc; d_kind = "error"; d_msg = msg;
                d_severity = Error; d_file = None }) ex_es
+         @ redecls
        in
        (* One entry per distinct complaint: the declaration loop and the pass over
           the desugared program see the same nodes, so the same error arrives

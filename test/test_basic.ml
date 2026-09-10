@@ -2476,36 +2476,45 @@ let () =
     (missing_at "line 2, col 8" "Triangle (_, _)"
        "help: | Triangle (a1, a2) -> ...");
 
-  (* Two modules declaring `type t` share one entry in the variant registry,
-     because it keys on the bare name. This match is complete, and reporting
-     `Z` — a constructor of the OTHER `t` — is what made a correct program
-     fail to build once the finding became an error. *)
-  check "non-exhaustive: a constructor from a same-named type is not reported"
-    (warnings_of
-      "module Foo { type t = X | Y; };
-       module Bar { type t = X | Z; };
-       let a = Foo.X in
-       match a with | Foo.X -> 1 | Foo.Y -> 2") "";
-  check "module: 2 modules same ctor + qualified pattern match still runs"
-    (Pipeline.process
-       "module Foo { type t = X | Y; };\n\
-        module Bar { type t = X | Z; };\n\
-        let a = Foo.X in let b = Bar.X in\n\
-        (match a with | Foo.X -> 1 | Foo.Y -> 2) + (match b with | Bar.X -> 10 | Bar.Z -> 20)")
-    "11";
-  (* The half of that collision still answered wrongly, kept as a row rather
-     than left as an absence: when one type's constructors are a SUBSET of the
-     other's, every arm is found in the entry and the extra one is reported.
-     Telling them apart needs the registry keyed on the qualified type name.
-     This asserts today's wrong answer on purpose — the day the registry is
-     fixed, this check fails and says where to look. *)
-  check "non-exhaustive: KNOWN HOLE — a subset collision still reports the other type's case"
-    (warnings_of
+  (* TWO MODULES DECLARING `type t` ARE REFUSED (v0.1.474), which is what closes
+     the hole the three checks here used to describe.
+
+     Module types are registered globally and unqualified on purpose, so this
+     was never a module problem: a type name declared twice with a DIFFERENT
+     constructor set leaves the compiler holding one model for two types. The
+     second wins for the name while the first's constructors stay usable, so a
+     `match` over one was checked against the other. Measured at zero sites
+     across 945 files before it became an error. *)
+  check_raises_containing "redeclared type: two modules, one type name"
+    "declared twice with different constructors"
+    (fun () -> Pipeline.process
+      "module Foo { type t = X | Y; };\n\
+       module Bar { type t = X | Z; };\n\
+       let a = Foo.X in let b = Bar.X in\n\
+       (match a with | Foo.X -> 1 | Foo.Y -> 2) + (match b with | Bar.X -> 10 | Bar.Z -> 20)");
+  (* The subset shape was the half the exhaustiveness checker could NOT decline
+     -- every arm was found in the entry and the extra constructor was reported
+     as missing -- and it is refused at the declaration now, before any match
+     is looked at. *)
+  check_raises_containing "redeclared type: a subset collision is refused too"
+    "declared twice with different constructors"
+    (fun () -> Pipeline.process
       "module Ga { type u = P | Q; };
        module Gb { type u = P | Q | R; };
        let a = Ga.P in
-       match a with | Ga.P -> 1 | Ga.Q -> 2")
-    (missing_at "line 4, col 8" "R" "help: | R -> ...");
+       match a with | Ga.P -> 1 | Ga.Q -> 2");
+  (* And an IDENTICAL restatement is still accepted, which twelve files in this
+     tree rely on: `'a list` and `'a opt` are restated for self-containment and
+     describe the same type both times. *)
+  check "redeclared type: an identical restatement is fine"
+    (Pipeline.process
+      "type 'a list = Nil | Cons of 'a * 'a list;
+       match (Cons (1, Nil)) with | Cons (h, _) -> h | Nil -> 0") "1";
+  check "redeclared type: a record restated identically is fine"
+    (Pipeline.process
+      "type Pt = { x: int, y: int };
+       type Pt = { x: int, y: int };
+       let p = Pt { x = 3, y = 4 } in p.x + p.y") "7";
 
   (* The hole the note offers, at the library level: `fail` is typed `'a`, so
      an arm returning it covers the rest of the match. The compiled backends
@@ -5742,12 +5751,20 @@ let () =
        "module Traffic { type Light = Red | Yellow | Green; let label = fn (l: Light) -> match l with | Red -> 1 | Yellow -> 2 | Green -> 3; };\n\
         module Mood { type Color = Red | Blue | Purple; let label = fn (c: Color) -> match c with | Red -> 10 | Blue -> 20 | Purple -> 30; };\n\
         Traffic.label Traffic.Red + Mood.label Mood.Red") "11";
-  check "module: 2 modules same ctor + qualified pattern match"
-    (Pipeline.process
+  (* Two modules may share a CONSTRUCTOR name (the test above) but not a TYPE
+     name: module types are registered globally and unqualified, so `Foo.t` and
+     `Bar.t` were one type with the second's constructors, and this program got
+     11 by reading a match over one against the other. Refused since v0.1.474 --
+     see the redeclaration tests in the exhaustiveness section for the whole
+     story. Kept here as well because THIS is where a reader looks for what
+     module scoping does and does not give you. *)
+  check_raises_containing "module: 2 modules may not share a type name"
+    "declared twice with different constructors"
+    (fun () -> Pipeline.process
        "module Foo { type t = X | Y; };\n\
         module Bar { type t = X | Z; };\n\
         let a = Foo.X in let b = Bar.X in\n\
-        (match a with | Foo.X -> 1 | Foo.Y -> 2) + (match b with | Bar.X -> 10 | Bar.Z -> 20)") "11";
+        (match a with | Foo.X -> 1 | Foo.Y -> 2) + (match b with | Bar.X -> 10 | Bar.Z -> 20)");
   (* Phase 42 (b): M-qualified record type works in interp (codegen is
      covered by the 4-backend smoke test in module_scoping.mere) *)
   check "module: qualified record literal + field access (interp)"
