@@ -480,7 +480,9 @@ jobs:
 
       # A `match` with no arm for a case was a warning printed from inside the
       # interpreter's path -- so `-c`, `-ll`, `-w` and `-rv` said nothing and
-      # exited 0, and each invented a value for the fallthrough. The refusal is
+      # exited 0. (This comment used to say each backend invented a value for the
+      # fallthrough; measured, three of the four failed LATE AND MUTE instead --
+      # see v0.1.470.) The refusal is
       # held on all five paths here, and the arm the error prints is pasted
       # back into the program and run, so a hint that stops being valid Mere
       # goes red rather than being merely wrong.

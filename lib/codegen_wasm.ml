@@ -3936,7 +3936,22 @@ and emit_expr (e : Ast.expr) : unit =
     in
     let arms = List.concat_map expand_or arms in
     let rec emit_arms = function
-      | [] -> emit_instr "unreachable"
+      | [] ->
+        (* v0.1.470: the named, catchable failure — not a bare `unreachable`.
+           A trap here is the shape v0.1.275 removed from `vec_get` for the same
+           reason it is written up there: "no message, nothing for try_or to
+           catch, where the interpreter raises a catchable failure". A match
+           that falls through was the remaining one.
+           `$__lang_fail` leaves an i64 on the stack in the caught case, which
+           is what every Mere value is on this backend, so it stands where the
+           polymorphic `unreachable` did. The diagnostic goes to stdout, not
+           stderr, because this backend's host ABI has one sink — a fact about
+           the host that `scripts/parity.sh` records in `wasm_diag_stream`.
+           Untagged: `fail: ` belongs to the `fail` builtin, not here. *)
+        fail_used := true;
+        emit_instr (Printf.sprintf "i64.const %d"
+                      (intern_show_str "no matching arm in match"));
+        emit_instr "call $__lang_fail"
       | (pat, guard, body) :: rest ->
         let (cond_slot, bindings) = compile_pat pat scrut_slot scrut_ty in
         (* Guard: evaluate within arm-bindings scope, AND with cond. If

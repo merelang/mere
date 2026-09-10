@@ -27,7 +27,8 @@ let rec walk_v = fn (v: Json.json) -> fn (n: int) -> fn (i: int) -> fn (l: int) 
   // document to integer literals, so this arm is not reached by the input this
   // benchmark is timed on -- it is here because the arm that was missing made
   // a fallthrough, and a walk whose job is to count every node cannot answer
-  // a node it has no arm for with a number it invented.
+  // a node it has no arm for at all: reaching it aborted the process with no
+  // message before v0.1.470 and names the failure now, and neither is a count.
   | Json.JFloat _ -> (n + 1, i, l)
   | Json.JStr s -> (n + 1, i, l + str_len s)
   | Json.JArr xs -> walk_l xs (n + 1) i l

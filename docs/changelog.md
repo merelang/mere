@@ -4,6 +4,106 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.470 — 2026-09-10
+
+**A `match` that falls through gave four answers, and the note in v0.1.468 said the wrong
+thing about all of them.** Measured this time, on a program that actually reaches the
+missing arm rather than one that merely has it:
+
+| | exit | stderr | `try_or` around it |
+|---|---:|---|---|
+| interpreter | 1 | `no matching arm in match`, with the line | catches it |
+| C | **134** | *nothing* | killed — a signal is not something a jmpbuf sees |
+| LLVM | **134** | *nothing* | killed |
+| Wasm | 1 | *nothing* | trapped |
+| RV32IM | 0 | *nothing* | **never failed at all** |
+
+So the claim v0.1.468 wrote into six places — "each backend invented a value, and the
+answer came back wrong instead of refused" — was true of exactly one backend. C and LLVM
+ran a bare `abort()`, Wasm executed `unreachable`, and all three failed **late and mute**
+rather than wrongly. RV32IM was the one that really did carry on with a value: the arm
+chain's last mismatch falls straight into the merge label with the saved stack pointer
+still in `a0`, so the match evaluated to a **stack address** and the program used it. Its
+comment said "typer guarantees exhaustiveness, so some arm matched" — which it does not,
+because a `match` over an int with no wildcard arm is a warning and compiles.
+
+Every copy of the wrong sentence is corrected in place, with what measuring found:
+`lib/pipeline.ml`, `scripts/exhaustive_check.sh`, `.github/workflows/ci.yml`,
+`benchmarks/json/bench.mere`, both places in the v0.1.468 entry, and one comment in
+mere-ruby. The commit messages are history and stay as they are; this entry is the
+correction they point at.
+
+### One answer, on all five paths
+
+Nothing new was written to do it — each backend already had the mechanism, applied to
+`fail` and not to this:
+
+- **C**: `__lang_fail_impl("no matching arm in match")` in place of `abort()`. Its own note
+  explains the choice made for `fail`: "an uncaught `fail` is a program error the language
+  defines, not a crash. `abort()` made the shell report 134 / SIGABRT and could dump core,
+  while the interpreter and the Wasm backend both exited 1 for the same program."
+- **LLVM**: the same helper with a length-prefixed message constant, beside the `lb_push`
+  ones. The other `@abort()` sites in that file are `show` / `eq_` / `cmp_` walking
+  variants they generated the arms for, which is a different claim and left alone.
+- **Wasm**: `call $__lang_fail`, which is what v0.1.275 gave `vec_get` for the reason
+  written there — "no message, nothing for try_or to catch, where the interpreter raises a
+  catchable failure". A match that falls through was the remaining one.
+- **RV32IM**: `emit_abort`, this file's own compile-time-known message, whose comment
+  records the same lesson a third time: the copy that used to live there was the
+  write-and-exit half only, "which is why every abort this backend emitted was
+  uncatchable".
+
+The message carries no `fail: ` tag, because that tag belongs to the `fail` builtin and
+this is the backend's own failure — the convention the other internal failures already
+follow, and the one `scripts/parity.sh`'s `payload()` is written around.
+
+### Two parity cases, because one shape cannot hold it
+
+`test/parity/fail/uncaught_nonexhaustive.mere` pins the message and the status across four
+backends. `test/parity/nonexhaustive_caught.mere` pins **catchability**, and it is in the
+passing corpus rather than `fail/` because it succeeds: every backend exits 0 and the
+answer differs, which the failure section cannot compare. It is also the only one of the
+two that covers RV32IM, because `scripts/rv_exec_check.sh` sweeps the passing corpus and
+the failure section has no RV leg.
+
+**Both use an int scrutinee on purpose.** Since v0.1.468 a missing case the checker can
+NAME is a compile error, so a program that reaches a fallthrough is one the compiler
+refuses — except where the checker admits it cannot name what is missing, which is exactly
+the scalar case that stays a warning. That decision is what keeps these two files
+compiling without a flag; if it is ever revisited, they are what says so.
+
+Poisoned three ways. Reverting C to `abort()` gives `c:EXIT(134)` on the uncaught case and
+fails the caught one; reverting Wasm to `unreachable` gives `wasm:OUT`. Parity 194/0
+(176 + 18), unit 2724/0, `exhaustive_check` 31, `check_cmd_check` 883. RV32IM checked on
+both cases against the C backend under the emulator, which is the comparison
+`rv_exec_check.sh` makes.
+
+### What is still open, and why it is not here
+
+**The checker's blind spot.** It compares TOP-LEVEL constructors only, so
+`Cons (TId nm, r)` and `Cons (TP lp, r)` between them "cover" `Cons` and a third token kind
+falls through. Swept: **269 such sites in this repository** (of 38,088 matches), 162 in
+mere-ruby, 127 in mbrowse. The first two examined by hand were both real holes —
+`benchmarks/churn/bench.mere` has no arm for a one-element argument list, and
+`contrib/db/redis_cluster.mere` none for a reply of the wrong shape. Closing it is the
+standard usefulness algorithm, which this pattern language fits (no ranges, no arrays, no
+lazy patterns) and which needs two things the registry does not push yet — a type's
+declared params, to instantiate a polymorphic payload, and the record field types. That is
+implementable; making it an ERROR is a migration of several hundred sites, so it wants to
+land as a warning first. This release makes the runtime half honest in the meantime.
+
+**Two types with the same bare name.** Not a checker bug: module-internal types are
+registered globally *unqualified* and the parser drops the `Module.` prefix from a
+qualified annotation, on purpose. So `Foo.t` and `Bar.t` are the same type — measured
+three ways: a match over one takes the other's arms, `Foo.X == Bar.X` is true, and a
+function annotated `Foo.t` accepts `Bar.Z`. The checker is being asked about a type with
+two conflicting declarations and has no right answer available, which is why it declines
+(v0.1.468). Fixing it means namespacing module types — DEFERRED §4.1, a breaking change
+across the parser, three typer registries and four backends — and it is not an
+exhaustiveness item.
+
+---
+
 ## v0.1.469 — 2026-09-10
 
 **`mere check <file>` — accept or refuse the program, emit nothing, say nothing when the
@@ -87,11 +187,19 @@ let area = fn (s: shape) ->
 ```
 
 Before: `mere shape.mere` printed one line of warning above the answer and exited 0;
-`mere -c shape.mere` emitted C and exited 0. A `match` with no arm for a case has no
-value to return, so each backend filled the fallthrough in with one of its own, and the
-answer came back **wrong instead of refused**. This is the ordinary edit — a case added
+`mere -c shape.mere` emitted C and exited 0. This is the ordinary edit — a case added
 to a type, every `match` over it left as it was — which is exactly why the check has to
 be on the path the person or the agent is actually using.
+
+> **v0.1.470 corrected the two sentences that used to be here.** They said a fallthrough
+> has no value to return, so each backend filled it in with one of its own and the answer
+> came back *wrong instead of refused*. Measured, on a program that actually reaches the
+> missing arm: the interpreter names the failure and points at the line, C and LLVM ran a
+> bare `abort()` (exit 134, no output), Wasm executed `unreachable` (exit 1, no output),
+> and **only RV32IM** carried on with a value — the saved stack pointer. So on three of
+> the four the failure was LATE AND MUTE, not wrong. That is a smaller claim than the one
+> written here, and still reason enough to move the check to compile time; the runtime
+> half became one answer on all five paths in v0.1.470.
 
 After, on all five:
 
@@ -144,7 +252,8 @@ arm for seven constructors, and `match_re (RChar "a") "a"` reached a fallthrough
 the answer written for it four lines below. Parenthesising the inner match is the whole fix;
 the `RSeq` path is unchanged and `examples/regex_demo.mere` still reports all 21 cases `ok`.
 `benchmarks/json/bench.mere` had no arm for `JFloat` in a walk whose job is to count every
-node — unreachable for the document the MANIFEST pins, and a number invented for any other.
+node — unreachable for the document the MANIFEST pins, and for any other one an abort with
+no message (this sentence said "a number invented"; see the correction above).
 
 **A false positive that had been hiding behind the warning.** Two modules that each declare
 `type t` share one entry in the variant registry, because it keys on the bare name — so a
