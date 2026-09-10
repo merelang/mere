@@ -276,6 +276,37 @@ node scripts/run_wasm.js sum.wasm                    # → 7 (via the host harne
 
 All three backends (C / LLVM / Wasm) match at feature parity — ints, functions, strings, tuples, records, variants, closures, polymorphism, recursive variants, complex patterns, `show`, region, view, `with` Drop, list pretty-printing, the four Q-010 collections (Vec / OwnedVec / StrBuf / Map), polymorphic user let-recs, inner-fn lifting, top-level value bindings globalized, and `str_compare`'s sign-normalized output (parity reached incrementally through Phases 15.x → 31.0; 16 realistic examples retain diff = 0 PERFECT).
 
+## Checking (`mere check`)
+
+Accept or refuse the program and emit nothing. Silent when the answer is yes;
+the exit status is the answer.
+
+```sh
+mere check src/foo.mere          # every check the compile path runs, no codegen
+mere check -w src/foo.mere       # …and the Wasm emit as well, bytes discarded
+```
+
+It runs what the four backends are handed: inference over the declarations and
+over the desugared program, the channel-element `Send` obligations, the borrow
+conflicts, the spawn-capture move analysis, and match exhaustiveness. On this
+repository's largest Mere program — a 51,000-line Ruby interpreter — that is
+**5.4 s against 34 s** for `mere -c` with its output thrown away, because on a
+file that size codegen is most of the work. On a small file the two are the same
+30 ms of process startup.
+
+`mere -t` is not this. It answers a type question, runs the declaration loop
+only, and its own help says the borrow and thread-capture checks do not run
+there — `examples/borrow_conflict.mere` is the standing proof: `-t` exits 0 on
+it and every compiled backend refuses it. `scripts/check_cmd_check.sh` holds
+`check` to agreeing with the compile path across the whole `examples/` tree, so
+it cannot drift into being a second `-t`.
+
+The one gap it has, stated rather than hidden: **codegen is not run**, so a
+backend refusing what it was handed — a builtin no Wasm host implements, a shape
+the RV32IM emitter walls on — is invisible to the bare form. That is what the
+`-c` / `-ll` / `-w` / `-rv` flags are for, and it is why the answer to "will this
+build" needs one of them.
+
 ## Formatting (`mere fmt`)
 
 A built-in pretty-printer normalizes source style — 2-space indent, operator-precedence-driven paren insertion, `else if` chain flattening, list / range / lambda-shorthand sugar reconstruction.

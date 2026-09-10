@@ -4,6 +4,74 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.469 — 2026-09-10
+
+**`mere check <file>` — accept or refuse the program, emit nothing, say nothing when the
+answer is yes.** There was no way to ask that question. The only cheap thing that looked
+like an answer was `mere -t`, which runs the declaration loop and NOT the borrow, spawn-
+capture or exhaustiveness checks — its own help has said so for a while, and
+`examples/borrow_conflict.mere` is the standing proof: `-t` exits 0 on it and every
+compiled backend refuses it. So the honest way to ask was to compile the program and throw
+the output away.
+
+On this repository's largest Mere program — mere-ruby, 51,014 lines — that costs:
+
+| | |
+|---|---:|
+| `mere check` | **5.4 s** |
+| `mere -c > /dev/null` | 33.6 s |
+| `mere -w > /dev/null` | 32.0 s |
+
+Codegen is 28 of those 34 seconds, so on a file that size the answer was six times more
+expensive than the question. On a small file the two are the same 30 ms of process startup:
+the win is entirely where it is needed and nowhere else.
+
+It runs exactly what the four backends are handed — `Pipeline.infer_program`: inference
+over the declarations and over the desugared program, the channel-element `Send`
+obligations, the borrow conflicts, the spawn-capture move analysis, and the exhaustiveness
+findings. Silent on success, because the exit status is the whole interface and a check
+that prints on the good path cannot go in a loop; that is how `mere fmt --check` already
+reads.
+
+**The gap it has is stated rather than hidden.** Codegen is not run, so a backend that
+refuses what it was handed is invisible to the bare form —
+`test/parity/bytebuf_edges.mere` type-checks and both the LLVM and Wasm emitters refuse
+it. `mere check -c | -ll | -w | -rv` runs that backend's emit as well and discards the
+bytes, which is the only way to ask "will this build" rather than "is this a valid
+program". The same four flags the compile paths use, rather than a second spelling
+(`--target c`) of the same four things.
+
+### The gate is a differential, because the hazard is not a bug
+
+What `mere check` is exposed to is becoming a second `-t`: a fast answer to a different
+question. Three hand-picked cases cannot hold that, because the failure would be a program
+nobody thought to pick. So `scripts/check_cmd_check.sh` sweeps **all 291 files in
+`examples/`** three ways and holds:
+
+- `check -c` and `-c` agree **exactly** — they do the same work and differ only in whether
+  the bytes are printed, so a disagreement is the subcommand having grown its own opinion;
+- `check` accepts everything `-c` accepts — a check that refuses what builds sends people
+  hunting a bug that is in the checker;
+- where `check` accepts and `-c` refuses, `check -c` must refuse it too. **13 of the 291
+  are such rows**, so this is exercised rather than vacuous.
+
+Plus the named cases the sweep cannot supply: `-t` accepts `borrow_conflict.mere` and
+`check` refuses it (if that inverts, the subcommand has become `-t`); bare `check` accepts
+`bytebuf_edges.mere` while `-ll` and `-w` refuse it (without this, the third invariant
+could pass on a corpus where no backend ever refuses anything); silence on the good path;
+and the two usage errors.
+
+Three poisons, and **one of them found the gate lying**. Making `check` behave like `-t`
+is caught by the named row. Making it silently run codegen is caught both by the
+accepts-what-builds sweep and by the `bytebuf_edges` row. Dropping its `~quiet:true` was
+caught by *nothing*: the silence check read `$(...)`, which strips trailing newlines, and
+`check` returns the empty string — so printing it produced exactly one newline that
+command substitution ate. It counts bytes now, and the poison reports
+`wrote 1 byte(s) ... \n`. That is the same trap the `puts` work two commits earlier used
+`od -c` to avoid, walked into one file over.
+
+---
+
 ## v0.1.468 — 2026-09-10
 
 **A `match` missing a case was a warning, and the warning was printed from inside the
