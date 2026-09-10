@@ -6304,7 +6304,17 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let arms = List.concat_map expand_or arms in
     let rec emit_arms = function
       | [] ->
-        emit_instr "  call void @abort()";
+        (* v0.1.470: the named, catchable failure — not a bare abort.
+           `__lang_fail_impl` prints the message, exits 1, and honours the
+           try_or jmpbuf; the abort said nothing, exited 134, and could not be
+           caught, so the same program answered differently here and on the
+           interpreter. The message matches the interpreter's word for word
+           because `scripts/parity.sh`'s failure section compares it. Untagged:
+           `fail: ` belongs to the `fail` builtin, not to a backend's own
+           failure. The other `@abort()` sites in this file are `show` / `eq_` /
+           `cmp_` walking variants they generated the arms for, which is a
+           different claim from a user's match. *)
+        emit_instr "  call void @__lang_fail_impl(ptr @.nomatch_msg)";
         emit_instr "  unreachable"
       | (pat, guard, body) :: rest ->
         let arm_label = fresh_label "arm_" in
@@ -11190,6 +11200,8 @@ let str_concat_helper =
       "@.lb_frozen_msg = internal alias [66 x i8], getelementptr inbounds ({ i64, [66 x i8] }, ptr @.lb_frozen_msg_h, i32 0, i32 1)";
       "@.lb_region_msg_h = internal constant { i64, [61 x i8] } { i64 60, [61 x i8] c\"lb_push: the builder belongs to a region that is not current\\00\" }";
       "@.lb_region_msg = internal alias [61 x i8], getelementptr inbounds ({ i64, [61 x i8] }, ptr @.lb_region_msg_h, i32 0, i32 1)";
+      "@.nomatch_msg_h = internal constant { i64, [25 x i8] } { i64 24, [25 x i8] c\"no matching arm in match\\00\" }";
+      "@.nomatch_msg = internal alias [25 x i8], getelementptr inbounds ({ i64, [25 x i8] }, ptr @.nomatch_msg_h, i32 0, i32 1)";
       "@.oom_msg_h = internal constant { i64, [14 x i8] } { i64 13, [14 x i8] c\"out of memory\\00\" }";
       "@.oom_msg = internal alias [14 x i8], getelementptr inbounds ({ i64, [14 x i8] }, ptr @.oom_msg_h, i32 0, i32 1)";
       "@.divzero_msg_h = internal constant { i64, [17 x i8] } { i64 16, [17 x i8] c\"division by zero\\00\" }";

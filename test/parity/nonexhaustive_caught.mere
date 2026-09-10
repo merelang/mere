@@ -1,0 +1,33 @@
+// A `match` that falls through, INSIDE a `try_or`. The subtlest of the three
+// things the four backends disagreed about, and the one no harness could see.
+//
+// `uncaught_nonexhaustive.mere` next door pins the message and the status. This
+// pins CATCHABILITY, which is a different property and was wrong in a different
+// way on each backend before v0.1.470: the interpreter handed back the try_or
+// default, the C and LLVM backends were killed by a bare `abort()` (a signal is
+// not something a jmpbuf sees), Wasm trapped on `unreachable`, and RV32IM never
+// failed at all — it returned the saved stack pointer as the match's value and
+// the try_or had nothing to catch.
+//
+// So this file is here rather than in fail/ because it SUCCEEDS: it is the shape
+// where the answer differs while every backend exits 0, which the failure
+// section cannot compare. It is also in the corpus `scripts/rv_exec_check.sh`
+// sweeps, which is the only gate that runs RV32IM output — the failure section
+// covers four backends and RV is not one of them.
+//
+// The vehicle is an int scrutinee for the reason written next door: a missing
+// case the checker can name is a compile error, so the only fallthrough a
+// compiling program can reach is one the checker admits it cannot name.
+
+let name = fn (n: int) ->
+  match n with
+  | 0 -> "zero"
+  | 1 -> "one";
+
+let safe = fn (n: int) -> try_or (fn () -> name n) "caught";
+
+let _ = print (name 1);
+let _ = print (safe 0);
+let _ = print (safe 7);
+let _ = print (safe 1);
+print (safe 99)

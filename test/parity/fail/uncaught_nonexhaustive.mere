@@ -1,0 +1,32 @@
+// A `match` that falls through, uncaught. The fifth thing that was four.
+//
+// Until v0.1.470 the same program answered four ways. The interpreter raised
+// `no matching arm in match` and pointed at the line. The C and LLVM backends
+// ran a bare `abort()`: exit 134, no output at all. Wasm executed
+// `unreachable`: exit 1, no output at all. And RV32IM fell off the end of the
+// arm chain with the saved stack pointer still in a0, so the match evaluated to
+// a STACK ADDRESS and the program carried on with it — the only one of the four
+// that really did invent a value.
+//
+// Nothing compared them. This section of the harness compares exit status,
+// stdout and the failure message for programs the interpreter refuses, and no
+// program in it reached a fallthrough — the same gap `exit` sat in until
+// v0.1.434 (Q-114), where the whole builtin was outside what the suite ran.
+//
+// THE VEHICLE IS AN INT SCRUTINEE ON PURPOSE. A missing case the checker can
+// NAME is a compile error since v0.1.468, so a program that reaches a
+// fallthrough is one the compiler refuses — except here: an int with no
+// wildcard arm is a warning, because that arm of the checker is an admitted
+// approximation and cannot name what is missing. So this file compiles on every
+// backend with no flag, and it stays that way as long as that decision does.
+//
+// Execution mode: 4 backends, compared on exit status + stdout + failure message
+
+let name = fn (n: int) ->
+  match n with
+  | 0 -> "zero"
+  | 1 -> "one";
+let _ = print (name 0);
+let _ = print (name 2);
+let _ = print "unreachable";
+0
