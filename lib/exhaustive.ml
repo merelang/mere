@@ -54,6 +54,25 @@ let record_decls : (string, string list * (string * Ast.ty) list) Hashtbl.t =
 let register_record_decl name params fields =
   Hashtbl.replace record_decls name (params, fields)
 
+(* Per-compilation state, cleared with the typer's own registries.
+
+   These three were never cleared, which the checker got away with because the
+   only thing it did with a stale entry was answer about a type the current
+   program does not declare. Two things made it matter. A process that compiles
+   more than one program -- the test binary, and the language server on every
+   keystroke -- could consult the PREVIOUS program's constructor list. And the
+   conflicting-redeclaration check added in v0.1.474 reads this table, so a
+   `type shape` in one test program read as a conflicting prior declaration of
+   the `type shape` in the next.
+
+   Cleared rather than snapshotted: `parse_program` re-parses the prelude
+   immediately after the reset, which re-registers everything the prelude
+   declares. *)
+let reset_registries () =
+  Hashtbl.reset type_variants;
+  Hashtbl.reset type_params;
+  Hashtbl.reset record_decls
+
 (* For variant types: collect which constructor names appear at the top of
    each arm's pattern.  As-patterns are stripped; or-patterns are flattened. *)
 (* A constructor written inside a `module M { ... }` is parsed as the

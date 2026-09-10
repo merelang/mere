@@ -4,6 +4,72 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.474 — 2026-09-10
+
+**A type name declared twice with different constructors is refused.** This is the last
+item the exhaustiveness arc left open, and investigating it moved it out of the language's
+DEFERRED list entirely: it is not a module problem and it does not need module types
+namespaced.
+
+What was measured first, because the framing decided the size of the change:
+
+```mere
+type t = A | B;
+type t = X | Y;
+match A with | A -> 1 | B -> 2      // exit 0, answers 1
+```
+
+Both declarations are accepted, the SECOND wins for the name `t`, and the FIRST's
+constructors stay usable — they are keyed by constructor name, not by type. So the compiler
+holds one model for two types, and everything downstream answers from whichever came last:
+a `match` over the first type is checked against the second's cases, `==` compares values
+of two types as one, and a function annotated with the name accepts either. All three were
+measured, at top level and inside modules, and they behave the same. **Module types are
+registered globally and unqualified on purpose** — the parser drops the prefix from a
+qualified annotation, and says so — which is why `module A { type t }` beside
+`module B { type t }` is exactly the top-level collision and not a scoping bug. DEFERRED
+§4.1 (namespacing module types) is a different and larger change that this does not need.
+
+**Restating a type identically stays fine, because it is ordinary here**: twelve files in
+this tree restate `'a list` or `'a opt` for self-containment, and both declarations describe
+the same type. Only a CONFLICTING redeclaration is refused, with both constructor sets in
+the message and a `help:` that says which half is allowed.
+
+### The count, measured before it became an error
+
+Zero conflicting redeclarations across 945 files here and six downstream repositories.
+Fifteen type names *are* declared with different shapes across the ecosystem — `tree` in
+three shapes across ten files, `expr` in four — but each shape is a different program, and
+the registries are per-compilation, so none of them is a collision. The refusal cost
+nothing.
+
+### Which is how it found a real bug of its own
+
+The first sweep reported conflicts that were not there: a `type shape` in one test program
+read as a prior declaration of the `type shape` in the next. **`Exhaustive`'s three
+registries were never cleared between compilations.** `Typer.reset_type_registries` has
+restored the typer's own tables per program since v0.1.291 for exactly this reason, and the
+checker's were not in it — so a process that compiles more than one program (the test
+binary, and the language server on every keystroke) could consult the previous program's
+constructor list for a type the current one does not declare. They are cleared now.
+
+### What this closes
+
+`test_basic.ml` carried a row asserting today's wrong answer for the half the
+exhaustiveness checker could not decline — a subset collision (`X | Y` beside `X | Y | Z`),
+where every arm is found in the entry and the extra constructor is reported as missing.
+That program is refused at its declaration now, before any match is looked at, and the row
+is a refusal test. The checker's `entry_describes_column` decline stays as a backstop; the
+cause it guarded against cannot reach it.
+
+Two modules may still share a CONSTRUCTOR name (`Traffic.Red` and `Mood.Red`), which is
+what module scoping is for and has its own test beside this one.
+
+Unit 2733/0, parity 194/0, `exhaustive_check` 31, `check_cmd_check` 883, refusal verified
+on all five paths.
+
+---
+
 ## v0.1.473 — 2026-09-10
 
 **The four real holes are fixed, and a nested missing case is an error.** v0.1.472 shipped

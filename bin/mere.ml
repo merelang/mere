@@ -244,6 +244,18 @@ let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
   | Mere.Parser.Parse_error (loc, msg) -> report_syntax loc msg
   | Mere.Exhaustive.Non_exhaustive findings ->
     print_warnings (); report_nonexhaustive findings
+  | Mere.Pipeline.Type_redeclared rs ->
+    (* No position to render a code frame against — `Top_type` carries none —
+       so this takes the line=0 shape `Diagnostic.format` already has. *)
+    print_warnings ();
+    prerr_endline
+      (String.concat "\n\n"
+         (List.map (fun r ->
+            render ~source ~filename:label Mere.Loc.dummy "type error"
+              (Mere.Pipeline.redecl_message r)) rs));
+    if List.length rs > 1 then
+      Printf.eprintf "\n%d errors\n" (List.length rs);
+    exit 1
   | Mere.Eval.Eval_error (loc, msg) ->
     (* print_warnings FIRST, which this handler did not do. A program that
        reaches a fallthrough at runtime is usually one the checker warned
