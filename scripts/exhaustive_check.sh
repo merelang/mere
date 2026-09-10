@@ -45,14 +45,17 @@
 #   5. THE ESCAPE HATCH. `--allow-nonexhaustive` builds the program in item 1
 #      and says `warning` instead.
 #
-#   6. AN OPEN-SIGNATURE MISS IS STILL A WARNING. `match n with | 0 -> ...` over
-#      an int is missing a value, and since v0.1.472 the checker NAMES one
-#      (`missing 1`) instead of only saying a wildcard is absent. It stays a
-#      warning all the same: promoting it would refuse every match over a
-#      scalar that has no `_` arm, and -- more immediately -- the two parity
-#      cases that hold the RUNTIME behaviour of a fallthrough are compiled by
-#      exactly this permission. A complete checker and a reachable fallthrough
-#      cannot both be tested without a flag.
+#   6. AN OPEN-SIGNATURE MISS IS A WARNING, and that is the line rather than a
+#      phase of one. The checker NAMES the value since v0.1.472
+#      (`match n with | 0 | 1` is `missing 2`), and the only arm that closes an
+#      infinite domain is `| _ -> ...`, which the language reference already
+#      asks for at every match over a scalar -- so refusing the program adds
+#      nothing the warning did not say. A witness built only from finite
+#      signatures names a SHAPE and the fix is that arm, so it is an error
+#      (v0.1.473). Item 1 above is such a witness; this one is not.
+#      It also keeps `test/parity/nonexhaustive_caught.mere` and its fail/ twin
+#      compiling: they hold the RUNTIME behaviour of a fallthrough, which no
+#      compiling program could reach if every named miss were refused.
 #
 # The subject is integer-only so that all five backends, RV32IM included, can
 # take it.
