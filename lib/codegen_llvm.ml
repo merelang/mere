@@ -249,6 +249,14 @@ let file_io_used_llvm = ref false
    file_pwrite / file_fsync / file_close), the group a paged or
    append-only store is built on. *)
 let file_pio_used_llvm = ref false
+(* v0.1.475: file_pread_bytes gets its OWN flag rather than riding in
+   file_pio_runtime_llvm, because it calls @__lang_bytes_alloc -- which is in
+   the bytes runtime, behind a different flag. Emitted with the positioned-IO
+   block it put a call to an undefined symbol into every program that used
+   file_pio WITHOUT bytes, and llc refused the module. test/parity/file_pio.mere
+   is exactly that program, and it is what went red. The lowering sets
+   bytes_used too, so wherever this is emitted the allocator is as well. *)
+let file_pread_bytes_used_llvm = ref false
 (* v0.1.169: `args ()`. Gates the argc/argv globals, the list builder, and
    main's parameter list — a module that never asks for argv keeps the
    `main()` signature it has always had. *)
@@ -4211,6 +4219,24 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
       "  %s = call i64 @__lang_file_pwrite_bytes(i64 %s, i64 %s, ptr %s)" r f off b);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.App
+                 ({ node = Ast.Var "file_pread_bytes"; _ }, ch_e); _ }, off_e); _ },
+             len_e) ->
+    (* v0.1.475 (medit2 dogfood): the read half, one fread into a `bytes`.
+       file_pread returns Vec[int] at eight bytes per byte, built one fgetc at a
+       time; this is the shape a reader paging through a large file wants. *)
+    file_io_used_llvm := true; file_pio_used_llvm := true; bytes_used := true;
+    file_pread_bytes_used_llvm := true;
+    (* Same reason as file_pwrite_bytes above: the positioned-IO runtime is one
+       block and file_pread's body calls the Vec[int] accessors regardless. *)
+    if not (Hashtbl.mem vec_instances "int") then Hashtbl.add vec_instances "int" Ast.TyInt;
+    let f = emit_expr env ch_e in
+    let off = emit_expr env off_e in
+    let len = emit_expr env len_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+      "  %s = call ptr @__lang_file_pread_bytes(i64 %s, i64 %s, i64 %s)" r f off len);
     r
   | Ast.App ({ node = Ast.Var ("file_fsync" | "file_close" as fio); _ }, ch_e) ->
     file_io_used_llvm := true; file_pio_used_llvm := true;
@@ -11977,6 +12003,34 @@ let args_runtime_llvm =
       "  ret ptr %acc";
       "}" ]
 
+let file_pread_bytes_runtime_llvm =
+  String.concat "\n"
+    [ "; v0.1.475: the read half of file_pwrite_bytes. Allocate for len, fread";
+      "; once, then store what actually arrived as the length -- a read past the";
+      "; end comes back short rather than padded, the contract file_pread";
+      "; already documents.";
+      "define ptr @__lang_file_pread_bytes(i64 %h, i64 %off, i64 %len) {";
+      "entry_prb:";
+      "  %fr = inttoptr i64 %h to ptr";
+      "  %badoff = icmp slt i64 %off, 0";
+      "  %badlen = icmp sle i64 %len, 0";
+      "  %badr = or i1 %badoff, %badlen";
+      "  br i1 %badr, label %emptyr, label %seekr";
+      "emptyr:";
+      "  %e = call ptr @__lang_bytes_alloc(i64 0)";
+      "  ret ptr %e";
+      "seekr:";
+      "  %ser = call i32 @fseek(ptr %fr, i64 %off, i32 0)";
+      "  %okr = icmp eq i32 %ser, 0";
+      "  br i1 %okr, label %readr, label %emptyr";
+      "readr:";
+      "  %br = call ptr @__lang_bytes_alloc(i64 %len)";
+      "  %datar = getelementptr i8, ptr %br, i64 8";
+      "  %nr = call i64 @fread(ptr %datar, i64 1, i64 %len, ptr %fr)";
+      "  store i64 %nr, ptr %br";
+      "  ret ptr %br";
+      "}" ]
+
 let file_pio_runtime_llvm =
   String.concat "\n"
     [ "declare i32 @fgetc(ptr)";
@@ -12484,6 +12538,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   str_count_used_llvm := false;
   file_io_used_llvm := false;
   file_pio_used_llvm := false;
+  file_pread_bytes_used_llvm := false;
   args_used_llvm := false;
   uses_read_file_bytes_llvm := false;
   uses_write_file_bytes_llvm := false;
@@ -13154,6 +13209,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !uses_read_file_bytes_llvm || !uses_write_file_bytes_llvm
        then [file_bytes_runtime_llvm; ""] else [])
     @ (if !file_pio_used_llvm then [file_pio_runtime_llvm; ""] else [])
+    @ (if !file_pread_bytes_used_llvm then [file_pread_bytes_runtime_llvm; ""] else [])
     @ (if !args_used_llvm then [args_runtime_llvm; ""] else [])
     @ (if !logger_used then [logger_runtime_llvm; ""] else [])
     @ (if !metrics_used then [metrics_runtime_llvm; ""] else [])

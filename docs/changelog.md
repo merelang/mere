@@ -4,6 +4,82 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.475 — 2026-09-12
+
+_A positioned read that builds a `bytes`, the region a positioned read lives in,
+and what a region hands back when it is released. All three came out of one
+dogfood — a text editor that opens files it cannot hold in memory — and the
+third one is the one nobody had measured._
+
+_**`file_pread_bytes : File -> int -> int -> bytes`**, on all four backends. The
+read half of `file_pwrite_bytes`, which has existed since v0.1.222; only the
+write side had a `bytes` version. `file_pread` returns `Vec[R, int]` -- eight
+bytes per byte, built one `fgetc` at a time -- which is what mbtree wants for a
+page it is about to index as numbers, and not what a reader streaming a file
+wants. Measured on 208 MB in 256 KiB pages, C backend: **3.64 s at 10.1 MB peak
+RSS becomes 0.36 s at 1.8 MB**. Ten times faster and a fifth of the memory, and
+it removes a choice: before it, `read_bytes` was 0.33 s at 210 MB, so paging a
+file meant picking between memory and speed._
+
+_On Wasm this is the cheap one: the host import already HANDS BACK a bytes
+pointer and `file_pread` adds a `vec_of_bytes` after it, so the new builtin is
+the same call with the conversion removed._
+
+_**`file_pread` was the last container constructor missing from the typer's
+region-marker list.** `vec_new`, `read_file_bytes`, `strbuf_new`, `map_new`,
+`bytebuf_new` and the rest bind their result to the region open at the call
+site; `file_pread`'s region-quantified scheme instantiated a fresh marker that
+nothing unified with the block around it, and it settled on the default region.
+A `region R { let v = file_pread f off len in .. }` paging through a file
+retained every page it had read -- 200 pages of 64 KiB came to 107 MB, linear in
+the iteration count, inside a block that was acquiring and releasing correctly.
+Writing `(file_pread f off len : Vec[R, int])` bound it by hand and cut it to
+2.0 MB; it now needs no annotation. The identical hole, with the identical
+cause, is written up in this file for `bytebuf_new` (Q-127 / m3d Q-10) -- it
+survived in the one constructor that gets called in a loop._
+
+_**A released region keeps its largest block.** This is the one that had to be
+measured rather than read, and the reason is that the bookkeeping was already
+right. Releasing a grown region freed its whole chain and re-seeded at 1 MiB;
+every block WAS freed, and an instrumented run agreed -- 40 releases, 40 chain
+frees, 40 of 40. The process grew anyway, because the next iteration asks the
+allocator for those megabytes again and malloc does not hand the same pages
+back. Forty iterations of a 5 MiB `Vec` inside a `region` block reached **216 MB
+of resident memory**. Keeping the largest block and dropping the rest reuses the
+same memory: **13.7 MB, flat**._
+
+_Across the sweep that found it (20 iterations, by the size of the Vec's data):_
+
+| Vec data | before | after |
+|---|---|---|
+| 4 MiB | 8.6 MB | 11.3 MB |
+| 5 MiB | 107 MB | 13.4 MB |
+| 8 MiB | 167 MB | 19.5 MB |
+| 16 MiB | 327 MB | 35.9 MB |
+
+_Resident memory now scales with ONE iteration rather than with the iteration
+count. The 4 MiB row is the cost: a region that grew no longer shrinks back to
+1 MiB. **The retained block is capped** (`__LANG_REGION_KEEP_MAX`, 16 MiB),
+because a program that builds one enormous value in a region and then stops
+using regions should not hold it for the rest of the run -- eight regions are
+cached per thread, so an uncapped keep is eight times the largest value the
+program ever built. `scripts/region_reclaim_check.sh` pins **both** directions:
+under the cap the footprint must not follow the iteration count, over it it
+must. A trade with one side measured drifts._
+
+_`io_poll_new` / `add` / `mod` / `del` / `wait` / `get` and `io_set_nonblocking`
+are **documented** (v0.1.313, stdlib-reference until now only in the changelog).
+They are `poll(2)` over a registered interest set and take ANY fd -- `fd 0`, or a
+socketpair to a child process from a shim of your own -- which is what lets one
+loop wait on the keyboard and a subprocess with no busy-wait and no second
+thread. The dogfood that found this had designed a busy-polling loop around
+`stdin_byte` first. Same shape as `file_pwrite_bytes`, which the mraft dogfood
+missed for a whole slice for the same reason._
+
+_`dune runtest` 2733/0, parity 195/195, region_reclaim 11 checks._
+
+---
+
 ## v0.1.474 — 2026-09-10
 
 **A type name declared twice with different constructors is refused.** This is the last

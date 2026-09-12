@@ -2628,6 +2628,21 @@ and emit_expr (e : Ast.expr) : unit =
     emit_expr off_e;
     emit_expr b_e;
     emit_instr "call $file_pwrite"
+  | Ast.App ({ node = Ast.App ({ node = Ast.App
+                 ({ node = Ast.Var "file_pread_bytes"; _ }, ch_e); _ }, off_e); _ },
+             len_e)
+    when not (List.mem_assoc "file_pread_bytes" !locals
+              || Hashtbl.mem toplevel_fn_names "file_pread_bytes"
+              || Hashtbl.mem inner_lifts_wasm "file_pread_bytes") ->
+    (* v0.1.475: the mirror of file_pwrite_bytes above. The host import already
+       HANDS BACK a bytes pointer — file_pread's extra `vec_of_bytes` is the
+       conversion this one does not do. So on this backend the cheap primitive
+       is the one that was already underneath. *)
+    file_pio_used := true; bytes_used := true;
+    emit_expr ch_e;
+    emit_expr off_e;
+    emit_expr len_e;
+    emit_instr "call $file_pread"
   | Ast.App ({ node = Ast.Var ("file_fsync" | "file_close" as fio); _ }, ch_e)
     when not (List.mem_assoc fio !locals
               || Hashtbl.mem toplevel_fn_names fio

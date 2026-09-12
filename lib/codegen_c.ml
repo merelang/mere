@@ -576,6 +576,7 @@ let uses_read_file_bytes = ref false
 let uses_file_pread = ref false  (* v0.1.83: file_pread (positioned read) *)
 let uses_file_pwrite = ref false  (* v0.1.115: file_pwrite (positioned write) *)
 let uses_file_pwrite_bytes = ref false  (* v0.1.222: the same over `bytes` *)
+let uses_file_pread_bytes = ref false  (* v0.1.475: the read half over `bytes` *)
 let uses_file_openrw = ref false  (* v0.1.115: file_openrw (read/write open) *)
 let uses_file_fsync = ref false   (* v0.1.115: file_fsync (durability) *)
 let uses_tls = ref false  (* v0.1.91: tcp_starttls* -> real OpenSSL runtime *)
@@ -3278,6 +3279,17 @@ let rec emit_expr (e : Ast.expr) : string =
        bytes_used := true;
        uses_file_pwrite_bytes := true;
        Printf.sprintf "__lang_file_pwrite_bytes(%s, %s, %s)"
+         (emit_expr ch_e) (emit_expr off_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "file_pread_bytes"; _ }, ch_e); _ },
+                off_e) ->
+       (* v0.1.475 (medit2 dogfood): `file_pread_bytes ch off len` — the read
+          half, straight into a `bytes`. file_pread builds a Vec[int] one fgetc
+          at a time (eight bytes per byte, and 55 MB/s); this is one fread, and
+          a flat allocation an enclosing `region` block actually reclaims. No
+          region argument: `bytes` carries no region marker. *)
+       bytes_used := true;
+       uses_file_pread_bytes := true;
+       Printf.sprintf "__lang_file_pread_bytes(%s, %s, %s)"
          (emit_expr ch_e) (emit_expr off_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "write_file_bytes"; _ }, path_e) ->
        (* v0.1.44: the write half. The vec arg guarantees the vec_int
@@ -8471,6 +8483,9 @@ let region_runtime_helpers =
       "   slots cover any realistic nesting depth; deeper than that falls back";
       "   to malloc, which is correct and merely slower. */";
       "#define __LANG_REGION_CACHE_CAP 8";
+      (* v0.1.475: how much a recycled region may hold on to. Eight regions
+         are cached per thread, so this bounds the retention at 8 * this. *)
+      "#define __LANG_REGION_KEEP_MAX (16 * 1024 * 1024)";
       "static _Thread_local __lang_region* __lang_region_cache[__LANG_REGION_CACHE_CAP];";
       "static _Thread_local int __lang_region_cache_n = 0;";
       "";
@@ -8540,10 +8555,43 @@ let region_runtime_helpers =
       (* charged: the __lang_region_free below is the same arena and must not
          count it twice, and the recycled struct starts clean at acquire *)
       "  r->site = 0;";
+      (* v0.1.475 (medit2 dogfood): a region that GREW used to be thrown away
+         whole and rebuilt at 1 MiB. The bookkeeping was right -- every block
+         was freed -- and the process still grew without bound, because a loop
+         building a multi-megabyte value per iteration then asks the allocator
+         for that many megabytes again on the next one, and malloc does not
+         hand the same pages back. Measured: 40 iterations of a 5 MiB Vec inside
+         `region R { }` reached 216 MB of RSS while the release counter said it
+         had freed the chain 40 times out of 40.
+
+         Keeping the largest block and dropping the rest reuses the same memory:
+         the same loop is 13.7 MB and flat. That is 16x here and it is the shape
+         of every editor, renderer and pager -- one big value per iteration.
+
+         The retained block is capped, because the other direction is real too:
+         a program that builds ONE enormous value in a region and then never
+         uses regions again should not hold it for the rest of the run. Above
+         the cap this does what it always did. Both directions are pinned by
+         tests; neither is a judgement call that can drift. *)
       "  if (r->blocks->prev) {";
-      "    /* grew past the first block: free the chain, re-seed fresh */";
-      "    __lang_region_free(r);";
-      "    __lang_region_init(r, 1 << 20);";
+      "    __lang_region_block* best = r->blocks; size_t bestcap = r->blocks->pad;";
+      "    for (__lang_region_block* b = r->blocks; b; b = b->prev)";
+      "      if (b->pad > bestcap) { best = b; bestcap = b->pad; }";
+      "    if (bestcap > __LANG_REGION_KEEP_MAX) {";
+      "      /* one-off and enormous: give it back rather than hold it */";
+      "      __lang_region_free(r);";
+      "      __lang_region_init(r, 1 << 20);";
+      "    } else {";
+      "      for (__lang_region_block* b = r->blocks; b; ) {";
+      "        __lang_region_block* prev = b->prev;";
+      "        if (b != best) free(b);";
+      "        b = prev;";
+      "      }";
+      "      best->prev = NULL;";
+      "      r->blocks = best;";
+      "      r->base = (char*)(best + 1);";
+      "      r->cap = best->pad;";
+      "    }";
       "  }";
       "  r->top = r->base;";
       "  if (__lang_region_cache_n < __LANG_REGION_CACHE_CAP)";
@@ -9230,6 +9278,21 @@ let file_pwrite_bytes_runtime =
       "  if (fseek(f, (long)off, SEEK_SET) != 0) return 0;";
       "  size_t n = fwrite(b->data, 1, (size_t)b->len, f);";
       "  return (long long)n;";
+      "}" ]
+
+let file_pread_bytes_runtime =
+  String.concat "\n"
+    [ "static mere_bytes* __lang_file_pread_bytes(FILE* f, long long off, long long len) {";
+      "  if (off < 0 || len <= 0) return __lang_bytes_alloc(0);";
+      "  if (fseek(f, (long)off, SEEK_SET) != 0) return __lang_bytes_alloc(0);";
+      (* A read past EOF comes back short rather than padded, the same
+         contract file_pread documents. Allocate for len, fread once, then
+         report what arrived -- mere_bytes carries its own length, so a short
+         read needs no second allocation. *)
+      "  mere_bytes* b = __lang_bytes_alloc(len);";
+      "  size_t n = fread(b->data, 1, (size_t)len, f);";
+      "  b->len = (long long)n;";
+      "  return b;";
       "}" ]
 
 let bytebuf_runtime =
@@ -11213,6 +11276,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   uses_file_pread := false;
   uses_file_pwrite := false;
   uses_file_pwrite_bytes := false;
+  uses_file_pread_bytes := false;
   uses_file_openrw := false;
   uses_file_fsync := false;
   uses_file_io := false;
@@ -13003,6 +13067,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                     || Hashtbl.mem extern_fn_decls "mem_copy_bytes"); ""] else [])
     (* Also after it, for the same reason: it dereferences a mere_bytes. *)
     @ (if !uses_file_pwrite_bytes then [file_pwrite_bytes_runtime; ""] else [])
+    @ (if !uses_file_pread_bytes then [file_pread_bytes_runtime; ""] else [])
     (* After the bytes runtime: freezing a ByteBuf calls __lang_bytes_alloc. *)
     @ (if !bytebuf_used then [bytebuf_runtime; ""] else [])
     @ (if !bytes_vec_used then [bytes_vec_bridge_runtime; ""] else [])

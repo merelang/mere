@@ -13,6 +13,8 @@ character.
 | `lb_table.mere` | `module LbTable { key_of, class_of, flags_of, the 44 class constants }` — **generated** | ~50 + a 32,625-char literal |
 | `normalize.mere` | `module Normalize { nfc, nfd, is_nfc, is_nfd, ccc_of }` | ~200 |
 | `nfc_table.mere` | `module NfcTable { ccc_of, decomp_row, compose_pair }` — **generated** | ~90 + three literals |
+| `width.mere` | `module Width { of_cp, of_cp_amb, is_ambiguous, of_str, of_str_amb, of_str_narrow, of_str_wide, take_cols, take_cols_amb, cols_before, cols_before_amb }` | ~100 |
+| `width_table.mere` | `module WidthTable { class_of, the four width constants }` — **generated** | ~40 + a 8,814-char literal |
 
 ## Usage
 
@@ -23,6 +25,52 @@ Grapheme.clusters "🇯🇵á"     // ["🇯🇵"; "á"]
 Grapheme.count "👩‍👩‍👦"             // 1
 Grapheme.class_of 0x200D     // GcbTable.zwj
 ```
+
+## Width is its own table, and this is why
+
+`Width.of_str "日本語"` is 6, not 3 and not 9. A terminal cursor moves by
+columns, and a program that counts characters or bytes draws every line after
+the first CJK character in the wrong place.
+
+**It cannot be derived from `lb_table`**, which already reads
+`EastAsianWidth.txt`. That generator keeps one bit — `flag_eastasian`, set for
+`F`, `W` and `H` together — because UAX #14's LB19a and LB30 only ever ask "is
+this East Asian?". `H` is halfwidth katakana: East Asian and **one** column
+wide. The bit answers the line-breaker's question and throws away the width.
+
+**The ambiguous set is why every function here has two forms.**
+`EastAsianWidth=A` covers `±`, `§`, `※`, the box-drawing characters and much of
+Greek and Cyrillic, and the standard deliberately declines to say how wide they
+are: one column in a Western terminal, two in a terminal configured for CJK. So
+`of_cp_amb` takes the caller's answer and `is_ambiguous` lets a caller ask. A
+library that picked silently would be wrong half the time and never say so.
+
+**Three oracles, because one is not enough:**
+
+| | answers | how |
+|---|---|---|
+| the UCD | what the standard says | `scripts/gen_width_table.sh` generates from it |
+| **Reline** (Ruby) | what a terminal user's editor already agrees with | `scripts/width_check.sh` — 17,793 of 18,226 code points match, and **every** difference is in a named category rather than a waiver |
+| **the terminal** | what THIS terminal will actually do | `scripts/width_probe_terminal.sh` prints a character and reads the cursor column back with `ESC[6n`. The only oracle for the ambiguous set, and it needs a tty, so it is not a gate |
+
+The Reline comparison earned its place immediately: it found that using
+`Extended_Pictographic` for emoji width was too wide a net — `‼ ⁉ ℹ ↩ ⌨ ☀` default
+to *text* presentation and are one column — and 350 code points changed when it
+became `Emoji_Presentation`. Generating from the UCD alone could not have found
+that, because it would have been comparing the generator with itself.
+
+Two of the named categories are ones where **the oracle is the one to correct**:
+Reline reports 1 for `U+200B ZERO WIDTH SPACE` and friends, and it implements an
+older Unicode than the table (15.0 against 17.0), so `U+2630 ☰` — `N` in 15.0 and
+`W` in 17.0 — differs for a reason that will disappear when ruby catches up.
+
+**Code points, not clusters.** `Width` walks code points and gives combining
+marks zero width, which gets `é` and Hangul right; it does not run UAX #29, so an
+emoji ZWJ sequence counts each pictograph. That is deliberate and the reason is
+measured: `Grapheme.clusters` allocates a `StrBuf` per cluster into the
+program-lifetime region, so calling it once per visible line per redraw leaks
+about 60 KB a frame. A renderer cannot pay that. When the clustering allocates in
+the caller's region, this should walk clusters instead.
 
 ## Why grapheme clusters and not code points
 
