@@ -292,6 +292,16 @@ let rec tokenize ?file s =
                     | '\\' -> '\\'
                     | '"' -> '"'
                     | '{' -> '{'        (* escape interpolation *)
+                    (* v0.1.476: `\}` too, and it is a papercut rather than a
+                       feature. A literal `}` in a string needs no escape --
+                       only `{` starts an interpolation -- so `\}` was an
+                       error, and anyone writing JSON, a CSS rule or a shell
+                       brace had to spell the two halves of a pair
+                       differently: `"\{\"id\":1}"`. This project's own test
+                       suite is full of that shape. Accepting `\}` costs
+                       nothing (a literal `}` still works unescaped) and lets a
+                       pair be written as a pair. *)
+                    | '}' -> '}'
                     | _ ->
                       raise (Lex_error (pos,
                         Printf.sprintf "unknown escape: \\%c" esc))

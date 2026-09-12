@@ -359,6 +359,46 @@ let rec warn_reserved_in_pattern (p : Ast.pattern) : unit =
     warn_reserved_in_pattern b
   | _ -> ()
 
+(* v0.1.476: an `extern fn` for a name THIS COMPILER implements has to agree
+   with it about how many arguments there are.
+   
+   Before this, it did not have to: the declaration was taken at face value, the
+   call was emitted with that many arguments, and clang reported
+   `too few arguments to function call, expected 3, have 2` about a line of
+   generated C. The user's mistake, named somewhere the user did not write.
+   
+   Only the arity. Comparing types needs a compatibility notion that does not
+   exist: `tcp_close : int -> unit` is what every contrib declares and the
+   runtime returns `int`, so demanding an exact match would flag correct code.
+   
+   A warning rather than an error, because the same emission already fails at
+   the C compiler with a concrete message -- this one arrives first and points
+   at the declaration, which is the part that was missing. *)
+let warn_extern_arity () =
+  let rec arity t =
+    match Ast.walk t with
+    | Ast.TyArrow (p, r) ->
+      (* `unit` in argument position is the no-argument spelling, not an
+         argument -- `tty_raw : unit -> unit` takes none. *)
+      (match Ast.walk p with Ast.TyUnit -> arity r | _ -> 1 + arity r)
+    | _ -> 0
+  in
+  List.iter
+    (fun (name, ty, loc) ->
+       match Codegen_c.native_ffi_declared_arity name with
+       | None -> ()
+       | Some want ->
+         let got = arity ty in
+         if got <> want then
+           warn loc
+             (Printf.sprintf
+                "`extern fn %s` declares %d argument%s, but this compiler \
+                 implements `%s` with %d. The declaration is what the call is \
+                 emitted from, so the mismatch surfaces as a C compiler error \
+                 about generated code rather than about this line."
+                name got (if got = 1 then "" else "s") name want))
+    !Parser.declared_externs
+
 (* Warn about type names C cannot take. Done from the parser's table rather than from
    the decls, because a `Top_type` carries no position and a warning an editor cannot
    place is a warning nobody sees. *)
@@ -438,6 +478,7 @@ let top_let_scheme outer_env (value : Ast.expr) (ty : Ast.ty) : Typer.scheme =
 
 let process_decls eval_env type_env decls =
   warn_declared_types ();
+  warn_extern_arity ();
   List.iter (fun decl ->
     match decl with
     | Ast.Top_let (pat, value) ->
@@ -902,6 +943,7 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
   (* The same warnings process_decls raises. This is the path an editor takes, and a
      warning it cannot see is one nobody sees. *)
   warn_declared_types ();
+  warn_extern_arity ();
   let type_env = ref Typer.initial_env in
   (* With `on_error`, a declaration that does not type-check is *reported* and the
      walk continues, so a file with three broken functions says so three times

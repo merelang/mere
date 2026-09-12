@@ -466,6 +466,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/region_reclaim_check.sh
 
+      # Does a key a program asked for actually ARRIVE? A pipe has no line
+      # discipline, so every tty test in this project passed while medit's
+      # documented save and quit keys were being eaten as XOFF/XON. This drives
+      # a Mere program through a real pty. The Ctrl-C leg pins the OTHER
+      # direction: plain tty_raw must still let the signal through, so folding
+      # ISIG into it cannot happen quietly.
+      - name: tty_raw_check (raw mode delivers the keys, and still interrupts)
+        if: ${{ !cancelled() }}
+        run: sh scripts/tty_raw_check.sh
+
       # contrib/unicode/width against a NAMED second implementation (Reline),
       # not against the UCD it is generated from -- that would compare the
       # generator with itself. Every difference has to land in a category with

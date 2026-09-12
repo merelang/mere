@@ -22,19 +22,23 @@
 // having already decided. A library that picked silently would be wrong half
 // the time and never say so.
 //
-// CODE POINTS, NOT CLUSTERS. This walks code points and gives combining marks
-// zero width, which gets "é" and Hangul right. It does NOT run UAX #29, so an
-// emoji ZWJ sequence counts each pictograph -- 👩‍👩‍👦 comes out 6 rather than 2.
-// That is a deliberate limit, and the reason is measured: a container allocated
-// inside a called function goes to the PROGRAM-LIFETIME region, not to the
-// `region` block around the call -- the placement rule is lexical. So
-// Grapheme.clusters, which makes one StrBuf per cluster, leaks about 60 KB a
-// frame when a renderer calls it once per visible line per keystroke (2,000
-// frames of 40 lines of Japanese came to 125 MB, growing linearly, inside a
-// region block). A renderer cannot pay that. When the clustering allocates in
-// the caller's region, this should walk clusters instead.
+// CLUSTERS, and that took making them affordable first. A cluster is what a
+// reader calls a character and what a cursor moves by, so it is the unit a width
+// has to be summed over: 👩‍👩‍👦 is one cluster two columns wide, not six code
+// points of one and two. But Grapheme.clusters used to allocate a StrBuf per
+// cluster into the program-lifetime region -- about 60 KB a frame for a renderer
+// calling it once per visible line per keystroke, 127.8 MB over 2,000 frames --
+// so this file walked code points instead and said so. Building each cluster as
+// a `str` rather than a StrBuf made the same run 1.6 MB and flat (and faster),
+// and the reason to avoid clusters went away with it.
+//
+// `of_cp` is still the per-code-point answer, because that is what a table
+// comparison wants and what `scripts/width_check.sh` asks. The string-level
+// functions below sum over clusters, taking each cluster's width from its BASE
+// character -- the marks, joiners and continuations that follow add none.
 
 import "width_table.mere";
+import "grapheme.mere";
 
 module Width {
 
@@ -51,15 +55,22 @@ module Width {
   let is_ambiguous = fn (cp: int) ->
     WidthTable.class_of cp == WidthTable.w_ambiguous;
 
-  // Sum over the code points of a string. Walks `utf8_chars` rather than
-  // indexing, because `codepoint_at` re-walks the string on every call and a
-  // per-index loop is quadratic in the length of the line.
+  // A cluster is as wide as its BASE character. Everything after the base in a
+  // cluster is a mark, a joiner or a continuation, and none of those advance the
+  // cursor -- which is what makes "e" + U+0301 one column and 👩‍👩‍👦 two.
+  let width_of_cluster_amb = fn (amb: int) -> fn (c: str) ->
+    match utf8_chars c with
+    | Nil -> 0
+    | Cons (base, _) -> of_cp_amb amb (codepoint_of base);
+
+  let width_of_cluster = fn (c: str) -> width_of_cluster_amb 1 c;
+
   let rec _sum = fn (amb: int) -> fn (cs: str list) -> fn (acc: int) ->
     match cs with
     | Nil -> acc
-    | Cons (c, rest) -> _sum amb rest (acc + of_cp_amb amb (codepoint_of c));
+    | Cons (c, rest) -> _sum amb rest (acc + width_of_cluster_amb amb c);
 
-  let of_str_amb = fn (amb: int) -> fn (s: str) -> _sum amb (utf8_chars s) 0;
+  let of_str_amb = fn (amb: int) -> fn (s: str) -> _sum amb (Grapheme.clusters s) 0;
 
   let of_str = fn (s: str) -> of_str_amb 1 s;
   let of_str_narrow = fn (s: str) -> of_str_amb 1 s;
@@ -75,12 +86,12 @@ module Width {
     match cs with
     | Nil -> acc
     | Cons (c, rest) ->
-      let w = of_cp_amb amb (codepoint_of c) in
+      let w = width_of_cluster_amb amb c in
       if w > left then acc
       else _take amb rest (left - w) (acc + str_len c);
 
   let take_cols_amb = fn (amb: int) -> fn (s: str) -> fn (cols: int) ->
-    if cols <= 0 then 0 else _take amb (utf8_chars s) cols 0;
+    if cols <= 0 then 0 else _take amb (Grapheme.clusters s) cols 0;
 
   let take_cols = fn (s: str) -> fn (cols: int) -> take_cols_amb 1 s cols;
 
@@ -94,10 +105,10 @@ module Width {
       | Cons (c, rest) ->
         let n = str_len c in
         if n > left then acc
-        else _cols_before amb rest (left - n) (acc + of_cp_amb amb (codepoint_of c));
+        else _cols_before amb rest (left - n) (acc + width_of_cluster_amb amb c);
 
   let cols_before_amb = fn (amb: int) -> fn (s: str) -> fn (upto: int) ->
-    if upto <= 0 then 0 else _cols_before amb (utf8_chars s) upto 0;
+    if upto <= 0 then 0 else _cols_before amb (Grapheme.clusters s) upto 0;
 
   let cols_before = fn (s: str) -> fn (upto: int) -> cols_before_amb 1 s upto;
 }
