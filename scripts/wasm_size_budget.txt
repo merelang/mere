@@ -8,7 +8,7 @@
 # measures a different artifact -- the check skips rather than compare across
 # that line.
 #
-# Each band is the size measured on 2026-09-12, -10% / +10%. Not targets: the
+# Each band is the size measured on 2026-09-12 after the prelude prune, -10% / +10%. Not targets: the
 # ceiling is tight enough that the 2026-07 -> 2026-09 tripling of hello.wasm
 # would have failed here long before anyone saw it by eye. The floor exists
 # because a demo that collapses to a stub is a failure a ceiling-only check
@@ -27,18 +27,18 @@
 # read these modules at all.
 #
 # Moving a band is a decision, not maintenance: say why in the commit.
-chip8.wasm                    12349    15095
-counter.wasm                   7457     9115
-echo.wasm                      7146     8734
-fibonacci.wasm                 7074     8648
-fizzbuzz.wasm                  7124     8708
-g2048.wasm                    12519    15303
-gameboy.wasm                  24021    29359
-hello.wasm                     7123     8707
-raytrace.wasm                 16770    20498
-rvconsole.wasm                12905    15773
-selfhost-compile.wasm        175321   214283
-selfhost-fmt.wasm             94187   115119
-selfhost-repl.wasm           105535   128989
-selfhost-tyck.wasm           133018   162578
-wordcount.wasm                 9277    11339
+chip8.wasm                     7100     8678
+counter.wasm                   2093     2559
+echo.wasm                      1495     1829
+fibonacci.wasm                 1701     2081
+fizzbuzz.wasm                  1674     2046
+g2048.wasm                     7348     8982
+gameboy.wasm                  18880    23076
+hello.wasm                     1751     2141
+raytrace.wasm                 11570    14142
+rvconsole.wasm                 7677     9385
+selfhost-compile.wasm        170730   208670
+selfhost-fmt.wasm             89458   109338
+selfhost-repl.wasm           100656   123026
+selfhost-tyck.wasm           128228   156724
+wordcount.wasm                 4055     4957
