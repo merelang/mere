@@ -115,12 +115,25 @@ module Grapheme {
   // walks the string each time it is called, and a per-position lookup would make
   // this quadratic in the length of the text.
 
+  // The cluster in hand is a plain `str` and not a StrBuf, and the difference is
+  // WHERE IT LIVES. A container is allocated in the program-lifetime region when
+  // the allocation is not lexically inside the caller's `region` block -- and a
+  // library function never is -- so a StrBuf per cluster is a StrBuf that is
+  // never reclaimed. A renderer calling this once per visible line per keystroke
+  // leaked about 60 KB a frame: 2,000 frames of 40 lines of Japanese came to
+  // 127.8 MB, growing linearly, inside a region block that was doing its job.
+  // As a `str` the same run is 1.6 MB and FLAT -- and 0.45 s against 0.84 s.
+  //
+  // `++` costs nothing here that a StrBuf saves. A grapheme cluster is one to a
+  // handful of code points, so the quadratic that append-by-concatenation would
+  // pay is bounded by the length of ONE cluster and not of the text -- while a
+  // string is allocated in the current region, which the block reclaims.
   let rec _walk = fn (rest) -> fn (prev: int) -> fn (ri: int) -> fn (pict: int) ->
-                  fn (incb: int) -> fn (cur_buf) -> fn (acc) ->
+                  fn (incb: int) -> fn (cur: str) -> fn (acc) ->
     match rest with
     | Nil ->
       // The cluster in hand is finished by the end of the text (GB2).
-      list_rev (if prev < 0 then acc else Cons (strbuf_to_str cur_buf, acc))
+      list_rev (if prev < 0 then acc else Cons (cur, acc))
     | Cons (ch, tail) ->
       let k = GcbTable.class_of (codepoint_of ch) in
       let boundary = if prev < 0 then false
@@ -128,17 +141,10 @@ module Grapheme {
       let ri2 = _next_ri prev k ri in
       let pict2 = _next_pict k pict in
       let incb2 = _next_incb k incb in
-      if boundary then
-        let finished = strbuf_to_str cur_buf in
-        let fresh = strbuf_new () in
-        let _ = strbuf_push fresh ch in
-        _walk tail k ri2 pict2 incb2 fresh (Cons (finished, acc))
-      else
-        let _ = strbuf_push cur_buf ch in
-        _walk tail k ri2 pict2 incb2 cur_buf acc;
+      if boundary then _walk tail k ri2 pict2 incb2 ch (Cons (cur, acc))
+      else _walk tail k ri2 pict2 incb2 (cur ++ ch) acc;
 
-  let clusters = fn (s: str) ->
-    _walk (utf8_chars s) (0 - 1) 0 0 0 (strbuf_new ()) Nil;
+  let clusters = fn (s: str) -> _walk (utf8_chars s) (0 - 1) 0 0 0 "" Nil;
 
   let count = fn (s: str) -> list_len (clusters s);
 

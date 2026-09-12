@@ -148,8 +148,14 @@ let aliases : (string, string list * Ast.ty) Hashtbl.t = Hashtbl.create 8
    parsing to check the names against C's; see `reserved_c_type_names` there. *)
 let declared_types : (string * Loc.t) list ref = ref []
 
+(* v0.1.476: the same reason declared_types exists -- `Top_extern` carries no
+   position, and a warning an editor cannot place is a warning nobody sees.
+   The type comes along because the check is about the declaration's ARITY. *)
+let declared_externs : (string * Ast.ty * Loc.t) list ref = ref []
+
 let reset_decl_state () =
   declared_types := [];
+  declared_externs := [];
   Hashtbl.reset constructors;
   Hashtbl.reset signatures;
   Hashtbl.reset records;
@@ -2174,11 +2180,12 @@ let rec parse_program_internal tokens =
       let decl =
         if marker = "sync" then Ast.Top_sync name else Ast.Top_local name in
       parse_decls (decl :: decls) after_marker
-    | (_, T_extern) :: (_, T_fn) :: (_, T_ident name) :: (_, T_colon) :: rest ->
+    | (epos, T_extern) :: (_, T_fn) :: (_, T_ident name) :: (_, T_colon) :: rest ->
       (* Phase 32.1 (C1 FFI): `extern fn <name>: <ty>;` parse. *)
       let t, after_ty = ty rest in
       (match after_ty with
        | (_, T_semi) :: rest ->
+         declared_externs := (name, t, epos) :: !declared_externs;
          parse_decls (Ast.Top_extern (name, t) :: decls) rest
        | _ ->
          raise (Parse_error (pos_of after_ty,

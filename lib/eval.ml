@@ -631,10 +631,44 @@ let builtin_tty_raw =
          if !saved_termios = None then saved_termios := Some tio;
          Unix.tcsetattr Unix.stdin Unix.TCSANOW
            { tio with Unix.c_icanon = false; Unix.c_echo = false;
+                      (* v0.1.476: IXON too, and this is a fix rather than a
+                         choice -- no full-screen program wants software flow
+                         control. With it on, Ctrl-S is XOFF and Ctrl-Q is XON:
+                         the line discipline eats both and the program never
+                         sees either byte. The medit dogfood documents Ctrl-S as
+                         save and Ctrl-Q as quit, and driven under a real pty it
+                         drew ZERO bytes after each and its file was never
+                         written -- an editor that could not be saved or quit
+                         from, published, for two months. A pipe has no line
+                         discipline, so its piped tests passed throughout. *)
+                      Unix.c_ixon = false; Unix.c_ixoff = false;
                       Unix.c_vmin = 1; Unix.c_vtime = 0 }
        end);
       V_unit
     | _ -> failwith "tty_raw: expected unit")
+
+(* v0.1.476: the keys the terminal would turn into signals, delivered as bytes.
+   SEPARATE FROM tty_raw because it is a real trade and not a fix: with ISIG
+   cleared, Ctrl-C no longer interrupts, so a program that calls this MUST have
+   a working quit key of its own. An editor needs it (Ctrl-Z is SUSP, so undo
+   never arrives); a game that quits on `q` does not, and should keep the escape
+   hatch. Making tty_raw do this silently would take Ctrl-C away from every
+   existing TUI to serve the one that asked.
+
+   Like tty_raw, a no-op off a tty -- which is also why this bug is invisible to
+   a piped test: through a pipe there is no line discipline, 0x1a arrives, and
+   undo works. *)
+let builtin_tty_no_signal_keys =
+  V_builtin ("tty_no_signal_keys", fun v ->
+    match v with
+    | V_unit ->
+      (if Unix.isatty Unix.stdin then begin
+         let tio = Unix.tcgetattr Unix.stdin in
+         if !saved_termios = None then saved_termios := Some tio;
+         Unix.tcsetattr Unix.stdin Unix.TCSANOW { tio with Unix.c_isig = false }
+       end);
+      V_unit
+    | _ -> failwith "tty_no_signal_keys: expected unit")
 
 let builtin_tty_restore =
   V_builtin ("tty_restore", fun v ->
@@ -3575,6 +3609,7 @@ let initial_env : env =
     ("read_stdin", ref builtin_read_stdin);
     ("run", ref builtin_run);
     ("tty_raw", ref builtin_tty_raw);
+    ("tty_no_signal_keys", ref builtin_tty_no_signal_keys);
     ("tty_restore", ref builtin_tty_restore);
     ("read_key", ref builtin_read_key);
     ("file_size", ref builtin_file_size);
