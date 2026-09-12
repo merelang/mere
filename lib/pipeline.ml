@@ -21,7 +21,7 @@ let prelude_type_count = ref 0
    that is the point — a position from the prelude is Mere code, but not *this*
    program's, and anything that turns a position into a place has to be able to
    tell. *)
-let prelude_file = "<prelude>"
+let prelude_file = Prelude_stdlib.file_name
 
 let parse_prelude () : Ast.top_decl list =
   let tokens = Lexer.tokenize ~file:prelude_file Prelude_stdlib.contents in

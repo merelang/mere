@@ -21,6 +21,13 @@
    - Users redeclaring the same type does not break things (the typer
      overrides with `Hashtbl.replace`, and ctors behave the same way). *)
 
+(* The name the lexer stamps on every prelude token's Loc, so that later passes
+   can tell a prelude definition from the user's own. One place, because two
+   spellings of it would silently disagree: codegen_wasm decides what to emit
+   by comparing against it. *)
+let file_name = "<prelude>"
+
+
 let contents = {|
 type 'a list = Nil | Cons of 'a * 'a list;
 type 'a option = None | Some of 'a;

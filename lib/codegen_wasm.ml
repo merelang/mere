@@ -29,6 +29,52 @@ let unsupported loc what =
    and the WIT it is embedded against cannot disagree. *)
 let wasi_package_version = "0.2.3"
 
+(* Every name that occurs anywhere in an expression, over-approximated: binder
+   names and field-holder names are included too. It exists for one question --
+   which prelude functions can this program reach -- and for that question, too
+   many names only means emitting a function nobody calls, while too few means
+   emitting a CALL to a function that was never laid down.
+
+   Deliberately without a catch-all arm. The RV32I backend's twin ends in
+   `| _ -> acc` because that backend implements a subset of the language; this
+   one does not, and a silent `acc` for a constructor added later would drop
+   every name under it. An unhandled constructor should stop the build here
+   instead. *)
+let rec occurring_names (e : Ast.expr) (acc : string list) : string list =
+  match e.Ast.node with
+  | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+  | Ast.Unit_lit -> acc
+  | Ast.Var v -> v :: acc
+  | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+  | Ast.App (a, b) | Ast.Let (_, a, b) | Ast.With (_, a, b) ->
+    occurring_names a (occurring_names b acc)
+  | Ast.Neg a | Ast.Annot (a, _) | Ast.Fun (_, _, a)
+  | Ast.Region_block (_, a) | Ast.Region_loop (_, _, a)
+  | Ast.Field_get (a, _) -> occurring_names a acc
+  | Ast.Ref (_, n, a) -> n :: occurring_names a acc
+  | Ast.If (a, b, c) ->
+    occurring_names a (occurring_names b (occurring_names c acc))
+  | Ast.Let_rec (bs, b) ->
+    List.fold_left (fun ac (_, e) -> occurring_names e ac) (occurring_names b acc) bs
+  | Ast.Constr (_, None) -> acc
+  | Ast.Constr (_, Some a) -> occurring_names a acc
+  | Ast.Tuple es -> List.fold_left (fun ac el -> occurring_names el ac) acc es
+  | Ast.Record_lit (_, fs) ->
+    List.fold_left (fun ac (_, el) -> occurring_names el ac) acc fs
+  | Ast.Record_update (b, ups) ->
+    List.fold_left (fun ac (_, el) -> occurring_names el ac) (occurring_names b acc) ups
+  | Ast.Match (scrut, arms) ->
+    List.fold_left (fun ac (_, g, b) ->
+      let ac = occurring_names b ac in
+      match g with Some gg -> occurring_names gg ac | None -> ac)
+      (occurring_names scrut acc) arms
+
+(* A definition the user did not write. The lexer stamps the prelude's file on
+   every token it produced, and a node inherits its token's position, so this
+   asks the body where it came from. *)
+let is_prelude_fn_body (body : Ast.expr) : bool =
+  body.Ast.loc.Loc.file = Some Prelude_stdlib.file_name
+
 (* Host builtins with no Wasm lowering yet. Like codegen_llvm.ml's twin list,
    this makes the gap loud: without it these fall through to the generic
    "unbound variable" tail, which reads like a user typo rather than a
@@ -9719,6 +9765,60 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       ) [] (List.rev fns)
     )
   in
+  (* Emit only the prelude functions this program can reach.
+     Every top-level fn gets a closure adapter registered in the function
+     table, and every lambda inside a fn body gets one too -- and each elem
+     entry is a root the optimizer may not remove, because `call_indirect`
+     could target it. A `print "hi"` program was carrying 65 of them (34
+     adapters for `fact`, `lcm`, `utf8_rev` and friends, 31 prelude lambdas),
+     which kept 101 functions alive through `wasm-opt -Oz` where 7 are used.
+
+     So the filter runs HERE, before inner-fn lifting and before the show-type
+     collection: a pruned function's lambdas must never be lifted, or they land
+     in the table anyway and the table is the whole cost.
+
+     Only the prelude is pruned, and only what nothing reaches. Every function
+     the user wrote stays a root whether or not this walk can see a use of it,
+     which keeps the blast radius inside code they did not write. The walk
+     over-approximates; if it is ever wrong in the other direction the result
+     is a `call` to a function that was not emitted, which wat2wasm refuses by
+     name rather than miscompiling. *)
+  let fns =
+    let by_name : (string, fn_decl) Hashtbl.t = Hashtbl.create 64 in
+    List.iter (fun f -> Hashtbl.replace by_name f.name f) fns;
+    let reachable : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+    let rec visit name =
+      if not (Hashtbl.mem reachable name) then begin
+        Hashtbl.replace reachable name ();
+        (* A monomorphized specialization is named `<base>__<type tags>`, and
+           nothing in the source ever says that name -- the call site says
+           `list_map` and the emitter writes
+           `list_map__list_top_decl__closure_top_decl_top_decl__list_top_decl`.
+           Reaching the base therefore has to reach every instance of it, or
+           the emitted call has no callee. This is the one hole the first
+           version of this had, and wat2wasm named it rather than letting it
+           through. Matching on the prefix over-approximates -- an unrelated
+           `foo__bar` beside a reachable `foo` is kept -- which costs a
+           function nobody calls, in exchange for not having to be right about
+           which names are manglings. *)
+        let pfx = name ^ "__" in
+        List.iter (fun f ->
+          if String.starts_with ~prefix:pfx f.name then visit f.name) fns;
+        match Hashtbl.find_opt by_name name with
+        | Some f -> List.iter visit (occurring_names f.body [])
+        | None -> ()
+      end
+    in
+    List.iter visit (occurring_names body_expr []);
+    List.iter (fun f -> if not (is_prelude_fn_body f.body) then visit f.name) fns;
+    let kept = List.filter (fun f -> Hashtbl.mem reachable f.name) fns in
+    (match Sys.getenv_opt "MERE_WASM_PRUNE_REPORT" with
+     | Some _ ->
+       Printf.eprintf "wasm prune: %d of %d top-level fns kept\n%!"
+         (List.length kept) (List.length fns)
+     | None -> ());
+    kept
+  in
   collect_show_types main_expr fns;
   (* Phase 27.2: register show_<main_ty> so the auto-print at end of main
      has the right helper available. *)
@@ -10058,13 +10158,26 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \  (elem (i32.const 0) %s)\n"
         n elem_names
     end
-    else if !vec_higher_order_used then
-      (* No closure adapters in the table but the higher-order Vec
-         helpers reference (type $cl) + call_indirect, which require a
-         table. Declare a zero-element one. *)
+    else
+      (* Declared even when nothing registered in it. A `call_indirect` needs a
+         table to call through -- `table variable out of range: 0 (max 0)` at
+         validation otherwise -- and the emitted code has several sources of
+         one: the higher-order Vec helpers, closures reached through a bytes /
+         Vec bridge, the runtime sections. This used to be keyed on
+         `vec_higher_order_used`, the single construct that had been seen to hit
+         it, and that held only because something else kept the table non-empty
+         for every other program: every top-level fn registered a closure
+         adapter whether or not anything used it. Pruning unreachable prelude
+         functions removed that accident and a parity case stopped assembling.
+
+         Keying it on "does the emitted text contain a call_indirect" was the
+         first fix and it was wrong in a quieter way: the table section is built
+         before `$main`'s body and several runtime sections exist as strings, so
+         the scan would have been reading a subset and answering for the whole.
+         An unconditional zero-element table costs about twenty bytes in a
+         module that never calls through it, and cannot be wrong. *)
       "  (table 0 funcref)\n\
       \  (export \"__indirect_function_table\" (table 0))\n"
-    else ""
   in
   (* Phase 26.1: reserve bytes for __lang_char_table. Byte-safe strings use
      6-byte cells [i32 len=1][char][NUL], so 256 * 6 = 1536 bytes.
