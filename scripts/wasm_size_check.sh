@@ -41,8 +41,14 @@
 # line. A gate that only notices growth lets an improvement be absorbed
 # silently, and the ceiling stops meaning anything.
 #
+# IT ALSO RUNS WHAT IT MEASURED. wasm-opt -Oz is part of the site build now, so
+# this checks the optimizer did not change the answer: the shipped module is run
+# and judged against the interpreter. Nothing else covers that -- parity.sh
+# compiles its own programs and never sees these.
+#
 # SKIPS LOUDLY, NEVER VACUOUSLY. A missing wat2wasm prints a skip and exits 0.
-# But a run that measured zero files is a FAIL: an empty check is not a pass.
+# But a run that measured zero files, or ran zero of them, is a FAIL: an empty
+# check is not a pass.
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -53,6 +59,12 @@ BUDGET="${WASM_SIZE_BUDGET:-$ROOT/scripts/wasm_size_budget.txt}"
 
 [ -x "$MERE" ] || { echo "wasm_size_check: $MERE not found -- run 'dune build'" >&2; exit 1; }
 command -v wat2wasm >/dev/null 2>&1 || { echo "wasm_size_check: SKIP (no wat2wasm)"; exit 0; }
+# The bands are for the OPTIMIZED build -- build_full.sh runs wasm-opt -Oz, and
+# that is about a third of the shipped bytes. Measuring an unoptimized build
+# against them would fail every file for a reason that is not a regression, so
+# this skips rather than reporting a number about a different artifact.
+command -v wasm-opt >/dev/null 2>&1 || { echo "wasm_size_check: SKIP (no wasm-opt; the bands are for the -Oz build the site ships)"; exit 0; }
+command -v node >/dev/null 2>&1 || { echo "wasm_size_check: SKIP (no node; the behaviour half cannot run)"; exit 0; }
 [ -f "$BUDGET" ] || { echo "wasm_size_check: $BUDGET not found" >&2; exit 1; }
 
 TMP="$(mktemp -d)"
@@ -130,6 +142,40 @@ while read -r bname bceil; do
     fails=$((fails + 1))
   fi
 done < "$BUDGET"
+
+# --- the optimizer must not have changed the answer ------------------------
+# wasm-opt -Oz now runs inside build_full.sh, on the modules the public site
+# hands people, and nothing else in this tree checks that it preserved
+# behaviour -- parity.sh compiles its own programs and never sees these. So the
+# shipped artifact is run and judged against the interpreter, which is the
+# oracle parity uses. Only the demos that need no DOM and no stdin can be run
+# this way; the list is fixed rather than discovered, and an empty one is a
+# FAIL, because a behaviour check with nothing in it is not a check.
+runnable='hello fibonacci fizzbuzz'
+ran=0
+agreed=0
+for d in $runnable; do
+  [ -f "$PG/$d.wasm" ] || { echo "FAIL wasm_size_check: $d.wasm was not built"; fails=$((fails + 1)); continue; }
+  want="$("$MERE" "$ROOT/contrib/site/playground/$d.mere" 2>&1)"
+  got="$(node "$ROOT/scripts/run_wasm.js" "$PG/$d.wasm" 2>&1)"
+  ran=$((ran + 1))
+  if [ "$want" = "$got" ]; then
+    agreed=$((agreed + 1))
+  else
+    echo "FAIL wasm_size_check[$d]: the optimized module does not answer what the interpreter does"
+    echo "  interp: $(printf '%s' "$want" | head -c 120)"
+    echo "  wasm  : $(printf '%s' "$got" | head -c 120)"
+    fails=$((fails + 1))
+  fi
+done
+if [ "$ran" -eq 0 ]; then
+  echo "FAIL wasm_size_check: ran 0 modules -- the behaviour check covered nothing"
+  fails=$((fails + 1))
+else
+  # Counted, not assumed: a summary that says "3 agree" while one of them just
+  # failed above is a line stating something the run disproved.
+  echo "behaviour: $agreed of $ran optimized module(s) answer what the interpreter does"
+fi
 
 echo
 if [ "$checked" -eq 0 ]; then

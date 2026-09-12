@@ -31,8 +31,11 @@ jobs:
       - name: Install dependencies
         run: opam install . --deps-only
 
-      - name: Install wabt (wat2wasm)
-        run: sudo apt-get update && sudo apt-get install -y wabt
+      # binaryen as well as wabt: build_full.sh runs wasm-opt -Oz, and without it
+      # the DEPLOYED site would ship modules a third larger than the ones CI
+      # measures in scripts/wasm_size_check.sh. Two pipelines, one artifact.
+      - name: Install wabt (wat2wasm) and binaryen (wasm-opt)
+        run: sudo apt-get update && sudo apt-get install -y wabt binaryen
 
       - name: Build mere
         run: opam exec -- dune build
