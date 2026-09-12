@@ -364,9 +364,14 @@ jobs:
       # Separate from budget above because it costs a full site build (most of
       # a minute, nearly all of it compiling selfhost-compile.mere) and covers
       # a different subject: the .wasm the public site hands a browser.
+      # `opam exec --`, like pages.yml, because this gate runs the real
+      # contrib/site/build_full.sh and that starts with `dune exec mere --
+      # install`. The neighbouring gates here need no such thing -- they call
+      # _build/default/bin/mere.exe directly -- so copying their step form is
+      # what broke it: dune is on PATH here only inside opam's environment.
       - name: wasm_size (what the playground ships, inside its bands)
         if: ${{ !cancelled() }}
-        run: sh scripts/wasm_size_check.sh
+        run: opam exec -- sh scripts/wasm_size_check.sh
 
       - name: nojs (the primary flow completes with no JavaScript)
         if: ${{ !cancelled() }}
