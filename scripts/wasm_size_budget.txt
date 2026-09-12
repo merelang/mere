@@ -3,26 +3,37 @@
 # One line per file: <name> <floor> <ceiling>, in bytes.
 # scripts/wasm_size_check.sh builds the site and fails outside the band.
 #
-# These are NOT targets. Each is the size measured on 2026-09-12, -10% / +10%.
-# The ceiling is tight enough that the 2026-07 -> 2026-09 tripling of
-# hello.wasm (5.2 KB -> 15.0 KB) would have failed here long before anyone
-# noticed it by eye. The floor exists because a demo that collapses to a stub
-# is a failure that a ceiling-only check calls a pass, forever -- the reasoning
-# is scripts/budget_check.sh's, and test/budget/BUDGETS says it at length.
+# THESE ARE POST-wasm-opt. build_full.sh runs `wasm-opt -Oz` on every module,
+# which is about a third of the playground's bytes, so a build without it
+# measures a different artifact -- the check skips rather than compare across
+# that line.
+#
+# Each band is the size measured on 2026-09-12, -10% / +10%. Not targets: the
+# ceiling is tight enough that the 2026-07 -> 2026-09 tripling of hello.wasm
+# would have failed here long before anyone saw it by eye. The floor exists
+# because a demo that collapses to a stub is a failure a ceiling-only check
+# calls a pass forever -- the reasoning is scripts/budget_check.sh's.
+#
+# The floor these bands sit on is not free space. After -Oz, hello.wasm is 101
+# functions, 65 of them rooted by the elem segment because every Mere closure
+# call goes through the function table. Remove the table (a broken module,
+# measured only as a bound) and the same program is 7 functions and 2,299 B.
+# Shrinking that is compiler work, not band work: do not lower these by hand
+# hoping to force it.
 #
 # Moving a band is a decision, not maintenance: say why in the commit.
-chip8.wasm                    22742    27796
-counter.wasm                  16099    19677
-echo.wasm                     14921    18237
-fibonacci.wasm                13796    16862
-fizzbuzz.wasm                 13913    17005
-g2048.wasm                    23292    28468
-gameboy.wasm                  39689    48509
-hello.wasm                    13862    16944
-raytrace.wasm                 27108    33132
-rvconsole.wasm                23105    28241
-selfhost-compile.wasm        238671   291711
-selfhost-fmt.wasm            139968   171072
-selfhost-repl.wasm           156000   190668
-selfhost-tyck.wasm           197343   241199
-wordcount.wasm                17732    21674
+chip8.wasm                    12349    15095
+counter.wasm                   7457     9115
+echo.wasm                      7146     8734
+fibonacci.wasm                 7074     8648
+fizzbuzz.wasm                  7124     8708
+g2048.wasm                    12519    15303
+gameboy.wasm                  24021    29359
+hello.wasm                     7123     8707
+raytrace.wasm                 16770    20498
+rvconsole.wasm                12905    15773
+selfhost-compile.wasm        175321   214283
+selfhost-fmt.wasm             94187   115119
+selfhost-repl.wasm           105535   128989
+selfhost-tyck.wasm           133018   162578
+wordcount.wasm                 9277    11339
