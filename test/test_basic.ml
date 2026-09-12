@@ -4959,8 +4959,15 @@ let () =
     (wasm "10 / 2") "i64.div_s";
   assert_contains "wasm: < maps to i32.lt_s"
     (wasm "if 1 < 2 then 10 else 20") "i64.lt_s";
+  (* This asked for `if (result i32)` and passed for years without ever
+     looking at the program under test: an `int`-valued `if` emits
+     `(result i64)`, and the i32 spelling was coming from eight occurrences
+     inside $__lang_utf8_len, a runtime helper the program does not use. It
+     surfaced when the Wasm backend stopped emitting unreachable prelude
+     functions and the accidental match went away with them. The i64 spelling
+     is checked to discriminate: zero occurrences in `1 + 2`, one here. *)
   assert_contains "wasm: if uses if/else/end"
-    (wasm "if 1 < 2 then 10 else 20") "if (result i32)";
+    (wasm "if 1 < 2 then 10 else 20") "if (result i64)";
   assert_contains "wasm: if has else branch"
     (wasm "if 1 < 2 then 10 else 20") "else";
   assert_contains "wasm: let allocates local slot"
@@ -4973,8 +4980,13 @@ let () =
     (wasm "true") "i64.const 1";
   (* v0.1.34: && short-circuits (Logic lowers to If) — the strict
      i32.and evaluated both operands and trapped on guarded vec_get. *)
+  (* i32 spellings here described a layout the backend left behind, and kept
+     passing because the string turned up in runtime helpers the program does
+     not use. Pruning unreachable prelude functions took those helpers away and
+     the assertions stopped being true. Each replacement below was read off
+     $main and checked to be absent from the program `0`. *)
   assert_contains "wasm: && lowers to a short-circuit if"
-    (wasm "true && false") "if (result i32)";
+    (wasm "true && false") "if (result i64)";
 
   (* --- Wasm codegen: function lifting + recursion (Phase 6.2) ---
      Top-level fns lift to `(func $name (param i32) (result i32))`, direct calls
@@ -5031,22 +5043,29 @@ let () =
     (wasm "str_index_of \"hi\" \"i\"") "(func $__lang_str_index_of";
 
   (* --- Wasm codegen: tuple (Phase 6.4) ---
-     Tuples live in linear memory: each element is 4 bytes (i32 / offset);
-     the base offset is saved into a local immediately and bump is advanced
-     right away (so nested tuples or ++ advancing the bump do not overlap);
-     fst/snd are retrieved via i32.load offset. *)
-  assert_contains "wasm: tuple stores via i32.store offset"
+     Tuples live in linear memory: each element is 8 bytes (i64), so the second
+     sits at offset=8; the base offset is saved into a local immediately and
+     bump is advanced right away (so nested tuples or ++ advancing the bump do
+     not overlap); fst/snd are retrieved via i64.load offset.
+
+     These four said i32 and offset=4 -- the layout before the value
+     representation widened -- and passed anyway, because those strings occur
+     in runtime helpers the program does not use. Pruning unreachable prelude
+     functions took the helpers away and the assertions stopped being true,
+     which is the only reason anyone found out. Each needle below was read off
+     $main and checked to be absent from the program `0`. *)
+  assert_contains "wasm: tuple stores via i64.store offset"
     (wasm "let p = (1, 2) in fst p + snd p")
-    "i32.store offset=0";
-  assert_contains "wasm: tuple stores second element at offset=4"
+    "i64.store offset=0";
+  assert_contains "wasm: tuple stores second element at offset=8"
     (wasm "let p = (1, 2) in fst p + snd p")
-    "i32.store offset=4";
-  assert_contains "wasm: fst lowers to i32.load offset=0"
+    "i64.store offset=8";
+  assert_contains "wasm: fst lowers to i64.load offset=0"
     (wasm "let p = (1, 2) in fst p")
-    "i32.load offset=0";
-  assert_contains "wasm: snd lowers to i32.load offset=4"
+    "i64.load offset=0";
+  assert_contains "wasm: snd lowers to i64.load offset=8"
     (wasm "let p = (1, 2) in snd p")
-    "i32.load offset=4";
+    "i64.load offset=8";
   assert_contains "wasm: tuple reserves space via bump advance"
     (wasm "(1, 2)")
     "global.set $__lang_bump";
@@ -5060,12 +5079,12 @@ let () =
     (wasm_with_decls
       "type WCgRect = { w: int, h: int };\n\
        let r = WCgRect { w = 3, h = 4 } in r.w * r.h")
-    "i32.store offset=0";
-  assert_contains "wasm: record field access via i32.load offset"
+    "i64.store offset=0";
+  assert_contains "wasm: record field access via i64.load offset"
     (wasm_with_decls
       "type WCgPt = { x: int, y: int };\n\
        let p = WCgPt { x = 1, y = 2 } in p.y")
-    "i32.load offset=4";
+    "i64.load offset=8";
   assert_contains "wasm: record update reserves new struct"
     (wasm_with_decls
       "type WCgPt2 = { x: int, y: int };\n\
@@ -5085,17 +5104,17 @@ let () =
     (wasm_with_decls
       "type WCgCol1 = WCgR1 | WCgG1 | WCgB1;\n\
        WCgG1")
-    "i32.store offset=0";
-  assert_contains "wasm: variant with payload stores payload at offset=4"
+    "i64.store offset=0";
+  assert_contains "wasm: variant with payload stores payload at offset=8"
     (wasm_with_decls
       "type WCgStat1 = WCgOk1 | WCgErr1 of int;\n\
        WCgErr1 42")
-    "i32.store offset=4";
+    "i64.store offset=8";
   assert_contains "wasm: Match loads tag at offset=0"
     (wasm_with_decls
       "type WCgCol2 = WCgR2 | WCgG2;\n\
        match WCgR2 with | WCgR2 -> 1 | WCgG2 -> 2")
-    "i32.load offset=0";
+    "i64.load offset=0";
   assert_contains "wasm: Match dispatches with i32.eq + if"
     (wasm_with_decls
       "type WCgCol3 = WCgR3 | WCgG3;\n\
@@ -5106,11 +5125,11 @@ let () =
       "type WCgCol4 = WCgR4 | WCgG4;\n\
        match WCgR4 with | WCgR4 -> 1 | WCgG4 -> 2")
     "unreachable";
-  assert_contains "wasm: payload bind loads via offset=4"
+  assert_contains "wasm: payload bind loads via offset=8"
     (wasm_with_decls
       "type WCgStat2 = WCgOk2 | WCgErr2 of int;\n\
        match WCgErr2 5 with | WCgOk2 -> 0 | WCgErr2 n -> n")
-    "i32.load offset=4";
+    "i64.load offset=8";
 
   (* --- Wasm codegen: first-class fn + closure (Phase 6.7) ---
      Closure = 8-byte memory struct `{ env_offset, fn_table_idx }`.
@@ -5145,9 +5164,12 @@ let () =
   assert_contains "wasm: Region_block saves bump pointer"
     (wasm "region R { 42 }")
     "global.set $__lang_bump";
+  (* i64, not i32: same widening as the tuple block above, same accidental
+     match in an unused runtime helper keeping it green. Read off $main;
+     absent from the program `0`. *)
   assert_contains "wasm: Ref stores value at allocated slot"
     (wasm "region R { let x = &R 5 in 42 }")
-    "i32.store offset=0";
+    "i64.store offset=0";
   assert_contains "wasm: with calls close via call_indirect"
     (wasm_with_decls
       "drop type WCgConn = { id: int, close: unit -> unit };\n\
@@ -5158,12 +5180,12 @@ let () =
     (wasm_with_decls
       "view WCgCellW[R] of int { v: int };\n\
        region R { let c = WCgCellW { v = 7 } in c.v }")
-    "i32.store offset=0";
-  assert_contains "wasm: view field access via i32.load offset"
+    "i64.store offset=0";
+  assert_contains "wasm: view field access via i64.load offset"
     (wasm_with_decls
       "view WCgCellW2[R] of int { v: int, w: int };\n\
        region R { let c = WCgCellW2 { v = 7, w = 9 } in c.w }")
-    "i32.load offset=4";
+    "i64.load offset=8";
   assert_contains "wasm: Unit_lit becomes i32.const 0"
     (wasm "fn () -> ()") "i32.const 0";
 
@@ -5182,12 +5204,12 @@ let () =
     (wasm_with_decls
       "type 'a WCgBox = { v: 'a };\n\
        let b = WCgBox { v = 42 } in b.v")
-    "i32.store offset=0";
+    "i64.store offset=0";
   assert_contains "wasm: recursive variant Cons stores tuple payload"
     (wasm_with_decls
       "type 'a WCgList = WCgNil | WCgCons of 'a * 'a WCgList;\n\
        WCgCons (1, WCgNil)")
-    "i32.store offset=4";
+    "i64.store offset=8";
   assert_contains "wasm: P_tuple sub-pattern extracts elements"
     (wasm_with_decls
       "type 'a WCgList2 = WCgNil2 | WCgCons2 of 'a * 'a WCgList2;\n\
@@ -5195,7 +5217,7 @@ let () =
          | WCgNil2 -> 0\n\
          | WCgCons2 (h, t) -> h + sum t\n\
        in sum (WCgCons2 (1, WCgNil2))")
-    "i32.load offset=0";
+    "i64.load offset=0";
 
   (* --- Wasm codegen: complex pattern (Phase 6.10) ---
      P_int / P_bool / P_str (via @__lang_streq) / P_unit / P_record / P_as /
@@ -5212,11 +5234,11 @@ let () =
   assert_contains "wasm: P_bool via i32.eq"
     (wasm "match true with | false -> 0 | true -> 1")
     "i32.eq";
-  assert_contains "wasm: record pattern via i32.load offset"
+  assert_contains "wasm: record pattern via i64.load offset"
     (wasm_with_decls
       "type WCgPt5 = { x: int, y: int };\n\
        match WCgPt5 { x = 3, y = 4 } with | WCgPt5 { x = a, y = b } -> a + b")
-    "i32.load offset=0";
+    "i64.load offset=0";
   assert_contains "wasm: nested ctor with combined i32.and"
     (wasm_with_decls
       "type 'a WCgOpt7 = WCgN7 | WCgS7 of 'a;\n\
@@ -5229,7 +5251,7 @@ let () =
     (wasm_with_decls
       "type WCgCol9 = WCg9A | WCg9B | WCg9C;\n\
        match WCg9B with | WCg9A | WCg9B -> 1 | WCg9C -> 2")
-    "if (result i32)";
+    "if (result i64)";
   assert_contains "wasm: match guard short-circuits via inner if"
     (wasm
        "match 7 with | n when n < 5 -> 100 | n when n < 10 -> 200 | _ -> 300")
