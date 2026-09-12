@@ -20,6 +20,15 @@ exception Codegen_error of Loc.t * string
 let unsupported loc what =
   raise (Codegen_error (loc, "unsupported (wasm codegen, Phase 6.1 MVP): " ^ what))
 
+(* Every wasi:* import in the socket section is pinned to one package
+   version. The version used to be spelled out at each import, which is one
+   rule written thirty-two times: a release that moved it would have had to
+   be right in all of them, and a miss is a link error at component-build
+   time rather than here. The build script does not repeat it either -- it
+   reads the version back out of the module this file emits, so the compiler
+   and the WIT it is embedded against cannot disagree. *)
+let wasi_package_version = "0.2.3"
+
 (* Host builtins with no Wasm lowering yet. Like codegen_llvm.ml's twin list,
    this makes the gap loud: without it these fall through to the generic
    "unbound variable" tail, which reads like a user typo rather than a
@@ -10802,38 +10811,44 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
          `component new --adapt`, and run `wasmtime -S inherit-network=y`. *)
       let socket_imports =
         if not !wasm_socket_ffi then "" else
-        "  (import \"wasi:sockets/instance-network@0.2.3\" \"instance-network\" (func $sock_instnet (result i32)))\n\
-        \  (import \"wasi:sockets/tcp-create-socket@0.2.3\" \"create-tcp-socket\" (func $sock_create (param i32 i32)))\n\
-        \  (import \"wasi:sockets/tcp@0.2.3\" \"[method]tcp-socket.start-connect\" (func $sock_connect (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))\n\
-        \  (import \"wasi:sockets/tcp@0.2.3\" \"[method]tcp-socket.start-bind\" (func $sock_bind (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))\n\
-        \  (import \"wasi:sockets/tcp@0.2.3\" \"[method]tcp-socket.finish-bind\" (func $sock_fbind (param i32 i32)))\n\
-        \  (import \"wasi:sockets/tcp@0.2.3\" \"[method]tcp-socket.start-listen\" (func $sock_listen (param i32 i32)))\n\
-        \  (import \"wasi:sockets/tcp@0.2.3\" \"[method]tcp-socket.finish-listen\" (func $sock_flisten (param i32 i32)))\n\
-        \  (import \"wasi:sockets/tcp@0.2.3\" \"[method]tcp-socket.accept\" (func $sock_accept (param i32 i32)))\n\
-        \  (import \"wasi:sockets/tcp@0.2.3\" \"[method]tcp-socket.subscribe\" (func $sock_subscribe (param i32) (result i32)))\n\
-        \  (import \"wasi:sockets/tcp@0.2.3\" \"[method]tcp-socket.finish-connect\" (func $sock_finish (param i32 i32)))\n\
-        \  (import \"wasi:sockets/tcp@0.2.3\" \"[resource-drop]tcp-socket\" (func $sock_drop (param i32)))\n\
-        \  (import \"wasi:io/poll@0.2.3\" \"[method]pollable.block\" (func $sock_block (param i32)))\n\
-        \  (import \"wasi:io/poll@0.2.3\" \"[resource-drop]pollable\" (func $poll_drop (param i32)))\n\
-        \  (import \"wasi:sockets/ip-name-lookup@0.2.3\" \"resolve-addresses\" (func $sock_resolve (param i32 i32 i32 i32)))\n\
-        \  (import \"wasi:sockets/ip-name-lookup@0.2.3\" \"[method]resolve-address-stream.subscribe\" (func $sock_rsub (param i32) (result i32)))\n\
-        \  (import \"wasi:sockets/ip-name-lookup@0.2.3\" \"[method]resolve-address-stream.resolve-next-address\" (func $sock_rnext (param i32 i32)))\n\
-        \  (import \"wasi:sockets/ip-name-lookup@0.2.3\" \"[resource-drop]resolve-address-stream\" (func $rstream_drop (param i32)))\n\
-        \  (import \"wasi:sockets/udp-create-socket@0.2.3\" \"create-udp-socket\" (func $ucreate (param i32 i32)))\n\
-        \  (import \"wasi:sockets/udp@0.2.3\" \"[method]udp-socket.start-bind\" (func $ubind (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))\n\
-        \  (import \"wasi:sockets/udp@0.2.3\" \"[method]udp-socket.finish-bind\" (func $ufbind (param i32 i32)))\n\
-        \  (import \"wasi:sockets/udp@0.2.3\" \"[method]udp-socket.stream\" (func $ustream (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))\n\
-        \  (import \"wasi:sockets/udp@0.2.3\" \"[resource-drop]udp-socket\" (func $udrop (param i32)))\n\
-        \  (import \"wasi:sockets/udp@0.2.3\" \"[method]outgoing-datagram-stream.check-send\" (func $ucheck (param i32 i32)))\n\
-        \  (import \"wasi:sockets/udp@0.2.3\" \"[method]outgoing-datagram-stream.send\" (func $usend (param i32 i32 i32 i32)))\n\
-        \  (import \"wasi:sockets/udp@0.2.3\" \"[resource-drop]outgoing-datagram-stream\" (func $odrop (param i32)))\n\
-        \  (import \"wasi:sockets/udp@0.2.3\" \"[method]incoming-datagram-stream.subscribe\" (func $insub (param i32) (result i32)))\n\
-        \  (import \"wasi:sockets/udp@0.2.3\" \"[method]incoming-datagram-stream.receive\" (func $ureceive (param i32 i64 i32)))\n\
-        \  (import \"wasi:sockets/udp@0.2.3\" \"[resource-drop]incoming-datagram-stream\" (func $idrop (param i32)))\n\
-        \  (import \"wasi:io/streams@0.2.3\" \"[method]output-stream.blocking-write-and-flush\" (func $sock_swrite (param i32 i32 i32 i32)))\n\
-        \  (import \"wasi:io/streams@0.2.3\" \"[method]input-stream.blocking-read\" (func $sock_sread (param i32 i64 i32)))\n\
-        \  (import \"wasi:io/streams@0.2.3\" \"[resource-drop]input-stream\" (func $in_drop (param i32)))\n\
-        \  (import \"wasi:io/streams@0.2.3\" \"[resource-drop]output-stream\" (func $out_drop (param i32)))\n"
+        let imp iface name decl =
+          Printf.sprintf "  (import \"wasi:%s@%s\" \"%s\" (func %s))\n"
+            iface wasi_package_version name decl
+        in
+        String.concat "" [
+          imp "sockets/instance-network" "instance-network" "$sock_instnet (result i32)";
+          imp "sockets/tcp-create-socket" "create-tcp-socket" "$sock_create (param i32 i32)";
+          imp "sockets/tcp" "[method]tcp-socket.start-connect" "$sock_connect (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)";
+          imp "sockets/tcp" "[method]tcp-socket.start-bind" "$sock_bind (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)";
+          imp "sockets/tcp" "[method]tcp-socket.finish-bind" "$sock_fbind (param i32 i32)";
+          imp "sockets/tcp" "[method]tcp-socket.start-listen" "$sock_listen (param i32 i32)";
+          imp "sockets/tcp" "[method]tcp-socket.finish-listen" "$sock_flisten (param i32 i32)";
+          imp "sockets/tcp" "[method]tcp-socket.accept" "$sock_accept (param i32 i32)";
+          imp "sockets/tcp" "[method]tcp-socket.subscribe" "$sock_subscribe (param i32) (result i32)";
+          imp "sockets/tcp" "[method]tcp-socket.finish-connect" "$sock_finish (param i32 i32)";
+          imp "sockets/tcp" "[resource-drop]tcp-socket" "$sock_drop (param i32)";
+          imp "io/poll" "[method]pollable.block" "$sock_block (param i32)";
+          imp "io/poll" "[resource-drop]pollable" "$poll_drop (param i32)";
+          imp "sockets/ip-name-lookup" "resolve-addresses" "$sock_resolve (param i32 i32 i32 i32)";
+          imp "sockets/ip-name-lookup" "[method]resolve-address-stream.subscribe" "$sock_rsub (param i32) (result i32)";
+          imp "sockets/ip-name-lookup" "[method]resolve-address-stream.resolve-next-address" "$sock_rnext (param i32 i32)";
+          imp "sockets/ip-name-lookup" "[resource-drop]resolve-address-stream" "$rstream_drop (param i32)";
+          imp "sockets/udp-create-socket" "create-udp-socket" "$ucreate (param i32 i32)";
+          imp "sockets/udp" "[method]udp-socket.start-bind" "$ubind (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)";
+          imp "sockets/udp" "[method]udp-socket.finish-bind" "$ufbind (param i32 i32)";
+          imp "sockets/udp" "[method]udp-socket.stream" "$ustream (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)";
+          imp "sockets/udp" "[resource-drop]udp-socket" "$udrop (param i32)";
+          imp "sockets/udp" "[method]outgoing-datagram-stream.check-send" "$ucheck (param i32 i32)";
+          imp "sockets/udp" "[method]outgoing-datagram-stream.send" "$usend (param i32 i32 i32 i32)";
+          imp "sockets/udp" "[resource-drop]outgoing-datagram-stream" "$odrop (param i32)";
+          imp "sockets/udp" "[method]incoming-datagram-stream.subscribe" "$insub (param i32) (result i32)";
+          imp "sockets/udp" "[method]incoming-datagram-stream.receive" "$ureceive (param i32 i64 i32)";
+          imp "sockets/udp" "[resource-drop]incoming-datagram-stream" "$idrop (param i32)";
+          imp "io/streams" "[method]output-stream.blocking-write-and-flush" "$sock_swrite (param i32 i32 i32 i32)";
+          imp "io/streams" "[method]input-stream.blocking-read" "$sock_sread (param i32 i64 i32)";
+          imp "io/streams" "[resource-drop]input-stream" "$in_drop (param i32)";
+          imp "io/streams" "[resource-drop]output-stream" "$out_drop (param i32)";
+        ]
       in
       let socket_helpers =
         if not !wasm_socket_ffi then "" else
