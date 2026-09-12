@@ -38,18 +38,32 @@ if grep -q 'wasi:sockets' "$tmp/core.wat"; then
   # Socket program: embed the p2 wasi:sockets types (extracted from the
   # adapter) under a world that imports the socket + io interfaces, then link
   # the adapter for the remaining wasi_snapshot_preview1 imports.
+  # The wasi package version is not written here. It is read back out of the
+  # module the compiler just emitted, so the world can never be embedded
+  # against a version the imports do not actually use -- and a module that
+  # mixed two versions would be caught here rather than at link time.
+  ver="$(grep -o 'wasi:[a-z][a-z-]*/[a-z][a-z-]*@[0-9][0-9.]*' "$tmp/core.wat" \
+           | sed 's/.*@//' | sort -u)" || true
+  if [ -z "$ver" ]; then
+    echo "no wasi imports in the emitted module" >&2
+    exit 1
+  fi
+  if [ "$(printf '%s\n' "$ver" | wc -l | tr -d ' ')" != 1 ]; then
+    echo "the emitted module mixes wasi versions: $(printf '%s ' $ver)" >&2
+    exit 1
+  fi
   {
-    cat <<'WIT'
+    cat <<WIT
 package local:app;
 world app {
-  import wasi:sockets/instance-network@0.2.3;
-  import wasi:sockets/tcp-create-socket@0.2.3;
-  import wasi:sockets/tcp@0.2.3;
-  import wasi:sockets/udp-create-socket@0.2.3;
-  import wasi:sockets/udp@0.2.3;
-  import wasi:sockets/ip-name-lookup@0.2.3;
-  import wasi:io/streams@0.2.3;
-  import wasi:io/poll@0.2.3;
+  import wasi:sockets/instance-network@${ver};
+  import wasi:sockets/tcp-create-socket@${ver};
+  import wasi:sockets/tcp@${ver};
+  import wasi:sockets/udp-create-socket@${ver};
+  import wasi:sockets/udp@${ver};
+  import wasi:sockets/ip-name-lookup@${ver};
+  import wasi:io/streams@${ver};
+  import wasi:io/poll@${ver};
 }
 WIT
     wasm-tools component wit "$adapter" | sed -n '/^package wasi:/,$p'
