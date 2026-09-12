@@ -57,6 +57,7 @@ wasm_socket_ffi                  sock_instnet              component  test/compo
 c:bytebuf_runtime                mere_bytebuf_new          c          test/parity/bytebuf_edges.mere
 c:bytes_vec_bridge_runtime       __lang_bytes_of_vec       c          test/parity/bytes_vec_bridge.mere
 c:file_pwrite_bytes_runtime      __lang_file_pwrite_bytes  c          test/parity/file_pwrite_bytes.mere
+c:file_pread_bytes_runtime       __lang_file_pread_bytes   c          test/parity/file_pread_bytes.mere
 c:logger_runtime                 __mere_logger_info_fn     c          test/parity/logger_metrics_caps.mere
 c:metrics_runtime                __mere_metrics_inc_fn     c          test/parity/logger_metrics_caps.mere
 c:read_lines_helper              __lang_read_lines         c          test/parity/read_lines.mere
@@ -67,6 +68,7 @@ llvm:bytes_runtime               __lang_bytes_alloc        llvm       test/parit
 llvm:bytes_vec_bridge_runtime    __lang_bytes_of_vec       llvm       test/parity/bytes_vec_bridge.mere
 llvm:env_var_runtime             __lang_env_var            llvm       test/parity/env_var.mere
 llvm:file_pio_runtime            __lang_file_openrw        llvm       test/parity/file_pio.mere
+llvm:file_pread_bytes_runtime    __lang_file_pread_bytes   llvm       test/parity/file_pread_bytes.mere
 llvm:logger_runtime              __mere_logger_info_fn     llvm       test/parity/logger_metrics_caps.mere
 llvm:simd_runtime                mere_u8x16_splat          llvm       test/parity/simd_u8x16.mere
 llvm:metrics_runtime             __mere_metrics_inc_fn     llvm       test/parity/logger_metrics_caps.mere

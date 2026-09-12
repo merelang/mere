@@ -1,0 +1,47 @@
+// test/regionreclaim/perbigvec.mere — one LARGE value per iteration.
+//
+// pertree.mere already asks whether a region block reclaims. This asks whether
+// it reclaims in the shape an editor, a renderer or a pager actually has: a
+// multi-megabyte value built, used and dropped once per iteration, over and
+// over.
+//
+// That case was different, and the bookkeeping is why it took measuring to see.
+// Releasing a grown region used to free its whole chain and re-seed at 1 MiB,
+// so every block WAS freed -- the counters agreed -- and the process still grew
+// without bound, because the next iteration asks the allocator for those
+// megabytes again and malloc does not hand the same pages back. Forty
+// iterations of a 5 MiB Vec reached 216 MB of resident memory with a release
+// counter reading 40 of 40.
+//
+// Since v0.1.475 the release keeps the region's largest block and drops the
+// rest, so the next iteration reuses the same memory: the same loop is 13.7 MB
+// and flat.
+//
+// Usage: perbigvec ITERATIONS ELEMENTS
+// Prints the total element count, so two backends can be checked to have run
+// the same computation before their footprints are compared.
+
+let argv = args ();
+
+let rec _nth = fn (xs: str list) -> fn (i: int) -> fn (d: int) ->
+  match xs with
+  | Nil -> d
+  | Cons (x, rest) -> if i <= 0 then int_of_str x else _nth rest (i - 1) d;
+
+let iters = _nth argv 0 40;
+let elems = _nth argv 1 655360;   // 5 MiB of int at eight bytes each
+
+let rec fill = fn (v: Vec[R, int]) -> fn (i: int) ->
+  if i >= elems then vec_len v
+  else let _ = vec_push v i in fill v (i + 1);
+
+let rec spin = fn (i: int) -> fn (acc: int) ->
+  if i >= iters then acc
+  else
+    // The Vec is built, measured and dropped inside the block. Only an int
+    // leaves, so an implementation that reclaims holds ONE of these however
+    // many iterations run.
+    let n = region R { let v = vec_new () in fill v 0 } in
+    spin (i + 1) (acc + n);
+
+print (show (spin 0 0))

@@ -466,6 +466,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/region_reclaim_check.sh
 
+      # contrib/unicode/width against a NAMED second implementation (Reline),
+      # not against the UCD it is generated from -- that would compare the
+      # generator with itself. Every difference has to land in a category with
+      # a reason attached; anything else is a DIFF and fails. Two of the
+      # categories are ones where the ORACLE is the one to correct, which is
+      # why the script is written to report rather than to waive.
+      - name: width_check (display width agrees with a second implementation)
+        if: ${{ !cancelled() }}
+        run: sh scripts/width_check.sh
+
       # How big Q-127's remaining half is, measured on the corpus rather than
       # guessed: which functions would take a hidden region argument, and which
       # cannot take one at all.

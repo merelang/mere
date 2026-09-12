@@ -82,6 +82,7 @@ instantiation with a missing-import error rather than a wrong answer.
 | `file_pread` | `File -> int -> int -> Vec[R, int]` | Read at most `len` bytes starting at an offset; a read past the end comes back short rather than padded |
 | `file_pwrite` | `File -> int -> Vec[R, int] -> int` | Write a byte vec (each element 0..255) at an offset, extending the file if it writes past the end; returns the count written |
 | `file_pwrite_bytes` | `File -> int -> bytes -> int` | The same over `bytes`, without exploding a byte string into one boxed int per byte (v0.1.222, mraft dogfood) |
+| `file_pread_bytes` | `File -> int -> int -> bytes` | The read half of `file_pwrite_bytes`: `len` bytes at an offset, straight into a byte string. A read past the end comes back short, like `file_pread`. **This is the one to page a large file with** — see below (v0.1.475, medit2 dogfood) |
 | `file_fsync` | `File -> unit` | Force the OS to commit this handle's writes to stable storage. The difference between "written" and "durable", and what a store calls at a commit point |
 | `file_close` | `File -> unit` | Close the handle |
 | `env_var` ★ | `str -> str option` | Fetch env var; `None` if unset (Phase 19.6; depends on prelude) |
@@ -171,12 +172,67 @@ differences:
   no-op that returned success, so a program that set a deadline blocked forever on
   the next read. A bounded wait needs the native backend.
 
+**Readiness** (v0.1.313), also `extern fn` declarations, C backend. A registered
+interest set waited on with `poll(2)`; registration persists across waits, so the
+API survives a later kqueue/epoll implementation unchanged. Documented here since
+v0.1.475 — it had lived only in the changelog, which is how the medit2 dogfood came
+to plan a busy-polling event loop before finding it.
+
+| name | type | notes |
+|---|---|---|
+| `io_poll_new` | `int -> int` | A pollset id, or -1 when eight are already live. The argument is ignored |
+| `io_poll_add` | `int -> int -> int -> int` | `set fd interest`; interest is `1` read, `2` write, `3` both. `-1` if that fd is already in the set — use `io_poll_mod` |
+| `io_poll_mod` | `int -> int -> int -> int` | Change one fd's interest |
+| `io_poll_del` | `int -> int -> int` | Drop one fd |
+| `io_poll_wait` | `int -> int -> int` | `set timeout_ms`; how many are ready, `0` on timeout, `-1` on error |
+| `io_poll_get` | `int -> int -> int` | The i-th ready event, packed as `fd * 8 + bits` (`1` read, `2` write, `4` err/hup) — the convention `midi_read` set |
+| `io_set_nonblocking` | `int -> int` | `O_NONBLOCK` on one fd |
+
+**Any fd, not only the ones this runtime handed out.** It is `poll(2)`, so `fd 0` is
+a legal member and so is a pipe or socketpair from a C shim of your own. That is what
+lets one loop wait on the keyboard and a subprocess at the same time, with no
+busy-wait and no second thread:
+
+```mere
+let ps = io_poll_new 0;
+let _ = io_poll_add ps 0 1;        // stdin
+let _ = io_poll_add ps child_fd 1; // a socketpair to a child process
+let n = io_poll_wait ps 16;
+let ev = io_poll_get ps 0;
+let fd = ev / 8;
+```
+
+`tcp_read` / `tcp_write` are `read(2)` / `write(2)` and are likewise not
+socket-specific, so the same pair reads whichever fd came back ready.
+
 **Positioned file I/O** (`file_openrw` through `file_close`) works on **all four**
 backends: interp and C natively, Wasm over host imports since v0.1.153 (bytes cross
 in the `mere_bytes` layout rather than one call per byte), LLVM since v0.1.163. It
 is the group a paged store or a write-ahead log needs, and it was documented only in
 the changelog until v0.1.222 — which is how the mraft dogfood came to write its log
 through the Vec-taking call for a whole slice before noticing.
+
+**`file_pread` or `file_pread_bytes`** (v0.1.475). Both read at an offset; the
+difference is what they build. `file_pread` returns `Vec[R, int]`, which is what
+mbtree wants — a page it is about to index into as numbers. `file_pread_bytes`
+returns a `bytes`, which is what a reader streaming a large file wants, and the
+difference is not small. Measured on 208 MB in 256 KiB pages, C backend:
+
+| | time | peak RSS |
+|---|---|---|
+| `file_pread` + `region` | 3.64 s | 10.1 MB |
+| `file_pread_bytes` + `region` | **0.36 s** | **1.8 MB** |
+| `read_bytes` (whole file) | 0.03 s | 210 MB |
+
+Ten times faster and a fifth of the memory, and the third row is the choice this
+removes: before it, paging a file meant picking between memory and speed. Two
+things make the difference. `file_pread` costs eight bytes per byte and builds the
+Vec one `fgetc` at a time. And **a `Vec` whose data array outgrows a `region`
+block's arena is not reclaimed by that block at all** — around 4-5 MiB of data on
+the C backend — so a loop reading pages into Vecs retains every page it has read,
+inside a region block that is otherwise doing its job. A `bytes` is one flat
+allocation and does not hit that. Reach for `file_pread` when the page is numbers;
+reach for `file_pread_bytes` when it is a file.
 
 **★ Codegen status** (v0.1.246 for the first two): `print_no_nl` and `print_err` lower
 on **interp + C + LLVM**; both were refused by LLVM until it grew a `write(fd, ...)`
