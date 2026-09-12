@@ -55,3 +55,4 @@ mere-ruby      main.mere          compile    the largest surface of the language
 mere-gcheap    gcloop.mere        compile    a library about the memory model itself
 memu           riscv.mere         compile    the emulator the RISC-V differential runs against
 mbigfmt        bigfmt.mere        compile    arbitrary-precision formatting; its dependency is another 284km repo
+medit2         medit2.mere        compile    an `extern fn` this compiler does NOT implement -- every other row's externs are names codegen emits itself, so the user-shim path had no downstream witness at all. Also io_poll, file_pread_bytes, and contrib/unicode vendored into .mere_modules
