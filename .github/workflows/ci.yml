@@ -217,6 +217,13 @@ jobs:
           [ -f "$(npm root -g)/graphql/package.json" ] || { echo "graphql-js missing"; exit 1; }
           python3 -c "import hyperframe" || { echo "hyperframe missing"; exit 1; }
           python3 -c "import hpack" || { echo "hpack missing"; exit 1; }
+          # width_check compares the generated table against Reline, and skips
+          # without it -- so its absence is asserted rather than tolerated. The
+          # comparison is only evidence if a second implementation actually ran.
+          command -v ruby >/dev/null || { echo "ruby missing (width_check)"; exit 1; }
+          ruby -e 'require "reline"' || { echo "reline missing (width_check)"; exit 1; }
+          # tty_raw_check opens a pty from python3, which is asserted above --
+          # named here so the dependency is not invisible at the gate.
           command -v grpcurl >/dev/null || { echo "grpcurl missing"; exit 1; }
           for f in --enable-tail-call --enable-threads; do
             wat2wasm --help 2>&1 | grep -q -- "$f" \

@@ -4,6 +4,60 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.477 — 2026-09-13
+
+_Two CI failures from the last two slices, and the reason both were invisible
+here: one gate was measuring an allocator rather than the compiler, and one
+number in the README is not derived from anything._
+
+_**region_reclaim's perbigvec legs were comparing peak RSS, which cannot answer
+the question they asked.** "Held but reused" and "freed and re-obtained" have
+the SAME peak; they differ in what the process is sitting on afterwards. macOS
+hands large frees back to the OS, so the accumulating case happened to show up
+as a bigger peak and the gate appeared to work. glibc reuses the block, so the
+identical binary read flat on Linux and CI went red for a property that was
+never being measured._
+
+_`MERE_REGION_STATS` now reports the thing itself — `region-stats cache:
+regions=N retained=B`, how many regions are cached and how many bytes they are
+carrying. A function of the program, not of the allocator. Both directions are
+pinned with it: under `__LANG_REGION_KEEP_MAX` a released region KEEPS its grown
+block (measured: 8,388,608 bytes retained after a 5 MiB value), over it the
+block goes back and the region re-seeds at 1 MiB (1,048,576). Poisoned in both
+directions._
+
+_The README's parity count said 176 and `test/parity` holds 177.
+`first_run_check.sh` re-derives it, which is why it was caught; the test count
+beside it is not derived and was stale too._
+
+_**`contrib/unicode/width.mere` is not the first display width in this
+project**, and v0.1.476's entry implied it was. `utf8_width` has been in the
+prelude since v0.1.45 and in the stdlib reference all along; the search that
+missed it looked in `contrib/` and in the builtin matrix and never in the
+prelude. Measuring the two is what settles which to use, so that number is now
+in both docs: over 17,661 code points they disagree on **2,083 (11.8%)** —_
+
+| | |
+|---|---|
+| 1,488 | the table says 0, the prelude says 1: combining marks, format characters and conjoining jamo outside its single `U+0300..036F` range, `U+200B ZERO WIDTH SPACE` among them |
+| 380 | the table says 1, the prelude says 2: narrow characters inside its coarse CJK block |
+| 209 | the table says 2, the prelude says 1: wide characters and emoji outside its two hardcoded emoji blocks |
+
+_`utf8_width` needs no import and is enough for lining up a column of a table,
+which is what it was written for. The generated table is for when a CURSOR has
+to land where the glyph ends — an editor, a pager, anything that draws over what
+it drew before — because there the error does not stay in one cell._
+
+_And the two gates added in v0.1.476 declare their dependencies in the CI
+toolchain preflight, where this project already asserts them: a gate that skips
+in CI is a gate that passes without running. `width_check` needs ruby and
+reline; `tty_raw_check` needs the python3 already asserted there. All four gates
+run green under **dash**, which is the shell CI uses._
+
+_dune runtest 2737/0, parity 195/195._
+
+---
+
 ## v0.1.476 — 2026-09-13
 
 _Six things a text editor asked for, five of them small and one of them
