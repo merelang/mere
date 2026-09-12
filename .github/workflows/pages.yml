@@ -31,11 +31,24 @@ jobs:
       - name: Install dependencies
         run: opam install . --deps-only
 
-      # binaryen as well as wabt: build_full.sh runs wasm-opt -Oz, and without it
+      - name: Install wabt (wat2wasm)
+        run: sudo apt-get update && sudo apt-get install -y wabt
+
+      # binaryen as well, because build_full.sh runs wasm-opt -Oz: without it
       # the DEPLOYED site would ship modules a third larger than the ones CI
-      # measures in scripts/wasm_size_check.sh. Two pipelines, one artifact.
-      - name: Install wabt (wat2wasm) and binaryen (wasm-opt)
-        run: sudo apt-get update && sudo apt-get install -y wabt binaryen
+      # measures in scripts/wasm_size_check.sh. Two pipelines, one artifact, so
+      # the same pinned version as ci.yml -- apt's 108 cannot read these modules
+      # at all, and an unpinned optimizer would make the deployed bytes drift
+      # away from the recorded ones without anything saying so.
+      - name: Install binaryen (wasm-opt), pinned as in ci.yml
+        run: |
+          set -e
+          BINARYEN=132
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN}/binaryen-version_${BINARYEN}-x86_64-linux.tar.gz" \
+            | tar -xz -C /tmp
+          install "/tmp/binaryen-version_${BINARYEN}/bin/wasm-opt" "$HOME/.local/bin/"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Build mere
         run: opam exec -- dune build

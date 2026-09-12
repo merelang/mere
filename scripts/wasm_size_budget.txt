@@ -21,6 +21,11 @@
 # Shrinking that is compiler work, not band work: do not lower these by hand
 # hoping to force it.
 #
+# The optimizer is part of the measurement. Recorded with:
+# wasm-opt: 132
+# ci.yml and pages.yml pin the same version; ubuntu's apt binaryen (108) cannot
+# read these modules at all.
+#
 # Moving a band is a decision, not maintenance: say why in the commit.
 chip8.wasm                    12349    15095
 counter.wasm                   7457     9115

@@ -166,8 +166,16 @@ if [ -d "$PLAYGROUND_OUT" ]; then
           mv "$wasm.opt" "$wasm"
           echo "  wasm-opt -Oz $(basename "$wasm"): $before -> $(wc -c < "$wasm" | tr -d ' ') B"
         else
+          # Present but failing is a broken toolchain, not a missing one, and
+          # shipping unoptimized here would put the deployed site a third above
+          # the bytes scripts/wasm_size_budget.txt records -- as a warning
+          # nobody reads. ubuntu 24.04's apt binaryen (version 108) does exactly
+          # this: it cannot read these modules at all.
           rm -f "$wasm.opt"
-          echo "  warning: wasm-opt failed on $wasm, shipping it unoptimized" >&2
+          echo "error: wasm-opt is on PATH but failed on $wasm" >&2
+          wasm-opt -Oz --enable-tail-call "$wasm" -o /dev/null 2>&1 | head -3 >&2
+          echo "       (needs binaryen 132 or newer; 108 refuses these modules)" >&2
+          exit 1
         fi
       else
         echo "  warning: wasm-opt not in PATH, $(basename "$wasm") ships unoptimized" >&2
