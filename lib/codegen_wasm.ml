@@ -1646,18 +1646,33 @@ let emit_float_alloc_from_f64_on_stack () : unit =
 let user_shadows_wasm name =
   (* Locals and lifted inner fns are lexically in scope by construction, so
      they decide on their own. For a top-level name the question is where we
-     are in the file, and it has to be asked before the name-only tables:
-     `fn_closure_table_idx` and `top_globals_wasm` also hold top-level fn
-     names, and answering from those would put a binding in scope above its
-     own declaration. *)
+     are in the file, which `toplevel_fn_pos` answers.
+
+     Two more name tables used to be consulted when that lookup missed --
+     `toplevel_fn_names` and `fn_closure_table_idx` -- and neither could ever
+     answer. All three are filled from the same `skels` list (fn_closure_table_idx
+     from `fns`, which is `skels` resolved and deduped), so a name in either of
+     them always HAS a position, and this arm only runs when it does not. They
+     were dead, and they read as a safety net that was not there: the comment
+     they carried said answering from them would put a binding in scope above
+     its own declaration, which is true, and is why they sat after the
+     positional check where nothing could reach them.
+
+     Measured before removing, not only reasoned: an instrumented build that
+     printed on reaching this arm with such a name got zero hits across the
+     unit suite, all fifteen playground demos (selfhost-compile included) and
+     sixty corpus programs. Removing them also leaves `fn_closure_table_idx`
+     answering ONE question -- "materialize this top-level fn as a closure
+     value" -- instead of doubling as a scope oracle, which is what makes it
+     safe to narrow later.
+
+     `top_globals_wasm` stays: top-level VALUE bindings are a different
+     population with no entry in `toplevel_fn_pos`, so that one does fire. *)
   List.mem_assoc name !locals
   || Hashtbl.mem inner_lifts_wasm name
   || (match Hashtbl.find_opt toplevel_fn_pos name with
       | Some p -> p <= !current_toplevel_pos
-      | None ->
-        Hashtbl.mem toplevel_fn_names name
-        || Hashtbl.mem fn_closure_table_idx name
-        || Hashtbl.mem top_globals_wasm name)
+      | None -> Hashtbl.mem top_globals_wasm name)
 
 (* The head of an application spine: `f a b c` is App (App (App (f, a), b), c),
    so a three-argument builtin is matched at the outermost App with the name
