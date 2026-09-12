@@ -177,47 +177,63 @@ fi
 # 216 MB with a release counter reading 40 of 40. Since v0.1.475 the release
 # keeps the largest block: the same loop is 13.7 MB and flat.
 #
-# BOTH DIRECTIONS ARE PINNED HERE, because the fix is a trade and a trade with
-# only one side measured drifts:
+# THOSE NUMBERS ARE FROM macOS AND THE ASSERTIONS BELOW ARE NOT MADE FROM THEM.
+# The first version of this leg compared peak RSS, and that was the wrong
+# instrument on both platforms for the same reason: "held but reused" and
+# "freed and re-obtained" have the SAME peak. They differ in what the process is
+# sitting on afterwards. macOS hands large frees straight back to the OS, so the
+# accumulating case happened to show up as a bigger peak and the check appeared
+# to work; glibc reuses the block, so the identical binary read flat on Linux
+# and the gate went red for a property it was never measuring.
 #
-#   under __LANG_REGION_KEEP_MAX   the footprint must NOT follow the iterations
-#   over it                        the footprint MUST, because a program that
-#                                  builds one enormous value and then stops
-#                                  using regions should not hold it forever
+# MERE_REGION_STATS reports the thing itself: how many regions are cached and
+# how many bytes they are carrying. A function of the program, not of the
+# allocator. Both directions of the trade are pinned with it:
 #
-# The second is not a wish -- it is the cap doing its job, and a future change
-# that removes the cap turns this red and asks for the decision again rather
-# than silently retaining hundreds of megabytes per cached region.
+#   under __LANG_REGION_KEEP_MAX   a released region KEEPS its grown block
+#   over it                        it gives the block back and re-seeds at 1 MiB
+#
+# The second is the cap doing its job -- eight regions are cached per thread, so
+# an uncapped keep is eight times the largest value the program ever built, held
+# for the rest of the run. A future change that removes the cap turns this red
+# and asks for the decision again.
 
 BIGSRC="$ROOT/test/regionreclaim/perbigvec.mere"
 if [ -f "$BIGSRC" ]; then
   if "$MERE" -c "$BIGSRC" > "$TMP/bv.c" 2>/dev/null && $CC -O2 -w "$TMP/bv.c" -o "$TMP/bvbin" 2>/dev/null; then
-    # 5 MiB of int per iteration: comfortably under the 16 MiB keep cap.
-    UNDER=655360
-    b_small="$(peak "$TMP/bvbin" 10 $UNDER)"
-    b_big="$(peak "$TMP/bvbin" 40 $UNDER)"
-    if [ -n "$b_small" ] && [ -n "$b_big" ]; then
-      if [ "$(( b_big * 10 ))" -gt "$(( b_small * 20 ))" ]; then
-        echo "FAIL region_reclaim/perbigvec: peak went $b_small -> $b_big for 10 -> 40 iterations."
-        echo "  A region under the keep cap is supposed to reuse its largest block rather than"
-        echo "  free the chain and re-seed at 1 MiB. See __lang_region_block_release in codegen_c.ml."
+    retained() {
+      MERE_REGION_STATS=1 "$TMP/bvbin" "$1" "$2" 2>&1 >/dev/null \
+        | sed -n 's/^region-stats cache: regions=[0-9]* retained=\([0-9]*\)$/\1/p' | tail -1
+    }
+    KEEP_MAX=$((16 * 1024 * 1024))
+    SEED=$((1024 * 1024))
+
+    # 5 MiB of int per iteration: comfortably under the cap.
+    under="$(retained 5 655360)"
+    if [ -z "$under" ]; then
+      echo "FAIL region_reclaim/perbigvec: MERE_REGION_STATS printed no cache line -- the meter is gone, so neither direction below is being checked"
+      fail=1
+    else
+      if [ "$under" -le "$SEED" ]; then
+        echo "FAIL region_reclaim/perbigvec: a released region retained $under bytes after building a 5 MiB value."
+        echo "  Under the keep cap it is supposed to hold on to its grown block so the next"
+        echo "  iteration reuses the memory rather than asking the allocator for it again."
+        echo "  See __lang_region_block_release in codegen_c.ml."
         fail=1
       fi
       checked=$((checked + 1))
-    fi
 
-    # 32 MiB of int per iteration: over the cap, so the region gives it back and
-    # the footprint follows the iteration count. Asserting the OTHER direction.
-    OVER=4194304
-    o_small="$(peak "$TMP/bvbin" 4 $OVER)"
-    o_big="$(peak "$TMP/bvbin" 16 $OVER)"
-    if [ -n "$o_small" ] && [ -n "$o_big" ]; then
-      if [ "$(( o_big * 10 ))" -le "$(( o_small * 12 ))" ]; then
-        echo "FAIL region_reclaim/perbigvec: peak went $o_small -> $o_big for 4 -> 16 iterations of a"
-        echo "  32 MiB value -- flat, which means __LANG_REGION_KEEP_MAX is no longer bounding what a"
-        echo "  recycled region holds. Eight regions are cached per thread, so an unbounded keep means"
-        echo "  eight times the largest value the program ever built, held for the rest of the run."
-        echo "  If that is now the intended trade, change this leg deliberately."
+      # 32 MiB of int per iteration: over the cap, so the block goes back.
+      over="$(retained 4 4194304)"
+      if [ -z "$over" ]; then
+        echo "FAIL region_reclaim/perbigvec: no cache line for the over-cap run"
+        fail=1
+      elif [ "$over" -gt "$KEEP_MAX" ]; then
+        echo "FAIL region_reclaim/perbigvec: a released region retained $over bytes after building a"
+        echo "  32 MiB value -- more than __LANG_REGION_KEEP_MAX, so the cap is no longer bounding"
+        echo "  what a recycled region holds. Eight regions are cached per thread, so an unbounded"
+        echo "  keep means eight times the largest value the program ever built, held for the rest"
+        echo "  of the run. If that is now the intended trade, change this leg deliberately."
         fail=1
       fi
       checked=$((checked + 1))
