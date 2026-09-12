@@ -65,10 +65,41 @@ command -v wat2wasm >/dev/null 2>&1 || { echo "wasm_size_check: SKIP (no wat2was
 # this skips rather than reporting a number about a different artifact.
 command -v wasm-opt >/dev/null 2>&1 || { echo "wasm_size_check: SKIP (no wasm-opt; the bands are for the -Oz build the site ships)"; exit 0; }
 command -v node >/dev/null 2>&1 || { echo "wasm_size_check: SKIP (no node; the behaviour half cannot run)"; exit 0; }
+
+# Not just "is node here" but "can this node load what Mere emits". Every
+# playground module uses return_call (opcode 0x12), which node only accepts
+# unflagged from 22 on. Without this probe an old node makes the behaviour half
+# report "the optimized module does not answer what the interpreter does" --
+# naming the optimizer for something node refused to load. A failure that
+# accuses the wrong tool is worse than no check, so the precondition is asked
+# here, next to the other tool guards, rather than diagnosed from the symptom.
+probe="$(mktemp -d)"
+cat > "$probe/t.wat" <<'WAT'
+(module (func $a (result i32) (i32.const 1))
+        (func (export "m") (result i32) (return_call $a)))
+WAT
+if ! wat2wasm --enable-tail-call "$probe/t.wat" -o "$probe/t.wasm" 2>/dev/null \
+   || ! node -e 'new WebAssembly.Module(require("fs").readFileSync(process.argv[1]))' "$probe/t.wasm" 2>/dev/null; then
+  rm -rf "$probe"
+  echo "wasm_size_check: SKIP (this node cannot load a tail-call module; needs node 22+, have $(node --version))"
+  exit 0
+fi
+rm -rf "$probe"
 [ -f "$BUDGET" ] || { echo "wasm_size_check: $BUDGET not found" >&2; exit 1; }
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+
+# The optimizer version is part of the measurement, not part of the machine:
+# these are byte counts, and a different wasm-opt produces different bytes. A
+# mismatch is not made a failure -- that would block anyone on another build --
+# but it is said out loud, so a band failure is not misread as a regression.
+want_opt="$(awk '/^# wasm-opt:/ { print $3 }' "$BUDGET")"
+have_opt="$(wasm-opt --version 2>/dev/null | awk '{ print $3 }')"
+if [ -n "$want_opt" ] && [ "$want_opt" != "$have_opt" ]; then
+  echo "wasm_size_check: NOTE -- bands were recorded with wasm-opt $want_opt, this is $have_opt."
+  echo "                 Band failures below may be the optimizer rather than the code."
+fi
 
 echo "wasm_size_check: building the site (this is the real build, not a paraphrase)"
 if ! PATH="$ROOT/_build/default/bin:$PATH" sh "$ROOT/contrib/site/build_full.sh" \

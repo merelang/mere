@@ -98,7 +98,7 @@ jobs:
       - name: Install harness tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang wabt lldb binaryen
+          sudo apt-get install -y clang wabt lldb
           # SDL2 for the window capability. window_check.sh skips without it, and
           # a skipped gate is a gate that is not running — so install it here.
           sudo apt-get install -y libsdl2-dev
@@ -113,6 +113,15 @@ jobs:
           set -e
           WASM_TOOLS=1.255.0
           WASMTIME=46.0.1
+          # binaryen, for the wasm-opt -Oz that build_full.sh runs on every
+          # playground module. NOT apt: ubuntu 24.04 ships version 108, which
+          # refuses these modules outright -- without --enable-tail-call on the
+          # return_call sites, and with it on "Exported global cannot be
+          # mutable". Pinned for the stronger reason too: scripts/wasm_size_
+          # budget.txt records byte counts, so the optimizer version is part of
+          # the measurement. 132 emits the recorded bytes exactly, checked on
+          # this image against the same modules built on macOS.
+          BINARYEN=132
           mkdir -p "$HOME/.local/bin"
           curl -sSfL "https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS}/wasm-tools-${WASM_TOOLS}-x86_64-linux.tar.gz" \
             | tar -xz -C /tmp
@@ -120,6 +129,9 @@ jobs:
           curl -sSfL "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME}/wasmtime-v${WASMTIME}-x86_64-linux.tar.xz" \
             | tar -xJ -C /tmp
           install "/tmp/wasmtime-v${WASMTIME}-x86_64-linux/wasmtime" "$HOME/.local/bin/"
+          curl -sSfL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN}/binaryen-version_${BINARYEN}-x86_64-linux.tar.gz" \
+            | tar -xz -C /tmp
+          install "/tmp/binaryen-version_${BINARYEN}/bin/wasm-opt" "$HOME/.local/bin/"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           npm install -g @bytecodealliance/jco@1.27.0
           # graphql-js is the oracle for graphql_parity.sh. Pinned for the same
@@ -210,6 +222,15 @@ jobs:
             wat2wasm --help 2>&1 | grep -q -- "$f" \
               || { echo "wat2wasm does not support $f"; exit 1; }
           done
+          # wasm_size_check's behaviour half runs the shipped modules under
+          # node, and every playground module uses return_call. node accepts it
+          # unflagged from 22 on; below that the gate skips itself, so a node
+          # downgrade here would quietly stop checking that wasm-opt preserved
+          # behaviour. Asserted as a capability, not a version string.
+          printf '(module (func $a (result i32) (i32.const 1))\n (func (export "m") (result i32) (return_call $a)))\n' > /tmp/tc.wat
+          wat2wasm --enable-tail-call /tmp/tc.wat -o /tmp/tc.wasm
+          node -e 'new WebAssembly.Module(require("fs").readFileSync("/tmp/tc.wasm"))' \
+            || { echo "node cannot load a tail-call module (needs 22+): $(node --version)"; exit 1; }
           # The two node-oracle harnesses skip below this floor rather than
           # reporting phantom failures, so the floor is asserted here — a gate
           # that silently skips in CI is a gate that passes without running.
