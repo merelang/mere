@@ -146,6 +146,32 @@ if [ -d "$PLAYGROUND_OUT" ]; then
       # Enabled by default in Chrome / Safari / Firefox 129+ / Node 22+.
       wat2wasm --enable-tail-call "$wat" -o "$wasm" 2>&1 \
         && echo "  wat2wasm $(basename "$wat") -> $(basename "$wasm")"
+
+      # 3b. Shrink it. These files are downloaded by every visitor, and the
+      # unoptimized emit carries a lot that nothing reaches: -Oz takes about
+      # 48% off the small demos and 27-33% off the selfhost ones, 34% over the
+      # whole playground, and every result still passes wasm-validate.
+      #
+      # What it CANNOT take is the part the elem segment roots. Every closure
+      # call in Mere goes through the function table, so each table entry is a
+      # DCE root -- hello.wasm keeps 101 of its 152 functions after -Oz, and
+      # 65 of those are table entries. With the table removed (a broken module,
+      # measured only to bound the headroom) the same program is 7 functions
+      # and 2,299 bytes. So -Oz is the free half; the other half is a question
+      # about which prelude closures a program can actually reach indirectly,
+      # and that one belongs in the compiler.
+      if command -v wasm-opt > /dev/null 2>&1; then
+        before=$(wc -c < "$wasm" | tr -d ' ')
+        if wasm-opt -Oz --enable-tail-call "$wasm" -o "$wasm.opt" 2>/dev/null; then
+          mv "$wasm.opt" "$wasm"
+          echo "  wasm-opt -Oz $(basename "$wasm"): $before -> $(wc -c < "$wasm" | tr -d ' ') B"
+        else
+          rm -f "$wasm.opt"
+          echo "  warning: wasm-opt failed on $wasm, shipping it unoptimized" >&2
+        fi
+      else
+        echo "  warning: wasm-opt not in PATH, $(basename "$wasm") ships unoptimized" >&2
+      fi
     else
       echo "  warning: wat2wasm not in PATH, skipping $wat" >&2
     fi
