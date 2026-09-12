@@ -1,0 +1,103 @@
+// contrib/unicode/width.mere — how many columns text occupies on a terminal.
+//
+// The question a full-screen terminal program has to answer before it can put
+// anything anywhere: the cursor moves by columns, and a Japanese character is
+// two of them. Get this wrong and every line after the first multi-byte
+// character is drawn in the wrong place -- which is why a terminal editor in a
+// language without this is a Western-text editor.
+//
+//   import "contrib/unicode/width.mere";
+//
+//   Width.of_str "日本語"                            // 6
+//   Width.of_str "hello"                            // 5
+//   Width.of_str ("cafe" ++ chr 204 ++ chr 129)     // 4 -- a combining
+//                                                  //   acute adds no column
+//   Width.take_cols "日本語abc" 5                    // 6 bytes: 日本 fits
+//
+// THE AMBIGUOUS SET is why this has two of everything. EastAsianWidth=A covers
+// ±, §, ※, the box-drawing characters and much of Greek and Cyrillic, and the
+// standard deliberately does not say how wide they are: one column in a
+// Western terminal, two in a terminal configured for CJK. So `of_str` takes the
+// caller's answer, and `of_str_narrow` / `of_str_wide` are the two you get by
+// having already decided. A library that picked silently would be wrong half
+// the time and never say so.
+//
+// CODE POINTS, NOT CLUSTERS. This walks code points and gives combining marks
+// zero width, which gets "é" and Hangul right. It does NOT run UAX #29, so an
+// emoji ZWJ sequence counts each pictograph -- 👩‍👩‍👦 comes out 6 rather than 2.
+// That is a deliberate limit, and the reason is measured: a container allocated
+// inside a called function goes to the PROGRAM-LIFETIME region, not to the
+// `region` block around the call -- the placement rule is lexical. So
+// Grapheme.clusters, which makes one StrBuf per cluster, leaks about 60 KB a
+// frame when a renderer calls it once per visible line per keystroke (2,000
+// frames of 40 lines of Japanese came to 125 MB, growing linearly, inside a
+// region block). A renderer cannot pay that. When the clustering allocates in
+// the caller's region, this should walk clusters instead.
+
+import "width_table.mere";
+
+module Width {
+
+  // Resolve the table's four answers into a column count. `amb` is what the
+  // caller says an ambiguous-width character is worth: 1 or 2.
+  let of_cp_amb = fn (amb: int) -> fn (cp: int) ->
+    let k = WidthTable.class_of cp in
+    if k == WidthTable.w_ambiguous then amb else k;
+
+  // The common case. Ambiguous is one column, which is what a terminal that
+  // has not been told otherwise does.
+  let of_cp = fn (cp: int) -> of_cp_amb 1 cp;
+
+  let is_ambiguous = fn (cp: int) ->
+    WidthTable.class_of cp == WidthTable.w_ambiguous;
+
+  // Sum over the code points of a string. Walks `utf8_chars` rather than
+  // indexing, because `codepoint_at` re-walks the string on every call and a
+  // per-index loop is quadratic in the length of the line.
+  let rec _sum = fn (amb: int) -> fn (cs: str list) -> fn (acc: int) ->
+    match cs with
+    | Nil -> acc
+    | Cons (c, rest) -> _sum amb rest (acc + of_cp_amb amb (codepoint_of c));
+
+  let of_str_amb = fn (amb: int) -> fn (s: str) -> _sum amb (utf8_chars s) 0;
+
+  let of_str = fn (s: str) -> of_str_amb 1 s;
+  let of_str_narrow = fn (s: str) -> of_str_amb 1 s;
+  let of_str_wide = fn (s: str) -> of_str_amb 2 s;
+
+  // How many BYTES of `s` fit in `cols` columns. Bytes rather than characters,
+  // because the caller is about to `substring` with it.
+  //
+  // A character that would straddle the right edge is left out entirely: half
+  // of a wide character is not a thing a terminal can draw, and a renderer that
+  // emits it corrupts every line below. The caller pads the gap.
+  let rec _take = fn (amb: int) -> fn (cs: str list) -> fn (left: int) -> fn (acc: int) ->
+    match cs with
+    | Nil -> acc
+    | Cons (c, rest) ->
+      let w = of_cp_amb amb (codepoint_of c) in
+      if w > left then acc
+      else _take amb rest (left - w) (acc + str_len c);
+
+  let take_cols_amb = fn (amb: int) -> fn (s: str) -> fn (cols: int) ->
+    if cols <= 0 then 0 else _take amb (utf8_chars s) cols 0;
+
+  let take_cols = fn (s: str) -> fn (cols: int) -> take_cols_amb 1 s cols;
+
+  // The inverse: how many columns precede byte offset `upto` in `s`. This is
+  // what turns a cursor's byte position into a screen column.
+  let rec _cols_before = fn (amb: int) -> fn (cs: str list) -> fn (left: int) -> fn (acc: int) ->
+    if left <= 0 then acc
+    else
+      match cs with
+      | Nil -> acc
+      | Cons (c, rest) ->
+        let n = str_len c in
+        if n > left then acc
+        else _cols_before amb rest (left - n) (acc + of_cp_amb amb (codepoint_of c));
+
+  let cols_before_amb = fn (amb: int) -> fn (s: str) -> fn (upto: int) ->
+    if upto <= 0 then 0 else _cols_before amb (utf8_chars s) upto 0;
+
+  let cols_before = fn (s: str) -> fn (upto: int) -> cols_before_amb 1 s upto;
+}

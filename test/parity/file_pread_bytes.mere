@@ -1,0 +1,51 @@
+// Positioned READ of a byte string, across the backends.
+//
+// file_pread (v0.1.83, msqlite dogfood) returns a Vec[int]: one boxed int per
+// byte, built one fgetc at a time on the C backend. Two costs, and the second
+// is the one that took measuring. Eight bytes per byte is the obvious one. The
+// other is that a Vec whose data array outgrows a `region` block's arena is not
+// reclaimed by that block AT ALL -- so a reader paging through a large file
+// leaked every page it had read, inside a region block that was doing its job.
+//
+// Measured on 208 MB, 256 KiB pages, C backend: file_pread 3.64 s at 10.1 MB
+// peak RSS, file_pread_bytes 0.36 s at 1.8 MB. read_bytes is faster still and
+// holds the whole file (210 MB), which is the choice this removes.
+//
+// No region parameter, because `bytes` carries no region marker -- which is
+// also why the flat allocation is reclaimed where the Vec was not.
+
+let path = "/tmp/mere_parity_prb.bin";
+let _ = write_file path "hello world, positioned";
+
+let f = file_openrw path;
+
+// A read from the middle, so the offset is doing something.
+let mid = file_pread_bytes f 6 5;
+let _ = print (str_of_bytes mid);
+
+// A read that runs past the end comes back SHORT rather than padded -- the
+// contract file_pread already documents, kept here so the two agree.
+let tail = file_pread_bytes f 18 999;
+let _ = print (str_of_bytes tail ++ " " ++ str_of_int (bytes_len tail));
+
+// Entirely past the end is empty, not an error.
+let past = file_pread_bytes f 9999 16;
+let _ = print (str_of_int (bytes_len past));
+
+// A non-positive length is empty too, on every backend, rather than each
+// deciding for itself what a zero-byte read means.
+let zero = file_pread_bytes f 0 0;
+let _ = print (str_of_int (bytes_len zero));
+
+// The two halves agree on the same bytes: what pread_bytes reads and what
+// pread reads through the Vec bridge are the same string.
+let viavec = str_of_bytes (bytes_of_vec (file_pread f 6 5));
+let _ = print (if str_eq viavec (str_of_bytes mid) then "agree" else "DIFFER");
+
+// And the write half round-trips through the read half.
+let _ = file_pwrite_bytes f 0 (bytes_of_str "HELLO");
+let _ = file_fsync f;
+let _ = print (str_of_bytes (file_pread_bytes f 0 11));
+
+let _ = file_close f;
+print "prb ok"

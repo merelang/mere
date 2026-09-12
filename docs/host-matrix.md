@@ -95,6 +95,7 @@ machine rather than a host.
 | `file_open` | yes | refused | refused | refused |
 | `file_openrw` | yes | yes | yes | refused |
 | `file_pread` | yes | yes | yes | unattributed |
+| `file_pread_bytes` | yes | yes | yes | unattributed |
 | `file_pwrite` | yes | yes | yes | unattributed |
 | `file_pwrite_bytes` | yes | yes | yes | unattributed |
 | `file_read_line` | yes | refused | refused | unattributed |

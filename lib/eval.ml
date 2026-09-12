@@ -3206,6 +3206,53 @@ let builtin_file_pread =
         | _ -> failwith "file_pread: offset expected int")
     | _ -> failwith "file_pread: expected File")
 
+(* v0.1.475 (medit2 dogfood): the read half of file_pwrite_bytes. file_pread
+   returns Vec[int] — one boxed int per byte — which costs eight bytes per byte
+   and, past a few megabytes, is not reclaimed by an enclosing `region` block at
+   all (the Vec's data array outgrows the block's arena; a flat `bytes` does
+   not). Paging a large file through file_pread therefore had to choose between
+   memory and speed: 208 MB took 3.81 s at 9.6 MB peak RSS, where read_bytes took
+   0.33 s at 210 MB. This reads straight into a byte string, which is both.
+   Short reads at EOF come back short, exactly like file_pread. *)
+let builtin_file_pread_bytes =
+  let read_ch ch off len =
+    let flen = in_channel_length ch in
+    let avail = if off >= flen then 0 else min len (flen - off) in
+    let avail = if avail < 0 then 0 else avail in
+    seek_in ch off;
+    let buf = Bytes.create avail in
+    really_input ch buf 0 avail;
+    V_bytes (Bytes.to_string buf)
+  in
+  let read_fd fd off len =
+    let len = if len < 0 then 0 else len in
+    ignore (Unix.lseek fd off Unix.SEEK_SET);
+    let buf = Bytes.create len in
+    let rec read_all pos =
+      if pos >= len then pos
+      else
+        let n = Unix.read fd buf pos (len - pos) in
+        if n <= 0 then pos else read_all (pos + n)
+    in
+    let got = read_all 0 in
+    V_bytes (Bytes.sub_string buf 0 got)
+  in
+  V_builtin ("file_pread_bytes", fun fv ->
+    let reader =
+      match fv with
+      | V_file ch -> read_ch ch
+      | V_rwfile fd -> read_fd fd
+      | _ -> failwith "file_pread_bytes: expected File"
+    in
+    V_builtin ("file_pread_bytes_off", fun ov ->
+      match ov with
+      | V_int off ->
+        V_builtin ("file_pread_bytes_len", fun lv ->
+          match lv with
+          | V_int len -> reader off len
+          | _ -> failwith "file_pread_bytes: length expected int")
+      | _ -> failwith "file_pread_bytes: offset expected int"))
+
 let builtin_channel_recv_opt =
   V_builtin ("channel_recv_opt", fun ch ->
     match ch with
@@ -3540,6 +3587,7 @@ let initial_env : env =
     ("read_file", ref builtin_read_file);
     ("read_file_bytes", ref builtin_read_file_bytes);
     ("file_pread", ref builtin_file_pread);
+    ("file_pread_bytes", ref builtin_file_pread_bytes);
     ("write_file_bytes", ref builtin_write_file_bytes);
     ("write_file", ref builtin_write_file);
     ("read_lines", ref builtin_read_lines);

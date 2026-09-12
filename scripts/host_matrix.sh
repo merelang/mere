@@ -102,6 +102,7 @@ file_openrw|let f = file_openrw "/tmp/mere_probe.bin"; let _ = file_close f; 0
 file_pread|let f = file_openrw "/tmp/mere_probe.bin"; let v = file_pread f 0 4; vec_len v
 file_pwrite|let f = file_openrw "/tmp/mere_probe.bin"; let n = file_pwrite f 0 (vec_new ()); n
 file_pwrite_bytes|let f = file_openrw "/tmp/mere_probe.bin"; let n = file_pwrite_bytes f 0 (bytes_of_str "x"); n
+file_pread_bytes|let f = file_openrw "/tmp/mere_probe.bin"; let b = file_pread_bytes f 0 4; bytes_len b
 map_new|let m = map_new (); let _ = map_set m "k" 1; 0
 vec_new|let v = vec_new (); let _ = vec_push v 1; vec_len v
 owned_vec_new|let v = owned_vec_new (); let _ = owned_vec_push v 1; 0

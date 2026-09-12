@@ -2673,6 +2673,16 @@ let initial_env : env =
      mono (Ast.TyArrow (Ast.TyCon ("File", []),
              Ast.TyArrow (Ast.TyInt,
                Ast.TyArrow (Ast.TyBytes, Ast.TyInt)))));
+    (* v0.1.475 (medit2 dogfood): the READ half, taking no region because
+       `bytes` carries none. file_pread's Vec[int] costs eight bytes per byte,
+       and past a few megabytes an enclosing `region` block does not reclaim its
+       data array at all — so paging a large file had to pick between memory and
+       speed. This is both, and it is the shape every reader of a large file
+       wants: 208 MB in 0.33 s at O(page) memory rather than 3.81 s. *)
+    ("file_pread_bytes",
+     mono (Ast.TyArrow (Ast.TyCon ("File", []),
+             Ast.TyArrow (Ast.TyInt,
+               Ast.TyArrow (Ast.TyInt, Ast.TyBytes)))));
     ("write_file_bytes", write_file_bytes_scheme);
     (* Phase 44: file system primitives for the docs site SSG *)
     ("list_dir",
@@ -3396,6 +3406,29 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        let marker = current_region_marker () in
        let result_ty = Ast.TyCon ("Vec", [marker; Ast.TyInt]) in
        unify e.loc ta Ast.TyStr;
+       unify e.loc tf (Ast.TyArrow (ta, result_ty));
+       result_ty
+     (* v0.1.475 (medit2 dogfood): `file_pread` was the one container
+        constructor still missing from this list, and it is the one a program
+        calls in a LOOP. Its scheme is region-quantified, so each use
+        instantiated a fresh marker that nothing unified with the block around
+        it, and it settled on the default region -- the same shape as the
+        bytebuf_new case below, found the same way (by measuring, not reading).
+        A `region R { let v = file_pread f off len in .. }` paging through a
+        file retained every page: 200 pages of 64 KiB came to 107 MB, growing
+        linearly with the iteration count, inside a region block that was
+        acquiring and releasing correctly. Writing the ascription
+        `(file_pread f off len : Vec[R, int])` bound the marker by hand and cut
+        it to 2.0 MB; this makes the ascription unnecessary, which is the point
+        -- the one that needs a hand-written region annotation to not leak is
+        the one nobody annotates. Matched saturated, where the Vec is: a bare
+        `file_pread` in value position still takes the plain scheme, exactly as
+        read_file_bytes above does. *)
+     | Ast.App ({ Ast.node = Ast.App
+                    ({ Ast.node = Ast.Var "file_pread"; _ }, _f_e); _ }, _off_e) ->
+       let marker = current_region_marker () in
+       let result_ty = Ast.TyCon ("Vec", [marker; Ast.TyInt]) in
+       unify e.loc ta Ast.TyInt;
        unify e.loc tf (Ast.TyArrow (ta, result_ty));
        result_ty
      (* Q-127 / m3d Q-10: `bytebuf_new` and `bytebuf_of_bytes` never bound their
