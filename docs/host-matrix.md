@@ -183,6 +183,7 @@ machine rather than a host.
 | `time` | yes | yes | yes | yes |
 | `to_lower` | yes | yes | yes | yes |
 | `to_upper` | yes | yes | yes | yes |
+| `tty_no_signal_keys` | yes | refused | refused | refused |
 | `tty_raw` | yes | refused | refused | refused |
 | `tty_restore` | yes | refused | refused | refused |
 | `u8x16_splat` | yes | yes | yes | yes |

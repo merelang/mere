@@ -4,6 +4,97 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.476 — 2026-09-13
+
+_Six things a text editor asked for, five of them small and one of them
+embarrassing. The embarrassing one is that raw mode was not delivering the keys
+a program had asked for, and every test in this project that could have seen it
+was a pipe._
+
+_**`tty_raw` clears IXON.** A fix rather than a choice: no full-screen program
+wants software flow control. With it on, Ctrl-S is XOFF and Ctrl-Q is XON — the
+line discipline consumes both and the program never sees either byte. The
+`medit` dogfood documents Ctrl-S as save and Ctrl-Q as quit; driven under a real
+pty it drew **zero** bytes after each, stayed alive, and never wrote its file.
+It had been unusable in a real terminal since July. Rebuilt against this
+compiler, with no change to its own source, it saves and quits._
+
+_**`tty_no_signal_keys`** is a second call and not part of `tty_raw`, because
+ISIG is a trade rather than a bug. Clearing it delivers Ctrl-C / Ctrl-Z / Ctrl-\
+as bytes, which an editor needs — with ISIG set, Ctrl-Z is SUSP and an undo bound
+to it silently does nothing — and takes away the interrupt key, which a game
+that quits on `q` should keep. Folding it into `tty_raw` would have taken the
+escape hatch from every existing TUI to serve the one that asked._
+
+_Neither is visible to a piped test, in either direction: a pipe has no line
+discipline, so 0x13 and 0x1a both arrive and everything looks finished.
+**`scripts/tty_raw_check.sh`** drives a Mere program through a real pty and asks
+whether the bytes it was sent reached it — including the leg that pins Ctrl-C
+**still interrupting** under plain `tty_raw`, so that trade cannot be quietly
+reversed later. It is poisoned in both directions._
+
+_**`Grapheme.clusters` builds each cluster as a `str` rather than a StrBuf**, and
+the difference is where it lives. A container is allocated in the
+program-lifetime region when the allocation is not lexically inside the caller's
+`region` block — and a library function never is — so a StrBuf per cluster was a
+StrBuf that was never reclaimed. Two thousand frames of forty lines of Japanese
+came to **127.8 MB, growing linearly**, inside a region block that was doing its
+job. As a `str` the same run is **1.6 MB and flat**, and **faster**: 0.45 s
+against 0.84 s. The StrBuf was not buying anything — a cluster is one to a
+handful of code points, so the quadratic that concatenation would pay is bounded
+by the length of one cluster and not of the text. Still agrees with ICU on all
+8,509 conformance inputs._
+
+_That made clustering affordable per keystroke, so **`Width` now sums over
+clusters**: 👩‍👩‍👦 is 2 columns rather than 6, 🇯🇵 is 2 rather than 4, and nothing
+else moves. `Width.of_cp` is still the per-code-point answer, which is what a
+table comparison wants._
+
+_**`\}` is a literal brace.** A `}` in a string never needed an escape — only
+`{` starts an interpolation — so `\}` was "unknown escape", and a brace PAIR had
+to be written with its two halves spelled differently: `"\{\"id\":1}"`. This
+project's own test suite is written around it. The unescaped form still works._
+
+_**An `extern fn` for a name this compiler implements is checked for arity.**
+It was not before: the declaration was taken at face value, the call emitted with
+that many arguments, and clang reported `too few arguments to function call,
+expected 3, have 2` about a line of generated C — the user's mistake, named
+somewhere the user did not write. The expected arity is **derived** by scanning
+the C this backend emits rather than listed beside it, so it cannot drift from
+the runtime. Arity only: comparing types needs a compatibility notion that does
+not exist here, since `tcp_close : int -> unit` is what every contrib declares
+and the runtime returns `int`. Swept over 400 `.mere` files in this tree: zero
+false positives._
+
+_**A match's unreachable fall-through is cast to the match's type.** The
+placeholder was a bare `0`, and a statement expression is typed by its last
+expression — so `({ ...; 0; })` is an `int`, and putting that in the else-arm of
+a conditional whose other arm is a pointer made clang warn on every match over a
+user variant. Nothing was broken (`__lang_fail_impl` is `noreturn`, so the value
+is unreachable) but a warning that fires on correct code on every build is one
+nobody reads, and it stops a `-Werror` build dead. The medit2 dogfood's emitted
+C carried eleven._
+
+_**Measured and not done: incremental LSP sync.** `mere lsp` advertises
+`textDocumentSync: 1`, so every change sends the whole buffer, and the obvious
+next step was `2`. The measurement says no. Per-change time against file size,
+median of five, `didChange` to `publishDiagnostics`:_
+
+| lines | bytes | ms | growth for 2x lines |
+|---|---|---|---|
+| 100 | 1,981 | 4.2 | |
+| 800 | 18,081 | 9.0 | x1.55 |
+| 3,200 | 79,881 | 27.4 | x1.66 |
+
+_Linear, not quadratic. And incremental sync would reduce the bytes SENT while
+the server still re-checks the whole buffer — 80 KB over a socketpair is under a
+tenth of a millisecond against 27 ms of checking. It would buy almost nothing;
+what costs is the check, and that is a different piece of work._
+
+_`dune runtest` 2737/0, parity 195/195, and every gate above._
+
+---
+
 ## v0.1.475 — 2026-09-12
 
 _A positioned read that builds a `bytes`, the region a positioned read lives in,

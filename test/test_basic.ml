@@ -2009,6 +2009,21 @@ let () =
     (Pipeline.process "'\\t'") "\"\\t\"";
   check "char literal escape backslash"
     (Pipeline.process "'\\\\'") "\"\\\\\"";
+  (* v0.1.476: a literal `}` needs no escape -- only `{` starts an
+     interpolation -- so `\}` used to be "unknown escape". That made a brace
+     PAIR have to be written with its two halves spelled differently, which is
+     a papercut anyone writing JSON, CSS or a shell brace hits immediately;
+     the json cases further down this file are written around it. Both
+     spellings are accepted now, and the unescaped one still works, so nothing
+     that compiled before compiles differently. *)
+  check "string: \\} is a literal brace"
+    (Pipeline.process "\"\\{\\}\"") "\"{}\"";
+  check "string: an unescaped } is still a literal brace"
+    (Pipeline.process "\"a } b\"") "\"a } b\"";
+  check "string: a brace pair can be written as a pair"
+    (Pipeline.process "\"\\{\\\"id\\\":1\\}\"") "\"{\\\"id\\\":1}\"";
+  check "string: interpolation still fires beside an escaped brace"
+    (Pipeline.process "let n = 7 in \"n={show n} \\{lit\\}\"") "\"n=7 {lit}\"";
   check "char literal in match"
     (Pipeline.process
       "match 'h' with | 'h' -> \"hit\" | _ -> \"miss\"") "\"hit\"";

@@ -1096,9 +1096,28 @@ let region_parameterised = region_parameterised_names
 
    So the binding happens where the instantiation does. A reference to a
    region-polymorphic function, evaluated inside a block, allocates in that block --
-   whether or not the allocation is visible in its type. What is invisible cannot
-   escape on its own, so binding it costs nothing; what is visible now carries the
-   block's name into the caller's types, where the escape check reads it. *)
+   for every allocation region the instantiation actually produced, whether or not it
+   is visible in the result type. What is visible carries the block's name into the
+   caller's types, where the escape check reads it.
+
+   WHAT THIS DOES NOT REACH, and an earlier version of this note claimed it did: an
+   allocation region that appears NOWHERE in the binding's type is never quantified,
+   so instantiating it produces no mapping and there is nothing here to bind. It
+   settles on the default region instead. That is not an oversight -- it is the
+   conservative answer, and the level discipline is what makes it the right one. A
+   variable shared with something that outlives the call has had its level demoted and
+   is not local, so `generalize` declines it; a variable that is purely internal is
+   local but invisible, and the two are indistinguishable from the TYPE alone. Binding
+   an invisible region would be sound only for the second, and this cannot tell them
+   apart here. The note used to say "what is invisible cannot escape on its own, so
+   binding it costs nothing", which is the part that was wrong.
+
+   The cost is real and was measured (medit2, v0.1.476): a library function that
+   allocates a container per item -- Grapheme.clusters made one StrBuf per cluster --
+   is unusable on a per-frame path, because every one of those containers outlives the
+   caller's block. The fix there was to stop allocating the container, not to bind it.
+   Quantifying invisible allocation regions would need a way to see that a variable is
+   local AND unshared, which is a change to generalisation rather than to this. *)
 let bind_instantiated_alloc_regions (mapping : (int * Ast.ty) list) : unit =
   match !active_regions with
   | [] -> ()
@@ -2644,6 +2663,9 @@ let initial_env : env =
        (no echo, no line buffering), restore, and a blocking single-key
        read. read_key returns a 1-char str ("" on EOF). *)
     ("tty_raw",     mono (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit)));
+    (* v0.1.476: a separate call rather than a wider tty_raw, because giving up
+       Ctrl-C is a cost and only some TUIs want to pay it. *)
+    ("tty_no_signal_keys", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit)));
     ("tty_restore", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit)));
     ("read_key",    mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     (* v0.1.21 (mwasm dogfood): a binary file's true byte length (stat).

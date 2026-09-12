@@ -89,6 +89,33 @@ instantiation with a missing-import error rather than a wrong answer.
 | `args` ★ | `unit -> str list` | The program's own args (after the script path / binary name); consistent interp ↔ native since v0.1.12. On `-rv` there is no host to ask: the loader leaves the arguments in RAM and this reads them, so a program given none — or run by a loader that leaves the block alone — sees an empty list rather than an error |
 | `run` | `str -> int` | Run a command line via the shell, inherit stdio, return its exit code (interp + C native; v0.1.13) |
 | `stdin_byte` | `unit -> int` | One byte from stdin **without blocking**; -1 when nothing is ready. `read_key` blocks, which a device emulator polling a line-status register cannot afford (interp + C native) |
+| `tty_raw` | `unit -> unit` | Put stdin in raw mode: no echo, no line buffering, **no software flow control**. A no-op off a tty (interp + C native; v0.1.18) |
+| `tty_no_signal_keys` | `unit -> unit` | Also deliver Ctrl-C / Ctrl-Z / Ctrl-\ as bytes instead of signals — see below (interp + C native; v0.1.476) |
+| `tty_restore` | `unit -> unit` | Put back the termios the first `tty_raw` saved |
+| `read_key` | `unit -> str` | One byte, blocking; `""` at end of input |
+
+**Why the signal keys are a second call** (v0.1.476). `tty_raw` clears `IXON`
+as of that version, and that was a FIX rather than a choice: no full-screen
+program wants software flow control. With it on, Ctrl-S is XOFF and Ctrl-Q is
+XON — the line discipline consumes both and the program never sees either byte.
+The `medit` dogfood documents Ctrl-S as save and Ctrl-Q as quit; driven under a
+real pty it drew **zero** bytes after each and never wrote its file. It shipped
+that way for two months, because **a pipe has no line discipline** and every tty
+test in this project was a pipe.
+
+`ISIG` is different, and that is why it is `tty_no_signal_keys` and not part of
+`tty_raw`. Clearing it takes Ctrl-C away, so a program that calls it **must have
+a working quit key of its own**. An editor needs it — with `ISIG` set, Ctrl-Z is
+SUSP and an undo bound to it silently does nothing — and a game that quits on
+`q` does not, and should keep the escape hatch. Folding it into `tty_raw` would
+take Ctrl-C from every existing TUI to serve the one that asked.
+
+Neither is visible to a piped test, in either direction: through a pipe 0x13 and
+0x1a both arrive and everything looks finished. `scripts/tty_raw_check.sh` drives
+a Mere program through a real pty and asks whether the bytes it was sent reached
+it — including the leg that pins Ctrl-C **still interrupting** under plain
+`tty_raw`, so that trade cannot be quietly reversed later.
+
 
 ```
 file_exists "/etc/hosts"            // → true

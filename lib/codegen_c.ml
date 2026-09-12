@@ -3353,6 +3353,9 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "tty_raw" when not (user_shadows "tty_raw") ->
        (* v0.1.18 (mrog dogfood): raw terminal mode on stdin. *)
        Printf.sprintf "((void)(%s), __lang_tty_raw())" (emit_expr arg)
+     | Ast.Var "tty_no_signal_keys" when not (user_shadows "tty_no_signal_keys") ->
+       (* v0.1.476 (medit2 dogfood): Ctrl-C / Ctrl-Z / Ctrl-\\ as bytes. *)
+       Printf.sprintf "((void)(%s), __lang_tty_no_signal_keys())" (emit_expr arg)
      | Ast.Var "tty_restore" when not (user_shadows "tty_restore") ->
        Printf.sprintf "((void)(%s), __lang_tty_restore())" (emit_expr arg)
      | Ast.Var "read_key" when not (user_shadows "read_key") ->
@@ -4360,18 +4363,32 @@ let rec emit_expr (e : Ast.expr) : string =
       | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> "({ __lang_fail_impl(\"no matching arm in match\"); 0; })"
       | Ast.TyStr -> "({ __lang_fail_impl(\"no matching arm in match\"); \"\"; })"
       | Ast.TyFloat -> "({ __lang_fail_impl(\"no matching arm in match\"); 0.0; })"
-      | Ast.TyCon (("Vec" | "OwnedVec" | "StrBuf" | "Channel" | "Map" | "ListBuf"), _) ->
-        (* v0.1.51: pointer-typed containers (mere_vec_T* etc.) zero to
-           NULL — is_ptr_ty only covers recursive variants / views. *)
-        "({ __lang_fail_impl(\"no matching arm in match\"); 0; })"
-      | t when is_ptr_ty t ->
-        (* v0.1.51: pointer-represented result types (Vec / Map /
-           recursive variants / views) zero to NULL. The old code ran a
-           `Vec[R,int]` through mono_variant_name and produced
-           `(Vec___heap_int){0}`, an undeclared struct name, instead of
-           the real `mere_vec_int*`. Found by the gzip inflate probe's
-           `vec_of` (`match ... | Nil -> v` returning a Vec). *)
-        "({ __lang_fail_impl(\"no matching arm in match\"); 0; })"
+      | t when (match t with
+                | Ast.TyCon (("Vec" | "OwnedVec" | "StrBuf" | "Channel" | "Map"
+                             | "ListBuf"), _) -> true
+                | _ -> is_ptr_ty t) ->
+        (* v0.1.51: pointer-represented result types (Vec / Map / recursive
+           variants / views) zero to NULL. The old code ran a `Vec[R,int]`
+           through mono_variant_name and produced `(Vec___heap_int){0}`, an
+           undeclared struct name, instead of the real `mere_vec_int*`. Found
+           by the gzip inflate probe's `vec_of`.
+
+           v0.1.476: CAST it. A bare `0` is a null pointer constant in most
+           places, but the value of a statement expression is typed by its last
+           expression -- so `({ ...; 0; })` is an `int`, and putting that in the
+           else-arm of a conditional whose other arm is a pointer makes clang
+           warn on EVERY match over a user variant:
+
+             warning: pointer/integer type mismatch in conditional expression
+                      ('list_piece' and 'int')
+
+           Nothing is broken -- __lang_fail_impl is noreturn, so the value is
+           unreachable -- but a warning that fires on correct code on every
+           build is one nobody reads, and it stops a -Werror build dead. The
+           medit2 dogfood's emitted C carried eleven of them. *)
+        Printf.sprintf
+          "({ __lang_fail_impl(\"no matching arm in match\"); (%s)0; })"
+          (!c_type_of_fwd match_result_ty)
       | Ast.TyTuple ts ->
         Printf.sprintf "({ __lang_fail_impl(\"no matching arm in match\"); (%s){0}; })" (tuple_struct_name ts)
       | Ast.TyCon (n, args) ->
@@ -6351,6 +6368,92 @@ let native_util_names =
     "sha256_of_hex"; "hmac_sha256_hex_str"; "pbkdf2_sha256_hex";
     "base64_encode_hex"; "base64_decode_to_hex"; "random_b64"; "hex_xor" ]
 
+(* v0.1.476: the arity a native-FFI name actually has, DERIVED from the C this
+   backend emits for it rather than listed beside it.
+
+   These names are implemented by the compiler, and a user's `extern fn`
+   declaration for one was never compared against that. Get the arity wrong and
+   the program type-checks, emits, and then clang says
+
+     error: too few arguments to function call, expected 3, have 2
+
+   about a line of generated C -- a long way from the declaration that is wrong.
+
+   Derived and not curated, which is the point: the runtime is one string built
+   by native_ffi_runtime, so scanning THAT asks the same source of truth the
+   emitter uses. A table written beside it would be right the day it was written
+   and wrong after the first signature change, with nothing to say so.
+
+   ARITY ONLY. Comparing types needs a compatibility notion that does not exist
+   here: `tcp_close : int -> unit` is what every contrib declares and the
+   runtime returns `int`, so an exact match would flag correct code. Arity is
+   both robust and the thing that was actually violated. *)
+let native_ffi_arity : (string, int) Hashtbl.t = Hashtbl.create 64
+
+(* `static <ret> <name>(<params>) {` is the only shape these are written in. A
+   line that does not parse is skipped rather than guessed at: a missing entry
+   means no check, which is the situation this improves on anyway. *)
+let scan_c_signature (line : string) : (string * int) option =
+  let line = String.trim line in
+  if String.length line <= 7 || String.sub line 0 7 <> "static " then None
+  else
+    match String.index_opt line '(' with
+    | None -> None
+    | Some lp ->
+      match String.rindex_from_opt line (max 0 (lp - 1)) ' ' with
+      | None -> None
+      | Some sp ->
+        let raw = String.sub line (sp + 1) (lp - sp - 1) in
+        (* `static int *foo(` -- the stars belong to the return type. *)
+        let start = ref 0 in
+        while !start < String.length raw && raw.[!start] = '*' do incr start done;
+        let name = String.sub raw !start (String.length raw - !start) in
+        if name = "" then None
+        else
+          match String.index_from_opt line lp ')' with
+          | None -> None
+          | Some rp ->
+            let params = String.trim (String.sub line (lp + 1) (rp - lp - 1)) in
+            let n =
+              if params = "" || params = "void" then 0
+              else List.length (String.split_on_char ',' params)
+            in
+            Some (name, n)
+
+(* The check runs from the frontend, before anything decides which flags a
+   particular program sets -- so the table is built once from the runtime with
+   ALL of them on, which is the union of every signature this backend can emit.
+   A name in the table that this program will not link is harmless: the arity
+   is the same either way. *)
+let native_ffi_arity_ready = ref false
+
+(* native_ffi_runtime is defined further down (it needs the emitters above it),
+   so the query below reaches it through a forward reference, the same way
+   c_type_of does. *)
+let native_ffi_runtime_fwd_text : (unit -> string) ref = ref (fun () -> "")
+
+let build_native_ffi_arity (runtime_text : string) : unit =
+  Hashtbl.reset native_ffi_arity;
+  List.iter
+    (fun line ->
+       match scan_c_signature line with
+       | Some (name, n) ->
+         if not (Hashtbl.mem native_ffi_arity name) then
+           Hashtbl.replace native_ffi_arity name n
+       | None -> ())
+    (String.split_on_char '\n' runtime_text)
+
+(* `Some n` when this backend implements the name itself and its arity could be
+   read off the C it emits; `None` when it does not, or when the signature line
+   did not parse -- in which case there is no check, which is where this started. *)
+let native_ffi_declared_arity (name : string) : int option =
+  if not !native_ffi_arity_ready then begin
+    native_ffi_arity_ready := true;
+    build_native_ffi_arity
+      (!native_ffi_runtime_fwd_text ())
+  end;
+  Hashtbl.find_opt native_ffi_arity name
+
 let is_native_ffi name =
   List.mem name native_ffi_names
   || List.mem name native_ffi_stub_names
@@ -7371,6 +7474,10 @@ let native_ffi_runtime ~tls ~midi ~window ~audio =
       "static int bytes_from_hex_alloc(const char* hex){ int n=(int)strlen(hex)/2; int p=mem_alloc(n); __from_hex(hex, __mem + p); return p; }";
       "static char* bytes_to_hex_len(int p, int len){ return __to_hex(__mem + p, len); }" ]
 
+let () =
+  native_ffi_runtime_fwd_text :=
+    fun () -> native_ffi_runtime ~tls:true ~midi:true ~window:true ~audio:true
+
 let str_concat_helper =
   String.concat "\n"
     [ (* Byte-safe strings (v0.1.x): a Mere `str` is a `char*` pointing at
@@ -7902,9 +8009,18 @@ let str_concat_helper =
       "}";
       "";
       (* v0.1.18 (mrog dogfood): raw terminal mode + single-key input.
-         Raw = no echo, no canonical buffering; ISIG stays on (Ctrl-C
-         works). tty_restore puts back the termios saved by the first
-         tty_raw. read_key blocks for one byte; "" on EOF. *)
+         Raw = no echo, no canonical buffering, no software flow control;
+         ISIG stays on (Ctrl-C works) unless the program also calls
+         tty_no_signal_keys. tty_restore puts back the termios saved by the
+         first tty_raw. read_key blocks for one byte; "" on EOF.
+
+         v0.1.476 added IXON to the mask, which is a FIX and not a choice: no
+         full-screen program wants software flow control. With it on, Ctrl-S is
+         XOFF and Ctrl-Q is XON, the line discipline eats both, and the program
+         never sees either byte. The medit dogfood documents Ctrl-S as save and
+         Ctrl-Q as quit; driven under a real pty it drew zero bytes after each
+         and never wrote its file. It shipped that way for two months, because a
+         pipe has no line discipline and its piped tests passed throughout. *)
       "#include <termios.h>";
       "static struct termios __lang_saved_tio;";
       "static int __lang_tio_saved = 0;";
@@ -7914,7 +8030,24 @@ let str_concat_helper =
       "  if (tcgetattr(0, &tio) != 0) return 0;";
       "  if (!__lang_tio_saved) { __lang_saved_tio = tio; __lang_tio_saved = 1; }";
       "  tio.c_lflag &= ~(ICANON | ECHO);";
+      "  tio.c_iflag &= ~(IXON | IXOFF);";
       "  tio.c_cc[VMIN] = 1; tio.c_cc[VTIME] = 0;";
+      "  tcsetattr(0, TCSANOW, &tio);";
+      "  return 0;";
+      "}";
+      (* v0.1.476: the keys the terminal would turn into signals, as bytes.
+         SEPARATE from tty_raw because it is a real trade rather than a fix:
+         with ISIG cleared, Ctrl-C no longer interrupts, so a caller MUST have
+         a working quit key of its own. An editor needs this (Ctrl-Z is SUSP,
+         so undo never arrives); a game that quits on `q` does not, and keeps
+         the escape hatch. Folding it into tty_raw would take Ctrl-C away from
+         every existing TUI to serve the one that asked. *)
+      "static int __lang_tty_no_signal_keys(void) {";
+      "  if (!isatty(0)) return 0;";
+      "  struct termios tio;";
+      "  if (tcgetattr(0, &tio) != 0) return 0;";
+      "  if (!__lang_tio_saved) { __lang_saved_tio = tio; __lang_tio_saved = 1; }";
+      "  tio.c_lflag &= ~ISIG;";
       "  tcsetattr(0, TCSANOW, &tio);";
       "  return 0;";
       "}";
