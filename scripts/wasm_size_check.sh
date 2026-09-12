@@ -101,7 +101,25 @@ if [ -n "$want_opt" ] && [ "$want_opt" != "$have_opt" ]; then
   echo "                 Band failures below may be the optimizer rather than the code."
 fi
 
+# FAIL, not SKIP. The other tool guards above skip because those tools can
+# reasonably be absent; dune cannot -- anything that produced the mere.exe this
+# gate already requires was built with it. Skipping here would mean that
+# dropping `opam exec --` from the CI step turns this gate off without a word,
+# which is the failure mode it exists to prevent elsewhere.
+if ! command -v dune >/dev/null 2>&1; then
+  echo "FAIL wasm_size_check: no dune on PATH, and contrib/site/build_full.sh opens with"
+  echo "  \`dune exec mere -- install\`. In CI, run this step under \`opam exec --\`,"
+  echo "  the way pages.yml invokes the same script."
+  exit 1
+fi
+
 echo "wasm_size_check: building the site (this is the real build, not a paraphrase)"
+# build_full.sh opens with `dune exec mere -- install`, so it needs dune on
+# PATH -- which in CI means running this step under `opam exec --`, the way
+# pages.yml invokes the same script. Named here because the first CI run of
+# this gate said only "the site build failed" over a one-line `dune: not
+# found`, and a build failure has many more likely causes than that one.
+
 if ! PATH="$ROOT/_build/default/bin:$PATH" sh "$ROOT/contrib/site/build_full.sh" \
        "$ROOT/docs" "$TMP/site" >"$TMP/build.log" 2>&1; then
   echo "FAIL wasm_size_check: the site build failed"
