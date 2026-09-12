@@ -8558,6 +8558,12 @@ let region_runtime_helpers =
          before the default region is freed (a normal return), or the atexit
          hook (a program that leaves through exit() never reaches main's
          epilogue, and its region is still intact when atexit fires). *)
+      "#define __LANG_REGION_CACHE_CAP 8";
+      (* v0.1.475: how much a recycled region may hold on to. Eight regions
+         are cached per thread, so this bounds the retention at 8 * this. *)
+      "#define __LANG_REGION_KEEP_MAX (16 * 1024 * 1024)";
+      "static _Thread_local __lang_region* __lang_region_cache[__LANG_REGION_CACHE_CAP];";
+      "static _Thread_local int __lang_region_cache_n = 0;";
       "static void __lang_region_stats_report(void) {";
       "  static int __done = 0;";
       "  if (__done || !getenv(\"MERE_REGION_STATS\")) return;";
@@ -8583,6 +8589,25 @@ let region_runtime_helpers =
       "  if (__lang_region_sites_dropped)";
       "    fprintf(stderr, \"region-stats WARNING: %zu arena releases uncounted (more than %d names)\\n\",";
       "            __lang_region_sites_dropped, __LANG_REGION_SITES);";
+      (* v0.1.477: WHAT THE RECYCLED REGIONS ARE HOLDING.
+         A released region keeps its largest block so the next iteration reuses
+         the memory instead of asking the allocator for it again, and
+         __LANG_REGION_KEEP_MAX bounds how much it may keep. Neither half of
+         that is visible in peak RSS -- which is the number the gate first
+         tried, and it was wrong on both platforms for the same reason.
+         "Held but reused" and "freed and re-obtained" have the same peak;
+         they differ in what the process is SITTING ON, and only an allocator
+         that hands large frees straight back to the OS makes the second show
+         up as a smaller peak. macOS does, so the check passed there; glibc
+         reuses the block, so the same binary read flat on Linux and the gate
+         went red for a property that was never being measured.
+         This reports the thing itself: how many regions are cached and how
+         many bytes they are carrying. A function of the program. *)
+      "  size_t cached_bytes = 0;";
+      "  for (int i = 0; i < __lang_region_cache_n; i++)";
+      "    cached_bytes += __lang_region_bytes(__lang_region_cache[i]);";
+      "  fprintf(stderr, \"region-stats cache: regions=%d retained=%zu\\n\",";
+      "          __lang_region_cache_n, cached_bytes);";
       "}";
       "";
       "static void __lang_region_free(__lang_region* r) {";
@@ -8615,12 +8640,6 @@ let region_runtime_helpers =
       "   churn over a 200k-iteration run, visible in its block counters. Eight";
       "   slots cover any realistic nesting depth; deeper than that falls back";
       "   to malloc, which is correct and merely slower. */";
-      "#define __LANG_REGION_CACHE_CAP 8";
-      (* v0.1.475: how much a recycled region may hold on to. Eight regions
-         are cached per thread, so this bounds the retention at 8 * this. *)
-      "#define __LANG_REGION_KEEP_MAX (16 * 1024 * 1024)";
-      "static _Thread_local __lang_region* __lang_region_cache[__LANG_REGION_CACHE_CAP];";
-      "static _Thread_local int __lang_region_cache_n = 0;";
       "";
       "/* v0.1.301: the ACTIVE region stack. Every live block region is on";
       "   it, so a fail that longjmps out of nested `region R { }` blocks can";
