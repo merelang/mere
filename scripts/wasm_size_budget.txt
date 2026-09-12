@@ -1,0 +1,28 @@
+# scripts/wasm_size_budget.txt -- bands for the .wasm the docs site ships.
+#
+# One line per file: <name> <floor> <ceiling>, in bytes.
+# scripts/wasm_size_check.sh builds the site and fails outside the band.
+#
+# These are NOT targets. Each is the size measured on 2026-09-12, -10% / +10%.
+# The ceiling is tight enough that the 2026-07 -> 2026-09 tripling of
+# hello.wasm (5.2 KB -> 15.0 KB) would have failed here long before anyone
+# noticed it by eye. The floor exists because a demo that collapses to a stub
+# is a failure that a ceiling-only check calls a pass, forever -- the reasoning
+# is scripts/budget_check.sh's, and test/budget/BUDGETS says it at length.
+#
+# Moving a band is a decision, not maintenance: say why in the commit.
+chip8.wasm                    22742    27796
+counter.wasm                  16099    19677
+echo.wasm                     14921    18237
+fibonacci.wasm                13796    16862
+fizzbuzz.wasm                 13913    17005
+g2048.wasm                    23292    28468
+gameboy.wasm                  39689    48509
+hello.wasm                    13862    16944
+raytrace.wasm                 27108    33132
+rvconsole.wasm                23105    28241
+selfhost-compile.wasm        238671   291711
+selfhost-fmt.wasm            139968   171072
+selfhost-repl.wasm           156000   190668
+selfhost-tyck.wasm           197343   241199
+wordcount.wasm                17732    21674
