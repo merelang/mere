@@ -1,0 +1,101 @@
+# test/contrib_ctests.txt — the contrib libraries scripts/contrib_ctest.sh runs.
+#
+# One path per line. Explicit rather than a glob: a glob that skips what will
+# not compile reports green over a set that shrank, and this list exists
+# because `contrib/toml` spent the project's whole history unable to produce
+# C that compiles while its self-tests passed under the interpreter.
+#
+# What is NOT here: anything declaring `extern fn` for a symbol the compiler
+# does not emit itself (there is no linkable definition to run against), and
+# files that are module fragments rather than programs -- contrib/graphql's
+# lexer, parser and printer only parse once `ast.mere` is imported, and
+# `exec.mere` is the entry point that imports them all.
+#
+# Add a line when a library is added, and raise EXPECT in the script with it.
+contrib/argparse/argparse.mere
+contrib/async/async.mere
+contrib/bignum/bignum.mere
+contrib/codegen/codegen_wasm.mere
+contrib/csv/parser.mere
+contrib/csv/writer.mere
+contrib/db/live.mere
+contrib/encoding/decode.mere
+contrib/encoding/jis_index.mere
+contrib/encoding/jis.mere
+contrib/encoding/labels.mere
+contrib/eval/eval.mere
+contrib/feed/feed.mere
+contrib/fmt/fmt.mere
+contrib/font/font.mere
+contrib/gen/gen.mere
+contrib/graphql/ast.mere
+contrib/graphql/exec.mere
+contrib/graphql/introspection_sdl.mere
+contrib/graphql/validate.mere
+contrib/html/build.mere
+contrib/html/entities.mere
+contrib/html/tokenizer.mere
+contrib/http/cookie.mere
+contrib/http/csrf_field.mere
+contrib/http/escape.mere
+contrib/http/mount.mere
+contrib/http/multipart.mere
+contrib/http/query.mere
+contrib/http/router.mere
+contrib/http2/frame.mere
+contrib/http2/hpack_table.mere
+contrib/http2/hpack.mere
+contrib/inc/inc.mere
+contrib/json/json.mere
+contrib/kv/kv.mere
+contrib/kv/pack.mere
+contrib/mlint/mlint.mere
+contrib/option/option.mere
+contrib/ordset/ordset.mere
+contrib/orm/orm.mere
+contrib/parser/ast.mere
+contrib/parser/free_names.mere
+contrib/parser/lexer.mere
+contrib/parser/parser.mere
+contrib/path/path.mere
+contrib/prop/prop.mere
+contrib/proto/descriptor.mere
+contrib/proto/gen.mere
+contrib/proto/parse.mere
+contrib/proto/wire.mere
+contrib/raster/canvas.mere
+contrib/raster/path.mere
+contrib/regex/engine.mere
+contrib/regex/regex.mere
+contrib/schema/reflect.mere
+contrib/site/build.mere
+contrib/softfloat/add.mere
+contrib/softfloat/bits.mere
+contrib/softfloat/conv.mere
+contrib/softfloat/dec.mere
+contrib/softfloat/div.mere
+contrib/softfloat/limbs.mere
+contrib/softfloat/mul.mere
+contrib/softfloat/softfloat.mere
+contrib/softfloat/sqrt.mere
+contrib/state/cell.mere
+contrib/state/store.mere
+contrib/store/kvlog.mere
+contrib/stream/stream.mere
+contrib/test/test.mere
+contrib/time/time.mere
+contrib/toml/toml.mere
+contrib/typer/typer.mere
+contrib/unicode/gcb_table.mere
+contrib/unicode/grapheme.mere
+contrib/unicode/lb_table.mere
+contrib/unicode/linebreak.mere
+contrib/unicode/nfc_table.mere
+contrib/unicode/normalize.mere
+contrib/unicode/width_table.mere
+contrib/unicode/width.mere
+contrib/url/host.mere
+contrib/url/ipv6.mere
+contrib/url/path.mere
+contrib/url/percent.mere
+contrib/xml/xml.mere

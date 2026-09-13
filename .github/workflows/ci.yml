@@ -412,6 +412,21 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/ctest.sh
 
+      # contrib's own self-tests ran under the interpreter and nowhere else,
+      # which is how `contrib/toml` spent the project's whole history unable
+      # to produce C that compiles. Four minutes, 87 programs.
+      - name: contrib_ctest (contrib compiles and agrees with the interpreter)
+        if: ${{ !cancelled() }}
+        run: sh scripts/contrib_ctest.sh
+
+      # Q-134 pinned in both directions: an allocation visible in a function's
+      # type takes the caller's region, one that is not falls back to the
+      # default. The second is conservative and open; the first is a
+      # regression if it ever flips.
+      - name: alloc_region_pin (where an invisible allocation goes)
+        if: ${{ !cancelled() }}
+        run: sh scripts/alloc_region_pin.sh
+
       - name: range_version_check (the checked loop is the oracle for Q-108)
         if: ${{ !cancelled() }}
         run: sh scripts/range_version_check.sh
