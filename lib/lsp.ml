@@ -95,22 +95,92 @@ let read_message (ic : in_channel) : Json.t option =
    which is what turns an underline into something that points at the right
    token rather than at one character of it. *)
 
-let position line col =
-  Json.Obj [ ("line", Json.Num (float_of_int (max 0 (line - 1))));
-             ("character", Json.Num (float_of_int (max 0 (col - 1)))) ]
+(* --- columns: bytes on one side, UTF-16 units on the other ----------------
 
-let range_of_loc (loc : Loc.t) =
+   `Loc` counts BYTES from the start of a line, because bytes are what the lexer
+   advances over. The protocol counts UTF-16 code units. The two agree on ASCII
+   and on nothing else, so one kanji before the cursor puts the two counts two
+   apart and three put them six apart — far enough to land a hover on a
+   different token, which the server then answers about, correctly and about
+   the wrong thing.
+
+   Found by using this server from an editor rather than by reading the
+   specification: every test here was ASCII, where the bug does not exist.
+
+   Both directions are computed against the buffer the server is holding, which
+   is the same text the Loc came from. When there is no buffer to measure —
+   diagnostics about an imported file the editor never opened — the conversion
+   is the identity, which is exactly right for ASCII and no worse than what
+   there was before. *)
+
+let utf8_seq_len (c : char) =
+  let b = Char.code c in
+  if b < 0x80 then 1
+  (* A stray continuation byte is its own character rather than a reason to
+     loop forever: this runs on half-typed buffers. *)
+  else if b < 0xC0 then 1
+  else if b < 0xE0 then 2
+  else if b < 0xF0 then 3
+  else 4
+
+(* Everything outside the BMP is a surrogate PAIR in UTF-16, and that is exactly
+   the 4-byte UTF-8 sequences. *)
+let utf16_units (c : char) = if Char.code c >= 0xF0 then 2 else 1
+
+(* Byte offsets [start, stop) of a zero-based line, not counting its newline. *)
+let line_bounds (text : string) (line0 : int) : int * int =
+  let n = String.length text in
+  let rec start i l =
+    if l >= line0 then i
+    else if i >= n then n
+    else start (i + 1) (if text.[i] = '\n' then l + 1 else l)
+  in
+  let s = if line0 <= 0 then 0 else start 0 0 in
+  let rec fin j = if j >= n || text.[j] = '\n' then j else fin (j + 1) in
+  (s, fin s)
+
+(* The protocol's `character` -> a zero-based BYTE column on that line. *)
+let byte_col_of_char (text : string) (line0 : int) (ch : int) : int =
+  if ch <= 0 || text = "" then max 0 ch
+  else
+    let (s, e) = line_bounds text line0 in
+    let rec go i units =
+      if i >= e || units >= ch then i - s
+      else go (i + utf8_seq_len text.[i]) (units + utf16_units text.[i])
+    in
+    go s 0
+
+(* A zero-based BYTE column -> the protocol's `character`. *)
+let char_of_byte_col (text : string) (line0 : int) (bcol : int) : int =
+  if bcol <= 0 || text = "" then max 0 bcol
+  else
+    let (s, e) = line_bounds text line0 in
+    let target = min (s + bcol) e in
+    let rec go i units =
+      if i >= target then units
+      else go (i + utf8_seq_len text.[i]) (units + utf16_units text.[i])
+    in
+    go s 0
+
+(* `line` and `col` are Loc's 1-based numbers; the protocol's are 0-based. *)
+let position ?(text = "") line col =
+  let line0 = max 0 (line - 1) in
+  Json.Obj [ ("line", Json.Num (float_of_int line0));
+             ("character",
+              Json.Num (float_of_int (char_of_byte_col text line0 (max 0 (col - 1))))) ]
+
+let range_of_loc ?(text = "") (loc : Loc.t) =
   let width = max 1 loc.Loc.width in
-  Json.Obj [ ("start", position loc.Loc.line loc.Loc.col);
-             ("end", position loc.Loc.line (loc.Loc.col + width)) ]
+  Json.Obj [ ("start", position ~text loc.Loc.line loc.Loc.col);
+             ("end", position ~text loc.Loc.line (loc.Loc.col + width)) ]
 
 let severity_number = function
   | Pipeline.Error -> 1
   | Pipeline.Warning -> 2
 
-let diagnostic_json (d : Pipeline.diagnostic) =
+let diagnostic_json ?(text = "") (d : Pipeline.diagnostic) =
   Json.Obj [
-    ("range", range_of_loc d.Pipeline.d_loc);
+    ("range", range_of_loc ~text d.Pipeline.d_loc);
     ("severity", Json.Num (float_of_int (severity_number d.Pipeline.d_severity)));
     ("source", Json.Str "mere");
     ("message", Json.Str (d.Pipeline.d_kind ^ ": " ^ d.Pipeline.d_msg));
@@ -168,10 +238,11 @@ let notification meth params =
   Json.Obj [ ("jsonrpc", Json.Str "2.0"); ("method", Json.Str meth);
              ("params", params) ]
 
-let publish uri (diags : Pipeline.diagnostic list) =
+let publish ?(text = "") uri (diags : Pipeline.diagnostic list) =
   notification "textDocument/publishDiagnostics"
     (Json.Obj [ ("uri", Json.Str uri);
-                ("diagnostics", Json.List (List.map diagnostic_json diags)) ])
+                ("diagnostics",
+                 Json.List (List.map (diagnostic_json ~text) diags)) ])
 
 (* Check one document: the notifications to send, the typed tree if it
    type-checked, and the other files that were published about.
@@ -200,19 +271,33 @@ let check_document ?search_paths (previous : string list) uri text =
   in
   let mine = List.filter (fun (d : Pipeline.diagnostic) -> d.Pipeline.d_file = None) diags in
   let for_other u =
-    publish u
+    (* The other file's ranges are in ITS columns, so they need its bytes. It
+       is not open in the editor, so it is read from disk; if that fails the
+       conversion falls back to the identity rather than the notification
+       being dropped. *)
+    let other_text =
+      let path = String.sub u 7 (String.length u - 7) in
+      try
+        let ic = open_in_bin path in
+        let n = in_channel_length ic in
+        let b = really_input_string ic n in
+        close_in ic; b
+      with _ -> ""
+    in
+    publish ~text:other_text u
       (List.filter (fun (d : Pipeline.diagnostic) ->
          Option.map (fun p -> "file://" ^ p) d.Pipeline.d_file = Some u) diags)
   in
   (* Clear whatever we said about files that are no longer implicated. *)
   let cleared = List.filter (fun u -> not (List.mem u others)) previous in
-  (publish uri mine :: List.map for_other others @ List.map (fun u -> publish u []) cleared,
+  (publish ~text uri mine :: List.map for_other others @ List.map (fun u -> publish u []) cleared,
    tree, others)
 
 (* The vocabulary of semantic tokens, in the order the legend declares them —
    a token names its type by index into this list. *)
 let token_legend =
-  [ Query.Tk_function; Query.Tk_variable; Query.Tk_parameter; Query.Tk_constructor ]
+  [ Query.Tk_function; Query.Tk_variable; Query.Tk_parameter; Query.Tk_constructor;
+    Query.Tk_keyword; Query.Tk_string; Query.Tk_number; Query.Tk_comment ]
 
 let token_index kind =
   let rec go i = function
@@ -274,8 +359,17 @@ let ask state uri (params : Json.t) =
   let line = Option.value ~default:(-1) (Json.to_int_opt (Json.member "line" position)) in
   let col = Option.value ~default:(-1) (Json.to_int_opt (Json.member "character" position)) in
   match List.assoc_opt uri state.docs with
-  | Some { tree = Some prog; _ } -> Some (prog, line + 1, col + 1)
+  | Some { tree = Some prog; text; _ } ->
+    (* The request counts UTF-16 units; every Loc in the tree counts bytes. *)
+    let bcol = if col < 0 then col else byte_col_of_char text line col in
+    Some (prog, line + 1, bcol + 1)
   | _ -> None
+
+(* The buffer a document's Locs were measured against, for turning them back
+   into the protocol's columns. Empty when the document is not open, which makes
+   the conversion the identity. *)
+let doc_text state uri =
+  match List.assoc_opt uri state.docs with Some d -> d.text | None -> ""
 
 (* Hover: `Query.node_at` finds the narrowest node whose token contains the
    cursor, and the typer has already written that node's type onto it. *)
@@ -293,7 +387,7 @@ let hover state uri (params : Json.t) =
             ("contents",
              Json.Obj [ ("kind", Json.Str "markdown");
                         ("value", Json.Str ("```mere\n" ^ text ^ "\n```")) ]);
-            ("range", range_of_loc node.Ast.loc);
+            ("range", range_of_loc ~text:(doc_text state uri) node.Ast.loc);
           ]))
 
 (* Completion: every name visible at the position. The kind is what an editor
@@ -337,18 +431,38 @@ let completion state uri (params : Json.t) =
    `Query.semantic_tokens` rather than here. *)
 let semantic_tokens state uri =
   match List.assoc_opt uri state.docs with
-  | Some { tree = Some prog; _ } ->
+  | Some { tree = Some prog; text; _ } ->
+    (* Two sources, one stream. The tree says which NAMES are parameters and
+       which are functions; the lexer says which words are keywords and where
+       the strings and comments are. They are merged and sorted because the
+       encoding below is a delta from the previous token, which is only a
+       delta if the stream is in order.
+       The tree may be older than the text -- it is whatever last type-checked
+       -- while the lexical half is always current. Mixed, and better than
+       either alone: the file keeps its shape while a line is half typed. *)
     let toks =
-      Query.semantic_tokens ~prelude_decls:(Pipeline.prelude_decl_count ()) prog
+      List.stable_sort (fun (a : Query.token) (b : Query.token) ->
+        compare (a.Query.t_loc.Loc.line, a.Query.t_loc.Loc.col)
+                (b.Query.t_loc.Loc.line, b.Query.t_loc.Loc.col))
+        (Query.semantic_tokens ~prelude_decls:(Pipeline.prelude_decl_count ()) prog
+         @ Query.lexical_tokens text)
     in
     let data = ref [] in
     let prev_line = ref 0 and prev_col = ref 0 in
     List.iter (fun (t : Query.token) ->
       let line = t.Query.t_loc.Loc.line - 1 in
-      let col = t.Query.t_loc.Loc.col - 1 in
+      (* Deltas are in the protocol's columns, so each one is converted before
+         it is subtracted: converting the difference would be converting a
+         number that is not a position. *)
+      let col = char_of_byte_col text line (t.Query.t_loc.Loc.col - 1) in
       let dline = line - !prev_line in
       let dcol = if dline = 0 then col - !prev_col else col in
-      let len = max 1 t.Query.t_loc.Loc.width in
+      (* The length is in the protocol's units too, and a kanji is three bytes
+         and one unit: a byte width paints three columns of highlight for one
+         character. *)
+      let len =
+        max 1 (char_of_byte_col text line
+                 (t.Query.t_loc.Loc.col - 1 + max 1 t.Query.t_loc.Loc.width) - col) in
       data := [ dline; dcol; len; token_index t.Query.t_kind; 0 ] :: !data;
       prev_line := line;
       prev_col := col) toks;
@@ -369,7 +483,8 @@ let references state uri (params : Json.t) =
      | None -> Json.List []
      | Some (_, locs) ->
        Json.List (List.map (fun loc ->
-         Json.Obj [ ("uri", Json.Str uri); ("range", range_of_loc loc) ]) locs))
+         Json.Obj [ ("uri", Json.Str uri);
+                    ("range", range_of_loc ~text:(doc_text state uri) loc) ]) locs))
 
 (* What can be renamed: a binding this file owns. A prelude name or a builtin
    cannot be — the edit would rename the uses and leave the definition, which is
@@ -389,7 +504,7 @@ let prepare_rename state uri params =
   match renameable state uri params with
   | None -> Json.Null
   | Some (b, _) ->
-    Json.Obj [ ("range", range_of_loc b.Query.b_loc);
+    Json.Obj [ ("range", range_of_loc ~text:(doc_text state uri) b.Query.b_loc);
                ("placeholder", Json.Str b.Query.b_name) ]
 
 let rename state uri (params : Json.t) =
@@ -404,7 +519,7 @@ let rename state uri (params : Json.t) =
           Json.Obj [
             (uri,
              Json.List (List.map (fun loc ->
-               Json.Obj [ ("range", range_of_loc loc);
+               Json.Obj [ ("range", range_of_loc ~text:(doc_text state uri) loc);
                           ("newText", Json.Str new_name) ]) locs)) ]) ])
 
 (* The outline. Kinds are the protocol's numbers: 12 is Function, 13 is Variable.
@@ -416,7 +531,7 @@ let document_symbols state uri =
   | Some { tree = Some prog; _ } ->
     Json.List
       (List.map (fun (s : Query.symbol) ->
-         let r = range_of_loc s.Query.s_loc in
+         let r = range_of_loc ~text:(doc_text state uri) s.Query.s_loc in
          Json.Obj [
            ("name", Json.Str s.Query.s_name);
            ("kind", Json.Num (if s.Query.s_is_fn then 12.0 else 13.0));
@@ -477,7 +592,8 @@ let definition state uri (params : Json.t) =
              prog line col with
      | None -> Json.Null
      | Some loc ->
-       Json.Obj [ ("uri", Json.Str uri); ("range", range_of_loc loc) ])
+       Json.Obj [ ("uri", Json.Str uri);
+                  ("range", range_of_loc ~text:(doc_text state uri) loc) ])
 
 (* One message in, the messages to send back out. `exit` is signalled by the
    third component so the driver can stop without this module knowing what a

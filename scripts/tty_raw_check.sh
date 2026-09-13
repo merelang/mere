@@ -17,8 +17,15 @@
 # was sent reached it. Three keys, one per property:
 #
 #   Ctrl-S (19)  IXON cleared by tty_raw           -- a fix; nothing wants XOFF
+#   Ctrl-O (15)  IEXTEN cleared by tty_raw          -- the same bug, second letter
 #   Ctrl-Z (26)  ISIG cleared by tty_no_signal_keys -- opt-in; costs Ctrl-C
 #   Ctrl-C (3)   ISIG *kept* under tty_raw alone    -- the other side of that
+#
+# Ctrl-O was found the same way Ctrl-S was: by binding a key to it. IEXTEN
+# enables VDISCARD, which on BSD and macOS is Ctrl-O -- the discipline eats the
+# byte AND throws away the program's next output, so the symptom is "the key did
+# nothing and the screen froze". The lesson repeated exactly: the mask was
+# narrowed to the letters a bug had already been found behind.
 #
 # The third leg is the one that keeps the trade honest. If a later change folds
 # the signal keys into tty_raw, every existing TUI silently loses its escape
@@ -158,6 +165,19 @@ for want in "got 19" "got 17"; do
   fi
   checked=$((checked + 1))
 done
+
+# ---- Ctrl-O arrives under plain tty_raw ---------------------------------
+# VDISCARD. An editor that binds Ctrl-O to "open" loses the key and, worse,
+# loses the frame it draws next.
+out=$(run "15,65,66")
+if ! printf '%s' "$out" | grep -q "got 15"; then
+  echo "FAIL tty_raw_check: Ctrl-O never reached the program."
+  echo "  tty_raw has to clear IEXTEN: with it on, 0x0f is VDISCARD on BSD/macOS,"
+  echo "  the line discipline consumes it and discards the program's next output."
+  echo "  See __lang_tty_raw in codegen_c.ml."
+  fail=1
+fi
+checked=$((checked + 1))
 
 # ---- Ctrl-Z arrives once the program has asked for it --------------------
 out=$(run "26,65,66" --nosig)

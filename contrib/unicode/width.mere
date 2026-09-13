@@ -78,10 +78,14 @@ module Width {
   // A cluster is as wide as its BASE character. Everything after the base in a
   // cluster is a mark, a joiner or a continuation, and none of those advance the
   // cursor -- which is what makes "e" + U+0301 one column and 👩‍👩‍👦 two.
+  // `codepoint_or` and not `codepoint_of`: a renderer is handed whatever is in
+  // the file, and a stray byte must not take the program down. An invalid byte
+  // becomes U+FFFD, which is one column -- the same space a terminal gives the
+  // replacement glyph it draws there.
   let width_of_cluster_amb = fn (amb: int) -> fn (c: str) ->
     match utf8_chars c with
     | Nil -> 0
-    | Cons (base, _) -> of_cp_amb amb (codepoint_of base);
+    | Cons (base, _) -> of_cp_amb amb (codepoint_or base 65533);
 
   let width_of_cluster = fn (c: str) -> width_of_cluster_amb 1 c;
 

@@ -8616,9 +8616,14 @@ let () =
            (_lfilter_into / _lsi_into -- list_filter and list_sort_insert
             accumulate and reverse now, like list_map, so they survive a list
             longer than the stack)
+        + medit2 dogfood: 1 (codepoint_or -- a TOTAL decoder. `codepoint_of`
+           fails on invalid UTF-8 while `utf8_chars` is total, so the pair was
+           mismatched: any program that walked a file's characters and asked
+           what they were died on the first stray byte. An editor opens files
+           it did not write.)
         *)
      string_of_int (List.length prog.Ast.decls))
-    "86";
+    "87";
 
   (* Phase 39.A' #4: list_sort_by / list_sort prelude helpers *)
   check "list_sort_by: ascending int sort"
@@ -13183,6 +13188,44 @@ let () =
   check "lsp: a frame counts bytes, not characters"
     (Lsp.frame (Json.Str "\xe3\x81\x82"))
     "Content-Length: 5\r\n\r\n\"\xe3\x81\x82\"";
+  (* --- columns: the protocol counts UTF-16 units, Loc counts bytes ---------
+
+     These two numbers are equal for every ASCII file, which is every file the
+     tests above use, so this whole class of bug was invisible until the server
+     was driven from an editor over a line with kanji in it: the hover landed
+     six columns to the left and the server answered about that token instead,
+     with no error anywhere.
+
+     "let z = \"AAA\" ..." with A standing for a 3-byte character: character 12
+     (just past the closing quote) is byte 18. *)
+  let ja = "let z = \"\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\" ++ show (add 1 2);\n" in
+  check "lsp: a character offset becomes a byte column"
+    (string_of_int (Lsp.byte_col_of_char ja 0 12)) "18";
+  check "lsp: and back again"
+    (string_of_int (Lsp.char_of_byte_col ja 0 18)) "12";
+  (* Inside the literal, so the two counts have already diverged. *)
+  check "lsp: a column in the middle of the kanji run"
+    (string_of_int (Lsp.byte_col_of_char ja 0 10)) "12";
+  (* Astral characters are a surrogate PAIR: one character, two units. Counting
+     code points instead of UTF-16 units is off by one per emoji, and the error
+     accumulates along the line. *)
+  let emoji = "a\xf0\x9f\x8e\xb5b\n" in
+  check "lsp: an astral character is two units"
+    (string_of_int (Lsp.char_of_byte_col emoji 0 5)) "3";
+  check "lsp: and converting back lands on the right byte"
+    (string_of_int (Lsp.byte_col_of_char emoji 0 3)) "5";
+  (* A position past the end of the line clamps to the end rather than running
+     off it: a stale request asks about a line the buffer has since shortened. *)
+  check "lsp: a character past the end of the line clamps"
+    (string_of_int (Lsp.byte_col_of_char "ab\ncd\n" 0 99)) "2";
+  (* The second line, to prove the line is found rather than the first one used. *)
+  check "lsp: columns are measured on the line asked about"
+    (string_of_int (Lsp.byte_col_of_char ("x\n" ^ ja) 1 12)) "18";
+  (* With no buffer to measure -- a diagnostic about a file the editor never
+     opened -- the conversion is the identity rather than a guess. *)
+  check "lsp: with no text the conversion is the identity"
+    (string_of_int (Lsp.byte_col_of_char "" 0 7)) "7";
+
   let didopen uri text =
     Json.Obj [ ("jsonrpc", Json.Str "2.0");
                ("method", Json.Str "textDocument/didOpen");
@@ -13672,7 +13715,11 @@ let () =
            (ask_doc "file:///tmp/s.mere" text "textDocument/semanticTokens/full"))
     in
     let nums = List.map (fun v -> Option.value ~default:(-1) (Json.to_int_opt v)) raw in
-    let legend = [ "function"; "variable"; "parameter"; "enumMember" ] in
+    (* Derived, not re-typed. This list was a copy of the legend's first four
+       names, so when the server grew four more the copy silently answered "?"
+       for every one of them -- the test failed for the right reason and said
+       the wrong thing. The legend is the server's own, exactly as it sends it. *)
+    let legend = List.map Query.token_kind_name Lsp.token_legend in
     let rec go acc line col = function
       | dl :: dc :: len :: tt :: _ :: rest ->
         let line = line + dl in
@@ -13683,16 +13730,25 @@ let () =
     in
     String.concat " " (go [] 0 0 nums)
   in
+  (* The stream is TWO sources merged: the tree says which names are parameters
+     and which are functions -- a distinction no pattern over the text can make
+     -- and the lexer says where the keywords and literals are. Merged and
+     sorted by position, because the encoding is a delta from the previous
+     token and is only a delta if the stream is in order. A client that had to
+     bring its own lexer for the second half would be a client that needs to
+     know the language, which is the thing a language server exists to avoid. *)
   check "semantic tokens: a parameter is told from a function"
     (tokens_of "let twice = fn (n: int) -> n * 2;\nlet _ = print_int (twice 21);\n")
-    "0:27/1/parameter 1:8/9/function 1:19/5/function";
+    "0:0/3/keyword 0:12/2/keyword 0:27/1/parameter 0:31/1/number \
+     1:0/3/keyword 1:8/9/function 1:19/5/function 1:25/2/number";
   (* `Red` in the value position is a constructor; the `Red` in a match *pattern*
      is not tokenised, because patterns are not expressions and the walk that
      produces these follows expressions. The grammar still colours it, being
      capitalised. *)
   check "semantic tokens: a constructor is one"
     (tokens_of "type color = Red | Green;\nlet c = Red;\nlet _ = print (match c with | Red -> \"r\" | Green -> \"g\");\n")
-    "1:8/3/enumMember 2:8/5/function 2:21/1/variable";
+    "0:0/4/keyword 1:0/3/keyword 1:8/3/enumMember 2:0/3/keyword 2:8/5/function \
+     2:15/5/keyword 2:21/1/variable 2:23/4/keyword 2:37/3/string 2:52/3/string";
 
   (* `-c -g`: the emitted C carries `#line` directives back to the Mere source, so
      a debugger on the compiled program shows the program that was written. Two
