@@ -7872,11 +7872,23 @@ let () =
      let __ = map_iter m (fn k -> fn vv -> vec_push v vv) in \
      vec_fold v 0 (fn acc -> fn x -> acc + x)"
   in
+  (* v0.1.481: the dispatch is still inlined, and now it picks the closure's
+     uncurried entry when there is one. The two-step form is still emitted
+     below it -- that is the fallback for a callback whose twin cannot be
+     named, and asserting on it keeps BOTH paths in the emitted text. A test
+     that only saw the fast path would go quiet the day the fallback was
+     dropped, and a two-argument callback with no fn2 would then call through
+     a null pointer. *)
   assert_contains "map_iter: C codegen inlines closure dispatch"
     (let prog = Pipeline.parse_program map_iter_src in
      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
      Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
-    "__outer.fn(__outer.env, __m->keys[__i])";
+    "__inner.fn(__inner.env, __v)";
+  assert_contains "map_iter: and takes the uncurried entry when there is one"
+    (let prog = Pipeline.parse_program map_iter_src in
+     let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
+     Codegen_c.emit_program ~main_ty:Ast.TyInt prog)
+    "if (__outer.fn2) __outer.fn2(__outer.env, __k, __v);";
   assert_contains "map_iter: LLVM codegen emits per-(K,V) iter helper"
     (let prog = Pipeline.parse_program map_iter_src in
      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
