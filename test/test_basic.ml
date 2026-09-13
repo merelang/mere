@@ -3460,9 +3460,21 @@ let () =
     (codegen "read_key ()") "__lang_read_key";
   assert_contains "codegen C: tty_raw emits termios helper"
     (codegen "tty_raw ()") "__lang_tty_raw";
-  (* v0.1.261: by length, like print -- fputs stopped at the first NUL *)
+  (* v0.1.261: by length, like print -- fputs stopped at the first NUL.
+     v0.1.480: and through write(2) rather than stdio, because `main` sets
+     stdout line buffered and an fwrite onto an _IOLBF stream flushes at every
+     newline -- so a program that had already assembled its answer still paid
+     one syscall per line. The length is still what is passed; that is the part
+     this assertion has always been about. *)
   assert_contains "codegen C: print_no_nl writes the str by length"
-    (codegen "print_no_nl \"x\"") "fwrite(__pn, 1, __lang_str_size(__pn), stdout)";
+    (codegen "print_no_nl \"x\"") "__lang_write_all(1, __pn, __lang_str_size(__pn))";
+  assert_contains "codegen C: the whole-answer write loops on a short write"
+    (codegen "print_no_nl \"x\"") "if (w > 0) { p += (size_t)w; n -= (size_t)w; continue; }";
+  (* The flush is the ordering guarantee: `print` goes through stdio and these
+     bytes do not, and they share fd 1. Without it a line printed earlier can
+     arrive later. *)
+  assert_contains "codegen C: the whole-answer write flushes stdio first"
+    (codegen "print_no_nl \"x\"") "fflush(stdout);";
   assert_contains "codegen C: random_int emits __lang_random_int"
     (codegen "random_int 4") "__lang_random_int";
   assert_contains "codegen C: file_size emits __lang_file_size"
@@ -6377,9 +6389,14 @@ let () =
         let _ = write_bytes p (bytes_of_hex \"00ff0041\") in\n\
         hex_of_bytes (read_bytes p)")
     "\"00ff0041\"";
+  (* v0.1.480: the same property, now through write(2). What matters here is
+     unchanged and is the reason the test exists: the LENGTH crosses the
+     boundary, so a zero byte in the middle of a `bytes` does not end the
+     output the way a string print would. *)
   check "bytes: print_bytes is emitted as a length-carrying write, not a string print"
     (let c = codegen "let _ = print_bytes (bytes_of_hex \"4100\");" in
-     string_of_bool (contains c "fwrite(__pb->data" && not (contains c "fputs(__lang_bytes")))
+     string_of_bool (contains c "__lang_write_all(1, (const char*)__pb->data, (size_t)__pb->len)"
+                     && not (contains c "fputs(__lang_bytes")))
     "true";
   check "bytes: the Wasm backend asks the host for a pointer and a length"
     (let prog = Pipeline.parse_program "let _ = print_bytes (bytes_of_hex \"4100\");\n()" in
