@@ -1,0 +1,41 @@
+// A local `let` bound to a polymorphic VALUE, used at one concrete type.
+//
+// The typer generalises `init` to `(str * 'a list)`; only the fold below says
+// what `'a` is. The compiled backends default a residual type variable to int,
+// so before v0.1.478 this emitted a `tuple_str_list_int` and handed it to a
+// function expecting `tuple_str_list_tuple_str_tv` -- the emitted C did not
+// compile at all.
+//
+// It is a VALUE and not a function on purpose: the single-use specialisation
+// that fixes the function case looked for uses whose type is a concrete ARROW,
+// and a tuple is not one, so the value case fell through to the defaulting and
+// nothing noticed. `contrib/toml` is written this way and had never been built
+// on a compiled backend; its self-tests run under the interpreter, which has no
+// such type to get wrong.
+
+type tv = TI of int | TS of str;
+
+let step = fn (acc: (str * (str * tv) list)) -> fn (x: str) ->
+  (x, Cons ((x, TI (str_len x)), snd acc));
+
+let go = fn (lines: str list) ->
+  let init = ("", Nil) in
+  let final = list_fold lines init step in
+  (fst final, list_len (snd final));
+
+let r = go (Cons ("aa", Cons ("bbb", Nil)));
+
+// The same shape again, with the element type a plain str rather than a pair,
+// so a fix that happened to work for one container type is not mistaken for a
+// general one.
+let step2 = fn (acc: (int * str list)) -> fn (x: str) ->
+  (fst acc + str_len x, Cons (x, snd acc));
+
+let go2 = fn (lines: str list) ->
+  let init2 = (0, Nil) in
+  let f2 = list_fold lines init2 step2 in
+  (fst f2, list_len (snd f2));
+
+let r2 = go2 (Cons ("xy", Cons ("z", Nil)));
+
+print (fst r ++ " " ++ show (snd r) ++ " " ++ show (fst r2) ++ " " ++ show (snd r2))

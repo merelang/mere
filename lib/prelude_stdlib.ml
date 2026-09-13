@@ -386,6 +386,42 @@ let codepoint_of = fn (s: str) ->
         fail "codepoint_of: expected a single-codepoint str"
       else cp;
 
+// v0.1.478: the TOTAL one. `codepoint_of` fails on anything that is not
+// exactly one well-formed code point, which is right for a decoder and wrong
+// for a RENDERER -- and `utf8_chars` is already total, handing back an invalid
+// byte as a one-byte piece, so the pair was mismatched. Anything that draws
+// text meets a file with a stray byte in it eventually; the medit2 dogfood
+// found this by opening one and dying with
+// `fail: codepoint_of: expected a single-codepoint str`.
+//
+// A `try_or` around `codepoint_of` was the obvious alternative and was
+// measured: 24x the user time (0.01 s to 0.24 s over 1.6M decodes), because it
+// sets up a handler per character on the per-frame path. The arithmetic below
+// costs nothing and says the same thing.
+let codepoint_or = fn (s: str) -> fn (d: int) ->
+  let n = str_len s in
+  if n == 0 then d
+  else
+    let b0 = ord (char_at s 0) in
+    let span = _cp_span b0 in
+    if span != n then d
+    else
+      let cp =
+        if span == 1 then b0
+        else if span == 2 then bit_or (bit_shl (bit_and b0 31) 6) (_cp_cont s 1)
+        else if span == 3 then
+          bit_or (bit_or (bit_shl (bit_and b0 15) 12) (bit_shl (_cp_cont s 1) 6))
+                 (_cp_cont s 2)
+        else
+          bit_or (bit_or (bit_shl (bit_and b0 7) 18) (bit_shl (_cp_cont s 1) 12))
+                 (bit_or (bit_shl (_cp_cont s 2) 6) (_cp_cont s 3)) in
+      let shortest =
+        if span == 1 then cp < 128
+        else if span == 2 then cp >= 128
+        else if span == 3 then cp >= 2048
+        else cp >= 65536 in
+      if _cp_bad cp || not shortest then d else cp;
+
 // `let rec` like its neighbours, not for the recursion but because the decl
 // loops that tests keep miniature copies of bind Top_let_rec and Top_let
 // separately, and a plain `let` here that reaches back to `let rec utf8_at`

@@ -1,0 +1,31 @@
+// contrib/toml, built and run on the compiled backend.
+//
+// The library's own self-tests run under the interpreter, and for as long as
+// that was the only place they ran, `mere -c contrib/toml/toml.mere` did not
+// produce C that compiles -- for every version of the compiler there has ever
+// been. `let init = ("", Nil)` in `parse_toml` was emitted with the empty list
+// defaulted to `int` and handed to a fold that wanted a list of pairs. The
+// interpreter has no such type to get wrong, so nothing said a word.
+//
+// This is here rather than in contrib so the DEFAULT ctest set covers it: a
+// gate that has to be remembered is a gate that stops being run.
+
+import "../../contrib/toml/toml.mere";
+
+let doc = Toml.parse_toml
+  "title = \"medit2\"\ntab = 4\nwide = true\n\n[keys]\nsave = \"C-s\"\n";
+
+let show_val = fn (v: toml_value) ->
+  match v with
+  | TInt (n) -> "int:" ++ show n
+  | TStr (s) -> "str:" ++ s
+  | TBool (b) -> "bool:" ++ (if b then "true" else "false")
+  | TArr (_) -> "arr";
+
+// A value of each kind, and one from inside a section -- the section path is
+// what makes the accumulator polymorphic in the first place.
+print (show_val (Toml.get doc "title") ++ " "
+    ++ show_val (Toml.get doc "tab") ++ " "
+    ++ show_val (Toml.get doc "wide") ++ " "
+    ++ show_val (Toml.get doc "keys.save") ++ " "
+    ++ (if Toml.has doc "nope" then "?" else "absent"))

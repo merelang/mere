@@ -120,7 +120,13 @@ let is_ident_cont c = is_alpha c || is_digit c
 (* `?file` stamps every position this produces with the file it came from. Only
    an `import` passes it: for the source being compiled, "no file" already means
    the right thing to everything that reports a position. *)
-let rec tokenize ?file s =
+(* `comments`, when given, collects each comment's location and width.
+   Comments are not tokens -- nothing downstream of the lexer wants them -- so
+   they are handed out through a ref rather than by widening the return type,
+   which every caller of `tokenize` would otherwise have to change. The one
+   consumer is semantic highlighting, which needs to colour the thing the
+   compiler throws away. *)
+let rec tokenize ?file ?comments s =
   let len = String.length s in
   let line = ref 1 in
   let col = ref 1 in
@@ -144,6 +150,9 @@ let rec tokenize ?file s =
           if j >= len || s.[j] = '\n' then j else skip (j + 1)
         in
         let j = skip (i + 2) in
+        (match comments with
+         | Some acc -> acc := with_width pos (j - i) :: !acc
+         | None -> ());
         advance (j - i);
         aux j acc
       | '.' when i + 2 < len && s.[i + 1] = '.' && s.[i + 2] = '.' ->
