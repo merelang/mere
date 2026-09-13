@@ -4,6 +4,56 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.482 — 2026-09-14
+
+_And the lambda written at the call site._
+
+_**An anonymous closure gets an uncurried twin too.** v0.1.481 gave named fns
+and their values an `fn2`, which left `vec_sort v (fn a -> fn b -> a - b)`
+paying an environment per comparison: an anonymous closure had no `__direct`
+twin to point at. It has one now, and the generic call path reaches it through
+a dictionary field as well, so a trait method is no longer the expensive
+spelling of the same thing._
+
+_Every row of the table this arc started from is zero:_
+
+| spelling | before | after |
+|---|---|---|
+| `f a b`, f a named top-level fn | 0 | 0 |
+| `f a b`, f taken as a PARAMETER | 24 B/call | **0** |
+| a trait method, `cmp a b` | 24 B/call | **0** |
+| `vec_sort v (fn a -> fn b -> …)` | 333.5 B/elem | **0** |
+| `vec_sort v cmp` | 333.5 B/elem | **0** |
+| `vec_fold`, `map_iter` | 24 B/call | **0** |
+
+_The condition for peeling is the one `peel_lifted_direct` already used, and it
+is not a detail: the body must be IMMEDIATELY another `fn`. `fn a -> { print a;
+fn b -> … }` does work when it takes its first argument, a program can see
+whether that happened, and it keeps the two-step path. The cost of the twin is
+that a two-argument lambda's body is emitted twice._
+
+_The generic path now also accepts a head that is a FIELD rather than a name.
+A name can be something the arms above call directly with no closure anywhere —
+that is what broke the first version of this guard — but a field read is
+already a value, and it is how a trait method arrives._
+
+_**`scripts/closure_alloc_pin.sh`** pins both directions, and the floor is the
+one that matters: a partial application must still allocate. A gate that only
+checked that saturated calls are free would stay green the day the two-step
+fallback was deleted, and a callback with no `fn2` would then call through a
+null pointer. It was poisoned before being believed — with `fn2` disabled it
+reports 5,034,136 bytes and fails; with it, 8,224 and passes._
+
+_New parity program `closure_fn2_order.mere` holds the three things a program
+can see across all four backends: partial application still returns a closure,
+work between the parameters still happens before the second argument is
+evaluated, and a comparator is called the same number of times in the same
+order._
+
+_2748 tests, parity 178 + 18, ctest 18, contrib 79 of 87._
+
+---
+
 ## v0.1.481 — 2026-09-14
 
 _The uncurried twin was already in the file; the value did not carry it._

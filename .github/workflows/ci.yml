@@ -427,6 +427,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/alloc_region_pin.sh
 
+      # v0.1.481-482. Two bounds, and the floor is the one that matters: a gate
+      # that only checked that saturated calls are free would stay green on the
+      # day the two-step fallback was deleted, and a callback with no fn2 would
+      # then call through a null pointer. Measured rather than grepped because
+      # v0.1.324 records a fix to this same cost that built, kept every gate
+      # green, and moved the allocation by zero bytes.
+      - name: closure_alloc_pin (the uncurried entry, both directions)
+        if: ${{ !cancelled() }}
+        run: sh scripts/closure_alloc_pin.sh
+
       - name: range_version_check (the checked loop is the oracle for Q-108)
         if: ${{ !cancelled() }}
         run: sh scripts/range_version_check.sh

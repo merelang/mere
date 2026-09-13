@@ -1,0 +1,55 @@
+// THE UNCURRIED ENTRY MUST NOT CHANGE WHEN THINGS HAPPEN (v0.1.481-482).
+//
+// A closure whose return type is an arrow carries `fn2`, a second entry that
+// takes both arguments at once, so a saturated call does not build the
+// intermediate environment. That is an allocation change and should be an
+// allocation change ONLY. Three things a program can see, and this file prints
+// all of them:
+//
+//   1. PARTIAL APPLICATION still exists. `fn2` is for two arguments at once;
+//      applying one has to keep working and keep returning a closure.
+//   2. WORK BETWEEN THE PARAMETERS still happens where it did. A lambda whose
+//      body is not immediately another `fn` gets no `fn2`, because taking its
+//      first argument does something observable -- and the second argument
+//      must still be evaluated AFTER that.
+//   3. A COMPARATOR IS CALLED THE SAME NUMBER OF TIMES, IN THE SAME ORDER.
+//      test/parity/vec_sort_stable.mere counts them for a named comparator;
+//      this adds a lambda, which reaches `fn2` by a different route.
+
+// --- 1. partial application ---------------------------------------------
+let add = fn (a: int) -> fn (b: int) -> a + b;
+let add5 = add 5;
+let _ = print_int (add5 3);
+let _ = print_int (add 5 3);
+
+// a function taken as a PARAMETER: the caller cannot see which fn arrives,
+// which is the shape that used to allocate on every call.
+let apply2 = fn (f: int -> int -> int) -> fn (x: int) -> fn (y: int) -> f x y;
+let _ = print_int (apply2 add 20 3);
+let _ = print_int (apply2 (fn (p: int) -> fn (q: int) -> p * q) 20 3);
+
+// --- 2. work between the parameters --------------------------------------
+// The body is a BLOCK, not immediately another `fn`, so this one keeps the
+// two-step path. `mid` has to print before `arg`.
+let noisy = fn (a: int) -> { print "mid"; fn (b: int) -> a + b };
+let loud = fn (n: int) -> { print "arg"; n };
+let _ = print_int (noisy 1 (loud 2));
+
+// --- 3. a comparator, as a lambda ----------------------------------------
+let v = vec_new ();
+let _ = vec_push v 5;
+let _ = vec_push v 1;
+let _ = vec_push v 4;
+let _ = vec_push v 1;
+let _ = vec_push v 3;
+let calls = vec_new ();
+let _ = vec_push calls 0;
+let _ = vec_sort v (fn (a: int) -> fn (b: int) ->
+  { vec_set calls 0 (vec_get calls 0 + 1); a - b });
+let _ = print_int (vec_get v 0);
+let _ = print_int (vec_get v 4);
+let _ = print_int (vec_get calls 0);
+
+// --- 4. fold and iterate with two-argument callbacks ----------------------
+let _ = print_int (vec_fold v 0 (fn (acc: int) -> fn (x: int) -> acc * 10 + x));
+let _ = print_int (vec_fold v 100 add);
