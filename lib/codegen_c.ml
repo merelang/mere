@@ -842,6 +842,13 @@ let app_head_user_bound_c (x : Ast.expr) : bool =
   | Ast.Var n -> user_shadows n
   | _ -> false
 
+(* Does this anonymous closure get an `fn2`? The construction site has to
+   answer the same question as the drain that emits it, so both ask here. *)
+let anon_has_fn2 (return_ty : Ast.ty) (body : Ast.expr) : bool =
+  match body.Ast.node, Ast.walk return_ty with
+  | Ast.Fun _, Ast.TyArrow _ -> true
+  | _ -> false
+
 (* Fresh names for anonymous closures + their env structs. *)
 let anon_closure_counter = ref 0
 let fresh_anon_names () =
@@ -2552,9 +2559,16 @@ let rec emit_expr (e : Ast.expr) : string =
       ce_host = !current_host_fn;
     } :: !pending_closures;
     let cstruct = closure_struct_name param_ty return_ty in
+    (* v0.1.482: and its uncurried entry, when the lambda takes two arguments
+       with nothing in between. The drain below asks `anon_has_fn2` about the
+       same ce, so the two cannot disagree about whether the symbol exists. *)
+    let fn2_init =
+      if anon_has_fn2 return_ty fn_body
+      then Printf.sprintf ", .fn2 = %s2" adapter_name else ""
+    in
     if captures = [] then
       (* No env needed — pass NULL. *)
-      Printf.sprintf "((%s){.env = NULL, .fn = %s})" cstruct adapter_name
+      Printf.sprintf "((%s){.env = NULL, .fn = %s%s})" cstruct adapter_name fn2_init
     else
       let inits =
         String.concat " "
@@ -2564,8 +2578,8 @@ let rec emit_expr (e : Ast.expr) : string =
                 node = Ast.Var n })) captures)
       in
       Printf.sprintf
-        "({ %s* __env = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); __env->__r = __lang_current_region; __env->__copy = __mcopy_env_%s; %s (%s){.env = __env, .fn = %s}; })"
-        env_name env_name env_name env_name inits cstruct adapter_name
+        "({ %s* __env = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); __env->__r = __lang_current_region; __env->__copy = __mcopy_env_%s; %s (%s){.env = __env, .fn = %s%s}; })"
+        env_name env_name env_name env_name inits cstruct adapter_name fn2_init
   | Ast.App (f, arg) ->
     (* Phase 32.6 (C1 FFI multi-arg): if the head of a curried App chain is an
        extern fn, collect all arguments and convert to a direct C call. 1-arg
@@ -2770,6 +2784,13 @@ let rec emit_expr (e : Ast.expr) : string =
                 (List.mem_assoc n !current_var_types
                  || List.mem_assoc n !current_env_subst)
                 && not (Hashtbl.mem inner_lifts n)
+              (* v0.1.482: a head that is not a NAME is already a value
+                 expression -- a trait method read out of its dictionary
+                 (`Field_get`), a closure returned by a call. Only a name can
+                 be something the arms above would have called directly
+                 without building a closure at all, which is the case that has
+                 to stay out. *)
+              | Ast.Field_get _ -> true
               | _ -> false) ->
            (match g.Ast.ty with
             | Some t ->
@@ -6425,6 +6446,63 @@ let emit_closure_adapter (ce : closure_emission) : string =
        probe, whose innermost `fn (index: int) -> ...` becomes a closure. *)
     (c_type_of ce.ce_param_ty) (c_safe_name ce.ce_param)
     env_unpack body_c
+
+(* v0.1.482: the uncurried twin of an ANONYMOUS closure.
+   v0.1.481 gave named fns and their values an `fn2`, which left the lambda
+   written at the call site -- `vec_sort v (fn a -> fn b -> a - b)` -- still
+   paying an environment per comparison, because an anonymous closure has no
+   __direct twin to point at. This emits one.
+   The condition is the same one peel_lifted_direct uses, and it is not a
+   detail: the body must be IMMEDIATELY another `fn`. `fn a -> { print a;
+   fn b -> ... }` does work when it takes its first argument, and a program
+   can see whether that happened, so it keeps the two-step path.
+   The body is emitted a second time here (once inside the inner adapter,
+   once inside this), which is the cost: a two-argument lambda's body appears
+   twice in the C. *)
+let emit_closure_adapter_fn2 (ce : closure_emission) : (string * string) option =
+  match ce.ce_body.Ast.node, Ast.walk ce.ce_return_ty with
+  | Ast.Fun (p2, _, inner), Ast.TyArrow (q, s2) ->
+    let q = Ast.walk q and s2 = Ast.walk s2 in
+    set_inner_lifts_for_host ce.ce_host;
+    let env_subst =
+      List.map (fun (n, _) -> (n, "(__env_self->" ^ c_safe_name n ^ ")"))
+        ce.ce_env_fields
+    in
+    let prev = !current_env_subst in
+    current_env_subst := env_subst;
+    let var_bindings =
+      ce.ce_env_fields @ [(ce.ce_param, ce.ce_param_ty); (p2, q)]
+    in
+    let prev_caps = !captured_regions in
+    let prev_rps = !current_region_params in
+    captured_regions := regions_of_captures ce.ce_env_fields @ prev_caps;
+    current_region_params := [];
+    let body_c =
+      Fun.protect ~finally:(fun () ->
+          captured_regions := prev_caps; current_region_params := prev_rps) (fun () ->
+        with_var_types var_bindings (fun () ->
+          with_expected_ty s2 (fun () -> emit_expr inner)))
+    in
+    current_env_subst := prev;
+    let env_unpack =
+      if ce.ce_env_fields = [] then "(void)__env_self_void;"
+      else
+        Printf.sprintf "%s* __env_self = (%s*)__env_self_void;"
+          ce.ce_env_name ce.ce_env_name
+    in
+    let name = ce.ce_adapter_name ^ "2" in
+    Some
+      (Printf.sprintf "static %s %s(void*, %s, %s);"
+         (c_type_of s2) name (c_type_of ce.ce_param_ty) (c_type_of q),
+       Printf.sprintf
+         "static %s %s(void* __env_self_void, %s %s, %s %s) {\n  \
+            %s\n  \
+            return %s;\n}"
+         (c_type_of s2) name
+         (c_type_of ce.ce_param_ty) (c_safe_name ce.ce_param)
+         (c_type_of q) (c_safe_name p2)
+         env_unpack body_c)
+  | _ -> None
 
 (* String-concat runtime helper: allocates |a| + |b| + 1 bytes from the
    default region and concatenates. Reclaimed in bulk when main exits. *)
@@ -12351,7 +12429,15 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
            closure_env_copies := (ce.ce_env_name, ce.ce_env_fields) :: !closure_env_copies);
         closure_adapter_forward_decls :=
           emit_closure_adapter_forward_decl ce :: !closure_adapter_forward_decls;
-        closure_adapters := emit_closure_adapter ce :: !closure_adapters)
+        closure_adapters := emit_closure_adapter ce :: !closure_adapters;
+        (* v0.1.482: and the uncurried twin, which may itself queue more
+           closures (a lambda nested inside the body is emitted a second
+           time) -- the drain below picks those up. *)
+        (match emit_closure_adapter_fn2 ce with
+         | Some (decl, def) ->
+           closure_adapter_forward_decls := decl :: !closure_adapter_forward_decls;
+           closure_adapters := def :: !closure_adapters
+         | None -> ()))
         (List.rev queue);
       drain ()
     end
