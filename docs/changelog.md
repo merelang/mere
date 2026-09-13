@@ -4,6 +4,60 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.481 — 2026-09-14
+
+_The uncurried twin was already in the file; the value did not carry it._
+
+_**A closure whose return type is itself an arrow now carries `fn2`**, an entry
+point taking both arguments at once. Applying a curried closure to two
+arguments used to build the intermediate closure's environment just to pass the
+second one: 24 bytes and about 13 ns, on every spelling that abstracts over the
+function. On a 200,000-point sort that was 1,855,936 environments and 60.4% of
+everything the program allocated._
+
+_What the search turned up is that **half the fix was already emitted**. A named
+top-level fn gets a `__direct` twin, and for the sort in question
+`mu_cmp__direct(P, P)` and `mu_cmp_as_value` were in the same file — the value
+simply did not point at the twin. Same shape as Q-066 (v0.1.325), where the
+twin had been emitted for years and the call site looked it up under a name it
+was never keyed by._
+
+| | before | after |
+|---|---|---|
+| `vec_sort v cmp`, n = 100,000 | 33,349,392 B | **0** |
+| a function taken as a parameter, 1e6 calls | 24,000,000 B | **0** |
+| that sort as a judge problem: allocation | 134.8 MB | **39.2 MB** |
+| …peak RSS | 140.6 MB | **45.1 MB** |
+
+_`fn2` is NULL wherever a twin cannot be named — a polymorphic callee, a twin
+that takes leading region parameters, an anonymous lambda (which has no twin at
+all yet) — and the two-step path is still emitted right below it. That is the
+fallback, and both codegen assertions were written to keep BOTH paths in the
+text: a test that only saw the fast path would go quiet the day the fallback
+was dropped._
+
+_**Two things had to be narrowed after they broke something.** The first guard
+checked only the TYPE of the call's head, so an inner-lifted fn — which the
+arm below calls directly, with no closure anywhere — was turned into a compound
+literal of a closure typedef the program had never needed and therefore never
+emitted. The C did not compile. `scripts/parity.sh` caught it, by failing to
+BUILD rather than by answering wrong, which is the cheaper of the two ways to
+find out. The head must be a local holding a closure._
+
+_The second is evaluation order. A curried closure with no `fn2` may do work
+when it takes its first argument, and the program can see the order, so the
+partial application still happens before the second argument is evaluated. The
+emitted shape is awkward on purpose: the inner closure is declared without
+evaluating the call (`__typeof__`), assigned only on the slow path, and the
+second argument appears once. `fn2` exists only for a callee that does nothing
+between its two parameters, so skipping the step there is unobservable._
+
+_Only arrow-returning closure structs grow, by one pointer: `unit -> unit`
+(spawn's) and `str -> unit` (a Logger field) are untouched. 2748 tests, parity
+177 + 18, ctest 18._
+
+---
+
 ## v0.1.480 — 2026-09-14
 
 _The output was already assembled, and building it bought nothing._

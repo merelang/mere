@@ -2736,10 +2736,74 @@ let rec emit_expr (e : Ast.expr) : string =
        three ordinary call shapes are lifted out here so the general guard
        has somewhere to send a call it must not let the builtin arms see. *)
     let emit_closure_call () =
-       (* Closure dispatch via the closure value's fn pointer + env. *)
-       Printf.sprintf
-         "({ __auto_type __c = %s; __c.fn(__c.env, %s); })"
-         (emit_expr f) (emit_expr arg)
+       (* v0.1.481: a SATURATED two-argument call on a closure VALUE goes
+          through the closure's uncurried entry when it has one. This is the
+          arm that user code lands on once the callee stops being a name the
+          call site can see -- a function taken as a parameter, a trait method
+          read out of its dictionary -- and it was 24 bytes and ~13 ns per
+          call, because passing the second argument meant building the
+          intermediate closure's environment first.
+          The temporaries are not decoration: C does not order argument
+          evaluation and Mere promises left to right (v0.1.450 fixed the same
+          thing for operators). Both paths evaluate a0 then a1, so switching
+          between them cannot reorder a program's effects.
+          `fn2` NULL keeps the two-step form, which is what a partial
+          application, a polymorphic callee, or a region-parameterised twin
+          still needs. *)
+       let two_arg_head =
+         match f.Ast.node with
+         (* The head has to be a LOCAL holding a closure -- a parameter, a
+            let binding, a captured name. Anything else is dispatched by the
+            arms above to something that is not a closure call at all, and
+            emitting `emit_expr g` here would materialise a closure value the
+            program never asked for. That is not hypothetical: the first
+            version of this guard only checked the TYPE, and an inner-lifted
+            fn (which the arm below calls directly, with no closure) was
+            turned into a compound literal of a closure typedef that the
+            program had never needed and therefore never emitted. The C did
+            not compile, and parity caught it -- `capture_after_call` and
+            `graphql_stack_portable`, both by failing to build rather than by
+            answering wrong. *)
+         | Ast.App (g, a) when
+             (match g.Ast.node with
+              | Ast.Var n ->
+                (List.mem_assoc n !current_var_types
+                 || List.mem_assoc n !current_env_subst)
+                && not (Hashtbl.mem inner_lifts n)
+              | _ -> false) ->
+           (match g.Ast.ty with
+            | Some t ->
+              (match Ast.walk t with
+               | Ast.TyArrow (_, r) ->
+                 (match Ast.walk r with Ast.TyArrow _ -> Some (g, a) | _ -> None)
+               | _ -> None)
+            | None -> None)
+         | _ -> None
+       in
+       (match two_arg_head with
+        | Some (g, a) ->
+          (* The partial application happens BEFORE the second argument is
+             evaluated, exactly as it did without this path. A curried
+             closure with no `fn2` may do work when it takes its first
+             argument, and a program can see the order; `fn2` exists only for
+             a callee that does nothing between its two parameters, so
+             skipping the step there is unobservable. Hence the awkward
+             shape: __i2 is declared unconditionally (its type is named
+             without evaluating the call) and assigned only on the slow path,
+             so the second argument is emitted ONCE and still evaluated in
+             the right place. *)
+          Printf.sprintf
+            "({ __auto_type __c2 = %s; __auto_type __a0 = %s; \
+             __typeof__(__c2.fn(__c2.env, __a0)) __i2; \
+             if (!__c2.fn2) __i2 = __c2.fn(__c2.env, __a0); \
+             __auto_type __a1 = %s; \
+             __c2.fn2 ? __c2.fn2(__c2.env, __a0, __a1) : __i2.fn(__i2.env, __a1); })"
+            (emit_expr g) (emit_expr a) (emit_expr arg)
+        | None ->
+          (* Closure dispatch via the closure value's fn pointer + env. *)
+          Printf.sprintf
+            "({ __auto_type __c = %s; __c.fn(__c.env, %s); })"
+            (emit_expr f) (emit_expr arg))
     in
     let emit_inner_lift_call name =
        (* Defunctionalized direct call (Phase 4.8).
@@ -3823,8 +3887,11 @@ let rec emit_expr (e : Ast.expr) : string =
          "({ __auto_type __vc = %s; __auto_type __acc = %s; \
           __auto_type __outer = %s; \
           for (int __i = 0; __i < __vc->len; __i++) { \
-            __auto_type __inner = __outer.fn(__outer.env, __acc); \
-            __acc = __inner.fn(__inner.env, mere_vec_%s_get(__vc, __i)); \
+            __auto_type __e = mere_vec_%s_get(__vc, __i); \
+            __acc = __outer.fn2 \
+              ? __outer.fn2(__outer.env, __acc, __e) \
+              : ({ __auto_type __inner = __outer.fn(__outer.env, __acc); \
+                   __inner.fn(__inner.env, __e); }); \
           } __acc; })"
          (emit_expr vec_e) (emit_expr acc_e) (emit_expr arg) elem_tag
      | Ast.App ({ node = Ast.App ({ node = Ast.Var "__vec_set_unchecked"; _ }, vec_e); _ }, idx_e) ->
@@ -3887,12 +3954,16 @@ let rec emit_expr (e : Ast.expr) : string =
           it -- a comparator may have side effects -- which is what
           test/parity/vec_sort_stable.mere pins by counting the calls.
 
-          The per-comparison cost that remains is the curried application:
-          cmp.fn(env, a) builds the inner closure's environment in the region.
-          n² of those was what made a 40k sort read 6.7 GB; n log n of them is
-          the same allocation, at a rate that stops being the story. Removing
-          it needs the closure to carry an uncurried entry (the value-level
-          twin of the __direct fns), which is its own change.
+          The per-comparison cost USED to be the curried application:
+          cmp.fn(env, a) built the inner closure's environment in the region.
+          n² of those was what made a 40k sort read 6.7 GB; n log n of them was
+          the same allocation at a rate that stopped being the story, and
+          v0.1.481 removed it: the closure carries `fn2`, the value-level twin
+          of the __direct fns, and a comparator that has one is called with
+          both elements at once. `fn2` is NULL for a comparator whose twin
+          cannot be named, and the two-step form below is still what runs then
+          -- so the COMPARISON SEQUENCE is the same either way, which is what
+          test/parity/vec_sort_stable.mere counts.
 
           The scratch buffer is malloc/free rather than region: it is a
           temporary the program cannot observe, and a region alloc would
@@ -3915,8 +3986,11 @@ let rec emit_expr (e : Ast.expr) : string =
                   if (__i >= __mid) __right = 1; \
                   else if (__j >= __hi) __right = 0; \
                   else { \
-                    __auto_type __inner = __cmp.fn(__cmp.env, __src[__j]); \
-                    __right = (__inner.fn(__inner.env, __src[__i]) < 0); \
+                    __auto_type __x = __src[__j]; __auto_type __y = __src[__i]; \
+                    __right = ((__cmp.fn2 \
+                      ? __cmp.fn2(__cmp.env, __x, __y) \
+                      : ({ __auto_type __inner = __cmp.fn(__cmp.env, __x); \
+                           __inner.fn(__inner.env, __y); })) < 0); \
                   } \
                   if (__right) __dst[__k] = __src[__j++]; \
                   else __dst[__k] = __src[__i++]; \
@@ -4138,8 +4212,10 @@ let rec emit_expr (e : Ast.expr) : string =
          "({ __auto_type __m = %s; __auto_type __outer = %s; \
           for (int __i = 0; __i < __m->len; __i++) { \
             if (__m->dead[__i]) continue; \
-            __auto_type __inner = __outer.fn(__outer.env, __m->keys[__i]); \
-            __inner.fn(__inner.env, __m->values[__i]); \
+            __auto_type __k = __m->keys[__i]; __auto_type __v = __m->values[__i]; \
+            if (__outer.fn2) __outer.fn2(__outer.env, __k, __v); \
+            else { __auto_type __inner = __outer.fn(__outer.env, __k); \
+                   __inner.fn(__inner.env, __v); } \
           } 0; })"
          (emit_expr m_e) (emit_expr arg)
      | Ast.Var "strbuf_new" ->
@@ -5221,15 +5297,42 @@ let emit_closure_wrapper (f : fn_decl) : string =
      sanitized just like any other binding (a source param named like a C
      keyword — `case`, `default` — otherwise emits an invalid C parameter). *)
   let sparam = c_safe_name f.param in
+  (* v0.1.481: and the uncurried entry, when this fn already has a __direct
+     twin taking exactly two arguments. It always did -- `mu_cmp__direct(P, P)`
+     and `mu_cmp_as_value` were emitted into the same file, and the value did
+     not carry the twin, so `vec_sort v cmp` built an environment per
+     comparison to pass the second point. Same shape as Q-066: the twin was
+     there and nothing at the call site could name it.
+     Two conditions, both conservative. The twin must take NO leading region
+     parameters (this adapter is a global with no region to hand it), and it
+     must take exactly two -- a three-argument fn keeps the old path until the
+     day a third entry is worth its width. Failing either leaves `fn2` zero,
+     which is the fallback, not a bug. *)
+  let fn2 =
+    match Ast.walk f.return_ty with
+    | Ast.TyArrow (q, s2) when direct_region_params f.name = [] ->
+      (match Hashtbl.find_opt direct_fns f.name with
+       | Some info when List.length info.d_params = 2 ->
+         Some (Printf.sprintf
+                 "static %s %s_closure_fn2(void* __env, %s __a0, %s __a1) {\n  \
+                    (void)__env;\n  \
+                    return %s__direct(__a0, __a1);\n\
+                  }\n"
+                 (c_type_of s2) safe carg (c_type_of q) safe)
+       | _ -> None)
+    | _ -> None
+  in
   Printf.sprintf
     "static %s %s_closure_fn(void* __env, %s %s) {\n  \
        (void)__env;\n  \
        return %s(%s);\n\
      }\n\
-     %sconst %s %s_as_value = {.env = NULL, .fn = %s_closure_fn};"
+     %s%sconst %s %s_as_value = {.env = NULL, .fn = %s_closure_fn%s};"
     cret safe carg sparam
     safe sparam
+    (match fn2 with Some a -> a | None -> "")
     (lib_static ()) cstruct safe safe
+    (match fn2 with Some _ -> Printf.sprintf ", .fn2 = %s_closure_fn2" safe | None -> "")
 
 (* Closure struct typedef for a `(p) -> r` arrow. *)
 let emit_closure_typedef (p : Ast.ty) (r : Ast.ty) : string =
@@ -5246,8 +5349,29 @@ let emit_closure_typedef (p : Ast.ty) (r : Ast.ty) : string =
      borrowed pointer, leaves `copy` zero-initialized and is copied shallowly.
      v0.1.291: and a program with no region block does not carry the field at
      all -- see program_uses_regions. *)
+  (* v0.1.481: the value-level twin of the __direct fns. A closure whose
+     RETURN is itself an arrow carries a second entry point taking both
+     arguments at once, so a saturated call does not have to build the
+     intermediate closure's environment to pass the second one. Measured
+     before this: 24 bytes and about 13 ns per saturated application, on every
+     spelling that abstracts over the function -- a comparator handed to
+     vec_sort, a function taken as a parameter, a trait method. On a 200,000
+     point sort that was 1,855,936 environments and 60.4% of everything the
+     program allocated.
+     `fn2` is NULL wherever a twin cannot be named, and the two-step path
+     below it is the fallback -- which is what keeps partial application, a
+     polymorphic callee, and a region-parameterised twin working unchanged.
+     Only the arrow-returning structs grow: `unit -> unit` (spawn's closure)
+     and `str -> unit` (a Logger field) are untouched. *)
+  let fn2_field =
+    match Ast.walk r with
+    | Ast.TyArrow (q, s2) ->
+      Printf.sprintf "\n  %s (*fn2)(void*, %s, %s);" (c_type_of s2) carg (c_type_of q)
+    | _ -> ""
+  in
     Printf.sprintf
-      "typedef struct {\n  void* env;\n  %s (*fn)(void*, %s);\n} %s;" cret carg cstruct
+      "typedef struct {\n  void* env;\n  %s (*fn)(void*, %s);%s\n} %s;"
+      cret carg fn2_field cstruct
 
 let emit_lifted_fn_forward_decl (f : lifted_fn) : string =
   let params =
