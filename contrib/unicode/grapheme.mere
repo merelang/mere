@@ -135,7 +135,10 @@ module Grapheme {
       // The cluster in hand is finished by the end of the text (GB2).
       list_rev (if prev < 0 then acc else Cons (cur, acc))
     | Cons (ch, tail) ->
-      let k = GcbTable.class_of (codepoint_of ch) in
+      // Total: an invalid byte is classified as U+FFFD rather than failing.
+      // utf8_chars already hands back such a byte as its own piece, so the
+      // pair was mismatched -- and a text renderer meets one eventually.
+      let k = GcbTable.class_of (codepoint_or ch 65533) in
       let boundary = if prev < 0 then false
                      else breaks_between prev k ri pict incb in
       let ri2 = _next_ri prev k ri in

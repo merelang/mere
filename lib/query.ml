@@ -188,6 +188,23 @@ type completion = {
   c_prelude : bool;
 }
 
+(* Builtins are not declarations. Nothing in the tree binds `str_len`, `print`
+   or `vec_push`, so the scope walk above — which reads the tree — cannot see
+   them, and a completion list built only from the walk omits exactly the names
+   an editor is asked for most. This was found by using the server from an
+   editor: typing `str_l` and pressing the completion key offered `list_iter`.
+
+   They go LAST so that a name the file defines shadows a builtin of the same
+   name, which is what the compiler does, and they are marked `b_prelude` so
+   an editor sorts them below the file's own names. `b_loc` is the zero
+   location: there is no source position to jump to, and `definition_at`
+   already refuses a binding with a non-positive line. *)
+let builtin_bindings () : binding list =
+  List.map (fun (name, (sch : Typer.scheme)) ->
+    { b_name = name; b_ty = Some sch.Typer.body;
+      b_loc = Loc.dummy; b_prelude = true })
+    Typer.initial_env
+
 (* Innermost first, and one entry per name: an inner binding shadows an outer one
    of the same name, and offering both would be offering a name that cannot be
    reached. *)
@@ -206,7 +223,7 @@ let completions_at ?prelude_decls (prog : Ast.program) (line : int) (col : int)
       then None
       else Some { c_name = b.b_name; c_ty = b.b_ty; c_prelude = b.b_prelude }
     end)
-    (scope_at ?prelude_decls prog line col)
+    (scope_at ?prelude_decls prog line col @ builtin_bindings ())
 
 (* --- what is in this file -------------------------------------------------
 
@@ -262,12 +279,26 @@ type token_kind =
   | Tk_variable     (* any other bound name *)
   | Tk_parameter    (* a function's own parameter *)
   | Tk_constructor  (* Some, Cons, ... *)
+  (* The four above are the ones worth having: they are distinctions a grammar
+     cannot make, and they come from the tree. The four below come from the
+     LEXER and a grammar could make them -- but an editor that colours the
+     names and leaves `let`, `"text"`, `42` and the comments plain does not
+     look like it is highlighting anything. They are here so that a client
+     needs no per-language lexer of its own, which was the point. *)
+  | Tk_keyword
+  | Tk_string
+  | Tk_number
+  | Tk_comment
 
 let token_kind_name = function
   | Tk_function -> "function"
   | Tk_variable -> "variable"
   | Tk_parameter -> "parameter"
   | Tk_constructor -> "enumMember"
+  | Tk_keyword -> "keyword"
+  | Tk_string -> "string"
+  | Tk_number -> "number"
+  | Tk_comment -> "comment"
 
 type token = {
   t_loc : Loc.t;
@@ -414,3 +445,59 @@ let references_at ?prelude_decls (prog : Ast.program) (line : int) (col : int)
     Some (target,
           List.filter_map (fun (loc, b) ->
             if same_binding b target then Some loc else None) all)
+
+(* --- what the lexer knows -------------------------------------------------
+
+   Keywords, literals and comments, straight from the real lexer rather than
+   from a pattern that looks like the language. A client gets them over the
+   same protocol as the name kinds above and needs no lexer of its own -- which
+   is the whole reason to put highlighting behind a language server.
+
+   Two things this deliberately does not colour:
+
+   - OPERATORS. An interpolated string literal is lexed into several tokens
+     that all carry the LITERAL's position and width -- `lit ++ ( expr )` where
+     every piece claims the same span -- so emitting them would paint the same
+     columns several times over.
+   - the string half of an INTERPOLATED literal, for the same reason. Its
+     interpolated expression is a real sub-expression with real positions, and
+     the tree pass above already colours the names in it; a `string` token
+     spanning the whole literal would cover them. A literal that emitted
+     exactly one token at its position is a plain one and is coloured.
+
+   A file that does not lex gets no lexical tokens rather than an exception:
+   this runs on half-typed buffers by definition. *)
+let lexical_tokens ?file (text : string) : token list =
+  let comments = ref [] in
+  let toks = try Lexer.tokenize ?file ~comments text with _ -> [] in
+  (* How many tokens claim each position: more than one means the lexer
+     rewrote something into several, which is the interpolation case. *)
+  let at = Hashtbl.create 256 in
+  List.iter (fun ((l : Loc.t), _) ->
+    let k = (l.Loc.line, l.Loc.col) in
+    Hashtbl.replace at k (1 + (try Hashtbl.find at k with Not_found -> 0))) toks;
+  let kind_of (t : Lexer.token) =
+    match t with
+    | Lexer.T_let | Lexer.T_rec | Lexer.T_and | Lexer.T_in | Lexer.T_if
+    | Lexer.T_then | Lexer.T_else | Lexer.T_fn | Lexer.T_type
+    | Lexer.T_signature | Lexer.T_region | Lexer.T_view | Lexer.T_drop
+    | Lexer.T_using | Lexer.T_module | Lexer.T_import | Lexer.T_open
+    | Lexer.T_extern | Lexer.T_trait | Lexer.T_impl | Lexer.T_dyn
+    | Lexer.T_derive | Lexer.T_match | Lexer.T_with | Lexer.T_when
+    | Lexer.T_of | Lexer.T_as -> Some Tk_keyword
+    | Lexer.T_true | Lexer.T_false -> Some Tk_keyword
+    | Lexer.T_int _ | Lexer.T_float _ -> Some Tk_number
+    | Lexer.T_string _ -> Some Tk_string
+    | _ -> None
+  in
+  let lexed =
+    List.filter_map (fun ((l : Loc.t), t) ->
+      if l.Loc.line <= 0 || l.Loc.file <> None then None
+      else
+        match kind_of t with
+        | Some Tk_string when (try Hashtbl.find at (l.Loc.line, l.Loc.col) with Not_found -> 1) > 1 ->
+          None
+        | Some k -> Some { t_loc = l; t_kind = k }
+        | None -> None) toks
+  in
+  List.map (fun l -> { t_loc = l; t_kind = Tk_comment }) !comments @ lexed

@@ -2752,6 +2752,16 @@ let lookup_extern (name : string) (_ty : Ast.ty) : value =
               | _ -> failwith "setenv: 3rd arg expected int")
           | _ -> failwith "setenv: 2nd arg expected str")
       | _ -> failwith "setenv: 1st arg expected str")
+  | "now_ms" ->
+    (* The C backend emits a CLOCK_MONOTONIC reading; this is wall clock, so a
+       clock step during a run can make a difference negative here and never
+       there. That is acceptable for the documented contract (only differences
+       are meaningful) and it is what lets a program that merely TIMES OUT run
+       under the interpreter — before this, any extern-fn program with a
+       timeout was compile-only, and the interpreter is where its logic is
+       easiest to believe. The argument is unit and is ignored. *)
+    V_builtin ("now_ms", fun _v ->
+      V_int (int_of_float (Unix.gettimeofday () *. 1000.)))
   | _ ->
     (* Phase 32.1: unknown extern fails at call time rather than lookup
        (so that program analysis can still pass / running via codegen

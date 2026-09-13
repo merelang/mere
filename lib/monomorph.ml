@@ -443,7 +443,18 @@ let find_live_arrow (name : string) (skel_names : (string, unit) Hashtbl.t)
    Phase 23.3: takes a list of exprs to scan, so chained-poly multi-inst
    can include cloned bodies of already-specialized parent fns (e.g.,
    to detect rev_aux's multi-inst from rev's cloned bodies). *)
-let find_all_concrete_arrows_in (name : string) (exprs : Ast.expr list) : Ast.ty list =
+(* `arrows_only` is what the original caller wanted: a local polymorphic FN,
+   found by looking for uses whose type is a concrete arrow. A local `let`
+   bound to a polymorphic VALUE has exactly the same problem -- the binding
+   keeps a residual TyVar and the backends default it to int -- but its uses
+   are not arrows, so with the filter on, the value case finds nothing and is
+   silently left to the defaulting. Found by compiling `contrib/toml`, which
+   binds `let init = ("", Nil)` and folds over it: the tuple was emitted as
+   `tuple_str_list_int` and the fold wanted `tuple_str_list_tuple_str_toml_value`.
+   The library had never been built on a compiled backend -- its self-tests run
+   under the interpreter, which has no such type to get wrong. *)
+let find_all_concrete_arrows_in ?(arrows_only = true) (name : string)
+    (exprs : Ast.expr list) : Ast.ty list =
   let seen : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4 in
   let rec go (e : Ast.expr) =
     (match e.Ast.node with
@@ -453,6 +464,9 @@ let find_all_concrete_arrows_in (name : string) (exprs : Ast.expr list) : Ast.ty
           let walked = erase_container_regions (Ast.walk t) in
           (match walked with
            | Ast.TyArrow _ ->
+             let key = Ast.pp_ty walked in
+             if not (Hashtbl.mem seen key) then Hashtbl.add seen key walked
+           | _ when not arrows_only ->
              let key = Ast.pp_ty walked in
              if not (Hashtbl.mem seen key) then Hashtbl.add seen key walked
            | _ -> ())
@@ -576,6 +590,19 @@ let specialize_single_use_local_fns (root : Ast.expr) : unit =
           (try Typer.unify Loc.dummy (erase_container_regions vty) arrow with _ -> ())
         | _ -> ());
        let _ = value in ()
+     (* The same treatment for a local `let` bound to a polymorphic VALUE. The
+        guard is deliberately the mirror image of the Fun case above: not a
+        function, type not concrete, used at exactly one concrete type with no
+        use still unresolved. Anything else is left to the existing defaulting,
+        which is what happens today. *)
+     | Ast.Let ({ Ast.pnode = Ast.P_var n; _ }, { Ast.node = Ast.Fun _; _ }, _) ->
+       ignore n
+     | Ast.Let ({ Ast.pnode = Ast.P_var n; _ }, { Ast.ty = Some vty; _ }, body)
+       when not (ty_is_concrete (Ast.walk vty)) ->
+       (match find_all_concrete_arrows_in ~arrows_only:false n [body] with
+        | [t] when not (has_unresolved_use_of n [body]) ->
+          (try Typer.unify Loc.dummy (erase_container_regions vty) t with _ -> ())
+        | _ -> ())
      | Ast.Let_rec (bindings, body) ->
        (* Single-use specialization for a local `let rec` group, RESTRICTED to
           trait-constrained members (a dictionary-taking fn produced by

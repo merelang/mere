@@ -4,6 +4,83 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.478 — 2026-09-13
+
+_Six things the `medit2` dogfood found by finishing the editor — and four of
+them were in code no program had used before._
+
+_**`mere lsp` was answering in BYTES where the protocol counts UTF-16 code
+units.** They agree on ASCII and on nothing else, and every test this server
+had was ASCII, so the whole class was invisible. One line with three kanji on it
+puts the question six columns to the left, and the server answers about the
+token it finds there — correctly, and about the wrong thing, with no error
+anywhere. Converted in both directions: incoming positions become byte columns
+against the buffer the server is holding, and every outgoing range, diagnostic
+and semantic token converts back. The token LENGTH converts too, or one kanji
+gets three columns of highlight. Two discriminating inputs are needed and
+neither substitutes for the other: kanji separate bytes from characters, an
+astral character separates characters from UTF-16 units._
+
+_**Completion could not offer a builtin.** `Query.completions_at` walks the tree
+for what is in scope, and `str_len` and `print` are not declarations, so typing
+`str_l` and asking for a completion offered `list_iter`. `Query.builtin_bindings`
+reads `Typer.initial_env`; they go last, so a name the file defines still
+shadows them._
+
+_**`tty_raw` was not clearing IEXTEN** — the same bug as v0.1.476's IXON, one
+letter along, found the same way: by binding a key to it. IEXTEN enables
+VDISCARD (Ctrl-O on BSD and macOS), which eats the byte AND throws away the
+program's next output, so the symptom is "the key did nothing and the screen
+froze". ICANON, ECHO and IEXTEN are now cleared together because the reason is
+one reason; ISIG stays with `tty_no_signal_keys`, because taking Ctrl-C away is
+a trade rather than a fix, and both sides are pinned in
+`scripts/tty_raw_check.sh` (now six checks)._
+
+_**A local `let` bound to a polymorphic VALUE was defaulting to int.**
+`let init = ("", Nil) in ... list_fold lines init step` emitted a
+`tuple_str_list_int` and handed it to a function wanting a list of pairs. The
+v0.1.99 pass that fixes this for local polymorphic FUNCTIONS looked for uses
+whose type is a concrete ARROW, and a tuple is not one, so values fell through
+to the defaulting. **`contrib/toml` is written this way and has never compiled
+on any compiled backend** — its self-tests run under the interpreter, which has
+no such type to get wrong._
+
+_**`extern fn ... -> str` was broken.** This backend's strings carry a length
+header before byte 0; a foreign function returns a bare `char*` that has none,
+so `++` read whatever preceded the constant as the length:_
+
+```
+extern fn getenv: str -> str;
+print ("[" ++ getenv "HOME" ++ "]")     =>  out of memory
+```
+
+_The declaration was right and a comment said the difference was "absorbed by
+the implicit const conversion" — const was the only part of it that was
+absorbed. The adoption helper already existed and its own comment named getenv
+as a caller; the extern path was the one place that did not call it. Fixed on
+both call shapes (direct, and through the `_as_value` closure), with NULL — an
+unset variable — becoming the empty string rather than a crash. `contrib/log`
+reads `LOG_LEVEL` this way and could not be built natively either._
+
+_**`now_ms` had no interpreter mock**, so any program with a timeout in it was
+compile-only._
+
+_And one feature, because the editor could not use what was there: **semantic
+tokens now carry keyword, string, number and comment**, from the compiler's own
+lexer, merged with the four name kinds from the tree. An editor that coloured
+the identifiers and left `let` and the comments plain does not look like it is
+highlighting anything, and the alternative was a second lexer in every client.
+Operators and interpolated-string literals are deliberately left uncoloured:
+the lexer rewrites an interpolation into several tokens that all claim the
+literal's own position and width._
+
+_Measured while fixing the toml bug: of the 87 `extern`-free contrib libraries,
+**79 compile and agree with the interpreter**, 7 fail only at Wasm emission,
+and one "mismatch" is the interpreter stack-overflowing where the native binary
+completes. toml was the only genuine C-backend failure._
+
+---
+
 ## v0.1.477 — 2026-09-13
 
 _Two CI failures from the last two slices, and the reason both were invisible
@@ -1604,7 +1681,7 @@ regions needs one body, not three.
 to distinguish instances, and the region is deliberately not part of the C type
 (`Vec[R, T]` and `Vec[__heap, T]` are both `mere_vec_<T>*`, the region a pointer inside
 the struct). Those two requirements are not compatible: every attempt fixed one and
-broke the other. Written up in aidocs.
+broke the other.
 
 ### The tag stopped naming the region, in all four backends
 

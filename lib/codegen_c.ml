@@ -289,6 +289,13 @@ let top_global_init_values : Ast.expr list ref = ref []
    dispatches App (Var name, arg) directly to a C function call. *)
 let extern_fn_decls : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 
+(* Forward reference to `is_native_ffi`, which lives with the FFI name lists a
+   few thousand lines below. The extern CALL emission up here has to tell a
+   foreign C function from one this backend defines itself, and moving four
+   name lists and their arity table up to meet it would be a bigger change
+   than a ref cell. Set immediately after the real definition. *)
+let is_native_ffi_fwd : (string -> bool) ref = ref (fun _ -> false)
+
 (* Phase 35.1 (DEFERRED §1.2 fix): registry of eta adapters generated when a
    builtin is used in first-class value position (`let f = vec_new in f ()`).
    key = adapter name (e.g. "vec_new_int"), value = (builtin_name, ret_ty).
@@ -2587,6 +2594,17 @@ let rec emit_expr (e : Ast.expr) : string =
        let ret_ty = result_ty (Hashtbl.find extern_fn_decls name) in
        (match ret_ty with
         | Ast.TyUnit -> Printf.sprintf "(%s, 0)" call_str
+        (* A foreign function returns a bare C string. This backend's strings
+           carry a LENGTH HEADER before byte 0, so handing a libc `char*` to
+           `++` makes it read whatever precedes the constant as the length --
+           and `extern fn getenv: str -> str; print ("[" ++ getenv "HOME")`
+           printed `out of memory`. The FFI declaration said `char*` and a
+           comment claimed the difference was "absorbed by the implicit const
+           conversion"; const was the only part of the difference it absorbed.
+           Native FFI names are excluded: those have static definitions emitted
+           here and already return proper Mere strings. *)
+        | Ast.TyStr when not (!is_native_ffi_fwd name) ->
+          Printf.sprintf "__lang_str_of_cstr(%s)" call_str
         | _ -> call_str)
      | None ->
     (* v0.1.27 (mlog dogfood P4): exactly-saturated call to a curried
@@ -6460,6 +6478,8 @@ let is_native_ffi name =
   || List.mem name native_http_names
   || List.mem name native_util_names
 
+let () = is_native_ffi_fwd := is_native_ffi
+
 let native_http_runtime ~tls =
   String.concat "\n"
     ([ "/* --- native HTTP server (Stage 3): single-threaded accept loop, ";
@@ -7510,6 +7530,16 @@ let str_concat_helper =
          Used at boundaries where a headerless C string enters Mere: asprintf
          results (show_* / str_of_int / str_of_float / format), getenv, argv. *)
       "static const char* __lang_str_of_cstr(const char* s) {";
+      (* NULL is what getenv answers for a variable that is not set, and it is
+         what a great many C functions answer for "nothing". Mere has no null
+         string, so it becomes the empty one -- which is the value every caller
+         already tests for. Crashing here would make an unset variable fatal. *)
+      (* A zero-length allocation rather than a copy of "": a string LITERAL
+         here would be one more `__lang_str_dup_n("...")` in every program, and
+         "no per-evaluation copy of a literal anywhere in the emitted C" is a
+         property one of the codegen tests asserts textually over the whole
+         file. It is also simply less work. *)
+      "  if (!s) return __lang_str_alloc(__lang_current_region, 0);";
       "  size_t n = strlen(s);";
       "  char* r = __lang_str_alloc(__lang_current_region, n);";
       "  memcpy(r, s, n);";
@@ -8020,7 +8050,21 @@ let str_concat_helper =
          never sees either byte. The medit dogfood documents Ctrl-S as save and
          Ctrl-Q as quit; driven under a real pty it drew zero bytes after each
          and never wrote its file. It shipped that way for two months, because a
-         pipe has no line discipline and its piped tests passed throughout. *)
+         pipe has no line discipline and its piped tests passed throughout.
+
+         IEXTEN is the same bug wearing a different letter, and the second one
+         found the same way — by binding a key to it. IEXTEN enables VDISCARD
+         (Ctrl-O on BSD and macOS) and VLNEXT (Ctrl-V): the discipline eats
+         both, and VDISCARD additionally THROWS AWAY the program's next output,
+         so the symptom is not "the key did nothing" but "the key did nothing
+         and the screen stopped updating". Any full-screen program that binds
+         Ctrl-O or Ctrl-V loses them, which is every editor there is.
+
+         The masks are the three the discipline uses to intercept input, and
+         they are cleared together because the reason is one reason: a program
+         in raw mode asked for the bytes. ISIG is the one exception and is left
+         to tty_no_signal_keys, because taking Ctrl-C away is a trade rather
+         than a fix. *)
       "#include <termios.h>";
       "static struct termios __lang_saved_tio;";
       "static int __lang_tio_saved = 0;";
@@ -8029,7 +8073,7 @@ let str_concat_helper =
       "  struct termios tio;";
       "  if (tcgetattr(0, &tio) != 0) return 0;";
       "  if (!__lang_tio_saved) { __lang_saved_tio = tio; __lang_tio_saved = 1; }";
-      "  tio.c_lflag &= ~(ICANON | ECHO);";
+      "  tio.c_lflag &= ~(ICANON | ECHO | IEXTEN);";
       "  tio.c_iflag &= ~(IXON | IXOFF);";
       "  tio.c_cc[VMIN] = 1; tio.c_cc[VTIME] = 0;";
       "  tcsetattr(0, TCSANOW, &tio);";
@@ -12076,6 +12120,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         let call =
           match Ast.walk b with
           | Ast.TyUnit -> Printf.sprintf "%s%s(%s); return 0" drop_arg name arg
+          (* Same adoption as the direct-call path: passed as a VALUE, the
+             extern is reached through this wrapper instead, and a fix in only
+             one of the two places leaves `list_map xs getenv` broken while
+             `getenv x` works. *)
+          | Ast.TyStr when not (is_native_ffi name) ->
+            Printf.sprintf "%sreturn __lang_str_of_cstr(%s(%s))" drop_arg name arg
           | _ -> Printf.sprintf "%sreturn %s(%s)" drop_arg name arg
         in
         Printf.sprintf

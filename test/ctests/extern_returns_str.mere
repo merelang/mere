@@ -1,0 +1,34 @@
+// An `extern fn` that returns `str` is a FOREIGN function returning a bare
+// `char*`. This backend's strings carry a length header before byte 0, so
+// handing that pointer to `++` made the concat read whatever preceded the
+// constant as the length:
+//
+//     extern fn getenv: str -> str;
+//     print ("[" ++ getenv "HOME" ++ "]")     =>  out of memory
+//
+// It was declared correctly as `char*` and a comment said the difference was
+// "absorbed by the implicit const conversion" -- const was the only part of the
+// difference that was absorbed. `contrib/log` reads `LOG_LEVEL` this way and
+// could not be built natively either.
+//
+// Two call shapes, because the wrapper for a value and the direct call are
+// emitted by different code and fixing one leaves the other broken.
+
+extern fn getenv: str -> str;
+
+// Applied directly.
+let home = getenv "HOME";
+
+// Reached as a VALUE, through the `_as_value` closure.
+let read = fn (f: str -> str) -> fn (k: str) -> f k;
+let home2 = read getenv "HOME";
+
+// A variable that is not set: `getenv` answers NULL, and Mere has no null
+// string. The empty string is the only value the language can offer, and
+// crashing would make an unset variable fatal.
+let missing = getenv "MERE_CTEST_DEFINITELY_UNSET_VARIABLE";
+
+print (show (str_len home > 0) ++ " "
+    ++ show (str_eq home home2) ++ " "
+    ++ "[" ++ missing ++ "]" ++ " "
+    ++ show (str_len missing))
