@@ -7577,12 +7577,43 @@ let str_concat_helper =
       "";
       (* Phase 19.1.1: str_index_of — return position of needle in
          haystack, -1 if not found. Empty needle returns 0. *)
+      (* memchr for the candidate starts, memcmp to confirm. The obvious loop
+         -- memcmp at every offset -- calls memcmp once per byte of haystack,
+         and for a needle that is NOT there that is the whole file's length in
+         calls. memchr is the one function libc is certain to have vectorised,
+         so this hands the scanning to it and only pays memcmp where the first
+         byte already matched.
+
+         Measured on a 1 GB file with a needle that is absent (medit2's
+         bench/big.sh, which is what asked the question): 548 MB/s before,
+         and the editor's "search the whole file and find nothing" is the
+         case a user waits through.
+
+         memchr and not strchr: a Mere string carries its length and may hold
+         NUL bytes, so stopping at the first one would cut the haystack short.
+
+         The window is derived from `last` -- the final offset a needle can
+         start at -- rather than kept in a counter that is decremented
+         alongside the pointer. A counter that drifts from the pointer reads
+         past the end of the haystack WITHOUT CHANGING THE ANSWER: the extra
+         candidates all fail the memcmp. That bug is invisible to a
+         differential test, and invisible to AddressSanitizer too, because
+         these strings live inside the region arena and an over-read lands in
+         a block ASAN considers live. So the possibility is removed rather
+         than tested for: there is one source of truth for the window and
+         nothing to keep in step with it. *)
       "static int64_t __lang_str_index_of(const char* h, const char* n) {";
       "  size_t hn = __lang_str_size(h), nn = __lang_str_size(n);";
       "  if (nn == 0) return 0;";
       "  if (nn > hn) return -1;";
-      "  for (size_t i = 0; i + nn <= hn; i++)";
-      "    if (memcmp(h + i, n, nn) == 0) return (int64_t)i;";
+      "  const char* last = h + (hn - nn);";
+      "  const char* p = h;";
+      "  while (p <= last) {";
+      "    const char* q = (const char*)memchr(p, (unsigned char)n[0], (size_t)(last - p) + 1);";
+      "    if (!q) return -1;";
+      "    if (memcmp(q, n, nn) == 0) return (int64_t)(q - h);";
+      "    p = q + 1;";
+      "  }";
       "  return -1;";
       "}";
       "";

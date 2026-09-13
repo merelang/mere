@@ -56,8 +56,17 @@ trap 'rm -rf "$TMP"' EXIT
 pass=0
 fail=0
 for f in $FILES; do
-  name="$(basename "$f" .mere)"
-  cfile="$TMP/$name.c"
+  # The label is the directory AND the stem, not the stem alone. With the
+  # default set -- one flat directory -- a basename is unique and this never
+  # mattered. Pointed at contrib it stops being unique: five basenames appear
+  # in two libraries each (ast, build, gen, parser, path), so `FAIL gen` named
+  # two different files and the temp files for both collided on one path. A
+  # report that cannot say WHICH file failed is a report nothing can be pinned
+  # against.
+  name="$(dirname "$f" | sed 's|.*/||')/$(basename "$f" .mere)"
+  # Temp paths get the slash flattened; the label keeps it.
+  stem="$(printf '%s' "$name" | tr '/' '_')"
+  cfile="$TMP/$stem.c"
   if ! "$MERE" -c "$f" > "$cfile" 2>"$TMP/emit.err"; then
     echo "FAIL $name: C emission failed"
     sed 's/^/    /' "$TMP/emit.err"
@@ -75,7 +84,7 @@ for f in $FILES; do
   # they cannot. Requiring the interpreter to run it too is what keeps this from
   # firing on a program that would open a socket — an extern the interpreter mocks
   # is an extern somebody thought about.
-  bin="$TMP/$name.bin"
+  bin="$TMP/$stem.bin"
   if grep -q '^extern ' "$f" 2>/dev/null || grep -q '[^_]extern fn' "$f" 2>/dev/null; then
     if "$CC" -O0 -w "$cfile" -o "$bin" -lm 2>"$TMP/cc.err" \
        && "$MERE" "$f" > "$TMP/i.out" 2>"$TMP/i.err"; then
@@ -121,8 +130,8 @@ for f in $FILES; do
   # available. Same closure/capture/mangling family, second backend.
   wasm_note=""
   if command -v wat2wasm >/dev/null 2>&1; then
-    if "$MERE" -w "$f" > "$TMP/$name.wat" 2>"$TMP/wat.err"; then
-      if wat2wasm --enable-tail-call "$TMP/$name.wat" -o "$TMP/$name.wasm" 2>"$TMP/w2.err"; then
+    if "$MERE" -w "$f" > "$TMP/$stem.wat" 2>"$TMP/wat.err"; then
+      if wat2wasm --enable-tail-call "$TMP/$stem.wat" -o "$TMP/$stem.wasm" 2>"$TMP/w2.err"; then
         wasm_note=" +wasm"
       else
         echo "FAIL $name: emitted WAT does not assemble"

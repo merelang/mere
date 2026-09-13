@@ -1,0 +1,72 @@
+// `str_index_of` on the backend that ships, not on the interpreter.
+//
+// Every existing test for this goes through `Pipeline.process`, which is the
+// INTERPRETER, plus an `assert_contains` that the emitted C mentions the
+// helper. Between them they say nothing about what the helper computes -- the
+// C implementation had no behavioural test at all. This file runs on both and
+// ctest.sh diffs them.
+//
+// The cases are the ones that separate a memchr-driven scan (find a candidate
+// first byte, confirm with memcmp) from the loop it replaced (memcmp at every
+// offset). The two agree on "does the needle appear in this sentence" and can
+// disagree on:
+//
+//   - a REPEATED first byte, where candidates overlap and skipping one loses
+//     a real match
+//   - a match at the very END, where the remaining-length arithmetic decides
+//     whether the last valid start is even tried
+//   - an embedded NUL, which is a byte like any other in a Mere string and a
+//     terminator to anything that reaches for strchr
+//   - many candidate first bytes and no match, which is where the loop that
+//     decrements the remaining length either runs forever or stops early
+
+let nul = chr 0;
+
+let show2 = fn (name: str) -> fn (v: int) -> print (name ++ " " ++ show v);
+
+// --- the ordinary cases ----------------------------------------------------
+let _ = show2 "found" (str_index_of "hello world" "world");
+let _ = show2 "absent" (str_index_of "hello" "xyz");
+let _ = show2 "empty needle" (str_index_of "abc" "");
+let _ = show2 "empty haystack" (str_index_of "" "a");
+let _ = show2 "both empty" (str_index_of "" "");
+let _ = show2 "needle longer" (str_index_of "ab" "abc");
+let _ = show2 "whole string" (str_index_of "abc" "abc");
+
+// --- overlapping candidates ------------------------------------------------
+// `aaab` first matches its `a` at 0, fails, and the next candidate is at 1 --
+// not at 4. A scan that skipped to just past the failed comparison would miss
+// the match entirely.
+let _ = show2 "repeated first byte" (str_index_of "aaaaab" "aaab");
+let _ = show2 "repeated, no match" (str_index_of "aaaaa" "aaab");
+let _ = show2 "every byte a candidate" (str_index_of "aaaaaaaaab" "ab");
+// Every position starts a candidate and only the last one works.
+let _ = show2 "last candidate wins" (str_index_of "aaaaaaaaaa" "aaaaaaaaaa");
+
+// --- the boundaries --------------------------------------------------------
+let _ = show2 "at the very end" (str_index_of "xxxxxy" "y");
+let _ = show2 "two bytes at the end" (str_index_of "xxxxyz" "yz");
+let _ = show2 "one past the end" (str_index_of "xxxxyz" "z!");
+let _ = show2 "single byte haystack, hit" (str_index_of "a" "a");
+let _ = show2 "single byte haystack, miss" (str_index_of "a" "b");
+
+// --- NUL is a byte ---------------------------------------------------------
+// A Mere string carries its length, so a NUL in the middle is data. Anything
+// that treats the haystack as C-terminated cuts it short here and answers -1.
+let withnul = "ab" ++ nul ++ "cd";
+let _ = show2 "past an embedded NUL" (str_index_of withnul "cd");
+let _ = show2 "the NUL itself" (str_index_of withnul nul);
+let _ = show2 "a needle containing NUL" (str_index_of withnul (nul ++ "c"));
+let _ = show2 "NUL-led needle, absent" (str_index_of "abcd" (nul ++ "c"));
+
+// --- a long haystack with many false starts --------------------------------
+// 2,000 candidate first bytes and one real match at the end. A wrong
+// remaining-length decrement either stops before it or never terminates.
+let rec build = fn (i: int) -> fn (acc: str) ->
+  if i <= 0 then acc else build (i - 1) (acc ++ "ax");
+let hay = build 1000 "" ++ "azq";
+let _ = show2 "many false starts" (str_index_of hay "azq");
+let _ = show2 "many false starts, absent" (str_index_of hay "azz");
+let _ = show2 "haystack length" (str_len hay);
+
+print "str_index_of: done"
