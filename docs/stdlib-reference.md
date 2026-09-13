@@ -40,7 +40,7 @@ Legend:
 | Name | Type | Description |
 |---|---|---|
 | `print` | `str -> unit` | Write to stdout with newline |
-| `print_no_nl` | `str -> unit` | Without newline + flush (for prompts) |
+| `print_no_nl` | `str -> unit` | Without newline, and **in one `write(2)`** rather than through stdio (v0.1.480). `main` sets stdout line buffered, so an `fwrite` here flushed at every newline and the recommended idiom — accumulate into a `StrBuf`, print once — still cost one syscall per line, about 1.6 µs each. Stdio is flushed first, so a `print` issued earlier still arrives earlier |
 | `print_int` | `int -> unit` | Print integer with newline |
 | `print_bool` | `bool -> unit` | Print bool with newline |
 | `print_err` | `str -> unit` | Write to stderr with newline |
@@ -56,7 +56,7 @@ Legend:
 | `bytebuf_push` | `ByteBuf[R] -> int -> unit` | Append, growing the buffer |
 | `bytes_of_bytebuf` | `ByteBuf[R] -> bytes` | Freeze a copy, which can then leave the region |
 | `bytebuf_of_bytes` | `bytes -> ByteBuf[R]` | The other way, for editing |
-| `print_bytes` ⚡ | `bytes -> unit` | Write a `bytes` to stdout, unbuffered and with **no newline**. This is what `print_no_nl` cannot be: a `str` is NUL-terminated in the compiled backends, so a zero byte ended the output there and did not on the interpreter. **All four backends** (v0.1.216, Wasm in v0.1.219) |
+| `print_bytes` ⚡ | `bytes -> unit` | Write a `bytes` to stdout in one `write(2)` (v0.1.480) and with **no newline**. This is what `print_no_nl` cannot be: a `str` is NUL-terminated in the compiled backends, so a zero byte ended the output there and did not on the interpreter. **All four backends** (v0.1.216, Wasm in v0.1.219) |
 | `write_file` ⚡ | `str -> str -> unit` | Write content to path (overwrite); raises on failure |
 
 **The FFI byte arena's `bytes` bridge** (v0.1.282). `tcp_read` and friends write into

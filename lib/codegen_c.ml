@@ -2819,7 +2819,8 @@ let rec emit_expr (e : Ast.expr) : string =
        (* v0.1.19 (mrog dogfood P2): newline-free flushed write — a TUI's
           cursor-control sequences must not be line-buffered.
           v0.1.261: by length, for the same reason as print. *)
-       "({ const char* __pn = " ^ emit_expr arg ^ ";            fwrite(__pn, 1, __lang_str_size(__pn), stdout); fflush(stdout); 0; })"
+       (* v0.1.480: one write(2) for the whole string. See __lang_write_all. *)
+       "({ const char* __pn = " ^ emit_expr arg ^ ";            __lang_write_all(1, __pn, __lang_str_size(__pn)); 0; })"
      (* Q-012: spawn a `unit -> unit` closure on a fresh OS thread. Copy the
         closure value onto the heap so the child owns it, then pthread_create
         the trampoline. Returns a ThreadHandle. *)
@@ -2959,8 +2960,8 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "print_bytes" ->
        bytes_used := true;
        Printf.sprintf
-         "({ mere_bytes* __pb = %s; fwrite(__pb->data, 1, (size_t)__pb->len, stdout); \
-          fflush(stdout); 0; })" (emit_expr arg)
+         "({ mere_bytes* __pb = %s; \
+          __lang_write_all(1, (const char*)__pb->data, (size_t)__pb->len); 0; })" (emit_expr arg)
      | Ast.Var "read_bytes" ->
        bytes_used := true;
        Printf.sprintf "__lang_read_bytes(%s)" (emit_expr arg)
@@ -7516,6 +7517,28 @@ let str_concat_helper =
       "  return d;";
       "}";
       "static size_t __lang_str_size(const char* s) { return ((const size_t*)s)[-1]; }";
+      (* v0.1.480: hand a whole answer to the kernel in one call.
+         `main` sets stdout line buffered, which is right for a program someone
+         is watching and wrong for one that has already assembled its output:
+         fwrite of a 15 MB buffer onto an _IOLBF stream flushes at every
+         newline, so BUILDING THE OUTPUT YOURSELF BOUGHT NOTHING. Measured
+         against a judge's test data, that was one write(2) per line at about
+         1.6 microseconds each: 1.53 s of a 2.30 s run that prints a million
+         lines, and the same constant across ten programs.
+         So the newline-free writers go around stdio instead. fflush first, so
+         anything `print` has buffered still comes out ahead of these bytes --
+         the two paths share fd 1 and the order is the program's, not the
+         buffer's. A short write is a loop, not a lost tail; EINTR is a retry.
+         `print` keeps its line at a time, which is what a log wants. *)
+      "static void __lang_write_all(int fd, const char* p, size_t n) {";
+      "  fflush(stdout);";
+      "  while (n) {";
+      "    ssize_t w = write(fd, p, n);";
+      "    if (w > 0) { p += (size_t)w; n -= (size_t)w; continue; }";
+      "    if (w < 0 && errno == EINTR) continue;";
+      "    break;";
+      "  }";
+      "}";
       (* Byte-safe comparison: memcmp over the shorter length (so embedded NULs
          participate), then break ties by length. For NUL-free strings this
          matches strcmp exactly, so existing behavior is preserved. *)
@@ -12860,6 +12883,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "#include <time.h>";  (* v0.1.127: time () wall clock *)
       "#include <pthread.h>";  (* Q-012: spawn / join. Link with -pthread on Linux. *)
       "#include <unistd.h>";   (* native FFI: read / write / close *)
+      "#include <errno.h>";    (* v0.1.480: EINTR on the write(2) path *)
       (* v0.1.315: float semantics must not depend on the C compiler's
          optimization level. clang on arm64 contracts a*b+c into fma at -O2
          by default, which rounds ONCE where the interpreter (and -O0, and

@@ -4,6 +4,45 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.480 — 2026-09-14
+
+_The output was already assembled, and building it bought nothing._
+
+_**`print_no_nl` and `print_bytes` hand the whole buffer to one `write(2)`**
+instead of `fwrite`-ing it onto stdio. `main` sets stdout line buffered, which
+is right for a program someone is watching -- a server's log should not stop
+existing because it was redirected -- and wrong for one that has already
+finished its answer: an `fwrite` of a 15 MB buffer onto an `_IOLBF` stream
+flushes at every newline. So the idiom the docs recommend, accumulate into a
+`StrBuf` and print once, still paid one syscall per line._
+
+_Measured against a judge's test data, twelve programs, worst case each:_
+
+| | before | after | C++ reference |
+|---|---|---|---|
+| 1,000,000 lines out | 2.40 s | **0.23 s** | 0.37 s |
+| 500,000 | 1.25 s | **0.10 s** | 0.16 s |
+| 500,000, graph | 1.31 s | **0.18 s** | 0.30 s |
+| 1 line out | 0.08 s | 0.10 s | 0.05 s |
+
+_The constant that disappeared was about **1.6 microseconds per output line**,
+and it was the same number in all ten programs that print more than one line
+-- 1.50 to 1.99 µs, median 1.6. The two whose answer is a single line did not
+move, which is how the attribution was confirmed rather than assumed: a fix
+that also changed the control would have been measuring something else._
+
+_`fflush(stdout)` leads, because `print` still goes through stdio and both
+share fd 1: the order has to be the program's, not the buffer's. A short write
+is a loop and `EINTR` is a retry -- dropping the tail of an answer is the one
+failure mode worth writing three lines to prevent. `print` is unchanged and
+still writes a line at a time, which is what a log wants._
+
+_The two codegen assertions this moved were updated to assert the same
+property they always did: that the LENGTH crosses the boundary, so a zero byte
+in the middle of a `bytes` does not end the output._
+
+---
+
 ## v0.1.479 — 2026-09-13
 
 _A 13x search, found by pointing a benchmark at an editor rather than at the
