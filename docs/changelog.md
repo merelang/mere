@@ -4,6 +4,65 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.479 — 2026-09-13
+
+_A 13x search, found by pointing a benchmark at an editor rather than at the
+compiler._
+
+_**`str_index_of` compared the needle at every offset.** For a needle that is
+not in the haystack that is one `memcmp` call per byte of haystack, which is
+the case a user waits through: "search the whole file and find nothing".
+`memchr` finds the candidate first bytes and `memcmp` only confirms them, which
+hands the scanning to the one libc function that is certainly vectorised.
+Measured over a 1 GB file (`medit2/bench/big.sh`, which is what asked):_
+
+| | |
+|---|---|
+| before | 548 MB/s — 1,868 ms for 1 GB |
+| after | **7,211-7,428 MB/s — 140 ms** |
+
+_`memchr` and not `strchr`: a Mere string carries its length and may hold NUL
+bytes, so stopping at the first one cuts the haystack short._
+
+_The search window is derived from `last` — the final offset a needle can start
+at — rather than kept in a counter alongside the pointer. A counter that drifts
+reads past the end of the haystack WITHOUT CHANGING THE ANSWER, because the
+extra candidates all fail the comparison; that bug is invisible to a
+differential test and invisible to AddressSanitizer too, since these strings
+live inside a region arena and the over-read lands in a block ASAN considers
+live. The possibility is removed rather than tested for._
+
+_`test/ctests/str_index_of_scan.mere` is new, and is the first behavioural test
+this helper has ever had on a compiled backend: every existing one went through
+`Pipeline.process` (the interpreter) plus an `assert_contains` that the emitted
+C mentions the helper's name._
+
+_**`scripts/ctest.sh` identified its subjects by basename.** With the default
+set — one flat directory — a basename is unique and this never mattered.
+Pointed at `contrib/`, five basenames appear in two libraries each (ast, build,
+gen, parser, path): `FAIL gen` named two different files and their temp files
+collided on one path. Labels are now `<dir>/<stem>`._
+
+_Two gates are new, both of them turning something that was written down into
+something that is asked every run:_
+
+_**`scripts/contrib_ctest.sh`** runs every contrib library's self-tests on the
+compiled backend and diffs against the interpreter — 79 of 87 pass, 8 pinned
+with reasons (7 refused by Wasm emission, 1 where the INTERPRETER overflows its
+stack and the native binary completes). This is the gate that was missing when
+`contrib/toml` spent the project's whole history unable to produce C that
+compiles. The subject list is explicit and its length is asserted, because a
+glob that skips what will not compile reports green over a set that shrank._
+
+_**`scripts/alloc_region_pin.sh`** pins both directions of the trade an
+allocation makes when it is not visible in a function's type: it falls back to
+the program-lifetime region, which is conservative and correct and not free.
+The direction nobody intends to change is pinned too — region changes have
+shipped three versions of this compiler that segfaulted a 3D viewer on its
+second frame._
+
+---
+
 ## v0.1.478 — 2026-09-13
 
 _Six things the `medit2` dogfood found by finishing the editor — and four of
