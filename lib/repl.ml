@@ -147,6 +147,10 @@ let process_decl eval_env type_env decl =
     Typer.register_local_type name;
     Printf.printf "local type %s registered\n" name;
     []
+  | Ast.Top_forward (name, ty, _) ->
+    type_env := (name, Typer.mono ty) :: !type_env;
+    Printf.printf "let fn %s : %s declared\n" name (Ast.pp_ty ty);
+    []
   | Ast.Top_extern (name, ty) ->
     (* Phase 32.1 (C1 FFI): also accept extern fn in the REPL *)
     type_env := (name, Typer.mono ty) :: !type_env;
