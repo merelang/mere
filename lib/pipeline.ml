@@ -1,6 +1,45 @@
 (* Source string -> ... convenience functions.
    Handles top-level decls (let, let rec, type) in order. *)
 
+(* Names promised by `let fn <name>: <ty>;`. The interpreter binds each to a
+   placeholder ref when the promise is made, so a caller written before the
+   definition captures the ref the definition will fill in -- the same
+   back-patching a `let rec ... and ...` group already does for its members.
+   Prepending a NEW binding at the definition would shadow instead, and every
+   caller above it would go on calling the placeholder. *)
+let forward_promised : (string, Ast.ty * Loc.t) Hashtbl.t = Hashtbl.create 16
+(* the promises this program has kept, so the end-of-program check can name
+   the ones it did not *)
+let forward_kept : (string, unit) Hashtbl.t = Hashtbl.create 16
+let forward_reset () = Hashtbl.reset forward_promised; Hashtbl.reset forward_kept
+
+(* ⚠ THE DEFINITION HAS TO MEAN WHAT THE DECLARATION PROMISED. Without this the
+   declared type is what callers ABOVE the definition see and the inferred one
+   is what callers below see, and the two can disagree -- `let fn f : int -> int;`
+   followed by `let f = fn (s: str) -> s;` type-checked, and the program had two
+   incompatible ideas of f. *)
+let forward_check_def name loc (t : Ast.ty) =
+  match Hashtbl.find_opt forward_promised name with
+  | None -> ()
+  | Some (declared, dloc) ->
+    Hashtbl.replace forward_kept name ();
+    (try Typer.unify loc declared t
+     with _ ->
+       raise (Typer.Type_error (loc,
+         Printf.sprintf
+           "`%s` was declared `%s` at line %d, and this definition has a different type"
+           name (Ast.pp_ty declared) dloc.Loc.line)))
+
+(* every promise must be kept: a name declared and never defined is a name
+   nothing can call. *)
+let forward_check_all_kept () =
+  Hashtbl.iter (fun name (ty, loc) ->
+    if not (Hashtbl.mem forward_kept name) then
+      raise (Typer.Type_error (loc,
+        Printf.sprintf
+          "`let fn %s: %s;` promises a definition that this program never gives"
+          name (Ast.pp_ty ty)))) forward_promised
+
 (* Phase 19.4: parses the auto-imported prelude and returns its decls.
    When the user's parse starts, these decls are inserted at the front of
    the user decls. Disabled by `?prelude:false` (for tests / debug). *)
@@ -495,8 +534,15 @@ let process_decls eval_env type_env decls =
          raise (Eval.Eval_error (pat.Ast.ploc,
            "top-level let pattern did not match"))
        | Some val_bindings ->
-         eval_env := List.fold_left (fun acc (n, v) -> (n, ref v) :: acc)
-                       !eval_env val_bindings);
+         eval_env := List.fold_left (fun acc (n, v) ->
+           (* a promised name is FILLED, not rebound: callers written above
+              hold the very ref this assigns into. *)
+           if Hashtbl.mem forward_promised n then
+             (match List.assoc_opt n acc with
+              | Some r -> r := v; acc
+              | None -> (n, ref v) :: acc)
+           else (n, ref v) :: acc) !eval_env val_bindings);
+      List.iter (fun (n, ty) -> forward_check_def n value.Ast.loc ty) bindings;
       type_env := List.fold_left (fun acc (n, ty) ->
         let sch = top_let_scheme outer_env value ty in
         (* Q-127: the backends cannot read a region out of a fn_decl's types -- Monomorph
@@ -549,6 +595,13 @@ let process_decls eval_env type_env decls =
       Typer.register_sync_type name
     | Ast.Top_local name ->
       Typer.register_local_type name
+    (* A FORWARD DECLARATION binds the name to its written type from here on.
+       Unlike extern there is no foreign implementation behind it: the
+       definition is a later `let` in this same program, and the eval side gets a placeholder that the definition overwrites. *)
+    | Ast.Top_forward (name, ty, floc) ->
+      Hashtbl.replace forward_promised name (ty, floc);
+      type_env := (name, Typer.mono ty) :: !type_env;
+      eval_env := (name, ref Eval.V_unit) :: !eval_env
     | Ast.Top_extern (name, ty) ->
       (* Phase 32.1 (FFI): register extern fn in both the type env and the eval env.
          The typer side just adds the type. The eval side references the
@@ -569,9 +622,11 @@ let process_decls eval_env type_env decls =
       (* Lowered to plain decls by Trait_elab.elaborate before this loop
          runs; never reached in practice. *)
       ()
-  ) decls
+  ) decls;
+  forward_check_all_kept ()
 
 let process ?base_dir ?(search_paths = []) s =
+  forward_reset ();
   Exhaustive.reset ();
   Typer.reset_send_constraints ();
   Typer.reset_region_params ();
@@ -669,6 +724,8 @@ let type_of s =
       Typer.register_sync_type name
     | Ast.Top_local name ->
       Typer.register_local_type name
+    | Ast.Top_forward (name, ty, _) ->
+      type_env := (name, Typer.mono ty) :: !type_env
     | Ast.Top_extern (name, ty) ->
       type_env := (name, Typer.mono ty) :: !type_env
     | Ast.Top_extern_type type_name ->
@@ -742,6 +799,7 @@ let region_param_report ?base_dir ?(search_paths = []) s =
     | Ast.Top_drop name -> Typer.register_drop_type name
     | Ast.Top_sync name -> Typer.register_sync_type name
     | Ast.Top_local name -> Typer.register_local_type name
+    | Ast.Top_forward (name, ty, _) -> type_env := (name, Typer.mono ty) :: !type_env
     | Ast.Top_extern (name, ty) -> type_env := (name, Typer.mono ty) :: !type_env
     | Ast.Top_extern_type type_name -> Typer.register_type type_name [] []
     | Ast.Top_ctor_alias (alias, target) -> Typer.alias_ctor alias target
@@ -930,6 +988,7 @@ let rec infer_program ?base_dir ?(search_paths = []) ?on_error source =
   | None -> infer_program_inner ?base_dir ~search_paths ?on_error source
 
 and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
+  forward_reset ();
   Typer.reset_send_constraints ();
   Typer.reset_region_params ();
   (* The compile path never reset this — it worked only because nothing drained
@@ -1022,6 +1081,7 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
         let outer_env = !type_env in
         let t = Typer.enter_level (fun () -> infer_top_let outer_env value) in
         let bindings = Typer.check_pattern pat t in
+        List.iter (fun (n, ty) -> forward_check_def n value.Ast.loc ty) bindings;
         type_env := List.fold_left (fun acc (n, ty) ->
           (n, top_let_scheme outer_env value ty) :: acc) outer_env bindings)
     | Ast.Top_let_rec bindings ->
@@ -1053,6 +1113,11 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
       Typer.register_sync_type name
     | Ast.Top_local name ->
       Typer.register_local_type name
+    | Ast.Top_forward (name, ty, floc) ->
+      Hashtbl.replace forward_promised name (ty, floc);
+      (* Into BOTH, for the same reason as extern below. *)
+      type_env := (name, Typer.mono ty) :: !type_env;
+      base_env := (name, Typer.mono ty) :: !base_env
     | Ast.Top_extern (name, ty) ->
       (* Into BOTH: the declaration loop needs it, and so does the desugared
          program, which drops the declaration and so cannot rebind it. *)
@@ -1066,6 +1131,7 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
       Typer.alias_record alias target
     | Ast.Top_trait _ | Ast.Top_impl _ -> ()
   ) prog.decls;
+  forward_check_all_kept ();
   let desugared = Ast.desugar_program prog in
   (* The desugared program re-visits every declaration's body, so when recovering
      this pass usually re-raises the first error the loop above already reported.

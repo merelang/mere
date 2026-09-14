@@ -121,6 +121,13 @@ and pattern_node =
 
 type top_decl =
   | Top_let of pattern * expr   (* left-side can be P_var (typical) or P_wild/P_tuple etc. *)
+  (* `let fn <name>: <ty>;` -- the name is bound to the written type HERE, and
+     the definition follows later, possibly in a file imported further down.
+     That is the only way to write mutual recursion that crosses a `let rec
+     ... and ...` chain, because `import` is a splice and a chain closes at
+     the splice point. Deliberately the mirror of `extern fn <name>: <ty>;`,
+     which says the same thing about a name defined OUTSIDE Mere. *)
+  | Top_forward of string * ty * Loc.t
   | Top_let_rec of (string * expr) list   (* multi for `let rec X = e1 and Y = e2 ;` *)
   | Top_type of string * string list * (string * ty option) list
     (* type name * type params (param names) * variants *)
@@ -879,6 +886,9 @@ let desugar_program (prog : program) : expr =
     | Top_sync _ -> body
     | Top_local _ -> body
     | Top_extern _ -> body
+    (* a forward declaration is a promise, not a binding: the definition it
+       names carries the value, and appears later in this same decl list. *)
+    | Top_forward _ -> body
     | Top_extern_type _ -> body
     | Top_ctor_alias _ -> body
     | Top_record_alias _ -> body
@@ -919,7 +929,7 @@ let decl_exprs (d : top_decl) : expr list =
   | Top_let (_, e) -> [e]
   | Top_let_rec bindings -> List.map snd bindings
   | Top_type _ | Top_signature _ | Top_record _ | Top_type_alias _
-  | Top_view _ | Top_extern _ | Top_extern_type _ | Top_drop _
+  | Top_view _ | Top_extern _ | Top_extern_type _ | Top_forward _ | Top_drop _
   | Top_sync _ | Top_local _ | Top_ctor_alias _ | Top_record_alias _
   | Top_trait _ | Top_impl _ -> []
 

@@ -10841,6 +10841,8 @@ let () =
       | Ast.Top_drop name -> Typer.register_drop_type name
       | Ast.Top_sync name -> Typer.register_sync_type name
       | Ast.Top_local name -> Typer.register_local_type name
+      | Ast.Top_forward (name, ty, _) ->
+        type_env := (name, Typer.mono ty) :: !type_env
       | Ast.Top_extern (name, ty) ->
         type_env := (name, Typer.mono ty) :: !type_env
       | Ast.Top_extern_type tn -> Typer.register_type tn [] []
@@ -15662,6 +15664,51 @@ let () =
    check "v0.1.451: the wide return goes to the notail branch"
      (if has (ll 12) "notail call %w" then "notail" else "bare call")
      "notail");
+
+  (* ---- `let fn <name>: <ty>;` — forward declarations -------------------
+     A `let rec ... and ...` chain is the only mutual recursion Mere had, and
+     `import` is a splice, so a chain closes where the splice happens: two
+     files, or two chains in one file, could not call each other. A forward
+     declaration binds the name to its written type at the point of the
+     promise, and the definition -- anywhere below, in any imported file --
+     fills it in. Q-137. *)
+  let fwd_err src =
+    try ignore (Pipeline.process src); "no error"
+    with Typer.Type_error (_, m) -> m | Parser.Parse_error (_, m) -> m in
+  check "let fn: a caller may be written above the definition"
+    (Pipeline.process
+       "let fn later: int -> int;\n\
+        let caller = fn (n: int) -> later n + 1;\n\
+        let later = fn (n: int) -> n * 2;\n\
+        caller 5")
+    "11";
+  check "let fn: mutual recursion across the declaration"
+    (Pipeline.process
+       "let fn is_even: int -> bool;\n\
+        let is_odd = fn (n: int) -> if n == 0 then false else is_even (n - 1);\n\
+        let is_even = fn (n: int) -> if n == 0 then true else is_odd (n - 1);\n\
+        (is_even 10, is_even 7)")
+    "(true, false)";
+  (* ⚠ the definition has to mean what the declaration promised: without this
+     the declared type is what callers ABOVE see and the inferred one is what
+     callers below see, and the program has two incompatible ideas of the name. *)
+  check "let fn: a definition of a different type is refused"
+    (let m = fwd_err
+       "let fn f: int -> int;\n\
+        let f = fn (s: str) -> s;\n\
+        f \"x\"" in
+     if idx_of m "was declared" >= 0 then "refused" else m)
+    "refused";
+  check "let fn: a promise with no definition is refused"
+    (let m = fwd_err "let fn never_given: int -> int;\n0" in
+     if idx_of m "never gives" >= 0 then "refused" else m)
+    "refused";
+  check "let fn: the name is still callable normally after its definition"
+    (Pipeline.process
+       "let fn twice: int -> int;\n\
+        let twice = fn (n: int) -> n * 2;\n\
+        twice (twice 3)")
+    "12";
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1
