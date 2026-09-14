@@ -4885,7 +4885,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr "  store i32 1, ptr @__lang_fail_jmpbuf_set";
     (* setjmp *)
     let sj_reg = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i32 @setjmp(ptr @__lang_fail_jmpbuf)" sj_reg);
+    emit_instr (Printf.sprintf "  %s = call i32 @_setjmp(ptr @__lang_fail_jmpbuf)" sj_reg);
     let from_jmp_reg = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = icmp ne i32 %s, 0" from_jmp_reg sj_reg);
     emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s"
@@ -7508,8 +7508,10 @@ let runtime_decls =
       "declare double @llvm.log.f64(double)";
       "declare double @llvm.pow.f64(double, double)";
       "declare double @atan2(double, double)";
-      "declare i32 @setjmp(ptr) returns_twice";
-      "declare void @longjmp(ptr, i32) noreturn";
+      (* the underscore pair: the plain one restores the signal mask, which
+         is a syscall per entry on macOS. See the note in codegen_c.ml. *)
+      "declare i32 @_setjmp(ptr) returns_twice";
+      "declare void @_longjmp(ptr, i32) noreturn";
       (* v0.1.264: a str the runtime concatenates with needs a header like any
          other -- this one is read for its length by str_concat. *)
       "@.fail_prefix_h = internal constant { i64, [7 x i8] } { i64 6, [7 x i8] c\"fail: \\00\" }";
@@ -11199,7 +11201,7 @@ let str_concat_helper =
       "  %active = icmp ne i32 %set, 0";
       "  br i1 %active, label %do_jmp, label %do_abort";
       "do_jmp:";
-      "  call void @longjmp(ptr @__lang_fail_jmpbuf, i32 1)";
+      "  call void @_longjmp(ptr @__lang_fail_jmpbuf, i32 1)";
       "  unreachable";
       (* This wrote the diagnostic with `puts` — to *stdout* — and then
          abort()ed for exit 134, while the interpreter and C both wrote to
