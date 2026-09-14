@@ -705,6 +705,37 @@ let instantiate_with_map sch =
 
 let instantiate sch = fst (instantiate_with_map sch)
 
+(* ⚠ A WRITTEN TYPE VARIABLE IS A PROMISE OF POLYMORPHISM, not a rigid name.
+   The parser turns `'a` into `TyParam "a"`, which unifies only with itself --
+   right for a parameter annotation, where the writer is naming a type the
+   caller chose, and wrong for a forward declaration, where the writer is
+   saying "for every 'a". Each distinct TyParam becomes one quantified
+   variable, so `let fn id: 'a -> 'a;` declares a scheme and not a demand that
+   the definition work on a type literally called 'a.
+
+   Region parameters are the reason this matters in practice rather than in
+   principle: every function that takes a map or a vec has one, so 117 of the
+   161 declarations mere-ruby needs to split its evaluator mention a variable.
+   Q-137. *)
+let scheme_of_written (t : Ast.ty) : scheme =
+  let seen : (string * Ast.ty) list ref = ref [] in
+  let rec subst t =
+    match Ast.walk t with
+    | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes
+      | Ast.TySimd _ | Ast.TyUnit) as t -> t
+    | Ast.TyParam name ->
+      (try List.assoc name !seen
+       with Not_found ->
+         let v = fresh_var () in seen := (name, v) :: !seen; v)
+    | Ast.TyVar _ as t -> t
+    | Ast.TyArrow (a, b) -> Ast.TyArrow (subst a, subst b)
+    | Ast.TyTuple ts -> Ast.TyTuple (List.map subst ts)
+    | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map subst args)
+    | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, subst inner)
+  in
+  let body = subst t in
+  { quantified = collect_free_vars body []; body; constraints = [] }
+
 type env = (string * scheme) list
 
 (* ---- Trait support (ad-hoc polymorphism via dictionary elaboration) ----
