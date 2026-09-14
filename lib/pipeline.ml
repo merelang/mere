@@ -23,7 +23,9 @@ let forward_check_def name loc (t : Ast.ty) =
   | None -> ()
   | Some (declared, dloc) ->
     Hashtbl.replace forward_kept name ();
-    (try Typer.unify loc declared t
+    (* instantiate: the declaration is a scheme, and the definition is one
+       instance of it. *)
+    (try Typer.unify loc (Typer.instantiate (Typer.scheme_of_written declared)) t
      with _ ->
        raise (Typer.Type_error (loc,
          Printf.sprintf
@@ -562,7 +564,16 @@ let process_decls eval_env type_env decls =
         let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
         Typer.unify value.Ast.loc alpha t
       ) bindings alphas;
-      let placeholders = List.map (fun (n, _) -> (n, ref Eval.V_unit)) bindings in
+      List.iter2 (fun (n, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
+      (* a member that KEEPS A PROMISE reuses the ref the promise made, so a
+         caller written above the group -- the only reason to declare it --
+         ends up holding the finished function and not the placeholder. *)
+      let placeholders = List.map (fun (n, _) ->
+        if Hashtbl.mem forward_promised n then
+          (match List.assoc_opt n !eval_env with
+           | Some r -> (n, r)
+           | None -> (n, ref Eval.V_unit))
+        else (n, ref Eval.V_unit)) bindings in
       let env_eval = List.fold_left (fun acc (n, r) -> (n, r) :: acc) !eval_env placeholders in
       List.iter (fun (n, value) ->
         let v = Eval.eval_in env_eval value in
@@ -600,7 +611,7 @@ let process_decls eval_env type_env decls =
        definition is a later `let` in this same program, and the eval side gets a placeholder that the definition overwrites. *)
     | Ast.Top_forward (name, ty, floc) ->
       Hashtbl.replace forward_promised name (ty, floc);
-      type_env := (name, Typer.mono ty) :: !type_env;
+      type_env := (name, Typer.scheme_of_written ty) :: !type_env;
       eval_env := (name, ref Eval.V_unit) :: !eval_env
     | Ast.Top_extern (name, ty) ->
       (* Phase 32.1 (FFI): register extern fn in both the type env and the eval env.
@@ -705,6 +716,7 @@ let type_of s =
         let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
         Typer.unify value.Ast.loc alpha t
       ) bindings alphas;
+      List.iter2 (fun (n, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
       type_env := List.fold_left2 (fun acc (n, _) a ->
         let sch = Typer.generalize outer_env a in
         Typer.record_top_scheme n sch;
@@ -725,7 +737,7 @@ let type_of s =
     | Ast.Top_local name ->
       Typer.register_local_type name
     | Ast.Top_forward (name, ty, _) ->
-      type_env := (name, Typer.mono ty) :: !type_env
+      type_env := (name, Typer.scheme_of_written ty) :: !type_env
     | Ast.Top_extern (name, ty) ->
       type_env := (name, Typer.mono ty) :: !type_env
     | Ast.Top_extern_type type_name ->
@@ -758,6 +770,41 @@ let type_of s =
 
    Disqualified is not an error: those keep today's behaviour, which is the default
    region -- over-strict, never unsound. *)
+(* `mere --decls <file>`: the forward declaration for every top-level function
+   the file defines, in definition order. Splitting a `let rec ... and ...`
+   chain means writing one `let fn <name>: <ty>;` per name the halves share,
+   and a chain worth splitting has hundreds -- mere-ruby's evaluator needs 161
+   for one cut. Typing them by hand is transcription, and the compiler already
+   knows every answer. Q-137.
+
+   The types come from the inference that just ran, so a name whose type the
+   program does not pin (an unused polymorphic helper) prints with the type
+   variables inference gave it; a declaration is monomorphic, so such a line
+   has to be looked at rather than pasted. *)
+let decls_report ?base_dir ?(search_paths = []) s =
+  Exhaustive.reset ();
+  Typer.reset_send_constraints ();
+  Typer.reset_region_params ();
+  forward_reset ();
+  let prog = Trait_elab.elaborate (parse_program ?base_dir ~search_paths s) in
+  let eval_env = ref Eval.initial_env in
+  let type_env = ref Typer.initial_env in
+  process_decls eval_env type_env prog.Ast.decls;
+  let out = Buffer.create 4096 in
+  List.iter (fun decl ->
+    let names = match decl with
+      | Ast.Top_let ({ Ast.pnode = Ast.P_var n; _ }, _) -> [n]
+      | Ast.Top_let_rec bs -> List.map fst bs
+      | _ -> [] in
+    List.iter (fun n ->
+      match Hashtbl.find_opt Typer.top_schemes n with
+      | Some sch ->
+        Buffer.add_string out
+          (Printf.sprintf "let fn %s: %s;\n" n (Ast.pp_ty sch.Typer.body))
+      | None -> ()) names)
+    prog.Ast.decls;
+  Buffer.contents out
+
 let region_param_report ?base_dir ?(search_paths = []) s =
   Exhaustive.reset ();
   Typer.reset_send_constraints ();
@@ -789,6 +836,7 @@ let region_param_report ?base_dir ?(search_paths = []) s =
       List.iter2 (fun (_, value) alpha ->
         let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
         Typer.unify value.Ast.loc alpha t) bindings alphas;
+        List.iter2 (fun (n, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
       type_env := List.fold_left2 (fun acc (n, _) a ->
         let sch = Typer.generalize outer_env a in
         Typer.record_top_scheme n sch;
@@ -799,7 +847,7 @@ let region_param_report ?base_dir ?(search_paths = []) s =
     | Ast.Top_drop name -> Typer.register_drop_type name
     | Ast.Top_sync name -> Typer.register_sync_type name
     | Ast.Top_local name -> Typer.register_local_type name
-    | Ast.Top_forward (name, ty, _) -> type_env := (name, Typer.mono ty) :: !type_env
+    | Ast.Top_forward (name, ty, _) -> type_env := (name, Typer.scheme_of_written ty) :: !type_env
     | Ast.Top_extern (name, ty) -> type_env := (name, Typer.mono ty) :: !type_env
     | Ast.Top_extern_type type_name -> Typer.register_type type_name [] []
     | Ast.Top_ctor_alias (alias, target) -> Typer.alias_ctor alias target
@@ -1096,6 +1144,7 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
         List.iter2 (fun (_, value) alpha ->
           let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
           Typer.unify value.Ast.loc alpha t) bindings alphas;
+          List.iter2 (fun (n, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
         type_env := List.fold_left2 (fun acc (n, _) a ->
           let sch = Typer.generalize outer_env a in
           (n, sch) :: acc) outer_env bindings alphas)
@@ -1116,8 +1165,8 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
     | Ast.Top_forward (name, ty, floc) ->
       Hashtbl.replace forward_promised name (ty, floc);
       (* Into BOTH, for the same reason as extern below. *)
-      type_env := (name, Typer.mono ty) :: !type_env;
-      base_env := (name, Typer.mono ty) :: !base_env
+      type_env := (name, Typer.scheme_of_written ty) :: !type_env;
+      base_env := (name, Typer.scheme_of_written ty) :: !base_env
     | Ast.Top_extern (name, ty) ->
       (* Into BOTH: the declaration loop needs it, and so does the desugared
          program, which drops the declaration and so cannot rebind it. *)

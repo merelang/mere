@@ -742,6 +742,16 @@ let () =
   | [_; "-t"; path] ->
     let source = read_file path in
     run_action Mere.Pipeline.type_of path source
+  (* Q-137: the forward declaration for every top-level function this file
+     defines. Splitting a `let rec ... and ...` chain means writing one
+     `let fn <name>: <ty>;` per shared name, and a chain worth splitting has
+     hundreds; the compiler already knows every answer. *)
+  | [_; "--decls"; path] ->
+    let source = read_file path in
+    let base = Filename.dirname path in
+    run_action ~base_dir:base
+      (Mere.Pipeline.decls_report ~base_dir:base ~search_paths:!search_paths)
+      path source
   (* Q-127 stage 1: which functions would take a hidden region argument, and which
      cannot. A measurement, not a compilation mode -- see Pipeline.region_param_report. *)
   | [_; "--dump-region-params"; path] ->
