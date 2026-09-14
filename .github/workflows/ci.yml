@@ -316,6 +316,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/doc_coverage_check.sh
 
+      - name: "decls round-trip (--decls output, pasted back, changes nothing)"
+        if: ${{ !cancelled() }}
+        run: sh scripts/decls_roundtrip.sh
+
       - name: live_query (which reads a write affects, on every backend)
         if: ${{ !cancelled() }}
         run: sh scripts/live_query_check.sh
