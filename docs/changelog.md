@@ -4,6 +4,45 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.485 — 2026-09-15
+
+_`str_of_int` stops going through printf._
+
+_**`show_int` was `asprintf("%lld")` followed by `__lang_str_of_cstr` and a
+`free`** -- the whole printf formatting machinery, a malloc, then a strlen, a
+REGION allocation and a memcpy, and finally a free: two allocations and a copy
+to spell a number. It writes the digits into a 24-byte stack buffer and makes
+one region allocation now._
+
+_Measured in C alone, 2,000,000 conversions: asprintf 135-145 ms, digits by
+hand 52-54 ms. In mere-ruby, where anything that keys a table by an id calls
+it:_
+
+| | before | after |
+|---|---|---|
+| CSV.parse quoted, 1,600 rows | 4.29-4.42 s | **3.33-3.40 s** |
+| 120k Array / Hash / String / Integer method rounds | 9.60 s | **9.18 s** |
+| 200k method calls | 4.23-4.29 s | 4.08-4.24 s |
+
+_Three runs each for the first two, five for the last -- which is the honest
+one to read carefully: its ranges nearly touch, so call it 2-3% and not more.
+The CSV row is 23%._
+
+_⚠ **The input that breaks a hand-rolled itoa is the most negative integer**,
+where `-v` overflows -- and signed overflow is UB the optimiser may delete a
+guard for. The form here computes `(unsigned long long)(-(v + 1)) + 1` and
+never negates the value at all. Two tests pin it: the minimum, and the
+zero / negative / maximum trio._
+
+_Checked on the interpreter, the C backend and LLVM -- eleven lines each,
+identical, edges included -- and the emitted C was compiled and run on the
+Linux CI image for the same answer. (LLVM has its own `show_int` through
+`mint_show_format` and is untouched; it agrees because it always did.)_
+
+_2767 tests, parity 178/178._
+
+---
+
 ## v0.1.484 — 2026-09-14
 
 _The underscore that was worth 100x._
