@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.484 — 2026-09-14
+
+_The underscore that was worth 100x._
+
+_**`try_or` compiles to `_setjmp` / `_longjmp` instead of `setjmp` /
+`longjmp`.** On macOS and the BSDs the plain pair SAVES AND RESTORES THE
+SIGNAL MASK, and that is a `sigprocmask` syscall on every entry. Measured
+here with a three-line C program, 3,000,000 iterations:_
+
+| | time | per call |
+|---|---|---|
+| `setjmp` | 673-687 ms | **229 ns** |
+| `_setjmp` | 6.7-7.0 ms | **2.3 ns** |
+
+_~100x, and it is paid on ENTRY -- not on the rare unwind. Anything that
+wraps a call in `try_or` pays it per call. In mere-ruby, an interpreter
+written in Mere, `try_or` is entered once per Ruby method call, and the
+plain pair was **7% of the whole profile** (225 of 3,305 samples, with
+`sigprocmask` and `__sigaltstack` sitting under it)._
+
+| | before | after |
+|---|---|---|
+| mere-ruby, 200k method calls | 5.20-5.31 s | **4.91-5.02 s** |
+
+_Three runs each, no overlap between the two sets._
+
+_**Nothing depends on the mask being restored.** The runtime never blocks a
+signal, and no signal handler longjmps out -- the SIGSEGV handler writes one
+line and `_exit`s. On glibc `setjmp` already does not save the mask, so this
+changes nothing on Linux; the emitted C was compiled and run on the CI image
+to confirm `_setjmp` is declared there too (same answer, clean build)._
+
+_Both backends that emit it: the C one (4 sites) and the LLVM one (`declare
+i32 @_setjmp(ptr) returns_twice`, and the `_longjmp` call in the fail path).
+A `try_or` program gives the same answer on the interpreter, the C backend
+and LLVM._
+
+_**A test refuses the plain pair**, because dropping the underscore is a 100x
+regression on one platform and invisible on the other -- exactly the kind of
+change no ordinary test notices. It emits C for a `try_or` program and fails
+if a bare `setjmp(` or `longjmp(` appears; poisoned by putting one back, and
+it went red._
+
+_2765 tests, parity 178/178._
+
+---
+
 ## v0.1.483 — 2026-09-14
 
 _A name can be promised before it is defined._
