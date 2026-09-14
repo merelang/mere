@@ -194,9 +194,16 @@ It is the mirror of `extern fn <name>: <type>;`, which declares a name defined
 - **every promise must be kept** — a declared name with no definition is
   refused, naming the declaration.
 
-The declared type is monomorphic, like `extern`'s. A polymorphic forward
-declaration would need the written type's variables to be quantified, which
-they are not today (`fn (x: a) -> x` reads `a` as a rigid type name).
+A written type variable is quantified, not rigid: `let fn idl: 'a list -> 'a
+list;` declares a scheme, so the definition may be `int list -> int list`.
+(In a parameter annotation the same `'a` still names one type the caller
+chose — there the writer is naming, here promising.) Region parameters make
+this the ordinary case rather than the exotic one: every function that takes a
+`Map` or a `Vec` has one.
+
+`mere --decls <file>` prints the declaration for every top-level function the
+file defines, which is how a large chain gets split without transcribing
+hundreds of types by hand.
 
 ### if-then-else / if-then
 ```

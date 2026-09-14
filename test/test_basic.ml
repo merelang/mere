@@ -15703,6 +15703,28 @@ let () =
     (let m = fwd_err "let fn never_given: int -> int;\n0" in
      if idx_of m "never gives" >= 0 then "refused" else m)
     "refused";
+  (* ⚠ A WRITTEN TYPE VARIABLE IS A PROMISE OF POLYMORPHISM. The parser makes
+     `'a` a TyParam, which unifies only with itself -- right for a parameter
+     annotation, wrong here. Region parameters make this the common case, not
+     the exotic one: 117 of the 161 declarations mere-ruby needs to split its
+     evaluator mention a variable, because every function that takes a map has
+     one. *)
+  check "let fn: a declared type variable is quantified, not rigid"
+    (Pipeline.process
+       "let fn idl: 'a list -> 'a list;\n\
+        let idl = fn (xs: int list) -> xs;\n\
+        idl (Cons (1, Nil))")
+    "[1]";
+  (* a promise kept by a member of a `let rec ... and ...` group counts: that is
+     the whole point, since the group is what a chain is made of. *)
+  check "let fn: a promise kept inside a rec group"
+    (Pipeline.process
+       "let fn ping: int -> int;\n\
+        let caller = fn (n: int) -> ping n;\n\
+        let rec ping = fn (n: int) -> if n <= 0 then 0 else pong (n - 1)\n\
+        and pong = fn (n: int) -> ping n;\n\
+        caller 3")
+    "0";
   check "let fn: the name is still callable normally after its definition"
     (Pipeline.process
        "let fn twice: int -> int;\n\
