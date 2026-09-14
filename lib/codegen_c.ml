@@ -3520,6 +3520,15 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.App ({ node = Ast.Var "try_or"; _ }, fn_e) ->
        (* Phase 22.5: try_or fn default — catch fail via setjmp and return
           default on failure. __lang_fail_impl does longjmp when jmpbuf is set,
+          ⚠ `_setjmp` / `_longjmp`, NOT `setjmp` / `longjmp`. On macOS and the
+          BSDs the plain pair SAVES AND RESTORES THE SIGNAL MASK, which is a
+          `sigprocmask` SYSCALL on every entry: measured on an M-series mac,
+          229 ns against 2.3 ns -- ~100x -- and a `try_or` is entered once per
+          call in an interpreter written in this language, where it was 7% of
+          the whole profile. Nothing here depends on the mask being restored:
+          the runtime never blocks a signal, and no signal handler longjmps out
+          (the SIGSEGV one writes a line and _exit()s). On glibc `setjmp`
+          already does not save the mask, so this changes nothing on Linux.
           abort when unset. Save/restore to support nesting. *)
        let default_c = emit_expr arg in
        let fn_invoke_c =
@@ -3543,7 +3552,7 @@ let rec emit_expr (e : Ast.expr) : string =
              __lang_fail_jmpbuf_set = 1; \
              __auto_type __default = (%s); \
              __auto_type __res = __default; \
-             if (setjmp(__lang_fail_jmpbuf) == 0) { __res = (%s); } \
+             if (_setjmp(__lang_fail_jmpbuf) == 0) { __res = (%s); } \
              else { __lang_region_unwind(__saved_rsn); \
                     __lang_current_region = __saved_cur; } \
              __lang_fail_jmpbuf_set = __saved_set; \
@@ -5791,7 +5800,7 @@ typedef struct mj_node {
 static jmp_buf __mj_jb;
 static int __mj_active = 0;
 static void __mj_die(const char* msg) {
-  if (__mj_active) longjmp(__mj_jb, 1);
+  if (__mj_active) _longjmp(__mj_jb, 1);
   fprintf(stderr, "of_json: %s\n", msg); exit(1);
 }
 static mj_node* __mj_alloc(mj_kind k) {
@@ -6056,7 +6065,7 @@ let emit_of_json_opt_fn (inner_tag : string) (inner_t : Ast.ty) : string =
   Printf.sprintf
     "static %s of_json_opt_%s(const char* __s) {\n  \
        volatile int __saved = __mj_active; __mj_active = 1;\n  \
-       if (setjmp(__mj_jb)) { __mj_active = __saved; return %s; }\n  \
+       if (_setjmp(__mj_jb)) { __mj_active = __saved; return %s; }\n  \
        %s __v = ((%s){.tag = %d, .payload.Some = __ojnode_%s(__mj_parse(__s))});\n  \
        __mj_active = __saved; return __v;\n}"
     opt_cty inner_tag none_v opt_cty opt_cty some_tag inner_tag
@@ -7988,7 +7997,7 @@ let str_concat_helper =
       "     'fail: ...' line on every try_or-caught failure. */";
       "  if (__lang_fail_jmpbuf_set) {";
       "    snprintf(__lang_fail_msg, sizeof __lang_fail_msg, \"%s\", msg);";
-      "    longjmp(__lang_fail_jmpbuf, 1);";
+      "    _longjmp(__lang_fail_jmpbuf, 1);";
       "  }";
       "  fprintf(stderr, \"%s\\n\", msg);";
       (* exit rather than abort: an uncaught `fail` is a program error the
@@ -12885,7 +12894,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           \  int __saved_rsn = __lang_region_active_n;\n\
           \  memcpy(__saved_jmp, __lang_fail_jmpbuf, sizeof(jmp_buf));\n\
           \  __lang_fail_jmpbuf_set = 1;\n\
-          \  if (setjmp(__lang_fail_jmpbuf) != 0) {\n\
+          \  if (_setjmp(__lang_fail_jmpbuf) != 0) {\n\
           \    __lang_region_unwind(__saved_rsn);\n\
           \    __lang_current_region = __saved_cur;\n\
           \    __lang_fail_jmpbuf_set = __saved_set;\n\

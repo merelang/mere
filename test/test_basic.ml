@@ -6213,7 +6213,7 @@ let () =
     (let c = vec_codegen_c "try_or (fn u -> int_of_str \"x\") 0" in
      (* v0.1.310 reshaped the guard to multiple lines (it copies the message
         into the per-thread slot before jumping); the property is unchanged. *)
-     let jmp = idx_of c "longjmp(__lang_fail_jmpbuf, 1);" in
+     let jmp = idx_of c "_longjmp(__lang_fail_jmpbuf, 1);" in
      (* v0.1.246: the `fail: ` tag moved from this print to the `fail` builtin, so
         the print is a bare "%s" now. The property is the same one — the longjmp
         has to come first, or a caught failure leaks a diagnostic. *)
@@ -6914,7 +6914,7 @@ let () =
     (vec_codegen_c
        "type 'a option = None | Some of 'a; type R = { a: int }; \
         match (of_json_opt \"x\" : R option) with | Some r -> r.a | None -> 0")
-    "setjmp(__mj_jb)";
+    "_setjmp(__mj_jb)";
   (* exit n on the C backend: emits libc exit() (was undeclared before; mq
      PAIN P1's last item). *)
   assert_contains "exit: C backend emits libc exit()"
@@ -15097,8 +15097,22 @@ let () =
      then "header" else "missing") "header";
   check "v0.1.308: --lib leaves no extern linkage on internals"
     (if has lib_demo "extern const" then "extern" else "static-only") "static-only";
+  (* ⚠ THE UNDERSCORE IS THE POINT. On macOS and the BSDs, `setjmp`/`longjmp`
+     save and restore the SIGNAL MASK -- a `sigprocmask` syscall on every
+     entry, measured at 229 ns against `_setjmp`'s 2.3 ns on an M-series mac.
+     A `try_or` is entered once per call in an interpreter written in Mere,
+     where the plain pair was 7% of the whole profile. Dropping the underscore
+     is a 100x regression on one platform and invisible on the other, which is
+     exactly the kind of change no ordinary test notices. *)
+  check "the C backend uses _setjmp, never the mask-saving setjmp"
+    (let c = vec_codegen_c "try_or (fn u -> int_of_str \"x\") 0" in
+     let bad = idx_of c " setjmp(" >= 0 || idx_of c "(setjmp(" >= 0
+               || idx_of c " longjmp(" >= 0 || idx_of c "(longjmp(" >= 0 in
+     if bad then "found a mask-saving setjmp/longjmp"
+     else if idx_of c "_setjmp(" >= 0 then "underscore only" else "no setjmp at all")
+    "underscore only";
   check "v0.1.310: the wrapper guards the call with setjmp"
-    (if has lib_demo "if (setjmp(__lang_fail_jmpbuf) != 0) {"
+    (if has lib_demo "if (_setjmp(__lang_fail_jmpbuf) != 0) {"
         && has lib_demo "return MERE_FAIL;"
      then "guarded" else "bare") "guarded";
   check "v0.1.310: the fail jmpbuf is per-thread in every mode"
