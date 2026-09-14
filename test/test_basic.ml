@@ -15097,6 +15097,19 @@ let () =
      then "header" else "missing") "header";
   check "v0.1.308: --lib leaves no extern linkage on internals"
     (if has lib_demo "extern const" then "extern" else "static-only") "static-only";
+  (* ⚠ THE MOST NEGATIVE INTEGER. `show_int` formats digits by hand now instead
+     of calling asprintf, and the one input that breaks a hand-rolled itoa is
+     the minimum: `-v` overflows there, and signed overflow is UB the optimiser
+     is entitled to delete the guard for. The form used computes
+     `(unsigned)(-(v + 1)) + 1` and never negates the value itself. *)
+  check "show_int: the most negative integer"
+    (Pipeline.process "let big = 4611686018427387903 in str_of_int (0 - big - 1)")
+    "\"-4611686018427387904\"";
+  check "show_int: zero, negative and the maximum"
+    (Pipeline.process
+       "let big = 4611686018427387903 in \
+        str_of_int 0 ++ \"|\" ++ str_of_int (0 - 7) ++ \"|\" ++ str_of_int big")
+    "\"0|-7|4611686018427387903\"";
   (* ⚠ THE UNDERSCORE IS THE POINT. On macOS and the BSDs, `setjmp`/`longjmp`
      save and restore the SIGNAL MASK -- a `sigprocmask` syscall on every
      entry, measured at 229 ns against `_setjmp`'s 2.3 ns on an M-series mac.
