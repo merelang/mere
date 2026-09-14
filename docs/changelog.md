@@ -4,6 +4,92 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.483 — 2026-09-14
+
+_A name can be promised before it is defined._
+
+_**`let fn <name>: <type>;` declares a top-level name ahead of its
+definition**, so two functions can call each other without sharing one
+`let rec ... and ...` chain. The chain was the only tool for mutual recursion,
+and it is also the unit of MONOMORPHISM: everything inside one is instantiated
+at a single type. So in a large program "these two call each other" and "these
+two must have the same type" were one statement, with no way to say only the
+first._
+
+```
+let fn even: int -> bool;
+let odd  = fn (n: int) -> if n == 0 then false else even (n - 1);
+let even = fn (n: int) -> if n == 0 then true  else odd  (n - 1);
+```
+
+_A declaration is checked, not trusted. The definition is unified against the
+declared type where it appears, and a promise still unkept at the end of the
+program is an error naming the declaration's line._
+
+_`mere --decls <file>` prints the declarations for a program's own top-level
+names, so an existing chain can be cut without transcribing types by hand._
+
+_**The feature landed with four defects, and its seven unit tests were green
+for all four.** Every one of them needed a real program to see, and what saw
+them was pasting `--decls` output back into the file it came from and requiring
+byte-identical output — now `scripts/decls_roundtrip.sh`, over the 178-program
+parity corpus. It found:_
+
+| | what it did | what saw it |
+|---|---|---|
+| a promise on a name that shadows a builtin | never kept — `let fn odd;` + `let odd = ...` was refused as undefined | round-trip |
+| a definition more specific than its promise | accepted; a caller above it could pass a type the definition has no body for. Typer passed, C backend failed to compile | round-trip |
+| declaring a type | made the name LESS general than not declaring it: `'a -> 'a` was fixed by its first call site | a two-call-site program |
+| `--decls` | printed the prelude's ~70 names, under post-uniquify spellings, and RAN the program while doing it | round-trip |
+
+_The first is `uniquify_toplevel_shadows`, which renames a top-level binding
+that shadows a builtin and did not know about forward declarations: the promise
+kept the name `odd` and the definition became `odd__v2`, so the promise was
+registered under one name and kept under another. A declaration and its
+definition are one binding, so the rename happens at the declaration now and
+the definition inherits it._
+
+_The second and third are one root: the declaration and the definition were
+related by INSTANTIATION rather than SUBSUMPTION. Unifying the definition
+against a fresh instance of the declared scheme lets the definition be narrower
+than the promise, and the instance's variables — made at the outer level — drag
+the definition's own variables down out of reach of `generalize`. Unifying
+against the declaration AS WRITTEN fixes both: the parser makes `'a` a
+`TyParam`, which unifies only with itself or an unbound variable, and that is
+exactly a skolem. The declared scheme is then what the name means both above
+and below its definition, which is the whole point of writing one._
+
+_A fifth thing the round-trip found is not a defect: a declaration for a name
+that shadows a builtin moves the shadow up to the declaration, so a caller
+written above the definition stops seeing the builtin. That is the feature
+working — `test/parity/shadow_builtin.mere` exists to hold exactly that
+ordering — but it is not what someone pasting a generated file expects, so
+`--decls` prints those lines commented, with the reason. Names bound twice at
+top level get the same treatment, for a plainer reason: one declaration cannot
+name two bindings._
+
+_`let fn` also accepts a module-qualified name (`let fn M.f: int -> int;`). The
+lexer makes each `.` its own token and the parser matched a single identifier,
+so every module member was undeclarable — 625 of the declarations `--decls`
+printed for the corpus._
+
+_167 of the 168 corpus programs round-trip. The one that does not names a
+record type declared inside a module, which cannot be named in an annotation
+from outside it at all — `let use = fn (r: M.t) -> r.a` fails the same way, with
+no declaration involved. It is exempted BY NAME in the gate, and the gate fails
+if it ever starts passing, so the exemption cannot outlive its reason._
+
+_The feature came from a program that had outgrown the chain: an interpreter
+whose `let rec eval_e = ... and ...` had reached 38,856 lines in one file,
+because everything reachable from the evaluator had to live in it. Six generated
+declarations were enough to cut it. That program does not ship the cut — it
+peeled off everything the chain did not need instead, which is the better answer
+for that codebase — but the constraint it was working around is gone either way._
+
+_16 tests (2764 total), one new gate. Documented in `docs/language-reference.md`._
+
+---
+
 ## v0.1.482 — 2026-09-14
 
 _And the lambda written at the call site._

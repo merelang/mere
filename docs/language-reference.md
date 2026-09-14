@@ -195,15 +195,49 @@ It is the mirror of `extern fn <name>: <type>;`, which declares a name defined
   refused, naming the declaration.
 
 A written type variable is quantified, not rigid: `let fn idl: 'a list -> 'a
-list;` declares a scheme, so the definition may be `int list -> int list`.
-(In a parameter annotation the same `'a` still names one type the caller
-chose — there the writer is naming, here promising.) Region parameters make
-this the ordinary case rather than the exotic one: every function that takes a
-`Map` or a `Vec` has one.
+list;` declares a *scheme*, and each call site instantiates it fresh. (In a
+parameter annotation the same `'a` still names one type the caller chose —
+there the writer is naming, here promising.) Region parameters make this the
+ordinary case rather than the exotic one: every function that takes a `Map` or
+a `Vec` has one.
 
-`mere --decls <file>` prints the declaration for every top-level function the
-file defines, which is how a large chain gets split without transcribing
-hundreds of types by hand.
+The definition must be **at least as general as** the declaration, not merely
+an instance of it — `let fn idl: 'a list -> 'a list;` with `let idl = fn (xs:
+int list) -> xs;` is refused. It has to be: a caller written above the
+definition would otherwise be free to pass a `str list`, which is the one thing
+a declaration exists to allow and the definition cannot do.
+
+A declaration also does not cost the name any polymorphism it would have had:
+a declared `'a -> 'a` is usable at as many types as the same definition with no
+declaration at all.
+
+The name may be module-qualified — `let fn M.f: int -> int;` declares a member
+of `module M { ... }`, whose splice gives it that name.
+
+### `mere --decls <file>`
+
+Prints the declaration for every top-level name the file defines — how a large
+chain gets split without transcribing hundreds of types by hand. It reports the
+file's own names only (not the prelude's), under the spellings the source uses,
+and does not run the program.
+
+Two kinds of name come out **commented, with the reason**, because pasting them
+back would not mean what it says:
+
+- a name bound more than once at top level (`let x = 1; let x = x + 40;`) —
+  one declaration cannot name two bindings;
+- a name that shadows a builtin. Top-level bindings are sequential, so a caller
+  written above `let show = ...` uses the *builtin* `show`; a declaration puts
+  the user's `show` in scope from the declaration down, which changes what that
+  caller calls. Uncomment it only if that is what you want.
+
+`scripts/decls_roundtrip.sh` is the gate: every program in `test/parity/` must
+produce identical output with its own `--decls` output prepended.
+
+⚠ A record type declared inside a module cannot be named in an annotation from
+outside it — `M.t` and `t` are both rejected — so a declaration mentioning one
+does not type-check. That is a pre-existing gap in annotations generally, not
+in declarations: `let use = fn (r: M.t) -> r.a` fails the same way.
 
 ### if-then-else / if-then
 ```
