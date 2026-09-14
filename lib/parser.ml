@@ -2180,6 +2180,29 @@ let rec parse_program_internal tokens =
       let decl =
         if marker = "sync" then Ast.Top_sync name else Ast.Top_local name in
       parse_decls (decl :: decls) after_marker
+    (* `let fn <name>: <ty>;` -- a FORWARD DECLARATION. The name is in scope
+       from here on with the written type; the definition comes later, and may
+       be in a file imported below this point. That is what makes mutual
+       recursion possible across a chain boundary: `import` is a splice, so a
+       `let rec ... and ...` chain closes where the splice happens, and without
+       this there is no way to name something defined on the other side.
+       Spelled after `extern fn <name>: <ty>;`, which declares a name defined
+       outside Mere; this one is defined inside it, later. `let fn` is not
+       otherwise a legal start of a declaration (a pattern cannot be `fn`), so
+       no existing program changes meaning -- and no new keyword is taken,
+       which `val` would have done at the cost of six files that use it as an
+       ordinary name. *)
+    | (fpos, T_let) :: (_, T_fn) :: (_, T_ident name) :: (_, T_colon) :: rest ->
+      let t, after_ty = ty rest in
+      (match after_ty with
+       | (_, T_semi) :: rest ->
+         parse_decls (Ast.Top_forward (name, t, fpos) :: decls) rest
+       | _ ->
+         raise (Parse_error (pos_of after_ty,
+           "expected ';' after `let fn " ^ name ^ ": <type>` forward declaration")))
+    | (fpos, T_let) :: (_, T_fn) :: _ ->
+      raise (Parse_error (fpos,
+        "expected `let fn <name>: <type>;` (a forward declaration)"))
     | (epos, T_extern) :: (_, T_fn) :: (_, T_ident name) :: (_, T_colon) :: rest ->
       (* Phase 32.1 (C1 FFI): `extern fn <name>: <ty>;` parse. *)
       let t, after_ty = ty rest in

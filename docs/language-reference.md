@@ -170,6 +170,34 @@ and is_odd     = fn n -> if n == 0 then false else is_even (n - 1)
 in is_even 10
 ```
 
+### Forward declarations (`let fn <name>: <type>;`)
+
+`let rec ... and ...` is the only way two definitions can call each other, and
+a chain closes where it ends. `import` is a splice, so a chain also closes at
+an import: two files, or two chains in one file, could not be mutually
+recursive. A forward declaration binds a name to a written type at the point
+of the promise; the definition follows anywhere below, including in a file
+imported further down.
+
+```
+let fn is_even: int -> bool;                    // the promise
+let is_odd  = fn (n: int) -> if n == 0 then false else is_even (n - 1);
+let is_even = fn (n: int) -> if n == 0 then true  else is_odd  (n - 1);
+```
+
+It is the mirror of `extern fn <name>: <type>;`, which declares a name defined
+*outside* Mere; this one is defined inside it, later. Two rules, both checked:
+
+- **the definition must have the declared type** — otherwise callers written
+  above the definition and callers written below it would see different types
+  for the same name;
+- **every promise must be kept** — a declared name with no definition is
+  refused, naming the declaration.
+
+The declared type is monomorphic, like `extern`'s. A polymorphic forward
+declaration would need the written type's variables to be quantified, which
+they are not today (`fn (x: a) -> x` reads `a` as a rigid type name).
+
 ### if-then-else / if-then
 ```
 if cond then a else b               // standard if; a and b share the same type

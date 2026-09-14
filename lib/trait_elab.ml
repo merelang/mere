@@ -148,6 +148,9 @@ let type_pass (prog : program) : (string, Typer.scheme) Hashtbl.t =
     | Top_sync name -> Typer.register_sync_type name
     | Top_local name -> Typer.register_local_type name
     | Top_extern (name, ty) -> type_env := (name, Typer.mono ty) :: !type_env
+    (* a forward declaration binds the name to its written type from here on,
+       exactly as extern does; the difference is where the definition lives. *)
+    | Top_forward (name, ty, _) -> type_env := (name, Typer.mono ty) :: !type_env
     | Top_extern_type name -> Typer.register_type name [] []
     | Top_ctor_alias (a, t) -> Typer.alias_ctor a t
     | Top_record_alias (a, t) -> Typer.alias_record a t
