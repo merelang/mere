@@ -2192,14 +2192,33 @@ let rec parse_program_internal tokens =
        no existing program changes meaning -- and no new keyword is taken,
        which `val` would have done at the cost of six files that use it as an
        ordinary name. *)
-    | (fpos, T_let) :: (_, T_fn) :: (_, T_ident name) :: (_, T_colon) :: rest ->
-      let t, after_ty = ty rest in
-      (match after_ty with
-       | (_, T_semi) :: rest ->
-         parse_decls (Ast.Top_forward (name, t, fpos) :: decls) rest
+    | (fpos, T_let) :: (_, T_fn) :: (_, T_ident _) :: _ ->
+      (* The name may be MODULE-QUALIFIED. `module M { let f = ... }` is a splice
+         that renames its members to `M.f`, and the lexer makes each `.` its own
+         token, so a declaration for one of them arrives as three tokens and the
+         single-`T_ident` shape could not match it. Every module member was
+         therefore undeclarable -- 625 of the declarations `mere --decls` printed
+         for the parity corpus, none of which could be read back in. Nesting is
+         allowed for the same reason it is allowed in a module: `A.B.c` is one
+         name that happens to contain dots. *)
+      let rec qname acc = function
+        | (_, T_ident n) :: (_, T_dot) :: rest -> qname (acc ^ n ^ ".") rest
+        | (_, T_ident n) :: rest -> (acc ^ n, rest)
+        | rest -> (acc, rest) in
+      let after_fn = (match toks with _ :: _ :: r -> r | r -> r) in
+      let name, after_name = qname "" after_fn in
+      (match after_name with
+       | (_, T_colon) :: rest ->
+         let t, after_ty = ty rest in
+         (match after_ty with
+          | (_, T_semi) :: rest ->
+            parse_decls (Ast.Top_forward (name, t, fpos) :: decls) rest
+          | _ ->
+            raise (Parse_error (pos_of after_ty,
+              "expected ';' after `let fn " ^ name ^ ": <type>` forward declaration")))
        | _ ->
-         raise (Parse_error (pos_of after_ty,
-           "expected ';' after `let fn " ^ name ^ ": <type>` forward declaration")))
+         raise (Parse_error (pos_of after_name,
+           "expected ':' after `let fn " ^ name ^ "` (a forward declaration is `let fn <name>: <type>;`)")))
     | (fpos, T_let) :: (_, T_fn) :: _ ->
       raise (Parse_error (fpos,
         "expected `let fn <name>: <type>;` (a forward declaration)"))

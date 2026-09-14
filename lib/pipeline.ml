@@ -23,14 +23,44 @@ let forward_check_def name loc (t : Ast.ty) =
   | None -> ()
   | Some (declared, dloc) ->
     Hashtbl.replace forward_kept name ();
-    (* instantiate: the declaration is a scheme, and the definition is one
-       instance of it. *)
-    (try Typer.unify loc (Typer.instantiate (Typer.scheme_of_written declared)) t
+    (* SUBSUMPTION, NOT INSTANTIATION. The first version instantiated the
+       declaration and unified the definition against the instance -- the wrong
+       direction, and it cost two things at once:
+         - a definition could be MORE SPECIFIC than its declaration. `let fn idl:
+           'a list -> 'a list;` with `let idl = fn (xs: int list) -> xs;` was
+           accepted, and a caller written ABOVE the definition -- the only reason
+           to declare a name -- could then call it on a `str list`. It type-checked,
+           and the C backend failed with a codegen error on a program the typer
+           had passed.
+         - the fresh variables the instantiation made were created at the OUTER
+           level, so unifying them with the definition's own variables pulled those
+           down and `generalize` could no longer quantify them. A declared
+           `'a -> 'a` was monomorphic from its first call site -- `ident 7` then
+           `ident "s"` was a type error -- while the same definition WITHOUT a
+           declaration was polymorphic. Declaring a type made a name less general
+           than not declaring it.
+       Unifying against the declaration AS WRITTEN fixes both: the parser makes
+       `'a` a `TyParam`, and a TyParam unifies only with itself or an unbound
+       variable, which is exactly a skolem. `fn x -> x` (`?1 -> ?1`) unifies; `fn
+       (xs: int list) -> xs` does not, and is refused here rather than in a
+       backend. *)
+    (try Typer.unify loc declared t
      with _ ->
        raise (Typer.Type_error (loc,
          Printf.sprintf
-           "`%s` was declared `%s` at line %d, and this definition has a different type"
+           "`%s` was declared `%s` at line %d, and this definition is not that general"
            name (Ast.pp_ty declared) dloc.Loc.line)))
+
+(* THE DECLARED TYPE IS WHAT THE NAME MEANS, above the definition and below it.
+   Publishing the definition's INFERRED scheme instead gave the name two meanings:
+   callers above got the declaration's, callers below the definition's, and a
+   declaration exists precisely so that those are one thing. `forward_check_def`
+   has already refused any definition less general than its promise, so the
+   declared scheme is the sound one to publish. *)
+let forward_scheme name (inferred : Typer.scheme) : Typer.scheme =
+  match Hashtbl.find_opt forward_promised name with
+  | Some (declared, _) -> Typer.scheme_of_written declared
+  | None -> inferred
 
 (* every promise must be kept: a name declared and never defined is a name
    nothing can call. *)
@@ -546,7 +576,7 @@ let process_decls eval_env type_env decls =
            else (n, ref v) :: acc) !eval_env val_bindings);
       List.iter (fun (n, ty) -> forward_check_def n value.Ast.loc ty) bindings;
       type_env := List.fold_left (fun acc (n, ty) ->
-        let sch = top_let_scheme outer_env value ty in
+        let sch = forward_scheme n (top_let_scheme outer_env value ty) in
         (* Q-127: the backends cannot read a region out of a fn_decl's types -- Monomorph
            erases it. They read it out of the scheme, by source name. *)
         Typer.record_top_scheme n sch;
@@ -582,7 +612,7 @@ let process_decls eval_env type_env decls =
       ) bindings;
       eval_env := env_eval;
       type_env := List.fold_left2 (fun acc (n, _) a ->
-        let sch = Typer.generalize outer_env a in
+        let sch = forward_scheme n (Typer.generalize outer_env a) in
         Typer.record_top_scheme n sch;
         (n, sch) :: acc
       ) outer_env bindings alphas
@@ -678,11 +708,14 @@ let exhaustiveness_warnings s =
   let _ = Typer.infer !type_env prog.main in
   Exhaustive.take ()
 
-let type_of s =
+(* `?base_dir` / `?search_paths` so a program with `import`s can be asked too --
+   without them every imported name is unbound and the answer is an error rather
+   than a type. `decls_report` is the caller that needs it. *)
+let type_of ?base_dir ?(search_paths = []) s =
   Exhaustive.reset ();
   Typer.reset_send_constraints ();
   Typer.reset_region_params ();
-  let prog = Trait_elab.elaborate (parse_program s) in
+  let prog = Trait_elab.elaborate (parse_program ?base_dir ~search_paths s) in
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
   (* Type-check decls but skip eval to avoid side effects. *)
@@ -718,7 +751,7 @@ let type_of s =
       ) bindings alphas;
       List.iter2 (fun (n, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
       type_env := List.fold_left2 (fun acc (n, _) a ->
-        let sch = Typer.generalize outer_env a in
+        let sch = forward_scheme n (Typer.generalize outer_env a) in
         Typer.record_top_scheme n sch;
         (n, sch) :: acc
       ) outer_env bindings alphas
@@ -787,22 +820,73 @@ let decls_report ?base_dir ?(search_paths = []) s =
   Typer.reset_region_params ();
   forward_reset ();
   let prog = Trait_elab.elaborate (parse_program ?base_dir ~search_paths s) in
-  let eval_env = ref Eval.initial_env in
-  let type_env = ref Typer.initial_env in
-  process_decls eval_env type_env prog.Ast.decls;
+  (* ⚠ TYPE-CHECK WITHOUT RUNNING. This used `process_decls`, which EVALUATES
+     every top-level `let` -- so asking a program for its declarations ran the
+     program, and its output came out interleaved with them. `type_of` walks the
+     same declarations for their types alone; the main expression it returns is
+     not wanted here, only the schemes it records on the way. *)
+  ignore (type_of ?base_dir ~search_paths s);
   let out = Buffer.create 4096 in
+  (* ⚠ ONLY THE USER'S OWN DECLARATIONS, AND UNDER THE NAMES THE SOURCE USES.
+     `parse_program` returns the prelude spliced in front and every top-level
+     name run through `uniquify_toplevel_shadows`, and the first version of this
+     report walked all of it: it printed ~70 declarations of prelude functions
+     before the program's own, under renamed spellings like `decr__v2`. Pasting
+     that back -- the only thing this output is for -- produced a program that
+     promises names it never defines. Round-tripping every one of the 178 parity
+     programs through it failed on all 178, which is also how this was found:
+     printing something plausible is not the same as printing something that
+     goes back in. *)
+  let user_decls =
+    let n = prelude_decl_count () in
+    let rec drop k l = if k <= 0 then l else match l with [] -> [] | _ :: t -> drop (k - 1) t in
+    drop n prog.Ast.decls
+  in
+  let names_of decl = match decl with
+    | Ast.Top_let ({ Ast.pnode = Ast.P_var n; _ }, _) -> [n]
+    | Ast.Top_let_rec bs -> List.map fst bs
+    | _ -> [] in
+  (* ⚠ TWO KINDS OF NAME MUST NOT BE DECLARED SILENTLY, and both are exactly the
+     names `uniquify_toplevel_shadows` had to rename:
+
+       a name bound TWICE at top level (`let x = 1; let x = x + 40;`) cannot be
+       described by two declarations of one name at all; and
+
+       a name that SHADOWS A BUILTIN changes the program's meaning if a
+       declaration is pasted above it. Top-level bindings are sequential, so a
+       caller written above `let show = ...` uses the BUILTIN show -- test/parity/
+       shadow_builtin.mere exists to hold exactly that -- and a declaration puts
+       the user's `show` in scope from the declaration down. That is the feature
+       working, not a fault, which is why the line is still printed: silently
+       dropping it would leave a chain uncuttable with no explanation. It is
+       commented, with the reason, so the person pasting it decides.
+
+     Found by round-tripping the parity corpus: `--decls`, output pasted back,
+     must give byte-identical output. shadow_builtin printed `SHOWN MY SHOW`
+     where the original prints `SHOWN 7`. *)
+  let src_count = Hashtbl.create 64 in
+  List.iter (fun d -> List.iter (fun n ->
+    let s = Ast.toplevel_source_name n in
+    Hashtbl.replace src_count s (1 + (try Hashtbl.find src_count s with Not_found -> 0)))
+    (names_of d)) user_decls;
   List.iter (fun decl ->
-    let names = match decl with
-      | Ast.Top_let ({ Ast.pnode = Ast.P_var n; _ }, _) -> [n]
-      | Ast.Top_let_rec bs -> List.map fst bs
-      | _ -> [] in
     List.iter (fun n ->
       match Hashtbl.find_opt Typer.top_schemes n with
       | Some sch ->
-        Buffer.add_string out
-          (Printf.sprintf "let fn %s: %s;\n" n (Ast.pp_ty sch.Typer.body))
-      | None -> ()) names)
-    prog.Ast.decls;
+        let src = Ast.toplevel_source_name n in
+        let line = Printf.sprintf "let fn %s: %s;" src (Ast.pp_ty sch.Typer.body) in
+        let dup = (try Hashtbl.find src_count src with Not_found -> 1) > 1 in
+        if dup then
+          Buffer.add_string out
+            (Printf.sprintf "// %s   // `%s` is bound %d times at top level; one declaration cannot name them all\n"
+               line src (Hashtbl.find src_count src))
+        else if src <> n then
+          Buffer.add_string out
+            (Printf.sprintf "// %s   // `%s` shadows a builtin: declaring it here puts YOUR `%s` in scope from this line, so callers written above the definition would stop seeing the builtin\n"
+               line src src)
+        else Buffer.add_string out (line ^ "\n")
+      | None -> ()) (names_of decl))
+    user_decls;
   Buffer.contents out
 
 let region_param_report ?base_dir ?(search_paths = []) s =
@@ -838,7 +922,7 @@ let region_param_report ?base_dir ?(search_paths = []) s =
         Typer.unify value.Ast.loc alpha t) bindings alphas;
         List.iter2 (fun (n, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
       type_env := List.fold_left2 (fun acc (n, _) a ->
-        let sch = Typer.generalize outer_env a in
+        let sch = forward_scheme n (Typer.generalize outer_env a) in
         Typer.record_top_scheme n sch;
         (n, sch) :: acc) outer_env bindings alphas
     | Ast.Top_type (name, params, variants) -> Typer.register_type name params variants
@@ -1131,7 +1215,7 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
         let bindings = Typer.check_pattern pat t in
         List.iter (fun (n, ty) -> forward_check_def n value.Ast.loc ty) bindings;
         type_env := List.fold_left (fun acc (n, ty) ->
-          (n, top_let_scheme outer_env value ty) :: acc) outer_env bindings)
+          (n, forward_scheme n (top_let_scheme outer_env value ty)) :: acc) outer_env bindings)
     | Ast.Top_let_rec bindings ->
       List.iter (fun (n, value) ->
         warn_reserved_name value.Ast.loc n) bindings;
@@ -1146,7 +1230,7 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
           Typer.unify value.Ast.loc alpha t) bindings alphas;
           List.iter2 (fun (n, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
         type_env := List.fold_left2 (fun acc (n, _) a ->
-          let sch = Typer.generalize outer_env a in
+          let sch = forward_scheme n (Typer.generalize outer_env a) in
           (n, sch) :: acc) outer_env bindings alphas)
     | Ast.Top_type (name, params, variants) ->
       Typer.register_type name params variants

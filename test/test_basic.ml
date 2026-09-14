@@ -15703,18 +15703,59 @@ let () =
     (let m = fwd_err "let fn never_given: int -> int;\n0" in
      if idx_of m "never gives" >= 0 then "refused" else m)
     "refused";
-  (* ⚠ A WRITTEN TYPE VARIABLE IS A PROMISE OF POLYMORPHISM. The parser makes
-     `'a` a TyParam, which unifies only with itself -- right for a parameter
-     annotation, wrong here. Region parameters make this the common case, not
-     the exotic one: 117 of the 161 declarations mere-ruby needs to split its
-     evaluator mention a variable, because every function that takes a map has
-     one. *)
-  check "let fn: a declared type variable is quantified, not rigid"
+  (* ⚠ A WRITTEN TYPE VARIABLE IS A PROMISE OF POLYMORPHISM, and the test that
+     first stood here asserted the wrong half of it. It declared `'a list -> 'a
+     list`, defined `int list -> int list`, and expected that to be ACCEPTED --
+     which made the declaration a way to promise more than the definition gives.
+     A caller written above the definition could then call it on a `str list`:
+     the typer passed the program and the C backend failed to compile it. The
+     rule is subsumption -- the definition must be at least as general as its
+     promise -- and these three checks are the three ways that can be wrong.
+     Region parameters make it the common case rather than the exotic one: 117
+     of the 161 declarations mere-ruby needs to split its evaluator mention a
+     variable, because every function taking a map has one. *)
+  check "let fn: a declared 'a is quantified at every call site"
     (Pipeline.process
+       "let fn ident: 'a -> 'a;\n\
+        let ident = fn x -> x;\n\
+        (ident 7, ident \"s\")")
+    "(7, \"s\")";
+  (* ...and it must be no WORSE than not declaring it, which is what the level
+     bug did: the instantiation's fresh variables were made at the outer level,
+     so unifying them with the definition's pulled those down out of reach of
+     `generalize`, and the name was monomorphic from its first use. *)
+  check "let fn: declaring a type does not cost polymorphism"
+    (Pipeline.process
+       "let ident = fn x -> x;\n\
+        (ident 7, ident \"s\")")
+    "(7, \"s\")";
+  check "let fn: a definition less general than its promise is refused"
+    (let m = fwd_err
        "let fn idl: 'a list -> 'a list;\n\
         let idl = fn (xs: int list) -> xs;\n\
-        idl (Cons (1, Nil))")
-    "[1]";
+        0" in
+     if idx_of m "not that general" >= 0 then "refused" else m)
+    "refused";
+  (* ⚠ SHADOWING A BUILTIN IS ORDINARY MERE, and a declaration must not take it
+     away. `uniquify_toplevel_shadows` renames a user binding that shadows a
+     builtin, and it did not know about `Top_forward`: `let fn odd: int -> bool;`
+     kept the name while `let odd = ...` below became `odd__v2`, so the promise
+     was registered under one name and kept under another. The program was
+     refused with "promises a definition that this program never gives" -- while
+     pointing at a definition three lines further down. *)
+  check "let fn: a promise on a name that shadows a builtin is kept"
+    (Pipeline.process
+       "let fn odd: int -> bool;\n\
+        let odd = fn (n: int) -> n % 2 == 1;\n\
+        (odd 3, odd 4)")
+    "(true, false)";
+  check "let fn: mutual recursion on two builtin names"
+    (Pipeline.process
+       "let fn even: int -> bool;\n\
+        let odd = fn (n: int) -> if n == 0 then false else even (n - 1);\n\
+        let even = fn (n: int) -> if n == 0 then true else odd (n - 1);\n\
+        (even 10, odd 10)")
+    "(true, false)";
   (* a promise kept by a member of a `let rec ... and ...` group counts: that is
      the whole point, since the group is what a chain is made of. *)
   check "let fn: a promise kept inside a rec group"
@@ -15725,6 +15766,41 @@ let () =
         and pong = fn (n: int) -> ping n;\n\
         caller 3")
     "0";
+  (* ---- `mere --decls` -------------------------------------------------
+     The report is TEXT MEANT TO BE PASTED BACK into the file it came from, and
+     scripts/decls_roundtrip.sh checks exactly that over the parity corpus. Two
+     of its properties cannot be seen from there, because they concern lines the
+     round-trip never executes -- the commented-out ones -- so they are checked
+     here instead. *)
+  let decls src = Pipeline.decls_report src in
+  check "--decls: the prelude's own names are not reported"
+    (let d = decls "let f = fn (n: int) -> n + 1;\n0" in
+     if idx_of d "let fn f: (int -> int);" >= 0 && idx_of d "decr" < 0 then "own names only" else d)
+    "own names only";
+  (* ⚠ the report used `process_decls`, which EVALUATES every top-level let: asking
+     a program for its declarations RAN it, and its stdout came out interleaved
+     with them. *)
+  check "--decls: reporting does not run the program"
+    (let d = decls "let _ = print \"SIDE EFFECT\";\nlet f = fn (n: int) -> n;\n0" in
+     if idx_of d "SIDE EFFECT" < 0 then "did not run" else d)
+    "did not run";
+  (* ⚠ and a builtin-shadowing name is reported under the name the SOURCE uses,
+     not the one `uniquify_toplevel_shadows` gave it -- commented out, because
+     pasting it moves the shadow up to the declaration and changes which function
+     callers above the definition reach. *)
+  check "--decls: a builtin-shadowing name is commented, under its source name"
+    (let d = decls "let show = fn (n: int) -> \"MINE\";\n0" in
+     if idx_of d "// let fn show:" >= 0 && idx_of d "show__v" < 0
+     then "commented, source name" else d)
+    "commented, source name";
+  check "--decls: a name bound twice at top level is commented"
+    (let d = decls "let x = 1;\nlet x = x + 1;\n0" in
+     if idx_of d "bound 2 times" >= 0 then "commented" else d)
+    "commented";
+  check "--decls: a module member is reported qualified"
+    (let d = decls "module M { let f = fn (n: int) -> n; }\n0" in
+     if idx_of d "let fn M.f: (int -> int);" >= 0 then "qualified" else d)
+    "qualified";
   check "let fn: the name is still callable normally after its definition"
     (Pipeline.process
        "let fn twice: int -> int;\n\

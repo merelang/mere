@@ -745,7 +745,16 @@ let reserve_toplevel_main (prog : program) : program =
    The caller passes only the builtins the PRELUDE does not itself define — the
    prelude deliberately shadows ten of them (`pow`, `divmod`, …), and those must keep
    the names they have always had. *)
+(* What this pass renamed, keyed by the name it PRODUCED. Anything that shows a
+   top-level name back to a person -- `mere --decls`, whose whole output is text
+   meant to be pasted into the source it came from -- has to undo the rename, or
+   it prints `odd__v2` for a program whose source says `odd`. *)
+let toplevel_renames : (string, string) Hashtbl.t = Hashtbl.create 16
+let toplevel_source_name n =
+  match Hashtbl.find_opt toplevel_renames n with Some src -> src | None -> n
+
 let uniquify_toplevel_shadows ?(shadowable = []) (prog : program) : program =
+  Hashtbl.reset toplevel_renames;
   let cur : (string, string) Hashtbl.t = Hashtbl.create 16 in
   let count : (string, int) Hashtbl.t = Hashtbl.create 16 in
   List.iter (fun n -> Hashtbl.replace count n 1) shadowable;
@@ -768,20 +777,47 @@ let uniquify_toplevel_shadows ?(shadowable = []) (prog : program) : program =
     else begin
       let n' = n ^ "__v" ^ string_of_int c in
       Hashtbl.replace cur n n';
+      Hashtbl.replace toplevel_renames n' n;
       n'
     end
+  in
+  (* A FORWARD DECLARATION AND ITS DEFINITION ARE ONE BINDING, so the rename has
+     to happen at the DECLARATION and be inherited by the definition. This pass
+     used to leave `Top_forward` in `other`, and a declaration for a name that
+     shadows a builtin then went wrong in the quietest possible way: `let fn
+     odd: int -> bool;` kept the name `odd` while `let odd = ...` below it was
+     renamed to `odd__v2`, so the promise was registered under one name and kept
+     under another, and the program was refused with "promises a definition that
+     this program never gives" -- pointing at a definition three lines down.
+     Shadowing a builtin is ordinary Mere (`let odd = ...` alone is fine), so the
+     declaration must not be what takes it away.
+     Binding at the declaration is also the right SCOPE: references between the
+     promise and the definition have to resolve to the promised name, which is
+     what `cur` does from here down. *)
+  let pre : (string, string) Hashtbl.t = Hashtbl.create 8 in
+  (* the name a definition binds under: the one its declaration already chose, if
+     it had one -- NOT a second call to bind_name, which would count it twice and
+     rename the definition away from its own promise. *)
+  let bind_def n =
+    match Hashtbl.find_opt pre n with
+    | Some n' -> Hashtbl.remove pre n; n'
+    | None -> bind_name n
   in
   let rn_decl = function
     | Top_let ({ pnode = P_var n; _ } as p, v) ->
       (* non-recursive: the value is in the scope BEFORE this binding *)
       let v' = rename_free_vars lk v in
-      let n' = bind_name n in
+      let n' = bind_def n in
       Top_let ({ p with pnode = P_var n' }, v')
     | Top_let (p, v) -> Top_let (p, rename_free_vars lk v)
     | Top_let_rec bs ->
       (* recursive: names are in scope within their own values *)
-      let names' = List.map (fun (n, _) -> bind_name n) bs in
+      let names' = List.map (fun (n, _) -> bind_def n) bs in
       Top_let_rec (List.map2 (fun n' (_, v) -> (n', rename_free_vars lk v)) names' bs)
+    | Top_forward (n, t, loc) ->
+      let n' = bind_name n in
+      Hashtbl.replace pre n n';
+      Top_forward (n', t, loc)
     | other -> other
   in
   let decls = List.map rn_decl prog.decls in
