@@ -88,11 +88,12 @@ let usage () =
   print_endline "";
   print_endline "";
   print_endline "Runtime diagnostics:";
-  print_endline "  A failure that is not caught reports where it happened and";
-  print_endline "  the calls that got there. The interpreter names the source";
-  print_endline "  line; a compiled binary names the functions (with -g, a";
-  print_endline "  debugger maps those back to the .mere line).";
-  print_endline "  MERE_BACKTRACE=0        no call stack, message only";
+  print_endline "  An uncaught failure in the INTERPRETER reports where it";
+  print_endline "  happened and the calls that got there. A compiled binary";
+  print_endline "  reports the message alone, identically on every platform;";
+  print_endline "  build with -g and use MERE_FAIL_TRAP with a debugger to get";
+  print_endline "  the frames there.";
+  print_endline "  MERE_BACKTRACE=0        no call stack, message only (interp)";
   print_endline "  MERE_BACKTRACE_FRAMES=N how many frames to print (default 10)";
   print_endline "  MERE_REGION_STATS=1     print how many bytes were allocated";
   print_endline "                        (C, LLVM and Wasm; one line on stderr)";

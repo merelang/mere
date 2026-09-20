@@ -4,6 +4,50 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.489 — 2026-09-20
+
+_The compiled backtrace is withdrawn: it answered on macOS and said nothing on
+Linux._
+
+_**v0.1.486 printed the frames under a compiled failure itself**, reading them
+back from `backtrace()` + `dladdr`. Every gate was green — on macOS. CI is where
+it broke, and the interpreter half (five cases, position and frames) passed
+there untouched:_
+
+```
+runtime_loc: 5/5 ok (position + frames on every case)
+  compiled frames: got [] want [a__direct b__direct c__direct d__direct]
+```
+
+_**`dladdr` consults the DYNAMIC symbol table on glibc**, and the frames a Mere
+program actually stands on are its `__direct` twins, which are emitted `static`.
+A static function has no entry in `.dynsym` — `-rdynamic` exports globals and
+does not change that. Measured in the CI image with a four-frame probe: plain
+link resolves nothing, `-rdynamic` resolves `mu_a`, `mu_b` and `main`, and
+`mu_a__direct` resolves under neither. So the design could not have worked
+there; it was not a flag away._
+
+_The retraction rather than a platform carve-out: **a diagnostic that answers on
+one platform and is silent on the other is worse than one that is silent on
+both**, because the silence reads as "nothing to say" instead of "this does not
+work here". The compiled leg of the gate now pins the SAMENESS — stderr is the
+message and one newline, byte-identical at `-O0` and `-O2` — and
+`MERE_FAIL_TRAP=1` is the way to the frames, handed to a debugger whose unwinder
+reads DWARF and can see a static function._
+
+_**The interpreter side is untouched and is where this mattered**: the position
+and the call stack, which is what a 30,000-line file needed._
+
+_⚠ **The gate was run on macOS only before it was pushed.** The repo already
+knows to run a new gate once on the CI image — `ocaml/opam:ubuntu-24.04` builds
+`mere.exe` in about 33 seconds — and that step was skipped. "Tested" is true
+about the machine it was tested on._
+
+_suite 2773, parity 178, and the three gates plus their poisons green on both
+macOS and the CI image._
+
+---
+
 ## v0.1.488 — 2026-09-20
 
 _Q-138: the allocation meter, on the other two backends._

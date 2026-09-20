@@ -192,10 +192,18 @@ echo "runtime_loc: $total/$total ok (position + frames on every case)"
 
 # ---------------------------------------------------------------- compiled leg
 #
-# The same question on the backend the big programs actually run on. There is no
-# POSITION here -- the C runtime's failure helpers are handed none -- so what is
-# checked is the frames, the two switches, and the one thing a trap must never
-# do: fire on a failure the program caught on purpose.
+# The same question on the backend the big programs actually run on, and the
+# answer is different: a compiled binary says the MESSAGE and nothing else, the
+# same on every platform, and a debugger is how the frames are reached.
+#
+# v0.1.486 printed the frames itself, from backtrace() + dladdr. It was green on
+# macOS and empty on Linux, and CI is where that showed. dladdr consults the
+# DYNAMIC symbol table on glibc, and the frames a Mere program stands on are its
+# `__direct` twins -- emitted `static`, so absent from .dynsym with or without
+# -rdynamic. Measured in the CI image: `mu_a` and `mu_b` resolve under
+# -rdynamic, `mu_a__direct` never does. So what this leg pins now is the
+# SAMENESS: one line, no stack, both platforms, with MERE_FAIL_TRAP as the way
+# in for anyone who wants more.
 #
 # Skips (exit 0) without clang, the way debug_info.sh does: this asks a question
 # about a compiled binary, and without a C compiler there is no binary to ask.
@@ -212,33 +220,28 @@ csrc="$CASES/compiled/deep_chain.mere"
 # not a defect being hidden -- the -O2 run below asserts the honest answer.
 clang -g -O0 -o "$tmp/deep" "$tmp/deep.c" || { echo "runtime_loc: clang failed"; exit 1; }
 
-frames_of() { # binary -> "a b c" (the printed frame names, in order)
-  "$1" >/dev/null 2>"$tmp/cerr"
-  awk '/^call stack/ {on=1; next} on && NF == 1 {printf "%s ", $1}' "$tmp/cerr" | sed 's| *$||'
-}
-
-want="a__direct b__direct c__direct d__direct"
-got="$(frames_of "$tmp/deep")"
-if [ "$got" != "$want" ]; then
-  echo "  compiled frames: got [$got] want [$want]"
+# The whole of stderr is the message and one newline. Compared as the exact
+# BYTES, because that is the claim: a platform that grows a stack here, or a
+# build that loses the message, both change this number.
+"$tmp/deep" >/dev/null 2>"$tmp/cerr"
+want_msg="char_at: index 99 out of range (len=2)"
+got_err="$(cat "$tmp/cerr")"
+if [ "$got_err" != "$want_msg" ]; then
+  echo "  compiled stderr: got [$got_err] want [$want_msg]"
   cbad=$((cbad + 1))
 fi
+lines=$(wc -l <"$tmp/cerr" | tr -d ' ')
+[ "$lines" = "1" ] || {
+  echo "  compiled stderr is $lines lines, want exactly 1 (no stack on any platform)"
+  cbad=$((cbad + 1)); }
 
-# Switched off, the block must be gone entirely -- not an empty heading. Counted
-# in BYTES: `$(...)` strips trailing newlines, so a heading with nothing under it
-# and no heading at all compare equal as strings.
-MERE_BACKTRACE=0 "$tmp/deep" >/dev/null 2>"$tmp/cerr"
-if [ "$(grep -c 'call stack' "$tmp/cerr" || true)" != "0" ]; then
-  echo "  compiled frames: MERE_BACKTRACE=0 still printed a stack"
-  cbad=$((cbad + 1))
-fi
-
-# -O2: the frames really are not on the stack, so the honest report has none.
-# The claim being pinned is that it prints NO frames rather than wrong ones.
+# -O2 changes nothing about what is said. Pinned because the version this
+# replaced DID differ between optimization levels, which is how a report starts
+# meaning different things to different readers.
 clang -g -O2 -o "$tmp/deep2" "$tmp/deep.c" || { echo "runtime_loc: clang -O2 failed"; exit 1; }
-got2="$(frames_of "$tmp/deep2")"
-if [ -n "$got2" ]; then
-  echo "  compiled frames at -O2: expected none (inlined away), got [$got2]"
+"$tmp/deep2" >/dev/null 2>"$tmp/cerr2"
+if ! cmp -s "$tmp/cerr" "$tmp/cerr2"; then
+  echo "  compiled stderr differs between -O0 and -O2"
   cbad=$((cbad + 1))
 fi
 
@@ -272,4 +275,4 @@ if [ "$cbad" != 0 ]; then
   echo "runtime_loc: $cbad compiled check(s) failed"
   exit 1
 fi
-echo "runtime_loc: compiled leg ok (frames at -O0, none at -O2, both switches, caught fail silent)"
+echo "runtime_loc: compiled leg ok (message only and identical at -O0/-O2, both switches, caught fail silent)"
