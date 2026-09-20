@@ -673,6 +673,30 @@ type fn_decl = Monomorph.fn_decl = {
 }
 
 (* Set of known top-level fn names (used by emit_expr to direct-call Var). *)
+(* Q-139: the uncurried entry, ported from the C backend (which has had it
+   since v0.1.27 and extended it in Q-066 / Q-135). Until now it existed in
+   codegen_c.ml and nowhere else, and nothing could see that, because until
+   v0.1.488 this backend had no allocation meter. What the meter then said:
+
+     B/call                             C   LLVM
+     f a b (named top-level, concrete)  0     16
+
+   -- and that row is zero on C BY CONSTRUCTION. A two-argument call here
+   compiles to "allocate an environment holding the first argument, return a
+   closure, apply it to the second", so it is not abstraction that allocates on
+   this backend, it is the call.
+
+   Same shape as the C table: for an eligible `f = fn p1 -> .. -> fn pN -> body`
+   emit `@mu_f__direct(p1, .., pN)` holding the body, and send exactly-saturated
+   call sites straight to it. Partial applications and first-class uses keep the
+   curried chain, which is still emitted and still correct. *)
+type direct_fn_info_llvm = {
+  dl_params : (string * Ast.ty) list;
+  dl_body   : Ast.expr;
+  dl_ret    : Ast.ty;
+}
+let direct_fns_llvm : (string, direct_fn_info_llvm) Hashtbl.t = Hashtbl.create 16
+
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 (* v0.1.172: declaration position of each top-level fn. Top-level bindings
    are sequential — the typer rejects a forward reference — so `show` used
@@ -6733,6 +6757,77 @@ and emit_user_app ?(tail = false) (env : env) (e : Ast.expr) : string =
      top-level fn, or a closure value. Split out of emit_expr so that the
      shadowing guard has somewhere to send a call it must not let the
      builtin arms see. *)
+  (* Q-139: ...and, before any of them, an exactly-saturated call to a curried
+     top-level fn that has an uncurried twin. The arms below all match
+     `App (Var name, arg)`, and a two-argument call is `App (App (Var f, a1),
+     a2)` -- whose head is an App and not a Var -- so none of them see it and it
+     has always fallen through to the closure path, which allocates an
+     environment to carry the first argument. Collect the spine instead.
+
+     Guarded the way the C backend guards its own: the head must not be an
+     inner-lifted fn, must not be shadowed by a local binding, and the arity
+     must match EXACTLY. A partial application is not this and keeps the
+     curried chain. *)
+  let direct_spine () =
+    let rec spine e' acc =
+      match e'.Ast.node with
+      | Ast.App (f', a) -> spine f' (a :: acc)
+      | Ast.Var n -> Some (n, acc)
+      | _ -> None
+    in
+    match spine e [] with
+    | Some (n, args)
+      when (match Hashtbl.find_opt direct_fns_llvm (mu n) with
+            | Some info -> List.length args = List.length info.dl_params
+            | None -> false)
+           && not (Hashtbl.mem inner_lifts_llvm n)
+           && not (List.mem_assoc n env)
+           && not (List.mem_assoc n !current_var_types) ->
+      Some (mu n, args)
+    | _ -> None
+  in
+  match direct_spine () with
+  | Some (callee, args) ->
+    let info = Hashtbl.find direct_fns_llvm callee in
+    let arg_tys = List.map (fun (_, t) -> llvm_ty_of t) info.dl_params in
+    let ret_ty = llvm_ty_of info.dl_ret in
+    let arg_vals =
+      List.map2 (fun a t -> Printf.sprintf "%s %s" t (emit_expr env a))
+        args arg_tys
+    in
+    (* THE SAME TAIL RULES AS THE CLOSURE PATH, and they are not decoration here.
+       Rerouting a call away from that path also reroutes it away from `musttail`,
+       and a tail-recursive function that loses the guarantee grows the stack once
+       per iteration -- the defect the C backend records against its own
+       single-argument case. The two v0.1.451 assertions caught exactly this the
+       first time the reroute landed without them: they ask a two-argument
+       `let rec` for `musttail call %w`, and the answer had become a bare call. *)
+    let can_musttail =
+      (not no_tail_call) && tail
+      && (match !llvm_current_sig with
+          | Some (r_ty, a_tys) -> r_ty = ret_ty && a_tys = arg_tys
+          | None -> false)
+      && (match e.Ast.ty with
+          | Some t -> llvm_ret_leaves t <= musttail_leaf_budget
+          | None -> false)
+    in
+    let r = fresh_reg () in
+    if can_musttail then begin
+      emit_instr (Printf.sprintf "  %s = musttail call %s @%s__direct(%s)"
+                    r ret_ty callee (String.concat ", " arg_vals));
+      emit_instr (Printf.sprintf "  ret %s %s" ret_ty r);
+      llvm_returned := true;
+      r
+    end else begin
+      (* Q-129 again: `tail` on an sret call is the miscompile, so an aggregate
+         return that cannot be musttail must carry the marker that forbids it. *)
+      let notail =
+        if String.length ret_ty > 0 && ret_ty.[0] = '%' then "notail " else "" in
+      emit_instr (Printf.sprintf "  %s = %scall %s @%s__direct(%s)"
+                    r notail ret_ty callee (String.concat ", " arg_vals));
+      r
+    end
+  | None ->
   match e.Ast.node with
   | Ast.App ({ node = Ast.Var name; _ }, arg)
     when Hashtbl.mem inner_lifts_llvm name ->
@@ -7084,6 +7179,50 @@ let emit_lifted_fn_llvm (lf : lifted_fn_llvm) : string =
   in
   Printf.sprintf "define %s @%s(%s) {\n%s\n}"
     (llvm_ty_of lf.l_return_ty) lf.l_name params body
+
+(* Q-139: the uncurried twin. Same body, both parameters as real arguments, so
+   a saturated call has nothing to allocate. The curried definition is still
+   emitted beside it and is still what a partial application or a first-class
+   use reaches -- this adds an entry, it does not replace one. *)
+let emit_direct_fn_llvm (name : string) (info : direct_fn_info_llvm) : string =
+  let saved = !instrs in
+  let saved_types = !current_var_types in
+  let saved_exp = !current_expected_ty in
+  let saved_host = !current_host_fn_llvm in
+  instrs := [];
+  (* The twin is a top-level definition, not a lifted host's body, so the host
+     name is cleared the way emit_fn_def leaves it for a top-level fn. *)
+  current_host_fn_llvm := "";
+  current_var_types := info.dl_params;
+  current_expected_ty := Some info.dl_ret;
+  let env = List.map (fun (n, _) -> (n, "%" ^ llvm_safe_local n)) info.dl_params in
+  emit_instr "entry:";
+  llvm_tail_pos := true;
+  llvm_returned := false;
+  (* The twin publishes its OWN prototype, which is what makes the self tail call
+     inside it a `musttail`: two i64 arguments matching two i64 parameters. The
+     curried definition could never match that -- its prototype is (ptr, T) -- so
+     a two-argument tail-recursive function had no constant-space form on this
+     backend at all, only the closure chain's per-iteration environment. *)
+  let saved_sig = !llvm_current_sig in
+  llvm_current_sig :=
+    Some (llvm_ty_of info.dl_ret,
+          List.map (fun (_, t) -> llvm_ty_of t) info.dl_params);
+  let rv = emit_expr env info.dl_body in
+  if !llvm_returned then llvm_returned := false
+  else emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of info.dl_ret) rv);
+  llvm_current_sig := saved_sig;
+  let body = String.concat "\n" (List.rev !instrs) in
+  instrs := saved;
+  current_var_types := saved_types;
+  current_expected_ty := saved_exp;
+  current_host_fn_llvm := saved_host;
+  Printf.sprintf "define %s @%s__direct(%s) {\n%s\n}"
+    (llvm_ty_of info.dl_ret) name
+    (String.concat ", "
+       (List.map (fun (n, t) ->
+          Printf.sprintf "%s %%%s" (llvm_ty_of t) (llvm_safe_local n)) info.dl_params))
+    body
 
 (* Env-ignoring adapter so the top-level fn `f` can be used as a closure
    value: `T2 @f_closure_fn(ptr unused, T1 %x) { ret T2 @f(T1 %x); }`. *)
@@ -12829,6 +12968,33 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      BEFORE any typedef emission. Also collect show types now (their
      instances need to flow into mono_variant_instances so emit picks
      up types only-used-via-show). *)
+  (* Q-139: eligible curried top-level fns, peeled by the RESOLVED type so a
+     polymorphic fn that settled on one concrete instance qualifies too. Must
+     run before any emit_expr, so that every call site sees the same table.
+
+     CONSERVATIVE ON PURPOSE, first slice: exactly two parameters, no region
+     parameters, fully concrete throughout. Two is where the measured cost is
+     (a one-argument call allocates nothing here) and a region parameter would
+     have to be threaded through the twin as well. Anything failing these keeps
+     the curried chain -- which is not a fallback that might be wrong, it is the
+     path every call took until now. *)
+  Hashtbl.reset direct_fns_llvm;
+  List.iter (fun (f : fn_decl) ->
+    let rec peel params body ty =
+      match body.Ast.node, Ast.walk ty with
+      | Ast.Fun (p, _, inner), Ast.TyArrow (pt, rt) ->
+        peel ((p, Ast.walk pt) :: params) inner rt
+      | _ -> (List.rev params, body, Ast.walk ty)
+    in
+    let params, body, ret = peel [(f.param, Ast.walk f.param_ty)] f.body f.return_ty in
+    if List.length params = 2
+       && Typer.region_params_for (source_name_of_llvm f.name) = []
+       && List.for_all (fun (_, t) -> ty_is_concrete t) params
+       && ty_is_concrete ret
+       && not (Hashtbl.mem inner_lifts_llvm f.name)
+    then Hashtbl.replace direct_fns_llvm f.name
+           { dl_params = params; dl_body = body; dl_ret = ret }
+  ) fns;
   collect_mono_instances main_expr fns;
   collect_show_types main_expr fns;
   collect_eq_cmp_types main_expr fns;
@@ -12998,6 +13164,17 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     List.map (fun f ->
       set_inner_lifts_for_host_llvm (unmu f.name);
       emit_fn_def f) fns
+  in
+  (* Q-139: the uncurried twins, beside the curried definitions rather than
+     instead of them. Emitted from the same list and in the same order, with
+     the host's inner lifts in scope for the body exactly as above. *)
+  let direct_defs =
+    List.filter_map (fun f ->
+      match Hashtbl.find_opt direct_fns_llvm f.name with
+      | Some info ->
+        set_inner_lifts_for_host_llvm (unmu f.name);
+        Some (emit_direct_fn_llvm f.name info)
+      | None -> None) fns
   in
   let lifted_defs = List.map emit_lifted_fn_llvm !lifted_fns_llvm in
   let closure_adapters = List.map emit_closure_adapter fns in
@@ -13316,6 +13493,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        else "; Phase 30.2b: top-level non-fn let values as LLVM globals"
             :: emit_top_globals_llvm top_globals_list @ [""])
     @ (if fn_defs = [] then [] else fn_defs @ [""])
+    @ (if direct_defs = [] then [] else direct_defs @ [""])
     @ (if lifted_defs = [] then [] else lifted_defs @ [""])
     @ (if closure_adapters = [] then [] else closure_adapters @ [""])
     @ (if show_fn_defs = [] then [] else show_fn_defs @ [""])
