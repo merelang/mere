@@ -109,6 +109,19 @@ for n in noregion noregion2x region; do build_wasm "$n"; done
 build_c noregion
 build_ll noregion
 
+# THE TOOL BEING PRESENT IS NOT THE TOOL BEING ABLE TO. This backend emits
+# `return_call`, and node only runs that from v20 or so; node 18 is on PATH in
+# plenty of images and fails with a CompileError that reaches this gate as "no
+# wasm report", which reads like the meter is broken. Asked as a capability
+# rather than as a version number, because the version that gained it is a fact
+# about V8 that this file should not be claiming to know.
+node "$ROOT/scripts/run_wasm.js" "$tmp/noregion.wasm" >/dev/null 2>"$tmp/probe.err" || true
+if grep -q "return_call" "$tmp/probe.err" 2>/dev/null; then
+  echo "alloc_meter: this node ($(node --version)) cannot run the tail calls this"
+  echo "             backend emits — skipping. CI pins node 24 for the same reason."
+  exit 0
+fi
+
 # 1. silent unless asked. Counted in bytes: a heading with nothing under it and
 #    no heading at all are the same string once the shell strips newlines.
 node "$ROOT/scripts/run_wasm.js" "$tmp/noregion.wasm" >/dev/null 2>"$tmp/quiet.err"
