@@ -1,0 +1,6 @@
+// Nothing called anything: the failure has a position and NO frames, and the
+// report has to say so by printing no stack rather than an empty heading.
+// expect-msg: char_at: index 99 out of range
+// expect-loc: 6:8
+// expect-frames: -
+print (char_at "ab" 99)

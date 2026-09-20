@@ -2349,6 +2349,68 @@ let () =
   let warnings_of s =
     String.concat " | " (Pipeline.exhaustiveness_warnings s)
   in
+  (* v0.1.487: the same question from the other end -- which arms no value
+     reaches. Held here as well as in scripts/unreachable_arm_check.sh because
+     the four cases that must stay SILENT are the ones that would be noticed
+     late: a check that fires on a working match gets a live arm deleted. *)
+  let unreachable_of s =
+    String.concat " | "
+      (List.filter (fun w ->
+         let needle = "cannot be reached" in
+         let nl = String.length needle in
+         let rec has i =
+           i + nl <= String.length w
+           && (String.sub w i nl = needle || has (i + 1)) in
+         has 0)
+        (Pipeline.exhaustiveness_warnings s))
+  in
+  check "v0.1.487: a second arm for one constructor is reported"
+    (unreachable_of
+       "type h = Ro | Pa;\n\
+        let f = fn (x: h) -> match x with | Ro -> 1 | Pa -> 2 | Ro -> 3;\n\
+        f Pa")
+    ("line 2, col 57: warning: this arm cannot be reached: an earlier arm on line 2 already matches it\n"
+     ^ "note: the arm is dead -- the value that would reach it is answered above, so the code here never runs\n"
+     ^ "help: reorder the arms, narrow the one above, or delete this one");
+  check "v0.1.487: an arm after a catch-all is reported"
+    (if unreachable_of
+          "type h = Ro | Pa;\n\
+           let f = fn (x: h) -> match x with | Ro -> 1 | _ -> 2 | Pa -> 3;\n\
+           f Pa" = "" then "silent" else "reported")
+    "reported";
+  (* A guard can be false, so the arm under it is the one that answers. *)
+  check "v0.1.487: a guarded arm does not close its constructor"
+    (unreachable_of
+       "type h = Ro | Pa;\n\
+        let f = fn (x: h) -> fn (b: bool) -> match x with\n\
+          | Ro when b -> 1 | Ro -> 2 | Pa -> 3;\n\
+        f Ro false")
+    "";
+  (* `Link (0, _)` is some Links, not all of them. *)
+  check "v0.1.487: a refutable payload does not close its constructor"
+    (unreachable_of
+       "type c = End | Link of (int * c);\n\
+        let rec f = fn (l: c) -> match l with\n\
+          | End -> 0 | Link (0, _) -> 1 | Link (_, r) -> f r;\n\
+        f (Link (1, End))")
+    "";
+  (* Half of an or-pattern being closed still leaves the arm reachable. *)
+  check "v0.1.487: a half-closed or-pattern is still reached"
+    (unreachable_of
+       "type h = Ro | Pa | Sc;\n\
+        let f = fn (x: h) -> match x with\n\
+          | Pa -> 1 | Pa | Sc -> 2 | Ro -> 3;\n\
+        f Sc")
+    "";
+  (* Reportable and deliberately not reported: the defensive wildcard after
+     every constructor is already named is the shape people write so that a
+     match keeps compiling when the type gains a case. *)
+  check "v0.1.487: the defensive wildcard is left alone"
+    (unreachable_of
+       "type h = Ro | Pa;\n\
+        let f = fn (x: h) -> match x with | Ro -> 1 | Pa -> 2 | _ -> 3;\n\
+        f Ro")
+    "";
   (* A finding that names a case carries the arm to write and then the hole,
      and both are asserted rather than the headline alone: the hint is the
      half a caller acts on, and a hint that stopped being valid Mere would

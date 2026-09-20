@@ -1,0 +1,12 @@
+// The recorded defect: two arms for one constructor. The second never runs, and
+// what the reader sees is an error raised from the arm they did not write.
+// expect-unreachable: 1
+// expect-lines: 10
+type hand = Rock | Paper | Scissors;
+let name = fn (h: hand) ->
+  match h with
+  | Rock -> "r"
+  | Paper -> "p"
+  | Rock -> "r2"
+  | Scissors -> "s";
+print (name Paper)

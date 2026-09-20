@@ -4333,7 +4333,47 @@ and emit_expr (e : Ast.expr) : unit =
     emit_instr (Printf.sprintf "local.get %d" mark_slot);
     emit_instr "i32.gt_u";
     emit_instr "select";
+    (* Q-138: the allocation meter, and it goes HERE rather than beside every
+       bump. `$__lang_bump` only ever moves two ways -- up at an allocation, and
+       down at this one release -- so the total handed out is the bump plus
+       everything a release has taken back, and instrumenting the ONE place that
+       goes down costs a ninth of the sites that go up. Writing the same
+       accumulate at twenty bump sites is how one rule becomes three values.
+       `$__lang_bump` alone is a LOWER BOUND for exactly this reason; the
+       difference is what the C backend has no number for, because its regions
+       free whole blocks and never tell anyone how much was in them: how much
+       the region actually reclaimed. *)
+    let rel_slot = fresh_local_i32 () in
+    let pre_slot = fresh_local_i32 () in
+    emit_instr (Printf.sprintf "local.tee %d" rel_slot);
+    (* The bump AS IT STANDS NOW, not `mark`. `mark` is where the block STARTED,
+       which is below the release target, so `mark - release` is never positive
+       and the meter read zero reclaimed for every block -- the first number it
+       produced was 34 bytes for a program that allocates 262,194, and the only
+       reason that was visible as wrong is that the C backend had already
+       answered for the same program. Two names for two different questions:
+       where the block began, and where allocation had reached. *)
+    emit_instr "global.get $__lang_bump";
+    emit_instr (Printf.sprintf "local.set %d" pre_slot);
     emit_instr "global.set $__lang_bump";
+    emit_instr "global.get $__lang_reclaimed";
+    emit_instr (Printf.sprintf "local.get %d" pre_slot);
+    emit_instr "i64.extend_i32_u";
+    emit_instr (Printf.sprintf "local.get %d" rel_slot);
+    emit_instr "i64.extend_i32_u";
+    emit_instr "i64.sub";
+    (* Clamped at zero rather than subtracted: a store can raise the high-water
+       mark above where the bump stood, and a block that gave nothing back must
+       read as nothing given back, not as a debit against the blocks that did. *)
+    emit_instr "i64.const 0";
+    emit_instr (Printf.sprintf "local.get %d" pre_slot);
+    emit_instr "i64.extend_i32_u";
+    emit_instr (Printf.sprintf "local.get %d" rel_slot);
+    emit_instr "i64.extend_i32_u";
+    emit_instr "i64.gt_u";
+    emit_instr "select";
+    emit_instr "i64.add";
+    emit_instr "global.set $__lang_reclaimed";
     emit_instr (Printf.sprintf "local.get %d" outer_mark_slot);
     emit_instr "global.set $__lang_block_mark";
     emit_instr "global.get $__lang_region_depth";
@@ -11353,6 +11393,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      %s\
      \  (global $__mere_abi (export \"__mere_abi\") i32 (i32.const 1))\n\
      \  (global $__lang_bump (export \"__lang_bump\") (mut i32) (i32.const %d))\n\
+  (global $__lang_reclaimed (export \"__lang_reclaimed\") (mut i64) (i64.const 0))\n\
   (global $__rgn_tmp (mut i64) (i64.const 0))\n\
   (global $__lang_region_depth (mut i32) (i32.const 0))\n\
   (global $__lang_block_mark (mut i32) (i32.const 0))\n\

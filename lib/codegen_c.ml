@@ -8019,6 +8019,61 @@ let str_concat_helper =
       "  sigaction(SIGSEGV, &sa, 0);";
       "  sigaction(SIGBUS, &sa, 0);";
       "}";
+      (* The compiled half of "a failure says how the program got there". The
+         interpreter walks its own call stack; here the frames are the machine's,
+         read back through dladdr.
+
+         It works because a user's Mere function is emitted with EXTERNAL
+         linkage (`mu_lookup`), while the prelude's helpers are `static` and so
+         carry no symbol -- the filter is therefore the program's own functions,
+         with no list to maintain. Under -O2 an inlined frame is simply absent,
+         which is honest: it is not on the stack.
+
+         MERE_BACKTRACE=0 turns it off, the same spelling the interpreter uses;
+         MERE_BACKTRACE_FRAMES caps it, default 10. *)
+      "static void __lang_print_backtrace(void) {";
+      "#ifdef MERE_HAVE_BACKTRACE";
+      "  const char* off = getenv(\"MERE_BACKTRACE\");";
+      "  if (off && (!strcmp(off, \"0\") || !strcmp(off, \"off\") || !strcmp(off, \"no\"))) return;";
+      "  int cap = 10;";
+      "  const char* capenv = getenv(\"MERE_BACKTRACE_FRAMES\");";
+      "  if (capenv) { int v = atoi(capenv); if (v > 0) cap = v; }";
+      "  void* pcs[128];";
+      "  int n = backtrace(pcs, 128);";
+      "  int shown = 0;";
+      "  for (int i = 0; i < n; i++) {";
+      "    Dl_info info;";
+      "    if (!dladdr(pcs[i], &info) || !info.dli_sname) continue;";
+      "    const char* s = info.dli_sname;";
+      (* Mach-O prefixes C symbols with an underscore; dladdr hands some
+         platforms the linker spelling and some the C one, so both are
+         accepted rather than guessed at. *)
+      "    if (s[0] == '_' && s[1] == 'm' && s[2] == 'u' && s[3] == '_') s++;";
+      "    if (strncmp(s, \"mu_\", 3) != 0) continue;";
+      (* A RETURN ADDRESS IS NEVER A FUNCTION'S FIRST INSTRUCTION -- it points
+         after a call -- so a pc that resolves to offset 0 is not a frame in
+         that function, it is a pc this walk could not place being handed the
+         nearest symbol that starts there. Without this the report named a real
+         function in the program that was NOT on the path to the failure, which
+         is the one kind of wrong a backtrace must not be.
+
+         Measured (a -> b -> c -> d, char_at out of range):
+           -O0  one spurious `+0` frame, and dropping it leaves exactly
+                a__direct b__direct c__direct d__direct
+           -O2  every remaining frame is `+0`, and dropping them leaves none --
+                which is the truth: inlining and tail calls mean those frames
+                are not on the stack to be found. *)
+      "    if ((char*)pcs[i] <= (char*)info.dli_saddr) continue;";
+      "    if (shown == 0) fprintf(stderr, \"\\ncall stack (innermost first):\\n\");";
+      "    if (shown >= cap) {";
+      "      fprintf(stderr, \"  ... more frames (MERE_BACKTRACE_FRAMES=%d)\\n\", cap);";
+      "      break;";
+      "    }";
+      "    fprintf(stderr, \"  %s\\n\", s + 3);";
+      "    shown++;";
+      "  }";
+      "#endif";
+      "}";
       "__attribute__((noreturn)) static void __lang_fail_impl(const char* msg) {";
       "  /* v0.1.67 (mere-ruby dogfood): print only when the failure is NOT";
       "     caught by an active try_or — a caught fail is control flow, not an";
@@ -8030,6 +8085,15 @@ let str_concat_helper =
       "    _longjmp(__lang_fail_jmpbuf, 1);";
       "  }";
       "  fprintf(stderr, \"%s\\n\", msg);";
+      "  __lang_print_backtrace();";
+      (* MERE_FAIL_TRAP=1 stops here instead of leaving, so a debugger holds the
+         program AT the failure with its locals still alive. `mere -c -g` maps
+         these instructions back to the .mere line, so lldb shows the source the
+         person wrote. Opt-in: without a debugger attached, SIGTRAP is fatal and
+         the exit status stops being 1, which is a bargain only somebody who
+         asked for it should be making. *)
+      "  { const char* t = getenv(\"MERE_FAIL_TRAP\");";
+      "    if (t && *t && strcmp(t, \"0\") != 0) raise(SIGTRAP); }";
       (* exit rather than abort: an uncaught `fail` is a program error the
          language defines, not a crash. abort() made the shell report 134 /
          SIGABRT and could dump core, while the interpreter and the Wasm
@@ -13133,6 +13197,19 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "#include <pthread.h>";  (* Q-012: spawn / join. Link with -pthread on Linux. *)
       "#include <unistd.h>";   (* native FFI: read / write / close *)
       "#include <errno.h>";    (* v0.1.480: EINTR on the write(2) path *)
+      (* The frames under an uncaught failure. `execinfo.h` is not standard C
+         and not in musl, so the two libcs this backend is actually built
+         against are named rather than assumed -- and the whole feature is
+         inside that guard, so a target without it loses the frames and nothing
+         else. `dladdr` rather than `backtrace_symbols`: it hands back the
+         symbol NAME, where the other hands back a formatted line whose shape
+         differs between macOS and glibc and would have to be parsed back
+         apart. *)
+      "#if defined(__APPLE__) || defined(__GLIBC__)";
+      "#define MERE_HAVE_BACKTRACE 1";
+      "#include <execinfo.h>";
+      "#include <dlfcn.h>";
+      "#endif";
       (* v0.1.315: float semantics must not depend on the C compiler's
          optimization level. clang on arm64 contracts a*b+c into fma at -O2
          by default, which rounds ONCE where the interpreter (and -O0, and

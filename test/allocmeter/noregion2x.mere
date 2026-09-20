@@ -1,0 +1,8 @@
+// The same program with twice the work. A meter that answers a constant -- the
+// prelude's own allocation, say -- passes every single-value check ever written
+// and fails this one.
+let n = 40000;
+let v = vec_new ();
+let rec go = fn (i: int) -> if i >= n then () else (let _ = vec_push v (i * 2) in go (i + 1));
+let _ = go 0 in
+print_int (vec_len v)

@@ -20,6 +20,60 @@ let max_depth =
 
 let call_depth = ref 0
 
+(* The Mere-level call stack, so a failure can say how the program got there.
+   A frame is (the callee as it was written at the call site, the call site's
+   position) -- the position is the one a reader can go and look at, which the
+   callee's own definition site is not.
+
+   Why a stack and not just a position: most runtime failures are raised by a
+   builtin, which is handed no position at all (the 50-odd `Eval_error
+   (Loc.dummy, ...)` sites below), so the innermost thing that KNOWS where it is
+   is the application node that called it. That gives the line. The frames above
+   it give the answer to the question that comes next -- `map_get: key not found`
+   on line 3 of a 30,000-line file is not yet an answer if line 3 is a helper
+   that forty callers share.
+
+   A frame is the APPLICATION NODE itself, not a (name, position) pair built
+   here. The pair costs a tuple and a walk down the call spine for the callee's
+   name on EVERY call the program makes, and both are only ever read on the way
+   out of a failure. Pushing the node is one cons cell; the name and the position
+   are derived in `backtrace` from the handful of frames that get printed.
+   Measured on `fib 32` -- 2.1M calls and nothing else -- the pair form cost
+   0.66s against 0.60s without any of this. *)
+let call_stack : Ast.expr list ref = ref []
+
+(* Frames are popped on the way BACK, and deliberately not on the way OUT: an
+   unwinding failure leaves them standing, which is how the driver still has
+   them when it catches the error. The first version took a snapshot in an
+   exception handler on every call instead, and that handler -- not the frame,
+   not the allocation -- was most of its cost: `fib 32` ran 0.66s with it and
+   0.62s without, on a build where everything else was identical. `call_depth`
+   right above already works this way (its raise site zeroes it because nothing
+   on the way out will), so this is the file's existing bargain, not a new one.
+   The price is that a site which SWALLOWS a failure has to give the frames back
+   itself -- `try_or` does, and so do the `of_json_opt` pair -- otherwise the
+   abandoned frames sit under whatever fails next. Any enclosing call that
+   returns normally heals it, because it restores the stack it saved. *)
+let clear_backtrace () = call_stack := []
+
+(* The callee as written at the call site. `f a b` parses as `App (App (f, a), b)`
+   so the name is at the bottom of the spine; a method-ish `x.f` names the field.
+   Anything else is a computed callee and has no name to print. *)
+let rec callee_name (e : Ast.expr) =
+  match e.Ast.node with
+  | Ast.Var n -> n
+  | Ast.App (f, _) -> callee_name f
+  | Ast.Field_get (_, fld) -> fld
+  | Ast.Annot (inner, _) -> callee_name inner
+  | _ -> "<fn>"
+
+(* What the driver prints under the diagnostic. Innermost frame first. *)
+let backtrace () =
+  List.map (fun (e : Ast.expr) ->
+    match e.Ast.node with
+    | Ast.App (f, _) -> (callee_name f, e.Ast.loc)
+    | _ -> ("<fn>", e.Ast.loc)) !call_stack
+
 type value =
   | V_int of int
   | V_float of float
@@ -2097,12 +2151,18 @@ let builtin_try_or =
   V_builtin ("try_or", fun f ->
     V_builtin ("try_or_partial", fun default ->
       let saved = !call_depth in
+      let saved_stack = !call_stack in
       try !apply_value_ref f V_unit
       with Eval_error _ ->
         (* the frames the failure unwound are gone, so the count of them goes
            too -- otherwise a program that catches inside a loop drifts upward
            until it reports a depth it is not at *)
         call_depth := saved;
+        (* and the frames it unwound, for the same reason: they are not standing
+           any more, so a LATER failure must not be reported as if they were.
+           Nothing pops them on the way out (see `call_stack`), so the site that
+           recovers on purpose is the site that gives them back. *)
+        call_stack := saved_stack;
         default))
 
 (* Phase 12.9: higher-order Vec API (iter / map / fold / set).
@@ -4306,8 +4366,9 @@ let rec eval_in (env : env) (e : Ast.expr) =
          | other -> other)
       | _ -> oj_ty_of_value e.Ast.loc witness
     in
+    let saved_stack = !call_stack in
     (try V_constr ("Some", Some (of_json_value target (parse_json_tree s)))
-     with _ -> V_constr ("None", None))
+     with _ -> call_stack := saved_stack; V_constr ("None", None))
   (* of_json applied directly: decode the string using the call node's type. *)
   | Ast.App ({ Ast.node = Ast.Var "of_json"; _ }, arg) ->
     let s =
@@ -4342,8 +4403,9 @@ let rec eval_in (env : env) (e : Ast.expr) =
         type_error e.Ast.loc
           "of_json_opt: cannot infer target type (add a type annotation)"
     in
+    let saved_stack = !call_stack in
     (try V_constr ("Some", Some (of_json_value inner (parse_json_tree s)))
-     with Json_parse_error _ -> V_constr ("None", None))
+     with Json_parse_error _ -> call_stack := saved_stack; V_constr ("None", None))
   | Ast.Int_lit n -> V_int n
   | Ast.Float_lit f -> V_float f
   | Ast.Bool_lit b -> V_bool b
@@ -4473,12 +4535,24 @@ let rec eval_in (env : env) (e : Ast.expr) =
          raise (Eval_error (e.Ast.loc, "stack overflow (recursion too deep)"))
        end;
        call_depth := d + 1;
+       let saved_stack = !call_stack in
+       call_stack := e :: saved_stack;
        let r = eval_in ((param, ref v) :: captured) body in
        call_depth := d;
+       call_stack := saved_stack;
        r
      | V_builtin (_, fn) ->
        let v = eval_in env arg in
-       fn v
+       (* A builtin is handed no position -- it raises `Eval_error (Loc.dummy,
+          ...)` -- so the application node lends it one on the way past. Only
+          when it has none: a builtin that called back into user code (vec_sort's
+          comparator, map_iter's block) re-raises a failure that already knows a
+          better line than this one, and overwriting it would move the report
+          from the program to the library. *)
+       (match fn v with
+        | r -> r
+        | exception Eval_error (l, msg) when l.Loc.line = 0 ->
+          raise (Eval_error (e.Ast.loc, msg)))
      | _ -> type_error e.Ast.loc "applying non-function")
   | Ast.Annot (inner, _) -> eval_in env inner
   | Ast.Constr (name, None) ->

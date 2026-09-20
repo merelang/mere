@@ -1,0 +1,13 @@
+// MUST NOT WARN. A guarded arm may decline, so the constructor stays open and
+// the arm below it is the one that answers when the guard is false. Treating a
+// guard as coverage would report the working half of every guarded match.
+// expect-unreachable: 0
+// expect-lines:
+type hand = Rock | Paper | Scissors;
+let name = fn (h: hand) -> fn (loud: bool) ->
+  match h with
+  | Rock when loud -> "ROCK"
+  | Rock -> "r"
+  | Paper -> "p"
+  | Scissors -> "s";
+print (name Rock false)

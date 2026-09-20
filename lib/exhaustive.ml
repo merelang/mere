@@ -596,18 +596,131 @@ let witness_finding loc (scrut_ty : Ast.ty) (w : Ast.pattern) (is_error : bool)
 
 (* Check a Match expression. Returns the findings for it (empty when the match
    is exhaustive). `loc` is the location of the match expression. *)
+(* ---------------------------------------------------------------- redundancy
+   The other side of this file's question. Exhaustiveness asks which values no
+   arm answers for; this asks which arms no value reaches.
+
+   It is the same class of defect seen from the other end, and it has cost real
+   time here: an arm written for a constructor an earlier arm already took is
+   never entered, and what the reader then sees is an error raised from the arm
+   they did NOT write the code in. Nothing says anything -- it builds, it runs,
+   and the second arm is simply not there. Arms written after a `_` are the same
+   thing with a more obvious cause and exactly as little diagnosis.
+
+   ONLY WHEN CERTAIN. Every rule below is about an earlier UNGUARDED arm, since
+   a guarded one may decline and fall through, and coverage is only claimed for
+   a constructor whose payload pattern is itself irrefutable -- `Cons (0, _)`
+   leaves `Cons` open and is not allowed to close it. The cost of a false
+   positive here is somebody deleting a live arm.
+
+   Reported as a warning rather than an error: it is a check being added to
+   trees that already compile, and every one of those has a right to keep
+   compiling while the arms it names are looked at. Escalating is a separate
+   decision, to be made when the count is zero. *)
+
+let rec pat_irrefutable (p : Ast.pattern) : bool =
+  match p.Ast.pnode with
+  | Ast.P_wild | Ast.P_var _ | Ast.P_unit -> true
+  | Ast.P_as (inner, _) -> pat_irrefutable inner
+  | Ast.P_tuple ps -> List.for_all pat_irrefutable ps
+  (* A record pattern names one nominal type and may leave fields out, so it
+     matches every value of that type as long as the fields it DOES name are
+     irrefutable. *)
+  | Ast.P_record (_, fields) -> List.for_all (fun (_, fp) -> pat_irrefutable fp) fields
+  | Ast.P_or (a, b) -> pat_irrefutable a || pat_irrefutable b
+  | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_constr _ -> false
+
+(* The alternatives a pattern offers, flattened: an or-pattern is two arms
+   written in one. *)
+let rec pat_alts (p : Ast.pattern) : Ast.pattern list =
+  match p.Ast.pnode with
+  | Ast.P_or (a, b) -> pat_alts a @ pat_alts b
+  | Ast.P_as (inner, _) -> pat_alts inner
+  | _ -> [p]
+
+(* What an alternative can CLOSE, if it is unguarded. `None` means it closes
+   nothing a later arm could collide with. *)
+type closes = C_all | C_ctor of string | C_lit of string | C_nothing
+
+let alt_closes (p : Ast.pattern) : closes =
+  if pat_irrefutable p then C_all
+  else
+    match p.Ast.pnode with
+    | Ast.P_constr (name, None) -> C_ctor (bare_ctor name)
+    | Ast.P_constr (name, Some inner) when pat_irrefutable inner ->
+      C_ctor (bare_ctor name)
+    | Ast.P_constr _ -> C_nothing   (* payload is refutable: the case stays open *)
+    | Ast.P_int n -> C_lit ("i" ^ string_of_int n)
+    | Ast.P_bool b -> C_lit ("b" ^ string_of_bool b)
+    | Ast.P_str s -> C_lit ("s" ^ s)
+    | _ -> C_nothing
+
+let redundant_findings
+      (arms : (Ast.pattern * Ast.expr option * Ast.expr) list) : finding list =
+  let covered_all = ref false in
+  let covered = Hashtbl.create 8 in   (* key -> the line that closed it *)
+  let out = ref [] in
+  List.iter (fun (p, guard, _) ->
+    let reason =
+      if !covered_all then Some "an earlier arm matches every value"
+      else
+        (* An arm is unreachable only when EVERY alternative it offers is
+           already closed: `A | B` with only `A` taken is still reachable. *)
+        let alts = pat_alts p in
+        let closed_by alt =
+          match alt_closes alt with
+          | C_all -> None      (* irrefutable and nothing above closed it *)
+          | C_nothing -> None
+          | C_ctor c -> Hashtbl.find_opt covered ("c" ^ c)
+          | C_lit k -> Hashtbl.find_opt covered k
+        in
+        let lines = List.map closed_by alts in
+        if alts <> [] && List.for_all (fun x -> x <> None) lines then
+          match List.hd lines with
+          | Some line ->
+            Some (Printf.sprintf "an earlier arm on line %d already matches it" line)
+          | None -> None
+        else None
+    in
+    (match reason with
+     | Some why ->
+       out :=
+         { f_loc = p.Ast.ploc;
+           f_msg = "this arm cannot be reached: " ^ why;
+           f_hint =
+             [ "note: the arm is dead -- the value that would reach it is \
+                answered above, so the code here never runs";
+               "help: reorder the arms, narrow the one above, or delete this one" ];
+           f_error = false } :: !out
+     | None -> ());
+    (* A guarded arm may decline, so it closes nothing. *)
+    if guard = None then
+      List.iter (fun alt ->
+        match alt_closes alt with
+        | C_all -> covered_all := true
+        | C_ctor c ->
+          if not (Hashtbl.mem covered ("c" ^ c)) then
+            Hashtbl.add covered ("c" ^ c) p.Ast.ploc.Loc.line
+        | C_lit k ->
+          if not (Hashtbl.mem covered k) then
+            Hashtbl.add covered k p.Ast.ploc.Loc.line
+        | C_nothing -> ()) (pat_alts p)
+  ) arms;
+  List.rev !out
+
 let check_match (loc : Loc.t)
                 (scrut_ty : Ast.ty)
                 (arms : (Ast.pattern * Ast.expr option * Ast.expr) list)
               : finding list =
+  let redundant = redundant_findings arms in
   let unguarded =
     List.filter_map (fun (p, g, _) -> if g = None then Some [p] else None) arms
   in
   steps := 0;
   declined := false;
   match (try find_missing [scrut_ty] unguarded with Search_exhausted -> None) with
-  | _ when !declined -> []
-  | None -> []
+  | _ when !declined -> redundant
+  | None -> redundant
   | Some [w] ->
     let is_error = witness_is_error w in
     (* `absent_top_level` is self-limiting: it answers with the constructors of
@@ -615,8 +728,8 @@ let check_match (loc : Loc.t)
        `Cons (_, Nil)` -- whose top-level constructors are all present -- adds
        nothing and the finding stays about the one shape. *)
     let also = if is_error then absent_top_level scrut_ty unguarded else [] in
-    [ witness_finding loc scrut_ty w is_error also ]
-  | Some _ -> []
+    redundant @ [ witness_finding loc scrut_ty w is_error also ]
+  | Some _ -> redundant
 
 (* Phase 21.2: deferred matches.  Storing the triple lets us re-walk the
    scrutinee type AFTER all typer unification has completed, so a Match

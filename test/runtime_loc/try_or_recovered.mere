@@ -1,0 +1,12 @@
+// THE HYGIENE CASE. Nothing pops frames while a failure unwinds, so a site that
+// SWALLOWS one has to give them back -- otherwise the abandoned frames are
+// reported as the ancestors of whatever fails next, and the trace describes a
+// run that already ended. `safe` fails and recovers; `other` then fails for an
+// unrelated reason and must be reported on its own.
+// expect-msg: char_at: index 99 out of range
+// expect-loc: 10:28
+// expect-frames: other@12:8
+let safe = fn (u: unit) -> try_or (fn () -> fail "recovered one") 7;
+let other = fn (k: str) -> char_at k 99;
+let _ = print_int (safe ()) in
+print (other "ab")

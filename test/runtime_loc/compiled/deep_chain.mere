@@ -1,0 +1,9 @@
+// The compiled half. There is no position here -- the C runtime's failure
+// helpers are handed none -- but the frames are the machine's own, read back
+// through dladdr, and at -O0 they are exactly the chain the program took.
+// The gate expects: a__direct b__direct c__direct d__direct
+let a = fn (s: str) -> char_at s 99;
+let b = fn (s: str) -> a s;
+let c = fn (s: str) -> b s;
+let d = fn (s: str) -> c s;
+print (d "xy")

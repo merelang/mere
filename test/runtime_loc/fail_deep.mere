@@ -1,0 +1,8 @@
+// `fail` is a builtin too, so it is the same mechanism -- and the message keeps
+// its `fail: ` tag, which the parity harness compares across backends.
+// expect-msg: fail: boom here
+// expect-loc: 6:41
+// expect-frames: boom@7:29 deeper@8:12
+let boom = fn (x: int) -> if x > 0 then fail "boom here" else 0;
+let deeper = fn (y: int) -> boom (y + 1);
+print_int (deeper 3)

@@ -510,9 +510,36 @@ const wasmPath = process.argv[2];
   // Expose for hosts that bind extra env imports later (e.g. DOM glue).
   globalThis.__mere_call_closure = callMereClosure;
 
+  // Q-138: the allocation meter, reported by the host because the module has no
+  // getenv to consult. The module keeps two numbers -- the bump pointer, which
+  // is where allocation has reached, and `__lang_reclaimed`, everything a region
+  // release has taken back -- and the total handed out is their sum. Written to
+  // STDERR and only under MERE_REGION_STATS, the same spelling the C backend
+  // uses, so a program's stdout is byte-identical with the meter on or off and
+  // the parity harness never sees it.
+  // Where the bump stands before `main` runs IS the heap base -- a constant the
+  // module would otherwise have to export, and an export costs its own name in
+  // every .wasm the site ships. Read once, here, rather than paid for forever.
+  const heapBase = instance.exports.__lang_bump ? instance.exports.__lang_bump.value : 0;
+  const reportAllocStats = () => {
+    if (!process.env.MERE_REGION_STATS) return;
+    const bump = instance.exports.__lang_bump;
+    const recl = instance.exports.__lang_reclaimed;
+    if (!bump || !recl) return;
+    const live = BigInt(bump.value) - BigInt(heapBase);
+    const reclaimed = BigInt(recl.value);
+    process.stderr.write(
+      `region-stats wasm: alloc_total=${live + reclaimed} ` +
+      `live=${live} reclaimed=${reclaimed}\n`);
+  };
+
   try {
     instance.exports.main();
+    reportAllocStats();
   } catch (e) {
+    // A failing program allocated too, and the number for the run that broke is
+    // the one somebody chasing an allocation is most likely to want.
+    try { reportAllocStats(); } catch (_) { /* never let the meter eat the fault */ }
     if (e instanceof RangeError) {
       // v0.1.271: the host's own words for this are "Maximum call stack size
       // exceeded", with a stack trace of the same wasm frame a few hundred
