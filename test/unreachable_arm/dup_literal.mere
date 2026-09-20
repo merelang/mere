@@ -1,0 +1,10 @@
+// Literals close the same way constructors do.
+// expect-unreachable: 1
+// expect-lines: 8
+let classify = fn (n: int) ->
+  match n with
+  | 0 -> "zero"
+  | 1 -> "one"
+  | 0 -> "zero again"
+  | _ -> "many";
+print (classify 1)

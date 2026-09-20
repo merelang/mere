@@ -7291,6 +7291,16 @@ let runtime_decls =
          what `print_no_nl` promises. Declared unconditionally because the panic
          path needs fd 2 whether or not the program uses `print_bytes`. *)
       "declare i64 @write(i32, ptr, i64)";
+      (* Declared HERE and not beside its first user. `env_var_runtime_llvm` is
+         emitted only when the program calls `env_var`, and the allocation meter
+         below needs `getenv` in every program -- two conditional declarations of
+         one symbol in one module is an IR error, and the only program that would
+         have shown it is one that reads an environment variable AND is measured. *)
+      "declare ptr @getenv(ptr)";
+      (* The meter reports at exit and has to survive the `exit` builtin, which
+         does not return through main. atexit is the one hook both routes go
+         through. *)
+      "declare i32 @atexit(ptr)";
       (* Same reason the C backend line-buffers stdout: `print` must mean the
          same thing piped as it does on a terminal, or a long-running program
          logs nothing until it exits. fflush(NULL) flushes every open output
@@ -7741,6 +7751,38 @@ let region_runtime_helpers =
       "  ret void";
       "}";
       "";
+      (* Q-138. `MERE_REGION_STATS` existed in codegen_c.ml and nowhere else, so
+         "this change cut allocation" was a sentence only one backend could be
+         asked about -- and Q-135 (24 bytes per saturated application) was
+         verified on C alone for that reason. snprintf into a stack buffer and
+         write(2, ...) rather than fprintf: naming `stderr` from IR means naming
+         a symbol that differs per platform, and fd 2 is the same everywhere.
+         This is the reason the panic path uses write too. *)
+      "@__lang_alloc_total = internal global i64 0";
+      "@.rstats_env_h = internal constant { i64, [18 x i8] } { i64 17, [18 x i8] c\"MERE_REGION_STATS\\00\" }";
+      "@.rstats_env = internal alias [18 x i8], getelementptr inbounds ({ i64, [18 x i8] }, ptr @.rstats_env_h, i32 0, i32 1)";
+      (* 35 visible characters, then the newline, then the NUL: the array is 37
+         and the length word counts 36. The assembler catches a wrong array
+         bound; it cannot catch a wrong LENGTH word, which is the half that
+         would have shipped as a message truncated by one character. *)
+      "@.rstats_fmt_h = internal constant { i64, [37 x i8] } { i64 36, [37 x i8] c\"region-stats llvm: alloc_total=%lld\\0A\\00\" }";
+      "@.rstats_fmt = internal alias [37 x i8], getelementptr inbounds ({ i64, [37 x i8] }, ptr @.rstats_fmt_h, i32 0, i32 1)";
+      "define void @__lang_alloc_stats_report() {";
+      "entry:";
+      "  %e = call ptr @getenv(ptr @.rstats_env)";
+      "  %unset = icmp eq ptr %e, null";
+      "  br i1 %unset, label %done, label %say";
+      "say:";
+      "  %buf = alloca [96 x i8]";
+      "  %t = load i64, ptr @__lang_alloc_total";
+      "  %n = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buf, i64 96, ptr @.rstats_fmt, i64 %t)";
+      "  %n64 = sext i32 %n to i64";
+      "  %w = call i64 @write(i32 2, ptr %buf, i64 %n64)";
+      "  br label %done";
+      "done:";
+      "  ret void";
+      "}";
+      "";
       (* v0.1.443 (Q-116): the one place that decides where a value goes. *)
       "define ptr @__lang_alloc(i64 %n) {";
       "entry:";
@@ -7773,15 +7815,25 @@ let region_runtime_helpers =
       "growbody:";
       "  %ncap2 = shl i64 %ncap, 1";
       "  br label %growloop";
+      (* Q-138: the meter. BOTH exits, because this function returns from two
+         places -- a fresh block and the current one -- and instrumenting the
+         one that reads like the main path would undercount exactly the programs
+         that allocate enough to need a second block. *)
       "growdone:";
       "  call void @__lang_region_add_block(ptr %r, i64 %ncap)";
       "  %top2 = load ptr, ptr %top_p";
       "  %new_top2 = getelementptr i8, ptr %top2, i64 %aligned";
       "  store ptr %new_top2, ptr %top_p";
+      "  %at2 = load i64, ptr @__lang_alloc_total";
+      "  %at2n = add i64 %at2, %aligned";
+      "  store i64 %at2n, ptr @__lang_alloc_total";
       "  ret ptr %top2";
       "use:";
       "  %new_top = getelementptr i8, ptr %top, i64 %aligned";
       "  store ptr %new_top, ptr %top_p";
+      "  %at1 = load i64, ptr @__lang_alloc_total";
+      "  %at1n = add i64 %at1, %aligned";
+      "  store i64 %at1n, ptr @__lang_alloc_total";
       "  ret ptr %top";
       "}";
       "";
@@ -7819,6 +7871,15 @@ let region_runtime_helpers =
       "  br i1 %over, label %fresh, label %inplace";
       "inplace:";
       "  store ptr %new_end, ptr %top_p";
+      (* Growing in place moves the top pointer WITHOUT going through
+         __lang_region_alloc, so the bytes it takes are invisible to the meter
+         unless counted here. Only the delta: the old bytes were counted when
+         they were first handed out. The C backend counts the same difference at
+         the same place. *)
+      "  %atg = load i64, ptr @__lang_alloc_total";
+      "  %gdelta = sub i64 %new_al, %old_al";
+      "  %atgn = add i64 %atg, %gdelta";
+      "  store i64 %atgn, ptr @__lang_alloc_total";
       "  ret ptr %old";
       "fresh:";
       "  %p = call ptr @__lang_region_alloc(ptr %r, i64 %new_n)";
@@ -12181,9 +12242,10 @@ let file_pio_runtime_llvm =
    setenv cannot move the string out from under the value. *)
 let env_var_runtime_llvm =
   String.concat "\n"
-    [ "declare ptr @getenv(ptr)";
-      "";
-      "define %option_str @__lang_env_var(ptr %name) {";
+    (* `declare ptr @getenv(ptr)` used to be here. It is unconditional now (see
+       the declare block), because the allocation meter needs it in programs that
+       never call `env_var`. *)
+    [ "define %option_str @__lang_env_var(ptr %name) {";
       "entry:";
       "  %c = call ptr @getenv(ptr %name)";
       "  %isnull = icmp eq ptr %c, null";
@@ -13344,6 +13406,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         (* installed before the program's own entry block runs *)
         "__lang_boot:";
         "  call void @__lang_install_segv()";
+        "  %__mere_atexit = call i32 @atexit(ptr @__lang_alloc_stats_report)";
         "  br label %entry";
         body;
         "}";

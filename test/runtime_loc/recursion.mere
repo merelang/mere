@@ -1,0 +1,9 @@
+// A runaway recursion arrives with as many frames as the limit allows. The
+// report must collapse the repeat and say how many, because a thousand copies
+// of one line is the same as no report at all.
+// env: MERE_MAX_DEPTH=40
+// expect-msg: stack overflow (recursion too deep)
+// expect-loc: 8:35
+// expect-frames: down@8:35(x39) down@9:12
+let rec down = fn (n: int) -> 1 + down (n + 1);
+print_int (down 0)

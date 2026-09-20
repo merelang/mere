@@ -1,0 +1,11 @@
+// MUST NOT WARN. `Link (0, _)` matches some Link values, not all of them, so it
+// does not close Link -- the arm below it runs for every other Link.
+// expect-unreachable: 0
+// expect-lines:
+type chain = End | Link of (int * chain);
+let rec describe = fn (l: chain) ->
+  match l with
+  | End -> "empty"
+  | Link (0, _) -> "starts with zero"
+  | Link (_, rest) -> describe rest;
+print (describe (Link (1, Link (0, End))))

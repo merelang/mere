@@ -1,0 +1,12 @@
+// Everything written after a catch-all is dead. Same defect, more obvious cause
+// and exactly as little diagnosis before this check existed.
+// expect-unreachable: 2
+// expect-lines: 10 11
+type hand = Rock | Paper | Scissors;
+let name = fn (h: hand) ->
+  match h with
+  | Rock -> "r"
+  | _ -> "x"
+  | Paper -> "p"
+  | Scissors -> "s";
+print (name Paper)
