@@ -1,0 +1,9 @@
+// A builtin raises with no position of its own. The application node lends it
+// one, and the frames above say which caller got there.
+// expect-msg: map_get: key not found
+// expect-loc: 7:29
+// expect-frames: lookup@8:25 go@9:8
+let m = map_new ();
+let lookup = fn (k: str) -> map_get m k;
+let go = fn (n: int) -> lookup "missing";
+print (go 1)

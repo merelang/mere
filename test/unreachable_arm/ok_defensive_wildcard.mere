@@ -1,0 +1,14 @@
+// MUST NOT WARN, ON PURPOSE. Every constructor is already named, so a trailing
+// `_` is strictly speaking dead -- and it is also the shape people write to
+// keep a match compiling when the type gains a case. Reporting it would be
+// right and useless, and the noise would bury the two findings that are not.
+// expect-unreachable: 0
+// expect-lines:
+type hand = Rock | Paper | Scissors;
+let name = fn (h: hand) ->
+  match h with
+  | Rock -> "r"
+  | Paper -> "p"
+  | Scissors -> "s"
+  | _ -> "unknown";
+print (name Rock)

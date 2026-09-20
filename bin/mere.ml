@@ -86,6 +86,24 @@ let usage () =
   print_endline "                        the error names, or `| _ -> fail \"todo\"`,";
   print_endline "                        is the fix.";
   print_endline "";
+  print_endline "";
+  print_endline "Runtime diagnostics:";
+  print_endline "  A failure that is not caught reports where it happened and";
+  print_endline "  the calls that got there. The interpreter names the source";
+  print_endline "  line; a compiled binary names the functions (with -g, a";
+  print_endline "  debugger maps those back to the .mere line).";
+  print_endline "  MERE_BACKTRACE=0        no call stack, message only";
+  print_endline "  MERE_BACKTRACE_FRAMES=N how many frames to print (default 10)";
+  print_endline "  MERE_REGION_STATS=1     print how many bytes were allocated";
+  print_endline "                        (C, LLVM and Wasm; one line on stderr)";
+  print_endline "  MERE_FAIL_TRAP=1        raise SIGTRAP at an uncaught failure";
+  print_endline "                        instead of exiting, so a debugger holds";
+  print_endline "                        the program there. Compiled backends only.";
+  print_endline "                        A CAUGHT `fail` is control flow and never";
+  print_endline "                        traps. Changes the exit status to 133 when";
+  print_endline "                        no debugger is attached, which is why it";
+  print_endline "                        is opt-in.";
+  print_endline "";
   print_endline "Docs: docs/tutorial.md / docs/language-reference.md / docs/stdlib-reference.md";
   print_endline "Examples: examples/ (280 .mere files; see examples/README.md for category index)"
 
@@ -135,6 +153,64 @@ let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
   let report loc kind msg =
     let (src, name, loc) = locate loc in
     prerr_endline (render ~source:src ~filename:name loc kind msg);
+    exit 1
+  in
+  (* The frames under a runtime failure. A position tells you WHERE the program
+     broke; in a file with one helper and forty callers that is not yet the
+     answer, and the frames are the rest of it.
+     MERE_BACKTRACE=0 turns it off for a harness that compares stderr byte for
+     byte; MERE_BACKTRACE_FRAMES sets the cap (default 10). The cap is not
+     decoration: `stack overflow (recursion too deep)` arrives with a million
+     frames, and a million lines of them is the same as none. *)
+  let print_backtrace () =
+    let frames = Mere.Eval.backtrace () in
+    let enabled =
+      match Sys.getenv_opt "MERE_BACKTRACE" with
+      | Some ("0" | "off" | "no") -> false
+      | _ -> true
+    in
+    let cap =
+      match Sys.getenv_opt "MERE_BACKTRACE_FRAMES" with
+      | Some s -> (try max 1 (int_of_string s) with _ -> 10)
+      | None -> 10
+    in
+    if enabled && frames <> [] then begin
+      (* Recursion repeats one frame thousands of times. Collapsing runs keeps
+         the cap spent on distinct callers -- the repeat COUNT is the fact
+         worth reading there, not the thousandth copy of the line. *)
+      let rec runs = function
+        | [] -> []
+        | ((n, l) as f) :: rest ->
+          let same (n', l') =
+            n' = n && l'.Mere.Loc.line = l.Mere.Loc.line
+            && l'.Mere.Loc.col = l.Mere.Loc.col
+          in
+          let rec take k = function
+            | x :: tl when same x -> take (k + 1) tl
+            | tl -> (k, tl)
+          in
+          let (k, tl) = take 1 rest in
+          (f, k) :: runs tl
+      in
+      let collapsed = runs frames in
+      let shown = List.filteri (fun i _ -> i < cap) collapsed in
+      let dropped = List.length collapsed - List.length shown in
+      prerr_endline "";
+      prerr_endline "call stack (innermost first):";
+      List.iter (fun ((n, l), k) ->
+        let (_, file, l) = locate l in
+        let times = if k > 1 then Printf.sprintf " (x %d)" k else "" in
+        Printf.eprintf "  %s at %s:%d:%d%s\n"
+          n file l.Mere.Loc.line l.Mere.Loc.col times) shown;
+      if dropped > 0 then
+        Printf.eprintf "  ... %d more frame%s (MERE_BACKTRACE_FRAMES=%d)\n"
+          dropped (if dropped = 1 then "" else "s") cap
+    end
+  in
+  let report_eval loc msg =
+    let (src, name, loc) = locate loc in
+    prerr_endline (render ~source:src ~filename:name loc "eval error" msg);
+    print_backtrace ();
     exit 1
   in
   (* A syntax error is never the only one worth knowing about: the parse stopped
@@ -262,7 +338,7 @@ let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
        about, and the warning is the sentence that explains the eval error --
        `no matching arm in match` above `missing 1` reads as two problems and
        is one. Every other handler here already prints them. *)
-    print_warnings (); report loc "eval error" msg
+    print_warnings (); report_eval loc msg
   | Mere.Typer.Type_error (loc, msg) -> print_warnings (); report_type loc msg
   | Mere.Trait_elab.Trait_error (loc, msg) -> report loc "trait error" msg
   | Mere.Codegen_c.Codegen_error (loc, msg) -> report loc "codegen error" msg

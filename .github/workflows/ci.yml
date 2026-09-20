@@ -269,6 +269,39 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/stack_overflow.sh
 
+      # And WHERE it happened, plus the calls that got there. Builtins raise with
+      # no position of their own, so this is the application node lending them
+      # one; the frames come from the interpreter's call stack. The poison runs
+      # here too, because a poison nobody executes is a claim, not a check — it
+      # switches the frames off and moves one expected position, and requires
+      # the gate to go red for each.
+      - name: "runtime_loc (a runtime failure names its line and its callers)"
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/runtime_loc_check.sh
+          sh scripts/runtime_loc_check.sh --poison
+
+      # The other side of the exhaustiveness question: which arms no value
+      # reaches. The four cases that must stay SILENT are the point -- a check
+      # that fires on a working match gets a live arm deleted. The sweep keeps
+      # the shipped tree clean, and the poison moves an expected LINE as well as
+      # a count, because warning about the wrong arm is the expensive failure.
+      - name: "unreachable_arm (a dead match arm is reported, a live one is not)"
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/unreachable_arm_check.sh
+          sh scripts/unreachable_arm_check.sh --poison
+
+      # Q-138. Three backends counting allocation in three different places and
+      # agreeing to within 18 bytes on 262 KB. A meter checked only against
+      # itself is checking nothing, which is why the agreement is the gate and
+      # not a note in the changelog.
+      - name: "alloc_meter (C, LLVM and Wasm agree on how much was allocated)"
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/alloc_meter_check.sh
+          sh scripts/alloc_meter_check.sh --poison
+
       - name: "determinism (parity precondition — stdout is a function of the program)"
         if: ${{ !cancelled() }}
         run: sh scripts/determinism_check.sh

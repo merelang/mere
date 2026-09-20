@@ -1,0 +1,11 @@
+// MUST NOT WARN. `Paper | Scissors` is two alternatives and only one of them is
+// closed above, so the arm is still reached -- by Scissors.
+// expect-unreachable: 0
+// expect-lines:
+type hand = Rock | Paper | Scissors;
+let name = fn (h: hand) ->
+  match h with
+  | Paper -> "p"
+  | Paper | Scissors -> "ps"
+  | Rock -> "r";
+print (name Scissors)

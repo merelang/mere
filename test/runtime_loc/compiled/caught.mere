@@ -1,0 +1,5 @@
+// A caught `fail` is control flow, not an error: it must print nothing, must
+// not add frames, and must NOT trip MERE_FAIL_TRAP. A trap that fires on
+// control flow would stop a debugger on every recovered failure in the program.
+let r = try_or (fn () -> fail "inner") 42;
+print_int r

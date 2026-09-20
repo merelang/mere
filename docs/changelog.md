@@ -4,6 +4,213 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.488 — 2026-09-20
+
+_Q-138: the allocation meter, on the other two backends._
+
+_**`MERE_REGION_STATS` existed in `codegen_c.ml` and nowhere else**, so "this
+change cut allocation" was a sentence only one backend could be asked about.
+Q-135 — 24 bytes per saturated application, v0.1.481-482 — was verified on C
+alone for exactly that reason, and the other three were taken on trust._
+
+_**Three implementations now answer, and they agree to within 18 bytes.** The
+same program (a 20,000-element Vec, no region block):_
+
+| backend | alloc_total | where it counts |
+|---|---|---|
+| C | 262,176 | a field on the region struct (already there) |
+| LLVM | 262,184 | `@__lang_region_alloc`'s `use` AND `growdone`, plus in-place growth |
+| Wasm | 262,194 | the bump pointer, plus `$__lang_reclaimed` |
+
+_**Wasm counts on the way DOWN.** `$__lang_bump` goes up at an allocation —
+twenty-odd sites — and down at exactly one, the region release. Instrumenting
+the one place that goes down is a ninth of the work and avoids writing one rule
+in twenty places. The total handed out is the bump plus everything a release
+took back, which also means **the bump alone is a lower bound** — the reason the
+second number has to exist._
+
+_And that second number is one **the C backend does not have**: its regions free
+whole blocks and never report how much was in them. On the region version of the
+same program, 99% of 524,306 B goes back._
+
+_⚠ **The first number this meter produced was 34 bytes**, for a program that
+allocates 262,194. The release subtracted from `mark` — where the block STARTED
+— instead of from the bump as it stood. `mark` is below the release target, so
+the difference clamped to zero every time. One name, two questions. **It was
+visible as wrong only because C had already answered for the same program**,
+which is the argument for building the third meter rather than trusting the
+first._
+
+_LLVM needed both exits of its one allocation function, as the investigation
+predicted: instrumenting only the path that reads like the main one would
+undercount exactly the programs that allocate enough to need a second block.
+In-place growth moves the top pointer without going through the allocator and
+needs its own line. `getenv` moved to the unconditional declarations, because
+`env_var_runtime_llvm` is emitted only when the program calls `env_var` and two
+conditional declarations of one symbol in one module is an IR error — the only
+program that would have shown it reads an environment variable AND is measured._
+
+_Opt-in through `MERE_REGION_STATS`, one line on stderr, stdout byte-identical
+with it on or off. **The cost on Wasm is hello.wasm 1,946 → 1,970 B** (+24 B,
++1.2%, against a band of 1,751-2,141). RV32I stays out of scope: `--bare` has no
+stderr._
+
+_`scripts/alloc_meter_check.sh` is the gate — three-way agreement, the identity
+`alloc_total = live + reclaimed`, silence by default measured in BYTES, and
+twice the work reporting twice the bytes (a meter stuck on a constant passes
+everything else). Two poisons: the agreement band pointed at the pair that
+legitimately differs by 2x, and the doubling band pointed at one program against
+itself._
+
+_parity 178, suite 2773, wasm_size_check 15 files all in band._
+
+---
+
+## v0.1.487 — 2026-09-20
+
+_Which arms no value reaches._
+
+_**The other side of the question this compiler has asked since Phase 1.**
+Exhaustiveness says which values no arm answers for. Nothing said which arms no
+value reaches, and a duplicated constructor arm went through `mere`,
+`mere check` and `mere check -c` in silence:_
+
+```mere
+| Rock -> "r" | Paper -> "p" | Rock -> "r2" | _ -> "x" | Scissors -> "s"
+```
+
+_— accepted, exit 0, nothing printed. Two arms there are dead. The defect this
+answers is a recorded one: when a second arm for one constructor never runs,
+what the reader eventually sees is an error raised from the arm they did NOT
+write the code in, and there is nothing in the build to connect the two._
+
+_`Exhaustive.redundant_findings` already had everything it needed — the arms in
+order, with their positions. An arm is reported when every alternative it offers
+was already closed by an earlier UNGUARDED arm, closed meaning an irrefutable
+pattern, a bare constructor, a constructor whose payload pattern is itself
+irrefutable, or a literal._
+
+_**Only when certain, because the cost of a false positive is a deleted live
+arm.** Four shapes are left alone, and all four are asserted as silent in the
+suite and in the gate: a guarded arm above the same constructor (a guard can be
+false, so the arm below it is the one that answers), a constructor with a
+refutable payload (`Link (0, _)` is some Links, not all), an or-pattern only
+half of which is closed (`Paper | Scissors` under a `Paper` is still reached by
+Scissors), and the defensive `_` written after every constructor is already
+named — dead, reportable, and deliberately not reported, because it is the shape
+people write so a match keeps compiling when the type gains a case, and the
+noise would bury the findings that matter._
+
+_**A warning, not an error.** It is a check being added to trees that already
+compile. Escalating is a separate decision, to be made when the count is zero
+and stays there._
+
+_**It found nothing.** 836 sources here, plus `mere-ruby`'s `main.mere` (30,392
+lines and seven modules), `m3d` and `mbrowse`: zero dead arms. That is a
+measured zero and not a blind one — a `Nil` arm duplicated inside
+`m_strutil.mere`, which `main.mere` reaches through an import, is reported with
+its file, line and column, so the check does run over a program that size and
+through its imports._
+
+_`scripts/unreachable_arm_check.sh` is the gate: seven cases (three reported,
+four silent), then a sweep asserting the shipped tree stays clean, and a
+`--poison` that raises one case's expected count and moves another's expected
+LINE, requiring exactly one red each. The line half matters on its own — a
+check that warns about the wrong arm is the failure that costs the most, and a
+count alone cannot see it._
+
+_suite 2773._
+
+---
+
+## v0.1.486 — 2026-09-20
+
+_A runtime failure says where it happened, and how the program got there._
+
+_**Static errors in this compiler have carried a position and a code frame for
+years; runtime ones carried neither.** `map_get: key not found in Map` was the
+entire report. In `mere-ruby`'s `main.mere` — 30,392 lines — that names
+nothing, and the first thing anyone did with it was go looking for which of the
+callers reached it._
+
+_Three parts, and the materials for all three were already here._
+
+_**The position** comes from the application node. The fifty-odd builtins that
+raise do it with `Loc.dummy`, because a builtin is handed no position; the `App`
+case lends the call site's one to any `Eval_error` that arrives without one. A
+builtin that called back into user code (vec_sort's comparator, map_iter's
+block) re-raises a failure that already knows a better line, and that one is
+left alone._
+
+```
+eval error: map_get: key not found in Map (use map_has to check first)
+  --> lookup.mere:7:29
+  |
+6 | let m = map_new ();
+7 | let lookup = fn (k: str) -> map_get m k;
+  |                             ^^^^^^^ map_get: key not found in Map
+8 | let go = fn (n: int) -> lookup "missing";
+
+call stack (innermost first):
+  lookup at lookup.mere:8:25
+  go at lookup.mere:9:8
+```
+
+_**The frames** are the interpreter's own call stack. Frames are popped on the
+way BACK and deliberately not on the way OUT, so an unwinding failure leaves
+them standing for the driver to read — the bargain `call_depth` right beside it
+already makes. The first version took a snapshot in an exception handler on
+every call instead: `fib 32` ran **0.66 s** with that handler and **0.62 s**
+without, against 0.62 s for the build with none of this. The handler, not the
+frame and not the allocation, was the whole cost. A frame is the application
+node, not a (name, position) pair, so a call costs one cons cell and no walk
+down the spine for a name only a printed frame ever needs._
+
+_⚠ **The symmetric-looking version of that is wrong.** Restoring `call_depth`
+per frame on the way out — the obvious counterpart to the success path — makes
+the suite fail on the `spawn` tests, because **`call_depth` is one global shared
+by every domain**. A child domain running its own closures writes the same
+counter, so a main-domain unwind that also writes it lands between the child's
+`+1` and `-1`. Measured drift: 0 → 1 → 59, and it stuck there for every later
+program in the process._
+
+_**The compiled backend** gets the frames from the machine, through `dladdr`.
+It works because a user's Mere function is emitted with external linkage
+(`mu_lookup`) while the prelude's helpers are `static`, so the filter is the
+program's own functions with no list to maintain._
+
+_⚠ **A return address is never a function's first instruction**, so a pc that
+resolves to offset 0 is not a frame — it is a pc the walk could not place being
+handed the nearest symbol that starts there. Without that rule the report named
+a real function in the program that was **not on the path to the failure**.
+Measured on a four-deep chain: at `-O0` one spurious `+0` frame, and dropping it
+leaves exactly the chain; at `-O2` every remaining frame is `+0`, and dropping
+them leaves none — which is the truth, because inlining and tail calls mean
+those frames are not on the stack to be found._
+
+_`MERE_FAIL_TRAP=1` raises `SIGTRAP` at an uncaught failure instead of exiting,
+so a debugger holds the program AT the failure with `-g` mapping it back to the
+`.mere` line. Opt-in, because without a debugger attached SIGTRAP is fatal and
+the exit status stops being 1. A **caught** `fail` is control flow and does
+none of this: silent, no frames, no trap, exit 0._
+
+_`MERE_BACKTRACE=0` turns the frames off on both backends;
+`MERE_BACKTRACE_FRAMES` caps them (default 10). Runaway recursion arrives with
+as many frames as the depth limit allows, so repeats are collapsed —
+`down at f.mere:8:35 (x 39)`._
+
+_`scripts/runtime_loc_check.sh` is the gate, and it **carries its own poison**
+(`--poison`): it switches the frames off and requires every case that declares
+frames to go red, then moves one expected position by a column and requires
+exactly that case to go red, with the clean run asserted green first so that
+"red" means the poison and not a broken harness. Both run in CI. Five
+interpreter cases plus a compiled leg (frames at `-O0`, none at `-O2`, both
+switches, and a caught fail that stays silent with the trap armed)._
+
+_parity 178 unchanged, suite 2767._
+
+---
+
 ## v0.1.485 — 2026-09-15
 
 _`str_of_int` stops going through printf._

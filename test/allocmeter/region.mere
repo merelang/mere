@@ -1,0 +1,11 @@
+// Everything inside a region block. `live` collapses and `reclaimed` carries
+// the whole number -- which is the measurement the C backend cannot make, since
+// its regions free whole blocks and never say how much was in them.
+let n = 20000;
+let build = fn (k: int) ->
+  let v = vec_new () in
+  let rec go = fn (i: int) -> if i >= k then () else (let _ = vec_push v (i * 2) in go (i + 1)) in
+  let _ = go 0 in
+  vec_len v;
+let total = region R { build n };
+print_int total
