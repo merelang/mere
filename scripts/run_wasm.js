@@ -533,13 +533,24 @@ const wasmPath = process.argv[2];
       `live=${live} reclaimed=${reclaimed}\n`);
   };
 
+  // ON THE EXIT EVENT, not after main returns. `exit n` reaches the host as
+  // `exit_proc`, which calls process.exit and never comes back -- so a program
+  // that ends by exiting (which every competitive-programming solution does,
+  // since that is how the trailing `()` is suppressed) skipped the meter
+  // entirely and reported nothing at all. The listener fires for process.exit
+  // as well as for falling off the end, which is why it replaces both of the
+  // explicit calls that were here. The LLVM backend reached the same conclusion
+  // with atexit.
+  let reported = false;
+  process.on("exit", () => {
+    if (reported) return;
+    reported = true;
+    try { reportAllocStats(); } catch (_) { /* never let the meter eat the exit */ }
+  });
+
   try {
     instance.exports.main();
-    reportAllocStats();
   } catch (e) {
-    // A failing program allocated too, and the number for the run that broke is
-    // the one somebody chasing an allocation is most likely to want.
-    try { reportAllocStats(); } catch (_) { /* never let the meter eat the fault */ }
     if (e instanceof RangeError) {
       // v0.1.271: the host's own words for this are "Maximum call stack size
       // exceeded", with a stack trace of the same wasm frame a few hundred
