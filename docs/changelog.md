@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.490 — 2026-09-21
+
+_The Wasm meter was silent for every program that ends by exiting._
+
+_**`exit n` reaches the Wasm host as `exit_proc`, which calls `process.exit` and
+never comes back**, so the line that reported allocation was never reached. Not
+an approximation and not a wrong number: no output at all, on exactly the shape
+every judged program has — `exit 0` at the end is how the trailing `()` is
+suppressed (Q-136). The meter was checked on programs that fall off the end and
+those all worked._
+
+_Reported from the exit event instead, which fires for `process.exit` as well as
+for a normal return. The LLVM backend reached the same conclusion two days
+earlier with `atexit`; Wasm was the one that did not have it._
+_`test/allocmeter/exits.mere` pins it, and the gate compares the number against
+the same work written without the `exit` — silence would otherwise read as a
+program that allocates nothing._
+
+_**And then the meter was used for what it was built for.** Q-138 existed so
+that Q-135 — 24 bytes per saturated application, fixed for C in v0.1.481-482 —
+could be asked of the other backends. The answer, measured rather than assumed:_
+
+| B/call | C | LLVM | Wasm |
+|---|---|---|---|
+| `f a b` (named top-level, concrete) | 0 | 16 | 32 |
+| `f a b` (f is a function parameter) | 0 | 56 | 67 |
+| trait method | 0 | 16 | 32 |
+| `vec_fold` (2-arg callback) | 0 | 8 | 16 |
+| `vec_map` (1-arg callback) | 0 | 0 | 0 |
+| `map_iter` (2-arg callback) | 0 | 8 | 15 |
+| `vec_sort`, per element | 0 | 111 | 230 |
+
+_**The fix was C-only**, which the changelog for v0.1.481-482 could not have
+said at the time because nothing could measure it. And the first row says the
+problem there is wider than Q-135: that row is zero on C by construction — a
+named top-level function at a concrete type, applied saturated, written out at
+the call site — and it costs 16 and 32 bytes on the others. On those backends it
+is not abstraction that allocates; it is the two-argument call._
+
+_No change to those backends here. The instrument now exists and has been read;
+what it found is written down in the project's open questions, and fixing it is
+its own slice._
+
+---
+
 ## v0.1.489 — 2026-09-20
 
 _The compiled backtrace is withdrawn: it answered on macOS and said nothing on

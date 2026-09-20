@@ -1,0 +1,10 @@
+// A program that ends by EXITING rather than by falling off the end. Every
+// competitive-programming solution does this -- it is how the trailing `()` is
+// suppressed -- and the Wasm meter reported nothing at all for it, because
+// `exit` reaches the host as process.exit and never comes back. The meter now
+// reports from the exit event; this is what says so.
+let v = vec_new ();
+let rec go = fn (i: int) -> if i >= 20000 then () else (let _ = vec_push v (i * 2) in go (i + 1));
+let _ = go 0;
+let _ = print_int (vec_len v);
+exit 0
