@@ -4,6 +4,61 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.491 — 2026-09-21
+
+_Q-139, first slice: the uncurried entry reaches the LLVM backend._
+
+_**`__direct` existed in `codegen_c.ml` and nowhere else**, and nothing could
+see that until this backend had an allocation meter (v0.1.488). What the meter
+said, for a named top-level function at a concrete type applied to both its
+arguments — the row that is zero on C by construction:_
+
+```
+B/call                               C   LLVM   Wasm
+f a b (named top-level, concrete)    0     16     32
+```
+
+_A two-argument call compiled here to "allocate an environment holding the first
+argument, return a closure, apply it to the second". So on this backend it was
+never abstraction that allocated; it was the call._
+
+_Same shape as the C table: for an eligible `f = fn p1 -> fn p2 -> body`, emit
+`@mu_f__direct(p1, p2)` holding the body, and send exactly-saturated call sites
+straight to it. The curried definition is still emitted beside it — this adds an
+entry rather than replacing one, so partial application and first-class use are
+untouched._
+
+_Conservative on purpose for a first slice: exactly two parameters, no region
+parameters, concrete throughout, not an inner lift, head not shadowed by a
+local, arity matching exactly._
+
+_⚠ **Rerouting a call also reroutes it away from `musttail`.** The first version
+emitted a bare call, and the two v0.1.451 assertions went red immediately: they
+ask a two-argument `let rec` for `musttail call %w` and got a bare call. That is
+not a cosmetic loss — a tail-recursive function without the guarantee grows the
+stack once per iteration, which is the defect the C backend records against its
+own single-argument case. The twin now publishes its own prototype (two i64
+arguments, not the curried `(ptr, T)`), which is what lets the self tail call
+inside it match and become `musttail`; wide aggregate returns still take
+`notail`, because `tail` on an sret call is the Q-129 miscompile. **A
+two-argument tail-recursive function had no constant-space form on this backend
+before this.**_
+
+| B/call | C | LLVM before | LLVM after |
+|---|---|---|---|
+| `f a b` (named top-level, concrete) | 0 | 16 | **0** |
+| trait method | 0 | 16 | **8** |
+| `f a b` (f is a function parameter) | 0 | 56 | **48** |
+
+_The rest of Q-139 is the closure-value half — the equivalent of Q-135's `fn2`
+slices — and the Wasm backend, which has none of this yet. Both stay open, with
+the table as the gate._
+
+_suite 2773, parity 196 PASS / 0 FAIL, musttail_budget / debug_info /
+determinism / stack_overflow / vectorize green._
+
+---
+
 ## v0.1.490 — 2026-09-21
 
 _The Wasm meter was silent for every program that ends by exiting._
