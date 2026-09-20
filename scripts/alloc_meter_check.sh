@@ -105,7 +105,7 @@ within() {
     exit (d * 100 <= p * m) ? 0 : 1 }'
 }
 
-for n in noregion noregion2x region; do build_wasm "$n"; done
+for n in noregion noregion2x region exits; do build_wasm "$n"; done
 build_c noregion
 build_ll noregion
 
@@ -167,6 +167,19 @@ if [ -n "$r_total" ] && [ "$r_total" -gt 0 ] 2>/dev/null; then
   fi
 else
   note "no wasm report for the region case"
+fi
+
+# A program that leaves through `exit` skipped the meter entirely: `exit` reaches
+# the host as process.exit and never returns to the line that reported. Pinned
+# because it is the shape every judged program has, and the failure was silence
+# rather than a wrong number -- nothing in the output said the meter had not run.
+e_total=$(wasm_field exits alloc_total)
+if [ -z "$e_total" ] || [ "$e_total" = "0" ]; then
+  note "a program ending in \`exit 0\` reported [${e_total:-nothing}]"
+elif ! within "$e_total" "$w_total" 5; then
+  note "the exiting program reported $e_total against $w_total for the same work"
+else
+  echo "alloc_meter: a program that leaves through \`exit\` still reports ($e_total B)"
 fi
 
 d_total=$(wasm_field noregion2x alloc_total)
