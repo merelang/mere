@@ -4602,18 +4602,21 @@ let () =
     "declare void @abort()";
 
   (* --- LLVM IR codegen: first-class top-level fn (Phase 5.7-a) ---
-     Top-level fn can be passed as value. closure_T1_T2 = { ptr, ptr }
+     Top-level fn can be passed as value. closure_T1_T2 = { ptr, ptr, ptr }
      struct, fn_closure_fn adapter, indirect App goes through extractvalue +
-     call via fn pointer. *)
+     call via fn pointer. The third field is Q-139's uncurried entry, null
+     unless the value carries one; it is pinned here because a layout is a
+     contract and the field is a POINTER THAT GETS CALLED -- a construction
+     site that forgot it would leave undef there. *)
   assert_contains "llvm: closure typedef for int->int"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "%closure_int_int = type { ptr, ptr }";
+    "%closure_int_int = type { ptr, ptr, ptr }";
   assert_contains "llvm: closure adapter emitted"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "define i64 @mu_inc_closure_fn(ptr %env_unused, i64 %x)";
   assert_contains "llvm: fn-as-value builds closure with adapter"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
-    "insertvalue %closure_int_int undef, ptr null, 0";
+    "insertvalue %closure_int_int zeroinitializer, ptr null, 0";
   assert_contains "llvm: fn-as-value sets fn pointer"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "ptr @mu_inc_closure_fn, 1";
@@ -4651,7 +4654,7 @@ let () =
     "ptr @anon_0_fn, 1";
   assert_contains "llvm: captureless anon Fun uses null env"
     (llvm "let apply = fn f -> f 5 in apply (fn x -> x + 1)")
-    "insertvalue %closure_int_int undef, ptr null, 0";
+    "insertvalue %closure_int_int zeroinitializer, ptr null, 0";
 
   (* --- LLVM IR codegen: default region runtime (Phase 5.8) ---
      %__lang_region struct, init/alloc/free helpers, and the global

@@ -4,6 +4,59 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.492 — 2026-09-21
+
+_Q-139, second slice: the uncurried entry becomes N-ary, and a closure value
+carries one._
+
+_Two changes, and the second was measured into existence rather than assumed._
+
+_**N-ary, not exactly two.** The first slice took exactly two parameters,
+because that is where the meter had pointed. `ap add acc i` is a THREE-argument
+spine, so its first application still built an environment per iteration — the
+whole of that row. Opening the twin to two or more took it from **56 to 8**
+bytes a call._
+
+_**And a closure value now carries `fn2`**, the uncurried entry, the way the C
+backend's does since Q-135. The layout is `{ ptr env, ptr fn, ptr fn2 }`, and
+**null is a real case, not a defensive one**: a partial application, a
+polymorphic value, an eta adapter and anything with a region parameter all carry
+null and take the two-step path, which is the path every closure call took
+before this. So the choice is a branch at runtime, not a decision at emit time.
+Every construction starts from `zeroinitializer` rather than `undef` for that
+reason — an undef field here is a pointer that would be CALLED._
+
+_Worth its width, and checked by removing it: with the fn2 path disabled and
+everything else in place, the same row reads **8**; with it, **0**._
+
+| B/call | C | LLVM v0.1.490 | v0.1.491 | v0.1.492 |
+|---|---|---|---|---|
+| `f a b` (named top-level, concrete) | 0 | 16 | 0 | **0** |
+| `f a b` (f is a function parameter) | 0 | 56 | 48 | **0** |
+| trait method | 0 | 16 | 8 | 8 |
+| `vec_fold` / `map_iter` | 0 | 8 | 8 | 8 |
+
+_⚠ **Two things went wrong, and the tree caught both.**_
+
+_The arm took over calls that were not the user's. `emit_user_app` is also the
+fallback for shapes the builtin arms declined, so a partially applied BUILTIN —
+`channel_recv_timeout c ms` — came through it and produced a different refusal
+than the one the suite pins. The arm was right about the shape and wrong about
+whose call it was; it now requires a user-bound head._
+
+_And **it changed evaluation order**. The second argument was evaluated before
+the branch, but on the two-step path the FIRST application runs first, and a
+body that is not immediately another `fn` can print before the second argument
+is reached. `test/parity/closure_fn2_order.mere` holds `noisy 1 (loud 2)`, whose
+prints must read "mid" then "arg", and this printed them the other way round.
+**That file was written for the C backend's own version of this change and it
+caught this one on its first run.** The second argument is now evaluated inside
+each branch._
+
+_suite 2773, parity 196 PASS / 0 FAIL, ten gates green._
+
+---
+
 ## v0.1.491 — 2026-09-21
 
 _Q-139, first slice: the uncurried entry reaches the LLVM backend._

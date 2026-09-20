@@ -3229,13 +3229,21 @@ let emit_cmp_fn (tag : string) (t : Ast.ty) : string =
   instrs := saved_instrs; reg_counter := saved_reg; label_counter := saved_lbl;
   Printf.sprintf "define i64 @cmp_%s(%s %%a, %s %%b) {\n%s\n}" tag pty pty body
 
-(* Closure value layout: `{ ptr env, ptr fn }`. The fn pointer's
+(* Closure value layout: `{ ptr env, ptr fn, ptr fn2 }`. The fn pointer's
    concrete signature (T2 (ptr, T1)) is encoded via bitcast at call
-   sites; LLVM's opaque pointers tolerate that without a typed cast. *)
+   sites; LLVM's opaque pointers tolerate that without a typed cast.
+
+   Q-139: `fn2` is the UNCURRIED entry -- `S (ptr env, P a, Q b)` -- for a value
+   whose result is itself an arrow, and it is NULL when there is not one. Null is
+   the contract and not an oversight: a partial application, a polymorphic value
+   and anything built before this field existed all read null and take the
+   two-step path, which is what every closure call did until now. That is why
+   every construction below starts from `zeroinitializer` rather than `undef` --
+   an undef field here is a pointer that would be CALLED. *)
 let emit_closure_typedef ((p : Ast.ty), (r : Ast.ty)) : string =
   ignore p; ignore r;
   let name = closure_struct_name p r in
-  Printf.sprintf "%%%s = type { ptr, ptr }" name
+  Printf.sprintf "%%%s = type { ptr, ptr, ptr }" name
 
 (* Phase 15.10: extract (K_tag, V_tag) from a Map[R, K, V] typed expr,
    register in `map_instances`. *)
@@ -3560,11 +3568,32 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                ~default:name)
        in
        let r0 = fresh_reg () in
-       emit_instr (Printf.sprintf "  %s = insertvalue %%%s undef, ptr null, 0" r0 cname);
+       emit_instr (Printf.sprintf "  %s = insertvalue %%%s zeroinitializer, ptr null, 0" r0 cname);
        let r1 = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, ptr @%s_closure_fn, 1"
                      r1 cname r0 dispatch_name);
-       r1
+       (* Q-139: ...and the uncurried entry, when this fn has a two-argument twin
+          and `emit_closure_adapter` therefore emitted the fn2 wrapper for it.
+          The two conditions have to agree -- naming a wrapper that was not
+          emitted is a link error, and leaving it null when it was is only a
+          missed optimisation -- so both ask the same table the same way. *)
+       let has_fn2 =
+         match Hashtbl.find_opt direct_fns_llvm dispatch_name with
+         | Some info ->
+           List.length info.dl_params = 2
+           && Typer.region_params_for (source_name_of_llvm dispatch_name) = []
+           && (match Ast.walk arrow with
+               | Ast.TyArrow (_, r) ->
+                 (match Ast.walk r with Ast.TyArrow _ -> true | _ -> false)
+               | _ -> false)
+         | None -> false
+       in
+       if has_fn2 then begin
+         let r2 = fresh_reg () in
+         emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, ptr @%s_closure_fn2, 2"
+                       r2 cname r1 dispatch_name);
+         r2
+       end else r1
      | None when Hashtbl.mem top_globals_llvm name ->
        (* Phase 30.2b: top-level non-fn let is already initialized in the
           file-scope global @name. Load it into a register. *)
@@ -3631,7 +3660,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
              let cname = closure_struct_name arg_ty ret_ty in
              let r0 = fresh_reg () in
              emit_instr (Printf.sprintf
-                           "  %s = insertvalue %%%s undef, ptr %s, 0"
+                           "  %s = insertvalue %%%s zeroinitializer, ptr %s, 0"
                            r0 cname env_p);
              let r1 = fresh_reg () in
              emit_instr (Printf.sprintf
@@ -6550,7 +6579,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let cstruct = closure_struct_name param_ty return_ty in
     if captures = [] then begin
       let r0 = fresh_reg () in
-      emit_instr (Printf.sprintf "  %s = insertvalue %%%s undef, ptr null, 0" r0 cstruct);
+      emit_instr (Printf.sprintf "  %s = insertvalue %%%s zeroinitializer, ptr null, 0" r0 cstruct);
       let r1 = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, ptr @%s, 1"
                     r1 cstruct r0 adapter_name);
@@ -6584,7 +6613,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                       (llvm_ty_of cty) cv p)
       ) captures;
       let r0 = fresh_reg () in
-      emit_instr (Printf.sprintf "  %s = insertvalue %%%s undef, ptr %s, 0"
+      emit_instr (Printf.sprintf "  %s = insertvalue %%%s zeroinitializer, ptr %s, 0"
                     r0 cstruct env_p);
       let r1 = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, ptr @%s, 1"
@@ -6786,8 +6815,133 @@ and emit_user_app ?(tail = false) (env : env) (e : Ast.expr) : string =
       Some (mu n, args)
     | _ -> None
   in
-  match direct_spine () with
-  | Some (callee, args) ->
+  (* Q-139: an exactly-saturated call to a CLOSURE VALUE, using the uncurried
+     entry the value now carries. `f a b` where f is a parameter, a trait
+     method's dict field, or any first-class function is two applications, and
+     the first of them exists only to build an environment holding `a` so the
+     second can be applied -- 48 bytes a call, measured. When fn2 is there, both
+     arguments go in one call and nothing is built.
+
+     NULL IS A REAL CASE, not a defensive one: a partial application, a
+     polymorphic value, an eta adapter and anything with a region parameter all
+     carry null, and they take the two-step path -- which is the path every
+     closure call took until now, unchanged. That is why this is a branch at
+     runtime rather than a decision at emit time: the emitter cannot always see
+     which of the two a value is. *)
+  let closure_fn2_call () =
+    match e.Ast.node with
+    | Ast.App ({ Ast.node = Ast.App (f, a); _ }, b) ->
+      let f_ty =
+        match f.Ast.ty with
+        | Some t -> Ast.walk t
+        | None -> Ast.TyUnit
+      in
+      (match f_ty with
+       | Ast.TyArrow (t1, rest) ->
+         (match Ast.walk rest with
+          | Ast.TyArrow (t2, t3)
+            when ty_is_concrete t1 && ty_is_concrete t2 && ty_is_concrete t3
+                 (* THE HEAD HAS TO BE THE USER'S. `emit_user_app` is also the
+                    fallback for shapes the builtin arms did not take, so without
+                    this a partially-applied BUILTIN -- `channel_recv_timeout c
+                    ms` -- came through here, and `emit_expr` on its head
+                    produced a different refusal than the one the suite pins.
+                    That is the whole of what went wrong: the arm was right about
+                    the shape and wrong about whose call it was. A top-level fn
+                    with a twin belongs to direct_spine, and an inner lift has
+                    its own arm; what is left for this one is a VALUE. *)
+                 && (match (app_spine_head f).Ast.node with
+                     | Ast.Var n ->
+                       user_shadows_llvm env n
+                       && not (Hashtbl.mem direct_fns_llvm (mu n))
+                       && not (Hashtbl.mem inner_lifts_llvm n)
+                     | _ -> false) ->
+            let t1' = Ast.walk t1 and t2' = Ast.walk t2 and t3' = Ast.walk t3 in
+            let outer = closure_struct_name t1' (Ast.TyArrow (t2', t3')) in
+            let inner = closure_struct_name t2' t3' in
+            let lt1 = llvm_ty_of t1' and lt2 = llvm_ty_of t2' and lt3 = llvm_ty_of t3' in
+            let cv = emit_expr env f in
+            let av = emit_expr env a in
+            (* THE SECOND ARGUMENT IS EVALUATED INSIDE EACH BRANCH, not before
+               them. On the slow path the first application RUNS -- and a body
+               that is not immediately another `fn` can print, or fail, before
+               the second argument is ever reached. Hoisting `b` above the
+               branch reversed that: test/parity/closure_fn2_order.mere holds
+               `noisy 1 (loud 2)`, whose two prints must come out "mid" then
+               "arg", and this printed them the other way round. That file was
+               written for the C backend's own version of this change (Q-135,
+               v0.1.481-482) and it caught this one the first time it ran.
+               `a` stays hoisted: it is evaluated first on both paths. *)
+            let envr = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0" envr outer cv);
+            let fn2r = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 2" fn2r outer cv);
+            let isnull = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = icmp eq ptr %s, null" isnull fn2r);
+            let slow = fresh_label "fn2_slow_" in
+            let fast = fresh_label "fn2_fast_" in
+            let join = fresh_label "fn2_join_" in
+            emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s"
+                          isnull slow fast);
+            emit_label fast;
+            (* No work can happen between the parameters on this path -- a value
+               only carries fn2 when its body is immediately another `fn` -- so
+               both arguments are evaluated and handed over together. *)
+            let bv_fast = emit_expr env b in
+            let rfast = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = call %s %s(ptr %s, %s %s, %s %s)"
+                          rfast lt3 fn2r envr lt1 av lt2 bv_fast);
+            (* The block control leaves from is not `fast` once evaluating `b`
+               opened blocks of its own -- `b` can be an `if`. The If case names
+               its phi predecessors the same way: land on a block of your own
+               first. *)
+            let fast_end = fresh_label "fn2_fast_end_" in
+            emit_instr (Printf.sprintf "  br label %%%s" fast_end);
+            emit_label fast_end;
+            emit_instr (Printf.sprintf "  br label %%%s" join);
+            emit_label slow;
+            let fnr = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1" fnr outer cv);
+            let midr = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = call %%%s %s(ptr %s, %s %s)"
+                          midr inner fnr envr lt1 av);
+            (* ...and only now the second argument, which is the order the
+               program wrote. *)
+            let bv = emit_expr env b in
+            let env2 = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0" env2 inner midr);
+            let fn1 = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1" fn1 inner midr);
+            let rslow = fresh_reg () in
+            (* Q-129: `tail` on an sret call is the miscompile, so an aggregate
+               result carries the marker that forbids it, here as everywhere. *)
+            let notail =
+              if String.length lt3 > 0 && lt3.[0] = '%' then "notail " else "" in
+            emit_instr (Printf.sprintf "  %s = %scall %s %s(ptr %s, %s %s)"
+                          rslow notail lt3 fn1 env2 lt2 bv);
+            let slow_end = fresh_label "fn2_slow_end_" in
+            emit_instr (Printf.sprintf "  br label %%%s" slow_end);
+            emit_label slow_end;
+            emit_instr (Printf.sprintf "  br label %%%s" join);
+            emit_label join;
+            let r = fresh_reg () in
+            (* The phi names the block control actually came FROM, which is not
+               `fast`/`slow` once evaluating an argument opened blocks of its
+               own -- `b` can be an `if`. *)
+            emit_instr (Printf.sprintf "  %s = phi %s [ %s, %%%s ], [ %s, %%%s ]"
+                          r lt3 rfast fast_end rslow slow_end);
+            Some r
+          | _ -> None)
+       | _ -> None)
+    | _ -> None
+  in
+  match (match direct_spine () with
+         | Some _ as d -> `Direct d
+         | None -> (match closure_fn2_call () with
+                    | Some r -> `Fn2 r
+                    | None -> `Direct None)) with
+  | `Fn2 r -> r
+  | `Direct (Some (callee, args)) ->
     let info = Hashtbl.find direct_fns_llvm callee in
     let arg_tys = List.map (fun (_, t) -> llvm_ty_of t) info.dl_params in
     let ret_ty = llvm_ty_of info.dl_ret in
@@ -6827,7 +6981,7 @@ and emit_user_app ?(tail = false) (env : env) (e : Ast.expr) : string =
                     r notail ret_ty callee (String.concat ", " arg_vals));
       r
     end
-  | None ->
+  | `Direct None ->
   match e.Ast.node with
   | Ast.App ({ node = Ast.Var name; _ }, arg)
     when Hashtbl.mem inner_lifts_llvm name ->
@@ -7239,9 +7393,31 @@ let emit_closure_adapter (f : fn_decl) : string =
     Printf.sprintf "  %%r = call %s @%s(%s)" rt f.name
       (String.concat ", " (rargs @ [Printf.sprintf "%s %%x" pt]))
   in
+  (* Q-139: and the uncurried entry, when this fn already has a two-argument
+     __direct twin. It always did -- the twin and the value are emitted into the
+     same module -- and the value simply did not carry it, so applying a
+     first-class function to both its arguments built an environment to pass the
+     second. Same shape as Q-135 in the C backend, down to the conditions: no
+     leading region parameters (this adapter is a global with no region to hand
+     over) and exactly two. Failing either leaves fn2 null, which is the
+     fallback and not a bug. *)
+  let fn2 =
+    match Ast.walk f.return_ty with
+    | Ast.TyArrow (q, s2) when Typer.region_params_for (source_name_of_llvm f.name) = [] ->
+      (match Hashtbl.find_opt direct_fns_llvm f.name with
+       | Some info when List.length info.dl_params = 2 ->
+         Some (Printf.sprintf
+                 "define %s @%s_closure_fn2(ptr %%env_unused, %s %%a, %s %%b) {\n\
+                  entry:\n  %%r = call %s @%s__direct(%s %%a, %s %%b)\n  ret %s %%r\n}"
+                 (llvm_ty_of s2) f.name pt (llvm_ty_of q)
+                 (llvm_ty_of s2) f.name pt (llvm_ty_of q) (llvm_ty_of s2))
+       | _ -> None)
+    | _ -> None
+  in
   Printf.sprintf
-    "define %s @%s_closure_fn(ptr %%env_unused, %s %%x) {\nentry:\n%s\n  ret %s %%r\n}"
+    "define %s @%s_closure_fn(ptr %%env_unused, %s %%x) {\nentry:\n%s\n  ret %s %%r\n}%s"
     rt f.name pt inner_call rt
+    (match fn2 with Some d -> "\n" ^ d | None -> "")
 
 (* Emit a top-level fn definition. Each fn gets fresh register/label
    counters so the SSA names don't collide across functions. *)
@@ -12987,7 +13163,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       | _ -> (List.rev params, body, Ast.walk ty)
     in
     let params, body, ret = peel [(f.param, Ast.walk f.param_ty)] f.body f.return_ty in
-    if List.length params = 2
+    (* >= 2, not = 2. The first slice took exactly two because that is where the
+       measured cost was; `ap add acc i` is a THREE-argument spine, and capping
+       at two left its first application building an environment per iteration
+       -- which is the whole of that row. The C backend takes >= 1 for a reason
+       of its own (its one-argument twin is what reaches the self-tail loop);
+       here a one-argument call already allocates nothing, so two is the floor. *)
+    if List.length params >= 2
        && Typer.region_params_for (source_name_of_llvm f.name) = []
        && List.for_all (fun (_, t) -> ty_is_concrete t) params
        && ty_is_concrete ret
@@ -13570,7 +13752,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
              ret_ll adapter body_code ret_ll
            in
            let const_def = Printf.sprintf
-             "@%s_as_value = internal constant %%%s { ptr null, ptr @%s_closure_fn }"
+             (* Q-139: an eta adapter is a wrapper this backend synthesised, not a
+                user fn with a __direct twin, so its uncurried entry is null. *)
+             "@%s_as_value = internal constant %%%s { ptr null, ptr @%s_closure_fn, ptr null }"
              adapter cstruct adapter
            in
            fn_def :: const_def :: acc)
