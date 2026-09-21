@@ -312,6 +312,16 @@ jobs:
           sh scripts/main_value_check.sh
           sh scripts/main_value_check.sh --poison
 
+      # The examples corpus, run on the interpreter and on C and required to
+      # print the same bytes. 291 programs written for people rather than for a
+      # harness, which is why they cover shapes a hand-written suite does not:
+      # its first run found `show` of a Vec answering `<unknown>` on C.
+      - name: "examples_parity (the corpus prints the same on interp and C)"
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/examples_parity.sh
+          sh scripts/examples_parity.sh --poison
+
       - name: "determinism (parity precondition — stdout is a function of the program)"
         if: ${{ !cancelled() }}
         run: sh scripts/determinism_check.sh

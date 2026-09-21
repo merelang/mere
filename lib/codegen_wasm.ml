@@ -5380,6 +5380,19 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
       | Some vs -> vs
       | None -> []
     in
+    (* Q-140 (found by the examples sweep): a type with NO constructors is not
+       a variant, and the tag chain below collapses to a bare `(unreachable)`.
+       That is a function which traps when called -- so `show` of a `Vec` on
+       this backend compiled, ran, and died with no message at all, while the
+       interpreter printed `Vec[1, 2]`, the C backend printed `<unknown>` (now
+       fixed) and LLVM refused. Refusing is what LLVM already does and is the
+       honest answer: this backend cannot display that value, and saying so at
+       compile time beats trapping at run time. *)
+    if vs = [] then
+      unsupported Loc.dummy
+        (Printf.sprintf
+           "show: `%s` has no constructors to walk, so this backend cannot \
+            display it -- print its parts instead" n);
     let mapping =
       match vs with
       | (cname, _) :: _ ->
