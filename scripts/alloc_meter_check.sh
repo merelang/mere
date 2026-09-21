@@ -25,6 +25,12 @@
 #   4. the region case reclaims -- ≥90% of the total goes back
 #   5. it responds to the subject -- twice the work reports ~twice the bytes. A
 #      meter stuck on a constant passes 1-4 and fails this.
+#   6. a float costs one box per iteration and no more (Q-141). This is the
+#      first thing the meter was pointed at that it then had to KEEP: floats
+#      were 64 bytes an iteration on Wasm and 0 on C, and the fix (literals in
+#      the data segment, arithmetic on the f64 operand stack) has nothing else
+#      guarding it -- the answers are identical either way, so parity, the
+#      suite and the size budgets are all green on the slow version.
 #
 # Usage:
 #   sh scripts/alloc_meter_check.sh            # check
@@ -105,7 +111,7 @@ within() {
     exit (d * 100 <= p * m) ? 0 : 1 }'
 }
 
-for n in noregion noregion2x region exits; do build_wasm "$n"; done
+for n in noregion noregion2x region exits floatarith; do build_wasm "$n"; done
 build_c noregion
 build_ll noregion
 
@@ -191,6 +197,31 @@ if [ -n "$d_total" ] && [ -n "$w_total" ]; then
   fi
 fi
 
+# 6. Q-141: bytes per iteration of float arithmetic, with a ceiling AND a
+#    floor. The ceiling is the regression check. The floor is there because the
+#    honest answer to "how cheap can this get" is not zero while a float is
+#    still a boxed value -- if it does reach zero, the value model changed, and
+#    that is a sentence somebody should have to write here.
+FLOAT_ITERS=100000
+FLOAT_MAX=16   # bytes/iteration: one 8-byte box, with room for alignment
+FLOAT_MIN=4
+f_total=$(wasm_field floatarith alloc_total)
+if [ -z "$f_total" ]; then
+  note "no wasm report for the float case"
+else
+  f_per=$((f_total / FLOAT_ITERS))
+  if [ "$f_per" -gt "$FLOAT_MAX" ]; then
+    note "float arithmetic costs $f_per B/iteration (budget $FLOAT_MAX) — \
+$f_total B for $FLOAT_ITERS iterations; boxing came back"
+  elif [ "$f_per" -lt "$FLOAT_MIN" ]; then
+    note "float arithmetic costs $f_per B/iteration, under the floor of \
+$FLOAT_MIN — if floats stopped being boxed, say so here"
+  else
+    echo "alloc_meter: float arithmetic costs $f_per B/iteration on wasm \
+($f_total B / $FLOAT_ITERS) — one box for the accumulator"
+  fi
+fi
+
 if [ "${1:-}" = "--poison" ]; then
   [ "$fails" = 0 ] || { echo "poison: CONTROL IS NOT GREEN ($fails)"; exit 1; }
   echo "poison: control green"
@@ -209,8 +240,25 @@ if [ "${1:-}" = "--poison" ]; then
   else
     echo "poison 2 (doubling vs itself): red — a ratio of 1.0 is caught"
   fi
+  # 3 and 4: the float budget's two sides, each pointed at a number that must
+  # break it. A ceiling and a floor are two comparisons, and a gate that grew a
+  # floor without one is half-poisoned.
+  if [ $((f_total * 100 / FLOAT_ITERS)) -gt "$FLOAT_MAX" ]; then
+    echo "poison 3 (float ceiling vs 100x the bytes): red — caught"
+  else
+    echo "poison 3 (float ceiling vs 100x the bytes): FAILED — accepted \
+$((f_total * 100 / FLOAT_ITERS)) B/iteration against a budget of $FLOAT_MAX"
+    p=$((p + 1))
+  fi
+  if [ $((f_total / 100 / FLOAT_ITERS)) -lt "$FLOAT_MIN" ]; then
+    echo "poison 4 (float floor vs a hundredth of the bytes): red — caught"
+  else
+    echo "poison 4 (float floor vs a hundredth of the bytes): FAILED — accepted \
+$((f_total / 100 / FLOAT_ITERS)) B/iteration against a floor of $FLOAT_MIN"
+    p=$((p + 1))
+  fi
   [ "$p" = 0 ] || exit 1
-  echo "alloc_meter: poison ok (2 poisons + control)"
+  echo "alloc_meter: poison ok (4 poisons + control)"
   exit 0
 fi
 

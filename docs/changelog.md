@@ -4,6 +4,84 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.500 — 2026-09-21
+
+_Floats stop being boxed at every node on the Wasm backend._
+
+_Q-140 and v0.1.499 both came from asking the examples corpus a question
+nothing else asked. Sweeping it a third time — this time for **allocation**,
+not output — found `examples/mandelbrot.mere` dying with "out of memory" on
+Wasm and nowhere else: C reports `alloc_total=6,291,736`, Wasm used up the
+whole 64 MB linear memory._
+
+_Isolating it took one probe and one control. 100,000 iterations of
+`acc + (1.0 / (1.0 + (2.0 * 3.0)))`:_
+
+```
+          Wasm          C
+float     6,400,036 B   32 B      <- 64 bytes an iteration
+int              30 B    0 B      <- the control: the loop itself is free
+```
+
+_The control is what makes this a measurement rather than a guess: it is not
+the loop and it is not the `Vec`, it is **the float**. This backend keeps every
+value in an `i64` slot, so a float is the address of an 8-byte box, and until
+now one was minted at every node — four literals and four results, eight boxes,
+to compute one accumulator._
+
+_Three places the box is not needed, in the order they were removed:_
+
+| | probe |
+|---|---|
+| before | 6,400,036 B |
+| literals interned in the data segment (they are constants) | 3,200,024 B |
+| intermediates built on Wasm's `f64` operand stack | **800,024 B** |
+| `let`-bound floats in `f64` locals | — (this probe has no `let`) |
+
+_**8×**, and the 8 bytes left are the accumulator itself: the floor for a boxed
+value model. `pi` and `e` were allocating on every read too, and go the same
+way._
+
+_No new mechanism — Q-109 had already built this shape for SIMD, so
+`emit_float_f64` / `float_locals` / `Ast.float_operand_only` are
+`emit_simd_v` / `simd_locals` / `Ast.simd_operand_only` with the width changed._
+
+_⚠ **The predicate decides whether the unboxing pays, never whether the code is
+correct.** An `f64` local asked for its address gets boxed on the spot by its
+own arm in `emit_expr`. Resting correctness on an analysis that has to be
+conservative is how an analysis that is slightly wrong becomes a wrong answer._
+
+_⚠ **Nothing else in the tree could have caught this, and nothing else guards
+it now.** The answers are bit-identical either way: `examples/raytrace.mere`
+writes the same 56,610-byte PPM and the same `adler=48497-22482` before and
+after. The suite, parity, `main_value_check` and the size budgets are all green
+on the slow version. So the gate is the allocation meter —
+`scripts/alloc_meter_check.sh` check 6, with a **ceiling and a floor**: the
+ceiling catches boxing coming back, the floor says floats are still boxed at
+all, so the day that stops being true somebody has to come here and write it
+down._
+
+_`raytrace.wasm`, where every vector is a `(float, float, float)`, went
+**9,530 → 6,107 B (-36%)** and broke its band's floor — which is the floor
+doing its job. Lowered deliberately, after checking the module still answers
+what the interpreter does, byte for byte._
+
+_**mandelbrot still does not run**, and measuring why produced a different
+question. Reduced to 80×60 so it completes (the `alloc_total` of a program that
+hits the wall is how much fit, not how much it wanted), it went 22,133,389 →
+13,702,001 B — 1.6×, not 8×. The same recursive loop at top level costs
+**16 B/iteration**; nested inside a function that captures, **103 B/iteration**,
+with an int control at 1.67. Counting bump sites per function in the WAT, the
+nested build alone carries `$anon_1_fn` and `$anon_0_fn_fn2`; the lifted body
+is identical. That is Q-139's `__direct`/`fn2` not reaching a capturing inner
+function, and it is not a float question — filed separately._
+
+_What remains genuinely float-shaped is the **calling convention**: an argument
+is a Mere value, so a float argument is an address, and two of them cost 16
+bytes a call. Changing that is a different slice._
+
+---
+
 ## v0.1.499 — 2026-09-21
 
 _The examples corpus is compared across backends, and the first run found a bug._

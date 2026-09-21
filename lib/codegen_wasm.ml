@@ -188,10 +188,14 @@ let fresh_local_v128 () =
   local_types := !local_types @ ["v128"];
   n
 let simd_locals : (string * int) list ref = ref []
+(* Q-141: float-typed let bindings whose every use is float arithmetic live
+   unboxed in an f64 local, exactly as `simd_locals` does for v128. *)
+let float_locals : (string * int) list ref = ref []
 let simd_result_ops = Ast.simd_result_ops
 let simd_scalar_ops = Ast.simd_scalar_ops
 let simd_head = Ast.simd_head
 let simd_operand_only = Ast.simd_operand_only
+let float_operand_only = Ast.float_operand_only
 
 (* String literals live in linear memory. Each Str_lit is laid out
    sequentially starting at `str_initial_offset` (we reserve the first
@@ -931,6 +935,38 @@ let const_closure_offset (fn_idx : int) (fn2_idx : int) : int =
       :: !str_data_decls;
     Hashtbl.add const_closure_offsets (fn_idx, fn2_idx) off;
     off
+
+(* Q-141: a float LITERAL is a constant, and boxing one on the bump heap every
+   time the expression is evaluated is 8 bytes a visit. Measured with the
+   allocation meter: 100,000 iterations of `acc + (1.0 / (1.0 + (2.0 * 3.0)))`
+   allocate 6,400,036 bytes on this backend and 32 on C -- 64 bytes an
+   iteration, eight boxes, of which four are these literals. The record is the
+   same eight bytes every time, so it belongs in the data segment. *)
+let const_float_offsets : (string, int) Hashtbl.t = Hashtbl.create 8
+let const_float_offset (bits : string) : int =
+  match Hashtbl.find_opt const_float_offsets bits with
+  | Some off -> off
+  | None ->
+    (* 8-byte aligned: the value is read back with `f64.load align=8`. *)
+    let off = (!str_offset_counter + 7) land (lnot 7) in
+    str_offset_counter := off + 8;
+    str_data_decls :=
+      Printf.sprintf "  (data (i32.const %d) \"%s\")" off bits
+      :: !str_data_decls;
+    Hashtbl.add const_float_offsets bits off;
+    off
+
+(* The IEEE-754 bits, little-endian, as a WAT data string -- the key is the
+   bit pattern and not the OCaml float, so 0.0 and -0.0 stay distinct. *)
+let const_float (f : float) : int =
+  let bits = Int64.bits_of_float f in
+  let b = Buffer.create 32 in
+  for i = 0 to 7 do
+    Buffer.add_string b
+      (Printf.sprintf "\\%02x"
+         (Int64.to_int (Int64.logand (Int64.shift_right_logical bits (i * 8)) 0xFFL)))
+  done;
+  const_float_offset (Buffer.contents b)
 
 let intern_show_str (s : string) : int =
   match Hashtbl.find_opt show_str_offsets s with
@@ -1969,6 +2005,40 @@ let rec emit_simd_v (e : Ast.expr) : unit =
     emit_instr (if name = "f64x2_load" then "call $mere_f64x2_load_v" else "call $mere_f64x2_load_unchecked_v")
   | _ -> emit_expr e; unbox ()
 
+(* Q-141: leave an f64 on the operand stack instead of a pointer to a box.
+   Every value in this backend is an i64 slot, so a float is an address and
+   arithmetic on floats was load-op-box at EVERY node: `a*a + b*b` boxed three
+   doubles to answer one question, and the two inner boxes were dead the
+   instant the outer add read them. Wasm has an f64 operand stack, so a float
+   subexpression whose only consumer is another float operation never needs an
+   address at all. Same shape as `emit_simd_v` above: a structural walk over
+   the arithmetic, and a fallback that unboxes whatever it does not recognise
+   (parameters, call results, Vec elements -- anything already a Mere value).
+
+   The saving is the intermediates; `Float_lit` is handled by the data segment
+   (`const_float_offset`) and appears here only so a literal operand does not
+   round-trip through memory. Boxing happens once, at the boundary where the
+   float becomes a value again -- which is where the caller calls
+   `emit_float_alloc_from_f64_on_stack`. *)
+and emit_float_f64 (e : Ast.expr) : unit =
+  let is_float (x : Ast.expr) =
+    match x.Ast.ty with Some t -> Ast.walk t = Ast.TyFloat | None -> false
+  in
+  match e.Ast.node with
+  | Ast.Var n when List.mem_assoc n !float_locals ->
+    emit_instr (Printf.sprintf "local.get %d" (List.assoc n !float_locals))
+  | Ast.Float_lit f -> emit_instr (Printf.sprintf "f64.const %.17g" f)
+  | Ast.Bin (((Ast.Add | Ast.Sub | Ast.Mul | Ast.Div) as op), a, b)
+    when is_float a && is_float b ->
+    emit_float_f64 a; emit_float_f64 b; emit_instr (wasm_binop_float op)
+  | Ast.Neg inner when is_float inner ->
+    emit_instr "f64.const 0"; emit_float_f64 inner; emit_instr "f64.sub"
+  | _ ->
+    (* already a value: unbox it, exactly as the boxed path always did *)
+    emit_expr e;
+    emit_instr "i32.wrap_i64";
+    emit_instr "f64.load offset=0 align=8"
+
 and emit_expr (e : Ast.expr) : unit =
   (* Snapshot inbound tail-position + top-level-body flags. All
      descendant emit_expr calls default back to non-tail / non-top;
@@ -1987,9 +2057,9 @@ and emit_expr (e : Ast.expr) : unit =
        literals outside i32 is gone; the full 64-bit range emits. *)
     emit_instr (Printf.sprintf "i64.const %d" n)
   | Ast.Float_lit f ->
-    (* Phase 34.3: push the f64 literal, bump alloc to get a boxed ptr *)
-    emit_instr (Printf.sprintf "f64.const %.17g" f);
-    emit_float_alloc_from_f64_on_stack ()
+    (* Q-141: the box is a constant, so it lives in the data segment and this
+       is just its address. Phase 34.3 bump-allocated one per evaluation. *)
+    emit_instr (Printf.sprintf "i64.const %d" (const_float f))
   | Ast.Bool_lit b ->
     emit_instr (Printf.sprintf "i64.const %d" (if b then 1 else 0))
   | Ast.Unit_lit ->
@@ -1998,11 +2068,17 @@ and emit_expr (e : Ast.expr) : unit =
     let off = fresh_str_offset s in
     emit_instr (Printf.sprintf "i64.const %d" off)
   | Ast.Var "pi" when not (user_shadows_wasm "pi") ->
-    (* Phase 34.3: float constants — heap-alloc and push an i32 ptr *)
-    emit_instr "f64.const 3.14159265358979323846";
-    emit_float_alloc_from_f64_on_stack ()
+    (* Q-141: constants, so the data segment, not the bump heap (Phase 34.3
+       heap-allocated one on every read). *)
+    emit_instr (Printf.sprintf "i64.const %d" (const_float 3.14159265358979323846))
   | Ast.Var "e" when not (user_shadows_wasm "e") ->
-    emit_instr "f64.const 2.7182818284590452354";
+    emit_instr (Printf.sprintf "i64.const %d" (const_float 2.7182818284590452354))
+  | Ast.Var name when List.mem_assoc name !float_locals ->
+    (* Q-141: `float_operand_only` is what put this name in an f64 local, so
+       reaching here means it is wanted as a value after all. Box it rather
+       than answer with the wrong slot: the predicate decides whether the
+       unboxing PAYS, and correctness must not also rest on it. *)
+    emit_instr (Printf.sprintf "local.get %d" (List.assoc name !float_locals));
     emit_float_alloc_from_f64_on_stack ()
   | Ast.Var name ->
     (* Phase 26.6 (port of codegen_c Phase 24.1 / codegen_llvm Phase 25.10):
@@ -2312,9 +2388,9 @@ and emit_expr (e : Ast.expr) : unit =
   | Ast.Bin (op, a, b) ->
     (match a.Ast.ty with
      | Some t when Ast.walk t = Ast.TyFloat ->
-       (* floats are boxed (i64-held ptr -> heap f64): wrap, load, op, re-box. *)
-       emit_expr a; emit_instr "i32.wrap_i64"; emit_instr "f64.load offset=0 align=8";
-       emit_expr b; emit_instr "i32.wrap_i64"; emit_instr "f64.load offset=0 align=8";
+       (* Q-141: the operands are built on the f64 stack, so a nested
+          arithmetic tree boxes once here rather than once per node. *)
+       emit_float_f64 a; emit_float_f64 b;
        emit_instr (wasm_binop_float op);
        emit_float_alloc_from_f64_on_stack ()
      | _ ->
@@ -2367,10 +2443,10 @@ and emit_expr (e : Ast.expr) : unit =
        emit_instr (wasm_cmp op);
        emit_instr "i64.extend_i32_u"
      | Ast.TyFloat, _ ->
-       (* floats are boxed (i64-held ptr): wrap, load both f64, compare,
-          extend the i32 comparison result back to an i64 bool *)
-       emit_expr a; emit_instr "i32.wrap_i64"; emit_instr "f64.load offset=0 align=8";
-       emit_expr b; emit_instr "i32.wrap_i64"; emit_instr "f64.load offset=0 align=8";
+       (* Q-141: a comparison consumes two f64 and produces a bool, so with
+          the operands on the f64 stack this path allocates nothing at all --
+          `x*x + y*y > 4.0` used to box three doubles to answer it. *)
+       emit_float_f64 a; emit_float_f64 b;
        emit_instr (wasm_cmp_float op);
        emit_instr "i64.extend_i32_u"
      | _ ->
@@ -2423,6 +2499,23 @@ and emit_expr (e : Ast.expr) : unit =
        wasm_tail_pos := saved_tail;
        wasm_in_top_level_body := saved_top;
        emit_expr body
+     | Ast.P_var name
+       when (match value.Ast.ty with
+             | Some t -> Ast.walk t = Ast.TyFloat | None -> false)
+            && not (saved_top && Hashtbl.mem top_globals_wasm name)
+            && float_operand_only name body ->
+       (* Q-141: unboxed in an f64 local. `zx2` and `zy2` in
+          examples/mandelbrot.mere are this shape -- two boxes per inner
+          iteration whose only readers are the next two float operations. *)
+       let slot = fresh_local_f64 () in
+       emit_float_f64 value;
+       emit_instr (Printf.sprintf "local.set %d" slot);
+       let prev_f = !float_locals in
+       float_locals := (name, slot) :: prev_f;
+       wasm_tail_pos := saved_tail;
+       wasm_in_top_level_body := saved_top;
+       emit_expr body;
+       float_locals := prev_f
      | Ast.P_var name
        when (match value.Ast.ty with Some t -> (match Ast.walk t with Ast.TySimd _ -> true | _ -> false) | None -> false)
             && not (saved_top && Hashtbl.mem top_globals_wasm name)
@@ -4825,6 +4918,7 @@ let emit_fn_def (f : fn_decl) : string =
   local_types := [];
   locals := [(f.param, 0)];
   simd_locals := [];
+  float_locals := [];
   let saved_tail = !wasm_tail_pos in
   let saved_unwind = !fail_unwind_on in
   wasm_tail_pos := true;
@@ -4878,6 +4972,7 @@ let emit_direct_fn_wasm (name : string) (info : direct_fn_info_wasm) : string =
   local_types := [];
   locals := List.mapi (fun i p -> (p, i)) info.dw_params;
   simd_locals := [];
+  float_locals := [];
   let saved_tail = !wasm_tail_pos in
   let saved_unwind = !fail_unwind_on in
   wasm_tail_pos := true;
@@ -5113,6 +5208,8 @@ let emit_anon_adapter2 (ce : closure_emission) : string option =
        lambda's, slot 2 the inner one's. *)
     locals := (ce.ce_param, 1) :: (p2, 2) :: capture_locals;
     simd_locals := [];
+    float_locals := [];
+  float_locals := [];
     let saved_tail = !wasm_tail_pos in
     let saved_unwind = !fail_unwind_on in
     wasm_tail_pos := true;

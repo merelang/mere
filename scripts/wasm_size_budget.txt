@@ -8,7 +8,8 @@
 # measures a different artifact -- the check skips rather than compare across
 # that line.
 #
-# Each band is the size measured on 2026-09-21 with Q-139 complete, -10% / +10%. Not targets: the
+# Each band is the size measured on 2026-09-21 with Q-139 complete (raytrace
+# re-measured with Q-141), -10% / +10%. Not targets: the
 # ceiling is tight enough that the 2026-07 -> 2026-09 tripling of hello.wasm
 # would have failed here long before anyone saw it by eye. The floor exists
 # because a demo that collapses to a stub is a failure a ceiling-only check
@@ -53,7 +54,13 @@ fizzbuzz.wasm                  1593     1947
 g2048.wasm                     5348     6537
 gameboy.wasm                  13377    16350
 hello.wasm                     1757     2148
-raytrace.wasm                  8577    10484
+# raytrace.wasm: lowered v0.1.500 from 8577/10484. Q-141 took the float boxing
+# out of this backend and the shipped module went 9530 -> 6107 B (-36%) -- by
+# far the biggest mover, because every vector in this program is a
+# (float, float, float) tuple. Verified as an improvement and not a stub: the
+# same program on wasm and on the interpreter writes a byte-identical 56,610 B
+# raytrace.ppm and the same adler=48497-22482.
+raytrace.wasm                  5496     6718
 rvconsole.wasm                 5448     6659
 selfhost-compile.wasm        152044   185831
 selfhost-fmt.wasm             85611   104636
