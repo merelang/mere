@@ -221,12 +221,14 @@ for f in sorted(p.name for p in tmp.joinpath("schemas").iterdir()):
     sdl = tmp.joinpath("schemas", f).read_text()
     lines.append('let _ = print (Gexec.run_json (Gparse.document (q ++ "%s")) (GObj ([])) []);'
                  % esc(sdl))
-lines.append("0")
 tmp.joinpath("subject.mere").write_text("\n".join(lines) + "\n")
 PY
 cp "$TMP/subject.mere" "$ROOT/examples/.gintro_tmp.mere"
 if run_subject "introspection" "$ROOT/examples/.gintro_tmp.mere" "$TMP/ours_raw.txt"; then
-  sed '$d' "$TMP/ours_raw.txt" > "$TMP/ours.txt"
+  # v0.1.501: nothing is trimmed. Until v0.1.494 a Mere program printed a
+  # trailing line for its own value, and the `0` appended above was a sentinel
+  # for it to eat; Q-136 made a unit main silent, so the trim ate the answer.
+  cp "$TMP/ours_raw.txt" "$TMP/ours.txt"
   node --input-type=module -e "
 import * as g from '$GQL_DIR/index.js';
 import { readFileSync, writeFileSync, readdirSync } from 'fs';
@@ -386,12 +388,11 @@ for q in tmp.joinpath("type_queries.txt").read_text().split("\n"):
     if not q: continue
     lines.append('let _ = print (Gexec.run_json (Gparse.document ("%s" ++ sdl)) (GObj ([])) []);'
                  % esc(q))
-lines.append("0")
 tmp.joinpath("tq_subject.mere").write_text("\n".join(lines) + "\n")
 PY
   cp "$TMP/tq_subject.mere" "$ROOT/examples/.gintro_tmp.mere"
   if run_subject "__type" "$ROOT/examples/.gintro_tmp.mere" "$TMP/tq_raw.txt"; then
-    sed '$d' "$TMP/tq_raw.txt" > "$TMP/tq_got.txt"
+    cp "$TMP/tq_raw.txt" "$TMP/tq_got.txt"
     # Compared as PARSED JSON, so key order in our serialiser is not the subject.
     node -e "
 const fs=require('fs');
@@ -447,7 +448,7 @@ tmp.joinpath("desc_subject.mere").write_text(
 PY
 cp "$TMP/desc_subject.mere" "$ROOT/examples/.gintro_tmp.mere"
 if run_subject "description" "$ROOT/examples/.gintro_tmp.mere" "$TMP/desc_raw.txt"; then
-  sed '$d' "$TMP/desc_raw.txt" > "$TMP/desc.txt"
+  cp "$TMP/desc_raw.txt" "$TMP/desc.txt"
   node -e "
 const d=JSON.parse(require('fs').readFileSync('$TMP/desc.txt','utf8'));
 let seen=0, nonnull=[];

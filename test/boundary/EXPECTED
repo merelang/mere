@@ -25,7 +25,6 @@ v3 -> v3 : ok
 # the identical change (one field added), on protobuf's wire:
 # proto  v1 -> v2 : ok
 # proto  v2 -> v1 : ok
-# proto  ()
 #
 # and what a name-keyed decoder costs if it fills absent keys instead
 # of refusing them (test/boundary/typo_cost.mere):

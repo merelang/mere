@@ -102,8 +102,11 @@ else
   # Default set. The t01–t05 files under test/selfhost/ are unit-typed
   # programs that produce their meaningful output via explicit `print`
   # calls; hello.mere and fibonacci.mere additionally exercise the
-  # main-return auto-print path (unit main → "()", int main → the
-  # returned integer) that both compilers now handle uniformly.
+  # main-return auto-print path (unit main → NOTHING since Q-136, int main →
+  # the returned integer) that both compilers handle uniformly. That rule
+  # lives in six places, and this gate is what found the sixth: v0.1.494
+  # changed the OCaml compiler's five and the self-hosted one kept printing
+  # `()`, so every program here was one line apart for seven commits.
   #
   # Remaining known gap: preamble emission is unconditional in
   # self-host — it always emits all runtime helpers regardless of

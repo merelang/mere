@@ -90,14 +90,19 @@ enc() {  # enc <MessageName> <textproto>  -> hex on stdout
 }
 
 # run_mere <file> <mode>   mode = interp | c
+# v0.1.501: no `sed '$d'` here any more. Until v0.1.494 every Mere program
+# printed a trailing line for its own value -- `()` for a unit main -- and this
+# dropped it. Q-136 made a unit main print nothing, so the line this was
+# dropping became the ANSWER: the whole-message probe reported `ours: ` empty
+# against protoc's bytes. The probes now print exactly what is compared.
 run_mere() {
   if [ "$2" = interp ]; then
-    ( ulimit -t 180; "$MERE" "$1" ) | sed '$d'
+    ( ulimit -t 180; "$MERE" "$1" )
   else
     ( ulimit -t 180
       "$MERE" -c "$1" > "$TMP/out.c" &&
       $CC -O1 -w "$TMP/out.c" -o "$TMP/out.bin" &&
-      "$TMP/out.bin" ) | sed '$d'
+      "$TMP/out.bin" )
   fi
 }
 
@@ -200,7 +205,6 @@ sweep() {
         *)  printf 'let _ = row %s;\n' "$v" ;;
       esac
     done < "$list"
-    echo '0'
   } > "$ROOT/examples/.proto_parity_tmp.mere"
 
   for mode in interp c; do
@@ -236,7 +240,6 @@ let _ = print (one (fn (b) -> Wire.put_varint b i64max));
 let _ = print (one (fn (b) -> Wire.put_varint b i64min));
 let _ = print (one (fn (b) -> Wire.put_varint b (Wire.zz64 i64min)));
 let _ = print (one (fn (b) -> Wire.put_varint b (Wire.zz64 i64max)));
-0
 MERE
 
 cat > "$TMP/div_c.txt" <<'EOF'

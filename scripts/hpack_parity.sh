@@ -144,12 +144,16 @@ for row in tmp.joinpath("blocks.txt").read_text().split("\n"):
     bi = bi_of.get(ci, 0); bi_of[ci] = bi + 1
     prev = "Hpack.new_state" if bi == 0 else f"st_{ci}_{bi - 1}"
     lines.append(f'let st_{ci}_{bi} = show "{ci}.{bi}" {prev} "{hexs}";')
-lines.append("0")
 out.write_text("\n".join(lines) + "\n")
 PY
 
 if run_subject "decode" "$ROOT/examples/.hpack_parity_tmp.mere" "$TMP/dec_raw.txt"; then
-  sed '$d' "$TMP/dec_raw.txt" > "$TMP/dec.txt"
+  # v0.1.501: nothing is trimmed here or elsewhere in this file. Until
+  # v0.1.494 a Mere program printed a trailing line for its own value -- the
+  # `0` sentinels above existed only so this had something to eat, and the
+  # probes without one relied on `()`. Q-136 made a unit main silent, and the
+  # grpc-go block then lost its `entries=/size=` line to the trim.
+  cp "$TMP/dec_raw.txt" "$TMP/dec.txt"
   if diff -q "$TMP/dec_want.txt" "$TMP/dec.txt" >/dev/null; then
     echo "  ok    decode  $NBLK blocks over 5 connections, dynamic table in step"
   else
@@ -182,7 +186,7 @@ lines.append(f"entries={len(d.header_table.dynamic_entries)} "
 pathlib.Path(sys.argv[1], "go_want.txt").write_text("\n".join(lines) + "\n")
 PY
 if run_subject "grpc-go block" "$ROOT/examples/.hpack_parity_tmp.mere" "$TMP/go_raw.txt"; then
-  sed '$d' "$TMP/go_raw.txt" > "$TMP/go.txt"
+  cp "$TMP/go_raw.txt" "$TMP/go.txt"
   if diff -q "$TMP/go_want.txt" "$TMP/go.txt" >/dev/null; then
     echo "  ok    grpc-go block  9 headers + table accounting from a third implementation"
   else
@@ -219,10 +223,10 @@ for i, hs in enumerate(sets):
 pathlib.Path(sys.argv[1], "enc_mere.txt").write_text("\n".join(mere) + "\n")
 pathlib.Path(sys.argv[1], "enc_want.txt").write_text("\n".join(want) + "\n")
 PY
-{ echo 'import "../contrib/http2/hpack.mere";'; cat "$TMP/enc_mere.txt"; echo '0'; } \
+{ echo 'import "../contrib/http2/hpack.mere";'; cat "$TMP/enc_mere.txt"; } \
   > "$ROOT/examples/.hpack_parity_tmp.mere"
 if run_subject "encode" "$ROOT/examples/.hpack_parity_tmp.mere" "$TMP/enc_raw.txt"; then
-  sed '$d' "$TMP/enc_raw.txt" > "$TMP/enc_hex.txt"
+  cp "$TMP/enc_raw.txt" "$TMP/enc_hex.txt"
   python3 - "$TMP" <<'PY'
 import sys, pathlib
 from hpack import Decoder
@@ -280,10 +284,9 @@ PY
     [ -z "$prefix" ] && continue
     printf 'let _ = rt %s %s;\nlet _ = enc %s %s;\n' "$prefix" "$v" "$prefix" "$v"
   done < "$TMP/int_rows.txt"
-  echo '0'
 } > "$ROOT/examples/.hpack_parity_tmp.mere"
 if run_subject "integers" "$ROOT/examples/.hpack_parity_tmp.mere" "$TMP/int_raw.txt"; then
-  sed '$d' "$TMP/int_raw.txt" > "$TMP/int_got.txt"
+  cp "$TMP/int_raw.txt" "$TMP/int_got.txt"
   if diff -q "$TMP/int_want.txt" "$TMP/int_got.txt" >/dev/null; then
     echo "  ok    integers  $(wc -l < "$TMP/int_rows.txt" | tr -d ' ') (prefix, value) pairs, encoded and round-tripped"
   else
@@ -334,10 +337,9 @@ PY
     printf 'let st%s = show "%s" %s "%s";\n' "$i" "$i" "$prev" "$h"
     i=$((i+1))
   done < "$TMP/ev_blocks.txt"
-  echo '0'
 } > "$ROOT/examples/.hpack_parity_tmp.mere"
 if run_subject "eviction" "$ROOT/examples/.hpack_parity_tmp.mere" "$TMP/ev_raw.txt"; then
-  sed '$d' "$TMP/ev_raw.txt" > "$TMP/ev_got.txt"
+  cp "$TMP/ev_raw.txt" "$TMP/ev_got.txt"
   if diff -q "$TMP/ev_want.txt" "$TMP/ev_got.txt" >/dev/null; then
     echo "  ok    eviction  entry count and byte size track the oracle through 6 blocks"
   else
