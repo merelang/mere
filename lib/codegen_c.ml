@@ -10399,7 +10399,17 @@ let main_format_of (t : Ast.ty) : string option =
   | Ast.TyBool -> Some "%d"
   | Ast.TyFloat -> Some "%g"  (* Phase 34.1: IEEE 754 double *)
   | Ast.TyStr -> Some "%s"
-  | Ast.TyUnit -> Some "()"  (* Phase 27.0: print "()" to match interp *)
+  (* Q-136: NOTHING. `()` was printed here from Phase 27.0 to match the
+     interpreter, and the interpreter is where it is dropped too -- the rule is
+     the same on both, so the parity that motivated it still holds.
+
+     What it cost: a judge, or anything that compares output exactly, saw an
+     unconditional mismatch on every program whose main is unit -- which is
+     every program that ends by printing its answer. All twelve solutions on the
+     mjudge board carry `let _ = exit 0;` as the last line for no other reason,
+     and everybody writing the same line to switch a default off is the evidence
+     that the default points the wrong way. *)
+  | Ast.TyUnit -> None
   | _ -> Some "%d"  (* best-effort; type-checker should have caught issues *)
 
 (* Compile a whole program: flatten top-decls into nested lets, lift
@@ -12797,10 +12807,6 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let main_stmt =
     match main_format_of main_ty with
     | None -> "  (void)(" ^ main_body ^ ");  /* unit result */"
-    | Some "()" ->
-      (* Phase 27.0: unit main — evaluate body for side effects, then
-         print "()\n" to match interp's Eval.to_string V_unit output. *)
-      "  (void)(" ^ main_body ^ ");\n  printf(\"()\\n\");"
     | Some "%g" ->
       (* Phase 34.1: float main — go through the __lang_str_of_float helper
          to match interp's string_of_float (OCaml's %.12g + a trailing `.`

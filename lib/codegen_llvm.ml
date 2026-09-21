@@ -7592,7 +7592,8 @@ let main_format_of (t : Ast.ty) : (string * string) option =
   | Ast.TyBool -> Some ("i32", "%d")  (* zext from i1 *)
   | Ast.TyFloat -> Some ("double", "float")  (* Phase 34.2: use __lang_str_of_float + puts for interp parity *)
   | Ast.TyStr -> Some ("ptr", "%s")
-  | Ast.TyUnit -> Some ("unit", "()")  (* Phase 25.11: print "()" for unit main *)
+  (* Q-136: nothing, the same as the other three. See codegen_c's note. *)
+  | Ast.TyUnit -> None
   | _ -> Some ("i64", "%lld")
 
 (* Runtime helpers emitted as LLVM IR. Mirrors codegen_c's runtime
@@ -13535,10 +13536,6 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let print_lines =
     match main_format_of main_ty with
     | None -> []
-    | Some ("unit", _) ->
-      (* Phase 25.11: print literal "()" for unit-typed main, matching
-         interp's Eval.to_string V_unit. *)
-      [ "  call i32 (ptr, ...) @printf(ptr @.fmt_unit)" ]
     | Some ("double", _) ->
       (* Phase 34.2: float main — to match the format of interp's
          string_of_float (OCaml's %.12g + trailing "." for whole numbers),
@@ -13611,9 +13608,6 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       [ "@.fmt_lld = private constant [6 x i8] c\"%lld\\0A\\00\"" ]
     | Some (_, "%s") ->
       [ "@.fmt_s = private constant [4 x i8] c\"%s\\0A\\00\"" ]
-    | Some ("unit", _) ->
-      (* Phase 25.11: "()\n\0" — 4 bytes. *)
-      [ "@.fmt_unit = private constant [4 x i8] c\"()\\0A\\00\"" ]
     | _ -> []
   in
   (* Phase 15.3: Vec[R, T] runtime — emit one struct typedef + 4 helper
