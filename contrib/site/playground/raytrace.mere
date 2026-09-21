@@ -5,9 +5,12 @@
 // The scene and math are examples/raytrace.mere unchanged: three spheres
 // on a giant ground sphere, a directional light, Lambertian + specular
 // shading, hard shadows, one mirror bounce, all the vector math on
-// (float, float, float) tuples. Every float operation is boxed on the
-// Wasm backend (~5 KB of arena per pixel), which is why the render is
-// 96x54 and CSS-scaled up: about 26 MB of the fixed 64 MB linear memory.
+// (float, float, float) tuples. A float is still a boxed value on the Wasm
+// backend, which is why the render is 96x54 and CSS-scaled up: the same scene
+// as examples/raytrace.mere measures 1.9 KB of arena per pixel, about 9.7 MB
+// of the fixed 64 MB linear memory. It was 3.7 KB and 19 MB until v0.1.500
+// (Q-141), when the literals moved to the data segment and the arithmetic
+// moved onto Wasm's f64 operand stack.
 // The same program prints the same Adler checksum as the native
 // backends — shown in the status line as a visible parity check.
 

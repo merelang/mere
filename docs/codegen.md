@@ -554,3 +554,52 @@ On the RISC-V backends the same idea uses the vector registers (v0.1.430): a
 `u8x16` expression tree is evaluated in `v1`..`v7` and boxed once at its
 root, and a let-bound `u8x16` used only as an operand lives in `v8`..`v15`
 when no call can run before its last use. See `bare-metal.md`.
+
+## Floats on the Wasm backend: where the box is, and where it is not (Q-141)
+
+The Wasm backend keeps every Mere value in an `i64` slot, so a `float` is not
+an `f64` -- it is the **address of an 8-byte box**. That is the value model,
+and it is why `show`, pattern matching, `Vec` elements and function arguments
+all work on floats without a second representation.
+
+It is also, taken literally, a box per node. Until v0.1.500 the expression
+
+```mere
+acc + (1.0 / (1.0 + (2.0 * 3.0)))
+```
+
+minted **eight** boxes every time it was evaluated -- four literals and four
+results -- 64 bytes an iteration where the C backend allocates nothing at all,
+because a `double` there is a `double`. Three places the box is not needed:
+
+- **Literals are constants.** They live in the data segment, one 8-byte record
+  per distinct bit pattern, and the expression pushes its address. (The key is
+  the bit pattern, not the OCaml float, so `0.0` and `-0.0` stay distinct.)
+  `pi` and `e` go the same way.
+- **Intermediates have one consumer.** Wasm has an `f64` operand stack, so a
+  float subexpression whose result is immediately consumed by another float
+  operation never needs an address. Arithmetic trees are built on that stack
+  and boxed once, at the root; a float *comparison* allocates nothing at all,
+  because its result is a bool.
+- **A `let`-bound float used only as an operand** lives unboxed in an `f64`
+  local -- the same treatment `u8x16` gets from Q-109, and the same predicate
+  shape (`float_operand_only`).
+
+Measured on 100,000 iterations of the expression above: 6,400,036 B before,
+**800,024 B** after -- 8 bytes an iteration, which is the accumulator itself
+and the floor for a boxed value model. `examples/raytrace.mere`, where every
+vector is a `(float, float, float)`, went from 3.7 KB to **1.9 KB of arena per
+pixel** and the shipped `raytrace.wasm` from 9,530 to 6,107 bytes.
+
+What is left is the **calling convention**: a function argument is a Mere
+value, so passing a float passes an address. A two-float recursive call
+therefore costs 16 bytes an iteration on this backend and that is the floor
+today.
+
+⚠ Nothing else in the tree guards this. The answers are bit-identical either
+way -- `raytrace` writes the same 56,610-byte PPM and the same Adler checksum
+before and after -- so the suite, parity and the size budgets are all green on
+the slow version. The allocation meter is the only witness, and
+`scripts/alloc_meter_check.sh` pins it with a ceiling *and* a floor: the
+ceiling catches the boxing coming back, and the floor says floats are still
+boxed at all, so the day that changes somebody has to come here and say so.

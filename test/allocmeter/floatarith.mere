@@ -1,0 +1,19 @@
+// Q-141: what a float costs on the Wasm backend, in bytes per iteration.
+//
+// Every value in that backend is an i64 slot, so a float is the ADDRESS of an
+// 8-byte box. Until v0.1.500 a box was minted at every node: the four literals
+// below, and the three intermediate results, on every single pass -- 64 bytes
+// an iteration for one accumulator. The C backend answers 32 bytes for the
+// whole program, because a double there is a double.
+//
+// The literals now live in the data segment (they are constants) and the
+// arithmetic is built on Wasm's f64 operand stack, so the only box left is the
+// one the accumulator IS -- 8 bytes. The budget below is a ceiling on that and
+// a floor under it: the ceiling catches the boxing coming back, and the floor
+// says the value model still boxes an accumulator at all, so that the day it
+// stops somebody has to come here and say so.
+let n = 100000;
+let rec go = fn (i: int) -> fn (acc: float) ->
+  if i >= n then acc
+  else go (i + 1) (acc + (1.0 / (1.0 + (2.0 * 3.0))));
+print (show (go 0 0.0))
