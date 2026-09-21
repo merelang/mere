@@ -906,6 +906,32 @@ let needs_struct_cmp = needs_struct_eq
 (* Cache: literal string → data segment offset, so repeated literals
    (e.g. `, ` between tuple elements) share one segment. *)
 let show_str_offsets : (string, int) Hashtbl.t = Hashtbl.create 16
+(* Q-139: a capture-free top-level fn used as a VALUE is a CONSTANT closure --
+   env is 0 and both table indices are known at emit time -- so the record
+   belongs in the data segment, allocated once, rather than being built on the
+   bump heap every time the expression is evaluated. `ap add acc i` in a loop
+   was 12 bytes an iteration for exactly this: not the call allocating, the
+   ARGUMENT being materialised. *)
+let const_closure_offsets : (int * int, int) Hashtbl.t = Hashtbl.create 8
+let const_closure_offset (fn_idx : int) (fn2_idx : int) : int =
+  match Hashtbl.find_opt const_closure_offsets (fn_idx, fn2_idx) with
+  | Some off -> off
+  | None ->
+    (* 4-byte aligned, because the host reads these fields with getInt32. *)
+    let off = (!str_offset_counter + 3) land (lnot 3) in
+    str_offset_counter := off + 12;
+    let le32 v =
+      Printf.sprintf "\\%02x\\%02x\\%02x\\%02x"
+        (v land 0xff) ((v asr 8) land 0xff)
+        ((v asr 16) land 0xff) ((v asr 24) land 0xff)
+    in
+    str_data_decls :=
+      Printf.sprintf "  (data (i32.const %d) \"%s%s%s\")"
+        off (le32 0) (le32 fn_idx) (le32 fn2_idx)
+      :: !str_data_decls;
+    Hashtbl.add const_closure_offsets (fn_idx, fn2_idx) off;
+    off
+
 let intern_show_str (s : string) : int =
   match Hashtbl.find_opt show_str_offsets s with
   | Some off -> off
@@ -2149,30 +2175,19 @@ and emit_expr (e : Ast.expr) : unit =
        (* Top-level fn as a value: materialize a closure
           `{ env = 0, fn_idx = table_idx }`. *)
        let idx = Hashtbl.find fn_closure_table_idx name in
-       emit_align_bump_4 ();  (* Phase 48.5: 4-byte align for host glue *)
-       let base = fresh_local_i32 () in
-       emit_instr "global.get $__lang_bump";
-       emit_instr (Printf.sprintf "local.set %d" base);
-       emit_instr (Printf.sprintf "local.get %d" base);
-       emit_instr "i32.const 12";
-       emit_instr "i32.add";
-       emit_instr "global.set $__lang_bump";
-       emit_instr (Printf.sprintf "local.get %d" base);
-       emit_instr "i32.const 0";
-       emit_instr "i32.store offset=0";
-       emit_instr (Printf.sprintf "local.get %d" base);
-       emit_instr (Printf.sprintf "i32.const %d" idx);
-       emit_instr "i32.store offset=4";
-       emit_instr (Printf.sprintf "local.get %d" base);
-       (* Q-139: the uncurried entry's index when this fn has one, and -1 when
-          it does not. -1 and not 0: the table starts at index 0 and that index
+       (* Q-139: a top-level fn captures nothing, so this record is the same
+          twelve bytes every time -- env 0 and two constant table indices. It
+          goes in the data segment once and the expression is a constant. The
+          uncurried entry's index when this fn has one, and -1 when it does
+          not: -1 and not 0, because the table starts at index 0 and that index
           is a real function, so zero could not mean "absent". *)
-       (match Hashtbl.find_opt fn_closure2_table_idx name with
-        | Some i2 -> emit_instr (Printf.sprintf "i32.const %d" i2)
-        | None -> emit_instr "i32.const -1");
-       emit_instr "i32.store offset=8";
-       emit_instr (Printf.sprintf "local.get %d" base);
-       emit_instr "i64.extend_i32_u"
+       let idx2 =
+         match Hashtbl.find_opt fn_closure2_table_idx name with
+         | Some i2 -> i2
+         | None -> -1
+       in
+       let off = const_closure_offset idx idx2 in
+       emit_instr (Printf.sprintf "i64.const %d" off)
      | None when Hashtbl.mem top_globals_wasm name ->
        (* Phase 30.2c: top-level non-fn let as a Wasm global *)
        emit_instr (Printf.sprintf "global.get $%s" name)
@@ -7494,13 +7509,17 @@ let vec_runtime = {|
     (local $i i32) (local $j i32) (local $k i32)
     (local $swap i32) (local $right i32)
     (local $inner_cl i32) (local $inner_env i32) (local $inner_fn i32)
-    (local $outer_fn2 i32)
+    (local $outer_fn2 i32) (local $scratch i32)
     (local.set $v (i32.wrap_i64 (local.get $v8)))
     (local.set $n (i32.load offset=4 (local.get $v)))
     (if (i32.le_s (local.get $n) (i32.const 1))
       (then (return (i64.const 0))))
     (local.set $src (i32.load offset=0 (local.get $v)))
     (local.set $dst (global.get $__lang_bump))
+    ;; remembered separately: $src and $dst are SWAPPED once per pass, and at
+    ;; the end $dst has been pointed at the vec's own buffer for the copy-back,
+    ;; so neither of them still names the block this allocated.
+    (local.set $scratch (local.get $dst))
     (global.set $__lang_bump
       (i32.add (local.get $dst) (i32.mul (local.get $n) (i32.const 8))))
     (local.set $outer_env (i32.load offset=0 (i32.wrap_i64 (local.get $cmp))))
@@ -7610,6 +7629,21 @@ let vec_runtime = {|
                 (i32.add (local.get $src) (i32.mul (local.get $k) (i32.const 8)))))
             (local.set $k (i32.add (local.get $k) (i32.const 1)))
             (br $cb_lp)))))
+    ;; Q-139: give the scratch back. A merge sort needs n slots of working
+    ;; memory and this one took them from the bump heap and left them there --
+    ;; 8 bytes an element, which is what the board measured once the per
+    ;; comparison environments were gone. The C backend malloc/frees its
+    ;; scratch for the same reason and says so.
+    ;;
+    ;; ONLY WHEN NOTHING WAS ALLOCATED AFTER IT. A comparator can allocate --
+    ;; the two-step path builds an environment, and a user's comparator can
+    ;; push to a Vec it captured, whose buffer may have been reallocated above
+    ;; this scratch. Resetting the bump past any of that would hand out memory
+    ;; something still holds. The test is the honest one: the scratch is
+    ;; reclaimable exactly when the bump is still where the sort left it.
+    (if (i32.eq (global.get $__lang_bump)
+                (i32.add (local.get $scratch) (i32.mul (local.get $n) (i32.const 8))))
+      (then (global.set $__lang_bump (local.get $scratch))))
     (i64.const 0))
   (func $mere_vec_concat (param $a8 i64) (param $b8 i64) (result i64)
     (local $new i32) (local $i i32) (local $alen i32) (local $blen i32)
