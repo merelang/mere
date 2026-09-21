@@ -63,11 +63,15 @@ check_one() {
   $RUN "$ref_wasm" > "$ref_out" 2>&1
 
   # Self-hosted pipeline. `run_wasm.js` calling selfmere.wasm prints the
-  # generated WAT via Mere's `print`, and then — because the CLI wraps
-  # main as `let _ = print (show ...) in ()` — an extra `()` line from
-  # the outer unit's auto-print epilogue. Strip that trailing `()` to
-  # recover pure WAT before assembly.
-  $RUN "$SELF" "$input" 2>/dev/null | sed '$d' > "$self_wat"
+  # generated WAT via Mere's `print`, and nothing else: the driver's own main
+  # is unit, which since v0.1.494 prints nothing.
+  #
+  # v0.1.501: this used to be piped through `sed '$d'` to strip the `()` that
+  # the auto-print epilogue added. After Q-136 there was no `()` and the trim
+  # was eating the blank line `print` leaves after a WAT that already ends in
+  # a newline -- harmless, and for a reason its own comment no longer
+  # described. wat2wasm takes the untrimmed output (checked), so it is gone.
+  $RUN "$SELF" "$input" 2>/dev/null > "$self_wat"
   wat2wasm --enable-tail-call "$self_wat" -o "$self_wasm" 2>/dev/null
   $RUN "$self_wasm" > "$self_out" 2>&1
 

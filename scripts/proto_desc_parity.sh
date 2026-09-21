@@ -237,11 +237,15 @@ fi
     printf 'let _ = print (hex_of_bytes (Pdesc.of_source "%s" (read_file "%s")));\n' \
       "$f" "$TMP/in/$f"
   done
-  echo '0'
 } > "$ROOT/examples/.pdesc_tmp.mere"
 
 if run_subject "descriptors" "$ROOT/examples/.pdesc_tmp.mere" "$TMP/got_raw.txt"; then
-  sed '$d' "$TMP/got_raw.txt" > "$TMP/got.txt"
+  # v0.1.501: the probe prints exactly what is compared. Until v0.1.494 every
+  # Mere program printed a trailing line for its own value, so probes ended with
+  # a bare `0` SENTINEL and the harness trimmed one line. Q-136 made a unit main
+  # silent and six gates then trimmed their own answers; the pair is removed
+  # here rather than re-sentinelled, so nothing depends on a line count.
+  cp "$TMP/got_raw.txt" "$TMP/got.txt"
   if diff -q "$TMP/want.txt" "$TMP/got.txt" >/dev/null; then
     echo "  ok    descriptors  $NC files byte-identical to protoc"
   else
@@ -349,12 +353,11 @@ done < "$TMP/imp/targets.txt"
     [ -z "$t" ] && continue
     printf 'let _ = print (hex_of_bytes (Pdesc.of_sources "%s" (read_file (dir ++ "/%s")) deps));\n' "$t" "$t"
   done < "$TMP/imp/targets.txt"
-  echo '0'
 } > "$ROOT/examples/.pdesc_tmp.mere"
 
 if ( ulimit -t 300; "$MERE" "$ROOT/examples/.pdesc_tmp.mere" "$TMP/imp" ) \
      > "$TMP/imp/raw.txt" 2>"$TMP/imp/err.txt"; then
-  sed '$d' "$TMP/imp/raw.txt" > "$TMP/imp/ours.txt"
+  cp "$TMP/imp/raw.txt" "$TMP/imp/ours.txt"
   if [ "$ibad" != 0 ]; then
     echo "  FAIL  imports  $ibad of the harness's own cases were rejected by protoc"
     fail=1

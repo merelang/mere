@@ -4,6 +4,45 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.502 — 2026-09-22
+
+_The rest of the class, and a check that keeps it out._
+
+_v0.1.501 fixed the six harnesses that had gone RED when Q-136 removed the
+trailing unit line. It left the ones that were still GREEN, on the grounds that
+they were correct — their probes end with a bare `0`, a real value the trim
+really does remove. That is true and it is not a good enough reason to keep
+them: a harness that drops its subject's last line can compare the wrong thing
+and pass, and the only thing standing between "correct" and "silently wrong" is
+whether someone remembers the sentinel when they edit the probe._
+
+_So the pair is gone everywhere. Nine more gates print exactly what is
+compared. In `url_parity` the sentinel had **leaked into the oracle** — node
+was printing a matching `0` — which is how far this kind of thing travels._
+
+_Three trims turned out to be doing something other than what they said:_
+
+| | what its comment claimed | what it actually did |
+|---|---|---|
+| `selfhost_check` | strips the `()` the CLI auto-prints | ate the blank line `print` leaves after a WAT that already ends in a newline |
+| `rv_exec_check` ×5 spellings | drops the auto-printed unit | would also drop a `()` a program **printed** |
+| `rv_float_check` ×3 | same | same |
+
+_Four uses are left and each is named in the new gate with its reason: the
+diagnostic payload `parity.sh` READS off the last line, the generated source
+`exhaustive_check.sh` splices an arm into, the `---MARK---` line
+`live_soundness_check.sh` drops from psql, and `rv_exec_check`'s documented
+"an RV binary never prints the program's own final value" — which is still
+load-bearing: run against the emulator, 19 of 96 programs match only after it._
+
+_`scripts/trailing_trim_check.sh` keeps the class out, with two poisons. ⚠ It
+found three violations older than itself the first time it ran, in a file six
+hand-written greps had missed. ⚠ And its own first pattern used `\?` in a basic
+regexp, which BSD grep does not take, so on macOS it matched **nothing** and
+reported ok — the poison is the only reason that was caught._
+
+---
+
 ## v0.1.501 — 2026-09-21
 
 _The workarounds v0.1.494 left behind, and the sixth place that decides what a

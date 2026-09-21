@@ -272,12 +272,16 @@ for d in tmp.joinpath("docs.txt").read_text().split("\n"):
     if not d.strip(): continue
     lines.append('let _ = print ("=== ");')
     lines.append('let _ = print (Gvalid.report (Gparse.document "%s") sdl);' % esc(d))
-lines.append("0")
 tmp.joinpath("subject.mere").write_text("\n".join(lines) + "\n")
 PY
 cp "$TMP/subject.mere" "$ROOT/examples/.gvalid_tmp.mere"
 if run_subject "validate" "$ROOT/examples/.gvalid_tmp.mere" "$TMP/ours_raw.txt"; then
-  sed '$d' "$TMP/ours_raw.txt" > "$TMP/ours.txt"
+  # v0.1.501: the probe prints exactly what is compared. Until v0.1.494 every
+  # Mere program printed a trailing line for its own value, so probes ended with
+  # a bare `0` SENTINEL and the harness trimmed one line. Q-136 made a unit main
+  # silent and six gates then trimmed their own answers; the pair is removed
+  # here rather than re-sentinelled, so nothing depends on a line count.
+  cp "$TMP/ours_raw.txt" "$TMP/ours.txt"
   node -e "
 const fs=require('fs');
 const oracle=JSON.parse(fs.readFileSync('$TMP/oracle.json','utf8'));
