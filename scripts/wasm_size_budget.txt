@@ -8,7 +8,7 @@
 # measures a different artifact -- the check skips rather than compare across
 # that line.
 #
-# Each band is the size measured on 2026-09-12 after the prelude prune, -10% / +10%. Not targets: the
+# Each band is the size measured on 2026-09-21 after Q-139, -10% / +10%. Not targets: the
 # ceiling is tight enough that the 2026-07 -> 2026-09 tripling of hello.wasm
 # would have failed here long before anyone saw it by eye. The floor exists
 # because a demo that collapses to a stub is a failure a ceiling-only check
@@ -27,18 +27,32 @@
 # read these modules at all.
 #
 # Moving a band is a decision, not maintenance: say why in the commit.
-chip8.wasm                     7100     8678
-counter.wasm                   2093     2559
-echo.wasm                      1495     1829
-fibonacci.wasm                 1701     2081
-fizzbuzz.wasm                  1674     2046
-g2048.wasm                     7348     8982
-gameboy.wasm                  18880    23076
-hello.wasm                     1751     2141
-raytrace.wasm                 11570    14142
-rvconsole.wasm                 7677     9385
-selfhost-compile.wasm        170730   208670
-selfhost-fmt.wasm             89458   109338
-selfhost-repl.wasm           100656   123026
-selfhost-tyck.wasm           128228   156724
-wordcount.wasm                 4055     4957
+#
+# 2026-09-21, Q-139: every band moved DOWN, by 4% to 29%, and the total went
+# 616,469 -> 522,611 B. Not a shrunk feature -- a `_closure` adapter used to be
+# emitted for EVERY top-level fn, and the elem table it sits in is a root the
+# pruner cannot see past, so every curried body shipped whether or not anything
+# could reach it. Emitting the adapter only for fns actually used as values,
+# and the curried body only when something can still enter it, let the pruner
+# do the work it was already capable of. gameboy -29%, raytrace -26%, chip8
+# -22%, selfhost-tyck -19%.
+#
+# Checked before the bands moved, because a floor exists to catch exactly the
+# mistake this would look like: suite 2773, parity 196/0, the bootstrap tests
+# that RUN the self-hosted compiler under node, and this file's own behaviour
+# check (3 of 3 optimized modules answer what the interpreter does).
+chip8.wasm                     5567     6804
+counter.wasm                   2121     2592
+echo.wasm                      1523     1862
+fibonacci.wasm                 1700     2077
+fizzbuzz.wasm                  1593     1947
+g2048.wasm                     5348     6537
+gameboy.wasm                  13377    16350
+hello.wasm                     1757     2148
+raytrace.wasm                  8577    10484
+rvconsole.wasm                 5448     6659
+selfhost-compile.wasm        144471   176576
+selfhost-fmt.wasm             77383    94580
+selfhost-repl.wasm            93573   114367
+selfhost-tyck.wasm           103853   126932
+wordcount.wasm                 4051     4952
