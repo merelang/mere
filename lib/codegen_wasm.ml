@@ -4266,6 +4266,16 @@ and emit_expr (e : Ast.expr) : unit =
     let n = List.length captures in
     let adapter_name = fresh_anon_name () in
     let table_idx = register_in_table adapter_name in
+    (* Q-139: the two-argument entry, when this lambda's body is immediately
+       another `fn`. Registered here, beside the one-argument entry, so the
+       value that is about to be built and the adapter that will be emitted are
+       decided by the SAME test -- naming an index whose function never appears
+       is a link error, and leaving -1 when one does is a missed fast path. *)
+    let table_idx2 =
+      match fn_body.Ast.node with
+      | Ast.Fun _ -> Some (register_in_table (adapter_name ^ "_fn2"))
+      | _ -> None
+    in
     pending_closures :=
       { ce_adapter_name = adapter_name;
         ce_param = param;
@@ -4294,7 +4304,7 @@ and emit_expr (e : Ast.expr) : unit =
     end;
     (* Build closure value: { env, fn_idx, fn2 } (i32 record fields, host-read).
        Q-139: twelve bytes, with the uncurried entry last so the host's reads at
-       +0 and +4 are unchanged. Zero means there is not one. *)
+       +0 and +4 are unchanged. -1 means there is not one. *)
     emit_align_bump_4 ();  (* Phase 48.5: 4-byte align for host glue *)
     emit_instr "global.get $__lang_bump";
     emit_instr (Printf.sprintf "local.set %d" cl_slot);
@@ -4310,7 +4320,9 @@ and emit_expr (e : Ast.expr) : unit =
     emit_instr "i32.store offset=4";
     emit_instr (Printf.sprintf "local.get %d" cl_slot);
     (* -1, not 0: table index 0 is a real function. *)
-    emit_instr "i32.const -1";
+    (match table_idx2 with
+     | Some i2 -> emit_instr (Printf.sprintf "i32.const %d" i2)
+     | None -> emit_instr "i32.const -1");
     emit_instr "i32.store offset=8";
     emit_instr (Printf.sprintf "local.get %d" cl_slot);
     emit_instr "i64.extend_i32_u"
@@ -5048,6 +5060,77 @@ let emit_anon_adapter (ce : closure_emission) : string =
   Printf.sprintf
     "  (func $%s (param i64) (param i64) (result i64)\n%s%s)"
     ce.ce_adapter_name local_decl indented_body
+
+(* Q-139: the two-argument adapter for an anonymous lambda whose body is
+   IMMEDIATELY another `fn`. `vec_fold v 0 (fn a -> fn b -> a + b)` hands a
+   value built here to the helper, and without this it carries -1 and the
+   helper's fast path can never fire for the shape people actually write.
+
+   "Immediately another fn" is the whole condition, and it is the same one the
+   order pin asks about: work between the two parameters cannot be expressed by
+   an entry that takes both at once. *)
+let emit_anon_adapter2 (ce : closure_emission) : string option =
+  match ce.ce_body.Ast.node with
+  | Ast.Fun (p2, _, body2) ->
+    let saved_instrs = !instrs in
+    let saved_local_counter = !local_counter in
+    let saved_locals = !locals in
+    let saved_local_types = !local_types in
+    let saved_host = !current_host_fn_wasm in
+    set_inner_lifts_for_host_wasm ce.ce_host;
+    current_host_fn_wasm := ce.ce_host;
+    instrs := [];
+    let env_slot = 0 in
+    let n = List.length ce.ce_captures in
+    let capture_locals =
+      List.mapi (fun i (cname, _) ->
+        let slot = 3 + i in
+        emit_instr (Printf.sprintf "local.get %d" env_slot);
+        emit_instr "i32.wrap_i64";
+        emit_instr (Printf.sprintf "i64.load offset=%d" (i * 8));
+        emit_instr (Printf.sprintf "local.set %d" slot);
+        (cname, slot)
+      ) ce.ce_captures
+    in
+    local_counter := 3 + n;
+    local_types := [];
+    (* Both parameters are in scope for the inner body: slot 1 is the outer
+       lambda's, slot 2 the inner one's. *)
+    locals := (ce.ce_param, 1) :: (p2, 2) :: capture_locals;
+    simd_locals := [];
+    let saved_tail = !wasm_tail_pos in
+    let saved_unwind = !fail_unwind_on in
+    wasm_tail_pos := true;
+    fail_unwind_on := true;
+    emit_expr body2;
+    fail_unwind_on := saved_unwind;
+    wasm_tail_pos := saved_tail;
+    let body_instrs = List.rev !instrs in
+    let extra_locals = !local_counter - 3 in
+    let extra_types = !local_types in
+    instrs := saved_instrs;
+    local_counter := saved_local_counter;
+    locals := saved_locals;
+    local_types := saved_local_types;
+    current_host_fn_wasm := saved_host;
+    let local_decl =
+      if extra_locals <= 0 then ""
+      else
+        let types =
+          if n + List.length extra_types = extra_locals then
+            List.init n (fun _ -> "i64") @ extra_types
+          else List.init extra_locals (fun _ -> "i64")
+        in
+        Printf.sprintf "    (local%s)\n"
+          (String.concat "" (List.map (fun t -> " " ^ t) types))
+    in
+    let indented_body =
+      String.concat "\n" (List.map (fun s -> "    " ^ s) body_instrs)
+    in
+    Some (Printf.sprintf
+            "  (func $%s_fn2 (param i64) (param i64) (param i64) (result i64)\n%s%s)"
+            ce.ce_adapter_name local_decl indented_body)
+  | _ -> None
 
 (* Emit `show_<tag>(x: i32) -> i32` for one type. Returns the WAT
    function definition as a string. *)
@@ -7411,6 +7494,7 @@ let vec_runtime = {|
     (local $i i32) (local $j i32) (local $k i32)
     (local $swap i32) (local $right i32)
     (local $inner_cl i32) (local $inner_env i32) (local $inner_fn i32)
+    (local $outer_fn2 i32)
     (local.set $v (i32.wrap_i64 (local.get $v8)))
     (local.set $n (i32.load offset=4 (local.get $v)))
     (if (i32.le_s (local.get $n) (i32.const 1))
@@ -7421,6 +7505,7 @@ let vec_runtime = {|
       (i32.add (local.get $dst) (i32.mul (local.get $n) (i32.const 8))))
     (local.set $outer_env (i32.load offset=0 (i32.wrap_i64 (local.get $cmp))))
     (local.set $outer_fn  (i32.load offset=4 (i32.wrap_i64 (local.get $cmp))))
+    (local.set $outer_fn2 (i32.load offset=8 (i32.wrap_i64 (local.get $cmp))))
     (local.set $w (i32.const 1))
     (block $w_end
       (loop $w_lp
@@ -7451,6 +7536,24 @@ let vec_runtime = {|
                     (if (i32.ge_s (local.get $j) (local.get $hi))
                       (then (local.set $right (i32.const 0)))
                       (else
+                        ;; Q-139: both elements at once when the comparator
+                        ;; carries an uncurried entry. A merge sort asks n log n
+                        ;; times and every ask built an environment to carry the
+                        ;; first element. THE ORDER AND THE COUNT DO NOT CHANGE:
+                        ;; the two paths differ only in how the same comparison
+                        ;; is delivered.
+                        (if (i32.ne (local.get $outer_fn2) (i32.const -1))
+                          (then
+                            (local.set $right (i64.lt_s
+                              (call_indirect (type $cl2)
+                                (i64.extend_i32_u (local.get $outer_env))
+                                (i64.load (i32.add (local.get $src)
+                                  (i32.mul (local.get $j) (i32.const 8))))
+                                (i64.load (i32.add (local.get $src)
+                                  (i32.mul (local.get $i) (i32.const 8))))
+                                (local.get $outer_fn2))
+                              (i64.const 0))))
+                          (else
                         (local.set $inner_cl (i32.wrap_i64
                           (call_indirect (type $cl)
                             (i64.extend_i32_u (local.get $outer_env))
@@ -7467,7 +7570,7 @@ let vec_runtime = {|
                             (i64.load (i32.add (local.get $src)
                               (i32.mul (local.get $i) (i32.const 8))))
                             (local.get $inner_fn))
-                          (i64.const 0)))))))
+                          (i64.const 0)))))))))
                 (if (local.get $right)
                   (then
                     (i64.store
@@ -7568,12 +7671,14 @@ let vec_higher_order_runtime = {|
     (local $i i32) (local $len i32) (local $buf i32) (local $acc i64)
     (local $outer_env i32) (local $outer_fn i32) (local $v i32) (local $outer_cl i32)
     (local $inner_cl i32) (local $inner_env i32) (local $inner_fn i32) (local $elem i64)
+    (local $outer_fn2 i32)
     (local.set $v (i32.wrap_i64 (local.get $v8)))
     (local.set $outer_cl (i32.wrap_i64 (local.get $outer_cl8)))
     (local.set $len (i32.load offset=4 (local.get $v)))
     (local.set $buf (i32.load offset=0 (local.get $v)))
     (local.set $outer_env (i32.load offset=0 (local.get $outer_cl)))
     (local.set $outer_fn (i32.load offset=4 (local.get $outer_cl)))
+    (local.set $outer_fn2 (i32.load offset=8 (local.get $outer_cl)))
     (local.set $acc (local.get $init_acc))
     (local.set $i (i32.const 0))
     (block $end
@@ -7582,6 +7687,20 @@ let vec_higher_order_runtime = {|
         (local.set $elem
           (i64.load (i32.add (local.get $buf)
                              (i32.mul (local.get $i) (i32.const 8)))))
+        ;; Q-139: both arguments at once when the callback carries an
+        ;; uncurried entry. The two-step form below builds an environment to
+        ;; hold the accumulator for every element. The element is already
+        ;; loaded and both paths hand over the same two values, so nothing
+        ;; about ORDER differs here.
+        (if (i32.ne (local.get $outer_fn2) (i32.const -1))
+          (then
+            (local.set $acc
+              (call_indirect (type $cl2)
+                (i64.extend_i32_u (local.get $outer_env))
+                (local.get $acc)
+                (local.get $elem)
+                (local.get $outer_fn2))))
+          (else
         ;; inner = outer(env, acc)
         (local.set $inner_cl (i32.wrap_i64
           (call_indirect (type $cl)
@@ -7595,7 +7714,7 @@ let vec_higher_order_runtime = {|
           (call_indirect (type $cl)
             (i64.extend_i32_u (local.get $inner_env))
             (local.get $elem)
-            (local.get $inner_fn)))
+            (local.get $inner_fn)))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
     (local.get $acc))
@@ -8459,7 +8578,7 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
     (local $i i32) (local $len i32)
     (local $keys i32) (local $values i32)
     (local $outer_env i32) (local $outer_fn i32)
-    (local $k i64) (local $v i64) (local $inner_cl i32)
+    (local $k i64) (local $v i64) (local $inner_cl i32) (local $outer_fn2 i32)
     (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $cl (i32.wrap_i64 (local.get $cl8)))
     (local.set $len    (i32.load offset=8 (local.get $m)))
@@ -8467,6 +8586,7 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
     (local.set $values (i32.load offset=4 (local.get $m)))
     (local.set $outer_env (i32.load offset=0 (local.get $cl)))
     (local.set $outer_fn  (i32.load offset=4 (local.get $cl)))
+    (local.set $outer_fn2 (i32.load offset=8 (local.get $cl)))
     (local.set $i (i32.const 0))
     (block $end
       (loop $lp
@@ -8475,13 +8595,23 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
                                   (i32.mul (local.get $i) (i32.const 8)))))
         (local.set $v (i64.load (i32.add (local.get $values)
                                   (i32.mul (local.get $i) (i32.const 8)))))
-        (local.set $inner_cl (i32.wrap_i64
-          (call_indirect (type $cl) (i64.extend_i32_u (local.get $outer_env)) (local.get $k)
-                         (local.get $outer_fn))))
-        (drop (call_indirect (type $cl)
-                (i64.extend_i32_u (i32.load offset=0 (local.get $inner_cl)))
-                (local.get $v)
-                (i32.load offset=4 (local.get $inner_cl))))
+        ;; Q-139: both arguments at once when the callback carries an
+        ;; uncurried entry. The result is discarded either way.
+        (if (i32.ne (local.get $outer_fn2) (i32.const -1))
+          (then
+            (drop (call_indirect (type $cl2)
+                    (i64.extend_i32_u (local.get $outer_env))
+                    (local.get $k)
+                    (local.get $v)
+                    (local.get $outer_fn2))))
+          (else
+            (local.set $inner_cl (i32.wrap_i64
+              (call_indirect (type $cl) (i64.extend_i32_u (local.get $outer_env)) (local.get $k)
+                             (local.get $outer_fn))))
+            (drop (call_indirect (type $cl)
+                    (i64.extend_i32_u (i32.load offset=0 (local.get $inner_cl)))
+                    (local.get $v)
+                    (i32.load offset=4 (local.get $inner_cl))))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
     (i64.const 0))
@@ -8850,7 +8980,7 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
     (local $i i32) (local $len i32)
     (local $keys i32) (local $values i32)
     (local $outer_env i32) (local $outer_fn i32)
-    (local $k i64) (local $v i64) (local $inner_cl i32) (local $dead i32)
+    (local $k i64) (local $v i64) (local $inner_cl i32) (local $dead i32) (local $outer_fn2 i32)
     (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $cl (i32.wrap_i64 (local.get $cl8)))
     (local.set $len    (i32.load offset=8 (local.get $m)))
@@ -8859,6 +8989,7 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
     (local.set $dead   (i32.load offset=24 (local.get $m)))
     (local.set $outer_env (i32.load offset=0 (local.get $cl)))
     (local.set $outer_fn  (i32.load offset=4 (local.get $cl)))
+    (local.set $outer_fn2 (i32.load offset=8 (local.get $cl)))
     (local.set $i (i32.const 0))
     (block $end
       (loop $lp
@@ -8873,13 +9004,23 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
                                   (i32.mul (local.get $i) (i32.const 8)))))
         (local.set $v (i64.load (i32.add (local.get $values)
                                   (i32.mul (local.get $i) (i32.const 8)))))
-        (local.set $inner_cl (i32.wrap_i64
-          (call_indirect (type $cl) (i64.extend_i32_u (local.get $outer_env)) (local.get $k)
-                         (local.get $outer_fn))))
-        (drop (call_indirect (type $cl)
-                (i64.extend_i32_u (i32.load offset=0 (local.get $inner_cl)))
-                (local.get $v)
-                (i32.load offset=4 (local.get $inner_cl))))
+        ;; Q-139: both arguments at once when the callback carries an
+        ;; uncurried entry. The result is discarded either way.
+        (if (i32.ne (local.get $outer_fn2) (i32.const -1))
+          (then
+            (drop (call_indirect (type $cl2)
+                    (i64.extend_i32_u (local.get $outer_env))
+                    (local.get $k)
+                    (local.get $v)
+                    (local.get $outer_fn2))))
+          (else
+            (local.set $inner_cl (i32.wrap_i64
+              (call_indirect (type $cl) (i64.extend_i32_u (local.get $outer_env)) (local.get $k)
+                             (local.get $outer_fn))))
+            (drop (call_indirect (type $cl)
+                    (i64.extend_i32_u (i32.load offset=0 (local.get $inner_cl)))
+                    (local.get $v)
+                    (i32.load offset=4 (local.get $inner_cl))))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
     (i64.const 0))
@@ -10426,6 +10567,9 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     | ce :: rest ->
       pending_closures := rest;
       anon_adapters := emit_anon_adapter ce :: !anon_adapters;
+      (match emit_anon_adapter2 ce with
+       | Some d -> anon_adapters := d :: !anon_adapters
+       | None -> ());
       drain ()
   in
   drain ();
