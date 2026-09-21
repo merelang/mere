@@ -201,15 +201,17 @@ for d in "$TMP"/c/*; do
     echo "  FAIL  generate  $(basename "$d"): $(head -1 "$d/ge.txt")"
     fail=1; continue
   fi
-  # `sed '$d'` drops the interpreter's trailing unit line.
-  sed -i.bak '$d' "$d/pb.mere" 2>/dev/null || sed -i '$d' "$d/pb.mere"
+  # v0.1.501: the generator's output no longer carries a trailing unit line, so
+  # nothing is trimmed here. Until v0.1.494 `protoc_mere.mere` printed the
+  # generated module AND `()` for its own value, and this dropped that line;
+  # after Q-136 it was dropping the last line of the generated CODE.
   {
     printf 'import "%s";\n' "$d/pb.mere"
     printf 'let src = bytes_of_hex "%s";\n' "$(cat "$d/want.hex")"
     printf 'print (hex_of_bytes (encode_%s (decode_%s src)))\n' "$MSG" "$MSG"
   } > "$ROOT/examples/.pgen_tmp.mere"
   if ( ulimit -t 120; "$MERE" "$ROOT/examples/.pgen_tmp.mere" ) 2>"$d/re.txt" \
-       | sed '$d' > "$d/got.hex"; then :; fi
+       > "$d/got.hex"; then :; fi
   if ! diff -q "$d/want.hex" "$d/got.hex" >/dev/null 2>&1; then
     echo "  FAIL  round-trip  $(basename "$d")"
     echo "        schema: $(tr '\n' ' ' < "$d/s.proto" | cut -c1-100)"
@@ -277,13 +279,12 @@ else
     echo "  FAIL  unpacked  the generator failed: $(head -1 "$TMP/u/ge.txt")"
     fail=1
   else
-    sed -i.bak '$d' "$TMP/u/pb.mere" 2>/dev/null || sed -i '$d' "$TMP/u/pb.mere"
     {
       printf 'import "%s";\n' "$TMP/u/pb.mere"
       printf 'print (hex_of_bytes (encode_M (decode_M (bytes_of_hex "%s"))))\n' "$UNPACKED"
     } > "$ROOT/examples/.pgen_tmp.mere"
     ( ulimit -t 120; "$MERE" "$ROOT/examples/.pgen_tmp.mere" ) 2>"$TMP/u/re.txt" \
-      | sed '$d' > "$TMP/u/got.hex"
+      > "$TMP/u/got.hex"
     if diff -q "$TMP/u/packed.hex" "$TMP/u/got.hex" >/dev/null 2>&1; then
       echo "  ok    unpacked  the non-packed form decodes to the same value and re-encodes packed"
     else
@@ -302,7 +303,6 @@ PROTO="$ROOT/examples/hello.proto"
 if [ -f "$PROTO" ]; then
   if ( ulimit -t 120; "$MERE" "$ROOT/examples/protoc_mere.mere" "examples/hello.proto" \
         "../contrib/proto/wire.mere" ) > "$TMP/fresh.mere" 2>"$TMP/fe.txt"; then
-    sed -i.bak '$d' "$TMP/fresh.mere" 2>/dev/null || sed -i '$d' "$TMP/fresh.mere"
     if diff -q "$GEN" "$TMP/fresh.mere" >/dev/null 2>&1; then
       echo "  ok    committed  examples/hello_pb.mere matches a fresh run"
     else

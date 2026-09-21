@@ -39,7 +39,6 @@ after_del=0
 eof_rd=1 eof=0
 accept_wb=-1
 write_wb=-1
-()
 W
 diff -u "$TMP/want" "$TMP/got" || { echo "FAIL io_poll: transcript differs"; exit 1; }
 echo "io_poll_check: ok"

@@ -117,7 +117,11 @@ File.foreach(ARGV[1]) { |l| c, w = l.split.map(&:to_i); mine[c] = w }
 $old_eaw = nil
 if ARGV[2] && File.size?(ARGV[2])
   $old_eaw = {}
-  File.foreach(ARGV[2]) do |line|
+  # UTF-8 explicitly, not whatever the caller's locale happens to be. Without
+  # it this reads as US-ASCII on a shell with LANG unset and dies on the first
+  # non-ASCII comment in EastAsianWidth.txt -- a red gate that says nothing
+  # about the subject. CI sets a UTF-8 locale and never saw it.
+  File.foreach(ARGV[2], encoding: "UTF-8") do |line|
     body = line.split("#").first.to_s.strip
     next if body.empty?
     rng, v = body.split(";").map(&:strip)

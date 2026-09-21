@@ -41,7 +41,6 @@ drained=0
 close=0
 after_close=-1
 badrate=-1
-()
 W
 diff -u "$TMP/want" "$TMP/got" || { echo "FAIL audio: transcript differs"; exit 1; }
 echo "audio_check: ok"
