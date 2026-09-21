@@ -47,6 +47,13 @@
 # and printed, rather than discovered from a page of phantom failures.
 NODE_MIN=24
 
+# v0.1.501: the probe prints exactly what is compared. Until v0.1.494 every
+# Mere program printed a trailing line for its own value, so probes ended with
+# a bare `0` SENTINEL and the harness trimmed one line. Q-136 made a unit main
+# silent and six gates then trimmed their own ANSWERS; the pair is removed here
+# rather than re-sentinelled, so nothing depends on a line count.
+# In the decode section the sentinel had also leaked into the ORACLE, which
+# printed a matching `0` -- removed with it.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
@@ -116,7 +123,6 @@ let _ = line "path" Percent.path;
 let _ = line "query" Percent.special_query;
 let _ = line "fragment" Percent.fragment;
 let _ = line "userinfo" Percent.userinfo;
-0
 MERE
 cp "$TMP/ours.mere" "$ROOT/examples/.url_parity_tmp.mere"
 ( ulimit -t 60; "$MERE" "$ROOT/examples/.url_parity_tmp.mere" ) > "$TMP/ours.txt"
@@ -160,7 +166,6 @@ let rec go = fn buf -> fn (b: int) ->
     go buf (b + 1);
 let _ = print (go (strbuf_new ()) 0x20);
 let _ = print (Percent.decode "%E3%81%82 %e3%81%82 100% %A %ZZ");
-0
 MERE
 cp "$TMP/dec.mere" "$ROOT/examples/.url_dec_tmp.mere"
 ( ulimit -t 60; "$MERE" "$ROOT/examples/.url_dec_tmp.mere" ) > "$TMP/dec.txt"
@@ -173,7 +178,6 @@ console.log(s);
 console.log("あ あ 100% %A %ZZ");
 // A Mere program prints the value of its final expression, so the `0` at the
 // end of the probe is part of its output and part of what we expect.
-console.log(0);
 NODE
 
 if diff -q "$TMP/dec_want.txt" "$TMP/dec.txt" >/dev/null; then
@@ -334,9 +338,8 @@ node "$TMP/auth.js" "$CORPUS" > "$TMP/auth_want.txt"
     esc=$(printf '%s' "$line" | sed 's/\\/\\\\/g; s/"/\\"/g; s/{/\\{/g')
     printf 'let _ = p "%s";\n' "$esc"
   done < "$CORPUS"
-  echo '0'
 } > "$ROOT/examples/.url_auth_tmp.mere"
-( ulimit -t 60; "$MERE" "$ROOT/examples/.url_auth_tmp.mere" ) | sed '$d' > "$TMP/auth_ours.txt"
+( ulimit -t 60; "$MERE" "$ROOT/examples/.url_auth_tmp.mere" ) > "$TMP/auth_ours.txt"
 rm -f "$ROOT/examples/.url_auth_tmp.mere"
 
 if diff -q "$TMP/auth_want.txt" "$TMP/auth_ours.txt" >/dev/null; then
@@ -467,9 +470,8 @@ node "$TMP/resolve.js" "$TMP/bases.txt" "$TMP/refs.txt" "$TMP/res_notes.txt" \
       printf 'let _ = r "%s" "%s";\n' "$besc" "$resc"
     done < "$TMP/refs.txt"
   done < "$TMP/bases.txt"
-  echo '0'
 } > "$ROOT/examples/.url_res_tmp.mere"
-( ulimit -t 120; "$MERE" "$ROOT/examples/.url_res_tmp.mere" ) | sed '$d' > "$TMP/res_ours.txt"
+( ulimit -t 120; "$MERE" "$ROOT/examples/.url_res_tmp.mere" ) > "$TMP/res_ours.txt"
 rm -f "$ROOT/examples/.url_res_tmp.mere"
 
 if diff -q "$TMP/res_want.txt" "$TMP/res_ours.txt" >/dev/null; then
@@ -538,9 +540,8 @@ let rec probe = fn (prefix: str) -> fn (b: int) ->
 
 let _ = probe "http://" 0x20;
 let _ = probe "foo://" 0x20;
-0
 MERE
-( ulimit -t 120; "$MERE" "$ROOT/examples/.url_hosts_tmp.mere" ) | sed '$d' > "$TMP/hosts_ours.txt"
+( ulimit -t 120; "$MERE" "$ROOT/examples/.url_hosts_tmp.mere" ) > "$TMP/hosts_ours.txt"
 rm -f "$ROOT/examples/.url_hosts_tmp.mere"
 
 if diff -q "$TMP/hosts_want.txt" "$TMP/hosts_ours.txt" >/dev/null; then
@@ -641,9 +642,8 @@ node "$TMP/v6.js" "$TMP/v6.txt" > "$TMP/v6_want.txt"
     [ -z "$line" ] && continue
     printf 'let _ = p "%s";\n' "$line"
   done < "$TMP/v6.txt"
-  echo '0'
 } > "$ROOT/examples/.url_v6_tmp.mere"
-( ulimit -t 120; "$MERE" "$ROOT/examples/.url_v6_tmp.mere" ) | sed '$d' > "$TMP/v6_ours.txt"
+( ulimit -t 120; "$MERE" "$ROOT/examples/.url_v6_tmp.mere" ) > "$TMP/v6_ours.txt"
 rm -f "$ROOT/examples/.url_v6_tmp.mere"
 
 if diff -q "$TMP/v6_want.txt" "$TMP/v6_ours.txt" >/dev/null; then

@@ -44,6 +44,11 @@
 NODE_MIN=24
 UNICODE_VERSION=17.0
 
+# v0.1.501: the probe prints exactly what is compared. Until v0.1.494 every
+# Mere program printed a trailing line for its own value, so probes ended with
+# a bare `0` SENTINEL and the harness trimmed one line. Q-136 made a unit main
+# silent and six gates then trimmed their own ANSWERS; the pair is removed here
+# rather than re-sentinelled, so nothing depends on a line count.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
@@ -204,11 +209,10 @@ let rec _go = fn (lines) ->
     _go rest;
 
 let _ = _go (read_lines "CORPUS_PATH");
-0
 MERE
 sed -i.bak "s|CORPUS_PATH|$TMP/corpus.txt|" "$ROOT/examples/.uni_parity_tmp.mere"
 rm -f "$ROOT/examples/.uni_parity_tmp.mere.bak"
-( ulimit -t 600; "$MERE" "$ROOT/examples/.uni_parity_tmp.mere" ) | sed '$d' > "$TMP/ours.txt"
+( ulimit -t 600; "$MERE" "$ROOT/examples/.uni_parity_tmp.mere" ) > "$TMP/ours.txt"
 rm -f "$ROOT/examples/.uni_parity_tmp.mere"
 
 fail=0
@@ -332,11 +336,10 @@ let rec _go = fn (lines: str list) ->
     _go rest;
 
 let _ = _go (read_lines "NF_CORPUS_PATH");
-0
 MERE
 sed -i.bak "s|NF_CORPUS_PATH|$TMP/nf_corpus.txt|" "$ROOT/examples/.uni_nf_tmp.mere"
 rm -f "$ROOT/examples/.uni_nf_tmp.mere.bak"
-( ulimit -t 900; "$MERE" "$ROOT/examples/.uni_nf_tmp.mere" ) | sed '$d' > "$TMP/nf_ours.txt"
+( ulimit -t 900; "$MERE" "$ROOT/examples/.uni_nf_tmp.mere" ) > "$TMP/nf_ours.txt"
 rm -f "$ROOT/examples/.uni_nf_tmp.mere"
 
 if diff -q "$TMP/nf_want.txt" "$TMP/nf_ours.txt" >/dev/null; then

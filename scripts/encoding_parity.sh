@@ -42,6 +42,11 @@
 # disagreement is diagnosed by reading one line instead of a page of diffs.
 NODE_MIN=24
 
+# v0.1.501: the probe prints exactly what is compared. Until v0.1.494 every
+# Mere program printed a trailing line for its own value, so probes ended with
+# a bare `0` SENTINEL and the harness trimmed one line. Q-136 made a unit main
+# silent and six gates then trimmed their own ANSWERS; the pair is removed here
+# rather than re-sentinelled, so nothing depends on a line count.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
@@ -158,9 +163,8 @@ let _ = sb 0;
 let _ = sj_all 0;
 let _ = ej_all 0;
 let _ = ej3_all 0;
-0
 MERE
-( ulimit -t 300; "$MERE" "$ROOT/examples/.enc_sweep_tmp.mere" ) | sed '$d' > "$TMP/ours.txt"
+( ulimit -t 300; "$MERE" "$ROOT/examples/.enc_sweep_tmp.mere" ) > "$TMP/ours.txt"
 rm -f "$ROOT/examples/.enc_sweep_tmp.mere"
 
 # One diff, but reported per section so a failure names which sweep broke.
@@ -337,9 +341,8 @@ fi
     esc=$(printf '%s' "$label" | sed 's/\\/\\\\/g; s/"/\\"/g; s/{/\\{/g')
     printf 'let _ = l "%s";\n' "$esc"
   done < "$TMP/labels.txt"
-  echo '0'
 } > "$ROOT/examples/.enc_labels_tmp.mere"
-( ulimit -t 60; "$MERE" "$ROOT/examples/.enc_labels_tmp.mere" ) | sed '$d' > "$TMP/labels_ours.txt"
+( ulimit -t 60; "$MERE" "$ROOT/examples/.enc_labels_tmp.mere" ) > "$TMP/labels_ours.txt"
 rm -f "$ROOT/examples/.enc_labels_tmp.mere"
 
 if diff -q "$TMP/labels_claim.txt" "$TMP/labels_ours.txt" >/dev/null; then

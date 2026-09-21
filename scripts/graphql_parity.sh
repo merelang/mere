@@ -285,7 +285,6 @@ fi
   for f in $(ls "$TMP/in"); do
     printf 'let _ = one "%s" "%s";\n' "$TMP/in/$f" "$TMP/out/$f.M"
   done
-  echo '0'
 } > "$ROOT/examples/.graphql_parity_tmp.mere"
 
 run_subject "round-trip" "$ROOT/examples/.graphql_parity_tmp.mere" || true
@@ -343,7 +342,6 @@ GQL_DIR="$GQL_DIR" node "$TMP/oracle.js" "$TMP/in2" "$TMP/A2"
   for f in $(ls "$TMP/in2"); do
     printf 'let _ = one "%s" "%s";\n' "$TMP/in2/$f" "$TMP/out2/$f.M"
   done
-  echo '0'
 } > "$ROOT/examples/.graphql_parity_tmp.mere"
 ( ulimit -t 300; "$MERE" "$ROOT/examples/.graphql_parity_tmp.mere" ) > /dev/null
 GQL_DIR="$GQL_DIR" INDIR="$TMP/in2" node "$TMP/back.js" "$TMP/A2" "$TMP/out2" > "$TMP/report2.txt" 2>&1
@@ -417,11 +415,15 @@ GQL_DIR="$GQL_DIR" node "$TMP/kinds.js" "$TMP/nums.txt" > "$TMP/kinds_want.txt"
     [ -z "$lex" ] && continue
     printf 'let _ = print (first_arg "\\{ f(a: %s) }");\n' "$lex"
   done < "$TMP/nums.txt"
-  echo '0'
 } > "$ROOT/examples/.graphql_parity_tmp.mere"
 
 run_subject "numeric kind" "$ROOT/examples/.graphql_parity_tmp.mere" "$TMP/kinds_raw.txt" || true
-sed '$d' "$TMP/kinds_raw.txt" > "$TMP/kinds_ours.txt" 2>/dev/null || : > "$TMP/kinds_ours.txt"
+# v0.1.501: the probe prints exactly what is compared. Until v0.1.494 every
+# Mere program printed a trailing line for its own value, so probes ended with
+# a bare `0` SENTINEL and the harness trimmed one line. Q-136 made a unit main
+# silent and six gates then trimmed their own answers; the pair is removed
+# here rather than re-sentinelled, so nothing depends on a line count.
+cp "$TMP/kinds_raw.txt" "$TMP/kinds_ours.txt" 2>/dev/null || : > "$TMP/kinds_ours.txt"
 
 if diff -q "$TMP/kinds_want.txt" "$TMP/kinds_ours.txt" >/dev/null; then
   echo "  ok    numeric kind  $(grep -c . "$TMP/nums.txt") lexemes: Int/Float classified as the oracle does"
