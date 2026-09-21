@@ -28,6 +28,11 @@
 # Usage:
 #   sh scripts/normalize_conformance.sh
 
+# v0.1.501: the probe prints exactly what is compared. Until v0.1.494 every
+# Mere program printed a trailing line for its own value, so probes ended with
+# a bare `0` SENTINEL and the harness trimmed one line. Q-136 made a unit main
+# silent and six gates then trimmed their own ANSWERS; the pair is removed here
+# rather than re-sentinelled, so nothing depends on a line count.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
@@ -111,11 +116,10 @@ let rec _go = fn (lines: str list) ->
     _go rest;
 
 let _ = _go (read_lines "CORPUS_PATH");
-0
 MERE
 sed -i.bak "s|CORPUS_PATH|$TMP/corpus.txt|" "$ROOT/examples/.nf_conf_tmp.mere"
 rm -f "$ROOT/examples/.nf_conf_tmp.mere.bak"
-( ulimit -t 1800; "$MERE" "$ROOT/examples/.nf_conf_tmp.mere" ) | sed '$d' > "$TMP/ours_raw.txt"
+( ulimit -t 1800; "$MERE" "$ROOT/examples/.nf_conf_tmp.mere" ) > "$TMP/ours_raw.txt"
 rm -f "$ROOT/examples/.nf_conf_tmp.mere"
 
 # The expected side is the file's own columns 2 and 3 as decimal code points, which

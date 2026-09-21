@@ -26,6 +26,11 @@
 # Usage:
 #   sh scripts/linebreak_conformance.sh
 
+# v0.1.501: the probe prints exactly what is compared. Until v0.1.494 every
+# Mere program printed a trailing line for its own value, so probes ended with
+# a bare `0` SENTINEL and the harness trimmed one line. Q-136 made a unit main
+# silent and six gates then trimmed their own ANSWERS; the pair is removed here
+# rather than re-sentinelled, so nothing depends on a line count.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
@@ -98,11 +103,10 @@ let rec _go = fn (lines: str list) ->
     _go rest;
 
 let _ = _go (read_lines "CORPUS_PATH");
-0
 MERE
 sed -i.bak "s|CORPUS_PATH|$TMP/corpus.txt|" "$ROOT/examples/.lb_conf_tmp.mere"
 rm -f "$ROOT/examples/.lb_conf_tmp.mere.bak"
-( ulimit -t 900; "$MERE" "$ROOT/examples/.lb_conf_tmp.mere" ) | sed '$d' > "$TMP/ours.txt"
+( ulimit -t 900; "$MERE" "$ROOT/examples/.lb_conf_tmp.mere" ) > "$TMP/ours.txt"
 rm -f "$ROOT/examples/.lb_conf_tmp.mere"
 
 if diff -q "$TMP/want.txt" "$TMP/ours.txt" >/dev/null; then

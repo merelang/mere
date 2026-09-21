@@ -77,12 +77,14 @@ echoed=0; known=0; nocref=0; refused=0; refused_names=""
 for p in "$ROOT"/test/parity/*.mere; do
   name=$(basename "$p" .mere)
   if "$MERE" -c "$p" > "$TMP/ref.c" 2>/dev/null && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
-  ( ulimit -t 60; "$TMP/ref" ) > "$TMP/i.out.raw" 2>&1
-  # -a: nul_in_str's output HAS a NUL, and without it grep's binary-file
-  # heuristic swallows lines -- nondeterministically, because the heuristic
-  # looks at buffer boundaries. This gate flaked at 60s, at 240s, and then
-  # kept flaking with no timeout in sight; the timeout was never the reason.
-  grep -a -v '^()$' "$TMP/i.out.raw" > "$TMP/i.out"
+  # v0.1.501: no `grep -v '^()$'` here. It existed to drop the auto-printed
+  # unit line, which Q-136 removed at the source in v0.1.494 -- and it would
+  # also have dropped a `()` a program PRINTED, which is a difference this
+  # gate is supposed to see. The flake it was documented against was grep's
+  # binary-file heuristic on nul_in_str (whose output HAS a NUL) swallowing
+  # lines nondeterministically; with no grep in the path there is no
+  # heuristic to be caught by.
+  ( ulimit -t 60; "$TMP/ref" ) > "$TMP/i.out" 2>&1
   else
     nocref=$((nocref+1)); continue   # not a C-backend program; nothing to compare against
   fi
@@ -97,10 +99,12 @@ for p in "$ROOT"/test/parity/*.mere; do
   fi
   if [ -z "$RVRUN" ]; then pass=$((pass+1)); continue; fi
   ( cd "$TMP" && perl -e 'alarm 480; exec @ARGV' ./rvrun 32 2>/dev/null ) | grep -a -v '^rvrun: ' > "$TMP/r.out"
-  # The reference prints the program's own final value and an RV32I binary does
-  # not, so an output that matches except for that last line is the ONE accepted
-  # shape -- spelled out rather than filtered, so a real difference in the last
-  # line is still a difference.
+  # The reference prints the program's own final value -- unless that value is
+  # unit, which since v0.1.494 prints nothing -- and an RV32I binary never
+  # does, so an output that matches except for that last line is the ONE
+  # accepted shape. Spelled out rather than filtered: the whole-file compare
+  # below is tried FIRST, so a real difference in the last line is still a
+  # difference, and after Q-136 most programs here match whole.
   sed '$d' "$TMP/i.out" > "$TMP/i.trim"
   expected_diff=no
   for k in $KNOWN_DIFF; do [ "$k" = "$name" ] && expected_diff=yes; done
@@ -129,7 +133,7 @@ name=region_map_escape
 if "$MERE" -c "$ROOT/test/rv/region_map_escape.mere" > "$TMP/ref.c" 2>/dev/null \
    && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null \
    && "$MERE" -rv "$ROOT/test/rv/region_map_escape.mere" > "$TMP/prog.bin" 2>"$TMP/rverr"; then
-  ( ulimit -t 60; "$TMP/ref" ) 2>&1 | grep -a -v '^()$' > "$TMP/i.out"
+  ( ulimit -t 60; "$TMP/ref" ) > "$TMP/i.out" 2>&1
   if [ -z "$RVRUN" ]; then pass=$((pass+1))
   else
     ( cd "$TMP" && perl -e 'alarm 60; exec @ARGV' ./rvrun 8 2>/dev/null ) | grep -a -v '^rvrun: ' > "$TMP/r.out"
@@ -226,8 +230,11 @@ if [ -n "$RVRUN64" ]; then
   for p in "$ROOT"/test/parity/*.mere; do
     name=$(basename "$p" .mere)
     if "$MERE" -c "$p" > "$TMP/ref.c" 2>/dev/null && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
-      ( ulimit -t 60; "$TMP/ref" ) > "$TMP/i.out.raw" 2>&1
-      grep -a -v '^()$' "$TMP/i.out.raw" > "$TMP/i.out"
+      # v0.1.501: no `grep -v '^()$'` here. It existed to drop the auto-printed
+      # unit line, which Q-136 removed at the source -- and it would also have
+      # dropped a `()` a program PRINTED, which is a difference this gate is
+      # supposed to see.
+      ( ulimit -t 60; "$TMP/ref" ) > "$TMP/i.out" 2>&1
     else continue; fi
     # counted and named, same as the 32-bit sweep: the denominator is the claim
     if ! "$MERE" -rv64 --ram 32 "$p" > "$TMP/prog.bin" 2>/dev/null; then
@@ -274,7 +281,7 @@ printf 'a\000b\000c' > "$TMP/rv_nul.dat"
 rm -f "$TMP/rv_absent.txt"
 if "$MERE" -c "$ROOT/test/rv/host_read_file.mere" > "$TMP/ref.c" 2>/dev/null \
    && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
-  ( cd "$TMP" && ulimit -t 60; ./ref ) 2>&1 | grep -a -v '^()$' > "$TMP/i.out"
+  ( cd "$TMP" && ulimit -t 60; ./ref ) > "$TMP/i.out" 2>&1
   for width in 32 64; do
     if [ "$width" = 64 ]; then flag=-rv64; emu="$RVRUN64"; else flag=-rv; emu="$RVRUN"; fi
     if ! "$MERE" $flag --ram 16 "$ROOT/test/rv/host_read_file.mere" > "$TMP/prog.bin" 2>"$TMP/rverr"; then
@@ -327,7 +334,7 @@ wfpass=0; wffail=0
 printf 'line1\nline2 for stdin\n' > "$TMP/rv_stdin_fixture"
 if "$MERE" -c "$ROOT/test/rv/host_write_file.mere" > "$TMP/ref.c" 2>/dev/null \
    && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
-  ( cd "$TMP" && ulimit -t 60; ./ref < rv_stdin_fixture ) 2>&1 | grep -a -v '^()$' > "$TMP/i.out"
+  ( cd "$TMP" && ulimit -t 60; ./ref < rv_stdin_fixture ) > "$TMP/i.out" 2>&1
   for width in 32 64; do
     if [ "$width" = 64 ]; then flag=-rv64; emu="$RVRUN64"; else flag=-rv; emu="$RVRUN"; fi
     if ! "$MERE" $flag --ram 16 "$ROOT/test/rv/host_write_file.mere" > "$TMP/prog.bin" 2>"$TMP/rverr"; then

@@ -302,6 +302,19 @@ jobs:
           sh scripts/alloc_meter_check.sh
           sh scripts/alloc_meter_check.sh --poison
 
+      # No harness may drop a line of its subject's output to compensate for
+      # what the language used to print. Q-136 (v0.1.494) made a unit main
+      # silent; the `sed '$d'` and `grep -v '^()$'` written against the old
+      # behaviour stayed, and what they dropped stopped being noise -- eleven
+      # CI steps across seven commits, including protoc-agreeing bytes that
+      # came out as an empty string. Cheap, and it goes first because it reads
+      # files rather than running anything.
+      - name: "trailing_trim (no harness eats its subject's last line)"
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/trailing_trim_check.sh
+          sh scripts/trailing_trim_check.sh --poison
+
       # What a program prints WHEN IT ENDS, on all four. parity.sh cannot see
       # this: every program it runs ends with `print`, so the path that
       # displays the program's own value is one almost nothing exercises -- and

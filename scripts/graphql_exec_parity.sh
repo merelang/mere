@@ -268,12 +268,16 @@ for (const c of cases) {
   const vars = list(Object.entries(c.vars).map(([k, v]) => `("${esc(k)}", ${lit(v)})`));
   out.push(`let _ = print (Gexec.run_json (Gparse.document "${esc(c.q + " " + c.sdl)}") (${lit(c.root)}) ${vars});`);
 }
-out.push("0");
 console.log(out.join("\n"));
 NODE
 
 if run_subject "execute" "$ROOT/examples/.gexec_tmp.mere" "$TMP/got_raw.txt"; then
-  sed '$d' "$TMP/got_raw.txt" > "$TMP/got.txt"
+  # v0.1.501: the probe prints exactly what is compared. Until v0.1.494 every
+  # Mere program printed a trailing line for its own value, so probes ended with
+  # a bare `0` SENTINEL and the harness trimmed one line. Q-136 made a unit main
+  # silent and six gates then trimmed their own answers; the pair is removed
+  # here rather than re-sentinelled, so nothing depends on a line count.
+  cp "$TMP/got_raw.txt" "$TMP/got.txt"
   if diff -q "$TMP/want.txt" "$TMP/got.txt" >/dev/null; then
     echo "  ok    execute  $NCASES cases: data, errors, paths and field order all agree"
   else
@@ -395,10 +399,9 @@ else
         process.stdout.write(lst(Object.entries(j).map(([k, x]) => `("${k}", ${lit(x)})`)));')
       printf 'let _ = print (Gexec.run_json (Gparse.document ("%s" ++ sdl)) root %s);\n' "$qe" "$ve"
     done < "$TMP/args.txt"
-    echo '0'
   } > "$ROOT/examples/.gexec_tmp.mere"
   if run_subject "arguments" "$ROOT/examples/.gexec_tmp.mere" "$TMP/args_raw.txt"; then
-    sed '$d' "$TMP/args_raw.txt" > "$TMP/args_got.txt"
+    cp "$TMP/args_raw.txt" "$TMP/args_got.txt"
     if diff -q "$TMP/args_want.txt" "$TMP/args_got.txt" >/dev/null; then
       echo "  ok    arguments  $NARGS cases: defaults, absence, variables and order agree"
     else

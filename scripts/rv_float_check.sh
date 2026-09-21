@@ -37,8 +37,12 @@ rc=0
 # comparing against a moving target.
 "$MERE" -c "$P" > "$TMP/ref.c" 2>"$TMP/err" || { echo "FAIL rv_float: the C backend refused the program"; head -5 "$TMP/err"; exit 1; }
 $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>"$TMP/err" || { echo "FAIL rv_float: cc refused the C backend's output"; head -5 "$TMP/err"; exit 1; }
-"$TMP/ref" | grep -v '^()$' > "$TMP/ref.out"
-"$MERE" "$P" | grep -v '^()$' > "$TMP/interp.out" 2>&1
+# v0.1.501: no `grep -v '^()$'` on these. It dropped the unit line every Mere
+# program used to print for its own value, which Q-136 removed at the source in
+# v0.1.494 -- and it would also have dropped a `()` a program PRINTED, which is
+# a difference this gate exists to see.
+"$TMP/ref" > "$TMP/ref.out"
+"$MERE" "$P" > "$TMP/interp.out" 2>&1
 if ! diff -q "$TMP/ref.out" "$TMP/interp.out" >/dev/null; then
   echo "FAIL rv_float: the interpreter and the C backend disagree — the reference is not stable"
   diff "$TMP/ref.out" "$TMP/interp.out" | head -10
@@ -76,7 +80,7 @@ fi
 CV="$ROOT/test/float/rv_float_conv.mere"
 "$MERE" -c "$CV" > "$TMP/cv.c" 2>"$TMP/err" || { echo "FAIL rv_float: the C backend refused the conversion gate"; exit 1; }
 $CC -O2 -w -o "$TMP/cvref" "$TMP/cv.c" || exit 1
-"$TMP/cvref" | grep -v '^()$' > "$TMP/cvref.out"
+"$TMP/cvref" > "$TMP/cvref.out"
 # --ram 64: each conversion builds exact digit arrays (a full-range double is
 # ~700 digits) and a region reclaims nothing on this backend, so three hundred
 # of them genuinely need tens of MB. 32 ran out at pattern 22.
