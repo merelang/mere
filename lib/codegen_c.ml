@@ -5633,6 +5633,28 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
     in
     Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return __lang_str_take_cstr(buf);\n}"
       header fmt (String.concat ", " fields_parts)
+  (* Q-140 (found by the examples sweep): a Vec displays as `Vec[a, b]`, which
+     is what the interpreter prints and what `examples/vec_higher_order.mere`
+     expects. It used to fall through the variant arm above and answer
+     `<unknown>` -- a silent wrong answer, on a container, in a shipped
+     example. Same shape as the list case a few arms up: walk the elements and
+     ask each one's own `show`. *)
+  | Ast.TyCon (("Vec" | "OwnedVec"), args) when args <> [] ->
+    let elem_ty = Ast.walk (List.nth args (List.length args - 1)) in
+    let elem_show = "show_" ^ ty_tag elem_ty in
+    Printf.sprintf
+      "%s {\n  \
+         if (v->len == 0) return __lang_str_of_cstr(\"Vec[]\");\n  \
+         const char* __acc = \"Vec[\";\n  \
+         for (int __i = 0; __i < v->len; __i++) {\n    \
+           char* __buf;\n    \
+           if (__i == 0) asprintf(&__buf, \"%%s%%s\", __acc, %s(v->data[__i]));\n    \
+           else asprintf(&__buf, \"%%s, %%s\", __acc, %s(v->data[__i]));\n    \
+           __acc = __lang_str_take_cstr(__buf);\n  \
+         }\n  \
+         { char* __buf; asprintf(&__buf, \"%%s]\", __acc); return __lang_str_take_cstr(__buf); }\n\
+       }"
+      header elem_show elem_show
   | Ast.TyCon (name, args) ->
     (* Variant — either monomorphic or polymorphic instance. Find its
        variants via polymorphic_variants or by scanning constructors. *)

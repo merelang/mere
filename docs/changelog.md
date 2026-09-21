@@ -4,6 +4,59 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.499 — 2026-09-21
+
+_The examples corpus is compared across backends, and the first run found a bug._
+
+_Q-140 closed one un-gated path — what a program prints when it ends. The
+question it raised was how many others there are, and guessing at source was
+not going to answer it: the four backends hold 446 catch-all arms that produce
+a value rather than refusing._
+
+_So the corpus was asked instead. `examples/` holds 291 programs written for
+people, and **nothing compared them across backends** —
+`check_cmd_check.sh` sweeps the same tree but asks only whether a program is
+ACCEPTED, never what it prints. Running them on the interpreter and on C and
+diffing found, on the first pass:_
+
+```
+examples/vec_higher_order.mere
+  xs:      Vec[1, 2, 3, 4, 5]        (interpreter)
+  xs:      <unknown>                 (C backend)
+```
+
+_**`show` of a `Vec`**, wrong on a shipped example, for as long as both had
+existed. And the same four-way split as Q-140 underneath it: interpreter
+`Vec[1, 2]`, C `<unknown>`, LLVM a refusal, **Wasm a function whose whole body
+was `(unreachable)`** — a program that compiled, ran, and died with no message._
+
+_C displays a Vec now, walking the elements and asking each one's own `show`,
+the way the list arm a few cases above it already did. ⚠ **The arm had to go
+BEFORE the general `TyCon` one**, which was swallowing it — OCaml's
+"this match case is unused" said so, which is the same check this compiler
+grew for Mere in v0.1.487._
+
+_Wasm refuses instead of trapping. A type with no constructors is not a
+variant, and the tag chain collapses to a bare `(unreachable)`; saying so at
+compile time is what LLVM already did and beats dying silently at run time. So
+the four now read: display, display, refuse, refuse — and none of them lies._
+
+_`scripts/examples_parity.sh` is the gate. It selects by asking rather than by
+listing: an example is compared when the interpreter finishes it unattended AND
+its output is a function of the program. ⚠ **That second question is asked
+after the C build, not beside the first run** — back to back, two interpreter
+runs land in the same second and a per-second clock looks stable, which is
+exactly how `log_levels_demo.mere` slipped through the first version. The gap
+is the build, so nothing here is a fixed sleep guessing at the machine._
+
+_186 compared, 89 skipped (input, ports, time), 1 not a function of the
+program, 15 refused by the C backend. The gate fails if fewer than 150 are
+compared: a corpus that quietly stops being swept passes forever._
+
+_suite 2773, parity 196 PASS / 0 FAIL._
+
+---
+
 ## v0.1.498 — 2026-09-21
 
 _Q-140: one rule for what a program prints when it ends._
