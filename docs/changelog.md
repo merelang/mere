@@ -4,6 +4,55 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.497 — 2026-09-21
+
+_Q-139 closed: every cell of the table is zero, on all three backends._
+
+| B/call | C | LLVM | Wasm |
+|---|---|---|---|
+| `f a b` (named top-level, concrete) | 0 | 0 | **0** |
+| `f a b` (f is a function parameter) | 0 | 0 | **0** |
+| trait method | 0 | 0 | **0** |
+| `vec_fold` / `map_iter` / `vec_map` | 0 | 0 | **0** |
+| `vec_sort`, per element | 0 | 0 | **0** |
+
+_Two rows were left, and NEITHER was the closure mechanism any more. Reading
+each one before touching it is the whole of why this is one slice._
+
+_**A capture-free top-level fn used as a value is a CONSTANT.** `ap add acc i`
+in a loop built the same twelve-byte record every iteration — env 0 and two
+table indices known at emit time. It goes in the data segment once now, and the
+expression is a constant. Twelve bytes a call to nothing._
+
+_**And the last eight bytes an element were the merge sort's scratch**, not a
+closure at all: n slots taken from the bump heap and left there. The C backend
+malloc/frees its scratch and its comment says exactly why — "a region alloc
+would leave n slots behind on every call" — and the Wasm backend had no such
+escape, so it simply left them._
+
+_⚠ **It is only given back when nothing was allocated after it.** A comparator
+can allocate: the two-step path builds an environment, and a user's comparator
+can push to a Vec it captured, whose buffer may have been reallocated above the
+scratch. Resetting the bump past any of that hands out memory something still
+holds. The test is the honest one — the scratch is reclaimable exactly when the
+bump is still where the sort left it — and a probe whose comparator pushes on
+every comparison answers the same on all four backends._
+
+_⚠ **`$src` and `$dst` are swapped once per pass**, and at the end `$dst` has
+been pointed at the vec's own buffer for the copy-back, so neither still names
+the block that was allocated. The first version compared against `$dst` and
+reclaimed nothing at all, silently._
+
+_Q-139 took six slices: three on LLVM (v0.1.491-493) and three on Wasm
+(v0.1.495-497). It started because the allocation meter (Q-138, v0.1.488) made
+the question askable, and the first answer it gave was that Q-135's fix had
+been C-only — which nothing could have known before._
+
+_suite 2773, parity 196 PASS / 0 FAIL, wasm 558 KB against 616 KB before the
+arc, every gate green._
+
+---
+
 ## v0.1.496 — 2026-09-21
 
 _Q-139 on Wasm, second half: a closure value carries the uncurried entry._
