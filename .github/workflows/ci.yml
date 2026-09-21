@@ -302,6 +302,16 @@ jobs:
           sh scripts/alloc_meter_check.sh
           sh scripts/alloc_meter_check.sh --poison
 
+      # What a program prints WHEN IT ENDS, on all four. parity.sh cannot see
+      # this: every program it runs ends with `print`, so the path that
+      # displays the program's own value is one almost nothing exercises -- and
+      # it had drifted into four different answers for the same program.
+      - name: "main_value (the four backends display a value the same way)"
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/main_value_check.sh
+          sh scripts/main_value_check.sh --poison
+
       - name: "determinism (parity precondition — stdout is a function of the program)"
         if: ${{ !cancelled() }}
         run: sh scripts/determinism_check.sh

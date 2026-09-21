@@ -10382,6 +10382,13 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     kept
   in
   collect_show_types main_expr fns;
+  (* Q-140: the program's own value is displayed the way `show` displays it,
+     so its type needs a `show_<tag>` emitted for it. *)
+  (* Q-140: a main whose type never resolved has no value to display. *)
+  (match Ast.walk main_ty with
+   | Ast.TyUnit -> ()
+   | t when not (ty_is_concrete t) -> ()
+   | t -> add_show_type t);
   (* Phase 27.2: register show_<main_ty> so the auto-print at end of main
      has the right helper available. *)
   add_show_type main_ty;
@@ -10573,9 +10580,20 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      emit_instr "i64.extend_i32_u";
      emit_instr "call $puts";
      emit_instr "i32.const 0"
-   | _ ->
-     (* Best-effort: drop body and return 0. *)
+   | t when not (ty_is_concrete t) ->
+     (* Q-140: no value to display -- see the note by add_show_type. *)
      emit_instr "drop";
+     emit_instr "i32.const 0"
+   | t ->
+     (* Q-140: everything else is printed the way `show` prints it, which is
+        what the interpreter does and what the other two backends now do. This
+        arm used to be "best-effort: drop body and return 0" -- a program whose
+        value was a list or a tuple printed NOTHING, silently, while C printed a
+        pointer as a decimal integer and LLVM refused. Three backends, three
+        answers, and `show` already agreed with the interpreter on all of
+        them. *)
+     emit_instr (Printf.sprintf "call $show_%s" (ty_tag t));
+     emit_instr "call $puts";
      emit_instr "i32.const 0");
   let body_instrs = List.rev !instrs in
   let local_count = !local_counter in
