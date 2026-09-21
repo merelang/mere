@@ -666,7 +666,11 @@ let process_decls eval_env type_env decls =
   ) decls;
   forward_check_all_kept ()
 
-let process ?base_dir ?(search_paths = []) s =
+(* What a program prints when it ends: `None` when it has nothing to say.
+   `process` below is the same thing as a string, for the hundreds of callers
+   that want one -- one rule, two spellings of the answer, rather than two
+   places that decide. *)
+let process_opt ?base_dir ?(search_paths = []) s =
   forward_reset ();
   Exhaustive.reset ();
   Typer.reset_send_constraints ();
@@ -693,10 +697,23 @@ let process ?base_dir ?(search_paths = []) s =
      the wrong answer it was explaining. *)
   enforce_exhaustive ();
   let v = Eval.eval_in !eval_env prog.main in
-  Eval.to_string v
+  match v with
+  (* Q-136: a program whose value is unit has nothing to say, and said `()`.
+     `Eval.to_string` is NOT the place to change that -- `show ()` goes through
+     it and has to keep answering `()`. The decision belongs to "what does a
+     program print when it ends", which is here. The compiled backends make the
+     same one in their own `main_format_of`, so the interp/compiled parity the
+     old behaviour was built for still holds; it now holds at silence. *)
+  | Eval.V_unit -> None
+  | _ -> Some (Eval.to_string v)
 
 (* Test-friendly entry point: returns the exhaustiveness warnings as a list
    (no side-effects), for unit tests to assert against. *)
+let process ?base_dir ?(search_paths = []) s =
+  match process_opt ?base_dir ~search_paths s with
+  | Some r -> r
+  | None -> ""
+
 let exhaustiveness_warnings s =
   Exhaustive.reset ();
   Typer.reset_send_constraints ();

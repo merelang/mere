@@ -132,6 +132,11 @@ let search_paths : string list ref = ref []
    A position inside the prelude is not remapped into the user's file, because
    there is no honest line there to point at: it is shown against the prelude's
    own text instead, which also makes a prelude bug legible as one. *)
+(* An action that always has something to print, lifted into the shape
+   `run_action` now takes. Only the program-running path can be silent
+   (Q-136: a unit main prints nothing), so everything else says so here. *)
+let says (f : string -> string) : string -> string option = fun s -> Some (f s)
+
 let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
   let render ~source ~filename loc kind msg =
     Mere.Diagnostic.format ~source ~filename loc kind msg
@@ -307,7 +312,14 @@ let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
        way `mere fmt --check` reads. Everything else here — the renderer, the
        report-them-all paths, the warnings — is the same machinery, which is the
        reason it goes through this function rather than beside it. *)
-    if not quiet then print_endline result
+    (* Q-136: `None` is "this program has nothing to print", which is not the
+       same as printing an empty line -- a `str` main whose value is "" still
+       gets its newline. The distinction has to survive to here, which is why
+       the action returns an option rather than a string that might be empty
+       for either reason. *)
+    (match result with
+     | Some r -> if not quiet then print_endline r
+     | None -> ())
   with
   | Mere.Lexer.Lex_error (loc, msg) -> print_warnings (); report loc "lex error" msg
   | Mere.Parser.Parse_error_in_file (file, loc, msg) ->
@@ -525,7 +537,7 @@ let rv_flags mode args =
       | "-rvs" -> listing_riscv ~base_dir
       | _ -> debug_map_riscv ~base_dir
     in
-    Some (fun () -> run_action ~rv:true ~base_dir action path (read_file path))
+    Some (fun () -> run_action ~rv:true ~base_dir (says action) path (read_file path))
 
 (* Phase 47: mere fmt — re-emit the source through the parser + formatter.
    Comments are not preserved (the lexer discards them); we document this
@@ -586,7 +598,7 @@ let fmt_inplace_files paths =
 let fmt_to_stdout path =
   let source = read_file path in
   let base = Filename.dirname path in
-  run_action ~base_dir:base (format_source ~base_dir:base) path source
+  run_action ~base_dir:base (says (format_source ~base_dir:base)) path source
 
 (* Enable ANSI color in diagnostics when stderr is a TTY and the
    environment hasn't opted out via NO_COLOR (https://no-color.org/). *)
@@ -681,17 +693,17 @@ let () =
       | "-ll" -> compile_to_llvm ~base_dir:base
       | _ -> compile_to_wasm ~base_dir:base
     in
-    run_action ~quiet:true ~base_dir:base action path source
+    run_action ~quiet:true ~base_dir:base (says action) path source
   | [_; "check"; "-rv"; path] | [_; "check"; path; "-rv"] ->
     (* ~rv:true so a position counted from the top of the glued-in prelude is
        reported against the line the user wrote; compile_to_riscv does the
        gluing, so the raw source goes in. *)
     run_action ~rv:true ~quiet:true ~base_dir:(Filename.dirname path)
-      (compile_to_riscv ~base_dir:(Filename.dirname path)) path (read_file path)
+      (says (compile_to_riscv ~base_dir:(Filename.dirname path))) path (read_file path)
   | [_; "check"; path] ->
     let source = read_file path in
     let base = Filename.dirname path in
-    run_action ~quiet:true ~base_dir:base (check_only ~base_dir:base) path source
+    run_action ~quiet:true ~base_dir:base (says (check_only ~base_dir:base)) path source
   | [_; "check"] ->
     prerr_endline "error: `mere check` requires a file path";
     exit 1
@@ -718,27 +730,27 @@ let () =
     prerr_endline "error: `mere fmt` requires a file path";
     exit 1
   | [_; "-e"; expr] ->
-    run_action Mere.Pipeline.process "<inline>" expr
+    run_action Mere.Pipeline.process_opt "<inline>" expr
   | [_; "-te"; expr] ->
-    run_action Mere.Pipeline.type_of "<inline>" expr
+    run_action (says Mere.Pipeline.type_of) "<inline>" expr
   | [_; "-ce"; expr] ->
-    run_action compile_to_c "<inline>" expr
+    run_action (says compile_to_c) "<inline>" expr
   | [_; "-ll"; "-g"; path] | [_; "-ll"; path; "-g"] ->
     Mere.Codegen_llvm.debug_file := Some path;
     let source = read_file path in
     let base = Filename.dirname path in
-    run_action ~base_dir:base (compile_to_llvm ~base_dir:base) path source
+    run_action ~base_dir:base (says (compile_to_llvm ~base_dir:base)) path source
   | [_; "-c"; "-g"; path] | [_; "-c"; path; "-g"] ->
     let source = read_file path in
     let base = Filename.dirname path in
     set_c_debug path;
     set_lib_stem path;
-    run_action ~base_dir:base (compile_to_c ~base_dir:base) path source
+    run_action ~base_dir:base (says (compile_to_c ~base_dir:base)) path source
   | [_; "-c"; path] ->
     let source = read_file path in
     let base = Filename.dirname path in
     set_lib_stem path;
-    run_action ~base_dir:base (compile_to_c ~base_dir:base) path source
+    run_action ~base_dir:base (says (compile_to_c ~base_dir:base)) path source
   | [_; "--suggest-regions"; path] ->
     (* Where a `region R { }` would pay. The pass reads the same typed program
        every backend starts from, and prints candidates as `file:line:col`
@@ -747,7 +759,7 @@ let () =
     let source = read_file path in
     let base = Filename.dirname path in
     run_action ~base_dir:base
-      (fun src ->
+      (says (fun src ->
          let open Mere in
          let (prog, _) = infer_program ~base_dir:base src in
          match Suggest.report ~path prog with
@@ -755,7 +767,7 @@ let () =
          | lines ->
            String.concat "\n" lines
            ^ Printf.sprintf "\n%d region candidate%s" (List.length lines)
-               (if List.length lines = 1 then "" else "s"))
+               (if List.length lines = 1 then "" else "s")))
       path source
   | [_; "--header"; path] ->
     (* the boundary's C header. A lib-mode emission computes the export list;
@@ -765,24 +777,24 @@ let () =
     let source = read_file path in
     let base = Filename.dirname path in
     run_action ~base_dir:base
-      (fun src ->
+      (says (fun src ->
          let _ = compile_to_c ~base_dir:base src in
-         !Mere.Codegen_c.lib_header)
+         !Mere.Codegen_c.lib_header))
       path source
   | [_; "-lle"; expr] ->
-    run_action compile_to_llvm "<inline>" expr
+    run_action (says compile_to_llvm) "<inline>" expr
   | [_; "-ll"; path] ->
     let source = read_file path in
     let base = Filename.dirname path in
-    run_action ~base_dir:base (compile_to_llvm ~base_dir:base) path source
+    run_action ~base_dir:base (says (compile_to_llvm ~base_dir:base)) path source
   | [_; "-we"; expr] ->
-    run_action compile_to_wasm "<inline>" expr
+    run_action (says compile_to_wasm) "<inline>" expr
   | [_; "-w"; path] ->
     let source = read_file path in
     let base = Filename.dirname path in
-    run_action ~base_dir:base (compile_to_wasm ~base_dir:base) path source
+    run_action ~base_dir:base (says (compile_to_wasm ~base_dir:base)) path source
   | [_; "-rve"; expr] ->
-    run_action ~rv:true compile_to_riscv "<inline>" expr
+    run_action ~rv:true (says compile_to_riscv) "<inline>" expr
   | [_; "lsp"] ->
     (* The editor speaks on stdin and listens on stdout, so nothing else may be
        written there — every diagnostic goes back as a protocol message. *)
@@ -790,9 +802,9 @@ let () =
   | [_; "-wg"; path] ->
     let source = read_file path in
     let base = Filename.dirname path in
-    run_action ~base_dir:base (wasm_debug_map ~path ~base_dir:base) path source
+    run_action ~base_dir:base (says (wasm_debug_map ~path ~base_dir:base)) path source
   | [_; "-rvse"; expr] ->
-    run_action ~rv:true listing_riscv "<inline>" expr
+    run_action ~rv:true (says listing_riscv) "<inline>" expr
   (* -rv (binary) / -rvs (listing) / -rvg (debug map), each with `--bare`,
      `--ram <MB>` and `--load-base <addr>` in any order. `--bare` means no host
      syscalls beyond the emulator's exit, and the program's top-level `main` is
@@ -818,7 +830,7 @@ let () =
     print_string (Mere.Riscv_disasm.disasm_binary bytes)
   | [_; "-t"; path] ->
     let source = read_file path in
-    run_action Mere.Pipeline.type_of path source
+    run_action (says Mere.Pipeline.type_of) path source
   (* Q-137: the forward declaration for every top-level function this file
      defines. Splitting a `let rec ... and ...` chain means writing one
      `let fn <name>: <ty>;` per shared name, and a chain worth splitting has
@@ -827,7 +839,7 @@ let () =
     let source = read_file path in
     let base = Filename.dirname path in
     run_action ~base_dir:base
-      (Mere.Pipeline.decls_report ~base_dir:base ~search_paths:!search_paths)
+      (says (Mere.Pipeline.decls_report ~base_dir:base ~search_paths:!search_paths))
       path source
   (* Q-127 stage 1: which functions would take a hidden region argument, and which
      cannot. A measurement, not a compilation mode -- see Pipeline.region_param_report. *)
@@ -835,7 +847,7 @@ let () =
     let source = read_file path in
     let base = Filename.dirname path in
     run_action ~base_dir:base
-      (Mere.Pipeline.region_param_report ~base_dir:base ~search_paths:!search_paths)
+      (says (Mere.Pipeline.region_param_report ~base_dir:base ~search_paths:!search_paths))
       path source
   | [_; path] when String.length path > 0 && path.[0] = '-' ->
     Printf.eprintf "error: unknown flag `%s`\n\n" path;
@@ -849,7 +861,7 @@ let () =
     let base = Filename.dirname path in
     Mere.Eval.program_argv := [];
     run_action ~base_dir:base
-      (Mere.Pipeline.process ~base_dir:base ~search_paths:!search_paths)
+      (Mere.Pipeline.process_opt ~base_dir:base ~search_paths:!search_paths)
       path source
   | _ :: path :: rest_args when String.length path > 0 && path.[0] <> '-' ->
     (* Phase 44: `mere <path> arg1 arg2 ...` — pass extra args to the program.
@@ -860,7 +872,7 @@ let () =
     let base = Filename.dirname path in
     Mere.Eval.program_argv := rest_args;
     run_action ~base_dir:base
-      (Mere.Pipeline.process ~base_dir:base ~search_paths:!search_paths)
+      (Mere.Pipeline.process_opt ~base_dir:base ~search_paths:!search_paths)
       path source
   | _ ->
     usage ();

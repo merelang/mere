@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.494 — 2026-09-21
+
+_Q-136: a program whose value is unit prints nothing._
+
+_`()` was printed by all four backends from Phase 25.11 / 27.0, to keep the
+interpreter and the compiled backends saying the same thing. They still say the
+same thing; they say nothing._
+
+_**What it cost.** Anything comparing output exactly — a judge, a diff, a golden
+file — saw an unconditional mismatch on every program whose main is unit, which
+is every program that ends by printing its answer. All twelve solutions on the
+mjudge board carry `let _ = exit 0;` as their last line for no other reason, and
+one of them carries a comment explaining why. **Everybody writing the same line
+to switch a default off is the evidence that the default points the wrong
+way.**_
+
+_Five places decide this and all five changed, which is why it is one slice:
+`Pipeline` for the interpreter, `main_format_of` in the C and LLVM backends, the
+`TyUnit` arm of the Wasm epilogue, and the LLVM format global that fed the call.
+Checked end to end on all four: `print "answer"` now writes `answer\n` and
+nothing else, byte for byte, on interp / C / LLVM / Wasm._
+
+_⚠ **`Eval.to_string` is NOT where this changed.** `show ()` goes through it and
+has to keep answering `()`. The decision belongs to "what does a program print
+when it ends", so it sits at the end of `Pipeline.process` — which now has an
+option-shaped twin, `process_opt`, because **"nothing to print" and "print an
+empty line" are different answers** and a `str` main whose value is `""` still
+gets its newline. `process` stays a `string` for its six hundred callers; one
+rule, two spellings._
+
+_Four golden files and twenty assertions moved with it. The two that pinned the
+OLD behaviour were re-pinned at the new one rather than deleted — the question
+"does a unit main print anything" is still worth asking, and now it has the
+other answer._
+
+_**The `()` was there for a parity that does not actually hold**, which came out
+while measuring this: a `str`-typed main prints `"abc"` — with the quotes — on
+the interpreter and `abc` on the compiled backends, and no gate notices, because
+parity programs end with `print` rather than with a bare value. Recorded as its
+own question rather than fixed here._
+
+_suite 2773, parity 196 PASS / 0 FAIL, ten gates green._
+
+---
+
 ## v0.1.493 — 2026-09-21
 
 _Q-139, third slice: the LLVM backend allocates nothing where the C backend
