@@ -4,6 +4,50 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.493 — 2026-09-21
+
+_Q-139, third slice: the LLVM backend allocates nothing where the C backend
+allocates nothing._
+
+| B/call | C | LLVM v0.1.490 | v0.1.492 | **v0.1.493** |
+|---|---|---|---|---|
+| `f a b` (named top-level, concrete) | 0 | 16 | 0 | 0 |
+| `f a b` (f is a function parameter) | 0 | 56 | 0 | 0 |
+| trait method | 0 | 16 | 8 | **0** |
+| `vec_fold` (2-arg callback) | 0 | 8 | 8 | **0** |
+| `map_iter` (2-arg callback) | 0 | 8 | 8 | **0** |
+| `vec_sort`, per element | 0 | 111 | 111 | **0** |
+
+_**The three rows had three different causes**, and reading each one before
+touching it is the only reason this took one slice instead of three._
+
+_**The builtin higher-order helpers** are emitted IR text, and their loops did
+the two-step call — `vec_fold`, `map_iter` and `vec_sort`, which is the whole
+surface: three sites. A merge sort asks its comparator n log n times, 1.7
+million for the 100,000 the board measures, and every ask built an environment
+to carry the first element._
+
+_**Then the numbers did not move**, because the callback in `vec_fold v 0 (fn a
+-> fn b -> a + b)` is an ANONYMOUS LAMBDA and those carried null. The C backend
+added `__anon_N_fn2` for this in v0.1.482; this adds the LLVM equivalent. The
+condition is "the body is immediately another `fn`", which is the same question
+the order pin asks: if anything happens before the inner `fn` is returned, that
+work belongs between the two arguments and an entry taking both at once cannot
+express it._
+
+_**And the trait row was not about the value at all.** The dictionary already
+carried `fn2` — `@anon_23_fn_fn2` sat in field 2 of `@mu_Ord2__int__dict` — and
+nothing was willing to look, because the call-site guard admitted only a `Var`
+head and a trait method is exactly what a `Var` is not: it elaborates to a read
+from the instance's dictionary. A field read is always a value and never a
+builtin, so those heads are admitted now. **One row that looked like the other
+two was a missing line in a guard.**_
+
+_suite 2773, parity 196 PASS / 0 FAIL, twelve gates green. Wasm is what remains
+of Q-139: it has none of this, and its column is unchanged at 32 / 67 / 230._
+
+---
+
 ## v0.1.492 — 2026-09-21
 
 _Q-139, second slice: the uncurried entry becomes N-ary, and a closure value

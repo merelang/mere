@@ -6577,13 +6577,34 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         :: !anon_env_typedefs
     end;
     let cstruct = closure_struct_name param_ty return_ty in
+    (* Q-139: the same condition emit_anon_adapter_fn2 applies, asked here so
+       that the value and the adapter agree. Naming an adapter that was not
+       emitted is a link error; leaving the field null when one was is only a
+       missed fast path, so the two must be the SAME question -- which is why it
+       is written once and read twice rather than restated. *)
+    let has_fn2 =
+      match fn_body.Ast.node, Ast.walk return_ty with
+      | Ast.Fun (_, _, _), Ast.TyArrow (t2, t3) ->
+        ty_is_concrete (Ast.walk param_ty)
+        && ty_is_concrete (Ast.walk t2) && ty_is_concrete (Ast.walk t3)
+      | _ -> false
+    in
+    let with_fn2 r1 =
+      if not has_fn2 then r1
+      else begin
+        let r2 = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, ptr @%s_fn2, 2"
+                      r2 cstruct r1 adapter_name);
+        r2
+      end
+    in
     if captures = [] then begin
       let r0 = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = insertvalue %%%s zeroinitializer, ptr null, 0" r0 cstruct);
       let r1 = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, ptr @%s, 1"
                     r1 cstruct r0 adapter_name);
-      r1
+      with_fn2 r1
     end else begin
       let size_p = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = getelementptr %%%s, ptr null, i32 1"
@@ -6618,7 +6639,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       let r1 = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, ptr @%s, 1"
                     r1 cstruct r0 adapter_name);
-      r1
+      with_fn2 r1
     end
   | Ast.Region_loop (_, _, _) ->
     unsupported e.Ast.loc "region loop"
@@ -6855,6 +6876,14 @@ and emit_user_app ?(tail = false) (env : env) (e : Ast.expr) : string =
                        user_shadows_llvm env n
                        && not (Hashtbl.mem direct_fns_llvm (mu n))
                        && not (Hashtbl.mem inner_lifts_llvm n)
+                     (* A field read is always a VALUE and never a builtin, and
+                        it is how a trait method arrives: `cmp a b` elaborates to
+                        a read from the instance's dictionary. The dictionary's
+                        field already carried fn2 -- what was missing was
+                        anything here willing to look, because the first version
+                        of this guard admitted only a Var head and a `Var` is
+                        exactly what a trait method is not. *)
+                     | Ast.Field_get _ -> true
                      | _ -> false) ->
             let t1' = Ast.walk t1 and t2' = Ast.walk t2 and t3' = Ast.walk t3 in
             let outer = closure_struct_name t1' (Ast.TyArrow (t2', t3')) in
@@ -7210,6 +7239,81 @@ and emit_user_app ?(tail = false) (env : env) (e : Ast.expr) : string =
 (* Emit the body of an anonymous-Fun adapter: gep + load each capture
    from `%env_self`, then evaluate the original Fun body with the
    captures bound. Returns the full `define ...` string. *)
+(* Q-139: the two-argument adapter for an anonymous lambda whose body is
+   IMMEDIATELY another `fn`. `vec_fold v 0 (fn a -> fn b -> a + b)` hands the
+   helper a value built here, and until this existed that value carried a null
+   uncurried entry -- so the helper's fast path could never fire for the shape
+   people actually write. The C backend calls its equivalent `__anon_N_fn2`
+   (v0.1.482).
+
+   "Immediately another fn" is the whole condition, and it is the same one the
+   order pin asks about: if the body does anything before returning the inner
+   `fn`, that work has to happen between the two arguments, and an entry taking
+   both at once cannot express it. Such a lambda gets no fn2 and keeps the
+   two-step path. *)
+let emit_anon_adapter_fn2 (ce : closure_emission) : string option =
+  match ce.ce_body.Ast.node, Ast.walk ce.ce_return_ty with
+  | Ast.Fun (p2, _, body2), Ast.TyArrow (t2, t3)
+    when ty_is_concrete (Ast.walk ce.ce_param_ty)
+         && ty_is_concrete (Ast.walk t2) && ty_is_concrete (Ast.walk t3) ->
+    let saved_instrs = !instrs in
+    let saved_reg = !reg_counter and saved_lbl = !label_counter in
+    let saved_vt = !current_var_types in
+    let saved_exp = !current_expected_ty in
+    let saved_host = !current_host_fn_llvm in
+    let saved_sig = !llvm_current_sig in
+    let saved_regions_anon = !current_regions in
+    set_inner_lifts_for_host_llvm ce.ce_host;
+    current_host_fn_llvm := ce.ce_host;
+    reg_counter := 0; label_counter := 0; instrs := [];
+    let t2' = Ast.walk t2 and t3' = Ast.walk t3 in
+    current_expected_ty := Some t3';
+    emit_instr "entry:";
+    let cap_env =
+      List.mapi (fun i (cname, cty) ->
+        let p = fresh_reg () in
+        emit_instr (Printf.sprintf
+                      "  %s = getelementptr %%%s, ptr %%env_self, i32 0, i32 %d"
+                      p ce.ce_env_name i);
+        let v = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = load %s, ptr %s" v (llvm_ty_of cty) p);
+        (cname, v)) ce.ce_env_fields
+    in
+    let env =
+      (ce.ce_param, "%" ^ llvm_safe_local ce.ce_param)
+      :: (p2, "%" ^ llvm_safe_local p2)
+      :: cap_env in
+    current_regions :=
+      List.filter_map (fun (n, v) ->
+        if String.length n > 9 && String.sub n 0 9 = "__region_"
+        then Some (String.sub n 9 (String.length n - 9), v) else None) cap_env
+      @ saved_regions_anon;
+    current_var_types :=
+      (ce.ce_param, ce.ce_param_ty) :: (p2, t2')
+      :: List.map (fun (n, t) -> (n, t)) ce.ce_env_fields;
+    llvm_tail_pos := true;
+    llvm_returned := false;
+    llvm_current_sig :=
+      Some (llvm_ty_of t3', ["ptr"; llvm_ty_of ce.ce_param_ty; llvm_ty_of t2']);
+    let rv = emit_expr env body2 in
+    if !llvm_returned then llvm_returned := false
+    else emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of t3') rv);
+    let body = String.concat "\n" (List.rev !instrs) in
+    instrs := saved_instrs;
+    reg_counter := saved_reg; label_counter := saved_lbl;
+    current_var_types := saved_vt;
+    current_expected_ty := saved_exp;
+    current_host_fn_llvm := saved_host;
+    current_regions := saved_regions_anon;
+    llvm_current_sig := saved_sig;
+    Some (Printf.sprintf
+            "define %s @%s_fn2(ptr %%env_self, %s %%%s, %s %%%s) {\n%s\n}"
+            (llvm_ty_of t3') ce.ce_adapter_name
+            (llvm_ty_of ce.ce_param_ty) (llvm_safe_local ce.ce_param)
+            (llvm_ty_of t2') (llvm_safe_local p2)
+            body)
+  | _ -> None
+
 let emit_anon_adapter (ce : closure_emission) : string =
   let saved_instrs = !instrs in
   let saved_reg = !reg_counter and saved_lbl = !label_counter in
@@ -8542,6 +8646,7 @@ let emit_vec_sort_helper_llvm (elem_ty : Ast.ty) : string =
         tag outer_cl;
       "entry:";
       Printf.sprintf "  %%outer_env = extractvalue %%%s %%cmp, 0" outer_cl;
+      Printf.sprintf "  %%outer_fn2 = extractvalue %%%s %%cmp, 2" outer_cl;
       Printf.sprintf "  %%outer_fn = extractvalue %%%s %%cmp, 1" outer_cl;
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
       "  %len = load i32, ptr %lp";
@@ -8613,12 +8718,29 @@ let emit_vec_sort_helper_llvm (elem_ty : Ast.ty) : string =
       Printf.sprintf "  %%jval = load %s, ptr %%jslot_c" c_elem;
       Printf.sprintf "  %%islot_c = getelementptr %s, ptr %%src_c, i32 %%i" c_elem;
       Printf.sprintf "  %%ival = load %s, ptr %%islot_c" c_elem;
+      (* Q-139: both elements at once when the comparator carries an uncurried
+         entry. A merge sort asks n log n times -- 1.7 million for the 100,000
+         the board measures -- and each ask built an environment to carry the
+         first element. THE ORDER AND THE COUNT DO NOT CHANGE: the two paths
+         differ only in how the same comparison is delivered, which is what
+         test/parity/vec_sort_stable.mere and closure_fn2_order.mere both
+         check by counting calls. *)
+      "  %chas2 = icmp ne ptr %outer_fn2, null";
+      "  br i1 %chas2, label %cfast, label %cslow";
+      "cfast:";
+      Printf.sprintf "  %%cres_f = call i64 %%outer_fn2(ptr %%outer_env, %s %%jval, %s %%ival)"
+        c_elem c_elem;
+      "  br label %cjoin";
+      "cslow:";
       Printf.sprintf "  %%inner = call %%%s %%outer_fn(ptr %%outer_env, %s %%jval)"
         inner_cl c_elem;
       Printf.sprintf "  %%inner_env = extractvalue %%%s %%inner, 0" inner_cl;
       Printf.sprintf "  %%inner_fn = extractvalue %%%s %%inner, 1" inner_cl;
-      Printf.sprintf "  %%cres = call i64 %%inner_fn(ptr %%inner_env, %s %%ival)"
+      Printf.sprintf "  %%cres_s = call i64 %%inner_fn(ptr %%inner_env, %s %%ival)"
         c_elem;
+      "  br label %cjoin";
+      "cjoin:";
+      "  %cres = phi i64 [ %cres_f, %cfast ], [ %cres_s, %cslow ]";
       "  %rgt = icmp slt i64 %cres, 0";
       "  br i1 %rgt, label %take_right, label %take_left";
       "take_right:";
@@ -8770,6 +8892,7 @@ let emit_map_iter_helper_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "entry:";
       Printf.sprintf "  %%outer_env = extractvalue %%%s %%outer, 0" outer_cl;
       Printf.sprintf "  %%outer_fn = extractvalue %%%s %%outer, 1" outer_cl;
+      Printf.sprintf "  %%outer_fn2 = extractvalue %%%s %%outer, 2" outer_cl;
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" struct_name;
       "  %len = load i32, ptr %lp";
       Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" struct_name;
@@ -8801,6 +8924,16 @@ let emit_map_iter_helper_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       Printf.sprintf "  %%k = load %s, ptr %%kslot" c_k;
       Printf.sprintf "  %%vslot = getelementptr %s, ptr %%values, i32 %%i" c_v;
       Printf.sprintf "  %%v = load %s, ptr %%vslot" c_v;
+      (* Q-139: both arguments at once when the callback carries an uncurried
+         entry, as in the fold helper. The result is discarded either way, so
+         there is no phi -- only the two calls. *)
+      "  %has2 = icmp ne ptr %outer_fn2, null";
+      "  br i1 %has2, label %fast, label %slow";
+      "fast:";
+      Printf.sprintf "  %%_f = call i32 %%outer_fn2(ptr %%outer_env, %s %%k, %s %%v)"
+        c_k c_v;
+      "  br label %cont";
+      "slow:";
       Printf.sprintf "  %%inner = call %%%s %%outer_fn(ptr %%outer_env, %s %%k)"
         inner_cl c_k;
       Printf.sprintf "  %%inner_env = extractvalue %%%s %%inner, 0" inner_cl;
@@ -8834,24 +8967,44 @@ let emit_vec_fold_helper_llvm (elem_ty : Ast.ty) (acc_ty : Ast.ty) : string =
       "entry:";
       "  %outer_env = extractvalue %" ^ outer_cl ^ " %outer, 0";
       "  %outer_fn = extractvalue %" ^ outer_cl ^ " %outer, 1";
+      "  %outer_fn2 = extractvalue %" ^ outer_cl ^ " %outer, 2";
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
       "  %len = load i32, ptr %lp";
       Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
       "  %data = load ptr, ptr %dp";
       "  br label %check";
       "check:";
-      Printf.sprintf "  %%i = phi i32 [ 0, %%entry ], [ %%i_next, %%body ]";
-      Printf.sprintf "  %%acc = phi %s [ %%init, %%entry ], [ %%new_acc, %%body ]" c_acc;
+      Printf.sprintf "  %%i = phi i32 [ 0, %%entry ], [ %%i_next, %%joined ]";
+      Printf.sprintf "  %%acc = phi %s [ %%init, %%entry ], [ %%new_acc, %%joined ]" c_acc;
       "  %done = icmp sge i32 %i, %len";
       "  br i1 %done, label %end, label %body";
       "body:";
       Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i32 %%i" c_elem;
       Printf.sprintf "  %%elem = load %s, ptr %%slot" c_elem;
+      (* Q-139: both arguments at once when the callback carries an uncurried
+         entry. The two-step form below builds an environment to hold the
+         accumulator for every element -- 8 bytes an element, measured. The test
+         is on the value and not on the shape of the call, because this helper
+         is one piece of emitted text shared by every callback the program
+         passes: some carry fn2 and some are partial applications that never
+         will. Nothing about ORDER changes here the way it did at a source-level
+         call site: the element is already loaded, and both paths hand over the
+         same two values. *)
+      "  %has2 = icmp ne ptr %outer_fn2, null";
+      "  br i1 %has2, label %fast, label %slow";
+      "fast:";
+      Printf.sprintf "  %%acc_fast = call %s %%outer_fn2(ptr %%outer_env, %s %%acc, %s %%elem)"
+        c_acc c_acc c_elem;
+      "  br label %joined";
+      "slow:";
       Printf.sprintf "  %%inner = call %%%s %%outer_fn(ptr %%outer_env, %s %%acc)"
         inner_cl c_acc;
       Printf.sprintf "  %%inner_env = extractvalue %%%s %%inner, 0" inner_cl;
       Printf.sprintf "  %%inner_fn = extractvalue %%%s %%inner, 1" inner_cl;
-      Printf.sprintf "  %%new_acc = call %s %%inner_fn(ptr %%inner_env, %s %%elem)" c_acc c_elem;
+      Printf.sprintf "  %%acc_slow = call %s %%inner_fn(ptr %%inner_env, %s %%elem)" c_acc c_elem;
+      "  br label %joined";
+      "joined:";
+      Printf.sprintf "  %%new_acc = phi %s [ %%acc_fast, %%fast ], [ %%acc_slow, %%slow ]" c_acc;
       "  %i_next = add i32 %i, 1";
       "  br label %check";
       "end:";
@@ -13440,6 +13593,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     | ce :: rest ->
       pending_closures := rest;
       anon_adapters := emit_anon_adapter ce :: !anon_adapters;
+      (match emit_anon_adapter_fn2 ce with
+       | Some d -> anon_adapters := d :: !anon_adapters
+       | None -> ());
       drain ()
   in
   drain ();
