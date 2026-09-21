@@ -4,6 +4,62 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.501 — 2026-09-21
+
+_The workarounds v0.1.494 left behind, and the sixth place that decides what a
+program prints._
+
+_CI had been red for seven commits. Every run failed the same eleven steps, and
+the first red one was v0.1.494 — Q-136, "a program whose value is unit prints
+nothing". That commit said the rule lived in five places and changed all five.
+It was wrong twice._
+
+_**Wrong about the harnesses.** Six gates carried `sed '$d'` on the subject's
+output: until v0.1.494 every Mere program printed a trailing line for its own
+value, and these dropped it. Afterwards they dropped the **answer**. The
+clearest case is `proto_parity`, whose whole-message check reported_
+
+```
+  FAIL  message (interp)
+        protoc: 08ac0210ffffffffffffffffff01180322026869380142040102ac02
+        ours:
+```
+
+_— not a wrong encoding, an erased one. `proto_gen_parity` was worse: the same
+trim ran on the GENERATED SOURCE, so `hello_pb.mere` came out a line short of
+itself. `render_agreement` lost the last element of the server's tree and
+reported the client as having one extra._
+
+_The probes that were still green show what the shape was: they end with a bare
+`0`, a **sentinel** whose only job was to give the trim something to eat.
+Sentinel and trim are both gone now — the probes print exactly what is
+compared._
+
+_**Wrong about the count.** There is a sixth place, and `selfhost_check` is
+what found it: the Mere compiler written in Mere still wrapped every program as
+`let _ = print (show (main : main_ty)) in ()`. All seven of its equivalence
+cases were one line apart from the reference for seven commits._
+
+_The rest were stale records — `()` sitting in `test/boundary/EXPECTED`, four
+`test/vclock/*.expected`, and the transcripts inside `audio_check.sh` and
+`io_poll_check.sh`._
+
+_⚠ **None of this was Linux-specific.** All eleven reproduce on a development
+machine; they were simply not in the set anyone was running before pushing.
+Running the CI gate list locally — all 100 of them — is what this slice
+actually cost, and it found one more thing: `width_check` builds a Ruby
+comparison that read `EastAsianWidth.txt` in **the caller's locale**, so it
+died on a shell with `LANG` unset while CI, which sets UTF-8, never saw it. The
+encoding is stated at the read now._
+
+_⚠ Six gates still carry a sentinel-and-trim pair. They are green and correct —
+their sentinel is a non-unit value that really is printed — and they are left
+alone, but a harness that drops its subject's last line can compare the wrong
+thing and pass, which is why the six that broke were rewritten rather than
+re-sentinelled._
+
+---
+
 ## v0.1.500 — 2026-09-21
 
 _Floats stop being boxed at every node on the Wasm backend._

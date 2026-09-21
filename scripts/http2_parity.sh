@@ -154,11 +154,14 @@ NROWS=$(wc -l < "$TMP/want.txt" | tr -d ' ')
     [ -z "$expr" ] && continue
     printf 'let _ = print (hex_of_bytes (%s));\n' "$expr"
   done < "$TMP/exprs.txt"
-  echo '0'
 } > "$ROOT/examples/.http2_parity_tmp.mere"
 
 if run_subject "encode" "$ROOT/examples/.http2_parity_tmp.mere" "$TMP/enc_raw.txt"; then
-  sed '$d' "$TMP/enc_raw.txt" > "$TMP/enc.txt"
+  # v0.1.501: nothing is trimmed here or below. Until v0.1.494 a Mere program
+  # printed a trailing line for its own value; the probes appended a `0`
+  # sentinel for this to eat, and the ones without a sentinel relied on `()`.
+  # Q-136 made a unit main silent, so the trim started eating answers.
+  cp "$TMP/enc_raw.txt" "$TMP/enc.txt"
   if diff -q "$TMP/want.txt" "$TMP/enc.txt" >/dev/null; then
     echo "  ok    encode  $NROWS frames byte-identical to hyperframe"
   else
@@ -199,11 +202,10 @@ PY
     [ -z "$hexs" ] && continue
     printf 'let _ = show "%s";\n' "$hexs"
   done < "$TMP/want.txt"
-  echo '0'
 } > "$ROOT/examples/.http2_parity_tmp.mere"
 
 if run_subject "decode" "$ROOT/examples/.http2_parity_tmp.mere" "$TMP/dec_raw.txt"; then
-  sed '$d' "$TMP/dec_raw.txt" > "$TMP/dec.txt"
+  cp "$TMP/dec_raw.txt" "$TMP/dec.txt"
   if diff -q "$TMP/dec_want.txt" "$TMP/dec.txt" >/dev/null; then
     echo "  ok    decode  $NROWS frames: type / flags / stream / length agree"
   else
@@ -238,7 +240,7 @@ RES=$(cat "$TMP/reserved.txt")
   echo 'print (str_of_int st)'
 } > "$ROOT/examples/.http2_parity_tmp.mere"
 if run_subject "reserved bit" "$ROOT/examples/.http2_parity_tmp.mere" "$TMP/res_out.txt"; then
-  got=$(sed '$d' "$TMP/res_out.txt" | head -1)
+  got=$(head -1 "$TMP/res_out.txt")
   if [ "$got" = 1 ]; then
     echo "  ok    reserved bit  a stream id of 0x80000001 reads as 1, not 2147483649"
   else
@@ -273,7 +275,7 @@ PY2
   echo 'print (hex_of_bytes (H2.frame_bytes H2.rst_stream 0 2147483649 (H2.u32_payload 0)))'
 } > "$ROOT/examples/.http2_parity_tmp.mere"
 if run_subject "writer reserved bit" "$ROOT/examples/.http2_parity_tmp.mere" "$TMP/wres_out.txt"; then
-  sed '$d' "$TMP/wres_out.txt" > "$TMP/wres.txt"
+  cp "$TMP/wres_out.txt" "$TMP/wres.txt"
   if diff -q "$TMP/wres_want.txt" "$TMP/wres.txt" >/dev/null; then
     echo "  ok    writer reserved bit  stream 0x80000001 is written as stream 1"
   else
@@ -366,10 +368,9 @@ NPAY=$(wc -l < "$TMP/pay_want.txt" | tr -d ' ')
     [ -z "$expr" ] && continue
     printf 'let _ = print (%s);\n' "$expr"
   done < "$TMP/pay_exprs.txt"
-  echo '0'
 } > "$ROOT/examples/.http2_parity_tmp.mere"
 if run_subject "payload accessors" "$ROOT/examples/.http2_parity_tmp.mere" "$TMP/pay_raw.txt"; then
-  sed '$d' "$TMP/pay_raw.txt" > "$TMP/pay.txt"
+  cp "$TMP/pay_raw.txt" "$TMP/pay.txt"
   if diff -q "$TMP/pay_want.txt" "$TMP/pay.txt" >/dev/null; then
     echo "  ok    payload accessors  $NPAY cases: read_settings / window_increment / error_code"
   else
@@ -394,7 +395,7 @@ fi
   echo 'print (str_of_int c ++ " " ++ hex_of_bytes body ++ " " ++ str_of_int nxt)'
 } > "$ROOT/examples/.http2_parity_tmp.mere"
 if run_subject "grpc framing" "$ROOT/examples/.http2_parity_tmp.mere" "$TMP/grpc_out.txt"; then
-  sed '$d' "$TMP/grpc_out.txt" > "$TMP/grpc.txt"
+  cp "$TMP/grpc_out.txt" "$TMP/grpc.txt"
   cat > "$TMP/grpc_want.txt" <<'EOF'
 000000000f220d68656c6c6f2e47726565746572
 0 220d68656c6c6f2e47726565746572 20
@@ -415,7 +416,7 @@ fi
   echo 'print (str_of_int (str_len H2.preface))'
 } > "$ROOT/examples/.http2_parity_tmp.mere"
 if run_subject "preface" "$ROOT/examples/.http2_parity_tmp.mere" "$TMP/pre_out.txt"; then
-  sed '$d' "$TMP/pre_out.txt" > "$TMP/pre.txt"
+  cp "$TMP/pre_out.txt" "$TMP/pre.txt"
   python3 - "$TMP" <<'PY'
 import sys, pathlib
 from h2.connection import H2Connection  # noqa: F401  (asserts h2 is present)

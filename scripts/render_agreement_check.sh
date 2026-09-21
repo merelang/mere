@@ -42,7 +42,11 @@ if ! "$MERE" test/render/server.mere > "$tmp/server.raw" 2>"$tmp/server.err"; th
   echo "render_agreement: FAIL — server side did not run"; cat "$tmp/server.err"; exit 1
 fi
 # the interpreter prints the program's unit result on the last line
-sed '$d' "$tmp/server.raw" > "$tmp/server.out"
+# v0.1.501: nothing is trimmed. Until v0.1.494 the server program printed a
+# trailing `()` for its own unit value and this dropped it; after Q-136 it was
+# dropping the last ELEMENT of the serialised tree, and the client -- which is
+# extracted by marker, not by line count -- was reported as having one extra.
+cp "$tmp/server.raw" "$tmp/server.out"
 
 # --- client: walk the same tree building real DOM -------------------------
 if ! "$MERE" -w test/render/client.mere > "$tmp/client.wat" 2>"$tmp/client.err"; then
