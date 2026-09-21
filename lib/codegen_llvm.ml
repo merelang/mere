@@ -13333,6 +13333,15 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   ) fns;
   collect_mono_instances main_expr fns;
   collect_show_types main_expr fns;
+  (* Q-140: the program's own value is displayed the way `show` displays it,
+     so its type needs a `show_<tag>` emitted for it. *)
+  (* Q-140: a main whose type never resolved (a program ending in `exit 0`,
+     say) has no value to display, and asking `show` for a `'a` is a refusal.
+     The interpreter exits inside the evaluation and prints nothing. *)
+  (match Ast.walk main_ty with
+   | Ast.TyUnit -> ()
+   | t when not (ty_is_concrete t) -> ()
+   | t -> add_show_type t);
   collect_eq_cmp_types main_expr fns;
   Hashtbl.iter (fun _ (vn, args) ->
     let (params, variants) = Hashtbl.find polymorphic_variants vn in
@@ -13534,28 +13543,18 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let r = emit_expr [] body_expr in
   (* Optional printf of main result. *)
   let print_lines =
-    match main_format_of main_ty with
-    | None -> []
-    | Some ("double", _) ->
-      (* Phase 34.2: float main — to match the format of interp's
-         string_of_float (OCaml's %.12g + trailing "." for whole numbers),
-         go through the __lang_str_of_float helper then puts. *)
+    (* Q-140: one rule, the same as the other backends -- the program's value
+       is printed the way `show` prints it, which is what the interpreter has
+       always done. The format table this replaced had `%d` as its catch-all,
+       and this backend REFUSED rather than printing a pointer, which was the
+       least wrong of the three answers and still not the right one. *)
+    match Ast.walk main_ty with
+    | Ast.TyUnit -> []
+    | t when not (ty_is_concrete t) -> []
+    | t ->
       let str_r = fresh_reg () in
-      [ Printf.sprintf "  %s = call ptr @__lang_str_of_float(double %s)" str_r r;
+      [ Printf.sprintf "  %s = call ptr @show_%s(%s %s)" str_r (ty_tag t) (llvm_ty_of t) r;
         Printf.sprintf "  call i32 @puts(ptr %s)" str_r ]
-    | Some (ty, fmt) ->
-      let widen =
-        if ty = "i32" && (match Ast.walk main_ty with Ast.TyBool -> true | _ -> false) then
-          let r2 = fresh_reg () in
-          ([ Printf.sprintf "  %s = zext i1 %s to i32" r2 r ], r2)
-        else
-          ([], r)
-      in
-      let (extra, r_final) = widen in
-      extra @
-      [ Printf.sprintf
-          "  call i32 (ptr, ...) @printf(ptr @.fmt_%s, %s %s)"
-          (String.sub fmt 1 (String.length fmt - 1)) ty r_final ]
   in
   List.iter emit_instr print_lines;
   (* Phase 15.8: free all OwnedVec allocations registered during run. *)

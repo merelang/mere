@@ -3170,7 +3170,11 @@ let () =
   in
   let int_lit_out = codegen "42" in
   assert_contains "codegen: emits stdio.h" int_lit_out "#include <stdio.h>";
-  assert_contains "codegen: int literal printf" int_lit_out "printf(\"%lld\\n\", 42LL)";
+  (* Q-140: the int main is printed through `show`, like every other type, so
+     that the four backends and the interpreter agree by construction. The
+     question -- does the value reach stdout -- is the same; the lowering is
+     `puts(show_int(...))` rather than a printf with a per-type format. *)
+  assert_contains "codegen: int literal printed" int_lit_out "puts(show_int(42LL))";
   assert_contains "codegen: arithmetic precedence"
     (codegen "1 + 2 * 3") "(1LL + (2LL * 3LL))";
   assert_contains "codegen: let + if uses statement-expr"
@@ -3211,8 +3215,12 @@ let () =
   assert_contains "codegen: metrics record curried emits inner fn"
     (codegen "let m = mk_metrics () in m.record \"qps\" 7")
     "__mere_metrics_record_inner_fn";
-  assert_contains "codegen: bool literal → 0/1"
-    (codegen "true") "printf(\"%d\\n\", 1)";
+  (* Q-140: `true` is emitted as the C value 1 -- that is the half this asks
+     about and it is unchanged -- but it is PRINTED through `show_bool`, which
+     writes "true". The old lowering printed `1` to stdout while the
+     interpreter printed `true`, for the same program. *)
+  assert_contains "codegen: bool literal → 0/1, printed as true"
+    (codegen "true") "puts(show_bool(1))";
   assert_contains "codegen: logical && via C &&"
     (codegen "true && false") "(1 && 0)";
   assert_contains "codegen: lifts top-level fn"
@@ -3259,8 +3267,12 @@ let () =
   (* --- C codegen: string support (Phase 4 third slice) --- *)
   assert_contains "codegen: str literal emits C string"
     (codegen "\"hello\"") "\"hello\"";
-  assert_contains "codegen: str main uses %s format"
-    (codegen "\"hi\"") "printf(\"%s\\n\"";
+  (* Q-140: a str main is printed through `show_str`, which QUOTES and escapes
+     it -- the same thing the interpreter has always printed for a program
+     whose value is a string. The old `%s` wrote the bytes raw, so
+     `mere -e '"a\"b"'` said `a"b` compiled and `"a\"b"` interpreted. *)
+  assert_contains "codegen: str main goes through show_str"
+    (codegen "\"hi\"") "puts(show_str(";
   assert_contains "codegen: ++ becomes __lang_str_concat call"
     (codegen "\"a\" ++ \"b\"") "__lang_str_concat(";
   (* v0.1.261: print writes the str's LENGTH (Q-033), so the emitted call is
@@ -4392,8 +4404,9 @@ let () =
     "store %tuple_int_int";
   assert_contains "llvm: format constant present"
     (llvm "42") "@.fmt_lld = private constant [6 x i8] c\"%lld\\0A\\00\"";
-  assert_contains "llvm: int literal call site"
-    (llvm "42") "@printf(ptr @.fmt_lld, i64 42)";
+  (* Q-140: printed through `show`, like every type and every backend. *)
+  assert_contains "llvm: int literal reaches the print"
+    (llvm "42") "call ptr @show_int(i64 42)";
   assert_contains "llvm: add lowers to LLVM add"
     (llvm "1 + 2") "add i64 1, 2";
   assert_contains "llvm: mul lowers to LLVM mul"
@@ -4424,8 +4437,13 @@ let () =
      evaluated it unconditionally). *)
   assert_contains "llvm: && lowers to a short-circuit branch"
     (llvm "true && false") "br i1 1";
-  assert_contains "llvm: bool result is zero-extended for printf"
-    (llvm "true") "zext i1";
+  (* Q-140: the widening this used to ask about existed only because printf's
+     varargs wanted an int. The value goes to `show_bool`, whose parameter is
+     an i1, so there is nothing to widen -- and the question that remains is
+     the one that mattered: the bool reaches the printer at its own width,
+     neither extended nor truncated. *)
+  assert_contains "llvm: bool main reaches show_bool as an i1"
+    (llvm "true") "call ptr @show_bool(i1 1)";
   assert_contains "llvm: ret 0 at main end"
     (llvm "1") "ret i32 0";
 
@@ -4461,8 +4479,11 @@ let () =
     "= private constant { i64, [3 x i8] } { i64 2, [3 x i8] c\"hi\\00\" }";
   assert_contains "llvm: str main printf uses %s"
     (llvm "\"hi\"") "@.fmt_s = private constant [4 x i8] c\"%s\\0A\\00\"";
-  assert_contains "llvm: str passed as ptr to printf"
-    (llvm "\"hi\"") "@printf(ptr @.fmt_s, ptr getelementptr";   (* slot-agnostic *)
+  (* Q-140: the str main goes to `show_str`, which quotes it -- the
+     interpreter's answer. The question is the same one: the value crosses as
+     a pointer to the string's bytes, not as something else. *)
+  assert_contains "llvm: str main passed as a ptr to show_str"
+    (llvm "\"hi\"") "call ptr @show_str(ptr getelementptr";   (* slot-agnostic *)
   (* v0.1.264: print writes the str's length, so puts (which stops at the
      first NUL) is gone from this path. *)
   assert_contains "llvm: print writes the str by length"
@@ -9903,7 +9924,11 @@ let () =
          else scan (i + 1)
        in scan 0
      in
-     if has "(2147483647LL + 1LL)" && has "printf(\"%lld\\n\"" then "ok"
+     (* Q-140: the value is printed through `show` now, so what this asks
+        about the PRINT is that the 64-bit value reaches it as a long long --
+        `show_int` takes one. The literal half is unchanged and is the half
+        this test is named for. *)
+     if has "(2147483647LL + 1LL)" && has "puts(show_int(" then "ok"
      else "no")
     "ok";
   (* v0.1.127: the Wasm backend's int is 64-bit — the old v0.1.41 rejection

@@ -12132,6 +12132,19 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Typer.records;
   collect_mono_variant_instances main_expr fns variant_decls;
   collect_show_types main_expr fns;
+  (* Q-140: the program's own value is displayed the way `show` displays it,
+     so the type it has needs a `show_<tag>` emitted for it. Registered here,
+     beside the ones the program asked for itself. *)
+  (* Q-140: a main whose type never resolved has no value to display -- the
+     common case is a program ending in `exit 0`, whose type is a variable
+     because the call does not return. The interpreter exits inside the
+     evaluation and prints nothing, so printing nothing is what agrees with
+     it. Registering the type would ask `show` for a `'a`, which it cannot
+     answer. *)
+  (match Ast.walk main_ty with
+   | Ast.TyUnit -> ()
+   | t when not (ty_concrete t) -> ()
+   | t -> add_type_and_deps show_types t);
   let mono_variant_typedefs =
     Hashtbl.fold (fun _ (vn, args) acc ->
       emit_mono_variant_typedef vn args :: acc) mono_variant_instances []
@@ -12805,14 +12818,19 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       owned_vec_instances []
   in
   let main_stmt =
-    match main_format_of main_ty with
-    | None -> "  (void)(" ^ main_body ^ ");  /* unit result */"
-    | Some "%g" ->
-      (* Phase 34.1: float main — go through the __lang_str_of_float helper
-         to match interp's string_of_float (OCaml's %.12g + a trailing `.`
-         for integer-valued floats). *)
-      "  puts(__lang_str_of_float(" ^ main_body ^ "));"
-    | Some fmt -> "  printf(\"" ^ fmt ^ "\\n\", " ^ main_body ^ ");"
+    (* Q-140: ONE RULE -- the program's value is printed the way `show` prints
+       it, which is what the interpreter has always done (`Eval.to_string`).
+       The format table this replaced had `%d` as its catch-all, so a program
+       whose value was a list printed a POINTER as a decimal integer, a tuple
+       printed its first field, and `true` printed as `1`. Three backends had
+       three different answers for the same program: C printed garbage, LLVM
+       refused, Wasm printed nothing. `show` already agreed with the
+       interpreter on every one of them -- it was simply not on this path. *)
+    match Ast.walk main_ty with
+    | Ast.TyUnit -> "  (void)(" ^ main_body ^ ");  /* unit result */"
+    | t when not (ty_concrete t) ->
+      "  (void)(" ^ main_body ^ ");  /* no value to display */"
+    | t -> Printf.sprintf "  puts(show_%s(%s));" (ty_tag t) main_body
   in
   (* --lib: the C ABI boundary that replaces `main`. Exports are decided from
      the same resolved tables the emission used: a function is exportable when
