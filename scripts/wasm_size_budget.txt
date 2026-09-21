@@ -8,7 +8,7 @@
 # measures a different artifact -- the check skips rather than compare across
 # that line.
 #
-# Each band is the size measured on 2026-09-21 after Q-139, -10% / +10%. Not targets: the
+# Each band is the size measured on 2026-09-21 with Q-139 complete, -10% / +10%. Not targets: the
 # ceiling is tight enough that the 2026-07 -> 2026-09 tripling of hello.wasm
 # would have failed here long before anyone saw it by eye. The floor exists
 # because a demo that collapses to a stub is a failure a ceiling-only check
@@ -35,7 +35,11 @@
 # could reach it. Emitting the adapter only for fns actually used as values,
 # and the curried body only when something can still enter it, let the pruner
 # do the work it was already capable of. gameboy -29%, raytrace -26%, chip8
-# -22%, selfhost-tyck -19%.
+# -22%, selfhost-tyck -19%. The second half of Q-139 (the uncurried entry on
+# closure VALUES: two-argument adapters, and the branch in each of the three
+# higher-order helpers) put 7% back, so the settled total is 558,305 B against
+# 616,469 before the arc -- these bands are that settled state, measured once
+# rather than chased slice by slice.
 #
 # Checked before the bands moved, because a floor exists to catch exactly the
 # mistake this would look like: suite 2773, parity 196/0, the bootstrap tests
@@ -51,8 +55,8 @@ gameboy.wasm                  13377    16350
 hello.wasm                     1757     2148
 raytrace.wasm                  8577    10484
 rvconsole.wasm                 5448     6659
-selfhost-compile.wasm        144471   176576
-selfhost-fmt.wasm             77383    94580
-selfhost-repl.wasm            93573   114367
-selfhost-tyck.wasm           103853   126932
+selfhost-compile.wasm        152044   185831
+selfhost-fmt.wasm             85611   104636
+selfhost-repl.wasm           101928   124579
+selfhost-tyck.wasm           111822   136671
 wordcount.wasm                 4051     4952

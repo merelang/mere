@@ -4,6 +4,49 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.496 — 2026-09-21
+
+_Q-139 on Wasm, second half: a closure value carries the uncurried entry._
+
+| B/call | C | LLVM | Wasm v0.1.494 | v0.1.495 | **now** |
+|---|---|---|---|---|---|
+| `f a b` (named top-level, concrete) | 0 | 0 | 32 | 0 | 0 |
+| `f a b` (f is a function parameter) | 0 | 0 | 67 | 12 | 12 |
+| trait method | 0 | 0 | 32 | 20 | **0** |
+| `vec_fold` (2-arg callback) | 0 | 0 | 16 | 20 | **0** |
+| `map_iter` (2-arg callback) | 0 | 0 | 15 | 15 | **0** |
+| `vec_sort`, per element | 0 | 0 | 230 | 286 | **8** |
+
+_Three pieces, the same three the LLVM backend needed: a two-argument adapter
+for an anonymous lambda whose body is immediately another `fn` (registered in
+the table beside the one-argument one, so the value and the adapter are decided
+by the same test); the fn2 index written into the closure record; and the
+branch in each of the three higher-order helpers — `vec_fold`, `map_iter`
+(BOTH variants, the linear one and the tombstoned one) and `vec_sort`._
+
+_The comparator in a merge sort is asked n log n times — 1.7 million for the
+100,000 the board measures — and every ask built an environment to carry the
+first element: **28.6 MB to 1.85 MB**. The order and the count are unchanged,
+and `test/parity/vec_sort_stable` and `closure_fn2_order` both say so on this
+backend now as well as on the others._
+
+_The trait row came free with the anonymous adapter: a dictionary field holds a
+lambda, so once lambdas carry fn2 the dictionary does, and the saturated
+closure-call path already admitted a field read as a head._
+
+_**Size**: 522 KB to 558 KB — the adapters and branches are real code — against
+616 KB before the arc. The bands are set to this settled state, measured once
+rather than chased slice by slice._
+
+_What is left of Q-139 is two rows at 12 and 8 bytes, both on Wasm, and neither
+is the closure-value mechanism any more: something else allocates on those
+paths. The table is the gate, and it now reads zero in nineteen of twenty-four
+cells._
+
+_suite 2773, parity 196 PASS / 0 FAIL, size and budget gates green._
+
+---
+
 ## v0.1.495 — 2026-09-21
 
 _Q-139 on Wasm: the uncurried entry, and the shipped modules get 15% smaller._
