@@ -341,6 +341,16 @@ let record_fn_line (name : string) (loc : Loc.t) =
   if loc.Loc.line > 0 && loc.Loc.file = None then
     debug_fn_lines := (name, loc.Loc.line) :: !debug_fn_lines
 
+(* Q-139: the uncurried entry, the third backend to get it (C since v0.1.27,
+   LLVM in v0.1.491-493). Everything here is i64, so a twin is just a second
+   function with two parameters instead of one -- no type zoo, and no region
+   parameters on this backend at all. *)
+type direct_fn_info_wasm = {
+  dw_params : string list;
+  dw_body   : Ast.expr;
+}
+let direct_fns_wasm : (string, direct_fn_info_wasm) Hashtbl.t = Hashtbl.create 16
+
 let toplevel_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
 (* v0.1.172: declaration position of each top-level fn. Top-level bindings
    are sequential — the typer rejects a forward reference — so `show` used
@@ -533,7 +543,9 @@ let free_vars (e : Ast.expr) (initially_bound : string list) : string list =
   List.rev !order
 
 (* ── Closure machinery (Phase 6.7) ──
-   Wasm closures are 8-byte memory structs `{ env_offset, fn_table_idx }`.
+   Wasm closures are 12-byte memory structs `{ env_offset, fn_table_idx, fn2 }`
+   (Q-139: the third field is the uncurried entry's TABLE INDEX, -1 when there
+   is none -- index 0 is a real function, so zero could not mean absent).
    The fn pointer is a `funcref` table index, not a memory pointer —
    indirect calls go through `call_indirect (type $cl)`. Every
    closure-callable function has signature `(env, x) -> result` and is
@@ -550,6 +562,126 @@ let register_in_table (name : string) : int =
 (* Top-level fn name → its closure adapter's table index. Populated
    when we emit the per-top-level-fn `<name>_closure` wrapper. *)
 let fn_closure_table_idx : (string, int) Hashtbl.t = Hashtbl.create 4
+
+(* Q-139: top-level fn name -> the table index of its TWO-argument adapter,
+   for the fns that have a two-parameter twin. Absent means the closure value
+   carries -1 and every call through it takes the two-step path. *)
+let fn_closure2_table_idx : (string, int) Hashtbl.t = Hashtbl.create 4
+
+(* Q-139: the top-level fns that are used AS VALUES somewhere -- passed to a
+   higher-order function, stored, returned. Only those need a `_closure`
+   adapter, and only the adapter keeps the curried body alive: it is what the
+   elem table points at, and the table is a root the pruner cannot see past.
+
+   Registering one for every fn is why adding the uncurried twins grew the
+   shipped modules by 24% instead of replacing anything -- both bodies were
+   rooted. A fn that is only ever CALLED needs no value form, and once its
+   adapter is gone the pruner takes the curried body with it.
+
+   The rule is one line: a top-level fn is used as a value when its name
+   appears somewhere that is not the immediate function position of an
+   application. `f x` and `f x y` are calls; `vec_sort v cmp` is a value. *)
+let fns_used_as_values : (string, unit) Hashtbl.t = Hashtbl.create 16
+
+let collect_fns_used_as_values (root : Ast.expr) (bodies : Ast.expr list) : unit =
+  Hashtbl.reset fns_used_as_values;
+  let rec walk (e : Ast.expr) =
+    match e.Ast.node with
+    (* The head of an application is a call, not a value -- and so is the head
+       of the head, which is how `f a b` stays a call all the way down. *)
+    | Ast.App (f, a) -> walk_head f; walk a
+    | Ast.Var n -> Hashtbl.replace fns_used_as_values n ()
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) -> walk a; walk b
+    | Ast.Neg a | Ast.Annot (a, _) -> walk a
+    | Ast.Let (_, v, b) -> walk v; walk b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk v) bs; walk b
+    | Ast.With (_, v, b) -> walk v; walk b
+    | Ast.If (c, t, e_) -> walk c; walk t; walk e_
+    | Ast.Fun (_, _, b) -> walk b
+    | Ast.Constr (_, Some a) -> walk a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (sc, arms) ->
+      walk sc;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> walk ge | None -> ()); walk b) arms
+    | Ast.Tuple es -> List.iter walk es
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walk b
+    | Ast.Ref (_, _, a) -> walk a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, x) -> walk x) fs
+    | Ast.Field_get (a, _) -> walk a
+    | Ast.Record_update (a, fs) -> walk a; List.iter (fun (_, x) -> walk x) fs
+  and walk_head (f : Ast.expr) =
+    match f.Ast.node with
+    | Ast.Var _ -> ()
+    | Ast.App (g, a) -> walk_head g; walk a
+    | _ -> walk f
+  in
+  List.iter walk (root :: bodies)
+
+(* Q-139: and the fns whose CURRIED body is still reachable. A fn with an
+   uncurried twin needs its one-argument chain only when something can enter
+   it: the fn is used as a value (the adapter above), or some call site applies
+   it to FEWER arguments than the twin takes. Otherwise both bodies ship and
+   nothing calls one of them -- measured on the self-hosting compiler, 118 of
+   158 curried bodies were emitted and never called, which is most of what the
+   twins added to the shipped module. *)
+let fns_applied_under : (string, unit) Hashtbl.t = Hashtbl.create 16
+
+let collect_under_saturated (arity_of : string -> int option)
+                            (root : Ast.expr) (bodies : Ast.expr list) : unit =
+  Hashtbl.reset fns_applied_under;
+  let rec walk (e : Ast.expr) =
+    match e.Ast.node with
+    (* THE OUTERMOST APPLICATION OF A SPINE, once. The first version walked
+       every node and asked the same question of `f a` as a subexpression of
+       `f a b`, so every two-argument call also reported a one-argument one and
+       all 118 twinned fns came back "applied under-saturated" -- the gate
+       looked right and kept everything. The arguments are walked; the head
+       chain is not walked again as applications of its own. *)
+    | Ast.App _ ->
+      let rec spine x n acc =
+        match x.Ast.node with
+        | Ast.App (g, a) -> spine g (n + 1) (a :: acc)
+        | Ast.Var v -> (Some v, n, acc)
+        | other_head -> ignore other_head; (None, n, acc)
+      in
+      let (head, n, args) = spine e 0 [] in
+      (match head with
+       | Some v ->
+         (match arity_of v with
+          | Some a when n < a -> Hashtbl.replace fns_applied_under v ()
+          | _ -> ())
+       | None ->
+         (* a computed head: walk it, it is not a named fn's spine *)
+         let rec head_expr x =
+           match x.Ast.node with Ast.App (g, _) -> head_expr g | _ -> x in
+         walk (head_expr e));
+      List.iter walk args
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) -> walk a; walk b
+    | Ast.Neg a | Ast.Annot (a, _) -> walk a
+    | Ast.Let (_, v, b) -> walk v; walk b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk v) bs; walk b
+    | Ast.With (_, v, b) -> walk v; walk b
+    | Ast.If (c, t, e_) -> walk c; walk t; walk e_
+    | Ast.Fun (_, _, b) -> walk b
+    | Ast.Constr (_, Some a) -> walk a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (sc, arms) ->
+      walk sc;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> walk ge | None -> ()); walk b) arms
+    | Ast.Tuple es -> List.iter walk es
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> walk b
+    | Ast.Ref (_, _, a) -> walk a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, x) -> walk x) fs
+    | Ast.Field_get (a, _) -> walk a
+    | Ast.Record_update (a, fs) -> walk a; List.iter (fun (_, x) -> walk x) fs
+  in
+  List.iter walk (root :: bodies)
 
 (* Phase 35.3: eta-wrapped nullary factory adapters (vec_new / owned_vec_new
    / strbuf_new / map_new_<k_tag>) used as first-class values. Key = adapter
@@ -1643,7 +1775,7 @@ let map_key_tag_of_wasm (ty_opt : Ast.ty option) (loc : Loc.t) : string =
    so internal Mere code doesn't care, but host code that reads
    closure records via `Int32Array` would land on the wrong word if
    the record sat at an odd offset. Call this immediately before
-   bump-allocating a closure record (8-byte { env, fn_idx } struct)
+   bump-allocating a closure record (12-byte { env, fn_idx, fn2 } struct)
    so the pointer handed to host glue is always 4-byte aligned.
    See contrib/dom/dom.glue.js for the JS side (which now uses
    DataView anyway, but alignment is the proper Mere-side fix). *)
@@ -1733,6 +1865,35 @@ let app_head_user_bound_wasm (x : Ast.expr) : bool =
   match (app_spine_head_wasm x).Ast.node with
   | Ast.Var n -> user_shadows_wasm n
   | _ -> false
+
+(* Q-139: the callee and the argument list of an exactly-saturated call to a
+   top-level fn that has an uncurried twin, or None. Arity must match EXACTLY --
+   a partial application is not this, and keeps the curried chain. *)
+let app_saturated_direct (x : Ast.expr) : (string * Ast.expr list) option =
+  let rec spine e acc =
+    match e.Ast.node with
+    | Ast.App (g, a) -> spine g (a :: acc)
+    | Ast.Var n -> Some (n, acc)
+    | _ -> None
+  in
+  match spine x [] with
+  | Some (n, args) when not (List.mem_assoc n !locals)
+                        && not (Hashtbl.mem inner_lifts_wasm n)
+                        (* A MULTI-INSTANTIATED fn has no single emitted body
+                           under its source name, and the arm below dispatches
+                           it through `Monomorph.instance_of`. Taking it here
+                           sent the call to a `__direct` that was never emitted
+                           for that instance -- which surfaced as the unrelated
+                           refusal "list_map is used at several types", from the
+                           value-form path, on the self-hosting bootstrap. The C
+                           backend looks the callee up under its EMITTED name
+                           for the same reason; this slice simply declines. *)
+                        && not (Monomorph.is_multi !multi_inst_fns_wasm n) ->
+    (match Hashtbl.find_opt direct_fns_wasm n with
+     | Some info when List.length args = List.length info.dw_params ->
+       Some (n, args)
+     | _ -> None)
+  | _ -> None
 
 (* Emit `expr` so its result lands on top of the Wasm operand stack. *)
 let rec emit_simd_v (e : Ast.expr) : unit =
@@ -1965,7 +2126,7 @@ and emit_expr (e : Ast.expr) : unit =
        emit_instr "global.get $__lang_bump";
        emit_instr (Printf.sprintf "local.set %d" base);
        emit_instr (Printf.sprintf "local.get %d" base);
-       emit_instr "i32.const 8";
+       emit_instr "i32.const 12";
        emit_instr "i32.add";
        emit_instr "global.set $__lang_bump";
        emit_instr (Printf.sprintf "local.get %d" base);
@@ -1974,6 +2135,11 @@ and emit_expr (e : Ast.expr) : unit =
        emit_instr (Printf.sprintf "local.get %d" base);
        emit_instr (Printf.sprintf "i32.const %d" idx);
        emit_instr "i32.store offset=4";
+       emit_instr (Printf.sprintf "local.get %d" base);
+       (* -1, not 0: the table starts at index 0 and that index is a real
+          function, so zero cannot mean "there is none". *)
+       emit_instr "i32.const -1";
+       emit_instr "i32.store offset=8";
        emit_instr (Printf.sprintf "local.get %d" base);
        emit_instr "i64.extend_i32_u"
      | None ->
@@ -1988,7 +2154,7 @@ and emit_expr (e : Ast.expr) : unit =
        emit_instr "global.get $__lang_bump";
        emit_instr (Printf.sprintf "local.set %d" base);
        emit_instr (Printf.sprintf "local.get %d" base);
-       emit_instr "i32.const 8";
+       emit_instr "i32.const 12";
        emit_instr "i32.add";
        emit_instr "global.set $__lang_bump";
        emit_instr (Printf.sprintf "local.get %d" base);
@@ -1997,6 +2163,14 @@ and emit_expr (e : Ast.expr) : unit =
        emit_instr (Printf.sprintf "local.get %d" base);
        emit_instr (Printf.sprintf "i32.const %d" idx);
        emit_instr "i32.store offset=4";
+       emit_instr (Printf.sprintf "local.get %d" base);
+       (* Q-139: the uncurried entry's index when this fn has one, and -1 when
+          it does not. -1 and not 0: the table starts at index 0 and that index
+          is a real function, so zero could not mean "absent". *)
+       (match Hashtbl.find_opt fn_closure2_table_idx name with
+        | Some i2 -> emit_instr (Printf.sprintf "i32.const %d" i2)
+        | None -> emit_instr "i32.const -1");
+       emit_instr "i32.store offset=8";
        emit_instr (Printf.sprintf "local.get %d" base);
        emit_instr "i64.extend_i32_u"
      | None when Hashtbl.mem top_globals_wasm name ->
@@ -2050,7 +2224,7 @@ and emit_expr (e : Ast.expr) : unit =
        emit_instr "global.get $__lang_bump";
        emit_instr (Printf.sprintf "local.set %d" cl_base);
        emit_instr (Printf.sprintf "local.get %d" cl_base);
-       emit_instr "i32.const 8";
+       emit_instr "i32.const 12";
        emit_instr "i32.add";
        emit_instr "global.set $__lang_bump";
        emit_instr (Printf.sprintf "local.get %d" cl_base);
@@ -2059,6 +2233,11 @@ and emit_expr (e : Ast.expr) : unit =
        emit_instr (Printf.sprintf "local.get %d" cl_base);
        emit_instr (Printf.sprintf "i32.const %d" table_idx);
        emit_instr "i32.store offset=4";
+       emit_instr (Printf.sprintf "local.get %d" cl_base);
+       (* -1, not 0: the table starts at index 0 and that index is a real
+          function, so zero cannot mean "there is none". *)
+       emit_instr "i32.const -1";
+       emit_instr "i32.store offset=8";
        emit_instr (Printf.sprintf "local.get %d" cl_base);
        emit_instr "i64.extend_i32_u"
      | None ->
@@ -4113,12 +4292,14 @@ and emit_expr (e : Ast.expr) : unit =
         emit_instr (Printf.sprintf "i64.store offset=%d" (i * 8))
       ) captures
     end;
-    (* Build closure value: { env, fn_idx } (i32 record fields, host-read). *)
+    (* Build closure value: { env, fn_idx, fn2 } (i32 record fields, host-read).
+       Q-139: twelve bytes, with the uncurried entry last so the host's reads at
+       +0 and +4 are unchanged. Zero means there is not one. *)
     emit_align_bump_4 ();  (* Phase 48.5: 4-byte align for host glue *)
     emit_instr "global.get $__lang_bump";
     emit_instr (Printf.sprintf "local.set %d" cl_slot);
     emit_instr (Printf.sprintf "local.get %d" cl_slot);
-    emit_instr "i32.const 8";
+    emit_instr "i32.const 12";
     emit_instr "i32.add";
     emit_instr "global.set $__lang_bump";
     emit_instr (Printf.sprintf "local.get %d" cl_slot);
@@ -4127,6 +4308,10 @@ and emit_expr (e : Ast.expr) : unit =
     emit_instr (Printf.sprintf "local.get %d" cl_slot);
     emit_instr (Printf.sprintf "i32.const %d" table_idx);
     emit_instr "i32.store offset=4";
+    emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    (* -1, not 0: table index 0 is a real function. *)
+    emit_instr "i32.const -1";
+    emit_instr "i32.store offset=8";
     emit_instr (Printf.sprintf "local.get %d" cl_slot);
     emit_instr "i64.extend_i32_u"
   | Ast.Tuple elems ->
@@ -4475,6 +4660,20 @@ and emit_user_app (saved_tail : bool) (e : Ast.expr) : unit =
      one-arg fn read a list as a str and the heap ran away ("out of memory").
      Falling through takes the closure-call path with the value the pattern
      bound. *)
+  (* Q-139: an exactly-saturated call to a curried top-level fn with a twin.
+     The arms around this one match `App (Var name, arg)`, and a two-argument
+     call is `App (App (Var f, a1), a2)` -- head an App, not a Var -- so none of
+     them saw it and it fell through to the closure path, which builds an
+     environment to carry the first argument. Same guards as the arm below: not
+     an inner lift, not shadowed by a local, arity matching exactly. *)
+  | Ast.App _ when
+      (match app_saturated_direct e with Some _ -> true | None -> false) ->
+    (match app_saturated_direct e with
+     | Some (callee, args) ->
+       List.iter emit_expr args;
+       let call_op = if saved_tail then "return_call" else "call" in
+       emit_instr (Printf.sprintf "%s $%s__direct" call_op callee)
+     | None -> ())
   | Ast.App ({ node = Ast.Var name; ty = f_ty; _ }, arg)
     when Hashtbl.mem toplevel_fn_names name
          && not (List.mem_assoc name !locals) ->
@@ -4485,9 +4684,80 @@ and emit_user_app (saved_tail : bool) (e : Ast.expr) : unit =
     in
     let call_op = if saved_tail then "return_call" else "call" in
     emit_instr (Printf.sprintf "%s $%s" call_op dispatch_name)
+  (* Q-139: an exactly-saturated call to a CLOSURE VALUE, through the uncurried
+     entry when the value carries one. `f a b` where f is a parameter or a
+     dictionary field is two applications, and the first exists only to build an
+     environment holding `a`. -1 means there is none, and then the two-step path
+     runs -- which is the path every closure call took before this.
+
+     THE SECOND ARGUMENT IS EVALUATED INSIDE EACH BRANCH, not before them: on
+     the two-step path the first application RUNS, and a body that is not
+     immediately another `fn` can print before the second argument is reached.
+     The LLVM half of this change got that wrong and
+     test/parity/closure_fn2_order.mere caught it. *)
+  | Ast.App ({ Ast.node = Ast.App (f, a); _ }, b)
+    when (match app_saturated_direct e with Some _ -> false | None -> true)
+         (* THE HEAD HAS TO BE A VALUE ALREADY. This arm evaluates `f` with
+            `emit_expr`, and on this backend a partially applied
+            multi-instantiated top-level fn HAS no value form -- asking for one
+            is a refusal ("list_map is used at several types"), which is how the
+            self-hosting bootstrap broke the first time this landed. A local
+            binding and a record field are values by construction; a Var naming
+            a top-level fn is not one, and belongs to the arms below. *)
+         && (match (app_spine_head_wasm f).Ast.node with
+             | Ast.Var n ->
+               List.mem_assoc n !locals
+               && not (Hashtbl.mem inner_lifts_wasm n)
+             | Ast.Field_get _ -> true
+             | _ -> false) ->
+    let cl_slot = fresh_local () in
+    let a_slot = fresh_local () in
+    emit_expr f;
+    emit_instr (Printf.sprintf "local.set %d" cl_slot);
+    emit_expr a;
+    emit_instr (Printf.sprintf "local.set %d" a_slot);
+    (* if fn2 != -1 then fn2(env, a, b) else step2(step1(env, a), b) *)
+    emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr "i32.wrap_i64";
+    emit_instr "i32.load offset=8";
+    emit_instr "i32.const -1";
+    emit_instr "i32.ne";
+    emit_instr "if (result i64)";
+    emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr "i32.wrap_i64";
+    emit_instr "i32.load offset=0";
+    emit_instr "i64.extend_i32_u";
+    emit_instr (Printf.sprintf "local.get %d" a_slot);
+    emit_expr b;
+    emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr "i32.wrap_i64";
+    emit_instr "i32.load offset=8";
+    emit_instr "call_indirect (type $cl2)";
+    emit_instr "else";
+    let mid_slot = fresh_local () in
+    emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr "i32.wrap_i64";
+    emit_instr "i32.load offset=0";
+    emit_instr "i64.extend_i32_u";
+    emit_instr (Printf.sprintf "local.get %d" a_slot);
+    emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr "i32.wrap_i64";
+    emit_instr "i32.load offset=4";
+    emit_instr "call_indirect (type $cl)";
+    emit_instr (Printf.sprintf "local.set %d" mid_slot);
+    emit_instr (Printf.sprintf "local.get %d" mid_slot);
+    emit_instr "i32.wrap_i64";
+    emit_instr "i32.load offset=0";
+    emit_instr "i64.extend_i32_u";
+    emit_expr b;
+    emit_instr (Printf.sprintf "local.get %d" mid_slot);
+    emit_instr "i32.wrap_i64";
+    emit_instr "i32.load offset=4";
+    emit_instr "call_indirect (type $cl)";
+    emit_instr "end"
   | Ast.App (f, arg) ->
     (* Indirect call via call_indirect on the closure value's table
-       index. closure layout: { env @ offset 0, fn_idx @ offset 4 }
+       index. closure layout: { env @ offset 0, fn_idx @ offset 4, fn2 @ 8 }
        (i32 record fields; env crosses as an i64 value). *)
     let cl_slot = fresh_local () in
     emit_expr f;
@@ -4563,6 +4833,58 @@ let emit_fn_def (f : fn_decl) : string =
     "  (func $%s (param i64) (result i64)\n%s%s)"
     f.name local_decl indented_body
 
+(* Q-139: the uncurried twin. Same body, both parameters as real parameters, so
+   a saturated call has no environment to build. The curried definition stays
+   beside it for partial application and first-class use. *)
+let emit_direct_fn_wasm (name : string) (info : direct_fn_info_wasm) : string =
+  let saved_instrs = !instrs in
+  let saved_local_counter = !local_counter in
+  let saved_locals = !locals in
+  let saved_local_types = !local_types in
+  let saved_host = !current_host_fn_wasm in
+  set_inner_lifts_for_host_wasm name;
+  current_host_fn_wasm := name;
+  instrs := [];
+  let n = List.length info.dw_params in
+  (* The parameters claim slots 0..n-1; extra locals start after them. *)
+  local_counter := n;
+  local_types := [];
+  locals := List.mapi (fun i p -> (p, i)) info.dw_params;
+  simd_locals := [];
+  let saved_tail = !wasm_tail_pos in
+  let saved_unwind = !fail_unwind_on in
+  wasm_tail_pos := true;
+  fail_unwind_on := true;
+  emit_expr info.dw_body;
+  fail_unwind_on := saved_unwind;
+  wasm_tail_pos := saved_tail;
+  let body_instrs = List.rev !instrs in
+  let extra_locals = !local_counter - n in
+  let extra_types = !local_types in
+  instrs := saved_instrs;
+  local_counter := saved_local_counter;
+  locals := saved_locals;
+  local_types := saved_local_types;
+  current_host_fn_wasm := saved_host;
+  let local_decl =
+    if extra_locals <= 0 then ""
+    else
+      let types =
+        if List.length extra_types = extra_locals then extra_types
+        else List.init extra_locals (fun _ -> "i64")
+      in
+      Printf.sprintf "    (local%s)\n"
+        (String.concat "" (List.map (fun t -> " " ^ t) types))
+  in
+  let indented_body =
+    String.concat "\n" (List.map (fun s -> "    " ^ s) body_instrs)
+  in
+  Printf.sprintf
+    "  (func $%s__direct%s (result i64)\n%s%s)"
+    name
+    (String.concat "" (List.init n (fun _ -> " (param i64)")))
+    local_decl indented_body
+
 (* Phase 26.3: emit a lifted inner fn as top-level Wasm fn. Captures
    come before the original param as i32 locals (positional). The body
    resolves recursive lifted siblings via set_inner_lifts_for_host_wasm. *)
@@ -4625,6 +4947,16 @@ let emit_top_adapter (f : fn_decl) : string =
     "  (func $%s_closure (param i64) (param i64) (result i64)\n\
      \    local.get 1\n\
      \    call $%s)" f.name f.name
+
+(* Q-139: the two-argument adapter, for a top-level fn that has a two-parameter
+   twin. It takes (env, a, b) like everything reachable through `$cl2` and
+   ignores the env, exactly as the one-argument adapter above does. *)
+let emit_top_adapter2 (name : string) : string =
+  Printf.sprintf
+    "  (func $%s_closure2 (param i64) (param i64) (param i64) (result i64)\n\
+     \    local.get 1\n\
+     \    local.get 2\n\
+     \    call $%s__direct)" name name
 
 (* Phase 35.3: eta adapter for a nullary factory builtin used as a value.
    `slug` is the registered key in [eta_adapters_wasm]; `builtin` is the
@@ -9882,6 +10214,41 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      Phase 26.4: include multi-inst base names so inner free_var analysis
      treats them as known toplevels (not captured). Call sites get
      rewritten to mangled spec at emit time. *)
+  (* Q-139: eligible curried top-level fns, peeled by the RESOLVED type. Two or
+     more parameters (a one-argument call allocates nothing here either) and
+     concrete throughout. Must run before any emit, so every call site sees the
+     same table. *)
+  Hashtbl.reset direct_fns_wasm;
+  (* A MONOMORPHISED INSTANCE gets no twin. Its calls reach it under a MANGLED
+     name (`list_map__list_top_decl__...`), which `app_saturated_direct`
+     declines and the collectors -- which see the source name in the AST --
+     cannot recognise. Giving it a twin therefore dropped a curried body that
+     the multi-instance dispatch still called, and wat2wasm named the missing
+     function. The exclusion is on the table, not only on the call site, so the
+     two cannot disagree. *)
+  let instance_names : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+  (let tbl = !multi_inst_fns_wasm in
+   Hashtbl.iter (fun base arrows ->
+     List.iter (fun a -> Hashtbl.replace instance_names (tbl.Monomorph.mangle base a) ())
+       arrows) tbl.Monomorph.arrows);
+  List.iter (fun (f : fn_decl) ->
+    let rec peel params body ty =
+      match body.Ast.node, Ast.walk ty with
+      | Ast.Fun (p, _, inner), Ast.TyArrow (pt, rt) ->
+        if ty_is_concrete (Ast.walk pt) then peel (p :: params) inner rt
+        else (List.rev params, body, Ast.walk ty)
+      | _ -> (List.rev params, body, Ast.walk ty)
+    in
+    let params, body, ret = peel [f.param] f.body f.return_ty in
+    if List.length params >= 2
+       && not (Hashtbl.mem instance_names f.name)
+       && not (Monomorph.is_multi !multi_inst_fns_wasm f.name)
+       && ty_is_concrete (Ast.walk f.param_ty)
+       && ty_is_concrete ret
+       && not (Hashtbl.mem inner_lifts_wasm f.name)
+    then Hashtbl.replace direct_fns_wasm f.name
+           { dw_params = params; dw_body = body }
+  ) fns;
   let mangled_names = List.map (fun f -> f.name) fns in
   let multi_base_names =
     Monomorph.multi_names !multi_inst_fns_wasm
@@ -9900,14 +10267,54 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      fn_closure_table_idx. The actual adapter WAT is still emitted after
      the fn_defs (top_adapters / lifted_defs), but the index registry must
      be populated up front. *)
+  (* Q-139: which fns are ever used as VALUES -- see fns_used_as_values. Only
+     those get a `_closure` adapter, and only that adapter roots the curried
+     body in the elem table. Run before the adapters are decided. *)
+  collect_fns_used_as_values main_expr (List.map (fun (f : fn_decl) -> f.body) fns);
   let top_adapters =
-    List.map (fun f ->
+    List.concat_map (fun f ->
+      if not (Hashtbl.mem fns_used_as_values f.name) then [] else begin
       let idx = register_in_table (f.name ^ "_closure") in
       Hashtbl.replace fn_closure_table_idx f.name idx;
-      emit_top_adapter f
+      (* Q-139: and the two-argument adapter, when the twin exists and takes
+         exactly two. A three-parameter twin keeps the old path until the day a
+         third entry is worth its width -- the same line the C backend drew. *)
+      let two =
+        match Hashtbl.find_opt direct_fns_wasm f.name with
+        | Some info when List.length info.dw_params = 2 ->
+          let i2 = register_in_table (f.name ^ "_closure2") in
+          Hashtbl.replace fn_closure2_table_idx f.name i2;
+          [ emit_top_adapter2 f.name ]
+        | _ -> []
+      in
+      emit_top_adapter f :: two end
     ) fns
   in
-  let fn_defs = List.map emit_fn_def fns in
+  (* Q-139: which curried bodies can still be entered. Anything with a twin,
+     never used as a value and never applied to fewer arguments than the twin
+     takes, has no way in -- and shipping it is what made the twins an addition
+     rather than a replacement. *)
+  collect_under_saturated
+    (fun n -> match Hashtbl.find_opt direct_fns_wasm n with
+       | Some i -> Some (List.length i.dw_params)
+       | None -> None)
+    main_expr (List.map (fun (f : fn_decl) -> f.body) fns);
+  let curried_needed (f : fn_decl) =
+    match Hashtbl.find_opt direct_fns_wasm f.name with
+    | None -> true   (* no twin: the curried body is the only body *)
+    | Some _ ->
+      Hashtbl.mem fns_used_as_values f.name
+      || Hashtbl.mem fns_applied_under f.name
+  in
+  let fn_defs = List.filter_map (fun f ->
+    if curried_needed f then Some (emit_fn_def f) else None) fns in
+  (* Q-139: the twins, beside the curried definitions. *)
+  let direct_defs =
+    List.filter_map (fun (f : fn_decl) ->
+      match Hashtbl.find_opt direct_fns_wasm f.name with
+      | Some info -> Some (emit_direct_fn_wasm f.name info)
+      | None -> None) fns
+  in
   let lifted_defs = List.map emit_lifted_fn_wasm !lifted_fns_wasm in
   (* Emit one specialized `show_<tag>` function per registered type. *)
   let show_fn_defs =
@@ -10082,21 +10489,39 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     (global.set $__lang_bump (i32.add (local.get $logger) (i32.const 24)))
     ;; info closure (8 bytes: env i32, fn_idx i32)
     (local.set $cl (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
+    ;; Q-139: 12 bytes, with -1 in the uncurried-entry slot. A hand-written
+    ;; closure record that kept the old width left whatever was next in the bump
+    ;; heap sitting where fn2 belongs, and a saturated call read it as a table
+    ;; index and jumped through it -- which is how the logger/metrics parity
+    ;; case started answering "out of memory".
+    (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 12)))
     (i32.store offset=0 (local.get $cl) (i32.wrap_i64 (local.get $prefix)))
     (i32.store offset=4 (local.get $cl) (i32.const %d))
+    (i32.store offset=8 (local.get $cl) (i32.const -1))
     (i64.store offset=0 (local.get $logger) (i64.extend_i32_u (local.get $cl)))
     ;; warn
     (local.set $cl (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
+    ;; Q-139: 12 bytes, with -1 in the uncurried-entry slot. A hand-written
+    ;; closure record that kept the old width left whatever was next in the bump
+    ;; heap sitting where fn2 belongs, and a saturated call read it as a table
+    ;; index and jumped through it -- which is how the logger/metrics parity
+    ;; case started answering "out of memory".
+    (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 12)))
     (i32.store offset=0 (local.get $cl) (i32.wrap_i64 (local.get $prefix)))
     (i32.store offset=4 (local.get $cl) (i32.const %d))
+    (i32.store offset=8 (local.get $cl) (i32.const -1))
     (i64.store offset=8 (local.get $logger) (i64.extend_i32_u (local.get $cl)))
     ;; error
     (local.set $cl (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
+    ;; Q-139: 12 bytes, with -1 in the uncurried-entry slot. A hand-written
+    ;; closure record that kept the old width left whatever was next in the bump
+    ;; heap sitting where fn2 belongs, and a saturated call read it as a table
+    ;; index and jumped through it -- which is how the logger/metrics parity
+    ;; case started answering "out of memory".
+    (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 12)))
     (i32.store offset=0 (local.get $cl) (i32.wrap_i64 (local.get $prefix)))
     (i32.store offset=4 (local.get $cl) (i32.const %d))
+    (i32.store offset=8 (local.get $cl) (i32.const -1))
     (i64.store offset=16 (local.get $logger) (i64.extend_i32_u (local.get $cl)))
     (i64.extend_i32_u (local.get $logger)))|}
         info_prefix_off warn_prefix_off error_prefix_off
@@ -10128,9 +10553,11 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   (func $__mere_metrics_record_outer_fn (param $env i64) (param $name i64) (result i64)
     (local $cl i32)
     (local.set $cl (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
+    ;; Q-139: 12 bytes, -1 in the uncurried-entry slot (see the logger above).
+    (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 12)))
     (i32.store offset=0 (local.get $cl) (i32.wrap_i64 (local.get $name)))
     (i32.store offset=4 (local.get $cl) (i32.const %d))
+    (i32.store offset=8 (local.get $cl) (i32.const -1))
     (i64.extend_i32_u (local.get $cl)))
   (func $__mere_mk_metrics (result i64)
     (local $m i32) (local $cl i32)
@@ -10139,15 +10566,19 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     (global.set $__lang_bump (i32.add (local.get $m) (i32.const 16)))
     ;; inc closure
     (local.set $cl (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
+    ;; Q-139: 12 bytes, -1 in the uncurried-entry slot (see the logger above).
+    (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 12)))
     (i32.store offset=0 (local.get $cl) (i32.const 0))
     (i32.store offset=4 (local.get $cl) (i32.const %d))
+    (i32.store offset=8 (local.get $cl) (i32.const -1))
     (i64.store offset=0 (local.get $m) (i64.extend_i32_u (local.get $cl)))
     ;; record outer closure
     (local.set $cl (global.get $__lang_bump))
-    (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 8)))
+    ;; Q-139: 12 bytes, -1 in the uncurried-entry slot (see the logger above).
+    (global.set $__lang_bump (i32.add (local.get $cl) (i32.const 12)))
     (i32.store offset=0 (local.get $cl) (i32.const 0))
     (i32.store offset=4 (local.get $cl) (i32.const %d))
+    (i32.store offset=8 (local.get $cl) (i32.const -1))
     (i64.store offset=8 (local.get $m) (i64.extend_i32_u (local.get $cl)))
     (i64.extend_i32_u (local.get $m)))|}
         inc_prefix_off rec_prefix_off eq_off rec_inner inc_idx rec_outer
@@ -10182,7 +10613,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
            else emit_copy_fn_wasm tag t :: acc)
            wasm_copy_types [])
     in
-    let all = fn_defs @ lifted_defs @ top_adapters @ anon_adapters @ eta_adapters @ show_fn_defs @ to_json_fn_defs @ of_json_fn_defs @ eq_fn_defs @ cmp_fn_defs @ copy_fn_defs @ inner_lift_adapter_strs in
+    let all = fn_defs @ direct_defs @ lifted_defs @ top_adapters @ anon_adapters @ eta_adapters @ show_fn_defs @ to_json_fn_defs @ of_json_fn_defs @ eq_fn_defs @ cmp_fn_defs @ copy_fn_defs @ inner_lift_adapter_strs in
     let all =
       if logger_runtime_section <> "" then all @ [logger_runtime_section]
       else all
@@ -11387,6 +11818,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   Printf.sprintf
     "(module\n\
      \  (type $cl (func (param i64) (param i64) (result i64)))\n\
+     \  (type $cl2 (func (param i64) (param i64) (param i64) (result i64)))\n\
      %s\
      %s\
      %s\

@@ -5253,11 +5253,21 @@ let () =
   assert_contains "wasm: indirect App uses call_indirect"
     (wasm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "call_indirect (type $cl)";
+  (* Q-139 changed the program, not the question: `(make_adder 5) 10` is a
+     saturated two-argument call and now goes straight to the uncurried twin,
+     so no anonymous closure is built at all. Asked with one that still is. *)
   assert_contains "wasm: anonymous Fun adapter emitted"
-    (wasm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
+    (wasm "let make_adder = fn n -> fn x -> x + n in\n           let add5 = make_adder 5 in add5 10")
     "(func $anon_0_fn (param i64) (param i64) (result i64)";
+  (* Q-139 changed the PROGRAM this asks with, not the question. `(make_adder
+     5) 10` is a saturated two-argument call and now goes straight to the
+     uncurried twin, so no closure is built and there is no env to load from --
+     which is the point of that change. The question "does an anonymous adapter
+     load its captures from env" is still worth asking, so it is asked with a
+     program that still builds one: the partial application is bound, and only
+     then applied. *)
   assert_contains "wasm: anonymous adapter loads captures from env"
-    (wasm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
+    (wasm "let make_adder = fn n -> fn x -> x + n in\n           let add5 = make_adder 5 in add5 10")
     "i32.load offset=0";
 
   (* --- Wasm codegen: Region_block + Ref + with Drop + view (Phase 6.8) ---
@@ -10569,7 +10579,12 @@ let () =
         0") in
      (* uniquify_toplevel_shadows renames the user's shadowing `list_rev_into`
         to `list_rev_into__v2`, so it is emitted as exactly one definition and
-        can never collide with the stdlib one. *)
+        can never collide with the stdlib one.
+        Q-139: WHICH definition that is now depends on how the program calls
+        it. Every call here is saturated, so the curried body has no way in and
+        is not emitted -- only the uncurried twin is. The question is the same
+        one ("exactly one definition of the renamed fn"), asked about whichever
+        body ships. *)
      let count p =
        let nlen = String.length wat and plen = String.length p in
        let rec scan i acc =
@@ -10578,7 +10593,8 @@ let () =
          else scan (i + 1) acc
        in scan 0 0
      in
-     if count "(func $list_rev_into__v2 " = 1 then "ok" else "dup-or-missing")
+     let total = count "(func $list_rev_into__v2 " + count "(func $list_rev_into__v2__direct " in
+     if total = 1 && count "(func $list_rev_into (" = 0 then "ok" else "dup-or-missing")
     "ok";
 
   (* Phase 26.2: Wasm try_or via fail flag + active-counter. *)
