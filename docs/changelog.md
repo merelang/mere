@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.498 — 2026-09-21
+
+_Q-140: one rule for what a program prints when it ends._
+
+_The same program, four answers:_
+
+| main | interp | C | LLVM | Wasm |
+|---|---|---|---|---|
+| `true` | `true` | **1** | **1** | `true` |
+| `"abc"` | `"abc"` | **abc** | **abc** | `"abc"` |
+| `(1, 2)` | `(1, 2)` | **1** | **refused** | **(nothing)** |
+| `[1, 2]` | `[1, 2]` | **-872415215** | **refused** | **(nothing)** |
+
+_That last cell is a POINTER printed as a decimal integer: `main_format_of`'s
+catch-all was `%d`, so anything the table did not name became an int. The tuple
+row is the same thing printing its first field. Three backends had three
+different wrong answers and nothing could see it, because **`parity.sh` runs
+programs that end with `print`** — the path that displays the program's own
+value is one almost nothing exercises._
+
+_**`show` already agreed with the interpreter on every one of them.** It was
+simply not on this path. So the rule is one line now, on all four: the
+program's value is displayed the way `show` displays it, which is what
+`Eval.to_string` has always done. Nine programs, four backends, one answer._
+
+_⚠ **A main whose type never resolved has no value to display.** The common
+case is a program ending in `exit 0`, whose type is a variable because the call
+does not return — asking `show` for a `'a` is a refusal, and it took down the
+whole suite the first time. The interpreter exits inside the evaluation and
+prints nothing, so printing nothing is what agrees with it._
+
+_Seven assertions moved. Every one pinned a lowering (`printf("%lld\n", 42LL)`,
+`zext i1`, `@printf(ptr @.fmt_s, ...)`) rather than an answer, and each was
+re-pinned at the new lowering with its question intact — except the `zext`,
+whose question stopped existing when printf did: the value now crosses to
+`show_bool` as an `i1`, so there is nothing to widen, and what is asked instead
+is that it crosses at its own width._
+
+_`scripts/main_value_check.sh` is the gate, with a poison that rewrites one
+backend's answer and requires the comparison to catch it. It is in CI, because
+this is precisely the kind of drift that survives for years when no gate runs
+the shape._
+
+_suite 2773, parity 196 PASS / 0 FAIL._
+
+---
+
 ## v0.1.497 — 2026-09-21
 
 _Q-139 closed: every cell of the table is zero, on all three backends._
