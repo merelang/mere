@@ -9976,10 +9976,10 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      emit_instr "call $puts";
      emit_instr "i32.const 0"
    | Ast.TyUnit ->
+     (* Q-136: the value is dropped and nothing is printed, as on the other
+        three. See codegen_c's note -- the `()` was here to match the
+        interpreter, and the interpreter no longer prints it either. *)
      emit_instr "drop";
-     let unit_off = intern_show_str "()" in
-     emit_instr (Printf.sprintf "i64.const %d" unit_off);
-     emit_instr "call $puts";
      emit_instr "i32.const 0"
    | Ast.TyFloat ->
      (* Phase 34.3: float main result — load f64 from ptr, str_of_float via

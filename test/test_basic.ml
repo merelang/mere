@@ -587,7 +587,7 @@ let () =
   check "block single expr"
     (Pipeline.process "{ 1 + 2 }") "3";
   check "empty block"
-    (Pipeline.process "{}") "()";
+    (Pipeline.process "{}") "";
   check "block sequencing"
     (Pipeline.process "{ 100; 200; 300 }") "300";
   check "block returns last"
@@ -849,9 +849,9 @@ let () =
 
   (* --- if without else (unit-typed branch) --- *)
   check "if without else (true branch)"
-    (Pipeline.process "if true then print \"hi\"") "()";
+    (Pipeline.process "if true then print \"hi\"") "";
   check "if without else (false branch)"
-    (Pipeline.process "if false then print \"hi\"") "()";
+    (Pipeline.process "if false then print \"hi\"") "";
   check "if without else type"
     (Pipeline.type_of "if true then print \"x\"") "unit";
   check "if without else in block"
@@ -938,7 +938,7 @@ let () =
 
   (* --- stdlib F6: assert --- *)
   check "assert true returns unit"
-    (Pipeline.process "assert true \"ok\"") "()";
+    (Pipeline.process "assert true \"ok\"") "";
   check_raises "assert false raises"
     (fun () -> Pipeline.process "assert false \"boom\"");
   check "assert type"
@@ -951,7 +951,7 @@ let () =
       "{ assert (10 > 0) \"a\"; assert (1 == 2) \"b\"; \"x\" }");
   check "assert curry partial"
     (Pipeline.process
-      "let must = assert true in must \"unused\"") "()";
+      "let must = assert true in must \"unused\"") "";
 
   (* --- structural equality on compound values --- *)
   check "tuple eq same"
@@ -1906,7 +1906,7 @@ let () =
   check "print_no_nl type"
     (Pipeline.type_of "print_no_nl") "(str -> unit)";
   check "print_no_nl returns unit"
-    (Pipeline.process "print_no_nl \"x\"") "()";
+    (Pipeline.process "print_no_nl \"x\"") "";
   check "print_no_nl in block"
     (Pipeline.process "{ print_no_nl \"a\"; print_no_nl \"b\"; 42 }") "42";
 
@@ -1914,17 +1914,17 @@ let () =
   check "print_err type"
     (Pipeline.type_of "print_err") "(str -> unit)";
   check "print_err returns unit"
-    (Pipeline.process "print_err \"err msg\"") "()";
+    (Pipeline.process "print_err \"err msg\"") "";
 
   (* --- iter_n : int -> (unit -> unit) -> unit (side-effect loop) --- *)
   check "iter_n type"
     (Pipeline.type_of "iter_n") "(int -> ((unit -> unit) -> unit))";
   check "iter_n returns unit"
-    (Pipeline.process "iter_n 3 (fn () -> ())") "()";
+    (Pipeline.process "iter_n 3 (fn () -> ())") "";
   check "iter_n zero is no-op"
-    (Pipeline.process "iter_n 0 (fn () -> fail \"should not run\")") "()";
+    (Pipeline.process "iter_n 0 (fn () -> fail \"should not run\")") "";
   check "iter_n negative is no-op"
-    (Pipeline.process "iter_n (- 5) (fn () -> fail \"never\")") "()";
+    (Pipeline.process "iter_n (- 5) (fn () -> fail \"never\")") "";
 
   (* --- incr / decr (int -> int helpers) --- *)
   check "incr basic" (Pipeline.process "incr 9") "10";
@@ -3311,10 +3311,21 @@ let () =
      (* one declaration, and no per-evaluation copy of it anywhere *)
      if count "\"zzq\"" = 1 && count "__lang_str_dup_n(\"" = 0 then "ok" else "no")
     "ok";
-  (* Phase 27.0: C codegen now prints "()" for unit-typed main to match
-     interp (was: no printf at all). *)
-  assert_contains "codegen: unit-typed main prints \"()\""
-    (codegen "print \"hi\"") "printf(\"()\\n\")";
+  (* Q-136: a unit-typed main prints NOTHING, and this asks for the absence
+     rather than deleting the question. Phase 27.0 added `printf("()\n")` here
+     to match the interpreter; the interpreter stopped printing it too, so the
+     parity that motivated it still holds -- at silence. Anything that compares
+     output exactly (a judge, a diff, a golden file) saw an unconditional
+     mismatch on every program that ends by printing its answer. *)
+  check "Q-136: a unit-typed main prints nothing"
+    (let c = codegen "print \"hi\"" in
+     let has p =
+       let nlen = String.length c and plen = String.length p in
+       let rec scan i =
+         i + plen <= nlen && (String.sub c i plen = p || scan (i + 1)) in
+       scan 0 in
+     if has "printf(\"()" then "still prints ()" else "silent")
+    "silent";
   assert_contains "codegen: helper __lang_str_concat is injected"
     (codegen "1") "__lang_str_concat";  (* always emitted, even if unused *)
 
@@ -6110,7 +6121,7 @@ let () =
      }"
   in
   check "borrow codegen: interpreter runs fn with &shared write R Logger"
-    (Pipeline.process borrow_field_src) "()";
+    (Pipeline.process borrow_field_src) "";
   assert_contains "borrow codegen: C emits Logger via -> on borrow"
     (let prog = Pipeline.parse_program borrow_field_src in
      let _ = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
@@ -10621,8 +10632,10 @@ let () =
      if String.length ll > 0 then "ok" else "empty")
     "ok";
 
-  (* Phase 25.11: LLVM prints "()" for unit main_ty to match interp. *)
-  check "§25.11: LLVM emits @.fmt_unit and printf for unit main"
+  (* Q-136: and neither does LLVM. Same question from the other side: the
+     format global and the call must BOTH be gone -- a leftover global is dead
+     weight, a leftover call prints. *)
+  check "Q-136: LLVM emits neither @.fmt_unit nor a printf for unit main"
     (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyUnit (typed_prog
        "print \"hi\"") in
      let has p =
@@ -10634,8 +10647,8 @@ let () =
        in
        scan 0
      in
-     if has "@.fmt_unit" && has "call i32 (ptr, ...) @printf(ptr @.fmt_unit)" then "ok" else "missing")
-    "ok";
+     if has "@.fmt_unit" || has "@printf(ptr @.fmt_unit)" then "still there" else "silent")
+    "silent";
 
   (* Phase 25.10: Var-shadowing for stdlib builtins (template_engine). *)
   check "§25.10: local `let len = ...` shadows stdlib len"
@@ -12626,7 +12639,7 @@ let () =
         let r2 = channel_recv ch in \
         r1 + r2") "13530";
   check "concurrency: join returns unit"
-    (Pipeline.process "let h = spawn (fn () -> ()) in join h") "()";
+    (Pipeline.process "let h = spawn (fn () -> ()) in join h") "";
   check "concurrency: channel carries a str element (polymorphic)"
     (Pipeline.process
        "let ch = channel_new () in \
@@ -12650,12 +12663,12 @@ let () =
     (Pipeline.process
        "type Payload = MkPayload of int; \
         let ch = channel_new () in \
-        channel_send ch (MkPayload 0)") "()";
+        channel_send ch (MkPayload 0)") "";
   check "concurrency: sync-marked element is Send (accepted)"
     (Pipeline.process
        "sync type SharedLog = MkLog of int; \
         let ch = channel_new () in \
-        channel_send ch (MkLog 0)") "()";
+        channel_send ch (MkLog 0)") "";
   (* Send/Sync derive structurally through unmarked records/variants: a plain
      type wrapping a !Send value is itself !Send (no smuggling by wrapping). *)
   check_raises_containing "send: a record wrapping a !Send field is rejected"
@@ -12676,7 +12689,7 @@ let () =
     (Pipeline.process
        "type Pt = { x: int, y: int }; \
         let ch = channel_new () in \
-        channel_send ch (Pt { x = 1, y = 2 })") "()";
+        channel_send ch (Pt { x = 1, y = 2 })") "";
   (* Q-012 (OPEN i): move / use-after-move analysis for spawn captures. *)
   check_raises_containing "move: use-after-move of an owned cap is rejected"
     "use after move"
@@ -12690,7 +12703,7 @@ let () =
        "drop type Logger = MkLogger of int; \
         let lg = MkLogger 0 in \
         let _ = spawn (fn () -> let _ = lg in ()) in \
-        ()") "()";
+        ()") "";
   (* v0.1.225: the typer's type registries are per-program, and were not. A compiler
      process checks one program, so nothing noticed; the language server checks one
      document per keystroke, and a constructor renamed from Alpha to Gamma left Alpha
@@ -12808,7 +12821,7 @@ let () =
        "sync type SLog = MkLog of int; \
         let s = MkLog 0 in \
         let _ = spawn (fn () -> let _ = s in ()) in \
-        let _ = s in ()") "()";
+        let _ = s in ()") "";
   (* Q-012 (OPEN ii): polymorphic channels — deferred Send bound + the
      "don't generalize a Send-constrained tyvar" monomorphization. *)
   check_raises_containing
@@ -12824,7 +12837,7 @@ let () =
     (Pipeline.process
        "let f = fn ch -> fn v -> channel_send ch v; \
         let ch = channel_new () in \
-        f ch 42") "()";
+        f ch 42") "";
   check_raises
     "poly channel: a Send-constrained channel fn is monomorphic (no reuse at 2 types)"
     (fun () -> Pipeline.process
