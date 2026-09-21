@@ -4,6 +4,69 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.495 — 2026-09-21
+
+_Q-139 on Wasm: the uncurried entry, and the shipped modules get 15% smaller._
+
+_The third backend gets the mechanism the other two have. On Wasm it also
+turned out to be a size question, and the answer was the opposite of what the
+first attempt measured._
+
+| B/call | C | LLVM | Wasm before | Wasm now |
+|---|---|---|---|---|
+| `f a b` (named top-level, concrete) | 0 | 0 | 32 | **0** |
+| `f a b` (f is a function parameter) | 0 | 0 | 67 | **12** |
+| trait method | 0 | 0 | 32 | 20 |
+
+_**The closure record is twelve bytes now**, `{ i32 env, i32 fn_idx, i32 fn2 }`,
+with the uncurried entry LAST so the host is untouched — `scripts/mere_host.js`
+reads env at +0 and fn_idx at +4 and neither moved. The absent value is **-1**,
+not 0: `fn2` is a table index and index 0 is a real function._
+
+_⚠ **Six hand-written closure records in the runtime WAT kept the old width**,
+and the eight bytes after them were read as a table index and jumped through.
+`test/parity/logger_metrics_caps` found it: the program printed three log lines
+and then "out of memory". Widening a record means every construction, including
+the ones written by hand in a string._
+
+_**And then the size gate refused it.** The twins took the shipped modules from
+616 KB to 769 KB, six of fifteen over their ceilings. The cause was not the
+twins: **a `_closure` adapter was emitted for every top-level fn**, the elem
+table it sits in is a root the pruner cannot see past, and so every curried
+body shipped whether or not anything could reach it. Emit the adapter only for
+fns actually used as values, and the curried body only when something can still
+enter it — a fn with a twin, never used as a value and never applied to fewer
+arguments than the twin takes, has no way in — and the pruner does the rest._
+
+_Result: **522 KB, down from 616 KB before any of this**. gameboy −29%,
+raytrace −26%, chip8 −22%, selfhost-tyck −19%. Every band in
+`scripts/wasm_size_budget.txt` and `test/budget/BUDGETS` moved DOWN, which is
+the floor half of those gates doing exactly its job: "a demo this much smaller
+than recorded probably stopped being built properly; if it is a real
+improvement, lower the band". It was checked before the bands moved — suite
+2773, parity 196/0, the bootstrap tests that RUN the self-hosted compiler under
+node, and the size gate's own behaviour check._
+
+_⚠ **Two things had to be excluded, and both were found by breakage, not by
+reading.** A monomorphised instance gets no twin: its calls arrive under a
+mangled name the collectors cannot see, so giving it one dropped a curried body
+that the multi-instance dispatch still called, and `wat2wasm` named the missing
+function. And the saturated closure-call path only takes a head that is already
+a VALUE — a local or a field — because a partially applied multi-instantiated
+fn has no value form on this backend, and asking for one is a refusal that
+surfaced as the self-hosting bootstrap failing to emit._
+
+_⚠ **A measurement taken while the tree was being edited is not a
+measurement.** The first verification of this ran in the background while the
+next slice was still landing, and reported three parity failures that did not
+exist. Re-run on a settled tree: 2773 / 196 / 0._
+
+_What remains of Q-139 is the Wasm closure-value half — `fn2` is carried by
+top-level fn values but not yet by anonymous lambdas or dictionary fields, so
+the callback rows still allocate. The table is the gate._
+
+---
+
 ## v0.1.494 — 2026-09-21
 
 _Q-136: a program whose value is unit prints nothing._
