@@ -1623,6 +1623,32 @@ let simd_head (e : expr) : string option =
   | _ -> None
 (* `name` is used in `body` only as a direct operand of a SIMD builtin, never
    under a lambda (a capture would need the box) and never anywhere else. *)
+(* Q-141 (Wasm): every use of `name` in `body` is an operand of a float
+   arithmetic node -- the shapes the Wasm backend can build on the f64 operand
+   stack. Deliberately more conservative than that backend's emitter (it takes
+   the float path on `a`'s type alone; this asks about both operands), because
+   the wrong direction here is a name that has no box when someone wants its
+   address. Same shape, and the same reason, as `simd_operand_only` below. *)
+let float_operand_only (name : string) (body : expr) : bool =
+  let rec mentions (e : expr) =
+    (match e.node with Var n when n = name -> true | _ -> false)
+    || List.exists mentions (children e) in
+  let is_float (e : expr) =
+    match e.ty with Some t -> walk t = TyFloat | None -> false in
+  let rec operand (e : expr) : bool =
+    match e.node with Var n when n = name -> true | _ -> ok e
+  and ok (e : expr) : bool =
+    match e.node with
+    | Var n when n = name -> false
+    | Fun (_, _, b) -> not (mentions b)
+    | Bin ((Add | Sub | Mul | Div), a, b) when is_float a && is_float b ->
+      operand a && operand b
+    | Cmp (_, a, b) when is_float a && is_float b -> operand a && operand b
+    | Neg inner when is_float inner -> operand inner
+    | _ -> List.for_all ok (children e)
+  in
+  ok body
+
 let simd_operand_only (name : string) (body : expr) : bool =
   let rec mentions (e : expr) =
     (match e.node with Var n when n = name -> true | _ -> false)
