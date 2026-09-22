@@ -3222,7 +3222,12 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        being polymorphic. *)
     let bindings =
       enter_level (fun () ->
-        let tv = infer env value in check_pattern pat tv) in
+        let tv = infer env value in
+        (* The same question a `match` asks, asked from the other construct:
+           can this pattern fail? Deferred like a match's, because `tv` may
+           still be a variable here. *)
+        Exhaustive.record_let pat.Ast.ploc tv pat;
+        check_pattern pat tv) in
     (* Phase 36 (DEFERRED §1.13 fix): narrow value restriction.
        If value is syntactically a value (Fun, literal, Var, etc), generalize.
        If value is an App but the inferred type doesn't involve a mutable

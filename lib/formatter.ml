@@ -687,19 +687,73 @@ let rec fuse_drop_decls decls =
 
 let format_expr e = fmt_expr ~prec:prec_top ~ind:0 e
 
-let format_program (prog : program) =
+(* Where a declaration starts, for placing the comments written above it.
+
+   Only three top-level forms carry a position at all -- a `top_decl` is mostly
+   a name and a shape, and `Top_type` has nowhere to put one. `decl_line` is
+   supplied by the caller (`Pipeline.format_source`), which can also consult the
+   parser's type table; a declaration it cannot place simply does not collect
+   the comments above it, and they go to the next one that can be placed.
+   Losing a comment is not an option; moving one down is the fallback. *)
+let default_decl_line (d : top_decl) : int option =
+  let ok (l : Loc.t) = if l.Loc.line > 0 && l.Loc.file = None then Some l.Loc.line else None in
+  match d with
+  | Top_let (pat, _) -> ok pat.ploc
+  | Top_let_rec ((_, (v : expr)) :: _) -> ok v.loc
+  | Top_forward (_, _, l) -> ok l
+  | _ -> None
+
+(* `comments` is (line, text) for the comment blocks that start in column 1,
+   in source order. Everything before the next placeable declaration is
+   printed above it, keeping the blank line the joiner already puts between
+   declarations.
+
+   COLUMN 1 ONLY, deliberately: 82% of the comment lines in this repository are
+   there, they are the ones hover reads (the block above a definition), and the
+   other two kinds need something the tree does not have -- an indented comment
+   belongs to an expression, and a trailing one belongs after a node whose
+   extent no `Loc.t` records. *)
+let format_program ?(comments : (int * string) list = [])
+    ?(decl_line : (top_decl -> int option) = default_decl_line) (prog : program) =
+  let pending = ref comments in
+  (* Everything written above `line`, in order, drained. *)
+  let take_before (line : int) =
+    let (before, rest) = List.partition (fun (l, _) -> l < line) !pending in
+    pending := rest;
+    List.map snd before
+  in
+  let with_comments (line : int option) (body : string) =
+    match line with
+    | None -> body
+    | Some l ->
+      (match take_before l with
+       | [] -> body
+       | cs -> String.concat "\n" cs ^ "\n" ^ body)
+  in
   let decls_s =
     prog.decls
     |> fuse_drop_decls
     |> List.filter_map (function
-      | `Combined s -> Some s
-      | `Decl d -> fmt_top_decl d)
+      (* A fused pair has no single declaration to ask, so it takes whatever is
+         pending: the comments were written above it either way. *)
+      | `Combined s -> Some (with_comments (Some max_int) s)
+      | `Decl d ->
+        (match fmt_top_decl d with
+         | None -> None
+         | Some body -> Some (with_comments (decl_line d) body)))
     |> String.concat "\n\n"
   in
   let main_s =
     match prog.main.node with
-    | Unit_lit -> ""   (* decls-only file *)
-    | _ -> fmt_expr ~prec:prec_top ~ind:0 prog.main
+    | Unit_lit ->
+      (* A decls-only file still has comments after the last declaration. *)
+      String.concat "\n" (take_before max_int)
+    | _ ->
+      let above = take_before (max 1 prog.main.loc.Loc.line) in
+      let body = fmt_expr ~prec:prec_top ~ind:0 prog.main in
+      let trailing = take_before max_int in
+      String.concat "\n"
+        (above @ [ body ] @ trailing)
   in
   match decls_s, main_s with
   | "", "" -> "()\n"

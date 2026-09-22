@@ -819,10 +819,28 @@ let check_match (loc : Loc.t)
 let deferred : (Loc.t * Ast.ty * (Ast.pattern * Ast.expr option * Ast.expr) list) list ref =
   ref []
 
-let reset () = deferred := []
+(* A `let` whose pattern is refutable, deferred for the same reason matches are:
+   the value's type may still be a fresh variable when the binding is inferred,
+   and the question is about the type it ends up with.
+
+   THIS IS THE SAME QUESTION `match` ALREADY ANSWERS. `let Some n = e;` is a
+   match with one arm, and until v0.1.505 the two got different answers: the
+   `match` was refused at compile time and the `let` compiled and failed at run
+   time with `top-level let pattern did not match`. One question, one answer. *)
+let deferred_lets : (Loc.t * Ast.ty * Ast.pattern) list ref = ref []
+
+let reset () = deferred := []; deferred_lets := []
 
 let record_match loc scrut_ty arms =
   deferred := (loc, scrut_ty, arms) :: !deferred
+
+(* Recorded only when the pattern can fail: an irrefutable one is the ordinary
+   binding and must stay free. `if let` never reaches here — the parser turns it
+   into a two-armed match, which is the construct for a pattern that may not
+   match. *)
+let record_let loc scrut_ty pat =
+  if not (pat_irrefutable pat) then
+    deferred_lets := (loc, scrut_ty, pat) :: !deferred_lets
 
 (* Every finding, in source order, drained.
 
@@ -831,8 +849,46 @@ let record_match loc scrut_ty arms =
    visits a declaration's body once as a declaration and again as part of the
    desugared program, so a match inside one is recorded twice, and the same
    complaint shown twice is a bug report waiting to happen. *)
+(* The finding for one refutable `let`. Error severity for the same reason the
+   match's named-case finding is: the value it does not handle is named, which
+   means the failure is provable rather than suspected. *)
+let let_finding loc (w : Ast.pattern) : finding =
+  { f_loc = loc;
+    f_msg =
+      Printf.sprintf "this `let` pattern does not match every value (missing %s)"
+        (show_witness w);
+    f_hint =
+      [ Printf.sprintf "help: write it as a `match` with an arm for %s"
+          (arm_pattern w);
+        "note: a `let` binds; it has no other arm to take when the pattern does not match, so this would fail at run time" ];
+    f_error = true;
+    (* No edit offered: turning a `let` into a `match` moves the body, and a
+       `Loc.t` is a start and a width -- the body's extent is exactly what is
+       not recorded. The arm to write is in the hint. *)
+    f_fix = None }
+
+(* The refutable-`let` findings alone, drained. Separate because the
+   interpreter has to ask before it evaluates each declaration, while
+   everything else is asked once at the end. *)
+let let_findings () : finding list =
+  let out =
+    List.filter_map (fun (loc, ty, (pat : Ast.pattern)) ->
+      steps := 0;
+      declined := false;
+      match (try find_missing [ty] [[pat]] with Search_exhausted -> None) with
+      | _ when !declined -> None
+      | Some [w] when witness_is_error w -> Some (let_finding loc w)
+      (* A witness the checker cannot name -- an int, a string -- is the
+         approximation case, and demanding a total pattern for those would
+         refuse `let 1 = n` without being able to say what else to write. *)
+      | _ -> None)
+      (List.rev !deferred_lets)
+  in
+  deferred_lets := [];
+  out
+
 let all_findings () : finding list =
-  let fs =
+  let fs = let_findings () @
     List.concat_map (fun (loc, scrut_ty, arms) -> check_match loc scrut_ty arms)
       (List.rev !deferred)
   in
