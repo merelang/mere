@@ -16220,5 +16220,64 @@ let () =
      if idx_of h "did you mean" < 0 && idx_of h "`def`" >= 0 then "named it" else h)
     "named it";
 
+  (* ---- Q-164: the same rule in both arms ------------------------------
+     A top-level binding can be spelled `let`, `let rec`, as a member of a
+     `let rec ... and ...`, or inside a `module`. Four declaration loops walk
+     them, and every one of the four routed `let` through `Pipeline.infer_top_let`
+     and `top_let_scheme` while inlining `let rec` by hand — so BOTH of that
+     pair's safeguards were missing from the `let rec` arm everywhere.
+     scripts/binding_form_check.sh holds all five spellings against each other;
+     these are the two properties at the unit level. *)
+  let lib_verdict src =
+    let saved = !Codegen_c.lib_mode in
+    Codegen_c.lib_mode := true;
+    let r =
+      try let _ = Pipeline.infer_program src in "accepted"
+      with Typer.Type_error (_, m) ->
+        if idx_of m "across the library boundary" >= 0 then "refused" else "refused: " ^ m
+    in
+    Codegen_c.lib_mode := saved; r in
+  let escaping binding =
+    "let store = vec_new ();\n" ^ binding ^ "\n0" in
+  check "Q-164: the library boundary reaches a `let rec` member"
+    (lib_verdict (escaping
+       "let rec keep = fn (n: int) -> let v = vec_new () in \
+        let _ = vec_push v n in let _ = vec_push store v in vec_len store;"))
+    "refused";
+  check "Q-164: and a member of a `let rec ... and ...` group"
+    (lib_verdict (escaping
+       "let rec keep = fn (n: int) -> let v = vec_new () in \
+        let _ = vec_push v n in let _ = vec_push store v in vec_len store\n\
+        and sib = fn (q: int) -> q;"))
+    "refused";
+  (* ⚠ and it must not fire for a program that does NOT escape: a check that
+     refuses every `let rec` under --lib would pass the two above. *)
+  check "Q-164: a `let rec` that keeps nothing is still accepted"
+    (lib_verdict "let rec twice = fn (n: int) -> n * 2;\nprint_int (twice 21)")
+    "accepted";
+  let restriction src =
+    try let _ = Pipeline.process src in "accepted"
+    with Typer.Type_error (_, m) ->
+      if idx_of m "expected" >= 0 then "refused" else "refused: " ^ m in
+  let two_types name =
+    "let _ = vec_push " ^ name ^ " 1;\nlet _ = vec_push " ^ name ^ " \"s\";\n\
+     print_int (vec_len " ^ name ^ ")" in
+  check "Q-164: the value restriction reaches a `let rec` binding"
+    (restriction ("let rec store = vec_new ();\n" ^ two_types "store")) "refused";
+  check "Q-164: and a container bound inside a group"
+    (restriction ("let rec store = vec_new ()\nand touch = fn (n: int) -> vec_len store;\n"
+                  ^ two_types "store")) "refused";
+  (* The two shapes the fix must not have broken. *)
+  check "Q-164: mutual recursion still type-checks and runs"
+    (Pipeline.process
+       "let rec ev = fn (n: int) -> if n == 0 then true else od (n - 1)\n\
+        and od = fn (n: int) -> if n == 0 then false else ev (n - 1);\n\
+        if ev 4 then 1 else 0")
+    "1";
+  (* ⚠ a group MAY hold a non-function, and one that does is module-init code
+     rather than a call, so the boundary must not wrap it. *)
+  check "Q-164: a group holding a non-function still works"
+    (Pipeline.process "let rec x = 1\nand f = fn (n: int) -> n + x;\nf 2") "3";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

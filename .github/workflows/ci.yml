@@ -816,6 +816,13 @@ jobs:
           sh scripts/syntax_hint_check.sh
           sh scripts/syntax_hint_check.sh --poison
 
+      # v0.1.508.
+      - name: binding_form_check (every spelling gets the same verdict)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/binding_form_check.sh
+          sh scripts/binding_form_check.sh --poison
+
       - name: socket_parity
         if: ${{ !cancelled() }}
         run: sh scripts/socket_parity.sh
