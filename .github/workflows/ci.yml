@@ -789,6 +789,19 @@ jobs:
           sh scripts/module_privacy_check.sh
           sh scripts/module_privacy_check.sh --poison
 
+      # v0.1.505.
+      - name: refutable_let_check (a let that can fail is refused)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/refutable_let_check.sh
+          sh scripts/refutable_let_check.sh --poison
+
+      - name: fmt_comments_check (the formatter keeps column-1 comments)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/fmt_comments_check.sh
+          sh scripts/fmt_comments_check.sh --poison
+
       - name: socket_parity
         if: ${{ !cancelled() }}
         run: sh scripts/socket_parity.sh

@@ -2388,6 +2388,36 @@ let () =
      The shadowing cases are the reason this is a pass over the tree rather
      than a case in the parser: rewriting the token broke
      `test/parity/graphql_stack_portable.mere`, which binds `echo` itself. *)
+  (* v0.1.505: a `let` whose pattern can fail is refused at compile time.
+
+     `let Some n = e;` is a match with one arm, and the two constructs used to
+     give different answers to the same question — the match refused, the let
+     compiled and failed at run time. The witness comes from the same
+     `find_missing` the match uses. *)
+  (* Through `Pipeline.check`, which is what `mere check`, every emit path and
+     the language server ask: the exception the run path raises carries the
+     findings as data rather than in its printed form. *)
+  check "v0.1.505: a refutable let is refused, naming what is missing"
+    (let (_, ds) = Pipeline.check "type o = None | Some of int;\nlet Some n = None;\nprint_int n" in
+     String.concat " | "
+       (List.filter_map (fun (d : Pipeline.diagnostic) ->
+          if d.Pipeline.d_severity = Pipeline.Error then Some d.Pipeline.d_msg else None) ds))
+    ("this `let` pattern does not match every value (missing None)\n"
+     ^ "help: write it as a `match` with an arm for None\n"
+     ^ "note: a `let` binds; it has no other arm to take when the pattern does not match, so this would fail at run time");
+  check "v0.1.505: a constructor pattern on a one-constructor type is total"
+    (Pipeline.process "type pt = Pt of int;\nlet Pt n = Pt 7;\nn")
+    "7";
+  check "v0.1.505: tuple destructuring is untouched"
+    (Pipeline.process "let (a, b) = (1, 2);\na + b")
+    "3";
+  (* `if let` is the construct for a pattern that may not match: the parser
+     turns it into a two-armed match, so it never reaches this check. Pinned
+     here because that is true of how it is written today. *)
+  check "v0.1.505: `if let` is untouched"
+    (Pipeline.process
+       "type o = None | Some of int;\nlet pick = fn (x: o) -> if let Some n = x then n else 0;\npick (Some 5) + pick None")
+    "5";
   (* v0.1.504: `pub` inside a module.
 
      OPT-IN PER MODULE, and the third check is the one that makes it usable:

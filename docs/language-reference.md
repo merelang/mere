@@ -659,6 +659,7 @@ is something the compiler knows and the person cannot see.
 | non-exhaustive `match` with no wildcard for an unenumerable type | an approximation the checker cannot prove; a **named** missing case is an error, not a warning |
 | an arm no value can reach | an earlier arm already answers it |
 | **an unread binding** (v0.1.503) | a local `let` or a `match` binder that nothing reads. Prefix it with `_` if that is deliberate. Not reported for top-level names (a file that is imported has its readers elsewhere), for function parameters, or for any file that did not type-check — in a half-inferred tree "nothing reads this" is usually "the line that reads it is the one being typed" |
+| **a `let` that can fail** (v0.1.505) | an ERROR, not a warning: `let Some n = e;` is a match with one arm, and the value it does not handle is named. `let (a, b) = ...`, a record pattern and a constructor pattern on a one-constructor type are all total and stay free. `if let` is untouched — it is the construct for a pattern that may not match |
 | **a deprecated name** (v0.1.503) | one of the compiler's own names that has been retired, with the replacement. Only where the name resolves to the builtin: a binding of your own by that name is yours |
 
 `--warnings-as-errors` makes a run that produced any of these exit 1 —
