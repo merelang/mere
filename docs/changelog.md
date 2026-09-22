@@ -4,6 +4,80 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.505 — 2026-09-22
+
+_One question that had two answers, and a formatter that deleted what the
+editor had just started reading._
+
+**A `let` that can fail is refused at compile time.** `let Some n = e;` is a
+match with one arm, and until now the two constructs answered the same question
+differently: the `match` was refused with `non-exhaustive match (missing None)`
+and the `let` compiled, then failed at run time with `top-level let pattern did
+not match`. The witness comes from the same `find_missing` the match uses, so
+the error names the value that does not match:
+
+```
+error: this `let` pattern does not match every value (missing None)
+  = help: write it as a `match` with an arm for None
+  = note: a `let` binds; it has no other arm to take when the pattern does not
+    match, so this would fail at run time
+```
+
+What stays free: `let (a, b) = ...`, record patterns, a plain name, and **a
+constructor pattern on a type that has only one constructor** — that one is
+total, and refusing it would be refusing the ordinary way to open a wrapper.
+`if let` is untouched: the parser turns it into a two-armed match, which is the
+construct for a pattern that may not match.
+
+⚠ THE SAME SPLIT REAPPEARED ONE LAYER IN. With the check written, `mere check`
+and every emit path refused the program while the interpreter still failed at
+run time — because it walks declarations and RUNS each one as it goes, so a
+refutable `let` reached its own failure before anything drained the findings.
+The findings are now drained before each declaration is evaluated, and all
+three paths give the same answer.
+
+Measured before writing it: **zero** refutable `let`s in this repository,
+mere-ruby, mbrowse, medit2 and m3d. The sixteen places that look like one are
+all `if let`.
+
+**`mere fmt` keeps the comments in column 1.** It used to delete every comment
+in the file. That was written down as an MVP limitation and it was survivable
+while nothing else depended on comments — and then v0.1.504 taught hover to
+read the block above a definition, so one half of the toolchain was reading
+what the other half deleted. `textDocument/formatting` is the same function, so
+format-on-save was the delete.
+
+Column 1 only, and the reason is a measurement: of the 23,452 comment lines in
+this repository's `.mere` files, **19,338 (82%) start in column 1** — and those
+are exactly the blocks hover reads. The other two kinds need something the tree
+does not have: an indented comment belongs to an expression, and a trailing one
+belongs after a node whose extent no `Loc.t` records.
+
+The material was already there: the lexer has been able to collect comments
+since semantic tokens needed them, and it records a position and a width, so
+the text is a slice of its own line. Nothing had asked for them.
+
+⚠ Most top-level declarations **carry no position at all** — only `Top_let`,
+`Top_let_rec` and `Top_forward` do, which is why `Parser.declared_types` exists
+for the rest. A declaration that cannot be placed does not collect the comments
+above it; they go to the next one that can. Losing a comment is not an option,
+moving one down is the fallback, and it is written down here rather than
+discovered later.
+
+`scripts/fmt_comments_check.sh` holds three things: a column-1 comment survives
+and stays above its declaration, formatting is idempotent, and over
+`examples/` the count of column-1 comment lines does not go down — **287 files,
+6,316 lines in, 6,316 out**. It also prints what is still dropped (~612
+indented lines in `examples/`) so that the remainder stays visible rather than
+forgotten.
+
+### Counts
+
+`dune test` 2796 → **2800**, and two more gate scripts with poison runs in CI
+(`refutable_let_check`, `fmt_comments_check`).
+
+---
+
 ## v0.1.504 — 2026-09-22
 
 _The second pass over Gleam: four answers the compiler already had, a flag that

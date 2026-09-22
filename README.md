@@ -326,7 +326,7 @@ files=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.mere$')
 [ -z "$files" ] || dune exec mere -- fmt --check $files
 ```
 
-Known MVP limitations: comments are dropped (the lexer discards them), `module M { ... }` blocks are emitted as flat `M.foo` bindings, and a few Phase 36 sugars (operator sections, string interpolation) are emitted in their desugared form.
+Comments written in **column 1** are kept, above the declaration they were written above (v0.1.505). Known limitations: **indented and trailing comments are still dropped** — an indented one belongs to an expression and a trailing one to a node whose extent no position records; `module M { ... }` blocks are emitted as flat `M.foo` bindings; and a few Phase 36 sugars (operator sections, string interpolation) are emitted in their desugared form.
 
 ## Layout
 

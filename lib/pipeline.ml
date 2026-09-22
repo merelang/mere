@@ -560,6 +560,19 @@ let enforce_type_redecls () =
   | [] -> ()
   | rs -> raise (Type_redeclared rs)
 
+(* Just the `let` findings, drained and raised. Used by the interpreter before
+   it evaluates a declaration; `enforce_exhaustive` drains everything else at
+   the end, and both go through the same `Non_exhaustive` exception so the CLI
+   renders them identically. *)
+let enforce_refutable_lets () =
+  match Exhaustive.let_findings () with
+  | [] -> ()
+  | fs ->
+    let rendered = List.map (fun f -> (f.Exhaustive.f_loc, Exhaustive.text f)) fs in
+    if !Exhaustive.allow then
+      List.iter (fun (loc, msg) -> warn loc msg) rendered
+    else raise (Exhaustive.Non_exhaustive rendered)
+
 let enforce_exhaustive () =
   enforce_type_redecls ();
   let (ws, es) = Exhaustive.classify () in
@@ -848,7 +861,15 @@ let process_decls eval_env type_env decls =
       let bindings =
         Typer.enter_level (fun () ->
           let t = infer_top_let outer_env value in
+          Exhaustive.record_let pat.Ast.ploc t pat;
           Typer.check_pattern pat t) in
+      (* BEFORE evaluating it. The interpreter walks declarations and runs each
+         one as it goes, so a refutable `let` reached its own runtime failure
+         before anything drained the findings -- the run path answered "eval
+         error: top-level let pattern did not match" while `mere check` and
+         every emit path answered "missing None" at compile time. One question
+         had two answers again, one layer further in. *)
+      enforce_refutable_lets ();
       let v = Eval.eval_in !eval_env value in
       (match Eval.match_pattern pat v with
        | None ->
@@ -1855,6 +1876,25 @@ let diagnostics ?base_dir ?search_paths (source : string) : diagnostic list =
    The prelude is parsed along with the source (constructors have to be
    registered before the user's code is parsed) and then dropped: what comes back
    is the person's own file, reformatted. *)
+(* The comments the formatter is allowed to place: the ones that start in
+   column 1, as (line, text).
+
+   The lexer has been able to collect comments since semantic tokens needed
+   them; it records a position and a width, so the text is a slice of the line
+   it is on. Nothing else had asked, which is why `mere fmt` deleted every
+   comment in a file until v0.1.505. *)
+let column_one_comments (source : string) : (int * string) list =
+  let lines = Array.of_list (String.split_on_char '\n' source) in
+  let acc = ref [] in
+  ignore (try Lexer.tokenize ~comments:acc source with _ -> []);
+  List.filter_map (fun (loc : Loc.t) ->
+    if loc.Loc.col <> 1 || loc.Loc.line < 1 || loc.Loc.line > Array.length lines then None
+    else
+      let line = lines.(loc.Loc.line - 1) in
+      let w = min loc.Loc.width (String.length line) in
+      if w <= 0 then None else Some (loc.Loc.line, String.sub line 0 w))
+    (List.sort (fun (a : Loc.t) b -> compare a.Loc.line b.Loc.line) !acc)
+
 let format_source ?(base_dir = Sys.getcwd ()) ?(search_paths = []) source =
   let prelude_decls = parse_prelude () in
   let n_prelude = List.length prelude_decls in
@@ -1862,4 +1902,26 @@ let format_source ?(base_dir = Sys.getcwd ()) ?(search_paths = []) source =
   let rec drop n xs =
     if n <= 0 then xs else match xs with [] -> [] | _ :: rest -> drop (n - 1) rest
   in
-  Formatter.format_program { prog with Ast.decls = drop n_prelude prog.Ast.decls }
+  (* A declaration the AST cannot place may still be placeable by name: the
+     parser records where each `type` / record declaration's name was. *)
+  let decl_line (d : Ast.top_decl) =
+    match Formatter.default_decl_line d with
+    | Some l -> Some l
+    | None ->
+      let named =
+        match d with
+        | Ast.Top_type (n, _, _) | Ast.Top_record (n, _, _)
+        | Ast.Top_type_alias (n, _, _) -> Some n
+        | _ -> None
+      in
+      (match named with
+       | None -> None
+       | Some n ->
+         (match List.assoc_opt n !Parser.declared_types with
+          | Some (l : Loc.t) when l.Loc.file = None && l.Loc.line > 0 -> Some l.Loc.line
+          | _ -> None))
+  in
+  Formatter.format_program
+    ~comments:(column_one_comments source)
+    ~decl_line
+    { prog with Ast.decls = drop n_prelude prog.Ast.decls }
