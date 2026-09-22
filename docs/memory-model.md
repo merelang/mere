@@ -335,6 +335,15 @@ The "Phase 2" section below is a record of the first implementation slices (the 
 
 This is a narrowed variant of ML's standard value restriction (limited to types involving mutable containers) — ordinary fn lets like `let inc = fn x -> x + 1` remain polymorphic.
 
+**Fixed in v0.1.508**: the restriction, and the `--lib` boundary escape check
+below, now reach **every spelling of a top-level binding**. Until then both were
+applied by the `let` arm of each declaration loop and inlined by hand in the
+`let rec` arm, so `let rec store = vec_new ();` was generalised where
+`let store = vec_new ();` was not, and one `Vec` could hold an `int` and a
+`str`. `scripts/binding_form_check.sh` now runs each property in all five
+spellings — `let`, `let rec`, a member of a `let rec ... and ...`, and both
+inside a `module` — and fails when they disagree, whichever one is right.
+
 **Added in Phase 38.G-1 (2026-06-22)**: **automatic scope-bound Drop** for `let v = owned_vec_new () in body` (Level 1). Implements N1 of the N1/N2/N3 decomposition from the `39_nll_linear_design.md` design notes:
 
 - If body doesn't let v escape lexically, `free(v->data)` is auto-emitted at scope end (same shape as the Phase 15.13 `with`).
