@@ -589,4 +589,20 @@ let swap = fn t -> (snd t, fst t);
 let const = fn a -> fn b -> a;
 // flip f x y = f y x. `(flip sub) 3 10` is `sub 10 3`.
 let flip = fn f -> fn a -> fn b -> f b a;
+// `echo x` prints x to stderr and answers x, so it can be dropped into the
+// middle of an expression without changing what the program computes --- and
+// taken out again without moving anything.
+//
+// The front end rewrites `echo` into `echo_at "<file>:<line>"`, which is this
+// same function with the position already filled in (see Parser: the rewrite
+// is why a debug print says WHERE without anyone typing the line number).
+// `echo` stays defined on its own so that a front end which does not do that
+// rewrite --- the self-hosted one --- still has a working, position-less echo
+// rather than an unbound name.
+//
+// stderr, not stdout: a program's answer is its stdout, and a debugging aid
+// that goes into the answer is one that changes what it is watching.
+let echo_at = fn (where: str) -> fn x ->
+  let _ = print_err (where ++ ": " ++ show x) in x;
+let echo = fn x -> let _ = print_err (show x) in x;
 |}

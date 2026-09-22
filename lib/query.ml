@@ -89,6 +89,10 @@ let rec pattern_bindings (p : Ast.pattern) : (string * Loc.t) list =
   | Ast.P_record (_, fields) -> List.concat_map (fun (_, p) -> pattern_bindings p) fields
   (* An or-pattern binds the same names on both sides, so one side is enough. *)
   | Ast.P_or (a, _) -> pattern_bindings a
+  (* The binder is at the pattern's own position, which is the literal's --
+     close enough for an editor, and the only position the node carries. *)
+  | Ast.P_str_prefix (_, name) ->
+    if name = "_" then [] else [ (name, p.Ast.ploc) ]
   | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_unit
   | Ast.P_constr (_, None) -> []
 
@@ -425,6 +429,72 @@ let occurrences ?(prelude_decls = 0) (prog : Ast.program)
     end) prog.Ast.decls;
   walk top prog.Ast.main;
   List.rev !out
+
+(* --- bound and never read -------------------------------------------------
+
+   A binding whose only occurrence is its own binder. The uses come from
+   `occurrences` above, which already resolves a name to the innermost binding
+   that owns it, so shadowing is answered by the walker hover and rename use and
+   not by a second copy of the rule — the first thing that would rot here is a
+   private walker that disagrees with that one about which `x` a use meant.
+
+   WHAT IS REPORTED: `let` bindings inside expressions, and the names a `match`
+   arm's pattern binds. Both are local to the file and cannot be read from
+   anywhere else, so "nothing reads it" is a fact rather than a guess.
+
+   WHAT IS NOT, and why:
+
+   - TOP-LEVEL names. A file that is imported has its declarations spliced into
+     the importer, and a file opened on its own in an editor is checked on its
+     own: its exports then have no readers, and every one of them would be
+     reported. Mere has no `pub`, so nothing distinguishes a library's surface
+     from dead code. Reporting these needs a visibility marker first.
+   - FUNCTION PARAMETERS. An unused parameter is usually an interface being
+     honoured, not a mistake.
+   - `let rec`. Its binder is not an occurrence, so it is invisible here; the
+     day that changes this will start reporting them, which is why the filter
+     below is written against what IS emitted rather than against a list of
+     node kinds.
+
+   A name starting with `_` is never reported: that is the spelling of "I know,
+   and I mean it", and the fix this offers is to write it. *)
+
+type unused = { u_name : string; u_loc : Loc.t }
+
+let unused_bindings ?(prelude_decls = 0) (prog : Ast.program) : unused list =
+  let key (b : binding) =
+    (b.b_name, b.b_loc.Loc.line, b.b_loc.Loc.col, b.b_loc.Loc.file)
+  in
+  let used = Hashtbl.create 64 in
+  let declared = Hashtbl.create 64 in
+  let order = ref [] in
+  List.iter (fun ((loc : Loc.t), (b : binding)) ->
+    if loc.Loc.line = b.b_loc.Loc.line && loc.Loc.col = b.b_loc.Loc.col
+       && loc.Loc.file = b.b_loc.Loc.file
+    then begin
+      if not (Hashtbl.mem declared (key b)) then begin
+        Hashtbl.add declared (key b) ();
+        order := b :: !order
+      end
+    end
+    else Hashtbl.replace used (key b) ())
+    (occurrences ~prelude_decls prog);
+  (* The top-level binders, which are emitted as occurrences too and are the
+     ones this does not answer for. *)
+  let top_level = Hashtbl.create 32 in
+  List.iter (function
+    | Ast.Top_let (pat, _) ->
+      List.iter (fun (n, (l : Loc.t)) ->
+        Hashtbl.replace top_level (n, l.Loc.line, l.Loc.col, l.Loc.file) ())
+        (pattern_bindings pat)
+    | _ -> ()) prog.Ast.decls;
+  List.filter_map (fun (b : binding) ->
+    if Hashtbl.mem used (key b) then None
+    else if Hashtbl.mem top_level (key b) then None
+    else if b.b_prelude || b.b_loc.Loc.file <> None then None
+    else if b.b_name = "" || b.b_name.[0] = '_' then None
+    else Some { u_name = b.b_name; u_loc = b.b_loc })
+    (List.rev !order)
 
 (* Two occurrences are of the same binding when they resolved to the same one —
    same name, introduced at the same place. *)

@@ -164,6 +164,10 @@ let rec fmt_pat p =
   | P_int n -> string_of_int n
   | P_bool true -> "true" | P_bool false -> "false"
   | P_str s -> escape_string_for_fmt s
+  (* The sugar, printed back as the sugar. This is why it is an AST node and
+     not a rewrite in the parser: the formatter runs on a tree that still has
+     it (`Pipeline.parse_program ~keep_sugar:true`). *)
+  | P_str_prefix (lit, name) -> escape_string_for_fmt lit ^ " <> " ^ name
   | P_unit -> "()"
   | P_constr (c, None) -> c
   | P_constr (c, Some sub) -> c ^ " " ^ fmt_pat_atom sub

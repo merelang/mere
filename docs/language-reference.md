@@ -462,6 +462,35 @@ save 100 10 5                       // 115
 
 ## 4. Patterns
 
+### String prefix patterns (v0.1.504)
+
+```mere
+match url with
+| "https://" <> rest -> secure rest
+| "http://" <> rest -> plain rest
+| "mailto:" <> _ -> mail
+| other -> none other
+```
+
+The scrutinee starts with the literal, and what is left is bound (`_` discards
+it). The literal's length is counted in **code points**, not bytes: `"ét" <>
+rest` on `"été"` binds `"é"`, where the prefix is two characters and three
+bytes.
+
+Lowered before inference into the guard and the slice the same code was writing
+by hand — `str_starts_with`, then `utf8_sub` — so no backend knows the syntax
+exists. Two consequences worth knowing:
+
+- **A prefix arm does not make a match total.** It is a guarded arm, and a
+  guarded arm closes nothing, so a `match` on `str` still wants a catch-all.
+- **A guard may name the binder**: `| "ab" <> r when str_len r > 1 ->` works,
+  because the binding is made for the guard as well as for the body.
+
+⚠ `utf8_sub` walks the string. That is right for parsing and wrong for a hot
+loop; a byte-indexed slice would be a builtin on five backends, and waits for
+something measured to ask for it.
+
+
 | Kind | Syntax | Example |
 |---|---|---|
 | Wildcard | `_` | `_` |
@@ -590,7 +619,60 @@ Items previously listed as "not implemented" were implemented incrementally thro
 - **FFI types, and the fact that they differ per backend**: this entry said "`int / bool / str / unit` only (float / tuple / record / variant / callback deferred, Phase 32)" long after it stopped being true. Measured at v0.1.444: on the **C and LLVM backends** `float`, a monomorphic **record**, and **`bytes`** all cross an `extern fn`, and a hand-written C file linked against the emitted code sees them as `double`, a by-value struct, and `mere_bytes*` (`{ long long len; unsigned char data[]; }`). Two cautions. **`int` at the boundary is C `int`**, 32 bits, not the `long long` Mere uses internally (v0.1.41) -- a pointer does not fit, so handles cross as `int` the way the socket family does. And **a record's C layout is the emitted one**: field order as declared, names prefixed `mu_`. Do not transcribe it by hand -- `mere --header <file>` prints the boundary's header, and a shim should include that. **Wasm is different**: the same declaration becomes an `env` import with every parameter an `i32`, so a value crosses as a pointer and the host glue does the reading. Still untested and therefore still unclaimed: tuples, variants, and passing a Mere closure as a callback (browser glue does that on Wasm through `__indirect_function_table`, which is not the same question).
 - **Polymorphism**: HM inference + let-polymorphism + per-instantiation specialization of polymorphic user let-recs (Phase 23.3 / 25.5 / 26.4). Phase 36 introduced a **narrow value restriction** (don't generalize on let-bind when the type contains a mutable container).
 
-## 9. Status summary
+## 8.5. `pub` inside a module (v0.1.504)
+
+```mere
+module Store {
+  let secret_key = fn (n: int) -> n * 7;   // internal
+  pub let get = fn (n: int) -> secret_key n + 1;
+}
+print_int (Store.get 5)        // fine
+print_int (Store.secret_key 5) // type error: `Store.secret_key` is internal to module `Store`
+```
+
+**Opt-in per module.** A module that marks nothing exports everything, exactly
+as every module written before this does; a module that marks anything is
+saying it has decided what its surface is, and its unmarked members become
+internal. Members of the module — and of modules nested inside it — reach each
+other regardless.
+
+`pub` is not a keyword: it is an identifier the module-body parser recognises
+in front of `let`, so a program using `pub` as a name is unaffected.
+
+⚠ **This is module-level only.** File-level visibility has nothing to enforce,
+because `import "path";` splices the imported file's declarations into this
+one's: after an import there is a single top-level namespace, and no boundary
+to enforce. See the changelog for v0.1.504.
+
+---
+
+## 9. What the compiler warns about
+
+A warning is not an error: the program compiles and runs. Every one of these
+is something the compiler knows and the person cannot see.
+
+| warning | what it means |
+|---|---|
+| a top-level name collides with a C keyword or libc symbol | the C backend will refuse this later, with an error about generated code rather than about your line ([reserved-names.md](reserved-names.md)) |
+| `extern fn` declares a different arity than the compiler implements | the same, one layer down |
+| `main` is not special in Mere | the entry point is the file's trailing expression; a binding named `main` reads as if it were one |
+| non-exhaustive `match` with no wildcard for an unenumerable type | an approximation the checker cannot prove; a **named** missing case is an error, not a warning |
+| an arm no value can reach | an earlier arm already answers it |
+| **an unread binding** (v0.1.503) | a local `let` or a `match` binder that nothing reads. Prefix it with `_` if that is deliberate. Not reported for top-level names (a file that is imported has its readers elsewhere), for function parameters, or for any file that did not type-check — in a half-inferred tree "nothing reads this" is usually "the line that reads it is the one being typed" |
+| **a deprecated name** (v0.1.503) | one of the compiler's own names that has been retired, with the replacement. Only where the name resolves to the builtin: a binding of your own by that name is yours |
+
+`--warnings-as-errors` makes a run that produced any of these exit 1 —
+everything is still printed and still emitted, and the status is the answer.
+It counts warnings PRODUCED, not the ten a terminal prints.
+
+A terminal prints at most **ten** warning blocks and then says how many more
+there are; an editor draws all of them. (The first tree the unread-binding
+check was pointed at answered with 462, which is four thousand lines of stderr
+in front of whatever you ran the compiler to see.)
+
+---
+
+## 10. Status summary
 
 - **1573 tests passing** (test/test_basic.ml).
 - **4-backend feature parity**: interpreter + C / LLVM IR / Wasm runtime.

@@ -1,0 +1,26 @@
+// Fixture for scripts/unused_check.sh.
+//
+// Three bindings here are read by nothing and must be reported; everything
+// else must stay silent, and the silent half is the half worth having --- a
+// check that fires on a name somebody reads gets that name deleted.
+//
+// Do not "tidy" this file. Its shape IS the test.
+
+let f = fn (n: int) ->
+  let dead_one = 1;        // REPORTED
+  let used_one = n + 1;    // silent: read on the last line of this fn
+  let _ignored = 2;        // silent: the `_` is the way to say "deliberate"
+  used_one;
+
+type box = Empty | Full of int;
+
+let g = fn (b: box) ->
+  match b with
+  | Empty -> 0
+  | Full dead_two -> 7;    // REPORTED: a pattern binds it, nothing reads it
+
+let h = fn (n: int) ->
+  let (dead_three, kept) = (n, n + 1);   // REPORTED (first), silent (second)
+  kept;
+
+print_int (f 1 + g Empty + h 2)

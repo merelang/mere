@@ -26,6 +26,12 @@ type doc = {
      server says otherwise, and "the import is fixed now" is exactly the message
      nobody would think to send. *)
   extra : string list;
+  (* This document's own diagnostics, as data rather than as the notification
+     they were sent in. A code action is an answer to one of them, and the
+     editor asks for actions in a separate request: re-checking the file to
+     answer it would be the same work a second time, and — on a buffer the
+     editor has since changed — about a different file. *)
+  diags : Pipeline.diagnostic list;
 }
 
 type state = {
@@ -260,7 +266,8 @@ let check_document ?search_paths (previous : string list) uri text =
            d_kind = "internal error";
            d_msg = Printexc.to_string e;
            d_severity = Pipeline.Error;
-           d_file = None } ])
+           d_file = None;
+           d_fix = None } ])
   in
   (* A diagnostic about another file is published against *that* file's URI,
      where its line numbers mean something. *)
@@ -291,7 +298,7 @@ let check_document ?search_paths (previous : string list) uri text =
   (* Clear whatever we said about files that are no longer implicated. *)
   let cleared = List.filter (fun u -> not (List.mem u others)) previous in
   (publish ~text uri mine :: List.map for_other others @ List.map (fun u -> publish u []) cleared,
-   tree, others)
+   tree, others, mine)
 
 (* The vocabulary of semantic tokens, in the order the legend declares them —
    a token names its type by index into this list. *)
@@ -319,11 +326,25 @@ let server_capabilities =
     ("completionProvider", Json.Obj [ ("resolveProvider", Json.Bool false) ]);
     ("documentSymbolProvider", Json.Bool true);
     ("referencesProvider", Json.Bool true);
+    (* The same answer as references, drawn in the file. Advertised separately
+       because the editor asks for it on every cursor move and would not think
+       to call the panel's request for that. *)
+    ("documentHighlightProvider", Json.Bool true);
+    ("typeDefinitionProvider", Json.Bool true);
+    (* A space is when an editor asks for the next parameter; an open paren is
+       when it asks for the first. *)
+    ("signatureHelpProvider",
+     Json.Obj [ ("triggerCharacters", Json.List [ Json.Str " "; Json.Str "(" ]) ]);
     (* `prepareSupport` lets the editor ask, before showing its rename box,
        whether this thing can be renamed at all — which is how a refusal becomes
        a message instead of a failed edit. *)
     ("renameProvider", Json.Obj [ ("prepareProvider", Json.Bool true) ]);
     ("documentFormattingProvider", Json.Bool true);
+    (* Actions are computed on request from the document's own diagnostics and
+       tree, so there is nothing to resolve later and no kind filter to honour:
+       the server answers with everything that applies at the range it was
+       given. *)
+    ("codeActionProvider", Json.Bool true);
     (* The legend is the agreement about what the numbers in the token stream
        mean: the server picks the vocabulary, and every token is an index into
        it. *)
@@ -340,7 +361,7 @@ let server_capabilities =
 let extra_of state uri =
   match List.assoc_opt uri state.docs with Some d -> d.extra | None -> []
 
-let set_doc state uri text tree extra =
+let set_doc state uri text tree extra diags =
   let previous = List.assoc_opt uri state.docs in
   let tree =
     match tree with
@@ -349,8 +370,11 @@ let set_doc state uri text tree extra =
        does not check, and a hover from a moment ago is better than none. *)
     | None -> (match previous with Some d -> d.tree | None -> None)
   in
+  (* The diagnostics are NOT kept the way the tree is. They describe the text
+     that was just checked, and an action offered against a stale one would
+     edit a line that has moved. *)
   { state with
-    docs = (uri, { text; tree; extra }) :: List.remove_assoc uri state.docs }
+    docs = (uri, { text; tree; extra; diags }) :: List.remove_assoc uri state.docs }
 
 (* The position a request asks about, translated into Mere's 1-based counting,
    together with the tree to ask. *)
@@ -371,24 +395,103 @@ let ask state uri (params : Json.t) =
 let doc_text state uri =
   match List.assoc_opt uri state.docs with Some d -> d.text | None -> ""
 
+(* The comment block directly above a definition, as its documentation.
+
+   Contiguous `//` lines ending on the line before the definition, with the
+   marker and one space removed. No new syntax: Gleam distinguishes `///` (a
+   doc, which its generator publishes) from `//` (a note to the next reader),
+   and that distinction earns its keep there because there is a generator.
+   Mere has none, so requiring a third slash would mean every comment already
+   written shows nothing.
+
+   A blank line ends the block, which is how a person already separates "about
+   this definition" from "about the section". *)
+let doc_above (text : string) (line : int) : string option =
+  let lines = String.split_on_char '\n' text in
+  let arr = Array.of_list lines in
+  let strip (s : string) =
+    let t = String.trim s in
+    if String.length t >= 2 && String.sub t 0 2 = "//" then
+      let rest = String.sub t 2 (String.length t - 2) in
+      Some (if String.length rest > 0 && rest.[0] = ' ' then
+              String.sub rest 1 (String.length rest - 1)
+            else rest)
+    else None
+  in
+  let rec up i acc =
+    if i < 0 then acc
+    else
+      match strip arr.(i) with
+      | Some c -> up (i - 1) (c :: acc)
+      | None -> acc
+  in
+  (* `line` is 1-based and is the definition's own line; the block is what sits
+     immediately above it. *)
+  let start = line - 2 in
+  if start < 0 || start >= Array.length arr then None
+  else match up start [] with
+    | [] -> None
+    | cs -> Some (String.concat "\n" cs)
+
 (* Hover: `Query.node_at` finds the narrowest node whose token contains the
-   cursor, and the typer has already written that node's type onto it. *)
+   cursor, and the typer has already written that node's type onto it.
+
+   Two things it did not do until v0.1.504:
+
+   - IT ANSWERED NOTHING ON A DEFINITION. `node_at` looks for an expression, and
+     the `inc` in `let inc = ...` is a pattern, so hovering the very place a
+     name is introduced returned nothing at all. `Query.references_at` resolves
+     both — its walker emits the binder as an occurrence — so it is the
+     fallback, and the answer is the binding's own name and type.
+   - IT SHOWED NO DOCUMENTATION. The comment above the definition is what a
+     person wrote to be read at exactly this moment. Found from the binding's
+     position, so hovering a USE shows what was written at the DEFINITION. *)
 let hover state uri (params : Json.t) =
   match ask state uri params with
   | None -> Json.Null
   | Some (prog, line, col) ->
-    (match Query.node_at prog line col with
+    let text = doc_text state uri in
+    let binding =
+      Option.map fst
+        (Query.references_at ~prelude_decls:(Pipeline.prelude_decl_count ())
+           prog line col)
+    in
+    let node = Query.node_at prog line col in
+    let signature =
+      match Option.bind node Query.describe with
+      | Some s -> Some s
+      | None ->
+        Option.map (fun (b : Query.binding) ->
+          match b.Query.b_ty with
+          | Some t -> b.Query.b_name ^ " : " ^ Ast.pp_ty t
+          | None -> b.Query.b_name) binding
+    in
+    (match signature with
      | None -> Json.Null
-     | Some node ->
-       (match Query.describe node with
-        | None -> Json.Null
-        | Some text ->
-          Json.Obj [
-            ("contents",
-             Json.Obj [ ("kind", Json.Str "markdown");
-                        ("value", Json.Str ("```mere\n" ^ text ^ "\n```")) ]);
-            ("range", range_of_loc ~text:(doc_text state uri) node.Ast.loc);
-          ]))
+     | Some sig_text ->
+       let doc =
+         match binding with
+         | Some b when b.Query.b_loc.Loc.file = None && not b.Query.b_prelude ->
+           doc_above text b.Query.b_loc.Loc.line
+         | _ -> None
+       in
+       let value =
+         "```mere\n" ^ sig_text ^ "\n```"
+         ^ (match doc with Some d -> "\n\n" ^ d | None -> "")
+       in
+       let range =
+         match node with
+         | Some n -> range_of_loc ~text n.Ast.loc
+         | None ->
+           (match binding with
+            | Some b -> range_of_loc ~text b.Query.b_loc
+            | None -> range_of_loc ~text Loc.dummy)
+       in
+       Json.Obj [
+         ("contents",
+          Json.Obj [ ("kind", Json.Str "markdown"); ("value", Json.Str value) ]);
+         ("range", range);
+       ])
 
 (* Completion: every name visible at the position. The kind is what an editor
    draws the icon from — 3 is Function, 6 is Variable — and a name whose type is
@@ -470,6 +573,150 @@ let semantic_tokens state uri =
                 Json.List (List.map (fun n -> Json.Num (float_of_int n))
                              (List.concat (List.rev !data)))) ]
   | _ -> Json.Obj [ ("data", Json.List []) ]
+
+(* Document highlight: the same answer as find-references, drawn in the file
+   instead of listed in a panel. The editor asks for it on every cursor move, so
+   it is the one place where "same question, different request" is worth saying
+   out loud — this handler must not start computing something else.
+
+   Every occurrence is kind 1 (Text). LSP also has Read and Write, and Mere has
+   no assignment: a name is bound once and read after that, so claiming to
+   distinguish them would be inventing a difference the language does not have. *)
+let document_highlight state uri (params : Json.t) =
+  match ask state uri params with
+  | None -> Json.List []
+  | Some (prog, line, col) ->
+    (match Query.references_at ~prelude_decls:(Pipeline.prelude_decl_count ())
+             prog line col with
+     | None -> Json.List []
+     | Some (_, locs) ->
+       Json.List (List.map (fun loc ->
+         Json.Obj [ ("range", range_of_loc ~text:(doc_text state uri) loc);
+                    ("kind", Json.Num 1.0) ]) locs))
+
+(* Go to type definition: not where this name was bound, but where the TYPE it
+   has was declared.
+
+   The type is on the node (inference wrote it there); the declaration's
+   position is in `Parser.declared_types`, which the parser fills as it reads
+   each `type` / record declaration. `Top_type` itself carries no position,
+   which is why that table exists at all.
+
+   Prelude types are excluded: `list` and `option` are declared in a text that
+   is prepended to every program, and sending an editor there is sending it to a
+   file the person cannot open. *)
+let type_definition state uri (params : Json.t) =
+  match ask state uri params with
+  | None -> Json.Null
+  | Some (prog, line, col) ->
+    (match Query.node_at prog line col with
+     | None -> Json.Null
+     | Some node ->
+       (match node.Ast.ty with
+        | None -> Json.Null
+        | Some t ->
+          (* The head of the type, through any alias chain the typer resolved:
+             `int list` goes to `list`, which is what a person asking "what is
+             this" means. A type with no name (a function, a tuple) has no
+             declaration to go to. *)
+          (match Ast.walk t with
+           | Ast.TyCon (name, _) ->
+             (match List.assoc_opt name !Parser.declared_types with
+              | Some (loc : Loc.t) when loc.Loc.file = None && loc.Loc.line > 0 ->
+                Json.Obj [ ("uri", Json.Str uri);
+                           ("range", range_of_loc ~text:(doc_text state uri) loc) ]
+              | _ -> Json.Null)
+           | _ -> Json.Null)))
+
+(* Signature help: what is being called here, and which argument is being typed.
+
+   In a curried language this is a smaller question than it looks. `f a b` is
+   `App (App (f, a), b)`, so `Ast.rv_spine` — which the range-check pass already
+   uses — answers both halves at once: the head is what is being called, and the
+   number of arguments already in the spine is which parameter comes next.
+
+   FINDING THE CALL is the part with a guess in it. A `Loc.t` is a start and a
+   width, so no node knows where it ends and "the call the cursor is inside" is
+   not a question the tree can answer. What it can answer is "the nearest call
+   head at or before the cursor, on this line", which is where the cursor is
+   when an editor asks — right after typing a name and a space. A call that
+   spans lines gets no help rather than the wrong help. *)
+let signature_help state uri (params : Json.t) =
+  match ask state uri params with
+  | None -> Json.Null
+  | Some (prog, line, col) ->
+    let best = ref None in
+    let consider (e : Ast.expr) =
+      match e.Ast.node with
+      | Ast.App _ ->
+        let (head, args) = Ast.rv_spine e in
+        (match head.Ast.node, head.Ast.ty with
+         | Ast.Var name, Some ty
+           when head.Ast.loc.Loc.line = line && head.Ast.loc.Loc.col <= col ->
+           (* Arguments BEFORE THE CURSOR, not arguments in the call. The tree
+              is the finished parse of the whole buffer, so the call always has
+              all of them; what the editor is asking is how many the person has
+              typed so far, and that is a question about positions. *)
+           let n =
+             List.length
+               (List.filter (fun (a : Ast.expr) ->
+                  a.Ast.loc.Loc.line < line
+                  || (a.Ast.loc.Loc.line = line && a.Ast.loc.Loc.col < col)) args)
+           in
+           (* How many parameters this head has, to tell a call that is still
+              being written from one that is finished. Without extents, that is
+              the only way to stop answering about `pick` when the cursor has
+              moved past `(pick Red)` and is filling in the call around it. *)
+           let rec arity (t : Ast.ty) =
+             match Ast.walk t with Ast.TyArrow (_, r) -> 1 + arity r | _ -> 0
+           in
+           let open_call = n < arity ty in
+           let better =
+             match !best with
+             | None -> true
+             | Some (c, k, o, _, _) ->
+               (* An unfinished call beats a finished one wherever it is; among
+                  equals, the nearest head, and then the longest spine (the
+                  outermost App, which is the whole call). *)
+               if open_call <> o then open_call
+               else head.Ast.loc.Loc.col > c
+                    || (head.Ast.loc.Loc.col = c && n > k)
+           in
+           if better then
+             best := Some (head.Ast.loc.Loc.col, n, open_call, name, ty)
+         | _ -> ())
+      | _ -> ()
+    in
+    let rec walk (e : Ast.expr) = consider e; List.iter walk (Ast.children e) in
+    List.iter (fun d -> List.iter walk (Ast.decl_exprs d)) prog.Ast.decls;
+    walk prog.Ast.main;
+    (match !best with
+     | None -> Json.Null
+     | Some (_, applied, _, name, ty) ->
+       (* The parameters, left to right, off the arrow chain. `int -> str -> bool`
+          has two; everything after them is the result. *)
+       let rec params_of (t : Ast.ty) =
+         match Ast.walk t with
+         | Ast.TyArrow (p, r) -> Ast.pp_ty p :: params_of r
+         | _ -> []
+       in
+       let ps = params_of ty in
+       let label = name ^ " : " ^ Ast.pp_ty ty in
+       Json.Obj [
+         ("signatures",
+          Json.List [
+            Json.Obj [
+              ("label", Json.Str label);
+              ("parameters",
+               Json.List (List.map (fun p -> Json.Obj [ ("label", Json.Str p) ]) ps));
+            ] ]);
+         ("activeSignature", Json.Num 0.0);
+         (* Applied arguments are behind the cursor; the one being typed is the
+            next. Clamped, because a fully applied call is still something an
+            editor will ask about. *)
+         ("activeParameter",
+          Json.Num (float_of_int (min applied (max 0 (List.length ps - 1)))));
+       ])
 
 (* Find references, and rename, which are the same question: where else is *this*
    binding — not every name spelled the same. Shadowing is the difficulty, and it
@@ -595,6 +842,116 @@ let definition state uri (params : Json.t) =
        Json.Obj [ ("uri", Json.Str uri);
                   ("range", range_of_loc ~text:(doc_text state uri) loc) ])
 
+(* --- code actions ---------------------------------------------------------
+
+   An action is an answer the compiler already has, in the shape an editor can
+   apply. Nothing here computes a new fact about the program: the missing arm
+   was written by `Exhaustive` before the diagnostic was published, and the type
+   in `let fn` is the one inference wrote on the value. What this adds is the
+   edit — a position and the characters to put there — which is the part a
+   sentence on a terminal cannot carry.
+
+   Every action is built from the CURRENT document's own state, and the request
+   names the range the cursor is in, so an action only appears where its subject
+   is. *)
+
+(* A zero-width range: an insertion point rather than a selection. `range_of_loc`
+   widens to at least one character, which is right for an underline and wrong
+   for this — it would make the edit REPLACE the character it starts at. *)
+let range_at ?(text = "") (loc : Loc.t) =
+  let p = position ~text loc.Loc.line loc.Loc.col in
+  Json.Obj [ ("start", p); ("end", p) ]
+
+(* `width` characters from `loc` are replaced; 0 of them is an insertion. *)
+let text_edit ~text ?(width = 0) (loc : Loc.t) (s : string) =
+  let range =
+    if width <= 0 then range_at ~text loc
+    else
+      Json.Obj [ ("start", position ~text loc.Loc.line loc.Loc.col);
+                 ("end", position ~text loc.Loc.line (loc.Loc.col + width)) ]
+  in
+  Json.Obj [ ("range", range); ("newText", Json.Str s) ]
+
+let code_action ?(kind = "quickfix") ~uri ~edits title =
+  Json.Obj [
+    ("title", Json.Str title);
+    ("kind", Json.Str kind);
+    ("edit", Json.Obj [ ("changes", Json.Obj [ (uri, Json.List edits) ]) ]);
+  ]
+
+(* The lines the request is asking about, in Mere's 1-based counting. An action
+   is offered when the thing it edits is on one of them. *)
+let range_lines (params : Json.t) =
+  let r = Json.member "range" params in
+  let line_of side =
+    Option.value ~default:(-1)
+      (Json.to_int_opt (Json.member "line" (Json.member side r)))
+  in
+  (line_of "start" + 1, line_of "end" + 1)
+
+(* Quickfixes: one per diagnostic that arrived with a fix attached. *)
+let fix_actions state uri (params : Json.t) =
+  let (lo, hi) = range_lines params in
+  let text = doc_text state uri in
+  match List.assoc_opt uri state.docs with
+  | None -> []
+  | Some d ->
+    List.filter_map (fun (dg : Pipeline.diagnostic) ->
+      match dg.Pipeline.d_fix with
+      | None -> None
+      (* The diagnostic's own line, not the fix's: the underline is what the
+         person's cursor is on when they ask. *)
+      | Some f when dg.Pipeline.d_loc.Loc.line >= lo && dg.Pipeline.d_loc.Loc.line <= hi ->
+        Some (code_action ~uri
+                ~edits:[ text_edit ~text ~width:f.Exhaustive.fx_width
+                           f.Exhaustive.fx_at f.Exhaustive.fx_text ]
+                f.Exhaustive.fx_title)
+      | Some _ -> None)
+      d.diags
+
+(* `let fn NAME: TY;` above a top-level binding that has no such declaration.
+
+   Mere has no annotation syntax on a `let` itself — the way to state a
+   top-level name's type is the forward declaration — so this action writes
+   that, on the line above. The type comes from inference, so accepting it can
+   never change what the program means; what it can do is make the next change
+   to that definition fail HERE, against a promise, instead of somewhere the
+   inferred type leaked to. *)
+let annotate_actions state uri (params : Json.t) =
+  let (lo, hi) = range_lines params in
+  let text = doc_text state uri in
+  match List.assoc_opt uri state.docs with
+  | Some { tree = Some prog; _ } ->
+    let declared =
+      List.filter_map (function
+        | Ast.Top_forward (n, _, _) -> Some n
+        | _ -> None) prog.Ast.decls
+    in
+    let n_prelude = Pipeline.prelude_decl_count () in
+    List.concat (List.mapi (fun i decl ->
+      if i < n_prelude then []
+      else
+        match decl with
+        | Ast.Top_let ({ Ast.pnode = Ast.P_var name; ploc; _ }, (v : Ast.expr)) ->
+          (match v.Ast.ty with
+           | Some ty
+             when ploc.Loc.file = None && ploc.Loc.line >= lo && ploc.Loc.line <= hi
+                  && not (List.mem name declared) ->
+             (* `let ` is four characters; the name's column is the only
+                position the tree records for this declaration. *)
+             let at = { ploc with Loc.col = max 1 (ploc.Loc.col - 4) } in
+             let indent = String.make (at.Loc.col - 1) ' ' in
+             [ code_action ~kind:"refactor.rewrite" ~uri
+                 ~edits:[ text_edit ~text at
+                            (Printf.sprintf "let fn %s: %s;\n%s" name (Ast.pp_ty ty) indent) ]
+                 (Printf.sprintf "Declare `%s : %s`" name (Ast.pp_ty ty)) ]
+           | _ -> [])
+        | _ -> []) prog.Ast.decls)
+  | _ -> []
+
+let code_actions state uri (params : Json.t) =
+  Json.List (fix_actions state uri params @ annotate_actions state uri params)
+
 (* One message in, the messages to send back out. `exit` is signalled by the
    third component so the driver can stop without this module knowing what a
    process is. *)
@@ -629,6 +986,18 @@ let handle ?search_paths (state : state) (msg : Json.t) : state * Json.t list * 
     (match uri_of doc with
      | Some uri -> (state, [ response id (completion state uri params) ], false)
      | None -> (state, [ response id (Json.List []) ], false))
+  | Some "textDocument/signatureHelp" ->
+    (match uri_of doc with
+     | Some uri -> (state, [ response id (signature_help state uri params) ], false)
+     | None -> (state, [ response id Json.Null ], false))
+  | Some "textDocument/documentHighlight" ->
+    (match uri_of doc with
+     | Some uri -> (state, [ response id (document_highlight state uri params) ], false)
+     | None -> (state, [ response id (Json.List []) ], false))
+  | Some "textDocument/typeDefinition" ->
+    (match uri_of doc with
+     | Some uri -> (state, [ response id (type_definition state uri params) ], false)
+     | None -> (state, [ response id Json.Null ], false))
   | Some "textDocument/references" ->
     (match uri_of doc with
      | Some uri -> (state, [ response id (references state uri params) ], false)
@@ -649,6 +1018,10 @@ let handle ?search_paths (state : state) (msg : Json.t) : state * Json.t list * 
     (match uri_of doc with
      | Some uri -> (state, [ response id (formatting state uri) ], false)
      | None -> (state, [ response id (Json.List []) ], false))
+  | Some "textDocument/codeAction" ->
+    (match uri_of doc with
+     | Some uri -> (state, [ response id (code_actions state uri params) ], false)
+     | None -> (state, [ response id (Json.List []) ], false))
   | Some "textDocument/semanticTokens/full" ->
     (match uri_of doc with
      | Some uri -> (state, [ response id (semantic_tokens state uri) ], false)
@@ -656,9 +1029,9 @@ let handle ?search_paths (state : state) (msg : Json.t) : state * Json.t list * 
   | Some "textDocument/didOpen" ->
     (match uri_of doc, Json.to_string_opt (Json.member "text" doc) with
      | Some uri, Some text ->
-       let (notes, tree, extra) =
+       let (notes, tree, extra, diags) =
          check_document ?search_paths (extra_of state uri) uri text in
-       (set_doc state uri text tree extra, notes, false)
+       (set_doc state uri text tree extra diags, notes, false)
      | _ -> (state, [], false))
   | Some "textDocument/didChange" ->
     (* Full sync: the last content change is the whole document. *)
@@ -670,9 +1043,9 @@ let handle ?search_paths (state : state) (msg : Json.t) : state * Json.t list * 
         | last :: _ ->
           (match Json.to_string_opt (Json.member "text" last) with
            | Some text ->
-             let (notes, tree, extra) =
+             let (notes, tree, extra, diags) =
                check_document ?search_paths (extra_of state uri) uri text in
-             (set_doc state uri text tree extra, notes, false)
+             (set_doc state uri text tree extra diags, notes, false)
            | None -> (state, [], false))
         | [] -> (state, [], false)))
   | Some "textDocument/didSave" ->
@@ -680,9 +1053,9 @@ let handle ?search_paths (state : state) (msg : Json.t) : state * Json.t list * 
      | Some uri ->
        (match List.assoc_opt uri state.docs with
         | Some d ->
-          let (notes, tree, extra) =
+          let (notes, tree, extra, diags) =
             check_document ?search_paths d.extra uri d.text in
-          (set_doc state uri d.text tree extra, notes, false)
+          (set_doc state uri d.text tree extra diags, notes, false)
         | None -> (state, [], false))
      | None -> (state, [], false))
   | Some "textDocument/didClose" ->

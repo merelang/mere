@@ -47,6 +47,7 @@ type venv = (string * binfo) list
 let rec pattern_vars (p : Ast.pattern) : string list =
   match p.Ast.pnode with
   | Ast.P_var n -> [ n ]
+  | Ast.P_str_prefix (_, n) -> if n = "_" then [] else [ n ]
   | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_unit -> []
   | Ast.P_constr (_, Some inner) -> pattern_vars inner
   | Ast.P_constr (_, None) -> []

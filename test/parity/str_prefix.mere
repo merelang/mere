@@ -1,0 +1,15 @@
+// `"lit" <> rest` — the prefix test and the slice that always followed it,
+// as one pattern. Every backend sees the desugared form (a guard and a
+// binding), which is the point: no backend knows this syntax exists.
+let scheme = fn (url: str) ->
+  match url with
+  | "https://" <> rest -> "secure:" ++ rest
+  | "http://" <> rest -> "plain:" ++ rest
+  | "mailto:" <> _ -> "mail"
+  | "日本" <> rest -> "jp:" ++ rest
+  | other -> "none:" ++ other;
+let _ = print (scheme "https://a.example");
+let _ = print (scheme "http://b.example");
+let _ = print (scheme "mailto:c@example");
+let _ = print (scheme "日本語です");
+print (scheme "ftp://d")

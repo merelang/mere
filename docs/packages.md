@@ -157,6 +157,74 @@ so the bundle stands alone. Run a compiled server with:
 So a released `mere` binary + `mere install` is enough to build *and* run
 an app — no compiler source tree required at runtime.
 
+## The compiler a package needs
+
+```toml
+[package]
+name = "thing"
+version = "0.1.0"
+mere = ">= 0.1.480"     # optional; `x.y.z` means the same as `>= x.y.z`
+```
+
+Checked against the compiler that is running — by `mere install`, for this
+package and for every dependency it fetches, and by every build of a file
+inside the package. Without it the failure still happens, just later and
+mute: the newer syntax reaches an older parser and comes back as a **syntax
+error in somebody else's file**.
+
+A manifest with no `mere` line makes no claim and is never refused. A line the
+compiler cannot read (`^1.2`, a range) is refused by name rather than ignored:
+a constraint nobody reads is worse than no constraint, because it looks like
+one.
+
+### `mere fix` — make the declared floor true
+
+```sh
+mere fix app.mere
+# fix: ./mere.toml -- set `mere = ">= 0.1.422"`
+#       (128-bit SIMD lane types (`f64x2` / `u8x16`) needs it)
+```
+
+Parses the file, asks which of the compiler's dated features it actually uses,
+and writes the highest into the nearest `mere.toml`. **It writes that line and
+nothing else** — a tool that "fixes" a file is one people stop reading the diff
+of.
+
+`mere --features` prints the table it computes from (name, version, and the
+word `scripts/version_floor_check.sh` re-derives the version from in
+`docs/changelog.md`, so a row invented by hand fails the gate). The table is
+short on purpose: a row earns its place only for a feature that old compilers
+in the wild do not have.
+
+## The API surface, as data
+
+```sh
+mere --decls --json app.mere
+```
+
+```json
+{
+  "mere": "0.1.504",
+  "requires": ">= 0.1.422",
+  "values": [ { "name": "pick", "type": "(color -> int)", "status": "ok", "note": "" } ],
+  "types":  [ { "name": "color", "kind": "variant", "params": [], "line": 1,
+                "constructors": [ { "name": "Red", "payload": null } ] } ]
+}
+```
+
+The same surface `mere --decls` prints, plus the type declarations and the
+package's declared floor — the promise and the surface in one document, which
+is how Gleam's `package-interface` carries its version constraint too.
+
+**What it is for**: the diff between two versions of a package. `mere fix`
+writes a floor from the features a file uses; it cannot say whether the API a
+downstream repository depends on has changed. That question is a diff of this.
+
+`status` is `ok`, `duplicate` or `shadows-builtin`: the last two are the
+declarations `--decls` prints commented out, because pasting them back would
+change the program. `scripts/decls_json_check.sh` rebuilds the text from this
+JSON and compares it byte for byte, so the two outputs cannot drift.
+
 ## Deliberate non-goals (for now)
 
 **No central registry**. `merelang.org`-hosted registry is planned

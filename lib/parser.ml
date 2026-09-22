@@ -60,6 +60,27 @@ let current_base_dir : string ref = ref ""
    with `-I /path/to/mere/checkout`. *)
 let import_search_paths : string list ref = ref []
 
+(* --- `pub` inside a module ------------------------------------------------
+
+   `module M { pub let get = ...; let helper = ...; }` — `get` can be called as
+   `M.get` from outside and `helper` cannot.
+
+   THE RULE IS OPT-IN PER MODULE, and it has to be: every module written before
+   this existed marks nothing, and making "unmarked" mean private would make
+   every one of them export nothing. So a module that marks NOTHING is
+   unchanged — all its members are reachable, as they always were — and a
+   module that marks anything is saying it has decided what its surface is, so
+   its unmarked members become internal.
+
+   `pub` is not a keyword. It is an identifier the module-body parser
+   recognises in front of `let`, which is why no existing program that uses
+   `pub` as a name stops lexing, and why the self-hosted lexer needs no change
+   to keep reading files that do not use it.
+
+   The table holds the QUALIFIED names that are private (`M.helper`), filled
+   while parsing and read by `Pipeline.check_module_privacy`. *)
+let private_module_names : (string, unit) Hashtbl.t = Hashtbl.create 16
+
 (* Q-013 (Go-style full-path imports): a project may declare a module path in
    its mere.toml — `[package]\n path = "github.com/owner/repo"`. An import whose
    path starts with that module path is resolved LOCALLY, relative to the
@@ -155,6 +176,7 @@ let declared_externs : (string * Ast.ty * Loc.t) list ref = ref []
 
 let reset_decl_state () =
   declared_types := [];
+  Hashtbl.reset private_module_names;
   declared_externs := [];
   Hashtbl.reset constructors;
   Hashtbl.reset signatures;
@@ -276,10 +298,18 @@ let rec parse_program_internal tokens =
     | (_, T_ident "float") :: rest -> Ast.TyFloat, rest
     | (_, T_ident "bool") :: rest -> Ast.TyBool, rest
     | (_, T_ident "str") :: rest -> Ast.TyStr, rest
-    | (_, T_ident "bytes") :: rest -> Ast.TyBytes, rest
-    | (_, T_ident "f64x2") :: rest -> Ast.TySimd Ast.F64x2, rest
-    | (_, T_ident "u8x16") :: rest -> Ast.TySimd Ast.U8x16, rest
-    | (_, T_ident "f32x4") :: rest -> Ast.TySimd Ast.F32x4, rest
+    (* The four type names that a compiler older than their row in
+       `Feature.all` cannot parse. Noting them here, where the name is already
+       being recognised, is what lets `mere fix` say which version a file needs
+       instead of everyone guessing. *)
+    | (loc, T_ident "bytes") :: rest ->
+      Feature.require Feature.bytes_api loc; Ast.TyBytes, rest
+    | (loc, T_ident "f64x2") :: rest ->
+      Feature.require Feature.simd_128 loc; Ast.TySimd Ast.F64x2, rest
+    | (loc, T_ident "u8x16") :: rest ->
+      Feature.require Feature.simd_128 loc; Ast.TySimd Ast.U8x16, rest
+    | (loc, T_ident "f32x4") :: rest ->
+      Feature.require Feature.simd_f32x4 loc; Ast.TySimd Ast.F32x4, rest
     | (_, T_ident "unit") :: rest -> Ast.TyUnit, rest
     | (_, T_ident name) :: (_, T_lbracket) :: rest
       when starts_with_upper name ->
@@ -870,6 +900,17 @@ let rec parse_program_internal tokens =
       result, rest
     | (pos, T_underscore) :: rest -> mkp pos Ast.P_wild, rest
     | (pos, T_int n) :: rest -> mkp pos (Ast.P_int n), rest
+    (* `"lit" <> rest` — the scrutinee starts with the literal, and what is
+       left is bound. `_` is a plain identifier to the lexer, so discarding the
+       rest needs no extra case. *)
+    | (pos, T_string s) :: (_, T_lt_gt) :: (_, T_ident name) :: rest ->
+      mkp pos (Ast.P_str_prefix (s, name)), rest
+    | (pos, T_string s) :: (_, T_lt_gt) :: (_, T_underscore) :: rest ->
+      (* `_` is its own token, not an identifier: discarding the rest is the
+         common case for "does it start with this". *)
+      mkp pos (Ast.P_str_prefix (s, "_")), rest
+    | (_, T_string _) :: (gpos, T_lt_gt) :: _ ->
+      raise (Parse_error (gpos, "expected a name after `<>` in a string prefix pattern"))
     | (pos, T_string s) :: rest -> mkp pos (Ast.P_str s), rest
     | (pos, T_true) :: rest -> mkp pos (Ast.P_bool true), rest
     | (pos, T_false) :: rest -> mkp pos (Ast.P_bool false), rest
@@ -1549,7 +1590,11 @@ let rec parse_program_internal tokens =
       in
       let fields, rest = parse_fields [] body_rest in
       mk pos (Ast.Record_lit (name, fields)), rest
-    | (pos, T_ident name) :: rest -> mk pos (Ast.Var name), rest
+    | (pos, T_ident name) :: rest ->
+      (* The one place every bare name passes through: see `Feature.note_ident`
+         for why the floor is read off names and not only off type sites. *)
+      Feature.note_ident name pos;
+      mk pos (Ast.Var name), rest
     | (pos, _) :: _ ->
       raise (Parse_error (pos, "expected literal, identifier, or '('"))
     | [] ->
@@ -1907,6 +1952,10 @@ let rec parse_program_internal tokens =
     in
     (List.map (fun tr -> Ast.Top_impl (tr, target, [])) traits, rest)
   in
+  (* Names a module body marked `pub`, for the module currently being parsed.
+     A list rather than a table because a module body is parsed to completion
+     before the next one starts, and the caller drains it. *)
+  let pub_marked : string list ref = ref [] in
   let rec parse_module_body cur_path decls toks =
     match toks with
     | (_, T_rbrace) :: rest -> List.rev decls, rest
@@ -1965,6 +2014,16 @@ let rec parse_program_internal tokens =
        | _ ->
          raise (Parse_error (pos_of toks,
            "expected ';' after let rec in module body")))
+    (* `pub` in front of a binding. A contextual keyword: `pub` followed by
+       `let` inside a module body, and an ordinary identifier anywhere else. *)
+    | (_, T_ident "pub") :: ((_, T_let) :: _ as rest) ->
+      (match rest with
+       | (_, T_let) :: (_, T_rec) :: (_, T_ident n) :: _ -> pub_marked := n :: !pub_marked
+       | (_, T_let) :: (_, T_ident n) :: (_, T_eq) :: _ -> pub_marked := n :: !pub_marked
+       | (_, T_let) :: (p, _) :: _ ->
+         raise (Parse_error (p, "`pub` must be followed by `let NAME = ...` or `let rec NAME = ...`"))
+       | _ -> ());
+      parse_module_body cur_path decls rest
     | (pos, T_let) :: rest_after_let ->
       let _ = pos in
       let pat, rest = pattern rest_after_let in
@@ -2097,8 +2156,28 @@ let rec parse_program_internal tokens =
          self-references like `M.foo` inside the module resolve
          correctly via `field_chain`. *)
       Hashtbl.replace module_names m_name ();
+      pub_marked := [];
       let body, rest = parse_module_body m_name [] rest in
+      let marked = !pub_marked in
+      pub_marked := [];
       let prefixed = prefix_module_decls m_name body in
+      (* Opt-in: a module that marked nothing exports everything, the way every
+         module written before `pub` existed does. One mark turns the rest
+         internal. *)
+      if marked <> [] then
+        List.iter (fun d ->
+          List.iter (fun n ->
+            let short =
+              match String.rindex_opt n '.' with
+              | Some i -> String.sub n (i + 1) (String.length n - i - 1)
+              | None -> n
+            in
+            if not (List.mem short marked) then
+              Hashtbl.replace private_module_names n ())
+            (match d with
+             | Ast.Top_let ({ Ast.pnode = Ast.P_var n; _ }, _) -> [n]
+             | Ast.Top_let_rec bs -> List.map fst bs
+             | _ -> [])) prefixed;
       (* `decls` accumulates newest-first; `prefixed` is in source order.
          Prepend each prefixed decl so the final List.rev yields the
          correct source order. *)
