@@ -39,10 +39,11 @@ same table for the words that get past the parser as unbound names (`def`,
 **A word is only a keyword if this file does not bind it.** `var`, `case`,
 `val` and `mut` are real identifiers in the Mere repositories —
 `let var = list_sum ...`, `fn (case: int) -> case * 2`, `fn val ->`,
-`&mut R v` — so the table is given the names the file binds and stays silent
-about those. `of` is not in the table at all: it is Mere's own keyword
-(`type t = A | B of int`, measured 424 times) and never reaches the parser as
-an identifier.
+`&mut R v`, and as tuple pattern binders, `let (val, j) = ...` and
+`let (classes, var, prefix, r2) = ...` — so the table is given the names the
+file binds and stays silent about those. `of` is not in the table at all: it
+is Mere's own keyword (`type t = A | B of int`, measured 943 times across 989
+source files) and never reaches the parser as an identifier.
 
 The window is the failing line rather than the failing token, because the
 evidence is often a few tokens back: `if c then 1 elif x < 0 then 2` fails at

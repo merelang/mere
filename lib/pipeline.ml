@@ -346,7 +346,13 @@ let bound_names (tokens : (Loc.t * Lexer.token) list) : string list =
         match a, c with
         | (Lexer.T_let | Lexer.T_and | Lexer.T_rec), (Lexer.T_eq | Lexer.T_colon) -> true
         | Lexer.T_fn, Lexer.T_arrow -> true
-        | (Lexer.T_lparen | Lexer.T_comma | Lexer.T_fn), Lexer.T_colon -> true
+        (* An element of a pattern or a parameter list: `let (val, j) = ...`
+           and `let (classes, var, prefix, r2) = ...` are how mere-ruby binds
+           two of these words, and the `let NAME =` shape above cannot see a
+           name inside the parentheses. *)
+        | (Lexer.T_lparen | Lexer.T_comma),
+          (Lexer.T_comma | Lexer.T_rparen | Lexer.T_colon) -> true
+        | Lexer.T_fn, Lexer.T_colon -> true
         | Lexer.T_amp, _ -> true
         | _ -> false
       in
