@@ -318,6 +318,92 @@ let echo_rewrite (prog : Ast.program) : Ast.program =
     in
     { Ast.decls = List.map decl prog.Ast.decls; Ast.main = go prog.Ast.main }
 
+(* A syntax error, with what was actually there added to it.
+
+   The hint is a `help:` line on the message, which is the same shape every
+   semantic error already uses — so nothing renders differently, and the 149
+   places in the parser that raise stay untouched. What they could not know is
+   what token the reader wrote; that is here, where the token list is.
+
+   The failure position identifies the token by line and column. The one before
+   it is what makes a compound operator legible (`x += 1` fails at `=` with `+`
+   behind it), so both are looked up. *)
+(* The names this file BINDS are identifiers, not attempts at another
+   language's keyword. `&mut R v`, `let var = ...`, `fn val ->` and
+   `fn (case: int) -> case * 2` are all real Mere in the repositories, and all
+   four words are also in the hint table — so the table is told which names are
+   spoken for here, and says nothing about those.
+
+   A binding is recognised by SHAPE, not by scope: `let`/`and`/`rec` then a
+   name then `=` or `:`, a parameter with an annotation, `fn name ->`, or a
+   name after `&` (Mere's own borrow modes). `let mut x = 1;` does NOT match —
+   `mut` is followed by a name, not by `=` — which is the case that has to keep
+   its hint. *)
+let bound_names (tokens : (Loc.t * Lexer.token) list) : string list =
+  let rec go acc = function
+    | a :: (Lexer.T_ident n as b) :: (c :: _ as rest) ->
+      let is_binding =
+        match a, c with
+        | (Lexer.T_let | Lexer.T_and | Lexer.T_rec), (Lexer.T_eq | Lexer.T_colon) -> true
+        | Lexer.T_fn, Lexer.T_arrow -> true
+        | (Lexer.T_lparen | Lexer.T_comma | Lexer.T_fn), Lexer.T_colon -> true
+        | Lexer.T_amp, _ -> true
+        | _ -> false
+      in
+      go (if is_binding then n :: acc else acc) (b :: rest)
+    | _ :: rest -> go acc rest
+    | [] -> acc
+  in
+  go [] (List.map snd tokens)
+
+(* Where the hint is attached. The parser raises in 149 places and all 149
+   places in the parser stay untouched. What they could not know is what the
+   reader wrote; that is here, where the token list is.
+
+   The failure position identifies the token by line and column. The REST OF
+   THAT LINE, nearest first, is what makes the spelling legible: `x += 1` fails
+   at `=` with `+` behind it, and `if c then 1 elif x < 0 then 2` fails at the
+   second `then`, four tokens past the `elif` that explains it. The line is the
+   unit because a syntax error is explained by the line it is on. *)
+let with_syntax_hint (tokens : (Loc.t * Lexer.token) list) (loc : Loc.t) (msg : string) : string =
+  let rec find before = function
+    | [] -> (before, None, [])
+    | ((l : Loc.t), t) :: rest ->
+      if l.Loc.line = loc.Loc.line && l.Loc.col = loc.Loc.col then
+        (before, Some t, List.filteri (fun i _ -> i < 2) (List.map snd rest))
+      else find ((l, t) :: before) rest
+  in
+  let (before, cur, after) = find [] tokens in
+  let before =
+    List.filter_map
+      (fun ((l : Loc.t), t) -> if l.Loc.line = loc.Loc.line then Some t else None)
+      before
+  in
+  let bound = bound_names tokens in
+  let bound n = List.mem n bound in
+  match Syntax_hint.for_window ~before ~cur ~after ~bound with
+  | Some hint -> msg ^ "\n" ^ hint
+  | None -> msg
+
+(* The same for the lexer, where the offending thing is a character rather than
+   a token: the position names it in the source. *)
+let with_lex_hint (source : string) (loc : Loc.t) (msg : string) : string =
+  let lines = String.split_on_char '\n' source in
+  let line =
+    match List.nth_opt lines (loc.Loc.line - 1) with Some l -> l | None -> ""
+  in
+  if loc.Loc.col < 1 || loc.Loc.col > String.length line then msg
+  else
+    match Syntax_hint.for_char line.[loc.Loc.col - 1] with
+    | Some hint -> msg ^ "\n" ^ hint
+    | None -> msg
+
+(* Tokenize, and say what the character was when it refuses. *)
+let tokenize_hinted ?file (source : string) =
+  try Lexer.tokenize ?file source with
+  | Lexer.Lex_error (loc, msg) when loc.Loc.file = None ->
+    raise (Lexer.Lex_error (loc, with_lex_hint source loc msg))
+
 (* `keep_sugar` is for the FORMATTER, and only for it.
 
    Sugar that is lowered while parsing (`echo` -> `echo_at "<where>"`) is
@@ -352,11 +438,17 @@ let parse_program ?(prelude = true) ?(keep_sugar = false) ?base_dir ?(search_pat
   (* The parser's type-name table now holds the prelude's; anything the user declares
      lands in front of it (the list is consed). See warn_declared_types. *)
   prelude_type_count := List.length !Parser.declared_types;
-  let tokens = Lexer.tokenize s in
+  let tokens = tokenize_hinted s in
   let user_prog =
-    match base_dir with
-    | Some d -> Parser.parse_program ~base_dir:d ~search_paths tokens
-    | None -> Parser.parse_program ~search_paths tokens
+    try
+      match base_dir with
+      | Some d -> Parser.parse_program ~base_dir:d ~search_paths tokens
+      | None -> Parser.parse_program ~search_paths tokens
+    with
+    (* Only for THIS file: an error from inside an `import` carries that
+       file's position, and its tokens are not the ones in hand here. *)
+    | Parser.Parse_error (loc, msg) when loc.Loc.file = None ->
+      raise (Parser.Parse_error (loc, with_syntax_hint tokens loc msg))
   in
   (* Q-012 Phase 32: lower saturated `par_map f xs` to spawn + channel +
      list_map so it works on every backend, not just the interpreter.
@@ -430,11 +522,17 @@ let syntax_errors ?base_dir ?(search_paths = []) s
   : (string option * Loc.t * string) list =
   Parser.reset_decl_state ();
   ignore (parse_prelude ());
-  let tokens = Lexer.tokenize s in
+  let tokens = tokenize_hinted s in
   let (_, errors) =
     Parser.parse_program_recover ?base_dir ~search_paths tokens
   in
-  errors
+  (* The recovering path returns its errors rather than raising them, so the
+     hint is added to each. A position from an imported file is left alone for
+     the same reason as above. *)
+  List.map (fun (file, (loc : Loc.t), msg) ->
+    if file = None && loc.Loc.file = None then (file, loc, with_syntax_hint tokens loc msg)
+    else (file, loc, msg))
+    errors
 
 let parse_only s =
   (* Phase 21.2: parse_only is used by pretty-print / AST-shape tests
@@ -533,11 +631,25 @@ let warn_fix loc msg fix = warnings := (loc, msg, fix) :: !warnings
    a reader needs to find the two declarations. *)
 exception Type_redeclared of (string * string * string) list
 
+(* Where a type name was declared, newest first. The parser conses an entry per
+   declaration, so a name declared twice has two entries -- which is exactly the
+   pair this error is about and could not point at until v0.1.506. Prelude
+   positions are dropped: they are in a text nobody can open. *)
+let declaration_sites (name : string) : Loc.t list =
+  List.filter_map (fun (n, (l : Loc.t)) ->
+    if n = name && l.Loc.file = None && l.Loc.line > 0 then Some l else None)
+    !Parser.declared_types
+
 let redecl_message (name, a, b) =
+  let first_line =
+    match List.rev (declaration_sites name) with
+    | (first : Loc.t) :: _ :: _ -> Printf.sprintf " (first declared on line %d)" first.Loc.line
+    | _ -> ""
+  in
   String.concat "\n"
     [ Printf.sprintf
-        "type `%s` is declared twice with different constructors (`%s` and `%s`)"
-        name a b;
+        "type `%s` is declared twice with different constructors (`%s` and `%s`)%s"
+        name a b first_line;
       "help: a type may be restated identically — twelve files here restate `'a list`";
       "help: — but two different types cannot share a name. The second wins for the";
       "help: name while the first's constructors stay usable, so a `match` over one";
@@ -1811,11 +1923,21 @@ let check ?base_dir ?(search_paths = []) (source : string)
           that says so: an editor that draws it as a hint is describing a
           program the compiler will refuse. *)
        (* A conflicting redeclaration is an error here too: an editor that does
-          not show it is describing a program the compiler will refuse. No
-          position, because `Top_type` carries none. *)
+          not show it is describing a program the compiler will refuse.
+
+          `Top_type` carries no position, which is why this had NONE at all --
+          the message was good and pointed at nothing. The parser's table knows
+          where every type name was declared, so the caret goes on the SECOND
+          declaration (the one that introduced the conflict) and the message
+          names the first. *)
        let redecls =
-         List.map (fun r ->
-           { d_loc = Loc.dummy; d_kind = "type error"; d_msg = redecl_message r;
+         List.map (fun ((name, _, _) as r) ->
+           let loc =
+             match declaration_sites name with
+             | latest :: _ :: _ -> latest   (* two or more: the newest is the conflict *)
+             | _ -> Loc.dummy
+           in
+           { d_loc = loc; d_kind = "type error"; d_msg = redecl_message r;
              d_severity = Error; d_file = None; d_fix = None })
            (Typer.take_type_redecls ())
        in

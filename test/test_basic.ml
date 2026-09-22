@@ -16167,5 +16167,58 @@ let () =
         twice (twice 3)")
     "12";
 
+  (* ---- a syntax error says what to write instead -----------------------
+     The catalogue itself is held by scripts/syntax_hint_check.sh, which runs
+     the CLI and so sees the rendered frame. What is checked HERE is the part
+     that a row-by-row gate cannot show: that the hint is attached at the
+     message, that it is scoped to a POSITION rather than to a word, and that a
+     name this file binds is an identifier. *)
+  let hint src =
+    try ignore (Pipeline.process src); "no error"
+    with
+    | Typer.Type_error (_, m) | Parser.Parse_error (_, m) | Lexer.Lex_error (_, m) ->
+      (match String.index_opt m '\n' with
+       | Some i -> String.sub m (i + 1) (String.length m - i - 1)
+       | None -> "no hint") in
+  let says src want =
+    let h = hint src in
+    if idx_of h want >= 0 then want else h in
+  check "syntax hint: a character the lexer refuses"
+    (says "# a comment\nlet x = 1;\n0" "comments are `//`") "comments are `//`";
+  check "syntax hint: the token the parser stopped at"
+    (says "let f = fn (n: int) => n + 1;\n0" "the arrow is `->`") "the arrow is `->`";
+  (* The evidence is four tokens behind the failure -- the parser stops at the
+     SECOND `then` -- which is why the window is the line and not the token. *)
+  check "syntax hint: evidence from earlier on the same line"
+    (says "let _ = if true then 1 elif false then 2 else 3;\n0" "`elif`") "`elif`";
+  check "syntax hint: a compound assignment is read from both tokens"
+    (says "let x = 1;\nlet _ = x += 1;\n0" "compound assignment") "compound assignment";
+  (* ⚠ `and` and `!=` are CORRECT Mere. The table answers about a position. *)
+  check "syntax hint: a rec group is not a borrowed `and`"
+    (Pipeline.process
+       "let rec ev = fn (n: int) -> if n == 0 then true else od (n - 1)\n\
+        and od = fn (n: int) -> if n == 0 then false else ev (n - 1);\n\
+        if ev 4 then 1 else 0")
+    "1";
+  check "syntax hint: Python's `and` in an expression is answered"
+    (says "let f = fn (a: bool) -> fn (b: bool) -> a and b;\n0" "boolean `and` is `&&`")
+    "boolean `and` is `&&`";
+  (* ⚠ `var`, `case`, `val` and `mut` are identifiers in the Mere repositories.
+     A file that BINDS one of them must keep its own meaning. *)
+  check "syntax hint: a bound name is an identifier, not a keyword"
+    (let h = hint "let var = 4;\nlet _ = print_int (var + );\n0" in
+     if idx_of h "`var`" < 0 then "silent" else h)
+    "silent";
+  check "syntax hint: and the same word unbound is answered"
+    (says "var x = 1;\n0" "`var`") "`var`";
+  (* The typer reads the same table: these two get past the parser. *)
+  check "syntax hint: a foreign keyword that arrives as an unbound name"
+    (says "let f = fn (n: int) -> return n;\n0" "there is no `return`")
+    "there is no `return`";
+  check "syntax hint: it beats the fuzzy suggestion, which answered `e`"
+    (let h = hint "def f(n):\n  return n" in
+     if idx_of h "did you mean" < 0 && idx_of h "`def`" >= 0 then "named it" else h)
+    "named it";
+
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

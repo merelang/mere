@@ -130,6 +130,14 @@ let raise_with_suggestion loc kind target candidates =
   let msg =
     let base = kind ^ ": " ^ target in
     let cands3 = suggest_names_n target candidates 3 in
+    (* A word that is a keyword somewhere else does not fail at the parser:
+       `def f(n):` and `return n` parse as applications and arrive here as
+       unbound names. The fuzzy search answers those with whatever is closest
+       in the environment — `did you mean \`e\`?` for `def` — which is worse
+       than nothing. The same table the syntax layer uses answers first. *)
+    match Syntax_hint.for_name target with
+    | Some text -> with_hint base ("`" ^ target ^ "` — " ^ text)
+    | None ->
     (* If the target looks like an attempted SCREAMING_SNAKE constant
        binding and the fuzzy search found nothing that resembles it,
        swap in a targeted hint about the constructor-vs-value naming

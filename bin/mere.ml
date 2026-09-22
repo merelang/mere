@@ -259,6 +259,28 @@ let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
     end
   in
   let report_eval loc msg =
+    (* A failure raised INSIDE a prelude function pointed the caret at the
+       prelude: `assert` / `divmod` / `list_max` are written in Mere, so their
+       `fail` carries a position in a text the person cannot open, and the line
+       they wrote appeared only in the stack below. The innermost frame that is
+       not the prelude's is where they can act, so that is the caret; the stack
+       still shows the whole path, including the prelude function's own name.
+
+       A builtin implemented in OCaml (`char_at`) never had this problem, which
+       is why it looked like a small oddity rather than a class of them. *)
+    let loc =
+      if loc.Mere.Loc.file = Some Mere.Pipeline.prelude_file then
+        match
+          List.find_opt
+            (fun (_, (l : Mere.Loc.t)) ->
+               l.Mere.Loc.file <> Some Mere.Pipeline.prelude_file
+               && l.Mere.Loc.line > 0)
+            (Mere.Eval.backtrace ())
+        with
+        | Some (_, l) -> l
+        | None -> loc
+      else loc
+    in
     let (src, name, loc) = locate loc in
     prerr_endline (render ~source:src ~filename:name loc "eval error" msg);
     print_backtrace ();
@@ -426,13 +448,23 @@ let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
   | Mere.Exhaustive.Non_exhaustive findings ->
     ignore (print_warnings ()); report_nonexhaustive findings
   | Mere.Pipeline.Type_redeclared rs ->
-    (* No position to render a code frame against — `Top_type` carries none —
-       so this takes the line=0 shape `Diagnostic.format` already has. *)
+    (* `Top_type` carries no position, so this printed a message with no code
+       frame at all: right about what was wrong and silent about where. The
+       parser's table knows where each type name was declared, and a name
+       declared twice has two entries there — the caret goes on the second and
+       the message names the first. A name with only one entry left (a type
+       restated inside an import, say) still takes the line=0 shape. *)
     ignore (print_warnings ());
     prerr_endline
       (String.concat "\n\n"
-         (List.map (fun r ->
-            render ~source ~filename:label Mere.Loc.dummy "type error"
+         (List.map (fun ((name, _, _) as r) ->
+            let loc =
+              match Mere.Pipeline.declaration_sites name with
+              | latest :: _ :: _ -> latest
+              | _ -> Mere.Loc.dummy
+            in
+            let (src, file, loc) = locate loc in
+            render ~source:src ~filename:file loc "type error"
               (Mere.Pipeline.redecl_message r)) rs));
     if List.length rs > 1 then
       Printf.eprintf "\n%d errors\n" (List.length rs);
