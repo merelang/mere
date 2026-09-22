@@ -1,0 +1,9 @@
+// Fixture for scripts/echo_check.sh.
+//
+// Two echoes on two different lines, and a value that passes through both: the
+// answer on stdout must be the same with or without them, and the two stderr
+// lines must name the lines they are written on.
+let f = fn (n: int) ->
+  let m = echo (n + 1);
+  echo (m * 2);
+print_int (f 20)

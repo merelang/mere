@@ -103,6 +103,11 @@ const stub = () => 0;
 const env = Object.assign({
   memory,
   puts: (ptr) => { process.stdout.write(readStrBytes(ptr)); process.stdout.write('\\n'); },
+  // v0.1.502: declared by codegen_wasm since v0.1.259 and never provided here,
+  // so every program that called print_err failed to instantiate on this host.
+  // Found by echo, which is built on it. (No backticks in this comment: this
+  // whole env is inside a template literal that the worker evaluates.)
+  print_err: (ptr) => { process.stderr.write(readStrBytes(ptr)); process.stderr.write('\\n'); },
   print_no_nl: (ptr) => process.stdout.write(readStrBytes(ptr)),
   // A pointer and a length: a zero is a byte, not an end.
   print_bytes: (ptr, len) =>
@@ -163,6 +168,12 @@ const wasmPath = process.argv[2];
       // two answers about one value. The newline matches C's puts.
       process.stdout.write(readStrBytes(ptr));
       process.stdout.write("\n");
+    },
+    // The diagnostic sink, which this host declared and did not have: see the
+    // note on the worker's copy above.
+    print_err: (ptr) => {
+      process.stderr.write(readStrBytes(ptr));
+      process.stderr.write("\n");
     },
     read_file: (pathPtr) => {
       const path = readCStr(pathPtr);

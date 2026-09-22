@@ -8,12 +8,67 @@ Speaks LSP over stdin and stdout. What it does today is **diagnostics** — ever
 syntax error in the buffer, republished on each keystroke, and the first type
 error once the file parses — **hover**, which reports the type inference gave
 whatever is under the cursor, **go to definition**, **completion**, an
-**outline**, **formatting**, **semantic highlighting**, **find references** and
-**rename**.
+**outline**, **formatting**, **semantic highlighting**, **find references**,
+**rename**, **code actions**, **document highlight**, **go to type definition**
+and **signature help**.
 
 It is the same check the compiler runs — `Pipeline.check`, which the CLI also
 goes through. A language server that agrees with the compiler on good days
 is worse than none, because it teaches you to distrust the underline.
+
+## What each answer is made of (v0.1.504)
+
+Three of these were added by writing a handler and nothing else. That is worth
+saying plainly, because it is the same discovery the code actions were:
+
+| request | the answer it uses |
+|---|---|
+| **document highlight** | `Query.references_at` — find-references' list, drawn in the file. Every occurrence is kind Text: Mere has no assignment, so there is no read/write distinction to claim |
+| **go to type definition** | the node's inferred type, and `Parser.declared_types` for where that type was declared. Prelude types are excluded — `list` is declared in a text nobody can open |
+| **signature help** | `Ast.rv_spine`, which splits `f a b` into a head and its arguments. In a curried language "which parameter" is just how many arguments sit before the cursor |
+
+⚠ Signature help contains one guess. A `Loc.t` is a start and a width, so "the
+call the cursor is inside" is not a question the tree can answer; it answers
+about the nearest call head at or before the cursor **on that line**, preferring
+a call that is still unfinished. That is what keeps `add3 (pick Red) ` from
+reporting about `pick`. A call spanning lines gets no help rather than the
+wrong help.
+
+**`foldingRange` is deliberately absent**: the same missing extent means nothing
+knows where a declaration ends.
+
+## Hover
+
+Two things, both since v0.1.504:
+
+- **It answers on a definition**, not only on a use. `Query.node_at` looks for
+  an expression, and the name in `let inc = ...` is a pattern, so for a long
+  time hovering the very place a name is introduced returned nothing.
+- **It shows the comment above the definition.** Contiguous `//` lines ending
+  on the line before the definition, found through the binding — so hovering a
+  *use* shows what was written at the *definition*. There is no `///` marker:
+  Gleam has one because its docs generator publishes them, and Mere has no
+  generator for a third slash to feed.
+
+## Code actions
+
+Three, and none of them computes anything new — each is an answer the compiler
+already had, in the shape an editor can apply:
+
+| action | where it comes from |
+|---|---|
+| **Add the missing arm(s)** | the exhaustiveness checker writes the arm when it finds the hole; it used to print it on the `help:` line and nothing else could reach it |
+| **Declare `f : (shape -> int)`** | the type inference put on the definition. Mere has no annotation on a `let`, so this writes the forward declaration — `let fn f: (shape -> int);` — on the line above. Accepting it cannot change what the program means; what it changes is where the next edit to that definition fails |
+| **Prefix `x` with `_`** | the unused-binding warning, which is the other thing a person does about one |
+
+They arrive as quickfixes on the diagnostic they answer (the annotation one is
+a `refactor.rewrite`, offered on the line the definition starts on). There is
+nothing to resolve later: the server builds the whole edit when asked.
+
+`scripts/lsp_smoke.sh` drives the round trip over the real wire format —
+request, apply the edit that comes back, compile the result — and
+`--poison` checks that it can go red by applying nothing, and by applying the
+same text at the wrong position.
 
 ## Editors
 

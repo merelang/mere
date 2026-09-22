@@ -74,6 +74,11 @@ let rec walk_rel dir prefix =
 type dep = { name : string; git : string; subdir : string option; rev : string }
 type manifest = { pkg_name : string; pkg_version : string;
                   pkg_path : string option;  (* [package] path — Go-style module path *)
+                  (* [package] mere — the compiler this package needs, written
+                     `">= 0.1.480"`. `None` means the package makes no claim,
+                     which is what every manifest written before v0.1.502 says
+                     and is never an error. *)
+                  pkg_mere : string option;
                   deps : dep list;
                   host : (string * string) option (* (git, rev) *) }
 
@@ -99,6 +104,7 @@ let parse_manifest (content : string) : manifest =
   let lines = String.split_on_char '\n' content in
   let section = ref "" in
   let pkg_name = ref "" and pkg_version = ref "0.0.0" and pkg_path = ref "" in
+  let pkg_mere = ref "" in
   let host_git = ref "" and host_rev = ref "" in
   let deps = ref [] in
   let simple_kv = Str.regexp "^[ \t]*\\([a-z_]+\\)[ \t]*=[ \t]*\"\\([^\"]*\\)\"" in
@@ -125,6 +131,7 @@ let parse_manifest (content : string) : manifest =
         if k = "name" then pkg_name := v
         else if k = "version" then pkg_version := v
         else if k = "path" then pkg_path := v
+        else if k = "mere" then pkg_mere := v
       end
       else if !section = "host" && Str.string_match simple_kv line 0 then begin
         let k = Str.matched_group 1 line and v = Str.matched_group 2 line in
@@ -138,7 +145,126 @@ let parse_manifest (content : string) : manifest =
   in
   { pkg_name = !pkg_name; pkg_version = !pkg_version;
     pkg_path = (if !pkg_path = "" then None else Some !pkg_path);
+    pkg_mere = (if !pkg_mere = "" then None else Some !pkg_mere);
     deps = List.rev !deps; host }
+
+(* ---- the compiler a package asks for ------------------------------------
+
+   A package may say which compiler it needs (`mere = ">= 0.1.480"` under
+   `[package]`). Checked against the one that is running, at the two moments
+   where the answer is still cheap: when the package is installed, and when
+   something inside it is built.
+
+   Without this the failure still happens, just later and mute: the new syntax
+   reaches an old parser and comes back as a syntax error about a line in
+   somebody else's file. The version was knowable the whole time; nobody was
+   asking. *)
+let check_compiler_floor ~who (m : manifest) =
+  match m.pkg_mere with
+  | None -> ()
+  | Some c ->
+    (match Feature.parse_constraint c with
+     | Feature.Unreadable s ->
+       (* Refused rather than ignored. A constraint nobody can read is worse
+          than no constraint, because it looks like one. *)
+       err "%s declares `mere = %S`, which is not a constraint this compiler \
+            understands. Write `>= x.y.z` (or `x.y.z`, which means the same)." who s
+     | Feature.Floor want ->
+       (match Feature.parse_version Version.v with
+        | None -> ()
+        | Some have ->
+          if Feature.compare_v have want < 0 then
+            err "%s needs mere >= %s, and this is mere %s.\n\
+                 Upgrade the compiler, or lower that package's `mere` line if \
+                 the claim is wrong."
+              who (Feature.string_of_v want) Version.v))
+
+(* The nearest `mere.toml` at or above a directory, if any. A file compiled
+   outside a package has no floor to check, which is not an error. *)
+let find_manifest (dir : string) : string option =
+  let rec up d n =
+    if n > 40 then None
+    else
+      let p = Filename.concat d "mere.toml" in
+      if Sys.file_exists p then Some p
+      else
+        let parent = Filename.dirname d in
+        if parent = d then None else up parent (n + 1)
+  in
+  up (if Filename.is_relative dir then Filename.concat (Sys.getcwd ()) dir else dir) 0
+
+(* Write a floor into a manifest, in place, changing nothing else.
+
+   Line-oriented on purpose: this file is hand-written and hand-read, and a
+   round trip through a TOML printer would reformat somebody's comments and
+   spacing to record one number. It rewrites an existing `mere = ...` line
+   under `[package]` if there is one, and otherwise inserts a line at the end
+   of that section. A manifest with no `[package]` section is left alone and
+   said so — inventing the section would be a different edit than the one
+   asked for. *)
+let set_floor ~(manifest : string) ~(floor : string)
+  : [ `Unchanged | `Written of string option ] =
+  let content = read_file manifest in
+  let lines = String.split_on_char '\n' content in
+  let want = Printf.sprintf "mere = \">= %s\"" floor in
+  let kv = Str.regexp "^[ \t]*mere[ \t]*=[ \t]*\"\\([^\"]*\\)\"" in
+  let in_package = ref false in
+  let seen_package = ref false in
+  let previous = ref None in
+  let replaced = ref false in
+  (* Where the [package] section ends: the index after its last non-empty line,
+     which is where a new key goes. *)
+  let last_package_line = ref (-1) in
+  List.iteri (fun i raw ->
+    let t = String.trim (strip_comment raw) in
+    if t <> "" && t.[0] = '[' then begin
+      in_package := (t = "[package]");
+      if !in_package then seen_package := true
+    end else if !in_package && t <> "" then last_package_line := i)
+    lines;
+  in_package := false;
+  let out =
+    List.mapi (fun i raw ->
+      let t = String.trim (strip_comment raw) in
+      if t <> "" && t.[0] = '[' then (in_package := (t = "[package]"); raw)
+      else if !in_package && Str.string_match kv raw 0 then begin
+        previous := Some (Str.matched_group 1 raw);
+        replaced := true;
+        want
+      end
+      else if i = !last_package_line && not !replaced then
+        (* Appended after the section's last line, which is only reached when
+           there was no `mere` key to rewrite. *)
+        raw ^ "\n" ^ want
+      else raw)
+      lines
+  in
+  if not !seen_package then `Unchanged
+  else if !previous = Some (Printf.sprintf ">= %s" floor) then `Unchanged
+  else begin
+    let oc = open_out manifest in
+    output_string oc (String.concat "\n" out);
+    close_out oc;
+    `Written !previous
+  end
+
+(* The floor check for whatever package a source file belongs to. Silent when
+   there is no manifest, when it makes no claim, or when it cannot be read —
+   a malformed manifest is `mere install`'s business to report, and refusing to
+   compile a file because of a comma somewhere above it would be worse than the
+   problem. *)
+let check_floor_for_dir (dir : string) =
+  match find_manifest dir with
+  | None -> ()
+  | Some path ->
+    (match (try Some (parse_manifest (read_file path)) with _ -> None) with
+     | None -> ()
+     | Some m ->
+       let who =
+         if m.pkg_name = "" then Printf.sprintf "the package at %s" (Filename.dirname path)
+         else Printf.sprintf "package `%s`" m.pkg_name
+       in
+       check_compiler_floor ~who m)
 
 (* ---- fetch + copy ------------------------------------------------------ *)
 
@@ -325,6 +451,7 @@ let install ~root =
   if not (Sys.file_exists manifest_path) then
     err "no mere.toml in %s" root;
   let m = parse_manifest (read_file manifest_path) in
+  check_compiler_floor ~who:"this package" m;
   let modules_dir = Filename.concat root ".mere_modules" in
   sh (Printf.sprintf "mkdir -p %s" (q modules_dir));
   (* Load any existing lock so we can verify unchanged pins (go.sum style):
@@ -371,6 +498,13 @@ let install ~root =
         let mt = Filename.concat src "mere.toml" in
         if Sys.file_exists mt then Some (parse_manifest (read_file mt)) else None
       in
+      (* And its floor: a dependency that needs a newer compiler than this one
+         is a failure at install time, where the name of the package and the
+         two version numbers are all still in hand. Left to the build, it is a
+         syntax error inside `.mere_modules`. *)
+      (match sub_manifest with
+       | Some sm -> check_compiler_floor ~who:(Printf.sprintf "package `%s`" name) sm
+       | None -> ());
       let mod_path =
         match sub_manifest with
         | Some sm -> (match sm.pkg_path with Some p -> p | None -> name)

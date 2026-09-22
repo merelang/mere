@@ -66,6 +66,21 @@ let usage () =
   print_endline "  mere fmt -i <files...>        format in place (one or more)";
   print_endline "  mere fmt --check <files...>   exit 1 if any file needs formatting";
   print_endline "  mere install [dir]            fetch mere.toml deps into .mere_modules/";
+  print_endline "  mere fix <file.mere>          write the compiler version that file";
+  print_endline "                        needs into the nearest mere.toml";
+  print_endline "                        (`[package] mere = \">= x.y.z\"`), which is";
+  print_endline "                        what an older compiler is refused against.";
+  print_endline "                        It writes that line and nothing else.";
+  print_endline "  mere --decls <file.mere>      print forward declarations for the file's";
+  print_endline "                        own top-level names (paste them above a";
+  print_endline "                        definition to cut a dependency cycle)";
+  print_endline "  mere --decls --json <file.mere>";
+  print_endline "                        the same surface as data: values, types and";
+  print_endline "                        constructors, plus the package's declared";
+  print_endline "                        `mere` floor. For diffing an API between";
+  print_endline "                        versions.";
+  print_endline "  mere --features               the feature/version table this compiler";
+  print_endline "                        holds: name, version, changelog probe";
   print_endline "  mere serve <file.wasm>        run a .wasm on the vendored Node host (.mere_host/)";
   print_endline "  mere -v | --version   print version";
   print_endline "  mere -h | --help      show this help";
@@ -79,6 +94,11 @@ let usage () =
   print_endline "                        (evaluated after any -I flags).";
   print_endline "";
   print_endline "Checks:";
+  print_endline "  --warnings-as-errors  a run that produced a warning exits 1.";
+  print_endline "                        Everything is still printed, and the";
+  print_endline "                        artifact is still emitted — the status is";
+  print_endline "                        the answer. Counts warnings PRODUCED, not";
+  print_endline "                        the ten a terminal prints.";
   print_endline "  --allow-nonexhaustive a `match` missing a named case is an";
   print_endline "                        error on every path that runs or emits";
   print_endline "                        the program; this downgrades it to a";
@@ -137,7 +157,32 @@ let search_paths : string list ref = ref []
    (Q-136: a unit main prints nothing), so everything else says so here. *)
 let says (f : string -> string) : string -> string option = fun s -> Some (f s)
 
+(* `--warnings-as-errors`: the run fails if it produced a warning.
+
+   v0.1.503 gave the compiler warnings worth acting on (an unread binding, a
+   deprecated name) and no way to make a machine act on them, so a CI could not
+   hold the line against new ones. Gleam has the same flag on its build for the
+   same reason.
+
+   THE RULE IS ONE RULE: everything is printed exactly as it would have been,
+   and then the status is 1. The action has already run by then -- an
+   interpreted program's output has happened, an emitted backend's text is on
+   stdout -- and hiding that would be a lie about what took place. A caller
+   that must not keep the artifact should check the status, which is what the
+   flag is for. *)
+let warnings_as_errors : bool ref = ref false
+
 let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
+  (* Before anything is parsed: if this file belongs to a package that asks for
+     a newer compiler than this one, say so in those words. The alternative is
+     the parse error that used to be the only symptom — about a line the person
+     did not write, naming syntax rather than a version. *)
+  (match base_dir with
+   | Some d ->
+     (try Mere.Pkg_install.check_floor_for_dir d
+      with Mere.Pkg_install.Install_error msg ->
+        Printf.eprintf "error: %s\n" msg; exit 1)
+   | None -> ());
   let render ~source ~filename loc kind msg =
     Mere.Diagnostic.format ~source ~filename loc kind msg
   in
@@ -261,11 +306,53 @@ let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
      got the file, the source line and the caret. The position of a warning is
      as much use as the position of an error, and a `help:` line the message
      carries is only rendered by this path. *)
+  (* At most this many warning blocks on a terminal, and then a count.
+
+     A block is a message plus its code frame: nine or so lines. The first tree
+     the unused-binding check (v0.1.502) was pointed at answered with 462 of
+     them -- all true, all in one file, every one of them a component of a tuple
+     destructuring that nobody reads -- which is 4,000 lines of stderr in front
+     of whatever the person actually ran the compiler to see. A backlog is worth
+     knowing about once; it is not worth being shown in full on every build. The
+     editor draws all of them, in the margin, where they cost nothing.
+
+     The count is printed rather than the remainder being dropped silently:
+     "and 452 more" is the difference between a cap and a lie. *)
+  let warning_blocks = 10 in
   let print_warnings () =
-    List.iter (fun (loc, msg) ->
-      let (src, name, loc) = locate loc in
-      prerr_endline (render ~source:src ~filename:name loc "warning" msg))
-      (Mere.Pipeline.take_warnings ())
+    (* The fix a warning carries is for an editor to apply; on a terminal the
+       `help:` line inside the message already says it, and saying it twice is
+       how the two spellings start to disagree. *)
+    let ws = Mere.Pipeline.take_warnings () in
+    (* On the -rv paths the prelude is glued in front of the source as TEXT, so
+       its positions carry no file and every filter upstream of here — which
+       tests `loc.file` — lets them through. A warning about the RV prelude is
+       about code the person cannot edit: the unused-binding check found one on
+       its first run against `-rv`. Dropped here, where the driver is already
+       the thing that knows what the glue did. *)
+    let ws =
+      if not rv then ws
+      else
+        List.filter (fun ((loc : Mere.Loc.t), _, _) ->
+          loc.Mere.Loc.file <> None
+          || (match Mere.Rv_prelude.origin_of loc with
+              | Mere.Rv_prelude.User _ -> true
+              | Mere.Rv_prelude.Prelude _ -> false)) ws
+    in
+    List.iteri (fun i (loc, msg, _fix) ->
+      if i < warning_blocks then begin
+        let (src, name, loc) = locate loc in
+        prerr_endline (render ~source:src ~filename:name loc "warning" msg)
+      end)
+      ws;
+    let n = List.length ws in
+    if n > warning_blocks then
+      Printf.eprintf "... and %d more warning%s (an editor shows them all)\n"
+        (n - warning_blocks) (if n - warning_blocks = 1 then "" else "s");
+    (* The COUNT, not the number printed: a warning suppressed by the block
+       limit is still a warning, and `--warnings-as-errors` has to fail on one
+       it did not have room to show. *)
+    n
   in
   (* Every match that is missing a named case, reported together, before
      anything is run or emitted. `report_syntax` does the same for the parse. *)
@@ -307,7 +394,7 @@ let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
   in
   try
     let result = action source in
-    print_warnings ();
+    let warned = print_warnings () in
     (* `mere check` has no output to print: the exit status is the answer, the
        way `mere fmt --check` reads. Everything else here — the renderer, the
        report-them-all paths, the warnings — is the same machinery, which is the
@@ -319,24 +406,29 @@ let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
        for either reason. *)
     (match result with
      | Some r -> if not quiet then print_endline r
-     | None -> ())
+     | None -> ());
+    if !warnings_as_errors && warned > 0 then begin
+      Printf.eprintf "%d warning%s, and --warnings-as-errors was given\n"
+        warned (if warned = 1 then "" else "s");
+      exit 1
+    end
   with
-  | Mere.Lexer.Lex_error (loc, msg) -> print_warnings (); report loc "lex error" msg
+  | Mere.Lexer.Lex_error (loc, msg) -> ignore (print_warnings ()); report loc "lex error" msg
   | Mere.Parser.Parse_error_in_file (file, loc, msg) ->
     (* The position is a line in the imported file, so it is reported against
        that file rather than against the one being compiled. *)
-    print_warnings ();
+    ignore (print_warnings ());
     prerr_endline
       (Mere.Diagnostic.format ~source:(try read_file file with _ -> "")
          ~filename:file loc "parse error" msg);
     exit 1
   | Mere.Parser.Parse_error (loc, msg) -> report_syntax loc msg
   | Mere.Exhaustive.Non_exhaustive findings ->
-    print_warnings (); report_nonexhaustive findings
+    ignore (print_warnings ()); report_nonexhaustive findings
   | Mere.Pipeline.Type_redeclared rs ->
     (* No position to render a code frame against — `Top_type` carries none —
        so this takes the line=0 shape `Diagnostic.format` already has. *)
-    print_warnings ();
+    ignore (print_warnings ());
     prerr_endline
       (String.concat "\n\n"
          (List.map (fun r ->
@@ -351,8 +443,8 @@ let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
        about, and the warning is the sentence that explains the eval error --
        `no matching arm in match` above `missing 1` reads as two problems and
        is one. Every other handler here already prints them. *)
-    print_warnings (); report_eval loc msg
-  | Mere.Typer.Type_error (loc, msg) -> print_warnings (); report_type loc msg
+    ignore (print_warnings ()); report_eval loc msg
+  | Mere.Typer.Type_error (loc, msg) -> ignore (print_warnings ()); report_type loc msg
   | Mere.Trait_elab.Trait_error (loc, msg) -> report loc "trait error" msg
   | Mere.Codegen_c.Codegen_error (loc, msg) -> report loc "codegen error" msg
   | Mere.Codegen_llvm.Codegen_error (loc, msg) -> report loc "codegen error" msg
@@ -390,6 +482,7 @@ let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
    default core-module output is unchanged. Extracted from argv in
    preprocess_argv, like -I. *)
 let component_flag : bool ref = ref false
+
 
 let infer_program ?base_dir source =
   Mere.Pipeline.infer_program ?base_dir ~search_paths:!search_paths source
@@ -467,7 +560,12 @@ let compile_to_wasm ?base_dir source =
    char-class helpers written on top of the primitives codegen_riscv emits).
    It carries no imports, so gluing it ahead of the user source is safe;
    line-number shifts in diagnostics are the only cost. *)
-let rv_source source = Mere.Rv_prelude.contents ^ "\n" ^ source
+let rv_source source =
+  (* The parser is about to see the prelude and the user's file as one text.
+     Anything it bakes INTO the program from a position -- `echo`'s line --
+     has to know how far down the user's line 1 now is. *)
+  Mere.Loc.glued_lines := Mere.Rv_prelude.lines ();
+  Mere.Rv_prelude.contents ^ "\n" ^ source
 
 (* `--ram <MB>` sets the RAM the emitted binary expects: the stack starts at
    the top of it and the heap grows up from 2MB, so this is the knob for a
@@ -630,6 +728,8 @@ let preprocess_argv () : string array =
     | "--lib" :: rest -> Mere.Codegen_c.lib_mode := true; walk kept dirs rest
     | "--allow-nonexhaustive" :: rest ->
       Mere.Exhaustive.allow := true; walk kept dirs rest
+    | "--warnings-as-errors" :: rest ->
+      warnings_as_errors := true; walk kept dirs rest
     | tok :: rest -> walk (tok :: kept) dirs rest
   in
   let (kept, dashI_dirs) = walk [] [] argv in
@@ -652,6 +752,56 @@ let () =
         Printf.printf "%s\t%s\n" name (Mere.Ast.pp_ty sch.body))
       Mere.Typer.initial_env
   | [_; "-r"] -> Mere.Repl.run ()
+  | [_; "--features"] ->
+    (* The table, from the compiler that holds it, so a gate can iterate the
+       rows that exist rather than the rows someone remembered to list.
+       name TAB since TAB changelog-probe. *)
+    List.iter (fun (f : Mere.Feature.feature) ->
+      Printf.printf "%s\t%s\t%s\n"
+        f.Mere.Feature.ft_name f.Mere.Feature.ft_since f.Mere.Feature.ft_probe)
+      Mere.Feature.all
+  | [_; "fix"; path] ->
+    (* Gleam's `gleam fix`, which does exactly one thing: it makes the declared
+       floor true. Same here — parse the file, ask what it actually needs, and
+       write that into the nearest mere.toml.
+
+       It writes the floor and nothing else. A tool that "fixes" a file is one
+       people stop reading the diff of; this one has a single, stated effect. *)
+    let source = read_file path in
+    let base = Filename.dirname path in
+    Mere.Feature.reset ();
+    (try
+       let _ = Mere.Pipeline.parse_program ~base_dir:base source in
+       ()
+     with e ->
+       Printf.eprintf "fix: %s does not parse (%s); nothing written\n"
+         path (Printexc.to_string e);
+       exit 1);
+    let prelude_name = Mere.Pipeline.prelude_file in
+    (match Mere.Feature.floor ~ignore_file:(fun f -> f = prelude_name) () with
+     | None ->
+       Printf.printf
+         "fix: nothing in %s needs a floor -- no `mere` line written\n" path
+     | Some (v, ft) ->
+       let want = Mere.Feature.string_of_v v in
+       (match Mere.Pkg_install.find_manifest base with
+        | None ->
+          Printf.eprintf
+            "fix: %s needs mere >= %s (%s), but there is no mere.toml above %s \
+             to record it in\n"
+            path want ft.Mere.Feature.ft_name base;
+          exit 1
+        | Some manifest ->
+          (match Mere.Pkg_install.set_floor ~manifest ~floor:want with
+           | `Unchanged ->
+             Printf.printf "fix: %s already says `mere = \">= %s\"`\n" manifest want
+           | `Written previous ->
+             Printf.printf "fix: %s -- set `mere = \">= %s\"`%s\n      (%s needs it)\n"
+               manifest want
+               (match previous with
+                | Some p -> Printf.sprintf " (was %S)" p
+                | None -> "")
+               ft.Mere.Feature.ft_name)))
   | [_; "install"] | [_; "install"; _] ->
     let root =
       match Array.to_list (preprocess_argv ()) with
@@ -835,6 +985,25 @@ let () =
      defines. Splitting a `let rec ... and ...` chain means writing one
      `let fn <name>: <ty>;` per shared name, and a chain worth splitting has
      hundreds; the compiler already knows every answer. *)
+  | [_; "--decls"; "--json"; path] | [_; "--decls"; path; "--json"] ->
+    (* The same declarations, as data. The floor comes from the package the
+       path is in, because that is a fact about the package and the pipeline
+       compiles a file. *)
+    let source = read_file path in
+    let base = Filename.dirname path in
+    let requires =
+      match Mere.Pkg_install.find_manifest base with
+      | None -> None
+      | Some manifest ->
+        (match (try Some (Mere.Pkg_install.parse_manifest (read_file manifest))
+                with _ -> None) with
+         | Some m -> m.Mere.Pkg_install.pkg_mere
+         | None -> None)
+    in
+    run_action ~base_dir:base
+      (says (Mere.Pipeline.decls_json ~base_dir:base ~search_paths:!search_paths
+               ?requires))
+      path source
   | [_; "--decls"; path] ->
     let source = read_file path in
     let base = Filename.dirname path in

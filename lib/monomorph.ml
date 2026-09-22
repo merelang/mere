@@ -211,6 +211,7 @@ let pattern_vars (p : Ast.pattern) : string list =
     | Ast.P_record (_, fs) -> List.concat_map (fun (_, p) -> go p) fs
     | Ast.P_as (inner, n) -> n :: go inner
     | Ast.P_or (a, _) -> go a  (* both branches must bind same names *)
+    | Ast.P_str_prefix (_, n) -> if n = "_" then [] else [n]
     | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_unit
     | Ast.P_constr (_, None) -> []
   in
@@ -739,7 +740,7 @@ let clone_with_fresh_tyvars (e : Ast.expr) : Ast.expr =
     { Ast.ploc = p.Ast.ploc; pnode = clone_pattern_node p.Ast.pnode }
   and clone_pattern_node = function
     | (Ast.P_wild | Ast.P_var _ | Ast.P_int _ | Ast.P_bool _
-       | Ast.P_str _ | Ast.P_unit) as n -> n
+       | Ast.P_str _ | Ast.P_str_prefix _ | Ast.P_unit) as n -> n
     | Ast.P_constr (c, Some sub) -> Ast.P_constr (c, Some (clone_pattern sub))
     | Ast.P_constr (c, None) -> Ast.P_constr (c, None)
     | Ast.P_tuple ps -> Ast.P_tuple (List.map clone_pattern ps)

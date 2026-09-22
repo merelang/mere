@@ -108,6 +108,16 @@ and pattern_node =
   | P_int of int
   | P_bool of bool
   | P_str of string
+  (* `"lit" <> rest`: the scrutinee starts with a literal, and the rest of it is
+     bound. Gleam spells it the same way, and it is the shape most string
+     handling in this repository already has by hand — `str_starts_with` and
+     then a slice, 13 times in contrib alone.
+
+     It survives only as far as `Pipeline`'s desugar, which turns the arm into
+     a guarded binding over the functions that were being called by hand. No
+     backend sees it, and the formatter does (`keep_sugar`), which is the whole
+     reason it is a node rather than a rewrite inside the parser. *)
+  | P_str_prefix of string * string
   | P_unit
   | P_constr of string * pattern option
   | P_tuple of pattern list
@@ -323,6 +333,7 @@ let rec pp_pattern p =
   | P_int n -> string_of_int n
   | P_bool b -> if b then "true" else "false"
   | P_str s -> escape_string s
+  | P_str_prefix (lit, name) -> escape_string lit ^ " <> " ^ name
   | P_unit -> "()"
   | P_constr (c, None) -> c
   | P_constr (c, Some sub) -> c ^ " " ^ pp_pattern sub
@@ -409,6 +420,7 @@ let rec pp e =
    shadowed inside a match arm or `let pat = ... in` body. *)
 let rec pattern_vars p =
   match p.pnode with
+  | P_str_prefix (_, name) -> if name = "_" then [] else [ name ]
   | P_wild | P_int _ | P_bool _ | P_str _ | P_unit -> []
   | P_var n -> [n]
   | P_constr (_, None) -> []
@@ -425,6 +437,7 @@ let rec pattern_vars p =
 let rec rename_pat_vars (subst : (string * string) list) (p : pattern) : pattern =
   let sub n = match List.assoc_opt n subst with Some n' -> n' | None -> n in
   match p.pnode with
+  | P_str_prefix (lit, name) -> { p with pnode = P_str_prefix (lit, sub name) }
   | P_wild | P_int _ | P_bool _ | P_str _ | P_unit -> p
   | P_var n -> { p with pnode = P_var (sub n) }
   | P_constr (c, None) -> { p with pnode = P_constr (c, None) }
@@ -461,7 +474,7 @@ let rename_free_vars (lookup : string -> string option) (e : expr) : expr =
     | P_tuple ps -> { p with pnode = P_tuple (List.map go_pat ps) }
     | P_as (inner, n) -> { p with pnode = P_as (go_pat inner, n) }
     | P_or (a, b) -> { p with pnode = P_or (go_pat a, go_pat b) }
-    | P_var _ | P_wild | P_int _ | P_bool _ | P_str _ | P_unit -> p
+    | P_var _ | P_wild | P_int _ | P_bool _ | P_str _ | P_str_prefix _ | P_unit -> p
   in
   (* `shadowed` is a set rather than a list. It used to be a list, and
      `with_shadow` prepended with `@` — which copies the whole thing at every

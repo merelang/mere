@@ -95,7 +95,8 @@ type token =
   | T_pipe
   | T_pipe_pipe        (* || *)
   | T_pipe_gt          (* |>  pipe operator *)
-  | T_lt_lt            (* <<  function composition (compose-right-to-left) *)
+  | T_lt_lt
+  | T_lt_gt            (* <<  function composition (compose-right-to-left) *)
   | T_gt_gt            (* >>  function composition (compose-left-to-right) *)
   | T_amp_amp          (* && *)
   | T_plus
@@ -198,6 +199,10 @@ let rec tokenize ?file ?comments s =
       | '<' when i + 1 < len && s.[i + 1] = '|' ->
         (* Phase 36: `<|` reverse function application. *)
         advance 2; aux (i + 2) ((pos, T_lt_pipe) :: acc)
+      | '<' when i + 1 < len && s.[i + 1] = '>' ->
+        (* v0.1.504: `"lit" <> rest` in a pattern. Only a pattern: there is no
+           `<>` operator, so no expression can mean anything else by it. *)
+        advance 2; aux (i + 2) ((pos, T_lt_gt) :: acc)
       | '<' when i + 1 < len && s.[i + 1] = '-' ->
         (* Phase 36: `<-` generator arrow for list comprehension. *)
         advance 2; aux (i + 2) ((pos, T_lt_minus) :: acc)

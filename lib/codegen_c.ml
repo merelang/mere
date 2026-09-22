@@ -1068,7 +1068,7 @@ let pattern_vars_with_types (p : Ast.pattern) (scrut_ty : Ast.ty)
   let rec go p t =
     match p.Ast.pnode with
     | Ast.P_var n -> [(n, Ast.walk t)]
-    | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_unit -> []
+    | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_str_prefix _ | Ast.P_unit -> []
     | Ast.P_as (inner, n) -> (n, Ast.walk t) :: go inner t
     | Ast.P_or (a, _) -> go a t
     | Ast.P_tuple ps ->
@@ -4840,6 +4840,13 @@ let rec emit_expr (e : Ast.expr) : string =
 and compile_pattern (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
     : string * string =
   match pat.Ast.pnode with
+  (* A prefix pattern reaching a backend means `Pipeline`'s desugar did not run
+     on this path: it is rewritten into a guarded binding before inference, so
+     nothing below the typer should ever see one. Named rather than ignored --
+     a silent fallthrough here would compile a match that tests nothing. *)
+  | Ast.P_str_prefix _ ->
+    raise (Codegen_error (pat.Ast.ploc,
+      "internal: a `\"lit\" <> rest` pattern reached codegen (the prefix desugar did not run)"))
   | Ast.P_wild -> ("1", "")
   | Ast.P_var n ->
     (* v0.1.56: bind under c_safe_name so the declaration matches the

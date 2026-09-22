@@ -1,0 +1,4 @@
+// One row of Feature.all, on its own: the 128-bit lane types.
+let v = f64x2_make 1.0 2.0;
+let w = f64x2_add v v;
+print "ok"

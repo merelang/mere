@@ -3066,6 +3066,16 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
   | Ast.Var name ->
     (match List.assoc_opt name env with
      | Some sch ->
+       (* A deprecated name is only deprecated when it IS the builtin. The env
+          is built by prepending, so a user's own binding shadows the initial
+          one and comes back as a different scheme: comparing by identity is
+          what keeps this from warning about somebody's own `str_len`. *)
+       (match Deprecated.lookup name with
+        | Some row
+          when (match List.assoc_opt name initial_env with
+                | Some s0 -> s0 == sch
+                | None -> false) -> Deprecated.note row e.Ast.loc
+        | _ -> ());
        let ity, mapping = instantiate_with_map sch in
        (* Q-127: this reference is being evaluated HERE, so whatever it allocates is
           allocated here -- see `bind_instantiated_alloc_regions`. *)
@@ -3772,6 +3782,14 @@ and check_pattern (p : Ast.pattern) (expected : Ast.ty) : (string * Ast.ty) list
   | Ast.P_int _ -> unify p.ploc expected Ast.TyInt; []
   | Ast.P_bool _ -> unify p.ploc expected Ast.TyBool; []
   | Ast.P_str _ -> unify p.ploc expected Ast.TyStr; []
+  (* Reached only if the desugar did not run: it rewrites every prefix arm
+     before inference, so seeing one here is a pass having been skipped rather
+     than a program to type. Typed anyway, as what it is — the scrutinee is a
+     `str` and the binder is the rest of it — so the answer is right even on
+     the path that forgot. *)
+  | Ast.P_str_prefix (_, name) ->
+    unify p.ploc expected Ast.TyStr;
+    if name = "_" then [] else [ (name, Ast.TyStr) ]
   | Ast.P_unit -> unify p.ploc expected Ast.TyUnit; []
   | Ast.P_constr (name, sub) ->
     let info =
