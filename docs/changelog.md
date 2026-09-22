@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.508 — 2026-09-22
+
+_One rule written in one arm of four twins, and the spelling that never got
+checked._
+
+**`let rec` was skipping two of `let`'s safeguards.** A top-level binding can
+be spelled `let f = ...`, `let rec f = ...`, as a member of a
+`let rec ... and ...` group, or inside a `module`. Four loops walk
+declarations — the interpreter's, `type_of`, `region_param_report` and
+`infer_program_inner` — and every one of them routed `Top_let` through
+`infer_top_let` and `top_let_scheme`, then inlined the `Top_let_rec` case by
+hand. Both of that pair's checks were therefore missing from all four:
+
+```
+let store = vec_new ();
+let keep = fn (n: int) -> ... vec_push store (vec_new ()) ...;   // refused under --lib
+let rec keep = fn (n: int) -> ... same ...;                       // compiled
+```
+
+Under `--lib` each exported call runs in its own region, so the second program
+put a pointer into memory the next call reuses — the exact fault the boundary
+check exists to stop, reachable by changing one word. The value restriction had
+the same hole: `let store = vec_new ();` is monomorphic, and spelled
+`let rec store = vec_new ();` it was generalised, after which one `Vec` held an
+`int` and a `str` and neither use complained.
+
+Both now go through one entry point, `infer_top_rec`, which the four loops
+share the way they already shared `infer_top_let`.
+
+**The gate is about the asymmetry, not the rule.** Each property is run in all
+five spellings and must get the same verdict, so the next rule that lands in
+one arm fails here even when the arm it landed in is right. It includes a
+program that must be ACCEPTED in every spelling — a gate whose every check is
+"this is refused" passes on a compiler that refuses everything — and its
+poisons are a compiler that refuses only the `let` spelling, which is the shape
+of the bug, and one that refuses everything.
+
+This was found sideways: an experiment that grouped adjacent `let` bindings
+made a regression test stop refusing what it refuses. The experiment was
+discarded; the hole it had routed ordinary `let`s into was older than it.
+
+### Counts
+
+`dune test` 2817, parity 180, and one more gate script with poison runs in CI.
+
+---
+
 ## v0.1.507 — 2026-09-22
 
 _The first layer a newcomer hits had twenty-six explanations everywhere else

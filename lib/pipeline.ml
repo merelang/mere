@@ -905,6 +905,31 @@ let warn_declared_types () =
    they had the same eight lines written out twice. They had also drifted: neither
    applied the value restriction that `Typer`'s inner `let` has had since Phase 36, and
    fixing one would have left the other. *)
+(* The boundary block's own check, run by hand: there is no `Region_block` node to
+   hang it on, and without it the boundary would be the one place the escape rule
+   does not reach.
+
+   It lives here, on its own, because BOTH kinds of top-level binding need it and
+   only one of them had it. See `infer_top_rec`. *)
+let check_lib_escape (loc : Loc.t) outer_env =
+  match Typer.region_leaked_into_env Typer.call_region_name outer_env with
+  | None -> ()
+  | Some bind ->
+    raise (Typer.Type_error (loc,
+      Printf.sprintf
+        "region escape across the library boundary: `%s` now holds a value built \
+         during a call, which is freed when that call returns (its type became \
+         `%s`). Each exported call runs in its own region -- build it at module \
+         init, or copy its contents out"
+        bind (Ast.pp_ty (Ast.walk (List.assoc bind outer_env).Typer.body))))
+
+(* Is this binding's value a function body — the only thing the call region may
+   wrap? A top-level `let x = <expr>` runs during module init, where the current
+   region is the default one, so wrapping it would claim a lifetime it does not
+   have. *)
+let is_fn_value (v : Ast.expr) =
+  match v.Ast.node with Ast.Fun _ -> true | _ -> false
+
 let infer_top_let outer_env (value : Ast.expr) : Ast.ty =
   (* Q-127: IN `--lib` MODE AN EXPORTED CALL *IS* A REGION. The boundary opens one per
      call and releases it at return -- that is what makes a call a transaction, and what
@@ -917,10 +942,7 @@ let infer_top_let outer_env (value : Ast.expr) : Ast.ty =
      Only a FUNCTION body. A top-level `let x = <expr>` runs during module init, where
      the current region is the default one, so wrapping it would claim a lifetime it
      does not have. *)
-  let wrap =
-    !Typer.lib_boundary
-    && (match value.Ast.node with Ast.Fun _ -> true | _ -> false)
-  in
+  let wrap = !Typer.lib_boundary && is_fn_value value in
   if not wrap then Typer.infer outer_env value
   else begin
     Typer.active_regions := Typer.call_region_name :: !Typer.active_regions;
@@ -930,21 +952,59 @@ let infer_top_let outer_env (value : Ast.expr) : Ast.ty =
       | t -> restore (); t
       | exception ex -> restore (); raise ex
     in
-    (* The block's own check, run by hand: there is no `Region_block` node here to hang
-       it on, and without it the boundary would be the one place the escape rule does
-       not reach. *)
-    (match Typer.region_leaked_into_env Typer.call_region_name outer_env with
-     | Some bind ->
-       raise (Typer.Type_error (value.Ast.loc,
-         Printf.sprintf
-           "region escape across the library boundary: `%s` now holds a value built \
-            during a call, which is freed when that call returns (its type became \
-            `%s`). Each exported call runs in its own region -- build it at module \
-            init, or copy its contents out"
-           bind (Ast.pp_ty (Ast.walk (List.assoc bind outer_env).Typer.body))))
-     | None -> ());
+    check_lib_escape value.Ast.loc outer_env;
     t
   end
+
+(* A TOP-LEVEL `let rec ... and ...`, TYPED ONCE.
+
+   ⚠ THIS EXISTS BECAUSE THE RULE WAS WRITTEN FOUR TIMES. Four loops walk
+   declarations — the interpreter's, `type_of`, `region_param_report` and
+   `infer_program_inner` — and each had its own copy of this block. Every one of
+   them routed `Top_let` through `infer_top_let` and `top_let_scheme`, and every
+   one of them inlined the `let rec` case by hand, so BOTH of that pair's
+   safeguards were missing from all four:
+
+     - the library boundary. `let store = vec_new (); let f = fn ... vec_push
+       store (vec_new ()) ...;` is refused under `--lib`; the same program
+       written `let rec f = ...` compiled, and each exported call read back
+       memory the previous call had freed.
+     - the value restriction. `let store = vec_new ();` is monomorphic; the same
+       binding written `let rec store = vec_new ();` was generalised, and one
+       `Vec` then held an `int` and a `str` at once.
+
+   Both are one entry point now. Q-164. *)
+let infer_top_rec outer_env (bindings : (string * Ast.expr) list) : Ast.ty list =
+  let alphas =
+    Typer.enter_level (fun () -> List.map (fun _ -> Typer.fresh_var ()) bindings) in
+  let env_rec =
+    List.fold_left2 (fun acc (n, _) a -> (n, Typer.mono a) :: acc)
+      outer_env bindings alphas in
+  let infer_all () =
+    List.iter2 (fun ((_ : string), (value : Ast.expr)) alpha ->
+      let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
+      Typer.unify value.Ast.loc alpha t) bindings alphas
+  in
+  (* The same rule as `infer_top_let`: the call region wraps function bodies and
+     nothing else. A group may hold a non-function (`let rec x = 1 and f = ...`
+     parses), and one that does is module-init code, not a call. *)
+  let wrap =
+    !Typer.lib_boundary
+    && bindings <> []
+    && List.for_all (fun (_, v) -> is_fn_value v) bindings
+  in
+  if not wrap then infer_all ()
+  else begin
+    Typer.active_regions := Typer.call_region_name :: !Typer.active_regions;
+    let restore () = Typer.active_regions := List.tl !Typer.active_regions in
+    (match infer_all () with
+     | () -> restore ()
+     | exception ex -> restore (); raise ex);
+    match bindings with
+    | (_, v) :: _ -> check_lib_escape v.Ast.loc outer_env
+    | [] -> ()
+  end;
+  alphas
 
 (* THE VALUE RESTRICTION, WHICH ONLY THE INNER `let` HAD. `Typer`'s Let case has had the
    narrow rule since Phase 36 -- a binding whose value is not syntactically a value and
@@ -1013,15 +1073,7 @@ let process_decls eval_env type_env decls =
       List.iter (fun (n, value) ->
         warn_reserved_name value.Ast.loc n) bindings;
       let outer_env = !type_env in
-      let alphas =
-        Typer.enter_level (fun () -> List.map (fun _ -> Typer.fresh_var ()) bindings) in
-      let env_rec = List.fold_left2 (fun acc (n, _) a ->
-        (n, Typer.mono a) :: acc
-      ) outer_env bindings alphas in
-      List.iter2 (fun (_, value) alpha ->
-        let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
-        Typer.unify value.Ast.loc alpha t
-      ) bindings alphas;
+      let alphas = infer_top_rec outer_env bindings in
       List.iter2 (fun (n, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
       (* a member that KEEPS A PROMISE reuses the ref the promise made, so a
          caller written above the group -- the only reason to declare it --
@@ -1039,8 +1091,8 @@ let process_decls eval_env type_env decls =
         r := v
       ) bindings;
       eval_env := env_eval;
-      type_env := List.fold_left2 (fun acc (n, _) a ->
-        let sch = forward_scheme n (Typer.generalize outer_env a) in
+      type_env := List.fold_left2 (fun acc (n, value) a ->
+        let sch = forward_scheme n (top_let_scheme outer_env value a) in
         Typer.record_top_scheme n sch;
         (n, sch) :: acc
       ) outer_env bindings alphas
@@ -1188,18 +1240,10 @@ let type_of ?base_dir ?(search_paths = []) s =
       List.iter (fun (n, value) ->
         warn_reserved_name value.Ast.loc n) bindings;
       let outer_env = !type_env in
-      let alphas =
-        Typer.enter_level (fun () -> List.map (fun _ -> Typer.fresh_var ()) bindings) in
-      let env_rec = List.fold_left2 (fun acc (n, _) a ->
-        (n, Typer.mono a) :: acc
-      ) outer_env bindings alphas in
-      List.iter2 (fun (_, value) alpha ->
-        let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
-        Typer.unify value.Ast.loc alpha t
-      ) bindings alphas;
+      let alphas = infer_top_rec outer_env bindings in
       List.iter2 (fun (n, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
-      type_env := List.fold_left2 (fun acc (n, _) a ->
-        let sch = forward_scheme n (Typer.generalize outer_env a) in
+      type_env := List.fold_left2 (fun acc (n, value) a ->
+        let sch = forward_scheme n (top_let_scheme outer_env value a) in
         Typer.record_top_scheme n sch;
         (n, sch) :: acc
       ) outer_env bindings alphas
@@ -1470,16 +1514,10 @@ let region_param_report ?base_dir ?(search_paths = []) s =
         (n, sch) :: acc) outer_env bindings
     | Ast.Top_let_rec bindings ->
       let outer_env = !type_env in
-      let alphas =
-        Typer.enter_level (fun () -> List.map (fun _ -> Typer.fresh_var ()) bindings) in
-      let env_rec = List.fold_left2 (fun acc (n, _) a ->
-        (n, Typer.mono a) :: acc) outer_env bindings alphas in
-      List.iter2 (fun (_, value) alpha ->
-        let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
-        Typer.unify value.Ast.loc alpha t) bindings alphas;
+      let alphas = infer_top_rec outer_env bindings in
         List.iter2 (fun (n, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
-      type_env := List.fold_left2 (fun acc (n, _) a ->
-        let sch = forward_scheme n (Typer.generalize outer_env a) in
+      type_env := List.fold_left2 (fun acc (n, value) a ->
+        let sch = forward_scheme n (top_let_scheme outer_env value a) in
         Typer.record_top_scheme n sch;
         (n, sch) :: acc) outer_env bindings alphas
     | Ast.Top_type (name, params, variants) -> Typer.register_type name params variants
@@ -1780,16 +1818,10 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
         warn_reserved_name value.Ast.loc n) bindings;
       guard_decl None (List.map fst bindings) (fun () ->
         let outer_env = !type_env in
-        let alphas =
-        Typer.enter_level (fun () -> List.map (fun _ -> Typer.fresh_var ()) bindings) in
-        let env_rec = List.fold_left2 (fun acc (n, _) a ->
-          (n, Typer.mono a) :: acc) outer_env bindings alphas in
-        List.iter2 (fun (_, value) alpha ->
-          let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
-          Typer.unify value.Ast.loc alpha t) bindings alphas;
+        let alphas = infer_top_rec outer_env bindings in
           List.iter2 (fun (n, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
-        type_env := List.fold_left2 (fun acc (n, _) a ->
-          let sch = forward_scheme n (Typer.generalize outer_env a) in
+        type_env := List.fold_left2 (fun acc (n, value) a ->
+          let sch = forward_scheme n (top_let_scheme outer_env value a) in
           (n, sch) :: acc) outer_env bindings alphas)
     | Ast.Top_type (name, params, variants) ->
       Typer.register_type name params variants
