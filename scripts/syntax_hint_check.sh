@@ -23,9 +23,10 @@
 #      must get no hint — the table must answer about a position, not a word.
 #   2. `var`, `case`, `val` and `mut` are real identifiers in the Mere
 #      repositories (`let var = list_sum ...`, `fn (case: int) -> case * 2`,
-#      `fn val ->`, `&mut R v`). A file that BINDS one of them and then fails
-#      to parse for an unrelated reason must not be told about another
-#      language's keyword.
+#      `fn val ->`, `&mut R v`, and — in mere-ruby — as TUPLE PATTERN binders,
+#      `let (val, j) = ...` and `let (classes, var, prefix, r2) = ...`). A file
+#      that BINDS one of them and then fails to parse for an unrelated reason
+#      must not be told about another language's keyword.
 #   3. a `mere` that prints the same errors with the `help:` lines stripped
 #      must make the catalogue go red — or the catalogue is not reading them.
 
@@ -111,7 +112,9 @@ if [ "${1:-}" = "--poison" ]; then
   for pair in "var:let var = 4;\nlet _ = print_int (var + );" \
               "case:let case = fn (n: int) -> n * 2;\nlet _ = print_int (case 3;" \
               "val:let f = fn val -> val + ;" \
-              "mut:let f = fn (db: &mut R DbHandle) -> db + ;"; do
+              "mut:let f = fn (db: &mut R DbHandle) -> db + ;" \
+              "val:let f = fn (s: str) -> let (val, j) = scan s in val + j + ;" \
+              "var:let f = fn (r: str) -> let (classes, var, p, r2) = parse r in var + ;"; do
     w=${pair%%:*}; prog=${pair#*:}
     # shellcheck disable=SC2059
     printf "$prog\n" > "$tmp/binds.mere"

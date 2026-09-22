@@ -45,14 +45,17 @@ let for_char (c : char) : string option =
 (* A word that is a keyword in another language.
 
    ⚠ NOT `of`: `of` is Mere's own keyword (`type t = A | B of int`) and is
-   measured 424 times in the four Mere repositories. It reaches the parser as
-   `T_of`, never as an identifier, so `case x of ...` is answered by `case`.
+   measured 943 times across the four Mere repositories (989 .mere files). It
+   reaches the parser as `T_of`, never as an identifier, so `case x of ...` is
+   answered by `case`.
 
    The words that ARE spelled as identifiers here — `mut` `var` `val` `case` —
-   are also real identifiers in that same corpus (`&mut R v`,
-   `let var = list_sum ...`, `fn val ->`, `fn (case: int) -> case * 2`), which
-   is why the caller passes `bound`: a name this file binds is an identifier,
-   and the table stays silent about it. *)
+   are also real identifiers in that same corpus: `&mut R v`,
+   `let var = list_sum ...`, `fn val ->`, `fn (case: int) -> case * 2`, and as
+   TUPLE PATTERN binders, `let (val, j) = scan_octal ...` and
+   `let (classes, var, prefix, r2) = parse_rescue_head r`. That is why the
+   caller passes `bound`: a name this file binds is an identifier, and the
+   table stays silent about it. *)
 let foreign (n : string) : string option =
   match n with
   | "mut" | "var" | "val" ->
