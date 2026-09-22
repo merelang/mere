@@ -667,9 +667,52 @@ everything is still printed and still emitted, and the status is the answer.
 It counts warnings PRODUCED, not the ten a terminal prints.
 
 A terminal prints at most **ten** warning blocks and then says how many more
-there are; an editor draws all of them. (The first tree the unread-binding
+there are; an editor draws all of them.
+
+**Where a diagnostic points** (v0.1.506): at the line you can act on. A failure
+raised inside a prelude function — `assert`, `divmod`, `list_max` are written
+in Mere — reports the call in your file rather than the prelude's own line, and
+declaring a type twice puts the caret on the second declaration while the
+message names the first. (The first tree the unread-binding
 check was pointed at answered with 462, which is four thousand lines of stderr
 in front of whatever you ran the compiler to see.)
+
+**When the spelling is another language's** (v0.1.507): the error says what to
+write instead. This is the layer you meet first, and until now it was the only
+one with no `help:` lines of its own — `var x = 1;` and `def f(n):` both came
+back as `trailing input`.
+
+```
+parse error: expected ';' or 'in' after let binding
+  --> x.mere:1:35
+  |
+1 | let _ = if true then 1 elif false then 2 else 3;
+  |                                   ^^^^
+  |
+  = help: `elif` — chain with `else if`
+```
+
+| you wrote | Mere |
+|---|---|
+| `x += 1` | bindings do not change: `let y = x + 1;` |
+| `#` | comments are `//` |
+| `!x` | negation is `not x` — `!=` is the comparison |
+| `$` outside a string | interpolation is `"x = {expr}"`, so `$` never starts anything |
+| `=>` | the arrow is `->` |
+| `{ ... }` as a block | `if c then a else b`, `match x with \| pat -> e`; a sequence is `let _ = a; b` |
+| `=` as a comparison | `==` |
+| `mut` / `var` / `val` | `let name = value;` |
+| `def` / `func` / `fun` | `let name = fn (x: int) -> body;` |
+| `case` / `switch` | `match x with \| pat -> e` |
+| `elif` | `else if` |
+| `return` | the last expression is the value |
+| `a and b` | `a && b` — `and` joins a `let rec ... and ...` group |
+| a leading `;` | `;` ends a `let` or a declaration; it cannot begin one |
+
+A hint names the token it keyed on, and a word you BIND is yours: `var`,
+`case`, `val` and `mut` are ordinary identifiers, and a file that binds one is
+never told about another language. (`of` is not in the table at all — it is
+Mere's own keyword in `type t = A | B of int`.)
 
 ---
 

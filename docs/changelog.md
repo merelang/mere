@@ -4,6 +4,109 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.507 — 2026-09-22
+
+_The first layer a newcomer hits had twenty-six explanations everywhere else
+and none of its own._
+
+**A syntax error now says what to write instead.** The typer, the
+exhaustiveness checker and the pipeline carry twenty-six `help:` lines between
+them; the lexer and the parser carried zero, although the syntax layer is the
+one a reader meets first. Seventeen spellings borrowed from other languages
+were tried against the compiler and sixteen came back with a generic message —
+several of them actively misleading, because `var x = 1;` and `def f(n):` both
+produced `trailing input`, and Python's `a and b` produced
+`expected ';' or 'in' after let binding` (`and` is Mere's keyword for a
+mutual-recursion group):
+
+```
+parse error: expected ';' or 'in' after let binding
+  --> x.mere:1:35
+  |
+1 | let _ = if true then 1 elif false then 2 else 3;
+  |                                   ^^^^
+  |
+  = help: `elif` — chain with `else if`
+```
+
+**It is one table, not 149 edits.** `Parse_error` is raised in 149 places and
+none of them were touched. A hint rides on the message, which already exists;
+what was missing is the answer to *what did the reader actually write*, and the
+token list answers that at the two entry points that parse. The typer reads the
+same table for the words that get past the parser as unbound names (`def`,
+`return`), where the fuzzy suggestion used to answer `did you mean \`e\`?`.
+
+**A word is only a keyword if this file does not bind it.** `var`, `case`,
+`val` and `mut` are real identifiers in the Mere repositories —
+`let var = list_sum ...`, `fn (case: int) -> case * 2`, `fn val ->`,
+`&mut R v` — so the table is given the names the file binds and stays silent
+about those. `of` is not in the table at all: it is Mere's own keyword
+(`type t = A | B of int`, measured 424 times) and never reaches the parser as
+an identifier.
+
+The window is the failing line rather than the failing token, because the
+evidence is often a few tokens back: `if c then 1 elif x < 0 then 2` fails at
+the *second* `then`, four tokens past the `elif` that explains it. Every hint
+names the token it keyed on, so a reader who was doing something else can see
+at once that the hint is not about them.
+
+`scripts/syntax_hint_check.sh` holds all eighteen rows, and its poisons are the
+risk the design took on: `!=` and `let rec ... and` are correct Mere and must
+stay silent, a file that binds one of the four words must not be told about
+another language, and with the `help:` lines stripped every row must go red.
+
+### Counts
+
+`dune test` 2810, parity 180, and one more gate script with poison runs in CI.
+
+---
+
+## v0.1.506 — 2026-09-22
+
+_Two diagnostics that were right about what was wrong and silent, or wrong,
+about where._
+
+**A failure inside a prelude function points at the caller.** `assert`,
+`divmod` and `list_max` are written in Mere, so their `fail` carried a position
+in `<prelude>` — a text nobody can open — and the line the person actually
+wrote appeared only in the stack below:
+
+```
+eval error: fail: assertion failed: boom
+  --> <prelude>:539:24              ← before
+  --> /tmp/x.mere:1:9               ← now
+```
+
+The innermost frame that is not the prelude's is where they can act, and the
+backtrace had computed it all along. A builtin implemented in OCaml
+(`char_at`) never had the problem, which is why this looked like one oddity
+rather than a class of them.
+
+**Declaring a type twice now says where, twice.** The message was good and
+pointed at nothing at all (`Top_type` carries no position):
+
+```
+type error: type `t` is declared twice with different constructors
+            (`A | B` and `C | D`) (first declared on line 1)
+  --> x.mere:3:6
+```
+
+The parser's table records where every type name was declared, and a name
+declared twice has two entries in it — the caret goes on the second, the
+message names the first. One location is not enough when the error is about a
+pair; Gleam spends a whole secondary-label mechanism on this and uses it in
+fifteen places, which is worth remembering if a second case turns up here.
+
+`scripts/diagnostic_position_check.sh` holds both, with poisons in the
+directions that would make it pass for the wrong reason: an OCaml builtin must
+still point at the user, and a type declared once must not be reported.
+
+### Counts
+
+`dune test` 2800, parity 180, and one more gate script with poison runs in CI.
+
+---
+
 ## v0.1.505 — 2026-09-22
 
 _One question that had two answers, and a formatter that deleted what the
