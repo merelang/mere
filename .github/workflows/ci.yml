@@ -802,6 +802,20 @@ jobs:
           sh scripts/fmt_comments_check.sh
           sh scripts/fmt_comments_check.sh --poison
 
+      # v0.1.506.
+      - name: diagnostic_position_check (a diagnostic points where you can act)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/diagnostic_position_check.sh
+          sh scripts/diagnostic_position_check.sh --poison
+
+      # v0.1.507.
+      - name: syntax_hint_check (a syntax error says what to write instead)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/syntax_hint_check.sh
+          sh scripts/syntax_hint_check.sh --poison
+
       - name: socket_parity
         if: ${{ !cancelled() }}
         run: sh scripts/socket_parity.sh
