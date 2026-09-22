@@ -4,6 +4,262 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.504 — 2026-09-22
+
+_The second pass over Gleam: four answers the compiler already had, a flag that
+makes yesterday's warnings mean something, a machine-readable API surface, one
+pattern, and `pub`._
+
+_The previous pass's five landed in v0.1.503; this is the outside of that circle,
+chosen by the same rule — take what is a wire rather than a new analysis — plus
+one thing that was **measured and dropped** (below)._
+
+**Four LSP answers, none of them new work.** The server advertised nine
+providers; Gleam enables twelve. Three of the four missing ones had their
+answer sitting in this repository already:
+
+| | what it needed | where the answer was |
+|---|---|---|
+| **document highlight** | one handler | `Query.references_at` — the same list find-references returns, drawn in the file instead of in a panel |
+| **go to type definition** | one handler | `Parser.declared_types`, which the parser fills because `Top_type` carries no position of its own |
+| **signature help** | one handler | `Ast.rv_spine`, which the range-check pass already uses to split `f a b` into a head and its arguments |
+
+The fourth, `foldingRange`, is **not** in this release and is not an oversight:
+a `Loc.t` is a start and a width, so nothing in the tree knows where a
+declaration ends. That is the same missing fact that stopped the redundant-arm
+quickfix in v0.1.503.
+
+Two things the hover did not do, and now does. **It answered nothing on a
+definition** — `Query.node_at` looks for an expression and the `inc` in `let
+inc = ...` is a pattern, so hovering the place a name is introduced returned
+nothing at all. And **it showed no documentation**: the contiguous `//` lines
+above a definition are now part of the hover, found through the binding, so
+hovering a USE shows what was written at the DEFINITION. No `///` marker,
+because Mere has no docs generator for one to feed — requiring a third slash
+would mean every comment already written shows nothing.
+
+⚠ Signature help needs one guess and says so: without extents, "the call the
+cursor is inside" is not a question the tree can answer. It answers about the
+nearest call head at or before the cursor on that line, preferring a call that
+is **still unfinished** — which is what stops `add3 (pick Red) ` from reporting
+about `pick`.
+
+**`--warnings-as-errors`.** v0.1.503 gave the compiler warnings worth acting on
+(an unread binding, a deprecated name) and no way to make a machine act on
+them, so a CI could not hold the line against new ones. The rule is one rule:
+everything is printed exactly as it would have been, and then the status is 1.
+The count is of warnings **produced**, not printed — a file with twelve of them
+fails even though the terminal shows ten and a summary.
+
+**A machine-readable API surface.** `mere --decls --json` prints what `--decls`
+prints, plus the type declarations and their constructors, plus the package's
+declared floor — the same pairing Gleam's `package-interface` has, where the
+version constraint sits beside the interface. What it is for is the diff
+between two versions of a package, which is the question `mere fix` raised in
+v0.1.503 and could not answer.
+
+The two outputs are two renderings of one walk, and
+`scripts/decls_json_check.sh` is what keeps that true: it **rebuilds the text
+from the JSON** and compares byte for byte across the whole parity corpus — 179
+files, 32 of them carrying a commented-out declaration, which are the entries
+nobody writes by hand.
+
+**`| "lit" <> rest ->`.** The prefix test and the slice that always followed it,
+as one pattern. In `contrib/` alone there were 38 `str_starts_with` calls, 13 of
+them followed within two lines by a slice; that shape is now:
+
+```mere
+match url with
+| "https://" <> rest -> secure rest
+| "http://" <> rest -> plain rest
+| other -> none other
+```
+
+It is a node only as far as `Pipeline`'s desugar, which rewrites the arm into a
+guard and a binding over `str_starts_with` / `utf8_sub` / `utf8_len`. **No
+backend knows the syntax exists**, and a guarded arm closes nothing, so the
+exhaustiveness checker already says what it should: a prefix arm does not make
+a match total.
+
+⚠ It is an AST node rather than a rewrite inside the parser for one reason: the
+formatter. Which is how the next entry was found.
+
+**The formatter was rewriting the source it formatted.** `echo` is lowered to
+`echo_at "<where>"` while parsing — and the formatter parses. For one release
+`mere fmt` on a file containing `echo x` printed `echo_at "line 2" x`: correct,
+equivalent, and not what the person wrote. Sugar lowering is now skipped on
+that one path (`parse_program ~keep_sugar:true`), with a test that says so.
+
+**`pub`, inside a module.** `module M { pub let get = ...; let helper = ...; }`
+— `M.get` is callable from outside and `M.helper` is not, by name:
+
+```
+type error: `Store.secret` is internal to module `Store` (the module marks its exports with `pub`)
+```
+
+**Opt-in per module**, because it has to be: every module written before this
+marks nothing, and making unmarked mean private would have made all of them
+export nothing. A module that marks nothing is unchanged; one mark says the
+module has decided what its surface is. `pub` is not a keyword either — it is an
+identifier the module-body parser recognises in front of `let`, so nothing that
+uses `pub` as a name stops lexing.
+
+⚠ **This is not what Q-146 wanted**, and reading the parser is what settled
+it. File-level visibility has nothing to enforce: `import "path"` is a SPLICE
+(`parser.ml`, the imported file's declarations are prepended to this one's), so
+after an import every name is in one top-level namespace. `pub` works inside
+`module M { }` because that boundary already exists. The file boundary does
+not, and cannot be added without the separate-compilation change the design
+notes have been holding since the last measurement of it. "Add `pub` and Q-146 closes" was half right.
+
+### Measured, and dropped
+
+Gleam compiles patterns through a decision tree; Mere emits a linear chain of
+tag tests, and **never emits `br_table`** — zero occurrences in a whole Wasm
+module. That looks like something worth fixing. It is not, at the sizes anyone
+writes:
+
+| same program, only the arm that matches differs | 16 arms | 64 arms |
+|---|---|---|
+| C backend, `-O2`, 20M iterations | 0.02 / 0.02 s | the optimiser folded the loop away |
+| Wasm, node, 2M iterations, five runs | — | first arm 0.21–0.33 s, last arm 0.21–0.26 s |
+
+⚠ The first two attempts at this were **not measurements**: constant folding
+deleted the loop and printed 0.00 s. Only after the scrutinee came out of a
+4,096-entry table did any work survive. The negative result is recorded in the
+note so the static fact does not produce the same proposal again.
+
+### Counts
+
+parity 179 → **180**, `dune test` 2784 → **2796**, and three more gate scripts
+with poison runs in CI (`warnings_as_errors_check`, `decls_json_check`,
+`module_privacy_check`).
+
+---
+
+## v0.1.503 — 2026-09-22
+
+_Five things Gleam has, in Mere's spelling — and the four bugs that writing
+them found._
+
+_Read `gleam-lang/gleam` at v1.18.0 next to this compiler and took the parts
+that are configuration of what Mere already computes rather than work Mere has
+not done. The plan, its measurements and what was deliberately NOT taken are in
+the internal note; what landed is below. Four of the five needed no new
+analysis at all._
+
+**Code actions (`textDocument/codeAction`).** Gleam's language server builds 49
+of them; this one advertised eight providers and none. It was not missing an
+analysis — it was missing a wire. `Exhaustive` has always known the arm to
+write (it prints it on the `help:` line), `rename` has always built a
+`WorkspaceEdit`, and `Query` has always resolved a position. What was in
+between was a `string`: `classify` flattened its findings to `(loc, message)`
+and `Pipeline.diagnostic` carried nothing else, so the arm died one function
+before anything could apply it. A finding now carries a `fix` — a title, a
+position, a width and the text — and three actions are built from answers that
+were already there: **add the missing arm(s)**, **declare a top-level
+binding's inferred type** (`let fn f: (shape -> int);`, Mere's spelling of an
+annotation), and **prefix an unread binding with `_`**.
+
+⚠ The plumbing changes NO output: the same bytes on stderr, the same exit
+codes, every gate green before and after. Its only witness is a unit test that
+reads the fix off a diagnostic, and `scripts/lsp_smoke.sh` now drives a whole
+round trip — ask for the actions, APPLY the edit that comes back, and require
+the file to compile where it did not before, with two poisons (apply nothing;
+apply at the wrong position) that must both leave it refused.
+
+**Unused bindings.** Gleam has thirteen `Unused*` warnings. Mere had four
+warnings in total, all of them the same kind — a top-level name that collides
+with libc, an `extern` whose arity disagrees — which is to say *the compile
+error you are about to get*, and nothing about code that is simply dead. The
+check is built on `Query.occurrences`, the scope-resolving walker hover and
+rename already use, so shadowing is answered by the same code that answers it
+for go-to-definition rather than by a second opinion. **Local `let` bindings and
+`match` binders only**: a top-level name in a file that is imported has its
+readers in another file, and with no `pub` in the language there is nothing to
+tell a library's surface from dead code. One rule is borrowed wholesale from
+Gleam and worth naming — **nothing is reported for a file that did not
+type-check**, because "nothing reads this" in a half-inferred tree is usually
+"the line that reads it is the one being typed".
+
+Pointed at mere-ruby's 32,832-line `main.mere` it answers **462**, every one of
+them true and most of them one idiom: `let (meths, sup, ocls, ivars) = world`
+where the arm uses one of the four. Which produced the other half of this
+change — a terminal prints at most **ten** warning blocks and then says how
+many more there are. 462 blocks is four thousand lines of stderr in front of
+whatever the person ran the compiler to see; the editor draws all of them in
+the margin, where they cost nothing.
+
+**A compiler version in `mere.toml`.** `[package] mere = ">= 0.1.480"` is now
+read, and checked against the compiler that is running — by `mere install`
+(for the package and for every dependency it fetches) and by every build of a
+file inside the package. Before this, a package needing newer syntax failed on
+an older compiler as a **parse error in somebody else's file**: true, useless,
+and unactionable without knowing the language's history.
+
+The other half is `mere fix`, which is Gleam's `gleam fix` — a command that
+does exactly one thing: it makes the declared floor true. `Feature.all` maps a
+feature to the version it landed in (`bytes` 0.1.278, the 128-bit lane types
+0.1.422, `f32x4` 0.1.445), the parser notes them where the names are already
+recognised, and `mere fix` writes the highest into the nearest manifest.
+
+⚠ A table of versions is a claim about history, which is the kind of thing that
+is right the day it is written and never looked at again.
+`scripts/version_floor_check.sh` **re-derives every row from
+`docs/changelog.md`** — oldest mention of the feature's probe word, version of
+the section it sits in — and fails when a row disagrees with the record it came
+from. Rewriting one row's version by hand turns it red, which is how that
+sentence is known to be true.
+
+**Deprecation, without an attribute.** Gleam marks a deprecation on the
+definition. Mere has no attribute syntax and adding one costs *two* parsers,
+this one and the self-hosted one, so the mechanism is a table keyed on the
+names the compiler itself ships, matched only where the name resolves to the
+builtin (a user who binds `str_len` themselves is not told about their own
+name). **The table is empty**, and that is a measurement rather than a
+placeholder: all 281 entries of `initial_env` were compared for the pairs a
+rename leaves behind and there are none. The tests install a row to drive the
+path end to end.
+
+**`echo`.** `echo x` prints x to stderr with the line it was written on and
+answers x, so it drops into the middle of an expression and comes out again
+without moving anything. Two prelude functions and one pass — no backend knows
+about it, and all five have it.
+
+⚠ The first version rewrote the token in the parser, which is simpler and
+wrong: `test/parity/graphql_stack_portable.mere` binds `echo` as a name of its
+own, and rewriting every occurrence turned its value into a partial
+application. The rewrite now runs over the parsed tree with scope tracked, and
+an `echo` the user bound means what they said.
+
+### The four bugs that only appeared when it ran
+
+None of these is visible from reading. Each was found by the same program
+being asked to print the same thing on five backends.
+
+| | what was wrong | how long |
+|---|---|---|
+| **Wasm host** | `print_err` has been an import of the emitted module since v0.1.259 and `scripts/run_wasm.js` never provided it, so **any program calling `print_err` failed to instantiate** | 243 versions |
+| **RISC-V** | `print_err` wrote the bytes and not the trailing newline the other four backends write, so the same program's stderr differed by backend | since it existed |
+| **`-rv` positions** | the RV prelude is glued in front as TEXT, so an `echo` on line 2 reported line 1925 — diagnostics are corrected on the way out, and nothing corrected a position the compiler puts INTO the program | new, and the same shape as the next row |
+| **`-rv` warnings** | for the same reason, the unused check reported bindings inside the RV prelude against the user | new |
+
+`scripts/echo_check.sh` is the gate, and it compares **stderr** across interp /
+C / LLVM / Wasm / RISC-V, because a debug print that reached stdout would be
+changing the answer it is watching. The RISC-V row has a stated exception: the
+emulator's `write` ignores the descriptor, so the guest's fd 2 arrives on fd 1
+and the two streams are put back together before comparing — a fact about the
+emulator, written down rather than left as a filter.
+
+### Counts
+
+parity 178 → **179** programs (the new case is `echo`, whose value must pass
+through unchanged on every backend), `dune test` 2767 → **2784**, and four gate
+scripts with poison runs in CI: `unused_check`, `version_floor_check`,
+`echo_check`, plus `lsp_smoke --poison`, which did not exist.
+
+---
+
 ## v0.1.502 — 2026-09-22
 
 _The rest of the class, and a check that keeps it out._

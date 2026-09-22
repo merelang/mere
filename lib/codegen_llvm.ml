@@ -6209,6 +6209,13 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       (fail_label : string)
       : string * (string * string) list * (string * Ast.ty) list =
       match pat.Ast.pnode with
+      (* A prefix pattern reaching a backend means `Pipeline`'s desugar did not
+         run: it is rewritten into a guarded binding before inference. Named
+         rather than ignored -- a silent fallthrough compiles a match that
+         tests nothing. *)
+      | Ast.P_str_prefix _ ->
+        raise (Codegen_error (pat.Ast.ploc,
+          "internal: a `\"lit\" <> rest` pattern reached codegen (the prefix desugar did not run)"))
       | Ast.P_wild -> ("1", [], [])
       | Ast.P_var n -> ("1", [(n, v_reg)], [(n, v_ty)])
       | Ast.P_unit -> ("1", [], [])

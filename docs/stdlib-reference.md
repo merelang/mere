@@ -35,7 +35,7 @@ Legend:
 
 ---
 
-## I/O (12)
+## I/O (12 + 2 prelude)
 
 | Name | Type | Description |
 |---|---|---|
@@ -43,7 +43,9 @@ Legend:
 | `print_no_nl` | `str -> unit` | Without newline, and **in one `write(2)`** rather than through stdio (v0.1.480). `main` sets stdout line buffered, so an `fwrite` here flushed at every newline and the recommended idiom — accumulate into a `StrBuf`, print once — still cost one syscall per line, about 1.6 µs each. Stdio is flushed first, so a `print` issued earlier still arrives earlier |
 | `print_int` | `int -> unit` | Print integer with newline |
 | `print_bool` | `bool -> unit` | Print bool with newline |
-| `print_err` | `str -> unit` | Write to stderr with newline |
+| `print_err` | `str -> unit` | Write to stderr with newline. ⚠ Two backends had this wrong until v0.1.503: the Node host for Wasm never provided it (so any program calling it failed to instantiate), and RISC-V wrote the bytes without the trailing newline the other four write |
+| `echo` | `'a -> 'a` | **Prelude, not a builtin.** Prints its argument to stderr with the line it was written on, and answers the argument, so it drops into the middle of an expression and comes out again without moving anything: `let m = echo (n + 1);` prints `line 7: 21` and binds `21`. The front end rewrites `echo` into `echo_at "<where>"` — a scope-aware pass, so a binding of your own named `echo` means what you said. Same bytes on all five backends (`scripts/echo_check.sh`), and stderr rather than stdout, because a debug print in the answer changes what it is watching (v0.1.503) |
+| `echo_at` | `str -> 'a -> 'a` | What `echo` becomes. Useful directly when the position you want is not the one you are writing at |
 | `read_line` | `unit -> str` | One line from stdin; empty string on EOF |
 | `read_file` ⚡ | `str -> str` | Read the whole file **as text**; raises on failure. On the C backend the str is NUL-terminated, so binary data silently truncates at the first 0x00 byte (the interpreter's strings carry NULs) — use `read_file_bytes` for binary (v0.1.43) |
 | `read_file_bytes` ⚡ | `str -> Vec[R, int]` | Read the whole file as raw bytes — one int (0..255) per byte, binary-safe on every supported backend. interp + C only (v0.1.43, CRC-32 probe). Costs eight bytes per byte; prefer `read_bytes` |

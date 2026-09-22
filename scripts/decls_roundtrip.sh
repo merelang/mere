@@ -43,7 +43,14 @@ KNOWN_GAP=module_qualified_record_closure
 norm() {  # a diagnostic names the file and the line, and the round-trip file is
           # a different name with the declarations added on top. Neither is a
           # difference in what the program does.
-  LC_ALL=C sed -E 's|[^ ]*parity/[A-Za-z_0-9]+\.mere|F|g; s/:[0-9]+:[0-9]+/:L:C/g; s/^ *[0-9]+ \|/N |/'
+          #
+          # `echo` is the same fact from the other side: it PRINTS the line it
+          # is written on, and the round-trip file has the declarations above
+          # it, so the line it truthfully reports is a different number. A
+          # program that names its own positions cannot be invariant under
+          # prepending text to it; the position is normalised here exactly like
+          # a diagnostic's, and the value it echoes still has to match.
+  LC_ALL=C sed -E 's|[^ ]*parity/[A-Za-z_0-9]+\.mere|F|g; s/:[0-9]+:[0-9]+/:L:C/g; s/^ *[0-9]+ \|/N |/; s/^line [0-9]+: /line L: /'
 }
 ok=0; bad=0; skip=0; gap_passed=0; failures=''
 for f in test/parity/*.mere; do

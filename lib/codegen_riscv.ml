@@ -301,7 +301,7 @@ let adapters : (string, unit) Hashtbl.t = Hashtbl.create 16
 let rec pat_vars (p : Ast.pattern) : string list =
   match p.Ast.pnode with
   | Ast.P_var x -> [x]
-  | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_unit -> []
+  | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_str_prefix _ | Ast.P_unit -> []
   | Ast.P_tuple ps -> List.concat_map pat_vars ps
   | Ast.P_constr (_, Some s) -> pat_vars s
   | Ast.P_constr (_, None) -> []
@@ -703,7 +703,7 @@ let slot_off i = i * wsz ()
 let rec pvars_in_pattern p =
   match p.Ast.pnode with
   | Ast.P_var _ -> 1
-  | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_unit -> 0
+  | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_str_prefix _ | Ast.P_unit -> 0
   | Ast.P_tuple pats -> List.fold_left (fun n q -> n + pvars_in_pattern q) 0 pats
   | Ast.P_constr (_, Some sub) -> pvars_in_pattern sub
   | Ast.P_constr (_, None) -> 0
@@ -1905,6 +1905,19 @@ and compile_app env e =
     emit_word (enc_i (wsz ()) a0 0 a1 0x13);                    (* addi a1, a0, 4 *)
     li a0 2;                                             (* fd = stderr *)
     emit_word (enc_i 64 zero 0 a7 0x13);                 (* li a7, 64 *)
+    emit_word (enc_i 0 zero 0 zero 0x73);                (* ecall (write) *)
+    (* And the newline, which this backend alone did not print: the other four
+       all end `print_err` with one, so the same program's stderr differed by
+       backend. Found by `echo`, whose two calls came out on one line here and
+       on two everywhere else. `a0` is the syscall's return by now, so the
+       descriptor is loaded again -- the emulator ignores it, QEMU does not. *)
+    li t0 (scratch_base ());                             (* t0 = print scratch *)
+    emit_word (enc_i 10 zero 0 t1 0x13);                 (* li t1, '\n' *)
+    emit_word (enc_s 0 t1 t0 0 0x23);                    (* sb t1, 0(t0) *)
+    emit_word (enc_i 0 t0 0 a1 0x13);                    (* mv a1, t0 *)
+    emit_word (enc_i 1 zero 0 a2 0x13);                  (* li a2, 1 *)
+    li a0 2;                                             (* fd = stderr again *)
+    emit_word (enc_i 64 zero 0 a7 0x13);                 (* li a7, 64 *)
     emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall (write) *)
   | Ast.Var "print_no_nl" when List.length args = 1 ->
     compile_expr env (List.hd args);
@@ -2650,6 +2663,13 @@ and compile_pattern_bind env pat l_fail = bind_pattern env pat l_fail
    fighting over scratch registers. *)
 and bind_pattern env pat l_fail =
   match pat.Ast.pnode with
+  (* A prefix pattern reaching a backend means `Pipeline`'s desugar did not run
+     on this path: it is rewritten into a guarded binding before inference, so
+     nothing below the typer should ever see one. Named rather than ignored --
+     a silent fallthrough here would compile a match that tests nothing. *)
+  | Ast.P_str_prefix _ ->
+    raise (Codegen_error (pat.Ast.ploc,
+      "internal: a `\"lit\" <> rest` pattern reached codegen (the prefix desugar did not run)"))
   | Ast.P_wild | Ast.P_unit -> env
   | Ast.P_var name ->
     let idx = !slot_ctr in incr slot_ctr; store_a0_to idx; (name, idx) :: env

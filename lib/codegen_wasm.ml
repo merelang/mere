@@ -1453,7 +1453,7 @@ let clone_with_fresh_tyvars_wasm (e : Ast.expr) : Ast.expr =
     { Ast.ploc = p.Ast.ploc; pnode = clone_pattern_node p.Ast.pnode }
   and clone_pattern_node = function
     | (Ast.P_wild | Ast.P_var _ | Ast.P_int _ | Ast.P_bool _
-       | Ast.P_str _ | Ast.P_unit) as n -> n
+       | Ast.P_str _ | Ast.P_str_prefix _ | Ast.P_unit) as n -> n
     | Ast.P_constr (c, Some sub) -> Ast.P_constr (c, Some (clone_pattern sub))
     | Ast.P_constr (c, None) -> Ast.P_constr (c, None)
     | Ast.P_tuple ps -> Ast.P_tuple (List.map clone_pattern ps)
@@ -4149,6 +4149,13 @@ and emit_expr (e : Ast.expr) : unit =
     let rec compile_pat (pat : Ast.pattern) (v_slot : int) (v_ty : Ast.ty)
       : int * (string * int) list =
       match pat.Ast.pnode with
+      (* A prefix pattern reaching a backend means `Pipeline`'s desugar did not run
+         on this path: it is rewritten into a guarded binding before inference, so
+         nothing below the typer should ever see one. Named rather than ignored --
+         a silent fallthrough here would compile a match that tests nothing. *)
+      | Ast.P_str_prefix _ ->
+        raise (Codegen_error (pat.Ast.ploc,
+          "internal: a `\"lit\" <> rest` pattern reached codegen (the prefix desugar did not run)"))
       | Ast.P_wild -> (true_cond (), [])
       | Ast.P_var n -> (true_cond (), [(n, v_slot)])
       | Ast.P_unit -> (true_cond (), [])

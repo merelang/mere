@@ -745,7 +745,49 @@ jobs:
 
       - name: lsp_smoke
         if: ${{ !cancelled() }}
-        run: sh scripts/lsp_smoke.sh
+        run: |
+          sh scripts/lsp_smoke.sh
+          sh scripts/lsp_smoke.sh --poison
+
+      # v0.1.502. Three checks that came in with the Gleam-derived slice, each
+      # with its poison run: a gate that cannot go red is a line in a log.
+      - name: unused_check (bindings nothing reads)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/unused_check.sh
+          sh scripts/unused_check.sh --poison
+
+      - name: version_floor_check (the feature/version table, re-derived)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/version_floor_check.sh
+          sh scripts/version_floor_check.sh --poison
+
+      - name: echo_check (echo says the same thing on every backend)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/echo_check.sh
+          sh scripts/echo_check.sh --poison
+
+      # v0.1.504. The second Gleam-derived slice, same rule: each with its
+      # poison run.
+      - name: warnings_as_errors_check (a warning can fail a build)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/warnings_as_errors_check.sh
+          sh scripts/warnings_as_errors_check.sh --poison
+
+      - name: decls_json_check (the two exits of --decls agree)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/decls_json_check.sh
+          sh scripts/decls_json_check.sh --poison
+
+      - name: module_privacy_check (pub hides what it does not mark)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/module_privacy_check.sh
+          sh scripts/module_privacy_check.sh --poison
 
       - name: socket_parity
         if: ${{ !cancelled() }}

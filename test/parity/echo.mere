@@ -1,0 +1,7 @@
+// `echo` answers its argument, so a program with echoes in the middle of an
+// expression computes exactly what it computed without them. Its own output
+// goes to stderr, which is why this case can sit in a stdout comparison at
+// all; scripts/echo_check.sh is where the stderr is compared.
+let twice = fn (n: int) -> echo (n * 2);
+let sum = echo (twice 20) + echo 2;
+print_int sum

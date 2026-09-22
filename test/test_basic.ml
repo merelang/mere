@@ -2349,6 +2349,23 @@ let () =
   let warnings_of s =
     String.concat " | " (Pipeline.exhaustiveness_warnings s)
   in
+  (* v0.1.502: the arm the checker already wrote, as data.
+     `Exhaustive` has always known what to add -- it prints it on the `help:`
+     line -- but the string was all that left the file, so every other reader
+     had to parse a sentence or re-derive the arm. The fix rides on the
+     diagnostic now.
+     THIS IS THE ONLY WITNESS for that change: it alters no output, so the
+     suite, the parity runs and the gates are all green with and without it. *)
+  let fix_of s =
+    let (_, ds) = Pipeline.check s in
+    match List.filter_map (fun d -> d.Pipeline.d_fix) ds with
+    | [] -> "no fix"
+    | f :: _ ->
+      Printf.sprintf "%s @%d:%d [%s]"
+        f.Exhaustive.fx_title
+        f.Exhaustive.fx_at.Loc.line f.Exhaustive.fx_at.Loc.col
+        (String.escaped f.Exhaustive.fx_text)
+  in
   (* v0.1.487: the same question from the other end -- which arms no value
      reaches. Held here as well as in scripts/unreachable_arm_check.sh because
      the four cases that must stay SILENT are the ones that would be noticed
@@ -2364,6 +2381,165 @@ let () =
          has 0)
         (Pipeline.exhaustiveness_warnings s))
   in
+  (* v0.1.502: `echo`. The value passes through, so a program means the same
+     with and without it; the printing itself goes to stderr and is compared
+     across the five backends by scripts/echo_check.sh.
+
+     The shadowing cases are the reason this is a pass over the tree rather
+     than a case in the parser: rewriting the token broke
+     `test/parity/graphql_stack_portable.mere`, which binds `echo` itself. *)
+  (* v0.1.504: `pub` inside a module.
+
+     OPT-IN PER MODULE, and the third check is the one that makes it usable:
+     every module written before this marks nothing and must keep exporting
+     everything, or every program with a module stops compiling. *)
+  check "v0.1.504: a `pub` member is callable from outside"
+    (Pipeline.process
+       "module Store { let secret = fn (n: int) -> n * 7; pub let get = fn (n: int) -> secret n + 1; }\nStore.get 5")
+    "36";
+  check_raises_containing "v0.1.504: an unmarked member is internal"
+    "internal to module `Store`"
+    (fun () ->
+       Pipeline.process
+         "module Store { let secret = fn (n: int) -> n * 7; pub let get = fn (n: int) -> secret n + 1; }\nStore.secret 5");
+  check "v0.1.504: a module that marks nothing exports everything, as before"
+    (Pipeline.process
+       "module Store { let secret = fn (n: int) -> n * 7; let get = fn (n: int) -> secret n + 1; }\nStore.secret 5")
+    "35";
+  (* A member reaching its own module's internals is the point of having them. *)
+  check "v0.1.504: an internal member is reachable from inside the module"
+    (Pipeline.process
+       "module Store { let secret = fn (n: int) -> n * 7; pub let twice = fn (n: int) -> secret n + secret n; }\nStore.twice 1")
+    "14";
+  (* v0.1.504: `"lit" <> rest`. The node exists only as far as the desugar,
+     which rewrites the arm into a guard and a binding over `str_starts_with`
+     and `utf8_sub` — the two calls every program doing this by hand already
+     makes. No backend knows the syntax exists. *)
+  check "v0.1.504: a prefix pattern binds the rest"
+    (Pipeline.process
+       "let f = fn (s: str) -> match s with | \"ab\" <> r -> r | _ -> \"no\" in f \"abcd\"")
+    "\"cd\"";
+  check "v0.1.504: a prefix that does not match falls to the next arm"
+    (Pipeline.process
+       "let f = fn (s: str) -> match s with | \"ab\" <> r -> r | _ -> \"no\" in f \"xy\"")
+    "\"no\"";
+  check "v0.1.504: `_` discards the rest"
+    (Pipeline.process
+       "let f = fn (s: str) -> match s with | \"ab\" <> _ -> \"yes\" | _ -> \"no\" in f \"abcd\"")
+    "\"yes\"";
+  (* The literal is counted in CODE POINTS, because the slice is. Two
+     characters here and six bytes. *)
+  check "v0.1.504: a multibyte prefix slices by codepoint"
+    (Pipeline.process
+       "let f = fn (s: str) -> match s with | \"\230\151\165\230\156\172\" <> r -> r | _ -> \"no\" in f \"\230\151\165\230\156\172\232\170\158\"")
+    "\"\232\170\158\"";
+  (* The user's guard may name the binder, so it has to be bound for the guard
+     and not only for the body. *)
+  check "v0.1.504: a guard can read the bound rest"
+    (Pipeline.process
+       "let f = fn (s: str) -> match s with | \"ab\" <> r when str_len r > 1 -> r | _ -> \"short\" in f \"abc\"")
+    "\"short\"";
+  check "v0.1.504: the same guard when it passes"
+    (Pipeline.process
+       "let f = fn (s: str) -> match s with | \"ab\" <> r when str_len r > 1 -> r | _ -> \"short\" in f \"abcd\"")
+    "\"cd\"";
+  check "v0.1.504: `mere fmt` prints the prefix pattern back"
+    (let out = Pipeline.format_source
+       "let f = fn (s: str) -> match s with | \"ab\" <> r -> r | _ -> s;\nprint (f \"abc\")" in
+     let has needle =
+       let n = String.length needle and m = String.length out in
+       let rec go i = i + n <= m && (String.sub out i n = needle || go (i + 1)) in
+       go 0
+     in
+     Printf.sprintf "sugar=%b desugared=%b" (has "<> r") (has "str_starts_with"))
+    "sugar=true desugared=false";
+  (* v0.1.504: the formatter must print what the person wrote. `echo` is
+     lowered to `echo_at "<where>"` while parsing, and the formatter parses;
+     for one slice it therefore REWROTE the sugar out of the file it was asked
+     to format. A formatter that edits the source it formats is a tool people
+     stop running. *)
+  check "v0.1.504: `mere fmt` leaves `echo` as `echo`"
+    (let out = Pipeline.format_source "let f = fn (n: int) -> echo n;\nprint_int (f 1)" in
+     let has needle =
+       let n = String.length needle and m = String.length out in
+       let rec go i = i + n <= m && (String.sub out i n = needle || go (i + 1)) in
+       go 0
+     in
+     Printf.sprintf "echo=%b echo_at=%b" (has "echo n") (has "echo_at"))
+    "echo=true echo_at=false";
+  check "v0.1.502: echo answers its argument"
+    (Pipeline.process "echo (40 + 2)") "42";
+  check "v0.1.502: echo composes like any other function"
+    (Pipeline.process "let xs = list_map (Cons (1, Cons (2, Nil))) echo in list_sum xs") "3";
+  check "v0.1.502: a top-level binding named `echo` is the user's own"
+    (Pipeline.process "let echo = 7;\necho + 1") "8";
+  check "v0.1.502: a local binding named `echo` shadows the prelude's"
+    (Pipeline.process "let echo = fn (x: int) -> 0 in echo 5") "0";
+  (* v0.1.502: deprecation. The production table is empty -- Mere has not
+     retired a name yet -- so the mechanism is driven here with a row installed
+     for the duration of these three checks. A mechanism whose only test is
+     "the empty table warns about nothing" is not tested. *)
+  let with_deprecation f =
+    Deprecated.table :=
+      [ { Deprecated.dp_name = "str_len"; dp_replacement = "str_length";
+          dp_since = "0.1.502"; dp_why = "the name says bytes and it counts characters" } ];
+    let r = (try f () with e -> Deprecated.table := []; raise e) in
+    Deprecated.table := [];
+    r
+  in
+  let warnings_about s =
+    let (_, ds) = Pipeline.check s in
+    String.concat " | "
+      (List.filter_map (fun (d : Pipeline.diagnostic) ->
+         if d.Pipeline.d_severity = Pipeline.Warning then Some d.Pipeline.d_msg else None)
+         ds)
+  in
+  let first_fix s =
+    let (_, ds) = Pipeline.check s in
+    match List.filter_map (fun (d : Pipeline.diagnostic) -> d.Pipeline.d_fix) ds with
+    | [] -> "no fix"
+    | f :: _ ->
+      Printf.sprintf "%s @%d:%d w%d -> %s" f.Exhaustive.fx_title
+        f.Exhaustive.fx_at.Loc.line f.Exhaustive.fx_at.Loc.col
+        f.Exhaustive.fx_width f.Exhaustive.fx_text
+  in
+  check "v0.1.502: using a deprecated builtin is reported, with the replacement"
+    (with_deprecation (fun () -> warnings_about "print_int (str_len \"ab\")"))
+    ("`str_len` is deprecated since v0.1.502, the name says bytes and it counts characters\n"
+     ^ "help: use `str_length` instead");
+  check "v0.1.502: the deprecation carries the rename as an edit"
+    (with_deprecation (fun () -> first_fix "print_int (str_len \"ab\")"))
+    "Replace `str_len` with `str_length` @1:12 w7 -> str_length";
+  (* The line this mechanism turns on: a deprecation is about the name the
+     COMPILER ships. Somebody who binds it themselves owns that name. *)
+  check "v0.1.502: a user's own binding of the name is not deprecated"
+    (with_deprecation (fun () ->
+       warnings_about "let str_len = fn (s: str) -> 7;\nprint_int (str_len \"ab\")"))
+    "";
+  check "v0.1.502: with the table empty, nothing is reported"
+    (warnings_about "print_int (str_len \"ab\")")
+    "";
+  check "v0.1.502: a missing arm arrives as an edit, not only as a sentence"
+    (fix_of
+       "type shape = Circle | Square | Triangle;\n\
+        let f = fn (s: shape) -> match s with | Circle -> 1 | Square -> 2;\n\
+        f Circle")
+    ("Add the missing arm @2:55 [Triangle -> fail \\\"todo\\\"\\n"
+     ^ String.make 52 ' ' ^ "| ]");
+  check "v0.1.502: two missing arms come as one edit"
+    (fix_of
+       "type sh2 = A | B | C | D;\n\
+        let f = fn (s: sh2) -> match s with | A -> 1 | B -> 2;\n\
+        f A")
+    ("Add the 2 missing arms @2:48 [C -> fail \\\"todo\\\"\\n"
+     ^ String.make 45 ' ' ^ "| D -> fail \\\"todo\\\"\\n"
+     ^ String.make 45 ' ' ^ "| ]");
+  check "v0.1.502: an exhaustive match offers no edit"
+    (fix_of
+       "type sh3 = P | Q;\n\
+        let f = fn (s: sh3) -> match s with | P -> 1 | Q -> 2;\n\
+        f P")
+    "no fix";
   check "v0.1.487: a second arm for one constructor is reported"
     (unreachable_of
        "type h = Ro | Pa;\n\
@@ -8757,9 +8933,13 @@ let () =
            mismatched: any program that walked a file's characters and asked
            what they were died on the first stray byte. An editor opens files
            it did not write.)
+        + v0.1.502 (echo): 2 (echo_at / echo -- a debug print that answers its
+           argument. Two, not one, because the parser rewrites `echo` into
+           `echo_at "<where>"` and a front end that does not do that rewrite
+           still needs `echo` to be a name.)
         *)
      string_of_int (List.length prog.Ast.decls))
-    "87";
+    "89";
 
   (* Phase 39.A' #4: list_sort_by / list_sort prelude helpers *)
   check "list_sort_by: ascending int sort"
@@ -13435,9 +13615,12 @@ let () =
   let (_, out, _) =
     Lsp.handle Lsp.initial
       (* Any method the server does not implement; this one has been chosen
-         twice already because the previous choice stopped being true. *)
+         THREE times now, because each previous choice stopped being true
+         (`signatureHelp` landed in v0.1.504). `codeLens` is the current
+         answer, and Gleam does not implement it either -- when it too stops
+         being true, replace it and leave this note. *)
       (Json.Obj [ ("jsonrpc", Json.Str "2.0"); ("id", Json.Num 7.0);
-                  ("method", Json.Str "textDocument/signatureHelp") ])
+                  ("method", Json.Str "textDocument/codeLens") ])
   in
   check "lsp: an unimplemented request is refused, not ignored"
     (match out with

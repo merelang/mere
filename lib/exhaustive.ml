@@ -11,6 +11,25 @@
    same one — a case added to a type, and a `match` on it left as it was — and
    the next thing anyone does with the message is write the arm it names. *)
 
+(* The same answer as `f_hint`, in the shape an editor can apply.
+
+   The hint line already says what to write (`help: | Triangle (_, _) -> ...`);
+   what it does not say is WHERE, and a string cannot be applied. A `fix` is the
+   same sentence with the position kept: insert `fx_text` immediately before
+   `fx_at`. Nothing here renders it — `Diagnostic.format` still prints the hint
+   lines and nothing else — so a compiler run's output is byte for byte what it
+   was. The one reader is `mere lsp`. *)
+type fix = {
+  fx_title : string;      (* what the editor calls the action *)
+  fx_at : Loc.t;          (* where the edit starts *)
+  (* How many characters it replaces. 0 is an insertion — the text goes in
+     front of `fx_at` and nothing is removed — which is what an added match arm
+     and an added `_` both are. A rename replaces the name it is on, and its
+     width is that name's. *)
+  fx_width : int;
+  fx_text : string;       (* exactly these characters *)
+}
+
 (* A missing case, and what to write for it.
 
    `f_error` is the difference between a finding that names a case and one that
@@ -24,6 +43,10 @@ type finding = {
   f_msg : string;         (* the headline, without the position in it *)
   f_hint : string list;   (* `help:` / `note:` lines, rendered under the frame *)
   f_error : bool;
+  (* `None` when the checker can name the case but not a place to put it: a
+     match with no arms has no arm to insert before. A finding without a fix is
+     still a finding; it is the editor that has less to offer. *)
+  f_fix : fix option;
 }
 
 (* Variant registry: variant-type name -> full list of (cname, payload).
@@ -447,6 +470,10 @@ let rec show_witness ?(nested = false) (p : Ast.pattern) : string =
     ^ " }"
   | Ast.P_as (inner, _) -> show_witness ~nested inner
   | Ast.P_or (a, _) -> show_witness ~nested a
+  (* Only reachable from the formatter's tree: the desugar turns a prefix arm
+     into a guarded binding before anything types it, and this file runs on the
+     typed one. Printed the way the source spells it. *)
+  | Ast.P_str_prefix (lit, name) -> Printf.sprintf "%S <> %s" lit name
 
 (* The witness as an ARM, which is not the same string as the witness itself:
    a wildcard in the witness is a position the arm should BIND, so the headline
@@ -541,8 +568,51 @@ let absent_top_level (scrut_ty : Ast.ty)
       else Some (rebuild c (List.map wild_of_ty (con_subtys c)))) full
   | _ -> []
 
+(* The pattern to write for a witness, as source.
+
+   One function, because the `help:` line and the editor's fix have to agree:
+   the same rule spelled twice becomes two answers the first time one of them is
+   edited. A witness that is a single binder is written `_` — it covers the same
+   values and it is what a person writes. Reached when the witness is itself an
+   open-signature value: `missing 1` asks for a catch-all, not for the number. *)
+let arm_pattern (q : Ast.pattern) : string =
+  let arm = show_arm q in
+  let is_bare_binder =
+    String.length arm > 1 && arm.[0] = 'a'
+    && (let rest = String.sub arm 1 (String.length arm - 1) in
+        String.for_all (fun c -> c >= '0' && c <= '9') rest)
+  in
+  if is_bare_binder then "_" else arm
+
+(* The arms, as text to insert immediately before an existing arm's pattern.
+
+   The insertion point is the LAST arm's pattern, which always follows a `|`
+   that is already in the file: the new text takes that bar for its own first
+   arm and ends with a fresh `| ` for the arm that was there. So a match with
+   one arm and a match with six are the same edit, and the result parses without
+   anyone having found the end of the expression — which a `Loc.t`, being a
+   start and a width, cannot say.
+
+   `fail "todo"` rather than a hole: it has type `str -> 'a`, so the arm
+   type-checks whatever the others answer, and a program that reaches it says
+   so instead of inventing a value. *)
+let arms_fix (at : Loc.t) (cases : Ast.pattern list) : fix =
+  (* `|` sits two columns before the pattern it introduces; a column is 1-based. *)
+  let indent = String.make (max 0 (at.Loc.col - 3)) ' ' in
+  let n = List.length cases in
+  { fx_title =
+      (if n = 1 then "Add the missing arm"
+       else Printf.sprintf "Add the %d missing arms" n);
+    fx_at = at;
+    fx_width = 0;
+    fx_text =
+      String.concat ""
+        (List.map (fun q ->
+           Printf.sprintf "%s -> fail \"todo\"\n%s| " (arm_pattern q) indent)
+           cases) }
+
 let witness_finding loc (scrut_ty : Ast.ty) (w : Ast.pattern) (is_error : bool)
-                    (also : Ast.pattern list) =
+                    (also : Ast.pattern list) (at : Loc.t option) =
   match w.Ast.pnode with
   | Ast.P_wild ->
     (* The whole column is uncovered and the type cannot be enumerated: an int,
@@ -561,7 +631,8 @@ let witness_finding loc (scrut_ty : Ast.ty) (w : Ast.pattern) (is_error : bool)
     { f_loc = loc;
       f_msg = Printf.sprintf "non-exhaustive match (no wildcard arm%s)" ty_hint;
       f_hint = [ "help: | _ -> ..." ];
-      f_error = false }
+      f_error = false;
+      f_fix = Option.map (fun at -> arms_fix at [ w ]) at }
   | _ ->
     (* `also` is the rest of the absent set when there is one, with the witness
        itself kept first so the two agree on where they start. *)
@@ -575,24 +646,14 @@ let witness_finding loc (scrut_ty : Ast.ty) (w : Ast.pattern) (is_error : bool)
       f_msg =
         Printf.sprintf "non-exhaustive match (missing %s)"
           (String.concat ", " (List.map show_witness cases));
-      (* An arm that is a single binder is written `_`: it covers the same
-         values and it is what a person writes. Reached when the witness is
-         itself an open-signature value -- `missing 1` asks for a catch-all,
-         not for the number. *)
       f_hint =
-        List.map (fun q ->
-          let arm = show_arm q in
-          let is_bare_binder =
-            String.length arm > 1 && arm.[0] = 'a'
-            && (let rest = String.sub arm 1 (String.length arm - 1) in
-                String.for_all (fun c -> c >= '0' && c <= '9') rest)
-          in
-          Printf.sprintf "help: | %s -> ..." (if is_bare_binder then "_" else arm))
+        List.map (fun q -> Printf.sprintf "help: | %s -> ..." (arm_pattern q))
           cases
         @ (if is_error
            then [ "note: or `| _ -> fail \"todo\"` to compile before writing them" ]
            else []);
-      f_error = is_error }
+      f_error = is_error;
+      f_fix = Option.map (fun at -> arms_fix at cases) at }
 
 (* Check a Match expression. Returns the findings for it (empty when the match
    is exhaustive). `loc` is the location of the match expression. *)
@@ -628,7 +689,8 @@ let rec pat_irrefutable (p : Ast.pattern) : bool =
      irrefutable. *)
   | Ast.P_record (_, fields) -> List.for_all (fun (_, fp) -> pat_irrefutable fp) fields
   | Ast.P_or (a, b) -> pat_irrefutable a || pat_irrefutable b
-  | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_constr _ -> false
+  | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_str_prefix _
+  | Ast.P_constr _ -> false
 
 (* The alternatives a pattern offers, flattened: an or-pattern is two arms
    written in one. *)
@@ -691,7 +753,12 @@ let redundant_findings
              [ "note: the arm is dead -- the value that would reach it is \
                 answered above, so the code here never runs";
                "help: reorder the arms, narrow the one above, or delete this one" ];
-           f_error = false } :: !out
+           f_error = false;
+           (* Deleting an arm needs its extent, and a `Loc.t` is a start and a
+              width: the pattern's, not the arm's. Three ways to fix this one
+              and no way to say where any of them end, so the editor is offered
+              nothing rather than a guess. *)
+           f_fix = None } :: !out
      | None -> ());
     (* A guarded arm may decline, so it closes nothing. *)
     if guard = None then
@@ -716,6 +783,16 @@ let check_match (loc : Loc.t)
   let unguarded =
     List.filter_map (fun (p, g, _) -> if g = None then Some [p] else None) arms
   in
+  (* Where a new arm would go: before the last one, whose pattern position is
+     the only end-of-match the tree records. A position from an imported file
+     is dropped — the edit would land in the importing file at a line that
+     means nothing there. *)
+  let at =
+    match List.rev arms with
+    | (p, _, _) :: _ when p.Ast.ploc.Loc.file = None && p.Ast.ploc.Loc.line > 0 ->
+      Some p.Ast.ploc
+    | _ -> None
+  in
   steps := 0;
   declined := false;
   match (try find_missing [scrut_ty] unguarded with Search_exhausted -> None) with
@@ -728,7 +805,7 @@ let check_match (loc : Loc.t)
        `Cons (_, Nil)` -- whose top-level constructors are all present -- adds
        nothing and the finding stays about the one shape. *)
     let also = if is_error then absent_top_level scrut_ty unguarded else [] in
-    redundant @ [ witness_finding loc scrut_ty w is_error also ]
+    redundant @ [ witness_finding loc scrut_ty w is_error also at ]
   | Some _ -> redundant
 
 (* Phase 21.2: deferred matches.  Storing the triple lets us re-walk the
@@ -772,10 +849,16 @@ let all_findings () : finding list =
    to draw its underline, so the position is never inside the text. *)
 let text (f : finding) : string = String.concat "\n" (f.f_msg :: f.f_hint)
 
-(* Drained and split: (warnings, errors). *)
-let classify () : (Loc.t * string) list * (Loc.t * string) list =
+(* Drained and split: (warnings, errors).
+
+   The fix rides along rather than being rendered away. This used to hand back
+   `(Loc.t * string)` and nothing else, which meant the arm the checker had
+   already written could not leave this file: the terminal got it inside a
+   sentence and every other reader got nothing. The string is unchanged, so
+   what a compiler run prints is unchanged too. *)
+let classify () : (Loc.t * string * fix option) list * (Loc.t * string * fix option) list =
   let (ws, es) = List.partition (fun f -> not f.f_error) (all_findings ()) in
-  let render = List.map (fun f -> (f.f_loc, text f)) in
+  let render = List.map (fun f -> (f.f_loc, text f, f.f_fix)) in
   (render ws, render es)
 
 (* Raised by the paths that would otherwise run or emit the program. Carries

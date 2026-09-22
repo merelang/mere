@@ -1,0 +1,8 @@
+// The same unread binding, in a file that does not type-check.
+//
+// Nothing here may be reported: in a tree that failed inference, "nothing reads
+// this" is usually "the line that reads it is the one being written".
+let f = fn (n: int) ->
+  let dead_here = 1;
+  n + "x";
+print_int (f 1)

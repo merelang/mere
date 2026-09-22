@@ -116,7 +116,221 @@ let register_declared_types (decls : Ast.top_decl list) : unit =
     | Ast.Top_record_alias (alias, target) -> Typer.alias_record alias target
     | _ -> ()) decls
 
-let parse_program ?(prelude = true) ?base_dir ?(search_paths = []) s =
+(* `pub` inside a module: what the module did not mark, nobody outside it calls.
+
+   The parser records the private QUALIFIED names while it prefixes a module's
+   declarations (`Parser.private_module_names`); this is the pass that enforces
+   them. Declarations are flat by the time anyone sees them — `module M { let
+   f }` is a top-level `M.f` — so "inside the module" is a question about the
+   name of the declaration a reference sits in, and nothing deeper is needed.
+
+   Reported as a type error because that is what it is: a name that does not
+   resolve from where it was written. The message says which module, because
+   "unbound variable: Store.secret" would send the reader looking for a typo. *)
+let check_module_privacy (prog : Ast.program) =
+  if Hashtbl.length Parser.private_module_names > 0 then begin
+    let module_of (n : string) =
+      match String.rindex_opt n '.' with
+      | Some i -> String.sub n 0 i
+      | None -> ""
+    in
+    let check_in (owner : string) (e : Ast.expr) =
+      let rec go (x : Ast.expr) =
+        (match x.Ast.node with
+         | Ast.Var n when Hashtbl.mem Parser.private_module_names n ->
+           let home = module_of n in
+           (* Inside its own module, or inside one nested within it. *)
+           let inside =
+             owner = home
+             || (String.length owner > String.length home
+                 && String.sub owner 0 (String.length home) = home
+                 && owner.[String.length home] = '.')
+           in
+           if not inside then
+             raise (Typer.Type_error (x.Ast.loc,
+               Printf.sprintf
+                 "`%s` is internal to module `%s` (the module marks its exports with `pub`)"
+                 n home))
+         | _ -> ());
+        List.iter go (Ast.children x)
+      in
+      go e
+    in
+    List.iter (fun d ->
+      let owner =
+        match d with
+        | Ast.Top_let ({ Ast.pnode = Ast.P_var n; _ }, _) -> module_of n
+        | Ast.Top_let_rec ((n, _) :: _) -> module_of n
+        | _ -> ""
+      in
+      List.iter (check_in owner) (Ast.decl_exprs d)) prog.Ast.decls;
+    check_in "" prog.Ast.main
+  end
+
+(* `| "lit" <> rest ->` : the arm becomes a guard and a binding.
+
+   The rewrite, once, so that no backend has to learn a pattern:
+
+     match s with | "http://" <> rest -> body
+   =>
+     match s with | __pfxN when str_starts_with __pfxN "http://" ->
+                    let rest = utf8_sub __pfxN 7 (utf8_len __pfxN - 7) in body
+
+   Every piece of that is a function the programs doing this by hand already
+   call (`str_starts_with` and a slice, 13 times in `contrib/` alone). The arm
+   binds the scrutinee rather than naming it, so the subject is evaluated once
+   by `match` and the guard and the binding both read the same value.
+
+   A GUARDED ARM CLOSES NOTHING, which is what exhaustiveness should already
+   say about a prefix test: `| "a" <> r -> ...` covers some strings and the
+   checker has no way to know which, so a `_` arm is still required. That falls
+   out of the existing rule rather than being added to it.
+
+   The literal's length is counted in CODE POINTS, because `utf8_sub` is
+   codepoint-indexed. "http://" is 7 either way; "日本" is 2 here and 6 bytes.
+
+   ⚠ `utf8_sub` walks the string. That is the right first implementation and the
+   wrong one for a hot loop; a byte-indexed slice would be a builtin, which is
+   five backends, and is worth adding when something measured asks for it. *)
+let prefix_desugar (prog : Ast.program) : Ast.program =
+  let counter = ref 0 in
+  let codepoints (s : string) =
+    let n = ref 0 in
+    String.iter (fun c -> if Char.code c land 0xC0 <> 0x80 then incr n) s;
+    !n
+  in
+  let rec go (e : Ast.expr) : Ast.expr =
+    Ast.rv_map_scoped ~shadow:[] (fun _ (x : Ast.expr) ->
+      match x.Ast.node with
+      | Ast.Match (scrut, arms)
+        when List.exists (fun ((p : Ast.pattern), _, _) ->
+               match p.Ast.pnode with Ast.P_str_prefix _ -> true | _ -> false) arms ->
+        let arms' =
+          List.map (fun ((p : Ast.pattern), guard, body) ->
+            let guard = Option.map go guard and body = go body in
+            match p.Ast.pnode with
+            | Ast.P_str_prefix (lit, name) ->
+              incr counter;
+              let fresh = Printf.sprintf "__pfx%d" !counter in
+              let loc = p.Ast.ploc in
+              let mk node = { Ast.loc; ty = None; node } in
+              let var n = mk (Ast.Var n) in
+              let app f a = mk (Ast.App (f, a)) in
+              let k = codepoints lit in
+              let test =
+                app (app (var "str_starts_with") (var fresh)) (mk (Ast.Str_lit lit))
+              in
+              let slice () =
+                app (app (app (var "utf8_sub") (var fresh)) (mk (Ast.Int_lit k)))
+                  (mk (Ast.Bin (Ast.Sub,
+                                app (var "utf8_len") (var fresh),
+                                mk (Ast.Int_lit k))))
+              in
+              let bind_rest e =
+                if name = "_" then e
+                else
+                  { e with Ast.node =
+                      Ast.Let ({ Ast.ploc = loc; pnode = Ast.P_var name }, slice (), e) }
+              in
+              let guard' =
+                match guard with
+                | None -> Some test
+                (* THE USER'S GUARD CAN NAME THE BINDER — `| "ab" <> r when
+                   str_len r > 1` — so `r` has to be bound for the guard too,
+                   not only for the body. `&&` short-circuits, so the slice is
+                   only computed once the prefix has matched. *)
+                | Some g -> Some (mk (Ast.Logic (Ast.And, test, bind_rest g)))
+              in
+              let body' = bind_rest body in
+              ({ Ast.ploc = loc; pnode = Ast.P_var fresh }, guard', body')
+            | _ -> (p, guard, body)) arms
+        in
+        Some { x with Ast.node = Ast.Match (go scrut, arms') }
+      | _ -> None) e
+  in
+  let decl d =
+    match d with
+    | Ast.Top_let (p, e) -> Ast.Top_let (p, go e)
+    | Ast.Top_let_rec bs -> Ast.Top_let_rec (List.map (fun (n, e) -> (n, go e)) bs)
+    | other -> other
+  in
+  { Ast.decls = List.map decl prog.Ast.decls; Ast.main = go prog.Ast.main }
+
+(* `echo` -> `echo_at "<where>"`: the debug print gets its position.
+
+   WHY A PASS AND NOT A PARSER CASE. The first version of this rewrote the
+   token, which is simpler and wrong: `test/parity/graphql_stack_portable.mere`
+   binds `echo` as a name of its own, and rewriting every occurrence turned its
+   value into a partially applied function and the program into a type error.
+   A debug helper that breaks a program which never asked for it is not worth
+   having, so the rewrite runs over the parsed tree with scope tracked
+   (`Ast.rv_map_scoped`), and a `echo` the user bound -- at top level or in any
+   scope around the use -- is left alone and means what they said.
+
+   The prelude's own `echo` does NOT shadow it: the prelude is prepended to
+   every program, so counting its top-level names as user bindings would
+   disable the rewrite everywhere. Top-level names are collected from
+   declarations the user wrote, which are the ones whose positions carry no
+   `<prelude>` file. *)
+let echo_rewrite (prog : Ast.program) : Ast.program =
+  let user_top =
+    List.concat_map (fun d ->
+      match d with
+      | Ast.Top_let (p, _) ->
+        List.filter_map (fun (n, (l : Loc.t)) ->
+          if l.Loc.file = Some prelude_file then None else Some n)
+          (Query.pattern_bindings p)
+      | Ast.Top_let_rec bs ->
+        List.filter_map (fun (n, (v : Ast.expr)) ->
+          if v.Ast.loc.Loc.file = Some prelude_file then None else Some n) bs
+      | Ast.Top_forward (n, _, (l : Loc.t)) ->
+        if l.Loc.file = Some prelude_file then [] else [ n ]
+      | _ -> []) prog.Ast.decls
+  in
+  if List.mem "echo" user_top then prog
+  else
+    let go (e : Ast.expr) =
+      Ast.rv_map_scoped ~shadow:[] (fun sh (x : Ast.expr) ->
+        match x.Ast.node with
+        | Ast.Var "echo" when not (List.mem "echo" sh) ->
+          let where =
+            match x.Ast.loc.Loc.file with
+            | Some f when f <> prelude_file ->
+              Printf.sprintf "%s:%d" f x.Ast.loc.Loc.line
+            | _ ->
+              (* Minus whatever a driver glued in front of the file: on `-rv`
+                 the prelude is prepended as TEXT, and an `echo` on line 2 was
+                 reporting line 1925. A position inside the glue would go
+                 non-positive, so it is clamped. *)
+              Printf.sprintf "line %d"
+                (max 1 (x.Ast.loc.Loc.line - !Loc.glued_lines))
+          in
+          Some { x with Ast.node =
+                   Ast.App ({ x with Ast.node = Ast.Var "echo_at"; ty = None },
+                            { x with Ast.node = Ast.Str_lit where; ty = None }) }
+        | _ -> None) e
+    in
+    let decl d =
+      match d with
+      | Ast.Top_let (p, e) -> Ast.Top_let (p, go e)
+      | Ast.Top_let_rec bs -> Ast.Top_let_rec (List.map (fun (n, e) -> (n, go e)) bs)
+      | other -> other
+    in
+    { Ast.decls = List.map decl prog.Ast.decls; Ast.main = go prog.Ast.main }
+
+(* `keep_sugar` is for the FORMATTER, and only for it.
+
+   Sugar that is lowered while parsing (`echo` -> `echo_at "<where>"`) is
+   invisible to everything downstream, which is the point — and the formatter
+   is downstream. `mere fmt` on a file containing `echo x` printed
+   `echo_at "line 2" x`: correct, equivalent, and not what the person wrote.
+   A formatter that rewrites the source it is formatting is a tool people stop
+   running.
+
+   So the lowering is skipped on that one path. It is a parameter rather than a
+   global because the formatter and the compiler run in the same process (the
+   language server does both on every keystroke). *)
+let parse_program ?(prelude = true) ?(keep_sugar = false) ?base_dir ?(search_paths = []) s =
   (* Clear the parser's per-program declaration tables so a `type` / `module`
      from a previously-parsed program in this process cannot leak into this one
      (see Parser.reset_decl_state). Done BEFORE the prelude parse, which then
@@ -185,7 +399,15 @@ let parse_program ?(prelude = true) ?base_dir ?(search_paths = []) s =
         (Ast.uniquify_inner_fns_program
           (Ast.range_version_program ~unsafe_builtins:higher_order_builtins
             (Ast.lower_par_map_program
-              { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls }))))
+              ((if keep_sugar then fun p -> p
+                else (fun p ->
+                  (* The privacy check rides with the sugar lowering for one
+                     reason: both are skipped when formatting. A formatter that
+                     refuses to format a program because of a name it cannot
+                     call is a formatter people stop running on broken files,
+                     which is when they need it. *)
+                  check_module_privacy p; prefix_desugar (echo_rewrite p)))
+                { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls })))))
   in
   (* Tell the typer what this program declares, here rather than only when the
      declarations are later walked. What types exist is a fact about the program, and
@@ -266,11 +488,18 @@ let reserved_c_names =
    They used to go straight to stderr, which is fine for a terminal and useless to
    anything else: an editor cannot underline a line that was written to a stream it
    is not reading. The CLI prints them now, which is the only place that should
-   decide how a warning looks. *)
-let warnings : (Loc.t * string) list ref = ref []
+   decide how a warning looks.
+
+   A warning may carry a fix: the edit that answers it, with the position it
+   goes at (`Exhaustive.fix`). Nothing on the terminal path reads it — the CLI
+   renders the message and the `help:` lines exactly as before — but a warning
+   that knows how to be answered should not have to be re-derived by whoever
+   wants to answer it. *)
+let warnings : (Loc.t * string * Exhaustive.fix option) list ref = ref []
 let reset_warnings () = warnings := []
 let take_warnings () = let ws = List.rev !warnings in warnings := []; ws
-let warn loc msg = warnings := (loc, msg) :: !warnings
+let warn loc msg = warnings := (loc, msg, None) :: !warnings
+let warn_fix loc msg fix = warnings := (loc, msg, fix) :: !warnings
 
 (* Drain the exhaustiveness findings on a path that is about to run or emit the
    program, and stop it if any of them names a case.
@@ -334,10 +563,70 @@ let enforce_type_redecls () =
 let enforce_exhaustive () =
   enforce_type_redecls ();
   let (ws, es) = Exhaustive.classify () in
-  List.iter (fun (loc, msg) -> warn loc msg) ws;
+  List.iter (fun (loc, msg, fix) -> warn_fix loc msg fix) ws;
   if es <> [] then
-    if !Exhaustive.allow then List.iter (fun (loc, msg) -> warn loc msg) es
-    else raise (Exhaustive.Non_exhaustive es)
+    if !Exhaustive.allow then List.iter (fun (loc, msg, fix) -> warn_fix loc msg fix) es
+    (* The exception carries what the CLI prints, which is the pair it always
+       carried: this path ends in a terminal, and a terminal cannot apply an
+       edit. *)
+    else raise (Exhaustive.Non_exhaustive (List.map (fun (l, m, _) -> (l, m)) es))
+
+(* Bindings nothing reads, as warnings.
+
+   Raised only from paths that have a program that type-checked: a binding that
+   looks unread in a half-inferred tree is usually a name whose use is inside
+   the expression that failed, and a warning about it is noise about code the
+   person is in the middle of writing. (Gleam draws the same line and says why:
+   it checks a scope for unused entities only if the scope was processed
+   successfully.)
+
+   The fix writes the `_`, which is the answer in the overwhelming majority of
+   cases where the report is not a mistake — deleting the binding needs its
+   extent, and a `Loc.t` is a start and a width. *)
+let warn_unused (prog : Ast.program) =
+  List.iter (fun (u : Query.unused) ->
+    let fix =
+      { Exhaustive.fx_title = Printf.sprintf "Prefix `%s` with `_`" u.Query.u_name;
+        fx_at = u.Query.u_loc;
+        fx_width = 0;
+        fx_text = "_" }
+    in
+    warn_fix u.Query.u_loc
+      (Printf.sprintf
+         "unused binding `%s` -- nothing in this file reads it\n\
+          help: prefix it with `_` (`_%s`) if that is deliberate, or remove it"
+         u.Query.u_name u.Query.u_name)
+      (Some fix))
+    (Query.unused_bindings ~prelude_decls:(prelude_decl_count ()) prog)
+
+(* Uses of a deprecated name, as warnings with the rename attached.
+
+   Drained on the same paths and under the same rule as the unused check: only
+   from a program that type-checked, because the name has to have RESOLVED for
+   "this is the builtin" to mean anything. *)
+let warn_deprecated () =
+  List.iter (fun ((r : Deprecated.row), (loc : Loc.t)) ->
+    (* Not the prelude's own uses. It is prepended to every program, it is
+       where the compiler's own code lives, and a person cannot edit it: a
+       warning there fires on every compile and names a line nobody wrote.
+       (The reserved-name linter above learned this first.) *)
+    if loc.Loc.file = Some prelude_file then () else
+    let fix =
+      { Exhaustive.fx_title =
+          Printf.sprintf "Replace `%s` with `%s`" r.Deprecated.dp_name
+            r.Deprecated.dp_replacement;
+        fx_at = loc;
+        fx_width = String.length r.Deprecated.dp_name;
+        fx_text = r.Deprecated.dp_replacement }
+    in
+    warn_fix loc
+      (Printf.sprintf
+         "`%s` is deprecated since v%s, %s\n\
+          help: use `%s` instead"
+         r.Deprecated.dp_name r.Deprecated.dp_since r.Deprecated.dp_why
+         r.Deprecated.dp_replacement)
+      (Some fix))
+    (Deprecated.take ())
 
 let warn_reserved_name (loc : Loc.t) name =
   (* Not for the prelude's own declarations. They are prepended to every program,
@@ -673,6 +962,7 @@ let process_decls eval_env type_env decls =
 let process_opt ?base_dir ?(search_paths = []) s =
   forward_reset ();
   Exhaustive.reset ();
+  Deprecated.reset ();
   Typer.reset_send_constraints ();
   Typer.reset_region_params ();
   let prog = Trait_elab.elaborate (parse_program ?base_dir ~search_paths s) in
@@ -716,6 +1006,7 @@ let process ?base_dir ?(search_paths = []) s =
 
 let exhaustiveness_warnings s =
   Exhaustive.reset ();
+  Deprecated.reset ();
   Typer.reset_send_constraints ();
   Typer.reset_region_params ();
   let prog = Trait_elab.elaborate (parse_program s) in
@@ -730,6 +1021,7 @@ let exhaustiveness_warnings s =
    than a type. `decls_report` is the caller that needs it. *)
 let type_of ?base_dir ?(search_paths = []) s =
   Exhaustive.reset ();
+  Deprecated.reset ();
   Typer.reset_send_constraints ();
   Typer.reset_region_params ();
   let prog = Trait_elab.elaborate (parse_program ?base_dir ~search_paths s) in
@@ -831,8 +1123,29 @@ let type_of ?base_dir ?(search_paths = []) s =
    program does not pin (an unused polymorphic helper) prints with the type
    variables inference gave it; a declaration is monomorphic, so such a line
    has to be looked at rather than pasted. *)
-let decls_report ?base_dir ?(search_paths = []) s =
+(* One declaration of the user's, as data.
+
+   `decls_report` used to build its text inline, which was fine while text was
+   the only reader. It is not any more: `--decls --json` answers the same
+   question for a machine, and two functions walking the same declarations
+   would be two answers about one program the first time either is edited. So
+   the walk happens once, here, and the two outputs are two renderings of this
+   list. The text is unchanged, byte for byte, and
+   `scripts/decls_json_check.sh` rebuilds it FROM the JSON to say so. *)
+type decl_entry = {
+  de_name : string;     (* the name as the source spells it *)
+  de_type : string;     (* the inferred type, printed *)
+  (* "ok" | "duplicate" | "shadows-builtin" — why a line is commented out.
+     Both non-ok kinds are declarations that would change the program if pasted
+     back, which is the whole reason the text comments them rather than
+     dropping them. *)
+  de_status : string;
+  de_note : string;     (* the sentence the text puts after the line; "" when ok *)
+}
+
+let decls_entries ?base_dir ?(search_paths = []) s : decl_entry list =
   Exhaustive.reset ();
+  Deprecated.reset ();
   Typer.reset_send_constraints ();
   Typer.reset_region_params ();
   forward_reset ();
@@ -886,28 +1199,116 @@ let decls_report ?base_dir ?(search_paths = []) s =
     let s = Ast.toplevel_source_name n in
     Hashtbl.replace src_count s (1 + (try Hashtbl.find src_count s with Not_found -> 0)))
     (names_of d)) user_decls;
+  ignore out;
+  let entries = ref [] in
   List.iter (fun decl ->
     List.iter (fun n ->
       match Hashtbl.find_opt Typer.top_schemes n with
       | Some sch ->
         let src = Ast.toplevel_source_name n in
-        let line = Printf.sprintf "let fn %s: %s;" src (Ast.pp_ty sch.Typer.body) in
         let dup = (try Hashtbl.find src_count src with Not_found -> 1) > 1 in
-        if dup then
-          Buffer.add_string out
-            (Printf.sprintf "// %s   // `%s` is bound %d times at top level; one declaration cannot name them all\n"
-               line src (Hashtbl.find src_count src))
-        else if src <> n then
-          Buffer.add_string out
-            (Printf.sprintf "// %s   // `%s` shadows a builtin: declaring it here puts YOUR `%s` in scope from this line, so callers written above the definition would stop seeing the builtin\n"
-               line src src)
-        else Buffer.add_string out (line ^ "\n")
+        let (status, note) =
+          if dup then
+            ("duplicate",
+             Printf.sprintf "`%s` is bound %d times at top level; one declaration cannot name them all"
+               src (Hashtbl.find src_count src))
+          else if src <> n then
+            ("shadows-builtin",
+             Printf.sprintf "`%s` shadows a builtin: declaring it here puts YOUR `%s` in scope from this line, so callers written above the definition would stop seeing the builtin"
+               src src)
+          else ("ok", "")
+        in
+        entries :=
+          { de_name = src; de_type = Ast.pp_ty sch.Typer.body;
+            de_status = status; de_note = note } :: !entries
       | None -> ()) (names_of decl))
     user_decls;
-  Buffer.contents out
+  List.rev !entries
+
+(* The text, from the entries. This is the output `--decls` has always had, and
+   the one `decls_roundtrip.sh` pastes back into a program. *)
+let render_decl_entry (e : decl_entry) : string =
+  let line = Printf.sprintf "let fn %s: %s;" e.de_name e.de_type in
+  if e.de_status = "ok" then line ^ "\n"
+  else Printf.sprintf "// %s   // %s\n" line e.de_note
+
+let decls_report ?base_dir ?(search_paths = []) s =
+  String.concat "" (List.map render_decl_entry (decls_entries ?base_dir ~search_paths s))
+
+(* The same declarations, for a machine.
+
+   WHAT IT IS FOR: the difference between two versions of a package. `mere fix`
+   writes a floor into `mere.toml` from the features a file uses; what it cannot
+   say is whether the API a downstream repository depends on has changed. That
+   question is a diff of this document.
+
+   Gleam's `gleam export package-interface` is the same idea, and its JSON
+   carries the version constraint alongside the interface
+   (`package_interface.rs`) — which is why `requires` is here rather than in a
+   second file: the promise and the surface are one answer.
+
+   `requires` is passed in rather than read here: it is a fact about the
+   PACKAGE (the nearest `mere.toml`), and this module compiles a file. The CLI
+   is what knows which package a path is in. *)
+let decls_json ?base_dir ?(search_paths = []) ?(requires : string option) s : string =
+  let entries = decls_entries ?base_dir ~search_paths s in
+  (* The type declarations the user wrote. Positions come from the parser's
+     table because `Top_type` carries none; the prelude's are excluded by their
+     file, the way every other reader of that table excludes them. *)
+  let prog = parse_program ?base_dir ~search_paths s in
+  let user_decls =
+    let n = prelude_decl_count () in
+    let rec drop k l = if k <= 0 then l else match l with [] -> [] | _ :: t -> drop (k - 1) t in
+    drop n prog.Ast.decls
+  in
+  let line_of name =
+    match List.assoc_opt name !Parser.declared_types with
+    | Some (l : Loc.t) when l.Loc.file = None -> l.Loc.line
+    | _ -> 0
+  in
+  let types =
+    List.filter_map (fun d ->
+      match d with
+      | Ast.Top_type (name, params, variants) ->
+        Some (Json.Obj [
+          ("name", Json.Str name);
+          ("kind", Json.Str "variant");
+          ("params", Json.List (List.map (fun p -> Json.Str p) params));
+          ("line", Json.Num (float_of_int (line_of name)));
+          ("constructors",
+           Json.List (List.map (fun (cn, payload) ->
+             Json.Obj [ ("name", Json.Str cn);
+                        ("payload",
+                         match payload with
+                         | Some t -> Json.Str (Ast.pp_ty t)
+                         | None -> Json.Null) ]) variants)) ])
+      | Ast.Top_record (name, params, fields) ->
+        Some (Json.Obj [
+          ("name", Json.Str name);
+          ("kind", Json.Str "record");
+          ("params", Json.List (List.map (fun p -> Json.Str p) params));
+          ("line", Json.Num (float_of_int (line_of name)));
+          ("fields",
+           Json.List (List.map (fun (fn, ft) ->
+             Json.Obj [ ("name", Json.Str fn); ("type", Json.Str (Ast.pp_ty ft)) ])
+             fields)) ])
+      | _ -> None) user_decls
+  in
+  Json.to_string (Json.Obj [
+    ("mere", Json.Str Version.v);
+    ("requires", (match requires with Some r -> Json.Str r | None -> Json.Null));
+    ("values",
+     Json.List (List.map (fun e ->
+       Json.Obj [ ("name", Json.Str e.de_name);
+                  ("type", Json.Str e.de_type);
+                  ("status", Json.Str e.de_status);
+                  ("note", Json.Str e.de_note) ]) entries));
+    ("types", Json.List types);
+  ])
 
 let region_param_report ?base_dir ?(search_paths = []) s =
   Exhaustive.reset ();
+  Deprecated.reset ();
   Typer.reset_send_constraints ();
   Typer.reset_region_params ();
   let prog = Trait_elab.elaborate (parse_program ?base_dir ~search_paths s) in
@@ -1109,6 +1510,7 @@ let region_param_report ?base_dir ?(search_paths = []) s =
 
 let process_typed s =
   Exhaustive.reset ();
+  Deprecated.reset ();
   Typer.reset_send_constraints ();
   Typer.reset_region_params ();
   let prog = Trait_elab.elaborate (parse_program s) in
@@ -1144,6 +1546,7 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
      it either, and a second `infer_program` in one process would have been
      judged against the first one's matches. *)
   Exhaustive.reset ();
+  Deprecated.reset ();
   let prog =
     Trait_elab.elaborate
       (parse_program ?base_dir ~search_paths source)
@@ -1310,7 +1713,11 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
      (* Last, and only here: a recovering caller wants the findings as data
         with the rest of the diagnostics (`check` drains them itself), and one
         judged against a program that did not type-check is guesswork about a
-        scrutinee whose type never resolved. *)
+        scrutinee whose type never resolved. The same is true of "nothing reads
+        this": a file mid-edit has plenty of names whose reader is the line
+        being written. *)
+     warn_unused prog;
+     warn_deprecated ();
      enforce_exhaustive ()
    end
    else
@@ -1342,6 +1749,11 @@ type diagnostic = {
      an error inside an `import`, whose line numbers mean nothing in the
      importing file. `None` means "the text you handed me". *)
   d_file : string option;
+  (* The edit that answers this diagnostic, when the checker that raised it
+     knows one. `mere lsp` turns it into a code action; the terminal renderer
+     ignores it, because the `help:` line inside `d_msg` already says the same
+     thing to a reader who is going to type it themselves. *)
+  d_fix : Exhaustive.fix option;
 }
 
 let check ?base_dir ?(search_paths = []) (source : string)
@@ -1351,14 +1763,16 @@ let check ?base_dir ?(search_paths = []) (source : string)
      the parse and could not otherwise say. *)
   let err ?file kind (loc, msg) =
     let file = match file with Some f -> Some f | None -> loc.Loc.file in
-    { d_loc = loc; d_kind = kind; d_msg = msg; d_severity = Error; d_file = file }
+    { d_loc = loc; d_kind = kind; d_msg = msg; d_severity = Error; d_file = file;
+      d_fix = None }
   in
-  let warning (loc, msg) =
+  let warning (loc, msg, fix) =
     { d_loc = loc; d_kind = "warning"; d_msg = msg;
-      d_severity = Warning; d_file = None }
+      d_severity = Warning; d_file = None; d_fix = fix }
   in
   reset_warnings ();
   Exhaustive.reset ();
+  Deprecated.reset ();
   match syntax_errors ?base_dir ~search_paths source with
   | (_ :: _) as errs ->
     (None, List.map (fun (file, loc, msg) -> err ?file "parse error" (loc, msg)) errs)
@@ -1381,16 +1795,18 @@ let check ?base_dir ?(search_paths = []) (source : string)
        let redecls =
          List.map (fun r ->
            { d_loc = Loc.dummy; d_kind = "type error"; d_msg = redecl_message r;
-             d_severity = Error; d_file = None })
+             d_severity = Error; d_file = None; d_fix = None })
            (Typer.take_type_redecls ())
        in
        let (ex_ws, ex_es) = Exhaustive.classify () in
        let ws =
          List.map warning (take_warnings ())
          @ List.map warning ex_ws
-         @ List.map (fun (loc, msg) ->
+         (* A named missing case is an error, and it is the one error in this
+            list that arrives with its own answer attached. *)
+         @ List.map (fun (loc, msg, fix) ->
              { d_loc = loc; d_kind = "error"; d_msg = msg;
-               d_severity = Error; d_file = None }) ex_es
+               d_severity = Error; d_file = None; d_fix = fix }) ex_es
          @ redecls
        in
        (* One entry per distinct complaint: the declaration loop and the pass over
@@ -1406,7 +1822,19 @@ let check ?base_dir ?(search_paths = []) (source : string)
        in
        let errs = List.map (err "type error") errs in
        (* A file that did not type-check has a tree, but one full of holes: it is
-          only worth handing back when nothing went wrong. *)
+          only worth handing back when nothing went wrong.
+
+          The unused check runs here rather than inside inference, because this
+          path is the recovering one: it is reached with errors in hand, and the
+          answer is only worth asking for when there are none. *)
+       let ws =
+         if errs = [] then begin
+           reset_warnings ();
+           warn_unused prog;
+           warn_deprecated ();
+           ws @ List.map warning (take_warnings ())
+         end else ws
+       in
        ((if errs = [] then Some prog else None), errs @ ws)
      with
      | Lexer.Lex_error (loc, msg) -> (None, [err "lex error" (loc, msg)])
@@ -1430,7 +1858,7 @@ let diagnostics ?base_dir ?search_paths (source : string) : diagnostic list =
 let format_source ?(base_dir = Sys.getcwd ()) ?(search_paths = []) source =
   let prelude_decls = parse_prelude () in
   let n_prelude = List.length prelude_decls in
-  let prog = parse_program ~prelude:true ~base_dir ~search_paths source in
+  let prog = parse_program ~prelude:true ~keep_sugar:true ~base_dir ~search_paths source in
   let rec drop n xs =
     if n <= 0 then xs else match xs with [] -> [] | _ :: rest -> drop (n - 1) rest
   in

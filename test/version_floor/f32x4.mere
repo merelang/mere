@@ -1,0 +1,4 @@
+// One row of Feature.all, on its own: f32x4.
+let v = f32x4_splat 1.0;
+let w = f32x4_add v v;
+print "ok"
