@@ -2043,17 +2043,39 @@ let diagnostics ?base_dir ?search_paths (source : string) : diagnostic list =
    them; it records a position and a width, so the text is a slice of the line
    it is on. Nothing else had asked, which is why `mere fmt` deleted every
    comment in a file until v0.1.505. *)
-let column_one_comments (source : string) : (int * string) list =
+(* Both kinds the formatter can place, read off the one thing that knows where
+   every comment was: the lexer. `col = 1` is the block above a declaration;
+   `col > 1` with nothing but whitespace in front of it is a comment written
+   inside a body, which slice 2 puts back into the run of `let`s it was written
+   in. A comment with CODE before it on the line is neither -- placing it needs
+   the end of the node it follows, which no `Loc.t` records -- and is dropped
+   here as it always has been (Q-154). *)
+let source_comments (source : string)
+    : (int * string) list * (int * string) list * (int * string) list =
   let lines = Array.of_list (String.split_on_char '\n' source) in
   let acc = ref [] in
   ignore (try Lexer.tokenize ~comments:acc source with _ -> []);
-  List.filter_map (fun (loc : Loc.t) ->
-    if loc.Loc.col <> 1 || loc.Loc.line < 1 || loc.Loc.line > Array.length lines then None
+  let sorted = List.sort (fun (a : Loc.t) b -> compare a.Loc.line b.Loc.line) !acc in
+  List.fold_left (fun (col1, inline, trail) (loc : Loc.t) ->
+    if loc.Loc.line < 1 || loc.Loc.line > Array.length lines then (col1, inline, trail)
     else
       let line = lines.(loc.Loc.line - 1) in
-      let w = min loc.Loc.width (String.length line) in
-      if w <= 0 then None else Some (loc.Loc.line, String.sub line 0 w))
-    (List.sort (fun (a : Loc.t) b -> compare a.Loc.line b.Loc.line) !acc)
+      let start = loc.Loc.col - 1 in
+      if start < 0 || start > String.length line then (col1, inline, trail)
+      else
+        let w = min loc.Loc.width (String.length line - start) in
+        if w <= 0 then (col1, inline, trail)
+        else
+          let text = String.sub line start w in
+          if loc.Loc.col = 1 then ((loc.Loc.line, text) :: col1, inline, trail)
+          else if String.trim (String.sub line 0 start) = "" then
+            (col1, (loc.Loc.line, text) :: inline, trail)
+          else (col1, inline, (loc.Loc.line, text) :: trail))
+    ([], [], []) sorted
+  |> fun (a, b, c) -> (List.rev a, List.rev b, List.rev c)
+
+let column_one_comments (source : string) : (int * string) list =
+  let (a, _, _) = source_comments source in a
 
 let format_source ?(base_dir = Sys.getcwd ()) ?(search_paths = []) source =
   let prelude_decls = parse_prelude () in
@@ -2081,7 +2103,10 @@ let format_source ?(base_dir = Sys.getcwd ()) ?(search_paths = []) source =
           | Some (l : Loc.t) when l.Loc.file = None && l.Loc.line > 0 -> Some l.Loc.line
           | _ -> None))
   in
+  let (col1, inline, trailing) = source_comments source in
   Formatter.format_program
-    ~comments:(column_one_comments source)
+    ~comments:col1
+    ~inline
+    ~trailing
     ~decl_line
     { prog with Ast.decls = drop n_prelude prog.Ast.decls }
