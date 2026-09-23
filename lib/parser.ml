@@ -44,6 +44,19 @@ let module_bindings : (string, string list) Hashtbl.t = Hashtbl.create 4
    via different relative path representations. *)
 let imported_files : (string, unit) Hashtbl.t = Hashtbl.create 4
 
+(* Q-174: every `import` the ENTRY file wrote, as
+   (index in that file's declaration list, path exactly as written, how many
+   declarations the import spliced in, the line it was on).
+
+   `import` splices, so by the time anything downstream sees a program the
+   import STATEMENT is gone and the imported file's declarations are sitting
+   where it used to be. For a compiler that is the whole point. For `mere fmt`
+   it meant the output had no `import` line and carried somebody else's
+   declarations instead -- and `mere fmt -i` wrote that back over the user's
+   file. The formatter needs to undo the splice exactly, which needs where it
+   happened and how much it put there. *)
+let entry_imports : (int * string * int * int) list ref = ref []
+
 (* Phase 9.5: base directory for importer-relative path resolution.
    Set at the top level by `parse_program ~base_dir`, and temporarily
    pushed to "the directory of the imported file" each time
@@ -2142,8 +2155,19 @@ let rec parse_program_internal tokens =
               "import: cannot resolve path `%s` (tried: %s)"
               path (String.concat ", " candidates)))
       in
-      if Hashtbl.mem imported_files canonical then
+      (* Only the entry file's imports: a position with a file on it came from
+         an import itself, and that file's own `import` lines belong to it. *)
+      let note_import (count : int) =
+        if pos.Loc.file = None then
+          entry_imports :=
+            (List.length decls, path, count, pos.Loc.line) :: !entry_imports
+      in
+      if Hashtbl.mem imported_files canonical then begin
+        (* Already pulled in by something else, so it contributes NO
+           declarations here -- but the line was written and has to come back. *)
+        note_import 0;
         parse_decls decls rest
+      end
       else begin
         Hashtbl.replace imported_files canonical ();
         let source =
@@ -2175,6 +2199,7 @@ let rec parse_program_internal tokens =
         (* Imported file's main expression is discarded (decls-only is
            the recommended form). We prepend its decls newest-first so
            the final List.rev yields the correct source order. *)
+        note_import (List.length prog_imp.Ast.decls);
         let decls' = List.rev_append prog_imp.Ast.decls decls in
         parse_decls decls' rest
       end
@@ -2492,6 +2517,7 @@ let rec parse_program_internal tokens =
    recursion. *)
 let parse_program ?(base_dir = Sys.getcwd ()) ?(search_paths = []) tokens =
   Hashtbl.reset imported_files;
+  entry_imports := [];
   current_base_dir := base_dir;
   import_search_paths := search_paths;
   parse_program_internal tokens
