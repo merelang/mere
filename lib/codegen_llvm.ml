@@ -4759,11 +4759,34 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let av = emit_expr env a_e in
     let bv = emit_expr env b_e in
     let r = fresh_reg () in
-    let instr = match op with
-      | "bit_and" -> "and" | "bit_or" -> "or" | "bit_xor" -> "xor"
-      | "bit_shl" -> "shl" | _ -> "ashr"
-    in
-    emit_instr (Printf.sprintf "  %s = %s i64 %s, %s" r instr av bv);
+    (match op with
+     | "bit_shl" | "bit_shr" ->
+       (* Q-039: a shift by 64 or more is POISON in IR, and a negative count is
+          the same thing read as huge-unsigned. The contract the RISC-V backend
+          was written against -- zero for a left shift, the sign bit for a right
+          one -- is emitted here instead, and the count is masked before the
+          shift so no poison is produced at all rather than produced and then
+          selected away. *)
+       let left = (op = "bit_shl") in
+       let big = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = icmp ugt i64 %s, 63" big bv);
+       let safe_n = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = and i64 %s, 63" safe_n bv);
+       let shifted = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = %s i64 %s, %s" shifted
+                     (if left then "shl" else "ashr") av safe_n);
+       let out_of_range = fresh_reg () in
+       if left then
+         emit_instr (Printf.sprintf "  %s = add i64 0, 0" out_of_range)
+       else
+         emit_instr (Printf.sprintf "  %s = ashr i64 %s, 63" out_of_range av);
+       emit_instr (Printf.sprintf "  %s = select i1 %s, i64 %s, i64 %s"
+                     r big out_of_range shifted)
+     | _ ->
+       let instr = match op with
+         | "bit_and" -> "and" | "bit_or" -> "or" | _ -> "xor"
+       in
+       emit_instr (Printf.sprintf "  %s = %s i64 %s, %s" r instr av bv));
     r
   | Ast.App ({ node = Ast.Var "bit_not"; _ }, a_e) ->
     let av = emit_expr env a_e in
