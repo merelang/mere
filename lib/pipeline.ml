@@ -598,12 +598,23 @@ let parse_program ?(prelude = true) ?(keep_sugar = false) ?base_dir ?(search_pat
     List.filter_map (fun (n, (sch : Typer.scheme)) -> if has_fn_param sch.Typer.body then Some n else None)
       Typer.initial_env
   in
-  let prog =
+  (* Q-173: everything from here down is preparation for CODE GENERATION --
+     range-check versioning splits a loop into `f__rvfast` / `f__rvslow`,
+     uniquifying renames inner functions to `go_uq3`, `par_map` lowers to its
+     runtime shape. `keep_sugar` used to guard only the desugaring, so `mere
+     fmt` printed all of it back: 19 example files came out with names no one
+     wrote, and formatting them AGAIN split the already-split loops. A formatter
+     that edits the source it formats is a tool people stop running -- the same
+     sentence v0.1.504 wrote about `echo`, one layer down. *)
+  let for_codegen p =
     Ast.uniquify_toplevel_shadows ~shadowable
       (Ast.reserve_toplevel_main
         (Ast.uniquify_inner_fns_program
           (Ast.range_version_program ~unsafe_builtins:higher_order_builtins
-            (Ast.lower_par_map_program
+            (Ast.lower_par_map_program p))))
+  in
+  let prog =
+    (if keep_sugar then (fun p -> p) else for_codegen)
               ((if keep_sugar then fun p -> p
                 else (fun p ->
                   (* The privacy check rides with the sugar lowering for one
@@ -613,7 +624,7 @@ let parse_program ?(prelude = true) ?(keep_sugar = false) ?base_dir ?(search_pat
                      which is when they need it. *)
                   check_module_privacy p; check_file_privacy p;
                   prefix_desugar (echo_rewrite p)))
-                { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls })))))
+                { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls })
   in
   (* Tell the typer what this program declares, here rather than only when the
      declarations are later walked. What types exist is a fact about the program, and
