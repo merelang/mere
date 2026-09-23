@@ -2506,6 +2506,31 @@ let () =
     (Pipeline.process
        "let f = fn (s: str) -> match s with | \"ab\" <> r when str_len r > 1 -> r | _ -> \"short\" in f \"abcd\"")
     "\"cd\"";
+  (* v0.1.514 (Q-166): `pub` at the top of a file. The import splice is what
+     makes this need a check at all -- after it there is one namespace -- and
+     `Loc.t`'s file field is what makes the check possible. Contextual, so a
+     program that binds `pub` is unaffected. *)
+  check "v0.1.514: `pub` is still an ordinary name at top level"
+    (Pipeline.process "let pub = 7 in pub + 1") "8";
+  check "v0.1.514: a file that marks nothing is unchanged"
+    (Pipeline.process "let helper = fn (n: int) -> n * 2 in helper 21") "42";
+  check "v0.1.514: `pub let` parses and the binding works"
+    (Pipeline.process "pub let api = fn (n: int) -> n + 1;\napi 41") "42";
+  (* The two holes the design review found, which four green directions had said
+     nothing about: a module's `pub` keys on a qualified name that nothing else
+     can spell, a file's keys on the bare one that every local can. *)
+  check "v0.1.514: a local shadowing a name does not consult file privacy"
+    (Pipeline.process
+       "pub let api = fn (n: int) -> n;\nlet helper = fn (n: int) -> n * 7;\nlet f = fn (n: int) -> let helper = n + 1 in helper * 2;\nf 20")
+    "42";
+  check "v0.1.514: a parameter with that name is not a reference"
+    (Pipeline.process
+       "pub let api = fn (n: int) -> n;\nlet helper = fn (n: int) -> n * 7;\nlet g = fn (helper: int) -> helper + 1;\ng 41")
+    "42";
+  check "v0.1.514: `pub` must be followed by a named let"
+    (try ignore (Pipeline.process "pub let (a, b) = (1, 2);\na"); "accepted"
+     with Parser.Parse_error (_, _) -> "refused")
+    "refused";
   (* v0.1.513 (Q-167): four spellings the lexer had never heard of. Three were
      not syntax errors but NAME errors -- `0b1010` read as the integer 0 next
      to an identifier `b1010` -- which is why they were reported as unbound
