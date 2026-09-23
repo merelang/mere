@@ -1,0 +1,110 @@
+// fd_* : the open file. Every expectation below is a value THIS program set,
+// so the numbers are facts rather than a snapshot of one machine.
+//
+// WHAT IS BEING CHECKED and why it is a runtime rather than an `extern` the
+// program writes: open(2) lives in <fcntl.h>, which an emitted program does
+// not include, and its flags are platform constants a caller would have to
+// guess. lseek is the same shape -- off_t is a typedef, SEEK_* are constants.
+// The two contracts the runtime defines are exercised here: the MODE STRING
+// (r/w/a with an optional + and a trailing b) and the WHENCE numbering
+// (0 set, 1 cur, 2 end).
+extern fn fd_open: str -> str -> int -> int;
+extern fn fd_read: int -> int -> int -> int;
+extern fn fd_write: int -> int -> int -> int;
+extern fn fd_close: int -> int;
+extern fn fd_seek: int -> int -> int -> int;
+extern fn fd_dup: int -> int;
+extern fn fd_sync: int -> int;
+extern fn fd_isatty: int -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_to_str: int -> int -> str;
+extern fn mem_copy_str: int -> int -> str -> int;
+
+let say = fn (label: str) -> fn (got: int) -> fn (want: int) ->
+  if got == want then print (label ++ " ok")
+  else print (label ++ " FAIL got=" ++ str_of_int got ++ " want=" ++ str_of_int want);
+
+let say_s = fn (label: str) -> fn (got: str) -> fn (want: str) ->
+  if str_eq got want then print (label ++ " ok")
+  else print (label ++ " FAIL got=" ++ got ++ " want=" ++ want);
+
+let main = fn () ->
+  let path = "/tmp/mere_fdio_probe" in
+  let buf = mem_alloc 256 in
+  // ⚠ "w" TRUNCATES, and that only shows against a file that already has
+  //   something longer in it. A first version opened "w" on whatever the last
+  //   run left behind, so a poison test that dropped O_TRUNC passed on a clean
+  //   machine and failed on a dirty one -- the probe was reading the previous
+  //   run instead of its own setup. It lays down the long content itself now.
+  let w0 = fd_open path "w" 420 in
+  let n0 = mem_copy_str buf 0 "0123456789ABCDEFGHIJ" in
+  let _ = fd_write w0 buf n0 in
+  let _ = fd_close w0 in
+  // write: "w" creates and truncates
+  let w = fd_open path "w" 420 in
+  let _ = say "open w" (if w >= 0 then 1 else 0) 1 in
+  let n = mem_copy_str buf 0 "hello world" in
+  let _ = say "write" (fd_write w buf n) 11 in
+  let _ = say "sync" (fd_sync w) 0 in
+  let _ = say "close w" (fd_close w) 0 in
+  // ...and the twenty bytes that were there are gone, not overwritten in place
+  let tr = fd_open path "r" 0 in
+  let _ = say "w truncated" (fd_seek tr 0 2) 11 in
+  let _ = fd_close tr in
+  // read it back
+  let r = fd_open path "r" 0 in
+  let got = fd_read r buf 256 in
+  let _ = say "read count" got 11 in
+  let _ = say_s "read bytes" (mem_to_str buf got) "hello world" in
+  // WHENCE: 0 set, 1 cur, 2 end -- the contract the runtime defines.
+  //
+  // ⚠ THE NUMBERS HERE ARE CHOSEN SO THE THREE DISAGREE. A first version
+  //   seeked to the end and then -5 from CUR, and a poison test that SWAPPED
+  //   SEEK_CUR and SEEK_END did not move a single row: at that moment the
+  //   position WAS the end, so both readings answered the same number. Every
+  //   seek below is taken from a position that is neither 0 nor the end, and
+  //   with an offset that lands somewhere different under each whence.
+  let _ = say "seek set" (fd_seek r 6 0) 6 in
+  let got2 = fd_read r buf 256 in
+  let _ = say_s "read after seek" (mem_to_str buf got2) "world" in
+  // back to 3 -- not the start, not the end
+  let _ = say "seek set again" (fd_seek r 3 0) 3 in
+  // CUR from 3 by +2 is 5; END by +2 would be 13, SET would be 2
+  let _ = say "seek cur" (fd_seek r 2 1) 5 in
+  // END by -4 is 7; CUR from 5 would be 1, SET would be -1 (a refusal)
+  let _ = say "seek end" (fd_seek r (0 - 4) 2) 7 in
+  let _ = say_s "read after seek end" (mem_to_str buf (fd_read r buf 256)) "orld" in
+  let _ = say "read at eof" (fd_read r buf 256) 0 in
+  // and a seek back to the start, so the dup below reads from a known place
+  let _ = say "seek to start" (fd_seek r 6 0) 6 in
+  // a duplicate shares the file OFFSET, which is what dup(2) means
+  let d = fd_dup r in
+  let _ = say "dup" (if d >= 0 then 1 else 0) 1 in
+  let _ = say_s "dup shares the offset" (mem_to_str buf (fd_read d buf 256)) "world" in
+  let _ = say "close dup" (fd_close d) 0 in
+  let _ = say "close r" (fd_close r) 0 in
+  // "a" appends rather than truncating
+  let a = fd_open path "a" 420 in
+  let n2 = mem_copy_str buf 0 "!" in
+  let _ = fd_write a buf n2 in
+  let _ = fd_close a in
+  let r2 = fd_open path "r" 0 in
+  let _ = say_s "append" (mem_to_str buf (fd_read r2 buf 256)) "hello world!" in
+  let _ = fd_close r2 in
+  // a trailing b is accepted and ignored: there is no text mode here
+  let rb = fd_open path "rb" 0 in
+  let _ = say "mode rb accepted" (if rb >= 0 then 1 else 0) 1 in
+  let _ = fd_close rb in
+  // refusals, and each answers -1 rather than guessing
+  let _ = say "unknown mode" (fd_open path "zz" 0) (0 - 1) in
+  let _ = say "missing file" (fd_open "/tmp/mere_fdio_no_such" "r" 0) (0 - 1) in
+  let _ = say "read a closed fd" (fd_read r2 buf 16) (0 - 1) in
+  let _ = say "close twice" (fd_close r2) (0 - 1) in
+  let _ = say "negative fd" (fd_read (0 - 1) buf 16) (0 - 1) in
+  let _ = say "whence out of range" (fd_seek 0 0 7) (0 - 1) in
+  // a regular file is not a terminal, whatever the run is attached to
+  let t = fd_open path "r" 0 in
+  let _ = say "isatty on a file" (fd_isatty t) 0 in
+  let _ = fd_close t in
+  0;
+exit (main ())

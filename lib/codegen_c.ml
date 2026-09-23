@@ -598,6 +598,7 @@ let uses_midi = ref false  (* v0.1.128: midi_* -> PortMidi input runtime *)
 let uses_window = ref false  (* v0.1.249: win_* -> SDL2 window / pixels / input *)
 let uses_audio = ref false  (* v0.1.314: audio_* -> SDL2 audio, push model *)
 let uses_filestat = ref false  (* v0.1.509: file_* -> stat(2) and friends *)
+let uses_fdio = ref false      (* v0.1.522: fd_* -> open(2) and friends *)
 let uses_file_io = ref false  (* v0.1.59: file_open / file_read_line / file_close *)
 let uses_int_of_str = ref false  (* v0.1.60: validating int parse *)
 let uses_write_file_bytes = ref false
@@ -6707,7 +6708,20 @@ let native_ffi_names =
        struct layout stay on this side and a caller never guesses an offset. *)
     "file_stat"; "file_lstat"; "file_stat_field"; "file_chmod"; "file_chown";
     "file_truncate"; "file_umask"; "file_mkfifo"; "file_utime";
-    "file_readlink" ]
+    "file_readlink";
+    (* v0.1.522: the open file. `open`, `lseek` and `dup` are the three an
+       `extern` cannot name by hand -- open(2) lives in <fcntl.h>, which an
+       emitted program does not include, and its flags are platform constants
+       a caller would have to guess; lseek takes an off_t and SEEK_* are
+       constants of the same kind. read/write/close ARE in <unistd.h> and
+       could be declared, but splitting the family across two mechanisms
+       would put half the contract in the caller's hands, so all of it is
+       here. The MODE is a string, as fopen takes it, and the whence is 0/1/2
+       -- both are contracts this file defines, which is what keeps the
+       platform's constants on this side of the boundary. Bytes cross through
+       the same arena tcp_read and tcp_write use. *)
+    "fd_open"; "fd_read"; "fd_write"; "fd_close"; "fd_seek"; "fd_dup";
+    "fd_sync"; "fd_isatty" ]
 
 (* TLS externs. Not implemented natively yet (needs libssl FFI). Stubbed so
    a native build LINKS and plaintext connections work; referenced by the
@@ -7151,7 +7165,7 @@ let native_http_runtime ~tls =
            "  return -1;";
            "}" ]))
 
-let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat =
+let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio =
   String.concat "\n"
     [ "/* --- native FFI runtime: Wasm-style byte arena + POSIX TCP --- */";
       "#include <sys/socket.h>";
@@ -7584,6 +7598,92 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat =
           \  return 0;\n\
           }\n"
        else "");
+      (if fdio then
+         String.concat "\n"
+           [ "/* --- the open file (v0.1.522). read(2), write(2) and close(2) are in";
+             "   <unistd.h> and an `extern` could name them; open(2) is not -- it";
+             "   lives in <fcntl.h>, which an emitted program does not include, and";
+             "   its FLAGS are platform constants a caller would have to guess. So is";
+             "   lseek: off_t is a typedef and SEEK_SET/CUR/END are constants of the";
+             "   same kind. Splitting the family across two mechanisms would leave";
+             "   half the contract in the caller's hands, so all of it is here.";
+             "";
+             "   TWO CONTRACTS THIS FILE DEFINES, the way file_stat_field's field";
+             "   numbering is one:";
+             "     the MODE is a string, as fopen takes it -- r r+ w w+ a a+, with an";
+             "     optional trailing b that is accepted and ignored (there is no text";
+             "     mode on POSIX). An unknown mode is -1 rather than a guess.";
+             "     the WHENCE is 0 set, 1 cur, 2 end.";
+             "";
+             "   Bytes cross through the same byte arena tcp_read and tcp_write use:";
+             "   the caller passes an offset and a count and gets back how many bytes";
+             "   moved, then reads them with mem_to_str. That is what lets a payload";
+             "   with a zero byte in it survive, which a `str` return could not do.";
+             "";
+             "   Every one of these answers -1 on failure and does NOT read errno.";
+             "   A caller that needs to tell ENOENT from EACCES should be given errno";
+             "   itself rather than a guess made in the middle -- the same rule the";
+             "   file_* family states. */";
+             "#include <fcntl.h>";
+             "";
+             "static int __fd_flags(const char* mode) {";
+             "  if (mode == NULL) return -1;";
+             "  /* a trailing 'b' is accepted and ignored: there is no text mode here */";
+             "  int plus = 0; const char* q = mode;";
+             "  for (; *q; q++) if (*q == '+') plus = 1;";
+             "  if (mode[0] == 'r') return plus ? O_RDWR : O_RDONLY;";
+             "  if (mode[0] == 'w') return (plus ? O_RDWR : O_WRONLY) | O_CREAT | O_TRUNC;";
+             "  if (mode[0] == 'a') return (plus ? O_RDWR : O_WRONLY) | O_CREAT | O_APPEND;";
+             "  return -1;";
+             "}";
+             "";
+             "static long long fd_open(const char* path, const char* mode, long long perm) {";
+             "  int fl = __fd_flags(mode);";
+             "  if (path == NULL || fl < 0) return -1;";
+             "  int fd = open(path, fl, (mode_t)(perm < 0 ? 0666 : perm));";
+             "  return fd < 0 ? -1 : (long long)fd;";
+             "}";
+             "";
+             "static long long fd_read(long long fd, long long off, long long cap) {";
+             "  if (fd < 0 || cap <= 0) return -1;";
+             "  long long n = (long long)read((int)fd, __mem + off, (size_t)cap);";
+             "  return n < 0 ? -1 : n;";
+             "}";
+             "";
+             "static long long fd_write(long long fd, long long off, long long len) {";
+             "  if (fd < 0 || len < 0) return -1;";
+             "  long long n = (long long)write((int)fd, __mem + off, (size_t)len);";
+             "  return n < 0 ? -1 : n;";
+             "}";
+             "";
+             "static long long fd_close(long long fd) {";
+             "  if (fd < 0) return -1;";
+             "  return close((int)fd) == 0 ? 0 : -1;";
+             "}";
+             "";
+             "static long long fd_seek(long long fd, long long off, long long whence) {";
+             "  int w = whence == 1 ? SEEK_CUR : whence == 2 ? SEEK_END : SEEK_SET;";
+             "  if (fd < 0 || whence < 0 || whence > 2) return -1;";
+             "  off_t r = lseek((int)fd, (off_t)off, w);";
+             "  return r < 0 ? -1 : (long long)r;";
+             "}";
+             "";
+             "static long long fd_dup(long long fd) {";
+             "  if (fd < 0) return -1;";
+             "  int n = dup((int)fd);";
+             "  return n < 0 ? -1 : (long long)n;";
+             "}";
+             "";
+             "static long long fd_sync(long long fd) {";
+             "  if (fd < 0) return -1;";
+             "  return fsync((int)fd) == 0 ? 0 : -1;";
+             "}";
+             "";
+             "static long long fd_isatty(long long fd) {";
+             "  if (fd < 0) return 0;";
+             "  return isatty((int)fd) ? 1 : 0;";
+             "}" ]
+       else "");
       (if filestat then
          String.concat "\n"
            [ "/* --- file metadata (v0.1.509). The syscalls that Mere's extern ABI";
@@ -7958,7 +8058,7 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat =
 let () =
   native_ffi_runtime_fwd_text :=
     fun () -> native_ffi_runtime ~tls:true ~midi:true ~window:true ~audio:true
-                ~filestat:true
+                ~filestat:true ~fdio:true
 
 let str_concat_helper =
   String.concat "\n"
@@ -12078,6 +12178,17 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     || Hashtbl.mem extern_fn_decls "file_mkfifo"
     || Hashtbl.mem extern_fn_decls "file_utime"
     || Hashtbl.mem extern_fn_decls "file_readlink";
+  (* v0.1.522: declaring any fd_* extern pulls in <fcntl.h>. Same cost model
+     as file_*: one header, no library and no build-line change. *)
+  uses_fdio :=
+    Hashtbl.mem extern_fn_decls "fd_open"
+    || Hashtbl.mem extern_fn_decls "fd_read"
+    || Hashtbl.mem extern_fn_decls "fd_write"
+    || Hashtbl.mem extern_fn_decls "fd_close"
+    || Hashtbl.mem extern_fn_decls "fd_seek"
+    || Hashtbl.mem extern_fn_decls "fd_dup"
+    || Hashtbl.mem extern_fn_decls "fd_sync"
+    || Hashtbl.mem extern_fn_decls "fd_isatty";
   strbuf_used := false;
   bytebuf_used := false;
   bytes_used := false;
@@ -13568,7 +13679,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       (if Hashtbl.fold (fun n _ acc -> acc || is_native_ffi n)
             extern_fn_decls false
        then native_ffi_runtime ~tls:!uses_tls ~midi:!uses_midi ~window:!uses_window
-              ~audio:!uses_audio ~filestat:!uses_filestat ^ "\n"
+              ~audio:!uses_audio ~filestat:!uses_filestat ~fdio:!uses_fdio ^ "\n"
        else "");
       (* Q-012: concurrency runtime. `spawn` runs a `unit -> unit` closure on a
          fresh OS thread; the trampoline invokes the closure the same way the
