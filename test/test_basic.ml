@@ -2537,6 +2537,53 @@ let () =
      in
      Printf.sprintf "swallowed=%b" bad)
     "swallowed=false";
+  (* v0.1.520 (Q-154): the comment on an `if ... then` line. It was keyed on the
+     THEN-BRANCH's line, and the branch is on the NEXT line -- so the key never
+     matched and 42 of these were dropped. The condition's line is the line the
+     comment is on. ⚠ When the branch starts ON the `then` line the source wrote
+     the comment after the BRANCH, and the branch's own site keeps it. *)
+  check "v0.1.520: an `if ... then` line keeps its trailing comment"
+    (let out = Pipeline.format_source
+       "let f = fn (n: int) ->\n  if n == 0 then   // ZERO\n    print_str \"z\"\n  else if n == 1 then   // ONE\n    print_str \"o\"\n  else\n    print_str \"m\";\nf 1" in
+     let has needle =
+       let n = String.length needle and m = String.length out in
+       let rec go i = i + n <= m && (String.sub out i n = needle || go (i + 1)) in
+       go 0
+     in
+     Printf.sprintf "if=%b else_if=%b" (has "ZERO") (has "ONE"))
+    "if=true else_if=true";
+  check "v0.1.520: the comment stays on the `then` line, not above the branch"
+    (let out = Pipeline.format_source
+       "let f = fn (n: int) ->\n  if n == 0 then   // ZERO\n    print_str \"z\"\n  else if n == 1 then\n    print_str \"o\"\n  else\n    print_str \"m\";\nf 1" in
+     let contains l needle =
+       let n = String.length needle and m = String.length l in
+       let rec go i = i + n <= m && (String.sub l i n = needle || go (i + 1)) in
+       go 0
+     in
+     let same =
+       List.exists (fun l -> contains l "ZERO" && contains l "then")
+         (String.split_on_char '\n' out)
+     in
+     Printf.sprintf "same_line=%b" same)
+    "same_line=true";
+  (* ⚠ An `if` SMALL ENOUGH to come back on one line has no safe site: the whole
+     expression is a fragment and the `;` after it belongs to the caller, which
+     is the shape that broke 13 files. It drops the comment on purpose, and this
+     pins that it does not instead swallow the terminator. *)
+  check "v0.1.520: the one-line `if` form does not swallow the terminator"
+    (let out = Pipeline.format_source
+       "let f = fn (n: int) ->\n  if n == 0 then   // ZERO\n    print_str \"z\"\n  else\n    print_str \"m\";\nf 1" in
+     let bad =
+       List.exists (fun l ->
+         match String.index_opt l '/' with
+         | None -> false
+         | Some i ->
+           i + 1 < String.length l && l.[i + 1] = '/'
+           && (match String.index_from_opt l i ';' with Some _ -> true | None -> false))
+         (String.split_on_char '\n' out)
+     in
+     Printf.sprintf "swallowed=%b" bad)
+    "swallowed=false";
   (* v0.1.518 (Q-173): `keep_sugar` guarded the desugaring and nothing else, so
      `mere fmt` printed back the preparation for CODE GENERATION -- a loop split
      into `f__rvfast` / `f__rvslow` by range-check versioning, inner functions

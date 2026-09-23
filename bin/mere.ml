@@ -79,6 +79,10 @@ let usage () =
   print_endline "                        constructors, plus the package's declared";
   print_endline "                        `mere` floor. For diffing an API between";
   print_endline "                        versions.";
+  print_endline "  mere doc <file.mere>          the file's own top-level names, with the";
+  print_endline "                        comment block each was written under. The";
+  print_endline "                        `--json` form is `--decls --json`, which";
+  print_endline "                        carries `doc` on every value.";
   print_endline "  mere --features               the feature/version table this compiler";
   print_endline "                        holds: name, version, changelog probe";
   print_endline "  mere serve <file.wasm>        run a .wasm on the vendored Node host (.mere_host/)";
@@ -180,6 +184,12 @@ let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
   (match base_dir with
    | Some d ->
      (try Mere.Pkg_install.check_floor_for_dir d
+      with Mere.Pkg_install.Install_error msg ->
+        Printf.eprintf "error: %s\n" msg; exit 1);
+     (* Q-168: the same manifest may say how much stack the program needs. Read
+        here, next to the floor, because both are facts about the package that
+        the backends need before they emit anything. *)
+     (try Mere.Typer.stack_request := Mere.Pkg_install.stack_for_dir d
       with Mere.Pkg_install.Install_error msg ->
         Printf.eprintf "error: %s\n" msg; exit 1)
    | None -> ());
@@ -583,8 +593,26 @@ let wasm_debug_map ~path ?base_dir source =
   let (prog, main_ty) = infer_program ?base_dir source in
   Codegen_wasm.emit_debug_map ~main_ty ~component:!component_flag ~source:path prog
 
+(* Q-168: `stack = ...` in mere.toml is honoured by putting the program's work
+   on a thread the program sized, which only the two NATIVE backends can do.
+   Here the stack belongs to something outside the program -- the JS engine's
+   own `--stack-size`, the linker script that lays out a bare-metal image -- so
+   this REFUSES rather than emitting something that quietly ignores the request.
+   ⚠ A request silently dropped is the failure Q-168 is about, one level in:
+   the program would again be built with a stack nobody chose. *)
+let refuse_stack_request (backend : string) (instead : string) =
+  match !Mere.Typer.stack_request with
+  | None -> ()
+  | Some _ ->
+    Printf.eprintf
+      "error: the %s backend cannot honour `stack` in mere.toml — on this \
+       target the stack is not the program's to size. %s\n" backend instead;
+    exit 1
+
 let compile_to_wasm ?base_dir source =
   let open Mere in
+  refuse_stack_request "Wasm"
+    "Node takes it as `--stack-size` when it runs the module.";
   let (prog, main_ty) = infer_program ?base_dir source in
   Codegen_wasm.emit_program ~main_ty ~component:!component_flag prog
 
@@ -616,6 +644,7 @@ let set_riscv_ram mb =
   Mere.Codegen_riscv.ram_bytes := n * 1024 * 1024
 
 let compile_to_riscv ?base_dir source =
+  refuse_stack_request "RV32IM" "The image's stack is laid out by the linker script.";
   let open Mere in
   let (prog, main_ty) = infer_program ?base_dir (rv_source source) in
   Codegen_riscv.emit_program ~main_ty prog
@@ -1041,6 +1070,31 @@ let () =
     let base = Filename.dirname path in
     run_action ~base_dir:base
       (says (Mere.Pipeline.decls_report ~base_dir:base ~search_paths:!search_paths))
+      path source
+  (* Q-169: `mere doc`. The same walk `--decls` does, printed for a reader
+     instead of for a paste, with the comment block above each definition. The
+     `--json` form is `--decls --json`, which carries `doc` on every value. *)
+  | [_; "doc"; "--json"; path] | [_; "doc"; path; "--json"] ->
+    let source = read_file path in
+    let base = Filename.dirname path in
+    let requires =
+      match Mere.Pkg_install.find_manifest base with
+      | None -> None
+      | Some manifest ->
+        (match (try Some (Mere.Pkg_install.parse_manifest (read_file manifest))
+                with _ -> None) with
+         | Some m -> m.Mere.Pkg_install.pkg_mere
+         | None -> None)
+    in
+    run_action ~base_dir:base
+      (says (Mere.Pipeline.decls_json ~base_dir:base ~search_paths:!search_paths
+               ?requires))
+      path source
+  | [_; "doc"; path] ->
+    let source = read_file path in
+    let base = Filename.dirname path in
+    run_action ~base_dir:base
+      (says (Mere.Pipeline.docs_report ~base_dir:base ~search_paths:!search_paths))
       path source
   (* Q-127 stage 1: which functions would take a hidden region argument, and which
      cannot. A measurement, not a compilation mode -- see Pipeline.region_param_report. *)

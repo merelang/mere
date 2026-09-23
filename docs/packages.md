@@ -157,6 +157,33 @@ so the bundle stands alone. Run a compiled server with:
 So a released `mere` binary + `mere install` is enough to build *and* run
 an app — no compiler source tree required at runtime.
 
+## The stack a program needs
+
+```toml
+[package]
+name = "deep"
+version = "0.1.0"
+stack = "512MB"         # optional; also `0x20000000` or a plain byte count
+```
+
+A program built from the C or LLVM backend runs its work on a thread sized to
+this, so the request travels with the source instead of with the command that
+runs it. Without it, a deeply recursive program dies the way it always did — it
+still SAYS `stack overflow (recursion too deep)` rather than exiting 139 in
+silence, but the only cure lived outside the build and was spelled differently
+on every host: `-Wl,-stack_size` on Darwin, `ulimit -s` on Linux,
+`--stack-size` for node.
+
+It costs address space, not memory: a trivial program asking for 512 MB holds
+about 1.5 MiB resident.
+
+**The Wasm and RV32IM backends refuse a file that asks.** There the stack is not
+the program's to size — Node takes `--stack-size` when it runs the module, and a
+bare-metal image gets its stack from the linker script — so asking is an error
+rather than something quietly dropped. A size the compiler cannot read is
+refused too: a request nobody honours is worse than no request, because the
+program looks like it asked.
+
 ## The compiler a package needs
 
 ```toml
@@ -206,7 +233,8 @@ mere --decls --json app.mere
 {
   "mere": "0.1.504",
   "requires": ">= 0.1.422",
-  "values": [ { "name": "pick", "type": "(color -> int)", "status": "ok", "note": "" } ],
+  "values": [ { "name": "pick", "type": "(color -> int)", "status": "ok", "note": "",
+                "line": 3, "doc": "Which number a colour stands for." } ],
   "types":  [ { "name": "color", "kind": "variant", "params": [], "line": 1,
                 "constructors": [ { "name": "Red", "payload": null } ] } ]
 }
@@ -224,6 +252,37 @@ downstream repository depends on has changed. That question is a diff of this.
 declarations `--decls` prints commented out, because pasting them back would
 change the program. `scripts/decls_json_check.sh` rebuilds the text from this
 JSON and compares it byte for byte, so the two outputs cannot drift.
+
+## The same surface, for a reader
+
+```sh
+mere doc app.mere
+```
+
+```
+TYPES
+
+  color
+    The three we actually use.
+
+VALUES
+
+  pick : (color -> int)
+    Which number a colour stands for.
+
+  helper : (int -> int)
+```
+
+The comment block written directly above a definition is its documentation —
+the same block `mere lsp` shows on hover, so the two cannot drift apart. A name
+with nothing written above it is still listed, with no block under it: otherwise
+"this file does not export that" and "nobody wrote a comment about it" would
+come back as the same answer.
+
+⚠ `mere doc` lists only the file's OWN names. `import` splices declarations in,
+so `--decls` sees the imported names as well and prints them on purpose — that
+output is for pasting, and they are in scope. Documentation is a different
+question.
 
 ## Deliberate non-goals (for now)
 

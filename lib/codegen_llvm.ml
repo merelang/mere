@@ -14157,16 +14157,90 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        if eta_lines = [] then []
        else "; Phase 35.2: nullary factory builtins as first-class values"
             :: eta_lines @ [""])
-    @ [ (if !args_used_llvm then "define i32 @main(i32 %__argc, ptr %__argv) {"
-         else "define i32 @main() {");
-        (* installed before the program's own entry block runs *)
-        "__lang_boot:";
-        "  call void @__lang_install_segv()";
-        "  %__mere_atexit = call i32 @atexit(ptr @__lang_alloc_stats_report)";
-        "  br label %entry";
-        body;
-        "}";
-        "" ]
+    @ (let boot name_and_sig =
+         [ name_and_sig;
+           (* installed before the program's own entry block runs *)
+           "__lang_boot:";
+           "  call void @__lang_install_segv()";
+           "  %__mere_atexit = call i32 @atexit(ptr @__lang_alloc_stats_report)";
+           "  br label %entry";
+           body;
+           "}";
+           "" ]
+       in
+       match !Typer.stack_request with
+       | None ->
+         boot (if !args_used_llvm then "define i32 @main(i32 %__argc, ptr %__argv) {"
+               else "define i32 @main() {")
+       | Some bytes ->
+         (* Q-168, the same move the C backend makes: the process stack is the
+            host's to size, so the program's work goes on a thread this program
+            sized. The body is not touched -- it keeps the signature it had as
+            `@main`, and a trampoline with pthread's `ptr(ptr)` shape calls it.
+
+            ⚠ These declarations are emitted ONLY here. Without a request this
+            backend's output does not change by a byte, which is what makes a
+            regression in it readable. *)
+         let msg = "mere: this host refused the stack this program asked for\n" in
+         let n = String.length msg in
+         let argv_store =
+           if !args_used_llvm then
+             [ "  store i32 %__argc, ptr @__lang_argc";
+               "  store ptr %__argv, ptr @__lang_argv" ]
+           else []
+         in
+         let call_real =
+           if !args_used_llvm then
+             [ "  %__sa = load i32, ptr @__lang_argc";
+               "  %__sv = load ptr, ptr @__lang_argv";
+               "  %__sr = call i32 @__lang_main_sized(i32 %__sa, ptr %__sv)" ]
+           else [ "  %__sr = call i32 @__lang_main_sized()" ]
+         in
+         [ "declare i32 @pthread_attr_init(ptr)";
+           "declare i32 @pthread_attr_setstacksize(ptr, i64)";
+           "declare i32 @pthread_attr_destroy(ptr)";
+           (* The length is COMPUTED, for the reason written above the dlsym
+              names: two of three hand-counted ones were wrong by one. *)
+           Printf.sprintf
+             "@__lang_msg_nostack = private unnamed_addr constant [%d x i8] c\"%s\""
+             n (String.concat "" (List.map (fun c ->
+                  if c = '\n' then "\\0A" else String.make 1 c)
+                  (List.init n (String.get msg))));
+           "" ]
+         @ boot (if !args_used_llvm
+                 then "define internal i32 @__lang_main_sized(i32 %__argc, ptr %__argv) {"
+                 else "define internal i32 @__lang_main_sized() {")
+         @ [ "define internal ptr @__lang_main_trampoline(ptr %__arg) {";
+             "entry:" ]
+         @ call_real
+         @ [ "  ret ptr null";
+             "}";
+             "";
+             "define i32 @main(i32 %__argc, ptr %__argv) {";
+             "entry:" ]
+         @ argv_store
+         @ [ "  %__attr = alloca [128 x i8], align 16";
+             "  %__ai = call i32 @pthread_attr_init(ptr %__attr)";
+             Printf.sprintf
+               "  %%__ss = call i32 @pthread_attr_setstacksize(ptr %%__attr, i64 %d)" bytes;
+             "  %__ssbad = icmp ne i32 %__ss, 0";
+             "  br i1 %__ssbad, label %refused, label %spawn";
+             "spawn:";
+             "  %__tid = alloca i64, align 8";
+             "  %__pc = call i32 @pthread_create(ptr %__tid, ptr %__attr, ptr @__lang_main_trampoline, ptr null)";
+             "  %__pcbad = icmp ne i32 %__pc, 0";
+             "  br i1 %__pcbad, label %refused, label %wait";
+             "wait:";
+             "  %__t = load i64, ptr %__tid";
+             "  %__jr = call i32 @pthread_join(i64 %__t, ptr null)";
+             "  %__dr = call i32 @pthread_attr_destroy(ptr %__attr)";
+             "  ret i32 0";
+             "refused:";
+             Printf.sprintf
+               "  %%__w = call i64 @write(i32 2, ptr @__lang_msg_nostack, i64 %d)" n;
+             "  ret i32 1";
+             "}";
+             "" ])
   in
   let parts =
     match !debug_file with
