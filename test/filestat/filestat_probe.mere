@@ -1,0 +1,79 @@
+// file_* metadata externs: the syscalls whose types an ordinary `extern`
+// cannot name. Every expectation below is a value THIS program set, so the
+// numbers are facts rather than a snapshot of one machine.
+//
+// The snapshot is explicit: file_stat/file_lstat run the syscall, and
+// file_stat_field reads out of the result. The first version of the runtime
+// took the snapshot implicitly and cached it by path; this probe is what
+// found that a chmod did not invalidate it.
+extern fn file_stat: str -> int;
+extern fn file_lstat: str -> int;
+extern fn file_stat_field: int -> int;
+extern fn file_chmod: str -> int -> int;
+extern fn file_truncate: str -> int -> int;
+extern fn file_umask: int -> int;
+extern fn file_readlink: str -> int -> int -> int;
+extern fn file_utime: str -> int -> int -> int;
+extern fn file_mkfifo: str -> int -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_to_str: int -> int -> str;
+extern fn symlink: str -> str -> int;
+
+let say = fn (label: str) -> fn (got: int) -> fn (want: int) ->
+  if got == want then print (label ++ " ok")
+  else print (label ++ " FAIL got=" ++ str_of_int got ++ " want=" ++ str_of_int want);
+
+// stat the path, then read one field out of the snapshot
+let field = fn (path: str) -> fn (which: int) ->
+  if file_stat path == 0 then file_stat_field which else (0 - 1);
+
+let main = fn () ->
+  let path = "/tmp/mere_filestat_probe" in
+  let link = "/tmp/mere_filestat_probe_link" in
+  let fifo = "/tmp/mere_filestat_probe_fifo" in
+  let _ = write_file path "hello" in
+  // the mode set is the mode read back, and a SECOND chmod is seen too
+  let _ = file_chmod path 420 in
+  let _ = say "chmod 0644" ((field path 2) % 4096) 420 in
+  let _ = file_chmod path 384 in
+  let _ = say "chmod 0600" ((field path 2) % 4096) 384 in
+  // size follows truncate
+  let _ = say "size" (field path 7) 5 in
+  let _ = file_truncate path 2 in
+  let _ = say "size after truncate" (field path 7) 2 in
+  // a stat that fails answers -1, and so does every field read after it
+  let _ = say "missing file" (file_stat "/tmp/mere_filestat_no_such") (0 - 1) in
+  let _ = say "field after a failed stat" (file_stat_field 7) (0 - 1) in
+  let _ = say "present file" (file_stat path) 0 in
+  let _ = say "field out of range" (file_stat_field 99) (0 - 1) in
+  // umask round-trips: setting answers the PREVIOUS value
+  let old = file_umask 18 in
+  let _ = say "umask round trip" (file_umask old) 18 in
+  // utime, then mtime reads it back
+  let _ = file_utime path 1000000000 1234567890 in
+  let _ = say "utime/mtime" (field path 9) 1234567890 in
+  // ⚠ atime is NOT asserted, and the first version of this file did. It
+  // passed, then failed on the next run with the current time: on a real
+  // machine something else reads the file -- Spotlight's indexer here -- and
+  // an access time is not the program's to own. mtime changes only when the
+  // content or utime says so, which is what makes it checkable.
+  // readlink answers the target it was given, and lstat sees the link itself
+  let _ = symlink path link in
+  let p = mem_alloc 4096 in
+  let n = file_readlink link p 4095 in
+  let _ = if str_eq (mem_to_str p n) path then print "readlink ok"
+          else print ("readlink FAIL got=" ++ mem_to_str p n) in
+  let _ = say "readlink length" n (str_len path) in
+  let _ = say "readlink on a non-link" (file_readlink path p 4095) (0 - 1) in
+  let sz_through = (if file_stat link == 0 then file_stat_field 7 else (0 - 1)) in
+  let sz_link = (if file_lstat link == 0 then file_stat_field 7 else (0 - 1)) in
+  let _ = say "lstat sees the link, stat sees through it"
+            (if sz_through == sz_link then 0 else 1) 1 in
+  // mkfifo makes a fifo, and the mode's TYPE bits say so. S_IFIFO is octal
+  // 0010000, which is 4096 -- the first version of this line expected 4,
+  // reading the octal digit as if it were the quotient.
+  let _ = file_mkfifo fifo 420 in
+  let _ = say "mkfifo type bits" (((field fifo 2) / 4096) % 16) 1 in
+  let _ = say "mkfifo permission bits" ((field fifo 2) % 4096) 420 in
+  0;
+exit (main ())

@@ -713,6 +713,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/audio_check.sh
 
+      # v0.1.509: the file_* metadata runtime. Every expectation is a value the
+      # probe sets itself -- it chmods and reads the mode back, truncates and
+      # reads the size -- so the gate is the same on any POSIX host and needs
+      # no library. It caught a stale-cache design on its first run.
+      - name: filestat_check (stat, chmod, truncate, umask, readlink, mkfifo)
+        if: ${{ !cancelled() }}
+        run: sh scripts/filestat_check.sh
+
       # Float results must not depend on the C optimizer (v0.1.315): the
       # same dot product at -O0 and -O2 must produce the same bits, and both
       # must match the interpreter. Without the emitted FP_CONTRACT OFF
