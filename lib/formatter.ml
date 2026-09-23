@@ -72,8 +72,9 @@ let trailing_pending : (int * string) list ref = ref []
 (* The comment written at the end of `line`, if the layout emitted that line in
    one piece. `chunk` is what is about to be written: a newline in it means the
    line the comment was on is not the line being closed. *)
-let take_trailing_on (line : int) (chunk : string) =
-  if String.contains chunk '\n' then ""
+let take_trailing_on ?(same_file = true) (line : int) (chunk : string) =
+  if not same_file then ""
+  else if String.contains chunk '\n' then ""
   else
     match List.assoc_opt line !trailing_pending with
     | None -> ""
@@ -97,6 +98,17 @@ let printing_module : string option ref = ref None
    unqualified alias for each module constructor, which is why the bare name
    works anywhere and why the source must have been written with it. *)
 let known_modules : string list ref = ref []
+
+(* Q-172 の残り: `dyn Trait e` はパーサが `Trait__pack e` に脱糖する。
+   The parser desugars `dyn Trait e` into `App (Var "Trait__pack", e)` and does
+   it unconditionally -- `keep_sugar` is a pipeline flag and the parser has never
+   heard of it, which is why the `echo` fix (a pipeline pass) could be guarded
+   and this one could not. The formatter recognises the shape instead.
+
+   ⚠ Guarded by the TRAIT NAMES in the program, not by the suffix alone: a
+   person may write a function called `X__pack`, and printing `dyn X` for it
+   would be a different program. *)
+let known_traits : string list ref = ref []
 
 let unqualify_ctor (c : string) : string =
   let strip m =
@@ -336,6 +348,17 @@ let rec fmt_expr ~prec:p ~ind e =
   | Str_lit s -> escape_string_for_fmt s
   | Unit_lit -> "()"
   | Var n -> n
+  (* `dyn Trait e`, back from the packer call the parser lowered it to. *)
+  | App ({ node = Var n; _ }, arg)
+    when (match String.index_opt n '_' with
+          | _ ->
+            let suf = "__pack" in
+            let ls = String.length suf and ln = String.length n in
+            ln > ls && String.sub n (ln - ls) ls = suf
+            && List.mem (String.sub n 0 (ln - ls)) !known_traits) ->
+    let t = String.sub n 0 (String.length n - String.length "__pack") in
+    let s = "dyn " ^ t ^ " " ^ fmt_expr ~prec:(prec_app + 1) ~ind arg in
+    wrap (p > prec_app) s
   | Constr ("Nil", None) -> "[]"
   | Constr (c, None) -> unqualify_ctor c
   | Constr ("Cons", Some _) when (try_match_list_literal e) <> None ->
@@ -518,7 +541,14 @@ and fmt_block ~ind e =
            binding would have taken fall through to `migrate_inline`, which puts
            them above the declaration -- moved, which this formatter has always
            preferred to lost. *)
-        if Buffer.length buf > 0 then begin
+        (* ⚠ Only a binding from the file being formatted. `Loc.line` counts
+           within its OWN file, and `import` splices other files' declarations
+           into this tree -- so a `let` at line 400 of a contrib file was
+           consuming a comment written at line 152 of the entry file, and the
+           comment landed in another function entirely. It looked like drift
+           because formatting the OUTPUT (one file, all lines comparable) put it
+           back in the right place. *)
+        if Buffer.length buf > 0 && e.loc.Loc.file = None then begin
           let cind = if ind = 0 then "  " else indent ind in
           List.iter (fun t -> Buffer.add_string buf (cind ^ t ^ "\n" ^ indent ind))
             (take_inline_before e.loc.Loc.line)
@@ -531,7 +561,9 @@ and fmt_block ~ind e =
         in
         let one_line = "let " ^ fmt_pat pat ^ " =" ^ value_s ^ " in" in
         Buffer.add_string buf
-          (one_line ^ take_trailing_on e.loc.Loc.line one_line ^ "\n");
+          (one_line
+           ^ take_trailing_on ~same_file:(e.loc.Loc.file = None) e.loc.Loc.line one_line
+           ^ "\n");
         Buffer.add_string buf (indent ind);
         run body
       | _ -> Buffer.add_string buf (fmt_expr ~prec:prec_top ~ind e)
@@ -573,7 +605,8 @@ and fmt_block ~ind e =
        trailing `Match` (or `Let-in-...-Match`) inside an arm body would
        steal the outer match's later arms when re-parsed. Wrap such
        bodies in `( ... )` to terminate them explicitly. *)
-    let arm_s (p, guard, body) =
+    let n_arms = List.length arms in
+    let arm_s i (p, guard, body) =
       let g_s = match guard with
         | None -> ""
         | Some g -> " when " ^ fmt_expr ~prec:prec_top ~ind:(ind + 1) g
@@ -581,10 +614,19 @@ and fmt_block ~ind e =
       let needs_paren = trailing_match body in
       let body_s = fmt_expr ~prec:prec_top ~ind:(ind + 1) body in
       let body_s = if needs_paren then "(" ^ body_s ^ ")" else body_s in
-      indent ind ^ "| " ^ fmt_pat p ^ g_s ^ " -> " ^ body_s
+      (* Q-154: the comment written at the end of this arm's line -- but ONLY
+         where this formatter emits the newline itself, which is between arms.
+         The LAST arm is followed by whatever encloses the match, and the `;`
+         that ends the declaration is appended by the caller: attaching there
+         put the terminator inside the comment and 13 example files stopped
+         parsing. Emitting a comment is only safe where the line is known to
+         end. *)
+      let line = indent ind ^ "| " ^ fmt_pat p ^ g_s ^ " -> " ^ body_s in
+      if i = n_arms - 1 then line
+      else line ^ take_trailing_on ~same_file:(p.ploc.Loc.file = None) p.ploc.Loc.line line
     in
     "match " ^ fmt_expr ~prec:prec_top ~ind scrut ^ " with\n"
-    ^ String.concat "\n" (List.map arm_s arms)
+    ^ String.concat "\n" (List.mapi arm_s arms)
   | Region_block (name, body) ->
     "region " ^ name ^ " {\n"
     ^ indent (ind + 1) ^ fmt_expr ~prec:prec_top ~ind:(ind + 1) body ^ "\n"
@@ -620,9 +662,16 @@ and fmt_else_chain ~ind else_ =
       indent ind ^ "else if " ^ cond_s ^ " then\n"
       ^ indent (ind + 1) ^ then_body
     in
+    (* This one IS safe: the chain emits the newline after it. *)
+    let head = head ^ take_trailing_on ~same_file:(then_.loc.Loc.file = None)
+                        then_.loc.Loc.line then_body in
     head ^ "\n" ^ fmt_else_chain ~ind else_inner
   | _ ->
     let body = fmt_expr ~prec:prec_top ~ind:(ind + 1) else_ in
+    (* ⚠ Nothing is attached here. The final `else` body is the end of the whole
+       `if`, and what follows it on the line -- the `;` that ends a declaration,
+       a closing paren -- is appended by the caller. See the note in the match
+       arm above. *)
     indent ind ^ "else\n" ^ indent (ind + 1) ^ body
 
 (* ── Top-level decls ────────────────────────────────────────────────── *)
@@ -909,6 +958,8 @@ let format_program ?(comments : (int * string) list = [])
     ?(decl_line : (top_decl -> int option) = default_decl_line) (prog : program) =
   let pending = ref comments in
   known_modules := modules;
+  known_traits :=
+    List.filter_map (function Top_trait (n, _, _, _, _) -> Some n | _ -> None) prog.decls;
   inline_pending := List.sort (fun (a, _) (b, _) -> compare a b) inline;
   inline_mark := 0;
   trailing_pending := trailing;
