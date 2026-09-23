@@ -880,6 +880,15 @@ jobs:
           sh scripts/fmt_roundtrip_check.sh
           sh scripts/fmt_roundtrip_check.sh --poison
 
+      # Q-052. A local `let` must not write a top-level binding that shares its
+      # name. The same bug was fixed on Wasm first and shipped with NO gate,
+      # which is exactly how the LLVM side stayed broken; this asks both.
+      - name: toplevel_shadow_check (a callee's local does not write your global)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/toplevel_shadow_check.sh
+          sh scripts/toplevel_shadow_check.sh --poison
+
       # Q-169. `mere doc` joins two answers the compiler already had (`--decls`
       # and hover's `doc_above`). The undocumented case is the one checked
       # hardest: a tool that prints only documented names merges "not exported"

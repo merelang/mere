@@ -4,6 +4,56 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.522 — 2026-09-24
+
+_Q-052: a local `let` was writing a top-level binding that happened to share its
+name, on the LLVM backend, silently. Four lines reproduce it._
+
+```mere
+let n = 7;
+let f = fn (u: int) -> n;
+let _ = print_int (codepoint_of "a");
+print_int (f 0)
+```
+
+The interpreter, C and Wasm print 7. LLVM printed 1. `codepoint_of` is the
+STANDARD LIBRARY's, and it binds its own `n` inside — nothing had to be imported,
+no closure trick, no volume of allocation. Any program with a top-level `let n`
+that reached it got a wrong answer, which is the failure direction with no
+symptom.
+
+The backend decided "does this `let` initialise a file-scope global?" by asking
+whether the NAME was registered in `top_globals_llvm`. A name is not a binding.
+`llvm_in_top_level_body` now marks the one context where the question makes
+sense — the top-level `let` spine of the main body — and every other `let` is a
+plain local, whatever it is called.
+
+⚠ **The same bug was found and closed on the Wasm backend a month earlier**
+(`wasm_in_top_level_body`: a local `let entries` overwrote a KV strbuf pointer
+and `kv_save` then wrote 0 bytes). That fix shipped with no gate, and the twin
+stayed broken. `scripts/toplevel_shadow_check.sh` asks both backends now, plus
+the whole corpus for the emit-time footprint: no `@mu_*` global may be stored
+from a function other than `@main`. That was **23 sites across 6 examples**
+before this and is 0 now — and five of those six still printed the right answer,
+so the behavioural question alone would have called them fine.
+
+**Two pinned divergences come off.** `capture_after_call` was Q-052's own case.
+`llvm_loop_guard_global` was recorded separately as "a loop whose bound is a
+top-level binding stops after one iteration on LLVM… whatever `n` is read from
+after the lifted thunk has been called is not the global that holds 4" — the same
+root cause, diagnosed as a loop-guard problem and never connected. Parity's
+stale-pin detector is what said so.
+
+⚠ **Q-052's recorded narrowing was wrong in three places**, and all three were
+written as measurements: it is not the closure's captured value (no closure is
+needed), it does not need allocation volume (four lines), and the global is not
+intact (it is the only thing broken — the direct reads that looked fine were
+using an in-flight value instead of reloading).
+
+2,850 unit tests, parity 214/214 with no skips.
+
+---
+
 ## v0.1.521 — 2026-09-23
 
 _`mere fmt` stops deleting a file's imports and writing somebody else's code
