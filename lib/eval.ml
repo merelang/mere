@@ -2165,6 +2165,23 @@ let builtin_try_or =
         call_stack := saved_stack;
         default))
 
+(* Q-165: the same catch, with the reason. `Eval_error` has carried the message
+   all along -- `fail` puts the `fail: ` tag in when it raises, so what comes out
+   here is the diagnostic line the program would have printed, which is the
+   string the compiled backends keep too. *)
+let builtin_try_or_msg =
+  V_builtin ("try_or_msg", fun f ->
+    V_builtin ("try_or_msg_partial", fun handler ->
+      let saved = !call_depth in
+      let saved_stack = !call_stack in
+      try !apply_value_ref f V_unit
+      with Eval_error (_, msg) ->
+        (* the same bookkeeping try_or does: the unwound frames are gone, so the
+           depth and the stack they were counted in go with them *)
+        call_depth := saved;
+        call_stack := saved_stack;
+        !apply_value_ref handler (V_str msg)))
+
 (* Phase 12.9: higher-order Vec API (iter / map / fold / set).
    Calls user functions (V_closure / V_builtin) via apply_value_ref. *)
 let builtin_vec_iter =
@@ -3793,6 +3810,7 @@ let initial_env : env =
     ("fst", ref builtin_fst);
     ("snd", ref builtin_snd);
     ("try_or", ref builtin_try_or);
+    ("try_or_msg", ref builtin_try_or_msg);
     ("iter_n", ref builtin_iter_n);
     ("mk_logger", ref builtin_mk_logger);
     ("mk_metrics", ref builtin_mk_metrics);

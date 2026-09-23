@@ -3560,6 +3560,59 @@ let rec emit_expr (e : Ast.expr) : string =
              memcpy(__lang_fail_jmpbuf, __saved_jmp, sizeof(jmp_buf)); \
              __res; })"
          default_c fn_invoke_c
+     (* Q-165: `try_or` with the reason. The catch machinery is the one above,
+        verbatim -- jmpbuf save/restore, region unwind to the entry depth -- and
+        the only difference is what runs on the failure path: the handler,
+        applied to the message THIS BACKEND ALREADY KEPT. `__lang_fail_msg` has
+        been filled by `__lang_fail_impl` since v0.1.67, for the `--lib`
+        boundary's `err` buffer; nothing in the language could read it.
+
+        The copy matters. `__lang_fail_msg` is one static buffer, so the handler
+        must not be handed a pointer into it -- a second failure inside the
+        handler would rewrite the string it is reading. `__lang_str_dup_n` puts
+        it in the CURRENT region, which the line above has just restored to the
+        catcher's, so the message outlives the frame that raised it and dies
+        with the frame that caught it.
+
+        AND THE CATCH COMES DOWN BEFORE THE HANDLER RUNS. `try_or` never had to
+        think about this: its default is evaluated before `_setjmp`, so nothing
+        the failure path runs is under this frame's jmpbuf. A handler is, and a
+        handler that fails -- the ordinary "translate this into my own error"
+        shape -- longjmps straight back into the catch that just called it and
+        calls it again, forever. Found by the parity suite, as a program that
+        printed three lines fewer on this backend and then did not stop. *)
+     | Ast.App ({ node = Ast.Var "try_or_msg"; _ }, fn_e) ->
+       let res_ty =
+         match e.Ast.ty with
+         | Some t ->
+           (try !c_type_of_fwd (Ast.walk t)
+            with _ -> unsupported e.Ast.loc "try_or_msg: result type")
+         | None -> unsupported e.Ast.loc "try_or_msg: result type is unknown"
+       in
+       let handler_c = emit_expr arg in
+       let fn_invoke_c =
+         Printf.sprintf "({ __auto_type __c = %s; __c.fn(__c.env, 0); })"
+           (emit_expr fn_e)
+       in
+       Printf.sprintf
+         "({ jmp_buf __saved_jmp; int __saved_set = __lang_fail_jmpbuf_set; \
+             __lang_region* __saved_cur = __lang_current_region; \
+             int __saved_rsn = __lang_region_active_n; \
+             memcpy(__saved_jmp, __lang_fail_jmpbuf, sizeof(jmp_buf)); \
+             __lang_fail_jmpbuf_set = 1; \
+             __auto_type __handler = (%s); \
+             %s __res; \
+             if (_setjmp(__lang_fail_jmpbuf) == 0) { __res = (%s); } \
+             else { __lang_region_unwind(__saved_rsn); \
+                    __lang_current_region = __saved_cur; \
+                    __lang_fail_jmpbuf_set = __saved_set; \
+                    memcpy(__lang_fail_jmpbuf, __saved_jmp, sizeof(jmp_buf)); \
+                    __res = __handler.fn(__handler.env, \
+                      __lang_str_dup_n(__lang_fail_msg, strlen(__lang_fail_msg))); } \
+             __lang_fail_jmpbuf_set = __saved_set; \
+             memcpy(__lang_fail_jmpbuf, __saved_jmp, sizeof(jmp_buf)); \
+             __res; })"
+         handler_c res_ty fn_invoke_c
      (* Phase 30.0 (DEFERRED §1.12 fix): if a user-defined fn exists with the
         same name, skip builtin dispatch and fall through to the regular user
         fn call path. C version of LLVM Phase 25.7. *)

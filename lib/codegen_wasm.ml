@@ -277,6 +277,14 @@ let modzero_msg_offset = ref 0
    while a try_or is active. See the note where it is minted. *)
 let fail_sentinel_offset = ref 0
 
+(* Q-165: byte0 of the buffer the failure message is copied into, with its
+   4-byte length header just below. Reserved rather than interned, because this
+   one is WRITTEN at run time: `fail` copies the message here on the way out so
+   `try_or_msg` can still read it after the bump has been rolled back past the
+   string the raiser built. 255 bytes and a NUL, the same cut the C backend's
+   snprintf into its 256-byte buffer makes. *)
+let fail_msg_offset = ref 0
+
 (* v0.1.268: the message a missing map key fails with, interned like the other
    internal failure messages so the miss can go through `fail` (catchable)
    rather than `unreachable` (not). *)
@@ -3627,6 +3635,61 @@ and emit_expr (e : Ast.expr) : unit =
     emit_instr "else";
     emit_instr (Printf.sprintf "local.get %d" result_slot);
     emit_instr "end"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "try_or_msg"; _ }, fn_e); _ }, handler_e) ->
+    (* Q-165: the arm above, with the reason. Everything up to the flag test is
+       the same; the failure branch applies the handler to a str copied out of
+       the buffer `$__lang_fail` wrote on its way out.
+
+       The copy is made HERE and not shared: the buffer is one, so a second
+       failure -- including one raised by the handler itself -- would rewrite
+       the bytes the handler is still reading. `$__lang_str_copyn` puts them in
+       the bump, which is where every other str the handler sees lives. *)
+    fail_used := true;
+    let saved_active = fresh_local_i32 () in
+    let result_slot = fresh_local () in
+    emit_instr "global.get $__lang_fail_active";
+    emit_instr (Printf.sprintf "local.set %d" saved_active);
+    emit_instr "i32.const 1";
+    emit_instr "global.set $__lang_fail_active";
+    emit_instr "i32.const 0";
+    emit_instr "global.set $__lang_fail_flag";
+    let cl_slot = fresh_local () in
+    emit_expr fn_e;
+    emit_instr (Printf.sprintf "local.set %d" cl_slot);
+    emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr "i32.wrap_i64";
+    emit_instr "i32.load offset=0";
+    emit_instr "i64.extend_i32_u";
+    emit_instr "i64.const 0";
+    emit_instr (Printf.sprintf "local.get %d" cl_slot);
+    emit_instr "i32.wrap_i64";
+    emit_instr "i32.load offset=4";
+    without_fail_unwind (fun () -> emit_instr "call_indirect (type $cl)");
+    emit_instr (Printf.sprintf "local.set %d" result_slot);
+    emit_instr (Printf.sprintf "local.get %d" saved_active);
+    emit_instr "global.set $__lang_fail_active";
+    emit_instr "global.get $__lang_fail_flag";
+    emit_instr "if (result i64)";
+    emit_instr "i32.const 0";
+    emit_instr "global.set $__lang_fail_flag";
+    let h_slot = fresh_local () in
+    emit_expr handler_e;
+    emit_instr (Printf.sprintf "local.set %d" h_slot);
+    emit_instr (Printf.sprintf "local.get %d" h_slot);
+    emit_instr "i32.wrap_i64";
+    emit_instr "i32.load offset=0";
+    emit_instr "i64.extend_i32_u";
+    (* the message, copied out of the one buffer into the bump *)
+    emit_instr "(i64.extend_i32_u (global.get $__lang_fail_msg))";
+    emit_instr "(i64.extend_i32_u (i32.load (i32.sub (global.get $__lang_fail_msg) (i32.const 4))))";
+    emit_instr "call $__lang_str_copyn";
+    emit_instr (Printf.sprintf "local.get %d" h_slot);
+    emit_instr "i32.wrap_i64";
+    emit_instr "i32.load offset=4";
+    emit_instr "call_indirect (type $cl)";
+    emit_instr "else";
+    emit_instr (Printf.sprintf "local.get %d" result_slot);
+    emit_instr "end"
   | Ast.App ({ node = Ast.Var "lb_new"; _ }, _arg) ->
     (* Q-106: the builder records $__lang_region_depth; lb_push refuses while
        the depth differs (a block rolls the bump back at its end, so a cell
@@ -6743,10 +6806,28 @@ let runtime_helpers = {|
   ;; for everything in Wasm). Otherwise print + trap. The flag /
   ;; active-counter globals are declared at module level.
   (func $__lang_fail (param $msg8 i64) (result i64)
-    (local $msg i32)
+    (local $msg i32) (local $n i32) (local $i i32)
     (local.set $msg (i32.wrap_i64 (local.get $msg8)))
     (if (global.get $__lang_fail_active)
       (then
+        ;; Q-165: keep the reason where try_or_msg can still read it. The string
+        ;; the raiser built can be above a bump mark that a block rolls back on
+        ;; the way out, so what survives has to be a copy into memory no region
+        ;; owns. Bounded by the buffer: 255 bytes and a NUL, which is where the
+        ;; C backend's snprintf cuts a message too.
+        (local.set $n (i32.load (i32.sub (local.get $msg) (i32.const 4))))
+        (if (i32.gt_u (local.get $n) (i32.const 255))
+          (then (local.set $n (i32.const 255))))
+        (i32.store (i32.sub (global.get $__lang_fail_msg) (i32.const 4)) (local.get $n))
+        (local.set $i (i32.const 0))
+        (block $fm_done
+          (loop $fm_cp
+            (br_if $fm_done (i32.ge_u (local.get $i) (local.get $n)))
+            (i32.store8 (i32.add (global.get $__lang_fail_msg) (local.get $i))
+                        (i32.load8_u (i32.add (local.get $msg) (local.get $i))))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $fm_cp)))
+        (i32.store8 (i32.add (global.get $__lang_fail_msg) (local.get $n)) (i32.const 0))
         (global.set $__lang_fail_flag (i32.const 1))
         ;; Q-032: an EMPTY STR, not 0. `fail` does not unwind here -- the code
         ;; between it and the try_or still runs -- so whatever it hands back is
@@ -10260,6 +10341,12 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      sentinel is one. It does not make fail unwind -- the code in between still
      runs -- it makes what runs survivable. *)
   fail_sentinel_offset := fresh_str_offset "";
+  (* 4-byte aligned: the header is read with i32.load. No data segment —
+     memory a segment does not cover reads as zero, and every byte here is
+     written before it is read. *)
+  let fail_msg_hdr = (!str_offset_counter + 3) land (lnot 3) in
+  str_offset_counter := fail_msg_hdr + 4 + 256;
+  fail_msg_offset := fail_msg_hdr + 4;
   mapget_msg_offset :=
     fresh_str_offset "map_get: key not found in Map (use map_has to check first)";
   vec_used := false;
@@ -12148,6 +12235,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
      \  (global $__lang_fail_flag (mut i32) (i32.const 0))\n\
      \  (global $__lang_fail_active (mut i32) (i32.const 0))\n\
      \  (global $__lang_fail_sentinel i32 (i32.const %d))\n\
+     \  (global $__lang_fail_msg i32 (i32.const %d))\n\
      \  (global $__lang_mapget_msg i64 (i64.const %d))\n\
      \  (global $__lang_idx_pre_get i32 (i32.const %d))\n\
      \  (global $__lang_idx_pre_set i32 (i32.const %d))\n\
@@ -12192,7 +12280,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     puts_decl
     file_io_imports
     memory_section
-    table_section bump_init char_table_offset !fail_sentinel_offset !mapget_msg_offset
+    table_section bump_init char_table_offset !fail_sentinel_offset !fail_msg_offset !mapget_msg_offset
     !idx_pre_get_offset !idx_pre_set_offset !idx_mid_vec_offset !idx_post_vec_offset
     !idx_pre_charat_offset !idx_mid_charat_offset
     !bytes_get_msg_offset !bytes_slice_msg_offset !rand_pre_offset !rand_post_offset

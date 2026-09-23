@@ -4,6 +4,64 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.510 — 2026-09-23
+
+_Q-165: a caught failure can say why._
+
+`try_or` could see THAT something failed and not WHY. What it handed back was
+the default; the message the raiser wrote went nowhere, and a library written
+here could not offer "branch on the kind of failure" to its callers --
+`contrib/url`'s `parse` gave up `fail` and returns `?url_parts` for exactly that
+reason. `try_or_msg : (unit -> 'a) -> (str -> 'a) -> 'a` applies its handler to
+the message instead.
+
+**What the handler receives is the diagnostic line**, the bytes the failure
+would have written to stderr had nobody caught it: `fail "boom"` arrives as
+`fail: boom`, tag included, and a failure raised inside a backend arrives under
+its own name. The tag belongs to the `fail` builtin rather than to the printer,
+which is why that string is the one every backend already had in hand at the
+catch -- taking it off would have been four different subtractions to keep
+equal.
+
+Three of the four had the message and dropped it. The C backend has copied it
+into `__lang_fail_msg` since v0.1.67, for the `--lib` boundary's `err` buffer,
+and nothing in the language could read it; LLVM received the pointer in
+`__lang_fail_impl` and longjmped without it; Wasm received it and set a flag.
+They copy it now, into a fixed 256-byte buffer on C and LLVM and into reserved
+memory on Wasm, because the string the raiser built can be above a bump mark
+that a block rolls back on the way out. At the catch it is copied AGAIN, into
+the catcher's region: the buffer is one, and a second failure -- including one
+raised by the handler -- would rewrite what the handler is reading. `try_or`'s
+211 call sites across five repositories are untouched; this is a new name, not
+a new signature. The RISC-V backend refuses it by name.
+
+**The shape that only exists once there is a handler.** A handler that fails --
+"translate this into my own error", the ordinary reason to want one -- longjmped
+back into the catch that had just called it, which called it again, forever.
+`try_or` cannot have this bug: its default is evaluated before the `_setjmp`, so
+nothing on its failure path runs under its own jmpbuf. The catch comes down
+before the handler runs now. The parity suite found it, as a program that
+printed three lines fewer on one backend and then did not stop.
+
+`test/parity/fail/reason_*.mere` is the gate: twelve programs, each writing the
+same failing expression twice -- once inside `try_or_msg`, whose handler prints
+what it was told, and once bare, so the process ends with that same failure.
+`scripts/fail_reason_check.sh` compares the two on every backend that can be
+built here, with a poison that prints a different reason.
+
+_And a hole this arc found but did not fix._ A `try_or` catching a failure
+raised inside a `region R { }`, in a loop, **segfaults on the LLVM backend** at
+a hundred iterations where C runs twenty thousand. `longjmp` skips the block's
+exit, so `@__lang_current_region` still points at the region that was jumped
+over -- the C backend saves and restores it (v0.1.31) and releases what it
+jumped over (v0.1.301), and this backend has no `__lang_region_unwind` at all.
+`try_or_msg` restores the pointer on its own failure path, because the message
+it allocates has to land somewhere owned; `try_or` is unchanged and the hole is
+recorded rather than patched. It went unseen because nothing in the caught-side
+parity had ever failed from inside a region block.
+
+---
+
 ## v0.1.508 — 2026-09-22
 
 _One rule written in one arm of four twins, and the spelling that never got

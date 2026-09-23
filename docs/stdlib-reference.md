@@ -510,6 +510,7 @@ fst (divmod 100 7) + snd (divmod 100 7)   // 14 + 2
 | `fail` ⚡ ★ | `str -> 'a` | Panic that unifies with any type |
 | `assert` ⚡ | `bool -> str -> unit` | On false, raises "assertion failed: MSG" |
 | `try_or` ★ | `(unit -> 'a) -> 'a -> 'a` | Evaluate the thunk; catch `Eval_error` and return default |
+| `try_or_msg` ★ | `(unit -> 'a) -> (str -> 'a) -> 'a` | The same catch, with the reason handed to the handler |
 
 ```
 let safe = fn s -> try_or (fn () -> int_of_str s) (- 1);
@@ -552,8 +553,37 @@ them by more releases than either took to fix:
   when the entry should have.
 
 `try_or` catches all of these on all four backends, including the ones raised inside
-the backend rather than by `fail`. What it hands back is the default — **not the
-message**: the language can observe that something failed, not why.
+the backend rather than by `fail`. What it hands back is the default; **`try_or_msg`
+hands back the reason** (v0.1.510, Q-165):
+
+```mere
+try_or_msg (fn () -> int_of_str s) (fn (m: str) -> let _ = print m in 0)
+// int_of_str: "abc" is not a valid int
+```
+
+**What the handler receives is the diagnostic line**, the bytes the failure would
+have written to stderr had nobody caught it — so `fail "boom"` arrives as
+`fail: boom`, tag included, and a failure raised inside the backend arrives under
+its own name. The tag belongs to `fail` rather than to the printer, which is why
+that is also the string every backend already had in hand at the catch; taking it
+off would be four different subtractions and one more thing to keep equal.
+`test/parity/fail/reason_*.mere` writes the same failing expression twice, caught
+and uncaught, and `scripts/fail_reason_check.sh` compares the two on every backend
+that can be built.
+
+Two things this does not give you. The message is a **str, not a value**: a library
+that wants callers to branch on the kind of failure still has to parse it or return
+`?t` instead. And it is **capped at 255 bytes** — the C backend has copied into a
+256-byte buffer since v0.1.67 and the other backends now copy into one the same
+size, so a longer message is cut at the same place everywhere rather than in one
+place and not another.
+
+The copy is the part worth knowing about. The string the raiser built can live in a
+region the catch jumps out of, so what the handler gets is a copy made at the
+failure and re-allocated in the catcher's region — not a pointer into the buffer,
+which a second failure (including one raised by the handler) would overwrite.
+
+`try_or_msg` has no RV32IM lowering; that backend refuses it by name.
 
 ---
 

@@ -1,0 +1,15 @@
+// Q-165: the reason a failure gives when it is CAUGHT is the line it would have
+// printed had nobody caught it. The same expression appears twice here -- once
+// inside `try_or_msg`, whose handler prints what it was told, and once bare, so
+// the process ends with the diagnostic. `scripts/fail_reason_check.sh` compares
+// the two; the parity harness compares both of them across the backends.
+//
+// The handler prints and returns an int rather than returning the message: the
+// thunk and the handler have to agree on a type, and the thunk's is whatever
+// the failing expression would have produced.
+//
+// Execution mode: 4 backends, exit status + the stdout written before the
+// failure + the message
+
+let _ = try_or_msg (fn () -> (let v = vec_new () in let _ = vec_push v 1 in vec_get v 5)) (fn (m: str) -> let _ = print m in 0);
+(let v = vec_new () in let _ = vec_push v 1 in vec_get v 5)

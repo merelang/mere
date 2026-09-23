@@ -1633,6 +1633,39 @@ let () =
     (Pipeline.process "try_or (fn () -> 10 / 0) 0") "0";
   check "try_or catches assert"
     (Pipeline.process "try_or (fn () -> { assert false \"bad\"; 1 }) 42") "42";
+  (* --- Q-165: `try_or_msg`, the same catch with the reason --- *)
+  check "try_or_msg type"
+    (Pipeline.type_of "try_or_msg") "((unit -> 'a) -> ((str -> 'a) -> 'a))";
+  check "try_or_msg success does not run the handler"
+    (Pipeline.process "try_or_msg (fn () -> 1 + 2) (fn (m: str) -> 0 - 1)") "3";
+  (* The handler receives the DIAGNOSTIC LINE, tag and all: `fail` owns its
+     `fail: ` prefix, so a message the program wrote arrives with it. *)
+  check "try_or_msg hands back the reason"
+    (Pipeline.process
+      "try_or_msg (fn () -> fail \"oops\") (fn (m: str) -> m)") "\"fail: oops\"";
+  (* ...and a failure the BACKEND raised arrives under its own name, with no tag. *)
+  check "try_or_msg reason of a backend failure"
+    (Pipeline.process
+      "try_or_msg (fn () -> show (int_of_str \"abc\")) (fn (m: str) -> m)")
+    "\"int_of_str: \\\"abc\\\" is not a valid int\"";
+  check "try_or_msg reason of division by zero"
+    (Pipeline.process
+      "try_or_msg (fn () -> show (10 / 0)) (fn (m: str) -> m)") "\"division by zero\"";
+  (* A handler that fails belongs to the ENCLOSING catch, not to its own: the
+     compiled backends took the catch down before running it precisely so this
+     shape terminates. *)
+  check "try_or_msg handler that fails is caught outside"
+    (Pipeline.process
+      "try_or_msg (fn () -> try_or_msg (fn () -> fail \"inner\") (fn (m: str) -> fail \"from the handler\")) (fn (m: str) -> m)")
+    "\"fail: from the handler\"";
+  check "try_or_msg nested, inner handler answers"
+    (Pipeline.process
+      "try_or_msg (fn () -> try_or_msg (fn () -> fail \"inner\") (fn (m: str) -> \"handled\")) (fn (m: str) -> \"outer\")")
+    "\"handled\"";
+  check "try_or_msg does not leave the catch armed"
+    (Pipeline.process
+      "let _ = try_or_msg (fn () -> fail \"x\") (fn (m: str) -> \"caught\") in try_or_msg (fn () -> \"fine\") (fn (m: str) -> \"wrong\")")
+    "\"fine\"";
   check "try_or polymorphic at str"
     (Pipeline.process
       "try_or (fn () -> int_of_str \"bad\" |> show) \"none\"") "\"none\"";

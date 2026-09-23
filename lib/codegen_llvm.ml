@@ -4988,6 +4988,102 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  store i32 %s, ptr @__lang_fail_jmpbuf_set" saved_set_reg);
     emit_instr (Printf.sprintf "  call ptr @memcpy(ptr @__lang_fail_jmpbuf, ptr %s, i64 200)" saved_buf_reg);
     result_reg
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "try_or_msg"; _ }, fn_e); _ }, handler_e) ->
+    (* Q-165: try_or with the reason. Same setjmp machinery as the arm above;
+       the failure path applies the handler to the message __lang_fail_impl
+       stashed on its way out.
+
+       AND IT SAVES THE REGION, which the `try_or` above does not. This backend
+       has no __lang_region_unwind at all (the C backend grew one in v0.1.31 and
+       made it release rather than leak in v0.1.301), so a `fail` out of a
+       `region R { }` leaves @__lang_current_region pointing at the block that
+       was jumped over. `try_or` can live with that because it allocates nothing
+       on the failure path; this one allocates the message, and putting it in an
+       orphaned region would hand the handler a string in memory nobody owns.
+       Restoring the pointer is not a fix for the leak -- that is a separate
+       hole in this backend, recorded rather than patched here. *)
+    let result_ty =
+      match e.Ast.ty with Some t -> llvm_ty_of (Ast.walk t) | None -> "i64"
+    in
+    let l_ok = fresh_label "trym_ok_" in
+    let l_failed = fresh_label "trym_failed_" in
+    let l_done = fresh_label "trym_done_" in
+    let saved_set_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load i32, ptr @__lang_fail_jmpbuf_set" saved_set_reg);
+    let saved_buf_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = alloca [200 x i8], align 16" saved_buf_reg);
+    emit_instr (Printf.sprintf "  call ptr @memcpy(ptr %s, ptr @__lang_fail_jmpbuf, i64 200)" saved_buf_reg);
+    let saved_region_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load ptr, ptr @__lang_current_region" saved_region_reg);
+    emit_instr "  store i32 1, ptr @__lang_fail_jmpbuf_set";
+    let sj_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i32 @_setjmp(ptr @__lang_fail_jmpbuf)" sj_reg);
+    let from_jmp_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = icmp ne i32 %s, 0" from_jmp_reg sj_reg);
+    emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s"
+                  from_jmp_reg l_failed l_ok);
+    emit_label l_ok;
+    let fn_v = emit_expr env fn_e in
+    let cl_struct_name =
+      match fn_e.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyArrow (p, r) -> closure_struct_name p r
+         | _ -> unsupported e.Ast.loc "try_or_msg: fn arg has non-arrow type")
+      | None -> unsupported e.Ast.loc "try_or_msg: fn arg missing type"
+    in
+    let env_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0" env_reg cl_struct_name fn_v);
+    let fnp_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1" fnp_reg cl_struct_name fn_v);
+    let notail_try =
+      if String.length result_ty > 0 && result_ty.[0] = '%' then "notail " else "" in
+    let ok_result_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = %scall %s %s(ptr %s, i32 0)"
+                  ok_result_reg notail_try result_ty fnp_reg env_reg);
+    let l_ok_end = fresh_label "trym_ok_end_" in
+    emit_instr (Printf.sprintf "  br label %%%s" l_ok_end);
+    emit_label l_ok_end;
+    emit_instr (Printf.sprintf "  br label %%%s" l_done);
+    emit_label l_failed;
+    emit_instr (Printf.sprintf "  store ptr %s, ptr @__lang_current_region" saved_region_reg);
+    (* The catch comes down BEFORE the handler runs. `try_or` never had to think
+       about this -- its default is evaluated before the setjmp -- but a handler
+       that fails while this frame's jmpbuf is still installed longjmps back
+       into the catch that called it, and is called again, forever. *)
+    emit_instr (Printf.sprintf "  store i32 %s, ptr @__lang_fail_jmpbuf_set" saved_set_reg);
+    emit_instr (Printf.sprintf "  call ptr @memcpy(ptr @__lang_fail_jmpbuf, ptr %s, i64 200)" saved_buf_reg);
+    let msg_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_of_cstr(ptr @__lang_fail_msg)" msg_reg);
+    let h_v = emit_expr env handler_e in
+    let h_struct =
+      match handler_e.Ast.ty with
+      | Some t ->
+        (match Ast.walk t with
+         | Ast.TyArrow (p, r) -> closure_struct_name p r
+         | _ -> unsupported e.Ast.loc "try_or_msg: handler has non-arrow type")
+      | None -> unsupported e.Ast.loc "try_or_msg: handler missing type"
+    in
+    let h_env_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0" h_env_reg h_struct h_v);
+    let h_fnp_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1" h_fnp_reg h_struct h_v);
+    let failed_result_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = %scall %s %s(ptr %s, ptr %s)"
+                  failed_result_reg notail_try result_ty h_fnp_reg h_env_reg msg_reg);
+    let l_failed_end = fresh_label "trym_failed_end_" in
+    emit_instr (Printf.sprintf "  br label %%%s" l_failed_end);
+    emit_label l_failed_end;
+    emit_instr (Printf.sprintf "  br label %%%s" l_done);
+    emit_label l_done;
+    let result_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = phi %s [%s, %%%s], [%s, %%%s]"
+                  result_reg result_ty
+                  ok_result_reg l_ok_end
+                  failed_result_reg l_failed_end);
+    emit_instr (Printf.sprintf "  store i32 %s, ptr @__lang_fail_jmpbuf_set" saved_set_reg);
+    emit_instr (Printf.sprintf "  call ptr @memcpy(ptr @__lang_fail_jmpbuf, ptr %s, i64 200)" saved_buf_reg);
+    result_reg
   | Ast.App ({ node = Ast.Var "exit"; _ }, arg) ->
     (* Q-111: `exit n` -- libc exit, noreturn. Its result type is the bottom
        'a, which is why this used to fall through to the generic closure call
@@ -8100,6 +8196,14 @@ let runtime_decls =
       "@.ios_suf_h = internal constant { i64, [21 x i8] } { i64 20, [21 x i8] c\"\\22 is not a valid int\\00\" }";
       "@.ios_suf = internal alias [21 x i8], getelementptr inbounds ({ i64, [21 x i8] }, ptr @.ios_suf_h, i32 0, i32 1)";
       "@__lang_fail_jmpbuf = global [200 x i8] zeroinitializer, align 16";
+      (* Q-165: the message the failure carried, kept across the longjmp so
+         `try_or_msg` can hand it to its handler. The C backend has had the
+         same buffer since v0.1.67 (for the --lib boundary's `err`); this
+         backend received the pointer in __lang_fail_impl and dropped it.
+         A FIXED BUFFER and not the pointer: the string the raiser built can
+         live in a region the catch jumps out of, so what survives has to be
+         a copy, and one that does not itself allocate on the failure path. *)
+      "@__lang_fail_msg = global [256 x i8] zeroinitializer";
       "@__lang_fail_jmpbuf_set = global i32 0" ]
 (* Phase 30.2b: declare top-level non-fn lets as @name LLVM globals.
    Emit each entry as `@name = internal global <type> zeroinitializer`.
@@ -11738,6 +11842,15 @@ let str_concat_helper =
       "  %active = icmp ne i32 %set, 0";
       "  br i1 %active, label %do_jmp, label %do_abort";
       "do_jmp:";
+      (* Copy before the jump, bounded by the buffer: 255 bytes and a NUL, which
+         is what the C backend's snprintf into the same-sized buffer does, so a
+         message longer than that is cut at the same place on both. *)
+      "  %mlen = call i64 @__lang_str_size(ptr %msg)";
+      "  %mbig = icmp ugt i64 %mlen, 255";
+      "  %mn = select i1 %mbig, i64 255, i64 %mlen";
+      "  call ptr @memcpy(ptr @__lang_fail_msg, ptr %msg, i64 %mn)";
+      "  %mend = getelementptr i8, ptr @__lang_fail_msg, i64 %mn";
+      "  store i8 0, ptr %mend";
       "  call void @_longjmp(ptr @__lang_fail_jmpbuf, i32 1)";
       "  unreachable";
       (* This wrote the diagnostic with `puts` — to *stdout* — and then
