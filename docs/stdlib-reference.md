@@ -536,17 +536,20 @@ the parity harness compared stdout and nothing else, so **no parity test used `f
 — none could have passed**. `test/parity/fail/*.mere` is the gate now: exit status,
 the output written before the failure, and the message, on all four.
 
-Two limitations remain, and both are pinned rather than described:
+Two limitations used to be pinned here. Both are gone, and this entry outlived
+them by more releases than either took to fix:
 
-- **Wasm has one output sink.** The JS host ABI provides `env.puts` and nothing else,
-  so the diagnostic lands in stdout there. The harness knows this and would break if
-  it changed. Under `--component` the same backend writes through WASI.
-- **`fail` on Wasm does not unwind.** It sets a flag that callers check on the way
-  out, so statements *after* it in the same body still run: inside a `try_or` thunk,
-  work that follows the failure happens. `test/parity/failure_caught.mere` holds the
-  other three to one answer and declares Wasm's exact output in a
-  `.wasm.expected` file next to it, so the day that backend learns to unwind, the
-  declaration breaks and says so.
+- **Wasm writes a diagnostic to stderr, like the others** (v0.1.503). The JS host
+  ABI provided `env.puts` and nothing else, so the line landed in stdout there.
+  Adding `echo` put `print_err` on the host (`scripts/run_wasm.js`), and
+  `scripts/echo_check.sh` now compares that output across all five backends.
+  Under `--component` the same backend writes through WASI.
+- **`fail` on Wasm unwinds** (v0.1.272). It used to set a flag that callers checked
+  on the way out, so statements *after* it in the same body still ran; the check
+  goes in at `emit_instr` now, which every call passes through, and
+  `test/parity/region_fail_unwind.mere` holds all four backends to one answer. The
+  `.wasm.expected` pin this entry named came down with the fix — which is exactly
+  when the entry should have.
 
 `try_or` catches all of these on all four backends, including the ones raised inside
 the backend rather than by `fail`. What it hands back is the default — **not the
