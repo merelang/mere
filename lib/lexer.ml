@@ -297,6 +297,46 @@ let rec tokenize ?file ?comments s =
                       | _ -> k
                   in
                   read (skip_ws (j + 2))
+                (* Q-167: `\uXXXX`, exactly four hex digits, encoded as UTF-8.
+                   This is the one escape that is not a character: it can add up
+                   to three bytes, so it cannot go in the table below, which
+                   returns one. A surrogate is refused here rather than written
+                   out -- half of a pair is not a character, and `str` is bytes,
+                   so nothing downstream would put the halves back together.
+                   Beyond the BMP is written as the character itself: this file
+                   is UTF-8 and the lexer copies unknown bytes through. *)
+                | 'u' ->
+                  let hex4 k =
+                    if k + 3 >= len then None
+                    else
+                      let sub = String.sub s k 4 in
+                      let ok = ref true in
+                      String.iter (fun c ->
+                        if not (is_digit c || (c >= 'a' && c <= 'f')
+                                || (c >= 'A' && c <= 'F')) then ok := false) sub;
+                      if !ok then int_of_string_opt ("0x" ^ sub) else None
+                  in
+                  (match hex4 (j + 2) with
+                   | None ->
+                     raise (Lex_error (pos,
+                       "`\\u` needs exactly four hex digits, as in `\\u3042`"))
+                   | Some cp when cp >= 0xD800 && cp <= 0xDFFF ->
+                     raise (Lex_error (pos, Printf.sprintf
+                       "`\\u%04X` is half of a surrogate pair, which is not a \
+                        character -- write the character itself, this file is UTF-8"
+                       cp))
+                   | Some cp ->
+                     (* UTF-8, the same three ranges `str_of_codepoint` uses *)
+                     if cp < 0x80 then Buffer.add_char buf (Char.chr cp)
+                     else if cp < 0x800 then begin
+                       Buffer.add_char buf (Char.chr (0xC0 lor (cp lsr 6)));
+                       Buffer.add_char buf (Char.chr (0x80 lor (cp land 0x3F)))
+                     end else begin
+                       Buffer.add_char buf (Char.chr (0xE0 lor (cp lsr 12)));
+                       Buffer.add_char buf (Char.chr (0x80 lor ((cp lsr 6) land 0x3F)));
+                       Buffer.add_char buf (Char.chr (0x80 lor (cp land 0x3F)))
+                     end;
+                     read (j + 6))
                 | _ ->
                   let actual = match esc with
                     | 'n' -> '\n'
@@ -432,20 +472,42 @@ let rec tokenize ?file ?comments s =
         let is_hex_digit c =
           is_digit c || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
         in
-        if c = '0' && i + 2 < len && (s.[i + 1] = 'x' || s.[i + 1] = 'X')
-           && is_hex_digit s.[i + 2] then begin
-          let rec read_hex j =
-            if j < len && is_hex_digit s.[j] then read_hex (j + 1) else j
+        let is_oct_digit c = c >= '0' && c <= '7' in
+        let is_bin_digit c = c = '0' || c = '1' in
+        (* Q-167: a run of digits, with `_` allowed BETWEEN them. Every `_` has
+           to be followed by another digit, so `1_000` is one literal and `1_`
+           is still the integer 1 next to an identifier -- the reading a program
+           that binds `_x` already relies on. `int_of_string` has understood
+           both the separators and the 0b / 0o prefixes all along; the lexer was
+           the only thing that had not heard of them, which is why `0b1010` came
+           back as `unbound variable: b1010` rather than as a syntax error. *)
+        let read_run is_d j =
+          let rec go j =
+            if j < len && is_d s.[j] then go (j + 1)
+            else if j < len && s.[j] = '_' && j + 1 < len && is_d s.[j + 1]
+            then go (j + 2)
+            else j
           in
-          let j = read_hex (i + 2) in
-          let n = lex_int pos (String.sub s i (j - i)) in
-          let w = j - i in
-          advance w;
-          aux j ((with_width pos w, T_int n) :: acc)
-        end else
-        let rec read j =
-          if j < len && is_digit s.[j] then read (j + 1) else j
+          go j
         in
+        let based =
+          if c <> '0' || i + 2 >= len then None
+          else
+            match s.[i + 1] with
+            | 'x' | 'X' when is_hex_digit s.[i + 2] -> Some is_hex_digit
+            | 'o' | 'O' when is_oct_digit s.[i + 2] -> Some is_oct_digit
+            | 'b' | 'B' when is_bin_digit s.[i + 2] -> Some is_bin_digit
+            | _ -> None
+        in
+        (match based with
+         | Some is_d ->
+           let j = read_run is_d (i + 2) in
+           let n = lex_int pos (String.sub s i (j - i)) in
+           let w = j - i in
+           advance w;
+           aux j ((with_width pos w, T_int n) :: acc)
+         | None ->
+        let read j = read_run is_digit j in
         let j = read i in
         (* v0.1.260: an exponent makes the literal a float, with or without
            a decimal point (1e3, 1.5e3, 2.0e-3, 4E+5). Writing the smallest
@@ -480,7 +542,7 @@ let rec tokenize ?file ?comments s =
             let w = j - i in
             advance w;
             aux j ((with_width pos w, T_int n) :: acc)
-        end
+        end)
       | c when is_alpha c ->
         (* Allow ML-style primed identifiers (`arg'`, `x''`) — `'` is a
            continuation character only once the identifier has started

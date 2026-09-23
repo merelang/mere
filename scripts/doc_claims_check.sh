@@ -48,9 +48,10 @@ M="${M:-./_build/default/bin/mere.exe}"
 
 rows() {
   cat <<'ROWS'
-docs/language-reference.md|No Unicode escape (`\uXXXX`)|refuse|unicode_escape
-docs/language-reference.md|no octal or binary literal syntax and no digit separator|refuse|binary_literal
-docs/language-reference.md|no octal or binary literal syntax and no digit separator|refuse|digit_separator
+docs/language-reference.md|encoded as UTF-8|accept|unicode_escape
+docs/language-reference.md|Binary and octal literals|accept|binary_literal
+docs/language-reference.md|may be written between digits|accept|digit_separator
+docs/language-reference.md|A surrogate half|refuse|surrogate_escape
 docs/language-reference.md|No nested string literals in interpolation|refuse|nested_interp
 docs/language-reference.md|A type name may not be declared twice with different constructors|refuse|type_redecl
 docs/language-reference.md|A top-level `while` must be bound or be the last expression|accept|toplevel_while
@@ -75,6 +76,8 @@ retired() {
 Wasm has one output sink
 `fail` on Wasm does not unwind
 the language can observe that something failed, not why
+No Unicode escape
+no octal or binary literal syntax and no digit separator
 codegen support only inside fn bodies
 `while` only inside fn bodies
 RETIRED
@@ -111,6 +114,7 @@ EOF
 write_probe() {
   case "$1" in
     unicode_escape)   printf 'print "\\u0041"\n' > "$2" ;;
+    surrogate_escape) printf 'print "\\uD800"\n' > "$2" ;;
     binary_literal)   printf 'print_int 0b1010\n' > "$2" ;;
     digit_separator)  printf 'print_int 1_000\n' > "$2" ;;
     nested_interp)    printf 'print "x = {show \\"abc\\"}"\n' > "$2" ;;
@@ -194,7 +198,11 @@ if [ "${1:-}" = "--poison" ]; then
   pfail=0
   # 1. a phrase removed from a copy of the docs must be reported.
   P="$T/poison1"; mkdir -p "$P/docs"; cp docs/*.md "$P/docs/"
-  grep -vF -- "No Unicode escape" "$P/docs/language-reference.md" > "$P/tmp" \
+  # ⚠ The phrase this deletes has to be one the CATALOGUE names. It used to be
+  # "No Unicode escape", which stopped being a row the day the escape landed --
+  # and the poison then passed a file it had not changed, which is the poison
+  # equivalent of a stale pin.
+  grep -vF -- "A surrogate half" "$P/docs/language-reference.md" > "$P/tmp" \
     && cat "$P/tmp" > "$P/docs/language-reference.md"
   if run_rows "$P" >/dev/null 2>&1; then
     echo "doc_claims --poison 1: FAILED (a deleted phrase went unnoticed)"; pfail=1
