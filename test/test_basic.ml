@@ -2506,6 +2506,42 @@ let () =
     (Pipeline.process
        "let f = fn (s: str) -> match s with | \"ab\" <> r when str_len r > 1 -> r | _ -> \"short\" in f \"abcd\"")
     "\"cd\"";
+  (* v0.1.511 (Q-154): the two kinds of comment that used to be deleted. An
+     indented one goes back into the run of `let`s it was written in; one
+     written at the end of a `let` that fits on a line goes back at the end of
+     that line. Both are checked by CONTENT rather than by exact layout -- the
+     layout is the formatter's to choose, the comment is not. *)
+  check "v0.1.511: `mere fmt` keeps an indented comment inside the body"
+    (let out = Pipeline.format_source
+       "let f = fn (n: int) ->\n  let a = n + 1 in\n  // INDENTED_MARK\n  let b = a + 1 in\n  b;\nprint_int (f 1)" in
+     let has needle =
+       let n = String.length needle and m = String.length out in
+       let rec go i = i + n <= m && (String.sub out i n = needle || go (i + 1)) in
+       go 0
+     in
+     Printf.sprintf "kept=%b" (has "INDENTED_MARK"))
+    "kept=true";
+  check "v0.1.511: `mere fmt` keeps a comment at the end of a one-line let"
+    (let out = Pipeline.format_source
+       "let x = 1;  // TRAILING_MARK\nprint_int x" in
+     let has needle =
+       let n = String.length needle and m = String.length out in
+       let rec go i = i + n <= m && (String.sub out i n = needle || go (i + 1)) in
+       go 0
+     in
+     (* ...and on the line it was written at the end of, not on one of its own *)
+     let on_same_line =
+       List.exists (fun l ->
+         let contains sub =
+           let n = String.length sub and m = String.length l in
+           let rec go i = i + n <= m && (String.sub l i n = sub || go (i + 1)) in
+           go 0
+         in
+         contains "let x" && contains "TRAILING_MARK")
+         (String.split_on_char '\n' out)
+     in
+     Printf.sprintf "kept=%b same_line=%b" (has "TRAILING_MARK") on_same_line)
+    "kept=true same_line=true";
   check "v0.1.504: `mere fmt` prints the prefix pattern back"
     (let out = Pipeline.format_source
        "let f = fn (s: str) -> match s with | \"ab\" <> r -> r | _ -> s;\nprint (f \"abc\")" in

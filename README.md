@@ -326,7 +326,7 @@ files=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.mere$')
 [ -z "$files" ] || dune exec mere -- fmt --check $files
 ```
 
-Comments written in **column 1** are kept, above the declaration they were written above (v0.1.505). Known limitations: **indented and trailing comments are still dropped** — an indented one belongs to an expression and a trailing one to a node whose extent no position records; `module M { ... }` blocks are emitted as flat `M.foo` bindings; and a few Phase 36 sugars (operator sections, string interpolation) are emitted in their desugared form.
+**Comments are kept.** One written in column 1 stays above the declaration it was written above (v0.1.505); an indented one written above a binding goes back into the run of `let`s it was written in, and a comment written at the end of a `let` that fits on one line goes back at the end of that line (v0.1.511). On the `examples/` corpus that is 8,181 of 8,426 comment lines, against 7,168 before. **What is still dropped**: a trailing comment on a line the formatter does not emit in one piece — an `else`, a match arm, a multi-line binding — because placing one there needs the end of the node it follows and no position records that; 245 lines in that corpus, counted by `scripts/fmt_comments_check.sh` rather than estimated. Other limitations: `module M { ... }` blocks are emitted as flat `M.foo` bindings, and a few Phase 36 sugars (operator sections, string interpolation) are emitted in their desugared form.
 
 ## Layout
 
