@@ -868,6 +868,26 @@ jobs:
           sh scripts/fmt_roundtrip_check.sh
           sh scripts/fmt_roundtrip_check.sh --poison
 
+      # Q-169. `mere doc` joins two answers the compiler already had (`--decls`
+      # and hover's `doc_above`). The undocumented case is the one checked
+      # hardest: a tool that prints only documented names merges "not exported"
+      # with "nobody wrote a comment".
+      - name: doc_cmd_check (mere doc says what a file exports)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/doc_cmd_check.sh
+          sh scripts/doc_cmd_check.sh --poison
+
+      # Q-168. A program could be DIAGNOSED for running out of stack since
+      # v0.1.271 but could not ask for more; the answer lived outside the build
+      # in three different spellings. Both directions on both native backends,
+      # because a fixture that passed either way would prove nothing.
+      - name: stack_request_check (a program can say how much stack it needs)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/stack_request_check.sh
+          sh scripts/stack_request_check.sh --poison
+
       # v0.1.508.
       - name: binding_form_check (every spelling gets the same verdict)
         if: ${{ !cancelled() }}

@@ -4,6 +4,79 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.520 — 2026-09-23
+
+_A program can say how much stack it needs, `mere doc` exists, and the gate that
+was about to certify the next ceiling was not guarding its own denominator._
+
+**Q-168: `stack = "512MB"` in mere.toml.** Deep recursion has been DIAGNOSED
+since v0.1.271 -- it says "stack overflow (recursion too deep)" instead of
+exiting 139 with an empty stderr -- but nothing in the language could ask for
+more. The answer lived outside the build in three spellings:
+`-Wl,-stack_size` on Darwin, `ulimit -s` on Linux, `--stack-size` on node. So
+whoever RAN a program had to know a fact about the PROGRAM.
+
+Translating the request into a link flag could not reach: `mere -c` emits C and
+never invokes the linker. But `main` is a thing this compiler writes, so the C
+and LLVM backends now put the program's work on a thread sized to the request
+and join it. Measured both ways on both: two million frames overflow without it
+and complete with it. A trivial program built with the same request holds 1.5
+MiB resident, so it is address space and not memory. Wasm and RV32IM refuse by
+name, because there the stack belongs to the JS engine or the linker script. A
+size this cannot read is refused rather than ignored -- a request nobody honours
+is worse than no request, because the program looks like it asked.
+
+**Q-169: `mere doc`.** Both halves already existed with no exit between them:
+`--decls` knows every top-level name and its inferred type, and `doc_above`
+(v0.1.506, hover) knows the comment block a definition was written under. This
+is those two joined and nothing else. `--decls --json` gained `doc` and `line`,
+added and not instead of -- `decls_json_check.sh` still rebuilds the text output
+from those fields, byte for byte.
+
+An undocumented name is printed with no block under it. Leaving it out would
+merge "this file does not export that" with "nobody wrote a comment", and the
+second is what a reader is trying to find. `mere doc` also lists only the file's
+OWN names: `import` splices, so the walk sees the imported file's top-level names
+too, and `--decls` prints them on purpose (they are in scope, and that output is
+for pasting) -- but "what does this file document" must not answer with somebody
+else's names.
+
+**⚠ The comment ceiling went 96 → 53, and finding the rest of it found two
+defects instead.**
+
+The tractable half landed: the comment on an `if ... then` line was keyed on the
+THEN-BRANCH's line, and the branch is on the NEXT line, so the key never matched
+and 42 of these were dropped. It is keyed on the condition's line now. When the
+branch starts on the `then` line the source wrote the comment after the BRANCH,
+and the branch keeps it.
+
+The other half did not, and the reason is worth more than the twelve comments it
+was about. `extern` declarations carry a position the parser already keeps, so
+placing them looked like four lines -- and it destabilised two example files.
+`mere fmt` prints the SPLICED program: a file importing `contrib/http/query.mere`
+comes back with `extern fn http_current_body` TWICE, both now in one file, so the
+name is not a key and whichever line is chosen is right in one pass and wrong in
+the next.
+
+Which is the small symptom of something larger, now **Q-174**: `mere fmt -i`
+DELETES a file's `import` lines and writes the imported file's declarations into
+it. Nine imports became zero and seven externs became nineteen on one example.
+The idempotence and round-trip gates could not see it -- the inlined output still
+type-checks and is stable on a second pass. `Loc.file` already says which
+declarations came from an import, which is what a fix would read.
+
+**And the gate under all of this was not counting its own corpus.** `lost` is a
+difference taken over the files `fmt` accepted, so a file that starts being
+refused leaves BOTH sums and the gate gets greener -- a false pass, which is the
+one thing a ceiling cannot show. Four of the 291 examples do not format and
+nothing said so. `fmt_comments_check.sh` now classifies refusals by reason the
+way `region_params_check.sh` does for the same corpus, names the three that are
+deliberate, fails on one nobody listed, fails on a name that starts formatting
+again, and holds a floor of 280 measured files. Three poisons, because an
+impossible ceiling cannot reach a bug that makes the number smaller.
+
+---
+
 ## v0.1.519 — 2026-09-23
 
 _The two ceilings v0.1.518 measured are gone, and one of them was not what the

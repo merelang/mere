@@ -395,43 +395,11 @@ let ask state uri (params : Json.t) =
 let doc_text state uri =
   match List.assoc_opt uri state.docs with Some d -> d.text | None -> ""
 
-(* The comment block directly above a definition, as its documentation.
-
-   Contiguous `//` lines ending on the line before the definition, with the
-   marker and one space removed. No new syntax: Gleam distinguishes `///` (a
-   doc, which its generator publishes) from `//` (a note to the next reader),
-   and that distinction earns its keep there because there is a generator.
-   Mere has none, so requiring a third slash would mean every comment already
-   written shows nothing.
-
-   A blank line ends the block, which is how a person already separates "about
-   this definition" from "about the section". *)
-let doc_above (text : string) (line : int) : string option =
-  let lines = String.split_on_char '\n' text in
-  let arr = Array.of_list lines in
-  let strip (s : string) =
-    let t = String.trim s in
-    if String.length t >= 2 && String.sub t 0 2 = "//" then
-      let rest = String.sub t 2 (String.length t - 2) in
-      Some (if String.length rest > 0 && rest.[0] = ' ' then
-              String.sub rest 1 (String.length rest - 1)
-            else rest)
-    else None
-  in
-  let rec up i acc =
-    if i < 0 then acc
-    else
-      match strip arr.(i) with
-      | Some c -> up (i - 1) (c :: acc)
-      | None -> acc
-  in
-  (* `line` is 1-based and is the definition's own line; the block is what sits
-     immediately above it. *)
-  let start = line - 2 in
-  if start < 0 || start >= Array.length arr then None
-  else match up start [] with
-    | [] -> None
-    | cs -> Some (String.concat "\n" cs)
+(* The comment block directly above a definition, as its documentation. It
+   lives in `Pipeline` now: `mere doc` renders the same blocks for the whole
+   file, and two copies of "what counts as documentation" would be two answers
+   about one program the first time either is touched. *)
+let doc_above = Pipeline.doc_above
 
 (* Hover: `Query.node_at` finds the narrowest node whose token contains the
    cursor, and the typer has already written that node's type onto it.

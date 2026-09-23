@@ -1493,6 +1493,44 @@ let type_of ?base_dir ?(search_paths = []) s =
    program does not pin (an unused polymorphic helper) prints with the type
    variables inference gave it; a declaration is monomorphic, so such a line
    has to be looked at rather than pasted. *)
+(* The comment block directly above a definition, as its documentation.
+
+   Contiguous `//` lines ending on the line before the definition, with the
+   marker and one space removed. No new syntax: Gleam distinguishes `///` (a
+   doc, which its generator publishes) from `//` (a note to the next reader),
+   and that distinction earns its keep there because there is a generator.
+   Mere has none, so requiring a third slash would mean every comment already
+   written shows nothing.
+
+   A blank line ends the block, which is how a person already separates "about
+   this definition" from "about the section". *)
+let doc_above (text : string) (line : int) : string option =
+  let lines = String.split_on_char '\n' text in
+  let arr = Array.of_list lines in
+  let strip (s : string) =
+    let t = String.trim s in
+    if String.length t >= 2 && String.sub t 0 2 = "//" then
+      let rest = String.sub t 2 (String.length t - 2) in
+      Some (if String.length rest > 0 && rest.[0] = ' ' then
+              String.sub rest 1 (String.length rest - 1)
+            else rest)
+    else None
+  in
+  let rec up i acc =
+    if i < 0 then acc
+    else
+      match strip arr.(i) with
+      | Some c -> up (i - 1) (c :: acc)
+      | None -> acc
+  in
+  (* `line` is 1-based and is the definition's own line; the block is what sits
+     immediately above it. *)
+  let start = line - 2 in
+  if start < 0 || start >= Array.length arr then None
+  else match up start [] with
+    | [] -> None
+    | cs -> Some (String.concat "\n" cs)
+
 (* One declaration of the user's, as data.
 
    `decls_report` used to build its text inline, which was fine while text was
@@ -1511,6 +1549,16 @@ type decl_entry = {
      dropping them. *)
   de_status : string;
   de_note : string;     (* the sentence the text puts after the line; "" when ok *)
+  (* 1-based source line of the declaration, or 0 when it cannot be placed.
+     `mere doc` needs it to find the comment block above; the text rendering
+     does not use it and is unchanged. *)
+  de_line : int;
+  (* Whether the declaration is in the file that was asked about. `import`
+     SPLICES, so the walk sees the imported file's top-level names as well;
+     `--decls` has always printed them (they are in scope, and that output is for
+     pasting), but "what does this file document" is a different question and
+     must not answer with somebody else's names. *)
+  de_own : bool;
 }
 
 let decls_entries ?base_dir ?(search_paths = []) s : decl_entry list =
@@ -1542,9 +1590,16 @@ let decls_entries ?base_dir ?(search_paths = []) s : decl_entry list =
     let rec drop k l = if k <= 0 then l else match l with [] -> [] | _ :: t -> drop (k - 1) t in
     drop n prog.Ast.decls
   in
+  (* (name, line). The line is the declaration's own, which is what
+     `doc_above` counts back from. *)
   let names_of decl = match decl with
-    | Ast.Top_let ({ Ast.pnode = Ast.P_var n; _ }, _) -> [n]
-    | Ast.Top_let_rec bs -> List.map fst bs
+    | Ast.Top_let ({ Ast.pnode = Ast.P_var n; ploc }, _) ->
+      let own = ploc.Loc.file = None in
+      [ (n, (if own then ploc.Loc.line else 0), own) ]
+    | Ast.Top_let_rec bs ->
+      List.map (fun (n, (v : Ast.expr)) ->
+        let own = v.Ast.loc.Loc.file = None in
+        (n, (if own then v.Ast.loc.Loc.line else 0), own)) bs
     | _ -> [] in
   (* ⚠ TWO KINDS OF NAME MUST NOT BE DECLARED SILENTLY, and both are exactly the
      names `uniquify_toplevel_shadows` had to rename:
@@ -1565,14 +1620,14 @@ let decls_entries ?base_dir ?(search_paths = []) s : decl_entry list =
      must give byte-identical output. shadow_builtin printed `SHOWN MY SHOW`
      where the original prints `SHOWN 7`. *)
   let src_count = Hashtbl.create 64 in
-  List.iter (fun d -> List.iter (fun n ->
+  List.iter (fun d -> List.iter (fun (n, _, _) ->
     let s = Ast.toplevel_source_name n in
     Hashtbl.replace src_count s (1 + (try Hashtbl.find src_count s with Not_found -> 0)))
     (names_of d)) user_decls;
   ignore out;
   let entries = ref [] in
   List.iter (fun decl ->
-    List.iter (fun n ->
+    List.iter (fun (n, line, own) ->
       match Hashtbl.find_opt Typer.top_schemes n with
       | Some sch ->
         let src = Ast.toplevel_source_name n in
@@ -1590,7 +1645,8 @@ let decls_entries ?base_dir ?(search_paths = []) s : decl_entry list =
         in
         entries :=
           { de_name = src; de_type = Ast.pp_ty sch.Typer.body;
-            de_status = status; de_note = note } :: !entries
+            de_status = status; de_note = note; de_line = line;
+            de_own = own } :: !entries
       | None -> ()) (names_of decl))
     user_decls;
   List.rev !entries
@@ -1620,6 +1676,51 @@ let decls_report ?base_dir ?(search_paths = []) s =
    `requires` is passed in rather than read here: it is a fact about the
    PACKAGE (the nearest `mere.toml`), and this module compiles a file. The CLI
    is what knows which package a path is in. *)
+(* `mere doc` — Q-169. The compiler already knew both halves and neither had an
+   exit: `decls_entries` has every top-level name with its inferred type, and
+   `doc_above` has the comment block a definition was written under (v0.1.506
+   put it in hover). This is those two, joined, and nothing else. No new
+   analysis: a subcommand earns its place when the answer already exists and
+   only the exit is missing, not when it needs the compiler to learn something.
+
+   ⚠ An undocumented name is PRINTED, with no block under it. Leaving it out
+   would merge two different answers -- "this file does not export that" and
+   "nobody wrote a comment" -- and the second is the one a person reading this
+   is trying to find. *)
+let docs_report ?base_dir ?(search_paths = []) s =
+  let entries = decls_entries ?base_dir ~search_paths s in
+  let b = Buffer.create 4096 in
+  let put_doc line =
+    if line > 0 then
+      match doc_above s line with
+      | Some d ->
+        List.iter (fun l -> Buffer.add_string b ("    " ^ l ^ "\n"))
+          (String.split_on_char '\n' d)
+      | None -> ()
+  in
+  let types =
+    List.filter (fun (_, (l : Loc.t)) -> l.Loc.file = None && l.Loc.line > 0)
+      !Parser.declared_types
+  in
+  if types <> [] then begin
+    Buffer.add_string b "TYPES\n\n";
+    List.iter (fun (n, (l : Loc.t)) ->
+      Buffer.add_string b (Printf.sprintf "  %s\n" n);
+      put_doc l.Loc.line;
+      Buffer.add_string b "\n") types
+  end;
+  Buffer.add_string b "VALUES\n\n";
+  List.iter (fun e ->
+    Buffer.add_string b (Printf.sprintf "  %s : %s\n" e.de_name e.de_type);
+    (* A name the declarations output comments out is a name a reader should not
+       copy, and the reason is already written; repeating it here keeps the two
+       outputs from disagreeing about the same declaration. *)
+    if e.de_status <> "ok" then
+      Buffer.add_string b (Printf.sprintf "    (%s: %s)\n" e.de_status e.de_note);
+    put_doc e.de_line;
+    Buffer.add_string b "\n") (List.filter (fun e -> e.de_own) entries);
+  Buffer.contents b
+
 let decls_json ?base_dir ?(search_paths = []) ?(requires : string option) s : string =
   let entries = decls_entries ?base_dir ~search_paths s in
   (* The type declarations the user wrote. Positions come from the parser's
@@ -1668,11 +1769,21 @@ let decls_json ?base_dir ?(search_paths = []) ?(requires : string option) s : st
     ("mere", Json.Str Version.v);
     ("requires", (match requires with Some r -> Json.Str r | None -> Json.Null));
     ("values",
+     (* ⚠ `doc` is ADDED, never instead of anything: `--decls --json` already has
+        readers, and `scripts/decls_json_check.sh` rebuilds the text output from
+        these fields. A declaration with no comment above it gets "" rather than
+        being left out, so "undocumented" and "absent" stay different answers. *)
      Json.List (List.map (fun e ->
        Json.Obj [ ("name", Json.Str e.de_name);
                   ("type", Json.Str e.de_type);
                   ("status", Json.Str e.de_status);
-                  ("note", Json.Str e.de_note) ]) entries));
+                  ("note", Json.Str e.de_note);
+                  ("line", Json.Num (float_of_int e.de_line));
+                  ("doc",
+                   Json.Str (if e.de_line > 0 then
+                               (match doc_above s e.de_line with
+                                | Some d -> d | None -> "")
+                             else "")) ]) entries));
     ("types", Json.List types);
   ])
 
@@ -2285,12 +2396,20 @@ let format_source ?(base_dir = Sys.getcwd ()) ?(search_paths = []) source =
         | Ast.Top_type_alias (n, _, _) -> Some n
         | _ -> None
       in
-      (match named with
-       | None -> None
-       | Some n ->
-         (match List.assoc_opt n !Parser.declared_types with
-          | Some (l : Loc.t) when l.Loc.file = None && l.Loc.line > 0 -> Some l.Loc.line
-          | _ -> None))
+      (* ⚠ `Top_extern` is NOT placed, and the reason is not that the parser
+         lacks a position -- `Parser.declared_externs` has one. It is that
+         `mere fmt` prints the SPLICED program: a file importing
+         `contrib/http/query.mere` comes back with `extern fn http_current_body`
+         TWICE, so the name is not a key, and whichever line is chosen is right
+         in one pass and wrong in the next. Placing them moved a comment block
+         ten lines on a second format. The 12 trailing comments this would
+         recover wait for the splice itself. *)
+      match named with
+      | None -> None
+      | Some n ->
+        (match List.assoc_opt n !Parser.declared_types with
+         | Some (l : Loc.t) when l.Loc.file = None && l.Loc.line > 0 -> Some l.Loc.line
+         | _ -> None)
   in
   let (col1, inline, trailing) = source_comments source in
   (* Q-172: the formatter needs to know which prefixes are modules, and which
