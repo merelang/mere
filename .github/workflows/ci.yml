@@ -850,6 +850,15 @@ jobs:
           sh scripts/file_privacy_check.sh
           sh scripts/file_privacy_check.sh --poison
 
+      # Q-171. A `fail` caught outside a `region R { }` longjmps past the
+      # block's release; the scale is the point, because one catch passed on the
+      # backend that segfaulted at a hundred.
+      - name: region_unwind_check (a catch releases the block it jumped over)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/region_unwind_check.sh
+          sh scripts/region_unwind_check.sh --poison
+
       # v0.1.508.
       - name: binding_form_check (every spelling gets the same verdict)
         if: ${{ !cancelled() }}
