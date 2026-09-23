@@ -24,10 +24,11 @@
 #      so the next slice shows up as the number going DOWN, and a regression
 #      shows up as it going UP.
 #
-# ⚠ WHAT IDEMPOTENCE HERE DOES NOT SAY. Check 2 formats ONE fixture twice.
-# 109 of the 315 example files are not idempotent under this formatter and were
-# not before this gate existed either; that is a separate hole, recorded rather
-# than hidden behind a passing check on one file.
+# ⚠ WHAT IDEMPOTENCE HERE DOES NOT SAY. Check 2 formats ONE fixture twice, and
+# one fixture said nothing about the corpus: 109 of the 315 example files were
+# not idempotent and nobody could see it. `scripts/fmt_roundtrip_check.sh` asks
+# the corpus that question now, with a measured ceiling (3 at v0.1.518, all of
+# them a comment shifting one indent level).
 #
 # Usage:
 #   sh scripts/fmt_comments_check.sh            # check

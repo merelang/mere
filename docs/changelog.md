@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.518 — 2026-09-23
+
+_Q-173 closed to a measured ceiling: `keep_sugar` guarded the desugaring and
+nothing else._
+
+Five passes run after it and were not guarded at all -- range-check versioning
+(Q-108) splitting a loop into `f__rvfast` / `f__rvslow`, inner-function
+uniquifying renaming `go` to `go_uq3`, `par_map` lowering, top-level shadow
+uniquifying, main reservation. All of them are preparation for CODE GENERATION,
+and `mere fmt` printed them back: 19 example files came out carrying names
+nobody wrote, and formatting the output split the already-split loops again.
+
+That is the sentence v0.1.504 wrote about `echo`, one layer down -- a formatter
+that edits the source it formats is a tool people stop running. Formatting skips
+them now.
+
+**Non-idempotent example files: 109 → 3.** The three left are a comment moving
+one indent level on the second pass, which is placement drifting rather than
+anything being lost -- the inline comments landed by v0.1.511 are put back by
+source line, and a line moves when the code around it reflows.
+
+`scripts/fmt_roundtrip_check.sh` owns both questions now, over the whole corpus
+and with measured ceilings: what the formatter writes still type-checks (1 left,
+a trait's internal `__pack` constructor) and formatting twice gives the same file
+(3 left). `fmt_comments_check.sh` says in its header that the idempotence
+question moved -- formatting ONE fixture twice is what let 109 files drift
+unseen.
+
+---
+
 ## v0.1.517 — 2026-09-23
 
 _Q-172: what `mere fmt` wrote was not a program, and the cause had five layers._
