@@ -721,6 +721,18 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/filestat_check.sh
 
+      # v0.1.522: the fd_* runtime -- an open file. open(2) is in <fcntl.h>,
+      # which an emitted program does not include, and its flags are platform
+      # constants; the mode string and the whence numbering are contracts the
+      # runtime defines and this gate exercises. Every expectation is a value
+      # the probe sets. It caught two DEGENERATE CHECKS of its own before it
+      # caught anything in the runtime: a seek test where CUR and END happened
+      # to answer the same number, and a truncation test that was reading the
+      # previous run's leftovers.
+      - name: fdio_check (open, read, write, seek, dup, close)
+        if: ${{ !cancelled() }}
+        run: sh scripts/fdio_check.sh
+
       # Float results must not depend on the C optimizer (v0.1.315): the
       # same dot product at -O0 and -O2 must produce the same bits, and both
       # must match the interpreter. Without the emitted FP_CONTRACT OFF
