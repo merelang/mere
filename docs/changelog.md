@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.515 — 2026-09-23
+
+_Q-173: the formatter escaped five characters and the lexer writes seven._
+
+A carriage return went out of `mere fmt` as a RAW CR. The lexer reads that as a
+line break -- `newline in string literal` -- so 69 of the 315 example files
+could not be formatted twice. That was the visible half. The other half is
+worse: **formatting the output again DROPPED the byte**, so `mere fmt -i` on a
+file with CRLF in a string, which is every Redis and HTTP string in `contrib`,
+silently changed what the program sends. A formatter that rewrites in place may
+not lose a byte. `\0` had the same hole.
+
+The fix is two lines in `escape_string_for_fmt`, and the rule behind it is that
+the set it writes has to be a SUBSET of what the lexer reads back: `n t r 0`,
+backslash, quote, and the interpolation braces. Anything else stays a raw byte
+and round-trips, because the lexer copies unknown bytes through -- only these
+two were read as something else.
+
+`scripts/fmt_comments_check.sh` asks the new question directly: a string holding
+CR, NUL, tab, backslash and a quote keeps its LENGTH through a format, and
+formatting twice gives the same file. Its fourth poison is the old behaviour --
+drop an escape and the length changes.
+
+_And the number it was hiding._ Non-idempotent files went 109 → 52, while the
+count of files whose output does not PARSE went 21 → 33: a dozen files used to
+fail at the carriage return before they could reach the other defect. Two
+independent faults, and the first one was masking the second.
+
+---
+
 ## v0.1.514 — 2026-09-23
 
 _Q-166: `pub` at the top of a file, and the boundary the splice had not erased._

@@ -2506,6 +2506,28 @@ let () =
     (Pipeline.process
        "let f = fn (s: str) -> match s with | \"ab\" <> r when str_len r > 1 -> r | _ -> \"short\" in f \"abcd\"")
     "\"cd\"";
+  (* v0.1.515 (Q-173): the formatter escaped five characters and the lexer
+     writes seven. A carriage return went out raw, was read back as a line
+     break, and the SECOND format dropped it -- `mere fmt -i` on a file with
+     CRLF in a string changed what the program sends. *)
+  check "v0.1.515: `mere fmt` keeps a carriage return"
+    (let out = Pipeline.format_source "let s = \"a\\r\\nb\";\nprint_int (str_len s)" in
+     let has needle =
+       let n = String.length needle and m = String.length out in
+       let rec go i = i + n <= m && (String.sub out i n = needle || go (i + 1)) in
+       go 0
+     in
+     Printf.sprintf "escaped=%b raw=%b" (has "\\r") (String.contains out '\r'))
+    "escaped=true raw=false";
+  check "v0.1.515: `mere fmt` keeps a NUL"
+    (let out = Pipeline.format_source "let s = \"a\\0b\";\nprint_int (str_len s)" in
+     let has needle =
+       let n = String.length needle and m = String.length out in
+       let rec go i = i + n <= m && (String.sub out i n = needle || go (i + 1)) in
+       go 0
+     in
+     Printf.sprintf "escaped=%b raw=%b" (has "\\0") (String.contains out '\000'))
+    "escaped=true raw=false";
   (* v0.1.514 (Q-166): `pub` at the top of a file. The import splice is what
      makes this need a check at all -- after it there is one namespace -- and
      `Loc.t`'s file field is what makes the check possible. Contextual, so a

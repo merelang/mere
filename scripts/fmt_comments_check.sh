@@ -116,6 +116,25 @@ else
 fi
 [ "$skipped" = "0" ] || printf '  note  %s files were refused by fmt and not counted\n' "$skipped"
 
+# --- the bytes inside a string literal ------------------------------------
+# Q-173. The formatter escaped five characters and the lexer writes seven. A
+# carriage return went out RAW, the lexer read it as a line break, and
+# formatting the output again DROPPED it -- so `mere fmt -i` on a file with
+# CRLF in a string (every Redis and HTTP string in contrib) changed what the
+# program sends. This is not an idempotence check: it asks whether the bytes
+# survive, which is the thing a formatter may never get wrong.
+printf 'let s = "a\\r\\nb\\tc\\0d\\\\e\\"f";\nprint_int (str_len s)\n' > "$tmp/bytes.mere"
+want=$("$MERE" "$tmp/bytes.mere" 2>/dev/null)
+"$MERE" fmt "$tmp/bytes.mere" > "$tmp/bytes1.mere" 2>/dev/null
+"$MERE" fmt "$tmp/bytes1.mere" > "$tmp/bytes2.mere" 2>/dev/null
+got=$("$MERE" "$tmp/bytes1.mere" 2>/dev/null)
+if [ -n "$want" ] && [ "$want" = "$got" ] && cmp -s "$tmp/bytes1.mere" "$tmp/bytes2.mere"; then
+  printf '  ok    %s\n' "a string keeps its bytes through fmt (len $want, and twice is the same file)"
+else
+  printf '  FAIL  %s\n' "a string lost bytes: $want in, $got out (twice-same: $(cmp -s "$tmp/bytes1.mere" "$tmp/bytes2.mere" && echo yes || echo no))"
+  fail=1
+fi
+
 # --- all three kinds, over the same corpus ---------------------------------
 # The ceiling is what was measured when the trailing slice landed. It is a
 # CEILING on what may be lost, not a target: shrinking it is the next slice.
@@ -145,6 +164,17 @@ if [ "${1:-}" = "--poison" ]; then
   else
     printf '  FAIL  %s\n' "POISON 1: the counter found comments in a file that has none"
     pfail=1
+  fi
+  # POISON 4: the byte check must notice a lost byte. A formatter that drops
+  # the escape is exactly what this file had until v0.1.515, so the poison is
+  # the old behaviour: strip one escape from the fixture and the length changes.
+  printf 'let s = "a\\r\\nb";\nprint_int (str_len s)\n' > "$tmp/p4a.mere"
+  printf 'let s = "a\\nb";\nprint_int (str_len s)\n' > "$tmp/p4b.mere"
+  if [ "$("$MERE" "$tmp/p4a.mere" 2>/dev/null)" = "$("$MERE" "$tmp/p4b.mere" 2>/dev/null)" ]; then
+    printf '  FAIL  %s\n' "POISON 4: losing the CR did not change the length — the check cannot see it"
+    pfail=1
+  else
+    printf '  ok    %s\n' "POISON 4 (a dropped escape): the length changes, so the check can see it"
   fi
   # POISON 3: the all-kinds ceiling must be able to refuse. A ceiling of -1
   # cannot be met by any formatter, so a run that still passes is not reading
