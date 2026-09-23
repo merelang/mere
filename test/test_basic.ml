@@ -2506,6 +2506,23 @@ let () =
     (Pipeline.process
        "let f = fn (s: str) -> match s with | \"ab\" <> r when str_len r > 1 -> r | _ -> \"short\" in f \"abcd\"")
     "\"cd\"";
+  (* v0.1.518 (Q-173): `keep_sugar` guarded the desugaring and nothing else, so
+     `mere fmt` printed back the preparation for CODE GENERATION -- a loop split
+     into `f__rvfast` / `f__rvslow` by range-check versioning, inner functions
+     renamed `go_uq3`. Formatting the output split the already-split loops
+     again. *)
+  check "v0.1.518: `mere fmt` does not print codegen preparation"
+    (let src =
+       "let sum = fn (v: int vec) -> fn (n: int) ->\n  let rec go = fn (i: int) -> fn (acc: int) ->\n    if i >= n then acc else go (i + 1) (acc + vec_get v i) in\n  go 0 0;\nprint_int 0" in
+     let out = Pipeline.format_source src in
+     let has needle =
+       let n = String.length needle and m = String.length out in
+       let rec go i = i + n <= m && (String.sub out i n = needle || go (i + 1)) in
+       go 0
+     in
+     Printf.sprintf "rvfast=%b unchecked=%b uq=%b"
+       (has "__rvfast") (has "_unchecked") (has "_uq"))
+    "rvfast=false unchecked=false uq=false";
   (* v0.1.517 (Q-172): the formatter printed the parser's FLATTENED form of a
      module -- `let Bignum.base = ...`, which is not syntax. Putting the block
      back is a grouping pass: only the binding name loses the prefix, because a

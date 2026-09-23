@@ -33,11 +33,14 @@ MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 CEILING="${CEILING:-1}"
 
 probe="__fmtroundtrip__.mere"
-cleanup() { find "$ROOT/examples" -name "$probe" -delete 2>/dev/null || true; }
+cleanup() {
+  find "$ROOT/examples" -name "$probe" -delete 2>/dev/null || true
+  find "$ROOT/examples" -name "__fmtroundtrip2__.mere" -delete 2>/dev/null || true
+}
 trap cleanup EXIT INT TERM
 cleanup
 
-checked=0; broke=0; names=""
+checked=0; broke=0; names=""; drift=0; drift_names=""
 for f in "$ROOT"/examples/*.mere "$ROOT"/examples/*/*.mere; do
   [ -f "$f" ] || continue
   case "$f" in *"$probe") continue ;; esac
@@ -51,6 +54,16 @@ for f in "$ROOT"/examples/*.mere "$ROOT"/examples/*/*.mere; do
     broke=$((broke + 1))
     names="$names $(basename "$f")"
   fi
+  # ...and formatting the output again gives the same file. The gate that used
+  # to own this question formatted ONE fixture twice, which is why 109 of these
+  # were not idempotent without anybody knowing.
+  out2="$(dirname "$f")/__fmtroundtrip2__.mere"
+  if "$MERE" fmt "$out" > "$out2" 2>/dev/null; then
+    cmp -s "$out" "$out2" || { drift=$((drift + 1)); drift_names="$drift_names $(basename "$f")"; }
+  else
+    drift=$((drift + 1)); drift_names="$drift_names $(basename "$f")(refused)"
+  fi
+  rm -f "$out2"
   rm -f "$out"
 done
 
@@ -67,10 +80,20 @@ else
   exit 1
 fi
 
+DRIFT_CEILING="${DRIFT_CEILING:-3}"
+if [ "$drift" -le "$DRIFT_CEILING" ]; then
+  printf '  ok    %s\n' "$checked formatted twice; $drift differ the second time (ceiling $DRIFT_CEILING)"
+  [ "$drift" = 0 ] || printf '  note  %s\n' "second pass differs:$drift_names"
+else
+  printf '  FAIL  %s\n' "$drift files differ on a second format, above the ceiling of $DRIFT_CEILING:$drift_names"
+  echo "fmt_roundtrip: FAILED"
+  exit 1
+fi
+
 if [ "${1:-}" = "--poison" ]; then
   # A ceiling of -1 cannot be met, so a run that still passes is not reading the
   # number it prints.
-  if CEILING=-1 sh "$0" >/dev/null 2>&1; then
+  if CEILING=-1 sh "$0" >/dev/null 2>&1 || DRIFT_CEILING=-1 sh "$0" >/dev/null 2>&1; then
     echo "fmt_roundtrip --poison: FAILED (an impossible ceiling still passed)"
     exit 1
   fi
