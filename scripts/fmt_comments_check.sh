@@ -158,7 +158,17 @@ fi
 # list_lib           a parse limit on purpose
 # template_engine    the same lexer limit
 fmt_known_skips="${FMT_KNOWN_SKIPS-brackets_balance list_lib template_engine}"
-LOST_CEILING="${LOST_CEILING:-53}"
+# ⚠ 53 -> 111 AT v0.1.521 AND NOTHING WAS NEWLY LOST. Until Q-174 was fixed the
+# output carried the IMPORTED files' declarations, and contrib is full of string
+# literals containing `//` (`"http://"`, `Url._cred`), so the output side of this
+# subtraction was being credited with another file's text. Measured separately,
+# strictly-lost comments of the ENTRY FILE went 151 -> 108 over the same corpus
+# and NO file lost more of its own. The number is not comparable across that
+# version: the denominator stopped including somebody else.
+# Then 111 -> 99 in the same version: with the splice undone, only THIS file's
+# externs are in the tree, so a bare name is a key again and the 12 trailing
+# comments on `extern` declarations come back.
+LOST_CEILING="${LOST_CEILING:-99}"
 FILE_FLOOR="${FILE_FLOOR:-280}"
 all_in=0; all_out=0; measured=0; unresolved=0; unexpected=""; stale_skip=""
 for f in "$ROOT"/examples/*.mere; do

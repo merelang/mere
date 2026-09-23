@@ -980,6 +980,10 @@ let format_program ?(comments : (int * string) list = [])
     ?(modules : string list = [])
     ?(private_members : string list = [])
     ?(pub_members : string list = [])
+    (* Q-174: (index, path as written, declarations spliced, source line) for
+       every `import` the entry file had. Empty means "print what is here",
+       which is what every caller other than `mere fmt` wants. *)
+    ?(imports : (int * string * int * int) list = [])
     ?(decl_line : (top_decl -> int option) = default_decl_line) (prog : program) =
   let pending = ref comments in
   known_modules := modules;
@@ -1121,8 +1125,16 @@ let format_program ?(comments : (int * string) list = [])
     in
     wrap parts (String.concat "\n" body)
   in
-  let decls_s =
-    prog.decls
+  (* Q-174: put the `import` lines back and take the declarations they spliced
+     OUT. Without this, `mere fmt` printed the imported file's declarations as
+     if this file had written them -- and `mere fmt -i` saved that over the
+     source, deleting the import and copying somebody else's code in.
+
+     The run an import contributed is CONTIGUOUS and its length was recorded at
+     splice time, so undoing it is exact: no guessing from positions, and a
+     nested import (A imports B) is already inside A's count. *)
+  let render_run (ds : top_decl list) : string list =
+    ds
     |> group_modules
     (* ⚠ `fuse_drop_decls` pairs a marker declaration with the one after it, so
        it has to see a RUN and not one declaration at a time -- calling it per
@@ -1146,7 +1158,37 @@ let format_program ?(comments : (int * string) list = [])
         (match fmt_top_decl d with
          | None -> None
          | Some body -> Some (with_comments (decl_line d) body)))
-    |> String.concat "\n\n"
+  in
+  let decls_s =
+    let imps = List.sort (fun (a, _, _, _) (b, _, _, _) -> compare a b) imports in
+    let rec drop k l = if k <= 0 then l else match l with [] -> [] | _ :: t -> drop (k - 1) t in
+    (* Walk the declaration list and the import list together. `i` is the index
+       in the list the entry file produced, which is the index the parser
+       recorded against. *)
+    let out = ref [] and cur = ref [] in
+    let flush () =
+      if !cur <> [] then begin
+        out := List.rev_append (render_run (List.rev !cur)) !out;
+        cur := []
+      end
+    in
+    let rec go i decls imps =
+      match imps with
+      | (idx, path, cnt, line) :: rest when idx <= i ->
+        flush ();
+        (* Comments written above the `import` belong above it, which is why the
+           line is recorded too -- otherwise they migrate down to whatever
+           declaration follows. *)
+        out := with_comments (Some line)
+                 ("import " ^ escape_string_for_fmt path ^ ";") :: !out;
+        go (i + cnt) (drop cnt decls) rest
+      | _ ->
+        (match decls with
+         | [] -> flush ()
+         | d :: t -> cur := d :: !cur; go (i + 1) t imps)
+    in
+    go 0 prog.decls imps;
+    String.concat "\n\n" (List.rev !out)
   in
   let main_s =
     match prog.main.node with

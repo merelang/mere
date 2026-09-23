@@ -4,6 +4,54 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.521 — 2026-09-23
+
+_`mere fmt` stops deleting a file's imports and writing somebody else's code
+into it (Q-174), and the gate that could not see that now asks the question it
+was missing._
+
+`import` SPLICES: by the time anything downstream sees a program, the import
+statement is gone and the imported file's declarations are sitting where it was.
+For a compiler that is the whole point. `mere fmt` printed that, so formatting a
+file DELETED its `import` lines and copied the imported declarations in — nine
+imports became zero and seven externs became nineteen on one example — and
+`mere fmt -i` saved it over the source.
+
+⚠ **Both existing fmt gates were green on it.** The inlined output type-checks
+and is stable on a second pass, so "what fmt writes is still a program" and
+"formatting twice gives the same file" both pass. They are two spellings of *is
+the output broken*; nothing asked whether it is the SAME program. A third
+question does now: every example with imports keeps every one of them (92 of
+them), and a fixture pins that the imported file's declaration is not written
+into the output. Its own poison, because a ceiling poison cannot reach a bug
+whose symptom is a count going to zero.
+
+The parser records each of the entry file's imports as (index in the declaration
+list, path as written, how many declarations it spliced, source line), so the
+formatter undoes the splice exactly rather than guessing from positions — a
+nested import is already inside its parent's count, and an import that brought
+nothing in because something else had already pulled that file in is still a line
+the source wrote, so it still comes back.
+
+**Two things followed from it.**
+
+`extern` declarations can be placed now, which recovers the 12 trailing comments
+v0.1.520 had to leave: placing them used to pick a line from whichever copy of a
+duplicated name came first, and the duplicate was the imported file's. The
+ambiguity guard stays, because two externs of one name in ONE file is still
+something a person can write.
+
+And `fmt_comments_check.sh` was measuring against a contaminated output.
+`LOST_CEILING` went 53 → 111 → 99 in this version and **nothing was newly lost**:
+the output used to carry the imported files' declarations, and contrib is full of
+string literals containing `//` (`"http://"`, `Url._cred`), so the subtraction
+was crediting the output with another file's text. Measured separately, strictly
+lost comments of the entry file went 151 → 108 over the same corpus and no file
+lost more of its own. The number is not comparable across this version, and the
+gate says so where the ceiling is set.
+
+---
+
 ## v0.1.520 — 2026-09-23
 
 _A program can say how much stack it needs, `mere doc` exists, and the gate that
