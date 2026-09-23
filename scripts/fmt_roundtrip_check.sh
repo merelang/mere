@@ -90,6 +90,60 @@ else
   exit 1
 fi
 
+# --- IS IT THE SAME PROGRAM? (Q-174) ---------------------------------------
+#
+# ⚠ The two questions above are BOTH "is the output broken". They were both
+# green while `mere fmt` DELETED every `import` line and wrote the imported
+# files' declarations into the user's file instead -- the inlined output
+# type-checks and is stable on a second pass, so neither could see it. A
+# transform needs at least one check that names what must be PRESERVED.
+TMPOUT=$(mktemp)
+badimp=""; nimp=0
+for f in "$ROOT"/examples/*.mere; do
+  want=$(grep -c '^import ' "$f" 2>/dev/null || true)
+  [ "$want" != "0" ] || continue
+  "$MERE" -t "$f" >/dev/null 2>&1 || continue
+  "$MERE" fmt "$f" > "$TMPOUT" 2>/dev/null || continue
+  nimp=$((nimp + 1))
+  got=$(grep -c '^import ' "$TMPOUT" 2>/dev/null || true)
+  [ "$want" = "$got" ] || badimp="$badimp $(basename "$f")($want->$got)"
+done
+rm -f "$TMPOUT"
+if [ "$nimp" -lt 20 ]; then
+  echo "fmt_roundtrip: only $nimp examples with imports — the corpus is not what this expects" >&2
+  exit 2
+fi
+if [ -z "$badimp" ]; then
+  printf '  ok    %s\n' "$nimp examples with imports keep every one of them"
+else
+  printf '  FAIL  %s\n' "fmt changed how many imports a file has:$badimp"
+  echo "fmt_roundtrip: FAILED"
+  exit 1
+fi
+
+# And the declarations the import used to splice in must NOT be written into the
+# file. Counting imports alone would pass a formatter that kept the line AND
+# inlined the file.
+IT=$(mktemp -d)
+mkdir -p "$IT/sub"
+printf 'let a_helper_from_elsewhere = fn (n: int) -> n + 1;\n' > "$IT/sub/lib.mere"
+printf 'import "sub/lib.mere";\nlet mine = 1;\nprint_int (a_helper_from_elsewhere mine)\n' > "$IT/p.mere"
+if "$MERE" fmt "$IT/p.mere" > "$IT/out" 2>/dev/null; then
+  if grep -q 'a_helper_from_elsewhere = ' "$IT/out"; then
+    printf '  FAIL  %s\n' "the imported file's declaration was written into the output"
+    rm -rf "$IT"; echo "fmt_roundtrip: FAILED"; exit 1
+  elif grep -q '^import "sub/lib.mere";' "$IT/out"; then
+    printf '  ok    %s\n' "the import line comes back and the imported declaration does not"
+  else
+    printf '  FAIL  %s\n' "the import line did not come back"
+    rm -rf "$IT"; echo "fmt_roundtrip: FAILED"; exit 1
+  fi
+else
+  printf '  FAIL  %s\n' "the fixture with an import could not be formatted"
+  rm -rf "$IT"; echo "fmt_roundtrip: FAILED"; exit 1
+fi
+rm -rf "$IT"
+
 if [ "${1:-}" = "--poison" ]; then
   # A ceiling of -1 cannot be met, so a run that still passes is not reading the
   # number it prints.
@@ -97,7 +151,19 @@ if [ "${1:-}" = "--poison" ]; then
     echo "fmt_roundtrip --poison: FAILED (an impossible ceiling still passed)"
     exit 1
   fi
-  echo "fmt_roundtrip --poison: ok (the ceiling can refuse)"
+  # ⚠ The import question needs its OWN poison: a ceiling poison cannot reach it,
+  # because the bug it stands for made the count go to zero and this gate had no
+  # count at all. A file whose import cannot be resolved is skipped by the walk,
+  # so the poison is the fixture with the imported file taken away -- the
+  # formatter must not answer for it.
+  PT=$(mktemp -d)
+  printf 'import "gone/missing.mere";\nprint_int 1\n' > "$PT/p.mere"
+  if "$MERE" fmt "$PT/p.mere" >/dev/null 2>&1; then
+    echo "fmt_roundtrip --poison: FAILED (an unresolvable import still formatted)"
+    rm -rf "$PT"; exit 1
+  fi
+  rm -rf "$PT"
+  echo "fmt_roundtrip --poison: ok (the ceiling can refuse, and an import it cannot read is not answered for)"
 fi
 echo "fmt_roundtrip: ok"
 exit 0

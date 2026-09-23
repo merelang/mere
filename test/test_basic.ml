@@ -2537,6 +2537,51 @@ let () =
      in
      Printf.sprintf "swallowed=%b" bad)
     "swallowed=false";
+  (* v0.1.521 (Q-174): `mere fmt` printed the SPLICED program -- the `import`
+     line was gone and the imported file's declarations were sitting where it had
+     been. `mere fmt -i` saved that over the source, so formatting a file
+     DELETED its imports and copied somebody else's code into it.
+
+     ⚠ Neither existing question could see it: the inlined output type-checks
+     and is stable on a second pass. Both were "is the output broken"; this one
+     asks whether it is the same program. *)
+  let fmt_imp_dir = Filename.temp_dir "lang_q174" "" in
+  let fmt_imp_write path content =
+    let oc = open_out path in output_string oc content; close_out oc
+  in
+  Unix.mkdir (Filename.concat fmt_imp_dir "sub") 0o755;
+  fmt_imp_write (Filename.concat fmt_imp_dir "sub/lib.mere")
+    "let from_elsewhere174 = fn (n: int) -> n + 1;";
+  check "v0.1.521: fmt keeps the import and does not inline what it brought"
+    (let out =
+       Pipeline.format_source ~base_dir:fmt_imp_dir
+         "// header\nimport \"sub/lib.mere\";\nlet mine174 = 1;\nprint_int (from_elsewhere174 mine174)"
+     in
+     let has needle =
+       let n = String.length needle and m = String.length out in
+       let rec go i = i + n <= m && (String.sub out i n = needle || go (i + 1)) in
+       go 0
+     in
+     Printf.sprintf "import=%b inlined=%b header=%b"
+       (has "import \"sub/lib.mere\";")
+       (has "from_elsewhere174 = fn")
+       (has "// header"))
+    "import=true inlined=false header=true";
+  (* An import that brought nothing in -- the file was already pulled in by an
+     earlier one -- was still WRITTEN, so it still comes back. *)
+  check "v0.1.521: a duplicate import is still a line the source has"
+    (let out =
+       Pipeline.format_source ~base_dir:fmt_imp_dir
+         "import \"sub/lib.mere\";\nimport \"sub/lib.mere\";\nprint_int (from_elsewhere174 1)"
+     in
+     let rec count i acc =
+       let n = String.length "import \"sub/lib.mere\";" in
+       if i + n > String.length out then acc
+       else if String.sub out i n = "import \"sub/lib.mere\";" then count (i + n) (acc + 1)
+       else count (i + 1) acc
+     in
+     Printf.sprintf "lines=%d" (count 0 0))
+    "lines=2";
   (* v0.1.520 (Q-154): the comment on an `if ... then` line. It was keyed on the
      THEN-BRANCH's line, and the branch is on the NEXT line -- so the key never
      matched and 42 of these were dropped. The condition's line is the line the

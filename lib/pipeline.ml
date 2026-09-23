@@ -2396,20 +2396,38 @@ let format_source ?(base_dir = Sys.getcwd ()) ?(search_paths = []) source =
         | Ast.Top_type_alias (n, _, _) -> Some n
         | _ -> None
       in
-      (* ⚠ `Top_extern` is NOT placed, and the reason is not that the parser
-         lacks a position -- `Parser.declared_externs` has one. It is that
-         `mere fmt` prints the SPLICED program: a file importing
-         `contrib/http/query.mere` comes back with `extern fn http_current_body`
-         TWICE, so the name is not a key, and whichever line is chosen is right
-         in one pass and wrong in the next. Placing them moved a comment block
-         ten lines on a second format. The 12 trailing comments this would
-         recover wait for the splice itself. *)
-      match named with
-      | None -> None
-      | Some n ->
-        (match List.assoc_opt n !Parser.declared_types with
-         | Some (l : Loc.t) when l.Loc.file = None && l.Loc.line > 0 -> Some l.Loc.line
-         | _ -> None)
+      (* Q-154 / Q-174: `Top_extern` carries no position, and the parser keeps
+         one for it (`declared_externs`, v0.1.476). Placing it was blocked while
+         `mere fmt` printed the spliced program -- the same extern appeared
+         twice and a bare name stopped being a key. The splice is undone now, so
+         only this file's externs are here.
+
+         ⚠ The ambiguity guard stays anyway: two externs of one name in ONE file
+         is something a person can still write, and a declaration that cannot be
+         placed simply does not collect the comments above it. *)
+      let placed =
+        match named with
+        | None -> None
+        | Some n ->
+          (match List.assoc_opt n !Parser.declared_types with
+           | Some (l : Loc.t) when l.Loc.file = None && l.Loc.line > 0 -> Some l.Loc.line
+           | _ -> None)
+      in
+      (match placed with
+       | Some l -> Some l
+       | None ->
+         (match d with
+          | Ast.Top_extern (n, _) ->
+            let matches =
+              List.filter
+                (fun (m, _, (l : Loc.t)) ->
+                   m = n && l.Loc.file = None && l.Loc.line > 0)
+                !Parser.declared_externs
+            in
+            (match matches with
+             | [ (_, _, (l : Loc.t)) ] -> Some l.Loc.line
+             | _ -> None)
+          | _ -> None))
   in
   let (col1, inline, trailing) = source_comments source in
   (* Q-172: the formatter needs to know which prefixes are modules, and which
@@ -2428,5 +2446,8 @@ let format_source ?(base_dir = Sys.getcwd ()) ?(search_paths = []) source =
     ~modules
     ~private_members
     ~pub_members
+    (* Q-174: the entry file's own `import` lines, so the formatter can undo the
+       splice instead of printing the imported declarations as this file's. *)
+    ~imports:(List.rev !Parser.entry_imports)
     ~decl_line
     { prog with Ast.decls = drop n_prelude prog.Ast.decls }
