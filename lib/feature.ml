@@ -45,7 +45,10 @@ let simd_128   = { ft_name = "128-bit SIMD lane types (`f64x2` / `u8x16`)";
 let simd_f32x4 = { ft_name = "the `f32x4` lane type"; ft_since = "0.1.445";
                    ft_probe = "f32x4" }
 
-let all = [ bytes_api; simd_128; simd_f32x4 ]
+let try_or_msg = { ft_name = "`try_or_msg` (the reason a catch was given)";
+                   ft_since = "0.1.510"; ft_probe = "try_or_msg" }
+
+let all = [ bytes_api; simd_128; simd_f32x4; try_or_msg ]
 
 (* --- versions -------------------------------------------------------------
 
@@ -116,7 +119,14 @@ let require (f : feature) (loc : Loc.t) =
    Exact type names are handled at the parser's type sites, where there is no
    guessing at all. *)
 let prefixes = [ ("bytes_", bytes_api); ("f64x2_", simd_128); ("u8x16_", simd_128);
-                 ("f32x4_", simd_f32x4) ]
+                 ("f32x4_", simd_f32x4);
+                 (* The whole name, which this mechanism reads as a prefix that
+                    happens to have nothing after it: `try_or` is old and must
+                    not pick up a floor, and it is one character short of
+                    matching. Erring high is the safe direction here (a user
+                    binding called `try_or_msg_anything` gets the floor too),
+                    which is the same trade every row above makes. *)
+                 ("try_or_msg", try_or_msg) ]
 
 let starts_with p s =
   String.length s >= String.length p && String.sub s 0 (String.length p) = p

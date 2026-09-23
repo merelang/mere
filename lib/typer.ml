@@ -1788,6 +1788,27 @@ let try_or_scheme =
       Ast.TyArrow (Ast.TyUnit, _try_alpha),
       Ast.TyArrow (_try_alpha, _try_alpha)) }
 
+(* `try_or_msg : (unit -> 'a) -> (str -> 'a) -> 'a` — the same catch, with the
+   REASON handed to the handler. Q-165: `try_or` can observe that something
+   failed and not why, so a library written here cannot offer "branch on the
+   kind of failure" to its callers; contrib/url's `parse` gave up `fail` and
+   returns `?url_parts` for exactly that.
+
+   What the handler receives is THE DIAGNOSTIC LINE the failure would have
+   printed had nobody caught it -- tag and all, so `fail "boom"` arrives as
+   `fail: boom` and `int_of_str` on junk arrives as its own text. That is the
+   string every backend already has in hand at the catch (the `fail: ` tag
+   belongs to the builtin, not to the printer), which is what makes the answer
+   the same on all of them; stripping the tag would be four different
+   subtractions. *)
+let _try_msg_alpha = fresh_var ()
+let try_or_msg_scheme =
+  let aid = match _try_msg_alpha with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [aid];
+    body = Ast.TyArrow (
+      Ast.TyArrow (Ast.TyUnit, _try_msg_alpha),
+      Ast.TyArrow (Ast.TyArrow (Ast.TyStr, _try_msg_alpha), _try_msg_alpha)) }
+
 (* `exit : int -> 'a` — never returns, polymorphic result. *)
 let _exit_alpha = fresh_var ()
 let exit_scheme =
@@ -2937,6 +2958,7 @@ let initial_env : env =
     ("fst",         fst_scheme);
     ("snd",         snd_scheme);
     ("try_or",      try_or_scheme);
+    ("try_or_msg",  try_or_msg_scheme);
     ("iter_n",
        mono (Ast.TyArrow (Ast.TyInt,
               Ast.TyArrow (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit), Ast.TyUnit))));
