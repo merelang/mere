@@ -4958,6 +4958,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let saved_buf_reg = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = alloca [200 x i8], align 16" saved_buf_reg);
     emit_instr (Printf.sprintf "  call ptr @memcpy(ptr %s, ptr @__lang_fail_jmpbuf, i64 200)" saved_buf_reg);
+    (* Q-171: the depth of the active-region stack, so the catch can release
+       what the jump went past. The C backend has saved this since v0.1.31. *)
+    let saved_rsn_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load i32, ptr @__lang_region_active_n" saved_rsn_reg);
+    let saved_cur_reg = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load ptr, ptr @__lang_current_region" saved_cur_reg);
     emit_instr "  store i32 1, ptr @__lang_fail_jmpbuf_set";
     (* setjmp *)
     let sj_reg = fresh_reg () in
@@ -4993,8 +4999,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  br label %%%s" l_try_ok_end);
     emit_label l_try_ok_end;
     emit_instr (Printf.sprintf "  br label %%%s" l_try_done);
-    (* try_failed block: emit default *)
+    (* try_failed block: release the regions the jump went past, then default *)
     emit_label l_try_failed;
+    emit_instr (Printf.sprintf "  call void @__lang_region_unwind(i32 %s)" saved_rsn_reg);
+    emit_instr (Printf.sprintf "  store ptr %s, ptr @__lang_current_region" saved_cur_reg);
     let default_v = emit_expr env default_e in
     let l_try_failed_end = fresh_label "try_failed_end_" in
     emit_instr (Printf.sprintf "  br label %%%s" l_try_failed_end);
@@ -5038,6 +5046,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  call ptr @memcpy(ptr %s, ptr @__lang_fail_jmpbuf, i64 200)" saved_buf_reg);
     let saved_region_reg = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = load ptr, ptr @__lang_current_region" saved_region_reg);
+    let saved_rsn_reg2 = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load i32, ptr @__lang_region_active_n" saved_rsn_reg2);
     emit_instr "  store i32 1, ptr @__lang_fail_jmpbuf_set";
     let sj_reg = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i32 @_setjmp(ptr @__lang_fail_jmpbuf)" sj_reg);
@@ -5069,6 +5079,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_label l_ok_end;
     emit_instr (Printf.sprintf "  br label %%%s" l_done);
     emit_label l_failed;
+    emit_instr (Printf.sprintf "  call void @__lang_region_unwind(i32 %s)" saved_rsn_reg2);
     emit_instr (Printf.sprintf "  store ptr %s, ptr @__lang_current_region" saved_region_reg);
     (* The catch comes down BEFORE the handler runs. `try_or` never had to think
        about this -- its default is evaluated before the setjmp -- but a handler
@@ -6783,10 +6794,11 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit in
     let plan = region_result_plan result_ty in
     (match plan with Refuse msg -> unsupported e.Ast.loc msg | _ -> ());
+    (* Q-171: from the heap and onto the active stack, not an `alloca`. A
+       `fail` caught outside this block longjmps past the release below, and a
+       struct on this frame is gone by the time anyone could free it. *)
     let region_p = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = alloca %%__lang_region" region_p);
-    emit_instr (Printf.sprintf
-                  "  call void @__lang_region_init(ptr %s, i64 1048576)" region_p);
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_region_block_acquire()" region_p);
     let saved = !current_regions in
     current_regions := (name, region_p) :: saved;
     (* v0.1.443 (Q-116): the block is current for its body, so ordinary value
@@ -6819,7 +6831,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  %s = load i32, ptr @__lang_region_depth" d2);
     emit_instr (Printf.sprintf "  %s = sub i32 %s, 1" d3 d2);
     emit_instr (Printf.sprintf "  store i32 %s, ptr @__lang_region_depth" d3);
-    emit_instr (Printf.sprintf "  call void @__lang_region_free(ptr %s)" region_p);
+    emit_instr (Printf.sprintf "  call void @__lang_region_block_release(ptr %s)" region_p);
     out
   | Ast.Ref (_mode, region, inner) ->
     (* `&R v` — region-allocate a copy of `v` and return ptr. *)
@@ -8445,6 +8457,96 @@ let region_runtime_helpers =
       "  br label %done";
       "done:";
       "  ret ptr %p";
+      "}";
+      "";
+      (* Q-171: the active-region stack, which the C backend has had since
+         v0.1.31 and this one never did. A `fail` inside a `region R { }` caught
+         by an outer `try_or` LONGJMPS PAST THE BLOCK EXIT: the block's free is
+         skipped, and the struct it was keeping lived in an `alloca` -- on a
+         stack frame that is gone. The loop then segfaulted at a hundred
+         iterations where the C backend ran twenty thousand.
+
+         Two changes make it releasable. The struct comes from `malloc` now, and
+         every live block is on this stack, so a catch can release what it
+         jumped over by depth alone.
+
+         SIMPLER THAN THE C VERSION ON PURPOSE: this backend REFUSES `region
+         loop` (see the emitter), so blocks here are strictly LIFO and a release
+         pops the top. C carries a scan-and-shift because its region-loop swap
+         releases the entry under the one just pushed. *)
+      "@__lang_region_active = internal global ptr null";
+      "@__lang_region_active_n = internal global i32 0";
+      "@__lang_region_active_cap = internal global i32 0";
+      "";
+      "define void @__lang_region_active_push(ptr %r) {";
+      "entry:";
+      "  %n = load i32, ptr @__lang_region_active_n";
+      "  %cap = load i32, ptr @__lang_region_active_cap";
+      "  %full = icmp sge i32 %n, %cap";
+      "  br i1 %full, label %grow, label %put";
+      "grow:";
+      "  %iszero = icmp eq i32 %cap, 0";
+      "  %dbl = mul i32 %cap, 2";
+      "  %ncap = select i1 %iszero, i32 64, i32 %dbl";
+      "  %ncap64 = sext i32 %ncap to i64";
+      "  %bytes = mul i64 %ncap64, 8";
+      "  %old = load ptr, ptr @__lang_region_active";
+      "  %new = call ptr @realloc(ptr %old, i64 %bytes)";
+      "  store ptr %new, ptr @__lang_region_active";
+      "  store i32 %ncap, ptr @__lang_region_active_cap";
+      "  br label %put";
+      "put:";
+      "  %arr = load ptr, ptr @__lang_region_active";
+      "  %idx = sext i32 %n to i64";
+      "  %slot = getelementptr ptr, ptr %arr, i64 %idx";
+      "  store ptr %r, ptr %slot";
+      "  %n1 = add i32 %n, 1";
+      "  store i32 %n1, ptr @__lang_region_active_n";
+      "  ret void";
+      "}";
+      "";
+      "define ptr @__lang_region_block_acquire() {";
+      "entry:";
+      "  %szp = getelementptr %__lang_region, ptr null, i32 1";
+      "  %sz = ptrtoint ptr %szp to i64";
+      "  %r = call ptr @malloc(i64 %sz)";
+      "  call void @__lang_region_init(ptr %r, i64 1048576)";
+      "  call void @__lang_region_active_push(ptr %r)";
+      "  ret ptr %r";
+      "}";
+      "";
+      "define void @__lang_region_block_release(ptr %r) {";
+      "entry:";
+      "  call void @__lang_region_free(ptr %r)";
+      "  %n = load i32, ptr @__lang_region_active_n";
+      "  %gt = icmp sgt i32 %n, 0";
+      "  br i1 %gt, label %pop, label %fin";
+      "pop:";
+      "  %n1 = sub i32 %n, 1";
+      "  store i32 %n1, ptr @__lang_region_active_n";
+      "  br label %fin";
+      "fin:";
+      "  call void @free(ptr %r)";
+      "  ret void";
+      "}";
+      "";
+      "define void @__lang_region_unwind(i32 %to) {";
+      "entry:";
+      "  br label %loop";
+      "loop:";
+      "  %n = load i32, ptr @__lang_region_active_n";
+      "  %more = icmp sgt i32 %n, %to";
+      "  br i1 %more, label %body, label %done";
+      "body:";
+      "  %arr = load ptr, ptr @__lang_region_active";
+      "  %i = sub i32 %n, 1";
+      "  %ix = sext i32 %i to i64";
+      "  %slot = getelementptr ptr, ptr %arr, i64 %ix";
+      "  %rr = load ptr, ptr %slot";
+      "  call void @__lang_region_block_release(ptr %rr)";
+      "  br label %loop";
+      "done:";
+      "  ret void";
       "}";
       "";
       "define void @__lang_region_free(ptr %r) {";
