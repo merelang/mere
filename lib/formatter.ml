@@ -100,6 +100,21 @@ let escape_string_for_fmt s =
     | '\\' -> Buffer.add_string buf "\\\\"
     | '\n' -> Buffer.add_string buf "\\n"
     | '\t' -> Buffer.add_string buf "\\t"
+    (* Q-173: and the two the lexer can write that this could not. A carriage
+       return went out as a RAW CR, which the lexer reads as a line break --
+       `newline in string literal` on the way back in, and 69 of the 315
+       example files could not be formatted twice because of it. Worse than
+       that: formatting the output again DROPPED the byte, so `mere fmt -i` on
+       a file with CRLF in it -- every Redis and HTTP string in contrib --
+       silently changed what the program sends. A formatter that rewrites in
+       place may not lose a byte.
+
+       The set here has to be a subset of the lexer's escapes: n, t, r, 0,
+       backslash, quote, and the two interpolation braces. Anything else stays
+       a raw byte, which round-trips because the lexer copies unknown bytes
+       through -- only these two are read as something else. *)
+    | '\r' -> Buffer.add_string buf "\\r"
+    | '\000' -> Buffer.add_string buf "\\0"
     | '{' -> Buffer.add_string buf "\\{"
     | c -> Buffer.add_char buf c
   ) s;
