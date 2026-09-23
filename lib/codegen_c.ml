@@ -596,6 +596,7 @@ let env_var_used = ref false
 let uses_midi = ref false  (* v0.1.128: midi_* -> PortMidi input runtime *)
 let uses_window = ref false  (* v0.1.249: win_* -> SDL2 window / pixels / input *)
 let uses_audio = ref false  (* v0.1.314: audio_* -> SDL2 audio, push model *)
+let uses_filestat = ref false  (* v0.1.509: file_* -> stat(2) and friends *)
 let uses_file_io = ref false  (* v0.1.59: file_open / file_read_line / file_close *)
 let uses_int_of_str = ref false  (* v0.1.60: validating int parse *)
 let uses_write_file_bytes = ref false
@@ -6619,7 +6620,19 @@ let native_ffi_names =
     (* v0.1.314: audio output, push model (SDL_QueueAudio -- no callback into
        Mere; the program's job is to keep the queue fed before the deadline).
        s16le mono. Samples cross as arena bytes, like every other device. *)
-    "audio_open"; "audio_queue"; "audio_queued"; "audio_close" ]
+    "audio_open"; "audio_queue"; "audio_queued"; "audio_close";
+    (* v0.1.509: the file-metadata syscalls. An `extern` can only name a libc
+       function whose parameters and result are things Mere's ABI already
+       emits -- `const char*` and plain `int` -- and the metadata calls are
+       none of those: stat(2) fills a struct, readlink(2) fills the caller's
+       buffer, and chmod/chown/truncate/umask/mkfifo/utime all take a typedef
+       (mode_t, uid_t, off_t, time_t) that collides with the `int` in Mere's
+       emitted prototype. Declaring them by hand fails to COMPILE, not to link.
+       Here the C is written with the real headers, so the typedefs and the
+       struct layout stay on this side and a caller never guesses an offset. *)
+    "file_stat"; "file_lstat"; "file_stat_field"; "file_chmod"; "file_chown";
+    "file_truncate"; "file_umask"; "file_mkfifo"; "file_utime";
+    "file_readlink" ]
 
 (* TLS externs. Not implemented natively yet (needs libssl FFI). Stubbed so
    a native build LINKS and plaintext connections work; referenced by the
@@ -7063,7 +7076,7 @@ let native_http_runtime ~tls =
            "  return -1;";
            "}" ]))
 
-let native_ffi_runtime ~tls ~midi ~window ~audio =
+let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat =
   String.concat "\n"
     [ "/* --- native FFI runtime: Wasm-style byte arena + POSIX TCP --- */";
       "#include <sys/socket.h>";
@@ -7496,6 +7509,108 @@ let native_ffi_runtime ~tls ~midi ~window ~audio =
           \  return 0;\n\
           }\n"
        else "");
+      (if filestat then
+         String.concat "\n"
+           [ "/* --- file metadata (v0.1.509). The syscalls that Mere's extern ABI";
+             "   cannot name by hand: stat(2) fills a struct, readlink(2) fills the";
+             "   CALLER's buffer, and chmod/chown/truncate/umask/mkfifo/utime each";
+             "   take a typedef (mode_t, uid_t, off_t, time_t) that collides with the";
+             "   plain `int` an emitted prototype carries. Written here, with the real";
+             "   headers, none of that is the caller's problem: the struct layout and";
+             "   the typedef widths stay on this side of the boundary and the caller";
+             "   asks for a FIELD BY NUMBER, which is a contract this file defines.";
+             "";
+             "   ONE SNAPSHOT AT A TIME, AND THE CALLER TAKES IT. `file_stat` runs";
+             "   the syscall into a single slot and answers 0 or -1; `file_stat_field`";
+             "   reads a field OUT of that slot and runs no syscall. Thirteen fields";
+             "   off one file therefore cost one stat(2), which is what ruby's";
+             "   File::Stat is -- a snapshot, not a live view.";
+             "";
+             "   \xe2\x9a\xa0 The first version of this cached the last result keyed by PATH and";
+             "   let field reads take the snapshot implicitly. The probe caught it in";
+             "   one run: `file_chmod` then a mode read answered the mode from before";
+             "   the chmod, and so did size after truncate and mtime after utime. A";
+             "   cache that a write does not invalidate is a silent wrong answer, and";
+             "   invalidating on THIS side cannot be complete anyway -- another";
+             "   process, or a write through some other path, changes the file";
+             "   without passing through here. Handing the caller the snapshot makes";
+             "   the staleness theirs to see.";
+             "";
+             "   Fields, and this numbering is the contract:";
+             "      0 dev   1 ino   2 mode  3 nlink  4 uid   5 gid   6 rdev";
+             "      7 size  8 atime 9 mtime 10 ctime 11 blksize 12 blocks --- */";
+             "#include <sys/stat.h>";
+             "#include <sys/types.h>";
+             "#include <utime.h>";
+             "";
+             "static struct stat __fs_st;";
+             "static int __fs_ok = 0;";
+             "";
+             "static long long file_stat(const char* path) {";
+             "  __fs_ok = (path != NULL && stat(path, &__fs_st) == 0);";
+             "  return __fs_ok ? 0 : -1;";
+             "}";
+             "";
+             "static long long file_lstat(const char* path) {";
+             "  __fs_ok = (path != NULL && lstat(path, &__fs_st) == 0);";
+             "  return __fs_ok ? 0 : -1;";
+             "}";
+             "";
+             "static long long file_stat_field(long long which) {";
+             "  if (!__fs_ok) return -1;";
+             "  switch ((int)which) {";
+             "    case 0:  return (long long)__fs_st.st_dev;";
+             "    case 1:  return (long long)__fs_st.st_ino;";
+             "    case 2:  return (long long)__fs_st.st_mode;";
+             "    case 3:  return (long long)__fs_st.st_nlink;";
+             "    case 4:  return (long long)__fs_st.st_uid;";
+             "    case 5:  return (long long)__fs_st.st_gid;";
+             "    case 6:  return (long long)__fs_st.st_rdev;";
+             "    case 7:  return (long long)__fs_st.st_size;";
+             "    case 8:  return (long long)__fs_st.st_atime;";
+             "    case 9:  return (long long)__fs_st.st_mtime;";
+             "    case 10: return (long long)__fs_st.st_ctime;";
+             "    case 11: return (long long)__fs_st.st_blksize;";
+             "    case 12: return (long long)__fs_st.st_blocks;";
+             "    default: return -1;";
+             "  }";
+             "}";
+             "";
+             "/* The write side. Each one is a cast the caller cannot make, and each";
+             "   answers 0 or -1 the way its syscall does -- errno is NOT read back";
+             "   here, because a caller that wants to tell EACCES from ENOENT should";
+             "   be given errno itself rather than a guess made in the middle. */";
+             "static long long file_chmod(const char* path, long long mode) {";
+             "  return chmod(path, (mode_t)mode) == 0 ? 0 : -1;";
+             "}";
+             "static long long file_chown(const char* path, long long uid, long long gid) {";
+             "  return chown(path, (uid_t)uid, (gid_t)gid) == 0 ? 0 : -1;";
+             "}";
+             "static long long file_truncate(const char* path, long long len) {";
+             "  return truncate(path, (off_t)len) == 0 ? 0 : -1;";
+             "}";
+             "static long long file_umask(long long mask) {";
+             "  return (long long)umask((mode_t)mask);";
+             "}";
+             "static long long file_mkfifo(const char* path, long long mode) {";
+             "  return mkfifo(path, (mode_t)mode) == 0 ? 0 : -1;";
+             "}";
+             "static long long file_utime(const char* path, long long at, long long mt) {";
+             "  struct utimbuf tb; tb.actime = (time_t)at; tb.modtime = (time_t)mt;";
+             "  return utime(path, &tb) == 0 ? 0 : -1;";
+             "}";
+             "";
+             "/* readlink writes into the byte arena, like every other device here:";
+             "   the caller passes an offset and a capacity and gets a LENGTH, then";
+             "   reads the bytes with mem_to_str. Nothing is NUL-terminated by";
+             "   readlink(2), so the length is the only thing that says where it";
+             "   ends -- returning it is not a convenience. */";
+             "static long long file_readlink(const char* path, long long p, long long cap) {";
+             "  if (cap <= 0 || p < 0 || p + cap > __MEM_CAP) return -1;";
+             "  ssize_t n = readlink(path, (char*)(__mem + p), (size_t)cap);";
+             "  return n < 0 ? -1 : (long long)n;";
+             "}" ]
+       else "");
       (if audio then
          "/* --- audio output (SDL2 audio, push model) — v0.1.314. No callback\n\
           \   into Mere: the device drains a queue, and the PROGRAM's job is to\n\
@@ -7768,6 +7883,7 @@ let native_ffi_runtime ~tls ~midi ~window ~audio =
 let () =
   native_ffi_runtime_fwd_text :=
     fun () -> native_ffi_runtime ~tls:true ~midi:true ~window:true ~audio:true
+                ~filestat:true
 
 let str_concat_helper =
   String.concat "\n"
@@ -11873,6 +11989,20 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   uses_audio :=
     Hashtbl.mem extern_fn_decls "audio_open"
     || Hashtbl.mem extern_fn_decls "audio_queue";
+  (* v0.1.509: declaring any file_* metadata extern pulls in <sys/stat.h> and
+     <utime.h>. No library and no build-line change -- unlike win_*/audio_*,
+     this costs two headers. *)
+  uses_filestat :=
+    Hashtbl.mem extern_fn_decls "file_stat"
+    || Hashtbl.mem extern_fn_decls "file_lstat"
+    || Hashtbl.mem extern_fn_decls "file_stat_field"
+    || Hashtbl.mem extern_fn_decls "file_chmod"
+    || Hashtbl.mem extern_fn_decls "file_chown"
+    || Hashtbl.mem extern_fn_decls "file_truncate"
+    || Hashtbl.mem extern_fn_decls "file_umask"
+    || Hashtbl.mem extern_fn_decls "file_mkfifo"
+    || Hashtbl.mem extern_fn_decls "file_utime"
+    || Hashtbl.mem extern_fn_decls "file_readlink";
   strbuf_used := false;
   bytebuf_used := false;
   bytes_used := false;
@@ -13363,7 +13493,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       (if Hashtbl.fold (fun n _ acc -> acc || is_native_ffi n)
             extern_fn_decls false
        then native_ffi_runtime ~tls:!uses_tls ~midi:!uses_midi ~window:!uses_window
-              ~audio:!uses_audio ^ "\n"
+              ~audio:!uses_audio ~filestat:!uses_filestat ^ "\n"
        else "");
       (* Q-012: concurrency runtime. `spawn` runs a `unit -> unit` closure on a
          fresh OS thread; the trampoline invokes the closure the same way the
