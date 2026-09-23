@@ -30,7 +30,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 [ -x "$MERE" ] || { echo "fmt_roundtrip: $MERE not built" >&2; exit 2; }
-CEILING="${CEILING:-1}"
+CEILING="${CEILING:-0}"
 
 probe="__fmtroundtrip__.mere"
 cleanup() {
@@ -80,7 +80,7 @@ else
   exit 1
 fi
 
-DRIFT_CEILING="${DRIFT_CEILING:-3}"
+DRIFT_CEILING="${DRIFT_CEILING:-0}"
 if [ "$drift" -le "$DRIFT_CEILING" ]; then
   printf '  ok    %s\n' "$checked formatted twice; $drift differ the second time (ceiling $DRIFT_CEILING)"
   [ "$drift" = 0 ] || printf '  note  %s\n' "second pass differs:$drift_names"

@@ -2506,6 +2506,37 @@ let () =
     (Pipeline.process
        "let f = fn (s: str) -> match s with | \"ab\" <> r when str_len r > 1 -> r | _ -> \"short\" in f \"abcd\"")
     "\"cd\"";
+  (* v0.1.519 (Q-154): the comment at the end of a match arm and of an `else if`
+     head. ⚠ Not the LAST arm and not the final `else`: what follows those on
+     the line -- the `;` that ends the declaration -- is appended by the caller,
+     and attaching there put the terminator inside the comment. A comment is
+     only safe where this formatter emits the newline itself. *)
+  check "v0.1.519: a match arm keeps its trailing comment"
+    (let out = Pipeline.format_source
+       "let g = fn (n: int) -> match n with\n  | 0 -> 10  // ZERO\n  | _ -> 20;\nprint_int (g 0)" in
+     let has needle =
+       let n = String.length needle and m = String.length out in
+       let rec go i = i + n <= m && (String.sub out i n = needle || go (i + 1)) in
+       go 0
+     in
+     Printf.sprintf "kept=%b" (has "ZERO"))
+    "kept=true";
+  check "v0.1.519: the terminator does not end up inside a comment"
+    (let out = Pipeline.format_source
+       "let g = fn (n: int) -> match n with\n  | 0 -> 10\n  | _ -> 20;  // LAST\nprint_int (g 0)" in
+     (* A `;` AFTER a `//` on the same line is the terminator inside the
+        comment -- the exact shape that broke 13 files. *)
+     let bad =
+       List.exists (fun l ->
+         match String.index_opt l '/' with
+         | None -> false
+         | Some i ->
+           i + 1 < String.length l && l.[i + 1] = '/'
+           && (match String.index_from_opt l i ';' with Some _ -> true | None -> false))
+         (String.split_on_char '\n' out)
+     in
+     Printf.sprintf "swallowed=%b" bad)
+    "swallowed=false";
   (* v0.1.518 (Q-173): `keep_sugar` guarded the desugaring and nothing else, so
      `mere fmt` printed back the preparation for CODE GENERATION -- a loop split
      into `f__rvfast` / `f__rvslow` by range-check versioning, inner functions
