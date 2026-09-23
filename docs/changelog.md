@@ -4,6 +4,47 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.514 — 2026-09-23
+
+_Q-166: `pub` at the top of a file, and the boundary the splice had not erased._
+
+`import "path";` splices the imported file's declarations into this one, so
+after an import there is a single top-level namespace. The language reference
+drew the obvious conclusion and said file-level visibility had "nothing to
+enforce": a library's helper was as reachable as the function it was written
+for, and `mere` could not report an unread top-level name because it could not
+tell a file's surface from its insides (Q-146).
+
+The boundary is not gone, though — it is in `Loc.t`. Every token carries the
+file it came from, set by the lexer for anything that arrived through an import,
+which means a REFERENCE can be checked against the file that made the binding.
+`pub let` at top level now says the file has decided its surface, and the check
+is the module one (v0.1.504) one level out.
+
+Opt-in per file, as it is per module: a file that marks nothing exports
+everything, which is every file written before this. `pub` stays a contextual
+keyword — a program that binds it as a name is unaffected.
+
+**The rule that keeps it usable**: a file that binds the name ITSELF is
+unaffected by what another file decided about its own copy. The single namespace
+means two files may bind the same top-level name; without that, one library
+marking `pub` would make a common name unusable in a file that never imported
+it. `scripts/file_privacy_check.sh` holds all four directions with two poisons —
+including that removing the marker makes the refused call succeed, so the gate
+is watching this failure and not some other one.
+
+⚠ **This is visibility, not separate compilation.** The splice still happens:
+the program is still one translation unit and `mere -c` still reads the whole
+tree. What changed is what may be REFERRED to.
+
+_And the claims gate caught the reference again._ `File-level visibility has
+nothing to enforce` is retired wording now. The first row written for the new
+sentence reported PHRASE GONE from a file that said exactly what it claimed —
+the phrase had wrapped across a line, and the check is a fixed-string grep per
+line. The header says so now.
+
+---
+
 ## v0.1.513 — 2026-09-23
 
 _Q-167: four spellings the lexer had never heard of, and three of them were

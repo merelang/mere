@@ -639,10 +639,35 @@ other regardless.
 `pub` is not a keyword: it is an identifier the module-body parser recognises
 in front of `let`, so a program using `pub` as a name is unaffected.
 
-⚠ **This is module-level only.** File-level visibility has nothing to enforce,
-because `import "path";` splices the imported file's declarations into this
-one's: after an import there is a single top-level namespace, and no boundary
-to enforce. See the changelog for v0.1.504.
+**And at the top of a FILE** (v0.1.514, Q-166). `import "path";` splices the
+imported file's declarations into this one's, so after an import there is a
+single top-level namespace — which is why this entry used to say file-level
+visibility had "nothing to enforce". The boundary the splice erases is the one
+`Loc.t` keeps: every token carries the file it came from, so a reference can be
+checked against the file that made the binding.
+
+```mere
+// lib.mere
+let internal_helper = fn (n: int) -> n * 7;
+pub let public_api = fn (n: int) -> internal_helper n + 1;
+```
+
+```mere
+import "lib.mere";
+print_int (public_api 6)     // 43
+print_int (internal_helper 6) // type error: `internal_helper` is internal to lib.mere
+```
+
+Opt-in per file, as it is per module: a file that marks nothing exports
+everything, which is every file written before this one. **A file that binds the
+name itself is unaffected** by what another file decided about its own copy —
+the single namespace means two files may bind the same top-level name, and
+without that rule one library marking `pub` would make a common name unusable
+everywhere.
+
+⚠ **This is visibility, not separate compilation.** The splice still happens:
+the program is still one translation unit, `mere -c` still reads the whole tree,
+and `pub` changes what may be REFERRED to rather than what is compiled.
 
 ---
 

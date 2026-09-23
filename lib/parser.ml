@@ -81,6 +81,25 @@ let import_search_paths : string list ref = ref []
    while parsing and read by `Pipeline.check_module_privacy`. *)
 let private_module_names : (string, unit) Hashtbl.t = Hashtbl.create 16
 
+(* Q-166: the same opt-in, one level out. `import "x.mere";` SPLICES x's
+   declarations into this file, so after it there is a single top-level
+   namespace and nothing marks where a name came from -- a library's helper is
+   as reachable as the function it was written for, and `mere` cannot report an
+   unread top-level name because it cannot tell a surface from dead code.
+
+   A file that marks nothing exports everything, exactly as every file written
+   before this does. One `pub` at top level says the file has decided its
+   surface, and its unmarked top-level bindings become internal to it.
+
+   The FILE is `Loc.t`'s own `file` field, which the lexer already sets for
+   every token that came through an import -- so this needs no new plumbing,
+   only a key. `""` is the file the compiler was handed. *)
+let file_key (f : string option) : string = match f with Some p -> p | None -> ""
+
+(* Files that used `pub` at top level, and the (file, name) pairs they marked. *)
+let pub_files : (string, unit) Hashtbl.t = Hashtbl.create 8
+let file_pub_names : (string * string) list ref = ref []
+
 (* Q-013 (Go-style full-path imports): a project may declare a module path in
    its mere.toml — `[package]\n path = "github.com/owner/repo"`. An import whose
    path starts with that module path is resolved LOCALLY, relative to the
@@ -177,6 +196,8 @@ let declared_externs : (string * Ast.ty * Loc.t) list ref = ref []
 let reset_decl_state () =
   declared_types := [];
   Hashtbl.reset private_module_names;
+  Hashtbl.reset pub_files;
+  file_pub_names := [];
   declared_externs := [];
   Hashtbl.reset constructors;
   Hashtbl.reset signatures;
@@ -2410,6 +2431,22 @@ let rec parse_program_internal tokens =
          finish decls main toks
        | _ ->
          raise (Parse_error (pos_of toks, "expected ';' or 'in' after let rec binding")))
+    (* Q-166: `pub` in front of a top-level binding. A contextual keyword, the
+       same way it is inside a module: `pub` followed by `let`, and an ordinary
+       identifier anywhere else -- a program that binds `pub` is unaffected. *)
+    | (ppos, T_ident "pub") :: ((_, T_let) :: _ as rest_pub) ->
+      let key = file_key ppos.Loc.file in
+      Hashtbl.replace pub_files key ();
+      (match rest_pub with
+       | (_, T_let) :: (_, T_rec) :: (_, T_ident n) :: _ ->
+         file_pub_names := (key, n) :: !file_pub_names
+       | (_, T_let) :: (_, T_ident n) :: (_, T_eq) :: _ ->
+         file_pub_names := (key, n) :: !file_pub_names
+       | (_, T_let) :: (p, _) :: _ ->
+         raise (Parse_error (p,
+           "`pub` must be followed by `let NAME = ...` or `let rec NAME = ...`"))
+       | _ -> ());
+      parse_decls decls rest_pub
     | (pos, T_let) :: (_, T_rec) :: _ ->
       raise (Parse_error (pos, "expected 'ident = expr' after 'let rec'"))
     | (pos, T_let) :: rest_after_let ->
