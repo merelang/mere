@@ -859,6 +859,15 @@ jobs:
           sh scripts/region_unwind_check.sh
           sh scripts/region_unwind_check.sh --poison
 
+      # Q-172. `mere fmt -i` rewrites in place, so the output being a program is
+      # not a nicety -- 52 of 293 examples came back as something the compiler
+      # refused, and the formatter's own tests were all small single files.
+      - name: fmt_roundtrip_check (what fmt writes is still the same program)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/fmt_roundtrip_check.sh
+          sh scripts/fmt_roundtrip_check.sh --poison
+
       # v0.1.508.
       - name: binding_form_check (every spelling gets the same verdict)
         if: ${{ !cancelled() }}

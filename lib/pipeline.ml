@@ -2212,9 +2212,21 @@ let format_source ?(base_dir = Sys.getcwd ()) ?(search_paths = []) source =
           | _ -> None))
   in
   let (col1, inline, trailing) = source_comments source in
+  (* Q-172: the formatter needs to know which prefixes are modules, and which
+     members the module kept to itself, to put `module M { }` and its `pub`
+     markers back. Both are the parser's tables; passing them keeps the
+     formatter from depending on the parser. *)
+  let modules = Hashtbl.fold (fun k () acc -> k :: acc) Parser.module_names [] in
+  let private_members =
+    Hashtbl.fold (fun k () acc -> k :: acc) Parser.private_module_names [] in
+  let pub_members =
+    Hashtbl.fold (fun k () acc -> k :: acc) Parser.pub_module_names [] in
   Formatter.format_program
     ~comments:col1
     ~inline
     ~trailing
+    ~modules
+    ~private_members
+    ~pub_members
     ~decl_line
     { prog with Ast.decls = drop n_prelude prog.Ast.decls }

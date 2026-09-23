@@ -2506,6 +2506,35 @@ let () =
     (Pipeline.process
        "let f = fn (s: str) -> match s with | \"ab\" <> r when str_len r > 1 -> r | _ -> \"short\" in f \"abcd\"")
     "\"cd\"";
+  (* v0.1.517 (Q-172): the formatter printed the parser's FLATTENED form of a
+     module -- `let Bignum.base = ...`, which is not syntax. Putting the block
+     back is a grouping pass: only the binding name loses the prefix, because a
+     qualified self-reference is valid inside the module it names. *)
+  check "v0.1.517: `mere fmt` puts `module M { }` back"
+    (let out = Pipeline.format_source
+       "module Store {\n  let secret = fn (n: int) -> n * 7;\n  pub let get = fn (n: int) -> secret n + 1;\n}\nprint_int (Store.get 5)" in
+     let has needle =
+       let n = String.length needle and m = String.length out in
+       let rec go i = i + n <= m && (String.sub out i n = needle || go (i + 1)) in
+       go 0
+     in
+     Printf.sprintf "block=%b pub=%b flat=%b"
+       (has "module Store {") (has "pub let get") (has "let Store.secret"))
+    "block=true pub=true flat=false";
+  (* ⚠ A list literal is fine as a FUNCTION argument and not as a CONSTRUCTOR's.
+     The formatter wrote the bare form in both and 24 files stopped
+     type-checking; parenthesising it everywhere broke the self-host cross-check
+     instead, because that formatter does not parenthesise the function case. *)
+  check "v0.1.517: a list literal is parenthesised only for a constructor"
+    (let out = Pipeline.format_source
+       "type t = A of int list;\nlet f = fn (xs: int list) -> list_len xs;\nlet x = A Nil;\nprint_int (f Nil + 0)" in
+     let has needle =
+       let n = String.length needle and m = String.length out in
+       let rec go i = i + n <= m && (String.sub out i n = needle || go (i + 1)) in
+       go 0
+     in
+     Printf.sprintf "ctor=%b fn=%b" (has "A ([])") (has "f []"))
+    "ctor=true fn=true";
   (* v0.1.515 (Q-173): the formatter escaped five characters and the lexer
      writes seven. A carriage return went out raw, was read back as a line
      break, and the SECOND format dropped it -- `mere fmt -i` on a file with
