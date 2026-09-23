@@ -4,6 +4,50 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.511 — 2026-09-23
+
+_Q-154: the comments the formatter was still deleting, and two holes found
+under them._
+
+v0.1.505 taught `mere fmt` to keep comments written in column 1. The other two
+kinds were documented as dropped: an indented comment belongs to an expression
+and the tree has no field for one, a trailing comment belongs after a node
+whose extent no `Loc.t` records. The lexer had both all along -- it records a
+position for every comment and the collector threw away everything that was not
+in column 1 -- so what was missing was placement, not collection.
+
+**Indented comments go back into the run of `let`s they were written in.** That
+run is the one place this formatter emits its own indent, which makes it the one
+place a comment can be put back without guessing a column; 516 of the 654 in the
+examples corpus sit directly above a `let`. Placement uses a watermark rather
+than draining everything written before the line, so a comment written above a
+whole block is not dragged down to the second binding -- it falls through to the
+old fallback and is printed above the declaration. Moved, which this formatter
+has always preferred to lost.
+
+**A trailing comment goes back at the end of the line it was written at**, when
+that line is one the layout emits in one piece -- a `let` whose value fits, or a
+one-line declaration. 375 of 636 are on a line that starts with `let`.
+
+On `examples/`: 8,181 of 8,426 comment lines survive, against 7,168 before.
+What is still dropped is a trailing comment on a line the formatter does not
+emit whole (an `else`, a match arm, a multi-line binding), and
+`scripts/fmt_comments_check.sh` now holds a measured CEILING on the loss rather
+than a note -- the next slice shows up as the number going down, a regression as
+it going up, and a third poison proves the ceiling can refuse.
+
+**Two properties this arc measured and did not fix**, both older than it. On the
+315 example files: `mere fmt` output does not parse for **21** of them, and
+formatting is not idempotent for **109**. The gate's idempotence check formats
+ONE fixture twice, which is why neither number was visible; it says so now.
+Both were measured against this compiler with the change stashed, so they are
+the baseline rather than this slice's doing -- the first version of the indented
+placement added 47 files to the non-idempotent count, and that was fixed by
+refusing to write a comment when the buffer cannot know what column the caller
+left the cursor in.
+
+---
+
 ## v0.1.510 — 2026-09-23
 
 _Q-165: a caught failure can say why._

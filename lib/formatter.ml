@@ -35,6 +35,52 @@ let prec_atom     = 11  (* literal, Var, paren, tuple, record, .field *)
 
 (* ── String helpers ─────────────────────────────────────────────────── *)
 
+(* Q-154 slice 2: comments that are NOT in column 1 but are alone on their line.
+   Column-1 ones are placed by `format_program`, above the declaration they were
+   written above. These belong INSIDE a declaration -- 516 of the 654 in the
+   examples corpus sit directly above a `let` -- and the tree has no field for
+   them, so they are carried here and emitted where the layout passes their
+   line: a run of `let`s is the one place the formatter emits its own indent and
+   therefore the one place a comment can be put back without guessing.
+
+   A watermark rather than a plain drain: a comment is only placed when the line
+   it was written on lies BETWEEN the last thing emitted and the next one.
+   Draining "everything before this line" would pull a comment written above the
+   whole block down to the second binding, which is worse than the fallback of
+   putting it above the declaration -- there it reads as describing the wrong
+   binding rather than as being early. *)
+let inline_pending : (int * string) list ref = ref []
+let inline_mark = ref 0
+
+(* Comments strictly between the watermark and `line`, in order, drained. *)
+let take_inline_before (line : int) =
+  let (before, rest) =
+    List.partition (fun (l, _) -> l > !inline_mark && l < line) !inline_pending in
+  inline_pending := rest;
+  if before <> [] then inline_mark := line;
+  List.map snd before
+
+(* Q-154 slice 3: a comment with CODE in front of it. It has no node to hang
+   from -- placing one in general needs the end of the thing it follows, which
+   no `Loc.t` records -- but it does have a LINE, and the one construct this
+   formatter emits line-for-line is a binding whose value fits on one line.
+   375 of the 636 in the examples corpus sit on a line that starts with `let`.
+   Those go back; the rest are still dropped, and the gate counts them so the
+   number stays visible. *)
+let trailing_pending : (int * string) list ref = ref []
+
+(* The comment written at the end of `line`, if the layout emitted that line in
+   one piece. `chunk` is what is about to be written: a newline in it means the
+   line the comment was on is not the line being closed. *)
+let take_trailing_on (line : int) (chunk : string) =
+  if String.contains chunk '\n' then ""
+  else
+    match List.assoc_opt line !trailing_pending with
+    | None -> ""
+    | Some t ->
+      trailing_pending := List.remove_assoc line !trailing_pending;
+      "  " ^ t
+
 let parens s = "(" ^ s ^ ")"
 
 let wrap need_paren s = if need_paren then parens s else s
@@ -388,13 +434,40 @@ and fmt_block ~ind e =
     let rec run e =
       match e.node with
       | Let (pat, value, body) ->
+        (* The buffer ends with this run's indent, which is what makes the
+           comment land in the right column without computing one -- EXCEPT at
+           indent 0, where this formatter writes function bodies flat. A comment
+           emitted there would start in column 1, and column 1 is how the reader
+           on the next pass tells "above a declaration" from "inside a body": the
+           comment would be read back as the first kind and lifted out of the
+           body it was written in. Formatting would not be idempotent, which is
+           the property that keeps a comment from walking a line per run. Two
+           spaces is the smallest thing that keeps the distinction. *)
+        (* ...and only from the SECOND binding on. The buffer is created empty by
+           `fmt_block`, so at the first `let` this code cannot know what column
+           the caller left the cursor in -- after `-> ` in a match arm, after
+           `fn (x: int) -> `, or at the start of a fresh line. Writing a comment
+           there puts it after code, where the next pass reads it as a trailing
+           comment and drops it: the run walked one binding down every time it
+           was formatted. A non-empty buffer means this run wrote the indent
+           itself and the cursor is at the start of a line. Comments the first
+           binding would have taken fall through to `migrate_inline`, which puts
+           them above the declaration -- moved, which this formatter has always
+           preferred to lost. *)
+        if Buffer.length buf > 0 then begin
+          let cind = if ind = 0 then "  " else indent ind in
+          List.iter (fun t -> Buffer.add_string buf (cind ^ t ^ "\n" ^ indent ind))
+            (take_inline_before e.loc.Loc.line)
+        end;
         let value_s =
           if is_block value then
             "\n" ^ indent (ind + 1) ^ fmt_expr ~prec:prec_top ~ind:(ind + 1) value
           else
             " " ^ fmt_expr ~prec:prec_top ~ind value
         in
-        Buffer.add_string buf ("let " ^ fmt_pat pat ^ " =" ^ value_s ^ " in\n");
+        let one_line = "let " ^ fmt_pat pat ^ " =" ^ value_s ^ " in" in
+        Buffer.add_string buf
+          (one_line ^ take_trailing_on e.loc.Loc.line one_line ^ "\n");
         Buffer.add_string buf (indent ind);
         run body
       | _ -> Buffer.add_string buf (fmt_expr ~prec:prec_top ~ind e)
@@ -708,24 +781,50 @@ let default_decl_line (d : top_decl) : int option =
    printed above it, keeping the blank line the joiner already puts between
    declarations.
 
-   COLUMN 1 ONLY, deliberately: 82% of the comment lines in this repository are
-   there, they are the ones hover reads (the block above a definition), and the
-   other two kinds need something the tree does not have -- an indented comment
-   belongs to an expression, and a trailing one belongs after a node whose
-   extent no `Loc.t` records. *)
+   `inline` is the same for comments that are alone on their line but indented:
+   they belong inside a declaration, and `fmt_block`'s run of `let`s puts them
+   back. `trailing` is for the ones with code in front of them, which go back
+   only where the layout emits their line in one piece.
+
+   WHAT IS STILL DROPPED, and why it is not an oversight: a trailing comment on
+   a line this formatter does not emit whole -- an `else`, a match arm, a
+   binding whose value goes multi-line. Putting one back needs the end of the
+   node it follows, and a `Loc.t` records where a token STARTS. 245 lines in
+   the examples corpus; `scripts/fmt_comments_check.sh` counts them. *)
 let format_program ?(comments : (int * string) list = [])
+    ?(inline : (int * string) list = [])
+    ?(trailing : (int * string) list = [])
     ?(decl_line : (top_decl -> int option) = default_decl_line) (prog : program) =
   let pending = ref comments in
+  inline_pending := List.sort (fun (a, _) (b, _) -> compare a b) inline;
+  inline_mark := 0;
+  trailing_pending := trailing;
   (* Everything written above `line`, in order, drained. *)
   let take_before (line : int) =
     let (before, rest) = List.partition (fun (l, _) -> l < line) !pending in
     pending := rest;
     List.map snd before
   in
+  (* An indented comment written ABOVE a declaration cannot be placed inside it,
+     because the run that would place it starts later. It joins the column-1
+     stream instead and is printed above the declaration -- the fallback this
+     formatter has always taken: moved, never dropped. *)
+  let migrate_inline (l : int) =
+    let (before, rest) = List.partition (fun (cl, _) -> cl < l) !inline_pending in
+    inline_pending := rest;
+    if before <> [] then
+      pending := List.sort (fun (a, _) (b, _) -> compare a b) (!pending @ before)
+  in
   let with_comments (line : int option) (body : string) =
     match line with
     | None -> body
     | Some l ->
+      migrate_inline l;
+      inline_mark := l;
+      (* A declaration that came out on one line can carry the comment written
+         at the end of the line it started on. A multi-line one cannot: the line
+         being closed is not the line the comment was on. *)
+      let body = body ^ take_trailing_on l body in
       (match take_before l with
        | [] -> body
        | cs -> String.concat "\n" cs ^ "\n" ^ body)
@@ -747,13 +846,21 @@ let format_program ?(comments : (int * string) list = [])
     match prog.main.node with
     | Unit_lit ->
       (* A decls-only file still has comments after the last declaration. *)
+      migrate_inline max_int;
       String.concat "\n" (take_before max_int)
     | _ ->
+      migrate_inline (max 1 prog.main.loc.Loc.line);
+      inline_mark := max 1 prog.main.loc.Loc.line;
       let above = take_before (max 1 prog.main.loc.Loc.line) in
       let body = fmt_expr ~prec:prec_top ~ind:0 prog.main in
       let trailing = take_before max_int in
+      (* Anything the run never reached -- a comment inside a construct this
+         slice does not place, an `if` arm or a match -- still has to come out
+         somewhere. Last, in source order, rather than lost. *)
+      let left = List.map snd (List.sort (fun (a, _) (b, _) -> compare a b) !inline_pending) in
+      inline_pending := [];
       String.concat "\n"
-        (above @ [ body ] @ trailing)
+        (above @ [ body ] @ trailing @ left)
   in
   match decls_s, main_s with
   | "", "" -> "()\n"

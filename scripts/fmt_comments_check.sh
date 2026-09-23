@@ -16,9 +16,18 @@
 #   3. on the examples corpus, the count of column-1 comment lines does not go
 #      DOWN. Not "the output equals the input": formatting is allowed to move
 #      code. Nothing may be lost.
+#   4. on the same corpus, the TOTAL over all three kinds does not fall below a
+#      recorded ceiling. Indented comments go back into the run of `let`s they
+#      were written in and trailing ones onto the `let` line they were written
+#      at (v0.1.511); what is still dropped is a trailing comment on a line the
+#      formatter does not emit whole. The ceiling is that number, measured --
+#      so the next slice shows up as the number going DOWN, and a regression
+#      shows up as it going UP.
 #
-# Indented and trailing comments are NOT preserved yet (slice 2). This gate
-# counts them so that the number is visible rather than forgotten.
+# ⚠ WHAT IDEMPOTENCE HERE DOES NOT SAY. Check 2 formats ONE fixture twice.
+# 109 of the 315 example files are not idempotent under this formatter and were
+# not before this gate existed either; that is a separate hole, recorded rather
+# than hidden behind a passing check on one file.
 #
 # Usage:
 #   sh scripts/fmt_comments_check.sh            # check
@@ -107,9 +116,24 @@ else
 fi
 [ "$skipped" = "0" ] || printf '  note  %s files were refused by fmt and not counted\n' "$skipped"
 
-# What is still dropped, counted so it stays visible.
-ind=$(grep -hcE '^[[:space:]]+//' "$ROOT"/examples/*.mere 2>/dev/null | paste -sd+ - | bc 2>/dev/null || echo "?")
-printf '  note  indented comments are still dropped (slice 2): ~%s lines in examples/\n' "$ind"
+# --- all three kinds, over the same corpus ---------------------------------
+# The ceiling is what was measured when the trailing slice landed. It is a
+# CEILING on what may be lost, not a target: shrinking it is the next slice.
+LOST_CEILING="${LOST_CEILING:-188}"
+all_in=0; all_out=0
+for f in "$ROOT"/examples/*.mere; do
+  if "$MERE" fmt "$f" > "$tmp/f.out" 2>/dev/null; then
+    all_in=$((all_in + $(grep -c '//' "$f" 2>/dev/null || true)))
+    all_out=$((all_out + $(grep -c '//' "$tmp/f.out" 2>/dev/null || true)))
+  fi
+done
+lost=$((all_in - all_out))
+if [ "$lost" -le "$LOST_CEILING" ]; then
+  printf '  ok    %s\n' "all kinds: $all_in comment lines in, $all_out out ($lost lost, ceiling $LOST_CEILING)"
+else
+  printf '  FAIL  %s\n' "all kinds: $lost lost, above the ceiling of $LOST_CEILING"
+  fail=1
+fi
 
 if [ "${1:-}" = "--poison" ]; then
   pfail=0
@@ -121,6 +145,15 @@ if [ "${1:-}" = "--poison" ]; then
   else
     printf '  FAIL  %s\n' "POISON 1: the counter found comments in a file that has none"
     pfail=1
+  fi
+  # POISON 3: the all-kinds ceiling must be able to refuse. A ceiling of -1
+  # cannot be met by any formatter, so a run that still passes is not reading
+  # the number it prints.
+  if LOST_CEILING=-1 sh "$0" >/dev/null 2>&1; then
+    printf '  FAIL  %s\n' "POISON 3: an impossible ceiling still passed"
+    pfail=1
+  else
+    printf '  ok    %s\n' "POISON 3 (impossible ceiling): the check refuses"
   fi
   # POISON 2: the idempotence check must compare two real runs.
   printf '// MARK_X\nprint_int 1\n' > "$tmp/p2.mere"
