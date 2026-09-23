@@ -17,6 +17,7 @@
 #   refuse  the program must NOT be accepted   (the limitation still holds)
 #   accept  the program MUST be accepted       (the capability still works)
 #   absent  the program runs and its output must not contain a string
+#   present the program runs and its output must contain one
 #   exists  a path the doc names must be on disk
 #
 # A row goes red in both directions: the phrase disappearing from the doc means
@@ -53,7 +54,7 @@ docs/language-reference.md|no octal or binary literal syntax and no digit separa
 docs/language-reference.md|No nested string literals in interpolation|refuse|nested_interp
 docs/language-reference.md|A type name may not be declared twice with different constructors|refuse|type_redecl
 docs/language-reference.md|A top-level `while` must be bound or be the last expression|accept|toplevel_while
-docs/stdlib-reference.md|the language can observe that something failed, not why|absent|try_or_reason
+docs/stdlib-reference.md|What the handler receives is the diagnostic line|present|try_or_reason
 docs/stdlib-reference.md|test/parity/region_fail_unwind.mere|exists|test/parity/region_fail_unwind.mere
 ROWS
 }
@@ -71,6 +72,7 @@ retired() {
   cat <<'RETIRED'
 Wasm has one output sink
 `fail` on Wasm does not unwind
+the language can observe that something failed, not why
 codegen support only inside fn bodies
 `while` only inside fn bodies
 RETIRED
@@ -112,7 +114,7 @@ write_probe() {
     nested_interp)    printf 'print "x = {show \\"abc\\"}"\n' > "$2" ;;
     type_redecl)      printf 'type t = A | B;\ntype t = C | D;\nprint_int 0\n' > "$2" ;;
     toplevel_while)   printf 'let v = vec_new ();\nlet _ = vec_push v 0;\nlet _ = while vec_len v < 5 do vec_push v (vec_len v);\nprint_int (vec_len v)\n' > "$2" ;;
-    try_or_reason)    printf 'let r = try_or (fn () -> fail "REASON_XYZ") "default" in\nprint r\n' > "$2" ;;
+    try_or_reason)    printf 'let r = try_or_msg (fn () -> fail "REASON_XYZ") (fn (m: str) -> m) in\nprint r\n' > "$2" ;;
     *) return 1 ;;
   esac
 }
@@ -158,6 +160,15 @@ run_rows() {
         case "$out" in
           *REASON_XYZ*)
             echo "  STALE  $doc:$line — the reason it says is unreachable came back ($arg)"
+            fails=$((fails + 1)) ;;
+        esac ;;
+      present)
+        write_probe "$arg" "$T/p.mere" || { echo "  NO PROBE  $arg"; fails=$((fails+1)); continue; }
+        out=$("$M" "$T/p.mere" 2>&1)
+        case "$out" in
+          *REASON_XYZ*) ;;
+          *)
+            echo "  STALE  $doc:$line — the reason it says arrives did not ($arg)"
             fails=$((fails + 1)) ;;
         esac ;;
       exists)

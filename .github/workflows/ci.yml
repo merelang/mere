@@ -834,6 +834,14 @@ jobs:
           sh scripts/doc_claims_check.sh
           sh scripts/doc_claims_check.sh --poison
 
+      # Q-165. The parity suite holds the backends to one answer; this asks
+      # whether that answer is the same one the uncaught failure prints.
+      - name: fail_reason_check (a caught failure and an uncaught one agree)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/fail_reason_check.sh
+          sh scripts/fail_reason_check.sh --poison
+
       # v0.1.508.
       - name: binding_form_check (every spelling gets the same verdict)
         if: ${{ !cancelled() }}

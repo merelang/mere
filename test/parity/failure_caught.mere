@@ -74,4 +74,34 @@ let _ = print "=== and a caught failure inside a function that keeps going ===";
 let safe_div = fn (a: int) -> fn (b: int) -> try_or (fn () -> let (q, r) = divmod a b in q) 0;
 let _ = print (show (safe_div 17 5) ++ " " ++ show (safe_div 17 0) ++ " "
                ++ show (safe_div 0 5) ++ " " ++ show (safe_div 17 1));
+
+// Q-165: the same catch, with the reason. Everything above asks whether the
+// failure was caught; these ask WHICH failure it was, which is a question the
+// language could not put until `try_or_msg` existed. The strings are the
+// diagnostic lines, tag and all -- `fail` owns its `fail: `, the backends' own
+// failures name themselves -- so a backend that kept a different message, or
+// the previous one, diverges here rather than in nobody's test.
+let _ = print "=== the reason, not just the fact ===";
+let _ = print (try_or_msg (fn () -> fail "boom") (fn (m: str) -> m));
+let _ = print (try_or_msg (fn () -> show (int_of_str "abc")) (fn (m: str) -> m));
+let _ = print (try_or_msg (fn () -> let z = 0 in show (17 / z)) (fn (m: str) -> m));
+let _ = print (try_or_msg (fn () -> "no failure here") (fn (m: str) -> "unreachable"));
+
+// The flag has to be cleared on this path too: a handler that ran once must not
+// leave the next call looking failed.
+let _ = print (try_or_msg (fn () -> "second call") (fn (m: str) -> "still armed"));
+
+// Nesting, and a failure raised INSIDE a handler: the inner reason is consumed
+// by the inner handler, the outer one sees the failure the handler itself
+// raised, not the one that got it there.
+let _ = print (try_or_msg (fn () -> try_or_msg (fn () -> fail "inner") (fn (m: str) -> "handled: " ++ m))
+                          (fn (m: str) -> "outer: " ++ m));
+let _ = print (try_or_msg (fn () -> try_or_msg (fn () -> fail "first") (fn (_m: str) -> fail "raised by the handler"))
+                          (fn (m: str) -> "outer: " ++ m));
+
+// A reason that outlives the region the failing thunk allocated it in: the
+// message is built inside a `region R { }`, and the block ends when the failure
+// leaves it. What the handler prints has to be a copy.
+let _ = print (try_or_msg (fn () -> region R { fail ("built in a region: " ++ show (1 + 1)) })
+                          (fn (m: str) -> m));
 0

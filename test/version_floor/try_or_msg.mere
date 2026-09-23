@@ -1,0 +1,3 @@
+// One row of Feature.all, on its own: the reason a catch was given.
+let r = try_or_msg (fn () -> fail "boom") (fn (m: str) -> m);
+print r
