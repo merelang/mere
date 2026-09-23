@@ -4,6 +4,43 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.513 — 2026-09-23
+
+_Q-167: four spellings the lexer had never heard of, and three of them were
+name errors rather than syntax errors._
+
+`0b1010` came back as **`unbound variable: b1010`**. The lexer read the `0`,
+stopped, and handed `b1010` to the typer as a name — so the diagnostic was true
+and useless, and nothing in it said "this language has no binary literals". Same
+for `0o17` and `1_000`. `int_of_string` had understood all three all along, and
+the digit separators too: what was missing was the lexer, not the conversion.
+
+Binary (`0b` / `0B`), octal (`0o` / `0O`) and `_` between digits, in every base
+and in a float — `1_000_000`, `0xFF_FF`, `0b1010_1010`, `1_000.5`. Each `_` has
+to be followed by another digit, so `1_` is still the integer 1 next to an
+identifier, which is the reading a program that binds `_x` already relies on.
+
+**`\uXXXX`** is the one that is not a number. Exactly four hex digits, encoded
+as UTF-8, so `"\u3042"` is three bytes and `utf8_len` counts it as one
+character. A surrogate half is refused with a sentence rather than written out:
+it is not a character, `str` is bytes, and nothing downstream would put a pair
+back together. Beyond the BMP is written as the character itself — this file is
+UTF-8 and the lexer copies unknown bytes through.
+
+**`scripts/doc_claims_check.sh` caught its own docs.** The gate landed two days
+into its own life with `No Unicode escape (\uXXXX)` and `no octal or binary
+literal syntax and no digit separator` in its catalogue; the moment the lexer
+learned them, it went red naming `docs/language-reference.md:613` and `:614`
+before either sentence had been touched. Both wordings are retired now, which is
+the other half of the same gate.
+
+_Measured and not fixed._ The self-host lexer (`contrib/parser/lexer.mere`)
+splits every one of these into three tokens — **including `0xFF`**, which this
+compiler has had since v0.1.46. It was behind before this change and is behind
+by three more spellings now; that is Q-153's ground, and the number is in it.
+
+---
+
 ## v0.1.512 — 2026-09-23
 
 _Q-039: the shift count had four answers, one of them undefined._
