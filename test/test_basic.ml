@@ -2506,6 +2506,24 @@ let () =
     (Pipeline.process
        "let f = fn (s: str) -> match s with | \"ab\" <> r when str_len r > 1 -> r | _ -> \"short\" in f \"abcd\"")
     "\"cd\"";
+  (* v0.1.513 (Q-167): four spellings the lexer had never heard of. Three were
+     not syntax errors but NAME errors -- `0b1010` read as the integer 0 next
+     to an identifier `b1010` -- which is why they were reported as unbound
+     variables rather than as something to write differently. *)
+  check "v0.1.513: binary and octal literals" (Pipeline.process "0b1010 + 0o17") "25";
+  check "v0.1.513: digit separators, in every base"
+    (Pipeline.process "show 1_000_000 ++ \" \" ++ show 0xFF_FF ++ \" \" ++ show 0b1010_1010")
+    "\"1000000 65535 170\"";
+  check "v0.1.513: a separator does not eat an identifier"
+    (Pipeline.process "let _x = 5 in 1 + _x") "6";
+  check "v0.1.513: \\u is UTF-8 bytes, not a character"
+    (Pipeline.process "show (str_len \"\\u3042\") ++ \" \" ++ show (utf8_len \"\\u3042\\u0041\")")
+    "\"3 2\"";
+  check "v0.1.513: a surrogate half is refused"
+    (try ignore (Pipeline.process "\"\\uD800\""); "accepted"
+     with Lexer.Lex_error (_, m) ->
+       if String.length m > 0 then "refused" else "refused")
+    "refused";
   (* v0.1.511 (Q-154): the two kinds of comment that used to be deleted. An
      indented one goes back into the run of `let`s it was written in; one
      written at the end of a `let` that fits on a line goes back at the end of

@@ -1,0 +1,29 @@
+// Q-167: the four spellings the lexer had never heard of.
+//
+// `0b1010` came back as `unbound variable: b1010`, not as a syntax error: the
+// lexer read the `0`, stopped, and handed `b1010` to the typer as a name. Same
+// for `0o17` and `1_000`. `int_of_string` has understood all three all along --
+// and the separators too -- so what was missing was the lexer, not the
+// conversion. `\uXXXX` is the one that is not a number: it encodes as UTF-8,
+// which is up to three bytes, and a surrogate half is refused.
+//
+// Execution mode: 4 backends, diff = 0
+
+let _ = print "=== bases ===";
+let _ = print (show 0b1010 ++ " " ++ show 0B1111);
+let _ = print (show 0o17 ++ " " ++ show 0O777);
+let _ = print (show 0xFF ++ " " ++ show 0XfF);
+
+let _ = print "=== separators, in every base ===";
+let _ = print (show 1_000_000);
+let _ = print (show 0xFF_FF ++ " " ++ show 0b1010_1010 ++ " " ++ show 0o1_7);
+let _ = print (show 1_000.5);
+
+let _ = print "=== and they are ordinary ints ===";
+let _ = print (show (0b1010 + 0o17 + 0x10));
+let _ = print (show (bit_and 0b1111_0000 0xFF));
+
+let _ = print "=== \\u, as bytes and as characters ===";
+let _ = print "Aあé";
+let _ = print (show (str_len "あ") ++ " " ++ show (utf8_len "あA"));
+print (show (str_len "A") ++ " " ++ show (str_len "é"))
