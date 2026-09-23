@@ -3046,10 +3046,34 @@ and emit_expr (e : Ast.expr) : unit =
     emit_expr a_e; emit_expr b_e; emit_instr "i64.xor"
   | Ast.App ({ node = Ast.Var "bit_not"; _ }, a_e) ->
     emit_expr a_e; emit_instr "i64.const -1"; emit_instr "i64.xor"
-  | Ast.App ({ node = Ast.App ({ node = Ast.Var "bit_shl"; _ }, a_e); _ }, b_e) ->
-    emit_expr a_e; emit_expr b_e; emit_instr "i64.shl"
-  | Ast.App ({ node = Ast.App ({ node = Ast.Var "bit_shr"; _ }, a_e); _ }, b_e) ->
-    emit_expr a_e; emit_expr b_e; emit_instr "i64.shr_s"
+  (* Q-039: this backend's shifts mask the count mod 64 by spec, which is a
+     THIRD answer -- the interpreter defines an out-of-range count, C had
+     undefined behaviour, IR has poison, and here `bit_shl x 70` quietly meant
+     `x << 6`. The contract the RISC-V backend was written against is emitted
+     instead: zero for a left shift, the sign bit for a right one, for any count
+     that does not fit (a negative one reads as huge-unsigned, as it does
+     there). *)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var ("bit_shl" | "bit_shr" as op); _ }, a_e); _ }, b_e) ->
+    let left = (op = "bit_shl") in
+    let a_slot = fresh_local () in
+    let n_slot = fresh_local () in
+    emit_expr a_e; emit_instr (Printf.sprintf "local.set %d" a_slot);
+    emit_expr b_e; emit_instr (Printf.sprintf "local.set %d" n_slot);
+    emit_instr (Printf.sprintf "local.get %d" n_slot);
+    emit_instr "i64.const 63";
+    emit_instr "i64.gt_u";
+    emit_instr "if (result i64)";
+    if left then emit_instr "i64.const 0"
+    else begin
+      emit_instr (Printf.sprintf "local.get %d" a_slot);
+      emit_instr "i64.const 63";
+      emit_instr "i64.shr_s"
+    end;
+    emit_instr "else";
+    emit_instr (Printf.sprintf "local.get %d" a_slot);
+    emit_instr (Printf.sprintf "local.get %d" n_slot);
+    emit_instr (if left then "i64.shl" else "i64.shr_s");
+    emit_instr "end"
   | Ast.App ({ node = Ast.Var "str_rev"; _ }, arg) ->
     emit_expr arg;
     emit_instr "call $__lang_str_rev"

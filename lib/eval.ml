@@ -1447,8 +1447,13 @@ let builtin_bit_or  = bit_binop "bit_or" (lor)
 let builtin_bit_xor = bit_binop "bit_xor" (lxor)
 let builtin_bit_shl = bit_binop "bit_shl"
   (fun x n -> if n < 0 || n > 62 then 0 else x lsl n)
+(* Q-039: a count outside the width means the same thing in both directions --
+   out of range. It used to return x unchanged for a negative count, which no
+   other backend could reproduce: they compare the count as unsigned, so a
+   negative one is huge and lands in the out-of-range arm. One rule, four
+   backends: zero for a left shift, the sign for a right one. *)
 let builtin_bit_shr = bit_binop "bit_shr"
-  (fun x n -> if n < 0 then x else x asr (min n 62))
+  (fun x n -> if n < 0 || n > 62 then x asr 62 else x asr n)
 let builtin_bit_not =
   V_builtin ("bit_not", fun v ->
     match v with

@@ -4,6 +4,45 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.512 — 2026-09-23
+
+_Q-039: the shift count had four answers, one of them undefined._
+
+`bit_shl x n` with `n` at or beyond the width meant four different things. The
+interpreter defined it. The C backend's `<<` on a signed `long long` was
+**undefined behaviour** — and not theoretically: UBSan on the emitted code says
+*left shift of 4611686018427387904 by 1 places cannot be represented in type
+'long long'*, and a count of 64 or more is undefined on its own. LLVM IR calls a
+shift by 64 or more **poison**. Wasm masks the count mod 64 by spec, so
+`bit_shl x 70` quietly meant `x << 6` there.
+
+**The contract was already written down**, in the RISC-V backend: a count at or
+beyond the width gives zero for a left shift and the sign bit for a right one,
+chosen there "to match what the other backends give". Three backends had never
+implemented it. They do now — C shifts in `unsigned long long` and guards the
+count, LLVM masks the count so no poison is produced at all and selects, Wasm
+tests the count before shifting — and the interpreter's one disagreement went
+with it: a NEGATIVE count used to return `x` unchanged from `bit_shr`, which no
+compiled backend could reproduce because they compare the count as unsigned.
+One rule, four backends, `test/parity/shift_counts.mere`.
+
+**And the boundary between the two integer widths is pinned rather than
+avoided.** The lexer refuses a literal above 2^62-1 on every backend and says
+why; nothing enforces that on a computed value, and 2^62 is exactly where the
+interpreter's 63-bit int and the compiled backends' 64-bit one part company:
+`bit_shl 1 61` is one number everywhere, `bit_shl 1 62` is two.
+`test/parity/int_width_boundary.mere` declares that difference to the harness,
+which reads it as DIVERGE — so moving it is a failure rather than a surprise,
+and the corpus stops quietly staying under 2^62 without saying why.
+
+**No `bit_ushr`**, and the reason is that boundary rather than effort. A logical
+right shift is a statement about the top bit, and the top bit is what the two
+widths disagree about: `bit_ushr (-8) 1` is 2^63-4 on the compiled backends, a
+value the interpreter cannot hold. Documented in the stdlib reference next to
+the mask convention the varint code here already uses.
+
+---
+
 ## v0.1.511 — 2026-09-23
 
 _Q-154: the comments the formatter was still deleting, and two holes found

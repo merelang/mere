@@ -1,0 +1,23 @@
+// Q-039: where the interpreter's integer stops being the compiled one's.
+//
+// The lexer refuses a literal above 2^62-1 on every backend, and says so:
+// "literals are held in a 63-bit int". Nothing enforces that on a COMPUTED
+// value, and this is where the two widths part company -- the interpreter's int
+// is OCaml's 63-bit one, the compiled backends' is 64 bits wide.
+//
+// 2^61 agrees. 2^62 does not: the interpreter wraps to its own minimum, the
+// compiled backends keep the value. That is not a bug in either one, it is the
+// boundary, and it is pinned here so that MOVING it is a failure rather than a
+// surprise. The `.expected` files next to this one hold what the compiled
+// backends answer; the row reads DIVERGE, which is the harness saying "known".
+//
+// Execution mode: 4 backends, DIVERGE against declared expectations
+
+let _ = print "=== below the boundary: one answer ===";
+let _ = print (show (bit_shl 1 60));
+let _ = print (show (bit_shl 1 61));
+let _ = print (show (bit_shr (bit_shl 1 61) 1));
+
+let _ = print "=== at the boundary: two ===";
+let _ = print (show (bit_shl 1 62));
+print (show (bit_shl 1 63))

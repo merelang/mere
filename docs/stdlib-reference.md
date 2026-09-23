@@ -402,8 +402,36 @@ str_unescape "a\\nb"                          // a + newline + b (3 chars)
 | `bit_or` | `int -> int -> int` | Bitwise OR (v0.1.42) |
 | `bit_xor` | `int -> int -> int` | Bitwise XOR (v0.1.42) |
 | `bit_not` | `int -> int` | Bitwise complement; numerically `-x - 1` on every backend (v0.1.42) |
-| `bit_shl` | `int -> int -> int` | Shift left. Keep counts in `0..62` for portable code — int is 64-bit on C, LLVM and Wasm (widened in v0.1.96 / v0.1.127), 63-bit on interp |
-| `bit_shr` | `int -> int -> int` | **Arithmetic** (sign-propagating) shift right; `bit_shr x n` equals floor division by 2^n on every backend (v0.1.42) |
+| `bit_shl` | `int -> int -> int` | Shift left. A count outside `0..63` gives **0** on every backend (v0.1.512) |
+| `bit_shr` | `int -> int -> int` | **Arithmetic** (sign-propagating) shift right; equals floor division by 2^n (v0.1.42). A count outside `0..63` gives **the sign**: `0` or `-1` (v0.1.512) |
+
+**★ The shift count, and the four answers it used to have** (v0.1.512, Q-039).
+A count at or beyond the width had no shared meaning: the interpreter defined
+one, the C backend's `<<` on a signed `long long` was **undefined behaviour**
+(UBSan: *left shift of 4611686018427387904 by 1 places cannot be represented in
+type 'long long'*), LLVM IR calls a shift by 64 or more **poison**, and Wasm
+masks the count mod 64 by spec — so `bit_shl x 70` quietly meant `x << 6` there.
+The contract had already been written down in the RISC-V backend, which chose
+zero for a left shift and the sign bit for a right one *to match what the other
+backends give*; three backends had never implemented it. They do now, a negative
+count reads as huge-unsigned (out of range) in all four, and
+`test/parity/shift_counts.mere` holds them to it.
+
+**★ Where the interpreter's integer stops being the compiled one's.** The lexer
+refuses a literal above 2^62-1 on every backend and says why — *literals are held
+in a 63-bit int*. Nothing enforces that on a **computed** value, and 2^62 is
+exactly where the two widths part company: `bit_shl 1 61` is one number
+everywhere, `bit_shl 1 62` is `4611686018427387904` on C / LLVM / Wasm and
+`-4611686018427387904` on the interpreter, whose int is OCaml's 63-bit one.
+`test/parity/int_width_boundary.mere` pins that difference rather than hiding
+it, so moving the boundary is a failure and not a surprise.
+
+**This is why there is no `bit_ushr`.** A logical right shift is a statement
+about the top bit, and the top bit is the thing the two widths disagree about:
+`bit_ushr (-8) 1` would be 2^63-4 on the compiled backends, a value the
+interpreter cannot hold at all. Code that needs unsigned semantics masks
+explicitly and stays under 2^62 — which is what the varint work here already
+does with its own `lshr7` / `lshr8`.
 
 **★ A transcendental is not correctly rounded by anybody** (v0.1.248). `exp` and
 `log` reach C through libm, LLVM through `@llvm.exp.f64`, and Wasm through the host's
