@@ -880,6 +880,16 @@ jobs:
           sh scripts/fmt_roundtrip_check.sh
           sh scripts/fmt_roundtrip_check.sh --poison
 
+      # Q-133. The Wasm substring assertions must be capable of failing. 41 of
+      # 97 were not, and 11 were outright false about the user's code; the
+      # vacuity check lives in the test now, and this pins the population and
+      # the size of the skeleton exemption.
+      - name: wasm_assert_strength (the wasm assertions can fail)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/wasm_assert_strength.sh
+          sh scripts/wasm_assert_strength.sh --poison
+
       # Q-052. A local `let` must not write a top-level binding that shares its
       # name. The same bug was fixed on Wasm first and shipped with NO gate,
       # which is exactly how the LLVM side stayed broken; this asks both.

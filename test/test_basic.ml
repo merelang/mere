@@ -5518,13 +5518,131 @@ let () =
     let main_ty = Typer.infer !type_env (Ast.desugar_program prog) in
     Codegen_wasm.emit_program ~main_ty prog
   in
+  (* Q-133. A SUBSTRING ASSERTION ON A WASM MODULE IS ONLY A CHECK IF THE
+     STRING WOULD BE ABSENT FROM A PROGRAM THAT DOES NOT HAVE THE FEATURE, and
+     for a long time 41 of these were not: the emitted module carries the whole
+     runtime -- 58 `$__lang_*` functions for the program `0` -- so a needle
+     naming an opcode matched no matter what was compiled.
+
+     ⚠ AND ELEVEN OF THEM WERE FALSE, which the record said none were. Asked
+     about the USER'S code rather than about the module, `i32.mul` is `i64.mul`,
+     `i32.eq` is `i64.eq`, and `i32.and` is nothing at all -- survivors of the
+     i32→i64 widening that the earlier sweep missed because it only asked what
+     was false module-wide.
+
+     WHAT COUNTS AS THE PROGRAM'S OWN CODE IS DECIDED BY THE CONTROL, not by a
+     list of name prefixes. Every function the trivial program `0` also defines
+     is boilerplate; `$main` is the exception, because that is where the
+     program's own body goes. A list of prefixes would have to be maintained,
+     and the first thing it got wrong was `$show_WCgCol8` -- generated FOR THE
+     USER'S TYPE and named like a runtime helper. *)
+  let wasm_fn_names (wat : string) : string list =
+    List.filter_map (fun line ->
+      let t = String.trim line in
+      let starts p =
+        String.length t >= String.length p && String.sub t 0 (String.length p) = p
+      in
+      if not (starts "(func $") then None
+      else begin
+        let rest = String.sub t 7 (String.length t - 7) in
+        let stop =
+          match String.index_opt rest ' ' with
+          | Some i -> i
+          | None ->
+            (match String.index_opt rest ')' with
+             | Some i -> i | None -> String.length rest)
+        in
+        Some (String.sub rest 0 stop)
+      end) (String.split_on_char '\n' wat)
+  in
+  let wasm_control = wasm "0" in
+  let wasm_boilerplate_fns =
+    List.filter (fun n -> n <> "main") (wasm_fn_names wasm_control)
+  in
+  let wasm_user_part (wat : string) : string =
+    let indent line =
+      let n = String.length line in
+      let rec go i = if i < n && line.[i] = ' ' then go (i + 1) else i in go 0
+    in
+    let skip = ref false in
+    let keep = List.filter (fun line ->
+      let t = String.trim line in
+      let starts p =
+        String.length t >= String.length p && String.sub t 0 (String.length p) = p
+      in
+      (* ⚠ A MODULE-LEVEL SECTION ENDS THE SKIP, not just the next function.
+         `(data …)`, `(table …)` and `(elem …)` sit at the same indentation as
+         `(func` and often AFTER the last one, so a skip that only ended at the
+         next function swallowed them -- and with them every assertion about a
+         string literal reaching a data segment. *)
+      if starts "(" && indent line <= 2 then begin
+        skip := false;
+        if starts "(func $" then begin
+          let rest = String.sub t 7 (String.length t - 7) in
+          let stop =
+            match String.index_opt rest ' ' with
+            | Some i -> i
+            | None ->
+              (match String.index_opt rest ')' with
+               | Some i -> i | None -> String.length rest)
+          in
+          skip := List.mem (String.sub rest 0 stop) wasm_boilerplate_fns
+        end
+      end;
+      (* ⚠ A `;;` comment is prose, never evidence. The word "else" appears in
+         one of the runtime's comments, which made an assertion about an `if`
+         having an else branch look vacuous. *)
+      let is_comment =
+        String.length t >= 2 && String.sub t 0 2 = ";;"
+      in
+      (not !skip) && not is_comment) (String.split_on_char '\n' wat)
+    in
+    String.concat "\n" keep
+  in
+  let wasm_control_user = wasm_user_part wasm_control in
+  (* How many assertions took the skeleton exemption. Pinned below, so the way
+     out cannot widen without somebody choosing to widen it. *)
+  let wasm_module_exemptions = ref 0 in
+  (* ⚠ The two ways this fails are different repairs, so they are printed
+     differently: "not in the subject" means the claim is wrong, "also in the
+     control" means the claim is unfalsifiable. *)
+  let assert_wasm name out needle =
+    let user = wasm_user_part out in
+    if not (contains user needle) then begin
+      incr fail;
+      Printf.printf
+        "FAIL  %s\n  expected in the PROGRAM'S OWN code: %s\n  its code was:%s\n"
+        name needle user
+    end else if contains wasm_control_user needle then begin
+      incr fail;
+      Printf.printf
+        "FAIL  %s\n  vacuous: %s is also in the control program `0`, so it is evidence about the runtime and not about this program\n"
+        name needle
+    end else begin
+      incr pass; Printf.printf "PASS  %s\n" name
+    end
+  in
+  (* The skeleton every module has: the `(module` header, the exported memory,
+     the imported host `puts`. These are worth asserting and CANNOT be
+     discriminating -- the control has them too, which is the point. Separated
+     so that "this claims a feature" and "this claims the shape" are not the
+     same sentence. *)
+  let assert_wasm_module name out needle =
+    incr wasm_module_exemptions;
+    if contains out needle then begin
+      incr pass; Printf.printf "PASS  %s\n" name
+    end else begin
+      incr fail;
+      Printf.printf "FAIL  %s\n  expected in the module: %s\n" name needle
+    end
+  in
   (* 2048 dogfood P2: a user-bound `spawn` must NOT dispatch to the
      concurrency builtin (which would drag in shared memory + $mere_spawn).
      Port of the C backend's mk-P2 `join` shadowing fix. *)
   assert_no_contains "wasm: shadowed spawn stays an ordinary call"
     (wasm_with_decls "let spawn = fn (n: int) -> n * 2; spawn 21")
     "mere_spawn";
-  assert_contains "wasm: genuine spawn still lowers to $mere_spawn"
+  assert_wasm "wasm: genuine spawn still lowers to $mere_spawn"
     (wasm_with_decls "let cw = fn (u: unit) -> print \"x\" in let h = spawn cw in join h")
     "mere_spawn";
   (* 2048 dogfood P3: two same-named inner fns in one host (a `let rec go`
@@ -5547,50 +5665,50 @@ let () =
      application — `worker_call req` on a two-argument extern produced WAT
      wat2wasm rejected. It now eta-wraps, so the partial application
      builds a closure and reaches its callee through the function table. *)
-  assert_contains "wasm: a partially applied extern becomes a closure"
+  assert_wasm "wasm: a partially applied extern becomes a closure"
     (wasm_with_decls "extern fn two: str -> (str -> unit) -> unit;\n\
            let task = two \"hi\" in\n\
            let _ = task (fn (s: str) -> print s) in 0")
     "call_indirect";
-  assert_contains "wasm: a saturated extern still calls directly"
+  assert_wasm "wasm: a saturated extern still calls directly"
     (wasm_with_decls "extern fn two: str -> (str -> unit) -> unit;\n\
            let _ = two \"hi\" (fn (s: str) -> print s) in 0")
     "call $two";
-  assert_contains "wasm: emits (module"
+  assert_wasm_module "wasm: emits (module"
     (wasm "42") "(module";
-  assert_contains "wasm: exports main with i32 result"
+  assert_wasm_module "wasm: exports main with i32 result"
     (wasm "42") "(func $main (export \"main\") (result i32)";
   (* Q-012 step 3b-4f: a non-threaded program keeps its own unshared memory;
      a program that spawns switches to a host-imported shared memory and
      pulls the spawn/join host imports. Verified end-to-end on node
      worker_threads (a worker instantiates the same module over the shared
      memory and runs the closure via the indirect function table). *)
-  assert_contains "wasm: non-threaded program declares its own memory"
+  assert_wasm_module "wasm: non-threaded program declares its own memory"
     (wasm "42") "(memory (export \"memory\") 1024)";
-  assert_contains "wasm: spawn switches to imported shared memory"
+  assert_wasm "wasm: spawn switches to imported shared memory"
     (wasm_with_decls "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
     "(import \"env\" \"memory\" (memory 1024 65536 shared))";
-  assert_contains "wasm: spawn emits the mere_spawn host import + call"
+  assert_wasm "wasm: spawn emits the mere_spawn host import + call"
     (wasm_with_decls "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
     "call $mere_spawn";
   (* Channels are host imports over the shared memory (the host does the
      atomic queue via JS Atomics). Verified end-to-end: a 4-way parallel
      fan-out/fan-in runs under node on all four backends including Wasm. *)
-  assert_contains "wasm: channel_new / send / recv are host imports"
+  assert_wasm "wasm: channel_new / send / recv are host imports"
     (wasm_with_decls
       "let ch = channel_new () in \
        let _ = spawn (fn u -> channel_send ch 7) in \
        channel_recv ch")
     "call $mere_channel_recv";
-  assert_contains "wasm: int literal becomes i64.const"
+  assert_wasm "wasm: int literal becomes i64.const"
     (wasm "42") "i64.const 42";
-  assert_contains "wasm: add maps to i64.add"
+  assert_wasm "wasm: add maps to i64.add"
     (wasm "1 + 2") "i64.add";
-  assert_contains "wasm: mul maps to i64.mul"
-    (wasm "3 * 4") "i32.mul";
-  assert_contains "wasm: sdiv via i32.div_s"
-    (wasm "10 / 2") "i64.div_s";
-  assert_contains "wasm: < maps to i32.lt_s"
+  assert_wasm "wasm: mul maps to i64.mul"
+    (wasm "3 * 4") "i64.mul";
+  assert_wasm "wasm: sdiv lowers to a call to $__lang_idiv"
+    (wasm "10 / 2") "call $__lang_idiv";
+  assert_wasm "wasm: < maps to i32.lt_s"
     (wasm "if 1 < 2 then 10 else 20") "i64.lt_s";
   (* This asked for `if (result i32)` and passed for years without ever
      looking at the program under test: an `int`-valued `if` emits
@@ -5599,18 +5717,18 @@ let () =
      surfaced when the Wasm backend stopped emitting unreachable prelude
      functions and the accidental match went away with them. The i64 spelling
      is checked to discriminate: zero occurrences in `1 + 2`, one here. *)
-  assert_contains "wasm: if uses if/else/end"
+  assert_wasm "wasm: if uses if/else/end"
     (wasm "if 1 < 2 then 10 else 20") "if (result i64)";
-  assert_contains "wasm: if has else branch"
+  assert_wasm "wasm: if has else branch"
     (wasm "if 1 < 2 then 10 else 20") "else";
-  assert_contains "wasm: let allocates local slot"
+  assert_wasm "wasm: let allocates local slot"
     (wasm "let x = 5 in x * x") "local.set 0";
-  assert_contains "wasm: var reads via local.get"
+  assert_wasm "wasm: var reads via local.get"
     (wasm "let x = 5 in x") "local.get 0";
-  assert_contains "wasm: locals declared at fn start"
+  assert_wasm "wasm: locals declared at fn start"
     (wasm "let x = 5 in x") "(local i64)";
-  assert_contains "wasm: bool literal as i32"
-    (wasm "true") "i64.const 1";
+  assert_wasm "wasm: bool literal is i64.const 1"
+    (wasm "true") "i64.const 1\n    call $show_bool";
   (* v0.1.34: && short-circuits (Logic lowers to If) — the strict
      i32.and evaluated both operands and trapped on guarded vec_get. *)
   (* i32 spellings here described a layout the backend left behind, and kept
@@ -5618,26 +5736,26 @@ let () =
      not use. Pruning unreachable prelude functions took those helpers away and
      the assertions stopped being true. Each replacement below was read off
      $main and checked to be absent from the program `0`. *)
-  assert_contains "wasm: && lowers to a short-circuit if"
+  assert_wasm "wasm: && lowers to a short-circuit if"
     (wasm "true && false") "if (result i64)";
 
   (* --- Wasm codegen: function lifting + recursion (Phase 6.2) ---
      Top-level fns lift to `(func $name (param i32) (result i32))`, direct calls
      become `call $name`, and mutual recursion works within the same module
      (Wasm allows forward references). *)
-  assert_contains "wasm: top-level fn lifted to (func $name)"
+  assert_wasm "wasm: top-level fn lifted to (func $name)"
     (wasm "let inc = fn x -> x + 1 in inc 5")
     "(func $inc (param i64) (result i64)";
-  assert_contains "wasm: direct call uses call $name"
+  assert_wasm "wasm: direct call uses call $name"
     (wasm "let inc = fn x -> x + 1 in inc 5")
     "call $inc";
-  assert_contains "wasm: param read via local.get 0"
+  assert_wasm "wasm: param read via local.get 0"
     (wasm "let inc = fn x -> x + 1 in inc 5")
     "local.get 0";
-  assert_contains "wasm: self-recursion compiles"
+  assert_wasm "wasm: self-recursion compiles"
     (wasm "let rec fact = fn n -> if n <= 1 then 1 else n * fact (n - 1) in fact 5")
     "call $fact";
-  assert_contains "wasm: mutual recursion: both fns defined"
+  assert_wasm "wasm: mutual recursion: both fns defined"
     (wasm "let rec is_even = fn n -> if n == 0 then true else is_odd (n - 1)\n\
            and is_odd = fn n -> if n == 0 then false else is_even (n - 1)\n\
            in is_even 4")
@@ -5647,33 +5765,25 @@ let () =
      Strings live in linear memory: Str_lit goes into a data segment, dynamic
      allocation uses a bump-pointer global, $__lang_strlen / $__lang_str_concat
      are defined inline in WAT, and print uses a host import (env.puts). *)
-  assert_contains "wasm: memory declared + exported"
-    (wasm "\"hi\"") "(memory (export \"memory\") 1024)";
   (* Bump-pointer global is now exported ("__lang_bump") so the JS
      host can advance it from extern-fn implementations (Phase 55.x
      onwards). Match the prefix — the (export "…") attribute lands
      between the name and the (mut i32) type. *)
-  assert_contains "wasm: bump pointer global declared"
+  assert_wasm_module "wasm: bump pointer global declared"
     (wasm "\"hi\"") "(global $__lang_bump";
-  assert_contains "wasm: puts imported"
+  assert_wasm_module "wasm: puts imported"
     (wasm "\"hi\"") "(import \"env\" \"puts\" (func $puts_h (param i32)))";
-  assert_contains "wasm: str literal becomes data segment"
-    (wasm "\"hi\"") "(data (i32.const ";
-  assert_contains "wasm: str_len calls $__lang_strlen"
+  assert_wasm "wasm: str literal becomes data segment"
+    (wasm "\"hi\"") "\\02\\00\\00\\00hi\\00";
+  assert_wasm "wasm: str_len calls $__lang_strlen"
     (wasm "str_len \"hi\"") "call $__lang_strlen";
-  assert_contains "wasm: ++ calls $__lang_str_concat"
+  assert_wasm "wasm: ++ calls $__lang_str_concat"
     (wasm "\"a\" ++ \"b\"") "call $__lang_str_concat";
-  assert_contains "wasm: print calls $puts"
+  assert_wasm_module "wasm: print calls $puts"
     (wasm "print \"hi\"") "call $puts";
-  assert_contains "wasm: __lang_strlen helper defined"
-    (wasm "\"hi\"") "(func $__lang_strlen";
-  assert_contains "wasm: __lang_str_concat helper defined"
-    (wasm "\"hi\"") "(func $__lang_str_concat";
   (* Phase 19.1.1: str_index_of codegen *)
-  assert_contains "wasm: str_index_of calls $__lang_str_index_of"
+  assert_wasm "wasm: str_index_of calls $__lang_str_index_of"
     (wasm "str_index_of \"hi\" \"i\"") "call $__lang_str_index_of";
-  assert_contains "wasm: __lang_str_index_of helper defined"
-    (wasm "str_index_of \"hi\" \"i\"") "(func $__lang_str_index_of";
 
   (* --- Wasm codegen: tuple (Phase 6.4) ---
      Tuples live in linear memory: each element is 8 bytes (i64), so the second
@@ -5687,19 +5797,19 @@ let () =
      functions took the helpers away and the assertions stopped being true,
      which is the only reason anyone found out. Each needle below was read off
      $main and checked to be absent from the program `0`. *)
-  assert_contains "wasm: tuple stores via i64.store offset"
+  assert_wasm "wasm: tuple stores via i64.store offset"
     (wasm "let p = (1, 2) in fst p + snd p")
     "i64.store offset=0";
-  assert_contains "wasm: tuple stores second element at offset=8"
+  assert_wasm "wasm: tuple stores second element at offset=8"
     (wasm "let p = (1, 2) in fst p + snd p")
     "i64.store offset=8";
-  assert_contains "wasm: fst lowers to i64.load offset=0"
+  assert_wasm "wasm: fst lowers to i64.load offset=0"
     (wasm "let p = (1, 2) in fst p")
     "i64.load offset=0";
-  assert_contains "wasm: snd lowers to i64.load offset=8"
+  assert_wasm "wasm: snd lowers to i64.load offset=8"
     (wasm "let p = (1, 2) in snd p")
     "i64.load offset=8";
-  assert_contains "wasm: tuple reserves space via bump advance"
+  assert_wasm "wasm: tuple reserves space via bump advance"
     (wasm "(1, 2)")
     "global.set $__lang_bump";
 
@@ -5708,22 +5818,22 @@ let () =
      i32.store in declaration order, Field_get becomes i32.load offset from the
      field index, and Record_update reserves a new buffer and copies non-updated
      fields via load. *)
-  assert_contains "wasm: record literal stores fields at offset"
+  assert_wasm "wasm: record literal stores fields at offset"
     (wasm_with_decls
       "type WCgRect = { w: int, h: int };\n\
        let r = WCgRect { w = 3, h = 4 } in r.w * r.h")
     "i64.store offset=0";
-  assert_contains "wasm: record field access via i64.load offset"
+  assert_wasm "wasm: record field access via i64.load offset"
     (wasm_with_decls
       "type WCgPt = { x: int, y: int };\n\
        let p = WCgPt { x = 1, y = 2 } in p.y")
     "i64.load offset=8";
-  assert_contains "wasm: record update reserves new struct"
+  assert_wasm "wasm: record update reserves new struct"
     (wasm_with_decls
       "type WCgPt2 = { x: int, y: int };\n\
        let p = WCgPt2 { x = 1, y = 2 } in { p | x = 100 }.x")
     "global.set $__lang_bump";
-  assert_contains "wasm: record-returning fn uses i32 return"
+  assert_wasm "wasm: record-returning fn uses i32 return"
     (wasm_with_decls
       "type WCgPt3 = { x: int, y: int };\n\
        let mk = fn n -> WCgPt3 { x = n, y = n + 1 } in (mk 5).x")
@@ -5733,32 +5843,32 @@ let () =
      Variants live in linear memory too: {i32 tag} (nullary) or {i32 tag, i32 payload}.
      Constr does alloc + store tag (+ payload); Match does tag load + a nested
      if/else chain; fallthrough traps via unreachable. *)
-  assert_contains "wasm: nullary variant Constr stores tag"
+  assert_wasm "wasm: nullary variant Constr stores tag"
     (wasm_with_decls
       "type WCgCol1 = WCgR1 | WCgG1 | WCgB1;\n\
        WCgG1")
     "i64.store offset=0";
-  assert_contains "wasm: variant with payload stores payload at offset=8"
+  assert_wasm "wasm: variant with payload stores payload at offset=8"
     (wasm_with_decls
       "type WCgStat1 = WCgOk1 | WCgErr1 of int;\n\
        WCgErr1 42")
     "i64.store offset=8";
-  assert_contains "wasm: Match loads tag at offset=0"
+  assert_wasm "wasm: Match loads tag at offset=0"
     (wasm_with_decls
       "type WCgCol2 = WCgR2 | WCgG2;\n\
        match WCgR2 with | WCgR2 -> 1 | WCgG2 -> 2")
     "i64.load offset=0";
-  assert_contains "wasm: Match dispatches with i32.eq + if"
+  assert_wasm "wasm: Match dispatches with i64.eq + if"
     (wasm_with_decls
       "type WCgCol3 = WCgR3 | WCgG3;\n\
        match WCgR3 with | WCgR3 -> 1 | WCgG3 -> 2")
-    "i32.eq";
-  assert_contains "wasm: Match fallthrough is unreachable"
+    "i64.eq";
+  assert_wasm "wasm: Match fallthrough names the failure"
     (wasm_with_decls
       "type WCgCol4 = WCgR4 | WCgG4;\n\
        match WCgR4 with | WCgR4 -> 1 | WCgG4 -> 2")
-    "unreachable";
-  assert_contains "wasm: payload bind loads via offset=8"
+    "no matching arm in match";
+  assert_wasm "wasm: payload bind loads via offset=8"
     (wasm_with_decls
       "type WCgStat2 = WCgOk2 | WCgErr2 of int;\n\
        match WCgErr2 5 with | WCgOk2 -> 0 | WCgErr2 n -> n")
@@ -5768,25 +5878,25 @@ let () =
      Closure = 8-byte memory struct `{ env_offset, fn_table_idx }`.
      Top-level fn adapter + indirect App via call_indirect (type $cl).
      Anonymous Fun captures env in memory + adapter loads them. *)
-  assert_contains "wasm: closure type declared"
+  assert_wasm_module "wasm: closure type declared"
     (wasm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "(type $cl (func (param i64) (param i64) (result i64)))";
-  assert_contains "wasm: function table declared"
+  assert_wasm_module "wasm: function table declared"
     (wasm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "(table ";
-  assert_contains "wasm: top-level adapter emitted"
+  assert_wasm "wasm: top-level adapter emitted"
     (wasm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "(func $inc_closure (param i64) (param i64) (result i64)";
-  assert_contains "wasm: elem section places adapters"
+  assert_wasm "wasm: elem section places adapters"
     (wasm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "(elem (i32.const 0)";
-  assert_contains "wasm: indirect App uses call_indirect"
+  assert_wasm "wasm: indirect App uses call_indirect"
     (wasm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "call_indirect (type $cl)";
   (* Q-139 changed the program, not the question: `(make_adder 5) 10` is a
      saturated two-argument call and now goes straight to the uncurried twin,
      so no anonymous closure is built at all. Asked with one that still is. *)
-  assert_contains "wasm: anonymous Fun adapter emitted"
+  assert_wasm "wasm: anonymous Fun adapter emitted"
     (wasm "let make_adder = fn n -> fn x -> x + n in\n           let add5 = make_adder 5 in add5 10")
     "(func $anon_0_fn (param i64) (param i64) (result i64)";
   (* Q-139 changed the PROGRAM this asks with, not the question. `(make_adder
@@ -5796,7 +5906,7 @@ let () =
      load its captures from env" is still worth asking, so it is asked with a
      program that still builds one: the partial application is bound, and only
      then applied. *)
-  assert_contains "wasm: anonymous adapter loads captures from env"
+  assert_wasm "wasm: anonymous adapter loads captures from env"
     (wasm "let make_adder = fn n -> fn x -> x + n in\n           let add5 = make_adder 5 in add5 10")
     "i32.load offset=0";
 
@@ -5804,32 +5914,32 @@ let () =
      LIFO region (save/restore bump pointer on Region_block entry/exit),
      Ref allocs + stores + returns ptr, With Drop auto-calls close field
      via call_indirect, view literal uses the same bump alloc as record. *)
-  assert_contains "wasm: Region_block saves bump pointer"
+  assert_wasm "wasm: Region_block saves bump pointer"
     (wasm "region R { 42 }")
     "global.set $__lang_bump";
   (* i64, not i32: same widening as the tuple block above, same accidental
      match in an unused runtime helper keeping it green. Read off $main;
      absent from the program `0`. *)
-  assert_contains "wasm: Ref stores value at allocated slot"
+  assert_wasm "wasm: Ref stores value at allocated slot"
     (wasm "region R { let x = &R 5 in 42 }")
     "i64.store offset=0";
-  assert_contains "wasm: with calls close via call_indirect"
+  assert_wasm "wasm: with calls close via call_indirect"
     (wasm_with_decls
       "drop type WCgConn = { id: int, close: unit -> unit };\n\
        let mk = fn i -> WCgConn { id = i, close = fn () -> () } in\n\
        with c = mk 7 in c.id")
     "call_indirect (type $cl)";
-  assert_contains "wasm: view literal stores fields"
+  assert_wasm "wasm: view literal stores fields"
     (wasm_with_decls
       "view WCgCellW[R] of int { v: int };\n\
        region R { let c = WCgCellW { v = 7 } in c.v }")
     "i64.store offset=0";
-  assert_contains "wasm: view field access via i64.load offset"
+  assert_wasm "wasm: view field access via i64.load offset"
     (wasm_with_decls
       "view WCgCellW2[R] of int { v: int, w: int };\n\
        region R { let c = WCgCellW2 { v = 7, w = 9 } in c.w }")
     "i64.load offset=8";
-  assert_contains "wasm: Unit_lit becomes i32.const 0"
+  assert_wasm_module "wasm: Unit_lit becomes i32.const 0"
     (wasm "fn () -> ()") "i32.const 0";
 
   (* --- Wasm codegen: poly variant/record + recursive variant + P_tuple
@@ -5838,22 +5948,22 @@ let () =
      polymorphic variants/records need no monomorphization, and recursive variants
      (e.g. `'a list`'s Cons) share the same memory layout. Match's Cons (h, t)
      also reads the payload as a tuple offset, chaining extractvalues. *)
-  assert_contains "wasm: polymorphic variant works without specialization"
+  assert_wasm "wasm: polymorphic variant works without specialization"
     (wasm_with_decls
       "type 'a WCgOpt = WCgN | WCgS of 'a;\n\
        match WCgS 42 with | WCgN -> 0 | WCgS n -> n")
-    "i32.eq";
-  assert_contains "wasm: polymorphic record works without specialization"
+    "i64.store offset=8";
+  assert_wasm "wasm: polymorphic record works without specialization"
     (wasm_with_decls
       "type 'a WCgBox = { v: 'a };\n\
        let b = WCgBox { v = 42 } in b.v")
     "i64.store offset=0";
-  assert_contains "wasm: recursive variant Cons stores tuple payload"
+  assert_wasm "wasm: recursive variant Cons stores tuple payload"
     (wasm_with_decls
       "type 'a WCgList = WCgNil | WCgCons of 'a * 'a WCgList;\n\
        WCgCons (1, WCgNil)")
     "i64.store offset=8";
-  assert_contains "wasm: P_tuple sub-pattern extracts elements"
+  assert_wasm "wasm: P_tuple sub-pattern extracts elements"
     (wasm_with_decls
       "type 'a WCgList2 = WCgNil2 | WCgCons2 of 'a * 'a WCgList2;\n\
        let rec sum = fn xs -> match xs with\n\
@@ -5865,37 +5975,37 @@ let () =
   (* --- Wasm codegen: complex pattern (Phase 6.10) ---
      P_int / P_bool / P_str (via @__lang_streq) / P_unit / P_record / P_as /
      nested ctor / or-pattern (pre-flattened) / guard. *)
-  assert_contains "wasm: streq runtime helper emitted"
-    (wasm "match \"hi\" with | \"hi\" -> 1 | _ -> 0")
-    "(func $__lang_streq";
-  assert_contains "wasm: P_int via i32.eq"
-    (wasm "match 3 with | 0 -> 1 | 3 -> 2 | _ -> 9")
-    "i32.eq";
-  assert_contains "wasm: P_str via streq call"
+  assert_wasm "wasm: a str pattern calls $__lang_streq"
     (wasm "match \"hi\" with | \"hi\" -> 1 | _ -> 0")
     "call $__lang_streq";
-  assert_contains "wasm: P_bool via i32.eq"
+  assert_wasm "wasm: P_int via i64.eq"
+    (wasm "match 3 with | 0 -> 1 | 3 -> 2 | _ -> 9")
+    "i64.eq";
+  assert_wasm "wasm: P_str via streq call"
+    (wasm "match \"hi\" with | \"hi\" -> 1 | _ -> 0")
+    "call $__lang_streq";
+  assert_wasm "wasm: P_bool via i64.eq"
     (wasm "match true with | false -> 0 | true -> 1")
-    "i32.eq";
-  assert_contains "wasm: record pattern via i64.load offset"
+    "i64.eq";
+  assert_wasm "wasm: record pattern via i64.load offset"
     (wasm_with_decls
       "type WCgPt5 = { x: int, y: int };\n\
        match WCgPt5 { x = 3, y = 4 } with | WCgPt5 { x = a, y = b } -> a + b")
     "i64.load offset=0";
-  assert_contains "wasm: nested ctor with combined i32.and"
+  assert_wasm "wasm: nested ctor compares tags with i64.eq"
     (wasm_with_decls
       "type 'a WCgOpt7 = WCgN7 | WCgS7 of 'a;\n\
        match WCgS7 (WCgS7 7) with\n\
          | WCgN7 -> 0\n\
          | WCgS7 WCgN7 -> 1\n\
          | WCgS7 (WCgS7 n) -> n")
-    "i32.and";
-  assert_contains "wasm: or-pattern flattens to multiple arms"
+    "i64.eq";
+  assert_wasm "wasm: or-pattern flattens to multiple arms"
     (wasm_with_decls
       "type WCgCol9 = WCg9A | WCg9B | WCg9C;\n\
        match WCg9B with | WCg9A | WCg9B -> 1 | WCg9C -> 2")
     "if (result i64)";
-  assert_contains "wasm: match guard short-circuits via inner if"
+  assert_wasm "wasm: match guard short-circuits via inner if"
     (wasm
        "match 7 with | n when n < 5 -> 100 | n when n < 10 -> 200 | _ -> 300")
     "if (result i32)";
@@ -5904,27 +6014,27 @@ let () =
      Equivalent to LLVM Phase 5.12. show is self-contained: int->string
      conversion is implemented inside Wasm too, and composition of
      strings/tuples/records/variants is done via __lang_str_concat. *)
-  assert_contains "wasm: show_int defined"
+  assert_wasm_module "wasm: show_int defined"
     (wasm "show 42") "(func $show_int";
-  assert_contains "wasm: show int call site"
+  assert_wasm_module "wasm: show int call site"
     (wasm "show 42") "call $show_int";
-  assert_contains "wasm: show_bool selects between true/false offsets"
+  assert_wasm "wasm: show_bool selects between true/false offsets"
     (wasm "show true") "(func $show_bool";
-  assert_contains "wasm: show_str wraps via str_concat"
+  assert_wasm "wasm: show_str wraps via str_concat"
     (wasm "show \"hi\"") "(func $show_str";
-  assert_contains "wasm: show tuple composes elements"
+  assert_wasm "wasm: show tuple composes elements"
     (wasm "show (1, \"hi\")") "(func $show_tuple_int_str";
-  assert_contains "wasm: show variant tag dispatch"
+  assert_wasm "wasm: show variant tag dispatch"
     (wasm_with_decls
       "type WCgCol8 = WCg8A | WCg8B;\n\
        show WCg8A")
     "(func $show_WCgCol8";
-  assert_contains "wasm: show poly variant uses mono name"
+  assert_wasm "wasm: show poly variant uses mono name"
     (wasm_with_decls
       "type 'a WCgOpt7 = WCgN7 | WCgS7 of 'a;\n\
        show (WCgS7 1)")
     "(func $show_WCgOpt7_int";
-  assert_contains "wasm: show record"
+  assert_wasm "wasm: show record"
     (wasm_with_decls
       "type WCgPt6 = { x: int, y: int };\n\
        show (WCgPt6 { x = 1, y = 2 })")
@@ -5933,33 +6043,33 @@ let () =
   (* --- Wasm codegen: list show in `[a, b, c]` format (Phase 6.12) ---
      Special-case `'a list = Nil | Cons of 'a * 'a list` to render as an
      array-style string. *)
-  assert_contains "wasm: list show uses loop / block"
+  assert_wasm "wasm: list show uses loop / block"
     (wasm_with_decls
       "type 'a list = Nil | Cons of 'a * 'a list;\n\
        show [1, 2, 3]")
     "(loop $lp";
-  assert_contains "wasm: list show concats element show"
+  assert_wasm "wasm: list show concats element show"
     (wasm_with_decls
       "type 'a list = Nil | Cons of 'a * 'a list;\n\
        show [1, 2, 3]")
     "call $__lang_str_concat";
-  assert_contains "wasm: list show special-case fn defined"
+  assert_wasm "wasm: list show special-case fn defined"
     (wasm_with_decls
       "type 'a list = Nil | Cons of 'a * 'a list;\n\
        show [1, 2, 3]")
     "(func $show_list_int";
 
   (* Phase 16.3: mk_logger / mk_metrics Wasm codegen. *)
-  assert_contains "wasm: mk_logger calls $__mere_mk_logger"
+  assert_wasm "wasm: mk_logger calls $__mere_mk_logger"
     (wasm "let lg = mk_logger \"app\" in lg.info \"hi\"")
     "call $__mere_mk_logger";
-  assert_contains "wasm: logger info helper defined"
+  assert_wasm "wasm: logger info helper defined"
     (wasm "let lg = mk_logger \"app\" in lg.info \"hi\"")
     "(func $__mere_logger_info_fn";
-  assert_contains "wasm: logger format prefix in data"
+  assert_wasm "wasm: logger format prefix in data"
     (wasm "let lg = mk_logger \"app\" in lg.info \"hi\"")
     " [INFO] ";
-  assert_contains "wasm: mk_metrics calls $__mere_mk_metrics"
+  assert_wasm "wasm: mk_metrics calls $__mere_mk_metrics"
     (wasm "let m = mk_metrics () in m.inc \"x\"")
     "call $__mere_mk_metrics";
 
@@ -5968,16 +6078,16 @@ let () =
      region that escape to the outside (e.g. the OwnedVec from
      `let v = region R { vec_to_owned ... }`) are not overwritten by
      subsequent allocations. *)
-  assert_contains "wasm: Region_block emits body directly (no save/restore)"
+  assert_wasm_module "wasm: Region_block emits body directly (no save/restore)"
     (wasm "region R { 42 }")
     "(func $main";
   (* v0.1.37: regions RECLAIM on Wasm again — the sound replacement for
      the Phase 16.4 leak semantics (which this test used to pin). The
      block saves the bump, evaluates the body, copies its result out
      (boxed results, via $__mcopy_<tag>), and restores. *)
-  assert_contains "wasm: region block releases the bump on exit"
+  assert_wasm "wasm: region block releases the bump on exit"
     (wasm "region R { 42 }") "global.set $__rgn_tmp";
-  assert_contains "wasm: region block copies a boxed result out"
+  assert_wasm "wasm: region block copies a boxed result out"
     (wasm "str_len (region R { \"a\" ++ \"b\" })") "call $__mcopy_str";
   (* Q-132: THIS TEST USED TO ASSERT THE OPPOSITE, and the refusal it pinned was both
      over-strict and not the rule it claimed to be. It rejected a store into a container
@@ -5986,13 +6096,21 @@ let () =
      unboxed-element exemption let the reallocated BUFFER dangle. A guard that has to be
      right about every store in the program cannot be syntactic. Now the block gives up
      the part of its range something outside can still reach, and the store compiles. *)
-  assert_contains "wasm: a store into a container older than the block compiles"
+  assert_wasm "wasm: a store into a container older than the block compiles"
     (wasm "let v = vec_new () in \
            let _ = region R { vec_push v (\"a\" ++ \"b\") } in \
            vec_len v")
     "call $__lang_protect";
-  assert_contains "wasm: and the block's release is bounded by the high-water mark"
+  assert_wasm "wasm: and the block's release is bounded by the high-water mark"
     (wasm "region R { 42 }") "global.get $__lang_hwm";
+  (* ⚠ THE WAY OUT IS PINNED. `assert_wasm_module` skips the vacuity check on
+     purpose -- `(module`, the exported memory and the imported `puts` are the
+     skeleton every module has, and a check that they are discriminating would
+     be asking for a lie. But an exemption nobody counts is how 41 assertions
+     became evidence about the runtime instead of about a program, so the number
+     of them is a number somebody has to change on purpose. *)
+  check "wasm: how many assertions take the skeleton exemption"
+    (string_of_int !wasm_module_exemptions) "12";
   (* What is still refused, and the message has to say "unsupported in ... codegen
      subset" -- not because the phrase is prettier: `scripts/parity.sh` reads it to tell a
      DOCUMENTED LIMIT from a backend that fell over. Worded as "not supported yet" this

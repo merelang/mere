@@ -1,87 +1,107 @@
 #!/bin/sh
-# scripts/wasm_assert_strength.sh -- which Wasm substring assertions would pass
-# for any program at all.
+# scripts/wasm_assert_strength.sh -- the Wasm substring assertions must be
+# capable of failing, and the exemption from that must stay small.
 #
-# WHAT THIS IS. test/test_basic.ml checks the Wasm backend in places by
-# compiling a small program and asserting that some string appears in the
-# emitted module. That is only a check if the string would be ABSENT from a
-# program that does not have the feature. Many of them are not: the emitted
-# runtime contains nearly every opcode, so an assertion naming one passes no
-# matter what was compiled.
+# Q-133. `test/test_basic.ml` checks the Wasm backend by compiling a small
+# program and asserting that some string appears in the emitted module. That is
+# only a check if the string would be ABSENT from a program without the feature,
+# and 41 of the 97 were not: the module carries the whole runtime -- 58
+# `$__lang_*` functions for the program `0` -- so a needle naming an opcode
+# matched whatever was compiled.
 #
-# HOW IT FOUND OUT IT MATTERED. Twenty of these were not merely weak, they were
-# false -- they asked for i32 spellings and offset=4, the memory layout from
-# before the value representation widened, and matched runtime helper functions
-# the program under test does not use. They survived that layout change for a
-# long time, and only surfaced when the backend stopped emitting unreachable
-# prelude functions and the accidental match went away with them. Those are
-# fixed. This script is about the rest.
+# ⚠ AND ELEVEN OF THEM WERE FALSE, where the record said none were. Asked about
+# the USER'S code instead of the module, `i32.mul` was `i64.mul`, `i32.eq` was
+# `i64.eq`, and `i32.and` was nothing at all -- survivors of the i32→i64
+# widening. The earlier sweep missed them because it only asked what was false
+# MODULE-WIDE, and module-wide they were all true.
 #
-# THE TEST IS A CONTROL PROGRAM. Compile the trivial program `0` once. Any
-# needle that appears in THAT module cannot be evidence about a program that
-# was compiled to exercise a feature. It is not wrong, it is vacuous.
+# WHERE THE CHECK LIVES NOW. In the test, not here. `assert_wasm` compiles the
+# control program once and refuses a needle that also appears in the control's
+# own code, so a vacuous assertion fails the moment it is written. Keeping a
+# second copy of "what counts as the program's own code" in this script would be
+# the same rule in two languages, and they would drift.
 #
-# NOT A CI GATE, YET. It reports a known population and exits non-zero while
-# any of it remains, so wiring it into CI would make CI red for a condition
-# nobody is fixing this week. It is here to be run, and to let the open
-# question about it retire itself when the count reaches zero.
+# WHAT IS LEFT FOR THIS SCRIPT is the shape of the population, which the test
+# cannot see: how many assertions there are, how many took the skeleton
+# exemption, and whether any have been written in the old unchecked form.
 #
-#   sh scripts/wasm_assert_strength.sh          # report
-#   sh scripts/wasm_assert_strength.sh --list   # and name every one
+#   sh scripts/wasm_assert_strength.sh
+#   sh scripts/wasm_assert_strength.sh --poison
 set -u
-
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
-LIST=0
-[ "${1:-}" = "--list" ] && LIST=1
+SRC="${SRC:-$ROOT/test/test_basic.ml}"
+[ -f "$SRC" ] || { echo "wasm_assert_strength: no $SRC" >&2; exit 2; }
+MODE="${1:-}"
+fail=0
 
-[ -x "$MERE" ] || { echo "wasm_assert_strength: no compiler at $MERE (run dune build)" >&2; exit 2; }
-command -v python3 >/dev/null 2>&1 || { echo "wasm_assert_strength: SKIP (no python3)"; exit 0; }
+# ⚠ A FLOOR, because the failure that hides everything is the population going
+# to zero. The first version of this script counted `assert_contains "wasm:`;
+# when those were all renamed it reported "0 assertions, 0 vacuous" and exited
+# GREEN. A denominator nobody guards is not a measurement.
+TOTAL_FLOOR="${TOTAL_FLOOR:-90}"
+EXEMPT_CEILING="${EXEMPT_CEILING:-12}"
 
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+n_all=$(grep -c 'assert_wasm\(_module\)\? "wasm:' "$SRC" || true)
+n_exempt=$(grep -c 'assert_wasm_module "wasm:' "$SRC" || true)
+n_old=$(grep -c 'assert_contains "wasm:' "$SRC" || true)
 
-printf '0\n' > "$TMP/control.mere"
-"$MERE" -w "$TMP/control.mere" > "$TMP/control.wat" 2>/dev/null || {
-  echo "wasm_assert_strength: the control program did not compile" >&2; exit 2; }
+if [ "$n_all" -ge "$TOTAL_FLOOR" ]; then
+  printf '  ok    %s\n' "$n_all wasm assertions (floor $TOTAL_FLOOR)"
+else
+  printf '  FAIL  %s\n' "only $n_all wasm assertions, below the floor of $TOTAL_FLOOR — the population shrank"
+  fail=1
+fi
 
-MERE="$MERE" TMP="$TMP" LIST="$LIST" python3 - "$ROOT/test/test_basic.ml" <<'PY'
-import os, re, subprocess, sys
+if [ "$n_exempt" -le "$EXEMPT_CEILING" ]; then
+  printf '  ok    %s\n' "$n_exempt take the skeleton exemption (ceiling $EXEMPT_CEILING)"
+else
+  printf '  FAIL  %s\n' "$n_exempt skeleton exemptions, above $EXEMPT_CEILING — the way out is widening"
+  fail=1
+fi
 
-src = open(sys.argv[1]).read()
-tmp, mere, want_list = os.environ["TMP"], os.environ["MERE"], os.environ["LIST"] == "1"
-control = open(os.path.join(tmp, "control.wat")).read()
+# The old form takes no control and cannot be vacuous-checked. It is the shape
+# the 41 were written in.
+if [ "$n_old" = "0" ]; then
+  printf '  ok    %s\n' "none are written as a bare \`assert_contains\`, so every one is checked against the control"
+else
+  printf '  FAIL  %s\n' "$n_old wasm assertions still use \`assert_contains\`, which does not ask the control"
+  fail=1
+fi
 
-pat = re.compile(
-    r'assert_contains\s+"(wasm:[^"]*)"\s*\n?\s*\((?:wasm|wasm_with_decls)\s*\n?\s*'
-    r'"((?:[^"\\]|\\.)*)"\)\s*\n?\s*"((?:[^"\\]|\\.)*)"\s*;', re.S)
+if [ "$MODE" = "--poison" ]; then
+  pfail=0
+  # POISON 1: an impossible floor must refuse.
+  if TOTAL_FLOOR=99999 sh "$0" >/dev/null 2>&1; then
+    printf '  FAIL  %s\n' "POISON 1: an impossible floor still passed"; pfail=1
+  else
+    printf '  ok    %s\n' "POISON 1 (impossible floor): the population count can refuse"
+  fi
+  # POISON 2: the old unchecked form must be detected. A copy of the source with
+  # one added is the poison -- the real file is not touched.
+  T=$(mktemp -d)
+  { cat "$SRC"; printf '\nlet _ = assert_contains "wasm: poisoned" (wasm "0") "(module";\n'; } > "$T/poisoned.ml"
+  if SRC="$T/poisoned.ml" sh "$0" >/dev/null 2>&1; then
+    printf '  FAIL  %s\n' "POISON 2: a bare assert_contains was not noticed"; pfail=1
+  else
+    printf '  ok    %s\n' "POISON 2 (one written the old way): noticed"
+  fi
+  rm -rf "$T"
+  # POISON 3: ⚠ the vacuity check itself lives in the test. Prove it is wired by
+  # showing the test file asks the control -- if that call vanished, every
+  # assertion would silently stop being checked and this script could not tell.
+  if grep -q 'wasm_control_user' "$SRC" && grep -q 'contains wasm_control_user needle' "$SRC"; then
+    printf '  ok    %s\n' "POISON 3: the test still compares every needle against the control"
+  else
+    printf '  FAIL  %s\n' "POISON 3: the test no longer compares needles against the control — the checking moved or died"
+    pfail=1
+  fi
+  if [ "$pfail" = 0 ] && [ "$fail" = 0 ]; then
+    echo "wasm_assert_strength --poison: ok (the gate can go red)"
+  else
+    echo "wasm_assert_strength --poison: FAILED"; pfail=1
+  fi
+  exit "$pfail"
+fi
 
-def unquote(s):
-    s = re.sub(r'\\\n\s*', '', s)          # OCaml line continuation
-    return s.replace('\\n', '\n').replace('\\"', '"')
-
-total = vacuous = false_now = 0
-rows = []
-for m in pat.finditer(src):
-    name, prog, needle = (unquote(g) for g in m.groups())
-    total += 1
-    open(os.path.join(tmp, "probe.mere"), "w").write(prog + "\n")
-    r = subprocess.run([mere, "-w", os.path.join(tmp, "probe.mere")],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        continue
-    if needle not in r.stdout:
-        false_now += 1
-        rows.append(("FALSE  ", name, needle))
-    elif needle in control:
-        vacuous += 1
-        rows.append(("VACUOUS", name, needle))
-
-if want_list:
-    for kind, name, needle in rows:
-        print("  %s %-52s %s" % (kind, name[:52], needle))
-
-print("wasm_assert_strength: %d assertions, %d vacuous (also match the program 0), %d false"
-      % (total, vacuous, false_now))
-sys.exit(1 if (vacuous or false_now) else 0)
-PY
+if [ "$fail" = 0 ]; then echo "wasm_assert_strength: ok"; else echo "wasm_assert_strength: FAILED"; fi
+exit "$fail"
