@@ -596,9 +596,9 @@ and fmt_block ~ind e =
       let else_s = fmt_expr ~prec:prec_top ~ind else_ in
       let single = "if " ^ cond_s ^ " then " ^ then_s ^ " else " ^ else_s in
       if String.length single + (ind * 2) <= 80 then single
-      else fmt_if_multiline ~ind cond_s then_ else_
+      else fmt_if_multiline ~ind ~cond_loc:cond.loc cond_s then_ else_
     else
-      fmt_if_multiline ~ind cond_s then_ else_
+      fmt_if_multiline ~ind ~cond_loc:cond.loc cond_s then_ else_
   | Match (scrut, arms) ->
     (* Mere's `match` is greedy: an arm's body keeps consuming `| pat ->`
        as long as the parser sees them, regardless of indentation. So a
@@ -647,9 +647,25 @@ and fmt_block ~ind e =
        E
    Triggered both when arms contain blocks and when an inline rendering
    would overflow the column budget. *)
-and fmt_if_multiline ~ind cond_s then_ else_ =
+and fmt_if_multiline ~ind ~cond_loc cond_s then_ else_ =
   let then_body = fmt_expr ~prec:prec_top ~ind:(ind + 1) then_ in
-  let head = "if " ^ cond_s ^ " then\n" ^ indent (ind + 1) ^ then_body in
+  (* Q-154. The comment on `if c then  // why` is keyed on the CONDITION's line:
+     the body goes on the NEXT line, so asking for the body's line found nothing
+     and 42 of these were dropped. Attaching here is safe by the same rule as
+     everywhere else -- the newline after `then` is one THIS function emits, so
+     nothing a caller appends can end up inside the comment.
+
+     ⚠ When the body starts on the same line as `then`, the source wrote the
+     comment AFTER the body, and the body's own site (below, and in
+     `fmt_else_chain`) is the one that should claim it. *)
+  let on_then =
+    if cond_loc.Loc.line = then_.loc.Loc.line then ""
+    else take_trailing_on ~same_file:(cond_loc.Loc.file = None)
+           cond_loc.Loc.line cond_s
+  in
+  let head =
+    "if " ^ cond_s ^ " then" ^ on_then ^ "\n" ^ indent (ind + 1) ^ then_body
+  in
   let tail = fmt_else_chain ~ind else_ in
   head ^ "\n" ^ tail
 
@@ -658,8 +674,15 @@ and fmt_else_chain ~ind else_ =
   | If (cond, then_, else_inner) ->
     let cond_s = fmt_expr ~prec:prec_top ~ind cond in
     let then_body = fmt_expr ~prec:prec_top ~ind:(ind + 1) then_ in
+    (* Same as `fmt_if_multiline`: the comment sits on the `else if ... then`
+       line, which is the CONDITION's line, not the body's. *)
+    let on_then =
+      if cond.loc.Loc.line = then_.loc.Loc.line then ""
+      else take_trailing_on ~same_file:(cond.loc.Loc.file = None)
+             cond.loc.Loc.line cond_s
+    in
     let head =
-      indent ind ^ "else if " ^ cond_s ^ " then\n"
+      indent ind ^ "else if " ^ cond_s ^ " then" ^ on_then ^ "\n"
       ^ indent (ind + 1) ^ then_body
     in
     (* This one IS safe: the chain emits the newline after it. *)
@@ -945,10 +968,12 @@ let default_decl_line (d : top_decl) : int option =
    only where the layout emits their line in one piece.
 
    WHAT IS STILL DROPPED, and why it is not an oversight: a trailing comment on
-   a line this formatter does not emit whole -- an `else`, a match arm, a
-   binding whose value goes multi-line. Putting one back needs the end of the
-   node it follows, and a `Loc.t` records where a token STARTS. 245 lines in
-   the examples corpus; `scripts/fmt_comments_check.sh` counts them. *)
+   a line this formatter does not emit whole -- a binding whose value goes
+   multi-line, a line that ends in the `;` a CALLER appends, an expression this
+   formatter re-breaks so that the line it was written on does not exist in the
+   output. Putting one back needs the end of the node it follows, and a `Loc.t`
+   records where a token STARTS. 53 lines in the examples corpus;
+   `scripts/fmt_comments_check.sh` counts them and holds the ceiling. *)
 let format_program ?(comments : (int * string) list = [])
     ?(inline : (int * string) list = [])
     ?(trailing : (int * string) list = [])

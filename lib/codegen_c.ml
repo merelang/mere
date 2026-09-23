@@ -55,6 +55,7 @@ let debug_file : string option ref = ref None
    without their internals colliding. `lib_stem` prefixes the wrappers
    (`mere_<stem>_<fn>`); the driver sets it from the source filename. *)
 let lib_mode = Typer.lib_boundary   (* Q-127: one flag, named in Typer *)
+let stack_request = Typer.stack_request   (* Q-168: named in Typer for the same reason *)
 let lib_stem : string ref = ref "lib"
 
 (* `mere --header` prints the C header for the --lib boundary. The exports are
@@ -13969,34 +13970,80 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        else "/* Phase 35.1: nullary factory builtins as first-class values */"
             :: eta_lines @ [""])
     @ (if !lib_mode then lib_boundary_parts else
-      [ "int main(int argc, char** argv) {";
-        (* Line-buffer stdout so `print` means the same thing whether the program
-           is watched in a terminal or piped to a file. C's default is to switch
-           to full buffering when stdout is not a tty, which for a batch program
-           is invisible and for a long-running one is not: the mraft dogfood's
-           server logged nothing at all until it exited, because 4KB of output
-           had not accumulated yet. A program's log is how it is watched, and it
-           should not stop existing because someone redirected it. *)
-        "  setvbuf(stdout, NULL, _IOLBF, 0);";
-        (* the stack bounds are read here, where `main`'s frame is the deepest
-           the program has been so far *)
-        "  __lang_stack_bounds();";
-        "  __lang_install_segv();";
-        (if !args_used then "  __lang_argc = argc; __lang_argv = argv;"
-         else "  (void)argc; (void)argv;");
-        "  __lang_region_init(&__lang_default_region, 1 << 22);";
-        "  atexit(__lang_region_stats_report);";
-        (if top_global_inits = [] then ""
-         else String.concat "\n" top_global_inits);
-        main_stmt;
-        (* Phase 15.8: free all OwnedVec allocations registered during run. *)
-        (if Hashtbl.length owned_vec_instances > 0
-         then "  __mere_owned_vec_free_all();" else "");
-        "  __lang_region_stats_report();";
-        "  __lang_region_free(&__lang_default_region);";
-        "  return 0;";
-        "}";
-        "" ])
+      let run_lines =
+        [ (* the stack bounds are read here, where the program's first frame is
+             the deepest it has been so far *)
+          "  __lang_stack_bounds();";
+          (* ⚠ `sigaltstack` is PER-THREAD. When the work below runs on a thread
+             this has to be installed on that thread, which is why it is here
+             and not beside `setvbuf`. *)
+          "  __lang_install_segv();";
+          "  __lang_region_init(&__lang_default_region, 1 << 22);";
+          "  atexit(__lang_region_stats_report);";
+          (if top_global_inits = [] then ""
+           else String.concat "\n" top_global_inits);
+          main_stmt;
+          (* Phase 15.8: free all OwnedVec allocations registered during run. *)
+          (if Hashtbl.length owned_vec_instances > 0
+           then "  __mere_owned_vec_free_all();" else "");
+          "  __lang_region_stats_report();";
+          "  __lang_region_free(&__lang_default_region);" ]
+      in
+      let argv_lines =
+        [ (* Line-buffer stdout so `print` means the same thing whether the
+             program is watched in a terminal or piped to a file. C's default is
+             to switch to full buffering when stdout is not a tty, which for a
+             batch program is invisible and for a long-running one is not: the
+             mraft dogfood's server logged nothing at all until it exited,
+             because 4KB of output had not accumulated yet. A program's log is
+             how it is watched, and it should not stop existing because someone
+             redirected it. *)
+          "  setvbuf(stdout, NULL, _IOLBF, 0);";
+          (if !args_used then "  __lang_argc = argc; __lang_argv = argv;"
+           else "  (void)argc; (void)argv;") ]
+      in
+      match !stack_request with
+      | None ->
+        [ "int main(int argc, char** argv) {" ]
+        @ argv_lines @ run_lines @ [ "  return 0;"; "}"; "" ]
+      | Some bytes ->
+        (* Q-168: the program said how much stack it needs, and this is the only
+           place that can honour it without the build system. `main`'s own stack
+           is the host's to size -- `-Wl,-stack_size` on Darwin, `ulimit -s` on
+           Linux -- so the work moves to a thread whose size THIS program chose.
+           ⚠ A refused request is a refused BUILD RESULT, not a warning: a
+           program that runs with the wrong stack is the failure being fixed. *)
+        [ "/* Q-168: `stack` in mere.toml. The work runs on a thread sized here,";
+          "   because the process stack belongs to the host and this does not. */";
+          "static void* __lang_main_on_stack(void* __arg) {";
+          "  (void)__arg;" ]
+        @ run_lines
+        @ [ "  return NULL;";
+            "}";
+            "";
+            "int main(int argc, char** argv) {" ]
+        @ argv_lines
+        @ [ "  pthread_attr_t __lang_sa;";
+            "  if (pthread_attr_init(&__lang_sa) != 0) {";
+            "    fprintf(stderr, \"mere: cannot set up the requested stack\\n\");";
+            "    return 1;";
+            "  }";
+            Printf.sprintf
+              "  if (pthread_attr_setstacksize(&__lang_sa, (size_t)%dULL) != 0) {" bytes;
+            Printf.sprintf
+              "    fprintf(stderr, \"mere: this host refused a stack of %d bytes\\n\");" bytes;
+            "    return 1;";
+            "  }";
+            "  pthread_t __lang_st;";
+            "  if (pthread_create(&__lang_st, &__lang_sa, __lang_main_on_stack, NULL) != 0) {";
+            "    fprintf(stderr, \"mere: cannot start the program on its own stack\\n\");";
+            "    return 1;";
+            "  }";
+            "  pthread_join(__lang_st, NULL);";
+            "  pthread_attr_destroy(&__lang_sa);";
+            "  return 0;";
+            "}";
+            "" ])
   in
   let out = String.concat "\n" parts in
   (* Every literal is known only now, so the declarations are patched in where

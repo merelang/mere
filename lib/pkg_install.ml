@@ -79,6 +79,15 @@ type manifest = { pkg_name : string; pkg_version : string;
                      which is what every manifest written before v0.1.502 says
                      and is never an error. *)
                   pkg_mere : string option;
+                  (* [package] stack — how much stack the program needs, as
+                     `"512MB"` / `"0x20000000"` / a plain byte count. Q-168: the
+                     answer used to live outside the build, spelled three
+                     different ways (`-Wl,-stack_size` on Darwin, `ulimit -s` on
+                     Linux, `--stack-size` on node), so whoever RAN the program
+                     had to know a fact about the PROGRAM. `None` means "take
+                     what the host gives", which is what every manifest says
+                     today and is never an error. *)
+                  pkg_stack : string option;
                   deps : dep list;
                   host : (string * string) option (* (git, rev) *) }
 
@@ -104,7 +113,7 @@ let parse_manifest (content : string) : manifest =
   let lines = String.split_on_char '\n' content in
   let section = ref "" in
   let pkg_name = ref "" and pkg_version = ref "0.0.0" and pkg_path = ref "" in
-  let pkg_mere = ref "" in
+  let pkg_mere = ref "" and pkg_stack = ref "" in
   let host_git = ref "" and host_rev = ref "" in
   let deps = ref [] in
   let simple_kv = Str.regexp "^[ \t]*\\([a-z_]+\\)[ \t]*=[ \t]*\"\\([^\"]*\\)\"" in
@@ -132,6 +141,7 @@ let parse_manifest (content : string) : manifest =
         else if k = "version" then pkg_version := v
         else if k = "path" then pkg_path := v
         else if k = "mere" then pkg_mere := v
+        else if k = "stack" then pkg_stack := v
       end
       else if !section = "host" && Str.string_match simple_kv line 0 then begin
         let k = Str.matched_group 1 line and v = Str.matched_group 2 line in
@@ -146,7 +156,40 @@ let parse_manifest (content : string) : manifest =
   { pkg_name = !pkg_name; pkg_version = !pkg_version;
     pkg_path = (if !pkg_path = "" then None else Some !pkg_path);
     pkg_mere = (if !pkg_mere = "" then None else Some !pkg_mere);
+    pkg_stack = (if !pkg_stack = "" then None else Some !pkg_stack);
     deps = List.rev !deps; host }
+
+(* ---- the stack a program asks for (Q-168) -------------------------------
+
+   `stack = "512MB"`. Accepts a plain byte count, a hex count, and the suffixes
+   K/KB/M/MB/G/GB (binary, because this is a memory size and the linker flags it
+   replaces are binary). ⚠ A value it cannot read is REFUSED, not ignored: a
+   request nobody honours is worse than no request, because the program looks
+   like it asked. That is the same call `mere = ...` makes for a constraint. *)
+let parse_stack_bytes (s : string) : int option =
+  let s = String.trim s in
+  let lower = String.lowercase_ascii s in
+  let num, mult =
+    let ends suf = 
+      let n = String.length suf and m = String.length lower in
+      n < m && String.sub lower (m - n) n = suf
+    in
+    if ends "gb" then (String.sub s 0 (String.length s - 2), 1024 * 1024 * 1024)
+    else if ends "mb" then (String.sub s 0 (String.length s - 2), 1024 * 1024)
+    else if ends "kb" then (String.sub s 0 (String.length s - 2), 1024)
+    else if ends "g" then (String.sub s 0 (String.length s - 1), 1024 * 1024 * 1024)
+    else if ends "m" then (String.sub s 0 (String.length s - 1), 1024 * 1024)
+    else if ends "k" then (String.sub s 0 (String.length s - 1), 1024)
+    else (s, 1)
+  in
+  match int_of_string_opt (String.trim num) with
+  | Some n when n > 0 ->
+    (* Overflow is a refusal, not a wrap: a negative stack size would be passed
+       to the runtime as an enormous unsigned one. *)
+    if n > max_int / mult then None else Some (n * mult)
+  | _ -> None
+
+
 
 (* ---- the compiler a package asks for ------------------------------------
 
@@ -265,6 +308,25 @@ let check_floor_for_dir (dir : string) =
          else Printf.sprintf "package `%s`" m.pkg_name
        in
        check_compiler_floor ~who m)
+
+(* The stack request that applies to a file, from the nearest manifest above it.
+   Raises `Install_error` when the manifest names a size this cannot read. *)
+let stack_for_dir (dir : string) : int option =
+  match find_manifest dir with
+  | None -> None
+  | Some path ->
+    (match (try Some (parse_manifest (read_file path)) with _ -> None) with
+     | None -> None
+     | Some m ->
+       (match m.pkg_stack with
+        | None -> None
+        | Some v ->
+          (match parse_stack_bytes v with
+           | Some n -> Some n
+           | None ->
+             err "%s declares `stack = %S`, which is not a size this compiler \
+                  understands. Write a byte count, or one with a K/M/G suffix \
+                  (for example \"512MB\")." path v)))
 
 (* ---- fetch + copy ------------------------------------------------------ *)
 

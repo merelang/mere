@@ -962,6 +962,17 @@ let views : (string, view_info) Hashtbl.t = Hashtbl.create 8
    `Codegen_c.lib_mode` is this ref under its old name. *)
 let lib_boundary = ref false
 
+(* Q-168: how much stack the program asked for, in bytes, from `stack = "512MB"`
+   in the nearest `mere.toml`. `None` means "take what the host gives", which is
+   what every program did before v0.1.520.
+
+   It lives next to `lib_boundary` for the same reason: it is a fact about the
+   BUILD that two backends need and neither owns. The C and LLVM backends put
+   `main`'s work on a thread sized to it; Wasm and RV32IM refuse by name,
+   because there the stack belongs to something outside the program (the JS
+   engine's `--stack-size`, the linker script). *)
+let stack_request : int option ref = ref None
+
 (* The name the boundary's per-call arena is typed under. Not a source region -- no
    `region` block writes it -- so it cannot collide with one, and it reads as itself in
    a diagnostic. *)

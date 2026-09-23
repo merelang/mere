@@ -105,7 +105,7 @@ for f in "$ROOT"/examples/*.mere; do
     skipped=$((skipped + 1))
   fi
 done
-if [ "$files" -lt 20 ]; then
+if [ "$files" -lt "${FILE_FLOOR:-280}" ]; then
   echo "fmt_comments: only $files files formatted — the corpus is not what this expects" >&2
   exit 1
 fi
@@ -139,14 +139,63 @@ fi
 # --- all three kinds, over the same corpus ---------------------------------
 # The ceiling is what was measured when the trailing slice landed. It is a
 # CEILING on what may be lost, not a target: shrinking it is the next slice.
-LOST_CEILING="${LOST_CEILING:-96}"
-all_in=0; all_out=0
+#
+# ⚠ THE DENOMINATOR IS PART OF THE MEASUREMENT, and until v0.1.520 nothing
+# guarded it. `lost` is a DIFFERENCE taken over the files `fmt` accepted, so a
+# file that STARTS being refused leaves both sums at once and this gate gets
+# GREENER -- the failure direction is a false pass, which is the one a ceiling
+# cannot show you. Four of the 291 examples do not format and the loop said
+# nothing about them.
+#
+# Failures are classified by reason, the way `region_params_check.sh` does it
+# for the same corpus: an unresolvable import is a fact about the CHECKOUT (the
+# module is not vendored here) so it is counted and skipped, and ANYTHING ELSE
+# is a fact about the PROGRAM and has to be named below. A name that starts
+# formatting again is also an error -- a list nobody prunes is how the four
+# stayed invisible.
+#
+# brackets_balance   a lexer limit on purpose ("..." inside {...} interpolation)
+# list_lib           a parse limit on purpose
+# template_engine    the same lexer limit
+fmt_known_skips="${FMT_KNOWN_SKIPS-brackets_balance list_lib template_engine}"
+LOST_CEILING="${LOST_CEILING:-53}"
+FILE_FLOOR="${FILE_FLOOR:-280}"
+all_in=0; all_out=0; measured=0; unresolved=0; unexpected=""; stale_skip=""
 for f in "$ROOT"/examples/*.mere; do
-  if "$MERE" fmt "$f" > "$tmp/f.out" 2>/dev/null; then
+  n=$(basename "$f" .mere)
+  if "$MERE" fmt "$f" > "$tmp/f.out" 2>"$tmp/f.err"; then
+    case " $fmt_known_skips " in *" $n "*) stale_skip="$stale_skip $n" ;; esac
+    measured=$((measured + 1))
     all_in=$((all_in + $(grep -c '//' "$f" 2>/dev/null || true)))
     all_out=$((all_out + $(grep -c '//' "$tmp/f.out" 2>/dev/null || true)))
+  elif grep -q 'cannot resolve path' "$tmp/f.err" 2>/dev/null; then
+    unresolved=$((unresolved + 1))
+  else
+    case " $fmt_known_skips " in
+      *" $n "*) ;;
+      # The compiler's own first line, because "fmt refused it" without a
+      # reason is a question, not a report.
+      *) unexpected="$unexpected
+        $n: $(head -1 "$tmp/f.err" 2>/dev/null | cut -c1-72)" ;;
+    esac
   fi
 done
+
+if [ -n "$stale_skip" ]; then
+  printf '  FAIL  %s\n' "listed as a known skip but fmt accepts it now — drop it from the list:$stale_skip"
+  fail=1
+else
+  printf '  ok    %s\n' "$measured files measured, $unresolved skipped for an unvendored import, $(set -- $fmt_known_skips; echo $#) refused on purpose"
+fi
+if [ -n "$unexpected" ]; then
+  printf '  FAIL  %s\n' "fmt refused a file nobody listed, so the corpus shrank silently:$unexpected"
+  fail=1
+fi
+if [ "$measured" -lt "$FILE_FLOOR" ]; then
+  printf '  FAIL  %s\n' "only $measured files measured, below the floor of $FILE_FLOOR — the difference below is over a smaller corpus"
+  fail=1
+fi
+
 lost=$((all_in - all_out))
 if [ "$lost" -le "$LOST_CEILING" ]; then
   printf '  ok    %s\n' "all kinds: $all_in comment lines in, $all_out out ($lost lost, ceiling $LOST_CEILING)"
@@ -185,6 +234,34 @@ if [ "${1:-}" = "--poison" ]; then
     pfail=1
   else
     printf '  ok    %s\n' "POISON 3 (impossible ceiling): the check refuses"
+  fi
+  # POISON 5/6/7: the DENOMINATOR, in both directions and then its floor. A
+  # ceiling poison cannot reach these: the bug they stand for makes the number
+  # smaller, so an impossible ceiling is still met.
+  if FMT_KNOWN_SKIPS="list_lib template_engine" sh "$0" >/dev/null 2>&1; then
+    printf '  FAIL  %s\n' "POISON 5: a refusal nobody listed still passed"
+    pfail=1
+  else
+    printf '  ok    %s\n' "POISON 5 (a name dropped from the list): the unlisted refusal is caught"
+  fi
+  p6=""
+  for f in "$ROOT"/examples/*.mere; do
+    if "$MERE" fmt "$f" >/dev/null 2>&1; then p6=$(basename "$f" .mere); break; fi
+  done
+  if [ -z "$p6" ]; then
+    printf '  FAIL  %s\n' "POISON 6: no example formats at all — the poison cannot be built"
+    pfail=1
+  elif FMT_KNOWN_SKIPS="brackets_balance list_lib template_engine $p6" sh "$0" >/dev/null 2>&1; then
+    printf '  FAIL  %s\n' "POISON 6: a name that formats stayed on the list and still passed"
+    pfail=1
+  else
+    printf '  ok    %s\n' "POISON 6 (a stale name on the list): $p6 formats, and the list is pruned"
+  fi
+  if FILE_FLOOR=9999 sh "$0" >/dev/null 2>&1; then
+    printf '  FAIL  %s\n' "POISON 7: an impossible floor still passed"
+    pfail=1
+  else
+    printf '  ok    %s\n' "POISON 7 (impossible floor): the denominator can refuse"
   fi
   # POISON 2: the idempotence check must compare two real runs.
   printf '// MARK_X\nprint_int 1\n' > "$tmp/p2.mere"
