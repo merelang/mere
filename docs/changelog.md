@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.523 — 2026-09-24
+
+_The Wasm substring assertions now have to be capable of failing, and eleven of
+them turned out to be false._
+
+`test/test_basic.ml` checks the Wasm backend by compiling a small program and
+asserting that some string appears in the emitted module. That is a check only
+if the string would be ABSENT from a program without the feature, and 41 of the
+97 were not: the module carries the whole runtime — 58 `$__lang_*` functions for
+the program `0` — so a needle naming an opcode matched whatever was compiled.
+`scripts/wasm_assert_strength.sh` has reported that number since v0.1.201.
+
+⚠ **The record said none of them were false. Eleven were.** Asked about the
+USER'S code instead of about the module, `i32.mul` is `i64.mul`, `i32.eq` is
+`i64.eq`, `i32.and` is nothing at all, and `unreachable` and `(loop $lp` are not
+in the program's own code either. They are survivors of the i32→i64 widening —
+the same class as the twenty fixed in v0.1.201, still here because that sweep
+only asked what was false MODULE-WIDE, and module-wide every one of them was
+true. A needle that matches the runtime is not merely weak evidence; it can hide
+a claim that is wrong.
+
+**The check moved into the test.** `assert_wasm` compiles the control program
+`0` once and refuses a needle that also appears in the control's own code, so a
+vacuous assertion fails the moment it is written rather than being counted by a
+script somebody has to remember to run. What counts as "the program's own code"
+is decided BY THE CONTROL — every function the trivial program also defines is
+boilerplate, `$main` excepted — because a list of name prefixes has to be
+maintained, and the first thing such a list got wrong was `$show_WCgCol8`,
+generated for the user's own type and named like a runtime helper.
+
+Twelve assertions keep a documented exemption: `(module`, the exported memory,
+the imported `puts` and the like are the skeleton every module has, and asking
+them to be discriminating would be asking for a lie. **That number is pinned**,
+because an exemption nobody counts is how 41 of them got here. Four were deleted
+as duplicates of a call-site assertion on the same program.
+
+⚠ **And the script that measured this reported "0 assertions, 0 vacuous" and
+exited green** once the renaming was done — its denominator had gone to zero.
+It holds a floor now, and its poison adds an assertion in the old form to a copy
+of the source to prove the detection works.
+
+93 wasm assertions, 0 vacuous, 0 false. 2,847 unit tests, parity 214/214.
+
+---
+
 ## v0.1.522 — 2026-09-24
 
 _Q-052: a local `let` was writing a top-level binding that happened to share its
