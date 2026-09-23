@@ -81,6 +81,13 @@ let import_search_paths : string list ref = ref []
    while parsing and read by `Pipeline.check_module_privacy`. *)
 let private_module_names : (string, unit) Hashtbl.t = Hashtbl.create 16
 
+(* Q-172: the members a module MARKED, kept because `private_module_names` is
+   not enough to reconstruct the source. A module that marks every member has
+   nothing private, so the formatter would print it back with no `pub` at all --
+   the same program today, and a different one the moment somebody adds a
+   member, because an unmarked module exports everything. *)
+let pub_module_names : (string, unit) Hashtbl.t = Hashtbl.create 16
+
 (* Q-166: the same opt-in, one level out. `import "x.mere";` SPLICES x's
    declarations into this file, so after it there is a single top-level
    namespace and nothing marks where a name came from -- a library's helper is
@@ -196,6 +203,7 @@ let declared_externs : (string * Ast.ty * Loc.t) list ref = ref []
 let reset_decl_state () =
   declared_types := [];
   Hashtbl.reset private_module_names;
+  Hashtbl.reset pub_module_names;
   Hashtbl.reset pub_files;
   file_pub_names := [];
   declared_externs := [];
@@ -2194,7 +2202,8 @@ let rec parse_program_internal tokens =
               | None -> n
             in
             if not (List.mem short marked) then
-              Hashtbl.replace private_module_names n ())
+              Hashtbl.replace private_module_names n ()
+            else Hashtbl.replace pub_module_names n ())
             (match d with
              | Ast.Top_let ({ Ast.pnode = Ast.P_var n; _ }, _) -> [n]
              | Ast.Top_let_rec bs -> List.map fst bs

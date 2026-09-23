@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.517 — 2026-09-23
+
+_Q-172: what `mere fmt` wrote was not a program, and the cause had five layers._
+
+The parser FLATTENS a module -- its members become top-level bindings called
+`M.foo` -- and the formatter printed that: `let Bignum.base = 1000000000;`, which
+is not syntax. `mere fmt -i` rewrites in place, so 52 of the 293 example files
+came back as something the compiler refused. The formatter's own tests were all
+small single-file samples; the corpus had never been asked.
+
+Putting the block back is a grouping pass, not a tree rewrite: **only the
+binding name loses its prefix**, because a qualified self-reference is valid
+inside the module it names -- the parser registers the module before parsing its
+body for exactly that. Then four more layers, each found by fixing the one
+above:
+
+  1. **Constructors keep their prefix wherever they are USED**, and the rule is
+     the OPPOSITE inside and out. `M.C` is unspellable inside `module M` (a
+     parse error in a pattern, unbound in an expression) and REQUIRED outside it
+     -- `examples/module_scoping.mere` has `Red` in two modules and tells them
+     apart that way. Stripped inside the block only.
+  2. **A type declared in a module was printed outside it.** The declaration
+     carries no trace of the block, but `Top_ctor_alias ("Traffic.Red", "Red")`
+     does, so the type goes back where its constructors were declared.
+  3. **That ownership lookup misfired on a shared name.** Keeping the last
+     owner of `Red` put `type Light` inside `Mood`. A type is placed by the
+     first constructor that names exactly ONE module.
+  4. **`A [1, 2]` does not type-check.** A list literal is fine as a FUNCTION
+     argument (`sum [1, 2, 3]` runs) and not as a constructor's -- both `A []`
+     and `A [1, 2]` come back as `constructor A requires an argument`. The
+     formatter wrote the bare form in both.
+
+⚠ And parenthesising the literal everywhere broke the **self-host
+cross-validation**: `contrib/fmt/fmt.mere` and this formatter are held to
+byte-identical output on a set of samples, and that one does not parenthesise
+the function case. The parens went to the constructor site instead. Two
+formatters agreeing is what stopped a fix that was too wide.
+
+`scripts/fmt_roundtrip_check.sh` asks the corpus directly now: every example the
+compiler accepts is formatted and the OUTPUT handed back to the compiler. 52 → 1,
+and the one that remains is a trait's internal `__pack` constructor reaching the
+output -- a ceiling, measured, so the next cause shows up as the number moving.
+
+---
+
 ## v0.1.516 — 2026-09-23
 
 _Q-171: a catch now releases the region it jumped over, on the backend that had
