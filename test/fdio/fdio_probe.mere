@@ -16,6 +16,7 @@ extern fn fd_seek: int -> int -> int -> int;
 extern fn fd_dup: int -> int;
 extern fn fd_sync: int -> int;
 extern fn fd_isatty: int -> int;
+extern fn fd_pipe: unit -> int;
 extern fn mem_alloc: int -> int;
 extern fn mem_to_str: int -> int -> str;
 extern fn mem_copy_str: int -> int -> str -> int;
@@ -106,5 +107,21 @@ let main = fn () ->
   let t = fd_open path "r" 0 in
   let _ = say "isatty on a file" (fd_isatty t) 0 in
   let _ = fd_close t in
+  // pipe(2) fills the caller's int[2], so the two descriptors come back packed:
+  // read end high, write end low. The halves are what is checked, not the
+  // numbers themselves -- those are whatever the process has free.
+  let pk = fd_pipe () in
+  let _ = say "pipe" (if pk >= 0 then 1 else 0) 1 in
+  let pr = pk / 4294967296 in
+  let pw = pk % 4294967296 in
+  let _ = say "pipe ends differ" (if pr == pw then 0 else 1) 1 in
+  let n3 = mem_copy_str buf 0 "through" in
+  let _ = say "pipe write" (fd_write pw buf n3) 7 in
+  let _ = say_s "pipe read" (mem_to_str buf (fd_read pr buf 256)) "through" in
+  let _ = say "pipe is not a tty" (fd_isatty pr) 0 in
+  // a pipe has no position: seeking one is ESPIPE, which is a refusal here
+  let _ = say "pipe cannot seek" (fd_seek pr 0 0) (0 - 1) in
+  let _ = say "close pipe read" (fd_close pr) 0 in
+  let _ = say "close pipe write" (fd_close pw) 0 in
   0;
 exit (main ())
