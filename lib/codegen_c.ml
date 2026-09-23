@@ -3279,10 +3279,31 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "((%s) ^ (%s))" (emit_expr a_e) (emit_expr arg)
      | Ast.Var "bit_not" ->
        Printf.sprintf "(~(%s))" (emit_expr arg)
+     (* Q-039: the count, and the undefined behaviour that was under it.
+        `x << n` on a signed `long long` is UB the moment the result does not
+        fit -- UBSan names it, `left shift of 4611686018427387904 by 1 places
+        cannot be represented in type 'long long'` -- and a count of 64 or more
+        is UB on its own. The value this produced was the right one on every
+        machine anyone ran it on, which is exactly what makes the class of bug
+        worth removing rather than arguing about.
+
+        THE CONTRACT WAS ALREADY WRITTEN, in the RISC-V backend: a count at or
+        above the width gives zero for a left shift and the sign bit for a right
+        one, chosen there to match "what the other backends give". Three
+        backends never implemented it. A negative count reads as huge-unsigned
+        here for the same reason it does there. *)
      | Ast.App ({ node = Ast.Var "bit_shl"; _ }, a_e) ->
-       Printf.sprintf "((%s) << (%s))" (emit_expr a_e) (emit_expr arg)
+       Printf.sprintf
+         "({ long long __sa = (%s); long long __sn = (%s); \
+             ((unsigned long long)__sn > 63ULL) ? 0LL \
+             : (long long)((unsigned long long)__sa << __sn); })"
+         (emit_expr a_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "bit_shr"; _ }, a_e) ->
-       Printf.sprintf "((%s) >> (%s))" (emit_expr a_e) (emit_expr arg)
+       Printf.sprintf
+         "({ long long __sa = (%s); long long __sn = (%s); \
+             ((unsigned long long)__sn > 63ULL) ? (__sa < 0 ? -1LL : 0LL) \
+             : (__sa >> __sn); })"
+         (emit_expr a_e) (emit_expr arg)
      | Ast.Var "chr" when not (user_shadows "chr") ->
        (* Phase 36: chr n — int in [0,255] → single-byte str via char_table *)
        Printf.sprintf "__lang_char_at_chr(%s)" (emit_expr arg)

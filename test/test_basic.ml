@@ -10595,7 +10595,15 @@ let () =
          else scan (i + 1)
        in scan 0
      in
-     if has "(12LL) & (10LL)" && has "(1LL) << (2LL)" then "ok" else "no")
+     (* v0.1.512 (Q-039): the shift is still a native operator, and it is now
+        done in UNSIGNED and guarded on the count -- `x << n` on a signed
+        long long is undefined the moment the result does not fit, and a count
+        of 64 or more is undefined on its own. `&` and friends were never
+        affected and are emitted as they were. *)
+     if has "(12LL) & (10LL)"
+        && has "(unsigned long long)__sa << __sn"
+        && has "(unsigned long long)__sn > 63ULL"
+     then "ok" else "no")
     "ok";
   check "v0.1.42/127: Wasm codegen emits i64 bitwise instructions"
     (let wat = Codegen_wasm.emit_program ~main_ty:Ast.TyInt
