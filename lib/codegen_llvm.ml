@@ -609,6 +609,25 @@ let llvm_string_escape (s : string) : string =
    way the C backend does it -- read into a local at the top of emit_expr,
    restored only for the sub-expression that stays in tail position. *)
 let llvm_tail_pos = ref false
+
+(* Q-052. True only while `emit_expr` is walking the top-level
+   `let a = … in let b = … in … e` spine of the main body. That is the ONE
+   context where a `let x = v in …` whose name is registered in
+   `top_globals_llvm` should also STORE into `@mu_x` (the Phase 36
+   initialisation trick at its source-order position).
+
+   Any nested `let x = v in …` inside a fn body that happens to share a name
+   with a top-level global is a plain local shadowing binding and must not
+   touch the global. Without this the check was BY NAME ONLY, so the standard
+   library's own `let n = …` inside `codepoint_of` stored into a user's
+   top-level `n`: a four-line program printed 1 where every other backend
+   printed 7. Wrong ANSWERS, silently, on one backend.
+
+   ⚠ The same bug was found and closed on the Wasm backend
+   (`wasm_in_top_level_body`, which overwrote a KV strbuf pointer so `kv_save`
+   wrote 0 bytes). It landed with no gate, which is why this side stayed broken.
+   `scripts/toplevel_shadow_check.sh` now asks both. *)
+let llvm_in_top_level_body = ref false
 let llvm_returned = ref false
 (* (return type, argument types) of the function being emitted, as LLVM type
    strings. musttail requires the callee's prototype to match the caller's, so
@@ -3399,7 +3418,11 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
      so a sub-expression is not in tail position unless the case below puts it
      back -- the same discipline the C backend's c_tail_pos uses. *)
   let __in_tail = !llvm_tail_pos in
+  (* Q-052: same discipline as the tail flag -- cleared immediately, and put
+     back only by the nodes that genuinely continue the top-level spine. *)
+  let __in_top = !llvm_in_top_level_body in
   llvm_tail_pos := false;
+  llvm_in_top_level_body := false;
   match e.Ast.node with
   | Ast.Int_lit n ->
     (* v0.1.96: the LLVM backend's int is 64-bit (i64), matching the C
@@ -3866,6 +3889,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
          && Hashtbl.mem inner_lifts_llvm name ->
        (* Phase 25.3: inner-lifted fn binding — body holds the call sites,
           the definition lives at top level (lifted). Just emit body. *)
+       llvm_in_top_level_body := __in_top;
        emit_expr env body
      | Ast.P_var name ->
        let rv = emit_expr env value in
@@ -3878,7 +3902,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
           store the value into @name so subsequent reads (via Var emit
           which does `load ... @name`) see the updated value at the
           right source-order point. *)
-       if Hashtbl.mem top_globals_llvm name then
+       (* ⚠ `__in_top &&` is the whole fix for Q-052: `top_globals_llvm` is keyed
+          by NAME, and a name is not a binding. Only the top-level spine may
+          write the global. *)
+       if __in_top && Hashtbl.mem top_globals_llvm name then
          emit_instr (Printf.sprintf "  store %s %s, ptr @%s"
                        (llvm_ty_of value_ty) rv (mu name));
        (* Phase 38.G-1 (DEFERRED §1.3 Level 1): detect safe auto-Drop. *)
@@ -3895,6 +3922,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
          && (not (Hashtbl.mem top_globals_llvm name))
          && owned_vec_safe_to_drop_at_scope_llvm body name
        in
+       llvm_in_top_level_body := __in_top;
        let r = emit_expr ((name, rv) :: env) body in
        current_var_types := saved;
        (* Emit scope-end free for auto-Drop — same shape as Phase 15.13 `with`. *)
@@ -3910,8 +3938,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        end;
        r
      | Ast.P_wild | Ast.P_unit ->
-       (* Phase 22.1: evaluate RHS for side effects, then continue with body. *)
+       (* Phase 22.1: evaluate RHS for side effects, then continue with body.
+          ⚠ This one carries the spine too: a file's top level is mostly
+          `let _ = print …;` and losing the flag here would stop every global
+          after the first one from being initialised. *)
        let _ = emit_expr env value in
+       llvm_in_top_level_body := __in_top;
        emit_expr env body
      | Ast.P_tuple ps ->
        (* Phase 22.1: `let (a, b, ...) = E in B` — extractvalue per index. *)
@@ -3950,6 +3982,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        current_var_types :=
          List.filter_map (function Some (n, _, t) -> Some (n, t) | None -> None)
            new_env_extra @ saved;
+       llvm_in_top_level_body := __in_top;
        let r = emit_expr env' body in
        current_var_types := saved;
        r
@@ -6925,8 +6958,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   | Ast.Let_rec (bindings, body) ->
     (* Phase 25.3: inner let-rec lifting. If all bindings are registered
        in inner_lifts_llvm (= lifted to top level), just emit body. *)
-    if List.for_all (fun (n, _) -> Hashtbl.mem inner_lifts_llvm n) bindings then
+    if List.for_all (fun (n, _) -> Hashtbl.mem inner_lifts_llvm n) bindings then begin
+      llvm_in_top_level_body := __in_top;
       emit_expr env body
+    end
     else
       unsupported e.Ast.loc "let rec inside an expression (only allowed at top level)"
   | Ast.Float_lit f ->
@@ -13785,7 +13820,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      body_expr (the Let bindings stayed in body and emit_expr Let emits
      `store ... @name`). No upfront init needed. *)
   ignore top_globals_list;
+  (* Q-052: the spine starts here and nowhere else. *)
+  llvm_in_top_level_body := true;
   let r = emit_expr [] body_expr in
+  llvm_in_top_level_body := false;
   (* Optional printf of main result. *)
   let print_lines =
     (* Q-140: one rule, the same as the other backends -- the program's value

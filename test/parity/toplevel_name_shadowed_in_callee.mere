@@ -1,0 +1,24 @@
+// A TOP-LEVEL BINDING A CALLEE HAPPENS TO SHADOW. Q-052.
+//
+// `codepoint_of` is the standard library's, and it binds its own `n` inside.
+// The LLVM backend decided "does this `let` initialise a file-scope global?" by
+// asking whether the NAME was registered, not whether the BINDING was the
+// top-level one -- so the library's local `n` stored into this file's `n`, and
+// this program printed 1 where every other backend printed 7.
+//
+// Nothing here is unusual: no import, no closure trick, no volume of
+// allocation. Any program with a top-level `let n` that reaches `codepoint_of`
+// was affected, and it was affected SILENTLY -- the wrong answer, not a crash.
+//
+// The same bug was fixed on the Wasm backend first (a local `let entries`
+// overwrote a KV strbuf pointer, and `kv_save` then wrote 0 bytes). That fix
+// shipped with no gate, which is how this side stayed broken.
+let n = 7;
+let f = fn (u: int) -> n;
+let _ = print_int (codepoint_of "a");
+let _ = print_int (f 0);
+// The same shape one level down: a local `d` in a callee must not reach here
+// either. `half` and `span` are the prelude's other local names.
+let d = 3;
+let g = fn (u: int) -> d * 100;
+print_int (g 0)
