@@ -824,6 +824,16 @@ jobs:
           sh scripts/syntax_hint_check.sh
           sh scripts/syntax_hint_check.sh --poison
 
+      # doc_coverage asks whether a builtin's NAME is spelled in a doc; this asks
+      # whether a doc's CLAIM is still true. Three sentences described a compiler
+      # that had not existed for hundreds of releases, each one next to a green
+      # gate that proved the opposite.
+      - name: doc_claims_check (a documented limitation is still a limitation)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/doc_claims_check.sh
+          sh scripts/doc_claims_check.sh --poison
+
       # v0.1.508.
       - name: binding_form_check (every spelling gets the same verdict)
         if: ${{ !cancelled() }}

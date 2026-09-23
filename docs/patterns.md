@@ -443,14 +443,21 @@ for x in 1..10 do print (show x);
 for x in xs do
   let _ = owned_vec_push buf (transform x) in ();
 
-// while: usable inside an fn body
+// while: inside an fn body
 let consume_stream = fn stream ->
   while !(stream_eof stream) do
     let x = stream_next stream in
     let _ = process x in ();
+
+// ...and at top level, bound or as the last expression
+let _ = while vec_len v < 5 do vec_push v (vec_len v);
 ```
 
-Note: `while` currently has codegen support only inside fn bodies (top-level main is unsupported).
+Note: a top-level `while` must be bound (`let _ = while ... ;`) or be the file's
+last expression — a bare loop with a statement after it is `trailing input`. This
+note used to say top level was codegen-unsupported, which stopped being true
+without either copy of the sentence hearing about it; see
+[language-reference.md](language-reference.md) §8.
 
 ### Single-shot `Option` extraction with `if let`
 
