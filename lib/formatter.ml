@@ -81,6 +81,36 @@ let take_trailing_on (line : int) (chunk : string) =
       trailing_pending := List.remove_assoc line !trailing_pending;
       "  " ^ t
 
+(* Q-172: the module whose members are being printed, if any. A constructor
+   declared inside `module M { }` is registered as `M.C`, and NEITHER an
+   expression nor a pattern can spell that -- `M.C` is `unbound variable` in one
+   and a parse error in the other, because the module injects an unqualified
+   alias and that is the only way to write it. So the prefix comes off at the
+   printing site, which is smaller and safer than rewriting the tree: only the
+   two places that print a constructor name need to know. *)
+let printing_module : string option ref = ref None
+
+(* Every module name in the program. A constructor keeps its module prefix in
+   the tree wherever it is USED, not just inside the block -- a top-level
+   function matching on `Json.JStr` is how a file that imports one reads -- and
+   the prefix is unspellable in both positions. The parser injects an
+   unqualified alias for each module constructor, which is why the bare name
+   works anywhere and why the source must have been written with it. *)
+let known_modules : string list ref = ref []
+
+let unqualify_ctor (c : string) : string =
+  let strip m =
+    let p = m ^ "." in
+    let lp = String.length p in
+    if String.length c > lp && String.sub c 0 lp = p
+    then Some (String.sub c lp (String.length c - lp)) else None
+  in
+  (* INSIDE the module only. Outside it, `M.Red` is valid in both an expression
+     and a pattern, and is the ONLY way to tell two modules' `Red` apart -- the
+     language reference says so and `examples/module_scoping.mere` is the demo.
+     Stripping it everywhere made that file type-check against the wrong type. *)
+  match !printing_module with Some m -> (match strip m with Some r -> r | None -> c) | None -> c
+
 let parens s = "(" ^ s ^ ")"
 
 let wrap need_paren s = if need_paren then parens s else s
@@ -230,13 +260,16 @@ let rec fmt_pat p =
      it (`Pipeline.parse_program ~keep_sugar:true`). *)
   | P_str_prefix (lit, name) -> escape_string_for_fmt lit ^ " <> " ^ name
   | P_unit -> "()"
-  | P_constr (c, None) -> c
-  | P_constr (c, Some sub) -> c ^ " " ^ fmt_pat_atom sub
+  | P_constr (c, None) -> unqualify_ctor c
+  | P_constr (c, Some sub) -> unqualify_ctor c ^ " " ^ fmt_pat_atom sub
   | P_tuple ps ->
     "(" ^ String.concat ", " (List.map fmt_pat ps) ^ ")"
   | P_record (name, fields) ->
     let parts = List.map (fun (f, p) -> f ^ " = " ^ fmt_pat p) fields in
-    name ^ " { " ^ String.concat ", " parts ^ " }"
+    (* A record type declared inside a module is `M.Rect` in the tree, and the
+       literal syntax cannot spell that either -- the parser injects an
+       unqualified alias for the same reason it does for constructors. *)
+    unqualify_ctor name ^ " { " ^ String.concat ", " parts ^ " }"
   | P_as (inner, name) ->
     fmt_pat inner ^ " as " ^ name
   | P_or (a, b) ->
@@ -304,7 +337,7 @@ let rec fmt_expr ~prec:p ~ind e =
   | Unit_lit -> "()"
   | Var n -> n
   | Constr ("Nil", None) -> "[]"
-  | Constr (c, None) -> c
+  | Constr (c, None) -> unqualify_ctor c
   | Constr ("Cons", Some _) when (try_match_list_literal e) <> None ->
     let xs = Option.get (try_match_list_literal e) in
     "[" ^ String.concat ", " (List.map (fmt_expr ~prec:prec_top ~ind) xs) ^ "]"
@@ -320,7 +353,23 @@ let rec fmt_expr ~prec:p ~ind e =
     in
     wrap (p > prec_range) s
   | Constr (c, Some arg) ->
-    let s = c ^ " " ^ fmt_expr ~prec:(prec_app + 1) ~ind arg in
+    (* ⚠ A list literal is fine as a FUNCTION argument (`sum [1, 2, 3]` runs)
+       and not as a CONSTRUCTOR's: `A [1, 2]` and `A []` both come back as
+       `constructor A requires an argument`, while `A ([])` and `A Nil` are
+       fine. 24 example files came out of `mere fmt` as something the type
+       checker then refused, because the formatter wrote the bare form a person
+       would write. Parenthesised HERE and not in the literal itself -- doing it
+       everywhere also parenthesised the function case, where the self-host
+       formatter (which agrees with this one byte for byte) does not. *)
+    let is_list_literal =
+      match arg.node with
+      | Constr ("Nil", None) -> true
+      | Constr ("Cons", Some _) -> (try_match_list_literal arg) <> None
+      | _ -> false
+    in
+    let arg_s = fmt_expr ~prec:(prec_app + 1) ~ind arg in
+    let arg_s = if is_list_literal then parens arg_s else arg_s in
+    let s = unqualify_ctor c ^ " " ^ arg_s in
     wrap (p > prec_app) s
   (* ── operators ── *)
   | Neg a ->
@@ -379,7 +428,7 @@ let rec fmt_expr ~prec:p ~ind e =
     let parts =
       List.map (fun (f, e) -> f ^ " = " ^ fmt_expr ~prec:prec_top ~ind e) fields
     in
-    name ^ " { " ^ String.concat ", " parts ^ " }"
+unqualify_ctor name ^ " { " ^ String.concat ", " parts ^ " }"
   | Field_get (e, f) ->
     fmt_expr ~prec:prec_atom ~ind e ^ "." ^ f
   | Record_update (base, updates) ->
@@ -771,6 +820,51 @@ let rec fuse_drop_decls decls =
   | d :: rest -> `Decl d :: fuse_drop_decls rest
   | [] -> []
 
+(* Q-172: put `module M { ... }` back together.
+
+   The parser FLATTENS a module: its members become top-level bindings called
+   `M.foo`, and that is what this formatter printed -- `let Bignum.base = ...`,
+   which is not syntax. 21 of the 315 example files came out of `mere fmt` as
+   something the compiler could not read back, and `mere fmt -i` writes in
+   place.
+
+   Only the BINDING NAME has to lose the prefix. A qualified self-reference is
+   valid inside the module it names (the parser registers the module before
+   parsing its body for exactly that reason), so the bodies can be printed
+   unchanged and `M.bar` inside `module M` still resolves. That is what makes
+   this a grouping pass rather than a tree rewrite.
+
+   Types declared inside a module are not grouped: the parser registers them
+   globally and unqualified on purpose (see the language reference), so the
+   declaration carries no trace of the block it was written in and printing it
+   outside is the same program. *)
+let module_of_name (modules : string list) (n : string) : string option =
+  List.fold_left (fun best m ->
+    let p = m ^ "." in
+    let lp = String.length p in
+    if String.length n > lp && String.sub n 0 lp = p then
+      match best with
+      | Some b when String.length b >= String.length m -> best
+      | _ -> Some m
+    else best) None modules
+
+let decl_member_name (d : top_decl) : string option =
+  match d with
+  | Top_let ({ pnode = P_var n; _ }, _) -> Some n
+  | Top_let_rec ((n, _) :: _) -> Some n
+  | _ -> None
+
+let strip_prefix (m : string) (n : string) : string =
+  let lp = String.length m + 1 in
+  if String.length n > lp then String.sub n lp (String.length n - lp) else n
+
+let unqualify_decl (m : string) (d : top_decl) : top_decl =
+  match d with
+  | Top_let ({ pnode = P_var n; _ } as pat, v) ->
+    Top_let ({ pat with pnode = P_var (strip_prefix m n) }, v)
+  | Top_let_rec bs -> Top_let_rec (List.map (fun (n, v) -> (strip_prefix m n, v)) bs)
+  | other -> other
+
 (* ── Entry points ───────────────────────────────────────────────────── *)
 
 let format_expr e = fmt_expr ~prec:prec_top ~ind:0 e
@@ -809,8 +903,12 @@ let default_decl_line (d : top_decl) : int option =
 let format_program ?(comments : (int * string) list = [])
     ?(inline : (int * string) list = [])
     ?(trailing : (int * string) list = [])
+    ?(modules : string list = [])
+    ?(private_members : string list = [])
+    ?(pub_members : string list = [])
     ?(decl_line : (top_decl -> int option) = default_decl_line) (prog : program) =
   let pending = ref comments in
+  known_modules := modules;
   inline_pending := List.sort (fun (a, _) (b, _) -> compare a b) inline;
   inline_mark := 0;
   trailing_pending := trailing;
@@ -844,9 +942,126 @@ let format_program ?(comments : (int * string) list = [])
        | [] -> body
        | cs -> String.concat "\n" cs ^ "\n" ^ body)
   in
+  (* Q-172: consecutive members of one module come back as one block. The run
+     has to be CONSECUTIVE -- a declaration from outside the module in the
+     middle of it means the source had two blocks, and printing two is right. *)
+  (* Which module a declaration belongs to. For a binding it is the prefix on
+     its own name; for a TYPE the name carries nothing, so the answer comes from
+     the aliases the parser injects -- `Top_ctor_alias ("Traffic.Red", "Red")`
+     says where `Red` was declared. Putting the type back inside its block is
+     what makes two modules' `Red` distinguishable again: printed at top level
+     they collide, and the file that demonstrates module scoping stopped
+     type-checking. *)
+  (* ⚠ A bare constructor name can belong to MORE THAN ONE module -- that is
+     what module scoping is for, and `examples/module_scoping.mere` has `Red` in
+     two of them. Keeping only the last owner put `type Light` inside `Mood`.
+     So the owners are collected as a list and a type is placed by the first
+     constructor that names exactly one module. *)
+  let ctor_owner : (string, string list) Hashtbl.t = Hashtbl.create 32 in
+  List.iter (fun d ->
+    match d with
+    | Top_ctor_alias (q, bare) | Top_record_alias (q, bare) ->
+      (match module_of_name modules q with
+       | Some m ->
+         let prev = match Hashtbl.find_opt ctor_owner bare with Some l -> l | None -> [] in
+         if not (List.mem m prev) then Hashtbl.replace ctor_owner bare (m :: prev)
+       | None -> ())
+    | _ -> ()) prog.decls;
+  let sole_owner (c : string) : string option =
+    match Hashtbl.find_opt ctor_owner c with Some [ m ] -> Some m | _ -> None
+  in
+  let type_owner (d : top_decl) : string option =
+    match d with
+    | Top_type (_, _, variants) ->
+      List.fold_left (fun acc (c, _) ->
+        match acc with Some _ -> acc | None -> sole_owner c) None variants
+    | Top_record (name, _, _) -> sole_owner name
+    | _ -> None
+  in
+  let group_modules (ds : top_decl list) : [ `One of top_decl | `Mod of string * top_decl list ] list =
+    let rec go acc cur ds =
+      let flush acc = match cur with
+        | Some (m, rev) -> `Mod (m, List.rev rev) :: acc
+        | None -> acc
+      in
+      match ds with
+      | [] -> List.rev (flush acc)
+      | d :: rest ->
+        let owner =
+          match decl_member_name d with
+          | Some n -> module_of_name modules n
+          | None -> type_owner d
+        in
+        (match owner, cur with
+         | Some m, Some (m', rev) when m = m' -> go acc (Some (m, d :: rev)) rest
+         | Some m, _ -> go (flush acc) (Some (m, [d])) rest
+         | None, _ -> go (`One d :: flush acc) None rest)
+    in
+    go [] None ds
+  in
+  (* A module that marked nothing exports everything and its members carry no
+     `pub`; one that marked anything has its unmarked members in the parser's
+     private table, so the rest were marked. Recovering it this way means the
+     formatter does not need the parser to keep a separate list. *)
+  (* Marked at all, not merely "has something private": a module that marked
+     every member has nothing in the private table, and printing it back
+     unmarked would export the next member somebody adds. *)
+  let module_marks_something m =
+    List.exists (fun n -> module_of_name modules n = Some m) private_members
+    || List.exists (fun n -> module_of_name modules n = Some m) pub_members
+  in
+  let fmt_module (m : string) (members : top_decl list) : string =
+    let marks = module_marks_something m in
+    printing_module := Some m;
+    let restore () = printing_module := None in
+    let body =
+      List.filter_map (fun d ->
+        match fmt_top_decl (unqualify_decl m d) with
+        | None -> None
+        | Some text ->
+          let is_pub =
+            marks && (match decl_member_name d with
+                      | Some n -> not (List.mem n private_members)
+                      | None -> false)
+          in
+          Some (if is_pub then "pub " ^ text else text))
+        members
+    in
+    restore ();
+    (* A nested module flattens to `A.B.foo`, and the longest prefix that names
+       a module is `A.B` -- which is not a module NAME. `module A.B { }` does
+       not parse, so the chain comes back as the nesting it was written as. *)
+    let parts = String.split_on_char '.' m in
+    let rec wrap ps inner =
+      match ps with
+      | [] -> inner
+      | p :: rest ->
+        let indented =
+          String.concat "\n"
+            (List.map (fun l -> if l = "" then l else "  " ^ l)
+               (String.split_on_char '\n' (wrap rest inner)))
+        in
+        "module " ^ p ^ " {\n" ^ indented ^ "\n}"
+    in
+    wrap parts (String.concat "\n" body)
+  in
   let decls_s =
     prog.decls
-    |> fuse_drop_decls
+    |> group_modules
+    (* ⚠ `fuse_drop_decls` pairs a marker declaration with the one after it, so
+       it has to see a RUN and not one declaration at a time -- calling it per
+       decl would silently stop fusing every `drop type` in the file. *)
+    |> (fun items ->
+         let rec go acc pending items =
+           let flush acc = if pending = [] then acc
+                           else List.rev_append (fuse_drop_decls (List.rev pending)) acc in
+           match items with
+           | [] -> List.rev (flush acc)
+           | `Mod (m, members) :: rest ->
+             go (`Combined (fmt_module m members) :: flush acc) [] rest
+           | `One d :: rest -> go acc (d :: pending) rest
+         in
+         go [] [] items)
     |> List.filter_map (function
       (* A fused pair has no single declaration to ask, so it takes whatever is
          pending: the comments were written above it either way. *)
