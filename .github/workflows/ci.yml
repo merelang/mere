@@ -842,6 +842,14 @@ jobs:
           sh scripts/fail_reason_check.sh
           sh scripts/fail_reason_check.sh --poison
 
+      # Q-166. The module gate one level out: `import` splices, so the boundary
+      # `pub` needs is the file each token came from.
+      - name: file_privacy_check (`pub` at the top of a file survives the splice)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/file_privacy_check.sh
+          sh scripts/file_privacy_check.sh --poison
+
       # v0.1.508.
       - name: binding_form_check (every spelling gets the same verdict)
         if: ${{ !cancelled() }}

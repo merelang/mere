@@ -20,6 +20,11 @@
 #   present the program runs and its output must contain one
 #   exists  a path the doc names must be on disk
 #
+# ⚠ A PHRASE MUST FIT ON ONE LINE. The check is a fixed-string grep, and a
+# doc wraps where it likes -- the first row added after this note was written
+# across a line break and reported PHRASE GONE from a file that said exactly
+# what it claimed.
+#
 # A row goes red in both directions: the phrase disappearing from the doc means
 # the claim moved or was reworded without this catalogue hearing about it, and
 # the probe answering the other way means the doc is now false. The report names
@@ -52,6 +57,7 @@ docs/language-reference.md|encoded as UTF-8|accept|unicode_escape
 docs/language-reference.md|Binary and octal literals|accept|binary_literal
 docs/language-reference.md|may be written between digits|accept|digit_separator
 docs/language-reference.md|A surrogate half|refuse|surrogate_escape
+docs/language-reference.md|a file that marks nothing exports|accept|file_pub_optin
 docs/language-reference.md|No nested string literals in interpolation|refuse|nested_interp
 docs/language-reference.md|A type name may not be declared twice with different constructors|refuse|type_redecl
 docs/language-reference.md|A top-level `while` must be bound or be the last expression|accept|toplevel_while
@@ -78,6 +84,7 @@ Wasm has one output sink
 the language can observe that something failed, not why
 No Unicode escape
 no octal or binary literal syntax and no digit separator
+File-level visibility has nothing to enforce
 codegen support only inside fn bodies
 `while` only inside fn bodies
 RETIRED
@@ -115,6 +122,7 @@ write_probe() {
   case "$1" in
     unicode_escape)   printf 'print "\\u0041"\n' > "$2" ;;
     surrogate_escape) printf 'print "\\uD800"\n' > "$2" ;;
+    file_pub_optin)   printf 'let helper = fn (n: int) -> n * 2;\nprint_int (helper 21)\n' > "$2" ;;
     binary_literal)   printf 'print_int 0b1010\n' > "$2" ;;
     digit_separator)  printf 'print_int 1_000\n' > "$2" ;;
     nested_interp)    printf 'print "x = {show \\"abc\\"}"\n' > "$2" ;;

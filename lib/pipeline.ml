@@ -127,6 +127,113 @@ let register_declared_types (decls : Ast.top_decl list) : unit =
    Reported as a type error because that is what it is: a name that does not
    resolve from where it was written. The message says which module, because
    "unbound variable: Store.secret" would send the reader looking for a typo. *)
+(* Q-166: the file-level half of the same rule. A file that marked anything with
+   `pub` keeps its unmarked top-level bindings to itself; a reference from
+   another file is refused by name and location.
+
+   TWO THINGS MAKE THIS HARDER THAN THE MODULE VERSION, and the first draft of
+   it had both wrong. A module keys on a QUALIFIED name (`M.foo`), which nothing
+   else in a program can spell. A file keys on the bare one.
+
+     1. A LOCAL CAN SPELL IT. `fn (helper: int) -> helper + 1` in another file
+        was refused, and so was `let helper = n + 1 in ...` -- the walk looked at
+        every `Var` node and knew nothing about what bound it. The walk carries
+        the names in scope now: parameters, `let` and `match` binders, `with`,
+        and the loop forms.
+
+     2. SO CAN ANOTHER FILE. Two files may bind the same top-level name -- the
+        splice has always allowed it -- and one of them marking `pub` must not
+        reach into the other's. A name bound at top level by more than one file
+        is therefore NOT checked: which binding a reference means is a question
+        this pass cannot answer, and refusing on a guess would refuse correct
+        programs. Erring toward accepting is the right direction for a rule
+        whose whole job is to say "you did not mean to reach in here".
+
+   Both were found by asking the design rather than the tests -- the gate's four
+   directions did not include a local that happens to share a name. *)
+let check_file_privacy (prog : Ast.program) =
+  if Hashtbl.length Parser.pub_files > 0 then begin
+    let names_of (d : Ast.top_decl) : string list * string =
+      match d with
+      | Ast.Top_let ({ Ast.pnode = Ast.P_var n; Ast.ploc = l; _ }, _) ->
+        ([n], Parser.file_key l.Loc.file)
+      | Ast.Top_let_rec ((_, (v : Ast.expr)) :: _ as bs) ->
+        (List.map fst bs, Parser.file_key v.Ast.loc.Loc.file)
+      | _ -> ([], "")
+    in
+    (* name -> the file that keeps it to itself; and name -> how many files bind it *)
+    let private_here : (string, string) Hashtbl.t = Hashtbl.create 32 in
+    let bound_by : (string, string list) Hashtbl.t = Hashtbl.create 64 in
+    List.iter (fun d ->
+      let (ns, key) = names_of d in
+      List.iter (fun n ->
+        let prev = match Hashtbl.find_opt bound_by n with Some l -> l | None -> [] in
+        if not (List.mem key prev) then Hashtbl.replace bound_by n (key :: prev);
+        if Hashtbl.mem Parser.pub_files key
+           && not (List.mem (key, n) !Parser.file_pub_names)
+        then Hashtbl.replace private_here n key) ns)
+      prog.Ast.decls;
+    (* Drop the ambiguous ones: more than one file binds that name. *)
+    Hashtbl.iter (fun n _ ->
+      match Hashtbl.find_opt bound_by n with
+      | Some (_ :: _ :: _) -> Hashtbl.remove private_here n
+      | _ -> ()) (Hashtbl.copy private_here);
+    if Hashtbl.length private_here > 0 then begin
+      let rec pat_names (p : Ast.pattern) : string list =
+        match p.Ast.pnode with
+        | Ast.P_var n -> [n]
+        | Ast.P_str_prefix (_, n) -> [n]
+        | Ast.P_as (inner, n) -> n :: pat_names inner
+        | Ast.P_constr (_, Some sub) -> pat_names sub
+        | Ast.P_tuple ps -> List.concat_map pat_names ps
+        | Ast.P_record (_, fs) -> List.concat_map (fun (_, q) -> pat_names q) fs
+        | Ast.P_or (a, b) -> pat_names a @ pat_names b
+        | _ -> []
+      in
+      let check (e : Ast.expr) =
+        let rec go bound (x : Ast.expr) =
+          match x.Ast.node with
+          | Ast.Var n when not (List.mem n bound) ->
+            (match Hashtbl.find_opt private_here n with
+             | Some owner ->
+               let here = Parser.file_key x.Ast.loc.Loc.file in
+               if here <> owner then
+                 raise (Typer.Type_error (x.Ast.loc,
+                   Printf.sprintf
+                     "`%s` is internal to %s (that file marks its exports with `pub`)"
+                     n (if owner = "" then "the file it is written in" else owner)))
+             | None -> ())
+          | Ast.Var _ -> ()
+          | Ast.Fun (param, _, body) -> go (param :: bound) body
+          | Ast.Let (pat, value, body) ->
+            go bound value; go (pat_names pat @ bound) body
+          | Ast.Let_rec (bs, body) ->
+            let bound' = List.map fst bs @ bound in
+            List.iter (fun (_, v) -> go bound' v) bs;
+            go bound' body
+          | Ast.With (name, value, body) ->
+            go bound value; go (name :: bound) body
+          | Ast.Match (scrut, arms) ->
+            go bound scrut;
+            List.iter (fun (pat, guard, body) ->
+              let bound' = pat_names pat @ bound in
+              (match guard with Some g -> go bound' g | None -> ());
+              go bound' body) arms
+          | Ast.Region_block (name, body) -> go (name :: bound) body
+          | Ast.Region_loop (a, b, body) -> go (a :: b :: bound) body
+          | _ -> List.iter (go bound) (Ast.children x)
+        in
+        go [] e
+      in
+      List.iter (fun d ->
+        match d with
+        | Ast.Top_let (_, v) -> check v
+        | Ast.Top_let_rec bs -> List.iter (fun (_, v) -> check v) bs
+        | _ -> ()) prog.Ast.decls;
+      check prog.Ast.main
+    end
+  end
+
 let check_module_privacy (prog : Ast.program) =
   if Hashtbl.length Parser.private_module_names > 0 then begin
     let module_of (n : string) =
@@ -504,7 +611,8 @@ let parse_program ?(prelude = true) ?(keep_sugar = false) ?base_dir ?(search_pat
                      refuses to format a program because of a name it cannot
                      call is a formatter people stop running on broken files,
                      which is when they need it. *)
-                  check_module_privacy p; prefix_desugar (echo_rewrite p)))
+                  check_module_privacy p; check_file_privacy p;
+                  prefix_desugar (echo_rewrite p)))
                 { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls })))))
   in
   (* Tell the typer what this program declares, here rather than only when the
