@@ -86,10 +86,18 @@ close twice ok
 negative fd ok
 whence out of range ok
 isatty on a file ok
+pipe ok
+pipe ends differ ok
+pipe write ok
+pipe read ok
+pipe is not a tty ok
+pipe cannot seek ok
+close pipe read ok
+close pipe write ok
 W
 
 if diff -u "$TMP/want" "$TMP/got" > "$TMP/d" 2>&1; then
-  echo "fdio: 28/28 ok"
+  echo "fdio: 36/36 ok"
 else
   echo "FAIL fdio: the transcript differs"
   cat "$TMP/d"

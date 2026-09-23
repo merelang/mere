@@ -729,7 +729,7 @@ jobs:
       # caught anything in the runtime: a seek test where CUR and END happened
       # to answer the same number, and a truncation test that was reading the
       # previous run's leftovers.
-      - name: fdio_check (open, read, write, seek, dup, close)
+      - name: fdio_check (open, read, write, seek, dup, pipe, close)
         if: ${{ !cancelled() }}
         run: sh scripts/fdio_check.sh
 

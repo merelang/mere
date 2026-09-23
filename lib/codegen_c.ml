@@ -6721,7 +6721,7 @@ let native_ffi_names =
        platform's constants on this side of the boundary. Bytes cross through
        the same arena tcp_read and tcp_write use. *)
     "fd_open"; "fd_read"; "fd_write"; "fd_close"; "fd_seek"; "fd_dup";
-    "fd_sync"; "fd_isatty" ]
+    "fd_sync"; "fd_isatty"; "fd_pipe" ]
 
 (* TLS externs. Not implemented natively yet (needs libssl FFI). Stubbed so
    a native build LINKS and plaintext connections work; referenced by the
@@ -7682,6 +7682,17 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio =
              "static long long fd_isatty(long long fd) {";
              "  if (fd < 0) return 0;";
              "  return isatty((int)fd) ? 1 : 0;";
+             "}";
+             "";
+             "/* pipe(2) fills the CALLER's int[2], which is another thing Mere's";
+             "   extern ABI cannot name. A THIRD CONTRACT, then: the two descriptors";
+             "   come back packed into one integer, read end in the high half,";
+             "   write end in the low half, and -1 for the whole thing on failure.";
+             "   The halves are 32 bits wide, which no descriptor number reaches. */";
+             "static long long fd_pipe(void) {";
+             "  int fds[2];";
+             "  if (pipe(fds) != 0) return -1;";
+             "  return ((long long)fds[0] << 32) | (long long)(unsigned int)fds[1];";
              "}" ]
        else "");
       (if filestat then
@@ -12188,7 +12199,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     || Hashtbl.mem extern_fn_decls "fd_seek"
     || Hashtbl.mem extern_fn_decls "fd_dup"
     || Hashtbl.mem extern_fn_decls "fd_sync"
-    || Hashtbl.mem extern_fn_decls "fd_isatty";
+    || Hashtbl.mem extern_fn_decls "fd_isatty"
+    || Hashtbl.mem extern_fn_decls "fd_pipe";
   strbuf_used := false;
   bytebuf_used := false;
   bytes_used := false;
