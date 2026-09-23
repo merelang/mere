@@ -4,6 +4,42 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.516 — 2026-09-23
+
+_Q-171: a catch now releases the region it jumped over, on the backend that had
+never been able to._
+
+A `fail` raised inside a `region R { }` and caught by an outer `try_or` LONGJMPS
+PAST THE BLOCK'S EXIT, so the release written there never runs. The C backend
+has carried an active-region stack for exactly this since v0.1.31, and made it
+release rather than leak in v0.1.301. The LLVM backend had neither, and kept the
+region struct in an `alloca` -- on a frame that is gone by the time anyone could
+free it. The loop segfaulted at a HUNDRED iterations where C ran twenty
+thousand; Wasm and the interpreter were fine.
+
+Two changes. The struct comes from `malloc`, and every live block is on an
+active stack, so a catch releases what it jumped over by depth alone --
+`try_or` and `try_or_msg` save `@__lang_region_active_n` on the way in and call
+`@__lang_region_unwind` on the failure path.
+
+**Simpler than the C version on purpose.** This backend REFUSES `region loop`,
+so its blocks are strictly LIFO and a release pops the top; C carries a
+scan-and-shift because its region-loop swap releases the entry under the one
+just pushed. Porting that too would have been code with no caller.
+
+`scripts/region_unwind_check.sh` runs the loop on every backend that can build
+here, at a scale where leaking the 1 MiB block could not fit in memory -- so
+passing is evidence the blocks come back, not just that the answer is right. Its
+poison is the shape of the bug: **one catch passes on the broken backend too**,
+which is why the gate runs twenty thousand.
+
+⚠ What it does not claim: total memory. Mere reclaims nothing by default, so
+peak RSS still grows with the iteration count on every backend, and by different
+amounts (N=50000: C 2.6 MiB, LLVM 9.7 MiB). That is allocation shape, not this
+bug -- a leaked block would have been fifty gigabytes.
+
+---
+
 ## v0.1.515 — 2026-09-23
 
 _Q-173: the formatter escaped five characters and the lexer writes seven._
