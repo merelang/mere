@@ -849,6 +849,74 @@ let warn_unused (prog : Ast.program) =
       (Some fix))
     (Query.unused_bindings ~prelude_decls:(prelude_decl_count ()) prog)
 
+(* Q-146: top-level names nothing reads, in a file that said what its surface is.
+
+   This was deliberately silent, and the reason was the language: `import`
+   splices, so after it there is one namespace and a file's helper is
+   indistinguishable from its API. Reporting would have fired on every export of
+   every library the moment somebody opened it.
+
+   v0.1.514 gave a file a way to say. A file that marked anything with `pub` has
+   decided its surface, so an UNMARKED top-level binding in it is internal --
+   and its readers, if any, are in that same file. A name with none is dead code
+   the person can act on.
+
+   ⚠ Only files that marked something. One that marked nothing is in the state
+   every file was in before `pub` existed, and nothing about it says which names
+   are meant to be reachable.
+
+   ⚠ A self-reference does not count as a read: `let rec f = ... f ...` that
+   nobody calls is still dead. References are counted from the OTHER
+   declarations and from the main expression. *)
+let warn_unused_toplevel (prog : Ast.program) =
+  if Hashtbl.length Parser.pub_files > 0 then begin
+    let binding_of (d : Ast.top_decl) : (string * Loc.t) list =
+      match d with
+      | Ast.Top_let ({ Ast.pnode = Ast.P_var n; Ast.ploc = l; _ }, _) -> [ (n, l) ]
+      | Ast.Top_let_rec bs ->
+        List.map (fun (n, (v : Ast.expr)) -> (n, v.Ast.loc)) bs
+      | _ -> []
+    in
+    let internal =
+      List.concat_map (fun d ->
+        List.filter_map (fun (n, (l : Loc.t)) ->
+          let key = Parser.file_key l.Loc.file in
+          if Hashtbl.mem Parser.pub_files key
+             && not (List.mem (key, n) !Parser.file_pub_names)
+          then Some (n, l) else None) (binding_of d)) prog.Ast.decls
+    in
+    if internal <> [] then begin
+      let read : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+      let rec note (x : Ast.expr) =
+        (match x.Ast.node with Ast.Var n -> Hashtbl.replace read n () | _ -> ());
+        List.iter note (Ast.children x)
+      in
+      List.iter (fun d ->
+        let mine = List.map fst (binding_of d) in
+        let others_only (n, _) = not (List.mem n mine) in
+        ignore others_only;
+        (* Walk this declaration, then forget the names it binds itself. *)
+        let before = Hashtbl.copy read in
+        (match d with
+         | Ast.Top_let (_, v) -> note v
+         | Ast.Top_let_rec bs -> List.iter (fun (_, v) -> note v) bs
+         | _ -> ());
+        List.iter (fun n ->
+          if not (Hashtbl.mem before n) then Hashtbl.remove read n) mine)
+        prog.Ast.decls;
+      note prog.Ast.main;
+      List.iter (fun (n, l) ->
+        if not (Hashtbl.mem read n) then
+          warn l
+            (Printf.sprintf
+               "unused top-level binding `%s` -- this file marks its exports with \
+                `pub` and nothing in it reads this one\n\
+                help: mark it `pub` if it is part of the surface, or remove it"
+               n))
+        internal
+    end
+  end
+
 (* Uses of a deprecated name, as warnings with the rename attached.
 
    Drained on the same paths and under the same rule as the unused check: only
@@ -2007,6 +2075,7 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
         this": a file mid-edit has plenty of names whose reader is the line
         being written. *)
      warn_unused prog;
+     warn_unused_toplevel prog;
      warn_deprecated ();
      enforce_exhaustive ()
    end
@@ -2131,6 +2200,7 @@ let check ?base_dir ?(search_paths = []) (source : string)
          if errs = [] then begin
            reset_warnings ();
            warn_unused prog;
+           warn_unused_toplevel prog;
            warn_deprecated ();
            ws @ List.map warning (take_warnings ())
          end else ws

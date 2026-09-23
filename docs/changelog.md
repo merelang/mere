@@ -4,6 +4,48 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.519 — 2026-09-23
+
+_The two ceilings v0.1.518 measured are gone, and one of them was not what the
+last entry said it was._
+
+v0.1.518 wrote that the three non-idempotent files were "a comment moving one
+indent level" -- placement drifting rather than anything being lost. That was
+wrong, and it was wrong in the reassuring direction. Measured properly, a comment
+on line 380 of the first pass is on line 805 of the second: it moved 425 lines,
+onto code it does not describe. The diff looked like indentation because the `-`
+and `+` lines carried the SAME TEXT and only the leading whitespace differed --
+the line numbers were never read.
+
+The cause was that comment placement is decided by source line, and `Loc.line`
+counts within its OWN file. `import` splices another file's declarations in, so
+the entry file's line 380 and an imported file's line 380 were the same key.
+Placement now only considers comments whose location carries no file -- the entry
+file's own.
+
+Three more things, from the same corpus:
+
+- The formatter prints `dyn Trait e` again. The parser desugars it to
+  `Trait__pack e` unconditionally -- it is in the parser, where `keep_sugar` does
+  not reach -- so the formatter reconstructs it, and only for names the file
+  actually declares as traits.
+- Trailing comments survive on match arms and on `else if` heads. Over the
+  corpus: 7,584 comment lines in, 7,488 out -- **188 lost → 96.** The
+  restriction is narrow on purpose: a comment is only attached where the
+  formatter itself emits the newline, because attaching it to a final arm or a
+  closing `else` puts the caller's `;` inside the comment -- that broke 13 files
+  before the rule was narrowed.
+- `mere check` reports top-level bindings nothing reads, in files that mark their
+  exports with `pub` (Q-146). Files that mark nothing stay silent: without `pub`
+  there is no way to tell a library's surface from dead code, which is exactly
+  why this was deferred in the first place. The gate asks both directions.
+
+`fmt_roundtrip_check.sh` now runs at `CEILING=0` and `DRIFT_CEILING=0` over all
+293 example files: what `mere fmt` writes type-checks, and formatting twice gives
+the same bytes. `fmt_comments_check.sh` is at `LOST_CEILING=96`.
+
+---
+
 ## v0.1.518 — 2026-09-23
 
 _Q-173 closed to a measured ceiling: `keep_sugar` guarded the desugaring and

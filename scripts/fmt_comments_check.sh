@@ -139,7 +139,7 @@ fi
 # --- all three kinds, over the same corpus ---------------------------------
 # The ceiling is what was measured when the trailing slice landed. It is a
 # CEILING on what may be lost, not a target: shrinking it is the next slice.
-LOST_CEILING="${LOST_CEILING:-188}"
+LOST_CEILING="${LOST_CEILING:-96}"
 all_in=0; all_out=0
 for f in "$ROOT"/examples/*.mere; do
   if "$MERE" fmt "$f" > "$tmp/f.out" 2>/dev/null; then
