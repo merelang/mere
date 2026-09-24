@@ -60,6 +60,7 @@ docs/language-reference.md|A surrogate half|refuse|surrogate_escape
 docs/language-reference.md|a file that marks nothing exports|accept|file_pub_optin
 docs/language-reference.md|No nested string literals in interpolation|refuse|nested_interp
 docs/language-reference.md|A type name may not be declared twice with different constructors|refuse|type_redecl
+docs/language-reference.md|a record type name may not be declared twice with different fields|refuse|record_redecl
 docs/language-reference.md|A top-level `while` must be bound or be the last expression|accept|toplevel_while
 docs/stdlib-reference.md|What the handler receives is the diagnostic line|present|try_or_reason
 docs/stdlib-reference.md|test/parity/region_fail_unwind.mere|exists|test/parity/region_fail_unwind.mere
@@ -127,6 +128,7 @@ write_probe() {
     digit_separator)  printf 'print_int 1_000\n' > "$2" ;;
     nested_interp)    printf 'print "x = {show \\"abc\\"}"\n' > "$2" ;;
     type_redecl)      printf 'type t = A | B;\ntype t = C | D;\nprint_int 0\n' > "$2" ;;
+    record_redecl)    printf 'type t = \\{ a: int };\ntype t = \\{ b: str };\nprint_int 0\n' > "$2" ;;
     toplevel_while)   printf 'let v = vec_new ();\nlet _ = vec_push v 0;\nlet _ = while vec_len v < 5 do vec_push v (vec_len v);\nprint_int (vec_len v)\n' > "$2" ;;
     try_or_reason)    printf 'let r = try_or_msg (fn () -> fail "REASON_XYZ") (fn (m: str) -> m) in\nprint r\n' > "$2" ;;
     *) return 1 ;;

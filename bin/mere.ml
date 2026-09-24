@@ -467,7 +467,7 @@ let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
     ignore (print_warnings ());
     prerr_endline
       (String.concat "\n\n"
-         (List.map (fun ((name, _, _) as r) ->
+         (List.map (fun ((_, name, _, _) as r) ->
             let loc =
               match Mere.Pipeline.declaration_sites name with
               | latest :: _ :: _ -> latest

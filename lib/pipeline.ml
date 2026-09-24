@@ -754,7 +754,7 @@ let warn_fix loc msg fix = warnings := (loc, msg, fix) :: !warnings
    No position: `Ast.Top_type` carries none, so there is no line to point at.
    The message names the type and both constructor sets instead, which is what
    a reader needs to find the two declarations. *)
-exception Type_redeclared of (string * string * string) list
+exception Type_redeclared of ([ `Variant | `Record ] * string * string * string) list
 
 (* Where a type name was declared, newest first. The parser conses an entry per
    declaration, so a name declared twice has two entries -- which is exactly the
@@ -765,20 +765,36 @@ let declaration_sites (name : string) : Loc.t list =
     if n = name && l.Loc.file = None && l.Loc.line > 0 then Some l else None)
     !Parser.declared_types
 
-let redecl_message (name, a, b) =
+(* ⚠ THE VARIANT WORDING IS NOT TOUCHED. Three unit tests and
+   `scripts/doc_claims_check.sh`'s catalogue pin "declared twice with different
+   constructors" verbatim; a record says "fields" because that is what it
+   clashes on, and the two branches exist so that neither has to be softened
+   into wording that fits both. *)
+let redecl_message (kind, name, a, b) =
   let first_line =
     match List.rev (declaration_sites name) with
     | (first : Loc.t) :: _ :: _ -> Printf.sprintf " (first declared on line %d)" first.Loc.line
     | _ -> ""
   in
-  String.concat "\n"
-    [ Printf.sprintf
-        "type `%s` is declared twice with different constructors (`%s` and `%s`)%s"
-        name a b first_line;
-      "help: a type may be restated identically — twelve files here restate `'a list`";
-      "help: — but two different types cannot share a name. The second wins for the";
-      "help: name while the first's constructors stay usable, so a `match` over one";
-      "help: is checked against the other. Rename one of them." ]
+  match kind with
+  | `Variant ->
+    String.concat "\n"
+      [ Printf.sprintf
+          "type `%s` is declared twice with different constructors (`%s` and `%s`)%s"
+          name a b first_line;
+        "help: a type may be restated identically — twelve files here restate `'a list`";
+        "help: — but two different types cannot share a name. The second wins for the";
+        "help: name while the first's constructors stay usable, so a `match` over one";
+        "help: is checked against the other. Rename one of them." ]
+  | `Record ->
+    String.concat "\n"
+      [ Printf.sprintf
+          "type `%s` is declared twice with different fields (`%s` and `%s`)%s"
+          name a b first_line;
+        "help: a record may be restated identically, but two different records cannot";
+        "help: share a name — including across modules, where `A.t` and `B.t` are one";
+        "help: type. The second wins, so a value built by one is read as the other.";
+        "help: Rename one of them." ]
 
 (* So that an uncaught one, and `Printexc.to_string` generally, say what it is
    rather than `Type_redeclared(_)`. The host runtime's words are not the
@@ -787,9 +803,9 @@ let redecl_message (name, a, b) =
 let () =
   Printexc.register_printer (function
     | Type_redeclared rs ->
-      Some (String.concat "; " (List.map (fun (n, a, b) ->
-        Printf.sprintf "type `%s` is declared twice with different constructors (`%s` and `%s`)"
-          n a b) rs))
+      Some (String.concat "; " (List.map (fun (k, n, a, b) ->
+        Printf.sprintf "type `%s` is declared twice with different %s (`%s` and `%s`)"
+          n (match k with `Variant -> "constructors" | `Record -> "fields") a b) rs))
     | _ -> None)
 
 let enforce_type_redecls () =
@@ -2268,7 +2284,7 @@ let check ?base_dir ?(search_paths = []) (source : string)
           declaration (the one that introduced the conflict) and the message
           names the first. *)
        let redecls =
-         List.map (fun ((name, _, _) as r) ->
+         List.map (fun ((_, name, _, _) as r) ->
            let loc =
              match declaration_sites name with
              | latest :: _ :: _ -> latest   (* two or more: the newest is the conflict *)
