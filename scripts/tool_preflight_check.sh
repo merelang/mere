@@ -37,6 +37,9 @@ MODE="${1:-}"
 # the message it must print rather than by a non-zero exit.
 if [ "$MODE" = "--poison" ]; then
   fails=0
+  tmp=$(mktemp -d) || exit 1
+  trap 'rm -rf "$tmp"' EXIT
+  mkdir -p "$tmp/empty-workflows"
   run() {
     label=$1; want=$2; shift 2
     out=$(env "$@" sh "$0" --required 2>&1)
@@ -58,7 +61,13 @@ if [ "$MODE" = "--poison" ]; then
   # 3. the floor itself -- proof that the count above is a real number
   run "the floor is a real number" \
     "required tools were derived" TOOL_PREFLIGHT_REQ_FLOOR=99
-  [ "$fails" -eq 0 ] && { echo "tool_preflight --poison: 3 caught"; exit 0; }
+  # 4. a gate that no workflow names -- the half that has never had to pass
+  run "a gate drops out of every workflow" \
+    "UNWIRED  scripts/" TOOL_PREFLIGHT_WF_DIR="$tmp/empty-workflows"
+  # 5. the gate glob stops matching, so there is nothing to find unwired
+  run "the gate list collapses" \
+    "gates were found (floor" TOOL_PREFLIGHT_GATE_FLOOR=999
+  [ "$fails" -eq 0 ] && { echo "tool_preflight --poison: 5 caught"; exit 0; }
   echo "tool_preflight --poison: $fails not caught"; exit 1
 fi
 
@@ -175,7 +184,43 @@ REQ_FLOOR="${TOOL_PREFLIGHT_REQ_FLOOR-8}"
   echo "  CI, stopped working. An empty denominator makes every absent tool invisible."
   exit 1; }
 
+# ⚠ THE OTHER HALF: A GATE THAT NO WORKFLOW NAMES.
+#
+# Everything above is about a gate that CI runs and that skips. This is about a
+# gate CI does not run at all -- which is worse, because it has no chance to
+# skip and no chance to pass. `rv_exec_check.sh` was in that state: the
+# differential between the RISC-V backend and the C backend, cited in a
+# conference talk as one of three boundary checks, in no workflow, and RED.
+#
+# Derived the same way: every scripts/*_check.sh (plus the parity and emulator
+# gates, which do not carry the suffix), minus the ones named here with why.
+WF_DIR="${TOOL_PREFLIGHT_WF_DIR-.github/workflows}"
+UNWIRED_OK="${TOOL_PREFLIGHT_UNWIRED_OK-rv_float_check.sh bigstr_check.sh}"
+#   rv_float_check.sh   needs a memu checkout AND minutes of emulator time;
+#                       run beside rv_exec_check when the RV backend is touched
+#   bigstr_check.sh     allocates gigabytes by design; it is a memory probe,
+#                       not a correctness gate, and a CI runner cannot host it
+unwired=0
+for f in $(ls scripts/*_check.sh scripts/parity.sh scripts/qemu_virt.sh 2>/dev/null | sort -u); do
+  [ -f "$f" ] || continue
+  b=$(basename "$f")
+  grep -rq "$b" "$WF_DIR" 2>/dev/null && continue
+  case " $UNWIRED_OK " in *" $b "*) continue ;; esac
+  echo "  UNWIRED  scripts/$b — no workflow names it, so it has never had to pass"
+  unwired=$((unwired + 1))
+done
+n_gates=$(ls scripts/*_check.sh 2>/dev/null | wc -l | tr -d ' ')
+GATE_FLOOR="${TOOL_PREFLIGHT_GATE_FLOOR-40}"
+[ "$n_gates" -ge "$GATE_FLOOR" ] || {
+  echo "tool_preflight: FAIL — only $n_gates gates were found (floor $GATE_FLOOR); the glob stopped matching."
+  exit 1; }
+echo "  $n_gates gates named *_check.sh; $unwired of them in no workflow"
+
 if [ "$MODE" = "--required" ] || [ "${MERE_REQUIRE_TOOLS-}" = "1" ]; then
+  [ "$unwired" -eq 0 ] || {
+    echo "tool_preflight: FAIL — $unwired gate(s) are in no workflow. A gate nothing"
+    echo "  runs is not a gate: wire it, or name it in UNWIRED_OK with the reason."
+    exit 1; }
   [ "$missing" -eq 0 ] || {
     echo "tool_preflight: FAIL — $missing tool(s) absent, so that many CI gates would"
     echo "  report nothing and the build would stay green. Install them, or add the"
