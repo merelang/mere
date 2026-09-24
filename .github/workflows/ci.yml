@@ -880,6 +880,16 @@ jobs:
           sh scripts/fmt_roundtrip_check.sh
           sh scripts/fmt_roundtrip_check.sh --poison
 
+      # Q-125. A record declared inside a module could not be named in an
+      # annotation -- not even inside the module that declared it -- while
+      # variants could. The twins are asked the same questions side by side,
+      # because the bug was that they disagreed.
+      - name: module_type_check (a module's type can be written down)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/module_type_check.sh
+          sh scripts/module_type_check.sh --poison
+
       # Q-133. The substring assertions must be capable of failing. 41 of the 97
       # wasm ones were not, and 11 were outright false about the user's code.
       # All three backends (wasm / C / LLVM, 352 assertions) compare against a

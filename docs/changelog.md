@@ -4,6 +4,50 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.525 — 2026-09-24
+
+_Q-125: a record declared inside a module could not be named in an annotation —
+and not only from outside. From inside, either._
+
+```mere
+module M { type t = { a: int }; let get = fn (v: t) -> v.a; }
+```
+
+⚠ **That did not compile**, in the module that declared the type. The question
+was recorded as "cannot be named from OUTSIDE the module", and it was also
+narrower than recorded: **variants were fine all along**. `M.v` worked, `v`
+worked, inside and out.
+
+The asymmetry is where the qualification lands. A variant's lands on the
+CONSTRUCTOR — `M.A` still builds a `v` — so the type stays canonical and any
+annotation matches. A record's landed on the TYPE NAME: the literal became
+`M.t { … }` and every annotation resolved to `t`, so the two could never meet.
+
+**A record's identity is its bare name now**, the way a variant's already was.
+The canonicalisation is in the parser, at the two places it builds a qualified
+record literal or pattern — ⚠ one place rather than the **87 sites** that read a
+record name across the typer, the exhaustiveness checker and both native
+backends. Putting it in the typer first worked for the typer and left the C
+backend emitting two structs, `M__t` and `t`, for one type.
+
+⚠ **Records had no redeclaration check at all**, which variants have had since
+v0.1.474. `type t = { a: int }; type t = { b: str };` was accepted in silence
+and the second won. That was survivable only while `M.t` and `t` were different
+types; making them one would have merged two different records without a word.
+So the guard lands first, in the same shape as the variant one and with the same
+kind of message — **and the variant wording is not touched**, because three unit
+tests and `scripts/doc_claims_check.sh`'s catalogue pin it verbatim. Restating a
+record identically is still fine; twelve files here restate `'a list`.
+
+`scripts/module_type_check.sh` asks fifteen questions, and asks the twins side by
+side: every spelling that must work is asked of a record AND of a variant,
+because the bug was not "records are broken", it was "records and variants
+disagree" and nothing compared them.
+
+2,847 unit tests, parity 214/214 with no skips.
+
+---
+
 ## v0.1.524 — 2026-09-24
 
 _The same control the Wasm assertions got now covers C and LLVM: 352 substring

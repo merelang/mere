@@ -206,6 +206,20 @@ let aliases : (string, string list * Ast.ty) Hashtbl.t = Hashtbl.create 8
    Recorded because `Ast.Top_type` and friends carry no location, and a warning
    without a position is one an editor cannot show. Pipeline reads this after
    parsing to check the names against C's; see `reserved_c_type_names` there. *)
+(* Q-125. A record type's identity is its BARE name, the same way a variant's
+   is: `M.A` constructs a `v`, not an `M.v`. Written `M.t { … }` from outside the
+   module, the name is canonicalised at the two places this parser builds a
+   qualified record literal or pattern -- so nothing downstream ever sees `M.t`
+   as a record name. The alternative was to canonicalise in the typer, the
+   exhaustiveness checker and both native backends: 87 sites reading the same
+   name, which is how one rule ends up with three different answers. *)
+let canonical_record_name (full : string) : string =
+  match String.rindex_opt full '.' with
+  | None -> full
+  | Some i ->
+    let bare = String.sub full (i + 1) (String.length full - i - 1) in
+    if Hashtbl.mem records bare then bare else full
+
 let declared_types : (string * Loc.t) list ref = ref []
 
 (* v0.1.476: the same reason declared_types exists -- `Top_extern` carries no
@@ -382,11 +396,16 @@ let rec parse_program_internal tokens =
       expand_alias_or_tycon name args, rest
     | (_, T_ident m) :: (_, T_dot) :: (_, T_ident tyname) :: rest
       when starts_with_upper m ->
-      (* Qualified module type, e.g. `Json.json` in an annotation. Module-
-         internal types are registered globally *unqualified* (see the
-         module body parser), so drop the `Module.` prefix and resolve the
-         bare type name. Mirrors qualified value / constructor access,
-         which already parse. (mq dogfood P4.) *)
+      (* Qualified module type, e.g. `Json.json` in an annotation: drop the
+         `Module.` prefix and resolve the bare name. Mirrors qualified value /
+         constructor access, which already parse. (mq dogfood P4.)
+
+         ⚠ The comment here used to say module-internal types are registered
+         "globally unqualified", and that stopped being true: a record's type
+         name IS prefixed where it is used, and `Top_record_alias` registers
+         `M.t` beside `t`. Dropping the prefix is still right, but it is right
+         because the TYPER canonicalises a record literal's name back to the
+         bare one (Q-125) -- not because only one name was ever registered. *)
       expand_alias_or_tycon tyname [], rest
     | (_, T_ident name) :: rest -> expand_alias_or_tycon name [], rest
     | (_, T_tyvar name) :: rest -> Ast.TyParam name, rest
@@ -999,7 +1018,7 @@ let rec parse_program_internal tokens =
                 "expected 'field = pat' in record pattern"))
           in
           let fpats, rest = parse_fpats [] body_rest in
-          mkp pos (Ast.P_record (full, fpats)), rest
+          mkp pos (Ast.P_record (canonical_record_name full, fpats)), rest
         | _ ->
           raise (Parse_error (pos, "expected '{' for record pattern"))
       end else
@@ -1223,7 +1242,7 @@ let rec parse_program_internal tokens =
                      "expected 'field = expr' in record literal"))
                in
                let fields, rest = parse_fields [] body_rest in
-               field_chain (mk pos (Ast.Record_lit (full, fields))) rest
+               field_chain (mk pos (Ast.Record_lit (canonical_record_name full, fields))) rest
              | _ ->
                (* No `{` follows — treat as a bare type name reference
                   (unusual but parseable as Var). *)
@@ -1761,7 +1780,7 @@ let rec parse_program_internal tokens =
   (* Apply `M.` prefix to every bound name in the module's decls, AND
      rewrite free Var references that match those names so internal
      short-name refs (`foo` inside `M`) resolve to the exported form. *)
-  let prefix_module_decls ?(full_path = "") m_name decls =
+    let prefix_module_decls ?(full_path = "") m_name decls =
     let names = collect_module_names decls in
     (* For `open M;`: record only the DIRECT short names (no dot in
        the name) — nested module's exports are accessed via their own
@@ -1811,9 +1830,16 @@ let rec parse_program_internal tokens =
     (* Build rename map: bare → M.prefixed. Includes type / record / ctor
        names (so internal body references get qualified) and the regular
        let-binding names. *)
+    (* ⚠ RECORD NAMES ARE NOT RENAMED. A record literal inside the module keeps
+       the bare name, so its type is the one an annotation resolves to --
+       `module M { type t = { a: int }; let get = fn (v: t) -> v.a; }` did not
+       compile before this, in the module that declared the type. Variants never
+       had the problem because their rename lands on the CONSTRUCTOR and leaves
+       the type canonical; this makes records agree. A qualified literal written
+       from outside is canonicalised where it is parsed. *)
     let symbol_rename =
       List.map (fun n -> (n, m_name ^ "." ^ n))
-        (!type_names @ !record_names @ List.map fst !ctor_arities)
+        (!type_names @ List.map fst !ctor_arities)
     in
     let rename = symbol_rename @ List.map (fun n -> (n, m_name ^ "." ^ n)) names in
     let lookup n = List.assoc_opt n rename in

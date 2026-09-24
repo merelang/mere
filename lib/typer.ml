@@ -1306,7 +1306,12 @@ let rec subst_region (from_name : string) (to_name : string) (t : Ast.ty) : Ast.
    parser's module handling: the general case covers it, and DEFERRED §4.1
    (namespacing module types) is a different and larger change that this does
    not need. *)
-let type_redecls : (string * string * string) list ref = ref []
+(* (kind, name, shape-of-the-first, shape-of-the-second). ⚠ The KIND is carried
+   because the two messages must read differently -- a variant clashes on its
+   constructors, a record on its fields -- and the variant wording is pinned by
+   three unit tests and by `scripts/doc_claims_check.sh`'s catalogue. Putting the
+   distinction in the payload keeps one collection path and one raise. *)
+let type_redecls : ([ `Variant | `Record ] * string * string * string) list ref = ref []
 let reset_type_redecls () = type_redecls := []
 
 (* De-duplicated: `register_type` runs from the declaration walk, from the pass
@@ -1315,7 +1320,7 @@ let reset_type_redecls () = type_redecls := []
 let take_type_redecls () =
   let seen = Hashtbl.create 8 in
   let out =
-    List.filter (fun (n, a, b) ->
+    List.filter (fun (_, n, a, b) ->
       let key = (n, (if a < b then a else b), (if a < b then b else a)) in
       if Hashtbl.mem seen key then false else (Hashtbl.add seen key (); true))
       (List.rev !type_redecls)
@@ -1331,7 +1336,7 @@ let shape_of variants =
 let register_type type_name params variants =
   (match Hashtbl.find_opt Exhaustive.type_variants type_name with
    | Some prev when variants <> [] && prev <> [] && shape_of prev <> shape_of variants ->
-     type_redecls := (type_name, shape_of prev, shape_of variants) :: !type_redecls
+     type_redecls := (`Variant, type_name, shape_of prev, shape_of variants) :: !type_redecls
    | _ -> ());
   Hashtbl.replace types type_name (List.length params);
   (* The params go with the variants: the exhaustiveness checker instantiates a
@@ -1343,7 +1348,26 @@ let register_type type_name params variants =
       { params; arg = payload; type_name }
   ) variants
 
+(* The same sentence `shape_of` writes for a variant, for a record: the field
+   names and nothing about their types, sorted, so that restating a declaration
+   identically is not a conflict and reordering its fields is not either. *)
+let fields_shape fields =
+  "{ " ^ String.concat ", " (List.sort compare (List.map fst fields)) ^ " }"
+
 let register_record type_name params fields =
+  (* ⚠ Records had NO redeclaration check while variants had one, so
+     `type t = { a: int }; type t = { b: str };` was accepted in silence and the
+     second won. That was survivable only while a record's type name was not
+     canonicalised; once `M.t` and `t` are one type (see `Record_lit`), two
+     different records sharing a name would silently BE the same type. The hole
+     is closed first, in the same shape as the variant one. *)
+  (match Hashtbl.find_opt records type_name with
+   | Some prev when fields <> [] && prev.r_fields <> []
+                    && fields_shape prev.r_fields <> fields_shape fields ->
+     type_redecls :=
+       (`Record, type_name, fields_shape prev.r_fields, fields_shape fields)
+       :: !type_redecls
+   | _ -> ());
   Hashtbl.replace types type_name (List.length params);
   (* Same reason, for the columns a record pattern opens up. *)
   Exhaustive.register_record_decl type_name params fields;
@@ -3710,6 +3734,22 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
           Field_get / Record_update / pp_ty. *)
        Ast.TyCon (name, [Ast.TyRef (Ast.BorrowedRead, target_region, Ast.TyUnit)])
      | None ->
+       (* Q-125. A record declared inside `module M { }` is renamed to `M.t`
+          wherever it is used, and `Top_record_alias` registers `M.t` beside
+          `t`. Built from the alias, the literal's type was `TyCon("M.t")`
+          while every ANNOTATION resolved to `t` -- so
+          `module M { type t = { a: int }; let get = fn (v: t) -> v.a; }`
+          did not compile, in the module that declared the type.
+
+          Variants never had this: their alias is on the CONSTRUCTOR
+          (`Top_ctor_alias "M.A" -> "A"`) and the type stays canonical, which is
+          why `M.v` worked and `M.t` did not. `Ast.canonical_record` exists for
+          exactly this and was called from nowhere -- its twin
+          `Ast.canonical_ctor` is called from a dozen places in the C backend.
+
+          ⚠ This makes `A.t` and `B.t` ONE type, the same way `A.v` and `B.v`
+          already are. Two records that genuinely differ are refused by the
+          redeclaration check above rather than merged in silence. *)
        let info =
          try Hashtbl.find records name
          with Not_found ->
@@ -3863,6 +3903,10 @@ and check_pattern (p : Ast.pattern) (expected : Ast.ty) : (string * Ast.ty) list
     unify p.ploc expected (Ast.TyTuple element_tys);
     List.concat (List.map2 check_pattern ps element_tys)
   | Ast.P_record (name, fpats) ->
+    (* Q-125, the pattern half: `match p with | M.t { … }` has to name the same
+       type the literal built, so it canonicalises the same way. Without this
+       the literal was `t` and the pattern `M.t`, which is the same mismatch
+       one step along. *)
     let info =
       try Hashtbl.find records name
       with Not_found ->
