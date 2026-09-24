@@ -61,6 +61,7 @@ docs/language-reference.md|a file that marks nothing exports|accept|file_pub_opt
 docs/language-reference.md|No nested string literals in interpolation|refuse|nested_interp
 docs/language-reference.md|A type name may not be declared twice with different constructors|refuse|type_redecl
 docs/language-reference.md|a record type name may not be declared twice with different fields|refuse|record_redecl
+docs/language-reference.md|`scripts/ffi_header_check.sh` builds a shim against it|exists|scripts/ffi_header_check.sh
 docs/language-reference.md|A top-level `while` must be bound or be the last expression|accept|toplevel_while
 docs/stdlib-reference.md|What the handler receives is the diagnostic line|present|try_or_reason
 docs/stdlib-reference.md|test/parity/region_fail_unwind.mere|exists|test/parity/region_fail_unwind.mere

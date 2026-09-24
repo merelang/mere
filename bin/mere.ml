@@ -79,6 +79,11 @@ let usage () =
   print_endline "                        constructors, plus the package's declared";
   print_endline "                        `mere` floor. For diffing an API between";
   print_endline "                        versions.";
+  print_endline "  mere --ffi-header <file.mere> the C header for this file's `extern fn`";
+  print_endline "                        declarations: the prototypes and the structs";
+  print_endline "                        they carry. Include it from the C side rather";
+  print_endline "                        than writing the layout out again. (`--header`";
+  print_endline "                        is the other direction: Mere AS a library.)";
   print_endline "  mere doc <file.mere>          the file's own top-level names, with the";
   print_endline "                        comment block each was written under. The";
   print_endline "                        `--json` form is `--decls --json`, which";
@@ -1064,6 +1069,21 @@ let () =
     run_action ~base_dir:base
       (says (Mere.Pipeline.decls_json ~base_dir:base ~search_paths:!search_paths
                ?requires))
+      path source
+  (* Q-120: the C header a shim includes instead of copying the layout.
+     ⚠ NOT `--header`, which already exists and points the other way: that one
+     is Mere compiled AS a shared library, for a C caller. This one is for the C
+     side of an `extern fn` -- the functions MERE calls out to. Two headers,
+     two directions, and giving them one name would have made the second one
+     unreachable (the first pattern matched and the compiler said so). *)
+  | [_; "--ffi-header"; path] ->
+    let source = read_file path in
+    let base = Filename.dirname path in
+    run_action ~base_dir:base
+      (says (fun s ->
+         let open Mere in
+         let (prog, _main_ty) = infer_program ~base_dir:base s in
+         Codegen_c.emit_c_header prog))
       path source
   | [_; "--decls"; path] ->
     let source = read_file path in
