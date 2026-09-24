@@ -3668,6 +3668,135 @@ let () =
         name needle out
     end
   in
+  (* ── Q-133: a substring assertion needs a control ───────────────────────
+     A needle that also appears when the TRIVIAL program is compiled is not
+     evidence about the program under test. On the Wasm backend 41 of 97 were
+     in that state, and eleven of those turned out to be FALSE about the user's
+     code -- `i32.mul` where the compiler emits `i64.mul`. Module-wide they were
+     all true, which is why an earlier sweep for false ones found none.
+
+     ⚠ THE RULE IS WRITTEN ONCE. Three backends print three different things,
+     so what changes between them is how a line says "a function starts here"
+     and how far a top-level item is indented -- not the idea. Writing the idea
+     three times is how the twin backends drift.
+
+     WHAT COUNTS AS BOILERPLATE IS DECIDED BY THE CONTROL: every function the
+     trivial program also defines. A list of name prefixes has to be maintained,
+     and the first thing such a list got wrong was `$show_WCgCol8` -- generated
+     FOR THE USER'S TYPE and named like a runtime helper. *)
+  let line_indent line =
+    let n = String.length line in
+    let rec go i = if i < n && line.[i] = ' ' then go (i + 1) else i in go 0
+  in
+  (* ⚠ COMMENTS ARE PROSE, NEVER EVIDENCE, and each backend spells them
+     differently. Unifying the three strippers lost this rule the first time and
+     seven wasm assertions went vacuous: the word "else" appears in one of the
+     runtime's `;;` comments. *)
+  let strip_boilerplate ~ends_body ~fn_of_line ~comments ~boiler (text : string) : string =
+    let skip = ref false in
+    let keep = List.filter (fun line ->
+      (* Two separate questions, and conflating them left one function's body in.
+         A FUNCTION HEADER starts a body wherever it is written -- the Wasm
+         runtime has one `(func` nested a level deeper than the other 57, and
+         requiring top-level indentation here kept its whole body. A TOP-LEVEL
+         ITEM ends the previous body, which is what lets `(data …)` and
+         `(table …)` through instead of being swallowed by the last function.
+
+         ⚠ WHAT ENDS A BODY IS PER-BACKEND, and "a line at column 0" is wrong
+         for LLVM: a basic-block label sits at column 0 INSIDE a function, so
+         that rule ended every body at its first label and left 5,103 of 5,319
+         runtime lines in. *)
+      (if String.trim line <> "" then
+         match fn_of_line line with
+         | Some n -> skip := List.mem n boiler
+         | None -> if ends_body line then skip := false);
+      let t = String.trim line in
+      let is_comment =
+        List.exists (fun c ->
+          String.length t >= String.length c && String.sub t 0 (String.length c) = c)
+          comments
+      in
+      (not !skip) && not is_comment) (String.split_on_char '\n' text)
+    in
+    String.concat "\n" keep
+  in
+  (* Returns (assert_feature, assert_runtime, exemption_count). `entry` is the
+     one function the control also defines that is NOT boilerplate: it holds the
+     program's own body. *)
+  let backend_asserts ~control ~ends_body ~fn_of_line ~comments ~entry =
+    (* ⚠ Collected from EVERY line, not only top-level ones, for the same
+       reason: a nested definition is still boilerplate. *)
+    let boiler =
+      List.filter (fun n -> n <> entry)
+        (List.filter_map fn_of_line (String.split_on_char '\n' control))
+    in
+    let user_part t = strip_boilerplate ~ends_body ~fn_of_line ~comments ~boiler t in
+    let control_user = user_part control in
+    let exemptions = ref 0 in
+    (* ⚠ The two ways this fails are different repairs, so they print
+       differently: "not in the subject" means the claim is wrong, "also in the
+       control" means the claim cannot be falsified. *)
+    let assert_feature name out needle =
+      let user = user_part out in
+      if not (contains user needle) then begin
+        incr fail;
+        Printf.printf
+          "FAIL  %s\n  expected in the PROGRAM'S OWN code: %s\n  its code was:%s\n"
+          name needle user
+      end else if contains control_user needle then begin
+        incr fail;
+        Printf.printf
+          "FAIL  %s\n  vacuous: %s is also in the control program `0`, so it is evidence about the runtime and not about this program\n"
+          name needle
+      end else begin
+        incr pass; Printf.printf "PASS  %s\n" name
+      end
+    in
+    (* For claims that are deliberately about the RUNTIME or the module
+       skeleton -- "the idiv helper still uses sdiv", "(module", the imported
+       host `puts`. They cannot be discriminating, and asking them to be would
+       be asking for a lie. Counted, because an exemption nobody counts is how
+       41 assertions became evidence about the runtime. *)
+    let assert_runtime name out needle =
+      incr exemptions;
+      if contains out needle then begin
+        incr pass; Printf.printf "PASS  %s\n" name
+      end else begin
+        incr fail;
+        Printf.printf "FAIL  %s\n  expected in the emitted module: %s\n" name needle
+      end
+    in
+    (assert_feature, assert_runtime, exemptions)
+  in
+  (* C: a definition starts at column 0 with a return type and a name before the
+     open paren. ⚠ Some of the runtime is written as one-line `static inline`
+     definitions, so a body cannot be assumed to close with a `}` of its own --
+     the next column-0 line is what ends it. *)
+  let c_fn_of_line line =
+    let t = String.trim line in
+    if t = "" || t.[0] = '#' || t.[0] = '}' || t.[0] = '/' then None
+    else match String.index_opt t '(' with
+      | None -> None
+      | Some paren ->
+        let head = String.sub t 0 paren in
+        (match String.rindex_opt head ' ' with
+         | None -> None
+         | Some sp ->
+           let n = String.sub head (sp + 1) (String.length head - sp - 1) in
+           let ok =
+             n <> ""
+             && (let c = n.[0] in (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c = '_')
+             && String.for_all (fun c ->
+                  (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                  || (c >= '0' && c <= '9') || c = '_') n
+           in
+           if ok then Some n else None)
+  in
+  let (assert_c, assert_c_runtime, c_exemptions) =
+    backend_asserts ~control:(codegen "0")
+      ~ends_body:(fun l -> String.trim l <> "" && line_indent l <= 0)
+      ~fn_of_line:c_fn_of_line ~comments:["//"; "/*"; "*"] ~entry:"main"
+  in
   let assert_no_contains name out needle =
     if not (contains out needle) then begin
       incr pass; Printf.printf "PASS  %s\n" name
@@ -3678,22 +3807,22 @@ let () =
     end
   in
   let int_lit_out = codegen "42" in
-  assert_contains "codegen: emits stdio.h" int_lit_out "#include <stdio.h>";
+  assert_c_runtime "codegen: emits stdio.h" int_lit_out "#include <stdio.h>";
   (* Q-140: the int main is printed through `show`, like every other type, so
      that the four backends and the interpreter agree by construction. The
      question -- does the value reach stdout -- is the same; the lowering is
      `puts(show_int(...))` rather than a printf with a per-type format. *)
-  assert_contains "codegen: int literal printed" int_lit_out "puts(show_int(42LL))";
-  assert_contains "codegen: arithmetic precedence"
+  assert_c "codegen: int literal printed" int_lit_out "puts(show_int(42LL))";
+  assert_c "codegen: arithmetic precedence"
     (codegen "1 + 2 * 3") "(1LL + (2LL * 3LL))";
-  assert_contains "codegen: let + if uses statement-expr"
+  assert_c "codegen: let + if uses statement-expr"
     (codegen "let x = 5 in if x < 10 then x * 2 else 0")
     "__let_tmp_x = 5";
   (* Phase 16, part 2 / DEFERRED §1.4: regression test for the bug where same-name
      rebinding `let x = f x` had the old x on the RHS overwritten by the new x,
      causing self-reference. The 2-step form (via __let_tmp_<name>) ensures that
      the old binding is visible at the time the RHS is evaluated. *)
-  assert_contains "codegen: same-name rebinding uses tmp var"
+  assert_c "codegen: same-name rebinding uses tmp var"
     (codegen "let x = 1 in let x = x + 10 in x")
     "__let_tmp_x = (mu_x + 10LL)";
   (* Phase 16.3 / DEFERRED §1.5: codegen support for mk_logger / mk_metrics.
@@ -3709,30 +3838,30 @@ let () =
   Typer.register_record "Metrics" []
     [("inc",    Ast.TyArrow (Ast.TyStr, Ast.TyUnit));
      ("record", Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyInt, Ast.TyUnit)))];
-  assert_contains "codegen: mk_logger emits runtime call"
+  assert_c "codegen: mk_logger emits runtime call"
     (codegen "let lg = mk_logger \"app\" in lg.info \"hi\"")
     "__mere_mk_logger";
-  assert_contains "codegen: logger runtime printf"
+  assert_c "codegen: logger runtime printf"
     (codegen "let lg = mk_logger \"app\" in lg.info \"hi\"")
     "%s [INFO] %s";
-  assert_contains "codegen: Logger struct uses closure fields"
+  assert_c "codegen: Logger struct uses closure fields"
     (codegen "let lg = mk_logger \"app\" in lg.info \"hi\"")
     "closure_str_unit mu_info";
-  assert_contains "codegen: mk_metrics emits runtime call"
+  assert_c "codegen: mk_metrics emits runtime call"
     (codegen "let m = mk_metrics () in m.inc \"x\"")
     "__mere_mk_metrics";
-  assert_contains "codegen: metrics record curried emits inner fn"
+  assert_c "codegen: metrics record curried emits inner fn"
     (codegen "let m = mk_metrics () in m.record \"qps\" 7")
     "__mere_metrics_record_inner_fn";
   (* Q-140: `true` is emitted as the C value 1 -- that is the half this asks
      about and it is unchanged -- but it is PRINTED through `show_bool`, which
      writes "true". The old lowering printed `1` to stdout while the
      interpreter printed `true`, for the same program. *)
-  assert_contains "codegen: bool literal → 0/1, printed as true"
+  assert_c "codegen: bool literal → 0/1, printed as true"
     (codegen "true") "puts(show_bool(1))";
-  assert_contains "codegen: logical && via C &&"
+  assert_c "codegen: logical && via C &&"
     (codegen "true && false") "(1 && 0)";
-  assert_contains "codegen: lifts top-level fn"
+  assert_c "codegen: lifts top-level fn"
     (codegen "let inc = fn x -> x + 1 in inc 5")
     "long long mu_inc(long long mu_x)";
   (* v0.1.402: the call goes through the direct twin now. A one-argument
@@ -3741,7 +3870,7 @@ let () =
      that form, so single-argument `let rec` compiled to real recursion. The
      spelling here is incidental; that the call site CALLS the lifted function
      is the thing being checked, so it is asserted with its argument. *)
-  assert_contains "codegen: lifted fn call site"
+  assert_c "codegen: lifted fn call site"
     (codegen "let inc = fn x -> x + 1 in inc 5")
     "mu_inc__direct(__da0)";
   (* v0.1.402: through the direct twin, which a one-argument top-level fn now
@@ -3749,52 +3878,52 @@ let () =
      so it stays a call rather than becoming the loop, which is the half of the
      transform worth pinning here: only a call the function returns directly
      may turn into a jump. *)
-  assert_contains "codegen: let-rec self-recursion"
+  assert_c "codegen: let-rec self-recursion"
     (codegen "let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in fact 5")
     "mu_fact__direct(__da0)";
-  assert_contains "codegen: mutual rec emits both forward decls"
+  assert_c "codegen: mutual rec emits both forward decls"
     (codegen
        "let rec ev = fn n -> if n == 0 then 1 else od (n - 1)\n\
         and od = fn n -> if n == 0 then 0 else ev (n - 1)\n\
         in ev 4")
     "long long mu_ev(long long);\nlong long mu_od(long long);";
-  assert_contains "codegen: nested fn lifted to top level with captures"
+  assert_c "codegen: nested fn lifted to top level with captures"
     (* Previously rejected; Phase 4.8 lifts inner fns via defunctionalization. *)
     (codegen
       "let outer = fn x -> let helper = fn y -> x + y in helper 10 in outer 5")
     "long long __lifted_helper_0(long long mu_x, long long mu_y)";
-  assert_contains "codegen: lifted inner fn called with captures prepended"
+  assert_c "codegen: lifted inner fn called with captures prepended"
     (codegen
       "let outer = fn x -> let helper = fn y -> x + y in helper 10 in outer 5")
     "__lifted_helper_0(mu_x, 10LL)";
-  assert_contains "codegen: anonymous fn application via closure"
+  assert_c "codegen: anonymous fn application via closure"
     (* Phase 4.9-B: anonymous Fun in expression position is now lifted as
        a closure value, and the App goes through closure dispatch. *)
     (codegen "(fn x -> x + 1) 5")
     "__c.fn(__c.env, 5LL)";
 
   (* --- C codegen: string support (Phase 4 third slice) --- *)
-  assert_contains "codegen: str literal emits C string"
+  assert_c "codegen: str literal emits C string"
     (codegen "\"hello\"") "\"hello\"";
   (* Q-140: a str main is printed through `show_str`, which QUOTES and escapes
      it -- the same thing the interpreter has always printed for a program
      whose value is a string. The old `%s` wrote the bytes raw, so
      `mere -e '"a\"b"'` said `a"b` compiled and `"a\"b"` interpreted. *)
-  assert_contains "codegen: str main goes through show_str"
+  assert_c "codegen: str main goes through show_str"
     (codegen "\"hi\"") "puts(show_str(";
-  assert_contains "codegen: ++ becomes __lang_str_concat call"
+  assert_c "codegen: ++ becomes __lang_str_concat call"
     (codegen "\"a\" ++ \"b\"") "__lang_str_concat(";
   (* v0.1.261: print writes the str's LENGTH (Q-033), so the emitted call is
      an fwrite of __lang_str_size bytes rather than puts, which stopped at the
      first NUL. *)
-  assert_contains "codegen: print writes the str by length"
+  assert_c "codegen: print writes the str by length"
     (codegen "print \"hi\"") "fwrite(__ps, 1, __lang_str_size(__ps), stdout)";
   (* A string literal is immutable, so it is emitted ONCE as a static constant
      carrying the length header, and every evaluation refers to it. It used to
      be a fresh region copy per evaluation, which is invisible in a small
      program and a third of the time and memory in an interpreter, where the
      same literals are compared millions of times. *)
-  assert_contains "codegen: a string literal is one static constant"
+  assert_c "codegen: a string literal is one static constant"
     (codegen "str_eq \"abc\" \"abc\"")
     "static const struct { size_t l; char s[4]; } __sl_";
   (* v0.1.259: an inner fn name went into a PROGRAM-wide "known" list, so a
@@ -3847,26 +3976,26 @@ let () =
        scan 0 in
      if has "printf(\"()" then "still prints ()" else "silent")
     "silent";
-  assert_contains "codegen: helper __lang_str_concat is injected"
+  assert_c_runtime "codegen: helper __lang_str_concat is injected"
     (codegen "1") "__lang_str_concat";  (* always emitted, even if unused *)
 
   (* --- C codegen: str-typed lifted fns (Phase 4 fourth slice) --- *)
-  assert_contains "codegen: str-returning fn gets const char* return"
+  assert_c "codegen: str-returning fn gets const char* return"
     (codegen "let greet = fn n -> if n > 0 then \"pos\" else \"neg\" in greet 5")
     "const char* mu_greet(long long mu_n)";
-  assert_contains "codegen: str-taking fn gets const char* param"
+  assert_c "codegen: str-taking fn gets const char* param"
     (codegen "let exclaim = fn s -> s ++ \"!\" in exclaim \"hi\"")
     "const char* mu_exclaim(const char* mu_s)";
-  assert_contains "codegen: forward decl carries through the right type"
+  assert_c "codegen: forward decl carries through the right type"
     (codegen "let greet = fn n -> if n > 0 then \"pos\" else \"neg\" in greet 5")
     "const char* mu_greet(long long);";
-  assert_contains "codegen: str_len builtin maps to __lang_str_size"
+  assert_c "codegen: str_len builtin maps to __lang_str_size"
     (codegen "str_len \"abc\"") "__lang_str_size(";
   (* Phase 19.1.1: str_index_of codegen *)
-  assert_contains "codegen: str_index_of calls __lang_str_index_of"
+  assert_c "codegen: str_index_of calls __lang_str_index_of"
     (codegen "str_index_of \"hi\" \"i\"")
     "__lang_str_index_of(";
-  assert_contains "codegen: __lang_str_index_of helper defined"
+  assert_c_runtime "codegen: __lang_str_index_of helper defined"
     (codegen "str_index_of \"hi\" \"i\"")
     (* v0.1.274: int64_t, not int -- an offset into a string longer than 2GB
        came back negative *)
@@ -3876,22 +4005,22 @@ let () =
       let _ = codegen "let f = fn x -> x +. 1.0 in f 2.0" in ());
 
   (* --- C codegen: tuple support (Phase 4 fifth slice) --- *)
-  assert_contains "codegen: tuple typedef for int*int"
+  assert_c_runtime "codegen: tuple typedef for int*int"
     (codegen "let p = (1, 2) in fst p + snd p")
     "struct tuple_int_int {\n  long long f0;\n  long long f1;\n};";
-  assert_contains "codegen: tuple literal uses compound literal"
+  assert_c "codegen: tuple literal uses compound literal"
     (codegen "let p = (1, 2) in fst p")
     "((tuple_int_int){.f0 = 1LL, .f1 = 2LL})";
-  assert_contains "codegen: fst → .f0 access"
+  assert_c "codegen: fst → .f0 access"
     (codegen "let p = (1, 2) in fst p")
     "(mu_p).f0";
-  assert_contains "codegen: snd → .f1 access"
+  assert_c "codegen: snd → .f1 access"
     (codegen "let p = (1, 2) in snd p")
     "(mu_p).f1";
-  assert_contains "codegen: mixed-type tuple struct (str, int)"
+  assert_c "codegen: mixed-type tuple struct (str, int)"
     (codegen "let p = (\"hi\", 42) in fst p")
     "struct tuple_str_int {\n  const char* f0;\n  long long f1;\n};";
-  assert_contains "codegen: tuple-returning fn signature"
+  assert_c "codegen: tuple-returning fn signature"
     (codegen "let split = fn s -> (s, str_len s) in split \"x\"")
     "tuple_str_int mu_split(const char* mu_s)";
 
@@ -3955,7 +4084,7 @@ let () =
      a reserved-word list, and the same argument decides it here. These assertions failing loudly
      when the prefix was introduced is that decision's other property working -- an emission path
      that forgets it breaks every record rather than only the unluckily-named ones. *)
-  assert_contains "codegen: record typedef"
+  assert_c "codegen: record typedef"
     (codegen_with_decls
       "type CgRectA = { w: int, h: int };\n\
        let r = CgRectA { w = 3, h = 4 } in r.w * r.h")
@@ -3963,12 +4092,12 @@ let () =
   long long mu_w;
   long long mu_h;
 };";
-  assert_contains "codegen: record literal compound"
+  assert_c "codegen: record literal compound"
     (codegen_with_decls
       "type CgRectB = { w: int, h: int };\n\
        let r = CgRectB { w = 3, h = 4 } in r.w")
     "((CgRectB){.mu_w = 3LL, .mu_h = 4LL})";
-  assert_contains "codegen: record field access"
+  assert_c "codegen: record field access"
     (codegen_with_decls
       "type CgRectC = { w: int };\n\
        let r = CgRectC { w = 5 } in r.w")
@@ -4304,49 +4433,49 @@ let () =
          "let ch = channel_new () in\n\
           match channel_recv_timeout ch 50 with | Some v -> v | None -> 0" in
        let _ = Codegen_llvm.emit_program ~main_ty:mt prog in ()));
-  assert_contains "codegen: record update via tmp + statement expr"
+  assert_c "codegen: record update via tmp + statement expr"
     (codegen_with_decls
       "type CgRectD = { w: int, h: int };\n\
        let r = CgRectD { w = 1, h = 2 } in { r | w = 99 }")
     "__rupd.mu_w = 99";
-  assert_contains "codegen: record-returning fn signature"
+  assert_c "codegen: record-returning fn signature"
     (codegen_with_decls
       "type CgRectE = { w: int };\n\
        let mk = fn n -> CgRectE { w = n } in mk 7")
     "CgRectE mu_mk(long long mu_n)";
-  assert_contains "codegen: record with str field"
+  assert_c "codegen: record with str field"
     (codegen_with_decls
       "type CgUser = { name: str, age: int };\n\
        let u = CgUser { name = \"a\", age = 30 } in u.name")
     "  const char* mu_name;";
-  assert_contains "codegen: polymorphic record specialized via monomorphization"
+  assert_c "codegen: polymorphic record specialized via monomorphization"
     (* Was previously rejected; Phase 4.13 specializes per instantiation. *)
     (codegen_with_decls
       "type 'a CgBox = { v: 'a };\n\
        let b = CgBox { v = 1 } in b.v")
     "struct CgBox_int {";
-  assert_contains "codegen: poly record Box_str specialization"
+  assert_c "codegen: poly record Box_str specialization"
     (codegen_with_decls
       "type 'a CgBox2 = { v: 'a };\n\
        let b = CgBox2 { v = \"hi\" } in b.v")
     "  const char* mu_v;\n};";
-  assert_contains "codegen: poly record literal uses mono name"
+  assert_c "codegen: poly record literal uses mono name"
     (codegen_with_decls
       "type 'a CgBox3 = { v: 'a };\n\
        CgBox3 { v = 42 }")
     "((CgBox3_int){.mu_v = 42LL})";
 
   (* --- C codegen: complex patterns (Phase 4.14) --- *)
-  assert_contains "codegen: P_int compiles to equality"
+  assert_c "codegen: P_int compiles to equality"
     (codegen "match 3 with | 0 -> 100 | _ -> 200")
     "(__scrut) == 0";
-  assert_contains "codegen: P_str compiles to strcmp"
+  assert_c "codegen: P_str compiles to strcmp"
     (codegen "match \"hi\" with | \"a\" -> 1 | _ -> 2")
     "strcmp((__scrut), \"a\")";
-  assert_contains "codegen: P_bool true compiles to == 1"
+  assert_c "codegen: P_bool true compiles to == 1"
     (codegen "match true with | true -> 1 | false -> 0")
     "(__scrut) == 1";
-  assert_contains "codegen: nested P_constr binds inner var"
+  assert_c "codegen: nested P_constr binds inner var"
     (codegen_with_decls
       "type 'a CgO = CgN | CgS of 'a;\n\
        type 'a CgL = CgLN | CgLC of 'a * 'a CgL;\n\
@@ -4355,43 +4484,43 @@ let () =
          | CgLC (CgN, _) -> 1\n\
          | CgLC (CgS n, _) -> n")
     "__auto_type mu_n =";
-  assert_contains "codegen: P_record destructures named fields"
+  assert_c "codegen: P_record destructures named fields"
     (codegen_with_decls
       "type CgPtX = { a: int, b: int };\n\
        match CgPtX { a = 3, b = 4 } with\n\
          | CgPtX { a = x, b = y } -> x + y")
     "__auto_type mu_x =";
-  assert_contains "codegen: P_as binds whole-value"
+  assert_c "codegen: P_as binds whole-value"
     (codegen "match 5 with | n as all -> n + all")
     "__auto_type mu_all = __scrut";
 
   (* --- C codegen: or-pattern + match guard (Phase 4.15) --- *)
-  assert_contains "codegen: or-pattern flattens into two arms"
+  assert_c "codegen: or-pattern flattens into two arms"
     (codegen_with_decls
       "type CgOr1 = OA | OB | OC;\n\
        match OB with | OA | OB -> 1 | OC -> 2")
     ".tag == 0";  (* both alternatives emit their own tag test *)
-  assert_contains "codegen: or-pattern result correct via duplicated body"
+  assert_c "codegen: or-pattern result correct via duplicated body"
     (codegen_with_decls
       "type CgOr2 = OD | OE;\n\
        match OE with | OD | OE -> 99")
     "{ 99LL; }";  (* body 99 duplicated for both alternatives *)
-  assert_contains "codegen: guard emitted in bindings scope"
+  assert_c "codegen: guard emitted in bindings scope"
     (codegen "match 7 with | n when n < 5 -> 100 | _ -> 200")
     "n < 5";
-  assert_contains "codegen: guard with bindings"
+  assert_c "codegen: guard with bindings"
     (codegen "match 7 with | n when n > 5 -> n * 10 | _ -> 0")
     "__auto_type mu_n =";
 
   (* --- C codegen: list show pretty-print (Phase 4.16) --- *)
-  assert_contains "codegen: list show emits Cons-iterating formatter"
+  assert_c "codegen: list show emits Cons-iterating formatter"
     (codegen_with_decls
       "type 'a list = Nil | Cons of 'a * 'a list;\n\
        show [1, 2, 3]")
     (* v0.1.156: the empty-list case returns a real Mere str rather than a
        bare C literal, which has no length word in front of it. *)
     "if (list_int__tag(v) == 0) return __lang_str_of_cstr(\"[]\")";
-  assert_contains "codegen: list show separator is \", \""
+  assert_c "codegen: list show separator is \", \""
     (codegen_with_decls
       "type 'a list = Nil | Cons of 'a * 'a list;\n\
        show [1, 2]")
@@ -4400,55 +4529,55 @@ let () =
   (* --- C codegen: region runtime (Phase 4.17) ---
      `region R { body }` initializes a bump-allocator buffer, evaluates
      the body, frees the buffer. `&R v` allocates v in the region. *)
-  assert_contains "codegen: region runtime helpers injected"
+  assert_c_runtime "codegen: region runtime helpers injected"
     (codegen "1")
     "__lang_region_alloc";
-  assert_contains "codegen: region block initializes + frees buffer"
+  assert_c "codegen: region block initializes + frees buffer"
     (codegen "region R { 42 }")
     "__lang_region* __region_R = __lang_region_block_acquire(\"region R\")";
-  assert_contains "codegen: region block frees at end"
+  assert_c "codegen: region block frees at end"
     (codegen "region R { 42 }")
     "__lang_region_block_release(__region_R)";
-  assert_contains "codegen: Ref allocates in region and copies"
+  assert_c "codegen: Ref allocates in region and copies"
     (codegen "region R { let x = &R 5 in 42 }")
     "__lang_region_alloc(__region_R";
-  assert_contains "codegen: Ref uses typeof for inner type"
+  assert_c "codegen: Ref uses typeof for inner type"
     (codegen "region R { let x = &R 5 in 42 }")
     "typeof(__ref_v)*";
 
   (* --- C codegen: `with` Drop execution (Phase 4.18) --- *)
-  assert_contains "codegen: with binding emit"
+  assert_c "codegen: with binding emit"
     (codegen_with_decls
       "drop type CgConn = { id: int, close: unit -> unit };\n\
        let mk = fn id ->\n\
          CgConn { id = id, close = fn () -> () } in\n\
        with c = mk 1 in c.id")
     "__auto_type c =";
-  assert_contains "codegen: with calls close field at scope end"
+  assert_c "codegen: with calls close field at scope end"
     (codegen_with_decls
       "drop type CgConn2 = { id: int, close: unit -> unit };\n\
        let mk = fn id ->\n\
          CgConn2 { id = id, close = fn () -> () } in\n\
        with c = mk 1 in c.id")
     "c.mu_close.fn(c.mu_close.env, 0)";
-  assert_contains "codegen: with on Drop type without close field omits call"
+  assert_c "codegen: with on Drop type without close field omits call"
     (codegen_with_decls
       "drop type CgRes = { v: int };\n\
        with r = CgRes { v = 5 } in r.v")
     "__with_result";
 
   (* --- C codegen: view runtime (Phase 4.19) — views are region-allocated pointers --- *)
-  assert_contains "codegen: view type becomes pointer"
+  assert_c "codegen: view type becomes pointer"
     (codegen_with_decls
       "view CgCell[R] of int { v: int };\n\
        region R { let c = CgCell { v = 7 } in c.v }")
     "CgCell*";
-  assert_contains "codegen: view construction bump-allocates in region"
+  assert_c "codegen: view construction bump-allocates in region"
     (codegen_with_decls
       "view CgCell2[R] of int { v: int };\n\
        region R { let c = CgCell2 { v = 7 } in c.v }")
     "__lang_region_alloc(__region_R, sizeof(CgCell2))";
-  assert_contains "codegen: view field access uses -> "
+  assert_c "codegen: view field access uses -> "
     (codegen_with_decls
       "view CgCell3[R] of int { v: int };\n\
        region R { let c = CgCell3 { v = 7 } in c.v }")
@@ -4457,7 +4586,7 @@ let () =
   (* --- C codegen: closure env in default region (Phase 4.20) — closures
        outlive any user region, so their env structs go to a program-lifetime
        bump arena (`__lang_default_region`) instead of malloc. --- *)
-  assert_contains "codegen: default region declared at file scope"
+  assert_c_runtime "codegen: default region declared at file scope"
     (codegen_with_decls
       "let add = fn n -> fn x -> n + x in (add 3) 4")
     "static __lang_region __lang_default_region;";
@@ -4474,7 +4603,7 @@ let () =
      frame cost one of CRuby's bootstraptest pairs its stack on a platform that
      caps -stack_size at 512 MB. v0.1.291 had answered that by emitting two
      different closure shapes; a header answers it once. *)
-  assert_contains "codegen: the closure struct is env + fn, nothing else"
+  assert_c_runtime "codegen: the closure struct is env + fn, nothing else"
     (codegen_with_decls
       "let add = fn n -> fn x -> n + x in (add 3) 4")
     "typedef struct {\n  void* env;\n  long long (*fn)(void*, long long);\n}";
@@ -4482,19 +4611,19 @@ let () =
     (codegen_with_decls
       "let add = fn n -> fn x -> n + x in (add 3) 4")
     ".copy = __mcopy_env_";
-  assert_contains "codegen: the env carries the header"
+  assert_c "codegen: the env carries the header"
     (codegen_with_decls
       "let add = fn n -> fn x -> n + x in (add 3) 4")
     "->__copy = __mcopy_env_";  (* either construction site's variable name *)
-  assert_contains "codegen: an env follows the current region"
+  assert_c "codegen: an env follows the current region"
     (codegen_with_decls
       "let add = fn n -> fn x -> n + x in (add 3) 4")
     "__lang_region_alloc(__lang_current_region, sizeof(__anon";
-  assert_contains "codegen: the arrow copy reads the env's header"
+  assert_c "codegen: the arrow copy reads the env's header"
     (codegen_with_decls
       "let f = region R { let s = \"a\" ++ \"b\" in fn x -> str_len s + x } in f 1")
     "__lang_env_hdr*";
-  assert_contains "codegen: the env copier is idempotent within one region"
+  assert_c "codegen: the env copier is idempotent within one region"
     (codegen_with_decls
       "let f = region R { let s = \"a\" ++ \"b\" in fn x -> str_len s + x } in f 1")
     "if (__s->__r == r) return __p;";
@@ -4503,17 +4632,17 @@ let () =
       "let add = fn n -> fn x -> n + x in (add 3) 4")
     "__env = (__anon_0_env*)malloc";
   (* v0.1.296: the region-carrying loop. *)
-  assert_contains "codegen: region loop swaps arenas at Continue"
+  assert_c "codegen: region loop swaps arenas at Continue"
     (codegen_with_decls
       "let n = region R loop x { match x with | None -> Continue 1 \
        | Some k -> if k >= 3 then Done k else Continue (k + 1) } in n")
     "__lang_region_block_release(__rl_cur); __rl_cur = __rl_next;";
-  assert_contains "codegen: the carry crosses through the deep family"
+  assert_c "codegen: the carry crosses through the deep family"
     (codegen_with_decls
       "let n = region R loop x { match x with | None -> Continue 1 \
        | Some k -> if k >= 3 then Done k else Continue (k + 1) } in n")
     "__mdeep_int(__rl_next";
-  assert_contains "codegen: a carried Map is deep-copied entry by entry"
+  assert_c "codegen: a carried Map is deep-copied entry by entry"
     (codegen_with_decls
       "let n = region R loop x { match x with \
        | None -> Continue (map_new ()) \
@@ -4537,13 +4666,13 @@ let () =
         "let f = region RY loop x { match x with \
          | None -> Continue (fn (k: int) -> k + 1) \
          | Some g -> Done (g 1) } in f");
-  assert_contains "codegen: main initializes default region"
+  assert_c_runtime "codegen: main initializes default region"
     (codegen_with_decls "1 + 2")
     "__lang_region_init(&__lang_default_region";
-  assert_contains "codegen: main frees default region"
+  assert_c_runtime "codegen: main frees default region"
     (codegen_with_decls "1 + 2")
     "__lang_region_free(&__lang_default_region)";
-  assert_contains "codegen: str_concat allocates in the current region (v0.1.31)"
+  assert_c_runtime "codegen: str_concat allocates in the current region (v0.1.31)"
     (codegen_with_decls "\"hi\" ++ \"!\"")
     "__lang_str_alloc(__lang_current_region, la + lb)";
   assert_no_contains "codegen: str_concat no longer mallocs"
@@ -4553,37 +4682,37 @@ let () =
   (* --- C codegen: variant + match (Phase 4 seventh slice) ---
      Variants → tagged unions, match → if-else chain via ternaries.
      Limited subset: monomorphic only, simple P_constr / P_var / P_wild. *)
-  assert_contains "codegen: nullary variant becomes tag-only struct"
+  assert_c "codegen: nullary variant becomes tag-only struct"
     (codegen_with_decls
       "type CgCol = CR | CG | CB;\n\
        let c = CG in match c with | CR -> 0 | CG -> 1 | CB -> 2")
     "struct CgCol {\n  int tag;\n};";
-  assert_contains "codegen: variant with payload includes union"
+  assert_c "codegen: variant with payload includes union"
     (codegen_with_decls
       "type CgStat = COk | CErr of str;\n\
        match CErr \"x\" with | COk -> 0 | CErr m -> str_len m")
     "  union {\n    const char* CErr;\n  } payload;";
-  assert_contains "codegen: Constr emits compound literal with tag"
+  assert_c "codegen: Constr emits compound literal with tag"
     (codegen_with_decls
       "type CgCol2 = X | Y;\n\
        let c = Y in match c with | X -> 0 | Y -> 1")
     "((CgCol2){.tag = 1})";
-  assert_contains "codegen: Constr with arg emits payload"
+  assert_c "codegen: Constr with arg emits payload"
     (codegen_with_decls
       "type CgStat2 = SOk | SErr of int;\n\
        SErr 42")
     ".payload.SErr = 42";
-  assert_contains "codegen: match emits scrut binding"
+  assert_c "codegen: match emits scrut binding"
     (codegen_with_decls
       "type CgCol3 = A | B;\n\
        match A with | A -> 0 | B -> 1")
     "__auto_type __scrut =";
-  assert_contains "codegen: P_constr emits tag equality test"
+  assert_c "codegen: P_constr emits tag equality test"
     (codegen_with_decls
       "type CgCol4 = A | B;\n\
        match A with | A -> 0 | B -> 1")
     ".tag == 0";
-  assert_contains "codegen: P_constr with payload binds via __auto_type"
+  assert_c "codegen: P_constr with payload binds via __auto_type"
     (codegen_with_decls
       "type CgStat3 = SOk | SErr of str;\n\
        match SErr \"hi\" with | SOk -> 0 | SErr m -> str_len m")
@@ -4591,12 +4720,12 @@ let () =
   (* A polymorphic variant left uninstantiated used to be rejected; a
      residual tyvar is now erased to int (nothing ever inspects such a
      value), so the program emits a concrete int instance instead. *)
-  assert_contains "codegen: polymorphic variant erases residual tyvar"
+  assert_c "codegen: polymorphic variant erases residual tyvar"
     (codegen_with_decls
       "type 'a CgOpt = CNone | CSome of 'a;\n\
        CNone")
     "CgOpt_int";
-  assert_contains "codegen: match guard accepted"
+  assert_c "codegen: match guard accepted"
     (codegen_with_decls
       "type CgCol5 = A | B;\n\
        match A with | A when true -> 0 | _ -> 1")
@@ -4606,20 +4735,20 @@ let () =
      Inner `let n = fn x -> body` is lifted to a top-level fn with
      captured outer-scope vars prepended to its params (defunctionalization).
      Call sites are rewritten to pass the captures explicitly. *)
-  assert_contains "codegen: closure captures host param"
+  assert_c "codegen: closure captures host param"
     (codegen
       "let outer = fn x -> let h = fn y -> x + y in h 10 in outer 5")
     "long long __lifted_h_0(long long mu_x, long long mu_y)";
-  assert_contains "codegen: closure call site prepends captures"
+  assert_c "codegen: closure call site prepends captures"
     (codegen
       "let outer = fn x -> let h = fn y -> x + y in h 10 in outer 5")
     "__lifted_h_0(mu_x, 10LL)";
-  assert_contains "codegen: closure binding is dropped from let-chain"
+  assert_c "codegen: closure binding is dropped from let-chain"
     (* The `__auto_type h = ...` should NOT appear since h was lifted. *)
     (codegen
       "let outer = fn x -> let h = fn y -> y + 1 in h 5 in outer 3")
     "long long mu_outer(long long mu_x) {\n  return __lifted_h_0(5LL);";
-  assert_contains "codegen: nested closure captures from multiple levels"
+  assert_c "codegen: nested closure captures from multiple levels"
     (* Inner `h` captures `x` (from g's param) and `n` (from f's param).
        Free-var collection orders captures by source order of usage, so
        captures = [x; n]. g gets slot 0, h gets slot 1. *)
@@ -4635,7 +4764,7 @@ let () =
      generalized result type leaked a tyvar into the capture's recorded
      annotation). With tyvar erasure the program compiles and runs
      correctly (verified against the interpreter), capturing the tuple. *)
-  assert_contains "codegen: capture of tuple type is lifted"
+  assert_c_runtime "codegen: capture of tuple type is lifted"
     (codegen
       "let outer = fn x -> let t = (x, x) in let h = fn y -> fst t in h 1 in outer 5")
     "tuple_int_int";
@@ -4644,23 +4773,23 @@ let () =
      Top-level fns can be passed as values via prepared closure wrappers.
      HOF param of type T1 -> T2 becomes a closure struct, application via
      `.fn(.env, arg)`. Direct call to a known top-level Var stays direct. *)
-  assert_contains "codegen: closure typedef for int -> int"
+  assert_c_runtime "codegen: closure typedef for int -> int"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "} closure_int_int;";
-  assert_contains "codegen: top-level fn gets closure wrapper"
+  assert_c "codegen: top-level fn gets closure wrapper"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "static long long mu_inc_closure_fn(void* __env, long long mu_x)";
-  assert_contains "codegen: top-level fn gets _as_value constant"
+  assert_c "codegen: top-level fn gets _as_value constant"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "const closure_int_int mu_inc_as_value =";   (* Phase 36: dropped `static` *)
-  assert_contains "codegen: HOF takes closure param"
+  assert_c "codegen: HOF takes closure param"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "long long mu_apply(closure_int_int mu_f)";
-  assert_contains "codegen: closure dispatch via .fn(.env, x)"
+  assert_c "codegen: closure dispatch via .fn(.env, x)"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "__c.fn(__c.env, 5LL)";
@@ -4668,7 +4797,7 @@ let () =
      direct twin like every other arity. What this checks is unchanged and is
      the interesting half: a top-level fn used as a VALUE is passed as
      `_as_value`, the closure form, not as a bare function pointer. *)
-  assert_contains "codegen: Var of top-level fn in value pos emits _as_value"
+  assert_c "codegen: Var of top-level fn in value pos emits _as_value"
     (codegen
       "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "mu_inc_as_value";
@@ -4683,28 +4812,28 @@ let () =
      a user name and now goes through `c_safe_name`, the prefix v0.1.56 chose over a
      reserved-word list. Before that, a capture called `short` emitted `const char* short;`
      and no program using it built. *)
-  assert_contains "codegen: anonymous Fun emits env typedef"
+  assert_c "codegen: anonymous Fun emits env typedef"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
     "  closure_int_int mu_f;\n} __anon_";   (* Slot numbers shift whenever the
                              prelude gains lambdas — match the unique env FIELD
                              (`closure_int_int f` = the user's `fn x -> f x` capturing f)
                              without pinning the slot. *)
-  assert_contains "codegen: anonymous Fun emits adapter"
+  assert_c_runtime "codegen: anonymous Fun emits adapter"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
     "_fn(void* __env_self_void, long long mu_x)";
-  assert_contains "codegen: anonymous Fun emits closure construction"
+  assert_c "codegen: anonymous Fun emits closure construction"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
     "__env->mu_f = mu_f";
-  assert_contains "codegen: captured var rewritten to env access"
+  assert_c_runtime "codegen: captured var rewritten to env access"
     (codegen
       "let apply = fn f -> fn x -> f x in let inc = fn n -> n + 1 in apply inc 5")
     "(__env_self->mu_f)";
 
   (* --- C codegen: recursive variants + P_tuple pattern (Phase 4.10) --- *)
-  assert_contains "codegen: recursive variant emits forward + ptr typedef"
+  assert_c "codegen: recursive variant emits forward + ptr typedef"
     (codegen_with_decls
       "type CgList = CgNil | CgCons of int * CgList;\n\
        let rec sum = fn xs -> match xs with\n\
@@ -4712,7 +4841,7 @@ let () =
          | CgCons (h, t) -> h + sum t\n\
        in sum (CgCons (1, CgCons (2, CgNil)))")
     "typedef CgList_node* CgList;";
-  assert_contains "codegen: recursive variant struct body emitted"
+  assert_c "codegen: recursive variant struct body emitted"
     (codegen_with_decls
       "type CgList2 = CgNil2 | CgCons2 of int * CgList2;\n\
        let rec sum = fn xs -> match xs with\n\
@@ -4720,7 +4849,7 @@ let () =
          | CgCons2 (h, t) -> h + sum t\n\
        in sum (CgCons2 (1, CgNil2))")
     "struct CgList2_node {";
-  assert_contains "codegen: recursive variant Constr uses default region"
+  assert_c "codegen: recursive variant Constr uses default region"
     (codegen_with_decls
       "type CgList3 = CgNil3 | CgCons3 of int * CgList3;\n\
        let rec sum = fn xs -> match xs with\n\
@@ -4728,7 +4857,7 @@ let () =
          | CgCons3 (h, t) -> h + sum t\n\
        in sum (CgCons3 (1, CgNil3))")
     "__lang_region_alloc(__lang_current_region, sizeof(CgList3_node))";
-  assert_contains "codegen: match on recursive variant uses -> access"
+  assert_c "codegen: match on recursive variant uses -> access"
     (codegen_with_decls
       "type CgList4 = CgNil4 | CgCons4 of int * CgList4;\n\
        let rec sum = fn xs -> match xs with\n\
@@ -4744,51 +4873,51 @@ let () =
          | CgCons5 (h, t) -> h + sum t\n\
        in sum (CgCons5 (1, CgNil5))"
   in
-  assert_contains "codegen: P_tuple pattern destructures via .f0 / .f1"
+  assert_c "codegen: P_tuple pattern destructures via .f0 / .f1"
     cg5_out
     "payload.CgCons5).f0";
 
   (* --- C codegen: polymorphic variant monomorphization (Phase 4.11) --- *)
-  assert_contains "codegen: polymorphic opt specialized to opt_int"
+  assert_c "codegen: polymorphic opt specialized to opt_int"
     (codegen_with_decls
       "type 'a Cgopt = CgNone | CgSome of 'a;\n\
        let v = CgSome 42 in match v with | CgNone -> 0 | CgSome n -> n")
     "struct Cgopt_int {";
-  assert_contains "codegen: polymorphic list specialized to list_int"
+  assert_c "codegen: polymorphic list specialized to list_int"
     (codegen_with_decls
       "type 'a Cglst = CgN | CgC of 'a * 'a Cglst;\n\
        let rec sum = fn xs -> match xs with | CgN -> 0 | CgC (h, t) -> h + sum t in\n\
        sum (CgC (1, CgC (2, CgN)))")
     "typedef Cglst_int_node* Cglst_int;";
-  assert_contains "codegen: mono variant tuple struct for list payload"
+  assert_c "codegen: mono variant tuple struct for list payload"
     (codegen_with_decls
       "type 'a Cglst2 = CgN2 | CgC2 of 'a * 'a Cglst2;\n\
        let rec sum = fn xs -> match xs with | CgN2 -> 0 | CgC2 (h, t) -> h + sum t in\n\
        sum (CgC2 (1, CgN2))")
     "struct tuple_int_Cglst2_int {";
-  assert_contains "codegen: Constr for mono variant uses specialized name"
+  assert_c "codegen: Constr for mono variant uses specialized name"
     (codegen_with_decls
       "type 'a Cgopt3 = CgNone3 | CgSome3 of 'a;\n\
        CgSome3 42")
     "Cgopt3_int){.tag = 1";
 
   (* --- C codegen: show polymorphic builtin (Phase 4.12) --- *)
-  assert_contains "codegen: show int emits show_int adapter"
+  assert_c_runtime "codegen: show int emits show_int adapter"
     (codegen "show 42") "show_int";
-  assert_contains "codegen: show int call site"
+  assert_c "codegen: show int call site"
     (codegen "show 42") "show_int(42LL)";
-  assert_contains "codegen: show str specialization"
+  assert_c "codegen: show str specialization"
     (codegen "show \"hi\"") "show_str";
-  assert_contains "codegen: show bool specialization"
+  assert_c "codegen: show bool specialization"
     (codegen "show true") "show_bool";
-  assert_contains "codegen: show tuple composes elements"
+  assert_c "codegen: show tuple composes elements"
     (codegen "show (1, \"hi\")") "show_tuple_int_str";
-  assert_contains "codegen: show variant uses tagged dispatch"
+  assert_c "codegen: show variant uses tagged dispatch"
     (codegen_with_decls
       "type CgCol6 = X6 | Y6;\n\
        show X6")
     "show_CgCol6";
-  assert_contains "codegen: show poly variant uses mono name"
+  assert_c "codegen: show poly variant uses mono name"
     (codegen_with_decls
       "type 'a Cgopt4 = CgNone4 | CgSome4 of 'a;\n\
        show (CgSome4 1)")
@@ -4801,6 +4930,37 @@ let () =
     let prog = Pipeline.parse_program s in
     let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
     Codegen_llvm.emit_program ~main_ty prog
+  in
+  (* LLVM: `define <ret> @name(`. Top-level items all start at column 0. *)
+  let llvm_fn_of_line line =
+    let t = String.trim line in
+    let starts p =
+      String.length t >= String.length p && String.sub t 0 (String.length p) = p
+    in
+    if not (starts "define ") then None
+    else match String.index_opt t '@' with
+      | None -> None
+      | Some at ->
+        let rest = String.sub t (at + 1) (String.length t - at - 1) in
+        let rest = if rest <> "" && rest.[0] = '"' then String.sub rest 1 (String.length rest - 1) else rest in
+        let stop =
+          let n = String.length rest in
+          let rec go i =
+            if i >= n then n
+            else
+              let c = rest.[i] in
+              if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                 || (c >= '0' && c <= '9') || c = '_' || c = '.' then go (i + 1)
+              else i
+          in go 0
+        in
+        if stop = 0 then None else Some (String.sub rest 0 stop)
+  in
+  let (assert_llvm, assert_llvm_runtime, llvm_exemptions) =
+    backend_asserts ~control:(llvm "0")
+      (* ⚠ Only the closing brace: labels are at column 0 too. *)
+      ~ends_body:(fun l -> String.trim l = "}")
+      ~fn_of_line:llvm_fn_of_line ~comments:[";"] ~entry:"main"
   in
   (* Same as `llvm`, but processes top-level decls (type / record / view)
      so the typer's registries are populated before codegen runs. *)
@@ -4850,15 +5010,15 @@ let () =
     let main_ty = Typer.infer !type_env (Ast.desugar_program prog) in
     Codegen_llvm.emit_program ~main_ty prog
   in
-  assert_contains "llvm: declares printf"
+  assert_llvm_runtime "llvm: declares printf"
     (llvm "42") "declare i32 @printf(ptr, ...)";
-  assert_contains "llvm: defines main"
+  assert_llvm_runtime "llvm: defines main"
     (llvm "42") "define i32 @main()";
   (* v0.1.86: str_eq was unbound on the LLVM backend (a bignum/mpath dogfood
      hit it). The 2-arg call lowers to the byte-compare runtime. *)
-  assert_contains "llvm: str_eq lowers to the __lang_str_eq runtime"
+  assert_llvm "llvm: str_eq lowers to the __lang_str_eq runtime"
     (llvm "if str_eq \"a\" \"a\" then 1 else 0") "@__lang_str_eq";
-  assert_contains "llvm: str_eq runtime is defined"
+  assert_llvm_runtime "llvm: str_eq runtime is defined"
     (llvm "42") "define i1 @__lang_str_eq(ptr %a, ptr %b)";
   (* v0.1.87: a user top-level `main` binding is alpha-renamed so it no longer
      collides with the synthesized entry. The rename is transparent (the
@@ -4868,35 +5028,35 @@ let () =
      the entry-colliding `@main` / `$main`. *)
   check "user top-level main decl runs (renamed transparently)"
     (Pipeline.process "let main = fn (u: unit) -> 42;\nmain ()") "42";
-  assert_contains "llvm: user main decl is renamed away from the entry"
+  assert_llvm "llvm: user main decl is renamed away from the entry"
     (llvm "let main = fn (u: unit) -> 42;\nmain ()") "@mu___mere_user_main";
   (* Q-012 step 3b-4d: LLVM backend spawn / join over pthreads. The emitted
      IR compiles with clang and runs the closure on a real OS thread
      (validated manually). *)
-  assert_contains "llvm: spawn emits pthread_create"
+  assert_llvm "llvm: spawn emits pthread_create"
     (llvm_with_decls "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
     "call i32 @pthread_create";
-  assert_contains "llvm: join emits pthread_join"
+  assert_llvm "llvm: join emits pthread_join"
     (llvm_with_decls "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
     "call i32 @pthread_join";
-  assert_contains "llvm: emits the spawn trampoline"
+  assert_llvm "llvm: emits the spawn trampoline"
     (llvm_with_decls "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
     "@__mere_spawn_trampoline";
   (* Q-012 step 3b-4e: LLVM channels via the generic i64-slot runtime.
      A parallel producer/consumer compiles with clang and runs. *)
-  assert_contains "llvm: channel_new calls the generic runtime"
+  assert_llvm "llvm: channel_new calls the generic runtime"
     (llvm_with_decls
       "let ch = channel_new () in \
        let _ = spawn (fn u -> channel_send ch 7) in \
        channel_recv ch")
     "call ptr @mere_channel_new()";
-  assert_contains "llvm: channel_send casts the element to an i64 slot"
+  assert_llvm_runtime "llvm: channel_send casts the element to an i64 slot"
     (llvm_with_decls
       "let ch = channel_new () in \
        let _ = spawn (fn u -> channel_send ch 7) in \
        channel_recv ch")
     "call i32 @mere_channel_send(ptr";
-  assert_contains "llvm: channel_recv reads an i64 slot"
+  assert_llvm "llvm: channel_recv reads an i64 slot"
     (llvm_with_decls
       "let ch = channel_new () in \
        let _ = spawn (fn u -> channel_send ch 7) in \
@@ -4905,112 +5065,112 @@ let () =
   (* A by-value aggregate element (tuple/record) can exceed 8 bytes, so it is
      boxed onto the heap and the slot carries the pointer — otherwise the i64
      cast would emit invalid IR. *)
-  assert_contains "llvm: channel of a tuple element boxes the aggregate"
+  assert_llvm_runtime "llvm: channel of a tuple element boxes the aggregate"
     (llvm_with_decls
       "let ch = channel_new () in \
        let _ = spawn (fn u -> channel_send ch (1, 2)) in \
        channel_recv ch")
     "store %tuple_int_int";
-  assert_contains "llvm: format constant present"
+  assert_llvm_runtime "llvm: format constant present"
     (llvm "42") "@.fmt_lld = private constant [6 x i8] c\"%lld\\0A\\00\"";
   (* Q-140: printed through `show`, like every type and every backend. *)
-  assert_contains "llvm: int literal reaches the print"
+  assert_llvm "llvm: int literal reaches the print"
     (llvm "42") "call ptr @show_int(i64 42)";
-  assert_contains "llvm: add lowers to LLVM add"
+  assert_llvm "llvm: add lowers to LLVM add"
     (llvm "1 + 2") "add i64 1, 2";
-  assert_contains "llvm: mul lowers to LLVM mul"
+  assert_llvm "llvm: mul lowers to LLVM mul"
     (llvm "3 * 4") "mul i64 3, 4";
   (* v0.1.247: integer / and % go through a helper that checks the divisor —
      `sdiv i64 x, 0` is immediate undefined behaviour in IR. The instruction is
      still there, inside @__lang_idiv, which these two also assert. *)
-  assert_contains "llvm: / calls the checked division helper"
+  assert_llvm "llvm: / calls the checked division helper"
     (llvm "10 / 2") "call i64 @__lang_idiv(i64 10, i64 2)";
-  assert_contains "llvm: % calls the checked remainder helper"
+  assert_llvm "llvm: % calls the checked remainder helper"
     (llvm "10 % 3") "call i64 @__lang_imod(i64 10, i64 3)";
-  assert_contains "llvm: the helper still uses sdiv"
+  assert_llvm_runtime "llvm: the helper still uses sdiv"
     (llvm "10 / 2") "%q = sdiv i64 %a, %b";
-  assert_contains "llvm: the helper still uses srem"
+  assert_llvm_runtime "llvm: the helper still uses srem"
     (llvm "10 % 3") "%r = srem i64 %a, %b";
-  assert_contains "llvm: dividing by zero raises rather than being undefined"
+  assert_llvm_runtime "llvm: dividing by zero raises rather than being undefined"
     (llvm "10 / 2") "call void @__lang_fail_impl(ptr @.divzero_msg)";
-  assert_contains "llvm: < lowers to icmp slt"
+  assert_llvm "llvm: < lowers to icmp slt"
     (llvm "if 1 < 2 then 10 else 20") "icmp slt i64 1, 2";
-  assert_contains "llvm: if emits br on i1"
+  assert_llvm "llvm: if emits br on i1"
     (llvm "if 1 < 2 then 10 else 20") "br i1";
-  assert_contains "llvm: if uses phi for join"
+  assert_llvm "llvm: if uses phi for join"
     (llvm "if 1 < 2 then 10 else 20") "= phi i64";
-  assert_contains "llvm: let body sees binding"
+  assert_llvm "llvm: let body sees binding"
     (llvm "let x = 5 in x * x") "mul i64 5, 5";
   (* v0.1.34: && / || short-circuit on every backend — Logic lowers to
      the If emission (a trapping RHS is an effect; the old eager `and i1`
      evaluated it unconditionally). *)
-  assert_contains "llvm: && lowers to a short-circuit branch"
+  assert_llvm "llvm: && lowers to a short-circuit branch"
     (llvm "true && false") "br i1 1";
   (* Q-140: the widening this used to ask about existed only because printf's
      varargs wanted an int. The value goes to `show_bool`, whose parameter is
      an i1, so there is nothing to widen -- and the question that remains is
      the one that mattered: the bool reaches the printer at its own width,
      neither extended nor truncated. *)
-  assert_contains "llvm: bool main reaches show_bool as an i1"
+  assert_llvm "llvm: bool main reaches show_bool as an i1"
     (llvm "true") "call ptr @show_bool(i1 1)";
-  assert_contains "llvm: ret 0 at main end"
+  assert_llvm_runtime "llvm: ret 0 at main end"
     (llvm "1") "ret i32 0";
 
   (* --- LLVM IR codegen: function lifting + recursion (Phase 5.2) --- *)
-  assert_contains "llvm: top-level fn lifted to @name"
+  assert_llvm "llvm: top-level fn lifted to @name"
     (llvm "let inc = fn x -> x + 1 in inc 5")
     "define i64 @mu_inc(i64 %x)";
-  assert_contains "llvm: direct call site uses call instr"
+  assert_llvm "llvm: direct call site uses call instr"
     (llvm "let inc = fn x -> x + 1 in inc 5")
     "call i64 @mu_inc(i64 5)";
-  assert_contains "llvm: self-recursion compiles"
+  assert_llvm "llvm: self-recursion compiles"
     (llvm "let rec fact = fn n -> if n <= 1 then 1 else n * fact (n - 1) in fact 5")
     "call i64 @mu_fact";
-  assert_contains "llvm: mutual recursion emits both definitions"
+  assert_llvm "llvm: mutual recursion emits both definitions"
     (llvm "let rec is_even = fn n -> if n == 0 then true else is_odd (n - 1)\n\
            and is_odd = fn n -> if n == 0 then false else is_even (n - 1)\n\
            in is_even 4")
     "define i1 @mu_is_even(i64 %n)";
-  assert_contains "llvm: mutual recursion second fn"
+  assert_llvm "llvm: mutual recursion second fn"
     (llvm "let rec is_even = fn n -> if n == 0 then true else is_odd (n - 1)\n\
            and is_odd = fn n -> if n == 0 then false else is_even (n - 1)\n\
            in is_even 4")
     "define i1 @mu_is_odd(i64 %n)";
-  assert_contains "llvm: param accessed via %name"
+  assert_llvm "llvm: param accessed via %name"
     (llvm "let inc = fn x -> x + 1 in inc 5")
     "add i64 %x, 1";
 
   (* --- LLVM IR codegen: strings / print / ++ / str_len (Phase 5.3) --- *)
   (* v0.1.264: a literal carries `[i64 len][bytes][NUL]`, so the constant is a
      struct and the value is a getelementptr into its second field. *)
-  assert_contains "llvm: str literal global carries its length"
+  assert_llvm "llvm: str literal global carries its length"
     (llvm "\"hi\"")
     "= private constant { i64, [3 x i8] } { i64 2, [3 x i8] c\"hi\\00\" }";
-  assert_contains "llvm: str main printf uses %s"
+  assert_llvm "llvm: str main printf uses %s"
     (llvm "\"hi\"") "@.fmt_s = private constant [4 x i8] c\"%s\\0A\\00\"";
   (* Q-140: the str main goes to `show_str`, which quotes it -- the
      interpreter's answer. The question is the same one: the value crosses as
      a pointer to the string's bytes, not as something else. *)
-  assert_contains "llvm: str main passed as a ptr to show_str"
+  assert_llvm "llvm: str main passed as a ptr to show_str"
     (llvm "\"hi\"") "call ptr @show_str(ptr getelementptr";   (* slot-agnostic *)
   (* v0.1.264: print writes the str's length, so puts (which stops at the
      first NUL) is gone from this path. *)
-  assert_contains "llvm: print writes the str by length"
+  assert_llvm "llvm: print writes the str by length"
     (llvm "print \"hi\"") "call i64 @__lang_str_size(ptr ";
-  assert_contains "llvm: ++ lowers to __lang_str_concat"
+  assert_llvm "llvm: ++ lowers to __lang_str_concat"
     (llvm "\"a\" ++ \"b\"") "call ptr @__lang_str_concat";
-  assert_contains "llvm: __lang_str_concat helper is emitted"
+  assert_llvm_runtime "llvm: __lang_str_concat helper is emitted"
     (llvm "\"a\" ++ \"b\"") "define ptr @__lang_str_concat(ptr %a, ptr %b)";
-  assert_contains "llvm: str_len uses strlen + trunc"
+  assert_llvm_runtime "llvm: str_len uses strlen + trunc"
     (llvm "str_len \"hi\"") "call i64 @strlen(ptr ";
-  assert_contains "llvm: str_len truncates to i32"
+  assert_llvm_runtime "llvm: str_len truncates to i32"
     (llvm "str_len \"hi\"") "trunc i64";
   (* Phase 19.1.1: str_index_of codegen *)
-  assert_contains "llvm: str_index_of calls __lang_str_index_of"
+  assert_llvm "llvm: str_index_of calls __lang_str_index_of"
     (llvm "str_index_of \"hi\" \"i\"")
     (* v0.1.274: i64, like the C backend's *)
     "call i64 @__lang_str_index_of(ptr ";
-  assert_contains "llvm: __lang_str_index_of helper defined"
+  assert_llvm_runtime "llvm: __lang_str_index_of helper defined"
     (llvm "str_index_of \"hi\" \"i\"")
     "define i64 @__lang_str_index_of";
   (* v0.1.284: this used to assert that the backend declares strstr, which was a
@@ -5019,41 +5179,41 @@ let () =
      since v0.1.264, so the search now reads the two lengths and compares bytes.
      Asserting the memcmp keeps the test on the property that mattered — that the
      needle is compared by length and not by termination. *)
-  assert_contains "llvm: str_index_of compares by length, not NUL"
+  assert_llvm_runtime "llvm: str_index_of compares by length, not NUL"
     (llvm "str_index_of \"hi\" \"i\"")
     "call i32 @memcmp(ptr %p, ptr %n, i64 %nn)";
   assert_no_contains "llvm: str_index_of does not call strstr"
     (llvm "str_index_of \"hi\" \"i\"")
     "@strstr";
-  assert_contains "llvm: str-returning fn signature"
+  assert_llvm "llvm: str-returning fn signature"
     (llvm "let exclaim = fn s -> s ++ \"!\" in exclaim \"hi\"")
     "define ptr @mu_exclaim(ptr %s)";
-  assert_contains "llvm: str arg passed as ptr"
+  assert_llvm "llvm: str arg passed as ptr"
     (llvm "let len = fn s -> str_len s in len \"hello\"")
     "@mu_len(ptr ";
 
   (* --- LLVM IR codegen: tuple (Phase 5.4) ---
      Tuples lower to named struct types; literals build via insertvalue
      chains, fst/snd via extractvalue at index 0 / 1. *)
-  assert_contains "llvm: tuple type definition emitted"
+  assert_llvm_runtime "llvm: tuple type definition emitted"
     (llvm "(1, 2)") "%tuple_int_int = type { i64, i64 }";
-  assert_contains "llvm: tuple literal uses insertvalue undef"
+  assert_llvm "llvm: tuple literal uses insertvalue undef"
     (llvm "(1, 2)") "insertvalue %tuple_int_int undef, i64 1, 0";
-  assert_contains "llvm: tuple literal chains insertvalue"
+  assert_llvm "llvm: tuple literal chains insertvalue"
     (llvm "(1, 2)") "insertvalue %tuple_int_int";
-  assert_contains "llvm: fst lowers to extractvalue 0"
+  assert_llvm "llvm: fst lowers to extractvalue 0"
     (llvm "let p = (1, 2) in fst p")
     "extractvalue %tuple_int_int";
-  assert_contains "llvm: tuple of mixed types"
+  assert_llvm "llvm: tuple of mixed types"
     (llvm "(\"hi\", 42)")
     "%tuple_str_int = type { ptr, i64 }";
-  assert_contains "llvm: nested tuple type definition"
+  assert_llvm "llvm: nested tuple type definition"
     (llvm "((1, 2), 3)")
     "%tuple_tuple_int_int_int = type { %tuple_int_int, i64 }";
-  assert_contains "llvm: tuple-arg fn signature"
+  assert_llvm "llvm: tuple-arg fn signature"
     (llvm "let sum_pair = fn p -> fst p + snd p in sum_pair (1, 2)")
     "define i64 @mu_sum_pair(%tuple_int_int %p)";
-  assert_contains "llvm: tuple-returning fn signature"
+  assert_llvm "llvm: tuple-returning fn signature"
     (llvm "let split = fn s -> (s, str_len s) in split \"hi\"")
     "define %tuple_str_int @mu_split(ptr %s)";
 
@@ -5061,32 +5221,32 @@ let () =
      Monomorphic records lower to named structs; literal builds via
      insertvalue, field access via extractvalue, update via insertvalue
      chain on top of the base. *)
-  assert_contains "llvm: record typedef emitted"
+  assert_llvm "llvm: record typedef emitted"
     (llvm_with_decls
       "type CgLRect = { w: int, h: int };\n\
        let r = CgLRect { w = 3, h = 4 } in r.w * r.h")
     "%CgLRect = type { i64, i64 }";
-  assert_contains "llvm: record literal builds via insertvalue chain"
+  assert_llvm "llvm: record literal builds via insertvalue chain"
     (llvm_with_decls
       "type CgLPt = { x: int, y: int };\n\
        let p = CgLPt { x = 1, y = 2 } in p.x")
     "insertvalue %CgLPt undef, i64 1, 0";
-  assert_contains "llvm: record field get via extractvalue"
+  assert_llvm "llvm: record field get via extractvalue"
     (llvm_with_decls
       "type CgLPt2 = { x: int, y: int };\n\
        let p = CgLPt2 { x = 1, y = 2 } in p.y")
     "extractvalue %CgLPt2";
-  assert_contains "llvm: record update emits insertvalue on top of base"
+  assert_llvm "llvm: record update emits insertvalue on top of base"
     (llvm_with_decls
       "type CgLPt3 = { x: int, y: int };\n\
        let p = CgLPt3 { x = 1, y = 2 } in { p | x = 100 }.x")
     "insertvalue %CgLPt3";
-  assert_contains "llvm: record with str field"
+  assert_llvm "llvm: record with str field"
     (llvm_with_decls
       "type CgLPair = { a: str, b: int };\n\
        let p = CgLPair { a = \"hi\", b = 42 } in p.b")
     "%CgLPair = type { ptr, i64 }";
-  assert_contains "llvm: record-returning fn signature"
+  assert_llvm "llvm: record-returning fn signature"
     (llvm_with_decls
       "type CgLPt4 = { x: int, y: int };\n\
        let mk = fn n -> CgLPt4 { x = n, y = n + 1 } in (mk 5).x")
@@ -5096,47 +5256,47 @@ let () =
      Variants lower to `%V = type { i32 }` (nullary) or `%V = type { i32, T }`
      (single-payload-type). Constr → insertvalue chain, Match → icmp chain
      with phi node for the join. *)
-  assert_contains "llvm: nullary variant typedef"
+  assert_llvm "llvm: nullary variant typedef"
     (llvm_with_decls
       "type LCol = LR | LG | LB;\n\
        match LG with | LR -> 0 | LG -> 1 | LB -> 2")
     "%LCol = type { i32 }";
-  assert_contains "llvm: variant with payload typedef"
+  assert_llvm "llvm: variant with payload typedef"
     (llvm_with_decls
       "type LStat = LOk | LErr of str;\n\
        match LErr \"x\" with | LOk -> 0 | LErr m -> str_len m")
     "%LStat = type { i32, ptr }";
-  assert_contains "llvm: Constr emits insertvalue with tag"
+  assert_llvm "llvm: Constr emits insertvalue with tag"
     (llvm_with_decls
       "type LCol2 = LX | LY;\n\
        let c = LY in match c with | LX -> 0 | LY -> 1")
     "insertvalue %LCol2 undef, i32 1, 0";
-  assert_contains "llvm: Constr with payload emits second insertvalue"
+  assert_llvm "llvm: Constr with payload emits second insertvalue"
     (llvm_with_decls
       "type LStat2 = LOk2 | LErr2 of int;\n\
        LErr2 42")
     "insertvalue %LStat2 ";
-  assert_contains "llvm: Match extracts tag via extractvalue"
+  assert_llvm "llvm: Match extracts tag via extractvalue"
     (llvm_with_decls
       "type LCol3 = LR3 | LG3;\n\
        match LR3 with | LR3 -> 1 | LG3 -> 2")
     "extractvalue %LCol3";
-  assert_contains "llvm: Match uses icmp eq on tag"
+  assert_llvm "llvm: Match uses icmp eq on tag"
     (llvm_with_decls
       "type LCol4 = LR4 | LG4;\n\
        match LR4 with | LR4 -> 1 | LG4 -> 2")
     "icmp eq i32";
-  assert_contains "llvm: Match phi joins arm results"
+  assert_llvm "llvm: Match phi joins arm results"
     (llvm_with_decls
       "type LCol5 = LR5 | LG5;\n\
        match LR5 with | LR5 -> 10 | LG5 -> 20")
     "= phi i64";
-  assert_contains "llvm: Match payload bound via extractvalue"
+  assert_llvm "llvm: Match payload bound via extractvalue"
     (llvm_with_decls
       "type LStat3 = LOk3 | LErr3 of int;\n\
        match LErr3 5 with | LOk3 -> 0 | LErr3 n -> n")
     "extractvalue %LStat3";
-  assert_contains "llvm: abort declared for fallthrough"
+  assert_llvm_runtime "llvm: abort declared for fallthrough"
     (llvm_with_decls
       "type LCol6 = LR6 | LG6;\n\
        match LR6 with | LR6 -> 1 | LG6 -> 2")
@@ -5149,25 +5309,25 @@ let () =
      unless the value carries one; it is pinned here because a layout is a
      contract and the field is a POINTER THAT GETS CALLED -- a construction
      site that forgot it would leave undef there. *)
-  assert_contains "llvm: closure typedef for int->int"
+  assert_llvm_runtime "llvm: closure typedef for int->int"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "%closure_int_int = type { ptr, ptr, ptr }";
-  assert_contains "llvm: closure adapter emitted"
+  assert_llvm "llvm: closure adapter emitted"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "define i64 @mu_inc_closure_fn(ptr %env_unused, i64 %x)";
-  assert_contains "llvm: fn-as-value builds closure with adapter"
+  assert_llvm "llvm: fn-as-value builds closure with adapter"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "insertvalue %closure_int_int zeroinitializer, ptr null, 0";
-  assert_contains "llvm: fn-as-value sets fn pointer"
+  assert_llvm "llvm: fn-as-value sets fn pointer"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "ptr @mu_inc_closure_fn, 1";
-  assert_contains "llvm: indirect App extracts env + fn ptr"
+  assert_llvm "llvm: indirect App extracts env + fn ptr"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "extractvalue %closure_int_int";
-  assert_contains "llvm: indirect call uses extracted fn ptr"
+  assert_llvm_runtime "llvm: indirect call uses extracted fn ptr"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "= call i32 ";
-  assert_contains "llvm: HOF receives closure-typed param"
+  assert_llvm "llvm: HOF receives closure-typed param"
     (llvm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "define i64 @mu_apply(%closure_int_int %f)";
 
@@ -5175,25 +5335,25 @@ let () =
      Inner `fn x -> ...` in expression position lifts to an env struct
      + adapter; captures are stored in a heap-allocated env (via malloc
      for now) and re-loaded inside the adapter from `%env_self`. *)
-  assert_contains "llvm: anon adapter emitted"
+  assert_llvm_runtime "llvm: anon adapter emitted"
     (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
     "define i64 @anon_0_fn(ptr %env_self, i64 %x)";
-  assert_contains "llvm: anon env struct typedef"
+  assert_llvm "llvm: anon env struct typedef"
     (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
     "%anon_0_env = type { i64 }";
-  assert_contains "llvm: anon env allocated via malloc"
+  assert_llvm_runtime "llvm: anon env allocated via malloc"
     (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
     "= call ptr @malloc";
-  assert_contains "llvm: capture stored into env via getelementptr"
+  assert_llvm "llvm: capture stored into env via getelementptr"
     (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
     "getelementptr %anon_0_env, ptr ";
-  assert_contains "llvm: capture loaded from env_self in adapter"
+  assert_llvm "llvm: capture loaded from env_self in adapter"
     (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
     "= load i32, ptr ";
-  assert_contains "llvm: anon closure value built with adapter pointer"
+  assert_llvm "llvm: anon closure value built with adapter pointer"
     (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
     "ptr @anon_0_fn, 1";
-  assert_contains "llvm: captureless anon Fun uses null env"
+  assert_llvm "llvm: captureless anon Fun uses null env"
     (llvm "let apply = fn f -> f 5 in apply (fn x -> x + 1)")
     "insertvalue %closure_int_int zeroinitializer, ptr null, 0";
 
@@ -5206,20 +5366,20 @@ let () =
      of writing past the buffer. Before this the LLVM allocator was a pure
      bump with no bounds check, so allocation-heavy programs overran the
      4 MB default arena and crashed (see test/parity/region_growth.mere). *)
-  assert_contains "llvm: __lang_region struct typedef"
+  assert_llvm_runtime "llvm: __lang_region struct typedef"
     (llvm "1 + 2") "%__lang_region = type { ptr, ptr, i64, ptr }";
-  assert_contains "llvm: default region global"
+  assert_llvm_runtime "llvm: default region global"
     (llvm "1 + 2") "@__lang_default_region = internal global %__lang_region zeroinitializer";
-  assert_contains "llvm: region_alloc helper defined"
+  assert_llvm_runtime "llvm: region_alloc helper defined"
     (llvm "1 + 2") "define ptr @__lang_region_alloc(ptr %r, i64 %n)";
-  assert_contains "llvm: region_alloc bounds-checks before bumping"
+  assert_llvm_runtime "llvm: region_alloc bounds-checks before bumping"
     (llvm "1 + 2") "%over = icmp ugt ptr %want, %limit";
-  assert_contains "llvm: region grows by chaining a new block"
+  assert_llvm_runtime "llvm: region grows by chaining a new block"
     (llvm "1 + 2") "call void @__lang_region_add_block(ptr %r, i64 %ncap)";
-  assert_contains "llvm: main initializes default region"
+  assert_llvm_runtime "llvm: main initializes default region"
     (llvm "1 + 2")
     "call void @__lang_region_init(ptr @__lang_default_region, i64 4194304)";
-  assert_contains "llvm: main frees default region"
+  assert_llvm_runtime "llvm: main frees default region"
     (llvm "1 + 2")
     "call void @__lang_region_free(ptr @__lang_default_region)";
   (* v0.1.264: concat allocates through str_alloc, which is where the header
@@ -5228,10 +5388,10 @@ let () =
      it asks @__lang_alloc, which reads the CURRENT one, so a `region R { }`
      reclaims the strings its body made. The default region is still where
      that points outside any block. *)
-  assert_contains "llvm: str_alloc allocates through the current region"
+  assert_llvm_runtime "llvm: str_alloc allocates through the current region"
     (llvm "\"a\" ++ \"b\"")
     "call ptr @__lang_alloc(i64 %sz)";
-  assert_contains "llvm: closure env alloc goes through the current region"
+  assert_llvm "llvm: closure env alloc goes through the current region"
     (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
     "call ptr @__lang_alloc(i64";
   assert_no_contains "llvm: closure env no longer uses bare malloc"
@@ -5242,37 +5402,37 @@ let () =
      `'a opt`, `'a Box` etc. get a specialized struct per concrete
      instantiation (`%opt_int`, `%Box_str`). Constr / Record_lit /
      Field_get / Match use the mono name. *)
-  assert_contains "llvm: poly variant mono typedef"
+  assert_llvm "llvm: poly variant mono typedef"
     (llvm_with_decls
       "type 'a LCgOpt = LCgN | LCgS of 'a;\n\
        match LCgS 42 with | LCgN -> 0 | LCgS n -> n")
     "%LCgOpt_int = type { i32, ptr }";  (* Phase 25.0: boxed payload *)
-  assert_contains "llvm: poly variant Constr uses mono name"
+  assert_llvm "llvm: poly variant Constr uses mono name"
     (llvm_with_decls
       "type 'a LCgOpt2 = LCgN2 | LCgS2 of 'a;\n\
        LCgS2 42")
     "insertvalue %LCgOpt2_int";
-  assert_contains "llvm: poly variant Match uses mono name"
+  assert_llvm "llvm: poly variant Match uses mono name"
     (llvm_with_decls
       "type 'a LCgOpt3 = LCgN3 | LCgS3 of 'a;\n\
        match LCgS3 42 with | LCgN3 -> 0 | LCgS3 n -> n")
     "extractvalue %LCgOpt3_int";
-  assert_contains "llvm: poly record mono typedef"
+  assert_llvm "llvm: poly record mono typedef"
     (llvm_with_decls
       "type 'a LCgBox = { v: 'a };\n\
        let b = LCgBox { v = 42 } in b.v")
     "%LCgBox_int = type { i64 }";
-  assert_contains "llvm: poly record Record_lit uses mono name"
+  assert_llvm "llvm: poly record Record_lit uses mono name"
     (llvm_with_decls
       "type 'a LCgBox2 = { v: 'a };\n\
        let b = LCgBox2 { v = 42 } in b.v")
     "insertvalue %LCgBox2_int";
-  assert_contains "llvm: poly record Field_get uses mono name"
+  assert_llvm "llvm: poly record Field_get uses mono name"
     (llvm_with_decls
       "type 'a LCgBox3 = { v: 'a };\n\
        let b = LCgBox3 { v = 42 } in b.v")
     "extractvalue %LCgBox3_int";
-  assert_contains "llvm: poly record specializes at two types"
+  assert_llvm "llvm: poly record specializes at two types"
     (llvm_with_decls
       "type 'a LCgBox4 = { v: 'a };\n\
        let bi = LCgBox4 { v = 42 } in\n\
@@ -5285,22 +5445,22 @@ let () =
      to heap-allocated nodes via region alloc; values are `ptr` to the
      node, accessed via getelementptr + load. P_tuple sub-pattern in Cons
      unpacks the payload tuple via extractvalue. *)
-  assert_contains "llvm: recursive variant emits _node typedef"
+  assert_llvm "llvm: recursive variant emits _node typedef"
     (llvm_with_decls
       "type LCgIList = LCgINil | LCgICons of int * LCgIList;\n\
        LCgICons (1, LCgINil)")
     "%LCgIList_node = type { i32, ptr }";  (* Phase 25.0: boxed payload *)
-  assert_contains "llvm: recursive Constr allocs via region"
+  assert_llvm "llvm: recursive Constr allocs via region"
     (llvm_with_decls
       "type LCgIList2 = LCgINil2 | LCgICons2 of int * LCgIList2;\n\
        LCgICons2 (1, LCgINil2)")
     "call ptr @__lang_alloc(i64";
-  assert_contains "llvm: recursive Match loads tag via GEP"
+  assert_llvm "llvm: recursive Match loads tag via GEP"
     (llvm_with_decls
       "type LCgIList3 = LCgINil3 | LCgICons3 of int * LCgIList3;\n\
        match LCgINil3 with | LCgINil3 -> 0 | LCgICons3 (h, _) -> h")
     "getelementptr %LCgIList3_node, ptr ";
-  assert_contains "llvm: poly recursive list emits mono _node typedef"
+  assert_llvm "llvm: poly recursive list emits mono _node typedef"
     (llvm_with_decls
       "type 'a LCgList = LCgNil | LCgCons of 'a * 'a LCgList;\n\
        let rec sum = fn xs -> match xs with\n\
@@ -5308,7 +5468,7 @@ let () =
          | LCgCons (h, t) -> h + sum t\n\
        in sum (LCgCons (1, LCgCons (2, LCgNil)))")
     "%LCgList_int_node = type { i32, ptr }";  (* Phase 25.0: boxed payload *)
-  assert_contains "llvm: P_tuple sub-pattern extracts via extractvalue"
+  assert_llvm "llvm: P_tuple sub-pattern extracts via extractvalue"
     (llvm_with_decls
       "type LCgIList4 = LCgINil4 | LCgICons4 of int * LCgIList4;\n\
        let rec sum = fn xs -> match xs with\n\
@@ -5320,34 +5480,34 @@ let () =
   (* --- LLVM IR codegen: complex pattern (Phase 5.11) ---
      P_int / P_bool / P_str (via @strcmp) / P_unit / P_record / P_as /
      or-pattern (pre-flattened) / guard (and-ed with arm test). *)
-  assert_contains "llvm: strcmp declared"
+  assert_llvm_runtime "llvm: strcmp declared"
     (llvm "match \"hi\" with | \"hi\" -> 1 | _ -> 0")
     "declare i32 @strcmp(ptr, ptr)";
-  assert_contains "llvm: P_int via icmp eq"
+  assert_llvm "llvm: P_int via icmp eq"
     (llvm "match 3 with | 0 -> 1 | 3 -> 2 | _ -> 9")
     "= icmp eq i64 ";
-  assert_contains "llvm: P_str via strcmp"
+  assert_llvm "llvm: P_str via strcmp"
     (llvm "match \"hello\" with | \"hi\" -> 1 | \"hello\" -> 2 | _ -> 9")
     "= call i32 @strcmp(ptr ";
-  assert_contains "llvm: P_bool via icmp eq i1"
+  assert_llvm "llvm: P_bool via icmp eq i1"
     (llvm "match true with | false -> 0 | true -> 1")
     "= icmp eq i1 ";
-  assert_contains "llvm: record pattern via extractvalue"
+  assert_llvm "llvm: record pattern via extractvalue"
     (llvm_with_decls
       "type LCgPt5 = { x: int, y: int };\n\
        match LCgPt5 { x = 3, y = 4 } with | LCgPt5 { x = a, y = b } -> a + b")
     "extractvalue %LCgPt5";
-  assert_contains "llvm: nested constructor with P_constr sub"
+  assert_llvm_runtime "llvm: nested constructor with P_constr sub"
     (llvm_with_decls
       "type 'a LCgOpt5 = LCgN5 | LCgS5 of 'a;\n\
        match LCgS5 (LCgS5 7) with | LCgN5 -> 0 | LCgS5 LCgN5 -> 1 | LCgS5 (LCgS5 n) -> n")
     "and i1 ";
-  assert_contains "llvm: or-pattern flattens to multiple arms"
+  assert_llvm "llvm: or-pattern flattens to multiple arms"
     (llvm_with_decls
       "type LCgCol7 = LCg7A | LCg7B | LCg7C;\n\
        match LCg7B with | LCg7A | LCg7B -> 1 | LCg7C -> 2")
     "%arm_";
-  assert_contains "llvm: match guard adds br after pass"
+  assert_llvm "llvm: match guard adds br after pass"
     (llvm
        "match 7 with | n when n < 5 -> 100 | n when n < 10 -> 200 | _ -> 300")
     "guard_pass_";
@@ -5358,29 +5518,29 @@ let () =
      recursive). Generate a dedicated function per type via `@asprintf`,
      discover required types via collect_show_types, and dispatch
      `App (Var "show", arg)` to `call ptr @show_<tag>`. *)
-  assert_contains "llvm: asprintf declared"
+  assert_llvm_runtime "llvm: asprintf declared"
     (llvm "print (show 42)") "declare i32 @asprintf(ptr, ptr, ...)";
-  assert_contains "llvm: show_int defined"
+  assert_llvm_runtime "llvm: show_int defined"
     (llvm "show 42") "define ptr @show_int(i64 %x)";
-  assert_contains "llvm: show int call site"
+  assert_llvm "llvm: show int call site"
     (llvm "show 42") "call ptr @show_int(i64 42)";
-  assert_contains "llvm: show str specialization"
+  assert_llvm "llvm: show str specialization"
     (llvm "show \"hi\"") "define ptr @show_str(ptr %x)";
-  assert_contains "llvm: show bool specialization"
+  assert_llvm "llvm: show bool specialization"
     (llvm "show true") "define ptr @show_bool(i1 %x)";
-  assert_contains "llvm: show tuple composes elements"
+  assert_llvm "llvm: show tuple composes elements"
     (llvm "show (1, \"hi\")") "define ptr @show_tuple_int_str";
-  assert_contains "llvm: show variant uses tag dispatch"
+  assert_llvm "llvm: show variant uses tag dispatch"
     (llvm_with_decls
       "type LCgCol8 = LCg8A | LCg8B;\n\
        show LCg8A")
     "define ptr @show_LCgCol8";
-  assert_contains "llvm: show poly variant uses mono name"
+  assert_llvm "llvm: show poly variant uses mono name"
     (llvm_with_decls
       "type 'a LCgOpt7 = LCgN7 | LCgS7 of 'a;\n\
        show (LCgS7 1)")
     "define ptr @show_LCgOpt7_int";
-  assert_contains "llvm: show record"
+  assert_llvm "llvm: show record"
     (llvm_with_decls
       "type LCgPt6 = { x: int, y: int };\n\
        show (LCgPt6 { x = 1, y = 2 })")
@@ -5392,32 +5552,32 @@ let () =
      `&R v` to region_alloc + store returning a ptr, `with c = v in body` to
      bind + body + auto-close, and view construction to region_alloc + insertvalue
      + store + ptr return. *)
-  assert_contains "llvm: Region_block calls __lang_region_init"
+  assert_llvm_runtime "llvm: Region_block calls __lang_region_init"
     (llvm "region R { let x = &R 5 in 42 }")
     "call void @__lang_region_init(ptr ";
-  assert_contains "llvm: Region_block calls __lang_region_free"
+  assert_llvm_runtime "llvm: Region_block calls __lang_region_free"
     (llvm "region R { let x = &R 5 in 42 }")
     "call void @__lang_region_free(ptr ";
-  assert_contains "llvm: Ref allocs via region + store"
+  assert_llvm "llvm: Ref allocs via region + store"
     (llvm "region R { let x = &R 5 in 42 }")
     "store i64 5, ptr ";
-  assert_contains "llvm: with calls close.fn(env, 0) at scope end"
+  assert_llvm_runtime "llvm: with calls close.fn(env, 0) at scope end"
     (llvm_with_decls
       "drop type LCgConn7 = { id: int, close: unit -> unit };\n\
        let mk = fn i -> LCgConn7 { id = i, close = fn () -> () } in\n\
        with c = mk 7 in c.id")
     "call i32 ";
-  assert_contains "llvm: view typedef same as record (insertvalue then store)"
+  assert_llvm "llvm: view typedef same as record (insertvalue then store)"
     (llvm_with_decls
       "view LCgCell8[R] of int { v: int };\n\
        region R { let c = LCgCell8 { v = 7 } in c.v }")
     "%LCgCell8 = type { i64 }";
-  assert_contains "llvm: view construction region-allocates"
+  assert_llvm "llvm: view construction region-allocates"
     (llvm_with_decls
       "view LCgCell9[R] of int { v: int };\n\
        region R { let c = LCgCell9 { v = 7 } in c.v }")
     "call ptr @__lang_region_alloc(ptr ";
-  assert_contains "llvm: view field access uses GEP + load"
+  assert_llvm "llvm: view field access uses GEP + load"
     (llvm_with_decls
       "view LCgCellA[R] of int { v: int };\n\
        region R { let c = LCgCellA { v = 7 } in c.v }")
@@ -5427,35 +5587,35 @@ let () =
      Special-case `'a list` instead of the generic recursive-variant show, printing
      it in `[1, 2, 3]` form. Inside show_list_<T>, use alloca/load/store and a loop
      to call show_T on each element and concatenate via __lang_str_concat. *)
-  assert_contains "llvm: list show emits [ prefix"
+  assert_llvm_runtime "llvm: list show emits [ prefix"
     (llvm_with_decls
       "type 'a list = Nil | Cons of 'a * 'a list;\n\
        show [1, 2, 3]")
     "@.s_lbracket";
-  assert_contains "llvm: list show emits ] suffix"
+  assert_llvm_runtime "llvm: list show emits ] suffix"
     (llvm_with_decls
       "type 'a list = Nil | Cons of 'a * 'a list;\n\
        show [1, 2, 3]")
     "@.s_rbracket";
-  assert_contains "llvm: list show emits comma separator"
+  assert_llvm_runtime "llvm: list show emits comma separator"
     (llvm_with_decls
       "type 'a list = Nil | Cons of 'a * 'a list;\n\
        show [1, 2, 3]")
     "@.s_comma_space";
-  assert_contains "llvm: list show calls element show via str_concat"
+  assert_llvm "llvm: list show calls element show via str_concat"
     (llvm_with_decls
       "type 'a list = Nil | Cons of 'a * 'a list;\n\
        show [1, 2, 3]")
     "call ptr @__lang_str_concat";
 
   (* Phase 16.3: mk_logger / mk_metrics LLVM codegen. *)
-  assert_contains "llvm: mk_logger emits @__mere_mk_logger call"
+  assert_llvm "llvm: mk_logger emits @__mere_mk_logger call"
     (llvm "let lg = mk_logger \"app\" in lg.info \"hi\"")
     "call %Logger @__mere_mk_logger";
-  assert_contains "llvm: logger info fn defined"
+  assert_llvm "llvm: logger info fn defined"
     (llvm "let lg = mk_logger \"app\" in lg.info \"hi\"")
     "define internal i32 @__mere_logger_info_fn";
-  assert_contains "llvm: mk_metrics emits @__mere_mk_metrics call"
+  assert_llvm "llvm: mk_metrics emits @__mere_mk_metrics call"
     (llvm "let m = mk_metrics () in m.inc \"x\"")
     "call %Metrics @__mere_mk_metrics";
 
@@ -5518,123 +5678,29 @@ let () =
     let main_ty = Typer.infer !type_env (Ast.desugar_program prog) in
     Codegen_wasm.emit_program ~main_ty prog
   in
-  (* Q-133. A SUBSTRING ASSERTION ON A WASM MODULE IS ONLY A CHECK IF THE
-     STRING WOULD BE ABSENT FROM A PROGRAM THAT DOES NOT HAVE THE FEATURE, and
-     for a long time 41 of these were not: the emitted module carries the whole
-     runtime -- 58 `$__lang_*` functions for the program `0` -- so a needle
-     naming an opcode matched no matter what was compiled.
-
-     ⚠ AND ELEVEN OF THEM WERE FALSE, which the record said none were. Asked
-     about the USER'S code rather than about the module, `i32.mul` is `i64.mul`,
-     `i32.eq` is `i64.eq`, and `i32.and` is nothing at all -- survivors of the
-     i32→i64 widening that the earlier sweep missed because it only asked what
-     was false module-wide.
-
-     WHAT COUNTS AS THE PROGRAM'S OWN CODE IS DECIDED BY THE CONTROL, not by a
-     list of name prefixes. Every function the trivial program `0` also defines
-     is boilerplate; `$main` is the exception, because that is where the
-     program's own body goes. A list of prefixes would have to be maintained,
-     and the first thing it got wrong was `$show_WCgCol8` -- generated FOR THE
-     USER'S TYPE and named like a runtime helper. *)
-  let wasm_fn_names (wat : string) : string list =
-    List.filter_map (fun line ->
-      let t = String.trim line in
-      let starts p =
-        String.length t >= String.length p && String.sub t 0 (String.length p) = p
-      in
-      if not (starts "(func $") then None
-      else begin
-        let rest = String.sub t 7 (String.length t - 7) in
-        let stop =
-          match String.index_opt rest ' ' with
-          | Some i -> i
-          | None ->
-            (match String.index_opt rest ')' with
-             | Some i -> i | None -> String.length rest)
-        in
-        Some (String.sub rest 0 stop)
-      end) (String.split_on_char '\n' wat)
-  in
-  let wasm_control = wasm "0" in
-  let wasm_boilerplate_fns =
-    List.filter (fun n -> n <> "main") (wasm_fn_names wasm_control)
-  in
-  let wasm_user_part (wat : string) : string =
-    let indent line =
-      let n = String.length line in
-      let rec go i = if i < n && line.[i] = ' ' then go (i + 1) else i in go 0
+  (* Wasm: `(func $name`, and a top-level item sits at indentation 2. *)
+  let wasm_fn_of_line line =
+    let t = String.trim line in
+    let starts p =
+      String.length t >= String.length p && String.sub t 0 (String.length p) = p
     in
-    let skip = ref false in
-    let keep = List.filter (fun line ->
-      let t = String.trim line in
-      let starts p =
-        String.length t >= String.length p && String.sub t 0 (String.length p) = p
+    if not (starts "(func $") then None
+    else begin
+      let rest = String.sub t 7 (String.length t - 7) in
+      let stop =
+        match String.index_opt rest ' ' with
+        | Some i -> i
+        | None -> (match String.index_opt rest ')' with Some i -> i | None -> String.length rest)
       in
-      (* ⚠ A MODULE-LEVEL SECTION ENDS THE SKIP, not just the next function.
-         `(data …)`, `(table …)` and `(elem …)` sit at the same indentation as
-         `(func` and often AFTER the last one, so a skip that only ended at the
-         next function swallowed them -- and with them every assertion about a
-         string literal reaching a data segment. *)
-      if starts "(" && indent line <= 2 then begin
-        skip := false;
-        if starts "(func $" then begin
-          let rest = String.sub t 7 (String.length t - 7) in
-          let stop =
-            match String.index_opt rest ' ' with
-            | Some i -> i
-            | None ->
-              (match String.index_opt rest ')' with
-               | Some i -> i | None -> String.length rest)
-          in
-          skip := List.mem (String.sub rest 0 stop) wasm_boilerplate_fns
-        end
-      end;
-      (* ⚠ A `;;` comment is prose, never evidence. The word "else" appears in
-         one of the runtime's comments, which made an assertion about an `if`
-         having an else branch look vacuous. *)
-      let is_comment =
-        String.length t >= 2 && String.sub t 0 2 = ";;"
-      in
-      (not !skip) && not is_comment) (String.split_on_char '\n' wat)
-    in
-    String.concat "\n" keep
-  in
-  let wasm_control_user = wasm_user_part wasm_control in
-  (* How many assertions took the skeleton exemption. Pinned below, so the way
-     out cannot widen without somebody choosing to widen it. *)
-  let wasm_module_exemptions = ref 0 in
-  (* ⚠ The two ways this fails are different repairs, so they are printed
-     differently: "not in the subject" means the claim is wrong, "also in the
-     control" means the claim is unfalsifiable. *)
-  let assert_wasm name out needle =
-    let user = wasm_user_part out in
-    if not (contains user needle) then begin
-      incr fail;
-      Printf.printf
-        "FAIL  %s\n  expected in the PROGRAM'S OWN code: %s\n  its code was:%s\n"
-        name needle user
-    end else if contains wasm_control_user needle then begin
-      incr fail;
-      Printf.printf
-        "FAIL  %s\n  vacuous: %s is also in the control program `0`, so it is evidence about the runtime and not about this program\n"
-        name needle
-    end else begin
-      incr pass; Printf.printf "PASS  %s\n" name
+      Some (String.sub rest 0 stop)
     end
   in
-  (* The skeleton every module has: the `(module` header, the exported memory,
-     the imported host `puts`. These are worth asserting and CANNOT be
-     discriminating -- the control has them too, which is the point. Separated
-     so that "this claims a feature" and "this claims the shape" are not the
-     same sentence. *)
-  let assert_wasm_module name out needle =
-    incr wasm_module_exemptions;
-    if contains out needle then begin
-      incr pass; Printf.printf "PASS  %s\n" name
-    end else begin
-      incr fail;
-      Printf.printf "FAIL  %s\n  expected in the module: %s\n" name needle
-    end
+  let (assert_wasm, assert_wasm_runtime, wasm_runtime_exemptions) =
+    backend_asserts ~control:(wasm "0")
+      ~ends_body:(fun l ->
+        let t = String.trim l in
+        t <> "" && line_indent l <= 2 && t.[0] = '(')
+      ~fn_of_line:wasm_fn_of_line ~comments:[";;"] ~entry:"main"
   in
   (* 2048 dogfood P2: a user-bound `spawn` must NOT dispatch to the
      concurrency builtin (which would drag in shared memory + $mere_spawn).
@@ -5674,16 +5740,16 @@ let () =
     (wasm_with_decls "extern fn two: str -> (str -> unit) -> unit;\n\
            let _ = two \"hi\" (fn (s: str) -> print s) in 0")
     "call $two";
-  assert_wasm_module "wasm: emits (module"
+  assert_wasm_runtime "wasm: emits (module"
     (wasm "42") "(module";
-  assert_wasm_module "wasm: exports main with i32 result"
+  assert_wasm_runtime "wasm: exports main with i32 result"
     (wasm "42") "(func $main (export \"main\") (result i32)";
   (* Q-012 step 3b-4f: a non-threaded program keeps its own unshared memory;
      a program that spawns switches to a host-imported shared memory and
      pulls the spawn/join host imports. Verified end-to-end on node
      worker_threads (a worker instantiates the same module over the shared
      memory and runs the closure via the indirect function table). *)
-  assert_wasm_module "wasm: non-threaded program declares its own memory"
+  assert_wasm_runtime "wasm: non-threaded program declares its own memory"
     (wasm "42") "(memory (export \"memory\") 1024)";
   assert_wasm "wasm: spawn switches to imported shared memory"
     (wasm_with_decls "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
@@ -5769,9 +5835,9 @@ let () =
      host can advance it from extern-fn implementations (Phase 55.x
      onwards). Match the prefix — the (export "…") attribute lands
      between the name and the (mut i32) type. *)
-  assert_wasm_module "wasm: bump pointer global declared"
+  assert_wasm_runtime "wasm: bump pointer global declared"
     (wasm "\"hi\"") "(global $__lang_bump";
-  assert_wasm_module "wasm: puts imported"
+  assert_wasm_runtime "wasm: puts imported"
     (wasm "\"hi\"") "(import \"env\" \"puts\" (func $puts_h (param i32)))";
   assert_wasm "wasm: str literal becomes data segment"
     (wasm "\"hi\"") "\\02\\00\\00\\00hi\\00";
@@ -5779,7 +5845,7 @@ let () =
     (wasm "str_len \"hi\"") "call $__lang_strlen";
   assert_wasm "wasm: ++ calls $__lang_str_concat"
     (wasm "\"a\" ++ \"b\"") "call $__lang_str_concat";
-  assert_wasm_module "wasm: print calls $puts"
+  assert_wasm_runtime "wasm: print calls $puts"
     (wasm "print \"hi\"") "call $puts";
   (* Phase 19.1.1: str_index_of codegen *)
   assert_wasm "wasm: str_index_of calls $__lang_str_index_of"
@@ -5878,10 +5944,10 @@ let () =
      Closure = 8-byte memory struct `{ env_offset, fn_table_idx }`.
      Top-level fn adapter + indirect App via call_indirect (type $cl).
      Anonymous Fun captures env in memory + adapter loads them. *)
-  assert_wasm_module "wasm: closure type declared"
+  assert_wasm_runtime "wasm: closure type declared"
     (wasm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "(type $cl (func (param i64) (param i64) (result i64)))";
-  assert_wasm_module "wasm: function table declared"
+  assert_wasm_runtime "wasm: function table declared"
     (wasm "let inc = fn x -> x + 1 in let apply = fn f -> f 5 in apply inc")
     "(table ";
   assert_wasm "wasm: top-level adapter emitted"
@@ -5939,7 +6005,7 @@ let () =
       "view WCgCellW2[R] of int { v: int, w: int };\n\
        region R { let c = WCgCellW2 { v = 7, w = 9 } in c.w }")
     "i64.load offset=8";
-  assert_wasm_module "wasm: Unit_lit becomes i32.const 0"
+  assert_wasm_runtime "wasm: Unit_lit becomes i32.const 0"
     (wasm "fn () -> ()") "i32.const 0";
 
   (* --- Wasm codegen: poly variant/record + recursive variant + P_tuple
@@ -6014,9 +6080,9 @@ let () =
      Equivalent to LLVM Phase 5.12. show is self-contained: int->string
      conversion is implemented inside Wasm too, and composition of
      strings/tuples/records/variants is done via __lang_str_concat. *)
-  assert_wasm_module "wasm: show_int defined"
+  assert_wasm_runtime "wasm: show_int defined"
     (wasm "show 42") "(func $show_int";
-  assert_wasm_module "wasm: show int call site"
+  assert_wasm_runtime "wasm: show int call site"
     (wasm "show 42") "call $show_int";
   assert_wasm "wasm: show_bool selects between true/false offsets"
     (wasm "show true") "(func $show_bool";
@@ -6078,7 +6144,7 @@ let () =
      region that escape to the outside (e.g. the OwnedVec from
      `let v = region R { vec_to_owned ... }`) are not overwritten by
      subsequent allocations. *)
-  assert_wasm_module "wasm: Region_block emits body directly (no save/restore)"
+  assert_wasm_runtime "wasm: Region_block emits body directly (no save/restore)"
     (wasm "region R { 42 }")
     "(func $main";
   (* v0.1.37: regions RECLAIM on Wasm again — the sound replacement for
@@ -6103,14 +6169,34 @@ let () =
     "call $__lang_protect";
   assert_wasm "wasm: and the block's release is bounded by the high-water mark"
     (wasm "region R { 42 }") "global.get $__lang_hwm";
-  (* ⚠ THE WAY OUT IS PINNED. `assert_wasm_module` skips the vacuity check on
+  (* ⚠ THE WAY OUT IS PINNED. `assert_wasm_runtime` skips the vacuity check on
      purpose -- `(module`, the exported memory and the imported `puts` are the
      skeleton every module has, and a check that they are discriminating would
      be asking for a lie. But an exemption nobody counts is how 41 assertions
      became evidence about the runtime instead of about a program, so the number
      of them is a number somebody has to change on purpose. *)
-  check "wasm: how many assertions take the skeleton exemption"
-    (string_of_int !wasm_module_exemptions) "12";
+  (* ⚠ THE WAY OUT IS PINNED, for all three backends. `assert_*_runtime` skips
+     the control check on purpose, and there are exactly two reasons to take it:
+
+       1. THE CLAIM IS ABOUT THE RUNTIME, not about a program. "the idiv helper
+          still uses sdiv", "region_alloc bounds-checks before bumping",
+          "declares printf", `(module`. These are worth pinning and cannot be
+          discriminating -- every program gets them -- so asking them to be
+          would be asking for a lie.
+
+       2. ⚠ THE CONTROL USES THE SAME GENERATED NAME. `anon_0_fn` is what the
+          first anonymous function is called, and the trivial program already
+          has one (the prelude's), so a subject's adapter cannot be told from
+          the control's by name. Six assertions are here for that reason and
+          not because their claim is weak.
+
+     An exemption nobody counts is how 41 wasm assertions became evidence about
+     the runtime instead of about a program, so each number is one somebody has
+     to change on purpose. C and LLVM start higher than Wasm because these two
+     backends pin runtime implementation details deliberately. *)
+  check "assertions taking the runtime exemption (c / llvm / wasm)"
+    (Printf.sprintf "%d %d %d" !c_exemptions !llvm_exemptions !wasm_runtime_exemptions)
+    "15 39 12";
   (* What is still refused, and the message has to say "unsupported in ... codegen
      subset" -- not because the phrase is prettier: `scripts/parity.sh` reads it to tell a
      DOCUMENTED LIMIT from a backend that fell over. Worded as "not supported yet" this
@@ -8051,11 +8137,11 @@ let () =
      if String.length ll > 0 then "ok" else "empty") "ok";
   (* v0.1.110: structural == / < on a variant lowers to @eq_<tag> / @cmp_<tag>
      on the LLVM backend (previously UNSUP). *)
-  assert_contains "llvm: variant == emits a structural @eq_ helper"
+  assert_llvm "llvm: variant == emits a structural @eq_ helper"
     (vec_codegen_llvm
        "type c = A | B; let x = A in (if x == B then 1 else 0)")
     "define i1 @eq_c(";
-  assert_contains "llvm: variant < emits a structural @cmp_ helper"
+  assert_llvm "llvm: variant < emits a structural @cmp_ helper"
     (vec_codegen_llvm
        "type c = A | B; let x = A in (if x < B then 1 else 0)")
     "define i64 @cmp_c(";
