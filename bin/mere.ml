@@ -1045,8 +1045,14 @@ let () =
     close_in ic;
     print_string (Mere.Riscv_disasm.disasm_binary bytes)
   | [_; "-t"; path] ->
+    (* Q-083: an `import` resolves against the FILE'S directory, which is what
+       every other path here passes and what `-c` / `-w` / `check` / `fmt` /
+       `fix` all did. This one asked from the current working directory, so a
+       program the build accepts was rejected by the type query -- and an editor
+       on this path is the only thing that would be red. *)
     let source = read_file path in
-    run_action (says Mere.Pipeline.type_of) path source
+    let base = Filename.dirname path in
+    run_action ~base_dir:base (says (Mere.Pipeline.type_of ~base_dir:base)) path source
   (* Q-137: the forward declaration for every top-level function this file
      defines. Splitting a `let rec ... and ...` chain means writing one
      `let fn <name>: <ty>;` per shared name, and a chain worth splitting has
