@@ -76,6 +76,7 @@ case|`case`|let f = fn (n: int) -> case n of 1 -> 1;
 elif|`elif`|let x = 1;\nlet _ = if x > 0 then print "a" elif x < 0 then print "b" else print "c";
 pyand|boolean `and` is `&&`|let f = fn (a: bool) -> fn (b: bool) -> a and b;
 semi|`;`|let x = 1;\n; let y = 2;
+defnext|`def`|def f(n):\n  0
 EOF
   return "$n"
 }
@@ -126,6 +127,33 @@ if [ "${1:-}" = "--poison" ]; then
       pfail=1
     fi
   done
+
+  # POISON 4: ⚠ THE `;` IS A WALL. Widening the window from the failing line to
+  # the statement is only safe while it stops at the statement: a spelling three
+  # statements back must not be offered as the explanation for a failure down
+  # here.
+  # ⚠ The word has to PARSE where it sits, or the failure lands on it and the
+  # window question is never asked. `let a = var;` is an unbound name, not a
+  # syntax error, so the parser walks on and stops three statements later.
+  printf 'let a = var;\nlet b = 2;\nlet c = 3;\nlet d = (;\n' > "$tmp/far.mere"
+  if "$MERE" check "$tmp/far.mere" 2>&1 | grep -qF 'help: `var`'; then
+    printf '  FAIL  %s\n' "POISON: a spelling three statements back was offered as the explanation"
+    pfail=1
+  else
+    printf '  ok    %s\n' "POISON: the window stops — a spelling three statements back is not the answer"
+  fi
+
+  # POISON 5: ⚠ AND THE LINE CAP IS LOAD-BEARING, which POISON 4 cannot show --
+  # the `;` wall stops that fixture first, so it passes at any width. The cap is
+  # measured at 2 (the failing line and one before it); at 1 the window is the
+  # old line-only one and the cross-line row goes silent. If narrowing it by one
+  # changes nothing, the number in the source is decoration.
+  if MERE_HINT_WINDOW_LINES=1 sh "$0" >/dev/null 2>&1; then
+    printf '  FAIL  %s\n' "POISON: the catalogue still passed with the window one line narrower — the cap is not doing anything"
+    pfail=1
+  else
+    printf '  ok    %s\n' "POISON: one line narrower and the cross-line row goes red, so 2 is the measured width"
+  fi
 
   # POISON 3: strip the hints and the catalogue must notice.
   cat > "$tmp/stripped" <<EOF

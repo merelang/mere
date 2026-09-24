@@ -487,10 +487,49 @@ let with_syntax_hint (tokens : (Loc.t * Lexer.token) list) (loc : Loc.t) (msg : 
       else find ((l, t) :: before) rest
   in
   let (before, cur, after) = find [] tokens in
+  (* Q-161. THE WINDOW IS THE STATEMENT, NOT THE LINE. It was the line, and that
+     is right when the evidence is where the parser stopped:
+
+         def f(n):
+           return n        <- fails here, `def` is on this window
+
+     but a broken line often makes the parser fail on the NEXT one, and there
+     the evidence is a line back:
+
+         def f(n):
+           0               <- fails here, `def` is not on this window
+
+     Mere separates top-level declarations with `;`, and a line the reader wrote
+     in another language does not have one -- so walking back to the nearest `;`
+     reaches the evidence and stops at the previous statement.
+
+     ⚠ CAPPED IN LINES AS WELL. Without a cap, a file with no `;` for fifty
+     lines would let a spelling from the top of the file explain a failure at
+     the bottom. TWO is measured, not chosen: at 1 the window is the old line
+     and the case above is silent; at 2 it answers, the 18 catalogue rows all
+     still answer, and the three poisons all still go red. Going wider buys
+     nothing that was asked for.
+
+     ⚠ THE FEAR THIS DESIGN RECORDED DID NOT MATERIALISE. Q-161 said widening
+     the window widens the false-positive window for `var` / `case` / `val` /
+     `mut`. It does not: `bound_names` walks the WHOLE token list, so "does this
+     file bind that name?" never depended on the window. Measured rather than
+     assumed -- the poisons were run at each width. *)
+  let max_lines =
+    match Sys.getenv_opt "MERE_HINT_WINDOW_LINES" with
+    | Some s -> (try int_of_string s with _ -> 2)
+    | None -> 2
+  in
   let before =
-    List.filter_map
-      (fun ((l : Loc.t), t) -> if l.Loc.line = loc.Loc.line then Some t else None)
-      before
+    let rec take acc = function
+      | [] -> List.rev acc
+      | ((l : Loc.t), t) :: rest ->
+        if loc.Loc.line - l.Loc.line >= max_lines then List.rev acc
+        else if t = Lexer.T_semi then List.rev acc
+        else take (t :: acc) rest
+    in
+    (* `before` is nearest-first already (the walk conses as it goes). *)
+    take [] before
   in
   let bound = bound_names tokens in
   let bound n = List.mem n bound in
