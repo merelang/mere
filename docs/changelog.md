@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.532 — 2026-09-24
+
+_A gate in no workflow has never had to pass._ v0.1.531 asked whether a gate CI
+runs could skip. This is the other half: **three gates were in no workflow at
+all**, and one of them was red.
+
+`rv_exec_check.sh` is the differential between the RISC-V backend and the C
+backend on the hosted side — the half `qemu_virt.sh` does not cover, and one of
+the three boundary checks a conference talk cites. Nothing ran it. Run on
+2026-09-24 it exited 1: `int_width_boundary`, added to the parity suite for a
+different question (Q-039 pins where the interpreter's 63-bit int and the
+compiled backends' 64-bit one part company), **differs by construction on a
+32-bit target** — `bit_shl 1 60` is 1152921504606846976 on the C backend and 0
+there. It is in `KNOWN_DIFF` now with that reason, which is what the list is
+for: a name in it that stops differing also fails.
+
+64 bits: 105 passed, 0 failed, 2 known-different. 32 bits: 98 passed, 0 failed,
+4 known-different. ⚠ **84 programs are refused by `-rv` at compile time and do
+not run**, so "98 agree" has a denominator of 186, not 98 — `host_matrix.md`
+holds the reasons.
+
+`tool_preflight_check.sh` grew the second question: **every `scripts/*_check.sh`
+must be named in a workflow**, or listed with the reason it is not. 90 gates, 0
+unwired. The two exceptions are named: `rv_float_check.sh` needs an emulator
+checkout and minutes of emulator time, and `bigstr_check.sh` allocates
+gigabytes by design and no runner can host it. Two more poisons (a gate falling
+out of every workflow; the gate glob collapsing), five in total.
+
+⚠ **Found by re-measuring numbers for a talk, not by the build.** The build had
+nothing to say, because the check was not in it.
+
+`dune test` 2856/0.
+
+---
+
 ## v0.1.531 — 2026-09-24
 
 _A gate that did not run is not a gate that passed._ 65 of this repo's gates
