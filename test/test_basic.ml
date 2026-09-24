@@ -5628,6 +5628,33 @@ let () =
     let main_ty = Typer.infer Typer.initial_env (Ast.desugar_program prog) in
     Codegen_wasm.emit_program ~main_ty prog
   in
+  (* v0.1.528 (Q-085): the per-emission host flags are per-emission.
+     `wasm_run_host_used`, `wasm_env_host_used` and `wasm_fexists_host_used`
+     were added in v0.1.350 and never cleared, so the SECOND module emitted in
+     one process carried the first one's host imports -- and an import a
+     program does not use is one more name its host has to bind or fail to
+     instantiate. Nothing caught it because every JS host in the tree happens
+     to bind all three. Asked here rather than assumed: emit a program that
+     reaches for the host, then one that does not, and read the second. *)
+  let contains hay needle =
+    let n = String.length needle and h = String.length hay in
+    let rec go i = i + n <= h && (String.sub hay i n = needle || go (i + 1)) in
+    n = 0 || go 0
+  in
+  let leak_probe reacher name =
+    let _ = wasm reacher in
+    let plain = wasm "1 + 1" in
+    if contains plain ("\"" ^ name ^ "\"") then "leaked " ^ name else "clean"
+  in
+  check "wasm: a host import does not leak into the next emission (env_var)"
+    (leak_probe "match env_var \"HOME\" with Some v -> v | None -> \"u\"" "getenv") "clean";
+  check "wasm: a host import does not leak into the next emission (run)"
+    (leak_probe "run \"echo hi\"" "system") "clean";
+  check "wasm: a host import does not leak into the next emission (file_exists)"
+    (leak_probe "if file_exists \"/etc/hosts\" then 1 else 0" "file_exists") "clean";
+  check "wasm: a host import does not leak into the next emission (read_line)"
+    (leak_probe "read_line ()" "read_line") "clean";
+
   let wasm_with_decls s =
     let prog = Pipeline.parse_program s in
     let type_env = ref Typer.initial_env in

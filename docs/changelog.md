@@ -4,6 +4,68 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.528 — 2026-09-24
+
+_The two builtins the gate could not see were the two that were broken._
+`read_stdin` and `read_line` answered the empty string on plain Wasm, under a
+comment saying a browser host has no stdin. True of a browser. False of
+`scripts/run_wasm.js`, which has an fd 0 — and false of `docs/host-matrix.md`,
+which called both `yes`. This is the rest of the job v0.1.350 did for `run`,
+`env_var` and `file_exists`, and it was left undone for the same reason it was
+invisible.
+
+An empty string is what EOF looks like, so the program did not fail. It read
+nothing and carried on.
+
+Both now go through the host. `scripts/mere_host.js` grows the one stdin reader
+every Node host shares — it has to be one, because the buffer is: two
+independent `read_line`s would each hold half of a line. Checked against the
+interpreter and the C backend on four inputs, multi-byte included: three lines
+consumed in order, a short read at EOF, empty input, and `ま`/`る` split across
+a chunk boundary by construction. A host with no stdin answers 0, which becomes
+a real empty str rather than a null pointer, because a caller reading the length
+header of 0 reads whatever is at address -4.
+
+**The exclusion list is where the bug lived.** `scripts/wasm_stub_check.sh`
+said so in a comment:
+
+    # read_line / read_stdin / file_openrw are left out: their answers
+    # depend on stdin or on writing a file, neither of which is fixed
+    # across a run.
+
+Stdin is fixed by feeding it and a file is fixed by choosing its path. All
+three are probed now; the gate went red naming both stubs with their evidence
+(`C=mere_stub_probe_line Wasm=`) before the fix and reports 0 after.
+
+**A fourth probe was measuring nothing.** `read_file_bytes` was probed with
+`bytes_len`, and `read_file_bytes` answers `Vec[R, int]`, so the expression was
+a type error and the gate had recorded `refused` for it since the day it was
+written — a word that reads like an answer.
+
+**The gate now states what it is a fraction of.** "10 builtins probed, 0 stubs"
+says nothing about the eleventh. The Wasm backend's host surface is the set of
+`(import "env" ...)` names it can emit, and it is 39. Fourteen probes reach 32
+of them; the other 7 are named with the reason nothing probes them — `memory`
+is not a function, `exit_proc`'s answer is an exit status that
+`exit_status_check.sh` owns, and the five concurrency imports have no answer
+that is fixed across a run. The list is checked in both directions, so a skip
+that stops being true fails instead of drifting into fiction. Poisoned four
+ways, each asserted by the message it should print rather than by a non-zero
+exit.
+
+**Found while adding the flag: three flags from v0.1.350 were never reset.**
+`wasm_run_host_used`, `wasm_env_host_used` and `wasm_fexists_host_used` are
+per-emission state, and a second module emitted in the same process inherited
+the first one's host imports — one more name its host has to bind or fail to
+instantiate. Every JS host in the tree happens to bind all three, which is why
+nothing noticed. Four unit tests emit a program that reaches for the host, then
+one that does not, and read the second.
+
+`dune test` 2851/0, parity 184+30, `wasm_stub_check` 14 probed / 0 stubs /
+39-name surface, `--poison` 4 caught.
+
+---
+
 ## v0.1.527 — 2026-09-24
 
 _Q-120 (b): `mere --ffi-header` writes the C side's header, so a shim stops

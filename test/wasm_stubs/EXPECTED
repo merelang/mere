@@ -7,4 +7,11 @@ file_exists host
 args host
 read_file host
 file_size host
-read_file_bytes refused
+read_file_bytes host
+read_line host
+read_stdin host
+file_openrw host
+write_file_bytes host
+print_err host
+print_no_nl host
+print_bytes host
