@@ -529,7 +529,9 @@ let rec parse_program_internal tokens =
          let fn_value = mk pos (Ast.Fun ("__unit", Some Ast.TyUnit, if_expr)) in
          let _ = unit_pat in
          let initial_call = mk pos (Ast.App (loop_var, unit_lit)) in
-         mk pos (Ast.Let_rec ([(loop_name, fn_value)], initial_call)), toks
+         (* synthesised by `while` desugaring: no name in the source, so the
+              binder points at the construct it came from *)
+           mk pos (Ast.Let_rec ([(loop_name, pos, fn_value)], initial_call)), toks
        | _ -> raise (Parse_error (pos_of after_cond, "expected 'do' after `while cond`")))
     (* Phase 36: `for x in xs do body` desugars to
          list_iter xs (\x -> body) *)
@@ -585,18 +587,22 @@ let rec parse_program_internal tokens =
             let else_branch = mk pos Ast.Unit_lit in
             mk pos (Ast.If (cond, then_branch, else_branch)), toks)
        | _ -> raise (Parse_error (pos_of toks, "expected 'then'")))
-    | (pos, T_let) :: (_, T_rec) :: (_, T_ident name) :: (_, T_eq) :: rest ->
+    (* v0.1.530: `nloc` is the position of the NAME, not of `let` and not of the
+       value. Go to definition and rename are the two things that need to point
+       at it, and both used the value's loc before, which is a different line
+       whenever the `fn` is written under the `=`. *)
+    | (pos, T_let) :: (_, T_rec) :: (nloc, T_ident name) :: (_, T_eq) :: rest ->
       let value, toks = expr rest in
       (* `and NAME = expr` chain for mutual recursion. *)
       let rec parse_more acc toks =
         match toks with
-        | (_, T_and) :: (_, T_ident n) :: (_, T_eq) :: rest ->
+        | (_, T_and) :: (nl, T_ident n) :: (_, T_eq) :: rest ->
           let v, toks = expr rest in
-          parse_more ((n, v) :: acc) toks
+          parse_more ((n, nl, v) :: acc) toks
         | _ -> List.rev acc, toks
       in
       let more, toks = parse_more [] toks in
-      let bindings = (name, value) :: more in
+      let bindings = (name, nloc, value) :: more in
       (match toks with
        | (_, T_in) :: rest ->
          let body, toks = expr rest in
@@ -1773,7 +1779,7 @@ let rec parse_program_internal tokens =
   let collect_module_names decls =
     List.concat_map (function
       | Ast.Top_let ({ pnode = Ast.P_var n; _ }, _) -> [n]
-      | Ast.Top_let_rec bindings -> List.map fst bindings
+      | Ast.Top_let_rec bindings -> List.map (fun (n, _, _) -> n) bindings
       | _ -> []
     ) decls
   in
@@ -1863,8 +1869,8 @@ let rec parse_program_internal tokens =
           let new_value = Ast.rename_free_vars lookup value in
           Ast.Top_let (new_pat, new_value)
         | Ast.Top_let_rec bindings ->
-          let new_bindings = List.map (fun (n, v) ->
-            (m_name ^ "." ^ n, Ast.rename_free_vars lookup v)
+          let new_bindings = List.map (fun (n, l, v) ->
+            (m_name ^ "." ^ n, l, Ast.rename_free_vars lookup v)
           ) bindings in
           Ast.Top_let_rec new_bindings
         | d -> d
@@ -2064,17 +2070,17 @@ let rec parse_program_internal tokens =
          may add proper M-prefix scoping for module-internal types. *)
       let decl, rest = parse_type_decl_after_keyword rest in
       parse_module_body cur_path (decl :: decls) rest
-    | (pos, T_let) :: (_, T_rec) :: (_, T_ident name) :: (_, T_eq) :: rest ->
+    | (pos, T_let) :: (_, T_rec) :: (nloc, T_ident name) :: (_, T_eq) :: rest ->
       let value, toks = expr rest in
       let rec parse_more acc toks =
         match toks with
-        | (_, T_and) :: (_, T_ident n) :: (_, T_eq) :: rest ->
+        | (_, T_and) :: (nl, T_ident n) :: (_, T_eq) :: rest ->
           let v, toks = expr rest in
-          parse_more ((n, v) :: acc) toks
+          parse_more ((n, nl, v) :: acc) toks
         | _ -> List.rev acc, toks
       in
       let more, toks = parse_more [] toks in
-      let bindings = (name, value) :: more in
+      let bindings = (name, nloc, value) :: more in
       let _ = pos in
       (match toks with
        | (_, T_semi) :: rest ->
@@ -2257,7 +2263,7 @@ let rec parse_program_internal tokens =
             else Hashtbl.replace pub_module_names n ())
             (match d with
              | Ast.Top_let ({ Ast.pnode = Ast.P_var n; _ }, _) -> [n]
-             | Ast.Top_let_rec bs -> List.map fst bs
+             | Ast.Top_let_rec bs -> List.map (fun (n, _, _) -> n) bs
              | _ -> [])) prefixed;
       (* `decls` accumulates newest-first; `prefixed` is in source order.
          Prepend each prefixed decl so the final List.rev yields the
@@ -2471,17 +2477,17 @@ let rec parse_program_internal tokens =
     | (_, T_type) :: rest ->
       let decl, rest = parse_type_decl_after_keyword rest in
       parse_decls (decl :: decls) rest
-    | (pos, T_let) :: (_, T_rec) :: (_, T_ident name) :: (_, T_eq) :: rest ->
+    | (pos, T_let) :: (_, T_rec) :: (nloc, T_ident name) :: (_, T_eq) :: rest ->
       let value, toks = expr rest in
       let rec parse_more acc toks =
         match toks with
-        | (_, T_and) :: (_, T_ident n) :: (_, T_eq) :: rest ->
+        | (_, T_and) :: (nl, T_ident n) :: (_, T_eq) :: rest ->
           let v, toks = expr rest in
-          parse_more ((n, v) :: acc) toks
+          parse_more ((n, nl, v) :: acc) toks
         | _ -> List.rev acc, toks
       in
       let more, toks = parse_more [] toks in
-      let bindings = (name, value) :: more in
+      let bindings = (name, nloc, value) :: more in
       (match toks with
        | (_, T_semi) :: rest ->
          parse_decls (Ast.Top_let_rec bindings :: decls) rest

@@ -1055,9 +1055,9 @@ let free_vars (e : Ast.expr) (initially_bound : string list) : string list =
       go v bound;
       go body (pattern_vars pat @ bound)
     | Ast.Let_rec (bindings, body) ->
-      let names = List.map fst bindings in
+      let names = List.map Ast.rb_name bindings in
       let bound' = names @ bound in
-      List.iter (fun (_, v) -> go v bound') bindings;
+      List.iter (fun (_, _, v) -> go v bound') bindings;
       go body bound'
     | Ast.With (n, v, body) -> go v bound; go body (n :: bound)
     | Ast.If (c, t, e_) -> go c bound; go t bound; go e_ bound
@@ -1118,8 +1118,8 @@ let rec var_appears_in_llvm (v : string) (e : Ast.expr) : bool =
   | Ast.Let (pat, value, body) ->
     g value || (not (List.mem v (pattern_vars pat)) && g body)
   | Ast.Let_rec (bs, body) ->
-    let names = List.map fst bs in
-    List.exists (fun (_, e') -> g e') bs
+    let names = List.map Ast.rb_name bs in
+    List.exists (fun (_, _, e') -> g e') bs
     || (not (List.mem v names) && g body)
   | Ast.With (n, value, body) -> g value || (n <> v && g body)
   | Ast.If (c, t, e_) -> g c || g t || g e_
@@ -1159,8 +1159,8 @@ let rec no_value_leak_llvm (v : string) (e : Ast.expr) : bool =
   | Ast.Let (pat, value, body) ->
     g value && (List.mem v (pattern_vars pat) || g body)
   | Ast.Let_rec (bs, body) ->
-    let names = List.map fst bs in
-    List.for_all (fun (_, v') -> g v') bs
+    let names = List.map Ast.rb_name bs in
+    List.for_all (fun (_, _, v') -> g v') bs
     && (List.mem v names || g body)
   | Ast.If (c, t, e_) -> g c && g t && g e_
   | Ast.Match (s, arms) ->
@@ -1178,7 +1178,7 @@ let rec tail_does_not_return_v_llvm (v : string) (e : Ast.expr) : bool =
   | Ast.Let (pat, _, body) ->
     List.mem v (pattern_vars pat) || tail_does_not_return_v_llvm v body
   | Ast.Let_rec (bs, body) ->
-    List.exists (fun (n, _) -> n = v) bs
+    List.exists (fun (n, _, _) -> n = v) bs
     || tail_does_not_return_v_llvm v body
   | Ast.If (_, t, e_) ->
     tail_does_not_return_v_llvm v t && tail_does_not_return_v_llvm v e_
@@ -1222,9 +1222,9 @@ let collect_tainted_names_llvm (v : string) (body : Ast.expr) : string list =
         tainted := pattern_vars pat @ !tainted;
       walk body'
     | Ast.Let_rec (bs, body') ->
-      List.iter (fun (_, v') -> walk v') bs;
-      if List.exists (fun (_, v') -> value_propagates_taint v') bs then
-        tainted := List.map fst bs @ !tainted;
+      List.iter (fun (_, _, v') -> walk v') bs;
+      if List.exists (fun (_, _, v') -> value_propagates_taint v') bs then
+        tainted := List.map Ast.rb_name bs @ !tainted;
       walk body'
     | Ast.With (n, value, body') ->
       walk value;
@@ -1294,7 +1294,7 @@ let rec no_tainted_leak_llvm (tainted : string list) (e : Ast.expr) : bool =
   | Ast.App (a, b) -> g a && g b
   | Ast.Let (_, value, body) -> g value && g body
   | Ast.Let_rec (bs, body) ->
-    List.for_all (fun (_, v') -> g v') bs && g body
+    List.for_all (fun (_, _, v') -> g v') bs && g body
   | Ast.If (c, t, e_) -> g c && g t && g e_
   | Ast.Match (s, arms) ->
     g s
@@ -1400,7 +1400,7 @@ let lookup_var_ty_llvm (body : Ast.expr) (name : string) : Ast.ty =
          found := Some (Ast.walk t); stop := true
        | _ -> ());
       if not !stop then (go v; go b)
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> go v) bs; go b
     | Ast.With (_, v, b) -> go v; go b
     | Ast.If (c, t, e_) -> go c; go t; go e_
     | Ast.Fun (_, _, b) -> go b
@@ -1525,8 +1525,8 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
          walk host_param host_locals value;
          walk host_param (pattern_vars pat @ host_locals) body)
     | Ast.Let_rec (bindings, body) ->
-      let rec_names = List.map fst bindings in
-      let fn_specs = List.map (fun (n, value) ->
+      let rec_names = List.map Ast.rb_name bindings in
+      let fn_specs = List.map (fun (n, _, value) ->
         match value.Ast.node with
         | Ast.Fun (p, _, fn_body) ->
           (n, p, fn_body, value.Ast.loc, value.Ast.ty)
@@ -1623,7 +1623,7 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
      | Ast.App (a, b) -> recurse a; recurse b
      | Ast.Neg a | Ast.Annot (a, _) -> recurse a
      | Ast.Let (_, v, b) -> recurse v; recurse b
-     | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> recurse v) bs; recurse b
+     | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> recurse v) bs; recurse b
      | Ast.With (_, v, b) -> recurse v; recurse b
      | Ast.If (c, t, e_) -> recurse c; recurse t; recurse e_
      | Ast.Fun (_, _, b) -> recurse b
@@ -1656,7 +1656,7 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
       (match e.Ast.node with
        | Ast.Fun (p, _, _) -> add p
        | Ast.Let (pat, _, _) -> List.iter add (pattern_vars pat)
-       | Ast.Let_rec (bs, _) -> List.iter (fun (n, _) -> add n) bs
+       | Ast.Let_rec (bs, _) -> List.iter (fun (n, _, _) -> add n) bs
        | Ast.With (n, _, _) -> add n
        | Ast.Region_block (n, _) | Ast.Region_loop (n, _, _) -> add n
        | Ast.Match (_, arms) ->
@@ -1669,7 +1669,7 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
       | Ast.App (a, b) -> go a; go b
       | Ast.Neg a | Ast.Annot (a, _) -> go a
       | Ast.Let (_, v, b) -> go v; go b
-      | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+      | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> go v) bs; go b
       | Ast.With (_, v, b) -> go v; go b
       | Ast.If (c, t, e_) -> go c; go t; go e_
       | Ast.Fun (_, _, b) -> go b
@@ -1756,7 +1756,7 @@ let collect_tuple_shapes (root : Ast.expr) (fns : fn_decl list) : Ast.ty list li
     | Ast.App (a, b) -> walk_expr a; walk_expr b
     | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
     | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> walk_expr v) bs; walk_expr b
     | Ast.With (_, v, b) -> walk_expr v; walk_expr b
     | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
     | Ast.Fun (_, _, b) -> walk_expr b
@@ -1837,7 +1837,7 @@ let collect_variant_names (root : Ast.expr) (fns : fn_decl list) : string list =
     | Ast.App (a, b) -> walk_expr a; walk_expr b
     | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
     | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> walk_expr v) bs; walk_expr b
     | Ast.With (_, v, b) -> walk_expr v; walk_expr b
     | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
     | Ast.Fun (_, _, b) -> walk_expr b
@@ -1889,7 +1889,7 @@ let collect_record_names (root : Ast.expr) (fns : fn_decl list) : string list =
     | Ast.App (a, b) -> walk_expr a; walk_expr b
     | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
     | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> walk_expr v) bs; walk_expr b
     | Ast.With (_, v, b) -> walk_expr v; walk_expr b
     | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
     | Ast.Fun (_, _, b) -> walk_expr b
@@ -2027,7 +2027,7 @@ let collect_arrow_types (root : Ast.expr) (fns : fn_decl list) : (Ast.ty * Ast.t
     | Ast.App (a, b) -> walk_expr a; walk_expr b
     | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
     | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> walk_expr v) bs; walk_expr b
     | Ast.With (_, v, b) -> walk_expr v; walk_expr b
     | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
     | Ast.Fun (_, _, b) -> walk_expr b
@@ -2090,7 +2090,7 @@ let collect_mono_instances (root : Ast.expr) (fns : fn_decl list) : unit =
     | Ast.App (a, b) -> walk_expr a; walk_expr b
     | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
     | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> walk_expr v) bs; walk_expr b
     | Ast.With (_, v, b) -> walk_expr v; walk_expr b
     | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
     | Ast.Fun (_, _, b) -> walk_expr b
@@ -2333,7 +2333,7 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
     | Ast.App (a, b) -> walk_expr a; walk_expr b
     | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
     | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> walk_expr v) bs; walk_expr b
     | Ast.With (_, v, b) -> walk_expr v; walk_expr b
     | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
     | Ast.Fun (_, _, b) -> walk_expr b
@@ -2379,7 +2379,7 @@ let collect_eq_cmp_types (root : Ast.expr) (fns : fn_decl list) : unit =
     | Ast.App (a, b) -> walk_expr a; walk_expr b
     | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
     | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> walk_expr v) bs; walk_expr b
     | Ast.With (_, v, b) -> walk_expr v; walk_expr b
     | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
     | Ast.Fun (_, _, b) -> walk_expr b
@@ -6673,7 +6673,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
          | Ast.Var n -> add n
          | Ast.Let (pat, _, _) ->
            (match pat.Ast.pnode with Ast.P_var n -> add n | _ -> ())
-         | Ast.Let_rec (bs, _) -> List.iter (fun (n, _) -> add n) bs
+         | Ast.Let_rec (bs, _) -> List.iter (fun (n, _, _) -> add n) bs
          | _ -> ());
         List.iter go (Ast.children e)
       in
@@ -6958,7 +6958,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   | Ast.Let_rec (bindings, body) ->
     (* Phase 25.3: inner let-rec lifting. If all bindings are registered
        in inner_lifts_llvm (= lifted to top level), just emit body. *)
-    if List.for_all (fun (n, _) -> Hashtbl.mem inner_lifts_llvm n) bindings then begin
+    if List.for_all (fun (n, _, _) -> Hashtbl.mem inner_lifts_llvm n) bindings then begin
       llvm_in_top_level_body := __in_top;
       emit_expr env body
     end
@@ -13303,7 +13303,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   List.iter (fun d ->
     match d with
     | Ast.Top_let (_, v) -> Typer.default_container_regions v
-    | Ast.Top_let_rec bs -> List.iter (fun (_, v) -> Typer.default_container_regions v) bs
+    | Ast.Top_let_rec bs -> List.iter (fun (_, _, v) -> Typer.default_container_regions v) bs
     | _ -> ()) prog.decls;
 
 
@@ -13414,8 +13414,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          | Ast.P_var n when n = name -> ()
          | _ -> recur b)
       | Ast.Let_rec (bs, b) ->
-        let shadowed = List.exists (fun (n, _) -> n = name) bs in
-        List.iter (fun (_, v) -> recur v) bs;
+        let shadowed = List.exists (fun (n, _, _) -> n = name) bs in
+        List.iter (fun (_, _, v) -> recur v) bs;
         if not shadowed then recur b
       | Ast.If (c, t, e_) -> recur c; recur t; recur e_
       | Ast.Tuple es -> List.iter recur es
@@ -13456,7 +13456,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     and walk_subs e =
       match e.Ast.node with
       | Ast.Let (_, v, b) -> walk v; walk b
-      | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk v) bs; walk b
+      | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> walk v) bs; walk b
       | Ast.App (a, b) | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b)
       | Ast.Logic (_, a, b) -> walk a; walk b
       | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _)
