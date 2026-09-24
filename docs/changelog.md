@@ -4,6 +4,55 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.524 — 2026-09-24
+
+_The same control the Wasm assertions got now covers C and LLVM: 352 substring
+assertions, every one of them able to fail._
+
+v0.1.523 gave the 97 Wasm assertions a control and found 41 vacuous and eleven
+FALSE. The same shape was in `codegen:` (121) and `llvm:` (138) with no control
+at all. ⚠ **This time there were no lies** — measured, not assumed. It is
+prevention, and it is worth the same as the find: this exact hole kept eleven
+wrong claims green for a month.
+
+**Sixty of the C assertions could not be reached from outside.** They are
+written as `let out = codegen "…" in … assert_contains … out …`, which no
+regex over the source can follow — which is why they had never been measured.
+Moving the check INTO the assertion makes the shape irrelevant: `assert_c name
+out needle` does not care how `out` was produced.
+
+The rule is written once. Three backends print three different things, so what
+changes between them is how a line says "a function starts here", what ends a
+body, and how a comment is spelled — not the idea. Unifying the three found two
+bugs in the version that had been shipping:
+
+- ⚠ **"a line at column 0 ends a body" is wrong for LLVM**: a basic-block label
+  sits at column 0 INSIDE a function, so that rule ended every body at its first
+  label and left 5,103 of 5,319 runtime lines in.
+- ⚠ **A function header starts a body wherever it is written.** The Wasm runtime
+  has one `(func` nested a level deeper than the other 57; requiring top-level
+  indentation kept its whole body, and with it six assertions went vacuous.
+
+**Fifteen C and thirty-nine LLVM assertions take the runtime exemption**, and
+the number is pinned. Two reasons, both written down: the claim is about the
+runtime rather than about a program ("the idiv helper still uses sdiv",
+"region_alloc bounds-checks before bumping"), or ⚠ **the control uses the same
+generated name** — `anon_0_fn` is what the first anonymous function is called
+and the trivial program already has one, so a subject's adapter cannot be told
+from the control's by name.
+
+`scripts/wasm_assert_strength.sh` asks all three: a floor on each population, a
+ceiling on each exemption, and zero assertions left in the unchecked form.
+
+⚠ **Not covered, and counted so it is visible**: 292 `assert_contains` remain
+under prefixes that do not name a backend (`vec:` 15, `owned_vec:` 7, `of_json:`
+5, …). Some of them read C output. The prefix cannot be used to sort them, so
+they are left, and said so.
+
+2,847 unit tests, parity 214/214 with no skips.
+
+---
+
 ## v0.1.523 — 2026-09-24
 
 _The Wasm substring assertions now have to be capable of failing, and eleven of
