@@ -158,4 +158,54 @@ function makeClosureCaller({ getMemory, getTable, who }) {
   };
 }
 
-module.exports = { MERE_ABI, checkAbi, makeMarshal, makeClosureCaller, PAGE };
+// v0.1.528 (Q-085): stdin for a Node host.
+//
+// The Wasm backend used to lower `read_stdin` and `read_line` to the empty
+// string under a comment saying a browser host has no stdin. True of a browser.
+// False here — and an empty string is what EOF looks like, so the program did
+// not fail, it read nothing and carried on. Both now come through the host.
+//
+// One reader, shared by every Node host, because the buffer has to be: two
+// independent `read_line` implementations would each hold half of a line.
+function makeStdin() {
+  const fs = require("fs");
+  const { StringDecoder } = require("string_decoder");
+  const decoder = new StringDecoder("utf8");
+  const chunk = Buffer.allocUnsafe(65536);
+  let buf = "";     // read from fd 0, not yet handed to the program
+  let eof = false;
+
+  // Returns false once fd 0 is exhausted. A chunk boundary can fall inside a
+  // multi-byte character, which is what StringDecoder is holding on to.
+  const pull = () => {
+    if (eof) return false;
+    let n = 0;
+    try {
+      n = fs.readSync(0, chunk, 0, chunk.length, null);
+    } catch (e) {
+      // EOF is how some platforms report the end of a pipe; EAGAIN is a
+      // non-blocking tty with nothing in it, which is also "no input now".
+      if (e.code === "EOF" || e.code === "EAGAIN") n = 0;
+      else throw e;
+    }
+    if (n === 0) { buf += decoder.end(); eof = true; return false; }
+    buf += decoder.write(chunk.subarray(0, n));
+    return true;
+  };
+
+  return {
+    // The whole of stdin, trailing newline included — read_stdin's contract.
+    readAll() { while (pull()) {} const s = buf; buf = ""; return s; },
+    // One line without its newline; the empty string at EOF, which is the
+    // ambiguity read_line is documented to have on every backend.
+    readLine() {
+      for (;;) {
+        const i = buf.indexOf("\n");
+        if (i >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); return line; }
+        if (!pull()) { const line = buf; buf = ""; return line; }
+      }
+    },
+  };
+}
+
+module.exports = { MERE_ABI, checkAbi, makeMarshal, makeClosureCaller, makeStdin, PAGE };

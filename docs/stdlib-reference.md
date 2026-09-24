@@ -1129,6 +1129,15 @@ satisfy it and hide the very row it was describing.
 | `mkdir_p` | `str -> unit` | creates parents, succeeds if it exists |
 | `channel_new` | `unit -> Channel[T]` | see "Channel receive: which of the three blocks" above |
 
+**Stdin on plain Wasm reaches the host (v0.1.528).** `read_stdin` and
+`read_line` used to answer the empty string on `mere -w`, on the ground that a
+browser has no stdin. A Node host has one, and an empty string is what EOF
+looks like, so a program that read nothing could not tell. Both go through the
+host now, like `run` / `env_var` / `file_exists` since v0.1.350; a host with no
+stdin answers the empty string and that is the host saying so.
+`scripts/wasm_stub_check.sh` is the gate, and it states how much of the Wasm
+host surface its probes reach rather than only how many of them passed.
+
 
 **Allocation shape (v0.1.414).** `vec_sort` sorts in place; its scratch buffer is
 malloc/free, so a sort leaves nothing in the arena. `list_sort_by` is the same
