@@ -880,6 +880,15 @@ jobs:
           sh scripts/fmt_roundtrip_check.sh
           sh scripts/fmt_roundtrip_check.sh --poison
 
+      # Q-120. The C side of an `extern fn` should include a header the compiler
+      # wrote rather than copying the `mu_` prefix and the field order by hand.
+      # The poison is the hand-copied struct, giving a different answer.
+      - name: ffi_header_check (the shim includes what the compiler wrote)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/ffi_header_check.sh
+          sh scripts/ffi_header_check.sh --poison
+
       # Q-125. A record declared inside a module could not be named in an
       # annotation -- not even inside the module that declared it -- while
       # variants could. The twins are asked the same questions side by side,

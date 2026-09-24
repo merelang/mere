@@ -4,6 +4,54 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.527 — 2026-09-24
+
+_Q-120 (b): `mere --ffi-header` writes the C side's header, so a shim stops
+copying the layout by hand._
+
+`extern fn` carries float, record-by-value and `bytes` on the C and LLVM
+backends. What it did not carry was any way for the author of the other side to
+KNOW what those look like — the `mu_` field prefix, the field order, and the
+fact that a boundary `int` is C's 32-bit `int` and not `long long` are all this
+generator's choices. Shims wrote them out by hand:
+
+```c
+typedef struct { double mu_x, mu_y, mu_z; } v3;   /* copied */
+```
+
+⚠ That is an ABI held together by two people agreeing. An `extern` declaration
+is a promise, not a check.
+
+`mere --ffi-header <file>` prints the prototypes and the structs they carry, and
+**only the types the boundary reaches** — an internal record does not leak into
+a file the other side compiles against. Nothing new is computed: the prototype
+builder was already in the C backend and is now one function both callers share,
+because writing that mapping twice would be two answers the first time either
+moved.
+
+⚠ **`--header` was already taken, by the other direction** — Mere compiled as a
+shared library, for a C caller. The compiler said so (`this match case is
+unused`) rather than the two silently becoming one. Two headers, two guards:
+`MERE_FFI_H` stays with the library one, this is `MERE_EXTERN_H`.
+
+`scripts/ffi_header_check.sh` builds a shim that includes the header, links it
+against the emitted C, and checks the answer; regenerating gives the same bytes;
+reordering the record in the Mere source keeps the shim right. Its poison is the
+hand-copied struct, now stale, giving 607 where the header gives 418.
+
+⚠ **The first version of that poison passed for the wrong reason.** The shim
+computed a dot product, which is the same number however the fields are
+permuted, so a stale copy still looked right. The weights make the order
+readable.
+
+Still untested and therefore still unclaimed at the boundary: tuples, variants,
+and passing a Mere closure as a callback. The header does not name them, because
+naming them would be making the same unchecked promise this replaces.
+
+2,847 unit tests, parity 214/214.
+
+---
+
 ## v0.1.526 — 2026-09-24
 
 _Q-161: the syntax hint's window is the statement now, not the failing line._
