@@ -4518,9 +4518,9 @@ let rec eval_in (env : env) (e : Ast.expr) =
   | Ast.Let_rec (bindings, body) ->
     (* Mutual recursion: placeholder ref for each name, evaluate each
        value under the env with all placeholders, then backpatch each. *)
-    let placeholders = List.map (fun (n, _) -> (n, ref V_unit)) bindings in
+    let placeholders = List.map (fun (n, _, _) -> (n, ref V_unit)) bindings in
     let env' = List.fold_left (fun acc (n, r) -> (n, r) :: acc) env placeholders in
-    List.iter (fun (n, value) ->
+    List.iter (fun (n, _, value) ->
       let v = eval_in env' value in
       let r = List.assoc n placeholders in
       r := v

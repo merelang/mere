@@ -55,7 +55,7 @@ let rec occurring_names (e : Ast.expr) (acc : string list) : string list =
   | Ast.If (a, b, c) ->
     occurring_names a (occurring_names b (occurring_names c acc))
   | Ast.Let_rec (bs, b) ->
-    List.fold_left (fun ac (_, e) -> occurring_names e ac) (occurring_names b acc) bs
+    List.fold_left (fun ac (_, _, e) -> occurring_names e ac) (occurring_names b acc) bs
   | Ast.Constr (_, None) -> acc
   | Ast.Constr (_, Some a) -> occurring_names a acc
   | Ast.Tuple es -> List.fold_left (fun ac el -> occurring_names el ac) acc es
@@ -534,9 +534,9 @@ let free_vars (e : Ast.expr) (initially_bound : string list) : string list =
       go v bound;
       go body (pattern_vars pat @ bound)
     | Ast.Let_rec (bindings, body) ->
-      let names = List.map fst bindings in
+      let names = List.map Ast.rb_name bindings in
       let bound' = names @ bound in
-      List.iter (fun (_, v) -> go v bound') bindings;
+      List.iter (fun (_, _, v) -> go v bound') bindings;
       go body bound'
     | Ast.With (n, v, body) -> go v bound; go body (n :: bound)
     | Ast.If (c, t, e_) -> go c bound; go t bound; go e_ bound
@@ -614,7 +614,7 @@ let collect_fns_used_as_values (root : Ast.expr) (bodies : Ast.expr list) : unit
     | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) -> walk a; walk b
     | Ast.Neg a | Ast.Annot (a, _) -> walk a
     | Ast.Let (_, v, b) -> walk v; walk b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk v) bs; walk b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> walk v) bs; walk b
     | Ast.With (_, v, b) -> walk v; walk b
     | Ast.If (c, t, e_) -> walk c; walk t; walk e_
     | Ast.Fun (_, _, b) -> walk b
@@ -682,7 +682,7 @@ let collect_under_saturated (arity_of : string -> int option)
     | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) -> walk a; walk b
     | Ast.Neg a | Ast.Annot (a, _) -> walk a
     | Ast.Let (_, v, b) -> walk v; walk b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk v) bs; walk b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> walk v) bs; walk b
     | Ast.With (_, v, b) -> walk v; walk b
     | Ast.If (c, t, e_) -> walk c; walk t; walk e_
     | Ast.Fun (_, _, b) -> walk b
@@ -1282,7 +1282,7 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
     | Ast.App (a, b) -> walk_expr a; walk_expr b
     | Ast.Neg a | Ast.Annot (a, _) -> walk_expr a
     | Ast.Let (_, v, b) -> walk_expr v; walk_expr b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk_expr v) bs; walk_expr b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> walk_expr v) bs; walk_expr b
     | Ast.With (_, v, b) -> walk_expr v; walk_expr b
     | Ast.If (c, t, e_) -> walk_expr c; walk_expr t; walk_expr e_
     | Ast.Fun (_, _, b) -> walk_expr b
@@ -1385,7 +1385,7 @@ let find_all_concrete_arrows_in_wasm (name : string) (exprs : Ast.expr list)
     | Ast.App (a, b) -> go a; go b
     | Ast.Neg a | Ast.Annot (a, _) -> go a
     | Ast.Let (_, v, b) -> go v; go b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> go v) bs; go b
     | Ast.With (_, v, b) -> go v; go b
     | Ast.If (c, t, e_) -> go c; go t; go e_
     | Ast.Fun (_, _, b) -> go b
@@ -1437,7 +1437,7 @@ let clone_with_fresh_tyvars_wasm (e : Ast.expr) : Ast.expr =
     | Ast.Neg a -> Ast.Neg (clone_expr a)
     | Ast.Let (p, v, b) -> Ast.Let (clone_pattern p, clone_expr v, clone_expr b)
     | Ast.Let_rec (bs, b) ->
-      Ast.Let_rec (List.map (fun (n, e) -> (n, clone_expr e)) bs, clone_expr b)
+      Ast.Let_rec (List.map (fun (n, l, e) -> (n, l, clone_expr e)) bs, clone_expr b)
     | Ast.With (n, v, b) -> Ast.With (n, clone_expr v, clone_expr b)
     | Ast.If (c, t, e_) -> Ast.If (clone_expr c, clone_expr t, clone_expr e_)
     | Ast.Fun (n, t_opt, b) ->
@@ -1568,8 +1568,8 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list)
          walk host_param host_locals value;
          walk host_param (pattern_vars pat @ host_locals) body)
     | Ast.Let_rec (bindings, body) ->
-      let rec_names = List.map fst bindings in
-      let fn_specs = List.map (fun (n, value) ->
+      let rec_names = List.map Ast.rb_name bindings in
+      let fn_specs = List.map (fun (n, _, value) ->
         match value.Ast.node with
         | Ast.Fun (p, _, fn_body) -> (n, p, fn_body)
         | _ ->
@@ -1669,7 +1669,7 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list)
      | Ast.App (a, b) -> recurse a; recurse b
      | Ast.Neg a | Ast.Annot (a, _) -> recurse a
      | Ast.Let (_, v, b) -> recurse v; recurse b
-     | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> recurse v) bs; recurse b
+     | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> recurse v) bs; recurse b
      | Ast.With (_, v, b) -> recurse v; recurse b
      | Ast.If (c, t, e_) -> recurse c; recurse t; recurse e_
      | Ast.Fun (_, _, b) -> recurse b
@@ -1703,7 +1703,7 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list)
       (match e.Ast.node with
        | Ast.Fun (p, _, _) -> add p
        | Ast.Let (pat, _, _) -> List.iter add (pattern_vars pat)
-       | Ast.Let_rec (bs, _) -> List.iter (fun (n, _) -> add n) bs
+       | Ast.Let_rec (bs, _) -> List.iter (fun (n, _, _) -> add n) bs
        | Ast.With (n, _, _) -> add n
        | Ast.Region_block (n, _) | Ast.Region_loop (n, _, _) -> add n
        | Ast.Match (_, arms) ->
@@ -1716,7 +1716,7 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list)
       | Ast.App (a, b) -> go a; go b
       | Ast.Neg a | Ast.Annot (a, _) -> go a
       | Ast.Let (_, v, b) -> go v; go b
-      | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+      | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> go v) bs; go b
       | Ast.With (_, v, b) -> go v; go b
       | Ast.If (c, t, e_) -> go c; go t; go e_
       | Ast.Fun (_, _, b) -> go b
@@ -2617,7 +2617,7 @@ and emit_expr (e : Ast.expr) : unit =
   | Ast.Let_rec (bindings, body) ->
     (* Phase 26.3: inner let-rec lifting. If all bindings are registered
        in inner_lifts_wasm (= lifted to top level), just emit body. *)
-    if List.for_all (fun (n, _) -> Hashtbl.mem inner_lifts_wasm n) bindings then
+    if List.for_all (fun (n, _, _) -> Hashtbl.mem inner_lifts_wasm n) bindings then
       (wasm_tail_pos := saved_tail;
        wasm_in_top_level_body := saved_top;
        emit_expr body)
@@ -4688,7 +4688,7 @@ and emit_expr (e : Ast.expr) : unit =
        | Ast.Ref (_, _, a) | Ast.Region_block (_, a) | Ast.Region_loop (_, _, a) -> guard a
        | Ast.Let (_, v, b) -> guard v; guard b
        | Ast.With (_, v, b) -> guard v; guard b
-       | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> guard v) bs; guard b
+       | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> guard v) bs; guard b
        | Ast.If (c, t, f) -> guard c; guard t; guard f
        | Ast.Fun (_, _, b) -> guard b
        | Ast.Constr (_, Some a) -> guard a
@@ -10288,7 +10288,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   List.iter (fun d ->
     match d with
     | Ast.Top_let (_, v) -> Typer.default_container_regions v
-    | Ast.Top_let_rec bs -> List.iter (fun (_, v) -> Typer.default_container_regions v) bs
+    | Ast.Top_let_rec bs -> List.iter (fun (_, _, v) -> Typer.default_container_regions v) bs
     | _ -> ()) prog.decls;
 
 
@@ -10455,8 +10455,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
          | Ast.P_var n when n = name -> ()
          | _ -> recur b)
       | Ast.Let_rec (bs, b) ->
-        let shadowed = List.exists (fun (n, _) -> n = name) bs in
-        List.iter (fun (_, v) -> recur v) bs;
+        let shadowed = List.exists (fun (n, _, _) -> n = name) bs in
+        List.iter (fun (_, _, v) -> recur v) bs;
         if not shadowed then recur b
       | Ast.If (c, t, e_) -> recur c; recur t; recur e_
       | Ast.Tuple es -> List.iter recur es
@@ -10497,7 +10497,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     and walk_subs e =
       match e.Ast.node with
       | Ast.Let (_, v, b) -> walk v; walk b
-      | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> walk v) bs; walk b
+      | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> walk v) bs; walk b
       | Ast.App (a, b) | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b)
       | Ast.Logic (_, a, b) -> walk a; walk b
       | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _)

@@ -80,22 +80,22 @@ let process_decl eval_env type_env decl =
   | Ast.Top_let_rec bindings ->
     let outer_env = !type_env in
     let alphas = List.map (fun _ -> Typer.fresh_var ()) bindings in
-    let env_rec = List.fold_left2 (fun acc (n, _) a ->
+    let env_rec = List.fold_left2 (fun acc (n, _, _) a ->
       (n, Typer.mono a) :: acc
     ) outer_env bindings alphas in
-    List.iter2 (fun (_, value) alpha ->
+    List.iter2 (fun (_, _, value) alpha ->
       let t = Typer.infer env_rec value in
       Typer.unify value.Ast.loc alpha t
     ) bindings alphas;
-    let placeholders = List.map (fun (n, _) -> (n, ref Eval.V_unit)) bindings in
+    let placeholders = List.map (fun (n, _, _) -> (n, ref Eval.V_unit)) bindings in
     let env_eval = List.fold_left (fun acc (n, r) -> (n, r) :: acc) !eval_env placeholders in
-    List.iter (fun (n, value) ->
+    List.iter (fun (n, _, value) ->
       let v = Eval.eval_in env_eval value in
       let r = List.assoc n placeholders in
       r := v
     ) bindings;
     eval_env := env_eval;
-    let added = List.map2 (fun (n, _) a ->
+    let added = List.map2 (fun (n, _, _) a ->
       let sch = Typer.generalize outer_env a in
       (n, sch)
     ) bindings alphas in

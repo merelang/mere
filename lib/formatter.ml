@@ -572,7 +572,7 @@ and fmt_block ~ind e =
     Buffer.contents buf
   | Let_rec (bindings, body) ->
     let parts =
-      List.mapi (fun i (n, v) ->
+      List.mapi (fun i (n, _, v) ->
         let kw = if i = 0 then "let rec " else indent ind ^ "and " in
         let v_s =
           if is_block v then
@@ -711,7 +711,7 @@ let fmt_top_let pat value =
 
 let fmt_top_let_rec bindings =
   let parts =
-    List.mapi (fun i (n, v) ->
+    List.mapi (fun i (n, _, v) ->
       let kw = if i = 0 then "let rec " else "and " in
       let body_s =
         match v.node with
@@ -923,7 +923,7 @@ let module_of_name (modules : string list) (n : string) : string option =
 let decl_member_name (d : top_decl) : string option =
   match d with
   | Top_let ({ pnode = P_var n; _ }, _) -> Some n
-  | Top_let_rec ((n, _) :: _) -> Some n
+  | Top_let_rec ((n, _, _) :: _) -> Some n
   | _ -> None
 
 let strip_prefix (m : string) (n : string) : string =
@@ -934,7 +934,7 @@ let unqualify_decl (m : string) (d : top_decl) : top_decl =
   match d with
   | Top_let ({ pnode = P_var n; _ } as pat, v) ->
     Top_let ({ pat with pnode = P_var (strip_prefix m n) }, v)
-  | Top_let_rec bs -> Top_let_rec (List.map (fun (n, v) -> (strip_prefix m n, v)) bs)
+  | Top_let_rec bs -> Top_let_rec (List.map (fun (n, l, v) -> (strip_prefix m n, l, v)) bs)
   | other -> other
 
 (* ── Entry points ───────────────────────────────────────────────────── *)
@@ -953,7 +953,7 @@ let default_decl_line (d : top_decl) : int option =
   let ok (l : Loc.t) = if l.Loc.line > 0 && l.Loc.file = None then Some l.Loc.line else None in
   match d with
   | Top_let (pat, _) -> ok pat.ploc
-  | Top_let_rec ((_, (v : expr)) :: _) -> ok v.loc
+  | Top_let_rec ((_, _, (v : expr)) :: _) -> ok v.loc
   | Top_forward (_, _, l) -> ok l
   | _ -> None
 

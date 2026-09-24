@@ -31,15 +31,12 @@ M=./_build/default/bin/mere.exe
 [ -x "$M" ] || { echo "decls_roundtrip: $M not built" >&2; exit 2; }
 RT=test/parity/__decls_rt.mere
 trap 'rm -f "$RT"' EXIT INT TERM
-# ⚠ The one program that cannot round-trip, and WHY -- a name with no reason is a
-# name nobody removes. `module_qualified_record_closure` uses a record type
-# declared inside a module, and such a type cannot be named in an annotation from
-# outside it: `M.t` and `t` are both rejected. That is a pre-existing language gap
-# (v0.1.446's changelog says so), reachable with no forward declaration at all --
-# `let use = fn (r: M.t) -> r.a` fails the same way -- so it is not this feature's
-# to fix. If it starts passing, this script FAILS, because the exemption has
-# outlived its reason and must be deleted rather than left to hide a regression.
-KNOWN_GAP=module_qualified_record_closure
+# ⚠ THE EXEMPTION IS GONE (v0.1.530). `module_qualified_record_closure` used a
+# record type declared inside a module, which could not be named in an
+# annotation from outside it -- `M.t` and `t` were both rejected. Q-125 fixed
+# that in v0.1.525, and this script's own rule ("if it starts passing, FAIL")
+# is what said so, the first time anybody ran it afterwards. Every program in
+# the corpus is checked the same way now.
 norm() {  # a diagnostic names the file and the line, and the round-trip file is
           # a different name with the declarations added on top. Neither is a
           # difference in what the program does.
@@ -52,7 +49,7 @@ norm() {  # a diagnostic names the file and the line, and the round-trip file is
           # a diagnostic's, and the value it echoes still has to match.
   LC_ALL=C sed -E 's|[^ ]*parity/[A-Za-z_0-9]+\.mere|F|g; s/:[0-9]+:[0-9]+/:L:C/g; s/^ *[0-9]+ \|/N |/; s/^line [0-9]+: /line L: /'
 }
-ok=0; bad=0; skip=0; gap_passed=0; failures=''
+ok=0; bad=0; skip=0; failures=''
 for f in test/parity/*.mere; do
   case "$f" in *__decls_rt*) continue;; esac
   base=$("$M" "$f" 2>&1 | norm)
@@ -63,9 +60,7 @@ for f in test/parity/*.mere; do
   b=$(basename "$f" .mere)
   if [ "$base" = "$out" ]; then
     ok=$((ok+1))
-    [ "$b" = "$KNOWN_GAP" ] && gap_passed=1
   else
-    if [ "$b" = "$KNOWN_GAP" ]; then continue; fi
     bad=$((bad+1))
     failures="$failures  $b: $(printf '%s' "$out" | LC_ALL=C tr -cd '\11\12\40-\176' | head -1 | cut -c1-90)
 "
@@ -76,12 +71,8 @@ if [ "$ok" -lt 100 ]; then
   echo "decls_roundtrip: only $ok programs round-tripped and $skip were skipped -- the corpus or the CLI is not what this expects" >&2
   exit 1
 fi
-if [ "$gap_passed" = 1 ]; then
-  echo "decls_roundtrip: $KNOWN_GAP now round-trips. The exemption in this script is stale -- delete it (and its reason) so the program is checked like the rest." >&2
-  exit 1
-fi
 if [ "$bad" -gt 0 ]; then
   printf 'decls_roundtrip: %d program(s) behave differently with their own --decls output prepended:\n%s' "$bad" "$failures" >&2
   exit 1
 fi
-echo "decls_roundtrip: $ok programs round-trip through --decls ($skip skipped, 1 known gap: $KNOWN_GAP)"
+echo "decls_roundtrip: $ok programs round-trip through --decls ($skip skipped, no exemptions)"

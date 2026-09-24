@@ -157,8 +157,8 @@ let check_file_privacy (prog : Ast.program) =
       match d with
       | Ast.Top_let ({ Ast.pnode = Ast.P_var n; Ast.ploc = l; _ }, _) ->
         ([n], Parser.file_key l.Loc.file)
-      | Ast.Top_let_rec ((_, (v : Ast.expr)) :: _ as bs) ->
-        (List.map fst bs, Parser.file_key v.Ast.loc.Loc.file)
+      | Ast.Top_let_rec ((_, _, (v : Ast.expr)) :: _ as bs) ->
+        (List.map Ast.rb_name bs, Parser.file_key v.Ast.loc.Loc.file)
       | _ -> ([], "")
     in
     (* name -> the file that keeps it to itself; and name -> how many files bind it *)
@@ -208,8 +208,8 @@ let check_file_privacy (prog : Ast.program) =
           | Ast.Let (pat, value, body) ->
             go bound value; go (pat_names pat @ bound) body
           | Ast.Let_rec (bs, body) ->
-            let bound' = List.map fst bs @ bound in
-            List.iter (fun (_, v) -> go bound' v) bs;
+            let bound' = List.map Ast.rb_name bs @ bound in
+            List.iter (fun (_, _, v) -> go bound' v) bs;
             go bound' body
           | Ast.With (name, value, body) ->
             go bound value; go (name :: bound) body
@@ -228,7 +228,7 @@ let check_file_privacy (prog : Ast.program) =
       List.iter (fun d ->
         match d with
         | Ast.Top_let (_, v) -> check v
-        | Ast.Top_let_rec bs -> List.iter (fun (_, v) -> check v) bs
+        | Ast.Top_let_rec bs -> List.iter (fun (_, _, v) -> check v) bs
         | _ -> ()) prog.Ast.decls;
       check prog.Ast.main
     end
@@ -267,7 +267,7 @@ let check_module_privacy (prog : Ast.program) =
       let owner =
         match d with
         | Ast.Top_let ({ Ast.pnode = Ast.P_var n; _ }, _) -> module_of n
-        | Ast.Top_let_rec ((n, _) :: _) -> module_of n
+        | Ast.Top_let_rec ((n, _, _) :: _) -> module_of n
         | _ -> ""
       in
       List.iter (check_in owner) (Ast.decl_exprs d)) prog.Ast.decls;
@@ -358,7 +358,7 @@ let prefix_desugar (prog : Ast.program) : Ast.program =
   let decl d =
     match d with
     | Ast.Top_let (p, e) -> Ast.Top_let (p, go e)
-    | Ast.Top_let_rec bs -> Ast.Top_let_rec (List.map (fun (n, e) -> (n, go e)) bs)
+    | Ast.Top_let_rec bs -> Ast.Top_let_rec (List.map (fun (n, l, e) -> (n, l, go e)) bs)
     | other -> other
   in
   { Ast.decls = List.map decl prog.Ast.decls; Ast.main = go prog.Ast.main }
@@ -388,7 +388,7 @@ let echo_rewrite (prog : Ast.program) : Ast.program =
           if l.Loc.file = Some prelude_file then None else Some n)
           (Query.pattern_bindings p)
       | Ast.Top_let_rec bs ->
-        List.filter_map (fun (n, (v : Ast.expr)) ->
+        List.filter_map (fun (n, _, (v : Ast.expr)) ->
           if v.Ast.loc.Loc.file = Some prelude_file then None else Some n) bs
       | Ast.Top_forward (n, _, (l : Loc.t)) ->
         if l.Loc.file = Some prelude_file then [] else [ n ]
@@ -420,7 +420,7 @@ let echo_rewrite (prog : Ast.program) : Ast.program =
     let decl d =
       match d with
       | Ast.Top_let (p, e) -> Ast.Top_let (p, go e)
-      | Ast.Top_let_rec bs -> Ast.Top_let_rec (List.map (fun (n, e) -> (n, go e)) bs)
+      | Ast.Top_let_rec bs -> Ast.Top_let_rec (List.map (fun (n, l, e) -> (n, l, go e)) bs)
       | other -> other
     in
     { Ast.decls = List.map decl prog.Ast.decls; Ast.main = go prog.Ast.main }
@@ -616,7 +616,7 @@ let parse_program ?(prelude = true) ?(keep_sugar = false) ?base_dir ?(search_pat
     List.concat_map (fun d ->
       match d with
       | Ast.Top_let ({ Ast.pnode = Ast.P_var n; _ }, _) -> [n]
-      | Ast.Top_let_rec bs -> List.map fst bs
+      | Ast.Top_let_rec bs -> List.map (fun (n, _, _) -> n) bs
       | _ -> []) prelude_decls
   in
   let shadowable =
@@ -929,7 +929,7 @@ let warn_unused_toplevel (prog : Ast.program) =
       match d with
       | Ast.Top_let ({ Ast.pnode = Ast.P_var n; Ast.ploc = l; _ }, _) -> [ (n, l) ]
       | Ast.Top_let_rec bs ->
-        List.map (fun (n, (v : Ast.expr)) -> (n, v.Ast.loc)) bs
+        List.map (fun (n, _, (v : Ast.expr)) -> (n, v.Ast.loc)) bs
       | _ -> []
     in
     let internal =
@@ -954,7 +954,7 @@ let warn_unused_toplevel (prog : Ast.program) =
         let before = Hashtbl.copy read in
         (match d with
          | Ast.Top_let (_, v) -> note v
-         | Ast.Top_let_rec bs -> List.iter (fun (_, v) -> note v) bs
+         | Ast.Top_let_rec bs -> List.iter (fun (_, _, v) -> note v) bs
          | _ -> ());
         List.iter (fun n ->
           if not (Hashtbl.mem before n) then Hashtbl.remove read n) mine)
@@ -1216,14 +1216,14 @@ let infer_top_let outer_env (value : Ast.expr) : Ast.ty =
        `Vec` then held an `int` and a `str` at once.
 
    Both are one entry point now. Q-164. *)
-let infer_top_rec outer_env (bindings : (string * Ast.expr) list) : Ast.ty list =
+let infer_top_rec outer_env (bindings : (string * Loc.t * Ast.expr) list) : Ast.ty list =
   let alphas =
     Typer.enter_level (fun () -> List.map (fun _ -> Typer.fresh_var ()) bindings) in
   let env_rec =
-    List.fold_left2 (fun acc (n, _) a -> (n, Typer.mono a) :: acc)
+    List.fold_left2 (fun acc (n, _, _) a -> (n, Typer.mono a) :: acc)
       outer_env bindings alphas in
   let infer_all () =
-    List.iter2 (fun ((_ : string), (value : Ast.expr)) alpha ->
+    List.iter2 (fun ((_ : string), (_ : Loc.t), (value : Ast.expr)) alpha ->
       let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
       Typer.unify value.Ast.loc alpha t) bindings alphas
   in
@@ -1233,7 +1233,7 @@ let infer_top_rec outer_env (bindings : (string * Ast.expr) list) : Ast.ty list 
   let wrap =
     !Typer.lib_boundary
     && bindings <> []
-    && List.for_all (fun (_, v) -> is_fn_value v) bindings
+    && List.for_all (fun (_, _, v) -> is_fn_value v) bindings
   in
   if not wrap then infer_all ()
   else begin
@@ -1243,7 +1243,7 @@ let infer_top_rec outer_env (bindings : (string * Ast.expr) list) : Ast.ty list 
      | () -> restore ()
      | exception ex -> restore (); raise ex);
     match bindings with
-    | (_, v) :: _ -> check_lib_escape v.Ast.loc outer_env
+    | (_, _, v) :: _ -> check_lib_escape v.Ast.loc outer_env
     | [] -> ()
   end;
   alphas
@@ -1312,28 +1312,28 @@ let process_decls eval_env type_env decls =
         Typer.record_top_scheme n sch;
         (n, sch) :: acc) outer_env bindings
     | Ast.Top_let_rec bindings ->
-      List.iter (fun (n, value) ->
+      List.iter (fun (n, _, value) ->
         warn_reserved_name value.Ast.loc n) bindings;
       let outer_env = !type_env in
       let alphas = infer_top_rec outer_env bindings in
-      List.iter2 (fun (n, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
+      List.iter2 (fun (n, _, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
       (* a member that KEEPS A PROMISE reuses the ref the promise made, so a
          caller written above the group -- the only reason to declare it --
          ends up holding the finished function and not the placeholder. *)
-      let placeholders = List.map (fun (n, _) ->
+      let placeholders = List.map (fun (n, _, _) ->
         if Hashtbl.mem forward_promised n then
           (match List.assoc_opt n !eval_env with
            | Some r -> (n, r)
            | None -> (n, ref Eval.V_unit))
         else (n, ref Eval.V_unit)) bindings in
       let env_eval = List.fold_left (fun acc (n, r) -> (n, r) :: acc) !eval_env placeholders in
-      List.iter (fun (n, value) ->
+      List.iter (fun (n, _, value) ->
         let v = Eval.eval_in env_eval value in
         let r = List.assoc n placeholders in
         r := v
       ) bindings;
       eval_env := env_eval;
-      type_env := List.fold_left2 (fun acc (n, value) a ->
+      type_env := List.fold_left2 (fun acc (n, _, value) a ->
         let sch = forward_scheme n (top_let_scheme outer_env value a) in
         Typer.record_top_scheme n sch;
         (n, sch) :: acc
@@ -1479,12 +1479,12 @@ let type_of ?base_dir ?(search_paths = []) s =
         (n, sch) :: acc) outer_env bindings;
       eval_env := !eval_env  (* unused *)
     | Ast.Top_let_rec bindings ->
-      List.iter (fun (n, value) ->
+      List.iter (fun (n, _, value) ->
         warn_reserved_name value.Ast.loc n) bindings;
       let outer_env = !type_env in
       let alphas = infer_top_rec outer_env bindings in
-      List.iter2 (fun (n, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
-      type_env := List.fold_left2 (fun acc (n, value) a ->
+      List.iter2 (fun (n, _, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
+      type_env := List.fold_left2 (fun acc (n, _, value) a ->
         let sch = forward_scheme n (top_let_scheme outer_env value a) in
         Typer.record_top_scheme n sch;
         (n, sch) :: acc
@@ -1652,7 +1652,7 @@ let decls_entries ?base_dir ?(search_paths = []) s : decl_entry list =
       let own = ploc.Loc.file = None in
       [ (n, (if own then ploc.Loc.line else 0), own) ]
     | Ast.Top_let_rec bs ->
-      List.map (fun (n, (v : Ast.expr)) ->
+      List.map (fun (n, _, (v : Ast.expr)) ->
         let own = v.Ast.loc.Loc.file = None in
         (n, (if own then v.Ast.loc.Loc.line else 0), own)) bs
     | _ -> [] in
@@ -1868,8 +1868,8 @@ let region_param_report ?base_dir ?(search_paths = []) s =
     | Ast.Top_let_rec bindings ->
       let outer_env = !type_env in
       let alphas = infer_top_rec outer_env bindings in
-        List.iter2 (fun (n, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
-      type_env := List.fold_left2 (fun acc (n, value) a ->
+        List.iter2 (fun (n, _, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
+      type_env := List.fold_left2 (fun acc (n, _, value) a ->
         let sch = forward_scheme n (top_let_scheme outer_env value a) in
         Typer.record_top_scheme n sch;
         (n, sch) :: acc) outer_env bindings alphas
@@ -1911,7 +1911,7 @@ let region_param_report ?base_dir ?(search_paths = []) s =
     | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _) | Ast.Ref (_, _, a)
     | Ast.Region_block (_, a) | Ast.Region_loop (_, _, a) | Ast.Fun (_, _, a) -> value a
     | Ast.Let (_, v, b) | Ast.With (_, v, b) -> value v; value b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> value v) bs; value b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> value v) bs; value b
     | Ast.If (c, t, f) -> value c; value t; value f
     | Ast.Constr (_, Some a) -> value a
     | Ast.Constr (_, None) -> ()
@@ -1926,7 +1926,7 @@ let region_param_report ?base_dir ?(search_paths = []) s =
   List.iter (fun decl ->
     match decl with
     | Ast.Top_let (_, v) -> value v
-    | Ast.Top_let_rec bs -> List.iter (fun (_, v) -> value v) bs
+    | Ast.Top_let_rec bs -> List.iter (fun (_, _, v) -> value v) bs
     | _ -> ()) prog.decls;
   value prog.main;
 
@@ -1990,7 +1990,7 @@ let region_param_report ?base_dir ?(search_paths = []) s =
         | None -> [] in
       walk_calls caller ps v
     | Ast.Top_let_rec bs ->
-      List.iter (fun (n, v) ->
+      List.iter (fun (n, _, v) ->
         let ps = match List.assoc_opt n !type_env with
           | Some sch -> Typer.scheme_region_params sch | None -> [] in
         walk_calls n ps v) bs
@@ -2167,13 +2167,13 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
         type_env := List.fold_left (fun acc (n, ty) ->
           (n, forward_scheme n (top_let_scheme outer_env value ty)) :: acc) outer_env bindings)
     | Ast.Top_let_rec bindings ->
-      List.iter (fun (n, value) ->
+      List.iter (fun (n, _, value) ->
         warn_reserved_name value.Ast.loc n) bindings;
-      guard_decl None (List.map fst bindings) (fun () ->
+      guard_decl None (List.map Ast.rb_name bindings) (fun () ->
         let outer_env = !type_env in
         let alphas = infer_top_rec outer_env bindings in
-          List.iter2 (fun (n, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
-        type_env := List.fold_left2 (fun acc (n, value) a ->
+          List.iter2 (fun (n, _, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
+        type_env := List.fold_left2 (fun acc (n, _, value) a ->
           let sch = forward_scheme n (top_let_scheme outer_env value a) in
           (n, sch) :: acc) outer_env bindings alphas)
     | Ast.Top_type (name, params, variants) ->

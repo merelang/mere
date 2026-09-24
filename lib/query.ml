@@ -123,10 +123,11 @@ let scope_at ?(prelude_decls = 0) (prog : Ast.program) (line : int) (col : int)
       in
       walk env' body
     | Ast.Let_rec (bindings, body) ->
+      (* v0.1.530: the binder's own position, not the value's. *)
       let env' =
-        List.map (fun (n, (v : Ast.expr)) -> binding_of (n, v.Ast.loc) v.Ast.ty) bindings @ env
+        List.map (fun (n, nloc, (v : Ast.expr)) -> binding_of (n, nloc) v.Ast.ty) bindings @ env
       in
-      List.iter (fun (_, v) -> walk env' v) bindings;
+      List.iter (fun (_, _, v) -> walk env' v) bindings;
       walk env' body
     | Ast.Fun (param, ty, body) ->
       walk (binding_of (param, e.Ast.loc) ty :: env) body
@@ -153,8 +154,10 @@ let scope_at ?(prelude_decls = 0) (prog : Ast.program) (line : int) (col : int)
       | Ast.Top_let (pat, (v : Ast.expr)) ->
         List.map (fun b -> binding_of ~prelude b v.Ast.ty) (pattern_bindings pat)
       | Ast.Top_let_rec bindings ->
-        List.map (fun (n, (v : Ast.expr)) ->
-          binding_of ~prelude (n, v.Ast.loc) v.Ast.ty) bindings
+        (* v0.1.530: the NAME's position. It used to be the value's, so go to
+           definition on a `let rec` member landed on the `fn` under the `=`. *)
+        List.map (fun (n, nloc, (v : Ast.expr)) ->
+          binding_of ~prelude (n, nloc) v.Ast.ty) bindings
       | _ -> []) prog.Ast.decls)
   in
   List.iter (fun d -> List.iter (walk top) (Ast.decl_exprs d)) prog.Ast.decls;
@@ -262,8 +265,8 @@ let symbols ?(prelude_decls = 0) (prog : Ast.program) : symbol list =
           { s_name = name; s_loc = loc; s_is_fn = is_fn v })
           (pattern_bindings pat)
       | Ast.Top_let_rec bindings ->
-        List.map (fun (name, (v : Ast.expr)) ->
-          { s_name = name; s_loc = v.Ast.loc; s_is_fn = is_fn v }) bindings
+        List.map (fun (name, nloc, (v : Ast.expr)) ->
+          { s_name = name; s_loc = nloc; s_is_fn = is_fn v }) bindings
       | _ -> []) prog.Ast.decls)
 
 (* --- colour, from what the compiler knows --------------------------------
@@ -385,10 +388,13 @@ let occurrences ?(prelude_decls = 0) (prog : Ast.program)
       walk env' body
     | Ast.Let_rec (bindings, body) ->
       let env' =
-        List.map (fun (n, (v : Ast.expr)) -> binding_of (n, v.Ast.loc) v.Ast.ty)
+        List.map (fun (n, nloc, (v : Ast.expr)) -> binding_of (n, nloc) v.Ast.ty)
           bindings @ env
       in
-      List.iter (fun (_, v) -> walk env' v) bindings;
+      (* the binder itself is an occurrence, the way a local `let`'s is *)
+      List.iter (fun (n, nloc, _) ->
+        match resolve env' n with Some b -> emit nloc b | None -> ()) bindings;
+      List.iter (fun (_, _, v) -> walk env' v) bindings;
       walk env' body
     | Ast.Fun (param, ty, body) -> walk (binding_of (param, e.Ast.loc) ty :: env) body
     | Ast.With (name, value, body) ->
@@ -412,8 +418,10 @@ let occurrences ?(prelude_decls = 0) (prog : Ast.program)
       | Ast.Top_let (pat, (v : Ast.expr)) ->
         List.map (fun b -> binding_of ~prelude b v.Ast.ty) (pattern_bindings pat)
       | Ast.Top_let_rec bindings ->
-        List.map (fun (n, (v : Ast.expr)) ->
-          binding_of ~prelude (n, v.Ast.loc) v.Ast.ty) bindings
+        (* v0.1.530: the NAME's position. It used to be the value's, so go to
+           definition on a `let rec` member landed on the `fn` under the `=`. *)
+        List.map (fun (n, nloc, (v : Ast.expr)) ->
+          binding_of ~prelude (n, nloc) v.Ast.ty) bindings
       | _ -> []) prog.Ast.decls)
   in
   List.iteri (fun i d ->
@@ -424,6 +432,13 @@ let occurrences ?(prelude_decls = 0) (prog : Ast.program)
          List.iter (fun (n, l) ->
            match resolve top n with Some b -> emit l b | None -> ())
            (pattern_bindings pat)
+       (* v0.1.530: `let rec` was not here at all, so a rec member's own
+          declaration was never an occurrence -- rename edited every USE and
+          left the declaration alone, handing back a program that does not
+          compile. The binder now has a position to emit. *)
+       | Ast.Top_let_rec bindings ->
+         List.iter (fun (n, nloc, _) ->
+           match resolve top n with Some b -> emit nloc b | None -> ()) bindings
        | _ -> ());
       List.iter (walk top) (Ast.decl_exprs d)
     end) prog.Ast.decls;

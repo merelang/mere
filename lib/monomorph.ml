@@ -264,7 +264,7 @@ let lift_fn_skels ?(subset = "C subset") (e : Ast.expr) : fn_skel list * Ast.exp
          :: more, rest'
        | _, Ast.Let_rec (bindings, lr_body) ->
          let lr_skels =
-           List.map (fun (n, v) ->
+           List.map (fun (n, _, v) ->
              match v.Ast.node with
              | Ast.Fun (p, _, fb) ->
                { sname = n; sparam = p; sbody = fb; sfun = v }
@@ -280,7 +280,7 @@ let lift_fn_skels ?(subset = "C subset") (e : Ast.expr) : fn_skel list * Ast.exp
          more, { e with Ast.node = Ast.Let (pat, value, rest') })
     | Ast.Let_rec (bindings, rest) ->
       let skels =
-        List.map (fun (n, v) ->
+        List.map (fun (n, _, v) ->
           match v.Ast.node with
           | Ast.Fun (p, _, fb) ->
             { sname = n; sparam = p; sbody = fb; sfun = v }
@@ -345,7 +345,7 @@ let find_concrete_arrow (name : string) (e : Ast.expr) : Ast.ty option =
     | Ast.App (a, b) -> go a; go b
     | Ast.Neg a | Ast.Annot (a, _) -> go a
     | Ast.Let (_, v, b) -> go v; go b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> go v) bs; go b
     | Ast.With (_, v, b) -> go v; go b
     | Ast.If (c, t, e_) -> go c; go t; go e_
     (* A fn parameter named `name` shadows an outer `name` in the body, so a
@@ -415,7 +415,7 @@ let find_live_arrow (name : string) (skel_names : (string, unit) Hashtbl.t)
            | _ -> false) in
         (if skip then () else go v); go b
       | Ast.Let_rec (bs, b) ->
-        List.iter (fun (n, v) -> if Hashtbl.mem skel_names n then () else go v) bs;
+        List.iter (fun (n, _, v) -> if Hashtbl.mem skel_names n then () else go v) bs;
         go b
       | Ast.With (_, v, b) -> go v; go b
       | Ast.If (c, t, e_) -> go c; go t; go e_
@@ -480,7 +480,7 @@ let find_all_concrete_arrows_in ?(arrows_only = true) (name : string)
     | Ast.App (a, b) -> go a; go b
     | Ast.Neg a | Ast.Annot (a, _) -> go a
     | Ast.Let (_, v, b) -> go v; go b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> go v) bs; go b
     | Ast.With (_, v, b) -> go v; go b
     | Ast.If (c, t, e_) -> go c; go t; go e_
     (* A fn parameter named `name` shadows an outer `name` (see
@@ -563,7 +563,7 @@ let has_unresolved_use_of (name : string) (exprs : Ast.expr list) : bool =
     | Ast.App (a, b) -> go a; go b
     | Ast.Neg a | Ast.Annot (a, _) -> go a
     | Ast.Let (_, v, b) -> go v; go b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> go v) bs; go b
     | Ast.With (_, v, b) -> go v; go b
     | Ast.If (c, t, e_) -> go c; go t; go e_
     | Ast.Fun (p, _, b) -> if p <> name then go b
@@ -628,12 +628,12 @@ let specialize_single_use_local_fns (root : Ast.expr) : unit =
             | _ -> false)
          | _ -> false
        in
-       List.iter (fun (n, value) ->
+       List.iter (fun (n, _, value) ->
          match value.Ast.ty with
          | Some vty
            when not (ty_is_concrete (Ast.walk vty)) && is_dict_taking vty ->
            let scan_roots =
-             body :: List.filter_map (fun (_, v) ->
+             body :: List.filter_map (fun (_, _, v) ->
                if v == value then None else Some v) bindings
            in
            (match find_all_concrete_arrows_in n scan_roots with
@@ -649,7 +649,7 @@ let specialize_single_use_local_fns (root : Ast.expr) : unit =
     | Ast.App (a, b) -> go a; go b
     | Ast.Neg a | Ast.Annot (a, _) -> go a
     | Ast.Let (_, v, b) -> go v; go b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> go v) bs; go b
     | Ast.With (_, v, b) -> go v; go b
     | Ast.If (c, t, e_) -> go c; go t; go e_
     | Ast.Fun (_, _, b) -> go b
@@ -710,7 +710,7 @@ let clone_with_fresh_tyvars (e : Ast.expr) : Ast.expr =
     | Ast.Neg a -> Ast.Neg (clone_expr a)
     | Ast.Let (p, v, b) -> Ast.Let (clone_pattern p, clone_expr v, clone_expr b)
     | Ast.Let_rec (bs, b) ->
-      Ast.Let_rec (List.map (fun (n, e) -> (n, clone_expr e)) bs, clone_expr b)
+      Ast.Let_rec (List.map (fun (n, l, e) -> (n, l, clone_expr e)) bs, clone_expr b)
     | Ast.With (n, v, b) -> Ast.With (n, clone_expr v, clone_expr b)
     | Ast.If (c, t, e_) -> Ast.If (clone_expr c, clone_expr t, clone_expr e_)
     | Ast.Fun (n, t_opt, b) ->
@@ -797,8 +797,8 @@ let duplicate_multi_use_local_fns (root : Ast.expr) : Ast.expr =
       | Ast.Let (p, v, b) ->
         go v; if List.mem f (pattern_vars p) then shadowed := true else go b
       | Ast.Let_rec (bs, b) ->
-        if List.exists (fun (n, _) -> n = f) bs then shadowed := true
-        else (List.iter (fun (_, v) -> go v) bs; go b)
+        if List.exists (fun (n, _, _) -> n = f) bs then shadowed := true
+        else (List.iter (fun (_, _, v) -> go v) bs; go b)
       | Ast.With (n, v, b) -> go v; if n = f then shadowed := true else go b
       | Ast.If (c, t, el) -> go c; go t; go el
       | Ast.Fun (p, _, b) -> if p = f then shadowed := true else go b
@@ -838,7 +838,7 @@ let duplicate_multi_use_local_fns (root : Ast.expr) : Ast.expr =
         | Ast.Annot (a, t) -> Ast.Annot (rw a, t)
         | Ast.Let (p, v, b) -> Ast.Let (p, rw v, rw b)
         | Ast.Let_rec (bs, b) ->
-          Ast.Let_rec (List.map (fun (n, v) -> (n, rw v)) bs, rw b)
+          Ast.Let_rec (List.map (fun (n, l, v) -> (n, l, rw v)) bs, rw b)
         | Ast.With (n, v, b) -> Ast.With (n, rw v, rw b)
         | Ast.If (c, t, el) -> Ast.If (rw c, rw t, rw el)
         | Ast.Fun (p, t, b) -> Ast.Fun (p, t, rw b)
@@ -895,7 +895,7 @@ let duplicate_multi_use_local_fns (root : Ast.expr) : Ast.expr =
                        go cl, acc))) named body'
       end else
         { e with Ast.node = Ast.Let (pat, go value, go body) }
-    | Ast.Let_rec ([(f, ({ Ast.node = Ast.Fun _; ty = Some vty; _ } as value))],
+    | Ast.Let_rec ([(f, floc, ({ Ast.node = Ast.Fun _; ty = Some vty; _ } as value))],
                    body)
       when in_fn && not (ty_is_concrete (Ast.walk vty)) ->
       (* Single self-recursive local `let rec f = fn ... in body` used at
@@ -929,10 +929,10 @@ let duplicate_multi_use_local_fns (root : Ast.expr) : Ast.expr =
            | None -> ());
           (* Redirect the recursive self-call f -> nm inside the copy. *)
           let cl = rewrite_uses f (fun _ -> Some nm) cl in
-          mk (Ast.Let_rec ([(nm, go cl)], acc))) named body'
+          mk (Ast.Let_rec ([(nm, floc, go cl)], acc))) named body'
       end else
         { e with Ast.node =
-            Ast.Let_rec ([(f, go value)], go body) }
+            Ast.Let_rec ([(f, floc, go value)], go body) }
     | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
     | Ast.Unit_lit | Ast.Var _ -> e
     | Ast.Bin (op, a, b) -> { e with Ast.node = Ast.Bin (op, go a, go b) }
@@ -944,7 +944,7 @@ let duplicate_multi_use_local_fns (root : Ast.expr) : Ast.expr =
     | Ast.Let (p, v, b) -> { e with Ast.node = Ast.Let (p, go v, go b) }
     | Ast.Let_rec (bs, b) ->
       { e with Ast.node =
-          Ast.Let_rec (List.map (fun (n, v) -> (n, go v)) bs, go b) }
+          Ast.Let_rec (List.map (fun (n, l, v) -> (n, l, go v)) bs, go b) }
     | Ast.With (n, v, b) -> { e with Ast.node = Ast.With (n, go v, go b) }
     | Ast.If (c, t, el) -> { e with Ast.node = Ast.If (go c, go t, go el) }
     | Ast.Fun (p, t, b) ->
@@ -1327,8 +1327,8 @@ let rewrite_instance_refs (tbl : inst_table) (root : Ast.expr) : Ast.expr =
         Ast.Let (p, rw bound v, rw (bind_pattern bound p) b)
       | Ast.Let_rec (bs, b) ->
         let bound' =
-          List.fold_left (fun s (n, _) -> StrSet.add n s) bound bs in
-        Ast.Let_rec (List.map (fun (n, v) -> (n, rw bound' v)) bs, rw bound' b)
+          List.fold_left (fun s (n, _, _) -> StrSet.add n s) bound bs in
+        Ast.Let_rec (List.map (fun (n, l, v) -> (n, l, rw bound' v)) bs, rw bound' b)
       | Ast.With (n, v, b) -> Ast.With (n, rw bound v, rw (StrSet.add n bound) b)
       | Ast.If (c, t, el) -> Ast.If (rw bound c, rw bound t, rw bound el)
       | Ast.Fun (p, t, b) -> Ast.Fun (p, t, rw (StrSet.add p bound) b)
@@ -1359,7 +1359,7 @@ let rewrite_instance_refs (tbl : inst_table) (root : Ast.expr) : Ast.expr =
       { e with Ast.node = Ast.Let (p, rw StrSet.empty v, rw_spine b) }
     | Ast.Let_rec (bs, b) ->
       { e with Ast.node =
-          Ast.Let_rec (List.map (fun (n, v) -> (n, rw StrSet.empty v)) bs,
+          Ast.Let_rec (List.map (fun (n, l, v) -> (n, l, rw StrSet.empty v)) bs,
                        rw_spine b) }
     | _ -> rw StrSet.empty e
   in

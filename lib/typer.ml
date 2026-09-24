@@ -3344,15 +3344,15 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        under env_rec (which has all names mono-bound), unify each, then
        generalize each against the OUTER env. *)
     let alphas = enter_level (fun () -> List.map (fun _ -> fresh_var ()) bindings) in
-    let env_rec = List.fold_left2 (fun acc (n, _) a ->
+    let env_rec = List.fold_left2 (fun acc (n, _, _) a ->
       (n, mono a) :: acc
     ) env bindings alphas in
     enter_level (fun () ->
-      List.iter2 (fun (_, value) alpha ->
+      List.iter2 (fun (_, _, value) alpha ->
         let tv = infer env_rec value in
         unify value.Ast.loc alpha tv
       ) bindings alphas);
-    let env' = List.fold_left2 (fun acc (n, value) a ->
+    let env' = List.fold_left2 (fun acc (n, _, value) a ->
       let sch = generalize env a in
       (* A local recursive constrained binding (e.g.
          `let rec sum = fn xs -> ... add ... in ...`): record its value node +
@@ -4140,5 +4140,5 @@ let rec check_borrows active (e : Ast.expr) : unit =
     in
     check_borrows active' body
   | Ast.Let_rec (bindings, body) ->
-    List.iter (fun (_, v) -> check_borrows active v) bindings;
+    List.iter (fun (_, _, v) -> check_borrows active v) bindings;
     check_borrows active body

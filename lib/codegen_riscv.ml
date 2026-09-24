@@ -321,8 +321,8 @@ let rec free_vars_of (e : Ast.expr) : string list =
   | Ast.If (a, b, c) -> free_vars_of a @ free_vars_of b @ free_vars_of c
   | Ast.Let (p, rhs, body) -> free_vars_of rhs @ rm (pat_vars p) (free_vars_of body)
   | Ast.Let_rec (bs, body) ->
-    let names = List.map fst bs in
-    rm names (List.concat_map (fun (_, e) -> free_vars_of e) bs @ free_vars_of body)
+    let names = List.map Ast.rb_name bs in
+    rm names (List.concat_map (fun (_, _, e) -> free_vars_of e) bs @ free_vars_of body)
   | Ast.Fun (x, _, b) -> rm [x] (free_vars_of b)
   | Ast.Region_block (_, b) -> free_vars_of b
   | Ast.Region_loop (_, x, b) -> List.filter (fun n -> n <> x) (free_vars_of b)
@@ -409,7 +409,7 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
   | Ast.If (a, b, c) -> vars_in a (vars_in b (vars_in c acc))
   | Ast.Let (_, a, b) -> vars_in a (vars_in b acc)
   | Ast.Let_rec (bs, b) ->
-    List.fold_left (fun ac (_, e) -> vars_in e ac) (vars_in b acc) bs
+    List.fold_left (fun ac (_, _, e) -> vars_in e ac) (vars_in b acc) bs
   | Ast.Fun (_, _, b) -> vars_in b acc
   (* a region body is ordinary code: without this, a function called only
      from inside `region R { ... }` is never marked reachable and its label
@@ -678,8 +678,8 @@ let rec split_tops (e : Ast.expr) : Ast.expr =
     Hashtbl.replace tops name (collect_fun f);
     split_tops body
   | Ast.Let_rec (bindings, body)
-    when List.for_all (fun (_, v) -> match v.Ast.node with Ast.Fun _ -> true | _ -> false) bindings ->
-    List.iter (fun (name, f) -> Hashtbl.replace tops name (collect_fun f)) bindings;
+    when List.for_all (fun (_, _, v) -> match v.Ast.node with Ast.Fun _ -> true | _ -> false) bindings ->
+    List.iter (fun (name, _, f) -> Hashtbl.replace tops name (collect_fun f)) bindings;
     split_tops body
   | Ast.Let ({ pnode = Ast.P_var name; _ }, rhs, body) ->
     let idx = Hashtbl.length globals_map in
@@ -1143,7 +1143,7 @@ let rv_live_across_call (env : env) (name : string) (body : Ast.expr) : bool =
              alt acc (seq (match g with Some gg -> walk gg | None -> none) (walk b))) none arms)
     | Ast.Region_loop (_, _, b) -> let r = walk b in seq r r
     | Ast.Let_rec (bs, b) ->
-      let defs = List.fold_left (fun acc (_, v) ->
+      let defs = List.fold_left (fun acc (_, _, v) ->
           seq acc (match v.Ast.node with Ast.Fun _ -> none | _ -> call)) none bs in
       seq defs (walk b)
     | Ast.App _ ->
@@ -1424,7 +1424,7 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     emit (LoadAddr (t0, label));                                    (* t0 = &lambda code *)
     emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);                               (* sw t0, 0(t1) *)
     emit_word (enc_i 0 t1 0 a0 0x13)                                (* mv a0, t1 *)
-  | Ast.Let_rec ([ (f, ({ node = Ast.Fun (param, _, fbody); _ }) ) ], body) ->
+  | Ast.Let_rec ([ (f, _, ({ node = Ast.Fun (param, _, fbody); _ }) ) ], body) ->
     (* local recursive closure. Bind f to its own closure BEFORE filling the
        captures, so the body's self-reference (a normal capture of f) reads
        the block pointer we just allocated. *)
@@ -4197,7 +4197,7 @@ let emit_program ~main_ty (prog : Ast.program) : string =
   List.iter (fun d ->
     match d with
     | Ast.Top_let (_, v) -> Typer.default_container_regions v
-    | Ast.Top_let_rec bs -> List.iter (fun (_, v) -> Typer.default_container_regions v) bs
+    | Ast.Top_let_rec bs -> List.iter (fun (_, _, v) -> Typer.default_container_regions v) bs
     | _ -> ()) prog.decls;
 
 
