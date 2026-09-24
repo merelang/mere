@@ -256,6 +256,23 @@ jobs:
             && riscv64-linux-gnu-objdump --version | head -1 \
             || echo "riscv64-linux-gnu-objdump absent: rvd_oracle will skip"
 
+      # ⚠ "WILL SKIP" IS THE PROBLEM, NOT THE REPORT. 65 gates in this repo exit
+      # 0 when a tool they need is absent, and 46 of them are named in this
+      # file. That is right for a laptop without psql and wrong for a build
+      # whose only output is red or green: the day a package is renamed, the
+      # install above fails (it is allowed to), the gate skips, and this job
+      # stays green with its strongest differential gone.
+      #
+      # tool_preflight derives the tool list from the gates themselves and
+      # fails HERE, naming the gate that would have disappeared, before any of
+      # them has a chance to pass by not running.
+      - name: tool_preflight (a gate that did not run is not a gate that passed)
+        run: sh scripts/tool_preflight_check.sh --required
+
+      - name: tool_preflight poison
+        if: ${{ !cancelled() }}
+        run: sh scripts/tool_preflight_check.sh --poison
+
       # The build matrix runs this too, but without wat2wasm and node it skips
       # the self-host codegen cross-validation — 2,225 cases there against 2,430
       # here. Those 205 only run in this job, which has the toolchain.
