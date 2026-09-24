@@ -251,6 +251,12 @@ let con_of_head (p : Ast.pattern) : con option =
   | Ast.P_bool b -> Some (Cbool b)
   | Ast.P_unit -> Some Cunit
   | Ast.P_tuple ps -> Some (Ctuple (List.map (fun _ -> Ast.TyUnit) ps))
+  (* Q-125: the same canonicalisation `bare_ctor` does above, for records. A
+     pattern written `M.t { … }` and a value built as `t` are one type to the
+     typer; if this column head still said `M.t` the match looked non-exhaustive
+     for a name nobody could add an arm for. ⚠ `bare_ctor` existed and had no
+     record twin -- the same shape as `canonical_ctor` having no caller for
+     `canonical_record`. *)
   | Ast.P_record (n, _) -> Some (Crecord (n, []))
   | _ -> None
 
