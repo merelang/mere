@@ -39,6 +39,14 @@
 #   parity.sh              the diagnostic payload IS the last line on a
 #                          single-sink backend; it is read, not discarded
 #   live_soundness_check.sh drops the `---MARK---` line from psql output
+#   fail_reason_check.sh   same shape as parity.sh: on the plain Wasm host the
+#                          diagnostic goes to stdout when stderr is empty, so
+#                          the last line IS the message and the body is what
+#                          comes before it. Both halves are then COMPARED --
+#                          nothing is discarded. ⚠ Added to this list on
+#                          2026-09-24, when a full local sweep ran this gate
+#                          for the first time since fail_reason_check landed
+#                          (v0.1.510) and found CI red.
 #
 # Usage:
 #   sh scripts/trailing_trim_check.sh            # check
@@ -47,7 +55,7 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SELF="$(basename "$0")"
-ALLOW="rv_exec_check.sh exhaustive_check.sh parity.sh live_soundness_check.sh"
+ALLOW="rv_exec_check.sh exhaustive_check.sh parity.sh live_soundness_check.sh fail_reason_check.sh"
 
 # Comment lines are excluded, or this file's own explanation is a violation of
 # it -- the removal pattern hitting its own documentation.
