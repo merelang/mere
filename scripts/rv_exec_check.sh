@@ -53,7 +53,13 @@ rc=0; pass=0; fail=0
 # but now agrees -- remove it", at both widths. Its reason (polymorphic == is a
 # word comparison here) was true when written and is not true now, which is the
 # only thing this check is for.
-KNOWN_DIFF="float_edges region_growth map_compact"
+# int_width_boundary joined in v0.1.532. It is the fixture that PINS where the
+# interpreter's 63-bit int and the compiled backends' 64-bit one part company
+# (Q-039), so on a 32-bit target it differs by construction: `bit_shl 1 60` is
+# 1152921504606846976 on the C backend and 0 here. ⚠ It was added to the parity
+# suite for a different question, turned this gate red, and nothing said so --
+# rv_exec_check was in no workflow at all.
+KNOWN_DIFF="float_edges region_growth map_compact int_width_boundary"
 # float_edges/str_edges             64-bit values; this backend's int is 32 bits
 #   (coll_edges and nul_in_str sat here too, on the strength of a 60-second
 #    alarm that was really a measurement of how slow decimal printing is on an
