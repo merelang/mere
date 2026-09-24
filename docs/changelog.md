@@ -4,6 +4,48 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.526 — 2026-09-24
+
+_Q-161: the syntax hint's window is the statement now, not the failing line._
+
+v0.1.507 gave syntax errors a `help:` line that answers a spelling from another
+language. All 18 catalogue rows answered — but only because the evidence sat on
+the line the parser stopped at:
+
+```
+def f(n):          def f(n):
+  return n           0
+```
+
+The first gets `help: \`def\` — a function is \`let name = fn (x: int) -> body;\``.
+The second was silent: `):` reads as a type annotation, so the parser walks on
+and fails at line 2, and `def` is a line back.
+
+The window walks back to the nearest `;` now, capped at two lines. **Both
+numbers are measured**: at a cap of 1 the window is the old line-only one and
+the new row goes silent; at 2 it answers, all 18 old rows still answer, and
+every poison still goes red. Wider buys nothing that was asked for.
+
+⚠ **The fear this question recorded did not materialise.** Q-161 said widening
+the window widens the false-positive window for `var` / `case` / `val` / `mut` —
+words that are real identifiers in these repositories. It does not:
+`bound_names` walks the WHOLE token list, so "does this file bind that name?"
+never depended on the window. That was checked at each width rather than
+assumed, because the question asked for it to be.
+
+Two poisons were added, and the first one written was weaker than it looked:
+
+- The `;` is a wall — a spelling three statements back is not offered as the
+  explanation. ⚠ But that fixture passes at ANY width, because the `;` stops it
+  before the line cap is reached, so it says nothing about the cap.
+- So the cap gets its own: run the catalogue with the window one line narrower
+  and the cross-line row must go red. Without it the number in the source would
+  be decoration.
+
+19 catalogue rows, 5 poisons. 2,847 unit tests, parity 214/214.
+
+---
+
 ## v0.1.525 — 2026-09-24
 
 _Q-125: a record declared inside a module could not be named in an annotation —
