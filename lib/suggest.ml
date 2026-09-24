@@ -146,7 +146,7 @@ let rec allocates (e : expr) : bool =
        in
        by_callee || List.exists allocates args)
   | Let (_, v, b) -> allocates v || allocates b
-  | Let_rec (bs, b) -> List.exists (fun (_, v) -> allocates v) bs || allocates b
+  | Let_rec (bs, b) -> List.exists (fun (_, _, v) -> allocates v) bs || allocates b
   | Fun _ -> false
   | If (c, a, b) -> allocates c || allocates a || allocates b
   | Match (s, arms) ->
@@ -185,7 +185,7 @@ let rec funs_only ~visit (e : expr) : unit =
   | Record_lit (_, fs) -> List.iter (fun (_, x) -> go x) fs
   | Record_update (b, fs) -> go b; List.iter (fun (_, x) -> go x) fs
   | Let (_, v, b) | With (_, v, b) -> go v; go b
-  | Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+  | Let_rec (bs, b) -> List.iter (fun (_, _, v) -> go v) bs; go b
   | If (c, a, b) -> go c; go a; go b
   | Match (s, arms) ->
     go s; List.iter (fun (_, g, b) -> Option.iter go g; go b) arms
@@ -261,7 +261,7 @@ let rec visit ~in_fn ~in_region (e : expr) : unit =
      | P_var name, Fun _ -> check_fn_binding name v
      | _ -> ());
     go v; go b
-  | Let_rec (bs, b) -> List.iter (fun (_, v) -> go v) bs; go b
+  | Let_rec (bs, b) -> List.iter (fun (_, _, v) -> go v) bs; go b
   | If (c, a, b) -> go c; go a; go b
   | Match (s, arms) ->
     go s; List.iter (fun (_, g, b) -> Option.iter go g; go b) arms
@@ -279,7 +279,7 @@ let report ~path (prog : Ast.program) : string list =
        | _ -> ());
       visit ~in_fn:false ~in_region:false e
     | Top_let_rec bs ->
-      List.iter (fun ((_, e) : string * expr) ->
+      List.iter (fun ((_, _, e) : string * Loc.t * expr) ->
         if not (from_prelude e.loc) then visit ~in_fn:false ~in_region:false e) bs
     | _ -> ()) prog.decls;
   visit ~in_fn:false ~in_region:false prog.main;

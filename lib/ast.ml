@@ -68,7 +68,10 @@ and expr_node =
   | Logic of logicop * expr * expr     (* && / ||、short-circuit eval *)
   | Neg of expr
   | Let of pattern * expr * expr   (* left side is a pattern — supports `let (a, b) = ...` etc. *)
-  | Let_rec of (string * expr) list * expr   (* list >= 1; multi for `let rec X = e1 and Y = e2 in body` *)
+  (* v0.1.530: the binder carries its own position, like Top_let_rec's.
+     `let rec loop = fn ... in` had the same hole: go to definition landed on
+     the `fn`, not on `loop`. *)
+  | Let_rec of (string * Loc.t * expr) list * expr   (* list >= 1; multi for `let rec X = e1 and Y = e2 in body` *)
   | With of string * expr * expr
   | If of expr * expr * expr
   | Fun of string * ty option * expr   (* fn x -> body  or  fn (x : t) -> body *)
@@ -138,7 +141,16 @@ type top_decl =
      the splice point. Deliberately the mirror of `extern fn <name>: <ty>;`,
      which says the same thing about a name defined OUTSIDE Mere. *)
   | Top_forward of string * ty * Loc.t
-  | Top_let_rec of (string * expr) list   (* multi for `let rec X = e1 and Y = e2 ;` *)
+  (* v0.1.530: the binder carries its own position. It used to be a bare
+     string, so everything that needed to point AT the name -- go to
+     definition, rename, the outline -- pointed at the VALUE instead, which
+     is a different line as soon as the `fn` is written under the `=`. A
+     rename then edited the uses and not the declaration, and handed back a
+     program that does not compile. `Top_let`'s binder is a pattern and has
+     had a position all along; this is the same fact through the same door.
+     A pass that SYNTHESISES a binding has no name in the source to point at
+     and passes the value's loc, which is exactly what everything got before. *)
+  | Top_let_rec of (string * Loc.t * expr) list   (* multi for `let rec X = e1 and Y = e2 ;` *)
   | Top_type of string * string list * (string * ty option) list
     (* type name * type params (param names) * variants *)
   | Top_signature of string * (string * ty) list
@@ -218,6 +230,19 @@ type program = {
    construction time, so pattern matches work regardless of whether
    the user wrote the bare or qualified name) and by codegen
    (similar canonicalization for emitted ctor tags). *)
+(* v0.1.530: a `let rec` binder is (name, its own position, value). These three
+   keep the sites that only want one of the parts readable -- and they are the
+   reason the change is a widening rather than a rewrite: `List.assoc` and
+   `fst`/`snd` stop applying the moment a pair becomes a triple, which is how
+   the type checker found all 76 places that had to decide. *)
+let rb_name (n, _, _) = n
+let rb_value (_, _, v) = v
+let rb_assoc n bs = let (_, _, v) = List.find (fun (m, _, _) -> m = n) bs in v
+let rb_assoc_opt n bs =
+  match List.find_opt (fun (m, _, _) -> m = n) bs with
+  | Some (_, _, v) -> Some v
+  | None -> None
+
 let ctor_aliases : (string, string) Hashtbl.t = Hashtbl.create 8
 let record_aliases : (string, string) Hashtbl.t = Hashtbl.create 8
 
@@ -365,7 +390,7 @@ let rec pp e =
   | Let (pat, value, body) ->
     "(let " ^ pp_pattern pat ^ " = " ^ pp value ^ " in " ^ pp body ^ ")"
   | Let_rec (bindings, body) ->
-    let parts = List.map (fun (n, v) -> n ^ " = " ^ pp v) bindings in
+    let parts = List.map (fun (n, _, v) -> n ^ " = " ^ pp v) bindings in
     "(let rec " ^ String.concat " and " parts ^ " in " ^ pp body ^ ")"
   | With (name, value, body) ->
     "(with " ^ name ^ " = " ^ pp value ^ " in " ^ pp body ^ ")"
@@ -508,9 +533,9 @@ let rename_free_vars (lookup : string -> string option) (e : expr) : expr =
       let body' = with_shadow (pattern_vars pat) body in
       { e with node = Let (go_pat pat, value', body') }
     | Let_rec (bindings, body) ->
-      let names = List.map fst bindings in
+      let names = List.map (fun (n, _, _) -> n) bindings in
       let bindings' =
-        List.map (fun (n, v) -> (n, with_shadow names v)) bindings
+        List.map (fun (n, l, v) -> (n, l, with_shadow names v)) bindings
       in
       let body' = with_shadow names body in
       { e with node = Let_rec (bindings', body') }
@@ -651,16 +676,16 @@ let uniquify_inner_fns_expr (seen : (string, unit) Hashtbl.t) (e0 : expr) : expr
     (* nested recursive fn group: names are in scope in the values + body *)
     | Let_rec (bindings, body) ->
       let renames =
-        List.filter_map (fun (n, _) ->
+        List.filter_map (fun (n, _, _) ->
           match claim n with Some n' -> Some (n, n') | None -> None) bindings in
       if renames = [] then
-        { e with node = Let_rec (List.map (fun (n, v) -> (n, uq v)) bindings, uq body) }
+        { e with node = Let_rec (List.map (fun (n, l, v) -> (n, l, uq v)) bindings, uq body) }
       else
         let lookup n = List.assoc_opt n renames in
         let bindings' =
-          List.map (fun (n, v) ->
+          List.map (fun (n, l, v) ->
             let n' = match List.assoc_opt n renames with Some x -> x | None -> n in
-            (n', uq (rename_free_vars lookup v))) bindings in
+            (n', l, uq (rename_free_vars lookup v))) bindings in
         let body' = uq (rename_free_vars lookup body) in
         { e with node = Let_rec (bindings', body') }
   in
@@ -681,12 +706,12 @@ let uniquify_inner_fns_program (prog : program) : program =
      the colliding inner fn to be renamed. *)
   List.iter (function
     | Top_let (p, _) -> List.iter (fun n -> Hashtbl.replace seen n ()) (pattern_vars p)
-    | Top_let_rec bs -> List.iter (fun (n, _) -> Hashtbl.replace seen n ()) bs
+    | Top_let_rec bs -> List.iter (fun (n, _, _) -> Hashtbl.replace seen n ()) bs
     | _ -> ()) prog.decls;
   let decls =
     List.map (function
       | Top_let (p, e) -> Top_let (p, uniquify_inner_fns_expr seen e)
-      | Top_let_rec bs -> Top_let_rec (List.map (fun (n, e) -> (n, uniquify_inner_fns_expr seen e)) bs)
+      | Top_let_rec bs -> Top_let_rec (List.map (fun (n, l, e) -> (n, l, uniquify_inner_fns_expr seen e)) bs)
       | d -> d)
       prog.decls
   in
@@ -705,7 +730,7 @@ let reserve_toplevel_main (prog : program) : program =
   let binds_main =
     List.exists (function
       | Top_let (p, _) -> List.mem "main" (pattern_vars p)
-      | Top_let_rec bs -> List.exists (fun (n, _) -> n = "main") bs
+      | Top_let_rec bs -> List.exists (fun (n, _, _) -> n = "main") bs
       | _ -> false) prog.decls
   in
   if not binds_main then prog
@@ -721,8 +746,8 @@ let reserve_toplevel_main (prog : program) : program =
       | Top_let (p, v) -> Top_let (rn_pat p, rename_free_vars lk v)
       | Top_let_rec bs ->
         Top_let_rec
-          (List.map (fun (n, v) ->
-             ((if n = "main" then fresh else n), rename_free_vars lk v)) bs)
+          (List.map (fun (n, l, v) ->
+             ((if n = "main" then fresh else n), l, rename_free_vars lk v)) bs)
       | other -> other
     in
     { decls = List.map rn_decl prog.decls;
@@ -825,8 +850,8 @@ let uniquify_toplevel_shadows ?(shadowable = []) (prog : program) : program =
     | Top_let (p, v) -> Top_let (p, rename_free_vars lk v)
     | Top_let_rec bs ->
       (* recursive: names are in scope within their own values *)
-      let names' = List.map (fun (n, _) -> bind_def n) bs in
-      Top_let_rec (List.map2 (fun n' (_, v) -> (n', rename_free_vars lk v)) names' bs)
+      let names' = List.map (fun (n, _, _) -> bind_def n) bs in
+      Top_let_rec (List.map2 (fun n' (_, l, v) -> (n', l, rename_free_vars lk v)) names' bs)
     | Top_forward (n, t, loc) ->
       let n' = bind_name n in
       Hashtbl.replace pre n n';
@@ -872,7 +897,7 @@ let lower_par_map_expr (e : expr) : expr =
     | Neg a -> { e with node = Neg (lo a) }
     | Let (p, v, b) -> { e with node = Let (p, lo v, lo b) }
     | Let_rec (bs, b) ->
-      { e with node = Let_rec (List.map (fun (n, v) -> (n, lo v)) bs, lo b) }
+      { e with node = Let_rec (List.map (fun (n, l, v) -> (n, l, lo v)) bs, lo b) }
     | With (n, v, b) -> { e with node = With (n, lo v, lo b) }
     | If (c, t, el) -> { e with node = If (lo c, lo t, lo el) }
     | Fun (p, t, b) -> { e with node = Fun (p, t, lo b) }
@@ -913,7 +938,7 @@ let lower_par_map_expr (e : expr) : expr =
 let lower_par_map_program (prog : program) : program =
   let lower_decl = function
     | Top_let (p, e) -> Top_let (p, lower_par_map_expr e)
-    | Top_let_rec bs -> Top_let_rec (List.map (fun (n, e) -> (n, lower_par_map_expr e)) bs)
+    | Top_let_rec bs -> Top_let_rec (List.map (fun (n, l, e) -> (n, l, lower_par_map_expr e)) bs)
     | d -> d
   in
   { decls = List.map lower_decl prog.decls; main = lower_par_map_expr prog.main }
@@ -962,7 +987,7 @@ let children (e : expr) : expr list =
   | With (_, a, b) -> [a; b]
   | If (a, b, c) -> [a; b; c]
   | Fun (_, _, body) -> [body]
-  | Let_rec (bindings, body) -> List.map snd bindings @ [body]
+  | Let_rec (bindings, body) -> List.map (fun (_, _, v) -> v) bindings @ [body]
   | Constr (_, arg) -> (match arg with Some a -> [a] | None -> [])
   | Match (scrutinee, arms) ->
     scrutinee
@@ -976,7 +1001,7 @@ let children (e : expr) : expr list =
 let decl_exprs (d : top_decl) : expr list =
   match d with
   | Top_let (_, e) -> [e]
-  | Top_let_rec bindings -> List.map snd bindings
+  | Top_let_rec bindings -> List.map (fun (_, _, v) -> v) bindings
   | Top_type _ | Top_signature _ | Top_record _ | Top_type_alias _
   | Top_view _ | Top_extern _ | Top_extern_type _ | Top_forward _ | Top_drop _
   | Top_sync _ | Top_local _ | Top_ctor_alias _ | Top_record_alias _
@@ -1028,7 +1053,7 @@ let rec rv_bound_names (e : expr) : string list =
   let here =
     match e.node with
     | Let (p, _, _) -> pattern_vars p
-    | Let_rec (bs, _) -> List.map fst bs
+    | Let_rec (bs, _) -> List.map (fun (n, _, _) -> n) bs
     | Fun (x, _, _) -> [x]
     | With (n, _, _) -> [n]
     | Match (_, arms) -> List.concat_map (fun (p, _, _) -> pattern_vars p) arms
@@ -1048,7 +1073,7 @@ let rec rv_has_fun_below (e : expr) : bool =
   match e.node with
   | Fun _ -> true
   | Let_rec (bs, b) ->
-    List.exists (fun (_, v) -> let _, inner = rv_peel_funs v in rv_has_fun_below inner) bs
+    List.exists (fun (_, _, v) -> let _, inner = rv_peel_funs v in rv_has_fun_below inner) bs
     || rv_has_fun_below b
   | _ -> List.exists rv_has_fun_below (children e)
 
@@ -1071,7 +1096,7 @@ let rec rv_calls_ok ~(ok_head : string -> bool) (e : expr) : bool =
   | _ -> List.for_all (rv_calls_ok ~ok_head) (children e)
 
 (* The `let rec` bindings anywhere inside e (a helper loop a body may call). *)
-let rec rv_local_recs (e : expr) : (string * expr) list =
+let rec rv_local_recs (e : expr) : (string * Loc.t * expr) list =
   (match e.node with Let_rec (bs, _) -> bs | _ -> [])
   @ List.concat_map rv_local_recs (children e)
 
@@ -1080,12 +1105,12 @@ let rec rv_local_recs (e : expr) : (string * expr) list =
    recs, starting from "all safe" and removing until nothing changes. *)
 let rv_body_safe ~(ok_head : string -> bool) (body : expr) : bool =
   let recs = rv_local_recs body in
-  let safe = ref (List.map fst recs) in
+  let safe = ref (List.map (fun (n, _, _) -> n) recs) in
   let ok h = ok_head h || List.mem h !safe in
   let step () =
     let before = List.length !safe in
     safe := List.filter (fun n ->
-      let _, inner = rv_peel_funs (List.assoc n recs) in
+      let _, inner = rv_peel_funs (rb_assoc n recs) in
       not (rv_has_fun_below inner) && rv_calls_ok ~ok_head:ok inner) !safe;
     List.length !safe <> before
   in
@@ -1104,7 +1129,7 @@ let rv_loop_safe_toplevels ~(unsafe_builtins : string list) (prog : program) : s
   List.iter (fun d ->
     match d with
     | Top_let ({ pnode = P_var n; _ }, v) -> Hashtbl.replace fns n v; order := n :: !order
-    | Top_let_rec bs -> List.iter (fun (n, v) -> Hashtbl.replace fns n v; order := n :: !order) bs
+    | Top_let_rec bs -> List.iter (fun (n, _, v) -> Hashtbl.replace fns n v; order := n :: !order) bs
     | _ -> ()) prog.decls;
   let names = List.rev !order in
   let is_builtin n = not (Hashtbl.mem fns n) in
@@ -1150,8 +1175,8 @@ let rec rv_map_scoped ~(shadow : string list) (f : string list -> expr -> expr o
     | Logic (op, a, b) -> { e with node = Logic (op, g shadow a, g shadow b) }
     | Let (p, v, b) -> { e with node = Let (p, g shadow v, g (pattern_vars p @ shadow) b) }
     | Let_rec (bs, b) ->
-      let sh = List.map fst bs @ shadow in
-      { e with node = Let_rec (List.map (fun (n, v) -> (n, g sh v)) bs, g sh b) }
+      let sh = List.map rb_name bs @ shadow in
+      { e with node = Let_rec (List.map (fun (n, l, v) -> (n, l, g sh v)) bs, g sh b) }
     | With (n, v, b) -> { e with node = With (n, g shadow v, g (n :: shadow) b) }
     | If (c, t, el) -> { e with node = If (g shadow c, g shadow t, g shadow el) }
     | Fun (x, t, b) -> { e with node = Fun (x, t, g (x :: shadow) b) }
@@ -1257,7 +1282,7 @@ let rv_rewrite ~(self : string) ~(self' : string) ~(idx : string)
     | Cmp (op, a, b) -> { e with node = Cmp (op, go a, go b) }
     | Logic (op, a, b) -> { e with node = Logic (op, go a, go b) }
     | Let (p, v, b) -> { e with node = Let (p, go v, go b) }
-    | Let_rec (bs, b) -> { e with node = Let_rec (List.map (fun (n, v) -> (n, go v)) bs, go b) }
+    | Let_rec (bs, b) -> { e with node = Let_rec (List.map (fun (n, l, v) -> (n, l, go v)) bs, go b) }
     | With (n, v, b) -> { e with node = With (n, go v, go b) }
     | If (c, t, el) -> { e with node = If (go c, go t, go el) }
     | Fun (p, t, b) -> { e with node = Fun (p, t, go b) }
@@ -1310,7 +1335,7 @@ let rv_step_ok ~(self : string) ~(idx : string) ~(ipos : int) ~(arity : int) (st
          then Some 1 else None
        | _ -> if count e = 0 then Some 0 else None)
     | Let (_, v, b) -> if count v = 0 then tail b else None
-    | Let_rec (bs, b) -> if List.for_all (fun (_, v) -> count v = 0) bs then tail b else None
+    | Let_rec (bs, b) -> if List.for_all (fun (_, _, v) -> count v = 0) bs then tail b else None
     | With (_, v, b) -> if count v = 0 then tail b else None
     | If (c, t, el) ->
       if count c <> 0 then None
@@ -1332,7 +1357,9 @@ let rv_step_ok ~(self : string) ~(idx : string) ~(ipos : int) ~(arity : int) (st
 (* A versioned loop: the fast copy, and how to dispatch to it at a call site. *)
 type rv_plan = {
   rv_name : string;
-  rv_fast : string * expr;
+  (* v0.1.530: synthesised, so it has no name in the source to point at --
+     it carries the value's loc, which is what every binder got before. *)
+  rv_fast : string * Loc.t * expr;
   rv_arity : int;
   rv_ipos : int;
   rv_guard : expr -> expr;        (* the guard, from the index argument at the call site *)
@@ -1504,7 +1531,7 @@ let rv_plan_binding ~(loop_safe : string list) ~(unsafe_builtins : string list)
            in
            if !range_version_log then prerr_endline ("range-version: " ^ name);
            range_versioned := name :: !range_versioned;
-           Some { rv_name = name; rv_fast = (fast, wrap params fast_body); rv_arity = arity;
+           Some { rv_name = name; rv_fast = (fast, (wrap params fast_body).loc, wrap params fast_body); rv_arity = arity;
                   rv_ipos = ipos; rv_guard = guard; rv_guard_names = guard_names }
          end
        end)
@@ -1534,7 +1561,7 @@ let rv_apply_plans (plans : rv_plan list) (e : expr) : expr =
             if !range_version_log then prerr_endline ("range-version: " ^ n ^ " @call");
             let mk node = { loc = e.loc; ty = None; node } in
             let fast_call =
-              List.fold_left (fun acc a -> mk (App (acc, rv_clone a))) (mk (Var (fst p.rv_fast))) args in
+              List.fold_left (fun acc a -> mk (App (acc, rv_clone a))) (mk (Var (rb_name p.rv_fast))) args in
             Some (mk (If (p.rv_guard (List.nth args p.rv_ipos), fast_call, e)))
           | _ -> None)
        | _ -> None)
@@ -1547,7 +1574,7 @@ let range_version_program ~(unsafe_builtins : string list) (prog : program) : pr
       ref (List.concat_map (fun d ->
         match d with
         | Top_let (p, _) -> pattern_vars p
-        | Top_let_rec bs -> List.map fst bs
+        | Top_let_rec bs -> List.map (fun (n, _, _) -> n) bs
         | _ -> []) prog.decls)
     in
     let relied = [ "vec_get"; "vec_set"; "bytes_get"; "vec_len"; "bytes_len"; "f64x2_load"; "f64x2_store"; "u8x16_load" ] in
@@ -1561,7 +1588,7 @@ let range_version_program ~(unsafe_builtins : string list) (prog : program) : pr
       let rec transform ~(shadow : string list) (e : expr) : expr =
         rv_map_scoped ~shadow (fun shadow e ->
           match e.node with
-          | Let_rec ([ (name, value) ], body) ->
+          | Let_rec ([ (name, nloc, value) ], body) ->
             let sh = name :: shadow in
             let value = transform ~shadow:sh value in
             let body = transform ~shadow:sh body in
@@ -1570,8 +1597,8 @@ let range_version_program ~(unsafe_builtins : string list) (prog : program) : pr
              | Some plan ->
                let mk node = { loc = e.loc; ty = None; node } in
                Some { e with node = Let_rec ([ plan.rv_fast ],
-                        mk (Let_rec ([ (name, value) ], rv_apply_plans [ plan ] body))) }
-             | None -> Some { e with node = Let_rec ([ (name, value) ], body) })
+                        mk (Let_rec ([ (name, nloc, value) ], rv_apply_plans [ plan ] body))) }
+             | None -> Some { e with node = Let_rec ([ (name, nloc, value) ], body) })
           | _ -> None) e
       in
       let plans = ref [] in
@@ -1581,7 +1608,7 @@ let range_version_program ~(unsafe_builtins : string list) (prog : program) : pr
           let binders =
             match d with
             | Top_let (p, _) -> pattern_vars p
-            | Top_let_rec bs -> List.map fst bs
+            | Top_let_rec bs -> List.map (fun (n, _, _) -> n) bs
             | _ -> []
           in
           (* a top-level binding of a loop's name, or of something its guard reads,
@@ -1595,19 +1622,19 @@ let range_version_program ~(unsafe_builtins : string list) (prog : program) : pr
           let out =
             match d with
             | Top_let (p, v) -> [ Top_let (p, transform ~shadow:outer0 (rv_apply_plans !plans v)) ]
-            | Top_let_rec [ (name, value) ] ->
+            | Top_let_rec [ (name, nloc, value) ] ->
               let value = transform ~shadow:outer0 (rv_apply_plans !plans value) in
               (match rv_plan_binding ~loop_safe:!loop_safe ~unsafe_builtins ~user_bound:!user_bound
                        ~outer:outer0 (name, value) with
                | Some plan ->
-                 let fast = fst plan.rv_fast in
+                 let fast = rb_name plan.rv_fast in
                  user_bound := fast :: !user_bound;
                  if List.mem name !loop_safe then loop_safe := fast :: !loop_safe;
                  plans := plan :: live_plans;
-                 [ Top_let_rec [ plan.rv_fast ]; Top_let_rec [ (name, value) ] ]
-               | None -> plans := live_plans; [ Top_let_rec [ (name, value) ] ])
+                 [ Top_let_rec [ plan.rv_fast ]; Top_let_rec [ (name, nloc, value) ] ]
+               | None -> plans := live_plans; [ Top_let_rec [ (name, nloc, value) ] ])
             | Top_let_rec bs ->
-              [ Top_let_rec (List.map (fun (n, v) -> (n, transform ~shadow:outer0 (rv_apply_plans !plans v))) bs) ]
+              [ Top_let_rec (List.map (fun (n, l, v) -> (n, l, transform ~shadow:outer0 (rv_apply_plans !plans v))) bs) ]
             | d -> [ d ]
           in
           (match d with Top_let_rec [ _ ] -> () | _ -> plans := live_plans);

@@ -71,8 +71,8 @@ let rec free_vars (e : Ast.expr) : SS.t =
     let bound = SS.of_list (pattern_vars pat) in
     SS.union (free_vars value) (SS.diff (free_vars body) bound)
   | Ast.Let_rec (bindings, body) ->
-    let names = SS.of_list (List.map fst bindings) in
-    let bodies = List.fold_left (fun acc (_, v) -> SS.union acc (free_vars v))
+    let names = SS.of_list (List.map Ast.rb_name bindings) in
+    let bodies = List.fold_left (fun acc (_, _, v) -> SS.union acc (free_vars v))
                    (free_vars body) bindings in
     SS.diff bodies names
   | Ast.With (name, value, body) ->
@@ -211,10 +211,10 @@ let rec go (env : venv) (consumed : IS.t) (multi : bool) (e : Ast.expr) : IS.t =
     let env' = bind_name env name value.Ast.ty in
     go env' consumed multi body
   | Ast.Let_rec (bindings, body) ->
-    let env' = List.fold_left (fun env (n, v) -> bind_name env n v.Ast.ty)
+    let env' = List.fold_left (fun env (n, _, v) -> bind_name env n v.Ast.ty)
                  env bindings in
     (* Recursive bindings may run many times: check under multi=true. *)
-    List.iter (fun (_, v) -> ignore (go env' consumed true v)) bindings;
+    List.iter (fun (_, _, v) -> ignore (go env' consumed true v)) bindings;
     go env' consumed multi body
   | Ast.If (cond, t, e_) ->
     let c1 = go env consumed multi cond in

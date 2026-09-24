@@ -54,7 +54,7 @@ let rec map_expr (subst : expr -> expr option) (e : expr) : expr =
       | Logic (op, a, b) -> Logic (op, go a, go b)
       | Neg a -> Neg (go a)
       | Let (p, v, b) -> Let (p, go v, go b)
-      | Let_rec (bs, b) -> Let_rec (List.map (fun (n, v) -> (n, go v)) bs, go b)
+      | Let_rec (bs, b) -> Let_rec (List.map (fun (n, l, v) -> (n, l, go v)) bs, go b)
       | With (s, v, b) -> With (s, go v, go b)
       | If (c, t, el) -> If (go c, go t, go el)
       | Fun (s, ty, b) -> Fun (s, ty, go b)
@@ -132,12 +132,12 @@ let type_pass (prog : program) : (string, Typer.scheme) Hashtbl.t =
       let outer = !type_env in
       let alphas =
         Typer.enter_level (fun () -> List.map (fun _ -> Typer.fresh_var ()) bindings) in
-      let env_rec = List.fold_left2 (fun acc (n, _) a ->
+      let env_rec = List.fold_left2 (fun acc (n, _, _) a ->
         (n, Typer.mono a) :: acc) outer bindings alphas in
-      List.iter2 (fun (_, value) alpha ->
+      List.iter2 (fun (_, _, value) alpha ->
         let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
         Typer.unify value.loc alpha t) bindings alphas;
-      type_env := List.fold_left2 (fun acc (n, _) a ->
+      type_env := List.fold_left2 (fun acc (n, _, _) a ->
         let sch = Typer.generalize outer a in
         Hashtbl.replace schemes n sch;
         (n, sch) :: acc) outer bindings alphas
@@ -506,7 +506,7 @@ let elaborate (prog : program) : program =
       | None ->
         (match e.node with
          | Let_rec (bindings, body)
-           when List.exists (fun (_, v) ->
+           when List.exists (fun (_, _, v) ->
                   List.exists (fun (vn, _) -> vn == v) local_params) bindings ->
            (* A local recursive `let rec ... and ...` group with at least one
               constrained member (self- or mutually-recursive). Intra-group
@@ -518,7 +518,7 @@ let elaborate (prog : program) : program =
               members share the dispatch variable(s), so the dict parameters are
               in scope across the whole group. *)
            let group_params =
-             List.filter_map (fun (n, v) ->
+             List.filter_map (fun (n, _, v) ->
                match List.find_opt (fun (vn, _) -> vn == v) local_params with
                | Some (_, params) -> Some (n, params)
                | None -> None) bindings
@@ -535,12 +535,12 @@ let elaborate (prog : program) : program =
                 | _ -> None)
            in
            let bindings' =
-             List.map (fun (n, v) ->
+             List.map (fun (n, nloc, v) ->
                match List.assoc_opt n group_params, v.node with
                | Some params, Fun (x, ty, fbody) ->
                  let fbody' = map_expr subst_rec fbody in
-                 (n, wrap_params params { v with node = Fun (x, ty, fbody') })
-               | _ -> (n, map_expr subst_rec v)) bindings
+                 (n, nloc, wrap_params params { v with node = Fun (x, ty, fbody') })
+               | _ -> (n, nloc, map_expr subst_rec v)) bindings
            in
            Some { e with node = Let_rec (bindings', map_expr subst_rec body) }
          | _ ->
@@ -594,11 +594,11 @@ let elaborate (prog : program) : program =
       | Top_let (p, value) -> Top_let (p, rewrite value)
       | Top_let_rec bindings ->
         let constrained =
-          List.filter (fun (n, _) -> Hashtbl.mem binding_params n) bindings in
+          List.filter (fun (n, _, _) -> Hashtbl.mem binding_params n) bindings in
         (match constrained with
          | [] ->
            (* No constrained binding in the group — nothing trait-specific. *)
-           Top_let_rec (List.map (fun (n, v) -> (n, rewrite v)) bindings)
+           Top_let_rec (List.map (fun (n, l, v) -> (n, l, rewrite v)) bindings)
          | _ ->
            (* One or more (mutually) recursive constrained functions.
               Intra-let-rec references are typed monomorphically (before
@@ -612,7 +612,7 @@ let elaborate (prog : program) : program =
               scope. This subsumes the single self-recursive case. Sibling
               obligation replacements (trait-method uses -> dict.method) run via
               `subst`; then each body gets its own dict parameter(s) prepended. *)
-           let group_names = List.map fst bindings in
+           let group_names = List.map Ast.rb_name bindings in
            let subst_rec e =
              match subst e with
              | Some r -> Some r
@@ -626,9 +626,9 @@ let elaborate (prog : program) : program =
                     mk e.loc (App (acc, mk e.loc (Var p)))) e params)
                 | _ -> None)
            in
-           Top_let_rec (List.map (fun (n, v) ->
+           Top_let_rec (List.map (fun (n, nloc, v) ->
              let v' = map_expr subst_rec v in
-             (n, wrap_dict_params n v')) bindings))
+             (n, nloc, wrap_dict_params n v')) bindings))
       | other -> other
     in
     let decls = List.map rewrite_decl prog.decls in

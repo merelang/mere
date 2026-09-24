@@ -4,6 +4,59 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.530 — 2026-09-24
+
+_Rename handed back a program that does not compile._ `Top_let`'s binder is a
+pattern and has carried a position since the beginning. `Top_let_rec`'s was a
+bare string, so everything that had to point AT the name pointed at the VALUE
+instead — a different line as soon as the `fn` is written under the `=`, which
+is how most of mere-ruby's ~2,500 top-level functions are written.
+
+Three things were wrong, and the third is the one that touches files:
+
+| | `let` | `let rec` (before) |
+|---|---|---|
+| go to definition | the name | the `fn` on the next line |
+| document symbol | the name | the value |
+| **rename** | declaration + uses | **uses only** |
+
+`Top_let_rec` was not in the match that says "a top-level declaration's own
+name is an occurrence too", so a rename rewrote every use and left the
+definition alone. The local `let rec ... in` had the same hole.
+
+`Top_let_rec` and `Let_rec` now carry `(name, its own position, value)`. That
+is 76 sites across 15 files, and the point of doing it as a widening rather
+than a side table is that `fst`, `snd` and `List.assoc` stop type-checking the
+moment a pair becomes a triple: the compiler named every place that had to
+decide, including four in the backends and two in the REPL. A pass that
+SYNTHESISES a binding — `while` desugaring, the RV fast-path clone, monomorph's
+copies — has no name in the source and passes the value's loc, which is exactly
+what every binder got before.
+
+⚠ **The automated part of the edit widened three tuples that were not rec
+binders** (a `(name, ty)` list, a `(expr, params)` list, and eval's
+placeholder refs). Each one type-checked as a different error a step later and
+had to be put back. Mechanical is not the same as safe; the type checker
+caught all three, which is the argument for the widening.
+
+`scripts/lsp_binding_position_check.sh` drives the real server over JSON-RPC
+and asks the same two questions of five binding forms. ⚠ Every fixture puts
+the value on the line AFTER the binder, because a one-line fixture cannot tell
+the two positions apart — and the gate asserts that about itself before it
+trusts any of its own rows. On the previous compiler it reports six failures
+naming `fn` as the definition; on this one, none. Five unit tests cover
+`Query` directly and three of them go red without the fix.
+
+**A stale exemption went with it.** `decls_roundtrip.sh` carried one program
+that could not round-trip, with the rule "if it starts passing, FAIL, because
+the exemption has outlived its reason". Q-125 fixed the underlying gap in
+v0.1.525 and the rule fired the first time anyone ran the script afterwards.
+172 programs, no exemptions.
+
+`dune test` 2856/0, parity 184+30.
+
+---
+
 ## v0.1.529 — 2026-09-24
 
 _Only the editor was red._ `mere -t` resolved `import "dep.mere"` against the

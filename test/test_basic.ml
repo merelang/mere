@@ -4066,12 +4066,12 @@ let () =
         let alphas =
           Typer.enter_level (fun () ->
             List.map (fun _ -> Typer.fresh_var ()) bindings) in
-        let env_rec = List.fold_left2 (fun acc (n, _) a ->
+        let env_rec = List.fold_left2 (fun acc (n, _, _) a ->
           (n, Typer.mono a) :: acc) outer bindings alphas in
-        List.iter2 (fun (_, value) alpha ->
+        List.iter2 (fun (_, _, value) alpha ->
           let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
           Typer.unify value.Ast.loc alpha t) bindings alphas;
-        type_env := List.fold_left2 (fun acc (n, _) a ->
+        type_env := List.fold_left2 (fun acc (n, _, _) a ->
           (n, Typer.generalize outer a) :: acc) outer bindings alphas
       | _ -> ()
     ) prog.decls;
@@ -4998,12 +4998,12 @@ let () =
         let alphas =
           Typer.enter_level (fun () ->
             List.map (fun _ -> Typer.fresh_var ()) bindings) in
-        let env_rec = List.fold_left2 (fun acc (n, _) a ->
+        let env_rec = List.fold_left2 (fun acc (n, _, _) a ->
           (n, Typer.mono a) :: acc) outer bindings alphas in
-        List.iter2 (fun (_, value) alpha ->
+        List.iter2 (fun (_, _, value) alpha ->
           let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
           Typer.unify value.Ast.loc alpha t) bindings alphas;
-        type_env := List.fold_left2 (fun acc (n, _) a ->
+        type_env := List.fold_left2 (fun acc (n, _, _) a ->
           (n, Typer.generalize outer a) :: acc) outer bindings alphas
       | _ -> ()
     ) prog.decls;
@@ -5693,12 +5693,12 @@ let () =
         let alphas =
           Typer.enter_level (fun () ->
             List.map (fun _ -> Typer.fresh_var ()) bindings) in
-        let env_rec = List.fold_left2 (fun acc (n, _) a ->
+        let env_rec = List.fold_left2 (fun acc (n, _, _) a ->
           (n, Typer.mono a) :: acc) outer bindings alphas in
-        List.iter2 (fun (_, value) alpha ->
+        List.iter2 (fun (_, _, value) alpha ->
           let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
           Typer.unify value.Ast.loc alpha t) bindings alphas;
-        type_env := List.fold_left2 (fun acc (n, _) a ->
+        type_env := List.fold_left2 (fun acc (n, _, _) a ->
           (n, Typer.generalize outer a) :: acc) outer bindings alphas
       | _ -> ()
     ) prog.decls;
@@ -6388,6 +6388,54 @@ let () =
   assert_no_contains "hint: omitted when types don't pair into a known case"
     (infer_err "(1, 2) + 3")
     "use `show";
+
+  (* --- v0.1.530: a `let rec` binder points at its own NAME ---
+
+     Go to definition and rename both ask "where was this name introduced".
+     For `Top_let` the answer came from the pattern, which carries a position.
+     For `Top_let_rec` the binder was a bare string, so the answer was the
+     VALUE's position -- a different line as soon as the `fn` is written under
+     the `=`, which is how ~2,500 of mere-ruby's functions are written. Rename
+     was worse than wrong: the declaration was not an occurrence at all, so it
+     edited every use and left the definition behind, handing back a program
+     that does not compile.
+
+     ⚠ THE FIXTURE PUTS THE VALUE ON THE NEXT LINE ON PURPOSE. Written on one
+     line, the value's position and the name's differ by a few columns and a
+     test that compares only lines passes either way. *)
+  let def_line src line col =
+    let prog = Pipeline.parse_program ~prelude:false src in
+    match Query.definition_at prog line col with
+    | Some l -> Printf.sprintf "%d:%d" l.Loc.line l.Loc.col
+    | None -> "none"
+  in
+  let occ_count src line col =
+    let prog = Pipeline.parse_program ~prelude:false src in
+    match Query.definition_at prog line col with
+    | None -> -1
+    | Some _ ->
+      List.length (List.filter (fun ((_ : Loc.t), (b : Query.binding)) ->
+                      b.Query.b_name = "twice") (Query.occurrences prog))
+  in
+  let rec_src =
+    "let rec twice =\n  fn (n: int) -> n * 2\nand helper =\n  fn (n: int) -> twice n + 1;\nprint_int (helper 3)\n" in
+  let let_src =
+    "let twice =\n  fn (n: int) -> n * 2;\nlet helper =\n  fn (n: int) -> twice n + 1;\nprint_int (helper 3)\n" in
+  check "definition on a plain `let` lands on the name"
+    (def_line let_src 4 19) "1:5";
+  check "definition on a `let rec` member lands on the name, not the value"
+    (def_line rec_src 4 19) "1:9";
+  let and_src =
+    "let rec first =\n  fn (n: int) -> n\nand second =\n  fn (n: int) -> n + 1;\nprint_int (first (second 1))\n" in
+  check "definition on an `and` member lands on the name"
+    (def_line and_src 5 19) "3:5";
+  let local_src =
+    "let f = fn (n: int) ->\n  let rec loop =\n    fn (i: int) -> if i <= 0 then 0 else loop (i - 1)\n  in loop n;\nprint_int (f 3)\n" in
+  check "definition on a local `let rec` lands on the name"
+    (def_line local_src 4 6) "2:11";
+  (* The declaration is an occurrence too -- this is the half rename needs. *)
+  check "a `let rec` member's own declaration is an occurrence"
+    (string_of_int (occ_count rec_src 4 19)) "2";
 
   (* --- Phase 7.7: hint expansion --- *)
   assert_contains "hint: bool where int expected → suggest if/then/else"
@@ -11695,12 +11743,12 @@ let () =
         let outer_env = !type_env in
         let alphas =
           Typer.enter_level (fun () -> List.map (fun _ -> Typer.fresh_var ()) bindings) in
-        let env_rec = List.fold_left2 (fun acc (n, _) a ->
+        let env_rec = List.fold_left2 (fun acc (n, _, _) a ->
           (n, Typer.mono a) :: acc) outer_env bindings alphas in
-        List.iter2 (fun (_, value) alpha ->
+        List.iter2 (fun (_, _, value) alpha ->
           let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
           Typer.unify value.Ast.loc alpha t) bindings alphas;
-        type_env := List.fold_left2 (fun acc (n, _) a ->
+        type_env := List.fold_left2 (fun acc (n, _, _) a ->
           let sch = Typer.generalize outer_env a in
           (n, sch) :: acc) outer_env bindings alphas
       | Ast.Top_type (name, params, variants) ->
