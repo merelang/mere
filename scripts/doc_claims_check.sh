@@ -64,6 +64,7 @@ docs/language-reference.md|a record type name may not be declared twice with dif
 docs/language-reference.md|`scripts/ffi_header_check.sh` builds a shim against it|exists|scripts/ffi_header_check.sh
 docs/language-reference.md|A top-level `while` must be bound or be the last expression|accept|toplevel_while
 docs/stdlib-reference.md|What the handler receives is the diagnostic line|present|try_or_reason
+docs/stdlib-reference.md|`scripts/wasm_stub_check.sh` is the gate|exists|scripts/wasm_stub_check.sh
 docs/stdlib-reference.md|test/parity/region_fail_unwind.mere|exists|test/parity/region_fail_unwind.mere
 docs/stdlib-reference.md|test/parity/shift_counts.mere|exists|test/parity/shift_counts.mere
 docs/stdlib-reference.md|test/parity/int_width_boundary.mere|exists|test/parity/int_width_boundary.mere

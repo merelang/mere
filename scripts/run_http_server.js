@@ -8,7 +8,8 @@
 // Usage: node scripts/run_http_server.js <path-to-wasm>
 
 const fs = require("fs");
-const { checkAbi, makeMarshal } = require("./mere_host.js");
+const { checkAbi, makeMarshal, makeStdin } = require("./mere_host.js");
+const stdin = makeStdin();
 const path = require("path");
 const { makeHttpGlue } = require("../contrib/http/http.glue.js");
 const { mereParseFloat } = require("./mere_parse_float.js");
@@ -208,6 +209,10 @@ const wasmPath = process.argv[2];
       return 0;
     },
     abs_int: (n) => Math.abs(n | 0),
+    // v0.1.528 (Q-085): the Wasm backend answered these two without ever
+    // reaching a host. This host has an fd 0.
+    read_stdin: () => writeStr(stdin.readAll()),
+    read_line: () => writeStr(stdin.readLine()),
     getenv: (namePtr) => {
       const name = readCStr(namePtr);
       const v = process.env[name];

@@ -449,6 +449,12 @@ let wasm_args_host_used = ref false
 let wasm_run_host_used = ref false
 let wasm_env_host_used = ref false
 let wasm_fexists_host_used = ref false  (* args() on a plain host: emit $__lang_args_host + arg_count/arg_get imports *)
+(* v0.1.528 (Q-085): read_stdin/read_line on a PLAIN host go through the host,
+   the way run/getenv/file_exists started to in v0.1.350. They used to answer
+   the empty string under a comment saying a browser has no stdin -- true of a
+   browser, false of scripts/run_wasm.js, which can read fd 0. An empty string
+   is indistinguishable from EOF, so the program did not fail, it read nothing. *)
+let wasm_stdin_host_used = ref false
 let wasm_args_used = ref false  (* command component called args() -> emit $__lang_args + wasi args imports *)
 let wasm_time_used = ref false  (* command component called time() -> real $__lang_time via wasi clock_time_get *)
 let wasm_env_used = ref false  (* command component called env_var() -> emit $__lang_env_var + wasi environ imports *)
@@ -3574,18 +3580,25 @@ and emit_expr (e : Ast.expr) : unit =
       emit_instr "drop";
       emit_instr "call $__lang_read_stdin"
     end else begin
-      (* A browser/worker host has no stdin — read_stdin is the empty string.
+      (* v0.1.528 (Q-085): through the host, like run/getenv/file_exists since
+         v0.1.350. The host returns a pointer to a Mere str; 0 means it has no
+         stdin, and that reads as the empty string -- the same answer as before,
+         but now it is the HOST saying so rather than the compiler assuming it.
          (The unit arg is inert; evaluate it for effect, then drop.) *)
+      wasm_stdin_host_used := true;
       emit_expr arg;
       emit_instr "drop";
-      emit_instr (Printf.sprintf "i64.const %d" (intern_show_str ""))
+      emit_instr "call $__lang_read_stdin_host"
     end
   | Ast.App ({ node = Ast.Var "read_line"; _ }, arg)
     when not (user_shadows_wasm "read_line") ->
-    (* No stdin on a browser host — one line reads as the empty string. *)
+    (* Same as read_stdin: one line, asked of the host. A host without stdin
+       answers 0 and the caller sees "", which is also what EOF looks like --
+       that ambiguity is read_line's documented contract, not this lowering's. *)
+    wasm_stdin_host_used := true;
     emit_expr arg;
     emit_instr "drop";
-    emit_instr (Printf.sprintf "i64.const %d" (intern_show_str ""))
+    emit_instr "call $__lang_read_line_host"
   | Ast.App ({ node = Ast.Var "read_file_bytes"; _ }, path_e) ->
     (* host returns a length-prefixed byte buffer (mere_bytes layout); convert
        it to a Vec[int] with the bytes bridge (all in-Wasm, no per-byte host
@@ -10289,6 +10302,15 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   wasm_time_used := false;
   wasm_env_used := false;
   wasm_stdin_used := false;
+  (* These four are per-emission state. The first three were added in
+     v0.1.350 and never reset, so a second module emitted in the same
+     process inherited the first one's host imports -- an import the
+     program does not use is one more name its host has to bind. Found
+     while adding the fourth. *)
+  wasm_run_host_used := false;
+  wasm_env_host_used := false;
+  wasm_fexists_host_used := false;
+  wasm_stdin_host_used := false;
   wasm_exit_used := false;
   wasm_socket_ffi := false;
   print_no_nl_used := false;
@@ -11147,6 +11169,10 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     ^ (if !wasm_fexists_host_used then
       "  (import \"env\" \"file_exists\" (func $file_exists_h (param i32) (result i32)))\n"
     else "")
+    ^ (if !wasm_stdin_host_used then
+      "  (import \"env\" \"read_stdin\" (func $read_stdin_h (result i32)))\n\
+      \  (import \"env\" \"read_line\" (func $read_line_h (result i32)))\n"
+    else "")
   in
   let boundary_shims =
     "  (func $puts (param i64) (call $puts_h (i32.wrap_i64 (local.get 0))))\n"
@@ -11447,6 +11473,31 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       none_t some_t
   in
 
+  (* v0.1.528 (Q-085): read_stdin / read_line on a plain host. The host hands
+     back a Mere str pointer (length header at ptr-4, NUL-terminated) or 0 when
+     it has no stdin at all -- a browser. 0 becomes a real empty str rather than
+     a null pointer, because a caller reading the length header of 0 reads
+     whatever is at address -4. *)
+  let stdin_host_section =
+    if not !wasm_stdin_host_used then "" else
+    let one name callee =
+      Printf.sprintf
+        "  (func $%s (result i64)\n\
+        \    (local $p i32)\n\
+        \    (local.set $p (call $%s))\n\
+        \    (if (result i64) (i32.eqz (local.get $p))\n\
+        \      (then\n\
+        \        (local.set $p (global.get $__lang_bump))\n\
+        \        (global.set $__lang_bump (i32.add (local.get $p) (i32.const 8)))\n\
+        \        (i32.store (local.get $p) (i32.const 0))\n\
+        \        (i32.store8 offset=4 (local.get $p) (i32.const 0))\n\
+        \        (i64.extend_i32_s (i32.add (local.get $p) (i32.const 4))))\n\
+        \      (else (i64.extend_i32_s (local.get $p)))))\n"
+        name callee
+    in
+    one "__lang_read_stdin_host" "read_stdin_h"
+    ^ one "__lang_read_line_host" "read_line_h"
+  in
   let args_host_section =
     if not !wasm_args_host_used then "" else
     Printf.sprintf
@@ -12318,7 +12369,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     list_str_runtime_section
     vec_runtime_section
     vec_higher_order_section strbuf_section map_key_eq_section map_runtime_section
-    (args_host_section ^ env_host_section ^ vec_to_list_section ^ lb_section) list_len_section
+    (args_host_section ^ env_host_section ^ stdin_host_section ^ vec_to_list_section ^ lb_section) list_len_section
     fn_section component_section local_decl indented_body
   |> prune_dead_fail_checks
 

@@ -45,6 +45,42 @@ for t in clang wat2wasm node; do
   command -v "$t" >/dev/null 2>&1 || { echo "wasm_stub: SKIP (no $t)"; exit 0; }
 done
 
+# --poison: four ways this gate could go quiet, each checked by the MESSAGE it
+# should print and not merely by a non-zero exit. A poison that fails for some
+# other reason is a poison that passed for the wrong reason.
+if [ "${1:-}" = "--poison" ]; then
+  fails=0
+  run_poison() {
+    label=$1; want=$2; shift 2
+    out=$(env "$@" sh "$0" 2>&1)
+    if [ $? -eq 0 ]; then
+      echo "POISON NOT CAUGHT — $label (the gate stayed green)"; fails=$((fails + 1)); return
+    fi
+    if printf '%s' "$out" | grep -qF "$want"; then
+      echo "poison caught: $label"
+    else
+      echo "POISON CAUGHT FOR THE WRONG REASON — $label"
+      echo "  wanted: $want"
+      printf '%s\n' "$out" | sed 's/^/  /'
+      fails=$((fails + 1))
+    fi
+  }
+  run_poison "a builtin drops out of NAMES" \
+    "probed 13 builtins, expected 14" \
+    WASM_STUB_NAMES="run env_var file_exists args read_file file_size read_file_bytes read_stdin file_openrw write_file_bytes print_err print_no_nl print_bytes"
+  run_poison "the host-surface grep stops matching" \
+    "the host surface came back as" \
+    SURFACE_FLOOR=99
+  run_poison "an unreached import with no reason written down" \
+    'no probe reaches host import `exit_proc`' \
+    WASM_STUB_UNPROBED="memory mere_spawn mere_join mere_channel_new mere_channel_send mere_channel_recv"
+  run_poison "a stale skip: a name listed as unprobed that a probe reaches" \
+    'is listed as unprobed but a probe reaches it' \
+    WASM_STUB_UNPROBED="memory exit_proc getenv mere_spawn mere_join mere_channel_new mere_channel_send mere_channel_recv"
+  [ "$fails" -eq 0 ] && { echo "wasm_stub --poison: 4 caught"; exit 0; }
+  echo "wasm_stub --poison: $fails not caught"; exit 1
+fi
+
 tmp=$(mktemp -d) || exit 1
 trap 'rm -rf "$tmp"' EXIT
 
@@ -78,23 +114,45 @@ probe() {
     # the program's. The probes must differ only where the backends do.
     read_file)       echo 'if str_len (read_file "/etc/hosts") > 0 then "yes" else "no"' ;;
     file_size)       echo 'if file_size "/etc/hosts" > 0 then "yes" else "no"' ;;
-    read_file_bytes) echo 'if bytes_len (read_file_bytes "/etc/hosts") > 0 then "yes" else "no"' ;;
+    # `bytes_len` here was a type error -- read_file_bytes answers Vec[R, int],
+    # not bytes -- so this probe never emitted and the gate recorded `refused`
+    # for it since the day it was written. A probe that cannot compile measures
+    # nothing, and `refused` is a word that makes it look like it did.
+    read_file_bytes) echo 'if vec_len (read_file_bytes "/etc/hosts") > 0 then "yes" else "no"' ;;
+    write_file_bytes) echo "let v = vec_new () in let _ = vec_push v 104 in let _ = vec_push v 105 in let _ = write_file_bytes \"$tmp/wfb.bin\" v in read_file \"$tmp/wfb.bin\"" ;;
+    print_err)       echo 'let _ = print_err "E" in "ok"' ;;
+    print_no_nl)     echo 'let _ = print_no_nl "AB" in "cd"' ;;
+    print_bytes)     echo 'let _ = print_bytes (bytes_of_str "AB") in "cd"' ;;
+    # v0.1.528: THE THREE THAT USED TO BE EXCLUDED. The exclusion said their
+    # answers "depend on stdin or on writing a file, neither of which is fixed
+    # across a run" -- but stdin is fixed by feeding it, and a file is fixed by
+    # choosing the path. Both of the stdin ones were stubs, so the two builtins
+    # this gate could not see were the two that were broken.
+    read_line)       echo 'read_line ()' ;;
+    read_stdin)      echo 'read_stdin ()' ;;
+    file_openrw)     echo "let f = file_openrw \"$tmp/openrw.bin\" in let n = file_pwrite_bytes f 0 (bytes_of_str \"hi\") in let b = file_pread_bytes f 0 2 in let _ = file_close f in str_of_int n ++ str_of_bytes b" ;;
   esac
 }
 
-# read_line / read_stdin / file_openrw are left out: their answers depend on
-# stdin or on writing a file, neither of which is fixed across a run.
-NAMES="run env_var file_exists args read_file file_size read_file_bytes"
+NAMES="${WASM_STUB_NAMES-run env_var file_exists args read_file file_size read_file_bytes read_line read_stdin file_openrw write_file_bytes print_err print_no_nl print_bytes}"
+
+# Both backends read the same bytes. Without this, `read_line` answers "" on C
+# too -- the gate would compare two empty strings and call the stub a host.
+printf 'mere_stub_probe_line\nsecond\n' > "$tmp/stdin"
 
 export MERE_STUB_PROBE=set_by_the_gate
 checked=0
 : > "$tmp/out"
+: > "$tmp/reached"
 for b in $NAMES; do
   p=$(probe "$b")
   [ -n "$p" ] || continue
   if ! "$MERE" -we "$p" > "$tmp/p.wat" 2>/dev/null; then
     echo "$b refused" >> "$tmp/out"; checked=$((checked + 1)); continue
   fi
+  # What this probe reaches, for the denominator below.
+  grep -oE '\(import "env" "[A-Za-z_0-9]+"' "$tmp/p.wat" \
+    | sed 's/.*"env" "//; s/"//' >> "$tmp/reached"
   if ! "$MERE" -ce "$p" > "$tmp/p.c" 2>/dev/null; then
     echo "$b c-refused" >> "$tmp/out"; checked=$((checked + 1)); continue
   fi
@@ -107,14 +165,68 @@ for b in $NAMES; do
   # surrounding quotes before comparison -- narrowly, so a real difference in
   # the VALUE still shows.
   strip_q() { sed 's/^"//; s/"$//'; }
-  c_out=$("$tmp/p.bin" 2>&1 | head -1 | strip_q)
-  w_out=$(node scripts/run_wasm.js "$tmp/p.wasm" 2>&1 | head -1 | strip_q)
+  # Each side gets the same stdin, and file_openrw starts from no file at all --
+  # otherwise the second backend reads what the first one wrote and a stub that
+  # never opened anything looks like it did.
+  rm -f "$tmp/openrw.bin"
+  c_out=$("$tmp/p.bin" < "$tmp/stdin" 2>&1 | head -1 | strip_q)
+  rm -f "$tmp/openrw.bin"
+  w_out=$(node scripts/run_wasm.js "$tmp/p.wasm" < "$tmp/stdin" 2>&1 | head -1 | strip_q)
   if [ "$c_out" = "$w_out" ]; then echo "$b host" >> "$tmp/out"
   else echo "$b stub [C=$c_out Wasm=$w_out]" >> "$tmp/out"; fi
   checked=$((checked + 1))
 done
 
-[ "$checked" -ge 7 ] || { echo "wasm_stub: FAIL — probed $checked builtins, expected 7"; exit 1; }
+NAME_FLOOR=${NAME_FLOOR-14}
+[ "$checked" -ge "$NAME_FLOOR" ] || { echo "wasm_stub: FAIL — probed $checked builtins, expected $NAME_FLOOR"; exit 1; }
+
+# THE DENOMINATOR. "10 builtins probed, 0 stubs" says nothing about the
+# eleventh, and the two that were broken were exactly the two a comment had
+# excluded. So the gate now states what it is a fraction OF: the Wasm backend's
+# host surface, which is the set of `(import "env" ...)` names it can emit --
+# every one of them a way for a program to reach outside this module. A name on
+# that surface that no probe reaches is either a missing probe or a documented
+# reason, and it has to be one of them out loud.
+SURFACE_FLOOR=${SURFACE_FLOOR-35}
+KNOWN_UNPROBED="${WASM_STUB_UNPROBED-memory exit_proc mere_spawn mere_join mere_channel_new mere_channel_send mere_channel_recv}"
+#   memory        not a function -- the module's linear memory, imported as a value
+#   exit_proc     the answer is an exit status, not a line of stdout;
+#                 scripts/exit_status_check.sh is the gate that compares those
+#   mere_spawn / mere_join / mere_channel_*  the answer depends on the
+#                 scheduler, so it is not fixed across a run;
+#                 test/parity/concurrency_channel.mere holds them instead
+grep -oE '\(import \\"env\\" \\"[A-Za-z_0-9]+\\"' lib/codegen_wasm.ml \
+  | sed 's/.*env\\" \\"//; s/\\"//' | sort -u > "$tmp/surface"
+n_surface=$(wc -l < "$tmp/surface" | tr -d ' ')
+[ "$n_surface" -ge "$SURFACE_FLOOR" ] || {
+  echo "wasm_stub: FAIL — the host surface came back as $n_surface names (floor $SURFACE_FLOOR)."
+  echo "  The emitter's import lines moved and this grep stopped matching them;"
+  echo "  an empty surface makes every unprobed name invisible."; exit 1; }
+sort -u "$tmp/reached" > "$tmp/reached.u"
+comm -23 "$tmp/surface" "$tmp/reached.u" > "$tmp/unreached"
+n_unreached=$(wc -l < "$tmp/unreached" | tr -d ' ')
+surface_fail=0
+while read -r name; do
+  [ -n "$name" ] || continue
+  case " $KNOWN_UNPROBED " in
+    *" $name "*) ;;
+    *) echo "wasm_stub: FAIL — no probe reaches host import \`$name\`, and no reason is written down."
+       echo "  Add a probe to NAMES, or name it in KNOWN_UNPROBED with why."
+       surface_fail=1 ;;
+  esac
+done < "$tmp/unreached"
+# The reverse: a skip that is no longer true. Without this, a name stays on the
+# list after a probe starts covering it and the list drifts into fiction.
+for name in $KNOWN_UNPROBED; do
+  if grep -qx "$name" "$tmp/reached.u"; then
+    echo "wasm_stub: FAIL — \`$name\` is listed as unprobed but a probe reaches it. Remove it."
+    surface_fail=1
+  elif ! grep -qx "$name" "$tmp/surface"; then
+    echo "wasm_stub: FAIL — \`$name\` is listed as unprobed but is not on the host surface at all."
+    surface_fail=1
+  fi
+done
+[ "$surface_fail" -eq 0 ] || exit 1
 
 if [ "${1:-}" = "--update" ]; then
   { echo "# builtin  host|stub|refused — produced by scripts/wasm_stub_check.sh --update"
@@ -134,6 +246,7 @@ if diff -u "$tmp/want" "$tmp/out" > "$tmp/d" 2>&1; then
   # than one with no headline.
   stubs=$(grep -c ' stub' "$tmp/out")
   echo "wasm_stub: $checked builtins probed, $stubs answer without reaching the host (recorded)"
+  echo "  host surface $n_surface imports — $(wc -l < "$tmp/reached.u" | tr -d ' ') reached by a probe, $n_unreached unprobed with a reason ($KNOWN_UNPROBED)"
   exit 0
 fi
 echo "wasm_stub: FAIL — a builtin changed which side of the host it is on"
