@@ -1,0 +1,21 @@
+// v0.1.532: the plain-host stdin section exists only when a program asks for it.
+//
+// `read_stdin` / `read_line` went through the host in v0.1.528 (Q-085); before
+// that they were a constant empty string, which is also what EOF looks like, so
+// a program could not tell it had read nothing. The Wasm backend emits
+// `$__lang_read_stdin_host` only for a program that calls them, and text that
+// is never emitted is never validated.
+//
+// ⚠ THE CALLS ARE EMITTED AND NOT EXECUTED, on purpose. This harness gives a
+// program no stdin and does not close it, so a real `read_line ()` blocks until
+// the timeout -- the first version of this file did exactly that. The guard is
+// `args ()`, which is empty here and unknowable at compile time, so the call
+// survives into the output. `section_coverage.sh` checks that the section is
+// EMITTED (running it is another gate's job), and `scripts/wasm_stub_check.sh`
+// is the one that feeds real bytes and holds the answer against the C backend.
+//
+// Execution mode: 4 backends, identical output
+let argc = list_len (args ()) in
+let a = if argc > 99 then read_line () else "no-stdin" in
+let b = if argc > 99 then read_stdin () else "no-stdin" in
+print ("line=[" ++ a ++ "] all=[" ++ b ++ "] done")

@@ -4,6 +4,44 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.533 — 2026-09-24
+
+_Running every gate, rather than the ones that looked affected._ A full local
+sweep of the 124 gates CI names found **three red**, and two of them had been
+red on `main`.
+
+**`section_coverage` — mine, from v0.1.528.** `wasm_stdin_host_used` is a gated
+runtime section, and a gated section with no row in `test/parity/SECTIONS` is
+text that is emitted by nothing and therefore validated by nothing. I added the
+flag and not the row. `test/parity/read_stdin_host.mere` is that row.
+⚠ **Its calls are emitted and not executed, on purpose**: the harness gives a
+program no stdin and does not close it, so a real `read_line ()` blocks until
+the timeout — the first version of the fixture did exactly that. The guard is
+`args ()`, empty here and unknowable at compile time. `section_coverage` checks
+that a section is EMITTED; `wasm_stub_check.sh` is the gate that feeds it real
+bytes.
+
+**`trailing_trim_check` — red since v0.1.510.** `fail_reason_check.sh` uses
+`sed '$d'`, which the gate forbids outside an allowlist. The use is legitimate
+and the same shape as `parity.sh`'s: on the plain Wasm host the diagnostic goes
+to stdout when stderr is empty, so the last line IS the message and both halves
+are then compared. It is on the allowlist now, with that reason.
+
+**`first_run_check` — the README's own sentence came true.** It said the parity
+count is re-derived "because a number in a README rots silently — and the test
+count is not ... and nothing checks it". The parity count had drifted 180 → 185
+and the test count 2796 → 2856. Both are derived now: the test count by running
+`dune test` and reading its own "N passed" line, which is what the number is
+about. A sentence that names its own failure mode is not a check.
+
+⚠ **Nothing found today was found by the build.** Two of these were red on
+`main` while four versions were pushed, because each push ran the gates that
+looked related. The sweep is the thing that had not happened.
+
+`dune test` 2856/0, parity 185+30.
+
+---
+
 ## v0.1.532 — 2026-09-24
 
 _A gate in no workflow has never had to pass._ v0.1.531 asked whether a gate CI
