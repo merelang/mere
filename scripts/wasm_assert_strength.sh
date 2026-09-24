@@ -1,6 +1,8 @@
 #!/bin/sh
-# scripts/wasm_assert_strength.sh -- the Wasm substring assertions must be
+# scripts/wasm_assert_strength.sh -- the backends' substring assertions must be
 # capable of failing, and the exemption from that must stay small.
+#
+# Covers all three: `wasm:`, `codegen:` (C) and `llvm:`.
 #
 # Q-133. `test/test_basic.ml` checks the Wasm backend by compiling a small
 # program and asserting that some string appears in the emitted module. That is
@@ -38,40 +40,46 @@ fail=0
 # to zero. The first version of this script counted `assert_contains "wasm:`;
 # when those were all renamed it reported "0 assertions, 0 vacuous" and exited
 # GREEN. A denominator nobody guards is not a measurement.
-TOTAL_FLOOR="${TOTAL_FLOOR:-90}"
-EXEMPT_CEILING="${EXEMPT_CEILING:-12}"
+# ⚠ A FLOOR, because the failure that hides everything is the population going
+# to zero. The first version of this script counted `assert_contains "wasm:`;
+# when those were all renamed it reported "0 assertions, 0 vacuous" and exited
+# GREEN. A denominator nobody guards is not a measurement.
+#
+# Three backends now. C and LLVM start with a larger exemption than Wasm because
+# those two pin runtime implementation details on purpose ("the idiv helper
+# still uses sdiv"), and because the control program already generates an
+# `anon_0_fn`, so an assertion about the subject's adapter cannot be told from
+# the control's by name.
+check_backend() { # $1=tag $2=assert prefix $3=floor $4=exemption ceiling
+  tag="$1"; pre="$2"; floor="$3"; ceil="$4"
+  n_all=$(grep -c "${pre}\(_runtime\)\? \"${tag}:" "$SRC" || true)
+  n_ex=$(grep -c "${pre}_runtime \"${tag}:" "$SRC" || true)
+  n_old=$(grep -c "assert_contains \"${tag}:" "$SRC" || true)
+  if [ "$n_all" -ge "$floor" ]; then
+    printf '  ok    %s\n' "$tag: $n_all assertions (floor $floor), $n_ex take the runtime exemption"
+  else
+    printf '  FAIL  %s\n' "$tag: only $n_all assertions, below the floor of $floor — the population shrank"
+    fail=1
+  fi
+  if [ "$n_ex" -gt "$ceil" ]; then
+    printf '  FAIL  %s\n' "$tag: $n_ex runtime exemptions, above $ceil — the way out is widening"
+    fail=1
+  fi
+  if [ "$n_old" != "0" ]; then
+    printf '  FAIL  %s\n' "$tag: $n_old still use \`assert_contains\`, which does not ask the control"
+    fail=1
+  fi
+}
 
-n_all=$(grep -c 'assert_wasm\(_module\)\? "wasm:' "$SRC" || true)
-n_exempt=$(grep -c 'assert_wasm_module "wasm:' "$SRC" || true)
-n_old=$(grep -c 'assert_contains "wasm:' "$SRC" || true)
-
-if [ "$n_all" -ge "$TOTAL_FLOOR" ]; then
-  printf '  ok    %s\n' "$n_all wasm assertions (floor $TOTAL_FLOOR)"
-else
-  printf '  FAIL  %s\n' "only $n_all wasm assertions, below the floor of $TOTAL_FLOOR — the population shrank"
-  fail=1
-fi
-
-if [ "$n_exempt" -le "$EXEMPT_CEILING" ]; then
-  printf '  ok    %s\n' "$n_exempt take the skeleton exemption (ceiling $EXEMPT_CEILING)"
-else
-  printf '  FAIL  %s\n' "$n_exempt skeleton exemptions, above $EXEMPT_CEILING — the way out is widening"
-  fail=1
-fi
-
-# The old form takes no control and cannot be vacuous-checked. It is the shape
-# the 41 were written in.
-if [ "$n_old" = "0" ]; then
-  printf '  ok    %s\n' "none are written as a bare \`assert_contains\`, so every one is checked against the control"
-else
-  printf '  FAIL  %s\n' "$n_old wasm assertions still use \`assert_contains\`, which does not ask the control"
-  fail=1
-fi
+check_backend wasm    assert_wasm "${WASM_FLOOR:-90}"  "${WASM_EXEMPT:-12}"
+check_backend codegen assert_c    "${C_FLOOR:-115}"    "${C_EXEMPT:-15}"
+check_backend llvm    assert_llvm "${LLVM_FLOOR:-130}" "${LLVM_EXEMPT:-39}"
 
 if [ "$MODE" = "--poison" ]; then
   pfail=0
   # POISON 1: an impossible floor must refuse.
-  if TOTAL_FLOOR=99999 sh "$0" >/dev/null 2>&1; then
+  if WASM_FLOOR=99999 sh "$0" >/dev/null 2>&1 || C_FLOOR=99999 sh "$0" >/dev/null 2>&1 \
+     || LLVM_FLOOR=99999 sh "$0" >/dev/null 2>&1; then
     printf '  FAIL  %s\n' "POISON 1: an impossible floor still passed"; pfail=1
   else
     printf '  ok    %s\n' "POISON 1 (impossible floor): the population count can refuse"
@@ -79,7 +87,7 @@ if [ "$MODE" = "--poison" ]; then
   # POISON 2: the old unchecked form must be detected. A copy of the source with
   # one added is the poison -- the real file is not touched.
   T=$(mktemp -d)
-  { cat "$SRC"; printf '\nlet _ = assert_contains "wasm: poisoned" (wasm "0") "(module";\n'; } > "$T/poisoned.ml"
+  { cat "$SRC"; printf '\nlet _ = assert_contains "llvm: poisoned" (llvm "0") "(module";\n'; } > "$T/poisoned.ml"
   if SRC="$T/poisoned.ml" sh "$0" >/dev/null 2>&1; then
     printf '  FAIL  %s\n' "POISON 2: a bare assert_contains was not noticed"; pfail=1
   else
@@ -89,7 +97,8 @@ if [ "$MODE" = "--poison" ]; then
   # POISON 3: ⚠ the vacuity check itself lives in the test. Prove it is wired by
   # showing the test file asks the control -- if that call vanished, every
   # assertion would silently stop being checked and this script could not tell.
-  if grep -q 'wasm_control_user' "$SRC" && grep -q 'contains wasm_control_user needle' "$SRC"; then
+  if grep -q 'let control_user = user_part control' "$SRC" \
+     && grep -q 'contains control_user needle' "$SRC"; then
     printf '  ok    %s\n' "POISON 3: the test still compares every needle against the control"
   else
     printf '  FAIL  %s\n' "POISON 3: the test no longer compares needles against the control — the checking moved or died"

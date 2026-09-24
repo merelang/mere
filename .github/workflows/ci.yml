@@ -880,11 +880,12 @@ jobs:
           sh scripts/fmt_roundtrip_check.sh
           sh scripts/fmt_roundtrip_check.sh --poison
 
-      # Q-133. The Wasm substring assertions must be capable of failing. 41 of
-      # 97 were not, and 11 were outright false about the user's code; the
-      # vacuity check lives in the test now, and this pins the population and
-      # the size of the skeleton exemption.
-      - name: wasm_assert_strength (the wasm assertions can fail)
+      # Q-133. The substring assertions must be capable of failing. 41 of the 97
+      # wasm ones were not, and 11 were outright false about the user's code.
+      # All three backends (wasm / C / LLVM, 352 assertions) compare against a
+      # control inside the test now; this pins each population and the size of
+      # each runtime exemption.
+      - name: wasm_assert_strength (the backends' assertions can fail)
         if: ${{ !cancelled() }}
         run: |
           sh scripts/wasm_assert_strength.sh
