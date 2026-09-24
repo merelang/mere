@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.529 — 2026-09-24
+
+_Only the editor was red._ `mere -t` resolved `import "dep.mere"` against the
+current working directory. Every other path that reads a file — `-c`, `-ll`,
+`-w`, `check`, `fmt`, `fix`, `--decls`, `--header`, `--suggest-regions`,
+`--dump-region-params` — resolves it against the file's directory, which is
+where the file's author wrote it. So a program the build accepts was rejected
+by the type query, with `cannot resolve path (tried: /dep.mere)` naming a path
+nobody wrote.
+
+The tool most likely to be on this path is an editor, and an editor is the
+thing least likely to share a working directory with the file it is showing.
+
+One line: `-t` passes `~base_dir:(Filename.dirname path)` like its twelve
+siblings. The other four handlers that looked like they were missing it were
+measured and were not — they compute it a few lines further down.
+
+`scripts/type_query_imports_check.sh` asks five paths the same question from a
+directory that is not the file's, and is poisoned twice: the fixture has to
+actually depend on its import (otherwise a compiler that never reads `import`
+passes every row), and a genuinely missing import has to be refused with a
+message that says where it looked. It reports `-t` as the only failure on the
+compiler from ten minutes ago.
+
+This is NOT the other half of Q-083 — `-t` skipping the borrow and capture
+checks is deliberate, documented in `mere --help`, and unchanged.
+
+`dune test` 2851/0, parity 184+30.
+
+---
+
 ## v0.1.528 — 2026-09-24
 
 _The two builtins the gate could not see were the two that were broken._
