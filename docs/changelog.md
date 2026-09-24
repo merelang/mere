@@ -4,6 +4,52 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.531 — 2026-09-24
+
+_A gate that did not run is not a gate that passed._ 65 of this repo's gates
+exit 0 when a tool they need is absent, and **46 of them are named in
+`ci.yml`**. Both halves of that are reasonable on their own — nobody should
+need `psql` to work on the parser, and a build should not go red because a
+laptop lacks `wat2wasm` — and together they mean this: the day a package is
+renamed, the best-effort install fails, the gate skips, and CI is green with
+the check gone.
+
+`qemu_virt.sh` is the case that matters. It is the differential against an
+emulator nobody here wrote, which makes it the strongest oracle in the repo,
+and it was installed with `continue-on-error: true` and skipped cleanly when
+absent.
+
+`scripts/tool_preflight_check.sh` fails in CI, before any gate runs, naming the
+gate that would have disappeared. **The tool list is derived, not typed**:
+every `command -v` in `scripts/*.sh`, mapped back to the gate that probes for
+it, and a tool counts as required when a gate that probes for it is named in
+`ci.yml`. 33 tools across 93 gates; 31 required.
+
+⚠ **The first version missed the gate it was written for.** `qemu_virt.sh`
+probes `command -v "$QEMU"`, and a scan that reads only literal names sees a
+variable and moves on — so `qemu-system-riscv32`, the whole argument, was not
+in the list. `$CC` (39 sites) and the loop variables went the same way. There
+are four shapes, and the derivation resolves all four: a literal, a variable
+with a `VAR=${VAR:-tool}` default, a `for t in clang wat2wasm node` loop, and a
+`have() { command -v "$1"; }` helper.
+
+⚠ **And it printed "0 of them are needed by a gate CI runs" and called itself
+ok.** The derivation had silently produced nothing — which is the failure this
+file exists to describe, written into the file about it. There is a floor now,
+and its poison is one of three: the tool this was built for going missing, the
+gate-to-CI link breaking, and the floor being a real number. Each asserts the
+message it should print rather than a non-zero exit.
+
+⚠ **A shape-based scan gets false positives for free.** The prose "have to" in
+a comment parsed as a tool named `to`. Comments are stripped first, and the one
+genuine false positive left — `command -v mere`, which three gates use to find
+the compiler and which they fail loudly without — is named in `ALLOWED_ABSENT`
+with its reason rather than quietly dropped.
+
+`dune test` 2856/0.
+
+---
+
 ## v0.1.530 — 2026-09-24
 
 _Rename handed back a program that does not compile._ `Top_let`'s binder is a
