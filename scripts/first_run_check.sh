@@ -105,6 +105,32 @@ elif [ "$claimed" != "$actual" ]; then
   fails=$((fails + 1))
 fi
 
+# THE TEST COUNT, for the same reason. The README said so itself -- "the test
+# count is not [derived] ... and nothing checks it" -- and then drifted twice:
+# 2715 while the suite passed 2724, and 2796 while it passed 2856. A sentence
+# that names its own failure mode is not a check.
+#
+# `dune test` is what the number is ABOUT, so that is what is asked. dune
+# caches it, so on an unchanged tree this costs nothing; on a changed one the
+# build had to happen anyway.
+claimed_t="$(sed -n 's/.*\*\*\([0-9]*\) tests passing\*\*.*/\1/p' "$README" | head -1)"
+if [ -z "$claimed_t" ]; then
+  echo "FAIL first_run[counts]: README no longer states a test count in the form this reads -- the check lost its subject"
+  fails=$((fails + 1))
+elif command -v dune >/dev/null 2>&1; then
+  actual_t="$( (cd "$ROOT" && dune test 2>&1) | sed -n 's/^\([0-9]*\) passed, .*/\1/p' | tail -1)"
+  if [ -z "$actual_t" ]; then
+    echo "FAIL first_run[counts]: \`dune test\` printed no \"N passed\" line -- the count cannot be derived, so the README's number is unchecked again"
+    fails=$((fails + 1))
+  elif [ "$claimed_t" != "$actual_t" ]; then
+    echo "FAIL first_run[counts]: README claims $claimed_t tests, \`dune test\` passes $actual_t"
+    fails=$((fails + 1))
+  fi
+else
+  echo "FAIL first_run[counts]: no dune, so the README's test count cannot be derived here"
+  fails=$((fails + 1))
+fi
+
 # --- 3. the install path names only artifacts that are actually built ------
 # install.sh used to map Darwin/x86_64 to `mere-macos-x86_64`, which the
 # release matrix does not build. An Intel Mac got a 404 and a message asking
@@ -171,4 +197,4 @@ if [ "$fails" -gt 0 ]; then
   echo "FAIL first_run_check: $fails problem(s)"
   exit 1
 fi
-echo "PASS first_run_check: $cmds README commands, parity count $actual, install/release assets agree, first program agrees on both backends"
+echo "PASS first_run_check: $cmds README commands, parity count $actual, test count ${actual_t:-?}, install/release assets agree, first program agrees on both backends"
