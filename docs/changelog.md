@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.537 — 2026-09-27
+
+_`utf8_chars` split a stray continuation byte onto the character before it,
+on all three compiled backends._ `test/parity/prop_utf8.mere` had pinned the
+disagreement since contrib/prop found it: for `"A" ++ chr 128` the interpreter
+gives two characters and C, LLVM and Wasm gave one, so `codepoint_at s 0` was
+65 on one and a refusal on the others. The file's own note said the
+difference had to be under the prelude, because the span logic is one Mere
+source compiled by all four.
+
+It was the builtin. Each compiled backend implemented `utf8_chars` as a
+BACKWARD walk -- start at the end, step back over continuation bytes, take
+what is left as one character -- which gives every continuation byte to
+whatever precedes it, a lead byte or not. The interpreter splits FORWARD by
+the lead byte's span, and so did the compiled backends' own `utf8_len`, which
+is why the two builtins disagreed with each other inside one backend. No
+backward walk can reproduce the forward rule: a lead byte does not check
+what follows it (`0xE0 'A' 'B'` is one three-byte span), so the boundaries
+are only known from the front. All three now record the starts going forward
+(C: malloc; LLVM: malloc, because a string can be megabytes; Wasm: the bump
+region) and build the list from the back, as before.
+
+The three `.expected` pins are deleted; `prop_utf8` is MATCH on all four.
+
+---
+
 ## v0.1.536 — 2026-09-27
 
 _A cached test prints nothing._ With dune on the PATH (v0.1.535),
