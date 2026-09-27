@@ -4,6 +4,22 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.536 — 2026-09-27
+
+_A cached test prints nothing._ With dune on the PATH (v0.1.535),
+`first_run_check` got one step further on CI and failed on the next thing:
+`` `dune test` printed no "N passed" line ``. Its own comment explained why,
+as a feature -- "dune caches it, so on an unchanged tree this costs nothing"
+-- and a cached test action is not re-run, so it prints nothing, so there is
+no count to read. CI runs `dune runtest` a few steps earlier, so on CI the
+tree was always unchanged and the check could never pass there; locally it
+passed whenever something had just been rebuilt, which during a change is
+always. Reproduced by running it twice in a row, which fails on the second.
+It asks `dune test --force test` now: the suite the count comes from, re-run,
+about four minutes.
+
+---
+
 ## v0.1.535 — 2026-09-27
 
 _CI had been red since v0.1.531, on two steps that were right about something
