@@ -107,6 +107,7 @@ machine rather than a host.
 | `float_of_int` | yes | yes | yes | yes |
 | `float_of_str` | yes | yes | yes | yes |
 | `floor` | yes | yes | refused | yes |
+| `fma` | yes | yes | yes | refused |
 | `gcd` | yes | yes | yes | yes |
 | `incr` | yes | yes | yes | yes |
 | `int_max` | refused | refused | refused | refused |

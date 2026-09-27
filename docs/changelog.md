@@ -4,6 +4,84 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.534 — 2026-09-27
+
+_`fma`: one rounding, asked for by name — and two LLVM bugs its gate found on
+the way._
+
+**`fma a b c` and `f64x2_fma`** compute `a * b + c` rounded **once**
+(Q-176). `a * b + c` written out is unchanged: it rounds twice, on every
+backend at every optimization level, which is what the C backend's
+`#pragma STDC FP_CONTRACT OFF` has guaranteed since v0.1.315. Fusing is now
+something a program asks for, and what it gets is a different answer that is
+the same everywhere: fma is one of the operations IEEE-754 requires to be
+correctly rounded, like `+ - * /` and `sqrt`.
+
+Why it is worth a builtin, measured on `mat4xvec4` through the C backend:
+the `f64x2` kernel written with `f64x2_fma` runs in **100 ms against 140 ms**
+for `f64x2_mul` + `f64x2_add`, and clang turns each pair of lane fmas into one
+`fmla.2d`. It is not the benchmark row, because that row's claim is that the
+scalar and lane programs print the same bytes.
+
+Lowering: the interpreter uses `Float.fma`, C calls `fma(3)` (per lane for
+`f64x2_fma`), LLVM calls `llvm.fma.f64` / `llvm.fma.v2f64`. **Wasm has no fma
+instruction and the host's `Math` has none either**, so `$__lang_fma` computes
+it in the module, in integers: the three significands normalized to 54 bits
+with bit 0 clear, the 108-bit product built from 32-bit halves (Wasm has no
+64x64->128 multiply), c aligned against it with a sticky bit for whatever is
+shifted out, one add or subtract, and ONE rounding -- the conversion of the
+top 63 bits to f64, pre-rounded at the subnormal's last place when the result
+will be subnormal so the final scaling does not round again. The structure is
+musl's. About 12 ns a call on node 24, four times the unfused arithmetic.
+The alternative was to refuse `fma` on Wasm, and a program would then write
+`a * b + c` for that one backend and get a different answer there -- the thing
+the pragma exists to prevent. The RISC-V backends refuse the name: they have
+no double-precision unit, and the 90-bit working width of the software floats
+there has no room for a 106-bit product.
+
+**`scripts/fma_check.sh`** (CI) holds all four backends to the C library's
+`fma(3)`, bit for bit, on six families of inputs: all 10,648 triples of 22
+special values, fully random bit patterns, products at the edges of the
+exponent range, exact and near cancellation, and **ties decided by a single
+sticky bit**. The last family exists because random inputs essentially never
+land on a tie: while the software fma was being written, dropping the sticky
+bit of a shifted-out c passed 20 million random cases and failed 10,272 of 20
+million once ties were in. The gate's own poison is `fma` redefined as
+`a * b + c`, which must not match (it differs in 6 of 6 families). Before it
+was transliterated, the algorithm ran 250 million cases against the hardware
+fma natively and the WAT ran 50 million under node, all bit-identical; two of
+its sticky paths (the product shifted right, or out entirely, against a much
+larger c) could not be made to change an answer and are argued unobservable
+rather than tested -- a 53-bit by 53-bit product cannot have 64 zero bits
+between two set ones.
+
+**LLVM: `x != x` said a NaN was not a NaN.** Float `!=` was the ordered
+`fcmp one`, which is false when either side is a NaN; the interpreter, C and
+Wasm give IEEE-754's answer, true. It is `une` now. Found because the fma
+gate folds NaN results with exactly that test, and the LLVM leg alone
+disagreed -- on the one family that produces NaNs. `test/parity/float_edges.mere`
+asked `==`, `<` and `>` of a NaN and never `!=`; it asks all six now, and
+fails with the old predicate.
+
+**LLVM: a local binding of a builtin's name leaked into `main`.** main was
+emitted with the inner-lift view of whichever fn had been emitted last, so a
+`let atan2 = ...` inside a fn made every `atan2` in main call that local:
+`atan2 1.0 1.0` printed 2.0. main's own local fns are not lifted through that
+table at all, so its view is the empty one now. Found by the fma parity case,
+which binds a local `fma` and uses the builtin elsewhere in the file.
+⚠ **Only the LAST host's lifts leaked**, so the first version of
+`test/parity/local_shadows_builtin.mere` passed with the bug in place -- a
+later fn with its own lifted local had replaced the table. The fn that
+shadows is the last one in the file now, and the file fails without the fix.
+
+Also found and left for its own version: `f_min` / `f_max` with a NaN
+argument return NaN on the interpreter and Wasm and the other operand on C
+and LLVM, depending on argument order.
+
+`dune test` 2862/0, parity 187 (fma, local_shadows_builtin).
+
+---
+
 ## v0.1.533 — 2026-09-24
 
 _Running every gate, rather than the ones that looked affected._ A full local

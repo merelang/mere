@@ -1,0 +1,17 @@
+// local_shadows_builtin -- a local binding of a builtin's name belongs to its
+// own scope. The LLVM backend leaked it: main was emitted with the inner-lift
+// view of whichever fn had been emitted LAST, so `let atan2 = ...` inside
+// `own` made the top-level `atan2 1.0 1.0` call that local and print 2.0
+// (v0.1.534). The other three backends print pi/4 on both lines.
+//
+// ORDER MATTERS, and is why `own` is the last fn in the file: only the last
+// host's lifts leaked. With another fn with a lifted local after it, the leak
+// was that fn's table instead, and this file passed with the bug in place.
+let r = let sq = fn (x: float) -> x * x in sq 3.0;
+let other = fn (u: int) -> let sq = fn (x: float) -> x + x in sq 3.0;
+let _ = print (show r);
+let _ = print (show (other 0));
+let _ = print (show (atan2 1.0 1.0));
+let own = fn (u: int) -> let atan2 = fn (x: float) -> fn (y: float) -> x + y in atan2 1.0 2.0;
+let _ = print (show (atan2 1.0 1.0));
+print (show (own 0))

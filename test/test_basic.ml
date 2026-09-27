@@ -2354,6 +2354,22 @@ let () =
   check "sin type"      (Pipeline.type_of "sin") "(float -> float)";
   check "atan2 type"
     (Pipeline.type_of "atan2") "(float -> (float -> float))";
+  (* Q-176: a*b+c rounded once. 0.1 * 10 is not exactly 1, and only the
+     fused form keeps the difference. *)
+  check "Q-176: fma type"
+    (Pipeline.type_of "fma") "(float -> (float -> (float -> float)))";
+  check "Q-176: fma rounds once"
+    (Pipeline.process "fma 0.1 10.0 (0.0 - 1.0)") "5.551115123125783e-17";
+  check "Q-176: a * b + c still rounds twice"
+    (Pipeline.process "0.1 * 10.0 - 1.0") "0.0";
+  check "Q-176: f64x2_fma type"
+    (Pipeline.type_of "f64x2_fma") "(f64x2 -> (f64x2 -> (f64x2 -> f64x2)))";
+  check "Q-176: f64x2_fma is fma per lane"
+    (Pipeline.process "f64x2_extract (f64x2_fma (f64x2_make 2.0 0.1) (f64x2_make 3.0 10.0) (f64x2_make 1.0 (0.0 - 1.0))) 1")
+    "5.551115123125783e-17";
+  check "Q-176: an underflowing product keeps its sign against a zero addend"
+    (Pipeline.process "float_bits_hi (fma (float_of_bits 443547648 0) (float_of_bits 2591031296 0) 0.0)")
+    "2147483648";
   check "f_min picks smaller"
     (Pipeline.process "f_min 3.5 2.0") "2.0";
   check "f_max picks larger"

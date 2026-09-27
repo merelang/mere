@@ -2861,6 +2861,8 @@ let initial_env : env =
     ("cos",         mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
     ("tan",         mono (Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)));
     ("atan2",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyFloat))));
+    (* Q-176: a*b+c rounded once *)
+    ("fma",         mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyFloat)))));
     ("f_min",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyFloat))));
     ("f_max",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyFloat))));
     ("f_pow",       mono (Ast.TyArrow (Ast.TyFloat, Ast.TyArrow (Ast.TyFloat, Ast.TyFloat))));
@@ -3069,6 +3071,7 @@ let initial_env : env =
     ("f64x2_sub",   f64x2_binop_scheme);
     ("f64x2_mul",   f64x2_binop_scheme);
     ("f64x2_div",   f64x2_binop_scheme);
+    ("f64x2_fma",   mono (Ast.TyArrow (Ast.TySimd Ast.F64x2, Ast.TyArrow (Ast.TySimd Ast.F64x2, Ast.TyArrow (Ast.TySimd Ast.F64x2, Ast.TySimd Ast.F64x2)))));
     ("f64x2_reduce_add", mono (Ast.TyArrow (Ast.TySimd Ast.F64x2, Ast.TyFloat)));
     ("f64x2_load",  f64x2_load_scheme);
     ("f64x2_store", f64x2_store_scheme);

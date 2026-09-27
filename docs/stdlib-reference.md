@@ -508,6 +508,7 @@ own answer, which made it portable over only half the range its result could hol
 | `cos` ★ | `float -> float` | Cosine (Phase 19.7) |
 | `tan` ★ | `float -> float` | Tangent (Phase 19.7) |
 | `atan2` ★ | `float -> float -> float` | `atan2 y x` for angle (Phase 19.7) |
+| `fma` | `float -> float -> float -> float` | `fma a b c` is `a * b + c` rounded **once** -- IEEE-754's fusedMultiplyAdd, correctly rounded like `+ - * /` and `sqrt`, so every backend gives the same bits (v0.1.534, Q-176). Not what `a * b + c` means: that rounds twice on every backend at every optimization level (v0.1.315). `fma 0.1 10.0 (0.0 - 1.0)` is `5.551115123125783e-17` where the unfused expression is `0.0`. C: `fma(3)`; LLVM: `llvm.fma`; **Wasm has no fma instruction, so it is computed in software** (in integers, about 12 ns a call on node, four times the unfused expression); refused on RV32IM / RV64IM |
 | `random_int` ★ ⚡ | `int -> int` | `random_int n` returns int in `0..n-1`; raises if n<=0 (Phase 19.7) |
 | `random_float` ★ | `unit -> float` | Float in `[0.0, 1.0)` (Phase 19.7) |
 | `pi` | `float` | π ≈ 3.14159265 (constant builtin) |
@@ -1079,6 +1080,7 @@ satisfy it and hide the very row it was describing.
 | `f64x2_make` | `float -> float -> f64x2` | lane 0, lane 1 |
 | `f64x2_add` / `f64x2_sub` / `f64x2_mul` / `f64x2_div` | `f64x2 -> f64x2 -> f64x2` | lane-wise |
 | `f64x2_reduce_add` | `f64x2 -> float` | lane 0 + lane 1, in that order |
+| `f64x2_fma` | `f64x2 -> f64x2 -> f64x2 -> f64x2` | `fma` per lane, each rounded once (v0.1.534). One `fmla.2d` on arm64 through C and LLVM; two software `fma` calls on Wasm |
 | `f64x2_load` | `Vec[R, float] -> int -> f64x2` | lanes `[i, i+2)` of the Vec; past the end fails like `vec_get` |
 | `f64x2_store` | `Vec[R, float] -> int -> f64x2 -> unit` | the two lanes into `[i, i+2)` |
 | `f32x4_splat` | `float -> f32x4` | all four lanes, narrowed to f32 |

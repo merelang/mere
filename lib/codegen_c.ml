@@ -3207,6 +3207,11 @@ let rec emit_expr (e : Ast.expr) : string =
          (emit_expr a_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "atan2"; _ }, a_e) ->
        Printf.sprintf "atan2(%s, %s)" (emit_expr a_e) (emit_expr arg)
+     (* Q-176: fma(3) is correctly rounded by definition, and an explicit call
+        is not what the FP_CONTRACT OFF pragma forbids -- that stops the compiler
+        fusing a*b+c on its own; this is the program asking for one rounding. *)
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "fma"; _ }, a_e); _ }, b_e) when not (user_shadows "fma") ->
+       Printf.sprintf "fma(%s, %s, %s)" (emit_expr a_e) (emit_expr b_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "str_split"; _ }, s_e) ->
        (* Phase 24.3: str_split s delim — curried. Returns list_str. *)
        str_split_used := true;
@@ -3946,6 +3951,8 @@ let rec emit_expr (e : Ast.expr) : string =
        (* the vector extension's arithmetic is lane-wise *)
        let c_op = match op with "f64x2_add" -> "+" | "f64x2_sub" -> "-" | "f64x2_mul" -> "*" | _ -> "/" in
        Printf.sprintf "((%s) %s (%s))" (emit_expr a_e) c_op (emit_expr arg)
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "f64x2_fma"; _ }, a_e); _ }, b_e) ->
+       Printf.sprintf "mere_f64x2_fma(%s, %s, %s)" (emit_expr a_e) (emit_expr b_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var ("f64x2_load" | "__f64x2_load_unchecked" as name); _ }, v_e) ->
        let sfx = if name = "f64x2_load" then "" else "_unchecked" in
        Printf.sprintf "mere_vec_float_f64x2_load%s(%s, %s)" sfx (emit_expr v_e) (emit_expr arg)
@@ -13685,6 +13692,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "}";
       "static inline mere_f64x2 mere_f64x2_make(double a, double b) { mere_f64x2 v = { a, b }; return v; }";
       "static inline double mere_f64x2_reduce_add(mere_f64x2 v) { return v[0] + v[1]; }";
+      (* Q-176: one fma(3) per lane. Portable C rather than a clang builtin, and
+         clang still folds the pair into one fmla.2d at -O2 on arm64. *)
+      "static inline mere_f64x2 mere_f64x2_fma(mere_f64x2 a, mere_f64x2 b, mere_f64x2 c) {";
+      "  mere_f64x2 r = { fma(a[0], b[0], c[0]), fma(a[1], b[1], c[1]) }; return r;";
+      "}";
       (* Q-109 (2d): f32x4. The lanes are single precision and the language's
          scalar float is a double, so every boundary here is a C conversion --
          and C's double-to-float conversion IS round-to-nearest-even, which is

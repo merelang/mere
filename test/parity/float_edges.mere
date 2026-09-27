@@ -49,6 +49,15 @@ let nan = inf - inf;
 let _ = print (b (nan == nan));
 let _ = print (b (nan < 0.0));
 let _ = print (b (nan > 0.0));
+// v0.1.534: and therefore unequal to everything, itself included. `!=` is the
+// one comparison that is TRUE with a NaN on either side, and it is the one
+// this file did not ask: the LLVM backend emitted the ordered `fcmp one`,
+// which answers false, so `x != x` -- the NaN test -- said "not a NaN".
+let _ = print (b (nan != nan));
+let _ = print (b (nan != 0.0));
+let _ = print (b (0.0 != nan));
+let _ = print (b (nan <= 0.0));
+let _ = print (b (nan >= 0.0));
 
 // both zeros: equal as numbers, distinguishable by what dividing tells you
 let pos_zero = 0.0;
