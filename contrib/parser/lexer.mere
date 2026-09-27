@@ -49,6 +49,11 @@ type token =
   | TComma | TSemi
   | TColon | TColonColon
   | TPipe
+  // v0.1.539 (Q-153): the operators lib/lexer.ml has and this lexer did not.
+  // `|>` split into Pipe and Gt, `@@` and `?` did not lex at all.
+  // scripts/selfhost_lexer_ops_check.sh derives the list from lib/lexer.ml.
+  | TPipeGt | TLtPipe | TLtLt | TGtGt | TLtGt | TLtMinus
+  | TAtAt | TQuestion | TQuestionBang | TAmp
   | TDot | TDotDot | TDotDotDot
   | TUnderscore
   | TEof
@@ -209,6 +214,14 @@ let try_multi_op = fn (s: str) -> fn (n: int) -> fn (i: int) ->
     else if c == "|" && c2 == "|" then Some (TPipePipe, i + 2)
     else if c == "&" && c2 == "&" then Some (TAmpAmp, i + 2)
     else if c == ":" && c2 == ":" then Some (TColonColon, i + 2)
+    else if c == "|" && c2 == ">" then Some (TPipeGt, i + 2)
+    else if c == "<" && c2 == "|" then Some (TLtPipe, i + 2)
+    else if c == "<" && c2 == "<" then Some (TLtLt, i + 2)
+    else if c == ">" && c2 == ">" then Some (TGtGt, i + 2)
+    else if c == "<" && c2 == ">" then Some (TLtGt, i + 2)
+    else if c == "<" && c2 == "-" then Some (TLtMinus, i + 2)
+    else if c == "@" && c2 == "@" then Some (TAtAt, i + 2)
+    else if c == "?" && c2 == "!" then Some (TQuestionBang, i + 2)
     else if c == "." && c2 == "." then
       // `...` (TDotDotDot) takes priority over `..` (TDotDot)
       if i + 2 < n && char_at s (i + 2) == "." then Some (TDotDotDot, i + 3)
@@ -304,6 +317,8 @@ let tokenize = fn (s: str) ->
               else if c == "|" then Some TPipe
               else if c == "." then Some TDot
               else if c == "\\" then Some TBackslash
+              else if c == "?" then Some TQuestion
+              else if c == "&" then Some TAmp
               else None
             in
             match tok_opt with
@@ -344,6 +359,9 @@ let token_str = fn (t: token) -> match t with
   | TComma -> "Comma" | TSemi -> "Semi"
   | TColon -> "Colon" | TColonColon -> "ColonColon"
   | TPipe -> "Pipe"
+  | TPipeGt -> "PipeGt" | TLtPipe -> "LtPipe" | TLtLt -> "LtLt" | TGtGt -> "GtGt"
+  | TLtGt -> "LtGt" | TLtMinus -> "LtMinus" | TAtAt -> "AtAt"
+  | TQuestion -> "Question" | TQuestionBang -> "QuestionBang" | TAmp -> "Amp"
   | TDot -> "Dot" | TDotDot -> "DotDot" | TDotDotDot -> "DotDotDot"
   | TUnderscore -> "Underscore"
   | TEof -> "Eof"

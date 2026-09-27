@@ -69,6 +69,14 @@ let take_inline_before (line : int) =
    number stays visible. *)
 let trailing_pending : (int * string) list ref = ref []
 
+(* Q-154 slice 6 (v0.1.539): the expression the whole FILE ends in -- the tail
+   of `main`'s run of `let ... in` -- by identity. Nothing is ever written after
+   it, so it is the one place where a trailing comment can go back at the end of
+   a let run: anywhere else the caller may append the `;` or `)` that closes the
+   run, and a comment put before it would swallow it (13 files broke that way
+   when slice 4 tried the last arm of a match). *)
+let main_tail : expr option ref = ref None
+
 (* The comment written at the end of `line`, if the layout emitted that line in
    one piece. `chunk` is what is about to be written: a newline in it means the
    line the comment was on is not the line being closed. *)
@@ -566,7 +574,13 @@ and fmt_block ~ind e =
            ^ "\n");
         Buffer.add_string buf (indent ind);
         run body
-      | _ -> Buffer.add_string buf (fmt_expr ~prec:prec_top ~ind e)
+      | _ ->
+        let tail = fmt_expr ~prec:prec_top ~ind e in
+        let tail = match !main_tail with
+          | Some t when t == e ->
+            tail ^ take_trailing_on ~same_file:(e.loc.Loc.file = None) e.loc.Loc.line tail
+          | _ -> tail in
+        Buffer.add_string buf tail
     in
     run e;
     Buffer.contents buf
@@ -1200,7 +1214,18 @@ let format_program ?(comments : (int * string) list = [])
       migrate_inline (max 1 prog.main.loc.Loc.line);
       inline_mark := max 1 prog.main.loc.Loc.line;
       let above = take_before (max 1 prog.main.loc.Loc.line) in
+      (* Q-154 slice 6 (v0.1.539): the program's own trailing expression carries
+         the comment written after it -- `sum xs  // 15`, the shape an example
+         file ends in -- whether it is the whole of `main` or the tail of its
+         run of `let ... in` (see main_tail). *)
+      let rec tail_of (e : expr) = match e.node with
+        | Let (_, _, body) -> tail_of body
+        | _ -> e in
+      main_tail := Some (tail_of prog.main);
       let body = fmt_expr ~prec:prec_top ~ind:0 prog.main in
+      main_tail := None;
+      let body = body ^ take_trailing_on ~same_file:(prog.main.loc.Loc.file = None)
+                          prog.main.loc.Loc.line body in
       let trailing = take_before max_int in
       (* Anything the run never reached -- a comment inside a construct this
          slice does not place, an `if` arm or a match -- still has to come out

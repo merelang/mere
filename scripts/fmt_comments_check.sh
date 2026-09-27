@@ -168,7 +168,13 @@ fmt_known_skips="${FMT_KNOWN_SKIPS-brackets_balance list_lib template_engine}"
 # Then 111 -> 99 in the same version: with the splice undone, only THIS file's
 # externs are in the tree, so a bare name is a key again and the 12 trailing
 # comments on `extern` declarations come back.
-LOST_CEILING="${LOST_CEILING:-99}"
+# 99 -> 93 at v0.1.539 (slice 6): the expression the file ends in carries the
+# comment written after it, as the whole of `main` or as the tail of its run of
+# `let ... in`. What is left, classified by the line it was on: an `if` / `then`
+# inside an expression 30, a line ending in the caller's `;` 26, a variant or
+# match arm 12, `let ... in` 7, `,` 6, `else` 5, other mid-expression 4 -- and
+# 7 that are `//` inside a string literal, which are not comments at all.
+LOST_CEILING="${LOST_CEILING:-93}"
 FILE_FLOOR="${FILE_FLOOR:-280}"
 all_in=0; all_out=0; measured=0; unresolved=0; unexpected=""; stale_skip=""
 for f in "$ROOT"/examples/*.mere; do
