@@ -630,6 +630,36 @@ let builtin_read_stdin =
    (fn c -> run c) cmds` ran commands one at a time. fork/exec via
    Unix.create_process is thread-safe, letting `run` calls in different
    domains truly overlap. *)
+(* v0.1.538 (Q-088): OCaml's Unix.waitpid reports a signal in OCAML's
+   encoding -- Sys.sigkill is -7, Sys.sigxcpu is -27 -- and a signal OCaml
+   has no name for as the system's own number. `run` answers in the system's
+   numbering, the way the shell and the C backend do (137 for SIGKILL), so
+   the named ones are translated here. The numbers 1-15 other than SIGBUS are
+   the same on Linux and macOS; the rest are not, and are chosen by the
+   system the compiler was built for. *)
+let os_signal_number (n : int) : int =
+  if n >= 0 then n else
+  let linux = Platform_config.system <> "macosx" in
+  let table = [
+    Sys.sighup, 1; Sys.sigint, 2; Sys.sigquit, 3; Sys.sigill, 4; Sys.sigtrap, 5;
+    Sys.sigabrt, 6; Sys.sigfpe, 8; Sys.sigkill, 9; Sys.sigsegv, 11;
+    Sys.sigpipe, 13; Sys.sigalrm, 14; Sys.sigterm, 15;
+    Sys.sigttin, 21; Sys.sigttou, 22; Sys.sigxcpu, 24; Sys.sigxfsz, 25;
+    Sys.sigvtalrm, 26; Sys.sigprof, 27;
+    Sys.sigbus, (if linux then 7 else 10);
+    Sys.sigusr1, (if linux then 10 else 30);
+    Sys.sigusr2, (if linux then 12 else 31);
+    Sys.sigchld, (if linux then 17 else 20);
+    Sys.sigcont, (if linux then 18 else 19);
+    Sys.sigstop, (if linux then 19 else 17);
+    Sys.sigtstp, (if linux then 20 else 18);
+    Sys.sigurg, (if linux then 23 else 16);
+    Sys.sigsys, (if linux then 31 else 12);
+  ] in
+  match List.assoc_opt n table with
+  | Some k -> k
+  | None -> -n  (* sigpoll: no fixed number; a positive status beats 128 + a negative one *)
+
 let builtin_run =
   V_builtin ("run", fun v ->
     match v with
@@ -653,9 +683,10 @@ let builtin_run =
       let code = match status with
         | Unix.WEXITED n -> n
         (* Reached only when the shell itself is signalled, which the
-           subshell above makes rare rather than impossible. `128 + n` is the
-           right shape and `n` is still OCaml's encoding here: see Q-088. *)
-        | Unix.WSIGNALED n | Unix.WSTOPPED n -> 128 + n
+           subshell above makes rare rather than impossible -- `kill -9 $$`
+           does it, since `$$` is the shell even inside the subshell. `n` is
+           OCaml's encoding, translated to the system's (Q-088, v0.1.538). *)
+        | Unix.WSIGNALED n | Unix.WSTOPPED n -> 128 + os_signal_number n
       in
       V_int code
     | _ -> failwith "run: expected str")

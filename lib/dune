@@ -1,3 +1,12 @@
 (library
  (name mere)
  (libraries unix str))
+
+; v0.1.538 (Q-088): the target system, for the few answers that differ by it
+; -- signal numbers. `macosx` or `linux` from the OCaml that builds this.
+(rule
+ (targets platform_config.ml)
+ (action
+  (with-stdout-to
+   platform_config.ml
+   (echo "let system = \"%{ocaml-config:system}\"\n"))))

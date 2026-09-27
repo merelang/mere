@@ -1,14 +1,53 @@
-# Reserved names — Mere top-level fn names and C codegen collisions
+# Reserved names — Mere's reserved words, and the C collisions that are left
 
-Mere's C codegen **emits top-level fns directly as C functions**. As a result, if a top-level `let` / `let rec` binding name **collides with an existing function in libc / libm on macOS / Linux** or with a **C language keyword**, codegen succeeds but `clang` / `gcc` then fail with a **compile error**.
+Two different things make a name unusable, and they fail in different places:
 
-The interp / LLVM / Wasm backends are unaffected (so a program that runs in interp can fail in C codegen). Because this is easy to miss, the **Phase 38.A3 linter** issues a warning at parse time. This document is the full list of reserved names plus avoidance patterns.
+- **Mere's own reserved words** (§0) are refused by the parser, on every backend,
+  with the word named.
+- **C collisions** (§1) are names the C compiler already owns. Since v0.1.538 this
+  applies to **type names only**: a top-level `let` / `let rec` name is emitted with
+  a prefix by every backend (`mu_div` on C), so `let div = ...`, `let malloc = ...`,
+  `let printf = ...` and `let case = ...` compile and run on all five. A **type**
+  name is not prefixed on the C backend -- `type wait = ...` lowers to
+  `typedef struct wait wait;` and collides with `union wait` in `<sys/wait.h>` -- and
+  that is what the linter still warns about.
 
-> **TL;DR**: writing a top-level binding that collides with any name in the table below produces a warning + C compile error at codegen time. Avoid it via a **prefix (`m_` / `mere_`) / suffix (`_` / `_v`) / verb phrase (`run_*` / `*_list`)**.
+> **TL;DR**: a reserved word (§0) cannot be a name at all. A `type` whose name is in
+> §1 compiles on the interpreter, LLVM and Wasm and fails in the C compiler; rename
+> it with a prefix (`m_`) or suffix (`_`).
 
-## 1. Collision list (~110 names)
+## 0. Mere's reserved words (33)
 
-The implementation is in [`lib/pipeline.ml:42`](../lib/pipeline.ml) under `reserved_c_names`. Defining a top-level binding with one of these names triggers a Phase 38.A3 linter warning.
+`let` / `rec` / `and` / `in` / `if` / `then` / `else` / `for` / `do` / `while` /
+`true` / `false` / `fn` / `type` / `signature` / `region` / `view` / `drop` /
+`using` / `module` / `import` / `open` / `extern` / `trait` / `impl` / `dyn` /
+`derive` / `match` / `with` / `when` / `of` / `as` / `_`
+
+The list is the lexer's table (`Lexer.keywords`), and `scripts/keywords_doc_check.sh`
+fails when a word there is missing here or from language-reference.md -- which is
+how `view` went unlisted from the day it was added until v0.1.538. A reserved word
+used as a name is refused with the word named:
+
+```
+let view = 5;   // error: `view` is a reserved word, so it cannot be a name here
+```
+
+Most likely to hit: **`view`** (UI code), **`type`**, **`match`**, **`open`**,
+**`module`**, **`drop`**. `pub` is **not** reserved (see language-reference.md).
+
+## 1. C collisions — type names (~110 names + struct tags)
+
+The implementation is in [`lib/pipeline.ml`](../lib/pipeline.ml) under
+`reserved_c_names` and `reserved_c_type_names`. Declaring a `type` with one of these
+names triggers a warning, because the C backend emits it as a C typedef under the
+same name.
+
+⚠ **Until v0.1.538 the same warning fired for top-level `let` names too**, saying
+"this will be a compile error at codegen". That had stopped being true: every
+backend prefixes top-level bindings, and a program binding `div`, `malloc`,
+`printf`, `memcpy`, `strlen`, `case` and `main` printed the same answer on the
+interpreter, C, LLVM, Wasm and RV32. The warning was a false alarm on every
+backend, and it was removed rather than reworded.
 
 ### 1.1 C keywords (~30)
 
@@ -46,7 +85,7 @@ Most likely to hit: **`read`** / **`write`** (when writing file-I/O wrappers); *
 
 `main` is especially important — C reserves it as the execution entry point. A Mere top-level expression automatically becomes the `main` function, so a user `let main = ...` is **always a conflict**.
 
-## 2. Avoidance patterns (3)
+## 2. Avoidance patterns (3) — for a type name in §1
 
 | Pattern | Example (collision name → safe name) | Use case |
 |---|---|---|
@@ -61,7 +100,7 @@ Most likely to hit: **`read`** / **`write`** (when writing file-I/O wrappers); *
 
 ## 3. A different axis: shadowing a *builtin*
 
-The list above is about names the **C compiler** already owns. A separate
+§1 is about names the **C compiler** already owns. A separate
 hazard is a name **Mere** already owns: a top-level `let join = ...` is a
 perfectly good C identifier, but `join` is also the thread builtin, and a
 backend that lowers `join x` to `pthread_join` without first asking whether
@@ -103,15 +142,15 @@ Names most likely to collide this way: **`join`** (string-join helper),
 
 ## 4. See also
 
-- **Linter implementation**: [`lib/pipeline.ml:42-82`](../lib/pipeline.ml) (Phase 38.A3)
-- **patterns.md §5**: condensed version of this doc
-- **language-reference.md**: Mere language reserved words (`let` / `fn` / `match` / `if` etc.) are separate — they're rejected by the parser and can't be used as binding names.
+- **Linter implementation**: `warn_reserved_type_name` in [`lib/pipeline.ml`](../lib/pipeline.ml) (Phase 38.A3; type names only since v0.1.538)
+- **patterns.md §5**: condensed version of §1
+- **language-reference.md**, "Keywords": the same reserved words as §0, held to the lexer by the same gate.
 
 ## 5. Future extensions (DEFERRED)
 
 | Stage | Content |
 |---|---|
 | A. Auto-rename suggestions | The linter would suggest name-specific replacements like "`pow` → `power`" or "`case` → `case_`" (currently only generic `_` / `m_` / `_v` are suggested) |
-| B. Namespacing | Allow same-named top-level bindings inside modules (currently `M.case` after module rewrite is still emitted as a C function, so it's blocked) |
+| B. Prefix type names on the C backend | The fix that would retire §1 entirely: a `type` would lower to a prefixed typedef the way a `let` lowers to a prefixed function |
 
 Both are issue-driven work for after public release.

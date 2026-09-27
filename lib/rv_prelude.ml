@@ -538,10 +538,19 @@ let round = fn (x: float) ->
   if f < 0.5 then t
   else if __fp_hi_sign (float_bits_hi x) == 1 then t - 1.0 else t + 1.0;
 
-// the C backend's exact spelling: a < b ? a : b -- NOT libm's fmin (which
-// answers the other operand for a NaN; this answers b, like the ternary)
-let f_min = fn (a: float) -> fn (b: float) -> if a < b then a else b;
-let f_max = fn (a: float) -> fn (b: float) -> if a > b then a else b;
+// v0.1.538 (Q-177): the interpreter's Float.min / Float.max, transcribed
+// step for step from OCaml's stdlib, so that even the NaN that comes back is
+// the same one. This used to copy the C backend's `a < b ? a : b`, which
+// answered the OTHER operand when the NaN came first and returned equal zeros
+// in argument order; the C backend was the one that was wrong, and both
+// changed together. The sign is read from the bits, NaN's included.
+let __fp_sign_bit = fn (x: float) -> __fp_hi_sign (float_bits_hi x) == 1;
+let f_min = fn (x: float) -> fn (y: float) ->
+  if y > x || (not (__fp_sign_bit y) && __fp_sign_bit x) then (if y != y then y else x)
+  else (if x != x then x else y);
+let f_max = fn (x: float) -> fn (y: float) ->
+  if y > x || (not (__fp_sign_bit y) && __fp_sign_bit x) then (if x != x then x else y)
+  else (if y != y then y else x);
 
 let sqrt = fn (a: float) -> __sf_float_of_sf (__sf_fsqrt (__sf_sf_of_float a));
 

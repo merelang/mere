@@ -97,6 +97,10 @@ let _ = each vals (fn (p: (str * float * bool)) ->
         let _ = show ("add " ++ tag) (a + bb) in
         let _ = show ("sub " ++ tag) (a - bb) in
         let _ = show ("mul " ++ tag) (a * bb) in
+        // v0.1.538 (Q-177): f_min / f_max are prelude Mere on RV32I, and they
+        // copied the C backend's `a < b ? a : b`, NaN asymmetry and all.
+        let _ = show ("min " ++ tag) (f_min a bb) in
+        let _ = show ("max " ++ tag) (f_max a bb) in
         show ("div " ++ tag) (a / bb) in
     let _ = b ("eq " ++ tag) (a == bb) in
     let _ = b ("ne " ++ tag) (a != bb) in

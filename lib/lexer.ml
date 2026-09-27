@@ -127,6 +127,51 @@ let is_ident_cont c = is_alpha c || is_digit c
    which every caller of `tokenize` would otherwise have to change. The one
    consumer is semantic highlighting, which needs to colour the thing the
    compiler throws away. *)
+(* v0.1.538 (Q-084): the reserved words as a table rather than as arms of a
+   match, so the rest of the compiler can ask about them -- the parser names a
+   reserved word when one is used as a name (`let view = 5` said only "expected
+   pattern"), and scripts/keywords_doc_check.sh requires every entry here to be
+   listed in docs/reserved-names.md, which had never heard of `view`. *)
+let keywords : (string * token) list = [
+  ("let", T_let);
+  ("rec", T_rec);
+  ("and", T_and);
+  ("in", T_in);
+  ("if", T_if);
+  ("then", T_then);
+  ("else", T_else);
+  ("for", T_for);
+  ("do", T_do);
+  ("while", T_while);
+  ("true", T_true);
+  ("false", T_false);
+  ("fn", T_fn);
+  ("type", T_type);
+  ("signature", T_signature);
+  ("region", T_region);
+  ("view", T_view);
+  ("drop", T_drop);
+  ("using", T_using);
+  ("module", T_module);
+  ("import", T_import);
+  ("open", T_open);
+  ("extern", T_extern);
+  ("trait", T_trait);
+  ("impl", T_impl);
+  ("dyn", T_dyn);
+  ("derive", T_derive);
+  ("match", T_match);
+  ("with", T_with);
+  ("when", T_when);
+  ("of", T_of);
+  ("as", T_as);
+  ("_", T_underscore);
+]
+
+(* The spelling of a reserved-word token, or None for any other token. *)
+let keyword_spelling (t : token) : string option =
+  List.find_map (fun (w, k) -> if k = t && w <> "_" then Some w else None) keywords
+
 let rec tokenize ?file ?comments s =
   let len = String.length s in
   let line = ref 1 in
@@ -554,40 +599,8 @@ let rec tokenize ?file ?comments s =
         in
         let j = read i in
         let word = String.sub s i (j - i) in
-        let tok = match word with
-          | "let" -> T_let
-          | "rec" -> T_rec
-          | "and" -> T_and
-          | "in" -> T_in
-          | "if" -> T_if
-          | "then" -> T_then
-          | "else" -> T_else
-          | "for" -> T_for       (* Phase 36: `for x in xs do body` *)
-          | "do" -> T_do
-          | "while" -> T_while   (* Phase 36: `while cond do body` *)
-          | "true" -> T_true
-          | "false" -> T_false
-          | "fn" -> T_fn
-          | "type" -> T_type
-          | "signature" -> T_signature
-          | "region" -> T_region
-          | "view" -> T_view
-          | "drop" -> T_drop
-          | "using" -> T_using
-          | "module" -> T_module
-          | "import" -> T_import
-          | "open" -> T_open
-          | "extern" -> T_extern
-          | "trait" -> T_trait
-          | "impl" -> T_impl
-          | "dyn" -> T_dyn
-          | "derive" -> T_derive
-          | "match" -> T_match
-          | "with" -> T_with
-          | "when" -> T_when
-          | "of" -> T_of
-          | "as" -> T_as
-          | "_" -> T_underscore
+        let tok = match List.assoc_opt word keywords with
+          | Some t -> t
           | _ -> T_ident word
         in
         let w = j - i in

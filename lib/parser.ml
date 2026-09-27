@@ -1079,6 +1079,13 @@ let rec parse_program_internal tokens =
           mkp pos (Ast.P_constr (name, None)), rest
       end
     | (pos, T_ident name) :: rest -> mkp pos (Ast.P_var name), rest
+    (* v0.1.538 (Q-084): a reserved word where a name was wanted. `let view = 5`
+       said only "expected pattern", which describes the grammar and not the
+       mistake -- and `view` is a name a UI programmer reaches for first. *)
+    | (pos, tok) :: _ when Lexer.keyword_spelling tok <> None ->
+      let w = Option.get (Lexer.keyword_spelling tok) in
+      raise (Parse_error (pos, Printf.sprintf
+        "`%s` is a reserved word, so it cannot be a name here\nhelp: rename it, e.g. `%s_` or `my_%s`" w w w))
     | _ -> raise (Parse_error (pos_of toks, "expected pattern"))
   and logic_or toks =
     (* || is left-associative *)

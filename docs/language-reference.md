@@ -33,7 +33,12 @@ A char literal `'X'` is just a length-1 str (Mere has no separate char type). Co
 let rec and in if then else true false fn type signature
 match with when of as _ for do while
 module open import extern using region view drop
+trait impl dyn derive
 ```
+None of these can be a name; `let view = 5` is refused with "`view` is a
+reserved word". The list is the lexer's own table, and
+`scripts/keywords_doc_check.sh` holds this block and
+[reserved-names.md](reserved-names.md) to it.
 
 ### Operators and symbols
 ```
@@ -679,7 +684,7 @@ is something the compiler knows and the person cannot see.
 
 | warning | what it means |
 |---|---|
-| a top-level name collides with a C keyword or libc symbol | the C backend will refuse this later, with an error about generated code rather than about your line ([reserved-names.md](reserved-names.md)) |
+| a **type** name collides with a C type, keyword or libc symbol | the C backend will refuse this later, with an error about generated code rather than about your line ([reserved-names.md](reserved-names.md)). A `let` name cannot collide: every backend prefixes it |
 | `extern fn` declares a different arity than the compiler implements | the same, one layer down |
 | `main` is not special in Mere | the entry point is the file's trailing expression; a binding named `main` reads as if it were one |
 | non-exhaustive `match` with no wildcard for an unenumerable type | an approximation the checker cannot prove; a **named** missing case is an error, not a warning |

@@ -57,10 +57,19 @@ cpu_limit_plain|ulimit -t 1; sh $TMP/spin.sh|KILLED
 cpu_limit_exec|ulimit -t 1; exec sh $TMP/spin.sh|KILLED
 exit_zero|exit 0|0
 exit_nonzero|exit 3|3
+shell_killed|kill -9 \$\$|137
+shell_termed|kill -TERM \$\$|143
+shell_usr1|kill -USR1 \$\$|KILLED
 CASES
 )
+# The shell_* rows kill the shell `run` waits on, not a child of it: `$$` is
+# that shell even inside the subshell `run` wraps the command in. That is the
+# one path where the interpreter reads the signal from waitpid itself, in
+# OCaml's encoding, and it printed 121 / 117 for these (v0.1.538, Q-088).
+# SIGUSR1 is 10 on Linux and 30 on macOS, so its row asks only that the two
+# backends agree on a signal status -- which the C backend reads from the OS.
 
-EXPECTED=6
+EXPECTED=9
 ran=0
 fail=0
 
