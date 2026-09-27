@@ -110,15 +110,21 @@ fi
 # 2715 while the suite passed 2724, and 2796 while it passed 2856. A sentence
 # that names its own failure mode is not a check.
 #
-# `dune test` is what the number is ABOUT, so that is what is asked. dune
-# caches it, so on an unchanged tree this costs nothing; on a changed one the
-# build had to happen anyway.
+# `dune test` is what the number is ABOUT, so that is what is asked.
+#
+# ⚠ WITH --force (v0.1.536). This comment used to say "dune caches it, so on
+# an unchanged tree this costs nothing" -- and a cached test prints NOTHING,
+# so on an unchanged tree there was no "N passed" line to read. CI runs
+# `dune runtest` a few steps earlier, so on CI the tree was always unchanged
+# and this was red on every run; locally it passed whenever something had
+# just been rebuilt. --force reruns the suite in test/ (where the count comes
+# from), which is the cost of asking the question at all.
 claimed_t="$(sed -n 's/.*\*\*\([0-9]*\) tests passing\*\*.*/\1/p' "$README" | head -1)"
 if [ -z "$claimed_t" ]; then
   echo "FAIL first_run[counts]: README no longer states a test count in the form this reads -- the check lost its subject"
   fails=$((fails + 1))
 elif command -v dune >/dev/null 2>&1; then
-  actual_t="$( (cd "$ROOT" && dune test 2>&1) | sed -n 's/^\([0-9]*\) passed, .*/\1/p' | tail -1)"
+  actual_t="$( (cd "$ROOT" && dune test --force test 2>&1) | sed -n 's/^\([0-9]*\) passed, .*/\1/p' | tail -1)"
   if [ -z "$actual_t" ]; then
     echo "FAIL first_run[counts]: \`dune test\` printed no \"N passed\" line -- the count cannot be derived, so the README's number is unchecked again"
     fails=$((fails + 1))
