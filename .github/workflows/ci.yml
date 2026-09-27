@@ -820,6 +820,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/selfhost_check.sh
 
+      # The self-hosted lexer reads every operator lib/lexer.ml reads, as one
+      # token (v0.1.539, Q-153): `|>` came out as Pipe then Gt and `@@` / `?`
+      # did not lex, while selfhost_check stayed green on a corpus using none.
+      - name: selfhost_lexer_ops (the second lexer keeps up with the first)
+        if: ${{ !cancelled() }}
+        run: sh scripts/selfhost_lexer_ops_check.sh && sh scripts/selfhost_lexer_ops_check.sh --poison
+
       - name: lsp_smoke
         if: ${{ !cancelled() }}
         run: |

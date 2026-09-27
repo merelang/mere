@@ -4,6 +4,46 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.539 — 2026-09-28
+
+_The second lexer catches up with the first, and the file's last line keeps
+its comment._
+
+**The self-hosted lexer read ten operators wrong (Q-153).**
+`contrib/parser/lexer.mere` split `|>` -- the language's own pipe -- into
+Pipe and Gt, split `<|`, `<<`, `>>`, `<>` and `<-` the same way, and failed
+outright on `@@`, `?!`, `?` and `&`. `selfhost_check.sh` stayed green
+throughout, because the bootstrap corpus uses none of them. All ten are
+tokens now. The self-hosted parser does not read most of them yet, which is
+why adding them breaks nothing; what it needed first was the text split
+where the compiler splits it.
+
+`scripts/selfhost_lexer_ops_check.sh` (CI, with a poison) does not list the
+operators: it derives them from `lib/lexer.ml`'s arms -- every
+`'c' when ... s.[i + 1] = 'd'` is a two-character operator, every
+`'c' -> advance 1` a one-character one, 40 in all -- and requires each to be
+one token in the self-hosted lexer. Against the old lexer it names the ten.
+`//` is left out on purpose (it begins a comment in both), and the
+backslash arm, the one written as two characters in the OCaml source, is
+asked for by name after the first version of the gate missed it. Reserved
+words are a separate gap and are not asked: the self-hosted parser reads
+`import` as an identifier, so the lexer cannot make it a keyword alone.
+
+**`mere fmt` keeps the comment on the line a file ends with (Q-154, slice
+6).** `sum xs  // 15`, the shape an example file ends in, lost its comment
+whenever the expression was the tail of a run of `let ... in`: the formatter
+only puts a trailing comment back where it emits the whole line, and never
+asked at the end of a let run -- correctly, in general, because a caller may
+append the `;` or `)` that closes the run, and a comment placed before it
+swallows it. The one tail nothing is ever written after is the expression
+the whole file ends in, so that one is recognised by identity and asked.
+Comments lost on the examples corpus: 99 -> 93. What is left, by the line
+it was on: an `if` / `then` inside an expression 30, a line ending in the
+caller's `;` 26, a variant or match arm 12, `let ... in` 7, `,` 6, `else` 5,
+other 4 -- plus 7 that are `//` inside a string literal and not comments.
+
+---
+
 ## v0.1.538 — 2026-09-27
 
 _Four known failures, each of which had a written record and none of which
