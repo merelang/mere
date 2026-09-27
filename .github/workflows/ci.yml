@@ -420,6 +420,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/doc_coverage_check.sh
 
+      # Every reserved word the lexer has, in language-reference.md's Keywords
+      # block and in reserved-names.md (v0.1.538, Q-084): `view` was in neither
+      # list, and the reference's block was missing trait / impl / dyn / derive.
+      - name: "keywords doc (every reserved word is listed where people look)"
+        if: ${{ !cancelled() }}
+        run: sh scripts/keywords_doc_check.sh && sh scripts/keywords_doc_check.sh --poison
+
       - name: "decls round-trip (--decls output, pasted back, changes nothing)"
         if: ${{ !cancelled() }}
         run: sh scripts/decls_roundtrip.sh

@@ -4498,15 +4498,40 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = fcmp %s double %s, %s" r cmp av bv);
     r
+  (* v0.1.538 (Q-177): the interpreter's Float.min / Float.max, transcribed
+     step for step from OCaml's stdlib -- see the C backend. With x the first
+     operand and y the second:
+       c = y > x || (!signbit y && signbit x)
+       min = c ? (isnan y ? y : x) : (isnan x ? x : y)
+       max = c ? (isnan x ? x : y) : (isnan y ? y : x) *)
   | Ast.App ({ node = Ast.App ({ node = Ast.Var fname; _ }, a_e); _ }, b_e)
     when fname = "f_min" || fname = "f_max" ->
-    let cmp = if fname = "f_min" then "olt" else "ogt" in
-    let av = emit_expr env a_e in
-    let bv = emit_expr env b_e in
-    let cmp_r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = fcmp %s double %s, %s" cmp_r cmp av bv);
-    let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = select i1 %s, double %s, double %s" r cmp_r av bv);
+    let is_min = fname = "f_min" in
+    let xv = emit_expr env a_e in
+    let yv = emit_expr env b_e in
+    let gt = fresh_reg () and xi = fresh_reg () and yi = fresh_reg () in
+    let xneg = fresh_reg () and yneg = fresh_reg () and ypos = fresh_reg () in
+    let both = fresh_reg () and c = fresh_reg () in
+    let xnan = fresh_reg () and ynan = fresh_reg () in
+    let th = fresh_reg () and el = fresh_reg () and r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = fcmp ogt double %s, %s" gt yv xv);
+    emit_instr (Printf.sprintf "  %s = bitcast double %s to i64" xi xv);
+    emit_instr (Printf.sprintf "  %s = bitcast double %s to i64" yi yv);
+    emit_instr (Printf.sprintf "  %s = icmp slt i64 %s, 0" xneg xi);
+    emit_instr (Printf.sprintf "  %s = icmp slt i64 %s, 0" yneg yi);
+    emit_instr (Printf.sprintf "  %s = xor i1 %s, true" ypos yneg);
+    emit_instr (Printf.sprintf "  %s = and i1 %s, %s" both ypos xneg);
+    emit_instr (Printf.sprintf "  %s = or i1 %s, %s" c gt both);
+    emit_instr (Printf.sprintf "  %s = fcmp uno double %s, %s" xnan xv xv);
+    emit_instr (Printf.sprintf "  %s = fcmp uno double %s, %s" ynan yv yv);
+    (if is_min then begin
+       emit_instr (Printf.sprintf "  %s = select i1 %s, double %s, double %s" th ynan yv xv);
+       emit_instr (Printf.sprintf "  %s = select i1 %s, double %s, double %s" el xnan xv yv)
+     end else begin
+       emit_instr (Printf.sprintf "  %s = select i1 %s, double %s, double %s" th xnan xv yv);
+       emit_instr (Printf.sprintf "  %s = select i1 %s, double %s, double %s" el ynan yv xv)
+     end);
+    emit_instr (Printf.sprintf "  %s = select i1 %s, double %s, double %s" r c th el);
     r
   | Ast.App ({ node = Ast.Var "f_neg"; _ }, a_e) ->
     let av = emit_expr env a_e in

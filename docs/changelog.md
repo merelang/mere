@@ -4,6 +4,81 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.538 — 2026-09-27
+
+_Four known failures, each of which had a written record and none of which
+had been fixed._
+
+**`f_min` / `f_max` with a NaN or a signed zero (Q-177).** The interpreter
+answers with OCaml's `Float.min` / `Float.max` and Wasm with `f64.min` /
+`f64.max`; C and LLVM compiled `a < b ? a : b`, which is not symmetric in a
+NaN -- false with the NaN first, so `f_min nan 1.0` was `1.0` while
+`f_min 1.0 nan` was NaN -- and returned equal zeros in argument order, where
+-0 is below +0. The RV32/RV64 prelude had copied the C spelling on purpose.
+All three now transcribe OCaml's stdlib step for step:
+
+```
+c   = y > x || (!signbit y && signbit x)
+min = c ? (isnan y ? y : x) : (isnan x ? x : y)
+max = c ? (isnan x ? x : y) : (isnan y ? y : x)
+```
+
+The first version used `a + b` for the NaN case, and `rv_float_check.sh`
+caught it: a signalling NaN comes back from OCaml as it went in, and an add
+quiets it -- same NaN, different bits, and that gate compares bits. The
+transcription returns the operand itself. `test/parity/float_minmax.mere`
+covers every pair of eight values on the parity backends, and
+`test/float/rv_float_ops.mere` now asks `f_min` / `f_max` of every pair on
+RV32I, bit for bit against the machine (3440 lines).
+
+**`run` reported a shell killed by a signal in OCaml's numbering (Q-088).**
+v0.1.360 wrapped the command in a subshell so the shell `run` waits on
+usually survives to report `128 + signal` itself. When the shell itself is
+the one killed -- `kill -9 $$`, since `$$` is that shell even inside the
+subshell -- the interpreter read the status from waitpid, which carries
+OCaml's encoding (`Sys.sigkill = -7`), and answered 121 where the C backend
+answered 137; 117 for SIGTERM, 116 for SIGUSR1. OCaml's named signals are
+now translated to the system's numbers: 1-15 other than SIGBUS are the same
+on Linux and macOS, and the rest are chosen by the system the compiler was
+built for, which dune writes into `Platform_config` from
+`%{ocaml-config:system}`. Three rows in `run_status_check.sh` kill the
+waited-on shell; with the translation removed they fail as 121 / 117 / 116.
+
+**`mere -t` accepted programs the build refuses (Q-083).** The type query
+runs no borrow, move, Send or exhaustiveness check, so a non-exhaustive match
+typed there and was refused by `mere -c` -- and a measurement once made with
+`-t` concluded that a check did not exist. `-t` and `-te` still exit 0 with
+the type, which is what editors and scripts asking a type question need, and
+now print the build's own diagnostic on stderr under "note: `mere -t`
+answers a type; it does not accept the program". The findings come from
+`Pipeline.type_notes`, which runs the build's checks and puts back the
+warnings they collect, so `-t` prints nothing new for a program the build
+accepts.
+
+**`view` was reserved and nothing said so (Q-084).** `let view = 5` failed
+with "expected pattern", and `view` was in neither docs/reserved-names.md nor
+language-reference.md's Keywords block -- which was also missing `trait`,
+`impl`, `dyn` and `derive`. The lexer's reserved words are a table now
+(`Lexer.keywords`); the parser names one when it is used as a name ("`view`
+is a reserved word, so it cannot be a name here"), and
+`scripts/keywords_doc_check.sh` (CI, with a poison) requires every word in
+the table to be listed in both documents.
+
+**And a warning that was false on every backend.** Writing that section
+turned up the other half of reserved-names.md: "a top-level name that
+collides with a C keyword or libc/libm symbol ... will be a compile error at
+codegen". It had stopped being true -- every backend prefixes a top-level
+binding (`mu_div` on C) -- and a program binding `div`, `malloc`, `printf`,
+`memcpy`, `strlen`, `case` and `main` printed the same answer on the
+interpreter, C, LLVM, Wasm and RV32. The warning is gone. TYPE names are
+not prefixed on the C backend and do still collide (`type wait` against
+`union wait`), so that warning stays, and reserved-names.md and patterns.md
+say which is which.
+
+`dune test` 2868/0, parity 188.
+
+---
+
 ## v0.1.537 — 2026-09-27
 
 _`utf8_chars` split a stray continuation byte onto the character before it,

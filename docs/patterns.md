@@ -575,9 +575,14 @@ fn (p: Point) -> { p | x = 0 }          // OK with annotation
 
 Without row polymorphism, record-typed function args need annotations.
 
-### 5. Top-level fn names collide with libc / libm / C keywords (C codegen)
+### 5. Type names collide with libc / libm / C keywords (C codegen)
 
-C codegen emits top-level fns directly as C functions, so names that already exist in macOS / Linux's libc / libm or are C language keywords cause compile errors. Real collisions found in Phases 32-38:
+⚠ **Since v0.1.538 this is about `type` names only.** It used to say top-level fn
+names collide too, and they did in Phases 32-38; every backend now emits a top-level
+binding with a prefix (`mu_div`), so `let div = ...` compiles and runs everywhere and
+the warning that said otherwise is gone. A `type` is still emitted under its own name
+as a C typedef, so the names below still fail in the C compiler as type names. The
+collisions found in Phases 32-38, as they were then:
 
 | Mere name | Collides with |
 |---|---|

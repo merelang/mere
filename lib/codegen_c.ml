@@ -3117,11 +3117,21 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "((%s) > (%s))" (emit_expr a_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "f_ge"; _ }, a_e) ->
        Printf.sprintf "((%s) >= (%s))" (emit_expr a_e) (emit_expr arg)
+     (* v0.1.538 (Q-177): the interpreter's Float.min / Float.max, transcribed
+        -- OCaml's stdlib, step for step, so that even the NaN that comes back is
+        the same one (a signalling NaN is returned as it is, not quieted by an
+        add). `a < b ? a : b` was not symmetric in a NaN -- false with it first,
+        so the OTHER operand came back -- and returned equal zeros in argument
+        order, where -0 is below +0. *)
      | Ast.App ({ node = Ast.Var "f_min"; _ }, a_e) ->
-       Printf.sprintf "({ double __a = (%s); double __b = (%s); __a < __b ? __a : __b; })"
+       Printf.sprintf "({ double __x = (%s); double __y = (%s); \
+         (__y > __x || (!signbit(__y) && signbit(__x))) \
+           ? (__y != __y ? __y : __x) : (__x != __x ? __x : __y); })"
          (emit_expr a_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "f_max"; _ }, a_e) ->
-       Printf.sprintf "({ double __a = (%s); double __b = (%s); __a > __b ? __a : __b; })"
+       Printf.sprintf "({ double __x = (%s); double __y = (%s); \
+         (__y > __x || (!signbit(__y) && signbit(__x))) \
+           ? (__x != __x ? __x : __y) : (__y != __y ? __y : __x); })"
          (emit_expr a_e) (emit_expr arg)
      | Ast.Var "f_neg" ->
        Printf.sprintf "(-(%s))" (emit_expr arg)

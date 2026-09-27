@@ -1032,13 +1032,16 @@ let warn_reserved_name (loc : Loc.t) name =
        expression, not a `main` function. A top-level binding named `main` \
        compiles fine now, but reads as if it were the entry; consider renaming \
        it (e.g. `run`)." 
-  else if List.mem name reserved_c_names then
-    warn loc
-      (Printf.sprintf
-         "top-level name `%s` collides with a C keyword or libc/libm symbol — \
-          this will be a compile error at codegen. Renaming is recommended \
-          (e.g. `%s_` / `m_%s` / `%s_v`) (see docs/patterns.md §5)"
-         name name name name)
+  (* v0.1.538: and nothing else. This used to warn when a top-level name was
+     in `reserved_c_names` -- "collides with a C keyword or libc/libm symbol,
+     this will be a compile error at codegen" -- and the note above already
+     suspected it was stale. Measured: `div`, `malloc`, `printf`, `memcpy`,
+     `strlen`, `case` and `main` bound at the top level printed the same
+     answer on the interpreter, C, LLVM, Wasm and RV32, because every backend
+     prefixes a top-level binding. A warning that is false on every backend is
+     removed, not reworded. TYPE names are not prefixed on the C backend and
+     do collide; warn_reserved_type_name below keeps warning about those. *)
+  else ()
 
 (* C struct tags and typedefs from the headers the C backend emits. A Mere `type`
    lowers to `typedef struct <name> <name>;`, which claims both the tag namespace and
@@ -2250,6 +2253,22 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
      | Typer.Type_error (loc, msg) | Trait_elab.Trait_error (loc, msg) ->
        report loc msg);
   (prog, main_ty)
+
+(* Q-083 (option B, v0.1.538): what the build would refuse in a program the type
+   query accepts -- as data, for `mere -t` / `-te` to print on stderr while they
+   still exit 0 with the type. The type path (type_of) runs no borrow, move,
+   Send or exhaustiveness check; these are the build's own. The warnings they
+   collect are put back: they are the build's to print, and the type query did
+   not print them before. *)
+let type_notes ?base_dir s : (Loc.t * string) list =
+  let saved = !warnings in
+  let notes =
+    try ignore (infer_program ?base_dir s); [] with
+    | Typer.Type_error (loc, msg) | Trait_elab.Trait_error (loc, msg) -> [ (loc, msg) ]
+    | Exhaustive.Non_exhaustive fs -> fs
+  in
+  warnings := saved;
+  notes
 
 (* Everything wrong with a source string, as data rather than as an exception.
 

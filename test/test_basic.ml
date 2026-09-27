@@ -2356,6 +2356,34 @@ let () =
     (Pipeline.type_of "atan2") "(float -> (float -> float))";
   (* Q-176: a*b+c rounded once. 0.1 * 10 is not exactly 1, and only the
      fused form keeps the difference. *)
+  (* v0.1.538 (Q-083): the type query says what the build would refuse *)
+  let has s sub =
+    let n = String.length s and k = String.length sub in
+    let rec go i = i + k <= n && (String.sub s i k = sub || go (i + 1)) in go 0 in
+  check "Q-083: type_notes names the non-exhaustive match the build refuses"
+    (match Pipeline.type_notes "type c = R | G | B;\nlet f = fn (x: c) -> match x with | R -> 1 | G -> 2;\nf R" with
+     | [ (_, m) ] when has m "non-exhaustive" -> "one note"
+     | l -> Printf.sprintf "%d notes" (List.length l)) "one note";
+  check "Q-083: and nothing for a program the build accepts"
+    (string_of_int (List.length (Pipeline.type_notes "let x = 1;\nx + 1"))) "0";
+  (* v0.1.538 (Q-084): a reserved word used as a name is named *)
+  check "Q-084: `let view = 5` says view is a reserved word"
+    (try ignore (Pipeline.process "let view = 5;\n1"); "accepted"
+     with Parser.Parse_error (_, m) ->
+       if has m "`view` is a reserved word" then "named" else "unnamed: " ^ m) "named";
+  (* v0.1.538: a top-level let may be named like a libc function (every backend
+     prefixes it); a TYPE may not, and still warns *)
+  let collide_warnings src =
+    ignore (Pipeline.take_warnings ());
+    (try ignore (Pipeline.process src) with _ -> ());
+    List.length (List.filter (fun (_, m, _) -> has m "collides") (Pipeline.take_warnings ())) in
+  check "v0.1.538: `let div` is not warned about any more"
+    (string_of_int (collide_warnings "let div = fn (a: int) -> a;\ndiv 3")) "0";
+  check "v0.1.538: `type wait` still is"
+    (string_of_int (collide_warnings "type wait = W of int | N;\n1")) "1";
+  (* v0.1.538 (Q-088): OCaml's signal encoding, in the system's numbering *)
+  check "Q-088: SIGKILL and SIGTERM in the system's numbers"
+    (Printf.sprintf "%d %d" (Eval.os_signal_number Sys.sigkill) (Eval.os_signal_number Sys.sigterm)) "9 15";
   check "Q-176: fma type"
     (Pipeline.type_of "fma") "(float -> (float -> (float -> float)))";
   check "Q-176: fma rounds once"

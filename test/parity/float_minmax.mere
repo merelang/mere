@@ -1,0 +1,33 @@
+// float_minmax -- f_min / f_max with a NaN or a signed zero, on every backend.
+//
+// The interpreter's answer is OCaml's Float.min / Float.max, which is IEEE-754
+// 2019's minimum / maximum: a NaN on EITHER side gives a NaN, and -0 is less
+// than +0. Wasm's f64.min / f64.max answer the same. The C and LLVM backends
+// compiled `a < b ? a : b`, which is NOT symmetric: with a NaN first the
+// comparison is false and the other operand comes back, with it second the NaN
+// does -- so `f_min nan 1.0` was 1.0 and `f_min 1.0 nan` was NaN (v0.1.538,
+// Q-177). And `-0 < +0` is false, so the zeros came back in argument order.
+//
+// A NaN is printed as `nan` rather than by its bits: IEEE-754 does not specify
+// the payload or the sign of the NaN an operation returns. A zero is printed
+// by its sign, which it does specify.
+let nan = float_of_bits 2146959360 0;
+let neg_zero = float_of_bits 2147483648 0;
+let inf = 1.0 / 0.0;
+let show_f = fn (x: float) ->
+  if x != x then "nan"
+  else if x == 0.0 then (if 1.0 / x < 0.0 then "-0" else "+0")
+  else show x;
+let vals = [nan, neg_zero, 0.0, 1.0, 0.0 - 1.0, inf, 0.0 - inf, 2.5];
+let names = ["nan", "-0", "+0", "1", "-1", "inf", "-inf", "2.5"];
+let rec row = fn (xs: float list) -> fn (ns: str list) -> fn (a: float) -> fn (an: str) ->
+  match (xs, ns) with
+  | (Cons (b, xt), Cons (bn, nt)) ->
+    let _ = print (an ++ " " ++ bn ++ ": min " ++ show_f (f_min a b) ++ " max " ++ show_f (f_max a b)) in
+    row xt nt a an
+  | _ -> ();
+let rec all = fn (xs: float list) -> fn (ns: str list) ->
+  match (xs, ns) with
+  | (Cons (a, xt), Cons (an, nt)) -> let _ = row vals names a an in all xt nt
+  | _ -> ();
+all vals names

@@ -7,9 +7,9 @@ let usage () =
   print_endline "  mere -t <file.mere>   print the inferred type";
   print_endline "  mere -te <expr>       print the inferred type of an inline expression";
   print_endline "        -t and -te ANSWER A TYPE QUESTION, they do not accept the";
-  print_endline "        program: the borrow and thread-capture checks do not run,";
-  print_endline "        so a type here is not a promise that `mere -c` will build it";
-  print_endline "        — `mere check` is the one that answers that";
+  print_endline "        program: they exit 0 with the type even when the build";
+  print_endline "        would refuse it, and then say so on stderr with the";
+  print_endline "        build's own diagnostic — `mere check` is the one that fails";
   print_endline "  mere -c <file.mere>   emit C source (compile with clang)";
   print_endline "  mere -ce <expr>       emit C source for an inline expression";
   print_endline "        -c and -ll take `-g`: debug information back to the .mere";
@@ -165,6 +165,25 @@ let search_paths : string list ref = ref []
    `run_action` now takes. Only the program-running path can be silent
    (Q-136: a unit main prints nothing), so everything else says so here. *)
 let says (f : string -> string) : string -> string option = fun s -> Some (f s)
+
+(* Q-083 (option B, v0.1.538): `-t` / `-te` answer the type and still exit 0 --
+   a type query that died on a compile error would be useless to the editors
+   and scripts that ask it -- but when the build would REFUSE the program they
+   now say so on stderr. The type path runs no borrow, move, Send or
+   exhaustiveness check, so a non-exhaustive match typed here and was refused
+   by `-c`, and a measurement made with `-t` concluded that a check did not
+   exist. The findings are Pipeline.type_notes: the build's own checks. *)
+let type_noting ?base_dir (label : string) : string -> string option = fun s ->
+  let t = Mere.Pipeline.type_of ?base_dir s in
+  let note (loc : Mere.Loc.t) msg =
+    let (src, name) = match loc.Mere.Loc.file with
+      | Some f -> ((try read_file f with _ -> ""), f)
+      | None -> (s, label) in
+    prerr_endline "note: `mere -t` answers a type; it does not accept the program. The build refuses it:";
+    prerr_endline (Mere.Diagnostic.format ~source:src ~filename:name loc "error" msg)
+  in
+  List.iter (fun (loc, msg) -> note loc msg) (Mere.Pipeline.type_notes ?base_dir s);
+  Some t
 
 (* `--warnings-as-errors`: the run fails if it produced a warning.
 
@@ -948,7 +967,7 @@ let () =
   | [_; "-e"; expr] ->
     run_action Mere.Pipeline.process_opt "<inline>" expr
   | [_; "-te"; expr] ->
-    run_action (says Mere.Pipeline.type_of) "<inline>" expr
+    run_action (type_noting "<inline>") "<inline>" expr
   | [_; "-ce"; expr] ->
     run_action (says compile_to_c) "<inline>" expr
   | [_; "-ll"; "-g"; path] | [_; "-ll"; path; "-g"] ->
@@ -1052,7 +1071,7 @@ let () =
        on this path is the only thing that would be red. *)
     let source = read_file path in
     let base = Filename.dirname path in
-    run_action ~base_dir:base (says (Mere.Pipeline.type_of ~base_dir:base)) path source
+    run_action ~base_dir:base (type_noting ~base_dir:base path) path source
   (* Q-137: the forward declaration for every top-level function this file
      defines. Splitting a `let rec ... and ...` chain means writing one
      `let fn <name>: <ty>;` per shared name, and a chain worth splitting has
