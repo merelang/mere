@@ -30,6 +30,10 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="$ROOT/_build/default/bin/mere.exe"
 CC="${CC:-cc}"
+# LLVM IR needs clang whatever CC is: on the Ubuntu runner cc is gcc, which
+# took the .ll for a linker script. The C leg keeps CC, so there it is gcc's
+# answer that is checked -- a second compiler, not a second copy of the first.
+LLVM_CC="${LLVM_CC:-clang}"
 P="$ROOT/test/fma/fma_bits.mere"
 [ -x "$MERE" ] || { echo "fma_check: $MERE not found -- run 'dune build'" >&2; exit 1; }
 command -v "$CC" >/dev/null 2>&1 || { echo "FAIL fma_check: no C compiler"; exit 1; }
@@ -45,8 +49,12 @@ fail() { echo "FAIL fma_check: $*"; fails=$((fails + 1)); }
 # which families differ, by name
 compare() { # leg file
   if ! cmp -s "$2" "$TMP/want"; then
-    fam=$(diff "$2" "$TMP/want" | sed -n 's/^< \([a-z]*\) .*/\1/p' | tr '\n' ' ')
-    fail "$1 differs from fma(3)${fam:+ in: $fam}"
+    fam=$(diff "$2" "$TMP/want" | sed -n 's/^< \([a-z]*\) [0-9][0-9]*$/\1/p' | tr '\n' ' ')
+    # No family lines at all means the leg did not print checksums -- it
+    # failed to run. Say what it printed instead of an empty list (node 18
+    # without tail calls produced exactly that).
+    if [ -n "$fam" ]; then fail "$1 differs from fma(3) in: $fam"
+    else fail "$1 printed no checksums: $(head -1 "$2" | cut -c1-160)"; fi
     return 1
   fi
   return 0
@@ -64,8 +72,10 @@ if "$MERE" -c "$P" > "$TMP/p.c" 2>"$TMP/err"; then
   done
 else fail "mere -c refused: $(head -1 "$TMP/err")"; fi
 
-if "$MERE" -ll "$P" > "$TMP/p.ll" 2>"$TMP/err"; then
-  if "$CC" -O2 -w "$TMP/p.ll" -lm -o "$TMP/pl" 2>"$TMP/err"; then
+if ! command -v "$LLVM_CC" >/dev/null 2>&1; then
+  fail "no $LLVM_CC for the LLVM leg"
+elif "$MERE" -ll "$P" > "$TMP/p.ll" 2>"$TMP/err"; then
+  if "$LLVM_CC" -O2 -w "$TMP/p.ll" -lm -o "$TMP/pl" 2>"$TMP/err"; then
     "$TMP/pl" > "$TMP/llvm" 2>&1; compare LLVM "$TMP/llvm" && legs="$legs LLVM"
   else fail "the emitted LLVM IR did not build: $(head -1 "$TMP/err")"; fi
 else fail "mere -ll refused: $(head -1 "$TMP/err")"; fi

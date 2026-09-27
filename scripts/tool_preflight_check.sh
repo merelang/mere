@@ -33,7 +33,7 @@ cd "$ROOT" || exit 2
 CI_YML="${TOOL_PREFLIGHT_CI_YML-.github/workflows/ci.yml}"
 MODE="${1:-}"
 
-# --poison: three ways this check could stop meaning anything, each asserted by
+# --poison: six ways this check could stop meaning anything, each asserted by
 # the message it must print rather than by a non-zero exit.
 if [ "$MODE" = "--poison" ]; then
   fails=0
@@ -67,7 +67,12 @@ if [ "$MODE" = "--poison" ]; then
   # 5. the gate glob stops matching, so there is nothing to find unwired
   run "the gate list collapses" \
     "gates were found (floor" TOOL_PREFLIGHT_GATE_FLOOR=999
-  [ "$fails" -eq 0 ] && { echo "tool_preflight --poison: 5 caught"; exit 0; }
+  # 6. the name CI hands a gate is the one asked about on CI, not the gate's
+  #    default -- the reason rvd_oracle's tool read absent on every run
+  sed 's/OBJDUMP=riscv64-linux-gnu-objdump /OBJDUMP=no-such-objdump-poison /' "$CI_YML" > "$tmp/override.yml"
+  run "CI overrides a gate's tool with one that is not there" \
+    "ABSENT   no-such-objdump-poison" GITHUB_ACTIONS=true TOOL_PREFLIGHT_CI_YML="$tmp/override.yml"
+  [ "$fails" -eq 0 ] && { echo "tool_preflight --poison: 6 caught"; exit 0; }
   echo "tool_preflight --poison: $fails not caught"; exit 1
 fi
 
@@ -82,7 +87,11 @@ fi
 #              neither exists. Absence there is loud already; this derivation
 #              cannot tell "probe that leads to a skip" from "probe that leads
 #              to a failure", so the one false positive is named here.
-ALLOWED_ABSENT="${TOOL_PREFLIGHT_ALLOWED-psql sdl2-config wasmtime wasm-tools mere}"
+#   brew       a macOS convenience, not a dependency: tls_server_check.sh asks
+#              Homebrew where OpenSSL's headers are because Homebrew keeps them
+#              off the default include path. On Linux they are on it, and the
+#              gate runs (19 checks on the runner) with brew absent (v0.1.535).
+ALLOWED_ABSENT="${TOOL_PREFLIGHT_ALLOWED-psql sdl2-config wasmtime wasm-tools mere brew}"
 
 tmp=$(mktemp -d) || exit 1
 trap 'rm -rf "$tmp"' EXIT
@@ -103,9 +112,27 @@ for f in scripts/*.sh; do
       | sed 's/command -v "\{0,1\}//'
 
     # 2. a variable: command -v "$QEMU", resolved from VAR=${VAR:-tool} or VAR=tool
+    #
+    # ⚠ BUT WHAT CI PASSES WINS (v0.1.535). rvd_oracle_check.sh defaults to
+    # riscv64-elf-objdump (the Homebrew name) and CI runs it as
+    # `OBJDUMP=riscv64-linux-gnu-objdump sh scripts/rvd_oracle_check.sh`. Reading
+    # only the default, this reported the gate's tool absent on every CI run
+    # while the gate itself ran and passed against the Ubuntu one. --required is
+    # a question about CI's environment, so ON CI the name CI hands the gate is
+    # the name asked about. Off CI the gate is run the way a developer runs it,
+    # with no override, so the default is the right name there -- asking about
+    # the Ubuntu binary on a Mac would make the local report red for a gate that
+    # runs. A value that is itself an expansion is not a name.
     grep -ohE 'command -v "?\$\{?[A-Z_][A-Z0-9_]*' "$f" 2>/dev/null \
       | sed -e 's/.*\$//' -e 's/^{//' | sort -u \
       | while read -r v; do
+          ci_val=""
+          [ -n "${GITHUB_ACTIONS-}" ] && ci_val=$(grep -ohE "(^|[[:space:]])$v=[^[:space:]]+[[:space:]]+(opam exec -- )?(sh|bash) scripts/$g" "$CI_YML" 2>/dev/null \
+                     | head -1 | sed -E "s/^[[:space:]]*$v=//; s/[[:space:]].*//" | tr -d '\042\047')
+          case "$ci_val" in
+            ''|*'$'*) ;;
+            *) printf '%s\n' "$ci_val"; continue ;;
+          esac
           line=$(grep -m1 -E "^[[:space:]]*$v=" "$f" 2>/dev/null)
           [ -n "$line" ] || continue
           case "$line" in

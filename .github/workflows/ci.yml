@@ -192,6 +192,22 @@ jobs:
       - name: Install hyperframe / hpack (oracles for http2_parity, hpack_parity)
         run: python3 -m pip install --break-system-packages hyperframe==6.1.0 h2==4.4.1 hpack==4.2.0
 
+      # PostgreSQL as BINARIES, not as a service, the way mere-blog's CI does it:
+      # live_soundness_check.sh runs its own throwaway cluster on a port it picks,
+      # so nothing is shared between runs and there is nothing to collide over.
+      # Without them that gate SKIPS, and a gate that skips is a gate that does
+      # not run.
+      # v0.1.535: installed HERE, with the other tools, and not beside the gates
+      # that use it. It used to sit between two gates, after tool_preflight had
+      # already run -- so the preflight looked for initdb and pg_ctl before they
+      # were on the PATH, reported them absent, and was red from the day it
+      # became a required step (v0.1.531) while the gates that use them passed.
+      - name: PostgreSQL (oracle for live_soundness, migration, cascade_catalog)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql postgresql-client
+          echo "$(pg_config --bindir)" >> "$GITHUB_PATH"
+
       - name: Install dependencies
         run: opam install . --deps-only --with-test
 
@@ -266,8 +282,13 @@ jobs:
       # tool_preflight derives the tool list from the gates themselves and
       # fails HERE, naming the gate that would have disappeared, before any of
       # them has a chance to pass by not running.
+      # `opam exec --` because dune is a tool some gates need (first_run_check
+      # runs `dune test` to derive the README's test count), and it is only on
+      # the PATH inside the opam environment. Without it this step reported
+      # dune absent -- correctly, as it turned out: first_run_check ran without
+      # opam and failed on exactly that (v0.1.535).
       - name: tool_preflight (a gate that did not run is not a gate that passed)
-        run: sh scripts/tool_preflight_check.sh --required
+        run: opam exec -- sh scripts/tool_preflight_check.sh --required
 
       - name: tool_preflight poison
         if: ${{ !cancelled() }}
@@ -406,18 +427,6 @@ jobs:
       - name: live_query (which reads a write affects, on every backend)
         if: ${{ !cancelled() }}
         run: sh scripts/live_query_check.sh
-
-      # PostgreSQL as BINARIES, not as a service, the way mere-blog's CI does it:
-      # live_soundness_check.sh runs its own throwaway cluster on a port it picks,
-      # so nothing is shared between runs and there is nothing to collide over.
-      # Without them that gate SKIPS, and a gate that skips is a gate that does
-      # not run.
-      - name: PostgreSQL (oracle for live_soundness)
-        if: ${{ !cancelled() }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql postgresql-client
-          echo "$(pg_config --bindir)" >> "$GITHUB_PATH"
 
       - name: migration_check (a migration consumes every existing row)
         if: ${{ !cancelled() }}
@@ -703,7 +712,7 @@ jobs:
       # outward. This is.
       - name: first_run_check (the README, executed)
         if: ${{ !cancelled() }}
-        run: sh scripts/first_run_check.sh
+        run: opam exec -- sh scripts/first_run_check.sh
 
       # Parts of the Wasm runtime are literal WAT text gated behind a flag only
       # a program using that feature sets, so text nobody reaches is never
