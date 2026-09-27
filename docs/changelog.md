@@ -4,6 +4,56 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.535 — 2026-09-27
+
+_CI had been red since v0.1.531, on two steps that were right about something
+and wrong about where._ The Gates job failed on `tool_preflight` and
+`first_run_check` for every push from v0.1.531 to v0.1.534, while every gate
+passed locally -- including those two, which is how four versions went out on
+a red build. ⚠ **The local sweep in v0.1.533 ("run every gate") was run on a
+laptop, and the laptop is not the runner.**
+
+**`first_run_check`: the one real finding.** v0.1.533 derives the README's
+test count by running `dune test`, and the CI step ran the script without
+`opam exec --`, where dune is not on the PATH: `FAIL first_run[counts]: no
+dune`. The step runs under `opam exec --` now. `tool_preflight` had said so --
+`dune — scripts/first_run_check.sh would skip` -- in the same log, under four
+false alarms.
+
+**`tool_preflight`: four false alarms, three causes.**
+
+- `initdb` and `pg_ctl`: the PostgreSQL install step sat between two gates,
+  well after the preflight, so the tools were not on the PATH yet when the
+  preflight looked. The gates that use them ran and passed. The install is
+  with the other tools now, before the preflight.
+- `riscv64-elf-objdump`: the preflight resolves `command -v "$OBJDUMP"` from
+  the script's default, the Homebrew name, while CI runs the gate as
+  `OBJDUMP=riscv64-linux-gnu-objdump sh scripts/rvd_oracle_check.sh`. On CI
+  (`GITHUB_ACTIONS` set) the name CI passes the gate is the one asked about;
+  off CI the default still is, because that is how a developer runs it. A
+  sixth poison replaces CI's name with one that does not exist and requires
+  the preflight to report it.
+- `brew`: `tls_server_check.sh` asks Homebrew where OpenSSL's headers are on
+  macOS; on Linux they are on the default path and the gate runs 19 checks
+  without it. It is in `ALLOWED_ABSENT`, with that reason.
+
+The preflight step runs under `opam exec --` too, so that dune -- a tool a
+gate CI runs needs -- is asked about in the environment that gate gets.
+
+**`fma_check`, new in v0.1.534, was red on its first CI run.** Its LLVM leg
+compiled the `.ll` with `$CC`, which on the Ubuntu runner is gcc, and gcc
+took the IR for a linker script. The LLVM leg uses clang now (`LLVM_CC`); the
+C leg keeps `$CC`, so the runner checks gcc's answer there as a second
+compiler. ⚠ A new gate is supposed to run once on a CI-like Linux image
+before it is pushed; this one was not, and its first Linux run was the CI
+run. It has been since: x86-64 Ubuntu (gcc 13 at -O0 and -O2, clang 18 for
+the IR, glibc's fma as the oracle) and arm64 Ubuntu under dash, all six
+families matching. A leg that prints no checksums at all is now reported with
+what it did print -- under node 18, which has no tail calls, the report had
+been "differs in:" and an empty list.
+
+---
+
 ## v0.1.534 — 2026-09-27
 
 _`fma`: one rounding, asked for by name — and two LLVM bugs its gate found on
