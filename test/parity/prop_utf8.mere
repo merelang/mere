@@ -1,5 +1,12 @@
-// UTF-8 character splitting disagrees between the interpreter and the three
-// compiled backends, and the interpreter is the one that is right.
+// UTF-8 character splitting DISAGREED between the interpreter and the three
+// compiled backends until v0.1.537, and the interpreter was the one that was
+// right. The history is kept below because it is why this file exists.
+//
+// v0.1.537: the difference was under the prelude, as suspected -- in the
+// `utf8_chars` builtin, which the compiled backends each implemented as a
+// BACKWARD walk that gave every continuation byte to the byte before it. The
+// interpreter, and the compiled backends' own `utf8_len`, split FORWARD by the
+// lead byte's span. All three split forward now, and the pins are gone.
 //
 // Found by contrib/prop on its first run, then narrowed below codepoint_at to
 // the thing that actually differs. For `s = "A" ++ chr 128` — two bytes, 0x41
@@ -24,12 +31,11 @@
 // of it that the interpreter reaches first — and finding out which is a
 // separate measurement, not a guess to make while writing a test.
 //
-// The three compiled answers are pinned, not tolerated: each must match its
-// .expected byte for byte, so any other change here is still a failure, and
-// fixing the split breaks all three pins at once and says so. Deleting the lines
-// would be reaching agreement by declining to ask.
+// Until v0.1.537 the three compiled answers were pinned, not tolerated: each
+// had to match a .expected byte for byte. The fix broke all three pins at once,
+// which is how it announced itself, and they were deleted with it.
 //
-// Execution mode: 4 backends, interp is the reference, C / LLVM / Wasm pinned.
+// Execution mode: 4 backends, interp is the reference.
 
 import "../../contrib/prop/prop.mere";
 

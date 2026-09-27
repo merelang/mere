@@ -7283,28 +7283,51 @@ let list_str_runtime_wasm = {|
         (local.set $c (i32.add (local.get $c) (i32.const 1)))
         (br $lp)))
     (i64.extend_i32_s (local.get $c)))
+  ;; v0.1.537: forward, by the lead byte's span, like the interpreter and
+  ;; $__lang_utf8_len above. The backward walk gave a stray continuation byte
+  ;; to the ASCII byte before it ("A" ++ chr 128 was one character). The
+  ;; starts are recorded going forward (4 bytes each, from the bump region)
+  ;; and the list is built from the back.
   (func $__lang_utf8_chars (param $s8 i64) (result i64)
-    (local $n i32) (local $end i32) (local $st i32) (local $l i32)
-    (local $tok i32) (local $j i32) (local $acc i32)
+    (local $n i32) (local $i i32) (local $l i32) (local $k i32) (local $st i32)
+    (local $a i32) (local $tok i32) (local $j i32) (local $acc i32) (local $b i32)
     (local $s i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $n (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
     (local.set $acc (i32.wrap_i64 (call $__lang_list_str_nil)))
-    (local.set $end (local.get $n))
+    (if (i32.le_s (local.get $n) (i32.const 0)) (then (return (i64.extend_i32_s (local.get $acc)))))
+    (local.set $st (i32.and (i32.add (global.get $__lang_bump) (i32.const 3)) (i32.const -4)))
+    (global.set $__lang_bump (i32.add (local.get $st) (i32.shl (i32.add (local.get $n) (i32.const 1)) (i32.const 2))))
+    (local.set $i (i32.const 0))
+    (local.set $k (i32.const 0))
+    (block $fdone
+      (loop $fwd
+        (br_if $fdone (i32.ge_s (local.get $i) (local.get $n)))
+        (local.set $b (i32.load8_u (i32.add (local.get $s) (local.get $i))))
+        (local.set $l
+          (if (result i32) (i32.lt_u (local.get $b) (i32.const 128))
+            (then (i32.const 1))
+            (else (if (result i32) (i32.and (i32.ge_u (local.get $b) (i32.const 192)) (i32.le_u (local.get $b) (i32.const 223)))
+              (then (i32.const 2))
+              (else (if (result i32) (i32.and (i32.ge_u (local.get $b) (i32.const 224)) (i32.le_u (local.get $b) (i32.const 239)))
+                (then (i32.const 3))
+                (else (if (result i32) (i32.and (i32.ge_u (local.get $b) (i32.const 240)) (i32.le_u (local.get $b) (i32.const 247)))
+                  (then (i32.const 4))
+                  (else (i32.const 1))))))))))
+        (if (i32.gt_s (local.get $l) (i32.sub (local.get $n) (local.get $i)))
+          (then (local.set $l (i32.sub (local.get $n) (local.get $i)))))
+        (i32.store (i32.add (local.get $st) (i32.shl (local.get $k) (i32.const 2))) (local.get $i))
+        (local.set $k (i32.add (local.get $k) (i32.const 1)))
+        (local.set $i (i32.add (local.get $i) (local.get $l)))
+        (br $fwd)))
+    (i32.store (i32.add (local.get $st) (i32.shl (local.get $k) (i32.const 2))) (local.get $n))
     (block $done
-      (loop $outer
-        (br_if $done (i32.le_s (local.get $end) (i32.const 0)))
-        ;; scan backward to this character's lead byte
-        (local.set $st (i32.sub (local.get $end) (i32.const 1)))
-        (block $found
-          (loop $back
-            (br_if $found (i32.le_s (local.get $st) (i32.const 0)))
-            (br_if $found
-              (i32.ne (i32.and (i32.load8_u (i32.add (local.get $s) (local.get $st))) (i32.const 192))
-                      (i32.const 128)))
-            (local.set $st (i32.sub (local.get $st) (i32.const 1)))
-            (br $back)))
-        (local.set $l (i32.sub (local.get $end) (local.get $st)))
+      (loop $back
+        (br_if $done (i32.le_s (local.get $k) (i32.const 0)))
+        (local.set $k (i32.sub (local.get $k) (i32.const 1)))
+        (local.set $a (i32.load (i32.add (local.get $st) (i32.shl (local.get $k) (i32.const 2)))))
+        (local.set $l (i32.sub (i32.load (i32.add (local.get $st) (i32.shl (i32.add (local.get $k) (i32.const 1)) (i32.const 2))))
+                               (local.get $a)))
         ;; copy the char bytes into a fresh NUL-terminated str
         (local.set $tok (i32.add (global.get $__lang_bump) (i32.const 4)))
         (global.set $__lang_bump (i32.add (i32.add (local.get $tok) (local.get $l)) (i32.const 1)))
@@ -7314,13 +7337,12 @@ let list_str_runtime_wasm = {|
           (loop $clp
             (br_if $cend (i32.ge_s (local.get $j) (local.get $l)))
             (i32.store8 (i32.add (local.get $tok) (local.get $j))
-                        (i32.load8_u (i32.add (i32.add (local.get $s) (local.get $st)) (local.get $j))))
+                        (i32.load8_u (i32.add (i32.add (local.get $s) (local.get $a)) (local.get $j))))
             (local.set $j (i32.add (local.get $j) (i32.const 1)))
             (br $clp)))
         (i32.store8 (i32.add (local.get $tok) (local.get $l)) (i32.const 0))
         (local.set $acc (i32.wrap_i64 (call $__lang_list_str_cons (i64.extend_i32_s (local.get $tok)) (i64.extend_i32_s (local.get $acc)))))
-        (local.set $end (local.get $st))
-        (br $outer)))
+        (br $back)))
     (i64.extend_i32_s (local.get $acc)))
   ;; str_split s delim — 2-pass: count tokens, then build list back-to-front.
   (func $__lang_str_split (param $s8 i64) (param $delim8 i64) (result i64)

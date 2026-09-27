@@ -10329,23 +10329,39 @@ let str_list_helpers () =
       "  }";
       "  return c;";
       "}";
+      (* v0.1.537: FORWARD, by the lead byte's span, the way the interpreter and
+         this file's own __lang_utf8_len split. It used to walk BACKWARD and give
+         every continuation byte to whatever byte preceded it, so "A" ++ chr 128
+         -- an ASCII byte and a stray continuation -- came out as ONE character
+         here and on LLVM and Wasm, and as two on the interpreter (the pinned
+         DIVERGE in test/parity/prop_utf8). No backward walk can reproduce the
+         forward rule: a lead does not check what follows it (0xE0 'A' 'B' is one
+         three-byte span), so the boundaries are only known from the front. The
+         starts are recorded going forward and the list is built from the back. *)
       "static list_str __lang_utf8_chars(const char* s) {";
       "  int n = (int)__lang_str_size(s);";
       "  list_str acc = list_str__mk(0, &__mshared_list_str_t0);";
-      "  int end = n;";
-      "  while (end > 0) {";
-      "    int st = end - 1;";
-      "    while (st > 0 && (((unsigned char)s[st]) & 0xC0) == 0x80) st--;";
-      "    int l = end - st;";
+      "  if (n == 0) return acc;";
+      "  int* st = (int*)malloc(sizeof(int) * ((size_t)n + 1));";
+      "  int k = 0, i = 0;";
+      "  while (i < n) {";
+      "    int l = __lang_utf8_span((unsigned char)s[i]);";
+      "    if (l > n - i) l = n - i;";
+      "    st[k++] = i; i += l;";
+      "  }";
+      "  st[k] = n;";
+      "  while (k > 0) {";
+      "    k--;";
+      "    int a = st[k], l = st[k + 1] - st[k];";
       "    char* tok = __lang_str_alloc(__lang_current_region, (size_t)l);";
-      "    memcpy(tok, s + st, (size_t)l);";
+      "    memcpy(tok, s + a, (size_t)l);";
       "    tok[l] = '\\0';";
       "    struct list_str_node* cons = (struct list_str_node*)__lang_region_alloc(__lang_current_region, sizeof(struct list_str_node));";
       "    cons->payload.Cons.f0 = tok;";
       "    cons->payload.Cons.f1 = acc;";
       "    acc = list_str__mk(1, cons);";
-      "    end = st;";
       "  }";
+      "  free(st);";
       "  return acc;";
       "}";
       "static list_str __lang_str_split(const char* s, const char* delim) {";
