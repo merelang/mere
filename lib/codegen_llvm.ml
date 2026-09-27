@@ -3804,10 +3804,16 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                         r (llvm_cmp_int op) c);
           r)
      | Ast.TyFloat ->
-       (* v0.1.44: float comparisons are fcmp on double (ordered). The
-          icmp fallthrough was invalid IR on float operands. *)
+       (* v0.1.44: float comparisons are fcmp on double. The icmp fallthrough
+          was invalid IR on float operands.
+          v0.1.534: ordered for every predicate EXCEPT `!=`, which is `une`.
+          "Ordered and not equal" is false when either side is a NaN, so
+          `x != x` -- the NaN test -- was false here and true on the
+          interpreter, C and Wasm, which all give IEEE-754's answer: a NaN is
+          unequal to everything, itself included. Found by the fma gate
+          (Q-176), which folds NaN results with exactly that test. *)
        let fpred = match op with
-         | Ast.Eq -> "oeq" | Ast.Ne -> "one"
+         | Ast.Eq -> "oeq" | Ast.Ne -> "une"
          | Ast.Lt -> "olt" | Ast.Le -> "ole"
          | Ast.Gt -> "ogt" | Ast.Ge -> "oge"
        in
@@ -4619,6 +4625,16 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = bitcast i64 %s to double" r o);
     r
+  (* Q-176: llvm.fma is fused by definition, and it is the program asking --
+     no fadd/fmul here carries a `contract` flag, so nothing else fuses. *)
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "fma"; _ }, a_e); _ }, b_e); _ }, c_e)
+    when not (user_shadows_llvm env "fma") ->
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let cv = emit_expr env c_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call double @llvm.fma.f64(double %s, double %s, double %s)" r av bv cv);
+    r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "atan2"; _ }, a_e); _ }, b_e) ->
     let av = emit_expr env a_e in
     let bv = emit_expr env b_e in
@@ -5376,6 +5392,13 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let t = fresh_reg () and r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = insertelement <2 x double> undef, double %s, i32 0" t av);
     emit_instr (Printf.sprintf "  %s = insertelement <2 x double> %s, double %s, i32 1" r t bv); r
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "f64x2_fma"; _ }, a_e); _ }, b_e); _ }, c_e) ->
+    simd_used_llvm := true;
+    let av = emit_expr env a_e in
+    let bv = emit_expr env b_e in
+    let cv = emit_expr env c_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call <2 x double> @llvm.fma.v2f64(<2 x double> %s, <2 x double> %s, <2 x double> %s)" r av bv cv); r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var ("f64x2_add" | "f64x2_sub" | "f64x2_mul" | "f64x2_div" as op); _ }, a_e); _ }, b_e) ->
     simd_used_llvm := true;
     let ir_op = match op with "f64x2_add" -> "fadd" | "f64x2_sub" -> "fsub" | "f64x2_mul" -> "fmul" | _ -> "fdiv" in
@@ -8111,6 +8134,7 @@ let runtime_decls =
       "declare double @llvm.log.f64(double)";
       "declare double @llvm.pow.f64(double, double)";
       "declare double @atan2(double, double)";
+      "declare double @llvm.fma.f64(double, double, double)";  (* Q-176 *)
       (* the underscore pair: the plain one restores the signal mask, which
          is a syscall per entry on macOS. See the note in codegen_c.ml. *)
       "declare i32 @_setjmp(ptr) returns_twice";
@@ -10788,6 +10812,7 @@ let emit_map_runtime_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
 let simd_runtime_llvm =
   String.concat "\n"
     [ "@.idxfmt_f64x2 = private constant [53 x i8] c\"f64x2_extract: lane %lld out of range (lanes = %lld)\\00\"";
+      "declare <2 x double> @llvm.fma.v2f64(<2 x double>, <2 x double>, <2 x double>)";  (* Q-176 *)
       "@.idxfmt_f32x4 = private constant [53 x i8] c\"f32x4_extract: lane %lld out of range (lanes = %lld)\\00\"";
       "define double @mere_f32x4_extract(<4 x float> %v, i64 %i) {";
       "entry:";
@@ -13813,6 +13838,15 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      directly — without this the cursor keeps whatever the last emitted fn
      body left behind and main sees only part of the file. *)
   current_toplevel_pos := max_int;
+  (* v0.1.534: and main sees NO host's inner lifts. `inner_lifts_llvm` is the
+     view of whichever host was emitted last -- the lifted helpers run just
+     above -- so a local `let atan2 = ...` inside some fn made every `atan2`
+     in main call that local instead of the builtin (2.0 for `atan2 1.0 1.0`).
+     main's own local fns are not lifted through this table at all
+     (lift_inner_fns_llvm walks the top-level fns only), so the right view here
+     is the empty one. Found by the fma parity case (Q-176), which binds a
+     local `fma` and uses the builtin elsewhere in the same file. *)
+  Hashtbl.reset inner_lifts_llvm;
   emit_instr "entry:";
   emit_instr
     "  call void @__lang_region_init(ptr @__lang_default_region, i64 4194304)";

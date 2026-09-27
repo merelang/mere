@@ -1,0 +1,50 @@
+// fma -- a*b+c rounded once (Q-176), on the paths a backend can take it.
+//
+// The bit-for-bit check against the machine's fma(3) is scripts/fma_check.sh;
+// this file is the parity corpus's reach into the same code, so that the
+// Wasm runtime section ($__lang_fma, the software fma) is emitted and run by
+// the corpus like every other gated section (test/parity/SECTIONS).
+
+let bits = fn (x: float) -> str_of_int (float_bits_hi x) ++ ":" ++ str_of_int (float_bits_lo x);
+
+// the example that tells one rounding from two: 0.1 * 10 is not exactly 1
+let _ = print (show (fma 0.1 10.0 (0.0 - 1.0)));
+let _ = print (show (0.1 * 10.0 - 1.0));
+
+// unboxed: fma inside arithmetic, and arithmetic inside fma
+let a = 1.0 / 3.0;
+let b = 3.0;
+let _ = print (bits (fma a b (0.0 - 1.0) * 2.0 + 1.0));
+let _ = print (bits (fma (a + a) (b - 1.0) (fma a b (0.0 - 1.0))));
+
+// boxed: through a function, a list and a record
+let pass = fn (x: float) -> x;
+let _ = print (bits (pass (fma a a (0.0 - 0.1111111111111111))));
+let xs = [fma 2.0 3.0 1.0, fma a b 0.0, fma 0.5 0.5 0.25];
+let _ = print (show (list_fold xs 0.0 (fn (acc: float) -> fn (x: float) -> acc + x)));
+type P = { v: float };
+let p = P { v = fma 1.5 1.5 (0.0 - 2.25) };
+let _ = print (show p.v);
+
+// the sign of an exact result: a product that underflows to zero keeps its sign
+let tiny = float_of_bits 443547648 0;                   // 2^-600
+let neg_zero = float_of_bits 2147483648 0;
+let _ = print (bits (fma tiny (0.0 - tiny) 0.0));        // -0: the product's sign
+let _ = print (bits (fma tiny tiny neg_zero));           // +0
+// inf and NaN go through as a*b+c would
+let inf = 1.0 / 0.0;
+let _ = print (show (fma inf 2.0 1.0));
+let nan_r = fma inf 0.0 1.0;
+let _ = print (show (nan_r != nan_r));
+
+// lane-wise
+let v = f64x2_fma (f64x2_make 0.1 a) (f64x2_splat 10.0) (f64x2_make (0.0 - 1.0) (0.0 - 3.3333333333333335));
+let _ = print (show v);
+let _ = print (bits (f64x2_extract v 0) ++ " " ++ bits (f64x2_extract v 1));
+let _ = print (show (f64x2_reduce_add (f64x2_fma v v v)));
+let keep = P { v = f64x2_extract (f64x2_fma (f64x2_splat 3.0) (f64x2_splat a) (f64x2_splat (0.0 - 1.0))) 1 };
+let _ = print (bits keep.v);
+
+// a local binding named fma is the program's, not the builtin
+let own = fn (u: int) -> let fma = fn (x: float) -> fn (y: float) -> fn (z: float) -> x + y + z in fma 1.0 2.0 3.0;
+print (show (own 0))

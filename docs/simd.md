@@ -91,7 +91,7 @@ are refused by the type checker; `show` and `to_json` work
 
 The builtins, with signatures and lane semantics, are tabled in
 [stdlib-reference.md](stdlib-reference.md) under "the 128-bit SIMD types":
-for `f64x2` splat / make / extract / add / sub / mul / div / reduce_add /
+for `f64x2` splat / make / extract / add / sub / mul / div / fma / reduce_add /
 load / store; for `f32x4` the same without load and store; for `u8x16` splat / extract / from_bytes / load / and / or /
 xor / sub_sat / eq / swizzle / shr / shift_in / any_true / reduce_add. The
 loads are bounds-checked like `vec_get` (`u8x16_load b i` needs `[i, i+16)`
@@ -196,6 +196,9 @@ The full table with conditions is in
   sixteen is a ceiling of 2x, so most of it arrives. A separate row and not a
   variant of the one above, because single and double precision are different
   answers and only the wall clock is comparable.
+- `mat4xvec4` with `f64x2_fma` (v0.1.534): **100 ms** against the 140 ms of
+  `f64x2_mul` + `f64x2_add`, through the C backend. A different answer, not a
+  faster spelling of the same one -- see "Fused multiply-add" below.
 - `axpy_simd`: loses to the auto-vectorized `axpy` (0.12 s against 0.08 s).
 - `utf8valid` 72 ms, `utf8valid_simd` 29 ms, scalar C 54 ms: 2.5x the scalar
   Mere machine and 1.9x scalar C, about 4 GB/s.
@@ -229,3 +232,31 @@ makes the accumulation lane-parallel and is 1.44x that, and faster than C
 (`mat4xvec4`). So: if a floating-point loop has more than one axis, check
 which one the compiler put in the lanes before concluding the automatic path
 has served it.
+
+### Fused multiply-add
+
+`fma a b c` and `f64x2_fma` compute `a * b + c` with **one** rounding
+(v0.1.534). `a * b + c` written out keeps its two roundings on every backend
+at every optimization level: the C backend emits `#pragma STDC FP_CONTRACT OFF`
+precisely so that clang does not fuse it on its own (v0.1.315), because a
+fused and an unfused dot product differ in the last bits and the answer would
+then depend on `-O2`. So fusing is something a program asks for by name, and
+what it gets is a different answer that is the same on every backend: fma is
+correctly rounded by IEEE-754, like `+ - * /` and `sqrt`.
+
+On `mat4xvec4` the fused kernel is 1.4x the unfused one through C and prints
+different bits -- which is why it is not the benchmark row: that row's claim
+is that the scalar and lane programs print the same bytes, and a fused lane
+program against an unfused scalar one would not.
+
+The cost to know about is the Wasm backend. Wasm has no fma instruction and
+the host's `Math` has no `fma`, so it is computed in the module, in integers
+(`$__lang_fma`). Measured on node 24 (arm64), eight nested `fma` per
+iteration over a million iterations took 130 ms where the unfused expression
+took 30 ms: about 12 ns a call, four times the arithmetic it replaces, and
+invisible in a loop that already boxes a float per iteration. The alternative
+was to refuse `fma` on Wasm, and a program that then wrote `a * b + c` for
+that one backend would get a different answer there, which is the thing the
+pragma exists to prevent. `scripts/fma_check.sh` holds all four backends to
+the C library's `fma(3)` bit for bit, including ties decided by one sticky
+bit. The RISC-V backends refuse `fma` by name.

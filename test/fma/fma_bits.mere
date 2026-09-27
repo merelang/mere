@@ -1,0 +1,142 @@
+// fma_bits -- `fma` and `f64x2_fma` against the machine's fma(3), bit for bit.
+//
+// fma is one of the operations IEEE-754 requires to be correctly rounded, so
+// every backend has to produce the same bits as the hardware -- including the
+// Wasm backend, which has no fma instruction and computes it in software.
+// scripts/fma_check.sh compiles test/fma/fma_ref.c (the same inputs through
+// the C library's fma) and requires this program's output to equal it on the
+// interpreter, C, LLVM and Wasm.
+//
+// Six families, one checksum line each. A checksum and not one line per case
+// because Wasm never reclaims memory and 100,000 printed lines would not fit;
+// on a mismatch, scripts/fma_check.sh says which family.
+//
+//   specials    all 10,648 triples of 22 values: signed zeros, the subnormal
+//               and normal extremes, infinities, a NaN, powers of two at the
+//               edges of the exact-product range (a product of two of them
+//               can underflow to a signed zero, which is where `fma x y 0.0`
+//               must keep the product's sign)
+//   random      every bit of a, b, c drawn at random: every exponent,
+//               subnormals, infinities and NaNs all appear
+//   edges       exponents chosen so that a*b lands near overflow, near
+//               underflow or in the subnormal range, and c within 64 binades
+//               of it (both alignment branches, and results that round into
+//               or out of the subnormals)
+//   cancel      c = -(a*b): the answer is exactly the rounding error of a*b
+//   near        c = -(a*b) nudged by a few ulps
+//   ties        a*b an exact odd 54-bit product, so it rounds at a tie, and
+//               c tiny and far below it: only c decides which way. c is
+//               shifted out entirely while aligning, so the only trace of it
+//               is a sticky bit -- the case a software fma gets wrong if it
+//               drops that bit, and one random inputs essentially never hit
+//
+// A NaN result is counted as one canonical NaN: its payload and sign are not
+// specified by IEEE-754 and differ between machines. -0.0 is NOT folded: the
+// sign of an exact zero is specified, and it is counted.
+//
+// f64x2_fma runs every case a second time with the lanes permuted, (a, b, c)
+// in lane 0 and (b, c, a) in lane 1, and folds both lanes in.
+
+let nx = fn (x: int) -> (x * 1103515245 + 12345) % 2147483648;
+
+let special = fn (k: int) ->
+  if k == 0 then float_of_bits 0 0                         // +0
+  else if k == 1 then float_of_bits 2147483648 0           // -0
+  else if k == 2 then 1.0
+  else if k == 3 then 0.0 - 1.0
+  else if k == 4 then float_of_bits 1072693248 1           // 1 + 2^-52
+  else if k == 5 then float_of_bits 1072693247 4294967295  // 1 - 2^-53
+  else if k == 6 then float_of_bits 0 1                    // smallest subnormal
+  else if k == 7 then float_of_bits 1048575 4294967295     // largest subnormal
+  else if k == 8 then float_of_bits 1048576 0              // smallest normal
+  else if k == 9 then float_of_bits 2146435071 4294967295  // largest finite
+  else if k == 10 then float_of_bits 2146435072 0          // +inf
+  else if k == 11 then float_of_bits 4293918720 0          // -inf
+  else if k == 12 then float_of_bits 2146959360 0          // NaN
+  else if k == 13 then float_of_bits 509607936 0           // 2^-537
+  else if k == 14 then float_of_bits 1608515584 0          // 2^511
+  else if k == 15 then float_of_bits 1572864 0             // 1.5 * 2^-1022
+  else if k == 16 then float_of_bits 1069128089 2576980378 // 0.1
+  else if k == 17 then float_of_bits 3221749760 0          // -3
+  else if k == 18 then float_of_bits 2145386496 0          // 2^1023
+  else if k == 19 then float_of_bits 0 3                   // 3 * 2^-1074
+  else if k == 20 then float_of_bits 4292870143 4294967295 // -(largest finite / 2)
+  else float_of_bits 2657091584 0;                         // -2^-537
+
+// a double with every bit random
+let any_bits = fn (r1: int) -> fn (r2: int) -> fn (r3: int) ->
+  float_of_bits ((r1 % 65536) * 65536 + r2 % 65536) ((r3 % 65536) * 65536 + (r1 / 65536) % 65536);
+
+// a normal double with the given unbiased exponent, a random mantissa and sign
+let with_exp = fn (e: int) -> fn (r1: int) -> fn (r2: int) ->
+  let hi = (e + 1023) * 1048576 + r1 % 1048576 in
+  let d = float_of_bits hi ((r2 * 2 + r1 % 2) % 4294967296) in
+  if (r1 / 1048576) % 2 == 0 then d else 0.0 - d;
+
+let fold1 = fn (acc: int) -> fn (r: float) ->
+  let hi = if r != r then 2146959360 else float_bits_hi r in
+  let lo = if r != r then 0 else float_bits_lo r in
+  ((acc * 31 + hi) % 1000000007 * 31 + lo) % 1000000007;
+
+// one case: the scalar fma, then both lanes of f64x2_fma
+let step = fn (acc: int) -> fn (a: float) -> fn (b: float) -> fn (c: float) ->
+  let v = f64x2_fma (f64x2_make a b) (f64x2_make b c) (f64x2_make c a) in
+  fold1 (fold1 (fold1 acc (fma a b c)) (f64x2_extract v 0)) (f64x2_extract v 1);
+
+let rec specials = fn (i: int) -> fn (acc: int) ->
+  if i == 10648 then acc
+  else specials (i + 1) (step acc (special (i / 484)) (special ((i / 22) % 22)) (special (i % 22)));
+
+let rec random = fn (i: int) -> fn (x: int) -> fn (acc: int) ->
+  if i == 20000 then acc
+  else
+    let x1 = nx x in let x2 = nx x1 in let x3 = nx x2 in let x4 = nx x3 in let x5 = nx x4 in
+    let x6 = nx x5 in let x7 = nx x6 in let x8 = nx x7 in let x9 = nx x8 in
+    random (i + 1) x9 (step acc (any_bits x1 x2 x3) (any_bits x4 x5 x6) (any_bits x7 x8 x9));
+
+// ea + eb spans -1140 .. 1060: past both ends of the product's range
+let rec edges = fn (i: int) -> fn (x: int) -> fn (acc: int) ->
+  if i == 20000 then acc
+  else
+    let x1 = nx x in let x2 = nx x1 in let x3 = nx x2 in let x4 = nx x3 in let x5 = nx x4 in
+    let x6 = nx x5 in let x7 = nx x6 in let x8 = nx x7 in
+    let sum = (x1 % 2201) - 1140 in
+    let ea0 = sum / 2 + (x2 % 101) - 50 in
+    let ea = if ea0 < 0 - 1022 then 0 - 1022 else if ea0 > 1023 then 1023 else ea0 in
+    let eb0 = sum - ea in
+    let eb = if eb0 < 0 - 1022 then 0 - 1022 else if eb0 > 1023 then 1023 else eb0 in
+    let ec0 = ea + eb + (x3 % 129) - 64 in
+    let ec = if ec0 < 0 - 1022 then 0 - 1022 else if ec0 > 1023 then 1023 else ec0 in
+    edges (i + 1) x8 (step acc (with_exp ea x4 x5) (with_exp eb x6 x7) (with_exp ec x8 x3));
+
+let rec cancel = fn (i: int) -> fn (x: int) -> fn (near: bool) -> fn (acc: int) ->
+  if i == 20000 then acc
+  else
+    let x1 = nx x in let x2 = nx x1 in let x3 = nx x2 in let x4 = nx x3 in let x5 = nx x4 in
+    let a = with_exp ((x1 % 401) - 200) x2 x3 in
+    let b = with_exp ((x4 % 401) - 200) x5 x1 in
+    let p = 0.0 - a * b in
+    let c = if near then p * (1.0 + float_of_int (x5 % 64 - 32) * 0.0000000000000002220446049250313) else p in
+    cancel (i + 1) x5 near (step acc a b c);
+
+// 2^k for k in the normal range
+let pow2 = fn (k: int) -> float_of_bits ((k + 1023) * 1048576) 0;
+
+let rec ties = fn (i: int) -> fn (x: int) -> fn (acc: int) ->
+  if i == 20000 then acc
+  else
+    let x1 = nx x in let x2 = nx x1 in let x3 = nx x2 in let x4 = nx x3 in let x5 = nx x4 in let x6 = nx x5 in
+    let sa = (x1 % 1200) - 600 in
+    let sb = (x2 % 200) - 100 in
+    let a = float_of_int (bit_or (x3 % 67108864) 67108865) * pow2 sa in
+    let b = float_of_int (bit_or (x4 % 67108864) 67108865) * pow2 sb in
+    let ec0 = 52 + sa + sb - 60 - x5 % 1000 in
+    let ec = if ec0 < 0 - 1022 then 0 - 1022 else ec0 in
+    ties (i + 1) x6 (step acc a b (with_exp ec x6 x5));
+
+let _ = print ("specials " ++ str_of_int (specials 0 7));
+let _ = print ("random " ++ str_of_int (random 0 12345 7));
+let _ = print ("edges " ++ str_of_int (edges 0 54321 7));
+let _ = print ("cancel " ++ str_of_int (cancel 0 999 false 7));
+let _ = print ("near " ++ str_of_int (cancel 0 4242 true 7));
+print ("ties " ++ str_of_int (ties 0 777 7))

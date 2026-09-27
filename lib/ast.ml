@@ -1646,7 +1646,7 @@ let range_version_program ~(unsafe_builtins : string list) (prog : program) : pr
 
 (* --- SIMD builtin names, shared by the backends that keep vector values out
    of their boxes (Wasm v128 locals, RISC-V vector registers) --------------- *)
-let simd_result_ops = [ "f64x2_splat"; "f64x2_make"; "f64x2_add"; "f64x2_sub"; "f64x2_mul"; "f64x2_div";
+let simd_result_ops = [ "f64x2_splat"; "f64x2_make"; "f64x2_add"; "f64x2_sub"; "f64x2_mul"; "f64x2_div"; "f64x2_fma";
                         "f64x2_load"; "__f64x2_load_unchecked";
                         "f32x4_splat"; "f32x4_make"; "f32x4_add"; "f32x4_sub"; "f32x4_mul"; "f32x4_div";
                         "u8x16_splat"; "u8x16_from_bytes"; "u8x16_load"; "__u8x16_load_unchecked";

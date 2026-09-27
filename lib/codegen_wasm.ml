@@ -410,6 +410,8 @@ let vec_higher_order_used = ref false
 let strbuf_used = ref false
 let bytes_used = ref false  (* gate the Wasm bytes runtime *)
 let simd_used = ref false  (* Q-109: gate simd_runtime_wasm *)
+let fma_used = ref false  (* Q-176: gate $__lang_fma, the software fma *)
+let f64x2_fma_used = ref false  (* Q-176: gate $mere_f64x2_fma_v, its lane-wise caller *)
 let bytes_vec_used = ref false  (* gate the bytes <-> Vec[int] bridge *)
 
 (* Phase 16.3: Logger / Metrics builtin usage flags. *)
@@ -1984,6 +1986,9 @@ let rec emit_simd_v (e : Ast.expr) : unit =
   | Ast.App ({ node = Ast.Var "f64x2_splat"; _ }, x) -> f64_of_boxed x; emit_instr "f64x2.splat"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "f64x2_make"; _ }, a); _ }, b) ->
     f64_of_boxed a; emit_instr "f64x2.splat"; f64_of_boxed b; emit_instr "f64x2.replace_lane 1"
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "f64x2_fma"; _ }, a); _ }, b); _ }, c) ->
+    fma_used := true; f64x2_fma_used := true;
+    emit_simd_v a; emit_simd_v b; emit_simd_v c; emit_instr "call $mere_f64x2_fma_v"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var ("f64x2_add" | "f64x2_sub" | "f64x2_mul" | "f64x2_div" as op); _ }, a); _ }, b) ->
     emit_simd_v a; emit_simd_v b;
     emit_instr (match op with "f64x2_add" -> "f64x2.add" | "f64x2_sub" -> "f64x2.sub" | "f64x2_mul" -> "f64x2.mul" | _ -> "f64x2.div")
@@ -2047,6 +2052,10 @@ and emit_float_f64 (e : Ast.expr) : unit =
     emit_float_f64 a; emit_float_f64 b; emit_instr (wasm_binop_float op)
   | Ast.Neg inner when is_float inner ->
     emit_instr "f64.const 0"; emit_float_f64 inner; emit_instr "f64.sub"
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "fma"; _ }, a); _ }, b); _ }, c)
+    when not (user_shadows_wasm "fma") ->
+    fma_used := true;
+    emit_float_f64 a; emit_float_f64 b; emit_float_f64 c; emit_instr "call $__lang_fma"
   | _ ->
     (* already a value: unbox it, exactly as the boxed path always did *)
     emit_expr e;
@@ -3343,6 +3352,12 @@ and emit_expr (e : Ast.expr) : unit =
     emit_instr "i64.and";
     emit_instr "i64.or";
     emit_instr "f64.reinterpret_i64";
+    emit_float_alloc_from_f64_on_stack ()
+  (* Q-176: Wasm has no fma instruction and the host's Math has no fma, so it
+     is computed in the module, in integers: $__lang_fma. *)
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "fma"; _ }, _); _ }, _); _ }, _)
+    when not (user_shadows_wasm "fma") ->
+    emit_float_f64 e;
     emit_float_alloc_from_f64_on_stack ()
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "atan2"; _ }, a_e); _ }, b_e) ->
     emit_expr a_e;
@@ -10324,6 +10339,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   Hashtbl.reset eta_adapters_wasm;
   Hashtbl.reset show_types;
   simd_used := false;
+  fma_used := false;
+  f64x2_fma_used := false;
   Hashtbl.reset to_json_types;
   Hashtbl.reset of_json_types;
   Hashtbl.reset of_json_opt_types;
@@ -11581,6 +11598,224 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       (else (i64.extend_i32_u (local.get $hd)))))"
       nil_tag_v !lb_frozen_msg_offset !lb_region_msg_offset cons_tag_v
   in
+  (* Q-176: fma in integers, because Wasm has no fma instruction. Normalize the
+     three significands to 54 bits with bit 0 clear, form the 108-bit product
+     from 32-bit halves (Wasm has no 64x64->128 multiply), align c against it
+     keeping a sticky bit for whatever is shifted out, add or subtract, and
+     round ONCE: the conversion of the top 63 bits to f64 is the rounding, and
+     a result that will be subnormal is pre-rounded at the place the subnormal
+     keeps so the final scaling does not round a second time. The structure is
+     musl's fma.c. Checked bit for bit against the machine's fma(3) by
+     scripts/fma_check.sh, including ties decided by a single sticky bit. *)
+  let fma_section =
+    if not !fma_used then "" else
+    {|
+  (func $__lang_fma (param $x f64) (param $y f64) (param $z f64) (result f64)
+    (local $ix i64) (local $iy i64) (local $iz i64)
+    (local $ex i64) (local $ey i64) (local $ez i64)
+    (local $mx i64) (local $my i64) (local $mz i64)
+    (local $e i64) (local $d i64) (local $s i64)
+    (local $xl i64) (local $xh i64) (local $yl i64) (local $yh i64)
+    (local $t1 i64) (local $t2 i64) (local $t3 i64) (local $t i64)
+    (local $rlo i64) (local $rhi i64) (local $zlo i64) (local $zhi i64)
+    (local $sign i64) (local $nonzero i32) (local $i i64) (local $r f64) (local $c f64)
+    (local.set $ix (i64.reinterpret_f64 (local.get $x)))
+    (local.set $iy (i64.reinterpret_f64 (local.get $y)))
+    (local.set $iz (i64.reinterpret_f64 (local.get $z)))
+    (local.set $ex (i64.and (i64.shr_u (local.get $ix) (i64.const 52)) (i64.const 2047)))
+    (local.set $ey (i64.and (i64.shr_u (local.get $iy) (i64.const 52)) (i64.const 2047)))
+    (local.set $ez (i64.and (i64.shr_u (local.get $iz) (i64.const 52)) (i64.const 2047)))
+    ;; a NaN or an infinity anywhere, or a zero factor: the product is exact
+    ;; (or NaN), so one rounding of it plus z is the answer
+    (if (i32.or (i32.or (i64.eq (local.get $ex) (i64.const 2047)) (i64.eq (local.get $ey) (i64.const 2047)))
+                (i32.or (i64.eqz (i64.shl (local.get $ix) (i64.const 1)))
+                        (i64.eqz (i64.shl (local.get $iy) (i64.const 1)))))
+      (then (return (f64.add (f64.mul (local.get $x) (local.get $y)) (local.get $z)))))
+    ;; z infinite, x*y finite: z, even where x*y alone would overflow
+    (if (i64.eq (local.get $ez) (i64.const 2047)) (then (return (local.get $z))))
+    ;; z zero: the exact result is x*y, nonzero -- keep its sign when it underflows
+    (if (i64.eqz (i64.shl (local.get $iz) (i64.const 1)))
+      (then (return (f64.mul (local.get $x) (local.get $y)))))
+    (local.set $mx (i64.and (local.get $ix) (i64.const 0xfffffffffffff)))
+    (local.set $my (i64.and (local.get $iy) (i64.const 0xfffffffffffff)))
+    (local.set $mz (i64.and (local.get $iz) (i64.const 0xfffffffffffff)))
+    (if (i64.eqz (local.get $ex))
+      (then (local.set $s (i64.sub (i64.clz (local.get $mx)) (i64.const 11)))
+            (local.set $mx (i64.shl (local.get $mx) (local.get $s)))
+            (local.set $ex (i64.sub (i64.const 1) (local.get $s))))
+      (else (local.set $mx (i64.or (local.get $mx) (i64.const 0x10000000000000)))))
+    (if (i64.eqz (local.get $ey))
+      (then (local.set $s (i64.sub (i64.clz (local.get $my)) (i64.const 11)))
+            (local.set $my (i64.shl (local.get $my) (local.get $s)))
+            (local.set $ey (i64.sub (i64.const 1) (local.get $s))))
+      (else (local.set $my (i64.or (local.get $my) (i64.const 0x10000000000000)))))
+    (if (i64.eqz (local.get $ez))
+      (then (local.set $s (i64.sub (i64.clz (local.get $mz)) (i64.const 11)))
+            (local.set $mz (i64.shl (local.get $mz) (local.get $s)))
+            (local.set $ez (i64.sub (i64.const 1) (local.get $s))))
+      (else (local.set $mz (i64.or (local.get $mz) (i64.const 0x10000000000000)))))
+    (local.set $mx (i64.shl (local.get $mx) (i64.const 1)))
+    (local.set $my (i64.shl (local.get $my) (i64.const 1)))
+    (local.set $mz (i64.shl (local.get $mz) (i64.const 1)))
+    ;; value of the product = (rhi:rlo) * 2^e; of z = mz * 2^ez
+    (local.set $e (i64.add (i64.sub (local.get $ex) (i64.const 1076)) (i64.sub (local.get $ey) (i64.const 1076))))
+    (local.set $ez (i64.sub (local.get $ez) (i64.const 1076)))
+    (local.set $xl (i64.and (local.get $mx) (i64.const 0xffffffff)))
+    (local.set $xh (i64.shr_u (local.get $mx) (i64.const 32)))
+    (local.set $yl (i64.and (local.get $my) (i64.const 0xffffffff)))
+    (local.set $yh (i64.shr_u (local.get $my) (i64.const 32)))
+    (local.set $t1 (i64.mul (local.get $xl) (local.get $yl)))
+    (local.set $t2 (i64.add (i64.mul (local.get $xl) (local.get $yh)) (i64.mul (local.get $xh) (local.get $yl))))
+    (local.set $t3 (i64.mul (local.get $xh) (local.get $yh)))
+    (local.set $rlo (i64.add (local.get $t1) (i64.shl (local.get $t2) (i64.const 32))))
+    (local.set $rhi (i64.add (i64.add (local.get $t3) (i64.shr_u (local.get $t2) (i64.const 32)))
+                             (i64.extend_i32_u (i64.lt_u (local.get $rlo) (local.get $t1)))))
+    ;; align: shift whichever is smaller right, keeping a sticky bit
+    (local.set $d (i64.sub (local.get $ez) (local.get $e)))
+    (if (i64.gt_s (local.get $d) (i64.const 0))
+      (then
+        (if (i64.lt_s (local.get $d) (i64.const 64))
+          (then
+            (local.set $zlo (i64.shl (local.get $mz) (local.get $d)))
+            (local.set $zhi (i64.shr_u (local.get $mz) (i64.sub (i64.const 64) (local.get $d)))))
+          (else
+            (local.set $zlo (i64.const 0))
+            (local.set $zhi (local.get $mz))
+            (local.set $e (i64.sub (local.get $ez) (i64.const 64)))
+            (local.set $d (i64.sub (local.get $d) (i64.const 64)))
+            (if (i64.ne (local.get $d) (i64.const 0))
+              (then
+                (if (i64.lt_s (local.get $d) (i64.const 64))
+                  (then
+                    (local.set $rlo
+                      (i64.or (i64.or (i64.shl (local.get $rhi) (i64.sub (i64.const 64) (local.get $d)))
+                                      (i64.shr_u (local.get $rlo) (local.get $d)))
+                              (i64.extend_i32_u (i64.ne (i64.shl (local.get $rlo) (i64.sub (i64.const 64) (local.get $d)))
+                                                        (i64.const 0)))))
+                    (local.set $rhi (i64.shr_u (local.get $rhi) (local.get $d))))
+                  (else
+                    (local.set $rlo (i64.const 1))
+                    (local.set $rhi (i64.const 0)))))))))
+      (else
+        (local.set $zhi (i64.const 0))
+        (local.set $d (i64.sub (i64.const 0) (local.get $d)))
+        (if (i64.eqz (local.get $d))
+          (then (local.set $zlo (local.get $mz)))
+          (else
+            (if (i64.lt_s (local.get $d) (i64.const 64))
+              (then
+                (local.set $zlo
+                  (i64.or (i64.shr_u (local.get $mz) (local.get $d))
+                          (i64.extend_i32_u (i64.ne (i64.shl (local.get $mz) (i64.sub (i64.const 64) (local.get $d)))
+                                                    (i64.const 0))))))
+              (else (local.set $zlo (i64.const 1))))))))
+    (local.set $sign (i64.shr_u (i64.xor (local.get $ix) (local.get $iy)) (i64.const 63)))
+    (local.set $nonzero (i32.const 1))
+    (if (i64.eq (local.get $sign) (i64.shr_u (local.get $iz) (i64.const 63)))
+      (then
+        (local.set $rlo (i64.add (local.get $rlo) (local.get $zlo)))
+        (local.set $rhi (i64.add (i64.add (local.get $rhi) (local.get $zhi))
+                                 (i64.extend_i32_u (i64.lt_u (local.get $rlo) (local.get $zlo))))))
+      (else
+        (local.set $t (local.get $rlo))
+        (local.set $rlo (i64.sub (local.get $rlo) (local.get $zlo)))
+        (local.set $rhi (i64.sub (i64.sub (local.get $rhi) (local.get $zhi))
+                                 (i64.extend_i32_u (i64.lt_u (local.get $t) (local.get $rlo)))))
+        (if (i64.ne (i64.shr_u (local.get $rhi) (i64.const 63)) (i64.const 0))
+          (then
+            (local.set $rlo (i64.sub (i64.const 0) (local.get $rlo)))
+            (local.set $rhi (i64.sub (i64.sub (i64.const 0) (local.get $rhi))
+                                     (i64.extend_i32_u (i64.ne (local.get $rlo) (i64.const 0)))))
+            (local.set $sign (i64.xor (local.get $sign) (i64.const 1)))))
+        (local.set $nonzero (i64.ne (local.get $rhi) (i64.const 0)))))
+    ;; rhi = the top 63 bits of the magnitude, bit 0 sticky
+    (if (local.get $nonzero)
+      (then
+        (local.set $e (i64.add (local.get $e) (i64.const 64)))
+        (local.set $d (i64.sub (i64.clz (local.get $rhi)) (i64.const 1)))
+        (local.set $rhi
+          (i64.or (i64.or (i64.shl (local.get $rhi) (local.get $d))
+                          (i64.shr_u (local.get $rlo) (i64.sub (i64.const 64) (local.get $d))))
+                  (i64.extend_i32_u (i64.ne (i64.shl (local.get $rlo) (local.get $d)) (i64.const 0))))))
+      (else
+        (if (i64.eqz (local.get $rlo))
+          (then (return (f64.add (f64.mul (local.get $x) (local.get $y)) (local.get $z)))))
+        (local.set $d (i64.sub (i64.clz (local.get $rlo)) (i64.const 1)))
+        (if (i64.lt_s (local.get $d) (i64.const 0))
+          (then (local.set $rhi (i64.or (i64.shr_u (local.get $rlo) (i64.const 1))
+                                        (i64.and (local.get $rlo) (i64.const 1)))))
+          (else (local.set $rhi (i64.shl (local.get $rlo) (local.get $d)))))))
+    (local.set $e (i64.sub (local.get $e) (local.get $d)))
+    ;; the one rounding: the top 63 bits to 53
+    (local.set $i (if (result i64) (i64.eqz (local.get $sign))
+                    (then (local.get $rhi)) (else (i64.sub (i64.const 0) (local.get $rhi)))))
+    (local.set $r (f64.convert_i64_s (local.get $i)))
+    (if (i64.lt_s (local.get $e) (i64.const -1084))
+      (then
+        (if (i64.eq (local.get $e) (i64.const -1085))
+          (then
+            (local.set $c (if (result f64) (i64.eqz (local.get $sign))
+                            (then (f64.const 0x1p63)) (else (f64.const -0x1p63))))
+            ;; rounded up to the smallest normal
+            (if (f64.eq (local.get $r) (local.get $c))
+              (then (return (if (result f64) (i64.eqz (local.get $sign))
+                              (then (f64.const 0x1p-1022)) (else (f64.const -0x1p-1022))))))
+            ;; inexact: a top bit makes the conversion round at the subnormal's last place
+            (if (i64.ne (i64.shl (local.get $rhi) (i64.const 53)) (i64.const 0))
+              (then
+                (local.set $i (i64.or (i64.or (i64.shr_u (local.get $rhi) (i64.const 1))
+                                              (i64.and (local.get $rhi) (i64.const 1)))
+                                      (i64.const 0x4000000000000000)))
+                (if (i64.ne (local.get $sign) (i64.const 0))
+                  (then (local.set $i (i64.sub (i64.const 0) (local.get $i)))))
+                (local.set $r (f64.sub (f64.mul (f64.const 2) (f64.convert_i64_s (local.get $i)))
+                                       (local.get $c))))))
+          (else
+            (local.set $i (i64.shl (i64.or (i64.shr_u (local.get $rhi) (i64.const 10))
+                                           (i64.extend_i32_u (i64.ne (i64.shl (local.get $rhi) (i64.const 54))
+                                                                     (i64.const 0))))
+                                   (i64.const 10)))
+            (if (i64.ne (local.get $sign) (i64.const 0))
+              (then (local.set $i (i64.sub (i64.const 0) (local.get $i)))))
+            (local.set $r (f64.convert_i64_s (local.get $i)))))))
+    ;; r * 2^e, by multiplications that stay exact until the last
+    (if (i64.gt_s (local.get $e) (i64.const 1023))
+      (then
+        (local.set $r (f64.mul (local.get $r) (f64.const 0x1p1023)))
+        (local.set $e (i64.sub (local.get $e) (i64.const 1023)))
+        (if (i64.gt_s (local.get $e) (i64.const 1023))
+          (then
+            (local.set $r (f64.mul (local.get $r) (f64.const 0x1p1023)))
+            (local.set $e (i64.sub (local.get $e) (i64.const 1023)))
+            (if (i64.gt_s (local.get $e) (i64.const 1023)) (then (local.set $e (i64.const 1023)))))))
+      (else
+        (if (i64.lt_s (local.get $e) (i64.const -1022))
+          (then
+            (local.set $r (f64.mul (local.get $r) (f64.const 0x1p-969)))
+            (local.set $e (i64.add (local.get $e) (i64.const 969)))
+            (if (i64.lt_s (local.get $e) (i64.const -1022))
+              (then
+                (local.set $r (f64.mul (local.get $r) (f64.const 0x1p-969)))
+                (local.set $e (i64.add (local.get $e) (i64.const 969)))
+                (if (i64.lt_s (local.get $e) (i64.const -1022)) (then (local.set $e (i64.const -1022))))))))))
+    (f64.mul (local.get $r) (f64.reinterpret_i64 (i64.shl (i64.add (local.get $e) (i64.const 1023)) (i64.const 52)))))
+|}
+  in
+  (* Q-176: f64x2_fma is two calls of the scalar one, lane by lane. Its own
+     section, because it is v128 code that a program using only the scalar
+     fma should not carry. *)
+  let f64x2_fma_section =
+    if not !f64x2_fma_used then "" else {|
+  (func $mere_f64x2_fma_v (param $a v128) (param $b v128) (param $c v128) (result v128)
+    (f64x2.replace_lane 1
+      (f64x2.splat (call $__lang_fma (f64x2.extract_lane 0 (local.get $a))
+                                     (f64x2.extract_lane 0 (local.get $b))
+                                     (f64x2.extract_lane 0 (local.get $c))))
+      (call $__lang_fma (f64x2.extract_lane 1 (local.get $a))
+                        (f64x2.extract_lane 1 (local.get $b))
+                        (f64x2.extract_lane 1 (local.get $c)))))
+|}
+  in
   let vec_to_list_section =
     if not !vec_to_list_used then "" else
     Printf.sprintf "
@@ -12369,7 +12604,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     list_str_runtime_section
     vec_runtime_section
     vec_higher_order_section strbuf_section map_key_eq_section map_runtime_section
-    (args_host_section ^ env_host_section ^ stdin_host_section ^ vec_to_list_section ^ lb_section) list_len_section
+    (args_host_section ^ env_host_section ^ stdin_host_section ^ fma_section ^ f64x2_fma_section ^ vec_to_list_section ^ lb_section) list_len_section
     fn_section component_section local_decl indented_body
   |> prune_dead_fail_checks
 

@@ -1167,6 +1167,17 @@ let builtin_float_of_f32_bits =
     | _ -> failwith "float_of_f32_bits: expected int")
 
 let builtin_atan2 = binary_float "atan2" Float.atan2
+(* Q-176: a*b+c rounded ONCE -- IEEE-754's fusedMultiplyAdd, correctly rounded
+   like + - * / and sqrt, so every backend is held to the same bits (the Wasm
+   backend computes it in software). Not what `a * b + c` means: that rounds
+   twice, on every backend, at every optimization level (v0.1.315). *)
+let builtin_fma =
+  V_builtin ("fma", fun a ->
+    V_builtin ("fma_p1", fun b ->
+      V_builtin ("fma_p2", fun c ->
+        match a, b, c with
+        | V_float x, V_float y, V_float z -> V_float (Float.fma x y z)
+        | _ -> failwith "fma: expected three floats")))
 let builtin_f_min = binary_float "f_min" Float.min
 let builtin_f_max = binary_float "f_max" Float.max
 let builtin_f_pow = binary_float "f_pow" Float.pow
@@ -1726,6 +1737,14 @@ let builtin_f64x2_add = f64x2_binop "f64x2_add" ( +. )
 let builtin_f64x2_sub = f64x2_binop "f64x2_sub" ( -. )
 let builtin_f64x2_mul = f64x2_binop "f64x2_mul" ( *. )
 let builtin_f64x2_div = f64x2_binop "f64x2_div" ( /. )
+(* Q-176: lane-wise fma, each lane rounded once (see builtin_fma). *)
+let builtin_f64x2_fma =
+  V_builtin ("f64x2_fma", fun a ->
+    V_builtin ("f64x2_fma_p1", fun b ->
+      V_builtin ("f64x2_fma_p2", fun c ->
+        let (a0, a1) = f64x2_of "f64x2_fma" a and (b0, b1) = f64x2_of "f64x2_fma" b
+        and (c0, c1) = f64x2_of "f64x2_fma" c in
+        V_f64x2 (Float.fma a0 b0 c0, Float.fma a1 b1 c1))))
 let builtin_f64x2_make =
   V_builtin ("f64x2_make", fun a ->
     V_builtin ("f64x2_make_p1", fun b ->
@@ -3749,6 +3768,7 @@ let initial_env : env =
     ("cos", ref builtin_cos);
     ("tan", ref builtin_tan);
     ("atan2", ref builtin_atan2);
+    ("fma", ref builtin_fma);
     ("float_bits_hi", ref builtin_float_bits_hi);
     ("float_bits_lo", ref builtin_float_bits_lo);
     ("float_of_bits", ref builtin_float_of_bits);
@@ -3848,6 +3868,7 @@ let initial_env : env =
     ("f64x2_sub", ref builtin_f64x2_sub);
     ("f64x2_mul", ref builtin_f64x2_mul);
     ("f64x2_div", ref builtin_f64x2_div);
+    ("f64x2_fma", ref builtin_f64x2_fma);
     ("f64x2_reduce_add", ref builtin_f64x2_reduce_add);
     ("f64x2_load", ref builtin_f64x2_load);
     ("f64x2_store", ref builtin_f64x2_store);

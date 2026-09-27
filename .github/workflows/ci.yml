@@ -774,6 +774,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/fp_contract_check.sh
 
+      # The one rounding a program asks for by name (Q-176, v0.1.534): `fma`
+      # and `f64x2_fma` against the C library's fma(3), bit for bit, on all
+      # four backends. The Wasm leg is software ($__lang_fma) and is the reason
+      # this gate exists; it fails rather than skips without wat2wasm and node.
+      - name: fma_check (fma against fma(3), bit for bit, four backends)
+        if: ${{ !cancelled() }}
+        run: sh scripts/fma_check.sh
+
       # The emitted C must fit inside clang's nesting limit and must evaluate
       # operands in the interpreter's order (v0.1.450). Both used to be left to
       # the C compiler: Apple's clang allows nesting that Ubuntu's refuses, and
