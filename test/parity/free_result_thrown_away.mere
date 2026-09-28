@@ -1,0 +1,10 @@
+// A function whose result is free (it ends in `fail`), used for its value
+// at two types and with its result thrown away. The calls that throw it away
+// name the instance with the free type erased to int.
+let boom = fn (msg: str) -> fail ("boom: " ++ msg);
+let as_str = fn (b: bool) -> if b then "fine" else boom "str";
+let as_bool = fn (b: bool) -> if b then true else boom "bool";
+let thrown = fn (u: unit) -> let _ = boom "thrown" in 0;
+let _ = print (as_str true);
+let _ = print (if as_bool true then "true" else "false");
+print (str_of_int (try_or (fn (u: unit) -> thrown ()) 7))

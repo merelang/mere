@@ -4,6 +4,42 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.546 — 2026-09-29
+
+_A free-result function used at two types, and with its result thrown away,
+no longer calls an instance nobody emitted (C and Wasm)._
+
+```
+let boom = fn (msg: str) -> fail ("boom: " ++ msg);
+let as_str = fn (b: bool) -> if b then "fine" else boom "str";
+let as_bool = fn (b: bool) -> if b then true else boom "bool";
+let thrown = fn (u: unit) -> let _ = boom "thrown" in 0;
+```
+
+`boom`'s result type is free (it ends in `fail`), so it is instantiated once
+per type it is used at: `str -> str` and `str -> bool`. The call in `thrown`
+throws the result away, its type stays a variable, and the backend names that
+call's instance with the variable erased to `int` -- `mu_boom__str__int` on C,
+`$boom__str__int` on Wasm. Nothing emitted it. The compiler said nothing;
+clang said "call to undeclared function" and wat2wasm "undefined function
+variable". The monomorphizer already recovered the same hole for a function
+that never concretized at all (it emits the erased instance for a call site
+that names one); a function that did concretize, at more than one type, fell
+outside that. It is covered now, in the same fixpoint: a recovered body may
+call a function the other recovery has to supply.
+
+The C and Wasm backends name a residual call that way and now get the
+instance; LLVM refuses such a program by name, as it did. Two further holes
+showed on Wasm, both found by the self-hosted codegen's bootstrap test: a
+recovered instance's body calls other polymorphic functions at types the main
+pass never saw (the fixpoint now collects those too), and a backend lists a
+name's specializations from the instance table, which the recovered ones
+were missing from.
+
+Found by mere-ruby's scheduler, whose delivery of a pending exception used
+`re_raise` for its value where a dozen other sites discard it.
+`test/parity/free_result_thrown_away` was red before and is green after.
+
 ## v0.1.545 — 2026-09-28
 
 _A finished coroutine keeps 24 bytes, not its saved state._

@@ -454,11 +454,22 @@ let find_live_arrow (name : string) (skel_names : (string, unit) Hashtbl.t)
    `tuple_str_list_int` and the fold wanted `tuple_str_list_tuple_str_toml_value`.
    The library had never been built on a compiled backend -- its self-tests run
    under the interpreter, which has no such type to get wrong. *)
-let find_all_concrete_arrows_in ?(arrows_only = true) (name : string)
+let find_all_concrete_arrows_in ?(arrows_only = true) ?(residual = false) (name : string)
     (exprs : Ast.expr list) : Ast.ty list =
   let seen : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4 in
   let rec go (e : Ast.expr) =
     (match e.Ast.node with
+     (* `residual` asks the opposite question: the ARROW uses whose type still
+        holds a type variable, which the emitter names with the variable
+        erased to int (see the second recovery pass in resolve_fn_types) *)
+     | Ast.Var n when n = name && residual ->
+       (match e.Ast.ty with
+        | Some t when (match Ast.walk t with Ast.TyArrow _ -> true | _ -> false)
+                      && not (ty_is_concrete (Ast.walk t)) ->
+          let erased = deep_erase_tyvars (erase_container_regions (Ast.walk t)) in
+          let key = Ast.pp_ty erased in
+          if not (Hashtbl.mem seen key) then Hashtbl.add seen key erased
+        | _ -> ())
      | Ast.Var n when n = name ->
        (match e.Ast.ty with
         | Some t when ty_is_concrete (Ast.walk t) ->
@@ -1021,7 +1032,7 @@ let instance_of (tbl : inst_table) (n : string) (use_ty : Ast.ty option)
        | _ -> None)
     | None -> None
 
-let resolve_fn_types ?(mangle = mangled_inst_name)
+let resolve_fn_types ?(mangle = mangled_inst_name) ?(recover_erased = false)
     (skels : fn_skel list) (root : Ast.expr)
   : fn_decl list * inst_table =
   (* Phase 21.1 (DEFERRED §1.7) + 21.2 multi-pass:
@@ -1248,9 +1259,53 @@ let resolve_fn_types ?(mangle = mangled_inst_name)
     ref (root :: List.map (fun (f : fn_decl) -> f.body) base) in
   let recovered_names : (string, unit) Hashtbl.t = Hashtbl.create 4 in
   let recovered = ref [] in
+  (* ...and the same hole one step over: a MULTI-instantiated fn called
+     somewhere its arrow still holds a residual tyvar. The call site names the
+     instance with that variable erased to int (the C backend's namer does;
+     and Wasm's do; `recover_erased` says so), and nothing emitted it -- the recovery below
+     was only for fns that never concretized at all. mere-ruby hit it with
+     `re_raise` (world -> Val -> 'a, it ends in `fail`): used for its value at
+     Flow and at Val, and with its result thrown away in a dozen places, whose
+     calls named an `int` instance the C compiler then could not find. The
+     erased instance is made like the others, from the pristine skeleton, and
+     both recoveries share one fixpoint: a body either adds may call a fn the
+     other has to supply. *)
+  let have : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+  List.iter (fun (d : fn_decl) -> Hashtbl.replace have d.name ()) base;
+  let extra = ref [] in
+  let residual_pass () =
+    let grew = ref false in
+    if recover_erased then
+      List.iter (fun s ->
+        if Hashtbl.mem multi_specs s.sname then
+          List.iter (fun erased ->
+            let nm = mangle s.sname erased in
+            if not (Hashtbl.mem have nm) then begin
+              Hashtbl.replace have nm ();
+              let (arrow, body) = make_spec erased s in
+              match Ast.walk arrow with
+              | Ast.TyArrow (p, r) ->
+                (* ...and in the table of instances, which is what a backend
+                 lists when it asks which specializations a name has *)
+              let prev = (match Hashtbl.find_opt multi_inst_fns s.sname with Some l -> l | None -> []) in
+              Hashtbl.replace multi_inst_fns s.sname (prev @ [erased]);
+              extra := { name = nm; param = s.sparam; body;
+                           param_ty = Ast.walk p; return_ty = Ast.walk r } :: !extra;
+                emitted_bodies := body :: !emitted_bodies;
+                grew := true
+              | _ -> ()
+            end)
+            (* the residual uses, erased -- and the concrete ones too: a body
+               this pass (or the recovery below) added calls other
+               multi-instantiated fns at types the main fixpoint never saw *)
+            (find_all_concrete_arrows_in ~residual:true s.sname !emitted_bodies
+             @ find_all_concrete_arrows_in s.sname !emitted_bodies)) skels;
+    !grew
+  in
   let changed = ref true in
   while !changed do
     changed := false;
+    if residual_pass () then changed := true;
     List.iter (fun s ->
       if not (Hashtbl.mem resolved s.sname)
          && not (Hashtbl.mem multi_specs s.sname)
@@ -1274,7 +1329,7 @@ let resolve_fn_types ?(mangle = mangled_inst_name)
         | None -> ()
       end) skels
   done;
-  base @ List.rev !recovered, { arrows = multi_inst_fns; mangle }
+  base @ List.rev !recovered @ List.rev !extra, { arrows = multi_inst_fns; mangle }
 
 (* --- Q-102: the same answer, as an AST -> AST rewrite ---------------------
    A backend that carries types to emit time picks the instance THERE, from the
