@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.542 — 2026-09-28
+
+_LLVM: two threads can allocate at once (Q-180)._
+
+The LLVM backend's allocator took no lock on the default region, which every
+thread shares (the C backend's does), and its current region and stack of
+open blocks were process globals (C's are thread-local). Two spawned threads
+building strings at the same time -- sharing nothing -- died with `out of
+memory` in 3 runs of 3; doing it inside `region R { }` blocks, they hung or
+crashed. One thread alone was fine, which is why nothing saw it: no gate ran
+two allocating threads concurrently on LLVM.
+
+The default region now takes a one-word spin lock (`cmpxchg`: a zeroed
+`pthread_mutex_t` is not an initialized one on macOS), taken only for the
+default region; a block region belongs to the thread that opened it. The
+current region, the open-block stack and the ListBuf depth word are
+thread-local -- small words only, since a large thread-local lands inside each
+thread's stack on glibc (v0.1.541). The allocation meter adds atomically.
+
+`scripts/threads_alloc_check.sh` (CI, with a poison): two threads allocating
+at once, in the default region and inside block regions, three runs each on C
+and LLVM under a time bound. The poison takes the fix back out of the emitted
+IR -- the lock calls, then `thread_local` on the current region -- and each
+must turn a fixture red. Run on Linux (ubuntu 24.04, clang 18) and macOS.
+
 ## v0.1.541 — 2026-09-28
 
 _LLVM: a spawned thread's alternate signal stack is its own block, not a
