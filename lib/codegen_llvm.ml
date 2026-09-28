@@ -4197,9 +4197,40 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  %s = getelementptr i8, ptr %s, i64 8" fnslot c);
     emit_instr (Printf.sprintf "  store ptr %s, ptr %s" fnr fnslot);
     emit_instr (Printf.sprintf "  %s = alloca i64" tidp);
+    (* Q-178: the stack the program asked for (Q-168) on this thread too. The
+       pthread_attr declarations exist exactly when a request does. *)
+    let attr =
+      match !Typer.stack_request with
+      | None -> "null"
+      | Some bytes ->
+        let a = fresh_reg () and rc = fresh_reg () and bad = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = alloca [128 x i8], align 16" a);
+        emit_instr (Printf.sprintf "  call i32 @pthread_attr_init(ptr %s)" a);
+        emit_instr (Printf.sprintf "  %s = call i32 @pthread_attr_setstacksize(ptr %s, i64 %d)" rc a bytes);
+        emit_instr (Printf.sprintf "  %s = icmp ne i32 %s, 0" bad rc);
+        let ok_l = fresh_label "spawn_sized" and no_l = fresh_label "spawn_refused" in
+        emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" bad no_l ok_l);
+        emit_label no_l;
+        let m = fresh_str_global (Printf.sprintf "spawn: this host refused the stack this program asked for (%d bytes)" bytes) in
+        emit_instr (Printf.sprintf "  call i32 @__lang_fail_int(ptr %s)" m);
+        emit_instr "  unreachable";
+        emit_label ok_l;
+        a
+    in
+    let pc = fresh_reg () and pcbad = fresh_reg () in
     emit_instr (Printf.sprintf
-      "  call i32 @pthread_create(ptr %s, ptr null, ptr @__mere_spawn_trampoline, ptr %s)"
-      tidp c);
+      "  %s = call i32 @pthread_create(ptr %s, ptr %s, ptr @__mere_spawn_trampoline, ptr %s)"
+      pc tidp attr c);
+    (* ⚠ the return code was ignored: a refused thread left the handle unset
+       and the program went on to join it *)
+    emit_instr (Printf.sprintf "  %s = icmp ne i32 %s, 0" pcbad pc);
+    let ok2 = fresh_label "spawn_ok" and no2 = fresh_label "spawn_failed" in
+    emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" pcbad no2 ok2);
+    emit_label no2;
+    let m2 = fresh_str_global "spawn: the host refused to start a thread" in
+    emit_instr (Printf.sprintf "  call i32 @__lang_fail_int(ptr %s)" m2);
+    emit_instr "  unreachable";
+    emit_label ok2;
     emit_instr (Printf.sprintf "  %s = load i64, ptr %s" tid tidp);
     tid
   (* Only the thread `join` builtin when the user has not bound that name.
@@ -8007,9 +8038,13 @@ let runtime_decls =
        in String.concat "\n"
             [ sym "pthread_getattr_np"; sym "pthread_attr_getstack";
               sym "pthread_attr_destroy" ]);
-      "@__lang_sigstack = internal global [131072 x i8] zeroinitializer";
-      "@__lang_stack_lo = internal global i64 0";
-      "@__lang_stack_hi = internal global i64 0";
+      (* Q-178: PER THREAD, all three. The bounds held the main thread's stack
+         for the whole process, and one alternate stack cannot serve two
+         threads, so an overflow on a spawned thread could not be named. A
+         spawned thread installs its own (see __mere_spawn_trampoline). *)
+      "@__lang_sigstack = internal thread_local global [131072 x i8] zeroinitializer";
+      "@__lang_stack_lo = internal thread_local global i64 0";
+      "@__lang_stack_hi = internal thread_local global i64 0";
       "@__lang_msg_stackov = private unnamed_addr constant [36 x i8] c\"stack overflow (recursion too deep)\n\"";
       "@__lang_msg_segv = private unnamed_addr constant [19 x i8] c\"segmentation fault\n\"";
       "define internal void @__lang_segv(i32 %sig, ptr %info, ptr %uap) {";
@@ -8314,7 +8349,12 @@ let runtime_decls =
       "@.ios_pre = internal alias [14 x i8], getelementptr inbounds ({ i64, [14 x i8] }, ptr @.ios_pre_h, i32 0, i32 1)";
       "@.ios_suf_h = internal constant { i64, [21 x i8] } { i64 20, [21 x i8] c\"\\22 is not a valid int\\00\" }";
       "@.ios_suf = internal alias [21 x i8], getelementptr inbounds ({ i64, [21 x i8] }, ptr @.ios_suf_h, i32 0, i32 1)";
-      "@__lang_fail_jmpbuf = global [200 x i8] zeroinitializer, align 16";
+      (* Q-178: ONE PER THREAD, as the C backend has had since v0.1.310. Found
+         while giving spawn its stack: a fail on a spawned thread with no
+         try_or of its own jumped into the try_or MAIN had armed -- onto
+         another thread's stack -- and main went on as if it had failed
+         itself (it printed the handler's value; C prints the fail and exits). *)
+      "@__lang_fail_jmpbuf = thread_local global [200 x i8] zeroinitializer, align 16";
       (* Q-165: the message the failure carried, kept across the longjmp so
          `try_or_msg` can hand it to its handler. The C backend has had the
          same buffer since v0.1.67 (for the --lib boundary's `err`); this
@@ -8323,7 +8363,7 @@ let runtime_decls =
          live in a region the catch jumps out of, so what survives has to be
          a copy, and one that does not itself allocate on the failure path. *)
       "@__lang_fail_msg = global [256 x i8] zeroinitializer";
-      "@__lang_fail_jmpbuf_set = global i32 0" ]
+      "@__lang_fail_jmpbuf_set = thread_local global i32 0" ]
 (* Phase 30.2b: declare top-level non-fn lets as @name LLVM globals.
    Emit each entry as `@name = internal global <type> zeroinitializer`.
    They are initialized by store at the start of main. *)
@@ -13217,6 +13257,9 @@ let thread_runtime_llvm =
   String.concat "\n"
     [ "define ptr @__mere_spawn_trampoline(ptr %p) {";
       "entry:";
+      (* Q-178: this thread's own bounds and alternate stack, so an overflow
+         here is named instead of dying with the handler unable to run *)
+      "  call void @__lang_install_segv()";
       "  %env = load ptr, ptr %p";
       "  %fnslot = getelementptr i8, ptr %p, i64 8";
       "  %fn = load ptr, ptr %fnslot";

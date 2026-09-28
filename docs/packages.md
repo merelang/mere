@@ -177,6 +177,12 @@ on every host: `-Wl,-stack_size` on Darwin, `ulimit -s` on Linux,
 It costs address space, not memory: a trivial program asking for 512 MB holds
 about 1.5 MiB resident.
 
+**Every thread gets it, not only `main`'s** (v0.1.540). A thread started with
+`spawn` is created with the same size, so a recursion that finishes on the main
+thread also finishes one `spawn` away; without a request, spawned threads keep
+the host's default (512 KiB on macOS). A spawned thread's overflow is named the
+same way as main's, and 64 threads under a 512 MB request hold about 2.6 MiB.
+
 **The Wasm and RV32IM backends refuse a file that asks.** There the stack is not
 the program's to size — Node takes `--stack-size` when it runs the module, and a
 bare-metal image gets its stack from the linker script — so asking is an error

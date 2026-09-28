@@ -2912,12 +2912,32 @@ let rec emit_expr (e : Ast.expr) : string =
      (* Q-012: spawn a `unit -> unit` closure on a fresh OS thread. Copy the
         closure value onto the heap so the child owns it, then pthread_create
         the trampoline. Returns a ThreadHandle. *)
+     (* Q-178: a program that asked for a stack (`stack` in mere.toml, Q-168)
+        gets it on EVERY thread it starts, not only on main's: the recursion
+        main finishes used to overflow one `spawn` away. Without a request the
+        emitted code is what it was, attributes and all (NULL = the host's).
+        ⚠ And a thread that cannot be started is a fail, catchable like any
+        other. The return code was ignored, so a refused thread left `tid`
+        unset, the closure never ran, and the program went on to `join` it. *)
      | Ast.Var "spawn" when not (user_shadows "spawn") ->
+       let attr_open, attr_arg, attr_close =
+         match !stack_request with
+         | None -> "", "NULL", ""
+         | Some bytes ->
+           Printf.sprintf
+             "pthread_attr_t __sa; pthread_attr_init(&__sa); \
+              if (pthread_attr_setstacksize(&__sa, (size_t)%dULL) != 0) \
+                __lang_fail_impl(\"spawn: this host refused the stack this program asked for (%d bytes)\"); "
+             bytes bytes,
+           "&__sa",
+           " pthread_attr_destroy(&__sa);"
+       in
        "({ __auto_type __cl = " ^ emit_expr arg ^ "; \
            __mere_unit_closure* __c = (__mere_unit_closure*)malloc(sizeof(__mere_unit_closure)); \
            __c->env = __cl.env; __c->fn = __cl.fn; \
-           ThreadHandle __t; \
-           pthread_create(&__t.tid, NULL, __mere_spawn_trampoline, __c); \
+           ThreadHandle __t; " ^ attr_open ^ "\
+           int __pc = pthread_create(&__t.tid, " ^ attr_arg ^ ", __mere_spawn_trampoline, __c);" ^ attr_close ^ " \
+           if (__pc != 0) { free(__c); __lang_fail_impl(\"spawn: the host refused to start a thread\"); } \
            __t; })"
      (* Only the Q-012 thread `join` builtin when not shadowed. `join` is a
         very common user name (e.g. a string-join helper); if it's bound
@@ -8321,8 +8341,11 @@ let str_concat_helper =
          compile-time constant on macOS, which is why this compiled here. 64 KiB is well
          above `MINSIGSTKSZ` on both, and the handler that runs on it writes one string. *)
       "static char __lang_sigstack[65536];";
-      "static char* __lang_stack_lo = 0;";
-      "static char* __lang_stack_hi = 0;";
+      (* Q-178: PER THREAD. These held the main thread's stack for the whole
+         process, so an overflow on a spawned thread was compared against
+         someone else's stack and could never be named. *)
+      "static _Thread_local char* __lang_stack_lo = 0;";
+      "static _Thread_local char* __lang_stack_hi = 0;";
       "static void __lang_segv(int sig, siginfo_t* info, void* uap) {";
       "  (void)sig; (void)uap;";
       "  const char* m;";
@@ -8366,6 +8389,30 @@ let str_concat_helper =
       "  sigemptyset(&sa.sa_mask);";
       "  sigaction(SIGSEGV, &sa, 0);";
       "  sigaction(SIGBUS, &sa, 0);";
+      "}";
+      (* Q-178: what a spawned thread needs for its own overflow to be named.
+         The handler is process-wide and already installed; the bounds and the
+         alternate stack are per-thread, and the main thread's 64 KiB buffer
+         cannot be shared -- two threads overflowing at once would run the
+         handler on one stack. Allocated here, released when the thread ends. *)
+      "static void* __lang_thread_segv_enter(void) {";
+      "  __lang_stack_bounds();";
+      "  void* alt = malloc(65536);";
+      "  if (!alt) return 0;";
+      "  stack_t ss;";
+      "  ss.ss_sp = alt;";
+      "  ss.ss_size = 65536;";
+      "  ss.ss_flags = 0;";
+      "  if (sigaltstack(&ss, 0) != 0) { free(alt); return 0; }";
+      "  return alt;";
+      "}";
+      "static void __lang_thread_segv_leave(void* alt) {";
+      "  if (!alt) return;";
+      "  stack_t ss;";
+      "  memset(&ss, 0, sizeof(ss));";
+      "  ss.ss_flags = SS_DISABLE;";
+      "  sigaltstack(&ss, 0);";
+      "  free(alt);";
       "}";
       "__attribute__((noreturn)) static void __lang_fail_impl(const char* msg) {";
       "  /* v0.1.67 (mere-ruby dogfood): print only when the failure is NOT";
@@ -13860,10 +13907,15 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          separate design item (see internal notes, Q-012-C-mem). *)
       "typedef struct { pthread_t tid; } ThreadHandle;";
       "typedef struct { void* env; int (*fn)(void*, int); } __mere_unit_closure;";
+      (* Q-178: defined with the SIGSEGV handler, which is emitted after this *)
+      "static void* __lang_thread_segv_enter(void);";
+      "static void __lang_thread_segv_leave(void*);";
       "static void* __mere_spawn_trampoline(void* __p) {";
       "  __mere_unit_closure* __c = (__mere_unit_closure*)__p;";
+      "  void* __alt = __lang_thread_segv_enter();";
       "  __c->fn(__c->env, 0);";
       "  free(__c);";
+      "  __lang_thread_segv_leave(__alt);";
       "  /* v0.1.31: drop this thread's cached block regions — _Thread_local";
       "     has no destructor, so a spawn-per-connection server would leak";
       "     ~1 MB per finished thread without this. (v0.1.295: the cache is a";
