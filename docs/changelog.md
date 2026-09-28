@@ -4,6 +4,52 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.540 — 2026-09-28
+
+_A spawned thread gets the stack the program asked for, and its overflow and
+its fail stay its own._
+
+**`spawn` honours `stack` (Q-178).** Q-168 let a program say
+`stack = "512MB"` in `mere.toml`, and the C and LLVM backends run `main`'s
+work on a thread of that size. `spawn` called `pthread_create` with no
+attributes, so every thread a program started had the host's default --
+512 KiB on macOS, `ulimit -s` on Linux -- whatever it had asked for: the
+recursion `main` finishes overflowed one `spawn` away. With a request, both
+backends now create every spawned thread with the same size; without one the
+emitted code is unchanged. The request is still address space and not memory:
+64 threads under a 512 MB request hold about 2.6 MiB resident.
+
+**A spawned thread's overflow is named.** The bounds the SIGSEGV handler
+compares against were process globals holding the main thread's stack, and
+`sigaltstack` -- which is per thread -- was installed on the main thread
+only. A spawned thread that ran out of stack therefore died with the handler
+unable to run: no output, exit 132 or 139, the shape v0.1.271 removed
+everywhere else. The bounds are thread-local now, and a spawned thread sets
+its own bounds and alternate stack on entry (C: a 64 KiB block allocated for
+the thread and released when it ends; LLVM: the existing buffer, now
+thread-local).
+
+**LLVM: a fail on a spawned thread no longer lands in another thread's
+`try_or`.** The C backend has had one jmpbuf per thread since v0.1.310; LLVM
+still had one global, so a fail on a spawned thread with no `try_or` of its
+own jumped into the one `main` was sitting in -- onto another thread's stack
+-- and `main` carried on with the handler's value as though it had failed
+itself. It is thread-local now, and the fail takes the thread's uncaught path
+(the message, exit 1), as on C. Found while writing the gate below.
+
+**A thread that cannot be started is a fail.** `pthread_create`'s return code
+was ignored on both backends, so a refused thread left its handle unset, the
+closure never ran, and the program went on to `join` it. It is a fail now
+("spawn: the host refused to start a thread"), catchable with `try_or` like
+any other; so is a stack size the host refuses.
+
+`scripts/spawn_stack_check.sh` (CI, with a poison): deep recursion inside
+`spawn` finishes with the request and is named as a stack overflow without
+it, on both native backends; a spawned thread's fail takes its own uncaught
+path; 64 threads under a 512 MB request stay small. The poison asks for 128K
+and requires the spawned recursion to stop -- a request that was not reaching
+`spawn` would pass everything else on a host whose default is large.
+
 ## v0.1.539 — 2026-09-28
 
 _The second lexer catches up with the first, and the file's last line keeps
