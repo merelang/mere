@@ -1,0 +1,16 @@
+// (2000, not 20000: a spawned thread has the host default stack, 512 KiB on
+// macOS, and at -O0 this recursion is not a loop)
+// Same two threads, NO region blocks: both allocate in the default region.
+let out = channel_new ();
+let rec work = fn (tag: str) -> fn (i: int) -> fn (bad: int) ->
+  if i == 0 then bad
+  else (let s = str_repeat tag 50 ++ str_of_int i in
+        let ok = (if s == str_repeat tag 50 ++ str_of_int i then 1 else 0) in
+        work tag (i - 1) (bad + 1 - ok));
+let h1 = spawn (fn () -> channel_send out (work "a" 2000 0));
+let h2 = spawn (fn () -> channel_send out (work "b" 2000 0));
+let _ = join h1;
+let _ = join h2;
+let a = channel_recv out;
+let b = channel_recv out;
+print ("bad: " ++ str_of_int a ++ " " ++ str_of_int b)

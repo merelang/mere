@@ -1006,6 +1006,15 @@ jobs:
       # Q-178. `spawn` ignored the stack the program asked for, a spawned
       # thread's overflow died unnamed, and on LLVM a spawned thread's fail
       # jumped into main's try_or. Both native backends, with a poison.
+      # Q-180. LLVM's allocator took no lock on the default region and kept
+      # its current region per process: two allocating threads ran out of
+      # memory. Both native backends, with a poison.
+      - name: threads_alloc_check (two threads allocating at once)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/threads_alloc_check.sh
+          sh scripts/threads_alloc_check.sh --poison
+
       - name: spawn_stack_check (a spawned thread gets the requested stack)
         if: ${{ !cancelled() }}
         run: |

@@ -8407,7 +8407,7 @@ let region_runtime_helpers =
          fails on the C backend (a push while another region is current)
          fails here too, with the same sentence. *)
       "%__lang_listbuf = type { ptr, ptr, ptr, i32, i32 }";
-      "@__lang_region_depth = internal global i32 0";
+      "@__lang_region_depth = internal thread_local global i32 0";
       (* v0.1.443 (Q-116): where an ordinary VALUE allocation goes. Until now
          every string, cons cell, tuple and variant node named
          @__lang_default_region directly, in forty places, so a `region R { }`
@@ -8416,7 +8416,10 @@ let region_runtime_helpers =
          itself current for its body and puts it back afterwards; the rule
          lives in @__lang_alloc rather than at each allocation site, because a
          rule written out forty times becomes forty rules. *)
-      "@__lang_current_region = internal global ptr @__lang_default_region";
+      (* Q-180: PER THREAD, as the C backend's are: each thread has its own
+         current region and its own stack of open blocks. Small words only --
+         a large thread_local lands inside each thread's stack on glibc (v0.1.541). *)
+      "@__lang_current_region = internal thread_local global ptr @__lang_default_region";
       "";
       (* v0.1.274: malloc's answer used to go unread here, and the next store
          wrote through the null it returned. An allocation that cannot be
@@ -8493,7 +8496,43 @@ let region_runtime_helpers =
       "  ret ptr %p";
       "}";
       "";
+      (* Q-180: THE DEFAULT REGION IS SHARED BY EVERY THREAD, and this took no
+         lock on it (the C backend's does): two spawned threads building strings
+         at once ran out of memory in 5 runs of 5, and nothing gated it because
+         no test ran two allocating threads on LLVM. A spin lock on one word,
+         taken only for the default region -- a block region belongs to the
+         thread that opened it. `cmpxchg` rather than a pthread mutex because a
+         zeroed pthread_mutex_t is not an initialized one on macOS. *)
+      "@__lang_rlock_word = internal global i32 0";
+      "define internal void @__lang_rlock() {";
+      "entry:";
+      "  br label %spin";
+      "spin:";
+      "  %r = cmpxchg ptr @__lang_rlock_word, i32 0, i32 1 acquire monotonic";
+      "  %got = extractvalue { i32, i1 } %r, 1";
+      "  br i1 %got, label %done, label %spin";
+      "done:";
+      "  ret void";
+      "}";
+      "define internal void @__lang_runlock() {";
+      "entry:";
+      "  store atomic i32 0, ptr @__lang_rlock_word release, align 4";
+      "  ret void";
+      "}";
       "define ptr @__lang_region_alloc(ptr %r, i64 %n) {";
+      "entry:";
+      "  %shared = icmp eq ptr %r, @__lang_default_region";
+      "  br i1 %shared, label %locked, label %plain";
+      "locked:";
+      "  call void @__lang_rlock()";
+      "  %p1 = call ptr @__lang_region_alloc_raw(ptr %r, i64 %n)";
+      "  call void @__lang_runlock()";
+      "  ret ptr %p1";
+      "plain:";
+      "  %p2 = call ptr @__lang_region_alloc_raw(ptr %r, i64 %n)";
+      "  ret ptr %p2";
+      "}";
+      "define internal ptr @__lang_region_alloc_raw(ptr %r, i64 %n) {";
       "entry:";
       "  %n7 = add i64 %n, 7";
       "  %aligned = and i64 %n7, -8";
@@ -8526,16 +8565,12 @@ let region_runtime_helpers =
       "  %top2 = load ptr, ptr %top_p";
       "  %new_top2 = getelementptr i8, ptr %top2, i64 %aligned";
       "  store ptr %new_top2, ptr %top_p";
-      "  %at2 = load i64, ptr @__lang_alloc_total";
-      "  %at2n = add i64 %at2, %aligned";
-      "  store i64 %at2n, ptr @__lang_alloc_total";
+      "  %at2 = atomicrmw add ptr @__lang_alloc_total, i64 %aligned monotonic";
       "  ret ptr %top2";
       "use:";
       "  %new_top = getelementptr i8, ptr %top, i64 %aligned";
       "  store ptr %new_top, ptr %top_p";
-      "  %at1 = load i64, ptr @__lang_alloc_total";
-      "  %at1n = add i64 %at1, %aligned";
-      "  store i64 %at1n, ptr @__lang_alloc_total";
+      "  %at1 = atomicrmw add ptr @__lang_alloc_total, i64 %aligned monotonic";
       "  ret ptr %top";
       "}";
       "";
@@ -8547,6 +8582,19 @@ let region_runtime_helpers =
          struct per block), so extending an outer container's buffer while a
          block is open touches only that container's own region. *)
       "define ptr @__lang_region_grow(ptr %r, ptr %old, i64 %old_n, i64 %new_n) {";
+      "entry:";
+      "  %shared = icmp eq ptr %r, @__lang_default_region";
+      "  br i1 %shared, label %locked, label %plain";
+      "locked:";
+      "  call void @__lang_rlock()";
+      "  %g1 = call ptr @__lang_region_grow_raw(ptr %r, ptr %old, i64 %old_n, i64 %new_n)";
+      "  call void @__lang_runlock()";
+      "  ret ptr %g1";
+      "plain:";
+      "  %g2 = call ptr @__lang_region_grow_raw(ptr %r, ptr %old, i64 %old_n, i64 %new_n)";
+      "  ret ptr %g2";
+      "}";
+      "define internal ptr @__lang_region_grow_raw(ptr %r, ptr %old, i64 %old_n, i64 %new_n) {";
       "entry:";
       "  %isnull = icmp eq ptr %old, null";
       "  %zero = icmp eq i64 %old_n, 0";
@@ -8578,13 +8626,11 @@ let region_runtime_helpers =
          unless counted here. Only the delta: the old bytes were counted when
          they were first handed out. The C backend counts the same difference at
          the same place. *)
-      "  %atg = load i64, ptr @__lang_alloc_total";
       "  %gdelta = sub i64 %new_al, %old_al";
-      "  %atgn = add i64 %atg, %gdelta";
-      "  store i64 %atgn, ptr @__lang_alloc_total";
+      "  %atg = atomicrmw add ptr @__lang_alloc_total, i64 %gdelta monotonic";
       "  ret ptr %old";
       "fresh:";
-      "  %p = call ptr @__lang_region_alloc(ptr %r, i64 %new_n)";
+      "  %p = call ptr @__lang_region_alloc_raw(ptr %r, i64 %new_n)";
       "  br i1 %skip, label %done, label %copy";
       "copy:";
       "  %lt = icmp ult i64 %old_n, %new_n";
@@ -8610,9 +8656,9 @@ let region_runtime_helpers =
          loop` (see the emitter), so blocks here are strictly LIFO and a release
          pops the top. C carries a scan-and-shift because its region-loop swap
          releases the entry under the one just pushed. *)
-      "@__lang_region_active = internal global ptr null";
-      "@__lang_region_active_n = internal global i32 0";
-      "@__lang_region_active_cap = internal global i32 0";
+      "@__lang_region_active = internal thread_local global ptr null";
+      "@__lang_region_active_n = internal thread_local global i32 0";
+      "@__lang_region_active_cap = internal thread_local global i32 0";
       "";
       "define void @__lang_region_active_push(ptr %r) {";
       "entry:";
