@@ -260,3 +260,9 @@ that one backend would get a different answer there, which is the thing the
 pragma exists to prevent. `scripts/fma_check.sh` holds all four backends to
 the C library's `fma(3)` bit for bit, including ties decided by one sticky
 bit. The RISC-V backends refuse `fma` by name.
+
+## See also
+
+[simd-go-comparison.md](simd-go-comparison.md) -- Go's SIMD experiment (Go 1.26-1.27)
+set against this page, item by item: what Mere took (`fma` / `f64x2_fma`), what it
+measured to be worth, what it did not take and when to look again.
