@@ -4,6 +4,24 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.541 — 2026-09-28
+
+_LLVM: a spawned thread's alternate signal stack is its own block, not a
+thread-local one._
+
+v0.1.540 made LLVM's 128 KiB alternate signal stack `thread_local` so that
+every thread could name its own overflow. On glibc, static TLS lives INSIDE
+each thread's stack, so a thread created with a small requested stack had no
+room for it and `pthread_create` refused: `stack = "128K"` made every LLVM
+program on Linux fail with "this host refused the stack this program asked
+for". macOS allocates TLS apart from the stack, which is why it passed there,
+and `spawn_stack_check.sh`'s poison caught it on CI's Linux. The buffer is a
+plain global again, used by the main thread; a spawned thread mallocs a block
+of its own, installs it, and disables and frees it when it ends (the C backend
+has done it that way since v0.1.540). Checked on Linux (ubuntu 24.04, clang
+18.1.3) and macOS: spawn_stack_check and stack_request_check with their
+poisons, thread_fail_check, thread_leak_check.
+
 ## v0.1.540 — 2026-09-28
 
 _A spawned thread gets the stack the program asked for, and its overflow and
