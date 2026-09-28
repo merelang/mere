@@ -4,6 +4,38 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.547 — 2026-09-29
+
+_Compacting a map or a Vec while a coroutine is suspended is safe (C)._
+
+A coroutine that stops in the middle of an expression can hold a pointer into
+a store's arena in a C variable of its own stack -- a string it read out of a
+map, say. `map_compact` / `vec_compact` move the store into a fresh arena and
+free the old one whole, and `map_recycle` frees its growth in place, so the
+coroutine resumed into freed memory: `held: lost` at -O2, a heap-use-after-free
+under ASan.
+
+Now the runtime asks before it frees. A program that makes coroutines installs
+a hook (on the first `coro_new`) that scans every suspended coroutine's stack
+-- from the stack pointer its switch saved, which covers the registers the
+switch pushed, to the stack's top -- for a word that falls inside one of the
+arena's blocks (low three bits masked, for tagged values). If one does, the
+arena is retired instead of freed, and tried again at the next retirement; a
+recycle moves the map to a fresh arena and retires the old. The scan is
+conservative: a word that only looks like a pointer keeps an arena a little
+longer, never frees one early. A program without coroutines frees at once, as
+before.
+
+`test/coro/compact.mere` holds a string across a compaction and a churn that
+reuses the freed memory; `scripts/coro_check.sh` runs it on the interpreter and
+on C, and its new poison takes the retirement out and goes red. (The LLVM
+backend has no `map_compact` / `vec_compact` at all -- it refuses them by
+name -- so there is nothing there to retire.) Run on macOS arm64, Linux arm64
+and x86-64 Linux.
+
+This is what mere-ruby needs to compact while fibers are suspended -- until now
+it skipped compaction then, and got back entries but not bytes.
+
 ## v0.1.546 — 2026-09-29
 
 _A free-result function used at two types, and with its result thrown away,

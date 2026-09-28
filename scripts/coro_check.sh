@@ -18,6 +18,10 @@
 # one. env differs on LLVM by design: its closures carry no env copier, so a
 # coroutine made inside a block is refused there by name.
 #
+# COMPACTION: a map compacted while a suspended coroutine holds a pointer into
+# its arena must not free that arena (C: it is retired and freed later; the
+# LLVM backend has no map_compact, so the fixture is interp + C).
+#
 # THE REFUSALS: a body that captures a block's container is a type error (its
 # env is copied out of the block, and a container's copy is the same handle);
 # a Coro cannot be sent or captured across a thread; Wasm and RV name the
@@ -54,7 +58,8 @@ self_handoff|icl|coro: a finished coroutine must hand over to another live corou
 many|icl|10000|0
 pingpong|icl|1000000|0
 overflow|cl|stack overflow (recursion too deep)|1
-deep/deep|cl|2000001000000;main: back|0'
+deep/deep|cl|2000001000000;main: back|0
+compact|ic|held: intact;700|0'
 
 # The interpreter prints a failure with its position and a code frame; the
 # compiled program prints the message alone. The comparison is on the message.
@@ -186,6 +191,7 @@ if [ "$MODE" = "--poison" ]; then
   poison c "C 4 (stack bounds not carried)" '/^  __lang_stack_lo = to->x->s_lo; __lang_stack_hi = to->x->s_hi;$/d' overflow
   poison c "C 5 (env left in the block)" 's/^    if (h->__r != &__lang_default_region \&\& h->__copy)$/    if (0)/' env
   poison c "C 6 (no finished check)" '/^  if (to->state == 3) __lang_fail_impl/d' finished
+  poison c "C 9 (an arena a suspended stack points into is freed)" 's/^  if (__lang_region_pinned) {$/  if (0) {/' compact
   poison c "C 7 (no hand-over check)" 's/^  if (!next || next == self || next->state == 3)$/  if (!next)/' self_handoff
   poison ll "LLVM 1 (current region not carried)" '/^  store ptr %tr, ptr @__lang_current_region$/d' region
   poison ll "LLVM 2 (live-block stack not carried)" '/^  store ptr %ta, ptr @__lang_region_active$/d' unwind
