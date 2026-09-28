@@ -961,12 +961,21 @@ What is refused, and where:
 - Switching to a finished coroutine, and a body that ends by naming itself or a
   finished one, fail with a message (the first one catchably).
 
-Backends: the interpreter and C. On C, a coroutine's stack is what `stack` in
-mere.toml asks for (as for `spawn`), otherwise 8 MiB, reserved rather than
-committed, below a guard page -- an overflow is named like any other. arm64 and
-x86-64 only; another target is a C compile error naming the builtin. LLVM does
-not lower these yet. Wasm and RV refuse by name: core Wasm cannot switch
-stacks, and the bare-metal runtime has one stack. See `scripts/coro_check.sh`.
+Backends: the interpreter, C and LLVM (v0.1.544). On both native backends a
+coroutine's stack is what `stack` in mere.toml asks for (as for `spawn`),
+otherwise 8 MiB, reserved rather than committed, below a guard page -- an
+overflow is named like any other. C switches with a few lines of assembly
+(arm64 and x86-64; another target is a C compile error naming the builtin).
+LLVM IR is not specific to a machine, so there the switch is `_setjmp` /
+`_longjmp` between existing stacks and `llvm.stackrestore` onto a new one.
+
+One difference: on LLVM a coroutine made **inside** a `region R { }` block
+(lexically, or by a function called from one) fails by name. LLVM closures
+carry no env copier, so the body's env would be released with the block; C
+copies it out. Make the coroutine outside the block.
+
+Wasm and RV refuse by name: core Wasm cannot switch stacks, and the bare-metal
+runtime has one stack. See `scripts/coro_check.sh`.
 
 ---
 
