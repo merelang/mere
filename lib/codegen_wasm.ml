@@ -1501,7 +1501,7 @@ let clone_with_fresh_tyvars_wasm (e : Ast.expr) : Ast.expr =
    had that shape, which is the only reason the copy survived under it. *)
 let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
   let decls, insts =
-    try Monomorph.resolve_fn_types ~mangle:mangled_inst_name_wasm skels root with
+    try Monomorph.resolve_fn_types ~mangle:mangled_inst_name_wasm ~recover_erased:true skels root with
     | Monomorph.Unsupported (loc, what) -> unsupported loc what
     | Monomorph.Error (loc, msg) -> raise (Codegen_error (loc, msg))
   in

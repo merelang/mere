@@ -5225,7 +5225,7 @@ let duplicate_multi_use_local_fns e =
 
 let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
   let decls, insts =
-    of_monomorph (fun () -> Monomorph.resolve_fn_types skels root) in
+    of_monomorph (fun () -> Monomorph.resolve_fn_types ~recover_erased:true skels root) in
   multi_inst_fns := insts;
   decls
 
