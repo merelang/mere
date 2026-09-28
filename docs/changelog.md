@@ -4,6 +4,54 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.544 — 2026-09-28
+
+_LLVM lowers the coroutines too, without assembly._
+
+The C runtime switches stacks with a few lines of assembly per target. The
+LLVM backend's output is IR that is not specific to one machine -- its runtime
+decides the platform at run time, off one `icmp` -- so it cannot carry a
+register swap for arm64 and another for x86-64. It does not need to. Between
+two stacks that already exist, a switch is `_setjmp` on the way out and
+`_longjmp` on the way in; the one step that has to set the stack pointer,
+entering a coroutine for the first time, is `llvm.stackrestore` onto the top of
+its stack followed by a call. Measured the same as C: two million switches in
+0.11 s at -O2. Checked at -O0 through -O3 on macOS arm64, Linux arm64 and
+x86-64 Linux, and with `_FORTIFY_SOURCE`.
+
+What a switch carries is C's four pieces plus this backend's ListBuf depth word.
+The guard page is `posix_memalign` + `mprotect` rather than `mmap`, because the
+`MAP_*` flags differ between Darwin and glibc and the protections do not. The
+thread's own record is on the heap, made on first use: a large thread-local
+lands in each thread's stack on glibc (v0.1.541).
+
+One refusal C does not have: a coroutine made while a region block is current
+fails by name. This backend's closures carry no env copier, so the body's env
+would be released with the block; C copies it out.
+
+Found on the way: a region block whose result is a `Coro` asked the variant
+tables about it, as if every named type were a user variant, and the backend
+stopped with `unknown variant type`.
+
+Both runtimes now keep finished stacks for reuse, up to 16 per thread, linked
+through a word at the bottom of each: making and finishing 100,000 coroutines
+on C went from 1.10 s (0.64 s of it in mmap / munmap) to 0.02 s of user time.
+And the guard below each stack is 64 KiB instead of one page, because clang
+does not probe a large frame on Linux and a frame bigger than the guard steps
+over it. That also answered v0.1.543's open note: under x86-64 emulation on an
+arm64 Mac the overflow at -O2 died unnamed with a one-page guard, and is named
+with this one. The emulator runs on 16 KiB host pages and a 4 KiB guard is a
+quarter of one. Real x86-64 (CI) named it either way. There is no poison for the
+guard's size: a frame between one page and 64 KiB is not something a Mere
+program can be made to have on purpose.
+
+`scripts/coro_check.sh` now runs every fixture on LLVM at -O0 and -O2 as well,
+with seven poisons on the emitted IR beside the seven on the emitted C; each
+turns its fixture red. `test/coro/pingpong` became 1000 x 1000 switches: as a
+single recursion a million deep it measured the stack at -O0 rather than the
+switch. Run on macOS arm64, Linux arm64 and, with C and IR emitted ahead,
+x86-64 Linux under emulation: every fixture and every poison as expected.
+
 ## v0.1.543 — 2026-09-28
 
 _Same-thread coroutines: `coro_new`, `coro_switch`, `coro_self` (interpreter and C)._

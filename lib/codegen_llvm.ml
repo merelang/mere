@@ -39,10 +39,396 @@ let host_builtins_without_llvm_lowering =
     "read_lines";
     "run";
     "file_exists"; "random_int"; "random_float";
-    "detach";
-    (* same-thread coroutines: C and the interpreter first; this backend's
-       runtime is hand-written IR and gets its own switch next *)
-    "coro_new"; "coro_switch"; "coro_self" ]
+    "detach" ]
+
+(* Same-thread coroutines (coro_new / coro_switch / coro_self). Emitted only
+   when a program uses one of the three; the comment at its top says why it is
+   _setjmp / _longjmp and llvm.stackrestore rather than assembly. *)
+let coro_runtime_llvm ~(stack_bytes : int) =
+  String.concat "\n"
+    [ "; Same-thread coroutines for the LLVM backend (coro_new / coro_switch / coro_self).";
+      "; No assembly: this IR is not specific to one machine, so the switch is _setjmp /";
+      "; _longjmp between stacks that already exist, and the one step that has to set the";
+      "; stack pointer -- entering a NEW coroutine -- is llvm.stackrestore onto the top of";
+      "; its stack. What a switch carries is what the C runtime carries (the current";
+      "; region, the open-block stack, the try_or jmpbuf, the stack bounds) plus this";
+      "; backend's ListBuf depth word.";
+      "; The guard is posix_memalign + mprotect rather than mmap, because mmap's MAP_*";
+      "; flags differ between Darwin and glibc and PROT_NONE / PROT_READ|WRITE do not.";
+      "; It is 64 KiB, not a page: clang does not probe a large frame on Linux, so a";
+      "; frame bigger than the guard would step over it. Finished stacks are kept for";
+      "; reuse, 16 per thread, threaded through a word at the bottom of each.";
+      "; Every record is on the heap, never thread_local: a large thread-local lands in";
+      "; each thread's stack on glibc. The root record (the thread's own stack) is made";
+      "; on first use.";
+      "%__lang_coro = type { [200 x i8], ptr, i32, ptr, ptr, ptr, ptr, ptr, i32, i32, i32, [200 x i8], i64, i64, i32, ptr }";
+      ";  0 jb   1 stack top   2 state (0 new, 1 running, 2 suspended, 3 finished)";
+      ";  3 env  4 fn  5 owner (pthread_self)  6 current region  7 open blocks";
+      ";  8 open-block count  9 its capacity  10 jmpbuf set  11 jmpbuf  12 stack lo";
+      "; 13 stack hi  14 ListBuf depth  15 the allocation (null for a root)";
+      "@__lang_coro_cur = internal thread_local global ptr null";
+      "@__lang_coro_zombie = internal thread_local global ptr null";
+      "@__lang_coro_pool = internal thread_local global ptr null";
+      "@__lang_coro_pool_n = internal thread_local global i32 0";
+      Printf.sprintf "@__lang_coro_stack_bytes = internal constant i64 %d" stack_bytes;
+      "@__lang_coro_m_new_block = private constant { i64, [121 x i8] } { i64 120, [121 x i8] c\"coro_new: inside a region block -- on LLVM the body's env would be released with the block (the C backend copies it out)\\00\" }";
+      "@__lang_coro_m_nostack = private constant { i64, [35 x i8] } { i64 34, [35 x i8] c\"coro_new: the host refused a stack\\00\" }";
+      "@__lang_coro_m_guard = private constant { i64, [38 x i8] } { i64 37, [38 x i8] c\"coro_new: cannot place the guard page\\00\" }";
+      "@__lang_coro_m_other = private constant { i64, [54 x i8] } { i64 53, [54 x i8] c\"coro_switch: that coroutine belongs to another thread\\00\" }";
+      "@__lang_coro_m_done = private constant { i64, [41 x i8] } { i64 40, [41 x i8] c\"coro_switch: that coroutine has finished\\00\" }";
+      "@__lang_coro_m_hand = private constant { i64, [68 x i8] } { i64 67, [68 x i8] c\"coro: a finished coroutine must hand over to another live coroutine\\00\" }";
+      "@__lang_coro_m_hand2 = private constant { i64, [63 x i8] } { i64 62, [63 x i8] c\"coro: a finished coroutine named a coroutine of another thread\\00\" }";
+      "declare ptr @calloc(i64, i64)";
+      "declare i32 @posix_memalign(ptr, i64, i64)";
+      "declare i32 @mprotect(ptr, i64, i32)";
+      "declare i32 @getpagesize()";
+      "declare void @llvm.stackrestore.p0(ptr)";
+      "";
+      "define internal i64 @__lang_coro_size() {";
+      "entry:";
+      "  %e = getelementptr %__lang_coro, ptr null, i32 1";
+      "  %n = ptrtoint ptr %e to i64";
+      "  ret i64 %n";
+      "}";
+      "";
+      "define internal ptr @__lang_coro_enter_root() {";
+      "entry:";
+      "  %c = load ptr, ptr @__lang_coro_cur";
+      "  %have = icmp ne ptr %c, null";
+      "  br i1 %have, label %done, label %make";
+      "make:";
+      "  %sz = call i64 @__lang_coro_size()";
+      "  %r = call ptr @calloc(i64 1, i64 %sz)";
+      "  %sp = getelementptr %__lang_coro, ptr %r, i32 0, i32 2";
+      "  store i32 1, ptr %sp";
+      "  %op = getelementptr %__lang_coro, ptr %r, i32 0, i32 5";
+      "  %me = call ptr @pthread_self()";
+      "  store ptr %me, ptr %op";
+      "  store ptr %r, ptr @__lang_coro_cur";
+      "  ret ptr %r";
+      "done:";
+      "  ret ptr %c";
+      "}";
+      "";
+      "define internal i64 @__lang_coro_guard() {";
+      "entry:";
+      "  %pg32 = call i32 @getpagesize()";
+      "  %pg = sext i32 %pg32 to i64";
+      "  %pm1 = sub i64 %pg, 1";
+      "  %w = add i64 65536, %pm1";
+      "  %mask = xor i64 %pm1, -1";
+      "  %g = and i64 %w, %mask";
+      "  ret i64 %g";
+      "}";
+      "";
+      "define internal void @__lang_coro_stack_put(ptr %mem) {";
+      "entry:";
+      "  %n = load i32, ptr @__lang_coro_pool_n";
+      "  %full = icmp sge i32 %n, 16";
+      "  %g = call i64 @__lang_coro_guard()";
+      "  br i1 %full, label %release, label %keep";
+      "release:";
+      "  %u = call i32 @mprotect(ptr %mem, i64 %g, i32 3)";
+      "  call void @free(ptr %mem)";
+      "  ret void";
+      "keep:";
+      "  %link = getelementptr i8, ptr %mem, i64 %g";
+      "  %head = load ptr, ptr @__lang_coro_pool";
+      "  store ptr %head, ptr %link";
+      "  store ptr %mem, ptr @__lang_coro_pool";
+      "  %n1 = add i32 %n, 1";
+      "  store i32 %n1, ptr @__lang_coro_pool_n";
+      "  ret void";
+      "}";
+      "";
+      "define internal ptr @__lang_coro_stack_take() {";
+      "entry:";
+      "  %m = load ptr, ptr @__lang_coro_pool";
+      "  %none = icmp eq ptr %m, null";
+      "  br i1 %none, label %empty, label %pop";
+      "empty:";
+      "  ret ptr null";
+      "pop:";
+      "  %g = call i64 @__lang_coro_guard()";
+      "  %link = getelementptr i8, ptr %m, i64 %g";
+      "  %next = load ptr, ptr %link";
+      "  store ptr %next, ptr @__lang_coro_pool";
+      "  %n = load i32, ptr @__lang_coro_pool_n";
+      "  %n1 = sub i32 %n, 1";
+      "  store i32 %n1, ptr @__lang_coro_pool_n";
+      "  ret ptr %m";
+      "}";
+      "";
+      "; a finished coroutine cannot free the stack it stands on; the one it handed";
+      "; over to does it on arrival";
+      "define internal void @__lang_coro_arrived() {";
+      "entry:";
+      "  %z = load ptr, ptr @__lang_coro_zombie";
+      "  %none = icmp eq ptr %z, null";
+      "  br i1 %none, label %done, label %reap";
+      "reap:";
+      "  store ptr null, ptr @__lang_coro_zombie";
+      "  %mp = getelementptr %__lang_coro, ptr %z, i32 0, i32 15";
+      "  %mem = load ptr, ptr %mp";
+      "  call void @__lang_coro_stack_put(ptr %mem)";
+      "  store ptr null, ptr %mp";
+      "  br label %done";
+      "done:";
+      "  ret void";
+      "}";
+      "";
+      "define internal void @__lang_coro_start() noinline {";
+      "entry:";
+      "  %c = load ptr, ptr @__lang_coro_cur";
+      "  %tp = getelementptr %__lang_coro, ptr %c, i32 0, i32 1";
+      "  %top = load ptr, ptr %tp";
+      "  call void @llvm.stackrestore.p0(ptr %top)";
+      "  call void @__lang_coro_body()";
+      "  unreachable";
+      "}";
+      "";
+      "define internal void @__lang_coro_switch_to(ptr %to) noinline {";
+      "entry:";
+      "  %from = load ptr, ptr @__lang_coro_cur";
+      "  ; the current region";
+      "  %f6 = getelementptr %__lang_coro, ptr %from, i32 0, i32 6";
+      "  %t6 = getelementptr %__lang_coro, ptr %to, i32 0, i32 6";
+      "  %cr = load ptr, ptr @__lang_current_region";
+      "  store ptr %cr, ptr %f6";
+      "  %tr = load ptr, ptr %t6";
+      "  store ptr %tr, ptr @__lang_current_region";
+      "  ; the open blocks";
+      "  %f7 = getelementptr %__lang_coro, ptr %from, i32 0, i32 7";
+      "  %f8 = getelementptr %__lang_coro, ptr %from, i32 0, i32 8";
+      "  %f9 = getelementptr %__lang_coro, ptr %from, i32 0, i32 9";
+      "  %t7 = getelementptr %__lang_coro, ptr %to, i32 0, i32 7";
+      "  %t8 = getelementptr %__lang_coro, ptr %to, i32 0, i32 8";
+      "  %t9 = getelementptr %__lang_coro, ptr %to, i32 0, i32 9";
+      "  %ra = load ptr, ptr @__lang_region_active";
+      "  %rn = load i32, ptr @__lang_region_active_n";
+      "  %rc = load i32, ptr @__lang_region_active_cap";
+      "  store ptr %ra, ptr %f7";
+      "  store i32 %rn, ptr %f8";
+      "  store i32 %rc, ptr %f9";
+      "  %ta = load ptr, ptr %t7";
+      "  %tn = load i32, ptr %t8";
+      "  %tc = load i32, ptr %t9";
+      "  store ptr %ta, ptr @__lang_region_active";
+      "  store i32 %tn, ptr @__lang_region_active_n";
+      "  store i32 %tc, ptr @__lang_region_active_cap";
+      "  ; the innermost try_or";
+      "  %f10 = getelementptr %__lang_coro, ptr %from, i32 0, i32 10";
+      "  %f11 = getelementptr %__lang_coro, ptr %from, i32 0, i32 11";
+      "  %t10 = getelementptr %__lang_coro, ptr %to, i32 0, i32 10";
+      "  %t11 = getelementptr %__lang_coro, ptr %to, i32 0, i32 11";
+      "  %js = load i32, ptr @__lang_fail_jmpbuf_set";
+      "  store i32 %js, ptr %f10";
+      "  call ptr @memcpy(ptr %f11, ptr @__lang_fail_jmpbuf, i64 200)";
+      "  %tjs = load i32, ptr %t10";
+      "  store i32 %tjs, ptr @__lang_fail_jmpbuf_set";
+      "  call ptr @memcpy(ptr @__lang_fail_jmpbuf, ptr %t11, i64 200)";
+      "  ; the stack bounds";
+      "  %f12 = getelementptr %__lang_coro, ptr %from, i32 0, i32 12";
+      "  %f13 = getelementptr %__lang_coro, ptr %from, i32 0, i32 13";
+      "  %t12 = getelementptr %__lang_coro, ptr %to, i32 0, i32 12";
+      "  %t13 = getelementptr %__lang_coro, ptr %to, i32 0, i32 13";
+      "  %lo = load i64, ptr @__lang_stack_lo";
+      "  %hi = load i64, ptr @__lang_stack_hi";
+      "  store i64 %lo, ptr %f12";
+      "  store i64 %hi, ptr %f13";
+      "  %tlo = load i64, ptr %t12";
+      "  %thi = load i64, ptr %t13";
+      "  store i64 %tlo, ptr @__lang_stack_lo";
+      "  store i64 %thi, ptr @__lang_stack_hi";
+      "  ; the ListBuf depth";
+      "  %f14 = getelementptr %__lang_coro, ptr %from, i32 0, i32 14";
+      "  %t14 = getelementptr %__lang_coro, ptr %to, i32 0, i32 14";
+      "  %d = load i32, ptr @__lang_region_depth";
+      "  store i32 %d, ptr %f14";
+      "  %td = load i32, ptr %t14";
+      "  store i32 %td, ptr @__lang_region_depth";
+      "  ; states";
+      "  %fs = getelementptr %__lang_coro, ptr %from, i32 0, i32 2";
+      "  %fst = load i32, ptr %fs";
+      "  %running = icmp eq i32 %fst, 1";
+      "  br i1 %running, label %park, label %go";
+      "park:";
+      "  store i32 2, ptr %fs";
+      "  br label %go";
+      "go:";
+      "  store ptr %to, ptr @__lang_coro_cur";
+      "  %r = call i32 @_setjmp(ptr %from)";
+      "  %first = icmp eq i32 %r, 0";
+      "  br i1 %first, label %leave, label %arrived";
+      "leave:";
+      "  %ts = getelementptr %__lang_coro, ptr %to, i32 0, i32 2";
+      "  %tst = load i32, ptr %ts";
+      "  store i32 1, ptr %ts";
+      "  %isnew = icmp eq i32 %tst, 0";
+      "  br i1 %isnew, label %start, label %resume";
+      "start:";
+      "  call void @__lang_coro_start()";
+      "  unreachable";
+      "resume:";
+      "  call void @_longjmp(ptr %to, i32 1)";
+      "  unreachable";
+      "arrived:";
+      "  call void @__lang_coro_arrived()";
+      "  ret void";
+      "}";
+      "";
+      "define internal void @__lang_coro_body() noinline {";
+      "entry:";
+      "  call void @__lang_coro_arrived()";
+      "  %self = load ptr, ptr @__lang_coro_cur";
+      "  %ep = getelementptr %__lang_coro, ptr %self, i32 0, i32 3";
+      "  %fp = getelementptr %__lang_coro, ptr %self, i32 0, i32 4";
+      "  %env = load ptr, ptr %ep";
+      "  %fn = load ptr, ptr %fp";
+      "  %next = call ptr %fn(ptr %env, i64 0)";
+      "  ; the body is over: every block it opened has closed and every try_or has";
+      "  ; returned, so there is nothing to unwind -- only somewhere to go";
+      "  %isnull = icmp eq ptr %next, null";
+      "  %isself = icmp eq ptr %next, %self";
+      "  %bad0 = or i1 %isnull, %isself";
+      "  br i1 %bad0, label %nowhere, label %chk";
+      "chk:";
+      "  %ns = getelementptr %__lang_coro, ptr %next, i32 0, i32 2";
+      "  %nst = load i32, ptr %ns";
+      "  %ndead = icmp eq i32 %nst, 3";
+      "  br i1 %ndead, label %nowhere, label %chk2";
+      "chk2:";
+      "  %no = getelementptr %__lang_coro, ptr %next, i32 0, i32 5";
+      "  %so = getelementptr %__lang_coro, ptr %self, i32 0, i32 5";
+      "  %nov = load ptr, ptr %no";
+      "  %sov = load ptr, ptr %so";
+      "  %same = icmp eq ptr %nov, %sov";
+      "  br i1 %same, label %finish, label %foreign";
+      "nowhere:";
+      "  call void @__lang_fail_impl(ptr getelementptr inbounds ({ i64, [68 x i8] }, ptr @__lang_coro_m_hand, i32 0, i32 1))";
+      "  unreachable";
+      "foreign:";
+      "  call void @__lang_fail_impl(ptr getelementptr inbounds ({ i64, [63 x i8] }, ptr @__lang_coro_m_hand2, i32 0, i32 1))";
+      "  unreachable";
+      "finish:";
+      "  %ra = load ptr, ptr @__lang_region_active";
+      "  call void @free(ptr %ra)";
+      "  store ptr null, ptr @__lang_region_active";
+      "  store i32 0, ptr @__lang_region_active_n";
+      "  store i32 0, ptr @__lang_region_active_cap";
+      "  %sst = getelementptr %__lang_coro, ptr %self, i32 0, i32 2";
+      "  store i32 3, ptr %sst";
+      "  store ptr null, ptr %ep";
+      "  store ptr %self, ptr @__lang_coro_zombie";
+      "  call void @__lang_coro_switch_to(ptr %next)";
+      "  unreachable";
+      "}";
+      "";
+      "define internal ptr @__lang_coro_new(ptr %env, ptr %fn) {";
+      "entry:";
+      "  %root = call ptr @__lang_coro_enter_root()";
+      "  %cr = load ptr, ptr @__lang_current_region";
+      "  %inblock = icmp ne ptr %cr, @__lang_default_region";
+      "  br i1 %inblock, label %refuse, label %alloc";
+      "refuse:";
+      "  call void @__lang_fail_impl(ptr getelementptr inbounds ({ i64, [121 x i8] }, ptr @__lang_coro_m_new_block, i32 0, i32 1))";
+      "  unreachable";
+      "alloc:";
+      "  %pg32 = call i32 @getpagesize()";
+      "  %pg = sext i32 %pg32 to i64";
+      "  %gd = call i64 @__lang_coro_guard()";
+      "  %want = load i64, ptr @__lang_coro_stack_bytes";
+      "  %pm1 = sub i64 %pg, 1";
+      "  %w1 = add i64 %want, %pm1";
+      "  %mask = xor i64 %pm1, -1";
+      "  %sz = and i64 %w1, %mask";
+      "  %total = add i64 %sz, %gd";
+      "  %pooled = call ptr @__lang_coro_stack_take()";
+      "  %have = icmp ne ptr %pooled, null";
+      "  br i1 %have, label %make, label %fresh";
+      "fresh:";
+      "  %slot = alloca ptr";
+      "  %rc = call i32 @posix_memalign(ptr %slot, i64 %pg, i64 %total)";
+      "  %bad = icmp ne i32 %rc, 0";
+      "  br i1 %bad, label %nostack, label %guard";
+      "nostack:";
+      "  call void @__lang_fail_impl(ptr getelementptr inbounds ({ i64, [35 x i8] }, ptr @__lang_coro_m_nostack, i32 0, i32 1))";
+      "  unreachable";
+      "guard:";
+      "  %fm = load ptr, ptr %slot";
+      "  %gp = call i32 @mprotect(ptr %fm, i64 %gd, i32 0)";
+      "  %gbad = icmp ne i32 %gp, 0";
+      "  br i1 %gbad, label %noguard, label %make";
+      "noguard:";
+      "  call void @__lang_fail_impl(ptr getelementptr inbounds ({ i64, [38 x i8] }, ptr @__lang_coro_m_guard, i32 0, i32 1))";
+      "  unreachable";
+      "make:";
+      "  %mem = phi ptr [ %pooled, %alloc ], [ %fm, %guard ]";
+      "  ; the record is never freed: a finished coroutine is still a value the program";
+      "  ; may hold, and switching to it must fail by name rather than read freed memory";
+      "  %csz = call i64 @__lang_coro_size()";
+      "  %c = call ptr @calloc(i64 1, i64 %csz)";
+      "  %c15 = getelementptr %__lang_coro, ptr %c, i32 0, i32 15";
+      "  store ptr %mem, ptr %c15";
+      "  %c3 = getelementptr %__lang_coro, ptr %c, i32 0, i32 3";
+      "  store ptr %env, ptr %c3";
+      "  %c4 = getelementptr %__lang_coro, ptr %c, i32 0, i32 4";
+      "  store ptr %fn, ptr %c4";
+      "  %c5 = getelementptr %__lang_coro, ptr %c, i32 0, i32 5";
+      "  %me = call ptr @pthread_self()";
+      "  store ptr %me, ptr %c5";
+      "  ; a new stack starts where a new thread starts: the default region, no open";
+      "  ; blocks, no try_or, and bounds of its own with the guard page below them";
+      "  %c6 = getelementptr %__lang_coro, ptr %c, i32 0, i32 6";
+      "  store ptr @__lang_default_region, ptr %c6";
+      "  %mi = ptrtoint ptr %mem to i64";
+      "  %lo = add i64 %mi, %gd";
+      "  %hi = add i64 %mi, %total";
+      "  %c12 = getelementptr %__lang_coro, ptr %c, i32 0, i32 12";
+      "  store i64 %lo, ptr %c12";
+      "  %c13 = getelementptr %__lang_coro, ptr %c, i32 0, i32 13";
+      "  store i64 %hi, ptr %c13";
+      "  %ta = and i64 %hi, -16";
+      "  %top = inttoptr i64 %ta to ptr";
+      "  %c1 = getelementptr %__lang_coro, ptr %c, i32 0, i32 1";
+      "  store ptr %top, ptr %c1";
+      "  ret ptr %c";
+      "}";
+      "";
+      "define internal void @__lang_coro_switch(ptr %to) {";
+      "entry:";
+      "  %cur = call ptr @__lang_coro_enter_root()";
+      "  %to5 = getelementptr %__lang_coro, ptr %to, i32 0, i32 5";
+      "  %own = load ptr, ptr %to5";
+      "  %me = call ptr @pthread_self()";
+      "  %mine = icmp eq ptr %own, %me";
+      "  br i1 %mine, label %alive, label %other";
+      "other:";
+      "  call void @__lang_fail_impl(ptr getelementptr inbounds ({ i64, [54 x i8] }, ptr @__lang_coro_m_other, i32 0, i32 1))";
+      "  unreachable";
+      "alive:";
+      "  %to2 = getelementptr %__lang_coro, ptr %to, i32 0, i32 2";
+      "  %st = load i32, ptr %to2";
+      "  %dead = icmp eq i32 %st, 3";
+      "  br i1 %dead, label %finished, label %self";
+      "finished:";
+      "  call void @__lang_fail_impl(ptr getelementptr inbounds ({ i64, [41 x i8] }, ptr @__lang_coro_m_done, i32 0, i32 1))";
+      "  unreachable";
+      "self:";
+      "  %same = icmp eq ptr %to, %cur";
+      "  br i1 %same, label %done, label %go";
+      "go:";
+      "  call void @__lang_coro_switch_to(ptr %to)";
+      "  br label %done";
+      "done:";
+      "  ret void";
+      "}";
+      "";
+      "define internal ptr @__lang_coro_self() {";
+      "entry:";
+      "  %c = call ptr @__lang_coro_enter_root()";
+      "  ret ptr %c";
+      "}" ]
 
 (* v0.1.178: LLVM keeps values and basic-block labels in one namespace, so a
    parameter called `entry` claims the slot the function's own entry block
@@ -264,6 +650,7 @@ let file_pread_bytes_used_llvm = ref false
    main's parameter list — a module that never asks for argv keeps the
    `main()` signature it has always had. *)
 let args_used_llvm = ref false
+let coro_used_llvm = ref false  (* coro_new / coro_switch / coro_self -> coro_runtime_llvm *)
 (* binary file I/O: gated separately because the runtime references the
    mere_vec_int runtime (which is only emitted when an int vec is used). *)
 let uses_read_file_bytes_llvm = ref false
@@ -492,6 +879,7 @@ let rec llvm_ty_of (t : Ast.ty) : string =
      `ptr` could not be passed through one. The runtime converts at its
      own boundary. *)
   | Ast.TyCon ("File", _) -> "i64"
+  | Ast.TyCon ("Coro", _) -> "ptr"  (* a heap record, see coro_runtime_llvm *)
   | Ast.TyTuple ts -> "%" ^ tuple_struct_name ts
   | Ast.TyRef _ -> "ptr"  (* `&R T` is a pointer into the region's buffer *)
   (* Q-012: ThreadHandle wraps a pthread_t (pointer-sized); Channel[T] is a
@@ -2167,6 +2555,7 @@ let rec add_struct_type (tbl : (string, Ast.ty) Hashtbl.t) (t : Ast.ty) : unit =
         let sv = subst_variants params args variants in
         List.iter (fun (_, arg_opt) ->
           match arg_opt with Some t -> add_struct_type tbl t | None -> ()) sv
+      | Ast.TyCon ("Coro", _) -> ()  (* a builtin record, not a user variant *)
       | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n ->
         let vs = variant_shape n in
         List.iter (fun (_, arg_opt) ->
@@ -2213,6 +2602,7 @@ let rec add_struct_deep_type (tbl : (string, Ast.ty) Hashtbl.t) (t : Ast.ty) : u
         let sv = subst_variants params args variants in
         List.iter (fun (_, arg_opt) ->
           match arg_opt with Some t -> go t | None -> ()) sv
+      | Ast.TyCon ("Coro", _) -> ()  (* a builtin record, not a user variant *)
       | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n ->
         List.iter (fun (_, arg_opt) ->
           match arg_opt with Some t -> go t | None -> ()) (variant_shape n)
@@ -2898,6 +3288,7 @@ let variant_shape_of (t : Ast.ty) : (string * string * bool * (string * Ast.ty o
     let (params, variants) = Hashtbl.find polymorphic_variants n in
     let mono = mono_variant_name n args in
     Some (n, mono, is_recursive_variant_name mono, subst_variants params args variants)
+  | Ast.TyCon ("Coro", _) -> None
   | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n ->
     Some (n, n, is_recursive_variant_name n, variant_shape n)
   | _ -> None
@@ -3027,6 +3418,9 @@ let emit_mcopy_fn (tag : string) (t : Ast.ty) : string =
   (match Ast.walk t with
    | Ast.TyInt | Ast.TyUnit | Ast.TyBool | Ast.TyFloat | Ast.TySimd _ ->
      emit_instr (Printf.sprintf "  ret %s %%v" pty)
+   (* a coroutine is a heap record with identity, not a region value *)
+   | Ast.TyCon ("Coro", _) ->
+     emit_instr "  ret ptr %v"
    | Ast.TyStr ->
      let n = fresh_reg () and d = fresh_reg () and n1 = fresh_reg () in
      emit_instr (Printf.sprintf "  %s = call i64 @__lang_str_size(ptr %%v)" n);
@@ -4184,6 +4578,33 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   (* Q-012: spawn a unit -> unit closure on a fresh pthread. Copy the
      closure's {env, fn} onto the heap so the child owns it, then
      pthread_create the trampoline. Result is the pthread_t as i64. *)
+  (* Same-thread coroutines. The body closure is handed over as its two words;
+     the runtime refuses one made inside a region block, whose env this
+     backend cannot copy out (C can: its envs carry a copier). *)
+  | Ast.App ({ node = Ast.Var "coro_new"; _ }, clos) ->
+    coro_used_llvm := true;
+    let cl = emit_expr env clos in
+    let cs =
+      match Option.map Ast.walk clos.Ast.ty with
+      | Some (Ast.TyArrow (p, r)) -> closure_struct_name (Ast.walk p) (Ast.walk r)
+      | _ -> "closure_unit_Coro"
+    in
+    let envr = fresh_reg () and fnr = fresh_reg () and r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0" envr cs cl);
+    emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1" fnr cs cl);
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_coro_new(ptr %s, ptr %s)" r envr fnr);
+    r
+  | Ast.App ({ node = Ast.Var "coro_switch"; _ }, c) ->
+    coro_used_llvm := true;
+    let v = emit_expr env c in
+    emit_instr (Printf.sprintf "  call void @__lang_coro_switch(ptr %s)" v);
+    "0"  (* unit *)
+  | Ast.App ({ node = Ast.Var "coro_self"; _ }, u) ->
+    coro_used_llvm := true;
+    ignore (emit_expr env u);
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_coro_self()" r);
+    r
   | Ast.App ({ node = Ast.Var "spawn"; _ }, clos) ->
     let cl = emit_expr env clos in
     let cs =
@@ -13530,6 +13951,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   file_pio_used_llvm := false;
   file_pread_bytes_used_llvm := false;
   args_used_llvm := false;
+  coro_used_llvm := false;
   uses_read_file_bytes_llvm := false;
   uses_write_file_bytes_llvm := false;
   logger_used := false;
@@ -14252,6 +14674,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !file_pio_used_llvm then [file_pio_runtime_llvm; ""] else [])
     @ (if !file_pread_bytes_used_llvm then [file_pread_bytes_runtime_llvm; ""] else [])
     @ (if !args_used_llvm then [args_runtime_llvm; ""] else [])
+    @ (if !coro_used_llvm then [coro_runtime_llvm ~stack_bytes:(Option.value !Typer.stack_request ~default:(8 * 1024 * 1024)); ""] else [])
     @ (if !logger_used then [logger_runtime_llvm; ""] else [])
     @ (if !metrics_used then [metrics_runtime_llvm; ""] else [])
     @ (if map_hash_runtime = [] then [] else map_hash_runtime @ [""])

@@ -182,7 +182,7 @@ about 1.5 MiB resident.
 thread also finishes one `spawn` away; without a request, spawned threads keep
 the host's default (512 KiB on macOS). A spawned thread's overflow is named the
 same way as main's, and 64 threads under a 512 MB request hold about 2.6 MiB.
-So does every coroutine (`coro_new`, v0.1.543, C backend): its stack is the
+So does every coroutine (`coro_new`, v0.1.543; C and LLVM): its stack is the
 requested size, or 8 MiB without a request, reserved below a guard page.
 
 **The Wasm and RV32IM backends refuse a file that asks.** There the stack is not

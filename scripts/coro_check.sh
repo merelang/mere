@@ -3,26 +3,29 @@
 #
 # A coroutine is a second stack on the thread that made it. Swapping the
 # registers is the easy part; what a switch must ALSO carry is every piece of
-# runtime state that belongs to a stack rather than to a thread. On the C
-# backend that is four things -- the current region, the live-block stack
+# runtime state that belongs to a stack rather than to a thread. On the native
+# backends that is four things -- the current region, the live-block stack
 # (what a fail unwinds), the innermost try_or's jmpbuf, and the stack bounds the
-# SIGSEGV handler compares a fault against. Leave any one on the thread and the
-# program reads freed memory, releases another stack's blocks, longjmps onto a
-# stack that is not running, or calls its own overflow a segfault.
+# SIGSEGV handler compares a fault against (LLVM adds its ListBuf depth word).
+# Leave any one on the thread and the program reads freed memory, releases
+# another stack's blocks, longjmps onto a stack that is not running, or calls
+# its own overflow a segfault.
 #
 # WHAT IS CHECKED: every fixture in test/coro/ gives its expected first lines
-# and exit status, on the interpreter and on C (at -O0 and -O2). The overflow
-# fixture is C only: whether that recursion fits is a fact about the default
-# stack size, and the interpreter's stack is not a native one.
+# and exit status, on the interpreter, on C and on LLVM (both at -O0 and -O2).
+# The overflow fixtures are native only: whether that recursion fits is a fact
+# about the default stack size, and the interpreter's stack is not a native
+# one. env differs on LLVM by design: its closures carry no env copier, so a
+# coroutine made inside a block is refused there by name.
 #
 # THE REFUSALS: a body that captures a block's container is a type error (its
 # env is copied out of the block, and a container's copy is the same handle);
 # a Coro cannot be sent or captured across a thread; Wasm and RV name the
 # builtin and the reason.
 #
-# --poison: the emitted C is edited to drop one carried piece (or one check) at
-# a time, and the fixture that exists for it must go red. A fixture that stays
-# green without the fix is not measuring it.
+# --poison: the emitted C, then the emitted IR, is edited to drop one carried
+# piece (or one check) at a time, and the fixture that exists for it must go
+# red. A fixture that stays green without the fix is not measuring it.
 #
 # Usage:
 #   sh scripts/coro_check.sh            # check
@@ -39,18 +42,19 @@ LIMIT="${LIMIT:-60}"
 FX="$ROOT/test/coro"
 fail=0
 
-# fixture | backends | expected output (lines joined with ;) | exit
-CASES='region|ic|B: my string survived;4106|0
-fail|ic|fail: from the coroutine|1
-nested|ic|main caught: -1;B caught: 5;main: done|0
-unwind|ic|B: region R2 survived main'"'"'s unwind;4096|0
+# fixture | backends (i interp, c C, l LLVM) | expected output (lines joined with ;) | exit
+CASES='region|icl|B: my string survived;4106|0
+fail|icl|fail: from the coroutine|1
+nested|icl|main caught: -1;B caught: 5;main: done|0
+unwind|icl|B: region R2 survived main'"'"'s unwind;4096|0
 env|ic|env: intact;8192|0
-finished|ic|B: ran;switch to a finished coroutine: refused|0
-self_handoff|ic|coro: a finished coroutine must hand over to another live coroutine|1
-many|ic|10000|0
-pingpong|ic|1000000|0
-overflow|c|stack overflow (recursion too deep)|1
-deep/deep|c|2000001000000;main: back|0'
+env|l|coro_new: inside a region block -- on LLVM the body'"'"'s env would be released with the block (the C backend copies it out)|1
+finished|icl|B: ran;switch to a finished coroutine: refused|0
+self_handoff|icl|coro: a finished coroutine must hand over to another live coroutine|1
+many|icl|10000|0
+pingpong|icl|1000000|0
+overflow|cl|stack overflow (recursion too deep)|1
+deep/deep|cl|2000001000000;main: back|0'
 
 # The interpreter prints a failure with its position and a code frame; the
 # compiled program prints the message alone. The comparison is on the message.
@@ -65,19 +69,19 @@ run_bounded() {  # $@ = command -> "output|exit"
   printf '%s|%s' "$(norm < "$T/out")" "$rc"
 }
 
-build() {  # $1 = fixture, $2 = opt, [$3 = sed expression] -> $T/bin, or prints why not
-  "$MERE" -c "$FX/$1.mere" > "$T/g.c" 2>"$T/emit.err" || { echo "EMITFAIL $(head -1 "$T/emit.err")"; return 1; }
-  if [ -n "${3:-}" ]; then
-    sed "$3" "$T/g.c" > "$T/p.c"
-    if cmp -s "$T/p.c" "$T/g.c"; then echo "SEDNOMATCH"; return 1; fi
-    mv "$T/p.c" "$T/g.c"
+build() {  # $1 = fixture, $2 = opt, $3 = c|ll, [$4 = sed expression] -> $T/bin, or prints why not
+  "$MERE" "-$3" "$FX/$1.mere" > "$T/g.$3" 2>"$T/emit.err" || { echo "EMITFAIL $(head -1 "$T/emit.err")"; return 1; }
+  if [ -n "${4:-}" ]; then
+    sed "$4" "$T/g.$3" > "$T/p.$3"
+    if cmp -s "$T/p.$3" "$T/g.$3"; then echo "SEDNOMATCH"; return 1; fi
+    mv "$T/p.$3" "$T/g.$3"
   fi
-  "$CC" "$2" -w -o "$T/bin" "$T/g.c" -lm -lpthread 2>"$T/cc.err" || { echo "CCFAIL $(head -1 "$T/cc.err")"; return 1; }
+  "$CC" "$2" -w -o "$T/bin" "$T/g.$3" -lm -lpthread 2>"$T/cc.err" || { echo "CCFAIL $(head -1 "$T/cc.err")"; return 1; }
 }
 
-want_of() {  # $1 = fixture -> "expected|exit"
+want_of() {  # $1 = fixture, $2 = backend letter -> "expected|exit"
   printf '%s\n' "$CASES" | while IFS='|' read -r f b w rc; do
-    [ "$f" = "$1" ] && printf '%s|%s' "$w" "$rc"
+    case "$b" in *"$2"*) [ "$f" = "$1" ] && printf '%s|%s' "$w" "$rc" ;; esac
   done
 }
 
@@ -88,11 +92,15 @@ while IFS='|' read -r f b w rc; do
     if [ "$got" = "$w|$rc" ]; then printf '  ok    %s\n' "interp $f"
     else printf '  FAIL  %s\n' "interp $f: got [$got] wanted [$w|$rc]"; fail=1; fi ;;
   esac
-  for opt in -O0 -O2; do
-    if ! why=$(build "$f" "$opt"); then printf '  FAIL  %s\n' "C $opt $f: $why"; fail=1; continue; fi
-    got=$(run_bounded "$T/bin")
-    if [ "$got" = "$w|$rc" ]; then printf '  ok    %s\n' "C $opt $f"
-    else printf '  FAIL  %s\n' "C $opt $f: got [$got] wanted [$w|$rc]"; fail=1; fi
+  for be in c ll; do
+    case "$be" in c) letter=c; name=C ;; ll) letter=l; name=LLVM ;; esac
+    case "$b" in *"$letter"*) ;; *) continue ;; esac
+    for opt in -O0 -O2; do
+      if ! why=$(build "$f" "$opt" "$be"); then printf '  FAIL  %s\n' "$name $opt $f: $why"; fail=1; continue; fi
+      got=$(run_bounded "$T/bin")
+      if [ "$got" = "$w|$rc" ]; then printf '  ok    %s\n' "$name $opt $f"
+      else printf '  FAIL  %s\n' "$name $opt $f: got [$got] wanted [$w|$rc]"; fail=1; fi
+    done
   done
 done < "$T/cases"
 
@@ -134,15 +142,16 @@ fi
 
 if [ "$MODE" = "--poison" ]; then
   pfail=0
-  poison() {  # $1 = label, $2 = sed expression, $3... = fixtures that must go red
-    label="$1"; ex="$2"; shift 2
+  poison() {  # $1 = c|ll, $2 = label, $3 = sed expression, $4... = fixtures that must go red
+    be="$1"; label="$2"; ex="$3"; shift 3
+    letter=c; [ "$be" = ll ] && letter=l
     for f in "$@"; do
-      if ! why=$(build "$f" -O2 "$ex"); then
+      if ! why=$(build "$f" -O2 "$be" "$ex"); then
         printf '  FAIL  %s\n' "POISON $label: $f: $why -- the runtime no longer has the shape this poison removes"
         pfail=1; continue
       fi
       got=$(run_bounded "$T/bin")
-      w=$(want_of "$f")
+      w=$(want_of "$f" "$letter")
       if [ "$got" = "$w" ]; then
         printf '  FAIL  %s\n' "POISON $label: $f still green without it"
         pfail=1
@@ -151,13 +160,20 @@ if [ "$MODE" = "--poison" ]; then
       fi
     done
   }
-  poison "1 (current region not carried)" '/^  __lang_current_region = to->s_cur;$/d' region
-  poison "2 (live-block stack not carried)" '/^  __lang_region_active = to->s_active; __lang_region_active_n = to->s_active_n;$/d' unwind
-  poison "3 (try_or jmpbuf not carried)" '/^  __lang_fail_jmpbuf_set = to->s_jb_set;$/d' fail nested
-  poison "4 (stack bounds not carried)" '/^  __lang_stack_lo = to->s_lo; __lang_stack_hi = to->s_hi;$/d' overflow
-  poison "5 (env left in the block)" 's/^    if (h->__r != &__lang_default_region \&\& h->__copy)$/    if (0)/' env
-  poison "6 (no finished check)" '/^  if (to->state == 3) __lang_fail_impl/d' finished
-  poison "7 (no hand-over check)" 's/^  if (!next || next == self || next->state == 3)$/  if (!next)/' self_handoff
+  poison c "C 1 (current region not carried)" '/^  __lang_current_region = to->s_cur;$/d' region
+  poison c "C 2 (live-block stack not carried)" '/^  __lang_region_active = to->s_active; __lang_region_active_n = to->s_active_n;$/d' unwind
+  poison c "C 3 (try_or jmpbuf not carried)" '/^  __lang_fail_jmpbuf_set = to->s_jb_set;$/d' fail nested
+  poison c "C 4 (stack bounds not carried)" '/^  __lang_stack_lo = to->s_lo; __lang_stack_hi = to->s_hi;$/d' overflow
+  poison c "C 5 (env left in the block)" 's/^    if (h->__r != &__lang_default_region \&\& h->__copy)$/    if (0)/' env
+  poison c "C 6 (no finished check)" '/^  if (to->state == 3) __lang_fail_impl/d' finished
+  poison c "C 7 (no hand-over check)" 's/^  if (!next || next == self || next->state == 3)$/  if (!next)/' self_handoff
+  poison ll "LLVM 1 (current region not carried)" '/^  store ptr %tr, ptr @__lang_current_region$/d' region
+  poison ll "LLVM 2 (live-block stack not carried)" '/^  store ptr %ta, ptr @__lang_region_active$/d' unwind
+  poison ll "LLVM 3 (try_or jmpbuf not carried)" '/^  store i32 %tjs, ptr @__lang_fail_jmpbuf_set$/d' fail nested
+  poison ll "LLVM 4 (stack bounds not carried)" '/^  store i64 %tlo, ptr @__lang_stack_lo$/d; /^  store i64 %thi, ptr @__lang_stack_hi$/d' overflow
+  poison ll "LLVM 5 (a block's coroutine not refused)" 's/^  br i1 %inblock, label %refuse, label %alloc$/  br label %alloc/' env
+  poison ll "LLVM 6 (no finished check)" 's/^  br i1 %dead, label %finished, label %self$/  br label %self/' finished
+  poison ll "LLVM 7 (no hand-over check)" 's/^  br i1 %bad0, label %nowhere, label %chk$/  br label %chk/' self_handoff
   if [ "$pfail" = 0 ] && [ "$fail" = 0 ]; then echo "coro --poison: ok (the gate can go red)"; else echo "coro --poison: FAILED"; pfail=1; fi
   exit "$pfail"
 fi
