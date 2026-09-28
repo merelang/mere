@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.548 — 2026-09-29
+
+_Asking whether a suspended coroutine pins an arena is cheap enough to ask on
+every recycle._
+
+v0.1.547's question -- does any suspended stack point into this arena? --
+rescanned every suspended coroutine's stack each time it was asked, and
+mere-ruby asks it constantly: it recycles a map at every method return (the
+frame pool), and CSV.parse_line leaves up to a thousand suspended fibers
+behind. Its csv benchmark did not finish in an hour. Three changes:
+
+- A coroutine can only point into a block that existed while it ran. Blocks
+  carry the epoch they were allocated in (bumped by every switch), each
+  coroutine the epoch it last stopped in, and the live list is kept
+  most-recently-stopped first -- so a walk ends at the first coroutine that
+  stopped before every block in question.
+- A recycle keeps its region's first block and frees only the growth after
+  it, so only those blocks are asked about. They are recent, which is what
+  makes the walk above short.
+- Each coroutine's candidate words are gathered once per stop -- only the ones
+  inside the address range this thread's blocks have spanned -- sorted, and
+  binary-searched per block.
+
+The csv benchmark (2000 rows, best of three) against the build before fibers
+could suspend: parse 1.47 -> 1.44 s, quoted 26.6 -> 26.3 s, headers 1.62 ->
+1.52 s, parse_line 4.88 -> 5.09 s, generate_line 1.20 -> 1.40 s.
+`scripts/coro_check.sh --poison` still passes, the compaction poison included.
+
 ## v0.1.547 — 2026-09-29
 
 _Compacting a map or a Vec while a coroutine is suspended is safe (C)._
