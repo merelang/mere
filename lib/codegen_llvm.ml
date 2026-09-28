@@ -8042,7 +8042,13 @@ let runtime_decls =
          for the whole process, and one alternate stack cannot serve two
          threads, so an overflow on a spawned thread could not be named. A
          spawned thread installs its own (see __mere_spawn_trampoline). *)
-      "@__lang_sigstack = internal thread_local global [131072 x i8] zeroinitializer";
+      (* ⚠ NOT thread_local, unlike the bounds: glibc puts static TLS inside each
+         thread's stack, so a 128 KiB TLS buffer made a spawned thread with a
+         small requested stack impossible to create at all (pthread_create
+         refused a 128K stack on Linux; macOS allocates TLS apart and did not
+         show it). The main thread uses this one; a spawned thread gets a block
+         of its own (__mere_spawn_trampoline). *)
+      "@__lang_sigstack = internal global [131072 x i8] zeroinitializer";
       "@__lang_stack_lo = internal thread_local global i64 0";
       "@__lang_stack_hi = internal thread_local global i64 0";
       "@__lang_msg_stackov = private unnamed_addr constant [36 x i8] c\"stack overflow (recursion too deep)\n\"";
@@ -8084,6 +8090,12 @@ let runtime_decls =
       "  unreachable";
       "}";
       "define internal void @__lang_install_segv() {";
+      "entry:";
+      "  call void @__lang_install_segv_on(ptr @__lang_sigstack)";
+      "  ret void";
+      "}";
+      (* the same, on an alternate stack the caller owns (131072 bytes) *)
+      "define internal void @__lang_install_segv_on(ptr %alt) {";
       "entry:";
       "  %dar0 = icmp ne ptr @pthread_get_stackaddr_np, null";
       (* Guarded, so a null weak symbol is skipped rather than called. Off Darwin the
@@ -8144,7 +8156,7 @@ let runtime_decls =
       "  %dar2 = icmp ne ptr @pthread_get_stackaddr_np, null";
       "  %ss = alloca [32 x i8]";
       "  call void @llvm.memset.p0.i64(ptr %ss, i8 0, i64 32, i1 false)";
-      "  store ptr @__lang_sigstack, ptr %ss";
+      "  store ptr %alt, ptr %ss";
       "  %szoff = select i1 %dar2, i64 8, i64 16";
       "  %szf = getelementptr i8, ptr %ss, i64 %szoff";
       "  store i64 131072, ptr %szf";
@@ -13259,12 +13271,25 @@ let thread_runtime_llvm =
       "entry:";
       (* Q-178: this thread's own bounds and alternate stack, so an overflow
          here is named instead of dying with the handler unable to run *)
-      "  call void @__lang_install_segv()";
+      "  %alt = call ptr @malloc(i64 131072)";
+      "  call void @__lang_install_segv_on(ptr %alt)";
       "  %env = load ptr, ptr %p";
       "  %fnslot = getelementptr i8, ptr %p, i64 8";
       "  %fn = load ptr, ptr %fnslot";
       "  %r = call i32 %fn(ptr %env, i32 0)";
       "  call void @free(ptr %p)";
+      (* stop using the alternate stack before giving it back: ss_flags =
+         SS_DISABLE, which is 4 on macOS and 2 on Linux (the flags word is at 16
+         on macOS and at 8 on glibc -- the stack_t layouts noted above) *)
+      "  %dss = icmp ne ptr @pthread_get_stackaddr_np, null";
+      "  %ds = alloca [32 x i8]";
+      "  call void @llvm.memset.p0.i64(ptr %ds, i8 0, i64 32, i1 false)";
+      "  %dfo = select i1 %dss, i64 16, i64 8";
+      "  %dfp = getelementptr i8, ptr %ds, i64 %dfo";
+      "  %dfv = select i1 %dss, i32 4, i32 2";
+      "  store i32 %dfv, ptr %dfp";
+      "  %drc = call i32 @sigaltstack(ptr %ds, ptr null)";
+      "  call void @free(ptr %alt)";
       "  ret ptr null";
       "}" ]
 
