@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.545 — 2026-09-28
+
+_A finished coroutine keeps 24 bytes, not its saved state._
+
+A `Coro` is a value the program may go on holding after the coroutine has
+finished, and switching to it must then fail by name, so the record a handle
+points at is never freed. It held everything: the saved registers' jump
+buffer, the parked runtime state, the stack's bounds. A million coroutines made
+and dropped held 339 MiB on C and 522 MiB on LLVM after they had all finished.
+
+The record is two now. The small one -- state, owner, and a pointer to the
+rest -- is what the handle points at and what the checks read. The large one is
+freed when the coroutine is reaped, along with its stack going back to the
+pool. The same million hold 34 MiB on both backends.
+
+`scripts/coro_check.sh` bounds that program's resident memory at 128 MiB on C
+and LLVM, and a poison per backend takes the free back out; both go red. The
+measurement is `/usr/bin/time` (BSD `-l` or GNU `-v`); where there is neither,
+the check fails and says the question was not asked, rather than passing. Run
+on macOS arm64, Linux arm64 and x86-64 Linux (emulated, with C and IR emitted
+ahead).
+
+mere-ruby's Fibers moved onto the coroutines the same day, and that is where a
+million of them is an ordinary program: one Enumerator stepped per CSV line.
+
 ## v0.1.544 — 2026-09-28
 
 _LLVM lowers the coroutines too, without assembly._

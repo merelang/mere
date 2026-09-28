@@ -104,6 +104,26 @@ while IFS='|' read -r f b w rc; do
   done
 done < "$T/cases"
 
+# --- what a finished coroutine keeps ---------------------------------------
+# A million made and finished must stay small: the handle's record is never
+# freed (a finished coroutine is still a value), so everything else in it has
+# to be. 128 MiB is about four times what a correct run holds (34 MiB on macOS)
+# and a third of what one holding a jmp_buf per coroutine does.
+RSS_CAP=134217728
+rss_of() {  # $1 = binary -> resident bytes, or empty when this host cannot say
+  r=$( { /usr/bin/time -l "$1" >/dev/null; } 2>&1 | awk '/maximum resident/ {print $1}' )
+  [ -n "$r" ] || r=$( { /usr/bin/time -v "$1" >/dev/null; } 2>&1 | awk '/Maximum resident/ {print $6 * 1024}' )
+  printf '%s' "$r"
+}
+for be in c ll; do
+  name=C; [ "$be" = ll ] && name=LLVM
+  if ! why=$(build million -O2 "$be"); then printf '  FAIL  %s\n' "$name million: $why"; fail=1; continue; fi
+  r=$(rss_of "$T/bin")
+  if [ -z "$r" ]; then printf '  FAIL  %s\n' "$name million: no /usr/bin/time here, so the question was not asked"; fail=1
+  elif [ "$r" -lt "$RSS_CAP" ]; then printf '  ok    %s\n' "$name: a million finished coroutines hold $((r / 1048576)) MiB"
+  else printf '  FAIL  %s\n' "$name: a million finished coroutines hold $((r / 1048576)) MiB"; fail=1; fi
+done
+
 # --- refusals -------------------------------------------------------------
 refuse() {  # $1 = label, $2 = flag ("" = interpreter), $3 = program, $4 = text the refusal must contain
   printf '%s\n' "$3" > "$T/r.mere"
@@ -160,10 +180,10 @@ if [ "$MODE" = "--poison" ]; then
       fi
     done
   }
-  poison c "C 1 (current region not carried)" '/^  __lang_current_region = to->s_cur;$/d' region
-  poison c "C 2 (live-block stack not carried)" '/^  __lang_region_active = to->s_active; __lang_region_active_n = to->s_active_n;$/d' unwind
-  poison c "C 3 (try_or jmpbuf not carried)" '/^  __lang_fail_jmpbuf_set = to->s_jb_set;$/d' fail nested
-  poison c "C 4 (stack bounds not carried)" '/^  __lang_stack_lo = to->s_lo; __lang_stack_hi = to->s_hi;$/d' overflow
+  poison c "C 1 (current region not carried)" '/^  __lang_current_region = to->x->s_cur;$/d' region
+  poison c "C 2 (live-block stack not carried)" '/^  __lang_region_active = to->x->s_active; __lang_region_active_n = to->x->s_active_n;$/d' unwind
+  poison c "C 3 (try_or jmpbuf not carried)" '/^  __lang_fail_jmpbuf_set = to->x->s_jb_set;$/d' fail nested
+  poison c "C 4 (stack bounds not carried)" '/^  __lang_stack_lo = to->x->s_lo; __lang_stack_hi = to->x->s_hi;$/d' overflow
   poison c "C 5 (env left in the block)" 's/^    if (h->__r != &__lang_default_region \&\& h->__copy)$/    if (0)/' env
   poison c "C 6 (no finished check)" '/^  if (to->state == 3) __lang_fail_impl/d' finished
   poison c "C 7 (no hand-over check)" 's/^  if (!next || next == self || next->state == 3)$/  if (!next)/' self_handoff
@@ -174,6 +194,17 @@ if [ "$MODE" = "--poison" ]; then
   poison ll "LLVM 5 (a block's coroutine not refused)" 's/^  br i1 %inblock, label %refuse, label %alloc$/  br label %alloc/' env
   poison ll "LLVM 6 (no finished check)" 's/^  br i1 %dead, label %finished, label %self$/  br label %self/' finished
   poison ll "LLVM 7 (no hand-over check)" 's/^  br i1 %bad0, label %nowhere, label %chk$/  br label %chk/' self_handoff
+  poison_rss() {  # $1 = c|ll, $2 = label, $3 = sed expression
+    if ! why=$(build million -O2 "$1" "$3"); then
+      printf '  FAIL  %s\n' "POISON $2: $why -- the runtime no longer has the shape this poison removes"; pfail=1; return
+    fi
+    r=$(rss_of "$T/bin")
+    if [ -z "$r" ]; then printf '  FAIL  %s\n' "POISON $2: no /usr/bin/time here, so the question was not asked"; pfail=1
+    elif [ "$r" -ge "$RSS_CAP" ]; then printf '  ok    %s\n' "POISON $2: million goes red ($((r / 1048576)) MiB)"
+    else printf '  FAIL  %s\n' "POISON $2: million still under the cap without it ($((r / 1048576)) MiB)"; pfail=1; fi
+  }
+  poison_rss c "C 8 (the saved state is never freed)" 's/ free(z->x); z->x = NULL; }$/ }/'
+  poison_rss ll "LLVM 8 (the saved state is never freed)" '/^  call void @free(ptr %zx)$/d'
   if [ "$pfail" = 0 ] && [ "$fail" = 0 ]; then echo "coro --poison: ok (the gate can go red)"; else echo "coro --poison: FAILED"; pfail=1; fi
   exit "$pfail"
 fi
