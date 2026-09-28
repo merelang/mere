@@ -163,6 +163,45 @@ let classify (name : string) (b : binfo) : capture =
         "cannot capture `%s` : %s across a thread boundary (it is neither \
          Send nor Sync)" name (Ast.pp_ty wt))
 
+(* --- Q-181: what a coroutine's body may capture ---
+   A coroutine's body runs later, on a stack of its own, and may outlive the
+   scope that made it. Its env is copied into the default region when the
+   coroutine is made (the C runtime does that with the env's own copier), which
+   is right for VALUES and wrong for a container: a Map or a Vec is a handle, its
+   copy is the same handle, and a handle into a block region dangles once the
+   block ends. So a captured binding whose type mentions a region -- directly
+   (a `&R` / a container's region marker) or through a nominal type declared
+   over one, in any block around this point -- is refused. Send does not come
+   into it: a coroutine never leaves its thread. *)
+let enclosing_blocks : string list ref = ref []
+
+let rec mentions_any_ref (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyRef _ -> true
+  | Ast.TyTuple ts -> List.exists mentions_any_ref ts
+  | Ast.TyCon (_, args) -> List.exists mentions_any_ref args
+  | _ -> false
+
+let coro_capture (env : venv) (clos : Ast.expr) : unit =
+  match clos.Ast.node with
+  | Ast.Fun _ ->
+    SS.iter (fun name ->
+      match List.assoc_opt name env with
+      | Some { ty = Some t; _ } ->
+        let wt = Ast.walk t in
+        if mentions_any_ref wt
+           || List.exists (fun r -> Typer.mentions_region_in_value r wt) !enclosing_blocks
+        then
+          raise (Typer.Type_error (clos.Ast.loc,
+            Printf.sprintf
+              "coro_new: the body captures `%s` : %s, which lives in a region \
+               block -- the coroutine may run after the block has ended and \
+               freed it. Build it outside the block, or pass it through \
+               something that outlives both" name (Ast.pp_ty wt)))
+      | _ -> ())
+      (free_vars clos)
+  | _ -> ()
+
 (* --- the flow traversal ---
    `go env consumed multi e` returns the consumed set after `e`.
    `multi` is true inside a closure / let rec body that may run more than
@@ -180,7 +219,12 @@ let rec go (env : venv) (consumed : IS.t) (multi : bool) (e : Ast.expr) : IS.t =
             longer be used here" x))
      | _ -> consumed)
   | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _)
-  | Ast.Ref (_, _, a) | Ast.Region_block (_, a) -> go env consumed multi a
+  | Ast.Ref (_, _, a) -> go env consumed multi a
+  | Ast.Region_block (r, a) ->
+    enclosing_blocks := r :: !enclosing_blocks;
+    let c = (try go env consumed multi a with ex -> enclosing_blocks := List.tl !enclosing_blocks; raise ex) in
+    enclosing_blocks := List.tl !enclosing_blocks;
+    c
   | Ast.Region_loop (_, x, a) ->
     (* The body runs any number of times, like a closure's: multi=true, so a
        move inside it of anything outer is rejected. x itself is loop-fresh. *)
@@ -234,6 +278,9 @@ let rec go (env : venv) (consumed : IS.t) (multi : bool) (e : Ast.expr) : IS.t =
   (* spawn (fn () -> ...) : capture analysis (§B). *)
   | Ast.App ({ Ast.node = Ast.Var "spawn"; _ }, ({ Ast.node = Ast.Fun _; _ } as clos)) ->
     spawn_capture env consumed multi clos
+  | Ast.App ({ Ast.node = Ast.Var "coro_new"; _ }, arg) when List.assoc_opt "coro_new" env = None ->
+    coro_capture env arg;
+    go env consumed multi arg
   | Ast.App (f, arg) ->
     go env (go env consumed multi f) multi arg
 
@@ -290,4 +337,5 @@ and spawn_capture (env : venv) (consumed : IS.t) (multi : bool) (clos : Ast.expr
 
 let check (e : Ast.expr) : unit =
   counter := 0;
+  enclosing_blocks := [];
   ignore (go [] IS.empty false e)

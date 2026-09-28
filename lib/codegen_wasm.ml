@@ -2355,7 +2355,16 @@ and emit_expr (e : Ast.expr) : unit =
        emit_instr (Printf.sprintf "local.get %d" cl_base);
        emit_instr "i64.extend_i32_u"
      | None ->
-       if List.mem name host_builtins_without_wasm_lowering then
+       if List.mem name ["coro_new"; "coro_switch"; "coro_self"] then
+         (* Named, with the reason, rather than left to the generic "no lowering
+            yet": "yet" would be a promise. Core Wasm has one stack per call
+            into the module and no instruction that leaves it and comes back. *)
+         unsupported e.Ast.loc
+           (name ^ " is not available on Wasm: a coroutine is a second native \
+                    stack the runtime switches to, and core Wasm cannot switch \
+                    stacks (stack switching is a proposal, not in the hosts this \
+                    backend targets). Coroutines are interp + C")
+       else if List.mem name host_builtins_without_wasm_lowering then
          unsupported e.Ast.loc
            (name ^ " has no Wasm lowering yet (host builtin; scope = interp + C)")
        else if Monomorph.is_multi !multi_inst_fns_wasm name then

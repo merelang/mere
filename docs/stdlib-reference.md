@@ -913,6 +913,63 @@ channel. `contrib/http/sse_native.mere` took the second route and says why.
 
 ---
 
+## Coroutines (v0.1.543)
+
+A coroutine is a second stack on the thread that made it. Nothing runs in
+parallel: `coro_switch` hands the thread over and comes back when something
+hands it back.
+
+| | type | |
+|---|---|---|
+| `coro_new` | `(unit -> Coro) -> Coro` | a suspended coroutine that will run the body; nothing runs yet |
+| `coro_switch` | `Coro -> unit` | run that coroutine until it switches back (or to someone else) |
+| `coro_self` | `unit -> Coro` | the coroutine running now; on a thread that never switched, its root |
+
+The body's result is **who runs next**: a coroutine ends by handing the thread
+to another live one, usually the one that switched to it. There is no implicit
+parent to return to, because transfer is symmetric -- any coroutine may switch
+to any other.
+
+```
+let root = coro_self ();
+let gen = coro_new (fn () ->
+  let _ = print "one" in
+  let _ = coro_switch root in
+  let _ = print "two" in
+  root);
+let _ = coro_switch gen;   // prints one
+let _ = coro_switch gen;   // prints two; gen is finished
+0
+```
+
+What each stack keeps as its own: the current region, the blocks it has open,
+its innermost `try_or`, and (compiled) its stack bounds. So a `fail` inside a
+coroutine is caught by a `try_or` on **that** coroutine's stack or by nothing
+-- never by one the switching stack had open, which would be a jump onto a
+stack that is not running. Uncaught, it ends the program, as on a thread.
+
+What is refused, and where:
+
+- `Coro` is neither Send nor Sync: a coroutine cannot be sent over a channel
+  or captured by `spawn` (type error). Switching to another thread's coroutine
+  is therefore not expressible.
+- A body that captures a **container** made inside an open `region R { }` is
+  a type error. The body's env is copied into the default region when the
+  coroutine is made -- the coroutine may run after the block has ended -- and
+  a container's copy is the same handle. A captured value (a `str`, a record)
+  is copied with it and is fine.
+- Switching to a finished coroutine, and a body that ends by naming itself or a
+  finished one, fail with a message (the first one catchably).
+
+Backends: the interpreter and C. On C, a coroutine's stack is what `stack` in
+mere.toml asks for (as for `spawn`), otherwise 8 MiB, reserved rather than
+committed, below a guard page -- an overflow is named like any other. arm64 and
+x86-64 only; another target is a C compile error naming the builtin. LLVM does
+not lower these yet. Wasm and RV refuse by name: core Wasm cannot switch
+stacks, and the bare-metal runtime has one stack. See `scripts/coro_check.sh`.
+
+---
+
 ## Virtual clock (v0.1.305)
 
 `MERE_VIRTUAL_CLOCK=1` makes the **interpreter** advance a virtual clock instead

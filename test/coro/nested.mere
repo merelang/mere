@@ -1,0 +1,12 @@
+// Two try_or chains, interleaved: main arms one and switches to B; B arms its
+// own and switches back; main fails and must land in its own. Then B fails and
+// must land in B's.
+let root = coro_self ();
+let b = coro_new (fn () ->
+  let r = try_or (fn (u) -> let _ = coro_switch root in let _ = fail "b" in 1) 5 in
+  let _ = print ("B caught: " ++ str_of_int r) in
+  root);
+let m = try_or (fn (u) -> let _ = coro_switch b in let _ = fail "m" in 1) (0 - 1);
+let _ = print ("main caught: " ++ str_of_int m);
+let _ = coro_switch b;
+print "main: done"

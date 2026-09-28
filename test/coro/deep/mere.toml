@@ -1,0 +1,4 @@
+[package]
+name = "coro_deep"
+version = "0.1.0"
+stack = "512MB"

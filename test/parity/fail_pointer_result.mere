@@ -1,0 +1,11 @@
+// `fail` and `exit` where the context wants a value the C backend represents
+// as a pointer (a Vec, a Map). The unreachable value after the noreturn call
+// was spelled as a struct literal of a type that does not exist in C, and
+// clang refused the program.
+let pick = fn (b: bool) -> if b then (let v = vec_new () in let _ = vec_push v 0 in v) else fail "no vec";
+let v = pick true;
+let _ = vec_push v 1;
+let m = if vec_len v == 2 then map_new () else exit 3;
+let _ = map_set m "k" 1;
+let w = try_or (fn (u) -> let x = pick false in vec_len x) 7;
+print_int (map_len m + w)

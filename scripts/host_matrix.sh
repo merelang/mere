@@ -90,6 +90,8 @@ mkdir_p|let _ = mkdir_p "/tmp/mere_probe"; 0
 spawn|let _ = spawn (fn () -> ()); 0
 join|let h = spawn (fn () -> ()); let _ = join h; 0
 detach|let h = spawn (fn () -> ()); let _ = detach h; 0
+coro_new|let c = coro_new (fn () -> coro_self ()); 0
+coro_switch|let _ = coro_switch (coro_self ()); 0
 channel_new|let c = channel_new (); let _ = channel_send c 1; 0
 channel_send|let c = channel_new (); let _ = channel_send c 1; 0
 channel_recv|let c = channel_new (); let _ = channel_send c 1; let v = channel_recv c; v

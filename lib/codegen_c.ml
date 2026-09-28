@@ -596,6 +596,7 @@ let uses_tls = ref false  (* v0.1.91: tcp_starttls* -> real OpenSSL runtime *)
 let env_var_used = ref false
 let uses_midi = ref false  (* v0.1.128: midi_* -> PortMidi input runtime *)
 let uses_window = ref false  (* v0.1.249: win_* -> SDL2 window / pixels / input *)
+let uses_coro = ref false  (* coro_new / coro_switch / coro_self -> the coroutine runtime *)
 let uses_audio = ref false  (* v0.1.314: audio_* -> SDL2 audio, push model *)
 let uses_filestat = ref false  (* v0.1.509: file_* -> stat(2) and friends *)
 let uses_fdio = ref false      (* v0.1.522: fd_* -> open(2) and friends *)
@@ -1602,6 +1603,24 @@ let logic_wants_sequencing (e : Ast.expr) : bool =
    the if-cascade below has to NAME the type of its result. Same trick the inner-lift
    closures use for the same reason: a ref filled in once c_type_of exists. *)
 let c_type_of_fwd : (Ast.ty -> string) ref = ref (fun _ -> raise Exit)
+
+(* The value an unreachable branch hands back -- after `fail`, `exit`, or a
+   match that ran out of arms, all of them noreturn -- so the statement
+   expression has the type its context expects. One function for the three
+   sites. `fail` and `exit` used to spell the type themselves, as if every
+   named type were a struct: a `fail` whose result was a Vec, a Channel, a Map
+   or a Coro emitted `(Vec___rp12_int){0}`, a name nobody declared, and the
+   refusal came from clang. The match site had the pointer case (v0.1.51,
+   v0.1.476); now all three ask c_type_of and zero a pointer with a cast. *)
+let unreachable_value (t : Ast.ty) : string =
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool | Ast.TyUnit | Ast.TyVar _ | Ast.TyParam _ -> "0"
+  | Ast.TyStr -> "\"\""
+  | Ast.TyFloat -> "0.0"
+  | t ->
+    let cty = !c_type_of_fwd t in
+    if cty <> "" && cty.[String.length cty - 1] = '*' then "(" ^ cty ^ ")0"
+    else "(" ^ cty ^ "){0}"
 
 (* A chain of `else if`. `if a then x else if b then y else ... ` nests one bracket per
    arm as `(a ? x : (b ? y : ...))`, and the mere-ruby prelude dispatches on method name
@@ -2919,6 +2938,19 @@ let rec emit_expr (e : Ast.expr) : string =
         ⚠ And a thread that cannot be started is a fail, catchable like any
         other. The return code was ignored, so a refused thread left `tid`
         unset, the closure never ran, and the program went on to `join` it. *)
+     (* Same-thread coroutines. The body closure's env is hoisted into the
+        default region by the runtime (the coroutine outlives the block it was
+        made in); move_check refuses a body that captures a block's value. *)
+     | Ast.Var "coro_new" when not (user_shadows "coro_new") ->
+       uses_coro := true;
+       "({ __auto_type __cl = " ^ emit_expr arg ^ "; \
+           __lang_coro_new((void*)__cl.env, (void*)__cl.fn); })"
+     | Ast.Var "coro_switch" when not (user_shadows "coro_switch") ->
+       uses_coro := true;
+       "({ __lang_coro_switch(" ^ emit_expr arg ^ "); 0; })"
+     | Ast.Var "coro_self" when not (user_shadows "coro_self") ->
+       uses_coro := true;
+       "((void)(" ^ emit_expr arg ^ "), __lang_coro_self())"
      | Ast.Var "spawn" when not (user_shadows "spawn") ->
        let attr_open, attr_arg, attr_close =
          match !stack_request with
@@ -3696,24 +3728,11 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "fail" when not (user_shadows "fail") ->
        (* Phase 22.4/22.5: fail msg — noreturn helper followed by a default
           literal chosen based on the expected context type. Primitive types
-          use dedicated helpers; non-primitive (tuple / record / variant)
-          types resolve the type name via inline c_type_of and append a
-          (TY){0} compound literal. *)
+          use dedicated helpers; everything else gets unreachable_value. *)
        let result_ty =
          match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt
        in
        let arg_c = emit_expr arg in
-       let inline_c_type_of t =
-         match Ast.walk t with
-         | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> "int"
-         | Ast.TyStr -> "const char*"
-         | Ast.TyTuple ts -> tuple_struct_name ts
-         | Ast.TyCon (n, args) ->
-           (* Phase 22.6: polymorphic types need mono-specialized name
-              (`list` instantiated to `'a = json` → `list_json`). *)
-           if args = [] then n else mono_variant_name n (List.map Ast.walk args)
-         | _ -> "int"
-       in
        (* The `fail: ` tag belongs to this builtin, not to the printer. It used
           to be added when the diagnostic was written, which tagged the backend's
           *own* failures too: `int_of_str` on junk said `fail: int_of_str: ...`
@@ -3736,8 +3755,7 @@ let rec emit_expr (e : Ast.expr) : string =
         | Ast.TyInt | Ast.TyBool | Ast.TyUnit ->
           Printf.sprintf "__lang_fail_int(%s)" arg_c
         | other ->
-          let c_ty = inline_c_type_of other in
-          Printf.sprintf "({ __lang_fail_impl(%s); (%s){0}; })" arg_c c_ty)
+          Printf.sprintf "({ __lang_fail_impl(%s); %s; })" arg_c (unreachable_value other))
      | Ast.Var "exit" when not (user_shadows "exit") ->
        (* `exit n` — call libc exit(n) (noreturn), then a default value of the
           expected type so the statement-expression type-checks (unreachable).
@@ -3745,15 +3763,7 @@ let rec emit_expr (e : Ast.expr) : string =
           `fail`, which also has an 'a (bottom) result. *)
        let arg_c = emit_expr arg in
        let default =
-         match (match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt) with
-         | Ast.TyStr -> "\"\""
-         | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> "0"
-         | Ast.TyTuple ts -> Printf.sprintf "(%s){0}" (tuple_struct_name ts)
-         | Ast.TyCon (n, args) ->
-           let cty = if args = [] then n
-                     else mono_variant_name n (List.map Ast.walk args) in
-           Printf.sprintf "(%s){0}" cty
-         | _ -> "0"
+         unreachable_value (match e.Ast.ty with Some t -> t | None -> Ast.TyInt)
        in
        Printf.sprintf "({ exit(%s); %s; })" arg_c default
      | Ast.Var "fst" when not (user_shadows "fst") ->
@@ -4597,52 +4607,13 @@ let rec emit_expr (e : Ast.expr) : string =
     let match_result_ty =
       match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt
     in
+    (* v0.1.51 / v0.1.476: a pointer-represented result zeroes to a CAST null
+       (a bare `0` against a pointer arm warns on every match over a user
+       variant, and stops a -Werror build); unreachable_value does that for
+       this site and for `fail` and `exit`. *)
     let fallthrough_default =
-      match match_result_ty with
-      | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> "({ __lang_fail_impl(\"no matching arm in match\"); 0; })"
-      | Ast.TyStr -> "({ __lang_fail_impl(\"no matching arm in match\"); \"\"; })"
-      | Ast.TyFloat -> "({ __lang_fail_impl(\"no matching arm in match\"); 0.0; })"
-      | t when (match t with
-                | Ast.TyCon (("Vec" | "OwnedVec" | "StrBuf" | "Channel" | "Map"
-                             | "ListBuf"), _) -> true
-                | _ -> is_ptr_ty t) ->
-        (* v0.1.51: pointer-represented result types (Vec / Map / recursive
-           variants / views) zero to NULL. The old code ran a `Vec[R,int]`
-           through mono_variant_name and produced `(Vec___heap_int){0}`, an
-           undeclared struct name, instead of the real `mere_vec_int*`. Found
-           by the gzip inflate probe's `vec_of`.
-
-           v0.1.476: CAST it. A bare `0` is a null pointer constant in most
-           places, but the value of a statement expression is typed by its last
-           expression -- so `({ ...; 0; })` is an `int`, and putting that in the
-           else-arm of a conditional whose other arm is a pointer makes clang
-           warn on EVERY match over a user variant:
-
-             warning: pointer/integer type mismatch in conditional expression
-                      ('list_piece' and 'int')
-
-           Nothing is broken -- __lang_fail_impl is noreturn, so the value is
-           unreachable -- but a warning that fires on correct code on every
-           build is one nobody reads, and it stops a -Werror build dead. The
-           medit2 dogfood's emitted C carried eleven of them. *)
-        Printf.sprintf
-          "({ __lang_fail_impl(\"no matching arm in match\"); (%s)0; })"
-          (!c_type_of_fwd match_result_ty)
-      | Ast.TyTuple ts ->
-        Printf.sprintf "({ __lang_fail_impl(\"no matching arm in match\"); (%s){0}; })" (tuple_struct_name ts)
-      | Ast.TyCon (n, args) ->
-        (* `flatten_module_dots` for the same reason ty_tag needs it: a `type`
-           declared inside a `module` is `M.t`, and a dot is not a C identifier.
-           This is the second place that built a type name without it -- the
-           first was the closure tag -- and it only shows up when a match whose
-           arms are exhaustive-by-construction returns such a record, because
-           that is when this unreachable branch gets a type to name. *)
-        let c_n =
-          if args = [] then flatten_module_dots n
-          else mono_variant_name n (List.map Ast.walk args)
-        in
-        Printf.sprintf "({ __lang_fail_impl(\"no matching arm in match\"); (%s){0}; })" c_n
-      | _ -> "({ __lang_fail_impl(\"no matching arm in match\"); 0; })"
+      Printf.sprintf "({ __lang_fail_impl(\"no matching arm in match\"); %s; })"
+        (unreachable_value match_result_ty)
     in
     (* Emit nested ternaries — each arm's body is wrapped in a
        statement expression so the pattern bindings are in scope for
@@ -4775,7 +4746,7 @@ let rec emit_expr (e : Ast.expr) : string =
             "region loop: the carry contains a function -- its captures \
              cannot be deep-copied across arenas yet"
         | Ast.TyCon (("OwnedVec" | "StrBuf" | "ByteBuf" | "Channel"
-                      | "ThreadHandle" | "ListBuf") as n, _) ->
+                      | "ThreadHandle" | "ListBuf" | "Coro") as n, _) ->
           unsupported e.Ast.loc
             (Printf.sprintf
                "region loop: the carry contains a %s, which cannot be \
@@ -5064,6 +5035,7 @@ type fn_decl = Monomorph.fn_decl = {
 let rec c_type_of (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyCon ("ListBuf", _) -> "__lang_listbuf*"   (* Q-106: one layout for every T *)
+  | Ast.TyCon ("Coro", _) -> "__lang_coro*"
   | Ast.TyCon ("Vec", args) ->
     (* Phase 15.2: Vec[R, T] — expand T to a concrete type and produce
        `mere_vec_<tag>*`. args have not been walked yet, so walk them here
@@ -6395,7 +6367,7 @@ let emit_copy_fn (tag : string) (t : Ast.ty) : string =
               char* s = __lang_str_alloc(r, n);\n  \
               memcpy(s, v, n);\n  return s;\n}"
   | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "Channel"
-                | "ThreadHandle" | "ListBuf"), _) ->
+                | "ThreadHandle" | "ListBuf" | "Coro"), _) ->
     header ^ " { (void)r; return v; }"
   | Ast.TyTuple ts ->
     let steps =
@@ -10279,6 +10251,287 @@ let bytebuf_runtime =
    Metrics' `record` is in curried form `str -> int -> unit`, so the outer
    closure returns the inner closure. The inner closure's env must carry the
    field name; allocate it from the default region and reuse. *)
+(* Same-thread coroutines (coro_new / coro_switch / coro_self). Emitted after
+   the env header, only when a program uses one of the three. The C comment
+   at its top names the state a switch has to carry. *)
+let coro_runtime ~(stack_bytes : int) =
+  String.concat "\n"
+    [ "/* Same-thread coroutines: coro_new / coro_switch / coro_self.";
+      "   A coroutine is a second stack on the thread that made it. Switching saves";
+      "   the callee-saved registers on the current stack and loads the other one's;";
+      "   nothing runs in parallel and nothing is locked. What a switch must also";
+      "   carry is every piece of runtime state that describes \"the stack I am";
+      "   running on\" rather than \"the thread I am running on\":";
+      "     __lang_current_region              where allocations go";
+      "     __lang_region_active / _n / _cap   the live block regions, for unwinding";
+      "     __lang_fail_jmpbuf_set / _jmpbuf   the innermost try_or";
+      "     __lang_stack_lo / _hi              what the SIGSEGV handler calls the stack";
+      "   Missing any one of them is a crash or a jump into a foreign stack, and each";
+      "   has its own poison in scripts/coro_check.sh. Not carried: the region cache";
+      "   (unused region structs, any stack may take one), the fail message slot";
+      "   (written and read with no switch in between), the signal stack (per";
+      "   thread; the handler runs on it whichever stack overflowed). */";
+      "#include <sys/mman.h>";
+      "#include <stdint.h>";
+      "#if !(defined(__aarch64__) || defined(__arm64__) || defined(__x86_64__))";
+      "#error \"coro_new: this target has no coroutine switch (arm64 and x86-64 only)\"";
+      "#endif";
+      "#if defined(__has_feature)";
+      "#  if __has_feature(address_sanitizer)";
+      "#    define __LANG_CORO_ASAN 1";
+      "#  endif";
+      "#endif";
+      "#if defined(__SANITIZE_ADDRESS__)";
+      "#  define __LANG_CORO_ASAN 1";
+      "#endif";
+      "#ifdef __LANG_CORO_ASAN";
+      "/* ASan keeps its own idea of the current stack; without these a longjmp on a";
+      "   coroutine stack is reported as a stack-buffer error that is not one. */";
+      "void __sanitizer_start_switch_fiber(void** fake_stack_save, const void* bottom, size_t size);";
+      "void __sanitizer_finish_switch_fiber(void* fake_stack_save, const void** bottom_old, size_t* size_old);";
+      "#endif";
+      "struct __lang_coro {";
+      "  void* sp;";
+      "  char* map; size_t map_size;          /* the mmap, guard page included; NULL for a thread's root */";
+      "  int state;                           /* 0 new, 1 running, 2 suspended, 3 finished */";
+      "  void* env; __lang_coro* (*fn)(void*, int);";
+      "  pthread_t owner;";
+      "  __lang_region* s_cur;";
+      "  __lang_region** s_active; int s_active_n, s_active_cap;";
+      "  int s_jb_set; jmp_buf s_jb;";
+      "  char* s_lo; char* s_hi;";
+      "  void* asan_fake; const void* asan_bottom; size_t asan_size;";
+      "};";
+      "static _Thread_local __lang_coro __lang_coro_root;";
+      "static _Thread_local __lang_coro* __lang_coro_cur;";
+      "static _Thread_local __lang_coro* __lang_coro_zombie;";
+      "static _Thread_local __lang_coro* __lang_coro_prev;";
+      "";
+      "static void __lang_coro_swap(void** save_sp, void* new_sp);";
+      "static void __lang_coro_boot(void);";
+      "#if defined(__APPLE__)";
+      "#  define __LANG_CORO_SYM(n) \"_\" #n";
+      "#else";
+      "#  define __LANG_CORO_SYM(n) #n";
+      "#endif";
+      "#if defined(__aarch64__) || defined(__arm64__)";
+      "/* AAPCS64: x19..x28, x29, x30, d8..d15 = 20 words, 160 bytes */";
+      "__asm__(";
+      "  \".text\\n\"";
+      "  \".p2align 2\\n\"";
+      "  __LANG_CORO_SYM(__lang_coro_swap) \":\\n\"";
+      "  \"  sub sp, sp, #160\\n\"";
+      "  \"  stp x19, x20, [sp, #0]\\n\"";
+      "  \"  stp x21, x22, [sp, #16]\\n\"";
+      "  \"  stp x23, x24, [sp, #32]\\n\"";
+      "  \"  stp x25, x26, [sp, #48]\\n\"";
+      "  \"  stp x27, x28, [sp, #64]\\n\"";
+      "  \"  stp x29, x30, [sp, #80]\\n\"";
+      "  \"  stp d8,  d9,  [sp, #96]\\n\"";
+      "  \"  stp d10, d11, [sp, #112]\\n\"";
+      "  \"  stp d12, d13, [sp, #128]\\n\"";
+      "  \"  stp d14, d15, [sp, #144]\\n\"";
+      "  \"  mov x2, sp\\n\"";
+      "  \"  str x2, [x0]\\n\"";
+      "  \"  mov sp, x1\\n\"";
+      "  \"  ldp x19, x20, [sp, #0]\\n\"";
+      "  \"  ldp x21, x22, [sp, #16]\\n\"";
+      "  \"  ldp x23, x24, [sp, #32]\\n\"";
+      "  \"  ldp x25, x26, [sp, #48]\\n\"";
+      "  \"  ldp x27, x28, [sp, #64]\\n\"";
+      "  \"  ldp x29, x30, [sp, #80]\\n\"";
+      "  \"  ldp d8,  d9,  [sp, #96]\\n\"";
+      "  \"  ldp d10, d11, [sp, #112]\\n\"";
+      "  \"  ldp d12, d13, [sp, #128]\\n\"";
+      "  \"  ldp d14, d15, [sp, #144]\\n\"";
+      "  \"  add sp, sp, #160\\n\"";
+      "  \"  ret\\n\"";
+      "  /* x19 = entry, x20 = its argument (seeded); x29 = 0 ends the frame chain */";
+      "  \".p2align 2\\n\"";
+      "  __LANG_CORO_SYM(__lang_coro_boot) \":\\n\"";
+      "  \"  mov x29, #0\\n\"";
+      "  \"  mov x30, #0\\n\"";
+      "  \"  mov x0, x20\\n\"";
+      "  \"  blr x19\\n\"";
+      "  \"  brk #0x1\\n\"";
+      ");";
+      "static void* __lang_coro_seed(char* top, void (*entry)(void*), void* arg) {";
+      "  uintptr_t t = ((uintptr_t)top) & ~(uintptr_t)15;";
+      "  void** f = (void**)(t - 160);";
+      "  for (int i = 0; i < 20; i++) f[i] = 0;";
+      "  f[0] = (void*)entry;";
+      "  f[1] = arg;";
+      "  f[11] = (void*)&__lang_coro_boot;";
+      "  return (void*)f;";
+      "}";
+      "#else";
+      "/* System V x86-64: rbp rbx r12..r15, then mxcsr and the x87 control word */";
+      "__asm__(";
+      "  \".text\\n\"";
+      "  \".p2align 4\\n\"";
+      "  __LANG_CORO_SYM(__lang_coro_swap) \":\\n\"";
+      "  \"  pushq %rbp\\n\"";
+      "  \"  pushq %rbx\\n\"";
+      "  \"  pushq %r12\\n\"";
+      "  \"  pushq %r13\\n\"";
+      "  \"  pushq %r14\\n\"";
+      "  \"  pushq %r15\\n\"";
+      "  \"  subq $8, %rsp\\n\"";
+      "  \"  stmxcsr (%rsp)\\n\"";
+      "  \"  fnstcw 4(%rsp)\\n\"";
+      "  \"  movq %rsp, (%rdi)\\n\"";
+      "  \"  movq %rsi, %rsp\\n\"";
+      "  \"  ldmxcsr (%rsp)\\n\"";
+      "  \"  fldcw 4(%rsp)\\n\"";
+      "  \"  addq $8, %rsp\\n\"";
+      "  \"  popq %r15\\n\"";
+      "  \"  popq %r14\\n\"";
+      "  \"  popq %r13\\n\"";
+      "  \"  popq %r12\\n\"";
+      "  \"  popq %rbx\\n\"";
+      "  \"  popq %rbp\\n\"";
+      "  \"  ret\\n\"";
+      "  \".p2align 4\\n\"";
+      "  __LANG_CORO_SYM(__lang_coro_boot) \":\\n\"";
+      "  \"  xorl %ebp, %ebp\\n\"";
+      "  \"  movq %r12, %rdi\\n\"";
+      "  \"  callq *%rbx\\n\"";
+      "  \"  ud2\\n\"";
+      ");";
+      "static void* __lang_coro_seed(char* top, void (*entry)(void*), void* arg) {";
+      "  uintptr_t t = ((uintptr_t)top) & ~(uintptr_t)15;";
+      "  /* after `ret` pops the boot address rsp is 16-aligned, so boot's `call`";
+      "     leaves the callee at the ABI's rsp % 16 == 8 */";
+      "  void** f = (void**)(t - 16 - 8 * 8);";
+      "  uint32_t csr[2];";
+      "  __asm__ volatile(\"stmxcsr %0\" : \"=m\"(csr[0]));";
+      "  __asm__ volatile(\"fnstcw %0\" : \"=m\"(*(uint16_t*)&csr[1]));";
+      "  csr[1] &= 0xffff;";
+      "  ((uint32_t*)f)[0] = csr[0]; ((uint32_t*)f)[1] = csr[1];";
+      "  f[1] = 0; f[2] = 0; f[3] = 0;";
+      "  f[4] = arg;";
+      "  f[5] = (void*)entry;";
+      "  f[6] = 0;";
+      "  f[7] = (void*)&__lang_coro_boot;";
+      "  return (void*)f;";
+      "}";
+      "#endif";
+      "";
+      "static void __lang_coro_arrived(__lang_coro* self) {";
+      "#ifdef __LANG_CORO_ASAN";
+      "  const void* b; size_t n;";
+      "  __sanitizer_finish_switch_fiber(self->asan_fake, &b, &n);";
+      "  if (__lang_coro_prev) { __lang_coro_prev->asan_bottom = b; __lang_coro_prev->asan_size = n; }";
+      "#else";
+      "  (void)self;";
+      "#endif";
+      "  /* a finished coroutine cannot unmap the stack it is standing on; the one";
+      "     it handed over to does it here */";
+      "  __lang_coro* z = __lang_coro_zombie;";
+      "  if (z) { __lang_coro_zombie = NULL; munmap(z->map, z->map_size); z->map = NULL; }";
+      "}";
+      "";
+      "static void __lang_coro_enter_root(void) {";
+      "  if (__lang_coro_cur) return;";
+      "  __lang_coro_root.state = 1;";
+      "  __lang_coro_root.owner = pthread_self();";
+      "  __lang_coro_cur = &__lang_coro_root;";
+      "}";
+      "";
+      "static void __lang_coro_switch_to(__lang_coro* to) {";
+      "  __lang_coro* from = __lang_coro_cur;";
+      "  from->s_cur = __lang_current_region;";
+      "  __lang_current_region = to->s_cur;";
+      "  from->s_active = __lang_region_active; from->s_active_n = __lang_region_active_n;";
+      "  from->s_active_cap = __lang_region_active_cap;";
+      "  __lang_region_active = to->s_active; __lang_region_active_n = to->s_active_n;";
+      "  __lang_region_active_cap = to->s_active_cap;";
+      "  from->s_jb_set = __lang_fail_jmpbuf_set;";
+      "  if (__lang_fail_jmpbuf_set) memcpy(from->s_jb, __lang_fail_jmpbuf, sizeof(jmp_buf));";
+      "  __lang_fail_jmpbuf_set = to->s_jb_set;";
+      "  if (to->s_jb_set) memcpy(__lang_fail_jmpbuf, to->s_jb, sizeof(jmp_buf));";
+      "  from->s_lo = __lang_stack_lo; from->s_hi = __lang_stack_hi;";
+      "  __lang_stack_lo = to->s_lo; __lang_stack_hi = to->s_hi;";
+      "  if (from->state == 1) from->state = 2;";
+      "  to->state = 1;";
+      "  __lang_coro_cur = to;";
+      "  __lang_coro_prev = from;";
+      "#ifdef __LANG_CORO_ASAN";
+      "  __sanitizer_start_switch_fiber(from->state == 3 ? NULL : &from->asan_fake, to->asan_bottom, to->asan_size);";
+      "#endif";
+      "  __lang_coro_swap(&from->sp, to->sp);";
+      "  __lang_coro_arrived(from);";
+      "}";
+      "";
+      "static void __lang_coro_body(void* p) {";
+      "  __lang_coro* self = (__lang_coro*)p;";
+      "  __lang_coro_arrived(self);";
+      "  __lang_coro* next = self->fn(self->env, 0);";
+      "  /* The body is over: every block it opened has closed and every try_or has";
+      "     returned, so there is nothing to unwind -- only somewhere to go. */";
+      "  if (!next || next == self || next->state == 3)";
+      "    __lang_fail_impl(\"coro: a finished coroutine must hand over to another live coroutine\");";
+      "  if (!pthread_equal(next->owner, self->owner))";
+      "    __lang_fail_impl(\"coro: a finished coroutine named a coroutine of another thread\");";
+      "  free(__lang_region_active);";
+      "  __lang_region_active = NULL; __lang_region_active_n = 0; __lang_region_active_cap = 0;";
+      "  self->state = 3;";
+      "  self->env = NULL;";
+      "  __lang_coro_zombie = self;";
+      "  __lang_coro_switch_to(next);";
+      "  __builtin_trap();";
+      "}";
+      "";
+      Printf.sprintf "static const size_t __lang_coro_stack_bytes = %dULL;" stack_bytes;
+      "static __lang_coro* __lang_coro_new(void* env, void* fn) {";
+      "  __lang_coro_enter_root();";
+      "  /* the closure outlives the block it was made in: its env goes where the";
+      "     coroutine's allocations go, the default region */";
+      "  if (env) {";
+      "    __lang_env_hdr* h = (__lang_env_hdr*)env;";
+      "    if (h->__r != &__lang_default_region && h->__copy)";
+      "      env = h->__copy(&__lang_default_region, env);";
+      "  }";
+      "  size_t page = (size_t)sysconf(_SC_PAGESIZE);";
+      "  size_t sz = (__lang_coro_stack_bytes + page - 1) / page * page;";
+      "  char* m = (char*)mmap(NULL, sz + page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON";
+      "#ifdef MAP_NORESERVE";
+      "                        | MAP_NORESERVE";
+      "#endif";
+      "                        , -1, 0);";
+      "  if (m == MAP_FAILED) __lang_fail_impl(\"coro_new: the host refused a stack\");";
+      "  if (mprotect(m, page, PROT_NONE) != 0) __lang_fail_impl(\"coro_new: cannot place the guard page\");";
+      "  /* The record is never freed: a finished coroutine is still a value the";
+      "     program may hold, and switching to it must fail with its name rather";
+      "     than read freed memory. Its stack is what costs, and that is unmapped. */";
+      "  __lang_coro* c = (__lang_coro*)calloc(1, sizeof(__lang_coro));";
+      "  if (!c) __lang_fail_impl(\"out of memory\");";
+      "  c->map = m; c->map_size = sz + page;";
+      "  c->env = env; c->fn = (__lang_coro* (*)(void*, int))fn;";
+      "  c->owner = pthread_self();";
+      "  /* a new stack starts where a new thread starts: the default region, no";
+      "     live blocks, no try_or, and bounds of its own (guard page below them) */";
+      "  c->s_cur = &__lang_default_region;";
+      "  c->s_lo = m + page; c->s_hi = m + sz + page;";
+      "  c->asan_bottom = m + page; c->asan_size = sz;";
+      "  c->sp = __lang_coro_seed(m + sz + page, __lang_coro_body, c);";
+      "  return c;";
+      "}";
+      "";
+      "static void __lang_coro_switch(__lang_coro* to) {";
+      "  __lang_coro_enter_root();";
+      "  if (!pthread_equal(to->owner, pthread_self()))";
+      "    __lang_fail_impl(\"coro_switch: that coroutine belongs to another thread\");";
+      "  if (to->state == 3) __lang_fail_impl(\"coro_switch: that coroutine has finished\");";
+      "  if (to == __lang_coro_cur) return;";
+      "  __lang_coro_switch_to(to);";
+      "}";
+      "";
+      "static __lang_coro* __lang_coro_self(void) {";
+      "  __lang_coro_enter_root();";
+      "  return __lang_coro_cur;";
+      "}" ]
+
 (* v0.1.292: every closure env begins with this header, so `__mcopy` can copy an
    env it only knows as `void*` -- the copier moves out of the closure struct,
    which goes back to two pointers. That matters because a closure is passed BY
@@ -12352,6 +12605,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      tcp_read/write/close); everyone else keeps the plaintext path and needs no
      OpenSSL at build time. *)
   env_var_used := false;
+  uses_coro := false;
   uses_tls :=
     Hashtbl.mem extern_fn_decls "tcp_starttls"
     || Hashtbl.mem extern_fn_decls "tcp_starttls_verified"
@@ -13959,6 +14213,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        stays false and the full struct below is omitted. The forward decl is
        enough for the pointer types and an unused typedef is harmless. *)
     @ ["typedef struct mere_bytes mere_bytes;";
+       (* a closure that returns a Coro is typed before the runtime *)
+       "typedef struct __lang_coro __lang_coro;";
        (* Forward, for the same reason: a closure struct that returns one is
           declared before the runtime that defines it. *)
        "typedef struct mere_bytebuf mere_bytebuf;"; ""]
@@ -13994,6 +14250,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if inner_lift_closure_decls = [] then []
        else inner_lift_closure_decls @ [""])
     @ [env_header_runtime; ""]
+    (* a coroutine's stack is the size the program asked for (`stack` in
+       mere.toml), like every thread it starts; otherwise 8 MiB *)
+    @ (if !uses_coro then [coro_runtime ~stack_bytes:(Option.value !stack_request ~default:(8 * 1024 * 1024)); ""]
+       else [])
     @ (if closure_env_copy_fwds = [] then [] else closure_env_copy_fwds @ [""])
     (* Vec[R, T] / OwnedVec[T] / StrBuf[R] runtime — depends on the
        element type's C struct being complete, so emit after tuple /

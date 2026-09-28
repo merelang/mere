@@ -1576,6 +1576,7 @@ let rec is_send_v (visiting : string list) (t : Ast.ty) : bool =
   | Ast.TyParam _ | Ast.TyVar _ -> true
   | Ast.TyCon ("Channel", _) -> true
   | Ast.TyCon ("ThreadHandle", _) -> true
+  | Ast.TyCon ("Coro", _) -> false             (* Q-181: it belongs to its thread *)
   | Ast.TyCon ("File", _) -> true              (* moving a handle is fine *)
   (* v0.1.29 (mkv dogfood P2): region-bound mutable containers are
      thread-local — the runtimes are lock-free (linear-scan arrays /
@@ -1606,6 +1607,7 @@ let rec is_sync_v (visiting : string list) (t : Ast.ty) : bool =
   | Ast.TyParam _ | Ast.TyVar _ -> true
   | Ast.TyCon ("Channel", _) -> true
   | Ast.TyCon ("ThreadHandle", _) -> false     (* single-owner handle *)
+  | Ast.TyCon ("Coro", _) -> false
   | Ast.TyCon ("File", _) -> false             (* FILE* reads are not thread-safe *)
   (* v0.1.29 (mkv dogfood P2): see is_send_v — lock-free region-bound
      containers must not be shared across threads. *)
@@ -1977,6 +1979,10 @@ let () = Hashtbl.replace types "ListBuf" 2
    and `ThreadHandle` (arity 0, e.g. `let h : ThreadHandle = spawn (...)`). *)
 let () = Hashtbl.replace types "Channel" 1
 let () = Hashtbl.replace types "ThreadHandle" 0
+(* Q-181: `Coro` -- a coroutine: a stack of its own on THIS thread, entered by
+   coro_switch. Opaque, arity 0, neither Send nor Sync (it belongs to the thread
+   that made it; switching to it from another is refused at run time). *)
+let () = Hashtbl.replace types "Coro" 0
 (* v0.1.59 (mgrep dogfood): File — an open read handle for streaming
    per-line file input (file_open / file_read_line / file_close). *)
 let () = Hashtbl.replace types "File" 0
@@ -2378,6 +2384,20 @@ let join_scheme =
    resources without waiting for it (pthread_detach on the C backend). *)
 let detach_scheme =
   mono (Ast.TyArrow (Ast.TyCon ("ThreadHandle", []), Ast.TyUnit))
+(* Q-181: coroutines. `coro_new body` makes a suspended coroutine; `body ()`
+   runs on the coroutine's own stack the first time something switches to it,
+   and the Coro it RETURNS is where control goes when it ends. `coro_switch c`
+   suspends the running coroutine and resumes c (symmetric: nothing returns to
+   the switcher unless someone switches back). `coro_self ()` is the running
+   one -- the thread's own stack is a coroutine too. No value slot: values
+   cross through whatever the program shares, since it is all one thread. *)
+let coro_new_scheme =
+  mono (Ast.TyArrow (Ast.TyArrow (Ast.TyUnit, Ast.TyCon ("Coro", [])),
+                     Ast.TyCon ("Coro", [])))
+let coro_switch_scheme =
+  mono (Ast.TyArrow (Ast.TyCon ("Coro", []), Ast.TyUnit))
+let coro_self_scheme =
+  mono (Ast.TyArrow (Ast.TyUnit, Ast.TyCon ("Coro", [])))
 
 let _chan_new_elem = fresh_var ()
 let channel_new_scheme =
@@ -2619,6 +2639,9 @@ let initial_env : env =
     ("spawn",        spawn_scheme);
     ("join",         join_scheme);
     ("detach",       detach_scheme);
+    ("coro_new",     coro_new_scheme);
+    ("coro_switch",  coro_switch_scheme);
+    ("coro_self",    coro_self_scheme);
     ("channel_new",  channel_new_scheme);
     ("channel_send", channel_send_scheme);
     ("channel_recv", channel_recv_scheme);

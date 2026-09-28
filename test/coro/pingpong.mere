@@ -1,0 +1,11 @@
+// A million switches each way, both sides inside a try_or (the shape an
+// interpreter has: every call runs under one, so the jmpbuf is always set).
+let root = coro_self ();
+let n = 1000000;
+let c = coro_new (fn () ->
+  try_or (fn (u) ->
+    let rec loop = fn (i: int) -> if i == 0 then root else (let _ = coro_switch root in loop (i - 1)) in
+    loop n) root);
+let rec drive = fn (i: int) -> if i == 0 then 0 else (let _ = coro_switch c in drive (i - 1));
+let _ = try_or (fn (u) -> drive (n + 1)) 0;
+print_int n

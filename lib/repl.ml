@@ -51,6 +51,8 @@ let format_diag ~source = function
     Diagnostic.format ~source ~filename:"<repl>" loc "type error" msg
   | Eval.Eval_error (loc, msg) ->
     Diagnostic.format ~source ~filename:"<repl>" loc "eval error" msg
+  | Eval.Coro_uncaught (loc, msg) ->
+    Diagnostic.format ~source ~filename:"<repl>" loc "eval error" msg
   | e -> "internal error: " ^ Printexc.to_string e
 
 (* Process one top decl, updating both envs.
@@ -288,7 +290,7 @@ let rec is_serializable = function
   | Eval.V_vec _ | Eval.V_lb _ | Eval.V_strbuf _ | Eval.V_map _ -> false
   | Eval.V_bytes _ -> false  (* no bytes literal syntax; :save can't round-trip it *)
   | Eval.V_bytebuf _ -> false  (* mutable, and region-bound: not a value to save *)
-  | Eval.V_channel _ | Eval.V_thread _ -> false
+  | Eval.V_channel _ | Eval.V_thread _ | Eval.V_coro _ -> false
   | Eval.V_constr (_, None) -> true
   | Eval.V_constr (_, Some inner) -> is_serializable inner
   | Eval.V_tuple vs -> List.for_all is_serializable vs
