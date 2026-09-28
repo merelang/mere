@@ -1,0 +1,7 @@
+// A finished coroutine is still a value. Switching to it is a fail with its
+// name, and a catchable one.
+let root = coro_self ();
+let b = coro_new (fn () -> let _ = print "B: ran" in root);
+let _ = coro_switch b;
+let v = try_or (fn (u) -> let _ = coro_switch b in 1) 0;
+print (if v == 0 then "switch to a finished coroutine: refused" else "switch to a finished coroutine: allowed")

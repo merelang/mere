@@ -1,0 +1,19 @@
+// Same-thread coroutines: two stacks take turns on one thread, each building
+// strings in its own frames, and the order of the lines is the order of the
+// switches. Interp + C (LLVM, Wasm and RV refuse by name).
+let root = coro_self ();
+let rec count = fn (tag: str) -> fn (i: int) -> fn (n: int) ->
+  if i == n then root
+  else (let _ = print (tag ++ str_of_int i) in
+        let _ = coro_switch root in
+        count tag (i + 1) n);
+let a = coro_new (fn () -> count "a" 0 3);
+let b = coro_new (fn () -> count "b" 0 2);
+let rec drive = fn (k: int) ->
+  if k == 0 then 0
+  else (let _ = coro_switch a in let _ = coro_switch b in drive (k - 1));
+let _ = drive 2;
+let _ = coro_switch a;
+let _ = coro_switch a;
+let v = try_or (fn (u) -> let _ = coro_switch a in 1) 0;
+print ("after the end: " ++ str_of_int v)

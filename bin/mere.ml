@@ -510,6 +510,9 @@ let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
        `no matching arm in match` above `missing 1` reads as two problems and
        is one. Every other handler here already prints them. *)
     ignore (print_warnings ()); report_eval loc msg
+  (* a fail no try_or on its own stack caught, inside a coroutine: uncaught,
+     whatever the stack that switched to it had open *)
+  | Mere.Eval.Coro_uncaught (loc, msg) -> ignore (print_warnings ()); report_eval loc msg
   | Mere.Typer.Type_error (loc, msg) -> ignore (print_warnings ()); report_type loc msg
   | Mere.Trait_elab.Trait_error (loc, msg) -> report loc "trait error" msg
   | Mere.Codegen_c.Codegen_error (loc, msg) -> report loc "codegen error" msg

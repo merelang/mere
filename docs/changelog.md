@@ -4,6 +4,59 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.543 — 2026-09-28
+
+_Same-thread coroutines: `coro_new`, `coro_switch`, `coro_self` (interpreter and C)._
+
+Until now the only way to leave a stack standing and come back to it later was
+`spawn`: one OS thread per suspended computation, a switch that is a channel
+round trip between two threads, and a thread's creation cost per suspension.
+A coroutine is a second stack on the same thread. `coro_new : (unit -> Coro)
+-> Coro` makes one without running it; `coro_switch : Coro -> unit` hands the
+thread to it; `coro_self : unit -> Coro` names the one running. The body's
+result is the coroutine to hand over to when it ends, because transfer is
+symmetric and there is no parent to return to.
+
+Swapping registers is the easy part (a few lines of assembly per target, arm64
+and x86-64). What a switch must also carry is every piece of runtime state that
+belongs to a stack rather than a thread. On C there are four: the current
+region, the stack of open blocks a fail unwinds, the innermost `try_or`'s jump
+buffer, and the stack bounds the SIGSEGV handler compares a fault against.
+Leave any one on the thread and the program reads freed memory, releases
+another stack's blocks, jumps onto a stack that is not running, or reports its
+own overflow as a segfault. The interpreter carries its three (call depth, the
+call stack a failure prints, the current region's id) and builds symmetric
+transfer from OCaml 5's asymmetric effects: only a thread's root runs a driver,
+and a coroutine that switches returns its continuation to it. A fail no
+`try_or` on the coroutine's own stack catches is uncaught on both, rather than
+landing in a handler the switching stack had open.
+
+`Coro` is neither Send nor Sync. A body whose captures include a container made
+inside an open `region R { }` is a type error: the body's env is copied into
+the default region when the coroutine is made, which is right for a value and
+wrong for a handle. Switching to a finished coroutine fails with a message, as
+does a body that ends by naming itself. On C a coroutine's stack is the size
+`stack` in mere.toml asks for, or 8 MiB, reserved below a guard page, and its
+overflow is named. LLVM does not lower these yet; Wasm and RV refuse them by
+name, with the reason.
+
+Found on the way: `fail` and `exit` in a position that wants a Vec, Map,
+Channel or Coro emitted `(Vec___rp12_int){0}` after the noreturn call -- a
+struct nobody declared -- and clang refused the program. The three sites that
+make that unreachable value (with the match fallthrough, which had the pointer
+case since v0.1.51) now share one function. `test/parity/fail_pointer_result`
+was red before and is green after.
+
+`scripts/coro_check.sh` (CI, with a poison): eleven fixtures in `test/coro/` on
+the interpreter and on C at -O0 and -O2, the refusals, and one allowed capture.
+The poison edits the emitted C to drop each of the four carried pieces, the env
+copy, and the two runtime checks, and the fixture that exists for each must go
+red; all seven do. Run on macOS arm64 and Linux arm64 (ubuntu 24.04, clang 18).
+On x86-64 Linux under emulation the fixtures and poisons are green except the
+overflow at -O2, which dies unnamed; the same emulator also loses the name for
+a plain main-thread overflow at -O1 about half the time while a hand-written
+C program with the same handler never does. Real x86-64 is CI's to answer.
+
 ## v0.1.542 — 2026-09-28
 
 _LLVM: two threads can allocate at once (Q-180)._

@@ -1,0 +1,22 @@
+// The live-block stack is per stack. B opens R2 and switches out with it open;
+// main fails out of a try_or and unwinds ITS blocks. With one shared stack the
+// unwind releases B's R2 as well, the next blocks recycle it, and B reads
+// someone else's bytes.
+let root = coro_self ();
+let b = coro_new (fn () ->
+  let n = region R2 {
+    let s = str_repeat "b" 32 ++ "!" in
+    let _ = coro_switch root in
+    if s == str_repeat "b" 32 ++ "!" then 1 else 0
+  } in
+  let _ = print (if n == 1 then "B: region R2 survived main's unwind" else "B: region R2 was released under me") in
+  root);
+let m = try_or (fn (u) -> region R1 {
+    let _ = coro_switch b in
+    let _ = fail "unwind" in
+    1
+  }) 0;
+// TWO blocks deep: the unwind released R2 then R1 and the region cache is LIFO,
+// so only the second acquire gets B's R2 back.
+let z = region R3 { region R4 { let t = str_repeat "Z" 4096 in let _ = coro_switch b in str_len t } };
+print_int (m + z)

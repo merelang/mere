@@ -149,6 +149,9 @@ type value =
     (* `ThreadHandle` — a worker spawned on a fresh OCaml 5 domain
        (Sub-Q A: OS-thread / Domain-like). `join` blocks on Domain.join.
        The domain runs the `unit -> unit` closure passed to `spawn`. *)
+  | V_coro of coro
+    (* `Coro` -- a same-thread coroutine (coro_new / coro_switch / coro_self).
+       See `coro_switch_to` for how three effects make symmetric transfer. *)
 
 (* Q-063: the interpreter's Map, with the same tombstone discipline the C
    backend got in v0.1.317. `m_order` is newest-first and APPEND-ONLY: a delete
@@ -179,6 +182,26 @@ and vecbuf = { mutable vc_data : value array; mutable vc_len : int }
 and lbuf = { mutable lb_items : value list; mutable lb_frozen : bool; lb_region : int }
 
 and env = (string * value ref) list
+
+(* A coroutine, and the interpreter's per-stack state parked on it while it is
+   not the one running: the call depth, the call stack a failure prints, and
+   which region is current. Those three are what "the stack I am on" means
+   here, the way the region pointer, the live-block stack, the try_or jmpbuf
+   and the stack bounds do in the C runtime. *)
+and coro = {
+  co_owner : int;  (* the domain that made it; only that domain may switch to it *)
+  mutable co_state : coro_state;
+  mutable co_depth : int;
+  mutable co_stack : Ast.expr list;
+  mutable co_region : int;
+}
+and coro_state =
+  | Co_new of value         (* the body, not yet started *)
+  | Co_running
+  | Co_parked               (* a domain's root, waiting in the driver *)
+  | Co_suspended of (unit, coro_step) Effect.Deep.continuation
+  | Co_dead
+and coro_step = Co_switched of coro | Co_finished of coro
 
 let vecbuf_of_array (a : value array) : vecbuf =
   { vc_data = a; vc_len = Array.length a }
@@ -355,6 +378,7 @@ and to_string = function
   | V_file _ -> "<file>"
   | V_rwfile _ -> "<file>"
   | V_thread _ -> "<thread>"
+  | V_coro _ -> "<coro>"
 
 (* `to_json x` — structural JSON serialization of any value, the derive-y
    sibling of `show` (compile-time-specialized ad-hoc polymorphism, no trait
@@ -376,7 +400,7 @@ and to_json_string = function
   | V_bool b -> if b then "true" else "false"
   | V_str s -> Ast.escape_string s
   | V_unit -> "null"
-  | V_closure _ | V_builtin _ | V_channel _ | V_thread _ | V_file _ | V_rwfile _ -> "null"
+  | V_closure _ | V_builtin _ | V_channel _ | V_thread _ | V_coro _ | V_file _ | V_rwfile _ -> "null"
   | V_constr ("Nil", None) -> "[]"
   | V_constr ("Cons", Some (V_tuple [_; _])) as v ->
     (match try_as_list v with
@@ -3117,6 +3141,118 @@ let builtin_detach =
       V_unit
     | _ -> failwith "detach: expected a ThreadHandle")
 
+(* Same-thread coroutines. OCaml's effect handlers are asymmetric -- a fiber
+   performs, its handler decides -- and coro_switch is symmetric: any coroutine
+   hands the thread to any other. The bridge is that only a domain's ROOT runs
+   a driver. The root's coro_switch does not perform; it runs `coro_drive`,
+   which starts or resumes the target under a handler and gets back a step:
+   "switched to X" (the target performed, its continuation is saved on it) or
+   "finished, hand over to X" (the body returned). The driver then runs X,
+   until X is the root again and its coro_switch returns. A coroutine that
+   switches to another coroutine never nests a fiber inside its own: it
+   returns to the driver, which is standing on the root's stack.
+
+   A fail that escapes a body is re-raised as Coro_uncaught. As an Eval_error
+   it would unwind into the root's frames -- into whatever try_or the root had
+   open around its coro_switch -- and be caught by a handler on another stack.
+   The C runtime cannot do that (the jmpbuf travels with the stack), so the
+   interpreter must not either: it is uncaught, and the program ends. *)
+exception Coro_uncaught of Loc.t * string
+type _ Effect.t += Coro_switch_eff : coro -> unit Effect.t
+
+let coro_fresh (st : coro_state) : coro =
+  { co_owner = (Domain.self () :> int); co_state = st;
+    co_depth = 0; co_stack = []; co_region = 0 }
+let coro_root_key : coro Domain.DLS.key =
+  Domain.DLS.new_key (fun () -> coro_fresh Co_running)
+let coro_cur_key : coro Domain.DLS.key =
+  Domain.DLS.new_key (fun () -> Domain.DLS.get coro_root_key)
+
+let coro_park (c : coro) =
+  c.co_depth <- !call_depth; c.co_stack <- !call_stack;
+  c.co_region <- !current_region_id
+let coro_unpark (c : coro) =
+  call_depth := c.co_depth; call_stack := c.co_stack;
+  current_region_id := c.co_region;
+  Domain.DLS.set coro_cur_key c
+
+let coro_fail msg = raise (Eval_error (Loc.dummy, msg))
+
+let coro_start (c : coro) (body : value) : coro_step =
+  Effect.Deep.match_with (fun () -> !apply_value_ref body V_unit) ()
+    { Effect.Deep.retc = (fun v ->
+        match v with
+        | V_coro next -> Co_finished next
+        | _ -> failwith "coro: a body returned something that is not a Coro (BUG)");
+      exnc = (fun ex ->
+        match ex with
+        | Eval_error (loc, msg) -> raise (Coro_uncaught (loc, msg))
+        | ex -> raise ex);
+      effc = (fun (type a) (eff : a Effect.t) ->
+        match eff with
+        | Coro_switch_eff target ->
+          Some (fun (k : (a, coro_step) Effect.Deep.continuation) ->
+            c.co_state <- Co_suspended k;
+            Co_switched target)
+        | _ -> None) }
+
+let coro_drive (root : coro) (first : coro) : unit =
+  coro_park root;
+  root.co_state <- Co_parked;
+  let rec go (t : coro) =
+    if t == root then begin
+      root.co_state <- Co_running;
+      coro_unpark root
+    end else begin
+      coro_unpark t;
+      let step =
+        match t.co_state with
+        | Co_new body -> t.co_state <- Co_running; coro_start t body
+        | Co_suspended k -> t.co_state <- Co_running; Effect.Deep.continue k ()
+        | Co_running | Co_parked | Co_dead ->
+          failwith "coro: the driver was handed a coroutine it cannot run (BUG)"
+      in
+      match step with
+      | Co_switched next -> coro_park t; go next
+      | Co_finished next ->
+        t.co_state <- Co_dead;
+        (match next.co_state with
+         | Co_dead ->
+           raise (Coro_uncaught (Loc.dummy,
+             "coro: a finished coroutine must hand over to another live coroutine"))
+         | _ when next.co_owner <> t.co_owner ->
+           raise (Coro_uncaught (Loc.dummy,
+             "coro: a finished coroutine named a coroutine of another thread"))
+         | _ -> go next)
+    end
+  in
+  (* a body that fails uncaught ends the program from the driver, so the
+     root's state is put back first: the report is about the root's stack
+     as it stood when it switched away *)
+  try go first
+  with ex -> root.co_state <- Co_running; coro_unpark root; raise ex
+
+let builtin_coro_new =
+  V_builtin ("coro_new", fun body -> V_coro (coro_fresh (Co_new body)))
+
+let builtin_coro_switch =
+  V_builtin ("coro_switch", fun v ->
+    match v with
+    | V_coro target ->
+      let me = Domain.DLS.get coro_cur_key in
+      if target.co_owner <> (Domain.self () :> int) then
+        coro_fail "coro_switch: that coroutine belongs to another thread";
+      (match target.co_state with
+       | Co_dead -> coro_fail "coro_switch: that coroutine has finished"
+       | _ -> ());
+      if target == me then V_unit
+      else if me == Domain.DLS.get coro_root_key then (coro_drive me target; V_unit)
+      else (Effect.perform (Coro_switch_eff target); V_unit)
+    | _ -> failwith "coro_switch: expected a Coro")
+
+let builtin_coro_self =
+  V_builtin ("coro_self", fun _ -> V_coro (Domain.DLS.get coro_cur_key))
+
 let builtin_channel_new =
   V_builtin ("channel_new", fun _ ->
     V_channel (Queue.create (), Mutex.create (), Condition.create (), ref false))
@@ -3704,6 +3840,9 @@ let initial_env : env =
     ("spawn", ref builtin_spawn);
     ("join", ref builtin_join);
     ("detach", ref builtin_detach);
+    ("coro_new", ref builtin_coro_new);
+    ("coro_switch", ref builtin_coro_switch);
+    ("coro_self", ref builtin_coro_self);
     ("channel_new", ref builtin_channel_new);
     ("channel_send", ref builtin_channel_send);
     ("channel_recv", ref builtin_channel_recv);

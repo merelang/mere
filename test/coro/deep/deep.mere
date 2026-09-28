@@ -1,0 +1,10 @@
+// Deep recursion on a coroutine's own stack. Here the stack is the default and
+// the recursion does not fit: the overflow is NAMED, from the coroutine's own
+// guard page. (deep/ runs the same body with a 512MB request and finishes.)
+type ilist = INil | ICons of int * ilist;
+let rec build = fn n -> if n == 0 then INil else ICons (n, build (n - 1));
+let rec total = fn lst -> match lst with | INil -> 0 | ICons (h, t) -> h + total t;
+let root = coro_self ();
+let c = coro_new (fn () -> let _ = print_int (total (build 2000000)) in root);
+let _ = coro_switch c;
+print "main: back"

@@ -1015,6 +1015,14 @@ jobs:
           sh scripts/threads_alloc_check.sh
           sh scripts/threads_alloc_check.sh --poison
 
+      # Same-thread coroutines. A switch carries the four pieces of state that
+      # belong to a stack (region, open blocks, try_or, stack bounds); the
+      # poison drops each, and the env copy and two checks, from the emitted C.
+      # --poison runs the fixtures and refusals first.
+      - name: coro_check (same-thread coroutines, interpreter and C)
+        if: ${{ !cancelled() }}
+        run: sh scripts/coro_check.sh --poison
+
       - name: spawn_stack_check (a spawned thread gets the requested stack)
         if: ${{ !cancelled() }}
         run: |

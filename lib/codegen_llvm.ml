@@ -39,7 +39,10 @@ let host_builtins_without_llvm_lowering =
     "read_lines";
     "run";
     "file_exists"; "random_int"; "random_float";
-    "detach" ]
+    "detach";
+    (* same-thread coroutines: C and the interpreter first; this backend's
+       runtime is hand-written IR and gets its own switch next *)
+    "coro_new"; "coro_switch"; "coro_self" ]
 
 (* v0.1.178: LLVM keeps values and basic-block labels in one namespace, so a
    parameter called `entry` claims the slot the function's own entry block
