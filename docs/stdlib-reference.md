@@ -969,6 +969,11 @@ overflow is named like any other. C switches with a few lines of assembly
 LLVM IR is not specific to a machine, so there the switch is `_setjmp` /
 `_longjmp` between existing stacks and `llvm.stackrestore` onto a new one.
 
+On C, a store compacted (`map_compact`, `vec_compact`, `map_recycle`) while a
+coroutine is suspended keeps any arena that coroutine's stack still points
+into, and frees it at a later compaction (v0.1.547). (LLVM has no compaction
+builtins.)
+
 One difference: on LLVM a coroutine made **inside** a `region R { }` block
 (lexically, or by a function called from one) fails by name. LLVM closures
 carry no env copier, so the body's env would be released with the block; C

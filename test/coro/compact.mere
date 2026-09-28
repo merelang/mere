@@ -1,0 +1,30 @@
+// A coroutine holds a string it read out of a map, in a local of its own
+// stack, and is suspended; the map is compacted, which frees the arena the
+// string lived in. When the coroutine resumes, the string must still be what
+// it read: the arena is retired, not freed, while a suspended stack points
+// into it -- and freed at a later retirement, once nothing does.
+let root = coro_self ();
+let m = map_new ();
+let rec fill = fn (i: int) -> if i == 0 then 0 else (let _ = map_set m i (str_repeat "v" 64 ++ str_of_int i) in fill (i - 1));
+let _ = fill 200;
+// the first compaction only moves the map into an arena of its own (the one
+// it was born in is shared); the string below is read out of THAT arena
+let _ = map_compact m;
+let c = coro_new (fn () ->
+  let held = map_get m 7 in
+  let _ = coro_switch root in
+  let _ = print (if held == str_repeat "v" 64 ++ "7" then "held: intact" else "held: lost") in
+  root);
+let _ = coro_switch c;
+// overwrite everything (the old values are now garbage), compact, and churn
+// the allocator so freed memory would be handed out again
+let rec over = fn (i: int) -> if i == 0 then 0 else (let _ = map_set m i (str_repeat "Z" 64) in over (i - 1));
+let _ = over 200;
+let _ = map_compact m;
+let rec churn = fn (i: int) -> if i == 0 then 0 else (let _ = map_set m (1000 + i) (str_repeat "Q" 200) in churn (i - 1));
+let _ = churn 500;
+let _ = map_compact m;
+let _ = coro_switch c;
+// nothing points into the retired arena now: the next compaction frees it
+let _ = map_compact m;
+print_int (map_len m)
