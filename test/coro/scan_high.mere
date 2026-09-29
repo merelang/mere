@@ -1,0 +1,30 @@
+// Handles that live above every user-space address (2^48 and up) -- the way a
+// program keeps its handles apart from its small numbers and its pointers --
+// asked for by range. The stopped stack's findings are kept, and a second ask
+// with a wider range is answered from them; a small number the stack also
+// holds is not in the range and is not reported.
+type H = | H of int;
+let base = 281474976710656;
+let root = coro_self ();
+let table = map_new ();
+let _ = map_set table 0 (H (base + 7));
+let _ = map_set table 1 (H 12);
+let c = coro_new (fn () ->
+  let a = map_get table 0 in
+  let b = map_get table 1 in
+  let _ = map_delete table 0 in
+  let _ = map_delete table 1 in
+  let _ = coro_switch root in
+  let _ = (match a with | H n -> print_int (n - base)) in
+  let _ = (match b with | H n -> print_int n) in
+  root);
+let _ = coro_switch c;
+let got = map_new ();
+let _ = coro_scan_ints c base (base + 100) (fn (n: int) -> map_set got n 1);
+let again = map_new ();
+let _ = coro_scan_ints c base (base + 1000000) (fn (n: int) -> map_set again n 1);
+let _ = print ((if map_has got (base + 7) then "found" else "missing") ++ ", "
+               ++ (if map_has again (base + 7) then "again found" else "again missing") ++ ", "
+               ++ (if map_has got 12 || map_has again 12 then "small reported" else "small left out"));
+let _ = coro_switch c;
+0

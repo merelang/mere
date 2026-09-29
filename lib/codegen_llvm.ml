@@ -458,6 +458,24 @@ let coro_runtime_llvm ~(stack_bytes : int) =
       "entry:";
       "  %c = call ptr @__lang_coro_enter_root()";
       "  ret ptr %c";
+      "}";
+      "";
+      (* coro_scan_ints: this backend keeps no list of live blocks to read a
+         suspended stack against, so it answers the superset the contract
+         allows -- every integer below the bound (the C backend scans). *)
+      "define internal void @__lang_coro_scan_all(i64 %lo, i64 %bound, ptr %env, ptr %fn) {";
+      "entry:";
+      "  br label %loop";
+      "loop:";
+      "  %n = phi i64 [%lo, %entry], [%n1, %body]";
+      "  %more = icmp slt i64 %n, %bound";
+      "  br i1 %more, label %body, label %done";
+      "body:";
+      "  %r = call i64 %fn(ptr %env, i64 %n)";
+      "  %n1 = add i64 %n, 1";
+      "  br label %loop";
+      "done:";
+      "  ret void";
       "}" ]
 
 (* v0.1.178: LLVM keeps values and basic-block labels in one namespace, so a
@@ -4628,6 +4646,17 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     coro_used_llvm := true;
     let v = emit_expr env c in
     emit_instr (Printf.sprintf "  call void @__lang_coro_switch(ptr %s)" v);
+    "0"  (* unit *)
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "coro_scan_ints"; _ }, c_e); _ }, l_e); _ }, h_e); _ }, clos) ->
+    coro_used_llvm := true;
+    ignore (emit_expr env c_e);
+    let l = emit_expr env l_e in
+    let b = emit_expr env h_e in
+    let cl = emit_expr env clos in
+    let envr = fresh_reg () and fnr = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractvalue %%closure_int_unit %s, 0" envr cl);
+    emit_instr (Printf.sprintf "  %s = extractvalue %%closure_int_unit %s, 1" fnr cl);
+    emit_instr (Printf.sprintf "  call void @__lang_coro_scan_all(i64 %s, i64 %s, ptr %s, ptr %s)" l b envr fnr);
     "0"  (* unit *)
   | Ast.App ({ node = Ast.Var "coro_self"; _ }, u) ->
     coro_used_llvm := true;

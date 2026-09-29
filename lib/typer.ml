@@ -2398,6 +2398,9 @@ let coro_switch_scheme =
   mono (Ast.TyArrow (Ast.TyCon ("Coro", []), Ast.TyUnit))
 let coro_self_scheme =
   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyCon ("Coro", [])))
+let coro_scan_ints_scheme =
+  mono (Ast.TyArrow (Ast.TyCon ("Coro", []), Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt,
+          Ast.TyArrow (Ast.TyArrow (Ast.TyInt, Ast.TyUnit), Ast.TyUnit)))))
 
 let _chan_new_elem = fresh_var ()
 let channel_new_scheme =
@@ -2642,6 +2645,7 @@ let initial_env : env =
     ("coro_new",     coro_new_scheme);
     ("coro_switch",  coro_switch_scheme);
     ("coro_self",    coro_self_scheme);
+    ("coro_scan_ints", coro_scan_ints_scheme);
     ("channel_new",  channel_new_scheme);
     ("channel_send", channel_send_scheme);
     ("channel_recv", channel_recv_scheme);

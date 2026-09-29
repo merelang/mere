@@ -974,6 +974,48 @@ coroutine is suspended keeps any arena that coroutine's stack still points
 into, and frees it at a later compaction (v0.1.547). (LLVM has no compaction
 builtins.)
 
+### What a stack still holds: `coro_scan_ints` (v0.1.549)
+
+| | type | |
+|---|---|---|
+| `coro_scan_ints` | `Coro -> int -> int -> (int -> unit) -> unit` | every integer in `[lo, hi)` that coroutine `c`'s stack can still reach, handed to `f` once each |
+
+For a program that keeps **its own handles** -- integers indexing tables of its
+own, as an interpreter written in Mere does -- and collects them itself. A
+coroutine that stops in the middle of an expression can hold a value in a C
+variable of its own stack that none of the program's roots names: something it
+took out of a table just before it stopped. `coro_scan_ints c lo hi f` reports
+the numbers in that range the stack can reach, so the program can keep those
+entries.
+
+- A suspended coroutine is read from where it stopped; the running one
+  (`coro_self ()`) from the call up, its registers included. A finished or
+  never-started one reaches nothing.
+- A word on the stack that points into a live block (only the part of a block
+  that is allocated) is followed, and the 16 words from there are read the same
+  way: through the coroutine's **own** regions (the ones open on its stack) as
+  far as the pointers go, and at most **three hops** into any other block -- a
+  number inside a node inside a node. A word inside no live block is never read
+  through.
+- **Conservative, never unsafe.** It hands over numbers, not values: a number
+  that only looks like a handle is reported too, which costs the caller an
+  entry it keeps one collection longer. The contract is a superset.
+- **Keep the handles apart from ordinary numbers.** A program's handles and its
+  counters, lengths and loop indices are all integers; if the handles are small
+  the reports are full of numbers that are not handles, and what they keep can
+  keep more (a kept table can hold further handles). Handles numbered from 2^48
+  are above every user-space address and every small number: ask for that range
+  and the reports are the handles.
+- A suspended coroutine's findings are kept until it runs again, and a later
+  ask is answered from them when its range is inside what was read (from `lo`
+  up with no end when `lo` is at least 2^47; up to 2^32 when `hi` is at most
+  2^32). `f` is called after the whole stack has been read, so it may allocate.
+
+Backends: C reads the stack. The interpreter and LLVM hand over every integer
+in the range -- the superset the contract allows, because neither keeps a list
+of live blocks to read against (an interpreter's suspended body is an OCaml
+continuation). Wasm and RV refuse it by name, as they refuse coroutines.
+
 One difference: on LLVM a coroutine made **inside** a `region R { }` block
 (lexically, or by a function called from one) fails by name. LLVM closures
 carry no env copier, so the body's env would be released with the block; C

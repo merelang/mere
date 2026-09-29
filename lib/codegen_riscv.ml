@@ -1278,7 +1278,7 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
             emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);                       (* sw t0, 0(t1) *)
             emit_word (enc_i 0 t1 0 a0 0x13)                        (* mv a0, t1 *)
           end
-          else if List.mem v ["coro_new"; "coro_switch"; "coro_self"] then
+          else if List.mem v ["coro_new"; "coro_switch"; "coro_self"; "coro_scan_ints"] then
             (* named, with the reason: the bare-metal runtime has one stack
                and no allocator for another, so "not yet" would be a promise *)
             err e.loc (Printf.sprintf
