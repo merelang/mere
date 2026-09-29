@@ -4,6 +4,48 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.549 — 2026-09-29
+
+_What a suspended coroutine still holds: `coro_scan_ints`._
+
+A program that keeps its own handles -- integers into tables of its own, as an
+interpreter written in Mere does -- and collects them itself could not see what
+a coroutine that stopped in the middle of an expression still held in C
+variables of its stack: something it had just taken out of a table. mere-ruby
+lost the object in `[q.pop, Fiber.yield]` to a collection and crashed when the
+fiber resumed (2 of 4 shapes). `coro_scan_ints c lo hi f` hands `f` every
+integer in `[lo, hi)` that coroutine `c`'s stack can reach:
+
+- a suspended coroutine from where it stopped, the running one from the call up
+  (registers spilled first);
+- a word that points into a **live** block is followed and the 16 words from
+  there read the same way -- without limit inside the coroutine's own regions,
+  at most three hops into any other block. Only the allocated part of a block
+  counts (a recycled region's block still holds what was there before), and a
+  word inside no live block is never read through. That takes a list of every
+  live block, which the region runtime now keeps (one per thread; the shared
+  default region's under a lock of its own);
+- conservative, never unsafe: it hands over numbers, not values;
+- a suspended coroutine's findings are kept until it runs again.
+
+Why a range and not a bound: mere-ruby's handles were small integers, and so
+were its loop counters and its Ruby Integers. Every one read as some handle,
+and what those kept kept more -- a dropped Enumerator's fiber came out
+"reachable" and the reclaim gave back none of 9000. Handles numbered from 2^48
+are above every user-space address and every counter; the program asks for
+that range. (Reading a table's arrays from the middle still reads the
+neighbouring handles; mere-ruby therefore decides which fibers can run again
+without the scan, and uses the scan only for what to keep.)
+
+The interpreter and LLVM hand over every integer in the range -- the superset
+the contract allows. Wasm and RV refuse it by name, with the other coroutine
+builtins. `scripts/coro_check.sh --poison`: fixtures `scan` and `scan_high`, and
+poisons for not following pointers, not reading suspended stacks, not reading
+the running stack, and not following the coroutine's own regions; run on
+macOS arm64 and Linux arm64. mere-ruby's csv benchmark against v0.1.548's
+mere-ruby: parse_line 5.03 -> 5.19 s, generate_line 1.26 -> 1.40 s, the rest
+unchanged.
+
 ## v0.1.548 — 2026-09-29
 
 _Asking whether a suspended coroutine pins an arena is cheap enough to ask on

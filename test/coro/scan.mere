@@ -1,0 +1,85 @@
+// A program that keeps its own handles -- integers into tables of its own --
+// asks which of them a SUSPENDED coroutine can still reach. The coroutine
+// below takes handles out of tables -- in a variant, a pair and a list -- and
+// builds a list of its own inside a region, then stops in the middle of an
+// expression; the tables no longer hold any of it, so nothing of the
+// program's own names them. coro_scan_ints must report every one.
+//   - what was taken: the words the stack holds point at nodes in the TABLES'
+//     blocks, and the handles are one to three hops away (the contract)
+//   - what was built outside its regions: a leaf inside a node inside a node,
+//     three hops, each node made apart from the last (the contract's depth)
+//   - what was built: a list in the coroutine's own region, followed to its end
+// Each list puts a 300-byte string between its cells, so a cell is never in
+// the 16 words read after the one before it: found means followed, not
+// adjacent. A number reported that is not a handle is allowed (conservative);
+// a handle held and not reported is the bug.
+type H = | H of int | Pair of int * int;
+type T = | Leaf of int | Node of T;
+let rec depth = fn (t: T) -> match t with | Leaf n -> n | Node u -> depth u;
+let rec spaced = fn (n: int) -> fn (k: int) ->
+  if k == 0 then []
+  else (let rest = spaced (n + 1) (k - 1) in
+        let _ = str_len (str_repeat "j" 300) in
+        Cons (H n, rest));
+let rec sum = fn (ys: H list) -> match ys with | [] -> 0 | Cons (H n, t) -> n + sum t | Cons (Pair (p, q), t) -> p + q + sum t;
+let root = coro_self ();
+let table = map_new ();
+let _ = map_set table 0 (H 4101);
+let _ = map_set table 1 (Pair (4102, 4103));
+let lists = map_new ();
+let _ = map_set lists 0 (spaced 4104 2);
+let got = map_new ();
+let seen = fn (n: int) -> map_set got n 1;
+let c = coro_new (fn () ->
+  let a = map_get table 0 in
+  let b = map_get table 1 in
+  let xs = map_get lists 0 in
+  let _ = map_delete table 0 in
+  let _ = map_delete table 1 in
+  let _ = map_delete lists 0 in
+  let l = Leaf 4150 in
+  let _ = str_len (str_repeat "j" 300) in
+  let n1 = Node l in
+  let _ = str_len (str_repeat "j" 300) in
+  let n2 = Node n1 in
+  let total = region R {
+    let mine = spaced 4110 8 in
+    let _ = coro_switch root in
+    sum mine
+  } in
+  // still here after the scan, and still the same values
+  let sa = (match a with | H n -> n | Pair (p, q) -> p + q) in
+  let sb = (match b with | H n -> n | Pair (p, q) -> p + q) in
+  let _ = print_int (sa + sb + sum xs + total + depth n2) in
+  root);
+let _ = coro_switch c;
+// churn so the tables' old slots are reused
+let rec churn = fn (i: int) -> if i == 0 then 0 else (let _ = map_set table (100 + i) (H i) in churn (i - 1));
+let _ = churn 300;
+let _ = coro_scan_ints c 0 5000 seen;
+let rec check = fn (n: int) -> fn (hi: int) -> if n > hi then "" else (if map_has got n then check (n + 1) hi else "missing " ++ str_of_int n ++ " ");
+let verdict0 = check 4101 4105 ++ check 4110 4117 ++ check 4150 4150;
+// asked again, with a bigger bound, before it runs: the same answer (the
+// runtime keeps a stopped stack's findings until it runs again)
+let again = map_new ();
+let _ = coro_scan_ints c 0 6000 (fn (n: int) -> map_set again n 1);
+let rec check2 = fn (n: int) -> fn (hi: int) -> if n > hi then "" else (if map_has again n then check2 (n + 1) hi else "again missing " ++ str_of_int n ++ " ");
+let verdict = verdict0 ++ check2 4101 4105 ++ check2 4110 4117 ++ check2 4150 4150;
+// the bound is honoured: nothing at or above it is reported
+let _ = print ((if verdict == "" then "all found" else verdict) ++ ", "
+               ++ (if map_has got 5000 || map_has again 6000 || map_has again 9999 then "bound broken" else "bound kept"));
+// the running stack, when asked for: a handle a running function read out of
+// a table that no longer has it (as the program's own collector would find it)
+let side = map_new ();
+let _ = map_set side 0 (H 4200);
+let probe = fn (k: int) ->
+  let local = map_get side k in
+  let _ = map_delete side k in
+  let got2 = map_new () in
+  let _ = coro_scan_ints (coro_self ()) 0 5000 (fn (n: int) -> map_set got2 n 1) in
+  let _ = print (if map_has got2 4200 then "running: found" else "running: missing") in
+  (match local with | H n -> n | Pair (_, _) -> 0);
+let back = probe 0;
+let _ = coro_switch c;
+let _ = print_int back;
+print_int (map_len table)

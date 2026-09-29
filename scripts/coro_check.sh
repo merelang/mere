@@ -59,7 +59,9 @@ many|icl|10000|0
 pingpong|icl|1000000|0
 overflow|cl|stack overflow (recursion too deep)|1
 deep/deep|cl|2000001000000;main: back|0
-compact|ic|held: intact;700|0'
+compact|ic|held: intact;700|0
+scan|icl|all found, bound kept;running: found;57573|0
+scan_high|cl|found, again found, small left out;7;12|0'
 
 # The interpreter prints a failure with its position and a code frame; the
 # compiled program prints the message alone. The comparison is on the message.
@@ -152,6 +154,8 @@ join h' 'cannot capture `c` : Coro across a thread boundary'
 refuse "Wasm names it" -w 'coro_switch (coro_self ())' 'is not available on Wasm'
 refuse "RV32I names it" -rv 'coro_switch (coro_self ())' 'is unsupported on this target'
 refuse "RV64 names it" -rv64 'coro_switch (coro_self ())' 'is unsupported on this target'
+refuse "Wasm names coro_scan_ints" -w 'coro_scan_ints (coro_self ()) 0 1 (fn (n: int) -> ())' 'is not available on Wasm'
+refuse "RV32I names coro_scan_ints" -rv 'coro_scan_ints (coro_self ()) 0 1 (fn (n: int) -> ())' 'is unsupported on this target'
 
 # and what must NOT be refused: a block's VALUE is copied out with the env
 printf '%s\n' 'let root = coro_self ();
@@ -193,6 +197,13 @@ if [ "$MODE" = "--poison" ]; then
   poison c "C 6 (no finished check)" '/^  if (to->state == 3) __lang_fail_impl/d' finished
   poison c "C 9 (an arena a suspended stack points into is freed)" 's/^  if (__lang_region_pinned) {$/  if (0) {/' compact
   poison c "C 7 (no hand-over check)" 's/^  if (!next || next == self || next->state == 3)$/  if (!next)/' self_handoff
+  poison c "C 10 (a pointer into a live block is not followed)" 's/^    if (st->nsp == 0 || a < st->sp\[0\]\.lo || a >= st->sp\[st->nsp - 1\]\.hi) continue;$/    continue;/' scan
+  poison c "C 11 (suspended stacks are not read)" 's/^    __lang_scan_words(&st, (uintptr_t\*)c->x->sp, (uintptr_t\*)c->x->s_hi, 0);$/    ;/' scan scan_high
+  poison c "C 13 (the coroutine's own regions are not followed to the end)" 's/^    int own = (a0 < st->nown \&\& st->ownb\[a0\] == hdr);$/    int own = 0;/' scan
+  # (No poison for the three-hop depth: a stack keeps stale slots that still
+  # point at the inner nodes, so "one hop is not enough" cannot be made to
+  # hold -- measured green at 1. C 10 is what shows the following matters.)
+  poison c "C 12 (the running stack is not read)" 's/^  if (running) {$/  if (0) {/' scan
   poison ll "LLVM 1 (current region not carried)" '/^  store ptr %tr, ptr @__lang_current_region$/d' region
   poison ll "LLVM 2 (live-block stack not carried)" '/^  store ptr %ta, ptr @__lang_region_active$/d' unwind
   poison ll "LLVM 3 (try_or jmpbuf not carried)" '/^  store i32 %tjs, ptr @__lang_fail_jmpbuf_set$/d' fail nested

@@ -2355,7 +2355,7 @@ and emit_expr (e : Ast.expr) : unit =
        emit_instr (Printf.sprintf "local.get %d" cl_base);
        emit_instr "i64.extend_i32_u"
      | None ->
-       if List.mem name ["coro_new"; "coro_switch"; "coro_self"] then
+       if List.mem name ["coro_new"; "coro_switch"; "coro_self"; "coro_scan_ints"] then
          (* Named, with the reason, rather than left to the generic "no lowering
             yet": "yet" would be a promise. Core Wasm has one stack per call
             into the module and no instruction that leaves it and comes back. *)

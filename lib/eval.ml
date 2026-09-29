@@ -3253,6 +3253,25 @@ let builtin_coro_switch =
 let builtin_coro_self =
   V_builtin ("coro_self", fun _ -> V_coro (Domain.DLS.get coro_cur_key))
 
+(* coro_scan_ints c lo hi f: a superset of the integers in [lo, hi) that
+   coroutine c's stack can reach. A stack here is an OCaml continuation (or
+   the interpreter's own), which cannot be looked into -- so the superset is
+   all of them: f gets every integer in [lo, hi). Sound (a caller keeps what
+   it might have freed) and exactly what the contract promises. *)
+let builtin_coro_scan_ints =
+  V_builtin ("coro_scan_ints", fun c ->
+    match c with
+    | V_coro _ ->
+      V_builtin ("coro_scan_ints_p1", fun l ->
+        V_builtin ("coro_scan_ints_p2", fun h ->
+          V_builtin ("coro_scan_ints_p3", fun f ->
+            (match l, h with
+             | V_int lo, V_int hi ->
+               for n = lo to hi - 1 do ignore (!apply_value_ref f (V_int n)) done
+             | _ -> failwith "coro_scan_ints: expected two ints");
+            V_unit)))
+    | _ -> failwith "coro_scan_ints: expected a Coro")
+
 let builtin_channel_new =
   V_builtin ("channel_new", fun _ ->
     V_channel (Queue.create (), Mutex.create (), Condition.create (), ref false))
@@ -3843,6 +3862,7 @@ let initial_env : env =
     ("coro_new", ref builtin_coro_new);
     ("coro_switch", ref builtin_coro_switch);
     ("coro_self", ref builtin_coro_self);
+    ("coro_scan_ints", ref builtin_coro_scan_ints);
     ("channel_new", ref builtin_channel_new);
     ("channel_send", ref builtin_channel_send);
     ("channel_recv", ref builtin_channel_recv);
