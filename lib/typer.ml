@@ -1003,7 +1003,14 @@ let generalize env t =
      `region` block and once on something that outlives it had one region for both,
      and mere-ruby's main.mere became a region-escape error. v0.1.560 quantifies
      again. What v0.1.559 was after needs the other half -- an inner function taking
-     region parameters of its own, the way a top-level one does. *)
+     region parameters of its own, the way a top-level one does (v0.1.562).
+
+     And the unmarking stays at every level. Keeping the marks of the variables an
+     inner binding does not quantify would let the members of a `let rec ... and`
+     group keep their region parameters when an inner function of one calls
+     another -- and would also let a call inside a block decide a region that
+     belongs to an enclosing binding: mere-ruby's `benv` became `BLK`'s again.
+     That group shape is the one inner-function case left in the default region. *)
   unmark_non_quantified_regions qs t;
   (* A variable this binding declined to quantify — pinned by a Send obligation —
      outlives the binding, so it must stop claiming to be local or the next

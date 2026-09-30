@@ -159,6 +159,22 @@ let region_var_of (name : string) : string =
      | None -> "__region_" ^ name)   (* an ordinary leading parameter *)
   else "__lang_current_region"
 
+(* v0.1.562 (Q-134): the region arguments a direct call to a lifted inner function
+   passes, and whether they are the ones this body already holds (a self-tail call
+   may become a goto only then -- the goto does not reassign them). The same reading
+   as a top-level call: the callee's scheme says where each region sits, this use's
+   type says what is there. *)
+let inner_region_args (name : string) (rps : string list) (use_ty : Ast.ty option)
+    : string list * bool =
+  if rps = [] then ([], true)
+  else
+    let pairs = Typer.region_args_for name use_ty in
+    let rargs = List.map (fun r ->
+        match List.assoc_opt r pairs with
+        | Some actual -> region_var_of actual
+        | None -> heap_container_region ()) rps in
+    (rargs, List.for_all2 (fun r a -> List.mem r !current_region_params && a = r) rps rargs)
+
 (* A position that names a file is not from the source being compiled — it came
    from the prelude or from an `import`, and claiming it as a line of this file
    would point a debugger at the wrong text. That check is the whole rule, and it
@@ -728,6 +744,9 @@ type lifted_inner = {
      hot loop allocate ~500x — gzip huff_decode). 0 = no twin. The
      single-param closure form is kept for partial application. *)
   direct_arity : int;
+  (* v0.1.562 (Q-134): the inner function's own region parameters, as a top-level
+     function's `__direct` twin has them (Q-127) -- see lifted_fn.l_rps *)
+  rps : string list;
 }
 (* Phase 22.5: inner_lifts is the ACTIVE scope (per-host fn) — set
    before emitting each host fn's body. inner_lifts_by_host stores the
@@ -2762,18 +2781,18 @@ let rec emit_expr (e : Ast.expr) : string =
       let rec spine e' acc =
         match e'.Ast.node with
         | Ast.App (f', a) -> spine f' (a :: acc)
-        | Ast.Var n -> Some (n, acc)
+        | Ast.Var n -> Some (n, e', acc)
         | _ -> None
       in
       match spine e0 [] with
-      | Some (n, args)
+      | Some (n, head, args)
         when (match Hashtbl.find_opt inner_lifts n with
               | Some li -> li.direct_arity >= 2
                            && List.length args = li.direct_arity
               | None -> false)
              && not (List.mem_assoc n !current_var_types)
              && not (List.mem_assoc n !current_env_subst) ->
-        Some (n, args)
+        Some (n, head, args)
       | _ -> None
     in
     (match collect_direct (Ast.{ node = Ast.App (f, arg); ty = e.ty; loc = e.loc }) with
@@ -2814,14 +2833,18 @@ let rec emit_expr (e : Ast.expr) : string =
                (rargs @ List.mapi (fun i _ -> Printf.sprintf "__da%d" i) args)))
      | None ->
     (match collect_inner_direct (Ast.{ node = Ast.App (f, arg); ty = e.ty; loc = e.loc }) with
-     | Some (n, args) ->
+     | Some (n, head, args) ->
        let li = Hashtbl.find inner_lifts n in
        let cap_args = List.map (fun (cn, _) ->
          match List.assoc_opt cn !current_env_subst with
          | Some s -> s | None -> c_safe_name cn) li.captures in
        let args_c = List.map emit_expr args in
        let callee = li.lifted_name ^ "__direct" in
-       (match (if __in_tail then self_tail_goto callee (cap_args @ args_c) else None) with
+       let rargs, regions_unchanged = inner_region_args n li.rps head.Ast.ty in
+       let cap_args = rargs @ cap_args in
+       (match (if __in_tail && regions_unchanged
+               then self_tail_goto callee (List.filteri (fun i _ -> i >= List.length rargs) cap_args @ args_c)
+               else None) with
         | Some g -> g
         | None ->
           let tmps =
@@ -2930,9 +2953,10 @@ let rec emit_expr (e : Ast.expr) : string =
          | None -> c_safe_name n
        ) li.captures in
        let args_c = cap_args @ [emit_expr arg] in
-       (match (if __in_tail then self_tail_goto li.lifted_name args_c else None) with
+       let rargs, regions_unchanged = inner_region_args name li.rps f.Ast.ty in
+       (match (if __in_tail && regions_unchanged then self_tail_goto li.lifted_name args_c else None) with
         | Some g -> g
-        | None -> li.lifted_name ^ "(" ^ String.concat ", " args_c ^ ")")
+        | None -> li.lifted_name ^ "(" ^ String.concat ", " (rargs @ args_c) ^ ")")
     in
     let emit_toplevel_call name =
        (* Direct call to a known top-level fn — fast path, no closure.
@@ -5342,7 +5366,21 @@ type lifted_fn = {
        switch inner_lifts scope at emit time so sibling lifted fns in
        the same host see each other's mappings (e.g., mutual recursion
        inside a `let rec ... and ...`). *)
+  l_rps       : string list;
+    (* v0.1.562 (Q-134): AN INNER FUNCTION TAKES REGION PARAMETERS OF ITS OWN.
+       Until now only a top-level function did, so an allocation an inner function
+       made went to the default region whatever region its caller was in -- the
+       inner `let rec` that mgit's store_read reaches every read through. The typer
+       already quantifies and names these (an inner binding is generalised like a
+       top-level one, and v0.1.560 is why that has to stay); what was missing was a
+       parameter to carry them and a call that passes them. They lead, before the
+       captures. A direct call passes what it bound (`region_args_for`); a use as a
+       value -- the closure adapter -- passes the default region, as a top-level
+       function's closure form does. *)
 }
+
+(* lifted name -> its region parameters, for the value-use adapter *)
+let lifted_rps : (string, string list) Hashtbl.t = Hashtbl.create 16
 
 let format_param (n, ty) =
   (* v0.1.51: the reference side (EVar) always goes through c_safe_name,
@@ -5430,7 +5468,8 @@ let emit_lifted_fn (f : lifted_fn) : string =
   set_inner_lifts_for_host f.l_host;
   let params =
     String.concat ", "
-      (List.map format_param (f.l_captures @ [(f.l_param, f.l_param_ty)]))
+      (List.map (fun r -> "__lang_region* " ^ r) f.l_rps
+       @ List.map format_param (f.l_captures @ [(f.l_param, f.l_param_ty)]))
   in
   let all_bindings = f.l_captures @ [(f.l_param, f.l_param_ty)] in
   (* Q-131: the regions this body captured, so `region_var_of` answers with the
@@ -5438,11 +5477,11 @@ let emit_lifted_fn (f : lifted_fn) : string =
      different arena the moment this is called from a block nested inside its own. *)
   let saved_caps = !captured_regions in
   captured_regions := regions_of_captures f.l_captures @ saved_caps;
-  (* Q-127: a lifted body declares no region parameters of its own. If the enclosing
-     `__direct` left its list in scope, a `__rpN` here would name a parameter this
-     function does not have. Regions reach a lifted body as CAPTURES (Q-131). *)
+  (* Q-127: a lifted body's region parameters are its own (v0.1.562), never the
+     enclosing `__direct`'s -- a `__rpN` of the host here would name a parameter this
+     function does not have. A block's region reaches it as a CAPTURE (Q-131). *)
   let saved_rps = !current_region_params in
-  current_region_params := [];
+  current_region_params := f.l_rps;
   let body_c, tail_used =
     Fun.protect ~finally:(fun () ->
         captured_regions := saved_caps; current_region_params := saved_rps) (fun () ->
@@ -5597,7 +5636,8 @@ let emit_closure_typedef (p : Ast.ty) (r : Ast.ty) : string =
 let emit_lifted_fn_forward_decl (f : lifted_fn) : string =
   let params =
     String.concat ", "
-      (List.map (fun (_, t) -> c_type_of t)
+      (List.map (fun _ -> "__lang_region*") f.l_rps
+       @ List.map (fun (_, t) -> c_type_of t)
          (f.l_captures @ [(f.l_param, f.l_param_ty)]))
   in
   Printf.sprintf "%s%s %s(%s);" (lib_static ()) (c_type_of f.l_return_ty) f.l_name params
@@ -5632,11 +5672,16 @@ let emit_lifted_fn_direct (f : lifted_fn) : string option =
   | Some (all_params, inner_body, final_ret) ->
     set_inner_lifts_for_host f.l_host;
     let all_bindings = f.l_captures @ all_params in
-    let params_c = String.concat ", " (List.map format_param all_bindings) in
+    let params_c = String.concat ", "
+        (List.map (fun r -> "__lang_region* " ^ r) f.l_rps
+         @ List.map format_param all_bindings) in
+    let saved_rps = !current_region_params in
+    current_region_params := f.l_rps;
     let body_c, tail_used =
+      Fun.protect ~finally:(fun () -> current_region_params := saved_rps) (fun () ->
       with_self_tail (f.l_name ^ "__direct") all_bindings (fun () ->
         with_var_types all_bindings (fun () ->
-          with_expected_ty final_ret (fun () -> emit_expr inner_body)))
+          with_expected_ty final_ret (fun () -> emit_expr inner_body))))
     in
     Some (Printf.sprintf "%s %s__direct(%s) {\n%s  return %s;\n}"
             (c_type_of final_ret) f.l_name params_c
@@ -5648,7 +5693,8 @@ let emit_lifted_fn_direct_forward_decl (f : lifted_fn) : string option =
   | Some (all_params, _, final_ret) ->
     let params =
       String.concat ", "
-        (List.map (fun (_, t) -> c_type_of t) (f.l_captures @ all_params))
+        (List.map (fun _ -> "__lang_region*") f.l_rps
+         @ List.map (fun (_, t) -> c_type_of t) (f.l_captures @ all_params))
     in
     Some (Printf.sprintf "%s %s__direct(%s);" (c_type_of final_ret) f.l_name params)
 
@@ -12420,11 +12466,13 @@ let lift_inner_fns
         raise (Codegen_error (value_loc,
           "inner fn missing inferred type (typer not run?)"))
     in
+    let rps = Typer.region_params_for n in
+    Hashtbl.replace lifted_rps lifted_name rps;
     let lf = {
       l_name = lifted_name; l_captures = captures;
       l_param = p; l_param_ty = param_ty;
       l_body = fn_body; l_return_ty = return_ty;
-      l_host = !current_host;
+      l_host = !current_host; l_rps = rps;
     } in
     lifted := lf :: !lifted;
     (* v0.1.52: peel the curried fn layers to see if an uncurried
@@ -12444,7 +12492,7 @@ let lift_inner_fns
       then List.length all_params
       else 0
     in
-    let entry = { lifted_name; captures; direct_arity } in
+    let entry = { lifted_name; captures; direct_arity; rps } in
     Hashtbl.replace inner_lifts n entry;  (* keep last-write for back-compat *)
     let host_tbl =
       match Hashtbl.find_opt inner_lifts_by_host !current_host with
@@ -14746,7 +14794,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       in
       let cap_args =
         String.concat ", "
-          (List.map (fun (n, _) -> c_safe_name n) captures
+          ((* v0.1.562: a lifted function used as a value takes its region
+              parameters from nobody -- the default region, as a top-level
+              function's closure form allocates *)
+           List.map (fun _ -> "(&__lang_default_region)")
+             (match Hashtbl.find_opt lifted_rps lifted_name with Some l -> l | None -> [])
+           @ List.map (fun (n, _) -> c_safe_name n) captures
            @ [c_safe_name "__inner_arg"])
       in
       Printf.sprintf
