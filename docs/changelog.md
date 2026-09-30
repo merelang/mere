@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.559 — 2026-10-01
+
+_A region parameter reaches a call made from an inner function._
+
+A function that takes a region parameter (v0.1.464) passes it to what it
+calls -- unless the call is made from something lifted out of its body.
+Then the callee got the default region, whatever region the outer function
+had been given:
+
+```
+let pr = fn (n: int) -> let v = vec_new () in let _ = vec_push v n in v;
+let sr = fn (n: int) ->
+  let rec ip = fn (k: int) -> if k == 0 then pr n else ip (k - 1) in
+  ip 2;
+region R { let a = sr 5 in ... }   // a's Vec: the default region, not R
+```
+
+It had two causes. The inner `let rec ip` generalised the allocation's
+region itself, so its region was a variable nothing would ever bind; and a
+lifted body was handed no region parameter to pass on. Now an inner binding
+never quantifies an allocation's region -- only a top-level function can
+take one, since the backends look it up by source name -- so the variable is
+the enclosing function's, which makes it a parameter, and a lifted body or a
+closure receives it as a capture, the way a block's region has been captured
+since Q-131. Unmarking a region the binding does not quantify is a
+top-level decision too, so a `let rec ... and` group keeps its marks.
+
+C and LLVM both pass it: an inner `let rec`, a closure, a lift inside a
+lift, and the inner binding of a group (`test/regionparams/inner.mere`,
+four `?` before, four `^param` now, asserted in `region_params_check` down
+to the emitted calls; `test/parity/region_inner_param.mere` holds the four
+backends to one answer).
+
+Found by mgit: its `store_read` reached every allocation through an inner
+function, so none of its reads took a region. They do now (0 call sites
+named / 1 forwarded before, 7 / 15 now), and the output is unchanged. Its
+peak memory is not: what it spends is `zlib_inflate`'s buffers, made, used
+and dropped inside the inflater, and a region that appears in no function's
+type is not something an argument can reach. That is the rest of Q-134.
+
+No program in the repository or the downstream packages (1,072 files) is
+refused, or compiled differently in outcome, on C or LLVM.
+
+---
+
 ## v0.1.558 — 2026-10-01
 
 _A finished coroutine keeps nothing (Q-183): its env is its own, and its handle is a slot and a generation._

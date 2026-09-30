@@ -1,0 +1,29 @@
+// v0.1.559: a region parameter reaches an allocation made through an inner
+// function. `pr` allocates in its caller's region; each of the others reaches
+// `pr` through something lifted out of its body -- an inner `let rec`, a
+// closure, a lift inside a lift, a `let rec ... and` group -- and must hand its
+// own region parameter down rather than the default region.
+let pr = fn (n: int) -> let v = vec_new () in let _ = vec_push v n in v;
+let via_rec = fn (n: int) ->
+  let rec ip = fn (k: int) -> if k == 0 then pr n else ip (k - 1) in
+  ip 2;
+let via_closure = fn (n: int) ->
+  let f = fn (k: int) -> pr (n + k) in
+  f 1;
+let via_nested = fn (n: int) ->
+  let rec outer = fn (k: int) ->
+    let rec inner = fn (j: int) -> if j == 0 then pr (n + k) else inner (j - 1) in
+    inner k in
+  outer 3;
+let rec grp = fn (n: int) -> if n > 10 then pr n else grp_b (n + 5)
+and grp_b = fn (n: int) ->
+  let rec ip = fn (k: int) -> if k == 0 then grp (n + 1) else ip (k - 1) in
+  ip 1;
+let t = region R {
+  let a = via_rec 5 in
+  let b = via_closure 6 in
+  let c = via_nested 7 in
+  let d = grp 1 in
+  vec_get a 0 + vec_get b 0 + vec_get c 0 + vec_get d 0
+};
+print_int t
