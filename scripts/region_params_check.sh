@@ -55,7 +55,7 @@ expect ok        "# 2 region-parameterised, 2 ok, 0 value-used, 0 partial"
 expect valueused "# 1 region-parameterised, 0 ok, 1 value-used, 0 partial"
 expect partial   "# 1 region-parameterised, 0 ok, 0 value-used, 1 partial"
 expect chain     "# 3 region-parameterised, 3 ok, 0 value-used, 0 partial"
-expect inner     "# 6 region-parameterised, 6 ok, 0 value-used, 0 partial"
+expect inner     "# 4 region-parameterised, 4 ok, 0 value-used, 0 partial"
 
 # ---- THE CHAIN, asserted line by line --------------------------------------
 #
@@ -80,36 +80,28 @@ if [ "$chain_got" != "$chain_want" ]; then
 fi
 checks=$((checks + 1))
 
-# ---- THROUGH AN INNER FUNCTION (v0.1.559) ---------------------------------
+# ---- THROUGH AN INNER FUNCTION: PINNED AS IT IS, TO GO RED WHEN TAUGHT -------
 #
-# Every one of these read `?` before: a call made from something lifted out of a
-# function's body -- an inner `let rec`, a closure, a lift inside a lift, the
-# inner binding of a `let rec ... and` group -- put what `pr` made in the default
-# region, whatever region the outer function was given. Two reasons: the inner
-# binding quantified the allocation's region itself, so it was a variable nothing
-# would bind, and a lifted body was handed no region parameter to pass. mgit's
-# `store_read` reached every allocation that way. The emitted code is checked too:
-# the region has to arrive, not only be named in the dump.
+# A call made from something lifted out of a function's body -- an inner `let
+# rec`, a closure, a lift inside a lift, the inner binding of a `let rec ... and`
+# group -- hands the callee the default region, whatever region the outer
+# function was given: the inner function quantifies the allocation's region
+# itself, and a lifted body has no region parameter to take it. v0.1.559 closed it
+# by not quantifying, which took region polymorphism away from every inner
+# function (a helper used inside a block and outside it became a region-escape
+# error; mere-ruby's main.mere was one), and v0.1.560 withdrew it. The fix is an
+# inner function taking region parameters of its own; when it lands these four
+# read `^param` and this leg says so.
 inner_got="$("$MERE" --dump-region-params "$ROOT/test/regionparams/inner.mere" 2>&1 | grep -e ' -> pr ' -e '^#sites')"
-inner_want='@via_rec -> pr : ^param
-@via_closure -> pr : ^param
-@via_nested -> pr : ^param
-@grp -> pr : ^param
-#sites 4 named, 6 forwarded, 0 undecided'
+inner_want='@via_rec -> pr : ?
+@via_closure -> pr : ?
+@via_nested -> pr : ?
+@grp -> pr : ?
+#sites 3 named, 0 forwarded, 4 undecided'
 if [ "$inner_got" != "$inner_want" ]; then
-  echo "FAIL region_params[inner]: a region parameter no longer reaches a call made from an inner function."
+  echo "FAIL region_params[inner]: the calls from inner functions no longer read as pinned -- if a region parameter reaches them now, update this leg (and test/parity/region_inner_poly.mere must still pass)."
   echo "  want:"; printf '%s\n' "$inner_want" | sed 's/^/    /'
   echo "  got:";  printf '%s\n' "$inner_got"  | sed 's/^/    /'
-  fails=$((fails + 1))
-fi
-checks=$((checks + 1))
-# C: the four calls to `pr` from lifted bodies pass a `__rp`; LLVM: the same, as
-# `ptr %__rp`. One call on each is the default region's and is not one of them
-# (the closure adapter of `pr` as a value).
-nc="$("$MERE" -c "$ROOT/test/regionparams/inner.mere" 2>/dev/null | grep -cE 'mu_pr__int__Vec_int__direct\(__rp[0-9]+,' || true)"
-nl="$("$MERE" -ll "$ROOT/test/regionparams/inner.mere" 2>/dev/null | grep -cE 'call ptr @mu_pr__int__Vec_int\(ptr %__rp[0-9]+,' || true)"
-if [ "$nc" != 4 ] || [ "$nl" != 4 ]; then
-  echo "FAIL region_params[inner-emit]: calls to pr passing the caller's region: C $nc, LLVM $nl (want 4 and 4)"
   fails=$((fails + 1))
 fi
 checks=$((checks + 1))

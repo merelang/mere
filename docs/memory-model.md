@@ -156,21 +156,14 @@ as of v0.1.31 it is the implemented semantics on the C backend:
   carrying the result out of the block stays the type error it already
   was.
 
-  **Through an inner function (v0.1.559).** A call made from something
-  lifted out of a function's body — an inner `let rec`, a closure, a lift
-  inside a lift, the inner half of a `let rec ... and` group — used to hand
-  the callee the default region, whatever region the outer function had
-  been given. The inner binding quantified the allocation's region itself,
-  so it was a variable nothing would bind, and a lifted body had no region
-  parameter to pass on. Now an inner binding never quantifies an
-  allocation's region (only a top-level function can take one), so the
-  variable is the enclosing function's, and the lifted body or closure
-  receives that parameter as a capture. `test/regionparams/inner.mere`
-  has one of each.
-
-  What still goes to the default region is an allocation whose region
-  appears in no function's type: a buffer a function makes, uses and
-  drops. That is Q-134 proper, and passing arguments cannot reach it.
+  **Not yet through an inner function.** A call made from something lifted
+  out of a function's body — an inner `let rec`, a closure, the inner half of
+  a `let rec ... and` group — hands the callee the default region: the inner
+  function quantifies the allocation's region itself, and a lifted body has no
+  region parameter to take it. v0.1.559 closed that by not quantifying, which
+  took region polymorphism away from every inner function, and v0.1.560
+  withdrew it (`test/parity/region_inner_poly.mere`). The fix is an inner
+  function taking region parameters of its own.
 
   **Per backend**: C (v0.1.464) and LLVM (v0.1.466) pass it. **Wasm** needs nothing: it has one bump for every region,
   and what keeps a callee's allocation alive there is the high-water mark
