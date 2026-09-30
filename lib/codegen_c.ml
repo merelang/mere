@@ -143,7 +143,11 @@ let current_region_params : string list ref = ref []
 
 let region_var_of (name : string) : string =
   if Typer.is_region_param_name name then
-    (if List.mem name !current_region_params then name else heap_container_region ())
+    (if List.mem name !current_region_params then
+       (* a lifted body's captured parameter is its own C parameter; an adapter's
+          is in its env (v0.1.559) *)
+       (match List.assoc_opt name !current_env_subst with Some s -> s | None -> name)
+     else heap_container_region ())
   else if name = "__heap" then heap_container_region ()
   else if List.mem name !region_scope then "__region_" ^ name
   (* Q-131: THE REGION TRAVELS WITH THE FUNCTION. A lifted body is not lexically
@@ -405,6 +409,9 @@ let c_safe_name (n : string) : string =
      the prefix buys nothing here: the name is the compiler's, not the user's, and
      `__` is not a spelling a source identifier can reach. *)
   if String.length n > 9 && String.sub n 0 9 = "__region_" then n
+  (* v0.1.559: and so is an enclosing function's region parameter captured by a
+     lifted inner body (see regions_needed_by) *)
+  else if Typer.is_region_param_name n then n
   else "mu_" ^ flatten_module_dots n
 
 (* Record FIELD identifiers. A field is a user name and C keywords are not available as
@@ -2795,6 +2802,7 @@ let rec emit_expr (e : Ast.expr) : string =
      | Some (n, args) ->
        let li = Hashtbl.find inner_lifts n in
        let cap_args = List.map (fun (cn, _) ->
+         if Typer.is_region_param_name cn then region_var_of cn else
          match List.assoc_opt cn !current_env_subst with
          | Some s -> s | None -> c_safe_name cn) li.captures in
        let args_c = List.map emit_expr args in
@@ -2903,6 +2911,7 @@ let rec emit_expr (e : Ast.expr) : string =
           current_env_subst the same way bare Var emission does. *)
        let li = Hashtbl.find inner_lifts name in
        let cap_args = List.map (fun (n, _) ->
+         if Typer.is_region_param_name n then region_var_of n else
          match List.assoc_opt n !current_env_subst with
          | Some s -> s
          | None -> c_safe_name n
@@ -5401,7 +5410,8 @@ let emit_lifted_fn (f : lifted_fn) : string =
      `__direct` left its list in scope, a `__rpN` here would name a parameter this
      function does not have. Regions reach a lifted body as CAPTURES (Q-131). *)
   let saved_rps = !current_region_params in
-  current_region_params := [];
+  current_region_params :=
+    List.filter Typer.is_region_param_name (List.map fst f.l_captures);
   let body_c, tail_used =
     Fun.protect ~finally:(fun () ->
         captured_regions := saved_caps; current_region_params := saved_rps) (fun () ->
@@ -6635,7 +6645,8 @@ let emit_closure_adapter (ce : closure_emission) : string =
   let prev_caps = !captured_regions in
   let prev_rps = !current_region_params in
   captured_regions := regions_of_captures ce.ce_env_fields @ prev_caps;
-  current_region_params := [];
+  current_region_params :=
+    List.filter Typer.is_region_param_name (List.map fst ce.ce_env_fields);
   let body_c =
     Fun.protect ~finally:(fun () ->
         captured_regions := prev_caps; current_region_params := prev_rps) (fun () ->
@@ -6691,7 +6702,8 @@ let emit_closure_adapter_fn2 (ce : closure_emission) : (string * string) option 
     let prev_caps = !captured_regions in
     let prev_rps = !current_region_params in
     captured_regions := regions_of_captures ce.ce_env_fields @ prev_caps;
-    current_region_params := [];
+    current_region_params :=
+      List.filter Typer.is_region_param_name (List.map fst ce.ce_env_fields);
     let body_c =
       Fun.protect ~finally:(fun () ->
           captured_regions := prev_caps; current_region_params := prev_rps) (fun () ->
@@ -12265,7 +12277,8 @@ let lift_inner_fns
         when List.mem n Typer.region_parameterised_names ->
         (match Ast.walk slot0 with
          | Ast.TyRef (_, r, Ast.TyUnit) ->
-           if List.mem r !lifting_regions && not (List.mem r !found) then
+           if (List.mem r !lifting_regions || Typer.is_region_param_name r)
+              && not (List.mem r !found) then
              found := r :: !found
          | other -> ty_go other);
         List.iter ty_go rest
@@ -12313,7 +12326,10 @@ let lift_inner_fns
        capture and needs to know nothing about regions. *)
     let captures =
       List.map (fun r ->
-        ("__region_" ^ r, Ast.TyRef (Ast.BorrowedRead, r, Ast.TyUnit)))
+        (* v0.1.559: an enclosing function's region parameter travels under its
+           own name; a block's under `__region_R` (Q-131) *)
+        if Typer.is_region_param_name r then (r, Ast.TyRef (Ast.BorrowedRead, r, Ast.TyUnit))
+        else ("__region_" ^ r, Ast.TyRef (Ast.BorrowedRead, r, Ast.TyUnit)))
         (regions_needed_by fn_body)
       @ captures
     in

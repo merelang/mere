@@ -1245,6 +1245,10 @@ let synthesize_curried_eta_llvm (name : string) (arrow_ty : Ast.ty) (loc : Loc.t
    undefined value`, which is exactly the bug v0.1.459 fixed. So: a list to consult, and
    the default region when it is not on it. *)
 let current_region_params_llvm : string list ref = ref []
+(* v0.1.559: an enclosing function's region parameter captured by a lifted body or a
+   closure, and the register that holds it there -- the parameter itself in a lifted
+   body, the value loaded from the env in an adapter. Empty in a top-level body. *)
+let current_rp_subst_llvm : (string * string) list ref = ref []
 
 (* Rebuilt each run from the table that made the mangled names -- see the same map in
    codegen_c. Region parameters are keyed by SOURCE name because Monomorph erases a
@@ -1407,6 +1411,11 @@ let lifting_regions_llvm : string list ref = ref []
 
 (* The regions a body actually reaches for: the names in its containers' region slots.
    Capturing every enclosing block would work and would carry parameters nothing reads. *)
+(* The capture a region travels under: a block's as `__region_R` (Q-131), an
+   enclosing function's region parameter under its own name (v0.1.559). *)
+let region_capture_of (r : string) : string =
+  if Typer.is_region_param_name r then r else "__region_" ^ r
+
 let regions_needed_by_llvm (enclosing : string list) (body : Ast.expr) : string list =
   let found = ref [] in
   let rec ty_go t =
@@ -1415,7 +1424,8 @@ let regions_needed_by_llvm (enclosing : string list) (body : Ast.expr) : string 
       when List.mem n Typer.region_parameterised_names ->
       (match Ast.walk slot0 with
        | Ast.TyRef (_, r, Ast.TyUnit) ->
-         if List.mem r enclosing && not (List.mem r !found) then found := r :: !found
+         if (List.mem r enclosing || Typer.is_region_param_name r)
+            && not (List.mem r !found) then found := r :: !found
        | other -> ty_go other);
       List.iter ty_go rest
     | Ast.TyCon (_, args) -> List.iter ty_go args
@@ -1922,8 +1932,7 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
        as the region marker (`llvm_ty_of` already lowers every `TyRef` to `ptr`), so the
        parameter, the argument and what `region_ptr_for` answers are one SSA name. *)
     let captures =
-      List.map (fun r ->
-        ("__region_" ^ r, Ast.TyRef (Ast.BorrowedRead, r, Ast.TyUnit)))
+      List.map (fun r -> (region_capture_of r, Ast.TyRef (Ast.BorrowedRead, r, Ast.TyUnit)))
         (regions_needed_by_llvm !lifting_regions_llvm fn_body)
       @ captures
     in
@@ -2718,8 +2727,11 @@ let region_result_plan (t : Ast.ty) : region_result_plan =
    function. *)
 let region_ptr_for (name : string) : string =
   if Typer.is_region_param_name name then
-    (if List.mem name !current_region_params_llvm then "%" ^ name
-     else "@__lang_default_region")
+    (match List.assoc_opt name !current_rp_subst_llvm with
+     | Some reg -> reg
+     | None ->
+       if List.mem name !current_region_params_llvm then "%" ^ name
+       else "@__lang_default_region")
   else if name = "__heap" then "@__lang_default_region"
   else match List.assoc_opt name !current_regions with
     | Some reg -> reg
@@ -4155,6 +4167,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                  match List.assoc_opt cn env with
                  | Some r -> r
                  | None ->
+                   if Typer.is_region_param_name cn then region_ptr_for cn else
                    (match region_capture_name cn with
                     | Some r -> region_ptr_for r
                     | None ->
@@ -7347,8 +7360,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        region the value's TYPE names. Captured at construction, where the block's
        pointer is in scope, under the same `__region_R` name the lifted-fn path uses. *)
     let captures =
-      List.map (fun r ->
-        ("__region_" ^ r, Ast.TyRef (Ast.BorrowedRead, r, Ast.TyUnit)))
+      List.map (fun r -> (region_capture_of r, Ast.TyRef (Ast.BorrowedRead, r, Ast.TyUnit)))
         (regions_needed_by_llvm (List.map fst !current_regions) fn_body)
       @ captures
     in
@@ -7417,6 +7429,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
              which `region_ptr_for` already knows how to produce here. *)
           if String.length cname > 9 && String.sub cname 0 9 = "__region_" then
             region_ptr_for (String.sub cname 9 (String.length cname - 9))
+          else if Typer.is_region_param_name cname then region_ptr_for cname
           else
           match List.assoc_opt cname env with
           | Some v -> v
@@ -7835,6 +7848,7 @@ and emit_user_app ?(tail = false) (env : env) (e : Ast.expr) : string =
             emit_instr (Printf.sprintf "  %s = load %s, ptr @%s"
                           r (llvm_ty_of cty) (mu cn));
             r
+          | None when Typer.is_region_param_name cn -> region_ptr_for cn
           | None ->
             (match region_capture_name cn with
              | Some r -> region_ptr_for r
@@ -8087,6 +8101,9 @@ let emit_anon_adapter_fn2 (ce : closure_emission) : string option =
         if String.length n > 9 && String.sub n 0 9 = "__region_"
         then Some (String.sub n 9 (String.length n - 9), v) else None) cap_env
       @ saved_regions_anon;
+    let saved_subst_anon = !current_rp_subst_llvm in
+    current_rp_subst_llvm :=
+      List.filter (fun (n, _) -> Typer.is_region_param_name n) cap_env;
     current_var_types :=
       (ce.ce_param, ce.ce_param_ty) :: (p2, t2')
       :: List.map (fun (n, t) -> (n, t)) ce.ce_env_fields;
@@ -8104,6 +8121,7 @@ let emit_anon_adapter_fn2 (ce : closure_emission) : string option =
     current_expected_ty := saved_exp;
     current_host_fn_llvm := saved_host;
     current_regions := saved_regions_anon;
+    current_rp_subst_llvm := saved_subst_anon;
     llvm_current_sig := saved_sig;
     Some (Printf.sprintf
             "define %s @%s_fn2(ptr %%env_self, %s %%%s, %s %%%s) {\n%s\n}"
@@ -8152,6 +8170,9 @@ let emit_anon_adapter (ce : closure_emission) : string =
       if String.length n > 9 && String.sub n 0 9 = "__region_"
       then Some (String.sub n 9 (String.length n - 9), v) else None) cap_env
     @ saved_regions_anon;
+  let saved_subst_anon = !current_rp_subst_llvm in
+  current_rp_subst_llvm :=
+    List.filter (fun (n, _) -> Typer.is_region_param_name n) cap_env;
   current_var_types :=
     (ce.ce_param, ce.ce_param_ty) ::
     List.map (fun (n, t) -> (n, t)) ce.ce_env_fields;
@@ -8177,6 +8198,7 @@ let emit_anon_adapter (ce : closure_emission) : string =
   reg_counter := saved_reg;
   label_counter := saved_lbl;
   current_regions := saved_regions_anon;
+  current_rp_subst_llvm := saved_subst_anon;
   current_var_types := saved_vt;
   current_expected_ty := saved_exp;
   current_host_fn_llvm := saved_host;
@@ -8217,6 +8239,12 @@ let emit_lifted_fn_llvm (lf : lifted_fn_llvm) : string =
   current_var_types :=
     List.map (fun (n, t) -> (n, t)) lf.l_captures
     @ [(lf.l_param, lf.l_param_ty)];
+  (* v0.1.559: the enclosing function's region parameters it captured are its own
+     parameters here, under the same names *)
+  let saved_subst = !current_rp_subst_llvm in
+  current_rp_subst_llvm :=
+    List.filter_map (fun (n, _) ->
+      if Typer.is_region_param_name n then Some (n, "%" ^ n) else None) lf.l_captures;
   llvm_tail_pos := true;
   llvm_returned := false;
   let rv = emit_expr env lf.l_body in
@@ -8224,6 +8252,7 @@ let emit_lifted_fn_llvm (lf : lifted_fn_llvm) : string =
   else emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of lf.l_return_ty) rv);
   let body = String.concat "\n" (List.rev !instrs) in
   instrs := saved_instrs;
+  current_rp_subst_llvm := saved_subst;
   current_regions := saved_regions;
   current_var_types := saved_vt;
   current_expected_ty := saved_exp;
@@ -8360,9 +8389,12 @@ let emit_fn_def (f : fn_decl) : string =
   llvm_returned := false;
   (* Q-127: in scope for the body, and only for it. *)
   let saved_rps = !current_region_params_llvm in
+  let saved_subst = !current_rp_subst_llvm in
   current_region_params_llvm := rps;
+  current_rp_subst_llvm := [];
   let rv =
-    Fun.protect ~finally:(fun () -> current_region_params_llvm := saved_rps)
+    Fun.protect ~finally:(fun () ->
+        current_region_params_llvm := saved_rps; current_rp_subst_llvm := saved_subst)
       (fun () -> emit_expr env f.body) in
   if !llvm_returned then llvm_returned := false
   else emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of f.return_ty) rv);

@@ -993,10 +993,23 @@ let generalize env t =
      22k-line file. Levels answer the same question in O(|t|). *)
   let local = collect_local_vars !cur_level t [] in
   let qs = List.filter (fun id -> not (List.mem id send_ids)) local in
+  (* v0.1.559 (Q-134 stage 1): AN INNER BINDING DOES NOT QUANTIFY AN ALLOCATION
+     REGION. Only a top-level function can take a region parameter (the backends
+     find it by source name), so an inner `let rec ip = ...` that quantified the
+     region of an allocation made that allocation's region a variable nothing
+     would ever bind -- the default region -- even when the function around it
+     takes one: `sr`'s own region parameter never reached `pr` called from `ip`
+     (mgit's store_read: 23 of 28 ByteBufs in the default region). Left
+     unquantified, the variable is shared with the enclosing function, which
+     quantifies it and makes it a parameter; the lifted `ip` receives it as a
+     capture. And it keeps its mark -- unmarking is a top-level decision. *)
+  let qs =
+    if !cur_level > 0 then List.filter (fun id -> not (Hashtbl.mem alloc_region_ids id)) qs
+    else qs in
   (* Q-127: a marked region this binding will not quantify belongs to something that
      outlives it, so the call site must not decide it. See the note on
      `unmark_non_quantified_regions`. *)
-  unmark_non_quantified_regions qs t;
+  if !cur_level = 0 then unmark_non_quantified_regions qs t;
   (* A variable this binding declined to quantify — pinned by a Send obligation —
      outlives the binding, so it must stop claiming to be local or the next
      binding out would quantify it. *)

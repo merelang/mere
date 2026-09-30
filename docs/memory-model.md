@@ -156,10 +156,23 @@ as of v0.1.31 it is the implemented semantics on the C backend:
   carrying the result out of the block stays the type error it already
   was.
 
-  **Per backend**: the C backend passes it. The **LLVM** backend does not
-  yet — it has no uncurried twin to hang the argument on, so its
-  `region_reclaim_check` leg asserts the old behaviour and goes red when
-  it is taught. **Wasm** needs nothing: it has one bump for every region,
+  **Through an inner function (v0.1.559).** A call made from something
+  lifted out of a function's body — an inner `let rec`, a closure, a lift
+  inside a lift, the inner half of a `let rec ... and` group — used to hand
+  the callee the default region, whatever region the outer function had
+  been given. The inner binding quantified the allocation's region itself,
+  so it was a variable nothing would bind, and a lifted body had no region
+  parameter to pass on. Now an inner binding never quantifies an
+  allocation's region (only a top-level function can take one), so the
+  variable is the enclosing function's, and the lifted body or closure
+  receives that parameter as a capture. `test/regionparams/inner.mere`
+  has one of each.
+
+  What still goes to the default region is an allocation whose region
+  appears in no function's type: a buffer a function makes, uses and
+  drops. That is Q-134 proper, and passing arguments cannot reach it.
+
+  **Per backend**: C (v0.1.464) and LLVM (v0.1.466) pass it. **Wasm** needs nothing: it has one bump for every region,
   and what keeps a callee's allocation alive there is the high-water mark
   (Q-132), not a region argument. **RV32I** needs nothing either: it does
   not reclaim regions at all. Those two are not "unimplemented" — there is
