@@ -1,0 +1,11 @@
+// v0.1.560: an inner function is region-polymorphic. `helper` is called once
+// for a Vec that outlives the block and once for one that dies with it, so the
+// two calls need two regions. v0.1.559 gave an inner function's allocation a
+// single region for all its calls -- the enclosing function's -- and this was
+// a region-escape error (mere-ruby's main.mere had the same shape).
+let f = fn (u: unit) ->
+  let helper = fn (k: int) -> let v = vec_new () in let _ = vec_push v k in v in
+  let keep = helper 40 in
+  let t = region B { let tmp = helper 2 in vec_get tmp 0 } in
+  vec_get keep 0 + t;
+print_int (f ())

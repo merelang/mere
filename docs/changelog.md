@@ -4,6 +4,49 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.560 — 2026-10-01
+
+_v0.1.559 is withdrawn: an inner function is region-polymorphic again._
+
+v0.1.559 made a region parameter reach a call made from an inner function by
+not letting the inner function quantify the allocation's region. That gave every
+inner function ONE region for all of its calls -- the enclosing function's -- and
+a helper called once for something that outlives a `region` block and once
+inside it is then a region-escape error:
+
+```
+let f = fn (u: unit) ->
+  let helper = fn (k: int) -> let v = vec_new () in let _ = vec_push v k in v in
+  let keep = helper 40 in
+  let t = region B { let tmp = helper 2 in vec_get tmp 0 } in
+  vec_get keep 0 + t;           // v0.1.559: `keep` now holds a value from region `B`
+```
+
+mere-ruby's main.mere has that shape and stopped compiling. The typer is back to
+quantifying, and the lifted body no longer captures the enclosing function's
+region parameter either: a closure can outlive the call that made it, and its env
+would then hold a region pointer whose block has been released and whose struct
+the runtime reuses for the next block. The emitted C for mere-ruby is byte for
+byte v0.1.558's again. `test/parity/region_inner_poly.mere` is the shape above;
+`region_params_check` pins the four inner-function calls at `?` and goes red
+when they are taught.
+
+What v0.1.559 was after needs the other half: an inner function taking region
+parameters of its own, passed at each call the way a top-level function's are.
+
+**Two things v0.1.559 said that were wrong.** Its sweep of 1,072 programs found
+nothing newly refused because it ran without their imports resolved, so
+mere-ruby failed on an import under both compilers and compared equal; and the
+gate that would have caught it, `downstream_check`, reports "did not run" (exit
+3) when `MERE_DOWNSTREAM` is unset, which a local run of every gate counted as a
+pass. And "mgit's peak memory does not move" was one pair of peak-RSS readings
+on a busy machine, where the same binary on the same input read 5.6 and 15.4
+GB. Counted by the runtime (`MERE_REGION_STATS=1`), v0.1.559 moved mgit's
+never-freed allocation from 33.7 GB to 10.6 GB -- which is what v0.1.560 gives
+back up, until inner functions take region parameters.
+
+---
+
 ## v0.1.559 — 2026-10-01
 
 _A region parameter reaches a call made from an inner function._
