@@ -794,6 +794,15 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/proclimit_check.sh
 
+      # v0.1.555: a listener on a chosen address, bind(2) on a socket, the
+      # address a socket has, and the errno the fd_* family keeps. The errno
+      # numbers differ exactly here (EADDRINUSE 48 vs 98, ECONNRESET 54 vs
+      # 104), so the expected ones are read from the host's <errno.h>; every
+      # other row is a port the kernel gave the probe or a refusal it provoked.
+      - name: sockaddr_check (tcp_listen_at, sock_bind, getsockname, getpeername, fd_last_errno)
+        if: ${{ !cancelled() }}
+        run: sh scripts/sockaddr_check.sh
+
       # Float results must not depend on the C optimizer (v0.1.315): the
       # same dot product at -O0 and -O2 must produce the same bits, and both
       # must match the interpreter. Without the emitted FP_CONTRACT OFF

@@ -1,0 +1,231 @@
+// tcp_listen_at, sock_bind, sock_local_addr / sock_peer_addr and
+// fd_last_errno. Every expectation is an address or port THIS program was
+// given by the kernel, or a refusal it provoked, so the rows are facts about
+// the run rather than a snapshot of one machine.
+//
+// Why a runtime and not an `extern` the program writes: bind(2),
+// getsockname(2) and getpeername(2) take a `struct sockaddr *`, and no extern
+// can spell one. The address crosses as text and the family as a name.
+//
+// ERRNO. The numbers a refusal is compared with are the platform's --
+// EADDRINUSE is 48 on macOS and 98 on Linux -- so the probe prints the number
+// it got and scripts/sockaddr_check.sh fills the expected one in from the
+// host's own <errno.h>. Nothing here is written down as a number.
+extern fn tcp_listen_at: str -> int -> int -> int;
+extern fn sock_bind: int -> str -> int -> int;
+extern fn sock_local_addr: int -> str;
+extern fn sock_peer_addr: int -> str;
+extern fn fd_last_errno: unit -> int;
+extern fn tcp_connect: str -> int -> int;
+extern fn tcp_accept: int -> int;
+extern fn tcp_close: int -> int;
+extern fn fd_read: int -> int -> int -> int;
+extern fn fd_write: int -> int -> int -> int;
+extern fn fd_close: int -> int;
+extern fn fd_open: str -> str -> int -> int;
+extern fn fd_pipe: unit -> int;
+extern fn io_poll_new: int -> int;
+extern fn io_poll_add: int -> int -> int -> int;
+extern fn io_poll_del: int -> int -> int;
+extern fn io_poll_wait: int -> int -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_to_str: int -> int -> str;
+extern fn mem_copy_str: int -> int -> str -> int;
+// socket(2) and listen(2) take and answer ints and are in <sys/socket.h>,
+// which every program using the tcp_* family includes: plain externs.
+extern fn socket: int -> int -> int -> int;
+extern fn listen: int -> int -> int;
+
+let say = fn (label: str) -> fn (got: int) -> fn (want: int) ->
+  if got == want then print (label ++ " ok")
+  else print (label ++ " FAIL got=" ++ str_of_int got ++ " want=" ++ str_of_int want);
+
+let say_s = fn (label: str) -> fn (got: str) -> fn (want: str) ->
+  if str_eq got want then print (label ++ " ok")
+  else print (label ++ " FAIL got=" ++ got ++ " want=" ++ want);
+
+// the errno the last call kept, printed for the script to compare with the
+// host's own constant
+let say_e = fn (label: str) ->
+  print (label ++ " errno=" ++ str_of_int (fd_last_errno ()));
+
+let b = fn (c: bool) -> if c then 1 else 0;
+
+let rec nth = fn (xs: str list) -> fn (i: int) ->
+  match xs with
+  | Nil -> ""
+  | Cons (x, rest) -> if i == 0 then x else nth rest (i - 1);
+
+// "<family> <port> <address>": the address is everything after the second
+// space (a unix path may hold spaces)
+let fam = fn (t: str) -> nth (str_split t " ") 0;
+let port = fn (t: str) -> if str_len t == 0 then (0 - 1) else int_of_str (nth (str_split t " ") 1);
+let host = fn (t: str) ->
+  (let a = str_len (fam t) + 1 in
+   if str_len t == 0 then ""
+   else (let rest = substring t a (str_len t) in
+         let c = str_len (nth (str_split rest " ") 0) + 1 in
+         substring rest c (str_len rest)));
+
+let main = fn () ->
+  let buf = mem_alloc 256 in
+  // --- a listener on a chosen address, and what the kernel says it is
+  let s4 = tcp_listen_at "127.0.0.1" 0 16 in
+  let _ = say "listen 127.0.0.1" (b (s4 >= 0)) 1 in
+  let _ = say "errno after success" (fd_last_errno ()) 0 in
+  let a4 = sock_local_addr s4 in
+  let _ = say_s "its family" (fam a4) "inet" in
+  let _ = say_s "its address" (host a4) "127.0.0.1" in
+  let p4 = port a4 in
+  let _ = say "the kernel chose a port" (b (p4 > 0 && p4 < 65536)) 1 in
+  let _ = say "getsockname errno" (fd_last_errno ()) 0 in
+  // the same port again: bound, so refused -- the errno is the point
+  let dup4 = tcp_listen_at "127.0.0.1" p4 16 in
+  let _ = say "the same port again" dup4 (0 - 1) in
+  let _ = say_e "the same port again" in
+  // an address this host does not have (TEST-NET-1, RFC 5737)
+  let _ = say "an address not here" (tcp_listen_at "192.0.2.1" 0 16) (0 - 1) in
+  let _ = say_e "an address not here" in
+  let _ = say "port out of range" (tcp_listen_at "127.0.0.1" 70000 16) (0 - 1) in
+  let _ = say_e "port out of range" in
+  // the wildcard is the family's own: :: or 0.0.0.0, whichever getaddrinfo
+  // answers first on this host
+  let sw = tcp_listen_at "" 0 16 in
+  let aw = sock_local_addr sw in
+  let _ = say "the wildcard" (b (str_eq (host aw) "::" || str_eq (host aw) "0.0.0.0")) 1 in
+  let _ = say "wildcard family matches"
+            (b ((str_eq (host aw) "::" && str_eq (fam aw) "inet6")
+                || (str_eq (host aw) "0.0.0.0" && str_eq (fam aw) "inet"))) 1 in
+  let _ = tcp_close sw in
+  // a name's listener is where a connect to the same name arrives: both ask
+  // getaddrinfo, and the listener is bound to its FIRST answer, as ruby's
+  // TCPServer.new is. (Bound to any later answer -- 127.0.0.1 where
+  // "localhost" is ::1 first -- the connect is refused.)
+  let sl = tcp_listen_at "localhost" 0 16 in
+  let _ = say "listen localhost" (b (sl >= 0)) 1 in
+  let cl0 = tcp_connect "localhost" (port (sock_local_addr sl)) in
+  let _ = say "a connect to localhost arrives" (b (cl0 >= 0)) 1 in
+  let _ = tcp_close cl0 in
+  let _ = tcp_close sl in
+  // SO_REUSEADDR: a port whose last connection the SERVER closed first is in
+  // TIME_WAIT, and a listener there again is refused without it
+  let st = tcp_listen_at "127.0.0.1" 0 16 in
+  let pt = port (sock_local_addr st) in
+  let ct = tcp_connect "127.0.0.1" pt in
+  let at = tcp_accept st in
+  let _ = tcp_close at in
+  let _ = say "the peer sees the end" (fd_read ct buf 16) 0 in
+  let _ = tcp_close ct in
+  let _ = tcp_close st in
+  let st2 = tcp_listen_at "127.0.0.1" pt 16 in
+  let _ = say "listen again through TIME_WAIT" (b (st2 >= 0)) 1 in
+  let _ = tcp_close st2 in
+  // --- a connection, both ends named
+  let c = tcp_connect "127.0.0.1" p4 in
+  let _ = say "connect" (b (c >= 0)) 1 in
+  let a = tcp_accept s4 in
+  let _ = say "accept" (b (a >= 0)) 1 in
+  let cl = sock_local_addr c in
+  let cp = sock_peer_addr c in
+  let al = sock_local_addr a in
+  let ap = sock_peer_addr a in
+  let _ = say "client's peer is the listener's port" (port cp) p4 in
+  let _ = say_s "client's peer address" (host cp) "127.0.0.1" in
+  let _ = say "accepted end's local port" (port al) p4 in
+  let _ = say "accepted end's peer is the client" (b (port ap == port cl && str_eq (host ap) (host cl))) 1 in
+  let _ = say "the client has an ephemeral port" (b (port cl > 0 && port cl != p4)) 1 in
+  // a listener has no peer
+  let _ = say_s "listener's peer" (sock_peer_addr s4) "" in
+  let _ = say_e "listener's peer" in
+  // --- ECONNRESET: close a socket with unread bytes in its receive buffer
+  // and the kernel answers the peer with RST, not FIN. The accepted end is
+  // closed only after poll(2) says the byte has arrived, so the RST is not a
+  // race. The client's next read is the reset -- not an end of file.
+  let n1 = mem_copy_str buf 0 "x" in
+  let _ = say "client writes" (fd_write c buf n1) 1 in
+  let ps = io_poll_new 0 in
+  let _ = io_poll_add ps a 1 in
+  let _ = say "the byte arrived" (io_poll_wait ps 5000) 1 in
+  let _ = io_poll_del ps a in
+  let _ = tcp_close a in
+  let _ = say "read after reset" (fd_read c buf 16) (0 - 1) in
+  let _ = say_e "read after reset" in
+  let _ = tcp_close c in
+  // --- EPIPE, from a pipe whose read end is gone (tcp_listen_at ignored
+  // SIGPIPE, so this is an errno and not the end of the process)
+  let pk = fd_pipe () in
+  let pr = pk / 4294967296 in
+  let pw = pk % 4294967296 in
+  let _ = fd_close pr in
+  let _ = say "write to a pipe with no reader" (fd_write pw buf n1) (0 - 1) in
+  let _ = say_e "write to a pipe with no reader" in
+  let _ = fd_close pw in
+  // --- the fd_* family's own refusals, and the slot clearing on success
+  let _ = say "read a closed fd" (fd_read pr buf 16) (0 - 1) in
+  let _ = say_e "read a closed fd" in
+  let _ = say "negative fd" (fd_read (0 - 1) buf 16) (0 - 1) in
+  let _ = say_e "negative fd" in
+  let _ = say "zero-length read" (fd_read 0 buf 0) (0 - 1) in
+  let _ = say_e "zero-length read" in
+  let _ = say "missing file" (fd_open "/nonexistent/mere_sockaddr_probe" "r" 0) (0 - 1) in
+  let _ = say_e "missing file" in
+  let _ = say "unknown mode" (fd_open "/tmp" "zz" 0) (0 - 1) in
+  let _ = say_e "unknown mode" in
+  let r = fd_open "/dev/null" "r" 0 in
+  let _ = say "read /dev/null" (fd_read r buf 16) 0 in
+  let _ = say "errno after an end of file" (fd_last_errno ()) 0 in
+  let _ = say "write a read-only fd" (fd_write r buf n1) (0 - 1) in
+  let _ = say_e "write a read-only fd" in
+  // ⚠ PER THREAD. A refusal here, a success on another thread, and the
+  //   refusal is still what this thread reads.
+  let _ = fd_read (0 - 1) buf 16 in
+  let h = spawn (fn () -> (let _ = fd_close (fd_open "/dev/null" "r" 0) in
+                            say "the other thread's success" (fd_last_errno ()) 0)) in
+  let _ = join h in
+  let _ = say_e "this thread still" in
+  let _ = fd_close r in
+  // --- sock_bind on a socket made by socket(2), then listen(2)
+  let fd = socket 2 1 0 in
+  let _ = say "socket" (b (fd >= 0)) 1 in
+  let unb = sock_local_addr fd in
+  let _ = say_s "an unbound socket's family" (fam unb) "inet" in
+  let _ = say "an unbound socket's port" (port unb) 0 in
+  let _ = say "bind 127.0.0.1" (sock_bind fd "127.0.0.1" 0) 0 in
+  let bl = sock_local_addr fd in
+  let _ = say_s "bound address" (host bl) "127.0.0.1" in
+  let _ = say "bound port" (b (port bl > 0)) 1 in
+  let _ = say "bind twice" (sock_bind fd "127.0.0.1" 0) (0 - 1) in
+  let _ = say_e "bind twice" in
+  let _ = say "listen" (listen fd 16) 0 in
+  let c2 = tcp_connect "127.0.0.1" (port bl) in
+  let _ = say "connect to the bound socket" (b (c2 >= 0)) 1 in
+  let _ = tcp_close c2 in
+  let _ = tcp_close fd in
+  // "" is the wildcard OF THE SOCKET'S FAMILY: an IPv4 socket gets 0.0.0.0
+  // even where getaddrinfo answers :: first
+  let fw = socket 2 1 0 in
+  let _ = say "bind the wildcard" (sock_bind fw "" 0) 0 in
+  let _ = say_s "an IPv4 socket's wildcard" (host (sock_local_addr fw)) "0.0.0.0" in
+  let _ = tcp_close fw in
+  let fd2 = socket 2 1 0 in
+  let _ = say "bind an address not here" (sock_bind fd2 "192.0.2.1" 0) (0 - 1) in
+  let _ = say_e "bind an address not here" in
+  let _ = say "bind the listener's port" (sock_bind fd2 "127.0.0.1" p4) (0 - 1) in
+  let _ = say_e "bind the listener's port" in
+  let _ = say "bind a name" (sock_bind fd2 "localhost" 0) (0 - 2) in
+  let _ = say "a name is not an errno" (fd_last_errno ()) 0 in
+  let _ = tcp_close fd2 in
+  let _ = say "bind a closed fd" (sock_bind fd2 "127.0.0.1" 0) (0 - 1) in
+  let _ = say_e "bind a closed fd" in
+  // --- asking something that is not a socket
+  let pk2 = fd_pipe () in
+  let pr2 = pk2 / 4294967296 in
+  let _ = say_s "address of a pipe" (sock_local_addr pr2) "" in
+  let _ = say_e "address of a pipe" in
+  let _ = fd_close pr2 in
+  let _ = fd_close (pk2 % 4294967296) in
+  let _ = say_s "address of a closed fd" (sock_local_addr pr2) "" in
+  let _ = say_e "address of a closed fd" in
+  let _ = tcp_close s4 in
+  0;
+exit (main ())
