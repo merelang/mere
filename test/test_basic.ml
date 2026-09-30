@@ -3133,6 +3133,18 @@ let () =
        module Gb { type u = P | Q | R; };
        let a = Ga.P in
        match a with | Ga.P -> 1 | Ga.Q -> 2");
+  (* A VARIANT AND A RECORD SHARING A NAME (v0.1.551). Accepted by every check
+     and by the interpreter; the C backend died inside the compiler
+     (`List.combine`). The prelude's `result` is the name a program reaches for
+     first -- mgate did -- and either order is refused. *)
+  check_raises_containing "redeclared type: a record named like the prelude's result"
+    "declared both as a variant"
+    (fun () -> Pipeline.process
+      "type result = { name: str };\nlet r = result { name = \"x\" };\nr.name");
+  check_raises_containing "redeclared type: a record, then a variant, by one name"
+    "declared both as a variant (`A | B`) and as a record (`{ v }`)"
+    (fun () -> Pipeline.process
+      "type w = { v: int };\ntype w = A | B;\nlet x = A in 1");
   (* And an IDENTICAL restatement is still accepted, which twelve files in this
      tree rely on: `'a list` and `'a opt` are restated for self-containment and
      describe the same type both times. *)

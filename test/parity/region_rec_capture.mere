@@ -1,0 +1,21 @@
+// A region block inside a recursive loop, and inside the block a recursive
+// helper that captures a container made in the block (v0.1.551).
+//
+// Lambda lifting threads a region into a lifted function as a capture named
+// `__region_R`. The list of names bound inside a lifted body held the block's
+// name as `R` only, so the outer `loop` was given the inner helper's region
+// capture as if it came from outside -- and its call site, outside the block,
+// named `__region_R` where no such local exists: the emitted C did not compile.
+// Found by the mgit dogfood's memory probe.
+let f = fn (k: int) ->
+  let rec loop = fn (j: int) -> fn (acc: int) ->
+    if j == k then acc
+    else
+      let len = region R {
+        let b = bytebuf_new 0 in
+        let rec go = fn (i: int) -> if i == j + 3 then () else let _ = bytebuf_push b i in go (i + 1) in
+        let _ = go 0 in
+        bytebuf_len b } in
+      loop (j + 1) (acc + len) in
+  loop 0 0;
+print_int (f 4)

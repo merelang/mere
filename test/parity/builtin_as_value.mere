@@ -1,0 +1,18 @@
+// A builtin passed as a value, not applied (v0.1.551).
+//
+// The C backend eta-expanded builtins in value position only for the names a
+// phase had listed (int_of_str, vec_push, map_get ...); every other one was
+// refused -- `list_iter hs join` did not compile while
+// `list_iter hs (fn h -> join h)` did. The mgate dogfood hit it with `join`;
+// of fourteen single-argument builtins tried, twelve
+// were refused and all twelve compile now. These are the ones every backend
+// has.
+let xs = Cons ("7", Cons ("x", Cons (" ", Nil)));
+let _ = list_iter (list_map xs is_digit) print_bool;
+let _ = list_iter (list_map xs is_space) print_bool;
+let _ = list_iter (list_map (Cons ("héllo", Nil)) utf8_len) print_int;
+let bs = list_map (Cons ("ab", Cons ("", Nil))) bytes_of_str;
+let _ = list_iter (list_map bs bytes_len) print_int;
+let _ = list_iter (list_map bs hex_of_bytes) print;
+let _ = list_iter (list_map bs str_of_bytes) print;
+print_int (list_len (list_fold (list_map (Cons ("añb", Nil)) utf8_chars) Nil (fn (a: str list) -> fn (b: str list) -> list_append a b)))

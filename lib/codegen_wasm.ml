@@ -710,6 +710,10 @@ let collect_under_saturated (arity_of : string -> int option)
    builtins used in value position (same logic as the helper of the same name
    in codegen_c / codegen_llvm). Routes through an anonymous Fun adapter +
    each builtin's direct-call fast path (line 1653 etc.). *)
+(* The callee nodes of synthesized eta expansions, by identity (v0.1.551), as
+   `eta_callees` in the C backend. *)
+let eta_callees_wasm : Ast.expr list ref = ref []
+
 let synthesize_curried_eta_wasm (name : string) (arrow_ty : Ast.ty) (loc : Loc.t)
     : Ast.expr =
   let mk node ty = Ast.{ node; ty = Some ty; loc } in
@@ -735,7 +739,9 @@ let synthesize_curried_eta_wasm (name : string) (arrow_ty : Ast.ty) (loc : Loc.t
       in
       build_app (i + 1) (mk (Ast.App (acc, arg_node)) new_ty) new_ty
   in
-  let inner_apps = build_app 0 (mk (Ast.Var name) arrow_ty) arrow_ty in
+  let callee = mk (Ast.Var name) arrow_ty in
+  eta_callees_wasm := callee :: !eta_callees_wasm;
+  let inner_apps = build_app 0 callee arrow_ty in
   let rec wrap i body_acc body_ty =
     if i < 0 then body_acc
     else
@@ -2395,7 +2401,15 @@ and emit_expr (e : Ast.expr) : unit =
             hole that is ours. The list above stays because it can say more --
             it knows the scope -- but it is no longer the only thing standing
             between a known name and a wrong diagnostic. *)
-         unsupported e.Ast.loc (name ^ " has no Wasm lowering yet (host builtin)")
+         (* v0.1.551: the C backend's rule (see `eta_in_progress` there). *)
+         (if List.memq e !eta_callees_wasm then
+            unsupported e.Ast.loc (name ^ " has no Wasm lowering yet (host builtin)")
+          else
+            match e.Ast.ty with
+            | Some t when ty_is_concrete (Ast.walk t)
+                          && (match Ast.walk t with Ast.TyArrow _ -> true | _ -> false) ->
+              emit_expr (synthesize_curried_eta_wasm name (Ast.walk t) e.Ast.loc)
+            | _ -> unsupported e.Ast.loc (name ^ " has no Wasm lowering yet (host builtin)"))
        else
          unsupported e.Ast.loc ("unbound variable: " ^ name)))
   | Ast.Annot (inner, _) -> emit_expr inner

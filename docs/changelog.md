@@ -4,6 +4,69 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.551 — 2026-09-30
+
+_Four holes the dogfoods walked into: a record named like the prelude's `result`, a builtin passed as a value, a region captured from the wrong side of a lift, and a gate that could not run beside its own poison._
+
+Three new programs written against the language in one day -- a gate runner
+(mgate), a git reader (mgit) and a coroutine-per-connection server
+(mpoll_coro) -- and each stopped on something no earlier program had written.
+
+**A record and a variant sharing a name are refused.** `type result = { name:
+str }` passed `mere check` and ran on the interpreter, and `mere -c` died
+inside the compiler: `Invalid_argument("List.combine")` in `subst_variants`,
+the record's zero parameters zipped against the prelude's `('a, 'e) result`.
+v0.1.474 and v0.1.525 refused a variant redeclared with other constructors and
+a record redeclared with other fields; the cross case was the one left, and the
+name a program reaches for first is one the prelude already owns. Now:
+`type `result` is declared both as a variant (`Err of _ | Ok of _`) and as a
+record (`{ name }`)`, from either order. The capability records `Logger` and
+`Metrics` stay replaceable by a program's own declaration in any shape, as
+before. Measured before landing: 0 of 1,193 `.mere` files in this tree and
+downstream are newly refused.
+
+**A builtin is a value on every backend that can apply it.** `list_iter hs
+join` did not compile on C while `list_iter hs (fn h -> join h)` did: each
+backend eta-expanded builtins in value position only for the names a phase had
+listed. The rest are now expanded too, on C, LLVM and Wasm -- of fourteen
+single-argument builtins tried, twelve were refused on C and all twelve compile
+(`is_digit`, `utf8_len`, `hex_of_bytes`, `print_int`, `file_exists`, ...); on
+LLVM and Wasm the ten tried were refused as values while applying them worked.
+A builtin with no direct-call lowering comes back to the value path from inside
+its own expansion and is refused there, recognised by the synthesized callee's
+identity. ⚠ The first version guarded with a flag set around the synthesis;
+the expansion becomes a closure adapter whose body is emitted when the adapters
+are drained, the flag was down by then, and `test_basic` ran for an hour.
+`test/parity/builtin_as_value.mere` holds four backends to one output.
+
+**A region opened inside a lifted function is not a capture from outside it.**
+`fn -> let rec loop -> region R { let b = bytebuf_new 0 in let rec go (pushing
+to b) }` emitted C that did not compile: `use of undeclared identifier
+'__region_R'`. The names bound inside a lifted body held the block as `R`, and
+a region travels as a capture named `__region_R` (Q-131), so the inner helper's
+capture was threaded into `loop` from its call site, outside the block. Both
+spellings are bound now. `test/parity/region_rec_capture.mere`.
+
+**`fmt_roundtrip_check.sh` can run beside its poison.** It writes each
+formatted example next to the original under a fixed name, and a gate runner
+running the plain and `--poison` invocations together (mgate) found 56 and 48
+"refused" files on a main that is green run by run: the two overwrote each
+other. CI runs one step at a time, which is why nothing had seen it. The probe
+names carry the process id, and cleanup removes only its own.
+
+Recorded, not fixed: a record field annotated `Vec[__heap, int]` loses the
+Vec's element type at the `vec_new` that fills it (C), and a Vec of
+region-polymorphic records at top level is the Q-042 shape; mgit keeps its
+packs in parallel Vecs instead. And Q-134 has its second witness: mgit reads
+every object inside `region R { }` and peaks at 1.9 GB on this repository,
+because the allocations are made by the functions the block calls.
+
+`dune test` 2870/0; every gate in the workflow plus the two unwired ones run
+through mgate, against the same run on v0.1.549: fmt_roundtrip green again,
+first_run green after the README's counts (193 parity programs, 2870 tests).
+
+---
+
 ## v0.1.550 — 2026-09-30
 
 _Resource limits, scheduling priority and `flock(2)`: `proc_*` and `file_flock`._
@@ -54,6 +117,8 @@ after that row failed. The row names both of its numbers now.
 
 Interpreter, LLVM and Wasm are unchanged, as for `file_*`: the interpreter says
 it has no mock for the extern, LLVM and Wasm leave it an import.
+
+---
 
 ## v0.1.549 — 2026-09-29
 

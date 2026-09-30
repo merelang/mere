@@ -311,6 +311,16 @@ let eta_adapters : (string, string * Ast.ty) Hashtbl.t = Hashtbl.create 8
    machinery (Phase 5.7-b), and the inner nested App hits the direct-call fast
    path -- a single synthesizer supports all multi-arg curried builtins without
    any per-builtin closure boilerplate. *)
+(* The callee nodes of the eta expansions synthesized so far (compared by
+   identity). A builtin with no direct-call lowering reaches the value path
+   again from INSIDE its own expansion -- `fn x -> name x` applies `name`
+   through the generic call path, which emits the callee as a value -- and must
+   be refused there, not expanded again. A flag set around the synthesis is not
+   enough: the expansion becomes a closure adapter whose body is emitted later,
+   when the adapters are drained, and by then the flag is down (the first
+   version of v0.1.551 did that, and test_basic ran for an hour). *)
+let eta_callees : Ast.expr list ref = ref []
+
 let synthesize_curried_eta (name : string) (arrow_ty : Ast.ty) (loc : Loc.t)
     : Ast.expr =
   let mk node ty = Ast.{ node; ty = Some ty; loc } in
@@ -337,7 +347,9 @@ let synthesize_curried_eta (name : string) (arrow_ty : Ast.ty) (loc : Loc.t)
       in
       build_app (i + 1) (mk (Ast.App (acc, arg_node)) new_ty) new_ty
   in
-  let inner_apps = build_app 0 (mk (Ast.Var name) arrow_ty) arrow_ty in
+  let callee = mk (Ast.Var name) arrow_ty in
+  eta_callees := callee :: !eta_callees;
+  let inner_apps = build_app 0 callee arrow_ty in
   (* Wrap from inner-most outward with Fun nodes *)
   let rec wrap i body_acc body_ty =
     if i < 0 then body_acc
@@ -1963,7 +1975,17 @@ let rec emit_expr (e : Ast.expr) : string =
             int_max - 1;`) lives in `top_globals` and is asked about
             separately. mere-ruby binds exactly those two names and stopped
             compiling when this check first landed without that half. *)
-         unsupported e.loc (name ^ " has no C lowering yet (host builtin)")
+         (* v0.1.551: a builtin with a direct-call lowering is a value by eta:
+            `list_iter hs join` is `list_iter hs (fn h -> join h)`, which
+            compiled while the first form did not (the mgate dogfood) -- the allowlists above name the ones a phase got to,
+            and this is the rest. A builtin with NO lowering comes back here
+            from inside its own expansion, and is refused as before. *)
+         if List.memq e !eta_callees then
+           unsupported e.loc (name ^ " has no C lowering yet (host builtin)")
+         else
+           (match try_eta () with
+            | Some s -> s
+            | None -> unsupported e.loc (name ^ " has no C lowering yet (host builtin)"))
        else c_safe_name name))
   | Ast.Annot (inner, _) -> c_tail_pos := __in_tail; emit_expr inner
   | Ast.Neg a -> "(-" ^ emit_expr a ^ ")"
@@ -12172,7 +12194,14 @@ let lift_inner_fns
        | Ast.Let (pat, _, _) -> List.iter add (pattern_vars pat)
        | Ast.Let_rec (bs, _) -> List.iter (fun (n, _, _) -> add n) bs
        | Ast.With (n, _, _) -> add n
-       | Ast.Region_block (n, _) -> add n
+       (* ⚠ BOTH SPELLINGS. A region travels as a capture named `__region_R`
+          (Q-131), so a callee that captures it asks about that name -- and this
+          list held only `R`, so a block opened INSIDE the lifted body was
+          threaded in from the call site, where it does not exist:
+          fn -> let rec loop -> region R { let b = bytebuf_new 0 in let rec go
+          (pushing to b) } emitted `use of undeclared identifier '__region_R'`
+          (the mgit dogfood's probe). *)
+       | Ast.Region_block (n, _) -> add n; add ("__region_" ^ n)
        | Ast.Match (_, arms) ->
          List.iter (fun (pat, _, _) -> List.iter add (pattern_vars pat)) arms
        | _ -> ());
