@@ -5,11 +5,11 @@
 // holds is not in the range and is not reported.
 type H = | H of int;
 let base = 281474976710656;
-let root = coro_self ();
+let root = coro_root ();
 let table = map_new ();
 let _ = map_set table 0 (H (base + 7));
 let _ = map_set table 1 (H 12);
-let c = coro_new (fn () ->
+let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
   let a = map_get table 0 in
   let b = map_get table 1 in
   let _ = map_delete table 0 in
@@ -17,7 +17,7 @@ let c = coro_new (fn () ->
   let _ = coro_switch root in
   let _ = (match a with | H n -> print_int (n - base)) in
   let _ = (match b with | H n -> print_int n) in
-  root);
+  root) ());
 let _ = coro_switch c;
 let got = map_new ();
 let _ = coro_scan_ints c base (base + 100) (fn (n: int) -> map_set got n 1);

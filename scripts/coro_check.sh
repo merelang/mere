@@ -61,7 +61,9 @@ overflow|cl|stack overflow (recursion too deep)|1
 deep/deep|cl|2000001000000;main: back|0
 compact|ic|held: intact;700|0
 scan|icl|all found, bound kept;running: found;57573|0
-scan_high|cl|found, again found, small left out;7;12|0'
+scan_high|cl|found, again found, small left out;7;12|0
+transfer|icl|int: 1 12 23, float: 3.75;bool: true then false, coro: hopped;after the end: 0|0
+notme|icl|coro_transfer: the third argument must be the running coroutine|1'
 
 # The interpreter prints a failure with its position and a code frame; the
 # compiled program prints the message alone. The comparison is on the message.
@@ -144,27 +146,38 @@ refuse() {  # $1 = label, $2 = flag ("" = interpreter), $3 = program, $4 = text 
   if [ "$rc" != 0 ] && grep -qF -- "$4" "$T/r.err"; then printf '  ok    %s\n' "refused: $1"
   else printf '  FAIL  %s\n' "not refused: $1 (exit $rc: $(head -1 "$T/r.err"))"; fail=1; fi
 }
-refuse "a body capturing a block's Vec" "" 'let root = coro_self ();
-let c = region R { let v = vec_new () in let _ = vec_push v 1 in coro_new (fn () -> let _ = print_int (vec_len v) in root) };
+refuse "a body capturing a block's Vec" "" 'let root = coro_root ();
+let c = region R { let v = vec_new () in let _ = vec_push v 1 in coro_new (fn _me -> fn (_u: unit) -> coro_exit ( let _ = print_int (vec_len v) in root) ()) };
 coro_switch c' 'coro_new: the body captures `v`'
-refuse "a body capturing a block's Vec (C)" -c 'let root = coro_self ();
-let c = region R { let v = vec_new () in let _ = vec_push v 1 in coro_new (fn () -> let _ = print_int (vec_len v) in root) };
+refuse "a body capturing a block's Vec (C)" -c 'let root = coro_root ();
+let c = region R { let v = vec_new () in let _ = vec_push v 1 in coro_new (fn _me -> fn (_u: unit) -> coro_exit ( let _ = print_int (vec_len v) in root) ()) };
 coro_switch c' 'coro_new: the body captures `v`'
 refuse "a Coro sent over a channel" "" 'let ch = channel_new ();
-let _ = channel_send ch (coro_self ());
-0' '`Coro` is not Send'
-refuse "a Coro captured by spawn" "" 'let c = coro_self ();
+let _ = channel_send ch (coro_root ());
+0' '`unit Coro` is not Send'
+refuse "a Coro captured by spawn" "" 'let c = coro_root ();
 let h = spawn (fn () -> coro_switch c);
-join h' 'cannot capture `c` : Coro across a thread boundary'
-refuse "Wasm names it" -w 'coro_switch (coro_self ())' 'is not available on Wasm'
-refuse "RV32I names it" -rv 'coro_switch (coro_self ())' 'is unsupported on this target'
-refuse "RV64 names it" -rv64 'coro_switch (coro_self ())' 'is unsupported on this target'
-refuse "Wasm names coro_scan_ints" -w 'coro_scan_ints (coro_self ()) 0 1 (fn (n: int) -> ())' 'is not available on Wasm'
-refuse "RV32I names coro_scan_ints" -rv 'coro_scan_ints (coro_self ()) 0 1 (fn (n: int) -> ())' 'is unsupported on this target'
+join h' 'cannot capture `c` : unit Coro across a thread boundary'
+# v0.1.561 (Q-184): what a message may be, the API that went, and the shape that changed
+refuse "a str message" "" 'let root = coro_root ();
+let c = coro_new (fn me -> fn (m: str) -> coro_exit root ());
+0' "a coroutine's messages are int, bool, float, unit or a Coro for now -- this one's are str"
+refuse "coro_self, removed" "" 'let r = coro_self (); 0' 'removed in v0.1.561'
+refuse "a body of the old shape" "" 'let c = coro_new (fn () -> coro_root ()); 0' 'a body is `fn me -> fn msg -> ..` since v0.1.561'
+refuse "a message type fixed once" "" 'let root = coro_root ();
+let c = coro_new (fn me -> fn m -> coro_exit root ());
+let _ = coro_transfer c 1 root;
+let _ = coro_transfer c true root;
+0' 'expected `int`, got `bool`'
+refuse "Wasm names it" -w 'coro_switch (coro_root ())' 'is not available on Wasm'
+refuse "RV32I names it" -rv 'coro_switch (coro_root ())' 'is unsupported on this target'
+refuse "RV64 names it" -rv64 'coro_switch (coro_root ())' 'is unsupported on this target'
+refuse "Wasm names coro_scan_ints" -w 'coro_scan_ints (coro_root ()) 0 1 (fn (n: int) -> ())' 'is not available on Wasm'
+refuse "RV32I names coro_scan_ints" -rv 'coro_scan_ints (coro_root ()) 0 1 (fn (n: int) -> ())' 'is unsupported on this target'
 
 # and what must NOT be refused: a block's VALUE is copied out with the env
-printf '%s\n' 'let root = coro_self ();
-let c = region R { let s = str_repeat "x" 3 in coro_new (fn () -> let _ = print s in root) };
+printf '%s\n' 'let root = coro_root ();
+let c = region R { let s = str_repeat "x" 3 in coro_new (fn _me -> fn (_u: unit) -> coro_exit ( let _ = print s in root) ()) };
 let _ = region Z { str_len (str_repeat "Z" 4096) };
 coro_switch c' > "$T/ok.mere"
 got=$("$MERE" -c "$T/ok.mere" 2>&1 > "$T/ok.c") || true

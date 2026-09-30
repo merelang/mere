@@ -1,7 +1,7 @@
 // A fail on a coroutine with no try_or of its own takes the uncaught path. It
 // does not land in the try_or the OTHER stack armed -- that would be a longjmp
 // onto a stack that is not running.
-let root = coro_self ();
-let b = coro_new (fn () -> let _ = coro_switch root in let _ = fail "from the coroutine" in root);
+let root = coro_root ();
+let b = coro_new (fn _me -> fn (_u: unit) -> coro_exit ( let _ = coro_switch root in let _ = fail "from the coroutine" in root) ());
 let v = try_or (fn (u) -> let _ = coro_switch b in let _ = coro_switch b in 7) (0 - 1);
 print_int v

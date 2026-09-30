@@ -22,7 +22,7 @@ let rec spaced = fn (n: int) -> fn (k: int) ->
         let _ = str_len (str_repeat "j" 300) in
         Cons (H n, rest));
 let rec sum = fn (ys: H list) -> match ys with | [] -> 0 | Cons (H n, t) -> n + sum t | Cons (Pair (p, q), t) -> p + q + sum t;
-let root = coro_self ();
+let root = coro_root ();
 let table = map_new ();
 let _ = map_set table 0 (H 4101);
 let _ = map_set table 1 (Pair (4102, 4103));
@@ -30,7 +30,7 @@ let lists = map_new ();
 let _ = map_set lists 0 (spaced 4104 2);
 let got = map_new ();
 let seen = fn (n: int) -> map_set got n 1;
-let c = coro_new (fn () ->
+let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
   let a = map_get table 0 in
   let b = map_get table 1 in
   let xs = map_get lists 0 in
@@ -51,7 +51,7 @@ let c = coro_new (fn () ->
   let sa = (match a with | H n -> n | Pair (p, q) -> p + q) in
   let sb = (match b with | H n -> n | Pair (p, q) -> p + q) in
   let _ = print_int (sa + sb + sum xs + total + depth n2) in
-  root);
+  root) ());
 let _ = coro_switch c;
 // churn so the tables' old slots are reused
 let rec churn = fn (i: int) -> if i == 0 then 0 else (let _ = map_set table (100 + i) (H i) in churn (i - 1));
@@ -76,7 +76,7 @@ let probe = fn (k: int) ->
   let local = map_get side k in
   let _ = map_delete side k in
   let got2 = map_new () in
-  let _ = coro_scan_ints (coro_self ()) 0 5000 (fn (n: int) -> map_set got2 n 1) in
+  let _ = coro_scan_ints (coro_root ()) 0 5000 (fn (n: int) -> map_set got2 n 1) in
   let _ = print (if map_has got2 4200 then "running: found" else "running: missing") in
   (match local with | H n -> n | Pair (_, _) -> 0);
 let back = probe 0;

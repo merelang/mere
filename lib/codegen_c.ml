@@ -179,6 +179,28 @@ let unsupported loc what =
   raise (Codegen_error (loc,
     Printf.sprintf "unsupported in C codegen subset: %s" what))
 
+(* v0.1.561 (Q-184): a coroutine's message is one word in the runtime, whatever
+   its type; these are the two directions. The types are the scalars move_check
+   allows -- anything else reaching here is a type the check could not see (a
+   type variable it left for the instantiation), refused here by name. *)
+let coro_to_bits loc (t : Ast.ty) (c : string) : string =
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool | Ast.TyVar _ | Ast.TyParam _ | Ast.TyCon ("Coro", _) ->
+    "(unsigned long long)(" ^ c ^ ")"
+  | Ast.TyUnit -> "((void)(" ^ c ^ "), 0ULL)"
+  | Ast.TyFloat -> "__lang_coro_f2b(" ^ c ^ ")"
+  | t -> unsupported loc ("a coroutine message of type " ^ Ast.pp_ty t
+                          ^ " (int, bool, float, unit or a Coro for now)")
+let coro_of_bits loc (t : Ast.ty) (c : string) : string =
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyVar _ | Ast.TyParam _ -> "(long long)(" ^ c ^ ")"
+  | Ast.TyBool -> "(int)(" ^ c ^ ")"
+  | Ast.TyCon ("Coro", _) -> "(__lang_coro_h)(" ^ c ^ ")"
+  | Ast.TyUnit -> "((void)(" ^ c ^ "), 0)"
+  | Ast.TyFloat -> "__lang_coro_b2f(" ^ c ^ ")"
+  | t -> unsupported loc ("a coroutine message of type " ^ Ast.pp_ty t
+                          ^ " (int, bool, float, unit or a Coro for now)")
+
 (* Constructor name → tag index (declaration order). Populated by
    emit_program from Top_type decls; read by emit_expr for Constr /
    Match. *)
@@ -2987,19 +3009,38 @@ let rec emit_expr (e : Ast.expr) : string =
      (* Same-thread coroutines. The body closure's env is hoisted into the
         default region by the runtime (the coroutine outlives the block it was
         made in); move_check refuses a body that captures a block's value. *)
-     | Ast.Var "coro_new" when not (user_shadows "coro_new") ->
+     | Ast.Var "__coro_new_raw" when not (user_shadows "__coro_new_raw") ->
        uses_coro := true;
        (match arg.Ast.node with Ast.Fun _ -> coro_env_owned_next := true | _ -> ());
        let arg_c = emit_expr arg in
        coro_env_owned_next := false;
        "({ __auto_type __cl = " ^ arg_c ^ "; \
            __lang_coro_new((void*)__cl.env, (void*)__cl.fn); })"
+     (* v0.1.561 (Q-184): the values -- see __lang_coro_transfer *)
+     | Ast.Var "__coro_msg" when not (user_shadows "__coro_msg") ->
+       uses_coro := true;
+       let t = match e.Ast.ty with Some t -> t | None -> Ast.TyInt in
+       coro_of_bits e.Ast.loc t ("__lang_coro_take(" ^ emit_expr arg ^ ")")
+     | Ast.Var "coro_root" when not (user_shadows "coro_root") ->
+       uses_coro := true;
+       "((void)(" ^ emit_expr arg ^ "), __lang_coro_root_h())"
+     | Ast.App ({ node = Ast.Var "coro_exit"; _ }, c_e) when not (user_shadows "coro_exit") ->
+       uses_coro := true;
+       let t = match arg.Ast.ty with Some t -> t | None -> Ast.TyInt in
+       "({ __lang_coro_h __ec = " ^ emit_expr c_e ^ "; \
+           __lang_coro_exit(__ec, " ^ coro_to_bits arg.Ast.loc t (emit_expr arg) ^ "); })"
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "coro_transfer"; _ }, c_e); _ }, v_e)
+       when not (user_shadows "coro_transfer") ->
+       uses_coro := true;
+       let tv = match v_e.Ast.ty with Some t -> t | None -> Ast.TyInt in
+       let tr = match e.Ast.ty with Some t -> t | None -> Ast.TyInt in
+       coro_of_bits e.Ast.loc tr
+         ("({ __lang_coro_h __tc = " ^ emit_expr c_e ^ "; \
+             unsigned long long __tv = " ^ coro_to_bits v_e.Ast.loc tv (emit_expr v_e) ^ "; \
+             __lang_coro_transfer(__tc, __tv, " ^ emit_expr arg ^ "); })")
      | Ast.Var "coro_switch" when not (user_shadows "coro_switch") ->
        uses_coro := true;
        "({ __lang_coro_switch(" ^ emit_expr arg ^ "); 0; })"
-     | Ast.Var "coro_self" when not (user_shadows "coro_self") ->
-       uses_coro := true;
-       "((void)(" ^ emit_expr arg ^ "), __lang_coro_self())"
      (* coro_scan_ints c lo hi f -- see __lang_coro_scan_ints *)
      | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "coro_scan_ints"; _ }, c_e); _ }, l_e); _ }, h_e)
        when not (user_shadows "coro_scan_ints") ->
@@ -5092,7 +5133,7 @@ let rec c_type_of (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyCon ("ListBuf", _) -> "__lang_listbuf*"   (* Q-106: one layout for every T *)
   (* v0.1.558: a handle, not the record's address -- see __lang_coro_slot *)
-  | Ast.TyCon ("Coro", _) -> "__lang_coro_h"
+  | Ast.TyCon (("Coro" | "CoroExit"), _) -> "__lang_coro_h"
   | Ast.TyCon ("Vec", args) ->
     (* Phase 15.2: Vec[R, T] — expand T to a concrete type and produce
        `mere_vec_<tag>*`. args have not been walked yet, so walk them here
@@ -10984,7 +11025,7 @@ let coro_runtime ~(stack_bytes : int) =
       "typedef struct __lang_coro_x {";
       "  void* sp;";
       "  char* map; size_t map_size;          /* the mmap, guard included; NULL for a thread's root */";
-      "  void* env; int env_owned; __lang_coro_h (*fn)(void*, int);";
+      "  void* env; int env_owned; __lang_coro_h (*fn)(void*, __lang_coro_h);";
       "  __lang_region* s_cur;";
       "  __lang_region** s_active; int s_active_n, s_active_cap;";
       "  int s_jb_set; jmp_buf s_jb;";
@@ -11001,6 +11042,7 @@ let coro_runtime ~(stack_bytes : int) =
       "  unsigned slot;                       /* its entry in __lang_coro_slots */";
       "  pthread_t owner;";
       "  __lang_coro_x* x;                    /* NULL once finished and reaped */";
+      "  unsigned long long msg;              /* v0.1.561: what was sent to it, not yet read */";
       "};";
       "static _Thread_local __lang_coro __lang_coro_root;";
       "static _Thread_local __lang_coro_x __lang_coro_root_x;";
@@ -11573,7 +11615,9 @@ let coro_runtime ~(stack_bytes : int) =
       "static void __lang_coro_body(void* p) {";
       "  __lang_coro* self = (__lang_coro*)p;";
       "  __lang_coro_arrived(self);";
-      "  __lang_coro* next = __lang_coro_of(self->x->fn(self->x->env, 0));";
+      "  /* v0.1.561: the body is handed its own handle; what it returns is a CoroExit,";
+      "     the coroutine coro_exit named (and already gave the value to) */";
+      "  __lang_coro* next = __lang_coro_of(self->x->fn(self->x->env, __lang_coro_handle(self)));";
       "  /* The body is over: every block it opened has closed and every try_or has";
       "     returned, so there is nothing to unwind -- only somewhere to go. */";
       "  if (!next || next == self || next->state == 3)";
@@ -11619,7 +11663,7 @@ let coro_runtime ~(stack_bytes : int) =
       "  if (c) c->x = (__lang_coro_x*)calloc(1, sizeof(__lang_coro_x));";
       "  if (!c || !c->x) __lang_fail_impl(\"out of memory\");";
       "  c->x->map = m; c->x->map_size = sz + guard;";
-      "  c->x->env = env; c->x->env_owned = owned; c->x->fn = (__lang_coro_h (*)(void*, int))fn;";
+      "  c->x->env = env; c->x->env_owned = owned; c->x->fn = (__lang_coro_h (*)(void*, __lang_coro_h))fn;";
       "  c->owner = pthread_self();";
       "  /* a new stack starts where a new thread starts: the default region, no";
       "     live blocks, no try_or, and bounds of its own (guard page below them) */";
@@ -11639,14 +11683,52 @@ let coro_runtime ~(stack_bytes : int) =
       "  if (!pthread_equal(to->owner, pthread_self()))";
       "    __lang_fail_impl(\"coro_switch: that coroutine belongs to another thread\");";
       "  if (to->state == 3) __lang_fail_impl(\"coro_switch: that coroutine has finished\");";
+      "  to->msg = 0;";
       "  if (to == __lang_coro_cur) return;";
       "  __lang_coro_switch_to(to);";
+      "  __lang_coro_cur->msg = 0;";
       "}";
       "";
-      "static __lang_coro_h __lang_coro_self(void) {";
+      "/* v0.1.561 (Q-184): the values. A coroutine receives what its OWN handle is";
+      "   typed to receive, so the one check is that `me` is the one running -- the";
+      "   typer has checked every sender against that type. The value is one word";
+      "   (codegen converts the scalar); it waits in the receiver's slot until the";
+      "   receiver reads it, which is the first thing it does on arriving. */";
+      "static __lang_coro_h __lang_coro_root_h(void) {";
       "  __lang_coro_enter_root();";
-      "  return __lang_coro_handle(__lang_coro_cur);";
-      "}" ]
+      "  return __lang_coro_handle(&__lang_coro_root);";
+      "}";
+      "static unsigned long long __lang_coro_take(__lang_coro_h me) {";
+      "  __lang_coro_enter_root();";
+      "  __lang_coro* c = __lang_coro_of(me);";
+      "  if (c != __lang_coro_cur) __lang_fail_impl(\"coro: a message is read by the coroutine it was sent to\");";
+      "  unsigned long long v = c->msg; c->msg = 0;";
+      "  return v;";
+      "}";
+      "static unsigned long long __lang_coro_transfer(__lang_coro_h th, unsigned long long v, __lang_coro_h me) {";
+      "  __lang_coro_enter_root();";
+      "  if (__lang_coro_of(me) != __lang_coro_cur)";
+      "    __lang_fail_impl(\"coro_transfer: the third argument must be the running coroutine\");";
+      "  __lang_coro* to = __lang_coro_of(th);";
+      "  if (!to) __lang_fail_impl(\"coro_transfer: that coroutine has finished\");";
+      "  if (!pthread_equal(to->owner, pthread_self()))";
+      "    __lang_fail_impl(\"coro_transfer: that coroutine belongs to another thread\");";
+      "  if (to->state == 3) __lang_fail_impl(\"coro_transfer: that coroutine has finished\");";
+      "  to->msg = v;";
+      "  if (to != __lang_coro_cur) __lang_coro_switch_to(to);";
+      "  __lang_coro* self = __lang_coro_cur;";
+      "  unsigned long long r = self->msg; self->msg = 0;";
+      "  return r;";
+      "}";
+      "static __lang_coro_h __lang_coro_exit(__lang_coro_h th, unsigned long long v) {";
+      "  __lang_coro_enter_root();";
+      "  __lang_coro* to = __lang_coro_of(th);";
+      "  if (!to || to->state == 3) __lang_fail_impl(\"coro_exit: that coroutine has finished\");";
+      "  to->msg = v;";
+      "  return th;";
+      "}";
+      "static unsigned long long __lang_coro_f2b(double d) { unsigned long long b; memcpy(&b, &d, 8); return b; }";
+      "static double __lang_coro_b2f(unsigned long long b) { double d; memcpy(&d, &b, 8); return d; }" ]
 
 (* v0.1.292: every closure env begins with this header, so `__mcopy` can copy an
    env it only knows as `void*` -- the copier moves out of the closure struct,

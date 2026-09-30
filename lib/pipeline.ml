@@ -425,6 +425,90 @@ let echo_rewrite (prog : Ast.program) : Ast.program =
     in
     { Ast.decls = List.map decl prog.Ast.decls; Ast.main = go prog.Ast.main }
 
+(* v0.1.561 (Q-184): `coro_new` is lowered here, before type-checking, into the
+   two forms every backend runs:
+
+     __coro_new_raw : (Coro['m] -> CoroExit) -> Coro['m]   the body is handed its
+                                                          own handle
+     __coro_msg     : Coro['m] -> 'm                       what was sent to it
+
+     coro_new (fn me -> fn m -> b)  =>  __coro_new_raw (fn me -> let m = __coro_msg me in b)
+     coro_new f                     =>  let k = f in __coro_new_raw (fn s -> k s (__coro_msg s))
+
+   WHY BEFORE THE TYPER, AND WHY THE FIRST FORM. A runtime that calls a curried
+   typed body would need one trampoline per message type on every compiled
+   backend; this way the runtime stays untyped and the message is read at its
+   type by ordinary code. The literal form makes no closure beyond the one the
+   user wrote -- a wrapper around their closure would copy its env on every
+   `coro_new`, which on C is the default-region growth v0.1.558 removed.
+
+   The old shape, a body of `fn () -> ..` that ended by returning the next
+   coroutine, is named as such: it would otherwise be a unification error about
+   an arrow nobody wrote. Scope is tracked as in `echo_rewrite`: a `coro_new` the
+   program binds itself is its own. *)
+let coro_rewrite (prog : Ast.program) : Ast.program =
+  let user_top =
+    List.concat_map (fun d ->
+      match d with
+      | Ast.Top_let (p, _) -> List.map fst (Query.pattern_bindings p)
+      | Ast.Top_let_rec bs -> List.map (fun (n, _, _) -> n) bs
+      | Ast.Top_forward (n, _, _) -> [ n ]
+      | _ -> []) (List.filter (fun d ->
+        match d with
+        | Ast.Top_let (_, (v : Ast.expr)) | Ast.Top_let_rec ((_, _, v) :: _) ->
+          v.Ast.loc.Loc.file <> Some prelude_file
+        | _ -> true) prog.Ast.decls)
+  in
+  if List.mem "coro_new" user_top then prog
+  else
+    let counter = ref 0 in
+    let fresh base = incr counter; Printf.sprintf "__%s%d" base !counter in
+    let rec go (e : Ast.expr) : Ast.expr =
+      Ast.rv_map_scoped ~shadow:[] (fun sh (x : Ast.expr) ->
+        let mk node = { Ast.loc = x.Ast.loc; ty = None; node } in
+        let var n = mk (Ast.Var n) in
+        let app f a = mk (Ast.App (f, a)) in
+        let raw body = app (var "__coro_new_raw") body in
+        let msg_of s = app (var "__coro_msg") (var s) in
+        let general (f : Ast.expr) =
+          let k = fresh "coro_body" and s = fresh "coro_self" in
+          mk (Ast.Let ({ Ast.ploc = x.Ast.loc; pnode = Ast.P_var k }, f,
+                raw (mk (Ast.Fun (s, None, app (app (var k) (var s)) (msg_of s))))))
+        in
+        match x.Ast.node with
+        | Ast.App ({ Ast.node = Ast.Var "coro_new"; _ }, arg) when not (List.mem "coro_new" sh) ->
+          (match arg.Ast.node with
+           | Ast.Fun (_, Some t, body)
+             when (match Ast.walk t with Ast.TyUnit -> true | _ -> false)
+                  && (match body.Ast.node with Ast.Fun _ -> false | _ -> true) ->
+             raise (Typer.Type_error (arg.Ast.loc,
+               "coro_new: a body is `fn me -> fn msg -> ..` since v0.1.561 -- it is handed \
+                its own handle and its first message, and it ends with `coro_exit next v` \
+                instead of returning the coroutine to run next"))
+           | Ast.Fun (me, me_ty, ({ Ast.node = Ast.Fun (m, m_ty, b); _ } as inner)) ->
+             let me' = if me = "_" then fresh "coro_self" else me in
+             let read = msg_of me' in
+             let read = match m_ty with
+               | Some t -> { read with Ast.node = Ast.Annot (read, t) }
+               | None -> read in
+             let pat = { Ast.ploc = inner.Ast.loc; pnode = Ast.P_var m } in
+             Some (raw { arg with Ast.node =
+                           Ast.Fun (me', me_ty, { inner with Ast.node = Ast.Let (pat, read, go b) }) })
+           | _ -> Some (general (go arg)))
+        | Ast.Var "coro_new" when not (List.mem "coro_new" sh) ->
+          (* as a value: the general form, under a lambda *)
+          let f = fresh "coro_fn" in
+          Some (mk (Ast.Fun (f, None, general (var f))))
+        | _ -> None) e
+    in
+    let decl d =
+      match d with
+      | Ast.Top_let (p, e) -> Ast.Top_let (p, go e)
+      | Ast.Top_let_rec bs -> Ast.Top_let_rec (List.map (fun (n, l, e) -> (n, l, go e)) bs)
+      | other -> other
+    in
+    { Ast.decls = List.map decl prog.Ast.decls; Ast.main = go prog.Ast.main }
+
 (* A syntax error, with what was actually there added to it.
 
    The hint is a `help:` line on the message, which is the same shape every
@@ -662,7 +746,7 @@ let parse_program ?(prelude = true) ?(keep_sugar = false) ?base_dir ?(search_pat
                      call is a formatter people stop running on broken files,
                      which is when they need it. *)
                   check_module_privacy p; check_file_privacy p;
-                  prefix_desugar (echo_rewrite p)))
+                  coro_rewrite (prefix_desugar (echo_rewrite p))))
                 { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls })
   in
   (* Tell the typer what this program declares, here rather than only when the

@@ -59,9 +59,11 @@ machine rather than a host.
 | `char_at` | yes | yes | yes | yes |
 | `chr` | yes | yes | yes | yes |
 | `clamp` | yes | yes | yes | yes |
+| `coro_exit` | yes | yes | refused | refused |
 | `coro_new` | yes | yes | refused | refused |
-| `coro_self` | yes | yes | refused | refused |
+| `coro_root` | yes | yes | refused | refused |
 | `coro_switch` | yes | yes | refused | refused |
+| `coro_transfer` | yes | yes | refused | refused |
 | `cos` | yes | yes | yes | yes |
 | `csr_read` | bare | refused | refused | bare |
 | `csr_write` | bare | refused | refused | bare |

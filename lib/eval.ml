@@ -194,6 +194,7 @@ and coro = {
   mutable co_depth : int;
   mutable co_stack : Ast.expr list;
   mutable co_region : int;
+  mutable co_msg : value;  (* v0.1.561: what was last sent to it, not yet read *)
 }
 and coro_state =
   | Co_new of value         (* the body, not yet started *)
@@ -3162,7 +3163,7 @@ type _ Effect.t += Coro_switch_eff : coro -> unit Effect.t
 
 let coro_fresh (st : coro_state) : coro =
   { co_owner = (Domain.self () :> int); co_state = st;
-    co_depth = 0; co_stack = []; co_region = 0 }
+    co_depth = 0; co_stack = []; co_region = 0; co_msg = V_unit }
 let coro_root_key : coro Domain.DLS.key =
   Domain.DLS.new_key (fun () -> coro_fresh Co_running)
 let coro_cur_key : coro Domain.DLS.key =
@@ -3179,11 +3180,12 @@ let coro_unpark (c : coro) =
 let coro_fail msg = raise (Eval_error (Loc.dummy, msg))
 
 let coro_start (c : coro) (body : value) : coro_step =
-  Effect.Deep.match_with (fun () -> !apply_value_ref body V_unit) ()
+  (* v0.1.561: the body is handed its own handle (see __coro_new_raw) *)
+  Effect.Deep.match_with (fun () -> !apply_value_ref body (V_coro c)) ()
     { Effect.Deep.retc = (fun v ->
         match v with
         | V_coro next -> Co_finished next
-        | _ -> failwith "coro: a body returned something that is not a Coro (BUG)");
+        | _ -> failwith "coro: a body returned something that is not a CoroExit (BUG)");
       exnc = (fun ex ->
         match ex with
         | Eval_error (loc, msg) -> raise (Coro_uncaught (loc, msg))
@@ -3232,26 +3234,82 @@ let coro_drive (root : coro) (first : coro) : unit =
   try go first
   with ex -> root.co_state <- Co_running; coro_unpark root; raise ex
 
+(* v0.1.561 (Q-184). The runtime is the same symmetric switch; what is new is the
+   slot each coroutine has for what was sent to it. `coro_new` is rewritten away
+   before this runs (Pipeline.coro_rewrite); it is here for the other entry points,
+   in the same two steps. *)
+let coro_check_target (who : string) (target : coro) =
+  if target.co_owner <> (Domain.self () :> int) then
+    coro_fail (who ^ ": that coroutine belongs to another thread");
+  (match target.co_state with
+   | Co_dead -> coro_fail (who ^ ": that coroutine has finished")
+   | _ -> ())
+
+(* hand the thread to `target`; returns when something hands it back *)
+let coro_go (me : coro) (target : coro) =
+  if target == me then ()
+  else if me == Domain.DLS.get coro_root_key then coro_drive me target
+  else Effect.perform (Coro_switch_eff target)
+
+let coro_take (me : coro) : value =
+  let v = me.co_msg in
+  me.co_msg <- V_unit;
+  v
+
+let builtin_coro_new_raw =
+  V_builtin ("__coro_new_raw", fun body -> V_coro (coro_fresh (Co_new body)))
+
+let builtin_coro_msg =
+  V_builtin ("__coro_msg", fun v ->
+    match v with
+    | V_coro me -> coro_take me
+    | _ -> failwith "__coro_msg: expected a Coro")
+
 let builtin_coro_new =
-  V_builtin ("coro_new", fun body -> V_coro (coro_fresh (Co_new body)))
+  V_builtin ("coro_new", fun f ->
+    V_coro (coro_fresh (Co_new (V_builtin ("coro_new_body", fun me ->
+      match me with
+      | V_coro c -> !apply_value_ref (!apply_value_ref f me) (coro_take c)
+      | _ -> failwith "coro_new: expected a Coro")))))
+
+let builtin_coro_transfer =
+  V_builtin ("coro_transfer", fun t ->
+    V_builtin ("coro_transfer_p1", fun v ->
+      V_builtin ("coro_transfer_p2", fun m ->
+        match t, m with
+        | V_coro target, V_coro me ->
+          if me != Domain.DLS.get coro_cur_key then
+            coro_fail "coro_transfer: the third argument must be the running coroutine";
+          coro_check_target "coro_transfer" target;
+          target.co_msg <- v;
+          coro_go me target;
+          coro_take me
+        | _ -> failwith "coro_transfer: expected a Coro")))
+
+let builtin_coro_exit =
+  V_builtin ("coro_exit", fun t ->
+    V_builtin ("coro_exit_p1", fun v ->
+      match t with
+      | V_coro target ->
+        coro_check_target "coro_exit" target;
+        target.co_msg <- v;
+        V_coro target
+      | _ -> failwith "coro_exit: expected a Coro"))
+
+let builtin_coro_root =
+  V_builtin ("coro_root", fun _ -> V_coro (Domain.DLS.get coro_root_key))
 
 let builtin_coro_switch =
   V_builtin ("coro_switch", fun v ->
     match v with
     | V_coro target ->
       let me = Domain.DLS.get coro_cur_key in
-      if target.co_owner <> (Domain.self () :> int) then
-        coro_fail "coro_switch: that coroutine belongs to another thread";
-      (match target.co_state with
-       | Co_dead -> coro_fail "coro_switch: that coroutine has finished"
-       | _ -> ());
-      if target == me then V_unit
-      else if me == Domain.DLS.get coro_root_key then (coro_drive me target; V_unit)
-      else (Effect.perform (Coro_switch_eff target); V_unit)
+      coro_check_target "coro_switch" target;
+      target.co_msg <- V_unit;
+      coro_go me target;
+      me.co_msg <- V_unit;
+      V_unit
     | _ -> failwith "coro_switch: expected a Coro")
-
-let builtin_coro_self =
-  V_builtin ("coro_self", fun _ -> V_coro (Domain.DLS.get coro_cur_key))
 
 (* coro_scan_ints c lo hi f: a superset of the integers in [lo, hi) that
    coroutine c's stack can reach. A stack here is an OCaml continuation (or
@@ -3860,8 +3918,12 @@ let initial_env : env =
     ("join", ref builtin_join);
     ("detach", ref builtin_detach);
     ("coro_new", ref builtin_coro_new);
+    ("__coro_new_raw", ref builtin_coro_new_raw);
+    ("__coro_msg", ref builtin_coro_msg);
+    ("coro_transfer", ref builtin_coro_transfer);
+    ("coro_exit", ref builtin_coro_exit);
+    ("coro_root", ref builtin_coro_root);
     ("coro_switch", ref builtin_coro_switch);
-    ("coro_self", ref builtin_coro_self);
     ("coro_scan_ints", ref builtin_coro_scan_ints);
     ("channel_new", ref builtin_channel_new);
     ("channel_send", ref builtin_channel_send);

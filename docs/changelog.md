@@ -4,6 +4,68 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.561 — 2026-10-01
+
+_A coroutine transfer carries a value, typed by the one that receives it (Q-184)._
+
+```
+coro_new      : (Coro['m] -> 'm -> CoroExit) -> Coro['m]
+coro_transfer : Coro['a] -> 'a -> Coro['b] -> 'b
+coro_exit     : Coro['a] -> 'a -> CoroExit
+coro_root     : unit -> Coro[unit]
+coro_switch   : Coro[unit] -> unit
+```
+
+A switch carried nothing, so both programs built on coroutines kept a mailbox
+beside it: mpoll_coro a table from fd to the event bits that woke it (and a
+second one to hand a pooled worker its fd), mere-ruby a global slot and a kind.
+Now `coro_transfer c v me` suspends `me`, resumes `c` with `v`, and returns
+what `me` is handed next; a body is handed its own handle and its first
+message, and ends with `coro_exit next v`.
+
+**It is typed, and that is why `coro_self` is gone.** `Coro['m]` is the type of
+what that coroutine receives. The `'b` a transfer returns is the `'m` of `me`,
+and the runtime checks that `me` is the one running -- so what arrives was
+checked, at the sender, against the receiver's own type: handles come only from
+`coro_new` (typed by the body) and `coro_root` (the thread's own stack, which
+receives `unit`). "The coroutine running now" has no type to check a sender
+against, so `coro_self` could not be kept; `coro_self` and the old body shape
+(`fn () -> ..` returning the coroutine to run next) are errors that say what to
+write instead. A `let` bound to `coro_new ..` is not generalised, like a
+channel, or one coroutine could be sent an int here and a bool there.
+`CoroExit` is the name of what a body returns rather than `Exit`, which is a
+name programs would want for themselves.
+
+**A message is a scalar for now** -- int, bool, float, unit or a Coro. It is one
+word in the runtime, read by the receiver with no copy. A boxed message would
+have to be copied into the receiver's region, and mere-ruby's Fibers run in the
+default region, so every resume would allocate there. move_check refuses
+anything else by name, and C and LLVM check again at the type they emit.
+
+How it is built: `coro_new` is rewritten before type-checking into two internal
+builtins -- a raw `coro_new` whose body is handed its handle, and a read of what
+was sent -- so the runtimes stay untyped and each backend reads the word back at
+its type with ordinary code; the literal `fn me -> fn m -> ..` form makes no
+closure beyond the user's (a wrapper would copy an env per coroutine, the
+default-region growth v0.1.558 removed). Interpreter, C and LLVM; Wasm and RV
+refuse each builtin by the name the program wrote.
+
+The two users, moved: **mpoll_coro** loses both tables -- a connection is a
+`Coro[int]` handed the bits that woke it, and a pooled worker is handed its next
+fd the same way (verify.sh: every mode, all checks). **mere-ruby** keeps its
+mailbox, because what a Fiber passes is a Ruby value and a Ruby value is not a
+scalar; its `coro_self` became `coro_root` (the only stack without an entry of
+its own is the main one), and a finished fiber's entry is dropped last, just
+before `coro_exit`. Its corpus (267/267) and core/fiber, thread, enumerator,
+lazy and threadgroup are unchanged. A million switches cost what they did
+(0.11 s, C -O2).
+
+`coro_check` has the values of each kind on three backends, the third argument
+that is not the one running, and the refusals: a `str` message, `coro_self`,
+the old shape, and a message type fixed once.
+
+---
+
 ## v0.1.560 — 2026-10-01
 
 _v0.1.559 is withdrawn: an inner function is region-polymorphic again._

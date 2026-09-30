@@ -65,12 +65,14 @@ let coro_runtime_llvm ~(stack_bytes : int) =
       "; program holds and is never freed: a finished coroutine is still a value, and";
       "; switching to it must fail by name. The large one -- the saved state -- is";
       "; freed when the coroutine is reaped, so a finished one costs 24 bytes.";
-      "%__lang_coro = type { i32, ptr, ptr }";
+      "%__lang_coro = type { i32, ptr, ptr, i64 }";
+      "; 3: v0.1.561, what was sent to it and not yet read (one word, whatever its type)";
       "%__lang_coro_x = type { [200 x i8], ptr, ptr, ptr, ptr, ptr, i32, i32, i32, [200 x i8], i64, i64, i32, ptr }";
       "; x:  0 jb   1 stack top   2 env   3 fn   4 current region   5 open blocks";
       ";     6 open-block count   7 its capacity   8 jmpbuf set   9 jmpbuf";
       ";    10 stack lo   11 stack hi   12 ListBuf depth   13 the allocation (null for a root)";
       "@__lang_coro_cur = internal thread_local global ptr null";
+      "@__lang_coro_root = internal thread_local global ptr null";
       "@__lang_coro_zombie = internal thread_local global ptr null";
       "@__lang_coro_pool = internal thread_local global ptr null";
       "@__lang_coro_pool_n = internal thread_local global i32 0";
@@ -81,6 +83,9 @@ let coro_runtime_llvm ~(stack_bytes : int) =
       "@__lang_coro_m_other = private constant { i64, [54 x i8] } { i64 53, [54 x i8] c\"coro_switch: that coroutine belongs to another thread\\00\" }";
       "@__lang_coro_m_done = private constant { i64, [41 x i8] } { i64 40, [41 x i8] c\"coro_switch: that coroutine has finished\\00\" }";
       "@__lang_coro_m_hand = private constant { i64, [68 x i8] } { i64 67, [68 x i8] c\"coro: a finished coroutine must hand over to another live coroutine\\00\" }";
+      "@__lang_coro_m_notme = private constant { i64, [64 x i8] } { i64 63, [64 x i8] c\"coro_transfer: the third argument must be the running coroutine\\00\" }";
+      "@__lang_coro_m_xdone = private constant { i64, [43 x i8] } { i64 42, [43 x i8] c\"coro_transfer: that coroutine has finished\\00\" }";
+      "@__lang_coro_m_edone = private constant { i64, [39 x i8] } { i64 38, [39 x i8] c\"coro_exit: that coroutine has finished\\00\" }";
       "@__lang_coro_m_hand2 = private constant { i64, [63 x i8] } { i64 62, [63 x i8] c\"coro: a finished coroutine named a coroutine of another thread\\00\" }";
       "declare ptr @calloc(i64, i64)";
       "declare i32 @posix_memalign(ptr, i64, i64)";
@@ -120,6 +125,7 @@ let coro_runtime_llvm ~(stack_bytes : int) =
       "  %me = call ptr @pthread_self()";
       "  store ptr %me, ptr %op";
       "  store ptr %r, ptr @__lang_coro_cur";
+      "  store ptr %r, ptr @__lang_coro_root";
       "  ret ptr %r";
       "done:";
       "  ret ptr %c";
@@ -311,7 +317,9 @@ let coro_runtime_llvm ~(stack_bytes : int) =
       "  %fp = getelementptr %__lang_coro_x, ptr %selfx, i32 0, i32 3";
       "  %env = load ptr, ptr %ep";
       "  %fn = load ptr, ptr %fp";
-      "  %next = call ptr %fn(ptr %env, i64 0)";
+      "  ; v0.1.561: the body is handed its own handle, and returns a CoroExit -- the";
+      "  ; coroutine coro_exit named and already gave the value to";
+      "  %next = call ptr %fn(ptr %env, ptr %self)";
       "  ; the body is over: every block it opened has closed and every try_or has";
       "  ; returned, so there is nothing to unwind -- only somewhere to go";
       "  %isnull = icmp eq ptr %next, null";
@@ -445,19 +453,91 @@ let coro_runtime_llvm ~(stack_bytes : int) =
       "  call void @__lang_fail_impl(ptr getelementptr inbounds ({ i64, [41 x i8] }, ptr @__lang_coro_m_done, i32 0, i32 1))";
       "  unreachable";
       "self:";
+      "  %tm = getelementptr %__lang_coro, ptr %to, i32 0, i32 3";
+      "  store i64 0, ptr %tm";
       "  %same = icmp eq ptr %to, %cur";
       "  br i1 %same, label %done, label %go";
       "go:";
       "  call void @__lang_coro_switch_to(ptr %to)";
+      "  %now = load ptr, ptr @__lang_coro_cur";
+      "  %nm = getelementptr %__lang_coro, ptr %now, i32 0, i32 3";
+      "  store i64 0, ptr %nm";
       "  br label %done";
       "done:";
       "  ret void";
       "}";
       "";
-      "define internal ptr @__lang_coro_self() {";
+      "; v0.1.561 (Q-184): the values. What a coroutine receives is typed by its own";
+      "; handle, so the one check is that `me` is the one running; the value waits in";
+      "; the receiver's slot until the receiver reads it on arriving.";
+      "define internal ptr @__lang_coro_root_h() {";
       "entry:";
       "  %c = call ptr @__lang_coro_enter_root()";
-      "  ret ptr %c";
+      "  %r = load ptr, ptr @__lang_coro_root";
+      "  ret ptr %r";
+      "}";
+      "";
+      "define internal i64 @__lang_coro_take(ptr %me) {";
+      "entry:";
+      "  %mp = getelementptr %__lang_coro, ptr %me, i32 0, i32 3";
+      "  %v = load i64, ptr %mp";
+      "  store i64 0, ptr %mp";
+      "  ret i64 %v";
+      "}";
+      "";
+      "define internal i64 @__lang_coro_transfer(ptr %to, i64 %v, ptr %me) {";
+      "entry:";
+      "  %cur = call ptr @__lang_coro_enter_root()";
+      "  %isme = icmp eq ptr %me, %cur";
+      "  br i1 %isme, label %chk, label %notme";
+      "notme:";
+      "  call void @__lang_fail_impl(ptr getelementptr inbounds ({ i64, [64 x i8] }, ptr @__lang_coro_m_notme, i32 0, i32 1))";
+      "  unreachable";
+      "chk:";
+      "  %to5 = getelementptr %__lang_coro, ptr %to, i32 0, i32 1";
+      "  %own = load ptr, ptr %to5";
+      "  %pt = call ptr @pthread_self()";
+      "  %mine = icmp eq ptr %own, %pt";
+      "  br i1 %mine, label %alive, label %other";
+      "other:";
+      "  call void @__lang_fail_impl(ptr getelementptr inbounds ({ i64, [54 x i8] }, ptr @__lang_coro_m_other, i32 0, i32 1))";
+      "  unreachable";
+      "alive:";
+      "  %to2 = getelementptr %__lang_coro, ptr %to, i32 0, i32 0";
+      "  %st = load i32, ptr %to2";
+      "  %dead = icmp eq i32 %st, 3";
+      "  br i1 %dead, label %finished, label %send";
+      "finished:";
+      "  call void @__lang_fail_impl(ptr getelementptr inbounds ({ i64, [43 x i8] }, ptr @__lang_coro_m_xdone, i32 0, i32 1))";
+      "  unreachable";
+      "send:";
+      "  %tm = getelementptr %__lang_coro, ptr %to, i32 0, i32 3";
+      "  store i64 %v, ptr %tm";
+      "  %same = icmp eq ptr %to, %cur";
+      "  br i1 %same, label %back, label %go";
+      "go:";
+      "  call void @__lang_coro_switch_to(ptr %to)";
+      "  br label %back";
+      "back:";
+      "  %now = load ptr, ptr @__lang_coro_cur";
+      "  %r = call i64 @__lang_coro_take(ptr %now)";
+      "  ret i64 %r";
+      "}";
+      "";
+      "define internal ptr @__lang_coro_exit(ptr %to, i64 %v) {";
+      "entry:";
+      "  %cur = call ptr @__lang_coro_enter_root()";
+      "  %to2 = getelementptr %__lang_coro, ptr %to, i32 0, i32 0";
+      "  %st = load i32, ptr %to2";
+      "  %dead = icmp eq i32 %st, 3";
+      "  br i1 %dead, label %finished, label %ok";
+      "finished:";
+      "  call void @__lang_fail_impl(ptr getelementptr inbounds ({ i64, [39 x i8] }, ptr @__lang_coro_m_edone, i32 0, i32 1))";
+      "  unreachable";
+      "ok:";
+      "  %tm = getelementptr %__lang_coro, ptr %to, i32 0, i32 3";
+      "  store i64 %v, ptr %tm";
+      "  ret ptr %to";
       "}";
       "";
       (* coro_scan_ints: this backend keeps no list of live blocks to read a
@@ -698,6 +778,34 @@ let file_pread_bytes_used_llvm = ref false
    main's parameter list — a module that never asks for argv keeps the
    `main()` signature it has always had. *)
 let args_used_llvm = ref false
+(* v0.1.561 (Q-184): a coroutine's message is one i64 in the runtime; these are the
+   two directions for the scalars move_check allows. *)
+let coro_word_bad loc t =
+  unsupported loc ("a coroutine message of type " ^ Ast.pp_ty t
+                   ^ " (int, bool, float, unit or a Coro for now)")
+let coro_to_word_llvm loc (t : Ast.ty) (v : string) : string =
+  let conv op from =
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = %s %s %s to i64" r op from v); r in
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyVar _ | Ast.TyParam _ -> v
+  | Ast.TyUnit -> "0"
+  | Ast.TyBool -> conv "zext" "i1"
+  | Ast.TyFloat -> conv "bitcast" "double"
+  | Ast.TyCon ("Coro", _) -> conv "ptrtoint" "ptr"
+  | t -> coro_word_bad loc t
+let coro_of_word_llvm loc (t : Ast.ty) (w : string) : string =
+  let conv op dst =
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = %s i64 %s to %s" r op w dst); r in
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyVar _ | Ast.TyParam _ -> w
+  | Ast.TyUnit -> "0"
+  | Ast.TyBool -> conv "trunc" "i1"
+  | Ast.TyFloat -> conv "bitcast" "double"
+  | Ast.TyCon ("Coro", _) -> conv "inttoptr" "ptr"
+  | t -> coro_word_bad loc t
+
 let coro_used_llvm = ref false  (* coro_new / coro_switch / coro_self -> coro_runtime_llvm *)
 (* binary file I/O: gated separately because the runtime references the
    mere_vec_int runtime (which is only emitted when an int vec is used). *)
@@ -927,7 +1035,7 @@ let rec llvm_ty_of (t : Ast.ty) : string =
      `ptr` could not be passed through one. The runtime converts at its
      own boundary. *)
   | Ast.TyCon ("File", _) -> "i64"
-  | Ast.TyCon ("Coro", _) -> "ptr"  (* a heap record, see coro_runtime_llvm *)
+  | Ast.TyCon (("Coro" | "CoroExit"), _) -> "ptr"  (* a heap record, see coro_runtime_llvm *)
   | Ast.TyTuple ts -> "%" ^ tuple_struct_name ts
   | Ast.TyRef _ -> "ptr"  (* `&R T` is a pointer into the region's buffer *)
   (* Q-012: ThreadHandle wraps a pthread_t (pointer-sized); Channel[T] is a
@@ -4685,7 +4793,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   (* Same-thread coroutines. The body closure is handed over as its two words;
      the runtime refuses one made inside a region block, whose env this
      backend cannot copy out (C can: its envs carry a copier). *)
-  | Ast.App ({ node = Ast.Var "coro_new"; _ }, clos) ->
+  | Ast.App ({ node = Ast.Var "__coro_new_raw"; _ }, clos) ->
     coro_used_llvm := true;
     let cl = emit_expr env clos in
     let cs =
@@ -4714,12 +4822,36 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  %s = extractvalue %%closure_int_unit %s, 1" fnr cl);
     emit_instr (Printf.sprintf "  call void @__lang_coro_scan_all(i64 %s, i64 %s, ptr %s, ptr %s)" l b envr fnr);
     "0"  (* unit *)
-  | Ast.App ({ node = Ast.Var "coro_self"; _ }, u) ->
+  (* v0.1.561 (Q-184): the values, one word in the runtime -- see coro_word_llvm *)
+  | Ast.App ({ node = Ast.Var "coro_root"; _ }, u) ->
     coro_used_llvm := true;
     ignore (emit_expr env u);
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call ptr @__lang_coro_self()" r);
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_coro_root_h()" r);
     r
+  | Ast.App ({ node = Ast.Var "__coro_msg"; _ }, me) ->
+    coro_used_llvm := true;
+    let m = emit_expr env me in
+    let w = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_coro_take(ptr %s)" w m);
+    coro_of_word_llvm e.Ast.loc (match e.Ast.ty with Some t -> t | None -> Ast.TyInt) w
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "coro_exit"; _ }, c_e); _ }, v_e) ->
+    coro_used_llvm := true;
+    let cv = emit_expr env c_e in
+    let vv = emit_expr env v_e in
+    let w = coro_to_word_llvm v_e.Ast.loc (match v_e.Ast.ty with Some t -> t | None -> Ast.TyInt) vv in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_coro_exit(ptr %s, i64 %s)" r cv w);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "coro_transfer"; _ }, c_e); _ }, v_e); _ }, me) ->
+    coro_used_llvm := true;
+    let cv = emit_expr env c_e in
+    let vv = emit_expr env v_e in
+    let w = coro_to_word_llvm v_e.Ast.loc (match v_e.Ast.ty with Some t -> t | None -> Ast.TyInt) vv in
+    let mv = emit_expr env me in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_coro_transfer(ptr %s, i64 %s, ptr %s)" r cv w mv);
+    coro_of_word_llvm e.Ast.loc (match e.Ast.ty with Some t -> t | None -> Ast.TyInt) r
   | Ast.App ({ node = Ast.Var "spawn"; _ }, clos) ->
     let cl = emit_expr env clos in
     let cs =

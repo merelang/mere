@@ -3,10 +3,10 @@
 // 1000 x 1000 rather than one loop of a million: at -O0 no backend turns the
 // recursion into a loop, and a million frames is a stack overflow, not a
 // measurement of switching.
-let root = coro_self ();
+let root = coro_root ();
 let rec inner = fn (i: int) -> if i == 0 then 0 else (let _ = coro_switch root in inner (i - 1));
 let rec outer = fn (j: int) -> if j == 0 then root else (let _ = inner 1000 in outer (j - 1));
-let c = coro_new (fn () -> try_or (fn (u) -> outer 1000) root);
+let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit ( try_or (fn (u) -> outer 1000) root) ());
 let rec drive_in = fn (i: int) -> if i == 0 then 0 else (let _ = coro_switch c in drive_in (i - 1));
 let rec drive = fn (j: int) -> if j == 0 then 0 else (let _ = drive_in 1000 in drive (j - 1));
 let _ = try_or (fn (u) -> let _ = drive 1000 in coro_switch c) ();

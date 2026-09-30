@@ -1,0 +1,8 @@
+// The third argument of coro_transfer names who is sending, and is what the
+// sender will be handed later; it must be the one running. Naming another is
+// what could make a coroutine receive a type it was not made for.
+let root = coro_root ();
+let a = coro_new (fn me -> fn (n: int) -> coro_exit root ());
+let b = coro_new (fn me -> fn (n: int) -> coro_exit root ());
+let _ = coro_transfer a 1 b;
+print "unreachable"
