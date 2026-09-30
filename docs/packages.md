@@ -292,6 +292,38 @@ so `--decls` sees the imported names as well and prints them on purpose — that
 output is for pasting, and they are in scope. Documentation is a different
 question.
 
+## How a package is checked: `[test]` + `mere test`
+
+```toml
+[test]
+run = ["sh verify.sh", "sh test/zlib_check.sh"]
+```
+
+`mere test` (v0.1.552) runs the `run` list of the nearest `mere.toml`, in
+order, from that file's directory. Without a list it runs `verify.sh` there --
+the convention most packages already follow -- and with neither it says so and
+exits 2. It is not a test framework: the checks are whatever the package
+already has, and `mere test` is where they are found and what their exit
+statuses mean.
+
+| exit status | class | meaning |
+|---|---|---|
+| 0 | PASS | |
+| 2 | CANNOT | the check could not answer (a tool it needs is missing) |
+| 3 | SKIP | the check is optional and was not run here |
+| 201 | TIMEOUT | the bound in `scripts/bounded.sh` |
+| anything else | FAIL | |
+
+`mere test` itself exits 1 if any check failed or timed out, 2 if any could not
+answer, 0 otherwise. Each command sees `MERE` and `MERE_BIN` (the compiler
+running it -- the variable most `verify.sh` files run) and, when that compiler
+is a checkout's build, `MERE_ROOT` (the checkout).
+
+A list and not a glob, for the reason `test/contrib_ctests.txt` gives: a check
+that should have been found and was not says nothing. To run many packages at
+once, or every gate of a CI workflow, and to compare a run with the last one,
+there is a gate runner written in Mere (mgate).
+
 ## Deliberate non-goals (for now)
 
 **No central registry**. `merelang.org`-hosted registry is planned

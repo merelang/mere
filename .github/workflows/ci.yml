@@ -1003,6 +1003,15 @@ jobs:
           sh scripts/doc_cmd_check.sh
           sh scripts/doc_cmd_check.sh --poison
 
+      # Q-169, the other half. `mere test` runs the [test] list in mere.toml
+      # (else verify.sh) and classes each exit status. The poison removes the
+      # list: the declared list must win over the convention.
+      - name: test_cmd_check (mere test runs what a package declares, in order)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/test_cmd_check.sh
+          sh scripts/test_cmd_check.sh --poison
+
       # Q-168. A program could be DIAGNOSED for running out of stack since
       # v0.1.271 but could not ask for more; the answer lived outside the build
       # in three different spellings. Both directions on both native backends,

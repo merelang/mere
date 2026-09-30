@@ -88,6 +88,11 @@ type manifest = { pkg_name : string; pkg_version : string;
                      what the host gives", which is what every manifest says
                      today and is never an error. *)
                   pkg_stack : string option;
+                  (* [test] run = ["sh verify.sh", ...] -- what `mere test`
+                     runs, in order (v0.1.552, Q-169). A list, not a glob, for
+                     the reason test/contrib_ctests.txt gives: a file that
+                     should have been found and was not is silent. *)
+                  test_run : string list;
                   deps : dep list;
                   host : (string * string) option (* (git, rev) *) }
 
@@ -114,6 +119,9 @@ let parse_manifest (content : string) : manifest =
   let section = ref "" in
   let pkg_name = ref "" and pkg_version = ref "0.0.0" and pkg_path = ref "" in
   let pkg_mere = ref "" and pkg_stack = ref "" in
+  let test_run = ref [] in
+  let str_item = Str.regexp "\"\\([^\"]*\\)\"" in
+  let run_line = Str.regexp "^[ \t]*run[ \t]*=[ \t]*\\[\\(.*\\)\\][ \t]*$" in
   let host_git = ref "" and host_rev = ref "" in
   let deps = ref [] in
   let simple_kv = Str.regexp "^[ \t]*\\([a-z_]+\\)[ \t]*=[ \t]*\"\\([^\"]*\\)\"" in
@@ -143,6 +151,15 @@ let parse_manifest (content : string) : manifest =
         else if k = "mere" then pkg_mere := v
         else if k = "stack" then pkg_stack := v
       end
+      else if !section = "test" && Str.string_match run_line line 0 then begin
+        let body = Str.matched_group 1 line in
+        let rec items pos acc =
+          match Str.search_forward str_item body pos with
+          | i -> items (i + String.length (Str.matched_string body)) (Str.matched_group 1 body :: acc)
+          | exception Not_found -> List.rev acc
+        in
+        test_run := items 0 []
+      end
       else if !section = "host" && Str.string_match simple_kv line 0 then begin
         let k = Str.matched_group 1 line and v = Str.matched_group 2 line in
         if k = "git" then host_git := v
@@ -157,6 +174,7 @@ let parse_manifest (content : string) : manifest =
     pkg_path = (if !pkg_path = "" then None else Some !pkg_path);
     pkg_mere = (if !pkg_mere = "" then None else Some !pkg_mere);
     pkg_stack = (if !pkg_stack = "" then None else Some !pkg_stack);
+    test_run = !test_run;
     deps = List.rev !deps; host }
 
 (* ---- the stack a program asks for (Q-168) -------------------------------
