@@ -88,6 +88,10 @@ let usage () =
   print_endline "                        comment block each was written under. The";
   print_endline "                        `--json` form is `--decls --json`, which";
   print_endline "                        carries `doc` on every value.";
+  print_endline "  mere test [dir]               run the package's checks: the `run` list";
+  print_endline "                        under [test] in mere.toml, else verify.sh.";
+  print_endline "                        Exit status per check: 0 PASS, 2 CANNOT,";
+  print_endline "                        3 SKIP, 201 TIMEOUT, else FAIL.";
   print_endline "  mere --features               the feature/version table this compiler";
   print_endline "                        holds: name, version, changelog probe";
   print_endline "  mere serve <file.wasm>        run a .wasm on the vendored Node host (.mere_host/)";
@@ -1144,6 +1148,72 @@ let () =
     run_action ~base_dir:base
       (says (Mere.Pipeline.docs_report ~base_dir:base ~search_paths:!search_paths))
       path source
+  (* Q-169, the other half: `mere test`. It finds the checks and runs them; it
+     is not a test framework. What to run is the `run` list under `[test]` in
+     the nearest mere.toml, in order; without one, the directory's verify.sh --
+     the convention 18 of the downstream repositories already follow. Each
+     command's exit status is a class, the one the gate runner (mgate) uses:
+     0 PASS, 2 CANNOT (it could not answer: a tool is missing), 3 SKIP
+     (declared optional), 201 TIMEOUT (scripts/bounded.sh), anything else
+     FAIL. The command sees MERE and MERE_BIN (this compiler) and, when this
+     compiler is a checkout's build, MERE_ROOT (the checkout).
+
+     Matched before `[_; path]`: without this arm `mere test` compiled a file
+     called `test`. *)
+  | [_; "test"] | [_; "test"; _] ->
+    let dir = match Array.to_list Sys.argv with [_; _; d] -> d | _ -> "." in
+    let dir = if Filename.is_relative dir then Filename.concat (Sys.getcwd ()) dir else dir in
+    let root, declared =
+      match Mere.Pkg_install.find_manifest dir with
+      | Some m ->
+        let parsed = (try Some (Mere.Pkg_install.parse_manifest (read_file m)) with _ -> None) in
+        (Filename.dirname m,
+         (match parsed with Some p -> p.Mere.Pkg_install.test_run | None -> []))
+      | None -> (dir, [])
+    in
+    let cmds =
+      if declared <> [] then declared
+      else if Sys.file_exists (Filename.concat root "verify.sh") then [ "sh verify.sh" ]
+      else []
+    in
+    if cmds = [] then begin
+      Printf.eprintf "mere test: nothing to run in %s -- no [test] run list in a mere.toml, and no verify.sh
+" root;
+      exit 2
+    end;
+    let exe =
+      let e = Sys.executable_name in
+      if Filename.is_relative e then Filename.concat (Sys.getcwd ()) e else e
+    in
+    (* <checkout>/_build/default/bin/mere.exe -> <checkout> *)
+    let checkout =
+      let d = Filename.dirname exe in
+      let up n p = let rec go n p = if n = 0 then p else go (n - 1) (Filename.dirname p) in go n p in
+      if Filename.basename d = "bin" && Filename.basename (up 2 d) = "_build" then Some (up 3 d) else None
+    in
+    let q = Filename.quote in
+    (* MERE is the compiler too, not the checkout: of the 21 downstream
+       repositories with checks, 12 verify.sh files run `$MERE` and 9 build
+       `$MERE/_build/...` (and now accept either). MERE_ROOT is the checkout,
+       when this compiler is a checkout's build. *)
+    let env =
+      "export MERE_BIN=" ^ q exe ^ " MERE=" ^ q exe ^ "; "
+      ^ (match checkout with Some c -> "export MERE_ROOT=" ^ q c ^ "; " | None -> "")
+    in
+    let classify = function
+      | 0 -> "PASS" | 2 -> "CANNOT" | 3 -> "SKIP" | 201 -> "TIMEOUT" | _ -> "FAIL" in
+    let results =
+      List.map (fun c ->
+        Printf.printf "mere test: %s\n%!" c;
+        let code = Sys.command ("cd " ^ q root ^ " && " ^ env ^ c) in
+        let st = classify code in
+        Printf.printf "  %s (exit %d)  %s\n%!" st code c;
+        st) cmds
+    in
+    let count s = List.length (List.filter (( = ) s) results) in
+    Printf.printf "mere test: %d run -- %d PASS, %d FAIL, %d TIMEOUT, %d CANNOT, %d SKIP\n"
+      (List.length results) (count "PASS") (count "FAIL") (count "TIMEOUT") (count "CANNOT") (count "SKIP");
+    exit (if count "FAIL" + count "TIMEOUT" > 0 then 1 else if count "CANNOT" > 0 then 2 else 0)
   (* Q-127 stage 1: which functions would take a hidden region argument, and which
      cannot. A measurement, not a compilation mode -- see Pipeline.region_param_report. *)
   | [_; "--dump-region-params"; path] ->

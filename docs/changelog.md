@@ -4,6 +4,38 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.552 — 2026-09-30
+
+_`mere test`: the checks a package declares, found and run._
+
+Q-169 had half an answer since v0.1.520: `mere doc` came in, `mere test` did
+not, because the question was the discovery convention (`*_test.mere`? a
+`tests/` directory?) rather than anything technical. The convention is now read
+off the packages that exist: of the downstream repositories with checks,
+eighteen have a `verify.sh` at their root, three have `*_test.mere` files, and
+none imports `contrib/test`. So:
+
+- `[test] run = ["sh verify.sh", ...]` in mere.toml is the list, run in order
+  from the manifest's directory -- a list and not a glob, as
+  `test/contrib_ctests.txt` is, because a check that should have been found and
+  was not says nothing
+- without a list, the directory's `verify.sh`; with neither, exit 2 and a line
+  saying so
+- each exit status is a class, the one the gate runner mgate uses: 0 PASS, 2 CANNOT, 3 SKIP, 201 TIMEOUT, else FAIL. `mere test` exits 1
+  on a FAIL or TIMEOUT, 2 on a CANNOT, 0 otherwise
+- each command sees `MERE` and `MERE_BIN` (this compiler) and, for a
+  checkout's build, `MERE_ROOT`. ⚠ The first version set `MERE` to the
+  checkout, on the belief that most `verify.sh` files take one: run over all
+  21 downstream repositories it turned 14 red with "is a directory". Counted,
+  12 run `$MERE` and 9 build `$MERE/_build/...`; the 9 accept either now
+
+Before this, `mere test` compiled a file called `test` -- the `[_; path]` arm
+took it. `scripts/test_cmd_check.sh` (CI) runs a fixture with one check per
+class and a `verify.sh` beside the list; its poison removes the list, and the
+check that the list ran in order is what goes red.
+
+---
+
 ## v0.1.551 — 2026-09-30
 
 _Four holes the dogfoods walked into: a record named like the prelude's `result`, a builtin passed as a value, a region captured from the wrong side of a lift, and a gate that could not run beside its own poison._
