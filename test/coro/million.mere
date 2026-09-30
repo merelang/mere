@@ -2,8 +2,8 @@
 // keeps is the small record the program's handle points at (24 bytes); its
 // saved state and its stack go back when it is reaped. scripts/coro_check.sh
 // bounds this program's resident memory.
-let root = coro_self ();
+let root = coro_root ();
 let rec go = fn (i: int) -> fn (acc: int) ->
   if i == 0 then acc
-  else (let c = coro_new (fn () -> root) in let _ = coro_switch c in go (i - 1) (acc + 1));
+  else (let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit ( root) ()) in let _ = coro_switch c in go (i - 1) (acc + 1));
 print_int (go 1000000 0)

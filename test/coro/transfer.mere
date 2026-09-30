@@ -1,0 +1,37 @@
+// v0.1.561 (Q-184): what a transfer carries, of each kind a message can be.
+// A generator and its consumer are both coroutines -- the root receives only
+// unit -- and the consumer sends how many it wants, the generator answers. A
+// float, a bool and a Coro each cross in a coroutine of their own (a
+// coroutine receives one type for its whole life). Transferring to one that
+// has finished is a fail by name, and a catchable one.
+let root = coro_root ();
+let cell = map_new ();   // where the generator finds the consumer
+let rec loop = fn (me: Coro[int]) -> fn (i: int) -> fn (want: int) ->
+  if want < 0 then coro_exit root ()
+  else (let got = coro_transfer (map_get cell 0) (i * 10 + want) me in loop me (i + 1) got);
+let gen = coro_new (fn me -> fn (first: int) -> loop me 0 first);
+let consumer = coro_new (fn me -> fn (_start: int) ->
+  let a = coro_transfer gen 1 me in
+  let b = coro_transfer gen 2 me in
+  let c = coro_transfer gen 3 me in
+  let _ = print_no_nl ("int: " ++ str_of_int a ++ " " ++ str_of_int b ++ " " ++ str_of_int c) in
+  coro_exit gen (0 - 1));
+let _ = map_set cell 0 consumer;
+let _ = coro_transfer consumer 0 root;
+let fl = coro_new (fn me -> fn (x: float) ->
+  let y = coro_transfer root () me in
+  let _ = print (", float: " ++ str_of_float (x + y)) in coro_exit root ());
+let _ = coro_transfer fl 1.5 root;
+let _ = coro_transfer fl 2.25 root;
+let bo = coro_new (fn me -> fn (p: bool) ->
+  let q = coro_transfer root () me in
+  let _ = print_no_nl (if p && (if q then false else true) then "bool: true then false" else "bool: wrong") in
+  coro_exit root ());
+let _ = coro_transfer bo true root;
+let _ = coro_transfer bo false root;
+// a Coro as the message: told where to go, it goes there
+let hop = coro_new (fn me -> fn (to: Coro[unit]) ->
+  let _ = print ", coro: hopped" in coro_exit to ());
+let _ = coro_transfer hop root root;
+let v = try_or (fn (u) -> let _ = coro_transfer consumer 0 root in 1) 0;
+print ("after the end: " ++ str_of_int v)

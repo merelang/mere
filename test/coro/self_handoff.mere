@@ -1,4 +1,4 @@
 // A body that ends by naming itself has nowhere to go.
-let b = coro_new (fn () -> coro_self ());
+let b = coro_new (fn me -> fn (_u: unit) -> coro_exit me ());
 let _ = coro_switch b;
 print "unreachable"

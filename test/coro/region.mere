@@ -1,12 +1,12 @@
 // A coroutine's allocations go to ITS current region, not to the block the
 // switching stack has open. Without the carry, B's string lands in main's block
 // R, R is released and recycled for Q, and B reads Q's bytes.
-let root = coro_self ();
-let b = coro_new (fn () ->
+let root = coro_root ();
+let b = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
   let s = str_repeat "B" 64 ++ "1" in
   let _ = coro_switch root in
   let _ = print (if s == str_repeat "B" 64 ++ "1" then "B: my string survived" else "B: my string is corrupted") in
-  root);
+  root) ());
 let r = region R { let _ = coro_switch b in str_len (str_repeat "m" 10) };
 let q = region Q { let t = str_repeat "Z" 4096 in let _ = coro_switch b in str_len t };
 print_int (r + q)

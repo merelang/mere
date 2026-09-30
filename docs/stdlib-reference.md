@@ -1012,34 +1012,58 @@ channel. `contrib/http/sse_native.mere` took the second route and says why.
 
 ---
 
-## Coroutines (v0.1.543)
+## Coroutines (v0.1.543; values v0.1.561)
 
 A coroutine is a second stack on the thread that made it. Nothing runs in
-parallel: `coro_switch` hands the thread over and comes back when something
-hands it back.
+parallel: a transfer hands the thread over, with a value, and comes back when
+something hands it back.
 
 | | type | |
 |---|---|---|
-| `coro_new` | `(unit -> Coro) -> Coro` | a suspended coroutine that will run the body; nothing runs yet |
-| `coro_switch` | `Coro -> unit` | run that coroutine until it switches back (or to someone else) |
-| `coro_self` | `unit -> Coro` | the coroutine running now; on a thread that never switched, its root |
+| `coro_new` | `(Coro['m] -> 'm -> CoroExit) -> Coro['m]` | a suspended coroutine; nothing runs yet. The body is handed its own handle and its first message |
+| `coro_transfer` | `Coro['a] -> 'a -> Coro['b] -> 'b` | `coro_transfer c v me`: suspend `me` (the one running), resume `c` with `v`; returns what `me` is handed next |
+| `coro_exit` | `Coro['a] -> 'a -> CoroExit` | how a body ends: `coro_exit c v` gives `c` the value `v`, and `c` runs when the body returns |
+| `coro_root` | `unit -> Coro[unit]` | the thread's own stack |
+| `coro_switch` | `Coro[unit] -> unit` | `coro_transfer c () <running>`, dropping what it is handed later |
+| `coro_scan_ints` | `Coro['m] -> int -> int -> (int -> unit) -> unit` | the integers in a range that a suspended stack can still reach (see Q-182) |
 
-The body's result is **who runs next**: a coroutine ends by handing the thread
-to another live one, usually the one that switched to it. There is no implicit
-parent to return to, because transfer is symmetric -- any coroutine may switch
-to any other.
+`'m` in `Coro['m]` is the type of what that coroutine **receives** -- its first
+message and everything it is handed after. Transfer is symmetric: there is no
+implicit parent to return to, and any coroutine may transfer to any other.
 
 ```
-let root = coro_self ();
-let gen = coro_new (fn () ->
-  let _ = print "one" in
-  let _ = coro_switch root in
-  let _ = print "two" in
-  root);
-let _ = coro_switch gen;   // prints one
-let _ = coro_switch gen;   // prints two; gen is finished
+let root = coro_root ();
+let cell = map_new ();   // where the generator finds its consumer
+let rec gen_loop = fn (me: Coro[int]) -> fn (i: int) -> fn (want: int) ->
+  if want < 0 then coro_exit root ()
+  else gen_loop me (i + 1) (coro_transfer (map_get cell 0) (i * 10 + want) me);
+let gen = coro_new (fn me -> fn (first: int) -> gen_loop me 0 first);
+let consumer = coro_new (fn me -> fn (_start: int) ->
+  let a = coro_transfer gen 1 me in    // 1
+  let b = coro_transfer gen 2 me in    // 12
+  let _ = print_int (a + b) in
+  coro_exit gen (0 - 1));
+let _ = map_set cell 0 consumer;
+let _ = coro_transfer consumer 0 root;  // prints 13
 0
 ```
+
+**Why the types hold.** What a coroutine receives is typed by its own handle:
+the `'b` of `coro_transfer` is the `'m` of `me`, and the runtime checks that
+`me` is the one running (a fail naming it otherwise). Handles come only from
+`coro_new`, which types one by its body, and `coro_root`, so everything that
+can send to a coroutine was checked against the type it receives. That is also
+why there is no `coro_self` (removed in v0.1.561): "the one running" has no
+type anyone could check it against. A body gets its own handle as its first
+argument instead. A `let` bound to `coro_new ..` is not generalised, as for a
+channel.
+
+**A message is a scalar for now**: `int`, `bool`, `float`, `unit` or a
+`Coro`. It travels in one word and the receiver needs no copy; anything boxed
+would have to be copied into the receiver's region, and a coroutine running in
+the default region would then allocate there on every resume. Send an index
+into something both sides can see. The root receives only `unit`, so a
+consumer that is handed values runs in a coroutine of its own (as above).
 
 What each stack keeps as its own: the current region, the blocks it has open,
 its innermost `try_or`, and (compiled) its stack bounds. So a `fail` inside a
@@ -1050,15 +1074,18 @@ stack that is not running. Uncaught, it ends the program, as on a thread.
 What is refused, and where:
 
 - `Coro` is neither Send nor Sync: a coroutine cannot be sent over a channel
-  or captured by `spawn` (type error). Switching to another thread's coroutine
-  is therefore not expressible.
+  or captured by `spawn` (type error). Transferring to another thread's
+  coroutine is therefore not expressible.
+- A message that is not a scalar is a type error naming it; so is the body
+  shape before v0.1.561 (`fn () -> ..` returning the coroutine to run next).
 - A body that captures a **container** made inside an open `region R { }` is
   a type error. The body's env is the coroutine's own copy -- the coroutine
   may run after the block has ended -- and a container's copy is the same
   handle. A captured value (a `str`, a record) is copied into the default
   region with it and is fine.
-- Switching to a finished coroutine, and a body that ends by naming itself or a
-  finished one, fail with a message (the first one catchably).
+- Transferring to a finished coroutine, naming a third argument that is not
+  the one running, and a body that ends by naming itself or a finished one,
+  fail with a message (the first one catchably).
 
 **What a finished coroutine keeps: nothing, on C** (v0.1.558). A handle is a
 slot and a generation, not an address: when a finished coroutine is reaped its
@@ -1067,11 +1094,12 @@ generation, and a handle from before still answers "has finished". A program
 that makes a coroutine per connection holds its peak of live ones, not every one
 it made -- measured flat over 100k connections. Two ways to keep it that way:
 
-- **Write the body as a lambda at the `coro_new`**: `coro_new (fn () -> serve
-  fd)`. That lambda's env is made as the coroutine's own. A closure made
-  elsewhere -- `coro_new (serve_curried fd)` -- is made where the currying
-  happens, in the current region, and outside a `region` block that is the
-  default one: the coroutine owns a copy, and the original stays.
+- **Write the body as a lambda at the `coro_new`**: `coro_new (fn me -> fn
+  bits -> serve me fd bits)`. That lambda's env is made as the coroutine's
+  own. A closure made elsewhere -- `coro_new (serve_curried fd)` -- is made
+  where the currying happens, in the current region, and outside a `region`
+  block that is the default one: the coroutine owns a copy, and the original
+  stays.
 - **Call saturated inside it** (`serve fd http`, not a partial application):
   a saturated call allocates nothing on C.
 
@@ -1106,7 +1134,8 @@ the numbers in that range the stack can reach, so the program can keep those
 entries.
 
 - A suspended coroutine is read from where it stopped; the running one
-  (`coro_self ()`) from the call up, its registers included. A finished or
+  (`coro_root ()` on the root, or the handle its body was given) from the call
+  up, its registers included. A finished or
   never-started one reaches nothing.
 - A word on the stack that points into a live block (only the part of a block
   that is allocated) is followed, and the 16 words from there are read the same

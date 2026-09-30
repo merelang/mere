@@ -1064,6 +1064,9 @@ let rec is_value (e : Ast.expr) : bool =
 let rec ty_mentions_mutable_container (t : Ast.ty) : bool =
   match Ast.walk t with
   | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "Channel" | "ListBuf"), _) -> true
+  (* v0.1.561: a coroutine's message type is fixed once, like a channel's element --
+     generalised, `let c = coro_new ..` could be sent an int here and a bool there *)
+  | Ast.TyCon ("Coro", _) -> true
   | Ast.TyCon (_, args) -> List.exists ty_mentions_mutable_container args
   | Ast.TyArrow (p, r) ->
     ty_mentions_mutable_container p || ty_mentions_mutable_container r
@@ -2015,10 +2018,13 @@ let () = Hashtbl.replace types "ListBuf" 2
    and `ThreadHandle` (arity 0, e.g. `let h : ThreadHandle = spawn (...)`). *)
 let () = Hashtbl.replace types "Channel" 1
 let () = Hashtbl.replace types "ThreadHandle" 0
-(* Q-181: `Coro` -- a coroutine: a stack of its own on THIS thread, entered by
-   coro_switch. Opaque, arity 0, neither Send nor Sync (it belongs to the thread
-   that made it; switching to it from another is refused at run time). *)
-let () = Hashtbl.replace types "Coro" 0
+(* Q-181: `Coro['m]` -- a coroutine: a stack of its own on THIS thread. Neither Send
+   nor Sync (it belongs to the thread that made it; switching to it from another is
+   refused at run time). v0.1.561 (Q-184): the parameter is the type of the messages
+   it RECEIVES -- see coro_transfer_scheme. `CoroExit` is what a body ends with, and
+   only `coro_exit` makes one. *)
+let () = Hashtbl.replace types "Coro" 1
+let () = Hashtbl.replace types "CoroExit" 0
 (* v0.1.59 (mgrep dogfood): File — an open read handle for streaming
    per-line file input (file_open / file_read_line / file_close). *)
 let () = Hashtbl.replace types "File" 0
@@ -2420,23 +2426,82 @@ let join_scheme =
    resources without waiting for it (pthread_detach on the C backend). *)
 let detach_scheme =
   mono (Ast.TyArrow (Ast.TyCon ("ThreadHandle", []), Ast.TyUnit))
-(* Q-181: coroutines. `coro_new body` makes a suspended coroutine; `body ()`
-   runs on the coroutine's own stack the first time something switches to it,
-   and the Coro it RETURNS is where control goes when it ends. `coro_switch c`
-   suspends the running coroutine and resumes c (symmetric: nothing returns to
-   the switcher unless someone switches back). `coro_self ()` is the running
-   one -- the thread's own stack is a coroutine too. No value slot: values
-   cross through whatever the program shares, since it is all one thread. *)
+(* Q-181: coroutines, and v0.1.561 (Q-184): the values they hand each other.
+
+     coro_new      : (Coro['m] -> 'm -> CoroExit) -> Coro['m]
+     coro_transfer : Coro['a] -> 'a -> Coro['b] -> 'b
+     coro_exit     : Coro['a] -> 'a -> CoroExit
+     coro_root     : unit -> Coro[unit]
+     coro_switch   : Coro[unit] -> unit
+
+   A body receives its own handle and its first message. `coro_transfer c v me`
+   suspends the running coroutine `me`, resumes `c` with `v`, and is what `me` is
+   handed when something transfers back. It is symmetric: nothing returns to the
+   sender unless someone transfers to it.
+
+   WHY THIS IS SOUND. What a coroutine receives is typed by its OWN handle: the
+   `'b` of `coro_transfer` is the `'m` of `me`, and the runtime checks that `me`
+   is the one running. A handle comes only from `coro_new` (which types it by the
+   body) or `coro_root` (the thread's own stack, `Coro[unit]`), so everything that
+   can send to a coroutine was checked against the type it receives. That is why
+   `coro_self` is gone: "the running one" has no type anyone could check it
+   against. `coro_switch c` sends `()` to a `Coro[unit]` and drops whatever it is
+   handed later, which is sound for the same reason.
+
+   A message is a SCALAR for now -- int, bool, float, unit or a Coro -- because it
+   travels in one machine word on the compiled backends and the receiver needs no
+   copy; move_check says so, and C and LLVM check again at the type they emit.
+   `coro_new` itself is rewritten before type-checking (Pipeline.coro_rewrite) into
+   `__coro_new_raw` and `__coro_msg`; its scheme here is what hover and the
+   reference show. *)
+let coro_ty (m : Ast.ty) = Ast.TyCon ("Coro", [m])
+let coro_exit_ty = Ast.TyCon ("CoroExit", [])
+let _coro_poly (k : Ast.ty list -> Ast.ty) (n : int) : scheme =
+  let vs = List.init n (fun _ -> fresh_var ()) in
+  { constraints = [];
+    quantified = List.map (function Ast.TyVar v -> v.id | _ -> assert false) vs;
+    body = k vs }
 let coro_new_scheme =
-  mono (Ast.TyArrow (Ast.TyArrow (Ast.TyUnit, Ast.TyCon ("Coro", [])),
-                     Ast.TyCon ("Coro", [])))
+  _coro_poly (function [m] ->
+    Ast.TyArrow (Ast.TyArrow (coro_ty m, Ast.TyArrow (m, coro_exit_ty)), coro_ty m)
+    | _ -> assert false) 1
+let coro_new_raw_scheme =
+  _coro_poly (function [m] ->
+    Ast.TyArrow (Ast.TyArrow (coro_ty m, coro_exit_ty), coro_ty m)
+    | _ -> assert false) 1
+let coro_msg_scheme =
+  _coro_poly (function [m] -> Ast.TyArrow (coro_ty m, m) | _ -> assert false) 1
+let coro_transfer_scheme =
+  _coro_poly (function [a; b] ->
+    Ast.TyArrow (coro_ty a, Ast.TyArrow (a, Ast.TyArrow (coro_ty b, b)))
+    | _ -> assert false) 2
+let coro_exit_scheme =
+  _coro_poly (function [a] ->
+    Ast.TyArrow (coro_ty a, Ast.TyArrow (a, coro_exit_ty)) | _ -> assert false) 1
+let coro_root_scheme = mono (Ast.TyArrow (Ast.TyUnit, coro_ty Ast.TyUnit))
 let coro_switch_scheme =
-  mono (Ast.TyArrow (Ast.TyCon ("Coro", []), Ast.TyUnit))
-let coro_self_scheme =
-  mono (Ast.TyArrow (Ast.TyUnit, Ast.TyCon ("Coro", [])))
+  mono (Ast.TyArrow (coro_ty Ast.TyUnit, Ast.TyUnit))
 let coro_scan_ints_scheme =
-  mono (Ast.TyArrow (Ast.TyCon ("Coro", []), Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt,
-          Ast.TyArrow (Ast.TyArrow (Ast.TyInt, Ast.TyUnit), Ast.TyUnit)))))
+  _coro_poly (function [m] ->
+    Ast.TyArrow (coro_ty m, Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt,
+      Ast.TyArrow (Ast.TyArrow (Ast.TyInt, Ast.TyUnit), Ast.TyUnit))))
+    | _ -> assert false) 1
+
+(* Every coroutine builtin, for the backends that refuse them by name, and the name
+   a program wrote for each (the two internal ones come from rewriting coro_new). *)
+let coro_builtins =
+  [ "coro_new"; "__coro_new_raw"; "__coro_msg"; "coro_transfer"; "coro_exit";
+    "coro_root"; "coro_switch"; "coro_scan_ints" ]
+let coro_source_name (n : string) : string =
+  if n = "__coro_new_raw" || n = "__coro_msg" then "coro_new" else n
+
+(* A message the compiled backends can carry in one word. A type variable passes
+   here: a polymorphic helper is checked again where it is instantiated. *)
+let coro_msg_ok (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool | Ast.TyFloat | Ast.TyUnit | Ast.TyVar _ | Ast.TyParam _ -> true
+  | Ast.TyCon ("Coro", _) -> true
+  | _ -> false
 
 let _chan_new_elem = fresh_var ()
 let channel_new_scheme =
@@ -2679,8 +2744,12 @@ let initial_env : env =
     ("join",         join_scheme);
     ("detach",       detach_scheme);
     ("coro_new",     coro_new_scheme);
+    ("__coro_new_raw", coro_new_raw_scheme);
+    ("__coro_msg",   coro_msg_scheme);
+    ("coro_transfer", coro_transfer_scheme);
+    ("coro_exit",    coro_exit_scheme);
+    ("coro_root",    coro_root_scheme);
     ("coro_switch",  coro_switch_scheme);
-    ("coro_self",    coro_self_scheme);
     ("coro_scan_ints", coro_scan_ints_scheme);
     ("channel_new",  channel_new_scheme);
     ("channel_send", channel_send_scheme);

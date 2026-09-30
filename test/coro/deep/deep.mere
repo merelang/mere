@@ -4,7 +4,7 @@
 type ilist = INil | ICons of int * ilist;
 let rec build = fn n -> if n == 0 then INil else ICons (n, build (n - 1));
 let rec total = fn lst -> match lst with | INil -> 0 | ICons (h, t) -> h + total t;
-let root = coro_self ();
-let c = coro_new (fn () -> let _ = print_int (total (build 2000000)) in root);
+let root = coro_root ();
+let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit ( let _ = print_int (total (build 2000000)) in root) ());
 let _ = coro_switch c;
 print "main: back"

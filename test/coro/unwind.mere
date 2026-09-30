@@ -2,15 +2,15 @@
 // main fails out of a try_or and unwinds ITS blocks. With one shared stack the
 // unwind releases B's R2 as well, the next blocks recycle it, and B reads
 // someone else's bytes.
-let root = coro_self ();
-let b = coro_new (fn () ->
+let root = coro_root ();
+let b = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
   let n = region R2 {
     let s = str_repeat "b" 32 ++ "!" in
     let _ = coro_switch root in
     if s == str_repeat "b" 32 ++ "!" then 1 else 0
   } in
   let _ = print (if n == 1 then "B: region R2 survived main's unwind" else "B: region R2 was released under me") in
-  root);
+  root) ());
 let m = try_or (fn (u) -> region R1 {
     let _ = coro_switch b in
     let _ = fail "unwind" in

@@ -1,15 +1,15 @@
 // 10000 coroutines suspended at once, each holding a string of its own, then
 // all resumed and finished. (Not 100k: each is two mappings, and Linux caps a
 // process at 65530.)
-type clist = CNil | CCons of Coro * clist;
-let root = coro_self ();
+type clist = CNil | CCons of Coro[unit] * clist;
+let root = coro_root ();
 let n = 10000;
 let rec mk = fn (i: int) -> fn (acc: clist) ->
   if i == n then acc
-  else (let c = coro_new (fn () ->
+  else (let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
           let s = "c" ++ str_of_int i in
           let _ = coro_switch root in
-          if s == "c" ++ str_of_int i then root else fail "a suspended coroutine lost its string") in
+          if s == "c" ++ str_of_int i then root else fail "a suspended coroutine lost its string") ()) in
         let _ = coro_switch c in
         mk (i + 1) (CCons (c, acc)));
 let rec fin = fn (l: clist) -> fn (k: int) -> match l with

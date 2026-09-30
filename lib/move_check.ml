@@ -202,11 +202,41 @@ let coro_capture (env : venv) (clos : Ast.expr) : unit =
       (free_vars clos)
   | _ -> ()
 
+(* v0.1.561 (Q-184): what a coroutine may be sent. One machine word on the compiled
+   backends, read by the receiver with no copy -- so a scalar, for now: int, bool,
+   float, unit or a Coro. A boxed message would have to be copied into the
+   receiver's region, and a coroutine that runs in the default region (mere-ruby's
+   Fibers do) would then allocate there on every resume. Checked at each use of a
+   builtin that moves one, at the type it was used at; a type variable is left to
+   the backend that sees it instantiated. *)
+let coro_msg_builtins = [ "coro_transfer"; "coro_exit"; "__coro_msg"; "__coro_new_raw"; "coro_new" ]
+
+let coro_msg_check (env : venv) (e : Ast.expr) : unit =
+  match e.Ast.node, e.Ast.ty with
+  | Ast.Var x, Some t when List.mem x coro_msg_builtins && List.assoc_opt x env = None ->
+    let rec walk (t : Ast.ty) =
+      match Ast.walk t with
+      | Ast.TyCon ("Coro", [ m ]) when not (Typer.coro_msg_ok m) ->
+        raise (Typer.Type_error (e.Ast.loc,
+          Printf.sprintf
+            "%s: a coroutine's messages are int, bool, float, unit or a Coro for now \
+             -- this one's are %s. Send an index into something both sides can see"
+            (if x = "__coro_new_raw" || x = "__coro_msg" then "coro_new" else x)
+            (Ast.pp_ty (Ast.walk m))))
+      | Ast.TyCon (_, args) -> List.iter walk args
+      | Ast.TyArrow (a, b) -> walk a; walk b
+      | Ast.TyTuple ts -> List.iter walk ts
+      | _ -> ()
+    in
+    walk t
+  | _ -> ()
+
 (* --- the flow traversal ---
    `go env consumed multi e` returns the consumed set after `e`.
    `multi` is true inside a closure / let rec body that may run more than
    once (relative to the moves it contains). *)
 let rec go (env : venv) (consumed : IS.t) (multi : bool) (e : Ast.expr) : IS.t =
+  coro_msg_check env e;
   match e.Ast.node with
   | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _
   | Ast.Str_lit _ | Ast.Unit_lit -> consumed
@@ -278,7 +308,8 @@ let rec go (env : venv) (consumed : IS.t) (multi : bool) (e : Ast.expr) : IS.t =
   (* spawn (fn () -> ...) : capture analysis (§B). *)
   | Ast.App ({ Ast.node = Ast.Var "spawn"; _ }, ({ Ast.node = Ast.Fun _; _ } as clos)) ->
     spawn_capture env consumed multi clos
-  | Ast.App ({ Ast.node = Ast.Var "coro_new"; _ }, arg) when List.assoc_opt "coro_new" env = None ->
+  | Ast.App ({ Ast.node = Ast.Var ("coro_new" | "__coro_new_raw" as n); _ }, arg)
+    when List.assoc_opt n env = None ->
     coro_capture env arg;
     go env consumed multi arg
   | Ast.App (f, arg) ->

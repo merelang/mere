@@ -24,3 +24,5 @@ __rv_access        internal: what `file_exists` asks on -rv (faccessat)
 __rv_open_wr       internal: what `write_file` opens with on -rv (openat O_WRONLY)
 __rv_write_all     internal: what `write_file` writes with on -rv
 __rv_substring_raw internal: the unchecked substring behind `substring`'s bounds refusal on -rv
+__coro_new_raw     internal: what `coro_new` is rewritten into before type-checking -- the body is handed its own handle
+__coro_msg         internal: the read of what was sent to a coroutine, in the body `coro_new` is rewritten into

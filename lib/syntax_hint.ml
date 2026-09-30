@@ -66,6 +66,10 @@ let foreign (n : string) : string option =
     Some "matching is `match x with | pat -> e | pat -> e`"
   | "elif" | "elsif" -> Some "chain with `else if`"
   | "return" -> Some "the last expression is the value; there is no `return`"
+  (* a builtin that was removed, not renamed (Deprecated is for renames) *)
+  | "coro_self" ->
+    Some "removed in v0.1.561: a coroutine's body is handed its own handle \
+          (`coro_new (fn me -> fn msg -> ..)`), and the thread's own stack is `coro_root ()`"
   | _ -> None
 
 (* For the TYPER, which sees the same words as unbound variables once they get
