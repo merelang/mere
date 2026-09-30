@@ -4,6 +4,47 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.557 — 2026-10-01
+
+_A closure that leaves its region block no longer reads freed memory: runtime retention (Q-188)._
+
+**A use-after-free that every check accepted.** A closure made inside
+`region R { }` and stored somewhere that outlives R kept pointing into R:
+
+```
+let o = vec_new ();
+let _ = region R { let v = vec_new () in let _ = vec_push v 700 in
+                   vec_push o (fn (u: int) -> vec_get v u) };
+... blocks that reuse the arena ...
+(vec_get o 0) 0     // interpreter: 700.  C: -1.  LLVM: segfault.
+```
+
+An arrow type names no region, so the escape check cannot see it. On C the
+closure's env was copied out (v0.1.290) but a captured Vec is a handle into R;
+on LLVM, which allocates an env in the current region and has no env copier,
+even a captured int read garbage. Found while planning Q-134, by reading the
+env copier, and confirmed by running it.
+
+**The fix is at run time, not in the types.** Every store of a value goes
+through a copier into the destination's region (`__mcopy_`). A container's
+copier -- still an identity, containers are handles -- now asks whether the
+container's region is a block younger than the destination; if so, the block
+is marked, and its release hands its memory to the destination instead of
+freeing it (or, when the destination is not a block open on this stack, to a
+region that is never freed). LLVM has no copier on that path, so a store of a
+value whose type holds a closure marks every open block above the destination
+-- conservative, and never unsafe. Wasm already kept a callee's allocations
+(Q-132) and reads the right values. **A wrong guess costs memory, never
+safety**: nothing depends on the types being precise.
+
+Measured: mere-ruby's corpus (267/267) and csv benchmark mark nothing, so its
+memory is unchanged by construction. `MERE_KEEP_TRACE=1` prints each block that
+is retained and where it went. `test/parity/region_closure_escape.mere` holds
+four backends to the interpreter's answer (v0.1.556's C prints -2);
+`test/escape/ROUTES` has the route, SAFE, Q-188.
+
+---
+
 ## v0.1.556 — 2026-09-30
 
 _Three small things the dogfoods walked into: `Vec[__heap, T]`, `let rec drop`, and a region block before `||`._

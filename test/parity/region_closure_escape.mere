@@ -1,0 +1,41 @@
+// A closure made inside `region R { }` and stored where it outlives R
+// (v0.1.557). The types cannot see this -- an arrow names no region -- and it
+// was a use-after-free on the compiled backends: C read R's arena for a captured
+// Vec after the next blocks reused it (-2 where the interpreter says 1401), and
+// LLVM, which allocates a closure's env in the current region and has no env
+// copier, read garbage for captured ints and segfaulted for a captured Vec.
+// Runtime retention keeps R's memory when a store needs it: the store marks the
+// block, and its release hands the memory to the destination.
+let o = vec_new ();
+let stash_vec = fn (k: int) ->
+  region R {
+    let v = vec_new () in
+    let _ = vec_push v (k * 100) in
+    let _ = vec_push v (k * 100 + 1) in
+    let _ = vec_push o (fn (u: int) -> vec_get v u) in
+    0
+  };
+let stash_int = fn (k: int) ->
+  region R2 {
+    let a = k * 10 in
+    let b = str_repeat "x" k in
+    let _ = vec_push o (fn (u: int) -> if u == 0 then a else str_len b) in
+    0
+  };
+let _ = stash_vec 7;
+let _ = stash_int 5;
+// reuse: blocks that fill arenas with other numbers
+let rec churn = fn (i: int) ->
+  if i == 200 then ()
+  else
+    let _ = region Q {
+      let w = vec_new () in
+      let rec fill = fn (j: int) -> if j == 64 then () else let _ = vec_push w (0 - 1) in fill (j + 1) in
+      let _ = fill 0 in
+      vec_len w } in
+    churn (i + 1);
+let _ = churn 0;
+let f = vec_get o 0;
+let g = vec_get o 1;
+let _ = print_int (f 0 + f 1);
+print_int (g 0 + g 1)
