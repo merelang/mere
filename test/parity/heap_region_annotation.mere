@@ -1,0 +1,17 @@
+// `Vec[__heap, T]` written out, in a record field and in an annotation
+// (v0.1.556, Q-185). The tutorial names `__heap` as the default region's marker
+// and `int Vec` expands to it, but the bracket form read only an UPPERCASE
+// first name as a region -- so this made a Vec whose region slot held a type
+// called `__heap`, which check and the interpreter accepted and the C backend
+// could not lower. And a region block is an operand (Q-187).
+type pk = { n: int, offs: Vec[__heap, int] };
+let mk = fn (k: int) ->
+  let offs = vec_new () in
+  let _ = vec_push offs k in
+  pk { n = k, offs = offs };
+let p = mk 3;
+let q = (vec_new () : Vec[__heap, int]);
+let _ = vec_push q 4;
+let small = fn (x: bool) -> region R { str_len (str_repeat "a" 3) == 3 } && x;
+let _ = print_int (vec_get p.offs 0 + vec_get q 0);
+print_bool (small true || region S { str_len "ab" == 9 })

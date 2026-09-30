@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.556 — 2026-09-30
+
+_Three small things the dogfoods walked into: `Vec[__heap, T]`, `let rec drop`, and a region block before `||`._
+
+**`Vec[__heap, T]` is the default region's Vec, written out** (Q-185). The
+tutorial names `__heap` as that marker and `int Vec` expands to it, but the
+bracket form took only an UPPERCASE first name as a region -- so
+`Vec[__heap, int]` made a Vec whose region slot held a *type* called `__heap`.
+`mere check` and the interpreter accepted it; the C backend stopped at the
+`vec_new` that filled it ("missing Vec result type"), which is where mgit's pack
+table met it. `__heap` in that position is the region now.
+
+**A reserved word after `let rec` is named as one** (Q-186). `let rec drop =`
+said "expected 'ident = expr' after 'let rec'". v0.1.538 taught the pattern
+position to say "`drop` is a reserved word"; the name after `let rec` is not a
+pattern, so it never did, and two dogfoods a month apart walked into `drop`.
+
+**A region block is an operand** (Q-187). It is closed by its `}`, like a
+parenthesised expression, but it was parsed at the level of `let` and `if`, so
+`region R { e } || x` ended at the `}` and `|| x` was a syntax error. It is
+parsed as an atom now. `test/parity/heap_region_annotation.mere` has both.
+
+---
+
 ## v0.1.555 — 2026-09-30
 
 _A listener on a chosen address, bind(2) on a socket, the address a socket has, and the errno fd_* keeps._

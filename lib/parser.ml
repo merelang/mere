@@ -267,6 +267,20 @@ let is_primitive_type_name = function
   | "int" | "float" | "bool" | "str" | "bytes" | "unit" | "f64x2" | "u8x16" | "f32x4" -> true
   | _ -> false
 
+
+(* Q-186 (v0.1.556): `let rec drop = ...` said "expected 'ident = expr' after
+   'let rec'" -- the grammar, not the mistake. v0.1.538 taught the pattern
+   position to name a reserved word; the name after `let rec` is not a pattern,
+   so it never got the message, and `drop` (a Drop-trait keyword) was walked
+   into twice by dogfoods a month apart. *)
+let let_rec_name_error pos rest =
+  match rest with
+  | (p, tok) :: _ when Lexer.keyword_spelling tok <> None ->
+    let w = Option.get (Lexer.keyword_spelling tok) in
+    Parse_error (p, Printf.sprintf
+      "`%s` is a reserved word, so it cannot be a name here\nhelp: rename it, e.g. `%s_` or `my_%s`" w w w)
+  | _ -> Parse_error (pos, "expected 'ident = expr' after 'let rec'")
+
 let rec parse_program_internal tokens =
   let open Lexer in
   (* Reset transient parser state so failed earlier parses don't leak.
@@ -379,8 +393,14 @@ let rec parse_program_internal tokens =
         match toks with
         | (_, T_rbracket) :: rest -> List.rev acc, rest
         | (_, T_comma) :: rest -> parse_bracket_args acc rest
+        (* ⚠ `__heap` is a region too (Q-185, v0.1.556): the tutorial names it
+           as the default region's marker and `int Vec` expands to it, but this
+           arm took only an UPPERCASE first name -- so `Vec[__heap, int]` made
+           a Vec whose region slot held a TYPE named `__heap`, check and the
+           interpreter accepted it, and the C backend could not find the
+           region ("vec_new: missing Vec result type", mgit's pack table). *)
         | (_, T_ident rname) :: rest2
-          when starts_with_upper rname
+          when (starts_with_upper rname || rname = "__heap")
                && acc = [] ->
           (* Leading uppercase bare ident → treat as region name.
              Encode as TyRef marker. *)
@@ -612,8 +632,7 @@ let rec parse_program_internal tokens =
          mk pos (Ast.Let_rec (bindings, body)), toks
        | _ ->
          raise (Parse_error (pos_of toks, "expected 'in' after let rec binding")))
-    | (pos, T_let) :: (_, T_rec) :: _ ->
-      raise (Parse_error (pos, "expected 'ident = expr' after 'let rec'"))
+    | (pos, T_let) :: (_, T_rec) :: rest -> raise (let_rec_name_error pos rest)
     | (pos, T_let) :: rest_after_let ->
       (* Parse the pattern (P_var for the typical `let x = ...` case,
          or P_tuple / P_wild / P_unit for destructuring). *)
@@ -829,17 +848,11 @@ let rec parse_program_internal tokens =
        | (_, T_rbrace) :: rest ->
          mk pos (Ast.Region_loop (name, binder, body)), rest
        | _ -> raise (Parse_error (pos_of toks, "expected '}' to close region loop")))
-    | (pos, T_region) :: (_, T_ident name) :: (_, T_lbrace) :: rest ->
-      region_stack := name :: !region_stack;
-      let body, toks =
-        try expr rest
-        with ex -> region_stack := List.tl !region_stack; raise ex
-      in
-      region_stack := List.tl !region_stack;
-      (match toks with
-       | (_, T_rbrace) :: rest ->
-         mk pos (Ast.Region_block (name, body)), rest
-       | _ -> raise (Parse_error (pos_of toks, "expected '}' to close region block")))
+    (* Q-187 (v0.1.556): a region block is closed by its `}`, so it is an
+       operand like a parenthesised expression -- parsed in `atom_base`, and
+       handed there from here. As an arm of this level, `region R { e } || x`
+       ended at the `}` and the `|| x` was a syntax error. *)
+    | (_, T_region) :: (_, T_ident _) :: (_, T_lbrace) :: _ -> pipe toks
     | (pos, T_region) :: _ ->
       raise (Parse_error (pos, "expected 'NAME { body }' after 'region'"))
     | _ -> pipe toks
@@ -1284,6 +1297,17 @@ let rec parse_program_internal tokens =
     field_chain v rest
   and atom_base toks =
     match toks with
+    | (pos, T_region) :: (_, T_ident name) :: (_, T_lbrace) :: rest ->
+      region_stack := name :: !region_stack;
+      let body, toks =
+        try expr rest
+        with ex -> region_stack := List.tl !region_stack; raise ex
+      in
+      region_stack := List.tl !region_stack;
+      (match toks with
+       | (_, T_rbrace) :: rest ->
+         mk pos (Ast.Region_block (name, body)), rest
+       | _ -> raise (Parse_error (pos_of toks, "expected '}' to close region block")))
     | (pos, T_dyn) :: (_, T_ident trait) :: rest ->
       (* `dyn Trait e` — pack `e` into a trait object; sugar for a call to the
          auto-generated packer `Trait__pack e` (built directly as a Var so the
@@ -2520,8 +2544,7 @@ let rec parse_program_internal tokens =
            "`pub` must be followed by `let NAME = ...` or `let rec NAME = ...`"))
        | _ -> ());
       parse_decls decls rest_pub
-    | (pos, T_let) :: (_, T_rec) :: _ ->
-      raise (Parse_error (pos, "expected 'ident = expr' after 'let rec'"))
+    | (pos, T_let) :: (_, T_rec) :: rest -> raise (let_rec_name_error pos rest)
     | (pos, T_let) :: rest_after_let ->
       (* Parse the pattern (P_var, P_wild, P_tuple, P_unit, P_record, ...). *)
       let pat, rest = pattern rest_after_let in
