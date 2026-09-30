@@ -600,6 +600,7 @@ let uses_coro = ref false  (* coro_new / coro_switch / coro_self -> the coroutin
 let uses_audio = ref false  (* v0.1.314: audio_* -> SDL2 audio, push model *)
 let uses_filestat = ref false  (* v0.1.509: file_* -> stat(2) and friends *)
 let uses_fdio = ref false      (* v0.1.522: fd_* -> open(2) and friends *)
+let uses_proclimit = ref false (* v0.1.550: proc_* / file_flock -> rlimit, priority, flock *)
 let uses_file_io = ref false  (* v0.1.59: file_open / file_read_line / file_close *)
 let uses_int_of_str = ref false  (* v0.1.60: validating int parse *)
 let uses_write_file_bytes = ref false
@@ -6737,7 +6738,22 @@ let native_ffi_names =
        platform's constants on this side of the boundary. Bytes cross through
        the same arena tcp_read and tcp_write use. *)
     "fd_open"; "fd_read"; "fd_write"; "fd_close"; "fd_seek"; "fd_dup";
-    "fd_sync"; "fd_isatty"; "fd_pipe" ]
+    "fd_sync"; "fd_isatty"; "fd_pipe";
+    (* v0.1.550: resource limits, scheduling priority and advisory file locks.
+       Each is out of an `extern`'s reach for its own reason: getrlimit and
+       setrlimit move the limits through a `struct rlimit *`; getpriority and
+       setpriority take an id_t, an unsigned typedef that conflicts with the
+       `int` an emitted prototype carries; and flock(2) is declared in
+       <sys/file.h>, which an emitted program does not include. <sys/resource.h>
+       IS included (through <stdlib.h> and <sys/wait.h>), which is why those
+       four fail with "conflicting types" and not "undeclared". The platform's
+       numbers -- RLIMIT_*, PRIO_*, LOCK_*, RLIM_INFINITY -- stay on this side:
+       a resource is asked for by NAME, and the selector and lock bits are
+       contracts this file defines. *)
+    "proc_getrlimit"; "proc_rlimit_field"; "proc_setrlimit";
+    "proc_rlimit_resource"; "proc_rlimit_names"; "proc_rlim_const";
+    "proc_getpriority"; "proc_setpriority"; "proc_last_errno";
+    "file_flock" ]
 
 (* TLS externs. Not implemented natively yet (needs libssl FFI). Stubbed so
    a native build LINKS and plaintext connections work; referenced by the
@@ -7181,7 +7197,7 @@ let native_http_runtime ~tls =
            "  return -1;";
            "}" ]))
 
-let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio =
+let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
   String.concat "\n"
     [ "/* --- native FFI runtime: Wasm-style byte arena + POSIX TCP --- */";
       "#include <sys/socket.h>";
@@ -7813,6 +7829,262 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio =
              "  return n < 0 ? -1 : (long long)n;";
              "}" ]
        else "");
+      (if proclimit then
+         String.concat "\n"
+           [ "/* --- resource limits, scheduling priority, advisory locks (v0.1.550).";
+             "   Three walls again, one per call: getrlimit/setrlimit move the limits";
+             "   through a `struct rlimit *` (shape), getpriority/setpriority take an";
+             "   id_t, an unsigned typedef that conflicts with the `int` an emitted";
+             "   prototype carries (types), and flock(2) is declared in <sys/file.h>,";
+             "   which an emitted program does not include (header).";
+             "";
+             "   THE PLATFORM'S NUMBERS STAY ON THIS SIDE. RLIMIT_NOFILE is 8 on macOS";
+             "   and 7 on Linux, and RLIM_INFINITY is 2^63-1 on one and 2^64-1 on the";
+             "   other, so a caller that wrote either table down would be right on one";
+             "   host and quietly wrong on the other. A resource is therefore asked for";
+             "   by NAME -- the short names ruby's Process.getrlimit takes, \"CPU\",";
+             "   \"NOFILE\", ... in capitals -- and three contracts are defined here:";
+             "     a limit is an int >= 0, and -1 is RLIM_INFINITY, both directions;";
+             "     the priority selector is 0 process, 1 process group, 2 user;";
+             "     the lock bits are 1 shared, 2 exclusive, 4 non-blocking, 8 unlock.";
+             "   proc_rlimit_resource and proc_rlim_const hand out the platform's own";
+             "   numbers for a caller that has to SHOW them (ruby's Process::RLIMIT_*";
+             "   and Process::RLIM_INFINITY); nothing here takes one back.";
+             "";
+             "   ERRNO IS KEPT, ONCE, BY THE CALL THAT FAILED. The file_* and fd_*";
+             "   families answer -1 and leave errno alone. That cannot work here:";
+             "   getpriority answers -1 for a process whose priority IS -1, so failure";
+             "   is only visible in errno, and errno itself is gone by the time a Mere";
+             "   program can ask -- the next allocation may have called into libc.";
+             "   Every function below stores the errno of its own call (0 when it";
+             "   succeeded) in a per-thread slot, and proc_last_errno reads the slot.";
+             "   The number is the platform's; a caller that names it (EPERM, EINVAL)";
+             "   is reading this host's errno.h, as ruby's Errno classes do. */";
+             "#include <sys/resource.h>";
+             "#include <sys/file.h>";
+             "";
+             "static _Thread_local int __proc_errno = 0;";
+             "";
+             "static long long proc_last_errno(void) {";
+             "  return (long long)__proc_errno;";
+             "}";
+             "";
+             "/* The names ruby knows (process.c's rlimit_resource_name2int), each one";
+             "   present only where the platform defines it. The order is fixed, so";
+             "   proc_rlimit_names answers the same string on every run of one host. */";
+             "static const struct { const char* name; int res; } __rl_tab[] = {";
+             "#ifdef RLIMIT_AS";
+             "  { \"AS\", RLIMIT_AS },";
+             "#endif";
+             "#ifdef RLIMIT_CORE";
+             "  { \"CORE\", RLIMIT_CORE },";
+             "#endif";
+             "#ifdef RLIMIT_CPU";
+             "  { \"CPU\", RLIMIT_CPU },";
+             "#endif";
+             "#ifdef RLIMIT_DATA";
+             "  { \"DATA\", RLIMIT_DATA },";
+             "#endif";
+             "#ifdef RLIMIT_FSIZE";
+             "  { \"FSIZE\", RLIMIT_FSIZE },";
+             "#endif";
+             "#ifdef RLIMIT_MEMLOCK";
+             "  { \"MEMLOCK\", RLIMIT_MEMLOCK },";
+             "#endif";
+             "#ifdef RLIMIT_MSGQUEUE";
+             "  { \"MSGQUEUE\", RLIMIT_MSGQUEUE },";
+             "#endif";
+             "#ifdef RLIMIT_NICE";
+             "  { \"NICE\", RLIMIT_NICE },";
+             "#endif";
+             "#ifdef RLIMIT_NOFILE";
+             "  { \"NOFILE\", RLIMIT_NOFILE },";
+             "#endif";
+             "#ifdef RLIMIT_NPROC";
+             "  { \"NPROC\", RLIMIT_NPROC },";
+             "#endif";
+             "#ifdef RLIMIT_NPTS";
+             "  { \"NPTS\", RLIMIT_NPTS },";
+             "#endif";
+             "#ifdef RLIMIT_RSS";
+             "  { \"RSS\", RLIMIT_RSS },";
+             "#endif";
+             "#ifdef RLIMIT_RTPRIO";
+             "  { \"RTPRIO\", RLIMIT_RTPRIO },";
+             "#endif";
+             "#ifdef RLIMIT_RTTIME";
+             "  { \"RTTIME\", RLIMIT_RTTIME },";
+             "#endif";
+             "#ifdef RLIMIT_SBSIZE";
+             "  { \"SBSIZE\", RLIMIT_SBSIZE },";
+             "#endif";
+             "#ifdef RLIMIT_SIGPENDING";
+             "  { \"SIGPENDING\", RLIMIT_SIGPENDING },";
+             "#endif";
+             "#ifdef RLIMIT_STACK";
+             "  { \"STACK\", RLIMIT_STACK },";
+             "#endif";
+             "  { NULL, -1 }";
+             "};";
+             "";
+             "static int __rl_lookup(const char* name) {";
+             "  if (name == NULL) return -1;";
+             "  for (int i = 0; __rl_tab[i].name != NULL; i++)";
+             "    if (strcmp(__rl_tab[i].name, name) == 0) return __rl_tab[i].res;";
+             "  return -1;";
+             "}";
+             "";
+             "/* RLIMIT_<name> on this platform, or -1 when it has no such resource.";
+             "   Exact capitals: \"nofile\" is not a name, as it is not for ruby. */";
+             "static long long proc_rlimit_resource(const char* name) {";
+             "  return (long long)__rl_lookup(name);";
+             "}";
+             "";
+             "/* Every name this platform has, space-separated, in the table's order. */";
+             "static char* proc_rlimit_names(void) {";
+             "  size_t n = 0;";
+             "  for (int i = 0; __rl_tab[i].name != NULL; i++) n += strlen(__rl_tab[i].name) + 1;";
+             "  char* s = __lang_str_alloc(__lang_current_region, n == 0 ? 0 : n - 1);";
+             "  size_t k = 0;";
+             "  for (int i = 0; __rl_tab[i].name != NULL; i++) {";
+             "    if (k > 0) s[k++] = ' ';";
+             "    size_t l = strlen(__rl_tab[i].name);";
+             "    memcpy(s + k, __rl_tab[i].name, l); k += l;";
+             "  }";
+             "  s[k] = 0;";
+             "  return s;";
+             "}";
+             "";
+             "/* RLIM_INFINITY / RLIM_SAVED_MAX / RLIM_SAVED_CUR as the platform";
+             "   defines them, in DECIMAL, because on Linux the value is 2^64-1 and does";
+             "   not fit an int; \"\" for a name the platform does not define. This is";
+             "   what ruby shows as Process::RLIM_*, and it is for showing: the limits";
+             "   themselves cross as -1. */";
+             "static char* proc_rlim_const(const char* name) {";
+             "  char buf[32]; buf[0] = 0;";
+             "  if (name != NULL) {";
+             "#ifdef RLIM_INFINITY";
+             "    if (strcmp(name, \"INFINITY\") == 0)";
+             "      snprintf(buf, sizeof buf, \"%llu\", (unsigned long long)RLIM_INFINITY);";
+             "#endif";
+             "#ifdef RLIM_SAVED_MAX";
+             "    if (strcmp(name, \"SAVED_MAX\") == 0)";
+             "      snprintf(buf, sizeof buf, \"%llu\", (unsigned long long)RLIM_SAVED_MAX);";
+             "#endif";
+             "#ifdef RLIM_SAVED_CUR";
+             "    if (strcmp(name, \"SAVED_CUR\") == 0)";
+             "      snprintf(buf, sizeof buf, \"%llu\", (unsigned long long)RLIM_SAVED_CUR);";
+             "#endif";
+             "  }";
+             "  size_t l = strlen(buf);";
+             "  char* s = __lang_str_alloc(__lang_current_region, l);";
+             "  memcpy(s, buf, l); s[l] = 0;";
+             "  return s;";
+             "}";
+             "";
+             "/* ONE SNAPSHOT, AND THE CALLER TAKES IT -- file_stat's rule. The soft and";
+             "   the hard limit come out of a single getrlimit(2), so they cannot come";
+             "   from two different moments. proc_getrlimit answers 0 or -1 (a name this";
+             "   platform lacks is -1 with EINVAL, which is what the kernel says about a";
+             "   resource number it does not know); proc_rlimit_field reads 0 soft /";
+             "   1 hard out of the snapshot and runs no syscall.";
+             "   A field is the limit, or -1 for RLIM_INFINITY, or -2 when there is no";
+             "   snapshot (the last proc_getrlimit failed) or the field is not 0 or 1.";
+             "   A finite limit above 2^63-1 -- representable on Linux, never handed";
+             "   out in practice -- is answered as 2^63-1 rather than wrapped negative. */";
+             "static _Thread_local struct rlimit __rl_snap;";
+             "static _Thread_local int __rl_ok = 0;";
+             "";
+             "static long long proc_getrlimit(const char* name) {";
+             "  int r = __rl_lookup(name);";
+             "  __rl_ok = 0;";
+             "  if (r < 0) { __proc_errno = EINVAL; return -1; }";
+             "  if (getrlimit(r, &__rl_snap) != 0) { __proc_errno = errno; return -1; }";
+             "  __rl_ok = 1; __proc_errno = 0;";
+             "  return 0;";
+             "}";
+             "";
+             "static long long __rl_out(rlim_t v) {";
+             "  if (v == RLIM_INFINITY) return -1;";
+             "  if ((unsigned long long)v > 9223372036854775807ULL) return 9223372036854775807LL;";
+             "  return (long long)v;";
+             "}";
+             "";
+             "static long long proc_rlimit_field(long long which) {";
+             "  if (!__rl_ok) return -2;";
+             "  if (which == 0) return __rl_out(__rl_snap.rlim_cur);";
+             "  if (which == 1) return __rl_out(__rl_snap.rlim_max);";
+             "  return -2;";
+             "}";
+             "";
+             "/* -1 is RLIM_INFINITY going in, as it is coming out; any other negative";
+             "   is -1 with EINVAL, and so is an unknown name. Answers 0 or -1. */";
+             "static long long proc_setrlimit(const char* name, long long cur, long long max) {";
+             "  int r = __rl_lookup(name);";
+             "  if (r < 0 || cur < -1 || max < -1) { __proc_errno = EINVAL; return -1; }";
+             "  struct rlimit rl;";
+             "  rl.rlim_cur = cur == -1 ? RLIM_INFINITY : (rlim_t)cur;";
+             "  rl.rlim_max = max == -1 ? RLIM_INFINITY : (rlim_t)max;";
+             "  if (setrlimit(r, &rl) != 0) { __proc_errno = errno; return -1; }";
+             "  __proc_errno = 0;";
+             "  return 0;";
+             "}";
+             "";
+             "/* 0 / 1 / 2 are PRIO_PROCESS / PRIO_PGRP / PRIO_USER. They happen to be";
+             "   those numbers on macOS and Linux both; the translation is here so that";
+             "   the contract does not depend on it. */";
+             "static int __prio_which(long long w) {";
+             "  if (w == 0) return PRIO_PROCESS;";
+             "  if (w == 1) return PRIO_PGRP;";
+             "  if (w == 2) return PRIO_USER;";
+             "  return -1;";
+             "}";
+             "";
+             "/* ⚠ -1 is a priority. getpriority(2) answers -1 both for a process at";
+             "   nice -1 and for a failure, and says which only through errno -- so";
+             "   errno is cleared first and stored after, and the result is whatever";
+             "   the call answered. A caller asks proc_last_errno, never the result. */";
+             "static long long proc_getpriority(long long which, long long who) {";
+             "  int w = __prio_which(which);";
+             "  if (w < 0) { __proc_errno = EINVAL; return -1; }";
+             "  errno = 0;";
+             "  int p = getpriority(w, (id_t)who);";
+             "  __proc_errno = errno;";
+             "  return (long long)p;";
+             "}";
+             "";
+             "static long long proc_setpriority(long long which, long long who, long long prio) {";
+             "  int w = __prio_which(which);";
+             "  if (w < 0) { __proc_errno = EINVAL; return -1; }";
+             "  if (setpriority(w, (id_t)who, (int)prio) != 0) { __proc_errno = errno; return -1; }";
+             "  __proc_errno = 0;";
+             "  return 0;";
+             "}";
+             "";
+             "/* flock(2). THREE ANSWERS, not two, because ruby's File#flock has three:";
+             "   0 locked (or unlocked), 1 REFUSED because the lock is held elsewhere and";
+             "   the caller asked not to wait (LOCK_NB -- ruby's `false`), and -1 any";
+             "   other failure, errno kept. The refusal is decided here and not by the";
+             "   caller comparing errno to EWOULDBLOCK: that is 35 on macOS and 11 on";
+             "   Linux, which is the kind of number this file exists to keep. A bit";
+             "   outside the four is EINVAL rather than passed through. An interrupted";
+             "   wait is retried, as ruby retries it. */";
+             "static long long file_flock(long long fd, long long op) {";
+             "  if (fd < 0) { __proc_errno = EBADF; return -1; }";
+             "  if (op & ~15LL) { __proc_errno = EINVAL; return -1; }";
+             "  int o = 0;";
+             "  if (op & 1) o |= LOCK_SH;";
+             "  if (op & 2) o |= LOCK_EX;";
+             "  if (op & 4) o |= LOCK_NB;";
+             "  if (op & 8) o |= LOCK_UN;";
+             "  int r;";
+             "  do { r = flock((int)fd, o); } while (r != 0 && errno == EINTR);";
+             "  if (r == 0) { __proc_errno = 0; return 0; }";
+             "  __proc_errno = errno;";
+             "  if ((op & 4) && (errno == EWOULDBLOCK || errno == EAGAIN)) return 1;";
+             "  return -1;";
+             "}" ]
+       else "");
       (if audio then
          "/* --- audio output (SDL2 audio, push model) — v0.1.314. No callback\n\
           \   into Mere: the device drains a queue, and the PROGRAM's job is to\n\
@@ -8085,7 +8357,7 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio =
 let () =
   native_ffi_runtime_fwd_text :=
     fun () -> native_ffi_runtime ~tls:true ~midi:true ~window:true ~audio:true
-                ~filestat:true ~fdio:true
+                ~filestat:true ~fdio:true ~proclimit:true
 
 let str_concat_helper =
   String.concat "\n"
@@ -13140,6 +13412,15 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     || Hashtbl.mem extern_fn_decls "fd_sync"
     || Hashtbl.mem extern_fn_decls "fd_isatty"
     || Hashtbl.mem extern_fn_decls "fd_pipe";
+  (* v0.1.550: declaring any proc_* limit/priority extern, or file_flock, pulls
+     in <sys/resource.h> and <sys/file.h>. The same cost model again: two
+     headers, no library, no build-line change. *)
+  uses_proclimit :=
+    List.exists (Hashtbl.mem extern_fn_decls)
+      [ "proc_getrlimit"; "proc_rlimit_field"; "proc_setrlimit";
+        "proc_rlimit_resource"; "proc_rlimit_names"; "proc_rlim_const";
+        "proc_getpriority"; "proc_setpriority"; "proc_last_errno";
+        "file_flock" ];
   strbuf_used := false;
   bytebuf_used := false;
   bytes_used := false;
@@ -14635,7 +14916,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       (if Hashtbl.fold (fun n _ acc -> acc || is_native_ffi n)
             extern_fn_decls false
        then native_ffi_runtime ~tls:!uses_tls ~midi:!uses_midi ~window:!uses_window
-              ~audio:!uses_audio ~filestat:!uses_filestat ~fdio:!uses_fdio ^ "\n"
+              ~audio:!uses_audio ~filestat:!uses_filestat ~fdio:!uses_fdio
+              ~proclimit:!uses_proclimit ^ "\n"
        else "");
       (* Q-012: concurrency runtime. `spawn` runs a `unit -> unit` closure on a
          fresh OS thread; the trampoline invokes the closure the same way the
