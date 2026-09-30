@@ -17,7 +17,7 @@
 # fails returns 0, the same value C uses for a clean end of stream. Distinguishing
 # them means decoding WASI's stream-error variant rather than its is-error bit.
 #
-# Skips (exit 0) without a C compiler, or without the Wasm component toolchain
+# Exits 3 (optional, not run) without a C compiler, or without the Wasm component toolchain
 # (wasm-tools + wasmtime + the WASI adapter).
 #
 # Usage:
@@ -31,14 +31,14 @@ PORT=${PORT:-7941}
 
 if ! command -v clang >/dev/null 2>&1 && ! command -v cc >/dev/null 2>&1; then
   echo "socket_parity: no C compiler — skipping (this check is optional)"
-  exit 0
+  exit 3
 fi
 CC=$(command -v clang || command -v cc)
 
 for tool in wasm-tools wasmtime; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "socket_parity: $tool not found — skipping (this check is optional)"
-    exit 0
+    exit 3
   fi
 done
 

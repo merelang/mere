@@ -27,7 +27,7 @@ BUDGETS=test/budget/BUDGETS
 PORT=${PORT:-8097}   # examples/nojs/server.mere listens here
 [ -x "$MERE" ] || { echo "budget: no compiler at $MERE (run dune build)"; exit 1; }
 for t in wat2wasm node curl; do
-  command -v "$t" >/dev/null 2>&1 || { echo "budget: SKIP (no $t)"; exit 0; }
+  command -v "$t" >/dev/null 2>&1 || { echo "budget: SKIP (no $t)"; exit 2; }
 done
 
 tmp=$(mktemp -d) || exit 1

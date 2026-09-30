@@ -34,9 +34,9 @@ BIN=${TMPDIR:-/tmp}/sse_native_gate.bin
 OUT=${TMPDIR:-/tmp}/sse_native_gate
 
 [ -x "$MERE" ] || { echo "sse_native: no compiler at $MERE (run dune build)"; exit 1; }
-command -v curl >/dev/null 2>&1 || { echo "sse_native: SKIP (no curl)"; exit 0; }
+command -v curl >/dev/null 2>&1 || { echo "sse_native: SKIP (no curl)"; exit 2; }
 CC=${CC:-cc}
-command -v "$CC" >/dev/null 2>&1 || { echo "sse_native: SKIP (no $CC)"; exit 0; }
+command -v "$CC" >/dev/null 2>&1 || { echo "sse_native: SKIP (no $CC)"; exit 2; }
 
 rm -rf "$OUT"; mkdir -p "$OUT"
 "$MERE" -c "$SRC" > "$OUT/server.c" 2>"$OUT/compile.err" || {

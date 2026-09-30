@@ -31,7 +31,7 @@
 # stated where it is printed: the harness confirms every label we claim maps
 # where we say it does, and it cannot discover a label we forgot to list.
 #
-# Skips (exit 0) when node is absent, so it stays out of the dependency set.
+# Exits 2 (could not answer) when node is absent, so it stays out of the dependency set.
 #
 # Usage:
 #   sh scripts/encoding_parity.sh
@@ -51,13 +51,13 @@ set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
 
-command -v node >/dev/null 2>&1 || { echo "encoding_parity: node absent, skipping"; exit 0; }
+command -v node >/dev/null 2>&1 || { echo "encoding_parity: node absent, skipping"; exit 2; }
 [ -x "$MERE" ] || { echo "encoding_parity: $MERE not found — run 'dune build'" >&2; exit 1; }
 
 NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
 if [ "$NODE_MAJOR" -lt "$NODE_MIN" ]; then
   echo "encoding_parity: node $(node -v) is below the v${NODE_MIN} floor, skipping"
-  exit 0
+  exit 2
 fi
 echo "encoding_parity: oracle is node $(node -v)"
 

@@ -28,7 +28,7 @@ PORT=${PORT:-8098}
 SRC=examples/authz/server.mere
 [ -x "$MERE" ] || { echo "authz_coverage: no compiler at $MERE (run dune build)"; exit 1; }
 for t in wat2wasm node curl; do
-  command -v "$t" >/dev/null 2>&1 || { echo "authz_coverage: SKIP (no $t)"; exit 0; }
+  command -v "$t" >/dev/null 2>&1 || { echo "authz_coverage: SKIP (no $t)"; exit 2; }
 done
 
 tmp=$(mktemp -d) || exit 1

@@ -42,7 +42,7 @@ MERE=${MERE:-./_build/default/bin/mere.exe}
 EXPECTED=test/wasm_stubs/EXPECTED
 [ -x "$MERE" ] || { echo "wasm_stub: no compiler at $MERE (run dune build)"; exit 1; }
 for t in clang wat2wasm node; do
-  command -v "$t" >/dev/null 2>&1 || { echo "wasm_stub: SKIP (no $t)"; exit 0; }
+  command -v "$t" >/dev/null 2>&1 || { echo "wasm_stub: SKIP (no $t)"; exit 2; }
 done
 
 # --poison: four ways this gate could go quiet, each checked by the MESSAGE it

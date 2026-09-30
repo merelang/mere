@@ -23,7 +23,7 @@
 # gate, and saying so because a gate named "render agreement" reads as if it
 # covered the whole of rendering.
 #
-# Skips (exit 0) without wat2wasm or node, the way window_check.sh skips without
+# Exits 2 (could not answer) without wat2wasm or node, the way window_check.sh skips without
 # SDL: an external toolchain is not a reason to fail a build.
 #
 # Usage: sh scripts/render_agreement_check.sh
@@ -31,8 +31,8 @@ set -u
 
 MERE=${MERE:-./_build/default/bin/mere.exe}
 [ -x "$MERE" ] || { echo "render_agreement: no compiler at $MERE (run dune build)"; exit 1; }
-command -v wat2wasm >/dev/null 2>&1 || { echo "render_agreement: SKIP (no wat2wasm)"; exit 0; }
-command -v node     >/dev/null 2>&1 || { echo "render_agreement: SKIP (no node)"; exit 0; }
+command -v wat2wasm >/dev/null 2>&1 || { echo "render_agreement: SKIP (no wat2wasm)"; exit 2; }
+command -v node     >/dev/null 2>&1 || { echo "render_agreement: SKIP (no node)"; exit 2; }
 
 tmp=$(mktemp -d) || exit 1
 trap 'rm -rf "$tmp"' EXIT

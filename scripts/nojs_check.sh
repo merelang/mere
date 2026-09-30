@@ -29,7 +29,7 @@ PORT=${PORT:-8097}
 SRC=examples/nojs/server.mere
 [ -x "$MERE" ] || { echo "nojs: no compiler at $MERE (run dune build)"; exit 1; }
 for t in wat2wasm node curl; do
-  command -v "$t" >/dev/null 2>&1 || { echo "nojs: SKIP (no $t)"; exit 0; }
+  command -v "$t" >/dev/null 2>&1 || { echo "nojs: SKIP (no $t)"; exit 2; }
 done
 
 tmp=$(mktemp -d) || exit 1

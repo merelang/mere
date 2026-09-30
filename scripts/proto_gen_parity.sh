@@ -19,7 +19,7 @@
 # Unicode tables and the host matrix: a generator whose output nobody reads is a
 # generator nobody can review.
 #
-# Skips (exit 0) without protoc.
+# Exits 2 (could not answer) without protoc.
 #
 # Usage:
 #   sh scripts/proto_gen_parity.sh
@@ -28,7 +28,7 @@ set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
 
-command -v protoc >/dev/null 2>&1 || { echo "proto_gen_parity: protoc absent, skipping"; exit 0; }
+command -v protoc >/dev/null 2>&1 || { echo "proto_gen_parity: protoc absent, skipping"; exit 2; }
 [ -x "$MERE" ] || { echo "proto_gen_parity: $MERE not found — run 'dune build'" >&2; exit 1; }
 echo "proto_gen_parity: oracle is $(protoc --version)"
 

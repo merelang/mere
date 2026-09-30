@@ -14,7 +14,7 @@
 # match. Checked by making the runtime's readback a no-op — 3072 of 3072 pixels
 # then differ.
 #
-# Skips (exit 0) when SDL2 is absent, the way qemu_virt.sh skips without QEMU:
+# Exits 3 (optional, not run) when SDL2 is absent, the way qemu_virt.sh skips without QEMU:
 # this is a capability with an external dependency, not a reason to fail a build.
 #
 # Usage:
@@ -33,7 +33,7 @@ CC="${CC:-clang}"; command -v "$CC" >/dev/null 2>&1 || CC=cc
 command -v "$CC" >/dev/null 2>&1 || { echo "window_check: no C compiler" >&2; exit 0; }
 command -v sdl2-config >/dev/null 2>&1 || {
   echo "window_check: sdl2-config not found — skipping (this check is optional)"
-  exit 0
+  exit 3
 }
 
 TMP="${TMPDIR:-/tmp}/mere_window.$$"; mkdir -p "$TMP"; trap 'rm -rf "$TMP"' EXIT

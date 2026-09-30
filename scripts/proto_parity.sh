@@ -38,7 +38,7 @@
 # becomes 64-bit, THIS SCRIPT BREAKS and says so. A gate that cannot detect its
 # own repair leaves a claim in the tree that stopped being true.
 #
-# Skips (exit 0) when protoc is absent, so protoc stays out of the dependency
+# Exits 2 (could not answer) when protoc is absent, so protoc stays out of the dependency
 # set for building mere.
 #
 # Usage:
@@ -48,7 +48,7 @@ set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
 
-command -v protoc >/dev/null 2>&1 || { echo "proto_parity: protoc absent, skipping"; exit 0; }
+command -v protoc >/dev/null 2>&1 || { echo "proto_parity: protoc absent, skipping"; exit 2; }
 [ -x "$MERE" ] || { echo "proto_parity: $MERE not found — run 'dune build'" >&2; exit 1; }
 
 echo "proto_parity: oracle is $(protoc --version)"

@@ -40,8 +40,8 @@ cd "$ROOT"
 MERE=${MERE:-$ROOT/_build/default/bin/mere.exe}
 [ -x "$MERE" ] || { echo "tty_raw_check: $MERE not found — run dune build first" >&2; exit 1; }
 CC=$(command -v clang || command -v cc || true)
-[ -n "$CC" ] || { echo "tty_raw_check: no C compiler — skipping"; exit 0; }
-command -v python3 >/dev/null 2>&1 || { echo "tty_raw_check: no python3 (needs one to open a pty) — skipping"; exit 0; }
+[ -n "$CC" ] || { echo "tty_raw_check: no C compiler — skipping"; exit 2; }
+command -v python3 >/dev/null 2>&1 || { echo "tty_raw_check: no python3 (needs one to open a pty) — skipping"; exit 2; }
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT

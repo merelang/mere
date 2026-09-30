@@ -32,7 +32,7 @@
 #   * we miss a rule we do NOT claim                 — DOCUMENTED-GAP, and the rule
 #     must be on the list below; a listed rule that never fires is STALE and fails
 #
-# Skips (exit 0) without node or graphql-js.
+# Exits 2 (could not answer) without node or graphql-js.
 #
 # Usage:
 #   sh scripts/graphql_validate_parity.sh
@@ -42,14 +42,14 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
 
 [ -x "$MERE" ] || { echo "graphql_validate_parity: $MERE not found — run 'dune build'" >&2; exit 1; }
-command -v node >/dev/null 2>&1 || { echo "graphql_validate_parity: node absent, skipping"; exit 0; }
+command -v node >/dev/null 2>&1 || { echo "graphql_validate_parity: node absent, skipping"; exit 2; }
 GQL_DIR=""
 for cand in "$ROOT/node_modules/graphql" "$(npm root -g 2>/dev/null)/graphql"; do
   [ -f "$cand/package.json" ] && { GQL_DIR=$cand; break; }
 done
 if [ -z "$GQL_DIR" ]; then
   echo "graphql_validate_parity: the 'graphql' package was not found, skipping"
-  exit 0
+  exit 2
 fi
 GQL_VER=$(node -p "require('$GQL_DIR/package.json').version")
 echo "graphql_validate_parity: oracle is graphql-js $GQL_VER (node $(node -v))"

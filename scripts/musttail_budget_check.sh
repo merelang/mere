@@ -27,7 +27,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="$ROOT/_build/default/bin/mere.exe"
 [ -x "$MERE" ] || { echo "musttail_budget: $MERE not found — run 'dune build'" >&2; exit 1; }
-command -v clang >/dev/null 2>&1 || { echo "musttail_budget: SKIP — no clang, and only a real target backend can answer this"; exit 0; }
+command -v clang >/dev/null 2>&1 || { echo "musttail_budget: SKIP — no clang, and only a real target backend can answer this"; exit 2; }
 
 # The measured line, per architecture: the widest return, in 8-byte leaves, whose
 # `musttail` this target still forwards at -O0. Both were swept 1..20 on 2026-09-08

@@ -44,7 +44,12 @@ DATA="$ROOT/test/data/NormalizationTest.txt"
   exit 1; }
 
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+# The program has to sit in examples/ (its import is relative to it), so it is
+# named for this process and removed on any exit: under a fixed name a run that
+# was stopped left it behind, and it was committed once with this machine's
+# temp path in it; two runs at once would share it.
+PROBE="$ROOT/examples/.nf_conf_tmp_$$.mere"
+trap 'rm -rf "$TMP" "$PROBE" "$PROBE.bak"' EXIT INT TERM
 
 # Three columns out, one line each, so the Mere side reads a flat file and the
 # expected answers are a plain diff away.
@@ -54,7 +59,7 @@ awk -F';' '{ print $2 "|" $3 }' "$TMP/corpus.txt" \
 
 cases=$(wc -l < "$TMP/corpus.txt" | tr -d ' ')
 
-cat > "$ROOT/examples/.nf_conf_tmp.mere" <<'MERE'
+cat > "$PROBE" <<'MERE'
 import "../contrib/unicode/normalize.mere";
 
 let _hv = fn (b: int) ->
@@ -117,10 +122,10 @@ let rec _go = fn (lines: str list) ->
 
 let _ = _go (read_lines "CORPUS_PATH");
 MERE
-sed -i.bak "s|CORPUS_PATH|$TMP/corpus.txt|" "$ROOT/examples/.nf_conf_tmp.mere"
-rm -f "$ROOT/examples/.nf_conf_tmp.mere.bak"
-( ulimit -t 1800; "$MERE" "$ROOT/examples/.nf_conf_tmp.mere" ) > "$TMP/ours_raw.txt"
-rm -f "$ROOT/examples/.nf_conf_tmp.mere"
+sed -i.bak "s|CORPUS_PATH|$TMP/corpus.txt|" "$PROBE"
+rm -f "$PROBE.bak"
+( ulimit -t 1800; "$MERE" "$PROBE" ) > "$TMP/ours_raw.txt"
+rm -f "$PROBE"
 
 # The expected side is the file's own columns 2 and 3 as decimal code points, which
 # is what the Mere side prints, so normalise the hex to decimal here rather than

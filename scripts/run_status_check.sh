@@ -33,7 +33,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 [ -x "$MERE" ] || { echo "run_status_check: $MERE not found — run dune build first" >&2; exit 1; }
-command -v "$CC" >/dev/null 2>&1 || { echo "run_status_check: no C compiler — SKIP"; exit 0; }
+command -v "$CC" >/dev/null 2>&1 || { echo "run_status_check: no C compiler — SKIP"; exit 2; }
 
 cat > "$TMP/kill_self.sh" <<'SH'
 kill -9 $$

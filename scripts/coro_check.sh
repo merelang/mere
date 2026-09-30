@@ -39,7 +39,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 [ -x "$MERE" ] || { echo "coro: $MERE not built" >&2; exit 2; }
 CC="${CC:-clang}"; command -v "$CC" >/dev/null 2>&1 || CC=cc
-command -v "$CC" >/dev/null 2>&1 || { echo "coro: no C compiler — skipping"; exit 0; }
+command -v "$CC" >/dev/null 2>&1 || { echo "coro: no C compiler — skipping"; exit 2; }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 MODE="${1:-}"
 LIMIT="${LIMIT:-60}"

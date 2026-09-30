@@ -12,7 +12,7 @@
 # bound is 20x, which is far enough above 8 to survive a loaded machine and far
 # enough below 64 to fail the moment the environment scan comes back.
 #
-# Skips (exit 0) when python3 is missing (used for sub-second timing).
+# Exits 3 (optional, not run) when python3 is missing (used for sub-second timing).
 #
 # Usage:
 #   sh scripts/infer_scaling.sh
@@ -26,7 +26,7 @@ MAX_RATIO=20
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "infer_scaling: python3 not found — skipping (this check is optional)"
-  exit 0
+  exit 3
 fi
 
 if [ ! -x "$MERE" ]; then

@@ -24,7 +24,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 [ -x "$MERE" ] || { echo "threads_alloc: $MERE not built" >&2; exit 2; }
-CC="${CC:-clang}"; command -v "$CC" >/dev/null 2>&1 || { echo "threads_alloc: no clang — LLVM IR cannot be compiled here, skipping"; exit 0; }
+CC="${CC:-clang}"; command -v "$CC" >/dev/null 2>&1 || { echo "threads_alloc: no clang — LLVM IR cannot be compiled here, skipping"; exit 2; }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 MODE="${1:-}"
 fail=0

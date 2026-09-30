@@ -39,7 +39,7 @@ DIR="${MERE_DOWNSTREAM:-}"
 
 if [ -z "$DIR" ]; then
   echo "downstream_check: SKIP (set MERE_DOWNSTREAM=<dir of checkouts>) -- 0 of $(awk '$1 !~ /^#/ && NF && $3 == "compile"' "$TABLE" | wc -l | tr -d ' ') repos checked"
-  exit 0
+  exit 3
 fi
 
 fails=0; ran=0; skipped=0; deferred=0

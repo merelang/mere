@@ -29,10 +29,10 @@ BOUND="${COMPONENT_TIMEOUT:-120}"
 [ -x "$MERE" ] || { echo "component_parity: $MERE not found -- run 'dune build'" >&2; exit 1; }
 
 for t in wasm-tools wasmtime; do
-  command -v "$t" >/dev/null 2>&1 || { echo "component_parity: SKIP (no $t)"; exit 0; }
+  command -v "$t" >/dev/null 2>&1 || { echo "component_parity: SKIP (no $t)"; exit 3; }
 done
 adapter="${WASI_ADAPTER:-$(npm root -g 2>/dev/null)/@bytecodealliance/jco/lib/wasi_snapshot_preview1.command.wasm}"
-[ -f "$adapter" ] || { echo "component_parity: SKIP (no wasi command adapter; set WASI_ADAPTER)"; exit 0; }
+[ -f "$adapter" ] || { echo "component_parity: SKIP (no wasi command adapter; set WASI_ADAPTER)"; exit 3; }
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

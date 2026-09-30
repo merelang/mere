@@ -30,7 +30,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 [ -x "$MERE" ] || { echo "stack_request: $MERE not built" >&2; exit 2; }
 CC="${CC:-clang}"; command -v "$CC" >/dev/null 2>&1 || CC=cc
-command -v "$CC" >/dev/null 2>&1 || { echo "stack_request: no C compiler — skipping"; exit 0; }
+command -v "$CC" >/dev/null 2>&1 || { echo "stack_request: no C compiler — skipping"; exit 2; }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 fail=0
 # ⚠ Captured BEFORE anything runs: the refusal loop below uses `set -- $pair` to

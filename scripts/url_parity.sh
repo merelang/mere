@@ -24,7 +24,7 @@
 # For those, our set is what it is and this harness has nothing to say. They are
 # printed as SKIP so the gap is visible rather than implied.
 #
-# Skips (exit 0) when node is absent, so it stays out of the dependency set.
+# Exits 2 (could not answer) when node is absent, so it stays out of the dependency set.
 #
 # Usage:
 #   sh scripts/url_parity.sh
@@ -58,7 +58,7 @@ set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
 
-command -v node >/dev/null 2>&1 || { echo "url_parity: node absent, skipping"; exit 0; }
+command -v node >/dev/null 2>&1 || { echo "url_parity: node absent, skipping"; exit 2; }
 [ -x "$MERE" ] || { echo "url_parity: $MERE not found — run 'dune build'" >&2; exit 1; }
 
 NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
@@ -67,7 +67,7 @@ if [ "$NODE_MAJOR" -lt "$NODE_MIN" ]; then
   echo "            (needs >= v${NODE_MIN}; see the note at the top of this script"
   echo "             for the two answers that changed)"
   echo "url_parity: skipping"
-  exit 0
+  exit 2
 fi
 echo "url_parity: oracle is node $(node -v)"
 

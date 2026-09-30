@@ -22,7 +22,7 @@
 # turns this from "the binary behaves as expected" into a differential test
 # between two independent implementations of the same board.
 #
-# Skips (exit 0) when qemu-system-riscv32 is absent, so it can be wired into a
+# Exits 3 (optional, not run) when qemu-system-riscv32 is absent, so it can be wired into a
 # build without making QEMU a dependency.
 #
 # Usage:
@@ -39,7 +39,7 @@ QEMU=${QEMU:-qemu-system-riscv32}
 
 if ! command -v "$QEMU" >/dev/null 2>&1; then
   echo "qemu_virt: $QEMU not found — skipping (this check is optional)"
-  exit 0
+  exit 3
 fi
 
 if [ ! -x "$MERE" ]; then

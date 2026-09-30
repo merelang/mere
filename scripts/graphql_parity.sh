@@ -32,7 +32,7 @@
 # because a printer that loses something on the first pass and is stable
 # afterwards would otherwise pass.
 #
-# Skips (exit 0) when node or the graphql package is absent.
+# Exits 2 (could not answer) when node or the graphql package is absent.
 #
 # Usage:
 #   sh scripts/graphql_parity.sh
@@ -41,7 +41,7 @@ set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
 
-command -v node >/dev/null 2>&1 || { echo "graphql_parity: node absent, skipping"; exit 0; }
+command -v node >/dev/null 2>&1 || { echo "graphql_parity: node absent, skipping"; exit 2; }
 [ -x "$MERE" ] || { echo "graphql_parity: $MERE not found — run 'dune build'" >&2; exit 1; }
 
 # The oracle is a package, and a package has a version. It is looked for in the

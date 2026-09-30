@@ -33,7 +33,7 @@ set -u
 
 MERE=${MERE:-./_build/default/bin/mere.exe}
 [ -x "$MERE" ] || { echo "live_soundness: no compiler at $MERE (run dune build)"; exit 1; }
-command -v psql >/dev/null 2>&1 || { echo "live_soundness: SKIP (no psql)"; exit 0; }
+command -v psql >/dev/null 2>&1 || { echo "live_soundness: SKIP (no psql)"; exit 3; }
 
 TMP=$(mktemp -d) || exit 1
 started_own=no
@@ -53,10 +53,10 @@ if psql -h "$PGHOST_T" -p "$PGPORT_T" -U "$PGUSER_T" -l >/dev/null 2>&1; then
   :
 else
   for t in initdb pg_ctl createdb; do
-    command -v "$t" >/dev/null 2>&1 || { echo "live_soundness: SKIP (no server at $PGHOST_T:$PGPORT_T and no $t)"; exit 0; }
+    command -v "$t" >/dev/null 2>&1 || { echo "live_soundness: SKIP (no server at $PGHOST_T:$PGPORT_T and no $t)"; exit 3; }
   done
   initdb -D "$PGDATA_DIR" -U postgres --auth=trust > "$TMP/initdb.log" 2>&1 \
-    || { echo "live_soundness: SKIP (initdb failed: $(sed -n '1p' "$TMP/initdb.log" | cut -c1-70))"; exit 0; }
+    || { echo "live_soundness: SKIP (initdb failed: $(sed -n '1p' "$TMP/initdb.log" | cut -c1-70))"; exit 2; }
   pg_ctl -D "$PGDATA_DIR" -o "-p $PGPORT_T -k $PGDATA_DIR -c listen_addresses=127.0.0.1" \
          -l "$PGDATA_DIR/server.log" start > "$TMP/pgstart.log" 2>&1 \
     || { echo "live_soundness: FAIL — postgres did not start"; sed -n '1,5p' "$PGDATA_DIR/server.log"; exit 1; }

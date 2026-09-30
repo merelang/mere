@@ -28,7 +28,7 @@
 set -u
 
 DIR=test/migration
-command -v psql >/dev/null 2>&1 || { echo "migration_check: SKIP (no psql)"; exit 0; }
+command -v psql >/dev/null 2>&1 || { echo "migration_check: SKIP (no psql)"; exit 3; }
 
 TMP=$(mktemp -d) || exit 1
 started_own=no
@@ -46,10 +46,10 @@ if psql -h "$PGHOST_T" -p "$PGPORT_T" -U "$PGUSER_T" -l >/dev/null 2>&1; then
   :
 else
   for t in initdb pg_ctl; do
-    command -v "$t" >/dev/null 2>&1 || { echo "migration_check: SKIP (no server at $PGHOST_T:$PGPORT_T and no $t)"; exit 0; }
+    command -v "$t" >/dev/null 2>&1 || { echo "migration_check: SKIP (no server at $PGHOST_T:$PGPORT_T and no $t)"; exit 3; }
   done
   initdb -D "$PGDATA_DIR" -U postgres --auth=trust > "$TMP/initdb.log" 2>&1 \
-    || { echo "migration_check: SKIP (initdb failed: $(sed -n '1p' "$TMP/initdb.log" | cut -c1-60))"; exit 0; }
+    || { echo "migration_check: SKIP (initdb failed: $(sed -n '1p' "$TMP/initdb.log" | cut -c1-60))"; exit 2; }
   pg_ctl -D "$PGDATA_DIR" -o "-p $PGPORT_T -k $PGDATA_DIR -c listen_addresses=127.0.0.1" \
          -l "$PGDATA_DIR/server.log" start > "$TMP/pgstart.log" 2>&1 \
     || { echo "migration_check: FAIL — postgres did not start"; sed -n '1,5p' "$PGDATA_DIR/server.log"; exit 1; }

@@ -23,7 +23,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT" || exit 2
 MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 [ -x "$MERE" ] || { echo "lsp_binding_position: no compiler at $MERE" >&2; exit 1; }
-command -v python3 >/dev/null 2>&1 || { echo "lsp_binding_position: SKIP (no python3)"; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo "lsp_binding_position: SKIP (no python3)"; exit 2; }
 
 MERE="$MERE" python3 - "${1:-}" <<'PY'
 import json, os, re, subprocess, sys

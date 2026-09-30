@@ -15,7 +15,7 @@
 # between two runs of one program, not between this program and a story about
 # what a sequential one would do.
 #
-# Skips (exit 0) without a C compiler or curl.
+# Exits 2 (could not answer) without a C compiler or curl.
 set -e
 
 MERE=${MERE:-./_build/default/bin/mere.exe}
@@ -24,9 +24,9 @@ PORT=${PORT:-18901}
 DELAY=${DELAY:-400}
 N=${N:-8}
 
-command -v curl >/dev/null 2>&1 || { echo "http_concurrency_check: no curl -- skipping"; exit 0; }
+command -v curl >/dev/null 2>&1 || { echo "http_concurrency_check: no curl -- skipping"; exit 2; }
 if ! command -v clang >/dev/null 2>&1 && ! command -v cc >/dev/null 2>&1; then
-  echo "http_concurrency_check: no C compiler -- skipping"; exit 0
+  echo "http_concurrency_check: no C compiler -- skipping"; exit 2
 fi
 CC=$(command -v clang || command -v cc)
 
@@ -41,7 +41,7 @@ now() { perl -MTime::HiRes=time -e 'printf "%.3f", time'; }
 
 "$MERE" -c "$ROOT/test/http/concurrent.mere" > "$WORK/c.c"
 $CC -O1 -o "$WORK/srv" "$WORK/c.c" -lm 2>"$WORK/cc.log" \
-  || { echo "http_concurrency_check: link failed -- skipping"; sed -n '1,5p' "$WORK/cc.log"; exit 0; }
+  || { echo "http_concurrency_check: link failed -- skipping"; sed -n '1,5p' "$WORK/cc.log"; exit 2; }
 
 # $1 = workers -> prints the wall-clock seconds for N concurrent requests
 burst() {

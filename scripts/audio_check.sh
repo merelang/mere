@@ -14,7 +14,7 @@ MERE="$ROOT/_build/default/bin/mere.exe"
 CC="${CC:-cc}"
 [ -x "$MERE" ] || { echo "audio_check: $MERE not found — run 'dune build'" >&2; exit 1; }
 command -v "$CC" >/dev/null 2>&1 || { echo "audio_check: no C compiler" >&2; exit 0; }
-command -v sdl2-config >/dev/null 2>&1 || { echo "audio_check: no sdl2-config — skipping" >&2; exit 0; }
+command -v sdl2-config >/dev/null 2>&1 || { echo "audio_check: no sdl2-config — skipping" >&2; exit 3; }
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

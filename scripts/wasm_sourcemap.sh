@@ -16,7 +16,7 @@
 # shifts everything after it — and nothing but disassembling the result and
 # looking will catch that.
 #
-# Skips (exit 0) when wabt or node are missing, like the other optional checks.
+# Exits 3 (optional, not run) when wabt or node are missing, like the other optional checks.
 #
 # Usage:
 #   sh scripts/wasm_sourcemap.sh
@@ -28,7 +28,7 @@ MERE=${MERE:-./_build/default/bin/mere.exe}
 for tool in wat2wasm wasm-objdump node; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "wasm_sourcemap: $tool not found — skipping (this check is optional)"
-    exit 0
+    exit 3
   fi
 done
 
