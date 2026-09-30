@@ -40,7 +40,7 @@ if [ ! -x "$MERE" ]; then
 fi
 if ! command -v "$CC" >/dev/null 2>&1; then
   echo "ctest: no C compiler ($CC) on PATH — skipping" >&2
-  exit 0
+  exit 2
 fi
 
 if [ $# -gt 0 ]; then

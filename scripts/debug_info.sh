@@ -10,7 +10,7 @@
 # breakpoint that resolves to `app.mere:8` is the evidence; the emitted text
 # looking right is not.
 #
-# Skips (exit 0) when clang or lldb are missing.
+# Exits 3 (optional, not run) when clang or lldb are missing.
 #
 # Usage:
 #   sh scripts/debug_info.sh
@@ -22,7 +22,7 @@ MERE=${MERE:-./_build/default/bin/mere.exe}
 for tool in clang lldb; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "debug_info: $tool not found — skipping (this check is optional)"
-    exit 0
+    exit 3
   fi
 done
 

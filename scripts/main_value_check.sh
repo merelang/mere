@@ -38,7 +38,7 @@ mkdir -p "$tmp"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 have() { command -v "$1" >/dev/null 2>&1; }
-have clang || { echo "main_value: clang not found — skipping"; exit 0; }
+have clang || { echo "main_value: clang not found — skipping"; exit 2; }
 WASM=1
 { have wat2wasm && have node; } || WASM=0
 

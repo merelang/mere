@@ -22,7 +22,7 @@
 # both sides — they need source positions the parser does not carry, and that is a
 # stated gap, not an accident.
 #
-# Skips (exit 0) without node or the graphql package.
+# Exits 2 (could not answer) without node or the graphql package.
 #
 # Usage:
 #   sh scripts/graphql_exec_parity.sh
@@ -31,13 +31,13 @@ set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
 
-command -v node >/dev/null 2>&1 || { echo "graphql_exec_parity: node absent, skipping"; exit 0; }
+command -v node >/dev/null 2>&1 || { echo "graphql_exec_parity: node absent, skipping"; exit 2; }
 [ -x "$MERE" ] || { echo "graphql_exec_parity: $MERE not found — run 'dune build'" >&2; exit 1; }
 GQL_DIR=""
 for cand in "$ROOT/node_modules/graphql" "$(npm root -g 2>/dev/null)/graphql"; do
   [ -f "$cand/package.json" ] && { GQL_DIR=$cand; break; }
 done
-[ -n "$GQL_DIR" ] || { echo "graphql_exec_parity: 'graphql' not found, skipping"; exit 0; }
+[ -n "$GQL_DIR" ] || { echo "graphql_exec_parity: 'graphql' not found, skipping"; exit 2; }
 echo "graphql_exec_parity: oracle is graphql-js $(node -p "require('$GQL_DIR/package.json').version") (node $(node -v))"
 
 TMP=$(mktemp -d)

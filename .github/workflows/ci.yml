@@ -59,9 +59,11 @@ jobs:
   # found it was scripts/parity.sh: exactly one of these.
   #
   # One step per harness, so a red build names the gate rather than a log line.
-  # Every script here exits non-zero on a real failure and exits zero with a
-  # printed reason when a dependency is absent, so a green job means each step
-  # either passed or said why it did not run.
+  # A gate's exit status is its class (v0.1.554): 0 passed, 1 failed, 2 could
+  # not answer (a tool it needs is missing -- tool_preflight says the runner has
+  # them all, so here that is red), 3 optional and not run. The optional gates
+  # run through scripts/gate.sh, which turns 3 into 0 and says so, so a green
+  # job means each step passed or was optional and said it did not run.
   #
   # Linux only, and that is deliberate rather than a shortcut: development
   # happens on macOS, where these are run before every commit, so the two
@@ -437,11 +439,11 @@ jobs:
 
       - name: migration_check (a migration consumes every existing row)
         if: ${{ !cancelled() }}
-        run: sh scripts/migration_check.sh
+        run: sh scripts/gate.sh scripts/migration_check.sh
 
       - name: live_soundness (a write never leaves a read stale — judged by the database)
         if: ${{ !cancelled() }}
-        run: sh scripts/live_soundness_check.sh
+        run: sh scripts/gate.sh scripts/live_soundness_check.sh
 
       - name: render_purity (no view module reads the clock or the environment)
         if: ${{ !cancelled() }}
@@ -449,7 +451,7 @@ jobs:
 
       - name: cascade_catalog (the DDL parser vs pg_constraint)
         if: ${{ !cancelled() }}
-        run: sh scripts/cascade_catalog_check.sh
+        run: sh scripts/gate.sh scripts/cascade_catalog_check.sh
 
       - name: extern_host (which contrib modules a native binary can link)
         if: ${{ !cancelled() }}
@@ -562,7 +564,7 @@ jobs:
 
       - name: vectorize_check (clang vectorizes the emitted C)
         if: ${{ !cancelled() }}
-        run: sh scripts/vectorize_check.sh
+        run: sh scripts/gate.sh scripts/vectorize_check.sh
 
       - name: url_parity (vs node's URL)
         if: ${{ !cancelled() }}
@@ -760,7 +762,7 @@ jobs:
       # close. Sample correctness is the consumer's oracle, not this gate's.
       - name: audio_check (the audio queue's contract, headless)
         if: ${{ !cancelled() }}
-        run: sh scripts/audio_check.sh
+        run: sh scripts/gate.sh scripts/audio_check.sh
 
       # v0.1.509: the file_* metadata runtime. Every expectation is a value the
       # probe sets itself -- it chmods and reads the mode back, truncates and
@@ -1006,6 +1008,14 @@ jobs:
       # Q-169, the other half. `mere test` runs the [test] list in mere.toml
       # (else verify.sh) and classes each exit status. The poison removes the
       # list: the declared list must win over the convention.
+      # v0.1.554. No gate says it skipped and then exits 0: "passed" and "did
+      # not run" are different statuses (2 could not answer, 3 optional).
+      - name: skip_exit_check (no gate says it skipped and exits 0)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/skip_exit_check.sh
+          sh scripts/skip_exit_check.sh --poison
+
       - name: test_cmd_check (mere test runs what a package declares, in order)
         if: ${{ !cancelled() }}
         run: |
@@ -1057,7 +1067,7 @@ jobs:
 
       - name: socket_parity
         if: ${{ !cancelled() }}
-        run: sh scripts/socket_parity.sh
+        run: sh scripts/gate.sh scripts/socket_parity.sh
 
       # Three runtime sections exist only under `-w --component`, so the parity
       # harness -- which compiles with plain `-w` -- cannot reach them at all.
@@ -1066,11 +1076,11 @@ jobs:
       # rather than silently if that toolchain is absent.
       - name: component_parity (the component-only sections, run)
         if: ${{ !cancelled() }}
-        run: sh scripts/component_parity.sh
+        run: sh scripts/gate.sh scripts/component_parity.sh
 
       - name: tcp_read_codes
         if: ${{ !cancelled() }}
-        run: sh scripts/tcp_read_codes.sh
+        run: sh scripts/gate.sh scripts/tcp_read_codes.sh
 
       # A Mere program ANSWERING a TLS connection, not dialling one. The client
       # half has existed since v0.1.x; the server half did not, which is why
@@ -1079,7 +1089,7 @@ jobs:
       # are not ours and cannot be made lenient from this repository.
       - name: tls_server_check (a Mere program terminates TLS)
         if: ${{ !cancelled() }}
-        run: sh scripts/tls_server_check.sh
+        run: sh scripts/gate.sh scripts/tls_server_check.sh
 
       # Whether the server answers requests AT THE SAME TIME. A handler that
       # sleeps on purpose is what makes the two answers different, and the same
@@ -1196,7 +1206,7 @@ jobs:
       # with no display, so this needs no X server on the runner.
       - name: window_check
         if: ${{ !cancelled() }}
-        run: sh scripts/window_check.sh
+        run: sh scripts/gate.sh scripts/window_check.sh
 
       # The HTML tokenizer against html5lib-tests, the suite maintained alongside
       # the specification. Vendored, so this needs no network.
@@ -1206,15 +1216,15 @@ jobs:
 
       - name: infer_scaling (type inference stays linear)
         if: ${{ !cancelled() }}
-        run: sh scripts/infer_scaling.sh
+        run: sh scripts/gate.sh scripts/infer_scaling.sh
 
       - name: wasm_sourcemap
         if: ${{ !cancelled() }}
-        run: sh scripts/wasm_sourcemap.sh
+        run: sh scripts/gate.sh scripts/wasm_sourcemap.sh
 
       - name: debug_info (lldb agrees where each line is)
         if: ${{ !cancelled() }}
-        run: sh scripts/debug_info.sh
+        run: sh scripts/gate.sh scripts/debug_info.sh
 
       # The RISC-V arc's headline claim is that the same bytes behave
       # identically on QEMU and on a CPU written in Mere. That emulator lives
@@ -1260,7 +1270,7 @@ jobs:
 
       - name: downstream_check (their code is still a program)
         if: ${{ !cancelled() }}
-        run: MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" sh scripts/downstream_check.sh
+        run: MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" sh scripts/gate.sh scripts/downstream_check.sh
 
       # memu is already among the dogfood clones above, so the RISC-V
       # differential points at that checkout rather than fetching it twice.
@@ -1269,7 +1279,7 @@ jobs:
       # it says. It names which halves ran now.
       - name: qemu_virt (vs an emulator nobody here wrote, and one we did)
         if: ${{ !cancelled() }}
-        run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/qemu_virt.sh
+        run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/gate.sh scripts/qemu_virt.sh
 
       # The operating system on that CPU: a two-task kernel with a shell, and a
       # kernel that runs a separately compiled user program and answers its

@@ -26,7 +26,7 @@
 # with the reserved bit set — the case a decoder that reads 32 bits gets wrong
 # against every well-behaved peer and only wrong against a hostile one.
 #
-# Skips (exit 0) when hyperframe is absent, so it stays out of the build's
+# Exits 2 (could not answer) when hyperframe is absent, so it stays out of the build's
 # dependency set.
 #
 # Usage:
@@ -37,7 +37,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
 
 [ -x "$MERE" ] || { echo "http2_parity: $MERE not found — run 'dune build'" >&2; exit 1; }
-command -v python3 >/dev/null 2>&1 || { echo "http2_parity: python3 absent, skipping"; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo "http2_parity: python3 absent, skipping"; exit 2; }
 if ! python3 -c "import hyperframe" 2>/dev/null; then
   echo "http2_parity: the 'hyperframe' package is not importable, skipping"
   echo "              (python3 -m pip install hyperframe)"

@@ -46,7 +46,7 @@ DEPTH=16
 
 [ -x "$MERE" ] || { echo "region_reclaim_check: $MERE not found — run dune build first" >&2; exit 1; }
 CC=$(command -v clang || command -v cc || true)
-[ -n "$CC" ] || { echo "region_reclaim_check: no C compiler — skipping"; exit 0; }
+[ -n "$CC" ] || { echo "region_reclaim_check: no C compiler — skipping"; exit 2; }
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT

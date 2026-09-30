@@ -23,7 +23,7 @@
 # The certificate is generated per run and never committed: a private key in a
 # public repository is a finding whatever it protects.
 #
-# Skips (exit 0) without a C compiler, openssl, or curl.
+# Exits 3 (optional, not run) without a C compiler, openssl, or curl.
 #
 # Usage:
 #   sh scripts/tls_server_check.sh
@@ -38,12 +38,12 @@ PORT2=$((PORT + 1))
 for tool in openssl curl; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "tls_server_check: $tool not found — skipping (this check is optional)"
-    exit 0
+    exit 3
   fi
 done
 if ! command -v clang >/dev/null 2>&1 && ! command -v cc >/dev/null 2>&1; then
   echo "tls_server_check: no C compiler — skipping (this check is optional)"
-  exit 0
+  exit 3
 fi
 CC=$(command -v clang || command -v cc)
 
@@ -74,7 +74,7 @@ bad()  { fail=$((fail + 1)); echo "FAIL  $1"; }
 openssl req -x509 -newkey rsa:2048 -keyout "$WORK/key.pem" -out "$WORK/cert.pem" \
   -days 2 -nodes -subj "/CN=localhost" \
   -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" >/dev/null 2>&1 \
-  || { echo "tls_server_check: openssl req failed — skipping"; exit 0; }
+  || { echo "tls_server_check: openssl req failed — skipping"; exit 2; }
 
 # ---- build -------------------------------------------------------------
 "$MERE" -c "$ROOT/test/tls/https_server.mere" > "$WORK/https.c"

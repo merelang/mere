@@ -56,7 +56,7 @@ CASES="$ROOT/test/allocmeter"
 for t in node wat2wasm clang; do
   command -v "$t" >/dev/null 2>&1 || {
     echo "alloc_meter: $t not found — skipping (this check needs all three)"
-    exit 0; }
+    exit 2; }
 done
 
 tmp="${TMPDIR:-/tmp}/alloc_meter.$$"
@@ -125,7 +125,7 @@ node "$ROOT/scripts/run_wasm.js" "$tmp/noregion.wasm" >/dev/null 2>"$tmp/probe.e
 if grep -q "return_call" "$tmp/probe.err" 2>/dev/null; then
   echo "alloc_meter: this node ($(node --version)) cannot run the tail calls this"
   echo "             backend emits — skipping. CI pins node 24 for the same reason."
-  exit 0
+  exit 2
 fi
 
 # 1. silent unless asked. Counted in bytes: a heading with nothing under it and

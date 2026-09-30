@@ -81,3 +81,5 @@ __pycache__/
 
 # Vendored by `mere install` — reproducible from mere.toml + mere.lock.
 .mere_modules/
+# a gate's scratch program (scripts/normalize_conformance.sh), never source
+examples/.nf_conf_tmp*.mere

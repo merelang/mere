@@ -17,7 +17,7 @@
 # peer that closes cleanly, and a peer that aborts with data still unread in its own
 # receive queue (which is what makes close() send RST instead of FIN).
 #
-# Native only — these are the C backend's sockets. Skips (exit 0) without a C
+# Native only — these are the C backend's sockets. Exits 3 (optional, not run) without a C
 # compiler.
 #
 # Usage:
@@ -30,7 +30,7 @@ PORT=${PORT:-7913}
 
 if ! command -v clang >/dev/null 2>&1 && ! command -v cc >/dev/null 2>&1; then
   echo "tcp_read_codes: no C compiler — skipping (this check is optional)"
-  exit 0
+  exit 3
 fi
 CC=$(command -v clang || command -v cc)
 

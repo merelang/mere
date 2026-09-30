@@ -58,13 +58,13 @@ MERE="$ROOT/_build/default/bin/mere.exe"
 BUDGET="${WASM_SIZE_BUDGET:-$ROOT/scripts/wasm_size_budget.txt}"
 
 [ -x "$MERE" ] || { echo "wasm_size_check: $MERE not found -- run 'dune build'" >&2; exit 1; }
-command -v wat2wasm >/dev/null 2>&1 || { echo "wasm_size_check: SKIP (no wat2wasm)"; exit 0; }
+command -v wat2wasm >/dev/null 2>&1 || { echo "wasm_size_check: SKIP (no wat2wasm)"; exit 2; }
 # The bands are for the OPTIMIZED build -- build_full.sh runs wasm-opt -Oz, and
 # that is about a third of the shipped bytes. Measuring an unoptimized build
 # against them would fail every file for a reason that is not a regression, so
 # this skips rather than reporting a number about a different artifact.
-command -v wasm-opt >/dev/null 2>&1 || { echo "wasm_size_check: SKIP (no wasm-opt; the bands are for the -Oz build the site ships)"; exit 0; }
-command -v node >/dev/null 2>&1 || { echo "wasm_size_check: SKIP (no node; the behaviour half cannot run)"; exit 0; }
+command -v wasm-opt >/dev/null 2>&1 || { echo "wasm_size_check: SKIP (no wasm-opt; the bands are for the -Oz build the site ships)"; exit 2; }
+command -v node >/dev/null 2>&1 || { echo "wasm_size_check: SKIP (no node; the behaviour half cannot run)"; exit 2; }
 
 # Not just "is node here" but "can this node load what Mere emits". Every
 # playground module uses return_call (opcode 0x12), which node only accepts
@@ -82,7 +82,7 @@ if ! wat2wasm --enable-tail-call "$probe/t.wat" -o "$probe/t.wasm" 2>/dev/null \
    || ! node -e 'new WebAssembly.Module(require("fs").readFileSync(process.argv[1]))' "$probe/t.wasm" 2>/dev/null; then
   rm -rf "$probe"
   echo "wasm_size_check: SKIP (this node cannot load a tail-call module; needs node 22+, have $(node --version))"
-  exit 0
+  exit 2
 fi
 rm -rf "$probe"
 [ -f "$BUDGET" ] || { echo "wasm_size_check: $BUDGET not found" >&2; exit 1; }

@@ -15,21 +15,21 @@
 #
 # curl builds the multipart body: the format is its idea of the format, not ours.
 #
-# Skips (exit 0) without a C compiler or curl.
+# Exits 2 (could not answer) without a C compiler or curl.
 set -e
 
 MERE=${MERE:-./_build/default/bin/mere.exe}
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PORT=${PORT:-18951}
 
-command -v curl >/dev/null 2>&1 || { echo "http_upload_check: no curl -- skipping"; exit 0; }
+command -v curl >/dev/null 2>&1 || { echo "http_upload_check: no curl -- skipping"; exit 2; }
 if ! command -v clang >/dev/null 2>&1 && ! command -v cc >/dev/null 2>&1; then
-  echo "http_upload_check: no C compiler -- skipping"; exit 0
+  echo "http_upload_check: no C compiler -- skipping"; exit 2
 fi
 CC=$(command -v clang || command -v cc)
 if command -v sha256sum >/dev/null 2>&1; then SHA="sha256sum"
 elif command -v shasum >/dev/null 2>&1; then SHA="shasum -a 256"
-else echo "http_upload_check: no sha256 tool -- skipping"; exit 0; fi
+else echo "http_upload_check: no sha256 tool -- skipping"; exit 2; fi
 
 WORK=$(mktemp -d); SRVPID=""
 cleanup() { [ -n "$SRVPID" ] && kill "$SRVPID" 2>/dev/null; rm -rf "$WORK"; :; }
@@ -40,7 +40,7 @@ bad() { fail=$((fail + 1)); echo "FAIL  $1"; }
 
 "$MERE" -c "$ROOT/test/http/upload.mere" > "$WORK/u.c"
 $CC -O1 -o "$WORK/usrv" "$WORK/u.c" -lm 2>"$WORK/cc.log" \
-  || { echo "http_upload_check: link failed -- skipping"; sed -n '1,5p' "$WORK/cc.log"; exit 0; }
+  || { echo "http_upload_check: link failed -- skipping"; sed -n '1,5p' "$WORK/cc.log"; exit 2; }
 
 # A file that is binary in the way that matters: it starts with a PNG signature
 # and then has forty zero bytes and a tail. Anything that stops at a NUL keeps

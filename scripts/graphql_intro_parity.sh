@@ -21,7 +21,7 @@
 # INTROSPECTION RESULT — the same reason the document gate compares printed
 # documents rather than serialised ASTs.
 #
-# Skips (exit 0) without node or graphql-js.
+# Exits 2 (could not answer) without node or graphql-js.
 #
 # Usage:
 #   sh scripts/graphql_intro_parity.sh
@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
 
 [ -x "$MERE" ] || { echo "graphql_intro_parity: $MERE not found — run 'dune build'" >&2; exit 1; }
-command -v node >/dev/null 2>&1 || { echo "graphql_intro_parity: node absent, skipping"; exit 0; }
+command -v node >/dev/null 2>&1 || { echo "graphql_intro_parity: node absent, skipping"; exit 2; }
 
 GQL_DIR=""
 for cand in "$ROOT/node_modules/graphql" "$(npm root -g 2>/dev/null)/graphql"; do
@@ -39,7 +39,7 @@ for cand in "$ROOT/node_modules/graphql" "$(npm root -g 2>/dev/null)/graphql"; d
 done
 if [ -z "$GQL_DIR" ]; then
   echo "graphql_intro_parity: the 'graphql' package was not found, skipping"
-  exit 0
+  exit 2
 fi
 GQL_VER=$(node -p "require('$GQL_DIR/package.json').version")
 echo "graphql_intro_parity: oracle is graphql-js $GQL_VER (node $(node -v))"

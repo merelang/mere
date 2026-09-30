@@ -28,7 +28,7 @@
 # name. A skipped construct would produce a descriptor that is wrong where nothing
 # looks; a refusal is visible.
 #
-# Skips (exit 0) when protoc is absent.
+# Exits 2 (could not answer) when protoc is absent.
 #
 # Usage:
 #   sh scripts/proto_desc_parity.sh
@@ -37,7 +37,7 @@ set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
 
-command -v protoc >/dev/null 2>&1 || { echo "proto_desc_parity: protoc absent, skipping"; exit 0; }
+command -v protoc >/dev/null 2>&1 || { echo "proto_desc_parity: protoc absent, skipping"; exit 2; }
 [ -x "$MERE" ] || { echo "proto_desc_parity: $MERE not found — run 'dune build'" >&2; exit 1; }
 echo "proto_desc_parity: oracle is $(protoc --version)"
 

@@ -24,9 +24,9 @@ MERE=${MERE:-./_build/default/bin/mere.exe}
 PORT=${PORT:-8099}
 SRC=examples/live/server.mere
 [ -x "$MERE" ] || { echo "live_e2e: no compiler at $MERE (run dune build)"; exit 1; }
-command -v wat2wasm >/dev/null 2>&1 || { echo "live_e2e: SKIP (no wat2wasm)"; exit 0; }
-command -v node >/dev/null 2>&1     || { echo "live_e2e: SKIP (no node)"; exit 0; }
-command -v curl >/dev/null 2>&1     || { echo "live_e2e: SKIP (no curl)"; exit 0; }
+command -v wat2wasm >/dev/null 2>&1 || { echo "live_e2e: SKIP (no wat2wasm)"; exit 2; }
+command -v node >/dev/null 2>&1     || { echo "live_e2e: SKIP (no node)"; exit 2; }
+command -v curl >/dev/null 2>&1     || { echo "live_e2e: SKIP (no curl)"; exit 2; }
 
 tmp=$(mktemp -d) || exit 1
 srv=""

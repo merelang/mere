@@ -36,7 +36,7 @@
 #              mis-parsed or shifted range shows up as a segmentation difference
 #              rather than waiting for a character nobody tested
 #
-# Skips (exit 0) when node is absent.
+# Exits 2 (could not answer) when node is absent.
 #
 # Usage:
 #   sh scripts/unicode_parity.sh
@@ -54,14 +54,14 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
 TABLE="$ROOT/contrib/unicode/gcb_table.mere"
 
-command -v node >/dev/null 2>&1 || { echo "unicode_parity: node absent, skipping"; exit 0; }
+command -v node >/dev/null 2>&1 || { echo "unicode_parity: node absent, skipping"; exit 2; }
 [ -x "$MERE" ] || { echo "unicode_parity: $MERE not found — run 'dune build'" >&2; exit 1; }
 [ -f "$TABLE" ] || { echo "unicode_parity: $TABLE missing — run gen_unicode_tables.sh" >&2; exit 1; }
 
 NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
 if [ "$NODE_MAJOR" -lt "$NODE_MIN" ]; then
   echo "unicode_parity: node $(node -v) is below the v${NODE_MIN} floor, skipping"
-  exit 0
+  exit 2
 fi
 
 have=$(node -p 'process.versions.unicode')

@@ -31,7 +31,7 @@ set -u
 MERE=${MERE:-./_build/default/bin/mere.exe}
 EXPECTED=test/extern_host/EXPECTED
 [ -x "$MERE" ] || { echo "extern_host: no compiler at $MERE (run dune build)"; exit 1; }
-command -v clang >/dev/null 2>&1 || { echo "extern_host: SKIP (no clang)"; exit 0; }
+command -v clang >/dev/null 2>&1 || { echo "extern_host: SKIP (no clang)"; exit 2; }
 
 tmp=$(mktemp -d) || exit 1
 trap 'rm -rf "$tmp"' EXIT

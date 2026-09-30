@@ -4,6 +4,47 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.554 — 2026-09-30
+
+_A gate that did not run says so in its exit status: 2 could not answer, 3 optional._
+
+Ninety-four places in `scripts/` printed "skipping" or "SKIP" and exited 0, so
+"passed" and "did not run" were one status. A runner had to read the words to
+tell them apart -- mgate did, and read three passes that count their skips
+("(13 skipped)") as skips -- and the 65 gates that could not fail for a
+missing tool were this shape. Every one of them now says what it is:
+
+| status | class | |
+|---|---|---|
+| 0 | passed | |
+| 1 | failed | |
+| 2 | could not answer | a tool it needs is missing, too old, or failed to set up (73 places) |
+| 3 | optional, not run | the author wrote "this check is optional", the tool is one the gates runner is not meant to have (psql, sdl2-config, wasmtime, wasm-tools), no PostgreSQL at all, an architecture with no pattern, `MERE_DOWNSTREAM` unset (21 places, 15 gates) |
+| 201 | timed out | scripts/bounded.sh |
+
+In CI a 2 is red: `tool_preflight --required` says the runner has every tool
+the gates probe, so a gate that cannot find one is a broken runner. A 3 is not:
+the fifteen gates that can exit 3 run through `scripts/gate.sh`, which turns 3
+into 0 and prints that the gate is optional and did not run. The 26 header
+comments that said "Skips (exit 0)" say which status they mean.
+
+`scripts/skip_exit_check.sh` (CI) keeps the old shape from coming back: an
+`echo` that says SKIP, skipping or skip-ok with `exit 0` on the same line or
+the next. Its poison plants both shapes.
+
+These are the classes `mere test` (v0.1.552) and mgate already report.
+
+Two more things the gate runs found in the gates themselves.
+`normalize_conformance.sh` wrote its scratch program into `examples/` under a
+fixed name, and a stopped run left it there -- where it was committed once,
+with this machine's temp path in it. It carries the process id now, is removed
+on INT and TERM too, and `.gitignore` names it. And the first poison of
+`skip_exit_check.sh` planted a probe for a tool called `frob` in the usual
+command-lookup form, which `tool_preflight --required` read as a dependency
+of the gates -- in the comment explaining it, too.
+
+---
+
 ## v0.1.553 — 2026-09-30
 
 _A table a helper builds at module init is module state under `--lib`, not a call's._

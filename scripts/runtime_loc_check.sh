@@ -205,11 +205,11 @@ echo "runtime_loc: $total/$total ok (position + frames on every case)"
 # SAMENESS: one line, no stack, both platforms, with MERE_FAIL_TRAP as the way
 # in for anyone who wants more.
 #
-# Skips (exit 0) without clang, the way debug_info.sh does: this asks a question
+# Exits 2 (could not answer) without clang, the way debug_info.sh does: this asks a question
 # about a compiled binary, and without a C compiler there is no binary to ask.
 command -v clang >/dev/null 2>&1 || {
   echo "runtime_loc: clang not found — skipping the compiled leg"
-  exit 0
+  exit 2
 }
 
 cbad=0

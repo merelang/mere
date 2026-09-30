@@ -38,7 +38,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 [ -x "$MERE" ] || { echo "examples_parity: $MERE not built" >&2; exit 2; }
 command -v clang >/dev/null 2>&1 || {
-  echo "examples_parity: clang not found — skipping"; exit 0; }
+  echo "examples_parity: clang not found — skipping"; exit 2; }
 
 tmp="${TMPDIR:-/tmp}/examples_parity.$$"
 mkdir -p "$tmp"

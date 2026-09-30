@@ -31,7 +31,7 @@ cd "$ROOT"
 MERE=${MERE:-$ROOT/_build/default/bin/mere.exe}
 [ -x "$MERE" ] || { echo "contrib_ctest: $MERE not found — run dune build first" >&2; exit 1; }
 command -v clang >/dev/null 2>&1 || command -v cc >/dev/null 2>&1 || {
-  echo "contrib_ctest: no C compiler — skipping" >&2; exit 0; }
+  echo "contrib_ctest: no C compiler — skipping" >&2; exit 2; }
 
 LIST="$ROOT/test/contrib_ctests.txt"
 [ -f "$LIST" ] || { echo "contrib_ctest: $LIST is missing" >&2; exit 1; }

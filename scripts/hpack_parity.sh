@@ -27,7 +27,7 @@
 #   4. integers  — the prefix representation across every boundary
 #   5. eviction  — a sequence that forces the dynamic table to evict
 #
-# Skips (exit 0) when hpack is absent.
+# Exits 2 (could not answer) when hpack is absent.
 #
 # Usage:
 #   sh scripts/hpack_parity.sh
@@ -37,7 +37,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MERE="$ROOT/_build/default/bin/mere.exe"
 
 [ -x "$MERE" ] || { echo "hpack_parity: $MERE not found — run 'dune build'" >&2; exit 1; }
-command -v python3 >/dev/null 2>&1 || { echo "hpack_parity: python3 absent, skipping"; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo "hpack_parity: python3 absent, skipping"; exit 2; }
 python3 -c "import hpack" 2>/dev/null || {
   echo "hpack_parity: the 'hpack' package is not importable, skipping"
   echo "              (python3 -m pip install hpack)"

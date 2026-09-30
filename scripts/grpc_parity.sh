@@ -26,7 +26,7 @@
 # connections, so it exits on its own. A harness that has to kill its subject
 # cannot tell a clean exit from a hang.
 #
-# Skips (exit 0) without protoc, grpcurl, a C compiler, or python h2.
+# Exits 2 (could not answer) without protoc, grpcurl, a C compiler, or python h2.
 #
 # Usage:
 #   sh scripts/grpc_parity.sh
@@ -37,13 +37,13 @@ MERE="$ROOT/_build/default/bin/mere.exe"
 
 [ -x "$MERE" ] || { echo "grpc_parity: $MERE not found — run 'dune build'" >&2; exit 1; }
 for t in protoc grpcurl python3; do
-  command -v "$t" >/dev/null 2>&1 || { echo "grpc_parity: $t absent, skipping"; exit 0; }
+  command -v "$t" >/dev/null 2>&1 || { echo "grpc_parity: $t absent, skipping"; exit 2; }
 done
 if command -v clang >/dev/null 2>&1; then CC=clang
 elif command -v cc >/dev/null 2>&1; then CC=cc
-else echo "grpc_parity: no C compiler, skipping"; exit 0; fi
+else echo "grpc_parity: no C compiler, skipping"; exit 2; fi
 python3 -c "import h2" 2>/dev/null || {
-  echo "grpc_parity: python 'h2' is not importable, skipping"; exit 0; }
+  echo "grpc_parity: python 'h2' is not importable, skipping"; exit 2; }
 
 echo "grpc_parity: clients are $(grpcurl --version 2>&1 | head -1) and python h2 $(python3 -c 'import h2;print(h2.__version__)')"
 

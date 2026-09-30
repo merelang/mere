@@ -26,8 +26,8 @@ set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT="$ROOT/contrib/http2/hpack_table.mere"
 
-command -v python3 >/dev/null 2>&1 || { echo "gen_hpack_tables: python3 absent, skipping"; exit 0; }
-python3 -c "import hpack" 2>/dev/null || { echo "gen_hpack_tables: hpack absent, skipping"; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo "gen_hpack_tables: python3 absent, skipping"; exit 2; }
+python3 -c "import hpack" 2>/dev/null || { echo "gen_hpack_tables: hpack absent, skipping"; exit 2; }
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 

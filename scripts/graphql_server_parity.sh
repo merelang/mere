@@ -19,7 +19,7 @@
 #     one packet, so a server that parses whatever one read gave it works
 #   * a lowercase `content-length`, which HTTP allows and curl does not send
 #
-# Skips (exit 0) without a C compiler, curl, or graphql-js.
+# Exits 2 (could not answer) without a C compiler, curl, or graphql-js.
 #
 # Usage:
 #   sh scripts/graphql_server_parity.sh
@@ -30,16 +30,16 @@ MERE="$ROOT/_build/default/bin/mere.exe"
 
 [ -x "$MERE" ] || { echo "graphql_server_parity: $MERE not found — run 'dune build'" >&2; exit 1; }
 for t in curl python3 node; do
-  command -v "$t" >/dev/null 2>&1 || { echo "graphql_server_parity: $t absent, skipping"; exit 0; }
+  command -v "$t" >/dev/null 2>&1 || { echo "graphql_server_parity: $t absent, skipping"; exit 2; }
 done
 if command -v clang >/dev/null 2>&1; then CC=clang
 elif command -v cc >/dev/null 2>&1; then CC=cc
-else echo "graphql_server_parity: no C compiler, skipping"; exit 0; fi
+else echo "graphql_server_parity: no C compiler, skipping"; exit 2; fi
 GQL_DIR=""
 for cand in "$ROOT/node_modules/graphql" "$(npm root -g 2>/dev/null)/graphql"; do
   [ -f "$cand/package.json" ] && { GQL_DIR=$cand; break; }
 done
-[ -n "$GQL_DIR" ] || { echo "graphql_server_parity: graphql-js not found, skipping"; exit 0; }
+[ -n "$GQL_DIR" ] || { echo "graphql_server_parity: graphql-js not found, skipping"; exit 2; }
 echo "graphql_server_parity: clients are $(curl --version | head -1 | cut -d' ' -f1-2) and python3; oracle is graphql-js $(node -p "require('$GQL_DIR/package.json').version")"
 
 TMP=$(mktemp -d)

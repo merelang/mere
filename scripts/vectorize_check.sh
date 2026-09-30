@@ -28,13 +28,13 @@ MERE="$ROOT/_build/default/bin/mere.exe"
 # (the LLVM backend's output is clang's anyway, and gcc's -O2 vectorizer has a
 # different cost model). Absent clang, this says so and skips.
 CC="${CC:-clang}"
-command -v "$CC" >/dev/null 2>&1 || { echo "vectorize_check: SKIP -- $CC not found (this gate is about clang's output)"; exit 0; }
+command -v "$CC" >/dev/null 2>&1 || { echo "vectorize_check: SKIP -- $CC not found (this gate is about clang's output)"; exit 2; }
 command -v python3 >/dev/null 2>&1 || { echo "vectorize_check: python3 absent" >&2; exit 1; }
 arch="$(uname -m)"
 case "$arch" in
   arm64|aarch64) pat='(fmul|fadd|fsub|fmla|fmls)(\.2d|\s+v[0-9]+\.2d)';;
   x86_64|amd64)  pat='\b(v?mulpd|v?addpd|v?subpd|vfmadd[0-9]*pd|vfmsub[0-9]*pd)\b';;
-  *) echo "vectorize_check: SKIP -- no vector instruction pattern for $arch"; exit 0;;
+  *) echo "vectorize_check: SKIP -- no vector instruction pattern for $arch"; exit 3;;
 esac
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 src="$ROOT/test/range_version/axpy.mere"
