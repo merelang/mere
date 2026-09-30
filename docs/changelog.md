@@ -4,6 +4,57 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.550 — 2026-09-30
+
+_Resource limits, scheduling priority and `flock(2)`: `proc_*` and `file_flock`._
+
+Five syscalls a program could not declare with `extern fn`, each for its own
+reason: `getrlimit` / `setrlimit` move the limits through a `struct rlimit *`,
+`getpriority` / `setpriority` take an `id_t` -- `<sys/resource.h>` is in every
+emitted program already, so the prototype Mere writes meets the real one and is
+a "conflicting types" error -- and `flock` is in `<sys/file.h>`, which is not
+included. Like `file_*` (v0.1.509) and `fd_*` (v0.1.522) the C is written in
+the runtime with the real headers, emitted only when a program declares one of
+the names: two headers, no library, no change to the build line.
+
+The platform's numbers differ exactly here -- `RLIMIT_NOFILE` is 8 on macOS and
+7 on Linux, `RLIM_INFINITY` 2^63-1 and 2^64-1, `EWOULDBLOCK` 35 and 11 -- so
+they stay on the C side and the runtime defines the contract:
+
+- a resource is asked for **by name** (`proc_getrlimit "NOFILE"`), the names
+  ruby's `Process.getrlimit` accepts, present only where the platform defines
+  them; `proc_rlimit_names` lists them and `proc_rlimit_resource` hands out the
+  platform number for a caller that has to show it (ruby's `Process::RLIMIT_*`);
+- a limit of `-1` is `RLIM_INFINITY` going in and coming out;
+  `proc_rlim_const "INFINITY"` gives the platform's value in decimal, because on
+  Linux it does not fit an `int`;
+- `proc_getrlimit` takes one snapshot and `proc_rlimit_field` reads soft or hard
+  out of it -- `file_stat`'s rule, so the two limits come from one moment;
+- the priority selector is 0 process / 1 group / 2 user, and the lock bits are
+  1 shared / 2 exclusive / 4 non-blocking / 8 unlock;
+- `file_flock` answers **three** ways: `0`, `1` when the lock is held elsewhere
+  and the caller asked not to wait (ruby's `false`), `-1` otherwise.
+
+**errno is kept, which the earlier families do not do.** `getpriority` answers
+`-1` for a process at priority `-1`, so its failure is visible only in errno,
+and errno is gone by the time a Mere program can ask. Every call stores its own
+errno (0 on success) in a per-thread slot, and `proc_last_errno` reads it.
+
+`scripts/proclimit_check.sh`, 55 rows, in CI: limits set and read back, a nice
+value raised and read, a lock taken through one open and refused through
+another, and the refusals (unknown name, soft above hard, bad selector, no
+such process, closed fd). Run on macOS arm64 and on Linux arm64 and x86-64, as
+root and unprivileged. Poisoned six ways -- a refusal answered as `-1`, the
+non-blocking bit mistranslated, infinity not mapped coming out, infinity not
+mapped going in, getpriority's errno dropped, a failed snapshot left readable
+-- and each moved at least one row. ⚠ The probe's first run broke itself: a "soft above hard" row
+asked for the current hard limit plus one, NOFILE's hard limit is unlimited on
+macOS and crosses as `-1`, and the soft limit became 0 descriptors. Every open
+after that row failed. The row names both of its numbers now.
+
+Interpreter, LLVM and Wasm are unchanged, as for `file_*`: the interpreter says
+it has no mock for the extern, LLVM and Wasm leave it an import.
+
 ## v0.1.549 — 2026-09-29
 
 _What a suspended coroutine still holds: `coro_scan_ints`._

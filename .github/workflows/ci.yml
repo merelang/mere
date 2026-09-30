@@ -782,6 +782,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/fdio_check.sh
 
+      # v0.1.550: resource limits, scheduling priority and flock(2). The
+      # platform's numbers differ exactly here (RLIMIT_NOFILE 8 vs 7,
+      # RLIM_INFINITY 2^63-1 vs 2^64-1, EWOULDBLOCK 35 vs 11), so the runtime
+      # takes a resource by name and defines its own selector and lock bits;
+      # every row is a limit the probe set and read back, or a refusal it
+      # provoked. Same transcript as root and as an unprivileged user.
+      - name: proclimit_check (getrlimit, setrlimit, getpriority, setpriority, flock)
+        if: ${{ !cancelled() }}
+        run: sh scripts/proclimit_check.sh
+
       # Float results must not depend on the C optimizer (v0.1.315): the
       # same dot product at -O0 and -O2 must produce the same bits, and both
       # must match the interpreter. Without the emitted FP_CONTRACT OFF

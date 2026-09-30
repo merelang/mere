@@ -234,6 +234,58 @@ let fd = ev / 8;
 `tcp_read` / `tcp_write` are `read(2)` / `write(2)` and are likewise not
 socket-specific, so the same pair reads whichever fd came back ready.
 
+**Resource limits, scheduling priority and advisory locks** (v0.1.550), also
+`extern fn` declarations, C backend only. None of the five syscalls can be
+declared by hand: `getrlimit` / `setrlimit` move the limits through a
+`struct rlimit *`, `getpriority` / `setpriority` take an `id_t` (the emitted
+`int` prototype is a "conflicting types" error), and `flock` is in
+`<sys/file.h>`, which an emitted program does not include. The platform's
+numbers differ exactly here — `RLIMIT_NOFILE` is 8 on macOS and 7 on Linux,
+`RLIM_INFINITY` is 2^63-1 on one and 2^64-1 on the other — so the runtime keeps
+them and defines its own contracts: a resource is asked for **by name**, a limit
+of **`-1` is `RLIM_INFINITY`** in both directions, the priority selector is
+**0 process / 1 process group / 2 user**, and the lock bits are **1 shared /
+2 exclusive / 4 non-blocking / 8 unlock**.
+
+| name | type | notes |
+|---|---|---|
+| `proc_getrlimit` | `str -> int` | Take a snapshot of one resource's limits (`"CPU"`, `"NOFILE"`, ...; capitals). `0`, or `-1` — a name this platform lacks is `-1` with `EINVAL` |
+| `proc_rlimit_field` | `int -> int` | Read `0` soft / `1` hard out of the snapshot; no syscall. The limit, `-1` for unlimited, `-2` when there is no snapshot or the field is not 0 or 1 |
+| `proc_setrlimit` | `str -> int -> int -> int` | `name soft hard`; `-1` is unlimited, any other negative is `EINVAL`. `0`, or `-1` |
+| `proc_rlimit_resource` | `str -> int` | The platform's `RLIMIT_<name>` number, or `-1` when it has no such resource |
+| `proc_rlimit_names` | `unit -> str` | Every resource name this platform has, space-separated, in a fixed order |
+| `proc_rlim_const` | `str -> str` | `"INFINITY"` / `"SAVED_MAX"` / `"SAVED_CUR"` as the platform defines them, **in decimal** (2^64-1 does not fit an `int`); `""` when undefined. For showing a value — limits themselves cross as `-1` |
+| `proc_getpriority` | `int -> int -> int` | `which who`. The priority — **which may be `-1`**, so failure is only in `proc_last_errno` |
+| `proc_setpriority` | `int -> int -> int -> int` | `which who prio`. `0`, or `-1` |
+| `file_flock` | `int -> int -> int` | `fd op`. `0` done, **`1` refused** because another open holds the lock and the non-blocking bit was set, `-1` any other failure. A bit outside the four is `EINVAL` |
+| `proc_last_errno` | `unit -> int` | The errno the last of these calls left, `0` when it succeeded |
+
+**Why errno is kept here when `file_*` and `fd_*` do not keep it.** Those answer
+`-1` and leave errno alone. `getpriority` answers `-1` for a process whose
+priority is `-1`, so its failure is only visible in errno — and errno itself is
+gone by the time a Mere program can read it, since the next allocation may call
+into libc. Each call above stores the errno of its own syscall in a per-thread
+slot; `proc_last_errno` reads the slot. The number is the platform's
+(`EWOULDBLOCK` is 35 on macOS and 11 on Linux), which is why `file_flock` decides
+the refusal itself and answers `1` instead of leaving the comparison to the
+caller. The limits snapshot is also per thread.
+
+```mere
+extern fn proc_getrlimit: str -> int;
+extern fn proc_rlimit_field: int -> int;
+extern fn proc_setrlimit: str -> int -> int -> int;
+
+let _ = proc_getrlimit "NOFILE";
+let soft = proc_rlimit_field 0;
+let hard = proc_rlimit_field 1;     // -1: unlimited
+let _ = proc_setrlimit "NOFILE" 256 hard;
+```
+
+`scripts/proclimit_check.sh` is the gate: every row is a limit the probe set
+and read back, a priority it raised and read, a lock it took through one open
+and was refused through another, or a refusal it provoked. The same transcript
+holds on macOS and Linux, as root and as an unprivileged user.
+
 **Positioned file I/O** (`file_openrw` through `file_close`) works on **all four**
 backends: interp and C natively, Wasm over host imports since v0.1.153 (bytes cross
 in the `mere_bytes` layout rather than one call per byte), LLVM since v0.1.163. It

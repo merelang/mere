@@ -1,0 +1,160 @@
+// proc_* limits and priority, and file_flock. Every expectation below is a
+// value THIS program set or a refusal it provoked, so the rows are facts
+// rather than a snapshot of one machine: no limit is compared to a number
+// written here, only to the number the probe put there itself.
+//
+// Why a runtime and not an `extern` the program writes: getrlimit/setrlimit
+// move the limits through a `struct rlimit *`, getpriority/setpriority take
+// an id_t (an unsigned typedef that conflicts with the emitted `int`), and
+// flock(2) is in <sys/file.h>, which an emitted program does not include.
+// The three contracts the runtime defines are exercised here: a resource BY
+// NAME with -1 as RLIM_INFINITY, the selector 0/1/2 for process/group/user,
+// and the lock bits 1/2/4/8.
+//
+// The errno numbers that ARE written down -- EINVAL 22, ESRCH 3, EBADF 9 --
+// are the same on macOS, Linux and the BSDs; EWOULDBLOCK is not, which is
+// why file_flock answers a refusal as 1 instead of leaving it to errno.
+extern fn proc_getrlimit: str -> int;
+extern fn proc_rlimit_field: int -> int;
+extern fn proc_setrlimit: str -> int -> int -> int;
+extern fn proc_rlimit_resource: str -> int;
+extern fn proc_rlimit_names: unit -> str;
+extern fn proc_rlim_const: str -> str;
+extern fn proc_getpriority: int -> int -> int;
+extern fn proc_setpriority: int -> int -> int -> int;
+extern fn proc_last_errno: unit -> int;
+extern fn file_flock: int -> int -> int;
+extern fn fd_open: str -> str -> int -> int;
+extern fn fd_close: int -> int;
+
+let say = fn (label: str) -> fn (got: int) -> fn (want: int) ->
+  if got == want then print (label ++ " ok")
+  else print (label ++ " FAIL got=" ++ str_of_int got ++ " want=" ++ str_of_int want);
+
+let b = fn (c: bool) -> if c then 1 else 0;
+
+// soft (0) or hard (1) limit of a resource, or -3 when the snapshot failed
+let lim = fn (name: str) -> fn (which: int) ->
+  if proc_getrlimit name == 0 then proc_rlimit_field which else (0 - 3);
+
+let rec all_digits = fn (s: str) -> fn (i: int) ->
+  if i >= str_len s then true
+  else if is_digit (char_at s i) then all_digits s (i + 1)
+  else false;
+
+// every listed name resolves to a resource number, and only listed ones do
+let rec all_resolve = fn (xs: str list) ->
+  match xs with
+  | Nil -> true
+  | Cons (x, rest) -> if proc_rlimit_resource x >= 0 then all_resolve rest else false;
+
+// the first of these whose HARD limit is unlimited, or "". CPU and FSIZE are
+// the candidates because a finite soft limit on them is harmless for the rest
+// of the run; ⚠ AS came first in the platform's list and was the first choice,
+// and macOS refuses a finite RLIMIT_AS below what the process already maps.
+let rec first_unlimited = fn (xs: str list) ->
+  match xs with
+  | Nil -> ""
+  | Cons (x, rest) -> if lim x 1 == (0 - 1) then x else first_unlimited rest;
+
+let main = fn () ->
+  // --- names and numbers
+  let names = proc_rlimit_names () in
+  let padded = " " ++ names ++ " " in
+  let _ = say "names include the SUSv3 five"
+            (b (str_contains padded " CORE " && str_contains padded " CPU "
+                && str_contains padded " DATA " && str_contains padded " NOFILE "
+                && str_contains padded " STACK ")) 1 in
+  let _ = say "every listed name resolves" (b (all_resolve (str_split names " "))) 1 in
+  let _ = say "unknown name has no number" (proc_rlimit_resource "FOO") (0 - 1) in
+  let _ = say "names are capitals" (proc_rlimit_resource "nofile") (0 - 1) in
+  let inf = proc_rlim_const "INFINITY" in
+  let _ = say "RLIM_INFINITY is decimal"
+            (b (str_len inf > 0 && all_digits inf 0)) 1 in
+  let _ = say "unknown constant is empty" (str_len (proc_rlim_const "FOO")) 0 in
+  // --- getrlimit: one snapshot, two fields
+  let _ = say "getrlimit NOFILE" (proc_getrlimit "NOFILE") 0 in
+  let _ = say "errno after success" (proc_last_errno ()) 0 in
+  let soft = proc_rlimit_field 0 in
+  let hard = proc_rlimit_field 1 in
+  let _ = say "soft within hard"
+            (b (soft >= 0 && (hard == (0 - 1) || soft <= hard))) 1 in
+  let _ = say "field out of range" (proc_rlimit_field 2) (0 - 2) in
+  let _ = say "getrlimit unknown name" (proc_getrlimit "FOO") (0 - 1) in
+  let _ = say "unknown name is EINVAL" (proc_last_errno ()) 22 in
+  let _ = say "field after a failed getrlimit" (proc_rlimit_field 0) (0 - 2) in
+  // --- setrlimit: what is set is what is read back
+  let _ = say "setrlimit NOFILE soft 64" (proc_setrlimit "NOFILE" 64 hard) 0 in
+  let _ = say "NOFILE soft reads 64" (lim "NOFILE" 0) 64 in
+  let _ = say "NOFILE hard unchanged" (lim "NOFILE" 1) hard in
+  let _ = say "setrlimit NOFILE restored" (proc_setrlimit "NOFILE" soft hard) 0 in
+  let _ = say "NOFILE soft reads the original" (lim "NOFILE" 0) soft in
+  let core_soft = lim "CORE" 0 in
+  let core_hard = lim "CORE" 1 in
+  let _ = say "setrlimit CORE soft 0" (proc_setrlimit "CORE" 0 core_hard) 0 in
+  let _ = say "CORE soft reads 0" (lim "CORE" 0) 0 in
+  let _ = say "setrlimit CORE restored" (proc_setrlimit "CORE" core_soft core_hard) 0 in
+  // -1 is RLIM_INFINITY in both directions: take a resource whose hard limit
+  // is unlimited, give it a finite soft limit, then an unlimited one again.
+  let u = first_unlimited (str_split "CPU FSIZE" " ") in
+  let _ = say "an unlimited resource exists" (b (str_len u > 0)) 1 in
+  let u_soft = lim u 0 in
+  let _ = say "finite soft under unlimited hard" (proc_setrlimit u 1000000 (0 - 1)) 0 in
+  let _ = say "finite soft reads back" (lim u 0) 1000000 in
+  let _ = say "unlimited soft" (proc_setrlimit u (0 - 1) (0 - 1)) 0 in
+  let _ = say "unlimited soft reads -1" (lim u 0) (0 - 1) in
+  let _ = proc_setrlimit u u_soft (0 - 1) in
+  // ⚠ soft above hard, asked with the two numbers given here -- not as
+  // "the current hard limit plus one": NOFILE's hard limit is unlimited on
+  // macOS, -1 + 1 is 0, and the first version of this row set the soft
+  // limit to 0 descriptors. Every open after it failed.
+  let _ = say "soft above hard refused" (proc_setrlimit "CORE" 100 50) (0 - 1) in
+  let _ = say "soft above hard is EINVAL" (proc_last_errno ()) 22 in
+  let _ = say "CORE untouched by the refusal" (lim "CORE" 0) core_soft in
+  let _ = say "negative limit refused" (proc_setrlimit "CORE" (0 - 5) core_hard) (0 - 1) in
+  let _ = say "setrlimit unknown name" (proc_setrlimit "FOO" 1 1) (0 - 1) in
+  // --- priority. Raising one's own nice value is always allowed; lowering
+  // it back is not for an unprivileged process, so it is not asserted, and
+  // the probe keeps the higher value until it exits.
+  let p = proc_getpriority 0 0 in
+  let _ = say "getpriority process" (proc_last_errno ()) 0 in
+  let _ = proc_getpriority 1 0 in
+  let _ = say "getpriority group" (proc_last_errno ()) 0 in
+  let _ = proc_getpriority 2 0 in
+  let _ = say "getpriority user" (proc_last_errno ()) 0 in
+  let _ = say "getpriority bad selector" (proc_getpriority 7 0) (0 - 1) in
+  let _ = say "bad selector is EINVAL" (proc_last_errno ()) 22 in
+  let _ = proc_getpriority 0 2147483646 in
+  let _ = say "no such process is ESRCH" (proc_last_errno ()) 3 in
+  let _ = proc_getpriority 0 0 in
+  let _ = say "errno clears on success" (proc_last_errno ()) 0 in
+  let up = if p < 19 then p + 1 else p in
+  let _ = say "setpriority up" (proc_setpriority 0 0 up) 0 in
+  let _ = say "getpriority reads it" (proc_getpriority 0 0) up in
+  let _ = say "setpriority bad selector" (proc_setpriority 7 0 0) (0 - 1) in
+  // --- flock: locks belong to an OPEN FILE, so two opens of one path in one
+  // process contend exactly as two processes would.
+  let path = "/tmp/mere_proclimit_probe" in
+  let _ = write_file path "x" in
+  let a = fd_open path "r" 0 in
+  let c = fd_open path "r" 0 in
+  let _ = say "flock exclusive" (file_flock a 2) 0 in
+  let _ = say "second exclusive refused" (file_flock c 6) 1 in
+  let _ = say "second shared refused" (file_flock c 5) 1 in
+  let _ = say "unlock" (file_flock a 8) 0 in
+  let _ = say "second exclusive after unlock" (file_flock c 6) 0 in
+  let _ = say "first refused now" (file_flock a 6) 1 in
+  let _ = say "unlock second" (file_flock c 8) 0 in
+  let _ = say "shared twice" ((file_flock a 1) + (file_flock c 5)) 0 in
+  let _ = say "exclusive over shared refused" (file_flock a 6) 1 in
+  let _ = file_flock a 8 in
+  let _ = file_flock c 8 in
+  let _ = say "unknown bit refused" (file_flock a 16) (0 - 1) in
+  let _ = say "unknown bit is EINVAL" (proc_last_errno ()) 22 in
+  let _ = fd_close a in
+  let _ = say "flock a closed fd" (file_flock a 2) (0 - 1) in
+  let _ = say "closed fd is EBADF" (proc_last_errno ()) 9 in
+  let _ = say "flock a negative fd" (file_flock (0 - 1) 2) (0 - 1) in
+  let _ = fd_close c in
+  0;
+exit (main ())
