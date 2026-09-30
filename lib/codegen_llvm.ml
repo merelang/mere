@@ -1180,6 +1180,9 @@ let extern_fn_decls_llvm : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
 (* Phase 35.2 (DEFERRED §1.2 fix): registry of eta-wrapped nullary factory
    builtins. emit_program emits each entry as
    `define ... @<name>_<tag>_closure_fn` + `@<name>_<tag>_as_value = constant ...`. *)
+(* The callee nodes of synthesized eta expansions, by identity (v0.1.551): see
+   `eta_callees` in the C backend for why a flag is not enough. *)
+let eta_callees_llvm : Ast.expr list ref = ref []
 let eta_adapters_llvm : (string, string * Ast.ty) Hashtbl.t = Hashtbl.create 8
 
 (* Phase 38.C (DEFERRED §1.2 A2): syntactic eta-expansion for multi-arg curried
@@ -1211,7 +1214,9 @@ let synthesize_curried_eta_llvm (name : string) (arrow_ty : Ast.ty) (loc : Loc.t
       in
       build_app (i + 1) (mk (Ast.App (acc, arg_node)) new_ty) new_ty
   in
-  let inner_apps = build_app 0 (mk (Ast.Var name) arrow_ty) arrow_ty in
+  let callee = mk (Ast.Var name) arrow_ty in
+  eta_callees_llvm := callee :: !eta_callees_llvm;
+  let inner_apps = build_app 0 callee arrow_ty in
   let rec wrap i body_acc body_ty =
     if i < 0 then body_acc
     else
@@ -4152,7 +4157,15 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
             hole that is ours. The list above stays because it can say more --
             it knows the scope -- but it is no longer the only thing standing
             between a known name and a wrong diagnostic. *)
-         unsupported e.Ast.loc (name ^ " has no LLVM lowering yet (host builtin)")
+         (* v0.1.551: the C backend's rule (see `eta_in_progress` there): a
+            builtin with a direct-call lowering is a value by eta, and one
+            without comes back here from inside its own expansion. *)
+         (if List.memq e !eta_callees_llvm then
+            unsupported e.Ast.loc (name ^ " has no LLVM lowering yet (host builtin)")
+          else
+            match try_eta_llvm () with
+            | Some v -> v
+            | None -> unsupported e.Ast.loc (name ^ " has no LLVM lowering yet (host builtin)"))
        else
          unsupported e.Ast.loc ("unbound variable: " ^ name))))
   | Ast.Annot (inner, _) -> emit_expr env inner

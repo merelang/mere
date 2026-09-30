@@ -1311,7 +1311,11 @@ let rec subst_region (from_name : string) (to_name : string) (t : Ast.ty) : Ast.
    constructors, a record on its fields -- and the variant wording is pinned by
    three unit tests and by `scripts/doc_claims_check.sh`'s catalogue. Putting the
    distinction in the payload keeps one collection path and one raise. *)
-let type_redecls : ([ `Variant | `Record ] * string * string * string) list ref = ref []
+(* `Both (v0.1.551): the name is a variant AND a record -- (kind, name,
+   the variant's constructors, the record's fields). Checked from both sides,
+   since either declaration can come second; the prelude's `result`, `option`
+   and `list` are variants, so a user record by one of those names is this. *)
+let type_redecls : ([ `Variant | `Record | `Both ] * string * string * string) list ref = ref []
 let reset_type_redecls () = type_redecls := []
 
 (* De-duplicated: `register_type` runs from the declaration walk, from the pass
@@ -1333,10 +1337,31 @@ let shape_of variants =
        (List.map (fun (c, payload) ->
           c ^ (match payload with None -> "" | Some _ -> " of _")) variants))
 
+(* The same sentence for a record, used by both checks below; defined here
+   because `register_type` needs it too. *)
+let fields_shape fields =
+  "{ " ^ String.concat ", " (List.sort compare (List.map fst fields)) ^ " }"
+
+(* The capability records registered at module load (below). A program may
+   declare its own `type Logger` in any shape -- that is what they are for, and
+   test_basic's `drop type Logger = MkLogger of int` relies on it -- so a
+   variant by one of these names replaces the builtin rather than colliding. *)
+let builtin_record_names = [ "Logger"; "Metrics" ]
+
 let register_type type_name params variants =
   (match Hashtbl.find_opt Exhaustive.type_variants type_name with
    | Some prev when variants <> [] && prev <> [] && shape_of prev <> shape_of variants ->
      type_redecls := (`Variant, type_name, shape_of prev, shape_of variants) :: !type_redecls
+   | _ -> ());
+  (* ⚠ A variant and a record sharing a name were accepted by every check and
+     the interpreter, and killed the C backend inside the compiler
+     (`List.combine` in `subst_variants`: the record's zero parameters against
+     the variant's). Found by the mgate dogfood with `type result = { ... }`
+     beside the prelude's `('a, 'e) result`. *)
+  (match Hashtbl.find_opt records type_name with
+   | Some { r_fields = fs; _ } when variants <> [] && fs <> []
+                                 && not (List.mem type_name builtin_record_names) ->
+     type_redecls := (`Both, type_name, shape_of variants, fields_shape fs) :: !type_redecls
    | _ -> ());
   Hashtbl.replace types type_name (List.length params);
   (* The params go with the variants: the exhaustiveness checker instantiates a
@@ -1348,11 +1373,10 @@ let register_type type_name params variants =
       { params; arg = payload; type_name }
   ) variants
 
-(* The same sentence `shape_of` writes for a variant, for a record: the field
-   names and nothing about their types, sorted, so that restating a declaration
-   identically is not a conflict and reordering its fields is not either. *)
-let fields_shape fields =
-  "{ " ^ String.concat ", " (List.sort compare (List.map fst fields)) ^ " }"
+(* `fields_shape` (above `register_type`) is the sentence `shape_of` writes
+   for a variant, for a record: the field names and nothing about their types,
+   sorted, so that restating a declaration identically is not a conflict and
+   reordering its fields is not either. *)
 
 let register_record type_name params fields =
   (* ⚠ Records had NO redeclaration check while variants had one, so
@@ -1367,6 +1391,10 @@ let register_record type_name params fields =
      type_redecls :=
        (`Record, type_name, fields_shape prev.r_fields, fields_shape fields)
        :: !type_redecls
+   | _ -> ());
+  (match Hashtbl.find_opt Exhaustive.type_variants type_name with
+   | Some vs when vs <> [] && fields <> [] ->
+     type_redecls := (`Both, type_name, shape_of vs, fields_shape fields) :: !type_redecls
    | _ -> ());
   Hashtbl.replace types type_name (List.length params);
   (* Same reason, for the columns a record pattern opens up. *)

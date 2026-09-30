@@ -32,10 +32,17 @@ MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 [ -x "$MERE" ] || { echo "fmt_roundtrip: $MERE not built" >&2; exit 2; }
 CEILING="${CEILING:-0}"
 
-probe="__fmtroundtrip__.mere"
+# ⚠ THE PROBE'S NAME CARRIES THIS PROCESS'S ID. It was `__fmtroundtrip__.mere`
+#   for every run, and the plain run and the --poison run started together
+#   overwrote each other's output next to the same example: a gate runner that
+#   runs gates in parallel (mgate) found 56 and 48 "refused"
+#   files on a main that was green run by run. CI runs its steps one at a time,
+#   which is why nothing had seen it. Cleanup removes this run's files only --
+#   a second run's are not ours to delete.
+probe="__fmtroundtrip_$$__.mere"
+probe2="__fmtroundtrip2_$$__.mere"
 cleanup() {
-  find "$ROOT/examples" -name "$probe" -delete 2>/dev/null || true
-  find "$ROOT/examples" -name "__fmtroundtrip2__.mere" -delete 2>/dev/null || true
+  find "$ROOT/examples" \( -name "$probe" -o -name "$probe2" \) -delete 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 cleanup
@@ -43,7 +50,7 @@ cleanup
 checked=0; broke=0; names=""; drift=0; drift_names=""
 for f in "$ROOT"/examples/*.mere "$ROOT"/examples/*/*.mere; do
   [ -f "$f" ] || continue
-  case "$f" in *"$probe") continue ;; esac
+  case "$f" in *__fmtroundtrip*) continue ;; esac
   # Only files the compiler accepts as they are: a file it already refuses
   # cannot say anything about the formatter.
   "$MERE" -t "$f" >/dev/null 2>&1 || continue
@@ -57,7 +64,7 @@ for f in "$ROOT"/examples/*.mere "$ROOT"/examples/*/*.mere; do
   # ...and formatting the output again gives the same file. The gate that used
   # to own this question formatted ONE fixture twice, which is why 109 of these
   # were not idempotent without anybody knowing.
-  out2="$(dirname "$f")/__fmtroundtrip2__.mere"
+  out2="$(dirname "$f")/$probe2"
   if "$MERE" fmt "$out" > "$out2" 2>/dev/null; then
     cmp -s "$out" "$out2" || { drift=$((drift + 1)); drift_names="$drift_names $(basename "$f")"; }
   else

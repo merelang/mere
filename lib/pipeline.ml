@@ -793,7 +793,7 @@ let warn_fix loc msg fix = warnings := (loc, msg, fix) :: !warnings
    No position: `Ast.Top_type` carries none, so there is no line to point at.
    The message names the type and both constructor sets instead, which is what
    a reader needs to find the two declarations. *)
-exception Type_redeclared of ([ `Variant | `Record ] * string * string * string) list
+exception Type_redeclared of ([ `Variant | `Record | `Both ] * string * string * string) list
 
 (* Where a type name was declared, newest first. The parser conses an entry per
    declaration, so a name declared twice has two entries -- which is exactly the
@@ -834,6 +834,15 @@ let redecl_message (kind, name, a, b) =
         "help: share a name — including across modules, where `A.t` and `B.t` are one";
         "help: type. The second wins, so a value built by one is read as the other.";
         "help: Rename one of them." ]
+  | `Both ->
+    String.concat "\n"
+      [ Printf.sprintf
+          "type `%s` is declared both as a variant (`%s`) and as a record (`%s`)%s"
+          name a b first_line;
+        "help: one name is one type, and a variant and a record cannot both be it --";
+        "help: the C backend could not tell them apart. `result`, `option` and `list`";
+        "help: are declared by the prelude, so a record cannot take those names either.";
+        "help: Rename one of them." ]
 
 (* So that an uncaught one, and `Printexc.to_string` generally, say what it is
    rather than `Type_redeclared(_)`. The host runtime's words are not the
@@ -843,8 +852,12 @@ let () =
   Printexc.register_printer (function
     | Type_redeclared rs ->
       Some (String.concat "; " (List.map (fun (k, n, a, b) ->
-        Printf.sprintf "type `%s` is declared twice with different %s (`%s` and `%s`)"
-          n (match k with `Variant -> "constructors" | `Record -> "fields") a b) rs))
+        match k with
+        | `Both ->
+          Printf.sprintf "type `%s` is declared both as a variant (`%s`) and as a record (`%s`)" n a b
+        | `Variant | `Record ->
+          Printf.sprintf "type `%s` is declared twice with different %s (`%s` and `%s`)"
+            n (match k with `Variant -> "constructors" | _ -> "fields") a b) rs))
     | _ -> None)
 
 let enforce_type_redecls () =
