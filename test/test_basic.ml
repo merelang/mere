@@ -3133,6 +3133,15 @@ let () =
        module Gb { type u = P | Q | R; };
        let a = Ga.P in
        match a with | Ga.P -> 1 | Ga.Q -> 2");
+  (* Q-186 (v0.1.556): a reserved word after `let rec` is named as one, as it
+     has been in a pattern since v0.1.538 -- in a function and at top level. *)
+  check_raises_containing "let rec drop names the reserved word"
+    "`drop` is a reserved word"
+    (fun () -> Pipeline.process "let f = fn (n: int) ->\n  let rec drop = fn (k: int) -> k in\n  drop n;\nf 1");
+  check_raises_containing "top-level let rec drop names the reserved word"
+    "`drop` is a reserved word"
+    (fun () -> Pipeline.process "let rec drop = fn (k: int) -> k;\ndrop 1");
+
   (* A VARIANT AND A RECORD SHARING A NAME (v0.1.551). Accepted by every check
      and by the interpreter; the C backend died inside the compiler
      (`List.combine`). The prelude's `result` is the name a program reaches for
