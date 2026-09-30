@@ -1685,6 +1685,9 @@ let emit_bin_apply (op : Ast.binop) (node : Ast.expr) (l : string) (r : string) 
   | _ -> Printf.sprintf "(%s %s %s)" l (binop_to_c op) r
 
 (* Translate one Lang expression to a C expression string. *)
+(* set just before emitting a lambda that is `coro_new`'s argument (v0.1.558) *)
+let coro_env_owned_next = ref false
+
 let rec emit_expr (e : Ast.expr) : string =
   (* Q-029: tail position belongs to where this expression sits, so take it
      and hand it on only where it still holds. *)
@@ -2466,6 +2469,11 @@ let rec emit_expr (e : Ast.expr) : string =
       "({ __auto_type %s = %s; __auto_type __with_result = (%s); %s__with_result; })"
       name value_c body_c close_call
   | Ast.Fun (param, _, fn_body) ->
+    (* v0.1.558: the lambda written as `coro_new`'s argument has its env made
+       as the coroutine's own (see __lang_coro_env_owner), so nothing of it is
+       left in the default region; only this lambda, not the ones inside it *)
+    let env_owned = !coro_env_owned_next in
+    coro_env_owned_next := false;
     (* Anonymous Fun in expression position → emit a closure value.
        Prefer the typer's recorded type; if it's still polymorphic (due
        to let-poly generalization above us), fall back to the type the
@@ -2622,6 +2630,21 @@ let rec emit_expr (e : Ast.expr) : string =
               { Ast.loc = e.loc; ty = Some (List.assoc n captures);
                 node = Ast.Var n })) captures)
       in
+      if env_owned then
+        (* the fields are what `coro_new`'s copy would have made of them: deep
+           copies in the default region. Taken raw, a string captured from an
+           open block pointed into the block after it was released. *)
+        let owned_inits =
+          String.concat " "
+            (List.map (fun (n, t) ->
+              Printf.sprintf "__env->%s = __mcopy_%s(&__lang_default_region, %s);" (c_safe_name n)
+                (ty_tag t)
+                (emit_expr { Ast.loc = e.loc; ty = Some t; node = Ast.Var n })) captures)
+        in
+        Printf.sprintf
+          "({ %s* __env = (%s*)__lang_env_alloc(&__lang_coro_env_owner, sizeof(%s)); __env->__r = &__lang_coro_env_owner; __env->__copy = __mcopy_env_%s; %s (%s){.env = __env, .fn = %s%s}; })"
+          env_name env_name env_name env_name owned_inits cstruct adapter_name fn2_init
+      else
       Printf.sprintf
         "({ %s* __env = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); __env->__r = __lang_current_region; __env->__copy = __mcopy_env_%s; %s (%s){.env = __env, .fn = %s%s}; })"
         env_name env_name env_name env_name inits cstruct adapter_name fn2_init
@@ -2966,7 +2989,10 @@ let rec emit_expr (e : Ast.expr) : string =
         made in); move_check refuses a body that captures a block's value. *)
      | Ast.Var "coro_new" when not (user_shadows "coro_new") ->
        uses_coro := true;
-       "({ __auto_type __cl = " ^ emit_expr arg ^ "; \
+       (match arg.Ast.node with Ast.Fun _ -> coro_env_owned_next := true | _ -> ());
+       let arg_c = emit_expr arg in
+       coro_env_owned_next := false;
+       "({ __auto_type __cl = " ^ arg_c ^ "; \
            __lang_coro_new((void*)__cl.env, (void*)__cl.fn); })"
      | Ast.Var "coro_switch" when not (user_shadows "coro_switch") ->
        uses_coro := true;
@@ -2978,7 +3004,7 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "coro_scan_ints"; _ }, c_e); _ }, l_e); _ }, h_e)
        when not (user_shadows "coro_scan_ints") ->
        uses_coro := true;
-       "({ __lang_coro* __sc = " ^ emit_expr c_e ^ "; long long __sl = " ^ emit_expr l_e ^ "; \
+       "({ __lang_coro_h __sc = " ^ emit_expr c_e ^ "; long long __sl = " ^ emit_expr l_e ^ "; \
            long long __sh = " ^ emit_expr h_e ^ "; __auto_type __cl = " ^ emit_expr arg ^ "; \
            __lang_coro_scan_ints(__sc, __sl, __sh, (void*)__cl.env, (void*)__cl.fn); 0; })"
      | Ast.Var "spawn" when not (user_shadows "spawn") ->
@@ -5065,7 +5091,8 @@ type fn_decl = Monomorph.fn_decl = {
 let rec c_type_of (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyCon ("ListBuf", _) -> "__lang_listbuf*"   (* Q-106: one layout for every T *)
-  | Ast.TyCon ("Coro", _) -> "__lang_coro*"
+  (* v0.1.558: a handle, not the record's address -- see __lang_coro_slot *)
+  | Ast.TyCon ("Coro", _) -> "__lang_coro_h"
   | Ast.TyCon ("Vec", args) ->
     (* Phase 15.2: Vec[R, T] — expand T to a concrete type and produce
        `mere_vec_<tag>*`. args have not been walked yet, so walk them here
@@ -5642,8 +5669,8 @@ let emit_closure_env_copy_fn (env_name : string) (fields : (string * Ast.ty) lis
     "static void* __mcopy_env_%s(__lang_region* r, void* __p) {\n\
     \  %s* __s = (%s*)__p;\n\
     \  if (__s->__r == r) return __p;\n\
-    \  %s* __d = (%s*)__lang_region_alloc(r, sizeof(%s));\n\
-    \  *__d = *__s;\n  __d->__r = r;\n  __d->__copy = __s->__copy;\n%s\n  return (void*)__d;\n}"
+    \  %s* __d = (%s*)__lang_env_alloc(r, sizeof(%s));\n\
+    \  *__d = *__s;\n  __d->__r = r;\n  __d->__copy = __s->__copy;\n  r = __LANG_ENV_PAYLOAD(r);\n%s\n  return (void*)__d;\n}"
     env_name env_name env_name env_name env_name env_name steps
 
 let emit_closure_env_copy_fwd (env_name : string) : string =
@@ -10957,7 +10984,7 @@ let coro_runtime ~(stack_bytes : int) =
       "typedef struct __lang_coro_x {";
       "  void* sp;";
       "  char* map; size_t map_size;          /* the mmap, guard included; NULL for a thread's root */";
-      "  void* env; __lang_coro* (*fn)(void*, int);";
+      "  void* env; int env_owned; __lang_coro_h (*fn)(void*, int);";
       "  __lang_region* s_cur;";
       "  __lang_region** s_active; int s_active_n, s_active_cap;";
       "  int s_jb_set; jmp_buf s_jb;";
@@ -10971,6 +10998,7 @@ let coro_runtime ~(stack_bytes : int) =
       "} __lang_coro_x;";
       "struct __lang_coro {";
       "  int state;                           /* 0 new, 1 running, 2 suspended, 3 finished */";
+      "  unsigned slot;                       /* its entry in __lang_coro_slots */";
       "  pthread_t owner;";
       "  __lang_coro_x* x;                    /* NULL once finished and reaped */";
       "};";
@@ -10980,6 +11008,63 @@ let coro_runtime ~(stack_bytes : int) =
       "static _Thread_local __lang_coro* __lang_coro_zombie;";
       "static _Thread_local __lang_coro* __lang_coro_prev;";
       "static _Thread_local __lang_coro* __lang_coro_live;   /* every live coroutine, the root included */";
+      (* v0.1.558 (Q-183): GENERATIONAL HANDLES. The program held the record's
+         address, so the record could never be freed -- a finished coroutine is
+         still a value and switching to it must fail by name -- and every
+         coroutine a program ever made kept 24 bytes (32 with malloc's rounding).
+         A handle is a slot and a generation now, below 2^48 (24 bits each, so it
+         stays out of the range coro_scan_ints callers number their own handles
+         in): reaping frees the record and the slot and bumps the generation, and
+         a handle whose generation no longer matches answers "has finished" as
+         before. What a program keeps is its peak of live coroutines. A handle
+         held across 2^24 reuses of one slot would alias a later coroutine. *)
+      "#define __LANG_CORO_SLOT_BITS 24";
+      "static _Thread_local __lang_coro** __lang_coro_slots = NULL;";
+      "static _Thread_local unsigned* __lang_coro_gens = NULL;";
+      "static _Thread_local unsigned __lang_coro_nslots = 0, __lang_coro_capslots = 0;";
+      "static _Thread_local unsigned* __lang_coro_free = NULL;";
+      "static _Thread_local unsigned __lang_coro_nfree = 0, __lang_coro_capfree = 0;";
+      "static __lang_coro_h __lang_coro_handle(__lang_coro* c) {";
+      "  return ((__lang_coro_h)__lang_coro_gens[c->slot] << __LANG_CORO_SLOT_BITS) | c->slot;";
+      "}";
+      "static void __lang_coro_give_slot(__lang_coro* c) {";
+      "  unsigned s;";
+      "  if (__lang_coro_nfree > 0) s = __lang_coro_free[--__lang_coro_nfree];";
+      "  else {";
+      "    if (__lang_coro_nslots == 0) __lang_coro_nslots = 1;   /* slot 0 is never a handle */";
+      "    if (__lang_coro_nslots >= (1u << __LANG_CORO_SLOT_BITS)) __lang_fail_impl(\"coro_new: too many live coroutines\");";
+      "    if (__lang_coro_nslots >= __lang_coro_capslots) {";
+      "      unsigned nc = __lang_coro_capslots ? __lang_coro_capslots * 2 : 64;";
+      "      __lang_coro** ns = (__lang_coro**)realloc(__lang_coro_slots, sizeof(__lang_coro*) * nc);";
+      "      unsigned* ng = (unsigned*)realloc(__lang_coro_gens, sizeof(unsigned) * nc);";
+      "      if (!ns || !ng) __lang_fail_impl(\"out of memory\");";
+      "      for (unsigned i = __lang_coro_capslots; i < nc; i++) { ns[i] = NULL; ng[i] = 1; }";
+      "      __lang_coro_slots = ns; __lang_coro_gens = ng; __lang_coro_capslots = nc;";
+      "    }";
+      "    s = __lang_coro_nslots++;";
+      "  }";
+      "  __lang_coro_slots[s] = c; c->slot = s;";
+      "}";
+      "static void __lang_coro_drop_slot(__lang_coro* c) {";
+      "  unsigned s = c->slot;";
+      "  __lang_coro_slots[s] = NULL;";
+      "  __lang_coro_gens[s] = (__lang_coro_gens[s] + 1) & ((1u << __LANG_CORO_SLOT_BITS) - 1);";
+      "  if (__lang_coro_gens[s] == 0) __lang_coro_gens[s] = 1;";
+      "  if (__lang_coro_nfree == __lang_coro_capfree) {";
+      "    unsigned nc = __lang_coro_capfree ? __lang_coro_capfree * 2 : 64;";
+      "    unsigned* nf = (unsigned*)realloc(__lang_coro_free, sizeof(unsigned) * nc);";
+      "    if (!nf) __lang_fail_impl(\"out of memory\");";
+      "    __lang_coro_free = nf; __lang_coro_capfree = nc;";
+      "  }";
+      "  __lang_coro_free[__lang_coro_nfree++] = s;";
+      "}";
+      "/* the record a handle names, or NULL once that coroutine was reaped */";
+      "static __lang_coro* __lang_coro_of(__lang_coro_h h) {";
+      "  unsigned s = (unsigned)(h & ((1u << __LANG_CORO_SLOT_BITS) - 1));";
+      "  unsigned g = (unsigned)(h >> __LANG_CORO_SLOT_BITS);";
+      "  if (s == 0 || s >= __lang_coro_nslots || __lang_coro_gens[s] != g) return NULL;";
+      "  return __lang_coro_slots[s];";
+      "}";
       "static void __lang_coro_link(__lang_coro* c) {";
       "  c->x->lprev = NULL; c->x->lnext = __lang_coro_live;";
       "  if (__lang_coro_live) __lang_coro_live->x->lprev = c;";
@@ -11198,7 +11283,8 @@ let coro_runtime ~(stack_bytes : int) =
       "  pthread_mutex_unlock(&__lang_blk_dl_lock);";
       "  qsort(__lang_scan_sp, __lang_scan_nsp, sizeof(__lang_span), __lang_span_cmp);";
       "}";
-      "static void __lang_coro_scan_ints(__lang_coro* c, long long lo, long long hi, void* env, void* fn) {";
+      "static void __lang_coro_scan_ints(__lang_coro_h ch, long long lo, long long hi, void* env, void* fn) {";
+      "  __lang_coro* c = __lang_coro_of(ch);";
       "  if (lo < 0) lo = 0;";
       "  if (hi <= lo || !c) return;";
       "  int running = (c == __lang_coro_cur);";
@@ -11436,7 +11522,7 @@ let coro_runtime ~(stack_bytes : int) =
       "  /* a finished coroutine cannot unmap the stack it is standing on; the one";
       "     it handed over to does it here */";
       "  __lang_coro* z = __lang_coro_zombie;";
-      "  if (z) { __lang_coro_zombie = NULL; __lang_coro_stack_put(z->x->map, z->x->map_size); free(z->x->pw); free(z->x->sf); free(z->x); z->x = NULL; }";
+      "  if (z) { __lang_coro_zombie = NULL; __lang_coro_stack_put(z->x->map, z->x->map_size); free(z->x->pw); free(z->x->sf); free(z->x); z->x = NULL; __lang_coro_drop_slot(z); free(z); }";
       "}";
       "";
       "static void __lang_coro_enter_root(void) {";
@@ -11444,6 +11530,7 @@ let coro_runtime ~(stack_bytes : int) =
       "  __lang_coro_root.state = 1;";
       "  __lang_coro_root.owner = pthread_self();";
       "  __lang_coro_root.x = &__lang_coro_root_x;";
+      "  __lang_coro_give_slot(&__lang_coro_root);";
       "  __lang_coro_link(&__lang_coro_root);";
       "  __lang_region_pinned = __lang_coro_pins;";
       "  __lang_coro_cur = &__lang_coro_root;";
@@ -11486,7 +11573,7 @@ let coro_runtime ~(stack_bytes : int) =
       "static void __lang_coro_body(void* p) {";
       "  __lang_coro* self = (__lang_coro*)p;";
       "  __lang_coro_arrived(self);";
-      "  __lang_coro* next = self->x->fn(self->x->env, 0);";
+      "  __lang_coro* next = __lang_coro_of(self->x->fn(self->x->env, 0));";
       "  /* The body is over: every block it opened has closed and every try_or has";
       "     returned, so there is nothing to unwind -- only somewhere to go. */";
       "  if (!next || next == self || next->state == 3)";
@@ -11497,6 +11584,7 @@ let coro_runtime ~(stack_bytes : int) =
       "  __lang_region_active = NULL; __lang_region_active_n = 0; __lang_region_active_cap = 0;";
       "  self->state = 3;";
       "  __lang_coro_unlink(self);";
+      "  if (self->x->env_owned) free(self->x->env);";
       "  self->x->env = NULL;";
       "  __lang_coro_zombie = self;";
       "  __lang_coro_switch_to(next);";
@@ -11504,14 +11592,15 @@ let coro_runtime ~(stack_bytes : int) =
       "}";
       "";
       Printf.sprintf "static const size_t __lang_coro_stack_bytes = %dULL;" stack_bytes;
-      "static __lang_coro* __lang_coro_new(void* env, void* fn) {";
+      "static __lang_coro_h __lang_coro_new(void* env, void* fn) {";
       "  __lang_coro_enter_root();";
-      "  /* the closure outlives the block it was made in: its env goes where the";
-      "     coroutine's allocations go, the default region */";
+      "  /* the closure outlives the block it was made in: the coroutine owns a";
+      "     copy of its env (freed when the body ends) whose fields point into the";
+      "     default region, where the coroutine's allocations go (v0.1.558) */";
+      "  int owned = 0;";
       "  if (env) {";
       "    __lang_env_hdr* h = (__lang_env_hdr*)env;";
-      "    if (h->__r != &__lang_default_region && h->__copy)";
-      "      env = h->__copy(&__lang_default_region, env);";
+      "    if (h->__copy) { env = h->__copy(&__lang_coro_env_owner, env); owned = 1; }";
       "  }";
       "  size_t page = (size_t)sysconf(_SC_PAGESIZE);";
       "  size_t sz = (__lang_coro_stack_bytes + page - 1) / page * page;";
@@ -11530,7 +11619,7 @@ let coro_runtime ~(stack_bytes : int) =
       "  if (c) c->x = (__lang_coro_x*)calloc(1, sizeof(__lang_coro_x));";
       "  if (!c || !c->x) __lang_fail_impl(\"out of memory\");";
       "  c->x->map = m; c->x->map_size = sz + guard;";
-      "  c->x->env = env; c->x->fn = (__lang_coro* (*)(void*, int))fn;";
+      "  c->x->env = env; c->x->env_owned = owned; c->x->fn = (__lang_coro_h (*)(void*, int))fn;";
       "  c->owner = pthread_self();";
       "  /* a new stack starts where a new thread starts: the default region, no";
       "     live blocks, no try_or, and bounds of its own (guard page below them) */";
@@ -11538,12 +11627,15 @@ let coro_runtime ~(stack_bytes : int) =
       "  c->x->s_lo = m + guard; c->x->s_hi = m + sz + guard;";
       "  c->x->asan_bottom = m + guard; c->x->asan_size = sz;";
       "  c->x->sp = __lang_coro_seed(m + sz + guard, __lang_coro_body, c);";
+      "  __lang_coro_give_slot(c);";
       "  __lang_coro_link(c);";
-      "  return c;";
+      "  return __lang_coro_handle(c);";
       "}";
       "";
-      "static void __lang_coro_switch(__lang_coro* to) {";
+      "static void __lang_coro_switch(__lang_coro_h th) {";
       "  __lang_coro_enter_root();";
+      "  __lang_coro* to = __lang_coro_of(th);";
+      "  if (!to) __lang_fail_impl(\"coro_switch: that coroutine has finished\");";
       "  if (!pthread_equal(to->owner, pthread_self()))";
       "    __lang_fail_impl(\"coro_switch: that coroutine belongs to another thread\");";
       "  if (to->state == 3) __lang_fail_impl(\"coro_switch: that coroutine has finished\");";
@@ -11551,9 +11643,9 @@ let coro_runtime ~(stack_bytes : int) =
       "  __lang_coro_switch_to(to);";
       "}";
       "";
-      "static __lang_coro* __lang_coro_self(void) {";
+      "static __lang_coro_h __lang_coro_self(void) {";
       "  __lang_coro_enter_root();";
-      "  return __lang_coro_cur;";
+      "  return __lang_coro_handle(__lang_coro_cur);";
       "}" ]
 
 (* v0.1.292: every closure env begins with this header, so `__mcopy` can copy an
@@ -11572,7 +11664,26 @@ let env_header_runtime =
       "";
       "/* An FFI shim's env: a borrowed pointer with a header, so reading the";
       "   header is always valid for any closure with a non-NULL env. */";
-      "typedef struct { __lang_region* __r; void* (*__copy)(__lang_region*, void*); const char* s; } __lang_shim_env;" ]
+      "typedef struct { __lang_region* __r; void* (*__copy)(__lang_region*, void*); const char* s; } __lang_shim_env;";
+      "";
+      (* v0.1.558 (Q-183): A COROUTINE OWNS ITS ENV. `coro_new` copied the body's
+         env into the default region, which is never freed, so every coroutine a
+         program made kept its env for good -- 24 to 144 bytes each, measured,
+         and a server making one per connection grew without end. Copied with
+         this region as the destination, an env copier puts the env STRUCT in
+         malloc'd memory the coroutine frees when its body ends, and what the
+         fields point to in the default region as before (a captured string can
+         be kept by something else; the struct's own address never leaves). *)
+      "static __lang_region __lang_coro_env_owner;   /* a marker, never allocated from */";
+      "static void* __lang_env_alloc(__lang_region* r, size_t n) {";
+      "  if (r == &__lang_coro_env_owner) {";
+      "    void* p = malloc(n);";
+      "    if (!p) __lang_fail_impl(\"out of memory\");";
+      "    return p;";
+      "  }";
+      "  return __lang_region_alloc(r, n);";
+      "}";
+      "#define __LANG_ENV_PAYLOAD(r) ((r) == &__lang_coro_env_owner ? &__lang_default_region : (r))" ]
 
 let logger_runtime =
   String.concat "\n"
@@ -15256,6 +15367,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ ["typedef struct mere_bytes mere_bytes;";
        (* a closure that returns a Coro is typed before the runtime *)
        "typedef struct __lang_coro __lang_coro;";
+       "typedef unsigned long long __lang_coro_h;";
        (* Forward, for the same reason: a closure struct that returns one is
           declared before the runtime that defines it. *)
        "typedef struct mere_bytebuf mere_bytebuf;"; ""]
