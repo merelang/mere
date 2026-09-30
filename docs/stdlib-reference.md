@@ -1053,12 +1053,30 @@ What is refused, and where:
   or captured by `spawn` (type error). Switching to another thread's coroutine
   is therefore not expressible.
 - A body that captures a **container** made inside an open `region R { }` is
-  a type error. The body's env is copied into the default region when the
-  coroutine is made -- the coroutine may run after the block has ended -- and
-  a container's copy is the same handle. A captured value (a `str`, a record)
-  is copied with it and is fine.
+  a type error. The body's env is the coroutine's own copy -- the coroutine
+  may run after the block has ended -- and a container's copy is the same
+  handle. A captured value (a `str`, a record) is copied into the default
+  region with it and is fine.
 - Switching to a finished coroutine, and a body that ends by naming itself or a
   finished one, fail with a message (the first one catchably).
+
+**What a finished coroutine keeps: nothing, on C** (v0.1.558). A handle is a
+slot and a generation, not an address: when a finished coroutine is reaped its
+record, stack, saved state and env are freed and its slot is reused under a new
+generation, and a handle from before still answers "has finished". A program
+that makes a coroutine per connection holds its peak of live ones, not every one
+it made -- measured flat over 100k connections. Two ways to keep it that way:
+
+- **Write the body as a lambda at the `coro_new`**: `coro_new (fn () -> serve
+  fd)`. That lambda's env is made as the coroutine's own. A closure made
+  elsewhere -- `coro_new (serve_curried fd)` -- is made where the currying
+  happens, in the current region, and outside a `region` block that is the
+  default one: the coroutine owns a copy, and the original stays.
+- **Call saturated inside it** (`serve fd http`, not a partial application):
+  a saturated call allocates nothing on C.
+
+A handle held across 2^24 reuses of one slot would name a later coroutine.
+LLVM still keeps a 24-byte record per coroutine for its handle.
 
 Backends: the interpreter, C and LLVM (v0.1.544). On both native backends a
 coroutine's stack is what `stack` in mere.toml asks for (as for `spawn`),

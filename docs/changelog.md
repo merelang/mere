@@ -4,6 +4,48 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.558 — 2026-10-01
+
+_A finished coroutine keeps nothing (Q-183): its env is its own, and its handle is a slot and a generation._
+
+A server that made a coroutine per connection grew by about 120 bytes per
+connection for as long as it ran -- 13.9 → 23.1 MiB over 80k connections, and
+mpoll_coro had to write a pool of workers to stay flat. What a finished
+coroutine kept, measured exactly on C: its 24-byte handle record (32 with
+malloc's rounding) and its body's env, both for good.
+
+**The env is the coroutine's own.** `coro_new` copied it into the default
+region, which is never freed. An env copier can now be given a marker region
+that makes the env STRUCT malloc'd -- freed when the body ends -- while what its
+fields point to goes to the default region as before (a captured string may be
+kept by something else; the struct's address never leaves it). And the lambda
+written as `coro_new`'s argument is made that way to begin with, so nothing of
+it is ever in the default region; its captures are deep-copied into the default
+region as the copy would have made them.
+
+**The handle is a slot and a generation.** The program held the record's
+address, so the record could not be freed without a stale handle switching to
+some other coroutine. A handle is now 24 bits of slot and 24 of generation,
+below 2^48 (out of the range `coro_scan_ints` callers number their own handles
+in). Reaping frees the record, the stack, the saved state and the slot, and
+bumps the generation; a handle whose generation does not match answers "has
+finished". A program keeps its peak of live coroutines.
+
+Measured: a million coroutines made and finished hold 1 MiB (34 MiB before);
+the Q-183 probe retains 0 bytes per coroutine (64 before); mpoll_coro with a
+coroutine per connection, its body written as a lambda at the `coro_new`, is
+flat over 100k connections (3.4 / 2.9 / 3.3 MiB at 20k / 50k / 100k) with no
+pool. mere-ruby's corpus 267/267. `coro_check.sh` caps C at 16 MiB for the
+million and has a poison that keeps the records; poisons 5, 6 and 8 follow the
+new runtime. LLVM is unchanged and still keeps the 24-byte record (its cap
+stays 128 MiB).
+
+Also: `migration_check.sh` and `live_soundness_check.sh` both started
+PostgreSQL on port 54329, so a gate runner running them at once failed one of
+them; migration_check uses 54330.
+
+---
+
 ## v0.1.557 — 2026-10-01
 
 _A closure that leaves its region block no longer reads freed memory: runtime retention (Q-188)._

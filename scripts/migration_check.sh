@@ -33,7 +33,7 @@ command -v psql >/dev/null 2>&1 || { echo "migration_check: SKIP (no psql)"; exi
 TMP=$(mktemp -d) || exit 1
 started_own=no
 PGDATA_DIR="$TMP/pg"
-PGPORT_T=${PGPORT_T:-54329}
+PGPORT_T=${PGPORT_T:-54330}   # live_soundness has 54329: a gate runner runs them at once
 PGHOST_T=${PGHOST_T:-127.0.0.1}
 PGUSER_T=${PGUSER_T:-postgres}
 cleanup() {

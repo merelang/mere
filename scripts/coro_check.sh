@@ -112,11 +112,16 @@ while IFS='|' read -r f b w rc; do
 done < "$T/cases"
 
 # --- what a finished coroutine keeps ---------------------------------------
-# A million made and finished must stay small: the handle's record is never
-# freed (a finished coroutine is still a value), so everything else in it has
-# to be. 128 MiB is about four times what a correct run holds (34 MiB on macOS)
-# and a third of what one holding a jmp_buf per coroutine does.
-RSS_CAP=134217728
+# A million made and finished must stay small. On C (v0.1.558) a finished
+# coroutine keeps NOTHING -- its record is freed at reap and its handle carries
+# a generation, its env was its own -- and a correct run holds about 1.5 MiB:
+# the cap is 16 MiB, and a runtime that kept the 24-byte records (34 MiB) is
+# over it. LLVM still keeps the record for the handle to name, so its cap is
+# the old one: 128 MiB, four times what it holds and a third of what one
+# holding a jmp_buf per coroutine does.
+RSS_CAP_C=16777216
+RSS_CAP_LL=134217728
+cap_for() { if [ "$1" = c ]; then printf '%s' "$RSS_CAP_C"; else printf '%s' "$RSS_CAP_LL"; fi; }
 rss_of() {  # $1 = binary -> resident bytes, or empty when this host cannot say
   r=$( { /usr/bin/time -l "$1" >/dev/null; } 2>&1 | awk '/maximum resident/ {print $1}' )
   [ -n "$r" ] || r=$( { /usr/bin/time -v "$1" >/dev/null; } 2>&1 | awk '/Maximum resident/ {print $6 * 1024}' )
@@ -127,7 +132,7 @@ for be in c ll; do
   if ! why=$(build million -O2 "$be"); then printf '  FAIL  %s\n' "$name million: $why"; fail=1; continue; fi
   r=$(rss_of "$T/bin")
   if [ -z "$r" ]; then printf '  FAIL  %s\n' "$name million: no /usr/bin/time here, so the question was not asked"; fail=1
-  elif [ "$r" -lt "$RSS_CAP" ]; then printf '  ok    %s\n' "$name: a million finished coroutines hold $((r / 1048576)) MiB"
+  elif [ "$r" -lt "$(cap_for "$be")" ]; then printf '  ok    %s\n' "$name: a million finished coroutines hold $((r / 1048576)) MiB"
   else printf '  FAIL  %s\n' "$name: a million finished coroutines hold $((r / 1048576)) MiB"; fail=1; fi
 done
 
@@ -193,8 +198,12 @@ if [ "$MODE" = "--poison" ]; then
   poison c "C 2 (live-block stack not carried)" '/^  __lang_region_active = to->x->s_active; __lang_region_active_n = to->x->s_active_n;$/d' unwind
   poison c "C 3 (try_or jmpbuf not carried)" '/^  __lang_fail_jmpbuf_set = to->x->s_jb_set;$/d' fail nested
   poison c "C 4 (stack bounds not carried)" '/^  __lang_stack_lo = to->x->s_lo; __lang_stack_hi = to->x->s_hi;$/d' overflow
-  poison c "C 5 (env left in the block)" 's/^    if (h->__r != &__lang_default_region \&\& h->__copy)$/    if (0)/' env
-  poison c "C 6 (no finished check)" '/^  if (to->state == 3) __lang_fail_impl/d' finished
+  # v0.1.558: the env is the coroutine's own -- malloc'd where the lambda is
+  # written, or copied into the coroutine by coro_new. Left in the block means
+  # both undone: allocated in the current region, and not copied out.
+  poison c "C 5 (env left in the block)" 's/__lang_env_alloc(\&__lang_coro_env_owner, /__lang_region_alloc(__lang_current_region, /; s/__env->__r = \&__lang_coro_env_owner;/__env->__r = __lang_current_region;/; s/^    if (h->__copy) { env = h->__copy(\&__lang_coro_env_owner, env); owned = 1; }$/    ;/' env
+  # v0.1.558: a reaped coroutine is known by its handle's generation
+  poison c "C 6 (no finished check)" '/^  if (!to) __lang_fail_impl/d; /^  if (to->state == 3) __lang_fail_impl/d' finished
   poison c "C 9 (an arena a suspended stack points into is freed)" 's/^  if (__lang_region_pinned) {$/  if (0) {/' compact
   poison c "C 7 (no hand-over check)" 's/^  if (!next || next == self || next->state == 3)$/  if (!next)/' self_handoff
   poison c "C 10 (a pointer into a live block is not followed)" 's/^    if (st->nsp == 0 || a < st->sp\[0\]\.lo || a >= st->sp\[st->nsp - 1\]\.hi) continue;$/    continue;/' scan
@@ -217,10 +226,11 @@ if [ "$MODE" = "--poison" ]; then
     fi
     r=$(rss_of "$T/bin")
     if [ -z "$r" ]; then printf '  FAIL  %s\n' "POISON $2: no /usr/bin/time here, so the question was not asked"; pfail=1
-    elif [ "$r" -ge "$RSS_CAP" ]; then printf '  ok    %s\n' "POISON $2: million goes red ($((r / 1048576)) MiB)"
+    elif [ "$r" -ge "$(cap_for "$1")" ]; then printf '  ok    %s\n' "POISON $2: million goes red ($((r / 1048576)) MiB)"
     else printf '  FAIL  %s\n' "POISON $2: million still under the cap without it ($((r / 1048576)) MiB)"; pfail=1; fi
   }
-  poison_rss c "C 8 (the saved state is never freed)" 's/ free(z->x); z->x = NULL; }$/ }/'
+  poison_rss c "C 14 (a finished coroutine's record is never freed)" 's/ __lang_coro_drop_slot(z); free(z); }$/ __lang_coro_drop_slot(z); }/'
+  poison_rss c "C 8 (the saved state is never freed)" 's/ free(z->x); z->x = NULL; __lang_coro_drop_slot(z); free(z); }$/ __lang_coro_drop_slot(z); }/'
   poison_rss ll "LLVM 8 (the saved state is never freed)" '/^  call void @free(ptr %zx)$/d'
   if [ "$pfail" = 0 ] && [ "$fail" = 0 ]; then echo "coro --poison: ok (the gate can go red)"; else echo "coro --poison: FAILED"; pfail=1; fi
   exit "$pfail"
