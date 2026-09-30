@@ -90,6 +90,7 @@ variant_payload      GATED  REJECT    REJECT      -           Q-067
 str_out              SAFE   ACCEPT    ACCEPT      -           -
 variant_of_str       SAFE   ACCEPT    ACCEPT      -           -
 closure_out          SAFE   ACCEPT    ACCEPT      rv          -
+closure_captures_container SAFE ACCEPT ACCEPT  rv          Q-188
 scalar_out           SAFE   ACCEPT    ACCEPT      -           -
 recursive_type       SAFE   ACCEPT    ACCEPT      -           -
 fn_over_carry        SAFE   ACCEPT    ACCEPT      ll,w,rv     -

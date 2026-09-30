@@ -3863,6 +3863,49 @@ let lb_layout_llvm (ty_opt : Ast.ty option) (loc : Loc.t) : string * string * in
   let nil_tag = try Hashtbl.find variant_tags "Nil" with Not_found -> 0 in
   (node_struct, tup_struct, cons_tag, nil_tag)
 
+(* v0.1.557: can a value of this type hold a closure? A closure's env lives in
+   the region that was current when it was made, and an arrow type names no
+   region -- so storing such a value somewhere older is the one store the types
+   cannot vouch for (see __lang_region_keep_above). A container is a handle
+   whose own stores were marked when they happened, so it is not followed. *)
+let rec ty_has_arrow_seen (seen : string list) (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyArrow _ -> true
+  | Ast.TyTuple ts -> List.exists (ty_has_arrow_seen seen) ts
+  | Ast.TyRef (_, _, inner) -> ty_has_arrow_seen seen inner
+  | Ast.TyCon (("Vec" | "Map" | "StrBuf" | "ByteBuf" | "ListBuf" | "OwnedVec"
+               | "Channel" | "ThreadHandle" | "Coro" | "File" | "option" | "list"), args) ->
+    (* option and list are values whose payloads are stored with them *)
+    (match Ast.walk t with
+     | Ast.TyCon (("option" | "list"), args) -> List.exists (ty_has_arrow_seen seen) args
+     | _ -> ignore args; false)
+  | Ast.TyCon (n, args) when List.mem n seen -> List.exists (ty_has_arrow_seen seen) args
+  | Ast.TyCon (n, args) ->
+    let seen = n :: seen in
+    List.exists (ty_has_arrow_seen seen) args
+    || (match Hashtbl.find_opt Typer.records n with
+        | Some info -> List.exists (fun (_, ft) -> ty_has_arrow_seen seen ft) info.Typer.r_fields
+        | None -> false)
+    || (match Hashtbl.find_opt Exhaustive.type_variants n with
+        | Some ctors -> List.exists (fun (_, p) -> match p with
+            | Some pt -> ty_has_arrow_seen seen pt | None -> false) ctors
+        | None -> false)
+  | Ast.TyParam _ | Ast.TyVar _ -> false
+  | _ -> false
+let ty_has_arrow = ty_has_arrow_seen []
+
+(* mark the open blocks above the region of the container at `c` (a
+   `%struct` whose region is field `idx`), or above nothing (null: a store
+   into something that is not a block's) *)
+let emit_keep_above_field (struct_name : string) (idx : int) (c : string) : unit =
+  let rp = Printf.sprintf "%%kr%d" !reg_counter in
+  incr reg_counter;
+  let rv = Printf.sprintf "%%kv%d" !reg_counter in
+  incr reg_counter;
+  emit_instr (Printf.sprintf "  %s = getelementptr %%%s, ptr %s, i32 0, i32 %d" rp struct_name c idx);
+  emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" rv rp);
+  emit_instr (Printf.sprintf "  call void @__lang_region_keep_above(ptr %s)" rv)
+
 let rec emit_expr (env : env) (e : Ast.expr) : string =
   (* Q-029: whether THIS expression is in tail position. Cleared immediately,
      so a sub-expression is not in tail position unless the case below puts it
@@ -5805,6 +5848,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let c_elem = llvm_ty_of elem_ty in
     let b = emit_expr env b_e in
     let x = emit_expr env val_e in
+    (* a builder's cells live in the default region on this backend (v0.1.557) *)
+    if ty_has_arrow elem_ty then emit_instr "  call void @__lang_region_keep_above(ptr null)";
     let gep i = let r = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = getelementptr %%__lang_listbuf, ptr %s, i32 0, i32 %d" r b i); r in
     let l_frozen = fresh_label "lb_frozen" and l_chk = fresh_label "lb_chk"
@@ -5920,6 +5965,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let elem_ty = Hashtbl.find vec_instances elem_tag in
     let av = emit_expr env vec_e in
     let xv = emit_expr env val_e in
+    if ty_has_arrow elem_ty then emit_keep_above_field ("mere_vec_" ^ elem_tag) 3 av;
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_vec_%s_push(ptr %s, %s %s)"
@@ -6120,6 +6166,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let iv0 = emit_expr env idx_e in
     let iv = iv0 in
     let xv = emit_expr env val_e in
+    if ty_has_arrow elem_ty then emit_keep_above_field ("mere_vec_" ^ elem_tag) 3 av;
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_vec_%s_set(ptr %s, i64 %s, %s %s)"
@@ -6343,6 +6390,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let av = emit_expr env m_e in
     let kv = emit_expr env k_e in
     let vv = emit_expr env v_e in
+    if ty_has_arrow v_ty then emit_keep_above_field ("mere_map_" ^ k_tag ^ "_" ^ v_tag) 4 av;
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_map_%s_%s_set(ptr %s, %s %s, %s %s)"
@@ -6384,6 +6432,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let elem_ty = Hashtbl.find owned_vec_instances elem_tag in
     let av = emit_expr env vec_e in
     let xv = emit_expr env val_e in
+    (* an OwnedVec is the heap's, older than any block (v0.1.557) *)
+    if ty_has_arrow elem_ty then
+      emit_instr "  call void @__lang_region_keep_above(ptr null)";
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_owned_vec_%s_push(ptr %s, %s %s)"
@@ -8895,7 +8946,9 @@ let region_runtime_helpers =
        heap. Blocks never move, so pointers into earlier blocks stay valid
        across growth. Each block is `malloc(16 + cap)`: a 16-byte header holds
        the `prev` link (and keeps the data that follows 16-aligned). *)
-    [ "%__lang_region = type { ptr, ptr, i64, ptr }";
+    (* field 4 (v0.1.557): where this block's memory goes when it is released --
+       -1 freed, -2 kept for good, i >= 0 handed to the i-th open block. *)
+    [ "%__lang_region = type { ptr, ptr, i64, ptr, i32 }";
       "@__lang_default_region = internal global %__lang_region zeroinitializer";
       (* Q-106: the in-order list builder -- { head, tail, nil, depth, frozen }.
          Values on this backend all live in the default region, so a builder
@@ -8948,6 +9001,8 @@ let region_runtime_helpers =
       "entry:";
       "  %blocks_p = getelementptr %__lang_region, ptr %r, i32 0, i32 3";
       "  store ptr null, ptr %blocks_p";
+      "  %keep_p = getelementptr %__lang_region, ptr %r, i32 0, i32 4";
+      "  store i32 -1, ptr %keep_p";
       "  call void @__lang_region_add_block(ptr %r, i64 %cap)";
       "  ret void";
       "}";
@@ -9193,9 +9248,115 @@ let region_runtime_helpers =
       "  ret ptr %r";
       "}";
       "";
+      (* v0.1.557: RUNTIME RETENTION, this backend's form of the C backend's
+         __lang_region_keep. A closure's env is allocated in the current region
+         and this backend has no env copier, so a closure made inside
+         `region R { }` and stored somewhere older kept pointing into R: the
+         program read R's arena after the next block reused it (garbage, or a
+         segfault when a Vec was captured). The types cannot see it -- an arrow
+         names no region. So a store of a value whose type holds a closure marks
+         every open block above the destination: their memory goes to the
+         destination when they are released (or is kept for good, if the
+         destination is not an open block). Conservative -- a block the closure
+         does not point into is kept too -- and never unsafe. *)
+      "define void @__lang_region_keep_above(ptr %dst) {";
+      "entry:";
+      "  %n = load i32, ptr @__lang_region_active_n";
+      "  %arr = load ptr, ptr @__lang_region_active";
+      "  br label %find";
+      "find:";
+      "  %i = phi i32 [ %n, %entry ], [ %im1, %next ]";
+      "  %i0 = sub i32 %i, 1";
+      "  %gone = icmp slt i32 %i0, 0";
+      "  br i1 %gone, label %notfound, label %check";
+      "check:";
+      "  %ix = sext i32 %i0 to i64";
+      "  %slot = getelementptr ptr, ptr %arr, i64 %ix";
+      "  %ri = load ptr, ptr %slot";
+      "  %is = icmp eq ptr %ri, %dst";
+      "  br i1 %is, label %found, label %next";
+      "next:";
+      "  %im1 = sub i32 %i, 1";
+      "  br label %find";
+      "found:";
+      "  br label %mark";
+      "notfound:";
+      "  br label %mark";
+      "mark:";
+      "  %tgt = phi i32 [ %i0, %found ], [ -2, %notfound ]";
+      "  %start = phi i32 [ %i, %found ], [ 0, %notfound ]";
+      "  br label %mloop";
+      "mloop:";
+      "  %j = phi i32 [ %start, %mark ], [ %j1, %mbody ]";
+      "  %more = icmp slt i32 %j, %n";
+      "  br i1 %more, label %mbody, label %mdone";
+      "mbody:";
+      "  %jx = sext i32 %j to i64";
+      "  %js = getelementptr ptr, ptr %arr, i64 %jx";
+      "  %rj = load ptr, ptr %js";
+      "  %kp = getelementptr %__lang_region, ptr %rj, i32 0, i32 4";
+      "  %k = load i32, ptr %kp";
+      "  %knone = icmp eq i32 %k, -1";
+      "  %tsink = icmp eq i32 %tgt, -2";
+      "  %ksink = icmp eq i32 %k, -2";
+      "  %lt = icmp slt i32 %tgt, %k";
+      "  %minv = select i1 %lt, i32 %tgt, i32 %k";
+      "  %v1 = select i1 %ksink, i32 -2, i32 %minv";
+      "  %v2 = select i1 %tsink, i32 -2, i32 %v1";
+      "  %v3 = select i1 %knone, i32 %tgt, i32 %v2";
+      "  store i32 %v3, ptr %kp";
+      "  %j1 = add i32 %j, 1";
+      "  br label %mloop";
+      "mdone:";
+      "  ret void";
+      "}";
+      "";
+      "define void @__lang_region_adopt(ptr %t, ptr %r) {";
+      "entry:";
+      "  %rbp = getelementptr %__lang_region, ptr %r, i32 0, i32 3";
+      "  %rh = load ptr, ptr %rbp";
+      "  %empty = icmp eq ptr %rh, null";
+      "  br i1 %empty, label %done, label %walk";
+      "walk:";
+      "  %b = phi ptr [ %rh, %entry ], [ %p, %walk ]";
+      "  %p = load ptr, ptr %b";
+      "  %last = icmp eq ptr %p, null";
+      "  br i1 %last, label %link, label %walk";
+      "link:";
+      "  %tbp = getelementptr %__lang_region, ptr %t, i32 0, i32 3";
+      "  %th = load ptr, ptr %tbp";
+      "  %thnull = icmp eq ptr %th, null";
+      "  br i1 %thnull, label %done, label %behind";
+      "behind:";
+      "  %thprev = load ptr, ptr %th";
+      "  store ptr %thprev, ptr %b";
+      "  store ptr %rh, ptr %th";
+      "  br label %done";
+      "done:";
+      "  store ptr null, ptr %rbp";
+      "  ret void";
+      "}";
+      "";
       "define void @__lang_region_block_release(ptr %r) {";
       "entry:";
+      "  %keep_p = getelementptr %__lang_region, ptr %r, i32 0, i32 4";
+      "  %k = load i32, ptr %keep_p";
+      "  %none = icmp eq i32 %k, -1";
+      "  br i1 %none, label %freeit, label %keepit";
+      "freeit:";
       "  call void @__lang_region_free(ptr %r)";
+      "  br label %popchk";
+      "keepit:";
+      "  %sink = icmp eq i32 %k, -2";
+      "  br i1 %sink, label %popchk, label %adopt";
+      "adopt:";
+      "  %aarr = load ptr, ptr @__lang_region_active";
+      "  %kx = sext i32 %k to i64";
+      "  %ts = getelementptr ptr, ptr %aarr, i64 %kx";
+      "  %t = load ptr, ptr %ts";
+      "  call void @__lang_region_adopt(ptr %t, ptr %r)";
+      "  br label %popchk";
+      "popchk:";
       "  %n = load i32, ptr @__lang_region_active_n";
       "  %gt = icmp sgt i32 %n, 0";
       "  br i1 %gt, label %pop, label %fin";

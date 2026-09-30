@@ -1,0 +1,14 @@
+// SAFE since v0.1.557 (Q-188), by runtime retention rather than by the types.
+// A closure made in R captures a Vec of R and is stored in `o`, which outlives
+// R. An arrow type names no region, so no check sees the Vec escape; it was a
+// use-after-free on C and LLVM. The store marks R, and R's release hands its
+// memory to the destination instead of freeing it. The runtime witness -- a
+// program that reuses the arena and reads the Vec back -- is
+// test/parity/region_closure_escape.mere; this row holds the verdict.
+let o = vec_new ();
+let _ = region R {
+  let v = vec_new () in
+  let _ = vec_push v 41 in
+  vec_push o (fn (u: unit) -> vec_get v 0 + 1)
+};
+print (str_of_int ((vec_get o 0) ()))

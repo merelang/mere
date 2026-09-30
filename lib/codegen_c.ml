@@ -6396,8 +6396,12 @@ let emit_copy_fn (tag : string) (t : Ast.ty) : string =
     header ^ " {\n  size_t n = __lang_str_size(v);\n  \
               char* s = __lang_str_alloc(r, n);\n  \
               memcpy(s, v, n);\n  return s;\n}"
-  | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "Channel"
-                | "ThreadHandle" | "ListBuf" | "Coro"), _) ->
+  | Ast.TyCon (("Map" | "Vec" | "StrBuf" | "ByteBuf" | "ListBuf"), _) ->
+    (* v0.1.557: a container is still copied as its handle -- it is a mutable
+       identity -- but a handle stored where it outlives its block keeps the
+       block's memory (see __lang_region_keep). *)
+    header ^ " { if (v) __lang_region_keep(v->region, r); return v; }"
+  | Ast.TyCon (("OwnedVec" | "Channel" | "ThreadHandle" | "Coro"), _) ->
     header ^ " { (void)r; return v; }"
   | Ast.TyTuple ts ->
     let steps =
@@ -9492,6 +9496,13 @@ let region_runtime_helpers =
          A static string (a `region R` name, or a runtime-owned arena's label)
          or NULL for the default region and for an arena already charged. *)
       "  const char* site;";
+      (* v0.1.557 (runtime retention): `seq` orders the block regions a thread has
+         open -- 0 for the default region and for every arena that is not a
+         block's (compaction's private arenas, a --lib call's) -- and `keep` is
+         the region this one's blocks must be handed to when it is released,
+         because a value in it was stored where it will outlive the block. *)
+      "  unsigned long seq;";
+      "  struct __lang_region_s* keep;";
       "} __lang_region;";
       "static __lang_region __lang_default_region;";
       "";
@@ -9619,6 +9630,8 @@ let region_runtime_helpers =
       "  r->blocks = NULL;";
       "  r->alloc_total = 0;";
       "  r->site = 0;";
+      "  r->seq = 0;";
+      "  r->keep = NULL;";
       "  __lang_region_add_block(r, cap);";
       "}";
       "";
@@ -9983,6 +9996,49 @@ let region_runtime_helpers =
       "  }";
       "}";
       "";
+      (* v0.1.557: RUNTIME RETENTION. A value made in a `region R { }` block can be
+         stored where it outlives the block without its type saying so -- a
+         closure that captured a Vec of R, pushed into a Vec outside R. The
+         types cannot see it (an arrow type names no region), so it was a
+         use-after-free: the compiled program read R's arena after the next block
+         reused it (1401 on the interpreter, -2 on C). Every store goes through a
+         `__mcopy_` copier into the destination's region, and a container's copier
+         now asks this: if the container's region is a block younger than the
+         destination, that block must not free its memory -- it is handed to the
+         destination when it is released (or, for a destination that is not a
+         block, to a region that is never freed). A wrong guess costs memory,
+         never safety: nothing here depends on the types being precise. *)
+      "static _Thread_local unsigned long __lang_region_seq_ctr = 0;";
+      "static _Thread_local __lang_region __lang_kept_region;   /* retained, never freed */";
+      "static void __lang_region_keep(__lang_region* src, __lang_region* dst) {";
+      "  if (!src || src == dst || src->seq == 0) return;   /* not a block: it outlives any */";
+      "  if (dst && dst->seq != 0 && dst->seq >= src->seq) return;   /* dst is the younger */";
+      "  __lang_region* t = (dst && dst->seq != 0) ? dst : &__lang_kept_region;";
+      "  if (!src->keep) { src->keep = t; return; }";
+      "  if (src->keep == &__lang_kept_region) return;";
+      "  if (t == &__lang_kept_region || t->seq < src->keep->seq) src->keep = t;";
+      "}";
+      "/* hand r's blocks to t: they are t's now, freed when t is */";
+      "static void __lang_region_adopt(__lang_region* t, __lang_region* r) {";
+      "  __lang_region_block* head = r->blocks;";
+      "  if (!head) return;";
+      "  __lang_region_block* last = head;";
+      "  for (;;) { last->owner = t; if (!last->prev) break; last = last->prev; }";
+      "  if (!t->blocks) {";
+      "    t->blocks = head; t->base = (char*)(head + 1); t->cap = head->pad;";
+      "    t->top = t->base + t->cap;   /* full: nothing is bumped into a kept block */";
+      "  } else {";
+      "    last->prev = t->blocks->prev;";
+      "    t->blocks->prev = head;";
+      "  }";
+      "  r->blocks = NULL;";
+      "}";
+      "static int __lang_region_is_active(__lang_region* t) {";
+      "  for (int i = __lang_region_active_n - 1; i >= 0; i--)";
+      "    if (__lang_region_active[i] == t) return 1;";
+      "  return 0;";
+      "}";
+      "";
       "static __lang_region* __lang_region_block_acquire(const char* __site) {";
       "  if (__lang_region_cache_n > 0) {";
       "    __lang_region* r = __lang_region_cache[--__lang_region_cache_n];";
@@ -9990,12 +10046,14 @@ let region_runtime_helpers =
       (* the struct is recycled across sites, so each use starts its own tally *)
       "    r->alloc_total = 0;";
       "    r->site = __site;";
+      "    r->seq = ++__lang_region_seq_ctr; r->keep = NULL;";
       "    __lang_region_active_push(r);";
       "    return r;";
       "  }";
       "  __lang_region* r = (__lang_region*)malloc(sizeof(__lang_region));";
       "  __lang_region_init(r, 1 << 20);";
       "  r->site = __site;";
+      "  r->seq = ++__lang_region_seq_ctr;";
       "  __lang_region_active_push(r);";
       "  return r;";
       "}";
@@ -10003,6 +10061,26 @@ let region_runtime_helpers =
       "static void __lang_region_block_release(__lang_region* r) {";
       "  __lang_region_active_drop(r);";
       "  __lang_region_charge(r);";
+      "  if (r->keep && getenv(\"MERE_KEEP_TRACE\")) {";
+      "    size_t kb = 0; for (__lang_region_block* b = r->blocks; b; b = b->prev) kb += b->pad;";
+      "    fprintf(stderr, \"keep %s -> %s %zu\\n\", r->site ? r->site : \"?\",";
+      "            r->keep == &__lang_kept_region ? \"(kept)\" : (r->keep->site ? r->keep->site : \"?\"), kb);";
+      "  }";
+      "  if (r->keep) {";
+      "    /* a value in r outlives the block: its memory goes to the region it";
+      "       was stored into, or -- if that is not a block still open on this";
+      "       stack -- to the one that is never freed */";
+      "    __lang_region* t = r->keep;";
+      "    if (t != &__lang_kept_region && !__lang_region_is_active(t)) t = &__lang_kept_region;";
+      "    if (t != &__lang_kept_region && t->keep) __lang_region_keep(t, t->keep);";
+      "    __lang_region_adopt(t, r);";
+      "    r->site = 0; r->keep = NULL; r->seq = 0;";
+      "    __lang_region_init(r, 1 << 20);";
+      "    if (__lang_region_cache_n < __LANG_REGION_CACHE_CAP)";
+      "      __lang_region_cache[__lang_region_cache_n++] = r;";
+      "    else { __lang_region_free(r); free(r); }";
+      "    return;";
+      "  }";
       (* charged: the __lang_region_free below is the same arena and must not
          count it twice, and the recycled struct starts clean at acquire *)
       "  r->site = 0;";
