@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.553 — 2026-09-30
+
+_A table a helper builds at module init is module state under `--lib`, not a call's._
+
+Under `mere -c --lib` every top-level function body is typed inside the call
+region (v0.1.455), so a helper that builds and returns a container has
+`Vec[__call, _]` in its type. Called at module init it runs outside any call
+and the container lives in the default region -- but the value's type still
+said `__call`, and the library-boundary escape check refused it:
+
+```
+let vec_of = fn xs -> ...;              // builds and returns a Vec
+let tbl = vec_of (Cons (3, Cons (4, Nil)));
+pub let get = fn (i: int) -> vec_get tbl i;
+```
+
+`region escape across the library boundary: tbl now holds a value built during
+a call ... build it at module init` -- which is what the program did. Every
+table mgz builds that way was refused (with carets on the functions after it,
+not on the table), so mpng-ruby, which links mgz into a library, had not built
+since v0.1.455. Found by running every downstream repository's checks at once.
+
+A non-function top-level value's type now says `__heap` where it said
+`__call`: at init the call region is the default one. `lib_check.sh` has the
+case, and its store-into-module-state case is still refused.
+
+---
+
 ## v0.1.552 — 2026-09-30
 
 _`mere test`: the checks a package declares, found and run._

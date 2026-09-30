@@ -1201,7 +1201,23 @@ let infer_top_let outer_env (value : Ast.expr) : Ast.ty =
      the current region is the default one, so wrapping it would claim a lifetime it
      does not have. *)
   let wrap = !Typer.lib_boundary && is_fn_value value in
-  if not wrap then Typer.infer outer_env value
+  if not wrap then begin
+    let t = Typer.infer outer_env value in
+    (* ⚠ A VALUE BUILT AT MODULE INIT LIVES IN THE DEFAULT REGION, WHATEVER THE
+       HELPER THAT BUILT IT SAYS. Under --lib every top-level FUNCTION body is typed
+       inside the call region, so a helper that builds and returns a container --
+       `vec_of`, `mk_table` -- has `Vec[__call, _]` in its type. Called at module
+       init it runs outside any call, and the container is in the default region;
+       but its type still said `__call`, the escape check refused the table as if
+       an exported call had built it, and told the author to "build it at module
+       init", which is what they had done. Every table mgz builds with `vec_of`
+       was refused, so mpng-ruby, which links mgz into a library, has not built
+       since v0.1.455. At init the call region is the default one: say so in the
+       value's type. *)
+    if !Typer.lib_boundary then
+      Typer.subst_region Typer.call_region_name "__heap" (Typer.resolve_regions_ty t)
+    else t
+  end
   else begin
     Typer.active_regions := Typer.call_region_name :: !Typer.active_regions;
     let restore () = Typer.active_regions := List.tl !Typer.active_regions in

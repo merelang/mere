@@ -372,4 +372,24 @@ grep -q "mere_vec_int_new(__lang_current_region)" "$TMP/ok.c" || {
   exit 1; }
 echo "lib_check: a call-local container still lands in the call's own region"
 
+# ...AND A TABLE BUILT AT MODULE INIT BY A HELPER IS MODULE STATE, NOT A CALL'S.
+# Under --lib every top-level function body is typed inside the call region, so a
+# helper that builds and returns a container has `Vec[__call, _]` in its type --
+# and `let tbl = vec_of [...]` at top level was refused as if a call had built it,
+# with a message telling the author to build it at module init, where it was.
+# Every table mgz builds that way was refused, and mpng-ruby (which links mgz)
+# had not built since v0.1.455. Accepted now, and the store above still is not.
+cat > "$TMP/init.mere" <<'MERE'
+let vec_of = fn xs ->
+  let v = vec_new () in
+  let rec go = fn l -> match l with Nil -> v | Cons (h, t) -> let _ = vec_push v (h : int) in go t in
+  go xs;
+let tbl = vec_of (Cons (3, Cons (4, Nil)));
+pub let get = fn (i: int) -> vec_get tbl i;
+MERE
+"$MERE" -c --lib "$TMP/init.mere" > "$TMP/init.c" 2>"$TMP/init.err" || {
+  echo "FAIL lib_check: a table built at module init by a helper was refused"
+  sed -n '1,2p' "$TMP/init.err"; exit 1; }
+echo "lib_check: a table a helper builds at module init is module state, not a call's"
+
 echo "lib_check: ok (boundary exact, header-built host, str/bytes round-trip, fail -> status, calls are transactions, 8-thread clean, lifecycle abuse clean, containers cannot outlive a call)"
