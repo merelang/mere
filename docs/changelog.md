@@ -4,6 +4,70 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.555 — 2026-09-30
+
+_A listener on a chosen address, bind(2) on a socket, the address a socket has, and the errno fd_* keeps._
+
+`tcp_listen` binds `INADDR_ANY` and nothing could ask which address or port a
+socket had: `bind(2)`, `getsockname(2)` and `getpeername(2)` take a
+`struct sockaddr *`, which no extern can spell. A ruby on top of this answered
+`TCPServer.new("localhost", 0).addr` with the wildcard where ruby answers
+`::1`, could not raise `EADDRINUSE` or `EADDRNOTAVAIL` or `EACCES` from a bind,
+and read the bound port back from lsof(8). And `fd_read` / `fd_write` answer
+`-1` without errno, so a connection the peer reset read as a bad descriptor and
+every refused socket write had to be called `EPIPE`.
+
+The runtime keeps the sockaddr, the way it keeps `struct rlimit` (v0.1.550):
+an address goes in as the text `getaddrinfo(3)` reads and comes out as the text
+`getnameinfo(3)` writes, and the family comes out as a name, because
+`AF_INET6` is 30 on macOS and 10 on Linux.
+
+    tcp_listen_at (host) (port) (backlog) -> int   the fd; -1 errno kept; -2 did
+                                                   not resolve. "" is the wildcard
+    sock_bind (fd) (host) (port) -> int            numeric host, the socket's own
+                                                   family; 0 or -1
+    sock_local_addr (fd) -> str                    "inet 5000 127.0.0.1",
+    sock_peer_addr (fd) -> str                     "inet6 5000 ::1", "unix 0 <path>";
+                                                   "" on failure
+    fd_last_errno () -> int                        errno of the last of these or
+                                                   of any fd_* call, 0 on success
+
+`tcp_listen_at` does what ruby's `TCPServer.new` does (ext/socket/ipsocket.c,
+`init_inetsock_internal`): each answer of an `AI_PASSIVE` lookup in order gets
+`socket`, `SO_REUSEADDR` and `bind`, the first that binds is the listener, and
+when none does the errno is the last answer's. `fd_*` return what they returned
+before; every call now stores the errno of its own syscall in the per-thread
+slot `fd_last_errno` reads, and a refusal the runtime decides itself (a negative
+fd, an unknown mode, a read of size 0) is `EBADF` or `EINVAL`.
+
+`scripts/sockaddr_check.sh`, 73 rows, in CI. Each row is a port the kernel gave
+the probe, compared with what the other end of a connection reports, or a
+refusal it provoked: a port in use, an address the host does not have (TEST-NET-1),
+a bind of a socket already bound, and a reset provoked by closing a socket with
+an unread byte in it after `poll(2)` said the byte had arrived. The errno
+numbers differ by platform exactly here (`EADDRINUSE` 48 and 98, `ECONNRESET`
+54 and 104, `ENOTSOCK` 38 and 88), so the expected ones are read from the
+host's own `<errno.h>` by a C program the gate compiles. Run on macOS arm64 and
+on Linux arm64 and x86-64, as root and as an unprivileged user. Poisoned six
+ways -- errno not per thread, errno dropped by `fd_*`, the last answer bound
+instead of the first, the socket's family ignored by `sock_bind`, no
+`SO_REUSEADDR`, the family names swapped -- and each moved at least one row.
+
+  ⚠ Three of the poisons moved nothing on the probe's first version. The
+  wildcard row accepted `::` or `0.0.0.0`, which is right -- a host without
+  IPv6 answers only the second -- and so it also accepted a listener bound to
+  the last answer. What does not depend on the host is that a listener on a
+  name is reached by a connect to the same name; that row catches it. The
+  `SO_REUSEADDR` row needed a port in TIME_WAIT, which an RST does not leave, so
+  it closes a connection from the server side first. And `sock_bind` binding
+  `""` on an IPv4 socket is only a question where `::` is answered first, so
+  that row binds exactly that.
+
+Interpreter, LLVM and Wasm are unchanged, as for `fd_*`: the interpreter says it
+has no mock for the extern, LLVM and Wasm leave it an import.
+
+---
+
 ## v0.1.554 — 2026-09-30
 
 _A gate that did not run says so in its exit status: 2 could not answer, 3 optional._

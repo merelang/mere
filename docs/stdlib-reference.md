@@ -134,7 +134,7 @@ they take flat-arena offsets rather than `bytes`. They are native-only in practi
 
 | name | type | notes |
 |---|---|---|
-| `tcp_listen` | `int -> int` | Bind a listener on a port (all interfaces), `SO_REUSEADDR`; the fd, or -1 |
+| `tcp_listen` | `int -> int` | Bind a listener on a port (IPv4, all interfaces), `SO_REUSEADDR`; the fd, or -1. For a chosen address see `tcp_listen_at` below |
 | `tcp_accept` | `int -> int` | Accept one connection; the fd, or -1 |
 | `tcp_connect` | `str -> int -> int` | Dial host:port; the fd, or -1 |
 | `tcp_write` | `int -> int -> int -> int` | Write `len` bytes from an arena offset |
@@ -234,6 +234,52 @@ let fd = ev / 8;
 `tcp_read` / `tcp_write` are `read(2)` / `write(2)` and are likewise not
 socket-specific, so the same pair reads whichever fd came back ready.
 
+**A listener on a chosen address, `bind(2)`, and the address a socket has**
+(v0.1.555), also `extern fn` declarations, C backend only. `bind(2)`,
+`getsockname(2)` and `getpeername(2)` take a `struct sockaddr *`, which no extern
+can spell, so `tcp_listen` binds `INADDR_ANY` and nothing could ask which address
+or port a socket had. Here an address goes in as the text `getaddrinfo(3)` reads
+and comes out as the text `getnameinfo(3)` writes, and the family comes out as a
+**name**, because `AF_INET6` is 30 on macOS and 10 on Linux.
+
+| name | type | notes |
+|---|---|---|
+| `tcp_listen_at` | `str -> int -> int -> int` | `host port backlog`. `getaddrinfo` with `AI_PASSIVE`; each answer in order gets `socket`, `SO_REUSEADDR` and `bind`, and the **first that binds** is the listener (ruby's `TCPServer.new`). `""` is the wildcard (`::` before `0.0.0.0` on a host with IPv6). The fd; `-1` with errno kept (the last answer's, when none binds); `-2` when the name does not resolve. Ignores `SIGPIPE`, as `tcp_listen` does |
+| `sock_bind` | `int -> str -> int -> int` | `fd host port`: `bind(2)` an existing socket to a **numeric** address (no lookup; a name is `-2`). `""` is the wildcard of the socket's own family. No `SO_REUSEADDR`. `0`, or `-1` |
+| `sock_local_addr` | `int -> str` | `getsockname(2)` as `"<family> <port> <address>"` — `"inet 5000 127.0.0.1"`, `"inet6 5000 ::1"`, `"unix 0 <path>"` (the path last: it may hold spaces), `"other 0 "`. `""` on failure |
+| `sock_peer_addr` | `int -> str` | `getpeername(2)`, the same text; `""` with `ENOTCONN` for a socket with no peer |
+| `fd_last_errno` | `unit -> int` | The errno the last of these **and of the `fd_*` family** left, `0` when it succeeded. Per thread |
+
+The address text is what ruby's `Addrinfo#ip_address` says: a scoped IPv6 address
+keeps its `%zone`, a v4-mapped one its `::ffff:` prefix.
+
+**`fd_*` keep errno too.** `fd_read` and `fd_write` answer `-1` on failure as they
+always have; since v0.1.555 the cause is kept beside the answer. A read of a
+connection the peer reset is `-1` with `ECONNRESET` — before, a caller could not
+tell it from a bad descriptor, and a ruby on top of this reported every refused
+socket write as `EPIPE`. A refusal the runtime decides itself (a negative fd, an
+unknown mode or whence, a read of size `0`) is `EBADF` or `EINVAL`, as the kernel
+would say. The number is the platform's: `EADDRINUSE` is 48 on macOS and 98 on
+Linux.
+
+```mere
+extern fn tcp_listen_at: str -> int -> int -> int;
+extern fn sock_local_addr: int -> str;
+extern fn fd_last_errno: unit -> int;
+
+let srv = tcp_listen_at "localhost" 0 128;   // ::1 first on macOS
+let at = sock_local_addr srv;                // "inet6 53375 ::1"
+let again = tcp_listen_at "::1" 53375 128;   // -1
+let e = fd_last_errno ();                    // EADDRINUSE
+```
+
+`scripts/sockaddr_check.sh` is the gate: every row is a port the kernel gave the
+probe, compared with what the other end of a connection reports, or a refusal the
+probe provoked — a port in use, an address the host does not have, a reset
+provoked by closing a socket with an unread byte in it. The expected errno numbers
+are read from the host's own `<errno.h>`, so the transcript holds on macOS and
+Linux alike.
+
 **Resource limits, scheduling priority and advisory locks** (v0.1.550), also
 `extern fn` declarations, C backend only. None of the five syscalls can be
 declared by hand: `getrlimit` / `setrlimit` move the limits through a
@@ -260,8 +306,9 @@ of **`-1` is `RLIM_INFINITY`** in both directions, the priority selector is
 | `file_flock` | `int -> int -> int` | `fd op`. `0` done, **`1` refused** because another open holds the lock and the non-blocking bit was set, `-1` any other failure. A bit outside the four is `EINVAL` |
 | `proc_last_errno` | `unit -> int` | The errno the last of these calls left, `0` when it succeeded |
 
-**Why errno is kept here when `file_*` and `fd_*` do not keep it.** Those answer
-`-1` and leave errno alone. `getpriority` answers `-1` for a process whose
+**Why errno is kept here when `file_*` does not keep it** (and `fd_*` did not
+until v0.1.555, when it got `fd_last_errno`). `file_*` answers
+`-1` and leaves errno alone. `getpriority` answers `-1` for a process whose
 priority is `-1`, so its failure is only visible in errno — and errno itself is
 gone by the time a Mere program can read it, since the next allocation may call
 into libc. Each call above stores the errno of its own syscall in a per-thread
