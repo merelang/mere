@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.562 — 2026-10-01
+
+_An inner function takes region parameters of its own._
+
+A top-level function's allocations follow its caller's region (v0.1.464): the
+region travels in as a leading argument of its `__direct` twin. An inner
+function's did not -- a `let rec` in a body, a `let`-bound lambda, a lift inside
+a lift -- so whatever it allocated, and whatever the functions it called
+allocated, went to the default region even when the function around it had been
+handed a block:
+
+```
+let pr = fn (n: int) -> let v = vec_new () in let _ = vec_push v n in v;
+let sr = fn (n: int) ->
+  let rec ip = fn (k: int) -> if k == 0 then pr n else ip (k - 1) in
+  ip 2;
+region R { let a = sr 5 in ... }   // a's Vec: R now, the default region before
+```
+
+The typer already quantified an inner function's allocation regions and named
+them (it must: v0.1.559 stopped it, which took region polymorphism away, and
+v0.1.560 withdrew that). What was missing was a parameter to carry them and a
+call that passes them. Now they lead the lifted definition (and its `__direct`
+twin on C), a direct call passes what it bound -- read off the call the way a
+top-level call's are -- and a use as a value, through the closure adapter, passes
+the default region, as a top-level function's closure form does. A self-tail
+call stays a jump only while it hands its regions back unchanged. C and LLVM.
+
+`test/regionparams/inner.mere`: an inner `let rec`, a `let`-bound lambda and a
+lift inside a lift now read `^param` in `--dump-region-params` (which learned
+that an inner function's parameters are parameters), and region_params_check
+asserts the emitted calls on both backends. `region_inner_poly` still holds.
+
+**Not reached: an inner function of one member of a `let rec ... and` group
+calling another member.** The group's region variables are unmarked when the
+inner binding generalises, because a marked variable it does not quantify might
+equally belong to an enclosing value, and then a call inside a block would claim
+it -- keeping the marks made mere-ruby's `benv` a `region BLK` value again.
+Telling the two owners apart is a change to generalisation. It is also the shape
+mgit has (`store_read` reaches `loose_read` through an inner function, in one
+group), so mgit's reads are unchanged: 33.7 GB of its allocation still goes to
+the default region, counted by the runtime.
+
+---
+
 ## v0.1.561 — 2026-10-01
 
 _A coroutine transfer carries a value, typed by the one that receives it (Q-184)._

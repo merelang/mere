@@ -2083,7 +2083,9 @@ let region_param_report ?base_dir ?(search_paths = []) s =
        in
        (match head e [] with
         | Some (n, vnode, _) ->
-          (match List.assoc_opt n !type_env, vnode.Ast.ty with
+          (match (match List.assoc_opt n !type_env with
+                  | Some s -> Some s
+                  | None -> Hashtbl.find_opt Typer.top_schemes n), vnode.Ast.ty with
            | Some sch, Some inst when Typer.scheme_region_params sch <> [] ->
              let got = Typer.region_args_at sch inst in
              if got <> [] then
@@ -2093,7 +2095,21 @@ let region_param_report ?base_dir ?(search_paths = []) s =
            | _ -> ())
         | None -> ())
      | _ -> ());
-    List.iter (walk_calls caller caller_params) (Ast.children e)
+    (* v0.1.562: an inner function's own region parameters are parameters where its
+       body calls -- the backends pass them (lifted_fn.l_rps) -- so a call from inside
+       it that hands one on is `^param`, not undecided *)
+    let inner_ps n =
+      match Hashtbl.find_opt Typer.top_schemes n with
+      | Some sch -> Typer.scheme_region_params sch
+      | None -> [] in
+    match e.Ast.node with
+    | Ast.Let ({ Ast.pnode = Ast.P_var n; _ }, ({ Ast.node = Ast.Fun _; _ } as v), body) ->
+      walk_calls caller (inner_ps n @ caller_params) v;
+      walk_calls caller caller_params body
+    | Ast.Let_rec (bs, body) ->
+      List.iter (fun (n, _, v) -> walk_calls caller (inner_ps n @ caller_params) v) bs;
+      walk_calls caller caller_params body
+    | _ -> List.iter (walk_calls caller caller_params) (Ast.children e)
   in
   List.iter (fun decl ->
     match decl with

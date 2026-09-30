@@ -1415,7 +1415,10 @@ let mangled_inst_name_llvm (base : string) (arrow : Ast.ty) : string =
 type lifted_inner_llvm = {
   lifted_name : string;
   captures    : (string * Ast.ty) list;
+  rps         : string list;  (* v0.1.562: its own region parameters -- see lifted_fn_llvm *)
 }
+(* lifted name -> its region parameters, for the value-use adapter *)
+let lifted_rps_llvm : (string, string list) Hashtbl.t = Hashtbl.create 16
 let inner_lifts_llvm : (string, lifted_inner_llvm) Hashtbl.t = Hashtbl.create 8
 let inner_lifts_by_host_llvm : (string, (string, lifted_inner_llvm) Hashtbl.t) Hashtbl.t =
   Hashtbl.create 8
@@ -1447,6 +1450,10 @@ type lifted_fn_llvm = {
   l_body      : Ast.expr;
   l_return_ty : Ast.ty;
   l_host      : string;
+  l_rps       : string list;
+    (* v0.1.562 (Q-134): an inner function takes region parameters of its own, the
+       C backend's lifted_fn.l_rps: they lead, a direct call passes what it bound,
+       the value-use adapter passes the default region. *)
 }
 
 let inner_fn_counter_llvm = ref 0
@@ -2044,14 +2051,16 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
          | _ -> raise (Codegen_error (value_loc, "inner fn has non-arrow type")))
       | None -> raise (Codegen_error (value_loc, "inner fn missing type"))
     in
+    let rps = Typer.region_params_for n in
+    Hashtbl.replace lifted_rps_llvm lifted_name rps;
     let lf = {
       l_name = lifted_name; l_captures = captures;
       l_param = p; l_param_ty = param_ty;
       l_body = fn_body; l_return_ty = return_ty;
-      l_host = !current_host;
+      l_host = !current_host; l_rps = rps;
     } in
     lifted_fns_llvm := lf :: !lifted_fns_llvm;
-    let entry = { lifted_name; captures } in
+    let entry = { lifted_name; captures; rps } in
     Hashtbl.replace inner_lifts_llvm n entry;
     let host_tbl =
       match Hashtbl.find_opt inner_lifts_by_host_llvm !current_host with
@@ -7943,11 +7952,20 @@ and emit_user_app ?(tail = false) (env : env) (e : Ast.expr) : string =
     end
   | `Direct None ->
   match e.Ast.node with
-  | Ast.App ({ node = Ast.Var name; _ }, arg)
+  | Ast.App ({ node = Ast.Var name; ty = head_ty; _ }, arg)
     when Hashtbl.mem inner_lifts_llvm name ->
     (* Phase 25.3: inner-lifted fn call. Prepend captures (by name from env)
-       then the arg. *)
+       then the arg. v0.1.562: and before them its region arguments, read off
+       this use the way a top-level call reads them. *)
     let li = Hashtbl.find inner_lifts_llvm name in
+    let rargs =
+      if li.rps = [] then []
+      else
+        let pairs = Typer.region_args_for name head_ty in
+        List.map (fun r ->
+          "ptr " ^ (match List.assoc_opt r pairs with
+                    | Some actual -> region_ptr_for actual
+                    | None -> "@__lang_default_region")) li.rps in
     let av = emit_expr env arg in
     let arg_ty_str =
       match arg.Ast.ty with
@@ -7975,7 +7993,7 @@ and emit_user_app ?(tail = false) (env : env) (e : Ast.expr) : string =
         Printf.sprintf "%s %s" (llvm_ty_of cty) cv
       ) li.captures
     in
-    let all_args = String.concat ", " (cap_args @ [Printf.sprintf "%s %s" arg_ty_str av]) in
+    let all_args = String.concat ", " (rargs @ cap_args @ [Printf.sprintf "%s %s" arg_ty_str av]) in
     let ret_ty =
       match e.Ast.ty with
       | Some t -> llvm_ty_of (Ast.walk t)
@@ -8351,7 +8369,11 @@ let emit_lifted_fn_llvm (lf : lifted_fn_llvm) : string =
     @ [(lf.l_param, lf.l_param_ty)];
   llvm_tail_pos := true;
   llvm_returned := false;
-  let rv = emit_expr env lf.l_body in
+  let saved_rps = !current_region_params_llvm in
+  current_region_params_llvm := lf.l_rps;
+  let rv =
+    Fun.protect ~finally:(fun () -> current_region_params_llvm := saved_rps)
+      (fun () -> emit_expr env lf.l_body) in
   if !llvm_returned then llvm_returned := false
   else emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of lf.l_return_ty) rv);
   let body = String.concat "\n" (List.rev !instrs) in
@@ -8362,7 +8384,8 @@ let emit_lifted_fn_llvm (lf : lifted_fn_llvm) : string =
   current_host_fn_llvm := saved_host;
   let params =
     String.concat ", "
-      (List.map (fun (n, t) ->
+      (List.map (fun r -> "ptr %" ^ r) lf.l_rps
+       @ List.map (fun (n, t) ->
          Printf.sprintf "%s %%%s" (llvm_ty_of t) (llvm_safe_local n))
          (lf.l_captures @ [(lf.l_param, lf.l_param_ty)]))
   in
@@ -15110,7 +15133,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                List.mapi (fun i (_, cty) ->
                  Printf.sprintf "%s %%cap%d" (llvm_ty_of cty) i) captures
              in
-             String.concat ", " (cap_args @ [arg_lty ^ " %x"])
+             (* v0.1.562: used as a value, it is given the default region *)
+             let rp_args =
+               List.map (fun _ -> "ptr @__lang_default_region")
+                 (match Hashtbl.find_opt lifted_rps_llvm lifted_name with Some l -> l | None -> []) in
+             String.concat ", " (rp_args @ cap_args @ [arg_lty ^ " %x"])
            in
            Printf.sprintf
              "define %s @%s_inner_closure_fn(ptr %%env_p, %s %%x) {\nentry:\n%s\n  %%result = call %s @%s(%s)\n  ret %s %%result\n}"

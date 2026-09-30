@@ -156,14 +156,19 @@ as of v0.1.31 it is the implemented semantics on the C backend:
   carrying the result out of the block stays the type error it already
   was.
 
-  **Not yet through an inner function.** A call made from something lifted
-  out of a function's body — an inner `let rec`, a closure, the inner half of
-  a `let rec ... and` group — hands the callee the default region: the inner
-  function quantifies the allocation's region itself, and a lifted body has no
-  region parameter to take it. v0.1.559 closed that by not quantifying, which
-  took region polymorphism away from every inner function, and v0.1.560
-  withdrew it (`test/parity/region_inner_poly.mere`). The fix is an inner
-  function taking region parameters of its own.
+  **Through an inner function (v0.1.562).** An inner function — an inner
+  `let rec`, a `let`-bound lambda, a lift inside a lift — takes region
+  parameters of its own, the way a top-level function's `__direct` twin does:
+  they lead its lifted definition, a direct call passes what it bound, and a
+  use as a value (a closure) passes the default region. Before, it handed its
+  callees the default region whatever region its caller was in. v0.1.559 tried
+  the other route — not letting the inner function quantify, so the enclosing
+  function's parameter reached it — and that took region polymorphism away
+  from every inner function; v0.1.560 withdrew it
+  (`test/parity/region_inner_poly.mere`). One shape is still in the default
+  region: an inner function of one member of a `let rec ... and` group calling
+  another member (`test/regionparams/inner.mere`, pinned by
+  `region_params_check`).
 
   **Per backend**: C (v0.1.464) and LLVM (v0.1.466) pass it. **Wasm** needs nothing: it has one bump for every region,
   and what keeps a callee's allocation alive there is the high-water mark

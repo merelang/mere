@@ -80,28 +80,42 @@ if [ "$chain_got" != "$chain_want" ]; then
 fi
 checks=$((checks + 1))
 
-# ---- THROUGH AN INNER FUNCTION: PINNED AS IT IS, TO GO RED WHEN TAUGHT -------
+# ---- THROUGH AN INNER FUNCTION (v0.1.562) ---------------------------------
 #
-# A call made from something lifted out of a function's body -- an inner `let
-# rec`, a closure, a lift inside a lift, the inner binding of a `let rec ... and`
-# group -- hands the callee the default region, whatever region the outer
-# function was given: the inner function quantifies the allocation's region
-# itself, and a lifted body has no region parameter to take it. v0.1.559 closed it
-# by not quantifying, which took region polymorphism away from every inner
-# function (a helper used inside a block and outside it became a region-escape
-# error; mere-ruby's main.mere was one), and v0.1.560 withdrew it. The fix is an
-# inner function taking region parameters of its own; when it lands these four
-# read `^param` and this leg says so.
+# A call made from something lifted out of a function's body used to hand the
+# callee the default region, whatever region the outer function was given: the
+# inner function quantifies the allocation's region itself (and must --
+# v0.1.559 stopped that, which took region polymorphism away from every inner
+# function, and v0.1.560 withdrew it), and a lifted body had no region
+# parameter to take it. Now an inner function takes region parameters of its
+# own, as a top-level one's `__direct` twin does, and a direct call passes what
+# it bound. Three of the four shapes read `^param`, and the emitted code is
+# checked too: the region has to arrive, not only be named.
+#
+# The fourth stays `?`, pinned: an inner function of one member of a `let rec
+# ... and` group calling another member. The group's region variables lose their
+# mark when the inner binding generalises, and keeping the mark lets a call
+# inside a block decide a region an enclosing binding owns (mere-ruby's `benv`
+# became `BLK`'s). When that is solved this line changes.
 inner_got="$("$MERE" --dump-region-params "$ROOT/test/regionparams/inner.mere" 2>&1 | grep -e ' -> pr ' -e '^#sites')"
-inner_want='@via_rec -> pr : ?
-@via_closure -> pr : ?
-@via_nested -> pr : ?
+inner_want='@via_rec -> pr : ^param
+@via_closure -> pr : ^param
+@via_nested -> pr : ^param
 @grp -> pr : ?
-#sites 3 named, 0 forwarded, 4 undecided'
+#sites 3 named, 9 forwarded, 1 undecided'
 if [ "$inner_got" != "$inner_want" ]; then
-  echo "FAIL region_params[inner]: the calls from inner functions no longer read as pinned -- if a region parameter reaches them now, update this leg (and test/parity/region_inner_poly.mere must still pass)."
+  echo "FAIL region_params[inner]: the calls from inner functions no longer read as they must (test/parity/region_inner_poly.mere must pass too)."
   echo "  want:"; printf '%s\n' "$inner_want" | sed 's/^/    /'
   echo "  got:";  printf '%s\n' "$inner_got"  | sed 's/^/    /'
+  fails=$((fails + 1))
+fi
+checks=$((checks + 1))
+# C and LLVM: three calls to `pr` from lifted bodies pass a `__rp` (the fourth,
+# the group's, passes the default region)
+nc="$("$MERE" -c "$ROOT/test/regionparams/inner.mere" 2>/dev/null | grep -cE 'mu_pr__int__Vec_int__direct\(__rp[0-9]+,' || true)"
+nl="$("$MERE" -ll "$ROOT/test/regionparams/inner.mere" 2>/dev/null | grep -cE 'call ptr @mu_pr__int__Vec_int\(ptr %__rp[0-9]+,' || true)"
+if [ "$nc" != 3 ] || [ "$nl" != 3 ]; then
+  echo "FAIL region_params[inner-emit]: calls to pr passing the caller's region: C $nc, LLVM $nl (want 3 and 3)"
   fails=$((fails + 1))
 fi
 checks=$((checks + 1))
