@@ -63,7 +63,10 @@ compact|ic|held: intact;700|0
 scan|icl|all found, bound kept;running: found;57573|0
 scan_high|cl|found, again found, small left out;7;12|0
 transfer|icl|int: 1 12 23, float: 3.75;bool: true then false, coro: hopped;after the end: 0|0
-notme|icl|coro_transfer: the third argument must be the running coroutine|1'
+notme|icl|coro_transfer: the third argument must be the running coroutine|1
+sized|icl|5050;45000150000;partial|0
+sized_overflow|cl|stack overflow (recursion too deep)|1
+sized_reuse|icl|small;200010000;done|0'
 
 # The interpreter prints a failure with its position and a code frame; the
 # compiled program prints the message alone. The comparison is on the message.
@@ -233,6 +236,9 @@ if [ "$MODE" = "--poison" ]; then
   poison ll "LLVM 5 (a block's coroutine not refused)" 's/^  br i1 %inblock, label %refuse, label %alloc$/  br label %alloc/' env
   # v0.1.565: a finished coroutine is a handle that no longer resolves
   poison ll "LLVM 6 (no finished check)" 's/^  br i1 %gone, label %finished, label %go$/  br label %go/' finished
+  # v0.1.566: the pool keeps stacks apart by size
+  poison c "C 15 (the pool hands out a stack of another size)" 's/^    if (__lang_coro_pools\[i\].size != size || !__lang_coro_pools\[i\].head) continue;$/    if (!__lang_coro_pools[i].head) continue;/' sized_reuse
+  poison ll "LLVM 15 (the pool hands out a stack of another size)" 's/^  %ok = and i1 %same, %some$/  %ok = and i1 %some, %some/' sized_reuse
   poison ll "LLVM 7 (no hand-over check)" 's/^  br i1 %bad0, label %nowhere, label %chk$/  br label %chk/' self_handoff
   poison_rss() {  # $1 = c|ll, $2 = label, $3 = sed expression
     if ! why=$(build million -O2 "$1" "$3"); then

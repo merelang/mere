@@ -1021,6 +1021,7 @@ something hands it back.
 | | type | |
 |---|---|---|
 | `coro_new` | `(Coro['m] -> 'm -> CoroExit) -> Coro['m]` | a suspended coroutine; nothing runs yet. The body is handed its own handle and its first message |
+| `coro_new_sized` | `int -> (Coro['m] -> 'm -> CoroExit) -> Coro['m]` | the same, on a stack of at least that many bytes (v0.1.566): rounded up to a power of two, 64 KiB at least, 1 GiB at most |
 | `coro_transfer` | `Coro['a] -> 'a -> Coro['b] -> 'b` | `coro_transfer c v me`: suspend `me` (the one running), resume `c` with `v`; returns what `me` is handed next |
 | `coro_exit` | `Coro['a] -> 'a -> CoroExit` | how a body ends: `coro_exit c v` gives `c` the value `v`, and `c` runs when the body returns |
 | `coro_root` | `unit -> Coro[unit]` | the thread's own stack |
@@ -1105,6 +1106,19 @@ it made -- measured flat over 100k connections. Two ways to keep it that way:
 
 A handle held across 2^24 reuses of one slot would name a later coroutine.
 LLVM is the same since v0.1.565: a handle is a slot and a generation there too, and a body written as a lambda at the `coro_new` has its env as its own (a million finished coroutines: 1.5 MiB on both).
+
+**Stacks are pooled (v0.1.566).** A finished coroutine's stack is kept for the
+next one of the same size, up to the most coroutines this thread has had alive at
+once (at least 16), so making one is no system call; a server with fifty
+connections in flight no longer maps and unmaps a stack per connection (2000
+rounds of 64 coroutines: 1.0 s before, 0.05 s now). The pool never holds more
+stacks than were alive together, so it does not raise a program's peak memory; it
+only stops giving it back below that. `coro_new_sized` is for many small
+coroutines: only the pages a stack touches are resident (one 16 KiB page for a
+coroutine that does little, on either backend), so a smaller stack saves address
+space rather than memory -- and on Linux `vm.max_map_count` (65530) limits a
+process to about 32k live coroutines whatever their size, two mappings each.
+Overflowing a small stack is named like any other.
 
 Backends: the interpreter, C and LLVM (v0.1.544). On both native backends a
 coroutine's stack is what `stack` in mere.toml asks for (as for `spawn`),

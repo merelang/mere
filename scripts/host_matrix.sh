@@ -95,6 +95,7 @@ coro_switch|let _ = coro_switch (coro_root ()); 0
 coro_root|let r = coro_root (); 0
 coro_transfer|let g = coro_transfer; let r = coro_root (); let _ = g r () r; 0
 coro_exit|let g = coro_exit; let _ = g (coro_root ()) (); 0
+coro_new_sized|let c = coro_new_sized 65536 (fn _me -> fn (_u: unit) -> coro_exit (coro_root ()) ()); 0
 channel_new|let c = channel_new (); let _ = channel_send c 1; 0
 channel_send|let c = channel_new (); let _ = channel_send c 1; 0
 channel_recv|let c = channel_new (); let _ = channel_send c 1; let v = channel_recv c; v

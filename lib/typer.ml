@@ -2512,6 +2512,16 @@ let coro_new_scheme =
   _coro_poly (function [m] ->
     Ast.TyArrow (Ast.TyArrow (coro_ty m, Ast.TyArrow (m, coro_exit_ty)), coro_ty m)
     | _ -> assert false) 1
+(* v0.1.566: the same, on a stack of the size it asks for *)
+let coro_new_sized_scheme =
+  _coro_poly (function [m] ->
+    Ast.TyArrow (Ast.TyInt,
+      Ast.TyArrow (Ast.TyArrow (coro_ty m, Ast.TyArrow (m, coro_exit_ty)), coro_ty m))
+    | _ -> assert false) 1
+let coro_new_sized_raw_scheme =
+  _coro_poly (function [m] ->
+    Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyArrow (coro_ty m, coro_exit_ty), coro_ty m))
+    | _ -> assert false) 1
 let coro_new_raw_scheme =
   _coro_poly (function [m] ->
     Ast.TyArrow (Ast.TyArrow (coro_ty m, coro_exit_ty), coro_ty m)
@@ -2538,9 +2548,10 @@ let coro_scan_ints_scheme =
    a program wrote for each (the two internal ones come from rewriting coro_new). *)
 let coro_builtins =
   [ "coro_new"; "__coro_new_raw"; "__coro_msg"; "coro_transfer"; "coro_exit";
-    "coro_root"; "coro_switch"; "coro_scan_ints" ]
+    "coro_root"; "coro_switch"; "coro_scan_ints"; "coro_new_sized"; "__coro_new_sized_raw" ]
 let coro_source_name (n : string) : string =
-  if n = "__coro_new_raw" || n = "__coro_msg" then "coro_new" else n
+  if n = "__coro_new_raw" || n = "__coro_msg" then "coro_new"
+  else if n = "__coro_new_sized_raw" then "coro_new_sized" else n
 
 (* A message the compiled backends can carry in one word. A type variable passes
    here: a polymorphic helper is checked again where it is instantiated. *)
@@ -2792,6 +2803,8 @@ let initial_env : env =
     ("detach",       detach_scheme);
     ("coro_new",     coro_new_scheme);
     ("__coro_new_raw", coro_new_raw_scheme);
+    ("coro_new_sized", coro_new_sized_scheme);
+    ("__coro_new_sized_raw", coro_new_sized_raw_scheme);
     ("__coro_msg",   coro_msg_scheme);
     ("coro_transfer", coro_transfer_scheme);
     ("coro_exit",    coro_exit_scheme);

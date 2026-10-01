@@ -1,0 +1,10 @@
+// v0.1.566: a recursion too deep for a 64 KiB coroutine stack is named, from the
+// guard page under that stack, like any other overflow.
+
+let root = coro_root ();
+type ilist = INil | ICons of int * ilist;
+let rec build = fn n -> if n == 0 then INil else ICons (n, build (n - 1));
+let rec total = fn lst -> match lst with | INil -> 0 | ICons (h, t) -> h + total t;
+let small = coro_new_sized 65536 (fn me -> fn (n: int) -> let _ = print_int (total (build n)) in coro_exit root ());
+let _ = coro_transfer small 200000 root;
+print "unreachable"

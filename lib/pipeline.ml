@@ -459,7 +459,9 @@ let coro_rewrite (prog : Ast.program) : Ast.program =
           v.Ast.loc.Loc.file <> Some prelude_file
         | _ -> true) prog.Ast.decls)
   in
-  if List.mem "coro_new" user_top then prog
+  (* v0.1.566: and `coro_new_sized n f` the same way, into `__coro_new_sized_raw n`. A
+     program that binds one name of its own keeps both, so the two never mix. *)
+  if List.mem "coro_new" user_top || List.mem "coro_new_sized" user_top then prog
   else
     let counter = ref 0 in
     let fresh base = incr counter; Printf.sprintf "__%s%d" base !counter in
@@ -468,15 +470,18 @@ let coro_rewrite (prog : Ast.program) : Ast.program =
         let mk node = { Ast.loc = x.Ast.loc; ty = None; node } in
         let var n = mk (Ast.Var n) in
         let app f a = mk (Ast.App (f, a)) in
-        let raw body = app (var "__coro_new_raw") body in
+        let raw_for size body =
+          match size with
+          | None -> app (var "__coro_new_raw") body
+          | Some n -> app (app (var "__coro_new_sized_raw") n) body in
         let msg_of s = app (var "__coro_msg") (var s) in
-        let general (f : Ast.expr) =
+        let general_for size (f : Ast.expr) =
           let k = fresh "coro_body" and s = fresh "coro_self" in
           mk (Ast.Let ({ Ast.ploc = x.Ast.loc; pnode = Ast.P_var k }, f,
-                raw (mk (Ast.Fun (s, None, app (app (var k) (var s)) (msg_of s))))))
+                raw_for size (mk (Ast.Fun (s, None, app (app (var k) (var s)) (msg_of s))))))
         in
-        match x.Ast.node with
-        | Ast.App ({ Ast.node = Ast.Var "coro_new"; _ }, arg) when not (List.mem "coro_new" sh) ->
+        let lower size (arg : Ast.expr) =
+          let raw = raw_for size and general = general_for size in
           (match arg.Ast.node with
            | Ast.Fun (_, Some t, body)
              when (match Ast.walk t with Ast.TyUnit -> true | _ -> false)
@@ -495,10 +500,29 @@ let coro_rewrite (prog : Ast.program) : Ast.program =
              Some (raw { arg with Ast.node =
                            Ast.Fun (me', me_ty, { inner with Ast.node = Ast.Let (pat, read, go b) }) })
            | _ -> Some (general (go arg)))
+        in
+        match x.Ast.node with
+        | Ast.App ({ Ast.node = Ast.Var "coro_new"; _ }, arg) when not (List.mem "coro_new" sh) ->
+          lower None arg
+        | Ast.App ({ Ast.node = Ast.App ({ Ast.node = Ast.Var "coro_new_sized"; _ }, n); _ }, arg)
+          when not (List.mem "coro_new_sized" sh) ->
+          (* the size is evaluated first, as an application's arguments are *)
+          let nn = fresh "coro_size" in
+          (match lower (Some (var nn)) arg with
+           | Some body -> Some (mk (Ast.Let ({ Ast.ploc = x.Ast.loc; pnode = Ast.P_var nn }, go n, body)))
+           | None -> None)
+        | Ast.App ({ Ast.node = Ast.Var "coro_new_sized"; _ }, n) when not (List.mem "coro_new_sized" sh) ->
+          (* partly applied: the size now, the body later *)
+          let nn = fresh "coro_size" and f = fresh "coro_fn" in
+          Some (mk (Ast.Let ({ Ast.ploc = x.Ast.loc; pnode = Ast.P_var nn }, go n,
+                  mk (Ast.Fun (f, None, general_for (Some (var nn)) (var f))))))
         | Ast.Var "coro_new" when not (List.mem "coro_new" sh) ->
           (* as a value: the general form, under a lambda *)
           let f = fresh "coro_fn" in
-          Some (mk (Ast.Fun (f, None, general (var f))))
+          Some (mk (Ast.Fun (f, None, general_for None (var f))))
+        | Ast.Var "coro_new_sized" when not (List.mem "coro_new_sized" sh) ->
+          let nn = fresh "coro_size" and f = fresh "coro_fn" in
+          Some (mk (Ast.Fun (nn, None, mk (Ast.Fun (f, None, general_for (Some (var nn)) (var f))))))
         | _ -> None) e
     in
     let decl d =

@@ -3039,7 +3039,19 @@ let rec emit_expr (e : Ast.expr) : string =
        let arg_c = emit_expr arg in
        coro_env_owned_next := false;
        "({ __auto_type __cl = " ^ arg_c ^ "; \
-           __lang_coro_new((void*)__cl.env, (void*)__cl.fn); })"
+           __lang_coro_new((void*)__cl.env, (void*)__cl.fn, 0); })"
+     (* v0.1.566: coro_new_sized -- the same, on a stack of the size asked for *)
+     | Ast.App ({ node = Ast.Var "__coro_new_sized_raw"; _ }, n_e)
+       when not (user_shadows "__coro_new_sized_raw") ->
+       uses_coro := true;
+       let n_c = emit_expr n_e in
+       (match arg.Ast.node with Ast.Fun _ -> coro_env_owned_next := true | _ -> ());
+       let arg_c = emit_expr arg in
+       coro_env_owned_next := false;
+       "({ long long __csz = " ^ n_c ^ "; \
+           if (__csz <= 0) __lang_fail_impl(\"coro_new_sized: a stack size must be between 1 byte and 1 GiB\"); \
+           __auto_type __cl = " ^ arg_c ^ "; \
+           __lang_coro_new((void*)__cl.env, (void*)__cl.fn, __csz); })"
      (* v0.1.561 (Q-184): the values -- see __lang_coro_transfer *)
      | Ast.Var "__coro_msg" when not (user_shadows "__coro_msg") ->
        uses_coro := true;
@@ -11604,25 +11616,52 @@ let coro_runtime ~(stack_bytes : int) =
       "  size_t g = (size_t)64 << 10;";
       "  return g < page ? page : (g + page - 1) / page * page;";
       "}";
-      "/* Finished stacks are kept for reuse, up to 16 per thread, their guard";
-      "   still in place: making a coroutine is then no system call. The list is";
-      "   threaded through the stacks themselves, one word at the bottom of each,";
-      "   and all of a program's stacks are one size. */";
-      "static _Thread_local char* __lang_coro_pool;";
-      "static _Thread_local int __lang_coro_pool_n;";
+      "/* Finished stacks are kept for reuse, their guard still in place: making a";
+      "   coroutine is then no system call. One list per stack size (v0.1.566: a";
+      "   coroutine can ask for its own size, coro_new_sized), threaded through the";
+      "   stacks themselves, one word at the bottom of each.";
+      "   HOW MANY. Up to 16 were kept; a program with more finishing at once than";
+      "   that -- a server with 50 connections in flight -- paid an mmap, a guard";
+      "   mprotect, a first-touch fault and a munmap for every coroutine past the";
+      "   16th, about 10 us each (2000 rounds of 64: 1.0 s, against 0.02 s for 16).";
+      "   A list now keeps up to the most coroutines this thread has had alive at";
+      "   once (at least 16): 0.05 s for the same 2000 rounds. What it keeps is";
+      "   address space and resident pages the program already had at its peak --";
+      "   the pool never holds more stacks than were alive together -- so it does not";
+      "   raise the peak; it only stops giving memory back below it. (madvise on the";
+      "   way in was measured too: 0.6 s more, for no RSS saved on stacks that touch";
+      "   a page or two.) */";
+      "#define __LANG_CORO_CLASSES 8";
+      "static _Thread_local struct { size_t size; char* head; int n; } __lang_coro_pools[__LANG_CORO_CLASSES];";
+      "static _Thread_local int __lang_coro_live_n;";
+      "static _Thread_local int __lang_coro_live_peak;";
       "static void __lang_coro_stack_put(char* m, size_t size) {";
-      "  if (__lang_coro_pool_n >= 16) { munmap(m, size); return; }";
+      "  int k = -1;";
+      "  for (int i = 0; i < __LANG_CORO_CLASSES; i++) {";
+      "    if (__lang_coro_pools[i].size == size) { k = i; break; }";
+      "    if (__lang_coro_pools[i].size == 0 && k < 0) k = i;";
+      "  }";
+      "  int cap = __lang_coro_live_peak < 16 ? 16 : __lang_coro_live_peak;";
+      "  if (k < 0 || __lang_coro_pools[k].n >= cap) { munmap(m, size); return; }";
       "  size_t guard = __lang_coro_guard((size_t)sysconf(_SC_PAGESIZE));";
-      "  *(char**)(m + guard) = __lang_coro_pool;";
-      "  __lang_coro_pool = m; __lang_coro_pool_n++;";
+      "  __lang_coro_pools[k].size = size;";
+      "  *(char**)(m + guard) = __lang_coro_pools[k].head;";
+      "  *(size_t*)(m + guard + sizeof(char*)) = size;   /* checked by take */";
+      "  __lang_coro_pools[k].head = m; __lang_coro_pools[k].n++;";
       "}";
       "static char* __lang_coro_stack_take(size_t size) {";
-      "  (void)size;";
-      "  char* m = __lang_coro_pool;";
-      "  if (!m) return NULL;";
-      "  size_t guard = __lang_coro_guard((size_t)sysconf(_SC_PAGESIZE));";
-      "  __lang_coro_pool = *(char**)(m + guard); __lang_coro_pool_n--;";
-      "  return m;";
+      "  for (int i = 0; i < __LANG_CORO_CLASSES; i++) {";
+      "    if (__lang_coro_pools[i].size != size || !__lang_coro_pools[i].head) continue;";
+      "    char* m = __lang_coro_pools[i].head;";
+      "    size_t guard = __lang_coro_guard((size_t)sysconf(_SC_PAGESIZE));";
+      "    __lang_coro_pools[i].head = *(char**)(m + guard); __lang_coro_pools[i].n--;";
+      "    /* a stack of another size would put the stack pointer outside the mapping,";
+      "       and what that does depends on what is mapped there -- so it is checked */";
+      "    if (*(size_t*)(m + guard + sizeof(char*)) != size)";
+      "      __lang_fail_impl(\"coro: the stack pool handed out a stack of another size\");";
+      "    return m;";
+      "  }";
+      "  return NULL;";
       "}";
       "static void __lang_coro_arrived(__lang_coro* self) {";
       "#ifdef __LANG_CORO_ASAN";
@@ -11635,7 +11674,7 @@ let coro_runtime ~(stack_bytes : int) =
       "  /* a finished coroutine cannot unmap the stack it is standing on; the one";
       "     it handed over to does it here */";
       "  __lang_coro* z = __lang_coro_zombie;";
-      "  if (z) { __lang_coro_zombie = NULL; __lang_coro_stack_put(z->x->map, z->x->map_size); free(z->x->pw); free(z->x->sf); free(z->x); z->x = NULL; __lang_coro_drop_slot(z); free(z); }";
+      "  if (z) { __lang_coro_zombie = NULL; __lang_coro_live_n--; __lang_coro_stack_put(z->x->map, z->x->map_size); free(z->x->pw); free(z->x->sf); free(z->x); z->x = NULL; __lang_coro_drop_slot(z); free(z); }";
       "}";
       "";
       "static void __lang_coro_enter_root(void) {";
@@ -11707,7 +11746,17 @@ let coro_runtime ~(stack_bytes : int) =
       "}";
       "";
       Printf.sprintf "static const size_t __lang_coro_stack_bytes = %dULL;" stack_bytes;
-      "static __lang_coro_h __lang_coro_new(void* env, void* fn) {";
+      "/* v0.1.566: `want` is the stack a coroutine asked for (coro_new_sized), 0 for";
+      "   the program's own size. Rounded up to a power of two of at least 64 KiB, so";
+      "   the pool has few sizes to keep apart. */";
+      "static size_t __lang_coro_size_class(long long want) {";
+      "  if (want <= 0) return __lang_coro_stack_bytes;";
+      "  if (want > ((long long)1 << 30)) __lang_fail_impl(\"coro_new_sized: a stack bigger than 1 GiB\");";
+      "  size_t s = (size_t)64 << 10;";
+      "  while (s < (size_t)want) s <<= 1;";
+      "  return s;";
+      "}";
+      "static __lang_coro_h __lang_coro_new(void* env, void* fn, long long want) {";
       "  __lang_coro_enter_root();";
       "  /* the closure outlives the block it was made in: the coroutine owns a";
       "     copy of its env (freed when the body ends) whose fields point into the";
@@ -11718,7 +11767,7 @@ let coro_runtime ~(stack_bytes : int) =
       "    if (h->__copy) { env = h->__copy(&__lang_coro_env_owner, env); owned = 1; }";
       "  }";
       "  size_t page = (size_t)sysconf(_SC_PAGESIZE);";
-      "  size_t sz = (__lang_coro_stack_bytes + page - 1) / page * page;";
+      "  size_t sz = (__lang_coro_size_class(want) + page - 1) / page * page;";
       "  size_t guard = __lang_coro_guard(page);";
       "  char* m = __lang_coro_stack_take(sz + guard);";
       "  if (!m) {";
@@ -11742,6 +11791,7 @@ let coro_runtime ~(stack_bytes : int) =
       "  c->x->s_lo = m + guard; c->x->s_hi = m + sz + guard;";
       "  c->x->asan_bottom = m + guard; c->x->asan_size = sz;";
       "  c->x->sp = __lang_coro_seed(m + sz + guard, __lang_coro_body, c);";
+      "  if (++__lang_coro_live_n > __lang_coro_live_peak) __lang_coro_live_peak = __lang_coro_live_n;";
       "  __lang_coro_give_slot(c);";
       "  __lang_coro_link(c);";
       "  return __lang_coro_handle(c);";

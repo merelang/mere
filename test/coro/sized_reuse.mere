@@ -1,0 +1,12 @@
+// v0.1.566: finished stacks are pooled by size. A 64 KiB coroutine finishes
+// first, and its stack goes back to the pool; a coroutine of the program's own
+// size made next must not be handed it -- its recursion needs more than 64 KiB.
+let root = coro_root ();
+type ilist = INil | ICons of int * ilist;
+let rec build = fn n -> if n == 0 then INil else ICons (n, build (n - 1));
+let rec total = fn lst -> match lst with | INil -> 0 | ICons (h, t) -> h + total t;
+let small = coro_new_sized 65536 (fn me -> fn (u: unit) -> let _ = print "small" in coro_exit root ());
+let _ = coro_switch small;
+let big = coro_new (fn me -> fn (n: int) -> let _ = print_int (total (build n)) in coro_exit root ());
+let _ = coro_transfer big 20000 root;
+print "done"
