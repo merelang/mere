@@ -16,6 +16,9 @@
 #   ownedvec_store       (Q-192, v0.1.564) owned_vec_push stored a str as the
 #                        pointer it was
 #   channel_from_block   (v0.1.564, LLVM) a message sent as the pointer it was
+#   recycled_escape      (Q-195, v0.1.567) a Map given its own arena by map_recycle,
+#                        captured by a closure: retention asked about the arena and
+#                        not about the block the map's struct lives in
 #
 # plus coro_env_from_block, which was right already (v0.1.558) and is here so
 # that it stays right.
@@ -46,7 +49,8 @@ CASES='kept_then_written|cl
 spawn_env_in_block|c
 ownedvec_store|cl
 channel_from_block|cl
-coro_env_from_block|c'
+coro_env_from_block|c
+recycled_escape|c'
 
 run_bin() { perl -e 'alarm 20; exec @ARGV' "$1" 2>&1; }
 
@@ -84,7 +88,8 @@ kept_then_written|ll|a kept struct is freed again|s/  br i1 %none, label %freest
 spawn_env_in_block|c|the thread gets the env as it was|s/__se = __sh->__copy(&__lang_default_region, __se);/(void)0;/
 ownedvec_store|c|owned_vec_push stores the pointer|s/v->data\[v->len++\] = __mcopy_str(&__lang_default_region, x);/v->data[v->len++] = x;/
 ownedvec_store|ll|owned_vec_push stores the pointer|s/= call ptr @__mcopy_str(ptr @__lang_default_region, ptr \(%t[0-9]*\))/= getelementptr i8, ptr \1, i64 0/
-channel_from_block|ll|the message is sent as the pointer|s/= call ptr @__mcopy_str(ptr @__lang_default_region, ptr \(%t[0-9]*\))/= getelementptr i8, ptr \1, i64 0/'
+channel_from_block|ll|the message is sent as the pointer|s/= call ptr @__mcopy_str(ptr @__lang_default_region, ptr \(%t[0-9]*\))/= getelementptr i8, ptr \1, i64 0/
+recycled_escape|c|only the moved storage is kept, not where the struct lives|s/ __lang_region_keep(v->home, r); / /'
   printf '%s\n' "$POISONS" | while IFS='|' read -r f be what expr; do
     want=$("$MERE" "$FX/$f.mere" 2>&1)
     if ! why=$(build "$f" "$be" "$expr"); then printf '  FAIL  %s\n' "POISON $be $f ($what): $why"; echo x >> "$T/pfailed"; continue; fi

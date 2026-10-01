@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.567 — 2026-10-01
+
+_A recycled or compacted container that escaped its block lost its struct (Q-195)._
+
+A Map or a Vec can move its storage to an arena of its own -- `map_recycle`,
+`map_compact`, `vec_compact` -- and after that its `region` names that arena,
+while the struct the handle points at still lives where it was made. Runtime
+retention (v0.1.557) decided from `region` alone: for a map made in
+`region R { }`, recycled, and captured by a closure that outlived R, it saw an
+arena that is not a block, did nothing, and R was freed under the handle (the
+closure's next write segfaulted on C). A Map and a Vec now carry `home`, where
+their struct lives, and their copier keeps both. LLVM has no `map_recycle` or
+compaction and is not affected.
+
+Found by simulating Q-134's proposed fix -- every container whose region nobody
+decided placed in the runtime current region instead of the default one -- on
+mere-ruby, whose frame pool recycles every map it hands out: corpus program 100
+segfaulted, a bisection over the 1,867 allocation sites and AddressSanitizer
+(with the region cache off, so a freed block is really freed) named the route.
+
+`region_uaf_check` gains `recycled_escape` and a poison that drops the `home`
+retention; ROUTES gains its row.
+
+---
+
 ## v0.1.566 — 2026-10-01
 
 _`coro_new_sized`, and a stack pool that follows the program's peak instead of stopping at 16._
