@@ -326,7 +326,7 @@ let coro_runtime_llvm ~(stack_bytes : int) =
       "  ret i64 %s";
       "}";
       "";
-      "define internal void @__lang_coro_stack_put(ptr %mem, i64 %size) {";
+      "define internal void @__lang_coro_stack_put(ptr %mem, i64 %size) noinline {";
       "entry:";
       "  br label %find";
       "find:";
@@ -381,7 +381,7 @@ let coro_runtime_llvm ~(stack_bytes : int) =
       "  ret void";
       "}";
       "";
-      "define internal ptr @__lang_coro_stack_take(i64 %size) {";
+      "define internal ptr @__lang_coro_stack_take(i64 %size) noinline {";
       "entry:";
       "  br label %find";
       "find:";

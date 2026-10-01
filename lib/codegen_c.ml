@@ -11645,7 +11645,14 @@ let coro_runtime ~(stack_bytes : int) =
       "static _Thread_local struct { size_t size; char* head; int n; } __lang_coro_pools[__LANG_CORO_CLASSES];";
       "static _Thread_local int __lang_coro_live_n;";
       "static _Thread_local int __lang_coro_live_peak;";
-      "static void __lang_coro_stack_put(char* m, size_t size) {";
+      "/* v0.1.568: out of line. Inlined into every coroutine creation, the check in";
+      "   take -- a call to a function that does not return, inside the loop -- sent";
+      "   clang -O2 over a cliff on mere-ruby's 93 MB of C: killed after 136 s, where";
+      "   the same file without it compiles in 168. The pool is not the hot path. */";
+      "__attribute__((noinline)) static void __lang_coro_pool_mismatch(void) {";
+      "  __lang_fail_impl(\"coro: the stack pool handed out a stack of another size\");";
+      "}";
+      "__attribute__((noinline)) static void __lang_coro_stack_put(char* m, size_t size) {";
       "  int k = -1;";
       "  for (int i = 0; i < __LANG_CORO_CLASSES; i++) {";
       "    if (__lang_coro_pools[i].size == size) { k = i; break; }";
@@ -11659,7 +11666,7 @@ let coro_runtime ~(stack_bytes : int) =
       "  *(size_t*)(m + guard + sizeof(char*)) = size;   /* checked by take */";
       "  __lang_coro_pools[k].head = m; __lang_coro_pools[k].n++;";
       "}";
-      "static char* __lang_coro_stack_take(size_t size) {";
+      "__attribute__((noinline)) static char* __lang_coro_stack_take(size_t size) {";
       "  for (int i = 0; i < __LANG_CORO_CLASSES; i++) {";
       "    if (__lang_coro_pools[i].size != size || !__lang_coro_pools[i].head) continue;";
       "    char* m = __lang_coro_pools[i].head;";
@@ -11667,8 +11674,7 @@ let coro_runtime ~(stack_bytes : int) =
       "    __lang_coro_pools[i].head = *(char**)(m + guard); __lang_coro_pools[i].n--;";
       "    /* a stack of another size would put the stack pointer outside the mapping,";
       "       and what that does depends on what is mapped there -- so it is checked */";
-      "    if (*(size_t*)(m + guard + sizeof(char*)) != size)";
-      "      __lang_fail_impl(\"coro: the stack pool handed out a stack of another size\");";
+      "    if (*(size_t*)(m + guard + sizeof(char*)) != size) __lang_coro_pool_mismatch();";
       "    return m;";
       "  }";
       "  return NULL;";
