@@ -6531,7 +6531,15 @@ let emit_copy_fn (tag : string) (t : Ast.ty) : string =
     header ^ " {\n  size_t n = __lang_str_size(v);\n  \
               char* s = __lang_str_alloc(r, n);\n  \
               memcpy(s, v, n);\n  return s;\n}"
-  | Ast.TyCon (("Map" | "Vec" | "StrBuf" | "ByteBuf" | "ListBuf"), _) ->
+  (* v0.1.567: a Map or a Vec can move its storage to an arena of its own
+     (map_recycle, map_compact, vec_compact) -- and then `region` names that arena
+     while the struct the handle points at still lives where it was made. Keeping
+     only `region` let the block holding the struct be freed under a handle that had
+     escaped (a recycled Map captured by a closure; mere-ruby's frame pool under R2).
+     Both are kept. *)
+  | Ast.TyCon (("Map" | "Vec"), _) ->
+    header ^ " { if (v) { __lang_region_keep(v->region, r); __lang_region_keep(v->home, r); } return v; }"
+  | Ast.TyCon (("StrBuf" | "ByteBuf" | "ListBuf"), _) ->
     (* v0.1.557: a container is still copied as its handle -- it is a mutable
        identity -- but a handle stored where it outlives its block keeps the
        block's memory (see __lang_region_keep). *)
@@ -10413,6 +10421,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  int idx_used;  /* index slots not -1: live entries PLUS vacated ones */";
       "  __lang_region* region;";
       "  int owns_region;  /* 1 after the first compact: region is private and freeable */";
+      "  __lang_region* home;  /* v0.1.567: where this struct itself lives -- `region` moves */";
       Printf.sprintf "} %s;" struct_name;
       "";
       (* new *)
@@ -10427,6 +10436,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  for (int i = 0; i < 4; i++) m->dead[i] = 0;";
       "  m->live = 0;";
       "  m->region = r;";
+      "  m->home = r;";
       "  m->owns_region = 0;";
       "  m->idx_cap = 8;";
       "  m->idx = (int*)__lang_region_alloc(r, sizeof(int) * 8);";
@@ -12291,6 +12301,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  int cap;";
       "  __lang_region* region;";
       "  int owns_region;  /* 1 after the first compact (see the map twin) */";
+      "  __lang_region* home;  /* v0.1.567: where this struct itself lives -- `region` moves */";
       Printf.sprintf "} %s;" struct_name;
       "";
       Printf.sprintf "static %s* %s_new(__lang_region* r) {" struct_name struct_name;
@@ -12300,6 +12311,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  v->len = 0;";
       Printf.sprintf "  v->data = (%s*)__lang_region_alloc(r, sizeof(%s) * 4);" c_elem c_elem;
       "  v->region = r;";
+      "  v->home = r;";
       "  v->owns_region = 0;";
       "  return v;";
       "}";

@@ -1,0 +1,25 @@
+// Q-195 (v0.1.567): a Map made in R and given an arena of its own by map_recycle,
+// captured by a closure that outlives R. Retention asked about the map's `region`
+// -- now the private arena -- and not about R, where the map's struct still lives,
+// so R was freed under the handle. A Map or a Vec now keeps both.
+let o = vec_new ();
+let _ = region R {
+  let m = map_new () in
+  let _ = map_recycle m in
+  let _ = map_set m 1 "seed" in
+  vec_push o (fn (k: int) -> if k < 0 then let _ = map_set m 2 (str_repeat "a" 40) in "" else map_get m k)
+};
+let h = vec_get o 0;
+let rec churn = fn (i: int) ->
+  if i == 50 then ()
+  else
+    let _ = region Q {
+      let w = vec_new () in
+      let rec f = fn (j: int) -> if j == 64 then () else let _ = vec_push w (str_repeat "Z" 40) in f (j + 1) in
+      let _ = f 0 in
+      vec_len w } in
+    churn (i + 1);
+let _ = churn 0;
+let _ = h (0 - 1);
+let _ = print (h 1);
+print (h 2)

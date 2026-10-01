@@ -109,3 +109,4 @@ spawn_env_in_block   SAFE   ACCEPT    ACCEPT      ll,w,rv     Q-191
 ownedvec_store       SAFE   ACCEPT    ACCEPT      rv          Q-192
 channel_from_block   SAFE   ACCEPT    ACCEPT      w,rv        -
 bytebuf_out          GATED  REJECT    REJECT      -           -
+recycled_escape      SAFE   ACCEPT    ACCEPT      ll,rv       Q-195

@@ -223,7 +223,10 @@ as of v0.1.31 it is the implemented semantics on the C backend:
   it (Q-190). Three more stores now copy what they store, for the same reason:
   `owned_vec_push` (an OwnedVec is malloc'd and outlives every block),
   `spawn`'s env (the thread may run after the block), and on LLVM a channel
-  message. `scripts/region_uaf_check.sh` runs each of these after forcing the
+  message. A Map or a Vec whose storage moved to an arena of its own
+  (`map_recycle`, `map_compact`, `vec_compact`) still has its struct where it was
+  made, so retention keeps both (v0.1.567, Q-195).
+  `scripts/region_uaf_check.sh` runs each of these after forcing the
   block's memory to be reused.
 - **The block's result is copied out** into the enclosing region
   (per-type deep copy, specialized like the `show`/`==` derive family),
