@@ -1264,6 +1264,38 @@ first, and only once.
 
 ---
 
+### Which lines filled the default region (`--region-sites`, v0.1.570)
+
+The default region is never given back, and it is where a container goes when
+nothing decided its region — typically a buffer a function makes and uses but
+does not return, so it does not appear in the function's type. Compile with
+`--region-sites` and the same meter names the source line of every such
+container, most bytes first:
+
+```
+mere -c --region-sites main.mere > p.c && cc -O2 p.c -o p
+MERE_REGION_STATS=1 ./p
+region-stats default: blocks=12 cap=17175674880 alloc_total=11554780168
+region-stats default-sites: 29 lines, alloc_total=11552355112 of 11554780168
+region-stats default-site mgz/inflate.mere:341: alloc_total=8347724352
+region-stats default-site mgit/store.mere:210: alloc_total=1829840680
+```
+
+Each line counts what its containers asked for: the struct, the storage, every
+growth and every copy stored into them. Where the memory lives does not change —
+each line's region forwards every allocation to the default one — so the
+`default:` total is the same with and without the flag, and so is the output.
+Strings and other values allocated in the default region directly are not lines
+here, which is the gap between the two totals.
+
+The usual answer to a line at the top is a `region` block around where the
+container is made and used. The example above is mgit reading 17,500 git
+objects: one 64 KiB inflate window per object, 8.3 GB of 11.5. Inside a
+`region W { }` of its own the default region was 3.2 GB, with the same output.
+C backend only; without the flag the emitted calls are exactly what they were.
+
+---
+
 ## System / constants (4)
 
 | Name | Type | Description |
