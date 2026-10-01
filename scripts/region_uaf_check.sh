@@ -30,7 +30,12 @@
 # survived it: a lifetime fix has to be witnessed by a write, too.
 #
 # --poison undoes each fix in the emitted code, one at a time, and the program
-# that exists for it must go red.
+# that exists for it must go red. A poison that frees something has to wreck it
+# first: whether a program notices a freed struct is the allocator's business.
+# The LLVM `kept_then_written` poison only freed the struct up to v0.1.568, and
+# on glibc the struct's bytes were still there to be used -- green on Linux, red
+# on macOS, and CI red for six versions. It now fills the struct with 0xAA..
+# before the free (a poison written `perl:` is run by perl, which can add a line).
 #
 # Usage: sh scripts/region_uaf_check.sh [--poison]
 set -u
@@ -57,7 +62,10 @@ run_bin() { perl -e 'alarm 20; exec @ARGV' "$1" 2>&1; }
 build() {  # $1 = program, $2 = c|ll, [$3 = sed expression] -> $T/bin, or prints why not
   "$MERE" "-$2" "$FX/$1.mere" > "$T/g.$2" 2>"$T/emit.err" || { echo "EMITFAIL $(head -1 "$T/emit.err")"; return 1; }
   if [ -n "${3:-}" ]; then
-    sed "$3" "$T/g.$2" > "$T/p.$2"
+    case "$3" in
+      perl:*) perl -pe "${3#perl:}" "$T/g.$2" > "$T/p.$2" ;;
+      *) sed "$3" "$T/g.$2" > "$T/p.$2" ;;
+    esac
     if cmp -s "$T/p.$2" "$T/g.$2"; then echo "SEDNOMATCH"; return 1; fi
     mv "$T/p.$2" "$T/g.$2"
   fi
@@ -84,7 +92,7 @@ done
 if [ "$MODE" = --poison ]; then
   # program | backend | what the poison undoes | sed expression
   POISONS='kept_then_written|c|a kept struct is recycled again|s/    r->fwd = t;//
-kept_then_written|ll|a kept struct is freed again|s/  br i1 %none, label %freestruct, label %leave/  br label %freestruct/
+kept_then_written|ll|a kept struct is freed again|perl:s/^  br i1 %none, label %freestruct, label %leave$/  br label %freestruct/; s/^freestruct:$/freestruct:\n  store [6 x i64] [i64 -6148914691236517206, i64 -6148914691236517206, i64 -6148914691236517206, i64 -6148914691236517206, i64 -6148914691236517206, i64 -6148914691236517206], ptr %r/
 spawn_env_in_block|c|the thread gets the env as it was|s/__se = __sh->__copy(&__lang_default_region, __se);/(void)0;/
 ownedvec_store|c|owned_vec_push stores the pointer|s/v->data\[v->len++\] = __mcopy_str(&__lang_default_region, x);/v->data[v->len++] = x;/
 ownedvec_store|ll|owned_vec_push stores the pointer|s/= call ptr @__mcopy_str(ptr @__lang_default_region, ptr \(%t[0-9]*\))/= getelementptr i8, ptr \1, i64 0/

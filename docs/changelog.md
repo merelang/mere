@@ -4,6 +4,54 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.569 — 2026-10-02
+
+_Four gates that answered for their environment, and a correction to v0.1.568._
+
+**CI was red from v0.1.563 to v0.1.568**, every time on one line:
+`region_uaf_check --poison` said the LLVM poison for `kept_then_written` stayed
+green. The poison frees a region struct the fix keeps, and whether the program
+then notices is the allocator's business: on macOS the freed bytes are reused and
+the output goes wrong; on glibc they are still there and the writes land in live
+memory. The poison now fills the struct with `0xAA..` before it frees it, and goes
+red on both (a segfault on Linux, a hang the gate's alarm ends on macOS). Poisons
+can be written as `perl:` expressions, which can add a line where sed cannot.
+`MALLOC_PERTURB_` was tried and is not enough. The gate is run on the CI image
+before it is pushed this time; v0.1.563 added it without that.
+
+`tty_raw_check`'s Ctrl-C leg failed whenever the gates were started from a
+background job: a non-interactive shell starts `&` jobs with SIGINT ignored, an
+ignored signal survives exec, and the program under test never died of the Ctrl-C
+it was sent. Its pty driver restores SIGINT in the child, and `scripts/bounded.sh`
+restores SIGINT and SIGQUIT for every command it runs. Load had nothing to do with
+it: 24 of 24 runs failed started with `&`, and 24 of 24 passed with SIGINT restored,
+under the same 30 busy loops.
+
+`fmt_comments_check` read `fmt_roundtrip_check`'s probes: the latter writes
+`examples/__fmtroundtrip_$$__.mere` next to each example and deletes it, the
+former globs `examples/*.mere`, and `_` sorts first -- so POISON 6's "first example
+that formats" was sometimes a file that was about to vanish, and the plain legs
+counted 289 files or died of a syntax error on an empty count. The probes are dot
+files now (`.fmtroundtrip_$$.mere`), which no `*.mere` glob picks up -- the shape
+other gates already use. Four other gates glob `examples/` and are covered too.
+
+`downstream_check` gives each repository 900 s instead of 420, and prints how
+long each took. v0.1.568's CI failed a second way: mere-ruby's `main.mere`
+outlived 420 s. The same mere-ruby commit had taken 222 s in v0.1.567's run fifty
+minutes earlier, and v0.1.562 and v0.1.569 emit it in the same time here (120 and
+123 s of CPU) -- the runner, not the compiler. mere-ruby is about three times the
+size it was when 420 was chosen, so the margin had already gone.
+
+**The reason v0.1.568 gave is withdrawn.** It said the inlined pool check made
+clang -O2 get killed on mere-ruby's C "every time". That was seen twice, while
+the full gate sweep and a simulation ran on the same machine; clang peaks at 6-7 GB
+on that file. On a machine doing nothing else the C that v0.1.567 emitted compiles
+and links (187-206 s, 5.2-6.0 GB peak, three ways), and nothing on record says what
+killed it. The `noinline` stays -- it costs nothing measurable and keeps the pool
+out of every creation site -- but it fixed nothing that was shown to be broken.
+
+---
+
 ## v0.1.568 — 2026-10-01
 
 _mere-ruby builds again: the stack pool's size check made clang -O2 give up on it (v0.1.566-567)._

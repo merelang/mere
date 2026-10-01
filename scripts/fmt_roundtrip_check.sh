@@ -39,8 +39,8 @@ CEILING="${CEILING:-0}"
 #   files on a main that was green run by run. CI runs its steps one at a time,
 #   which is why nothing had seen it. Cleanup removes this run's files only --
 #   a second run's are not ours to delete.
-probe="__fmtroundtrip_$$__.mere"
-probe2="__fmtroundtrip2_$$__.mere"
+probe=".fmtroundtrip_$$.mere"
+probe2=".fmtroundtrip2_$$.mere"
 cleanup() {
   find "$ROOT/examples" \( -name "$probe" -o -name "$probe2" \) -delete 2>/dev/null || true
 }
@@ -50,7 +50,7 @@ cleanup
 checked=0; broke=0; names=""; drift=0; drift_names=""
 for f in "$ROOT"/examples/*.mere "$ROOT"/examples/*/*.mere; do
   [ -f "$f" ] || continue
-  case "$f" in *__fmtroundtrip*) continue ;; esac
+  case "$f" in */.fmtroundtrip*) continue ;; esac
   # Only files the compiler accepts as they are: a file it already refuses
   # cannot say anything about the formatter.
   "$MERE" -t "$f" >/dev/null 2>&1 || continue

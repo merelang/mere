@@ -18,7 +18,10 @@ exec perl -e '
   my $secs = shift @ARGV;
   my $pid = fork();
   defined $pid or exit 202;
-  if ($pid == 0) { exec { $ARGV[0] } @ARGV or exit 127 }
+  # A shell runs `&` jobs with SIGINT and SIGQUIT ignored, and an ignored signal
+  # survives exec: every gate started from a background runner inherited it, and
+  # a gate that needs Ctrl-C to work (tty_raw_check) failed only then (v0.1.569).
+  if ($pid == 0) { $SIG{INT} = $SIG{QUIT} = "DEFAULT"; exec { $ARGV[0] } @ARGV or exit 127 }
   $SIG{ALRM} = sub { kill "KILL", $pid; waitpid($pid, 0); exit 201 };
   alarm $secs;
   waitpid($pid, 0);
