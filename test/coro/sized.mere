@@ -1,0 +1,16 @@
+// v0.1.566: coro_new_sized -- a 64 KiB stack, a 64 MiB one, a partial application
+// (the size now, the body later), and a size that is not one, refused catchably.
+
+let root = coro_root ();
+type ilist = INil | ICons of int * ilist;
+let rec build = fn n -> if n == 0 then INil else ICons (n, build (n - 1));
+let rec total = fn lst -> match lst with | INil -> 0 | ICons (h, t) -> h + total t;
+let small = coro_new_sized 65536 (fn me -> fn (n: int) -> let _ = print_int (total (build n)) in coro_exit root ());
+let _ = coro_transfer small 100 root;
+let big = coro_new_sized (64 * 1048576) (fn me -> fn (n: int) -> let _ = print_int (total (build n)) in coro_exit root ());
+let _ = coro_transfer big 300000 root;
+let mk = coro_new_sized 131072;
+let c3 = mk (fn me -> fn (u: unit) -> let _ = print "partial" in coro_exit root ());
+let _ = coro_switch c3;
+let v = try_or (fn (u) -> let _ = coro_new_sized 0 (fn me -> fn (u: unit) -> coro_exit root ()) in 1) 0;
+print_int v

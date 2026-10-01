@@ -61,6 +61,7 @@ machine rather than a host.
 | `clamp` | yes | yes | yes | yes |
 | `coro_exit` | yes | yes | refused | refused |
 | `coro_new` | yes | yes | refused | refused |
+| `coro_new_sized` | yes | yes | refused | refused |
 | `coro_root` | yes | yes | refused | refused |
 | `coro_switch` | yes | yes | refused | refused |
 | `coro_transfer` | yes | yes | refused | refused |

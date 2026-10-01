@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.566 — 2026-10-01
+
+_`coro_new_sized`, and a stack pool that follows the program's peak instead of stopping at 16._
+
+**The pool.** A finished coroutine's stack was kept for the next one, up to 16
+per thread; past that every coroutine paid an mmap, a guard mprotect, a
+first-touch fault and a munmap, about 10 us. A server with fifty connections in
+flight is past it whenever more than 16 finish together -- the likely cause of
+mpoll_coro making a coroutine per connection serving fewer requests than its
+worker pool. A list now keeps up to the most coroutines the thread has had alive
+at once (at least 16). That is memory the program already had at its peak, so the
+peak does not rise; the pool only stops giving it back below it. madvise on the
+way in was measured and left out: 0.6 s more for no RSS saved on stacks that touch
+a page or two.
+
+| 2000 rounds of K coroutines alive, then finished | before | now |
+|---|---|---|
+| K = 16, C | 0.02 s | 0.01 s |
+| K = 64, C | 1.0 s | 0.05 s |
+| K = 64, LLVM | 0.16-0.23 s | 0.06 s |
+
+**`coro_new_sized : int -> (Coro['m] -> 'm -> CoroExit) -> Coro['m]`** makes a
+coroutine on a stack of at least that many bytes, rounded up to a power of two of
+at least 64 KiB, at most 1 GiB; the pool keeps one list per size. Only the pages
+a stack touches are resident, so a small stack saves address space rather than
+memory -- for a program that keeps very many coroutines alive, or a big one for
+one that recurses deeply. Overflowing a small stack is named like any other.
+Rewritten before type-checking like `coro_new` (partial application and the bare
+name included); interpreter, C and LLVM; Wasm and RV refuse it by name.
+
+**LLVM maps its stacks** with mmap, as C does (the flags are Darwin's or Linux's,
+told apart at run time by the weak symbol the overflow handler already uses).
+posix_memalign made a page resident for every stack before anything ran on it, so
+a suspended coroutine cost two pages on LLVM and one on C: 10,000 of them were
+335 MiB against 171. They are the same now (164 MiB).
+
+coro_check gains `sized` (both sizes, a partial application, a size refused),
+`sized_overflow` and `sized_reuse` -- a small stack finished first must not be
+handed to a coroutine of the program's own size -- with a poison on each backend
+that makes the pool ignore the size. A pooled stack carries its size beside the
+pool's link word and taking one checks it: a stack of another size would put the
+stack pointer outside its mapping, and what that does depends on what is mapped
+there -- the first version of this poison stayed green in one full run out of
+two, which is how that was found.
+
+---
+
 ## v0.1.565 — 2026-10-01
 
 _A finished coroutine keeps nothing on LLVM either: generational handles and an env of its own, the C runtime's v0.1.558._

@@ -3259,6 +3259,19 @@ let coro_take (me : coro) : value =
 let builtin_coro_new_raw =
   V_builtin ("__coro_new_raw", fun body -> V_coro (coro_fresh (Co_new body)))
 
+(* v0.1.566: coro_new_sized -- the interpreter has no native stacks, so the size is
+   checked the way the compiled runtimes check it and otherwise has no effect *)
+let coro_check_size (who : string) (v : value) =
+  match v with
+  | V_int n when n > 0 && n <= 1 lsl 30 -> ()
+  | V_int _ -> coro_fail (who ^ ": a stack size must be between 1 byte and 1 GiB")
+  | _ -> failwith (who ^ ": expected an int")
+
+let builtin_coro_new_sized_raw =
+  V_builtin ("__coro_new_sized_raw", fun n ->
+    coro_check_size "coro_new_sized" n;
+    V_builtin ("__coro_new_sized_raw_p1", fun body -> V_coro (coro_fresh (Co_new body))))
+
 let builtin_coro_msg =
   V_builtin ("__coro_msg", fun v ->
     match v with
@@ -3919,6 +3932,7 @@ let initial_env : env =
     ("detach", ref builtin_detach);
     ("coro_new", ref builtin_coro_new);
     ("__coro_new_raw", ref builtin_coro_new_raw);
+    ("__coro_new_sized_raw", ref builtin_coro_new_sized_raw);
     ("__coro_msg", ref builtin_coro_msg);
     ("coro_transfer", ref builtin_coro_transfer);
     ("coro_exit", ref builtin_coro_exit);

@@ -209,7 +209,8 @@ let coro_capture (env : venv) (clos : Ast.expr) : unit =
    Fibers do) would then allocate there on every resume. Checked at each use of a
    builtin that moves one, at the type it was used at; a type variable is left to
    the backend that sees it instantiated. *)
-let coro_msg_builtins = [ "coro_transfer"; "coro_exit"; "__coro_msg"; "__coro_new_raw"; "coro_new" ]
+let coro_msg_builtins = [ "coro_transfer"; "coro_exit"; "__coro_msg"; "__coro_new_raw"; "coro_new";
+                          "coro_new_sized"; "__coro_new_sized_raw" ]
 
 let coro_msg_check (env : venv) (e : Ast.expr) : unit =
   match e.Ast.node, e.Ast.ty with
@@ -221,7 +222,7 @@ let coro_msg_check (env : venv) (e : Ast.expr) : unit =
           Printf.sprintf
             "%s: a coroutine's messages are int, bool, float, unit or a Coro for now \
              -- this one's are %s. Send an index into something both sides can see"
-            (if x = "__coro_new_raw" || x = "__coro_msg" then "coro_new" else x)
+            (Typer.coro_source_name x)
             (Ast.pp_ty (Ast.walk m))))
       | Ast.TyCon (_, args) -> List.iter walk args
       | Ast.TyArrow (a, b) -> walk a; walk b
@@ -312,6 +313,11 @@ let rec go (env : venv) (consumed : IS.t) (multi : bool) (e : Ast.expr) : IS.t =
     when List.assoc_opt n env = None ->
     coro_capture env arg;
     go env consumed multi arg
+  (* v0.1.566: the sized form's body is its second argument *)
+  | Ast.App ({ Ast.node = Ast.App ({ Ast.node = Ast.Var ("coro_new_sized" | "__coro_new_sized_raw" as n); _ }, sz); _ }, arg)
+    when List.assoc_opt n env = None ->
+    coro_capture env arg;
+    go env (go env consumed multi sz) multi arg
   | Ast.App (f, arg) ->
     go env (go env consumed multi f) multi arg
 
