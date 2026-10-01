@@ -61,18 +61,30 @@ let coro_runtime_llvm ~(stack_bytes : int) =
       "; Every record is on the heap, never thread_local: a large thread-local lands in";
       "; each thread's stack on glibc. The root record (the thread's own stack) is made";
       "; on first use.";
-      "; A coroutine is two records. The small one ({state, owner, x}) is what the";
-      "; program holds and is never freed: a finished coroutine is still a value, and";
-      "; switching to it must fail by name. The large one -- the saved state -- is";
-      "; freed when the coroutine is reaped, so a finished one costs 24 bytes.";
-      "%__lang_coro = type { i32, ptr, ptr, i64 }";
+      "; A coroutine is two records, a small one ({state, owner, x, msg, slot}) and a";
+      "; large one (the saved state). Both are freed when it is reaped (v0.1.565): the";
+      "; program holds a handle -- a slot and a generation -- not either address, so a";
+      "; finished coroutine is still a value and switching to it fails by name.";
+      "%__lang_coro = type { i32, ptr, ptr, i64, i32 }";
       "; 3: v0.1.561, what was sent to it and not yet read (one word, whatever its type)";
-      "%__lang_coro_x = type { [200 x i8], ptr, ptr, ptr, ptr, ptr, i32, i32, i32, [200 x i8], i64, i64, i32, ptr }";
+      "; 4: v0.1.565, its slot in the thread's slot table (see __lang_coro_give_slot)";
+      "%__lang_coro_x = type { [200 x i8], ptr, ptr, ptr, ptr, ptr, i32, i32, i32, [200 x i8], i64, i64, i32, ptr, i32 }";
+      "; x 14: v0.1.565, 1 when the env is the coroutine's own (malloc'd, freed when the body ends)";
       "; x:  0 jb   1 stack top   2 env   3 fn   4 current region   5 open blocks";
       ";     6 open-block count   7 its capacity   8 jmpbuf set   9 jmpbuf";
       ";    10 stack lo   11 stack hi   12 ListBuf depth   13 the allocation (null for a root)";
       "@__lang_coro_cur = internal thread_local global ptr null";
       "@__lang_coro_root = internal thread_local global ptr null";
+      "; v0.1.565 (Q-183 on LLVM): GENERATIONAL HANDLES, the C runtime's v0.1.558. The";
+      "; program holds a slot and a generation (24 bits each, below 2^48), not the record's";
+      "; address, so reaping can free the record: a handle whose generation no longer";
+      "; matches answers \"has finished\". Small words only per thread; the arrays are malloc'd.";
+      "@__lang_coro_slots = internal thread_local global ptr null";
+      "@__lang_coro_gens = internal thread_local global ptr null";
+      "@__lang_coro_next = internal thread_local global ptr null";
+      "@__lang_coro_nslot = internal thread_local global i32 0";
+      "@__lang_coro_cap = internal thread_local global i32 0";
+      "@__lang_coro_free = internal thread_local global i32 -1";
       "@__lang_coro_zombie = internal thread_local global ptr null";
       "@__lang_coro_pool = internal thread_local global ptr null";
       "@__lang_coro_pool_n = internal thread_local global i32 0";
@@ -107,6 +119,141 @@ let coro_runtime_llvm ~(stack_bytes : int) =
       "  ret i64 %n";
       "}";
       "";
+      "define internal i64 @__lang_coro_give_slot(ptr %c) {";
+      "entry:";
+      "  %f = load i32, ptr @__lang_coro_free";
+      "  %has = icmp sge i32 %f, 0";
+      "  br i1 %has, label %pop, label %fresh";
+      "pop:";
+      "  %na = load ptr, ptr @__lang_coro_next";
+      "  %fx = sext i32 %f to i64";
+      "  %nfp = getelementptr i32, ptr %na, i64 %fx";
+      "  %nf = load i32, ptr %nfp";
+      "  store i32 %nf, ptr @__lang_coro_free";
+      "  br label %set";
+      "fresh:";
+      "  %n = load i32, ptr @__lang_coro_nslot";
+      "  %cap = load i32, ptr @__lang_coro_cap";
+      "  %full = icmp sge i32 %n, %cap";
+      "  br i1 %full, label %grow, label %take";
+      "grow:";
+      "  %cz = icmp eq i32 %cap, 0";
+      "  %c2 = shl i32 %cap, 1";
+      "  %ncap = select i1 %cz, i32 64, i32 %c2";
+      "  %ncx = sext i32 %ncap to i64";
+      "  %ocx = sext i32 %cap to i64";
+      "  %ns = call ptr @calloc(i64 %ncx, i64 8)";
+      "  %ng = call ptr @calloc(i64 %ncx, i64 4)";
+      "  %nn = call ptr @calloc(i64 %ncx, i64 4)";
+      "  %okp = icmp ne ptr %ns, null";
+      "  %okg = icmp ne ptr %ng, null";
+      "  %okn = icmp ne ptr %nn, null";
+      "  %ok1 = and i1 %okp, %okg";
+      "  %ok = and i1 %ok1, %okn";
+      "  br i1 %ok, label %copy, label %oom";
+      "oom:";
+      "  call void @__lang_fail_impl(ptr @.oom_msg)";
+      "  unreachable";
+      "copy:";
+      "  %os = load ptr, ptr @__lang_coro_slots";
+      "  %og = load ptr, ptr @__lang_coro_gens";
+      "  %on = load ptr, ptr @__lang_coro_next";
+      "  %b8 = mul i64 %ocx, 8";
+      "  %b4 = mul i64 %ocx, 4";
+      "  %hadold = icmp ne ptr %os, null";
+      "  br i1 %hadold, label %mv, label %inst";
+      "mv:";
+      "  call ptr @memcpy(ptr %ns, ptr %os, i64 %b8)";
+      "  call ptr @memcpy(ptr %ng, ptr %og, i64 %b4)";
+      "  call ptr @memcpy(ptr %nn, ptr %on, i64 %b4)";
+      "  call void @free(ptr %os)";
+      "  call void @free(ptr %og)";
+      "  call void @free(ptr %on)";
+      "  br label %inst";
+      "inst:";
+      "  store ptr %ns, ptr @__lang_coro_slots";
+      "  store ptr %ng, ptr @__lang_coro_gens";
+      "  store ptr %nn, ptr @__lang_coro_next";
+      "  store i32 %ncap, ptr @__lang_coro_cap";
+      "  br label %take";
+      "take:";
+      "  %n1 = add i32 %n, 1";
+      "  store i32 %n1, ptr @__lang_coro_nslot";
+      "  br label %set";
+      "set:";
+      "  %s = phi i32 [ %f, %pop ], [ %n, %take ]";
+      "  %sx = sext i32 %s to i64";
+      "  %sa = load ptr, ptr @__lang_coro_slots";
+      "  %sp = getelementptr ptr, ptr %sa, i64 %sx";
+      "  store ptr %c, ptr %sp";
+      "  %cs = getelementptr %__lang_coro, ptr %c, i32 0, i32 4";
+      "  store i32 %s, ptr %cs";
+      "  %h = call i64 @__lang_coro_handle(ptr %c)";
+      "  ret i64 %h";
+      "}";
+      "";
+      "define internal i64 @__lang_coro_handle(ptr %c) {";
+      "entry:";
+      "  %cs = getelementptr %__lang_coro, ptr %c, i32 0, i32 4";
+      "  %s = load i32, ptr %cs";
+      "  %sx = sext i32 %s to i64";
+      "  %ga = load ptr, ptr @__lang_coro_gens";
+      "  %gp = getelementptr i32, ptr %ga, i64 %sx";
+      "  %g = load i32, ptr %gp";
+      "  %gx = zext i32 %g to i64";
+      "  %hi = shl i64 %gx, 24";
+      "  %h = or i64 %hi, %sx";
+      "  ret i64 %h";
+      "}";
+      "";
+      "define internal ptr @__lang_coro_of(i64 %h) {";
+      "entry:";
+      "  %sx = and i64 %h, 16777215";
+      "  %gx = lshr i64 %h, 24";
+      "  %n = load i32, ptr @__lang_coro_nslot";
+      "  %nx = zext i32 %n to i64";
+      "  %inr = icmp ult i64 %sx, %nx";
+      "  %small = icmp ult i64 %gx, 16777216";
+      "  %ok0 = and i1 %inr, %small";
+      "  br i1 %ok0, label %look, label %none";
+      "look:";
+      "  %ga = load ptr, ptr @__lang_coro_gens";
+      "  %gp = getelementptr i32, ptr %ga, i64 %sx";
+      "  %g = load i32, ptr %gp";
+      "  %gz = zext i32 %g to i64";
+      "  %same = icmp eq i64 %gz, %gx";
+      "  br i1 %same, label %hit, label %none";
+      "hit:";
+      "  %sa = load ptr, ptr @__lang_coro_slots";
+      "  %sp = getelementptr ptr, ptr %sa, i64 %sx";
+      "  %c = load ptr, ptr %sp";
+      "  ret ptr %c";
+      "none:";
+      "  ret ptr null";
+      "}";
+      "";
+      "define internal void @__lang_coro_drop_slot(ptr %c) {";
+      "entry:";
+      "  %cs = getelementptr %__lang_coro, ptr %c, i32 0, i32 4";
+      "  %s = load i32, ptr %cs";
+      "  %sx = sext i32 %s to i64";
+      "  %sa = load ptr, ptr @__lang_coro_slots";
+      "  %sp = getelementptr ptr, ptr %sa, i64 %sx";
+      "  store ptr null, ptr %sp";
+      "  %ga = load ptr, ptr @__lang_coro_gens";
+      "  %gp = getelementptr i32, ptr %ga, i64 %sx";
+      "  %g = load i32, ptr %gp";
+      "  %g1 = add i32 %g, 1";
+      "  %g2 = and i32 %g1, 16777215";
+      "  store i32 %g2, ptr %gp";
+      "  %na = load ptr, ptr @__lang_coro_next";
+      "  %np = getelementptr i32, ptr %na, i64 %sx";
+      "  %f = load i32, ptr @__lang_coro_free";
+      "  store i32 %f, ptr %np";
+      "  store i32 %s, ptr @__lang_coro_free";
+      "  ret void";
+      "}";
+      "";
       "define internal ptr @__lang_coro_enter_root() {";
       "entry:";
       "  %c = load ptr, ptr @__lang_coro_cur";
@@ -126,6 +273,7 @@ let coro_runtime_llvm ~(stack_bytes : int) =
       "  store ptr %me, ptr %op";
       "  store ptr %r, ptr @__lang_coro_cur";
       "  store ptr %r, ptr @__lang_coro_root";
+      "  %rh = call i64 @__lang_coro_give_slot(ptr %r)";
       "  ret ptr %r";
       "done:";
       "  ret ptr %c";
@@ -196,6 +344,9 @@ let coro_runtime_llvm ~(stack_bytes : int) =
       "  call void @__lang_coro_stack_put(ptr %mem)";
       "  call void @free(ptr %zx)";
       "  store ptr null, ptr %zx_p";
+      "  ; v0.1.565: and the record, and its slot -- a handle from before is stale now";
+      "  call void @__lang_coro_drop_slot(ptr %z)";
+      "  call void @free(ptr %z)";
       "  br label %done";
       "done:";
       "  ret void";
@@ -319,7 +470,9 @@ let coro_runtime_llvm ~(stack_bytes : int) =
       "  %fn = load ptr, ptr %fp";
       "  ; v0.1.561: the body is handed its own handle, and returns a CoroExit -- the";
       "  ; coroutine coro_exit named and already gave the value to";
-      "  %next = call ptr %fn(ptr %env, ptr %self)";
+      "  %selfh = call i64 @__lang_coro_handle(ptr %self)";
+      "  %nexth = call i64 %fn(ptr %env, i64 %selfh)";
+      "  %next = call ptr @__lang_coro_of(i64 %nexth)";
       "  ; the body is over: every block it opened has closed and every try_or has";
       "  ; returned, so there is nothing to unwind -- only somewhere to go";
       "  %isnull = icmp eq ptr %next, null";
@@ -352,6 +505,15 @@ let coro_runtime_llvm ~(stack_bytes : int) =
       "  store i32 0, ptr @__lang_region_active_cap";
       "  %sst = getelementptr %__lang_coro, ptr %self, i32 0, i32 0";
       "  store i32 3, ptr %sst";
+      "  ; v0.1.565: an env that is the coroutine's own goes with it";
+      "  %eop = getelementptr %__lang_coro_x, ptr %selfx, i32 0, i32 14";
+      "  %eo = load i32, ptr %eop";
+      "  %owned = icmp ne i32 %eo, 0";
+      "  br i1 %owned, label %freeenv, label %gone";
+      "freeenv:";
+      "  call void @free(ptr %env)";
+      "  br label %gone";
+      "gone:";
       "  store ptr null, ptr %ep";
       "  store ptr %self, ptr @__lang_coro_zombie";
       "  call void @__lang_coro_switch_to(ptr %next)";
@@ -470,11 +632,12 @@ let coro_runtime_llvm ~(stack_bytes : int) =
       "; v0.1.561 (Q-184): the values. What a coroutine receives is typed by its own";
       "; handle, so the one check is that `me` is the one running; the value waits in";
       "; the receiver's slot until the receiver reads it on arriving.";
-      "define internal ptr @__lang_coro_root_h() {";
+      "define internal i64 @__lang_coro_root_h() {";
       "entry:";
       "  %c = call ptr @__lang_coro_enter_root()";
       "  %r = load ptr, ptr @__lang_coro_root";
-      "  ret ptr %r";
+      "  %h = call i64 @__lang_coro_handle(ptr %r)";
+      "  ret i64 %h";
       "}";
       "";
       "define internal i64 @__lang_coro_take(ptr %me) {";
@@ -538,6 +701,71 @@ let coro_runtime_llvm ~(stack_bytes : int) =
       "  %tm = getelementptr %__lang_coro, ptr %to, i32 0, i32 3";
       "  store i64 %v, ptr %tm";
       "  ret ptr %to";
+      "}";
+      "";
+      "; v0.1.565: what the program calls. A handle is resolved through the slot table;";
+      "; one that does not resolve is a coroutine that has finished and been reaped.";
+      "define internal i64 @__lang_coro_new_h(ptr %env, ptr %fn, i32 %owned) {";
+      "entry:";
+      "  %c = call ptr @__lang_coro_new(ptr %env, ptr %fn)";
+      "  %cx_p = getelementptr %__lang_coro, ptr %c, i32 0, i32 2";
+      "  %cx = load ptr, ptr %cx_p";
+      "  %op = getelementptr %__lang_coro_x, ptr %cx, i32 0, i32 14";
+      "  store i32 %owned, ptr %op";
+      "  %h = call i64 @__lang_coro_give_slot(ptr %c)";
+      "  ret i64 %h";
+      "}";
+      "define internal void @__lang_coro_switch_h(i64 %h) {";
+      "entry:";
+      "  %r0 = call ptr @__lang_coro_enter_root()";
+      "  %c = call ptr @__lang_coro_of(i64 %h)";
+      "  %gone = icmp eq ptr %c, null";
+      "  br i1 %gone, label %finished, label %go";
+      "finished:";
+      "  call void @__lang_fail_impl(ptr getelementptr inbounds ({ i64, [41 x i8] }, ptr @__lang_coro_m_done, i32 0, i32 1))";
+      "  unreachable";
+      "go:";
+      "  call void @__lang_coro_switch(ptr %c)";
+      "  ret void";
+      "}";
+      "define internal i64 @__lang_coro_take_h(i64 %me) {";
+      "entry:";
+      "  %c = call ptr @__lang_coro_of(i64 %me)";
+      "  %v = call i64 @__lang_coro_take(ptr %c)";
+      "  ret i64 %v";
+      "}";
+      "define internal i64 @__lang_coro_transfer_h(i64 %to, i64 %v, i64 %me) {";
+      "entry:";
+      "  %r0 = call ptr @__lang_coro_enter_root()";
+      "  %m = call ptr @__lang_coro_of(i64 %me)";
+      "  %mnull = icmp eq ptr %m, null";
+      "  br i1 %mnull, label %notme, label %chkto";
+      "notme:";
+      "  call void @__lang_fail_impl(ptr getelementptr inbounds ({ i64, [64 x i8] }, ptr @__lang_coro_m_notme, i32 0, i32 1))";
+      "  unreachable";
+      "chkto:";
+      "  %t = call ptr @__lang_coro_of(i64 %to)";
+      "  %tnull = icmp eq ptr %t, null";
+      "  br i1 %tnull, label %finished, label %go";
+      "finished:";
+      "  call void @__lang_fail_impl(ptr getelementptr inbounds ({ i64, [43 x i8] }, ptr @__lang_coro_m_xdone, i32 0, i32 1))";
+      "  unreachable";
+      "go:";
+      "  %r = call i64 @__lang_coro_transfer(ptr %t, i64 %v, ptr %m)";
+      "  ret i64 %r";
+      "}";
+      "define internal i64 @__lang_coro_exit_h(i64 %to, i64 %v) {";
+      "entry:";
+      "  %r0 = call ptr @__lang_coro_enter_root()";
+      "  %t = call ptr @__lang_coro_of(i64 %to)";
+      "  %tnull = icmp eq ptr %t, null";
+      "  br i1 %tnull, label %finished, label %go";
+      "finished:";
+      "  call void @__lang_fail_impl(ptr getelementptr inbounds ({ i64, [39 x i8] }, ptr @__lang_coro_m_edone, i32 0, i32 1))";
+      "  unreachable";
+      "go:";
+      "  %r = call ptr @__lang_coro_exit(ptr %t, i64 %v)";
+      "  ret i64 %to";
       "}";
       "";
       (* coro_scan_ints: this backend keeps no list of live blocks to read a
@@ -792,7 +1020,7 @@ let coro_to_word_llvm loc (t : Ast.ty) (v : string) : string =
   | Ast.TyUnit -> "0"
   | Ast.TyBool -> conv "zext" "i1"
   | Ast.TyFloat -> conv "bitcast" "double"
-  | Ast.TyCon ("Coro", _) -> conv "ptrtoint" "ptr"
+  | Ast.TyCon ("Coro", _) -> v   (* a handle is a word already (v0.1.565) *)
   | t -> coro_word_bad loc t
 let coro_of_word_llvm loc (t : Ast.ty) (w : string) : string =
   let conv op dst =
@@ -803,10 +1031,15 @@ let coro_of_word_llvm loc (t : Ast.ty) (w : string) : string =
   | Ast.TyUnit -> "0"
   | Ast.TyBool -> conv "trunc" "i1"
   | Ast.TyFloat -> conv "bitcast" "double"
-  | Ast.TyCon ("Coro", _) -> conv "inttoptr" "ptr"
+  | Ast.TyCon ("Coro", _) -> w
   | t -> coro_word_bad loc t
 
-let coro_used_llvm = ref false  (* coro_new / coro_switch / coro_self -> coro_runtime_llvm *)
+let coro_used_llvm = ref false
+(* v0.1.565: set while emitting the lambda that is `coro_new`'s argument, so its env
+   is malloc'd as the coroutine's own and freed when the body ends; cleared by the
+   allocation that uses it *)
+let coro_env_owned_next_llvm = ref false
+let coro_env_was_owned_llvm = ref false  (* coro_new / coro_switch / coro_self -> coro_runtime_llvm *)
 (* binary file I/O: gated separately because the runtime references the
    mere_vec_int runtime (which is only emitted when an int vec is used). *)
 let uses_read_file_bytes_llvm = ref false
@@ -1035,7 +1268,8 @@ let rec llvm_ty_of (t : Ast.ty) : string =
      `ptr` could not be passed through one. The runtime converts at its
      own boundary. *)
   | Ast.TyCon ("File", _) -> "i64"
-  | Ast.TyCon (("Coro" | "CoroExit"), _) -> "ptr"  (* a heap record, see coro_runtime_llvm *)
+  (* v0.1.565: a handle -- a slot and a generation -- not the record's address *)
+  | Ast.TyCon (("Coro" | "CoroExit"), _) -> "i64"
   | Ast.TyTuple ts -> "%" ^ tuple_struct_name ts
   | Ast.TyRef _ -> "ptr"  (* `&R T` is a pointer into the region's buffer *)
   (* Q-012: ThreadHandle wraps a pthread_t (pointer-sized); Channel[T] is a
@@ -3593,7 +3827,7 @@ let emit_mcopy_fn (tag : string) (t : Ast.ty) : string =
      emit_instr (Printf.sprintf "  ret %s %%v" pty)
    (* a coroutine is a heap record with identity, not a region value *)
    | Ast.TyCon ("Coro", _) ->
-     emit_instr "  ret ptr %v"
+     emit_instr "  ret i64 %v"
    | Ast.TyStr ->
      let n = fresh_reg () and d = fresh_reg () and n1 = fresh_reg () in
      emit_instr (Printf.sprintf "  %s = call i64 @__lang_str_size(ptr %%v)" n);
@@ -4807,7 +5041,11 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
      backend cannot copy out (C can: its envs carry a copier). *)
   | Ast.App ({ node = Ast.Var "__coro_new_raw"; _ }, clos) ->
     coro_used_llvm := true;
+    coro_env_owned_next_llvm := (match clos.Ast.node with Ast.Fun _ -> true | _ -> false);
+    coro_env_was_owned_llvm := false;
     let cl = emit_expr env clos in
+    coro_env_owned_next_llvm := false;
+    let owned = if !coro_env_was_owned_llvm then 1 else 0 in
     let cs =
       match Option.map Ast.walk clos.Ast.ty with
       | Some (Ast.TyArrow (p, r)) -> closure_struct_name (Ast.walk p) (Ast.walk r)
@@ -4816,12 +5054,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let envr = fresh_reg () and fnr = fresh_reg () and r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0" envr cs cl);
     emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1" fnr cs cl);
-    emit_instr (Printf.sprintf "  %s = call ptr @__lang_coro_new(ptr %s, ptr %s)" r envr fnr);
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_coro_new_h(ptr %s, ptr %s, i32 %d)" r envr fnr owned);
     r
   | Ast.App ({ node = Ast.Var "coro_switch"; _ }, c) ->
     coro_used_llvm := true;
     let v = emit_expr env c in
-    emit_instr (Printf.sprintf "  call void @__lang_coro_switch(ptr %s)" v);
+    emit_instr (Printf.sprintf "  call void @__lang_coro_switch_h(i64 %s)" v);
     "0"  (* unit *)
   | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "coro_scan_ints"; _ }, c_e); _ }, l_e); _ }, h_e); _ }, clos) ->
     coro_used_llvm := true;
@@ -4839,13 +5077,13 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     coro_used_llvm := true;
     ignore (emit_expr env u);
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call ptr @__lang_coro_root_h()" r);
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_coro_root_h()" r);
     r
   | Ast.App ({ node = Ast.Var "__coro_msg"; _ }, me) ->
     coro_used_llvm := true;
     let m = emit_expr env me in
     let w = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i64 @__lang_coro_take(ptr %s)" w m);
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_coro_take_h(i64 %s)" w m);
     coro_of_word_llvm e.Ast.loc (match e.Ast.ty with Some t -> t | None -> Ast.TyInt) w
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "coro_exit"; _ }, c_e); _ }, v_e) ->
     coro_used_llvm := true;
@@ -4853,7 +5091,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let vv = emit_expr env v_e in
     let w = coro_to_word_llvm v_e.Ast.loc (match v_e.Ast.ty with Some t -> t | None -> Ast.TyInt) vv in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call ptr @__lang_coro_exit(ptr %s, i64 %s)" r cv w);
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_coro_exit_h(i64 %s, i64 %s)" r cv w);
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "coro_transfer"; _ }, c_e); _ }, v_e); _ }, me) ->
     coro_used_llvm := true;
@@ -4862,7 +5100,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let w = coro_to_word_llvm v_e.Ast.loc (match v_e.Ast.ty with Some t -> t | None -> Ast.TyInt) vv in
     let mv = emit_expr env me in
     let r = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i64 @__lang_coro_transfer(ptr %s, i64 %s, ptr %s)" r cv w mv);
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_coro_transfer_h(i64 %s, i64 %s, i64 %s)" r cv w mv);
     coro_of_word_llvm e.Ast.loc (match e.Ast.ty with Some t -> t | None -> Ast.TyInt) r
   | Ast.App ({ node = Ast.Var "spawn"; _ }, clos) ->
     let cl = emit_expr env clos in
@@ -7584,9 +7822,16 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       let size = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" size size_p);
       let env_p = fresh_reg () in
+      (* v0.1.565: the env of the lambda written as `coro_new`'s argument is the
+         coroutine's own -- malloc'd, freed when the body ends (see
+         coro_env_owned_next_llvm); every other env is the current region's *)
+      let alloc_fn =
+        if !coro_env_owned_next_llvm then begin
+          coro_env_owned_next_llvm := false; coro_env_was_owned_llvm := true; "@malloc"
+        end else "@__lang_alloc" in
       emit_instr (Printf.sprintf
-                    "  %s = call ptr @__lang_alloc(i64 %s)"
-                    env_p size);
+                    "  %s = call ptr %s(i64 %s)"
+                    env_p alloc_fn size);
       List.iteri (fun i (cname, cty) ->
         let cv =
           (* A region capture is not a variable: its value is the block's pointer,

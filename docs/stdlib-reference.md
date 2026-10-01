@@ -1104,7 +1104,7 @@ it made -- measured flat over 100k connections. Two ways to keep it that way:
   a saturated call allocates nothing on C.
 
 A handle held across 2^24 reuses of one slot would name a later coroutine.
-LLVM still keeps a 24-byte record per coroutine for its handle.
+LLVM is the same since v0.1.565: a handle is a slot and a generation there too, and a body written as a lambda at the `coro_new` has its env as its own (a million finished coroutines: 1.5 MiB on both).
 
 Backends: the interpreter, C and LLVM (v0.1.544). On both native backends a
 coroutine's stack is what `stack` in mere.toml asks for (as for `spawn`),
