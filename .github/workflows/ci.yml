@@ -720,6 +720,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/region_uaf_check.sh --poison
 
+      # `mere -c --region-sites` names the source lines whose containers filled
+      # the default region (v0.1.570), and must change nothing else: the same
+      # output, the same default-region total.
+      - name: region_sites_check (the meter names the line that filled the default region)
+        if: ${{ !cancelled() }}
+        run: sh scripts/region_sites_check.sh --poison
+
       # The README, executed. Its Quick-examples transcript is cut from the
       # file at run time and run, the counts it states are re-derived from the
       # repo, and a newcomer's first program is built and run outside this

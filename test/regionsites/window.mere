@@ -1,0 +1,24 @@
+// scripts/region_sites_check.sh: the shape mgit had. `unpack` makes a 64 KiB
+// window it uses and does not return, so the window is in no type and goes to
+// the default region -- once per call, never given back, though every call is
+// made from inside a region block. `--region-sites` must name line 7.
+let unpack = fn (n: int) ->
+  let out = bytebuf_new 0 in
+  let win = bytebuf_new 65536 in
+  let rec go = fn (i: int) ->
+    if i == n then ()
+    else
+      let _ = bytebuf_set win (i % 65536) (i % 251) in
+      let _ = bytebuf_push out (bytebuf_get win (i % 65536)) in
+      go (i + 1) in
+  let _ = go 0 in
+  bytebuf_len out;
+let tags = vec_new ();
+let rec each = fn (k: int) -> fn (acc: int) ->
+  if k == 200 then acc
+  else
+    let got = region R { unpack 100 } in
+    let _ = vec_push tags k in
+    each (k + 1) (acc + got);
+let total = each 0 0;
+print (str_of_int total ++ " " ++ str_of_int (vec_len tags))

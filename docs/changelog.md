@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.570 — 2026-10-02
+
+_`mere -c --region-sites`: which source lines filled the default region._
+
+The default region is never given back, and a container goes there when nothing
+decided its region -- most often a buffer a function makes and uses but does not
+return, so it is in no type (Q-134). `MERE_REGION_STATS` could say how much went
+there, not from where. mgit's default region was 11.5 GB; finding that 8.3 GB of
+it was one line, mgz's 64 KiB inflate window made once per git object, took 23
+rebuilds with one allocation site at a time moved to the current region.
+
+Compiled with `--region-sites`, each container the program sends to the default
+region gets a region of its own named after its source line, which forwards every
+allocation to the default region (the forwarder v0.1.563 introduced) and counts
+what passes through it -- the struct, the storage, every growth and every copy
+stored into it. `MERE_REGION_STATS=1` then lists the lines, most bytes first:
+mgit's list starts `mgz/inflate.mere:341: alloc_total=8347724352`, in one run.
+Where memory lives does not change, so the output and the `default:` total are
+the same with the flag and without it; without the flag the emitted calls are
+what they were (the runtime carries the forwarding check either way, a branch
+on a field `__lang_region_live` already reads). C backend only.
+
+`scripts/region_sites_check.sh` (CI) holds all three on a small program of
+mgit's shape and goes red when a line is not charged or keeps its own memory.
+It was run on the CI image before it was pushed.
+
+---
+
 ## v0.1.569 — 2026-10-02
 
 _Four gates that answered for their environment, and a correction to v0.1.568._

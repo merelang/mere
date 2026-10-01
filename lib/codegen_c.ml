@@ -83,8 +83,35 @@ let lib_static () = if !lib_mode then "static " else ""
    typed inside the call's region now, so that store is refused by name -- see
    `Pipeline.infer_top_let`. The leak fix and the safety belong together; neither is
    sound on its own. *)
+(* v0.1.570: `mere -c --region-sites`. Every container this function sends to the
+   default region is given a STUB region of its own, named after the source line,
+   that forwards every allocation to the default region (see `fwd`) and counts the
+   bytes; MERE_REGION_STATS=1 then lists the lines by bytes. Where memory lives does
+   not change -- the stub is a forwarder -- only what the meter can say. Off by default
+   so the C a program is compiled to stays the same text.
+
+   WHY. mgit's default region was 11.5 GB, and finding that 8.3 GB of it was one
+   line (mgz's inflate window, a buffer that does not appear in its function's type)
+   took 23 rebuilds with one site at a time moved to the current region. *)
+let region_sites : bool ref = ref false
+let region_sites_main : string ref = ref "(main)"   (* the file being compiled *)
+let last_emit_loc : Loc.t ref = ref Loc.dummy
+
+let region_site_label () : string =
+  let l = !last_emit_loc in
+  let f = match l.Loc.file with Some f -> f | None -> !region_sites_main in
+  let clean = String.map (fun c ->
+      match c with
+      | 'A'..'Z' | 'a'..'z' | '0'..'9' | '_' | '.' | '/' | '-' | '(' | ')' -> c
+      | _ -> '_') f in
+  Printf.sprintf "%s:%d" clean l.Loc.line
+
 let heap_container_region () =
-  if !lib_mode then "__lang_current_region" else "(&__lang_default_region)"
+  if !lib_mode then "__lang_current_region"
+  else if !region_sites then
+    Printf.sprintf "({ static __lang_dsite __ds = { \"%s\", 0 }; __lang_default_at(&__ds); })"
+      (region_site_label ())
+  else "(&__lang_default_region)"
 
 (* v0.1.433: which named regions have a C local at the point being emitted.
    A `region R { ... }` binds `__region_R` as a local of the enclosing C
@@ -1730,6 +1757,7 @@ let emit_bin_apply (op : Ast.binop) (node : Ast.expr) (l : string) (r : string) 
 let coro_env_owned_next = ref false
 
 let rec emit_expr (e : Ast.expr) : string =
+  if !region_sites && e.loc.Loc.line > 0 then last_emit_loc := e.loc;
   (* Q-029: tail position belongs to where this expression sits, so take it
      and hand it on only where it still holds. *)
   let __in_tail = !c_tail_pos in
@@ -9790,6 +9818,37 @@ let region_runtime_helpers =
       "  while (r && r->fwd) r = r->fwd;";
       "  return r;";
       "}";
+      (* v0.1.570: --region-sites (see `heap_container_region`). A stub is told
+         apart from a Q-190 forwarder by its `site`: a forwarder's is cleared at
+         release, a stub's is the source line. *)
+      "typedef struct { const char* name; __lang_region* stub; } __lang_dsite;";
+      "static int __lang_dsites_on = -1;";
+      "static __lang_region** __lang_dsite_stubs = NULL;";
+      "static int __lang_dsite_n = 0, __lang_dsite_cap = 0;";
+      "static pthread_mutex_t __lang_dsite_lock = PTHREAD_MUTEX_INITIALIZER;";
+      "static inline __lang_region* __lang_default_at(__lang_dsite* s) {";
+      "  if (__lang_dsites_on < 0) __lang_dsites_on = getenv(\"MERE_REGION_STATS\") != NULL;";
+      "  if (!__lang_dsites_on) return &__lang_default_region;";
+      "  if (s->stub) return s->stub;";
+      "  pthread_mutex_lock(&__lang_dsite_lock);";
+      "  if (!s->stub) {";
+      "    __lang_region* st = (__lang_region*)calloc(1, sizeof(__lang_region));";
+      "    if (!st) __lang_fail_impl(\"out of memory\");";
+      "    st->site = s->name; st->fwd = &__lang_default_region;";
+      "    if (__lang_dsite_n == __lang_dsite_cap) {";
+      "      __lang_dsite_cap = __lang_dsite_cap ? 2 * __lang_dsite_cap : 64;";
+      "      __lang_dsite_stubs = (__lang_region**)realloc(__lang_dsite_stubs, sizeof(__lang_region*) * __lang_dsite_cap);";
+      "      if (!__lang_dsite_stubs) __lang_fail_impl(\"out of memory\");";
+      "    }";
+      "    __lang_dsite_stubs[__lang_dsite_n++] = st;";
+      "    s->stub = st;";
+      "  }";
+      "  pthread_mutex_unlock(&__lang_dsite_lock);";
+      "  return s->stub;";
+      "}";
+      "static inline void __lang_dsite_charge(__lang_region* r, size_t n) {";
+      "  if (r && r->fwd && r->site) __atomic_fetch_add(&r->alloc_total, n, __ATOMIC_RELAXED);";
+      "}";
       "";
       "/* Program-lifetime arena for closure envs and other long-lived";
       "   allocations that outlive any user `region R { ... }` block. It is";
@@ -9811,7 +9870,7 @@ let region_runtime_helpers =
       "static _Thread_local __lang_region* __lang_current_region = &__lang_default_region;";
       "";
       "static void* __lang_region_alloc(__lang_region* r, size_t n) {";
-      "  r = __lang_region_live(r);";
+      "  if (r && r->fwd) { __lang_dsite_charge(r, (n + 7) & ~((size_t)7)); r = __lang_region_live(r); }";
       "  int shared = (r == &__lang_default_region);";
       "  if (shared) pthread_mutex_lock(&__lang_default_region_lock);";
       "  size_t aligned = (n + 7) & ~((size_t)7);";
@@ -9872,6 +9931,7 @@ let region_runtime_helpers =
          Contract: `old` must be reachable ONLY through the caller (a
          container's private buffer) -- the realloc path below may move it. *)
       "static void* __lang_region_grow(__lang_region* r, void* old, size_t old_n, size_t new_n) {";
+      "  __lang_region* r0 = r;   /* a --region-sites stub is charged for what grows through it */";
       "  r = __lang_region_live(r);";
       "  int shared = (r == &__lang_default_region);";
       "  if (old && old_n) {";
@@ -9880,7 +9940,7 @@ let region_runtime_helpers =
       "    if (shared) pthread_mutex_lock(&__lang_default_region_lock);";
       "    if ((char*)old + old_al == r->top && (char*)old + new_al <= r->base + r->cap) {";
       "      r->top = (char*)old + new_al;";
-      "      r->alloc_total += new_al - old_al;";
+      "      r->alloc_total += new_al - old_al; __lang_dsite_charge(r0, new_al - old_al);";
       "      if (shared) pthread_mutex_unlock(&__lang_default_region_lock);";
       "      return old;";
       "    }";
@@ -9913,7 +9973,7 @@ let region_runtime_helpers =
       "        __lang_blk_link(r, nb);";
       "        nb->pad = new_al;";
       "        pred->prev = nb;";
-      "        r->alloc_total += new_al - old_al;";
+      "        r->alloc_total += new_al - old_al; __lang_dsite_charge(r0, new_al - old_al);";
       "        if (shared) pthread_mutex_unlock(&__lang_default_region_lock);";
       "        return (void*)(nb + 1);";
       "      }";
@@ -9921,7 +9981,7 @@ let region_runtime_helpers =
       "    }";
       "    if (shared) pthread_mutex_unlock(&__lang_default_region_lock);";
       "  }";
-      "  void* p = __lang_region_alloc(r, new_n);";
+      "  void* p = __lang_region_alloc(r0, new_n);";
       "  if (old && old_n) memcpy(p, old, old_n < new_n ? old_n : new_n);";
       "  return p;";
       "}";
@@ -10006,6 +10066,29 @@ let region_runtime_helpers =
       "  for (__lang_region_block* b = r->blocks; b; b = b->prev) { nblocks++; cap += b->pad; }";
       "  fprintf(stderr, \"region-stats default: blocks=%zu cap=%zu alloc_total=%zu\\n\",";
       "          nblocks, cap, r->alloc_total);";
+      (* v0.1.570: under --region-sites, which source lines the default region's
+         containers came from, most bytes first. The `default:` total above is
+         unchanged -- these lines divide part of it. *)
+      "  if (__lang_dsite_n > 0) {";
+      "    /* a function's curried and direct forms are two sites on one line: one row */";
+      "    int w = 0;";
+      "    for (int i = 0; i < __lang_dsite_n; i++) {";
+      "      int j = 0; while (j < w && strcmp(__lang_dsite_stubs[j]->site, __lang_dsite_stubs[i]->site) != 0) j++;";
+      "      if (j < w) __lang_dsite_stubs[j]->alloc_total += __lang_dsite_stubs[i]->alloc_total;";
+      "      else __lang_dsite_stubs[w++] = __lang_dsite_stubs[i];";
+      "    }";
+      "    __lang_dsite_n = w;";
+      "    for (int i = 1; i < __lang_dsite_n; i++) {";
+      "      __lang_region* x = __lang_dsite_stubs[i]; int j = i - 1;";
+      "      while (j >= 0 && __lang_dsite_stubs[j]->alloc_total < x->alloc_total) { __lang_dsite_stubs[j + 1] = __lang_dsite_stubs[j]; j--; }";
+      "      __lang_dsite_stubs[j + 1] = x;";
+      "    }";
+      "    size_t sum = 0;";
+      "    for (int i = 0; i < __lang_dsite_n; i++) sum += __lang_dsite_stubs[i]->alloc_total;";
+      "    fprintf(stderr, \"region-stats default-sites: %d lines, alloc_total=%zu of %zu\\n\", __lang_dsite_n, sum, r->alloc_total);";
+      "    for (int i = 0; i < __lang_dsite_n && i < 20; i++)";
+      "      fprintf(stderr, \"region-stats default-site %s: alloc_total=%zu\\n\", __lang_dsite_stubs[i]->site, __lang_dsite_stubs[i]->alloc_total);";
+      "  }";
       (* Q-065: the named arenas, one line each. The `default:` line above keeps
          its exact spelling -- scripts/region_slack_check.sh greps for it. *)
       "  size_t named_alloc = 0;";
