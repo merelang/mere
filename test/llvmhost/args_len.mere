@@ -1,0 +1,9 @@
+// scripts/llvm_host_args_check.sh: an argument is a str like any other -- its
+// length is its length, and `++` with it works. On LLVM up to v0.1.570 an
+// argument was argv's own pointer with no length header in front, so str_len
+// read eight bytes of whatever preceded it and the first `++` ran out of memory.
+let rec each = fn (xs: str list) -> fn (acc: str) ->
+  match xs with
+  | Nil -> acc
+  | Cons (x, rest) -> each rest (acc ++ "[" ++ str_of_int (str_len x) ++ ":" ++ x ++ "]");
+print (each (args ()) "args:")

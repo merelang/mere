@@ -1,0 +1,29 @@
+# test/downstream/CC -- how each downstream's emitted code is compiled, for
+# scripts/downstream_cc_check.sh. The entry is test/downstream/REPOS's.
+#
+#   repo  backend  flags (to `$CC ... -c`; nothing is linked, so no library is
+#                  needed -- only headers. `@ssl` and `@sdl` become this
+#                  platform's include flags for OpenSSL and SDL2.)
+#
+# The flags are each repository's own build line (its build script, Makefile
+# or README), so the row compiles what that repository would. `ll` rows are
+# the four that the LLVM backend emits whole; the other ten are refused there
+# for features that backend does not have (REPOS says why `-c` is the check).
+mkv          c    -O2 -w
+mraft        c    -O2 -w
+mpng         c    -O2 -w
+mq           c    -O2 -w
+mk           c    -O2 -w
+mrog         c    -O2 -w
+mwasm        c    -O2 -w
+mere-blog    c    -O2 -w @ssl
+mbrowse      c    -O2 -w @sdl @ssl
+mere-gcheap  c    -O2
+memu         c    -O2 -w
+mbigfmt      c    -O2 -w
+medit2       c    -O2 -Wno-conditional-type-mismatch
+mere-ruby    c    -O2 -w -fbracket-depth=1024
+mwasm        ll   -O2 -w
+mere-gcheap  ll   -O2 -w
+memu         ll   -O2 -w
+mbigfmt      ll   -O2 -w

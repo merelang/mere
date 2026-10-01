@@ -14202,11 +14202,16 @@ let str_join_runtime_llvm =
    program name dropped, matching interp and C. argc/argv reach here through
    globals that main() stores on entry.
 
-   The strings are argv's own, not copies. A str is a plain NUL-terminated
-   pointer on this backend, and argv's storage outlives the process's own
-   code, so there is nothing to allocate and nothing that can outlive what it
-   points at — whereas a copy into the current region would die at the end of
-   a `region` block the caller happened to be inside. *)
+   v0.1.571: the strings are COPIES, into the default region. They used to be
+   argv's own pointers, on the reasoning that a str here was a plain
+   NUL-terminated pointer -- and it stopped being one when strs got a length
+   header in front (`__lang_str_alloc_in`). Nothing noticed until mwasm, built
+   on this backend: `str_len` of an argument read eight bytes of whatever came
+   before argv's storage (32194994947519841 for "hello"), and the first `++`
+   with it failed "out of memory". The default region because it is never freed:
+   a copy into the current region would die at the end of a `region` block the
+   caller happened to be inside, which is the half of the old reasoning that
+   still holds. *)
 let args_runtime_llvm =
   String.concat "\n"
     [ "@__lang_argc = internal global i32 0";
@@ -14227,7 +14232,10 @@ let args_runtime_llvm =
       "body:";
       "  %i2 = sub i32 %i, 1";
       "  %slot = getelementptr ptr, ptr %argv, i32 %i2";
-      "  %s = load ptr, ptr %slot";
+      "  %raw = load ptr, ptr %slot";
+      "  %n = call i64 @strlen(ptr %raw)";
+      "  %s = call ptr @__lang_str_alloc_in(ptr @__lang_default_region, i64 %n)";
+      "  %cp = call ptr @memcpy(ptr %s, ptr %raw, i64 %n)";
       "  %cons = call ptr @__lang_list_str_cons(ptr %s, ptr %acc)";
       "  br label %loop";
       "done:";
@@ -15337,6 +15345,16 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       [ "@.fmt_s = private constant [4 x i8] c\"%s\\0A\\00\"" ]
     | _ -> []
   in
+  (* v0.1.571: the runtime blocks below that call mere_vec_int_* need the
+     Vec[int] instance whether or not the program has one. Each builtin that
+     pulls a block in was to register it itself, and file_openrw / file_size /
+     file_fsync / file_close did not -- so a program that used only those (mwasm)
+     emitted IR calling an undefined @mere_vec_int_get, which no gate compiled
+     until downstream_cc_check did. Decided here, once, from the blocks. *)
+  if (!file_pio_used_llvm || !bytes_vec_used
+      || !uses_read_file_bytes_llvm || !uses_write_file_bytes_llvm)
+     && not (Hashtbl.mem vec_instances "int")
+  then Hashtbl.add vec_instances "int" Ast.TyInt;
   (* Phase 15.3: Vec[R, T] runtime — emit one struct typedef + 4 helper
      functions per element type seen during fn / main emission. *)
   let vec_runtimes =

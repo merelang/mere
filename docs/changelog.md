@@ -4,6 +4,57 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.571 — 2026-10-02
+
+_The downstreams' emitted code is compiled now, and the first run found two LLVM bugs._
+
+`downstream_check` asks whether `mere -c` succeeds in each of fourteen
+repositories; nothing asked whether a C compiler then accepts what came out. The
+runtime is text pasted into every program, so a change to it reaches every
+downstream at once and every gate that stops at emission is blind to it --
+v0.1.566-567 shipped such a change and a mere-ruby build went looking.
+
+`scripts/downstream_cc_check.sh` (CI) compiles each repository's emitted C with
+that repository's own flags (`test/downstream/CC`), and the LLVM IR of the four
+the LLVM backend emits whole; nothing is linked, so only headers are needed. A
+failure says which of three things it was -- a compile error, a timeout, or a
+kill (signal 9 is usually the out-of-memory killer; mere-ruby and mbrowse peak at
+6-7 GB) -- and `--poison` holds each sentence to its cause. A row whose code,
+compiler and flags hash to an earlier pass is reused rather than rebuilt (the
+hash is of the code, not of which files a commit touched), which CI keeps in a
+cache. Each row prints its seconds.
+
+Its first run failed one row: **mwasm's LLVM IR did not build** (`use of undefined
+value '@mere_vec_int_get'`). The positioned-file runtime calls the Vec[int]
+helpers, and `file_openrw`, `file_size`, `file_fsync` and `file_close` pulled
+that runtime in without registering the instance, so a program whose only file
+builtins were those had no helpers to call. The instance is now decided once from
+the runtime blocks being emitted. Built, mwasm then failed **"out of memory"** on
+its first `++`: `args ()` handed out argv's own pointers, from when a str on this
+backend was a plain NUL-terminated pointer, and strs have carried a length header
+since -- `str_len` of the argument `hello` was 32194994947519841. Arguments are
+copied into the default region now (never freed, so a `region` block around the
+caller cannot take them away). mwasm built on LLVM prints what it prints on C.
+`scripts/llvm_host_args_check.sh` (CI, poisoned) holds both.
+
+**And it found what killed clang in v0.1.566-567.** The first full run reported
+mere-ruby's row as a compile error, and it was not one: clang's driver survives
+when its frontend is killed and exits 1 itself, printing `Killed: 9` -- the gate
+reads that message now. What killed it is in a log: mere-ruby's
+`mspec/rss_guard.sh`, which a test sweep runs beside it, kills -9 any process
+over 6 GB whose command line contains `mere-ruby`, and a clang compiling
+`.../mere-ruby.c` peaks at 6-7 GB. The guard logged that clang's whole command
+line. v0.1.569 said nothing on record explained the kill of 2026-10-01; this is
+the explanation that fits it (the same file, the same signal, a sweep running),
+though that night's log is not there to say so. The gate names its temporary
+files after the row, not the repository.
+
+The budget the plan had for peak RSS is not here: the same compile's peak moved
+by a fifth between runs on a loaded machine, and a budget that flaps is a gate
+nobody reads.
+
+---
+
 ## v0.1.570 — 2026-10-02
 
 _`mere -c --region-sites`: which source lines filled the default region._
