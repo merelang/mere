@@ -1,0 +1,27 @@
+// Q-190 (v0.1.563): a Vec made in R escapes inside a closure (the Q-188 route,
+// retained since v0.1.557) and is WRITTEN after R is released. Its `region` still
+// names R's struct; v0.1.557 recycled that struct, so the pushes landed in the
+// next block (the churn) and were freed with it. Now the struct forwards to the
+// region that adopted R's memory.
+let o = vec_new ();
+let _ = region R {
+  let v = vec_new () in
+  let _ = vec_push v "seed" in
+  vec_push o (fn (k: int) ->
+    if k < 0 then let _ = vec_push v (str_repeat "a" 40) in "" else vec_get v k)
+};
+let h = vec_get o 0;
+let rec fill = fn (i: int) -> if i == 50 then 0 else let _ = h (0 - 1) in fill (i + 1);
+let _ = fill 0;
+let rec churn = fn (i: int) ->
+  if i == 50 then ()
+  else
+    let _ = region Q {
+      let w = vec_new () in
+      let rec f = fn (j: int) -> if j == 64 then () else let _ = vec_push w (str_repeat "Z" 40) in f (j + 1) in
+      let _ = f 0 in
+      vec_len w } in
+    churn (i + 1);
+let _ = churn 0;
+let _ = print (h 0);
+print (h 25)

@@ -1,0 +1,15 @@
+// A ByteBuf made in R and handed out of R: refused by the region-escape rule,
+// like a Vec (result_container). Recorded because the codegen-side container
+// check (contains_container) does not list ByteBuf, and this row is what says
+// the type rule covers it.
+
+let churn = fn (u: unit) ->
+  let rec go = fn (i: int) ->
+    if i == 50 then ()
+    else let _ = region Q { let w = vec_new () in
+           let rec f = fn (j: int) -> if j == 64 then () else let _ = vec_push w (str_repeat "Z" 40) in f (j + 1) in
+           let _ = f 0 in vec_len w } in go (i + 1) in
+  go 0;
+let b = region R { let x = bytebuf_new 0 in let _ = bytebuf_push x 65 in let _ = bytebuf_push x 66 in x };
+let _ = churn ();
+print_int (bytebuf_get b 0 + bytebuf_get b 1)

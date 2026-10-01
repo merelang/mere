@@ -3085,9 +3085,18 @@ let rec emit_expr (e : Ast.expr) : string =
            "&__sa",
            " pthread_attr_destroy(&__sa);"
        in
+       (* v0.1.564 (Q-191): the thread may run after the block that made the
+          closure has ended, so it gets its own copy of the env, in the default
+          region, through the env's copier -- as coro_new does. It was handed the
+          env as it was: a str captured inside `region R { }` was read by the
+          thread after R was reused. No copier means no region blocks anywhere, and
+          the env is in the default region already. *)
        "({ __auto_type __cl = " ^ emit_expr arg ^ "; \
+           void* __se = (void*)__cl.env; \
+           if (__se) { __lang_env_hdr* __sh = (__lang_env_hdr*)__se; \
+                       if (__sh->__copy) __se = __sh->__copy(&__lang_default_region, __se); } \
            __mere_unit_closure* __c = (__mere_unit_closure*)malloc(sizeof(__mere_unit_closure)); \
-           __c->env = __cl.env; __c->fn = __cl.fn; \
+           __c->env = __se; __c->fn = __cl.fn; \
            ThreadHandle __t; " ^ attr_open ^ "\
            int __pc = pthread_create(&__t.tid, " ^ attr_arg ^ ", __mere_spawn_trampoline, __c);" ^ attr_close ^ " \
            if (__pc != 0) { free(__c); __lang_fail_impl(\"spawn: the host refused to start a thread\"); } \
@@ -4071,7 +4080,7 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf
          "({ __lang_listbuf* __b = %s; __auto_type __x = %s; \
           if (__b->frozen) __lang_fail_impl(\"lb_push: the builder was already turned into a list by lb_to_list\"); \
-          if (__b->region != __lang_current_region) __lang_fail_impl(\"lb_push: the builder belongs to a region that is not current\"); \
+          if (__lang_region_live(__b->region) != __lang_current_region) __lang_fail_impl(\"lb_push: the builder belongs to a region that is not current\"); \
           %s_node* __n = (%s_node*)__lang_region_alloc(__b->region, sizeof(%s_node)); \
           __n->payload.Cons.f0 = __x; __n->payload.Cons.f1 = %s__mk(%d, &%s); \
           %s __nv = %s__mk(%d, __n); \
@@ -9617,6 +9626,13 @@ let region_runtime_helpers =
          because a value in it was stored where it will outlive the block. *)
       "  unsigned long seq;";
       "  struct __lang_region_s* keep;";
+      (* v0.1.563 (Q-190): a kept block's struct is never reused. Containers that
+         escaped it still hold it as their `region`, so after release it stays as a
+         FORWARDER to the region that adopted its memory, and every allocation and
+         every retention question through it follows `fwd`. Reusing it -- which
+         v0.1.557 did -- sent a write to an escaped container into whichever block
+         took the struct next, and freed it with that block. *)
+      "  struct __lang_region_s* fwd;";
       "} __lang_region;";
       "static __lang_region __lang_default_region;";
       "";
@@ -9746,7 +9762,13 @@ let region_runtime_helpers =
       "  r->site = 0;";
       "  r->seq = 0;";
       "  r->keep = NULL;";
+      "  r->fwd = NULL;";
       "  __lang_region_add_block(r, cap);";
+      "}";
+      "/* where an allocation through r really goes (see `fwd`) */";
+      "static inline __lang_region* __lang_region_live(__lang_region* r) {";
+      "  while (r && r->fwd) r = r->fwd;";
+      "  return r;";
       "}";
       "";
       "/* Program-lifetime arena for closure envs and other long-lived";
@@ -9769,6 +9791,7 @@ let region_runtime_helpers =
       "static _Thread_local __lang_region* __lang_current_region = &__lang_default_region;";
       "";
       "static void* __lang_region_alloc(__lang_region* r, size_t n) {";
+      "  r = __lang_region_live(r);";
       "  int shared = (r == &__lang_default_region);";
       "  if (shared) pthread_mutex_lock(&__lang_default_region_lock);";
       "  size_t aligned = (n + 7) & ~((size_t)7);";
@@ -9829,6 +9852,7 @@ let region_runtime_helpers =
          Contract: `old` must be reachable ONLY through the caller (a
          container's private buffer) -- the realloc path below may move it. *)
       "static void* __lang_region_grow(__lang_region* r, void* old, size_t old_n, size_t new_n) {";
+      "  r = __lang_region_live(r);";
       "  int shared = (r == &__lang_default_region);";
       "  if (old && old_n) {";
       "    size_t old_al = (old_n + 7) & ~((size_t)7);";
@@ -10125,6 +10149,7 @@ let region_runtime_helpers =
       "static _Thread_local unsigned long __lang_region_seq_ctr = 0;";
       "static _Thread_local __lang_region __lang_kept_region;   /* retained, never freed */";
       "static void __lang_region_keep(__lang_region* src, __lang_region* dst) {";
+      "  src = __lang_region_live(src); dst = __lang_region_live(dst);";
       "  if (!src || src == dst || src->seq == 0) return;   /* not a block: it outlives any */";
       "  if (dst && dst->seq != 0 && dst->seq >= src->seq) return;   /* dst is the younger */";
       "  __lang_region* t = (dst && dst->seq != 0) ? dst : &__lang_kept_region;";
@@ -10188,11 +10213,11 @@ let region_runtime_helpers =
       "    if (t != &__lang_kept_region && !__lang_region_is_active(t)) t = &__lang_kept_region;";
       "    if (t != &__lang_kept_region && t->keep) __lang_region_keep(t, t->keep);";
       "    __lang_region_adopt(t, r);";
+      "    /* v0.1.563 (Q-190): and the struct stays, forwarding to t -- the";
+      "       containers that escaped still name it; it is never reused */";
       "    r->site = 0; r->keep = NULL; r->seq = 0;";
-      "    __lang_region_init(r, 1 << 20);";
-      "    if (__lang_region_cache_n < __LANG_REGION_CACHE_CAP)";
-      "      __lang_region_cache[__lang_region_cache_n++] = r;";
-      "    else { __lang_region_free(r); free(r); }";
+      "    r->base = r->top = NULL; r->cap = 0;";
+      "    r->fwd = t;";
       "    return;";
       "  }";
       (* charged: the __lang_region_free below is the same arena and must not
@@ -12185,7 +12210,11 @@ let emit_owned_vec_runtime_for (elem_ty : Ast.ty) : string =
       Printf.sprintf "    v->data = (%s*)realloc(v->data, sizeof(%s) * v->cap);"
         c_elem c_elem;
       "  }";
-      "  v->data[v->len++] = x;";
+      (* v0.1.564 (Q-192): an OwnedVec is malloc'd and outlives every block, so
+         what it stores has to as well -- a str made inside `region R { }` was
+         stored as the pointer it was, and read after R was reused. Copied into
+         the default region (a container element is retained the same way). *)
+      Printf.sprintf "  v->data[v->len++] = __mcopy_%s(&__lang_default_region, x);" tag;
       "  return 0; /* unit */";
       "}";
       "";
@@ -14857,6 +14886,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       add_type_and_deps copy_types v_ty) map_instances;
     Hashtbl.iter (fun _ elem_ty ->
       add_type_and_deps copy_types elem_ty) vec_instances;
+    (* v0.1.564 (Q-192): owned_vec_push copies too *)
+    Hashtbl.iter (fun _ elem_ty ->
+      add_type_and_deps copy_types elem_ty) owned_vec_instances;
     (* v0.1.31 (stage B): region-block results and channel elements are
        copied too — out of the dying block, and across threads into a
        per-message region. *)

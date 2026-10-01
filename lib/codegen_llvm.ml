@@ -2928,6 +2928,9 @@ let collect_eq_cmp_types (root : Ast.expr) (fns : fn_decl list) : unit =
         the expression bodies that use them. *)
      | Ast.Region_block (_, _) ->
        (match e.Ast.ty with Some t -> add_copy_type t | None -> ())
+     (* v0.1.564 (Q-192): owned_vec_push copies what it stores *)
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var ("owned_vec_push" | "channel_send"); _ }, _); _ }, x) ->
+       (match x.Ast.ty with Some t -> add_copy_type t | None -> ())
      | Ast.Cmp (op, a, _) ->
        let a_ty = match a.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt in
        if llvm_needs_struct_eq a_ty then
@@ -4863,6 +4866,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     coro_of_word_llvm e.Ast.loc (match e.Ast.ty with Some t -> t | None -> Ast.TyInt) r
   | Ast.App ({ node = Ast.Var "spawn"; _ }, clos) ->
     let cl = emit_expr env clos in
+    (* v0.1.564 (Q-191): the thread may outlive every block open here, and this
+       backend has no env copier -- so what the env points into is kept, the way a
+       closure stored somewhere older is (v0.1.557) *)
+    emit_instr "  call void @__lang_region_keep_above(ptr null)";
     let cs =
       match Option.map Ast.walk clos.Ast.ty with
       | Some (Ast.TyArrow (p, r)) -> closure_struct_name (Ast.walk p) (Ast.walk r)
@@ -4933,8 +4940,24 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "channel_send"; _ }, ch_e); _ }, v_e) ->
     let chv = emit_expr env ch_e in
-    let vv = emit_expr env v_e in
+    let vv0 = emit_expr env v_e in
     let vty = match v_e.Ast.ty with Some t -> llvm_ty_of t | None -> "i32" in
+    (* v0.1.564: the message outlives the block it was made in -- the receiver
+       reads it later, on another thread -- so it is copied into the default
+       region first, as the C backend copies it into the message's own region.
+       It was sent as the pointer it was, and read after the block was reused. *)
+    let vv =
+      match v_e.Ast.ty with
+      | Some t ->
+        (match region_result_plan (Ast.walk t) with
+         | Copy ->
+           let o = fresh_reg () in
+           emit_instr (Printf.sprintf "  %s = call %s @__mcopy_%s(ptr @__lang_default_region, %s %s)"
+                         o vty (ty_tag (Ast.walk t)) vty vv0);
+           o
+         | NoCopy | Refuse _ -> vv0)
+      | None -> vv0
+    in
     let slot = cast_to_i64 vv vty in
     emit_instr (Printf.sprintf "  call i32 @mere_channel_send(ptr %s, i64 %s)" chv slot);
     "0"  (* unit *)
@@ -6572,10 +6595,22 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let elem_tag = owned_vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
     let elem_ty = Hashtbl.find owned_vec_instances elem_tag in
     let av = emit_expr env vec_e in
-    let xv = emit_expr env val_e in
+    let xv0 = emit_expr env val_e in
     (* an OwnedVec is the heap's, older than any block (v0.1.557) *)
     if ty_has_arrow elem_ty then
       emit_instr "  call void @__lang_region_keep_above(ptr null)";
+    (* v0.1.564 (Q-192): and so must be what it stores -- a str made inside a
+       block was stored as the pointer it was. Copied into the default region. *)
+    let xv =
+      match region_result_plan elem_ty with
+      | Copy ->
+        let o = fresh_reg () in
+        let ety = llvm_ty_of elem_ty in
+        emit_instr (Printf.sprintf "  %s = call %s @__mcopy_%s(ptr @__lang_default_region, %s %s)"
+                      o ety (ty_tag elem_ty) ety xv0);
+        o
+      | NoCopy | Refuse _ -> xv0
+    in
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_owned_vec_%s_push(ptr %s, %s %s)"
@@ -9103,7 +9138,10 @@ let region_runtime_helpers =
        the `prev` link (and keeps the data that follows 16-aligned). *)
     (* field 4 (v0.1.557): where this block's memory goes when it is released --
        -1 freed, -2 kept for good, i >= 0 handed to the i-th open block. *)
-    [ "%__lang_region = type { ptr, ptr, i64, ptr, i32 }";
+    (* field 5 (v0.1.563, Q-190): a kept block's struct is never freed -- the
+       containers that escaped it still hold it -- and, when its memory went to
+       another open block, it forwards there; allocation follows the forward. *)
+    [ "%__lang_region = type { ptr, ptr, i64, ptr, i32, ptr }";
       "@__lang_default_region = internal global %__lang_region zeroinitializer";
       (* Q-106: the in-order list builder -- { head, tail, nil, depth, frozen }.
          Values on this backend all live in the default region, so a builder
@@ -9158,6 +9196,8 @@ let region_runtime_helpers =
       "  store ptr null, ptr %blocks_p";
       "  %keep_p = getelementptr %__lang_region, ptr %r, i32 0, i32 4";
       "  store i32 -1, ptr %keep_p";
+      "  %fwd_p = getelementptr %__lang_region, ptr %r, i32 0, i32 5";
+      "  store ptr null, ptr %fwd_p";
       "  call void @__lang_region_add_block(ptr %r, i64 %cap)";
       "  ret void";
       "}";
@@ -9238,8 +9278,23 @@ let region_runtime_helpers =
       "  %p2 = call ptr @__lang_region_alloc_raw(ptr %r, i64 %n)";
       "  ret ptr %p2";
       "}";
-      "define internal ptr @__lang_region_alloc_raw(ptr %r, i64 %n) {";
+      "define internal ptr @__lang_region_live(ptr %r0) {";
       "entry:";
+      "  br label %walk";
+      "walk:";
+      "  %r = phi ptr [ %r0, %entry ], [ %nx, %step ]";
+      "  %fp = getelementptr %__lang_region, ptr %r, i32 0, i32 5";
+      "  %nx = load ptr, ptr %fp";
+      "  %end = icmp eq ptr %nx, null";
+      "  br i1 %end, label %done, label %step";
+      "step:";
+      "  br label %walk";
+      "done:";
+      "  ret ptr %r";
+      "}";
+      "define internal ptr @__lang_region_alloc_raw(ptr %r0, i64 %n) {";
+      "entry:";
+      "  %r = call ptr @__lang_region_live(ptr %r0)";
       "  %n7 = add i64 %n, 7";
       "  %aligned = and i64 %n7, -8";
       "  %top_p = getelementptr %__lang_region, ptr %r, i32 0, i32 1";
@@ -9300,8 +9355,9 @@ let region_runtime_helpers =
       "  %g2 = call ptr @__lang_region_grow_raw(ptr %r, ptr %old, i64 %old_n, i64 %new_n)";
       "  ret ptr %g2";
       "}";
-      "define internal ptr @__lang_region_grow_raw(ptr %r, ptr %old, i64 %old_n, i64 %new_n) {";
+      "define internal ptr @__lang_region_grow_raw(ptr %r0, ptr %old, i64 %old_n, i64 %new_n) {";
       "entry:";
+      "  %r = call ptr @__lang_region_live(ptr %r0)";
       "  %isnull = icmp eq ptr %old, null";
       "  %zero = icmp eq i64 %old_n, 0";
       "  %skip = or i1 %isnull, %zero";
@@ -9510,6 +9566,9 @@ let region_runtime_helpers =
       "  %ts = getelementptr ptr, ptr %aarr, i64 %kx";
       "  %t = load ptr, ptr %ts";
       "  call void @__lang_region_adopt(ptr %t, ptr %r)";
+      "  ; v0.1.563 (Q-190): the struct forwards to t from now on";
+      "  %fw = getelementptr %__lang_region, ptr %r, i32 0, i32 5";
+      "  store ptr %t, ptr %fw";
       "  br label %popchk";
       "popchk:";
       "  %n = load i32, ptr @__lang_region_active_n";
@@ -9520,7 +9579,13 @@ let region_runtime_helpers =
       "  store i32 %n1, ptr @__lang_region_active_n";
       "  br label %fin";
       "fin:";
+      "  ; v0.1.563 (Q-190): a kept struct is never freed -- what escaped still";
+      "  ; names it (kept for good: its own blocks; adopted: it forwards)";
+      "  br i1 %none, label %freestruct, label %leave";
+      "freestruct:";
       "  call void @free(ptr %r)";
+      "  ret void";
+      "leave:";
       "  ret void";
       "}";
       "";

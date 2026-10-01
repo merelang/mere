@@ -1,0 +1,18 @@
+// Q-191 (v0.1.564): spawn inside a region block. The closure's env (and the str
+// it captured) are in R; the thread was handed the env as it was and read it
+// after R was reused. Now the thread gets a copy, in the default region.
+let h = region R {
+  let s = str_repeat "k" 30 in
+  spawn (fn () -> let _ = sleep_ms 200 in print s)
+};
+let rec churn = fn (i: int) ->
+  if i == 50 then ()
+  else
+    let _ = region Q {
+      let w = vec_new () in
+      let rec f = fn (j: int) -> if j == 64 then () else let _ = vec_push w (str_repeat "Z" 40) in f (j + 1) in
+      let _ = f 0 in
+      vec_len w } in
+    churn (i + 1);
+let _ = churn 0;
+join h

@@ -1,0 +1,16 @@
+// A coroutine made inside a region block runs after the block has ended. Its
+// env is its own copy (v0.1.558), so what it captured survives. (LLVM refuses
+// this by name: it has no env copier.)
+let root = coro_root ();
+let c = region R { let s = str_repeat "k" 30 in coro_new (fn me -> fn (_u: unit) -> let _ = print s in coro_exit root ()) };
+let rec churn = fn (i: int) ->
+  if i == 50 then ()
+  else
+    let _ = region Q {
+      let w = vec_new () in
+      let rec f = fn (j: int) -> if j == 64 then () else let _ = vec_push w (str_repeat "Z" 40) in f (j + 1) in
+      let _ = f 0 in
+      vec_len w } in
+    churn (i + 1);
+let _ = churn 0;
+coro_switch c

@@ -5432,7 +5432,7 @@ let () =
      bump with no bounds check, so allocation-heavy programs overran the
      4 MB default arena and crashed (see test/parity/region_growth.mere). *)
   assert_llvm_runtime "llvm: __lang_region struct typedef"
-    (llvm "1 + 2") "%__lang_region = type { ptr, ptr, i64, ptr, i32 }";
+    (llvm "1 + 2") "%__lang_region = type { ptr, ptr, i64, ptr, i32, ptr }";
   assert_llvm_runtime "llvm: default region global"
     (llvm "1 + 2") "@__lang_default_region = internal global %__lang_region zeroinitializer";
   assert_llvm_runtime "llvm: region_alloc helper defined"
