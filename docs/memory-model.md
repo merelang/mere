@@ -203,6 +203,22 @@ as of v0.1.31 it is the implemented semantics on the C backend:
   pointer, in the default region, with `__copy = NULL` meaning "do not
   copy me". One field answers both questions, and every closure with a
   non-NULL env can be asked.
+- **What the types cannot see is retained at run time (v0.1.557, v0.1.563).**
+  An arrow type names no region, so a closure that captured a container made in
+  `region R { }` can be stored somewhere older and outlive R without any type
+  saying so. Every such store goes through a copier, and a container's copier
+  marks R "kept": when R is released, its memory is handed to the region the
+  value was stored into (or to one that is never freed) instead of being freed.
+  The container keeps naming R's struct as its region, so that struct is never
+  reused either — it stays behind as a forwarder to the region that took its
+  memory, and every later push, set or grow through it follows the forward.
+  v0.1.557 recycled the struct, which was right for reading the escaped value
+  and wrong for writing it: the writes went into the next block and died with
+  it (Q-190). Three more stores now copy what they store, for the same reason:
+  `owned_vec_push` (an OwnedVec is malloc'd and outlives every block),
+  `spawn`'s env (the thread may run after the block), and on LLVM a channel
+  message. `scripts/region_uaf_check.sh` runs each of these after forcing the
+  block's memory to be reused.
 - **The block's result is copied out** into the enclosing region
   (per-type deep copy, specialized like the `show`/`==` derive family),
   so returning a value from a block is always safe. A container cannot be

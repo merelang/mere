@@ -712,6 +712,13 @@ jobs:
       - name: escape_check (region escape routes, enumerated)
         if: ${{ !cancelled() }}
         run: sh scripts/escape_check.sh
+      # The SAFE rows above are accepted; this asks whether an accepted program
+      # then reads the right bytes once the block's memory has been reused. Four
+      # routes were safe by every verdict and use-after-free at run time
+      # (Q-190, Q-191, Q-192 and LLVM channels, v0.1.563-564).
+      - name: region_uaf_check (what escaped a block by a route the types do not see is still there)
+        if: ${{ !cancelled() }}
+        run: sh scripts/region_uaf_check.sh --poison
 
       # The README, executed. Its Quick-examples transcript is cut from the
       # file at run time and run, the counts it states are re-derived from the

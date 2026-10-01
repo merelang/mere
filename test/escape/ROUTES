@@ -75,6 +75,14 @@
 # what the typer allows) is still possible and still recorded.
 #
 # route              kind   compiled  interp      unreadable  q
+# A SAFE VERDICT IS NOT A RUN. Four SAFE rows below were accepted everywhere and
+# use-after-free at run time: kept_then_written (Q-190), spawn_env_in_block
+# (Q-191), ownedvec_store (Q-192) and channel_from_block (LLVM). This table
+# cannot see that -- it asks accept or refuse -- so scripts/region_uaf_check.sh
+# runs those programs after forcing the block's memory to be reused and compares
+# their output with the interpreter's (v0.1.563). A route whose safety rests on
+# copying at run time belongs in both.
+#
 result_container     GATED  REJECT    REJECT      -           -
 vec_into_map         GATED  REJECT    REJECT      -           Q-053
 vec_into_vec         GATED  REJECT    REJECT      -           Q-053
@@ -96,3 +104,8 @@ recursive_type       SAFE   ACCEPT    ACCEPT      -           -
 fn_over_carry        SAFE   ACCEPT    ACCEPT      ll,w,rv     -
 callee_alloc_chain   SAFE   ACCEPT    ACCEPT      -           Q-132
 callee_built_into_vec GATED  REJECT    REJECT      -           Q-127
+kept_then_written    SAFE   ACCEPT    ACCEPT      -           Q-190
+spawn_env_in_block   SAFE   ACCEPT    ACCEPT      ll,w,rv     Q-191
+ownedvec_store       SAFE   ACCEPT    ACCEPT      rv          Q-192
+channel_from_block   SAFE   ACCEPT    ACCEPT      w,rv        -
+bytebuf_out          GATED  REJECT    REJECT      -           -

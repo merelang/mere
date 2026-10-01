@@ -1,0 +1,16 @@
+// Q-192 (v0.1.564): an OwnedVec is malloc'd and outlives every block, but its
+// push stored the element as it was -- a str made inside R was read after R was
+// reused. Now it is copied into the default region.
+let ov = owned_vec_new ();
+let _ = region R { owned_vec_push ov (str_repeat "k" 30) };
+let rec churn = fn (i: int) ->
+  if i == 50 then ()
+  else
+    let _ = region Q {
+      let z = vec_new () in
+      let rec f = fn (j: int) -> if j == 64 then () else let _ = vec_push z (str_repeat "Z" 40) in f (j + 1) in
+      let _ = f 0 in
+      vec_len z } in
+    churn (i + 1);
+let _ = churn 0;
+print (owned_vec_get ov 0)

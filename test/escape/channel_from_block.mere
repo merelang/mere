@@ -1,0 +1,17 @@
+// v0.1.564 (LLVM): a message sent from inside a region block is read after the
+// block has ended. C copies it into the message's own region; LLVM sent the str
+// as the pointer it was, and the receiver read the churn's bytes. Now LLVM copies
+// it into the default region.
+let ch = channel_new ();
+let _ = region R { let s = str_repeat "k" 30 in channel_send ch s };
+let rec churn = fn (i: int) ->
+  if i == 50 then ()
+  else
+    let _ = region Q {
+      let w = vec_new () in
+      let rec f = fn (j: int) -> if j == 64 then () else let _ = vec_push w (str_repeat "Z" 40) in f (j + 1) in
+      let _ = f 0 in
+      vec_len w } in
+    churn (i + 1);
+let _ = churn 0;
+print (channel_recv ch)

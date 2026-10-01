@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.563 — 2026-10-01
+
+_Four use-after-frees the types could not see: a retained container written after its block, a thread's env, an OwnedVec element, an LLVM channel message._
+
+All four were accepted by every backend and safe by every verdict in
+`test/escape/ROUTES`, and all four read or wrote freed memory once the block's
+arena had been reused. They were found by enumerating, route by route, what can
+reference a value after its block ends -- the survey that R2 (Q-134) needs before
+it can put more allocations in blocks.
+
+**A container retained by v0.1.557, written after its block** (Q-190). v0.1.557
+fixed the closure route (Q-188): a container captured by a closure stored
+somewhere older marks its block "kept", and the block's memory is handed over
+instead of freed. Then the block's struct was re-initialised and put back in the
+cache -- but the escaped container still names that struct as its region, so a
+later `vec_push` allocated in whichever block took the struct next, and was freed
+with it. The witness for v0.1.557 only READ the value afterwards, which is why it
+passed. Now a kept block's struct is never reused: it stays as a forwarder to the
+region that adopted its memory, and allocation and growth through it follow the
+forward (C: `fwd`; LLVM: field 5, and the struct is no longer freed). One struct
+per kept release is the cost.
+
+**A thread spawned in a block** (Q-191). `spawn` handed the thread its closure's
+env as it was; a str captured inside `region R { }` was read by the thread after
+R was reused. The thread now gets a copy, in the default region, through the env's
+copier -- as `coro_new` does since v0.1.558. (LLVM cannot express this today:
+`detach` and a block returning a `ThreadHandle` are unsupported there. It marks
+the open blocks kept, the conservative form it uses for closure stores.)
+
+**An OwnedVec element** (Q-192). An OwnedVec is malloc'd and outlives every
+block, and `owned_vec_push` stored the element as it was. It is copied into the
+default region now, on C and LLVM, as every other container copies what it
+stores into its own region.
+
+**An LLVM channel message.** The C backend copies a message into the message's
+own region; LLVM sent a str as the pointer it was, and the receiver read the
+churn's bytes. It is copied into the default region now.
+
+`scripts/region_uaf_check.sh` (CI) runs each route after forcing reuse and
+compares with the interpreter on C and LLVM; `--poison` undoes each fix in the
+emitted code and must go red (six poisons). ROUTES gains the four routes as SAFE
+rows and `bytebuf_out` as GATED (the region-escape rule refuses a ByteBuf out of
+its block; the codegen-side container check does not list ByteBuf, and this row
+is what says the type rule covers it).
+
+---
+
 ## v0.1.562 — 2026-10-01
 
 _An inner function takes region parameters of its own._
