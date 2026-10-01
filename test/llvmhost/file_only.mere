@@ -1,0 +1,10 @@
+// scripts/llvm_host_args_check.sh: a program whose only file builtins are
+// file_openrw, file_size and file_close. They pull in the positioned-file
+// runtime, which calls the Vec[int] helpers, and on LLVM up to v0.1.570 nothing
+// emitted those unless the program had a Vec[int] of its own: the IR called an
+// undefined @mere_vec_int_get and did not build (mwasm's shape).
+let p = "/tmp/mere_llvmhost_probe.bin";
+let _ = write_file p "abcdef";
+let f = file_openrw p;
+let _ = file_close f;
+print (str_of_int (file_size p))

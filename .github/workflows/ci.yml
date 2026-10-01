@@ -104,6 +104,8 @@ jobs:
           # SDL2 for the window capability. window_check.sh skips without it, and
           # a skipped gate is a gate that is not running — so install it here.
           sudo apt-get install -y libsdl2-dev
+          # OpenSSL headers for downstream_cc_check (mere-blog and mbrowse include them)
+          sudo apt-get install -y libssl-dev
 
       # socket_parity builds a Wasm component and compares its socket behaviour
       # against the C build, so it needs the component toolchain: wasm-tools,
@@ -727,6 +729,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/region_sites_check.sh --poison
 
+      # Two host-facing corners of the LLVM backend that nothing built and ran
+      # until downstream_cc_check compiled mwasm's IR (v0.1.571): a program
+      # whose only file builtins are file_openrw / file_size / file_close, and
+      # `args ()` strings, which were argv's raw pointers with no length header.
+      - name: llvm_host_args_check (file-only programs build on LLVM; an argument is a str)
+        if: ${{ !cancelled() }}
+        run: sh scripts/llvm_host_args_check.sh --poison
+
       # The README, executed. Its Quick-examples transcript is cut from the
       # file at run time and run, the counts it states are re-derived from the
       # repo, and a newcomer's first program is built and run outside this
@@ -1294,6 +1304,30 @@ jobs:
       - name: downstream_check (their code is still a program)
         if: ${{ !cancelled() }}
         run: MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" sh scripts/gate.sh scripts/downstream_check.sh
+
+      # downstream_check stops at emission; nothing compiled what came out, so a
+      # runtime change reaches every downstream with no gate looking (v0.1.566-567
+      # were found by a mere-ruby build). This runs each repository's own compile
+      # line on its emitted C (and the LLVM IR of the four the LLVM backend
+      # emits whole), no linking. A row whose code, compiler and flags hash to an
+      # earlier pass is reused, which is what the cache below is for: mere-ruby
+      # and mbrowse are minutes each and peak at 6-7 GB. The poison leg first:
+      # each kind of failure must say which kind it is.
+      - name: Restore the downstream compile cache
+        if: ${{ !cancelled() }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mere-downstream-cc
+          key: downstream-cc-${{ github.run_id }}
+          restore-keys: downstream-cc-
+
+      - name: downstream_cc_check --poison (a failure says whether it was an error, a timeout or a kill)
+        if: ${{ !cancelled() }}
+        run: MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" sh scripts/gate.sh scripts/downstream_cc_check.sh --poison
+
+      - name: downstream_cc_check (their emitted code still compiles)
+        if: ${{ !cancelled() }}
+        run: MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" sh scripts/gate.sh scripts/downstream_cc_check.sh
 
       # memu is already among the dogfood clones above, so the RISC-V
       # differential points at that checkout rather than fetching it twice.
