@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.568 — 2026-10-01
+
+_mere-ruby builds again: the stack pool's size check made clang -O2 give up on it (v0.1.566-567)._
+
+v0.1.566 made a pooled stack carry its size and the pool check it on the way out,
+a call to `__lang_fail_impl` (which does not return) inside the take loop. Inlined
+into every coroutine creation, that sent clang -O2 over a cliff on mere-ruby's
+93 MB of emitted C: the compiler was killed after 136 s, every time, where the
+same file without the check compiles in 168 s. Nothing in this repository's gates
+compiles a downstream's C -- `downstream_check` asks whether `mere -c` succeeds --
+so it shipped twice; a build of mere-ruby against v0.1.567 is what found it. The
+pool functions and the failure path are out of line now (`noinline`, C and LLVM):
+the pool is not the hot path, and churning 64 coroutines at a time costs what it
+did (0.06 s for 2000 rounds). mere-ruby builds in 164 s and its corpus matches.
+
+---
+
 ## v0.1.567 — 2026-10-01
 
 _A recycled or compacted container that escaped its block lost its struct (Q-195)._
