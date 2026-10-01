@@ -1339,9 +1339,12 @@ let infer_top_rec outer_env (bindings : (string * Loc.t * Ast.expr) list) : Ast.
     List.fold_left2 (fun acc (n, _, _) a -> (n, Typer.mono a) :: acc)
       outer_env bindings alphas in
   let infer_all () =
+    (* v0.1.564: the group's types, for the typer's unmarking -- see
+       Typer.active_group_alphas *)
+    Typer.with_group_alphas alphas (fun () ->
     List.iter2 (fun ((_ : string), (_ : Loc.t), (value : Ast.expr)) alpha ->
       let t = Typer.enter_level (fun () -> Typer.infer env_rec value) in
-      Typer.unify value.Ast.loc alpha t) bindings alphas
+      Typer.unify value.Ast.loc alpha t) bindings alphas)
   in
   (* The same rule as `infer_top_let`: the call region wraps function bodies and
      nothing else. A group may hold a non-function (`let rec x = 1 and f = ...`

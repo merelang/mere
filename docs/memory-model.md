@@ -165,10 +165,16 @@ as of v0.1.31 it is the implemented semantics on the C backend:
   the other route — not letting the inner function quantify, so the enclosing
   function's parameter reached it — and that took region polymorphism away
   from every inner function; v0.1.560 withdrew it
-  (`test/parity/region_inner_poly.mere`). One shape is still in the default
-  region: an inner function of one member of a `let rec ... and` group calling
-  another member (`test/regionparams/inner.mere`, pinned by
-  `region_params_check`).
+  (`test/parity/region_inner_poly.mere`). The last shape — an inner function
+  of one member of a `let rec ... and` group calling another member — is
+  reached since v0.1.564: an inner binding keeps the mark of a region variable
+  it does not quantify when the variable belongs to a group still being
+  inferred (the group quantifies it), and unmarks every other one, which
+  belongs to a value that outlives it. And a `let` holding a ByteBuf is not
+  generalised (v0.1.564): ByteBuf was missing from the value restriction's
+  mutable containers, so the region of a buffer bound by `let` was decided by
+  nobody. The two together are what mgit's reads needed: 34.7 GB of the default
+  region became 11.5 GB.
 
   **Per backend**: C (v0.1.464) and LLVM (v0.1.466) pass it. **Wasm** needs nothing: it has one bump for every region,
   and what keeps a callee's allocation alive there is the high-water mark

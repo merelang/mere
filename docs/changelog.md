@@ -4,6 +4,70 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.564 — 2026-10-01
+
+_The last inner-function shape reaches its caller's region, and a `let` holding a ByteBuf is not generalised (Q-193): mgit's never-freed allocation drops from 34.7 GB to 11.5 GB._
+
+v0.1.562 gave inner functions region parameters of their own and left one shape
+out: an inner function of one member of a `let rec ... and` group calling another
+member. That is the shape of mgit's object store -- `store_read` reaches
+`loose_read` through an inner `in_packs`, and the three are one group -- so mgit's
+reads still went to the default region.
+
+**The group's marks.** When an inner binding is generalised, a region variable it
+does not quantify belongs to something that outlives it, and its "allocation" mark
+is removed so a call site inside a block cannot decide it. A group's own variables
+are in that position too -- they appear free in an inner function of a member --
+and losing the mark meant the group could not make them region parameters. Now a
+variable keeps its mark when it is the group's: level 1 or deeper, and in the type
+of a `let rec` group still being inferred (both places that infer groups -- the
+typer's `Let_rec` and the pipeline's top-level `infer_top_rec` -- say which those
+are). Every other variable is unmarked as before. v0.1.562 tried keeping every
+mark, and a call inside `region BLK` then decided a region that mere-ruby's `benv`
+shares with a global pool; those are level 0, and this rule leaves them alone.
+
+**ByteBuf in the value restriction** (Q-193). A `let` is generalised unless its
+type mentions a mutable container, and the list had Map, Vec, OwnedVec, StrBuf,
+Channel, ListBuf and Coro, and not ByteBuf. So in
+`let (out, _e, ok) = zlib_inflate raw hp in`, `out`'s region became a fresh
+variable at every use, and the region the inflater allocated the buffer in was
+decided by nobody: the default region. The same program written with a Vec passed
+the caller's region.
+
+Neither alone moves mgit; together, counted by the runtime on the Mere
+repository (17,505 objects, output identical to git):
+
+| | default region (never freed) | blocks (given back per object) |
+|---|---|---|
+| v0.1.563 | 34.7 GB | 1.8 GB |
+| v0.1.564 | 11.5 GB | 24.8 GB |
+
+What is left in the default region is what no function's type names -- mgz's
+Huffman tables and bit readers, made and dropped inside the inflater. That is
+Q-134 proper.
+
+`region_params_check` asserts all four inner-function shapes as `^param` down to
+the emitted calls (four on C, four on LLVM) and a ByteBuf `let`
+(`test/regionparams/bytebuf_let.mere`); both go red on v0.1.563.
+
+Swept, with imports resolved, against v0.1.563: 982 files compile under both,
+none differently; 111 compile under neither (unvendored imports, deliberate
+refusals) and are not counted. mere-ruby's main.mere compiles under both. (The
+sweep v0.1.559 reported -- 1,072 files, no difference -- measured nothing: it
+timed each run with `timeout`, which this machine does not have, so every file
+exited 127 under both compilers.)
+
+**`mere install` names the other cause of an integrity error** (Q-194). Before
+v0.1.400 a package's content hash covered the installed tree's `.git`, which is
+different in every clone, so a lock entry written then fails on every fresh
+clone with "content changed since mere.lock". Four repositories had such entries
+(their hash lines are re-computed now; the revs did not move). For a
+whole-repository package -- a subdir never had a `.git` to hash -- the error now
+says so, and that deleting the lock and installing again keeps the revs, which
+`mere.toml` pins.
+
+---
+
 ## v0.1.563 — 2026-10-01
 
 _Four use-after-frees the types could not see: a retained container written after its block, a thread's env, an OwnedVec element, an LLVM channel message._

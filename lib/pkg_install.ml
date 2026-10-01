@@ -611,9 +611,20 @@ let install ~root =
       let coord = git ^ "\000" ^ Option.value ~default:"" subdir ^ "\000" ^ sha in
       (match Hashtbl.find_opt locked_hash coord with
        | Some old when old <> h ->
+         (* v0.1.564 (Q-194): the other cause, and the commonest in practice.
+            Before v0.1.400 the hash covered the installed tree's .git, which is
+            different in every clone, so an entry written then can never be
+            reproduced -- four repositories found that out on a fresh clone.
+            Only a whole-repository package had a .git to hash; a subdir did not. *)
+         let legacy =
+           if subdir = None then
+             " If this entry was written before Mere v0.1.400, its hash included \
+              the clone's .git and cannot be reproduced: delete mere.lock and \
+              install again (the rev stays pinned by mere.toml)."
+           else "" in
          err "integrity: %s @ %s content changed since mere.lock (%s vs %s) — \
-              a moved tag/force-push or a corrupt cache. Delete mere.lock to re-pin."
-           mod_path (String.sub sha 0 (min 8 (String.length sha))) old h
+              a moved tag/force-push or a corrupt cache. Delete mere.lock to re-pin.%s"
+           mod_path (String.sub sha 0 (min 8 (String.length sha))) old h legacy
        | _ -> ());
       entries := { l_name = mod_path; l_git = git; l_subdir = subdir;
                    l_rev = sha; l_hash = h } :: !entries;

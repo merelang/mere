@@ -55,7 +55,7 @@ expect ok        "# 2 region-parameterised, 2 ok, 0 value-used, 0 partial"
 expect valueused "# 1 region-parameterised, 0 ok, 1 value-used, 0 partial"
 expect partial   "# 1 region-parameterised, 0 ok, 0 value-used, 1 partial"
 expect chain     "# 3 region-parameterised, 3 ok, 0 value-used, 0 partial"
-expect inner     "# 4 region-parameterised, 4 ok, 0 value-used, 0 partial"
+expect inner     "# 6 region-parameterised, 6 ok, 0 value-used, 0 partial"
 
 # ---- THE CHAIN, asserted line by line --------------------------------------
 #
@@ -92,17 +92,18 @@ checks=$((checks + 1))
 # it bound. Three of the four shapes read `^param`, and the emitted code is
 # checked too: the region has to arrive, not only be named.
 #
-# The fourth stays `?`, pinned: an inner function of one member of a `let rec
-# ... and` group calling another member. The group's region variables lose their
-# mark when the inner binding generalises, and keeping the mark lets a call
-# inside a block decide a region an enclosing binding owns (mere-ruby's `benv`
-# became `BLK`'s). When that is solved this line changes.
+# The fourth -- an inner function of one member of a `let rec ... and` group
+# calling another member -- reads `^param` since v0.1.564: an inner binding keeps
+# the mark of a region variable it does not quantify when the variable is the
+# GROUP's (level >= 1, in the type of a group still being inferred), and unmarks
+# every other one as before -- keeping them all let a call inside a block decide
+# a region an enclosing value owns (mere-ruby's `benv` became `BLK`'s, v0.1.562).
 inner_got="$("$MERE" --dump-region-params "$ROOT/test/regionparams/inner.mere" 2>&1 | grep -e ' -> pr ' -e '^#sites')"
 inner_want='@via_rec -> pr : ^param
 @via_closure -> pr : ^param
 @via_nested -> pr : ^param
-@grp -> pr : ?
-#sites 3 named, 9 forwarded, 1 undecided'
+@grp -> pr : ^param
+#sites 4 named, 12 forwarded, 0 undecided'
 if [ "$inner_got" != "$inner_want" ]; then
   echo "FAIL region_params[inner]: the calls from inner functions no longer read as they must (test/parity/region_inner_poly.mere must pass too)."
   echo "  want:"; printf '%s\n' "$inner_want" | sed 's/^/    /'
@@ -110,12 +111,19 @@ if [ "$inner_got" != "$inner_want" ]; then
   fails=$((fails + 1))
 fi
 checks=$((checks + 1))
-# C and LLVM: three calls to `pr` from lifted bodies pass a `__rp` (the fourth,
-# the group's, passes the default region)
+# C and LLVM: all four calls to `pr` pass a `__rp`
 nc="$("$MERE" -c "$ROOT/test/regionparams/inner.mere" 2>/dev/null | grep -cE 'mu_pr__int__Vec_int__direct\(__rp[0-9]+,' || true)"
 nl="$("$MERE" -ll "$ROOT/test/regionparams/inner.mere" 2>/dev/null | grep -cE 'call ptr @mu_pr__int__Vec_int\(ptr %__rp[0-9]+,' || true)"
-if [ "$nc" != 3 ] || [ "$nl" != 3 ]; then
-  echo "FAIL region_params[inner-emit]: calls to pr passing the caller's region: C $nc, LLVM $nl (want 3 and 3)"
+if [ "$nc" != 4 ] || [ "$nl" != 4 ]; then
+  echo "FAIL region_params[inner-emit]: calls to pr passing the caller's region: C $nc, LLVM $nl (want 4 and 4)"
+  fails=$((fails + 1))
+fi
+checks=$((checks + 1))
+
+# v0.1.564 (Q-193): a `let` holding a ByteBuf is not generalised, so the region
+# a call allocates it in is the caller's -- the same answer a Vec gets.
+if [ "$("$MERE" --dump-region-params "$ROOT/test/regionparams/bytebuf_let.mere" 2>&1 | grep -c '^@wrap -> mk : ^param')" != 1 ]; then
+  echo "FAIL region_params[bytebuf_let]: a ByteBuf bound by \`let\` no longer passes the caller's region -- is ByteBuf still in the value restriction?"
   fails=$((fails + 1))
 fi
 checks=$((checks + 1))
