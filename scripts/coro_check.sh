@@ -118,11 +118,11 @@ done < "$T/cases"
 # coroutine keeps NOTHING -- its record is freed at reap and its handle carries
 # a generation, its env was its own -- and a correct run holds about 1.5 MiB:
 # the cap is 16 MiB, and a runtime that kept the 24-byte records (34 MiB) is
-# over it. LLVM still keeps the record for the handle to name, so its cap is
-# the old one: 128 MiB, four times what it holds and a third of what one
-# holding a jmp_buf per coroutine does.
+# over it. LLVM is the same since v0.1.565 (slot table, record freed at reap,
+# the lambda's env its own): 1.5 MiB, under the same cap -- it held 33.7 MiB
+# with the records and 49.7 with an env per coroutine.
 RSS_CAP_C=16777216
-RSS_CAP_LL=134217728
+RSS_CAP_LL=16777216
 cap_for() { if [ "$1" = c ]; then printf '%s' "$RSS_CAP_C"; else printf '%s' "$RSS_CAP_LL"; fi; }
 rss_of() {  # $1 = binary -> resident bytes, or empty when this host cannot say
   r=$( { /usr/bin/time -l "$1" >/dev/null; } 2>&1 | awk '/maximum resident/ {print $1}' )
@@ -231,7 +231,8 @@ if [ "$MODE" = "--poison" ]; then
   poison ll "LLVM 3 (try_or jmpbuf not carried)" '/^  store i32 %tjs, ptr @__lang_fail_jmpbuf_set$/d' fail nested
   poison ll "LLVM 4 (stack bounds not carried)" '/^  store i64 %tlo, ptr @__lang_stack_lo$/d; /^  store i64 %thi, ptr @__lang_stack_hi$/d' overflow
   poison ll "LLVM 5 (a block's coroutine not refused)" 's/^  br i1 %inblock, label %refuse, label %alloc$/  br label %alloc/' env
-  poison ll "LLVM 6 (no finished check)" 's/^  br i1 %dead, label %finished, label %self$/  br label %self/' finished
+  # v0.1.565: a finished coroutine is a handle that no longer resolves
+  poison ll "LLVM 6 (no finished check)" 's/^  br i1 %gone, label %finished, label %go$/  br label %go/' finished
   poison ll "LLVM 7 (no hand-over check)" 's/^  br i1 %bad0, label %nowhere, label %chk$/  br label %chk/' self_handoff
   poison_rss() {  # $1 = c|ll, $2 = label, $3 = sed expression
     if ! why=$(build million -O2 "$1" "$3"); then
@@ -245,6 +246,7 @@ if [ "$MODE" = "--poison" ]; then
   poison_rss c "C 14 (a finished coroutine's record is never freed)" 's/ __lang_coro_drop_slot(z); free(z); }$/ __lang_coro_drop_slot(z); }/'
   poison_rss c "C 8 (the saved state is never freed)" 's/ free(z->x); z->x = NULL; __lang_coro_drop_slot(z); free(z); }$/ __lang_coro_drop_slot(z); }/'
   poison_rss ll "LLVM 8 (the saved state is never freed)" '/^  call void @free(ptr %zx)$/d'
+  poison_rss ll "LLVM 14 (a finished coroutine's record is never freed)" '/^  call void @free(ptr %z)$/d'
   if [ "$pfail" = 0 ] && [ "$fail" = 0 ]; then echo "coro --poison: ok (the gate can go red)"; else echo "coro --poison: FAILED"; pfail=1; fi
   exit "$pfail"
 fi

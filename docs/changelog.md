@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.565 — 2026-10-01
+
+_A finished coroutine keeps nothing on LLVM either: generational handles and an env of its own, the C runtime's v0.1.558._
+
+On C, v0.1.558 made a finished coroutine free everything (Q-183). LLVM still
+handed the program the record's address, so the 24-byte record could never be
+freed, and a body's env went to the default region: a million coroutines made and
+finished held 33.7 MiB, and 49.7 MiB when the body captured something.
+
+Now a handle on LLVM is what it is on C -- a slot and a generation, 24 bits each,
+below 2^48, resolved through a per-thread slot table -- and reaping frees the
+record and bumps the slot's generation, so a handle from before answers "has
+finished". `Coro` and `CoroExit` are `i64` in the IR (the message word needs no
+conversion for a Coro any more). The lambda written as `coro_new`'s argument has
+its env malloc'd as the coroutine's own and freed when the body ends; any other
+closure's env is where it was.
+
+| a million coroutines made and finished | C | LLVM before | LLVM now |
+|---|---|---|---|
+| no captures | 1.48 MiB | 33.7 MiB | 1.50 MiB |
+| capturing an int and a bool | 1.48 MiB | 49.7 MiB | 1.52 MiB |
+
+coro_check's LLVM cap drops from 128 MiB to C's 16 MiB, gains a poison that keeps
+the record (47 MiB, red), and its finished-check poison now removes the check that
+a stale handle resolves to nothing.
+
+---
+
 ## v0.1.564 — 2026-10-01
 
 _The last inner-function shape reaches its caller's region, and a `let` holding a ByteBuf is not generalised (Q-193): mgit's never-freed allocation drops from 34.7 GB to 11.5 GB._
