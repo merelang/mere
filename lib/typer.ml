@@ -467,13 +467,47 @@ let is_alloc_region (t : Ast.ty) : bool =
    not local to the binding, so `generalize` does not quantify it. So every marked
    variable in a binding's type that generalisation declined to quantify is unmarked
    here, once and for all -- non-local is a property that never goes back. *)
-let unmark_non_quantified_regions (qs : int list) (t : Ast.ty) : unit =
+(* v0.1.564 (Q-134): THE TYPES OF THE `let rec` GROUPS BEING INFERRED
+   RIGHT NOW. A group's members are bound monomorphically while their bodies are
+   inferred and generalised together afterwards, so a region variable that appears
+   in a member's type belongs to the group -- which will quantify it -- and not to
+   anything that outlives the group. Pushed by `Let_rec` here and by the pipeline's
+   top-level `infer_top_rec`. *)
+let active_group_alphas : Ast.ty list ref = ref []
+
+let rec occurs_id (id : int) (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyVar v -> v.Ast.id = id
+  | Ast.TyCon (_, args) -> List.exists (occurs_id id) args
+  | Ast.TyTuple ts -> List.exists (occurs_id id) ts
+  | Ast.TyArrow (a, b) -> occurs_id id a || occurs_id id b
+  | Ast.TyRef (_, _, inner) -> occurs_id id inner
+  | _ -> false
+
+let with_group_alphas (alphas : Ast.ty list) (f : unit -> 'a) : 'a =
+  let saved = !active_group_alphas in
+  active_group_alphas := alphas @ saved;
+  Fun.protect ~finally:(fun () -> active_group_alphas := saved) f
+
+(* ~inner: this binding is not at the top level. Then a marked variable it does
+   not quantify keeps its mark when it is the group's -- level >= 1 and in the type
+   of a group still being inferred -- because the group will quantify it, and an
+   unmarked variable cannot become the group's region parameter: an inner function
+   of one member calling another handed the default region to everything (mgit's
+   store_read -> in_packs -> loose_read). Every other one is unmarked as before: it
+   belongs to a value that outlives the binding, and a call inside a block must not
+   decide it -- the level-0 variables mere-ruby's `benv` shares with a global pool
+   are the case that showed it (v0.1.562). *)
+let unmark_non_quantified_regions ?(inner = false) (qs : int list) (t : Ast.ty) : unit =
   let rec go t =
     match Ast.walk t with
     | Ast.TyCon (n, (slot0 :: rest)) when List.mem n region_parameterised_names ->
       (match Ast.walk slot0 with
        | Ast.TyVar v when not (List.mem v.Ast.id qs) ->
-         Hashtbl.remove alloc_region_ids v.Ast.id
+         if inner && v.Ast.level >= 1
+            && List.exists (occurs_id v.Ast.id) !active_group_alphas
+         then ()
+         else Hashtbl.remove alloc_region_ids v.Ast.id
        | other -> go other);
       List.iter go rest
     | Ast.TyCon (_, args) -> List.iter go args
@@ -1010,8 +1044,11 @@ let generalize env t =
      group keep their region parameters when an inner function of one calls
      another -- and would also let a call inside a block decide a region that
      belongs to an enclosing binding: mere-ruby's `benv` became `BLK`'s again.
-     That group shape is the one inner-function case left in the default region. *)
-  unmark_non_quantified_regions qs t;
+     That group shape is the one inner-function case left in the default region.
+
+     v0.1.564: and for that shape the mark stays when the variable is the GROUP's
+     -- see `unmark_non_quantified_regions ~inner`. *)
+  unmark_non_quantified_regions ~inner:(!cur_level > 0) qs t;
   (* A variable this binding declined to quantify — pinned by a Send obligation —
      outlives the binding, so it must stop claiming to be local or the next
      binding out would quantify it. *)
@@ -1070,7 +1107,10 @@ let rec is_value (e : Ast.expr) : bool =
 
 let rec ty_mentions_mutable_container (t : Ast.ty) : bool =
   match Ast.walk t with
-  | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "Channel" | "ListBuf"), _) -> true
+  (* v0.1.564 (Q-193): ByteBuf too. Missing, `let (out, _, _) = zlib_inflate raw p in`
+     generalised `out`'s region, every use of `out` got a fresh one, and the region the
+     buffer was allocated in was decided by nobody -- the default region. *)
+  | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "ByteBuf" | "Channel" | "ListBuf"), _) -> true
   (* v0.1.561: a coroutine's message type is fixed once, like a channel's element --
      generalised, `let c = coro_new ..` could be sent an int here and a bool there *)
   | Ast.TyCon ("Coro", _) -> true
@@ -3489,11 +3529,12 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
     let env_rec = List.fold_left2 (fun acc (n, _, _) a ->
       (n, mono a) :: acc
     ) env bindings alphas in
+    with_group_alphas alphas (fun () ->
     enter_level (fun () ->
       List.iter2 (fun (_, _, value) alpha ->
         let tv = infer env_rec value in
         unify value.Ast.loc alpha tv
-      ) bindings alphas);
+      ) bindings alphas));
     let env' = List.fold_left2 (fun acc (n, _, value) a ->
       let sch = generalize env a in
       (* A local recursive constrained binding (e.g.

@@ -2,8 +2,7 @@
 // allocates in its caller's region; each of the others reaches `pr` through
 // something lifted out of its body -- an inner `let rec`, a closure, a lift
 // inside a lift, a `let rec ... and` group -- and should hand its own region
-// parameter down. Since v0.1.562 the first three do; the group still hands
-// down the default region (region_params_check says which).
+// parameter down. The first three do since v0.1.562, the group since v0.1.564.
 let pr = fn (n: int) -> let v = vec_new () in let _ = vec_push v n in v;
 let via_rec = fn (n: int) ->
   let rec ip = fn (k: int) -> if k == 0 then pr n else ip (k - 1) in

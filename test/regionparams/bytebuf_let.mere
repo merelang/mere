@@ -1,0 +1,10 @@
+// v0.1.564 (Q-193): a `let` bound to a call that returns a ByteBuf is not
+// generalised, like one that returns a Vec. It was: ByteBuf was missing from
+// the value restriction's list of mutable containers, so `b`'s region became a
+// fresh one at each use, and the region `mk` allocates in was decided by nobody
+// -- the default region. mgit's `let (out, _, _) = zlib_inflate raw p in` was
+// this, under 23 GB of its reads.
+let mk = fn (n: int) -> let b = bytebuf_new 0 in let _ = bytebuf_push b n in b;
+let wrap = fn (n: int) -> let b = mk n in b;
+let t = region R { bytebuf_len (wrap 1) };
+print_int t
