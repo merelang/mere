@@ -91,6 +91,10 @@ import os, pty, select, struct, fcntl, termios, time, sys, signal
 binary, keys, args = sys.argv[1], sys.argv[2], sys.argv[3:]
 pid, fd = pty.fork()
 if pid == 0:
+    # A signal ignored by whoever started us (a non-interactive shell runs `&` jobs
+    # with SIGINT ignored, and posix_spawn passes that down) stays ignored across
+    # exec, and the Ctrl-C leg would then fail with ISIG on. Put it back.
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     os.execv(binary, [binary] + args)
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
 

@@ -32,7 +32,12 @@ TABLE="$ROOT/test/downstream/REPOS"
 # language) takes ~68 s to emit C on an M-series laptop and the CI runner is two
 # to three times slower, so 180 sat on the edge -- and a timeout was reported as
 # "no longer compiles", which it is not (see the 201 branch below).
-BOUND="${DOWNSTREAM_TIMEOUT:-420}"
+# 900, not 420 (v0.1.569): mere-ruby kept growing (about 120 s of CPU on that
+# laptop by 2026-10-02), and one CI runner is not another. The same mere-ruby
+# commit with compilers that emit it in the same time took 222 s in one run and
+# outlived 420 s in the next, 50 minutes later. Each row prints its seconds now, so
+# the next drift shows up as a number before it shows up as a timeout.
+BOUND="${DOWNSTREAM_TIMEOUT:-900}"
 DIR="${MERE_DOWNSTREAM:-}"
 [ -x "$MERE" ] || { echo "downstream_check: $MERE not found -- run 'dune build'" >&2; exit 1; }
 [ -f "$TABLE" ] || { echo "downstream_check: $TABLE not found" >&2; exit 1; }
@@ -89,10 +94,12 @@ while read -r repo entry check rest; do
       || echo "  note  $repo -- mere install failed; the check below says what broke"
   fi
   ran=$((ran + 1))
+  t0=$(date +%s)
   ( cd "$DIR/$repo" && sh "$ROOT/scripts/bounded.sh" "$BOUND" "$MERE" -c "$entry" > /dev/null 2>"$err" )
   rc=$?
+  secs=$(( $(date +%s) - t0 ))
   if [ "$rc" = 0 ]; then
-    echo "  ok    $repo ($entry)"
+    echo "  ok    $repo ($entry) ${secs}s"
   elif [ "$rc" = 201 ]; then
     # bounded.sh's own status: the compiler outlived the wall-clock limit. That
     # is a different fact from "does not compile", and used to be reported as
