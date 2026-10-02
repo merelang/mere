@@ -188,13 +188,15 @@ NAME_FLOOR=${NAME_FLOOR-14}
 # that surface that no probe reaches is either a missing probe or a documented
 # reason, and it has to be one of them out loud.
 SURFACE_FLOOR=${SURFACE_FLOOR-35}
-KNOWN_UNPROBED="${WASM_STUB_UNPROBED-memory exit_proc mere_spawn mere_join mere_channel_new mere_channel_send mere_channel_recv}"
+KNOWN_UNPROBED="${WASM_STUB_UNPROBED-memory exit_proc mere_spawn mere_join mere_detach mere_thread_fail mere_channel_new mere_channel_send mere_channel_recv}"
 #   memory        not a function -- the module's linear memory, imported as a value
 #   exit_proc     the answer is an exit status, not a line of stdout;
 #                 scripts/exit_status_check.sh is the gate that compares those
 #   mere_spawn / mere_join / mere_channel_*  the answer depends on the
 #                 scheduler, so it is not fixed across a run;
 #                 test/parity/concurrency_channel.mere holds them instead
+#   mere_detach / mere_thread_fail  a thread's failure (v0.1.586): what they
+#                 print is stderr and timing, held by scripts/thread_fail_check.sh
 grep -oE '\(import \\"env\\" \\"[A-Za-z_0-9]+\\"' lib/codegen_wasm.ml \
   | sed 's/.*env\\" \\"//; s/\\"//' | sort -u > "$tmp/surface"
 n_surface=$(wc -l < "$tmp/surface" | tr -d ' ')

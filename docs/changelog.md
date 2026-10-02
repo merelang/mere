@@ -4,6 +4,64 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.586 — 2026-10-02
+
+_A spawned thread's failure has one meaning on all four backends (Q-090): `join` raises it again, a detached one is a line on stderr, an unclaimed one is a line at exit, and the exit status is the main thread's. C reports leaked threads too (Q-055)._
+
+A plugin host reached for `spawn` to survive somebody else's code, and the four
+backends gave three answers. C and LLVM ended the process from the failing
+thread, racing the main thread's last write: the exit status was 1 in some runs
+and 0 in others, and stdout was sometimes cut. Wasm printed the failure and
+exited 0. The interpreter said nothing. A daemon whose detached handler failed
+once was gone -- mhttpd and mengd both.
+
+Now every backend gives Rust's answer:
+
+- the thread's failure is **recorded**, and **`join` raises it again** in the
+  joiner -- uncaught, it is the program's failure (`fail: boom`, exit 1); `try_or`
+  takes it;
+- a **detached** thread's failure is one line, and the program carries on:
+  `mere: thread 1 failed (detached): fail: boom`;
+- one **nobody claimed** is one line at exit:
+  `mere: thread 1 failed and was never joined: fail: boom`;
+- the exit status is the main thread's.
+
+C and LLVM keep a record per thread `{ pthread, number, state, claim, message }`
+on a list while nobody has claimed it; the thread body runs under the failure
+jump, so its failure lands in the record instead of in `exit(1)`, and the record
+is freed when both the thread and its handle are done with it. Wasm's workers
+set a flag in their own instance, so an uncaught `fail` there hands its message
+to the host instead of printing it; the host keeps the record in the shared
+buffer the join already waited on. `detach` was refused on LLVM and Wasm; it is
+lowered on both now. LLVM's failure-message buffer is per thread.
+
+The record is also what the leak report reads: `MERE_THREAD_REPORT=1` now works
+on C, LLVM and Wasm (Q-055) -- `still running`, `finished, never joined`, `died:
+<message>, never joined` (only the interpreter can say what a thread was blocked
+on).
+
+⚠ One consequence: a thread waiting on a channel for a message a failed thread
+was going to send now waits for good -- a channel does not know its senders --
+where before the failure ended the process. `scripts/spawn_stack_check.sh` had
+exactly that shape (its "a fail on a spawned thread is that thread's" case), and
+hung; it now has main's `try_or` run while the worker fails and then joins it.
+
+And a second: a worker POOL that let a handler's failure end the worker would
+lose a worker per failing request and then stop answering, silently. The two
+pools in `contrib/http` (`serve_rd`, `serve_mt`) now catch a handler's failure
+themselves -- one line on stderr, the connection closed, the worker back for the
+next request -- and `with_rescue` is still what turns it into a 500
+(`scripts/http_concurrency_check.sh` checks the difference).
+
+`scripts/thread_fail_check.sh` is rewritten from "pin the split" to "pin the
+contract": four programs on four backends (`spawned_fail` ten times each), the
+report, and eight poisons -- the thread not catching its own failure, `join` not
+raising it, a detached failure not told, the exit hook not telling, on C, LLVM and
+Wasm. `scripts/thread_leak_check.sh` gains the C column (the count; the wording
+is printed, since it races the real clock).
+
+---
+
 ## v0.1.585 — 2026-10-02
 
 _ByteBuf, `read_bytes` and `write_bytes` on LLVM and Wasm (Q-016): mgunzip now decompresses byte-for-byte the same on C, LLVM and Wasm._

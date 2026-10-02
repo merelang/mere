@@ -70,7 +70,7 @@ machine rather than a host.
 | `csr_write` | bare | refused | refused | bare |
 | `cube` | yes | yes | yes | yes |
 | `decr` | yes | yes | yes | yes |
-| `detach` | yes | refused | refused | unattributed |
+| `detach` | yes | yes | yes | unattributed |
 | `divmod` | yes | yes | yes | yes |
 | `e` | yes | yes | yes | yes |
 | `env_var` | yes | yes | yes | refused |

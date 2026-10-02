@@ -212,7 +212,12 @@ let rec mt_worker = fn (ch, rbuf: int, wbuf: int, pat: int, patn: int, h) ->
   match channel_recv_opt ch with
   | None -> ()
   | Some cfd ->
-    let _ = mt_serve_conn cfd rbuf wbuf pat patn h in
+    // A handler that fails costs its connection, not this worker (see serve_rd:
+    // since Mere v0.1.586 a thread's failure ends only that thread).
+    let _ = try_or_msg (fn () -> mt_serve_conn cfd rbuf wbuf pat patn h)
+                       (fn (m: str) -> let _ = print_err ("http: a handler failed: " ++ m) in
+                                       let _ = http_end_request () in
+                                       let _ = tcp_close cfd in 0) in
     mt_worker ch rbuf wbuf pat patn h;
 
 let rec mt_start = fn (ch, k: int, n: int, h) ->

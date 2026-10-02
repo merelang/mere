@@ -199,7 +199,14 @@ let rec rd_worker = fn (ch) -> fn (back) -> fn (slots: int) -> fn (ctx: int) -> 
   // watching the fd before sending, so the worker owns both until it either
   // closes the fd or hands the leftover back.
   | Some (fd, total) ->
-    let r = rd_worker_one fd (slots + fd * rd_slot) total ctx h in
+    // A handler that fails costs its connection, not this worker. Until Mere
+    // v0.1.586 a failure on any thread ended the process; now it ends only the
+    // thread, and a pool that lost a worker per failing request would stop
+    // answering with nothing said. with_rescue is still what turns it into a 500.
+    let r = match try_or_msg (fn () -> Some (rd_worker_one fd (slots + fd * rd_slot) total ctx h))
+                             (fn (m: str) -> let _ = print_err ("http: a handler failed: " ++ m) in None) with
+      | Some r -> r
+      | None -> let _ = http_end_request () in let _ = tcp_close fd in (fd, 0, 0, false) in
     // ALWAYS reported, even when finished, because the loop counts requests in
     // flight to decide whether it may sleep indefinitely.
     let _ = channel_send back r in

@@ -5137,9 +5137,10 @@ let () =
   assert_llvm "llvm: spawn emits pthread_create"
     (llvm_with_decls "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
     "call i32 @pthread_create";
-  assert_llvm "llvm: join emits pthread_join"
+  (* v0.1.586: through the thread's record, which raises its failure again *)
+  assert_llvm "llvm: join goes through the thread record"
     (llvm_with_decls "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
-    "call i32 @pthread_join";
+    "call void @__lang_thr_join";
   assert_llvm "llvm: emits the spawn trampoline"
     (llvm_with_decls "let cw = fn u -> print \"x\"; let h = spawn cw in join h")
     "@__mere_spawn_trampoline";
@@ -8226,7 +8227,9 @@ let () =
   assert_no_contains "join: local shadow isn't compiled as pthread_join"
     (vec_codegen_c
        "let rec join = fn xs -> match xs with | Nil -> 0 | Cons (h, t) -> h + join t in join (Cons (1, Cons (2, Nil)))")
-    "pthread_join";
+    (* v0.1.586: the call form -- the runtime's own __lang_thr_join holds a
+       pthread_join whether the program joins anything or not *)
+    "({ __lang_thr_join(";
   (* P6: str_eq works as a function on the C backend (was only the `==`
      operator on str). *)
   assert_contains "str_eq: C backend emits strcmp"

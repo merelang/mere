@@ -18,6 +18,12 @@
 # construction -- the leaked thread blocks, the main one does not -- but a gate
 # about threads blocking forever is the last place to assume that.
 #
+# v0.1.586 (Q-055): and the C build reports too, from the thread record the
+# C runtime keeps since Q-090. It is checked for the COUNT, which spawn settles;
+# what each was doing it can only say as "still running" / "finished" /
+# "died", never "blocked on ...", and the wording races the real clock, so it
+# is printed, not asserted.
+#
 # Usage: sh scripts/thread_leak_check.sh [file.mere ...]
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -94,8 +100,21 @@ for f in $FILES; do
     0) got="0" ;;
     *) why="$(sed -n 's/^  thread [0-9]*: //p' "$TMP/vc.err" | head -1)"; got="$n $why" ;;
   esac
+  # the C column: the same count
+  c_note=""
+  if command -v "${CC:-cc}" >/dev/null 2>&1 \
+     && "$MERE" -c "$f" > "$TMP/c.c" 2>/dev/null && "${CC:-cc}" -w -o "$TMP/c" "$TMP/c.c" -lm -lpthread 2>/dev/null; then
+    MERE_THREAD_REPORT=1 sh "$ROOT/scripts/bounded.sh" "$LIMIT" "$TMP/c" > "$TMP/c.out" 2> "$TMP/c.err" || true
+    cn="$(grep -c 'thread [0-9]*:' "$TMP/c.err" || true)"
+    if [ "$cn" != "$want_n" ]; then
+      echo "FAIL $name  (C: want $want_n thread(s) reported, got $cn)"
+      sed 's/^/    /' "$TMP/c.err" | head -4
+      fail=$((fail + 1)); continue
+    fi
+    c_note="  C: $cn $(sed -n 's/^  thread [0-9]*: //p' "$TMP/c.err" | head -1)"
+  fi
   if [ "$got" = "$want" ]; then
-    echo "PASS $name  [$got]"; pass=$((pass + 1))
+    echo "PASS $name  [$got]$c_note"; pass=$((pass + 1))
   else
     echo "FAIL $name  (want \`$want\`, got \`$got\`)"
     sed 's/^/    /' "$TMP/vc.err" | head -4

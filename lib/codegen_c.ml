@@ -3145,8 +3145,8 @@ let rec emit_expr (e : Ast.expr) : string =
                        if (__sh->__copy) __se = __sh->__copy(&__lang_default_region, __se); } \
            __mere_unit_closure* __c = (__mere_unit_closure*)malloc(sizeof(__mere_unit_closure)); \
            __c->env = __se; __c->fn = __cl.fn; __lang_threads_started = 1; \
-           ThreadHandle __t; " ^ attr_open ^ "\
-           int __pc = pthread_create(&__t.tid, " ^ attr_arg ^ ", __mere_spawn_trampoline, __c);" ^ attr_close ^ " \
+           ThreadHandle __t; __t.t = __lang_thr_new(); __c->thr = __t.t; " ^ attr_open ^ "\
+           int __pc = pthread_create(&__t.t->tid, " ^ attr_arg ^ ", __mere_spawn_trampoline, __c);" ^ attr_close ^ " \
            if (__pc != 0) { free(__c); __lang_fail_impl(\"spawn: the host refused to start a thread\"); } \
            __t; })"
      (* Only the Q-012 thread `join` builtin when not shadowed. `join` is a
@@ -3158,7 +3158,7 @@ let rec emit_expr (e : Ast.expr) : string =
               || List.mem_assoc "join" !current_env_subst
               || Hashtbl.mem inner_lifts "join"
               || Hashtbl.mem toplevel_fn_names "join") ->
-       "({ __auto_type __h = " ^ emit_expr arg ^ "; pthread_join(__h.tid, NULL); 0; })"
+       "({ __lang_thr_join(" ^ emit_expr arg ^ "); 0; })"
      (* v0.1.84 (mhttpd dogfood): fire-and-forget. Release a spawned thread's
         resources without waiting for it — the pattern a server's accept loop
         needs, where each connection handler runs unbounded and is never
@@ -3166,7 +3166,7 @@ let rec emit_expr (e : Ast.expr) : string =
         thread, and a long-running server eventually exhausts thread
         resources. *)
      | Ast.Var "detach" when not (user_shadows "detach") ->
-       "({ __auto_type __h = " ^ emit_expr arg ^ "; pthread_detach(__h.tid); 0; })"
+       "({ __lang_thr_detach(" ^ emit_expr arg ^ "); 0; })"
      (* Not the bare-metal arm above: the argument block exists on every -rv
         build, hosted or bare. Sharing that arm made the matrix file these under
         "bare", which is the wrong reason for refusing them -- what a hosted
@@ -15787,15 +15787,111 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          MVP supports closures that capture nothing (env == NULL); captured
          env lives in the shared region allocator, whose thread-safety is a
          separate design item (see internal notes, Q-012-C-mem). *)
-      "typedef struct { pthread_t tid; } ThreadHandle;";
-      "typedef struct { void* env; int (*fn)(void*, int); } __mere_unit_closure;";
+      (* v0.1.586 (Q-090, Q-055): WHAT A THREAD'S FAILURE DOES. It used to take
+         the uncaught path -- print and exit(1) -- from the thread, racing the
+         main thread's last write: the exit status was 1 in some runs and 0 in
+         others, stdout was cut, and one handler failing took a whole daemon
+         down (mhttpd, mengd). The interpreter ran on. Now every backend gives
+         Rust's answer: the thread's failure is RECORDED; `join` raises it again
+         in the joiner (where try_or takes it); a detached thread's failure is
+         one line on stderr and the program carries on; one nobody joined or
+         detached is one line at exit. The exit status is the main thread's.
+         The record is on a list while nobody has claimed it -- the exit report
+         reads it, and MERE_THREAD_REPORT=1 prints the whole leak report from it
+         (Q-055, the interpreter's since v0.1.304) -- and it is freed when both
+         the thread and its handle are done with it. *)
+      "typedef struct __lang_thr {";
+      "  pthread_t tid;";
+      "  int n;       /* spawn order: \"thread n\" */";
+      "  int state;   /* 0 running, 1 finished, 2 failed */";
+      "  int claim;   /* 0 nobody's yet, 1 joined, 2 detached */";
+      "  int refs;    /* the thread and its handle */";
+      "  int told;    /* the failure's line has been printed */";
+      "  char msg[256];";
+      "  struct __lang_thr *prev, *next;";
+      "} __lang_thr;";
+      "typedef struct { __lang_thr* t; } ThreadHandle;";
+      "typedef struct { void* env; int (*fn)(void*, int); __lang_thr* thr; } __mere_unit_closure;";
+      "static pthread_mutex_t __lang_thr_lock = PTHREAD_MUTEX_INITIALIZER;";
+      "static __lang_thr *__lang_thr_head = NULL, *__lang_thr_tail = NULL;";
+      "static int __lang_thr_seq = 0, __lang_thr_hooked = 0;";
+      "static void __lang_thr_unlink(__lang_thr* t) {   /* under the lock */";
+      "  if (t->prev) t->prev->next = t->next; else if (__lang_thr_head == t) __lang_thr_head = t->next;";
+      "  if (t->next) t->next->prev = t->prev; else if (__lang_thr_tail == t) __lang_thr_tail = t->prev;";
+      "  t->prev = t->next = NULL;";
+      "}";
+      "static void __lang_thr_release(__lang_thr* t) { if (--t->refs == 0) free(t); }   /* under the lock */";
+      "static void __lang_thr_tell(__lang_thr* t, const char* how) {   /* under the lock */";
+      "  if (t->told) return;";
+      "  t->told = 1;";
+      "  fflush(stdout);";
+      "  fprintf(stderr, \"mere: thread %d failed%s: %s\\n\", t->n, how, t->msg);";
+      "}";
+      "static void __lang_thr_exit_report(void) {";
+      "  pthread_mutex_lock(&__lang_thr_lock);";
+      "  int n = 0;";
+      "  for (__lang_thr* t = __lang_thr_head; t; t = t->next) { n++; if (t->state == 2) __lang_thr_tell(t, \" and was never joined\"); }";
+      "  if (n > 0 && getenv(\"MERE_THREAD_REPORT\")) {";
+      "    fprintf(stderr, \"mere: %d thread(s) neither joined nor detached at exit\\n\", n);";
+      "    for (__lang_thr* t = __lang_thr_head; t; t = t->next) {";
+      "      if (t->state == 2) fprintf(stderr, \"  thread %d: died: %s, never joined\\n\", t->n, t->msg);";
+      "      else fprintf(stderr, \"  thread %d: %s\\n\", t->n, t->state == 1 ? \"finished, never joined\" : \"still running\");";
+      "    }";
+      "  }";
+      "  pthread_mutex_unlock(&__lang_thr_lock);";
+      "}";
+      "static __lang_thr* __lang_thr_new(void) {";
+      "  __lang_thr* t = (__lang_thr*)calloc(1, sizeof(__lang_thr));";
+      "  if (!t) __lang_fail_impl(\"spawn: out of memory\");";
+      "  t->refs = 2;";
+      "  pthread_mutex_lock(&__lang_thr_lock);";
+      "  t->n = ++__lang_thr_seq;";
+      "  t->prev = __lang_thr_tail;";
+      "  if (__lang_thr_tail) __lang_thr_tail->next = t; else __lang_thr_head = t;";
+      "  __lang_thr_tail = t;";
+      "  if (!__lang_thr_hooked) { __lang_thr_hooked = 1; atexit(__lang_thr_exit_report); }";
+      "  pthread_mutex_unlock(&__lang_thr_lock);";
+      "  return t;";
+      "}";
+      "static void __lang_thr_join(ThreadHandle h) {";
+      "  pthread_join(h.t->tid, NULL);";
+      "  char m[256]; int failed;";
+      "  pthread_mutex_lock(&__lang_thr_lock);";
+      "  __lang_thr* t = h.t;";
+      "  t->claim = 1; __lang_thr_unlink(t);";
+      "  failed = t->state == 2;";
+      "  if (failed) snprintf(m, sizeof m, \"%s\", t->msg);";
+      "  __lang_thr_release(t);";
+      "  pthread_mutex_unlock(&__lang_thr_lock);";
+      "  if (failed) __lang_fail_impl(m);";
+      "}";
+      "static void __lang_thr_detach(ThreadHandle h) {";
+      "  pthread_mutex_lock(&__lang_thr_lock);";
+      "  __lang_thr* t = h.t;";
+      "  pthread_detach(t->tid);";
+      "  t->claim = 2; __lang_thr_unlink(t);";
+      "  if (t->state == 2) __lang_thr_tell(t, \" (detached)\");";
+      "  __lang_thr_release(t);";
+      "  pthread_mutex_unlock(&__lang_thr_lock);";
+      "}";
       (* Q-178: defined with the SIGSEGV handler, which is emitted after this *)
       "static void* __lang_thread_segv_enter(void);";
       "static void __lang_thread_segv_leave(void*);";
+      (* defined with the failure runtime, which is emitted after this *)
+      "static _Thread_local int __lang_fail_jmpbuf_set;";
+      "static _Thread_local jmp_buf __lang_fail_jmpbuf;";
+      "static _Thread_local char __lang_fail_msg[256];";
+      "static void __lang_region_unwind(int to_n);";
       "static void* __mere_spawn_trampoline(void* __p) {";
       "  __mere_unit_closure* __c = (__mere_unit_closure*)__p;";
+      "  __lang_thr* __t = __c->thr;";
       "  void* __alt = __lang_thread_segv_enter();";
-      "  __c->fn(__c->env, 0);";
+      "  int __failed = 0;";
+      "  /* v0.1.586: the thread's own failure lands here instead of exiting */";
+      "  __lang_fail_jmpbuf_set = 1;";
+      "  if (_setjmp(__lang_fail_jmpbuf) == 0) __c->fn(__c->env, 0);";
+      "  else { __failed = 1; __lang_region_unwind(0); }";
+      "  __lang_fail_jmpbuf_set = 0;";
       "  free(__c);";
       "  __lang_thread_segv_leave(__alt);";
       "  /* v0.1.31: drop this thread's cached block regions — _Thread_local";
@@ -15810,6 +15906,14 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "  /* v0.1.301: and the active-region stack's storage */";
       "  free(__lang_region_active);";
       "  __lang_region_active = NULL; __lang_region_active_n = 0; __lang_region_active_cap = 0;";
+      "  pthread_mutex_lock(&__lang_thr_lock);";
+      "  if (__failed) {";
+      "    snprintf(__t->msg, sizeof __t->msg, \"%s\", __lang_fail_msg);";
+      "    __t->state = 2;";
+      "    if (__t->claim == 2) __lang_thr_tell(__t, \" (detached)\");";
+      "  } else __t->state = 1;";
+      "  __lang_thr_release(__t);";
+      "  pthread_mutex_unlock(&__lang_thr_lock);";
       "  return NULL;";
       "}";
       "";

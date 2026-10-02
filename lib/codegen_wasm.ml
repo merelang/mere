@@ -96,7 +96,7 @@ let host_builtins_without_wasm_lowering =
        v0.1.585 (Q-016): read_bytes / write_bytes lower now, and left the list. *)
     "read_key"; "tty_raw"; "tty_restore";
     "read_lines"; "file_pread";
-    "random_float"; "detach" ]
+    "random_float" ]
 
 (* Accumulator for the function body's instructions (one WAT token per
    list entry). The driver concatenates them with newlines + indent. *)
@@ -2891,6 +2891,14 @@ and emit_expr (e : Ast.expr) : unit =
     uses_threads := true;
     emit_expr h;
     emit_instr "call $mere_join"  (* returns i32 0 = unit *)
+  (* v0.1.586: detach, refused on this backend until now *)
+  | Ast.App ({ node = Ast.Var "detach"; _ }, h)
+    when not (List.mem_assoc "detach" !locals
+              || Hashtbl.mem toplevel_fn_names "detach"
+              || Hashtbl.mem inner_lifts_wasm "detach") ->
+    uses_threads := true;
+    emit_expr h;
+    emit_instr "call $mere_detach"
   (* Q-012: channels as host imports over the shared memory (the host does
      the atomic mutex/cond via JS Atomics on the shared buffer). Elements are
      i32 (Mere's Wasm value width). *)
@@ -11887,6 +11895,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       file_io_imports
       ^ "  (import \"env\" \"mere_spawn\" (func $mere_spawn_h (param i32) (result i32)))\n\
         \  (import \"env\" \"mere_join\" (func $mere_join_h (param i32) (result i32)))\n\
+        \  (import \"env\" \"mere_detach\" (func $mere_detach_h (param i32) (result i32)))\n\
+        \  (import \"env\" \"mere_thread_fail\" (func $mere_thread_fail_h (param i32) (result i32)))\n\
         \  (import \"env\" \"mere_channel_new\" (func $mere_channel_new_h (param i32) (result i32)))\n\
         \  (import \"env\" \"mere_channel_send\" (func $mere_channel_send_h (param i32) (param i64) (result i32)))\n\
         \  (import \"env\" \"mere_channel_recv\" (func $mere_channel_recv_h (param i32) (result i64)))\n"
@@ -11897,8 +11907,15 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       boundary_shims
       ^ "  (func $mere_spawn (param i64) (result i64)\n\
         \    (i64.extend_i32_u (call $mere_spawn_h (i32.wrap_i64 (local.get 0)))))\n\
+        \  (global $__lang_in_thread (export \"__lang_in_thread\") (mut i32) (i32.const 0))\n\
         \  (func $mere_join (param i64) (result i64)\n\
-        \    (i64.extend_i32_u (call $mere_join_h (i32.wrap_i64 (local.get 0)))))\n\
+        \    (local $r i32)\n\
+        \    (local.set $r (call $mere_join_h (i32.wrap_i64 (local.get 0))))\n\
+        \    (if (result i64) (local.get $r)\n\
+        \      (then (call $__lang_fail (i64.extend_i32_u (local.get $r))))\n\
+        \      (else (i64.const 0))))\n\
+        \  (func $mere_detach (param i64) (result i64)\n\
+        \    (i64.extend_i32_u (call $mere_detach_h (i32.wrap_i64 (local.get 0)))))\n\
         \  (func $mere_channel_new (param i64) (result i64)\n\
         \    (i64.extend_i32_u (call $mere_channel_new_h (i32.wrap_i64 (local.get 0)))))\n\
         \  (func $mere_channel_send (param i64) (param i64) (result i64)\n\
@@ -13115,7 +13132,17 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     !esc_pre_offset !esc_post_offset
     !idx_pre_sub_offset !idx_mid1_sub_offset !idx_mid2_sub_offset
     top_globals_section
-    data_section runtime_helpers
+    data_section
+    (* v0.1.586 (Q-090): in a threaded module a worker sets __lang_in_thread, and
+       an uncaught failure then hands its message to the host instead of
+       printing it -- the thread's failure is the joiner's to raise *)
+    (if !uses_threads then
+       Str.global_replace (Str.regexp_string "    (call $puts_h (local.get $msg))\n    (unreachable))\n")
+         "    (if (global.get $__lang_in_thread)\n\
+          \      (then (drop (call $mere_thread_fail_h (local.get $msg))) (unreachable)))\n\
+          \    (call $puts_h (local.get $msg))\n    (unreachable))\n"
+         runtime_helpers
+     else runtime_helpers)
     list_str_runtime_section
     vec_runtime_section
     vec_higher_order_section strbuf_section map_key_eq_section map_runtime_section

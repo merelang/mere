@@ -1292,12 +1292,45 @@ for the answer to come back on.
 
 ---
 
+## When a spawned thread fails (v0.1.586)
+
+A thread's failure does not end the program. It is recorded, and what happens
+next depends on what the program does with the handle -- the same on every
+backend:
+
+- **`join h`** raises the failure again, in the joining thread. Uncaught there,
+  it is the program's failure (`fail: boom`, exit 1); `try_or` takes it like any
+  other.
+- **`detach h`**: the failure is one line on stderr, and the program carries on:
+
+  ```
+  mere: thread 1 failed (detached): fail: boom
+  ```
+
+- **Neither**: one line at exit, and the exit status is still the main thread's:
+
+  ```
+  mere: thread 1 failed and was never joined: fail: boom
+  ```
+
+  A thread still running when the program ends has nothing to report.
+
+⚠ A channel does not know who sends on it, so a thread that **waits on a
+channel for a message a failed thread was going to send waits for good** --
+before v0.1.586 the failure ended the whole program instead. `join` the thread
+before (or instead of) waiting on what it would have sent, and the failure
+reaches the waiter.
+
+Threads are numbered in the order they were spawned. Before v0.1.586 the C and
+LLVM backends ended the process from the failing thread (an exit status that
+changed from run to run), Wasm printed the failure, and the interpreter said
+nothing. See `scripts/thread_fail_check.sh`.
+
 ## Thread-leak report (v0.1.304)
 
-`MERE_THREAD_REPORT=1` makes the **interpreter** print, at exit, the threads that
-were neither `join`ed nor `detach`ed, and what each was blocked on. It goes to
-stderr and is off unless the variable is set, so it never changes what a program
-prints.
+`MERE_THREAD_REPORT=1` makes a program print, at exit, the threads that were
+neither `join`ed nor `detach`ed, and what each was doing. It goes to stderr and
+is off unless the variable is set, so it never changes what a program prints.
 
 ```
 mere: 1 thread(s) neither joined nor detached at exit
@@ -1305,8 +1338,10 @@ mere: 1 thread(s) neither joined nor detached at exit
 ```
 
 `detach` is what marks a thread as *meant* to block forever (a server's accept
-loop), so a detached thread is never reported. Not covered: the main thread, and
-the C backend. See `scripts/thread_leak_check.sh`.
+loop), so a detached thread is never reported. The interpreter says what a
+thread was blocked on; the C, LLVM and Wasm builds (v0.1.586) say `still
+running`, `finished, never joined` or `died: <message>, never joined`. Not
+covered: the main thread. See `scripts/thread_leak_check.sh`.
 
 ---
 
