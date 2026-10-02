@@ -528,6 +528,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/render_agreement_check.sh
 
+      - name: dom_canvas (a frame put on a canvas arrives pixel for pixel)
+        if: ${{ !cancelled() }}
+        run: sh scripts/dom_canvas_check.sh
+
       - name: parity (interp / C / LLVM / wasm agree)
         if: ${{ !cancelled() }}
         run: sh scripts/parity.sh

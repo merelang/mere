@@ -101,6 +101,17 @@ class El {
     if (p) { p.children = p.children.filter((c) => c !== this); this.parent = null; }
   }
   addEventListener(ev, fn) { (this.listeners[ev] ||= []).push(fn); }
+  // v0.1.603: a canvas's 2d context, enough to see what was drawn: the last
+  // image put, and how many rects were filled. The dump shows them.
+  getContext(kind) {
+    if (kind !== "2d") return null;
+    const el = this;
+    return this._ctx ||= {
+      fillStyle: "",
+      fillRect() { el._rects = (el._rects || 0) + 1; },
+      putImageData(img, x, y) { el._image = { w: img.width, h: img.height, x, y, data: img.data }; },
+    };
+  }
   fire(ev, obj = {}) {
     for (const fn of this.listeners[ev] || []) fn({ preventDefault() {}, ...obj });
   }
@@ -109,9 +120,13 @@ class El {
       .map(([k, v]) => ` ${k}="${v}"`).join("");
     // A form's state is in `value` and `checked`, not in text — without
     // these a dump of a filled-in form looks identical to an empty one.
+    const img = this._image;
     const props =
       (this.value ? ` value="${this.value}"` : "") +
-      (this.checked ? ` checked` : "");
+      (this.checked ? ` checked` : "") +
+      (this._rects ? ` rects=${this._rects}` : "") +
+      (img ? ` image=${img.w}x${img.h}@${img.x},${img.y}:` +
+        Buffer.from(img.data.subarray(0, Math.min(img.data.length, 64))).toString("hex") : "");
     const open = `${indent}<${this.tagName}${attrs}${props}>`;
     if (!this.children.length) {
       return this._text ? `${open}${this._text}` : open;
@@ -125,6 +140,17 @@ const lookup = (id) => {
   if (!byId.has(id)) byId.set(id, new El("div", id));
   return byId.get(id);
 };
+
+// Node has no ImageData; the browser's checks on its arguments, and nothing else
+if (typeof globalThis.ImageData === "undefined") {
+  globalThis.ImageData = class {
+    constructor(data, width, height) {
+      if (!(data instanceof Uint8ClampedArray) || data.length !== width * height * 4)
+        throw new Error("ImageData: the data is not width * height * 4 bytes");
+      this.data = data; this.width = width; this.height = height;
+    }
+  };
+}
 
 globalThis.document = {
   getElementById: lookup,

@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.603 — 2026-10-03
+
+_`dom_canvas_put_pixels`: a browser program puts a whole frame on a canvas in one call (Q-122)._
+
+contrib/dom's canvas could set a fill colour and fill a rectangle, so a
+renderer drew a frame one 1x1 rectangle -- one host call -- per pixel, and the
+note beside the bindings put a blit off until "typed-buffer FFI". That never
+came, and was not needed: a `bytes` already crosses the Wasm boundary as its
+length and then its bytes, and Wasm has had `ByteBuf` since v0.1.585 to build
+one in.
+
+`dom_canvas_put_pixels canvas px w h` draws a w x h image at the canvas's
+top-left corner from `px`, four bytes a pixel (RGBA), row by row; the glue copies
+them into an `ImageData` (one cannot be made over a view of a threaded module's
+shared memory) and calls `putImageData`. Fewer than w * h * 4 bytes is refused
+by name -- `dom_canvas_put_pixels: a 2x3 image needs 24 bytes, got 16` -- rather
+than drawn short.
+
+`scripts/run_dom_headless.mjs` gains a canvas whose 2d context records what was
+drawn, and `scripts/dom_canvas_check.sh` (in CI) builds
+`test/dom/canvas_put_pixels.mere` and checks the frame arrives pixel for pixel
+and the short one is refused. m3d's browser build and mbrowse's browser output
+were the two programs waiting on it.
+
+---
+
 ## v0.1.602 — 2026-10-03
 
 _A top-level name defined a second time is warned about: everything above the second definition -- including a `let rec ... and` group -- still means the first._

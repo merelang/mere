@@ -77,6 +77,7 @@ no blocking form at all: `dom_sse` is a callback in every design.
 |---|---|---|
 | `dom_canvas_fill_style` | `JsRef -> str -> unit` | `ctx.fillStyle = ...` |
 | `dom_canvas_fill_rect` | `JsRef -> int -> int -> int -> int -> unit` | `ctx.fillRect(x, y, w, h)` |
+| `dom_canvas_put_pixels` | `JsRef -> bytes -> int -> int -> unit` | `ctx.putImageData` of a w x h RGBA frame at (0, 0) (v0.1.603) |
 | `dom_audio_tone` | `int -> int -> int -> unit` | one Web Audio oscillator channel (chan, freq, vol 0..15) |
 | `dom_rom_size` / `dom_rom_byte` | `int -> int` | host-held cartridge bytes, served one at a time |
 | `dom_tz_offset` | `unit -> int` | minutes to add to UTC for the viewer's local clock |

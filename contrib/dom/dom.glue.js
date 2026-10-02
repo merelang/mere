@@ -233,6 +233,22 @@ export function makeDomGlue() {
       const ctx = el.__mereCtx || (el.__mereCtx = el.getContext("2d"));
       if (ctx) ctx.fillRect(x, y, w, h);
     },
+    // v0.1.603 (Q-122): blit a w x h RGBA frame. A Mere `bytes` is its length
+    // (i32) and then its bytes. The pixels are copied out: an ImageData cannot
+    // be made over a view of shared memory, which a threaded module's is.
+    dom_canvas_put_pixels: (handleIdx, bytesPtr, w, h) => {
+      const el = handles[handleIdx];
+      if (!el || !el.getContext || !memory) return;
+      const ctx = el.__mereCtx || (el.__mereCtx = el.getContext("2d"));
+      if (!ctx) return;
+      const need = w * h * 4;
+      const have = new DataView(memory.buffer).getInt32(bytesPtr, true);
+      if (w <= 0 || h <= 0 || have < need)
+        throw new Error(`dom_canvas_put_pixels: a ${w}x${h} image needs ${need} bytes, got ${have}`);
+      const px = new Uint8ClampedArray(need);
+      px.set(new Uint8Array(memory.buffer, bytesPtr + 4, need));
+      ctx.putImageData(new ImageData(px, w, h), 0, 0);
+    },
     // Per-frame callback: run the Mere closure once per requestAnimationFrame,
     // forever. For real-time programs (the CHIP-8 emulator) that must advance
     // on their own rather than only on input.
