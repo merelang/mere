@@ -49,7 +49,7 @@ machine rather than a host.
 | `bytebuf_new` | yes | yes | yes | refused |
 | `bytes_of_hex` | yes | yes | yes | yes |
 | `bytes_of_str` | yes | yes | yes | yes |
-| `ceil` | yes | yes | refused | yes |
+| `ceil` | yes | yes | yes | yes |
 | `channel_close` | yes | refused | refused | unattributed |
 | `channel_new` | yes | yes | yes | refused |
 | `channel_recv` | yes | yes | yes | unattributed |
@@ -112,7 +112,7 @@ machine rather than a host.
 | `float_of_f32_bits` | yes | yes | yes | refused |
 | `float_of_int` | yes | yes | yes | yes |
 | `float_of_str` | yes | yes | yes | yes |
-| `floor` | yes | yes | refused | yes |
+| `floor` | yes | yes | yes | yes |
 | `fma` | yes | yes | yes | refused |
 | `gcd` | yes | yes | yes | yes |
 | `incr` | yes | yes | yes | yes |
@@ -157,7 +157,7 @@ machine rather than a host.
 | `read_line` | yes | refused | yes | refused |
 | `read_lines` | yes | refused | refused | refused |
 | `read_stdin` | yes | refused | yes | yes |
-| `round` | yes | yes | refused | yes |
+| `round` | yes | yes | yes | yes |
 | `run` | yes | refused | yes | stub |
 | `sign` | yes | yes | yes | yes |
 | `sin` | yes | yes | yes | yes |

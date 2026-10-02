@@ -1,0 +1,17 @@
+// v0.1.595: floor / ceil / round and a negative zero, the same on every backend.
+// Wasm refused all three (round is not f64.nearest: it rounds half away from
+// zero), and its host printed -0.0 as 0.0. 0.49999999999999994 is the input that
+// floor(|x| + 0.5) gets wrong.
+let z = f_neg 0.0;
+let _ = print (str_of_float z);
+let _ = print (str_of_float (f_neg 1.0e-7));
+let show_r = fn (x: float) -> print (str_of_float (floor x) ++ " " ++ str_of_float (ceil x) ++ " " ++ str_of_float (round x));
+let _ = show_r 2.5;
+let _ = show_r (f_neg 2.5);
+let _ = show_r 0.49999999999999994;
+let _ = show_r (f_neg 0.4);
+let _ = show_r 1.5;
+let _ = show_r (f_neg 0.0);
+let _ = show_r 4503599627370497.0;
+let _ = show_r (float_of_int 7);
+print "done"
