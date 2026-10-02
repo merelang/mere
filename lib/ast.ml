@@ -944,6 +944,95 @@ let lower_par_map_program (prog : program) : program =
   in
   { decls = List.map lower_decl prog.decls; main = lower_par_map_expr prog.main }
 
+(* v0.1.597: `let ((a, b), (c, d)) = t in body` as flat lets, for the backends:
+   `let (__lt0, __lt1) = t in let (a, b) = __lt0 in let (c, d) = __lt1 in body`.
+   The interpreter destructures any pattern, and C, LLVM and Wasm refused a
+   tuple pattern nested in a let (`match` was the way round it). Run on the
+   typed tree: each new variable takes its type from the value's tuple type.
+   A subtree with nothing to rewrite is returned as the same node -- tables keyed
+   on nodes (trait dictionaries, instances) still find them. *)
+let let_tuple_counter = ref 0
+
+let flatten_let_tuples (e0 : expr) : expr =
+  let simple (p : pattern) = match p.pnode with P_var _ | P_wild -> true | _ -> false in
+  let nested (p : pattern) =
+    match p.pnode with P_tuple ps -> not (List.for_all simple ps) | _ -> false in
+  (* [let p = v in body], [v] and [body] already rewritten *)
+  let rec flat_let (whole : expr) (p : pattern) (v : expr) (body : expr) : expr =
+    match p.pnode with
+    | P_tuple ps when nested p ->
+      let comp =
+        match v.ty with
+        | Some t -> (match walk t with
+            | TyTuple ts when List.length ts = List.length ps -> List.map (fun t -> Some t) ts
+            | _ -> List.map (fun _ -> None) ps)
+        | None -> List.map (fun _ -> None) ps in
+      let parts = List.map2 (fun q ty ->
+        if simple q then (q, None)
+        else begin
+          let n = Printf.sprintf "__lt%d" !let_tuple_counter in
+          incr let_tuple_counter;
+          ({ q with pnode = P_var n }, Some (n, q, ty))
+        end) ps comp in
+      let inner = List.fold_right (fun (_, sub) acc ->
+        match sub with
+        | None -> acc
+        | Some (n, q, ty) ->
+          let var = { loc = q.ploc; ty; node = Var n } in
+          flat_let { acc with node = Let (q, var, acc) } q var acc) parts body in
+      { whole with node = Let ({ p with pnode = P_tuple (List.map fst parts) }, v, inner) }
+    | _ -> if whole.node == Let (p, v, body) then whole else { whole with node = Let (p, v, body) }
+  in
+  let rec go (e : expr) : expr =
+    let same a a' = a == a' in
+    match e.node with
+    | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit | Var _ -> e
+    | Let (p, v, b) ->
+      let v' = go v and b' = go b in
+      if nested p then flat_let e p v' b'
+      else if same v v' && same b b' then e else { e with node = Let (p, v', b') }
+    | Neg a -> let a' = go a in if same a a' then e else { e with node = Neg a' }
+    | Bin (op, a, b) -> let a' = go a and b' = go b in
+      if same a a' && same b b' then e else { e with node = Bin (op, a', b') }
+    | Cmp (op, a, b) -> let a' = go a and b' = go b in
+      if same a a' && same b b' then e else { e with node = Cmp (op, a', b') }
+    | Logic (op, a, b) -> let a' = go a and b' = go b in
+      if same a a' && same b b' then e else { e with node = Logic (op, a', b') }
+    | App (a, b) -> let a' = go a and b' = go b in
+      if same a a' && same b b' then e else { e with node = App (a', b') }
+    | Let_rec (bs, b) ->
+      let bs' = List.map (fun (n, l, v) -> (n, l, go v)) bs and b' = go b in
+      if List.for_all2 (fun (_, _, v) (_, _, v') -> same v v') bs bs' && same b b' then e
+      else { e with node = Let_rec (bs', b') }
+    | With (n, v, b) -> let v' = go v and b' = go b in
+      if same v v' && same b b' then e else { e with node = With (n, v', b') }
+    | If (c, t, el) -> let c' = go c and t' = go t and el' = go el in
+      if same c c' && same t t' && same el el' then e else { e with node = If (c', t', el') }
+    | Fun (x, t, b) -> let b' = go b in if same b b' then e else { e with node = Fun (x, t, b') }
+    | Annot (a, t) -> let a' = go a in if same a a' then e else { e with node = Annot (a', t) }
+    | Constr (n, Some a) -> let a' = go a in if same a a' then e else { e with node = Constr (n, Some a') }
+    | Constr (_, None) -> e
+    | Match (sc, arms) ->
+      let sc' = go sc in
+      let arms' = List.map (fun (p, g, b) -> (p, Option.map go g, go b)) arms in
+      if same sc sc' && List.for_all2 (fun (_, g, b) (_, g', b') ->
+          same b b' && (match g, g' with Some x, Some y -> same x y | _ -> true)) arms arms'
+      then e else { e with node = Match (sc', arms') }
+    | Tuple es -> let es' = List.map go es in
+      if List.for_all2 same es es' then e else { e with node = Tuple es' }
+    | Region_block (n, b) -> let b' = go b in if same b b' then e else { e with node = Region_block (n, b') }
+    | Region_loop (n, x, b) -> let b' = go b in if same b b' then e else { e with node = Region_loop (n, x, b') }
+    | Ref (m, r, a) -> let a' = go a in if same a a' then e else { e with node = Ref (m, r, a') }
+    | Record_lit (n, fs) -> let fs' = List.map (fun (f, x) -> (f, go x)) fs in
+      if List.for_all2 (fun (_, x) (_, x') -> same x x') fs fs' then e else { e with node = Record_lit (n, fs') }
+    | Field_get (a, f) -> let a' = go a in if same a a' then e else { e with node = Field_get (a', f) }
+    | Record_update (a, fs) ->
+      let a' = go a and fs' = List.map (fun (f, x) -> (f, go x)) fs in
+      if same a a' && List.for_all2 (fun (_, x) (_, x') -> same x x') fs fs' then e
+      else { e with node = Record_update (a', fs') }
+  in
+  go e0
+
 let desugar_program (prog : program) : expr =
   List.fold_right (fun decl body ->
     let loc = body.loc in

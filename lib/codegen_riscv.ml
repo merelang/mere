@@ -4151,7 +4151,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
    is how one becomes the other's bug. (It also cost 3x: the fixpoint is ~64s of
    mere-ruby's compile, and the loop below runs its body up to three times.) *)
 let prepare_main (prog : Ast.program) : Ast.expr =
-  let full = Ast.desugar_program prog in
+  let full = Ast.flatten_let_tuples (Ast.desugar_program prog) in
   try Monomorph.specialize_toplevel full with
   | Monomorph.Unsupported (loc, what) -> err loc ("RV: " ^ what)
   | Monomorph.Error (loc, msg) -> err loc msg

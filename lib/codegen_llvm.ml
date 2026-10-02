@@ -15860,7 +15860,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     if info.Typer.r_params <> [] then
       Hashtbl.replace polymorphic_records name (info.Typer.r_params, info.Typer.r_fields)
   ) Typer.records;
-  let main_expr = Ast.desugar_program prog in
+  let main_expr = Ast.flatten_let_tuples (Ast.desugar_program prog) in
   (* Phase 15.3: resolve let-bound Vec element types. Same trick as
      codegen_c — Mere's let-poly generalizes `let v = vec_new () in body`
      to `forall T. Vec[..., T]`, so each use of v in body gets a fresh
