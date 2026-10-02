@@ -362,14 +362,22 @@ let semantic_tokens ?(prelude_decls = 0) (prog : Ast.program) : token list =
    and the answer is the occurrences that resolved to the same one. Binder sites
    are included, which is what lets the cursor be on the definition. *)
 
+module SMap = Map.Make (String)
+
 let occurrences ?(prelude_decls = 0) (prog : Ast.program)
   : (Loc.t * binding) list =
   let out = ref [] in
   let emit loc b = if loc.Loc.line > 0 then out := (loc, b) :: !out in
-  (* A name resolves to the innermost binding of that name in scope. *)
-  let resolve env name = List.find_opt (fun b -> b.b_name = name) env in
+  (* A name resolves to the innermost binding of that name in scope.
+     v0.1.581: the scope is a map, not a list. A name with no local binding -- a
+     builtin, a top-level name -- walked the whole list, so a long chain of `let`s
+     was quadratic here (0.04 / 0.64 / 2.19 s at 3.2k / 12.8k / 25.6k bindings,
+     every `mere check`, for warn_unused). Adding a list's bindings in reverse
+     keeps the FIRST of a repeated name, which is what List.find_opt answered. *)
+  let resolve env name = SMap.find_opt name env in
+  let add_all bs env = List.fold_left (fun m b -> SMap.add b.b_name b m) env (List.rev bs) in
   let bind_pattern env pat =
-    List.map (fun (n, l) -> binding_of (n, l) None) (pattern_bindings pat) @ env
+    add_all (List.map (fun (n, l) -> binding_of (n, l) None) (pattern_bindings pat)) env
   in
   let rec walk env (e : Ast.expr) =
     (match e.Ast.node with
@@ -388,18 +396,18 @@ let occurrences ?(prelude_decls = 0) (prog : Ast.program)
       walk env' body
     | Ast.Let_rec (bindings, body) ->
       let env' =
-        List.map (fun (n, nloc, (v : Ast.expr)) -> binding_of (n, nloc) v.Ast.ty)
-          bindings @ env
+        add_all (List.map (fun (n, nloc, (v : Ast.expr)) -> binding_of (n, nloc) v.Ast.ty)
+          bindings) env
       in
       (* the binder itself is an occurrence, the way a local `let`'s is *)
       List.iter (fun (n, nloc, _) ->
         match resolve env' n with Some b -> emit nloc b | None -> ()) bindings;
       List.iter (fun (_, _, v) -> walk env' v) bindings;
       walk env' body
-    | Ast.Fun (param, ty, body) -> walk (binding_of (param, e.Ast.loc) ty :: env) body
+    | Ast.Fun (param, ty, body) -> walk (SMap.add param (binding_of (param, e.Ast.loc) ty) env) body
     | Ast.With (name, value, body) ->
       walk env value;
-      walk (binding_of (name, e.Ast.loc) value.Ast.ty :: env) body
+      walk (SMap.add name (binding_of (name, e.Ast.loc) value.Ast.ty) env) body
     | Ast.Match (scrutinee, arms) ->
       walk env scrutinee;
       List.iter (fun (pat, guard, body) ->
@@ -424,6 +432,7 @@ let occurrences ?(prelude_decls = 0) (prog : Ast.program)
           binding_of ~prelude (n, nloc) v.Ast.ty) bindings
       | _ -> []) prog.Ast.decls)
   in
+  let top = add_all top SMap.empty in
   List.iteri (fun i d ->
     if i >= prelude_decls then begin
       (* A top-level declaration's own name is an occurrence too. *)

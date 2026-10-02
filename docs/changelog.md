@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.581 — 2026-10-02
+
+_A thousand-member `let rec` group stops costing a walk of the whole program per member: mere-ruby checks in 1.8 s (was 7.7) and emits C in 14 s (was 113)._
+
+mere-ruby's interpreter is one `let rec ... and ...` group of about a thousand
+functions, and four passes were quadratic in it:
+
+- **The typer** found a variable by walking the environment, and inside the
+  group the environment is every binding so far plus the group -- 4,226 names,
+  1,184 steps per lookup on average. While a group of 32 or more is inferred its
+  environment is indexed once (`Env_index`); a lookup walks only what was consed
+  in front of it (the member's own parameters and lets) and then asks the table.
+- **The move checker** walked the same kind of list, and uses the same index.
+- **The unused-binding warning** (`mere check`) resolved names in a list too; it
+  is a map now (2.2 s at 25,600 top-level `let`s, 0.25 s at 16,000).
+- **The C, LLVM and Wasm instantiation search** asked, for every function on
+  every pass, for its uses -- and each asking walked the whole program and every
+  resolved body. One walk now indexes each body's uses by name, in the order and
+  with the shadowing the walk had, and the question reads that.
+
+`Ast.walk` also compresses the chains it follows (a link is only ever set on an
+unbound variable and never undone, so this changes no answer).
+
+Nothing a program means changes, and that is checked rather than argued: every
+`.mere` in the repository and in 18 downstream projects emits byte-identical C,
+LLVM, Wasm and RV32 output and the same `-t` answer as v0.1.580 (5,045
+comparisons), and so does mere-ruby (92 MB of C). mere-ruby: `check` 7.73 → 1.77 s,
+`-t` 10.5 → 2.8 s, `-c` 113 → 14 s, `-ll` 131 → 6.1 s.
+
+`scripts/infer_scaling.sh` measures the group now, with `-t` and with `-c`, and
+the independent bindings under `check`. v0.1.580 fails it (64x and 66x for 8x the
+members); this release is 7-8x.
+
+---
+
 ## v0.1.580 — 2026-10-02
 
 _parity.sh stops counting a miscompile as "unsupported", and the two it was hiding are fixed (Q-198, Q-199)._

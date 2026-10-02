@@ -42,6 +42,10 @@ let fresh_id () = incr counter; !counter
 type binfo = { id : int; ty : Ast.ty option }
 type venv = (string * binfo) list
 
+(* v0.1.581: a big rec group's environment is indexed (see Env_index) *)
+let v_ix : binfo Env_index.t = Env_index.create ()
+let vlook name (env : venv) = Env_index.lookup v_ix name env
+
 (* --- pattern / free-variable helpers --- *)
 
 let rec pattern_vars (p : Ast.pattern) : string list =
@@ -186,7 +190,7 @@ let coro_capture (env : venv) (clos : Ast.expr) : unit =
   match clos.Ast.node with
   | Ast.Fun _ ->
     SS.iter (fun name ->
-      match List.assoc_opt name env with
+      match vlook name env with
       | Some { ty = Some t; _ } ->
         let wt = Ast.walk t in
         if mentions_any_ref wt
@@ -214,7 +218,7 @@ let coro_msg_builtins = [ "coro_transfer"; "coro_exit"; "__coro_msg"; "__coro_ne
 
 let coro_msg_check (env : venv) (e : Ast.expr) : unit =
   match e.Ast.node, e.Ast.ty with
-  | Ast.Var x, Some t when List.mem x coro_msg_builtins && List.assoc_opt x env = None ->
+  | Ast.Var x, Some t when List.mem x coro_msg_builtins && vlook x env = None ->
     let rec walk (t : Ast.ty) =
       match Ast.walk t with
       | Ast.TyCon ("Coro", [ m ]) when not (Typer.coro_msg_ok m) ->
@@ -242,7 +246,7 @@ let rec go (env : venv) (consumed : IS.t) (multi : bool) (e : Ast.expr) : IS.t =
   | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _
   | Ast.Str_lit _ | Ast.Unit_lit -> consumed
   | Ast.Var x ->
-    (match List.assoc_opt x env with
+    (match vlook x env with
      | Some b when IS.mem b.id consumed ->
        raise (Typer.Type_error (e.Ast.loc,
          Printf.sprintf
@@ -289,7 +293,8 @@ let rec go (env : venv) (consumed : IS.t) (multi : bool) (e : Ast.expr) : IS.t =
     let env' = List.fold_left (fun env (n, _, v) -> bind_name env n v.Ast.ty)
                  env bindings in
     (* Recursive bindings may run many times: check under multi=true. *)
-    List.iter (fun (_, _, v) -> ignore (go env' consumed true v)) bindings;
+    Env_index.with_group v_ix (List.length bindings) env' (fun () ->
+      List.iter (fun (_, _, v) -> ignore (go env' consumed true v)) bindings);
     go env' consumed multi body
   | Ast.If (cond, t, e_) ->
     let c1 = go env consumed multi cond in
@@ -316,15 +321,15 @@ let rec go (env : venv) (consumed : IS.t) (multi : bool) (e : Ast.expr) : IS.t =
      way hung the C build three runs in three. `spawn body` with `body` a function
      value still passes here (an arrow is Sync); what such a value reaches is the
      next stage's question. *)
-  | Ast.App ({ Ast.node = Ast.Var "spawn"; _ }, arg) when List.assoc_opt "spawn" env = None ->
+  | Ast.App ({ Ast.node = Ast.Var "spawn"; _ }, arg) when vlook "spawn" env = None ->
     spawn_capture env consumed multi arg
   | Ast.App ({ Ast.node = Ast.Var ("coro_new" | "__coro_new_raw" as n); _ }, arg)
-    when List.assoc_opt n env = None ->
+    when vlook n env = None ->
     coro_capture env arg;
     go env consumed multi arg
   (* v0.1.566: the sized form's body is its second argument *)
   | Ast.App ({ Ast.node = Ast.App ({ Ast.node = Ast.Var ("coro_new_sized" | "__coro_new_sized_raw" as n); _ }, sz); _ }, arg)
-    when List.assoc_opt n env = None ->
+    when vlook n env = None ->
     coro_capture env arg;
     go env (go env consumed multi sz) multi arg
   | Ast.App (f, arg) ->
@@ -360,7 +365,7 @@ and spawn_capture (env : venv) (consumed : IS.t) (multi : bool) (clos : Ast.expr
      builtins are not tracked). Collect the ids that get moved. *)
   let moves =
     SS.fold (fun name acc ->
-      match List.assoc_opt name env with
+      match vlook name env with
       | None -> acc
       | Some b ->
         match classify name b with
@@ -420,6 +425,9 @@ and rbind = { rid : int; rname : string; rty : Ast.ty option; mutable rdef : rde
               rloc : Loc.t }
 and renv = (string * rbind) list
 
+let r_ix : rbind Env_index.t = Env_index.create ()
+let rlook name (env : renv) = Env_index.lookup r_ix name env
+
 let r_counter = ref 0
 let r_fresh () = incr r_counter; !r_counter
 
@@ -453,7 +461,7 @@ let reach_check (env : renv) (spawn_loc : Loc.t) (arg : Ast.expr) =
   let visited = Hashtbl.create 64 in
   let rec go path env e =
     SS.iter (fun x ->
-      match List.assoc_opt x env with
+      match rlook x env with
       | None -> ()
       | Some b when Hashtbl.mem visited b.rid -> ()
       | Some b ->
@@ -513,7 +521,8 @@ let rec rwalk (visit : renv -> Ast.expr -> unit) (env : renv) (e : Ast.expr) : u
       (n, { rid = r_fresh (); rname = n; rty = v.Ast.ty; rdef = RParam; rloc = l })) bs in
     let env' = List.rev_append binds env in
     List.iter2 (fun (_, b) (_, _, v) -> b.rdef <- RVal (v, env')) binds bs;
-    List.iter (fun (_, _, v) -> rwalk visit env' v) bs;
+    Env_index.with_group r_ix (List.length bs) env' (fun () ->
+      List.iter (fun (_, _, v) -> rwalk visit env' v) bs);
     rwalk visit env' body
   | Ast.If (c, t, f) -> w c; w t; w f
   | Ast.Constr (_, Some a) -> w a
@@ -543,8 +552,8 @@ let spawn_reach (e : Ast.expr) : unit =
   let mark env (e : Ast.expr) =
     match e.Ast.node with
     | Ast.App ({ Ast.node = Ast.Var f; _ }, { Ast.node = Ast.Var x; _ })
-      when List.mem f reader_builtins && List.assoc_opt f env = None ->
-      (match List.assoc_opt x env with
+      when List.mem f reader_builtins && rlook f env = None ->
+      (match rlook x env with
        | Some b when not (Hashtbl.mem only_read b.rid) -> Hashtbl.replace only_read b.rid true
        | _ -> ())
     | Ast.App (f, a) ->
@@ -552,7 +561,7 @@ let spawn_reach (e : Ast.expr) : unit =
          above took it -- that one matched first) *)
       ignore f;
       (match a.Ast.node with
-       | Ast.Var x -> (match List.assoc_opt x env with
+       | Ast.Var x -> (match rlook x env with
            | Some b -> Hashtbl.replace only_read b.rid false | None -> ())
        | _ -> ())
     | _ -> ()
@@ -562,17 +571,17 @@ let spawn_reach (e : Ast.expr) : unit =
   let mark_vars env (e : Ast.expr) =
     match e.Ast.node with
     | Ast.App ({ Ast.node = Ast.Var f; _ }, { Ast.node = Ast.Var _; _ })
-      when List.mem f reader_builtins && List.assoc_opt f env = None -> ()
+      when List.mem f reader_builtins && rlook f env = None -> ()
     | _ ->
       List.iter (fun (c : Ast.expr) ->
         match c.Ast.node with
         | Ast.Var x ->
           let is_reader_arg = match e.Ast.node with
             | Ast.App ({ Ast.node = Ast.Var f; _ }, a) when a == c ->
-              List.mem f reader_builtins && List.assoc_opt f env = None
+              List.mem f reader_builtins && rlook f env = None
             | _ -> false in
           if not is_reader_arg then
-            (match List.assoc_opt x env with
+            (match rlook x env with
              | Some b -> Hashtbl.replace only_read b.rid false | None -> ())
         | _ -> ()) (Ast.children e)
   in
@@ -583,7 +592,7 @@ let spawn_reach (e : Ast.expr) : unit =
   r_counter := 0;
   rwalk (fun env e ->
     match e.Ast.node with
-    | Ast.App ({ Ast.node = Ast.Var "spawn"; _ }, arg) when List.assoc_opt "spawn" env = None ->
+    | Ast.App ({ Ast.node = Ast.Var "spawn"; _ }, arg) when rlook "spawn" env = None ->
       reach_check env e.Ast.loc arg
     | _ -> ()) [] e
   end

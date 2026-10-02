@@ -202,6 +202,8 @@ let mangled_inst_name (base : string) (arrow : Ast.ty) : string =
      c_safe_name once (a single `mu_`), so prefixing here would double it. *)
   flatten_module_dots base ^ "__" ^ String.concat "__" (List.map ty_tag tys)
 
+module StrSet = Set.Make (String)
+
 let pattern_vars (p : Ast.pattern) : string list =
   let rec go p =
     match p.Ast.pnode with
@@ -454,35 +456,39 @@ let find_live_arrow (name : string) (skel_names : (string, unit) Hashtbl.t)
    `tuple_str_list_int` and the fold wanted `tuple_str_list_tuple_str_toml_value`.
    The library had never been built on a compiled backend -- its self-tests run
    under the interpreter, which has no such type to get wrong. *)
+(* one use of the name, already found: what it adds to [seen] *)
+let note_arrow_use ~arrows_only ~residual (seen : (string, Ast.ty) Hashtbl.t) (e : Ast.expr) =
+  if residual then
+    (* `residual` asks the opposite question: the ARROW uses whose type still
+       holds a type variable, which the emitter names with the variable
+       erased to int (see the second recovery pass in resolve_fn_types) *)
+    (match e.Ast.ty with
+     | Some t when (match Ast.walk t with Ast.TyArrow _ -> true | _ -> false)
+                   && not (ty_is_concrete (Ast.walk t)) ->
+       let erased = deep_erase_tyvars (erase_container_regions (Ast.walk t)) in
+       let key = Ast.pp_ty erased in
+       if not (Hashtbl.mem seen key) then Hashtbl.add seen key erased
+     | _ -> ())
+  else
+    (match e.Ast.ty with
+     | Some t when ty_is_concrete (Ast.walk t) ->
+       let walked = erase_container_regions (Ast.walk t) in
+       (match walked with
+        | Ast.TyArrow _ ->
+          let key = Ast.pp_ty walked in
+          if not (Hashtbl.mem seen key) then Hashtbl.add seen key walked
+        | _ when not arrows_only ->
+          let key = Ast.pp_ty walked in
+          if not (Hashtbl.mem seen key) then Hashtbl.add seen key walked
+        | _ -> ())
+     | _ -> ())
+
 let find_all_concrete_arrows_in ?(arrows_only = true) ?(residual = false) (name : string)
     (exprs : Ast.expr list) : Ast.ty list =
   let seen : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4 in
   let rec go (e : Ast.expr) =
     (match e.Ast.node with
-     (* `residual` asks the opposite question: the ARROW uses whose type still
-        holds a type variable, which the emitter names with the variable
-        erased to int (see the second recovery pass in resolve_fn_types) *)
-     | Ast.Var n when n = name && residual ->
-       (match e.Ast.ty with
-        | Some t when (match Ast.walk t with Ast.TyArrow _ -> true | _ -> false)
-                      && not (ty_is_concrete (Ast.walk t)) ->
-          let erased = deep_erase_tyvars (erase_container_regions (Ast.walk t)) in
-          let key = Ast.pp_ty erased in
-          if not (Hashtbl.mem seen key) then Hashtbl.add seen key erased
-        | _ -> ())
-     | Ast.Var n when n = name ->
-       (match e.Ast.ty with
-        | Some t when ty_is_concrete (Ast.walk t) ->
-          let walked = erase_container_regions (Ast.walk t) in
-          (match walked with
-           | Ast.TyArrow _ ->
-             let key = Ast.pp_ty walked in
-             if not (Hashtbl.mem seen key) then Hashtbl.add seen key walked
-           | _ when not arrows_only ->
-             let key = Ast.pp_ty walked in
-             if not (Hashtbl.mem seen key) then Hashtbl.add seen key walked
-           | _ -> ())
-        | _ -> ())
+     | Ast.Var n when n = name -> note_arrow_use ~arrows_only ~residual seen e
      | _ -> ());
     match e.Ast.node with
     | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
@@ -520,6 +526,65 @@ let find_all_concrete_arrows_in ?(arrows_only = true) ?(residual = false) (name 
     | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
   in
   List.iter go exprs;
+  Hashtbl.fold (fun _ v acc -> v :: acc) seen []
+
+(* v0.1.581: THE SAME QUESTION, ASKED OF AN INDEX. resolve_fn_types asked
+   `find_all_concrete_arrows_in` once per function per pass, and each asking
+   walked the whole program and every resolved body: the C emit of mere-ruby
+   (4,000 functions) spent most of its 113 s there. An [occ_index] is one walk of
+   an expression that lists, for every name, the Var nodes the walk above would
+   visit for it -- in the same pre-order, with the same shadowing (a Fun
+   parameter, a match arm's pattern) -- so asking it visits the same nodes in
+   the same order and reads their types as they are NOW. The tree is never
+   rebuilt in place (only `.ty` changes), which is what makes it safe to keep. *)
+type occ_index = (string, Ast.expr list) Hashtbl.t
+
+let occ_index (e0 : Ast.expr) : occ_index =
+  let tbl : occ_index = Hashtbl.create 64 in
+  let rec go sh (e : Ast.expr) =
+    (match e.Ast.node with
+     | Ast.Var n when not (StrSet.mem n sh) ->
+       Hashtbl.replace tbl n (e :: (try Hashtbl.find tbl n with Not_found -> []))
+     | _ -> ());
+    let go' = go sh in
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> go' a; go' b
+    | Ast.Neg a | Ast.Annot (a, _) -> go' a
+    | Ast.Let (_, v, b) -> go' v; go' b
+    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> go' v) bs; go' b
+    | Ast.With (_, v, b) -> go' v; go' b
+    | Ast.If (c, t, e_) -> go' c; go' t; go' e_
+    | Ast.Fun (p, _, b) -> go (StrSet.add p sh) b
+    | Ast.Constr (_, Some a) -> go' a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (s, arms) ->
+      go' s;
+      List.iter (fun (p, g, b) ->
+        let sh' = List.fold_left (fun a v -> StrSet.add v a) sh (pattern_vars p) in
+        (match g with Some ge -> go sh' ge | None -> ()); go sh' b) arms
+    | Ast.Tuple es -> List.iter go' es
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go' b
+    | Ast.Ref (_, _, a) -> go' a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go' e) fs
+    | Ast.Field_get (a, _) -> go' a
+    | Ast.Record_update (a, fs) -> go' a; List.iter (fun (_, e) -> go' e) fs
+  in
+  go StrSet.empty e0;
+  Hashtbl.filter_map_inplace (fun _ l -> Some (List.rev l)) tbl;
+  tbl
+
+let occ_uses (ix : occ_index) (name : string) : Ast.expr list =
+  try Hashtbl.find ix name with Not_found -> []
+
+(* [find_all_concrete_arrows_in name exprs], given the uses each of [exprs] has
+   of [name], in [exprs] order *)
+let concrete_arrows_of_uses ?(arrows_only = true) ?(residual = false)
+    (uses : Ast.expr list list) : Ast.ty list =
+  let seen : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4 in
+  List.iter (List.iter (note_arrow_use ~arrows_only ~residual seen)) uses;
   Hashtbl.fold (fun _ v acc -> v :: acc) seen []
 
 (* v0.1.99: specialize a let-generalized (polymorphic) *local* fn to its
@@ -1104,31 +1169,58 @@ let resolve_fn_types ?(mangle = mangled_inst_name) ?(recover_erased = false)
     in
     (arrow, cloned_body)
   in
+  (* v0.1.581: the uses of a name in `root :: extra_exprs ()`, read off indexes
+     (see [occ_index]) -- built once for root and each skeleton's body, and once
+     per spec body when it is first asked about. A name's skeleton owners are
+     kept in skeleton order, which is the order extra_exprs lists them in. *)
+  let root_occ = occ_index root in
+  let skel_arr = Array.of_list skels in
+  let skel_occ = Array.map (fun s -> occ_index s.sbody) skel_arr in
+  let owners : (string, int list) Hashtbl.t = Hashtbl.create 1024 in
+  for i = Array.length skel_arr - 1 downto 0 do
+    Hashtbl.iter (fun n _ ->
+      Hashtbl.replace owners n (i :: (try Hashtbl.find owners n with Not_found -> [])))
+      skel_occ.(i)
+  done;
+  let spec_occ : (string, (Ast.expr * occ_index) list) Hashtbl.t = Hashtbl.create 16 in
+  let occ_of_spec key body =
+    let known = try Hashtbl.find spec_occ key with Not_found -> [] in
+    match List.assq_opt body known with
+    | Some ix -> ix
+    | None ->
+      let ix = occ_index body in
+      Hashtbl.replace spec_occ key ((body, ix) :: known); ix
+  in
+  let uses_in_program name =
+    occ_uses root_occ name
+    :: (Hashtbl.fold (fun key specs acc ->
+          List.fold_left (fun acc (_, body) -> (key, body) :: acc) acc specs
+        ) multi_specs []
+        |> List.map (fun (key, body) -> occ_uses (occ_of_spec key body) name))
+    @ List.filter_map (fun i ->
+        if Hashtbl.mem resolved skel_arr.(i).sname
+        then Some (occ_uses skel_occ.(i) name) else None)
+        (try Hashtbl.find owners name with Not_found -> [])
+  in
   while !progress do
     progress := false;
     List.iter (fun s ->
-      let extra_exprs () =
-        Hashtbl.fold (fun _ specs acc ->
-          List.fold_left (fun acc (_, body) -> body :: acc) acc specs
-        ) multi_specs []
-        (* v0.1.28 (B-P2b): also scan the bodies of single-resolved poly
-           fns. A usage of poly fn B inside poly fn A's body only becomes
-           concrete once A resolves — before this, B's arrow-discovery
-           scan never saw it, so B stayed single-instantiated at some
-           OTHER type and the emitted C called B's body with mismatched
-           struct types (found: a generic heap's `drain` calling `hp_pop`
-           at int while hp_pop resolved at tuple). *)
-        @ List.filter_map (fun s2 ->
-            if Hashtbl.mem resolved s2.sname then Some s2.sbody else None)
-            skels
-      in
+      (* = find_all_concrete_arrows_in s.sname (root :: extra_exprs ()), where
+         extra_exprs is every spec body and (v0.1.28, B-P2b) the body of every
+         single-resolved poly fn. A usage of poly fn B inside poly fn A's body
+         only becomes concrete once A resolves — before the bodies were
+         scanned, B's arrow-discovery scan never saw it, so B stayed
+         single-instantiated at some OTHER type and the emitted C called B's
+         body with mismatched struct types (found: a generic heap's `drain`
+         calling `hp_pop` at int while hp_pop resolved at tuple). *)
+      let arrows_in_program () = concrete_arrows_of_uses (uses_in_program s.sname) in
       if Hashtbl.mem resolved s.sname then begin
         (* v0.1.28 (B-P2b): a fn resolved to a single instance may be
            discovered at a second type later (its other usage sites live
            in poly-fn bodies that resolve in later passes). Promote it to
            multi-inst: drop the single resolution and clone one spec per
            arrow from the pristine skeleton. *)
-        let all = find_all_concrete_arrows_in s.sname (root :: extra_exprs ()) in
+        let all = arrows_in_program () in
         let cur = Hashtbl.find resolved s.sname in
         let cur_str = Ast.pp_ty (Ast.walk cur) in
         let extra = List.filter (fun a ->
@@ -1156,7 +1248,7 @@ let resolve_fn_types ?(mangle = mangled_inst_name) ?(recover_erased = false)
            (e.g., `let bool_eq = fn b -> poly_eq true b` resolves bool ->
            int → bool_eq's body's `poly_eq true b` adds bool arrow to
            poly_eq specs), grow the spec list. *)
-        let all = find_all_concrete_arrows_in s.sname (root :: extra_exprs ()) in
+        let all = arrows_in_program () in
         let existing = Hashtbl.find multi_specs s.sname in
         let existing_arrows = List.map fst existing in
         (* Type equality via pp_ty string compare (simple but sufficient — same
@@ -1182,7 +1274,7 @@ let resolve_fn_types ?(mangle = mangled_inst_name) ?(recover_erased = false)
           Hashtbl.add resolved s.sname fun_ty;
           progress := true
         end else
-          let all = find_all_concrete_arrows_in s.sname (root :: extra_exprs ()) in
+          let all = arrows_in_program () in
           match all with
           | _ :: _ ->
             if List.length all > 1 then begin
@@ -1347,7 +1439,6 @@ let resolve_fn_types ?(mangle = mangled_inst_name) ?(recover_erased = false)
    instead of failing to find a label. An original that nothing references is
    dropped by the backend's own reachability, not by this. *)
 
-module StrSet = Set.Make (String)
 
 (* Rewrite every reference that names an instance, honouring shadowing: a local
    binding of the same name is a DIFFERENT `f`, and renaming its references to a
