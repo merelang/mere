@@ -1,0 +1,8 @@
+// scripts/owner_check.sh: vec_reverse writes in place, and up to v0.1.578 it
+// was not checked: a foreign thread reversing a Vec ran to the end.
+let mk = fn (u: unit) -> let v = vec_new () in let _ = vec_push v 1 in let _ = vec_push v 2 in v;
+let t = mk ();
+let start = fn (f: unit -> unit) -> spawn f;
+let h = start (fn (u: unit) -> vec_reverse t);
+let _ = join h;
+print_int (vec_get t 0)

@@ -1959,6 +1959,9 @@ and compile_app env e =
     compile_expr env (List.nth args 1);
     emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0=vec, a1=x *)
     emit (Jal (ra, "__vec_push"))
+  | Ast.Var "__vec_owned" when List.length args = 1 ->
+    (* v0.1.579: one hart, one thread: always this thread's *)
+    li a0 1
   | Ast.Var "vec_len" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)                         (* lw a0, 0(vec) — len *)

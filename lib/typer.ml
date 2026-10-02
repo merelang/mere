@@ -3292,6 +3292,13 @@ let initial_env : env =
        range has been checked before the loop. Same types as the checked
        builtins; the interpreter keeps them checked; never written by hand. *)
     ("__vec_get_unchecked",   vec_get_scheme);
+    (* v0.1.579: range-check versioning's guard asks whether this thread may
+       write a container the fast copy writes (see Ast.rv guard) *)
+    ("__vec_owned",
+     (let r = fresh_var () and a = fresh_var () in
+      let id v = match v with Ast.TyVar t -> t.id | _ -> assert false in
+      { constraints = []; quantified = [id a; id r];
+        body = Ast.TyArrow (Ast.TyCon ("Vec", [r; a]), Ast.TyBool) }));
     ("__vec_set_unchecked",   vec_set_scheme);
     ("__bytes_get_unchecked", mono (Ast.TyArrow (Ast.TyBytes, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
     (* Q-109: the 128-bit SIMD types' seed operations -- enough to build a value

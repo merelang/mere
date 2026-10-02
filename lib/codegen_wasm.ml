@@ -3786,6 +3786,11 @@ and emit_expr (e : Ast.expr) : unit =
        suffices. arg is a unit literal so don't push it. *)
     vec_used := true;
     emit_instr "call $mere_vec_new"
+  | Ast.App ({ node = Ast.Var "__vec_owned"; _ }, arg) ->
+    (* v0.1.579: one thread here, so a container is always this thread's *)
+    emit_expr arg;
+    emit_instr "drop";
+    emit_instr "i64.const 1"
   | Ast.App ({ node = Ast.Var "vec_len"; _ }, arg) ->
     vec_used := true;
     emit_expr arg;

@@ -4065,7 +4065,7 @@ let rec emit_expr (e : Ast.expr) : string =
           shared Nil of the instantiation, like every other empty list. *)
        let (mono_list, nil_tag) = lb_list_of arg.Ast.ty e.Ast.loc in
        Printf.sprintf
-         "({ __lang_listbuf* __b = %s; __b->frozen = 1; \
+         "({ __lang_listbuf* __b = %s; __LANG_OWNED(__b, \"ListBuf\", \"lb_to_list\"); __b->frozen = 1; \
           __b->head ? (%s)__b->head : %s__mk(%d, &%s); })"
          (emit_expr arg) mono_list mono_list nil_tag (shared_nullary_sym mono_list nil_tag)
      | Ast.Var "vec_new" ->
@@ -4182,6 +4182,9 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "((%s) %s (%s))" (emit_expr a_e) c_op (emit_expr arg)
      | Ast.App ({ node = Ast.Var "u8x16_extract"; _ }, v_e) ->
        Printf.sprintf "mere_u8x16_extract(%s, %s)" (emit_expr v_e) (emit_expr arg)
+     | Ast.Var "__vec_owned" ->
+       (* v0.1.579: the versioning guard's "may this thread write it" *)
+       Printf.sprintf "__LANG_OWNER_OK(%s)" (emit_expr arg)
      | Ast.App ({ node = Ast.Var "__vec_get_unchecked"; _ }, vec_e) ->
        (* Q-108: the loop's range was checked once before it (Ast.range_version). *)
        let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
@@ -4234,7 +4237,7 @@ let rec emit_expr (e : Ast.expr) : string =
        let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
        let _ = elem_tag in
        Printf.sprintf
-         "({ __auto_type __vc = %s; \
+         "({ __auto_type __vc = %s; __LANG_OWNED(__vc, \"Vec\", \"vec_reverse\"); \
           int __lo = 0, __hi = __vc->len - 1; \
           while (__lo < __hi) { \
             __auto_type __tmp = __vc->data[__lo]; \
@@ -4295,7 +4298,7 @@ let rec emit_expr (e : Ast.expr) : string =
           leave n slots behind on every call. *)
        let _ = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
        Printf.sprintf
-         "({ __auto_type __vs = %s; __auto_type __cmp = %s; \
+         "({ __auto_type __vs = %s; __auto_type __cmp = %s; __LANG_OWNED(__vs, \"Vec\", \"vec_sort\"); \
           int __n = __vs->len; \
           if (__n > 1) { \
             __typeof__(__vs->data) __src = __vs->data; \
@@ -9884,6 +9887,7 @@ let region_runtime_helpers =
       "}";
       "static int __lang_owner_off = 0;   /* mere_lib_init sets it: see above */";
       "#define __LANG_OWNER_NOW() (__lang_threads_started ? __lang_tid() : 1)";
+      "#define __LANG_OWNER_OK(c) (!__lang_threads_started || (c)->owner == __lang_tid() || __lang_owner_off)";
       "#define __LANG_OWNED(c, k, o) do { if (__builtin_expect(__lang_threads_started, 0) && (c)->owner != __lang_tid() && !__lang_owner_off) __lang_owner_fail(k, o); } while (0)";
       "";
       "/* Program-lifetime arena for closure envs and other long-lived";
@@ -12530,9 +12534,8 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
         c_elem struct_name struct_name;
       Printf.sprintf "static int %s_set_unchecked(%s* v, long long i, %s x) {"
         struct_name struct_name c_elem;
-      (* the flag is a global int and the stores are not ints, so clang may
-         hoist the test out of a versioned loop -- measured on benchmarks/ *)
-      "  __LANG_OWNED(v, \"Vec\", \"vec_set\");";
+      (* v0.1.579: no owner check here -- it is in the versioning guard, once
+         per loop (a check per element was 2.8x on axpy once a thread existed) *)
       Printf.sprintf "  v->data[i] = __mcopy_%s(v->region, x);" tag;
       "  return 0; /* unit */";
       "}" ]
@@ -12556,7 +12559,6 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  double* p = v->data + i; p[0] = x[0]; p[1] = x[1]; return 0;";
       "}";
       "static int mere_vec_float_f64x2_store_unchecked(mere_vec_float* v, long long i, mere_f64x2 x) {";
-      "  __LANG_OWNED(v, \"Vec\", \"f64x2_store\");";
       "  double* p = v->data + i; p[0] = x[0]; p[1] = x[1]; return 0;";
       "}" ]))
 

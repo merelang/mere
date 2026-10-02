@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.579 — 2026-10-02
+
+_v0.1.575's owner check made a versioned loop 2.8x slower once a thread existed; it is asked once per loop now._
+
+v0.1.575 put the write-owner check into every write, the unchecked ones
+range-check versioning makes inside a loop included. Its A/B measured programs
+that never spawn -- where the check is one load of a global -- and stopped there.
+Once any thread has been started the check reads the thread id, which on Darwin is
+a call, and it is a branch out of the loop that kept clang from vectorizing it:
+axpy with a `join (spawn ...)` in front took 0.24 s where v0.1.573 took 0.09.
+
+The unchecked writes carry no check now. The loop's guard -- evaluated once,
+before the fast copy -- asks `__vec_owned` of every container the fast copy
+WRITES, and a thread that does not own one takes the checked copy, whose
+`vec_set` fails by name as before. axpy with a thread started is 0.08-0.09 s on
+C again; LLVM 0.20 s (0.18 at v0.1.573). `vec_reverse`, `vec_sort` and
+`lb_to_list` write too and were not checked at all; they are, on the interpreter,
+C and LLVM. `owner_check` gains a reverse case and a versioned-loop case, and a
+poison that makes the guard stop asking.
+
+And a guard that was refusing loops it should have taken: with a stride above
+one that lands on the bound exactly, the last index visited is N - stride, not
+N - 1, but the guard asked N - 1 + w <= len -- so a stride-2 loop over an
+exactly-sized Vec never took its fast copy. axpy_simd: 0.11-0.13 s to 0.08-0.09,
+same output. `range_version_check` holds both sides of that edge: a stride-2 loop
+over an exact Vec is dispatched, and one over a Vec a slot short fails at the same
+index as before on every backend.
+
+---
+
 ## v0.1.578 — 2026-10-02
 
 _The self-hosted lexer reads every reserved word as a keyword (Q-153), and the new gates are in CI._

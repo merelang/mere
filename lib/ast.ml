@@ -1234,7 +1234,8 @@ let rv_subst_index ~(idx : string) ~(by : expr) (ie : expr) : expr =
 
 (* One unchecked access the fast copy makes: which container, of which kind,
    at which index expression (in terms of the index parameter). *)
-type rv_access = { acc_container : string; acc_bytes : bool; acc_index : expr; acc_width : int }
+type rv_access = { acc_container : string; acc_bytes : bool; acc_index : expr; acc_width : int;
+                   acc_write : bool  (* v0.1.579: a vec_set / f64x2_store, so the guard asks who owns it *) }
 
 (* Rewrite the qualifying accesses on invariant containers, and every
    `Var self` into `Var self'`. Returns the rewritten expression and the
@@ -1244,6 +1245,7 @@ let rv_rewrite ~(self : string) ~(self' : string) ~(idx : string)
   let accs = ref [] in
   let note a =
     if not (List.exists (fun b -> b.acc_container = a.acc_container && b.acc_bytes = a.acc_bytes
+                                  && b.acc_write = a.acc_write
                                   && b.acc_width = a.acc_width && pp b.acc_index = pp a.acc_index) !accs)
     then accs := a :: !accs
   in
@@ -1253,28 +1255,28 @@ let rv_rewrite ~(self : string) ~(self' : string) ~(idx : string)
     | Var n when n = self -> { e with node = Var self' }
     | App ({ node = App ({ node = Var "vec_get"; loc = l1; ty = t1 }, ({ node = Var v; _ } as ve)); loc = l2; ty = t2 }, ie)
       when qualifies v ie ->
-      note { acc_container = v; acc_bytes = false; acc_index = ie; acc_width = 1 };
+      note { acc_container = v; acc_bytes = false; acc_index = ie; acc_width = 1; acc_write = false };
       { e with node = App ({ node = App ({ node = Var "__vec_get_unchecked"; loc = l1; ty = t1 }, ve); loc = l2; ty = t2 }, ie) }
     | App ({ node = App ({ node = App ({ node = Var "vec_set"; loc = l1; ty = t1 }, ({ node = Var v; _ } as ve)); loc = l2; ty = t2 }, ie); loc = l3; ty = t3 }, x)
       when qualifies v ie ->
-      note { acc_container = v; acc_bytes = false; acc_index = ie; acc_width = 1 };
+      note { acc_container = v; acc_bytes = false; acc_index = ie; acc_width = 1; acc_write = true };
       { e with node = App ({ node = App ({ node = App ({ node = Var "__vec_set_unchecked"; loc = l1; ty = t1 }, ve); loc = l2; ty = t2 }, ie); loc = l3; ty = t3 }, go x) }
     (* Q-109 (2b): a two-lane load / store covers [ie, ie + 2) *)
     | App ({ node = App ({ node = Var "f64x2_load"; loc = l1; ty = t1 }, ({ node = Var v; _ } as ve)); loc = l2; ty = t2 }, ie)
       when qualifies v ie ->
-      note { acc_container = v; acc_bytes = false; acc_index = ie; acc_width = 2 };
+      note { acc_container = v; acc_bytes = false; acc_index = ie; acc_width = 2; acc_write = false };
       { e with node = App ({ node = App ({ node = Var "__f64x2_load_unchecked"; loc = l1; ty = t1 }, ve); loc = l2; ty = t2 }, ie) }
     | App ({ node = App ({ node = App ({ node = Var "f64x2_store"; loc = l1; ty = t1 }, ({ node = Var v; _ } as ve)); loc = l2; ty = t2 }, ie); loc = l3; ty = t3 }, x)
       when qualifies v ie ->
-      note { acc_container = v; acc_bytes = false; acc_index = ie; acc_width = 2 };
+      note { acc_container = v; acc_bytes = false; acc_index = ie; acc_width = 2; acc_write = true };
       { e with node = App ({ node = App ({ node = App ({ node = Var "__f64x2_store_unchecked"; loc = l1; ty = t1 }, ve); loc = l2; ty = t2 }, ie); loc = l3; ty = t3 }, go x) }
     | App ({ node = App ({ node = Var "u8x16_load"; loc = l1; ty = t1 }, ({ node = Var b; _ } as be)); loc = l2; ty = t2 }, ie)
       when qualifies b ie ->
-      note { acc_container = b; acc_bytes = true; acc_index = ie; acc_width = 16 };
+      note { acc_container = b; acc_bytes = true; acc_index = ie; acc_width = 16; acc_write = false };
       { e with node = App ({ node = App ({ node = Var "__u8x16_load_unchecked"; loc = l1; ty = t1 }, be); loc = l2; ty = t2 }, ie) }
     | App ({ node = App ({ node = Var "bytes_get"; loc = l1; ty = t1 }, ({ node = Var b; _ } as be)); loc = l2; ty = t2 }, ie)
       when qualifies b ie ->
-      note { acc_container = b; acc_bytes = true; acc_index = ie; acc_width = 1 };
+      note { acc_container = b; acc_bytes = true; acc_index = ie; acc_width = 1; acc_write = false };
       { e with node = App ({ node = App ({ node = Var "__bytes_get_unchecked"; loc = l1; ty = t1 }, be); loc = l2; ty = t2 }, ie) }
     | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit | Var _ -> e
     | Neg a -> { e with node = Neg (go a) }
@@ -1504,7 +1506,15 @@ let rv_plan_binding ~(loop_safe : string list) ~(unsafe_builtins : string list)
                 the plain index: every visited i is <= N-1, so N - 1 + w <= len
                 (i0 >= 0 is checked once, below) *)
              let plus_w e w = if w = 1 then e else mk (Bin (Add, e, mk (Int_lit (w - 1)))) in
-             let simple a = mk (Cmp (Le, plus_w (rv_clone bound) a.acc_width, len_of a)) in
+             (* v0.1.579: with a stride above one that lands on the bound exactly
+                (the `landing` conjunct below), the last index visited is N - stride,
+                not N - 1, so the last access ends at N - stride + w. Asking for
+                N - 1 + w refused every stride-2 loop over an exactly-sized Vec:
+                axpy_simd never took its fast copy. *)
+             let simple a =
+               if stride > 1 && eq_exit then
+                 mk (Cmp (Le, mk (Bin (Add, rv_clone bound, mk (Int_lit (a.acc_width - stride)))), len_of a))
+               else mk (Cmp (Le, plus_w (rv_clone bound) a.acc_width, len_of a)) in
              (* a monotonic index: both endpoints, each with its width *)
              let endpoint a at =
                let v = rv_subst_index ~idx ~by:at a.acc_index in
@@ -1525,9 +1535,18 @@ let rv_plan_binding ~(loop_safe : string list) ~(unsafe_builtins : string list)
                  [ mk (Cmp (Eq, mk (Bin (Mod, mk (Bin (Sub, rv_clone bound, rv_clone iarg)), mk (Int_lit stride))), mk (Int_lit 0))) ]
                else []
              in
+             (* v0.1.579: a container the fast copy WRITES must be this thread's.
+                The unchecked writes carry no owner check -- it was a thread-id read
+                per element, and a branch out of the loop that kept clang from
+                vectorizing it: axpy took 2.8x as long once any thread had been
+                started (v0.1.575). Asked once here instead; a foreign thread takes
+                the checked copy, whose vec_set fails by name. *)
+             let written = List.sort_uniq compare
+                 (List.filter_map (fun a -> if a.acc_write then Some a.acc_container else None) accs) in
+             let owned = List.map (fun c -> mk (App (var "__vec_owned", var c))) written in
              List.fold_left conj
                (conj (mk (Cmp (Ge, rv_clone iarg, mk (Int_lit 0)))) (mk (Cmp (Le, rv_clone iarg, rv_clone bound))))
-               (landing @ List.map per_access accs)
+               (landing @ List.map per_access accs @ owned)
            in
            if !range_version_log then prerr_endline ("range-version: " ^ name);
            range_versioned := name :: !range_versioned;

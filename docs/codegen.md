@@ -519,6 +519,10 @@ the three are internal names every backend lowers, and the interpreter keeps
 the bounds check under them so it stays the oracle), and a call site `if 0 >= 0 && 0 <= n && n <= vec_len v then f__rvfast 0 0.0
 else f 0 0.0`. The guard true means the removed checks could never have fired;
 false runs the original loop, which fails where it always did.
+When the fast copy WRITES a Vec, the guard also asks `__vec_owned v` (v0.1.579)
+-- "may this thread write it": the unchecked writes carry no owner check, so a
+thread other than the Vec's owner takes the checked copy, whose `vec_set` fails
+by name.
 
 Conditions, all syntactic: the exit compares the index parameter with pure
 arithmetic over loop-invariant names (or `vec_len` / `bytes_len` of one); every
