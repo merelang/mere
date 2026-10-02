@@ -1,0 +1,13 @@
+// scripts/owner_check.sh: a write inside a loop range-check versioning made
+// unchecked (axpy's shape: a top-level loop over a top-level Vec). The owner
+// check is not in the unchecked write (v0.1.579: it was 2.8x on axpy once a
+// thread existed) but in the loop's guard, so a foreign thread takes the
+// checked copy -- and its vec_set fails by name.
+let mk = fn (u: unit) -> let v = vec_new () in let _ = vec_push v 5 in let _ = vec_push v 6 in v;
+let t = mk ();
+let n = 2;
+let rec zero = fn (i: int) -> if i == n then () else let _ = vec_set t i 0 in zero (i + 1);
+let start = fn (f: unit -> unit) -> spawn f;
+let h = start (fn (u: unit) -> zero 0);
+let _ = join h;
+print_int (vec_get t 0)

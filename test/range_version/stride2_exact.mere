@@ -1,0 +1,10 @@
+// range-version: walk
+// v0.1.579: stride 2 over a Vec of exactly N: the last index visited is N - 2,
+// so the fast copy may run (it was refused while the guard asked N - 1 + w).
+let n = 8;
+let v = vec_new ();
+let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v (i * 3) in fill (i + 1);
+let _ = fill 0;
+let rec walk = fn (i: int) -> fn (acc: int) ->
+  if i == n then acc else walk (i + 2) (acc + vec_get v i + vec_get v (i + 1));
+print (str_of_int (walk 0 0))

@@ -2359,6 +2359,7 @@ let builtin_vec_reverse =
   V_builtin ("vec_reverse", fun v ->
     match v with
     | V_vec arr ->
+      own "Vec" "vec_reverse" arr.vc_owner;
       let n = arr.vc_len in
       for i = 0 to (n / 2) - 1 do
         let j = n - 1 - i in
@@ -2387,6 +2388,7 @@ let builtin_vec_sort =
     match v with
     | V_vec arr ->
       V_builtin ("vec_sort_p1", fun cmp ->
+        own "Vec" "vec_sort" arr.vc_owner;
         let compare_v a b =
           let inner = !apply_value_ref cmp a in
           match !apply_value_ref inner b with
@@ -2496,6 +2498,7 @@ let builtin_lb_to_list =
   V_builtin ("lb_to_list", fun v ->
     match v with
     | V_lb b ->
+      own "ListBuf" "lb_to_list" b.lb_owner;
       b.lb_frozen <- true;
       List.fold_left (fun acc x ->
         V_constr ("Cons", Some (V_tuple [x; acc]))
@@ -4139,6 +4142,8 @@ let initial_env : env =
     ("vec_set",  ref builtin_vec_set);
     (* Q-108: the interpreter is the oracle, so the "unchecked" names keep the check. *)
     ("__vec_get_unchecked", ref builtin_vec_get);
+    ("__vec_owned", ref (V_builtin ("__vec_owned", fun v ->
+       match v with V_vec arr -> V_bool (arr.vc_owner = owner_now ()) | _ -> failwith "__vec_owned: expected Vec")));
     ("__vec_set_unchecked", ref builtin_vec_set);
     ("__bytes_get_unchecked", ref builtin_bytes_get);
     ("f64x2_splat", ref builtin_f64x2_splat);

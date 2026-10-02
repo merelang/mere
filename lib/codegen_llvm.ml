@@ -6465,6 +6465,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let b = emit_expr env b_e in
     let gep i = let r = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = getelementptr %%__lang_listbuf, ptr %s, i32 0, i32 %d" r b i); r in
+    (let ow = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = load i32, ptr %s" ow (gep 5));
+     emit_instr (Printf.sprintf "  call void @__lang_owned(i32 %s, ptr @.own_listbuf_lb_to_list)" ow));
     emit_instr (Printf.sprintf "  store i32 1, ptr %s" (gep 4));
     let hd = fresh_reg () and nil = fresh_reg () and isnull = fresh_reg () and res = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" hd (gep 0));
@@ -6499,6 +6502,15 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf
                   "  %s = call ptr @mere_vec_%s_new(ptr %s)"
                   r elem_tag region_reg);
+    r
+  | Ast.App ({ node = Ast.Var "__vec_owned"; _ }, arg) ->
+    (* v0.1.579: the versioning guard's "may this thread write it" *)
+    let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
+    let av = emit_expr env arg in
+    let p = fresh_reg () and o = fresh_reg () and r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = getelementptr %%mere_vec_%s, ptr %s, i32 0, i32 4" p elem_tag av);
+    emit_instr (Printf.sprintf "  %s = load i32, ptr %s" o p);
+    emit_instr (Printf.sprintf "  %s = call i1 @__lang_owner_ok(i32 %s)" r o);
     r
   | Ast.App ({ node = Ast.Var "vec_len"; _ }, arg) ->
     let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
@@ -6724,6 +6736,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     (* Phase 19.3: vec_reverse v — in-place, per-T helper. *)
     let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
     let av = emit_expr env vec_e in
+    (let p = fresh_reg () and ow = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = getelementptr %%mere_vec_%s, ptr %s, i32 0, i32 4" p elem_tag av);
+     emit_instr (Printf.sprintf "  %s = load i32, ptr %s" ow p);
+     emit_instr (Printf.sprintf "  call void @__lang_owned(i32 %s, ptr @.own_vec_vec_reverse)" ow));
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_vec_%s_reverse(ptr %s)"
@@ -6747,6 +6763,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     if not (Hashtbl.mem vec_sort_instances elem_tag) then
       Hashtbl.add vec_sort_instances elem_tag elem_ty;
     let av = emit_expr env vec_e in
+    (let p = fresh_reg () and ow = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = getelementptr %%mere_vec_%s, ptr %s, i32 0, i32 4" p elem_tag av);
+     emit_instr (Printf.sprintf "  %s = load i32, ptr %s" ow p);
+     emit_instr (Printf.sprintf "  call void @__lang_owned(i32 %s, ptr @.own_vec_vec_sort)" ow));
     let cv = emit_expr env cmp_e in
     let outer_cl = closure_struct_name elem_ty
       (Ast.TyArrow (elem_ty, Ast.TyInt)) in
@@ -9522,6 +9542,7 @@ let emit_top_globals_llvm (lst : (string * Ast.expr * Ast.ty) list) : string lis
    spawn there is no other, so creation and the check read one plain global
    before anything thread-local. The messages' lengths are computed. *)
 let owner_msgs = [ ("Vec", "vec_push"); ("Vec", "vec_set"); ("Vec", "f64x2_store");
+                   ("Vec", "vec_reverse"); ("Vec", "vec_sort"); ("ListBuf", "lb_to_list");
                    ("Map", "map_set"); ("Map", "map_delete");
                    ("StrBuf", "strbuf_push"); ("ListBuf", "lb_push") ]
 let owner_msg_name (kind : string) (op : string) =
@@ -9557,6 +9578,18 @@ let owner_runtime_llvm =
       "ask:";
       "  %t = call i32 @__lang_tid()";
       "  ret i32 %t";
+      "}";
+      "define internal i1 @__lang_owner_ok(i32 %owner) {";
+      "entry:";
+      "  %s = load i32, ptr @__lang_threads_started";
+      "  %z = icmp eq i32 %s, 0";
+      "  br i1 %z, label %yes, label %ask";
+      "ask:";
+      "  %t = call i32 @__lang_tid()";
+      "  %same = icmp eq i32 %t, %owner";
+      "  ret i1 %same";
+      "yes:";
+      "  ret i1 1";
       "}";
       "define internal void @__lang_owned(i32 %owner, ptr %msg) {";
       "entry:";
@@ -10215,9 +10248,9 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       Printf.sprintf "  ret %s %%val" c_elem;
       "}";
       "";
+      (* v0.1.579: no owner check -- the versioning guard asks __vec_owned once *)
       Printf.sprintf "define i32 @mere_vec_%s_set_unchecked(ptr %%v, i64 %%i, %s %%x) {" tag c_elem;
       "entry:";
-    ] @ owner_check_lines ~sn:struct_name ~idx:4 ~c:"%v" "Vec" "vec_set" @ [
       Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
       "  %data = load ptr, ptr %dp";
       Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i64 %%i" c_elem;
@@ -10280,7 +10313,6 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       "}";
       "define i32 @mere_vec_float_f64x2_store_unchecked(ptr %v, i64 %i, <2 x double> %x) {";
       "entry:";
-    ] @ owner_check_lines ~sn:"mere_vec_float" ~idx:4 ~c:"%v" "Vec" "f64x2_store" @ [
       "  %dp = getelementptr %mere_vec_float, ptr %v, i32 0, i32 0";
       "  %data = load ptr, ptr %dp";
       "  %slot = getelementptr double, ptr %data, i64 %i";

@@ -12,6 +12,9 @@
 # once and only read is shared safely (test/owner/legit.mere does that).
 #
 #   param_vec / param_map / param_strbuf   must fail, naming the operation
+#   param_reverse     vec_reverse writes too (unchecked up to v0.1.578)
+#   param_versioned   a write in a loop range-check versioning made unchecked:
+#                     the guard asks __vec_owned, the checked copy fails
 #   legit                                  must run and print 31
 #
 # --poison removes the check from the emitted C and LLVM, and the races must
@@ -52,7 +55,7 @@ judge() {  # $1 program, $2 output, $3 status -> ok or why not
   esac
 }
 
-for f in param_vec param_map param_strbuf legit; do
+for f in param_vec param_map param_strbuf param_reverse param_versioned legit; do
   out=$(run "$MERE" "$FX/$f.mere"); st=$?
   v=$(judge "$f" "$out" "$st"); [ "$v" = ok ] && echo "  ok    interp $f" || { echo "  FAIL  interp $f: $v"; fail=1; }
   for be in c ll; do
@@ -64,15 +67,17 @@ done
 
 if [ "${1:-}" = --poison ]; then
   pf=0
-  while IFS='|' read -r be what expr; do
+  while IFS='|' read -r prog be what expr; do
     [ -n "$be" ] || continue
-    if ! why=$(build param_vec "$be" "$expr"); then echo "  FAIL  POISON $be ($what): $why"; pf=1; continue; fi
+    if ! why=$(build "$prog" "$be" "$expr"); then echo "  FAIL  POISON $be ($what): $why"; pf=1; continue; fi
     out=$(run "$T/bin"); st=$?
     case "$out" in *"$SENT"*) echo "  FAIL  POISON $be ($what): still fails by name -- the gate does not witness the check"; pf=1 ;;
       *) echo "  ok    POISON $be ($what): the race goes through unnoticed" ;; esac
   done <<'POISONS'
-c|the C check is gone|s/^#define __LANG_OWNED(c, k, o) .*/#define __LANG_OWNED(c, k, o) ((void)0)/
-ll|the LLVM check is gone|/call void @__lang_owned(i32/d
+param_vec|c|the C check is gone|s/^#define __LANG_OWNED(c, k, o) .*/#define __LANG_OWNED(c, k, o) ((void)0)/
+param_versioned|c|the versioning guard does not ask|s/^#define __LANG_OWNER_OK(c) .*/#define __LANG_OWNER_OK(c) 1/
+param_vec|ll|the LLVM check is gone|/call void @__lang_owned(i32/d
+param_reverse|ll|vec_reverse is not checked|/@.own_vec_vec_reverse)$/d
 POISONS
   [ "$pf" = 0 ] || { echo "owner_check --poison: FAILED"; exit 1; }
 fi

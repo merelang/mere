@@ -1,0 +1,14 @@
+// range-version: walk
+// v0.1.579: with a stride above one that lands on the bound, the guard asks
+// N - stride + w <= len (the last index visited is N - stride). Here stride 2
+// from 0 to 6 visits 0, 2, 4 -- and the Vec holds 4, so index 4 is out of
+// bounds. N - 2 + 1 = 5 <= 4 is false: the checked loop runs, and the failure
+// is the same one, at the same index, on every backend.
+let n = 4;
+let v = vec_new ();
+let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v i in fill (i + 1);
+let _ = fill 0;
+let _ = print "before";
+let rec walk = fn (i: int) -> fn (acc: int) ->
+  if i == 6 then acc else let _ = print (str_of_int i) in walk (i + 2) (acc + vec_get v i);
+print (str_of_int (walk 0 0))
