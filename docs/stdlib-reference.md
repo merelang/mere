@@ -779,14 +779,25 @@ parser in the target language, and LLVM has no hand-written one.
 ### The pair is not symmetric: containers write but do not read
 
 `to_json` serialises a `Vec` as an array and a `Map` as an object, and
-`of_json` decodes neither. Measured at v0.1.440:
+`of_json` decodes neither:
 
 | value | `to_json` | `of_json` round-trip |
 |---|---|---|
 | int / float / str / tuple / option / list / variant / record | yes | **yes** |
-| `Vec` | `[1]` | `of_json: expected a variant value for Vec` |
-| `Map` | `{"1":"a"}` | `of_json: k is not a case of Map` |
-| `StrBuf` | `"x"` | `of_json: x is not a case of StrBuf` |
+| `Vec`, `Map`, `StrBuf`, `ByteBuf`, `ListBuf`, `OwnedVec` | `[1]`, `{"1":"a"}`, `"x"` | refused when the program is type-checked |
+
+Since v0.1.584 an `of_json` / `of_json_opt` / `of_json_like` whose target is a
+container, or holds one (a record with a `Vec` field, a tuple with a `Map`), is
+a type error at the call -- before, it type-checked and failed when the program
+read its checkpoint back (`of_json: expected a variant value for Vec`):
+
+```
+type error: of_json cannot build a Vec: a Vec has a region and an identity, and
+decoding makes values, not containers -- `to_json` writes one, but nothing can
+read it back as one
+help: decode the contents as a list (or a record / tuple of lists) and rebuild
+the Vec from it
+```
 
 The witness form says why in its own words: *"the witness must be a record, a
 constructor, a tuple or a scalar — a closure or a handle cannot say what to
