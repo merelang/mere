@@ -174,7 +174,13 @@ fmt_known_skips="${FMT_KNOWN_SKIPS-brackets_balance list_lib template_engine}"
 # inside an expression 30, a line ending in the caller's `;` 26, a variant or
 # match arm 12, `let ... in` 7, `,` 6, `else` 5, other mid-expression 4 -- and
 # 7 that are `//` inside a string literal, which are not comments at all.
-LOST_CEILING="${LOST_CEILING:-93}"
+# 93 -> 43 at v0.1.577: the first `if c then x // ..` of a chain takes its
+# comment as the later branches always did, and a comment after the `;` that
+# ends a declaration is attached to it (the last line the declaration's tree
+# reaches standing in for an end position). Left: variant lines in a `type`
+# (no positions at all), `let ... in`, list literals reflowed across `,`,
+# nested if/else -- and the `//` inside strings.
+LOST_CEILING="${LOST_CEILING:-43}"
 FILE_FLOOR="${FILE_FLOOR:-280}"
 all_in=0; all_out=0; measured=0; unresolved=0; unexpected=""; stale_skip=""
 for f in "$ROOT"/examples/*.mere; do

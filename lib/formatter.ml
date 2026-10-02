@@ -680,6 +680,11 @@ and fmt_if_multiline ~ind ~cond_loc cond_s then_ else_ =
   let head =
     "if " ^ cond_s ^ " then" ^ on_then ^ "\n" ^ indent (ind + 1) ^ then_body
   in
+  (* v0.1.577 (Q-154): the first branch's trailing comment, as fmt_else_chain
+     takes the later branches'. Missing, the comment after `if c then x` of a
+     chain was dropped -- 26 of the 93 lines the corpus lost. *)
+  let head = head ^ take_trailing_on ~same_file:(then_.loc.Loc.file = None)
+                      then_.loc.Loc.line then_body in
   let tail = fmt_else_chain ~ind else_ in
   head ^ "\n" ^ tail
 
@@ -1171,7 +1176,28 @@ let format_program ?(comments : (int * string) list = [])
       | `Decl d ->
         (match fmt_top_decl d with
          | None -> None
-         | Some body -> Some (with_comments (decl_line d) body)))
+         | Some body ->
+           let body = with_comments (decl_line d) body in
+           (* v0.1.577 (Q-154): a comment after the `;` that ends a declaration.
+              The declaration has no end position, so the last line its tree
+              reaches stands in for one -- wrong only when a closing delimiter
+              sits alone on a later line, where the comment is then left where
+              it was found (the old behaviour). 24 of the 93 lost lines. *)
+           let rec maxl (e : expr) =
+             List.fold_left (fun m c -> max m (maxl c))
+               (if e.loc.Loc.file = None then e.loc.Loc.line else 0) (Ast.children e) in
+           let endl = match d with
+             | Top_let (_, v) -> maxl v
+             | Top_let_rec bs -> List.fold_left (fun m (_, _, v) -> max m (maxl v)) 0 bs
+             | _ -> 0 in
+           let n = String.length body in
+           let body =
+             if endl > 0 && n > 0 && body.[n - 1] = ';' then
+               (match List.assoc_opt endl !trailing_pending with
+                | Some t -> trailing_pending := List.remove_assoc endl !trailing_pending; body ^ "  " ^ t
+                | None -> body)
+             else body in
+           Some body))
   in
   let decls_s =
     let imps = List.sort (fun (a, _, _, _) (b, _, _, _) -> compare a b) imports in
