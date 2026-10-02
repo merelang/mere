@@ -264,8 +264,17 @@ let cmpop_to_string = function
 
 let logicop_to_string = function And -> "&&" | Or -> "||"
 
+(* v0.1.581: PATH COMPRESSION. A variable bound to a variable bound to ... is
+   walked on every look, and inference makes long chains (each unification links
+   one more). A link is only ever set on an unbound variable and never undone, so
+   pointing a bound one straight at the end of its chain changes no answer. *)
 let rec walk = function
-  | TyVar { link = Some t; _ } -> walk t
+  | TyVar ({ link = Some t; _ } as v) ->
+    (match t with
+     | TyVar { link = Some _; _ } ->
+       let r = walk t in
+       v.link <- Some r; r
+     | _ -> t)
   | t -> t
 
 let pp_ty t =

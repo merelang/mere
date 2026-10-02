@@ -780,6 +780,11 @@ let scheme_of_written (t : Ast.ty) : scheme =
 
 type env = (string * scheme) list
 
+(* v0.1.581: see Env_index -- the type environment of a big rec group. *)
+let env_ix : scheme Env_index.t = Env_index.create ()
+let with_env_index (e : env) (f : unit -> 'a) : 'a = Env_index.with_index env_ix e f
+let env_lookup (name : string) (env : env) : scheme option = Env_index.lookup env_ix name env
+
 (* ---- Trait support (ad-hoc polymorphism via dictionary elaboration) ----
 
    A trait declares a set of methods parameterised over a single type
@@ -3375,7 +3380,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
   | Ast.Str_lit _ -> Ast.TyStr
   | Ast.Unit_lit -> Ast.TyUnit
   | Ast.Var name ->
-    (match List.assoc_opt name env with
+    (match env_lookup name env with
      | Some sch ->
        (* A deprecated name is only deprecated when it IS the builtin. The env
           is built by prepending, so a user's own binding shadows the initial
@@ -3593,12 +3598,13 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
     let env_rec = List.fold_left2 (fun acc (n, _, _) a ->
       (n, mono a) :: acc
     ) env bindings alphas in
+    Env_index.with_group env_ix (List.length bindings) env_rec (fun () ->
     with_group_alphas alphas (fun () ->
     enter_level (fun () ->
       List.iter2 (fun (_, _, value) alpha ->
         let tv = infer env_rec value in
         unify value.Ast.loc alpha tv
-      ) bindings alphas));
+      ) bindings alphas)));
     let env' = List.fold_left2 (fun acc (n, _, value) a ->
       let sch = generalize env a in
       (* A local recursive constrained binding (e.g.

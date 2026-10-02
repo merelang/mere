@@ -1364,6 +1364,8 @@ let infer_top_rec outer_env (bindings : (string * Loc.t * Ast.expr) list) : Ast.
     List.fold_left2 (fun acc (n, _, _) a -> (n, Typer.mono a) :: acc)
       outer_env bindings alphas in
   let infer_all () =
+    (* v0.1.581: a big group's lookups go through an index (Typer.env_lookup) *)
+    Env_index.with_group Typer.env_ix (List.length bindings) env_rec @@ fun () ->
     (* v0.1.564: the group's types, for the typer's unmarking -- see
        Typer.active_group_alphas *)
     Typer.with_group_alphas alphas (fun () ->
