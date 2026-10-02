@@ -1,0 +1,7 @@
+// bytes_of_str is a view of the str while no region block is open, and a copy
+// inside one (v0.1.587, Q-117): the copy is what lets the bytes leave the block.
+// Both have to read the same on every backend.
+let s = "abc" ++ str_of_int 42;
+let b = bytes_of_str s;
+let r = region R { let t = "in" ++ str_of_int 7 in bytes_of_str t };
+print (str_of_int (bytes_len b) ++ " " ++ str_of_bytes b ++ " " ++ str_of_bytes r ++ " " ++ str_of_int (bytes_get b 0))

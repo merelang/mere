@@ -230,6 +230,12 @@ let canonical_record_name (full : string) : string =
 
 let declared_types : (string * Loc.t) list ref = ref []
 
+(* v0.1.587 (Q-154): the line each of a variant type's constructors is written
+   on, keyed by the line of the type's name -- `mere fmt` puts a comment written
+   at the end of a constructor's line back after that constructor. *)
+let declared_ctor_lines : (int * int list) list ref = ref []
+let last_ctor_lines : int list ref = ref []
+
 (* v0.1.476: the same reason declared_types exists -- `Top_extern` carries no
    position, and a warning an editor cannot place is a warning nobody sees.
    The type comes along because the check is about the declaration's ARITY. *)
@@ -237,6 +243,7 @@ let declared_externs : (string * Ast.ty * Loc.t) list ref = ref []
 
 let reset_decl_state () =
   declared_types := [];
+  declared_ctor_lines := [];
   Hashtbl.reset private_module_names;
   Hashtbl.reset pub_module_names;
   Hashtbl.reset pub_files;
@@ -480,9 +487,11 @@ let rec parse_program_internal tokens =
   in
   let parse_variants toks =
     let toks = match toks with (_, T_pipe) :: rest -> rest | _ -> toks in
+    last_ctor_lines := [];
     let rec loop acc toks =
       match toks with
-      | (_, T_ident name) :: rest when starts_with_upper name ->
+      | (cpos, T_ident name) :: rest when starts_with_upper name ->
+        last_ctor_lines := (if cpos.Loc.file = None then cpos.Loc.line else 0) :: !last_ctor_lines;
         let payload, rest =
           match rest with
           | (_, T_of) :: rest_after_of ->
@@ -1810,6 +1819,8 @@ let rec parse_program_internal tokens =
       in
       if is_variant_body then
         let variants, toks = parse_variants body_rest in
+        if tpos.Loc.file = None then
+          declared_ctor_lines := (tpos.Loc.line, List.rev !last_ctor_lines) :: !declared_ctor_lines;
         List.iter (fun (cname, payload) ->
           Hashtbl.replace constructors cname (match payload with None -> 0 | _ -> 1)
         ) variants;

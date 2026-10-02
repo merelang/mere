@@ -11019,7 +11019,15 @@ let bytes_runtime ~arena =
         "  return (int)v->len;";
         "}" ] else [])
     @ [
+      (* v0.1.587 (Q-117): A VIEW, NOT A COPY, WHEN IT CAN BE ONE. A str and a
+         bytes have the same layout -- an 8-byte length, then the data -- and
+         neither can be changed, so the str's own memory IS the bytes. A line
+         tool that hands each line to a SIMD load (which takes bytes) copied
+         every line to do it. Only while no `region` block is open, though: in
+         one, the str may be the block's and the bytes may be returned out of
+         it, so it is copied into the current region as before. *)
       "static mere_bytes* __lang_bytes_of_str(const char* s) {";
+      "  if (__lang_region_active_n == 0) return (mere_bytes*)(void*)(((long long*)(void*)s) - 1);";
       "  long long n = (long long)__lang_str_size(s);";
       "  mere_bytes* b = __lang_bytes_alloc(n);";
       "  memcpy(b->data, s, (size_t)n);";

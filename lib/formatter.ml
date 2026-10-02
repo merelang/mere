@@ -1003,7 +1003,11 @@ let format_program ?(comments : (int * string) list = [])
        every `import` the entry file had. Empty means "print what is here",
        which is what every caller other than `mere fmt` wants. *)
     ?(imports : (int * string * int * int) list = [])
-    ?(decl_line : (top_decl -> int option) = default_decl_line) (prog : program) =
+    ?(decl_line : (top_decl -> int option) = default_decl_line)
+    (* v0.1.587 (Q-154): a variant type's constructor lines, by the line of its
+       name (the parser's table); see fmt_type_with_comments below *)
+    ?(ctor_lines : (int -> int list option) = fun _ -> None)
+    (prog : program) =
   let pending = ref comments in
   known_modules := modules;
   known_traits :=
@@ -1174,7 +1178,34 @@ let format_program ?(comments : (int * string) list = [])
          pending: the comments were written above it either way. *)
       | `Combined s -> Some (with_comments (Some max_int) s)
       | `Decl d ->
-        (match fmt_top_decl d with
+        (* v0.1.587 (Q-154): a type written one constructor per line, with a
+           comment at the end of one of them, comes back that way. The one-line
+           form has no line for the comment to end; the multi-line form is only
+           chosen when there is a comment to keep, so every other type prints
+           exactly as before. 14 of the 43 lost lines in the examples corpus. *)
+        let typed_multi =
+          match d, decl_line d with
+          | Top_type (name, params, variants), Some l ->
+            (match ctor_lines l with
+             | Some lines when List.length lines = List.length variants
+                            && List.exists (fun cl -> cl > l && List.mem_assoc cl !trailing_pending) lines ->
+               let head = "type " ^ fmt_type_params params ^ name ^ " =" in
+               let head = head ^ take_trailing_on l head in
+               let n = List.length variants in
+               let arms =
+                 List.mapi (fun i ((c, payload), cl) ->
+                   let text = match payload with None -> c | Some t -> c ^ " of " ^ fmt_ty t in
+                   let line = "  | " ^ text ^ (if i = n - 1 then ";" else "") in
+                   (* the comment goes after the LAST constructor on its line *)
+                   let last_on_line = i = n - 1 || List.nth lines (i + 1) <> cl in
+                   if last_on_line && cl > 0 then line ^ take_trailing_on cl line else line)
+                   (List.combine variants lines)
+               in
+               Some (String.concat "\n" (head :: arms))
+             | _ -> None)
+          | _ -> None
+        in
+        (match (match typed_multi with Some b -> Some b | None -> fmt_top_decl d) with
          | None -> None
          | Some body ->
            let body = with_comments (decl_line d) body in

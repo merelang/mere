@@ -12933,8 +12933,17 @@ let bytes_runtime_llvm =
       "  %r = zext i8 %c to i64";
       "  ret i64 %r";
       "}";
+      (* v0.1.587 (Q-117): a view while no region block is open -- the C
+         backend's __lang_bytes_of_str says why; the layouts are the same *)
       "define ptr @__lang_bytes_of_str(ptr %s) {";
       "entry:";
+      "  %ra = load i32, ptr @__lang_region_active_n";
+      "  %free = icmp eq i32 %ra, 0";
+      "  br i1 %free, label %view, label %copy";
+      "view:";
+      "  %v = getelementptr i8, ptr %s, i64 -8";
+      "  ret ptr %v";
+      "copy:";
       "  %n = call i64 @__lang_str_size(ptr %s)";
       "  %b = call ptr @__lang_bytes_alloc(i64 %n)";
       "  %d = getelementptr i8, ptr %b, i64 8";
