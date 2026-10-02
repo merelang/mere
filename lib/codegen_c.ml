@@ -14595,7 +14595,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     List.filter_map (fun (name, _, variants) ->
       emit_variant_struct_body name variants) variant_decls
   in
-  let main_expr = Ast.desugar_program prog in
+  let main_expr = Ast.flatten_let_tuples (Ast.desugar_program prog) in
   (* Phase 15.2: resolve let-bound Vec element types.
      `let v = vec_new () in body` generalizes v to `forall T. Vec[..., T]`,
      so each use of v in body gets a *fresh* element tyvar. Some of those

@@ -4,6 +4,25 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.597 — 2026-10-03
+
+_A tuple pattern nested in a `let` compiles on every backend: parity checks every program on C (206 of 206), and leaves 15 unchecked on LLVM and 8 on Wasm._
+
+`let ((a, b), (c, d)) = t in body` ran in the interpreter and was refused by
+C, LLVM and Wasm ("nested pattern in let-tuple not supported ... use `match`").
+The backends now see it as one flat `let` per level --
+`let (__lt0, __lt1) = t in let (a, b) = __lt0 in let (c, d) = __lt1 in body` --
+written by `Ast.flatten_let_tuples` after type checking, each new variable typed
+from the value's tuple type. A subtree with nothing to rewrite stays the same
+node, so the tables keyed on nodes still find it. It applies inside functions as
+well as at the top level, to any depth, with `_` and functions as components
+(`test/parity/nested_let_tuple.mere`).
+
+The C, Wasm, RISC-V and `-t` output of every other program in the repository and
+downstream is unchanged (4,086 comparisons).
+
+---
+
 ## v0.1.596 — 2026-10-03
 
 _The LLVM backend erases a leftover type variable like the other backends, lifts a `let rec` written in the program's body, and stops mistaking externs for captures and `t0` for a register: parity leaves 16 programs unchecked on LLVM (was 19), mpng builds with it and passes its 33 checks, and 42 programs that clang or the emitter refused now build._

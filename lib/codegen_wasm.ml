@@ -10954,7 +10954,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     List.iteri (fun i (cname, _) ->
       Hashtbl.replace variant_tags cname i) vs
   ) Exhaustive.type_variants;
-  let main_expr = Ast.desugar_program prog in
+  let main_expr = Ast.flatten_let_tuples (Ast.desugar_program prog) in
   (* Phase 15.4: resolve let-bound Vec element types. Same trick as
      codegen_c / codegen_llvm — Mere's let-poly generalizes
      `let v = vec_new () in body` to `forall T. Vec[..., T]`, so each

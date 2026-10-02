@@ -1,0 +1,19 @@
+// v0.1.597: tuple patterns nested in a let, inside functions as well as at the
+// top level: flattened into one let per level for the backends.
+let swap_inner = fn (p: ((int * str) * bool)) ->
+  let ((n, s), b) = p in
+  (b, (s, n));
+let deep = fn (x: int) ->
+  let (((a, b), c), (_, (d, e))) = (((x, x + 1), x + 2), ("skip", (x + 3, "e"))) in
+  a + b + c + d + str_len e;
+let pairs = fn (xs: (int * int) list) ->
+  match xs with
+  | Nil -> 0
+  | Cons (p, _) -> let ((a, b), k) = (p, 10) in a * b + k;
+let (flag, (word, num)) = swap_inner ((7, "seven"), true);
+let _ = print (if flag then word else "no");
+let _ = print_int num;
+let _ = print_int (deep 1);
+let _ = print_int (pairs (Cons ((3, 4), Nil)));
+let ((f, g), h) = ((fn (x: int) -> x * 2, fn (x: int) -> x + 1), 5);
+print_int (f (g h))
