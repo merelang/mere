@@ -4,6 +4,45 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.574 — 2026-10-02
+
+_A spawned thread is checked for what it REACHES through functions, not only what it mentions (Q-179)._
+
+A function's type says nothing about what the function touches (`TyArrow _ ->
+true` in both is_send and is_sync), so `spawn (fn () -> effect "x")` with
+`effect` pushing to a top-level Vec was accepted. mere-blog shipped exactly that:
+eight HTTP workers pushing to one Vec, and the same push from eight spawned
+threads kept 159,123 of 160,000 entries (that standalone shape is refused now). Q-080 recorded the hole in 2026-08, and it was left open while
+mere-ruby's fibers depended on it; they have run on coroutines since 2026-09-28.
+
+Now every function the spawned expression mentions whose definition the
+program shows -- a `let` or `let rec` binding, a partial application of one, a
+data literal holding one, a module member -- is followed to what it mentions,
+and a value that is not Sync at the end of that walk refuses the spawn. The
+message names the path (`through w > fill > put`), because the offending binding
+is usually several calls from the `spawn`.
+
+A container nothing writes is shareable: if every occurrence in the program is
+the first argument of a read builtin, threads may read it together. mengd's
+inflate tables -- built with `vec_of [...]` at the top level, read by a thread
+per connection -- are that case, and nothing in them changes. (Range-check
+versioning turns a proved `vec_get` into `__vec_get_unchecked` before this pass
+runs, which made the tables look written until that name was on the list.)
+
+What it does not see is a function value whose definition is not visible -- a
+parameter, a channel's message, a call's result -- so a library that spawns the
+handler it was given is not checked at its spawn. **mere-blog's race is that
+shape**: its handler reaches the Vec, and the handler is handed to
+`http_serve_mt_ctx`, which spawns it. Its pre-fix source is still accepted here;
+it was fixed in that repository (`2a1bc87`), and a run-time check is the next
+stage for exactly this reason. Nothing in the 712 programs of this repository or
+the 19 downstream repositories is refused. The test that pinned "a Map inside a captured closure is not seen"
+as accepted pins it refused; its neighbour, the parameter case, stays accepted
+and says why. A program with no `spawn` skips the pass (mere-ruby's check:
+7.97 s before, 7.91 after).
+
+---
+
 ## v0.1.573 — 2026-10-02
 
 _`spawn` checks what any argument mentions, and a ByteBuf is not shared across threads (Q-179 stage 0, Q-197)._

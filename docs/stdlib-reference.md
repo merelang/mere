@@ -1202,6 +1202,38 @@ instead of hanging. Off by default; the C backend is untouched. See
 
 ---
 
+## What a spawned thread may touch (v0.1.574)
+
+`spawn e` is checked twice. What `e` mentions directly is classified by type:
+a value that is Sync is shared, one that is only Send is moved into the thread,
+and anything else -- `Map`, `Vec`, `StrBuf`, `ByteBuf`, `ListBuf`, `Coro` -- is
+refused. Then every function `e` mentions whose definition the program text
+shows is followed to what IT mentions, and the spawn is refused if that walk
+reaches a value that is not Sync. The error names the path:
+
+```
+type error: this thread reaches `tbl` : Map['a, int, int] (line 1) through
+w > fill > put, and a Map is not safe to share between threads
+```
+
+Two things are allowed through on purpose:
+
+- **A container nothing writes.** If every occurrence of a container in the
+  program is the first argument of a read (`vec_get`, `vec_len`, `map_get`,
+  `map_has`, `map_len`, `bytebuf_get`, ...), threads may read it together -- a
+  lookup table built at start-up is the case. Hand it to a function, alias it,
+  or write it once anywhere, and it is not read-only any more.
+- **A function value whose definition is not visible**: a parameter, something
+  received over a channel, a call's result. A library that spawns the handler
+  it was given (`http_serve_mt`) cannot see what the handler touches; that is
+  left to the run-time check (below, when it lands).
+
+The usual fix is to give the shared value one owner thread and send it
+messages over a `Channel` -- an append is a message, a read sends a channel
+for the answer to come back on.
+
+---
+
 ## Thread-leak report (v0.1.304)
 
 `MERE_THREAD_REPORT=1` makes the **interpreter** print, at exit, the threads that
