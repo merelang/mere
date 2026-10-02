@@ -4,6 +4,40 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.596 — 2026-10-03
+
+_The LLVM backend erases a leftover type variable like the other backends, lifts a `let rec` written in the program's body, and stops mistaking externs for captures and `t0` for a register: parity leaves 16 programs unchecked on LLVM (was 19), mpng builds with it and passes its 33 checks, and 42 programs that clang or the emitter refused now build._
+
+- **A type variable that survives to emission** -- the result of a function
+  that never returns, a helper whose error type nothing constrains -- was
+  refused ("unsupported LLVM codegen type element: 'a") where C and Wasm erase
+  it to int. `ty_tag` erases it here too (`llvm_ty_of` already lowered it to
+  i64), and the instantiation pass names the erased instance a residual call
+  site asks for, as it does for C and Wasm (`recover_promoted`: without the
+  concrete instances C and Wasm also get, which this backend finds through its
+  own table). `result_residual` and `free_result_thrown_away` are checked on
+  LLVM now. A tuple holding such a variable is declared under its erased name
+  when nothing in it is a type constructor (`let (f, g) = (fn x -> x, ...)`).
+- **`let rec` in the program's body** -- not inside a function -- was refused
+  ("let rec inside an expression"); it is lifted under the host `$main` as the C
+  backend has done. It was the first wall for mpng and medit2.
+  `region_outer_push_realloc` is checked on LLVM, and
+  `test/parity/main_let_rec.mere` covers a capture, mutual recursion and a
+  `let rec` inside a lifted one.
+- **Externs are not captures.** An inner function that called an `extern` took
+  it for a free variable and passed a local that does not exist ("use of
+  undefined value '%tcp_write'"); the C backend fixed the same thing in v0.1.61.
+- **A parameter named `t0`** collided with the temporaries `fresh_reg` names
+  `%t0, %t1, ...` ("multiple definition of local value named 't0'", mpng's
+  `chunk out t0 t1 t2 t3`). Such names get a suffix with a dot, which no Mere
+  identifier has.
+
+Of 1,022 programs (test/, examples/, the downstream programs), 42 whose LLVM IR
+the emitter or clang refused now build and none that built stops; the C, Wasm,
+RISC-V and `-t` output of all of them is unchanged.
+
+---
+
 ## v0.1.595 — 2026-10-03
 
 _`floor`, `ceil` and `round` on Wasm, and a negative zero printed as `-0.0` there: contrib/raster's path library builds for Wasm, and parity leaves 9 programs unchecked on Wasm (was 10)._

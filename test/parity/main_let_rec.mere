@@ -1,0 +1,25 @@
+// v0.1.596: `let rec` written in the program's body, not inside a function.
+let base = 10;
+let fma = fn (x: int) -> x * 2;
+let _ = (
+  let k = 3 in
+  let rec go = fn (i: int) -> if i <= 0 then k else base + go (i - 1) in
+  print_int (go 4)
+);
+let _ = (
+  let rec ev = fn (n: int) -> if n == 0 then true else od (n - 1)
+  and od = fn (n: int) -> if n == 0 then false else ev (n - 1) in
+  print (if ev 10 then "even" else "odd")
+);
+let _ = (
+  let rec outer = fn (n: int) ->
+    let rec inner = fn (m: int) -> if m <= 0 then n else inner (m - 1) + 1 in
+    if n <= 0 then 0 else inner n + outer (n - 1) in
+  print_int (outer 3)
+);
+let _ = (
+  let s = "x" in
+  let rec rep = fn (n: int) -> if n <= 0 then "" else s ++ rep (n - 1) in
+  print (rep 5)
+);
+print_int (fma 21)

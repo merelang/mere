@@ -136,8 +136,8 @@ machine rather than a host.
 | `mkdir_p` | yes | refused | refused | refused |
 | `not` | yes | yes | yes | yes |
 | `odd` | yes | yes | yes | yes |
-| `of_json` | refused | unattributed | unattributed | refused |
-| `of_json_opt` | refused | unattributed | unattributed | refused |
+| `of_json` | refused | refused | unattributed | refused |
+| `of_json_opt` | refused | refused | unattributed | refused |
 | `ord` | yes | yes | yes | yes |
 | `owned_vec_new` | yes | yes | yes | refused |
 | `pi` | yes | yes | yes | yes |
