@@ -81,3 +81,5 @@ llvm:str_count_runtime           __lang_str_count          llvm       test/parit
 llvm:str_join_runtime            __lang_str_join           llvm       test/parity/coll_edges.mere
 llvm:str_split_runtime           __lang_list_str_nil       llvm       test/parity/adt_match.mere
 llvm:strbuf_runtime              mere_strbuf_new           llvm       test/parity/encoding_decode.mere
+llvm:bytebuf_runtime             mere_bytebuf_new          llvm       test/parity/bytebuf_edges.mere
+llvm:rw_bytes_runtime            __lang_read_bytes         llvm       test/parity/bytes_file_roundtrip.mere

@@ -36,8 +36,8 @@
 #      put in a loop, and the exit status is the whole interface.
 #
 #   F. A per-backend refusal that the bare form CANNOT see is seen by the flag
-#      (`test/parity/bytebuf_edges.mere`: bare check accepts, `-ll` and `-w`
-#      refuse). Without this, C could be satisfied vacuously by a corpus in
+#      (`test/parity/read_lines.mere`: bare check accepts, `-ll` and `-w`
+#      refuse; it was bytebuf_edges.mere until ByteBuf reached both, v0.1.585). Without this, C could be satisfied vacuously by a corpus in
 #      which no backend ever refuses anything.
 #
 #   G. Usage errors: no path, and more arguments than it takes.
@@ -167,7 +167,7 @@ fi
 # Not "some file somewhere disagrees" -- a named one, so C cannot pass by the
 # corpus having no such row at all.
 
-bb=test/parity/bytebuf_edges.mere
+bb=test/parity/read_lines.mere
 if [ ! -f "$bb" ]; then
   echo "FAIL F: $bb is gone — the standing example of a per-backend refusal"
   fail=1
