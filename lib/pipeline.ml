@@ -1313,7 +1313,7 @@ let check_lib_escape (loc : Loc.t) outer_env =
 let is_fn_value (v : Ast.expr) =
   match v.Ast.node with Ast.Fun _ -> true | _ -> false
 
-let infer_top_let outer_env (value : Ast.expr) : Ast.ty =
+let infer_top_let_inner outer_env (value : Ast.expr) : Ast.ty =
   (* Q-127: IN `--lib` MODE AN EXPORTED CALL *IS* A REGION. The boundary opens one per
      call and releases it at return -- that is what makes a call a transaction, and what
      v0.1.311 measured. Typing the body inside it is what lets the escape check see the
@@ -1373,7 +1373,7 @@ let infer_top_let outer_env (value : Ast.expr) : Ast.ty =
        `Vec` then held an `int` and a `str` at once.
 
    Both are one entry point now. Q-164. *)
-let infer_top_rec outer_env (bindings : (string * Loc.t * Ast.expr) list) : Ast.ty list =
+let infer_top_rec_inner outer_env (bindings : (string * Loc.t * Ast.expr) list) : Ast.ty list =
   let alphas =
     Typer.enter_level (fun () -> List.map (fun _ -> Typer.fresh_var ()) bindings) in
   let env_rec =
@@ -1418,6 +1418,19 @@ let infer_top_rec outer_env (bindings : (string * Loc.t * Ast.expr) list) : Ast.
    `__heap` the difference did not show. Q-127 made it show: `let store = vec_new ()`
    was generalised over its REGION, so each use instantiated a different one for a
    container there is only one of. *)
+(* v0.1.584 (Q-118): and a top-level binding's `of_json` into a container is
+   refused as soon as it is typed -- the interpreter runs each top-level `let`
+   right after this, so a check after the last one would come after the failure
+   it is there to prevent *)
+let infer_top_let outer_env (value : Ast.expr) : Ast.ty =
+  let t = infer_top_let_inner outer_env value in
+  Typer.check_of_json_targets value;
+  t
+let infer_top_rec outer_env (bindings : (string * Loc.t * Ast.expr) list) : Ast.ty list =
+  let ts = infer_top_rec_inner outer_env bindings in
+  List.iter (fun (_, _, v) -> Typer.check_of_json_targets v) bindings;
+  ts
+
 let top_let_scheme outer_env (value : Ast.expr) (ty : Ast.ty) : Typer.scheme =
   if Typer.is_value value || not (Typer.ty_mentions_mutable_container ty)
   then Typer.generalize outer_env ty
@@ -1590,6 +1603,7 @@ let process_opt ?base_dir ?(search_paths = []) s =
   let type_env = ref Typer.initial_env in
   process_decls eval_env type_env prog.decls;
   let _ = Typer.infer !type_env prog.main in
+  Typer.check_of_json_targets prog.main;
   (* Q-012 (OPEN ii): discharge deferred channel-element Send obligations
      now that the whole program is typed and element tyvars are resolved. *)
   Typer.discharge_send_constraints ();
@@ -2432,6 +2446,9 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
      `mere -c file.mere` — and raced at runtime. Run the same checks the
      run path runs (run_program lines up with this order). *)
   let post () =
+    (* v0.1.584 (Q-118): once more on the whole program, for a target only a
+       later use settled *)
+    Typer.check_of_json_targets desugared;
     Typer.discharge_send_constraints ();
     Typer.check_borrows [] desugared;
     Move_check.check desugared

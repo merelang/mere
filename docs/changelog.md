@@ -4,6 +4,26 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.584 — 2026-10-02
+
+_`of_json` into a container is a type error at the call (Q-118), not a failure when the checkpoint is read back._
+
+`to_json` writes a `Vec` as an array, a `Map` as an object and a `StrBuf` as a
+string; `of_json` can decode none of them -- a container has a region and an
+identity, and a decoder makes values. The program that met this was the one that
+checkpointed its state (usually a `Map`), wrote it without complaint, and failed
+reading it back: `of_json: expected a variant value for Vec`, at run time.
+
+`of_json`, `of_json_opt`, `of_json_like` and `of_json_opt_like` whose target is a
+container -- or holds one, through a tuple, an option or list, a record field or
+a variant payload -- are now refused where the call is typed, naming the
+container and the way out (decode the contents as a list and rebuild it). A
+top-level binding is checked as soon as it is typed, because the interpreter runs
+it right after; the whole program is checked again once inference has settled
+targets that only a later use decides. Four unit tests.
+
+---
+
 ## v0.1.583 — 2026-10-02
 
 _A curried inner function called with all its arguments builds no closures on LLVM and Wasm either (Q-142): mandelbrot takes 6 MB on LLVM (was 235) and runs on Wasm (was out of memory)._

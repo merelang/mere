@@ -1779,6 +1779,49 @@ let rec unsync_builtin_in (visiting : string list) (t : Ast.ty) : string option 
      | None -> first (unsync_builtin_in visiting) args)
   | _ -> None
 
+(* v0.1.584 (Q-118): what `of_json` cannot build. The decoder writes every value
+   fresh, and a container is not a value it can make up: it has a region the
+   decoder would have to choose and an identity nothing could share. `to_json`
+   writes one (as an array, an object, a string), so the asymmetry was found by
+   the program that wrote a checkpoint and failed reading it back. Refused here,
+   at the call, where the annotation that asked for it is -- looking through
+   tuples, options/lists and user records/variants that hold one. *)
+let rec container_in (visiting : string list) (t : Ast.ty) : string option =
+  let first f l = List.fold_left (fun acc x -> match acc with Some _ -> acc | None -> f x) None l in
+  match Ast.walk t with
+  | Ast.TyTuple ts -> first (container_in visiting) ts
+  | Ast.TyCon (n, _) when List.mem n region_parameterised_names || n = "OwnedVec" -> Some n
+  | Ast.TyCon (n, _) when List.mem n visiting -> None
+  | Ast.TyCon (n, args) ->
+    (match nominal_contents n args with
+     | Some tys -> first (container_in (n :: visiting)) tys
+     | None -> first (container_in visiting) args)
+  | _ -> None
+
+let check_of_json_targets (e : Ast.expr) : unit =
+  let rec go (e : Ast.expr) =
+    (match e.Ast.node with
+     | Ast.App ({ Ast.node = Ast.Var ("of_json" | "of_json_opt" as f); _ }, _)
+     | Ast.App ({ Ast.node = Ast.App ({ Ast.node = Ast.Var ("of_json_like" | "of_json_opt_like" as f); _ }, _); _ }, _) ->
+       (match e.Ast.ty with
+        | Some t ->
+          (match container_in [] t with
+           | Some c ->
+             let a = match c.[0] with 'A' | 'E' | 'I' | 'O' | 'U' -> "an" | _ -> "a" in
+             raise (Type_error (e.Ast.loc, Printf.sprintf
+               "%s cannot build %s %s: %s %s has a region and an identity, and decoding \
+                makes values, not containers -- `to_json` writes one, but nothing can read \
+                it back as one\n\
+                help: decode the contents as a list (or a record / tuple of lists) and \
+                rebuild the %s from it"
+               f a c a c c))
+           | None -> ())
+        | None -> ())
+     | _ -> ());
+    List.iter go (Ast.children e)
+  in
+  go e
+
 let sync_type_holds_unsync (name : string) : string option =
   match nominal_contents name [] with
   | Some tys -> List.fold_left (fun acc t -> match acc with Some _ -> acc | None -> unsync_builtin_in [name] t) None tys

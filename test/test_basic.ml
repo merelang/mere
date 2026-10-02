@@ -13626,6 +13626,22 @@ let () =
        "sync type SharedLog = MkLog of int; \
         let ch = channel_new () in \
         channel_send ch (MkLog 0)") "";
+  (* v0.1.584 (Q-118): of_json into a container is a type error at the call *)
+  check_raises_containing "of_json into a Vec is refused when typed"
+    "of_json cannot build a Vec"
+    (fun () -> Pipeline.process
+       "let b = (of_json \"[1]\" : Vec[__heap, int]) in vec_len b");
+  check_raises_containing "of_json into a record holding a Map is refused"
+    "cannot build a Map"
+    (fun () -> Pipeline.process
+       "type St = { n: int, m: Map[__heap, int, int] }; \
+        let s = (of_json \"1\" : St) in s.n");
+  check_raises_containing "of_json_opt into a StrBuf is refused"
+    "of_json_opt cannot build a StrBuf"
+    (fun () -> Pipeline.process
+       "match (of_json_opt \"1\" : StrBuf[__heap] option) with | Some _ -> 1 | None -> 0");
+  check "of_json into a list of tuples still decodes"
+    (Pipeline.process "let xs = (of_json \"[[1,2],[3,4]]\" : (int * int) list) in list_len xs") "2";
   (* v0.1.582 (Q-179): `sync type` vouches for what it holds, except a builtin
      container -- which has no lock for the marker to stand for. *)
   check_raises_containing "sync type holding a Map is refused"
