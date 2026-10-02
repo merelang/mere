@@ -4,6 +4,24 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.577 — 2026-10-02
+
+_`mere fmt` keeps 50 more trailing comments: 93 lost lines over the corpus become 43 (Q-154)._
+
+Two places, neither needing an end position. The first branch of an `if` chain
+did not take its trailing comment while every later branch did -- one call
+`fmt_else_chain` makes and `fmt_if_multiline` did not (26 lines). And a comment
+written after the `;` that ends a declaration is now attached there, the last
+line the declaration's tree reaches standing in for its end (24 lines); where a
+closing delimiter sits alone on a later line the stand-in is short of the real
+end and the comment is left where it was, which is what happened to all of them
+before. `fmt_comments_check`'s ceiling is 43; fmt_roundtrip still finds every
+formatted file re-reads and formats to itself. What is left is classified in the
+gate: variant lines in a `type`, `let ... in`, list literals reflowed across
+`,`, nested if/else, and `//` inside strings.
+
+---
+
 ## v0.1.576 — 2026-10-02
 
 _The language server stops re-checking keystrokes that are already out of date, and answers folding (Q-023, Q-147)._
