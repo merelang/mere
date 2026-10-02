@@ -46,10 +46,17 @@ extern fn dom_on_key: (str -> unit) -> unit;
 // caches its 2d context. fill_style takes any CSS color string
 // (e.g. "rgb(200,30,30)"); fill_rect is x, y, w, h in canvas pixels.
 // Together they are the minimal pixel-output surface: a renderer sets
-// the style then fills 1x1 rects. Blitting a whole buffer in one call
-// (ImageData) needs typed-buffer FFI and is deliberately future work.
+// the style then fills 1x1 rects.
 extern fn dom_canvas_fill_style: JsRef -> str -> unit;
 extern fn dom_canvas_fill_rect: JsRef -> int -> int -> int -> int -> unit;
+
+// v0.1.603 (Q-122): a whole frame in one call. `dom_canvas_put_pixels c px w h`
+// draws a w x h image at the canvas's top-left corner; `px` is its pixels row
+// by row, four bytes each (red, green, blue, alpha). Build it in a ByteBuf and
+// freeze it with `bytes_of_bytebuf`. Fewer than w * h * 4 bytes is refused by
+// name rather than drawn short. A renderer that filled 1x1 rects made one host
+// call per pixel; this is one per frame.
+extern fn dom_canvas_put_pixels: JsRef -> bytes -> int -> int -> unit;
 
 // A per-frame callback driven by the host's requestAnimationFrame loop: the
 // glue calls the `unit -> unit` closure once per animation frame, forever.

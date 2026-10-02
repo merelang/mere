@@ -1,0 +1,16 @@
+// v0.1.603 (Q-122): a 2x2 frame blitted in one call. Pixels row by row,
+// RGBA: red, green / blue, white.
+import "../../contrib/dom/dom.mere";
+
+let screen = dom_get_by_id "screen";
+let px = bytebuf_new 16;
+let put = fn (i: int) -> fn (r: int) -> fn (g: int) -> fn (b: int) ->
+  let _ = bytebuf_set px (i * 4) r in
+  let _ = bytebuf_set px (i * 4 + 1) g in
+  let _ = bytebuf_set px (i * 4 + 2) b in
+  bytebuf_set px (i * 4 + 3) 255;
+let _ = put 0 255 0 0;
+let _ = put 1 0 255 0;
+let _ = put 2 0 0 255;
+let _ = put 3 255 255 255;
+dom_canvas_put_pixels screen (bytes_of_bytebuf px) 2 2
