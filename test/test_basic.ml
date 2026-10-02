@@ -2550,6 +2550,21 @@ let () =
     (Pipeline.process
        "let f = fn (s: str) -> match s with | \"ab\" <> r when str_len r > 1 -> r | _ -> \"short\" in f \"abcd\"")
     "\"cd\"";
+  (* v0.1.588 (Q-156): top-level functions in any order *)
+  check "a top-level fn may call one defined below it"
+    (Pipeline.process "let f = fn (x: int) -> g x + 1;\nlet g = fn (x: int) -> x * 2;\nf 3") "7";
+  check "two top-level fns may call each other across declarations"
+    (Pipeline.process
+       "let ev = fn (n: int) -> if n == 0 then true else od (n - 1);\n\
+        let od = fn (n: int) -> if n == 0 then false else ev (n - 1);\n\
+        if ev 7 then 1 else 0") "0";
+  check_raises_containing "a value still cannot use what is defined after it"
+    "unbound variable: g"
+    (fun () -> Pipeline.process
+       "let f = fn (x: int) -> g x;\nlet v = f 1;\nlet g = fn (x: int) -> x + v;\nv");
+  check "fmt keeps the order the program was written in"
+    (Pipeline.format_source "let f = fn (x: int) -> g x;\nlet g = fn (x: int) -> x;\nprint_int (f 1)")
+    "let f = fn (x: int) -> g x;\n\nlet g = fn (x: int) -> x;\n\nprint_int (f 1)\n";
   (* v0.1.587 (Q-154): a comment at the end of a constructor's line comes back
      after that constructor; a type without one stays on one line *)
   check "v0.1.587: constructor lines keep their comments"

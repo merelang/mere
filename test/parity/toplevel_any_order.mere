@@ -1,0 +1,10 @@
+// Top-level functions in any order (v0.1.588, Q-156): f calls g, defined below
+// it after a value g reads; is_even / is_odd call each other across two separate
+// declarations. Values keep their order; only function definitions move.
+let f = fn (x: int) -> g x + 1;
+let tbl = vec_new ();
+let _ = vec_push tbl 10;
+let g = fn (x: int) -> x * vec_get tbl 0;
+let is_even = fn (n: int) -> if n == 0 then true else is_odd (n - 1);
+let is_odd = fn (n: int) -> if n == 0 then false else is_even (n - 1);
+print (str_of_int (f 4) ++ " " ++ (if is_even 10 then "even" else "odd"))

@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.588 — 2026-10-02
+
+_Top-level functions may be defined in any order (Q-156): a function can call one defined below it, and two can call each other from separate declarations._
+
+A top-level function could only call one written above it. The way round was to
+put everything in one `let rec ... and ...` -- mere-ruby's interpreter is a group
+of a thousand -- which also makes the members monomorphic in each other (Q-157),
+or a `let fn` promise per name, which almost nobody wrote (one, in four
+repositories).
+
+`Ast.order_toplevel` runs once the top-level names are unique. Evaluation order
+does not move: a value keeps its place relative to every other value. A function
+definition, which does nothing when it is reached, is placed after the
+declarations it refers to (or earlier, when a value needs it), and functions
+that refer to each other across separate declarations become one group -- only
+those; a group the program wrote is never split. A value that needs a function
+that needs a later value cannot be scheduled and is left as written, with the
+`unbound variable` it always had. `mere fmt` prints the source order.
+
+A program with no forward reference comes back exactly as it was, so nothing
+that compiled before changes: every `.mere` in the repository and in 18
+downstream projects emits byte-identical C, LLVM, Wasm and RV32 output and the
+same `-t` answer as v0.1.587 (5,110 comparisons), and so does mere-ruby. The
+Q-156 probe retires. `test/parity/toplevel_any_order.mere` (203 programs) and
+four unit tests.
+
+---
+
 ## v0.1.587 — 2026-10-02
 
 _`mere fmt` keeps the comment at the end of a constructor's line (lost comment lines 43 -> 26), and `bytes_of_str` is a view instead of a copy while no region block is open (Q-117)._

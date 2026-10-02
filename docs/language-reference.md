@@ -175,10 +175,34 @@ and is_odd     = fn n -> if n == 0 then false else is_even (n - 1)
 in is_even 10
 ```
 
+### Top-level functions in any order (v0.1.588)
+
+A top-level function may call one defined below it, and two top-level functions
+may call each other from separate declarations -- no `and` needed:
+
+```
+let area = fn (s: Shape) -> scale * base_area s;
+let scale = 2;
+let base_area = fn (s: Shape) -> match s with | Sq n -> n * n | Dot -> 0;
+
+let is_even = fn (n: int) -> if n == 0 then true else is_odd (n - 1);
+let is_odd  = fn (n: int) -> if n == 0 then false else is_even (n - 1);
+```
+
+What runs still runs in the order it is written: a value (`let t = map_new ();`,
+`let _ = print "hi";`) keeps its place relative to every other value. Only
+function definitions -- which do nothing when they are reached -- are placed
+after what they refer to, and functions that refer to each other across
+declarations are checked as one group (so they are monomorphic in each other,
+the way an `and` group is). A *value* still cannot use something defined below
+it: `let v = f 1;` above the definition of a function `f` needs is the
+`unbound variable` error it always was. Inside an expression, `let ... in`
+keeps its order.
+
 ### Forward declarations (`let fn <name>: <type>;`)
 
-`let rec ... and ...` is the only way two definitions can call each other, and
-a chain closes where it ends. `import` is a splice, so a chain also closes at
+`let rec ... and ...` is the way two definitions inside an expression can call
+each other, and a chain closes where it ends. `import` is a splice, so a chain also closes at
 an import: two files, or two chains in one file, could not be mutually
 recursive. A forward declaration binds a name to a written type at the point
 of the promise; the definition follows anywhere below, including in a file

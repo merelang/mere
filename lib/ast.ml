@@ -1807,3 +1807,134 @@ let simd_operand_only (name : string) (body : expr) : bool =
     | _ -> List.for_all ok (children e)
   in
   ok body
+
+(* v0.1.588 (Q-156): TOP-LEVEL FUNCTIONS IN ANY ORDER. A top-level function
+   could only call one defined above it; the way round was to put everything in
+   one `let rec ... and ...` (mere-ruby's interpreter is a group of a thousand),
+   which also makes the group's members monomorphic in each other (Q-157).
+
+   Evaluation order is the program's and does not move: a value (`let t =
+   map_new ()`, `let _ = print ...`) stays where it is, in its order relative
+   to every other value. What moves is a FUNCTION definition -- which does
+   nothing when it is evaluated -- to after the declarations it refers to, and
+   earlier when a value refers to it. Functions that refer to each other across
+   separate declarations become one group, and only those: a group the program
+   wrote is never split, and a program with no forward reference comes back
+   exactly as it was (the common case, and why this changes nothing that
+   compiled before). A reference this cannot schedule -- a value that needs a
+   function that needs a later value -- is left as written, so it fails with
+   the error it always had. Runs after uniquify_toplevel_shadows, so a name is
+   one declaration. *)
+let order_toplevel ?(skip = 0) (prog : program) : program =
+  let all = Array.of_list prog.decls in
+  let n = Array.length all in
+  if n <= skip then prog else
+  let binds d = match d with
+    | Top_let (p, _) -> pattern_vars p
+    | Top_let_rec bs -> List.map (fun (nm, _, _) -> nm) bs
+    | Top_forward (nm, _, _) | Top_extern (nm, _) -> [ nm ]
+    | _ -> [] in
+  let is_fn d = match d with
+    | Top_let ({ pnode = P_var _; _ }, { node = Fun _; _ }) -> true
+    | Top_let_rec bs -> bs <> [] && List.for_all (fun (_, _, (v : expr)) -> match v.node with Fun _ -> true | _ -> false) bs
+    | _ -> false in
+  (* the first user declaration binding each name *)
+  let owner : (string, int) Hashtbl.t = Hashtbl.create 256 in
+  for i = skip to n - 1 do
+    List.iter (fun nm -> if not (Hashtbl.mem owner nm) then Hashtbl.add owner nm i) (binds all.(i))
+  done;
+  (* free names of an expression that a user declaration binds *)
+  let refs_of_expr (e0 : expr) (acc : (int, unit) Hashtbl.t) =
+    let rec go bound (e : expr) =
+      (match e.node with
+       | Var x when not (List.mem x bound) ->
+         (match Hashtbl.find_opt owner x with Some j -> Hashtbl.replace acc j () | None -> ())
+       | _ -> ());
+      match e.node with
+      | Fun (p, _, b) -> go (p :: bound) b
+      | Let (pat, v, b) -> go bound v; go (pattern_vars pat @ bound) b
+      | Let_rec (bs, b) ->
+        let bound' = List.map (fun (nm, _, _) -> nm) bs @ bound in
+        List.iter (fun (_, _, v) -> go bound' v) bs; go bound' b
+      | With (nm, v, b) -> go bound v; go (nm :: bound) b
+      | Region_loop (_, x, b) -> go (x :: bound) b
+      | Match (s, arms) ->
+        go bound s;
+        List.iter (fun (p, g, b) ->
+          let bound' = pattern_vars p @ bound in
+          (match g with Some ge -> go bound' ge | None -> ()); go bound' b) arms
+      | _ -> List.iter (go bound) (children e)
+    in
+    go [] e0
+  in
+  let deps = Array.make n [] in
+  for i = skip to n - 1 do
+    let acc = Hashtbl.create 8 in
+    (match all.(i) with
+     | Top_let (_, v) -> refs_of_expr v acc
+     | Top_let_rec bs -> List.iter (fun (_, _, v) -> refs_of_expr v acc) bs
+     | _ -> ());
+    deps.(i) <- Hashtbl.fold (fun j () l -> if j <> i then j :: l else l) acc []
+  done;
+  let forward = ref false and value_forward = ref false in
+  for i = skip to n - 1 do
+    List.iter (fun j -> if j > i then (forward := true; if not (is_fn all.(i)) then value_forward := true)) deps.(i)
+  done;
+  if not !forward || !value_forward then prog else begin
+    (* strongly connected components over the user declarations (Tarjan) *)
+    let index = Array.make n (-1) and low = Array.make n 0 and on = Array.make n false in
+    let comp = Array.make n (-1) and stack = ref [] and counter = ref 0 and ncomp = ref 0 in
+    let rec strong v =
+      index.(v) <- !counter; low.(v) <- !counter; incr counter;
+      stack := v :: !stack; on.(v) <- true;
+      List.iter (fun w ->
+        if index.(w) < 0 then (strong w; low.(v) <- min low.(v) low.(w))
+        else if on.(w) then low.(v) <- min low.(v) index.(w)) deps.(v);
+      if low.(v) = index.(v) then begin
+        let rec pop () = match !stack with
+          | w :: rest -> stack := rest; on.(w) <- false; comp.(w) <- !ncomp; if w <> v then pop ()
+          | [] -> () in
+        pop (); incr ncomp
+      end in
+    for i = skip to n - 1 do if index.(i) < 0 then strong i done;
+    let members = Array.make !ncomp [] in
+    for i = n - 1 downto skip do members.(comp.(i)) <- i :: members.(comp.(i)) done;
+    (* a cycle through a value cannot be scheduled: leave the program as written *)
+    let ok = Array.for_all (fun ms -> match ms with
+      | [] | [ _ ] -> true
+      | ms -> List.for_all (fun i -> is_fn all.(i)) ms) members in
+    if not ok then prog else begin
+      let unit_decl c = match members.(c) with
+        | [ i ] -> all.(i)
+        | ms ->
+          Top_let_rec (List.concat_map (fun i -> match all.(i) with
+            | Top_let ({ pnode = P_var nm; ploc }, v) -> [ (nm, ploc, v) ]
+            | Top_let_rec bs -> bs
+            | _ -> []) ms) in
+      let unit_deps c =
+        List.sort_uniq compare
+          (List.concat_map (fun i -> List.filter_map (fun j ->
+             if comp.(j) <> c then Some comp.(j) else None) deps.(i)) members.(c)) in
+      let first c = List.hd members.(c) in
+      let is_value c = match members.(c) with [ i ] -> not (is_fn all.(i)) | _ -> false in
+      let emitted = Array.make !ncomp false in
+      (* the units in source order of their first member *)
+      let order = List.sort (fun a b -> compare (first a) (first b)) (List.init !ncomp (fun c -> c)) in
+      let out = ref [] and left = ref order and stuck = ref false in
+      while !left <> [] && not !stuck do
+        (* the earliest unit that is ready; a value only once every earlier value is out *)
+        let rec pick seen_value = function
+          | [] -> None
+          | c :: rest ->
+            let ready = List.for_all (fun d -> emitted.(d)) (unit_deps c) in
+            if is_value c then (if ready && not seen_value then Some c else pick true rest)
+            else if ready then Some c else pick seen_value rest
+        in
+        match pick false !left with
+        | Some c -> emitted.(c) <- true; out := unit_decl c :: !out; left := List.filter (( <> ) c) !left
+        | None -> stuck := true
+      done;
+      if !stuck then prog
+      else { prog with decls = Array.to_list (Array.sub all 0 skip) @ List.rev !out }
+    end
+  end
