@@ -32,7 +32,36 @@ function makeChannelEnv(getBuffer, bumpAlloc) {
   // waiter's last look and its wait still wakes it (waiting on count, as
   // before, would sleep through a close: the count does not move).
   const CAP = 4096;
-  const HDR = 24;
+  // v0.1.601 (E): [6] = how many senders are registered, their thread ids from
+  // word 8 on, at most MAXSND of them (a worker cannot allocate here, so the
+  // list cannot grow: past it, channel_sender fails by name)
+  const MAXSND = 256;
+  const HDR = 32 + 4 * MAXSND;
+  // A thread's status block: the first 512 bytes of its private region (see
+  // mere_spawn), so any thread finds it from the id alone. Words: 0 state (0
+  // running, 1 finished, 2 failed), 2 message length, the message from byte 12.
+  const statusOf = (tid) => 16 * 1024 * 1024 + (tid - 1) * 8 * 1024 * 1024;
+  const sendersEnded = (i32, p) => {
+    const n = i32[p + 6];
+    if (n === 0) return null;
+    let failed = 0;
+    for (let i = 0; i < n; i++) {
+      const tid = i32[p + 8 + i];
+      const st = Atomics.load(i32, statusOf(tid) >> 2);
+      if (st === 0) return null;
+      if (st === 2 && failed === 0) failed = tid;
+    }
+    if (failed === 0) return "channel_recv: every sender has finished and the channel is empty";
+    const a = statusOf(failed);
+    const len = new Int32Array(getBuffer())[(a >> 2) + 2];
+    const msg = Buffer.from(new Uint8Array(getBuffer(), a + 12, len)).toString("utf8");
+    return "channel_recv: sender thread " + failed + " failed: " + msg;
+  };
+  const writeStrAt = (out, text) => {
+    const b = Buffer.from(text, "utf8");
+    new DataView(getBuffer()).setInt32(out, b.length, true);
+    new Uint8Array(getBuffer(), out + 4, b.length + 1).set([...b, 0]);
+  };
   const lock = (i32, p) => {
     while (Atomics.compareExchange(i32, p, 0, 1) !== 0) Atomics.wait(i32, p, 1);
   };
@@ -44,7 +73,7 @@ function makeChannelEnv(getBuffer, bumpAlloc) {
       const i32 = new Int32Array(getBuffer());
       const p = ptr >> 2;
       i32[p] = 0; i32[p + 1] = 0; i32[p + 2] = 0; i32[p + 3] = CAP;
-      i32[p + 4] = 0; i32[p + 5] = 0;
+      i32[p + 4] = 0; i32[p + 5] = 0; i32[p + 6] = 0;
       return ptr;
     },
     // 1 when the channel is closed (the module's shim fails, catchably)
@@ -64,8 +93,10 @@ function makeChannelEnv(getBuffer, bumpAlloc) {
     },
     // Every receive: wait (ms < 0: without a deadline) until a value is there
     // -- written as an i64 at `out`, answer 1 -- or the channel is closed and
-    // drained, or the deadline passed with nothing there: answer 0.
-    mere_channel_take: (ptr, ms, out) => {
+    // drained, or the deadline passed with nothing there: answer 0 -- or every
+    // registered sender has finished (v0.1.601): answer 2, with the receive's
+    // failure message written at `out` as a str when `wantMsg`.
+    mere_channel_take: (ptr, ms, out, wantMsg) => {
       const i32 = new Int32Array(getBuffer());
       const ring = new BigInt64Array(getBuffer(), ptr + HDR, CAP);
       const p = ptr >> 2;
@@ -84,15 +115,35 @@ function makeChannelEnv(getBuffer, bumpAlloc) {
         }
         const closed = i32[p + 4];
         const seq = i32[p + 5];
+        const polling = i32[p + 6] > 0;
+        const ended = closed === 0 ? sendersEnded(i32, p) : null;
         unlock(i32, p);
         if (closed !== 0) return 0;
-        if (ms < 0) Atomics.wait(i32, p + 5, seq);
+        if (ended !== null) { if (wantMsg) writeStrAt(out, ended); return 2; }
+        // a sender's end bumps nothing here, so with senders registered the
+        // wait looks again every 50 ms
+        if (ms < 0) Atomics.wait(i32, p + 5, seq, polling ? 50 : Infinity);
         else {
           const left = deadline - Date.now();
           if (left <= 0) return 0;
-          Atomics.wait(i32, p + 5, seq, left);
+          Atomics.wait(i32, p + 5, seq, polling ? Math.min(left, 50) : left);
         }
       }
+    },
+    // 1 when the channel already has MAXSND senders (the module's shim fails)
+    mere_channel_sender: (ptr, tid) => {
+      const i32 = new Int32Array(getBuffer());
+      const p = ptr >> 2;
+      lock(i32, p);
+      const n = i32[p + 6];
+      for (let i = 0; i < n; i++) if (i32[p + 8 + i] === tid) { unlock(i32, p); return 0; }
+      if (n >= MAXSND) { unlock(i32, p); return 1; }
+      i32[p + 8 + n] = tid;
+      i32[p + 6] = n + 1;
+      Atomics.add(i32, p + 5, 1);
+      unlock(i32, p);
+      Atomics.notify(i32, p + 5);
+      return 0;
     },
     mere_channel_close: (ptr) => {
       const i32 = new Int32Array(getBuffer());
@@ -118,7 +169,7 @@ function makeChannelEnv(getBuffer, bumpAlloc) {
 const WORKER_CODE = `
 const { workerData } = require('worker_threads');
 const fs = require('fs');
-const { wasmBytes, memory, fnIdx, envOff, doneSab, bumpBase, tid, topGlobals } = workerData;
+const { wasmBytes, memory, fnIdx, envOff, doneSab, bumpBase, tid, topGlobals, statusBase } = workerData;
 // v0.1.586 (Q-090): the thread's record, shared with the main thread. Words:
 // 0 done, 1 failed, 2 claim (0 nobody's, 1 joined, 2 detached), 3 told,
 // 4 message length; the message from byte 20.
@@ -192,6 +243,18 @@ const env = Object.assign({
         : /out of bounds/i.test(m) ? "out of memory" : "trap: " + m;
       recordFailure(Buffer.from(why, "utf8"));
     }
+  }
+  // v0.1.601: and in the shared memory, where a receive on a channel this
+  // thread was registered to send on reads it (channel_sender)
+  {
+    const failed = Atomics.load(st, 1) === 1;
+    const s32 = new Int32Array(memory.buffer);
+    if (failed) {
+      const n = Math.min(Atomics.load(st, 4), 255);
+      new Uint8Array(memory.buffer, statusBase + 12, n).set(new Uint8Array(doneSab, 20, n));
+      s32[(statusBase >> 2) + 2] = n;
+    }
+    Atomics.store(s32, statusBase >> 2, failed ? 2 : 1);
   }
   Atomics.store(st, 0, 1);
   // v0.1.590: a failure is one line when it happens, whoever holds the handle
@@ -562,14 +625,23 @@ const wasmPath = process.argv[2];
       // allocations can't collide (the bump pointer is a per-instance global).
       // This is the pragmatic alternative to a single shared atomic bump:
       // the main instance uses the low region, worker i uses [16MB + i*8MB, …).
-      const bumpBase = 16 * 1024 * 1024 + (tid - 1) * 8 * 1024 * 1024;
+      // v0.1.601: its first 512 bytes are the thread's status block (see
+      // makeChannelEnv's statusOf, the same address); allocation starts after
+      const statusBase = 16 * 1024 * 1024 + (tid - 1) * 8 * 1024 * 1024;
+      // the region can start past the memory's current end (the 7th thread's
+      // is at 64 MiB, the initial size): grow it first, or the write below
+      // throws in the host and the program dies of a "stack overflow"
+      const need = statusBase + 512 - sharedMemory.buffer.byteLength;
+      if (need > 0) sharedMemory.grow(Math.ceil(need / 65536));
+      new Int32Array(sharedMemory.buffer, statusBase, 3).fill(0);
+      const bumpBase = statusBase + 512;
       const topGlobals = {};
       if (mainInstance)
         for (const [k, g] of Object.entries(mainInstance.exports))
           if (k.startsWith("__tg_")) topGlobals[k] = g.value;
       const worker = new Worker(WORKER_CODE, {
         eval: true,
-        workerData: { wasmBytes, memory: sharedMemory, fnIdx, envOff, doneSab, bumpBase, tid, topGlobals },
+        workerData: { wasmBytes, memory: sharedMemory, fnIdx, envOff, doneSab, bumpBase, tid, topGlobals, statusBase },
       });
       worker.on('error', (e) => console.error('worker error:', e));
       threads.set(tid, { worker, sab: doneSab, st: new Int32Array(doneSab, 0, 5) });

@@ -1,0 +1,21 @@
+// v0.1.601: channel_sender -- a receive stops waiting once every sender it was
+// told about has finished and nothing is left to take.
+let results = channel_new ();
+let ok = spawn (fn (u: unit) -> channel_send results 1);
+let bad = spawn (fn (u: unit) -> let _ = channel_send results 2 in fail "boom");
+let _ = channel_sender results ok;
+let _ = channel_sender results bad;
+let rec drain = fn (acc: int) ->
+  match channel_recv_opt results with
+  | Some v -> drain (acc + v)
+  | None -> acc;
+let _ = print_int (drain 0);
+let _ = print (try_or_msg (fn (u: unit) -> str_of_int (channel_recv results)) (fn (m: str) -> m));
+let quiet = channel_new ();
+let fine = spawn (fn (u: unit) -> ());
+let _ = channel_sender quiet fine;
+let _ = print (try_or_msg (fn (u: unit) -> str_of_int (channel_recv quiet)) (fn (m: str) -> m));
+let _ = print (match channel_recv_timeout quiet 5000 with Some v -> str_of_int v | None -> "None, at once");
+let _ = detach ok;
+let _ = detach bad;
+detach fine
