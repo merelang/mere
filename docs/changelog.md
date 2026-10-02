@@ -4,6 +4,25 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.598 — 2026-10-03
+
+_`file_exists`, `sleep_ms` and `random_int` on LLVM, and `random_int`'s failure names the bound on C as it does everywhere else._
+
+The three were the first wall for a dozen downstream programs on LLVM
+(`file_exists` alone for mengd, mreg, mraft, mk and mere-ruby). They give the C
+runtime's answers: whether the path names something (`access(F_OK)`, since
+`stat` would need the platform's struct layout in IR), a sleep that does nothing
+for a count of zero or less, and a uniform int in [0, n) from `rand`, seeded
+once from time ^ pid. A libc function the program also declares as an `extern`
+is declared once.
+
+`random_int 0` failed with "random_int: bound must be positive" on C and with
+"... (got 0)" on the interpreter, Wasm and RISC-V; C and LLVM say "(got 0)" now.
+`test/parity/file_exists_random_int.mere` holds what of this is deterministic;
+`docs/host-matrix.md` shows the three as `yes` on LLVM.
+
+---
+
 ## v0.1.597 — 2026-10-03
 
 _A tuple pattern nested in a `let` compiles on every backend: parity checks every program on C (206 of 206), and leaves 15 unchecked on LLVM and 8 on Wasm._

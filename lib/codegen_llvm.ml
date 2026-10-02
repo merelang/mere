@@ -38,7 +38,8 @@ let host_builtins_without_llvm_lowering =
     "tty_raw"; "tty_restore";
     "read_lines";
     "run";
-    "file_exists"; "random_int"; "random_float" ]
+    (* file_exists / random_int were here until v0.1.598 *)
+    "random_float" ]
 
 (* Same-thread coroutines (coro_new / coro_switch / coro_self). Emitted only
    when a program uses one of the three; the comment at its top says why it is
@@ -1117,6 +1118,9 @@ let str_count_used_llvm = ref false
 (* v0.1.337: env_var pulls in its runtime AND registers `option_str`, which a
    program consuming the result with `match` alone would never register. *)
 let env_var_used_llvm = ref false
+(* v0.1.598: which of file_exists / sleep_ms / random_int the program calls;
+   see host_misc_runtime_llvm *)
+let host_misc_used_llvm : (string, unit) Hashtbl.t = Hashtbl.create 4
 let file_io_used_llvm = ref false
 (* v0.1.163: positioned file I/O (file_openrw / file_size / file_pread /
    file_pwrite / file_fsync / file_close), the group a paged or
@@ -6200,9 +6204,23 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   | Ast.App ({ node = Ast.Var "file_mtime"; _ }, _) ->
     unsupported e.Ast.loc
       "file_mtime is unsupported in LLVM codegen (Phase 44.6 MVP = interp + C only)"
-  | Ast.App ({ node = Ast.Var "sleep_ms"; _ }, _) ->
-    unsupported e.Ast.loc
-      "sleep_ms is unsupported in LLVM codegen (Phase 44.6 MVP = interp + C only)"
+  | Ast.App ({ node = Ast.Var "sleep_ms"; _ }, ms_e) when not (user_shadows_llvm env "sleep_ms") ->
+    Hashtbl.replace host_misc_used_llvm "sleep_ms" ();
+    let mv = emit_expr env ms_e in
+    emit_instr (Printf.sprintf "  call void @__lang_sleep_ms(i64 %s)" mv);
+    "0"
+  | Ast.App ({ node = Ast.Var "file_exists"; _ }, path_e) when not (user_shadows_llvm env "file_exists") ->
+    Hashtbl.replace host_misc_used_llvm "file_exists" ();
+    let pv = emit_expr env path_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i1 @__lang_file_exists(ptr %s)" r pv);
+    r
+  | Ast.App ({ node = Ast.Var "random_int"; _ }, n_e) when not (user_shadows_llvm env "random_int") ->
+    Hashtbl.replace host_misc_used_llvm "random_int" ();
+    let nv = emit_expr env n_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_random_int(i64 %s)" r nv);
+    r
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "write_file"; _ }, path_e); _ }, content_e) ->
     (* Phase 25.9: write_file path content — curried; returns unit (i32 0). *)
     file_io_used_llvm := true;
@@ -15171,6 +15189,82 @@ let file_pio_runtime_llvm =
    loud way -- it compiled, the unset case worked, and the first program that
    found the variable died with "out of memory".) Copying also means a later
    setenv cannot move the string out from under the value. *)
+(* v0.1.598: file_exists, sleep_ms and random_int, which the C backend has had
+   since mk, mraft and mrog needed them (v0.1.15-20). The same answers: whether
+   the path names something (`access(F_OK)` -- `stat` would need the platform's
+   struct layout in IR), a sleep of ms milliseconds that does nothing for
+   ms <= 0, and a uniform int in [0, n) from `rand`, seeded once from
+   time ^ pid, failing on n <= 0 the way the interpreter does. A libc function
+   the program also declares as an `extern` is declared once. *)
+let host_misc_runtime_llvm (declared : string -> bool) : string list =
+  let used k = Hashtbl.mem host_misc_used_llvm k in
+  let decl name line = if declared name then [] else [line] in
+  if Hashtbl.length host_misc_used_llvm = 0 then [] else
+  (if used "file_exists" then
+     decl "access" "declare i32 @access(ptr, i32)"
+     @ [ "define i1 @__lang_file_exists(ptr %path) {";
+         "entry:";
+         "  %r = call i32 @access(ptr %path, i32 0)";
+         "  %ok = icmp eq i32 %r, 0";
+         "  ret i1 %ok";
+         "}" ]
+   else [])
+  @ (if used "sleep_ms" then
+       decl "usleep" "declare i32 @usleep(i32)"
+       @ [ "define void @__lang_sleep_ms(i64 %ms) {";
+           "entry:";
+           "  %pos = icmp sgt i64 %ms, 0";
+           "  br i1 %pos, label %go, label %done";
+           "go:";
+           (* the C runtime's `(useconds_t)ms * 1000`: 32 bits, unsigned *)
+           "  %m32 = trunc i64 %ms to i32";
+           "  %us = mul i32 %m32, 1000";
+           "  %r = call i32 @usleep(i32 %us)";
+           "  br label %done";
+           "done:";
+           "  ret void";
+           "}" ]
+     else [])
+  @ (if used "random_int" then
+       decl "time" "declare i64 @time(ptr)"
+       @ decl "getpid" "declare i32 @getpid()"
+       @ decl "srand" "declare void @srand(i32)"
+       @ decl "rand" "declare i32 @rand()"
+       @ [ "@__lang_rand_seeded = internal global i32 0";
+           "@.rand_fmt = private constant [46 x i8] c\"random_int: bound must be positive (got %lld)\\00\"";
+           "define i64 @__lang_random_int(i64 %n) {";
+           "entry:";
+           "  %s = load i32, ptr @__lang_rand_seeded";
+           "  %need = icmp eq i32 %s, 0";
+           "  br i1 %need, label %seed, label %chk";
+           "seed:";
+           "  %t = call i64 @time(ptr null)";
+           "  %p = call i32 @getpid()";
+           "  %p64 = sext i32 %p to i64";
+           "  %x = xor i64 %t, %p64";
+           "  %x32 = trunc i64 %x to i32";
+           "  call void @srand(i32 %x32)";
+           "  store i32 1, ptr @__lang_rand_seeded";
+           "  br label %chk";
+           "chk:";
+           "  %bad = icmp sle i64 %n, 0";
+           "  br i1 %bad, label %fail, label %ok";
+           "fail:";
+           "  call void @__lang_fail_num(ptr @.rand_fmt, i64 %n)";
+           "  unreachable";
+           "ok:";
+           (* ((long long)rand() * RAND_MAX + rand()) % n, RAND_MAX = 2^31 - 1 *)
+           "  %a = call i32 @rand()";
+           "  %b = call i32 @rand()";
+           "  %a64 = sext i32 %a to i64";
+           "  %b64 = sext i32 %b to i64";
+           "  %m = mul i64 %a64, 2147483647";
+           "  %sum = add i64 %m, %b64";
+           "  %r = srem i64 %sum, %n";
+           "  ret i64 %r";
+           "}" ]
+     else [])
+
 let env_var_runtime_llvm =
   String.concat "\n"
     (* `declare ptr @getenv(ptr)` used to be here. It is unconditional now (see
@@ -15964,6 +16058,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   specialize_single_use_local_fns main_expr;
   (* Phase 32.3 (C1 FFI): walk prog.decls to register extern fn names. *)
   Hashtbl.reset extern_fn_decls_llvm;
+  Hashtbl.reset host_misc_used_llvm;
   List.iter (fun decl ->
     match decl with
     | Ast.Top_extern (name, ty) ->
@@ -16569,6 +16664,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !bytes_vec_used then [bytes_vec_bridge_runtime_llvm; ""] else [])
     @ (if !str_count_used_llvm then [str_count_runtime_llvm; ""] else [])
     @ (if !env_var_used_llvm then [env_var_runtime_llvm; ""] else [])
+    @ (match host_misc_runtime_llvm (Hashtbl.mem extern_fn_decls_llvm) with
+       | [] -> [] | l -> l @ [""])
     @ (if !str_split_used_llvm then [str_split_runtime_llvm; ""] else [])
     @ (if !str_join_used_llvm then [str_join_runtime_llvm; ""] else [])
     @ (if !file_io_used_llvm || !uses_read_file_bytes_llvm || !uses_write_file_bytes_llvm

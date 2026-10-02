@@ -1,0 +1,9 @@
+// v0.1.598: file_exists and random_int on LLVM, and random_int's failure naming
+// the bound on C as it does everywhere else. Only what is deterministic: "." is
+// there from any directory, a bound of 1 has one answer, and 0 is refused.
+let _ = print (if file_exists "." then "here" else "missing");
+let _ = print (if file_exists "no/such/dir/at/all" then "here" else "missing");
+let r = random_int 6;
+let _ = print (if r >= 0 && r < 6 then "in range" else "out of range");
+let _ = print_int (random_int 1);
+print (try_or_msg (fn (u: unit) -> str_of_int (random_int 0)) (fn (m: str) -> m))
