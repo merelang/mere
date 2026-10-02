@@ -8495,12 +8495,27 @@ let () =
   (* --- Phase 12.2: Vec[R, T] syntax (Q-010 narrowed -> second implementation step) --- *)
   (* Lightweight version: parse-only. R is dropped from the type representation
      and becomes the same TyCon as `T Vec` (forward-compatible). *)
-  check "vec[R, T]: type-annotation prints as Vec[R, int]"
+  (* v0.1.572 (Q-196): with no `region R { }` around the annotation, R is a
+     variable -- what patterns.md and the tutorial say it is. It used to be the
+     region NAMED R, which is every block of that name in the program. *)
+  check "vec[R, T]: an annotation's R outside any block R is a variable"
     (Pipeline.type_of "fn (v: Vec[R, int]) -> vec_len v")
-    "(Vec[R, int] -> int)";
+    "(Vec['a, int] -> int)";
   check "vec[R, T]: str variant"
     (Pipeline.type_of "fn (v: Vec[R, str]) -> vec_get v 0")
-    "(Vec[R, str] -> str)";
+    "(Vec['a, str] -> str)";
+  check "Q-196: a parameter's R does not meet an unrelated block named R"
+    (Pipeline.type_of "let first = fn (b: ByteBuf[R]) -> bytebuf_get b 0 in \
+                       let b = bytebuf_of_bytes (bytes_of_str \"xy\") in \
+                       let k = first b in \
+                       let _ = region R { str_len \"abc\" } in k")
+    "int";
+  check "Q-196: inside region R, an annotation's R is that block"
+    (Pipeline.type_of "region R { let v = vec_new () in let _ = vec_push v 1 in \
+                       let f = fn (w: Vec[R, int]) -> vec_len w in f v }")
+    "int";
+  check_raises "Q-196: a container annotated with the open block's R still cannot leave it"
+    (fun () -> Pipeline.type_of "region R { (vec_new () : Vec[R, int]) }");
   check "vec[R, T]: `int Vec` (postfix) defaults region to __heap"
     (Pipeline.type_of "fn (v: int Vec) -> vec_len v")
     "(Vec[__heap, int] -> int)";

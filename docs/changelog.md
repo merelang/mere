@@ -4,6 +4,38 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.572 — 2026-10-02
+
+_An annotation's region name is a variable unless a block of that name is open around it (Q-196)._
+
+`fn (b: ByteBuf[R]) -> ..` is how the documentation writes a function over any
+buffer -- patterns.md says to "write R as a type variable", the tutorial shows
+`fn (v: Vec[R, int]) -> vec_len v` -- and it was not one. The name went into the
+type as the region NAMED R, and that is the region of every `region R { }` in
+the program. Pass a buffer to such a function, open an unrelated block called R
+later in the same function, and the compiler said the buffer escaped R.
+
+mengd and mtar have done exactly that since they were written, and stopped
+compiling at v0.1.564: that version made a let-bound ByteBuf stop generalizing
+(Q-193, a soundness fix), which had been hiding the collision. A Vec, never
+generalized, failed the same way in every version. Neither repository was in
+`test/downstream/REPOS`, so nothing here said so for eight versions.
+
+Now an uppercase region name in an annotation -- a parameter's or `(e : t)` --
+names a block only when a block of that name is open around the annotation;
+otherwise it is a variable, one per name within the annotation, as `'r` always
+was. Inside `region R { }` an annotation's `R` is still that block, and a
+container annotated with it still cannot leave it. mengd and mtar as they were
+written compile again (both have since been changed to `'r`, which means the
+same thing on every version). The two tests that pinned the old printing --
+`(Vec[R, int] -> int)` for an annotation outside any block -- print the variable
+now, and the tutorial and patterns.md say which is which.
+
+`test/downstream/REPOS` gains mengd, mtar, mvm, mhttpd and mreg (nineteen rows),
+and `test/downstream/CC` compiles all five.
+
+---
+
 ## v0.1.571 — 2026-10-02
 
 _The downstreams' emitted code is compiled now, and the first run found two LLVM bugs._

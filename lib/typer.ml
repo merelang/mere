@@ -1014,6 +1014,46 @@ let call_region_name = "__call"
 
 let active_regions : string list ref = ref []
 
+(* v0.1.572 (Q-196): an ANNOTATION's region names. `fn (b: ByteBuf[R]) -> ..` is
+   documented as writing R as a variable (patterns.md: "write R as a type
+   variable"; the tutorial's `fn (v: Vec[R, int]) -> vec_len v`), and it was
+   not one: the name went into the type as the region NAMED R, which is every
+   `region R { }` in the program. Passing a buffer to such a function and then
+   opening an unrelated block called R was reported as the buffer escaping R --
+   mengd and mtar stopped compiling at v0.1.564, which made a let-bound ByteBuf
+   stop generalizing and so stopped hiding it (a Vec, never generalized, had
+   failed the same way all along).
+
+   So an uppercase region name in an annotation names a block only when such a
+   block is open around the annotation. Otherwise it is a variable, one per
+   name within the annotation, like `'r`. The region slot of a container is a
+   type argument, which is what can hold a variable; `&R T` keeps its name (its
+   region is a string, and a borrow is only made inside its block anyway).
+   `active_regions` is the stack of blocks open where the typer stands, which
+   is the lexical answer: inference walks into a block's body with its name
+   pushed. *)
+let freshen_annot t =
+  let regions = Hashtbl.create 2 in
+  let open_block r = List.mem r !active_regions in
+  let named r = String.length r > 0 && r.[0] >= 'A' && r.[0] <= 'Z' in
+  let t1 =
+    let rec aux t =
+      match Ast.walk t with
+      | Ast.TyRef (_, r, Ast.TyUnit) when named r && not (open_block r) ->
+        (match Hashtbl.find_opt regions r with
+         | Some v -> v
+         | None -> let v = fresh_var () in Hashtbl.add regions r v; v)
+      | (Ast.TyInt | Ast.TyFloat | Ast.TyBool | Ast.TyStr | Ast.TyBytes | Ast.TySimd _ | Ast.TyUnit | Ast.TyVar _ | Ast.TyParam _) as t -> t
+      | Ast.TyArrow (a, b) -> Ast.TyArrow (aux a, aux b)
+      | Ast.TyTuple ts -> Ast.TyTuple (List.map aux ts)
+      | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map aux args)
+      | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, aux inner)
+    in
+    aux t
+  in
+  freshen_params t1
+
+
 let generalize env t =
   let send_ids = pending_send_ids () in
   (* A variable is generalizable when it was created inside this binding and is
@@ -3673,7 +3713,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
     let alpha = fresh_var () in
     (match ty_opt with
      | Some t ->
-       let t', _ = freshen_params t in
+       let t', _ = freshen_annot t in
        (* User-supplied annotation is the expected type. *)
        unify e.loc t' alpha
      | None -> ());
@@ -3836,7 +3876,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
        in
        raise (Type_error (f.loc, msg))))
   | Ast.Annot (inner, t) ->
-    let t', _ = freshen_params t in
+    let t', _ = freshen_annot t in
     let ti = infer env inner in
     (* Annotation declares the expected type. *)
     unify e.loc t' ti;

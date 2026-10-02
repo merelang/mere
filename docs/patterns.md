@@ -638,9 +638,10 @@ Mere's Map has a region parameter, so type annotations must include R:
 let f = fn (m: Map[str, int]) -> map_get m "k";
 // type error: expected `Map['c, 'b, 'a]`, got `(str, int) Map`
 
-// Works (write R as a type variable)
+// Works (write R as a type variable -- or 'r; outside a block named R they mean the same)
 let f = fn (m: Map[R, str, int]) -> map_get m "k";
-// → but mismatch with the actual region can still cause separate type errors
+// Before v0.1.572 R here was the region of every `region R { }` in the program,
+// which is where the "separate type errors" this line used to warn about came from.
 
 // Easiest: skip annotations and let inference handle it
 let f = fn m -> map_get m "k";
