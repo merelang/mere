@@ -1,154 +1,154 @@
 #!/bin/sh
 # scripts/thread_fail_check.sh — what a spawned thread's failure does to the
-# program, asked of every backend, many times.
+# program, asked of every backend, many times (Q-090, v0.1.586).
 #
-# A plugin host reached for `spawn` as a way to survive somebody else's code, and
-# the four backends turned out to answer three different ways. C and LLVM end the
-# process. Wasm prints the failure and exits 0. The interpreter runs on and says
-# nothing on either stream -- BY DEFAULT. It has not lost the failure: `spawn`
-# records `T_died` with the message and re-raises into a domain nobody joins, and
-# `MERE_THREAD_REPORT=1` names it, message and all:
+# Until v0.1.586 the four backends gave three answers. C and LLVM ended the
+# process from the failing thread, racing the main thread's last write: the exit
+# status was 1 in some runs and 0 in others and stdout was sometimes cut. Wasm
+# printed the failure and exited 0. The interpreter said nothing. A daemon whose
+# detached handler failed once was gone (mhttpd, mengd).
 #
-#   mere: 2 thread(s) neither joined nor detached at exit
-#     thread 1: died: fail: boom, never joined
+# Now all four give Rust's answer, and this gate holds them to it:
 #
-# Both halves are asserted, because either alone reads as the wrong thing. "The
-# interpreter is silent" is what the default looks like and it is not what the
-# interpreter knows; "the interpreter reports it" is true of a run nobody makes.
+#   spawned_fail   nobody joins the thread that failed: exit 0, the program's
+#                  own output, and ONE line on stderr at exit:
+#                    mere: thread 1 failed and was never joined: fail: boom
+#   joined_fail    `join` raises the failure again in the joiner: exit 1, the
+#                  failure's message, and nothing after the join runs
+#   join_caught    ... and try_or takes it like any other: prints 7, stderr empty
+#   detached_fail  a detached thread's failure is one line and the program
+#                  carries on:  mere: thread 1 failed (detached): fail: boom
+#   MERE_THREAD_REPORT=1  the leak report names the dead thread and its message
 #
-# WHY THIS IS NOT A test/parity CASE. Its stdout is not a function of the program
-# on C, and on LLVM neither is its exit status: the failing thread races the main
-# thread's last write and nothing flushes what is lost (measured 2026-08-30: C
-# exits 1 every time but keeps its stdout in 9 runs of 20; LLVM exits 1 in 18 runs
-# of 20 and 0 in the other 2). A DIVERGE pin there would be pinning a coin flip,
-# which is what scripts/determinism_check.sh exists to keep out of that harness.
-# scripts/parity.sh compares exit status in its main loop as of v0.1.360, and this
-# case is exactly the one it still cannot hold.
+# spawned_fail runs $RUNS times per backend: the old answer was a coin flip, and
+# a coin flip passes a gate that asks once.
 #
-# So this gate asserts what IS stable, and each assertion is one a FIX would break:
+# --poison takes each piece out of the emitted C, LLVM IR or Wasm and the program
+# that depends on it must then fail its check (the interpreter's is not text).
 #
-#   interp  exits 0 on every run, and stderr is empty -- the default silence
-#   interp  under MERE_THREAD_REPORT=1, names the death and its message
-#   C       ends the process at least once in $RUNS runs
-#   wasm    exits 0 every run and the failure appears in its output
-#
-# and from those, that the backends disagree at all.
-#
-# WHY "AT LEAST ONCE" FOR C AND NOTHING AT ALL FOR LLVM. The first version of this
-# gate asserted "C exits 1 every run", having measured exactly that 20 times out of
-# 20. It failed on its next run. Measured again over 60: C exits 0 in 5 of them,
-# and LLVM -- which had shown 2 zeroes in 20 earlier -- showed none at all. The
-# proportions move with machine load, so neither backend can carry an "always"
-# and neither can carry a "sometimes" either, since a run of ten can miss a
-# minority answer. What survives is that a nonzero appears at all, which at the
-# observed rate would be missed with probability around 0.08^$RUNS. LLVM is only
-# REPORTED, so a change in it is visible to a reader with no assertion watching.
-#
-# Usage: scripts/thread_fail_check.sh
+# Usage: sh scripts/thread_fail_check.sh [--poison]
 set -u
 
-MERE=${MERE:-./_build/default/bin/mere.exe}
-CASE=test/threadfail/spawned_fail.mere
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+MERE=${MERE:-$ROOT/_build/default/bin/mere.exe}
+FX="$ROOT/test/threadfail"
 RUNS=${RUNS:-10}
 CC="${CC:-clang}"; command -v "$CC" >/dev/null 2>&1 || CC=cc
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-
 [ -x "$MERE" ] || { echo "thread_fail_check: $MERE not found — run dune build first" >&2; exit 1; }
-[ -f "$CASE" ] || { echo "thread_fail_check: $CASE is missing" >&2; exit 1; }
 
-fail=0
-asserted=0
+BES="interp c ll"
+HAVE_WASM=0
+if command -v wat2wasm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then BES="$BES w"; HAVE_WASM=1; fi
 
-# codes <command...> : prints the sorted distinct exit codes seen over $RUNS runs,
-# space separated, and leaves the last run's stderr in $TMP/last.err.
-codes() {
-  : > "$TMP/codes"
-  i=0
-  while [ "$i" -lt "$RUNS" ]; do
-    sh "$ROOT/scripts/bounded.sh" 20 "$@" > "$TMP/last.out" 2> "$TMP/last.err"
-    echo $? >> "$TMP/codes"
-    i=$((i + 1))
-  done
-  sort -u "$TMP/codes" | tr '\n' ' '
+NEVER="mere: thread 1 failed and was never joined: fail: boom"
+DETACHED="mere: thread 1 failed (detached): fail: boom"
+
+# build <prog> <be> [sed expr] -> prints the command to run, or fails with why
+build() {
+  src="$FX/$1.mere"
+  case "$2" in
+    interp) echo "$MERE $src"; return 0 ;;
+    c)  "$MERE" -c "$src" > "$TMP/g.c" 2>"$TMP/e" || { echo "EMITFAIL $(head -1 "$TMP/e")"; return 1; }
+        g="$TMP/g.c" ;;
+    ll) "$MERE" -ll "$src" > "$TMP/g.ll" 2>"$TMP/e" || { echo "EMITFAIL $(head -1 "$TMP/e")"; return 1; }
+        g="$TMP/g.ll" ;;
+    w)  "$MERE" -w "$src" > "$TMP/g.wat" 2>"$TMP/e" || { echo "EMITFAIL $(head -1 "$TMP/e")"; return 1; }
+        g="$TMP/g.wat" ;;
+  esac
+  if [ -n "${3:-}" ]; then
+    sed "$3" "$g" > "$g.p"
+    cmp -s "$g" "$g.p" && { echo "SEDNOMATCH"; return 1; }
+    mv "$g.p" "$g"
+  fi
+  case "$2" in
+    c)  "$CC" -w -O1 "$g" -o "$TMP/bin_$1_c" -lm -lpthread 2>"$TMP/e" || { echo "CCFAIL $(head -1 "$TMP/e")"; return 1; }
+        echo "$TMP/bin_$1_c" ;;
+    ll) "$CC" -w -O1 -x ir "$g" -o "$TMP/bin_$1_ll" -lm -lpthread 2>"$TMP/e" || { echo "CCFAIL $(grep -m1 error "$TMP/e")"; return 1; }
+        echo "$TMP/bin_$1_ll" ;;
+    w)  wat2wasm --enable-tail-call --enable-threads "$g" -o "$TMP/bin_$1.wasm" 2>"$TMP/e" || { echo "WATFAIL $(head -1 "$TMP/e")"; return 1; }
+        echo "node $ROOT/scripts/run_wasm.js $TMP/bin_$1.wasm" ;;
+  esac
 }
 
-# --- interpreter ------------------------------------------------------------
-i_codes="$(codes "$MERE" "$CASE")"
-i_err="$(cat "$TMP/last.err")"
-echo "interp  exit codes over $RUNS runs: $i_codes"
+run() { sh "$ROOT/scripts/bounded.sh" 30 $1 > "$TMP/o" 2> "$TMP/e"; echo $?; }
 
-asserted=$((asserted + 1))
-[ "$i_codes" = "0 " ] || { echo "FAIL  interp: want only 0, got: $i_codes"; fail=1; }
-
-# The DEFAULT silence, asserted: making the interpreter report a dead thread
-# without being asked breaks this line, which is how this gate finds out it was
-# fixed rather than passing quietly through the change.
-asserted=$((asserted + 1))
-if [ -n "$i_err" ]; then
-  echo "FAIL  interp now says something by default about the failed thread — the silence this gate pins is gone:"
-  printf '    %s\n' "$i_err"
-  fail=1
-fi
-
-# And the other half: the failure is recorded, with its message. A gate that only
-# pinned the silence would read as "the interpreter loses it", which is false and
-# would survive the interpreter actually starting to lose it.
-MERE_THREAD_REPORT=1 sh "$ROOT/scripts/bounded.sh" 20 "$MERE" "$CASE" > "$TMP/r.out" 2> "$TMP/r.err"
-r_all="$(cat "$TMP/r.out" "$TMP/r.err")"
-asserted=$((asserted + 1))
-case "$r_all" in
-  *"died: fail: boom"*) ;;
-  *) echo "FAIL  MERE_THREAD_REPORT=1 no longer names the dead thread and its message: [$r_all]"; fail=1 ;;
-esac
-
-# --- C ----------------------------------------------------------------------
-if "$MERE" -c "$CASE" > "$TMP/a.c" 2>"$TMP/e" && "$CC" -O0 -w "$TMP/a.c" -o "$TMP/a" -lm 2>"$TMP/e"; then
-  c_codes="$(codes "$TMP/a")"
-  c_nonzero="$(grep -cv '^0$' "$TMP/codes")"
-  echo "C       exit codes over $RUNS runs: $c_codes  (nonzero in $c_nonzero of $RUNS)"
-  asserted=$((asserted + 1))
-  [ "$c_nonzero" != 0 ] || {
-    echo "FAIL  C never ended the process in $RUNS runs — a thread's failure stopped reaching the exit status"
-    fail=1; }
-else
-  echo "FAIL  C: the case did not build"; sed 's/^/    /' "$TMP/e" | head -3; fail=1
-fi
-
-# --- LLVM: reported, not asserted -------------------------------------------
-if "$MERE" -ll "$CASE" > "$TMP/a.ll" 2>"$TMP/e" && "$CC" -O0 -w "$TMP/a.ll" -o "$TMP/al" -lm 2>"$TMP/e"; then
-  l_codes="$(codes "$TMP/al")"
-  echo "LLVM    exit codes over $RUNS runs: $l_codes  (nonzero in $(grep -cv '^0$' "$TMP/codes") of $RUNS — reported, not asserted)"
-else
-  echo "LLVM    not built on this host (reported, not asserted)"
-fi
-
-# --- Wasm -------------------------------------------------------------------
-if command -v wat2wasm >/dev/null 2>&1 && command -v node >/dev/null 2>&1 \
-   && "$MERE" -w "$CASE" > "$TMP/a.wat" 2>"$TMP/e" \
-   && wat2wasm --enable-tail-call --enable-threads "$TMP/a.wat" -o "$TMP/a.wasm" 2>"$TMP/e"; then
-  w_codes="$(codes node "$ROOT/scripts/run_wasm.js" "$TMP/a.wasm")"
-  w_out="$(cat "$TMP/last.out")"
-  echo "wasm    exit codes over $RUNS runs: $w_codes"
-  asserted=$((asserted + 1))
-  [ "$w_codes" = "0 " ] || { echo "FAIL  wasm: want only 0, got: $w_codes"; fail=1; }
-  asserted=$((asserted + 1))
-  case "$w_out" in
-    *boom*) ;;
-    *) echo "FAIL  wasm: the failure no longer appears in its output: [$w_out]"; fail=1 ;;
+# judge <prog> <be> <rc> -> "ok" or why not (reads $TMP/o and $TMP/e)
+judge() {
+  out=$(cat "$TMP/o"); err=$(cat "$TMP/e")
+  # Wasm writes an uncaught failure to stdout, as it does every one of its own
+  all="$out$err"
+  case "$1" in
+    spawned_fail)
+      [ "$3" = 0 ] || { echo "exit $3, want 0"; return; }
+      [ "$out" = 0 ] || { echo "stdout [$out], want [0]"; return; }
+      [ "$err" = "$NEVER" ] || { echo "stderr [$err], want [$NEVER]"; return; } ;;
+    joined_fail)
+      [ "$3" = 1 ] || { echo "exit $3, want 1"; return; }
+      case "$all" in *"fail: boom"*) ;; *) echo "no 'fail: boom' in the output"; return ;; esac
+      case "$out" in *after*) echo "ran past the join"; return ;; esac ;;
+    join_caught)
+      [ "$3" = 0 ] || { echo "exit $3, want 0"; return; }
+      [ "$out" = 7 ] || { echo "stdout [$out], want [7]"; return; }
+      [ -z "$err" ] || { echo "stderr [$err], want nothing"; return; } ;;
+    detached_fail)
+      [ "$3" = 0 ] || { echo "exit $3, want 0"; return; }
+      [ "$out" = after ] || { echo "stdout [$out], want [after]"; return; }
+      [ "$err" = "$DETACHED" ] || { echo "stderr [$err], want [$DETACHED]"; return; } ;;
   esac
-else
-  echo "wasm    toolchain absent — SKIP (2 assertions not run)"
-fi
+  echo ok
+}
 
-# The point of the gate, stated as an assertion rather than left to the reader.
-asserted=$((asserted + 1))
-if [ "${c_codes:-}" = "$i_codes" ]; then
-  echo "FAIL  interp and C now agree ($i_codes) — the split this gate exists to hold is gone"
-  fail=1
-fi
+fail=0
+for be in $BES; do
+  for prog in spawned_fail joined_fail join_caught detached_fail; do
+    if ! cmd=$(build "$prog" "$be"); then echo "  FAIL  $be $prog: $cmd"; fail=1; continue; fi
+    n=1; [ "$prog" = spawned_fail ] && n=$RUNS
+    bad=""; i=0
+    while [ "$i" -lt "$n" ]; do
+      rc=$(run "$cmd"); v=$(judge "$prog" "$be" "$rc")
+      [ "$v" = ok ] || { bad="$v"; break; }
+      i=$((i + 1))
+    done
+    if [ -z "$bad" ]; then echo "  ok    $be $prog ($n run(s))"
+    else echo "  FAIL  $be $prog (run $((i + 1)) of $n): $bad"; fail=1; fi
+  done
+  # the leak report, asked for
+  if cmd=$(build spawned_fail "$be"); then
+    MERE_THREAD_REPORT=1 sh "$ROOT/scripts/bounded.sh" 30 $cmd > "$TMP/o" 2> "$TMP/e"
+    if grep -q "thread 1: died: fail: boom, never joined" "$TMP/e"; then echo "  ok    $be MERE_THREAD_REPORT names the dead thread"
+    else echo "  FAIL  $be MERE_THREAD_REPORT=1 did not name the dead thread: [$(tr '\n' ' ' < "$TMP/e")]"; fail=1; fi
+  fi
+done
+[ "$HAVE_WASM" = 1 ] || echo "  note  wat2wasm/node missing: Wasm not checked"
 
-echo "thread_fail_check: $asserted assertion(s) ran"
-if [ "$fail" != 0 ]; then echo "thread_fail_check: FAILED"; exit 1; fi
-echo "thread_fail_check: ok  (three answers from four backends; the interpreter's is silence unless asked)"
+if [ "${1:-}" = --poison ]; then
+  pf=0
+  while IFS='|' read -r prog be what expr; do
+    [ -n "$be" ] || continue
+    case "$be" in w) [ "$HAVE_WASM" = 1 ] || continue ;; esac
+    if ! cmd=$(build "$prog" "$be" "$expr"); then echo "  FAIL  POISON $be ($what): $cmd"; pf=1; continue; fi
+    caught=""; i=0
+    while [ "$i" -lt "$RUNS" ]; do
+      rc=$(run "$cmd"); v=$(judge "$prog" "$be" "$rc")
+      [ "$v" = ok ] || { caught="$v"; break; }
+      i=$((i + 1))
+    done
+    if [ -n "$caught" ]; then echo "  ok    POISON $be ($what): $prog fails: $caught"
+    else echo "  FAIL  POISON $be ($what): $prog still passes -- the gate does not witness it"; pf=1; fi
+  done <<'POISONS'
+spawned_fail|c|the thread does not catch its own failure|s/^  __lang_fail_jmpbuf_set = 1;$//
+joined_fail|c|join does not raise it again|s/^  if (failed) __lang_fail_impl(m);$//
+detached_fail|c|a detached failure is not told|s/^    if (__t->claim == 2) __lang_thr_tell(__t, " (detached)");$//
+spawned_fail|ll|the exit hook does not tell|/^  call void @__lang_thr_tell(ptr %t, ptr @.thr_never)$/d
+joined_fail|ll|join does not raise it again|s/^  br i1 %failed, label %raise, label %ok$/  br label %ok/
+detached_fail|ll|a detached failure is not told|/^  call void @__lang_thr_tell(ptr %thr, ptr @.thr_det)$/d
+spawned_fail|w|the worker prints and traps as before|/(if (global.get $__lang_in_thread)/,+1d
+joined_fail|w|join does not raise it again|s/(then (call $__lang_fail (i64.extend_i32_u (local.get $r))))/(then (i64.const 0))/
+POISONS
+  [ "$pf" = 0 ] || { echo "thread_fail_check --poison: FAILED"; exit 1; }
+fi
+[ "$fail" = 0 ] || { echo "thread_fail_check: FAILED"; exit 1; }
+if [ "${1:-}" = --poison ]; then echo "thread_fail_check --poison: ok (the gate can go red)"
+else echo "thread_fail_check: ok (four backends, one answer)"; fi

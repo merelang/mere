@@ -410,12 +410,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/plugin_host_check.sh
 
-      # What a spawned thread's failure does to the program: three answers from
-      # four backends, and on C and LLVM the answer is a coin flip weighted by
-      # machine load -- which is why it cannot live in scripts/parity.sh.
+      # What a spawned thread's failure does to the program: one answer on four
+      # backends since v0.1.586 (join raises it again, detach reports it, an
+      # unclaimed one is a line at exit, the exit status is main's). Until then
+      # three answers, and on C and LLVM a coin flip weighted by machine load.
       - name: "thread fail (what a dead thread does to the program)"
         if: ${{ !cancelled() }}
-        run: sh scripts/thread_fail_check.sh
+        run: sh scripts/thread_fail_check.sh --poison
 
       # host_matrix asks which backend has each builtin; this asks whether the
       # documentation has heard of it. 25 of 221 had not been written about

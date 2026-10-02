@@ -1,0 +1,6 @@
+// scripts/thread_fail_check.sh: `join` raises the thread's failure again, in the
+// joiner (v0.1.586, Q-090) -- uncaught there, it is the program's failure: exit 1,
+// `fail: boom`, and "after" is never printed.
+let h = spawn (fn () -> let _ = fail "boom" in ()) in
+let _ = join h in
+print "after"

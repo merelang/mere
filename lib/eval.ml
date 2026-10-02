@@ -3060,6 +3060,10 @@ let thr_claimed : (int, string) Hashtbl.t = Hashtbl.create 8
 let thr_spawned : (int, string) Hashtbl.t = Hashtbl.create 8
 let thr_seq = ref 0
 let thr_hooked = ref false
+(* v0.1.586 (Q-090): ids whose failure has had its one line on stderr -- a
+   detached thread's when it fails (or when it is detached, if it failed first),
+   an unclaimed one's at exit. The compiled backends print the same line. *)
+let thr_told : (int, unit) Hashtbl.t = Hashtbl.create 8
 
 let thr_guard : 'a. (unit -> 'a) -> 'a = fun f ->
   Mutex.lock thr_lock;
@@ -3119,12 +3123,35 @@ let thr_report () =
       (List.sort compare leaked)
   end
 
+(* under thr_guard *)
+let thr_tell id label how why =
+  if not (Hashtbl.mem thr_told id) then begin
+    Hashtbl.replace thr_told id ();
+    flush stdout;
+    Printf.eprintf "mere: %s failed%s: %s\n%!" label how why
+  end
+
+(* v0.1.586: a failure nobody joined or detached is one line at exit, always --
+   the full leak report stays behind MERE_THREAD_REPORT *)
+let thr_tell_unclaimed () =
+  thr_guard (fun () ->
+    Hashtbl.fold (fun id (label, st) acc ->
+      match !st with
+      | T_died why when not (Hashtbl.mem thr_claimed id) -> (id, label, why) :: acc
+      | _ -> acc) thr_status []
+    |> List.sort compare
+    |> List.iter (fun (id, label, why) -> thr_tell id label " and was never joined" why))
+
 let thr_install_hook () =
   let need =
     thr_guard (fun () ->
       if !thr_hooked then false else (thr_hooked := true; true))
   in
-  if need && Sys.getenv_opt "MERE_THREAD_REPORT" <> None then at_exit thr_report
+  if need then begin
+    if Sys.getenv_opt "MERE_THREAD_REPORT" <> None then at_exit thr_report;
+    (* registered after, so it runs first: at_exit is last-in, first-out *)
+    at_exit thr_tell_unclaimed
+  end
 
 let builtin_spawn =
   V_builtin ("spawn", fun clos ->
@@ -3169,6 +3196,9 @@ let builtin_spawn =
           | e -> Printexc.to_string e
         in
         thr_set_wait (T_died why);
+        thr_guard (fun () ->
+          if Hashtbl.find_opt thr_claimed me = Some "detached" then
+            thr_tell me label " (detached)" why);
         if vclock_on then sched_drop_live ();
         raise e)
     in
@@ -3192,13 +3222,17 @@ let builtin_join =
             | Some (_, st) ->
               (match !st with T_finished | T_died _ -> true | _ -> false)
             | None -> false))));
-      ignore (Domain.join d);
+      (* the claim first: Domain.join raises the thread's failure again, which
+         is the point (v0.1.586), and a joined thread is not a leaked one *)
       thr_guard (fun () -> Hashtbl.replace thr_claimed id "joined");
+      ignore (Domain.join d);
       V_unit
     | V_thread d ->
       let id = (Domain.get_id d :> int) in
-      ignore (Domain.join d);
+      (* the claim first: Domain.join raises the thread's failure again, which
+         is the point (v0.1.586), and a joined thread is not a leaked one *)
       thr_guard (fun () -> Hashtbl.replace thr_claimed id "joined");
+      ignore (Domain.join d);
       V_unit
     | _ -> failwith "join: expected a ThreadHandle")
 
@@ -3213,8 +3247,12 @@ let builtin_detach =
       (* v0.1.304: a detached thread is disowned on purpose, so the leak report
          does not name it. This is the one place the language says "blocking
          forever here is the intent". *)
+      let id = (Domain.get_id d :> int) in
       thr_guard (fun () ->
-        Hashtbl.replace thr_claimed (Domain.get_id d :> int) "detached");
+        Hashtbl.replace thr_claimed id "detached";
+        match Hashtbl.find_opt thr_status id with
+        | Some (label, { contents = T_died why }) -> thr_tell id label " (detached)" why
+        | _ -> ());
       V_unit
     | _ -> failwith "detach: expected a ThreadHandle")
 

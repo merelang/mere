@@ -38,8 +38,7 @@ let host_builtins_without_llvm_lowering =
     "tty_raw"; "tty_restore";
     "read_lines";
     "run";
-    "file_exists"; "random_int"; "random_float";
-    "detach" ]
+    "file_exists"; "random_int"; "random_float" ]
 
 (* Same-thread coroutines (coro_new / coro_switch / coro_self). Emitted only
    when a program uses one of the three; the comment at its top says why it is
@@ -5300,11 +5299,17 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let fnslot = fresh_reg () and tidp = fresh_reg () and tid = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 0" envr cs cl);
     emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, 1" fnr cs cl);
-    emit_instr (Printf.sprintf "  %s = call ptr @malloc(i64 16)" c);
+    emit_instr (Printf.sprintf "  %s = call ptr @malloc(i64 24)" c);
     emit_instr (Printf.sprintf "  store ptr %s, ptr %s" envr c);
     emit_instr (Printf.sprintf "  %s = getelementptr i8, ptr %s, i64 8" fnslot c);
     emit_instr (Printf.sprintf "  store ptr %s, ptr %s" fnr fnslot);
-    emit_instr (Printf.sprintf "  %s = alloca i64" tidp);
+    (* v0.1.586: the thread's record; the handle is its address, and pthread_t
+       is its first field *)
+    let thr = fresh_reg () and thrslot = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_thr_new()" thr);
+    emit_instr (Printf.sprintf "  %s = getelementptr i8, ptr %s, i64 16" thrslot c);
+    emit_instr (Printf.sprintf "  store ptr %s, ptr %s" thr thrslot);
+    emit_instr (Printf.sprintf "  %s = getelementptr %%__lang_thr, ptr %s, i32 0, i32 0" tidp thr);
     (* Q-178: the stack the program asked for (Q-168) on this thread too. The
        pthread_attr declarations exist exactly when a request does. *)
     let attr =
@@ -5340,7 +5345,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  call i32 @__lang_fail_int(ptr %s)" m2);
     emit_instr "  unreachable";
     emit_label ok2;
-    emit_instr (Printf.sprintf "  %s = load i64, ptr %s" tid tidp);
+    emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" tid thr);
     tid
   (* Only the thread `join` builtin when the user has not bound that name.
      `join` is a very common user identifier — a string-join helper above
@@ -5352,8 +5357,14 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   | Ast.App ({ node = Ast.Var "join"; _ }, h)
     when not (user_shadows_llvm env "join") ->
     let hv = emit_expr env h in
-    emit_instr (Printf.sprintf "  call i32 @pthread_join(i64 %s, ptr null)" hv);
+    emit_instr (Printf.sprintf "  call void @__lang_thr_join(i64 %s)" hv);
     "0"  (* unit *)
+  (* v0.1.586: and `detach`, refused here until now *)
+  | Ast.App ({ node = Ast.Var "detach"; _ }, h)
+    when not (user_shadows_llvm env "detach") ->
+    let hv = emit_expr env h in
+    emit_instr (Printf.sprintf "  call void @__lang_thr_detach(i64 %s)" hv);
+    "0"
   (* Q-012: channels via the generic i64-slot runtime. Elements cast to/from
      i64 at the call site based on their LLVM type. *)
   | Ast.App ({ node = Ast.Var "channel_new"; _ }, _arg) ->
@@ -9781,7 +9792,9 @@ let runtime_decls =
          A FIXED BUFFER and not the pointer: the string the raiser built can
          live in a region the catch jumps out of, so what survives has to be
          a copy, and one that does not itself allocate on the failure path. *)
-      "@__lang_fail_msg = global [256 x i8] zeroinitializer";
+      (* v0.1.586: per thread, now that a thread's failure is caught on its own
+         thread and copied out of here into its record *)
+      "@__lang_fail_msg = thread_local global [256 x i8] zeroinitializer";
       "@__lang_fail_jmpbuf_set = thread_local global i32 0" ]
 (* Phase 30.2b: declare top-level non-fn lets as @name LLVM globals.
    Emit each entry as `@name = internal global <type> zeroinitializer`.
@@ -15296,7 +15309,251 @@ let file_bytes_runtime_llvm =
    pair. Closure fns lower to `i32 (ptr, i32)` for a unit -> unit closure. *)
 let thread_runtime_llvm =
   String.concat "\n"
-    [ "define ptr @__mere_spawn_trampoline(ptr %p) {";
+    [ (* v0.1.586 (Q-090, Q-055): the C backend's thread record (see
+         __lang_thr there): { tid, n, state, claim, refs, told, msg, prev, next }.
+         A handle is the record's address. The thread's failure is caught in the
+         trampoline and recorded; `join` raises it again, `detach` and the
+         thread's end print a detached one's line, the exit hook prints an
+         unclaimed one's -- each exactly once (`told`). *)
+      "%__lang_thr = type { i64, i32, i32, i32, i32, i32, [256 x i8], ptr, ptr }";
+      "@__lang_thr_mu = internal global [64 x i8] zeroinitializer, align 16";
+      "@__lang_thr_head = internal global ptr null";
+      "@__lang_thr_tail = internal global ptr null";
+      "@__lang_thr_seq = internal global i32 0";
+      "@__lang_thr_hooked = internal global i32 0";
+      "@.thr_fmt = private constant [30 x i8] c\"mere: thread %d failed%s: %s\\0A\\00\"";
+      "@.thr_never = private constant [22 x i8] c\" and was never joined\\00\"";
+      "@.thr_det = private constant [12 x i8] c\" (detached)\\00\"";
+      "@.thr_env = private constant [19 x i8] c\"MERE_THREAD_REPORT\\00\"";
+      "@.thr_hdr = private constant [56 x i8] c\"mere: %d thread(s) neither joined nor detached at exit\\0A\\00\"";
+      "@.thr_died = private constant [37 x i8] c\"  thread %d: died: %s, never joined\\0A\\00\"";
+      "@.thr_other = private constant [17 x i8] c\"  thread %d: %s\\0A\\00\"";
+      "@.thr_fin = private constant [23 x i8] c\"finished, never joined\\00\"";
+      "@.thr_run = private constant [14 x i8] c\"still running\\00\"";
+      "declare i32 @dprintf(i32, ptr, ...)";
+      "declare i32 @pthread_detach(i64)";
+      "define internal void @__lang_thr_init() {";
+      "entry:";
+      "  %r = call i32 @pthread_mutex_init(ptr @__lang_thr_mu, ptr null)";
+      "  ret void";
+      "}";
+      "define internal void @__lang_thr_unlink(ptr %t) {";
+      "entry:";
+      "  %pp = getelementptr %__lang_thr, ptr %t, i32 0, i32 7";
+      "  %np = getelementptr %__lang_thr, ptr %t, i32 0, i32 8";
+      "  %prev = load ptr, ptr %pp";
+      "  %next = load ptr, ptr %np";
+      "  %hasp = icmp ne ptr %prev, null";
+      "  br i1 %hasp, label %p1, label %p0";
+      "p1:";
+      "  %pnext = getelementptr %__lang_thr, ptr %prev, i32 0, i32 8";
+      "  store ptr %next, ptr %pnext";
+      "  br label %n";
+      "p0:";
+      "  %h = load ptr, ptr @__lang_thr_head";
+      "  %ish = icmp eq ptr %h, %t";
+      "  br i1 %ish, label %p0h, label %n";
+      "p0h:";
+      "  store ptr %next, ptr @__lang_thr_head";
+      "  br label %n";
+      "n:";
+      "  %hasn = icmp ne ptr %next, null";
+      "  br i1 %hasn, label %n1, label %n0";
+      "n1:";
+      "  %nprev = getelementptr %__lang_thr, ptr %next, i32 0, i32 7";
+      "  store ptr %prev, ptr %nprev";
+      "  br label %done";
+      "n0:";
+      "  %tl = load ptr, ptr @__lang_thr_tail";
+      "  %ist = icmp eq ptr %tl, %t";
+      "  br i1 %ist, label %n0t, label %done";
+      "n0t:";
+      "  store ptr %prev, ptr @__lang_thr_tail";
+      "  br label %done";
+      "done:";
+      "  store ptr null, ptr %pp";
+      "  store ptr null, ptr %np";
+      "  ret void";
+      "}";
+      "define internal void @__lang_thr_release(ptr %t) {";
+      "entry:";
+      "  %rp = getelementptr %__lang_thr, ptr %t, i32 0, i32 4";
+      "  %r = load i32, ptr %rp";
+      "  %r1 = sub i32 %r, 1";
+      "  store i32 %r1, ptr %rp";
+      "  %z = icmp eq i32 %r1, 0";
+      "  br i1 %z, label %fr, label %done";
+      "fr:";
+      "  call void @free(ptr %t)";
+      "  br label %done";
+      "done:";
+      "  ret void";
+      "}";
+      "define internal void @__lang_thr_tell(ptr %t, ptr %how) {";
+      "entry:";
+      "  %tp = getelementptr %__lang_thr, ptr %t, i32 0, i32 5";
+      "  %told = load i32, ptr %tp";
+      "  %was = icmp ne i32 %told, 0";
+      "  br i1 %was, label %done, label %say";
+      "say:";
+      "  store i32 1, ptr %tp";
+      "  %f = call i32 @fflush(ptr null)";
+      "  %npp = getelementptr %__lang_thr, ptr %t, i32 0, i32 1";
+      "  %n = load i32, ptr %npp";
+      "  %m = getelementptr %__lang_thr, ptr %t, i32 0, i32 6";
+      "  %w = call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.thr_fmt, i32 %n, ptr %how, ptr %m)";
+      "  br label %done";
+      "done:";
+      "  ret void";
+      "}";
+      "define internal void @__lang_thr_exit_report() {";
+      "entry:";
+      "  %l = call i32 @pthread_mutex_lock(ptr @__lang_thr_mu)";
+      "  %h0 = load ptr, ptr @__lang_thr_head";
+      "  br label %count";
+      "count:";
+      "  %t = phi ptr [ %h0, %entry ], [ %tn, %cnext ]";
+      "  %c = phi i32 [ 0, %entry ], [ %c1, %cnext ]";
+      "  %end = icmp eq ptr %t, null";
+      "  br i1 %end, label %report, label %cbody";
+      "cbody:";
+      "  %c1 = add i32 %c, 1";
+      "  %sp = getelementptr %__lang_thr, ptr %t, i32 0, i32 2";
+      "  %st = load i32, ptr %sp";
+      "  %dead = icmp eq i32 %st, 2";
+      "  br i1 %dead, label %ctell, label %cnext";
+      "ctell:";
+      "  call void @__lang_thr_tell(ptr %t, ptr @.thr_never)";
+      "  br label %cnext";
+      "cnext:";
+      "  %tnp = getelementptr %__lang_thr, ptr %t, i32 0, i32 8";
+      "  %tn = load ptr, ptr %tnp";
+      "  br label %count";
+      "report:";
+      "  %any = icmp sgt i32 %c, 0";
+      "  %ev = call ptr @getenv(ptr @.thr_env)";
+      "  %asked = icmp ne ptr %ev, null";
+      "  %go = and i1 %any, %asked";
+      "  br i1 %go, label %hdr, label %out";
+      "hdr:";
+      "  %w0 = call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.thr_hdr, i32 %c)";
+      "  br label %each";
+      "each:";
+      "  %u = phi ptr [ %h0, %hdr ], [ %un, %enext ]";
+      "  %uend = icmp eq ptr %u, null";
+      "  br i1 %uend, label %out, label %ebody";
+      "ebody:";
+      "  %unp = getelementptr %__lang_thr, ptr %u, i32 0, i32 1";
+      "  %un0 = load i32, ptr %unp";
+      "  %usp = getelementptr %__lang_thr, ptr %u, i32 0, i32 2";
+      "  %ust = load i32, ptr %usp";
+      "  %udead = icmp eq i32 %ust, 2";
+      "  br i1 %udead, label %edied, label %eother";
+      "edied:";
+      "  %um = getelementptr %__lang_thr, ptr %u, i32 0, i32 6";
+      "  %w1 = call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.thr_died, i32 %un0, ptr %um)";
+      "  br label %enext";
+      "eother:";
+      "  %ufin = icmp eq i32 %ust, 1";
+      "  %uw = select i1 %ufin, ptr @.thr_fin, ptr @.thr_run";
+      "  %w2 = call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.thr_other, i32 %un0, ptr %uw)";
+      "  br label %enext";
+      "enext:";
+      "  %unxp = getelementptr %__lang_thr, ptr %u, i32 0, i32 8";
+      "  %un = load ptr, ptr %unxp";
+      "  br label %each";
+      "out:";
+      "  %ul = call i32 @pthread_mutex_unlock(ptr @__lang_thr_mu)";
+      "  ret void";
+      "}";
+      "define internal ptr @__lang_thr_new() {";
+      "entry:";
+      "  %szp = getelementptr %__lang_thr, ptr null, i32 1";
+      "  %sz = ptrtoint ptr %szp to i64";
+      "  %t = call ptr @malloc(i64 %sz)";
+      "  call void @llvm.memset.p0.i64(ptr %t, i8 0, i64 %sz, i1 false)";
+      "  %rp = getelementptr %__lang_thr, ptr %t, i32 0, i32 4";
+      "  store i32 2, ptr %rp";
+      "  %l = call i32 @pthread_mutex_lock(ptr @__lang_thr_mu)";
+      "  %q = load i32, ptr @__lang_thr_seq";
+      "  %q1 = add i32 %q, 1";
+      "  store i32 %q1, ptr @__lang_thr_seq";
+      "  %np = getelementptr %__lang_thr, ptr %t, i32 0, i32 1";
+      "  store i32 %q1, ptr %np";
+      "  %tl = load ptr, ptr @__lang_thr_tail";
+      "  %pp = getelementptr %__lang_thr, ptr %t, i32 0, i32 7";
+      "  store ptr %tl, ptr %pp";
+      "  %hastl = icmp ne ptr %tl, null";
+      "  br i1 %hastl, label %link, label %first";
+      "link:";
+      "  %tlnext = getelementptr %__lang_thr, ptr %tl, i32 0, i32 8";
+      "  store ptr %t, ptr %tlnext";
+      "  br label %linked";
+      "first:";
+      "  store ptr %t, ptr @__lang_thr_head";
+      "  br label %linked";
+      "linked:";
+      "  store ptr %t, ptr @__lang_thr_tail";
+      "  %hk = load i32, ptr @__lang_thr_hooked";
+      "  %nohk = icmp eq i32 %hk, 0";
+      "  br i1 %nohk, label %hook, label %ret";
+      "hook:";
+      "  store i32 1, ptr @__lang_thr_hooked";
+      "  %ax = call i32 @atexit(ptr @__lang_thr_exit_report)";
+      "  br label %ret";
+      "ret:";
+      "  %ul = call i32 @pthread_mutex_unlock(ptr @__lang_thr_mu)";
+      "  ret ptr %t";
+      "}";
+      "define internal void @__lang_thr_join(i64 %h) {";
+      "entry:";
+      "  %t = inttoptr i64 %h to ptr";
+      "  %tidp = getelementptr %__lang_thr, ptr %t, i32 0, i32 0";
+      "  %tid = load i64, ptr %tidp";
+      "  %j = call i32 @pthread_join(i64 %tid, ptr null)";
+      "  %m = alloca [256 x i8]";
+      "  %l = call i32 @pthread_mutex_lock(ptr @__lang_thr_mu)";
+      "  %cp = getelementptr %__lang_thr, ptr %t, i32 0, i32 3";
+      "  store i32 1, ptr %cp";
+      "  call void @__lang_thr_unlink(ptr %t)";
+      "  %sp = getelementptr %__lang_thr, ptr %t, i32 0, i32 2";
+      "  %st = load i32, ptr %sp";
+      "  %failed = icmp eq i32 %st, 2";
+      "  %msg = getelementptr %__lang_thr, ptr %t, i32 0, i32 6";
+      "  %c = call ptr @memcpy(ptr %m, ptr %msg, i64 256)";
+      "  call void @__lang_thr_release(ptr %t)";
+      "  %ul = call i32 @pthread_mutex_unlock(ptr @__lang_thr_mu)";
+      "  br i1 %failed, label %raise, label %ok";
+      "raise:";
+      "  %s = call ptr @__lang_str_of_cstr(ptr %m)";
+      "  call void @__lang_fail_impl(ptr %s)";
+      "  unreachable";
+      "ok:";
+      "  ret void";
+      "}";
+      "define internal void @__lang_thr_detach(i64 %h) {";
+      "entry:";
+      "  %t = inttoptr i64 %h to ptr";
+      "  %l = call i32 @pthread_mutex_lock(ptr @__lang_thr_mu)";
+      "  %tidp = getelementptr %__lang_thr, ptr %t, i32 0, i32 0";
+      "  %tid = load i64, ptr %tidp";
+      "  %d = call i32 @pthread_detach(i64 %tid)";
+      "  %cp = getelementptr %__lang_thr, ptr %t, i32 0, i32 3";
+      "  store i32 2, ptr %cp";
+      "  call void @__lang_thr_unlink(ptr %t)";
+      "  %sp = getelementptr %__lang_thr, ptr %t, i32 0, i32 2";
+      "  %st = load i32, ptr %sp";
+      "  %dead = icmp eq i32 %st, 2";
+      "  br i1 %dead, label %tell, label %rel";
+      "tell:";
+      "  call void @__lang_thr_tell(ptr %t, ptr @.thr_det)";
+      "  br label %rel";
+      "rel:";
+      "  call void @__lang_thr_release(ptr %t)";
+      "  %ul = call i32 @pthread_mutex_unlock(ptr @__lang_thr_mu)";
+      "  ret void";
+      "}";
+      "define ptr @__mere_spawn_trampoline(ptr %p) {";
       "entry:";
       (* Q-178: this thread's own bounds and alternate stack, so an overflow
          here is named instead of dying with the handler unable to run *)
@@ -15305,7 +15562,22 @@ let thread_runtime_llvm =
       "  %env = load ptr, ptr %p";
       "  %fnslot = getelementptr i8, ptr %p, i64 8";
       "  %fn = load ptr, ptr %fnslot";
+      "  %thrslot = getelementptr i8, ptr %p, i64 16";
+      "  %thr = load ptr, ptr %thrslot";
+      (* v0.1.586: the thread's own failure lands here instead of exiting *)
+      "  store i32 1, ptr @__lang_fail_jmpbuf_set";
+      "  %sj = call i32 @_setjmp(ptr @__lang_fail_jmpbuf)";
+      "  %jumped = icmp ne i32 %sj, 0";
+      "  br i1 %jumped, label %caught, label %run";
+      "run:";
       "  %r = call i32 %fn(ptr %env, i32 0)";
+      "  br label %after";
+      "caught:";
+      "  call void @__lang_region_unwind(i32 0)";
+      "  br label %after";
+      "after:";
+      "  %failed = phi i1 [ false, %run ], [ true, %caught ]";
+      "  store i32 0, ptr @__lang_fail_jmpbuf_set";
       "  call void @free(ptr %p)";
       (* stop using the alternate stack before giving it back: ss_flags =
          SS_DISABLE, which is 4 on macOS and 2 on Linux (the flags word is at 16
@@ -15319,6 +15591,26 @@ let thread_runtime_llvm =
       "  store i32 %dfv, ptr %dfp";
       "  %drc = call i32 @sigaltstack(ptr %ds, ptr null)";
       "  call void @free(ptr %alt)";
+      "  %lk = call i32 @pthread_mutex_lock(ptr @__lang_thr_mu)";
+      "  %sp = getelementptr %__lang_thr, ptr %thr, i32 0, i32 2";
+      "  br i1 %failed, label %rec_fail, label %rec_ok";
+      "rec_fail:";
+      "  %mp = getelementptr %__lang_thr, ptr %thr, i32 0, i32 6";
+      "  %cpy = call ptr @memcpy(ptr %mp, ptr @__lang_fail_msg, i64 256)";
+      "  store i32 2, ptr %sp";
+      "  %cp = getelementptr %__lang_thr, ptr %thr, i32 0, i32 3";
+      "  %claim = load i32, ptr %cp";
+      "  %det = icmp eq i32 %claim, 2";
+      "  br i1 %det, label %rec_tell, label %rec_done";
+      "rec_tell:";
+      "  call void @__lang_thr_tell(ptr %thr, ptr @.thr_det)";
+      "  br label %rec_done";
+      "rec_ok:";
+      "  store i32 1, ptr %sp";
+      "  br label %rec_done";
+      "rec_done:";
+      "  call void @__lang_thr_release(ptr %thr)";
+      "  %ulk = call i32 @pthread_mutex_unlock(ptr @__lang_thr_mu)";
       "  ret ptr null";
       "}" ]
 
@@ -15993,6 +16285,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   emit_instr "entry:";
   emit_instr
     "  call void @__lang_region_init(ptr @__lang_default_region, i64 4194304)";
+  emit_instr "  call void @__lang_thr_init()";
   (* Phase 36 (DEFERRED §1.18 fix): globals are initialized inline in
      body_expr (the Let bindings stayed in body and emit_expr Let emits
      `store ... @name`). No upfront init needed. *)

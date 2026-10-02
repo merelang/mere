@@ -353,10 +353,13 @@ fi
     || bad "shedding was not reported on stderr"
 
 # ---- a failing handler ---------------------------------------------------
-# WITHOUT the middleware, a handler that fails unwinds past the server loop and
-# ends the PROCESS: one bad route takes the whole site down, and it is the route
-# nobody tested. The control is run FIRST and must show exactly that, or the
-# check below says nothing.
+# Until v0.1.586, WITHOUT the middleware a handler that failed ended the PROCESS:
+# one bad route took the whole site down. A thread's failure no longer does
+# (Q-090) -- it would end the pool worker it ran on, so the pools (serve_rd,
+# serve_mt) catch a handler's failure themselves: one line on stderr, the
+# connection closed, the worker back for the next request. The request that hit
+# it gets no answer; what the middleware adds is the answer, a 500. The control is run FIRST and must show
+# exactly that difference, or the check below says nothing.
 "$MERE" -c "$ROOT/test/http/rescue.mere" > "$WORK/rs.c"
 if $CC -O1 -o "$WORK/rssrv" "$WORK/rs.c" -lm 2>"$WORK/cc4.log"; then
 
@@ -378,9 +381,9 @@ if $CC -O1 -o "$WORK/rssrv" "$WORK/rs.c" -lm 2>"$WORK/cc4.log"; then
 
   ctl=$(boom_probe 0 $((PORT + 4)))
   set -- $ctl
-  [ "$2" != "200" ] \
-    && ok "without the middleware a failing route ends the server (then /ok gives $2)" \
-    || bad "the unwrapped server survived a failing handler; this pair measures nothing"
+  { [ "$1" != "500" ] && [ "$2" = "200" ] && grep -q "http: a handler failed" "$WORK/rs0.log"; } \
+    && ok "without the middleware the failing route gets no answer ($1), the server survives and says why" \
+    || bad "without the middleware: /boom gave $1, /ok gave $2, log: $(grep -m1 'failed' "$WORK/rs0.log" || echo none)"
 
   res=$(boom_probe 1 $((PORT + 5)))
   set -- $res

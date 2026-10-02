@@ -103,27 +103,31 @@ done
 # thread since v0.1.310), so a fail on a spawned thread with no try_or of its
 # own jumped into the try_or MAIN was sitting in -- onto another thread's stack
 # -- and main printed the handler's value as though it had failed itself.
+# v0.1.586: the thread's failure is recorded and `join` raises it (Q-090). So
+# main's try_or, running while the worker fails, must come back with its own
+# value (1), and the join after it must raise the worker's failure (caught: 2).
 cat > "$T/without/jb.mere" <<'JB'
 let go = channel_new ();
-let back = channel_new ();
 let worker = fn (u: unit) ->
   let _ = channel_recv go in
   let _ = fail "from the spawned thread" in
-  channel_send back 1;
+  ();
 let h = spawn (fn () -> worker ());
+let rec inner = fn (i: int) -> fn (acc: int) -> if i == 0 then acc else inner (i - 1) (acc + i % 7);
+let rec outer = fn (j: int) -> fn (acc: int) -> if j == 0 then acc else outer (j - 1) (inner 1000 acc);
 let r = try_or (fn (u) ->
   let _ = channel_send go 1 in
-  let _ = channel_recv back in
+  let _ = outer 2000 0 in
   [1]) [] in
-let _ = join h;
-print_int (match r with Cons (x, _) -> x | Nil -> 0 - 1)
+let j = try_or (fn (u) -> let _ = join h in 1) 2 in
+print (str_of_int (match r with Cons (x, _) -> x | Nil -> 0 - 1) ++ " " ++ str_of_int j)
 JB
 for flag in -c -ll; do
   b=C; [ "$flag" = "-ll" ] && b=LLVM
   got=$(build_run "$T/without" "$flag" jb.mere)
   case "$got" in
-    "fail: from the spawned thread")
-      printf '  ok    %s\n' "$b: a fail on a spawned thread takes that thread's uncaught path, not main's try_or" ;;
+    "1 2")
+      printf '  ok    %s\n' "$b: a fail on a spawned thread stays in that thread's record, not main's try_or" ;;
     *) printf '  FAIL  %s\n' "$b: a spawned thread's fail landed elsewhere: $got"
        fail=1 ;;
   esac

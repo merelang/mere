@@ -84,7 +84,18 @@ function makeChannelEnv(getBuffer, bumpAlloc) {
 // a shared allocator is a follow-up), which covers int-channel compute.
 const WORKER_CODE = `
 const { workerData } = require('worker_threads');
-const { wasmBytes, memory, fnIdx, envOff, doneSab, bumpBase } = workerData;
+const fs = require('fs');
+const { wasmBytes, memory, fnIdx, envOff, doneSab, bumpBase, tid } = workerData;
+// v0.1.586 (Q-090): the thread's record, shared with the main thread. Words:
+// 0 done, 1 failed, 2 claim (0 nobody's, 1 joined, 2 detached), 3 told,
+// 4 message length; the message from byte 20.
+const st = new Int32Array(doneSab, 0, 5);
+const recordFailure = (buf) => {
+  const n = Math.min(buf.length, 255);
+  new Uint8Array(doneSab, 20, 256).set(buf.subarray(0, n));
+  Atomics.store(st, 4, n);
+  Atomics.store(st, 1, 1);
+};
 const readCStr = (ptr) => {
   const bytes = new Uint8Array(memory.buffer);
   let end = ptr; while (end < bytes.length && bytes[end] !== 0) end++;
@@ -114,7 +125,9 @@ const env = Object.assign({
   print_bytes: (ptr, len) =>
     process.stdout.write(Buffer.from(memory.buffer, ptr, len)),
   time: () => Date.now() / 1000,
-  mere_spawn: stub, mere_join: stub,
+  mere_spawn: stub, mere_join: stub, mere_detach: stub,
+  // an uncaught failure in this thread: the message is the joiner's to raise
+  mere_thread_fail: (ptr) => { recordFailure(readStrBytes(ptr)); return 0; },
   __lang_str_of_float: stub, __lang_float_of_str: stub,
   // v0.1.277: the worker instantiates the SAME module, so every import the
   // module declares has to exist here too -- a missing one makes instantiation
@@ -130,10 +143,25 @@ const env = Object.assign({
   // Point this worker's bump allocator at its private region so allocations
   // in the spawned closure don't collide with other workers or the parent.
   if (instance.exports.__lang_bump) instance.exports.__lang_bump.value = bumpBase;
+  if (instance.exports.__lang_in_thread) instance.exports.__lang_in_thread.value = 1;
   const table = instance.exports.__indirect_function_table;
-  try { table.get(fnIdx)(BigInt(envOff), 0n); } catch (e) { /* wasm trap in child */ }
-  Atomics.store(new Int32Array(doneSab), 0, 1);
-  Atomics.notify(new Int32Array(doneSab), 0);
+  try { table.get(fnIdx)(BigInt(envOff), 0n); } catch (e) {
+    // a trap that was not a fail: name it the way the main thread's handler does
+    if (Atomics.load(st, 1) === 0) {
+      const m = String((e && e.message) || "");
+      const why = e instanceof RangeError ? "stack overflow (recursion too deep)"
+        : /out of bounds/i.test(m) ? "out of memory" : "trap: " + m;
+      recordFailure(Buffer.from(why, "utf8"));
+    }
+  }
+  Atomics.store(st, 0, 1);
+  // a detached thread's failure is one line, now; the main thread may be busy
+  if (Atomics.load(st, 1) === 1 && Atomics.load(st, 2) === 2
+      && Atomics.compareExchange(st, 3, 0, 1) === 0) {
+    const msg = Buffer.from(new Uint8Array(doneSab, 20, Atomics.load(st, 4))).toString("utf8");
+    fs.writeSync(2, "mere: thread " + tid + " failed (detached): " + msg + "\\n");
+  }
+  Atomics.notify(st, 0);
 })();
 `;
 
@@ -463,12 +491,37 @@ const wasmPath = process.argv[2];
     env.memory = sharedMemory;
     let nextTid = 1;
     const threads = new Map();
+    // v0.1.586 (Q-090): a thread's failure is recorded (see the worker), join
+    // raises it again, detach lets it be one line, and one nobody claimed is a
+    // line at exit -- the C and LLVM runtimes' answer, word for word.
+    const threadMsg = (t) =>
+      Buffer.from(new Uint8Array(t.sab, 20, Atomics.load(t.st, 4))).toString("utf8");
+    const tellThread = (tid, t, how) => {
+      if (Atomics.compareExchange(t.st, 3, 0, 1) === 0)
+        fs.writeSync(2, `mere: thread ${tid} failed${how}: ${threadMsg(t)}\n`);
+    };
+    process.on("exit", () => {
+      const unclaimed = [...threads].filter(([, t]) => Atomics.load(t.st, 2) === 0);
+      for (const [tid, t] of unclaimed)
+        if (Atomics.load(t.st, 0) === 1 && Atomics.load(t.st, 1) === 1)
+          tellThread(tid, t, " and was never joined");
+      if (unclaimed.length > 0 && process.env.MERE_THREAD_REPORT) {
+        fs.writeSync(2, `mere: ${unclaimed.length} thread(s) neither joined nor detached at exit\n`);
+        for (const [tid, t] of unclaimed) {
+          const why = Atomics.load(t.st, 0) !== 1 ? "still running"
+            : Atomics.load(t.st, 1) === 1 ? `died: ${threadMsg(t)}, never joined`
+            : "finished, never joined";
+          fs.writeSync(2, `  thread ${tid}: ${why}\n`);
+        }
+      }
+    });
+    env.mere_thread_fail = () => 0;  // only a worker's instance sets __lang_in_thread
     env.mere_spawn = (closurePtr) => {
       const view = new DataView(sharedMemory.buffer);
       const envOff = view.getInt32(closurePtr, true);
       const fnIdx = view.getInt32(closurePtr + 4, true);
       const tid = nextTid++;
-      const doneSab = new SharedArrayBuffer(4);
+      const doneSab = new SharedArrayBuffer(20 + 256);
       // Each worker allocates from a disjoint bump region so concurrent
       // allocations can't collide (the bump pointer is a per-instance global).
       // This is the pragmatic alternative to a single shared atomic bump:
@@ -476,15 +529,27 @@ const wasmPath = process.argv[2];
       const bumpBase = 16 * 1024 * 1024 + (tid - 1) * 8 * 1024 * 1024;
       const worker = new Worker(WORKER_CODE, {
         eval: true,
-        workerData: { wasmBytes, memory: sharedMemory, fnIdx, envOff, doneSab, bumpBase },
+        workerData: { wasmBytes, memory: sharedMemory, fnIdx, envOff, doneSab, bumpBase, tid },
       });
       worker.on('error', (e) => console.error('worker error:', e));
-      threads.set(tid, { worker, done: new Int32Array(doneSab) });
+      threads.set(tid, { worker, sab: doneSab, st: new Int32Array(doneSab, 0, 5) });
       return tid;
     };
+    // 0, or the failure's message as a str for the module to raise again
     env.mere_join = (tid) => {
       const t = threads.get(tid);
-      if (t) { Atomics.wait(t.done, 0, 0); t.worker.terminate(); }
+      if (!t) return 0;
+      Atomics.wait(t.st, 0, 0);
+      t.worker.terminate();
+      Atomics.store(t.st, 2, 1);
+      return Atomics.load(t.st, 1) === 1 ? writeStr(threadMsg(t)) : 0;
+    };
+    env.mere_detach = (tid) => {
+      const t = threads.get(tid);
+      if (!t) return 0;
+      Atomics.store(t.st, 2, 2);
+      t.worker.unref();   // fire and forget: the program does not wait for it
+      if (Atomics.load(t.st, 0) === 1 && Atomics.load(t.st, 1) === 1) tellThread(tid, t, " (detached)");
       return 0;
     };
     // Channels live in the shared memory; the creating (main) instance
