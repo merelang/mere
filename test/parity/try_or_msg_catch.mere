@@ -1,0 +1,13 @@
+// v0.1.599: try_or_msg on RISC-V: the handler gets the failure's message, a
+// value is passed through, nesting restores the outer handler, and the
+// catcher's own bindings survive the unwind.
+let check = fn (n: int) -> if n < 0 then fail ("negative: " ++ str_of_int n) else n;
+let _ = print (try_or_msg (fn (u: unit) -> str_of_int (check (0 - 3))) (fn (m: str) -> "caught: " ++ m));
+let keep = 41;
+let r = try_or_msg (fn (u: unit) ->
+          let inner = try_or_msg (fn (u2: unit) -> fail "inner") (fn (m: str) -> str_len m) in
+          if inner == 5 then fail "outer" else inner) (fn (m: str) -> str_len m + keep);
+let _ = print_int r;
+let (ok, v, m) = try_or_msg (fn (u: unit) -> (true, 7, "")) (fn (m: str) -> (false, 0, m));
+let _ = print (if ok then "ok " ++ str_of_int v else m);
+print (try_or_msg (fn (u: unit) -> fail "last") (fn (m: str) -> m))

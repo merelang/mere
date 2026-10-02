@@ -1,0 +1,15 @@
+// v0.1.599: a local mutually recursive group, capturing a local and each other.
+let classify = fn (limit: int) ->
+  let rec ev = fn (n: int) -> if n == 0 then true else if n > limit then false else od (n - 1)
+  and od = fn (n: int) -> if n == 0 then false else ev (n - 1) in
+  let rec count = fn (i: int) -> fn (acc: int) -> if i > 10 then acc else count (i + 1) (if ev i then acc + 1 else acc) in
+  count 0 0;
+let digits = fn (x: int) ->
+  let base = 10 in
+  let rec g1 = fn (v: int) -> fn (ds: int list) -> if v < base then Cons (v, ds) else g2 (v / base) (Cons (v % base, ds))
+  and g2 = fn (v: int) -> fn (ds: int list) -> g1 v ds in
+  g1 x Nil;
+let rec sum = fn (l: int list) -> match l with | Nil -> 0 | Cons (h, t) -> h + sum t;
+let _ = print_int (classify 100);
+let _ = print_int (classify 4);
+print_int (sum (digits 98765))

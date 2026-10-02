@@ -1,0 +1,25 @@
+// v0.1.599: Maps keyed by int and bool on RISC-V, beside str ones.
+let m = map_new ();
+let _ = map_set m 3 "three";
+let _ = map_set m 1 "one";
+let _ = map_set m 30 "thirty";
+let _ = map_set m 1 "uno";
+let _ = map_delete m 30;
+let _ = print (map_get m 1 ++ " " ++ map_get m 3);
+let _ = print (if map_has m 30 then "has 30" else "no 30");
+let _ = print_int (map_len m);
+let _ = map_iter m (fn (k: int) -> fn (v: str) -> print (str_of_int k ++ "=" ++ v));
+let b = map_new ();
+let _ = map_set b true 1;
+let _ = map_set b false 0;
+let _ = print_int (map_get b true + map_get b false);
+let s = map_new ();
+let _ = map_set s "k" 9;
+let count_ids = fn (ids: int list) ->
+  let seen = map_new () in
+  let rec go = fn (l: int list) -> match l with
+    | Nil -> map_len seen
+    | Cons (x, rest) -> let _ = map_set seen x true in go rest in
+  go ids;
+let _ = print_int (count_ids (Cons (5, Cons (7, Cons (5, Cons (100000, Nil))))));
+print_int (map_get s "k")

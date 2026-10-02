@@ -4,6 +4,49 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.599 — 2026-10-03
+
+_The RISC-V backend takes Maps keyed by int or bool, a local `let rec ... and ...`, a top-level function at another arity, and `try_or_msg`: mere-ruby builds for RV64 again (it stopped at the first of the four)._
+
+mere-ruby's RV64 build -- the interpreter compiled for a CPU that is itself a
+Mere program -- had been refused since mere-ruby keyed its object table by
+object id. Fixing that showed the next refusal each time; there were four.
+
+- **Maps keyed by `int` or `bool`.** The prelude's Map is an assoc list compared
+  with `str_eq`, which read an int key as a string's address, so such a key was
+  refused. A Map whose key type is int or bool now goes to an `rvmap_*_i` family
+  that compares with `==`, chosen from the Map's own type so `map_len` and
+  `map_iter` (no key argument) agree with `map_set`.
+- **A local mutually recursive group.** Only a single local `let rec` was
+  compiled; a group allocates every member's closure block and binds it before
+  filling any captures, so members that call each other read each other's
+  blocks.
+- **A top-level function at another arity**: `f a b` for an `f` of three, a bare
+  `f` passed as a value (both refused, "no currying layer"), and `f a b c d` for
+  an `f` of three. The first two are the closure the source means -- the given
+  arguments evaluated once, in order, straight into a closure block whose code
+  calls `f` with them and the rest -- built from values rather than frame slots,
+  so the enclosing function's frame is unchanged. The third is the saturated
+  call with the remaining arguments applied to its result. A function of one
+  argument goes through its adapter as before.
+- **`try_or_msg`.** It is `try_or` with a handler where the default was; the
+  unwind leaves the failure's message in a1 and the catch path calls the handler
+  with it. In a program that calls `try_or_msg`, a `fail` the program wrote
+  tags its message `fail: ` as every other backend does, so the handler reads
+  the same text -- and the prelude's own `fail`s, which stand in for builtins'
+  failures (`random_int`, `map_get`), do not, as theirs are untagged everywhere.
+  A program that does not call `try_or_msg` keeps the bytes it had (its
+  uncaught message is still printed untagged on this backend).
+
+Four parity programs cover these (`map_word_keys`, `local_mutual_rec`,
+`partial_top_fn`, `try_or_msg_catch`); interp, C, LLVM, Wasm, RV32 and RV64
+print the same. Of the 1,022 programs swept, every one that built for RISC-V
+before builds to the same binary, except two whose functions come out in a
+different order (the same 172 functions, each the same size: the table they are
+emitted from grew), and 63 that were refused now build.
+
+---
+
 ## v0.1.598 — 2026-10-03
 
 _`file_exists`, `sleep_ms` and `random_int` on LLVM, and `random_int`'s failure names the bound on C as it does everywhere else._
