@@ -155,11 +155,11 @@ const env = Object.assign({
     }
   }
   Atomics.store(st, 0, 1);
-  // a detached thread's failure is one line, now; the main thread may be busy
-  if (Atomics.load(st, 1) === 1 && Atomics.load(st, 2) === 2
-      && Atomics.compareExchange(st, 3, 0, 1) === 0) {
+  // v0.1.590: a failure is one line when it happens, whoever holds the handle
+  // (the main thread may be busy, so the worker writes it)
+  if (Atomics.load(st, 1) === 1 && Atomics.compareExchange(st, 3, 0, 1) === 0) {
     const msg = Buffer.from(new Uint8Array(doneSab, 20, Atomics.load(st, 4))).toString("utf8");
-    fs.writeSync(2, "mere: thread " + tid + " failed (detached): " + msg + "\\n");
+    fs.writeSync(2, "mere: thread " + tid + " failed: " + msg + "\\n");
   }
   Atomics.notify(st, 0);
 })();
@@ -491,20 +491,13 @@ const wasmPath = process.argv[2];
     env.memory = sharedMemory;
     let nextTid = 1;
     const threads = new Map();
-    // v0.1.586 (Q-090): a thread's failure is recorded (see the worker), join
-    // raises it again, detach lets it be one line, and one nobody claimed is a
-    // line at exit -- the C and LLVM runtimes' answer, word for word.
+    // v0.1.586 (Q-090): a thread's failure is recorded (see the worker, which
+    // also prints its one line when it fails -- v0.1.590), and join raises it
+    // again: the C and LLVM runtimes' answer, word for word.
     const threadMsg = (t) =>
       Buffer.from(new Uint8Array(t.sab, 20, Atomics.load(t.st, 4))).toString("utf8");
-    const tellThread = (tid, t, how) => {
-      if (Atomics.compareExchange(t.st, 3, 0, 1) === 0)
-        fs.writeSync(2, `mere: thread ${tid} failed${how}: ${threadMsg(t)}\n`);
-    };
     process.on("exit", () => {
       const unclaimed = [...threads].filter(([, t]) => Atomics.load(t.st, 2) === 0);
-      for (const [tid, t] of unclaimed)
-        if (Atomics.load(t.st, 0) === 1 && Atomics.load(t.st, 1) === 1)
-          tellThread(tid, t, " and was never joined");
       if (unclaimed.length > 0 && process.env.MERE_THREAD_REPORT) {
         fs.writeSync(2, `mere: ${unclaimed.length} thread(s) neither joined nor detached at exit\n`);
         for (const [tid, t] of unclaimed) {
@@ -549,7 +542,6 @@ const wasmPath = process.argv[2];
       if (!t) return 0;
       Atomics.store(t.st, 2, 2);
       t.worker.unref();   // fire and forget: the program does not wait for it
-      if (Atomics.load(t.st, 0) === 1 && Atomics.load(t.st, 1) === 1) tellThread(tid, t, " (detached)");
       return 0;
     };
     // Channels live in the shared memory; the creating (main) instance

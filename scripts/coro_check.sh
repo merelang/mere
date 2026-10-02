@@ -220,7 +220,10 @@ if [ "$MODE" = "--poison" ]; then
   poison c "C 5 (env left in the block)" 's/__lang_env_alloc(\&__lang_coro_env_owner, /__lang_region_alloc(__lang_current_region, /; s/__env->__r = \&__lang_coro_env_owner;/__env->__r = __lang_current_region;/; s/^    if (h->__copy) { env = h->__copy(\&__lang_coro_env_owner, env); owned = 1; }$/    ;/' env
   # v0.1.558: a reaped coroutine is known by its handle's generation
   poison c "C 6 (no finished check)" '/^  if (!to) __lang_fail_impl/d; /^  if (to->state == 3) __lang_fail_impl/d' finished
-  poison c "C 9 (an arena a suspended stack points into is freed)" 's/^  if (__lang_region_pinned) {$/  if (0) {/' compact
+  # v0.1.590: since v0.1.589 a pinned map is not compacted at all, and the retire
+  # step asks who pinned the arena -- so freeing it under the stack takes both
+  # checks gone (the old single pattern no longer matched anything)
+  poison c "C 9 (an arena a suspended stack points into is freed)" 's/^  if (m->owns_region \&\& __lang_region_pinned \&\& __lang_region_pinned(m->region, 0)) return 0;$/  if (0) return 0;/; s/^  if (__lang_region_pinners) {$/  if (0) {/' compact
   poison c "C 7 (no hand-over check)" 's/^  if (!next || next == self || next->state == 3)$/  if (!next)/' self_handoff
   poison c "C 10 (a pointer into a live block is not followed)" 's/^    if (st->nsp == 0 || a < st->sp\[0\]\.lo || a >= st->sp\[st->nsp - 1\]\.hi) continue;$/    continue;/' scan
   poison c "C 11 (suspended stacks are not read)" 's/^    __lang_scan_words(&st, (uintptr_t\*)c->x->sp, (uintptr_t\*)c->x->s_hi, 0);$/    ;/' scan scan_high

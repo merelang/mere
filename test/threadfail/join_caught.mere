@@ -1,6 +1,6 @@
 // scripts/thread_fail_check.sh: the failure `join` raises is an ordinary one, so
-// try_or takes it (v0.1.586). Prints 7, and nothing on stderr: a joined thread's
-// failure was claimed.
+// try_or takes it (v0.1.586). Prints 7; stderr has the thread's one line, which
+// goes out when it fails (v0.1.590), joined or not.
 let h = spawn (fn () -> let _ = fail "boom" in ()) in
 let r = try_or (fn () -> let _ = join h in 5) 7 in
 print (str_of_int r)

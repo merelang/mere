@@ -22,8 +22,12 @@ let rec fib = fn n ->
 
 let main_ =
   let ch = channel_new () in
-  let _ = spawn (fn () -> channel_send ch (fib 30)) in
-  let _ = spawn (fn () -> channel_send ch (fib 30)) in
+  let h1 = spawn (fn () -> channel_send ch (fib 30)) in
+  let h2 = spawn (fn () -> channel_send ch (fib 30)) in
+  // joined first, so a worker's failure reaches here instead of a recv that
+  // waits for good
+  let _ = join h1 in
+  let _ = join h2 in
   let r1 = channel_recv ch in
   let r2 = channel_recv ch in
   r1 + r2;

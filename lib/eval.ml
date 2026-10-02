@@ -3131,27 +3131,12 @@ let thr_tell id label how why =
     Printf.eprintf "mere: %s failed%s: %s\n%!" label how why
   end
 
-(* v0.1.586: a failure nobody joined or detached is one line at exit, always --
-   the full leak report stays behind MERE_THREAD_REPORT *)
-let thr_tell_unclaimed () =
-  thr_guard (fun () ->
-    Hashtbl.fold (fun id (label, st) acc ->
-      match !st with
-      | T_died why when not (Hashtbl.mem thr_claimed id) -> (id, label, why) :: acc
-      | _ -> acc) thr_status []
-    |> List.sort compare
-    |> List.iter (fun (id, label, why) -> thr_tell id label " and was never joined" why))
-
 let thr_install_hook () =
   let need =
     thr_guard (fun () ->
       if !thr_hooked then false else (thr_hooked := true; true))
   in
-  if need then begin
-    if Sys.getenv_opt "MERE_THREAD_REPORT" <> None then at_exit thr_report;
-    (* registered after, so it runs first: at_exit is last-in, first-out *)
-    at_exit thr_tell_unclaimed
-  end
+  if need && Sys.getenv_opt "MERE_THREAD_REPORT" <> None then at_exit thr_report
 
 let builtin_spawn =
   V_builtin ("spawn", fun clos ->
@@ -3196,9 +3181,11 @@ let builtin_spawn =
           | e -> Printexc.to_string e
         in
         thr_set_wait (T_died why);
-        thr_guard (fun () ->
-          if Hashtbl.find_opt thr_claimed me = Some "detached" then
-            thr_tell me label " (detached)" why);
+        (* v0.1.590: the line goes out when the thread fails, whoever holds its
+           handle -- Rust's panic message. At exit (v0.1.586) was never for a
+           daemon, which does not exit: a handler whose handle was dropped
+           failed in silence. `join` still raises the failure again. *)
+        thr_guard (fun () -> thr_tell me label "" why);
         if vclock_on then sched_drop_live ();
         raise e)
     in
@@ -3248,11 +3235,7 @@ let builtin_detach =
          does not name it. This is the one place the language says "blocking
          forever here is the intent". *)
       let id = (Domain.get_id d :> int) in
-      thr_guard (fun () ->
-        Hashtbl.replace thr_claimed id "detached";
-        match Hashtbl.find_opt thr_status id with
-        | Some (label, { contents = T_died why }) -> thr_tell id label " (detached)" why
-        | _ -> ());
+      thr_guard (fun () -> Hashtbl.replace thr_claimed id "detached");
       V_unit
     | _ -> failwith "detach: expected a ThreadHandle")
 

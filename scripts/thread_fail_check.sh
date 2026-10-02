@@ -8,16 +8,22 @@
 # printed the failure and exited 0. The interpreter said nothing. A daemon whose
 # detached handler failed once was gone (mhttpd, mengd).
 #
-# Now all four give Rust's answer, and this gate holds them to it:
+# Now all four give Rust's answer, and this gate holds them to it. The failure
+# is ONE line on stderr when the thread fails, whoever holds its handle (v0.1.590;
+# v0.1.586 printed an unclaimed one at exit, which a daemon never reaches):
+#     mere: thread 1 failed: fail: boom
 #
 #   spawned_fail   nobody joins the thread that failed: exit 0, the program's
-#                  own output, and ONE line on stderr at exit:
-#                    mere: thread 1 failed and was never joined: fail: boom
+#                  own output, and the line
 #   joined_fail    `join` raises the failure again in the joiner: exit 1, the
 #                  failure's message, and nothing after the join runs
-#   join_caught    ... and try_or takes it like any other: prints 7, stderr empty
-#   detached_fail  a detached thread's failure is one line and the program
-#                  carries on:  mere: thread 1 failed (detached): fail: boom
+#   join_caught    ... and try_or takes it like any other: prints 7 (and the line)
+#   detached_fail  a detached thread's failure: the line, and the program
+#                  carries on
+#   par_map_fail   par_map joins each element's thread before its result
+#                  (v0.1.590): a failing element is raised in the caller --
+#                  "3" from the par_map that passes, then exit 1 with fail: boom --
+#                  where it used to wait for good
 #   MERE_THREAD_REPORT=1  the leak report names the dead thread and its message
 #
 # spawned_fail runs $RUNS times per backend: the old answer was a coin flip, and
@@ -42,8 +48,8 @@ BES="interp c ll"
 HAVE_WASM=0
 if command -v wat2wasm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then BES="$BES w"; HAVE_WASM=1; fi
 
-NEVER="mere: thread 1 failed and was never joined: fail: boom"
-DETACHED="mere: thread 1 failed (detached): fail: boom"
+# v0.1.590: one line, when the thread fails, whoever holds its handle
+LINE="mere: thread 1 failed: fail: boom"
 
 # build <prog> <be> [sed expr] -> prints the command to run, or fails with why
 build() {
@@ -83,26 +89,31 @@ judge() {
     spawned_fail)
       [ "$3" = 0 ] || { echo "exit $3, want 0"; return; }
       [ "$out" = 0 ] || { echo "stdout [$out], want [0]"; return; }
-      [ "$err" = "$NEVER" ] || { echo "stderr [$err], want [$NEVER]"; return; } ;;
+      [ "$err" = "$LINE" ] || { echo "stderr [$err], want [$LINE]"; return; } ;;
     joined_fail)
       [ "$3" = 1 ] || { echo "exit $3, want 1"; return; }
       case "$all" in *"fail: boom"*) ;; *) echo "no 'fail: boom' in the output"; return ;; esac
+      case "$err" in *"$LINE"*) ;; *) echo "no [$LINE] when the thread failed"; return ;; esac
       case "$out" in *after*) echo "ran past the join"; return ;; esac ;;
     join_caught)
       [ "$3" = 0 ] || { echo "exit $3, want 0"; return; }
       [ "$out" = 7 ] || { echo "stdout [$out], want [7]"; return; }
-      [ -z "$err" ] || { echo "stderr [$err], want nothing"; return; } ;;
+      [ "$err" = "$LINE" ] || { echo "stderr [$err], want [$LINE]"; return; } ;;
+    par_map_fail)
+      [ "$3" = 1 ] || { echo "exit $3, want 1 (or it hung: 124/142 from the bound)"; return; }
+      [ "$(echo "$out" | head -1)" = "3" ] || { echo "stdout [$out], want [3] first"; return; }
+      case "$all" in *"fail: boom"*) ;; *) echo "no 'fail: boom' in the output"; return ;; esac ;;
     detached_fail)
       [ "$3" = 0 ] || { echo "exit $3, want 0"; return; }
       [ "$out" = after ] || { echo "stdout [$out], want [after]"; return; }
-      [ "$err" = "$DETACHED" ] || { echo "stderr [$err], want [$DETACHED]"; return; } ;;
+      [ "$err" = "$LINE" ] || { echo "stderr [$err], want [$LINE]"; return; } ;;
   esac
   echo ok
 }
 
 fail=0
 for be in $BES; do
-  for prog in spawned_fail joined_fail join_caught detached_fail; do
+  for prog in spawned_fail joined_fail join_caught detached_fail par_map_fail; do
     if ! cmd=$(build "$prog" "$be"); then echo "  FAIL  $be $prog: $cmd"; fail=1; continue; fi
     n=1; [ "$prog" = spawned_fail ] && n=$RUNS
     bad=""; i=0
@@ -140,11 +151,11 @@ if [ "${1:-}" = --poison ]; then
   done <<'POISONS'
 spawned_fail|c|the thread does not catch its own failure|s/^  __lang_fail_jmpbuf_set = 1;$//
 joined_fail|c|join does not raise it again|s/^  if (failed) __lang_fail_impl(m);$//
-detached_fail|c|a detached failure is not told|s/^    if (__t->claim == 2) __lang_thr_tell(__t, " (detached)");$//
-spawned_fail|ll|the exit hook does not tell|/^  call void @__lang_thr_tell(ptr %t, ptr @.thr_never)$/d
+detached_fail|c|a failure is not told when it happens|/^    __lang_thr_tell(__t, "");/d
 joined_fail|ll|join does not raise it again|s/^  br i1 %failed, label %raise, label %ok$/  br label %ok/
-detached_fail|ll|a detached failure is not told|/^  call void @__lang_thr_tell(ptr %thr, ptr @.thr_det)$/d
+spawned_fail|ll|a failure is not told when it happens|/^  call void @__lang_thr_tell(ptr %thr, ptr @.thr_none)$/d
 spawned_fail|w|the worker prints and traps as before|/(if (global.get $__lang_in_thread)/,+1d
+par_map_fail|c|par_map does not join|s/({ __lang_thr_join(\([^;]*\)); 0; })/0/g
 joined_fail|w|join does not raise it again|s/(then (call $__lang_fail (i64.extend_i32_u (local.get $r))))/(then (i64.const 0))/
 POISONS
   [ "$pf" = 0 ] || { echo "thread_fail_check --poison: FAILED"; exit 1; }

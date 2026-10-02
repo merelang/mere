@@ -1322,28 +1322,26 @@ for the answer to come back on.
 
 ---
 
-## When a spawned thread fails (v0.1.586)
+## When a spawned thread fails (v0.1.586, v0.1.590)
 
-A thread's failure does not end the program. It is recorded, and what happens
-next depends on what the program does with the handle -- the same on every
-backend:
+A thread's failure does not end the program. It is one line on stderr **when it
+happens**, whoever holds the thread's handle, and the exit status stays the main
+thread's -- the same on every backend:
 
-- **`join h`** raises the failure again, in the joining thread. Uncaught there,
-  it is the program's failure (`fail: boom`, exit 1); `try_or` takes it like any
-  other.
-- **`detach h`**: the failure is one line on stderr, and the program carries on:
+```
+mere: thread 1 failed: fail: boom
+```
 
-  ```
-  mere: thread 1 failed (detached): fail: boom
-  ```
+**`join h`** raises the failure again, in the joining thread. Uncaught there, it
+is the program's failure (`fail: boom`, exit 1); `try_or` takes it like any
+other. `par_map` joins each element's thread before taking its result (v0.1.590),
+so a failure in its function is raised in the caller.
 
-- **Neither**: one line at exit, and the exit status is still the main thread's:
+(v0.1.586 printed the line at exit for a thread nobody had joined or detached;
+a daemon never exits, so a handler whose handle was dropped failed in silence.)
 
-  ```
-  mere: thread 1 failed and was never joined: fail: boom
-  ```
-
-  A thread still running when the program ends has nothing to report.
+A worker POOL should catch a handler's failure itself (`try_or` around the
+handler), or each failure costs it a worker; `contrib/http`'s pools do.
 
 ⚠ A channel does not know who sends on it, so a thread that **waits on a
 channel for a message a failed thread was going to send waits for good** --
