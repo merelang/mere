@@ -96,7 +96,7 @@ machine rather than a host.
 | `f_pow` | yes | yes | yes | yes |
 | `f_sub` | yes | yes | yes | yes |
 | `fail` | yes | yes | yes | yes |
-| `file_exists` | yes | refused | yes | yes |
+| `file_exists` | yes | yes | yes | yes |
 | `file_mtime` | yes | refused | refused | refused |
 | `file_open` | yes | refused | refused | refused |
 | `file_openrw` | yes | yes | yes | refused |
@@ -149,7 +149,7 @@ machine rather than a host.
 | `print_int` | yes | yes | yes | yes |
 | `print_no_nl` | yes | yes | yes | yes |
 | `random_float` | refused | refused | refused | refused |
-| `random_int` | yes | refused | yes | yes |
+| `random_int` | yes | yes | yes | yes |
 | `read_bytes` | yes | yes | yes | yes |
 | `read_file` | yes | yes | yes | yes |
 | `read_file_bytes` | yes | yes | yes | refused |
@@ -161,7 +161,7 @@ machine rather than a host.
 | `run` | yes | refused | yes | stub |
 | `sign` | yes | yes | yes | yes |
 | `sin` | yes | yes | yes | yes |
-| `sleep_ms` | yes | refused | refused | refused |
+| `sleep_ms` | yes | yes | refused | refused |
 | `spawn` | yes | yes | yes | refused |
 | `sqrt` | yes | yes | yes | yes |
 | `square` | yes | yes | yes | yes |

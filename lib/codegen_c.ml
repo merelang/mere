@@ -9613,7 +9613,8 @@ let str_concat_helper =
       "static long long __lang_random_int(long long n) {";
       "  static int __seeded = 0;";
       "  if (!__seeded) { srand((unsigned)(time(NULL) ^ getpid())); __seeded = 1; }";
-      "  if (n <= 0) __lang_fail_impl(\"random_int: bound must be positive\");";
+      (* v0.1.598: with the bound, as the interpreter, Wasm and RISC-V say it *)
+      "  if (n <= 0) __lang_fail_num(\"random_int: bound must be positive (got %lld)\", n);";
       "  return ((long long)rand() * RAND_MAX + rand()) % n;";
       "}";
       "";

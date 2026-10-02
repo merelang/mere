@@ -5,3 +5,4 @@
 # Checked by scripts/determinism_check.sh. An entry whose case no longer calls
 # one is an error, so this list cannot outlive its reason.
 time_clock asserts only structure (epoch > 2020-01-01, second read >= first), never a value
+file_exists_random_int asserts only structure (a draw from 6 is in range, a draw from 1 is 0, a bound of 0 is refused), never a drawn value
