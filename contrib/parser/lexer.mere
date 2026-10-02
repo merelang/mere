@@ -56,6 +56,11 @@ type token =
   | TAtAt | TQuestion | TQuestionBang | TAmp
   | TDot | TDotDot | TDotDotDot
   | TUnderscore
+  // Q-153 (v0.1.578): the reserved words this lexer has no token of its own
+  // for. The compiler's lexer reserves them, so valid Mere never uses one as a
+  // name -- and reading them as identifiers let the parser match `TIdent
+  // "import"` and accept programs the compiler refuses.
+  | TKw of str
   | TEof
   ;
 
@@ -111,6 +116,9 @@ let keyword_of = fn (s: str) ->
   // Detect it post-hoc here so `_foo` stays an identifier while `_`
   // becomes the wild-pattern token — matches OCaml-side lexer.ml.
   else if s == "_" then Some TUnderscore
+  else if s == "view" || s == "region" || s == "import" || s == "trait"
+       || s == "impl" || s == "derive" || s == "signature" || s == "drop"
+       || s == "using" || s == "open" || s == "for" || s == "dyn" then Some (TKw s)
   else None;
 
 // === Scanning helpers ======================================================
@@ -337,6 +345,7 @@ let token_str = fn (t: token) -> match t with
   | TFloat s -> "Float(" ++ s ++ ")"
   | TStr s -> "Str(\"" ++ s ++ "\")"
   | TIdent s -> "Ident(" ++ s ++ ")"
+  | TKw s -> "Kw(" ++ s ++ ")"
   | TTyVar s -> "TyVar(" ++ s ++ ")"
   | TLet -> "Let" | TRec -> "Rec" | TAnd -> "And" | TIn -> "In"
   | TIf -> "If" | TThen -> "Then" | TElse -> "Else"

@@ -737,6 +737,29 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/llvm_host_args_check.sh --poison
 
+      # A container written by a thread other than the one that made it fails
+      # by name on the interpreter, C and LLVM (v0.1.575): the case the type
+      # check cannot see is a closure that arrives as a parameter.
+      - name: owner_check (a container is written only by the thread that made it)
+        if: ${{ !cancelled() }}
+        run: sh scripts/owner_check.sh --poison
+
+      # The language server (v0.1.576): an unbroken run of didChanges that has
+      # already arrived is checked once, and foldingRange is answered.
+      - name: lsp_coalesce_check (keystrokes already out of date are not each re-checked)
+        if: ${{ !cancelled() }}
+        run: sh scripts/lsp_coalesce_check.sh
+
+      - name: lsp_folding_check (declarations and comment runs fold)
+        if: ${{ !cancelled() }}
+        run: sh scripts/lsp_folding_check.sh
+
+      # The self-hosted lexer reads every word lib/lexer.ml reserves as a keyword
+      # (v0.1.578); the operators are selfhost_lexer_ops_check's.
+      - name: selfhost_lexer_keywords_check (no reserved word is read as a name)
+        if: ${{ !cancelled() }}
+        run: sh scripts/selfhost_lexer_keywords_check.sh --poison
+
       # The README, executed. Its Quick-examples transcript is cut from the
       # file at run time and run, the counts it states are re-derived from the
       # repo, and a newcomer's first program is built and run outside this
