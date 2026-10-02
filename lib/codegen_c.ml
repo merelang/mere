@@ -12796,7 +12796,8 @@ let lift_inner_fns
         | _ -> (List.rev params, Ast.walk ty)
       in
       let all_params, final_ret = peel [(p, param_ty)] fn_body return_ty in
-      if List.length all_params >= 2
+      if Ast.inner_direct_enabled
+         && List.length all_params >= 2
          && List.for_all (fun (_, t) -> ty_is_concrete t) all_params
          && ty_is_concrete final_ret
       then List.length all_params

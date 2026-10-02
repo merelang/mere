@@ -1763,6 +1763,15 @@ type lifted_inner_llvm = {
   captures    : (string * Ast.ty) list;
   rps         : string list;  (* v0.1.562: its own region parameters -- see lifted_fn_llvm *)
 }
+(* v0.1.583 (Q-142): a lifted inner fn's uncurried twin, the C backend's
+   `<lifted>__direct` (v0.1.52): captures and EVERY curried parameter as real
+   arguments. A saturated call inside the host -- the inner `go i zx zy` of a
+   mandelbrot -- went through the curried chain, one closure environment per
+   application per iteration: 104 B/iter where the same loop at top level is
+   16 (Wasm; LLVM the same shape). Keyed by lifted name: (all params, innermost
+   body, final return). *)
+let inner_direct_llvm : (string, (string * Ast.ty) list * Ast.expr * Ast.ty) Hashtbl.t =
+  Hashtbl.create 16
 (* lifted name -> its region parameters, for the value-use adapter *)
 let lifted_rps_llvm : (string, string list) Hashtbl.t = Hashtbl.create 16
 let inner_lifts_llvm : (string, lifted_inner_llvm) Hashtbl.t = Hashtbl.create 8
@@ -8423,6 +8432,75 @@ and emit_user_app ?(tail = false) (env : env) (e : Ast.expr) : string =
       r
     end
   | `Direct None ->
+  (* v0.1.583 (Q-142): an exactly-saturated call to an inner-lifted fn that has
+     an uncurried twin goes straight to it -- captures and every argument in one
+     call, nothing allocated. A partial application keeps the curried chain. *)
+  let inner_direct_spine () =
+    let rec spine e' acc =
+      match e'.Ast.node with
+      | Ast.App (f', a) -> spine f' (a :: acc)
+      | Ast.Var n -> Some (n, e', acc)
+      | _ -> None
+    in
+    match spine e [] with
+    | Some (n, head, args) when List.length args >= 2 ->
+      (match Hashtbl.find_opt inner_lifts_llvm n with
+       | Some li ->
+         (match Hashtbl.find_opt inner_direct_llvm li.lifted_name with
+          | Some (ps, _, ret) when List.length ps = List.length args -> Some (li, head, args, ps, ret)
+          | _ -> None)
+       | None -> None)
+    | _ -> None
+  in
+  match inner_direct_spine () with
+  | Some (li, head, args, ps, ret) ->
+    let rargs =
+      if li.rps = [] then []
+      else
+        let pairs = Typer.region_args_for (match head.Ast.node with Ast.Var n -> n | _ -> "") head.Ast.ty in
+        List.map (fun r ->
+          "ptr " ^ (match List.assoc_opt r pairs with
+                    | Some actual -> region_ptr_for actual
+                    | None -> "@__lang_default_region")) li.rps in
+    let cap_args =
+      List.map (fun (cn, cty) ->
+        let cv =
+          match List.assoc_opt cn env with
+          | Some v -> v
+          | None when Hashtbl.mem top_globals_llvm cn ->
+            let r = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = load %s, ptr @%s" r (llvm_ty_of cty) (mu cn));
+            r
+          | None ->
+            (match region_capture_name cn with
+             | Some r -> region_ptr_for r
+             | None -> "%" ^ llvm_safe_local cn)
+        in
+        Printf.sprintf "%s %s" (llvm_ty_of cty) cv) li.captures in
+    let arg_tys = List.map (fun (_, t) -> llvm_ty_of t) ps in
+    let arg_vals = List.map2 (fun a t -> Printf.sprintf "%s %s" t (emit_expr env a)) args arg_tys in
+    let ret_ty = llvm_ty_of ret in
+    let all_tys = List.map (fun _ -> "ptr") li.rps @ List.map (fun (_, t) -> llvm_ty_of t) li.captures @ arg_tys in
+    let can_musttail =
+      (not no_tail_call) && tail
+      && (match !llvm_current_sig with
+          | Some (r_ty, a_tys) -> r_ty = ret_ty && a_tys = all_tys
+          | None -> false)
+      && llvm_ret_leaves ret <= musttail_leaf_budget
+    in
+    let all_args = String.concat ", " (rargs @ cap_args @ arg_vals) in
+    let r = fresh_reg () in
+    if can_musttail then begin
+      emit_instr (Printf.sprintf "  %s = musttail call %s @%s__direct(%s)" r ret_ty li.lifted_name all_args);
+      emit_instr (Printf.sprintf "  ret %s %s" ret_ty r);
+      llvm_returned := true;
+      r
+    end else begin
+      let notail = if String.length ret_ty > 0 && ret_ty.[0] = '%' then "notail " else "" in
+      emit_instr (Printf.sprintf "  %s = %scall %s @%s__direct(%s)" r notail ret_ty li.lifted_name all_args);
+      r
+    end
+  | None ->
   match e.Ast.node with
   | Ast.App ({ node = Ast.Var name; ty = head_ty; _ }, arg)
     when Hashtbl.mem inner_lifts_llvm name ->
@@ -8863,6 +8941,78 @@ let emit_lifted_fn_llvm (lf : lifted_fn_llvm) : string =
   in
   Printf.sprintf "define %s @%s(%s) {\n%s\n}"
     (llvm_ty_of lf.l_return_ty) lf.l_name params body
+
+(* v0.1.583 (Q-142): peel a lifted fn's curried layers, as the C backend's
+   peel_lifted_direct does: >= 2 params, every type concrete *)
+let peel_lifted_direct_llvm (lf : lifted_fn_llvm)
+    : ((string * Ast.ty) list * Ast.expr * Ast.ty) option =
+  let rec peel params body ty =
+    match body.Ast.node, Ast.walk ty with
+    | Ast.Fun (q, _, inner), Ast.TyArrow (qt, rt) -> peel ((q, Ast.walk qt) :: params) inner rt
+    | _ -> (List.rev params, body, Ast.walk ty)
+  in
+  let all_params, inner_body, final_ret =
+    peel [(lf.l_param, Ast.walk lf.l_param_ty)] lf.l_body lf.l_return_ty in
+  if List.length all_params >= 2
+     && List.for_all (fun (_, t) -> ty_is_concrete t) all_params
+     && ty_is_concrete final_ret
+     && List.for_all (fun (_, t) -> ty_is_concrete t) lf.l_captures
+  then Some (all_params, inner_body, final_ret)
+  else None
+
+(* v0.1.583 (Q-142): the twin itself -- emit_lifted_fn_llvm with every
+   parameter at once, and its own prototype published so a self tail call in
+   it is a musttail (the loop runs in constant space) *)
+let emit_lifted_fn_direct_llvm (lf : lifted_fn_llvm)
+    ((all_params, inner_body, final_ret) : (string * Ast.ty) list * Ast.expr * Ast.ty) : string =
+  set_inner_lifts_for_host_llvm lf.l_host;
+  reg_counter := 0;
+  label_counter := 0;
+  let saved_instrs = !instrs in
+  let saved_vt = !current_var_types in
+  let saved_exp = !current_expected_ty in
+  let saved_host = !current_host_fn_llvm in
+  let saved_sig = !llvm_current_sig in
+  instrs := [];
+  current_expected_ty := Some final_ret;
+  current_host_fn_llvm := lf.l_host;
+  emit_instr "entry:";
+  let bindings = lf.l_captures @ all_params in
+  let env = List.map (fun (n, _) -> (n, "%" ^ llvm_safe_local n)) bindings in
+  let saved_regions = !current_regions in
+  current_regions :=
+    List.filter_map (fun (n, _) ->
+      if String.length n > 9 && String.sub n 0 9 = "__region_"
+      then Some (String.sub n 9 (String.length n - 9), "%" ^ n) else None)
+      lf.l_captures
+    @ saved_regions;
+  current_var_types := bindings;
+  llvm_current_sig :=
+    Some (llvm_ty_of final_ret,
+          List.map (fun _ -> "ptr") lf.l_rps @ List.map (fun (_, t) -> llvm_ty_of t) bindings);
+  llvm_tail_pos := true;
+  llvm_returned := false;
+  let saved_rps = !current_region_params_llvm in
+  current_region_params_llvm := lf.l_rps;
+  let rv =
+    Fun.protect ~finally:(fun () -> current_region_params_llvm := saved_rps)
+      (fun () -> emit_expr env inner_body) in
+  if !llvm_returned then llvm_returned := false
+  else emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of final_ret) rv);
+  let body = String.concat "\n" (List.rev !instrs) in
+  instrs := saved_instrs;
+  current_regions := saved_regions;
+  current_var_types := saved_vt;
+  current_expected_ty := saved_exp;
+  current_host_fn_llvm := saved_host;
+  llvm_current_sig := saved_sig;
+  let params =
+    String.concat ", "
+      (List.map (fun r -> "ptr %" ^ r) lf.l_rps
+       @ List.map (fun (n, t) -> Printf.sprintf "%s %%%s" (llvm_ty_of t) (llvm_safe_local n)) bindings)
+  in
+  Printf.sprintf "define %s @%s__direct(%s) {\n%s\n}"
+    (llvm_ty_of final_ret) lf.l_name params body
 
 (* Q-139: the uncurried twin. Same body, both parameters as real arguments, so
    a saturated call has nothing to allocate. The curried definition is still
@@ -15474,6 +15624,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   let toplevel_names = mangled_names @ multi_base_names in
   lift_inner_fns_llvm toplevel_names fns;
+  Hashtbl.reset inner_direct_llvm;
+  let inner_direct_order =
+    List.filter_map (fun lf ->
+      match (if Ast.inner_direct_enabled then peel_lifted_direct_llvm lf else None) with
+      | Some d -> Hashtbl.replace inner_direct_llvm lf.l_name d; Some (lf, d)
+      | None -> None) !lifted_fns_llvm in
   let fn_defs =
     List.map (fun f ->
       set_inner_lifts_for_host_llvm (unmu f.name);
@@ -15491,6 +15647,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       | None -> None) fns
   in
   let lifted_defs = List.map emit_lifted_fn_llvm !lifted_fns_llvm in
+  let inner_direct_defs =
+    List.map (fun (lf, d) -> emit_lifted_fn_direct_llvm lf d) inner_direct_order in
   let closure_adapters = List.map emit_closure_adapter fns in
   (* Reset counters for the main body. *)
   reg_counter := 0;
@@ -15820,6 +15978,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ (if direct_defs = [] then [] else direct_defs @ [""])
     @ (if lifted_defs = [] then [] else lifted_defs @ [""])
+    @ (if inner_direct_defs = [] then [] else inner_direct_defs @ [""])
     @ (if closure_adapters = [] then [] else closure_adapters @ [""])
     @ (if show_fn_defs = [] then [] else show_fn_defs @ [""])
     @ (if eq_cmp_fn_defs = [] then [] else eq_cmp_fn_defs @ [""])

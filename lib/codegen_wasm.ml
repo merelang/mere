@@ -880,6 +880,14 @@ type lifted_fn_wasm = {
   l_host     : string;
 }
 
+(* v0.1.583 (Q-142): a lifted inner fn's uncurried twin (the C backend's
+   `<lifted>__direct`, v0.1.52): captures and every curried parameter as real
+   arguments. A saturated call inside the host went through the curried chain,
+   one closure environment per application per iteration -- the mandelbrot's
+   inner loop was 104 B/iter here against 16 for the same loop at top level, and
+   examples/mandelbrot.mere ran out of memory. lifted name -> (params, body). *)
+let inner_direct_wasm : (string, string list * Ast.expr) Hashtbl.t = Hashtbl.create 16
+
 let inner_fn_counter_wasm = ref 0
 let fresh_inner_name_wasm (base : string) : string =
   let n = !inner_fn_counter_wasm in
@@ -4918,7 +4926,41 @@ and emit_user_app (saved_tail : bool) (e : Ast.expr) : unit =
      top-level fn, or a closure value. Split out of emit_expr so that the
      shadowing guard has somewhere to send a call it must not let the
      builtin arms see. *)
+  let inner_direct () =
+    let rec spine e' acc =
+      match e'.Ast.node with
+      | Ast.App (f', a) -> spine f' (a :: acc)
+      | Ast.Var n -> Some (n, acc)
+      | _ -> None
+    in
+    match spine e [] with
+    | Some (n, args) when List.length args >= 2 ->
+      (match Hashtbl.find_opt inner_lifts_wasm n with
+       | Some li ->
+         (match Hashtbl.find_opt inner_direct_wasm li.lifted_name with
+          | Some (ps, _) when List.length ps = List.length args -> Some (li, args)
+          | _ -> None)
+       | None -> None)
+    | _ -> None
+  in
   match e.Ast.node with
+  (* v0.1.583 (Q-142): an exactly-saturated call to an inner-lifted fn with an
+     uncurried twin: captures, then every argument, one call *)
+  | Ast.App _ when inner_direct () <> None ->
+    (match inner_direct () with
+     | Some (li, args) ->
+       List.iter (fun cap ->
+         match List.assoc_opt cap !locals with
+         | Some slot -> emit_instr (Printf.sprintf "local.get %d" slot)
+         | None when Hashtbl.mem top_globals_wasm cap ->
+           emit_instr (Printf.sprintf "global.get $%s" cap)
+         | None -> unsupported e.Ast.loc
+             (Printf.sprintf "inner-lifted capture `%s` not in scope" cap)
+       ) li.captures;
+       List.iter emit_expr args;
+       let call_op = if saved_tail then "return_call" else "call" in
+       emit_instr (Printf.sprintf "%s $%s__direct" call_op li.lifted_name)
+     | None -> ())
   | Ast.App ({ node = Ast.Var name; _ }, arg)
     when Hashtbl.mem inner_lifts_wasm name ->
     (* Phase 26.3: inner-lifted call — emit captures (looked up via
@@ -5224,6 +5266,66 @@ let emit_lifted_fn_wasm (lf : lifted_fn_wasm) : string =
   Printf.sprintf
     "  (func $%s %s (result i64)\n%s%s)"
     lf.l_name param_decls local_decl indented_body
+
+(* v0.1.583 (Q-142): peel a lifted fn's curried layers -- >= 2 params, every
+   layer's type concrete, as the top-level twin asks *)
+let peel_lifted_direct_wasm (lf : lifted_fn_wasm) : (string list * Ast.expr) option =
+  let concrete (e : Ast.expr) = match e.Ast.ty with Some t -> ty_is_concrete (Ast.walk t) | None -> false in
+  let rec peel params (body : Ast.expr) =
+    match body.Ast.node with
+    | Ast.Fun (q, _, inner) when concrete body -> peel (q :: params) inner
+    | _ -> (List.rev params, body)
+  in
+  let params, inner = peel [lf.l_param] lf.l_body in
+  if List.length params >= 2 && concrete inner then Some (params, inner) else None
+
+(* the twin: emit_lifted_fn_wasm with every parameter at once *)
+let emit_lifted_fn_direct_wasm (lf : lifted_fn_wasm) ((params, inner) : string list * Ast.expr) : string =
+  set_inner_lifts_for_host_wasm lf.l_host;
+  let saved_instrs = !instrs in
+  let saved_local_counter = !local_counter in
+  let saved_locals = !locals in
+  let saved_local_types = !local_types in
+  let saved_host = !current_host_fn_wasm in
+  instrs := [];
+  current_host_fn_wasm := lf.l_host;
+  let bindings = lf.l_captures @ params in
+  let n = List.length bindings in
+  local_counter := n;
+  local_types := [];
+  locals := List.rev (List.mapi (fun i b -> (b, i)) bindings);
+  simd_locals := [];
+  float_locals := [];
+  let saved_tail = !wasm_tail_pos in
+  let saved_unwind = !fail_unwind_on in
+  wasm_tail_pos := true;
+  fail_unwind_on := true;
+  emit_expr inner;
+  fail_unwind_on := saved_unwind;
+  wasm_tail_pos := saved_tail;
+  let body_instrs = List.rev !instrs in
+  let extra_locals = !local_counter - n in
+  let extra_types = !local_types in
+  instrs := saved_instrs;
+  local_counter := saved_local_counter;
+  locals := saved_locals;
+  local_types := saved_local_types;
+  current_host_fn_wasm := saved_host;
+  let local_decl =
+    if extra_locals <= 0 then ""
+    else
+      let types =
+        if List.length extra_types = extra_locals then extra_types
+        else List.init extra_locals (fun _ -> "i64")
+      in
+      Printf.sprintf "    (local%s)\n"
+        (String.concat "" (List.map (fun t -> " " ^ t) types))
+  in
+  let indented_body =
+    String.concat "\n" (List.map (fun s -> "    " ^ s) body_instrs)
+  in
+  Printf.sprintf "  (func $%s__direct %s (result i64)\n%s%s)"
+    lf.l_name (String.concat " " (List.init n (fun _ -> "(param i64)"))) local_decl indented_body
 
 (* Env-ignoring adapter so top-level fn `f` can be used as a closure
    value: `(env, x) -> result` that just calls `$f(x)`. *)
@@ -10773,6 +10875,12 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   let global_names = Hashtbl.fold (fun k _ acc -> k :: acc) top_globals_wasm [] in
   let toplevel_names = mangled_names @ multi_base_names @ global_names in
   lift_inner_fns_wasm toplevel_names fns body_expr;
+  Hashtbl.reset inner_direct_wasm;
+  let inner_direct_order =
+    List.filter_map (fun lf ->
+      match (if Ast.inner_direct_enabled then peel_lifted_direct_wasm lf else None) with
+      | Some d -> Hashtbl.replace inner_direct_wasm lf.l_name d; Some (lf, d)
+      | None -> None) !lifted_fns_wasm in
   (* Phase 36 (DEFERRED §1.19 fix): register top-level closure adapter
      table indices BEFORE emit_fn_def so that fn bodies (and nested
      lambdas) can resolve `Var <top_fn>` as a closure value via
@@ -10827,7 +10935,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       | Some info -> Some (emit_direct_fn_wasm f.name info)
       | None -> None) fns
   in
-  let lifted_defs = List.map emit_lifted_fn_wasm !lifted_fns_wasm in
+  let lifted_defs = List.map emit_lifted_fn_wasm !lifted_fns_wasm
+    @ List.map (fun (lf, d) -> emit_lifted_fn_direct_wasm lf d) inner_direct_order in
   (* Emit one specialized `show_<tag>` function per registered type. *)
   let show_fn_defs =
     Hashtbl.fold (fun tag t acc -> emit_show_fn tag t :: acc) show_types []

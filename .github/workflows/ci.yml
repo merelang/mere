@@ -740,9 +740,18 @@ jobs:
       # A container written by a thread other than the one that made it fails
       # by name on the interpreter, C and LLVM (v0.1.575): the case the type
       # check cannot see is a closure that arrives as a parameter.
+      # v0.1.582: and a container another thread has read is read-only, an
+      # OwnedVec belongs to the thread spawn moved it into.
       - name: owner_check (a container is written only by the thread that made it)
         if: ${{ !cancelled() }}
         run: sh scripts/owner_check.sh --poison
+
+      # A saturated call of a curried inner function allocates no closures on
+      # C, LLVM and Wasm (Q-142, v0.1.583): mandelbrot's inner loop was 104
+      # B/iter on Wasm and 235 MB on LLVM before.
+      - name: inner_direct_check (an inner function called with every argument builds no closures)
+        if: ${{ !cancelled() }}
+        run: sh scripts/inner_direct_check.sh && sh scripts/inner_direct_check.sh --poison
 
       # The language server (v0.1.576): an unbroken run of didChanges that has
       # already arrived is checked once, and foldingRange is answered.
