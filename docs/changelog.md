@@ -4,6 +4,35 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.602 — 2026-10-03
+
+_A top-level name defined a second time is warned about: everything above the second definition -- including a `let rec ... and` group -- still means the first._
+
+Since v0.1.588 top-level functions may come in any order, and a second
+definition of a name shadows the first for what follows it. Nothing said so.
+Splitting mere-ruby's big `let rec` groups into separate definitions showed what
+that costs: nine names quietly came to mean an earlier definition of the same
+name -- three of them a function of the same type, which no type error can
+catch (Q-157). The warning is the precondition for doing that split safely:
+
+```
+warning: `f` is defined again at the top level (first at line 1). From here on it
+means this one; everything above -- including any `let rec ... and` group that
+uses it -- still means the first. Rename one if that is not the intent
+```
+
+It is given on every path (`check`, the interpreter, the compilers) when both
+definitions are the program's own: in the same directory, so two libraries with
+a private helper of the same name do not warn in every program that imports
+both, and not inside an installed package (`.mere_modules/`), which its user
+cannot edit. A definition that keeps a `let fn` promise is not a second one, and
+a program's own version of a prelude name is not warned about. In this
+repository and its downstream programs it names 6 files; in mere-ruby, 7 names
+(`all_digits`, `hex4`, `hex_val`, `is_ws_ch`, `norm_ccc`, `rev_app_str`,
+`str_has_nul`) -- which are what to settle before its groups are split.
+
+---
+
 ## v0.1.601 — 2026-10-03
 
 _`channel_sender ch h`: a channel that is told who sends on it stops a receive from waiting once all of them have finished -- naming the sender that failed. On all four backends._

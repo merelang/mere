@@ -1448,13 +1448,60 @@ let top_let_scheme outer_env (value : Ast.expr) (ty : Ast.ty) : Typer.scheme =
     Typer.mono ty
   end
 
+(* v0.1.602: A TOP-LEVEL NAME DEFINED TWICE. The second definition shadows the
+     first for everything after it, and nothing said so: code above it, and every
+     member of a `let rec ... and` group above it, still means the first. That is
+     how splitting mere-ruby's groups into separate `let`s quietly changed what
+     nine names referred to (Q-157) -- three of them to a function of the same
+     type, which no type error could catch. Warned when both are the program's
+     own: in the same directory, so a library's private helper meeting another
+     library's does not warn in every program that imports both -- and not inside
+     an installed package (.mere_modules/), which its user cannot edit. Not for a name
+     defined after its `let fn` promise, which is what that promise is for. *)
+let top_def_noter () =
+  let top_seen : (string, Loc.t) Hashtbl.t = Hashtbl.create 256 in
+  let promised : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+  let dir_of (l : Loc.t) = Option.map Filename.dirname l.Loc.file in
+  let note_top_def (loc : Loc.t) (n : string) =
+    (* the name as written: a second definition has been renamed `f__v2` by
+       then (Q-156), which is what keeps the two apart for everything else *)
+    let n = match Hashtbl.find_opt Ast.toplevel_renames n with Some o -> o | None -> n in
+    let in_dependency = match loc.Loc.file with
+      | Some f ->
+        let needle = "/.mere_modules/" in
+        let ln = String.length needle and lf = String.length f in
+        let rec has i = i + ln <= lf && (String.sub f i ln = needle || has (i + 1)) in
+        has 0
+      | None -> false in
+    if loc.Loc.file = Some prelude_file || n = "_" || in_dependency then ()
+    else if Hashtbl.mem promised n && not (Hashtbl.mem top_seen n) then
+      Hashtbl.replace top_seen n loc
+    else match Hashtbl.find_opt top_seen n with
+      | Some first when dir_of first = dir_of loc ->
+        let where =
+          if first.Loc.file = loc.Loc.file then Printf.sprintf "line %d" first.Loc.line
+          else Printf.sprintf "%s:%d"
+              (match first.Loc.file with Some f -> Filename.basename f | None -> "?")
+              first.Loc.line in
+        warn loc (Printf.sprintf
+          "`%s` is defined again at the top level (first at %s). From here on it \
+           means this one; everything above -- including any `let rec ... and` \
+           group that uses it -- still means the first. Rename one if that is not \
+           the intent" n where);
+        Hashtbl.replace top_seen n loc
+      | _ -> Hashtbl.replace top_seen n loc
+  in
+  (note_top_def, fun n -> Hashtbl.replace promised n ())
+
 let process_decls eval_env type_env decls =
   warn_declared_types ();
   warn_extern_arity ();
+  let (note_top_def, promise_top) = top_def_noter () in
   List.iter (fun decl ->
     match decl with
     | Ast.Top_let (pat, value) ->
       warn_reserved_in_pattern pat;
+      List.iter (note_top_def pat.Ast.ploc) (Ast.pattern_vars pat);
       let outer_env = !type_env in
       (* Pattern variables belong to this binding — see Typer's Let case. *)
       let bindings =
@@ -1493,6 +1540,7 @@ let process_decls eval_env type_env decls =
     | Ast.Top_let_rec bindings ->
       List.iter (fun (n, _, value) ->
         warn_reserved_name value.Ast.loc n) bindings;
+      List.iter (fun (n, nloc, _) -> note_top_def nloc n) bindings;
       let outer_env = !type_env in
       let alphas = infer_top_rec outer_env bindings in
       List.iter2 (fun (n, _, value) alpha -> forward_check_def n value.Ast.loc alpha) bindings alphas;
@@ -1542,6 +1590,7 @@ let process_decls eval_env type_env decls =
        definition is a later `let` in this same program, and the eval side gets a placeholder that the definition overwrites. *)
     | Ast.Top_forward (name, ty, floc) ->
       Hashtbl.replace forward_promised name (ty, floc);
+      promise_top name;
       type_env := (name, Typer.scheme_of_written ty) :: !type_env;
       eval_env := (name, ref Eval.V_unit) :: !eval_env
     | Ast.Top_extern (name, ty) ->
@@ -2372,6 +2421,7 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
         List.iter (fun n ->
           type_env := (n, Typer.mono (Typer.fresh_var ())) :: !type_env) names
   in
+  let (note_top_def, promise_top) = top_def_noter () in
   List.iter (fun decl ->
     match decl with
     | Ast.Top_let (pat, value) ->
@@ -2380,6 +2430,7 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
          collision is caught here instead of surfacing as a cryptic
          downstream error (e.g. wat2wasm "redefinition of $main"). *)
       warn_reserved_in_pattern pat;
+      List.iter (note_top_def pat.Ast.ploc) (Ast.pattern_vars pat);
       guard_decl (Some pat) [] (fun () ->
         let outer_env = !type_env in
         let t = Typer.enter_level (fun () -> infer_top_let outer_env value) in
@@ -2390,6 +2441,7 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
     | Ast.Top_let_rec bindings ->
       List.iter (fun (n, _, value) ->
         warn_reserved_name value.Ast.loc n) bindings;
+      List.iter (fun (n, nloc, _) -> note_top_def nloc n) bindings;
       guard_decl None (List.map Ast.rb_name bindings) (fun () ->
         let outer_env = !type_env in
         let alphas = infer_top_rec outer_env bindings in
@@ -2413,6 +2465,7 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
       Typer.register_local_type name
     | Ast.Top_forward (name, ty, floc) ->
       Hashtbl.replace forward_promised name (ty, floc);
+      promise_top name;
       (* Into BOTH, for the same reason as extern below. *)
       type_env := (name, Typer.scheme_of_written ty) :: !type_env;
       base_env := (name, Typer.scheme_of_written ty) :: !base_env
