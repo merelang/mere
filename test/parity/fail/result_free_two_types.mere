@@ -1,0 +1,11 @@
+// A function whose result is a free type (it ends in `fail`) used at two types:
+// at `v` by `pick`, and by `arity_error`, whose own result is thrown away (so
+// erased to int). Until v0.1.591 it was instantiated once, at `v`, and the C
+// compiler refused the int caller. Fails on purpose: prints 3, then fail: 500.
+type v = VNil | VInt of int;
+let raise_exc = fn (msg: str) -> fail msg;
+let arity_error = fn (n: int) -> raise_exc (show n);
+let pick = fn (x: int) -> if x > 0 then VInt x else raise_exc "neg";
+let check = fn (x: int) -> let _ = (if x > 100 then arity_error x else arity_error 0) in 1;
+let _ = (match pick 3 with | VInt n -> print (show n) | VNil -> ()) in
+print (show (check 500))

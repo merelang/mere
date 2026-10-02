@@ -439,6 +439,61 @@ let find_live_arrow (name : string) (skel_names : (string, unit) Hashtbl.t)
   go e;
   !found
 
+(* v0.1.591: [find_live_arrow] for every name at once. One walk lists, for each
+   name, the Var nodes that walk would visit for it, in its order and with its
+   skipping (the value of a `let` that binds a skeleton's name); the first one
+   whose type is NOW an arrow is its answer. *)
+let live_index (skel_names : (string, unit) Hashtbl.t) (e0 : Ast.expr)
+  : (string, Ast.expr list) Hashtbl.t =
+  let tbl = Hashtbl.create 64 in
+  let rec go (e : Ast.expr) =
+    (match e.Ast.node with
+     | Ast.Var n -> Hashtbl.replace tbl n (e :: (try Hashtbl.find tbl n with Not_found -> []))
+     | _ -> ());
+    match e.Ast.node with
+    | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
+    | Ast.Unit_lit | Ast.Var _ -> ()
+    | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
+    | Ast.App (a, b) -> go a; go b
+    | Ast.Neg a | Ast.Annot (a, _) -> go a
+    | Ast.Let (pat, v, b) ->
+      let skip =
+        (match pat.Ast.pnode with
+         | Ast.P_var n -> Hashtbl.mem skel_names n
+         | _ -> false) in
+      (if skip then () else go v); go b
+    | Ast.Let_rec (bs, b) ->
+      List.iter (fun (n, _, v) -> if Hashtbl.mem skel_names n then () else go v) bs;
+      go b
+    | Ast.With (_, v, b) -> go v; go b
+    | Ast.If (c, t, e_) -> go c; go t; go e_
+    | Ast.Fun (_, _, b) -> go b
+    | Ast.Constr (_, Some a) -> go a
+    | Ast.Constr (_, None) -> ()
+    | Ast.Match (sc, arms) ->
+      go sc;
+      List.iter (fun (_, g, b) ->
+        (match g with Some ge -> go ge | None -> ()); go b) arms
+    | Ast.Tuple es -> List.iter go es
+    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
+    | Ast.Ref (_, _, a) -> go a
+    | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
+    | Ast.Field_get (a, _) -> go a
+    | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
+  in
+  go e0;
+  Hashtbl.filter_map_inplace (fun _ l -> Some (List.rev l)) tbl;
+  tbl
+
+let live_arrow_of (nodes : Ast.expr list) : Ast.ty option =
+  List.find_map (fun (e : Ast.expr) ->
+    match e.Ast.ty with
+    | Some t ->
+      (match Ast.walk t with
+       | Ast.TyArrow _ as ar -> Some (erase_container_regions ar)
+       | _ -> None)
+    | None -> None) nodes
+
 (* Phase 23.1 (DEFERRED §1.7 multi-instantiation): collect ALL distinct
    concrete arrow types at use sites of `name`. Used to detect when a
    single-specialization emit would silently miscompile.
@@ -1347,8 +1402,27 @@ let resolve_fn_types ?(mangle = mangled_inst_name) ?(recover_erased = false)
      reference another unresolved fn. *)
   let skel_names : (string, unit) Hashtbl.t = Hashtbl.create 16 in
   List.iter (fun s -> Hashtbl.replace skel_names s.sname ()) skels;
-  let emitted_bodies =
-    ref (root :: List.map (fun (f : fn_decl) -> f.body) base) in
+  (* v0.1.591: the emitted bodies -- root, then each fn_decl's -- with
+     each one added later put in front, and filed by name: a name's uses
+     ([occ_index]) and its live references ([live_index]) in each body that has
+     any, under the body's place in that order. Asking a name then visits the
+     bodies that hold it, in the order the walk over all of them did, and an
+     answer is read from the nodes' types as they are now. *)
+  let emitted_uses : (string, (int * Ast.expr list) list) Hashtbl.t = Hashtbl.create 1024 in
+  let emitted_live : (string, (int * Ast.expr list) list) Hashtbl.t = Hashtbl.create 1024 in
+  let file_body pos body =
+    let put tbl n l = Hashtbl.replace tbl n ((pos, l) :: (try Hashtbl.find tbl n with Not_found -> [])) in
+    Hashtbl.iter (put emitted_uses) (occ_index body);
+    Hashtbl.iter (put emitted_live) (live_index skel_names body) in
+  List.iteri file_body (root :: List.map (fun (f : fn_decl) -> f.body) base);
+  let next_front = ref 0 in
+  let add_emitted body = decr next_front; file_body !next_front body in
+  let in_order tbl name =
+    (try Hashtbl.find tbl name with Not_found -> [])
+    |> List.stable_sort (fun (a, _) (b, _) -> compare a b)
+    |> List.map snd in
+  let uses_in_emitted name = in_order emitted_uses name in
+  let live_in_emitted name = List.find_map live_arrow_of (in_order emitted_live name) in
   let recovered_names : (string, unit) Hashtbl.t = Hashtbl.create 4 in
   let recovered = ref [] in
   (* ...and the same hole one step over: a MULTI-instantiated fn called
@@ -1367,31 +1441,65 @@ let resolve_fn_types ?(mangle = mangled_inst_name) ?(recover_erased = false)
   let extra = ref [] in
   let residual_pass () =
     let grew = ref false in
+    let add_instance s erased =
+      let nm = mangle s.sname erased in
+      if not (Hashtbl.mem have nm) then begin
+        Hashtbl.replace have nm ();
+        let (arrow, body) = make_spec erased s in
+        match Ast.walk arrow with
+        | Ast.TyArrow (p, r) ->
+          (* ...and in the table of instances, which is what a backend
+           lists when it asks which specializations a name has *)
+          let prev = (match Hashtbl.find_opt multi_inst_fns s.sname with Some l -> l | None -> []) in
+          Hashtbl.replace multi_inst_fns s.sname (prev @ [erased]);
+          extra := { name = nm; param = s.sparam; body;
+                     param_ty = Ast.walk p; return_ty = Ast.walk r } :: !extra;
+          add_emitted body;
+          grew := true
+        | _ -> ()
+      end
+    in
     if recover_erased then
       List.iter (fun s ->
+        (* v0.1.591: a fn resolved at ONE type that also has a residual use --
+           `raise_exc : str -> 'a` (it ends in `fail`) resolved at `v` from one
+           caller, and called from `arity_error : int -> 'b`, whose result is
+           thrown away and so erased to int. The call named the `v` instance and
+           the C compiler refused "returning 'v' from a function with result
+           type 'long long'". It becomes multi-instantiated: its resolved type
+           and each residual one (erased) get an instance, and every call site
+           then names the one for its own type. *)
+        (if Hashtbl.mem resolved s.sname && not (Hashtbl.mem multi_specs s.sname) then
+           let cur = erase_container_regions (Ast.walk (Hashtbl.find resolved s.sname)) in
+           let key = Ast.pp_ty cur in
+           (* Only a use that agrees on every PARAMETER and differs in the final
+              result: the free result of a fn that ends in `fail`. A residual
+              variable in a parameter position is a different thing -- erased to
+              int it named an instance whose closure parameter did not match the
+              argument (contrib raster's comparators), where the one resolved
+              instance had been right. *)
+           let rec spine t = match Ast.walk t with
+             | Ast.TyArrow (a, b) -> let (ps, r) = spine b in (Ast.pp_ty a :: ps, r)
+             | r -> ([], Ast.pp_ty r) in
+           let (cur_ps, cur_r) = spine cur in
+           let others =
+             List.filter (fun a ->
+               let (ps, r) = spine a in
+               ps = cur_ps && r <> cur_r)
+               (concrete_arrows_of_uses ~residual:true (uses_in_emitted s.sname)) in
+           ignore key;
+           if others <> [] then begin
+             Hashtbl.replace multi_specs s.sname [];
+             add_instance s cur;
+             List.iter (add_instance s) others
+           end);
         if Hashtbl.mem multi_specs s.sname then
-          List.iter (fun erased ->
-            let nm = mangle s.sname erased in
-            if not (Hashtbl.mem have nm) then begin
-              Hashtbl.replace have nm ();
-              let (arrow, body) = make_spec erased s in
-              match Ast.walk arrow with
-              | Ast.TyArrow (p, r) ->
-                (* ...and in the table of instances, which is what a backend
-                 lists when it asks which specializations a name has *)
-              let prev = (match Hashtbl.find_opt multi_inst_fns s.sname with Some l -> l | None -> []) in
-              Hashtbl.replace multi_inst_fns s.sname (prev @ [erased]);
-              extra := { name = nm; param = s.sparam; body;
-                           param_ty = Ast.walk p; return_ty = Ast.walk r } :: !extra;
-                emitted_bodies := body :: !emitted_bodies;
-                grew := true
-              | _ -> ()
-            end)
+          List.iter (add_instance s)
             (* the residual uses, erased -- and the concrete ones too: a body
                this pass (or the recovery below) added calls other
                multi-instantiated fns at types the main fixpoint never saw *)
-            (find_all_concrete_arrows_in ~residual:true s.sname !emitted_bodies
-             @ find_all_concrete_arrows_in s.sname !emitted_bodies)) skels;
+            (concrete_arrows_of_uses ~residual:true (uses_in_emitted s.sname)
+             @ concrete_arrows_of_uses (uses_in_emitted s.sname))) skels;
     !grew
   in
   let changed = ref true in
@@ -1402,12 +1510,7 @@ let resolve_fn_types ?(mangle = mangled_inst_name) ?(recover_erased = false)
       if not (Hashtbl.mem resolved s.sname)
          && not (Hashtbl.mem multi_specs s.sname)
          && not (Hashtbl.mem recovered_names s.sname) then begin
-        let hit =
-          List.fold_left (fun acc e ->
-            match acc with
-            | Some _ -> acc
-            | None -> find_live_arrow s.sname skel_names e) None !emitted_bodies
-        in
+        let hit = live_in_emitted s.sname in
         match hit with
         | Some ar ->
           (match deep_erase_tyvars ar with
@@ -1415,7 +1518,7 @@ let resolve_fn_types ?(mangle = mangled_inst_name) ?(recover_erased = false)
              Hashtbl.replace recovered_names s.sname ();
              recovered := { name = s.sname; param = s.sparam; body = s.sbody;
                             param_ty = p; return_ty = r } :: !recovered;
-             emitted_bodies := s.sbody :: !emitted_bodies;
+             add_emitted s.sbody;
              changed := true
            | _ -> ())
         | None -> ()

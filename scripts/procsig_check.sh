@@ -37,14 +37,21 @@ trap 'rm -rf "$TMP"' EXIT
   || { echo "FAIL procsig: C compile failed"; cat "$TMP/cc.err"; exit 1; }
 P="$TMP/p"
 
+# THE "NOTHING INHERITED" SCENES PUT THE DEFAULT BACK FIRST. A CI runner starts
+# its steps with SIGPIPE ignored, and a shell cannot undo a disposition it was
+# started with (`trap - PIPE` is refused for a signal ignored on entry) -- so on
+# CI the fresh scene WAS the inherited one, and its rows failed exactly as an
+# inherited SIG_IGN says they should. perl can, and execs the rest.
+dflt() { perl -e '$SIG{PIPE} = "DEFAULT"; exec @ARGV' "$@"; }
+
 : > "$TMP/got"
-sh "$ROOT/scripts/bounded.sh" 30 "$P" fresh 2>> "$TMP/got"
+dflt sh "$ROOT/scripts/bounded.sh" 30 "$P" fresh 2>> "$TMP/got"
 echo "fresh exit $?" >> "$TMP/got"
 ( trap '' PIPE; sh "$ROOT/scripts/bounded.sh" 30 "$P" inherited ) 2>> "$TMP/got"
 echo "inherited exit $?" >> "$TMP/got"
 # the reader exits at once; the probe waits 300 ms before its first write
-sh "$ROOT/scripts/bounded.sh" 30 "$P" closed 2>> "$TMP/got" | true
-sh "$ROOT/scripts/bounded.sh" 30 "$P" dies 2>> "$TMP/got"
+dflt sh "$ROOT/scripts/bounded.sh" 30 "$P" closed 2>> "$TMP/got" | true
+dflt sh "$ROOT/scripts/bounded.sh" 30 "$P" dies 2>> "$TMP/got"
 echo "dies exit $?" >> "$TMP/got"
 
 # One line per check, compared AS A WHOLE: a row that stops being printed is a
