@@ -754,6 +754,8 @@ let parse_program ?(prelude = true) ?(keep_sugar = false) ?base_dir ?(search_pat
      that edits the source it formats is a tool people stop running -- the same
      sentence v0.1.504 wrote about `echo`, one layer down. *)
   let for_codegen p =
+    (* v0.1.588 (Q-156): after the names are one declaration each *)
+    Ast.order_toplevel ~skip:(List.length prelude_decls) @@
     Ast.uniquify_toplevel_shadows ~shadowable
       (Ast.reserve_toplevel_main
         (Ast.uniquify_inner_fns_program ~skip:(List.length prelude_decls)
