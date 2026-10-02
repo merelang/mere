@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.575 — 2026-10-02
+
+_A container written by a thread other than the one that made it stops the program by name (Q-179 stage 2)._
+
+v0.1.574 follows what a spawned thread reaches through functions whose
+definitions the program shows. A closure that arrives as a PARAMETER is not one
+of those, and that is the shape mere-blog's race had: its handler was handed to
+`http_serve_mt_ctx`, which spawns it, and the handler pushed to a Vec the
+program's thread made.
+
+So `Map`, `Vec`, `StrBuf`, `ByteBuf` and `ListBuf` record the thread that made
+them, and a write from any other thread fails with one sentence, the same on
+the interpreter, C and LLVM, instead of hanging a probe loop (a Map filled from
+four threads, three runs in three) or losing entries (159,123 of 160,000).
+Reads are not checked: a table built once and only read is shared safely, and
+a read is the hot path.
+
+What it costs. The program's thread is thread 1 and nothing asks a thread its
+number until something has been spawned, so a program that never spawns pays
+one load of a global per write -- on Darwin a thread-local read is a call, and
+`vec_set` sits in inner loops. On benchmarks/ (C, median of 21 runs on a loaded
+machine) crc32 is +1.4%, wordfreq +4.4%, the rest inside the noise; every
+output identical. The interpreter checks the same writes with the domain id. A
+`--lib` build turns the check off at `mere_lib_init`: a host calls in from
+whichever thread it likes, one call at a time, and module state is written from
+each. OwnedVec is single-owner by construction and is not checked.
+
+The struct sizes the LLVM runtime had written as numbers (24 for a Vec and a
+StrBuf, 32 for a ListBuf) are computed from the types now that the types grew.
+`scripts/owner_check.sh` (CI) runs a Vec, a Map and a StrBuf written through a
+parameter on all three backends, plus a program that shares a read-only table
+and must still run; its poisons take the check out of the emitted C and LLVM.
+
+---
+
 ## v0.1.574 — 2026-10-02
 
 _A spawned thread is checked for what it REACHES through functions, not only what it mentions (Q-179)._

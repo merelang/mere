@@ -3136,7 +3136,7 @@ let rec emit_expr (e : Ast.expr) : string =
            if (__se) { __lang_env_hdr* __sh = (__lang_env_hdr*)__se; \
                        if (__sh->__copy) __se = __sh->__copy(&__lang_default_region, __se); } \
            __mere_unit_closure* __c = (__mere_unit_closure*)malloc(sizeof(__mere_unit_closure)); \
-           __c->env = __se; __c->fn = __cl.fn; \
+           __c->env = __se; __c->fn = __cl.fn; __lang_threads_started = 1; \
            ThreadHandle __t; " ^ attr_open ^ "\
            int __pc = pthread_create(&__t.tid, " ^ attr_arg ^ ", __mere_spawn_trampoline, __c);" ^ attr_close ^ " \
            if (__pc != 0) { free(__c); __lang_fail_impl(\"spawn: the host refused to start a thread\"); } \
@@ -4058,7 +4058,7 @@ let rec emit_expr (e : Ast.expr) : string =
        in
        Printf.sprintf
          "({ __lang_listbuf* __b = (__lang_listbuf*)__lang_region_alloc(%s, sizeof(__lang_listbuf)); \
-          __b->head = 0; __b->tail = 0; __b->region = %s; __b->len = 0; __b->frozen = 0; __b; })"
+          __b->head = 0; __b->tail = 0; __b->region = %s; __b->len = 0; __b->frozen = 0; __b->owner = __LANG_OWNER_NOW(); __b; })"
          region_var region_var
      | Ast.Var "lb_to_list" ->
        (* Q-106: hand the head out and freeze. An empty builder answers the
@@ -4120,6 +4120,7 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf
          "({ __lang_listbuf* __b = %s; __auto_type __x = %s; \
           if (__b->frozen) __lang_fail_impl(\"lb_push: the builder was already turned into a list by lb_to_list\"); \
+          __LANG_OWNED(__b, \"ListBuf\", \"lb_push\"); \
           if (__lang_region_live(__b->region) != __lang_current_region) __lang_fail_impl(\"lb_push: the builder belongs to a region that is not current\"); \
           %s_node* __n = (%s_node*)__lang_region_alloc(__b->region, sizeof(%s_node)); \
           __n->payload.Cons.f0 = __x; __n->payload.Cons.f1 = %s__mk(%d, &%s); \
@@ -9738,6 +9739,7 @@ let region_runtime_helpers =
       "  __lang_region* region;";
       "  long long len;";
       "  int frozen;";
+      "  int owner;  /* v0.1.575: see __LANG_OWNED */";
       "} __lang_listbuf;";
       "";
       (* v0.1.274: malloc's answer used to go unread. When it said no, the very
@@ -9849,6 +9851,40 @@ let region_runtime_helpers =
       "static inline void __lang_dsite_charge(__lang_region* r, size_t n) {";
       "  if (r && r->fwd && r->site) __atomic_fetch_add(&r->alloc_total, n, __ATOMIC_RELAXED);";
       "}";
+      (* v0.1.575 (Q-179 stage 2): WHO MAY WRITE A CONTAINER. Map, Vec, StrBuf,
+         ByteBuf and ListBuf are lock-free and not safe to share, and the type
+         check cannot see every way a thread reaches one -- a handler handed to a
+         library that spawns it is a parameter, whose definition is the caller's.
+         So each container records the thread that made it, and a WRITE from any
+         other thread fails by name instead of corrupting the probe loop (a Map
+         filled from four threads hung three runs in three) or losing entries
+         silently (a Vec pushed from eight kept 159,123 of 160,000). Reads are not
+         checked: a table built once and only read is safe to share, and a read is
+         the hot path. --lib exempts itself: a host may call in from whichever
+         thread it likes, one call at a time, and module state is legitimately
+         written from each. *)
+      (* The thread that runs the program is 1 (set where it starts); every
+         thread `spawn` starts takes the next number the first time it asks.
+         Until the first spawn there is one thread, so a container made then is
+         the program thread's without asking -- and the check below reads a plain
+         global before anything thread-local: on Darwin a _Thread_local read is a
+         call, and `vec_set` sits in inner loops of programs that never spawn. *)
+      "static int __lang_tid_ctr = 1;";
+      "static int __lang_threads_started = 0;";
+      "static _Thread_local int __lang_tid_v = 0;";
+      "static inline int __lang_tid(void) {";
+      "  if (__builtin_expect(!__lang_tid_v, 0)) __lang_tid_v = __atomic_add_fetch(&__lang_tid_ctr, 1, __ATOMIC_RELAXED);";
+      "  return __lang_tid_v;";
+      "}";
+      "__attribute__((noinline, noreturn)) static void __lang_owner_fail(const char* kind, const char* op) {";
+      "  char m[320];";
+      "  snprintf(m, sizeof m, \"%s: a %s made by one thread was written by another -- a %s is not safe to share between threads; give it one owner thread and send it messages over a Channel\", op, kind, kind);";
+      "  __lang_fail_impl(m);";
+      "  abort();";
+      "}";
+      "static int __lang_owner_off = 0;   /* mere_lib_init sets it: see above */";
+      "#define __LANG_OWNER_NOW() (__lang_threads_started ? __lang_tid() : 1)";
+      "#define __LANG_OWNED(c, k, o) do { if (__builtin_expect(__lang_threads_started, 0) && (c)->owner != __lang_tid() && !__lang_owner_off) __lang_owner_fail(k, o); } while (0)";
       "";
       "/* Program-lifetime arena for closure envs and other long-lived";
       "   allocations that outlive any user `region R { ... }` block. It is";
@@ -10505,6 +10541,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  __lang_region* region;";
       "  int owns_region;  /* 1 after the first compact: region is private and freeable */";
       "  __lang_region* home;  /* v0.1.567: where this struct itself lives -- `region` moves */";
+      "  int owner;  /* v0.1.575: the thread that made it, the only one that may write it */";
       Printf.sprintf "} %s;" struct_name;
       "";
       (* new *)
@@ -10520,6 +10557,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  m->live = 0;";
       "  m->region = r;";
       "  m->home = r;";
+      "  m->owner = __LANG_OWNER_NOW();";
       "  m->owns_region = 0;";
       "  m->idx_cap = 8;";
       "  m->idx = (int*)__lang_region_alloc(r, sizeof(int) * 8);";
@@ -10585,6 +10623,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          doubling to 68 GB while a collector deleted its dead entries. Collect
          the survivors, clear, re-set. *)
       Printf.sprintf "static int %s_clear(%s* m) {" struct_name struct_name;
+      "  __LANG_OWNED(m, \"Map\", \"map_clear\");";
       "  m->len = 0;";
       "  m->live = 0;";
       "  for (int i = 0; i < m->idx_cap; i++) m->idx[i] = -1;";
@@ -10600,6 +10639,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          Semantically identical to map_clear -- the interpreter and wasm
          lower it to exactly that. *)
       Printf.sprintf "static int %s_recycle(%s* m) {" struct_name struct_name;
+      "  __LANG_OWNED(m, \"Map\", \"map_recycle\");";
       (* an arena a suspended coroutine points into is not recycled in place:
          the map moves to a fresh one and the old is retired *)
       "  if (m->owns_region && m->region->blocks->prev && __lang_region_pinned && __lang_region_pinned(m->region, 1)) {";
@@ -10658,6 +10698,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          allocator. Maps never compacted never pay: no private arena exists
          until the first call (a frame-shaped map costs nothing extra). *)
       Printf.sprintf "static int %s_compact(%s* m) {" struct_name struct_name;
+      "  __LANG_OWNED(m, \"Map\", \"map_compact\");";
       "  __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "  if (!fresh) __lang_fail_impl(\"out of memory\");";
       "  __lang_region_init(fresh, 4096);";
@@ -10705,6 +10746,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          delete keep their observable behavior. *)
       Printf.sprintf "static int %s_set(%s* m, %s __mk, %s __mv) {"
         struct_name struct_name c_k c_v;
+      "  __LANG_OWNED(m, \"Map\", \"map_set\");";
       (* v0.1.30 (copy-on-store): the map owns its contents, so a stored value
          never dangles when the storer's scope is reclaimed. But the deep-copy
          must happen only for what is actually stored: hashing and key
@@ -10826,6 +10868,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          amortised across O(live) deletes. *)
       Printf.sprintf "static int %s_delete(%s* m, %s __mk) {"
         struct_name struct_name c_k;
+      "  __LANG_OWNED(m, \"Map\", \"map_delete\");";
       Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "__mk");
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
       "  while (m->idx[s] != -1) {";
@@ -11008,6 +11051,7 @@ let strbuf_runtime =
       "  int len;";
       "  int cap;";
       "  __lang_region* region;";
+      "  int owner;  /* v0.1.575: see __LANG_OWNED */";
       "} mere_strbuf;";
       "";
       "static mere_strbuf* mere_strbuf_new(__lang_region* r) {";
@@ -11016,10 +11060,12 @@ let strbuf_runtime =
       "  sb->len = 0;";
       "  sb->data = (char*)__lang_region_alloc(r, sizeof(char) * 16);";
       "  sb->region = r;";
+      "  sb->owner = __LANG_OWNER_NOW();";
       "  return sb;";
       "}";
       "";
       "static int mere_strbuf_push(mere_strbuf* sb, const char* s) {";
+      "  __LANG_OWNED(sb, \"StrBuf\", \"strbuf_push\");";
       "  int slen = (int)__lang_str_size(s);";
       "  if (sb->len + slen > sb->cap) {";
       "    int new_cap = sb->cap * 2;";
@@ -11084,6 +11130,7 @@ let bytebuf_runtime =
       "  long long len;";
       "  long long cap;";
       "  __lang_region* region;";
+      "  int owner;  /* v0.1.575: see __LANG_OWNED */";
       "} mere_bytebuf;";
       "";
       "static mere_bytebuf* mere_bytebuf_new(__lang_region* r, long long n) {";
@@ -11094,6 +11141,7 @@ let bytebuf_runtime =
       "  bb->len = n;";
       "  bb->cap = cap;";
       "  bb->region = r;";
+      "  bb->owner = __LANG_OWNER_NOW();";
       "  return bb;";
       "}";
       "";
@@ -11109,6 +11157,7 @@ let bytebuf_runtime =
       "}";
       "";
       "static long long mere_bytebuf_set(mere_bytebuf* bb, long long i, long long v) {";
+      "  __LANG_OWNED(bb, \"ByteBuf\", \"bytebuf_set\");";
       "  if (i < 0 || i >= bb->len)";
       "    __lang_fail_idx(\"bytebuf_set: index %lld out of bounds (len = %lld)\", i, bb->len);";
       "  bb->data[i] = (unsigned char)(v & 255);";
@@ -11116,6 +11165,7 @@ let bytebuf_runtime =
       "}";
       "";
       "static long long mere_bytebuf_push(mere_bytebuf* bb, long long v) {";
+      "  __LANG_OWNED(bb, \"ByteBuf\", \"bytebuf_push\");";
       "  if (bb->len + 1 > bb->cap) {";
       "    long long new_cap = bb->cap * 2 + 16;";
       (* v0.1.414: in place when the buffer is the region's most recent
@@ -12391,6 +12441,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  __lang_region* region;";
       "  int owns_region;  /* 1 after the first compact (see the map twin) */";
       "  __lang_region* home;  /* v0.1.567: where this struct itself lives -- `region` moves */";
+      "  int owner;  /* v0.1.575: the thread that made it, the only one that may write it */";
       Printf.sprintf "} %s;" struct_name;
       "";
       Printf.sprintf "static %s* %s_new(__lang_region* r) {" struct_name struct_name;
@@ -12401,11 +12452,13 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       Printf.sprintf "  v->data = (%s*)__lang_region_alloc(r, sizeof(%s) * 4);" c_elem c_elem;
       "  v->region = r;";
       "  v->home = r;";
+      "  v->owner = __LANG_OWNER_NOW();";
       "  v->owns_region = 0;";
       "  return v;";
       "}";
       "";
       Printf.sprintf "static int %s_push(%s* v, %s x) {" struct_name struct_name c_elem;
+      "  __LANG_OWNED(v, \"Vec\", \"vec_push\");";
       (* v0.1.30 (copy-on-store): the vec owns its elements — see the map
          runtime's set for the rationale. *)
       Printf.sprintf "  x = __mcopy_%s(v->region, x);" tag;
@@ -12425,6 +12478,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
          full story. Slots overwritten by vec_set leave their old owned copies
          in the arena; the generation swap is what returns them. *)
       Printf.sprintf "static int %s_compact(%s* v) {" struct_name struct_name;
+      "  __LANG_OWNED(v, \"Vec\", \"vec_compact\");";
       "  __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "  if (!fresh) __lang_fail_impl(\"out of memory\");";
       "  __lang_region_init(fresh, 4096);";
@@ -12461,6 +12515,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "";
       Printf.sprintf "static int %s_set(%s* v, long long i, %s x) {"
         struct_name struct_name c_elem;
+      "  __LANG_OWNED(v, \"Vec\", \"vec_set\");";
       "  if (i < 0 || i >= (long long)v->len) {";
       "    __lang_fail_idx(\"vec_set: index %lld out of bounds (len = %lld)\", i, (long long)v->len);";
       "  }";
@@ -12475,6 +12530,9 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
         c_elem struct_name struct_name;
       Printf.sprintf "static int %s_set_unchecked(%s* v, long long i, %s x) {"
         struct_name struct_name c_elem;
+      (* the flag is a global int and the stores are not ints, so clang may
+         hoist the test out of a versioned loop -- measured on benchmarks/ *)
+      "  __LANG_OWNED(v, \"Vec\", \"vec_set\");";
       Printf.sprintf "  v->data[i] = __mcopy_%s(v->region, x);" tag;
       "  return 0; /* unit */";
       "}" ]
@@ -12493,10 +12551,12 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  const double* p = v->data + i; mere_f64x2 r = { p[0], p[1] }; return r;";
       "}";
       "static int mere_vec_float_f64x2_store(mere_vec_float* v, long long i, mere_f64x2 x) {";
+      "  __LANG_OWNED(v, \"Vec\", \"f64x2_store\");";
       "  if (i < 0 || i + 2 > (long long)v->len) __lang_fail_idx(\"f64x2_store: lanes [%lld, +2) out of bounds (len = %lld)\", i, (long long)v->len);";
       "  double* p = v->data + i; p[0] = x[0]; p[1] = x[1]; return 0;";
       "}";
       "static int mere_vec_float_f64x2_store_unchecked(mere_vec_float* v, long long i, mere_f64x2 x) {";
+      "  __LANG_OWNED(v, \"Vec\", \"f64x2_store\");";
       "  double* p = v->data + i; p[0] = x[0]; p[1] = x[1]; return 0;";
       "}" ]))
 
@@ -15350,6 +15410,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           "static pthread_mutex_t __mere_lib_lock = PTHREAD_MUTEX_INITIALIZER;";
           "static int __mere_lib_live = 0;";
           "void mere_lib_init(void) {";
+          "  __lang_owner_off = 1;";
           "  pthread_mutex_lock(&__mere_lib_lock);";
           "  if (!__mere_lib_live) { __mere_lib_init_body(); __mere_lib_live = 1; }";
           "  pthread_mutex_unlock(&__mere_lib_lock);";
@@ -15999,6 +16060,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         [ (* the stack bounds are read here, where the program's first frame is
              the deepest it has been so far *)
           "  __lang_stack_bounds();";
+          "  __lang_tid_v = 1;   /* v0.1.575: the program's thread is thread 1 */";
           (* ⚠ `sigaltstack` is PER-THREAD. When the work below runs on a thread
              this has to be installed on that thread, which is why it is here
              and not beside `setvbuf`. *)

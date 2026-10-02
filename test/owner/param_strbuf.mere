@@ -1,0 +1,7 @@
+// scripts/owner_check.sh: as param_vec, a StrBuf through a parameter.
+let mk = fn (u: unit) -> let b = strbuf_new () in let _ = strbuf_push b "a" in b;
+let sb = mk ();
+let start = fn (f: unit -> unit) -> spawn f;
+let h = start (fn (u: unit) -> strbuf_push sb "b");
+let _ = join h;
+print (strbuf_to_str sb)

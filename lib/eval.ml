@@ -107,7 +107,7 @@ type value =
        narrowed -> first implementation stage). Backed by a capacity-carrying
        buffer (`vecbuf` below), so push is amortised O(1).
        Trivial[R] when element type is Trivial[R]. *)
-  | V_strbuf of Buffer.t
+  | V_strbuf of strbuf
   (* A mutable byte buffer: one byte per byte, random access, and growable.
      `StrBuf` is the same shape for text and cannot serve — it appends only, and a
      string ends at a zero byte in the compiled backends. `Vec[R, int]` can do the
@@ -167,9 +167,12 @@ and map_state = {
   m_tbl : (value, value) Hashtbl.t;
   mutable m_order : value list;
   mutable m_order_n : int;
+  m_owner : int;   (* v0.1.575: the domain that made it -- see `own` *)
 }
 
-and bytebuf = { mutable bb_data : Bytes.t; mutable bb_len : int }
+and bytebuf = { mutable bb_data : Bytes.t; mutable bb_len : int; bb_owner : int }
+
+and strbuf = { sb : Buffer.t; sb_owner : int }
 
 (* v0.1.349: a Vec's storage, with capacity. Slots [0, vc_len) are live and
    the rest is V_unit filler, so `vec_push` doubles instead of reallocating.
@@ -178,8 +181,8 @@ and bytebuf = { mutable bb_data : Bytes.t; mutable bb_len : int }
    was already amortised. That asymptotic sat in the parity oracle, which is
    what bounds the input size a differential gate can afford: 200k pushes took
    74s interpreted and 0.01s compiled. *)
-and vecbuf = { mutable vc_data : value array; mutable vc_len : int }
-and lbuf = { mutable lb_items : value list; mutable lb_frozen : bool; lb_region : int }
+and vecbuf = { mutable vc_data : value array; mutable vc_len : int; vc_owner : int }
+and lbuf = { mutable lb_items : value list; mutable lb_frozen : bool; lb_region : int; lb_owner : int }
 
 and env = (string * value ref) list
 
@@ -204,10 +207,22 @@ and coro_state =
   | Co_dead
 and coro_step = Co_switched of coro | Co_finished of coro
 
-let vecbuf_of_array (a : value array) : vecbuf =
-  { vc_data = a; vc_len = Array.length a }
+(* v0.1.575 (Q-179 stage 2): the C and LLVM runtimes fail a container WRITTEN
+   by a thread other than the one that made it (the type check cannot see a
+   handler that arrives as a parameter). The interpreter answers the same way
+   with the same sentence -- its threads are domains, and they race too: a Map
+   filled from four of them came back with 69,352 of 80,000 entries. *)
+let owner_now () = (Domain.self () :> int)
+let own (kind : string) (op : string) (owner : int) =
+  if owner <> owner_now () then
+    raise (Eval_error (Loc.dummy, Printf.sprintf
+      "%s: a %s made by one thread was written by another -- a %s is not safe to share between threads; give it one owner thread and send it messages over a Channel"
+      op kind kind))
 
-let vecbuf_empty () : vecbuf = { vc_data = [||]; vc_len = 0 }
+let vecbuf_of_array (a : value array) : vecbuf =
+  { vc_data = a; vc_len = Array.length a; vc_owner = owner_now () }
+
+let vecbuf_empty () : vecbuf = { vc_data = [||]; vc_len = 0; vc_owner = owner_now () }
 
 (* Q-106: which region is current, as an integer the interpreter can compare.
    0 is the program-lifetime region; every `region R { }` entry and every
@@ -368,7 +383,7 @@ and to_string = function
     "Vec[" ^ String.concat ", " (List.map to_string elems) ^ "]"
   | V_lb b ->
     "ListBuf[" ^ String.concat ", " (List.rev_map to_string b.lb_items) ^ "]"
-  | V_strbuf buf ->
+  | V_strbuf { sb = buf; _ } ->
     "StrBuf[" ^ Ast.escape_string (Buffer.contents buf) ^ "]"
   | V_map m ->
     let parts = List.map (fun k ->
@@ -431,7 +446,7 @@ and to_json_string = function
     "[" ^ String.concat "," (List.map to_json_string (Array.to_list (vecbuf_live arr))) ^ "]"
   | V_lb b ->
     "[" ^ String.concat "," (List.rev_map to_json_string b.lb_items) ^ "]"
-  | V_strbuf buf -> Ast.escape_string (Buffer.contents buf)
+  | V_strbuf { sb = buf; _ } -> Ast.escape_string (Buffer.contents buf)
   | V_map m ->
     let parts = List.map (fun k ->
       let v = Hashtbl.find m.m_tbl k in
@@ -1659,7 +1674,7 @@ let builtin_len =
     match v with
     | V_vec arr -> V_int arr.vc_len
     | V_lb b -> V_int (List.length b.lb_items)
-    | V_strbuf buf -> V_int (Buffer.length buf)
+    | V_strbuf { sb = buf; _ } -> V_int (Buffer.length buf)
     | V_map m -> V_int (Hashtbl.length m.m_tbl)
     | V_str s -> V_int (String.length s)
     | V_tuple es -> V_int (List.length es)
@@ -1689,6 +1704,7 @@ let builtin_vec_push =
     match v with
     | V_vec arr ->
       V_builtin ("vec_push_p1", fun x ->
+        own "Vec" "vec_push" arr.vc_owner;
         vecbuf_push arr x;
         V_unit)
     | _ -> failwith "vec_push: expected Vec")
@@ -1833,6 +1849,7 @@ let builtin_f64x2_store =
     | V_vec arr ->
       V_builtin ("f64x2_store_p1", fun idx ->
         V_builtin ("f64x2_store_p2", fun x ->
+          own "Vec" "f64x2_store" arr.vc_owner;
           match idx with
           | V_int i ->
             f64x2_range "f64x2_store" arr i;
@@ -2017,7 +2034,7 @@ let builtin_bytebuf_new =
   V_builtin ("bytebuf_new", fun v ->
     match v with
     | V_int n when n >= 0 ->
-      V_bytebuf { bb_data = Bytes.make (max n 1) '\000'; bb_len = n }
+      V_bytebuf { bb_data = Bytes.make (max n 1) '\000'; bb_len = n; bb_owner = owner_now () }
     | V_int _ -> failwith "bytebuf_new: negative length"
     | _ -> failwith "bytebuf_new: expected int")
 
@@ -2043,6 +2060,7 @@ let builtin_bytebuf_set =
       match i with
       | V_int i ->
         V_builtin ("bytebuf_set_p2", fun x ->
+          own "ByteBuf" "bytebuf_set" b.bb_owner;
           match x with
           | V_int x when i >= 0 && i < b.bb_len ->
             Bytes.set b.bb_data i (Char.chr (x land 255)); V_unit
@@ -2056,6 +2074,7 @@ let builtin_bytebuf_push =
   V_builtin ("bytebuf_push", fun v ->
     let b = expect_bytebuf "bytebuf_push" v in
     V_builtin ("bytebuf_push_p1", fun x ->
+      own "ByteBuf" "bytebuf_push" b.bb_owner;
       match x with
       | V_int x ->
         bb_ensure b (b.bb_len + 1);
@@ -2074,20 +2093,21 @@ let builtin_bytebuf_of_bytes =
     match v with
     | V_bytes s ->
       V_bytebuf { bb_data = Bytes.of_string (if s = "" then "\000" else s);
-                  bb_len = String.length s }
+                  bb_len = String.length s; bb_owner = owner_now () }
     | _ -> failwith "bytebuf_of_bytes: expected bytes")
 
 let builtin_strbuf_new =
   V_builtin ("strbuf_new", fun v ->
     match v with
-    | V_unit -> V_strbuf (Buffer.create 64)
+    | V_unit -> V_strbuf { sb = Buffer.create 64; sb_owner = owner_now () }
     | _ -> failwith "strbuf_new: expected unit")
 
 let builtin_strbuf_push =
   V_builtin ("strbuf_push", fun v ->
     match v with
-    | V_strbuf buf ->
+    | V_strbuf { sb = buf; sb_owner } ->
       V_builtin ("strbuf_push_p1", fun s ->
+        own "StrBuf" "strbuf_push" sb_owner;
         match s with
         | V_str s -> Buffer.add_string buf s; V_unit
         | _ -> failwith "strbuf_push: expected str")
@@ -2096,13 +2116,13 @@ let builtin_strbuf_push =
 let builtin_strbuf_to_str =
   V_builtin ("strbuf_to_str", fun v ->
     match v with
-    | V_strbuf buf -> V_str (Buffer.contents buf)
+    | V_strbuf { sb = buf; _ } -> V_str (Buffer.contents buf)
     | _ -> failwith "strbuf_to_str: expected StrBuf")
 
 let builtin_strbuf_len =
   V_builtin ("strbuf_len", fun v ->
     match v with
-    | V_strbuf buf -> V_int (Buffer.length buf)
+    | V_strbuf { sb = buf; _ } -> V_int (Buffer.length buf)
     | _ -> failwith "strbuf_len: expected StrBuf")
 
 (* Map[R, K, V] builtins (Phase 12.10). Internally an OCaml Hashtbl
@@ -2113,7 +2133,7 @@ let builtin_strbuf_len =
 let builtin_map_new =
   V_builtin ("map_new", fun v ->
     match v with
-    | V_unit -> V_map { m_tbl = Hashtbl.create 16; m_order = []; m_order_n = 0 }
+    | V_unit -> V_map { m_tbl = Hashtbl.create 16; m_order = []; m_order_n = 0; m_owner = owner_now () }
     | _ -> failwith "map_new: expected unit")
 
 let builtin_map_set =
@@ -2122,6 +2142,7 @@ let builtin_map_set =
     | V_map m ->
       V_builtin ("map_set_p1", fun k ->
         V_builtin ("map_set_p2", fun vv ->
+          own "Map" "map_set" m.m_owner;
           (* Phase 27.1: track insertion order. Only record NEW keys;
              existing keys keep their original position. The list is kept
              newest-first (O(1) prepend); readers reverse it to recover
@@ -2175,7 +2196,7 @@ let builtin_map_len =
 let builtin_map_recycle =
   V_builtin ("map_recycle", fun v ->
     match v with
-    | V_map m -> Hashtbl.reset m.m_tbl; m.m_order <- []; m.m_order_n <- 0; V_unit
+    | V_map m -> own "Map" "map_recycle" m.m_owner; Hashtbl.reset m.m_tbl; m.m_order <- []; m.m_order_n <- 0; V_unit
     | _ -> failwith "map_recycle: expected Map")
 
 let builtin_map_bytes = V_builtin ("map_bytes", fun _ -> V_int 0)
@@ -2184,7 +2205,7 @@ let builtin_vec_bytes = V_builtin ("vec_bytes", fun _ -> V_int 0)
 let builtin_map_clear =
   V_builtin ("map_clear", fun v ->
     match v with
-    | V_map m -> Hashtbl.reset m.m_tbl; m.m_order <- []; m.m_order_n <- 0; V_unit
+    | V_map m -> own "Map" "map_clear" m.m_owner; Hashtbl.reset m.m_tbl; m.m_order <- []; m.m_order_n <- 0; V_unit
     | _ -> failwith "map_clear: expected Map")
 
 let builtin_map_compact =
@@ -2197,6 +2218,7 @@ let builtin_map_delete =
     match v with
     | V_map m ->
       V_builtin ("map_delete_p1", fun k ->
+        own "Map" "map_delete" m.m_owner;
         if Hashtbl.mem m.m_tbl k then begin
           Hashtbl.remove m.m_tbl k;
           map_maybe_compact m
@@ -2318,6 +2340,7 @@ let builtin_vec_set =
     | V_vec arr ->
       V_builtin ("vec_set_p1", fun idx ->
         V_builtin ("vec_set_p2", fun new_val ->
+          own "Vec" "vec_set" arr.vc_owner;
           match idx with
           | V_int i ->
             if i < 0 || i >= arr.vc_len then
@@ -2450,7 +2473,7 @@ let builtin_vec_to_list =
 let builtin_lb_new =
   V_builtin ("lb_new", fun v ->
     match v with
-    | V_unit -> V_lb { lb_items = []; lb_frozen = false; lb_region = !current_region_id }
+    | V_unit -> V_lb { lb_items = []; lb_frozen = false; lb_region = !current_region_id; lb_owner = owner_now () }
     | _ -> failwith "lb_new: expected unit")
 
 let builtin_lb_push =
@@ -2461,6 +2484,7 @@ let builtin_lb_push =
         if b.lb_frozen then
           raise (Eval_error (Loc.dummy,
             "lb_push: the builder was already turned into a list by lb_to_list"));
+        own "ListBuf" "lb_push" b.lb_owner;
         if b.lb_region <> !current_region_id then
           raise (Eval_error (Loc.dummy,
             "lb_push: the builder belongs to a region that is not current"));
