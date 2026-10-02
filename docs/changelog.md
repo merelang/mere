@@ -4,6 +4,38 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.580 — 2026-10-02
+
+_parity.sh stops counting a miscompile as "unsupported", and the two it was hiding are fixed (Q-198, Q-199)._
+
+A parity row whose backend refuses at emit time is UNSUP and passes, because a
+backend that does not implement a builtin yet is a documented limit, not a bug.
+The test for "refuses" was the word `unsupported` in the error -- and the LLVM and
+Wasm backends put that word in front of every codegen error they raise. So
+`unbound variable: p` on LLVM read as a documented limit. `emit_kind` now names
+the sentences that mean "not implemented here" (no lowering yet, not in the
+codegen subset, not available on Wasm, a region loop, ...) and anything else is
+a failure. Two rows went red at once.
+
+**An inner function's name met a variable of another function's** (Q-198): an
+inner `let rec cnt` in one function and a plain `let cnt = vec_new ()` in another
+lifted as one symbol, and LLVM -- and Wasm in a variant -- read the variable inside
+the other function's closures as the lifted function. mgz's inflate and deflate
+both have the shape (`p`, `cnt`); a captured variable named `len` failed the same
+way. The pass that renames colliding inner functions knew only other function
+names; it knows every variable's now. Three parity cases (200 in all).
+
+**A closure that calls an inner-lifted function, on Wasm**: the lambda did not
+carry the callee's captures, so a closure written inside a `region` block that
+calls such a helper failed "inner-lifted capture `v` not in scope" -- the C
+backend's fix from v0.1.453, never ported. It had been in parity since then,
+counted as unsupported. It carries them now, and msha's sha1 builds on Wasm --
+and so do four contrib libraries `contrib_ctest.sh` had pinned as Wasm gaps
+for the same sentence (`font/font`, `html/entities`, `html/tokenizer`,
+`proto/gen`), which are unpinned: a pin that starts passing is a failure there.
+
+---
+
 ## v0.1.579 — 2026-10-02
 
 _v0.1.575's owner check made a versioned loop 2.8x slower once a thread existed; it is asked once per loop now._

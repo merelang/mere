@@ -606,11 +606,15 @@ let uq_counter = ref 0
    lift map — single-use inner names (the common case, and what most tests
    assert on) are left untouched, and nothing leaks into pretty-printing of
    collision-free code. `seen` is a per-host set of already-taken names. *)
-let uniquify_inner_fns_expr (seen : (string, unit) Hashtbl.t) (e0 : expr) : expr =
+let uniquify_inner_fns_expr ?(vars : (string, unit) Hashtbl.t = Hashtbl.create 1)
+    ?(builtins : (string, unit) Hashtbl.t = Hashtbl.create 1)
+    (seen : (string, unit) Hashtbl.t) (e0 : expr) : expr =
   let is_fun ex = match ex.node with Fun _ -> true | _ -> false in
-  (* claim a name for an inner fn: keep it if free, else return a fresh one *)
+  (* claim a name for an inner fn: keep it if free, else return a fresh one.
+     v0.1.581: free of VARIABLE names too (`vars`, see the program-level pass) --
+     but only here: a parameter that shadows a variable is not renamed for it *)
   let claim n =
-    if Hashtbl.mem seen n then begin
+    if Hashtbl.mem seen n || Hashtbl.mem vars n then begin
       incr uq_counter; Some (n ^ "_uq" ^ string_of_int !uq_counter)
     end else begin Hashtbl.add seen n (); None end
   in
@@ -624,7 +628,7 @@ let uniquify_inner_fns_expr (seen : (string, unit) Hashtbl.t) (e0 : expr) : expr
      while both had the same type — the wrong binding happened to fit — and surfaced
      as bad C only when their types diverged. *)
   let claim_shadow n =
-    if Hashtbl.mem seen n then begin
+    if Hashtbl.mem seen n || Hashtbl.mem builtins n then begin
       incr uq_counter; Some (n ^ "_uq" ^ string_of_int !uq_counter)
     end else None
   in
@@ -691,31 +695,6 @@ let uniquify_inner_fns_expr (seen : (string, unit) Hashtbl.t) (e0 : expr) : expr
   in
   uq e0
 
-let uniquify_inner_fns_program (prog : program) : program =
-  (* Share one `seen` table across all top-level decls + main so an inner fn
-     name reused in two different top-level scopes (e.g. a `go` loop helper in
-     two places) lifts to two distinct symbols. Per-decl tables let the names
-     collide, which the LLVM backend miscompiled — one lifted body ended up
-     referencing the other's captured variable ("use of undefined value"). *)
-  let seen : (string, unit) Hashtbl.t = Hashtbl.create 64 in
-  (* Seed with every top-level binding name. A lifted inner fn must not collide
-     with a real top-level symbol of the same name: an inner `go` in one helper
-     and a top-level `go` both lift/emit as `go`, and the LLVM backend then
-     resolved a call to the top-level `go` against the lifted inner one (calling
-     it with the inner one's captures — "use of undefined value"). Seeding forces
-     the colliding inner fn to be renamed. *)
-  List.iter (function
-    | Top_let (p, _) -> List.iter (fun n -> Hashtbl.replace seen n ()) (pattern_vars p)
-    | Top_let_rec bs -> List.iter (fun (n, _, _) -> Hashtbl.replace seen n ()) bs
-    | _ -> ()) prog.decls;
-  let decls =
-    List.map (function
-      | Top_let (p, e) -> Top_let (p, uniquify_inner_fns_expr seen e)
-      | Top_let_rec bs -> Top_let_rec (List.map (fun (n, l, e) -> (n, l, uniquify_inner_fns_expr seen e)) bs)
-      | d -> d)
-      prog.decls
-  in
-  { decls; main = uniquify_inner_fns_expr seen prog.main }
 
 (* A user top-level binding named `main` collides with the synthesized program
    entry (C emits `main`, Wasm exports `$main`). Mere has no main convention —
@@ -998,6 +977,66 @@ let children (e : expr) : expr list =
   | Record_update (base, fields) -> base :: List.map snd fields
 
 (* The expressions a top-level declaration contains. *)
+
+let uniquify_inner_fns_program ?(skip = 0) ?(builtins : string list = []) (prog : program) : program =
+  (* Share one `seen` table across all top-level decls + main so an inner fn
+     name reused in two different top-level scopes (e.g. a `go` loop helper in
+     two places) lifts to two distinct symbols. Per-decl tables let the names
+     collide, which the LLVM backend miscompiled — one lifted body ended up
+     referencing the other's captured variable ("use of undefined value"). *)
+  let seen : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+  (* Seed with every top-level binding name. A lifted inner fn must not collide
+     with a real top-level symbol of the same name: an inner `go` in one helper
+     and a top-level `go` both lift/emit as `go`, and the LLVM backend then
+     resolved a call to the top-level `go` against the lifted inner one (calling
+     it with the inner one's captures — "use of undefined value"). Seeding forces
+     the colliding inner fn to be renamed. *)
+  List.iter (function
+    | Top_let (p, _) -> List.iter (fun n -> Hashtbl.replace seen n ()) (pattern_vars p)
+    | Top_let_rec bs -> List.iter (fun (n, _, _) -> Hashtbl.replace seen n ()) bs
+    | _ -> ()) prog.decls;
+  (* v0.1.580 (Q-198): and every name a VARIABLE is bound to, anywhere. An inner
+     fn `cnt` in one function and a plain `let cnt = vec_new ()` in another lifted
+     as one symbol, and the LLVM and Wasm backends then read the variable inside
+     the other function's closures as the lifted function: "unbound variable:
+     cnt" there, while the interpreter, C (and sometimes Wasm) were right. Only
+     function names were in this table. A rename is only a name, so renaming an
+     inner fn that collides with nothing harmful costs nothing. *)
+  (* ⚠ a table of its own (v0.1.581): seeding `seen` itself made every PARAMETER
+     that shares a name with any variable a "shadow" and renamed it -- 53 tests'
+     expected C, and every program's emitted names, moved for nothing (v0.1.580) *)
+  let vars : (string, unit) Hashtbl.t = Hashtbl.create 256 in
+  (* v0.1.581: a builtin's name is taken too. A parameter named `len` captured by
+     an inner fn was read as the builtin `len` on LLVM and Wasm ("len as a
+     value"); renaming the parameter -- the Q-046 rule for a parameter that
+     shadows a top-level binding, which a builtin is -- is what keeps them apart *)
+  let builtin_tbl : (string, unit) Hashtbl.t = Hashtbl.create 512 in
+  List.iter (fun n -> Hashtbl.replace builtin_tbl n ()) builtins;
+  let rec seed_vars (e : expr) =
+    (match e.node with
+     | Fun (x, _, _) -> Hashtbl.replace vars x ()
+     | Let (p, v, _) when (match v.node with Fun _ -> false | _ -> true) -> List.iter (fun n -> Hashtbl.replace vars n ()) (pattern_vars p)
+     | Match (_, arms) -> List.iter (fun (p, _, _) -> List.iter (fun n -> Hashtbl.replace vars n ()) (pattern_vars p)) arms
+     | Region_loop (_, x, _) | With (x, _, _) -> Hashtbl.replace vars x ()
+     | _ -> ());
+    List.iter seed_vars (children e)
+  in
+  (* the program's own declarations: the prelude's (the first `skip`) are not
+     where a collision comes from, and seeding them renamed every user inner fn
+     that happened to share a name with a prelude helper's variable *)
+  List.iteri (fun i d -> if i >= skip then match d with
+    | Top_let (_, e) -> seed_vars e
+    | Top_let_rec bs -> List.iter (fun (_, _, e) -> seed_vars e) bs
+    | _ -> ()) prog.decls;
+  seed_vars prog.main;
+  let decls =
+    List.map (function
+      | Top_let (p, e) -> Top_let (p, uniquify_inner_fns_expr ~vars ~builtins:builtin_tbl seen e)
+      | Top_let_rec bs -> Top_let_rec (List.map (fun (n, l, e) -> (n, l, uniquify_inner_fns_expr ~vars ~builtins:builtin_tbl seen e)) bs)
+      | d -> d)
+      prog.decls
+  in
+  { decls; main = uniquify_inner_fns_expr ~vars ~builtins:builtin_tbl seen prog.main }
 let decl_exprs (d : top_decl) : expr list =
   match d with
   | Top_let (_, e) -> [e]

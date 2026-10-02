@@ -4515,6 +4515,19 @@ and emit_expr (e : Ast.expr) : unit =
        go into a memory-resident env struct (or env = 0 if there are
        none). *)
     let raw_fvs = free_vars fn_body [param] in
+    (* v0.1.580: a lambda that CALLS an inner-lifted fn has to carry that fn's
+       captures too -- the call inside the adapter passes them, and the adapter
+       has only what the lambda captured. Without them a closure inside a region
+       block calling such a helper failed "inner-lifted capture `v` not in
+       scope" (the C backend's v0.1.453-era fix, never ported; parity counted it
+       as unsupported until Q-199). *)
+    let raw_fvs =
+      let extra = List.concat_map (fun n ->
+          match Hashtbl.find_opt inner_lifts_wasm n with
+          | Some li -> li.captures
+          | None -> []) raw_fvs in
+      raw_fvs @ List.filter (fun c -> not (List.mem c raw_fvs)) (List.sort_uniq compare extra)
+    in
     let captures =
       List.filter_map (fun n ->
         match List.assoc_opt n !locals with

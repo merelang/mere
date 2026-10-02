@@ -756,7 +756,8 @@ let parse_program ?(prelude = true) ?(keep_sugar = false) ?base_dir ?(search_pat
   let for_codegen p =
     Ast.uniquify_toplevel_shadows ~shadowable
       (Ast.reserve_toplevel_main
-        (Ast.uniquify_inner_fns_program
+        (Ast.uniquify_inner_fns_program ~skip:(List.length prelude_decls)
+           ~builtins:(List.map fst Typer.initial_env)
           (Ast.range_version_program ~unsafe_builtins:higher_order_builtins
             (Ast.lower_par_map_program p))))
   in

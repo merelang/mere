@@ -116,7 +116,16 @@ skip=0; skip_names=""
 
 # emit_fail_kind <errfile> : "unsup" if the emit error is a clean
 # backend-unsupported, else "hard".
-emit_kind() { grep -qE 'unsupported|not supported in .* codegen subset|does not fit the .* 32-bit int' "$1" 2>/dev/null && echo unsup || echo hard; }
+# v0.1.580 (Q-199): THE SENTENCES THAT MEAN "NOT IMPLEMENTED HERE", by name.
+# This matched the word `unsupported`, and the LLVM and Wasm backends put that
+# word in front of EVERY codegen error ("unsupported (llvm codegen, Phase 5.1
+# MVP): ...") -- so a miscompile that says "unbound variable: p" was counted as
+# a documented limit and the row passed (Q-198: an inner function's name met a
+# variable of another function's on LLVM). An emit error that is not one of
+# these is a failure; a new kind of limit is added here, on purpose.
+emit_kind() {
+  grep -qE 'has no (LLVM|Wasm|RV32I|C) lowering yet|not supported in .* codegen subset|is not supported in the [a-z]+ codegen subset|is not available on Wasm|(is|are) unsupported in (LLVM|Wasm) codegen|unsupported (LLVM|Wasm) codegen type|region loop|let rec inside an expression|has no single value form on Wasm|as a value: type is polymorphic|nested let-tuple patterns not supported|does not fit the .* 32-bit int' "$1" 2>/dev/null && echo unsup || echo hard
+}
 
 # note_exit <backend> <case-file> <rc> — appends the exit-status verdict to $row.
 #
