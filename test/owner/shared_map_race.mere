@@ -1,0 +1,18 @@
+// scripts/owner_check.sh: the race v0.1.575 could not see -- the OWNER writes a
+// Map while another thread reads it, and growing it moves what the reader is
+// probing (with deletes and compaction too, the C build segfaulted 3 runs in 3).
+// The reader's first read makes the Map shared; the owner's next write fails.
+let launch = fn (f: unit -> unit) -> spawn f;
+let m = map_new ();
+let rec pre = fn (i: int) -> if i == 1000 then () else let _ = map_set m i i in pre (i + 1);
+let _ = pre 0;
+let rec rd = fn (n: int) -> fn (bad: int) ->
+  if n == 0 then bad
+  else let k = n % 1000 in
+       let v = if map_has m k then map_get m k else 0 - 1 in
+       rd (n - 1) (if v == k then bad else bad + 1);
+let reader = fn (u: unit) -> let b = rd 3000000 0 in let _ = print_no_nl "bad reads: " in print_int b;
+let h = launch reader;
+let rec wr = fn (i: int) -> if i == 400000 then () else let _ = map_set m i i in wr (i + 1);
+let _ = wr 1000;
+join h

@@ -1,0 +1,24 @@
+// scripts/owner_check.sh: what freezing must leave alone -- mengd's shape:
+// tables built before the threads, read by every one of them, never written
+// again; and the owner still reads its own table after the joins.
+let launch = fn (f: unit -> unit) -> spawn f;
+let t = vec_new ();
+let rec pre = fn (i: int) -> if i == 1000 then () else let _ = vec_push t (i * 3) in pre (i + 1);
+let _ = pre 0;
+let names = map_new ();
+let _ = map_set names 1 10;
+let rec sum = fn (i: int) -> fn (acc: int) -> if i == vec_len t then acc else sum (i + 1) (acc + vec_get t i);
+let ch = channel_new ();
+let work = fn (u: unit) -> channel_send ch (sum 0 0 + map_get names 1);
+let h1 = launch work;
+let h2 = launch work;
+let h3 = launch work;
+let a = channel_recv ch;
+let b = channel_recv ch;
+let c = channel_recv ch;
+let _ = join h1;
+let _ = join h2;
+let _ = join h3;
+let _ = print_int (a + b + c);
+// the owner still reads its own table afterwards
+print_int (sum 0 0)

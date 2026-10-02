@@ -1267,6 +1267,22 @@ let warn_declared_types () =
     (fun i (name, loc) -> if i < mine then warn_reserved_type_name loc name)
     all
 
+(* v0.1.582 (Q-179): a `sync type` that holds a builtin container is refused --
+   see Typer.unsync_builtin_in. After the declarations are registered (the marker
+   comes before the type it marks), at the type's own line. *)
+let check_sync_types () =
+  List.iter (fun (name, loc) ->
+    if Hashtbl.mem Typer.sync_types name then
+      match Typer.sync_type_holds_unsync name with
+      | Some b ->
+        let a = match b.[0] with 'A' | 'E' | 'I' | 'O' | 'U' -> "an" | _ -> "a" in
+        raise (Typer.Type_error (loc, Printf.sprintf
+          "`sync type %s` holds %s %s, and %s %s is not safe to share between threads -- \
+           it has no lock, and marking the type that holds it sync does not give it one\n\
+           help: give the %s one owner thread and send it messages over a Channel"
+          name a b a b b))
+      | None -> ()) !Parser.declared_types
+
 (* A TOP-LEVEL `let`, TYPED ONCE. There are two callers -- `process_decls`, which the
    interpreter walks, and `infer_program_inner`, which every backend starts from -- and
    they had the same eight lines written out twice. They had also drifted: neither
@@ -1532,12 +1548,17 @@ let process_decls eval_env type_env decls =
          runs; never reached in practice. *)
       ()
   ) decls;
+  check_sync_types ();
   forward_check_all_kept ()
 
 (* What a program prints when it ends: `None` when it has nothing to say.
    `process` below is the same thing as a string, for the hundreds of callers
    that want one -- one rule, two spellings of the answer, rather than two
    places that decide. *)
+(* infer_program, which is defined below; see the use in process_opt *)
+let check_whole_program : (string option -> string list -> string -> unit) ref =
+  ref (fun _ _ _ -> ())
+
 let process_opt ?base_dir ?(search_paths = []) s =
   forward_reset ();
   Exhaustive.reset ();
@@ -1545,6 +1566,26 @@ let process_opt ?base_dir ?(search_paths = []) s =
   Typer.reset_send_constraints ();
   Typer.reset_region_params ();
   let prog = Trait_elab.elaborate (parse_program ?base_dir ~search_paths s) in
+  (* v0.1.582 (Q-179): CHECK, THEN RUN. process_decls runs each top-level `let`
+     as soon as it has typed it, and the whole-program checks below -- the
+     borrow check, the spawn-capture check -- come after the last declaration.
+     So a top-level `let _ = spawn ...` that the compiled backends refuse to
+     build was RUN by the interpreter first: the race in race_global happened,
+     and was stopped by the runtime owner check, not by the type error every
+     other backend gives. A program that spawns is checked whole first, the way
+     the compile path checks it; its warnings are put back, because the run
+     below raises them again. A program that never spawns has nothing for those
+     checks to find before it runs, and is not typed twice. *)
+  if Move_check.mentions_spawn (Ast.desugar_program prog) then begin
+    let saved = !warnings in
+    !check_whole_program base_dir search_paths s;
+    warnings := saved;
+    forward_reset ();
+    Exhaustive.reset ();
+    Deprecated.reset ();
+    Typer.reset_send_constraints ();
+    Typer.reset_region_params ()
+  end;
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
   process_decls eval_env type_env prog.decls;
@@ -2370,6 +2411,7 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
       Typer.alias_record alias target
     | Ast.Top_trait _ | Ast.Top_impl _ -> ()
   ) prog.decls;
+  check_sync_types ();
   forward_check_all_kept ();
   let desugared = Ast.desugar_program prog in
   (* The desugared program re-visits every declaration's body, so when recovering
@@ -2412,6 +2454,10 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
      | Typer.Type_error (loc, msg) | Trait_elab.Trait_error (loc, msg) ->
        report loc msg);
   (prog, main_ty)
+
+let () =
+  check_whole_program := (fun base_dir search_paths s ->
+    ignore (infer_program ?base_dir ~search_paths s))
 
 (* Q-083 (option B, v0.1.538): what the build would refuse in a program the type
    query accepts -- as data, for `mere -t` / `-te` to print on stderr while they

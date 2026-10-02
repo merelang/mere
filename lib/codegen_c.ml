@@ -3131,7 +3131,15 @@ let rec emit_expr (e : Ast.expr) : string =
           env as it was: a str captured inside `region R { }` was read by the
           thread after R was reused. No copier means no region blocks anywhere, and
           the env is in the default region already. *)
-       "({ __auto_type __cl = " ^ emit_expr arg ^ "; \
+       (* v0.1.582: the OwnedVecs the closure captures are given away *)
+       let release =
+         match arg.Ast.node with
+         | Ast.Fun _ ->
+           String.concat "" (List.map (fun (n, t) ->
+             Printf.sprintf "(%s)->owner = 0; " (emit_expr { arg with Ast.node = Ast.Var n; ty = Some t }))
+             (Ast.owned_vec_captures arg))
+         | _ -> "" in
+       "({ " ^ release ^ "__auto_type __cl = " ^ emit_expr arg ^ "; \
            void* __se = (void*)__cl.env; \
            if (__se) { __lang_env_hdr* __sh = (__lang_env_hdr*)__se; \
                        if (__sh->__copy) __se = __sh->__copy(&__lang_default_region, __se); } \
@@ -4396,7 +4404,7 @@ let rec emit_expr (e : Ast.expr) : string =
              "vec_to_list: result type must have a `Nil` constructor"
        in
        Printf.sprintf
-         "({ __auto_type __v = %s; \
+         "({ __auto_type __v = %s; __LANG_READ(__v); \
           %s __acc = %s__mk(%d, &%s); \
           for (int __i = __v->len - 1; __i >= 0; __i--) { \
             %s_node* __new_node = (%s_node*)__lang_region_alloc(__lang_current_region, sizeof(%s_node)); \
@@ -4537,7 +4545,7 @@ let rec emit_expr (e : Ast.expr) : string =
           parallel arrays. __auto_type infers types from the runtime call. *)
        let _ = map_kv_tags_of m_e.Ast.ty m_e.Ast.loc in
        Printf.sprintf
-         "({ __auto_type __m = %s; __auto_type __outer = %s; \
+         "({ __auto_type __m = %s; __auto_type __outer = %s; __LANG_READ(__m); \
           for (int __i = 0; __i < __m->len; __i++) { \
             if (__m->dead[__i]) continue; \
             __auto_type __k = __m->keys[__i]; __auto_type __v = __m->values[__i]; \
@@ -9886,9 +9894,58 @@ let region_runtime_helpers =
       "  abort();";
       "}";
       "static int __lang_owner_off = 0;   /* mere_lib_init sets it: see above */";
+      (* v0.1.582 (Q-179): FREEZE ON FIRST FOREIGN READ. Reads were left
+         unchecked so that a table built once and read by every thread stays
+         free -- and that left the race v0.1.575 could not see: the owner
+         writing while another thread reads. A Map churned by its owner under a
+         reader segfaulted 3 runs in 3; a Vec compacted under one was a
+         use-after-free. So the first time a thread other than the owner reads
+         a container, the container becomes SHARED -- a bit in its owner field,
+         which is why a write needs no second test: its owner check already
+         fails, and only then asks which way. A shared container is read-only
+         for good. That refuses one honest shape, "threads read it, are joined,
+         and then the owner writes" -- the same answer the static check gives
+         a captured container -- and the way out is the same: give the
+         container one owner thread, or build a new one. *)
+      "#define __LANG_SHARED 0x40000000";
+      "__attribute__((noinline, noreturn)) static void __lang_shared_fail(const char* kind, const char* op) {";
+      "  char m[360];";
+      "  snprintf(m, sizeof m, \"%s: a %s another thread has read was written -- once a second thread reads a %s it is shared, and a shared %s is read-only; give it one owner thread and send it messages over a Channel\", op, kind, kind, kind);";
+      "  __lang_fail_impl(m);";
+      "  abort();";
+      "}";
+      "__attribute__((noinline, noreturn)) static void __lang_write_fail(int owner, const char* kind, const char* op) {";
+      "  if (owner == (__lang_tid() | __LANG_SHARED)) __lang_shared_fail(kind, op);";
+      "  __lang_owner_fail(kind, op);";
+      "}";
       "#define __LANG_OWNER_NOW() (__lang_threads_started ? __lang_tid() : 1)";
       "#define __LANG_OWNER_OK(c) (!__lang_threads_started || (c)->owner == __lang_tid() || __lang_owner_off)";
-      "#define __LANG_OWNED(c, k, o) do { if (__builtin_expect(__lang_threads_started, 0) && (c)->owner != __lang_tid() && !__lang_owner_off) __lang_owner_fail(k, o); } while (0)";
+      "#define __LANG_OWNED(c, k, o) do { if (__builtin_expect(__lang_threads_started, 0) && (c)->owner != __lang_tid() && !__lang_owner_off) __lang_write_fail((c)->owner, k, o); } while (0)";
+      "#define __LANG_READ(c) do { if (__builtin_expect(__lang_threads_started, 0)) __lang_read_mark(&(c)->owner); } while (0)";
+      (* v0.1.582: an OwnedVec is not shared but MOVED: `spawn` hands the ones
+         its closure captures to the new thread (it sets their owner to 0, "given
+         away"), and the first thread to use a given-away one takes it. Any other
+         thread's use fails by name -- one that reached it through a closure
+         handed to a library that spawns it, say, where nothing moved it. *)
+      "__attribute__((noinline, noreturn)) static void __lang_ov_fail(const char* op) {";
+      "  char m[320];";
+      "  snprintf(m, sizeof m, \"%s: an OwnedVec belongs to one thread -- the one that made it, or the one spawn moved it into -- and another used it; move it into the thread by capturing it in the closure spawn is given\", op);";
+      "  __lang_fail_impl(m);";
+      "  abort();";
+      "}";
+      "static inline void __lang_ov_use(int* owner, const char* op) {";
+      "  if (!__builtin_expect(__lang_threads_started, 0) || __lang_owner_off) return;";
+      "  int t = __lang_tid();";
+      "  int o = __atomic_load_n(owner, __ATOMIC_RELAXED);";
+      "  if (o == t) return;";
+      "  if (o == 0) { int z = 0; if (__atomic_compare_exchange_n(owner, &z, t, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED) || z == t) return; }";
+      "  __lang_ov_fail(op);";
+      "}";
+      "static inline void __lang_read_mark(int* owner) {";
+      "  int o = __atomic_load_n(owner, __ATOMIC_RELAXED);";
+      "  if (!(o & __LANG_SHARED) && o != __lang_tid() && !__lang_owner_off)";
+      "    __atomic_fetch_or(owner, __LANG_SHARED, __ATOMIC_RELAXED);";
+      "}";
       "";
       "/* Program-lifetime arena for closure envs and other long-lived";
       "   allocations that outlive any user `region R { ... }` block. It is";
@@ -10827,6 +10884,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       (* get *)
       Printf.sprintf "static %s %s_get(%s* m, %s __mk) {"
         c_v struct_name struct_name c_k;
+      "  __LANG_READ(m);";
       Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "__mk");
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
       "  while (m->idx[s] != -1) {";
@@ -10846,6 +10904,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       (* has *)
       Printf.sprintf "static int %s_has(%s* m, %s __mk) {"
         struct_name struct_name c_k;
+      "  __LANG_READ(m);";
       Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "__mk");
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
       "  while (m->idx[s] != -1) {";
@@ -10860,7 +10919,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       (* len *)
       (* Q-063: the LIVE count. `len` is the dense high-water mark and includes
          tombstones, which no observer of the language is allowed to see. *)
-      Printf.sprintf "static int %s_len(%s* m) { return m->live; }"
+      Printf.sprintf "static int %s_len(%s* m) { __LANG_READ(m); return m->live; }"
         struct_name struct_name;
       "";
       (* Phase 39.A' #2 / Q-063: delete by TOMBSTONE. No-op if the key is absent.
@@ -11089,13 +11148,14 @@ let strbuf_runtime =
       "     wide default region so the returned str outlives the StrBuf's";
       "     scoped region. Avoids dangling pointers when";
       "     `region R { ...; strbuf_to_str b }` returns a value out of R. */";
+      "  __LANG_READ(sb);";
       "  char* r = __lang_str_alloc(__lang_current_region, sb->len);";
       "  for (int i = 0; i < sb->len; i++) r[i] = sb->data[i];";
       "  r[sb->len] = '\\0';";
       "  return r;";
       "}";
       "";
-      "static long long mere_strbuf_len(mere_strbuf* sb) { return sb->len; }" ]
+      "static long long mere_strbuf_len(mere_strbuf* sb) { __LANG_READ(sb); return sb->len; }" ]
 
 (* ByteBuf[R]: the same shape as StrBuf, for bytes. Random access is the point —
    `bytes` is immutable and StrBuf appends only — and one byte per byte is the
@@ -11149,12 +11209,13 @@ let bytebuf_runtime =
       "  return bb;";
       "}";
       "";
-      "static long long mere_bytebuf_len(mere_bytebuf* bb) { return bb->len; }";
+      "static long long mere_bytebuf_len(mere_bytebuf* bb) { __LANG_READ(bb); return bb->len; }";
       "";
       (* v0.1.279: catchable, like every other bad index. These printed and
          exited, so try_or could not take them and the program stopped where the
          interpreter carried on. *)
       "static long long mere_bytebuf_get(mere_bytebuf* bb, long long i) {";
+      "  __LANG_READ(bb);";
       "  if (i < 0 || i >= bb->len)";
       "    __lang_fail_idx(\"bytebuf_get: index %lld out of bounds (len = %lld)\", i, bb->len);";
       "  return (long long)bb->data[i];";
@@ -11185,6 +11246,7 @@ let bytebuf_runtime =
       "static mere_bytes* mere_bytes_of_bytebuf(mere_bytebuf* bb) {";
       "  /* Into the current region, so a `bytes` frozen inside `region R { }` can";
       "     be returned out of it — the same reason strbuf_to_str does. */";
+      "  __LANG_READ(bb);";
       "  mere_bytes* b = __lang_bytes_alloc(bb->len);";
       "  for (long long i = 0; i < bb->len; i++) b->data[i] = bb->data[i];";
       "  return b;";
@@ -12394,6 +12456,7 @@ let emit_owned_vec_runtime_for (elem_ty : Ast.ty) : string =
       Printf.sprintf "  %s* data;" c_elem;
       "  int len;";
       "  int cap;";
+      "  int owner;  /* v0.1.582: see __lang_ov_use */";
       Printf.sprintf "} %s;" struct_name;
       "";
       Printf.sprintf "static %s* %s_new(void) {" struct_name struct_name;
@@ -12402,12 +12465,14 @@ let emit_owned_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  v->cap = 4;";
       "  v->len = 0;";
       Printf.sprintf "  v->data = (%s*)malloc(sizeof(%s) * 4);" c_elem c_elem;
+      "  v->owner = __LANG_OWNER_NOW();";
       "  __mere_owned_vec_register(v);";
       "  return v;";
       "}";
       "";
       Printf.sprintf "static int %s_push(%s* v, %s x) {"
         struct_name struct_name c_elem;
+      "  __lang_ov_use(&v->owner, \"owned_vec_push\");";
       "  if (v->len == v->cap) {";
       "    v->cap *= 2;";
       Printf.sprintf "    v->data = (%s*)realloc(v->data, sizeof(%s) * v->cap);"
@@ -12422,13 +12487,14 @@ let emit_owned_vec_runtime_for (elem_ty : Ast.ty) : string =
       "}";
       "";
       Printf.sprintf "static %s %s_get(%s* v, long long i) {" c_elem struct_name struct_name;
+      "  __lang_ov_use(&v->owner, \"owned_vec_get\");";
       "  if (i < 0 || i >= (long long)v->len) {";
       "    __lang_fail_idx(\"owned_vec_get: index %lld out of bounds (len = %lld)\", i, (long long)v->len);";
       "  }";
       "  return v->data[i];";
       "}";
       "";
-      Printf.sprintf "static int %s_len(%s* v) { return v->len; }"
+      Printf.sprintf "static int %s_len(%s* v) { __lang_ov_use(&v->owner, \"owned_vec_len\"); return v->len; }"
         struct_name struct_name ]
 
 (* Phase 15.2/15.5: Vec[R, T] runtime — emit struct + 5 helpers
@@ -12505,6 +12571,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "}";
       "";
       Printf.sprintf "static %s %s_get(%s* v, long long i) {" c_elem struct_name struct_name;
+      "  __LANG_READ(v);";
       (* v0.1.275: `long long`, because the index is a Mere int. As an `int` it
          arrived as its low 32 bits, so `vec_get v 4294967297` on a two-element
          vec returned element 1 and exited 0 -- on all three compiled backends,
@@ -12515,7 +12582,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  return v->data[i];";
       "}";
       "";
-      Printf.sprintf "static long long %s_len(%s* v) { return v->len; }" struct_name struct_name;
+      Printf.sprintf "static long long %s_len(%s* v) { __LANG_READ(v); return v->len; }" struct_name struct_name;
       "";
       Printf.sprintf "static int %s_set(%s* v, long long i, %s x) {"
         struct_name struct_name c_elem;
@@ -12547,6 +12614,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
          anything and made it reload `v->data` on every iteration, where a
          store of doubles cannot touch a `double*` field. *)
       "static mere_f64x2 mere_vec_float_f64x2_load(mere_vec_float* v, long long i) {";
+      "  __LANG_READ(v);";
       "  if (i < 0 || i + 2 > (long long)v->len) __lang_fail_idx(\"f64x2_load: lanes [%lld, +2) out of bounds (len = %lld)\", i, (long long)v->len);";
       "  const double* p = v->data + i; mere_f64x2 r = { p[0], p[1] }; return r;";
       "}";
@@ -15270,7 +15338,29 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           !lib_stem name
           (String.concat ", " (c_params @ out_param @ ["mere_buf* err"]))
       in
-      let wrapper ((_name, ptys, rty, call) as e) =
+      (* v0.1.582 (Q-179): a library with MODULE STATE -- a top-level container
+         -- refuses a call that overlaps another thread's. Its state is written
+         from whichever thread calls, and the owner check cannot hold here (a
+         host calls from any thread it likes), so four host threads filling a
+         top-level Map kept 191,819 of 200,001 entries and said nothing. A
+         library without such state still takes concurrent calls (each has
+         its own region and failure buffer). A call from inside a call, on the
+         same thread, is not an overlap. *)
+      let lib_has_state =
+        List.exists (fun (_, _, t) -> Typer.ty_mentions_mutable_container t) top_globals_list in
+      let wrapper ((name, ptys, rty, call) as e) =
+        let enter, leave =
+          if not lib_has_state then "", "" else
+          (Printf.sprintf
+             "  int __lib_me = __lang_tid(), __lib_prev = 0;\n\
+              \  int __lib_outer = __atomic_compare_exchange_n(&__mere_lib_busy, &__lib_prev, __lib_me, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);\n\
+              \  if (!__lib_outer && __lib_prev != __lib_me) {\n\
+              \    static const char __m[] = \"mere_%s_%s: called while another thread is inside this library -- its module state (a top-level container) has one owner at a time; call the library from one thread, or hold a lock around the calls\";\n\
+              \    if (err) { unsigned char* __p = (unsigned char*)malloc(sizeof __m); if (__p) { memcpy(__p, __m, sizeof __m); err->ptr = __p; err->len = (long long)(sizeof __m - 1); } }\n\
+              \    return MERE_FAIL;\n\
+              \  }\n" !lib_stem name,
+           "  if (__lib_outer) __atomic_store_n(&__mere_lib_busy, 0, __ATOMIC_RELEASE);\n")
+        in
         let call_args =
           List.mapi (fun i t ->
             if is_unit t then "0"
@@ -15306,6 +15396,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           "%s {\n\
           \  mere_lib_init();\n\
           \  if (err) { err->ptr = NULL; err->len = 0; }\n\
+          %s\
           \  jmp_buf __saved_jmp; int __saved_set = __lang_fail_jmpbuf_set;\n\
           \  __lang_region* __saved_cur = __lang_current_region;\n\
           \  int __saved_rsn = __lang_region_active_n;\n\
@@ -15321,6 +15412,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           \      unsigned char* __p = (unsigned char*)malloc(__n + 1);\n\
           \      if (__p) { memcpy(__p, __lang_fail_msg, __n + 1); err->ptr = __p; err->len = (long long)__n; }\n\
           \    }\n\
+          %s\
           \    return MERE_FAIL;\n\
           \  }\n\
           \  __lang_region* __call_region = __lang_region_block_acquire(\"lib call\");\n\
@@ -15330,9 +15422,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           \  __lang_region_block_release(__call_region);\n\
           \  __lang_fail_jmpbuf_set = __saved_set;\n\
           \  memcpy(__lang_fail_jmpbuf, __saved_jmp, sizeof(jmp_buf));\n\
+          %s\
           \  return MERE_OK;\n\
           }"
-          (wrapper_sig e) body
+          (wrapper_sig e) enter leave body leave
       in
       let uses_str_bnd =
         List.exists (fun (_, ptys, rty, _) ->
@@ -15411,6 +15504,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
              another thread is mid-call is still the host's race to avoid. *)
           "static pthread_mutex_t __mere_lib_lock = PTHREAD_MUTEX_INITIALIZER;";
           "static int __mere_lib_live = 0;";
+          "static int __mere_lib_busy = 0;   /* v0.1.582: the thread inside, if the library has module state */";
           "void mere_lib_init(void) {";
           "  __lang_owner_off = 1;";
           "  pthread_mutex_lock(&__mere_lib_lock);";

@@ -1,0 +1,15 @@
+// scripts/owner_check.sh: the owner pushes a Vec while another thread reads it.
+// The reader's first read makes the Vec shared; the owner's next push fails.
+let launch = fn (f: unit -> unit) -> spawn f;
+let v = vec_new ();
+let rec pre = fn (i: int) -> if i == 1000 then () else let _ = vec_push v i in pre (i + 1);
+let _ = pre 0;
+let rec rd = fn (n: int) -> fn (bad: int) ->
+  if n == 0 then bad
+  else let k = n % 1000 in
+       rd (n - 1) (if vec_get v k == k then bad else bad + 1);
+let reader = fn (u: unit) -> let b = rd 20000000 0 in let _ = print_no_nl "bad reads: " in print_int b;
+let h = launch reader;
+let rec wr = fn (i: int) -> if i == 4000000 then () else let _ = vec_push v i in wr (i + 1);
+let _ = wr 1000;
+join h

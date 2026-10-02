@@ -167,12 +167,12 @@ and map_state = {
   m_tbl : (value, value) Hashtbl.t;
   mutable m_order : value list;
   mutable m_order_n : int;
-  m_owner : int;   (* v0.1.575: the domain that made it -- see `own` *)
+  mutable m_owner : int;   (* v0.1.575: the domain that made it -- see `own` *)
 }
 
-and bytebuf = { mutable bb_data : Bytes.t; mutable bb_len : int; bb_owner : int }
+and bytebuf = { mutable bb_data : Bytes.t; mutable bb_len : int; mutable bb_owner : int }
 
-and strbuf = { sb : Buffer.t; sb_owner : int }
+and strbuf = { sb : Buffer.t; mutable sb_owner : int }
 
 (* v0.1.349: a Vec's storage, with capacity. Slots [0, vc_len) are live and
    the rest is V_unit filler, so `vec_push` doubles instead of reallocating.
@@ -181,7 +181,7 @@ and strbuf = { sb : Buffer.t; sb_owner : int }
    was already amortised. That asymptotic sat in the parity oracle, which is
    what bounds the input size a differential gate can afford: 200k pushes took
    74s interpreted and 0.01s compiled. *)
-and vecbuf = { mutable vc_data : value array; mutable vc_len : int; vc_owner : int }
+and vecbuf = { mutable vc_data : value array; mutable vc_len : int; mutable vc_owner : int }
 and lbuf = { mutable lb_items : value list; mutable lb_frozen : bool; lb_region : int; lb_owner : int }
 
 and env = (string * value ref) list
@@ -213,11 +213,38 @@ and coro_step = Co_switched of coro | Co_finished of coro
    with the same sentence -- its threads are domains, and they race too: a Map
    filled from four of them came back with 69,352 of 80,000 entries. *)
 let owner_now () = (Domain.self () :> int)
+(* v0.1.582: bit 30 of the owner is "another thread has read it", and a
+   container with it set is read-only (see __LANG_SHARED in the C runtime) *)
+let shared_bit = 1 lsl 30
 let own (kind : string) (op : string) (owner : int) =
-  if owner <> owner_now () then
-    raise (Eval_error (Loc.dummy, Printf.sprintf
-      "%s: a %s made by one thread was written by another -- a %s is not safe to share between threads; give it one owner thread and send it messages over a Channel"
-      op kind kind))
+  let me = owner_now () in
+  if owner <> me then
+    raise (Eval_error (Loc.dummy,
+      if owner = me lor shared_bit then Printf.sprintf
+        "%s: a %s another thread has read was written -- once a second thread reads a %s it is shared, and a shared %s is read-only; give it one owner thread and send it messages over a Channel"
+        op kind kind kind
+      else Printf.sprintf
+        "%s: a %s made by one thread was written by another -- a %s is not safe to share between threads; give it one owner thread and send it messages over a Channel"
+        op kind kind))
+(* what a read leaves in the owner field: the shared bit, if the reader is not
+   the owner *)
+let read_mark (o : int) : int =
+  if o land shared_bit <> 0 || o = owner_now () then o else o lor shared_bit
+(* v0.1.582: an OwnedVec (a vecbuf here too) is moved, not shared: `spawn` gives
+   away the ones its closure captures (owner -1 here; the C runtime's 0) and the
+   next domain to use one takes it. Any other domain's use fails by name. *)
+let ov_released = -1
+let ov_use (op : string) (a : vecbuf) =
+  let me = owner_now () in
+  let o = a.vc_owner in
+  if o = me then ()
+  else if o = ov_released then a.vc_owner <- me
+  else raise (Eval_error (Loc.dummy, Printf.sprintf
+    "%s: an OwnedVec belongs to one thread -- the one that made it, or the one spawn moved it into -- and another used it; move it into the thread by capturing it in the closure spawn is given" op))
+let read_vec (a : vecbuf) = let o = a.vc_owner in let o' = read_mark o in if o' <> o then a.vc_owner <- o'
+let read_map (m : map_state) = let o = m.m_owner in let o' = read_mark o in if o' <> o then m.m_owner <- o'
+let read_sb (b : strbuf) = let o = b.sb_owner in let o' = read_mark o in if o' <> o then b.sb_owner <- o'
+let read_bb (b : bytebuf) = let o = b.bb_owner in let o' = read_mark o in if o' <> o then b.bb_owner <- o'
 
 let vecbuf_of_array (a : value array) : vecbuf =
   { vc_data = a; vc_len = Array.length a; vc_owner = owner_now () }
@@ -1672,10 +1699,10 @@ let rec vec_len_via_constr v =
 let builtin_len =
   V_builtin ("len", fun v ->
     match v with
-    | V_vec arr -> V_int arr.vc_len
+    | V_vec arr -> read_vec arr; V_int arr.vc_len
     | V_lb b -> V_int (List.length b.lb_items)
-    | V_strbuf { sb = buf; _ } -> V_int (Buffer.length buf)
-    | V_map m -> V_int (Hashtbl.length m.m_tbl)
+    | V_strbuf ({ sb = buf; _ } as b) -> read_sb b; V_int (Buffer.length buf)
+    | V_map m -> read_map m; V_int (Hashtbl.length m.m_tbl)
     | V_str s -> V_int (String.length s)
     | V_tuple es -> V_int (List.length es)
     | V_constr _ ->
@@ -1838,6 +1865,7 @@ let builtin_f64x2_load =
         match idx with
         | V_int i ->
           f64x2_range "f64x2_load" arr i;
+          read_vec arr;
           (match arr.vc_data.(i), arr.vc_data.(i + 1) with
            | V_float a, V_float b -> V_f64x2 (a, b)
            | _ -> failwith "f64x2_load: expected float elements")
@@ -1950,14 +1978,14 @@ let builtin_vec_get =
             raise (Eval_error (Loc.dummy,
               Printf.sprintf "vec_get: index %d out of bounds (len = %d)"
                 i arr.vc_len))
-          else arr.vc_data.(i)
+          else (read_vec arr; arr.vc_data.(i))
         | _ -> failwith "vec_get: expected int index")
     | _ -> failwith "vec_get: expected Vec")
 
 let builtin_vec_len =
   V_builtin ("vec_len", fun v ->
     match v with
-    | V_vec arr -> V_int arr.vc_len
+    | V_vec arr -> read_vec arr; V_int arr.vc_len
     | _ -> failwith "vec_len: expected Vec")
 
 (* The higher-order Vec API (Phase 12.9) requires apply_value_ref, so
@@ -1981,6 +2009,7 @@ let builtin_owned_vec_push =
     match v with
     | V_vec arr ->
       V_builtin ("owned_vec_push_p1", fun x ->
+        ov_use "owned_vec_push" arr;
         vecbuf_push arr x;
         V_unit)
     | _ -> failwith "owned_vec_push: expected OwnedVec")
@@ -1990,6 +2019,7 @@ let builtin_owned_vec_get =
     match v with
     | V_vec arr ->
       V_builtin ("owned_vec_get_p1", fun idx ->
+        ov_use "owned_vec_get" arr;
         match idx with
         | V_int i ->
           if i < 0 || i >= arr.vc_len then
@@ -2003,7 +2033,7 @@ let builtin_owned_vec_get =
 let builtin_owned_vec_len =
   V_builtin ("owned_vec_len", fun v ->
     match v with
-    | V_vec arr -> V_int arr.vc_len
+    | V_vec arr -> ov_use "owned_vec_len" arr; V_int arr.vc_len
     | _ -> failwith "owned_vec_len: expected OwnedVec")
 
 (* StrBuf[R] builtins (Phase 12.7) — a mutable string buffer inside a
@@ -2039,12 +2069,14 @@ let builtin_bytebuf_new =
     | _ -> failwith "bytebuf_new: expected int")
 
 let builtin_bytebuf_len =
-  V_builtin ("bytebuf_len", fun v -> V_int (expect_bytebuf "bytebuf_len" v).bb_len)
+  V_builtin ("bytebuf_len", fun v ->
+    let b = expect_bytebuf "bytebuf_len" v in read_bb b; V_int b.bb_len)
 
 let builtin_bytebuf_get =
   V_builtin ("bytebuf_get", fun v ->
     let b = expect_bytebuf "bytebuf_get" v in
     V_builtin ("bytebuf_get_p1", fun i ->
+      read_bb b;
       match i with
       | V_int i when i >= 0 && i < b.bb_len ->
         V_int (Char.code (Bytes.get b.bb_data i))
@@ -2086,6 +2118,7 @@ let builtin_bytebuf_push =
 let builtin_bytes_of_bytebuf =
   V_builtin ("bytes_of_bytebuf", fun v ->
     let b = expect_bytebuf "bytes_of_bytebuf" v in
+    read_bb b;
     V_bytes (Bytes.sub_string b.bb_data 0 b.bb_len))
 
 let builtin_bytebuf_of_bytes =
@@ -2116,13 +2149,13 @@ let builtin_strbuf_push =
 let builtin_strbuf_to_str =
   V_builtin ("strbuf_to_str", fun v ->
     match v with
-    | V_strbuf { sb = buf; _ } -> V_str (Buffer.contents buf)
+    | V_strbuf ({ sb = buf; _ } as b) -> read_sb b; V_str (Buffer.contents buf)
     | _ -> failwith "strbuf_to_str: expected StrBuf")
 
 let builtin_strbuf_len =
   V_builtin ("strbuf_len", fun v ->
     match v with
-    | V_strbuf { sb = buf; _ } -> V_int (Buffer.length buf)
+    | V_strbuf ({ sb = buf; _ } as b) -> read_sb b; V_int (Buffer.length buf)
     | _ -> failwith "strbuf_len: expected StrBuf")
 
 (* Map[R, K, V] builtins (Phase 12.10). Internally an OCaml Hashtbl
@@ -2161,6 +2194,7 @@ let builtin_map_get =
     match v with
     | V_map m ->
       V_builtin ("map_get_p1", fun k ->
+        read_map m;
         match Hashtbl.find_opt m.m_tbl k with
         | Some vv -> vv
         | None ->
@@ -2173,13 +2207,14 @@ let builtin_map_has =
     match v with
     | V_map m ->
       V_builtin ("map_has_p1", fun k ->
+        read_map m;
         V_bool (Hashtbl.mem m.m_tbl k))
     | _ -> failwith "map_has: expected Map")
 
 let builtin_map_len =
   V_builtin ("map_len", fun v ->
     match v with
-    | V_map m -> V_int (Hashtbl.length m.m_tbl)
+    | V_map m -> read_map m; V_int (Hashtbl.length m.m_tbl)
     | _ -> failwith "map_len: expected Map")
 
 (* Phase 39.A' #2 / Q-063: map_delete — Hashtbl.remove and nothing else.
@@ -2291,6 +2326,7 @@ let builtin_vec_iter =
     match v with
     | V_vec arr ->
       V_builtin ("vec_iter_p1", fun f ->
+        read_vec arr;
         Array.iter (fun x -> ignore (!apply_value_ref f x)) (vecbuf_live arr);
         V_unit)
     | _ -> failwith "vec_iter: expected Vec")
@@ -2300,6 +2336,7 @@ let builtin_vec_map =
     match v with
     | V_vec arr ->
       V_builtin ("vec_map_p1", fun f ->
+        read_vec arr;
         let mapped = Array.map (fun x -> !apply_value_ref f x) (vecbuf_live arr) in
         V_vec (vecbuf_of_array mapped))
     | _ -> failwith "vec_map: expected Vec")
@@ -2310,6 +2347,7 @@ let builtin_vec_fold =
     | V_vec arr ->
       V_builtin ("vec_fold_p1", fun init ->
         V_builtin ("vec_fold_p2", fun f ->
+          read_vec arr;
           Array.fold_left (fun acc x ->
             let acc_x = !apply_value_ref f acc in
             !apply_value_ref acc_x x
@@ -2324,6 +2362,7 @@ let builtin_map_iter =
     match v with
     | V_map m ->
       V_builtin ("map_iter_p1", fun f ->
+        read_map m;
         (* Phase 27.1: iterate in insertion order so output matches
            C / LLVM / Wasm Map runtime (which all use parallel arrays). *)
         List.iter (fun k ->
@@ -2464,6 +2503,7 @@ let builtin_vec_to_list =
   V_builtin ("vec_to_list", fun v ->
     match v with
     | V_vec arr ->
+      read_vec arr;
       Array.fold_right (fun x acc ->
         V_constr ("Cons", Some (V_tuple [x; acc]))
       ) (vecbuf_live arr) (V_constr ("Nil", None))
@@ -3088,6 +3128,15 @@ let thr_install_hook () =
 
 let builtin_spawn =
   V_builtin ("spawn", fun clos ->
+    (* v0.1.582: the OwnedVecs the closure captures are given away *)
+    (match clos with
+     | V_closure (param, body, cenv) ->
+       List.iter (fun (n, _) ->
+         if n <> param then
+           match List.assoc_opt n cenv with
+           | Some { contents = V_vec a } -> a.vc_owner <- ov_released
+           | _ -> ()) (Ast.owned_vec_captures body)
+     | _ -> ());
     let n = thr_guard (fun () -> incr thr_seq; !thr_seq) in
     let label = Printf.sprintf "thread %d" n in
     thr_install_hook ();

@@ -985,6 +985,35 @@ let children (e : expr) : expr list =
   | Record_lit (_, fields) -> List.map snd fields
   | Record_update (base, fields) -> base :: List.map snd fields
 
+(* v0.1.582 (Q-179): the OwnedVecs a closure literal captures -- what `spawn`
+   moves into the thread it starts. The type check lets the spawning thread
+   give an OwnedVec away by capturing it; the runtime records the hand-over
+   (each backend releases these at the spawn, and the new thread claims them).
+   Names a binder inside the closure rebinds are left out, so a capture can be
+   missed but never invented: a missed one is still owned by the spawner, and
+   the thread's first use of it fails by name rather than racing. *)
+let owned_vec_captures (f : expr) : (string * ty) list =
+  let used = ref [] and bound = ref [] in
+  let rec go (e : expr) =
+    (match e.node with
+     | Var x ->
+       (match e.ty with
+        | Some t ->
+          (match walk t with
+           | TyCon ("OwnedVec", _) as w -> if not (List.mem_assoc x !used) then used := (x, w) :: !used
+           | _ -> ())
+        | None -> ())
+     | Fun (p, _, _) -> bound := p :: !bound
+     | Let (pat, _, _) -> bound := pattern_vars pat @ !bound
+     | Let_rec (bs, _) -> bound := List.map (fun (n, _, _) -> n) bs @ !bound
+     | With (n, _, _) | Region_loop (_, n, _) -> bound := n :: !bound
+     | Match (_, arms) -> List.iter (fun (p, _, _) -> bound := pattern_vars p @ !bound) arms
+     | _ -> ());
+    List.iter go (children e)
+  in
+  go f;
+  List.filter (fun (x, _) -> not (List.mem x !bound)) (List.rev !used)
+
 (* The expressions a top-level declaration contains. *)
 
 let uniquify_inner_fns_program ?(skip = 0) ?(builtins : string list = []) (prog : program) : program =
@@ -1592,6 +1621,10 @@ let rv_plan_binding ~(loop_safe : string list) ~(unsafe_builtins : string list)
              let written = List.sort_uniq compare
                  (List.filter_map (fun a -> if a.acc_write then Some a.acc_container else None) accs) in
              let owned = List.map (fun c -> mk (App (var "__vec_owned", var c))) written in
+             (* v0.1.582: the unchecked READS leave no shared mark (see
+                __LANG_SHARED), and need none: every Vec the fast copy reads has its
+                length read by the guard above (`len_of`), through the checked
+                vec_len, which marks it. scripts/owner_check.sh poisons that. *)
              List.fold_left conj
                (conj (mk (Cmp (Ge, rv_clone iarg, mk (Int_lit 0)))) (mk (Cmp (Le, rv_clone iarg, rv_clone bound))))
                (landing @ List.map per_access accs @ owned)
