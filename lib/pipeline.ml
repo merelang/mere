@@ -1425,10 +1425,12 @@ let infer_top_rec_inner outer_env (bindings : (string * Loc.t * Ast.expr) list) 
    right after this, so a check after the last one would come after the failure
    it is there to prevent *)
 let infer_top_let outer_env (value : Ast.expr) : Ast.ty =
+  Env_index.track Typer.env_ix outer_env;
   let t = infer_top_let_inner outer_env value in
   Typer.check_of_json_targets value;
   t
 let infer_top_rec outer_env (bindings : (string * Loc.t * Ast.expr) list) : Ast.ty list =
+  Env_index.track Typer.env_ix outer_env;
   let ts = infer_top_rec_inner outer_env bindings in
   List.iter (fun (_, _, v) -> Typer.check_of_json_targets v) bindings;
   ts
@@ -1604,7 +1606,7 @@ let process_opt ?base_dir ?(search_paths = []) s =
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
   process_decls eval_env type_env prog.decls;
-  let _ = Typer.infer !type_env prog.main in
+  let _ = Env_index.track Typer.env_ix !type_env; Typer.infer !type_env prog.main in
   Typer.check_of_json_targets prog.main;
   (* Q-012 (OPEN ii): discharge deferred channel-element Send obligations
      now that the whole program is typed and element tyvars are resolved. *)
@@ -1649,7 +1651,7 @@ let exhaustiveness_warnings s =
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
   process_decls eval_env type_env prog.decls;
-  let _ = Typer.infer !type_env prog.main in
+  let _ = Env_index.track Typer.env_ix !type_env; Typer.infer !type_env prog.main in
   Exhaustive.take ()
 
 (* `?base_dir` / `?search_paths` so a program with `import`s can be asked too --
@@ -1718,7 +1720,7 @@ let type_of ?base_dir ?(search_paths = []) s =
       Typer.alias_record alias target
     | Ast.Top_trait _ | Ast.Top_impl _ -> ()
   ) prog.decls;
-  Ast.pp_ty (Typer.infer !type_env prog.main)
+  (Env_index.track Typer.env_ix !type_env; Ast.pp_ty (Typer.infer !type_env prog.main))
 
 (* Q-127 STAGE 1, THE MEASUREMENT. Nothing here changes what is compiled.
 
@@ -2089,7 +2091,7 @@ let region_param_report ?base_dir ?(search_paths = []) s =
     | Ast.Top_record_alias (alias, target) -> Typer.alias_record alias target
     | Ast.Top_signature _ | Ast.Top_type_alias _
     | Ast.Top_trait _ | Ast.Top_impl _ -> ()) prog.decls;
-  let _ = Typer.infer !type_env prog.main in
+  let _ = Env_index.track Typer.env_ix !type_env; Typer.infer !type_env prog.main in
 
   (* How each name is USED, over the whole program including every decl's body.
      `head` is the spine head of an application; everything else is a value use. *)
@@ -2266,7 +2268,7 @@ let process_typed s =
   let eval_env = ref Eval.initial_env in
   let type_env = ref Typer.initial_env in
   process_decls eval_env type_env prog.decls;
-  let _ = Typer.infer !type_env prog.main in
+  let _ = Env_index.track Typer.env_ix !type_env; Typer.infer !type_env prog.main in
   Typer.discharge_send_constraints ();
   Eval.to_string (Eval.eval_in !eval_env prog.main)
 
@@ -2433,6 +2435,7 @@ and infer_program_inner ?base_dir ?(search_paths = []) ?on_error source =
   (* The desugared program re-visits every declaration's body, so when recovering
      this pass usually re-raises the first error the loop above already reported.
      `check` de-duplicates, which is what makes that harmless. *)
+  Env_index.track Typer.env_ix !base_env;
   let main_ty =
     if not recovering then Typer.infer !base_env desugared
     else

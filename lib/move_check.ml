@@ -284,7 +284,7 @@ let rec go (env : venv) (consumed : IS.t) (multi : bool) (e : Ast.expr) : IS.t =
   | Ast.Let (pat, value, body) ->
     let consumed = go env consumed multi value in
     let env' = bind_pattern env pat value.Ast.ty in
-    go env' consumed multi body
+    Env_index.extend v_ix ~parent:env env' (fun () -> go env' consumed multi body)
   | Ast.With (name, value, body) ->
     let consumed = go env consumed multi value in
     let env' = bind_name env name value.Ast.ty in
@@ -295,7 +295,7 @@ let rec go (env : venv) (consumed : IS.t) (multi : bool) (e : Ast.expr) : IS.t =
     (* Recursive bindings may run many times: check under multi=true. *)
     Env_index.with_group v_ix (List.length bindings) env' (fun () ->
       List.iter (fun (_, _, v) -> ignore (go env' consumed true v)) bindings);
-    go env' consumed multi body
+    Env_index.extend v_ix ~parent:env env' (fun () -> go env' consumed multi body)
   | Ast.If (cond, t, e_) ->
     let c1 = go env consumed multi cond in
     let ct = go env c1 multi t in
@@ -513,7 +513,9 @@ let rec rwalk (visit : renv -> Ast.expr -> unit) (env : renv) (e : Ast.expr) : u
       | Some t -> (match Ast.walk t with Ast.TyArrow (a, _) -> Some a | _ -> None) | None -> None in
     rwalk visit (rbind1 env param pt RParam e.Ast.loc) body
   | Ast.Let (pat, v, body) ->
-    w v; rwalk visit (rbind_pat env pat v.Ast.ty (RVal (v, env))) body
+    w v;
+    let env' = rbind_pat env pat v.Ast.ty (RVal (v, env)) in
+    Env_index.extend r_ix ~parent:env env' (fun () -> rwalk visit env' body)
   | Ast.With (n, v, body) ->
     w v; rwalk visit (rbind1 env n v.Ast.ty (RVal (v, env)) e.Ast.loc) body
   | Ast.Let_rec (bs, body) ->
@@ -523,7 +525,7 @@ let rec rwalk (visit : renv -> Ast.expr -> unit) (env : renv) (e : Ast.expr) : u
     List.iter2 (fun (_, b) (_, _, v) -> b.rdef <- RVal (v, env')) binds bs;
     Env_index.with_group r_ix (List.length bs) env' (fun () ->
       List.iter (fun (_, _, v) -> rwalk visit env' v) bs);
-    rwalk visit env' body
+    Env_index.extend r_ix ~parent:env env' (fun () -> rwalk visit env' body)
   | Ast.If (c, t, f) -> w c; w t; w f
   | Ast.Constr (_, Some a) -> w a
   | Ast.Constr (_, None) -> ()
@@ -585,6 +587,8 @@ let spawn_reach (e : Ast.expr) : unit =
              | Some b -> Hashtbl.replace only_read b.rid false | None -> ())
         | _ -> ()) (Ast.children e)
   in
+  Env_index.track r_ix [];
+  Env_index.track r_ix [];
   rwalk (fun env e -> mark env e; mark_vars env e) [] e;
   (* the ids are re-made on the second walk, so pass 1 has to be keyed by
      something both walks agree on: the walk order. Reset the counter and walk
@@ -600,5 +604,6 @@ let spawn_reach (e : Ast.expr) : unit =
 let check (e : Ast.expr) : unit =
   counter := 0;
   enclosing_blocks := [];
+  Env_index.track v_ix [];
   ignore (go [] IS.empty false e);
   spawn_reach e

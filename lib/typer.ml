@@ -3657,7 +3657,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
       record_top_scheme n sch;
       (n, sch) :: acc
     ) env bindings in
-    infer env' body
+    Env_index.extend env_ix ~parent:env env' (fun () -> infer env' body)
   | Ast.Let_rec (bindings, body) ->
     (* Mutual recursion: fresh vars for ALL names first, infer each value
        under env_rec (which has all names mono-bound), unify each, then
@@ -3686,7 +3686,7 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
       record_top_scheme n sch;
       (n, sch) :: acc
     ) env bindings alphas in
-    infer env' body
+    Env_index.extend env_ix ~parent:env env' (fun () -> infer env' body)
   | Ast.With (name, value, body) ->
     (* Phase 3.1: `with c = v in body` requires v's type to be a Drop type
        (declared via `drop type ...`). At runtime, the value's `close`
