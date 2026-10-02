@@ -4,6 +4,43 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.585 — 2026-10-02
+
+_ByteBuf, `read_bytes` and `write_bytes` on LLVM and Wasm (Q-016): mgunzip now decompresses byte-for-byte the same on C, LLVM and Wasm._
+
+`ByteBuf[R]` -- random-access bytes, the buffer a binary tool builds its output
+in -- and the two whole-file bytes builtins were C and interpreter only, so a
+program like mgz's mgunzip ran on two backends of four.
+
+- **LLVM**: `%mere_bytebuf = { data, len, cap, region, owner }`, the C struct
+  field for field, with i64 lengths (an i32 one would make `bytebuf_get bb
+  4294967297` a question about index 1). Allocated in the region the result type
+  names; growth through the region's in-place grow; a bad index fails through the
+  index-failure path, so `try_or` catches it with C's message. The owner field is
+  set at creation, the two writes check it and the reads mark it shared, as on C
+  (v0.1.575/582). `read_bytes` / `write_bytes` are the C runtime's.
+- **Wasm**: a 16-byte header `{ data, len, cap }` like StrBuf's, from the bump
+  allocator (a `region` block reclaims what it made), zeroed by hand (memory a
+  block gave back is not zero), growing in place when it can and copying -- and
+  protecting the copy -- when a block is open. One thread, so no owner check.
+  `read_bytes` / `write_bytes` reuse the existing bytes host imports; a missing
+  file fails catchably with the interpreter's sentence.
+- Each runtime is emitted only when used: the Wasm output of 474 of 521 programs
+  (examples and parity) is byte-identical to v0.1.584's, and `wasm_size_check`
+  is unchanged.
+- **Found on the way, on both**: `write_file_bytes` did not check the 0..255
+  range (300 was written as 44 on LLVM, masked on Wasm). It fails with C's
+  message now; `test/parity/bytebuf_edges.mere` had been asking since v0.1.279,
+  on the two backends that refused it.
+
+Parity: 201 programs (`bytes_file_roundtrip` is new: 512 bytes, every other one a
+zero, through a ByteBuf and back). Unchecked on LLVM 23 -> 19, on Wasm 13 -> 10:
+`bytebuf_edges`, `region_bytebuf_reclaimed`, `region_rec_capture` and (LLVM)
+`raster` now MATCH. mgunzip on a 2 MB member: identical output on all three, 4 MB
+peak on LLVM.
+
+---
+
 ## v0.1.584 — 2026-10-02
 
 _`of_json` into a container is a type error at the call (Q-118), not a failure when the checkpoint is read back._
