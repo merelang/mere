@@ -494,7 +494,7 @@ region R {
 **Phase 12.3 made the `Vec[R, T]` syntax meaningful with region**:
 
 ```
-fn (v: Vec[R, int]) -> vec_len v    // Type: (Vec[R, int] -> int)
+fn (v: Vec[R, int]) -> vec_len v    // Type: (Vec['a, int] -> int) -- R is a variable here
 
 region R {
   let v = vec_new () in              // Type: Vec[R, int] (R auto-bound!)
@@ -503,6 +503,8 @@ region R {
 
 vec_new ()                           // Type: Vec[__heap, 'a] (default region)
 ```
+
+An uppercase region name in an annotation names a block only inside that block. Outside one it is a variable, like `'r` (v0.1.572): before, it was the region of every `region R { }` in the program, so a function annotated `Vec[R, int]` and an unrelated block named R were the same region.
 
 Calling `vec_new ()` automatically returns a `Vec[R, T]`-typed (region-tagged) value if there's a surrounding `region R { ... }`; otherwise it carries the default region marker `__heap`. Trying to escape a region is statically rejected:
 

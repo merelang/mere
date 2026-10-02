@@ -23,6 +23,11 @@ memu         c    -O2 -w
 mbigfmt      c    -O2 -w
 medit2       c    -O2 -Wno-conditional-type-mismatch
 mere-ruby    c    -O2 -w -fbracket-depth=1024
+mengd        c    -O2 -w @ssl
+mtar         c    -O2 -w
+mvm          c    -O2 -w
+mhttpd       c    -O2 -w
+mreg         c    -O2 -w @ssl
 mwasm        ll   -O2 -w
 mere-gcheap  ll   -O2 -w
 memu         ll   -O2 -w

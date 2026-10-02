@@ -56,3 +56,8 @@ mere-gcheap    gcloop.mere        compile    a library about the memory model it
 memu           riscv.mere         compile    the emulator the RISC-V differential runs against
 mbigfmt        bigfmt.mere        compile    arbitrary-precision formatting; its dependency is another 284km repo
 medit2         medit2.mere        compile    an `extern fn` this compiler does NOT implement -- every other row's externs are names codegen emits itself, so the user-shim path had no downstream witness at all. Also io_poll, file_pread_bytes, and contrib/unicode vendored into .mere_modules
+mengd          mengd.mere         compile    the largest region user after mere-ruby: tar extraction in a block per entry, deflate tables read by a thread per connection. Missing from this table until v0.1.572, and v0.1.564-571 could not compile it (Q-196) with nothing here to say so
+mtar           mtar.mere          compile    a region per archive entry, and ByteBuf helpers annotated `ByteBuf[R]` -- Q-196's other witness
+mvm            boot.mere          compile    device threads beside a vCPU loop, all state behind C shims
+mhttpd         mhttpd.mere        compile    a thread per connection over the sockets builtins
+mreg           mreg.mere          compile    an OCI registry: threads, TLS, and a prelude sort comparator crossing a thread
