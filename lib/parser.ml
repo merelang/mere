@@ -57,6 +57,14 @@ let imported_files : (string, unit) Hashtbl.t = Hashtbl.create 4
    happened and how much it put there. *)
 let entry_imports : (int * string * int * int) list ref = ref []
 
+(* v0.1.576 (Q-147): the first and last LINE of each top-level declaration of
+   the file being parsed (not of its imports), and of its main expression, in
+   source order once reversed. A declaration has no end position -- nodes carry
+   where they start -- but the parser knows: the tokens one call of
+   `parse_decls` consumed are exactly one declaration, so the last of them ends
+   it. Folding wants nothing finer than lines. *)
+let decl_spans : (int * int) list ref = ref []
+
 (* Phase 9.5: base directory for importer-relative path resolution.
    Set at the top level by `parse_program ~base_dir`, and temporarily
    pushed to "the directory of the imported file" each time
@@ -288,6 +296,23 @@ let rec parse_program_internal tokens =
      wrapper resets it once per top-level parse so the cycle guard
      accumulates across recursive imports within a single program. *)
   region_stack := [];
+  (* where the declaration being parsed started; see `decl_spans` *)
+  let decl_start = ref tokens in
+  let note_decl_end (toks : (Loc.t * Lexer.token) list) =
+    if toks != !decl_start then begin
+      let rec last_before l prev =
+        match l with
+        | [] -> prev
+        | x :: rest -> if l == toks then prev else last_before rest (Some x)
+      in
+      (match !decl_start, last_before !decl_start None with
+       | (spos, _) :: _, Some (epos, _)
+         when spos.Loc.file = None && epos.Loc.file = None && spos.Loc.line > 0 ->
+         decl_spans := (spos.Loc.line, epos.Loc.line) :: !decl_spans
+       | _ -> ());
+      decl_start := toks
+    end
+  in
   let mk loc node = Ast.{ loc; ty = None; node } in
   let mkp loc node = Ast.{ ploc = loc; pnode = node } in
   let pos_of = function
@@ -2150,6 +2175,7 @@ let rec parse_program_internal tokens =
       raise (Parse_error (Loc.dummy, "unterminated module body"))
   in
   let rec parse_decls decls toks =
+    note_decl_end toks;
     match toks with
     | (pos, T_import) :: (_, T_string path) :: (_, T_semi) :: rest ->
       (* `import "path";` — Phase 9.5: importer-relative path resolution.
@@ -2557,6 +2583,7 @@ let rec parse_program_internal tokens =
           | (_, T_in) :: rest ->
             let body, rest = expr rest in
             let main = mk pos (Ast.Let (pat, value, body)) in
+            note_decl_end rest;
             finish decls main rest
           | _ ->
             raise (Parse_error (pos_of rest, "expected ';' or 'in' after let binding")))
@@ -2569,6 +2596,7 @@ let rec parse_program_internal tokens =
       finish decls (mk pos Ast.Unit_lit) toks
     | _ ->
       let main, toks = expr toks in
+      note_decl_end toks;
       finish decls main toks
   in
   parse_decls [] tokens
@@ -2580,6 +2608,7 @@ let rec parse_program_internal tokens =
 let parse_program ?(base_dir = Sys.getcwd ()) ?(search_paths = []) tokens =
   Hashtbl.reset imported_files;
   entry_imports := [];
+  decl_spans := [];
   current_base_dir := base_dir;
   import_search_paths := search_paths;
   parse_program_internal tokens

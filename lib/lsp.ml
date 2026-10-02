@@ -325,6 +325,7 @@ let server_capabilities =
        after, so the editor asks when the user asks. *)
     ("completionProvider", Json.Obj [ ("resolveProvider", Json.Bool false) ]);
     ("documentSymbolProvider", Json.Bool true);
+    ("foldingRangeProvider", Json.Bool true);
     ("referencesProvider", Json.Bool true);
     (* The same answer as references, drawn in the file. Advertised separately
        because the editor asks for it on every cursor move and would not think
@@ -756,6 +757,40 @@ let document_symbols state uri =
          (Query.symbols ~prelude_decls:(Pipeline.prelude_decl_count ()) prog))
   | _ -> Json.List []
 
+(* v0.1.576 (Q-147): folding. A top-level declaration that spans lines folds
+   (its lines come from the parser: `Parser.decl_spans`), and so does a run of
+   two or more comment lines. The document is parsed on its own here rather
+   than taking the spans from the check, which also parses the prelude and
+   re-parses around syntax errors; a document that does not parse gets its
+   comment folds and no others -- an editor folds what it is given. *)
+let folding_ranges ?search_paths state uri =
+  let text = doc_text state uri in
+  let decls =
+    try
+      ignore (Parser.parse_program ?base_dir:(base_dir_of_uri uri)
+                ?search_paths:search_paths (Lexer.tokenize text));
+      List.rev !Parser.decl_spans
+    with _ -> []
+  in
+  let comment_lines =
+    let acc = ref [] in
+    (try ignore (Lexer.tokenize ~comments:acc text) with _ -> ());
+    List.sort_uniq compare (List.map (fun (l : Loc.t) -> l.Loc.line) !acc)
+  in
+  let rec runs start prev = function
+    | [] -> if prev > start then [ (start, prev) ] else []
+    | l :: rest when l = prev + 1 -> runs start l rest
+    | l :: rest -> (if prev > start then [ (start, prev) ] else []) @ runs l l rest
+  in
+  let comment_runs = match comment_lines with [] -> [] | l :: rest -> runs l l rest in
+  let range kind (a, b) =
+    Json.Obj [ ("startLine", Json.Num (float_of_int (a - 1)));
+               ("endLine", Json.Num (float_of_int (b - 1)));
+               ("kind", Json.Str kind) ] in
+  Json.List
+    (List.map (range "region") (List.filter (fun (a, b) -> b > a) decls)
+     @ List.map (range "comment") comment_runs)
+
 (* Formatting: the whole document, replaced. `mere fmt` and this are the same
    function, so format-on-save and the command line cannot come to different
    conclusions about what formatted means.
@@ -978,6 +1013,10 @@ let handle ?search_paths (state : state) (msg : Json.t) : state * Json.t list * 
     (match uri_of doc with
      | Some uri -> (state, [ response id (rename state uri params) ], false)
      | None -> (state, [ response id Json.Null ], false))
+  | Some "textDocument/foldingRange" ->
+    (match uri_of doc with
+     | Some uri -> (state, [ response id (folding_ranges ?search_paths state uri) ], false)
+     | None -> (state, [ response id (Json.List []) ], false))
   | Some "textDocument/documentSymbol" ->
     (match uri_of doc with
      | Some uri -> (state, [ response id (document_symbols state uri) ], false)
@@ -1040,15 +1079,109 @@ let handle ?search_paths (state : state) (msg : Json.t) : state * Json.t list * 
   | Some _ -> (state, [], false)          (* an unknown notification is ignored *)
   | None -> (state, [], false)
 
-(* The read/handle/write loop. Kept here so the CLI's `lsp` arm is one call, and
-   so the only untested part is three lines of IO. *)
+(* v0.1.576 (Q-023): A CHANGE THAT IS ALREADY OUT OF DATE IS NOT CHECKED.
+
+   Every didChange re-checks the whole program, and on mere-ruby's main.mere
+   (44k lines, 93k with imports) a check is 10.5-10.7 s -- and this loop
+   handled messages one at a time, so N keystrokes queued N checks: typing a
+   word bought a minute of diagnostics for text that no longer existed. A
+   didChange carries the whole document, so one for the same file arriving
+   later makes this one worthless. Before a didChange is handled, the messages
+   that have ALREADY arrived are read, and an unbroken run of didChanges for
+   the same document is handled as its last one. Anything else is kept, in
+   order -- a request between two changes is answered against the text it was
+   asked about.
+
+   That needs to know what has already arrived, which an in_channel cannot say:
+   its buffer can hold a whole message that `select` on the descriptor does not
+   see. So the bytes are read here, into a buffer this code owns -- "arrived" is
+   "a complete message is in the buffer, or the descriptor is readable now". *)
+type reader = { fd : Unix.file_descr; pending : Buffer.t }
+
+let reader_of (ic : in_channel) = { fd = Unix.descr_of_in_channel ic; pending = Buffer.create 4096 }
+
+(* a complete message at the front of the buffer, taken off it *)
+let take_message (r : reader) : Json.t option option =
+  let s = Buffer.contents r.pending in
+  match Str.search_forward (Str.regexp_string "\r\n\r\n") s 0 with
+  | exception Not_found -> None
+  | hend ->
+    (match content_length (String.sub s 0 hend) with
+     | None -> Some None                      (* not a message we can frame *)
+     | Some len ->
+       let body_at = hend + 4 in
+       if String.length s < body_at + len then None
+       else begin
+         let body = String.sub s body_at len in
+         Buffer.clear r.pending;
+         Buffer.add_string r.pending (String.sub s (body_at + len) (String.length s - body_at - len));
+         Some (try Some (Json.parse body) with Json.Json_error _ -> None)
+       end)
+
+let fill (r : reader) : bool =
+  let b = Bytes.create 65536 in
+  match Unix.read r.fd b 0 (Bytes.length b) with
+  | 0 -> false
+  | n -> Buffer.add_subbytes r.pending b 0 n; true
+  | exception Unix.Unix_error (Unix.EINTR, _, _) -> true
+
+(* block until a message is here; None at end of input *)
+let rec next_message (r : reader) : Json.t option =
+  match take_message r with
+  | Some (Some m) -> Some m
+  | Some None -> next_message r
+  | None -> if fill r then next_message r else None
+
+(* a message that has already arrived, without waiting for one *)
+let rec arrived_message (r : reader) : Json.t option =
+  match take_message r with
+  | Some (Some m) -> Some m
+  | Some None -> arrived_message r
+  | None ->
+    (match Unix.select [ r.fd ] [] [] 0.0 with
+     | (_ :: _, _, _) -> if fill r then arrived_message r else None
+     | _ -> None
+     | exception Unix.Unix_error (Unix.EINTR, _, _) -> None)
+
+let did_change_uri (msg : Json.t) : string option =
+  match Json.to_string_opt (Json.member "method" msg) with
+  | Some "textDocument/didChange" ->
+    Json.to_string_opt (Json.member "uri" (Json.member "textDocument" (Json.member "params" msg)))
+  | _ -> None
+
+(* The read/handle/write loop. Kept here so the CLI's `lsp` arm is one call. *)
 let serve ?search_paths ?(ic = stdin) ?(oc = stdout) () =
   set_binary_mode_in ic true;
   set_binary_mode_out oc true;
+  let r = reader_of ic in
+  (* messages read ahead while looking for a newer didChange, in order *)
+  let queue = Queue.create () in
+  let next () = if Queue.is_empty queue then next_message r else Some (Queue.pop queue) in
+  (* drop [msg] if the messages that arrived right after it are later
+     didChanges for the same document -- only an unbroken run of them, so
+     nothing else is answered against text newer than it was asked about *)
+  let newest (msg : Json.t) : Json.t =
+    match did_change_uri msg with
+    | None -> msg
+    | Some uri ->
+      let rec scan () =
+        match arrived_message r with
+        | Some m -> Queue.push m queue; scan ()
+        | None -> ()
+      in
+      scan ();
+      let rec run cur =
+        match Queue.peek_opt queue with
+        | Some m when did_change_uri m = Some uri -> ignore (Queue.pop queue); run m
+        | _ -> cur
+      in
+      run msg
+  in
   let rec loop state =
-    match read_message ic with
+    match next () with
     | None -> ()
     | Some msg ->
+      let msg = newest msg in
       let (state, out, stop) = handle ?search_paths state msg in
       List.iter (fun m -> output_string oc (frame m)) out;
       flush oc;

@@ -4,6 +4,35 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.576 — 2026-10-02
+
+_The language server stops re-checking keystrokes that are already out of date, and answers folding (Q-023, Q-147)._
+
+Every `didChange` re-checks the whole program, and on mere-ruby's main.mere
+(44k lines, 93k with imports) a check takes 10.5-10.7 s. The server handled
+messages one at a time, so N keystrokes queued N checks -- a word typed bought
+a minute of diagnostics for text that no longer existed. A didChange carries the
+whole document, so a later one for the same file makes it worthless: before a
+didChange is handled, the messages that have already arrived are read, and an
+unbroken run of didChanges for one document is handled as its last. Nothing else
+moves -- a request between two changes is answered against the text it was
+asked about. Knowing what has "already arrived" needs the bytes in a buffer this
+code owns (an in_channel can hold a whole message that `select` does not see),
+so the server reads its own input now. `scripts/lsp_coalesce_check.sh` (CI):
+ten changes sent at once are two publishes, not eleven; a hover between two
+changes sees both checked; the same ten changes paced 0.3 s apart are eleven,
+which is the control that says the count counts.
+
+`textDocument/foldingRange` is answered: a top-level declaration that spans
+lines folds, and so does a run of two or more comment lines. A declaration has
+no end position, but the parser knows where one ends -- the tokens one call of
+`parse_decls` consumed are exactly one declaration -- so it keeps each one's
+first and last line for the file being parsed (`Parser.decl_spans`), at no cost
+beyond walking the tokens once. `scripts/lsp_folding_check.sh` (CI) holds a
+three-line declaration and a comment run folding and a one-line declaration not.
+
+---
+
 ## v0.1.575 — 2026-10-02
 
 _A container written by a thread other than the one that made it stops the program by name (Q-179 stage 2)._
