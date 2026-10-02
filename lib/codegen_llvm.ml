@@ -5282,6 +5282,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         a
     in
     let pc = fresh_reg () and pcbad = fresh_reg () in
+    emit_instr "  store i32 1, ptr @__lang_threads_started";
     emit_instr (Printf.sprintf
       "  %s = call i32 @pthread_create(ptr %s, ptr %s, ptr @__mere_spawn_trampoline, ptr %s)"
       pc tidp attr c);
@@ -6365,7 +6366,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        (T unresolved) still compiles, as it does on the C backend. *)
     let nil_tag = try Hashtbl.find variant_tags "Nil" with Not_found -> 0 in
     let b = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call ptr @__lang_alloc(i64 32)" b);
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_alloc(i64 40)" b);
     let nil = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @__lang_alloc(i64 16)" nil);
     emit_instr (Printf.sprintf "  store i32 %d, ptr %s" nil_tag nil);
@@ -6378,6 +6379,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  %s = load i32, ptr @__lang_region_depth" d);
     emit_instr (Printf.sprintf "  store i32 %s, ptr %s" d (f 3));
     emit_instr (Printf.sprintf "  store i32 0, ptr %s" (f 4));
+    let own = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i32 @__lang_owner_now()" own);
+    emit_instr (Printf.sprintf "  store i32 %s, ptr %s" own (f 5));
     b
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "lb_push"; _ }, b_e); _ }, val_e) ->
     (* Q-106: refuse frozen / other-region, then splice a fresh Cons whose
@@ -6393,6 +6397,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     if ty_has_arrow elem_ty then emit_instr "  call void @__lang_region_keep_above(ptr null)";
     let gep i = let r = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = getelementptr %%__lang_listbuf, ptr %s, i32 0, i32 %d" r b i); r in
+    (let ow = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = load i32, ptr %s" ow (gep 5));
+     emit_instr (Printf.sprintf "  call void @__lang_owned(i32 %s, ptr %s)" ow "@.own_listbuf_lb_push"));  (* owner_msg_name "ListBuf" "lb_push", defined below *)
     let l_frozen = fresh_label "lb_frozen" and l_chk = fresh_label "lb_chk"
     and l_other = fresh_label "lb_other" and l_ok = fresh_label "lb_ok"
     and l_link = fresh_label "lb_link" and l_head = fresh_label "lb_head"
@@ -9508,6 +9515,86 @@ let emit_top_globals_llvm (lst : (string * Ast.expr * Ast.ty) list) : string lis
 (* Region runtime — mirrors codegen_c's region_runtime_helpers but
    expressed in LLVM IR. Uses an 8-byte aligned bump-pointer allocator.
    The default region is a file-scope global initialized in @main. *)
+(* v0.1.575 (Q-179 stage 2): the C runtime's __LANG_OWNED, here. A Map, Vec,
+   StrBuf or ListBuf records the thread that made it, and a WRITE from any other
+   thread fails by name. Reads are not checked (a table only read is safe to
+   share). The program's thread is 1, set in `__lang_boot`; until the first
+   spawn there is no other, so creation and the check read one plain global
+   before anything thread-local. The messages' lengths are computed. *)
+let owner_msgs = [ ("Vec", "vec_push"); ("Vec", "vec_set"); ("Vec", "f64x2_store");
+                   ("Map", "map_set"); ("Map", "map_delete");
+                   ("StrBuf", "strbuf_push"); ("ListBuf", "lb_push") ]
+let owner_msg_name (kind : string) (op : string) =
+  Printf.sprintf "@.own_%s_%s" (String.lowercase_ascii kind) op
+let owner_runtime_llvm =
+  let msg kind op = Printf.sprintf
+    "%s: a %s made by one thread was written by another -- a %s is not safe to share between threads; give it one owner thread and send it messages over a Channel"
+    op kind kind in
+  String.concat "\n" (
+    [ "@__lang_tid_ctr = internal global i32 1";
+      "@__lang_threads_started = internal global i32 0";
+      "@__lang_tid_v = internal thread_local global i32 0";
+      "define internal i32 @__lang_tid() {";
+      "entry:";
+      "  %t = load i32, ptr @__lang_tid_v";
+      "  %z = icmp eq i32 %t, 0";
+      "  br i1 %z, label %fresh, label %done";
+      "fresh:";
+      "  %o = atomicrmw add ptr @__lang_tid_ctr, i32 1 monotonic";
+      "  %n = add i32 %o, 1";
+      "  store i32 %n, ptr @__lang_tid_v";
+      "  ret i32 %n";
+      "done:";
+      "  ret i32 %t";
+      "}";
+      "define internal i32 @__lang_owner_now() {";
+      "entry:";
+      "  %s = load i32, ptr @__lang_threads_started";
+      "  %z = icmp eq i32 %s, 0";
+      "  br i1 %z, label %one, label %ask";
+      "one:";
+      "  ret i32 1";
+      "ask:";
+      "  %t = call i32 @__lang_tid()";
+      "  ret i32 %t";
+      "}";
+      "define internal void @__lang_owned(i32 %owner, ptr %msg) {";
+      "entry:";
+      "  %s = load i32, ptr @__lang_threads_started";
+      "  %z = icmp eq i32 %s, 0";
+      "  br i1 %z, label %ok, label %ask";
+      "ask:";
+      "  %t = call i32 @__lang_tid()";
+      "  %same = icmp eq i32 %t, %owner";
+      "  br i1 %same, label %ok, label %bad";
+      "bad:";
+      "  call void @__lang_fail_impl(ptr %msg)";
+      "  unreachable";
+      "ok:";
+      "  ret void";
+      "}" ]
+    (* a str here carries its length in the 8 bytes before it (see .oom_msg):
+       __lang_fail_impl reads it, so a bare C string printed nothing at all *)
+    @ List.concat_map (fun (k, o) ->
+        let m = msg k o in
+        let n = String.length m in
+        let name = owner_msg_name k o in
+        [ Printf.sprintf "%s_h = internal constant { i64, [%d x i8] } { i64 %d, [%d x i8] c\"%s\\00\" }"
+            name (n + 1) n (n + 1) m;
+          Printf.sprintf "%s = internal alias [%d x i8], getelementptr inbounds ({ i64, [%d x i8] }, ptr %s_h, i32 0, i32 1)"
+            name (n + 1) (n + 1) name ]) owner_msgs)
+
+(* load field [idx] of the container at [c] (a %[sn]) and check it *)
+let owner_check_lines ~(sn : string) ~(idx : int) ~(c : string) (kind : string) (op : string) : string list =
+  [ Printf.sprintf "  %%__own_p = getelementptr %%%s, ptr %s, i32 0, i32 %d" sn c idx;
+    "  %__own = load i32, ptr %__own_p";
+    Printf.sprintf "  call void @__lang_owned(i32 %%__own, ptr %s)" (owner_msg_name kind op) ]
+
+let owner_store_lines ~(sn : string) ~(idx : int) ~(c : string) : string list =
+  [ Printf.sprintf "  %%__own_p = getelementptr %%%s, ptr %s, i32 0, i32 %d" sn c idx;
+    "  %__own_now = call i32 @__lang_owner_now()";
+    "  store i32 %__own_now, ptr %__own_p" ]
+
 let region_runtime_helpers =
   String.concat "\n"
     (* A region is a chain of bump-allocated blocks. When the current block
@@ -9532,7 +9619,7 @@ let region_runtime_helpers =
          can never dangle here; the depth check exists so the program that
          fails on the C backend (a push while another region is current)
          fails here too, with the same sentence. *)
-      "%__lang_listbuf = type { ptr, ptr, ptr, i32, i32 }";
+      "%__lang_listbuf = type { ptr, ptr, ptr, i32, i32, i32 }   ; v0.1.575: field 5 is the owner";
       "@__lang_region_depth = internal thread_local global i32 0";
       (* v0.1.443 (Q-116): where an ordinary VALUE allocation goes. Until now
          every string, cons cell, tuple and variant node named
@@ -10023,12 +10110,15 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
   let struct_name = "mere_vec_" ^ tag in
   String.concat "\n"
     ([ (* struct { ptr data; i32 len; i32 cap; ptr region } — 24 bytes. *)
-      Printf.sprintf "%%%s = type { ptr, i32, i32, ptr }" struct_name;
+      (* v0.1.575: field 4 is the owner (see owner_runtime_llvm) *)
+      Printf.sprintf "%%%s = type { ptr, i32, i32, ptr, i32 }" struct_name;
       "";
       (* new *)
       Printf.sprintf "define ptr @mere_vec_%s_new(ptr %%r) {" tag;
       "entry:";
-      Printf.sprintf "  %%v = call ptr @__lang_region_alloc(ptr %%r, i64 24)";
+      Printf.sprintf "  %%vsz_p = getelementptr %%%s, ptr null, i32 1" struct_name;
+      "  %vsz = ptrtoint ptr %vsz_p to i64";
+      "  %v = call ptr @__lang_region_alloc(ptr %r, i64 %vsz)";
       Printf.sprintf "  %%esize_p = getelementptr %s, ptr null, i32 1" c_elem;
       Printf.sprintf "  %%esize = ptrtoint ptr %%esize_p to i64";
       Printf.sprintf "  %%init_bytes = mul i64 %%esize, 4";
@@ -10041,12 +10131,14 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       Printf.sprintf "  store i32 4, ptr %%cp";
       Printf.sprintf "  %%rp = getelementptr %%%s, ptr %%v, i32 0, i32 3" struct_name;
       Printf.sprintf "  store ptr %%r, ptr %%rp";
+    ] @ owner_store_lines ~sn:struct_name ~idx:4 ~c:"%v" @ [
       "  ret ptr %v";
       "}";
       "";
       (* push *)
       Printf.sprintf "define i32 @mere_vec_%s_push(ptr %%v, %s %%x) {" tag c_elem;
       "entry:";
+    ] @ owner_check_lines ~sn:struct_name ~idx:4 ~c:"%v" "Vec" "vec_push" @ [
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
       "  %len = load i32, ptr %lp";
       Printf.sprintf "  %%cp = getelementptr %%%s, ptr %%v, i32 0, i32 2" struct_name;
@@ -10125,6 +10217,7 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       "";
       Printf.sprintf "define i32 @mere_vec_%s_set_unchecked(ptr %%v, i64 %%i, %s %%x) {" tag c_elem;
       "entry:";
+    ] @ owner_check_lines ~sn:struct_name ~idx:4 ~c:"%v" "Vec" "vec_set" @ [
       Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
       "  %data = load ptr, ptr %dp";
       Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i64 %%i" c_elem;
@@ -10166,6 +10259,7 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       "}";
       "define i32 @mere_vec_float_f64x2_store(ptr %v, i64 %i, <2 x double> %x) {";
       "entry:";
+    ] @ owner_check_lines ~sn:"mere_vec_float" ~idx:4 ~c:"%v" "Vec" "f64x2_store" @ [
       "  %lp = getelementptr %mere_vec_float, ptr %v, i32 0, i32 1";
       "  %len32 = load i32, ptr %lp";
       "  %len = sext i32 %len32 to i64";
@@ -10186,6 +10280,7 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       "}";
       "define i32 @mere_vec_float_f64x2_store_unchecked(ptr %v, i64 %i, <2 x double> %x) {";
       "entry:";
+    ] @ owner_check_lines ~sn:"mere_vec_float" ~idx:4 ~c:"%v" "Vec" "f64x2_store" @ [
       "  %dp = getelementptr %mere_vec_float, ptr %v, i32 0, i32 0";
       "  %data = load ptr, ptr %dp";
       "  %slot = getelementptr double, ptr %data, i64 %i";
@@ -10197,6 +10292,7 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       (* Phase 15.5: vec_set v i x — in-place mutation. *)
       Printf.sprintf "define i32 @mere_vec_%s_set(ptr %%v, i64 %%i, %s %%x) {" tag c_elem;
       "entry:";
+    ] @ owner_check_lines ~sn:struct_name ~idx:4 ~c:"%v" "Vec" "vec_set" @ [
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
       "  %len32 = load i32, ptr %lp";
       "  %len = sext i32 %len32 to i64";
@@ -11397,8 +11493,9 @@ let emit_map_runtime_llvm_linear (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
     Printf.sprintf "  %s = call i1 @mere_map_key_eq_%s(%s %s, %s %s)"
       eq_reg k_tag c_k lhs c_k k_reg
   in
-  String.concat "\n"
-    [ Printf.sprintf "%%%s = type { ptr, ptr, i32, i32, ptr }" struct_name;
+  String.concat "\n" @@
+    [ (* v0.1.575: field 5 is the owner (see owner_runtime_llvm) *)
+      Printf.sprintf "%%%s = type { ptr, ptr, i32, i32, ptr, i32 }" struct_name;
       "";
       (* new *)
       Printf.sprintf "define ptr @%s_new(ptr %%r) {" fn_prefix;
@@ -11424,6 +11521,7 @@ let emit_map_runtime_llvm_linear (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  store i32 4, ptr %cp";
       Printf.sprintf "  %%rp = getelementptr %%%s, ptr %%m, i32 0, i32 4" struct_name;
       "  store ptr %r, ptr %rp";
+      ] @ owner_store_lines ~sn:struct_name ~idx:5 ~c:"%m" @ [
       "  ret ptr %m";
       "}";
       "";
@@ -11431,6 +11529,7 @@ let emit_map_runtime_llvm_linear (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       Printf.sprintf "define i32 @%s_set(ptr %%m, %s %%k, %s %%v) {"
         fn_prefix c_k c_v;
       "entry:";
+    ] @ owner_check_lines ~sn:struct_name ~idx:5 ~c:"%m" "Map" "map_set" @ [
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" struct_name;
       "  %len = load i32, ptr %lp";
       Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" struct_name;
@@ -11565,6 +11664,7 @@ let emit_map_runtime_llvm_linear (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       (* Phase 39.A' #2: delete — shift keys/values down to remove the key *)
       Printf.sprintf "define i32 @%s_delete(ptr %%m, %s %%k) {" fn_prefix c_k;
       "entry:";
+    ] @ owner_check_lines ~sn:struct_name ~idx:5 ~c:"%m" "Map" "map_delete" @ [
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" struct_name;
       "  %len = load i32, ptr %lp";
       Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" struct_name;
@@ -11625,7 +11725,7 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
   let p = sn in
   let hash reg out = Printf.sprintf "  %s = call i64 @mere_map_key_hash_%s(%s %s)" out k_tag c_k reg in
   let key_eq a b out = Printf.sprintf "  %s = call i1 @mere_map_key_eq_%s(%s %s, %s %s)" out k_tag c_k a c_k b in
-  String.concat "\n"
+  String.concat "\n" @@
     (* Q-063: fields 7/8/9 are the tombstone state, mirroring the C backend's
        v0.1.317 layout -- dead[] marks a vacated dense slot, live is what _len
        answers, idx_used counts occupied index slots (live entries PLUS vacated
@@ -11634,7 +11734,8 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
        delete cost O(live): measured 0.19 / 0.45 / 1.16 s for 40k operations
        over a live set of 500 / 1000 / 2000 / 4000, against a flat 0.02 s on the
        C backend. *)
-    [ Printf.sprintf "%%%s = type { ptr, ptr, i32, i32, ptr, ptr, i32, ptr, i32, i32 }" sn;
+    [ (* v0.1.575: field 10 is the owner (see owner_runtime_llvm) *)
+      Printf.sprintf "%%%s = type { ptr, ptr, i32, i32, ptr, ptr, i32, ptr, i32, i32, i32 }" sn;
       "";
       (* new *)
       Printf.sprintf "define ptr @%s_new(ptr %%r) {" p;
@@ -11694,6 +11795,7 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  store i32 %cinext, ptr %ci";
       "  br label %fl";
       "fend:";
+      ] @ owner_store_lines ~sn ~idx:10 ~c:"%m" @ [
       "  ret ptr %m";
       "}";
       "";
@@ -11851,6 +11953,7 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       (* set *)
       Printf.sprintf "define i32 @%s_set(ptr %%m, %s %%k, %s %%v) {" p c_k c_v;
       "entry:";
+    ] @ owner_check_lines ~sn ~idx:10 ~c:"%m" "Map" "map_set" @ [
       "  %s = alloca i32";
       (* Q-063: the index slot of the first VACATED entry this probe walked
          through, or -1. Reusing it instead of consuming a fresh slot is what
@@ -12116,6 +12219,7 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          the bottom is amortised across O(live) deletes. *)
       Printf.sprintf "define i32 @%s_delete(ptr %%m, %s %%k) {" p c_k;
       "entry:";
+    ] @ owner_check_lines ~sn ~idx:10 ~c:"%m" "Map" "map_delete" @ [
       "  %s = alloca i32";
       hash "%k" "%h";
       Printf.sprintf "  %%icp = getelementptr %%%s, ptr %%m, i32 0, i32 6" sn;
@@ -12659,13 +12763,15 @@ let bytes_vec_bridge_runtime_llvm =
       "}" ]
 
 let strbuf_runtime_llvm =
-  String.concat "\n"
-    [ "%mere_strbuf = type { ptr, i32, i32, ptr }";
+  String.concat "\n" @@
+    [ "%mere_strbuf = type { ptr, i32, i32, ptr, i32 }   ; v0.1.575: field 4 is the owner";
       "";
       (* new *)
       "define ptr @mere_strbuf_new(ptr %r) {";
       "entry:";
-      "  %sb = call ptr @__lang_region_alloc(ptr %r, i64 24)";
+      "  %sbsz_p = getelementptr %mere_strbuf, ptr null, i32 1";
+      "  %sbsz = ptrtoint ptr %sbsz_p to i64";
+      "  %sb = call ptr @__lang_region_alloc(ptr %r, i64 %sbsz)";
       "  %buf = call ptr @__lang_region_alloc(ptr %r, i64 16)";
       "  %dp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 0";
       "  store ptr %buf, ptr %dp";
@@ -12675,12 +12781,14 @@ let strbuf_runtime_llvm =
       "  store i32 16, ptr %cp";
       "  %rp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 3";
       "  store ptr %r, ptr %rp";
+    ] @ owner_store_lines ~sn:"mere_strbuf" ~idx:4 ~c:"%sb" @ [
       "  ret ptr %sb";
       "}";
       "";
       (* push *)
       "define i32 @mere_strbuf_push(ptr %sb, ptr %s) {";
       "entry:";
+    ] @ owner_check_lines ~sn:"mere_strbuf" ~idx:4 ~c:"%sb" "StrBuf" "strbuf_push" @ [
       "  %slen64 = call i64 @__lang_str_size(ptr %s)";
       "  %slen = trunc i64 %slen64 to i32";
       "  br label %check";
@@ -15502,6 +15610,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         "";
         region_runtime_helpers;
         "";
+        owner_runtime_llvm;
+        "";
         str_concat_helper;
         "";
         str_eq_helper;
@@ -15667,6 +15777,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          [ name_and_sig;
            (* installed before the program's own entry block runs *)
            "__lang_boot:";
+           "  store i32 1, ptr @__lang_tid_v   ; v0.1.575: the program's thread is thread 1";
            "  call void @__lang_install_segv()";
            "  %__mere_atexit = call i32 @atexit(ptr @__lang_alloc_stats_report)";
            "  br label %entry";

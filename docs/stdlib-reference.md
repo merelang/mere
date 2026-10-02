@@ -1226,7 +1226,22 @@ Two things are allowed through on purpose:
 - **A function value whose definition is not visible**: a parameter, something
   received over a channel, a call's result. A library that spawns the handler
   it was given (`http_serve_mt`) cannot see what the handler touches; that is
-  left to the run-time check (below, when it lands).
+  left to the run-time check below.
+
+**At run time (v0.1.575)**, a `Map`, `Vec`, `StrBuf`, `ByteBuf` or `ListBuf`
+remembers the thread that made it, and a WRITE from any other thread stops the
+program, on the interpreter, C and LLVM alike:
+
+```
+vec_push: a Vec made by one thread was written by another -- a Vec is not safe
+to share between threads; give it one owner thread and send it messages over a
+Channel
+```
+
+Reads are not checked, so a table built once and read by many threads works.
+A program that never spawns pays one load of a global per write; one that does
+pays a thread-id comparison. A `--lib` build turns the check off: a host may call
+in from whichever thread it likes, one call at a time.
 
 The usual fix is to give the shared value one owner thread and send it
 messages over a `Channel` -- an append is a message, a read sends a channel

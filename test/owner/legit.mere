@@ -1,0 +1,20 @@
+// scripts/owner_check.sh: what must still run. A container made inside the
+// thread and written there; a table the program's thread built and the threads
+// only READ (reads are not checked); a result sent back over a Channel and
+// written by the thread that made the container.
+let mk = fn (u: unit) -> let v = vec_new () in let _ = vec_push v 10 in let _ = vec_push v 20 in v;
+let table = mk ();
+let ch = channel_new ();
+let start = fn (f: unit -> unit) -> spawn f;
+let h1 = start (fn (u: unit) ->
+  let own = vec_new () in
+  let _ = vec_push own (vec_get table 0) in
+  channel_send ch (vec_get own 0 + vec_len own));
+let h2 = start (fn (u: unit) -> channel_send ch (vec_get table 1));
+let _ = join h1;
+let _ = join h2;
+let a = channel_recv ch;
+let b = channel_recv ch;
+let out = vec_new ();
+let _ = vec_push out (a + b);
+print_int (vec_get out 0)

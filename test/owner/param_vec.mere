@@ -1,0 +1,9 @@
+// scripts/owner_check.sh: the shape the type check cannot see -- a closure that
+// arrives as a PARAMETER and writes a Vec the program's thread made. mere-blog's
+// ledger was this (its handler handed to http_serve_mt_ctx). Must fail by name.
+let mk = fn (u: unit) -> let v = vec_new () in let _ = vec_push v 3 in v;
+let t = mk ();
+let start = fn (f: unit -> unit) -> spawn f;
+let h = start (fn (u: unit) -> vec_push t 4);
+let _ = join h;
+print_int (vec_len t)
