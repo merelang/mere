@@ -4,6 +4,28 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.595 — 2026-10-03
+
+_`floor`, `ceil` and `round` on Wasm, and a negative zero printed as `-0.0` there: contrib/raster's path library builds for Wasm, and parity leaves 9 programs unchecked on Wasm (was 10)._
+
+The Wasm backend refused all three. `floor` and `ceil` are `f64.floor` and
+`f64.ceil`; they were held back because putting them in the eta-expansion list
+sent it into an infinite expansion, so a call is emitted directly and the bare
+name as a value is still refused. `round` is not `f64.nearest`, which rounds half
+to even where C and the interpreter round half away from zero: it is the
+truncation, moved one away from zero when the part cut off is at least a half --
+computed from the truncation rather than as `floor(|x| + 0.5)`, which rounds
+0.49999999999999994 up because the sum is 1.0 in a double.
+
+The Wasm host printed `-0.0` as `0.0` (`(-0).toFixed(0)` is `"0"`); it prints
+`-0.0` like the other three.
+
+`test/parity/float_round.mere` covers halves, negatives, the 0.49999999999999994
+case, negative zero and a value past 2^52. `contrib_ctest` unpins `raster/path`;
+`docs/host-matrix.md` shows the three as `yes` on Wasm.
+
+---
+
 ## v0.1.594 — 2026-10-03
 
 _Five more places where building a program took time quadratic in its size are linear: mere-ruby's `-c` is 3.8 s (was 7.3) and its `check` 1.4 s (was 1.8), and every output is the same bytes._

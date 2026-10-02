@@ -71,7 +71,7 @@ done
 #           deeper than the interpreter's stack allows and the native binary
 #           completes. There is no output to diff against, and the native side
 #           is the one that works.
-KNOWN_WASM="raster/path stream/stream"
+KNOWN_WASM="stream/stream"
 KNOWN_INTERP="site/build"
 
 TMP=$(mktemp -d)

@@ -357,6 +357,9 @@ const wasmPath = process.argv[2];
           }
           if (p >= 17 || Number(s) === f) break;
         }
+        // toFixed drops the sign of a negative zero ((-0).toFixed(0) is "0");
+        // the other three backends print "-0.0". v0.1.595.
+        if (Object.is(f, -0)) s = "-0";
         // OCaml: append ".0" for plain integer-valued floats
         if (!/[.eEni]/.test(s)) s += ".0";
       }

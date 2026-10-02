@@ -3357,20 +3357,45 @@ and emit_expr (e : Ast.expr) : unit =
     emit_instr "f64.load offset=0 align=8";
     emit_instr "f64.sqrt";
     emit_float_alloc_from_f64_on_stack ()
-  (* floor / ceil / round: refused rather than emitted.
-     f64.floor and f64.ceil are instructions and looked like a five-line addition,
-     but putting the names in the eta-expansion list above sent that machinery into
-     an infinite expansion — a bare `floor` call never finished emitting. `round`
-     is worse than missing: f64.nearest rounds half to even where C and the
-     interpreter round half away from zero, and doing it properly needs a scratch
-     f64 local, which this backend declares per function.
-     A backend that says "no" is one a caller can work around; one that quietly
-     rounds differently, or that hangs, is not. The C and LLVM backends have all
-     three; scripts/host_matrix.sh records the gap. *)
-  | Ast.App ({ node = Ast.Var fname; _ }, _)
-    when fname = "floor" || fname = "ceil" || fname = "round" ->
-    unsupported e.loc
-      (fname ^ " is not supported in the wasm codegen subset")
+  (* floor / ceil / round. These were refused: f64.floor and f64.ceil looked like a
+     five-line addition, but putting the names in the eta-expansion list above sent
+     that machinery into an infinite expansion -- a bare `floor` call never finished
+     emitting -- so they stay out of it (a call is emitted here; `floor` as a value
+     is still refused). `round` is not f64.nearest, which rounds half to even where
+     C and the interpreter round half away from zero: it is trunc(x), moved one
+     away from zero when the part cut off is at least a half. Computed from the
+     truncation rather than as floor(|x| + 0.5), which rounds 0.49999999999999994
+     up (the sum is 1.0 in a double). v0.1.595. *)
+  | Ast.App ({ node = Ast.Var ("floor" | "ceil" as fname); _ }, a_e) ->
+    emit_expr a_e;
+    emit_instr "i32.wrap_i64";
+    emit_instr "f64.load offset=0 align=8";
+    emit_instr ("f64." ^ fname);
+    emit_float_alloc_from_f64_on_stack ()
+  | Ast.App ({ node = Ast.Var "round"; _ }, a_e) ->
+    let x = fresh_local_f64 () in
+    let t = fresh_local_f64 () in
+    emit_expr a_e;
+    emit_instr "i32.wrap_i64";
+    emit_instr "f64.load offset=0 align=8";
+    emit_instr (Printf.sprintf "local.tee %d" x);
+    emit_instr "f64.trunc";
+    emit_instr (Printf.sprintf "local.set %d" t);
+    (* select(t + copysign(1, x), t, |x - t| >= 0.5) *)
+    emit_instr (Printf.sprintf "local.get %d" t);
+    emit_instr "f64.const 1";
+    emit_instr (Printf.sprintf "local.get %d" x);
+    emit_instr "f64.copysign";
+    emit_instr "f64.add";
+    emit_instr (Printf.sprintf "local.get %d" t);
+    emit_instr (Printf.sprintf "local.get %d" x);
+    emit_instr (Printf.sprintf "local.get %d" t);
+    emit_instr "f64.sub";
+    emit_instr "f64.abs";
+    emit_instr "f64.const 0.5";
+    emit_instr "f64.ge";
+    emit_instr "select";
+    emit_float_alloc_from_f64_on_stack ()
   | Ast.App ({ node = Ast.Var fname; _ }, a_e)
     when fname = "sin" || fname = "cos" || fname = "tan"
          || fname = "exp" || fname = "log" ->
