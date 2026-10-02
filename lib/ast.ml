@@ -1121,6 +1121,10 @@ let decl_exprs (d : top_decl) : expr list =
    MERE_RANGE_VERSION_LOG=1 names each rewritten function on stderr, so a gate
    can tell "did not fire" from "fired and was harmless". *)
 let range_version_enabled = ref (Sys.getenv_opt "MERE_NO_RANGE_VERSION" = None)
+(* v0.1.583 (Q-142): MERE_NO_INNER_DIRECT=1 stops every backend from sending a
+   saturated call of a lifted inner fn to its uncurried twin -- the poison
+   scripts/inner_direct_check.sh feeds itself *)
+let inner_direct_enabled = Sys.getenv_opt "MERE_NO_INNER_DIRECT" = None
 let range_version_log = ref (Sys.getenv_opt "MERE_RANGE_VERSION_LOG" <> None)
 let range_versioned : string list ref = ref []
 

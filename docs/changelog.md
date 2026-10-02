@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.583 — 2026-10-02
+
+_A curried inner function called with all its arguments builds no closures on LLVM and Wasm either (Q-142): mandelbrot takes 6 MB on LLVM (was 235) and runs on Wasm (was out of memory)._
+
+An inner function is lifted to the top level with what it captures prepended to
+its parameters. The C backend has emitted an uncurried twin for it since v0.1.52
+-- captures and every curried parameter in one call -- and sent a saturated call
+there. LLVM and Wasm had the twin for top-level functions only (Q-139), so the
+inner `go i zx zy` of a mandelbrot went through the curried chain: one closure
+environment per application per iteration. The same loop cost 16 bytes an
+iteration at top level and 104 nested in a function on Wasm; LLVM allocated
+6,984,016 bytes for 96,000 iterations, and `examples/mandelbrot.mere` peaked at
+235 MB there against C's 6 MB and ran out of memory on Wasm.
+
+Both backends now emit `<lifted>__direct` beside the curried definition (which a
+partial application and a first-class use still reach) and send an exactly
+saturated call to it, a self tail call as `musttail` / `return_call`. The nested
+loop is 16 bytes on LLVM -- the whole run -- and 16 B/iter on Wasm, equal to the
+top-level loop (Wasm boxes floats). mandelbrot: LLVM 6.2 MB, Wasm runs, output
+identical to C.
+
+`scripts/inner_direct_check.sh` measures it on all three compiled backends: the
+nested loop against the top-level one, and a partial application that must still
+give the right answer. `MERE_NO_INNER_DIRECT=1` turns the twin off on every
+backend, and `--poison` uses it: C 10 MB, LLVM 7 MB, Wasm 10 MB.
+
+---
+
 ## v0.1.582 — 2026-10-02
 
 _The rest of Q-179: a read by another thread freezes a container, an OwnedVec is moved rather than shared, `sync type` cannot vouch for a Map, a stateful `--lib` refuses overlapping calls, and the interpreter checks a program that spawns before it runs any of it._
