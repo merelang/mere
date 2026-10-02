@@ -1192,6 +1192,11 @@ let pattern_vars_with_types (p : Ast.pattern) (scrut_ty : Ast.ty)
 
 (* Free variables of an expression with respect to a given set of bound
    names. Used to compute captures for inner fn lifting. *)
+module FvSet = Set.Make (String)
+
+(* v0.1.593: the bound names are a set. They were a list searched at every
+   variable, and lifting an inner fn passes every top-level name as bound --
+   about 9,000 in mere-ruby, so each variable cost a walk of 9,000 strings. *)
 let free_vars (e : Ast.expr) (initially_bound : string list) : string list =
   let seen = Hashtbl.create 8 in
   let order = ref [] in
@@ -1201,44 +1206,44 @@ let free_vars (e : Ast.expr) (initially_bound : string list) : string list =
       order := n :: !order
     end
   in
-  let rec go (e : Ast.expr) (bound : string list) =
+  let rec go (e : Ast.expr) (bound : FvSet.t) =
     match e.Ast.node with
     | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
     | Ast.Unit_lit -> ()
-    | Ast.Var n -> if not (List.mem n bound) then add n
+    | Ast.Var n -> if not (FvSet.mem n bound) then add n
     | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
     | Ast.App (a, b) -> go a bound; go b bound
     | Ast.Neg a | Ast.Annot (a, _) -> go a bound
     | Ast.Let (pat, v, body) ->
       go v bound;
-      go body (pattern_vars pat @ bound)
+      go body (List.fold_left (fun b n -> FvSet.add n b) bound (pattern_vars pat))
     | Ast.Let_rec (bindings, body) ->
       let names = List.map Ast.rb_name bindings in
-      let bound' = names @ bound in
+      let bound' = List.fold_left (fun b n -> FvSet.add n b) bound names in
       List.iter (fun (_, _, v) -> go v bound') bindings;
       go body bound'
     | Ast.With (n, v, body) ->
-      go v bound; go body (n :: bound)
+      go v bound; go body (FvSet.add n bound)
     | Ast.If (c, t, e_) -> go c bound; go t bound; go e_ bound
-    | Ast.Fun (param, _, body) -> go body (param :: bound)
+    | Ast.Fun (param, _, body) -> go body (FvSet.add param bound)
     | Ast.Constr (_, Some a) -> go a bound
     | Ast.Constr (_, None) -> ()
     | Ast.Match (s, arms) ->
       go s bound;
       List.iter (fun (pat, guard, body) ->
-        let bound' = pattern_vars pat @ bound in
+        let bound' = List.fold_left (fun b n -> FvSet.add n b) bound (pattern_vars pat) in
         (match guard with Some g -> go g bound' | None -> ());
         go body bound') arms
     | Ast.Tuple es -> List.iter (fun e -> go e bound) es
-    | Ast.Region_block (n, b) -> go b (n :: bound)
-    | Ast.Region_loop (n, x, b) -> go b (x :: n :: bound)
+    | Ast.Region_block (n, b) -> go b (FvSet.add n bound)
+    | Ast.Region_loop (n, x, b) -> go b (FvSet.add x (FvSet.add n bound))
     | Ast.Ref (_, _, a) -> go a bound
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e bound) fs
     | Ast.Field_get (a, _) -> go a bound
     | Ast.Record_update (a, fs) ->
       go a bound; List.iter (fun (_, e) -> go e bound) fs
   in
-  go e initially_bound;
+  go e (FvSet.of_list initially_bound);
   List.rev !order
 
 (* Phase 38.G-1 (DEFERRED §1.3 Level 1): static auto-Drop check for OwnedVec.
@@ -14582,94 +14587,75 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      a Vec, walk body and unify value.ty with every `Var name`.ty
      encountered. unify chains the tyvars together, so once any one is
      resolved (by e.g. vec_push), all others share that resolution. *)
-    let resolve_vec_let_types (root : Ast.expr) : unit =
+  (* v0.1.593: ONE walk instead of one per binding. This unified each Vec /
+     Map / StrBuf / OwnedVec / ListBuf `let` with every use in its scope by
+     scanning the rest of the scope -- per binding, so a top-level container
+     scanned the rest of the program and N of them were N^2 (1.4 s of
+     mere-ruby's C emit). The walk now records, for every `let`/`with`
+     binding, the uses that scan would have reached -- the same nodes, in the
+     same order, with the same shadowing (a `let`/`with`/parameter of the name
+     stops it; a match pattern and a tuple pattern do not; a `let rec`
+     member stops it only in the body) -- and then unifies binding by binding
+     in the order the walk met them, deciding whether a binding is a container
+     at that moment, as the scan did. *)
+  let resolve_vec_let_types (root : Ast.expr) : unit =
     let unify_with_value (vt : Ast.ty) (ut : Ast.ty) : unit =
       try Typer.unify Loc.dummy vt ut with _ -> ()
     in
-    let rec scan_uses name vt body =
-      (match body.Ast.node with
-       | Ast.Var n when n = name ->
-         (match body.Ast.ty with
-          | Some t -> unify_with_value vt t
-          | None -> ())
-       | _ -> ());
-      let recur b = scan_uses name vt b in
-      match body.Ast.node with
-      | Ast.App (a, b) -> recur a; recur b
-      | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) ->
-        recur a; recur b
-      | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _)
-      | Ast.Ref (_, _, a) | Ast.Region_block (_, a) -> recur a
-      | Ast.Let (pat, v, b) ->
-        recur v;
-        (match pat.Ast.pnode with
-         | Ast.P_var n when n = name -> ()  (* shadowed *)
-         | _ -> recur b)
-      | Ast.Let_rec (bs, b) ->
-        let shadowed = List.exists (fun (n, _, _) -> n = name) bs in
-        List.iter (fun (_, _, v) -> recur v) bs;
-        if not shadowed then recur b
-      | Ast.If (c, t, e_) -> recur c; recur t; recur e_
-      | Ast.Tuple es -> List.iter recur es
-      | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> recur e) fs
-      | Ast.Record_update (a, fs) ->
-        recur a; List.iter (fun (_, e) -> recur e) fs
-      | Ast.With (n, v, b) -> recur v; if n <> name then recur b
-      | Ast.Fun (n, _, b) -> if n <> name then recur b
-      | Ast.Match (s, arms) ->
-        recur s;
-        List.iter (fun (_, g, b) ->
-          (match g with Some ge -> recur ge | None -> ()); recur b) arms
-      | Ast.Constr (_, Some a) -> recur a
-      | _ -> ()
-    in
-    let rec walk e =
+    let module SM = Map.Make (String) in
+    (* id -> (the binding's value type, its uses, newest first) *)
+    let bindings : (int, Ast.ty option * Ast.expr list ref) Hashtbl.t = Hashtbl.create 1024 in
+    let next = ref 0 in
+    let bind env name vty =
+      let id = !next in incr next;
+      Hashtbl.replace bindings id (vty, ref []);
+      SM.add name (Some id) env in
+    let shadow env name = SM.add name None env in
+    let rec go env (e : Ast.expr) =
       (match e.Ast.node with
-       | Ast.Let (pat, value, body) ->
-         (match pat.Ast.pnode, value.Ast.ty with
-          | Ast.P_var name, Some vt ->
-            (match Ast.walk vt with
-             | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _)
-             | Ast.TyCon ("Map", _) | Ast.TyCon ("StrBuf", _)
-             | Ast.TyCon ("ListBuf", _) ->
-               scan_uses name vt body
-             | _ -> ())
+       | Ast.Var n ->
+         (match SM.find_opt n env with
+          | Some (Some id) -> let (_, us) = Hashtbl.find bindings id in us := e :: !us
           | _ -> ())
-       | Ast.With (name, value, body) ->
-         (match value.Ast.ty with
-          | Some vt ->
-            (match Ast.walk vt with
-             | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _)
-             | Ast.TyCon ("Map", _) | Ast.TyCon ("StrBuf", _)
-             | Ast.TyCon ("ListBuf", _) ->
-               scan_uses name vt body
-             | _ -> ())
-          | None -> ())
        | _ -> ());
-      walk_subs e
-    and walk_subs e =
+      let go' = go env in
       match e.Ast.node with
-      | Ast.Let (_, v, b) -> walk v; walk b
-      | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> walk v) bs; walk b
-      | Ast.App (a, b) | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b)
-      | Ast.Logic (_, a, b) -> walk a; walk b
+      | Ast.App (a, b) | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) -> go' a; go' b
       | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _)
-      | Ast.Ref (_, _, a) | Ast.Region_block (_, a) | Ast.Fun (_, _, a) ->
-        walk a
-      | Ast.If (c, t, e_) -> walk c; walk t; walk e_
-      | Ast.Tuple es -> List.iter walk es
-      | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> walk e) fs
-      | Ast.Record_update (a, fs) ->
-        walk a; List.iter (fun (_, e) -> walk e) fs
-      | Ast.With (_, v, b) -> walk v; walk b
-      | Ast.Match (s, arms) ->
-        walk s;
-        List.iter (fun (_, g, b) ->
-          (match g with Some ge -> walk ge | None -> ()); walk b) arms
-      | Ast.Constr (_, Some a) -> walk a
+      | Ast.Ref (_, _, a) | Ast.Region_block (_, a) -> go' a
+      | Ast.Let (pat, v, b) ->
+        go' v;
+        (match pat.Ast.pnode with
+         | Ast.P_var n -> go (bind env n v.Ast.ty) b
+         | _ -> go' b)
+      | Ast.Let_rec (bs, b) ->
+        List.iter (fun (_, _, v) -> go' v) bs;
+        go (List.fold_left (fun en (n, _, _) -> shadow en n) env bs) b
+      | Ast.If (c, t, e_) -> go' c; go' t; go' e_
+      | Ast.Tuple es -> List.iter go' es
+      | Ast.Record_lit (_, fs) -> List.iter (fun (_, x) -> go' x) fs
+      | Ast.Record_update (a, fs) -> go' a; List.iter (fun (_, x) -> go' x) fs
+      | Ast.With (n, v, b) -> go' v; go (bind env n v.Ast.ty) b
+      | Ast.Fun (n, _, b) -> go (shadow env n) b
+      | Ast.Match (sc, arms) ->
+        go' sc;
+        List.iter (fun (_, g, b) -> (match g with Some ge -> go' ge | None -> ()); go' b) arms
+      | Ast.Constr (_, Some a) -> go' a
       | _ -> ()
     in
-    walk root
+    go SM.empty root;
+    for id = 0 to !next - 1 do
+      match Hashtbl.find bindings id with
+      | (Some vt, us) ->
+        (match Ast.walk vt with
+         | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _)
+         | Ast.TyCon ("Map", _) | Ast.TyCon ("StrBuf", _)
+         | Ast.TyCon ("ListBuf", _) ->
+           List.iter (fun (u : Ast.expr) ->
+             match u.Ast.ty with Some t -> unify_with_value vt t | None -> ()) (List.rev !us)
+         | _ -> ())
+      | (None, _) -> ()
+    done
   in
   (* v0.1.105 (① increment 2): split a local poly fn used at several concrete
      types into one monomorphic copy per type, before lifting, so the C
@@ -14687,13 +14673,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      Only lets whose name appears in some skel's free_vars get globalized,
      otherwise they stay as __let_tmp_X in main (preserving existing
      behavior for programs that don't need globals). *)
-  let fvs_used_in_skels =
-    List.fold_left (fun acc s ->
-      let fvs = free_vars s.sbody [s.sparam] in
-      List.sort_uniq compare (fvs @ acc))
-      [] skels
-  in
-  let needs_global name = List.mem name fvs_used_in_skels in
+  (* v0.1.593: a set, not a list re-sorted with every skeleton's free vars
+     appended (0.6 s of mere-ruby's emit) *)
+  let fvs_used_in_skels : (string, unit) Hashtbl.t = Hashtbl.create 4096 in
+  List.iter (fun s ->
+    List.iter (fun v -> Hashtbl.replace fvs_used_in_skels v ()) (free_vars s.sbody [s.sparam]))
+    skels;
+  let needs_global name = Hashtbl.mem fvs_used_in_skels name in
   (* Phase 36 (DEFERRED §1.18 fix): keep the Let bindings in body_expr
      so global init happens at the SOURCE-ORDER position (interleaved
      with side-effecting code in main_body), not pre-emitted upfront

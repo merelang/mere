@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.593 — 2026-10-03
+
+_Three walks in the C emitter that were quadratic in the program are linear: mere-ruby's emit is 6.6 s (was 7.8), and the C it emits is the same bytes._
+
+- `resolve_vec_let_types` walked the rest of the program once per `let` whose
+  container type was still open. It is now one walk that records each binding's
+  uses, honouring shadowing, and then unifies them in binding order -- the order
+  the old per-binding walks ran in.
+- The set of free variables a closure skeleton uses, and the bound names inside
+  `free_vars`, were lists searched with `List.mem`; they are a hash table and a
+  string set.
+
+The C for 1,022 programs (test/, examples/, the downstream programs) and
+mere-ruby's C are byte-identical to v0.1.592's.
+
+---
+
 ## v0.1.592 — 2026-10-03
 
 _The C a standalone program compiles to has internal linkage, and a curried function's closure stages call its uncurried twin: mere-ruby's C is 40 MB (was 93), clang -O2 builds it in 54 s (was 185) in 1.4 GB (was 6.9)._
