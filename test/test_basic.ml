@@ -4204,6 +4204,16 @@ let () =
     (accepted sp_in_closure) "accepted";
   check "Q-080 hole: nor when that closure arrives as a parameter"
     (accepted sp_as_param) "accepted";
+  (* v0.1.573 (Q-179 stage 0) *)
+  check_raises_containing "Q-197: a ByteBuf is not shared across a thread"
+    "neither Send nor Sync" (fun () -> Pipeline.process
+      "let g = bytebuf_new 16;\nlet h = spawn (fn () -> bytebuf_set g 0 3);\njoin h");
+  check_raises_containing "Q-179: spawn checks a partial application's arguments"
+    "neither Send nor Sync" (fun () -> Pipeline.process
+      "let w = fn (m: Map['r, int, int]) -> fn (u: unit) -> map_set m 1 1;\n\
+       let m = map_new ();\nlet h = spawn (w m);\njoin h");
+  check "Q-179: spawn of a function value alone still passes (stage 1's question)"
+    (accepted "let f = fn (u: unit) -> print \"x\";\nlet h = spawn f;\njoin h") "accepted";
 
   (* Q-012 step 3b-4a: C backend spawn / join over pthreads (env-less closures).
      The emitted program compiles with clang and runs the closure on a real

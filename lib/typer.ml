@@ -1150,7 +1150,8 @@ let rec ty_mentions_mutable_container (t : Ast.ty) : bool =
   (* v0.1.564 (Q-193): ByteBuf too. Missing, `let (out, _, _) = zlib_inflate raw p in`
      generalised `out`'s region, every use of `out` got a fresh one, and the region the
      buffer was allocated in was decided by nobody -- the default region. *)
-  | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "ByteBuf" | "Channel" | "ListBuf"), _) -> true
+  | Ast.TyCon (n, _) when List.mem n region_parameterised_names -> true
+  | Ast.TyCon (("OwnedVec" | "Channel"), _) -> true
   (* v0.1.561: a coroutine's message type is fixed once, like a channel's element --
      generalised, `let c = coro_new ..` could be sent an int here and a bool there *)
   | Ast.TyCon ("Coro", _) -> true
@@ -1712,8 +1713,11 @@ let rec is_send_v (visiting : string list) (t : Ast.ty) : bool =
      shared Map compiled fine and lost concurrent writes (measured:
      39/1600 SET-then-GET failures in a naive RESP server). OwnedVec is
      NOT here: it is a drop type (single owner, movable), handled below.
-     Share by communicating instead: Channel is Send+Sync. *)
-  | Ast.TyCon (("Map" | "Vec" | "StrBuf" | "ListBuf"), _) -> false
+     Share by communicating instead: Channel is Send+Sync.
+     v0.1.573 (Q-197): from the one list. ByteBuf was missing from this case and
+     the next while the value restriction and the region list had it, so a
+     top-level ByteBuf written by a spawned lambda was accepted as shareable. *)
+  | Ast.TyCon (n, _) when List.mem n region_parameterised_names -> false
   | Ast.TyCon (name, _) when Hashtbl.mem local_types name -> false
   | Ast.TyCon (name, _) when Hashtbl.mem sync_types name -> true
   | Ast.TyCon (name, args) when Hashtbl.mem drop_types name ->
@@ -1737,7 +1741,7 @@ let rec is_sync_v (visiting : string list) (t : Ast.ty) : bool =
   | Ast.TyCon ("File", _) -> false             (* FILE* reads are not thread-safe *)
   (* v0.1.29 (mkv dogfood P2): see is_send_v — lock-free region-bound
      containers must not be shared across threads. *)
-  | Ast.TyCon (("Map" | "Vec" | "StrBuf" | "ListBuf"), _) -> false
+  | Ast.TyCon (n, _) when List.mem n region_parameterised_names -> false
   | Ast.TyCon (name, _) when Hashtbl.mem local_types name -> false
   | Ast.TyCon (name, _) when Hashtbl.mem sync_types name -> true
   | Ast.TyCon (name, _) when Hashtbl.mem drop_types name -> false

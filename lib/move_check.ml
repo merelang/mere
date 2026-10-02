@@ -309,6 +309,15 @@ let rec go (env : venv) (consumed : IS.t) (multi : bool) (e : Ast.expr) : IS.t =
   (* spawn (fn () -> ...) : capture analysis (§B). *)
   | Ast.App ({ Ast.node = Ast.Var "spawn"; _ }, ({ Ast.node = Ast.Fun _; _ } as clos)) ->
     spawn_capture env consumed multi clos
+  (* v0.1.573 (Q-179 stage 0): ANY argument, not just a literal lambda. `spawn e`
+     runs `e ()` on another thread, so what `e` mentions crosses the boundary just
+     as a lambda's captures do -- and `spawn (w slot)`, a partial application whose
+     argument is a Map, was not looked at at all: four threads filling one Map that
+     way hung the C build three runs in three. `spawn body` with `body` a function
+     value still passes here (an arrow is Sync); what such a value reaches is the
+     next stage's question. *)
+  | Ast.App ({ Ast.node = Ast.Var "spawn"; _ }, arg) when List.assoc_opt "spawn" env = None ->
+    spawn_capture env consumed multi arg
   | Ast.App ({ Ast.node = Ast.Var ("coro_new" | "__coro_new_raw" as n); _ }, arg)
     when List.assoc_opt n env = None ->
     coro_capture env arg;
