@@ -14168,10 +14168,11 @@ let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
       "  __lang_region_init(mr, 256);";
       Printf.sprintf "  v = __mcopy_%s(mr, v);" tag;
       "  pthread_mutex_lock(&ch->m);";
-      (* v0.1.47: sending on a closed channel is a programming error
-         (matches the interpreter, which raises). *)
+      (* v0.1.47: sending on a closed channel is a programming error. v0.1.590:
+         a failure the program can catch, as the interpreter's is -- it was
+         abort(), exit 134, past every try_or. *)
       "  if (ch->closed) { pthread_mutex_unlock(&ch->m); \
-        fprintf(stderr, \"channel_send: channel is closed\\n\"); abort(); }";
+        __lang_fail_impl(\"channel_send: channel is closed\"); }";
       "  if (ch->len == ch->cap) {";
       "    int nc = ch->cap * 2;";
       Printf.sprintf "    %s* nb = (%s*)malloc(sizeof(%s) * (size_t)nc);" cty cty cty;
@@ -14194,10 +14195,10 @@ let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
       Printf.sprintf "static %s %s_recv(%s* ch) {" cty s s;
       "  pthread_mutex_lock(&ch->m);";
       "  while (ch->len == 0 && !ch->closed) pthread_cond_wait(&ch->c, &ch->m);";
-      (* v0.1.47: recv on a closed, drained channel aborts (matches interp;
-         use channel_recv_opt for the shutdown path). *)
+      (* v0.1.47: recv on a closed, drained channel fails (use channel_recv_opt
+         for the shutdown path). v0.1.590: catchably, as on the interpreter. *)
       "  if (ch->len == 0) { pthread_mutex_unlock(&ch->m); \
-        fprintf(stderr, \"channel_recv: channel is closed and empty\\n\"); abort(); }";
+        __lang_fail_impl(\"channel_recv: channel is closed and empty\"); }";
       Printf.sprintf "  %s v = ch->buf[ch->head];" cty;
       "  __lang_region* mr = ch->regs[ch->head];";
       "  ch->head = (ch->head + 1) % ch->cap;";
@@ -16034,9 +16035,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          others, stdout was cut, and one handler failing took a whole daemon
          down (mhttpd, mengd). The interpreter ran on. Now every backend gives
          Rust's answer: the thread's failure is RECORDED; `join` raises it again
-         in the joiner (where try_or takes it); a detached thread's failure is
-         one line on stderr and the program carries on; one nobody joined or
-         detached is one line at exit. The exit status is the main thread's.
+         in the joiner (where try_or takes it); and the failure is one line on
+         stderr WHEN IT HAPPENS, whoever holds the handle (v0.1.590 -- at exit,
+         as v0.1.586 had it, never came for a daemon). The exit status is the
+         main thread's.
          The record is on a list while nobody has claimed it -- the exit report
          reads it, and MERE_THREAD_REPORT=1 prints the whole leak report from it
          (Q-055, the interpreter's since v0.1.304) -- and it is freed when both
@@ -16071,7 +16073,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "static void __lang_thr_exit_report(void) {";
       "  pthread_mutex_lock(&__lang_thr_lock);";
       "  int n = 0;";
-      "  for (__lang_thr* t = __lang_thr_head; t; t = t->next) { n++; if (t->state == 2) __lang_thr_tell(t, \" and was never joined\"); }";
+      "  for (__lang_thr* t = __lang_thr_head; t; t = t->next) n++;";
       "  if (n > 0 && getenv(\"MERE_THREAD_REPORT\")) {";
       "    fprintf(stderr, \"mere: %d thread(s) neither joined nor detached at exit\\n\", n);";
       "    for (__lang_thr* t = __lang_thr_head; t; t = t->next) {";
@@ -16111,7 +16113,6 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "  __lang_thr* t = h.t;";
       "  pthread_detach(t->tid);";
       "  t->claim = 2; __lang_thr_unlink(t);";
-      "  if (t->state == 2) __lang_thr_tell(t, \" (detached)\");";
       "  __lang_thr_release(t);";
       "  pthread_mutex_unlock(&__lang_thr_lock);";
       "}";
@@ -16151,7 +16152,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "  if (__failed) {";
       "    snprintf(__t->msg, sizeof __t->msg, \"%s\", __lang_fail_msg);";
       "    __t->state = 2;";
-      "    if (__t->claim == 2) __lang_thr_tell(__t, \" (detached)\");";
+      "    __lang_thr_tell(__t, \"\");   /* v0.1.590: when it fails, whoever holds the handle */";
       "  } else __t->state = 1;";
       "  __lang_thr_release(__t);";
       "  pthread_mutex_unlock(&__lang_thr_lock);";

@@ -71,6 +71,9 @@ build_run() {  # $1 = dir, $2 = flag (-c|-ll), $3 = source name -> prints first 
     echo "CCFAIL $(head -1 "$T/cc.err")"; return
   fi
   out=$( (cd "$d" && "$T/bin" 2>&1) ); rc=$?
+  # $4 = all: every line, joined with '|' (v0.1.590: a spawned thread's failure
+  # is a line on stderr when it happens, ahead of what main prints)
+  if [ "${4:-}" = all ]; then printf '%s\n' "$out" | tr '\n' '|'; echo; return; fi
   first=$(printf '%s\n' "$out" | head -1)
   [ -n "$first" ] || first="(no output, exit $rc)"
   echo "$first"
@@ -124,9 +127,9 @@ print (str_of_int (match r with Cons (x, _) -> x | Nil -> 0 - 1) ++ " " ++ str_o
 JB
 for flag in -c -ll; do
   b=C; [ "$flag" = "-ll" ] && b=LLVM
-  got=$(build_run "$T/without" "$flag" jb.mere)
+  got=$(build_run "$T/without" "$flag" jb.mere all)
   case "$got" in
-    "1 2")
+    *"mere: thread 1 failed: fail: from the spawned thread|"*"1 2|"*)
       printf '  ok    %s\n' "$b: a fail on a spawned thread stays in that thread's record, not main's try_or" ;;
     *) printf '  FAIL  %s\n' "$b: a spawned thread's fail landed elsewhere: $got"
        fail=1 ;;

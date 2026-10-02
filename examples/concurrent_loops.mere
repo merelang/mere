@@ -25,10 +25,11 @@ let total =
   let results = channel_new () in
   // Worker loop on its own thread. It captures `jobs`, `results`, `consume`
   // — all shared (Sync), so the main thread keeps using them too.
-  let _ = spawn (fn u -> channel_send results (consume jobs 0)) in
+  let h = spawn (fn u -> channel_send results (consume jobs 0)) in
   // Main loop produces 100 jobs concurrently with the worker.
   let _ = produce jobs 100 in
-  // Block until the worker reports its total.
+  // Wait for the worker (its failure, if any, is raised here), then read its total.
+  let _ = join h in
   channel_recv results;
 
 // 1 + 2 + ... + 100 = 5050

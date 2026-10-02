@@ -2,16 +2,16 @@
 //
 // One worker sends and then raises, another sends, and the main thread reads
 // both and works for a while, so the failure has happened before the program
-// ends -- a thread still running at exit has nothing to report, on any backend.
+// ends.
 // Nobody joins or detaches the one that failed.
 //
 // Until v0.1.586 the four backends gave three answers: C and LLVM ended the
 // process from the failing thread (exit 1 in some runs and 0 in others, stdout
 // sometimes cut), Wasm printed the failure and exited 0, the interpreter said
 // nothing. Now every backend gives the same one (Q-090): the exit status is the
-// main thread's, 0, and the failure nobody claimed is one line on stderr at exit:
+// main thread's, 0, and the failure is one line on stderr when it happens:
 //
-//   mere: thread 1 failed and was never joined: fail: boom
+//   mere: thread 1 failed: fail: boom
 //
 // scripts/thread_fail_check.sh runs it many times per backend.
 let c = channel_new () in

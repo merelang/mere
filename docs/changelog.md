@@ -4,6 +4,35 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.590 — 2026-10-03
+
+_What v0.1.586 left behind: `par_map` joins before it receives (a failing element hung every backend), a thread's failure is printed when it happens (a daemon never reached the exit that printed it), and C's closed channels fail catchably._
+
+v0.1.586 stopped a spawned thread's failure from ending the program. Three
+consequences of that surfaced afterwards:
+
+- **`par_map` hung.** It is lowered to a thread and a channel per element and
+  received without joining, so a failure in its function left the receive
+  waiting for a message nobody would send -- on all four backends, and in a real
+  program (mk). Every element's thread is now joined before its result is taken:
+  the failure is raised in the caller, where `try_or` takes it, and `par_map`
+  threads are no longer reported "never joined".
+- **A daemon's failures were silent.** The failure line of a thread nobody
+  joined or detached went out at exit, and a server whose handlers' handles are
+  dropped never exits. The line now goes out when the thread fails, whoever holds
+  the handle -- Rust's panic message, the same four-backend text:
+  `mere: thread 1 failed: fail: boom`. `join` still raises the failure again.
+- **C aborted on a closed channel.** `channel_recv` on a closed, empty channel
+  and `channel_send` on a closed one were `abort()` (exit 134, past every
+  `try_or`) where the interpreter fails catchably. They fail by name now.
+
+The fan-in examples join their workers before reading what they sent
+(`parallel_compute`, `parallel_channel`, `concurrent_loops`, `pubsub`), as the
+docs now advise. `scripts/thread_fail_check.sh` expects the new line and gains
+`par_map_fail` (four backends) with a poison that drops the join.
+
+---
+
 ## v0.1.589 — 2026-10-02
 
 _A recycled map keeps its block's real capacity; no out-of-memory fail while the region lock is held; the pin that keeps an arena for a suspended coroutine follows the pointers it finds and remembers who it is for; a signal's disposition, a refused write to stdout and socketpair(2), which no extern can reach._

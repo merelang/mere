@@ -15321,9 +15321,9 @@ let thread_runtime_llvm =
     [ (* v0.1.586 (Q-090, Q-055): the C backend's thread record (see
          __lang_thr there): { tid, n, state, claim, refs, told, msg, prev, next }.
          A handle is the record's address. The thread's failure is caught in the
-         trampoline and recorded; `join` raises it again, `detach` and the
-         thread's end print a detached one's line, the exit hook prints an
-         unclaimed one's -- each exactly once (`told`). *)
+         trampoline and recorded; `join` raises it again, and the thread's
+         end prints its line (v0.1.590: when it fails, whoever holds the
+         handle). The exit hook is the MERE_THREAD_REPORT leak report. *)
       "%__lang_thr = type { i64, i32, i32, i32, i32, i32, [256 x i8], ptr, ptr }";
       "@__lang_thr_mu = internal global [64 x i8] zeroinitializer, align 16";
       "@__lang_thr_head = internal global ptr null";
@@ -15331,8 +15331,7 @@ let thread_runtime_llvm =
       "@__lang_thr_seq = internal global i32 0";
       "@__lang_thr_hooked = internal global i32 0";
       "@.thr_fmt = private constant [30 x i8] c\"mere: thread %d failed%s: %s\\0A\\00\"";
-      "@.thr_never = private constant [22 x i8] c\" and was never joined\\00\"";
-      "@.thr_det = private constant [12 x i8] c\" (detached)\\00\"";
+      "@.thr_none = private constant [1 x i8] c\"\\00\"";
       "@.thr_env = private constant [19 x i8] c\"MERE_THREAD_REPORT\\00\"";
       "@.thr_hdr = private constant [56 x i8] c\"mere: %d thread(s) neither joined nor detached at exit\\0A\\00\"";
       "@.thr_died = private constant [37 x i8] c\"  thread %d: died: %s, never joined\\0A\\00\"";
@@ -15429,10 +15428,6 @@ let thread_runtime_llvm =
       "  %c1 = add i32 %c, 1";
       "  %sp = getelementptr %__lang_thr, ptr %t, i32 0, i32 2";
       "  %st = load i32, ptr %sp";
-      "  %dead = icmp eq i32 %st, 2";
-      "  br i1 %dead, label %ctell, label %cnext";
-      "ctell:";
-      "  call void @__lang_thr_tell(ptr %t, ptr @.thr_never)";
       "  br label %cnext";
       "cnext:";
       "  %tnp = getelementptr %__lang_thr, ptr %t, i32 0, i32 8";
@@ -15550,14 +15545,6 @@ let thread_runtime_llvm =
       "  %cp = getelementptr %__lang_thr, ptr %t, i32 0, i32 3";
       "  store i32 2, ptr %cp";
       "  call void @__lang_thr_unlink(ptr %t)";
-      "  %sp = getelementptr %__lang_thr, ptr %t, i32 0, i32 2";
-      "  %st = load i32, ptr %sp";
-      "  %dead = icmp eq i32 %st, 2";
-      "  br i1 %dead, label %tell, label %rel";
-      "tell:";
-      "  call void @__lang_thr_tell(ptr %t, ptr @.thr_det)";
-      "  br label %rel";
-      "rel:";
       "  call void @__lang_thr_release(ptr %t)";
       "  %ul = call i32 @pthread_mutex_unlock(ptr @__lang_thr_mu)";
       "  ret void";
@@ -15607,12 +15594,8 @@ let thread_runtime_llvm =
       "  %mp = getelementptr %__lang_thr, ptr %thr, i32 0, i32 6";
       "  %cpy = call ptr @memcpy(ptr %mp, ptr @__lang_fail_msg, i64 256)";
       "  store i32 2, ptr %sp";
-      "  %cp = getelementptr %__lang_thr, ptr %thr, i32 0, i32 3";
-      "  %claim = load i32, ptr %cp";
-      "  %det = icmp eq i32 %claim, 2";
-      "  br i1 %det, label %rec_tell, label %rec_done";
-      "rec_tell:";
-      "  call void @__lang_thr_tell(ptr %thr, ptr @.thr_det)";
+      (* v0.1.590: told when it fails, whoever holds the handle *)
+      "  call void @__lang_thr_tell(ptr %thr, ptr @.thr_none)";
       "  br label %rec_done";
       "rec_ok:";
       "  store i32 1, ptr %sp";

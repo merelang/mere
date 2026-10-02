@@ -907,15 +907,28 @@ let lower_par_map_expr (e : expr) : expr =
     | App ({ node = App ({ node = Var "par_map"; _ }, pf); _ }, pxs) ->
       let pf = lo pf and pxs = lo pxs in
       let fn = fresh "__pm_f" and xsn = fresh "__pm_xs" and xn = fresh "__pm_x"
-      and chn = fresh "__pm_ch" and cn = fresh "__pm_c" and un = fresh "__pm_u" in
+      and chn = fresh "__pm_ch" and cn = fresh "__pm_c" and un = fresh "__pm_u"
+      and hn = fresh "__pm_h" and pn = fresh "__pm_p" in
       let spawn_lambda =
         mk (Fun (un, None,
           app (app (var "channel_send") (var chn)) (app (var fn) (var xn)))) in
+      (* v0.1.590: each element is (its thread, its channel), and the thread is
+         JOINED before its result is received. Without the join, a failure in
+         `f` left the receiver waiting for a message nobody would send -- since
+         v0.1.586 a thread's failure no longer ends the program, so every backend
+         hung -- and every par_map thread was reported "never joined". The join
+         raises the element's failure in the caller, where try_or takes it. *)
       let inner_lambda =
         mk (Fun (xn, None,
           mk (Let (pvar chn, app (var "channel_new") (mk Unit_lit),
-            mk (Let (pwild, app (var "spawn") spawn_lambda, var chn)))))) in
-      let recv_lambda = mk (Fun (cn, None, app (var "channel_recv") (var cn))) in
+            mk (Let (pvar hn, app (var "spawn") spawn_lambda,
+              mk (Tuple [ var hn; var chn ]))))))) in
+      let recv_lambda =
+        mk (Fun (pn, None,
+          mk (Match (var pn,
+            [ ({ ploc = Loc.dummy; pnode = P_tuple [ pvar hn; pvar cn ] }, None,
+               mk (Let (pwild, app (var "join") (var hn),
+                 app (var "channel_recv") (var cn)))) ])))) in
       let inner_map = app (app (var "list_map") (var xsn)) inner_lambda in
       let outer_map = app (app (var "list_map") inner_map) recv_lambda in
       mk (Let (pvar fn, pf, mk (Let (pvar xsn, pxs, outer_map))))

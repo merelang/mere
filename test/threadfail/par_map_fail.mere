@@ -1,0 +1,12 @@
+// scripts/thread_fail_check.sh: par_map's function fails on one element. par_map
+// is lowered to a thread per element and a channel each, and until v0.1.590 it
+// received without joining -- since v0.1.586 a thread's failure does not end the
+// program, so the receive waited for good, on every backend. It joins first now,
+// and the failure is raised in the caller: exit 1, `fail: boom`.
+let g = fn (x: int) -> x * 10;
+let f = fn (x: int) -> if x == 2 then fail "boom" else x * 10;
+let xs = Cons (1, Cons (2, Cons (3, Nil)));
+let ok = par_map g xs;
+let _ = print (str_of_int (list_len ok));
+let ys = par_map f xs;
+print (str_of_int (list_len ys))

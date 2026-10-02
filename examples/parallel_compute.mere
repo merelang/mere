@@ -29,10 +29,17 @@ let rec partial = fn count ->
 let results = channel_new () in
 // Fan out: four workers, each on its own thread. They share `results` and
 // `partial` (both Sync), so nothing is moved.
-let _ = spawn (fn u -> channel_send results (partial 10)) in
-let _ = spawn (fn u -> channel_send results (partial 10)) in
-let _ = spawn (fn u -> channel_send results (partial 10)) in
-let _ = spawn (fn u -> channel_send results (partial 10)) in
+let h1 = spawn (fn u -> channel_send results (partial 10)) in
+let h2 = spawn (fn u -> channel_send results (partial 10)) in
+let h3 = spawn (fn u -> channel_send results (partial 10)) in
+let h4 = spawn (fn u -> channel_send results (partial 10)) in
+// Join before receiving: a worker that failed would otherwise leave the
+// receives below waiting for a message it will never send (since v0.1.586 a
+// thread's failure does not end the program). Joined, it is raised here.
+let _ = join h1 in
+let _ = join h2 in
+let _ = join h3 in
+let _ = join h4 in
 // Fan in: collect the four partials and combine.
 let r1 = channel_recv results in
 let r2 = channel_recv results in

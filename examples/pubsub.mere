@@ -66,10 +66,12 @@ let demo = fn () ->
   let _ = channel_send inbox (Pub (1, 20)) in
   let _ = channel_send inbox Stop in
 
-  let t0 = channel_recv r0 in
-  let t1 = channel_recv r1 in
+  // join the subscribers before reading their totals: one that failed would
+  // otherwise leave the read waiting for good (v0.1.586); joined, it is raised
   let _ = join s0 in
   let _ = join s1 in
+  let t0 = channel_recv r0 in
+  let t1 = channel_recv r1 in
   let _ = channel_close inbox in
   let _ = join bh in
   print ("topic0=" ++ str_of_int t0 ++ " topic1=" ++ str_of_int t1) in

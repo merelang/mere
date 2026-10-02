@@ -1,7 +1,8 @@
 // scripts/thread_fail_check.sh: a detached thread's failure is one line on stderr
 // and the program carries on (v0.1.586): mhttpd and mengd lost the whole daemon
 // to one handler's failure. The thread says it is about to fail, and the main
-// thread then works for a while, so the failure lands before the program ends.
+// thread then works for a while, so the failure lands before the program ends (a detached thread still running
+// at exit is simply ended with the process).
 let c = channel_new () in
 let h = spawn (fn () -> let _ = channel_send c 1 in let _ = fail "boom" in ()) in
 let _ = detach h in
