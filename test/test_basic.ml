@@ -2550,6 +2550,15 @@ let () =
     (Pipeline.process
        "let f = fn (s: str) -> match s with | \"ab\" <> r when str_len r > 1 -> r | _ -> \"short\" in f \"abcd\"")
     "\"cd\"";
+  (* v0.1.587 (Q-154): a comment at the end of a constructor's line comes back
+     after that constructor; a type without one stays on one line *)
+  check "v0.1.587: constructor lines keep their comments"
+    (Pipeline.format_source
+       "type Shape =\n  | Circle of float  // radius\n  | Dot;\nprint_int 1")
+    "type Shape =\n  | Circle of float  // radius\n  | Dot;\n\nprint_int 1\n";
+  check "v0.1.587: a type with no constructor comments stays on one line"
+    (Pipeline.format_source "type Shape =\n  | Circle of float\n  | Dot;\nprint_int 1")
+    "type Shape = Circle of float | Dot;\n\nprint_int 1\n";
   (* v0.1.519 (Q-154): the comment at the end of a match arm and of an `else if`
      head. ⚠ Not the LAST arm and not the final `else`: what follows those on
      the line -- the `;` that ends the declaration -- is appended by the caller,

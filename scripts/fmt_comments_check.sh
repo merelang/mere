@@ -180,7 +180,16 @@ fmt_known_skips="${FMT_KNOWN_SKIPS-brackets_balance list_lib template_engine}"
 # reaches standing in for an end position). Left: variant lines in a `type`
 # (no positions at all), `let ... in`, list literals reflowed across `,`,
 # nested if/else -- and the `//` inside strings.
-LOST_CEILING="${LOST_CEILING:-43}"
+# 43 -> 26 at v0.1.587: a type written one constructor per line keeps the
+# comment at the end of a constructor's line (the parser records the lines now).
+# And the count stopped counting `//` inside a string literal: a line is a
+# comment line when `//` is left on it AFTER its string literals are removed
+# (comment_lines below), so `"http://"` is not a comment on either side.
+LOST_CEILING="${LOST_CEILING:-26}"
+# lines that carry a comment: `//` outside a string literal
+comment_lines() {
+  perl -ne 's/"(?:\\.|[^"\\])*"//g; $c++ if m{//}; END { print $c + 0 }' "$1" 2>/dev/null || echo 0
+}
 FILE_FLOOR="${FILE_FLOOR:-280}"
 all_in=0; all_out=0; measured=0; unresolved=0; unexpected=""; stale_skip=""
 for f in "$ROOT"/examples/*.mere; do
@@ -188,8 +197,8 @@ for f in "$ROOT"/examples/*.mere; do
   if "$MERE" fmt "$f" > "$tmp/f.out" 2>"$tmp/f.err"; then
     case " $fmt_known_skips " in *" $n "*) stale_skip="$stale_skip $n" ;; esac
     measured=$((measured + 1))
-    all_in=$((all_in + $(grep -c '//' "$f" 2>/dev/null || true)))
-    all_out=$((all_out + $(grep -c '//' "$tmp/f.out" 2>/dev/null || true)))
+    all_in=$((all_in + $(comment_lines "$f")))
+    all_out=$((all_out + $(comment_lines "$tmp/f.out")))
   elif grep -q 'cannot resolve path' "$tmp/f.err" 2>/dev/null; then
     unresolved=$((unresolved + 1))
   else

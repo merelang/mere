@@ -8582,6 +8582,11 @@ let bytes_runtime_wasm = {|
     (local $n i32) (local $b i32) (local $i i32)
     (local $s i32)
     (local.set $s (i32.wrap_i64 (local.get $s8)))
+    ;; v0.1.587 (Q-117): a view while no region block is open -- a str and a
+    ;; bytes are the same four-byte length and the data, and neither changes
+    ;; (the C backend's __lang_bytes_of_str says why only then)
+    (if (i32.eqz (global.get $__lang_region_depth))
+      (then (return (i64.extend_i32_s (i32.sub (local.get $s) (i32.const 4))))))
     (local.set $n (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
     (local.set $b (i32.wrap_i64 (call $__lang_bytes_alloc (i64.extend_i32_s (local.get $n)))))
     (local.set $i (i32.const 0))

@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.587 — 2026-10-02
+
+_`mere fmt` keeps the comment at the end of a constructor's line (lost comment lines 43 -> 26), and `bytes_of_str` is a view instead of a copy while no region block is open (Q-117)._
+
+**fmt (Q-154).** A type written one constructor per line was printed on one line,
+and the comment at the end of a constructor's line had nowhere to go: a `Top_type`
+carries no positions. The parser now records the line of each constructor, and a
+type with a comment on one of them is printed one constructor per line with the
+comments back; every other type prints exactly as before. The gate's count also
+stopped counting `//` inside a string literal (`"http://"`): a line is a comment
+line when `//` is left on it after its string literals are removed.
+`scripts/fmt_comments_check.sh`: 7,527 comment lines in the examples, 26 lost
+(ceiling 43 -> 26; 29 by the old count).
+
+**bytes_of_str (Q-117).** A `str` and a `bytes` have the same layout on every
+compiled backend -- the length, then the data -- and neither can change, so the
+str's own memory is the bytes. A line tool that handed each line to a SIMD load
+(which takes `bytes`) copied every line to do it: 2,000,000 calls on a 200-byte
+line peaked at 417 MB on C, and take 1.4 MB as a view. Only while no `region`
+block is open: inside one the str may be the block's and the bytes may be
+returned out of it, so it is copied into the current region as before.
+`test/parity/bytes_of_str_view.mere` holds both (202 parity programs).
+
+---
+
 ## v0.1.586 — 2026-10-02
 
 _A spawned thread's failure has one meaning on all four backends (Q-090): `join` raises it again, a detached one is a line on stderr, an unclaimed one is a line at exit, and the exit status is the main thread's. C reports leaked threads too (Q-055)._

@@ -2746,4 +2746,5 @@ let format_source ?(base_dir = Sys.getcwd ()) ?(search_paths = []) source =
        splice instead of printing the imported declarations as this file's. *)
     ~imports:(List.rev !Parser.entry_imports)
     ~decl_line
+    ~ctor_lines:(fun l -> List.assoc_opt l !Parser.declared_ctor_lines)
     { prog with Ast.decls = drop n_prelude prog.Ast.decls }
