@@ -2381,6 +2381,25 @@ let () =
     (string_of_int (collide_warnings "let div = fn (a: int) -> a;\ndiv 3")) "0";
   check "v0.1.538: `type wait` still is"
     (string_of_int (collide_warnings "type wait = W of int | N;\n1")) "1";
+  (* v0.1.602: a top-level name defined twice is warned about; a definition
+     after its `let fn` promise, and a program's own definition of a name the
+     prelude has, are not *)
+  let redef_warnings src =
+    ignore (Pipeline.take_warnings ());
+    (try ignore (Pipeline.process src) with _ -> ());
+    List.length (List.filter (fun (_, m, _) -> has m "is defined again at the top level")
+                   (Pipeline.take_warnings ())) in
+  check "v0.1.602: a top-level name defined twice is warned about"
+    (string_of_int (redef_warnings
+       "let f = fn (x: int) -> x;\nlet g = fn (x: int) -> f x;\nlet f = fn (x: int) -> x + 1;\nf (g 1)")) "1";
+  check "v0.1.602: and in a let rec group"
+    (string_of_int (redef_warnings
+       "let f = fn (x: int) -> x;\nlet rec f = fn (x: int) -> if x == 0 then 0 else f (x - 1)\nand h = fn (x: int) -> x;\nf (h 1)")) "1";
+  check "v0.1.602: not a definition after its promise"
+    (string_of_int (redef_warnings
+       "let fn f: int -> int;\nlet g = fn (x: int) -> f x;\nlet f = fn (x: int) -> x;\ng 1")) "0";
+  check "v0.1.602: not the program's own version of a prelude name"
+    (string_of_int (redef_warnings "let list_len = fn (x: int) -> x;\nlist_len 1")) "0";
   (* v0.1.538 (Q-088): OCaml's signal encoding, in the system's numbering *)
   check "Q-088: SIGKILL and SIGTERM in the system's numbers"
     (Printf.sprintf "%d %d" (Eval.os_signal_number Sys.sigkill) (Eval.os_signal_number Sys.sigterm)) "9 15";

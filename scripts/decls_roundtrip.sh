@@ -47,6 +47,16 @@ norm() {  # a diagnostic names the file and the line, and the round-trip file is
           # program that names its own positions cannot be invariant under
           # prepending text to it; the position is normalised here exactly like
           # a diagnostic's, and the value it echoes still has to match.
+  #
+  # v0.1.602: and a WARNING is about the text, not about what the program does
+  # -- a top-level name defined twice is named with the line it was first on,
+  # and its code frame shows the lines around it, which the declarations on top
+  # change. A warning block (its message, its `-->` line, its frame and its
+  # `=` notes) is left out; an error's is still compared.
+  LC_ALL=C awk '
+    /^warning: / { w = 1; next }
+    w && (/^ +-->/ || /^ *[0-9]* *\|/ || /^ +=/) { next }
+    { w = 0; print }' |
   LC_ALL=C sed -E 's|[^ ]*parity/[A-Za-z_0-9]+\.mere|F|g; s/:[0-9]+:[0-9]+/:L:C/g; s/^ *[0-9]+ \|/N |/; s/^line [0-9]+: /line L: /'
 }
 ok=0; bad=0; skip=0; failures=''
