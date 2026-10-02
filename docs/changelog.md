@@ -4,6 +4,38 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.591 — 2026-10-03
+
+_A function whose result is a free type, used at two types, is instantiated at both: the C build of such a program no longer fails in clang._
+
+`raise_exc = fn (msg: str) -> fail msg` has type `str -> 'a`. Used for its
+value at `v` by one caller, it was resolved at `v`; called from a function whose
+own result is thrown away (so its type variable is erased to `int`), that call
+named the same `v` instance, and clang refused the C: "returning 'v' from a
+function with result type 'long long'". Seven lines reproduce it, and mere-ruby
+meets it as soon as its giant `let rec` groups are split. The recovery pass that
+already handles residual uses of multi-instantiated functions now also handles a
+function resolved at one type whose residual use agrees on every parameter and
+differs only in the result: it becomes multi-instantiated, and each call names
+the instance for its own type. A residual variable in a PARAMETER position is
+left alone -- erased to `int` it would name an instance whose closure parameter
+does not match (contrib raster's comparators showed it).
+
+The same pass now reads an index of the emitted bodies -- each name's uses and
+its live references, filed per body in the order the walk visited them --
+instead of walking all of them once per function per round (the new check would
+have made mere-ruby's `-c` 75 s, and a 16,000-member group 12 s). Every `.mere` in the repository and downstream emits byte-identical
+output on all five emitters (5,110 comparisons);
+`test/parity/fail/result_free_two_types.mere` holds the new case (it fails on
+purpose: 3, then `fail: 500`).
+
+
+`scripts/procsig_check.sh` (v0.1.589) failed on CI only: a CI runner starts its
+steps with SIGPIPE ignored, and a shell cannot undo a disposition it was started
+with, so the scenes that need nothing inherited were the inherited one. They
+put the default back with perl first.
+---
+
 ## v0.1.590 — 2026-10-03
 
 _What v0.1.586 left behind: `par_map` joins before it receives (a failing element hung every backend), a thread's failure is printed when it happens (a daemon never reached the exit that printed it), and C's closed channels fail catchably._
