@@ -58,6 +58,32 @@ with open(sys.argv[3], 'w') as f:
         for i in range(n):
             f.write(f'let f{i} = fn (x: int) -> x + {i};\n')
         f.write('let _ = print_int (f0 1);\n')
+    elif shape == 'maps':
+        # v0.1.594: top-level containers used at the end. The environment of the
+        # top-level chain was an association list, walked from the end of the
+        # program for every name: 8,000 of these took 5 s to check.
+        for i in range(n):
+            f.write(f'let g{i} = map_new ();\n')
+        f.write('let _ = ' + ' '.join(f'let _ = map_set g{i} \"k\" {i} in' for i in range(n)))
+        f.write(' print_int (map_len g0);\n')
+    elif shape == 'poly':
+        # v0.1.594: polymorphic helpers each used at two types. The C backend's
+        # instantiation fixpoint visited every spec of every helper per helper.
+        for i in range(n // 2):
+            f.write(f'let rec plen{i} = fn xs -> (match xs with | Nil -> 0 | Cons (_, r) -> 1 + plen{i} r);\n')
+            f.write(f'let u{i} = plen{i} (Cons ({i}, Nil)) + plen{i} (Cons (\"s\", Nil));\n')
+        f.write('let _ = print_int u0;\n')
+    elif shape == 'inner':
+        # v0.1.594: an inner let rec per function. Lifting each one turned every
+        # top-level name into a set again.
+        for i in range(n):
+            f.write(f'let f{i} = fn (x: int) -> let rec go = fn (k: int) -> if k <= 0 then x else go (k - 1) in go x;\n')
+        f.write('let _ = print_int (f0 1);\n')
+    elif shape == 'chain':
+        # v0.1.594: one long + chain, as generated code writes. Its left spine
+        # was collected by appending each link to the list of the ones below it.
+        f.write('let x = 1;\n')
+        f.write('let _ = print_int (' + ' + '.join('x' for _ in range(n)) + ');\n')
     else:
         f.write('let base = 7;\n')
         f.write('let rec g0 = fn (x: int) -> x + base\n')
@@ -111,5 +137,10 @@ check_shape independent -t
 check_shape independent check
 check_shape group -t
 check_shape group -c
+check_shape maps check
+check_shape maps -c
+check_shape poly -c
+check_shape inner -c
+check_shape chain -c
 
 if [ "$failed" = 0 ]; then echo 'infer_scaling: ok'; else exit 1; fi

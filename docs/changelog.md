@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.594 — 2026-10-03
+
+_Five more places where building a program took time quadratic in its size are linear: mere-ruby's `-c` is 3.8 s (was 7.3) and its `check` 1.4 s (was 1.8), and every output is the same bytes._
+
+Each was found by a program of one repeated shape, 2,000 and 16,000 times over;
+`scripts/infer_scaling.sh` now measures all five, and v0.1.593 fails each of them
+(42-85x for 8x the program).
+
+- **The top-level environment** (`check` and every emitter). A program is a chain
+  of `let`s, and the environment at the thousandth one is a list a thousand long:
+  every name bound early was found by walking past everything bound since. 16,000
+  top-level `let g = map_new ()` took 17.9 s to check and 24 s to emit C. The type checker and the
+  move checker now keep that chain as a persistent map, extended by each
+  top-level `let` for its body (`Env_index.extend`) and moved along by the
+  declaration loop (`Env_index.track`); a lookup walks only the bindings in front
+  of it. `check` 0.38 s.
+- **The C emitter's variables in scope** were the same list again; a map now.
+  `-c` 0.59 s.
+- **Instantiating polymorphic helpers.** Asking where a helper is used visited
+  every instance of every multi-instantiated function; the instances' uses are
+  filed by name, read back in the order the old walk produced them, which is the
+  order that decides which instance the C lists first. 8,000 helpers used at two
+  types: 43 s → 1.2 s.
+- **Lifting inner functions.** Each lift turned every top-level name into a set
+  again (94 s for 16,000 functions with an inner `let rec`); the set is kept. 1.2 s.
+- **A long operator chain**, as generated code writes one: its left spine was
+  collected by appending each link to the ones below it. 16,000 links: 1.6 → 0.08 s.
+
+The C, LLVM, Wasm, RISC-V and `-t` output of 1,022 programs (test/, examples/,
+the downstream programs) and mere-ruby's C are byte-identical to v0.1.593's.
+
+---
+
 ## v0.1.593 — 2026-10-03
 
 _Three walks in the C emitter that were quadratic in the program are linear: mere-ruby's emit is 6.6 s (was 7.8), and the C it emits is the same bytes._

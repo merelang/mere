@@ -1152,6 +1152,13 @@ let instance_of (tbl : inst_table) (n : string) (use_ty : Ast.ty option)
        | _ -> None)
     | None -> None
 
+type spec_use = {
+  su_key : string;
+  su_body : Ast.expr;
+  su_uses : Ast.expr list;
+  mutable su_live : bool;
+}
+
 let resolve_fn_types ?(mangle = mangled_inst_name) ?(recover_erased = false)
     (skels : fn_skel list) (root : Ast.expr)
   : fn_decl list * inst_table =
@@ -1237,21 +1244,63 @@ let resolve_fn_types ?(mangle = mangled_inst_name) ?(recover_erased = false)
       Hashtbl.replace owners n (i :: (try Hashtbl.find owners n with Not_found -> [])))
       skel_occ.(i)
   done;
-  let spec_occ : (string, (Ast.expr * occ_index) list) Hashtbl.t = Hashtbl.create 16 in
-  let occ_of_spec key body =
-    let known = try Hashtbl.find spec_occ key with Not_found -> [] in
-    match List.assq_opt body known with
-    | Some ix -> ix
-    | None ->
-      let ix = occ_index body in
-      Hashtbl.replace spec_occ key ((body, ix) :: known); ix
+  (* v0.1.594: a spec body's uses, filed under every name it uses, so asking a
+     name visits only the spec bodies that hold it -- not every spec of every
+     multi-instantiated fn, which was quadratic in a program with many
+     polymorphic helpers used at two types (4,000 of them: 7.8 s). The answer
+     keeps the order the walk over `Hashtbl.fold multi_specs` gave: that order
+     reaches the C, through which arrow is seen first. *)
+  let spec_uses : (string, spec_use list) Hashtbl.t = Hashtbl.create 1024 in
+  let ms_dirty = ref true in
+  let ms_rank : (string, int) Hashtbl.t = Hashtbl.create 16 in
+  let set_specs ~add key specs =
+    let old = try Hashtbl.find multi_specs key with Not_found -> [] in
+    List.iter (fun (_, body) ->
+      if not (List.exists (fun (_, b) -> b == body) specs) then
+        List.iter (fun n ->
+          List.iter (fun u -> if u.su_body == body then u.su_live <- false)
+            (try Hashtbl.find spec_uses n with Not_found -> []))
+          (Hashtbl.fold (fun n _ acc -> n :: acc) (occ_index body) [])) old;
+    List.iter (fun (_, body) ->
+      if not (List.exists (fun (_, b) -> b == body) old) then
+        Hashtbl.iter (fun n uses ->
+          let u = { su_key = key; su_body = body; su_uses = uses; su_live = true } in
+          Hashtbl.replace spec_uses n (u :: (try Hashtbl.find spec_uses n with Not_found -> [])))
+          (occ_index body)) specs;
+    if add then Hashtbl.add multi_specs key specs
+    else Hashtbl.replace multi_specs key specs;
+    ms_dirty := true
+  in
+  let rank key =
+    if !ms_dirty then begin
+      Hashtbl.reset ms_rank;
+      let i = ref 0 in
+      Hashtbl.iter (fun k _ -> Hashtbl.replace ms_rank k !i; incr i) multi_specs;
+      ms_dirty := false
+    end;
+    Hashtbl.find ms_rank key
+  in
+  let spec_index u =
+    let rec go i = function
+      | [] -> -1
+      | (_, b) :: r -> if b == u.su_body then i else go (i + 1) r in
+    go 0 (Hashtbl.find multi_specs u.su_key)
+  in
+  let uses_in_specs name =
+    match List.filter (fun u -> u.su_live)
+            (try Hashtbl.find spec_uses name with Not_found -> []) with
+    | [] -> []
+    | [u] -> [u.su_uses]
+    | us ->
+      (* the fold listed keys in table order and each key's specs in list
+         order, consing as it went: later key first, later spec first *)
+      List.map (fun u -> ((rank u.su_key, spec_index u), u)) us
+      |> List.stable_sort (fun (a, _) (b, _) -> compare b a)
+      |> List.map (fun (_, u) -> u.su_uses)
   in
   let uses_in_program name =
     occ_uses root_occ name
-    :: (Hashtbl.fold (fun key specs acc ->
-          List.fold_left (fun acc (_, body) -> (key, body) :: acc) acc specs
-        ) multi_specs []
-        |> List.map (fun (key, body) -> occ_uses (occ_of_spec key body) name))
+    :: uses_in_specs name
     @ List.filter_map (fun i ->
         if Hashtbl.mem resolved skel_arr.(i).sname
         then Some (occ_uses skel_occ.(i) name) else None)
@@ -1292,7 +1341,7 @@ let resolve_fn_types ?(mangle = mangled_inst_name) ?(recover_erased = false)
           Hashtbl.remove resolved s.sname;
           let arrows = cur :: extra in
           Hashtbl.replace multi_inst_fns s.sname arrows;
-          Hashtbl.replace multi_specs s.sname
+          set_specs ~add:false s.sname
             (List.map (fun a -> make_spec a s) arrows);
           progress := true
         end
@@ -1314,7 +1363,7 @@ let resolve_fn_types ?(mangle = mangled_inst_name) ?(recover_erased = false)
         in
         if new_arrows <> [] then begin
           let new_specs = List.map (fun a -> make_spec a s) new_arrows in
-          Hashtbl.replace multi_specs s.sname (existing @ new_specs);
+          set_specs ~add:false s.sname (existing @ new_specs);
           (* multi_inst_fns is used by emit_expr to pick mangled name;
              keep the arrow list in sync. *)
           Hashtbl.replace multi_inst_fns s.sname (existing_arrows @ new_arrows);
@@ -1335,7 +1384,7 @@ let resolve_fn_types ?(mangle = mangled_inst_name) ?(recover_erased = false)
             if List.length all > 1 then begin
               Hashtbl.add multi_inst_fns s.sname all;
               let specs = List.map (fun arrow -> make_spec arrow s) all in
-              Hashtbl.add multi_specs s.sname specs;
+              set_specs ~add:true s.sname specs;
               progress := true
             end else begin
               (try Typer.unify Loc.dummy (erase_container_regions fun_ty) (List.hd all) with _ -> ());

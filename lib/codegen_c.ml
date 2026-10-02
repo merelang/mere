@@ -854,7 +854,18 @@ let current_expected_ty : Ast.ty option ref = ref None
    let-poly generalization. Updated by emit_fn / emit_lifted_fn /
    emit_closure_adapter (binding the fn's param + any captures) and by
    emit_expr Let (binding the let's name). *)
-let current_var_types : (string * Ast.ty) list ref = ref []
+(* v0.1.594: a map. It was an association list, and the main program's chain
+   of top-level `let`s pushes one entry per binding, so every name asked about
+   in the thousandth binding walked a thousand entries (16,000 top-level
+   containers took 9 s to emit). Only ever asked "is it bound" and "at what
+   type", the innermost binding first -- which is what [VtMap.add] keeps. *)
+module VtMap = Map.Make (String)
+
+(* [bindings @ env], innermost first *)
+let vt_prepend (bindings : (string * Ast.ty) list) (env : Ast.ty VtMap.t) =
+  List.fold_right (fun (n, t) m -> VtMap.add n t m) bindings env
+
+let current_var_types : Ast.ty VtMap.t ref = ref VtMap.empty
 
 (* Q-029: a self tail call becomes a loop on the C backend.
    `while cond do body` desugars in the parser to a tail-recursive `let rec`,
@@ -919,7 +930,7 @@ let self_tail_goto (callee : string) (args_c : string list) : string option =
    shadow a builtin are unaffected. Mirrors the older per-builtin guards on
    `join` / `is_digit` / `is_alpha` / `is_space`. *)
 let user_shadows name =
-  List.mem_assoc name !current_var_types
+  VtMap.mem name !current_var_types
   || List.mem_assoc name !current_env_subst
   || Hashtbl.mem inner_lifts name
   || toplevel_binds_here name
@@ -1197,7 +1208,10 @@ module FvSet = Set.Make (String)
 (* v0.1.593: the bound names are a set. They were a list searched at every
    variable, and lifting an inner fn passes every top-level name as bound --
    about 9,000 in mere-ruby, so each variable cost a walk of 9,000 strings. *)
-let free_vars (e : Ast.expr) (initially_bound : string list) : string list =
+let rec free_vars (e : Ast.expr) (initially_bound : string list) : string list =
+  free_vars_of_set e (FvSet.of_list initially_bound)
+
+and free_vars_of_set (e : Ast.expr) (initially_bound : FvSet.t) : string list =
   let seen = Hashtbl.create 8 in
   let order = ref [] in
   let add n =
@@ -1243,7 +1257,7 @@ let free_vars (e : Ast.expr) (initially_bound : string list) : string list =
     | Ast.Record_update (a, fs) ->
       go a bound; List.iter (fun (_, e) -> go e bound) fs
   in
-  go e (FvSet.of_list initially_bound);
+  go e initially_bound;
   List.rev !order
 
 (* Phase 38.G-1 (DEFERRED §1.3 Level 1): static auto-Drop check for OwnedVec.
@@ -1648,13 +1662,15 @@ let rec bin_may_effect (e : Ast.expr) : bool =
   | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _) -> bin_may_effect a
   | _ -> true
 
-let rec bin_spine (e : Ast.expr)
+(* v0.1.594: collected from the outside in, so a chain of n links costs n and
+   not n^2 (each link appended to the list of the ones below it) *)
+let bin_spine (e : Ast.expr)
   : Ast.expr * (Ast.binop * Ast.expr * Ast.expr) list =
-  match e.Ast.node with
-  | Ast.Bin (op, a, b) ->
-    let (leftmost, links) = bin_spine a in
-    (leftmost, links @ [(op, b, e)])
-  | _ -> (e, [])
+  let rec go acc (e : Ast.expr) =
+    match e.Ast.node with
+    | Ast.Bin (op, a, b) -> go ((op, b, e) :: acc) a
+    | _ -> (e, acc) in
+  go [] e
 
 (* Two independent reasons to sequence, and a chain needs only one of them.
 
@@ -1810,7 +1826,7 @@ let rec emit_expr (e : Ast.expr) : string =
        Otherwise template_engine's `let len = str_len template in` would
        trip the "len as a value" guard below. *)
     let is_shadowed =
-      List.mem_assoc name !current_var_types
+      VtMap.mem name !current_var_types
       || List.mem_assoc name !current_env_subst
     in
     (* Vec builtins are interpreter-only (Phase 12.1). Reject early in
@@ -1964,7 +1980,7 @@ let rec emit_expr (e : Ast.expr) : string =
           emit the local (the C parameter / local), NOT the global's
           `<name>_as_value`. Without this, e.g. the prelude `list_fold`'s
           parameter `f` resolved to a user top-level `let f`. *)
-       if List.mem_assoc name !current_var_types then c_safe_name name
+       if VtMap.mem name !current_var_types then c_safe_name name
        else if Hashtbl.mem toplevel_fn_names name then
          (* v0.1.173: a polymorphic fn used at more than one type is emitted
             once per instantiation under a mangled name, and `_as_value`
@@ -2278,7 +2294,7 @@ let rec emit_expr (e : Ast.expr) : string =
            let value_c = emit_expr value in
            let bind_ty =
              match value.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt in
-           current_var_types := (name, bind_ty) :: !current_var_types;
+           current_var_types := VtMap.add name bind_ty !current_var_types;
            current_env_subst :=
              List.filter (fun (n, _) -> n <> name) !current_env_subst;
            Hashtbl.replace bound name ();
@@ -2344,7 +2360,7 @@ let rec emit_expr (e : Ast.expr) : string =
        in
        let prev_types = !current_var_types in
        let prev_subst = !current_env_subst in
-       current_var_types := (name, bind_ty) :: prev_types;
+       current_var_types := VtMap.add name bind_ty prev_types;
        current_env_subst := List.filter (fun (n, _) -> n <> name) prev_subst;
        let body_c =
          c_tail_pos := __in_tail;
@@ -2465,9 +2481,9 @@ let rec emit_expr (e : Ast.expr) : string =
        let prev_types = !current_var_types in
        let prev_subst = !current_env_subst in
        current_var_types :=
-         List.filter_map (fun (n_opt, ty, _) ->
+         vt_prepend (List.filter_map (fun (n_opt, ty, _) ->
            match n_opt with Some n -> Some (n, ty) | None -> None)
-           bindings_info @ prev_types;
+           bindings_info) prev_types;
        current_env_subst :=
          List.filter (fun (n, _) -> not (List.mem n shadow_names)) prev_subst;
        let body_c =
@@ -2666,7 +2682,7 @@ let rec emit_expr (e : Ast.expr) : string =
     let seen = Hashtbl.create 8 in
     let fvs =
       List.filter (fun n ->
-        (List.mem_assoc n !current_var_types || is_region_cap n)
+        (VtMap.mem n !current_var_types || is_region_cap n)
         && not (Hashtbl.mem seen n)
         && (Hashtbl.add seen n (); true))
         (raw_fvs @ lifted_callee_caps)
@@ -2679,7 +2695,7 @@ let rec emit_expr (e : Ast.expr) : string =
         Ast.TyRef (Ast.BorrowedRead,
                    String.sub fv 9 (String.length fv - 9), Ast.TyUnit)
       else
-        match List.assoc_opt fv !current_var_types with
+        match VtMap.find_opt fv !current_var_types with
         | Some t when ty_is_concrete t -> Ast.walk t
         | _ -> lookup_var_ty fn_body fv
     in
@@ -2810,7 +2826,7 @@ let rec emit_expr (e : Ast.expr) : string =
                  | Some info -> List.length args = List.length info.d_params
                  | None -> false)
                 && not (Hashtbl.mem inner_lifts n)
-                && not (List.mem_assoc n !current_var_types)
+                && not (VtMap.mem n !current_var_types)
                 && not (List.mem_assoc n !current_env_subst) ->
            Some (c_safe_name ename, n, head, args)
          | _ -> None)
@@ -2833,7 +2849,7 @@ let rec emit_expr (e : Ast.expr) : string =
               | Some li -> li.direct_arity >= 2
                            && List.length args = li.direct_arity
               | None -> false)
-             && not (List.mem_assoc n !current_var_types)
+             && not (VtMap.mem n !current_var_types)
              && not (List.mem_assoc n !current_env_subst) ->
         Some (n, head, args)
       | _ -> None
@@ -2937,7 +2953,7 @@ let rec emit_expr (e : Ast.expr) : string =
          | Ast.App (g, a) when
              (match g.Ast.node with
               | Ast.Var n ->
-                (List.mem_assoc n !current_var_types
+                (VtMap.mem n !current_var_types
                  || List.mem_assoc n !current_env_subst)
                 && not (Hashtbl.mem inner_lifts n)
               (* v0.1.482: a head that is not a NAME is already a value
@@ -3023,7 +3039,7 @@ let rec emit_expr (e : Ast.expr) : string =
     let emit_user_call name =
       if Hashtbl.mem inner_lifts name then emit_inner_lift_call name
       else if Hashtbl.mem toplevel_fn_names name
-              && not (List.mem_assoc name !current_var_types)
+              && not (VtMap.mem name !current_var_types)
               && not (List.mem_assoc name !current_env_subst)
       then emit_toplevel_call name
       else emit_closure_call ()
@@ -3169,7 +3185,7 @@ let rec emit_expr (e : Ast.expr) : string =
         locally / lifted / at top level, fall through to the ordinary-call
         cases below instead of emitting pthread_join. *)
      | Ast.Var "join" when
-         not (List.mem_assoc "join" !current_var_types
+         not (VtMap.mem "join" !current_var_types
               || List.mem_assoc "join" !current_env_subst
               || Hashtbl.mem inner_lifts "join"
               || Hashtbl.mem toplevel_fn_names "join") ->
@@ -4827,7 +4843,7 @@ let rec emit_expr (e : Ast.expr) : string =
         let pat_bindings = pattern_vars_with_types pat scrut_ty in
         let with_pat f =
           let prev = !current_var_types in
-          current_var_types := pat_bindings @ prev;
+          current_var_types := vt_prepend pat_bindings prev;
           let r = try f () with ex -> current_var_types := prev; raise ex in
           current_var_types := prev;
           r
@@ -5505,7 +5521,7 @@ let with_expected_ty (t : Ast.ty) (f : unit -> 'a) : 'a =
 
 let with_var_types (bindings : (string * Ast.ty) list) (f : unit -> 'a) : 'a =
   let prev = !current_var_types in
-  current_var_types := bindings @ prev;
+  current_var_types := vt_prepend bindings prev;
   let r = try f () with ex -> current_var_types := prev; raise ex in
   current_var_types := prev;
   r
@@ -12974,7 +12990,10 @@ let lift_inner_fns
      client-side FFI (tcp_connect + tcp_write) was driven from a helper. *)
   let builtin_names = List.map fst Typer.initial_env in
   let extern_names = Hashtbl.fold (fun k _ acc -> k :: acc) extern_fn_decls [] in
-  let known = ref (toplevel_names @ builtin_names @ extern_names) in
+  (* v0.1.594: a set. Each lift subtracted the host's locals from it and handed
+     the rest to free_vars as a list, which made a set of it again: every
+     top-level name, once per inner fn. *)
+  let known = ref (FvSet.of_list (toplevel_names @ builtin_names @ extern_names)) in
   (* Q-131: WHICH REGION BLOCKS THIS FUNCTION IS WRITTEN INSIDE. Pushed and popped by
      the walk below, which is single-threaded, so a ref is the whole mechanism -- and it
      avoids threading a tenth argument through a twenty-case traversal. *)
@@ -13012,9 +13031,9 @@ let lift_inner_fns
        shadowed by a local `let` in the host fn (e.g., `let len = ...`)
        are NOT excluded from free_vars — they should be captured. *)
     let effective_known =
-      List.filter (fun k -> not (List.mem k host_locals)) !known
+      List.fold_left (fun k l -> FvSet.remove l k) !known host_locals
     in
-    let body_fvs = free_vars fn_body (p :: effective_known) in
+    let body_fvs = free_vars_of_set fn_body (FvSet.add p effective_known) in
     if (try Sys.getenv "MERE_LIFT_DEBUG" <> "" with Not_found -> false) then
       (* The captures are the body's free variables MINUS what is already in scope, so when
          a capture is missing the question is always which of the two lists ate it. Both are
@@ -13023,7 +13042,7 @@ let lift_inner_fns
       Printf.eprintf "  lift_one %-12s param=%-8s host=%-8s fvs=[%s] blocked=[%s]\n"
         n p host_param (String.concat "," body_fvs)
         (String.concat "," (List.filter (fun k -> List.mem k (free_vars fn_body [p]))
-                              effective_known));
+                              (FvSet.elements effective_known)));
     let captures =
       List.map (fun fv ->
         let ty = lookup_var_ty fn_body fv in
@@ -13101,7 +13120,7 @@ let lift_inner_fns
         t
     in
     Hashtbl.replace host_tbl n entry;
-    known := lifted_name :: !known;
+    known := FvSet.add lifted_name !known;
     (host_param, fn_body)
   in
   let rec walk_in_fn (host_param : string) (host_locals : string list) (e : Ast.expr) =
@@ -13143,7 +13162,7 @@ let lift_inner_fns
           raise (Codegen_error (value.Ast.loc,
             "inner let-rec binding must be a single-arg function"))
       ) bindings in
-      known := rec_names @ !known;
+      known := List.fold_left (fun k n -> FvSet.add n k) !known rec_names;
       List.iter (fun (n, p, fn_body, loc, vty) ->
         let _ = lift_one host_param host_locals n p fn_body loc vty in ()
       ) fn_specs;
