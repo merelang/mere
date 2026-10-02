@@ -4,6 +4,26 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.578 — 2026-10-02
+
+_The self-hosted lexer reads every reserved word as a keyword (Q-153), and the new gates are in CI._
+
+`contrib/parser/lexer.mere` read twelve of the words the compiler reserves --
+`view`, `region`, `import`, `trait`, `impl`, `derive`, `signature`, `drop`,
+`using`, `open`, `for`, `dyn` -- as identifiers, and its parser matched
+`TIdent "import"`, so a program the compiler refuses (a reserved word used as a
+name) went through it. They are one token now, `TKw` with the word, and the
+parser's two places that read `import` and `region` by name read the keyword.
+`scripts/selfhost_lexer_keywords_check.sh` (CI) DERIVES the list from
+`lib/lexer.ml`'s keyword table, as the operators' gate derives operators, so a
+word reserved later is asked about without anyone remembering; its poison plants
+a word the self-hosted lexer does not know.
+
+CI also runs `owner_check` (v0.1.575), `lsp_coalesce_check` and
+`lsp_folding_check` (v0.1.576). The README's test count is 2882.
+
+---
+
 ## v0.1.577 — 2026-10-02
 
 _`mere fmt` keeps 50 more trailing comments: 93 lost lines over the corpus become 43 (Q-154)._
