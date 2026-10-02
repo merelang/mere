@@ -1,0 +1,22 @@
+// Q-198 (v0.1.580): an inner function's name met a variable of the same name in
+// another function, and LLVM (and Wasm) read the variable as the lifted function.
+let f = fn (len) -> fn (n: int) ->
+  let cnt = vec_new () in
+  let _ = vec_push cnt 3 in
+  let _ = vec_push cnt 4 in
+  if n == 0 then len
+  else
+    let rec give = fn (b: int) ->
+      if b > n then ()
+      else
+        let rec take = fn (k: int) ->
+          if k >= (vec_get cnt b : int) then ()
+          else let _ = vec_set len 0 ((vec_get len 0 : int) + 1) in take (k + 1) in
+        let _ = take 0 in
+        give (b + 1) in
+    let _ = give 0 in
+    len;
+let v = vec_new ();
+let _ = vec_push v 0;
+let r = f v 1;
+print (str_of_int (vec_get r 0 : int))

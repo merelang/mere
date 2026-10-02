@@ -71,7 +71,7 @@ done
 #           deeper than the interpreter's stack allows and the native binary
 #           completes. There is no output to diff against, and the native side
 #           is the one that works.
-KNOWN_WASM="font/font html/entities html/tokenizer proto/gen raster/canvas raster/path stream/stream"
+KNOWN_WASM="raster/canvas raster/path stream/stream"
 KNOWN_INTERP="site/build"
 
 TMP=$(mktemp -d)
@@ -121,7 +121,9 @@ done
 
 if [ "$fail" = "0" ]; then
   known=$(printf '%s %s' "$KNOWN_WASM" "$KNOWN_INTERP" | wc -w | tr -d ' ')
-  echo "PASS contrib_ctest: $pass_n of $COUNT contrib libraries compile and agree with the interpreter; $known pinned (7 Wasm emission, 1 the interpreter's own stack)"
+  known_w=$(printf '%s' "$KNOWN_WASM" | wc -w | tr -d ' ')
+  known_i=$(printf '%s' "$KNOWN_INTERP" | wc -w | tr -d ' ')
+  echo "PASS contrib_ctest: $pass_n of $COUNT contrib libraries compile and agree with the interpreter; $known pinned ($known_w Wasm emission, $known_i the interpreter's own stack)"
   exit 0
 fi
 echo "contrib_ctest: see $TMP/out" >&2
