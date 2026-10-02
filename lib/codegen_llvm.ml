@@ -33,7 +33,7 @@ let host_builtins_without_llvm_lowering =
        remembering. These arrived with the `bytes` type in v0.1.216, after this list
        was written, and fell straight through to "unbound variable" — the exact hole
        the list exists to close, reopened by a later feature. *)
-    "read_bytes"; "write_bytes";
+    (* read_bytes / write_bytes were here until v0.1.585 *)
     "read_line"; "read_stdin"; "read_key";
     "tty_raw"; "tty_restore";
     "read_lines";
@@ -1092,6 +1092,11 @@ let owned_vec_instances : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4
 (* Phase 15.9: StrBuf[R] usage flag — non-polymorphic, single runtime. *)
 let strbuf_used = ref false
 let bytes_used = ref false  (* gate bytes_runtime_llvm *)
+(* v0.1.585: ByteBuf[R] and read_bytes / write_bytes, each behind its own flag so
+   a program that uses neither emits neither runtime. Both set bytes_used where
+   they call @__lang_bytes_alloc, the dependency file_pread_bytes once missed. *)
+let bytebuf_used = ref false
+let rw_bytes_used_llvm = ref false
 let simd_used_llvm = ref false  (* Q-109: gate simd_runtime_llvm *)
 let bytes_vec_used = ref false  (* gate the bytes <-> Vec[int] bridge runtime *)
 (* Phase 25.9: stdlib catchup — emit each helper only when used. *)
@@ -1327,6 +1332,9 @@ let rec llvm_ty_of (t : Ast.ty) : string =
          "unsupported in LLVM codegen subset: OwnedVec[<unresolved>] (element type must be concrete)")))
   | Ast.TyCon ("StrBuf", _) ->
     strbuf_used := true;
+    "ptr"
+  | Ast.TyCon ("ByteBuf", _) ->
+    bytebuf_used := true;
     "ptr"
   | Ast.TyCon ("ListBuf", _) -> "ptr"   (* Q-106: one struct for every T *)
   | Ast.TyCon ("Map", args) ->
@@ -4386,7 +4394,8 @@ let emit_keep_above_field (struct_name : string) (idx : int) (c : string) : unit
 let owner_msgs = [ ("Vec", "vec_push"); ("Vec", "vec_set"); ("Vec", "f64x2_store");
                    ("Vec", "vec_reverse"); ("Vec", "vec_sort"); ("ListBuf", "lb_to_list");
                    ("Map", "map_set"); ("Map", "map_delete");
-                   ("StrBuf", "strbuf_push"); ("ListBuf", "lb_push") ]
+                   ("StrBuf", "strbuf_push"); ("ListBuf", "lb_push");
+                   ("ByteBuf", "bytebuf_set"); ("ByteBuf", "bytebuf_push") ]
 let owner_msg_name (kind : string) (op : string) =
   Printf.sprintf "@.own_%s_%s" (String.lowercase_ascii kind) op
 let shared_msg_name (kind : string) (op : string) =
@@ -6830,6 +6839,80 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                   "  %s = call ptr @mere_strbuf_new(ptr %s)"
                   r region_reg);
     r
+  | Ast.App ({ node = Ast.Var "bytebuf_new"; _ }, arg) ->
+    (* v0.1.585: the region comes from the result type's marker, as strbuf_new's
+       does -- test/parity/region_bytebuf_reclaimed.mere is the block that has to
+       own it. *)
+    bytebuf_used := true;
+    let region_name =
+      match Option.map Ast.walk e.Ast.ty with
+      | Some (Ast.TyCon ("ByteBuf", [Ast.TyRef (_, r, Ast.TyUnit)])) -> r
+      | _ -> "__heap"
+    in
+    let region_reg = region_ptr_for region_name in
+    let nv = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call ptr @mere_bytebuf_new(ptr %s, i64 %s)" r region_reg nv);
+    r
+  | Ast.App ({ node = Ast.Var "bytebuf_of_bytes"; _ }, arg) ->
+    (* the result type's region when it names one, the default otherwise --
+       C's heap_container_region, which vec_of_bytes above also follows *)
+    bytebuf_used := true; bytes_used := true;
+    let region_reg =
+      match Option.map Ast.walk e.Ast.ty with
+      | Some (Ast.TyCon ("ByteBuf", [Ast.TyRef (_, r, Ast.TyUnit)])) -> region_ptr_for r
+      | _ -> "@__lang_default_region"
+    in
+    let bv = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call ptr @mere_bytebuf_of_bytes(ptr %s, ptr %s)" r region_reg bv);
+    r
+  | Ast.App ({ node = Ast.Var "bytebuf_len"; _ }, arg) ->
+    bytebuf_used := true;
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @mere_bytebuf_len(ptr %s)" r av);
+    r
+  | Ast.App ({ node = Ast.Var "bytes_of_bytebuf"; _ }, arg) ->
+    bytebuf_used := true; bytes_used := true;
+    let av = emit_expr env arg in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @mere_bytes_of_bytebuf(ptr %s)" r av);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "bytebuf_get"; _ }, bb_e); _ }, i_e) ->
+    bytebuf_used := true;
+    let bv = emit_expr env bb_e in
+    let iv = emit_expr env i_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @mere_bytebuf_get(ptr %s, i64 %s)" r bv iv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "bytebuf_push"; _ }, bb_e); _ }, x_e) ->
+    bytebuf_used := true;
+    let bv = emit_expr env bb_e in
+    let xv = emit_expr env x_e in
+    emit_instr (Printf.sprintf "  call void @mere_bytebuf_push(ptr %s, i64 %s)" bv xv);
+    "0"
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "bytebuf_set"; _ }, bb_e); _ }, i_e); _ }, x_e) ->
+    bytebuf_used := true;
+    let bv = emit_expr env bb_e in
+    let iv = emit_expr env i_e in
+    let xv = emit_expr env x_e in
+    emit_instr (Printf.sprintf "  call void @mere_bytebuf_set(ptr %s, i64 %s, i64 %s)" bv iv xv);
+    "0"
+  | Ast.App ({ node = Ast.Var "read_bytes"; _ }, path_e) ->
+    rw_bytes_used_llvm := true; file_io_used_llvm := true; bytes_used := true;
+    let pv = emit_expr env path_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_read_bytes(ptr %s)" r pv);
+    r
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "write_bytes"; _ }, path_e); _ }, b_e) ->
+    rw_bytes_used_llvm := true; file_io_used_llvm := true; bytes_used := true;
+    let pv = emit_expr env path_e in
+    let bv = emit_expr env b_e in
+    emit_instr (Printf.sprintf "  call void @__lang_write_bytes(ptr %s, ptr %s)" pv bv);
+    "0"
   | Ast.App ({ node = Ast.Var "strbuf_len"; _ }, arg) ->
     strbuf_used := true;
     let av = emit_expr env arg in
@@ -13139,6 +13222,228 @@ let strbuf_runtime_llvm =
       "  ret i64 %len";
       "}" ]
 
+(* v0.1.585: a str constant with the length header a Mere str carries in
+   the 8 bytes before its pointer (see .oom_msg) -- __lang_fail_impl and
+   __lang_str_concat read it, so a bare C string would be a str of no length. *)
+let str_const_lines (name : string) (m : string) : string list =
+  let n = String.length m in
+  [ Printf.sprintf "%s_h = internal constant { i64, [%d x i8] } { i64 %d, [%d x i8] c\"%s\\00\" }"
+      name (n + 1) n (n + 1) m;
+    Printf.sprintf "%s = internal alias [%d x i8], getelementptr inbounds ({ i64, [%d x i8] }, ptr %s_h, i32 0, i32 1)"
+      name (n + 1) (n + 1) name ]
+
+(* a printf format for __lang_fail_idx: a plain C string, its length computed *)
+let c_fmt_line (name : string) (m : string) : string =
+  Printf.sprintf "%s = private constant [%d x i8] c\"%s\\00\"" name (String.length m + 1) m
+
+(* v0.1.585: ByteBuf[R] on LLVM -- the C backend's mere_bytebuf, field for
+   field: { data, len, cap, region, owner }. len and cap are i64 rather than
+   StrBuf's i32 because they are `long long` in C and the index a program asks
+   about is an int: an i32 length would make bytebuf_get bb 4294967297 a question
+   about index 1 (test/parity/bytebuf_edges.mere asks exactly that). The struct
+   and its bytes are allocated in the region the result type names, as
+   strbuf_new does; growth goes through __lang_region_grow, in place when the
+   buffer is the region's latest allocation, the way C's push does. Field 4 is
+   the owner (v0.1.575/582): set at creation, checked by the two writes, and a
+   read marks the buffer shared. A bad index goes through __lang_fail_idx, so it
+   is the failure try_or catches, with C's message. *)
+let bytebuf_runtime_llvm =
+  String.concat "\n" @@
+    [ "%mere_bytebuf = type { ptr, i64, i64, ptr, i32 }   ; data, len, cap, region, owner";
+      c_fmt_line "@.idxfmt_bbget" "bytebuf_get: index %lld out of bounds (len = %lld)";
+      c_fmt_line "@.idxfmt_bbset" "bytebuf_set: index %lld out of bounds (len = %lld)";
+      "";
+      (* new: n zero bytes, capacity at least 1 (C's `n > 0 ? n : 1`) *)
+      "define ptr @mere_bytebuf_new(ptr %r, i64 %n) {";
+      "entry:";
+      "  %bbsz_p = getelementptr %mere_bytebuf, ptr null, i32 1";
+      "  %bbsz = ptrtoint ptr %bbsz_p to i64";
+      "  %bb = call ptr @__lang_region_alloc(ptr %r, i64 %bbsz)";
+      "  %pos = icmp sgt i64 %n, 0";
+      "  %cap = select i1 %pos, i64 %n, i64 1";
+      "  %buf = call ptr @__lang_region_alloc(ptr %r, i64 %cap)";
+      "  %zn = select i1 %pos, i64 %n, i64 0";
+      "  call void @llvm.memset.p0.i64(ptr %buf, i8 0, i64 %zn, i1 false)";
+      "  %dp = getelementptr %mere_bytebuf, ptr %bb, i32 0, i32 0";
+      "  store ptr %buf, ptr %dp";
+      "  %lp = getelementptr %mere_bytebuf, ptr %bb, i32 0, i32 1";
+      "  store i64 %n, ptr %lp";
+      "  %cp = getelementptr %mere_bytebuf, ptr %bb, i32 0, i32 2";
+      "  store i64 %cap, ptr %cp";
+      "  %rp = getelementptr %mere_bytebuf, ptr %bb, i32 0, i32 3";
+      "  store ptr %r, ptr %rp";
+    ] @ owner_store_lines ~sn:"mere_bytebuf" ~idx:4 ~c:"%bb" @ [
+      "  ret ptr %bb";
+      "}";
+      "";
+      "define i64 @mere_bytebuf_len(ptr %bb) {";
+      "entry:";
+    ] @ read_mark_lines ~sn:"mere_bytebuf" ~idx:4 ~c:"%bb" @ [
+      "  %lp = getelementptr %mere_bytebuf, ptr %bb, i32 0, i32 1";
+      "  %len = load i64, ptr %lp";
+      "  ret i64 %len";
+      "}";
+      "";
+      "define i64 @mere_bytebuf_get(ptr %bb, i64 %i) {";
+      "entry:";
+    ] @ read_mark_lines ~sn:"mere_bytebuf" ~idx:4 ~c:"%bb" @ [
+      "  %lp = getelementptr %mere_bytebuf, ptr %bb, i32 0, i32 1";
+      "  %len = load i64, ptr %lp";
+      "  %lo = icmp slt i64 %i, 0";
+      "  %hi = icmp sge i64 %i, %len";
+      "  %oob = or i1 %lo, %hi";
+      "  br i1 %oob, label %fail, label %ok";
+      "fail:";
+      "  call void @__lang_fail_idx(ptr @.idxfmt_bbget, i64 %i, i64 %len)";
+      "  unreachable";
+      "ok:";
+      "  %dp = getelementptr %mere_bytebuf, ptr %bb, i32 0, i32 0";
+      "  %buf = load ptr, ptr %dp";
+      "  %p = getelementptr i8, ptr %buf, i64 %i";
+      "  %c = load i8, ptr %p";
+      "  %r = zext i8 %c to i64";
+      "  ret i64 %r";
+      "}";
+      "";
+      "define void @mere_bytebuf_set(ptr %bb, i64 %i, i64 %v) {";
+      "entry:";
+    ] @ owner_check_lines ~sn:"mere_bytebuf" ~idx:4 ~c:"%bb" "ByteBuf" "bytebuf_set" @ [
+      "  %lp = getelementptr %mere_bytebuf, ptr %bb, i32 0, i32 1";
+      "  %len = load i64, ptr %lp";
+      "  %lo = icmp slt i64 %i, 0";
+      "  %hi = icmp sge i64 %i, %len";
+      "  %oob = or i1 %lo, %hi";
+      "  br i1 %oob, label %fail, label %ok";
+      "fail:";
+      "  call void @__lang_fail_idx(ptr @.idxfmt_bbset, i64 %i, i64 %len)";
+      "  unreachable";
+      "ok:";
+      "  %dp = getelementptr %mere_bytebuf, ptr %bb, i32 0, i32 0";
+      "  %buf = load ptr, ptr %dp";
+      "  %p = getelementptr i8, ptr %buf, i64 %i";
+      "  %c = trunc i64 %v to i8";
+      "  store i8 %c, ptr %p";
+      "  ret void";
+      "}";
+      "";
+      "define void @mere_bytebuf_push(ptr %bb, i64 %v) {";
+      "entry:";
+    ] @ owner_check_lines ~sn:"mere_bytebuf" ~idx:4 ~c:"%bb" "ByteBuf" "bytebuf_push" @ [
+      "  %lp = getelementptr %mere_bytebuf, ptr %bb, i32 0, i32 1";
+      "  %len = load i64, ptr %lp";
+      "  %cp = getelementptr %mere_bytebuf, ptr %bb, i32 0, i32 2";
+      "  %cap = load i64, ptr %cp";
+      "  %dp = getelementptr %mere_bytebuf, ptr %bb, i32 0, i32 0";
+      "  %need = add i64 %len, 1";
+      "  %full = icmp sgt i64 %need, %cap";
+      "  br i1 %full, label %grow, label %put";
+      "grow:";
+      "  %c2 = mul i64 %cap, 2";
+      "  %new_cap = add i64 %c2, 16";
+      "  %rp = getelementptr %mere_bytebuf, ptr %bb, i32 0, i32 3";
+      "  %reg = load ptr, ptr %rp";
+      "  %old = load ptr, ptr %dp";
+      "  %nb = call ptr @__lang_region_grow(ptr %reg, ptr %old, i64 %cap, i64 %new_cap)";
+      "  store ptr %nb, ptr %dp";
+      "  store i64 %new_cap, ptr %cp";
+      "  br label %put";
+      "put:";
+      "  %buf = load ptr, ptr %dp";
+      "  %p = getelementptr i8, ptr %buf, i64 %len";
+      "  %c = trunc i64 %v to i8";
+      "  store i8 %c, ptr %p";
+      "  store i64 %need, ptr %lp";
+      "  ret void";
+      "}";
+      "";
+      (* Into the current region, so a `bytes` frozen inside `region R { }` can
+         be returned out of it (the block's result copy moves it on) -- the C
+         runtime's reason, and strbuf_to_str's. *)
+      "define ptr @mere_bytes_of_bytebuf(ptr %bb) {";
+      "entry:";
+    ] @ read_mark_lines ~sn:"mere_bytebuf" ~idx:4 ~c:"%bb" @ [
+      "  %lp = getelementptr %mere_bytebuf, ptr %bb, i32 0, i32 1";
+      "  %len = load i64, ptr %lp";
+      "  %b = call ptr @__lang_bytes_alloc(i64 %len)";
+      "  %dst = getelementptr i8, ptr %b, i64 8";
+      "  %dp = getelementptr %mere_bytebuf, ptr %bb, i32 0, i32 0";
+      "  %buf = load ptr, ptr %dp";
+      "  call ptr @memcpy(ptr %dst, ptr %buf, i64 %len)";
+      "  ret ptr %b";
+      "}";
+      "";
+      "define ptr @mere_bytebuf_of_bytes(ptr %r, ptr %b) {";
+      "entry:";
+      "  %n = load i64, ptr %b";
+      "  %bb = call ptr @mere_bytebuf_new(ptr %r, i64 %n)";
+      "  %dp = getelementptr %mere_bytebuf, ptr %bb, i32 0, i32 0";
+      "  %buf = load ptr, ptr %dp";
+      "  %src = getelementptr i8, ptr %b, i64 8";
+      "  call ptr @memcpy(ptr %buf, ptr %src, i64 %n)";
+      "  ret ptr %bb";
+      "}" ]
+
+(* v0.1.585: read_bytes / write_bytes, a whole file as one `bytes` --
+   [i64 len][len bytes], allocated in the current region like every other
+   bytes. These were on host_builtins_without_llvm_lowering since the bytes type
+   arrived (v0.1.216). A file that cannot be opened ends the program with C's
+   stderr line ("read_bytes: <path>") and exit 1; it goes through
+   __lang_fail_impl, as read_file does here, so under try_or it is the
+   catchable failure the interpreter raises rather than C's exit. ftell's -1
+   (not a seekable file) is the same failure: C would allocate for it. *)
+let rw_bytes_runtime_llvm =
+  String.concat "\n" @@
+    str_const_lines "@.rb_pre" "read_bytes: "
+    @ str_const_lines "@.wb_pre" "write_bytes: "
+    @ str_const_lines "@.rb_short" "read_bytes: short read"
+    @ [ "define ptr @__lang_read_bytes(ptr %path) {";
+        "entry:";
+        "  %f = call ptr @fopen(ptr %path, ptr @.fopen_rb)";
+        "  %isnull = icmp eq ptr %f, null";
+        "  br i1 %isnull, label %fail, label %open";
+        "open:";
+        "  %_se = call i32 @fseek(ptr %f, i64 0, i32 2)";
+        "  %n = call i64 @ftell(ptr %f)";
+        "  %_ss = call i32 @fseek(ptr %f, i64 0, i32 0)";
+        "  %neg = icmp slt i64 %n, 0";
+        "  br i1 %neg, label %close_fail, label %alloc";
+        "close_fail:";
+        "  %_c0 = call i32 @fclose(ptr %f)";
+        "  br label %fail";
+        "fail:";
+        "  %m = call ptr @__lang_str_concat(ptr @.rb_pre, ptr %path)";
+        "  call void @__lang_fail_impl(ptr %m)";
+        "  unreachable";
+        "alloc:";
+        "  %b = call ptr @__lang_bytes_alloc(i64 %n)";
+        "  %data = getelementptr i8, ptr %b, i64 8";
+        "  %got = call i64 @fread(ptr %data, i64 1, i64 %n, ptr %f)";
+        "  %_c = call i32 @fclose(ptr %f)";
+        "  %short = icmp ne i64 %got, %n";
+        "  br i1 %short, label %short_fail, label %done";
+        "short_fail:";
+        "  call void @__lang_fail_impl(ptr @.rb_short)";
+        "  unreachable";
+        "done:";
+        "  ret ptr %b";
+        "}";
+        "define void @__lang_write_bytes(ptr %path, ptr %b) {";
+        "entry:";
+        "  %f = call ptr @fopen(ptr %path, ptr @.fopen_wb)";
+        "  %isnull = icmp eq ptr %f, null";
+        "  br i1 %isnull, label %fail, label %ok";
+        "fail:";
+        "  %m = call ptr @__lang_str_concat(ptr @.wb_pre, ptr %path)";
+        "  call void @__lang_fail_impl(ptr %m)";
+        "  unreachable";
+        "ok:";
+        "  %n = load i64, ptr %b";
+        "  %data = getelementptr i8, ptr %b, i64 8";
+        "  %_w = call i64 @fwrite(ptr %data, i64 1, i64 %n, ptr %f)";
+        "  %_c = call i32 @fclose(ptr %f)";
+        "  ret void";
+        "}" ]
+
 (* Phase 16.3 / DEFERRED §1.5: LLVM IR runtime for Logger / Metrics.
    Express the same printf-based implementation as the C side in IR. Assumes
    the Logger struct %Logger = type { %closure_str_unit, %closure_str_unit,
@@ -14940,6 +15245,7 @@ let file_bytes_runtime_llvm =
       "fin:";
       "  ret ptr %v";
       "}";
+      c_fmt_line "@.numfmt_wfb" "write_file_bytes: byte value %lld out of range 0..255";
       "define i32 @__lang_write_file_bytes(ptr %path, ptr %v) {";
       "entry:";
       "  %i = alloca i32";
@@ -14961,6 +15267,19 @@ let file_bytes_runtime_llvm =
       "  br i1 %done, label %fin, label %body";
       "body:";
       "  %x = call i64 @mere_vec_int_get(ptr %v, i32 %iv)";
+      (* v0.1.585: the byte-range check C and the interpreter make (v0.1.279).
+         This truncated 300 to 44 and wrote it; test/parity/bytebuf_edges.mere
+         asks, and was refused on LLVM for its ByteBuf until now, so nothing
+         compared the answer. *)
+      "  %lo = icmp slt i64 %x, 0";
+      "  %hi = icmp sgt i64 %x, 255";
+      "  %bad = or i1 %lo, %hi";
+      "  br i1 %bad, label %range, label %put";
+      "range:";
+      "  %_cr = call i32 @fclose(ptr %f)";
+      "  call void @__lang_fail_num(ptr @.numfmt_wfb, i64 %x)";
+      "  unreachable";
+      "put:";
       "  %byte = trunc i64 %x to i8";
       "  store i8 %byte, ptr %bufp";
       "  %_w = call i64 @fwrite(ptr %bufp, i64 1, i64 1, ptr %f)";
@@ -15182,6 +15501,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   Hashtbl.reset vec_to_list_instances;
   Hashtbl.reset list_len_instances;
   strbuf_used := false;
+  bytebuf_used := false;
+  rw_bytes_used_llvm := false;
   bytes_used := false;
   bytes_vec_used := false;
   str_split_used_llvm := false;
@@ -15920,7 +16241,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if owned_vec_runtimes = [] then []
        else owned_vec_registry_runtime_llvm :: "" :: owned_vec_runtimes @ [""])
     @ (if !strbuf_used then [strbuf_runtime_llvm; ""] else [])
-    @ (if !bytes_used then [bytes_runtime_llvm; ""] else [])
+    @ (if !bytebuf_used then [bytebuf_runtime_llvm; ""] else [])
+    (* v0.1.585: `|| !bytebuf_used`, the C backend's v0.1.279 fix, needed here
+       for the same reason: mere_bytes_of_bytebuf calls @__lang_bytes_alloc, and
+       the ByteBuf runtime is emitted whenever the TYPE appears, so a program
+       that used a ByteBuf and no bytes did not link (clang: use of undefined
+       value '@__lang_bytes_alloc'). *)
+    @ (if !bytes_used || !bytebuf_used then [bytes_runtime_llvm; ""] else [])
     @ (if !simd_used_llvm then [simd_runtime_llvm; ""] else [])
     @ (if !bytes_vec_used then [bytes_vec_bridge_runtime_llvm; ""] else [])
     @ (if !str_count_used_llvm then [str_count_runtime_llvm; ""] else [])
@@ -15933,6 +16260,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        then [file_bytes_runtime_llvm; ""] else [])
     @ (if !file_pio_used_llvm then [file_pio_runtime_llvm; ""] else [])
     @ (if !file_pread_bytes_used_llvm then [file_pread_bytes_runtime_llvm; ""] else [])
+    @ (if !rw_bytes_used_llvm then [rw_bytes_runtime_llvm; ""] else [])
     @ (if !args_used_llvm then [args_runtime_llvm; ""] else [])
     @ (if !coro_used_llvm then [coro_runtime_llvm ~stack_bytes:(Option.value !Typer.stack_request ~default:(8 * 1024 * 1024)); ""] else [])
     @ (if !logger_used then [logger_runtime_llvm; ""] else [])

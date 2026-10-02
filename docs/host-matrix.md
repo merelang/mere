@@ -46,7 +46,7 @@ machine rather than a host.
 | `bit_shr` | yes | yes | yes | yes |
 | `bit_xor` | yes | yes | yes | yes |
 | `bool_of_str` | yes | yes | yes | refused |
-| `bytebuf_new` | yes | refused | refused | refused |
+| `bytebuf_new` | yes | yes | yes | refused |
 | `bytes_of_hex` | yes | yes | yes | yes |
 | `bytes_of_str` | yes | yes | yes | yes |
 | `ceil` | yes | yes | refused | yes |
@@ -150,7 +150,7 @@ machine rather than a host.
 | `print_no_nl` | yes | yes | yes | yes |
 | `random_float` | refused | refused | refused | refused |
 | `random_int` | yes | refused | yes | yes |
-| `read_bytes` | yes | refused | refused | yes |
+| `read_bytes` | yes | yes | yes | yes |
 | `read_file` | yes | yes | yes | yes |
 | `read_file_bytes` | yes | yes | yes | refused |
 | `read_key` | yes | refused | refused | refused |
@@ -197,6 +197,6 @@ machine rather than a host.
 | `utf8_chars` | yes | yes | yes | refused |
 | `utf8_len` | yes | yes | yes | refused |
 | `vec_new` | yes | yes | yes | yes |
-| `write_bytes` | yes | refused | refused | refused |
+| `write_bytes` | yes | yes | yes | refused |
 | `write_file` | yes | yes | yes | yes |
 | `write_file_bytes` | yes | yes | yes | refused |

@@ -92,8 +92,8 @@ let host_builtins_without_wasm_lowering =
        v0.1.216, after this list was written, and fell through to "unbound variable"
        — the exact hole the list exists to close, reopened by a later feature.
        (`par_map` is handled at the tail instead: it is desugared before codegen, so
-       this name never reaches here.) *)
-    "read_bytes"; "write_bytes";
+       this name never reaches here.)
+       v0.1.585 (Q-016): read_bytes / write_bytes lower now, and left the list. *)
     "read_key"; "tty_raw"; "tty_restore";
     "read_lines"; "file_pread";
     "random_float"; "detach" ]
@@ -409,6 +409,14 @@ let vec_higher_order_used = ref false
 (* Phase 15.9: StrBuf[R] usage flag — runtime is single non-polymorphic. *)
 let strbuf_used = ref false
 let bytes_used = ref false  (* gate the Wasm bytes runtime *)
+(* v0.1.585 (Q-016): gate the ByteBuf runtime, and read_bytes / write_bytes'
+   two wrappers. Separate from bytes_used, which most programs with a `bytes`
+   in them set without ever touching a ByteBuf or a file. *)
+let bytebuf_used = ref false
+let bytes_file_used = ref false
+(* v0.1.585 (Q-016): write_file_bytes' byte-range check (see
+   write_file_bytes_runtime_wasm). *)
+let write_file_bytes_used = ref false
 let simd_used = ref false  (* Q-109: gate simd_runtime_wasm *)
 let fma_used = ref false  (* Q-176: gate $__lang_fma, the software fma *)
 let f64x2_fma_used = ref false  (* Q-176: gate $mere_f64x2_fma_v, its lane-wise caller *)
@@ -3654,11 +3662,16 @@ and emit_expr (e : Ast.expr) : unit =
     emit_instr "call $read_file_bytes";
     emit_instr "call $__lang_vec_of_bytes"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "write_file_bytes"; _ }, path_e); _ }, vec_e) ->
-    file_bytes_io_used := true; bytes_used := true; bytes_vec_used := true; vec_used := true;
+    (* v0.1.585 (Q-016): through a helper that range-checks, not straight through
+       `$__lang_bytes_of_vec`, which masks (correctly, for bytes_of_vec). Found
+       when ByteBuf started lowering here and test/parity/bytebuf_edges.mere ran
+       on this backend for the first time: `write_file_bytes p [300]` wrote 0x2c
+       and answered unit, where the interpreter and C fail catchably. *)
+    file_bytes_io_used := true; bytes_used := true; vec_used := true;
+    write_file_bytes_used := true;
     emit_expr path_e;
     emit_expr vec_e;
-    emit_instr "call $__lang_bytes_of_vec";  (* vec -> bytesPtr (top of stack) *)
-    emit_instr "call $write_file_bytes"
+    emit_instr "call $__lang_write_file_bytes_v"
   | Ast.App ({ node = Ast.Var "list_dir"; _ }, _path_e) ->
     unsupported e.Ast.loc
       "list_dir is unsupported in Wasm codegen (Phase 44 MVP scope = interp + C only)"
@@ -4075,6 +4088,55 @@ and emit_expr (e : Ast.expr) : unit =
     emit_expr sb_e;
     emit_expr str_e;
     emit_instr "call $mere_strbuf_push"
+  (* v0.1.585 (Q-016): ByteBuf. The region argument the C backend passes is not
+     needed for the reason strbuf_new's is not: the bump is one global, and a
+     region block owns what is allocated while it is open. *)
+  | Ast.App ({ node = Ast.Var "bytebuf_new"; _ }, n_e) ->
+    bytebuf_used := true;
+    emit_expr n_e;
+    emit_instr "call $mere_bytebuf_new"
+  | Ast.App ({ node = Ast.Var "bytebuf_len"; _ }, bb_e) ->
+    bytebuf_used := true;
+    emit_expr bb_e;
+    emit_instr "call $mere_bytebuf_len"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "bytebuf_get"; _ }, bb_e); _ }, i_e) ->
+    bytebuf_used := true;
+    emit_expr bb_e;
+    emit_expr i_e;
+    emit_instr "call $mere_bytebuf_get"
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "bytebuf_set"; _ },
+                                                bb_e); _ }, i_e); _ }, x_e) ->
+    bytebuf_used := true;
+    emit_expr bb_e;
+    emit_expr i_e;
+    emit_expr x_e;
+    emit_instr "call $mere_bytebuf_set"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "bytebuf_push"; _ }, bb_e); _ }, x_e) ->
+    bytebuf_used := true;
+    emit_expr bb_e;
+    emit_expr x_e;
+    emit_instr "call $mere_bytebuf_push"
+  | Ast.App ({ node = Ast.Var "bytes_of_bytebuf"; _ }, bb_e) ->
+    bytebuf_used := true; bytes_used := true;
+    emit_expr bb_e;
+    emit_instr "call $mere_bytes_of_bytebuf"
+  | Ast.App ({ node = Ast.Var "bytebuf_of_bytes"; _ }, b_e) ->
+    bytebuf_used := true; bytes_used := true;
+    emit_expr b_e;
+    emit_instr "call $mere_bytebuf_of_bytes"
+  | Ast.App ({ node = Ast.Var "read_bytes"; _ }, path_e)
+    when not (user_shadows_wasm "read_bytes") ->
+    (* No bytes_used: the host writes the buffer, and nothing here calls into
+       the bytes runtime. *)
+    bytes_file_used := true; file_bytes_io_used := true; wasm_fexists_host_used := true;
+    emit_expr path_e;
+    emit_instr "call $__lang_read_bytes"
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "write_bytes"; _ }, path_e); _ }, b_e)
+    when not (user_shadows_wasm "write_bytes") ->
+    bytes_file_used := true; file_bytes_io_used := true;
+    emit_expr path_e;
+    emit_expr b_e;
+    emit_instr "call $__lang_write_bytes"
   | Ast.App ({ node = Ast.Var "fst"; _ }, arg) ->
     (* A 2-tuple is a pair of i64 slots at offsets 0 and 8 (same layout as a
        record). The tuple value is an i64 pointer, so wrap to i32 before the
@@ -4658,7 +4720,10 @@ and emit_expr (e : Ast.expr) : unit =
     in
     let rec ty_has_container t =
       match Ast.walk t with
-      | Ast.TyCon (("Vec" | "OwnedVec" | "Map" | "StrBuf" | "Channel"
+      (* v0.1.585 (Q-016): ByteBuf, now that it lowers here. Its buffer is
+         allocated in the block like a StrBuf's, so returning one hands out
+         memory the block's exit gives back; bytes_of_bytebuf is the way out. *)
+      | Ast.TyCon (("Vec" | "OwnedVec" | "Map" | "StrBuf" | "ByteBuf" | "Channel"
                     | "ThreadHandle"), _) -> true
       | Ast.TyRef _ -> true
       | Ast.TyTuple ts -> List.exists ty_has_container ts
@@ -8759,6 +8824,250 @@ let strbuf_runtime_wasm = {|
     (local.set $sb (i32.wrap_i64 (local.get $sb8)))
     (i64.extend_i32_s (i32.load offset=4 (local.get $sb))))|}
 
+(* v0.1.585 (Q-016): ByteBuf[R] on Wasm. Every bytebuf_* call was refused here
+   ("has no Wasm lowering yet"), so a program that builds a file a byte at a
+   time -- the PNG / zlib / tar dogfoods -- ran on interp + C only.
+
+   Layout: the StrBuf header, { data_ptr:i32, len:i32, cap:i32, _pad:i32 } =
+   16 bytes, followed directly by the first data buffer, one byte per byte.
+   Like StrBuf there is no region in the struct: the bump is a single global,
+   and a region block reclaims whatever was allocated inside it by rolling the
+   bump back, so where the buffer lives is decided by WHEN it was made. That is
+   also why `bytes_of_bytebuf` needs nothing special to leave a block: the
+   frozen `bytes` is a plain value the block's copy-out already handles.
+
+   No owner field and no owner check: this backend has one thread (see how
+   `__vec_owned` is lowered here -- always true), so the question the C
+   backend's `__LANG_OWNED` asks has one answer.
+
+   The two index failures and the negative length are the interpreter's
+   messages, built the way vec_get's are ($__lang_fail_idx with the shared
+   " out of bounds (len = " / ")" parts). Only the prefixes are new, and they
+   are interned when a program uses ByteBuf -- see where `bytebuf_section` is
+   built in emit_program -- so a program that does not pays nothing in its data
+   section either. *)
+let bytebuf_runtime_wasm ~get_pre ~set_pre ~neg_msg = Printf.sprintf {|
+  (func $mere_bytebuf_new (param $n8 i64) (result i64)
+    (local $bb i32) (local $buf i32) (local $cap i32) (local $i i32)
+    ;; The interpreter refuses a negative length, and not catchably: it is a
+    ;; `failwith`, which try_or does not take. (C stored it as the length, and
+    ;; bytebuf_len answered with it.) So the oracle's answer is the uncaught
+    ;; path even inside a try_or -- the scope is closed before the call, which
+    ;; then prints the message and traps.
+    (if (i64.lt_s (local.get $n8) (i64.const 0))
+      (then
+        (global.set $__lang_fail_active (i32.const 0))
+        (return (call $__lang_fail (i64.const %d)))))
+    ;; cap = max(n, 1), as C: a zero-length buffer still has somewhere for the
+    ;; first push to go, so push never has to ask whether there is a buffer.
+    (local.set $cap
+      (if (result i32) (i64.gt_s (local.get $n8) (i64.const 0))
+        (then (i32.wrap_i64 (local.get $n8)))
+        (else (i32.const 1))))
+    (global.set $__lang_bump
+      (i32.and (i32.add (global.get $__lang_bump) (i32.const 3)) (i32.const -4)))
+    (local.set $bb (global.get $__lang_bump))
+    (local.set $buf (i32.add (local.get $bb) (i32.const 16)))
+    (global.set $__lang_bump (i32.add (local.get $buf) (local.get $cap)))
+    ;; Zeroed by hand: fresh memory is zero, but memory a region block handed
+    ;; back is not, and `bytebuf_new n` is defined as n zero bytes.
+    (local.set $i (i32.const 0))
+    (block $z_end (loop $z_lp
+      (br_if $z_end (i32.ge_u (local.get $i) (local.get $cap)))
+      (i32.store8 (i32.add (local.get $buf) (local.get $i)) (i32.const 0))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $z_lp)))
+    (i32.store offset=0 (local.get $bb) (local.get $buf))
+    (i32.store offset=4 (local.get $bb) (i32.wrap_i64 (local.get $n8)))
+    (i32.store offset=8 (local.get $bb) (local.get $cap))
+    (i64.extend_i32_u (local.get $bb)))
+  (func $mere_bytebuf_len (param $bb8 i64) (result i64)
+    (i64.extend_i32_s (i32.load offset=4 (i32.wrap_i64 (local.get $bb8)))))
+  ;; Checked at full width, before the wrap -- the lesson of v0.1.275's vec_get:
+  ;; 4294967297 must not become 1.
+  (func $mere_bytebuf_get (param $bb8 i64) (param $i8 i64) (result i64)
+    (local $bb i32) (local $len i32)
+    (local.set $bb (i32.wrap_i64 (local.get $bb8)))
+    (local.set $len (i32.load offset=4 (local.get $bb)))
+    (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0))
+                (i64.ge_s (local.get $i8) (i64.extend_i32_s (local.get $len))))
+      (then (return (call $__lang_fail_idx
+                      (i64.const %d)
+                      (local.get $i8)
+                      (i64.extend_i32_u (global.get $__lang_idx_mid_vec))
+                      (i64.extend_i32_s (local.get $len))
+                      (i64.extend_i32_u (global.get $__lang_idx_post_vec))))))
+    (i64.extend_i32_u
+      (i32.load8_u (i32.add (i32.load offset=0 (local.get $bb))
+                            (i32.wrap_i64 (local.get $i8))))))
+  ;; No $__lang_protect: the value stored is a byte, not a pointer, and the
+  ;; buffer does not move, so nothing outside a block comes to point into it.
+  (func $mere_bytebuf_set (param $bb8 i64) (param $i8 i64) (param $x i64) (result i64)
+    (local $bb i32) (local $len i32)
+    (local.set $bb (i32.wrap_i64 (local.get $bb8)))
+    (local.set $len (i32.load offset=4 (local.get $bb)))
+    (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0))
+                (i64.ge_s (local.get $i8) (i64.extend_i32_s (local.get $len))))
+      (then (return (call $__lang_fail_idx
+                      (i64.const %d)
+                      (local.get $i8)
+                      (i64.extend_i32_u (global.get $__lang_idx_mid_vec))
+                      (i64.extend_i32_s (local.get $len))
+                      (i64.extend_i32_u (global.get $__lang_idx_post_vec))))))
+    ;; store8 keeps the low byte, which is C's `v & 255` and the interpreter's
+    ;; `x land 255`.
+    (i32.store8 (i32.add (i32.load offset=0 (local.get $bb))
+                         (i32.wrap_i64 (local.get $i8)))
+                (i32.wrap_i64 (local.get $x)))
+    (i64.const 0))
+  (func $mere_bytebuf_push (param $bb8 i64) (param $x i64) (result i64)
+    (local $bb i32) (local $len i32) (local $cap i32) (local $buf i32)
+    (local $new_cap i32) (local $new_buf i32) (local $i i32)
+    (local.set $bb (i32.wrap_i64 (local.get $bb8)))
+    (local.set $len (i32.load offset=4 (local.get $bb)))
+    (local.set $cap (i32.load offset=8 (local.get $bb)))
+    (if (i32.ge_s (local.get $len) (local.get $cap))
+      (then
+        (local.set $buf (i32.load offset=0 (local.get $bb)))
+        ;; C's growth, cap * 2 + 16, so the two backends reallocate at the same
+        ;; lengths.
+        (local.set $new_cap (i32.add (i32.mul (local.get $cap) (i32.const 2))
+                                     (i32.const 16)))
+        ;; In place under vec_push's condition (v0.1.414): the buffer ends at the
+        ;; bump and no region block is open, since a block rolls the bump back
+        ;; and an outer buffer extended into it would be extended into garbage.
+        ;; This is the case that matters -- a file built by pushing, nothing
+        ;; allocated in between -- and it costs the buffer once, not twice.
+        (if (i32.and
+              (i32.eq (i32.add (local.get $buf) (local.get $cap))
+                      (global.get $__lang_bump))
+              (i32.eqz (global.get $__lang_region_depth)))
+          (then
+            (global.set $__lang_bump (i32.add (local.get $buf) (local.get $new_cap))))
+          (else
+            (local.set $new_buf (global.get $__lang_bump))
+            (global.set $__lang_bump (i32.add (local.get $new_buf) (local.get $new_cap)))
+            (local.set $i (i32.const 0))
+            (block $cp_end (loop $cp_lp
+              (br_if $cp_end (i32.ge_u (local.get $i) (local.get $len)))
+              (i32.store8 (i32.add (local.get $new_buf) (local.get $i))
+                          (i32.load8_u (i32.add (local.get $buf) (local.get $i))))
+              (local.set $i (i32.add (local.get $i) (i32.const 1)))
+              (br $cp_lp)))
+            (i32.store offset=0 (local.get $bb) (local.get $new_buf))
+            ;; The new buffer is inside any open block. A ByteBuf from outside
+            ;; the block now points into it, so the block must not reclaim it
+            ;; (Q-132, the reallocated-buffer half).
+            (call $__lang_protect (local.get $bb8))))
+        (i32.store offset=8 (local.get $bb) (local.get $new_cap))))
+    (i32.store8 (i32.add (i32.load offset=0 (local.get $bb)) (local.get $len))
+                (i32.wrap_i64 (local.get $x)))
+    (i32.store offset=4 (local.get $bb) (i32.add (local.get $len) (i32.const 1)))
+    (i64.const 0))|} neg_msg get_pre set_pre
+
+(* The two conversions to and from `bytes`, apart from the rest because they
+   call $__lang_bytes_alloc, and a program that uses a ByteBuf and no `bytes`
+   has no bytes runtime to call. (C's v0.1.279 fix emits the whole bytes runtime
+   for every ByteBuf program instead.) Both arms that call these set bytes_used,
+   so "ByteBuf and bytes" is exactly when they can be reached. *)
+let bytebuf_bytes_runtime_wasm = {|
+  ;; A copy, through $__lang_bytes_alloc: later pushes and sets must not show
+  ;; through a `bytes`, which is immutable.
+  (func $mere_bytes_of_bytebuf (param $bb8 i64) (result i64)
+    (local $bb i32) (local $len i32) (local $buf i32) (local $b i32) (local $i i32)
+    (local.set $bb (i32.wrap_i64 (local.get $bb8)))
+    (local.set $len (i32.load offset=4 (local.get $bb)))
+    (local.set $buf (i32.load offset=0 (local.get $bb)))
+    (local.set $b (i32.wrap_i64 (call $__lang_bytes_alloc (i64.extend_i32_u (local.get $len)))))
+    (local.set $i (i32.const 0))
+    (block $cp_end (loop $cp_lp
+      (br_if $cp_end (i32.ge_u (local.get $i) (local.get $len)))
+      (i32.store8 (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))
+                  (i32.load8_u (i32.add (local.get $buf) (local.get $i))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $cp_lp)))
+    (i64.extend_i32_u (local.get $b)))
+  (func $mere_bytebuf_of_bytes (param $b8 i64) (result i64)
+    (local $b i32) (local $len i32) (local $bb i32) (local $buf i32) (local $i i32)
+    (local.set $b (i32.wrap_i64 (local.get $b8)))
+    (local.set $len (i32.load (local.get $b)))
+    (local.set $bb (i32.wrap_i64 (call $mere_bytebuf_new (i64.extend_i32_u (local.get $len)))))
+    (local.set $buf (i32.load offset=0 (local.get $bb)))
+    (local.set $i (i32.const 0))
+    (block $cp_end (loop $cp_lp
+      (br_if $cp_end (i32.ge_u (local.get $i) (local.get $len)))
+      (i32.store8 (i32.add (local.get $buf) (local.get $i))
+                  (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $cp_lp)))
+    (i64.extend_i32_u (local.get $bb)))|}
+
+(* v0.1.585 (Q-016): read_bytes / write_bytes, over the host imports
+   read_file_bytes / write_file_bytes already use -- they move the mere_bytes
+   layout ([i32 len][bytes]) across the boundary by length, so a zero byte is a
+   byte, and read_bytes needs no conversion at all (read_file_bytes is this plus
+   `vec_of_bytes`). No new import, so no new host surface to keep in step.
+
+   What the read import does NOT do is say that it failed: a missing file comes
+   back as an empty buffer, indistinguishable from an empty file -- an answer
+   where the interpreter raises. So read_bytes asks `file_exists` first, and a
+   missing file is the interpreter's catchable failure with the interpreter's
+   words: OCaml's Sys_error for it is "<path>: No such file or directory", and
+   that is the only reason this check can find. (A file that exists and still
+   cannot be read -- a directory, no permission -- is the host's empty buffer
+   and its stderr line; the import cannot say more.) The failing path returns an
+   EMPTY BYTES -- the zero length header the fail sentinel, an empty str,
+   carries in front of it -- because the code between a fail and its try_or
+   still runs on this backend and reads what it was handed.
+
+   write_file_bytes does report failure (non-zero), so write_bytes only has to
+   turn it into the failure. Its message is C's, "write_bytes: <path>": the
+   interpreter appends the OS's reason, and the host keeps that to its stderr. *)
+let bytes_file_runtime_wasm ~read_pre ~read_post ~write_pre = Printf.sprintf {|
+  (func $__lang_read_bytes (param $p8 i64) (result i64)
+    (if (i32.eqz (call $file_exists_h (i32.wrap_i64 (local.get $p8))))
+      (then
+        (drop (call $__lang_fail_str (i64.const %d) (local.get $p8) (i64.const %d)))
+        (return (i64.extend_i32_u
+                  (i32.sub (global.get $__lang_fail_sentinel) (i32.const 4))))))
+    (call $read_file_bytes (local.get $p8)))
+  (func $__lang_write_bytes (param $p8 i64) (param $b8 i64) (result i64)
+    (if (i64.ne (call $write_file_bytes (local.get $p8) (local.get $b8)) (i64.const 0))
+      (then
+        (return (call $__lang_fail_str (i64.const %d) (local.get $p8)
+                  (i64.extend_i32_u (global.get $__lang_fail_sentinel))))))
+    (i64.const 0))|} read_pre read_post write_pre
+
+(* v0.1.585 (Q-016): write_file_bytes, checked. Each element must be a byte, and
+   the first one that is not is the interpreter's catchable failure, with its
+   message. What is on disk at that point is also the interpreter's (and C's):
+   they open the file -- truncating it -- and write element by element, so the
+   prefix before the bad element is written and nothing after it. This builds
+   the prefix in one pass and hands it to the host once, then fails. The buffer
+   is sized for the whole Vec and its header is then set to the prefix's length,
+   so the common case, every element a byte, is still one allocation and one
+   host call. *)
+let write_file_bytes_runtime_wasm ~pre ~post = Printf.sprintf {|
+  (func $__lang_write_file_bytes_v (param $p8 i64) (param $v8 i64) (result i64)
+    (local $n i32) (local $k i32) (local $x i64) (local $b i32) (local $r i64)
+    (local.set $n (i32.wrap_i64 (call $mere_vec_len (local.get $v8))))
+    (local.set $b (i32.wrap_i64 (call $__lang_bytes_alloc (i64.extend_i32_u (local.get $n)))))
+    (local.set $k (i32.const 0))
+    (block $end (loop $lp
+      (br_if $end (i32.ge_u (local.get $k) (local.get $n)))
+      (local.set $x (call $mere_vec_get (local.get $v8) (i64.extend_i32_u (local.get $k))))
+      (br_if $end (i32.or (i64.lt_s (local.get $x) (i64.const 0))
+                          (i64.gt_s (local.get $x) (i64.const 255))))
+      (i32.store8 (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $k))
+                  (i32.wrap_i64 (local.get $x)))
+      (local.set $k (i32.add (local.get $k) (i32.const 1)))
+      (br $lp)))
+    (i32.store (local.get $b) (local.get $k))
+    (local.set $r (call $write_file_bytes (local.get $p8) (i64.extend_i32_u (local.get $b))))
+    (if (i32.lt_u (local.get $k) (local.get $n))
+      (then (return (call $__lang_fail_num (i64.const %d) (local.get $x) (i64.const %d)))))
+    (local.get $r))|} pre post
+
 (* Phase 15.10: Map[R, K, V] runtime — per-K only (V is i32 for all).
    Layout: { keys:i32, values:i32, len:i32, cap:i32 } = 16 bytes.
    Linear scan; on reaching cap, allocate a new array via bump
@@ -10580,6 +10889,9 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   vec_used := false;
   vec_higher_order_used := false;
   strbuf_used := false;
+  bytebuf_used := false;
+  bytes_file_used := false;
+  write_file_bytes_used := false;
   logger_used := false;
   metrics_used := false;
   uses_threads := false;
@@ -11259,6 +11571,34 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     in
     if all = [] then "" else String.concat "\n" all ^ "\n"
   in
+  (* v0.1.585 (Q-016): the ByteBuf / read_bytes messages are interned HERE --
+     after every body has been emitted, so the flags are final, and before the
+     data section is built from the list, so the bytes are in it. Interning them
+     with the always-present messages in the prologue would put them in every
+     module; interning them at the call site would mint one copy per call. *)
+  let bytebuf_section =
+    if !bytebuf_used then
+      bytebuf_runtime_wasm
+        ~neg_msg:(fresh_str_offset "bytebuf_new: negative length")
+        ~get_pre:(fresh_str_offset "bytebuf_get: index ")
+        ~set_pre:(fresh_str_offset "bytebuf_set: index ")
+    else ""
+  in
+  let bytes_file_section =
+    if !bytes_file_used then
+      bytes_file_runtime_wasm
+        ~read_pre:(fresh_str_offset "read_bytes: ")
+        ~read_post:(fresh_str_offset ": No such file or directory")
+        ~write_pre:(fresh_str_offset "write_bytes: ")
+    else ""
+  in
+  let write_file_bytes_section =
+    if !write_file_bytes_used then
+      write_file_bytes_runtime_wasm
+        ~pre:(fresh_str_offset "write_file_bytes: byte value ")
+        ~post:(fresh_str_offset " out of range 0..255")
+    else ""
+  in
   let data_section =
     if !str_data_decls = [] then ""
     else String.concat "\n" (List.rev !str_data_decls) ^ "\n"
@@ -11583,6 +11923,9 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   let strbuf_section =
     (if !strbuf_used then strbuf_runtime_wasm else "")
     ^ (if !bytes_used then bytes_runtime_wasm else "")
+    ^ bytebuf_section
+    ^ (if !bytebuf_used && !bytes_used then bytebuf_bytes_runtime_wasm else "")
+    ^ bytes_file_section ^ write_file_bytes_section
     ^ (if !simd_used then simd_runtime_wasm () else "")
     ^ (if !bytes_vec_used then bytes_vec_bridge_runtime_wasm else "") in
   (* Phase 15.14: emit per-K key-eq helper + per-K map runtime for each K

@@ -1,8 +1,8 @@
 // ByteBuf's index surface, and the byte range a file write accepts.
 //
-// The bytes/ByteBuf pair is interp + C by scope (Q-015/Q-017), so LLVM and Wasm
-// refuse this at emit time and the harness counts it as unchecked there rather
-// than failing it.
+// The bytes/ByteBuf pair was interp + C until v0.1.585 (Q-016): LLVM and Wasm
+// refused this at emit time and the harness counted it as unchecked there. They
+// lower it now, and every row here has to agree on all four.
 //
 // Until v0.1.279 every one of these ended the program on C: bytebuf_get and
 // bytebuf_set printed to stderr and called exit(1), and the byte-range check in
@@ -11,7 +11,7 @@
 // with the default. The messages were already right; what was missing was that
 // a failure the language defines has to be a failure the language can catch.
 //
-// Execution mode: interp + C (LLVM / Wasm refuse ByteBuf at emit)
+// Execution mode: interp + C + LLVM + Wasm
 
 let i = fn (label: str) -> fn (t: unit -> int) ->
   print (label ++ " = " ++ str_of_int (try_or t (0 - 999)));

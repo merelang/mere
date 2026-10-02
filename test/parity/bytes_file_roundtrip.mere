@@ -1,0 +1,13 @@
+// read_bytes / write_bytes round-trip 512 bytes, every other one a zero, through
+// a ByteBuf (v0.1.585, Q-016): both were refused on LLVM and Wasm, and ByteBuf
+// itself too, so a binary tool written against bytes ran on two backends of four.
+// A zero byte is the case a str path would cut short.
+let p = "/tmp/mere_parity_bytes_rt.bin";
+let b = bytebuf_new 0;
+let rec go = fn (i: int) -> if i == 256 then () else let _ = bytebuf_push b (255 - i) in let _ = bytebuf_push b 0 in go (i + 1);
+let _ = go 0;
+let _ = write_bytes p (bytes_of_bytebuf b);
+let r = read_bytes p;
+let rb = bytebuf_of_bytes r;
+let rec chk = fn (i: int) -> fn (acc: int) -> if i == bytebuf_len rb then acc else chk (i + 1) (acc * 31 % 1000000007 + bytebuf_get rb i);
+print (str_of_int (bytes_len r) ++ " " ++ str_of_int (chk 0 7))
