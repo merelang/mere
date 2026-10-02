@@ -382,6 +382,43 @@ let rvmap_len = fn m ->
       if _mseen seen kk then go rest seen acc
       else go rest (Cons (kk, seen)) (acc + 1) in
   go (vec_get m 0) Nil 0;
+// v0.1.599: the same Map with `int` (or `bool`) keys, compared as words.
+// `str_eq` read an int key's value as a string's address and length, which is
+// why such a key was refused (codegen_riscv's check_map_key); mere-ruby's object
+// table is keyed by object id. codegen_riscv sends a Map whose key type is int
+// or bool here, by the Map's own type, so map_len and map_iter -- which take no
+// key -- go to the same family as map_set.
+let rec _mfind_i = fn node -> fn (k : int) ->
+  match node with
+  | Nil -> None
+  | Cons ((kk, vv), rest) -> if kk == k then Some vv else _mfind_i rest k;
+let rvmap_get_i = fn m -> fn k ->
+  match _mfind_i (vec_get m 0) k with Some v -> v | None -> fail "map_get: key not found";
+let rvmap_has_i = fn m -> fn k -> match _mfind_i (vec_get m 0) k with Some v -> true | None -> false;
+let rec _mdel_i = fn node -> fn (k : int) ->
+  match node with
+  | Nil -> Nil
+  | Cons ((kk, vv), rest) -> if kk == k then _mdel_i rest k else Cons ((kk, vv), _mdel_i rest k);
+let rvmap_delete_i = fn m -> fn k -> vec_set m 0 (_mdel_i (vec_get m 0) k);
+let rec _mseen_i = fn seen -> fn (k : int) -> match seen with Nil -> false | Cons (x, rest) -> if x == k then true else _mseen_i rest k;
+let rec _miter_i = fn node -> fn orig -> fn f -> fn seen ->
+  match node with
+  | Nil -> ()
+  | Cons ((kk, vv), rest) ->
+    if _mseen_i seen kk then _miter_i rest orig f seen
+    else
+      let cur = match _mfind_i orig kk with Some v -> v | None -> vv in
+      let _ = f kk cur in _miter_i rest orig f (Cons (kk, seen));
+let rvmap_iter_i = fn m -> fn f -> let l = vec_get m 0 in _miter_i (_mrev l Nil) l f Nil;
+// (top-level, not an inner `let rec`: an inner function would renumber every
+// later program's lifted helpers, and change their bytes for nothing)
+let rec _mlen_i = fn node -> fn seen -> fn acc ->
+  match node with
+  | Nil -> acc
+  | Cons ((kk, vv), rest) ->
+    if _mseen_i seen kk then _mlen_i rest seen acc
+    else _mlen_i rest (Cons (kk, seen)) (acc + 1);
+let rvmap_len_i = fn m -> _mlen_i (vec_get m 0) Nil 0;
 // --- softfloat, for float arithmetic on a backend with no float ----------
 // Spliced in HERE, at the end, and not next to the other host-service shims:
 // top-level order matters in Mere, and this library calls `not`, which the

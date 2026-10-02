@@ -354,6 +354,41 @@ let rec collect_fun (e : Ast.expr) =
 let rec resolve_ty (t : Ast.ty) : Ast.ty =
   match t with Ast.TyVar { Ast.link = Some t'; _ } -> resolve_ty t' | _ -> t
 
+(* v0.1.599: is this Map keyed by a word -- an int or a bool? Read off the Map's
+   own type, or off the type of a map_* builtin whose first argument is one, so
+   map_len and map_iter (no key argument) choose the same prelude family as
+   map_set. Such a Map goes to the rvmap_*_i helpers, which compare keys with
+   `==`. *)
+let word_ty (t : Ast.ty option) =
+  match t with
+  | Some t -> (match resolve_ty t with Ast.TyInt | Ast.TyBool -> true | _ -> false)
+  | None -> false
+
+let rec map_ty_word_keyed (t : Ast.ty) : bool =
+  match resolve_ty t with
+  | Ast.TyCon ("Map", [_; k; _]) ->
+    (match resolve_ty k with Ast.TyInt | Ast.TyBool -> true | _ -> false)
+  | Ast.TyArrow (a, _) -> map_ty_word_keyed a
+  | Ast.TyRef (_, _, i) -> map_ty_word_keyed i
+  | _ -> false
+
+let map_word_keyed (e : Ast.expr) =
+  match e.Ast.ty with
+  | Some t ->
+    map_ty_word_keyed t
+    (* a builtin's own type: its key parameter, for a Map whose type is open *)
+    || (match resolve_ty t with
+        | Ast.TyArrow (_, r) ->
+          (match resolve_ty r with Ast.TyArrow (k, _) -> word_ty (Some k) | _ -> false)
+        | _ -> false)
+  | None -> false
+
+(* the Map argument's type says, or else the key argument's *)
+let map_keyed_by_word (args : Ast.expr list) =
+  match args with
+  | m :: rest -> map_word_keyed m || (match rest with k :: _ -> word_ty k.Ast.ty | [] -> false)
+  | [] -> false
+
 let is_float_ty (t : Ast.ty option) =
   match t with Some t -> (match resolve_ty t with Ast.TyFloat -> true | _ -> false) | None -> false
 
@@ -382,16 +417,16 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
     (match v with
      | "map_new" -> "rvmap_new" :: v :: acc
      | "map_set" -> "rvmap_set" :: v :: acc
-     | "map_get" -> "rvmap_get" :: v :: acc
-     | "map_has" -> "rvmap_has" :: v :: acc
-     | "map_delete" -> "rvmap_delete" :: v :: acc
-     | "map_len" -> "rvmap_len" :: v :: acc
+     | "map_get" -> (if map_word_keyed e then "rvmap_get_i" else "rvmap_get") :: v :: acc
+     | "map_has" -> (if map_word_keyed e then "rvmap_has_i" else "rvmap_has") :: v :: acc
+     | "map_delete" -> (if map_word_keyed e then "rvmap_delete_i" else "rvmap_delete") :: v :: acc
+     | "map_len" -> (if map_word_keyed e then "rvmap_len_i" else "rvmap_len") :: v :: acc
      | "map_clear" -> "rvmap_clear" :: v :: acc
      | "map_compact" -> "rvmap_compact" :: v :: acc
      | "map_recycle" -> "rvmap_recycle" :: v :: acc
      | "map_bytes" -> "rvmap_bytes" :: v :: acc
      | "vec_bytes" -> "rvvec_bytes" :: v :: acc
-     | "map_iter" -> "rvmap_iter" :: v :: acc
+     | "map_iter" -> (if map_word_keyed e then "rvmap_iter_i" else "rvmap_iter") :: v :: acc
      | _ -> v :: acc)
   | Ast.Int_lit _ | Ast.Bool_lit _ | Ast.Unit_lit
   | Ast.Str_lit _ | Ast.Float_lit _ -> acc
@@ -749,6 +784,57 @@ let rec flatten_app (e : Ast.expr) =
   | Ast.App (f, a) -> let (h, args) = flatten_app f in (h, args @ [a])
   | _ -> (e, [])
 
+(* v0.1.599: A TOP-LEVEL FUNCTION AT ANOTHER ARITY, written as one this backend
+   has. A function here takes all its arguments at once, so `f a b` for an `f`
+   of three, or a bare `f` passed as a value, was refused ("no currying layer").
+   It is the closure the source means: the given arguments evaluated once, in
+   order, straight into a closure block, whose code is `fn p -> ... f a b p`.
+   The block is built the way a `fn` builds its own, but from the arguments'
+   values instead of from frame slots, so the enclosing function's frame is the
+   size it always was. The new nodes carry the types read off `f`'s own type,
+   so what reads a type downstream (float operators, Map keys) still can. An
+   over-application is the saturated call, then the extra arguments applied to
+   its result. *)
+let eta_counter = ref 0
+
+(* the captures (fresh name, the argument it holds), the first missing
+   parameter, and the lambda body: the rest of the missing parameters as `fn`s
+   around the saturated call *)
+let eta_partial (head : Ast.expr) (arity : int) (args : Ast.expr list)
+  : (string * Ast.expr) list * string * Ast.expr =
+  let rec peel n t =
+    if n = 0 then []
+    else match t with
+      | Some t' ->
+        (match resolve_ty t' with
+         | Ast.TyArrow (a, b) -> Some a :: peel (n - 1) (Some b)
+         | _ -> List.init n (fun _ -> None))
+      | None -> List.init n (fun _ -> None) in
+  let ptys = peel arity head.Ast.ty in
+  let fresh () = incr eta_counter; Printf.sprintf "__eta%d" !eta_counter in
+  let mk node ty = { head with Ast.node; Ast.ty } in
+  let given = List.map (fun (a : Ast.expr) -> (fresh (), a)) args in
+  let k = List.length args in
+  let missing = List.filteri (fun i _ -> i >= k) ptys |> List.map (fun t -> (fresh (), t)) in
+  let rec rest_ty n t =
+    if n = 0 then t
+    else match t with
+      | Some t' -> (match resolve_ty t' with Ast.TyArrow (_, b) -> rest_ty (n - 1) (Some b) | _ -> None)
+      | None -> None in
+  let call =
+    let all = List.map (fun (n, (a : Ast.expr)) -> mk (Ast.Var n) a.Ast.ty) given
+              @ List.map (fun (n, t) -> mk (Ast.Var n) t) missing in
+    snd (List.fold_left (fun (i, acc) arg ->
+      (i + 1, mk (Ast.App (acc, arg)) (rest_ty (i + 1) head.Ast.ty))) (0, head) all) in
+  match missing with
+  | [] -> invalid_arg "eta_partial: nothing missing"
+  | (p0, _) :: more ->
+    let body = List.fold_right (fun (n, t) (body : Ast.expr) ->
+      let fty = match t, body.Ast.ty with
+        | Some a, Some b -> Some (Ast.TyArrow (a, b)) | _ -> None in
+      mk (Ast.Fun (n, None, body)) fty) more call in
+    (given, p0, body)
+
 (* --- register allocation (M1) -------------------------------------------
    Named bindings (params + lets) live in callee-saved registers s1..s11.
    They are callee-saved, so a value in an s-register survives any nested
@@ -966,6 +1052,22 @@ let emit_binop op rd rs1 rs2 loc =
    backend emitted was uncatchable: a program that called an unimplemented extern
    inside a `try_or` was killed rather than handed the default. That is the whole
    mechanism a program has for coping with a target that cannot do something. *)
+(* v0.1.599: set when reachable code calls `try_or_msg`, whose handler is handed
+   the failure's message. Only then does the unwind keep the message (in a1),
+   so a program without one emits what it always did. *)
+let try_msg_used = ref false
+
+(* Is this position in the prelude glued in front of the program? Its `fail`s
+   stand in for builtins' failures (map_get, random_int, ...), whose messages
+   carry no `fail: ` tag on any backend. The prelude is the first
+   `Loc.glued_lines` lines of the main file -- the file the prelude's own
+   `rvmap_new` was parsed from -- so a line that low in an IMPORTED file is the
+   user's. *)
+let prelude_file : string option option ref = ref None
+let in_rv_prelude (loc : Loc.t) =
+  loc.Loc.line <= !Loc.glued_lines
+  && (match !prelude_file with Some f -> loc.Loc.file = f | None -> true)
+
 let emit_fail_from_a0 () =
   let l_abort = fresh_label ".noCatch" in
   li t0 (fail_frame_addr ());
@@ -979,6 +1081,7 @@ let emit_fail_from_a0 () =
   (* the catcher's own named bindings, which the thunk has been writing over *)
   Array.iteri (fun i r ->
     emit_word (enc_i (tor_off (tor_sreg i)) t1 (ldf3 ()) r 0x03)) sregs;
+  if !try_msg_used then emit_word (enc_i 0 a0 0 a1 0x13);  (* mv a1, a0 -- the message *)
   emit_word (enc_i (tor_off tor_default) t1 (ldf3 ()) a0 0x03);            (* default *)
   emit_word (enc_i (tor_off tor_catch) t1 (ldf3 ()) t1 0x03);              (* catch *)
   emit_word (enc_i 0 t1 0 zero 0x67);                    (* jalr x0, t1 *)
@@ -1026,13 +1129,14 @@ let check_map_key loc (key : Ast.expr) =
   | Some t ->
     (match resolve_ty t with
      | Ast.TyStr -> ()
+     | Ast.TyInt | Ast.TyBool -> ()   (* v0.1.599: the rvmap_*_i family *)
      | Ast.TyVar { Ast.link = None; _ } -> ()
      | other ->
        err loc (Printf.sprintf
          "RV32I: a Map key of type `%s` cannot be compared on this backend -- its \
-          Map is an assoc list that compares keys with `str_eq`, so only `str` \
-          keys are correct here (a tuple or constructor key would be compared by \
-          reading its first word as a length)" (Formatter.fmt_ty other)))
+          Map is an assoc list that compares keys with `str_eq` (or `==` for an \
+          int or bool key), so a tuple or constructor key would be compared by \
+          reading its first word as a length" (Formatter.fmt_ty other)))
 
 (* --- SIMD register residency (Q-112) -------------------------------------
    A u8x16 expression tree is evaluated in v1..v7 and boxed once, at its root,
@@ -1266,17 +1370,15 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
         | None ->
           if is_top v then begin
             let arity = List.length (fst (Hashtbl.find tops v)) in
-            if arity <> 1 then
-              err e.loc (Printf.sprintf
-                "RV32I: `%s` takes %d arguments and is used as a value -- only a \
-                 one-argument top-level function can be, because a partial \
-                 application of a curried one has to allocate a closure per \
-                 argument and this backend has no currying layer" v arity);
+            if arity <> 1 then begin
+              compile_eta env e arity []
+            end else begin
             Hashtbl.replace adapters v ();
             alloc_words t1 1;
             emit (LoadAddr (t0, "__adapt_" ^ v));
             emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);                       (* sw t0, 0(t1) *)
             emit_word (enc_i 0 t1 0 a0 0x13)                        (* mv a0, t1 *)
+            end
           end
           else if List.mem v Typer.coro_builtins then
             (* named, with the reason: the bare-metal runtime has one stack
@@ -1453,8 +1555,39 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     ) fnexpr_fvs;
     tail_pos := saved_tail;
     compile_expr env_f body
+  | Ast.Let_rec (bindings, body)
+    when List.for_all (fun (_, _, (v : Ast.expr)) ->
+           match v.node with Ast.Fun _ -> true | _ -> false) bindings ->
+    (* v0.1.599: a local `let rec f = ... and g = ...`, the single case above made
+       for a group (mere-ruby's number formatting has one). Every member's block
+       is allocated and bound first, then every member's captures are filled, so
+       a member that calls another reads that one's block pointer. *)
+    let members = List.map (fun (f, _, (v : Ast.expr)) ->
+      match v.node with
+      | Ast.Fun (param, _, fbody) -> let idx = !slot_ctr in incr slot_ctr; (f, idx, param, fbody, v)
+      | _ -> assert false) bindings in
+    let env_rec = List.fold_left (fun acc (f, idx, _, _, _) -> (f, idx) :: acc) env members in
+    let filled = List.map (fun (_, idx, param, fbody, (v : Ast.expr)) ->
+      let fvs =
+        dedup (free_vars_of { v with node = Ast.Fun (param, None, fbody) })
+        |> List.filter (fun n -> List.mem_assoc n env_rec) in
+      let label = fresh_label "__lam_" in
+      lambdas := (label, fvs, param, fbody) :: !lambdas;
+      alloc_words t1 (List.length fvs + 1);                          (* [code][cap...] *)
+      emit (LoadAddr (t0, label)); emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);
+      emit_word (enc_i 0 t1 0 a0 0x13); store_a0_to idx;            (* bind the member *)
+      (idx, fvs)) members in
+    List.iter (fun (idx, fvs) ->
+      load_to_a0 idx;
+      emit_word (enc_i 0 a0 0 t1 0x13);                             (* mv t1, a0 *)
+      List.iteri (fun i name ->
+        load_to_a0 (List.assoc name env_rec);
+        emit_word (enc_s ((i + 1) * wsz ()) a0 t1 (stf3 ()) 0x23)
+      ) fvs) filled;
+    tail_pos := saved_tail;
+    compile_expr env_rec body
   | Ast.Let_rec _ ->
-    err e.loc "RV32I: only single-binding local `let rec f = fn ...` is supported"
+    err e.loc "RV32I: a local `let rec` binds functions only (`let rec f = fn ...`)"
   | Ast.Str_lit s ->
     let label = fresh_label "str_" in
     string_data := (label, mk_str_block s) :: !string_data;
@@ -1740,7 +1873,22 @@ and compile_app env e =
     compile_indirect ~tail:tail_here env head args
   | Ast.Var f when is_top f ->
     let arity = List.length (fst (Hashtbl.find tops f)) in
-    if List.length args <> arity then compile_indirect ~tail:tail_here env head args
+    let k = List.length args in
+    if k < arity then begin
+      ignore tail_here;
+      compile_eta env head arity args
+    end
+    else if k > arity then begin
+      (* arity 1 goes through its adapter, as it always has *)
+      if arity = 1 then compile_indirect ~tail:tail_here env head args
+      else begin
+        let sat = List.filteri (fun i _ -> i < arity) args
+        and extra = List.filteri (fun i _ -> i >= arity) args in
+        let sat_e = List.fold_left (fun acc (a : Ast.expr) ->
+          { e with Ast.node = Ast.App (acc, a); Ast.ty = None }) head sat in
+        compile_indirect ~tail:tail_here env sat_e extra
+      end
+    end
     else begin
       let argv = Array.of_list args in
       (* args 9+ travel on the caller's stack, which a frame teardown would
@@ -1831,7 +1979,17 @@ and compile_app env e =
     compile_expr env (List.hd args);
     emit_word (enc_i (wsz ()) a0 (ldf3 ()) a0 0x03)                     (* lw a0, 4(a0) *)
   | Ast.Var "fail" when List.length args = 1 ->
-    compile_expr env (List.hd args);                     (* a0 = msg str *)
+    (* v0.1.599: a program that can READ the message -- one that calls
+       try_or_msg -- reads it with the builtin's `fail: ` tag, as on every other
+       backend. (A program that cannot, keeps the bytes it always had; its
+       uncaught message is printed untagged, as before.) *)
+    let msg = List.hd args in
+    let msg =
+      if !try_msg_used && not (in_rv_prelude e.Ast.loc) then
+        { msg with Ast.node = Ast.Bin (Ast.Concat, { msg with Ast.node = Ast.Str_lit "fail: "; Ast.ty = Some Ast.TyStr }, msg);
+                   Ast.ty = Some Ast.TyStr }
+      else msg in
+    compile_expr env msg;                                (* a0 = msg str *)
     emit_fail_from_a0 ()
   (* try_or f default : run the thunk; if it fails, the value is `default`.
      Nesting works because the record keeps the PREVIOUS frame pointer and
@@ -1889,6 +2047,45 @@ and compile_app env e =
     emit (Jal (zero, l_after));
     emit (Label l_catch);
     (* fail restored sp/fp, put the default in a0, and uninstalled *)
+    emit (Label l_after)
+  (* v0.1.599: try_or_msg f h -- try_or with a handler where the default was. The
+     record's default word holds the closure `h`, and the unwind leaves the
+     message in a1 (see try_msg_used), so the catch path is one call: h msg. *)
+  | Ast.Var "try_or_msg" when List.length args = 2 ->
+    let l_catch = fresh_label ".catch" in
+    let l_after = fresh_label ".tryEnd" in
+    alloc_words t1 tor_words;
+    push t1;
+    li t0 (fail_frame_addr ());
+    emit_word (enc_i (0 * wsz ()) t0 (ldf3 ()) t2 0x03);                    (* lw t2, 0(t0) — prev *)
+    emit_word (enc_s (tor_off tor_prev) t2 t1 (stf3 ()) 0x23);              (* prev *)
+    emit (LoadAddr (t0, l_catch));
+    emit_word (enc_s (tor_off tor_catch) t0 t1 (stf3 ()) 0x23);             (* &catch *)
+    pop t1;
+    emit_word (enc_s (tor_off tor_sp) sp t1 (stf3 ()) 0x23);                (* sp *)
+    emit_word (enc_s (tor_off tor_fp) fp t1 (stf3 ()) 0x23);                (* fp *)
+    Array.iteri (fun i r ->
+      emit_word (enc_s (tor_off (tor_sreg i)) r t1 (stf3 ()) 0x23)) sregs;
+    push t1;
+    compile_expr env (List.nth args 1);                  (* a0 = handler closure *)
+    pop t1;
+    emit_word (enc_s (tor_off tor_default) a0 t1 (stf3 ()) 0x23);           (* handler *)
+    li t0 (fail_frame_addr ());
+    emit_word (enc_s (0 * wsz ()) t1 t0 (stf3 ()) 0x23);                    (* install *)
+    compile_expr env (List.nth args 0);                  (* a0 = thunk closure *)
+    li a1 0;                                             (* the unit argument *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t1 0x03);                    (* lw t1, 0(a0) — code *)
+    emit_word (enc_i 0 t1 0 ra 0x67);                    (* jalr ra, t1 *)
+    li t0 (fail_frame_addr ());
+    emit_word (enc_i (0 * wsz ()) t0 (ldf3 ()) t1 0x03);                    (* lw t1, 0(t0) — rec *)
+    emit_word (enc_i (0 * wsz ()) t1 (ldf3 ()) t2 0x03);                    (* lw t2, 0(t1) — prev *)
+    emit_word (enc_s (0 * wsz ()) t2 t0 (stf3 ()) 0x23);                    (* sw prev, 0(&frame) *)
+    emit (Jal (zero, l_after));
+    emit (Label l_catch);
+    (* fail restored sp/fp and the s-registers, uninstalled the record, and left
+       a0 = the handler, a1 = the message *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t1 0x03);                    (* lw t1, 0(a0) — code *)
+    emit_word (enc_i 0 t1 0 ra 0x67);                    (* jalr ra, t1 *)
     emit (Label l_after)
   (* exit code : terminate with the status the program chose. Never returns.
      The same ecall `fail` ends with, with a0 taken from the argument instead
@@ -2493,10 +2690,13 @@ and compile_app env e =
   | Ast.Var "map_set" when List.length args = 3 ->
     check_map_key e.Ast.loc (List.nth args 1); call_top env "rvmap_set" args
   | Ast.Var "map_get" when List.length args = 2 ->
-    check_map_key e.Ast.loc (List.nth args 1); call_top env "rvmap_get" args
+    check_map_key e.Ast.loc (List.nth args 1);
+    call_top env (if map_keyed_by_word args then "rvmap_get_i" else "rvmap_get") args
   | Ast.Var "map_has" when List.length args = 2 ->
-    check_map_key e.Ast.loc (List.nth args 1); call_top env "rvmap_has" args
-  | Ast.Var "map_len" when List.length args = 1 -> call_top env "rvmap_len" args
+    check_map_key e.Ast.loc (List.nth args 1);
+    call_top env (if map_keyed_by_word args then "rvmap_has_i" else "rvmap_has") args
+  | Ast.Var "map_len" when List.length args = 1 ->
+    call_top env (if map_keyed_by_word args then "rvmap_len_i" else "rvmap_len") args
   | Ast.Var "map_clear" when List.length args = 1 -> call_top env "rvmap_clear" args
   | Ast.Var "map_compact" when List.length args = 1 -> call_top env "rvmap_compact" args
   | Ast.Var "map_recycle" when List.length args = 1 -> call_top env "rvmap_recycle" args
@@ -2509,8 +2709,10 @@ and compile_app env e =
     compile_expr env (List.hd args);
     emit_word (enc_i 0 zero 0 a0 0x13)                   (* unit *)
   | Ast.Var "map_delete" when List.length args = 2 ->
-    check_map_key e.Ast.loc (List.nth args 1); call_top env "rvmap_delete" args
-  | Ast.Var "map_iter" when List.length args = 2 -> call_top env "rvmap_iter" args
+    check_map_key e.Ast.loc (List.nth args 1);
+    call_top env (if map_keyed_by_word args then "rvmap_delete_i" else "rvmap_delete") args
+  | Ast.Var "map_iter" when List.length args = 2 ->
+    call_top env (if map_keyed_by_word args then "rvmap_iter_i" else "rvmap_iter") args
   | Ast.Var "show" when List.length args = 1 ->
     (* polymorphic show: only the int case is supported (all the self-hosted
        compiler's uses are `show <int>`); resolve via the arg's type *)
@@ -2595,6 +2797,20 @@ and call_top env name args =
 
 (* general application: evaluate the head to a closure value and apply the
    arguments one at a time via indirect (curried) calls *)
+(* v0.1.599: see eta_partial. The block is [code][arg...], filled the way the
+   `Fun` case fills one from its captures. *)
+and compile_eta env head arity args =
+  let (given, param, body) = eta_partial head arity args in
+  let label = fresh_label "__lam_" in
+  lambdas := (label, List.map fst given, param, body) :: !lambdas;
+  let k = List.length given in
+  List.iter (fun (_, a) -> compile_expr env a; push a0) given;
+  alloc_words t1 (k + 1);                                         (* [code][arg...] *)
+  for i = k - 1 downto 0 do pop t0; emit_word (enc_s ((i + 1) * wsz ()) t0 t1 (stf3 ()) 0x23) done;
+  emit (LoadAddr (t0, label));
+  emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);              (* sw t0, 0(t1) *)
+  emit_word (enc_i 0 t1 0 a0 0x13)                                (* mv a0, t1 *)
+
 and compile_indirect ?(tail = false) env head args =
   compile_expr env head;                               (* a0 = closure *)
   let last = List.length args - 1 in
@@ -4072,6 +4288,9 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   List.iter visit (vars_in main_body []);
   List.iter (fun (_, init) -> List.iter visit (vars_in init [])) !globals;
   (match bare_entry with Some n -> visit n | None -> ());
+  try_msg_used := Hashtbl.mem reachable "try_or_msg";
+  prelude_file := (match Hashtbl.find_opt tops "rvmap_new" with
+                   | Some (_, body) -> Some body.Ast.loc.Loc.file | None -> None);
   (* layout: _start, runtime, main, reachable fns, then string rodata *)
   emit_start ();
   emit_print_int ();

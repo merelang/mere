@@ -1,0 +1,20 @@
+// v0.1.599: top-level functions at another arity on RISC-V -- partially
+// applied, passed bare, and applied to more arguments than they take.
+let add3 = fn (a: int) -> fn (b: int) -> fn (c: int) -> a * 100 + b * 10 + c;
+let pick = fn (k: int) -> fn (x: int) -> if k > 0 then fn (y: int) -> x + y else fn (y: int) -> x - y;
+let rec map = fn (f: int -> int) -> fn (l: int list) -> match l with
+  | Nil -> Nil | Cons (h, t) -> Cons (f h, map f t);
+let rec show_l = fn (l: int list) -> match l with
+  | Nil -> "" | Cons (h, t) -> str_of_int h ++ " " ++ show_l t;
+let twice = fn (g: int -> int -> int -> int) -> g 1 2 3 + g 4 5 6;
+let counter = vec_new ();
+let _ = vec_push counter 0;
+let tick = fn (u: unit) -> let _ = vec_set counter 0 (vec_get counter 0 + 1) in vec_get counter 0;
+let _ = print (show_l (map (add3 1 2) (Cons (3, Cons (4, Nil)))));
+let p = add3 (tick ()) in
+let q = p (tick ()) in
+let _ = print_int (q 7) in
+let _ = print_int (twice add3) in
+let _ = print_int (pick 1 10 5) in
+let _ = print_int (pick 0 10 5) in
+print_int (vec_get counter 0)
