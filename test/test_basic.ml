@@ -3975,7 +3975,8 @@ let () =
        "let rec ev = fn n -> if n == 0 then 1 else od (n - 1)\n\
         and od = fn n -> if n == 0 then 0 else ev (n - 1)\n\
         in ev 4")
-    "long long mu_ev(long long);\nlong long mu_od(long long);";
+    (* v0.1.592: internal linkage, a standalone program's too *)
+    "static long long mu_ev(long long);\nstatic long long mu_od(long long);";
   assert_c "codegen: nested fn lifted to top level with captures"
     (* Previously rejected; Phase 4.8 lifts inner fns via defunctionalization. *)
     (codegen

@@ -4,6 +4,38 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.592 — 2026-10-03
+
+_The C a standalone program compiles to has internal linkage, and a curried function's closure stages call its uncurried twin: mere-ruby's C is 40 MB (was 93), clang -O2 builds it in 54 s (was 185) in 1.4 GB (was 6.9)._
+
+A top-level function `f = fn a -> fn b -> fn c -> body` is emitted twice: as
+`f__direct(a, b, c)`, which every saturated call uses, and as the closure chain
+that a partial application or a first-class use goes through. The chain copied
+`body` into every stage and every stage's two-argument entry -- a number of
+copies that grows like the Fibonacci numbers with the arity (6 for three
+parameters, 56 for ten) -- and in a standalone program all of it had external
+linkage, so clang kept and optimised every copy whether anything reached it or
+not. mere-ruby's C was 92.9 MB, 59 MB of it closure stages; clang -O2 took 185 s
+and 6.9 GB and produced a 24 MB binary. Developers waited on clang for over 90%
+of a build.
+
+- **Internal linkage.** The program's own definitions -- top-level functions,
+  their stages, their `_as_value` constants -- are `static` in a standalone
+  program as they already were in a library: nothing outside the one
+  translation unit links to them. Except under `-g`, where a debugger breaks on a
+  function by its name and an unreferenced static one is dropped even at -O0
+  (`scripts/debug_info.sh` caught it).
+- **The chain calls the twin.** The curried form's innermost body is now a
+  saturated call of the function itself, which the emitter sends to the twin, so
+  the body exists once. Only where the twin takes no region arguments and no
+  parameter is named like the function.
+
+mere-ruby: C 92.9 → 40.2 MB, clang -O2 185 → 54 s, 6.9 → 1.4 GB, binary 24 → 5.4
+MB, its emit 12 → 7.8 s; its corpus matches Ruby on 276 of 276. parity,
+examples_parity, debug_info, lib_check and downstream_cc_check (23 programs) pass.
+
+---
+
 ## v0.1.591 — 2026-10-03
 
 _A function whose result is a free type, used at two types, is instantiated at both: the C build of such a program no longer fails in clang._

@@ -65,9 +65,6 @@ let lib_stem : string ref = ref "lib"
    way -- two derivations of one list is how the two drift apart. *)
 let lib_header : string ref = ref ""
 
-(* internal-linkage prefix for definitions that are external symbols in a
-   standalone program but must not leak out of a library *)
-let lib_static () = if !lib_mode then "static " else ""
 
 (* v0.1.311 + Q-127: WHERE A CONTAINER WHOSE REGION IS `__heap` IS ALLOCATED.
 
@@ -201,6 +198,19 @@ let inner_region_args (name : string) (rps : string list) (use_ty : Ast.ty optio
         | Some actual -> region_var_of actual
         | None -> heap_container_region ()) rps in
     (rargs, List.for_all2 (fun r a -> List.mem r !current_region_params && a = r) rps rargs)
+
+(* internal linkage for the program's own definitions. It was library-only --
+   a standalone program's top-level functions, their curried stages and their
+   `_as_value` constants were external symbols -- and nothing outside the one
+   translation unit ever links to them. External, clang must keep every one of
+   them; mere-ruby's 92 MB of C held 58 MB of closure stages no call reaches, and
+   clang -O2 took 185 s and 6.9 GB on it. Internal (v0.1.592), it drops what is
+   unreached: 49 s, 2.5 GB, a 6.5 MB binary instead of 24. The name is kept
+   because the library boundary is where the rule started.
+   Except under `-g`: a debug build is for breaking on a function by its name,
+   and an internal `mu_twice` that nothing calls (callers use its `__direct`
+   twin) is dropped even at -O0 -- scripts/debug_info.sh found that. *)
+let lib_static () = if !lib_mode || !debug_file = None then "static " else ""
 
 (* A position that names a file is not from the source being compiled — it came
    from the prelude or from an `import`, and claiming it as a line of this file
@@ -5495,6 +5505,42 @@ let with_var_types (bindings : (string * Ast.ty) list) (f : unit -> 'a) : 'a =
   current_var_types := prev;
   r
 
+(* v0.1.592: THE CURRIED FORM OF A FUNCTION THAT HAS AN UNCURRIED TWIN CALLS
+   THE TWIN. `f = fn a -> fn b -> fn c -> body` was emitted twice over: once as
+   `f__direct(a, b, c)` and once as the closure chain a partial application or a
+   first-class use goes through -- and that chain copied `body` into every stage
+   and every stage's two-argument entry, a number of copies that grows like the
+   Fibonacci numbers with the arity (6 for three parameters, 56 for ten).
+   mere-ruby's C was 92 MB, 59 MB of it closure stages. The chain's innermost
+   body is now `f a b c` -- a saturated call, which the emitter sends to the
+   twin -- so the body exists once. Only where the twin takes no region
+   arguments (a region parameter of the chain would have to be threaded to it)
+   and no parameter is named like the function. *)
+let curried_body_via_direct (f : fn_decl) : Ast.expr =
+  match Hashtbl.find_opt direct_fns f.name with
+  | Some info
+    when List.length info.d_params >= 2
+         && Typer.region_params_for (source_name_of f.name) = []
+         && not (List.mem_assoc f.name info.d_params) ->
+    let mk ty node = { Ast.loc = f.body.Ast.loc; ty = Some ty; node } in
+    let rec arrow = function
+      | [] -> info.d_ret
+      | (_, t) :: rest -> Ast.TyArrow (t, arrow rest) in
+    let call =
+      let rec apply head rest =
+        match rest with
+        | [] -> head
+        | (p, t) :: more -> apply (mk (arrow more) (Ast.App (head, mk t (Ast.Var p)))) more in
+      apply (mk (arrow info.d_params) (Ast.Var f.name)) info.d_params in
+    let rec rebuild (e : Ast.expr) k =
+      if k = 0 then Some call
+      else match e.Ast.node with
+        | Ast.Fun (p, t, inner) ->
+          Option.map (fun b -> { e with Ast.node = Ast.Fun (p, t, b) }) (rebuild inner (k - 1))
+        | _ -> None in
+    (match rebuild f.body (List.length info.d_params - 1) with Some b -> b | None -> f.body)
+  | _ -> f.body
+
 let emit_fn (f : fn_decl) : string =
   (* Phase 22.5: switch inner_lifts to this host's scope before
      emitting body, so call-site dispatch finds the right local
@@ -5502,7 +5548,7 @@ let emit_fn (f : fn_decl) : string =
   set_inner_lifts_for_host f.name;
   let body_c =
     with_var_types [(f.param, f.param_ty)] (fun () ->
-      with_expected_ty f.return_ty (fun () -> emit_expr f.body))
+      with_expected_ty f.return_ty (fun () -> emit_expr (curried_body_via_direct f)))
   in
   (* v0.1.55: the parameter declaration must go through c_safe_name, like
      format_param / emit_lifted_fn already do — otherwise a top-level curried
@@ -14536,7 +14582,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      a Vec, walk body and unify value.ty with every `Var name`.ty
      encountered. unify chains the tyvars together, so once any one is
      resolved (by e.g. vec_push), all others share that resolution. *)
-  let resolve_vec_let_types (root : Ast.expr) : unit =
+    let resolve_vec_let_types (root : Ast.expr) : unit =
     let unify_with_value (vt : Ast.ty) (ut : Ast.ty) : unit =
       try Typer.unify Loc.dummy vt ut with _ -> ()
     in
@@ -15246,12 +15292,12 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     List.map (fun (f : fn_decl) ->
       let cstruct = closure_struct_name f.param_ty f.return_ty in
       Printf.sprintf "%sconst %s %s_as_value;"
-        (if !lib_mode then "static " else "extern ")
+        (if lib_static () = "" then "extern " else "static ")
         cstruct (c_safe_name f.name))
       fns
     @ List.map (fun (name, a, b) ->
         Printf.sprintf "%sconst %s __ext_%s_as_value;"
-          (if !lib_mode then "static " else "extern ")
+          (if lib_static () = "" then "extern " else "static ")
           (closure_struct_name a b) name)
         extern_val_pairs
   in

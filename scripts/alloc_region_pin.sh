@@ -78,7 +78,7 @@ MERE
 # somehow reached a block arena would mean something stranger than either side
 # of this trade.
 checked=$((checked + 1))
-if ! grep -q '^long long mu_f(long long mu_n) {' "$TMP/invisible.c"; then
+if ! grep -q '^\(static \)\{0,1\}long long mu_f(long long mu_n) {' "$TMP/invisible.c"; then
   echo "FAIL alloc_region_pin: \`f\` no longer has the signature this pin reads."
   echo "  Expected \`long long mu_f(long long mu_n)\` — a function with NO hidden"
   echo "  region parameter. If quantification changed, that is OPEN QUESTION Q-134"
