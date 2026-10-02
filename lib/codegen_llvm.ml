@@ -905,8 +905,19 @@ let coro_runtime_llvm ~(stack_bytes : int) =
    the C reserved-name list in docs/reserved-names.md, one namespace over. *)
 let llvm_reserved_locals = [ "entry" ]
 
+(* v0.1.596: and the registers. `fresh_reg` names temporaries `%t0`, `%t1`, ...,
+   so a parameter written `t0` was defined twice in the same function (mpng's
+   `chunk out t0 t1 t2 t3`: "multiple definition of local value named 't0'").
+   The suffix has a dot, which no Mere identifier has, so it cannot meet another
+   name. *)
+let is_reg_name (n : string) : bool =
+  String.length n >= 2 && n.[0] = 't'
+  && String.for_all (fun c -> c >= '0' && c <= '9') (String.sub n 1 (String.length n - 1))
+
 let llvm_safe_local (n : string) : string =
-  if List.mem n llvm_reserved_locals then n ^ "_" else n
+  if List.mem n llvm_reserved_locals then n ^ "_"
+  else if is_reg_name n then n ^ ".u"
+  else n
 
 (* SSA register / basic-block label counter. Reset per emit_program. *)
 let reg_counter = ref 0
@@ -1028,10 +1039,11 @@ let rec ty_tag (t : Ast.ty) : string =
     (* Phase 19.x: for borrow types `&[mode] R T`, use the tag of the inner T.
        Same policy as codegen_c. *)
     ty_tag inner
-  | other ->
-    raise (Codegen_error (Loc.dummy,
-      Printf.sprintf "unsupported LLVM codegen type element: %s%s" (Ast.pp_ty other)
-        (if Sys.getenv_opt "MERE_TYTAG_TRACE" <> None then "\n" ^ Printexc.raw_backtrace_to_string (Printexc.get_callstack 30) else "")))
+  (* v0.1.596: a type variable that survives to here is the result of a function
+     that never returns, or one nothing constrains; no operation inspects such a
+     value. Erased to int, as `Monomorph.ty_tag` does and as `llvm_ty_of` already
+     lowers it (i64) -- this was the one place that still refused. *)
+  | Ast.TyVar _ | Ast.TyParam _ -> "int"
 
 let tuple_struct_name (elems : Ast.ty list) : string =
   "tuple_" ^ String.concat "_" (List.map ty_tag elems)
@@ -2263,7 +2275,7 @@ let specialize_single_use_local_fns e =
 let resolve_fn_types (skels : fn_skel list) (root : Ast.expr) : fn_decl list =
   let decls, insts =
     of_monomorph (fun () ->
-      Monomorph.resolve_fn_types ~mangle:mangled_inst_name_llvm skels root) in
+      Monomorph.resolve_fn_types ~mangle:mangled_inst_name_llvm ~recover_promoted:true skels root) in
   multi_inst_fns_llvm := insts;
   (* Q-127: instance -> source, from the table that made the names. *)
   Hashtbl.reset source_of_instance_llvm;
@@ -2350,13 +2362,18 @@ let lookup_var_ty_llvm (body : Ast.expr) (name : string) : Ast.ty =
 (* Phase 25.3: lift inner Let-Fun / Let_rec to top-level lifted fns.
    Same algorithm as codegen_c's lift_inner_fns, adapted to populate
    inner_lifts_by_host_llvm + lifted_fns_llvm. *)
-let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : unit =
+let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list)
+    (main_body : Ast.expr) : unit =
   Hashtbl.reset inner_lifts_llvm;
   Hashtbl.reset inner_lifts_by_host_llvm;
   inner_fn_counter_llvm := 0;
   lifted_fns_llvm := [];
   let builtin_names = List.map fst Typer.initial_env in
-  let known = ref (toplevel_names @ builtin_names) in
+  (* v0.1.596: and the externs, as the C backend has had since v0.1.61: an inner
+     fn that calls one took it for a capture and passed a local that does not
+     exist ("use of undefined value '%tcp_write'"). *)
+  let extern_names = Hashtbl.fold (fun k _ acc -> k :: acc) extern_fn_decls_llvm [] in
+  let known = ref (toplevel_names @ builtin_names @ extern_names) in
   let current_host = ref "" in
   (* Every top-level fn body, used to discover the concrete type at which a
      local (let-generalized) inner fn is actually applied. *)
@@ -2498,6 +2515,11 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list) : un
        IR only. *)
     current_host := unmu f.name;
     walk f.param [f.param] f.body) fns;
+  (* v0.1.596: and the `let rec`s written in the program's own body, under the
+     synthetic host "$main" as the C backend has done -- they were refused ("let
+     rec inside an expression"), which was the first wall for mpng and medit2. *)
+  current_host := "$main";
+  walk "" [] main_body;
   (* Phase 45 (DEFERRED §8): compute the transitive capture closure to handle
      mutual references between inner-lifted fns (same algorithm as codegen_c).
      See there for details. *)
@@ -2663,7 +2685,18 @@ let collect_tuple_shapes (root : Ast.expr) (fns : fn_decl list) : Ast.ty list li
   let rec walk_ty (t : Ast.ty) =
     match Ast.walk t with
     | Ast.TyTuple ts ->
-      if List.for_all ty_is_concrete ts then add ts;
+      (* v0.1.596: a tuple holding a type variable too -- `let (f, g) = (fn x ->
+         x, ...)` -- now that ty_tag erases one to int: its name and fields are
+         the erased ones, and it was used without being declared. Only when
+         nothing in it is a type constructor, whose erased instance (a
+         `list_tuple_int_int`) would need declaring in turn. *)
+      let rec plain t = match Ast.walk t with
+        | Ast.TyCon _ -> false
+        | Ast.TyTuple ts -> List.for_all plain ts
+        | Ast.TyArrow (a, b) -> plain a && plain b
+        | Ast.TyRef (_, _, i) -> plain i
+        | _ -> true in
+      if List.for_all ty_is_concrete ts || List.for_all plain ts then add ts;
       List.iter walk_ty ts
     | Ast.TyArrow (a, b) -> walk_ty a; walk_ty b
     | Ast.TyCon (_, args) -> List.iter walk_ty args
@@ -16228,7 +16261,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     Monomorph.multi_names !multi_inst_fns_llvm
   in
   let toplevel_names = mangled_names @ multi_base_names in
-  lift_inner_fns_llvm toplevel_names fns;
+  lift_inner_fns_llvm toplevel_names fns body_expr;
   Hashtbl.reset inner_direct_llvm;
   let inner_direct_order =
     List.filter_map (fun lf ->
@@ -16269,11 +16302,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      view of whichever host was emitted last -- the lifted helpers run just
      above -- so a local `let atan2 = ...` inside some fn made every `atan2`
      in main call that local instead of the builtin (2.0 for `atan2 1.0 1.0`).
-     main's own local fns are not lifted through this table at all
-     (lift_inner_fns_llvm walks the top-level fns only), so the right view here
-     is the empty one. Found by the fma parity case (Q-176), which binds a
-     local `fma` and uses the builtin elsewhere in the same file. *)
-  Hashtbl.reset inner_lifts_llvm;
+     main's view is its own lifts (host "$main", v0.1.596) and no other host's.
+     Found by the fma parity case (Q-176), which binds a local `fma` and uses the
+     builtin elsewhere in the same file. *)
+  set_inner_lifts_for_host_llvm "$main";
   emit_instr "entry:";
   emit_instr
     "  call void @__lang_region_init(ptr @__lang_default_region, i64 4194304)";

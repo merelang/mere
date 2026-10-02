@@ -1160,6 +1160,7 @@ type spec_use = {
 }
 
 let resolve_fn_types ?(mangle = mangled_inst_name) ?(recover_erased = false)
+    ?(recover_promoted = false)
     (skels : fn_skel list) (root : Ast.expr)
   : fn_decl list * inst_table =
   (* Phase 21.1 (DEFERRED §1.7) + 21.2 multi-pass:
@@ -1508,7 +1509,11 @@ let resolve_fn_types ?(mangle = mangled_inst_name) ?(recover_erased = false)
         | _ -> ()
       end
     in
-    if recover_erased then
+    (* v0.1.596: [recover_promoted] alone is this without the concrete uses at
+       the end, for the LLVM backend: it names an erased instance at a residual
+       call site like the others, and finds every concrete one it calls through
+       its own table, so those would only add functions nothing calls. *)
+    if recover_erased || recover_promoted then
       List.iter (fun s ->
         (* v0.1.591: a fn resolved at ONE type that also has a residual use --
            `raise_exc : str -> 'a` (it ends in `fail`) resolved at `v` from one
@@ -1548,7 +1553,8 @@ let resolve_fn_types ?(mangle = mangled_inst_name) ?(recover_erased = false)
                this pass (or the recovery below) added calls other
                multi-instantiated fns at types the main fixpoint never saw *)
             (concrete_arrows_of_uses ~residual:true (uses_in_emitted s.sname)
-             @ concrete_arrows_of_uses (uses_in_emitted s.sname))) skels;
+             @ (if recover_erased then concrete_arrows_of_uses (uses_in_emitted s.sname)
+                else []))) skels;
     !grew
   in
   let changed = ref true in
