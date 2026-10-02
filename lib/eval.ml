@@ -131,13 +131,15 @@ type value =
        iterates deterministically). Stored newest-first for O(1) prepend
        on insert; readers reverse it. The Hashtbl gives O(1) lookup, so a
        map fills in O(n) rather than the old O(n^2) (`@ [k]` append). *)
-  | V_channel of value Queue.t * Mutex.t * Condition.t * bool ref
+  | V_channel of value Queue.t * Mutex.t * Condition.t * bool ref * int list ref
   | V_file of in_channel                (* v0.1.59: streaming file read *)
   | V_rwfile of Unix.file_descr         (* v0.1.115: read/write handle (file_openrw / file_pwrite / file_pread) *)
     (* v0.1.47: the bool ref is the "closed" flag for graceful shutdown.
        channel_close sets it; channel_recv_opt returns None once the
        channel is closed and drained (workers can then return and be
        joined). *)
+    (* v0.1.601: the int list is the threads registered as its senders
+       (channel_sender), in the order they were registered; see senders_done. *)
     (* `Channel[T]` — blocking FIFO queue for cross-thread communication
        (Q-012 step 3a, concurrency narrowing Sub-Q C). Guarded by a
        Mutex; channel_recv blocks on the Condition until an element is
@@ -3138,6 +3140,51 @@ let thr_install_hook () =
   in
   if need && Sys.getenv_opt "MERE_THREAD_REPORT" <> None then at_exit thr_report
 
+(* v0.1.601 (E): A CHANNEL THAT KNOWS WHO SENDS ON IT. A channel did not know
+   its senders, so a receive whose sender had failed waited forever -- since
+   v0.1.586 a failed thread no longer takes the program down with it, and a
+   receiver waiting on its message was left with nothing to wake it.
+   `channel_sender ch h` registers thread `h` as a sender of `ch`; once every
+   registered sender has finished and the channel is empty, a receive stops
+   waiting as it does on a closed channel -- `channel_recv` fails naming the
+   failed sender (the first registered, with its message) or saying all of them
+   finished, and `channel_recv_opt` / `channel_recv_timeout` answer None. A
+   channel with none registered behaves as before.
+
+   [thr_watch]: id -> the channels to wake when that thread ends. *)
+let thr_watch : (int, (Mutex.t * Condition.t) list) Hashtbl.t = Hashtbl.create 8
+
+(* None: no sender registered, or one still running. Some None: all finished.
+   Some (Some why): all finished, and the first registered that failed, failed
+   so. *)
+let senders_done (ids : int list) : string option option =
+  if ids = [] then None
+  else thr_guard (fun () ->
+    let st = List.map (fun id ->
+      match Hashtbl.find_opt thr_status id with
+      | Some (label, w) -> Some (label, !w)
+      | None -> None) ids in
+    if List.exists (function
+        | Some (_, (T_finished | T_died _)) -> false
+        | _ -> true) st then None
+    else Some (List.find_map (function
+        | Some (label, T_died why) -> Some (label ^ " failed: " ^ why)
+        | _ -> None) st))
+
+let ended closed senders = !closed || senders_done !senders <> None
+
+let recv_end_message closed senders =
+  if !closed then "channel_recv: channel is closed and empty"
+  else match senders_done !senders with
+    | Some (Some f) -> "channel_recv: sender " ^ f
+    | _ -> "channel_recv: every sender has finished and the channel is empty"
+
+(* the thread with this id has ended: wake whoever waits on a channel it sends on *)
+let thr_wake (id : int) =
+  let ws = thr_guard (fun () ->
+    match Hashtbl.find_opt thr_watch id with Some l -> l | None -> []) in
+  List.iter (fun (m, c) -> Mutex.lock m; Condition.broadcast c; Mutex.unlock m) ws
+
 let builtin_spawn =
   V_builtin ("spawn", fun clos ->
     (* v0.1.582: the OwnedVecs the closure captures are given away *)
@@ -3172,6 +3219,7 @@ let builtin_spawn =
       match !apply_value_ref clos V_unit with
       | v ->
         thr_set_wait T_finished;
+        thr_wake me;
         if vclock_on then sched_drop_live ();
         v
       | exception e ->
@@ -3186,6 +3234,7 @@ let builtin_spawn =
            daemon, which does not exit: a handler whose handle was dropped
            failed in silence. `join` still raises the failure again. *)
         thr_guard (fun () -> thr_tell me label "" why);
+        thr_wake me;
         if vclock_on then sched_drop_live ();
         raise e)
     in
@@ -3442,12 +3491,12 @@ let builtin_coro_scan_ints =
 
 let builtin_channel_new =
   V_builtin ("channel_new", fun _ ->
-    V_channel (Queue.create (), Mutex.create (), Condition.create (), ref false))
+    V_channel (Queue.create (), Mutex.create (), Condition.create (), ref false, ref []))
 
 let builtin_channel_send =
   V_builtin ("channel_send", fun ch ->
     match ch with
-    | V_channel (q, m, c, closed) ->
+    | V_channel (q, m, c, closed, _) ->
       V_builtin ("channel_send_p", fun v ->
         Mutex.lock m;
         if !closed then begin
@@ -3467,22 +3516,22 @@ let builtin_channel_send =
 let builtin_channel_recv =
   V_builtin ("channel_recv", fun ch ->
     match ch with
-    | V_channel (q, m, c, closed) when vclock_on ->
+    | V_channel (q, m, c, closed, senders) when vclock_on ->
       ignore c;
       let rec take () =
         Mutex.lock m;
         if not (Queue.is_empty q) then begin
           let v = Queue.pop q in Mutex.unlock m; v
-        end else if !closed then begin
+        end else if ended closed senders then begin
           Mutex.unlock m;
           raise (Eval_error (Loc.dummy,
-                             "channel_recv: channel is closed and empty"))
+                             (recv_end_message closed senders)))
         end else begin
           Mutex.unlock m;
           ignore (thr_waiting "channel_recv" (fun () ->
             sched_wait (fun () ->
               Mutex.lock m;
-              let ready = not (Queue.is_empty q) || !closed in
+              let ready = not (Queue.is_empty q) || ended closed senders in
               Mutex.unlock m; ready)));
           (* pred true means SOMETHING is there, not that it is ours -- another
              receiver may take it first, so go round and look again. *)
@@ -3490,15 +3539,15 @@ let builtin_channel_recv =
         end
       in
       take ()
-    | V_channel (q, m, c, closed) ->
+    | V_channel (q, m, c, closed, senders) ->
       Mutex.lock m;
       thr_waiting "channel_recv" (fun () ->
-        while Queue.is_empty q && not !closed do Condition.wait c m done);
+        while Queue.is_empty q && not (ended closed senders) do Condition.wait c m done);
       (* v0.1.47: a closed, drained channel used to block forever; now
          recv on it raises (use channel_recv_opt for the shutdown path). *)
       if Queue.is_empty q then begin
         Mutex.unlock m;
-        raise (Eval_error (Loc.dummy, "channel_recv: channel is closed and empty"))
+        raise (Eval_error (Loc.dummy, recv_end_message closed senders))
       end;
       let v = Queue.pop q in
       Mutex.unlock m;
@@ -3510,7 +3559,7 @@ let builtin_channel_recv =
 let builtin_channel_close =
   V_builtin ("channel_close", fun ch ->
     match ch with
-    | V_channel (_, m, c, closed) ->
+    | V_channel (_, m, c, closed, _) ->
       Mutex.lock m;
       closed := true;
       Condition.broadcast c;   (* wake every blocked recv so they see None *)
@@ -3518,6 +3567,24 @@ let builtin_channel_close =
       if vclock_on then sched_notify ();
       V_unit
     | _ -> failwith "channel_close: expected a Channel")
+
+(* v0.1.601: channel_sender ch h -- see senders_done *)
+let builtin_channel_sender =
+  V_builtin ("channel_sender", fun ch ->
+    V_builtin ("channel_sender_p", fun h ->
+      match ch, h with
+      | V_channel (_, m, c, _, senders), V_thread d ->
+        let id = (Domain.get_id d :> int) in
+        thr_guard (fun () ->
+          Hashtbl.replace thr_watch id
+            ((m, c) :: (try Hashtbl.find thr_watch id with Not_found -> [])));
+        Mutex.lock m;
+        if not (List.mem id !senders) then senders := !senders @ [id];
+        Condition.broadcast c;
+        Mutex.unlock m;
+        if vclock_on then sched_notify ();
+        V_unit
+      | _ -> failwith "channel_sender: expected a Channel and a ThreadHandle"))
 
 (* channel_recv_opt: block for a value; return None when the channel is
    closed and empty. This is the primitive that lets a worker loop
@@ -3755,30 +3822,30 @@ let builtin_file_pread_bytes =
 let builtin_channel_recv_opt =
   V_builtin ("channel_recv_opt", fun ch ->
     match ch with
-    | V_channel (q, m, c, closed) when vclock_on ->
+    | V_channel (q, m, c, closed, senders) when vclock_on ->
       ignore c;
       let rec take () =
         Mutex.lock m;
         if not (Queue.is_empty q) then begin
           let v = Queue.pop q in
           Mutex.unlock m; V_constr ("Some", Some v)
-        end else if !closed then begin
+        end else if ended closed senders then begin
           Mutex.unlock m; V_constr ("None", None)
         end else begin
           Mutex.unlock m;
           ignore (thr_waiting "channel_recv_opt" (fun () ->
             sched_wait (fun () ->
               Mutex.lock m;
-              let ready = not (Queue.is_empty q) || !closed in
+              let ready = not (Queue.is_empty q) || ended closed senders in
               Mutex.unlock m; ready)));
           take ()
         end
       in
       take ()
-    | V_channel (q, m, c, closed) ->
+    | V_channel (q, m, c, closed, senders) ->
       Mutex.lock m;
       thr_waiting "channel_recv_opt" (fun () ->
-        while Queue.is_empty q && not !closed do Condition.wait c m done);
+        while Queue.is_empty q && not (ended closed senders) do Condition.wait c m done);
       let result =
         if Queue.is_empty q then V_constr ("None", None)
         else V_constr ("Some", Some (Queue.pop q))
@@ -3796,7 +3863,7 @@ let builtin_channel_recv_opt =
 let builtin_channel_recv_timeout =
   V_builtin ("channel_recv_timeout", fun ch ->
     match ch with
-    | V_channel (q, m, c, closed) ->
+    | V_channel (q, m, c, closed, senders) ->
       let _ = c in
       V_builtin ("channel_recv_timeout_p", fun tv ->
         match tv with
@@ -3811,14 +3878,14 @@ let builtin_channel_recv_timeout =
             if not (Queue.is_empty q) then begin
               let v = Queue.pop q in
               Mutex.unlock m; V_constr ("Some", Some v)
-            end else if !closed then begin
+            end else if ended closed senders then begin
               Mutex.unlock m; V_constr ("None", None)
             end else begin
               Mutex.unlock m;
               let alive = thr_waiting "channel_recv_timeout" (fun () ->
                 sched_wait ~deadline:dl (fun () ->
                   Mutex.lock m;
-                  let ready = not (Queue.is_empty q) || !closed in
+                  let ready = not (Queue.is_empty q) || ended closed senders in
                   Mutex.unlock m; ready))
               in
               if alive then take ()
@@ -3842,7 +3909,7 @@ let builtin_channel_recv_timeout =
             Mutex.lock m;
             if not (Queue.is_empty q) then begin
               let v = Queue.pop q in Mutex.unlock m; V_constr ("Some", Some v)
-            end else if !closed then begin
+            end else if ended closed senders then begin
               Mutex.unlock m; V_constr ("None", None)
             end else begin
               Mutex.unlock m;
@@ -4025,6 +4092,7 @@ let initial_env : env =
     ("vec_of_bytes", ref builtin_vec_of_bytes);
     (* Q-012 step 3a: concurrency primitives *)
     ("spawn", ref builtin_spawn);
+    ("channel_sender", ref builtin_channel_sender);
     ("join", ref builtin_join);
     ("detach", ref builtin_detach);
     ("coro_new", ref builtin_coro_new);

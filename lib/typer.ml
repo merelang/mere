@@ -2724,6 +2724,16 @@ let channel_recv_timeout_scheme =
              Ast.TyArrow (Ast.TyInt,
                Ast.TyCon ("option", [_chan_recv_to_elem]))) }
 
+(* v0.1.601: channel_sender : Channel[a] -> ThreadHandle -> unit. Registers the
+   thread as one of the channel's senders: once every registered sender has
+   finished and the channel is empty, a receive stops waiting (Eval.senders_done). *)
+let _chan_sender_elem = fresh_var ()
+let channel_sender_scheme =
+  let aid = match _chan_sender_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [aid];
+    body = Ast.TyArrow (Ast.TyCon ("Channel", [_chan_sender_elem]),
+             Ast.TyArrow (Ast.TyCon ("ThreadHandle", []), Ast.TyUnit)) }
+
 (* v0.1.600: what the LLVM and Wasm backends rewrite channel_recv_opt and
    channel_recv_timeout into (Ast.rewrite_channel_ops): the receive as a
    (got, value) pair, which the rewrite turns into the option. In the
@@ -2952,6 +2962,7 @@ let initial_env : env =
     ("channel_close", channel_close_scheme);
     ("channel_recv_opt", channel_recv_opt_scheme);
     ("channel_recv_timeout", channel_recv_timeout_scheme);
+    ("channel_sender", channel_sender_scheme);
     ("__chan_recv_pair", chan_recv_pair_scheme);
     ("__chan_recv_pair_timeout", chan_recv_pair_timeout_scheme);
     ("par_map",      par_map_scheme);

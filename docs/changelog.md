@@ -4,6 +4,43 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.601 — 2026-10-03
+
+_`channel_sender ch h`: a channel that is told who sends on it stops a receive from waiting once all of them have finished -- naming the sender that failed. On all four backends._
+
+Since v0.1.586 a failed thread no longer takes the program down, and a channel
+did not know its senders: a receive waiting for a message a failed thread was
+going to send waited for good, with nothing to wake it. Joining the thread first
+fixes the one-shot workers (and `par_map`, v0.1.590); it cannot fix a producer
+that lives as long as the program -- an actor, a broadcaster, an accept loop.
+
+`channel_sender ch h` registers thread `h` as a sender of `ch`. Once every
+registered sender has finished and the channel is empty, a receive stops
+waiting as it does on a closed channel:
+
+- `channel_recv` fails, catchably: `channel_recv: sender thread 2 failed: fail:
+  boom` -- the first registered sender that failed, with its message -- or
+  `channel_recv: every sender has finished and the channel is empty`;
+- `channel_recv_opt` and `channel_recv_timeout` answer `None`.
+
+A channel with no sender registered behaves exactly as before, and a program
+that never calls `channel_sender` compiles to the same C as before. It is
+opt-in on purpose: the alternatives the investigation weighed -- closing every
+channel a failed thread held, counting senders, waking every receiver on any
+failure -- each broke a program that is correct today.
+
+How each backend sees a sender end: the interpreter wakes the channels a thread
+was registered on when it ends; C and LLVM read the thread record (v0.1.586) and,
+with senders registered, look again every 50 ms while waiting; Wasm keeps each
+thread's status in the first 512 bytes of its private region of the shared
+memory, where any thread can read it, and a channel there takes at most 256
+senders (past that, `channel_sender` fails by name: a worker cannot allocate
+the list a bigger one would need). `test/parity/channel_senders.mere` holds the
+answers -- values sent before a failure still received, the failure named, the
+all-finished case, and a timeout answered at once -- the same on all four.
+
+---
+
 ## v0.1.600 — 2026-10-03
 
 _`channel_close`, `channel_recv_opt` and `channel_recv_timeout` on LLVM and Wasm, and a Wasm thread sees the program's top-level values: parity checks `concurrency_channel` and `channel_unconstrained_elem` on all four backends, which leaves 13 programs unchecked on LLVM and 6 on Wasm._

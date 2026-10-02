@@ -867,6 +867,9 @@ let vt_prepend (bindings : (string * Ast.ty) list) (env : Ast.ty VtMap.t) =
 
 let current_var_types : Ast.ty VtMap.t ref = ref VtMap.empty
 
+(* v0.1.601 (E): the program registers a channel's senders somewhere *)
+let chan_sender_used = ref false
+
 (* Q-029: a self tail call becomes a loop on the C backend.
    `while cond do body` desugars in the parser to a tail-recursive `let rec`,
    so no backend ever sees a loop; C got a self-recursive function and left
@@ -3239,6 +3242,12 @@ let rec emit_expr (e : Ast.expr) : string =
          (channel_elem_tag arg.Ast.ty) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "channel_send"; _ }, ch_e) ->
        Printf.sprintf "mere_channel_%s_send(%s, %s)"
+         (channel_elem_tag ch_e.Ast.ty) (emit_expr ch_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "channel_sender"; _ }, ch_e)
+       when not (user_shadows "channel_sender") ->
+       (* v0.1.601 (E): see __lang_senders_done *)
+       chan_sender_used := true;
+       Printf.sprintf "mere_channel_%s_sender(%s, %s)"
          (channel_elem_tag ch_e.Ast.ty) (emit_expr ch_e) (emit_expr arg)
      | Ast.Var "channel_close" ->
        (* v0.1.47 *)
@@ -14205,11 +14214,63 @@ let emit_variant_struct_body (name : string)
 (* Q-012: per-element-type channel runtime. A heap-allocated ring buffer
    guarded by a mutex + condition variable; recv blocks until an element is
    available. Element tag `tag`, C element type `cty`. *)
-let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
+(* What the senders of a channel are asked, emitted (with the channel runtime)
+   only when the program registers some. A sender's end signals nothing, so a
+   channel with senders registered looks again every 50 ms while it waits; one
+   without waits as before. *)
+let channel_senders_runtime = String.concat "\n" [
+  "/* v0.1.601 (E): has every registered sender finished? 0 when none is";
+  "   registered or one still runs; 1 when all have, with `why` naming the first";
+  "   registered that failed (empty if none did). */";
+  "static int __lang_senders_done(__lang_thr** s, int n, char* why, size_t whysz) {";
+  "  if (n == 0) return 0;";
+  "  int done = 1; why[0] = 0;";
+  "  pthread_mutex_lock(&__lang_thr_lock);";
+  "  for (int i = 0; i < n; i++) if (s[i]->state == 0) { done = 0; break; }";
+  "  if (done) for (int i = 0; i < n; i++) if (s[i]->state == 2) {";
+  "    snprintf(why, whysz, \"thread %d failed: %s\", s[i]->n, s[i]->msg); break; }";
+  "  pthread_mutex_unlock(&__lang_thr_lock);";
+  "  return done;";
+  "}";
+  "/* the channel keeps the record (a reference that is never given back) */";
+  "static void __lang_senders_add(__lang_thr*** s, int* n, int* cap, ThreadHandle h) {";
+  "  for (int i = 0; i < *n; i++) if ((*s)[i] == h.t) return;";
+  "  pthread_mutex_lock(&__lang_thr_lock); h.t->refs++; pthread_mutex_unlock(&__lang_thr_lock);";
+  "  if (*n == *cap) { *cap = *cap ? *cap * 2 : 4; *s = (__lang_thr**)realloc(*s, sizeof(__lang_thr*) * (size_t)*cap); }";
+  "  (*s)[(*n)++] = h.t;";
+  "}";
+  "static void __lang_chan_poll_deadline(struct timespec* ts) {";
+  "  clock_gettime(CLOCK_REALTIME, ts);";
+  "  ts->tv_nsec += 50000000L;";
+  "  if (ts->tv_nsec >= 1000000000L) { ts->tv_sec++; ts->tv_nsec -= 1000000000L; }";
+  "}";
+  "static void __lang_chan_wait(pthread_cond_t* c, pthread_mutex_t* m, int polling) {";
+  "  if (!polling) { pthread_cond_wait(c, m); return; }";
+  "  struct timespec ts; __lang_chan_poll_deadline(&ts);";
+  "  pthread_cond_timedwait(c, m, &ts);";
+  "}";
+  "/* 1 once `deadline` has passed */";
+  "static int __lang_chan_wait_until(pthread_cond_t* c, pthread_mutex_t* m, int polling, const struct timespec* deadline) {";
+  "  struct timespec ts = *deadline;";
+  "  if (polling) {";
+  "    struct timespec p; __lang_chan_poll_deadline(&p);";
+  "    if (p.tv_sec < ts.tv_sec || (p.tv_sec == ts.tv_sec && p.tv_nsec < ts.tv_nsec)) ts = p;";
+  "  }";
+  "  pthread_cond_timedwait(c, m, &ts);";
+  "  struct timespec now; clock_gettime(CLOCK_REALTIME, &now);";
+  "  return now.tv_sec > deadline->tv_sec";
+  "    || (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec);";
+  "}" ]
+
+let emit_channel_runtime_for ?(senders = false) (elem_ty : Ast.ty) : string =
   let tag = ty_tag elem_ty in
+  (* v0.1.601 (E): only a program that registers senders (channel_sender) gets
+     the sender list and the waits that look at it; every other program's
+     channel is the one it always had, byte for byte *)
+  let sn yes = if senders then yes else [] in
   let cty = c_type_of elem_ty in
   let s = "mere_channel_" ^ tag in
-  String.concat "\n"
+  String.concat "\n" (
     [ Printf.sprintf "typedef struct %s {" s;
       Printf.sprintf "  %s* buf;" cty;
       (* v0.1.31 (stage B): each queued message owns a malloc-backed
@@ -14220,6 +14281,7 @@ let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
       "  __lang_region** regs;";
       "  int len; int cap; int head;";
       "  int closed;";  (* v0.1.47: graceful shutdown flag *)
+    ] @ sn [ "  __lang_thr** snd; int nsnd; int capsnd;" ] @ [
       "  pthread_mutex_t m;";
       "  pthread_cond_t c;";
       Printf.sprintf "} %s;" s;
@@ -14227,6 +14289,7 @@ let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
       Printf.sprintf "static %s* %s_new(void) {" s s;
       Printf.sprintf "  %s* ch = (%s*)malloc(sizeof(%s));" s s s;
       "  ch->cap = 8; ch->len = 0; ch->head = 0; ch->closed = 0;";
+    ] @ sn [ "  ch->snd = NULL; ch->nsnd = 0; ch->capsnd = 0;" ] @ [
       Printf.sprintf "  ch->buf = (%s*)malloc(sizeof(%s) * (size_t)ch->cap);" cty cty;
       "  ch->regs = (__lang_region**)malloc(sizeof(__lang_region*) * (size_t)ch->cap);";
       "  pthread_mutex_init(&ch->m, NULL);";
@@ -14265,11 +14328,22 @@ let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
       "";
       Printf.sprintf "static %s %s_recv(%s* ch) {" cty s s;
       "  pthread_mutex_lock(&ch->m);";
+    ] @ (if senders then [
+      "  char why[300]; why[0] = 0;";
+      "  while (ch->len == 0 && !ch->closed && !__lang_senders_done(ch->snd, ch->nsnd, why, sizeof why))";
+      "    __lang_chan_wait(&ch->c, &ch->m, ch->nsnd);";
+      "  if (ch->len == 0) {";
+      "    char msg[400];";
+      "    if (ch->closed) snprintf(msg, sizeof msg, \"channel_recv: channel is closed and empty\");";
+      "    else if (why[0]) snprintf(msg, sizeof msg, \"channel_recv: sender %s\", why);";
+      "    else snprintf(msg, sizeof msg, \"channel_recv: every sender has finished and the channel is empty\");";
+      "    pthread_mutex_unlock(&ch->m); __lang_fail_impl(msg);";
+      "  }" ] else [
       "  while (ch->len == 0 && !ch->closed) pthread_cond_wait(&ch->c, &ch->m);";
       (* v0.1.47: recv on a closed, drained channel fails (use channel_recv_opt
          for the shutdown path). v0.1.590: catchably, as on the interpreter. *)
       "  if (ch->len == 0) { pthread_mutex_unlock(&ch->m); \
-        __lang_fail_impl(\"channel_recv: channel is closed and empty\"); }";
+        __lang_fail_impl(\"channel_recv: channel is closed and empty\"); }" ]) @ [
       Printf.sprintf "  %s v = ch->buf[ch->head];" cty;
       "  __lang_region* mr = ch->regs[ch->head];";
       "  ch->head = (ch->head + 1) % ch->cap;";
@@ -14296,7 +14370,11 @@ let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
          emit site wraps this into an option[T] (Some v / None). *)
       Printf.sprintf "static %s %s_recv_opt(%s* ch, int* ok) {" cty s s;
       "  pthread_mutex_lock(&ch->m);";
-      "  while (ch->len == 0 && !ch->closed) pthread_cond_wait(&ch->c, &ch->m);";
+    ] @ (if senders then [
+      "  char why[300];";
+      "  while (ch->len == 0 && !ch->closed && !__lang_senders_done(ch->snd, ch->nsnd, why, sizeof why))";
+      "    __lang_chan_wait(&ch->c, &ch->m, ch->nsnd);" ] else [
+      "  while (ch->len == 0 && !ch->closed) pthread_cond_wait(&ch->c, &ch->m);" ]) @ [
       "  if (ch->len == 0) {";
       "    ch->closed = ch->closed;  /* closed & empty */";
       "    pthread_mutex_unlock(&ch->m);";
@@ -14324,10 +14402,15 @@ let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
       "  ts.tv_nsec += (long)(ms % 1000) * 1000000L;";
       "  if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }";
       "  pthread_mutex_lock(&ch->m);";
+    ] @ (if senders then [
+      "  char why[300];";
+      "  while (ch->len == 0 && !ch->closed && !__lang_senders_done(ch->snd, ch->nsnd, why, sizeof why)) {";
+      "    if (__lang_chan_wait_until(&ch->c, &ch->m, ch->nsnd, &ts)) break;";
+      "  }" ] else [
       "  while (ch->len == 0 && !ch->closed) {";
       "    int rc = pthread_cond_timedwait(&ch->c, &ch->m, &ts);";
       "    if (rc == ETIMEDOUT) break;";
-      "  }";
+      "  }" ]) @ [
       "  if (ch->len == 0) {";
       "    pthread_mutex_unlock(&ch->m);";
       Printf.sprintf "    *ok = 0; %s z; memset(&z, 0, sizeof z); return z;" cty;
@@ -14342,7 +14425,15 @@ let emit_channel_runtime_for (elem_ty : Ast.ty) : string =
       "  free(mr);";
       "  *ok = 1;";
       "  return out;";
-      "}" ]
+      "}" ] @ sn [
+      "";
+      Printf.sprintf "static int %s_sender(%s* ch, ThreadHandle h) {" s s;
+      "  pthread_mutex_lock(&ch->m);";
+      "  __lang_senders_add(&ch->snd, &ch->nsnd, &ch->capsnd, h);";
+      "  pthread_cond_broadcast(&ch->c);";
+      "  pthread_mutex_unlock(&ch->m);";
+      "  return 0;";
+      "}" ])
 
 (* Q-120 (b). THE C HEADER A SHIM SHOULD INCLUDE INSTEAD OF COPYING.
 
@@ -14482,6 +14573,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   uses_read_lines := false;
   Hashtbl.reset owned_vec_instances;
   Hashtbl.reset channel_instances;
+  chan_sender_used := false;
   Hashtbl.reset map_instances;
   Hashtbl.reset extern_fn_decls;
   (* Phase 32.2 (C1 FFI): walk prog.decls to register extern fn names + types. *)
@@ -15435,7 +15527,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   in
   let channel_runtimes =
     Hashtbl.fold (fun _tag elem_ty acc ->
-      emit_channel_runtime_for elem_ty :: acc) channel_instances []
+      emit_channel_runtime_for ~senders:!chan_sender_used elem_ty :: acc) channel_instances []
+  in
+  let channel_runtimes =
+    if !chan_sender_used && channel_runtimes <> [] then channel_senders_runtime :: channel_runtimes
+    else channel_runtimes
   in
   let channel_forward_typedefs =
     Hashtbl.fold (fun tag _ acc ->

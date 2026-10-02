@@ -259,6 +259,7 @@ let rand_post_offset = ref 0
 (* v0.1.600: the two channel failures, named the way the C runtime names them *)
 let chsend_closed_offset = ref 0
 let chrecv_closed_offset = ref 0
+let chsender_full_offset = ref 0
 let fos_pre_offset = ref 0
 let fos_suf_offset = ref 0
 let bos_true_offset = ref 0
@@ -2016,7 +2017,10 @@ let emit_chan_pair (emit_ch : unit -> unit) (emit_ms : unit -> unit) =
   emit_instr (Printf.sprintf "local.get %d" base);
   emit_instr "i32.const 8";
   emit_instr "i32.add";
+  emit_instr "i32.const 0";                         (* no message wanted *)
   emit_instr "call $mere_channel_take_h";
+  emit_instr "i32.const 1";                         (* 1 = took a value *)
+  emit_instr "i32.eq";
   emit_instr "i64.extend_i32_u";
   emit_instr "i64.store offset=0";
   emit_instr (Printf.sprintf "local.get %d" base);
@@ -3046,6 +3050,15 @@ and emit_expr (e : Ast.expr) : unit =
      rewritten into `__chan_recv_pair` before emission (Ast.rewrite_channel_ops),
      which builds the (got, value) tuple: the host writes the value into the
      tuple's second slot and answers whether it did. *)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "channel_sender"; _ }, ch_e); _ }, h_e)
+    when not (List.mem_assoc "channel_sender" !locals
+              || Hashtbl.mem toplevel_fn_names "channel_sender"
+              || Hashtbl.mem inner_lifts_wasm "channel_sender") ->
+    (* v0.1.601 (E) *)
+    uses_threads := true;
+    emit_expr ch_e;
+    emit_expr h_e;
+    emit_instr "call $mere_channel_sender"
   | Ast.App ({ node = Ast.Var "channel_close"; _ }, ch_e)
     when not (List.mem_assoc "channel_close" !locals
               || Hashtbl.mem toplevel_fn_names "channel_close"
@@ -10921,6 +10934,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   rand_post_offset := fresh_str_offset ")";
   chsend_closed_offset := fresh_str_offset "channel_send: channel is closed";
   chrecv_closed_offset := fresh_str_offset "channel_recv: channel is closed and empty";
+  chsender_full_offset := fresh_str_offset "channel_sender: this backend's channel takes at most 256 senders";
   fos_pre_offset := fresh_str_offset "float_of_str: \"";
   fos_suf_offset := fresh_str_offset "\" is not a valid float";
   bos_true_offset := fresh_str_offset "true";
@@ -11966,7 +11980,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \  (import \"env\" \"mere_thread_fail\" (func $mere_thread_fail_h (param i32) (result i32)))\n\
         \  (import \"env\" \"mere_channel_new\" (func $mere_channel_new_h (param i32) (result i32)))\n\
         \  (import \"env\" \"mere_channel_send\" (func $mere_channel_send_h (param i32) (param i64) (result i32)))\n\
-        \  (import \"env\" \"mere_channel_take\" (func $mere_channel_take_h (param i32) (param i32) (param i32) (result i32)))\n\
+        \  (import \"env\" \"mere_channel_take\" (func $mere_channel_take_h (param i32) (param i32) (param i32) (param i32) (result i32)))\n\
+        \  (import \"env\" \"mere_channel_sender\" (func $mere_channel_sender_h (param i32) (param i32) (result i32)))\n\
         \  (import \"env\" \"mere_channel_close\" (func $mere_channel_close_h (param i32) (result i32)))\n"
     else file_io_imports
   in
@@ -11993,11 +12008,18 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \  (func $mere_channel_scratch (result i32)\n\
         \    (i32.and (i32.add (global.get $__lang_bump) (i32.const 7)) (i32.const -8)))\n\
         \  (func $mere_channel_recv (param i64) (result i64)\n\
-        \    (local $o i32)\n\
+        \    (local $o i32) (local $r i32)\n\
         \    (local.set $o (call $mere_channel_scratch))\n\
-        \    (if (i32.eqz (call $mere_channel_take_h (i32.wrap_i64 (local.get 0)) (i32.const -1) (local.get $o)))\n\
+        \    (local.set $r (call $mere_channel_take_h (i32.wrap_i64 (local.get 0)) (i32.const -1) (local.get $o) (i32.const 1)))\n\
+        \    (if (i32.eqz (local.get $r))\n\
         \      (then (drop (call $__lang_fail (i64.const " ^ string_of_int !chrecv_closed_offset ^ ")))))\n\
+        \    (if (i32.eq (local.get $r) (i32.const 2))\n\
+        \      (then (drop (call $__lang_fail (i64.extend_i32_u (i32.add (local.get $o) (i32.const 4)))))))\n\
         \    (i64.load (local.get $o)))\n\
+        \  (func $mere_channel_sender (param i64) (param i64) (result i64)\n\
+        \    (if (call $mere_channel_sender_h (i32.wrap_i64 (local.get 0)) (i32.wrap_i64 (local.get 1)))\n\
+        \      (then (drop (call $__lang_fail (i64.const " ^ string_of_int !chsender_full_offset ^ ")))))\n\
+        \    (i64.const 0))\n\
         \  (func $mere_channel_close (param i64) (result i64)\n\
         \    (drop (call $mere_channel_close_h (i32.wrap_i64 (local.get 0))))\n\
         \    (i64.const 0))\n"

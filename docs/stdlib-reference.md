@@ -1347,11 +1347,33 @@ a daemon never exits, so a handler whose handle was dropped failed in silence.)
 A worker POOL should catch a handler's failure itself (`try_or` around the
 handler), or each failure costs it a worker; `contrib/http`'s pools do.
 
-⚠ A channel does not know who sends on it, so a thread that **waits on a
-channel for a message a failed thread was going to send waits for good** --
-before v0.1.586 the failure ended the whole program instead. `join` the thread
-before (or instead of) waiting on what it would have sent, and the failure
-reaches the waiter.
+⚠ A channel does not know who sends on it unless it is told, so a thread that
+**waits on a channel for a message a failed thread was going to send waits for
+good** -- before v0.1.586 the failure ended the whole program instead. Two ways
+out:
+
+- `join` the thread before (or instead of) waiting on what it would have sent,
+  and the failure reaches the waiter.
+- **`channel_sender ch h`** (v0.1.601), for a sender that cannot be joined first
+  (a long-lived producer, an actor): it registers thread `h` as a sender of
+  `ch`. Once every registered sender has finished and the channel is empty, a
+  receive stops waiting as it does on a closed channel: `channel_recv` fails
+  with `channel_recv: sender thread 2 failed: fail: boom` (the first registered
+  sender that failed, with its message) or `channel_recv: every sender has
+  finished and the channel is empty`, and `channel_recv_opt` /
+  `channel_recv_timeout` answer `None`. A channel with no sender registered
+  waits as it always did. Register every thread that sends, or the receive ends
+  while one of them is still going to.
+
+  ```
+  let results = channel_new ();
+  let h = spawn (fn (u: unit) -> produce results);
+  let _ = channel_sender results h;
+  ```
+
+  The same on the interpreter, C, LLVM and Wasm
+  (`test/parity/channel_senders.mere`). The compiled backends notice a
+  sender's end within 50 ms of it; a Wasm channel takes at most 256 senders.
 
 Threads are numbered in the order they were spawned. Before v0.1.586 the C and
 LLVM backends ended the process from the failing thread (an exit status that
