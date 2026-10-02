@@ -1,0 +1,77 @@
+// proc_sig_noop / proc_sig_default / proc_sig_raise and proc_out_errno.
+// One mode per run, named by the first argument; scripts/procsig_check.sh
+// sets the scene (an inherited SIG_IGN, a pipe whose reader is gone) and
+// reads the transcript this writes to stderr, plus the exit status where the
+// question is how the process ended.
+//
+// Why a runtime and not an `extern`: signal(2) and sigaction(2) move a
+// disposition through a function pointer and a struct, and the write path
+// that print_no_nl and print_bytes share dropped its refusals before any
+// program could ask. The errno written down below (EPIPE 32) is the same on
+// macOS, Linux and the BSDs, and so is SIGPIPE's number (13).
+extern fn proc_sig_noop: int -> int;
+extern fn proc_sig_default: int -> int;
+extern fn proc_sig_raise: int -> int;
+extern fn proc_out_errno: unit -> int;
+extern fn proc_last_errno: unit -> int;
+
+let say = fn (label: str) -> fn (got: int) -> fn (want: int) ->
+  if got == want then print_err (label ++ " ok")
+  else print_err (label ++ " FAIL got=" ++ str_of_int got ++ " want=" ++ str_of_int want);
+
+let mode = (match args () with Cons (m, _) -> m | Nil -> "");
+
+// nothing inherited: the handler goes in, a second call keeps its own
+let fresh = fn (u: unit) ->
+  let _ = say "noop installs" (proc_sig_noop 13) 0 in
+  let _ = say "errno after success" (proc_last_errno ()) 0 in
+  let _ = say "noop again installs" (proc_sig_noop 13) 0 in
+  // ...and the handler does nothing: the process survives its own signal
+  let _ = say "raise under the handler" (proc_sig_raise 13) 0 in
+  let _ = print_err "survived the signal ok" in
+  // a child starts with the default (a handler does not survive exec), so a
+  // shell that signals itself dies of it: 128 + 13
+  let _ = say "a child has the default" (run "kill -PIPE $$; exit 0") 141 in
+  // no write has failed yet
+  let _ = say "no refusal yet" (proc_out_errno ()) 0 in
+  let _ = say "unknown signal refused" (proc_sig_noop 9999) (0 - 1) in
+  let _ = say "unknown signal is EINVAL" (proc_last_errno ()) 22 in
+  say "default unknown refused" (proc_sig_default 9999) (0 - 1);
+
+// SIG_IGN inherited (the gate runs this under `trap '' PIPE`): kept, as ruby
+// keeps it, and still ignored afterwards
+let inherited = fn (u: unit) ->
+  let _ = say "inherited ignore kept" (proc_sig_noop 13) 1 in
+  let _ = say "raise while ignored" (proc_sig_raise 13) 0 in
+  let _ = print_err "survived the ignored signal ok" in
+  // ...and what was kept is the IGNORE, not a handler that also survives a
+  // raise: a child inherits it, so a shell that signals itself lives
+  say "a child still ignores it" (run "kill -PIPE $$; exit 0") 0;
+
+// stdout is a pipe whose reader has gone: the first write is refused, the
+// refusal is EPIPE, asking clears it, and a write that succeeds leaves none
+let closed = fn (u: unit) ->
+  let _ = say "noop installs" (proc_sig_noop 13) 0 in
+  let _ = sleep_ms 300 in
+  let _ = print_no_nl "into nothing\n" in
+  let _ = say "refused write is EPIPE" (proc_out_errno ()) 32 in
+  let _ = say "asking clears it" (proc_out_errno ()) 0 in
+  let _ = print_bytes (bytes_of_str "bytes into nothing\n") in
+  say "print_bytes refusal is EPIPE" (proc_out_errno ()) 32;
+
+// back to the default, then the signal: the process ends of it (the gate
+// reads 141 from the shell)
+let dies = fn (u: unit) ->
+  let _ = proc_sig_noop 13 in
+  let _ = say "default restored" (proc_sig_default 13) 0 in
+  let _ = proc_sig_raise 13 in
+  print_err "still alive FAIL";
+
+let main = fn (u: unit) ->
+  if str_eq mode "fresh" then fresh ()
+  else if str_eq mode "inherited" then inherited ()
+  else if str_eq mode "closed" then closed ()
+  else if str_eq mode "dies" then dies ()
+  else print_err ("unknown mode " ++ mode);
+
+main ()

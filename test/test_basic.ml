@@ -15749,8 +15749,16 @@ let () =
     (llvm "str_repeat \"a\" 3") "define ptr @__lang_str_repeat(ptr %s, i64 %n)";
   (* And an allocation that cannot be satisfied is a failure with a name, not a
      write through the null malloc returned. *)
+  (* v0.1.589: through add_block's _try form, so the one call made under the
+     default region's lock can unlock before it fails *)
   assert_contains "v0.1.274: the C region allocator reads malloc's answer"
-    (codegen "1 + 1") "if (!b) __lang_fail_impl(\"out of memory\")";
+    (codegen "1 + 1") "if (!__lang_region_add_block_try(r, cap)) __lang_fail_impl(\"out of memory\")";
+  (* v0.1.589: a fail with the lock held left it held, and the next allocation
+     waited on its own thread for ever (mere-ruby) *)
+  assert_contains "v0.1.589: a failed malloc under the region lock unlocks before it fails"
+    (codegen "1 + 1") "if (shared && !__lang_region_add_block_try(r, ncap)) { pthread_mutex_unlock(&__lang_default_region_lock); __lang_fail_impl(\"out of memory\"); }";
+  assert_contains "v0.1.589: a recycled map keeps the capacity of the block it kept"
+    (codegen "let m = map_new () in let _ = map_set m 1 2 in map_recycle m") "    r->cap = b->pad;";
   assert_contains "v0.1.274: the LLVM region allocator reads it too"
     (llvm "1 + 1") "call void @__lang_fail_impl(ptr @.oom_msg)";
   (* A product that wraps would buy a small buffer for a large copy. *)

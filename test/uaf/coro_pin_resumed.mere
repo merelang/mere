@@ -1,0 +1,39 @@
+// v0.1.589: the coroutine that pinned an arena, running again. A string read
+// out of a map is held by a coroutine that suspends; the map is recycled,
+// and because the suspended stack points into its arena the map moves to a
+// fresh one and the old is retired. The coroutine resumes and compacts
+// another map -- a retirement, which tries the retired arenas again. Only the
+// suspended stacks were asked, and the one that pinned it was the one
+// running, so the arena was freed under the very pointer that had pinned it.
+// A retired arena now remembers who pinned it and is not tried while that
+// coroutine runs. Built with ASan by the gate.
+// (A recycle and not a compaction: a compaction under a pin now leaves the
+// map where it is -- v0.1.589 too -- and retires nothing.)
+let root = coro_root ();
+let m = map_new ();
+let n = map_new ();
+let rec fill = fn (t) -> fn (i: int) -> if i == 0 then 0 else (let _ = map_set t i (str_repeat "v" 64 ++ str_of_int i) in fill t (i - 1));
+let _ = fill m 200;
+let _ = fill n 200;
+let _ = map_compact m;
+let _ = map_compact n;
+// key 1 went in last, so it sits in the arena's newest block: the blocks a
+// recycle gives back (it keeps the oldest), and the ones the pin is asked about
+let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
+  let held = map_get m 1 in
+  let _ = coro_switch root in
+  // a retirement of a map only this coroutine has touched (the root's stack
+  // may point into n, and a compaction under a pin does nothing)
+  let q = map_new () in
+  let _ = map_set q 1 (str_repeat "q" 64) in
+  let _ = map_compact q in
+  let _ = map_compact q in
+  let rec churn = fn (i: int) -> if i == 0 then 0 else (let _ = map_set n (1000 + i) (str_repeat "Q" 200) in churn (i - 1)) in
+  let _ = churn 500 in
+  let _ = print (if held == str_repeat "v" 64 ++ "1" then "held: intact" else "held: lost") in
+  root) ());
+let _ = coro_switch c;
+let _ = map_recycle m;
+let _ = fill m 50;
+let _ = coro_switch c;
+print_int (map_len m)

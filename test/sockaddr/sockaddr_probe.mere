@@ -15,6 +15,7 @@ extern fn tcp_listen_at: str -> int -> int -> int;
 extern fn sock_bind: int -> str -> int -> int;
 extern fn sock_local_addr: int -> str;
 extern fn sock_peer_addr: int -> str;
+extern fn sock_pair: int -> int;
 extern fn fd_last_errno: unit -> int;
 extern fn tcp_connect: str -> int -> int;
 extern fn tcp_accept: int -> int;
@@ -226,6 +227,25 @@ let main = fn () ->
   let _ = fd_close (pk2 % 4294967296) in
   let _ = say_s "address of a closed fd" (sock_local_addr pr2) "" in
   let _ = say_e "address of a closed fd" in
+  // --- a connected pair (v0.1.589): socketpair(2), two descriptors in one int
+  let sp = sock_pair 1 in
+  let qa = sp / 1048576 in
+  let qb = sp % 1048576 in
+  let _ = say "socketpair answers two descriptors" (if sp > 0 && qa != qb then 1 else 0) 1 in
+  let _ = say_s "a pair's end is a unix socket" (fam (sock_local_addr qa)) "unix" in
+  let n2 = mem_copy_str buf 0 "pq" in
+  let _ = say "one end writes" (fd_write qa buf n2) 2 in
+  let _ = say "the other reads it" (fd_read qb buf 16) 2 in
+  let _ = say_s "what it read" (mem_to_str buf 2) "pq" in
+  let _ = fd_close qa in
+  let _ = say "a closed end is the end of file" (fd_read qb buf 16) 0 in
+  let _ = fd_close qb in
+  let dp = sock_pair 2 in
+  let _ = say "a datagram pair" (if dp > 0 then 1 else 0) 1 in
+  let _ = fd_close (dp / 1048576) in
+  let _ = fd_close (dp % 1048576) in
+  let _ = say "an unknown type" (sock_pair 7) (0 - 1) in
+  let _ = say_e "an unknown type" in
   let _ = tcp_close s4 in
   0;
 exit (main ())

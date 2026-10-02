@@ -6954,7 +6954,7 @@ let native_ffi_names =
        spell; the address crosses as text and the family as a name, because
        AF_INET6 is 30 on macOS and 10 on Linux. fd_last_errno reads the errno
        these and the fd_* family keep, per thread. *)
-    "tcp_listen_at"; "sock_bind"; "sock_local_addr"; "sock_peer_addr";
+    "tcp_listen_at"; "sock_bind"; "sock_local_addr"; "sock_peer_addr"; "sock_pair";
     "fd_last_errno";
     (* v0.1.550: resource limits, scheduling priority and advisory file locks.
        Each is out of an `extern`'s reach for its own reason: getrlimit and
@@ -6970,7 +6970,10 @@ let native_ffi_names =
     "proc_getrlimit"; "proc_rlimit_field"; "proc_setrlimit";
     "proc_rlimit_resource"; "proc_rlimit_names"; "proc_rlim_const";
     "proc_getpriority"; "proc_setpriority"; "proc_last_errno";
-    "file_flock" ]
+    "file_flock";
+    (* v0.1.589: a signal's disposition (a function pointer and a struct), and
+       the errno of a refused write to stdout, which the runtime used to drop *)
+    "proc_sig_noop"; "proc_sig_default"; "proc_sig_raise"; "proc_out_errno" ]
 
 (* TLS externs. Not implemented natively yet (needs libssl FFI). Stubbed so
    a native build LINKS and plaintext connections work; referenced by the
@@ -7610,6 +7613,22 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
       "  if (listen(fd, (int)backlog) != 0) { err = errno; close(fd); __fd_errno = err; return -1; }";
       "  __fd_errno = 0;";
       "  return fd;";
+      "}";
+      "";
+      (* v0.1.589: socketpair(2), which fills an array -- out of an extern's
+         reach. mere-ruby's UNIXSocket.pair / Socket.pair (seven of CRuby's
+         test_io copy_stream cases). *)
+      "/* sock_pair: an AF_UNIX socketpair(2) -- two connected descriptors, in";
+      "   one int: the first times 2^20 plus the second (a descriptor is far";
+      "   below 2^20). type 1 stream, 2 datagram, 5 seqpacket (the platform's";
+      "   SOCK_* numbers stay here). -1 with errno kept. */";
+      "static long long sock_pair(long long type) {";
+      "  int t = type == 2 ? SOCK_DGRAM : type == 5 ? SOCK_SEQPACKET : SOCK_STREAM;";
+      "  if (type != 1 && type != 2 && type != 5) { __fd_errno = EINVAL; return -1; }";
+      "  int sv[2];";
+      "  if (socketpair(AF_UNIX, t, 0, sv) != 0) { __fd_errno = errno; return -1; }";
+      "  __fd_errno = 0;";
+      "  return ((long long)sv[0] << 20) | (long long)sv[1];";
       "}";
       "";
       "/* sock_bind: bind(2) an existing socket to a NUMERIC address -- what";
@@ -8459,6 +8478,58 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
              "  __proc_errno = errno;";
              "  if ((op & 4) && (errno == EWOULDBLOCK || errno == EAGAIN)) return 1;";
              "  return -1;";
+             "}";
+             "";
+             "/* v0.1.589: a signal's disposition, which signal(2) and sigaction(2)";
+             "   move through a function pointer and a struct, out of an extern's reach.";
+             "   Three moves, the ones a runtime that writes to pipes needs:";
+             "     proc_sig_noop     catch it and do nothing -- what ruby does to";
+             "                       SIGPIPE (install_sighandler(SIGPIPE,";
+             "                       sig_do_nothing)). Unlike SIG_IGN, a handler is";
+             "                       reset to the default at exec(2), so a child starts";
+             "                       with the default; a write to a closed pipe is";
+             "                       EPIPE here either way. And ruby's rule for what was";
+             "                       INHERITED: a disposition that is not the default";
+             "                       (ignored, or a handler) is put back and kept.";
+             "                       0 installed, 1 kept, -1 refused.";
+             "     proc_sig_default  back to SIG_DFL. 0 or -1.";
+             "     proc_sig_raise    raise(3) the signal at this thread. 0 or -1.";
+             "   proc_out_errno is the errno of the last write print_no_nl or";
+             "   print_bytes could not make (0 if none since the last ask), and";
+             "   asking clears it. errno is kept as for the calls above. */";
+             "static void __proc_sig_nothing(int s) { (void)s; }";
+             "static long long proc_sig_noop(long long sig) {";
+             "  struct sigaction sa, old;";
+             "  memset(&sa, 0, sizeof sa);";
+             "  sa.sa_handler = __proc_sig_nothing;";
+             "  sigemptyset(&sa.sa_mask);";
+             "  sa.sa_flags = SA_RESTART;";
+             "  if (sigaction((int)sig, &sa, &old) != 0) { __proc_errno = errno; return -1; }";
+             "  __proc_errno = 0;";
+             "  if (old.sa_handler != SIG_DFL && old.sa_handler != __proc_sig_nothing) {";
+             "    sigaction((int)sig, &old, NULL);";
+             "    return 1;";
+             "  }";
+             "  return 0;";
+             "}";
+             "static long long proc_sig_default(long long sig) {";
+             "  struct sigaction sa;";
+             "  memset(&sa, 0, sizeof sa);";
+             "  sa.sa_handler = SIG_DFL;";
+             "  sigemptyset(&sa.sa_mask);";
+             "  if (sigaction((int)sig, &sa, NULL) != 0) { __proc_errno = errno; return -1; }";
+             "  __proc_errno = 0;";
+             "  return 0;";
+             "}";
+             "static long long proc_sig_raise(long long sig) {";
+             "  if (raise((int)sig) != 0) { __proc_errno = errno; return -1; }";
+             "  __proc_errno = 0;";
+             "  return 0;";
+             "}";
+             "static long long proc_out_errno(void) {";
+             "  int e = __lang_out_errno;";
+             "  __lang_out_errno = 0;";
+             "  return (long long)e;";
              "}" ]
        else "");
       (if audio then
@@ -8766,12 +8837,18 @@ let str_concat_helper =
          the two paths share fd 1 and the order is the program's, not the
          buffer's. A short write is a loop, not a lost tail; EINTR is a retry.
          `print` keeps its line at a time, which is what a log wants. *)
+      (* v0.1.589: ...and a refusal is KEPT, once, for proc_out_errno. It was
+         dropped, so a program whose stdout is a pipe nobody reads any more
+         (SIGPIPE ignored, or handled) wrote on into nothing for as long as it
+         ran: mere-ruby's `loop { puts :ok }` under a closed pipe, 94 seconds
+         of CRuby's test_io, where ruby raises Errno::EPIPE at the first one. *)
       "static void __lang_write_all(int fd, const char* p, size_t n) {";
       "  fflush(stdout);";
       "  while (n) {";
       "    ssize_t w = write(fd, p, n);";
       "    if (w > 0) { p += (size_t)w; n -= (size_t)w; continue; }";
       "    if (w < 0 && errno == EINTR) continue;";
+      "    if (w < 0) __lang_out_errno = errno;";
       "    break;";
       "  }";
       "}";
@@ -9799,10 +9876,14 @@ let region_runtime_helpers =
       "  if (lo < __lang_block_lo) __lang_block_lo = lo;";
       "  if (hi > __lang_block_hi) __lang_block_hi = hi;";
       "}";
+      "static int __lang_region_add_block_try(__lang_region* r, size_t cap);";
       "static void __lang_region_add_block(__lang_region* r, size_t cap) {";
+      "  if (!__lang_region_add_block_try(r, cap)) __lang_fail_impl(\"out of memory\");";
+      "}";
+      "static int __lang_region_add_block_try(__lang_region* r, size_t cap) {";
       "  __lang_region_block* b =";
       "    (__lang_region_block*) malloc(sizeof(__lang_region_block) + cap);";
-      "  if (!b) __lang_fail_impl(\"out of memory\");";
+      "  if (!b) return 0;";
       "  __lang_block_note(b, cap);";
       "  __lang_blk_link(r, b);";
       "  b->ep = __lang_region_epoch;";
@@ -9815,6 +9896,7 @@ let region_runtime_helpers =
       "  r->base = (char*)(b + 1);";
       "  r->top = r->base;";
       "  r->cap = cap;";
+      "  return 1;";
       "}";
       "";
       "static void __lang_region_init(__lang_region* r, size_t cap) {";
@@ -9986,7 +10068,7 @@ let region_runtime_helpers =
       "    if (aligned > r->cap / 4) {";
       "      __lang_region_block* big =";
       "        (__lang_region_block*) malloc(sizeof(__lang_region_block) + aligned);";
-      "      if (!big) __lang_fail_impl(\"out of memory\");";
+      "      if (!big) { if (shared) pthread_mutex_unlock(&__lang_default_region_lock); __lang_fail_impl(\"out of memory\"); }";
       "      __lang_block_note(big, aligned);";
       "      __lang_blk_link(r, big);";
       "      big->ep = __lang_region_epoch;";
@@ -10005,7 +10087,10 @@ let region_runtime_helpers =
       "      if (ncap > (size_t)-1 / 2) { ncap = aligned; break; }";
       "      ncap *= 2;";
       "    }";
-      "    __lang_region_add_block(r, ncap);";
+      (* a fail while the lock is held leaves it held, and the next
+         allocation waits on itself: unlock first *)
+      "    if (shared && !__lang_region_add_block_try(r, ncap)) { pthread_mutex_unlock(&__lang_default_region_lock); __lang_fail_impl(\"out of memory\"); }";
+      "    else if (!shared) __lang_region_add_block(r, ncap);";
       "  }";
       "  void* p = r->top;";
       "  r->top += aligned;";
@@ -10065,7 +10150,7 @@ let region_runtime_helpers =
       "        __lang_blk_unlink(blk);";
       "        __lang_region_block* nb =";
       "          (__lang_region_block*) realloc(blk, sizeof(__lang_region_block) + new_al);";
-      "        if (!nb) __lang_fail_impl(\"out of memory\");";
+      "        if (!nb) { if (shared) pthread_mutex_unlock(&__lang_default_region_lock); __lang_fail_impl(\"out of memory\"); }";
       "        __lang_block_note(nb, new_al);";
       "        __lang_blk_link(r, nb);";
       "        nb->pad = new_al;";
@@ -10245,27 +10330,50 @@ let region_runtime_helpers =
       "   back yet, it gives back later. Programs without coroutines free at once,";
       "   as before. */";
       "static _Thread_local int (*__lang_region_pinned)(__lang_region*, int) = 0;";
-      "static _Thread_local __lang_region** __lang_retired = NULL;";
+      (* v0.1.589: WHO pinned it, and the one running now. A retired arena was
+         tried again at every later retirement, and only the SUSPENDED stacks
+         were asked -- so the coroutine that had pinned it, running again by
+         then and still holding the very pointers that pinned it, was never
+         asked, and the arena was freed under it. (A fiber suspended across a
+         compaction and resumed; and mere-ruby's collection run on a coroutine
+         of its own, whose interrupted method resumes and returns, and the
+         frame pool's next compaction freed the old str_store under it.) A
+         retired arena keeps the handles of the stacks that pinned it, and is
+         not tried while one of them is the one running. *)
+      "static _Thread_local int (*__lang_region_pinners)(__lang_region*, unsigned long long**) = 0;";
+      "static _Thread_local unsigned long long (*__lang_coro_cur_h)(void) = 0;";
+      "typedef struct { __lang_region* r; unsigned long long* by; int nby; } __lang_retiree;";
+      "static _Thread_local __lang_retiree* __lang_retired = NULL;";
       "static _Thread_local int __lang_retired_n = 0, __lang_retired_cap = 0;";
       "static void __lang_region_retire(__lang_region* r) {";
-      "  if (__lang_region_pinned) {";
+      "  if (__lang_region_pinners) {";
+      "    unsigned long long curh = __lang_coro_cur_h();";
       "    int w = 0;";
       "    for (int i = 0; i < __lang_retired_n; i++) {";
-      "      __lang_region* o = __lang_retired[i];";
-      "      if (__lang_region_pinned(o, 0)) __lang_retired[w++] = o;";
-      "      else { __lang_region_free(o); free(o); }";
+      "      __lang_retiree o = __lang_retired[i];";
+      "      int keep = 0;";
+      "      for (int j = 0; j < o.nby; j++) if (o.by[j] == curh) keep = 1;";
+      "      if (!keep) { free(o.by); o.by = NULL; o.nby = __lang_region_pinners(o.r, &o.by); keep = o.nby > 0; }";
+      "      if (keep) __lang_retired[w++] = o;";
+      "      else { free(o.by); __lang_region_free(o.r); free(o.r); }";
       "    }";
       "    __lang_retired_n = w;";
-      "    if (__lang_region_pinned(r, 0)) {";
+      "    unsigned long long* by = NULL;";
+      "    int nby = __lang_region_pinners(r, &by);";
+      "    if (nby > 0) {";
       "      if (__lang_retired_n == __lang_retired_cap) {";
       "        int nc = __lang_retired_cap ? __lang_retired_cap * 2 : 16;";
-      "        __lang_region** p = (__lang_region**)realloc(__lang_retired, sizeof(__lang_region*) * nc);";
+      "        __lang_retiree* p = (__lang_retiree*)realloc(__lang_retired, sizeof(__lang_retiree) * nc);";
       "        if (!p) __lang_fail_impl(\"out of memory\");";
       "        __lang_retired = p; __lang_retired_cap = nc;";
       "      }";
-      "      __lang_retired[__lang_retired_n++] = r;";
+      "      __lang_retired[__lang_retired_n].r = r;";
+      "      __lang_retired[__lang_retired_n].by = by;";
+      "      __lang_retired[__lang_retired_n].nby = nby;";
+      "      __lang_retired_n++;";
       "      return;";
       "    }";
+      "    free(by);";
       "  }";
       "  __lang_region_free(r);";
       "  free(r);";
@@ -10717,7 +10825,12 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "    r->blocks = b;";
       "    r->base = (char*)(b + 1);";
       "    r->top = r->base;";
-      "    r->cap = 4096;";
+      (* the block kept is the OLDEST, which is the 4 KB seed only while no
+         dedicated block (v0.1.307) was chained in behind the seed; with the
+         seed still the bump block, the oldest IS the dedicated one, and a
+         capacity of 4096 claimed on it let the next allocations run off its
+         end into the heap (mere-ruby's frame pool) *)
+      "    r->cap = b->pad;";
       "  } else {";
       "    __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "    if (!fresh) __lang_fail_impl(\"out of memory\");";
@@ -10760,6 +10873,16 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          until the first call (a frame-shaped map costs nothing extra). *)
       Printf.sprintf "static int %s_compact(%s* m) {" struct_name struct_name;
       "  __LANG_OWNED(m, \"Map\", \"map_compact\");";
+      (* v0.1.589: NOT UNDER A PIN. Compaction has no observable behaviour, and
+         an arena a suspended stack points into cannot be given back yet -- it
+         is retired, and the copy is made beside it: the bytes of the map,
+         twice, for as long as that stack keeps the word. A program with two
+         thousand suspended fibers (mere-ruby's Fiber.yield loop) doubled its
+         stores at every collection: 6.9 s and 1.1 GB became 90 s and 6.5 GB
+         once the pin followed pointers into nodes. Leaving the map where it is
+         gives back nothing either, and costs nothing; a later compaction, when
+         no stack points there, does what this one could not. *)
+      "  if (m->owns_region && __lang_region_pinned && __lang_region_pinned(m->region, 0)) return 0;";
       "  __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "  if (!fresh) __lang_fail_impl(\"out of memory\");";
       "  __lang_region_init(fresh, 4096);";
@@ -11435,9 +11558,22 @@ let coro_runtime ~(stack_bytes : int) =
       "  uintptr_t x = *(const uintptr_t*)a, y = *(const uintptr_t*)b;";
       "  return x < y ? -1 : x > y ? 1 : 0;";
       "}";
+      "static void __lang_pin_add(__lang_coro_x* x, uintptr_t w) {";
+      "  if (x->pn == x->pcap) {";
+      "    size_t nc = x->pcap ? x->pcap * 2 : 256;";
+      "    uintptr_t* q = (uintptr_t*)realloc(x->pw, sizeof(uintptr_t) * nc);";
+      "    if (!q) __lang_fail_impl(\"out of memory\");";
+      "    x->pw = q; x->pcap = nc;";
+      "  }";
+      "  x->pw[x->pn++] = w;";
+      "}";
+      "static void __lang_pin_reach(__lang_coro* c);";
+      (* noinline: it reads a stack that is not this one, which ASan's
+         attribute allows only while the reading stays in this function *)
       "#ifdef __LANG_CORO_ASAN";
       "__attribute__((no_sanitize_address))";
       "#endif";
+      "__attribute__((noinline))";
       "static void __lang_pin_gather(__lang_coro* c) {";
       "  __lang_coro_x* x = c->x;";
       "  x->pn = 0;";
@@ -11445,14 +11581,19 @@ let coro_runtime ~(stack_bytes : int) =
       "  for (uintptr_t* p = (uintptr_t*)x->sp; p < (uintptr_t*)x->s_hi; p++) {";
       "    uintptr_t w = *p & ~(uintptr_t)7;";
       "    if (w < blo || w >= bhi) continue;";
-      "    if (x->pn == x->pcap) {";
-      "      size_t nc = x->pcap ? x->pcap * 2 : 256;";
-      "      uintptr_t* q = (uintptr_t*)realloc(x->pw, sizeof(uintptr_t) * nc);";
-      "      if (!q) __lang_fail_impl(\"out of memory\");";
-      "      x->pw = q; x->pcap = nc;";
-      "    }";
-      "    x->pw[x->pn++] = w;";
+      "    __lang_pin_add(x, w);";
       "  }";
+      (* v0.1.589: ...AND WHAT THOSE WORDS REACH. A stack holds a pointer to a
+         node -- a tuple, a closure's env, a list cell, in one of its own
+         regions or in a container's arena -- and the node holds the pointer
+         into the arena being freed. The words above were only the stack's own,
+         so a string a tuple on the stack pointed at was freed under it: a
+         collection mere-ruby runs in the middle of a method (on a coroutine of
+         its own, with the method's stack suspended) freed str_store's old
+         arena while a class body's frame still held a name from it. The same
+         reach coro_scan_ints uses: as far as the pointers go inside the
+         coroutine's own regions, three hops into anyone else's. *)
+      "  __lang_pin_reach(c);";
       "  qsort(x->pw, x->pn, sizeof(uintptr_t), __lang_uptr_cmp);";
       "  x->pgot = 1;";
       "}";
@@ -11478,6 +11619,44 @@ let coro_runtime ~(stack_bytes : int) =
       "    }";
       "  }";
       "  return 0;";
+      "}";
+      "";
+      (* v0.1.589: every suspended stack that points into one of r's blocks, as
+         handles (see __lang_region_retire) -- __lang_coro_pins without the
+         early answer *)
+      "static int __lang_coro_pinners(__lang_region* r, unsigned long long** out) {";
+      "  unsigned long oldest = (unsigned long)-1;";
+      "  for (__lang_region_block* b = r->blocks; b; b = b->prev)";
+      "    if (b->ep < oldest) oldest = b->ep;";
+      "  int n = 0, cap = 0;";
+      "  unsigned long long* hs = NULL;";
+      "  for (__lang_coro* c = __lang_coro_live; c; c = c->x->lnext) {";
+      "    if (c == __lang_coro_cur || c->state != 2) continue;";
+      "    if (c->x->sep <= oldest) break;";
+      "    if (!c->x->pgot) __lang_pin_gather(c);";
+      "    if (c->x->pn == 0) continue;";
+      "    int hit = 0;";
+      "    for (__lang_region_block* b = r->blocks; b && !hit; b = b->prev) {";
+      "      if (b->ep >= c->x->sep) continue;";
+      "      uintptr_t lo = (uintptr_t)(b + 1), hi = lo + b->pad;";
+      "      size_t a = 0, z = c->x->pn;";
+      "      while (a < z) { size_t m = a + (z - a) / 2; if (c->x->pw[m] < lo) a = m + 1; else z = m; }";
+      "      if (a < c->x->pn && c->x->pw[a] < hi) hit = 1;";
+      "    }";
+      "    if (!hit) continue;";
+      "    if (n == cap) {";
+      "      cap = cap ? cap * 2 : 4;";
+      "      unsigned long long* q = (unsigned long long*)realloc(hs, sizeof(unsigned long long) * cap);";
+      "      if (!q) __lang_fail_impl(\"out of memory\");";
+      "      hs = q;";
+      "    }";
+      "    hs[n++] = __lang_coro_handle(c);";
+      "  }";
+      "  *out = hs;";
+      "  return n;";
+      "}";
+      "static unsigned long long __lang_coro_cur_handle(void) {";
+      "  return __lang_coro_cur ? __lang_coro_handle(__lang_coro_cur) : 0;";
       "}";
       "";
       "/* coro_scan_ints: every integer in [0, bound) that coroutine c's stack can";
@@ -11519,6 +11698,7 @@ let coro_runtime ~(stack_bytes : int) =
       "  size_t last;                             /* the span the last pointer fell in */";
       "  uintptr_t* work; size_t nwork, capwork;  /* (lo, hi, hops) triples still to read */";
       "  uintptr_t* seen; int* seen_d; size_t nseen, capseen;  /* queued addresses, and at how few hops */";
+      "  __lang_coro_x* pinx;                     /* v0.1.589: gathering pins for this coroutine (every pointer met) */";
       "} __lang_scan;";
       "static size_t __lang_scan_slot(uintptr_t* t, size_t cap, uintptr_t a) {";
       "  size_t h = (size_t)((a >> 3) * 0x9E3779B97F4A7C15ull) & (cap - 1);";
@@ -11550,7 +11730,7 @@ let coro_runtime ~(stack_bytes : int) =
       "  size_t h = __lang_scan_slot(st->seen, st->capseen, a);";
       "  /* already read at as few hops or fewer: nothing new past it */";
       "  if (st->seen[h] && st->seen_d[h] <= hops) return;";
-      "  if (!st->seen[h]) { st->seen[h] = a; st->nseen++; }";
+      "  if (!st->seen[h]) { st->seen[h] = a; st->nseen++; if (st->pinx) __lang_pin_add(st->pinx, a); }";
       "  st->seen_d[h] = hops;";
       "  if (st->nwork == st->capwork) {";
       "    size_t nc = st->capwork ? st->capwork * 2 : 1024;";
@@ -11591,7 +11771,7 @@ let coro_runtime ~(stack_bytes : int) =
       "    while (a0 < z0) { size_t m = a0 + (z0 - a0) / 2; if (st->ownb[m] < hdr) a0 = m + 1; else z0 = m; }";
       "    int own = (a0 < st->nown && st->ownb[a0] == hdr);";
       "    int h2 = own ? 0 : hops + 1;";
-      "    if (h2 > __LANG_SCAN_FOREIGN_HOPS) continue;";
+      "    if (h2 > __LANG_SCAN_FOREIGN_HOPS) { if (st->pinx) __lang_pin_add(st->pinx, a); continue; }";
       "    uintptr_t e = a + 16 * sizeof(uintptr_t);";
       "    if (e > used) e = used;";
       "    __lang_scan_queue(st, a, e, h2);";
@@ -11624,6 +11804,45 @@ let coro_runtime ~(stack_bytes : int) =
       "  __lang_scan_tlgen = __lang_blk_tl_gen; __lang_scan_dlgen = __lang_blk_dl_gen;";
       "  pthread_mutex_unlock(&__lang_blk_dl_lock);";
       "  qsort(__lang_scan_sp, __lang_scan_nsp, sizeof(__lang_span), __lang_span_cmp);";
+      "}";
+      (* v0.1.589: the words a SUSPENDED coroutine's stack reaches, for the pin
+         (see __lang_pin_gather): the walk coro_scan_ints makes, asking for no
+         numbers and keeping every pointer into a live block it meets *)
+      "static void __lang_pin_reach(__lang_coro* c) {";
+      "  if (c->state != 2) return;";
+      "  __lang_scan st;";
+      "  memset(&st, 0, sizeof st);";
+      "  st.lo = 1; st.hi = 0;";
+      "  st.pinx = c->x;";
+      "  size_t capown = 64;";
+      "  st.ownb = (uintptr_t*)malloc(sizeof(uintptr_t) * capown);";
+      "  if (!st.ownb) __lang_fail_impl(\"out of memory\");";
+      "  for (int i = 0; i <= c->x->s_active_n; i++) {";
+      "    __lang_region* r = i < c->x->s_active_n ? c->x->s_active[i] : c->x->s_cur;";
+      "    if (!r || r == &__lang_default_region) continue;";
+      "    for (__lang_region_block* b = r->blocks; b; b = b->prev) {";
+      "      if (st.nown == capown) {";
+      "        capown *= 2;";
+      "        uintptr_t* q = (uintptr_t*)realloc(st.ownb, sizeof(uintptr_t) * capown);";
+      "        if (!q) __lang_fail_impl(\"out of memory\");";
+      "        st.ownb = q;";
+      "      }";
+      "      st.ownb[st.nown++] = (uintptr_t)b;";
+      "    }";
+      "  }";
+      "  qsort(st.ownb, st.nown, sizeof(uintptr_t), __lang_uptr_cmp2);";
+      "  __lang_scan_spans();";
+      "  st.sp = __lang_scan_sp; st.nsp = __lang_scan_nsp;";
+      "  st.capfound = 16;";
+      "  st.found = (long long*)calloc(st.capfound, sizeof(long long));";
+      "  st.capseen = 1 << 12;";
+      "  st.seen = (uintptr_t*)calloc(st.capseen, sizeof(uintptr_t));";
+      "  st.seen_d = (int*)calloc(st.capseen, sizeof(int));";
+      "  if (!st.found || !st.seen || !st.seen_d) __lang_fail_impl(\"out of memory\");";
+      "  __lang_scan_words(&st, (uintptr_t*)c->x->sp, (uintptr_t*)c->x->s_hi, 0);";
+      "  for (size_t done = 0; done < st.nwork; done++)";
+      "    __lang_scan_words(&st, (uintptr_t*)st.work[3 * done], (uintptr_t*)st.work[3 * done + 1], (int)st.work[3 * done + 2]);";
+      "  free(st.work); free(st.seen); free(st.seen_d); free(st.ownb); free(st.found);";
       "}";
       "static void __lang_coro_scan_ints(__lang_coro_h ch, long long lo, long long hi, void* env, void* fn) {";
       "  __lang_coro* c = __lang_coro_of(ch);";
@@ -11681,6 +11900,11 @@ let coro_runtime ~(stack_bytes : int) =
       "  st.seen = (uintptr_t*)calloc(st.capseen, sizeof(uintptr_t));";
       "  st.seen_d = (int*)calloc(st.capseen, sizeof(int));";
       "  if (!st.found || !st.seen || !st.seen_d) __lang_fail_impl(\"out of memory\");";
+      (* v0.1.589: a suspended stack's walk is also its pin (see
+         __lang_pin_gather): the same pointers, gathered once instead of twice
+         -- for two thousand suspended fibers the second walk was most of a
+         collection *)
+      "  if (!running) { c->x->pn = 0; st.pinx = c->x; }";
       "  if (!running)";
       "    __lang_scan_words(&st, (uintptr_t*)c->x->sp, (uintptr_t*)c->x->s_hi, 0);";
       "  if (running) {";
@@ -11697,6 +11921,7 @@ let coro_runtime ~(stack_bytes : int) =
       "  for (size_t done = 0; done < st.nwork; done++)";
       "    __lang_scan_words(&st, (uintptr_t*)st.work[3 * done], (uintptr_t*)st.work[3 * done + 1], (int)st.work[3 * done + 2]);";
       "  free(st.work); free(st.seen); free(st.seen_d); free(st.ownb);";
+      "  if (!running) { qsort(c->x->pw, c->x->pn, sizeof(uintptr_t), __lang_uptr_cmp); c->x->pgot = 1; }";
       "  if (keep) {";
       "    /* kept for the next ask (the bound is the caller's and grows): the";
       "       numbers themselves, not the stack's words */";
@@ -11908,6 +12133,8 @@ let coro_runtime ~(stack_bytes : int) =
       "  __lang_coro_give_slot(&__lang_coro_root);";
       "  __lang_coro_link(&__lang_coro_root);";
       "  __lang_region_pinned = __lang_coro_pins;";
+      "  __lang_region_pinners = __lang_coro_pinners;";
+      "  __lang_coro_cur_h = __lang_coro_cur_handle;";
       "  __lang_coro_cur = &__lang_coro_root;";
       "}";
       "";
@@ -12557,6 +12784,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
          in the arena; the generation swap is what returns them. *)
       Printf.sprintf "static int %s_compact(%s* v) {" struct_name struct_name;
       "  __LANG_OWNED(v, \"Vec\", \"vec_compact\");";
+      "  if (v->owns_region && __lang_region_pinned && __lang_region_pinned(v->region, 0)) return 0;  /* v0.1.589: see map_compact */";
       "  __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "  if (!fresh) __lang_fail_impl(\"out of memory\");";
       "  __lang_region_init(fresh, 4096);";
@@ -14254,7 +14482,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       [ "proc_getrlimit"; "proc_rlimit_field"; "proc_setrlimit";
         "proc_rlimit_resource"; "proc_rlimit_names"; "proc_rlim_const";
         "proc_getpriority"; "proc_setpriority"; "proc_last_errno";
-        "file_flock" ];
+        "file_flock"; "proc_sig_noop"; "proc_sig_default"; "proc_sig_raise";
+        "proc_out_errno" ];
   strbuf_used := false;
   bytebuf_used := false;
   bytes_used := false;
@@ -15624,6 +15853,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "#include <pthread.h>";  (* Q-012: spawn / join. Link with -pthread on Linux. *)
       "#include <unistd.h>";   (* native FFI: read / write / close *)
       "#include <errno.h>";    (* v0.1.480: EINTR on the write(2) path *)
+      (* v0.1.589: the errno of the last write __lang_write_all could not make,
+         read (and cleared) by proc_out_errno -- declared up here because the
+         proc_* runtime is emitted before the write path *)
+      "static _Thread_local int __lang_out_errno = 0;";
       (* v0.1.315: float semantics must not depend on the C compiler's
          optimization level. clang on arm64 contracts a*b+c into fma at -O2
          by default, which rounds ONCE where the interpreter (and -O0, and

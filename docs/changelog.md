@@ -4,6 +4,106 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.589 — 2026-10-02
+
+_A recycled map keeps its block's real capacity; no out-of-memory fail while the region lock is held; the pin that keeps an arena for a suspended coroutine follows the pointers it finds and remembers who it is for; a signal's disposition, a refused write to stdout and socketpair(2), which no extern can reach._
+
+**`map_recycle` ran off the end of the block it kept** (found by mere-ruby). A
+recycle keeps the OLDEST block of a map's private arena and calls it the 4 KB
+seed. But a value bigger than a quarter of the seed gets a dedicated block
+(v0.1.307), chained in behind the bump block -- so while the seed is still the
+bump block, the oldest block IS the dedicated one, and `r->cap = 4096` claimed
+4 KB on its 2 KB: the next allocations ran into the heap beside it. In
+mere-ruby's frame pool that was a 2.8 KB exception message, a corrupted length,
+and a deep copy that asked malloc for the impossible. The recycle now keeps the
+block's own capacity (`b->pad`). `test/uaf/recycle_dedicated.mere`, built with
+ASan by `scripts/region_uaf_check.sh` (a case marked `a`), and its poison --
+the old `r->cap = 4096` -- goes red. (A map was the only container with a
+recycle; the region cache's release already kept `best->pad`.)
+
+**...and that malloc failure left the program stopped, silently.** An
+allocation in the default region takes its lock, and a malloc that failed inside
+`__lang_region_alloc` -- a dedicated block, a new bump block, an in-place grow --
+called `__lang_fail_impl` with the lock still held. A `try_or` above caught the
+fail; the next allocation waited on the lock its own thread held, at 0% CPU,
+forever. Each of the three now unlocks before it fails (`add_block` has a
+`_try` form for the one under the lock). Not under a gate: it needs a malloc
+that fails, which a test cannot ask for portably.
+
+**Two holes in the pin (v0.1.547), found by running a collection on a
+coroutine of its own.** mere-ruby now collects in the middle of a method by
+switching to a coroutine and compacting there, so the method's stack is a
+suspended one -- the case the pin exists for -- and the first corpus run under
+a collection at every safepoint was a use-after-free in both of these ways.
+
+- *The pin read only the stack's own words.* A stack holds a pointer to a node
+  -- a list cell, a tuple, a closure's env -- and the node holds the pointer
+  into the arena being compacted. That arena was freed under the node. The pin
+  now gathers what the stack REACHES, by the walk `coro_scan_ints` already
+  makes: as far as the pointers go inside the coroutine's own regions, three
+  hops into anyone else's (`__lang_pin_reach`). Once per stop, as before.
+- *A retired arena was freed under the coroutine that pinned it.* Every later
+  retirement tries the retired arenas again, and asked only the SUSPENDED
+  stacks -- so once the coroutine that pinned an arena was running again, and
+  still holding the pointers that had pinned it, the next compaction anywhere
+  freed the arena. (For a fiber: suspended across a compaction, resumed, and a
+  map compacted while it runs.) A retired arena keeps the handles of the stacks
+  that pinned it and is not tried while one of them is running
+  (`__lang_coro_pinners`).
+
+- *...and so a compaction under a pin does nothing.* With the pin following
+  pointers, a suspended stack points into nearly every store, and compacting
+  one retired the old arena and made the copy beside it: the bytes twice, for
+  as long as the stack kept the word. mere-ruby's two thousand suspended fibers
+  went from 6.9 s / 1.1 GB to 90 s / 6.5 GB. Compaction has no observable
+  behaviour, so `map_compact` / `vec_compact` now leave a container where it is
+  while a suspended stack points into its arena (a recycle still moves, since it
+  must empty the map). The same walk also stopped being made twice: a suspended
+  stack's `coro_scan_ints` gathers its pin as it goes. The benchmark is back to
+  6.65 s, at 1.66 GB -- what the sound pin keeps that the old one let go.
+
+`test/uaf/coro_pin_reach.mere` and `coro_pin_resumed.mere`, ASan builds in
+`scripts/region_uaf_check.sh`, each with its poison (the reach skipped; a
+pinner's run not counted) going red. ⚠ The first version of the reach test
+stayed green under its poison: the string's address was still on the stack,
+in a dead frame's slot inside the live range, and a conservative pin rightly
+took it. The cell is made at the bottom of a 300-deep recursion now, so the
+copy is below where the stack pointer comes back to.
+
+**`proc_sig_noop`, `proc_sig_default`, `proc_sig_raise`, `proc_out_errno`.**
+`signal(2)` and `sigaction(2)` move a disposition through a function pointer
+and a struct, so a program could only reach `sigignore(2)` -- SIG_IGN -- and
+an ignored signal STAYS ignored across `exec(2)`. mere-ruby ignored SIGPIPE at
+its first pipe, every child it started ignored it too, and since the runtime
+dropped a write it could not make, a child `loop { puts :ok }` whose reader had
+gone printed into nothing for 94 seconds of CRuby's test_io, where ruby's child
+dies of SIGPIPE at once. ruby catches SIGPIPE with a handler that does nothing
+(a handler is reset to the default at exec) and keeps a disposition it
+inherited if that is not the default; `proc_sig_noop` is that, answering 0
+installed, 1 kept, -1 refused. `proc_sig_default` and `proc_sig_raise` end a
+process of a signal, as an unrescued SignalException ends ruby. And
+`__lang_write_all` -- the write behind `print_no_nl` and `print_bytes` --
+keeps the errno of a refused write for `proc_out_errno` (asking clears it), so
+an EPIPE is something a program can see. The proc_* family's errno slot
+(`proc_last_errno`) as for the others; emitted only when a program declares one
+of the names. `scripts/procsig_check.sh` (22 rows, in CI) runs each in the
+scene it is for -- nothing inherited, SIG_IGN inherited, a pipe whose reader
+has exited, a run that must end of the signal (exit 141) -- and four poisons
+(SIG_IGN for the handler, the inherited disposition not put back, the errno not
+kept, on both writers) each turn a row red. The third poison first went
+unnoticed: an un-restored handler also survives a raise, so the row that tells
+the two apart is a child's -- it inherits an ignore and not a handler.
+
+**`sock_pair`.** socketpair(2) fills an array, so it joins `sock_bind` and the
+rest of the sockaddr family on the runtime's side: an AF_UNIX pair, both
+descriptors in one int (`first * 2^20 + second`), type 1 stream / 2 datagram /
+5 seqpacket, -1 with `fd_last_errno`. mere-ruby's `UNIXSocket.pair` raised
+NotImplementedError, which seven of CRuby's test_io copy_stream cases met
+first. `scripts/sockaddr_check.sh` has nine more rows (82): the two ends talk,
+a closed end is the end of file, a datagram pair, an unknown type's EINVAL.
+
+---
+
 ## v0.1.588 — 2026-10-02
 
 _Top-level functions may be defined in any order (Q-156): a function can call one defined below it, and two can call each other from separate declarations._
