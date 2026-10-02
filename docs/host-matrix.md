@@ -50,11 +50,11 @@ machine rather than a host.
 | `bytes_of_hex` | yes | yes | yes | yes |
 | `bytes_of_str` | yes | yes | yes | yes |
 | `ceil` | yes | yes | yes | yes |
-| `channel_close` | yes | refused | refused | unattributed |
+| `channel_close` | yes | yes | yes | unattributed |
 | `channel_new` | yes | yes | yes | refused |
 | `channel_recv` | yes | yes | yes | unattributed |
-| `channel_recv_opt` | yes | refused | refused | unattributed |
-| `channel_recv_timeout` | yes | refused | refused | unattributed |
+| `channel_recv_opt` | yes | yes | yes | unattributed |
+| `channel_recv_timeout` | yes | yes | yes | unattributed |
 | `channel_send` | yes | yes | yes | unattributed |
 | `char_at` | yes | yes | yes | yes |
 | `chr` | yes | yes | yes | yes |

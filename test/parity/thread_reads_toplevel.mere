@@ -1,0 +1,9 @@
+// v0.1.600: a spawned thread reading the program's top-level values through a
+// top-level function. On Wasm each thread is its own instance with its own
+// globals, and every top-level value read as 0 there.
+let k = str_len "abcd" + 38;
+let ch = channel_new ();
+let report = fn (u: unit) -> channel_send ch k;
+let h = spawn (fn (u: unit) -> report ());
+let _ = join h;
+print_int (channel_recv ch)

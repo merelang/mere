@@ -73,10 +73,10 @@ if [ "${1:-}" = "--poison" ]; then
     SURFACE_FLOOR=99
   run_poison "an unreached import with no reason written down" \
     'no probe reaches host import `exit_proc`' \
-    WASM_STUB_UNPROBED="memory mere_spawn mere_join mere_channel_new mere_channel_send mere_channel_recv"
+    WASM_STUB_UNPROBED="memory mere_spawn mere_join mere_channel_new mere_channel_send mere_channel_take mere_channel_close"
   run_poison "a stale skip: a name listed as unprobed that a probe reaches" \
     'is listed as unprobed but a probe reaches it' \
-    WASM_STUB_UNPROBED="memory exit_proc getenv mere_spawn mere_join mere_channel_new mere_channel_send mere_channel_recv"
+    WASM_STUB_UNPROBED="memory exit_proc getenv mere_spawn mere_join mere_channel_new mere_channel_send mere_channel_take mere_channel_close"
   [ "$fails" -eq 0 ] && { echo "wasm_stub --poison: 4 caught"; exit 0; }
   echo "wasm_stub --poison: $fails not caught"; exit 1
 fi
@@ -188,7 +188,7 @@ NAME_FLOOR=${NAME_FLOOR-14}
 # that surface that no probe reaches is either a missing probe or a documented
 # reason, and it has to be one of them out loud.
 SURFACE_FLOOR=${SURFACE_FLOOR-35}
-KNOWN_UNPROBED="${WASM_STUB_UNPROBED-memory exit_proc mere_spawn mere_join mere_detach mere_thread_fail mere_channel_new mere_channel_send mere_channel_recv}"
+KNOWN_UNPROBED="${WASM_STUB_UNPROBED-memory exit_proc mere_spawn mere_join mere_detach mere_thread_fail mere_channel_new mere_channel_send mere_channel_take mere_channel_close}"
 #   memory        not a function -- the module's linear memory, imported as a value
 #   exit_proc     the answer is an exit status, not a line of stdout;
 #                 scripts/exit_status_check.sh is the gate that compares those

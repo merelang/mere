@@ -1,0 +1,34 @@
+// v0.1.600: channel_close / channel_recv_opt / channel_recv_timeout, what each
+// answers, the same on every backend that has threads.
+let ch = channel_new ();
+let _ = channel_send ch 1;
+let _ = channel_send ch 2;
+let _ = channel_close ch;
+let show_opt = fn (o: int option) -> match o with | Some v -> "Some " ++ str_of_int v | None -> "None";
+let _ = print (show_opt (channel_recv_opt ch));
+let _ = print (str_of_int (channel_recv ch));
+let _ = print (show_opt (channel_recv_opt ch));
+let _ = print (try_or_msg (fn (u: unit) -> let _ = channel_send ch 3 in "sent") (fn (m: str) -> m));
+let _ = print (try_or_msg (fn (u: unit) -> str_of_int (channel_recv ch)) (fn (m: str) -> m));
+let quiet = channel_new ();
+let _ = print (show_opt (channel_recv_timeout quiet 30));
+let _ = channel_send quiet 9;
+let _ = print (show_opt (channel_recv_timeout quiet 30));
+let done_ch = channel_new ();
+let jobs = channel_new ();
+let worker = fn (id: int) ->
+  let rec loop = fn (n: int) ->
+    match channel_recv_opt jobs with
+    | Some j -> loop (n + j)
+    | None -> channel_send done_ch n in
+  loop 0;
+let h1 = spawn (fn (u: unit) -> worker 1);
+let h2 = spawn (fn (u: unit) -> worker 2);
+let rec feed = fn (i: int) -> if i > 100 then () else let _ = channel_send jobs i in feed (i + 1);
+let _ = feed 1;
+let _ = channel_close jobs;
+let _ = join h1;
+let _ = join h2;
+let a = channel_recv done_ch;
+let b = channel_recv done_ch;
+print (str_of_int (a + b))
