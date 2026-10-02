@@ -381,7 +381,215 @@ and spawn_capture (env : venv) (consumed : IS.t) (multi : bool) (clos : Ast.expr
   ignore (go env consumed false body);
   IS.union consumed moves
 
+
+(* ---- v0.1.574 (Q-179): what a spawned thread REACHES -------------------------
+
+   The capture check above classifies what the spawned expression mentions, by
+   type -- and a function's type says nothing about what the function touches
+   (`TyArrow _ -> true` in both is_send and is_sync). So
+   `spawn (fn () -> effect "x")`, where `effect` pushes to a top-level Vec, was
+   accepted, and eight workers pushing that way kept 159,123 of 160,000 entries
+   (mere-blog's ledger, shipped). Q-080 recorded the hole in 2026-08.
+
+   This pass follows the bindings a spawned expression mentions to their
+   definitions, through every function value whose definition is visible -- a
+   `let` / `let rec` binding, a partial application of one, a data literal that
+   holds one, a module member -- and refuses the spawn if that walk reaches a
+   binding whose type is not Sync. What it reports is the path, because the
+   offending binding is usually three calls away from the `spawn`.
+
+   WHAT IT DOES NOT SEE: a function value whose definition is not visible -- a
+   parameter, a value received over a channel, the result of a call. A library
+   that spawns a handler it was given (contrib/http's serve_mt) is checked at
+   no site at all. That is the next stage's question (a run-time owner check);
+   this one is about the shapes the program text settles.
+
+   READ-ONLY IS FINE. A container no occurrence of which is anything but the
+   first argument of a read builtin (`vec_get t i`, `map_get m k`, ...) is never
+   written after it is built, and concurrent reads of it are safe -- mengd's
+   inflate tables, built with `vec_of [...]` at the top level and read by a
+   thread per connection, are exactly that. The test is on occurrences, so an
+   alias or a call that hands the container to someone else makes it not
+   read-only, which is the conservative answer.
+
+   A binding the spawned expression captures DIRECTLY is the check above's
+   business (it may legitimately be moved: a File, an OwnedVec); this pass only
+   speaks about what is reached through a function. *)
+type rdef = RVal of Ast.expr * renv | RParam
+and rbind = { rid : int; rname : string; rty : Ast.ty option; mutable rdef : rdef;
+              rloc : Loc.t }
+and renv = (string * rbind) list
+
+let r_counter = ref 0
+let r_fresh () = incr r_counter; !r_counter
+
+(* `__vec_get_unchecked` is what range-check versioning turns a `vec_get` into
+   when it has proved the index in bounds, before this pass runs -- leaving it
+   out made mengd's inflate tables look written. *)
+let reader_builtins =
+  ["vec_get"; "__vec_get_unchecked"; "vec_len"; "vec_to_list"; "map_get"; "map_has";
+   "map_len"; "strbuf_len"; "__strbuf_len"; "bytebuf_get"; "bytebuf_len"]
+
+(* binding id -> every occurrence was a read *)
+let only_read : (int, bool) Hashtbl.t = Hashtbl.create 64
+
+let rec mentions_arrow (vis : string list) (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyArrow _ | Ast.TyVar _ | Ast.TyParam _ -> true
+  | Ast.TyTuple ts -> List.exists (mentions_arrow vis) ts
+  | Ast.TyRef (_, _, i) -> mentions_arrow vis i
+  | Ast.TyCon (name, args) ->
+    List.exists (mentions_arrow vis) args ||
+    (if List.mem name vis then false else
+     match Typer.nominal_contents name args with
+     | Some tys -> List.exists (mentions_arrow (name :: vis)) tys
+     | None -> false)
+  | _ -> false
+
+let loc_line (l : Loc.t) =
+  (match l.Loc.file with Some f -> Printf.sprintf "%s:%d" (Filename.basename f) l.Loc.line | None -> Printf.sprintf "line %d" l.Loc.line)
+
+let reach_check (env : renv) (spawn_loc : Loc.t) (arg : Ast.expr) =
+  let visited = Hashtbl.create 64 in
+  let rec go path env e =
+    SS.iter (fun x ->
+      match List.assoc_opt x env with
+      | None -> ()
+      | Some b when Hashtbl.mem visited b.rid -> ()
+      | Some b ->
+        Hashtbl.add visited b.rid ();
+        (match path, b.rty with
+         | _ :: _, Some t when not (Typer.is_sync t)
+                            && not (Hashtbl.find_opt only_read b.rid = Some true) ->
+           raise (Typer.Type_error (spawn_loc,
+             Printf.sprintf
+               "this thread reaches `%s` : %s (%s) through %s, and a %s is not safe \
+                to share between threads -- the compiler cannot see that from `spawn` \
+                alone, because a function's type does not say what it touches\n\
+                help: give `%s` one owner thread and send it messages over a Channel, \
+                or build it inside the thread"
+               b.rname (Ast.pp_ty t) (loc_line b.rloc)
+               (String.concat " > " (List.rev path))
+               (match Ast.walk t with Ast.TyCon (n, _) -> n | _ -> "value") b.rname))
+         | _ -> ());
+        let recurse = match b.rty with None -> true | Some t -> mentions_arrow [] t in
+        if recurse then
+          match b.rdef with
+          | RVal (v, denv) -> go (b.rname :: path) denv v
+          | RParam -> ()) (free_vars e) in
+  go [] env arg
+
+let rbind_pat (env : renv) (pat : Ast.pattern) (ty : Ast.ty option) (def : rdef) : renv =
+  let typed = bind_pattern [] pat ty in
+  List.fold_left (fun env n ->
+    let t = match List.assoc_opt n typed with Some b -> b.ty | None -> None in
+    (n, { rid = r_fresh (); rname = n; rty = t; rdef = def; rloc = pat.Ast.ploc }) :: env)
+    env (pattern_vars pat)
+
+let rbind1 env n ty def loc =
+  (n, { rid = r_fresh (); rname = n; rty = ty; rdef = def; rloc = loc }) :: env
+
+(* One walk binds names to definitions; [visit] is called at every node with the
+   environment in force there. Run twice: first to record which bindings are
+   only read, then to check every spawn. *)
+let rec rwalk (visit : renv -> Ast.expr -> unit) (env : renv) (e : Ast.expr) : unit =
+  visit env e;
+  let w = rwalk visit env in
+  match e.Ast.node with
+  | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _ | Ast.Unit_lit | Ast.Var _ -> ()
+  | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) | Ast.App (a, b) -> w a; w b
+  | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _) | Ast.Ref (_, _, a) | Ast.Region_block (_, a) -> w a
+  | Ast.Region_loop (_, x, a) -> rwalk visit (rbind1 env x None RParam e.Ast.loc) a
+  | Ast.Fun (param, _, body) ->
+    let pt = match e.Ast.ty with
+      | Some t -> (match Ast.walk t with Ast.TyArrow (a, _) -> Some a | _ -> None) | None -> None in
+    rwalk visit (rbind1 env param pt RParam e.Ast.loc) body
+  | Ast.Let (pat, v, body) ->
+    w v; rwalk visit (rbind_pat env pat v.Ast.ty (RVal (v, env))) body
+  | Ast.With (n, v, body) ->
+    w v; rwalk visit (rbind1 env n v.Ast.ty (RVal (v, env)) e.Ast.loc) body
+  | Ast.Let_rec (bs, body) ->
+    let binds = List.map (fun (n, l, (v : Ast.expr)) ->
+      (n, { rid = r_fresh (); rname = n; rty = v.Ast.ty; rdef = RParam; rloc = l })) bs in
+    let env' = List.rev_append binds env in
+    List.iter2 (fun (_, b) (_, _, v) -> b.rdef <- RVal (v, env')) binds bs;
+    List.iter (fun (_, _, v) -> rwalk visit env' v) bs;
+    rwalk visit env' body
+  | Ast.If (c, t, f) -> w c; w t; w f
+  | Ast.Constr (_, Some a) -> w a
+  | Ast.Constr (_, None) -> ()
+  | Ast.Tuple es -> List.iter w es
+  | Ast.Record_lit (_, fs) -> List.iter (fun (_, x) -> w x) fs
+  | Ast.Record_update (b, fs) -> w b; List.iter (fun (_, x) -> w x) fs
+  | Ast.Match (scrut, arms) ->
+    w scrut;
+    List.iter (fun (pat, guard, body) ->
+      let env' = rbind_pat env pat scrut.Ast.ty (RVal (scrut, env)) in
+      (match guard with Some g -> rwalk visit env' g | None -> ());
+      rwalk visit env' body) arms
+
+let rec mentions_spawn (e : Ast.expr) : bool =
+  match e.Ast.node with
+  | Ast.Var "spawn" -> true
+  | _ -> List.exists mentions_spawn (Ast.children e)
+
+let spawn_reach (e : Ast.expr) : unit =
+  (* a program that never spawns has nothing to check, and the two walks below
+     are not free on a 40,000-line program *)
+  if mentions_spawn e then begin
+  Hashtbl.reset only_read;
+  r_counter := 0;
+  (* pass 1: an occurrence as a reader's first argument is a read; any other is not *)
+  let mark env (e : Ast.expr) =
+    match e.Ast.node with
+    | Ast.App ({ Ast.node = Ast.Var f; _ }, { Ast.node = Ast.Var x; _ })
+      when List.mem f reader_builtins && List.assoc_opt f env = None ->
+      (match List.assoc_opt x env with
+       | Some b when not (Hashtbl.mem only_read b.rid) -> Hashtbl.replace only_read b.rid true
+       | _ -> ())
+    | Ast.App (f, a) ->
+      (* `f a` with `a` a plain name: a use that is not a read (unless the case
+         above took it -- that one matched first) *)
+      ignore f;
+      (match a.Ast.node with
+       | Ast.Var x -> (match List.assoc_opt x env with
+           | Some b -> Hashtbl.replace only_read b.rid false | None -> ())
+       | _ -> ())
+    | _ -> ()
+  in
+  (* every Var occurrence that is not a reader's argument counts against it;
+     the App cases above see arguments, this sees everything else *)
+  let mark_vars env (e : Ast.expr) =
+    match e.Ast.node with
+    | Ast.App ({ Ast.node = Ast.Var f; _ }, { Ast.node = Ast.Var _; _ })
+      when List.mem f reader_builtins && List.assoc_opt f env = None -> ()
+    | _ ->
+      List.iter (fun (c : Ast.expr) ->
+        match c.Ast.node with
+        | Ast.Var x ->
+          let is_reader_arg = match e.Ast.node with
+            | Ast.App ({ Ast.node = Ast.Var f; _ }, a) when a == c ->
+              List.mem f reader_builtins && List.assoc_opt f env = None
+            | _ -> false in
+          if not is_reader_arg then
+            (match List.assoc_opt x env with
+             | Some b -> Hashtbl.replace only_read b.rid false | None -> ())
+        | _ -> ()) (Ast.children e)
+  in
+  rwalk (fun env e -> mark env e; mark_vars env e) [] e;
+  (* the ids are re-made on the second walk, so pass 1 has to be keyed by
+     something both walks agree on: the walk order. Reset the counter and walk
+     again in the same order -- the same bindings get the same ids. *)
+  r_counter := 0;
+  rwalk (fun env e ->
+    match e.Ast.node with
+    | Ast.App ({ Ast.node = Ast.Var "spawn"; _ }, arg) when List.assoc_opt "spawn" env = None ->
+      reach_check env e.Ast.loc arg
+    | _ -> ()) [] e
+  end
+
 let check (e : Ast.expr) : unit =
   counter := 0;
   enclosing_blocks := [];
-  ignore (go [] IS.empty false e)
+  ignore (go [] IS.empty false e);
+  spawn_reach e

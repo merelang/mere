@@ -4200,10 +4200,36 @@ let () =
      Pinning a defect this way makes the gate say something the day it closes:
      if either turns "refused", this test fails and the person who fixed it is
      told to update the record rather than discovering it years later. *)
-  check "Q-080 hole: a Map inside a captured closure is not seen"
-    (accepted sp_in_closure) "accepted";
-  check "Q-080 hole: nor when that closure arrives as a parameter"
+  (* v0.1.574 (Q-179): the first is closed -- the reach of a closure whose
+     definition is visible is followed. The second stays open: a parameter's
+     definition is the caller's, and this check is about what the text settles. *)
+  check_raises_containing "Q-179: a Map inside a captured closure is seen"
+    "this thread reaches `hits`" (fun () -> Pipeline.process sp_in_closure);
+  check "Q-080 hole (still): a closure that arrives as a parameter is not followed"
     (accepted sp_as_param) "accepted";
+  check_raises_containing "Q-179: the path is named, three calls in"
+    "through w > fill > put" (fun () -> Pipeline.process
+      "let tbl = map_new ();\n\
+       let put = fn (k: int) -> map_set tbl k k;\n\
+       let fill = fn (n: int) -> put n;\n\
+       let w = fn (b: int) -> fn (u: unit) -> fill b;\n\
+       let h = spawn (w 1);\njoin h");
+  check "Q-179: a container only ever read is shared (mengd's tables)"
+    (accepted "let mk = fn (u: unit) -> let v = vec_new () in let _ = vec_push v 3 in v;\n\
+               let t = mk ();\n\
+               let f = fn (i: int) -> vec_get t i + vec_len t;\n\
+               let h = spawn (fn () -> print_int (f 0));\njoin h") "accepted";
+  check_raises_containing "Q-179: one write anywhere and it is not read-only"
+    "this thread reaches `t`" (fun () -> Pipeline.process
+      "let t = vec_new ();\nlet _ = vec_push t 3;\n\
+       let f = fn (i: int) -> vec_get t i;\n\
+       let h = spawn (fn () -> print_int (f 0));\njoin h");
+  check_raises_containing "Q-179: handing it to a function is not a read"
+    "this thread reaches `t`" (fun () -> Pipeline.process
+      "let mk = fn (u: unit) -> let v = vec_new () in let _ = vec_push v 3 in v;\n\
+       let t = mk ();\nlet g = fn (v: Vec['r, int]) -> vec_get v 0;\n\
+       let f = fn (i: int) -> g t;\n\
+       let h = spawn (fn () -> print_int (f 0));\njoin h");
   (* v0.1.573 (Q-179 stage 0) *)
   check_raises_containing "Q-197: a ByteBuf is not shared across a thread"
     "neither Send nor Sync" (fun () -> Pipeline.process
