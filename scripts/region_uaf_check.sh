@@ -55,7 +55,10 @@ spawn_env_in_block|c
 ownedvec_store|cl
 channel_from_block|cl
 coro_env_from_block|c
-recycled_escape|c'
+recycled_escape|c
+recycle_dedicated|ca
+coro_pin_reach|ca
+coro_pin_resumed|ca'
 
 run_bin() { perl -e 'alarm 20; exec @ARGV' "$1" 2>&1; }
 
@@ -70,7 +73,11 @@ build() {  # $1 = program, $2 = c|ll, [$3 = sed expression] -> $T/bin, or prints
     mv "$T/p.$2" "$T/g.$2"
   fi
   if [ "$2" = c ]; then lang=c; else lang=ir; fi
-  "$CC" -w -x "$lang" -o "$T/bin" "$T/g.$2" -lm -lpthread 2>"$T/cc.err" || { echo "CCFAIL $(head -1 "$T/cc.err")"; return 1; }
+  # a case marked `a` is built with ASan: what it guards against is a write past
+  # a malloc'd block, which only a sanitizer turns into an answer
+  san=""; case "${4:-}" in *a*) san="-fsanitize=address -g" ;; esac
+  # shellcheck disable=SC2086
+  "$CC" -w $san -x "$lang" -o "$T/bin" "$T/g.$2" -lm -lpthread 2>"$T/cc.err" || { echo "CCFAIL $(head -1 "$T/cc.err")"; return 1; }
 }
 
 printf '%s\n' "$CASES" | while IFS='|' read -r f b; do
@@ -81,7 +88,7 @@ printf '%s\n' "$CASES" | while IFS='|' read -r f b; do
   for be in c ll; do
     case "$be" in c) letter=c; name=C ;; ll) letter=l; name=LLVM ;; esac
     case "$b" in *"$letter"*) ;; *) continue ;; esac
-    if ! why=$(build "$f" "$be"); then printf '  FAIL  %s\n' "$name $f: $why"; echo x >> "$T/failed"; continue; fi
+    if ! why=$(build "$f" "$be" "" "$b"); then printf '  FAIL  %s\n' "$name $f: $why"; echo x >> "$T/failed"; continue; fi
     got=$(run_bin "$T/bin")
     if [ "$got" = "$want" ]; then printf '  ok    %s\n' "$name $f"
     else printf '  FAIL  %s\n' "$name $f: got [$(echo "$got" | head -1 | cut -c1-40)] wanted [$(echo "$want" | head -1 | cut -c1-40)]"; echo x >> "$T/failed"; fi
@@ -97,10 +104,14 @@ spawn_env_in_block|c|the thread gets the env as it was|s/__se = __sh->__copy(&__
 ownedvec_store|c|owned_vec_push stores the pointer|s/v->data\[v->len++\] = __mcopy_str(&__lang_default_region, x);/v->data[v->len++] = x;/
 ownedvec_store|ll|owned_vec_push stores the pointer|s/= call ptr @__mcopy_str(ptr @__lang_default_region, ptr \(%t[0-9]*\))/= getelementptr i8, ptr \1, i64 0/
 channel_from_block|ll|the message is sent as the pointer|s/= call ptr @__mcopy_str(ptr @__lang_default_region, ptr \(%t[0-9]*\))/= getelementptr i8, ptr \1, i64 0/
-recycled_escape|c|only the moved storage is kept, not where the struct lives|s/ __lang_region_keep(v->home, r); / /'
+recycled_escape|c|only the moved storage is kept, not where the struct lives|s/ __lang_region_keep(v->home, r); / /
+recycle_dedicated|c|a recycle claims 4 KB on the block it kept|s/^    r->cap = b->pad;$/    r->cap = 4096;/
+coro_pin_reach|c|the pin reads the stack and not what it points at|s/^  __lang_pin_reach(c);$//
+coro_pin_resumed|c|a retired arena is tried while its pinner runs|s/if (o.by\[j\] == curh) keep = 1;//'
   printf '%s\n' "$POISONS" | while IFS='|' read -r f be what expr; do
     want=$("$MERE" "$FX/$f.mere" 2>&1)
-    if ! why=$(build "$f" "$be" "$expr"); then printf '  FAIL  %s\n' "POISON $be $f ($what): $why"; echo x >> "$T/pfailed"; continue; fi
+    flags=$(printf '%s\n' "$CASES" | grep "^$f|" | cut -d'|' -f2)
+    if ! why=$(build "$f" "$be" "$expr" "$flags"); then printf '  FAIL  %s\n' "POISON $be $f ($what): $why"; echo x >> "$T/pfailed"; continue; fi
     got=$(run_bin "$T/bin")
     if [ "$got" != "$want" ]; then printf '  ok    %s\n' "POISON $be $f ($what): goes red"
     else printf '  FAIL  %s\n' "POISON $be $f ($what): still green -- the program does not witness the fix"; echo x >> "$T/pfailed"; fi

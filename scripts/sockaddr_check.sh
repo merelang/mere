@@ -136,6 +136,15 @@ address of a pipe ok
 address of a pipe errno=@ENOTSOCK@
 address of a closed fd ok
 address of a closed fd errno=@EBADF@
+socketpair answers two descriptors ok
+a pair's end is a unix socket ok
+one end writes ok
+the other reads it ok
+what it read ok
+a closed end is the end of file ok
+a datagram pair ok
+an unknown type ok
+an unknown type errno=@EINVAL@
 W
 
 n=$(wc -l < "$TMP/want" | tr -d ' ')

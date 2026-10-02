@@ -246,6 +246,7 @@ and comes out as the text `getnameinfo(3)` writes, and the family comes out as a
 |---|---|---|
 | `tcp_listen_at` | `str -> int -> int -> int` | `host port backlog`. `getaddrinfo` with `AI_PASSIVE`; each answer in order gets `socket`, `SO_REUSEADDR` and `bind`, and the **first that binds** is the listener (ruby's `TCPServer.new`). `""` is the wildcard (`::` before `0.0.0.0` on a host with IPv6). The fd; `-1` with errno kept (the last answer's, when none binds); `-2` when the name does not resolve. Ignores `SIGPIPE`, as `tcp_listen` does |
 | `sock_bind` | `int -> str -> int -> int` | `fd host port`: `bind(2)` an existing socket to a **numeric** address (no lookup; a name is `-2`). `""` is the wildcard of the socket's own family. No `SO_REUSEADDR`. `0`, or `-1` |
+| `sock_pair` | `int -> int` | `type` (1 stream, 2 datagram, 5 seqpacket): an AF_UNIX `socketpair(2)` (v0.1.589). Both descriptors in one int, `first * 2^20 + second`; `-1` with errno kept |
 | `sock_local_addr` | `int -> str` | `getsockname(2)` as `"<family> <port> <address>"` — `"inet 5000 127.0.0.1"`, `"inet6 5000 ::1"`, `"unix 0 <path>"` (the path last: it may hold spaces), `"other 0 "`. `""` on failure |
 | `sock_peer_addr` | `int -> str` | `getpeername(2)`, the same text; `""` with `ENOTCONN` for a socket with no peer |
 | `fd_last_errno` | `unit -> int` | The errno the last of these **and of the `fd_*` family** left, `0` when it succeeded. Per thread |
@@ -332,6 +333,28 @@ let _ = proc_setrlimit "NOFILE" 256 hard;
 and read back, a priority it raised and read, a lock it took through one open
 and was refused through another, or a refusal it provoked. The same transcript
 holds on macOS and Linux, as root and as an unprivileged user.
+
+**A signal's disposition, and a refused write to stdout** (v0.1.589). `signal(2)`
+and `sigaction(2)` move a disposition through a function pointer and a struct, so
+no `extern` can name them; and the runtime's own write path (`print_no_nl`,
+`print_bytes`) dropped a refusal before a program could ask. Same family, same
+errno slot (`proc_last_errno`).
+
+| name | type | notes |
+|---|---|---|
+| `proc_sig_noop` | `int -> int` | Catch the signal and do nothing — what ruby does to `SIGPIPE`. **Unlike `SIG_IGN`, a handler goes back to the default at `exec(2)`**, so a child starts with the default. What was inherited and is not the default (ignored, or a handler) is put back and kept, ruby's rule. `0` installed, `1` kept, `-1` refused |
+| `proc_sig_default` | `int -> int` | Back to `SIG_DFL`. `0`, or `-1` |
+| `proc_sig_raise` | `int -> int` | `raise(3)` the signal at this thread. `0`, or `-1` |
+| `proc_out_errno` | `unit -> int` | The errno of the last write `print_no_nl` or `print_bytes` could not make, `0` if none since the last ask. **Asking clears it** |
+
+The pair a program that writes to pipes wants: `proc_sig_noop 13` (SIGPIPE does
+not end it, and its children are not left ignoring it), then
+`proc_out_errno ()` after a write — `32` is `EPIPE` on every POSIX host — and, to
+end the way an unhandled SIGPIPE ends a process, `proc_sig_default 13` followed
+by `proc_sig_raise 13`. `print` and `print_err` still go through stdio and are
+not covered. `scripts/procsig_check.sh` is the gate, each row in the scene it is
+for: nothing inherited, `SIG_IGN` inherited, a pipe whose reader has exited, and
+a run that must end of the signal (exit status 141).
 
 **Positioned file I/O** (`file_openrw` through `file_close`) works on **all four**
 backends: interp and C natively, Wasm over host imports since v0.1.153 (bytes cross
@@ -1141,8 +1164,15 @@ LLVM IR is not specific to a machine, so there the switch is `_setjmp` /
 
 On C, a store compacted (`map_compact`, `vec_compact`, `map_recycle`) while a
 coroutine is suspended keeps any arena that coroutine's stack still points
-into, and frees it at a later compaction (v0.1.547). (LLVM has no compaction
-builtins.)
+into, and frees it at a later compaction (v0.1.547). "Points into" is what the
+stack REACHES (v0.1.589): its own words, and the pointers inside the nodes they
+point at -- as far as they go in the coroutine's own regions, three hops in
+anyone else's, the walk `coro_scan_ints` makes. A retired arena is not tried
+again while one of the coroutines that pinned it is the one running. And since
+an arena under a pin cannot be given back anyway, `map_compact` and
+`vec_compact` leave such a container where it is rather than copying it beside
+the old arena (a recycle still moves, because it must empty the map). (LLVM
+has no compaction builtins.)
 
 ### What a stack still holds: `coro_scan_ints` (v0.1.549)
 

@@ -1,0 +1,29 @@
+// v0.1.589: map_recycle keeps the OLDEST block of a map's
+// private arena and calls it the 4 KB seed. A value bigger than a quarter of
+// the seed gets a dedicated block chained in BEHIND the bump block, so while
+// the seed is still the bump block the oldest block IS the dedicated one --
+// and a capacity of 4096 claimed on its ~2 KB let the next allocations run
+// off its end into the heap. The recycle keeps the block's real capacity now.
+// (mere-ruby's frame pool: a 2.8 KB exception message beside a pooled frame,
+// a corrupted length, a deep copy that asked malloc for the impossible.)
+// Built with ASan by the gate: the overrun is a write past a malloc'd block,
+// which nothing else in a plain build would show.
+// The dedicated block is made only for a value that does not fit what is left
+// of the bump block, so the seed is filled first: 20 small values, then one of
+// 2000 bytes that no longer fits, then the recycle. ⚠ The count is tuned, not
+// derived: 16 overflows the seed through the index's growth and the region
+// doubles instead (no dedicated block, nothing to witness). The gate's
+// --poison run is what says this still reaches the overrun.
+let m = map_new ();
+let _ = map_recycle m;
+let rec seed = fn (i: int) ->
+  if i == 20 then () else let _ = map_set m i (str_repeat "s" 40) in seed (i + 1);
+let _ = seed 0;
+let _ = map_set m 99 (str_repeat "x" 2000);
+let _ = map_recycle m;
+let rec fill = fn (i: int) ->
+  if i == 40 then () else let _ = map_set m i (str_repeat "y" 60) in fill (i + 1);
+let _ = fill 0;
+let rec total = fn (i: int) -> fn (acc: int) ->
+  if i == 40 then acc else total (i + 1) (acc + str_len (map_get m i));
+print (str_of_int (total 0 0))

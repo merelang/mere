@@ -1,0 +1,31 @@
+// v0.1.589: a suspended coroutine holds a string it read out of a map -- not
+// in a local of its own, but in a list cell its stack points at. The map is
+// compacted while the coroutine is suspended. The pin read only the stack's
+// own words, so the arena the string lived in was freed under the cell; the
+// pin now follows the pointers it finds (as coro_scan_ints does) and keeps
+// it. Built with ASan by the gate: the read after free is the answer.
+let root = coro_root ();
+let m = map_new ();
+let rec fill = fn (i: int) -> if i == 0 then 0 else (let _ = map_set m i (str_repeat "v" 64 ++ str_of_int i) in fill (i - 1));
+let _ = fill 200;
+let _ = map_compact m;
+// the cell is made at the bottom of a deep recursion, so once it returns the
+// string's address is nowhere in the live part of the coroutine's stack (a
+// dead frame's copy below the stack pointer is not read) -- only in the cell
+let rec cell = fn (d: int) -> fn (k: int) ->
+  if d == 0 then Cons (map_get m k, (Nil : str list))
+  else (let r = cell (d - 1) k in match r with Cons (_, _) -> r | Nil -> r);
+let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
+  let held = cell 300 7 in
+  let _ = coro_switch root in
+  let _ = print (match held with Cons (h, _) -> (if h == str_repeat "v" 64 ++ "7" then "held: intact" else "held: lost") | Nil -> "held: gone") in
+  root) ());
+let _ = coro_switch c;
+let rec over = fn (i: int) -> if i == 0 then 0 else (let _ = map_set m i (str_repeat "Z" 64) in over (i - 1));
+let _ = over 200;
+let _ = map_compact m;
+let rec churn = fn (i: int) -> if i == 0 then 0 else (let _ = map_set m (1000 + i) (str_repeat "Q" 200) in churn (i - 1));
+let _ = churn 500;
+let _ = map_compact m;
+let _ = coro_switch c;
+print_int (map_len m)
