@@ -445,9 +445,16 @@ let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
     match all with
     | [] | [_] -> report loc "type error" msg
     | _ ->
+      (* v0.1.604: the re-check reads `source` as it was given -- without the RV
+         prelude glued in front -- so its positions are the file's own lines
+         already. Read through `locate` on an -rv path, they were moved again,
+         into the prelude: every error but the first was shown as
+         `<rv-prelude>:2:9` with the prelude's line 2 under it. *)
+      let locate_rechecked (loc : Mere.Loc.t) =
+        if rv && loc.Mere.Loc.file = None then (source, label, loc) else locate loc in
       let blocks =
         List.map (fun (d : Mere.Pipeline.diagnostic) ->
-          let (src, name, loc) = locate d.Mere.Pipeline.d_loc in
+          let (src, name, loc) = locate_rechecked d.Mere.Pipeline.d_loc in
           render ~source:src ~filename:name loc
             d.Mere.Pipeline.d_kind d.Mere.Pipeline.d_msg) all
       in

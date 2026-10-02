@@ -284,6 +284,18 @@ if "$MERE" -rv "$TMP/tp.mere" 2>&1 | grep -q 'unbound variable'; then :; else
   rc=1
 fi
 
+# v0.1.604: with two errors in the program, both are the program's lines. The
+# report re-checks the file as it was given (no prelude in front), and those
+# positions were moved again as if they counted from the prelude's top: every
+# error was shown as `<rv-prelude>:N` with a prelude line under it.
+printf 'let a = 1;\nlet b = missing_one + a;\nlet c = missing_two + b;\nprint_int c\n' > "$TMP/two.mere"
+"$MERE" -rv "$TMP/two.mere" > /dev/null 2> "$TMP/twoerr"
+if grep -q 'rv-prelude' "$TMP/twoerr" || [ "$(grep -c 'two.mere:[23]:9' "$TMP/twoerr")" != 2 ]; then
+  echo "FAIL rv_prelude: two errors in the program are not both placed in it"
+  grep -- '-->' "$TMP/twoerr" | head -3
+  rc=1
+fi
+
 # The count is the names written in lib/rv_prelude.ml. The prelude ALSO carries
 # contrib/softfloat, spliced in from the generated lib/rv_softfloat.ml, and those
 # names are not in this list -- scripts/softfloat_check.sh compiles all of them

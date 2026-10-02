@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.604 — 2026-10-03
+
+_A zero divisor fails on RISC-V as everywhere else: `7 / 0` printed -1 there, and `7 % 0` printed 7. And on the `-rv` path a second type error is shown in the program, not in the prelude._
+
+RISC-V's `div` and `rem` do not trap: a zero divisor answers -1 and the
+dividend, which is defined behaviour for the instruction set and a silent wrong
+answer for the program -- the interpreter, C, LLVM and Wasm all fail with
+"division by zero" / "modulo by zero". Each division now branches on a zero
+divisor to one of two shared stubs (emitted only when the program divides) that
+fail with those messages, catchably: `try_or` and `try_or_msg` take them like
+any other failure. `INT_MIN / -1` needed nothing: RISC-V answers the wraparound
+the interpreter does.
+
+And on the same path: with two or more type errors, every one was shown as
+`<rv-prelude>:2:9` with a line of the prelude under it. The report re-checks the
+file as it was given -- without the prelude glued in front -- and its positions
+were then moved again as if they counted from the prelude's first line; they
+are the file's own now (`scripts/rv_prelude_check.sh` gains the case).
+
+Found while giving this backend `try_or_msg` (v0.1.599). `test/parity/divide_by_zero_caught.mere`
+is the same on all four backends and, through `scripts/rv_exec_check.sh`, on
+RV32 and RV64. Every RISC-V binary that divides changes; no other backend's
+output does.
+
+---
+
 ## v0.1.603 — 2026-10-03
 
 _`dom_canvas_put_pixels`: a browser program puts a whole frame on a canvas in one call (Q-122)._

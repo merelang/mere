@@ -1,0 +1,9 @@
+// v0.1.604: a zero divisor fails, catchably, with the same message everywhere.
+// RISC-V div / rem answer -1 and the dividend for it, and the RV backend
+// printed those.
+let z = str_len "";
+let a = try_or (fn (u: unit) -> 7 / z) 99;
+let b = try_or_msg (fn (u: unit) -> str_of_int (7 % z)) (fn (m: str) -> m);
+let _ = print_int a;
+let _ = print b;
+print_int (0 - 7 / 2 + 9 % 4)

@@ -1029,13 +1029,27 @@ let emit_raw_bounds width =
   emit (Branch (6, t1, t2, "__raw_fault"));             (* w.len < off+width -> fault *)
   emit_word (enc_r 0 a1 t0 0 t0 0x33)                   (* t0 = base + off *)
 
+(* v0.1.604: RISC-V's div answers -1 and rem answers the dividend for a zero
+   divisor -- defined, and silently wrong: `7 / 0` printed -1 here where every
+   other backend fails "division by zero". A branch to one shared stub per
+   message, emitted only by a program that divides (see emit_divzero_stubs).
+   INT_MIN / -1 needs nothing: RISC-V answers the wraparound the interpreter
+   does. *)
+let divzero_used = ref false
+
 let emit_binop op rd rs1 rs2 loc =
   match op with
   | Ast.Add -> emit_word (enc_r 0 rs2 rs1 0 rd 0x33)
   | Ast.Sub -> emit_word (enc_r 0x20 rs2 rs1 0 rd 0x33)
   | Ast.Mul -> emit_word (enc_r 1 rs2 rs1 0 rd 0x33)
-  | Ast.Div -> emit_word (enc_r 1 rs2 rs1 4 rd 0x33)
-  | Ast.Mod -> emit_word (enc_r 1 rs2 rs1 6 rd 0x33)
+  | Ast.Div ->
+    divzero_used := true;
+    emit (Branch (0, rs2, zero, "__div_zero"));          (* beq rs2, x0 *)
+    emit_word (enc_r 1 rs2 rs1 4 rd 0x33)
+  | Ast.Mod ->
+    divzero_used := true;
+    emit (Branch (0, rs2, zero, "__mod_zero"));
+    emit_word (enc_r 1 rs2 rs1 6 rd 0x33)
   | Ast.Concat -> err loc "RV32I: internal — string concat is handled in compile_bin"
 
 (* An abort with a fixed message: the tail of `fail` -- write it, then exit(1).
@@ -1093,6 +1107,16 @@ let emit_fail_from_a0 () =
   emit_word (enc_i 93 zero 0 a7 0x13);                   (* li a7, 93 *)
   emit_word (enc_i 1 zero 0 a0 0x13);                    (* li a0, 1 *)
   emit_word (enc_i 0 zero 0 zero 0x73)                   (* ecall (exit) *)
+
+(* v0.1.604: the two failures a zero divisor branches to (emit_binop) *)
+let emit_divzero_stubs () =
+  List.iter (fun (label, msg) ->
+    emit (Label label);
+    let sl = fresh_label "str_" in
+    string_data := (sl, mk_str_block msg) :: !string_data;
+    emit (LoadAddr (a0, sl));
+    emit_fail_from_a0 ())
+    [ ("__div_zero", "division by zero"); ("__mod_zero", "modulo by zero") ]
 
 (* A `fail` whose message is known at compile time. Catchable, like any other. *)
 let emit_abort msg =
@@ -4223,6 +4247,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   items := [];
   lbl_counter := 0;
   string_data := [];
+  divzero_used := false;
   lambdas := [];
   Hashtbl.reset adapters;
   globals := [];
@@ -4341,6 +4366,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
     | h :: rest -> eq_pending := rest; emit_eq_helper h; drain_eq ()
   in
   drain_eq ();
+  if !divzero_used then emit_divzero_stubs ();
   (* string literals collected during compilation, placed after the code *)
   List.iter (fun (label, bytes) -> emit (Label label); emit (Bytes bytes)) !string_data;
   List.rev !items
