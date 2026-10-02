@@ -2724,6 +2724,24 @@ let channel_recv_timeout_scheme =
              Ast.TyArrow (Ast.TyInt,
                Ast.TyCon ("option", [_chan_recv_to_elem]))) }
 
+(* v0.1.600: what the LLVM and Wasm backends rewrite channel_recv_opt and
+   channel_recv_timeout into (Ast.rewrite_channel_ops): the receive as a
+   (got, value) pair, which the rewrite turns into the option. In the
+   environment so every pass that asks "is this name a builtin" says yes;
+   nothing writes them. *)
+let _chan_pair_elem = fresh_var ()
+let chan_recv_pair_scheme =
+  let aid = match _chan_pair_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [aid];
+    body = Ast.TyArrow (Ast.TyCon ("Channel", [_chan_pair_elem]),
+             Ast.TyTuple [Ast.TyBool; _chan_pair_elem]) }
+let _chan_pair_to_elem = fresh_var ()
+let chan_recv_pair_timeout_scheme =
+  let aid = match _chan_pair_to_elem with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [aid];
+    body = Ast.TyArrow (Ast.TyCon ("Channel", [_chan_pair_to_elem]),
+             Ast.TyArrow (Ast.TyInt, Ast.TyTuple [Ast.TyBool; _chan_pair_to_elem])) }
+
 (* Q-012 Phase 32: par_map : ('a -> 'b) -> 'a list -> 'b list. Applies the
    function to each element in parallel and collects the results in order.
    'a and 'b cross thread boundaries, so both must be Send — checked (like
@@ -2934,6 +2952,8 @@ let initial_env : env =
     ("channel_close", channel_close_scheme);
     ("channel_recv_opt", channel_recv_opt_scheme);
     ("channel_recv_timeout", channel_recv_timeout_scheme);
+    ("__chan_recv_pair", chan_recv_pair_scheme);
+    ("__chan_recv_pair_timeout", chan_recv_pair_timeout_scheme);
     ("par_map",      par_map_scheme);
     ("read_line",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     (* v0.1.59 (mgrep dogfood): streaming per-line file input. read_file

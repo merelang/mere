@@ -4527,38 +4527,28 @@ let () =
      let mt = Typer.infer !type_env (Ast.desugar_program prog) in
      (prog, mt)
    in
-   check_raises_containing
-     "v0.1.47: Wasm rejects channel_close honestly"
-     "channel_close / channel_recv_opt are unsupported in Wasm codegen"
-     (fun () ->
-       let (prog, mt) = typed_prog_local
-         "let ch = channel_new () in\n\
-          let _ = channel_close ch in 0" in
-       let _ = Codegen_wasm.emit_program ~main_ty:mt prog in ());
-   check_raises_containing
-     "v0.1.47: LLVM rejects channel_recv_opt honestly"
-     "channel_close / channel_recv_opt are unsupported in LLVM codegen"
-     (fun () ->
-       let (prog, mt) = typed_prog_local
-         "let ch = channel_new () in\n\
-          match channel_recv_opt ch with | Some v -> v | None -> 0" in
-       let _ = Codegen_llvm.emit_program ~main_ty:mt prog in ());
-   check_raises_containing
-     "v0.1.48: Wasm rejects channel_recv_timeout honestly"
-     "channel_recv_timeout is unsupported in Wasm codegen"
-     (fun () ->
-       let (prog, mt) = typed_prog_local
-         "let ch = channel_new () in\n\
-          match channel_recv_timeout ch 50 with | Some v -> v | None -> 0" in
-       let _ = Codegen_wasm.emit_program ~main_ty:mt prog in ());
-   check_raises_containing
-     "v0.1.48: LLVM rejects channel_recv_timeout honestly"
-     "channel_recv_timeout is unsupported in LLVM codegen"
-     (fun () ->
-       let (prog, mt) = typed_prog_local
-         "let ch = channel_new () in\n\
-          match channel_recv_timeout ch 50 with | Some v -> v | None -> 0" in
-       let _ = Codegen_llvm.emit_program ~main_ty:mt prog in ()));
+   (* v0.1.600: refused here until LLVM and Wasm had them; now each reaches
+      its runtime entry *)
+   let emits name needle emit src =
+     let (prog, mt) = typed_prog_local src in
+     let out = emit mt prog in
+     let n = String.length needle and m = String.length out in
+     let rec has i = i + n <= m && (String.sub out i n = needle || has (i + 1)) in
+     check name (if has 0 then needle else "MISSING") needle in
+   let wasm mt prog = Codegen_wasm.emit_program ~main_ty:mt prog in
+   let llvm mt prog = Codegen_llvm.emit_program ~main_ty:mt prog in
+   emits "v0.1.600: Wasm emits channel_close" "call $mere_channel_close" wasm
+     "let ch = channel_new () in\n\
+      let _ = channel_close ch in 0";
+   emits "v0.1.600: LLVM emits channel_recv_opt" "@mere_channel_recv_opt" llvm
+     "let ch = channel_new () in\n\
+      match channel_recv_opt ch with | Some v -> v | None -> 0";
+   emits "v0.1.600: Wasm emits channel_recv_timeout" "call $mere_channel_take_h" wasm
+     "let ch = channel_new () in\n\
+      match channel_recv_timeout ch 50 with | Some v -> v | None -> 0";
+   emits "v0.1.600: LLVM emits channel_recv_timeout" "@mere_channel_recv_timeout" llvm
+     "let ch = channel_new () in\n\
+      match channel_recv_timeout ch 50 with | Some v -> v | None -> 0");
   assert_c "codegen: record update via tmp + statement expr"
     (codegen_with_decls
       "type CgRectD = { w: int, h: int };\n\

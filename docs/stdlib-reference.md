@@ -1035,6 +1035,10 @@ All three block. They differ in what ends the wait.
 | `channel_recv_opt` | a message arrives, **or the channel is closed and drained** (`None`) | a worker loop that must terminate: `channel_close` ends it |
 | `channel_recv_timeout` | a message arrives, or the deadline passes | the only one that answers "is there something *now*" |
 
+All three, and `channel_close`, work on the interpreter, C, LLVM and Wasm (LLVM
+and Wasm since v0.1.600). On every one a send on a closed channel and a
+`channel_recv` on a closed, drained one fail -- catchably, with the same message.
+
 `channel_recv_opt` is the one that gets misread, because a name ending in
 `_opt` reads like a try-receive. It is not: the implementation is
 `while (len == 0 && !closed) cond_wait`, and `None` means closed, never empty.

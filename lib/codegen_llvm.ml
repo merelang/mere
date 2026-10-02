@@ -4440,6 +4440,30 @@ let shared_msg_name (kind : string) (op : string) =
 let owner_call (owner : string) (kind : string) (op : string) =
   Printf.sprintf "  call void @__lang_owned(i32 %s, ptr %s, ptr %s)" owner
     (owner_msg_name kind op) (shared_msg_name kind op)
+(* v0.1.600: the tuple `(got, value)` a channel receive that may come back empty
+   answers, from the runtime's { i64 value, i32 got }; rewrite_channel_ops turns
+   it into the option the program asked for *)
+let emit_chan_pair (e : Ast.expr) (call : string) : string =
+  let ts = match Option.map Ast.walk e.Ast.ty with
+    | Some (Ast.TyTuple [b; v]) -> [Ast.walk b; Ast.walk v]
+    | _ -> raise (Codegen_error (e.Ast.loc, "channel receive: expected a (bool, value) pair")) in
+  let ety = llvm_ty_of (List.nth ts 1) in
+  let pr = fresh_reg () in
+  emit_instr (Printf.sprintf "  %s = %s" pr call);
+  let raw = fresh_reg () in
+  emit_instr (Printf.sprintf "  %s = extractvalue { i64, i32 } %s, 0" raw pr);
+  let ok = fresh_reg () in
+  emit_instr (Printf.sprintf "  %s = extractvalue { i64, i32 } %s, 1" ok pr);
+  let got = fresh_reg () in
+  emit_instr (Printf.sprintf "  %s = icmp ne i32 %s, 0" got ok);
+  let v = cast_from_i64 raw ety in
+  let tn = "%" ^ tuple_struct_name ts in
+  let t0 = fresh_reg () in
+  emit_instr (Printf.sprintf "  %s = insertvalue %s undef, i1 %s, 0" t0 tn got);
+  let t1 = fresh_reg () in
+  emit_instr (Printf.sprintf "  %s = insertvalue %s %s, %s %s, 1" t1 tn t0 ety v);
+  t1
+
 let rec emit_expr (env : env) (e : Ast.expr) : string =
   (* Q-029: whether THIS expression is in tail position. Cleared immediately,
      so a sub-expression is not in tail position unless the case below puts it
@@ -5437,10 +5461,6 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  %s = call i64 @mere_channel_recv(ptr %s)" raw chv);
     let ety = match e.Ast.ty with Some t -> llvm_ty_of t | None -> "i32" in
     cast_from_i64 raw ety
-  | Ast.App ({ node = Ast.Var "channel_recv_timeout"; _ }, _) ->
-    unsupported e.Ast.loc
-      "channel_recv_timeout is unsupported in LLVM codegen \
-       (v0.1.48 scope = interp + C)"
   (* v0.1.163: positioned file I/O. Same contract as interp / C / Wasm —
      the handle is a FILE*, bytes cross as a Vec[int] — so a store written
      against these builtins now compiles on all four backends. *)
@@ -5546,13 +5566,21 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        and a buffered cursor the runtime would have to own per handle. *)
     unsupported e.Ast.loc
       (fio ^ " is unsupported in LLVM codegen (scope = interp + C)")
-  | Ast.App ({ node = Ast.Var ("channel_close" | "channel_recv_opt"); _ }, _) ->
-    (* v0.1.47: graceful-shutdown primitives are interp + C only (the
-       worker-pool / server shape they serve is the native target). *)
-    unsupported e.Ast.loc
-      "channel_close / channel_recv_opt are unsupported in LLVM codegen \
-       (v0.1.47 scope = interp + C; concurrency shutdown targets the \
-       native C backend)"
+  (* v0.1.600: channel_close, and the two receives that answer an option --
+     rewritten before emission into `__chan_recv_pair` (see
+     rewrite_channel_ops), which hands back (got, value) as a tuple *)
+  | Ast.App ({ node = Ast.Var "channel_close"; _ }, ch_e)
+    when not (user_shadows_llvm env "channel_close") ->
+    let chv = emit_expr env ch_e in
+    emit_instr (Printf.sprintf "  call i32 @mere_channel_close(ptr %s)" chv);
+    "0"
+  | Ast.App ({ node = Ast.Var "__chan_recv_pair"; _ }, ch_e) ->
+    let chv = emit_expr env ch_e in
+    emit_chan_pair e (Printf.sprintf "call { i64, i32 } @mere_channel_recv_opt(ptr %s)" chv)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "__chan_recv_pair_timeout"; _ }, ch_e); _ }, ms_e) ->
+    let chv = emit_expr env ch_e in
+    let msv = emit_expr env ms_e in
+    emit_chan_pair e (Printf.sprintf "call { i64, i32 } @mere_channel_recv_timeout(ptr %s, i64 %s)" chv msv)
   | Ast.App ({ node = Ast.Var "mk_logger"; _ }, arg) ->
     (* Phase 16.3 / DEFERRED §1.5: call @__mere_mk_logger to build a
        Logger value (= 3 closure_str_unit fields). *)
@@ -9657,6 +9685,8 @@ let runtime_decls =
       "declare i32 @pthread_cond_init(ptr, ptr)";
       "declare i32 @pthread_cond_signal(ptr)";
       "declare i32 @pthread_cond_wait(ptr, ptr)";
+      "declare i32 @pthread_cond_broadcast(ptr)";          (* v0.1.600: channel_close *)
+      "declare i32 @pthread_cond_timedwait(ptr, ptr, ptr)";  (* v0.1.600: channel_recv_timeout *)
       "declare i32 @fprintf(ptr, ptr, ...)";
       "declare i32 @asprintf(ptr, ptr, ...)";
       "declare void @abort()";
@@ -15738,10 +15768,21 @@ let thread_runtime_llvm =
    slots — the send/recv sites cast to/from i64. A heap-allocated fixed-cap
    ring buffer guarded by a mutex + condition variable; recv blocks on the
    condition until non-empty. mutex/cond are heap blocks (64 bytes covers the
-   platform's pthread structs) so the struct layout stays platform-agnostic. *)
+   platform's pthread structs) so the struct layout stays platform-agnostic.
+
+   v0.1.600: and a `closed` word (field 6), with the C runtime's meaning:
+   channel_close sets it and wakes every waiter; a send on a closed channel and
+   a recv on a closed, drained one fail catchably; channel_recv_opt answers
+   None once closed and drained; channel_recv_timeout answers None at the
+   deadline too. The two that answer an option report through *ok, and the
+   call site builds the option (see rewrite_channel_ops). *)
 let channel_runtime_llvm =
   String.concat "\n"
-    [ "%mere_channel = type { ptr, i32, i32, i32, ptr, ptr }";
+    [ "%mere_channel = type { ptr, i32, i32, i32, ptr, ptr, i32 }";
+      "@.chsend_closed_msg_h = internal constant { i64, [32 x i8] } { i64 31, [32 x i8] c\"channel_send: channel is closed\\00\" }";
+      "@.chsend_closed_msg = internal alias [32 x i8], getelementptr inbounds ({ i64, [32 x i8] }, ptr @.chsend_closed_msg_h, i32 0, i32 1)";
+      "@.chrecv_closed_msg_h = internal constant { i64, [42 x i8] } { i64 41, [42 x i8] c\"channel_recv: channel is closed and empty\\00\" }";
+      "@.chrecv_closed_msg = internal alias [42 x i8], getelementptr inbounds ({ i64, [42 x i8] }, ptr @.chrecv_closed_msg_h, i32 0, i32 1)";
       "";
       "define ptr @mere_channel_new() {";
       "entry:";
@@ -15764,6 +15805,8 @@ let channel_runtime_llvm =
       "  %r1 = call i32 @pthread_cond_init(ptr %c, ptr null)";
       "  %cp = getelementptr %mere_channel, ptr %ch, i32 0, i32 5";
       "  store ptr %c, ptr %cp";
+      "  %closedp = getelementptr %mere_channel, ptr %ch, i32 0, i32 6";
+      "  store i32 0, ptr %closedp";
       "  ret ptr %ch";
       "}";
       "";
@@ -15772,6 +15815,15 @@ let channel_runtime_llvm =
       "  %mp = getelementptr %mere_channel, ptr %ch, i32 0, i32 4";
       "  %m = load ptr, ptr %mp";
       "  %r0 = call i32 @pthread_mutex_lock(ptr %m)";
+      "  %closedp = getelementptr %mere_channel, ptr %ch, i32 0, i32 6";
+      "  %closed = load i32, ptr %closedp";
+      "  %isclosed = icmp ne i32 %closed, 0";
+      "  br i1 %isclosed, label %closed_chan, label %open";
+      "closed_chan:";
+      "  %ru = call i32 @pthread_mutex_unlock(ptr %m)";
+      "  call void @__lang_fail_impl(ptr @.chsend_closed_msg)";
+      "  unreachable";
+      "open:";
       "  %lenp = getelementptr %mere_channel, ptr %ch, i32 0, i32 1";
       "  %len = load i32, ptr %lenp";
       "  %capp = getelementptr %mere_channel, ptr %ch, i32 0, i32 2";
@@ -15811,22 +15863,48 @@ let channel_runtime_llvm =
       "  ret i32 0";
       "}";
       "";
-      "define i64 @mere_channel_recv(ptr %ch) {";
+      (* The one receive, under the lock: waits while the channel is empty and
+         open, then takes the head (ok = 1) or reports closed-and-drained
+         (ok = 0). %ts is null for no deadline. Every receive goes through
+         it; the three entry points below differ in what they do with ok. *)
+      "define internal i64 @mere_channel_take(ptr %ch, ptr %ts, ptr %okp) {";
       "entry:";
       "  %mp = getelementptr %mere_channel, ptr %ch, i32 0, i32 4";
       "  %m = load ptr, ptr %mp";
       "  %r0 = call i32 @pthread_mutex_lock(ptr %m)";
       "  %lenp = getelementptr %mere_channel, ptr %ch, i32 0, i32 1";
+      "  %closedp = getelementptr %mere_channel, ptr %ch, i32 0, i32 6";
+      "  %cp = getelementptr %mere_channel, ptr %ch, i32 0, i32 5";
+      "  %c = load ptr, ptr %cp";
+      "  %timed = icmp ne ptr %ts, null";
       "  br label %wait";
       "wait:";
       "  %len = load i32, ptr %lenp";
       "  %empty = icmp eq i32 %len, 0";
-      "  br i1 %empty, label %block, label %ready";
+      "  br i1 %empty, label %check_closed, label %ready";
+      "check_closed:";
+      "  %closed = load i32, ptr %closedp";
+      "  %isclosed = icmp ne i32 %closed, 0";
+      "  br i1 %isclosed, label %none, label %block";
       "block:";
-      "  %cp = getelementptr %mere_channel, ptr %ch, i32 0, i32 5";
-      "  %c = load ptr, ptr %cp";
+      "  br i1 %timed, label %block_timed, label %block_forever";
+      "block_forever:";
       "  %rw = call i32 @pthread_cond_wait(ptr %c, ptr %m)";
       "  br label %wait";
+      "block_timed:";
+      "  %rt = call i32 @pthread_cond_timedwait(ptr %c, ptr %m, ptr %ts)";
+      (* any error is the deadline (ETIMEDOUT's number differs by platform);
+         the channel is looked at once more, as the C loop does after its break *)
+      "  %expired = icmp ne i32 %rt, 0";
+      "  br i1 %expired, label %last_look, label %wait";
+      "last_look:";
+      "  %len3 = load i32, ptr %lenp";
+      "  %empty3 = icmp eq i32 %len3, 0";
+      "  br i1 %empty3, label %none, label %ready";
+      "none:";
+      "  store i32 0, ptr %okp";
+      "  %r3 = call i32 @pthread_mutex_unlock(ptr %m)";
+      "  ret i64 0";
       "ready:";
       "  %headp = getelementptr %mere_channel, ptr %ch, i32 0, i32 3";
       "  %head = load i32, ptr %headp";
@@ -15843,8 +15921,79 @@ let channel_runtime_llvm =
       "  %len2 = load i32, ptr %lenp";
       "  %len2d = sub i32 %len2, 1";
       "  store i32 %len2d, ptr %lenp";
+      "  store i32 1, ptr %okp";
       "  %r2 = call i32 @pthread_mutex_unlock(ptr %m)";
       "  ret i64 %v";
+      "}";
+      "";
+      "define i64 @mere_channel_recv(ptr %ch) {";
+      "entry:";
+      "  %okp = alloca i32";
+      "  %v = call i64 @mere_channel_take(ptr %ch, ptr null, ptr %okp)";
+      "  %ok = load i32, ptr %okp";
+      "  %got = icmp ne i32 %ok, 0";
+      "  br i1 %got, label %done, label %closed";
+      "closed:";
+      "  call void @__lang_fail_impl(ptr @.chrecv_closed_msg)";
+      "  unreachable";
+      "done:";
+      "  ret i64 %v";
+      "}";
+      "";
+      (* (value, got) by value: an out-parameter would be an alloca at every
+         call site, and a call site in a loop would grow the stack with it *)
+      "define { i64, i32 } @mere_channel_recv_opt(ptr %ch) {";
+      "entry:";
+      "  %okp = alloca i32";
+      "  %v = call i64 @mere_channel_take(ptr %ch, ptr null, ptr %okp)";
+      "  %ok = load i32, ptr %okp";
+      "  %r0 = insertvalue { i64, i32 } undef, i64 %v, 0";
+      "  %r1 = insertvalue { i64, i32 } %r0, i32 %ok, 1";
+      "  ret { i64, i32 } %r1";
+      "}";
+      "";
+      (* the deadline is absolute CLOCK_REALTIME (0 on Darwin and Linux), as
+         pthread_cond_timedwait wants it; struct timespec is two i64s on both *)
+      "define { i64, i32 } @mere_channel_recv_timeout(ptr %ch, i64 %ms) {";
+      "entry:";
+      "  %okp = alloca i32";
+      "  %ts = alloca { i64, i64 }";
+      "  %rc = call i32 @clock_gettime(i32 0, ptr %ts)";
+      "  %secp = getelementptr { i64, i64 }, ptr %ts, i32 0, i32 0";
+      "  %nsecp = getelementptr { i64, i64 }, ptr %ts, i32 0, i32 1";
+      "  %sec = load i64, ptr %secp";
+      "  %nsec = load i64, ptr %nsecp";
+      "  %dsec = sdiv i64 %ms, 1000";
+      "  %dms = srem i64 %ms, 1000";
+      "  %dns = mul i64 %dms, 1000000";
+      "  %sec1 = add i64 %sec, %dsec";
+      "  %nsec1 = add i64 %nsec, %dns";
+      "  %over = icmp sge i64 %nsec1, 1000000000";
+      "  %sec2i = add i64 %sec1, 1";
+      "  %nsec2i = sub i64 %nsec1, 1000000000";
+      "  %sec2 = select i1 %over, i64 %sec2i, i64 %sec1";
+      "  %nsec2 = select i1 %over, i64 %nsec2i, i64 %nsec1";
+      "  store i64 %sec2, ptr %secp";
+      "  store i64 %nsec2, ptr %nsecp";
+      "  %v = call i64 @mere_channel_take(ptr %ch, ptr %ts, ptr %okp)";
+      "  %ok = load i32, ptr %okp";
+      "  %r0 = insertvalue { i64, i32 } undef, i64 %v, 0";
+      "  %r1 = insertvalue { i64, i32 } %r0, i32 %ok, 1";
+      "  ret { i64, i32 } %r1";
+      "}";
+      "";
+      "define i32 @mere_channel_close(ptr %ch) {";
+      "entry:";
+      "  %mp = getelementptr %mere_channel, ptr %ch, i32 0, i32 4";
+      "  %m = load ptr, ptr %mp";
+      "  %r0 = call i32 @pthread_mutex_lock(ptr %m)";
+      "  %closedp = getelementptr %mere_channel, ptr %ch, i32 0, i32 6";
+      "  store i32 1, ptr %closedp";
+      "  %cp = getelementptr %mere_channel, ptr %ch, i32 0, i32 5";
+      "  %c = load ptr, ptr %cp";
+      "  %r1 = call i32 @pthread_cond_broadcast(ptr %c)";
+      "  %r2 = call i32 @pthread_mutex_unlock(ptr %m)";
+      "  ret i32 0";
       "}" ]
 
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
@@ -15954,7 +16103,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     if info.Typer.r_params <> [] then
       Hashtbl.replace polymorphic_records name (info.Typer.r_params, info.Typer.r_fields)
   ) Typer.records;
-  let main_expr = Ast.flatten_let_tuples (Ast.desugar_program prog) in
+  let main_expr =
+    Ast.rewrite_channel_ops (Ast.flatten_let_tuples (Ast.desugar_program prog)) in
   (* Phase 15.3: resolve let-bound Vec element types. Same trick as
      codegen_c — Mere's let-poly generalizes `let v = vec_new () in body`
      to `forall T. Vec[..., T]`, so each use of v in body gets a fresh

@@ -27,3 +27,5 @@ __rv_substring_raw internal: the unchecked substring behind `substring`'s bounds
 __coro_new_raw     internal: what `coro_new` is rewritten into before type-checking -- the body is handed its own handle
 __coro_msg         internal: the read of what was sent to a coroutine, in the body `coro_new` is rewritten into
 __coro_new_sized_raw internal: what `coro_new_sized` is rewritten into before type-checking
+__chan_recv_pair   internal: what `channel_recv_opt` is rewritten into on LLVM and Wasm -- the receive as a (got, value) pair
+__chan_recv_pair_timeout internal: the same for `channel_recv_timeout`

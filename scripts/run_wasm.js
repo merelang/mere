@@ -25,37 +25,51 @@ const { makeSubprocessEnv } = require('./subprocess_env.js');
 function makeChannelEnv(getBuffer, bumpAlloc) {
   // v0.1.127 (i64 value model): channel VALUES are 64-bit. Layout at `ptr`
   // (8-byte aligned): i32 header words [0]=mutex, [1]=count, [2]=head,
-  // [3]=cap, then a ring of CAP BigInt64 slots starting at byte ptr+16.
+  // [3]=cap, [4]=closed, [5]=seq, then a ring of CAP BigInt64 slots starting
+  // at byte ptr+24.
+  // v0.1.600: `closed` and `seq` are for channel_close. A waiter waits on
+  // seq, which every send and the close bump, so a close that lands between a
+  // waiter's last look and its wait still wakes it (waiting on count, as
+  // before, would sleep through a close: the count does not move).
   const CAP = 4096;
+  const HDR = 24;
   const lock = (i32, p) => {
     while (Atomics.compareExchange(i32, p, 0, 1) !== 0) Atomics.wait(i32, p, 1);
   };
   const unlock = (i32, p) => { Atomics.store(i32, p, 0); Atomics.notify(i32, p, 1); };
   return {
     mere_channel_new: (_unit) => {
-      const raw = bumpAlloc(16 + CAP * 8 + 8);
+      const raw = bumpAlloc(HDR + CAP * 8 + 8);
       const ptr = (raw + 7) & ~7;  // 8-byte align for the BigInt64 ring
       const i32 = new Int32Array(getBuffer());
       const p = ptr >> 2;
       i32[p] = 0; i32[p + 1] = 0; i32[p + 2] = 0; i32[p + 3] = CAP;
+      i32[p + 4] = 0; i32[p + 5] = 0;
       return ptr;
     },
+    // 1 when the channel is closed (the module's shim fails, catchably)
     mere_channel_send: (ptr, v) => {
       const i32 = new Int32Array(getBuffer());
-      const ring = new BigInt64Array(getBuffer(), ptr + 16, CAP);
+      const ring = new BigInt64Array(getBuffer(), ptr + HDR, CAP);
       const p = ptr >> 2;
       lock(i32, p);
+      if (i32[p + 4] !== 0) { unlock(i32, p); return 1; }
       const count = i32[p + 1], cap = i32[p + 3], head = i32[p + 2];
       ring[(head + count) % cap] = BigInt(v);
       Atomics.store(i32, p + 1, count + 1);
+      Atomics.add(i32, p + 5, 1);
       unlock(i32, p);
-      Atomics.notify(i32, p + 1);  // wake recv waiters blocked on count
+      Atomics.notify(i32, p + 5);  // wake receivers
       return 0;
     },
-    mere_channel_recv: (ptr) => {
+    // Every receive: wait (ms < 0: without a deadline) until a value is there
+    // -- written as an i64 at `out`, answer 1 -- or the channel is closed and
+    // drained, or the deadline passed with nothing there: answer 0.
+    mere_channel_take: (ptr, ms, out) => {
       const i32 = new Int32Array(getBuffer());
-      const ring = new BigInt64Array(getBuffer(), ptr + 16, CAP);
+      const ring = new BigInt64Array(getBuffer(), ptr + HDR, CAP);
       const p = ptr >> 2;
+      const deadline = ms >= 0 ? Date.now() + ms : Infinity;
       for (;;) {
         lock(i32, p);
         const count = i32[p + 1];
@@ -65,11 +79,30 @@ function makeChannelEnv(getBuffer, bumpAlloc) {
           Atomics.store(i32, p + 2, (head + 1) % cap);
           Atomics.store(i32, p + 1, count - 1);
           unlock(i32, p);
-          return v;
+          new DataView(getBuffer()).setBigInt64(out, v, true);
+          return 1;
         }
+        const closed = i32[p + 4];
+        const seq = i32[p + 5];
         unlock(i32, p);
-        Atomics.wait(i32, p + 1, 0);  // block while empty
+        if (closed !== 0) return 0;
+        if (ms < 0) Atomics.wait(i32, p + 5, seq);
+        else {
+          const left = deadline - Date.now();
+          if (left <= 0) return 0;
+          Atomics.wait(i32, p + 5, seq, left);
+        }
       }
+    },
+    mere_channel_close: (ptr) => {
+      const i32 = new Int32Array(getBuffer());
+      const p = ptr >> 2;
+      lock(i32, p);
+      i32[p + 4] = 1;
+      Atomics.add(i32, p + 5, 1);
+      unlock(i32, p);
+      Atomics.notify(i32, p + 5);
+      return 0;
     },
   };
 }
@@ -85,7 +118,7 @@ function makeChannelEnv(getBuffer, bumpAlloc) {
 const WORKER_CODE = `
 const { workerData } = require('worker_threads');
 const fs = require('fs');
-const { wasmBytes, memory, fnIdx, envOff, doneSab, bumpBase, tid } = workerData;
+const { wasmBytes, memory, fnIdx, envOff, doneSab, bumpBase, tid, topGlobals } = workerData;
 // v0.1.586 (Q-090): the thread's record, shared with the main thread. Words:
 // 0 done, 1 failed, 2 claim (0 nobody's, 1 joined, 2 detached), 3 told,
 // 4 message length; the message from byte 20.
@@ -144,6 +177,12 @@ const env = Object.assign({
   // in the spawned closure don't collide with other workers or the parent.
   if (instance.exports.__lang_bump) instance.exports.__lang_bump.value = bumpBase;
   if (instance.exports.__lang_in_thread) instance.exports.__lang_in_thread.value = 1;
+  // v0.1.600: the program's top-level values as they stood when this thread
+  // was spawned. They are Wasm globals, one set per instance, so without this
+  // the thread saw each of them as 0.
+  for (const k in (topGlobals || {})) {
+    if (instance.exports[k]) instance.exports[k].value = topGlobals[k];
+  }
   const table = instance.exports.__indirect_function_table;
   try { table.get(fnIdx)(BigInt(envOff), 0n); } catch (e) {
     // a trap that was not a fail: name it the way the main thread's handler does
@@ -181,6 +220,7 @@ const wasmPath = process.argv[2];
   // a shared helper — the reason the length header landed here and in no
   // other host.
   let langBump = null;  // set after instantiate
+  let mainInstance = null;  // v0.1.600: spawn copies its top-level values
   const { bumpAlloc, writeStr, writeBytes, readCStr, readStrBytes } = makeMarshal({
     getMemory: () => memory,
     getBump: () => langBump,
@@ -523,9 +563,13 @@ const wasmPath = process.argv[2];
       // This is the pragmatic alternative to a single shared atomic bump:
       // the main instance uses the low region, worker i uses [16MB + i*8MB, …).
       const bumpBase = 16 * 1024 * 1024 + (tid - 1) * 8 * 1024 * 1024;
+      const topGlobals = {};
+      if (mainInstance)
+        for (const [k, g] of Object.entries(mainInstance.exports))
+          if (k.startsWith("__tg_")) topGlobals[k] = g.value;
       const worker = new Worker(WORKER_CODE, {
         eval: true,
-        workerData: { wasmBytes, memory: sharedMemory, fnIdx, envOff, doneSab, bumpBase, tid },
+        workerData: { wasmBytes, memory: sharedMemory, fnIdx, envOff, doneSab, bumpBase, tid, topGlobals },
       });
       worker.on('error', (e) => console.error('worker error:', e));
       threads.set(tid, { worker, sab: doneSab, st: new Int32Array(doneSab, 0, 5) });
@@ -558,6 +602,7 @@ const wasmPath = process.argv[2];
   checkAbi(instance, "scripts/run_wasm.js");
   memory = needsSharedMem ? sharedMemory : instance.exports.memory;
   langBump = instance.exports.__lang_bump || null;
+  mainInstance = instance;
 
   // Phase 48.2 (C2 Stage 2): helper for invoking a Mere closure value
   // (an i32 pointer to a 2-word { env, fn_idx } record in linear memory)

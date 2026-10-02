@@ -4,6 +4,42 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.600 — 2026-10-03
+
+_`channel_close`, `channel_recv_opt` and `channel_recv_timeout` on LLVM and Wasm, and a Wasm thread sees the program's top-level values: parity checks `concurrency_channel` and `channel_unconstrained_elem` on all four backends, which leaves 13 programs unchecked on LLVM and 6 on Wasm._
+
+The three were interp and C only, and they are what a worker loop uses to end:
+mere-blog's app had no other gap on Wasm.
+
+- **LLVM.** The channel gains a `closed` word. `channel_close` sets it and wakes
+  every waiter; a send on a closed channel and a `channel_recv` on a closed,
+  drained one fail catchably with the C runtime's messages. All receives go
+  through one routine that waits (with a deadline, for the timeout) and reports
+  whether it took a value, returned by value so a receive in a loop allocates
+  no stack.
+- **Wasm.** The host's channel gains `closed` and a sequence word every send
+  and the close bump; a waiter waits on the sequence, so a close that lands
+  between its last look and its wait still wakes it. One host call does every
+  receive and writes the value into memory the module names.
+- **The option.** Neither backend can build an option from inside a runtime
+  call, so before emission `channel_recv_opt ch` becomes
+  `let p = __chan_recv_pair ch in if fst p then Some (snd p) else None`
+  (`Ast.rewrite_channel_ops`), every new node typed from the original's, and a
+  type nothing constrains erased to int as these backends erase it.
+- **A Wasm thread read every top-level value as 0.** Top-level values are Wasm
+  globals, one set per instance, and a spawned thread is a new instance: a
+  top-level function called from a thread read a channel at address 0 or a
+  count of 0. A spawning program now exports them and the host copies their
+  values into each new thread's instance. `test/parity/thread_reads_toplevel.mere`.
+
+`test/parity/channel_close_family.mere` covers what each answers -- queued
+values surviving a close, the two failures, a timeout that expires and one that
+does not, and workers ended by a close -- the same on all four backends. Every
+program's LLVM IR changes (the channel runtime is in each); C, RISC-V and `-t`
+output do not.
+
+---
+
 ## v0.1.599 — 2026-10-03
 
 _The RISC-V backend takes Maps keyed by int or bool, a local `let rec ... and ...`, a top-level function at another arity, and `try_or_msg`: mere-ruby builds for RV64 again (it stopped at the first of the four)._

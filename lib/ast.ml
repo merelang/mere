@@ -1033,6 +1033,101 @@ let flatten_let_tuples (e0 : expr) : expr =
   in
   go e0
 
+(* v0.1.600: `channel_recv_opt ch` and `channel_recv_timeout ch ms` for the LLVM
+   and Wasm backends, which have no way to build an option from inside a
+   runtime call: `let p = __chan_recv_pair ch in if fst p then Some (snd p) else
+   None`, every new node typed from the original's. Only where the name still
+   means the builtin. *)
+module ChanSS = Set.Make (String)
+
+let rewrite_channel_ops (e0 : expr) : expr =
+  let counter = ref 0 in
+  let elem_of (ch : expr) = match ch.ty with
+    | Some t -> (match walk t with TyCon ("Channel", [el]) -> Some (walk el) | _ -> None)
+    | None -> None in
+  (* a variable nothing constrains -- a channel nobody sends on -- erased to
+     int in the new nodes, as the backends erase it, so the pair and the option
+     they name are ones the backend declares *)
+  let rec erase (t : ty) : ty =
+    match walk t with
+    | TyVar { link = None; _ } | TyParam _ -> TyInt
+    | TyCon (n, ts) -> TyCon (n, List.map erase ts)
+    | TyTuple ts -> TyTuple (List.map erase ts)
+    | TyArrow (a, b) -> TyArrow (erase a, erase b)
+    | TyRef (m, r, i) -> TyRef (m, r, erase i)
+    | t -> t in
+  let build (e : expr) (call_of : ty -> expr) : expr option =
+    match e.ty with
+    | Some opt_ty ->
+      (match erase opt_ty with
+       | TyCon ("option", [el]) as opt_ty ->
+         let el = walk el in
+         let pair = TyTuple [TyBool; el] in
+         let mk node ty = { loc = e.loc; ty = Some ty; node } in
+         incr counter;
+         let p = Printf.sprintf "__chp%d" !counter in
+         let pv () = mk (Var p) pair in
+         let cond = mk (App (mk (Var "fst") (TyArrow (pair, TyBool)), pv ())) TyBool in
+         let value = mk (App (mk (Var "snd") (TyArrow (pair, el)), pv ())) el in
+         Some (mk (Let ({ ploc = e.loc; pnode = P_var p }, call_of pair,
+                        mk (If (cond, mk (Constr ("Some", Some value)) opt_ty,
+                                mk (Constr ("None", None)) opt_ty)) opt_ty)) opt_ty)
+       | _ -> None)
+    | None -> None in
+  let rec go (bound : ChanSS.t) (e : expr) : expr =
+    let g = go bound in
+    match e.node with
+    | App ({ node = Var "channel_recv_opt"; _ } as f, ch)
+      when not (ChanSS.mem "channel_recv_opt" bound) && elem_of ch <> None ->
+      let ch' = g ch in
+      (match build e (fun pair ->
+         { e with ty = Some pair;
+                  node = App ({ f with node = Var "__chan_recv_pair";
+                                       ty = Some (TyArrow (Option.get ch.ty, pair)) }, ch') }) with
+       | Some r -> r
+       | None -> { e with node = App (f, ch') })
+    | App ({ node = App ({ node = Var "channel_recv_timeout"; _ } as f, ch); _ } as inner, ms)
+      when not (ChanSS.mem "channel_recv_timeout" bound) && elem_of ch <> None ->
+      let ch' = g ch and ms' = g ms in
+      (match build e (fun pair ->
+         let fty = TyArrow (Option.get ch.ty, TyArrow (TyInt, pair)) in
+         { e with ty = Some pair;
+                  node = App ({ inner with ty = Some (TyArrow (TyInt, pair));
+                                           node = App ({ f with node = Var "__chan_recv_pair_timeout";
+                                                                ty = Some fty }, ch') }, ms') }) with
+       | Some r -> r
+       | None -> { e with node = App ({ inner with node = App (f, ch') }, ms') })
+    | Int_lit _ | Float_lit _ | Bool_lit _ | Str_lit _ | Unit_lit | Var _ -> e
+    | Neg a -> { e with node = Neg (g a) }
+    | Bin (op, a, b) -> { e with node = Bin (op, g a, g b) }
+    | Cmp (op, a, b) -> { e with node = Cmp (op, g a, g b) }
+    | Logic (op, a, b) -> { e with node = Logic (op, g a, g b) }
+    | App (a, b) -> { e with node = App (g a, g b) }
+    | Let (p, v, b) ->
+      { e with node = Let (p, g v, go (List.fold_left (fun s n -> ChanSS.add n s) bound (pattern_vars p)) b) }
+    | Let_rec (bs, b) ->
+      let bound' = List.fold_left (fun s (n, _, _) -> ChanSS.add n s) bound bs in
+      { e with node = Let_rec (List.map (fun (n, l, v) -> (n, l, go bound' v)) bs, go bound' b) }
+    | With (n, v, b) -> { e with node = With (n, g v, go (ChanSS.add n bound) b) }
+    | If (c, t, el) -> { e with node = If (g c, g t, g el) }
+    | Fun (x, t, b) -> { e with node = Fun (x, t, go (ChanSS.add x bound) b) }
+    | Annot (a, t) -> { e with node = Annot (g a, t) }
+    | Constr (n, Some a) -> { e with node = Constr (n, Some (g a)) }
+    | Constr (_, None) -> e
+    | Match (sc, arms) ->
+      { e with node = Match (g sc, List.map (fun (p, gd, b) ->
+          let b' = List.fold_left (fun s n -> ChanSS.add n s) bound (pattern_vars p) in
+          (p, Option.map (go b') gd, go b' b)) arms) }
+    | Tuple es -> { e with node = Tuple (List.map g es) }
+    | Region_block (n, b) -> { e with node = Region_block (n, g b) }
+    | Region_loop (n, x, b) -> { e with node = Region_loop (n, x, go (ChanSS.add x bound) b) }
+    | Ref (m, r, a) -> { e with node = Ref (m, r, g a) }
+    | Record_lit (n, fs) -> { e with node = Record_lit (n, List.map (fun (f, x) -> (f, g x)) fs) }
+    | Field_get (a, f) -> { e with node = Field_get (g a, f) }
+    | Record_update (a, fs) -> { e with node = Record_update (g a, List.map (fun (f, x) -> (f, g x)) fs) }
+  in
+  go ChanSS.empty e0
+
 let desugar_program (prog : program) : expr =
   List.fold_right (fun decl body ->
     let loc = body.loc in

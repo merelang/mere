@@ -256,6 +256,9 @@ let simd_range_msg_offset = ref 0  (* Q-109 (2b): f64x2_load / store past the Ve
 let bytes_slice_msg_offset = ref 0
 let rand_pre_offset = ref 0
 let rand_post_offset = ref 0
+(* v0.1.600: the two channel failures, named the way the C runtime names them *)
+let chsend_closed_offset = ref 0
+let chrecv_closed_offset = ref 0
 let fos_pre_offset = ref 0
 let fos_suf_offset = ref 0
 let bos_true_offset = ref 0
@@ -1995,6 +1998,30 @@ let app_saturated_direct (x : Ast.expr) : (string * Ast.expr list) option =
      | _ -> None)
   | _ -> None
 
+(* v0.1.600: a (got, value) pair from one channel receive: a 16-byte tuple, its
+   first slot the flag, its second the value the host wrote there *)
+let emit_chan_pair (emit_ch : unit -> unit) (emit_ms : unit -> unit) =
+  uses_threads := true;
+  let base = fresh_local_i32 () in
+  emit_instr "global.get $__lang_bump";
+  emit_instr (Printf.sprintf "local.set %d" base);
+  emit_instr (Printf.sprintf "local.get %d" base);
+  emit_instr "i32.const 16";
+  emit_instr "i32.add";
+  emit_instr "global.set $__lang_bump";
+  emit_instr (Printf.sprintf "local.get %d" base);   (* where the flag goes *)
+  emit_ch ();
+  emit_instr "i32.wrap_i64";
+  emit_ms ();
+  emit_instr (Printf.sprintf "local.get %d" base);
+  emit_instr "i32.const 8";
+  emit_instr "i32.add";
+  emit_instr "call $mere_channel_take_h";
+  emit_instr "i64.extend_i32_u";
+  emit_instr "i64.store offset=0";
+  emit_instr (Printf.sprintf "local.get %d" base);
+  emit_instr "i64.extend_i32_u"
+
 (* Emit `expr` so its result lands on top of the Wasm operand stack. *)
 let rec emit_simd_v (e : Ast.expr) : unit =
   (* leaves a v128 on the stack; the boxed fallback covers parameters, call
@@ -3015,22 +3042,22 @@ and emit_expr (e : Ast.expr) : unit =
        and a buffered cursor the host would have to own per handle. *)
     unsupported e.Ast.loc
       (fio ^ " is unsupported in Wasm codegen (v0.1.59 scope = interp + C)")
-  | Ast.App ({ node = Ast.Var ("channel_close" | "channel_recv_opt" as cc); _ }, _)
-    when not (List.mem_assoc cc !locals
-              || Hashtbl.mem toplevel_fn_names cc
-              || Hashtbl.mem inner_lifts_wasm cc) ->
-    (* v0.1.47: graceful-shutdown primitives are interp + C only. *)
-    unsupported e.Ast.loc
-      "channel_close / channel_recv_opt are unsupported in Wasm codegen \
-       (v0.1.47 scope = interp + C)"
-  | Ast.App ({ node = Ast.App ({ node = Ast.Var "channel_recv_timeout"; _ }, _); _ }, _)
-    when not (List.mem_assoc "channel_recv_timeout" !locals
-              || Hashtbl.mem toplevel_fn_names "channel_recv_timeout"
-              || Hashtbl.mem inner_lifts_wasm "channel_recv_timeout") ->
-    (* v0.1.48 *)
-    unsupported e.Ast.loc
-      "channel_recv_timeout is unsupported in Wasm codegen \
-       (v0.1.48 scope = interp + C)"
+  (* v0.1.600: channel_close, and the receives that may come back empty --
+     rewritten into `__chan_recv_pair` before emission (Ast.rewrite_channel_ops),
+     which builds the (got, value) tuple: the host writes the value into the
+     tuple's second slot and answers whether it did. *)
+  | Ast.App ({ node = Ast.Var "channel_close"; _ }, ch_e)
+    when not (List.mem_assoc "channel_close" !locals
+              || Hashtbl.mem toplevel_fn_names "channel_close"
+              || Hashtbl.mem inner_lifts_wasm "channel_close") ->
+    uses_threads := true;
+    emit_expr ch_e;
+    emit_instr "call $mere_channel_close"
+  | Ast.App ({ node = Ast.Var "__chan_recv_pair"; _ }, ch_e) ->
+    emit_chan_pair (fun () -> emit_expr ch_e) (fun () -> emit_instr "i32.const -1")
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "__chan_recv_pair_timeout"; _ }, ch_e); _ }, ms_e) ->
+    emit_chan_pair (fun () -> emit_expr ch_e)
+      (fun () -> emit_expr ms_e; emit_instr "i32.wrap_i64")
   | Ast.App ({ node = Ast.Var "mk_logger"; _ }, arg) ->
     (* Phase 16.3 / DEFERRED §1.5: build a Logger record in linear
        memory (3 closure ptrs, each pointing to an 8-byte { env=prefix,
@@ -10892,6 +10919,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   bytes_slice_msg_offset := fresh_str_offset "bytes_slice: range out of bounds";
   rand_pre_offset := fresh_str_offset "random_int: bound must be positive (got ";
   rand_post_offset := fresh_str_offset ")";
+  chsend_closed_offset := fresh_str_offset "channel_send: channel is closed";
+  chrecv_closed_offset := fresh_str_offset "channel_recv: channel is closed and empty";
   fos_pre_offset := fresh_str_offset "float_of_str: \"";
   fos_suf_offset := fresh_str_offset "\" is not a valid float";
   bos_true_offset := fresh_str_offset "true";
@@ -10954,7 +10983,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     List.iteri (fun i (cname, _) ->
       Hashtbl.replace variant_tags cname i) vs
   ) Exhaustive.type_variants;
-  let main_expr = Ast.flatten_let_tuples (Ast.desugar_program prog) in
+  let main_expr =
+    Ast.rewrite_channel_ops (Ast.flatten_let_tuples (Ast.desugar_program prog)) in
   (* Phase 15.4: resolve let-bound Vec element types. Same trick as
      codegen_c / codegen_llvm — Mere's let-poly generalizes
      `let v = vec_new () in body` to `forall T. Vec[..., T]`, so each
@@ -11577,7 +11607,14 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     else
       String.concat "\n"
         (List.map (fun (name, _) ->
-          Printf.sprintf "  (global $%s (mut i64) (i64.const 0))" name)
+          (* v0.1.600: exported when the program spawns, so the host can copy
+             the values into a new thread's instance: a global is per instance,
+             and a spawned thread saw every top-level value as 0 (a channel
+             at address 0, a count of 0) *)
+          if !uses_threads then
+            Printf.sprintf "  (global $%s (export \"__tg_%s\") (mut i64) (i64.const 0))" name name
+          else
+            Printf.sprintf "  (global $%s (mut i64) (i64.const 0))" name)
           top_globals_list) ^ "\n"
   in
   let eta_adapters =
@@ -11929,7 +11966,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \  (import \"env\" \"mere_thread_fail\" (func $mere_thread_fail_h (param i32) (result i32)))\n\
         \  (import \"env\" \"mere_channel_new\" (func $mere_channel_new_h (param i32) (result i32)))\n\
         \  (import \"env\" \"mere_channel_send\" (func $mere_channel_send_h (param i32) (param i64) (result i32)))\n\
-        \  (import \"env\" \"mere_channel_recv\" (func $mere_channel_recv_h (param i32) (result i64)))\n"
+        \  (import \"env\" \"mere_channel_take\" (func $mere_channel_take_h (param i32) (param i32) (param i32) (result i32)))\n\
+        \  (import \"env\" \"mere_channel_close\" (func $mere_channel_close_h (param i32) (result i32)))\n"
     else file_io_imports
   in
   let boundary_shims =
@@ -11949,9 +11987,20 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         \  (func $mere_channel_new (param i64) (result i64)\n\
         \    (i64.extend_i32_u (call $mere_channel_new_h (i32.wrap_i64 (local.get 0)))))\n\
         \  (func $mere_channel_send (param i64) (param i64) (result i64)\n\
-        \    (i64.extend_i32_u (call $mere_channel_send_h (i32.wrap_i64 (local.get 0)) (local.get 1))))\n\
+        \    (if (call $mere_channel_send_h (i32.wrap_i64 (local.get 0)) (local.get 1))\n\
+        \      (then (drop (call $__lang_fail (i64.const " ^ string_of_int !chsend_closed_offset ^ ")))))\n\
+        \    (i64.const 0))\n\
+        \  (func $mere_channel_scratch (result i32)\n\
+        \    (i32.and (i32.add (global.get $__lang_bump) (i32.const 7)) (i32.const -8)))\n\
         \  (func $mere_channel_recv (param i64) (result i64)\n\
-        \    (call $mere_channel_recv_h (i32.wrap_i64 (local.get 0))))\n"
+        \    (local $o i32)\n\
+        \    (local.set $o (call $mere_channel_scratch))\n\
+        \    (if (i32.eqz (call $mere_channel_take_h (i32.wrap_i64 (local.get 0)) (i32.const -1) (local.get $o)))\n\
+        \      (then (drop (call $__lang_fail (i64.const " ^ string_of_int !chrecv_closed_offset ^ ")))))\n\
+        \    (i64.load (local.get $o)))\n\
+        \  (func $mere_channel_close (param i64) (result i64)\n\
+        \    (drop (call $mere_channel_close_h (i32.wrap_i64 (local.get 0))))\n\
+        \    (i64.const 0))\n"
     else boundary_shims
   in
   let memory_section =
