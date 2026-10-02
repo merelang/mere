@@ -1,0 +1,7 @@
+// scripts/owner_check.sh: an OwnedVec MOVED into a thread -- captured by the
+// closure spawn is given, and not touched by the spawner again -- belongs to
+// that thread (v0.1.582). Must run and print 3.
+let g = owned_vec_new ();
+let _ = owned_vec_push g 1;
+let h = spawn (fn () -> let _ = owned_vec_push g 2 in let _ = owned_vec_push g 3 in print_int (owned_vec_len g));
+join h

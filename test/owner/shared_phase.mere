@@ -1,0 +1,12 @@
+// scripts/owner_check.sh: freeze on first foreign read (v0.1.582). A thread
+// reads a table, is joined, and then the owner writes it. Nothing races any
+// more by then, but the first foreign read made the table shared, and a shared
+// container is read-only for good -- the same answer the type check gives a
+// container a spawned closure captures. Must fail, naming the write.
+let start = fn (f: unit -> unit) -> spawn f;
+let cfg = map_new ();
+let _ = map_set cfg 1 10;
+let h = start (fn (u: unit) -> print_int (map_get cfg 1));
+let _ = join h;
+let _ = map_set cfg 1 20;
+print_int (map_get cfg 1)

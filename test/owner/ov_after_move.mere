@@ -1,0 +1,9 @@
+// scripts/owner_check.sh: an OwnedVec moved into a thread, and then used by the
+// spawner through a function (peek) the move check does not follow. Whichever
+// thread uses it second fails by name.
+let g = owned_vec_new ();
+let _ = owned_vec_push g 1;
+let peek = fn (u: unit) -> owned_vec_len g;
+let h = spawn (fn () -> owned_vec_push g 3);
+let _ = print_int (peek ());
+join h

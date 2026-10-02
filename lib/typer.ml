@@ -1759,6 +1759,31 @@ let rec is_sync_v (visiting : string list) (t : Ast.ty) : bool =
 let is_send t = is_send_v [] t
 let is_sync t = is_sync_v [] t
 
+(* v0.1.582 (Q-179): what a `sync type` may not hold. The marker says "this is
+   safe to share", and that is the user's to vouch for -- except where it holds
+   one of the builtin containers, which have no lock and which nothing in the
+   language can lock: `sync type S = MkS of Map[..]` let two threads write the
+   Map at once (the C build aborted or lost entries). The first such builtin it
+   holds, looking through tuples and through user types that are not themselves
+   marked sync. *)
+let rec unsync_builtin_in (visiting : string list) (t : Ast.ty) : string option =
+  let first f l = List.fold_left (fun acc x -> match acc with Some _ -> acc | None -> f x) None l in
+  match Ast.walk t with
+  | Ast.TyTuple ts -> first (unsync_builtin_in visiting) ts
+  | Ast.TyCon (n, _) when List.mem n region_parameterised_names -> Some n
+  | Ast.TyCon (("OwnedVec" | "File" | "ThreadHandle" | "Coro") as n, _) -> Some n
+  | Ast.TyCon (n, _) when Hashtbl.mem sync_types n || List.mem n visiting -> None
+  | Ast.TyCon (n, args) ->
+    (match nominal_contents n args with
+     | Some tys -> first (unsync_builtin_in (n :: visiting)) tys
+     | None -> first (unsync_builtin_in visiting) args)
+  | _ -> None
+
+let sync_type_holds_unsync (name : string) : string option =
+  match nominal_contents name [] with
+  | Some tys -> List.fold_left (fun acc t -> match acc with Some _ -> acc | None -> unsync_builtin_in [name] t) None tys
+  | None -> None
+
 (* Q-012 (OPEN ii): register a channel element's Send obligation. If the
    element type is fully resolved, check it now; if it still mentions type
    variables, defer it to discharge (and generalize will keep those vars

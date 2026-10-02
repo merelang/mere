@@ -1238,10 +1238,42 @@ to share between threads; give it one owner thread and send it messages over a
 Channel
 ```
 
-Reads are not checked, so a table built once and read by many threads works.
-A program that never spawns pays one load of a global per write; one that does
-pays a thread-id comparison. A `--lib` build turns the check off: a host may call
-in from whichever thread it likes, one call at a time.
+**A read by another thread freezes the container (v0.1.582).** The first time a
+thread other than its owner reads one, the container becomes *shared*, and a
+shared container is read-only from then on -- the owner's next write fails too:
+
+```
+map_set: a Map another thread has read was written -- once a second thread
+reads a Map it is shared, and a shared Map is read-only; give it one owner
+thread and send it messages over a Channel
+```
+
+That is what stops the owner rewriting a Map (or compacting a Vec) under a
+reader, which used to crash or read garbage. A table built once and then only
+read by many threads still works, and its owner may still read it. The rule
+refuses one honest shape: threads read a table, are joined, and then the owner
+updates it. Build a new table for the next phase instead, or keep the table in
+one thread and ask it over a `Channel`.
+
+A program that never spawns pays one load of a global per read and per write;
+one that does pays a thread-id comparison.
+
+**`OwnedVec`** is moved, not shared: the closure given to `spawn` takes the
+`OwnedVec`s it captures with it, and they belong to the new thread. Any other
+thread's use fails (`owned_vec_push: an OwnedVec belongs to one thread ...`) --
+one reached through a closure handed to a library that spawns it, say, where
+nothing moved it.
+
+**`sync type`** vouches that a type is safe to share, and is refused when the
+type holds a builtin container (`Map`, `Vec`, `StrBuf`, `ByteBuf`, `ListBuf`,
+`OwnedVec`, `File`, ...): those have no lock for the marker to stand for.
+
+**`--lib`** turns the owner check off: a host may call in from whichever thread
+it likes. A library whose entry file has a top-level container -- module state
+-- refuses a call that overlaps another thread's call (`MERE_FAIL`, with the
+sentence `called while another thread is inside this library`), so that state
+is never written by two threads at once. A library without one still takes
+concurrent calls.
 
 The usual fix is to give the shared value one owner thread and send it
 messages over a `Channel` -- an append is a message, a read sends a channel

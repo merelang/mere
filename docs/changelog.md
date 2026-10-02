@@ -4,6 +4,53 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.582 — 2026-10-02
+
+_The rest of Q-179: a read by another thread freezes a container, an OwnedVec is moved rather than shared, `sync type` cannot vouch for a Map, a stateful `--lib` refuses overlapping calls, and the interpreter checks a program that spawns before it runs any of it._
+
+v0.1.575 failed a container WRITTEN by a thread other than the one that made it,
+and left reads free so a table built once could be read by every thread. That
+left the race it could not see: the owner writing while another thread reads. A
+Map churned by its owner under a reader segfaulted 3 runs in 3 on C; a Vec
+compacted under one was a use-after-free.
+
+- **Freeze on first foreign read** (interpreter, C, LLVM). The first time a
+  thread other than the owner reads a container, it becomes shared -- a bit in
+  its owner field, so a write needs no second test -- and a shared container is
+  read-only for good. The owner's next write fails with its own sentence (`a Map
+  another thread has read was written`). The four races, 20 runs each on every
+  backend that builds them: 200 of 200 fail by name, no signal. A table built
+  once and only read still works. The rule refuses "threads read it, are joined,
+  then the owner writes" -- the same answer the static check gives a captured
+  container. A range-check-versioned loop's unchecked reads leave no mark and
+  need none: its guard reads the Vec's length through the checked `vec_len`.
+- **OwnedVec has an owner.** `spawn` gives away the OwnedVecs its closure
+  captures (the move the type check allows) and the new thread takes them; any
+  other thread's use fails by name. Two threads pushing to one through a
+  launcher's parameter used to lose elements or abort.
+- **`sync type` cannot hold a builtin container.** The marker vouches that a
+  type is safe to share; a Map, Vec, StrBuf, ByteBuf, ListBuf, OwnedVec, File,
+  ThreadHandle or Coro inside it (through tuples and unmarked user types) has no
+  lock for it to stand for, and is refused at the type's line. No program in the
+  repository or downstream used `sync type`.
+- **`--lib` with module state refuses overlapping calls.** A library whose entry
+  file has a top-level container returns `MERE_FAIL` for a call that overlaps
+  another thread's, naming why; four host threads filling a top-level Map had
+  kept 191,819 of 200,001 entries. A library without module state still takes
+  concurrent calls.
+- **The interpreter checks, then runs.** It typed and ran each top-level `let`
+  in turn, and the borrow and spawn-capture checks came after the last one -- so
+  `race_global`, which every compiled backend refuses to build, ran its race on
+  the interpreter first. A program that spawns is now checked whole before any
+  of it runs (its warnings are not repeated).
+
+`scripts/owner_check.sh` has eight new programs and nine new poisons (a read
+leaves no mark, the write does not say why, the guard's `vec_len` leaves no
+mark, OwnedVec use unchecked, spawn does not give the OwnedVec away -- on C and
+LLVM); `scripts/lib_check.sh` a stateful library under four host threads.
+
+---
+
 ## v0.1.581 — 2026-10-02
 
 _A thousand-member `let rec` group stops costing a walk of the whole program per member: mere-ruby checks in 1.8 s (was 7.7) and emits C in 14 s (was 113)._

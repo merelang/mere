@@ -279,6 +279,59 @@ C
 "$TMP/hostmt" | grep -q "mt bad=0" || {
   echo "FAIL lib_check: concurrent calls returned wrong values"; exit 1; }
 
+# ---- 6b. module state: overlapping calls are refused, not raced ----------------
+# v0.1.582 (Q-179): a library whose entry file has a top-level container writes
+# it from whichever host thread calls in. Four threads filling a top-level Map
+# kept 191,819 of 200,001 entries and said nothing. Such a library refuses a
+# call that overlaps another thread's (MERE_FAIL, with the sentence); no call it
+# accepted may be lost. The stateless library above still takes 8 at once.
+cat > "$TMP/dl.mere" <<'MERE'
+let tbl = map_new ();
+let bump = fn (k: int) -> let _ = map_set tbl k (k + 1) in map_len tbl;
+let size = fn () -> map_len tbl;
+0
+MERE
+"$MERE" -c --lib "$TMP/dl.mere" > "$TMP/dl.c" 2>"$TMP/dl.err" \
+  || { echo "FAIL lib_check: mere -c --lib refused the stateful library"; cat "$TMP/dl.err"; exit 1; }
+"$CC" -O1 -w -fPIC -shared "$TMP/dl.c" -o "$TMP/dl.so" 2>"$TMP/cc.err" \
+  || { echo "FAIL lib_check: stateful library build failed"; cat "$TMP/cc.err"; exit 1; }
+cat > "$TMP/dlhost.c" <<'C'
+#include <stdio.h>
+#include <string.h>
+#include <pthread.h>
+typedef struct { const unsigned char* ptr; long long len; } mere_buf;
+typedef enum { MERE_OK = 0, MERE_FAIL = 1 } mere_status;
+mere_status mere_dl_bump(long long, long long* out, mere_buf* err);
+mere_status mere_dl_size(long long* out, mere_buf* err);
+void mere_lib_free(void* p);
+static int okc[4], failc[4], other[4];
+static void* worker(void* arg) {
+  int id = (int)(long)arg; long long r; mere_buf err;
+  for (int i = 0; i < 50000; i++) {
+    mere_status st = mere_dl_bump(id * 100000 + i, &r, &err);
+    if (st == MERE_OK) okc[id]++;
+    else { if (err.ptr && strstr((const char*)err.ptr, "called while another thread is inside")) failc[id]++; else other[id]++; mere_lib_free((void*)err.ptr); }
+  }
+  return NULL;
+}
+int main(void) {
+  pthread_t t[4];
+  for (long i = 0; i < 4; i++) pthread_create(&t[i], NULL, worker, (void*)i);
+  for (int i = 0; i < 4; i++) pthread_join(t[i], NULL);
+  int ok = 0, f = 0, o = 0; for (int i = 0; i < 4; i++) { ok += okc[i]; f += failc[i]; o += other[i]; }
+  long long n; mere_dl_size(&n, 0);
+  printf("ok=%d refused=%d other=%d size=%lld %s\n", ok, f, o, n, n == ok ? "CONSISTENT" : "LOST");
+  return 0;
+}
+C
+"$CC" -O1 -w "$TMP/dlhost.c" "$TMP/dl.so" -o "$TMP/dlhost" -lpthread \
+  || { echo "FAIL lib_check: stateful host link failed"; exit 1; }
+dl_out=$("$TMP/dlhost")
+case "$dl_out" in
+  *"other=0"*CONSISTENT*) : ;;
+  *) echo "FAIL lib_check: overlapping calls into module state: $dl_out"; exit 1 ;;
+esac
+
 # ---- 7. lifecycle abuse: shutdown is not the end -----------------------------
 # v0.1.312: pthread_once could not be re-armed, so a call after shutdown
 # reused the freed default region -- a use-after-free that WORKED in every
@@ -392,4 +445,4 @@ MERE
   sed -n '1,2p' "$TMP/init.err"; exit 1; }
 echo "lib_check: a table a helper builds at module init is module state, not a call's"
 
-echo "lib_check: ok (boundary exact, header-built host, str/bytes round-trip, fail -> status, calls are transactions, 8-thread clean, lifecycle abuse clean, containers cannot outlive a call)"
+echo "lib_check: ok (boundary exact, header-built host, str/bytes round-trip, fail -> status, calls are transactions, 8-thread clean, overlap on module state refused, lifecycle abuse clean, containers cannot outlive a call)"

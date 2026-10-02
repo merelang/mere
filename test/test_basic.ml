@@ -13626,6 +13626,26 @@ let () =
        "sync type SharedLog = MkLog of int; \
         let ch = channel_new () in \
         channel_send ch (MkLog 0)") "";
+  (* v0.1.582 (Q-179): `sync type` vouches for what it holds, except a builtin
+     container -- which has no lock for the marker to stand for. *)
+  check_raises_containing "sync type holding a Map is refused"
+    "`sync type Shared` holds a Map"
+    (fun () -> Pipeline.process
+       "sync type Shared = MkShared of Map[__heap, int, int]; \
+        let s = MkShared (map_new ()) in 0");
+  check_raises_containing "sync type holding an OwnedVec is refused"
+    "holds an OwnedVec"
+    (fun () -> Pipeline.process
+       "sync type Shared = MkShared of OwnedVec[int]; 0");
+  check_raises_containing "sync type holding a Vec inside a plain record is refused"
+    "holds a Vec"
+    (fun () -> Pipeline.process
+       "type Inner = { v: Vec[__heap, int] }; \
+        sync type Shared = MkShared of Inner; 0");
+  check "sync type holding another sync type is accepted"
+    (Pipeline.process
+       "sync type A = MkA of int; \
+        sync type B = MkB of A; 0") "0";
   (* Send/Sync derive structurally through unmarked records/variants: a plain
      type wrapping a !Send value is itself !Send (no smuggling by wrapping). *)
   check_raises_containing "send: a record wrapping a !Send field is rejected"

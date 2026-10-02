@@ -4372,6 +4372,20 @@ let emit_keep_above_field (struct_name : string) (idx : int) (c : string) : unit
   emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" rv rp);
   emit_instr (Printf.sprintf "  call void @__lang_region_keep_above(ptr %s)" rv)
 
+(* v0.1.575/582: the writes that check their owner, and their messages (see
+   owner_runtime_llvm below) *)
+let owner_msgs = [ ("Vec", "vec_push"); ("Vec", "vec_set"); ("Vec", "f64x2_store");
+                   ("Vec", "vec_reverse"); ("Vec", "vec_sort"); ("ListBuf", "lb_to_list");
+                   ("Map", "map_set"); ("Map", "map_delete");
+                   ("StrBuf", "strbuf_push"); ("ListBuf", "lb_push") ]
+let owner_msg_name (kind : string) (op : string) =
+  Printf.sprintf "@.own_%s_%s" (String.lowercase_ascii kind) op
+let shared_msg_name (kind : string) (op : string) =
+  Printf.sprintf "@.shr_%s_%s" (String.lowercase_ascii kind) op
+(* the call that checks [owner] (a register) before a write *)
+let owner_call (owner : string) (kind : string) (op : string) =
+  Printf.sprintf "  call void @__lang_owned(i32 %s, ptr %s, ptr %s)" owner
+    (owner_msg_name kind op) (shared_msg_name kind op)
 let rec emit_expr (env : env) (e : Ast.expr) : string =
   (* Q-029: whether THIS expression is in tail position. Cleared immediately,
      so a sub-expression is not in tail position unless the case below puts it
@@ -5242,6 +5256,18 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  %s = call i64 @__lang_coro_transfer_h(i64 %s, i64 %s, i64 %s)" r cv w mv);
     coro_of_word_llvm e.Ast.loc (match e.Ast.ty with Some t -> t | None -> Ast.TyInt) r
   | Ast.App ({ node = Ast.Var "spawn"; _ }, clos) ->
+    (* v0.1.582: the OwnedVecs the closure captures are given away (owner 0) *)
+    (match clos.Ast.node with
+     | Ast.Fun _ ->
+       List.iter (fun (n, t) ->
+         match t with
+         | Ast.TyCon ("OwnedVec", [et]) ->
+           let v = emit_expr env { clos with Ast.node = Ast.Var n; ty = Some t } in
+           let p = fresh_reg () in
+           emit_instr (Printf.sprintf "  %s = getelementptr %%mere_owned_vec_%s, ptr %s, i32 0, i32 3" p (ty_tag et) v);
+           emit_instr (Printf.sprintf "  store atomic i32 0, ptr %s monotonic, align 4" p)
+         | _ -> ()) (Ast.owned_vec_captures clos)
+     | _ -> ());
     let cl = emit_expr env clos in
     (* v0.1.564 (Q-191): the thread may outlive every block open here, and this
        backend has no env copier -- so what the env points into is kept, the way a
@@ -6399,7 +6425,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       emit_instr (Printf.sprintf "  %s = getelementptr %%__lang_listbuf, ptr %s, i32 0, i32 %d" r b i); r in
     (let ow = fresh_reg () in
      emit_instr (Printf.sprintf "  %s = load i32, ptr %s" ow (gep 5));
-     emit_instr (Printf.sprintf "  call void @__lang_owned(i32 %s, ptr %s)" ow "@.own_listbuf_lb_push"));  (* owner_msg_name "ListBuf" "lb_push", defined below *)
+     emit_instr (owner_call ow "ListBuf" "lb_push"));
     let l_frozen = fresh_label "lb_frozen" and l_chk = fresh_label "lb_chk"
     and l_other = fresh_label "lb_other" and l_ok = fresh_label "lb_ok"
     and l_link = fresh_label "lb_link" and l_head = fresh_label "lb_head"
@@ -6467,7 +6493,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       emit_instr (Printf.sprintf "  %s = getelementptr %%__lang_listbuf, ptr %s, i32 0, i32 %d" r b i); r in
     (let ow = fresh_reg () in
      emit_instr (Printf.sprintf "  %s = load i32, ptr %s" ow (gep 5));
-     emit_instr (Printf.sprintf "  call void @__lang_owned(i32 %s, ptr @.own_listbuf_lb_to_list)" ow));
+     emit_instr (owner_call ow "ListBuf" "lb_to_list"));
     emit_instr (Printf.sprintf "  store i32 1, ptr %s" (gep 4));
     let hd = fresh_reg () and nil = fresh_reg () and isnull = fresh_reg () and res = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" hd (gep 0));
@@ -6739,7 +6765,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     (let p = fresh_reg () and ow = fresh_reg () in
      emit_instr (Printf.sprintf "  %s = getelementptr %%mere_vec_%s, ptr %s, i32 0, i32 4" p elem_tag av);
      emit_instr (Printf.sprintf "  %s = load i32, ptr %s" ow p);
-     emit_instr (Printf.sprintf "  call void @__lang_owned(i32 %s, ptr @.own_vec_vec_reverse)" ow));
+     emit_instr (owner_call ow "Vec" "vec_reverse"));
     let r = fresh_reg () in
     emit_instr (Printf.sprintf
                   "  %s = call i32 @mere_vec_%s_reverse(ptr %s)"
@@ -6766,7 +6792,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     (let p = fresh_reg () and ow = fresh_reg () in
      emit_instr (Printf.sprintf "  %s = getelementptr %%mere_vec_%s, ptr %s, i32 0, i32 4" p elem_tag av);
      emit_instr (Printf.sprintf "  %s = load i32, ptr %s" ow p);
-     emit_instr (Printf.sprintf "  call void @__lang_owned(i32 %s, ptr @.own_vec_vec_sort)" ow));
+     emit_instr (owner_call ow "Vec" "vec_sort"));
     let cv = emit_expr env cmp_e in
     let outer_cl = closure_struct_name elem_ty
       (Ast.TyArrow (elem_ty, Ast.TyInt)) in
@@ -9541,16 +9567,13 @@ let emit_top_globals_llvm (lst : (string * Ast.expr * Ast.ty) list) : string lis
    share). The program's thread is 1, set in `__lang_boot`; until the first
    spawn there is no other, so creation and the check read one plain global
    before anything thread-local. The messages' lengths are computed. *)
-let owner_msgs = [ ("Vec", "vec_push"); ("Vec", "vec_set"); ("Vec", "f64x2_store");
-                   ("Vec", "vec_reverse"); ("Vec", "vec_sort"); ("ListBuf", "lb_to_list");
-                   ("Map", "map_set"); ("Map", "map_delete");
-                   ("StrBuf", "strbuf_push"); ("ListBuf", "lb_push") ]
-let owner_msg_name (kind : string) (op : string) =
-  Printf.sprintf "@.own_%s_%s" (String.lowercase_ascii kind) op
 let owner_runtime_llvm =
   let msg kind op = Printf.sprintf
     "%s: a %s made by one thread was written by another -- a %s is not safe to share between threads; give it one owner thread and send it messages over a Channel"
     op kind kind in
+  let shmsg kind op = Printf.sprintf
+    "%s: a %s another thread has read was written -- once a second thread reads a %s it is shared, and a shared %s is read-only; give it one owner thread and send it messages over a Channel"
+    op kind kind kind in
   String.concat "\n" (
     [ "@__lang_tid_ctr = internal global i32 1";
       "@__lang_threads_started = internal global i32 0";
@@ -9591,7 +9614,10 @@ let owner_runtime_llvm =
       "yes:";
       "  ret i1 1";
       "}";
-      "define internal void @__lang_owned(i32 %owner, ptr %msg) {";
+      (* v0.1.582: the owner field's bit 30 is "another thread has read it"
+         (see __LANG_SHARED in the C runtime); a write by the owner of a shared
+         container fails with the second message *)
+      "define internal void @__lang_owned(i32 %owner, ptr %msg, ptr %shmsg) {";
       "entry:";
       "  %s = load i32, ptr @__lang_threads_started";
       "  %z = icmp eq i32 %s, 0";
@@ -9601,27 +9627,88 @@ let owner_runtime_llvm =
       "  %same = icmp eq i32 %t, %owner";
       "  br i1 %same, label %ok, label %bad";
       "bad:";
-      "  call void @__lang_fail_impl(ptr %msg)";
+      "  %tsh = or i32 %t, 1073741824";
+      "  %issh = icmp eq i32 %owner, %tsh";
+      "  %m = select i1 %issh, ptr %shmsg, ptr %msg";
+      "  call void @__lang_fail_impl(ptr %m)";
       "  unreachable";
       "ok:";
+      "  ret void";
+      "}";
+      (* v0.1.582: an OwnedVec is moved, not shared -- see __lang_ov_use in the
+         C runtime. 0 is "given away by spawn"; the next user takes it. *)
+      "define internal void @__lang_ov_use(ptr %p, ptr %msg) {";
+      "entry:";
+      "  %s = load i32, ptr @__lang_threads_started";
+      "  %z = icmp eq i32 %s, 0";
+      "  br i1 %z, label %done, label %ask";
+      "ask:";
+      "  %t = call i32 @__lang_tid()";
+      "  %o = load atomic i32, ptr %p monotonic, align 4";
+      "  %mine = icmp eq i32 %o, %t";
+      "  br i1 %mine, label %done, label %free";
+      "free:";
+      "  %pair = cmpxchg ptr %p, i32 0, i32 %t acq_rel monotonic";
+      "  %was = extractvalue { i32, i1 } %pair, 0";
+      "  %got = extractvalue { i32, i1 } %pair, 1";
+      "  %again = icmp eq i32 %was, %t";
+      "  %ok = or i1 %got, %again";
+      "  br i1 %ok, label %done, label %bad";
+      "bad:";
+      "  call void @__lang_fail_impl(ptr %msg)";
+      "  unreachable";
+      "done:";
+      "  ret void";
+      "}";
+      "define internal void @__lang_read_mark(ptr %p) {";
+      "entry:";
+      "  %s = load i32, ptr @__lang_threads_started";
+      "  %z = icmp eq i32 %s, 0";
+      "  br i1 %z, label %done, label %look";
+      "look:";
+      "  %o = load atomic i32, ptr %p monotonic, align 4";
+      "  %sh = and i32 %o, 1073741824";
+      "  %already = icmp ne i32 %sh, 0";
+      "  br i1 %already, label %done, label %ask";
+      "ask:";
+      "  %t = call i32 @__lang_tid()";
+      "  %mine = icmp eq i32 %t, %o";
+      "  br i1 %mine, label %done, label %mark";
+      "mark:";
+      "  %old = atomicrmw or ptr %p, i32 1073741824 monotonic";
+      "  br label %done";
+      "done:";
       "  ret void";
       "}" ]
     (* a str here carries its length in the 8 bytes before it (see .oom_msg):
        __lang_fail_impl reads it, so a bare C string printed nothing at all *)
     @ List.concat_map (fun (k, o) ->
-        let m = msg k o in
-        let n = String.length m in
-        let name = owner_msg_name k o in
+        let one name m =
+          let n = String.length m in
+          [ Printf.sprintf "%s_h = internal constant { i64, [%d x i8] } { i64 %d, [%d x i8] c\"%s\\00\" }"
+              name (n + 1) n (n + 1) m;
+            Printf.sprintf "%s = internal alias [%d x i8], getelementptr inbounds ({ i64, [%d x i8] }, ptr %s_h, i32 0, i32 1)"
+              name (n + 1) (n + 1) name ] in
+        one (owner_msg_name k o) (msg k o) @ one (shared_msg_name k o) (shmsg k o)) owner_msgs
+    @ List.concat_map (fun op ->
+        let m = Printf.sprintf "%s: an OwnedVec belongs to one thread -- the one that made it, or the one spawn moved it into -- and another used it; move it into the thread by capturing it in the closure spawn is given" op in
+        let n = String.length m and name = "@.ov_" ^ op in
         [ Printf.sprintf "%s_h = internal constant { i64, [%d x i8] } { i64 %d, [%d x i8] c\"%s\\00\" }"
             name (n + 1) n (n + 1) m;
           Printf.sprintf "%s = internal alias [%d x i8], getelementptr inbounds ({ i64, [%d x i8] }, ptr %s_h, i32 0, i32 1)"
-            name (n + 1) (n + 1) name ]) owner_msgs)
+            name (n + 1) (n + 1) name ]) [ "owned_vec_push"; "owned_vec_get"; "owned_vec_len" ])
 
 (* load field [idx] of the container at [c] (a %[sn]) and check it *)
 let owner_check_lines ~(sn : string) ~(idx : int) ~(c : string) (kind : string) (op : string) : string list =
   [ Printf.sprintf "  %%__own_p = getelementptr %%%s, ptr %s, i32 0, i32 %d" sn c idx;
     "  %__own = load i32, ptr %__own_p";
-    Printf.sprintf "  call void @__lang_owned(i32 %%__own, ptr %s)" (owner_msg_name kind op) ]
+    owner_call "%__own" kind op ]
+
+(* v0.1.582: a read of the container at [c] marks it shared if this thread is
+   not its owner (see @__lang_read_mark) *)
+let read_mark_lines ~(sn : string) ~(idx : int) ~(c : string) : string list =
+  [ Printf.sprintf "  %%__rd_p = getelementptr %%%s, ptr %s, i32 0, i32 %d" sn c idx;
+    "  call void @__lang_read_mark(ptr %__rd_p)" ]
 
 let owner_store_lines ~(sn : string) ~(idx : int) ~(c : string) : string list =
   [ Printf.sprintf "  %%__own_p = getelementptr %%%s, ptr %s, i32 0, i32 %d" sn c idx;
@@ -10211,6 +10298,7 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       (* get *)
       Printf.sprintf "define %s @mere_vec_%s_get(ptr %%v, i64 %%i) {" c_elem tag;
       "entry:";
+    ] @ read_mark_lines ~sn:struct_name ~idx:4 ~c:"%v" @ [
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
       "  %len32 = load i32, ptr %lp";
       "  %len = sext i32 %len32 to i64";
@@ -10232,6 +10320,7 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       (* len *)
       Printf.sprintf "define i64 @mere_vec_%s_len(ptr %%v) {" tag;
       "entry:";
+    ] @ read_mark_lines ~sn:struct_name ~idx:4 ~c:"%v" @ [
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
       "  %len32 = load i32, ptr %lp";
       "  %len = zext i32 %len32 to i64";
@@ -10264,6 +10353,7 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       "@.idxfmt_f64x2store = private constant [57 x i8] c\"f64x2_store: lanes [%lld, +2) out of bounds (len = %lld)\\00\"";
       "define <2 x double> @mere_vec_float_f64x2_load(ptr %v, i64 %i) {";
       "entry:";
+    ] @ read_mark_lines ~sn:"mere_vec_float" ~idx:4 ~c:"%v" @ [
       "  %lp = getelementptr %mere_vec_float, ptr %v, i32 0, i32 1";
       "  %len32 = load i32, ptr %lp";
       "  %len = sext i32 %len32 to i64";
@@ -10975,8 +11065,8 @@ let emit_owned_vec_runtime_llvm (elem_ty : Ast.ty) : string =
   let tag = ty_tag elem_ty in
   let c_elem = llvm_ty_of elem_ty in
   let struct_name = "mere_owned_vec_" ^ tag in
-  String.concat "\n"
-    [ Printf.sprintf "%%%s = type { ptr, i32, i32 }" struct_name;
+  String.concat "\n" (
+    [ Printf.sprintf "%%%s = type { ptr, i32, i32, i32 }   ; v0.1.582: field 3 is the owner" struct_name;
       "";
       (* new *)
       Printf.sprintf "define ptr @mere_owned_vec_%s_new() {" tag;
@@ -10994,6 +11084,7 @@ let emit_owned_vec_runtime_llvm (elem_ty : Ast.ty) : string =
       "  store i32 0, ptr %lp";
       Printf.sprintf "  %%cp = getelementptr %%%s, ptr %%v, i32 0, i32 2" struct_name;
       "  store i32 4, ptr %cp";
+    ] @ owner_store_lines ~sn:struct_name ~idx:3 ~c:"%v" @ [
       "  call void @__mere_owned_vec_register(ptr %v)";
       "  ret ptr %v";
       "}";
@@ -11001,6 +11092,8 @@ let emit_owned_vec_runtime_llvm (elem_ty : Ast.ty) : string =
       (* push *)
       Printf.sprintf "define i32 @mere_owned_vec_%s_push(ptr %%v, %s %%x) {" tag c_elem;
       "entry:";
+      Printf.sprintf "  %%__ov_p = getelementptr %%%s, ptr %%v, i32 0, i32 3" struct_name;
+      "  call void @__lang_ov_use(ptr %__ov_p, ptr @.ov_owned_vec_push)";
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
       "  %len = load i32, ptr %lp";
       Printf.sprintf "  %%cp = getelementptr %%%s, ptr %%v, i32 0, i32 2" struct_name;
@@ -11032,6 +11125,8 @@ let emit_owned_vec_runtime_llvm (elem_ty : Ast.ty) : string =
       (* get *)
       Printf.sprintf "define %s @mere_owned_vec_%s_get(ptr %%v, i64 %%i) {" c_elem tag;
       "entry:";
+      Printf.sprintf "  %%__ov_p = getelementptr %%%s, ptr %%v, i32 0, i32 3" struct_name;
+      "  call void @__lang_ov_use(ptr %__ov_p, ptr @.ov_owned_vec_get)";
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
       "  %len32 = load i32, ptr %lp";
       "  %len = sext i32 %len32 to i64";
@@ -11053,11 +11148,13 @@ let emit_owned_vec_runtime_llvm (elem_ty : Ast.ty) : string =
       (* len *)
       Printf.sprintf "define i64 @mere_owned_vec_%s_len(ptr %%v) {" tag;
       "entry:";
+      Printf.sprintf "  %%__ov_p = getelementptr %%%s, ptr %%v, i32 0, i32 3" struct_name;
+      "  call void @__lang_ov_use(ptr %__ov_p, ptr @.ov_owned_vec_len)";
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
       "  %len32 = load i32, ptr %lp";
       "  %len = zext i32 %len32 to i64";
       "  ret i64 %len";
-      "}" ]
+      "}" ])
 
 (* Phase 15.7: vec_to_owned helper per-T.
    Deep copy from input Vec[R, T] to output OwnedVec[T]. *)
@@ -11627,6 +11724,7 @@ let emit_map_runtime_llvm_linear (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       (* get *)
       Printf.sprintf "define %s @%s_get(ptr %%m, %s %%k) {" c_v fn_prefix c_k;
       "entry:";
+    ] @ read_mark_lines ~sn:struct_name ~idx:5 ~c:"%m" @ [
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" struct_name;
       "  %len = load i32, ptr %lp";
       Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" struct_name;
@@ -11661,6 +11759,7 @@ let emit_map_runtime_llvm_linear (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       (* has *)
       Printf.sprintf "define i1 @%s_has(ptr %%m, %s %%k) {" fn_prefix c_k;
       "entry:";
+    ] @ read_mark_lines ~sn:struct_name ~idx:5 ~c:"%m" @ [
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" struct_name;
       "  %len = load i32, ptr %lp";
       Printf.sprintf "  %%kp = getelementptr %%%s, ptr %%m, i32 0, i32 0" struct_name;
@@ -11687,6 +11786,7 @@ let emit_map_runtime_llvm_linear (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       (* len *)
       Printf.sprintf "define i64 @%s_len(ptr %%m) {" fn_prefix;
       "entry:";
+    ] @ read_mark_lines ~sn:struct_name ~idx:5 ~c:"%m" @ [
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" struct_name;
       "  %len32 = load i32, ptr %lp";
       "  %len = zext i32 %len32 to i64";
@@ -12143,6 +12243,7 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       (* get *)
       Printf.sprintf "define %s @%s_get(ptr %%m, %s %%k) {" c_v p c_k;
       "entry:";
+    ] @ read_mark_lines ~sn:sn ~idx:10 ~c:"%m" @ [
       "  %s = alloca i32";
       hash "%k" "%h";
       Printf.sprintf "  %%icp = getelementptr %%%s, ptr %%m, i32 0, i32 6" sn;
@@ -12195,6 +12296,7 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       (* has *)
       Printf.sprintf "define i1 @%s_has(ptr %%m, %s %%k) {" p c_k;
       "entry:";
+    ] @ read_mark_lines ~sn:sn ~idx:10 ~c:"%m" @ [
       "  %s = alloca i32";
       hash "%k" "%h";
       Printf.sprintf "  %%icp = getelementptr %%%s, ptr %%m, i32 0, i32 6" sn;
@@ -12239,6 +12341,7 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          includes tombstones, which no observer of the language may see. *)
       Printf.sprintf "define i64 @%s_len(ptr %%m) {" p;
       "entry:";
+    ] @ read_mark_lines ~sn:sn ~idx:10 ~c:"%m" @ [
       Printf.sprintf "  %%livep = getelementptr %%%s, ptr %%m, i32 0, i32 8" sn;
       "  %live32 = load i32, ptr %livep";
       "  %len = zext i32 %live32 to i64";
@@ -12862,6 +12965,7 @@ let strbuf_runtime_llvm =
          `region R { ...; strbuf_to_str b }` escapes a value out of R. *)
       "define ptr @mere_strbuf_to_str(ptr %sb) {";
       "entry:";
+    ] @ read_mark_lines ~sn:"mere_strbuf" ~idx:4 ~c:"%sb" @ [
       "  %lp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 1";
       "  %len = load i32, ptr %lp";
       "  %len_pre = zext i32 %len to i64";
@@ -12878,6 +12982,7 @@ let strbuf_runtime_llvm =
       (* len *)
       "define i64 @mere_strbuf_len(ptr %sb) {";
       "entry:";
+    ] @ read_mark_lines ~sn:"mere_strbuf" ~idx:4 ~c:"%sb" @ [
       "  %lp = getelementptr %mere_strbuf, ptr %sb, i32 0, i32 1";
       "  %len32 = load i32, ptr %lp";
       "  %len = zext i32 %len32 to i64";

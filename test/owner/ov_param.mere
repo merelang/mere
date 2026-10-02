@@ -1,0 +1,10 @@
+// scripts/owner_check.sh: an OwnedVec captured by a closure handed to spawn
+// through a PARAMETER -- nothing moved it, and both threads push to it. The
+// thread's first push fails by name (v0.1.582; before, nothing checked).
+let launch = fn (f: unit -> unit) -> spawn f;
+let g = owned_vec_new ();
+let rec fill = fn (i: int) -> if i == 0 then () else let _ = owned_vec_push g i in fill (i - 1);
+let h = launch (fn () -> fill 50000);
+let _ = fill 50000;
+let _ = join h in
+print_int (owned_vec_len g)
