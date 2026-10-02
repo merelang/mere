@@ -4,6 +4,28 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.573 — 2026-10-02
+
+_`spawn` checks what any argument mentions, and a ByteBuf is not shared across threads (Q-179 stage 0, Q-197)._
+
+`spawn`'s capture check looked at one shape: a lambda written in place. Every
+other argument went through as an ordinary application -- `spawn (w slot)`, a
+partial application whose argument is a Map, was not looked at at all, and four
+threads filling one Map that way hung the C build in three runs of three (a
+concurrent resize breaks the open-addressing probe loop). Now any argument is
+checked for what it mentions, the way a lambda's captures are: `spawn (w slot)`
+is refused with the sentence a captured Map already got. A function value alone
+(`spawn body`) still passes -- an arrow type says nothing about what the
+function reaches, which is the next stage's question (Q-179).
+
+ByteBuf was missing from the Send and Sync classifiers' container case while the
+value restriction and the region list had it, so a top-level ByteBuf written by a
+spawned lambda was accepted as shareable. All three now read the one list of
+region-parameterised containers. Nothing in the 311 examples or the 19
+downstream repositories was relying on either.
+
+---
+
 ## v0.1.572 — 2026-10-02
 
 _An annotation's region name is a variable unless a block of that name is open around it (Q-196)._
