@@ -4,6 +4,50 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.605 — 2026-10-03
+
+_A chain of literal `++` is one literal by the time it is compiled, and a list is copied along its spine by a loop: ten million elements no longer run the copy out of C stack, and a 6703-line text written one literal per line no longer costs the square of its length at startup. On Wasm, a region block's result no longer overwrites itself on the way out._
+
+**`"a" ++ "b"` is folded** (found by mere-ruby). A text written as a chain of
+literals -- mere-ruby's Ruby prelude, one line per literal -- was concatenated
+when the program ran, every link copying everything before it: the copies came
+to 192 MB at every startup of mere-ruby, which is most of what `-e 1` used, and
+on RISC-V, where a region gives nothing back, more than the 256 MB a program
+has there. `fold_str_concat` (lib/pipeline.ml) runs after parsing with the
+other lowerings, so `mere fmt`, which keeps the sugar, still prints the chain
+as it was written. Two literals become one; `x ++ "a" ++ "b"` folds its tail;
+`"a" ++ x` is left as it is. mere-ruby's `-e 1`: 244 MB -> 46 MB (with the
+joined prelude built in a region). Three unit tests used two literals to look
+at the code `++` makes; they put a variable on one side now.
+
+**A recursive variant's copier walks its spine in a loop.** `__mcopy_<tag>`
+(copy-on-store) and `__mdeep_<tag>` (a region loop's carry) recursed into
+every node, and a list is one node per element: three million elements stored
+into a map ran out of the default 8 MB stack ("stack overflow (recursion too
+deep)"), and mere-ruby's `Array.new(10_000_000)` out of its 512 MB one -- in
+CRuby's test_method that was `rest(*(1..10_000_000))`, and the whole file with
+it. A constructor whose payload is a tuple ENDING in the type itself (a list's
+`Cons`) is now walked as a loop along that field, each new node linked into
+the slot the previous one left; the other fields and every other constructor
+are copied as before. `scripts/deep_list_check.sh` stores a 3M-element int list
+and str list into maps and carries one through a region loop under an 8 MB
+stack, and `--poison` puts the recursion back and requires a failure; in CI.
+The LLVM copier still recurses (a ten-million-element list carried out of a
+`region` overflows there); Wasm's is not measured.
+
+**On Wasm, a region block's second copy ran into its first** (shown by the
+fold). A Wasm region block copies its result twice -- above the block's
+garbage, then down to where the block began -- and when the garbage is smaller
+than the value, the second copy writes over the first while it reads it: a
+record whose first field is a string had the string's bytes written over its
+second field (`region R { rec_t { name = "abcdefgh", n = 4 } }` read `n` as
+1751606885, the bytes of "efgh"; a longer one ran out of memory). It took a
+string LITERAL to show it -- a string built in the block was garbage enough to
+keep the copies apart -- and folding turned `region_result_boxed`'s
+`"na" ++ "me"` into one, and the parity gate went red on Wasm. When the copies
+would overlap, the first is now the result and the bump is left after it.
+`test/parity/region_result_over_its_copy.mere`; it fails on v0.1.604.
+
 ## v0.1.604 — 2026-10-03
 
 _A zero divisor fails on RISC-V as everywhere else: `7 / 0` printed -1 there, and `7 % 0` printed 7. And on the `-rv` path a second type error is shown in the program, not in the prelude._

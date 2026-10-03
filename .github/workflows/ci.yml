@@ -727,6 +727,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/region_uaf_check.sh --poison
 
+      # v0.1.605: a ten-million-element list ran the copy out of C stack, one
+      # frame per element. The copier now walks a list's spine in a loop.
+      - name: deep_list_check (a long list is copied without a C frame per element)
+        if: ${{ !cancelled() }}
+        run: sh scripts/deep_list_check.sh --poison
+
       # `mere -c --region-sites` names the source lines whose containers filled
       # the default region (v0.1.570), and must change nothing else: the same
       # output, the same default-region total.
