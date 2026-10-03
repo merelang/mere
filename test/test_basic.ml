@@ -4020,8 +4020,9 @@ let () =
      `mere -e '"a\"b"'` said `a"b` compiled and `"a\"b"` interpreted. *)
   assert_c "codegen: str main goes through show_str"
     (codegen "\"hi\"") "puts(show_str(";
+  (* (a variable on one side: two literals are folded into one, v0.1.605) *)
   assert_c "codegen: ++ becomes __lang_str_concat call"
-    (codegen "\"a\" ++ \"b\"") "__lang_str_concat(";
+    (codegen "let a = \"a\" in a ++ \"b\"") "__lang_str_concat(";
   (* v0.1.261: print writes the str's LENGTH (Q-033), so the emitted call is
      an fwrite of __lang_str_size bytes rather than puts, which stopped at the
      first NUL. *)
@@ -4766,6 +4767,13 @@ let () =
     (codegen_with_decls
       "let add = fn n -> fn x -> n + x in (add 3) 4")
     "__env = (__anon_0_env*)malloc";
+  (* v0.1.605: a chain of literals is one literal by codegen time. *)
+  assert_c "codegen: \"a\" ++ \"b\" ++ \"c\" is folded"
+    (codegen_with_decls "let s = \"ab\" ++ \"cd\" ++ \"ef\" in str_len s")
+    "\"abcdef\"";
+  assert_c "codegen: a literal tail after a non-literal is folded"
+    (codegen_with_decls "let n = 3 in str_of_int n ++ \"gh\" ++ \"ij\"")
+    "\"ghij\"";
   (* v0.1.296: the region-carrying loop. *)
   assert_c "codegen: region loop swaps arenas at Continue"
     (codegen_with_decls
@@ -5294,7 +5302,7 @@ let () =
   assert_llvm "llvm: print writes the str by length"
     (llvm "print \"hi\"") "call i64 @__lang_str_size(ptr ";
   assert_llvm "llvm: ++ lowers to __lang_str_concat"
-    (llvm "\"a\" ++ \"b\"") "call ptr @__lang_str_concat";
+    (llvm "let a = \"a\" in a ++ \"b\"") "call ptr @__lang_str_concat";
   assert_llvm_runtime "llvm: __lang_str_concat helper is emitted"
     (llvm "\"a\" ++ \"b\"") "define ptr @__lang_str_concat(ptr %a, ptr %b)";
   assert_llvm_runtime "llvm: str_len uses strlen + trunc"
@@ -16736,9 +16744,12 @@ let () =
       if has c "((mu_n * mu_n) * mu_n)" then "nested" else "sequenced")
      "nested";
    check "v0.1.450: a long chain is sequenced even when nothing in it has effects"
+     (* (each link a variable: a chain of literals is one literal, v0.1.605) *)
      (let lits = String.concat " ++ "
-        (List.init 20 (fun i -> Printf.sprintf "\"s%d\"" i)) in
-      let c = from (codegen (Printf.sprintf "print (%s)" lits)) "int main(" in
+        (List.init 20 (fun i -> Printf.sprintf "s%d" i)) in
+      let binds = String.concat "\n"
+        (List.init 20 (fun i -> Printf.sprintf "let s%d = \"s%d\";" i i)) in
+      let c = from (codegen (Printf.sprintf "%s\nprint (%s)" binds lits)) "int main(" in
       if count c "__lang_str_concat(__bc" >= 19 then "sequenced" else "nested")
      "sequenced";
    check "v0.1.450: a long `&&` chain becomes conditionals, keeping the skip"

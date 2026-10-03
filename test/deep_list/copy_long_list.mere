@@ -1,0 +1,21 @@
+// A list long enough that copying it one C frame per element runs out of the
+// default 8 MB stack: stored into a map (copy-on-store, __mcopy), carried
+// through a region loop (__mdeep), and read back whole.
+let rec build = fn (n: int) -> fn (acc: int list) -> if n == 0 then acc else build (n - 1) (Cons (n, acc));
+let rec sum = fn (xs: int list) -> fn (a: int) -> match xs with Nil -> a | Cons (x, t) -> sum t (a + x);
+let rec len = fn (xs: str list) -> fn (a: int) -> match xs with Nil -> a | Cons (_, t) -> len t (a + 1);
+let rec strs = fn (n: int) -> fn (acc: str list) -> if n == 0 then acc else strs (n - 1) (Cons ("s", acc));
+let m = map_new ();
+let _ = map_set m "ints" (build 3000000 Nil);
+let _ = print (str_of_int (sum (map_get m "ints") 0));
+let m2 = map_new ();
+let _ = map_set m2 "strs" (strs 3000000 Nil);
+let _ = print (str_of_int (len (map_get m2 "strs") 0));
+// (the carry crosses each turn through __mdeep: the list is made on the first
+// turn and carried into the second, then answered)
+let kept = region R loop x {
+  match x with
+  | None -> Continue (build 3000000 Nil)
+  | Some xs -> Done (sum xs 0)
+};
+let _ = print (str_of_int kept);

@@ -363,6 +363,38 @@ let prefix_desugar (prog : Ast.program) : Ast.program =
   in
   { Ast.decls = List.map decl prog.Ast.decls; Ast.main = go prog.Ast.main }
 
+(* v0.1.605: `"a" ++ "b"` is one literal. A text written as a chain of
+   literals, one line each -- mere-ruby's Ruby prelude, 6703 lines -- was
+   concatenated at run time, every link copying everything before it: the
+   copies summed to the square of the length (192 MB of garbage at mere-ruby's
+   startup), and on RISC-V, where a region gives nothing back, that was past
+   the 256 MB a program has. Folded here, after parsing and before typing, so
+   `mere fmt` (which keeps the sugar) still prints the chain as written.
+   Literals only: `x ++ "a" ++ "b"` folds its tail ("ab"), `"a" ++ x` is left
+   alone. ++ is associative, so regrouping a literal tail changes nothing. *)
+let fold_str_concat (prog : Ast.program) : Ast.program =
+  let rec go (e : Ast.expr) : Ast.expr =
+    Ast.rv_map_scoped ~shadow:[] (fun _ (x : Ast.expr) ->
+      match x.Ast.node with
+      | Ast.Bin (Ast.Concat, a, b) ->
+        let a = go a and b = go b in
+        (match a.Ast.node, b.Ast.node with
+         | Ast.Str_lit s, Ast.Str_lit t -> Some { x with Ast.node = Ast.Str_lit (s ^ t) }
+         | Ast.Bin (Ast.Concat, a1, ({ Ast.node = Ast.Str_lit s; _ } as l)), Ast.Str_lit t ->
+           Some { x with Ast.node = Ast.Bin (Ast.Concat, a1, { l with Ast.node = Ast.Str_lit (s ^ t) }) }
+         | Ast.Str_lit s, Ast.Bin (Ast.Concat, ({ Ast.node = Ast.Str_lit t; _ } as l), b1) ->
+           Some { x with Ast.node = Ast.Bin (Ast.Concat, { l with Ast.node = Ast.Str_lit (s ^ t) }, b1) }
+         | _ -> Some { x with Ast.node = Ast.Bin (Ast.Concat, a, b) })
+      | _ -> None) e
+  in
+  let decl d =
+    match d with
+    | Ast.Top_let (p, e) -> Ast.Top_let (p, go e)
+    | Ast.Top_let_rec bs -> Ast.Top_let_rec (List.map (fun (n, l, e) -> (n, l, go e)) bs)
+    | other -> other
+  in
+  { Ast.decls = List.map decl prog.Ast.decls; Ast.main = go prog.Ast.main }
+
 (* `echo` -> `echo_at "<where>"`: the debug print gets its position.
 
    WHY A PASS AND NOT A PARSER CASE. The first version of this rewrote the
@@ -773,7 +805,7 @@ let parse_program ?(prelude = true) ?(keep_sugar = false) ?base_dir ?(search_pat
                      call is a formatter people stop running on broken files,
                      which is when they need it. *)
                   check_module_privacy p; check_file_privacy p;
-                  coro_rewrite (prefix_desugar (echo_rewrite p))))
+                  fold_str_concat (coro_rewrite (prefix_desugar (echo_rewrite p)))))
                 { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls })
   in
   (* Tell the typer what this program declares, here rather than only when the

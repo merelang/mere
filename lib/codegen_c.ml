@@ -6620,6 +6620,50 @@ let emit_cmp_fn (tag : string) (t : Ast.ty) : string =
 let emit_cmp_fn_forward_decl (tag : string) (t : Ast.ty) : string =
   Printf.sprintf "static int cmp_%s(%s, %s);" tag (c_type_of t) (c_type_of t)
 
+(* v0.1.605: a recursive variant's copier, shared by __mcopy and __mdeep.
+   A constructor whose payload is a tuple ENDING in the type itself -- a
+   list's Cons, a chain's link -- is walked as a loop along that last field
+   (the spine), not by recursion: the copy recursed once per element, and a
+   ten-million-element list ran out of C stack in the copy (mere-ruby's
+   `Array.new(10_000_000)`, test_method's splat of a 10M Range). Each new node
+   is linked into the slot the previous one left open. The other fields, and
+   every other constructor, are copied as before. *)
+let emit_recursive_variant_copy (fam : string) (header : string) (cty : string)
+    (tag : string) (variants : (string * Ast.ty option) list) : string =
+  let tag_of cname = try Hashtbl.find variant_tags cname with Not_found -> 0 in
+  let nullary =
+    List.filter_map (fun (cname, arg_opt) ->
+      match arg_opt with
+      | None -> Some (Printf.sprintf "    if (__t == %d) { *__slot = v; return __head; }" (tag_of cname))
+      | Some _ -> None) variants in
+  let payload =
+    List.filter_map (fun (cname, arg_opt) ->
+      match arg_opt with
+      | None -> None
+      | Some ty ->
+        let tag_n = tag_of cname in
+        (match Ast.walk ty with
+         | Ast.TyTuple ts when ts <> [] && ty_tag (List.nth ts (List.length ts - 1)) = tag ->
+           let last = List.length ts - 1 in
+           let steps =
+             List.concat (List.mapi (fun i et ->
+               if i = last then []
+               else [Printf.sprintf "      p->payload.%s.f%d = __%s_%s(r, p->payload.%s.f%d);"
+                       cname i fam (ty_tag et) cname i]) ts) in
+           Some (Printf.sprintf
+             "    if (__t == %d) {\n%s\n      %s __next = p->payload.%s.f%d;\n      \
+              *__slot = %s__mk(__t, p);\n      __slot = &p->payload.%s.f%d;\n      \
+              v = __next;\n      continue;\n    }"
+             tag_n (String.concat "\n" steps) cty cname last cty cname last)
+         | _ ->
+           Some (Printf.sprintf "    if (__t == %d) p->payload.%s = __%s_%s(r, p->payload.%s);"
+                   tag_n cname fam (ty_tag ty) cname))) variants in
+  Printf.sprintf
+    "%s {\n  %s __head; %s* __slot = &__head;\n  for (;;) {\n    int __t = %s__tag(v);\n%s\n    \
+     %s_node* p = (%s_node*)__lang_region_alloc(r, sizeof(%s_node));\n    *p = *%s__node(v);\n%s\n    \
+     *__slot = %s__mk(__t, p);\n    return __head;\n  }\n}"
+    header cty cty cty (String.concat "\n" nullary) cty cty cty cty (String.concat "\n" payload) cty
+
 (* v0.1.30 (copy-on-store): deep-copy a value into region `r`. Strings
    copy their bytes; tuples / records / variants copy structurally (cons
    cells and variant nodes are re-allocated in `r`); scalars and closures
@@ -6686,28 +6730,7 @@ let emit_copy_fn (tag : string) (t : Ast.ty) : string =
           Typer.constructors []
     in
     if is_recursive_variant cty then
-      (* Heap node: re-allocate the node in r, then copy the payload. *)
-      (* Q-104: a nullary node is the type's shared static and outlives every
-         arena, so it is returned as it is; a payload node is re-allocated
-         from the untagged source and the value re-tagged. *)
-      let cases =
-        List.filter_map (fun (cname, arg_opt) ->
-          let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
-          match arg_opt with
-          | None -> Some (Printf.sprintf "  if (__t == %d) return v;" tag_n)
-          | Some ty ->
-            Some (Printf.sprintf
-              "  if (__t == %d) p->payload.%s = __mcopy_%s(r, p->payload.%s);"
-              tag_n cname (ty_tag ty) cname))
-          variants
-      in
-      let nullary_returns = List.filter (fun c -> String.length c > 0 && (try ignore (Str.search_forward (Str.regexp_string "return v;") c 0); true with Not_found -> false)) cases in
-      let payload_steps = List.filter (fun c -> not (List.mem c nullary_returns)) cases in
-      Printf.sprintf
-        "%s {\n  int __t = %s__tag(v);\n%s\n  %s_node* p = (%s_node*)__lang_region_alloc(r, sizeof(%s_node));\n  \
-         *p = *%s__node(v);\n%s\n  return %s__mk(__t, p);\n}"
-        header cty (String.concat "\n" nullary_returns) cty cty cty cty
-        (String.concat "\n" payload_steps) cty
+      emit_recursive_variant_copy "mcopy" header cty tag variants
     else
       let cases =
         List.filter_map (fun (cname, arg_opt) ->
@@ -6794,27 +6817,7 @@ let emit_deep_copy_fn (tag : string) (t : Ast.ty) : string =
           Typer.constructors []
     in
     if is_recursive_variant cty then
-      (* Q-104: a nullary node is the type's shared static and outlives every
-         arena, so it is returned as it is; a payload node is re-allocated
-         from the untagged source and the value re-tagged. *)
-      let cases =
-        List.filter_map (fun (cname, arg_opt) ->
-          let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
-          match arg_opt with
-          | None -> Some (Printf.sprintf "  if (__t == %d) return v;" tag_n)
-          | Some ty ->
-            Some (Printf.sprintf
-              "  if (__t == %d) p->payload.%s = __mdeep_%s(r, p->payload.%s);"
-              tag_n cname (ty_tag ty) cname))
-          variants
-      in
-      let nullary_returns = List.filter (fun c -> String.length c > 0 && (try ignore (Str.search_forward (Str.regexp_string "return v;") c 0); true with Not_found -> false)) cases in
-      let payload_steps = List.filter (fun c -> not (List.mem c nullary_returns)) cases in
-      Printf.sprintf
-        "%s {\n  int __t = %s__tag(v);\n%s\n  %s_node* p = (%s_node*)__lang_region_alloc(r, sizeof(%s_node));\n  \
-         *p = *%s__node(v);\n%s\n  return %s__mk(__t, p);\n}"
-        header cty (String.concat "\n" nullary_returns) cty cty cty cty
-        (String.concat "\n" payload_steps) cty
+      emit_recursive_variant_copy "mdeep" header cty tag variants
     else
       let cases =
         List.filter_map (fun (cname, arg_opt) ->

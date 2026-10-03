@@ -4936,9 +4936,17 @@ and emit_expr (e : Ast.expr) : unit =
     emit_instr "i32.add";
     emit_instr "global.set $__lang_region_depth";
     emit_expr body;                             (* [result] *)
+    (* v0.1.605: where copy 1 starts and ends, to tell whether copy 2 can be
+       made below it (see the end of this arm) *)
+    let c1s_slot = fresh_local_i32 () in
+    let c1e_slot = fresh_local_i32 () in
+    emit_instr "global.get $__lang_bump";
+    emit_instr (Printf.sprintf "local.set %d" c1s_slot);
     if not unboxed then
       emit_instr (Printf.sprintf "call $__mcopy_%s" rtag);  (* copy 1 (above garbage) *)
     emit_instr "global.set $__rgn_tmp";
+    emit_instr "global.get $__lang_bump";
+    emit_instr (Printf.sprintf "local.set %d" c1e_slot);
     (* release: back to the mark, unless a store made part of this block
        reachable from outside it, in which case back to that high-water mark. *)
     emit_instr "global.get $__lang_hwm";
@@ -4994,9 +5002,23 @@ and emit_expr (e : Ast.expr) : unit =
     emit_instr "i32.const 1";
     emit_instr "i32.sub";
     emit_instr "global.set $__lang_region_depth";
-    emit_instr "global.get $__rgn_tmp";
-    if not unboxed then
-      emit_instr (Printf.sprintf "call $__mcopy_%s" rtag);  (* copy 2 (into enclosing) *)
+    (* v0.1.605: COPY 2 MUST NOT RUN INTO COPY 1. It writes from the release
+       point up while it reads copy 1, which sits just above the block's
+       garbage -- and when the garbage is smaller than the value, the two
+       overlap: a record whose first field is a string had that string's bytes
+       written over its second field before the field was read
+       (`region R { rec_t { name = "abcdefgh", n = 4 } }` read n as
+       1751606885, "efgh"). It took a string LITERAL to show it: a string
+       built in the block was garbage enough to keep them apart, and folding
+       `"na" ++ "me"` into one literal (v0.1.605) took that garbage away.
+       When they would overlap, copy 1 is the result and the bump is left
+       after it; what lies between the release point and copy 1 is smaller
+       than the value, and is all that is not given back. *)
+    if unboxed then emit_instr "global.get $__rgn_tmp"
+    else
+      emit_instr (Printf.sprintf
+        "(if (result i64) (i32.or (i32.le_u (i32.add (global.get $__lang_bump) (i32.sub (local.get %d) (local.get %d))) (local.get %d)) (i32.ge_u (global.get $__lang_bump) (local.get %d))) (then (call $__mcopy_%s (global.get $__rgn_tmp))) (else (global.set $__lang_bump (local.get %d)) (global.get $__rgn_tmp)))"
+        c1e_slot c1s_slot c1s_slot c1e_slot rtag c1e_slot);  (* copy 2 (into enclosing) *)
     wasm_tail_pos := saved
   | Ast.Ref (_, _, inner) ->
     (* `&R v` — region-alloc an 8-byte slot, store the value, return ptr. *)

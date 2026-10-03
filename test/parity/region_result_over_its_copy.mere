@@ -1,0 +1,20 @@
+// v0.1.605: a region block's result is copied twice on Wasm -- above the
+// block's garbage, then down to where the block began -- and when the garbage
+// is smaller than the value the second copy ran into the first. A record whose
+// first field is a string LITERAL (nothing built in the block, so no garbage)
+// had the string's bytes written over its second field before it was read.
+type rec_t = { name: str, n: int };
+type pair = { a: str, b: str, c: int };
+
+let r1 = region R { rec_t { name = "abcdefgh", n = 4 } };
+let _ = print (r1.name ++ " " ++ str_of_int r1.n);
+
+let r2 = region R { pair { a = "first string", b = "second", c = 42 } };
+let _ = print (r2.a ++ "|" ++ r2.b ++ "|" ++ str_of_int r2.c);
+
+let t3 = region R { ("a literal long enough to overlap", 7, "x") };
+let (s3, n3, x3) = t3;
+let _ = print (s3 ++ " " ++ str_of_int n3 ++ " " ++ x3);
+
+let l4 = region R { Cons ("one literal", Cons ("two", Nil)) };
+let _ = print (str_join "," l4);
