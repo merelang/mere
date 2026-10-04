@@ -395,6 +395,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/rv_prelude_check.sh
 
+      # The listing (-rvs) and the debug map (-rvg) must describe the binary
+      # -rv emits, word for word: they were built from a different program
+      # (regions not settled) until v0.1.610, and a profile read through the map
+      # blamed the wrong functions.
+      - name: "rv listing (-rvs / -rvg are the binary, word for word)"
+        if: ${{ !cancelled() }}
+        run: sh scripts/rv_listing_check.sh
+
       # `run` is the only channel a program has for the fate of a child, and the
       # interpreter reported a signalled child with OCaml's signal encoding: 121
       # for SIGKILL where the shell and the C backend say 137. Below 128, where

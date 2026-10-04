@@ -4240,13 +4240,14 @@ let listing (prog : item list) : string =
       here := !here + 4
     | Jal (rd, name) ->
       let off = (try Hashtbl.find labels name with Not_found -> !here) - !here in
-      let w = enc_j off rd 0x6F in
       let mn = if rd = 0 then Printf.sprintf "j %s" name
                else Printf.sprintf "jal %s, %s" (Riscv_disasm.r rd) name in
+      (* encoded only when it IS a J-type: in a wide layout the jump may be past
+         J-type's reach, and the listing refused a program the binary built *)
       Buffer.add_string buf
         (if !far_jumps
          then Printf.sprintf "  %6x:  (auipc+jalr)  %s  (wide)\n" !here mn
-         else Printf.sprintf "  %6x:  %08x  %s\n" !here w mn);
+         else Printf.sprintf "  %6x:  %08x  %s\n" !here (enc_j off rd 0x6F) mn);
       here := !here + item_size it
     | Branch (f3, rs1, rs2, name) ->
       let m = [| "beq"; "bne"; "?"; "?"; "blt"; "bge"; "bltu"; "bgeu" |].(f3) in
@@ -4492,7 +4493,11 @@ let build_items_sized (prog : Ast.program) : item list =
   in
   settle 1 (build_items prog full)
 
-let emit_program ~main_ty (prog : Ast.program) : string =
+(* Settling the regions is part of compiling: the listing and the debug map
+   go through it too, or they describe a different program from the binary.
+   (They did not until v0.1.610: on mere-ruby `-rv64s` refused a jump the
+   binary never has, and `-rv64g` put every function at the wrong address.) *)
+let settle_regions (prog : Ast.program) : unit =
   (* Q-127: SETTLE EVERY UNDECIDED CONTAINER REGION BEFORE ANYTHING READS ONE.
      A slot can hold a variable up to here, so that a call site inside a `region` block
      can decide it; what is left means nobody did, and it becomes `__heap`.
@@ -4518,15 +4523,19 @@ let emit_program ~main_ty (prog : Ast.program) : string =
     | Ast.Top_let (_, v) -> Typer.default_container_regions v
     | Ast.Top_let_rec bs -> List.iter (fun (_, _, v) -> Typer.default_container_regions v) bs
     | _ -> ()) prog.decls;
+  ()
 
-
+let emit_program ~main_ty (prog : Ast.program) : string =
+  settle_regions prog;
   ignore main_ty;
   assemble (build_items_sized prog)
 
 let emit_listing ~main_ty (prog : Ast.program) : string =
   ignore main_ty;
+  settle_regions prog;
   listing (build_items_sized prog)
 
 let emit_debug_map ~main_ty (prog : Ast.program) : string =
   ignore main_ty;
+  settle_regions prog;
   debug_map (build_items_sized prog)

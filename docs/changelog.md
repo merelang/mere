@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.610 — 2026-10-04
+
+_`mere -rvs` / `-rv64s` (the listing) and `-rvg` / `-rv64g` (the debug map) describe the binary `-rv` emits, word for word -- they were made from a different program, and a profile read through the map blamed the wrong functions._
+
+**The listing and the map skipped settling the regions.** Q-127 settles every
+undecided container region (`bind_region_params`, `default_container_regions`)
+before code is generated; `emit_program` did, and `emit_listing` /
+`emit_debug_map` did not, so they generated code for a slightly different
+program. On 15 of the parity programs the listing's words were not the
+binary's; on mere-ruby every address in the map was off -- a sampling profile
+of its startup on the RV64 emulator, read through it, said 26% was
+`do_class_alias` and 7% lgamma's helper, where the truth is the Map (the next
+version). `settle_regions` is now one function the three paths share.
+
+**A wide listing encoded its jumps as J-type anyway.** Past 512 KB of code a
+jump is emitted as `auipc + jalr`, and the listing printed it so -- after
+encoding it as a J-type first, which refuses anything over 1 MB: mere-ruby's
+listing stopped with "a jump of 2441396 bytes does not fit". It is encoded only
+when it is one now.
+
+`scripts/rv_listing_check.sh` (in CI): for every parity program at both widths,
+each encoded word the listing shows is the binary's word at that address, and
+each function symbol of the debug map is a listing label at that address; plus a
+generated 1.25 MB program whose 12,030 jumps are all wide (v0.1.609 refuses its
+listing). 273 listings, 1.3 million words.
+
 ## v0.1.609 — 2026-10-04
 
 _RISC-V has a libm: an `extern fn cbrt: float -> float` (and twenty more of libm's names) is answered by the prelude instead of refused, and those, `sin`, `cos`, `tan`, `atan2`, `exp`, `log` and `f_pow` are correctly rounded there -- within ~0.52 ulp of the true value, `sin 1e22` included._
