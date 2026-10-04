@@ -10834,6 +10834,24 @@ let () =
      in
      if has "declare i64 @getpid()" && has "call i64 @getpid(" then "ok" else "no")
     "ok";
+  (* The declaration drops a unit parameter by type; the call dropped only a
+     literal `()`, so a unit-typed VARIABLE was passed as an `i64` to a
+     function declared to take nothing. *)
+  check "§32.3: LLVM extern call drops a unit-typed variable argument"
+    (let ll = Codegen_llvm.emit_program ~main_ty:Ast.TyInt (typed_prog
+       "extern fn getpid: unit -> int;\n\
+        let pid_of = fn (u: unit) -> getpid u;\n\
+        pid_of ()") in
+     let has needle =
+       let nlen = String.length ll and plen = String.length needle in
+       let rec scan i =
+         if i + plen > nlen then false
+         else if String.sub ll i plen = needle then true
+         else scan (i + 1)
+       in scan 0
+     in
+     if has "call i64 @getpid()" && not (has "call i64 @getpid(i64") then "ok" else "no")
+    "ok";
   check "§32.6: multi-arg curried extern interp (setenv + getenv roundtrip)"
     (Pipeline.process
        "extern fn setenv: str -> str -> int -> int;\n\

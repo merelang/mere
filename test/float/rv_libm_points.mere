@@ -1,0 +1,86 @@
+// f_pow, exp and log on RISC-V, against the machine's libm, bit for bit.
+//
+// On RV32I and RV64IM these are prelude Mere over softfloat; everywhere else
+// they are libm. Neither side is required to be correctly rounded, so this file
+// is not a list of every point: it is points where the two AGREE now and did
+// not before v0.1.606 -- picked from a 6000-call sweep of each, where f_pow
+// moved from 3131 disagreements (up to 20 ulp) to 47 (1 ulp), exp from 303 to
+// 2 and log from 598 to 4. A change that loses the double-double pieces again
+// fails here by name.
+//
+// The first two are why: mere-ruby on RV64 printed `2.3 ** 3` as
+// 12.166999999999996 and `8 ** (1.0 / 3)` as 1.9999999999999998, where ruby
+// prints 12.166999999999998 and 2.0.
+//
+// Bits are printed as four 16-bit chunks: float_bits_hi is unsigned 32-bit and
+// prints negative on a 32-bit int (see rv_float_ops.mere).
+let chunks = fn (w: int) -> str_of_int (bit_and (bit_shr w 16) 65535) ++ " " ++ str_of_int (bit_and w 65535);
+let show = fn (r: float) -> print (chunks (float_bits_hi r) ++ " " ++ chunks (float_bits_lo r));
+
+let _ = show (f_pow 2.3 3.0);
+let _ = show (f_pow 8.0 (1.0 / 3.0));
+let _ = show (f_pow 0.3 3.0);
+let _ = show (f_pow 0.6 3.0);
+let _ = show (f_pow 1.2 3.0);
+let _ = show (f_pow 1.3 3.0);
+let _ = show (f_pow 2.3 3.0);
+let _ = show (f_pow 2.4 3.0);
+let _ = show (f_pow 2.6 3.0);
+let _ = show (f_pow 4.1 3.0);
+let _ = show (f_pow 2.3 3.0);
+let _ = show (f_pow 0.9 (0.0 - 700.0));
+let _ = show (f_pow 1.0000001 10000000.0);
+let _ = show (f_pow 0.008722640140345215 (0.0 - 20.0));
+let _ = show (f_pow 8.0 0.3333333333333333);
+let _ = show (f_pow 27.0 0.3333333333333333);
+let _ = show (f_pow 0.10911988216962139 0.1111111111111111);
+let _ = show (f_pow 26.913751806329806 0.3333333333333333);
+let _ = show (f_pow 0.10653763352719052 0.3333333333333333);
+let _ = show (f_pow 46.114914251725764 0.1);
+let _ = show (f_pow 0.010002162665743016 0.3333333333333333);
+let _ = show (f_pow 0.01976085170993678 0.1111111111111111);
+let _ = show (f_pow 127.95388751996913 0.25);
+let _ = show (f_pow 0.41467481426842423 0.1);
+let _ = show (f_pow 4.908655710041184 0.14285714285714285);
+let _ = show (f_pow 165.69605038070492 0.3333333333333333);
+let _ = show (f_pow 143.5934139387652 (0.0 - 8.414120286146122));
+let _ = show (f_pow 2.504648401536216 32.77632505144818);
+let _ = show (f_pow 0.008476513936291136 (0.0 - 32.742958932490794));
+let _ = show (f_pow 0.4078822686483296 3.2548708425713997);
+let _ = show (f_pow 0.01150886374959394 16.96886125969229);
+let _ = show (f_pow 0.6828449110804713 33.87531069110892);
+let _ = show (f_pow 0.419625330009828 36.96152667296877);
+let _ = show (f_pow 8.72240428038021 7.549590168401473);
+let _ = show (f_pow 11.05053804561997 30.96322337904735);
+let _ = show (f_pow 39.32832901384392 (0.0 - 25.412570081504214));
+let _ = show (f_pow 3.379943110772693 (0.0 - 14.511065511049075));
+let _ = show (f_pow 84.01227099069554 22.39755925648582);
+let _ = show (f_pow 0.3261621590578126 (0.0 - 31.71703250317406));
+let _ = show (f_pow 3.1090353565790387 (0.0 - 2.0678829414592883));
+let _ = show (f_pow 38.364127777086985 (0.0 - 27.08491115788548));
+let _ = show (f_pow 0.5569589267599797 34.96169610209938);
+let _ = show (exp (0.0 - 34.946806395321424));
+let _ = show (exp 27.39417028148256);
+let _ = show (exp 290.9334700971292);
+let _ = show (exp (0.0 - 33.72017537268566));
+let _ = show (exp (0.0 - 1.046371229296069));
+let _ = show (exp (0.0 - 8.671122636210093));
+let _ = show (exp (0.0 - 380.2451277448247));
+let _ = show (exp 12.280607731580659);
+let _ = show (exp 1.7551175263167949);
+let _ = show (exp 519.5417627708152);
+let _ = show (exp 508.8617436580057);
+let _ = show (exp (0.0 - 37.6168135939628));
+let _ = show (log 1.419083057185357);
+let _ = show (log 0.999094179627104);
+let _ = show (log 1.4508647881689127);
+let _ = show (log 1.5365168945876606);
+let _ = show (log 0.9991585464447081);
+let _ = show (log 1.0007665788858542);
+let _ = show (log 1.0001559035388718);
+let _ = show (log 1.3585993063252748);
+let _ = show (log 0.7914034479023958);
+let _ = show (log 0.9999967965289774);
+let _ = show (log 1.0009302154792976);
+let _ = show (log 0.9998150281468209);
+()

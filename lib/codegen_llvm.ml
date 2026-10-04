@@ -5151,18 +5151,28 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | t -> t
     in
     let ret_ty = result_ty (Hashtbl.find extern_fn_decls_llvm name) in
+    (* A `unit` parameter is not in the declaration (it is dropped by type),
+       so the call drops it by the same test; a non-literal one -- a variable
+       of type unit -- is still evaluated. Dropping only the literal passed
+       `fn (u: unit) -> getpid u` an argument `@getpid()` does not take. *)
+    let rec params t =
+      match Ast.walk t with
+      | Ast.TyArrow (p, r) -> Ast.walk p :: params r
+      | _ -> []
+    in
+    let ptys = params (Hashtbl.find extern_fn_decls_llvm name) in
     let arg_ll_list =
-      List.filter_map (fun a ->
-        match a.Ast.node with
-        | Ast.Unit_lit -> None
+      List.concat (List.mapi (fun i a ->
+        match a.Ast.node, List.nth_opt ptys i with
+        | Ast.Unit_lit, _ -> []
+        | _, Some Ast.TyUnit -> let _ = emit_expr env a in []
         | _ ->
           let v = emit_expr env a in
           let t =
             match a.Ast.ty with
             | Some t -> Ast.walk t | None -> Ast.TyInt
           in
-          Some (Printf.sprintf "%s %s" (llvm_ty_of t) v))
-        args
+          [Printf.sprintf "%s %s" (llvm_ty_of t) v]) args)
     in
     let arg_ll = String.concat ", " arg_ll_list in
     (match ret_ty with

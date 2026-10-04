@@ -2763,14 +2763,32 @@ let rec emit_expr (e : Ast.expr) : string =
     in
     (match collect_extern (Ast.{ node = Ast.App (f, arg); ty = e.ty; loc = e.loc }) [] with
      | Some (name, args) ->
-       let arg_strs =
-         List.filter_map (fun a ->
-           match a.Ast.node with
-           | Ast.Unit_lit -> None
-           | _ -> Some (emit_expr a))
-           args
+       (* A `unit` parameter has no C counterpart: c_extern_prototype drops it
+          by its DECLARED type. The call has to drop the same ones, and by the
+          same test -- dropping only a literal `()` passed a unit-typed variable
+          (`fn (u: unit) -> getpid u`) as an argument the prototype does not
+          have, and clang refused the program. A non-literal one is still
+          evaluated, ahead of the call. *)
+       let rec params t =
+         match Ast.walk t with
+         | Ast.TyArrow (p, r) -> Ast.walk p :: params r
+         | _ -> []
        in
-       let call_str = Printf.sprintf "%s(%s)" name (String.concat ", " arg_strs) in
+       let ptys = params (Hashtbl.find extern_fn_decls name) in
+       let is_unit_param i a =
+         (match List.nth_opt ptys i with Some Ast.TyUnit -> true | _ -> false)
+         || (match a.Ast.node with Ast.Unit_lit -> true | _ -> false)
+       in
+       let arg_strs =
+         List.concat (List.mapi (fun i a -> if is_unit_param i a then [] else [emit_expr a]) args)
+       in
+       let effects =
+         List.concat (List.mapi (fun i a ->
+           if is_unit_param i a && (match a.Ast.node with Ast.Unit_lit -> false | _ -> true)
+           then [Printf.sprintf "(void)(%s), " (emit_expr a)] else []) args)
+       in
+       let call_str = Printf.sprintf "%s%s(%s)" (String.concat "" effects) name (String.concat ", " arg_strs) in
+       let call_str = if effects = [] then call_str else "(" ^ call_str ^ ")" in
        let rec result_ty t =
          match Ast.walk t with
          | Ast.TyArrow (_, r) -> result_ty r

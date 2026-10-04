@@ -1,0 +1,24 @@
+// EXTERN — syntax-check only. A `unit` parameter of an extern, passed as a
+// VARIABLE of type unit rather than as the literal `()`.
+//
+// The prototype drops a unit parameter by its declared type
+// (`int getpid(void)`), but the call dropped only a literal `()`, so a
+// wrapper of the form `fn (u: unit) -> getpid u` called `getpid(mu_u)` and
+// clang refused the program: "too many arguments to function call". A
+// program that wraps each extern in a function of its own -- to catch the
+// named failure on a target without a C library -- is written exactly so.
+// The LLVM backend had the same mismatch (`declare i64 @getpid()` called
+// with an `i64`), which happened to link.
+//
+// The second call passes an expression with an effect: dropped from the
+// argument list, it still has to be evaluated.
+extern fn getpid: unit -> int;
+extern fn ext_two: unit -> int -> int;
+
+let pid_of = fn (u: unit) -> getpid u;
+let two_of = fn (u: unit) -> fn (n: int) -> ext_two u n;
+let noisy = fn (n: int) -> let _ = print (str_of_int n) in ();
+
+let _ = pid_of ();
+let _ = getpid (noisy 1);
+two_of () 2
