@@ -3138,9 +3138,16 @@ let add_to_json_type (t : Ast.ty) : unit = add_struct_type to_json_types t
 (* Register `t` and (transitively) its component types into `tbl` — the set of
    types that need an `@eq_<tag>` / `@cmp_<tag>` function. Mirrors add_show_type
    (including the mono-instance registration so typedefs are emitted). *)
-let rec add_struct_deep_type (tbl : (string, Ast.ty) Hashtbl.t) (t : Ast.ty) : unit =
+let rec add_struct_deep_type ?(handles = false) (tbl : (string, Ast.ty) Hashtbl.t) (t : Ast.ty) : unit =
   let t = Ast.walk t in
   if not (ty_is_concrete t) then ()
+  (* v0.1.613: a stored element may hold a container or a closure, which a
+     copy passes through as it is -- nothing to register, nothing inside *)
+  else if handles && (match t with
+      | Ast.TyArrow _
+      | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "ListBuf" | "Channel"
+                   | "ByteBuf" | "Coro"), _) -> true
+      | _ -> false) then ()
   else
     let tag = ty_tag t in
     if Hashtbl.mem tbl tag then ()
@@ -3156,7 +3163,7 @@ let rec add_struct_deep_type (tbl : (string, Ast.ty) Hashtbl.t) (t : Ast.ty) : u
          if not (Hashtbl.mem mono_record_instances mono) then
            Hashtbl.add mono_record_instances mono (n, args)
        | _ -> ());
-      let go = add_struct_deep_type tbl in
+      let go = add_struct_deep_type ~handles tbl in
       match t with
       | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit | Ast.TyFloat -> ()
       | Ast.TyTuple ts -> List.iter go ts
@@ -3330,6 +3337,14 @@ let collect_eq_cmp_types (root : Ast.expr) (fns : fn_decl list) : unit =
      (* v0.1.564 (Q-192): owned_vec_push copies what it stores *)
      | Ast.App ({ node = Ast.App ({ node = Ast.Var ("owned_vec_push" | "channel_send"); _ }, _); _ }, x) ->
        (match x.Ast.ty with Some t -> add_copy_type t | None -> ())
+     (* v0.1.613: so do vec_push / vec_set / map_set, while a block is open
+        (store_copy_lines). Registered whatever the type; the helper decides. *)
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_push"; _ }, _); _ }, x)
+     | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var ("vec_set" | "__vec_set_unchecked"); _ }, _); _ }, _); _ }, x) ->
+       (match x.Ast.ty with Some t -> add_struct_deep_type ~handles:true copy_types t | None -> ())
+     | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "map_set"; _ }, _); _ }, k); _ }, x) ->
+       List.iter (fun (a : Ast.expr) ->
+         match a.Ast.ty with Some t -> add_struct_deep_type ~handles:true copy_types t | None -> ()) [k; x]
      | Ast.Cmp (op, a, _) ->
        let a_ty = match a.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt in
        if llvm_needs_struct_eq a_ty then
@@ -3877,6 +3892,22 @@ let record_fields_of (t : Ast.ty) : (string * (string * Ast.ty) list) option =
     Some (n, record_fields n)
   | _ -> None
 
+(* v0.1.613: whether a stored element has anything in it a region block could
+   take away -- a string, bytes, a variant's node or box. Scalars, containers
+   (handles, shared) and closures (retained by keep_above) do not. *)
+let rec ty_needs_store_copy (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyStr | Ast.TyBytes -> true
+  | Ast.TyInt | Ast.TyBool | Ast.TyUnit | Ast.TyFloat | Ast.TySimd _
+  | Ast.TyArrow _ -> false
+  | Ast.TyTuple ts -> List.exists ty_needs_store_copy ts
+  | Ast.TyCon (("Map" | "Vec" | "OwnedVec" | "StrBuf" | "ListBuf" | "Channel"
+               | "ByteBuf" | "Coro"), _) -> false
+  | t when record_fields_of t <> None ->
+    List.exists (fun (_, ft) -> ty_needs_store_copy ft)
+      (snd (Option.get (record_fields_of t)))
+  | t -> variant_shape_of t <> None
+
 (* `define i1 @eq_<tag>(%ty %a, %ty %b)` — structural equality, short-circuit
    via direct `ret`. Recurses through @eq_<comp> for each component. *)
 let emit_eq_fn (tag : string) (t : Ast.ty) : string =
@@ -3986,6 +4017,16 @@ let emit_mcopy_fn (tag : string) (t : Ast.ty) : string =
   let saved_reg = !reg_counter and saved_lbl = !label_counter in
   reg_counter := 0; label_counter := 0; instrs := [];
   let pty = llvm_ty_of t in
+  (* v0.1.613: a component with nothing to copy -- a scalar, and for a stored
+     element a container or a closure -- is passed through, not called on *)
+  let copy_field ct src =
+    if ty_needs_store_copy ct then begin
+      let dst = fresh_reg () in
+      emit_instr (Printf.sprintf "  %s = call %s @__mcopy_%s(ptr %%r, %s %s)"
+                    dst (llvm_ty_of ct) (ty_tag ct) (llvm_ty_of ct) src);
+      dst
+    end else src
+  in
   emit_instr "entry:";
   (match Ast.walk t with
    | Ast.TyInt | Ast.TyUnit | Ast.TyBool | Ast.TyFloat | Ast.TySimd _ ->
@@ -4012,10 +4053,10 @@ let emit_mcopy_fn (tag : string) (t : Ast.ty) : string =
      let tname = tuple_struct_name ts in
      let acc = ref "undef" in
      List.iteri (fun i et ->
-       let f = fresh_reg () and c = fresh_reg () and nx = fresh_reg () in
+       let f = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%v, %d" f tname i);
-       emit_instr (Printf.sprintf "  %s = call %s @__mcopy_%s(ptr %%r, %s %s)"
-                     c (llvm_ty_of et) (ty_tag et) (llvm_ty_of et) f);
+       let c = copy_field et f in
+       let nx = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, %s %s, %d"
                      nx tname !acc (llvm_ty_of et) c i);
        acc := nx) ts;
@@ -4024,10 +4065,10 @@ let emit_mcopy_fn (tag : string) (t : Ast.ty) : string =
      let (aggname, fields) = Option.get (record_fields_of t) in
      let acc = ref "undef" in
      List.iteri (fun i (_, ft) ->
-       let f = fresh_reg () and c = fresh_reg () and nx = fresh_reg () in
+       let f = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = extractvalue %%%s %%v, %d" f aggname i);
-       emit_instr (Printf.sprintf "  %s = call %s @__mcopy_%s(ptr %%r, %s %s)"
-                     c (llvm_ty_of ft) (ty_tag ft) (llvm_ty_of ft) f);
+       let c = copy_field ft f in
+       let nx = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, %s %s, %d"
                      nx aggname !acc (llvm_ty_of ft) c i);
        acc := nx) fields;
@@ -4055,9 +4096,7 @@ let emit_mcopy_fn (tag : string) (t : Ast.ty) : string =
            emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" c arm next);
            emit_label arm;
            let pv = variant_payload_reg mono recursive "%v" ptyp in
-           let cp = fresh_reg () in
-           emit_instr (Printf.sprintf "  %s = call %s @__mcopy_%s(ptr %%r, %s %s)"
-                         cp (llvm_ty_of ptyp) (ty_tag ptyp) (llvm_ty_of ptyp) pv);
+           let cp = copy_field ptyp pv in
            (* the payload lives in a box the node points at, so the copy needs
               a box of its own in the destination region *)
            let bsp = fresh_reg () and bs = fresh_reg () and bx = fresh_reg () in
@@ -4087,9 +4126,8 @@ let emit_mcopy_fn (tag : string) (t : Ast.ty) : string =
            emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" c arm next);
            emit_label arm;
            let pv = variant_payload_reg mono recursive "%v" ptyp in
-           let cp = fresh_reg () and full = fresh_reg () in
-           emit_instr (Printf.sprintf "  %s = call %s @__mcopy_%s(ptr %%r, %s %s)"
-                         cp (llvm_ty_of ptyp) (ty_tag ptyp) (llvm_ty_of ptyp) pv);
+           let cp = copy_field ptyp pv in
+           let full = fresh_reg () in
            let bsp = fresh_reg () and bs = fresh_reg () and bx = fresh_reg () in
            emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr null, i32 1"
                          bsp (llvm_ty_of ptyp));
@@ -10561,6 +10599,36 @@ let region_runtime_helpers =
       "  ret void";
       "}" ]
 
+(* v0.1.613: copy-on-store. A value made inside `region R { }` and stored into a
+   container older than R was stored as the pointer it was, and read after R was
+   released and its memory reused -- a str put into an outer Map printed
+   whatever the next block wrote there. The C backend copies every stored value
+   into the container's region (v0.1.30); this does the same, but only while a
+   block is open: with none open, every value is in the default region or the
+   container's, and neither is going away. Returns the lines (a diamond ending
+   in a block of its own, so callers place it where no phi names the block it
+   splits) and the register holding the value to store. *)
+let store_copy_lines ~(sn : string) ~(ridx : int) ~(c : string)
+    (t : Ast.ty) (src : string) (dst : string) : string list * string =
+  if not (ty_needs_store_copy t && Hashtbl.mem copy_types (ty_tag t)) then ([], src)
+  else
+    let lty = llvm_ty_of t in
+    ([ Printf.sprintf "  %%%s_d = load i32, ptr @__lang_region_depth" dst;
+       Printf.sprintf "  %%%s_in = icmp ne i32 %%%s_d, 0" dst dst;
+       Printf.sprintf "  br i1 %%%s_in, label %%%s_cp, label %%%s_no" dst dst dst;
+       Printf.sprintf "%s_cp:" dst;
+       Printf.sprintf "  %%%s_rp = getelementptr %%%s, ptr %s, i32 0, i32 %d" dst sn c ridx;
+       Printf.sprintf "  %%%s_r = load ptr, ptr %%%s_rp" dst dst;
+       Printf.sprintf "  %%%s_c = call %s @__mcopy_%s(ptr %%%s_r, %s %s)"
+         dst lty (ty_tag t) dst lty src;
+       Printf.sprintf "  br label %%%s_j" dst;
+       Printf.sprintf "%s_no:" dst;
+       Printf.sprintf "  br label %%%s_j" dst;
+       Printf.sprintf "%s_j:" dst;
+       Printf.sprintf "  %%%s = phi %s [ %%%s_c, %%%s_cp ], [ %s, %%%s_no ]"
+         dst lty dst dst src dst ],
+     "%" ^ dst)
+
 (* Phase 15.3: emit one LLVM IR runtime block per concrete Vec element
    type. Uses LLVM's `getelementptr ... null, i32 1` idiom for sizeof.
    All pointers are opaque `ptr`; the element type only governs the
@@ -10572,6 +10640,10 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
   let tag = ty_tag elem_ty in
   let c_elem = llvm_ty_of elem_ty in
   let struct_name = "mere_vec_" ^ tag in
+  let copy dst = store_copy_lines ~sn:struct_name ~ridx:3 ~c:"%v" elem_ty "%x" dst in
+  let (push_copy, push_x) = copy "xc" in
+  let (set_copy, set_x) = copy "xc" in
+  let (setu_copy, setu_x) = copy "xc" in
   String.concat "\n"
     ([ (* struct { ptr data; i32 len; i32 cap; ptr region } — 24 bytes. *)
       (* v0.1.575: field 4 is the owner (see owner_runtime_llvm) *)
@@ -10630,10 +10702,11 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       "  store i32 %new_cap, ptr %cp";
       "  br label %store";
       "store:";
+    ] @ push_copy @ [
       Printf.sprintf "  %%dp2 = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
       "  %cur = load ptr, ptr %dp2";
       Printf.sprintf "  %%slot = getelementptr %s, ptr %%cur, i32 %%len" c_elem;
-      Printf.sprintf "  store %s %%x, ptr %%slot" c_elem;
+      Printf.sprintf "  store %s %s, ptr %%slot" c_elem push_x;
       "  %new_len = add i32 %len, 1";
       "  store i32 %new_len, ptr %lp";
       "  ret i32 0";
@@ -10684,10 +10757,11 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       (* v0.1.579: no owner check -- the versioning guard asks __vec_owned once *)
       Printf.sprintf "define i32 @mere_vec_%s_set_unchecked(ptr %%v, i64 %%i, %s %%x) {" tag c_elem;
       "entry:";
+    ] @ setu_copy @ [
       Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
       "  %data = load ptr, ptr %dp";
       Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i64 %%i" c_elem;
-      Printf.sprintf "  store %s %%x, ptr %%slot" c_elem;
+      Printf.sprintf "  store %s %s, ptr %%slot" c_elem setu_x;
       "  ret i32 0";
       "}";
       "" ]
@@ -10770,10 +10844,11 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       "  call void @__lang_fail_idx(ptr @.idxfmt_vecset, i64 %i, i64 %len)";
       "  unreachable";
       "ok:";
+    ] @ set_copy @ [
       Printf.sprintf "  %%dp = getelementptr %%%s, ptr %%v, i32 0, i32 0" struct_name;
       "  %data = load ptr, ptr %dp";
       Printf.sprintf "  %%slot = getelementptr %s, ptr %%data, i64 %%i" c_elem;
-      Printf.sprintf "  store %s %%x, ptr %%slot" c_elem;
+      Printf.sprintf "  store %s %s, ptr %%slot" c_elem set_x;
       "  ret i32 0";
       "}" ])
 
@@ -11959,6 +12034,10 @@ let emit_map_runtime_llvm_linear (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
   let c_k = llvm_ty_of k_ty in
   let c_v = llvm_ty_of v_ty in
   let struct_name = Printf.sprintf "mere_map_%s_%s" k_tag v_tag in
+  let mcopy t src dst = store_copy_lines ~sn:struct_name ~ridx:4 ~c:"%m" t src dst in
+  let (upd_copy, upd_v) = mcopy v_ty "%v" "vcu" in
+  let (ins_kcopy, ins_k) = mcopy k_ty "%k" "kcs" in
+  let (ins_vcopy, ins_v) = mcopy v_ty "%v" "vcs" in
   let fn_prefix = Printf.sprintf "mere_map_%s_%s" k_tag v_tag in
   (* Phase 15.14: emit a call to the per-K equality helper.
      The helper itself is emitted separately by `emit_map_key_eq_helper_llvm`. *)
@@ -12020,8 +12099,9 @@ let emit_map_runtime_llvm_linear (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       emit_key_eq "%cur_k" "%k" "%eq";
       "  br i1 %eq, label %replace, label %scan_cont";
       "replace:";
+    ] @ upd_copy @ [
       Printf.sprintf "  %%vslot = getelementptr %s, ptr %%values, i32 %%i" c_v;
-      Printf.sprintf "  store %s %%v, ptr %%vslot" c_v;
+      Printf.sprintf "  store %s %s, ptr %%vslot" c_v upd_v;
       "  ret i32 0";
       "scan_cont:";
       "  %i_next = add i32 %i, 1";
@@ -12054,12 +12134,13 @@ let emit_map_runtime_llvm_linear (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  store i32 %new_cap, ptr %cp";
       "  br label %do_store";
       "do_store:";
+    ] @ ins_kcopy @ ins_vcopy @ [
       "  %cur_keys = load ptr, ptr %kp";
       "  %cur_values = load ptr, ptr %vp";
       Printf.sprintf "  %%kslot2 = getelementptr %s, ptr %%cur_keys, i32 %%len" c_k;
-      Printf.sprintf "  store %s %%k, ptr %%kslot2" c_k;
+      Printf.sprintf "  store %s %s, ptr %%kslot2" c_k ins_k;
       Printf.sprintf "  %%vslot2 = getelementptr %s, ptr %%cur_values, i32 %%len" c_v;
-      Printf.sprintf "  store %s %%v, ptr %%vslot2" c_v;
+      Printf.sprintf "  store %s %s, ptr %%vslot2" c_v ins_v;
       "  %new_len = add i32 %len, 1";
       "  store i32 %new_len, ptr %lp";
       "  ret i32 0";
@@ -12198,6 +12279,10 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
   let c_k = llvm_ty_of k_ty in
   let c_v = llvm_ty_of v_ty in
   let sn = Printf.sprintf "mere_map_%s_%s" k_tag v_tag in
+  let mcopy t src dst = store_copy_lines ~sn:sn ~ridx:4 ~c:"%m" t src dst in
+  let (upd_copy, upd_v) = mcopy v_ty "%v" "vcu" in
+  let (ins_kcopy, ins_k) = mcopy k_ty "%k" "kcs" in
+  let (ins_vcopy, ins_v) = mcopy v_ty "%v" "vcs" in
   let p = sn in
   let hash reg out = Printf.sprintf "  %s = call i64 @mere_map_key_hash_%s(%s %s)" out k_tag c_k reg in
   let key_eq a b out = Printf.sprintf "  %s = call i1 @mere_map_key_eq_%s(%s %s, %s %s)" out k_tag c_k a c_k b in
@@ -12475,8 +12560,9 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       key_eq "%ck" "%k" "%eq";
       "  br i1 %eq, label %update, label %pnext";
       "update:";
+    ] @ upd_copy @ [
       Printf.sprintf "  %%uvslot = getelementptr %s, ptr %%values, i32 %%occ" c_v;
-      Printf.sprintf "  store %s %%v, ptr %%uvslot" c_v;
+      Printf.sprintf "  store %s %s, ptr %%uvslot" c_v upd_v;
       "  ret i32 0";
       "pnext:";
       "  %sp1 = add i32 %sv, 1";
@@ -12535,14 +12621,15 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  store i32 %new_cap, ptr %cp";
       "  br label %do_store";
       "do_store:";
+    ] @ ins_kcopy @ ins_vcopy @ [
       "  %ckeys = load ptr, ptr %kp";
       "  %cvalues = load ptr, ptr %vp";
       Printf.sprintf "  %%sdp = getelementptr %%%s, ptr %%m, i32 0, i32 7" sn;
       "  %cdead = load ptr, ptr %sdp";
       Printf.sprintf "  %%kslot2 = getelementptr %s, ptr %%ckeys, i32 %%len" c_k;
-      Printf.sprintf "  store %s %%k, ptr %%kslot2" c_k;
+      Printf.sprintf "  store %s %s, ptr %%kslot2" c_k ins_k;
       Printf.sprintf "  %%vslot2 = getelementptr %s, ptr %%cvalues, i32 %%len" c_v;
-      Printf.sprintf "  store %s %%v, ptr %%vslot2" c_v;
+      Printf.sprintf "  store %s %s, ptr %%vslot2" c_v ins_v;
       "  %dslot2 = getelementptr i8, ptr %cdead, i32 %len";
       "  store i8 0, ptr %dslot2";
       "  %newlen = add i32 %len, 1";

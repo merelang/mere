@@ -6598,10 +6598,20 @@ let runtime_helpers = {|
   ;; `$__lang_block_mark` is the INNERMOST open block's mark, saved and restored
   ;; per block. A container from an enclosing block reads as older than the inner
   ;; one and is protected -- conservative in the same direction.
+  ;;
+  ;; v0.1.613: OR BELOW THE HIGH-WATER MARK. A container a callee built inside
+  ;; the block lies above the block's mark; once a store has put it into an
+  ;; older one it is reachable from outside -- and that store raised the hwm
+  ;; above it. Testing the block mark alone let its NEXT store go unprotected:
+  ;; the buffer that store grew landed above the hwm, the rollback took it, and
+  ;; `vec_push` x 50 into such a vec read back -14468027695667681 for 12350.
+  ;; Anything below the hwm is kept, so what is stored into it must be too.
   (func $__lang_protect (param $c8 i64)
     (if (i32.and (i32.ne (global.get $__lang_region_depth) (i32.const 0))
-                 (i32.lt_u (i32.wrap_i64 (local.get $c8))
-                           (global.get $__lang_block_mark)))
+                 (i32.or (i32.lt_u (i32.wrap_i64 (local.get $c8))
+                                   (global.get $__lang_block_mark))
+                         (i32.lt_u (i32.wrap_i64 (local.get $c8))
+                                   (global.get $__lang_hwm))))
       (then
         (if (i32.gt_u (global.get $__lang_bump) (global.get $__lang_hwm))
           (then (global.set $__lang_hwm (global.get $__lang_bump)))))))

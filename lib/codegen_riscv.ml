@@ -599,6 +599,53 @@ let request_eq (t : Ast.ty) : string =
   end;
   "__eq_" ^ tag
 
+(* v0.1.613: a region block's result is copied out of the block before the
+   block's bump range is rolled back. `rcopy_kind` says whether a type can be:
+   an int / bool / unit is a word and needs no copy; a str, bytes, float,
+   tuple, record or variant is rebuilt field by field by a generated
+   `__rcopy_<tag>`; anything else -- a closure, a container, a reference, a
+   SIMD value, an unresolved type -- cannot be copied by value, and a block
+   with such a result is compiled as before: it reclaims nothing. *)
+type rkind = RWord | RBoxed | RNone
+let rec rcopy_kind_in (seen : string list) (t : Ast.ty) : rkind =
+  let all ts = List.for_all (fun t -> rcopy_kind_in seen t <> RNone) ts in
+  let zip ps args =
+    let rec go ps args = match ps, args with p :: ps', a :: args' -> (p, a) :: go ps' args' | _ -> [] in
+    go ps args in
+  match resolve_ty t with
+  | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> RWord
+  | Ast.TyStr | Ast.TyBytes | Ast.TyFloat -> RBoxed
+  | Ast.TyTuple ts -> if all ts then RBoxed else RNone
+  | Ast.TyCon (n, args) when Hashtbl.mem type_records n ->
+    let tag = ty_tag t in
+    if List.mem tag seen then RBoxed
+    else
+      let (params, fields) = Hashtbl.find type_records n in
+      let senv = zip params args in
+      if List.for_all (fun (_, fty) -> rcopy_kind_in (tag :: seen) (subst_ty senv fty) <> RNone) fields
+      then RBoxed else RNone
+  | Ast.TyCon (n, args) when Hashtbl.mem type_variants n ->
+    let tag = ty_tag t in
+    if List.mem tag seen then RBoxed
+    else
+      let (params, variants) = Hashtbl.find type_variants n in
+      let senv = zip params args in
+      if List.for_all (fun (_, p) -> match p with
+                         | None -> true
+                         | Some pty -> rcopy_kind_in (tag :: seen) (subst_ty senv pty) <> RNone) variants
+      then RBoxed else RNone
+  | _ -> RNone
+let rcopy_kind (t : Ast.ty) : rkind = rcopy_kind_in [] t
+let rcopy_pending : (string * Ast.ty) list ref = ref []
+let rcopy_requested : (string, unit) Hashtbl.t = Hashtbl.create 32
+let request_rcopy (t : Ast.ty) : string =
+  let tag = ty_tag t in
+  if not (Hashtbl.mem rcopy_requested tag) then begin
+    Hashtbl.replace rcopy_requested tag ();
+    rcopy_pending := (tag, t) :: !rcopy_pending
+  end;
+  "__rcopy_" ^ tag
+
 (* peel the leading chain of `let f = fn ...` / `let rec f = fn ...` into
    `tops`, returning the remaining expression as the program's main body. *)
 (* top-level value bindings (globals): (name option, initializer) in order.
@@ -653,8 +700,55 @@ let globals_base () = !load_base + !code_span
    "the buffer the print helpers build digits in", and putting unrelated state
    there would make the description untrue. Top-level value bindings start one
    word further up; the heap starts after those, as before. *)
-let runtime_words = 1
+let runtime_words = 4
 let fail_frame_addr () = globals_base ()
+(* v0.1.613: three more runtime words for region reclamation (see the
+   Region_block arm): how many region blocks are open, the innermost one's
+   mark, and the high-water mark a store raises. Contiguous, so one base
+   register reaches all three. *)
+let rt_depth_addr () = globals_base () + wsz ()
+let rt_depth_off = 0
+let rt_bmark_off () = wsz ()
+let rt_hwm_off () = 2 * wsz ()
+
+(* v0.1.613: a store into a container while a region block is open. If the
+   container is older than the innermost block (below its mark) -- or lies
+   below the high-water mark, which is where a container that ESCAPED the block
+   (stored into an older one) or was kept by an earlier store now sits -- then
+   something outside the block can reach what this store just put in it, and the
+   block must not roll back below the bump as it stands: the high-water mark is
+   raised to gp. Called AFTER the store's own allocation (a grown buffer, the
+   value already built), so all of it lies below gp. Clobbers t0..t3. Testing
+   the block mark alone loses a container a callee built inside the block,
+   stored outward, and grew afterwards (its new buffer lands above the mark),
+   which mere-ruby does with every Array a method fills; the Wasm backend's
+   protect tested only that until this same version.
+   Every store protects, whatever it stores: a `.ty` of int here may be a type
+   variable the monomorphizer erased to int (one `_mput` serves every Map whose
+   values are words or pointers), so "an int needs no protect" dropped the
+   protect on mere-ruby's Map values and freed a queue it still held.
+   The mark is only ever RAISED, and the closing brace never goes past its own
+   gp (see the Region_block arm). On one heap that changes nothing -- the mark
+   never exceeds gp there -- but the three words are per machine: a bare task
+   on a heap of its own (above this one) that stores while another task is in a
+   block raises the mark into its heap, and the block then keeps everything
+   rather than jumping gp there. Another heap's stores can make a block keep
+   more, never less. *)
+let emit_protect () =
+  let l_skip = fresh_label ".prot" in
+  let l_do = fresh_label ".protDo" in
+  li t0 (rt_depth_addr ());
+  emit_word (enc_i rt_depth_off t0 (ldf3 ()) t1 0x03);        (* depth *)
+  emit (Branch (0, t1, zero, l_skip));                         (* no block open *)
+  emit_word (enc_i (rt_bmark_off ()) t0 (ldf3 ()) t2 0x03);   (* block mark *)
+  emit (Branch (6, a0, t2, l_do));                             (* bltu c, mark *)
+  emit_word (enc_i (rt_hwm_off ()) t0 (ldf3 ()) t3 0x03);     (* hwm *)
+  emit (Branch (7, a0, t3, l_skip));                           (* bgeu c, hwm -> skip *)
+  emit (Label l_do);
+  emit_word (enc_i (rt_hwm_off ()) t0 (ldf3 ()) t3 0x03);     (* hwm *)
+  emit (Branch (7, t3, gp, l_skip));                           (* only ever raised *)
+  emit_word (enc_s (rt_hwm_off ()) gp t0 (stf3 ()) 0x23);     (* hwm = gp *)
+  emit (Label l_skip)
 
 (* RAM layout, derived from the RAM size so it is no longer three hardcoded
    immediates. The top `reserved_top` bytes hold the scratch buffer the print
@@ -925,7 +1019,11 @@ let tor_fp = 2
 let tor_catch = 3
 let tor_default = 4
 let tor_sreg i = 5 + i                     (* s1..s10, one per `sregs` entry *)
-let tor_words = 5 + Array.length sregs     (* the record's size in words *)
+(* v0.1.613: the region depth and innermost block mark at the try_or, put back
+   when a failure unwinds to it -- a block it left mid-way is never closed *)
+let tor_depth = 5 + Array.length sregs
+let tor_bmark = 6 + Array.length sregs
+let tor_words = 7 + Array.length sregs     (* the record's size in words *)
 let tor_off i =
   if i < 0 || i >= tor_words then
     failwith (Printf.sprintf
@@ -1147,6 +1245,13 @@ let emit_fail_from_a0 () =
   (* the catcher's own named bindings, which the thunk has been writing over *)
   Array.iteri (fun i r ->
     emit_word (enc_i (tor_off (tor_sreg i)) t1 (ldf3 ()) r 0x03)) sregs;
+  (* the region depth and block mark as they were at the try_or: the blocks the
+     failure left are never closed, and their allocations are simply kept *)
+  li t2 (rt_depth_addr ());
+  emit_word (enc_i (tor_off tor_depth) t1 (ldf3 ()) t3 0x03);
+  emit_word (enc_s rt_depth_off t3 t2 (stf3 ()) 0x23);
+  emit_word (enc_i (tor_off tor_bmark) t1 (ldf3 ()) t3 0x03);
+  emit_word (enc_s (rt_bmark_off ()) t3 t2 (stf3 ()) 0x23);
   if !try_msg_used then emit_word (enc_i 0 a0 0 a1 0x13);  (* mv a1, a0 -- the message *)
   emit_word (enc_i (tor_off tor_default) t1 (ldf3 ()) a0 0x03);            (* default *)
   emit_word (enc_i (tor_off tor_catch) t1 (ldf3 ()) t1 0x03);              (* catch *)
@@ -1675,26 +1780,95 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     err e.loc "RV32I: `region R loop` is not supported yet -- the bump rollback \
                here is LIFO, and the loop's carry must survive the rollback"
   | Ast.Region_block (_, body) ->
-    (* A region does NOT reclaim on this backend. It used to: park gp, run the
-       body, roll back -- the same LIFO bump rollback the Wasm backend does.
-       That rollback is sound only if nothing that OUTLIVES the region allocates
-       from the bump heap inside it, and on this backend that premise is false:
-       Map and every other prelude-lowered structure is ordinary Mere code whose
-       cons cells come from gp. `map_set m k v` on a map that lives OUTSIDE the
-       region allocated its new node INSIDE, the rollback declared that node
-       reusable, and the next closure allocation overwrote it -- while the map
-       still pointed at it. The typer's region tagging cannot see this: the map
-       is `Map[__heap, ..]` and mutating it is not an escape, because on every
-       other backend map internals live in the map's own arena, not the
-       region. mere-ruby runs each top-level statement inside `region STMT`,
-       so ONE `map_set` per statement was enough to corrupt the interpreter's
-       own constant table, four million instructions before the crash.
-
-       So: compile the body, reclaim nothing. Correct and hungrier -- a region
-       here keeps the flat-heap promise only after prelude structures learn to
-       allocate somewhere a rollback does not touch (a second, persistent bump
-       area), which is real design work and recorded as such. *)
-    compile_expr env body
+    (* v0.1.613: A REGION ROLLS BACK AGAIN, behind a high-water mark.
+       Until now a region reclaimed nothing here. It once rolled gp back to
+       where the block began, and that was unsound: an older container written
+       inside the block -- a `map_set` on a map that lives outside it -- had
+       its new parts allocated inside the block's range, the rollback freed
+       them, and the next allocation overwrote what the map still pointed at
+       (mere-ruby's constant table, four million instructions in).
+       Now every container store goes through emit_protect: a store into a
+       container older than the block (or below the high-water mark) raises the
+       mark to gp, and the block rolls back only to max(its mark, the high-water
+       mark). That is the Wasm backend's scheme (Q-132), with the hole both had
+       closed -- see emit_protect. The result is copied out first: once just above the
+       block's garbage, then -- after the rollback -- down to where the block's
+       range now ends, unless the two would overlap (then the first copy stays,
+       and gp is left after it). A result that cannot be copied by value (a
+       closure, a container, ...) keeps the old behaviour: the block runs and
+       nothing is rolled back.
+       A failure that leaves the block never reaches the rollback: try_or puts
+       the depth and block mark back, and the block's allocations are kept.
+       The rollback is to max(mark, min(high-water mark, gp)): see emit_protect
+       for why it is clamped to gp. *)
+    let kind = match e.Ast.ty with Some t -> rcopy_kind t | None -> RNone in
+    if kind = RNone then compile_expr env body
+    else begin
+      li t0 (rt_depth_addr ());
+      push gp;                                                    (* mark *)
+      emit_word (enc_i (rt_bmark_off ()) t0 (ldf3 ()) t1 0x03);
+      push t1;                                                    (* the outer block mark *)
+      li t0 (rt_depth_addr ());
+      emit_word (enc_s (rt_bmark_off ()) gp t0 (stf3 ()) 0x23);  (* block mark = mark *)
+      emit_word (enc_i rt_depth_off t0 (ldf3 ()) t1 0x03);
+      emit_word (enc_i 1 t1 0 t1 0x13);
+      emit_word (enc_s rt_depth_off t1 t0 (stf3 ()) 0x23);       (* depth + 1 *)
+      compile_expr env body;                                      (* a0 = result *)
+      let w = wsz () in
+      (* the rollback: gp = max(mark, hwm); then the outer block mark back, depth - 1.
+         `mark_at` is the mark's offset from sp at that point. *)
+      let release mark_at outer_at =
+        emit_word (enc_i mark_at sp (ldf3 ()) t1 0x03);           (* t1 = mark *)
+        li t0 (rt_depth_addr ());
+        emit_word (enc_i (rt_hwm_off ()) t0 (ldf3 ()) t2 0x03);  (* t2 = hwm *)
+        (* never past this block's own gp: see emit_protect *)
+        let lc = fresh_label ".rgnClamp" in
+        emit (Branch (6, t2, gp, lc));                            (* bltu hwm, gp -> keep hwm *)
+        emit_word (enc_i 0 gp 0 t2 0x13);                         (* t2 = gp *)
+        emit (Label lc);
+        let l = fresh_label ".rgnRel" in
+        emit (Branch (6, t2, t1, l));                             (* bltu hwm, mark -> keep mark *)
+        emit_word (enc_i 0 t2 0 t1 0x13);                         (* t1 = hwm *)
+        emit (Label l);
+        emit_word (enc_i 0 t1 0 gp 0x13);                         (* gp = max(mark, hwm) *)
+        emit_word (enc_i outer_at sp (ldf3 ()) t3 0x03);
+        emit_word (enc_s (rt_bmark_off ()) t3 t0 (stf3 ()) 0x23);
+        emit_word (enc_i rt_depth_off t0 (ldf3 ()) t3 0x03);
+        emit_word (enc_i (-1) t3 0 t3 0x13);
+        emit_word (enc_s rt_depth_off t3 t0 (stf3 ()) 0x23) in
+      if kind = RWord then begin
+        push a0;                                                  (* [mark 2w][outer w][r 0] *)
+        release (2 * w) w;
+        pop a0;
+        emit_word (enc_i (2 * w) sp 0 sp 0x13)
+      end else begin
+        let copier = request_rcopy (match e.Ast.ty with Some t -> t | None -> Ast.TyUnit) in
+        push gp;                                                  (* c1s *)
+        emit (Jal (ra, copier));                                  (* a0 = copy 1 *)
+        push gp;                                                  (* c1e *)
+        push a0;                                                  (* [mark 4w][outer 3w][c1s 2w][c1e w][c1 0] *)
+        release (4 * w) (3 * w);
+        (* copy 2 unless it would run into copy 1: it fits below it, or gp is past it *)
+        let l_copy = fresh_label ".rgnCp2" in
+        let l_keep = fresh_label ".rgnKeep" in
+        let l_done = fresh_label ".rgnDone" in
+        emit_word (enc_i (2 * w) sp (ldf3 ()) t3 0x03);           (* c1s *)
+        emit_word (enc_i w sp (ldf3 ()) t4 0x03);                 (* c1e *)
+        emit_word (enc_r 0x20 t3 t4 0 t5 0x33);                   (* t5 = c1e - c1s *)
+        emit_word (enc_r 0 t5 gp 0 t5 0x33);                      (* t5 = gp + size *)
+        emit (Branch (7, t3, t5, l_copy));                        (* bgeu c1s, gp+size -> copy *)
+        emit (Branch (7, gp, t4, l_copy));                        (* bgeu gp, c1e -> copy *)
+        emit (Label l_keep);
+        emit_word (enc_i 0 t4 0 gp 0x13);                         (* gp = c1e: copy 1 stays *)
+        emit_word (enc_i 0 sp (ldf3 ()) a0 0x03);                 (* a0 = copy 1 *)
+        emit (Jal (zero, l_done));
+        emit (Label l_copy);
+        emit_word (enc_i 0 sp (ldf3 ()) a0 0x03);
+        emit (Jal (ra, copier));                                  (* a0 = copy 2 *)
+        emit (Label l_done);
+        emit_word (enc_i (5 * w) sp 0 sp 0x13)
+      end
+    end
   | Ast.Float_lit f ->
     let b = Int64.bits_of_float f in
     let hi = signed32 (Int64.to_int (Int64.shift_right_logical b 32)) in
@@ -2107,6 +2281,11 @@ and compile_app env e =
        is the far-jump scratch and is dead between jumps. *)
     Array.iteri (fun i r ->
       emit_word (enc_s (tor_off (tor_sreg i)) r t1 (stf3 ()) 0x23)) sregs;
+    li t0 (rt_depth_addr ());
+    emit_word (enc_i rt_depth_off t0 (ldf3 ()) t2 0x03);
+    emit_word (enc_s (tor_off tor_depth) t2 t1 (stf3 ()) 0x23);             (* region depth *)
+    emit_word (enc_i (rt_bmark_off ()) t0 (ldf3 ()) t2 0x03);
+    emit_word (enc_s (tor_off tor_bmark) t2 t1 (stf3 ()) 0x23);             (* block mark *)
     push t1;
     compile_expr env (List.nth args 1);                  (* a0 = default *)
     pop t1;
@@ -2145,6 +2324,11 @@ and compile_app env e =
     emit_word (enc_s (tor_off tor_fp) fp t1 (stf3 ()) 0x23);                (* fp *)
     Array.iteri (fun i r ->
       emit_word (enc_s (tor_off (tor_sreg i)) r t1 (stf3 ()) 0x23)) sregs;
+    li t0 (rt_depth_addr ());
+    emit_word (enc_i rt_depth_off t0 (ldf3 ()) t2 0x03);
+    emit_word (enc_s (tor_off tor_depth) t2 t1 (stf3 ()) 0x23);             (* region depth *)
+    emit_word (enc_i (rt_bmark_off ()) t0 (ldf3 ()) t2 0x03);
+    emit_word (enc_s (tor_off tor_bmark) t2 t1 (stf3 ()) 0x23);             (* block mark *)
     push t1;
     compile_expr env (List.nth args 1);                  (* a0 = handler closure *)
     pop t1;
@@ -2339,6 +2523,7 @@ and compile_app env e =
     emit_word (enc_i (wshift ()) a1 1 t1 0x13);              (* slli t1, i, w *)
     emit_word (enc_r 0 t1 t0 0 t0 0x33);                     (* addr *)
     emit_word (enc_s (0 * wsz ()) a2 t0 (stf3 ()) 0x23);                        (* data[i] = x *)
+    emit_protect ();                                         (* a0 = the vec *)
     emit_word (enc_i 0 zero 0 a0 0x13)                       (* return unit (0) *)
   (* --- bitwise -----------------------------------------------------------
      A device driver cannot be written without these: the UART example had to
@@ -3231,6 +3416,10 @@ let emit_start () =
   (* no `try_or` is in scope yet, and `fail` reads this word to find out *)
   li t0 (fail_frame_addr ());
   emit_word (enc_s (0 * wsz ()) zero t0 (stf3 ()) 0x23);                   (* sw x0, 0(t0) *)
+  (* region depth, block mark, high-water mark: none open *)
+  emit_word (enc_s (1 * wsz ()) zero t0 (stf3 ()) 0x23);
+  emit_word (enc_s (2 * wsz ()) zero t0 (stf3 ()) 0x23);
+  emit_word (enc_s (3 * wsz ()) zero t0 (stf3 ()) 0x23);
   (* heap top starts just above the runtime word and the globals region *)
   li gp (globals_base () + (runtime_words + Hashtbl.length globals_map) * wsz ());
   (* Q-110: mstatus.VS = Initial. A real machine (QEMU) traps every vector
@@ -3839,6 +4028,7 @@ let emit_strbuf () =
   emit_word (enc_i (0 * wsz ()) a1 (ldf3 ()) t6 0x03);
   emit_word (enc_r 0 t6 t0 0 t0 0x33);
   emit_word (enc_s (0 * wsz ()) t0 a0 (stf3 ()) 0x23);                (* len = need *)
+  emit_protect ();                                 (* a0 = the buffer *)
   emit_word (enc_i 0 ra 0 zero 0x67);
   emit (Label "__strbuf_to_str");                  (* a0=buf -> a0 = fresh str *)
   emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                (* t0 = len *)
@@ -3917,7 +4107,9 @@ let emit_vec () =
   emit_word (enc_s (0 * wsz ()) a1 t3 (stf3 ()) 0x23);                (* databuf[len] = x *)
   emit_word (enc_i 1 t0 0 t0 0x13);                (* len++ *)
   emit_word (enc_s (0 * wsz ()) t0 a0 (stf3 ()) 0x23);                (* store len *)
+  emit_protect ();
   emit_word (enc_i 0 ra 0 zero 0x67)
+
 
 (* target of a refutable-let mismatch: abort with exit(2) *)
 (* heap exhaustion: report it and stop. The bump allocator never frees, so a
@@ -4137,6 +4329,115 @@ let emit_eq_helper (tag, ty) =
     emit_word (enc_i 1 t0 3 a0 0x13);
     emit_word (enc_i 0 ra 0 zero 0x67)
 
+(* --- region result copiers (__rcopy_<tag>), v0.1.613 ---------------------
+   a0 = the value, a0 = its copy, freshly allocated at gp. Like the __eq_
+   helpers: one per type, generated on a worklist, so a recursive type's copier
+   calls itself. Only a / t registers and the stack: a named binding in an s
+   register survives the call. *)
+let emit_rcopy_field (src_at : int) (dst_at : int) (i : int) (fty : Ast.ty) =
+  let w = wsz () in
+  match rcopy_kind fty with
+  | RWord | RNone ->
+    emit_word (enc_i src_at sp (ldf3 ()) t0 0x03);
+    emit_word (enc_i (i * w) t0 (ldf3 ()) t2 0x03);
+    emit_word (enc_i dst_at sp (ldf3 ()) t1 0x03);
+    emit_word (enc_s (i * w) t2 t1 (stf3 ()) 0x23)
+  | RBoxed ->
+    emit_word (enc_i src_at sp (ldf3 ()) t0 0x03);
+    emit_word (enc_i (i * w) t0 (ldf3 ()) a0 0x03);
+    emit (Jal (ra, request_rcopy fty));
+    emit_word (enc_i dst_at sp (ldf3 ()) t1 0x03);
+    emit_word (enc_s (i * w) a0 t1 (stf3 ()) 0x23)
+
+let emit_agg_rcopy (fields : Ast.ty list) =
+  let w = wsz () in
+  let n = List.length fields in
+  emit_word (enc_i (0 - 3 * w) sp 0 sp 0x13);
+  emit_word (enc_s (2 * w) ra sp (stf3 ()) 0x23);
+  emit_word (enc_s w a0 sp (stf3 ()) 0x23);                      (* src *)
+  alloc_words t1 (if n = 0 then 1 else n);
+  emit_word (enc_s 0 t1 sp (stf3 ()) 0x23);                      (* dst *)
+  List.iteri (fun i fty -> emit_rcopy_field w 0 i fty) fields;
+  emit_word (enc_i 0 sp (ldf3 ()) a0 0x03);
+  emit_word (enc_i (2 * w) sp (ldf3 ()) ra 0x03);
+  emit_word (enc_i (3 * w) sp 0 sp 0x13);
+  emit_word (enc_i 0 ra 0 zero 0x67)
+
+let emit_variant_rcopy senv (variants : (string * Ast.ty option) list) =
+  let w = wsz () in
+  let l_done = fresh_label ".rcd" in
+  emit_word (enc_i (0 - 3 * w) sp 0 sp 0x13);
+  emit_word (enc_s (2 * w) ra sp (stf3 ()) 0x23);
+  emit_word (enc_s w a0 sp (stf3 ()) 0x23);                      (* src *)
+  emit_word (enc_i 0 a0 (ldf3 ()) t0 0x03);                      (* t0 = tag *)
+  List.iteri (fun k (_ctor, payload) ->
+    match payload with
+    | None -> ()
+    | Some pty ->
+      let l_next = fresh_label ".rcn" in
+      li t1 k; emit (Branch (1, t0, t1, l_next));
+      alloc_words t2 2;
+      emit_word (enc_s 0 t0 t2 (stf3 ()) 0x23);                  (* tag *)
+      emit_word (enc_s 0 t2 sp (stf3 ()) 0x23);                  (* dst *)
+      emit_rcopy_field w 0 1 (subst_ty senv pty);                (* payload at word 1 *)
+      emit_word (enc_i 0 sp (ldf3 ()) a0 0x03);
+      emit (Jal (zero, l_done));
+      emit (Label l_next)
+  ) variants;
+  alloc_words t2 1;                                              (* a nullary constructor *)
+  emit_word (enc_s 0 t0 t2 (stf3 ()) 0x23);
+  emit_word (enc_i 0 t2 0 a0 0x13);
+  emit (Label l_done);
+  emit_word (enc_i (2 * w) sp (ldf3 ()) ra 0x03);
+  emit_word (enc_i (3 * w) sp 0 sp 0x13);
+  emit_word (enc_i 0 ra 0 zero 0x67)
+
+let emit_rcopy_helper (tag, ty) =
+  emit (Label ("__rcopy_" ^ tag));
+  let w = wsz () in
+  match resolve_ty ty with
+  | Ast.TyStr | Ast.TyBytes -> emit (Jal (zero, "__rv_copy_str"))     (* tail call *)
+  | Ast.TyFloat ->
+    alloc_words t1 2;
+    emit_word (enc_i 0 a0 (ldf3 ()) t0 0x03); emit_word (enc_s 0 t0 t1 (stf3 ()) 0x23);
+    emit_word (enc_i w a0 (ldf3 ()) t0 0x03); emit_word (enc_s w t0 t1 (stf3 ()) 0x23);
+    emit_word (enc_i 0 t1 0 a0 0x13);
+    emit_word (enc_i 0 ra 0 zero 0x67)
+  | Ast.TyTuple ts -> emit_agg_rcopy ts
+  | Ast.TyCon (n, args) when Hashtbl.mem type_records n ->
+    let (params, fields) = Hashtbl.find type_records n in
+    let senv = zip_tyenv params args in
+    emit_agg_rcopy (List.map (fun (_, fty) -> subst_ty senv fty) fields)
+  | Ast.TyCon (n, args) when Hashtbl.mem type_variants n ->
+    let (params, variants) = Hashtbl.find type_variants n in
+    emit_variant_rcopy (zip_tyenv params args) variants
+  | _ -> emit_word (enc_i 0 ra 0 zero 0x67)              (* a word: itself *)
+
+(* __rv_copy_str(a0 = a str or bytes block) -> a0 = a fresh copy: the length
+   word and the bytes, rounded up to whole words. Leaf. *)
+let emit_copy_str () =
+  emit (Label "__rv_copy_str");
+  emit_word (enc_i 0 a0 (ldf3 ()) t0 0x03);                     (* len *)
+  emit_word (enc_i (wsz () - 1) t0 0 t1 0x13);
+  emit_word (enc_i (0 - wsz ()) t1 7 t1 0x13);
+  emit_word (enc_i (wsz ()) t1 0 t1 0x13);                       (* bytes incl. header *)
+  emit_word (enc_i 0 gp 0 t2 0x13);                              (* dst = gp *)
+  emit_word (enc_r 0 t1 gp 0 gp 0x33);
+  emit_oom_check ();
+  emit_word (enc_i 0 a0 0 t3 0x13);                              (* src cursor *)
+  emit_word (enc_i 0 t2 0 t4 0x13);                              (* dst cursor *)
+  emit (Label ".cs_loop");
+  emit (Branch (0, t1, zero, ".cs_done"));
+  emit_word (enc_i 0 t3 (ldf3 ()) t5 0x03);
+  emit_word (enc_s 0 t5 t4 (stf3 ()) 0x23);
+  emit_word (enc_i (wsz ()) t3 0 t3 0x13);
+  emit_word (enc_i (wsz ()) t4 0 t4 0x13);
+  emit_word (enc_i (0 - wsz ()) t1 0 t1 0x13);
+  emit (Jal (zero, ".cs_loop"));
+  emit (Label ".cs_done");
+  emit_word (enc_i 0 t2 0 a0 0x13);
+  emit_word (enc_i 0 ra 0 zero 0x67)
+
 (* --- two-pass assembly: assign addresses, then encode ------------------- *)
 (* How many bytes an item becomes. FOUR places used to answer this -- the
    assembler's address pass, the encoder, the listing and the debug map -- and
@@ -4337,6 +4638,8 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   Hashtbl.reset adapters;
   globals := [];
   eq_pending := [];
+  rcopy_pending := [];
+  Hashtbl.reset rcopy_requested;
   Hashtbl.reset eq_requested;
   Hashtbl.reset globals_map;
   Hashtbl.reset tops;
@@ -4415,6 +4718,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   emit_rv_wall ();
   emit_str_eq ();
   emit_str_hash ();
+  emit_copy_str ();
   emit_str_cmp ();
   emit_bytes_slice ();
   emit_bytes_of_hex ();
@@ -4452,9 +4756,10 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   (* drain the structural-eq worklist (a helper may request more, e.g. for
      recursive types; eq_requested dedups so it terminates) *)
   let rec drain_eq () =
-    match !eq_pending with
-    | [] -> ()
-    | h :: rest -> eq_pending := rest; emit_eq_helper h; drain_eq ()
+    match !eq_pending, !rcopy_pending with
+    | [], [] -> ()
+    | h :: rest, _ -> eq_pending := rest; emit_eq_helper h; drain_eq ()
+    | [], h :: rest -> rcopy_pending := rest; emit_rcopy_helper h; drain_eq ()
   in
   drain_eq ();
   if !divzero_used then emit_divzero_stubs ();

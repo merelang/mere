@@ -3,8 +3,8 @@
 // arrays. Identical output required; no expected values are written here.
 //
 // Fewer random patterns than the hosted gate (12, not 2000): a full-range
-// conversion builds ~700-digit arrays, a region reclaims nothing on this
-// backend, and each printed value costs on the order of a megabyte of heap --
+// conversion builds ~700-digit arrays, nothing here runs inside a region, and
+// each printed value costs on the order of a megabyte of heap --
 // so the count is a RAM budget, measured (300 ran out of a 64 MB machine at
 // pattern 23). The two gates share the generator; the hosted one covers depth,
 // this one covers the target's integer width.

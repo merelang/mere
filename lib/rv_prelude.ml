@@ -549,8 +549,9 @@ let rvmap_bytes = fn m -> fail "RV32I: map_bytes measures an arena, and this tar
 // On RV64 the int is 64 bits, so the whole IEEE pattern fits one and the 53-bit
 // significand fits with room to spare: everything below is plain integer
 // arithmetic on words, with no record built on the way. The limb library above
-// built a record per operand per step -- about 2 KB of heap per `+`, and a
-// region gives nothing back on this target, so mere-ruby's `**` cost ~600 KB.
+// built a record per operand per step -- about 2 KB of heap per `+`, and until
+// v0.1.613 a region gave nothing back on this target, so mere-ruby's `**` cost
+// ~600 KB.
 // Here an operation allocates only its result's two-word block.
 //
 // It is the SAME algorithm as contrib/softfloat, transcribed: the working

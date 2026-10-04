@@ -82,8 +82,8 @@ CV="$ROOT/test/float/rv_float_conv.mere"
 $CC -O2 -w -o "$TMP/cvref" "$TMP/cv.c" || exit 1
 "$TMP/cvref" > "$TMP/cvref.out"
 # --ram 64: each conversion builds exact digit arrays (a full-range double is
-# ~700 digits) and a region reclaims nothing on this backend, so three hundred
-# of them genuinely need tens of MB. 32 ran out at pattern 22.
+# ~700 digits) and the gate runs them outside any region, so three hundred of
+# them genuinely need tens of MB. 32 ran out at pattern 22.
 "$MERE" -rv --ram 64 "$CV" > "$TMP/prog.bin" 2>"$TMP/err" || {
   echo "FAIL rv_float: -rv refused the conversion gate"; head -3 "$TMP/err"; exit 1; }
 ( cd "$TMP" && perl -e 'alarm 900; exec @ARGV' ./rvrun 64 2>&1 ) | grep -v '^rvrun: ' > "$TMP/cvrv.out"
@@ -175,7 +175,7 @@ fi
 # externs the RISC-V backend binds to it, against the CORRECTLY ROUNDED values
 # in rv_libm_ext.expected -- not against this host's libm, which differs by
 # platform (see the .mere's header). RV32 needs the full 256 MB: every float
-# operation there allocates its limbs and a region gives nothing back.
+# operation there allocates its limbs, and the gate runs outside any region.
 LX="$ROOT/test/float/rv_libm_ext.mere"
 LXE="$ROOT/test/float/rv_libm_ext.expected"
 LXN=$(grep -c . "$LXE")

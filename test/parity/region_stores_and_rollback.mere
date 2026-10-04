@@ -1,0 +1,96 @@
+// What a `region R { }` block may give back, and what it must not.
+//
+// Every backend must print the same lines. The C backend gives each block an
+// arena; Wasm and (since v0.1.613) RISC-V share one bump heap and roll it back
+// at the closing brace -- to the block's start, or to a high-water mark raised
+// by every store that makes something in the block reachable from outside.
+//
+//   1. a result of each copyable kind (str, record with a float, nested tuple,
+//      a recursive variant, a list) leaves the block intact;
+//   2. stores into containers older than the block (Map, Vec, StrBuf) survive;
+//   3. a container a callee builds AND stores into an older one -- above the
+//      block's mark, reachable from outside -- keeps what it is given after
+//      that: 50 pushes grow its buffer, the rollback must not take the new
+//      buffer, and the next block writes over whatever it did give back. Wasm
+//      read -14468027695667681 here instead of 12350 until v0.1.613, because
+//      its protect looked at the block's mark only;
+//   4. nested blocks; 5. a failure out of a block, then blocks again;
+//   6. 40,000 iterations of a block with 1.6 KB of garbage each -- 64 MB if
+//      nothing came back, which the RISC-V run of this file (rv_exec_check, 32 MB
+//      of RAM) cannot hold;
+//   7. an int-keyed outer Map whose values are Vecs made inside the blocks
+//      (mere-ruby's pending-pairs queue). On RISC-V one instance of the
+//      prelude's Map insert serves every Map with word or pointer values, its
+//      value reads as `int` there, and a protect skipped for "an int" let the
+//      rollback take the queues: the RISC-V run trapped.
+//
+// Execution mode: interp + C + LLVM + Wasm (parity), RV32 / RV64 (rv_exec_check)
+type pt = { name: str, n: int, f: float };
+type tree = Leaf | Node of tree * int * tree;
+let rec ins = fn (t: tree) -> fn (x: int) ->
+  match t with
+  | Leaf -> Node (Leaf, x, Leaf)
+  | Node (l, v, r) -> if x < v then Node (ins l x, v, r) else Node (l, v, ins r x);
+let rec sum = fn (t: tree) -> match t with Leaf -> 0 | Node (l, v, r) -> sum l + v + sum r;
+
+let outer_m = map_new ();
+let outer_v = vec_new ();
+let sb = strbuf_new ();
+let keep = vec_new ();
+// a callee that builds a container AND stores it into an outer table: the
+// container's address is above the block's mark, and it is reachable from outside
+let make_kept = fn (u: unit) -> let v = vec_new () in let _ = vec_push v 100 in let _ = vec_push keep v in v;
+let _ = make_kept ();
+
+// 1. results of every copyable kind
+let s1 = region A { "a" ++ str_of_int 42 ++ "b" };
+let p1 = region B { pt { name = "x" ++ s1, n = 7, f = 1.5 } };
+let t1 = region C { (s1, 3, (2.5, "y")) };
+let tr = region D { ins (ins (ins Leaf 5) 2) 9 };
+let l1 = region E { Cons ("p", Cons ("q", Nil)) };
+// 2. stores into OLDER containers inside a block
+let _ = region F { let _ = map_set outer_m "k" ("v" ++ str_of_int 1) in let _ = vec_push outer_v ("w" ++ "x") in let _ = strbuf_push sb ("z" ++ "z") in 0 };
+// 3. a callee's container stored outward, then grown inside the same block
+let rec push_n = fn (v: int Vec) -> fn (i: int) -> fn (n: int) -> if i >= n then () else let _ = vec_push v (i * 10) in push_n v (i + 1) n;
+let _ = region G { let v = make_kept () in let _ = push_n v 0 50 in 0 };
+// what the rollback gave back is written over right away
+let junk = region G2 { str_len (str_repeat "Q" 4000) };
+// 4. nested blocks
+let s4 = region H { let a = region I { "in" ++ "ner" } in a ++ (region J { "!" ++ "!" }) };
+// 5. a failure out of a block, then blocks again
+let r5 = try_or (fn (u: unit) -> region K { let _ = map_set outer_m "f" "before" in fail "boom" }) "caught";
+let s5 = region L { "after" ++ r5 };
+// 6. reclamation: garbage per iteration, inside a block
+let rec spin = fn (i: int) -> fn (acc: int) ->
+  if i == 0 then acc
+  else
+    let x = region M { let g = str_repeat "abcdefgh" 200 in str_len g + 1 } in
+    spin (i - 1) (acc + x);
+let total = spin 40000 0;
+// 7. queues made inside blocks, held by an int-keyed outer Map
+let pending = map_new ();
+let queue_for = fn (id: int) ->
+  if map_has pending id then map_get pending id
+  else (let q = vec_new () in let _ = map_set pending id q in q);
+let rec fill = fn (id: int) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then ()
+  else let q = queue_for id in let _ = vec_push q ("k" ++ str_of_int i) in fill id (i + 1) n;
+let rec blocks = fn (id: int) -> fn (n: int) ->
+  if id >= n then 0
+  else let _ = region Q { let _ = fill id 0 20 in let _ = str_repeat "Z" 3000 in 0 } in blocks (id + 1) n;
+let _ = blocks 0 30;
+let rec qlen = fn (q: str Vec) -> fn (i: int) -> fn (a: int) -> if i >= vec_len q then a else qlen q (i + 1) (a + str_len (vec_get q i));
+let rec qtotal = fn (id: int) -> fn (acc: int) -> if id >= 30 then acc else qtotal (id + 1) (qlen (map_get pending id) 0 acc);
+
+let _ = print (s1 ++ " " ++ p1.name ++ " " ++ str_of_int p1.n ++ " " ++ str_of_float p1.f);
+let (ta, tb, (tc, td)) = t1;
+let _ = print (ta ++ " " ++ str_of_int tb ++ " " ++ str_of_float tc ++ " " ++ td);
+let _ = print (str_of_int (sum tr));
+let _ = print (match l1 with Cons (a, Cons (b, Nil)) -> a ++ b | _ -> "?");
+let _ = print (map_get outer_m "k" ++ " " ++ vec_get outer_v 0 ++ " " ++ strbuf_to_str sb);
+let g = vec_get keep 1;
+let rec vsum = fn (v: int Vec) -> fn (i: int) -> fn (a: int) -> if i >= vec_len v then a else vsum v (i + 1) (a + vec_get v i);
+let _ = print (str_of_int (vec_len g) ++ " " ++ str_of_int (vsum g 0 0) ++ " " ++ str_of_int junk);
+let _ = print (s4 ++ " " ++ s5 ++ " " ++ map_get outer_m "f");
+let _ = print (str_of_int (qtotal 0 0) ++ " " ++ vec_get (map_get pending 29) 19);
+print (str_of_int total)

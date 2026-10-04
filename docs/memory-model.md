@@ -178,9 +178,10 @@ as of v0.1.31 it is the implemented semantics on the C backend:
 
   **Per backend**: C (v0.1.464) and LLVM (v0.1.466) pass it. **Wasm** needs nothing: it has one bump for every region,
   and what keeps a callee's allocation alive there is the high-water mark
-  (Q-132), not a region argument. **RV32I** needs nothing either: it does
-  not reclaim regions at all. Those two are not "unimplemented" — there is
-  no argument for them to pass.
+  (Q-132), not a region argument. **RISC-V** needs nothing either, for the
+  same reason: since v0.1.613 it reclaims with Wasm's scheme (before that it
+  did not reclaim at all). Those two are not "unimplemented" — there is no
+  argument for them to pass.
 - **Closure environments follow the current region too (v0.1.290).** They
   used to be allocated in the default (program-lifetime) region for one
   reason: a closure's env is a type-erased `void*`, so nothing could copy
@@ -237,6 +238,11 @@ as of v0.1.31 it is the implemented semantics on the C backend:
   `vec_set` copy the element. A stored value therefore outlives whoever
   stored it, no matter where it was allocated. Strings are immutable, so
   the copies are unobservable.
+  The LLVM backend does the same as of **v0.1.613**, but only while a region
+  block is open (with none open, every value is in the default region or the
+  container's, and neither goes away). Until then it stored the pointer: a
+  string put into an older Map inside `region R { }` was read after R was
+  released, as whatever the next block wrote there.
   - **Overwriting a heap element repeatedly leaks the old copies.** Because
     the container's region is bump-allocated, `vec_set`/`map_set` copying a
     *new* string into a slot that already held one cannot reclaim the old
@@ -303,13 +309,34 @@ instead of the element (Q-132) — because a guard that has to be right about
 every store in the program cannot be syntactic.
 
 The answer now is a **high-water mark**. A store into a container that predates
-the innermost open block raises `$__lang_hwm` to the current bump, and the
-block's exit restores `max(its mark, hwm)` instead of its mark. Sound because
+the innermost open block — or lies below the high-water mark (v0.1.613) —
+raises `$__lang_hwm` to the current bump, and the block's exit restores
+`max(its mark, hwm)` instead of its mark. The second half closes a hole: a
+container a callee builds inside the block and stores into an older one is
+reachable from outside but sits above the block's mark, so a later push that
+grew it put the new buffer above the high-water mark, and the rollback took it.
+Once the container has been stored outward it is below the high-water mark, and
+every store into it after that is protected. Sound because
 the value stored, and any buffer the store reallocated, were allocated before
 that point and lie below the bump; conservative because the block keeps its
 other garbage too — which is what the C backend does with a `__heap` value
 anyway, namely never free it. It costs one global compare when no block is
 open, and nothing at all for a block that touches only its own containers.
+
+The **RISC-V** backend (RV32IM and RV64IM) uses the same scheme as of
+v0.1.613: a block mark, a depth and a high-water mark in three runtime words,
+a protect after every `vec_push`, `vec_set` and `strbuf_push` (a Map, being
+Vecs since v0.1.611, goes through them), and the result copied out twice by a
+per-type `__rcopy_<tag>`. Every store protects, an int's too: after
+monomorphization a type variable reads as `int` here, and one instance of the
+prelude's Map insert serves every Map whose values are words or pointers. The
+mark is only ever raised, and a block never rolls back past its own `gp`, which
+on one heap changes nothing and on bare metal is what keeps another task's
+stores harmless (`docs/bare-metal.md`). A failure leaving the block skips the rollback;
+`try_or` puts the depth and the block mark back. A block whose result cannot be
+copied by value — a closure, a container — runs without rolling back, which is
+what every block did here before. Measured on `test/regionreclaim/pertree.mere`:
+100 trees of depth 14 run in a 16 MB machine, and ran out of it before.
 
 What is still refused inside a region block is what a mark cannot help with:
 `channel_send`, `spawn`, and closure-registering externs. Those hand the value

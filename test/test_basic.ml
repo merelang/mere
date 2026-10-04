@@ -15254,20 +15254,25 @@ let () =
   rv_contains "rv32i: a local `let rec` tail call jumps through the closure"
     "let run = fn n -> let rec loop = fn i -> if i >= n then i else loop (i + 1) in loop 0;\n\
      let _ = print_int (run 10);" "jalr zero, 0(t1)";
-  (* `region R { }` reclaims NOTHING on this backend, on purpose: Map and every
-     other prelude-lowered structure allocates its cells from the same bump heap,
-     so the old park-and-roll-back declared a __heap map's new node reusable the
-     moment the region closed -- mere-ruby corrupted its own constant table with
-     one `map_set` per statement. These two assertions used to pin the rollback
-     (`sw gp` / `mv gp, t0`); they now pin its ABSENCE, so the day rollback
-     returns (with a second, persistent bump area for escaping structures)
-     they fail and point here. *)
-  rv_not_contains "rv32i: a region does not park the bump pointer"
+  (* `region R { }` rolls the bump pointer back again (v0.1.613), behind a
+     high-water mark that every store into an older container raises. Between
+     v0.1.390 and v0.1.612 it reclaimed nothing -- the old park-and-roll-back
+     freed a __heap Map's new node the moment the region closed, and mere-ruby
+     corrupted its own constant table -- and these two assertions pinned that
+     absence so that they would fail the day rollback returned. It has: they
+     pin the rollback now, the mark parked on the stack and gp set back to
+     max(mark, high-water mark). *)
+  rv_contains "rv32i: a region parks the bump pointer"
     "let f = fn x -> x + 1;\n\
      let _ = print_int (region R { f 41 });" "sw gp, 0(sp)";
-  rv_not_contains "rv32i: a region does not roll the bump pointer back"
+  rv_contains "rv32i: a region rolls the bump pointer back"
     "let f = fn x -> x + 1;\n\
-     let _ = print_int (region R { f 41 });" "mv gp, t0";
+     let _ = print_int (region R { f 41 });" "mv gp, t1";
+  (* a result that cannot be copied by value -- here a closure -- leaves the
+     block as it did before: nothing parked, nothing rolled back *)
+  rv_not_contains "rv32i: a region returning a closure does not park the bump pointer"
+    "let g = region R { fn (x: int) -> x + 1 };\n\
+     let _ = print_int (g 41);" "sw gp, 0(sp)";
   (* the heap grows up and the stack grows down into the same gap; before this
      check they collided silently and the program jumped into rodata *)
   rv_contains "rv32i: an allocation checks the heap against the stack"
