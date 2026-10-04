@@ -12,6 +12,7 @@ __rv_argstr   internal: what `args` lowers to on -rv (one argument as a string)
 __rv_clock    internal: what `time` lowers to on -rv (clock_gettime64)
 __rv_urandom32 internal: what `random_int` draws from on -rv (getrandom)
 __rv_xlen     internal: the machine word width, for the prelude's one width branch
+__rv_str_hash internal: FNV-1a over a str's bytes, for the -rv prelude's hash-table Map
 __rv_word     internal: a value's machine word, for backend diagnostics only
 
 # v0.1.404's hosted file I/O on -rv, same rule: `read_file`, `write_file`,

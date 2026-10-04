@@ -3073,6 +3073,7 @@ let initial_env : env =
        needs it exactly once: Linux's timespec64 is two 32-bit-cell pairs on
        rv32 and two native words on rv64, and the same prelude reads both. *)
     ("__rv_xlen",   mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
+    ("__rv_str_hash", mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
     ("__rv_clock",  mono (Ast.TyArrow (Ast.TyInt,
                             Ast.TyTuple [Ast.TyInt; Ast.TyInt; Ast.TyInt; Ast.TyInt])));
     ("__rv_urandom32", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));

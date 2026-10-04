@@ -82,6 +82,7 @@ probe_for() {
     rvmap_get_i) echo 'let m = rvmap_new ();\nlet _ = print_int (rvmap_get_i m 1);' ;;
     rvmap_has_i) echo 'let _ = print_int (if rvmap_has_i (rvmap_new ()) 1 then 1 else 0);' ;;
     rvmap_delete_i) echo 'let m = rvmap_new ();\nlet _ = rvmap_delete_i m 1;\nlet _ = print_int 0;' ;;
+    rvmap_set_i) echo 'let m = rvmap_new ();\nlet _ = rvmap_set_i m 1 2;\nlet _ = print_int (rvmap_get_i m 1);' ;;
     rvmap_len_i) echo 'let m = rvmap_new ();\nlet _ = print_int (rvmap_len_i m);' ;;
     rvmap_iter_i) echo 'let m = rvmap_new ();\nlet _ = rvmap_iter_i m (fn k -> fn v -> ());\nlet _ = print_int 0;' ;;
     *) echo "" ;;

@@ -463,7 +463,7 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
     if Hashtbl.mem libm_bound v then ("__libm_" ^ v) :: v :: acc else
     (match v with
      | "map_new" -> "rvmap_new" :: v :: acc
-     | "map_set" -> "rvmap_set" :: v :: acc
+     | "map_set" -> (if map_word_keyed e then "rvmap_set_i" else "rvmap_set") :: v :: acc
      | "map_get" -> (if map_word_keyed e then "rvmap_get_i" else "rvmap_get") :: v :: acc
      | "map_has" -> (if map_word_keyed e then "rvmap_has_i" else "rvmap_has") :: v :: acc
      | "map_delete" -> (if map_word_keyed e then "rvmap_delete_i" else "rvmap_delete") :: v :: acc
@@ -2699,6 +2699,8 @@ and compile_app env e =
     li a3 0;                                             (* flags *)
     li a7 48;                                            (* faccessat *)
     emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall -> a0 = 0 | -errno *)
+  | Ast.Var "__rv_str_hash" when List.length args = 1 ->
+    compile_expr env (List.hd args); emit (Jal (ra, "__rv_str_hash"))
   | Ast.Var "__rv_xlen" when List.length args = 1 ->
     compile_expr env (List.hd args);                     (* the unit, discarded *)
     li a0 !xlen
@@ -2770,7 +2772,8 @@ and compile_app env e =
      are erased at codegen, so the Vec-based repr flows through fine. *)
   | Ast.Var "map_new" when List.length args = 1 -> call_top env "rvmap_new" args
   | Ast.Var "map_set" when List.length args = 3 ->
-    check_map_key e.Ast.loc (List.nth args 1); call_top env "rvmap_set" args
+    check_map_key e.Ast.loc (List.nth args 1);
+    call_top env (if map_keyed_by_word args then "rvmap_set_i" else "rvmap_set") args
   | Ast.Var "map_get" when List.length args = 2 ->
     check_map_key e.Ast.loc (List.nth args 1);
     call_top env (if map_keyed_by_word args then "rvmap_get_i" else "rvmap_get") args
@@ -3488,6 +3491,29 @@ let emit_str_eq () =
   emit (Jal (zero, ".se_loop"));
   emit (Label ".se_eq"); li a0 1; emit_word (enc_i 0 ra 0 zero 0x67);
   emit (Label ".se_ne"); li a0 0; emit_word (enc_i 0 ra 0 zero 0x67)
+
+(* __rv_str_hash(a0=s) -> a0 = FNV-1a over s's bytes, kept to 31 bits so it is
+   a non-negative int at either width. The prelude's Map hashes str keys with
+   it (v0.1.611); a hash built from `char_at` in Mere would allocate a string
+   per byte. Leaf. *)
+let emit_str_hash () =
+  emit (Label "__rv_str_hash");
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);     (* t0 = len *)
+  emit_word (enc_i (wsz ()) a0 0 t2 0x13);                 (* t2 = bytes *)
+  li t1 (-2128831035);                                     (* FNV offset basis 0x811c9dc5 *)
+  li t3 16777619;                                          (* FNV prime *)
+  emit (Label ".sh_loop");
+  emit (Branch (0, t0, zero, ".sh_done"));
+  emit_word (enc_i 0 t2 4 t4 0x03);                        (* lbu t4, 0(t2) *)
+  emit_word (enc_r 0 t4 t1 4 t1 0x33);                     (* xor t1, t1, t4 *)
+  emit_word (enc_r 1 t3 t1 0 t1 0x33);                     (* mul t1, t1, t3 *)
+  emit_word (enc_i 1 t2 0 t2 0x13);
+  emit_word (enc_i (-1) t0 0 t0 0x13);
+  emit (Jal (zero, ".sh_loop"));
+  emit (Label ".sh_done");
+  emit_word (enc_i (!xlen - 31) t1 1 t1 0x13);             (* slli: keep the low 31 bits *)
+  emit_word (enc_i (!xlen - 31) t1 5 a0 0x13);             (* srli *)
+  emit_word (enc_i 0 ra 0 zero 0x67)
 
 (* __bytes_slice(a0=bytes, a1=i, a2=n) -> a0 = a fresh block with bytes [i, i+n).
    Q-110. Refuses a range outside the block, as the other backends do. Leaf. *)
@@ -4388,6 +4414,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   emit_rv_slurp ();
   emit_rv_wall ();
   emit_str_eq ();
+  emit_str_hash ();
   emit_str_cmp ();
   emit_bytes_slice ();
   emit_bytes_of_hex ();

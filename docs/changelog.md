@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.611 — 2026-10-04
+
+_On RISC-V a Map is a hash table: mere-ruby's startup there takes half the instructions, and a corpus file that ran past two minutes finishes in eleven seconds._
+
+**The RV Map was an assoc list.** `map_set` prepended -- even over a key already
+there, so the list grew with every write -- `map_get` walked it, and `map_iter`
+walked a list of the keys it had seen once per element, the square of the
+length. Profiled on the RV64 emulator (through the debug map v0.1.610 made
+correct), that was 64% of mere-ruby's startup and 85-98% of the corpus files
+that timed out (`_mseen`, `_mfind`, `__str_eq`). C, LLVM and Wasm have had an
+O(1) Map since note 147.
+
+Now the entries are kept in insertion order -- keys, values and a live flag,
+three Vecs -- under an open-addressing index (a power-of-two Vec: 0 empty, -1 a
+tombstone, n entry n-1; linear probing; grown at 3/4 full, tombstones counted).
+The meaning is unchanged and is every backend's: `map_iter` visits each live
+key once, in the order it was first set, with its latest value; setting an
+existing key keeps its place; a key deleted and set again goes to the end.
+Growing the index never moves an entry; `map_compact` packs the live entries
+and repoints the index without hashing again; `map_clear` / `map_recycle`
+empty it. A str key is hashed by a new runtime routine, `__rv_str_hash`
+(FNV-1a over the bytes, 31 bits), an int or bool key by mixing its bits; `map_set`
+now goes to the `_i` family by the key type too, as `map_get` already did.
+
+Measured, mere-ruby on RV64: startup 939 -> 469 million instructions; corpus/67
+from past 120 s (24.7 billion instructions) to 11.5 s, matching ruby.
+`test/parity/map_random_ops.mere` is a deterministic random walk of set /
+delete / get / has / len / iter / compact / clear over a small key space (str
+and int keys) whose output every backend must reproduce; RV32 and RV64 do.
+
 ## v0.1.610 — 2026-10-04
 
 _`mere -rvs` / `-rv64s` (the listing) and `-rvg` / `-rv64g` (the debug map) describe the binary `-rv` emits, word for word -- they were made from a different program, and a profile read through the map blamed the wrong functions._

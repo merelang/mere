@@ -302,131 +302,229 @@ let int_of_str = fn s ->
     let v = go start 0 in
     if neg then 0 - v else v;
 
-// --- Map: a mutable cell (Vec[1]) holding a Cons-list of (key,value) pairs.
-// set prepends (last write wins); str_eq key comparison. Mirrors the
-// self-hosted Wasm backend's assoc-list Map. Keys are strings. These use the
-// `rvmap_` prefix (not `map_`): the typer special-cases the `map_new` name to
-// force the Map type, so codegen_riscv intercepts the map_* builtins and
-// dispatches here instead of shadowing them. --------------------------------
-let rvmap_new = fn (u : unit) -> let c = vec_new () in let _ = vec_push c Nil in c;
-let rvmap_set = fn m -> fn k -> fn v -> vec_set m 0 (Cons ((k, v), vec_get m 0));
-let rec _mfind = fn node -> fn k ->
-  match node with
-  | Nil -> None
-  | Cons ((kk, vv), rest) -> if str_eq kk k then Some vv else _mfind rest k;
-let rvmap_get = fn m -> fn k ->
-  match _mfind (vec_get m 0) k with Some v -> v | None -> fail "map_get: key not found";
-let rvmap_has = fn m -> fn k -> match _mfind (vec_get m 0) k with Some v -> true | None -> false;
-let rec _mdel = fn node -> fn k ->
-  match node with
-  | Nil -> Nil
-  | Cons ((kk, vv), rest) -> if str_eq kk k then _mdel rest k else Cons ((kk, vv), _mdel rest k);
-let rvmap_delete = fn m -> fn k -> vec_set m 0 (_mdel (vec_get m 0) k);
-// map_iter: visit each distinct key ONCE, in the order the keys were FIRST
-// inserted, carrying that key's most recent value. That is what every other
-// backend does, and what a program written against them expects: mere-ruby's
-// Hash is ruby's Hash, which is insertion-ordered, and `h[k] = v` on a key that
-// is already there keeps its place.
+// --- Map: a hash table (v0.1.611) ---------------------------------------------
+// It was an assoc list: map_set PREPENDED even over an existing key (the list
+// grew with every write), map_get walked it, and map_iter walked it once more
+// per element to skip keys it had seen -- the square of its length. Measured
+// on mere-ruby running on the RV64 emulator: 64% of its startup and 85-98% of
+// the corpus files that timed out were those walks (`_mseen`, `_mfind`,
+// `__str_eq`). C, LLVM and Wasm have had an O(1) Map since note 147.
 //
-// `rvmap_set` PREPENDS, so the list runs newest-first and the naive walk visited
-// keys in reverse insertion order -- measured against the C backend, which
-// answers `a=99 b=2 c=3` where this answered `a=99 c=3 b=2`. The values were
-// right; only the order was backwards, which is why nothing caught it until an
-// interpreter printed a Hash.
+// Now: the ENTRIES in insertion order -- keys, values and a live flag, three
+// Vecs -- and an open-addressing INDEX over them (a power-of-two Vec of ints:
+// 0 empty, -1 a tombstone, n entry n-1), probed linearly. The Map's meaning is
+// the one the assoc list had, which is every other backend's: map_iter visits
+// each live key once, in the order it was first set, with its latest value;
+// setting an existing key changes the value in place and keeps its position;
+// a deleted key set again goes to the end. A str key is hashed by the runtime's
+// `__rv_str_hash` (FNV-1a over its bytes), an int or bool key by mixing its
+// bits; codegen_riscv sends a Map to the `_i` family by its key type, as before.
 //
-// So: walk the list REVERSED (oldest first, which is first-insertion order),
-// and take each key's value from the ORIGINAL list, where the newest write is
-// nearest the head. Reversing alone would have paired each key with its OLDEST
-// value -- the right order and the wrong values, a trade for the worse.
-let rec _mrev = fn node -> fn acc ->
-  match node with Nil -> acc | Cons (p, rest) -> _mrev rest (Cons (p, acc));
-let rec _mseen = fn seen -> fn k -> match seen with Nil -> false | Cons (x, rest) -> if str_eq x k then true else _mseen rest k;
-let rec _miter = fn node -> fn orig -> fn f -> fn seen ->
-  match node with
-  | Nil -> ()
-  | Cons ((kk, vv), rest) ->
-    if _mseen seen kk then _miter rest orig f seen
-    else
-      // vv is this occurrence's value; the live one is whatever _mfind reaches
-      // first from the head. They differ exactly when the key was written twice.
-      let cur = match _mfind orig kk with Some v -> v | None -> vv in
-      let _ = f kk cur in _miter rest orig f (Cons (kk, seen));
-let rvmap_iter = fn m -> fn f -> let l = vec_get m 0 in _miter (_mrev l Nil) l f Nil;
-// The number of DISTINCT keys. `rvmap_set` prepends, so a key set twice is in
-// the list twice and the newer one shadows the older; counting nodes would count
-// the shadowed ones. This is the same walk `_miter` does, with a counter instead
-// of a callback.
-// The reclamation API, for a map that has no arena. `map_compact` returns
-// bytes an arena is holding after entries were overwritten or deleted, and
-// KEEPS the entries; this representation is an assoc list of ordinary values,
-// so there is nothing behind it to return and a no-op is the honest answer.
-//
-// `map_recycle` is NOT that: its contract is `map_clear` plus the arena
-// wind-back (docs/changelog v0.1.300 -- "semantically map_clear, and on the C
-// backend it also winds the arena back"). This backend had it as a no-op too,
-// reasoning from the half it cannot do to skipping the half it can -- and the
-// cost surfaced a long way off: mere-ruby pools its call frames and cleans a
-// dead frame with ONE map_recycle, so on this backend every recycled frame
-// came back still holding the previous call's locals. A bare identifier in a
-// method then resolved to another method's variable: `def f(v); q = v; end`
-// left `q` visible to the next call, and a Comparable's `n <=> o.n` read both
-// sides from the same leaked slot and answered 0. The wrongness was silent --
-// nothing crashed; values were merely someone else's.
-//
-// `map_bytes` is different again: it asks HOW MANY bytes the arena holds, and
-// answering 0 would read as "this map uses no memory" rather than "the
-// question does not apply here". So it stops and says which it is.
-let rvmap_clear = fn m -> vec_set m 0 Nil;
-let rvmap_compact = fn m -> ();
-let rvmap_recycle = fn m -> vec_set m 0 Nil;   // clear; the arena half has nothing to do
-let rvvec_bytes = fn v -> fail "RV32I: vec_bytes measures an arena, and a Vec here is a plain block with none -- there is no number to give";
-let rvmap_bytes = fn m -> fail "RV32I: map_bytes measures an arena, and this target's Map is an assoc list with none -- there is no number to give";
+// The map value is a tuple (index, keys, values, live, meta); meta holds the
+// live count, the entries used, the tombstones and the index mask. Growing the
+// index never moves an entry, so a map_iter that sets values keeps its place.
+// The entries are packed only by map_compact (and emptied by map_clear /
+// map_recycle): a deleted entry holds its slot in the order until then.
+let _mput = fn v -> fn (i: int) -> fn x ->
+  if i < vec_len v then vec_set v i x else vec_push v x;
+let rec _mfill = fn (v: int Vec) -> fn (n: int) -> fn (cap: int) ->
+  if n >= cap then () else let _ = vec_push v 0 in _mfill v (n + 1) cap;
+let rec _mzero = fn (v: int Vec) -> fn (i: int) -> fn (cap: int) ->
+  if i >= cap then () else let _ = vec_set v i 0 in _mzero v (i + 1) cap;
+let _mhash_i = fn (k: int) ->
+  let a = bit_xor k (bit_shr k 31) in
+  let b = bit_xor a (bit_shr a 15) * 73244475 in
+  bit_xor b (bit_shr b 13);
+let rvmap_new = fn (u: unit) ->
+  let idx = vec_new () in
+  let _ = _mfill idx 0 8 in
+  let meta = vec_new () in
+  let _ = vec_push meta 0 in let _ = vec_push meta 0 in
+  let _ = vec_push meta 0 in let _ = vec_push meta 7 in
+  (idx, vec_new (), vec_new (), vec_new (), meta);
+let rec _miter = fn keys -> fn vals -> fn (live: int Vec) -> fn f -> fn (j: int) -> fn (used: int) ->
+  if j >= used then ()
+  else
+    let _ = (if vec_get live j == 1 then f (vec_get keys j) (vec_get vals j) else ()) in
+    _miter keys vals live f (j + 1) used;
+// the entries as they were when the walk began: a key the callback adds is not
+// visited, and one it deletes before its turn is skipped
+let rvmap_iter = fn m -> fn f ->
+  let (_, keys, vals, live, meta) = m in
+  _miter keys vals live f 0 (vec_get meta 1);
+let rvmap_len = fn m -> let (_, _, _, _, meta) = m in vec_get meta 0;
+let rvmap_clear = fn m ->
+  let (idx, _, _, _, meta) = m in
+  let _ = _mzero idx 0 (vec_get meta 3 + 1) in
+  let _ = vec_set meta 0 0 in let _ = vec_set meta 1 0 in vec_set meta 2 0;
+// map_recycle is map_clear plus, on the arena backends, the arena wound back;
+// here it is the clear -- which it must be: mere-ruby cleans a pooled call
+// frame with one map_recycle, and when this was a no-op every recycled frame
+// came back holding the previous call's locals
+let rvmap_recycle = fn m -> rvmap_clear m;
 
-let rvmap_len = fn m ->
-  let rec go = fn node -> fn seen -> fn acc ->
-    match node with
-    | Nil -> acc
-    | Cons ((kk, vv), rest) ->
-      if _mseen seen kk then go rest seen acc
-      else go rest (Cons (kk, seen)) (acc + 1) in
-  go (vec_get m 0) Nil 0;
-// v0.1.599: the same Map with `int` (or `bool`) keys, compared as words.
-// `str_eq` read an int key's value as a string's address and length, which is
-// why such a key was refused (codegen_riscv's check_map_key); mere-ruby's object
-// table is keyed by object id. codegen_riscv sends a Map whose key type is int
-// or bool here, by the Map's own type, so map_len and map_iter -- which take no
-// key -- go to the same family as map_set.
-let rec _mfind_i = fn node -> fn (k : int) ->
-  match node with
-  | Nil -> None
-  | Cons ((kk, vv), rest) -> if kk == k then Some vv else _mfind_i rest k;
+// probe for k: the index slot holding it, or the first free slot to put it in
+// (a tombstone on the way if there was one) as -(slot + 1)
+let rec _mprobe = fn (idx: int Vec) -> fn keys -> fn (k) -> fn (mask: int) -> fn (i: int) -> fn (tomb: int) ->
+  let e = vec_get idx i in
+  if e == 0 then 0 - ((if tomb >= 0 then tomb else i) + 1)
+  else if e < 0 then _mprobe idx keys k mask (bit_and (i + 1) mask) (if tomb >= 0 then tomb else i)
+  else if str_eq (vec_get keys (e - 1)) k then i
+  else _mprobe idx keys k mask (bit_and (i + 1) mask) tomb;
+let _mslot = fn m -> fn k ->
+  let (idx, keys, _, _, meta) = m in
+  let mask = vec_get meta 3 in
+  _mprobe idx keys k mask (bit_and (__rv_str_hash k) mask) (0 - 1);
+let rec _mreindex = fn (idx: int Vec) -> fn keys -> fn (live: int Vec) -> fn (mask: int) -> fn (j: int) -> fn (used: int) ->
+  if j >= used then ()
+  else
+    let _ = (if vec_get live j == 1 then
+               (let s = _mprobe idx keys (vec_get keys j) mask (bit_and (__rv_str_hash (vec_get keys j)) mask) (0 - 1) in
+                vec_set idx (0 - s - 1) (j + 1))
+             else ()) in
+    _mreindex idx keys live mask (j + 1) used;
+// grow (or only sweep the tombstones out of) the index; entries stay put, so a
+// map_iter in progress keeps its place
+let _mgrow = fn m ->
+  let (idx, keys, _, live, meta) = m in
+  let count = vec_get meta 0 in
+  let cap0 = vec_get meta 3 + 1 in
+  let cap = if (count + 1) * 2 >= cap0 then cap0 * 2 else cap0 in
+  let _ = _mfill idx cap0 cap in
+  let _ = _mzero idx 0 cap in
+  let _ = vec_set meta 3 (cap - 1) in
+  let _ = vec_set meta 2 0 in
+  _mreindex idx keys live (cap - 1) 0 (vec_get meta 1);
+let rvmap_set = fn m -> fn k -> fn v ->
+  let (idx, keys, vals, live, meta) = m in
+  let s = _mslot m k in
+  if s >= 0 then vec_set vals (vec_get idx s - 1) v
+  else
+    // a new key: appended to the entries (its place in iteration order)
+    let used = vec_get meta 1 in
+    let _ = _mput keys used k in
+    let _ = _mput vals used v in
+    let _ = _mput live used 1 in
+    let slot = 0 - s - 1 in
+    let _ = (if vec_get idx slot < 0 then vec_set meta 2 (vec_get meta 2 - 1) else ()) in
+    let _ = vec_set idx slot (used + 1) in
+    let _ = vec_set meta 1 (used + 1) in
+    let _ = vec_set meta 0 (vec_get meta 0 + 1) in
+    // keep the index at most 3/4 full, tombstones counted
+    if (vec_get meta 0 + vec_get meta 2) * 4 >= (vec_get meta 3 + 1) * 3 then _mgrow m else ();
+let rvmap_get = fn m -> fn k ->
+  let (idx, _, vals, _, _) = m in
+  let s = _mslot m k in
+  if s >= 0 then vec_get vals (vec_get idx s - 1) else fail "map_get: key not found";
+let rvmap_has = fn m -> fn k -> _mslot m k >= 0;
+let rvmap_delete = fn m -> fn k ->
+  let (idx, _, _, live, meta) = m in
+  let s = _mslot m k in
+  if s < 0 then ()
+  else
+    let _ = vec_set live (vec_get idx s - 1) 0 in
+    let _ = vec_set idx s (0 - 1) in
+    let _ = vec_set meta 2 (vec_get meta 2 + 1) in
+    vec_set meta 0 (vec_get meta 0 - 1);
+// probe for k: the index slot holding it, or the first free slot to put it in
+// (a tombstone on the way if there was one) as -(slot + 1)
+let rec _mprobe_i = fn (idx: int Vec) -> fn keys -> fn (k) -> fn (mask: int) -> fn (i: int) -> fn (tomb: int) ->
+  let e = vec_get idx i in
+  if e == 0 then 0 - ((if tomb >= 0 then tomb else i) + 1)
+  else if e < 0 then _mprobe_i idx keys k mask (bit_and (i + 1) mask) (if tomb >= 0 then tomb else i)
+  else if _meq_i (vec_get keys (e - 1)) k then i
+  else _mprobe_i idx keys k mask (bit_and (i + 1) mask) tomb;
+let _mslot_i = fn m -> fn k ->
+  let (idx, keys, _, _, meta) = m in
+  let mask = vec_get meta 3 in
+  _mprobe_i idx keys k mask (bit_and (_mhash_i k) mask) (0 - 1);
+let rec _mreindex_i = fn (idx: int Vec) -> fn keys -> fn (live: int Vec) -> fn (mask: int) -> fn (j: int) -> fn (used: int) ->
+  if j >= used then ()
+  else
+    let _ = (if vec_get live j == 1 then
+               (let s = _mprobe_i idx keys (vec_get keys j) mask (bit_and (_mhash_i (vec_get keys j)) mask) (0 - 1) in
+                vec_set idx (0 - s - 1) (j + 1))
+             else ()) in
+    _mreindex_i idx keys live mask (j + 1) used;
+// grow (or only sweep the tombstones out of) the index; entries stay put, so a
+// map_iter in progress keeps its place
+let _mgrow_i = fn m ->
+  let (idx, keys, _, live, meta) = m in
+  let count = vec_get meta 0 in
+  let cap0 = vec_get meta 3 + 1 in
+  let cap = if (count + 1) * 2 >= cap0 then cap0 * 2 else cap0 in
+  let _ = _mfill idx cap0 cap in
+  let _ = _mzero idx 0 cap in
+  let _ = vec_set meta 3 (cap - 1) in
+  let _ = vec_set meta 2 0 in
+  _mreindex_i idx keys live (cap - 1) 0 (vec_get meta 1);
+let rvmap_set_i = fn m -> fn k -> fn v ->
+  let (idx, keys, vals, live, meta) = m in
+  let s = _mslot_i m k in
+  if s >= 0 then vec_set vals (vec_get idx s - 1) v
+  else
+    // a new key: appended to the entries (its place in iteration order)
+    let used = vec_get meta 1 in
+    let _ = _mput keys used k in
+    let _ = _mput vals used v in
+    let _ = _mput live used 1 in
+    let slot = 0 - s - 1 in
+    let _ = (if vec_get idx slot < 0 then vec_set meta 2 (vec_get meta 2 - 1) else ()) in
+    let _ = vec_set idx slot (used + 1) in
+    let _ = vec_set meta 1 (used + 1) in
+    let _ = vec_set meta 0 (vec_get meta 0 + 1) in
+    // keep the index at most 3/4 full, tombstones counted
+    if (vec_get meta 0 + vec_get meta 2) * 4 >= (vec_get meta 3 + 1) * 3 then _mgrow_i m else ();
 let rvmap_get_i = fn m -> fn k ->
-  match _mfind_i (vec_get m 0) k with Some v -> v | None -> fail "map_get: key not found";
-let rvmap_has_i = fn m -> fn k -> match _mfind_i (vec_get m 0) k with Some v -> true | None -> false;
-let rec _mdel_i = fn node -> fn (k : int) ->
-  match node with
-  | Nil -> Nil
-  | Cons ((kk, vv), rest) -> if kk == k then _mdel_i rest k else Cons ((kk, vv), _mdel_i rest k);
-let rvmap_delete_i = fn m -> fn k -> vec_set m 0 (_mdel_i (vec_get m 0) k);
-let rec _mseen_i = fn seen -> fn (k : int) -> match seen with Nil -> false | Cons (x, rest) -> if x == k then true else _mseen_i rest k;
-let rec _miter_i = fn node -> fn orig -> fn f -> fn seen ->
-  match node with
-  | Nil -> ()
-  | Cons ((kk, vv), rest) ->
-    if _mseen_i seen kk then _miter_i rest orig f seen
-    else
-      let cur = match _mfind_i orig kk with Some v -> v | None -> vv in
-      let _ = f kk cur in _miter_i rest orig f (Cons (kk, seen));
-let rvmap_iter_i = fn m -> fn f -> let l = vec_get m 0 in _miter_i (_mrev l Nil) l f Nil;
-// (top-level, not an inner `let rec`: an inner function would renumber every
-// later program's lifted helpers, and change their bytes for nothing)
-let rec _mlen_i = fn node -> fn seen -> fn acc ->
-  match node with
-  | Nil -> acc
-  | Cons ((kk, vv), rest) ->
-    if _mseen_i seen kk then _mlen_i rest seen acc
-    else _mlen_i rest (Cons (kk, seen)) (acc + 1);
-let rvmap_len_i = fn m -> _mlen_i (vec_get m 0) Nil 0;
+  let (idx, _, vals, _, _) = m in
+  let s = _mslot_i m k in
+  if s >= 0 then vec_get vals (vec_get idx s - 1) else fail "map_get: key not found";
+let rvmap_has_i = fn m -> fn k -> _mslot_i m k >= 0;
+let rvmap_delete_i = fn m -> fn k ->
+  let (idx, _, _, live, meta) = m in
+  let s = _mslot_i m k in
+  if s < 0 then ()
+  else
+    let _ = vec_set live (vec_get idx s - 1) 0 in
+    let _ = vec_set idx s (0 - 1) in
+    let _ = vec_set meta 2 (vec_get meta 2 + 1) in
+    vec_set meta 0 (vec_get meta 0 - 1);
+let _meq_i = fn (a: int) -> fn (b: int) -> a == b;
+// int / bool keys: the same table, compared as words and hashed by _mhash_i;
+// iteration and length need no key, so they are the same functions
+let rvmap_iter_i = fn m -> fn f -> rvmap_iter m f;
+let rvmap_len_i = fn m -> rvmap_len m;
+// map_compact packs the live entries to the front, in order, and points the
+// index's slots at their new places -- no key is hashed again, so one function
+// serves both key families. (Its contract on the arena backends is the same:
+// return what dead entries hold, keep the live ones.)
+let rec _mpack = fn keys -> fn vals -> fn (live: int Vec) -> fn (np: int Vec) -> fn (j: int) -> fn (n: int) -> fn (used: int) ->
+  if j >= used then n
+  else if vec_get live j == 1 then
+    (let _ = vec_set np j n in
+     let _ = vec_set keys n (vec_get keys j) in
+     let _ = vec_set vals n (vec_get vals j) in
+     let _ = vec_set live n 1 in
+     _mpack keys vals live np (j + 1) (n + 1) used)
+  else (let _ = vec_set np j (0 - 1) in _mpack keys vals live np (j + 1) n used);
+let rec _mrepoint = fn (idx: int Vec) -> fn (np: int Vec) -> fn (s: int) -> fn (cap: int) ->
+  if s >= cap then ()
+  else
+    let e = vec_get idx s in
+    let _ = (if e > 0 then vec_set idx s (vec_get np (e - 1) + 1) else ()) in
+    _mrepoint idx np (s + 1) cap;
+let rvmap_compact = fn m ->
+  let (idx, keys, vals, live, meta) = m in
+  let used = vec_get meta 1 in
+  if vec_get meta 0 == used then ()
+  else
+    let np = vec_new () in
+    let _ = _mfill np 0 used in
+    let n = _mpack keys vals live np 0 0 used in
+    let _ = _mrepoint idx np 0 (vec_get meta 3 + 1) in
+    vec_set meta 1 n;
+let rvvec_bytes = fn v -> fail "RV32I: vec_bytes measures an arena, and a Vec here is a plain block with none -- there is no number to give";
+let rvmap_bytes = fn m -> fail "RV32I: map_bytes measures an arena, and this target's Map has none -- there is no number to give";
 // --- softfloat, for float arithmetic on a backend with no float ----------
 // Spliced in HERE, at the end, and not next to the other host-service shims:
 // top-level order matters in Mere, and this library calls `not`, which the

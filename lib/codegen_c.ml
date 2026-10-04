@@ -3225,7 +3225,7 @@ let rec emit_expr (e : Ast.expr) : string =
         process does not have is the block, and `args` is the spelling that
         works everywhere. *)
      | Ast.Var ("__rv_argc" | "__rv_argstr" | "__rv_word"
-               | "__rv_clock" | "__rv_urandom32" | "__rv_xlen"
+               | "__rv_clock" | "__rv_urandom32" | "__rv_xlen" | "__rv_str_hash"
                | "__rv_open_rd" | "__rv_read_all" | "__rv_access"
                | "__rv_open_wr" | "__rv_write_all" | "__rv_substring_raw") ->
        unsupported e.Ast.loc
