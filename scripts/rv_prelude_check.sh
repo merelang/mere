@@ -16,7 +16,10 @@ MERE="$ROOT/_build/default/bin/mere.exe"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 rc=0
 
-NAMES=$(sed -n 's/^let \(rec \)\{0,1\}\([a-z_][a-z_0-9]*\) *=.*/\2/p' "$ROOT/lib/rv_prelude.ml" \
+# lib/rv_libm.ml is the prelude's tail (sin, cos, tan, atan2 and the libm the
+# RISC-V backend binds libm-named externs to): hand-written too, so read with it
+NAMES=$(cat "$ROOT/lib/rv_prelude.ml" "$ROOT/lib/rv_libm.ml" \
+        | sed -n 's/^let \(rec \)\{0,1\}\([a-z_][a-z_0-9]*\) *=.*/\2/p' \
         | grep -v '^contents$')
 COUNT=$(printf '%s\n' $NAMES | wc -l | tr -d ' ')
 
@@ -296,7 +299,7 @@ if grep -q 'rv-prelude' "$TMP/twoerr" || [ "$(grep -c 'two.mere:[23]:9' "$TMP/tw
   rc=1
 fi
 
-# The count is the names written in lib/rv_prelude.ml. The prelude ALSO carries
+# The count is the names written in lib/rv_prelude.ml and lib/rv_libm.ml. The prelude ALSO carries
 # contrib/softfloat, spliced in from the generated lib/rv_softfloat.ml, and those
 # names are not in this list -- scripts/softfloat_check.sh compiles all of them
 # for RV32I. Saying "all names" here would have covered 76 that this gate never

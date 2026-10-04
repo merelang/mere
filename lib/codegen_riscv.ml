@@ -419,6 +419,32 @@ let float_cmp_fn = function
   | Ast.Eq -> "__feq" | Ast.Ne -> "__fne" | Ast.Lt -> "__flt"
   | Ast.Le -> "__fle" | Ast.Gt -> "__fgt" | Ast.Ge -> "__fge"
 
+(* v0.1.609: the libm functions lib/rv_libm.ml computes. An `extern fn` of one
+   of these names AND the C signature is bound to `__libm_<name>` there instead
+   of being refused: a program that declares `extern fn cbrt: float -> float;`
+   (mere-ruby declares all of these) gets libm on a host and the prelude here.
+   A declaration of the same name with another type is not libm's function and
+   is refused as before. *)
+let libm_sigs : (string * string) list =
+  List.map (fun n -> (n, "f>f"))
+    [ "atan"; "asin"; "acos"; "sinh"; "cosh"; "tanh"; "asinh"; "acosh"; "atanh";
+      "cbrt"; "log2"; "log10"; "log1p"; "expm1"; "erf"; "erfc"; "tgamma"; "lgamma" ]
+  @ [ ("hypot", "ff>f"); ("fmod", "ff>f"); ("ldexp", "fi>f") ]
+let libm_bound : (string, unit) Hashtbl.t = Hashtbl.create 16
+let rec libm_sig_of (t : Ast.ty) : string =
+  match Ast.walk t with
+  | Ast.TyArrow (a, r) ->
+    let c = (match Ast.walk a with Ast.TyFloat -> "f" | Ast.TyInt -> "i" | _ -> "?") in
+    (match Ast.walk r with
+     | Ast.TyArrow _ -> c ^ libm_sig_of r
+     | Ast.TyFloat -> c ^ ">f"
+     | _ -> c ^ ">?")
+  | _ -> "?"
+let libm_arity name =
+  match List.assoc_opt name libm_sigs with
+  | Some s -> String.index s '>'
+  | None -> 0
+
 (* `if __rv_xlen () == N then A else B` is decided here, at compile time: the
    prelude keeps one source for both widths, and the arm for the other width is
    neither compiled nor counted as reachable. That is what lets the 64-bit float
@@ -434,6 +460,7 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
   match e.node with
   | Ast.Var v ->
     (* map_* builtins lower to the rv-prelude's rvmap_* helpers; pull those in *)
+    if Hashtbl.mem libm_bound v then ("__libm_" ^ v) :: v :: acc else
     (match v with
      | "map_new" -> "rvmap_new" :: v :: acc
      | "map_set" -> "rvmap_set" :: v :: acc
@@ -587,6 +614,7 @@ let globals_map : (string, int) Hashtbl.t = Hashtbl.create 32
    the same shape as the hole Q-070 closed for builtins, one declaration further
    out. *)
 let externs : (string, unit) Hashtbl.t = Hashtbl.create 16
+
 (* Globals + heap sit well above the code (the program loads at 0). The code
    must stay below this; the self-hosted compiler is ~300KB, so 2MB is ample. *)
 (* Where this program is loaded. Zero for the machine's first program, which the
@@ -1446,11 +1474,12 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
                here, because a second list drifts from the first. *)
             err e.loc (Printf.sprintf
               "RV32I: `%s` has no RV32I lowering yet (host builtin)" v)
+          else if Hashtbl.mem libm_bound v then
+            compile_expr env { e with Ast.node = Ast.Var ("__libm_" ^ v) }
           else if Hashtbl.mem externs v then
             err e.loc (Printf.sprintf
               "RV32I: `%s` is declared `extern fn`, and this target has no C \
-               library to link against -- `--bare` hands the program the machine, \
-               not a host" v)
+               library to link against -- the program is the whole machine image" v)
           else
             err e.loc (Printf.sprintf "RV32I: unbound variable `%s`" v)))
   (* Rewritten to a call rather than lowered here, the way `print_bool` is: the
@@ -2728,6 +2757,9 @@ and compile_app env e =
      with a target that cannot do something: mere-ruby sets `$$` from `getpid` at
      startup, and until this was catchable, wrapping that line changed nothing --
      the abort exited the process from inside the handler's reach. *)
+  (* a libm name with libm's signature: the prelude's function (lib/rv_libm.ml) *)
+  | Ast.Var f when Hashtbl.mem libm_bound f && List.length args = libm_arity f ->
+    call_top env ("__libm_" ^ f) args
   | Ast.Var f when Hashtbl.mem externs f ->
     List.iter (fun arg -> compile_expr env arg) args;
     emit_abort (Printf.sprintf
@@ -4286,6 +4318,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   Hashtbl.reset type_variants;
   Hashtbl.reset type_records;
   Hashtbl.reset externs;
+  Hashtbl.reset libm_bound;
   (* constructor tags + record field orders from the type declarations *)
   List.iter (fun decl ->
     match decl with
@@ -4297,7 +4330,11 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
     | Ast.Top_record (name, params, fields) ->
       Hashtbl.replace record_fields name (List.map fst fields);
       Hashtbl.replace type_records name (params, fields)
-    | Ast.Top_extern (name, _) -> Hashtbl.replace externs name ()
+    | Ast.Top_extern (name, ty) ->
+      Hashtbl.replace externs name ();
+      (match List.assoc_opt name libm_sigs with
+       | Some sg when libm_sig_of ty = sg -> Hashtbl.replace libm_bound name ()
+       | _ -> ())
     | _ -> ()
   ) prog.Ast.decls;
   let main_body = split_tops full in

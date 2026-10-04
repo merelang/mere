@@ -154,4 +154,27 @@ else
   diff "$TMP/lmref.out" "$TMP/lmrv.out" | head -20
   rc=1
 fi
+
+# The libm (lib/rv_libm.ml): sin/cos/tan/atan2 and the twenty-one libm-named
+# externs the RISC-V backend binds to it, against the CORRECTLY ROUNDED values
+# in rv_libm_ext.expected -- not against this host's libm, which differs by
+# platform (see the .mere's header). RV32 needs the full 256 MB: every float
+# operation there allocates its limbs and a region gives nothing back.
+LX="$ROOT/test/float/rv_libm_ext.mere"
+LXE="$ROOT/test/float/rv_libm_ext.expected"
+LXN=$(grep -c . "$LXE")
+for w in 64 32; do
+  if [ $w = 64 ]; then flag=-rv64; ram=64; run=./rvrun64; else flag=-rv; ram=256; run=./rvrun; fi
+  [ -x "$TMP/${run#./}" ] || continue
+  "$MERE" $flag --ram $ram "$LX" > "$TMP/prog.bin" 2>"$TMP/err" || {
+    echo "FAIL rv_float: $flag refused the libm program"; head -3 "$TMP/err"; rc=1; continue; }
+  ( cd "$TMP" && perl -e 'alarm 600; exec @ARGV' $run $ram 2>&1 ) | grep -v '^rvrun: ' > "$TMP/lx$w.out"
+  if diff -q "$LXE" "$TMP/lx$w.out" >/dev/null; then
+    echo "ok rv_float: $LXN libm results on RV$w identical to the correctly rounded values"
+  else
+    echo "FAIL rv_float: the libm on RV$w left the correctly rounded value"
+    diff "$LXE" "$TMP/lx$w.out" | head -10
+    rc=1
+  fi
+done
 exit $rc
