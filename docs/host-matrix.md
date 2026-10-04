@@ -31,6 +31,7 @@ machine rather than a host.
 | `__rv_open_rd` | refused | refused | refused | yes |
 | `__rv_open_wr` | refused | refused | refused | yes |
 | `__rv_read_all` | refused | refused | refused | yes |
+| `__rv_str_hash` | unattributed | refused | refused | yes |
 | `__rv_substring_raw` | refused | refused | refused | yes |
 | `__rv_urandom32` | refused | refused | refused | yes |
 | `__rv_write_all` | refused | refused | refused | yes |

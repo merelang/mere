@@ -1,0 +1,62 @@
+// A Map driven by a deterministic random walk of set / delete / get / has /
+// len / iter / compact / clear, over a small key space so that keys are
+// overwritten, deleted and set again many times -- the cases a hash table can
+// get wrong and an assoc list could not: an overwrite must keep its place in
+// iteration order, a delete leaves a tombstone the probe must step over, a key
+// set again after its delete goes to the end, the index grows under live
+// iteration order, and compact repacks without changing any of it.
+//
+// Every backend must print the same lines. On RISC-V this Map is the prelude's
+// (a hash table since v0.1.611; it was an assoc list), elsewhere the runtime's.
+//
+// Execution mode: interp + C + LLVM + Wasm (parity), RV32 / RV64 (rv_exec_check)
+let next = fn (s: int) -> bit_and (s * 1103515245 + 12345) 2147483647;
+let key_of = fn (r: int) -> "k" ++ str_of_int (bit_and (bit_shr r 8) 63);
+
+let dump_s = fn m ->
+  let acc = strbuf_new () in
+  let _ = map_iter m (fn (k: str) -> fn (v: int) ->
+    let _ = strbuf_push acc k in let _ = strbuf_push acc ":" in
+    strbuf_push acc (str_of_int v ++ " ")) in
+  print (str_of_int (map_len m) ++ " | " ++ strbuf_to_str acc);
+let dump_i = fn m ->
+  let sum = vec_new () in
+  let _ = vec_push sum 0 in
+  let _ = map_iter m (fn (k: int) -> fn (v: int) ->
+    vec_set sum 0 (bit_and (vec_get sum 0 * 31 + k * 7 + v) 1048575)) in
+  print (str_of_int (map_len m) ++ " # " ++ str_of_int (vec_get sum 0));
+
+let rec walk_s = fn m -> fn (s: int) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then ()
+  else
+    let s1 = next s in
+    let op = bit_and s1 15 in
+    let k = key_of s1 in
+    let _ = (if op < 7 then map_set m k i
+             else if op < 10 then map_delete m k
+             else if op < 12 then print (if map_has m k then k ++ "=" ++ str_of_int (map_get m k) else k ++ " absent")
+             else if op == 12 then dump_s m
+             else if op == 13 && bit_and (bit_shr s1 4) 7 == 0 then map_compact m
+             else if op == 14 && bit_and (bit_shr s1 4) 31 == 0 then map_clear m
+             else ()) in
+    walk_s m s1 (i + 1) n;
+let rec walk_i = fn m -> fn (s: int) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then ()
+  else
+    let s1 = next s in
+    let op = bit_and s1 15 in
+    let k = bit_and (bit_shr s1 8) 255 - 100 in
+    let _ = (if op < 8 then map_set m k (i * 3)
+             else if op < 11 then map_delete m k
+             else if op < 13 then (if map_has m k then (if map_get m k < 0 then print "neg" else ()) else ())
+             else if op == 13 then dump_i m
+             else if op == 14 && bit_and (bit_shr s1 4) 7 == 0 then map_compact m
+             else ()) in
+    walk_i m s1 (i + 1) n;
+
+let ms = map_new ();
+let _ = walk_s ms 7 0 1500;
+let _ = dump_s ms;
+let mi = map_new ();
+let _ = walk_i mi 11 0 3000;
+dump_i mi
