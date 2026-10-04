@@ -4,6 +4,45 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.606 — 2026-10-04
+
+_On RISC-V, `f_pow`, `exp` and `log` answer what libm answers: within 1 ulp everywhere, and the same bits on all but a few points in a thousand. `2.3 ** 3` is 12.166999999999998 there now, as everywhere else. An `extern` whose parameter is `unit` can be called with a unit-typed variable on C and LLVM._
+
+**`f_pow` / `exp` / `log` on RV32IM and RV64IM** (found by mere-ruby on RV64,
+corpus 105 and 173). These are prelude Mere over softfloat there, and
+libm on every other backend. Measured against libm on 6000-call sweeps:
+`f_pow` disagreed on 3131 points by up to 20 ulp, `exp` on 303 by 1, `log` on
+598 by up to 2; mere-ruby printed `2.3 ** 3` as 12.166999999999996 and
+`8 ** (1.0 / 3)` as 1.9999999999999998. Now 47, 2 and 4 points, each 1 ulp
+(`f_pow`'s worst is 0.71 ulp from the true value; on most of the 47 libm is
+the closer one). Three changes, all built from exact `two_sum` / `two_prod`
+(Dekker) pieces and rounded once at the end:
+- the log's HEAD+TAIL pair carries the rounding of `s = (m-1)/(m+1)`, which
+  was up to 4e-17 -- a whole ulp of log near 1, and y times that in `f_pow`;
+- `__fp_exp2` takes its argument as a pair, sums 1 + r + r^2/2 exactly, and
+  scales the argument's tail by all of e^r: the first version scaled it by
+  1 + r and was six ulps off at |y ln x| = 190, where the tail is 1e-14;
+- integer exponents |y| <= 32 walk the binary powering as pairs. The plain
+  walk stays as the first step: it is exact where the answer is exact, and
+  outside [2^-960, 2^960] (where a pair cannot be split) its answer stands.
+The cost is time and memory: a `f_pow` is about 2.3x the work, and on these
+targets every float operation allocates (about 2 KB through softfloat's
+limbs, and a region gives nothing back), so a `f_pow` now takes ~600 KB of
+the heap instead of ~300 KB. `test/float/rv_libm_points.mere` holds 66 points
+of the three to libm's bits -- points that 605 got wrong -- and
+`scripts/rv_float_check.sh` runs it on RV32I when `MEMU` is set; RV64 gives
+the same bits.
+
+**An extern's `unit` parameter is dropped by its type** (found while wrapping
+mere-ruby's externs). The C prototype drops a unit parameter by its declared
+type (`extern int getpid(void);`), but the call dropped only a literal `()`,
+so `fn (u: unit) -> getpid u` emitted `getpid(mu_u)` and clang refused the
+program; LLVM declared `@getpid()` and called it with an `i64`, which linked
+by luck. Both calls now drop the argument by the parameter's declared type,
+and a non-literal one is still evaluated, ahead of the call.
+`test/ctests/extern_unit_param_variable.mere` (clang) and a test_basic case
+(the LLVM call) hold it.
+
 ## v0.1.605 — 2026-10-03
 
 _A chain of literal `++` is one literal by the time it is compiled, and a list is copied along its spine by a loop: ten million elements no longer run the copy out of C stack, and a 6703-line text written one literal per line no longer costs the square of its length at startup. On Wasm, a region block's result no longer overwrites itself on the way out._

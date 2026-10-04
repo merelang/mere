@@ -525,12 +525,16 @@ let float_of_str = fn (s: str) -> __sf_float_of_sf (__sf_sf_of_dec s);
 // below in double arithmetic (which softfloat provides on this target) with
 // DOCUMENTED accuracy, measured against libm on 10k-point sweeps:
 //
-//   exp <= 1 ulp | log <= 2 ulp | sin/cos <= ~10 ulp and tan <= ~14 for
-//   |x| <= 1.6e6 (the 3-term reduction's exact range; beyond it they degrade
-//   and huge-argument reduction is out of scope) | atan2 <= 3 ulp |
-//   f_pow: exact-where-exact for integer exponents |y| <= 32 via binary
-//   exponentiation, general case <= ~20 ulp measured, error growing with
-//   |y ln x| (the honest floor without a double-double log)
+//   exp, log, f_pow <= 1 ulp from libm, and equal to it on all but 2, 4 and 47
+//   of 6000-point sweeps (v0.1.606; f_pow's worst against the true value is
+//   0.71 ulp): each is built from exact two_sum / two_prod pieces and rounded
+//   once -- a HEAD+TAIL log, an exp that takes a pair, and integer powers
+//   |y| <= 32 walked as pairs. Before, exp was 1 ulp off libm on 10% of
+//   points, log up to 2, and f_pow up to 20, growing with |y ln x|.
+//   test/float/rv_libm_points.mere holds points of each to libm's bits. |
+//   sin/cos <= ~10 ulp and tan <= ~14 for |x| <= 1.6e6 (the 3-term
+//   reduction's exact range; beyond it they degrade and huge-argument
+//   reduction is out of scope) | atan2 <= 3 ulp
 //
 // floor / ceil / round / f_min / f_max are EXACT: bit surgery and compares.
 // They cannot follow the libm-linked backends' spelling because there is no
@@ -599,35 +603,69 @@ let e = 2.718281828459045;
 // 2^k by building the exponent field; normal range only, callers split
 let __fp_pow2i = fn (k: int) -> float_of_bits (bit_shl (k + 1023) 20) 0;
 
+// The exact pieces the rest is built from. A Dekker split cuts a double into two
+// halves of <= 26 bits, so a product of halves is exact and x * y can be had as
+// a HEAD+TAIL pair whose sum is the true product. The split multiplies by
+// 2^27 + 1, so the argument has to stay below ~2^996; every caller here checks
+// its range first.
+let __fp_split = fn (x: float) ->
+  let c = x * 134217729.0 in
+  let h = c - (c - x) in
+  (h, x - h);
+let __fp_two_prod = fn (x: float) -> fn (y: float) ->
+  let p = x * y in
+  let (xh, xl) = __fp_split x in
+  let (yh, yl) = __fp_split y in
+  (p, ((xh * yh - p) + xh * yl + xl * yh) + xl * yl);
+let __fp_two_sum = fn (x: float) -> fn (y: float) ->
+  let s = x + y in
+  let bb = s - x in
+  (s, (x - (s - bb)) + (y - bb));
+
+// e^(zh + zl), rounded ONCE. k = round(zh / ln 2) and r = zh - k ln2 as a
+// pair (Cody-Waite: ln2_hi has 33 bits, so k * ln2_hi is exact for every k
+// this range allows, and the subtraction is exact by Sterbenz). Then
+// e^r = 1 + r + r^2/2 + r^3 P(r): the first three terms are summed exactly --
+// r^2 by two_prod -- and everything else is below 0.008, where a few ulps of
+// its own are a hundredth of an ulp of the result. The input's tail rides in
+// as zl e^r: the pair is what lets f_pow pass y log x without rounding it
+// first.
+let __fp_exp2 = fn (zh: float) -> fn (zl: float) ->
+  let kf = round (zh * 1.4426950408889634) in
+  let k = int_of_float kf in
+  let r1 = zh - kf * 0.6931471803691238 in
+  let (rh, re) = __fp_two_sum r1 (0.0 - kf * 1.9082149292705877e-10) in
+  let rl = re + zl in
+  let p = 7.647163731819816e-13 in
+  let p = p * rh + 1.1470745597729725e-11 in
+  let p = p * rh + 1.6059043836821613e-10 in
+  let p = p * rh + 2.08767569878681e-9 in
+  let p = p * rh + 2.505210838544172e-8 in
+  let p = p * rh + 2.755731922398589e-7 in
+  let p = p * rh + 0.0000027557319223985893 in
+  let p = p * rh + 0.0000248015873015873 in
+  let p = p * rh + 0.0001984126984126984 in
+  let p = p * rh + 0.001388888888888889 in
+  let p = p * rh + 0.008333333333333333 in
+  let p = p * rh + 0.041666666666666664 in
+  let p = p * rh + 0.16666666666666666 in
+  let (sh, sl) = __fp_two_prod rh rh in
+  let c3 = (sh * rh) * p in
+  let (a, ea) = __fp_two_sum 1.0 rh in
+  let (b, eb) = __fp_two_sum a (sh * 0.5) in
+  // rl scales by e^r, all of it: rl is y log x's rounding in f_pow, up to
+  // ~1e-14, and stopping at rl (1 + r) dropped r^2/2 of that -- six ulps.
+  let lo = ((ea + eb) + (sl * 0.5 + rl * (b + c3))) + c3 in
+  let m = b + lo in
+  if k >= 0 - 1021 && k <= 1023 then m * __fp_pow2i k
+  else if k < 0 - 1021 then (m * __fp_pow2i (k + 512)) * __fp_pow2i (0 - 512)
+  else (m * __fp_pow2i (k - 512)) * __fp_pow2i 512;
+
 let exp = fn (x: float) ->
   if x != x then x
   else if x > 709.782712893384 then 1.0 / 0.0
   else if x < 0.0 - 745.1332191019412 then 0.0
-  else
-    // k = round(x / ln 2); r = x - k ln2 via Cody-Waite (33-bit ln2_hi, so
-    // k * ln2_hi is exact for every k this range allows)
-    let kf = round (x * 1.4426950408889634) in
-    let k = int_of_float kf in
-    let r = (x - kf * 0.6931471803691238) - kf * 1.9082149292705877e-10 in
-    let p = 7.647163731819816e-13 in
-    let p = p * r + 1.1470745597729725e-11 in
-    let p = p * r + 1.6059043836821613e-10 in
-    let p = p * r + 2.08767569878681e-9 in
-    let p = p * r + 2.505210838544172e-8 in
-    let p = p * r + 2.755731922398589e-7 in
-    let p = p * r + 0.0000027557319223985893 in
-    let p = p * r + 0.0000248015873015873 in
-    let p = p * r + 0.0001984126984126984 in
-    let p = p * r + 0.001388888888888889 in
-    let p = p * r + 0.008333333333333333 in
-    let p = p * r + 0.041666666666666664 in
-    let p = p * r + 0.16666666666666666 in
-    let p = p * r + 0.5 in
-    let p = p * r + 1.0 in
-    let p = p * r + 1.0 in
-    if k >= 0 - 1021 && k <= 1023 then p * __fp_pow2i k
-    else if k < 0 - 1021 then (p * __fp_pow2i (k + 512)) * __fp_pow2i (0 - 512)
-    else (p * __fp_pow2i (k - 512)) * __fp_pow2i 512;
+  else __fp_exp2 x 0.0;
 
 // log as a HEAD+TAIL pair, renormalized so |tail| <= ulp(head): f_pow needs the
 // pair (a 1-ulp log error, magnified by y, is the whole ballgame there), and
@@ -645,7 +683,15 @@ let __fp_log2p = fn (x: float) ->
   let (m, k) = if m0 >= 1.4142135623730951
                then (m0 * 0.5, k0 + e - 1022)
                else (m0, k0 + e - 1023) in
-  let s = (m - 1.0) / (m + 1.0) in
+  // s = (m - 1) / (m + 1) carries its rounding as a tail: m - 1 is exact
+  // (Sterbenz), m + 1 is a two_sum, and the division's remainder is exact
+  // through two_prod. Without it 2s was off by up to 4e-17 -- a whole ulp of
+  // log for x near 1, and y times that in f_pow.
+  let u = m - 1.0 in
+  let (v, vt) = __fp_two_sum m 1.0 in
+  let s = u / v in
+  let (q, qe) = __fp_two_prod s v in
+  let st = (((u - q) - qe) - s * vt) / v in
   let w = s * s in
   // atanh series: log m = 2s (1 + w/3 + ... + w^11/23), last term ~6e-19 rel
   let p = 0.043478260869565216 in
@@ -661,10 +707,8 @@ let __fp_log2p = fn (x: float) ->
   let p = p * w + 0.3333333333333333 in
   let lm_tail = 2.0 * s * (w * p) in
   let kf = float_of_int k in
-  let a = kf * 0.6931471803691238 in
-  let b = 2.0 * s in
-  let h0 = a + b in
-  let t0 = (a - h0 + b) + (kf * 1.9082149292705877e-10 + lm_tail) in
+  let (h0, e0) = __fp_two_sum (kf * 0.6931471803691238) (2.0 * s) in
+  let t0 = e0 + ((2.0 * st + kf * 1.9082149292705877e-10) + lm_tail) in
   let head = h0 + t0 in
   let tail = h0 - head + t0 in
   (head, tail);
@@ -712,15 +756,39 @@ let rec f_pow = fn (x: float) -> fn (y: float) ->
     // correctly rounded sqrt wherever they overlap).
     else if y == 0.0 - 0.5 then 1.0 / sqrt x
     else if __fp_is_int_f y && f_abs y <= 32.0 then
-      // small integer exponent: binary exponentiation -- exact where the
-      // result is exact (2^10, 10^-3), which is the common printed case
+      // small integer exponent: binary exponentiation, carried as HEAD+TAIL
+      // pairs and rounded once at the end. Plain doubles rounded at every
+      // product: 2.3 ** 3 came out 12.166999999999996, where libm (and ruby)
+      // answer the correctly rounded 12.166999999999998. The plain walk is
+      // still the first step -- it is exact where the result is exact, and it
+      // tells whether the pair can be split without overflowing; outside
+      // [2^-960, 2^960] its answer stands.
       (let rec go = fn (b: float) -> fn (n: int) -> fn (acc: float) ->
          if n == 0 then acc
          else if n - (n / 2) * 2 == 1 then go (b * b) (n / 2) (acc * b)
          else go (b * b) (n / 2) acc in
        let n = int_of_float (f_abs y) in
        let m = go x n 1.0 in
-       if y < 0.0 then 1.0 / m else m)
+       let big = __fp_pow2i 960 in
+       if m != m || m > big || m < 1.0 / big then (if y < 0.0 then 1.0 / m else m)
+       else
+         // (h, l) * (h2, l2), renormalized
+         (let mul = fn (h: float) -> fn (l: float) -> fn (h2: float) -> fn (l2: float) ->
+            let (p, pe) = __fp_two_prod h h2 in
+            __fp_two_sum p (pe + (h * l2 + l * h2)) in
+          let rec gd = fn (bh: float) -> fn (bl: float) -> fn (k: int) -> fn (ah: float) -> fn (al: float) ->
+            if k == 0 then (ah, al)
+            else
+              let (ah2, al2) = (if k - (k / 2) * 2 == 1 then mul ah al bh bl else (ah, al)) in
+              if k / 2 == 0 then (ah2, al2)
+              else (let (bh2, bl2) = mul bh bl bh bl in gd bh2 bl2 (k / 2) ah2 al2) in
+          let (rh, rl) = gd x 0.0 n 1.0 0.0 in
+          if y > 0.0 then rh + rl
+          else
+            // 1 / (rh + rl): the quotient's remainder is exact through two_prod
+            (let q = 1.0 / rh in
+             let (qp, qe) = __fp_two_prod q rh in
+             q + q * (((1.0 - qp) - qe) - q * rl))))
     else
       // exp(y log x) with the product done EXACTLY (Dekker split) over the
       // two-piece log, so the only inherited error is the log's own
@@ -736,7 +804,7 @@ let rec f_pow = fn (x: float) -> fn (y: float) ->
       let pl = perr + y * lt in
       if ph > 710.0 then inf
       else if ph < 0.0 - 746.0 then 0.0
-      else exp ph * (1.0 + pl);
+      else __fp_exp2 ph pl;
 
 // pi/2 in four ~33-bit pieces (fdlibm's): n * piece is exact for n < 2^20,
 // which is the documented full-quality range. The subtractions carry their

@@ -95,4 +95,24 @@ else
   diff "$TMP/cvref.out" "$TMP/cvrv.out" | head -30
   rc=1
 fi
+
+# f_pow / exp / log: prelude Mere here, libm on the reference. Not required to
+# agree everywhere (nobody's pow is required to be correctly rounded), so the
+# file holds points where they DO agree and did not before v0.1.606 -- see its
+# header for the sweep they were picked from.
+LM="$ROOT/test/float/rv_libm_points.mere"
+"$MERE" -c "$LM" > "$TMP/lm.c" 2>"$TMP/err" || { echo "FAIL rv_float: the C backend refused the libm points"; exit 1; }
+$CC -O1 -w -o "$TMP/lmref" "$TMP/lm.c" -lm || exit 1
+"$TMP/lmref" > "$TMP/lmref.out"
+"$MERE" -rv --ram 32 "$LM" > "$TMP/prog.bin" 2>"$TMP/err" || {
+  echo "FAIL rv_float: -rv refused the libm points"; head -3 "$TMP/err"; exit 1; }
+( cd "$TMP" && perl -e 'alarm 300; exec @ARGV' ./rvrun 32 2>&1 ) | grep -v '^rvrun: ' > "$TMP/lmrv.out"
+LMN=$(grep -c . "$TMP/lmref.out")
+if diff -q "$TMP/lmref.out" "$TMP/lmrv.out" >/dev/null; then
+  echo "ok rv_float: $LMN f_pow/exp/log points identical — the RV32I prelude equals libm on each"
+else
+  echo "FAIL rv_float: f_pow/exp/log on RV32I left libm's answer at a point it used to match"
+  diff "$TMP/lmref.out" "$TMP/lmrv.out" | head -20
+  rc=1
+fi
 exit $rc
