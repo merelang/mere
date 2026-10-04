@@ -230,6 +230,19 @@ let _ = vec_set tcb x_gp (raw_base scratch) in
 Two programs built with different `--load-base` never share a heap either, so the
 same rule covers a user process.
 
+A region block keeps three words of state besides `gp` (v0.1.613): how many
+blocks are open, the innermost one's mark, and the high-water mark that stores
+raise. They sit in the runtime words at the start of the globals, one set per
+machine, not per task. Another task's container stores while one task is inside
+a block raise the high-water mark into the other task's heap; the mark is only
+ever raised, and the closing brace never rolls back past the block's own `gp`,
+so such a store makes the block keep more memory (all of it, if the other heap
+is above), never less. That is the case of `riscv_bare_shell`, whose background
+task counts into a Vec while the shell may be inside its per-command region. A
+task that itself ENTERS a region while another is inside one would interleave
+the depth and the marks: a scheduler that allows that must save and restore the
+three words with the registers.
+
 ## A user process
 
 A user process is an **ordinary** Mere program: not `--bare`, holding no

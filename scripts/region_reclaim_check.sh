@@ -16,6 +16,7 @@
 #   Wasm       completes         completes         reclaims (unreclaimed needs
 #                                                  ~105 MB of a fixed 64 MiB)
 #   LLVM       127 -> 316 MB     5.8 MB flat       reclaims as of v0.1.443
+#   RISC-V     (v0.1.612: depth 14 runs out of 16 MB; v0.1.613: 100 trees fit)
 #
 # THE LLVM COLUMN IS WHY THIS FILE EXISTS. When it was written the backend
 # allocated every value in @__lang_default_region whatever region blocks were
@@ -33,7 +34,8 @@
 # is a RATIO with a wide band, never an absolute number.
 #
 # Usage:
-#   sh scripts/region_reclaim_check.sh
+#   sh scripts/region_reclaim_check.sh             (C, LLVM, Wasm; RV64 too with MEMU)
+#   MEMU=<memu> sh scripts/region_reclaim_check.sh --rv-only
 
 set -u
 
@@ -53,6 +55,10 @@ trap 'rm -rf "$TMP"' EXIT
 
 fail=0
 checked=0
+# --rv-only: just the RISC-V leg (CI runs it where the memu clone exists)
+RV_ONLY=0
+[ "${1:-}" = "--rv-only" ] && RV_ONLY=1
+if [ "$RV_ONLY" = 0 ]; then
 
 # Peak RSS in BYTES, measured by a wrapper this gate compiles itself.
 #
@@ -343,13 +349,45 @@ else
   fi
 fi
 
+fi
+
+# RISC-V (v0.1.613): regions roll back again. 100 trees of depth 14 are ~130 MB
+# unreclaimed; in 16 MB of RAM completing IS the proof. Needs the RV64 core.
+rv_note=""
+if [ -n "${MEMU:-}" ] && [ -f "$MEMU/riscv-runc/rv64i_run.mere" ]; then
+  if "$MERE" -c "$MEMU/riscv-runc/rv64i_run.mere" > "$TMP/rv64.c" 2>/dev/null &&
+     $CC -O2 -w -o "$TMP/rvrun64" "$TMP/rv64.c" 2>/dev/null &&
+     "$MERE" -rv64 --ram 16 "$SRC" > "$TMP/prog.bin" 2>/dev/null; then
+    a_r="$( cd "$TMP" && perl -e 'alarm 600; exec @ARGV' ./rvrun64 16 -- 100 14 2>&1 | grep -v '^rvrun' | head -1 )"
+    if [ "$a_r" != "3276700" ]; then
+      echo "FAIL region_reclaim/RV64: got '$a_r', expected 3276700 — 100 trees of depth 14 did not fit in 16 MB: the RISC-V region stopped reclaiming"
+      fail=1
+    fi
+    checked=$((checked + 1)); rv_note=", RV64 holds 100 trees in 16 MB"
+  else
+    echo "FAIL region_reclaim/RV64: could not build the emulator or the program"; fail=1
+  fi
+fi
+
+if [ "$RV_ONLY" = 1 ]; then
+  # without the emulator, build it -- the convention of rv_exec_check and
+  # os_check, which CI runs with MEMU set
+  if [ -z "$rv_note" ] && [ "$fail" = 0 ]; then
+    "$MERE" -rv64 --ram 16 "$SRC" > "$TMP/prog.bin" 2>"$TMP/rverr" || {
+      echo "FAIL region_reclaim/RV64: -rv64 refused pertree.mere"; head -3 "$TMP/rverr"; exit 1; }
+    echo "region_reclaim (RV64): pertree.mere built — nothing RAN; set MEMU=<memu checkout> for that half"
+    exit 0
+  fi
+  [ "$fail" = 0 ] && { echo "PASS region_reclaim (RV64): 100 trees of depth 14 run in 16 MB"; exit 0; }
+  exit 1
+fi
 if [ "$checked" -lt 7 ]; then
   echo "FAIL region_reclaim: only $checked checks ran"
   exit 1
 fi
 
 if [ "$fail" = 0 ]; then
-  echo "PASS region_reclaim: $checked checks — C flat at $(( c_big / 1048576 )) MB, LLVM flat at $(( l_big / 1048576 )) MB, Wasm completes inside 64 MiB; a callee-built container is reclaimed on C ($(( pc_c_small / 1048576 )) -> $(( pc_c_big / 1048576 )) MB), LLVM ($(( pc_l_small / 1048576 )) -> $(( pc_l_big / 1048576 )) MB) and Wasm (Q-127 closed on both compiled backends)"
+  echo "PASS region_reclaim: $checked checks — C flat at $(( c_big / 1048576 )) MB, LLVM flat at $(( l_big / 1048576 )) MB, Wasm completes inside 64 MiB; a callee-built container is reclaimed on C ($(( pc_c_small / 1048576 )) -> $(( pc_c_big / 1048576 )) MB), LLVM ($(( pc_l_small / 1048576 )) -> $(( pc_l_big / 1048576 )) MB) and Wasm (Q-127 closed on both compiled backends)$rv_note"
   exit 0
 fi
 exit 1

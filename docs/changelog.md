@@ -4,6 +4,64 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.613 — 2026-10-05
+
+_A region block on RISC-V gives its memory back again, behind a high-water mark; on LLVM a string stored into an older Map or Vec inside a block no longer dangles; and Wasm's high-water mark no longer misses a container a callee built and stored outward._
+
+**RISC-V.** A region block reclaimed nothing on this backend. It once rolled
+`gp` back to the block's start, and that was unsound -- a `map_set` on an outer
+Map allocated the Map's new parts inside the block's range, and the rollback
+freed them -- so the rollback was taken out. It is back, with the Wasm
+backend's answer to the same problem: three runtime words (depth, the innermost
+block's mark, a high-water mark), a protect after every `vec_push`, `vec_set`
+and `strbuf_push` (a Map is Vecs since v0.1.611, so it goes through them), and
+at the closing brace `gp` returns to `max(mark, high-water mark)`. The result is copied out by a per-type
+`__rcopy_<tag>` (str, bytes, a float's box, tuples, records, variants,
+recursive ones included) twice: above the garbage first, then down to where
+the block now ends, unless the two overlap. A block whose result is a closure
+or holds a container runs without rolling back, as every block did before. A
+failure out of a block skips the rollback, and `try_or` puts the depth and the
+block mark back. `test/regionreclaim/pertree.mere`: 100 trees of depth 14 run
+in a 16 MB machine, which v0.1.612 ran out of; `region_reclaim_check.sh
+--rv-only` is a CI step now.
+
+Every store protects, an int's too. A version of this that skipped int stores
+freed a queue mere-ruby still held: the monomorphizer erases a leftover type
+variable to `int`, and one instance of the prelude's Map insert serves every
+Map whose values are words or pointers, so "an int" was a pointer there. The
+region words are per machine, so on bare metal another task's stores raise the
+mark into its own heap; the mark is only ever raised and a block never rolls
+back past its own `gp`, so that makes the block keep more, never less
+(`riscv_bare_shell`'s background task counts into a Vec while the shell is in
+its per-command region). `docs/bare-metal.md` says what a scheduler has to do.
+
+**Wasm.** Its protect raised the high-water mark only for a container older than
+the innermost block. A container a callee builds inside the block and stores
+into an older one is reachable from outside but lies above the block's mark, so
+when a later push in the same block grew it, the new buffer was above the
+high-water mark, the rollback took it, and the next block wrote over it: the
+new parity test read `-14468027695667681` for a sum of 12350. A container below
+the high-water mark is protected now too -- once stored outward, that is where
+it is.
+
+**LLVM** had no copy-on-store. Since v0.1.443 a value made inside a block lives
+in the block, and `map_set` / `vec_push` / `vec_set` stored it as the pointer it
+was, so a string put into an outer Map inside `region R { }` was read after R
+was released: five lines put a string into an outer Map and a Vec, ran one more
+block, and printed `out of memory` where the other backends printed `v1 wx`.
+The helpers now copy what they store into the container's region -- the C
+backend's rule since v0.1.30 -- but only while a block is open, so a program
+without regions runs the code it ran before. A Map copies a key only when it
+inserts it.
+
+`test/parity/region_stores_and_rollback.mere` holds all three: results of every
+copyable kind, stores into older Maps, Vecs and StrBufs, a callee's container
+stored outward and then grown, nested blocks, a failure out of a block,
+40,000 blocks of 1.6 KB garbage each (64 MB unreclaimed, run by
+`rv_exec_check` in 32 MB), and an int-keyed Map of queues made inside blocks
+(the case the skipped int protect broke). With this version it prints the same lines on the
+interpreter, C, LLVM, Wasm, RV32 and RV64; with v0.1.612, LLVM and Wasm did not.
+
 ## v0.1.612 — 2026-10-04
 
 _On RV64, `str_of_float` and `float_of_str` work on 64-bit words: a float is printed with about 5 KB of heap instead of 280 KB, and `1e+-5` is refused on RISC-V as it is everywhere else._
@@ -49,8 +107,8 @@ there, so the list grew with every write -- `map_get` walked it, and `map_iter`
 walked a list of the keys it had seen once per element, the square of the
 length. Profiled on the RV64 emulator (through the debug map v0.1.610 made
 correct), that was 64% of mere-ruby's startup and 85-98% of the corpus files
-that timed out (`_mseen`, `_mfind`, `__str_eq`). C, LLVM and Wasm have had an
-O(1) Map since note 147.
+that timed out (`_mseen`, `_mfind`, `__str_eq`). C, LLVM and Wasm already had
+an O(1) Map.
 
 Now the entries are kept in insertion order -- keys, values and a live flag,
 three Vecs -- under an open-addressing index (a power-of-two Vec: 0 empty, -1 a
