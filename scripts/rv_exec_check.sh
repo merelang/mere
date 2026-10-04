@@ -269,6 +269,28 @@ if [ -n "$RVRUN64" ]; then
   echo ""
 fi
 
+# print_bytes and the machine a refusal names, at both widths. Written-out
+# expectations, like extern_catchable: the interpreter has no RV32I/RV64I to
+# name. The NUL is shown as `@` so the comparison is on text.
+name=print_bytes_and_names
+for w in 32 64; do
+  if [ $w = 32 ]; then flag=-rv; run="$RVRUN"; tag=RV32I; else flag=-rv64; run="$RVRUN64"; tag=RV64I; fi
+  [ -n "$run" ] || continue
+  exp="a@b
+$tag:
+$tag:"
+  if "$MERE" $flag --ram 16 "$ROOT/test/rv/print_bytes_and_names.mere" > "$TMP/prog.bin" 2>"$TMP/rverr"; then
+    got=$( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' "$run" 16 2>&1 | grep -a -v '^rvrun' | tr '\000' '@' )
+    if [ "$got" = "$exp" ]; then
+      printf '  ok    %s@%s (a NUL goes out with print_bytes; refusals say %s)\n' "$name" $w $tag; pass=$((pass+1))
+    else
+      printf '  FAIL  %s@%s\n    expected: %s\n    got:      %s\n' "$name" $w "$exp" "$got"; fail=$((fail+1)); rc=1
+    fi
+  else
+    printf '  FAIL  %s@%s (%s refused it)\n' "$name" $w $flag; head -3 "$TMP/rverr"; fail=$((fail+1)); rc=1
+  fi
+done
+
 # host_read_file: `read_file` / `file_exists` on the hosted target, against the
 # C backend. Both sides run IN "$TMP" with the fixtures beside them -- deliberate,
 # because the reference otherwise runs in the repo root and the emulator in a temp

@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.607 — 2026-10-04
+
+_On RISC-V, `print_bytes` writes its bytes (a NUL included) instead of stopping, and a refusal on RV64 names RV64I rather than RV32I._
+
+**`print_bytes` on RV32IM / RV64IM** was a stub ("needs a host") although a
+`bytes` value has been a str block there since v0.1.426 and the write goes by
+the length word: it is now that write, so a NUL in the middle goes out like any
+other byte, as on every other backend. docs/host-matrix.md: `stub` -> `yes`.
+
+**The machine a message names.** Every message of this backend was written for
+RV32I and began with that name, so on RV64 mere-ruby reported "RV32I: `fd_pipe`
+is an `extern fn`". `err` and `emit_abort` now spell it RV64I on RV64; the
+32-bit spelling is unchanged, because host_matrix.sh and rv_prelude_check.sh
+key on it. Two texts said `--bare` on the hosted path too: an unimplemented
+host service now says "needs a host service this target does not provide (a
+hosted run answers a fixed set of Linux calls; --bare answers none)", and an
+`extern fn` "has no C library to link against -- the program is the whole
+machine image" (the part mere-ruby matches on is as it was).
+`test/rv/print_bytes_and_names.mere` runs at both widths in
+`scripts/rv_exec_check.sh` (with `MEMU`).
+
 ## v0.1.606 — 2026-10-04
 
 _On RISC-V, `f_pow`, `exp` and `log` answer what libm answers: within 1 ulp everywhere, and the same bits on all but a few points in a thousand. `2.3 ** 3` is 12.166999999999998 there now, as everywhere else. An `extern` whose parameter is `unit` can be called with a unit-typed variable on C and LLVM._

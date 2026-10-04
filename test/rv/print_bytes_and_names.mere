@@ -1,0 +1,23 @@
+// Two things a RISC-V program says about itself, checked at both widths.
+//
+// print_bytes was a stub here ("needs a host") although a bytes value has been
+// a str block since v0.1.426 and the write goes by the length word -- so the
+// NUL in the middle is written like any other byte, as on every other backend.
+//
+// And the machine a refusal names is the one the program runs on: on RV64 every
+// message said "RV32I:" (mere-ruby on RV64 reported `fd_pipe` that way). The
+// first word of a refusal is printed, so the 32- and 64-bit runs differ in
+// exactly that word.
+extern fn getppid: unit -> int;
+
+let first_word = fn (s: str) ->
+  let rec go = fn (i: int) ->
+    if i >= str_len s then s
+    else if str_eq (substring s i (i + 1)) " " then substring s 0 i
+    else go (i + 1) in
+  go 0;
+
+let _ = print_bytes (bytes_of_str ("a" ++ chr 0 ++ "b"));
+let _ = print "";
+let _ = print (try_or_msg (fn (u: unit) -> str_of_int (getppid ())) (fn (m: str) -> first_word m));
+print (try_or_msg (fn (u: unit) -> str_of_int (run "true")) (fn (m: str) -> first_word m))

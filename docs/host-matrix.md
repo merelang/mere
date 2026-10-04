@@ -144,7 +144,7 @@ machine rather than a host.
 | `pow` | yes | yes | yes | yes |
 | `print` | yes | yes | yes | yes |
 | `print_bool` | yes | yes | yes | yes |
-| `print_bytes` | yes | yes | yes | stub |
+| `print_bytes` | yes | yes | yes | yes |
 | `print_err` | yes | yes | yes | yes |
 | `print_int` | yes | yes | yes | yes |
 | `print_no_nl` | yes | yes | yes | yes |
