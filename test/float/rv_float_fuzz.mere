@@ -1,0 +1,60 @@
+// Random operands through every float operation, for RV64's one-word
+// arithmetic (v0.1.608) against the machine's doubles. Run by
+// scripts/rv_float_check.sh at 64 bits; a line where BOTH sides are NaN is not
+// compared bit for bit -- which NaN comes out of two NaN operands differs between
+// machines, and rv_float_ops.mere names those pairs. Everything else, int_of_float
+// and float_of_int included, must be the hardware's bits.
+//
+// Operands come in classes (zeros, infinities, quiet and signalling NaNs,
+// subnormals, exponents at both edges, ordinary ones) and the second operand is
+// sometimes the first's neighbour or its negation, which is where a subtraction
+// cancels and a comparison ties. A 31-bit LCG drives it: no product overflows
+// a signed 64-bit int, so every backend draws the same numbers.
+let next = fn (s: int) -> bit_and (s * 1103515245 + 12345) 2147483647;
+let m32 = 4294967295;
+let show = fn (r: float) -> print (str_of_int (bit_and (float_bits_hi r) m32) ++ " " ++ str_of_int (bit_and (float_bits_lo r) m32));
+let showi = fn (n: int) -> print (str_of_int n);
+// a double from three draws, by class
+let mkf = fn (c: int) -> fn (r1: int) -> fn (r2: int) ->
+  let sign = bit_and r1 1 in
+  let fh = bit_and (bit_shr r1 1) 1048575 in
+  let lo = bit_xor (bit_shl (bit_and r2 65535) 16) (bit_and (bit_shr r1 7) 65535) in
+  let e = if c == 0 then 0
+          else if c == 1 then 2047
+          else if c == 2 then 2047
+          else if c == 3 then 2047
+          else if c == 4 then 0
+          else if c == 5 then 2040 + bit_and r2 7
+          else if c == 6 then 1 + bit_and (bit_shr r2 3) 63
+          else 1023 - 60 + bit_and (bit_shr r2 17) 127 in
+  let fh2 = if c == 0 || c == 1 then 0
+            else if c == 2 then bit_or fh 524288
+            else if c == 3 then bit_or (bit_and fh 524287) 1
+            else fh in
+  let lo2 = if c == 0 || c == 1 then 0 else lo in
+  float_of_bits (bit_or (bit_shl sign 31) (bit_or (bit_shl e 20) fh2)) lo2;
+let rec go = fn (i: int) -> fn (s: int) ->
+  if i >= 2000 then ()
+  else
+    let s1 = next s in let s2 = next s1 in let s3 = next s2 in
+    let s4 = next s3 in let s5 = next s4 in let s6 = next s5 in
+    let ca = bit_and s1 15 in
+    let cb = bit_and (bit_shr s4 3) 15 in
+    let a = mkf ca s2 s3 in
+    // a related second operand now and then: the same exponent, nearby bits
+    let b = if cb == 12 then float_of_bits (float_bits_hi a) (bit_xor (float_bits_lo a) (bit_and s5 255))
+            else if cb == 13 then f_neg a
+            else mkf cb s5 s6 in
+    let _ = show (a + b) in
+    let _ = show (a - b) in
+    let _ = show (a * b) in
+    let _ = show (a / b) in
+    let _ = show (sqrt a) in
+    let _ = showi ((if a < b then 1 else 0) + (if a <= b then 2 else 0) + (if a == b then 4 else 0) + (if a > b then 8 else 0) + (if a >= b then 16 else 0)) in
+    let e = bit_and (bit_shr (float_bits_hi a) 20) 2047 in
+    let _ = (if e < 1023 + 62 then showi (int_of_float a) else showi 0) in
+    let n = bit_or (bit_shl (bit_and s6 1073741823) 32) (bit_or (bit_shl (bit_and s5 65535) 16) (bit_and s4 65535)) in
+    let n2 = if bit_and s3 1 == 1 then 0 - n else bit_shr n (bit_and s2 63) in
+    let _ = show (float_of_int n2) in
+    go (i + 1) s6;
+go 0 12345

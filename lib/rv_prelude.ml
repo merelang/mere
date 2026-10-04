@@ -447,32 +447,291 @@ let rvmap_len_i = fn m -> _mlen_i (vec_get m 0) Nil 0;
 // The names are `__sf_`-prefixed because this file is prepended to the user's
 // program, so a program with its own top-level `add` would otherwise supply what
 // `+` on floats calls.
+// --- RV64: a double as ONE 64-bit word --------------------------------------
+// On RV64 the int is 64 bits, so the whole IEEE pattern fits one and the 53-bit
+// significand fits with room to spare: everything below is plain integer
+// arithmetic on words, with no record built on the way. The limb library above
+// built a record per operand per step -- about 2 KB of heap per `+`, and a
+// region gives nothing back on this target, so mere-ruby's `**` cost ~600 KB.
+// Here an operation allocates only its result's two-word block.
+//
+// It is the SAME algorithm as contrib/softfloat, transcribed: the working
+// significand is shifted left 3 (guard, round, sticky), a value is
+// `s * 2^(e - 1078)` in `pack`, every NaN rule is the limb library's (which was
+// measured against the hardware), and int_of_float keeps the limb library's
+// answers out of range too. Only the representation differs, and the RV64 run
+// of test/float/rv_float_ops.mere holds the two to the same bits as the
+// hardware. `if __rv_xlen () == 64` is decided at compile time
+// (codegen_riscv's xlen_test), so none of this is compiled for RV32, where an
+// int cannot hold the word.
+//
+// No tuples and no closures: each step is a top-level function of ints, so a
+// call allocates nothing. Constants are built by shifting; no literal here is
+// 2^31 or more.
+let __f64_bits = fn (x: float) ->
+  let m32 = bit_shl 1 32 - 1 in
+  bit_or (bit_shl (bit_and (float_bits_hi x) m32) 32) (bit_and (float_bits_lo x) m32);
+let __f64_float = fn (b: int) ->
+  let m32 = bit_shl 1 32 - 1 in
+  float_of_bits (bit_and (bit_shr b 32) m32) (bit_and b m32);
+let __f64_exp = fn (b: int) -> bit_and (bit_shr b 52) 2047;
+let __f64_frac = fn (b: int) -> bit_and b (bit_shl 1 52 - 1);
+let __f64_sign = fn (b: int) -> bit_and (bit_shr b 63) 1;
+let __f64_mag = fn (b: int) -> bit_and b (bit_shl 1 63 - 1);
+let __f64_mk = fn (sign: int) -> fn (e: int) -> fn (f: int) ->
+  bit_or (bit_or (bit_shl sign 63) (bit_shl e 52)) f;
+let __f64_is_nan = fn (b: int) -> __f64_exp b == 2047 && __f64_frac b != 0;
+let __f64_is_snan = fn (b: int) -> __f64_is_nan b && bit_and b (bit_shl 1 51) == 0;
+let __f64_is_inf = fn (b: int) -> __f64_exp b == 2047 && __f64_frac b == 0;
+let __f64_is_zero = fn (b: int) -> __f64_mag b == 0;
+let __f64_quiet = fn (b: int) -> bit_or b (bit_shl 1 51);
+let __f64_nan = fn (u: unit) -> __f64_mk 0 2047 (bit_shl 1 51);
+let __f64_inf = fn (sign: int) -> __f64_mk sign 2047 0;
+let __f64_eff = fn (b: int) -> if __f64_exp b == 0 then 1 else __f64_exp b;
+// the significand with its hidden bit, unshifted (53 bits for a normal)
+let __f64_sig = fn (b: int) ->
+  if __f64_exp b == 0 then __f64_frac b else bit_or (__f64_frac b) (bit_shl 1 52);
+// bit length of a non-negative int, by halving steps
+let rec __f64_bl = fn (x: int) -> fn (n: int) -> fn (k: int) ->
+  if k == 0 then (if x > 0 then n + 1 else n)
+  else if bit_shr x k > 0 then __f64_bl (bit_shr x k) (n + k) (k / 2)
+  else __f64_bl x n (k / 2);
+let __f64_blen = fn (x: int) -> __f64_bl x 0 32;
+// x >> n, and whether any of the n bits shifted out was set (0 <= n <= 62)
+let __f64_lost = fn (x: int) -> fn (n: int) ->
+  if n <= 0 then 0 else if bit_and x (bit_shl 1 n - 1) != 0 then 1 else 0;
+
+// pack: s carries the 3 extra bits, value s * 2^(e - 1078); round to nearest,
+// ties to even. Four steps, each a function of ints: down (a carry above bit
+// 55), underflow (an exponent below 1 shifts into a subnormal), up (leading
+// zeros, stopping at e = 1), round.
+let __f64_pk_round = fn (sign: int) -> fn (s1: int) -> fn (e1: int) -> fn (st: int) ->
+  let lsb = bit_and (bit_shr s1 3) 1 in
+  let rnd = bit_and (bit_shr s1 2) 1 in
+  let sticky = if bit_and s1 3 != 0 || st != 0 then 1 else 0 in
+  let s2 = if rnd == 1 && (sticky == 1 || lsb == 1) then s1 + 8 else s1 in
+  let carry = s2 >= bit_shl 1 56 in
+  let sr = if carry then bit_shr s2 1 else s2 in
+  let e3 = if carry then e1 + 1 else e1 in
+  let s3 = bit_shr sr 3 in
+  if e3 >= 2047 then __f64_inf sign
+  else if bit_and (bit_shr s3 52) 1 == 1 then __f64_mk sign e3 (bit_and s3 (bit_shl 1 52 - 1))
+  else if s3 == 0 then __f64_mk sign 0 0
+  else __f64_mk sign 0 s3;
+let __f64_pk_up = fn (sign: int) -> fn (s: int) -> fn (e: int) -> fn (st: int) ->
+  if e <= 1 || s == 0 || s >= bit_shl 1 55 then __f64_pk_round sign s e st
+  else
+    let want = 56 - __f64_blen s in
+    let sh = if want < e - 1 then want else e - 1 in
+    __f64_pk_round sign (bit_shl s sh) (e - sh) st;
+let __f64_pk_uf = fn (sign: int) -> fn (s: int) -> fn (e: int) -> fn (st: int) ->
+  if e >= 1 then __f64_pk_up sign s e st
+  else
+    let n = if 1 - e > 60 then 60 else 1 - e in
+    let s2 = bit_shr s n in
+    let st2 = if st != 0 || __f64_lost s n != 0 || s2 == 0 then 1 else 0 in
+    __f64_pk_up sign s2 1 st2;
+let __f64_pack = fn (sign: int) -> fn (s: int) -> fn (e: int) -> fn (st: int) ->
+  if s < bit_shl 1 56 then __f64_pk_uf sign s e st
+  else
+    let n = __f64_blen s - 56 in
+    __f64_pk_uf sign (bit_shr s n) (e + n) (if st != 0 || __f64_lost s n != 0 then 1 else 0);
+
+let __f64_add_mag = fn (a: int) -> fn (b: int) ->
+  let ea = __f64_eff a in let eb = __f64_eff b in
+  let sa = bit_shl (__f64_sig a) 3 in let sb = bit_shl (__f64_sig b) 3 in
+  let a_first = if ea != eb then ea > eb else sa >= sb in
+  let hs = if a_first then __f64_sign a else __f64_sign b in
+  let ls = if a_first then __f64_sign b else __f64_sign a in
+  let he = if a_first then ea else eb in
+  let le = if a_first then eb else ea in
+  let hv = if a_first then sa else sb in
+  let lv = if a_first then sb else sa in
+  let d = he - le in
+  let lv2 = if d > 60 then 0 else bit_shr lv d in
+  let st = if d > 60 then (if lv != 0 then 1 else 0) else __f64_lost lv d in
+  if hs == ls then __f64_pack hs (hv + lv2) he st
+  else
+    let diff = if st == 1 then hv - lv2 - 1 else hv - lv2 in
+    if diff == 0 && st == 0 then 0
+    else __f64_pack hs diff he st;
+let __f64_add = fn (a: int) -> fn (b: int) ->
+  if __f64_is_snan a then __f64_quiet a
+  else if __f64_is_snan b then __f64_quiet b
+  else if __f64_is_nan a then __f64_quiet a
+  else if __f64_is_nan b then __f64_quiet b
+  else if __f64_is_inf a then
+    (if __f64_is_inf b && __f64_sign a != __f64_sign b then __f64_nan () else a)
+  else if __f64_is_inf b then b
+  else if __f64_is_zero a && __f64_is_zero b then
+    (if __f64_sign a == 1 && __f64_sign b == 1 then __f64_mk 1 0 0 else 0)
+  else if __f64_is_zero a then b
+  else if __f64_is_zero b then a
+  else __f64_add_mag a b;
+let __f64_neg = fn (b: int) -> bit_xor b (bit_shl 1 63);
+let __f64_sub = fn (a: int) -> fn (b: int) ->
+  if __f64_is_nan a then __f64_quiet a
+  else if __f64_is_nan b then __f64_quiet b
+  else __f64_add a (__f64_neg b);
+
+// the product of two 53-bit significands as hi * 2^54 + lo, lo < 2^54, exactly:
+// each is split 26/27 so every partial product fits a signed 64-bit int
+let __f64_mul_fin = fn (sign: int) -> fn (h: int) -> fn (l: int) -> fn (e0: int) ->
+  let len = if h > 0 then 54 + __f64_blen h else __f64_blen l in
+  let k = if len > 56 then len - 56 else 0 in
+  // k <= 50 (len <= 106), so the top 56 bits are h << (54 - k) plus l >> k
+  let s = bit_shl h (54 - k) + bit_shr l k in
+  __f64_pack sign s (e0 + k - 1072) (__f64_lost l k);
+let __f64_mul_mag = fn (sign: int) -> fn (a: int) -> fn (b: int) ->
+  let m27 = bit_shl 1 27 - 1 in
+  let ma = __f64_sig a in let mb = __f64_sig b in
+  let ah = bit_shr ma 27 in let al = bit_and ma m27 in
+  let bh = bit_shr mb 27 in let bl = bit_and mb m27 in
+  let mid = ah * bl + al * bh in
+  let low = al * bl + bit_shl (bit_and mid m27) 27 in
+  let hi = ah * bh + bit_shr mid 27 + bit_shr low 54 in
+  let lo = bit_and low (bit_shl 1 54 - 1) in
+  __f64_mul_fin sign hi lo (__f64_eff a + __f64_eff b);
+let __f64_mul = fn (a: int) -> fn (b: int) ->
+  let sign = bit_xor (__f64_sign a) (__f64_sign b) in
+  if __f64_is_snan a then __f64_quiet a
+  else if __f64_is_snan b then __f64_quiet b
+  else if __f64_is_nan a then a
+  else if __f64_is_nan b then b
+  else if __f64_is_inf a then (if __f64_is_zero b then __f64_nan () else __f64_inf sign)
+  else if __f64_is_inf b then (if __f64_is_zero a then __f64_nan () else __f64_inf sign)
+  else if __f64_is_zero a || __f64_is_zero b then __f64_mk sign 0 0
+  else __f64_mul_mag sign a b;
+
+// a subnormal's significand shifted up to 53 bits, and the exponent paid for it
+let __f64_norm_sig = fn (b: int) ->
+  let m = __f64_sig b in bit_shl m (53 - __f64_blen m);
+let __f64_norm_exp = fn (b: int) ->
+  __f64_eff b - (53 - __f64_blen (__f64_sig b));
+// long division, one quotient bit per round (contrib/softfloat/div's `divide`)
+let rec __f64_div_go = fn (i: int) -> fn (rem: int) -> fn (q: int) -> fn (d: int) -> fn (sign: int) -> fn (e: int) ->
+  if i <= 0 then __f64_pack sign q e (if rem == 0 then 0 else 1)
+  else
+    let r1 = bit_shl rem 1 in
+    if r1 >= d then __f64_div_go (i - 1) (r1 - d) (bit_shl q 1 + 1) d sign e
+    else __f64_div_go (i - 1) r1 (bit_shl q 1) d sign e;
+let __f64_div = fn (a: int) -> fn (b: int) ->
+  let sign = bit_xor (__f64_sign a) (__f64_sign b) in
+  if __f64_is_snan a then __f64_quiet a
+  else if __f64_is_snan b then __f64_quiet b
+  else if __f64_is_nan a then a
+  else if __f64_is_nan b then b
+  else if __f64_is_inf a then (if __f64_is_inf b then __f64_nan () else __f64_inf sign)
+  else if __f64_is_inf b then __f64_mk sign 0 0
+  else if __f64_is_zero a then (if __f64_is_zero b then __f64_nan () else __f64_mk sign 0 0)
+  else if __f64_is_zero b then __f64_inf sign
+  else
+    let na = __f64_norm_sig a in let nb = __f64_norm_sig b in
+    let e = __f64_norm_exp a - __f64_norm_exp b + 1022 in
+    if na >= nb then __f64_div_go 56 (na - nb) 1 nb sign e
+    else __f64_div_go 56 na 0 nb sign e;
+
+// square root, digit by digit (contrib/softfloat/sqrt): the radicand is m << 58,
+// consumed two bits a round from the top; rem and root stay below 2^59
+let rec __f64_sq_go = fn (i: int) -> fn (m: int) -> fn (rem: int) -> fn (root: int) -> fn (u: int) ->
+  if i < 0 then __f64_pack 0 root (u + 1049) (if rem == 0 then 0 else 1)
+  else
+    let j1 = 2 * i + 1 in
+    let j0 = 2 * i in
+    let b1 = if j1 < 58 then 0 else bit_and (bit_shr m (j1 - 58)) 1 in
+    let b0 = if j0 < 58 then 0 else bit_and (bit_shr m (j0 - 58)) 1 in
+    let rem2 = bit_shl rem 2 + (b1 + b1 + b0) in
+    let cand = bit_shl root 2 + 1 in
+    if rem2 >= cand then __f64_sq_go (i - 1) m (rem2 - cand) (bit_shl root 1 + 1) u
+    else __f64_sq_go (i - 1) m rem2 (bit_shl root 1) u;
+let __f64_sqrt = fn (a: int) ->
+  if __f64_is_snan a then __f64_quiet a
+  else if __f64_is_nan a then a
+  else if __f64_is_zero a then a
+  else if __f64_sign a == 1 then __f64_nan ()
+  else if __f64_is_inf a then __f64_inf 0
+  else
+    let m0 = __f64_norm_sig a in
+    let t0 = __f64_norm_exp a - 1075 in
+    let odd = if t0 - (t0 / 2) * 2 == 0 then 0 else 1 in
+    let m = if odd == 1 then bit_shl m0 1 else m0 in
+    __f64_sq_go 55 m 0 0 ((t0 - odd) / 2);
+
+// int -> double, rounding: the magnitude is 2 * (n / 2) + (the odd bit), which
+// exists for the most negative int too (contrib/softfloat/conv's reason)
+let __f64_of_int = fn (n: int) ->
+  if n == 0 then 0
+  else
+    let sign = if n < 0 then 1 else 0 in
+    let mh = if n < 0 then 0 - (n / 2) else n / 2 in
+    let odd = bit_and n 1 in
+    if mh < bit_shl 1 59 then __f64_pack sign (bit_shl (mh + mh + odd) 3) 1075 0
+    else __f64_pack sign (bit_shr mh 3) 1082 (if odd != 0 || bit_and mh 7 != 0 then 1 else 0);
+// double -> int, truncating; out of range it answers what the limb library
+// answered on this width (a 64-bit wrap of the shifted significand, or the bare
+// significand past 2^73), so nothing a program saw before changes
+let __f64_to_int = fn (a: int) ->
+  if __f64_is_nan a || __f64_is_zero a then 0
+  else
+    let s = __f64_sig a in
+    let sh = 1075 - __f64_eff a in
+    let v = if sh >= 0 then (if sh > 75 then 0 else (if sh > 62 then 0 else bit_shr s sh))
+            else (if 0 - sh > 20 then s else bit_shl s (0 - sh)) in
+    if __f64_sign a == 1 then 0 - v else v;
+
+// IEEE comparison: NaN is unordered, and -0.0 equals +0.0
+let __f64_eq = fn (a: int) -> fn (b: int) ->
+  if __f64_is_nan a || __f64_is_nan b then false
+  else if __f64_is_zero a && __f64_is_zero b then true
+  else a == b;
+let __f64_lt = fn (a: int) -> fn (b: int) ->
+  if __f64_is_nan a || __f64_is_nan b then false
+  else if __f64_is_zero a && __f64_is_zero b then false
+  else if __f64_sign a != __f64_sign b then __f64_sign a == 1
+  else if __f64_sign a == 0 then __f64_mag a < __f64_mag b
+  else __f64_mag a > __f64_mag b;
+let __f64_le = fn (a: int) -> fn (b: int) ->
+  if __f64_is_nan a || __f64_is_nan b then false else not (__f64_lt b a);
+let __f64_ge = fn (a: int) -> fn (b: int) ->
+  if __f64_is_nan a || __f64_is_nan b then false else not (__f64_lt a b);
+
 let __fadd = fn (a: float) -> fn (b: float) ->
-  __sf_float_of_sf (__sf_add (__sf_sf_of_float a) (__sf_sf_of_float b));
+  if __rv_xlen () == 64 then __f64_float (__f64_add (__f64_bits a) (__f64_bits b))
+  else __sf_float_of_sf (__sf_add (__sf_sf_of_float a) (__sf_sf_of_float b));
 let __fsub = fn (a: float) -> fn (b: float) ->
-  __sf_float_of_sf (__sf_sub (__sf_sf_of_float a) (__sf_sf_of_float b));
+  if __rv_xlen () == 64 then __f64_float (__f64_sub (__f64_bits a) (__f64_bits b))
+  else __sf_float_of_sf (__sf_sub (__sf_sf_of_float a) (__sf_sf_of_float b));
 let __fmul = fn (a: float) -> fn (b: float) ->
-  __sf_float_of_sf (__sf_mul (__sf_sf_of_float a) (__sf_sf_of_float b));
+  if __rv_xlen () == 64 then __f64_float (__f64_mul (__f64_bits a) (__f64_bits b))
+  else __sf_float_of_sf (__sf_mul (__sf_sf_of_float a) (__sf_sf_of_float b));
 let __fdiv = fn (a: float) -> fn (b: float) ->
-  __sf_float_of_sf (__sf_fdiv (__sf_sf_of_float a) (__sf_sf_of_float b));
+  if __rv_xlen () == 64 then __f64_float (__f64_div (__f64_bits a) (__f64_bits b))
+  else __sf_float_of_sf (__sf_fdiv (__sf_sf_of_float a) (__sf_sf_of_float b));
 // Negation is a sign-bit flip and is defined on NaN too, which is why it goes
 // through the library rather than through `0.0 - x`: that is a different
 // operation on -0.0 and on NaN.
-let __fneg = fn (a: float) -> __sf_float_of_sf (__sf_neg (__sf_sf_of_float a));
+let __fneg = fn (a: float) ->
+  if __rv_xlen () == 64 then __f64_float (__f64_neg (__f64_bits a))
+  else __sf_float_of_sf (__sf_neg (__sf_sf_of_float a));
 // `eq` and `lt` are not bit comparisons: -0.0 equals +0.0, and a NaN equals
 // nothing, itself included. Neither falls out of comparing the fields, and
 // neither falls out of comparing the two halves as ints.
 let __feq = fn (a: float) -> fn (b: float) ->
-  __sf_eq (__sf_sf_of_float a) (__sf_sf_of_float b);
+  if __rv_xlen () == 64 then __f64_eq (__f64_bits a) (__f64_bits b)
+  else __sf_eq (__sf_sf_of_float a) (__sf_sf_of_float b);
 let __fne = fn (a: float) -> fn (b: float) -> not (__feq a b);
 let __flt = fn (a: float) -> fn (b: float) ->
-  __sf_lt (__sf_sf_of_float a) (__sf_sf_of_float b);
+  if __rv_xlen () == 64 then __f64_lt (__f64_bits a) (__f64_bits b)
+  else __sf_lt (__sf_sf_of_float a) (__sf_sf_of_float b);
 let __fle = fn (a: float) -> fn (b: float) ->
-  __sf_le (__sf_sf_of_float a) (__sf_sf_of_float b);
+  if __rv_xlen () == 64 then __f64_le (__f64_bits a) (__f64_bits b)
+  else __sf_le (__sf_sf_of_float a) (__sf_sf_of_float b);
 let __fgt = fn (a: float) -> fn (b: float) ->
-  __sf_gt (__sf_sf_of_float a) (__sf_sf_of_float b);
+  if __rv_xlen () == 64 then __f64_lt (__f64_bits b) (__f64_bits a)
+  else __sf_gt (__sf_sf_of_float a) (__sf_sf_of_float b);
 let __fge = fn (a: float) -> fn (b: float) ->
-  __sf_ge (__sf_sf_of_float a) (__sf_sf_of_float b);
+  if __rv_xlen () == 64 then __f64_ge (__f64_bits a) (__f64_bits b)
+  else __sf_ge (__sf_sf_of_float a) (__sf_sf_of_float b);
 
 // The named forms of the same operations. They are the operators' spelling for
 // code that passes them around, so they share the implementation rather than
@@ -482,13 +741,19 @@ let f_sub = fn (a: float) -> fn (b: float) -> __fsub a b;
 let f_mul = fn (a: float) -> fn (b: float) -> __fmul a b;
 let f_div = fn (a: float) -> fn (b: float) -> __fdiv a b;
 let f_neg = fn (a: float) -> __fneg a;
-let f_abs = fn (a: float) -> __sf_float_of_sf (__sf_abs (__sf_sf_of_float a));
+let f_abs = fn (a: float) ->
+  if __rv_xlen () == 64 then __f64_float (__f64_mag (__f64_bits a))
+  else __sf_float_of_sf (__sf_abs (__sf_sf_of_float a));
 let f_lt = fn (a: float) -> fn (b: float) -> __flt a b;
 let f_le = fn (a: float) -> fn (b: float) -> __fle a b;
 let f_gt = fn (a: float) -> fn (b: float) -> __fgt a b;
 let f_ge = fn (a: float) -> fn (b: float) -> __fge a b;
-let float_of_int = fn (n: int) -> __sf_float_of_sf (__sf_of_int n);
-let int_of_float = fn (x: float) -> __sf_to_int (__sf_sf_of_float x);
+let float_of_int = fn (n: int) ->
+  if __rv_xlen () == 64 then __f64_float (__f64_of_int n)
+  else __sf_float_of_sf (__sf_of_int n);
+let int_of_float = fn (x: float) ->
+  if __rv_xlen () == 64 then __f64_to_int (__f64_bits x)
+  else __sf_to_int (__sf_sf_of_float x);
 // The two host services the emulator answers with Linux syscall numbers --
 // clock_gettime64 (403) and getrandom (278) -- so these are REAL on the hosted
 // -rv path, not shims. Under --bare the intrinsics they call refuse at compile
@@ -601,7 +866,9 @@ let f_max = fn (x: float) -> fn (y: float) ->
   if y > x || (not (__fp_sign_bit y) && __fp_sign_bit x) then (if x != x then x else y)
   else (if y != y then y else x);
 
-let sqrt = fn (a: float) -> __sf_float_of_sf (__sf_fsqrt (__sf_sf_of_float a));
+let sqrt = fn (a: float) ->
+  if __rv_xlen () == 64 then __f64_float (__f64_sqrt (__f64_bits a))
+  else __sf_float_of_sf (__sf_fsqrt (__sf_sf_of_float a));
 
 // the two float constants the host builtins provide elsewhere; double literals
 // here, which the decimal reader turns into the same bits libm's M_PI has
