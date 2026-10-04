@@ -72,7 +72,13 @@ let substring = fn (s: str) -> fn (a: int) -> fn (b: int) ->
 // `random_int` is answered by the host's getrandom (see __rv_urandom32), never
 // faked: a deterministic sequence returned from something named random is the
 // kind of wrong that stays quiet.
-let __h_todo = fn (n: str) -> fail ("RV32I: " ++ n ++ " needs a host, and --bare hands the program the machine instead");
+// The machine is named by width (`RV32I:` is what host_matrix.sh keys on), and
+// the reason is the one that holds on both paths: hosted, the emulator answers
+// a fixed set of Linux calls and these are not among them; under --bare there
+// is no host at all. It used to say "--bare" on the hosted path too.
+let __h_todo = fn (n: str) ->
+  fail ((if __rv_xlen () == 64 then "RV64I: " else "RV32I: ") ++ n
+        ++ " needs a host service this target does not provide (a hosted run answers a fixed set of Linux calls; --bare answers none)");
 let run = fn (c: str) -> (__h_todo "run" : int);
 
 // read_file / file_exists ARE answered here, through openat/read/close and
@@ -125,7 +131,9 @@ let read_stdin = fn (u: unit) -> __rv_read_all 0;
 // (was:) `bytes` has no representation on this backend at all -- these are not a host
 // service but the type itself, and they are here for the same reason: a program
 // that never builds one runs.
-let print_bytes = fn (b: bytes) -> (__h_todo "print_bytes" : unit);
+// print_bytes is the str write: a bytes value IS a str block here, and the
+// write goes by the length word, so a NUL is written like any other byte.
+let print_bytes = fn (b: bytes) -> print_no_nl (str_of_bytes b);
 // Q-110 (v0.1.428): a bytes value IS a str block here, so reading a file as
 // bytes is reading it as a str -- the same openat / read / close path.
 let read_bytes = fn (p: str) -> bytes_of_str (read_file p);

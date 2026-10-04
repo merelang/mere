@@ -21,7 +21,16 @@
 
 exception Codegen_error of Loc.t * string
 
-let err loc msg = raise (Codegen_error (loc, msg))
+(* Every message here was written for RV32I and starts with that name; on RV64
+   it named the wrong machine (mere-ruby on RV64 reported "RV32I: `fd_pipe` is
+   an `extern fn`"). The 32-bit spelling stays exactly as it was: host_matrix.sh
+   and rv_prelude_check.sh key on it. *)
+let xlen = ref 32
+let target_msg msg =
+  if !xlen = 64 && String.length msg >= 5 && String.sub msg 0 5 = "RV32I"
+  then "RV64I" ^ String.sub msg 5 (String.length msg - 5)
+  else msg
+let err loc msg = raise (Codegen_error (loc, target_msg msg))
 
 (* --- register numbers (ABI names) --------------------------------------- *)
 let zero = 0
@@ -65,8 +74,8 @@ let enc_r f7 rs2 rs1 f3 rd op =
    becomes 3), the size of a heap cell and a frame slot (4 -> 8), and how an
    address is materialised (RV64's lui sign-extends bit 31, so absolute
    addresses become pc-relative). Two files would drift; one file with a width
-   is the same rule written once. *)
-let xlen = ref 32
+   is the same rule written once. (`xlen` itself is defined above `err`, which
+   names the machine in its messages.) *)
 let wsz () = if !xlen = 64 then 8 else 4        (* bytes in a word/cell/slot *)
 let ldf3 () = if !xlen = 64 then 3 else 2       (* LD / LW *)
 let wshift () = if !xlen = 64 then 3 else 2     (* index -> byte offset: slli by this *)
@@ -1121,7 +1130,7 @@ let emit_divzero_stubs () =
 (* A `fail` whose message is known at compile time. Catchable, like any other. *)
 let emit_abort msg =
   let label = fresh_label "str_" in
-  string_data := (label, mk_str_block msg) :: !string_data;
+  string_data := (label, mk_str_block (target_msg msg)) :: !string_data;
   emit (LoadAddr (a0, label));
   emit_fail_from_a0 ()
 
@@ -2706,7 +2715,7 @@ and compile_app env e =
     List.iter (fun arg -> compile_expr env arg) args;
     emit_abort (Printf.sprintf
       "RV32I: `%s` is an `extern fn`, and this target has no C library to link \
-       against -- `--bare` hands the program the machine, not a host" f)
+       against -- the program is the whole machine image" f)
   (* Map builtins -> the rv-prelude's rvmap_* helpers (the typer forces the
      Map type on `map_new` by name, so these can't just be shadowed). Types
      are erased at codegen, so the Vec-based repr flows through fine. *)
