@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.608 — 2026-10-04
+
+_On RV64, a double is one 64-bit word while it is computed: float arithmetic allocates nothing but its result, 20,000 operations fit in 4 MB instead of 64, and run four times as fast. RV32 is unchanged._
+
+**Float arithmetic on RV64 without limbs.** Both RISC-V widths computed a
+float operation in contrib/softfloat's 15-bit limbs -- the width that keeps a
+limb product inside RV32's signed 32-bit int -- building a record per operand
+per step: about 2 KB of heap per `+`, and a region gives nothing back on these
+targets. mere-ruby's `**` cost ~600 KB there. On RV64 the int is 64 bits, so
+the IEEE pattern is one word and the 53-bit significand fits with room to
+spare: `+ - * /`, `sqrt`, the comparisons, `f_abs`, `f_neg`, `float_of_int`
+and `int_of_float` are now the same algorithm (pack with guard/round/sticky,
+long division, digit-by-digit root, every NaN rule) on words, as top-level
+functions of ints that build no tuple or closure. Measured on the emulator:
+20,000 float operations fit in 4 MB (64 MB before) in 0.56 s (2.22 s); 400
+`f_pow` in 8 MB (128 MB) in 1.53 s (3.64 s). The decimal conversions
+(`str_of_float`, `float_of_str`) still go through the limbs.
+
+The two are held to each other and to the hardware: rv_float_ops.mere's 3440
+operations give the machine's bits on RV64 as on RV32; a new random-operand
+sweep, `test/float/rv_float_fuzz.mere` (zeros, infinities, quiet and
+signalling NaNs, subnormals, both exponent edges, cancelling neighbours),
+gives the machine's bits on all 16,000 results except where both sides are
+NaN; and 320,000 results of the same sweep under eight seeds were identical
+to the limb library's on RV64, NaN payloads and out-of-range `int_of_float`
+included. `scripts/rv_float_check.sh` runs both RV64 checks when `MEMU` is set.
+
+**`if __rv_xlen () == N` is decided at compile time** (codegen_riscv's
+`xlen_test`): the branch for the other width is neither compiled nor counted
+as reachable. That is what lets the one prelude hold both arithmetics -- an
+RV32 image carries no 64-bit code (its size is unchanged), and an RV64 image no
+limb code (a float program's image went from 84,285 to 77,441 bytes).
+
 ## v0.1.607 — 2026-10-04
 
 _On RISC-V, `print_bytes` writes its bytes (a NUL included) instead of stopping, and a refusal on RV64 names RV64I rather than RV32I._

@@ -96,6 +96,45 @@ else
   rc=1
 fi
 
+# RV64 (v0.1.608): a double is one 64-bit word there and the arithmetic is the
+# same algorithm on words instead of limbs. The same 3440 operations must give
+# the hardware's bits, and a random sweep must too (a both-NaN line compared
+# only as "both NaN"). Needs the 64-bit core from the same MEMU checkout.
+if [ -f "$MEMU/riscv-runc/rv64i_run.mere" ]; then
+  "$MERE" -c "$MEMU/riscv-runc/rv64i_run.mere" > "$TMP/rvrun64.c" 2>"$TMP/err" \
+    && $CC -O2 -w -o "$TMP/rvrun64" "$TMP/rvrun64.c" \
+    || { echo "FAIL rv_float: the RV64 emulator did not build"; exit 1; }
+  "$MERE" -rv64 --ram 16 "$P" > "$TMP/prog.bin" 2>"$TMP/err" || { echo "FAIL rv_float: -rv64 refused the program"; exit 1; }
+  ( cd "$TMP" && perl -e 'alarm 300; exec @ARGV' ./rvrun64 16 2>&1 ) | grep -v '^rvrun: ' > "$TMP/rv64.out"
+  if diff -q "$TMP/ref.out" "$TMP/rv64.out" >/dev/null; then
+    echo "ok rv_float: $CASES lines identical on RV64 — the one-word arithmetic equals the machine's doubles"
+  else
+    echo "FAIL rv_float: RV64's float arithmetic disagrees with the machine's doubles"
+    diff "$TMP/ref.out" "$TMP/rv64.out" | head -20
+    rc=1
+  fi
+  FZ="$ROOT/test/float/rv_float_fuzz.mere"
+  "$MERE" -c "$FZ" > "$TMP/fz.c" 2>"$TMP/err" && $CC -O1 -w -o "$TMP/fzref" "$TMP/fz.c" || { echo "FAIL rv_float: the fuzz reference did not build"; exit 1; }
+  "$TMP/fzref" > "$TMP/fzref.out"
+  "$MERE" -rv64 --ram 32 "$FZ" > "$TMP/prog.bin" 2>"$TMP/err" || { echo "FAIL rv_float: -rv64 refused the fuzz"; exit 1; }
+  ( cd "$TMP" && perl -e 'alarm 300; exec @ARGV' ./rvrun64 32 2>&1 ) | grep -v '^rvrun: ' > "$TMP/fz64.out"
+  # a line is "hi lo" (a double) or one int; two NaN doubles compare equal here
+  bad=$(paste -d' ' "$TMP/fzref.out" "$TMP/fz64.out" | awk '
+    function isnan(h, l) { return int(h / 1048576) % 2048 == 2047 && (h % 1048576 != 0 || l != 0) }
+    NF == 4 { if ($1 != $3 || $2 != $4) { if (!(isnan($1, $2) && isnan($3, $4))) n++ } ; next }
+    NF == 2 { if ($1 != $2) n++ ; next }
+    { n++ }
+    END { print n + 0 }')
+  FZN=$(grep -c . "$TMP/fzref.out")
+  if [ "$bad" = 0 ] && [ "$(grep -c . "$TMP/fz64.out")" = "$FZN" ]; then
+    echo "ok rv_float: $FZN random-operand results identical on RV64 (two-NaN lines compared as NaN)"
+  else
+    echo "FAIL rv_float: $bad of $FZN random-operand results differ on RV64"
+    paste -d' ' "$TMP/fzref.out" "$TMP/fz64.out" | awk '$1 != $3 || $2 != $4' | head -10
+    rc=1
+  fi
+fi
+
 # f_pow / exp / log: prelude Mere here, libm on the reference. Not required to
 # agree everywhere (nobody's pow is required to be correctly rounded), so the
 # file holds points where they DO agree and did not before v0.1.606 -- see its

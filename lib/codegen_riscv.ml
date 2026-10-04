@@ -419,6 +419,17 @@ let float_cmp_fn = function
   | Ast.Eq -> "__feq" | Ast.Ne -> "__fne" | Ast.Lt -> "__flt"
   | Ast.Le -> "__fle" | Ast.Gt -> "__fgt" | Ast.Ge -> "__fge"
 
+(* `if __rv_xlen () == N then A else B` is decided here, at compile time: the
+   prelude keeps one source for both widths, and the arm for the other width is
+   neither compiled nor counted as reachable. That is what lets the 64-bit float
+   arithmetic (one 64-bit word per double) sit next to the 32-bit one (15-bit
+   limbs) without the 32-bit image carrying -- or compiling -- the other. *)
+let xlen_test (c : Ast.expr) : bool option =
+  match c.Ast.node with
+  | Ast.Cmp (Ast.Eq, { node = Ast.App ({ node = Ast.Var "__rv_xlen"; _ }, _); _ },
+             { node = Ast.Int_lit n; _ }) -> Some (n = !xlen)
+  | _ -> None
+
 let rec vars_in (e : Ast.expr) (acc : string list) : string list =
   match e.node with
   | Ast.Var v ->
@@ -450,7 +461,11 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
   | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) ->
     vars_in a (vars_in b acc)
   | Ast.Neg a | Ast.Annot (a, _) -> vars_in a acc
-  | Ast.If (a, b, c) -> vars_in a (vars_in b (vars_in c acc))
+  | Ast.If (a, b, c) ->
+    (match xlen_test a with
+     | Some true -> vars_in b acc
+     | Some false -> vars_in c acc
+     | None -> vars_in a (vars_in b (vars_in c acc)))
   | Ast.Let (_, a, b) -> vars_in a (vars_in b acc)
   | Ast.Let_rec (bs, b) ->
     List.fold_left (fun ac (_, _, e) -> vars_in e ac) (vars_in b acc) bs
@@ -1460,6 +1475,8 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
   | Ast.Bin (op, l, r) -> compile_bin env op l r
   | Ast.Cmp (op, l, r) -> compile_cmp env op l r
   | Ast.Logic (op, l, r) -> compile_logic env op l r
+  | Ast.If (c, t, _) when xlen_test c = Some true -> compile_expr env t
+  | Ast.If (c, _, e2) when xlen_test c = Some false -> compile_expr env e2
   | Ast.If (c, t, e2) ->
     let l_else = fresh_label ".else" in
     let l_end = fresh_label ".endif" in
