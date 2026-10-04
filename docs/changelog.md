@@ -4,6 +4,60 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.609 — 2026-10-04
+
+_RISC-V has a libm: an `extern fn cbrt: float -> float` (and twenty more of libm's names) is answered by the prelude instead of refused, and those, `sin`, `cos`, `tan`, `atan2`, `exp`, `log` and `f_pow` are correctly rounded there -- within ~0.52 ulp of the true value, `sin 1e22` included._
+
+**The libm** (lib/rv_libm.ml, appended to the RISC-V prelude). mere-ruby declares
+twenty-one libm functions as `extern fn` for its `Math` module, and on RV32IM /
+RV64IM every one was a named refusal: `Math.cbrt`, `Math.hypot`, `Math.gamma`,
+`Float#%` (fmod) and `Math.ldexp` stopped the script. An extern whose name is one
+of `atan asin acos sinh cosh tanh asinh acosh atanh cbrt log2 log10 log1p expm1
+erf erfc tgamma lgamma` (`float -> float`), `hypot fmod` (`float -> float ->
+float`) or `ldexp` (`float -> int -> float`) AND whose declared type is libm's is
+now bound to `__libm_<name>` in the prelude (codegen_riscv's `libm_bound`); on a
+host the same declaration still links libm. Another type under one of these
+names is refused as before.
+
+**Correctly rounded, not "libm's bits".** Each function is computed in
+double-double -- pairs of doubles carrying ~106 bits, built from the prelude's
+two_sum / two_prod with new `__dd_add / __dd_mul / __dd_div / __dd_sqrt /
+__dd_exp` -- and rounded once. Every function was prototyped operation for
+operation in Python (whose floats are the same IEEE doubles) and measured against
+a 50-digit reference over thousands of points: all are within ~0.52 ulp of the
+true value, fmod and ldexp exact. The Mere transcription was then held to the
+prototype bit for bit on 7,500 random calls on RV64. macOS's libm, measured the
+same way, is NOT correctly rounded for most of these -- cbrt, the inverse and
+hyperbolic functions, hypot, tan, erf, erfc, tgamma, lgamma are a ulp away on 3%
+to 49% of points (lgamma near its zeros by hundreds) -- so the gate,
+`test/float/rv_libm_ext.mere`, holds 502 results (mere-ruby's corpus/168 inputs,
+the IEEE specials and each function's edges, and random points) to the
+correctly rounded values in `rv_libm_ext.expected`, not to the host's.
+`scripts/rv_float_check.sh` runs it on RV64 and RV32 (256 MB there) with `MEMU`.
+The same 502, from the C backend linked against each host's libm: macOS
+disagrees on 39; glibc 2.39 (the CI image, arm64 and amd64) on 4, all lgamma,
+which glibc does not round correctly either -- so a RISC-V build of a program
+prints what it prints on Linux. erf is a positive-term series below 2 and erfc a 120-level continued fraction
+above it; tgamma and lgamma are Stirling's series past 12 with the shift in
+pairs, a zeta series within 0.1 of 1 and 2, and reflection below 0.
+
+**The builtins on the same pieces.** `sin`, `cos`, `tan` and `atan2` moved to
+lib/rv_libm.ml with double-double kernels; `exp`, `log` and `f_pow` keep their
+code with a more precise core under it (`__fp_exp_core` carries r^3/6 in a
+pair, `__fp_log2p` the series' first three terms and s's tail scaled by
+2/(1 - s^2)). Against libm on the v0.1.606 sweeps: `f_pow` 47 -> 7 points
+apart, `log` 4 -> 0, `exp` 2 -> 3 -- and on every one of the remaining ten the
+prelude is the correctly rounded one. Three faults found on the way:
+- the sin and cos series stopped at 1/17! and 1/14!, and r^16/16! at pi/4 is
+  1.6e-15: that was most of their documented "<= 10 ulp";
+- `__fp_pio2_2`, a piece of the three-piece pi/2, was written with fifteen
+  digits, not as fdlibm's double, so pi/2 was 6.5e-26 off and `tan` of the
+  double nearest pi/2 was wrong in the ninth digit;
+- past 2^20 that reduction is not exact, and nothing replaced it: `sin 1e22`
+  answered 7.9e91. Arguments that large now go through Payne-Hanek (2/pi to
+  1,248 bits, as 24-bit chunks in an if-tree, so nothing is built at startup)
+  and are as accurate as small ones.
+
 ## v0.1.608 — 2026-10-04
 
 _On RV64, a double is one 64-bit word while it is computed: float arithmetic allocates nothing but its result, 20,000 operations fit in 4 MB instead of 64, and run four times as fast. RV32 is unchanged._

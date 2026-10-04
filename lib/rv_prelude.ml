@@ -896,16 +896,49 @@ let __fp_two_sum = fn (x: float) -> fn (y: float) ->
   let s = x + y in
   let bb = s - x in
   (s, (x - (s - bb)) + (y - bb));
+// double-double: a pair (h, l) whose sum carries ~106 bits, |l| <= ulp(h)/2.
+// v0.1.609 builds the libm on these (lib/rv_libm.ml); they are the textbook
+// Dekker / Knuth constructions, and every one is a few float operations.
+let __dd_fast = fn (a: float) -> fn (b: float) -> let s = a + b in (s, b - (s - a));
+let __dd_add = fn (ah: float) -> fn (al: float) -> fn (bh: float) -> fn (bl: float) ->
+  let (s, e) = __fp_two_sum ah bh in
+  let (t, f) = __fp_two_sum al bl in
+  let (s2, e2) = __dd_fast s (e + t) in
+  __dd_fast s2 (e2 + f);
+let __dd_mul = fn (ah: float) -> fn (al: float) -> fn (bh: float) -> fn (bl: float) ->
+  let (p, e) = __fp_two_prod ah bh in
+  __dd_fast p (e + (ah * bl + al * bh));
+let __dd_mul_d = fn (ah: float) -> fn (al: float) -> fn (b: float) ->
+  let (p, e) = __fp_two_prod ah b in
+  __dd_fast p (e + al * b);
+// three quotient digits, each from the exact remainder
+let __dd_div = fn (ah: float) -> fn (al: float) -> fn (bh: float) -> fn (bl: float) ->
+  let q1 = ah / bh in
+  let (ph, pl) = __dd_mul_d bh bl q1 in
+  let (rh, rl) = __dd_add ah al (0.0 - ph) (0.0 - pl) in
+  let q2 = rh / bh in
+  let (ph2, pl2) = __dd_mul_d bh bl q2 in
+  let (rh2, _) = __dd_add rh rl (0.0 - ph2) (0.0 - pl2) in
+  let q3 = rh2 / bh in
+  let (qh, ql) = __dd_fast q1 q2 in
+  __dd_add qh ql q3 0.0;
+// one Newton step from the correctly rounded sqrt; ah > 0
+let __dd_sqrt = fn (ah: float) -> fn (al: float) ->
+  let s = sqrt ah in
+  let (p, pe) = __fp_two_prod s s in
+  __dd_fast s ((((ah - p) - pe) + al) / (2.0 * s));
 
-// e^(zh + zl), rounded ONCE. k = round(zh / ln 2) and r = zh - k ln2 as a
-// pair (Cody-Waite: ln2_hi has 33 bits, so k * ln2_hi is exact for every k
-// this range allows, and the subtraction is exact by Sterbenz). Then
-// e^r = 1 + r + r^2/2 + r^3 P(r): the first three terms are summed exactly --
-// r^2 by two_prod -- and everything else is below 0.008, where a few ulps of
-// its own are a hundredth of an ulp of the result. The input's tail rides in
-// as zl e^r: the pair is what lets f_pow pass y log x without rounding it
-// first.
-let __fp_exp2 = fn (zh: float) -> fn (zl: float) ->
+// e^(zh + zl). k = round(zh / ln 2) and r = zh - k ln2 as a pair (Cody-Waite:
+// ln2_hi has 33 bits, so k * ln2_hi is exact for every k this range allows,
+// and the subtraction is exact by Sterbenz). Then e^r = 1 + r + r^2/2 + r^3/6
+// + r^4 P(r): the first four terms are summed in pairs -- r^2 by two_prod,
+// r^3/6 by __dd_mul -- and the rest is below 6e-4, where its own rounding is
+// 1e-20 of the result. The input's tail rides in as zl e^r: the pair is what
+// lets f_pow pass y log x without rounding it first. The core hands back
+// (b, lo, k) with e^z = (b + lo) 2^k unrounded; __fp_exp2 rounds it once and
+// __dd_exp keeps it as a pair (v0.1.609: r^3/6 was in double before, a 1e-18
+// error that is invisible in one rounding and not in erfc = 1 - erf).
+let __fp_exp_core = fn (zh: float) -> fn (zl: float) ->
   let kf = round (zh * 1.4426950408889634) in
   let k = int_of_float kf in
   let r1 = zh - kf * 0.6931471803691238 in
@@ -914,27 +947,36 @@ let __fp_exp2 = fn (zh: float) -> fn (zl: float) ->
   let p = 7.647163731819816e-13 in
   let p = p * rh + 1.1470745597729725e-11 in
   let p = p * rh + 1.6059043836821613e-10 in
-  let p = p * rh + 2.08767569878681e-9 in
-  let p = p * rh + 2.505210838544172e-8 in
-  let p = p * rh + 2.755731922398589e-7 in
-  let p = p * rh + 0.0000027557319223985893 in
-  let p = p * rh + 0.0000248015873015873 in
+  let p = p * rh + 2.08767569878681e-09 in
+  let p = p * rh + 2.505210838544172e-08 in
+  let p = p * rh + 2.755731922398589e-07 in
+  let p = p * rh + 2.7557319223985893e-06 in
+  let p = p * rh + 2.48015873015873e-05 in
   let p = p * rh + 0.0001984126984126984 in
   let p = p * rh + 0.001388888888888889 in
   let p = p * rh + 0.008333333333333333 in
   let p = p * rh + 0.041666666666666664 in
-  let p = p * rh + 0.16666666666666666 in
   let (sh, sl) = __fp_two_prod rh rh in
-  let c3 = (sh * rh) * p in
+  let (ch, cl) = __dd_mul_d sh sl rh in
+  let (th, tl) = __dd_mul ch cl 0.16666666666666666 9.25185853854297e-18 in
+  let c4 = (ch * rh) * p in
   let (a, ea) = __fp_two_sum 1.0 rh in
   let (b, eb) = __fp_two_sum a (sh * 0.5) in
-  // rl scales by e^r, all of it: rl is y log x's rounding in f_pow, up to
-  // ~1e-14, and stopping at rl (1 + r) dropped r^2/2 of that -- six ulps.
-  let lo = ((ea + eb) + (sl * 0.5 + rl * (b + c3))) + c3 in
-  let m = b + lo in
+  let (b2, eb2) = __fp_two_sum b th in
+  let lo = ((ea + eb) + eb2) + ((sl * 0.5 + tl) + (c4 + rl * (b2 + c4))) in
+  (b2, lo, k);
+let __fp_scale = fn (m: float) -> fn (k: int) ->
   if k >= 0 - 1021 && k <= 1023 then m * __fp_pow2i k
   else if k < 0 - 1021 then (m * __fp_pow2i (k + 512)) * __fp_pow2i (0 - 512)
   else (m * __fp_pow2i (k - 512)) * __fp_pow2i 512;
+let __fp_exp2 = fn (zh: float) -> fn (zl: float) ->
+  let (b, lo, k) = __fp_exp_core zh zl in
+  __fp_scale (b + lo) k;
+let __dd_exp = fn (zh: float) -> fn (zl: float) ->
+  let (b, lo, k) = __fp_exp_core zh zl in
+  let (h, l) = __dd_fast b lo in
+  if k >= 0 - 1021 && k <= 1023 then (let s = __fp_pow2i k in (h * s, l * s))
+  else (__fp_scale h k, __fp_scale l k);
 
 let exp = fn (x: float) ->
   if x != x then x
@@ -942,9 +984,14 @@ let exp = fn (x: float) ->
   else if x < 0.0 - 745.1332191019412 then 0.0
   else __fp_exp2 x 0.0;
 
-// log as a HEAD+TAIL pair, renormalized so |tail| <= ulp(head): f_pow needs the
-// pair (a 1-ulp log error, magnified by y, is the whole ballgame there), and
-// `log` itself is head + tail rounded once
+// log as a HEAD+TAIL pair, good to ~1e-21 relative: f_pow needs the pair (a
+// 1-ulp log error, magnified by y, is the whole ballgame there), the libm
+// builds on it (lib/rv_libm.ml), and `log` itself is head + tail rounded once.
+// m in [1/sqrt2, sqrt2), s = (m-1)/(m+1) with its rounding kept as a tail, and
+// log m = 2 atanh s = 2s + (2/3)s^3 + (2/5)s^5 + 2s^7 (1/7 + ...): the first
+// three terms in pairs (v0.1.609; before, everything past 2s was in double, a
+// 2e-19 error), s's tail scaled by the derivative 2/(1 - s^2), and the series
+// through s^29.
 let __fp_log2p = fn (x: float) ->
   // subnormals scale into the normal range first, and k pays for it
   let sub = __fp_hi_exp (float_bits_hi x) == 0 in
@@ -953,23 +1000,20 @@ let __fp_log2p = fn (x: float) ->
   let hi = float_bits_hi x1 in
   let lo = float_bits_lo x1 in
   let e = __fp_hi_exp hi in
-  // m in [1/sqrt2, sqrt2): exponent bits swapped for 1023, halved if high
   let m0 = float_of_bits (bit_or (bit_and hi 1048575) (bit_shl 1023 20)) lo in
   let (m, k) = if m0 >= 1.4142135623730951
                then (m0 * 0.5, k0 + e - 1022)
                else (m0, k0 + e - 1023) in
-  // s = (m - 1) / (m + 1) carries its rounding as a tail: m - 1 is exact
-  // (Sterbenz), m + 1 is a two_sum, and the division's remainder is exact
-  // through two_prod. Without it 2s was off by up to 4e-17 -- a whole ulp of
-  // log for x near 1, and y times that in f_pow.
   let u = m - 1.0 in
   let (v, vt) = __fp_two_sum m 1.0 in
   let s = u / v in
   let (q, qe) = __fp_two_prod s v in
   let st = (((u - q) - qe) - s * vt) / v in
   let w = s * s in
-  // atanh series: log m = 2s (1 + w/3 + ... + w^11/23), last term ~6e-19 rel
-  let p = 0.043478260869565216 in
+  let p = 0.034482758620689655 in
+  let p = p * w + 0.037037037037037035 in
+  let p = p * w + 0.04 in
+  let p = p * w + 0.043478260869565216 in
   let p = p * w + 0.047619047619047616 in
   let p = p * w + 0.05263157894736842 in
   let p = p * w + 0.058823529411764705 in
@@ -978,15 +1022,19 @@ let __fp_log2p = fn (x: float) ->
   let p = p * w + 0.09090909090909091 in
   let p = p * w + 0.1111111111111111 in
   let p = p * w + 0.14285714285714285 in
-  let p = p * w + 0.2 in
-  let p = p * w + 0.3333333333333333 in
-  let lm_tail = 2.0 * s * (w * p) in
+  let (s2h, s2l) = __fp_two_prod s s in
+  let (s3h, s3l) = __dd_mul_d s2h s2l s in
+  let (ch, cl) = __dd_mul s3h s3l 0.6666666666666666 3.700743415417188e-17 in
+  let (s5h, s5l) = __dd_mul s3h s3l s2h s2l in
+  let (fh, fl) = __dd_mul s5h s5l 0.4 (0.0 - 2.2204460492503132e-17) in
+  let rest = 2.0 * s5h * w * p in
   let kf = float_of_int k in
   let (h0, e0) = __fp_two_sum (kf * 0.6931471803691238) (2.0 * s) in
-  let t0 = e0 + ((2.0 * st + kf * 1.9082149292705877e-10) + lm_tail) in
-  let head = h0 + t0 in
-  let tail = h0 - head + t0 in
-  (head, tail);
+  let (h1, e1) = __fp_two_sum h0 ch in
+  let (h2, e2) = __fp_two_sum h1 fh in
+  let t0 = ((e0 + e1) + e2)
+           + ((2.0 * st / (1.0 - w) + kf * 1.9082149292705877e-10) + ((cl + fl) + rest)) in
+  __dd_fast h2 t0;
 let log = fn (x: float) ->
   if x != x then x
   else if x < 0.0 then 0.0 / 0.0
@@ -1087,7 +1135,10 @@ let rec f_pow = fn (x: float) -> fn (y: float) ->
 // crossing of a large argument keeps its accuracy instead of dying at the
 // double's edge.
 let __fp_pio2_1 = 1.5707963267341256;
-let __fp_pio2_2 = 6.07710050630396e-11;
+// (v0.1.609: this one was written 6.07710050630396e-11 -- fifteen digits, not
+// the double fdlibm's 6.07710050630396597660e-11 names -- so the four pieces
+// summed to pi/2 - 6.5e-26, and tan of the double nearest pi/2 was 1e-9 off)
+let __fp_pio2_2 = 6.077100506303966e-11;
 let __fp_pio2_2t = 2.0222662487959506e-21;
 let __fp_pio2_3 = 2.0222662487111665e-21;
 let __fp_pio2_3t = 8.4784276603689e-32;
@@ -1105,98 +1156,9 @@ let __fp_trig_reduce = fn (x: float) ->
   let y1 = z3 - y0 + tail in
   let n4 = int_of_float (nf - __fp_trunc (nf * 0.25) * 4.0) in
   (y0, y1, if n4 < 0 then n4 + 4 else n4);
-let __fp_sin_poly = fn (r: float) ->
-  let z = r * r in
-  let p = 2.8114572543455208e-15 in
-  let p = p * z - 7.647163731819816e-13 in
-  let p = p * z + 1.6059043836821613e-10 in
-  let p = p * z - 2.505210838544172e-8 in
-  let p = p * z + 0.0000027557319223985893 in
-  let p = p * z - 0.0001984126984126984 in
-  let p = p * z + 0.008333333333333333 in
-  let p = p * z - 0.16666666666666666 in
-  r + r * (z * p);
-let __fp_cos_poly = fn (r: float) ->
-  let z = r * r in
-  let p = 0.0 - 1.1470745597729725e-11 in
-  let p = p * z + 2.08767569878681e-9 in
-  let p = p * z - 2.755731922398589e-7 in
-  let p = p * z + 0.0000248015873015873 in
-  let p = p * z - 0.001388888888888889 in
-  let p = p * z + 0.041666666666666664 in
-  let p = p * z - 0.5 in
-  1.0 + z * p;
-// sin(y0 + y1) = sin y0 + y1 cos y0 to first order in the tail; the pair
-// matters exactly when the result is TINY (x near a multiple of pi), where the
-// head alone would carry the reduction's rounding as thousands of ulps
-let __fp_sin_pair = fn (y0: float) -> fn (y1: float) ->
-  __fp_sin_poly y0 + y1 * (1.0 - y0 * y0 * 0.5);
-let __fp_cos_pair = fn (y0: float) -> fn (y1: float) ->
-  __fp_cos_poly y0 - y1 * y0;
-let sin = fn (x: float) ->
-  if x != x then x
-  else if __fp_is_inf x then 0.0 / 0.0
-  else if f_abs x < 1.0e-8 then x
-  else
-    let (y0, y1, q) = __fp_trig_reduce x in
-    if q == 0 then __fp_sin_pair y0 y1
-    else if q == 1 then __fp_cos_pair y0 y1
-    else if q == 2 then 0.0 - __fp_sin_pair y0 y1
-    else 0.0 - __fp_cos_pair y0 y1;
-let cos = fn (x: float) ->
-  if x != x then x
-  else if __fp_is_inf x then 0.0 / 0.0
-  else
-    let (y0, y1, q) = __fp_trig_reduce x in
-    if q == 0 then __fp_cos_pair y0 y1
-    else if q == 1 then 0.0 - __fp_sin_pair y0 y1
-    else if q == 2 then 0.0 - __fp_cos_pair y0 y1
-    else __fp_sin_pair y0 y1;
-let tan = fn (x: float) -> sin x / cos x;
-
-// atan by two half-angle reductions, then the alternating series through u^23
-let __fp_atan_core = fn (t: float) ->
-  let big = t > 1.0 in
-  let t1 = if big then 1.0 / t else t in
-  let u1 = t1 / (1.0 + sqrt (1.0 + t1 * t1)) in
-  let u = u1 / (1.0 + sqrt (1.0 + u1 * u1)) in
-  let z = u * u in
-  let q = 0.043478260869565216 in
-  let q = 0.0 - q * z + 0.047619047619047616 in
-  let q = 0.0 - q * z + 0.05263157894736842 in
-  let q = 0.0 - q * z + 0.058823529411764705 in
-  let q = 0.0 - q * z + 0.06666666666666667 in
-  let q = 0.0 - q * z + 0.07692307692307693 in
-  let q = 0.0 - q * z + 0.09090909090909091 in
-  let q = 0.0 - q * z + 0.1111111111111111 in
-  let q = 0.0 - q * z + 0.14285714285714285 in
-  let q = 0.0 - q * z + 0.2 in
-  let q = 0.0 - q * z + 0.3333333333333333 in
-  let a = 4.0 * (u - u * (z * q)) in
-  if big then 1.5707963267948966 - a else a;
-let atan2 = fn (y: float) -> fn (x: float) ->
-  let pi = 3.141592653589793 in
-  if y != y then y else if x != x then x
-  else
-    let ysign = __fp_hi_sign (float_bits_hi y) in
-    let xsign = __fp_hi_sign (float_bits_hi x) in
-    if y == 0.0 then
-      (if xsign == 0 then (if ysign == 1 then 0.0 - 0.0 else 0.0)
-       else (if ysign == 1 then 0.0 - pi else pi))
-    else if x == 0.0 then (if ysign == 1 then 0.0 - 1.5707963267948966 else 1.5707963267948966)
-    else if __fp_is_inf y && __fp_is_inf x then
-      (let base = if xsign == 0 then 0.7853981633974483 else 2.356194490192345 in
-       if ysign == 1 then 0.0 - base else base)
-    else if __fp_is_inf y then (if ysign == 1 then 0.0 - 1.5707963267948966 else 1.5707963267948966)
-    else if __fp_is_inf x then
-      (if xsign == 0 then (if ysign == 1 then 0.0 - 0.0 else 0.0)
-       else (if ysign == 1 then 0.0 - pi else pi))
-    else
-      let a = __fp_atan_core (f_abs (y / x)) in
-      if xsign == 0 then (if ysign == 1 then 0.0 - a else a)
-      else (if ysign == 1 then a - pi else pi - a);
+// sin / cos / tan / atan2 and the libm: lib/rv_libm.ml, appended to this.
 let str_of_float = fn (x: float) -> __sf_dec_of_sf (__sf_sf_of_float x);
-|mere}
+|mere} ^ Rv_libm.contents
 
 (* Lines the prelude occupies once it is glued ahead of the user source, so a
    position in the concatenation can be turned back into the line the person

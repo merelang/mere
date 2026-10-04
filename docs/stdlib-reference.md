@@ -564,6 +564,19 @@ exact in binary floating point (`exp 0`, `log 1`) and asserts everything else as
 identity within a tolerance — which still fails an `exp` that returns its argument or a
 `log` wired to log10, and does not report the C library's build options as a difference.
 
+**RISC-V is the one place they are correctly rounded** (v0.1.609). RV32IM and RV64IM
+have no libm, so `exp`, `log`, `f_pow`, `sin`, `cos`, `tan` and `atan2` are prelude Mere
+there, computed in double-double and rounded once — within about 0.52 ulp of the true
+value, measured against a 50-digit reference; `sin` / `cos` / `tan` reduce by
+Payne–Hanek past 2^20. The same prelude also answers twenty-one libm functions that a
+program declares as `extern fn` with libm's own signature (`atan asin acos sinh cosh tanh
+asinh acosh atanh cbrt log2 log10 log1p expm1 erf erfc tgamma lgamma` as `float -> float`,
+`hypot` and `fmod` as `float -> float -> float`, `ldexp` as `float -> int -> float`):
+on a host the declaration links libm, on RISC-V it is bound to the prelude instead of
+refused. Because they are correctly rounded, these can differ in the last bit from a
+host libm that is not — macOS's is a ulp away on 3% to 49% of points for most of them.
+`test/float/rv_libm_ext.mere` holds them to the correctly rounded values.
+
 **★ Integer `/` and `%` by zero raise** (v0.1.247): `division by zero` and
 `modulo by zero`, catchable with `try_or`, on the interpreter and the C, LLVM and
 Wasm backends. It cost a branch per division to make that true, and it was worth it
@@ -734,7 +747,7 @@ region the catch jumps out of, so what the handler gets is a copy made at the
 failure and re-allocated in the catcher's region — not a pointer into the buffer,
 which a second failure (including one raised by the handler) would overwrite.
 
-`try_or_msg` has no RV32IM lowering; that backend refuses it by name.
+`try_or_msg` is lowered on RV32IM and RV64IM too (v0.1.599), with the same message as the other backends.
 
 ---
 
