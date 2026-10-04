@@ -113,6 +113,22 @@ if [ -f "$MEMU/riscv-runc/rv64i_run.mere" ]; then
     diff "$TMP/ref.out" "$TMP/rv64.out" | head -20
     rc=1
   fi
+  # the decimal conversions at 64 bits (v0.1.612: Dragon4 and a bignum parser on
+  # words): the same conversion gate as RV32's above, and a random sweep
+  for DC in "$CV" "$ROOT/test/float/rv_dec64.mere"; do
+    "$MERE" -c "$DC" > "$TMP/dc.c" 2>"$TMP/err" && $CC -O1 -w -o "$TMP/dcref" "$TMP/dc.c" || { echo "FAIL rv_float: the C reference for $(basename "$DC") did not build"; exit 1; }
+    "$TMP/dcref" > "$TMP/dcref.out"
+    "$MERE" -rv64 --ram 64 "$DC" > "$TMP/prog.bin" 2>"$TMP/err" || { echo "FAIL rv_float: -rv64 refused $(basename "$DC")"; exit 1; }
+    ( cd "$TMP" && perl -e 'alarm 600; exec @ARGV' ./rvrun64 64 2>&1 ) | grep -v '^rvrun: ' > "$TMP/dc64.out"
+    DCN=$(grep -c . "$TMP/dcref.out")
+    if diff -q "$TMP/dcref.out" "$TMP/dc64.out" >/dev/null; then
+      echo "ok rv_float: $DCN lines of $(basename "$DC") identical on RV64 — str_of_float / float_of_str on words equal printf / strtod"
+    else
+      echo "FAIL rv_float: $(basename "$DC") on RV64 disagrees with printf / strtod"
+      diff "$TMP/dcref.out" "$TMP/dc64.out" | head -10
+      rc=1
+    fi
+  done
   FZ="$ROOT/test/float/rv_float_fuzz.mere"
   "$MERE" -c "$FZ" > "$TMP/fz.c" 2>"$TMP/err" && $CC -O1 -w -o "$TMP/fzref" "$TMP/fz.c" || { echo "FAIL rv_float: the fuzz reference did not build"; exit 1; }
   "$TMP/fzref" > "$TMP/fzref.out"

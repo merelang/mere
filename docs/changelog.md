@@ -4,6 +4,42 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.612 — 2026-10-04
+
+_On RV64, `str_of_float` and `float_of_str` work on 64-bit words: a float is printed with about 5 KB of heap instead of 280 KB, and `1e+-5` is refused on RISC-V as it is everywhere else._
+
+**`str_of_float`** (RV64). The limb library spelled a double by building its exact
+decimal expansion as a digit array and then trying %.{p}g for p = 12..17,
+parsing each attempt back: about 280 KB of heap and 7 ms on the emulator per
+call, never given back -- a script printing floats ran into the 256 MB. Now:
+Dragon4 (Burger & Dybvig's free-format algorithm) on bignums of 30-bit limbs
+gives the shortest digit string that reads back, the one nearest the value;
+when it has 12 digits or more that is exactly %.{p}g's answer, and when it has
+fewer, a fixed-precision pass gives the value's correctly rounded 12 digits
+(the same thing for a normal double, and not for a subnormal of few bits: the
+smallest prints `4.94065645841e-324`, not `5e-324` -- `rv_float_conv.mere`
+caught the first version saying the latter). 1,000 calls: 8 MB and 1.4 s
+(they did not fit in 256 MB).
+
+**`float_of_str`** (RV64). The lexical rules are the limb parser's, and anything
+that is not a plain decimal -- hex, `inf`, `nan`, not a number -- is handed to
+it, so its answers and messages are unchanged. A decimal D 10^k is converted
+exactly: for k >= 0 the top 57 bits of the product and a sticky bit, for k < 0
+57-58 quotient bits of D 2^j / 5^-k by long division with the remainder as
+sticky, rounded once by the word arithmetic's pack (v0.1.608). Past 800
+significant digits the rest becomes one sticky digit, which cannot move a
+rounding. 1,000 calls: 64 MB -> 32 MB, 1.9 s -> 1.3 s.
+
+**`1e+-5`** was a float on RISC-V (both widths): the limb parser took any
+number of signs before the exponent's digits. strtod stops at the `e`, so it is
+not a number -- on RV now too, and `0x1p+-3` likewise.
+
+Held to printf / strtod: `test/float/rv_dec64.mere` (random doubles by class,
+subnormals of a few bits included, each printed, read back, and read back from a
+longer spelling) and the existing `rv_float_conv.mere` now also run at 64 bits in
+`scripts/rv_float_check.sh` (with `MEMU`); 40,000 such lines over four seeds were
+identical to the C backend when this was made.
+
 ## v0.1.611 — 2026-10-04
 
 _On RISC-V a Map is a hash table: mere-ruby's startup there takes half the instructions, and a corpus file that ran past two minutes finishes in eleven seconds._

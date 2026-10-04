@@ -887,7 +887,380 @@ let random_int = fn (n: int) ->
 // The decimal conversions, from contrib/softfloat/dec: exact digit arrays, so
 // `str_of_float` prints the same shortest-round-trip spelling the interpreter
 // and the C runtime print, and `float_of_str` rounds the same way strtod does.
-let float_of_str = fn (s: str) -> __sf_float_of_sf (__sf_sf_of_dec s);
+// ---- RV64: decimal conversions on 64-bit words (v0.1.612) -------------------
+// A bignum is a Vec of ints: v[0] is the number of 30-bit limbs in use, v[1..n]
+// the limbs, least significant first; zero is n = 0. Capacity 104 limbs (3120
+// bits): the largest value the parser builds is about 2700 bits; the printer's
+// stay under 1130, and it asks for 42.
+let rec __bn_fill = fn (v: int Vec) -> fn (i: int) -> fn (n: int) ->
+  if i >= n then () else let _ = vec_push v 0 in __bn_fill v (i + 1) n;
+let __bn_new_cap = fn (cap: int) -> let v = vec_new () in let _ = __bn_fill v 0 (cap + 1) in v;
+let __bn_new = fn (u: unit) -> __bn_new_cap 104;
+let __bn_mask = fn (u: unit) -> bit_shl 1 30 - 1;
+let rec __bn_trim = fn (v: int Vec) ->
+  let n = vec_get v 0 in
+  if n > 0 && vec_get v n == 0 then (let _ = vec_set v 0 (n - 1) in __bn_trim v) else ();
+let __bn_set_int = fn (v: int Vec) -> fn (x: int) ->
+  let m = __bn_mask () in
+  let _ = vec_set v 1 (bit_and x m) in
+  let _ = vec_set v 2 (bit_and (bit_shr x 30) m) in
+  let _ = vec_set v 3 (bit_shr x 60) in
+  let _ = vec_set v 0 3 in
+  __bn_trim v;
+let rec __bn_copy_go = fn (d: int Vec) -> fn (s: int Vec) -> fn (i: int) -> fn (n: int) ->
+  if i > n then () else let _ = vec_set d i (vec_get s i) in __bn_copy_go d s (i + 1) n;
+let __bn_copy = fn (d: int Vec) -> fn (s: int Vec) -> __bn_copy_go d s 0 (vec_get s 0);
+// v = v * m + a, m and a below 2^30
+let rec __bn_mac_go = fn (v: int Vec) -> fn (m: int) -> fn (i: int) -> fn (n: int) -> fn (c: int) ->
+  if i > n then
+    (if c == 0 then () else (let _ = vec_set v i (bit_and c (__bn_mask ())) in
+                             let _ = vec_set v 0 i in __bn_mac_go v m (i + 1) i (bit_shr c 30)))
+  else
+    let t = vec_get v i * m + c in
+    let _ = vec_set v i (bit_and t (__bn_mask ())) in
+    __bn_mac_go v m (i + 1) n (bit_shr t 30);
+let __bn_mul_add = fn (v: int Vec) -> fn (m: int) -> fn (a: int) ->
+  __bn_mac_go v m 1 (vec_get v 0) a;
+let rec __bn_mul_pow10 = fn (v: int Vec) -> fn (k: int) ->
+  if k <= 0 then ()
+  else if k >= 9 then (let _ = __bn_mul_add v 1000000000 0 in __bn_mul_pow10 v (k - 9))
+  else
+    let rec p10 = fn (i: int) -> fn (a: int) -> if i == 0 then a else p10 (i - 1) (a * 10) in
+    __bn_mul_add v (p10 k 1) 0;
+let rec __bn_mul_pow5 = fn (v: int Vec) -> fn (k: int) ->
+  if k <= 0 then ()
+  else if k >= 12 then (let _ = __bn_mul_add v 244140625 0 in __bn_mul_pow5 v (k - 12))
+  else
+    let rec p5 = fn (i: int) -> fn (a: int) -> if i == 0 then a else p5 (i - 1) (a * 5) in
+    __bn_mul_add v (p5 k 1) 0;
+// v = v * 2^k, in place
+let rec __bn_shl_words = fn (v: int Vec) -> fn (i: int) -> fn (q: int) ->
+  if i < 1 then () else let _ = vec_set v (i + q) (vec_get v i) in __bn_shl_words v (i - 1) q;
+let rec __bn_zero_low = fn (v: int Vec) -> fn (i: int) -> fn (q: int) ->
+  if i > q then () else let _ = vec_set v i 0 in __bn_zero_low v (i + 1) q;
+let rec __bn_shl_bits = fn (v: int Vec) -> fn (i: int) -> fn (n: int) -> fn (r: int) -> fn (c: int) ->
+  if i > n then (if c == 0 then () else (let _ = vec_set v i c in vec_set v 0 i))
+  else
+    let t = vec_get v i in
+    let _ = vec_set v i (bit_and (bit_or (bit_shl t r) c) (__bn_mask ())) in
+    __bn_shl_bits v (i + 1) n r (bit_shr t (30 - r));
+let __bn_shl = fn (v: int Vec) -> fn (k: int) ->
+  let n = vec_get v 0 in
+  if n == 0 || k == 0 then ()
+  else
+    let q = k / 30 in
+    let r = k - q * 30 in
+    let _ = (if q > 0 then (let _ = __bn_shl_words v n q in
+                            let _ = __bn_zero_low v 1 q in vec_set v 0 (n + q)) else ()) in
+    if r > 0 then __bn_shl_bits v (q + 1) (vec_get v 0) r 0 else ();
+// v = v / 2 (floor), in place
+let rec __bn_shr1_go = fn (v: int Vec) -> fn (i: int) -> fn (c: int) ->
+  if i < 1 then ()
+  else
+    let t = vec_get v i in
+    let _ = vec_set v i (bit_or (bit_shr t 1) (bit_shl c 29)) in
+    __bn_shr1_go v (i - 1) (bit_and t 1);
+let __bn_shr1 = fn (v: int Vec) -> let _ = __bn_shr1_go v (vec_get v 0) 0 in __bn_trim v;
+let rec __bn_cmp_go = fn (a: int Vec) -> fn (b: int Vec) -> fn (i: int) ->
+  if i < 1 then 0
+  else
+    let x = vec_get a i in let y = vec_get b i in
+    if x != y then (if x < y then 0 - 1 else 1) else __bn_cmp_go a b (i - 1);
+let __bn_cmp = fn (a: int Vec) -> fn (b: int Vec) ->
+  let na = vec_get a 0 in let nb = vec_get b 0 in
+  if na != nb then (if na < nb then 0 - 1 else 1) else __bn_cmp_go a b na;
+// a = a - b, a >= b
+let rec __bn_sub_go = fn (a: int Vec) -> fn (b: int Vec) -> fn (i: int) -> fn (n: int) -> fn (nb: int) -> fn (br: int) ->
+  if i > n then ()
+  else
+    let t = vec_get a i - (if i <= nb then vec_get b i else 0) - br in
+    if t < 0 then (let _ = vec_set a i (t + bit_shl 1 30) in __bn_sub_go a b (i + 1) n nb 1)
+    else (let _ = vec_set a i t in __bn_sub_go a b (i + 1) n nb 0);
+let __bn_sub = fn (a: int Vec) -> fn (b: int Vec) ->
+  let _ = __bn_sub_go a b 1 (vec_get a 0) (vec_get b 0) 0 in __bn_trim a;
+// d = a + b (d may be a)
+let rec __bn_add_go = fn (d: int Vec) -> fn (a: int Vec) -> fn (b: int Vec) -> fn (i: int) -> fn (n: int) -> fn (c: int) ->
+  if i > n then (if c == 0 then vec_set d 0 n else (let _ = vec_set d i c in vec_set d 0 i))
+  else
+    let t = (if i <= vec_get a 0 then vec_get a i else 0) + (if i <= vec_get b 0 then vec_get b i else 0) + c in
+    let _ = vec_set d i (bit_and t (__bn_mask ())) in
+    __bn_add_go d a b (i + 1) n (bit_shr t 30);
+let __bn_add = fn (d: int Vec) -> fn (a: int Vec) -> fn (b: int Vec) ->
+  let na = vec_get a 0 in let nb = vec_get b 0 in
+  __bn_add_go d a b 1 (if na > nb then na else nb) 0;
+let rec __bn_bl = fn (t: int) -> fn (n: int) -> if t == 0 then n else __bn_bl (bit_shr t 1) (n + 1);
+let __bn_bitlen = fn (v: int Vec) ->
+  let n = vec_get v 0 in if n == 0 then 0 else (n - 1) * 30 + __bn_bl (vec_get v n) 0;
+// bits [lo, lo + cnt) of v as an int, cnt <= 60
+let __bn_bits = fn (v: int Vec) -> fn (lo: int) -> fn (cnt: int) ->
+  let rec go = fn (b: int) -> fn (acc: int) ->
+    if b < lo then acc
+    else
+      let w = b / 30 + 1 in
+      let bit = if w <= vec_get v 0 then bit_and (bit_shr (vec_get v w) (b - (w - 1) * 30)) 1 else 0 in
+      go (b - 1) (acc * 2 + bit) in
+  go (lo + cnt - 1) 0;
+// any bit below lo set?
+let __bn_any_below = fn (v: int Vec) -> fn (lo: int) ->
+  let rec go = fn (w: int) ->
+    if (w - 1) * 30 >= lo || w > vec_get v 0 then false
+    else
+      let top = w * 30 in
+      let lim = if top <= lo then 30 else lo - (w - 1) * 30 in
+      if bit_and (vec_get v w) (bit_shl 1 lim - 1) != 0 then true else go (w + 1) in
+  go 1;
+
+// ---- str_of_float: Dragon4 (Burger & Dybvig, free format) --------------------
+// The contract is %.{p}g for the first p in 12..17 whose output reads back to
+// the same double. That is the SHORTEST round-tripping digit string D (closest
+// to the value among the shortest) printed with p = max(12, len D): a p-digit
+// rounding of the value round-trips exactly when some p-digit decimal does, and
+// below 12 digits the 12-digit rounding is D padded with zeros, which %g drops.
+let rec __d64_gen = fn (r: int Vec) -> fn (s: int Vec) -> fn (mp: int Vec) -> fn (mm: int Vec) ->
+                     fn (ok: bool) -> fn (out: int Vec) -> fn (t: int Vec) ->
+  let _ = __bn_mul_add r 10 0 in
+  let _ = __bn_mul_add mp 10 0 in
+  let _ = __bn_mul_add mm 10 0 in
+  let rec digit = fn (d: int) -> if __bn_cmp r s >= 0 then (let _ = __bn_sub r s in digit (d + 1)) else d in
+  let d = digit 0 in
+  let c1 = __bn_cmp r mm in
+  let tc1 = if ok then c1 <= 0 else c1 < 0 in
+  let _ = __bn_add t r mp in
+  let c2 = __bn_cmp t s in
+  let tc2 = if ok then c2 >= 0 else c2 > 0 in
+  if not tc1 && not tc2 then (let _ = vec_push out d in __d64_gen r s mp mm ok out t)
+  else if tc1 && not tc2 then vec_push out d
+  else if tc2 && not tc1 then vec_push out (d + 1)
+  else
+    // both: the nearer; a tie goes to the even digit
+    let _ = __bn_add t r r in
+    let c3 = __bn_cmp t s in
+    vec_push out (if c3 < 0 then d else if c3 > 0 then d + 1 else (if bit_and d 1 == 0 then d else d + 1));
+// (digits msb first, k): value = 0.d1 d2 ... * 10^k
+let __d64_shortest = fn (f: int) -> fn (e: int) -> fn (subn: bool) ->
+  // every value here stays under ~1130 bits (38 limbs)
+  let r = __bn_new_cap 42 in let s = __bn_new_cap 42 in
+  let mp = __bn_new_cap 42 in let mm = __bn_new_cap 42 in
+  let pow2 = bit_shl 1 52 in
+  let unequal = f == pow2 && not subn in
+  let _ = (if e >= 0 then
+             (if not unequal then
+                (let _ = __bn_set_int r f in let _ = __bn_shl r (e + 1) in
+                 let _ = __bn_set_int s 2 in
+                 let _ = __bn_set_int mp 1 in let _ = __bn_shl mp e in
+                 let _ = __bn_set_int mm 1 in __bn_shl mm e)
+              else
+                (let _ = __bn_set_int r f in let _ = __bn_shl r (e + 2) in
+                 let _ = __bn_set_int s 4 in
+                 let _ = __bn_set_int mp 1 in let _ = __bn_shl mp (e + 1) in
+                 let _ = __bn_set_int mm 1 in __bn_shl mm e))
+           else
+             (if not unequal then
+                (let _ = __bn_set_int r (f * 2) in
+                 let _ = __bn_set_int s 1 in let _ = __bn_shl s (1 - e) in
+                 let _ = __bn_set_int mp 1 in __bn_set_int mm 1)
+              else
+                (let _ = __bn_set_int r (f * 4) in
+                 let _ = __bn_set_int s 1 in let _ = __bn_shl s (2 - e) in
+                 let _ = __bn_set_int mp 2 in __bn_set_int mm 1))) in
+  let ok = bit_and f 1 == 0 in
+  // k estimate: ceil(log10 v), at most one low
+  let lf = __bn_bl f 0 in
+  let est0 = float_of_int (e + lf - 1) * 0.30102999566398114 - 0.0000000001 in
+  let est = int_of_float est0 + (if est0 > float_of_int (int_of_float est0) then 1 else 0) in
+  let _ = (if est >= 0 then __bn_mul_pow10 s est
+           else (let _ = __bn_mul_pow10 r (0 - est) in
+                 let _ = __bn_mul_pow10 mp (0 - est) in __bn_mul_pow10 mm (0 - est))) in
+  let t = __bn_new_cap 42 in
+  let _ = __bn_add t r mp in
+  let c = __bn_cmp t s in
+  let low = if ok then c >= 0 else c > 0 in
+  let k = if low then est + 1 else est in
+  let _ = (if low then __bn_mul_add s 10 0 else ()) in
+  let out = vec_new () in
+  let _ = __d64_gen r s mp mm ok out t in
+  (out, k);
+// exactly p significant digits of v = f 2^e, correctly rounded (half to even on
+// the exact remainder): %.{p}g's digits. Needed beside the shortest string when
+// that is under 12 digits: there %.12g prints the exact value's 12-digit
+// rounding, which is the shortest string padded with zeros only while the
+// double's own precision is far finer than 12 digits. A subnormal's is not:
+// the smallest prints 4.94065645841e-324, where the shortest is 5e-324.
+let __d64_fixed = fn (f: int) -> fn (e: int) -> fn (p: int) ->
+  let r = __bn_new_cap 42 in let s = __bn_new_cap 42 in
+  let _ = __bn_set_int r f in let _ = __bn_set_int s 1 in
+  let _ = (if e >= 0 then __bn_shl r e else __bn_shl s (0 - e)) in
+  let lf = __bn_bl f 0 in
+  let est0 = float_of_int (e + lf - 1) * 0.30102999566398114 - 0.0000000001 in
+  let est = int_of_float est0 + (if est0 > float_of_int (int_of_float est0) then 1 else 0) in
+  let _ = (if est >= 0 then __bn_mul_pow10 s est else __bn_mul_pow10 r (0 - est)) in
+  // r / s = v / 10^est, below 1 unless the estimate was one low
+  let up = __bn_cmp r s >= 0 in
+  let _ = (if up then __bn_mul_add s 10 0 else ()) in
+  let k = if up then est + 1 else est in
+  let out = vec_new () in
+  let rec gen = fn (i: int) ->
+    if i >= p then ()
+    else
+      let _ = __bn_mul_add r 10 0 in
+      let rec digit = fn (d: int) -> if __bn_cmp r s >= 0 then (let _ = __bn_sub r s in digit (d + 1)) else d in
+      let _ = vec_push out (digit 0) in
+      gen (i + 1) in
+  let _ = gen 0 in
+  let t = __bn_new_cap 42 in
+  let _ = __bn_add t r r in
+  let c = __bn_cmp t s in
+  let roundup = c > 0 || (c == 0 && bit_and (vec_get out (p - 1)) 1 == 1) in
+  let rec carry = fn (i: int) ->
+    if i < 0 then true
+    else if vec_get out i == 9 then (let _ = vec_set out i 0 in carry (i - 1))
+    else (let _ = vec_set out i (vec_get out i + 1) in false) in
+  let over = if roundup then carry (p - 1) else false in
+  if over then
+    (let o2 = vec_new () in
+     let _ = vec_push o2 1 in
+     let rec zs = fn (i: int) -> if i >= p - 1 then () else let _ = vec_push o2 0 in zs (i + 1) in
+     let _ = zs 0 in (o2, k + 1))
+  else (out, k);
+// the digits without their trailing zeros (at least one kept)
+let __d64_strip = fn (d: int Vec) ->
+  let rec last = fn (i: int) -> if i <= 0 then 0 else if vec_get d i != 0 then i else last (i - 1) in
+  let n = last (vec_len d - 1) + 1 in
+  let o = vec_new () in
+  let rec cp = fn (i: int) -> if i >= n then () else let _ = vec_push o (vec_get d i) in cp (i + 1) in
+  let _ = cp 0 in o;
+let __d64_exp_str = fn (x: int) ->
+  let mag = if x < 0 then 0 - x else x in
+  "e" ++ (if x < 0 then "-" else "+") ++ (if mag < 10 then "0" else "") ++ str_of_int mag;
+let __d64_digits = fn (dig: int Vec) -> fn (i: int) -> fn (j: int) ->
+  // digits i .. j-1 as text, zeros past the end
+  let b = strbuf_new () in
+  let rec go = fn (k: int) ->
+    if k >= j then ()
+    else let _ = strbuf_push b (chr (48 + (if k < vec_len dig then vec_get dig k else 0))) in go (k + 1) in
+  let _ = go i in
+  strbuf_to_str b;
+let __d64_str_of_float = fn (x: float) ->
+  // read through the two 32-bit halves, so this holds on any int of 63 bits or more
+  let m32 = bit_shl 1 32 - 1 in
+  let hi = bit_and (float_bits_hi x) m32 in
+  let lo = bit_and (float_bits_lo x) m32 in
+  let neg = bit_and (bit_shr hi 31) 1 == 1 in
+  let ex = bit_and (bit_shr hi 20) 2047 in
+  let frac = bit_or (bit_shl (bit_and hi 1048575) 32) lo in
+  if ex == 2047 then (if frac != 0 then "nan" else if neg then "-inf" else "inf")
+  else if ex == 0 && frac == 0 then (if neg then "-0.0" else "0.0")
+  else
+    let f = if ex == 0 then frac else bit_or frac (bit_shl 1 52) in
+    let e = if ex == 0 then 0 - 1074 else ex - 1075 in
+    let (dig0, k0) = __d64_shortest f e (ex <= 1) in
+    let (dig, k) = if vec_len dig0 >= 12 then (dig0, k0)
+                   else (let (d12, k12) = __d64_fixed f e 12 in (__d64_strip d12, k12)) in
+    let n = vec_len dig in
+    let p = if vec_len dig0 > 12 then vec_len dig0 else 12 in
+    let xx = k - 1 in
+    let body =
+      if xx < 0 - 4 || xx >= p then
+        __d64_digits dig 0 1 ++ (if n > 1 then "." ++ __d64_digits dig 1 n else "") ++ __d64_exp_str xx
+      else if xx >= 0 then
+        __d64_digits dig 0 (xx + 1) ++ (if n > xx + 1 then "." ++ __d64_digits dig (xx + 1) n else ".0")
+      else
+        let zb = strbuf_new () in
+        let rec zs = fn (i: int) -> if i >= 0 - xx - 1 then () else let _ = strbuf_push zb "0" in zs (i + 1) in
+        let _ = zs 0 in
+        "0." ++ strbuf_to_str zb ++ __d64_digits dig 0 n in
+    (if neg then "-" else "") ++ body;
+
+// ---- float_of_str: the decimal case on words -----------------------------------
+// The lexical rules are the limb parser's (trim, ndrop '_', sign, digits with one
+// '.', an optional e/E exponent, the whole string); anything that is not that --
+// hex, inf, nan, or not a number -- is handed to it, so its answers and its
+// failure messages are the same ones. The value: D * 10^k with D the digits (the
+// first 800 significant ones; any further nonzero digit becomes one sticky '1'
+// below them, which cannot change a rounding). k >= 0: D 10^k exactly, its top
+// 57 bits and a sticky bit to pack. k < 0: 57-58 quotient bits of D 2^j / 5^-k by
+// long division, the remainder as sticky; pack rounds once either way.
+let __d64_is_ws = fn (c: int) -> c == 32 || c == 9 || c == 10 || c == 13 || c == 12;
+let __d64_parse = fn (s: str) -> fn (old: str -> float) ->
+  let n = str_len s in
+  let ch = fn (i: int) -> ord (char_at s i) in
+  let rec lead = fn (i: int) -> if i < n && __d64_is_ws (ch i) then lead (i + 1) else i in
+  let rec trail = fn (i: int) -> if i > 0 && __d64_is_ws (ch (i - 1)) then trail (i - 1) else i in
+  let a = lead 0 in
+  let bnd = trail n in
+  // the next non-'_' position at or after i
+  let rec nx = fn (i: int) -> if i < bnd && ch i == 95 then nx (i + 1) else i in
+  let i0 = nx a in
+  let neg = i0 < bnd && ch i0 == 45 in
+  let i1 = if i0 < bnd && (ch i0 == 45 || ch i0 == 43) then nx (i0 + 1) else i0 in
+  // only digits, '.', 'e', 'E', '+', '-' from here; a letter means hex / inf / nan / bad
+  let dig = vec_new () in
+  let rec mant = fn (i: int) -> fn (dot: bool) -> fn (seen: int) -> fn (sig: int) -> fn (fdig: int) -> fn (ndrop: int) -> fn (sticky: bool) ->
+    if i >= bnd then (i, seen, sig, fdig, ndrop, sticky)
+    else
+      let c = ch i in
+      if c == 46 && not dot then mant (nx (i + 1)) true seen sig fdig ndrop sticky
+      else if c >= 48 && c <= 57 then
+        let d = c - 48 in
+        let fd = if dot then fdig + 1 else fdig in
+        if sig == 0 && d == 0 then mant (nx (i + 1)) dot (seen + 1) 0 fd ndrop sticky
+        else if sig < 800 then (let _ = vec_push dig d in mant (nx (i + 1)) dot (seen + 1) (sig + 1) fd ndrop sticky)
+        else mant (nx (i + 1)) dot (seen + 1) (sig + 1) fd (ndrop + 1) (sticky || d != 0)
+      else (i, seen, sig, fdig, ndrop, sticky) in
+  let (i2, seen, sig, fdig, ndrop, sticky) = mant i1 false 0 0 0 0 false in
+  // one sign at most: "1e+-5" is not a number (strtod stops at the 'e')
+  let rec pexp = fn (i: int) -> fn (acc: int) -> fn (any: int) -> fn (sg: int) -> fn (signed: bool) ->
+    if i >= bnd then (if any == 0 then (0 - 1, 0) else (i, sg * acc))
+    else
+      let c = ch i in
+      if any == 0 && not signed && c == 45 then pexp (nx (i + 1)) acc 0 (0 - 1) true
+      else if any == 0 && not signed && c == 43 then pexp (nx (i + 1)) acc 0 sg true
+      else if c >= 48 && c <= 57 then pexp (nx (i + 1)) (if acc > 1000000 then acc else acc * 10 + (c - 48)) (any + 1) sg signed
+      else (if any == 0 then (0 - 1, 0) else (i, sg * acc)) in
+  let (i3, dexp) = if i2 < bnd && (ch i2 == 101 || ch i2 == 69) then pexp (nx (i2 + 1)) 0 0 1 false else (i2, 0) in
+  if seen == 0 || i3 != bnd || i3 < 0 then old s
+  else
+    let sgn = fn (v: float) -> if neg then f_neg v else v in
+    // the packed word is positive (sign 0): its top half masked to 31 bits, so
+    // an int of only 63 bits (the interpreter's) builds it too
+    let pos = fn (w: int) -> float_of_bits (bit_and (bit_shr w 32) 2147483647) (bit_and w (bit_shl 1 32 - 1)) in
+    if sig == 0 then (if neg then f_neg 0.0 else 0.0)
+    else
+      let top10 = (sig - 1) + (dexp - fdig) in
+      if top10 >= 310 then (if neg then 0.0 - 1.0 / 0.0 else 1.0 / 0.0)
+      else if top10 <= 0 - 330 then (if neg then f_neg 0.0 else 0.0)
+      else
+        // D, with the sticky digit
+        let dd = __bn_new () in
+        let rec acc = fn (i: int) -> if i >= vec_len dig then () else let _ = __bn_mul_add dd 10 (vec_get dig i) in acc (i + 1) in
+        let _ = acc 0 in
+        let _ = (if sticky then __bn_mul_add dd 10 1 else ()) in
+        let k = dexp - fdig + ndrop - (if sticky then 1 else 0) in
+        if k >= 0 then
+          let _ = __bn_mul_pow10 dd k in
+          let l = __bn_bitlen dd in
+          if l <= 57 then sgn (pos (__f64_pack 0 (__bn_bits dd 0 l) 1078 0))
+          else
+            sgn (pos (__f64_pack 0 (__bn_bits dd (l - 57) 57) (1078 + (l - 57))
+                                         (if __bn_any_below dd (l - 57) then 1 else 0)))
+        else
+          let q5 = __bn_new () in
+          let _ = __bn_set_int q5 1 in
+          let _ = __bn_mul_pow5 q5 (0 - k) in
+          let j = 57 - __bn_bitlen dd + __bn_bitlen q5 in
+          let _ = (if j >= 0 then __bn_shl dd j else __bn_shl q5 (0 - j)) in
+          let _ = __bn_shl q5 57 in
+          let rec div = fn (b: int) -> fn (q: int) ->
+            if b < 0 then q
+            else if __bn_cmp dd q5 >= 0 then
+              (let _ = __bn_sub dd q5 in let _ = __bn_shr1 q5 in div (b - 1) (bit_or q (bit_shl 1 b)))
+            else (let _ = __bn_shr1 q5 in div (b - 1) q) in
+          let q = div 57 0 in
+          sgn (pos (__f64_pack 0 q (1078 - j + k) (if vec_get dd 0 == 0 then 0 else 1)));
+
+let float_of_str = fn (s: str) ->
+  if __rv_xlen () == 64 then __d64_parse s (fn (t: str) -> __sf_float_of_sf (__sf_sf_of_dec t))
+  else __sf_float_of_sf (__sf_sf_of_dec s);
 
 // --- the float library, computed here -----------------------------------
 // sqrt goes through contrib/softfloat's integer digit-by-digit root and is
@@ -1255,7 +1628,9 @@ let __fp_trig_reduce = fn (x: float) ->
   let n4 = int_of_float (nf - __fp_trunc (nf * 0.25) * 4.0) in
   (y0, y1, if n4 < 0 then n4 + 4 else n4);
 // sin / cos / tan / atan2 and the libm: lib/rv_libm.ml, appended to this.
-let str_of_float = fn (x: float) -> __sf_dec_of_sf (__sf_sf_of_float x);
+let str_of_float = fn (x: float) ->
+  if __rv_xlen () == 64 then __d64_str_of_float x
+  else __sf_dec_of_sf (__sf_sf_of_float x);
 |mere} ^ Rv_libm.contents
 
 (* Lines the prelude occupies once it is glued ahead of the user source, so a
