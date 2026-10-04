@@ -1,0 +1,32 @@
+// str_of_float / float_of_str on RV64 (v0.1.612: Dragon4 and a bignum parser on
+// 64-bit words) against the C backend's, which are printf's %.{p}g and strtod.
+// Random doubles by class -- subnormals (some of only a few bits), the smallest normals, the largest
+// exponents, ordinary ones, and integers and thousandths -- each printed, read
+// back, and read back again from a spelling with extra digits, which must still
+// round to the nearest double. scripts/rv_float_check.sh requires every line to
+// be identical. (40,000 such lines over four seeds were, when this was made.)
+let next = fn (s: int) -> bit_and (s * 1103515245 + 12345) 2147483647;
+let m32 = 4294967295;
+let bits = fn (x: float) -> str_of_int (bit_and (float_bits_hi x) m32) ++ ":" ++ str_of_int (bit_and (float_bits_lo x) m32);
+let rec go = fn (i: int) -> fn (s: int) ->
+  if i >= 1500 then ()
+  else
+    let s1 = next s in let s2 = next s1 in let s3 = next s2 in
+    let cls = bit_and s3 7 in
+    let ex = if cls == 0 then 0 else if cls == 1 then 1 else if cls == 2 then 2046 else if cls == 3 then bit_and (bit_shr s3 3) 2047 else 1023 - 60 + bit_and (bit_shr s3 3) 127 in
+    let ex2 = if ex == 2047 then 2046 else ex in
+    let hi = bit_or (bit_shl (bit_and s1 1) 31) (bit_or (bit_shl ex2 20) (bit_and (bit_shr s1 1) 1048575)) in
+    let lo = bit_and (bit_or (bit_shl s2 1) (bit_and (bit_shr s3 1) 1)) m32 in
+    // and subnormals of only a few bits, where %.12g is not the shortest padded
+    let few = cls == 0 && bit_and s3 128 != 0 in
+    let x0 = if few then float_of_bits (bit_shl (bit_and s1 1) 31) (bit_and lo (bit_shl 1 (bit_and (bit_shr s3 8) 31) - 1))
+             else float_of_bits hi lo in
+    let x = if bit_and s3 64 == 0 then x0 else float_of_int (bit_and s1 16777215) / (if cls < 4 then 1.0 else 1000.0) in
+    let t = str_of_float x in
+    let _ = print (t ++ " " ++ bits (float_of_str t)) in
+    // a spelling with more digits than the shortest: parse must still round right
+    let t2 = t ++ (if bit_and s2 3 == 0 then "" else str_of_int (bit_and s2 999)) in
+    let ok = try_or (fn (u: unit) -> bits (float_of_str t2)) "ERR" in
+    let _ = print ("  " ++ t2 ++ " " ++ ok) in
+    go (i + 1) s3;
+go 0 21

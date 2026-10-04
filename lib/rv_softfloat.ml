@@ -974,17 +974,18 @@ let __sf__dc_parse_hex = fn (sign: int) -> fn (t: str) -> fn (fail_s: str) ->
   if seen == 0 then fail fail_s else
   let (i2, pexp) =
     if i1 < n && (str_eq (char_at t i1) "p" || str_eq (char_at t i1) "P") then
-      let rec pe = fn (i: int) -> fn (acc: int) -> fn (any: int) -> fn (psign: int) ->
+      let rec pe = fn (i: int) -> fn (acc: int) -> fn (any: int) -> fn (psign: int) -> fn (sgd: int) ->
         if i >= n then (if any == 0 then (0 - 1, 0) else (i, psign * acc))
         else
           let c = char_at t i in
-          if any == 0 && str_eq c "-" then pe (i + 1) acc 0 (0 - 1)
-          else if any == 0 && str_eq c "+" then pe (i + 1) acc 0 psign
+          if any == 0 && sgd == 0 && str_eq c "-" then pe (i + 1) acc 0 (0 - 1) 1
+          else if any == 0 && sgd == 0 && str_eq c "+" then pe (i + 1) acc 0 psign 1
           else
             let dg = __sf__dc_digit c in
             if dg < 0 then (if any == 0 then (0 - 1, 0) else (i, psign * acc))
-            else pe (i + 1) (if acc > 100000 then acc else acc * 10 + dg) (any + 1) psign in
-      pe (i1 + 1) 0 0 1
+            else pe (i + 1) (if acc > 100000 then acc else acc * 10 + dg) (any + 1) psign sgd in
+      // one sign at most: "1e+-5" is not a number (strtod stops at the 'e')
+      pe (i1 + 1) 0 0 1 0
     else (i1, 0) in
   if i2 != n || i2 < 0 then fail fail_s else
   if __sf_l6_is_zero m && st == 0 then (if sign == 1 then __sf_neg_zero else __sf_zero) else
@@ -1029,19 +1030,20 @@ let __sf_sf_of_dec = fn (s: str) ->
     if seen == 0 then fail fail_s else
     let (i2, dexp) =
       if i1 < n && (str_eq (char_at t i1) "e" || str_eq (char_at t i1) "E") then
-        let rec pe = fn (i: int) -> fn (acc: int) -> fn (any: int) -> fn (psign: int) ->
+        let rec pe = fn (i: int) -> fn (acc: int) -> fn (any: int) -> fn (psign: int) -> fn (sgd: int) ->
           if i >= n then (if any == 0 then (0 - 1, 0) else (i, psign * acc))
           else
             let c = char_at t i in
-            if any == 0 && str_eq c "-" then pe (i + 1) acc 0 (0 - 1)
-            else if any == 0 && str_eq c "+" then pe (i + 1) acc 0 psign
+            if any == 0 && sgd == 0 && str_eq c "-" then pe (i + 1) acc 0 (0 - 1) 1
+            else if any == 0 && sgd == 0 && str_eq c "+" then pe (i + 1) acc 0 psign 1
             else
               let dg = __sf__dc_digit c in
               if dg < 0 then (if any == 0 then (0 - 1, 0) else (i, psign * acc))
               // the exponent saturates: past |10^6| the value is decided by the
               // digit count alone, and 10^6 digits is not a real input
-              else pe (i + 1) (if acc > 1000000 then acc else acc * 10 + dg) (any + 1) psign in
-        pe (i1 + 1) 0 0 1
+              else pe (i + 1) (if acc > 1000000 then acc else acc * 10 + dg) (any + 1) psign sgd in
+        // one sign at most: "1e+-5" is not a number (strtod stops at the 'e')
+      pe (i1 + 1) 0 0 1 0
       else (i1, 0) in
     if i2 != n || i2 < 0 then fail fail_s else
     // value = digits * 10^(dexp - fdig): LSB-first array, scale from the point
