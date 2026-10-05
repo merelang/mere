@@ -420,7 +420,7 @@ let rvmap_set = fn m -> fn k -> fn v ->
 let rvmap_get = fn m -> fn k ->
   let (idx, _, vals, _, _) = m in
   let s = _mslot m k in
-  if s >= 0 then vec_get vals (vec_get idx s - 1) else fail "map_get: key not found";
+  if s >= 0 then vec_get vals (vec_get idx s - 1) else fail "map_get: key not found in Map (use map_has to check first)";
 let rvmap_has = fn m -> fn k -> _mslot m k >= 0;
 let rvmap_delete = fn m -> fn k ->
   let (idx, _, _, live, meta) = m in
@@ -483,7 +483,7 @@ let rvmap_set_i = fn m -> fn k -> fn v ->
 let rvmap_get_i = fn m -> fn k ->
   let (idx, _, vals, _, _) = m in
   let s = _mslot_i m k in
-  if s >= 0 then vec_get vals (vec_get idx s - 1) else fail "map_get: key not found";
+  if s >= 0 then vec_get vals (vec_get idx s - 1) else fail "map_get: key not found in Map (use map_has to check first)";
 let rvmap_has_i = fn m -> fn k -> _mslot_i m k >= 0;
 let rvmap_delete_i = fn m -> fn k ->
   let (idx, _, _, live, meta) = m in

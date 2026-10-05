@@ -3098,8 +3098,9 @@ and compile_app env e =
     check_map_key e.Ast.loc (List.nth args 1);
     let word = map_keyed_by_word args in
     let kty = (List.nth args 1).Ast.ty and vty = (List.nth args 2).Ast.ty in
-    let copies t = match t with Some t -> skind t <> SWord | None -> false in
-    if in_rv_prelude e.Ast.loc || not (copies kty || copies vty) then
+    (* v0.1.616: every user-site map_set takes this path, words too: the find
+       and the update are the runtime's, only an insert calls the prelude *)
+    if in_rv_prelude e.Ast.loc then
       call_top env (if word then "rvmap_set_i" else "rvmap_set") args
     else begin
       (* v0.1.614: find, copy, then update or insert. The copy goes into the
@@ -3115,7 +3116,7 @@ and compile_app env e =
       List.iter (fun x -> compile_expr env x; push a0) args;    (* [v][k][m] *)
       emit_word (enc_i (2 * w) sp (ldf3 ()) a0 0x03);
       emit_word (enc_i w sp (ldf3 ()) a1 0x03);
-      emit (Jal (ra, if word then "u__mslot_i" else "u__mslot"));
+      emit (Jal (ra, if word then "__rv_mslot_w" else "__rv_mslot_s"));
       push a0;                                                  (* [s][v][k][m] *)
       let l_ins = fresh_label ".msIns" and l_done = fresh_label ".msDone" in
       emit (Branch (4, a0, zero, l_ins));                       (* s < 0: a new key *)
@@ -3125,7 +3126,7 @@ and compile_app env e =
       emit_word (enc_i 0 a1 0 a2 0x13);
       emit_word (enc_i (3 * w) sp (ldf3 ()) a0 0x03);
       emit_word (enc_i 0 sp (ldf3 ()) a1 0x03);
-      emit (Jal (ra, "u_rvmap_upd"));
+      emit (Jal (ra, "__rv_mupd"));
       emit (Jal (zero, l_done));
       emit (Label l_ins);
       emit_word (enc_i (3 * w) sp (ldf3 ()) a0 0x03);
@@ -3144,12 +3145,15 @@ and compile_app env e =
       emit_word (enc_i (4 * w) sp 0 sp 0x13);
       li a0 0
     end
-  | Ast.Var "map_get" when List.length args = 2 ->
+  (* v0.1.616: get / has / delete go to the runtime (emit_map_rt) *)
+  | Ast.Var ("map_get" | "map_has" | "map_delete" as op) when List.length args = 2 ->
     check_map_key e.Ast.loc (List.nth args 1);
-    call_top env (if map_keyed_by_word args then "rvmap_get_i" else "rvmap_get") args
-  | Ast.Var "map_has" when List.length args = 2 ->
-    check_map_key e.Ast.loc (List.nth args 1);
-    call_top env (if map_keyed_by_word args then "rvmap_has_i" else "rvmap_has") args
+    let sfx = if map_keyed_by_word args then "w" else "s" in
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1);
+    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;
+    let rt = match op with "map_get" -> "__rv_mget_" | "map_has" -> "__rv_mhas_" | _ -> "__rv_mdel_" in
+    emit (Jal (ra, rt ^ sfx))
   | Ast.Var "map_len" when List.length args = 1 ->
     call_top env (if map_keyed_by_word args then "rvmap_len_i" else "rvmap_len") args
   | Ast.Var "map_clear" when List.length args = 1 -> call_top env "rvmap_clear" args
@@ -3186,9 +3190,6 @@ and compile_app env e =
     let et = match vec_elem_ty (List.hd args).Ast.ty with Some t -> t | None -> Ast.TyInt in
     emit (Jal (ra, request_store "__vcompact_"
                      (if in_rv_prelude e.Ast.loc then Ast.TyInt else et)))
-  | Ast.Var "map_delete" when List.length args = 2 ->
-    check_map_key e.Ast.loc (List.nth args 1);
-    call_top env (if map_keyed_by_word args then "rvmap_delete_i" else "rvmap_delete") args
   | Ast.Var "map_iter" when List.length args = 2 ->
     call_top env (if map_keyed_by_word args then "rvmap_iter_i" else "rvmap_iter") args
   | Ast.Var "show" when List.length args = 1 ->
@@ -3890,28 +3891,217 @@ let emit_str_eq () =
   emit (Label ".se_eq"); li a0 1; emit_word (enc_i 0 ra 0 zero 0x67);
   emit (Label ".se_ne"); li a0 0; emit_word (enc_i 0 ra 0 zero 0x67)
 
-(* __rv_str_hash(a0=s) -> a0 = FNV-1a over s's bytes, kept to 31 bits so it is
-   a non-negative int at either width. The prelude's Map hashes str keys with
-   it (v0.1.611); a hash built from `char_at` in Mere would allocate a string
-   per byte. Leaf. *)
+(* __rv_str_hash(a0=s) -> a0 = a hash of s's bytes, kept to 31 bits so it is a
+   non-negative int at either width. The prelude's Map hashes str keys with it
+   (v0.1.611); a hash built from `char_at` in Mere would allocate a string per
+   byte. v0.1.616: a WORD at a time -- the last one masked to the bytes that
+   are the string's, since what follows them in the block is not zeroed --
+   xor, multiply by the FNV prime, and fold the high half back down, which a
+   multiply alone never does: without the fold the low bits a Map's mask keeps
+   would depend on each word's first byte only. The same body is inlined in
+   __rv_mslot_s, and the two must agree: an entry placed by one is found by the
+   other. Leaf; t0..t5 (the hash is built in dst, which must not be t0..t4), a0. *)
+let emit_str_hash_body ~(src : int) ~(dst : int) =
+  let w = wsz () in
+  let tag = fresh_label ".shb" in
+  emit_word (enc_i 0 src (ldf3 ()) t0 0x03);               (* t0 = len *)
+  emit_word (enc_i w src 0 t2 0x13);                       (* t2 = the bytes *)
+  li dst (-2128831035);                                    (* FNV offset basis *)
+  li t3 16777619;                                          (* FNV prime *)
+  emit (Label (tag ^ "L"));
+  emit (Branch (0, t0, zero, tag ^ "D"));
+  emit_word (enc_i 0 t2 (ldf3 ()) t4 0x03);                (* a word *)
+  (let l_full = tag ^ "F" in
+   li t1 w;
+   emit (Branch (7, t0, t1, l_full));                      (* len >= w: all of it *)
+   (* the last, partial word: keep its first len bytes *)
+   emit_word (enc_i 3 t0 1 t1 0x13);                       (* t1 = len * 8 *)
+   li t3 1; emit_word (enc_r 0 t1 t3 1 t1 0x33);           (* t1 = 1 << bits *)
+   emit_word (enc_i (-1) t1 0 t1 0x13);                    (* the mask *)
+   emit_word (enc_r 0 t1 t4 7 t4 0x33);                    (* and *)
+   li t3 16777619;
+   li t0 w;                                                (* consumes the rest *)
+   emit (Label l_full));
+  emit_word (enc_r 0 t4 dst 4 dst 0x33);                   (* xor *)
+  emit_word (enc_r 1 t3 dst 0 dst 0x33);                   (* mul *)
+  emit_word (enc_i (!xlen / 2 - 3) dst 5 t4 0x13);         (* srli by half the width - 3 *)
+  emit_word (enc_r 0 t4 dst 4 dst 0x33);                   (* fold it down *)
+  emit_word (enc_i w t2 0 t2 0x13);
+  emit_word (enc_i (0 - w) t0 0 t0 0x13);
+  emit (Jal (zero, tag ^ "L"));
+  emit (Label (tag ^ "D"));
+  emit_word (enc_i (!xlen - 31) dst 1 dst 0x13);           (* slli: keep the low 31 bits *)
+  emit_word (enc_i (!xlen - 31) dst 5 dst 0x13)            (* srli *)
+
 let emit_str_hash () =
   emit (Label "__rv_str_hash");
-  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);     (* t0 = len *)
-  emit_word (enc_i (wsz ()) a0 0 t2 0x13);                 (* t2 = bytes *)
-  li t1 (-2128831035);                                     (* FNV offset basis 0x811c9dc5 *)
-  li t3 16777619;                                          (* FNV prime *)
-  emit (Label ".sh_loop");
-  emit (Branch (0, t0, zero, ".sh_done"));
-  emit_word (enc_i 0 t2 4 t4 0x03);                        (* lbu t4, 0(t2) *)
-  emit_word (enc_r 0 t4 t1 4 t1 0x33);                     (* xor t1, t1, t4 *)
-  emit_word (enc_r 1 t3 t1 0 t1 0x33);                     (* mul t1, t1, t3 *)
-  emit_word (enc_i 1 t2 0 t2 0x13);
-  emit_word (enc_i (-1) t0 0 t0 0x13);
-  emit (Jal (zero, ".sh_loop"));
-  emit (Label ".sh_done");
-  emit_word (enc_i (!xlen - 31) t1 1 t1 0x13);             (* slli: keep the low 31 bits *)
-  emit_word (enc_i (!xlen - 31) t1 5 a0 0x13);             (* srli *)
+  emit_str_hash_body ~src:a0 ~dst:30;                       (* t5 *)
+  emit_word (enc_i 0 30 0 a0 0x13);
   emit_word (enc_i 0 ra 0 zero 0x67)
+
+(* --- v0.1.616: the Map's hot path, in the runtime ----------------------------
+   Measured on mere-ruby (RV64, every instruction counted): Map lookups were 54%
+   of all instructions. A probe step of the prelude's `_mprobe` -- a six-argument
+   Mere call, a tuple taken apart, bounds-checked vec_gets -- cost about 100
+   instructions, and a lookup about 400, although the chains were short (1.5 to
+   1.8 steps). These are the same probe, the same hash and the same answer, as
+   leaf loops over the Map's buffers. The layout is the prelude's (v0.1.611): a
+   Map is the tuple (index, keys, values, live, meta) of five Vec cells; the
+   index holds 0 (empty), -1 (a tombstone) or entry + 1; meta is [live count,
+   entries used, tombstones, mask]. A slot comes back as the index slot that
+   holds the key, or -(slot + 1) for where it would go (the first tombstone on
+   the way, else the empty slot that ended the probe) -- `_mprobe`'s answer.
+   Inserting, growing, reindexing, compaction and iteration stay in the
+   prelude: they are rarely called. *)
+let emit_map_rt () =
+  let w = wsz () in
+  let ld rd off rs = emit_word (enc_i off rs (ldf3 ()) rd 0x03) in
+  let sd src off base = emit_word (enc_s off src base (stf3 ()) 0x23) in
+  let addi rd rs imm = emit_word (enc_i imm rs 0 rd 0x13) in
+  let add rd a b = emit_word (enc_r 0 b a 0 rd 0x33) in
+  let sub rd a b = emit_word (enc_r 0x20 b a 0 rd 0x33) in
+  let xor_ rd a b = emit_word (enc_r 0 b a 4 rd 0x33) in
+  let and_ rd a b = emit_word (enc_r 0 b a 7 rd 0x33) in
+  let mul rd a b = emit_word (enc_r 1 b a 0 rd 0x33) in
+  let slli rd rs k = emit_word (enc_i k rs 1 rd 0x13) in
+  let srai rd rs k = emit_word (enc_i (0x400 lor k) rs 5 rd 0x13) in
+  let mv rd rs = addi rd rs 0 in
+  let ret () = emit_word (enc_i 0 ra 0 zero 0x67) in
+  let t4 = 29 and t5 = 30 and t6 = t6 in
+  let a6 = 16 and a7 = 17 in
+  (* the probe's end, shared: a0 = the slot to report -- tomb (t6 or a6) if one
+     was seen, else the current slot *)
+  let probe_end l_name cur tomb =
+    emit (Label l_name);
+    (let l = fresh_label ".mpT" in
+     emit (Branch (4, tomb, zero, l));                   (* no tombstone *)
+     mv cur tomb;
+     emit (Label l));
+    addi a0 cur 1; sub a0 zero a0; ret () in
+  (* __rv_mslot_w(a0 = map, a1 = an int or bool key) -- `_mslot_i`. Leaf. *)
+  emit (Label "__rv_mslot_w");
+  ld t0 0 a0; ld t1 (2 * w) t0;                          (* t1 = index data *)
+  ld t2 (4 * w) a0; ld t2 (2 * w) t2; ld t3 (3 * w) t2;  (* t3 = mask *)
+  ld t4 w a0; ld t4 (2 * w) t4;                          (* t4 = keys data *)
+  (* _mhash_i: a = k ^ (k >> 31); b = (a ^ (a >> 15)) * 73244475; b ^ (b >> 13) *)
+  srai a2 a1 31; xor_ a2 a2 a1;
+  srai a3 a2 15; xor_ a2 a2 a3; li a3 73244475; mul a2 a2 a3;
+  srai a3 a2 13; xor_ a2 a2 a3;
+  and_ t5 a2 t3;                                         (* t5 = slot *)
+  li t6 (-1);                                            (* t6 = first tombstone *)
+  emit (Label ".mwL");
+  slli a3 t5 (wshift ()); add a3 a3 t1; ld a4 0 a3;      (* a4 = index[slot] *)
+  emit (Branch (0, a4, zero, ".mwE"));
+  emit (Branch (4, a4, zero, ".mwT"));
+  addi a5 a4 (-1); slli a5 a5 (wshift ()); add a5 a5 t4; ld a5 0 a5;
+  emit (Branch (1, a5, a1, ".mwN"));
+  mv a0 t5; ret ();
+  emit (Label ".mwT");
+  emit (Branch (5, t6, zero, ".mwN"));                   (* already have one *)
+  mv t6 t5;
+  emit (Label ".mwN");
+  addi t5 t5 1; and_ t5 t5 t3;
+  emit (Jal (zero, ".mwL"));
+  probe_end ".mwE" t5 t6;
+  (* __rv_mslot_s(a0 = map, a1 = a str key) -- `_mslot`: the key hashed as
+     __rv_str_hash does it, compared by length and then bytes (a pointer equal to
+     the key's is equal without looking). Leaf. *)
+  emit (Label "__rv_mslot_s");
+  emit_str_hash_body ~src:a1 ~dst:t5;                    (* __rv_str_hash's, exactly *)
+  ld t0 0 a0; ld a3 (2 * w) t0;                          (* a3 = index data *)
+  ld t0 (4 * w) a0; ld t0 (2 * w) t0; ld a4 (3 * w) t0;  (* a4 = mask *)
+  ld t0 w a0; ld a5 (2 * w) t0;                          (* a5 = keys data *)
+  and_ a2 t5 a4;                                         (* a2 = slot *)
+  li a6 (-1);                                            (* a6 = first tombstone *)
+  emit (Label ".msL");
+  slli t0 a2 (wshift ()); add t0 t0 a3; ld t1 0 t0;      (* t1 = index[slot] *)
+  emit (Branch (0, t1, zero, ".msE"));
+  emit (Branch (4, t1, zero, ".msT"));
+  addi t2 t1 (-1); slli t2 t2 (wshift ()); add t2 t2 a5; ld t2 0 t2;   (* the entry's key *)
+  emit (Branch (0, t2, a1, ".msF"));                     (* the same block *)
+  ld t3 0 t2; ld t4 0 a1;
+  emit (Branch (1, t3, t4, ".msN"));                     (* lengths differ *)
+  addi t5 t2 w; addi t6 a1 w;
+  emit (Label ".msC");                                   (* a word at a time *)
+  emit (Branch (0, t3, zero, ".msF"));
+  ld t0 0 t5; ld t1 0 t6;
+  (let l_full = fresh_label ".msW" in
+   li t4 w;
+   emit (Branch (7, t3, t4, l_full));                    (* a whole word *)
+   emit_word (enc_i 3 t3 1 t4 0x13);                     (* the last one: its len bytes *)
+   li a0 1; emit_word (enc_r 0 t4 a0 1 t4 0x33);         (* a0: the map is not needed now; a7 holds the caller's ra *)
+   addi t4 t4 (-1);
+   and_ t0 t0 t4; and_ t1 t1 t4;
+   li t3 w;
+   emit (Label l_full));
+  emit (Branch (1, t0, t1, ".msN"));
+  addi t5 t5 w; addi t6 t6 w; addi t3 t3 (0 - w);
+  emit (Jal (zero, ".msC"));
+  emit (Label ".msF");
+  mv a0 a2; ret ();
+  emit (Label ".msT");
+  emit (Branch (5, a6, zero, ".msN"));
+  mv a6 a2;
+  emit (Label ".msN");
+  addi a2 a2 1; and_ a2 a2 a4;
+  emit (Jal (zero, ".msL"));
+  probe_end ".msE" a2 a6;
+  (* __rv_mget_{w,s}(a0 = map, a1 = key) -> the value, or the prelude's failure.
+     __rv_mhas_{w,s} -> 1 / 0. Both keep ra in a7 across the leaf probe. *)
+  List.iter (fun (sfx, slot) ->
+    emit (Label ("__rv_mget_" ^ sfx));
+    mv a7 ra; mv a6 a0;
+    (* the str probe uses a6: keep the map on the stack there *)
+    addi sp sp (0 - w); sd a0 0 sp;
+    emit (Jal (ra, slot));
+    ld a6 0 sp; addi sp sp w; mv ra a7;
+    (let l = fresh_label ".mgOk" in
+     emit (Branch (5, a0, zero, l));
+     (* every backend's words (RISC-V said only "map_get: key not found") *)
+     emit_abort "map_get: key not found in Map (use map_has to check first)";
+     emit (Label l));
+    ld t0 0 a6; ld t0 (2 * w) t0;                        (* index data *)
+    slli t1 a0 (wshift ()); add t1 t1 t0; ld t1 0 t1;    (* entry + 1 *)
+    addi t1 t1 (-1); slli t1 t1 (wshift ());
+    ld t0 (2 * w) a6; ld t0 (2 * w) t0;                  (* values data *)
+    add t1 t1 t0; ld a0 0 t1;
+    ret ();
+    emit (Label ("__rv_mhas_" ^ sfx));
+    mv a7 ra;
+    emit (Jal (ra, slot));
+    mv ra a7;
+    emit_word (enc_i 0 a0 2 a0 0x13);                    (* slti a0, a0, 0 *)
+    emit_word (enc_i 1 a0 4 a0 0x13);                    (* xori a0, a0, 1 *)
+    ret ();
+    (* __rv_mdel_{w,s}(a0 = map, a1 = key): the prelude's rvmap_delete. The
+       index, live flags and meta are int Vecs: an int store allocates nothing
+       and makes nothing reachable, so these stores need no protect. *)
+    emit (Label ("__rv_mdel_" ^ sfx));
+    mv a7 ra;
+    addi sp sp (0 - w); sd a0 0 sp;
+    emit (Jal (ra, slot));
+    ld a6 0 sp; addi sp sp w; mv ra a7;
+    (let l = fresh_label ".mdNo" in
+     emit (Branch (4, a0, zero, l));                     (* absent: nothing to do *)
+     ld t0 0 a6; ld t0 (2 * w) t0;
+     slli t1 a0 (wshift ()); add t1 t1 t0;               (* &index[slot] *)
+     ld t2 0 t1; addi t2 t2 (-1);                        (* the entry *)
+     li t3 (-1); sd t3 0 t1;                             (* a tombstone *)
+     ld t0 (3 * w) a6; ld t0 (2 * w) t0;
+     slli t2 t2 (wshift ()); add t2 t2 t0; sd zero 0 t2; (* live = 0 *)
+     ld t0 (4 * w) a6; ld t0 (2 * w) t0;
+     ld t1 (2 * w) t0; addi t1 t1 1; sd t1 (2 * w) t0;   (* tombstones + 1 *)
+     ld t1 0 t0; addi t1 t1 (-1); sd t1 0 t0;            (* live count - 1 *)
+     emit (Label l));
+    li a0 0; ret ())
+    [ ("w", "__rv_mslot_w"); ("s", "__rv_mslot_s") ];
+  (* __rv_mupd(a0 = map, a1 = an index slot that holds a key, a2 = value): the
+     value replaced in place -- a store into the values Vec, protected as any *)
+  emit (Label "__rv_mupd");
+  ld t0 0 a0; ld t0 (2 * w) t0;
+  slli t1 a1 (wshift ()); add t1 t1 t0; ld t1 0 t1; addi a1 t1 (-1);
+  ld a0 (2 * w) a0;                                      (* the values Vec *)
+  emit (Jal (zero, "__vec_set_rt"))
 
 (* __bytes_slice(a0=bytes, a1=i, a2=n) -> a0 = a fresh block with bytes [i, i+n).
    Q-110. Refuses a range outside the block, as the other backends do. Leaf. *)
@@ -5538,6 +5728,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   emit_strbuf ();
   emit_vec ();
   emit_arena ();
+  emit_map_rt ();
   emit_pat_fail ();
   emit_oom ();
   emit_raw_fault ();

@@ -4,6 +4,43 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.616 — 2026-10-06
+
+_On RISC-V a Map lookup is a runtime routine instead of prelude code: about 400 instructions became 91 for a str key and 42 for an int key. mere-ruby's corpus 165 on RV64 runs in 39% fewer instructions._
+
+The RV prelude's Map is written in Mere, and every lookup went through
+`rvmap_get` → `_mslot` → `_mprobe` (one six-argument call per probe step, a
+tuple destructured and a bounds-checked `vec_get` per field), with the str hash
+and `__str_eq` called on the way. Counting every instruction of mere-ruby on
+RV64 (corpus 165, ten iterations) put the Map at more than half of 1.63
+billion instructions, at about 400 instructions per lookup although a lookup takes
+1.5 to 1.8 probe steps on average.
+
+The lookup is now emitted as machine code:
+
+- `__rv_mslot_w` and `__rv_mslot_s` are leaf routines that hash the key, probe
+  linearly and return the slot (or `-(slot+1)` for the first tombstone or empty
+  slot), the same contract as the prelude's `_mslot_i` / `_mslot`. The word
+  routine mixes the key as `_mhash_i` does; the str routine compares length
+  first and then a word at a time, with the last word masked to the length.
+- `map_get`, `map_has` and `map_delete` in user code call `__rv_mget_*`,
+  `__rv_mhas_*` and `__rv_mdel_*`; a missing key in `map_get` fails with the
+  message the other backends give (`map_get: key not found in Map (use map_has
+  to check first)`), and the prelude's own `rvmap_get` now says the same.
+- `map_set` finds the slot with the routine and either updates in place
+  (`__rv_mupd`, which stores through `__vec_set_rt` so a value in an older
+  container is copied into its arena as before) or inserts through the
+  prelude. Insertion, growth, reindexing, compaction and iteration stay in the
+  prelude; they run far less often.
+
+`__rv_str_hash` hashes a word at a time (an FNV-style multiply per word, with
+the partial last word masked) instead of a byte at a time, and the str lookup
+shares its body, so the prelude's inserts and the runtime's lookups agree.
+Iteration order is unaffected (a Map iterates its entries in insertion order).
+
+Measured on that corpus: 1,634M → 998M instructions; the Map routines and
+`__str_eq` together fall from 61% of the count to 36%.
+
 ## v0.1.615 — 2026-10-05
 
 _On the C backend a builtin's arguments run left to right under gcc as well: `vec_set v (f 0) (f 1)` ran `f 1` first there. v0.1.614's CI went red on it._
