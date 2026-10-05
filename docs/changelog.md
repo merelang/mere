@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.617 — 2026-10-06
+
+_The RISC-V backend rewrites a push/pop pair around straight-line code into two register moves, then propagates copies and drops dead moves. mere-ruby's corpus 165 on RV64 runs in another 9.5% fewer instructions, from an 8% smaller binary._
+
+The emitter is a stack machine: an operand that must survive the evaluation of
+the next is pushed (`addi sp, sp, -w; sd r, 0(sp)`) and popped (`ld r', 0(sp);
+addi sp, sp, w`). Counted over mere-ruby those four instructions were 24% of
+everything run, and `mv` another 15%. Two passes now run over the item list
+before layout, so the binary, the listing and the debug map all describe the
+rewritten code (`rv_listing_check` holds them to that):
+
+- **push/pop → mv**: when the code between a push and its pop has no label,
+  jump, branch, call or ecall, and names neither sp nor a spare temporary
+  (t6, t5, t4), the pair becomes `mv t, r` / `mv r', t`. Nothing in between
+  can have read the slot, and nothing can have run elsewhere and come back.
+  Repeated until nothing changes, so nested pairs each get their own spare.
+- **copy propagation**: inside a straight-line run, an instruction that reads
+  a register holding a copy made by `mv` reads the original instead (while
+  neither has been written since), and a `mv` whose destination is written
+  again before anything reads it is dropped. Only argument, temporary and
+  saved registers take part, never sp, fp, gp, ra or zero, and every
+  register's value is assumed live at the end of the run. The formats it
+  reads are R, I, loads, S and U; any other opcode ends the run.
+
+Measured on that corpus: 998M → 903M instructions, binary 12.99 MB → 11.98 MB.
+Pushes and pops that remain sit around calls, branches or nested
+evaluations that span them.
+
 ## v0.1.616 — 2026-10-06
 
 _On RISC-V a Map lookup is a runtime routine instead of prelude code: about 400 instructions became 91 for a str key and 42 for an int key. mere-ruby's corpus 165 on RV64 runs in 39% fewer instructions._
