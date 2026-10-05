@@ -243,6 +243,12 @@ task that itself ENTERS a region while another is inside one would interleave
 the depth and the marks: a scheduler that allows that must save and restore the
 three words with the registers.
 
+Container arenas (v0.1.614) take their blocks from the same bump heap, a megabyte
+at a time, and give them back to free lists that are, like the region words,
+one set per machine. A block carved by one task may later serve another's
+container; nothing is lost by that, since a carve inside a region block raises
+the high-water mark past it and no rollback can take it back.
+
 ## A user process
 
 A user process is an **ordinary** Mere program: not `--bare`, holding no

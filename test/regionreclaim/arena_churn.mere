@@ -1,0 +1,37 @@
+// Stores into long-lived containers, inside region blocks, with the
+// containers compacted and recycled as a collector would. Each of the three
+// loops stores 20,000 values of about 2 KB -- 40 MB each if nothing came back.
+// On RISC-V (v0.1.614) a store copies the value into the container's arena, so
+// the block's garbage goes back at its closing brace, and a compaction or a
+// recycle frees what the container no longer holds: the whole file runs in an
+// 8 MB machine. Before, every store into an older container kept its block.
+let m = map_new ();
+let rec mloop = fn (i: int) -> fn (n: int) ->
+  if i >= n then ()
+  else
+    let _ = region A {
+      let _ = map_set m ("k" ++ str_of_int (i % 50)) (str_repeat "x" 2000 ++ str_of_int i) in
+      if i % 100 == 99 then map_compact m else () } in
+    mloop (i + 1) n;
+let _ = mloop 0 20000;
+let v = vec_new ();
+let rec vloop = fn (i: int) -> fn (n: int) ->
+  if i >= n then ()
+  else
+    let _ = region B {
+      let _ = (if vec_len v < 40 then vec_push v (str_repeat "y" 2000) else vec_set v (i % 40) (str_repeat "y" 2000 ++ str_of_int i)) in
+      if i % 100 == 99 then vec_compact v else () } in
+    vloop (i + 1) n;
+let _ = vloop 0 20000;
+let fr = map_new ();
+let rec floop = fn (i: int) -> fn (acc: int) ->
+  if i >= 20000 then acc
+  else
+    let n = region C {
+      let _ = map_recycle fr in
+      let _ = map_set fr "a" (str_repeat "z" 2000) in
+      let _ = map_set fr "b" (str_of_int i) in
+      str_len (map_get fr "b") } in
+    floop (i + 1) (acc + n);
+let total = floop 0 0;
+print (str_of_int (map_len m) ++ " " ++ str_of_int (str_len (map_get m "k49")) ++ " " ++ str_of_int (str_len (vec_get v 39)) ++ " " ++ str_of_int total)

@@ -357,11 +357,10 @@ let rvmap_clear = fn m ->
   let (idx, _, _, _, meta) = m in
   let _ = _mzero idx 0 (vec_get meta 3 + 1) in
   let _ = vec_set meta 0 0 in let _ = vec_set meta 1 0 in vec_set meta 2 0;
-// map_recycle is map_clear plus, on the arena backends, the arena wound back;
-// here it is the clear -- which it must be: mere-ruby cleans a pooled call
+// map_recycle is codegen_riscv's (__mrecycle, v0.1.614): the clear AND the
+// Map's arena wound back, as on C. It must clear: mere-ruby cleans a pooled call
 // frame with one map_recycle, and when this was a no-op every recycled frame
-// came back holding the previous call's locals
-let rvmap_recycle = fn m -> rvmap_clear m;
+// came back holding the previous call's locals.
 
 // probe for k: the index slot holding it, or the first free slot to put it in
 // (a tombstone on the way if there was one) as -(slot + 1)
@@ -395,11 +394,14 @@ let _mgrow = fn m ->
   let _ = vec_set meta 3 (cap - 1) in
   let _ = vec_set meta 2 0 in
   _mreindex idx keys live (cap - 1) 0 (vec_get meta 1);
-let rvmap_set = fn m -> fn k -> fn v ->
+// v0.1.615: `set` is find + update / insert, so that codegen_riscv can copy the
+// value -- and, for a new key, the key -- into the Map's arena between the two:
+// it knows their types at the call site, and this file does not.
+let rvmap_upd = fn m -> fn (s: int) -> fn v ->
+  let (idx, _, vals, _, _) = m in
+  vec_set vals (vec_get idx s - 1) v;
+let rvmap_ins = fn m -> fn (s: int) -> fn k -> fn v ->
   let (idx, keys, vals, live, meta) = m in
-  let s = _mslot m k in
-  if s >= 0 then vec_set vals (vec_get idx s - 1) v
-  else
     // a new key: appended to the entries (its place in iteration order)
     let used = vec_get meta 1 in
     let _ = _mput keys used k in
@@ -412,6 +414,9 @@ let rvmap_set = fn m -> fn k -> fn v ->
     let _ = vec_set meta 0 (vec_get meta 0 + 1) in
     // keep the index at most 3/4 full, tombstones counted
     if (vec_get meta 0 + vec_get meta 2) * 4 >= (vec_get meta 3 + 1) * 3 then _mgrow m else ();
+let rvmap_set = fn m -> fn k -> fn v ->
+  let s = _mslot m k in
+  if s >= 0 then rvmap_upd m s v else rvmap_ins m s k v;
 let rvmap_get = fn m -> fn k ->
   let (idx, _, vals, _, _) = m in
   let s = _mslot m k in
@@ -458,11 +463,8 @@ let _mgrow_i = fn m ->
   let _ = vec_set meta 3 (cap - 1) in
   let _ = vec_set meta 2 0 in
   _mreindex_i idx keys live (cap - 1) 0 (vec_get meta 1);
-let rvmap_set_i = fn m -> fn k -> fn v ->
+let rvmap_ins_i = fn m -> fn (s: int) -> fn k -> fn v ->
   let (idx, keys, vals, live, meta) = m in
-  let s = _mslot_i m k in
-  if s >= 0 then vec_set vals (vec_get idx s - 1) v
-  else
     // a new key: appended to the entries (its place in iteration order)
     let used = vec_get meta 1 in
     let _ = _mput keys used k in
@@ -475,6 +477,9 @@ let rvmap_set_i = fn m -> fn k -> fn v ->
     let _ = vec_set meta 0 (vec_get meta 0 + 1) in
     // keep the index at most 3/4 full, tombstones counted
     if (vec_get meta 0 + vec_get meta 2) * 4 >= (vec_get meta 3 + 1) * 3 then _mgrow_i m else ();
+let rvmap_set_i = fn m -> fn k -> fn v ->
+  let s = _mslot_i m k in
+  if s >= 0 then rvmap_upd m s v else rvmap_ins_i m s k v;
 let rvmap_get_i = fn m -> fn k ->
   let (idx, _, vals, _, _) = m in
   let s = _mslot_i m k in
@@ -523,8 +528,6 @@ let rvmap_compact = fn m ->
     let n = _mpack keys vals live np 0 0 used in
     let _ = _mrepoint idx np 0 (vec_get meta 3 + 1) in
     vec_set meta 1 n;
-let rvvec_bytes = fn v -> fail "RV32I: vec_bytes measures an arena, and a Vec here is a plain block with none -- there is no number to give";
-let rvmap_bytes = fn m -> fail "RV32I: map_bytes measures an arena, and this target's Map has none -- there is no number to give";
 // --- softfloat, for float arithmetic on a backend with no float ----------
 // Spliced in HERE, at the end, and not next to the other host-service shims:
 // top-level order matters in Mere, and this library calls `not`, which the

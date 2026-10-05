@@ -1,0 +1,165 @@
+// What vec_compact / map_compact / map_recycle must keep, on every backend.
+//
+// Every backend must print the same lines. Since v0.1.614 RISC-V gives a
+// container an arena of its own as C does (the default arena for a __heap one,
+// a private arena after its first compaction or recycle): a store COPIES the
+// value into the container's arena, a compaction copies the live elements into
+// a new arena and frees the old one, a recycle winds the arena back. So this
+// reads everything back after each of those, through region blocks whose
+// garbage must be given back without taking what was stored:
+//
+//   1. a Vec[str] compacted, overwritten inside blocks, compacted again;
+//   2. records with a float, a recursive variant, a nested Vec stored outward;
+//   3. a Map[str, str]: deletes, compaction, updates of one key inside blocks
+//      (an existing key copies only the value);
+//   4. a Map[int, variant] and a Map holding a Map;
+//   5. map_recycle as a pooled frame uses it: 3000 times, each refilled;
+//   6. a random walk over six Maps and six Vecs (set, delete, compact,
+//      recycle, a store inside a nested block), checksummed every round --
+//      values of 1..3000 bytes, so arena blocks of many sizes are taken, freed
+//      and taken again. (Small enough for Wasm, which keeps a block's garbage
+//      once it stores into an older container; that RISC-V does not is
+//      region_reclaim_check's to show.)
+//
+// Execution mode: interp + C + LLVM + Wasm (parity), RV32 / RV64 (rv_exec_check)
+type pt = { name: str, n: int, f: float };
+type tree = Leaf | Node of tree * str * tree;
+type vv = VInt of int | VStr of str | VList of vv list;
+
+// 1.
+let store = vec_new ();
+let _ = vec_compact store;
+let rec fill = fn (i: int) -> fn (n: int) ->
+  if i >= n then () else let _ = vec_push store ("s" ++ str_of_int i) in fill (i + 1) n;
+let _ = fill 0 100;
+let _ = vec_compact store;
+let _ = print (vec_get store 0 ++ vec_get store 99 ++ " " ++ str_of_int (vec_len store));
+let rec churn = fn (i: int) -> fn (n: int) ->
+  if i >= n then 0
+  else
+    let _ = region R { let g = str_repeat "x" 1000 in let _ = vec_set store (i % 100) ("r" ++ str_of_int i ++ substring g 0 1) in 0 } in
+    churn (i + 1) n;
+let _ = churn 0 20000;
+let _ = vec_compact store;
+let _ = print (vec_get store 0 ++ " " ++ vec_get store 99);
+
+// 2.
+let recs = vec_new ();
+let _ = vec_compact recs;
+let _ = vec_push recs (pt { name = "a" ++ "b", n = 3, f = 2.5 });
+let _ = vec_push recs (pt { name = "c", n = 4, f = 0.5 });
+let _ = vec_compact recs;
+let p = vec_get recs 0;
+let _ = print (p.name ++ " " ++ str_of_int p.n ++ " " ++ str_of_float p.f);
+let trees = vec_new ();
+let _ = vec_push trees (Node (Node (Leaf, "l", Leaf), "m", Leaf));
+let _ = vec_compact trees;
+let _ = vec_compact trees;
+let _ = print (match vec_get trees 0 with Node (Node (_, a, _), b, _) -> a ++ b | _ -> "?");
+let inner = vec_new ();
+let _ = vec_push inner "in";
+let outer = vec_new ();
+let _ = vec_compact outer;
+let _ = region Q { let _ = vec_push outer inner in 0 };
+let _ = vec_push inner "two";
+let _ = print (vec_get (vec_get outer 0) 1);
+
+// 3.
+let m = map_new ();
+let _ = map_compact m;
+let rec mfill = fn (i: int) -> fn (n: int) ->
+  if i >= n then () else let _ = map_set m ("k" ++ str_of_int i) ("v" ++ str_of_int i) in mfill (i + 1) n;
+let _ = mfill 0 300;
+let rec mdel = fn (i: int) -> fn (n: int) ->
+  if i >= n then () else let _ = map_delete m ("k" ++ str_of_int i) in mdel (i + 2) n;
+let _ = mdel 0 300;
+let _ = map_compact m;
+let _ = print (map_get m "k1" ++ map_get m "k299" ++ " " ++ str_of_int (map_len m) ++ " " ++ (if map_has m "k0" then "y" else "n"));
+let rec mchurn = fn (i: int) -> fn (n: int) ->
+  if i >= n then 0
+  else let _ = region S { let g = str_repeat "y" 2000 in let _ = map_set m "k1" (substring g 0 3 ++ str_of_int i) in 0 } in
+       mchurn (i + 1) n;
+let _ = mchurn 0 20000;
+let _ = map_compact m;
+let _ = print (map_get m "k1");
+
+// 4.
+let iv = map_new ();
+let _ = map_compact iv;
+let _ = map_set iv 1 (VList (Cons (VStr "a", Cons (VInt 2, Nil))));
+let _ = map_set iv 2 (VStr ("b" ++ "c"));
+let _ = map_compact iv;
+let _ = region T { str_len (str_repeat "Q" 30000) };
+let _ = print (match map_get iv 1 with VList (Cons (VStr s, Cons (VInt n, Nil))) -> s ++ str_of_int n | _ -> "?");
+let _ = print (match map_get iv 2 with VStr s -> s | _ -> "?");
+let mm = map_new ();
+let _ = map_compact mm;
+let im = map_new ();
+let _ = map_set im "x" "1";
+let _ = region P { let _ = map_set mm "in" im in 0 };
+let _ = map_set im "y" "2";
+let _ = print (map_get (map_get mm "in") "y");
+
+// 5.
+let fr = map_new ();
+let rec frames = fn (i: int) -> fn (acc: int) ->
+  if i >= 3000 then acc
+  else
+    let _ = map_recycle fr in
+    let _ = map_set fr "a" ("x" ++ str_of_int i) in
+    let _ = map_set fr "b" (str_repeat "z" 100) in
+    frames (i + 1) (acc + str_len (map_get fr "a") + map_len fr);
+let _ = print (str_of_int (frames 0 0));
+let _ = map_recycle fr;
+let _ = print (str_of_int (map_len fr) ++ (if map_has fr "a" then "y" else "n"));
+
+// 6.
+let seed = vec_new ();
+let _ = vec_push seed 12345;
+let rnd = fn (n: int) ->
+  let s = vec_get seed 0 in
+  let s2 = (s * 1103 + 12345) % 1048576 in
+  let _ = vec_set seed 0 s2 in
+  (s2 / 16) % n;
+let maps = vec_new ();
+let vecs = vec_new ();
+let rec mk = fn (i: int) -> if i >= 6 then () else
+  let _ = vec_push maps (map_new ()) in let _ = vec_push vecs (vec_new ()) in mk (i + 1);
+let _ = mk 0;
+let val_of = fn (k: int) -> fn (len: int) -> str_repeat (chr (97 + k % 26)) len ++ str_of_int k;
+let rec sum_str = fn (s: str) -> fn (i: int) -> fn (a: int) -> if i >= str_len s then a else sum_str s (i + 1) ((a * 31 + ord (char_at s i)) % 65521);
+let rec step = fn (i: int) -> fn (n: int) ->
+  if i >= n then ()
+  else
+    let which = rnd 6 in
+    let mp = vec_get maps which in
+    let vc = vec_get vecs which in
+    let _ = region U {
+    let op = rnd 100 in
+    let k = rnd 40 in
+    let _ =
+      if op < 40 then map_set mp ("k" ++ str_of_int k) (val_of k (1 + rnd 3000))
+      else if op < 55 then map_delete mp ("k" ++ str_of_int k)
+      else if op < 75 then
+        (if vec_len vc < 30 then vec_push vc (val_of k (1 + rnd 2000))
+         else vec_set vc (rnd (vec_len vc)) (val_of k (1 + rnd 2000)))
+      else if op < 85 then map_compact mp
+      else if op < 92 then vec_compact vc
+      else if op < 96 then map_recycle mp
+      else region W { let g = str_repeat "g" (rnd 5000) in let _ = map_set mp "r" (substring g 0 (str_len g / 2)) in () } in
+    () } in
+    step (i + 1) n;
+let rec checksum = fn (i: int) -> fn (acc: int) ->
+  if i >= 6 then acc
+  else
+    let mp = vec_get maps i in
+    let vc = vec_get vecs i in
+    let rec ks = fn (k: int) -> fn (a: int) -> if k > 40 then a else
+      let key = if k == 40 then "r" else "k" ++ str_of_int k in
+      ks (k + 1) (if map_has mp key then (a + sum_str (map_get mp key) 0 k) % 65521 else a) in
+    let rec vs = fn (j: int) -> fn (a: int) -> if j >= vec_len vc then a else vs (j + 1) ((a + sum_str (vec_get vc j) 0 j) % 65521) in
+    checksum (i + 1) ((acc + ks 0 0 + vs 0 0 + map_len mp) % 65521);
+let rec rounds = fn (r: int) -> fn (acc: int) ->
+  if r >= 4 then acc
+  else let _ = step 0 300 in let c = region C { checksum 0 0 } in rounds (r + 1) ((acc * 7 + c) % 65521);
+print (str_of_int (rounds 0 0))

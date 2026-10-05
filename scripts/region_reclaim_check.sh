@@ -16,7 +16,8 @@
 #   Wasm       completes         completes         reclaims (unreclaimed needs
 #                                                  ~105 MB of a fixed 64 MiB)
 #   LLVM       127 -> 316 MB     5.8 MB flat       reclaims as of v0.1.443
-#   RISC-V     (v0.1.612: depth 14 runs out of 16 MB; v0.1.613: 100 trees fit)
+#   RISC-V     (v0.1.612: depth 14 runs out of 16 MB; v0.1.613: 100 trees fit;
+#              v0.1.614: arena_churn.mere -- 60,000 container stores -- fits 8 MB)
 #
 # THE LLVM COLUMN IS WHY THIS FILE EXISTS. When it was written the backend
 # allocated every value in @__lang_default_region whatever region blocks were
@@ -364,6 +365,19 @@ if [ -n "${MEMU:-}" ] && [ -f "$MEMU/riscv-runc/rv64i_run.mere" ]; then
       fail=1
     fi
     checked=$((checked + 1)); rv_note=", RV64 holds 100 trees in 16 MB"
+    # v0.1.614: stores into long-lived containers, compacted and recycled --
+    # 120 MB of values if nothing came back; in 8 MB the arenas must give back
+    ACSRC="$ROOT/test/regionreclaim/arena_churn.mere"
+    if "$MERE" -rv64 --ram 8 "$ACSRC" > "$TMP/prog.bin" 2>/dev/null; then
+      a_c="$( cd "$TMP" && perl -e 'alarm 600; exec @ARGV' ./rvrun64 8 2>&1 | grep -v '^rvrun' | head -1 )"
+      if [ "$a_c" != "50 2005 2005 88890" ]; then
+        echo "FAIL region_reclaim/RV64: arena_churn got '$a_c', expected '50 2005 2005 88890' — 60,000 stores into compacted and recycled containers did not fit in 8 MB: the arenas stopped giving memory back"
+        fail=1
+      fi
+      checked=$((checked + 1)); rv_note="$rv_note, and 60,000 stores into compacted containers in 8 MB"
+    else
+      echo "FAIL region_reclaim/RV64: -rv64 refused arena_churn.mere"; fail=1
+    fi
   else
     echo "FAIL region_reclaim/RV64: could not build the emulator or the program"; fail=1
   fi
@@ -378,7 +392,7 @@ if [ "$RV_ONLY" = 1 ]; then
     echo "region_reclaim (RV64): pertree.mere built — nothing RAN; set MEMU=<memu checkout> for that half"
     exit 0
   fi
-  [ "$fail" = 0 ] && { echo "PASS region_reclaim (RV64): 100 trees of depth 14 run in 16 MB"; exit 0; }
+  [ "$fail" = 0 ] && { echo "PASS region_reclaim (RV64): 100 trees of depth 14 run in 16 MB$(echo "$rv_note" | sed 's/^, RV64 holds 100 trees in 16 MB//')"; exit 0; }
   exit 1
 fi
 if [ "$checked" -lt 7 ]; then
