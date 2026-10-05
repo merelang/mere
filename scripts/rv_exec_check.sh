@@ -59,7 +59,7 @@ rc=0; pass=0; fail=0
 # 1152921504606846976 on the C backend and 0 here. ⚠ It was added to the parity
 # suite for a different question, turned this gate red, and nothing said so --
 # rv_exec_check was in no workflow at all.
-KNOWN_DIFF="float_edges region_growth map_compact int_width_boundary"
+KNOWN_DIFF="float_edges region_growth int_width_boundary"
 # float_edges/str_edges             64-bit values; this backend's int is 32 bits
 #   (coll_edges and nul_in_str sat here too, on the strength of a 60-second
 #    alarm that was really a measurement of how slow decimal printing is on an
@@ -68,7 +68,7 @@ KNOWN_DIFF="float_edges region_growth map_compact int_width_boundary"
 #    that was cut off mid-print reads as a difference, and the cut moves with
 #    host load, which made the gate FLAKY at 60 and at 240.)
 # region_growth                     wants more RAM (and more time) than the sweep gives it
-# map_compact                       map_bytes measures an arena; a Vec here has none
+#   (map_compact sat here until v0.1.614, when a Map got an arena to measure)
 
 RVRUN=""
 if [ -n "${MEMU:-}" ]; then
@@ -216,8 +216,7 @@ fi
 # builders and splitter being O(n^2) in total allocation, which walked a 200KB
 # test's heap into the stack. StrBuf is a real byte buffer now and the
 # splitter finds from an offset instead of copying the tail per piece.
-KNOWN_DIFF64="map_compact region_growth"
-# map_compact              map_bytes measures an arena that does not exist here
+KNOWN_DIFF64="region_growth"
 # region_growth            wants more RAM than the sweep gives it (no reclaim)
 # str_edges                the prelude's string builders are concat-quadratic and
 #                          strbuf is concat-backed: 200k chars = GBs of dead heap.

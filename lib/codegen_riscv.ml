@@ -463,16 +463,16 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
     if Hashtbl.mem libm_bound v then ("__libm_" ^ v) :: v :: acc else
     (match v with
      | "map_new" -> "rvmap_new" :: v :: acc
-     | "map_set" -> (if map_word_keyed e then "rvmap_set_i" else "rvmap_set") :: v :: acc
+     | "map_set" ->
+       (* v0.1.614: a typed map_set calls the find / update / insert parts *)
+       (if map_word_keyed e then ["rvmap_set_i"; "_mslot_i"; "rvmap_ins_i"]
+        else ["rvmap_set"; "_mslot"; "rvmap_ins"]) @ ("rvmap_upd" :: v :: acc)
      | "map_get" -> (if map_word_keyed e then "rvmap_get_i" else "rvmap_get") :: v :: acc
      | "map_has" -> (if map_word_keyed e then "rvmap_has_i" else "rvmap_has") :: v :: acc
      | "map_delete" -> (if map_word_keyed e then "rvmap_delete_i" else "rvmap_delete") :: v :: acc
      | "map_len" -> (if map_word_keyed e then "rvmap_len_i" else "rvmap_len") :: v :: acc
      | "map_clear" -> "rvmap_clear" :: v :: acc
      | "map_compact" -> "rvmap_compact" :: v :: acc
-     | "map_recycle" -> "rvmap_recycle" :: v :: acc
-     | "map_bytes" -> "rvmap_bytes" :: v :: acc
-     | "vec_bytes" -> "rvvec_bytes" :: v :: acc
      | "map_iter" -> (if map_word_keyed e then "rvmap_iter_i" else "rvmap_iter") :: v :: acc
      | _ -> v :: acc)
   | Ast.Int_lit _ | Ast.Bool_lit _ | Ast.Unit_lit
@@ -646,6 +646,51 @@ let request_rcopy (t : Ast.ty) : string =
   end;
   "__rcopy_" ^ tag
 
+(* v0.1.614: how a STORED value is copied into a container's arena. A word is
+   itself; a container or a closure is a handle, shared and not copied (C's
+   __mcopy is shallow on them the same way); everything else is a heap block
+   copied field by field. Unlike rcopy_kind this says something for every type:
+   a tuple holding a Vec is copied, its Vec field kept as the handle. *)
+type skind = SWord | SHandle | SBox
+let skind (t : Ast.ty) : skind =
+  match resolve_ty t with
+  | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> SWord
+  | Ast.TyStr | Ast.TyBytes | Ast.TyFloat | Ast.TyTuple _ -> SBox
+  | Ast.TyCon (n, _) when Hashtbl.mem type_records n || Hashtbl.mem type_variants n -> SBox
+  | _ -> SHandle
+(* the typed helpers a store or a compaction asks for, by kind and type tag *)
+let store_pending : (string * string * Ast.ty) list ref = ref []
+let store_requested : (string, unit) Hashtbl.t = Hashtbl.create 32
+let request_store (kind : string) (t : Ast.ty) : string =
+  let tag = ty_tag t in
+  let name = kind ^ tag in
+  if not (Hashtbl.mem store_requested name) then begin
+    Hashtbl.replace store_requested name ();
+    store_pending := (kind, tag, t) :: !store_pending
+  end;
+  name
+(* v0.1.614: does a container type say __heap (or leave its region open, which
+   C reads as the default region too)? A block's or a region parameter's
+   container stays on gp and goes with its block. *)
+let heap_container (t : Ast.ty option) : bool =
+  match t with
+  | Some t ->
+    (match resolve_ty t with
+     | Ast.TyCon (_, slot :: _) ->
+       (match resolve_ty slot with
+        | Ast.TyRef (_, r, _) -> r = "__heap"
+        | _ -> true)
+     | _ -> true)
+  | None -> true
+(* the element type of a Vec (its last type argument: the first is a region) *)
+let vec_elem_ty (t : Ast.ty option) : Ast.ty option =
+  match t with
+  | Some t ->
+    (match resolve_ty t with
+     | Ast.TyCon ("Vec", args) when args <> [] -> Some (List.nth args (List.length args - 1))
+     | _ -> None)
+  | None -> None
+
 (* peel the leading chain of `let f = fn ...` / `let rec f = fn ...` into
    `tops`, returning the remaining expression as the program's main body. *)
 (* top-level value bindings (globals): (name option, initializer) in order.
@@ -700,7 +745,7 @@ let globals_base () = !load_base + !code_span
    "the buffer the print helpers build digits in", and putting unrelated state
    there would make the description untrue. Top-level value bindings start one
    word further up; the heap starts after those, as before. *)
-let runtime_words = 4
+let runtime_words = 32
 let fail_frame_addr () = globals_base ()
 (* v0.1.613: three more runtime words for region reclamation (see the
    Region_block arm): how many region blocks are open, the innermost one's
@@ -710,6 +755,62 @@ let rt_depth_addr () = globals_base () + wsz ()
 let rt_depth_off = 0
 let rt_bmark_off () = wsz ()
 let rt_hwm_off () = 2 * wsz ()
+(* v0.1.614: container arenas (see emit_arena). Word 4 is the OUTERMOST open
+   block's mark, word 5 is set once any arena exists, word 6 holds the real gp
+   while a copy runs inside an arena, and words 8.. are the free lists of arena
+   blocks, one per size class (1 KB << k). Same base register as the three above:
+   offsets from rt_depth_addr. *)
+let rt_base_off () = 3 * wsz ()
+let rt_aflag_off () = 4 * wsz ()
+let rt_realgp_off () = 5 * wsz ()
+let rt_default_off () = 6 * wsz ()          (* word 7: the default arena, or 0 *)
+let rt_free_off k = (7 + k) * wsz ()
+let arena_classes = 24
+(* the smallest arena block. 1 KB, not C's 4 KB seed: mere-ruby gives every
+   call frame a Map in an arena of its own, about 300 bytes of it used, and
+   with 4 KB blocks a recursion 10,000 deep ran the heap into the stack before
+   it reached Ruby's own depth limit (corpus 156) *)
+let arena_min_block = 1024
+
+(* The value in a1 made storable into the Vec in a0, a0 kept: into its arena if
+   it has one, onto gp if any arena exists (a value read out of one must not
+   point into it once it is compacted -- C copies every store, into the
+   container's own region), and as it is otherwise. a2 is kept too. *)
+let emit_store_value (ty : Ast.ty) =
+  let w = wsz () in
+  match skind ty with
+  | SWord -> ()
+  | SHandle ->
+    let l = fresh_label ".svh" in
+    emit_word (enc_i (3 * w) a0 (ldf3 ()) t0 0x03);
+    emit (Branch (0, t0, zero, l));
+    push ra; push a0; push a1; push a2;
+    emit_word (enc_i 0 a1 0 a0 0x13);
+    emit (Jal (ra, "__hprot"));
+    pop a2; pop a1; pop a0; pop ra;
+    emit (Label l)
+  | SBox ->
+    let l_gp = fresh_label ".svg" and l_done = fresh_label ".svd" in
+    emit_word (enc_i (3 * w) a0 (ldf3 ()) t0 0x03);
+    emit (Branch (0, t0, zero, l_gp));
+    push ra; push a0; push a2;
+    emit_word (enc_i 0 a1 0 a0 0x13);
+    emit_word (enc_i 0 t0 0 a1 0x13);
+    emit (Jal (ra, request_store "__acopy_" ty));
+    emit_word (enc_i 0 a0 0 a1 0x13);
+    pop a2; pop a0; pop ra;
+    emit (Jal (zero, l_done));
+    emit (Label l_gp);
+    li t0 (rt_depth_addr ());
+    emit_word (enc_i (rt_aflag_off ()) t0 (ldf3 ()) t0 0x03);
+    emit (Branch (0, t0, zero, l_done));
+    push ra; push a0; push a2;
+    emit_word (enc_i 0 a1 0 a0 0x13);
+    emit (Jal (ra, request_rcopy ty));
+    emit_word (enc_i 0 a0 0 a1 0x13);
+    pop a2; pop a0; pop ra;
+    emit (Label l_done)
+
 
 (* v0.1.613: a store into a container while a region block is open. If the
    container is older than the innermost block (below its mark) -- or lies
@@ -749,6 +850,15 @@ let emit_protect () =
   emit (Branch (7, t3, gp, l_skip));                           (* only ever raised *)
   emit_word (enc_s (rt_hwm_off ()) gp t0 (stf3 ()) 0x23);     (* hwm = gp *)
   emit (Label l_skip)
+
+(* v0.1.614: protect a store into a Vec (a0) -- unless the Vec lives in an arena,
+   whose contents are copies outside every region block. *)
+let emit_vprotect () =
+  let l = fresh_label ".vprot" in
+  emit_word (enc_i (3 * wsz ()) a0 (ldf3 ()) t0 0x03);
+  emit (Branch (1, t0, zero, l));
+  emit_protect ();
+  emit (Label l)
 
 (* RAM layout, derived from the RAM size so it is no longer three hardcoded
    immediates. The top `reserved_top` bytes hold the scratch buffer the print
@@ -1811,6 +1921,10 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
       li t0 (rt_depth_addr ());
       emit_word (enc_s (rt_bmark_off ()) gp t0 (stf3 ()) 0x23);  (* block mark = mark *)
       emit_word (enc_i rt_depth_off t0 (ldf3 ()) t1 0x03);
+      (let l = fresh_label ".rgnOuter" in                         (* v0.1.614: the outermost *)
+       emit (Branch (1, t1, zero, l));                            (* block's mark, for __hprot *)
+       emit_word (enc_s (rt_base_off ()) gp t0 (stf3 ()) 0x23);
+       emit (Label l));
       emit_word (enc_i 1 t1 0 t1 0x13);
       emit_word (enc_s rt_depth_off t1 t0 (stf3 ()) 0x23);       (* depth + 1 *)
       compile_expr env body;                                      (* a0 = result *)
@@ -2413,12 +2527,19 @@ and compile_app env e =
     err e.loc "RV32I: no RV32I lowering for lb_new / lb_push / lb_to_list (ListBuf) yet -- \
                build the list with an accumulator and list_rev"
   | Ast.Var "vec_new" when List.length args = 1 ->
-    compile_expr env (List.hd args); emit (Jal (ra, "__vec_new"))
+    compile_expr env (List.hd args); emit (Jal (ra, "__vec_new"));
+    (* v0.1.614: a __heap Vec stores into the default arena (emit_arena) *)
+    if heap_container e.Ast.ty && not (in_rv_prelude e.Ast.loc) then emit (Jal (ra, "__vheap"))
   | Ast.Var "vec_push" when List.length args = 2 ->
     compile_expr env (List.nth args 0); push a0;
     compile_expr env (List.nth args 1);
     emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0=vec, a1=x *)
-    emit (Jal (ra, "__vec_push"))
+    (* v0.1.614: a value with something to copy goes through the typed helper;
+       the prelude's own stores never do (its types may be erased to int) *)
+    (match (List.nth args 1).Ast.ty with
+     | Some t when not (in_rv_prelude e.Ast.loc) && skind t <> SWord ->
+       emit (Jal (ra, request_store "__vpush_" t))
+     | _ -> emit (Jal (ra, "__vec_push")))
   | Ast.Var "__vec_owned" when List.length args = 1 ->
     (* v0.1.579: one hart, one thread: always this thread's *)
     li a0 1
@@ -2489,6 +2610,10 @@ and compile_app env e =
     emit_word (enc_i (wshift ()) a1 1 t1 0x13);              (* slli t1, i, w *)
     emit_word (enc_r 0 t1 t0 0 t0 0x33);                     (* addr *)
     emit_word (enc_s (0 * wsz ()) a2 t0 (stf3 ()) 0x23);     (* data[i] = x *)
+    (* v0.1.614: this twin had no protect at all -- a store into an older Vec
+       inside a region block, made by a loop the versioning pass rewrote, went
+       unprotected and the rollback took what it stored *)
+    emit_vprotect ();
     emit_word (enc_i 0 zero 0 a0 0x13)                       (* return unit (0) *)
   | Ast.Var "vec_get" when List.length args = 2 ->
     compile_expr env (List.nth args 0); push a0;
@@ -2508,6 +2633,17 @@ and compile_app env e =
     emit_word (enc_i (wshift ()) a1 1 t1 0x13);              (* slli t1, i, w *)
     emit_word (enc_r 0 t1 t0 0 t0 0x33);                     (* t0 = dataptr + i*4 *)
     emit_word (enc_i (0 * wsz ()) t0 (ldf3 ()) a0 0x03)                         (* a0 = data[i] *)
+  | Ast.Var ("vec_set" | "__vec_set_unchecked") when List.length args = 3
+      && not (in_rv_prelude e.Ast.loc)
+      && (match (List.nth args 2).Ast.ty with Some t -> skind t <> SWord | None -> false) ->
+    (* v0.1.614: copied by the typed helper (bounds-checked even for the
+       unchecked twin: one helper, and the check is one compare) *)
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1); push a0;
+    compile_expr env (List.nth args 2);
+    emit_word (enc_i 0 a0 0 a2 0x13);
+    pop a1; pop a0;
+    emit (Jal (ra, request_store "__vset_" (Option.get (List.nth args 2).Ast.ty)))
   | Ast.Var "vec_set" when List.length args = 3 ->
     compile_expr env (List.nth args 0); push a0;
     compile_expr env (List.nth args 1); push a0;
@@ -2523,7 +2659,7 @@ and compile_app env e =
     emit_word (enc_i (wshift ()) a1 1 t1 0x13);              (* slli t1, i, w *)
     emit_word (enc_r 0 t1 t0 0 t0 0x33);                     (* addr *)
     emit_word (enc_s (0 * wsz ()) a2 t0 (stf3 ()) 0x23);                        (* data[i] = x *)
-    emit_protect ();                                         (* a0 = the vec *)
+    emit_vprotect ();                                        (* a0 = the vec *)
     emit_word (enc_i 0 zero 0 a0 0x13)                       (* return unit (0) *)
   (* --- bitwise -----------------------------------------------------------
      A device driver cannot be written without these: the UART example had to
@@ -2955,10 +3091,59 @@ and compile_app env e =
   (* Map builtins -> the rv-prelude's rvmap_* helpers (the typer forces the
      Map type on `map_new` by name, so these can't just be shadowed). Types
      are erased at codegen, so the Vec-based repr flows through fine. *)
-  | Ast.Var "map_new" when List.length args = 1 -> call_top env "rvmap_new" args
+  | Ast.Var "map_new" when List.length args = 1 ->
+    call_top env "rvmap_new" args;
+    if heap_container e.Ast.ty && not (in_rv_prelude e.Ast.loc) then emit (Jal (ra, "__mheap"))
   | Ast.Var "map_set" when List.length args = 3 ->
     check_map_key e.Ast.loc (List.nth args 1);
-    call_top env (if map_keyed_by_word args then "rvmap_set_i" else "rvmap_set") args
+    let word = map_keyed_by_word args in
+    let kty = (List.nth args 1).Ast.ty and vty = (List.nth args 2).Ast.ty in
+    let copies t = match t with Some t -> skind t <> SWord | None -> false in
+    if in_rv_prelude e.Ast.loc || not (copies kty || copies vty) then
+      call_top env (if word then "rvmap_set_i" else "rvmap_set") args
+    else begin
+      (* v0.1.614: find, copy, then update or insert. The copy goes into the
+         Map's arena (its keys Vec's), or onto gp once any arena exists, as for
+         a Vec; an existing key copies only the value (C's rule, v0.1.77), so a
+         counter keyed by the same strings does not grow. *)
+      let w = wsz () in
+      let store t = match t with
+        | Some t when skind t <> SWord ->
+          emit_word (enc_i w a0 (ldf3 ()) a0 0x03);      (* the keys Vec *)
+          emit_store_value t
+        | _ -> () in
+      List.iter (fun x -> compile_expr env x; push a0) args;    (* [v][k][m] *)
+      emit_word (enc_i (2 * w) sp (ldf3 ()) a0 0x03);
+      emit_word (enc_i w sp (ldf3 ()) a1 0x03);
+      emit (Jal (ra, if word then "u__mslot_i" else "u__mslot"));
+      push a0;                                                  (* [s][v][k][m] *)
+      let l_ins = fresh_label ".msIns" and l_done = fresh_label ".msDone" in
+      emit (Branch (4, a0, zero, l_ins));                       (* s < 0: a new key *)
+      emit_word (enc_i (3 * w) sp (ldf3 ()) a0 0x03);
+      emit_word (enc_i w sp (ldf3 ()) a1 0x03);
+      store vty;
+      emit_word (enc_i 0 a1 0 a2 0x13);
+      emit_word (enc_i (3 * w) sp (ldf3 ()) a0 0x03);
+      emit_word (enc_i 0 sp (ldf3 ()) a1 0x03);
+      emit (Jal (ra, "u_rvmap_upd"));
+      emit (Jal (zero, l_done));
+      emit (Label l_ins);
+      emit_word (enc_i (3 * w) sp (ldf3 ()) a0 0x03);
+      emit_word (enc_i (2 * w) sp (ldf3 ()) a1 0x03);
+      store kty;
+      emit_word (enc_s (2 * w) a1 sp (stf3 ()) 0x23);
+      emit_word (enc_i (3 * w) sp (ldf3 ()) a0 0x03);
+      emit_word (enc_i w sp (ldf3 ()) a1 0x03);
+      store vty;
+      emit_word (enc_i 0 a1 0 a3 0x13);
+      emit_word (enc_i (3 * w) sp (ldf3 ()) a0 0x03);
+      emit_word (enc_i 0 sp (ldf3 ()) a1 0x03);
+      emit_word (enc_i (2 * w) sp (ldf3 ()) a2 0x03);
+      emit (Jal (ra, if word then "u_rvmap_ins_i" else "u_rvmap_ins"));
+      emit (Label l_done);
+      emit_word (enc_i (4 * w) sp 0 sp 0x13);
+      li a0 0
+    end
   | Ast.Var "map_get" when List.length args = 2 ->
     check_map_key e.Ast.loc (List.nth args 1);
     call_top env (if map_keyed_by_word args then "rvmap_get_i" else "rvmap_get") args
@@ -2968,16 +3153,39 @@ and compile_app env e =
   | Ast.Var "map_len" when List.length args = 1 ->
     call_top env (if map_keyed_by_word args then "rvmap_len_i" else "rvmap_len") args
   | Ast.Var "map_clear" when List.length args = 1 -> call_top env "rvmap_clear" args
-  | Ast.Var "map_compact" when List.length args = 1 -> call_top env "rvmap_compact" args
-  | Ast.Var "map_recycle" when List.length args = 1 -> call_top env "rvmap_recycle" args
-  | Ast.Var "map_bytes" when List.length args = 1 -> call_top env "rvmap_bytes" args
-  | Ast.Var "vec_bytes" when List.length args = 1 -> call_top env "rvvec_bytes" args
-  (* A Vec here is the backend's own block, not a region arena, so there is
-     nothing to compact and nothing to report -- the same answer map_compact
-     gives, for the same reason. *)
-  | Ast.Var "vec_compact" when List.length args = 1 ->
+  | Ast.Var "map_compact" when List.length args = 1 ->
+    (* v0.1.614: the prelude packs the live entries; __mcompact_ moves the five
+       Vecs into a new arena, keys and values copied by their types *)
+    let m = List.hd args in
+    compile_expr env m; push a0;
+    emit (Jal (ra, "u_rvmap_compact"));
+    pop a0;
+    let (kt, vt) = match m.Ast.ty with
+      | Some t -> (match resolve_ty t with
+          | Ast.TyCon ("Map", ts) when List.length ts >= 2 ->
+            (List.nth ts (List.length ts - 2), List.nth ts (List.length ts - 1))
+          | _ -> (Ast.TyInt, Ast.TyInt))
+      | None -> (Ast.TyInt, Ast.TyInt) in
+    let (kt, vt) = if in_rv_prelude e.Ast.loc then (Ast.TyInt, Ast.TyInt) else (kt, vt) in
+    emit (Jal (ra, request_store "__mcompact_" (Ast.TyTuple [kt; vt])))
+  | Ast.Var "map_recycle" when List.length args = 1 ->
     compile_expr env (List.hd args);
-    emit_word (enc_i 0 zero 0 a0 0x13)                   (* unit *)
+    emit (Jal (ra, "__mrecycle"))
+  | Ast.Var "map_bytes" when List.length args = 1 ->
+    (* its arena's capacity (the keys Vec holds the Map's arena), 0 while none *)
+    compile_expr env (List.hd args);
+    emit_word (enc_i (wsz ()) a0 (ldf3 ()) a0 0x03);
+    emit (Jal (ra, "__vec_bytes"))
+  | Ast.Var "vec_bytes" when List.length args = 1 ->
+    (* v0.1.614: its own arena's capacity, 0 while it has none -- C's answer *)
+    compile_expr env (List.hd args);
+    emit (Jal (ra, "__vec_bytes"))
+  | Ast.Var "vec_compact" when List.length args = 1 ->
+    (* v0.1.614: into an arena of its own (see emit_vcompact_helper) *)
+    compile_expr env (List.hd args);
+    let et = match vec_elem_ty (List.hd args).Ast.ty with Some t -> t | None -> Ast.TyInt in
+    emit (Jal (ra, request_store "__vcompact_"
+                     (if in_rv_prelude e.Ast.loc then Ast.TyInt else et)))
   | Ast.Var "map_delete" when List.length args = 2 ->
     check_map_key e.Ast.loc (List.nth args 1);
     call_top env (if map_keyed_by_word args then "rvmap_delete_i" else "rvmap_delete") args
@@ -3416,10 +3624,11 @@ let emit_start () =
   (* no `try_or` is in scope yet, and `fail` reads this word to find out *)
   li t0 (fail_frame_addr ());
   emit_word (enc_s (0 * wsz ()) zero t0 (stf3 ()) 0x23);                   (* sw x0, 0(t0) *)
-  (* region depth, block mark, high-water mark: none open *)
-  emit_word (enc_s (1 * wsz ()) zero t0 (stf3 ()) 0x23);
-  emit_word (enc_s (2 * wsz ()) zero t0 (stf3 ()) 0x23);
-  emit_word (enc_s (3 * wsz ()) zero t0 (stf3 ()) 0x23);
+  (* region depth, block mark, high-water mark: none open; no arena, no free
+     arena block (v0.1.614: words 1 .. runtime_words - 1) *)
+  for i = 1 to runtime_words - 1 do
+    emit_word (enc_s (i * wsz ()) zero t0 (stf3 ()) 0x23)
+  done;
   (* heap top starts just above the runtime word and the globals region *)
   li gp (globals_base () + (runtime_words + Hashtbl.length globals_map) * wsz ());
   (* Q-110: mstatus.VS = Initial. A real machine (QEMU) traps every vector
@@ -4071,14 +4280,15 @@ let emit_vec () =
   emit_word (enc_i 0 gp 0 t0 0x13);                (* databuf = gp *)
   emit_word (enc_i (4 * wsz ()) gp 0 gp 0x13);     (* bump 4 cells *)
   emit_word (enc_i 0 gp 0 t1 0x13);                (* cell = gp *)
-  emit_word (enc_i (3 * wsz ()) gp 0 gp 0x13);     (* bump 3 cells *)
+  emit_word (enc_i (4 * wsz ()) gp 0 gp 0x13);     (* bump 4 words: v0.1.614 adds the arena *)
   emit_oom_check ();
+  emit_word (enc_s (3 * wsz ()) zero t1 (stf3 ()) 0x23);              (* arena = 0: on gp *)
   emit_word (enc_s (0 * wsz ()) zero t1 (stf3 ()) 0x23);              (* len = 0 *)
   emit_word (enc_s (wsz ()) t2 t1 (stf3 ()) 0x23);                (* cap = 4 *)
   emit_word (enc_s (2 * wsz ()) t0 t1 (stf3 ()) 0x23);                (* dataptr *)
   emit_word (enc_i 0 t1 0 a0 0x13);
   emit_word (enc_i 0 ra 0 zero 0x67);
-  emit (Label "__vec_push");                       (* a0=vec, a1=x ; leaf *)
+  emit (Label "__vec_push");                       (* a0=vec, a1=x *)
   emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                (* len *)
   emit_word (enc_i (wsz ()) a0 (ldf3 ()) t1 0x03);                (* cap *)
   emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t2 0x03);                (* dataptr *)
@@ -4086,9 +4296,12 @@ let emit_vec () =
   emit_word (enc_i 1 t1 1 t3 0x13);                (* slli t3, cap, 1 = newcap *)
   emit_word (enc_s (wsz ()) t3 a0 (stf3 ()) 0x23);                (* cell.cap = newcap *)
   emit_word (enc_i (wshift ()) t3 1 t4 0x13);      (* slli t4, newcap, w = bytes *)
+  emit_word (enc_i (3 * wsz ()) a0 (ldf3 ()) t5 0x03);                (* the arena *)
+  emit (Branch (1, t5, zero, ".vp_arena"));
   emit_word (enc_i 0 gp 0 t5 0x13);                (* newbuf = gp *)
   emit_word (enc_r 0 t4 gp 0 gp 0x33);             (* gp += bytes *)
   emit_oom_check ();
+  emit (Label ".vp_have");
   emit_word (enc_s (2 * wsz ()) t5 a0 (stf3 ()) 0x23);                (* cell.dataptr = newbuf *)
   emit (Label ".vp_copy");
   emit (Branch (0, t0, zero, ".vp_after"));        (* beq len,x0 -> done *)
@@ -4107,7 +4320,33 @@ let emit_vec () =
   emit_word (enc_s (0 * wsz ()) a1 t3 (stf3 ()) 0x23);                (* databuf[len] = x *)
   emit_word (enc_i 1 t0 0 t0 0x13);                (* len++ *)
   emit_word (enc_s (0 * wsz ()) t0 a0 (stf3 ()) 0x23);                (* store len *)
-  emit_protect ();
+  emit_vprotect ();
+  emit_word (enc_i 0 ra 0 zero 0x67);
+  (* v0.1.614: an arena's Vec grows inside its arena. t0 (len) and t2 (the old
+     buffer) are read again from the cell afterwards; the copy needs both. *)
+  emit (Label ".vp_arena");
+  push ra; push a0; push a1;
+  emit_word (enc_i 0 t5 0 a0 0x13);
+  emit_word (enc_i 0 t4 0 a1 0x13);
+  emit (Jal (ra, "__arena_alloc"));
+  emit_word (enc_i 0 a0 0 t5 0x13);
+  pop a1; pop a0; pop ra;
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                (* len *)
+  emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t2 0x03);                (* old dataptr *)
+  emit (Jal (zero, ".vp_have"));
+  (* __vec_set_rt(a0 = vec, a1 = i, a2 = x): what an inline vec_set does, for
+     the typed store helpers to tail into *)
+  emit (Label "__vec_set_rt");
+  emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t2 0x03);                (* len *)
+  emit (Branch (6, a1, t2, ".vsr_ok"));
+  emit_abort "vec_set: index out of bounds";
+  emit (Label ".vsr_ok");
+  emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t0 0x03);
+  emit_word (enc_i (wshift ()) a1 1 t1 0x13);
+  emit_word (enc_r 0 t1 t0 0 t0 0x33);
+  emit_word (enc_s (0 * wsz ()) a2 t0 (stf3 ()) 0x23);
+  emit_vprotect ();
+  emit_word (enc_i 0 zero 0 a0 0x13);
   emit_word (enc_i 0 ra 0 zero 0x67)
 
 
@@ -4329,6 +4568,324 @@ let emit_eq_helper (tag, ty) =
     emit_word (enc_i 1 t0 3 a0 0x13);
     emit_word (enc_i 0 ra 0 zero 0x67)
 
+(* --- container arenas, v0.1.614 ------------------------------------------
+   The C backend gives a container's memory back by moving it into an arena of
+   its own (vec_compact / map_compact) and freeing the old one, and by winding a
+   frame's arena back (map_recycle). This backend had one bump heap and nothing
+   that freed, so those three calls did nothing and mere-ruby's GC returned no
+   bytes; and a store did not copy its value out, so the per-statement region
+   blocks stayed pinned by the high-water mark (note: the same programs that
+   run in 90 MB on C ran past 256 MB here).
+
+   An ARENA is a chain of BLOCKS; a block is [next][size] then data, its size a
+   power of two from 1 KB. Freed blocks go on a free list per size class (the
+   runtime words from rt_free_off); a request takes the smallest class that
+   fits, splitting a larger free block in halves, and only when every list is
+   empty carves a new block from gp -- which an open region block must then
+   keep, so the high-water mark is raised past it. Blocks are never merged.
+   The arena's descriptor lives in its first block: [bump][limit][head][cap]
+   [first][shared], data after it. The one SHARED arena is the default arena,
+   C's default region: every container whose type says __heap is attached to it
+   when it is made, so what is stored into it is copied out of every region
+   block; it is never reset or freed -- a compaction moves a container out of
+   it into an arena of its own, as on C. A block is never shared by two arenas, and freeing
+   an arena puts every block back.
+
+   A Vec's cell has a fourth word, its arena (0: it lives on gp, as before). A
+   container gets one the first time it is compacted or recycled -- C's
+   "promotion" -- and from then on what is stored into it is COPIED into the
+   arena (by the typed store helpers below), its growth comes from the arena,
+   and it needs no protect: nothing it holds is in a region block's range. *)
+let emit_arena () =
+  let w = wsz () in
+  let ld rd off rs = emit_word (enc_i off rs (ldf3 ()) rd 0x03) in
+  let sd src off base = emit_word (enc_s off src base (stf3 ()) 0x23) in
+  let addi rd rs imm = emit_word (enc_i imm rs 0 rd 0x13) in
+  let add rd a b = emit_word (enc_r 0 b a 0 rd 0x33) in
+  let slli rd rs k = emit_word (enc_i k rs 1 rd 0x13) in
+  let srli rd rs k = emit_word (enc_i k rs 5 rd 0x13) in
+  let ret () = emit_word (enc_i 0 ra 0 zero 0x67) in
+  let t4 = 29 and t5 = 30 and t6 = t6 in
+  (* __blk_get(a0 = bytes wanted, header included) -> a0 = a block, its size in
+     word 1. Leaf; clobbers t0..t6, a1. *)
+  emit (Label "__blk_get");
+  li t1 arena_min_block; li t2 0;                        (* t1 = size, t2 = class *)
+  emit (Label ".bgSz");
+  emit (Branch (7, t1, a0, ".bgHave"));                  (* bgeu size, want *)
+  slli t1 t1 1; addi t2 t2 1;
+  emit (Jal (zero, ".bgSz"));
+  emit (Label ".bgHave");
+  li t0 (rt_depth_addr ());
+  addi t3 t2 0; addi t4 t1 0;                            (* t3 = class tried, t4 = its size *)
+  emit (Label ".bgFind");
+  li t5 arena_classes;
+  emit (Branch (7, t3, t5, ".bgCarve"));
+  slli t5 t3 (wshift ()); add t5 t5 t0; addi t5 t5 (rt_free_off 0);   (* &free[t3] *)
+  ld a1 0 t5;
+  emit (Branch (1, a1, zero, ".bgPop"));
+  addi t3 t3 1; slli t4 t4 1;
+  emit (Jal (zero, ".bgFind"));
+  emit (Label ".bgPop");
+  ld t6 0 a1; sd t6 0 t5;                                (* free[t3] = block.next *)
+  emit (Label ".bgSplit");                               (* halve it down to class t2 *)
+  emit (Branch (0, t3, t2, ".bgGot"));
+  srli t4 t4 1; addi t3 t3 (-1);
+  add t6 a1 t4;                                          (* the upper half *)
+  sd t4 w t6;
+  slli t5 t3 (wshift ()); add t5 t5 t0; addi t5 t5 (rt_free_off 0);
+  ld a0 0 t5; sd a0 0 t6; sd t6 0 t5;                    (* push it on free[t3] *)
+  emit (Jal (zero, ".bgSplit"));
+  emit (Label ".bgGot");
+  sd t4 w a1; addi a0 a1 0; ret ();
+  emit (Label ".bgCarve");                               (* a new block from gp *)
+  (* At least 1 MB at a time, the rest of it onto the free lists in halves
+     (size, size, 2 size, ... up to half the chunk): a carve inside a region
+     block raises the high-water mark, which keeps everything that block had
+     allocated so far, so carving has to be rare. *)
+  li t3 0x100000;
+  (let l = fresh_label ".bgBig" in
+   emit (Branch (6, t1, t3, l)); addi t3 t1 0; emit (Label l));    (* t3 = max(size, 1 MB) *)
+  addi a0 gp 0; add gp gp t3;
+  emit_oom_check ();
+  sd t1 w a0;
+  addi t4 t1 0;                                          (* t4 = piece size *)
+  addi t5 t2 0;                                          (* t5 = its class *)
+  emit (Label ".bgRest");
+  emit (Branch (7, t4, t3, ".bgRestD"));                 (* piece >= chunk: done *)
+  add t6 a0 t4;                                          (* the piece at a0 + size *)
+  sd t4 w t6;
+  slli a1 t5 (wshift ()); add a1 a1 t0; addi a1 a1 (rt_free_off 0);
+  ld t1 0 a1; sd t1 0 t6; sd t6 0 a1;
+  slli t4 t4 1; addi t5 t5 1;
+  emit (Jal (zero, ".bgRest"));
+  emit (Label ".bgRestD");
+  ld t2 rt_depth_off t0;                                 (* an open block keeps it *)
+  emit (Branch (0, t2, zero, ".bgRet"));
+  ld t3 (rt_hwm_off ()) t0;
+  emit (Branch (7, t3, gp, ".bgRet"));
+  sd gp (rt_hwm_off ()) t0;
+  emit (Label ".bgRet");
+  ret ();
+  (* __blk_put(a0 = block): onto the free list of its class. Leaf; t0..t3. *)
+  emit (Label "__blk_put");
+  ld t1 w a0; li t2 0; li t3 arena_min_block;
+  emit (Label ".bpSz");
+  emit (Branch (7, t3, t1, ".bpHave"));
+  slli t3 t3 1; addi t2 t2 1;
+  emit (Jal (zero, ".bpSz"));
+  emit (Label ".bpHave");
+  li t0 (rt_depth_addr ());
+  slli t3 t2 (wshift ()); add t3 t3 t0; addi t3 t3 (rt_free_off 0);
+  ld t1 0 t3; sd t1 0 a0; sd a0 0 t3;
+  ret ();
+  (* __arena_new() -> a0 = a descriptor, in a fresh block of the smallest class *)
+  emit (Label "__arena_new");
+  push ra;
+  li a0 arena_min_block;
+  emit (Jal (ra, "__blk_get"));
+  pop ra;
+  sd zero 0 a0;                                          (* block.next *)
+  addi t1 a0 (2 * w);                                    (* desc *)
+  addi t2 a0 (8 * w); sd t2 0 t1;                        (* bump *)
+  ld t3 w a0; add t4 a0 t3; sd t4 w t1;                  (* limit *)
+  sd a0 (2 * w) t1; sd t3 (3 * w) t1; sd a0 (4 * w) t1;  (* head, cap, first *)
+  sd zero (5 * w) t1;                                    (* not shared *)
+  li t0 (rt_depth_addr ()); li t2 1; sd t2 (rt_aflag_off ()) t0;
+  addi a0 t1 0; ret ();
+  (* __arena_alloc(a0 = desc, a1 = bytes) -> a0 = that many bytes in the arena *)
+  emit (Label "__arena_alloc");
+  addi a1 a1 (w - 1); emit_word (enc_i (0 - w) a1 7 a1 0x13);   (* round to words *)
+  ld t0 0 a0; add t1 t0 a1; ld t2 w a0;
+  emit (Branch (6, t2, t1, ".aaSlow"));                  (* limit < bump + n *)
+  sd t1 0 a0; addi a0 t0 0; ret ();
+  emit (Label ".aaSlow");                                (* a new block, at least the *)
+  push ra; push a0; push a1;                             (* arena's size so far, to 1 MB *)
+  addi t1 a1 (2 * w);
+  ld t2 (3 * w) a0; li t3 0x100000;
+  (let l = fresh_label ".aaCap" in
+   emit (Branch (6, t2, t3, l)); addi t2 t3 0; emit (Label l));
+  (let l = fresh_label ".aaWant" in
+   emit (Branch (7, t1, t2, l)); addi t1 t2 0; emit (Label l));
+  addi a0 t1 0;
+  emit (Jal (ra, "__blk_get"));
+  ld a1 0 sp; ld t1 w sp;                                (* n, desc *)
+  ld t2 (2 * w) t1; sd t2 0 a0; sd a0 (2 * w) t1;        (* chain it at the head *)
+  ld t2 w a0; ld t3 (3 * w) t1; add t3 t3 t2; sd t3 (3 * w) t1;
+  add t4 a0 t2; sd t4 w t1;                              (* limit *)
+  addi t5 a0 (2 * w); add t6 t5 a1; sd t6 0 t1;          (* bump past this request *)
+  addi a0 t5 0;
+  addi sp sp (2 * w); pop ra; ret ();
+  (* __arena_reset(a0 = desc): every block but the first back on the free lists,
+     the bump back to the start of the first *)
+  emit (Label "__arena_reset");
+  push ra;
+  addi a2 a0 0; ld a3 (2 * w) a2; ld a4 (4 * w) a2;
+  emit (Label ".arLoop");
+  emit (Branch (0, a3, a4, ".arDone"));
+  emit (Branch (0, a3, zero, ".arDone"));
+  ld a5 0 a3; addi a0 a3 0;
+  emit (Jal (ra, "__blk_put"));
+  addi a3 a5 0;
+  emit (Jal (zero, ".arLoop"));
+  emit (Label ".arDone");
+  sd zero 0 a4; sd a4 (2 * w) a2;
+  addi t1 a4 (8 * w); sd t1 0 a2;
+  ld t2 w a4; add t3 a4 t2; sd t3 w a2; sd t2 (3 * w) a2;
+  pop ra; ret ();
+  (* __arena_free(a0 = desc): every block back, the descriptor's included *)
+  emit (Label "__arena_free");
+  push ra;
+  ld a3 (2 * w) a0;
+  emit (Label ".afLoop");
+  emit (Branch (0, a3, zero, ".afDone"));
+  ld a5 0 a3; addi a0 a3 0;
+  emit (Jal (ra, "__blk_put"));
+  addi a3 a5 0;
+  emit (Jal (zero, ".afLoop"));
+  emit (Label ".afDone");
+  pop ra; ret ();
+  (* __arena_default() -> a0 = the default arena, made on first use *)
+  emit (Label "__arena_default");
+  li t0 (rt_depth_addr ());
+  ld a0 (rt_default_off ()) t0;
+  emit (Branch (1, a0, zero, ".adRet"));
+  push ra;
+  emit (Jal (ra, "__arena_new"));
+  li t1 1; sd t1 (5 * w) a0;                             (* shared *)
+  li t0 (rt_depth_addr ());
+  sd a0 (rt_default_off ()) t0;
+  pop ra;
+  emit (Label ".adRet");
+  ret ();
+  (* __vheap(a0 = a new vec on gp) / __mheap(a0 = a new map on gp) -> the same
+     container REMADE in the default arena, cell and buffers -- a Map is its
+     tuple, its five Vec cells and their buffers -- attached to it. What was made
+     on gp is garbage for whatever region block it was made in. C allocates a
+     __heap container in the default region for the same reason: a handle to it
+     stored anywhere must not point into a block. *)
+  emit (Label "__vheap");
+  addi sp sp (0 - 4 * w);
+  sd ra (3 * w) sp; sd a0 (2 * w) sp;
+  emit (Jal (ra, "__arena_default"));
+  sd a0 w sp;
+  ld a1 (2 * w) sp;
+  emit (Jal (ra, "__vremake"));
+  ld ra (3 * w) sp; addi sp sp (4 * w);
+  ret ();
+  emit (Label "__mheap");
+  addi sp sp (0 - 6 * w);
+  sd ra (5 * w) sp; sd a0 (4 * w) sp;
+  emit (Jal (ra, "__arena_default"));
+  sd a0 (3 * w) sp;
+  li a1 (5 * w);
+  emit (Jal (ra, "__arena_alloc"));                      (* the new tuple *)
+  sd a0 (2 * w) sp;
+  for i = 0 to 4 do
+    ld a0 (3 * w) sp; ld a1 (4 * w) sp; ld a1 (i * w) a1;
+    emit (Jal (ra, "__vremake"));
+    ld t1 (2 * w) sp; sd a0 (i * w) t1
+  done;
+  ld a0 (2 * w) sp;
+  ld ra (5 * w) sp; addi sp sp (6 * w);
+  ret ();
+  (* __vremake(a0 = arena, a1 = vec) -> a0 = a copy of the Vec's cell and buffer
+     in that arena, attached to it (the elements as words: a new container's) *)
+  emit (Label "__vremake");
+  addi sp sp (0 - 6 * w);
+  sd ra (5 * w) sp; sd a0 (4 * w) sp; sd a1 (3 * w) sp;
+  li a1 (4 * w);
+  emit (Jal (ra, "__arena_alloc"));
+  sd a0 (2 * w) sp;                                      (* the cell *)
+  ld t1 (3 * w) sp; ld a1 w t1;                          (* cap *)
+  slli a1 a1 (wshift ());
+  ld a0 (4 * w) sp;
+  emit (Jal (ra, "__arena_alloc"));                      (* the buffer *)
+  ld t1 (3 * w) sp; ld t2 (2 * w) sp;
+  ld t3 0 t1; sd t3 0 t2;                                (* len *)
+  ld t3 w t1; sd t3 w t2;                                (* cap *)
+  sd a0 (2 * w) t2;                                      (* dataptr *)
+  ld t3 (4 * w) sp; sd t3 (3 * w) t2;                    (* arena *)
+  ld t4 0 t1; ld t5 (2 * w) t1;                          (* copy len words *)
+  emit (Label ".vrL");
+  emit (Branch (0, t4, zero, ".vrD"));
+  ld t6 0 t5; sd t6 0 a0;
+  addi t5 t5 w; addi a0 a0 w; addi t4 t4 (-1);
+  emit (Jal (zero, ".vrL"));
+  emit (Label ".vrD");
+  addi a0 t2 0;
+  ld ra (5 * w) sp; addi sp sp (6 * w);
+  ret ();
+  (* __vec_bytes(a0 = vec) -> the capacity of the arena the Vec owns: 0 on gp
+     and in the shared default arena, as C answers 0 until a container owns its
+     region *)
+  emit (Label "__vec_bytes");
+  ld a0 (3 * w) a0;
+  emit (Branch (0, a0, zero, ".vbRet"));
+  ld t0 (5 * w) a0;
+  (let l = fresh_label ".vbOwn" in
+   emit (Branch (0, t0, zero, l)); li a0 0; ret (); emit (Label l));
+  ld a0 (3 * w) a0;
+  emit (Label ".vbRet");
+  ret ();
+  (* __arena_drop(a0 = an arena or 0): freed, unless it is the shared one *)
+  emit (Label "__arena_drop");
+  emit (Branch (0, a0, zero, ".adrRet"));
+  ld t0 (5 * w) a0;
+  emit (Branch (1, t0, zero, ".adrRet"));
+  emit (Jal (zero, "__arena_free"));
+  emit (Label ".adrRet");
+  ret ();
+  (* __mrecycle(a0 = map) is C's map_recycle: emptied, and its memory wound back
+     -- the arena reset to its first block (or, for a Map still on gp, a new
+     arena: the promotion), and the five Vecs given fresh buffers there, as
+     rvmap_new makes them: an index of 8 empty slots, three empty Vecs, and the
+     meta [live 0, used 0, tombstones 0, mask 7]. *)
+  emit (Label "__mrecycle");
+  addi sp sp (0 - 4 * w);
+  sd ra (3 * w) sp; sd a0 w sp;
+  ld t0 w a0; ld a0 (3 * w) t0;
+  emit (Branch (0, a0, zero, ".mrNew"));
+  ld t0 (5 * w) a0;                                      (* the shared arena is not *)
+  emit (Branch (1, t0, zero, ".mrNew"));                 (* reset: the Map leaves it *)
+  sd a0 0 sp;
+  emit (Jal (ra, "__arena_reset"));
+  emit (Jal (zero, ".mrInit"));
+  emit (Label ".mrNew");
+  emit (Jal (ra, "__arena_new"));
+  sd a0 0 sp;
+  emit (Label ".mrInit");
+  List.iteri (fun i (words, len, init) ->
+    ld a0 0 sp; li a1 (words * w);
+    emit (Jal (ra, "__arena_alloc"));
+    ld t1 w sp; ld t1 (i * w) t1;
+    sd a0 (2 * w) t1;
+    li t2 words; sd t2 w t1;
+    li t2 len; sd t2 0 t1;
+    ld t2 0 sp; sd t2 (3 * w) t1;
+    List.iteri (fun j v -> (if v = 0 then sd zero (j * w) a0 else (li t2 v; sd t2 (j * w) a0))) init)
+    [ (8, 8, [0; 0; 0; 0; 0; 0; 0; 0]);
+      (4, 0, []); (4, 0, []); (4, 0, []);
+      (4, 4, [0; 0; 0; 7]) ];
+  ld ra (3 * w) sp; addi sp sp (4 * w);
+  li a0 0; ret ();
+  (* __hprot(a0 = a container handle or a closure being stored into an arena):
+     the arena outlives every region block, so if the pointer lies inside an
+     open block's range the block must keep it -- the high-water mark goes to
+     gp. Leaf; t0..t2. *)
+  emit (Label "__hprot");
+  li t0 (rt_depth_addr ());
+  ld t1 rt_depth_off t0;
+  emit (Branch (0, t1, zero, ".hpRet"));
+  ld t1 (rt_base_off ()) t0;
+  emit (Branch (6, a0, t1, ".hpRet"));                   (* older than every block *)
+  emit (Branch (7, a0, gp, ".hpRet"));
+  ld t2 (rt_hwm_off ()) t0;
+  emit (Branch (6, a0, t2, ".hpRet"));                   (* already kept *)
+  emit (Branch (7, t2, gp, ".hpRet"));
+  sd gp (rt_hwm_off ()) t0;
+  emit (Label ".hpRet");
+  ret ()
+
 (* --- region result copiers (__rcopy_<tag>), v0.1.613 ---------------------
    a0 = the value, a0 = its copy, freshly allocated at gp. Like the __eq_
    helpers: one per type, generated on a worklist, so a recursive type's copier
@@ -4336,13 +4893,15 @@ let emit_eq_helper (tag, ty) =
    register survives the call. *)
 let emit_rcopy_field (src_at : int) (dst_at : int) (i : int) (fty : Ast.ty) =
   let w = wsz () in
-  match rcopy_kind fty with
-  | RWord | RNone ->
+  (* skind, not rcopy_kind: a region block's result has no handle in it, so the
+     two agree there, and a stored value may have one -- kept, not copied *)
+  match skind fty with
+  | SWord | SHandle ->
     emit_word (enc_i src_at sp (ldf3 ()) t0 0x03);
     emit_word (enc_i (i * w) t0 (ldf3 ()) t2 0x03);
     emit_word (enc_i dst_at sp (ldf3 ()) t1 0x03);
     emit_word (enc_s (i * w) t2 t1 (stf3 ()) 0x23)
-  | RBoxed ->
+  | SBox ->
     emit_word (enc_i src_at sp (ldf3 ()) t0 0x03);
     emit_word (enc_i (i * w) t0 (ldf3 ()) a0 0x03);
     emit (Jal (ra, request_rcopy fty));
@@ -4412,6 +4971,255 @@ let emit_rcopy_helper (tag, ty) =
     let (params, variants) = Hashtbl.find type_variants n in
     emit_variant_rcopy (zip_tyenv params args) variants
   | _ -> emit_word (enc_i 0 ra 0 zero 0x67)              (* a word: itself *)
+
+(* --- v0.1.614: the typed store helpers -----------------------------------
+   __ssize_<tag>(a0 = x) -> a0 = the bytes __rcopy_<tag> allocates for x, and on
+   the way every handle in x goes through __hprot. __acopy_<tag>(a0 = x, a1 =
+   arena) -> a0 = a copy of x in the arena: it reserves exactly that many bytes
+   there, points gp at them, runs __rcopy_<tag> and puts gp back (the real gp is
+   in a runtime word meanwhile). A copier that allocated through anything but gp
+   would be a second copier to keep in step with the first; a size that must
+   match it exactly is the smaller thing to keep in step. *)
+let emit_ssize_field (src_at : int) (acc_at : int) (i : int) (fty : Ast.ty) =
+  let w = wsz () in
+  match skind fty with
+  | SWord -> ()
+  | SHandle ->
+    emit_word (enc_i src_at sp (ldf3 ()) t0 0x03);
+    emit_word (enc_i (i * w) t0 (ldf3 ()) a0 0x03);
+    emit (Jal (ra, "__hprot"))
+  | SBox ->
+    emit_word (enc_i src_at sp (ldf3 ()) t0 0x03);
+    emit_word (enc_i (i * w) t0 (ldf3 ()) a0 0x03);
+    emit (Jal (ra, request_store "__ssize_" fty));
+    emit_word (enc_i acc_at sp (ldf3 ()) t0 0x03);
+    emit_word (enc_r 0 a0 t0 0 t0 0x33);
+    emit_word (enc_s acc_at t0 sp (stf3 ()) 0x23)
+
+let emit_ssize_helper (tag : string) (ty : Ast.ty) =
+  let w = wsz () in
+  emit (Label ("__ssize_" ^ tag));
+  let frame k = emit_word (enc_i (0 - 3 * w) sp 0 sp 0x13);
+    emit_word (enc_s (2 * w) ra sp (stf3 ()) 0x23);
+    emit_word (enc_s w a0 sp (stf3 ()) 0x23);
+    li t0 k; emit_word (enc_s 0 t0 sp (stf3 ()) 0x23) in
+  let unframe () =
+    emit_word (enc_i 0 sp (ldf3 ()) a0 0x03);
+    emit_word (enc_i (2 * w) sp (ldf3 ()) ra 0x03);
+    emit_word (enc_i (3 * w) sp 0 sp 0x13);
+    emit_word (enc_i 0 ra 0 zero 0x67) in
+  let agg fields =
+    let n = List.length fields in
+    frame ((if n = 0 then 1 else n) * w);
+    List.iteri (fun i fty -> emit_ssize_field w 0 i fty) fields;
+    unframe () in
+  match resolve_ty ty with
+  | Ast.TyStr | Ast.TyBytes ->
+    emit_word (enc_i 0 a0 (ldf3 ()) t0 0x03);
+    emit_word (enc_i (w - 1) t0 0 t0 0x13);
+    emit_word (enc_i (0 - w) t0 7 t0 0x13);
+    emit_word (enc_i w t0 0 a0 0x13);
+    emit_word (enc_i 0 ra 0 zero 0x67)
+  | Ast.TyFloat -> li a0 (2 * w); emit_word (enc_i 0 ra 0 zero 0x67)
+  | Ast.TyTuple ts -> agg ts
+  | Ast.TyCon (n, args) when Hashtbl.mem type_records n ->
+    let (params, fields) = Hashtbl.find type_records n in
+    let senv = zip_tyenv params args in
+    agg (List.map (fun (_, fty) -> subst_ty senv fty) fields)
+  | Ast.TyCon (n, args) when Hashtbl.mem type_variants n ->
+    let (params, variants) = Hashtbl.find type_variants n in
+    let senv = zip_tyenv params args in
+    frame w;                                         (* a nullary one: its tag *)
+    emit_word (enc_i w sp (ldf3 ()) t1 0x03);
+    emit_word (enc_i 0 t1 (ldf3 ()) t1 0x03);        (* t1 = tag *)
+    let l_done = fresh_label ".ssd" in
+    List.iteri (fun k (_ctor, payload) ->
+      match payload with
+      | None -> ()
+      | Some pty ->
+        let l_next = fresh_label ".ssn" in
+        li t2 k; emit (Branch (1, t1, t2, l_next));
+        li t0 (2 * w); emit_word (enc_s 0 t0 sp (stf3 ()) 0x23);
+        emit_ssize_field w 0 1 (subst_ty senv pty);
+        emit (Jal (zero, l_done));
+        emit (Label l_next)) variants;
+    emit (Label l_done);
+    unframe ()
+  | _ -> li a0 0; emit_word (enc_i 0 ra 0 zero 0x67)
+
+let emit_acopy_helper (tag : string) (ty : Ast.ty) =
+  let w = wsz () in
+  emit (Label ("__acopy_" ^ tag));
+  emit_word (enc_i (0 - 4 * w) sp 0 sp 0x13);
+  emit_word (enc_s (3 * w) ra sp (stf3 ()) 0x23);
+  emit_word (enc_s (2 * w) a0 sp (stf3 ()) 0x23);
+  emit_word (enc_s w a1 sp (stf3 ()) 0x23);
+  emit (Jal (ra, request_store "__ssize_" ty));
+  emit_word (enc_i 0 a0 0 a1 0x13);
+  emit_word (enc_s 0 a0 sp (stf3 ()) 0x23);          (* n *)
+  emit_word (enc_i w sp (ldf3 ()) a0 0x03);
+  emit (Jal (ra, "__arena_alloc"));
+  li t0 (rt_depth_addr ());
+  emit_word (enc_s (rt_realgp_off ()) gp t0 (stf3 ()) 0x23);
+  emit_word (enc_i 0 a0 0 gp 0x13);                  (* allocate there *)
+  emit_word (enc_i 0 sp (ldf3 ()) t1 0x03);          (* n, saved below *)
+  emit_word (enc_r 0 t1 a0 0 t1 0x33);
+  emit_word (enc_s 0 t1 sp (stf3 ()) 0x23);          (* where the copy must end *)
+  emit_word (enc_i (2 * w) sp (ldf3 ()) a0 0x03);
+  emit (Jal (ra, request_rcopy ty));
+  (* the size and the copier are two descriptions of one walk: if they ever
+     disagree the copy has written into whatever the arena holds next *)
+  emit_word (enc_i 0 sp (ldf3 ()) t1 0x03);
+  (let l = fresh_label ".acOk" in
+   emit (Branch (0, gp, t1, l));
+   li t0 (rt_depth_addr ());
+   emit_word (enc_i (rt_realgp_off ()) t0 (ldf3 ()) gp 0x03);
+   emit_abort ("internal: an arena copy of " ^ tag ^ " overran its size");
+   emit (Label l));
+  li t0 (rt_depth_addr ());
+  emit_word (enc_i (rt_realgp_off ()) t0 (ldf3 ()) gp 0x03);
+  emit_word (enc_i (3 * w) sp (ldf3 ()) ra 0x03);
+  emit_word (enc_i (4 * w) sp 0 sp 0x13);
+  emit_word (enc_i 0 ra 0 zero 0x67)
+
+(* __vpush_<tag>(a0 = vec, a1 = x) / __vset_<tag>(a0 = vec, a1 = i, a2 = x): the
+   value made storable, then the untyped store. For __vset the value travels in
+   a2, so it is moved to a1 for emit_store_value and back. *)
+let emit_vpush_helper (tag : string) (ty : Ast.ty) =
+  emit (Label ("__vpush_" ^ tag));
+  emit_store_value ty;
+  emit (Jal (zero, "__vec_push"))
+
+let emit_vset_helper (tag : string) (ty : Ast.ty) =
+  emit (Label ("__vset_" ^ tag));
+  push a1;                                         (* i, across the copy *)
+  emit_word (enc_i 0 a2 0 a1 0x13);
+  emit_store_value ty;
+  emit_word (enc_i 0 a1 0 a2 0x13);
+  pop a1;
+  emit (Jal (zero, "__vec_set_rt"))
+
+(* __vmove_<tag>(a0 = vec, a1 = arena): the Vec's elements copied into a
+   buffer in that arena (cap = max(len, 4)), its cell pointed at it. The old
+   buffer, and the old arena, are the caller's to free. *)
+let emit_vmove_helper (tag : string) (ty : Ast.ty) =
+  let w = wsz () in
+  let at k = k * w in
+  (* frame: [0] i, [1] buf, [2] n, [3] arena, [5] vec, [6] ra *)
+  emit (Label ("__vmove_" ^ tag));
+  emit_word (enc_i (0 - 8 * w) sp 0 sp 0x13);
+  emit_word (enc_s (at 6) ra sp (stf3 ()) 0x23);
+  emit_word (enc_s (at 5) a0 sp (stf3 ()) 0x23);
+  emit_word (enc_s (at 3) a1 sp (stf3 ()) 0x23);
+  emit_word (enc_i 0 a0 (ldf3 ()) t2 0x03);          (* len *)
+  li t3 4;
+  (let l = fresh_label ".vmN" in
+   emit (Branch (7, t2, t3, l)); emit_word (enc_i 0 t3 0 t2 0x13); emit (Label l));
+  emit_word (enc_s (at 2) t2 sp (stf3 ()) 0x23);     (* n = max(len, 4) *)
+  emit_word (enc_i 0 a1 0 a0 0x13);
+  emit_word (enc_i (wshift ()) t2 1 a1 0x13);
+  emit (Jal (ra, "__arena_alloc"));
+  emit_word (enc_s (at 1) a0 sp (stf3 ()) 0x23);
+  emit_word (enc_s 0 zero sp (stf3 ()) 0x23);
+  let l_loop = fresh_label ".vmL" and l_end = fresh_label ".vmE" in
+  emit (Label l_loop);
+  emit_word (enc_i 0 sp (ldf3 ()) t0 0x03);          (* i *)
+  emit_word (enc_i (at 5) sp (ldf3 ()) t1 0x03);
+  emit_word (enc_i 0 t1 (ldf3 ()) t2 0x03);          (* len *)
+  emit (Branch (7, t0, t2, l_end));
+  emit_word (enc_i (2 * w) t1 (ldf3 ()) t3 0x03);    (* old data *)
+  emit_word (enc_i (wshift ()) t0 1 t4 0x13);
+  emit_word (enc_r 0 t4 t3 0 t3 0x33);
+  emit_word (enc_i 0 t3 (ldf3 ()) a0 0x03);          (* x *)
+  (match skind ty with
+   | SBox ->
+     emit_word (enc_i (at 3) sp (ldf3 ()) a1 0x03);
+     emit (Jal (ra, request_store "__acopy_" ty))
+   | SWord | SHandle -> ());
+  emit_word (enc_i 0 sp (ldf3 ()) t0 0x03);
+  emit_word (enc_i (at 1) sp (ldf3 ()) t1 0x03);
+  emit_word (enc_i (wshift ()) t0 1 t4 0x13);
+  emit_word (enc_r 0 t4 t1 0 t1 0x33);
+  emit_word (enc_s 0 a0 t1 (stf3 ()) 0x23);
+  emit_word (enc_i 1 t0 0 t0 0x13);
+  emit_word (enc_s 0 t0 sp (stf3 ()) 0x23);
+  emit (Jal (zero, l_loop));
+  emit (Label l_end);
+  emit_word (enc_i (at 5) sp (ldf3 ()) t1 0x03);
+  emit_word (enc_i (at 1) sp (ldf3 ()) t2 0x03);
+  emit_word (enc_s (2 * w) t2 t1 (stf3 ()) 0x23);    (* dataptr *)
+  emit_word (enc_i (at 2) sp (ldf3 ()) t2 0x03);
+  emit_word (enc_s w t2 t1 (stf3 ()) 0x23);          (* cap *)
+  emit_word (enc_i (at 3) sp (ldf3 ()) t2 0x03);
+  emit_word (enc_s (3 * w) t2 t1 (stf3 ()) 0x23);    (* arena *)
+  emit_word (enc_i (at 6) sp (ldf3 ()) ra 0x03);
+  emit_word (enc_i (8 * w) sp 0 sp 0x13);
+  emit_word (enc_i 0 ra 0 zero 0x67)
+
+(* __vcompact_<tag>(a0 = vec) is C's vec_compact: the elements into a new arena,
+   the old arena -- if the Vec had one -- freed. The first compaction of a Vec
+   on gp moves it into an arena; what it leaves on gp is given back by whatever
+   region block it was in, or by nothing. *)
+let emit_vcompact_helper (tag : string) (ty : Ast.ty) =
+  let w = wsz () in
+  emit (Label ("__vcompact_" ^ tag));
+  emit_word (enc_i (0 - 4 * w) sp 0 sp 0x13);
+  emit_word (enc_s (3 * w) ra sp (stf3 ()) 0x23);
+  emit_word (enc_s (2 * w) a0 sp (stf3 ()) 0x23);
+  emit_word (enc_i (3 * w) a0 (ldf3 ()) t0 0x03);
+  emit_word (enc_s w t0 sp (stf3 ()) 0x23);          (* the old arena *)
+  emit (Jal (ra, "__arena_new"));
+  emit_word (enc_i 0 a0 0 a1 0x13);
+  emit_word (enc_i (2 * w) sp (ldf3 ()) a0 0x03);
+  emit (Jal (ra, request_store "__vmove_" ty));
+  emit_word (enc_i w sp (ldf3 ()) a0 0x03);
+  emit (Jal (ra, "__arena_drop"));
+  emit_word (enc_i (3 * w) sp (ldf3 ()) ra 0x03);
+  emit_word (enc_i (4 * w) sp 0 sp 0x13);
+  li a0 0;
+  emit_word (enc_i 0 ra 0 zero 0x67)
+
+(* __mcompact_<K * V>(a0 = map): the prelude has packed the live entries; the
+   Map's five Vecs (index, keys, values, live flags, meta) move into one new
+   arena -- keys and values copied by their types, the rest as words -- and the
+   old arena is freed. A Map is the tuple of those five Vecs, which never moves:
+   its cells stay where the Map was made, as C's struct stays in its home. *)
+let emit_mcompact_helper (_tag : string) (ty : Ast.ty) =
+  let w = wsz () in
+  let (kt, vt) = match resolve_ty ty with
+    | Ast.TyTuple [k; v] -> (k, v) | _ -> (Ast.TyInt, Ast.TyInt) in
+  emit (Label ("__mcompact_" ^ ty_tag ty));
+  emit_word (enc_i (0 - 4 * w) sp 0 sp 0x13);
+  emit_word (enc_s (3 * w) ra sp (stf3 ()) 0x23);
+  emit_word (enc_s (2 * w) a0 sp (stf3 ()) 0x23);
+  emit_word (enc_i w a0 (ldf3 ()) t0 0x03);          (* keys *)
+  emit_word (enc_i (3 * w) t0 (ldf3 ()) t0 0x03);
+  emit_word (enc_s w t0 sp (stf3 ()) 0x23);          (* the old arena *)
+  emit (Jal (ra, "__arena_new"));
+  emit_word (enc_s 0 a0 sp (stf3 ()) 0x23);
+  List.iteri (fun i et ->
+    emit_word (enc_i (2 * w) sp (ldf3 ()) t0 0x03);
+    emit_word (enc_i (i * w) t0 (ldf3 ()) a0 0x03);
+    emit_word (enc_i 0 sp (ldf3 ()) a1 0x03);
+    emit (Jal (ra, request_store "__vmove_" et)))
+    [Ast.TyInt; kt; vt; Ast.TyInt; Ast.TyInt];
+  emit_word (enc_i w sp (ldf3 ()) a0 0x03);
+  emit (Jal (ra, "__arena_drop"));
+  emit_word (enc_i (3 * w) sp (ldf3 ()) ra 0x03);
+  emit_word (enc_i (4 * w) sp 0 sp 0x13);
+  li a0 0;
+  emit_word (enc_i 0 ra 0 zero 0x67)
+
+let emit_store_helper (kind, tag, ty) =
+  match kind with
+  | "__ssize_" -> emit_ssize_helper tag ty
+  | "__acopy_" -> emit_acopy_helper tag ty
+  | "__vpush_" -> emit_vpush_helper tag ty
+  | "__vset_" -> emit_vset_helper tag ty
+  | "__vcompact_" -> emit_vcompact_helper tag ty
+  | "__vmove_" -> emit_vmove_helper tag ty
+  | "__mcompact_" -> emit_mcompact_helper tag ty
+  | _ -> failwith ("emit_store_helper: " ^ kind)
 
 (* __rv_copy_str(a0 = a str or bytes block) -> a0 = a fresh copy: the length
    word and the bytes, rounded up to whole words. Leaf. *)
@@ -4640,6 +5448,8 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   eq_pending := [];
   rcopy_pending := [];
   Hashtbl.reset rcopy_requested;
+  store_pending := [];
+  Hashtbl.reset store_requested;
   Hashtbl.reset eq_requested;
   Hashtbl.reset globals_map;
   Hashtbl.reset tops;
@@ -4727,6 +5537,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   emit_substring ();
   emit_strbuf ();
   emit_vec ();
+  emit_arena ();
   emit_pat_fail ();
   emit_oom ();
   emit_raw_fault ();
@@ -4756,10 +5567,11 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   (* drain the structural-eq worklist (a helper may request more, e.g. for
      recursive types; eq_requested dedups so it terminates) *)
   let rec drain_eq () =
-    match !eq_pending, !rcopy_pending with
-    | [], [] -> ()
-    | h :: rest, _ -> eq_pending := rest; emit_eq_helper h; drain_eq ()
-    | [], h :: rest -> rcopy_pending := rest; emit_rcopy_helper h; drain_eq ()
+    match !eq_pending, !rcopy_pending, !store_pending with
+    | [], [], [] -> ()
+    | h :: rest, _, _ -> eq_pending := rest; emit_eq_helper h; drain_eq ()
+    | [], h :: rest, _ -> rcopy_pending := rest; emit_rcopy_helper h; drain_eq ()
+    | [], [], h :: rest -> store_pending := rest; emit_store_helper h; drain_eq ()
   in
   drain_eq ();
   if !divzero_used then emit_divzero_stubs ();

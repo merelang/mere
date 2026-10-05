@@ -47,9 +47,11 @@ probe_for() {
     bytes_of_str) echo 'let _ = print_bytes (bytes_of_str "x");' ;;
     print_bytes) echo 'let _ = print_bytes (bytes_of_str "x");' ;;
     __h_todo) echo '' ;;
-    rvmap_clear|rvmap_compact|rvmap_recycle) echo "let m = rvmap_new ();\nlet _ = $1 m;\nlet _ = print_int 0;" ;;
-    rvmap_bytes) echo 'let m = rvmap_new ();\nlet _ = print_int (rvmap_bytes m);' ;;
-    rvvec_bytes) echo 'let v = vec_new ();\nlet _ = print_int (rvvec_bytes v);' ;;
+    rvmap_clear|rvmap_compact) echo "let m = rvmap_new ();\nlet _ = $1 m;\nlet _ = print_int 0;" ;;
+    # v0.1.614: map_set's find / update / insert parts (codegen calls them)
+    rvmap_upd) echo 'let m = rvmap_new ();\nlet _ = rvmap_set m "k" 1;\nlet _ = rvmap_upd m (_mslot m "k") 2;\nlet _ = print_int (rvmap_get m "k");' ;;
+    rvmap_ins) echo 'let m = rvmap_new ();\nlet _ = rvmap_ins m (_mslot m "k") "k" 1;\nlet _ = print_int (rvmap_len m);' ;;
+    rvmap_ins_i) echo 'let m = rvmap_new ();\nlet _ = rvmap_ins_i m (_mslot_i m 3) 3 1;\nlet _ = print_int (rvmap_get_i m 3);' ;;
     abs) echo 'let _ = print_int (abs (0 - 5));' ;;
     max|min|gcd) echo "let _ = print_int ($1 12 18);" ;;
     clamp) echo 'let _ = print_int (clamp 0 10 42);' ;;

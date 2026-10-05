@@ -338,6 +338,31 @@ copied by value — a closure, a container — runs without rolling back, which 
 what every block did here before. Measured on `test/regionreclaim/pertree.mere`:
 100 trees of depth 14 run in a 16 MB machine, and ran out of it before.
 
+As of **v0.1.614** RISC-V containers also live the way C's do. An **arena** is a
+chain of power-of-two blocks (4 KB up) carved from the bump heap a megabyte at
+a time, freed onto size-class free lists and taken again, never merged. A
+container whose type says `__heap` is made in the shared **default arena** --
+its cell, its buffer, and every value stored into it, which a store COPIES
+there (C's copy-on-store; containers and closures in the value are kept as
+handles) -- so a store into it needs no protect, and the region block it was
+made in gives everything else back. `vec_compact` / `map_compact` move a
+container into an arena of its own (the live elements copied, by their types)
+and free the one it had; `map_recycle` empties a Map and resets its arena to
+the first block; `vec_bytes` / `map_bytes` answer an owned arena's capacity, 0
+for the shared one, as C answers. The copies are made at the call site, where
+the types are known: the prelude's own Map code stores words, and `map_set` is
+lowered to find / copy / update-or-insert around it. A block- or
+parameter-region container stays on the bump heap, protected as above.
+
+The contract is C's: a value read out of a container before it is compacted
+(or recycled) does not survive the compaction. RISC-V had never freed
+anything, so code that broke the contract ran there by accident; the first
+mere-ruby run on arenas found two such reads (fixed in mere-ruby, and
+confirmed as use-after-free on C with AddressSanitizer). Measured on mere-ruby
+(RV64, `--ram 256`): corpus 165 and 285, which ran out of 256 MB, finish in
+165 MB and 139 MB; `test/regionreclaim/arena_churn.mere` -- 60,000 stores into
+compacted and recycled containers inside blocks -- runs in an 8 MB machine.
+
 What is still refused inside a region block is what a mark cannot help with:
 `channel_send`, `spawn`, and closure-registering externs. Those hand the value
 to another thread or to the host, on no schedule ordered with the block's exit.

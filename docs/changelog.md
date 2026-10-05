@@ -4,6 +4,67 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.614 — 2026-10-05
+
+_RISC-V containers keep their contents the way C's do: in arenas a store copies into, that a compaction frees and a recycle winds back. mere-ruby's corpus 165 and 285, which ran out of 256 MB on RV64, finish in 165 MB and 139 MB._
+
+**What was missing.** v0.1.613 gave region blocks their rollback, and mere-ruby
+still did not fit: it stores into a long-lived table on almost every statement,
+each store raised the high-water mark, and its per-statement blocks gave back
+almost nothing. And `vec_compact` did nothing on this backend, `map_compact`
+only packed, `map_recycle` only cleared, so its collector freed no bytes. On C
+the same program is held at 90 MB by exactly those two things: a store copies
+its value into the container's own region, so a block gives back all of its
+garbage, and a compaction moves a container into a fresh region and frees the
+old one (measured: with the compactions turned off in the generated C, corpus
+165 went from 90 to 129 MB; 285 was held by the blocks alone).
+
+**Arenas.** An arena is a chain of power-of-two blocks, 1 KB up, carved from the
+bump heap a megabyte at a time (a carve inside a region block raises the
+high-water mark, so carves have to be rare) and given back to size-class free
+lists; a larger free block is split, nothing is merged. A Vec's cell has a
+fourth word, its arena. A container whose type says `__heap` is made in the
+shared default arena -- cell, buffer and Map tuple included -- as C makes it in
+the default region; `vec_compact` / `map_compact` copy the live elements into
+an arena of its own and free the old one (never the shared one); `map_recycle`
+empties a Map and resets its arena to the first block; `vec_bytes` /
+`map_bytes` answer an owned arena's capacity, 0 otherwise. A block- or
+parameter-region container stays on the bump heap as before.
+
+**Copy-on-store, typed at the call site.** Values on this backend are untagged
+words, so a copy needs the type, and the prelude's Map code is compiled once
+for every value type (its values are erased to `int`; v0.1.613's note). So the
+copy is made where the type is known: `vec_push` / `vec_set` of a value with
+anything to copy call a per-type helper, and `map_set` is lowered to find, copy
+(the value; the key too when it is new -- C's rule), then update or insert.
+The copier is v0.1.613's `__rcopy_<tag>` run with `gp` pointed at an exact
+reservation that a per-type `__ssize_<tag>` measured first; a copy that ever
+ran past its reservation stops the program with that message rather than
+writing over the next thing in the arena. Containers and closures inside a
+stored value are kept as handles and, if they lie in an open block, keep it.
+Once any arena exists, a store into a container on the bump heap copies too, so
+nothing a container holds points into an arena that a compaction may free.
+
+The contract is C's: a value read out of a container does not survive that
+container's compaction or recycle. RISC-V never freed anything before, so code
+that broke the contract ran there by accident; the first mere-ruby run on
+arenas crashed on two such reads, which turned out to be use-after-frees on C
+as well (AddressSanitizer), and are fixed in mere-ruby.
+
+**Also.** The unchecked `vec_set` twin that loop versioning produces had no
+protect at all on RISC-V; it has the same as `vec_set` now. And
+`test/parity/map_compact.mere` leaves `rv_exec_check`'s known differences at
+both widths: `map_bytes` has an arena to measure.
+
+Measured on mere-ruby 770a113 (RV64, `--ram 256`): 165 and 285 complete
+(they ran out of memory on 612 and 613); startup leaves 78 MB of heap where
+613 left 69. `test/parity/container_arenas.mere` (compaction, recycle, stores
+inside blocks, a random walk over twelve containers) prints the same lines on
+the interpreter, C, Wasm, RV32 and RV64 (LLVM has no `map_recycle`), and
+`region_reclaim_check.sh --rv-only` adds `test/regionreclaim/arena_churn.mere`:
+60,000 stores into compacted and recycled containers inside blocks, 120 MB of
+values, in an 8 MB machine (v0.1.613 ran out of it).
+
 ## v0.1.613 — 2026-10-05
 
 _A region block on RISC-V gives its memory back again, behind a high-water mark; on LLVM a string stored into an older Map or Vec inside a block no longer dangles; and Wasm's high-water mark no longer misses a container a callee built and stored outward._
