@@ -1,0 +1,41 @@
+// A frame's binding slots are handed back when their scope ends, and a self
+// tail call jumps back past the prologue instead of rebuilding the frame
+// (RISC-V, v0.1.618). Siblings that share a slot must not see each other's
+// values, a match arm must not see the last arm's bindings, and a loop that
+// re-enters with all eight register arguments -- from inside a match arm,
+// under a tuple pattern that parks its pointer on the stack -- must carry
+// every argument through. Values stay under 2^31 so a 32-bit target agrees.
+//
+// It also caught the LLVM backend dropping `musttail` on a self tail call
+// that follows a `let`: `count` overflowed the stack there (fixed in v0.1.618).
+//
+// Execution mode: interp + C + LLVM + Wasm (parity)
+let side = fn (n: int) ->
+  let a = n * 3 in
+  let b = (let c = a + 1 in c * 2) + (let d = a + 2 in d * 5) in
+  let e = (let f = b - 1 in f) + (let g = b + 1 in g) in
+  a + b + e;
+
+let pick = fn (p: int * int) -> fn (k: int) ->
+  match k with
+  | 0 -> let x = 10 in x + 1
+  | 1 -> let (y, z) = p in y * 100 + z
+  | 2 -> let w = 7 in let v = w * w in v
+  | _ -> let (q, _) = p in q;
+
+let rec loop8 = fn (i: int) -> fn (a: int) -> fn (b: int) -> fn (c: int) ->
+  fn (d: int) -> fn (e: int) -> fn (f: int) -> fn (g: int) ->
+  if i == 0 then a + b * 3 + c * 5 + d * 7 + e * 11 + f * 13 + g * 17
+  else match (i % 3, i) with
+  | (0, j) -> loop8 (j - 1) b c d e f g ((a + 1) % 1000003)
+  | (1, _) -> let t = (a + g) % 1000003 in loop8 (i - 1) t a b c d e f
+  | _ -> loop8 (i - 1) ((a + i) % 1000003) b c d e f g;
+
+let rec count = fn (i: int) -> fn (acc: int) ->
+  if i == 0 then acc
+  else let s = side i in count (i - 1) (acc + s % 97);
+
+let _ = print_int (side 4);
+let _ = print_int (pick (3, 4) 0 + pick (3, 4) 1 + pick (3, 4) 2 + pick (3, 4) 3);
+let _ = print_int (loop8 100000 1 2 3 4 5 6 7);
+print_int (count 200000 0)
