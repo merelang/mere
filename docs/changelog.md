@@ -4,6 +4,46 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.618 — 2026-10-06
+
+_RISC-V frames are sized by the bindings live at once rather than by every binding in the body, and a self tail call loops back past the prologue instead of rebuilding the frame. mere-ruby's corpus 165 on RV64 runs in another 5% fewer instructions; from v0.1.615 it is 47% fewer in all._
+
+**Slots are handed back.** A function's frame had a slot for every binding its
+body made (`count_lets` summed them), and the first ten slots live in s1..s10,
+which the prologue saves and the epilogue restores. Now a binding's slot goes
+back when its scope ends: `compile_expr` restores the slot counter after each
+expression, and every match arm starts from the same base. The frame is sized
+by `max_lets`, the most bindings in scope at any one point, and the check after
+each body compares that with the counter's high-water mark (it used to compare
+`count_lets` with the final counter). The binary shrinks 7%; the count of
+saved registers hardly moves, because the functions that run most were
+already under ten.
+
+**A self tail call is a loop.** Most of the remaining saves and restores were
+in self-recursive loops (`go i acc = ... go (i + 1) ...`): every iteration tore
+the frame down, jumped to the function's entry and ran the prologue again. A
+saturated self call in tail position now resets sp to the frame base and jumps
+to a label just after the prologue, where the arguments are copied into their
+slots; the saved registers stay saved for the whole loop. Calls to other
+functions in tail position still tear down and jump.
+
+**On LLVM, a tail call after a `let` is `musttail` again.** The new parity test
+overflowed the stack there and nowhere else: the LLVM backend's `let` arms never
+passed tail position on to their body, so a loop of the commonest shape,
+`let s = f i in go (i - 1) (acc + s)`, was a plain call that grew the stack once
+per iteration (at `-O0`; clang's sibling-call optimisation hid it at `-O2`). Now
+every `let` arm hands tail position on -- except a `let` whose fresh `OwnedVec`
+is freed at scope end, where a `ret` in the body would skip the free.
+
+Not done: putting a leaf function's bindings in caller-saved registers, the
+other half of the plan. Counted, leaf functions pay 18% of the saves that are
+left, about 1% of all instructions.
+
+Measured on that corpus: 903M → 858M instructions (slot reuse 903M → 888M, the
+loop 888M → 858M), binary 11.98 MB → 11.08 MB. `test/parity/frame_reuse.mere`
+reuses slots across siblings and arms and loops with eight register arguments
+from inside a match arm whose tuple pattern parks its pointer on the stack.
+
 ## v0.1.617 — 2026-10-06
 
 _The RISC-V backend rewrites a push/pop pair around straight-line code into two register moves, then propagates copies and drops dead moves. mere-ruby's corpus 165 on RV64 runs in another 9.5% fewer instructions, from an 8% smaller binary._

@@ -15243,10 +15243,12 @@ let () =
   in
   (* Mere iterates by recursing, so without this a long-running loop grows the
      stack until it meets the heap. A self call in tail position must reuse
-     the frame: `j`, not `jal`. *)
+     the frame: `j`, not `jal`. Since v0.1.618 it jumps back past the prologue
+     (to the `.self` label where the arguments are copied into their slots)
+     rather than tearing the frame down and jumping to the function's entry. *)
   rv_contains "rv32i: a self tail call reuses the frame"
     "let rec loop = fn i -> if i >= 10 then i else loop (i + 1);\n\
-     let _ = print_int (loop 0);" "j u_loop";
+     let _ = print_int (loop 0);" "j .self";
   rv_contains "rv32i: a non-tail call is still a call"
     "let rec fact = fn n -> if n <= 1 then 1 else n * fact (n - 1);\n\
      let _ = print_int (fact 5);" "jal ra, u_fact";
@@ -15995,6 +15997,21 @@ let () =
              | Cons (h, t) -> go t (acc + h);\n\
            go [1, 2, 3] 0")
     "musttail call";
+  (* v0.1.618: and through a `let`. The let arms never handed tail position on
+     to their body, so `let s = f i in go (i - 1) (acc + s)` -- the commonest
+     loop body there is -- was a plain call and grew the stack per iteration.
+     The parity test frame_reuse overflowed at 200,000 on LLVM alone. *)
+  assert_contains "v0.1.618: a tail call after a let is musttail"
+    (llvm "let h = fn (n: int) -> n + 1;\n\
+           let rec go = fn (i: int) -> fn (acc: int) ->\n\
+             if i == 0 then acc else let s = h i in go (i - 1) (acc + s);\n\
+           go 3 0")
+    "musttail call i64 @mu_go__direct";
+  assert_contains "v0.1.618: ...and after a tuple let"
+    (llvm "let rec go = fn (i: int) -> fn (acc: int) ->\n\
+             if i == 0 then acc else let (a, b) = (i, 1) in go (i - b) (acc + a);\n\
+           go 3 0")
+    "musttail call i64 @mu_go__direct";
   check "v0.1.269: a long fold still answers"
     (Pipeline.process
        "let rec upto = fn (i: int) -> fn (acc: int list) ->\n\

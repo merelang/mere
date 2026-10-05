@@ -4993,6 +4993,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        (* Phase 25.3: inner-lifted fn binding — body holds the call sites,
           the definition lives at top level (lifted). Just emit body. *)
        llvm_in_top_level_body := __in_top;
+       llvm_tail_pos := __in_tail;
        emit_expr env body
      | Ast.P_var name ->
        let rv = emit_expr env value in
@@ -5026,6 +5027,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
          && owned_vec_safe_to_drop_at_scope_llvm body name
        in
        llvm_in_top_level_body := __in_top;
+       (* v0.1.618: a let's body is in tail position when the let is -- unless
+          an auto-Drop follows it, which a `ret` in the body would leave
+          unreachable. Without this a loop of the shape
+          `let s = f i in go (i - 1) (acc + s)` lost its musttail and grew the
+          stack once per iteration. *)
+       llvm_tail_pos := __in_tail && not do_auto_drop;
        let r = emit_expr ((name, rv) :: env) body in
        current_var_types := saved;
        (* Emit scope-end free for auto-Drop — same shape as Phase 15.13 `with`. *)
@@ -5047,6 +5054,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
           after the first one from being initialised. *)
        let _ = emit_expr env value in
        llvm_in_top_level_body := __in_top;
+       llvm_tail_pos := __in_tail;
        emit_expr env body
      | Ast.P_tuple ps ->
        (* Phase 22.1: `let (a, b, ...) = E in B` — extractvalue per index. *)
@@ -5086,6 +5094,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
          List.filter_map (function Some (n, _, t) -> Some (n, t) | None -> None)
            new_env_extra @ saved;
        llvm_in_top_level_body := __in_top;
+       llvm_tail_pos := __in_tail;
        let r = emit_expr env' body in
        current_var_types := saved;
        r
@@ -5096,6 +5105,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
           compiler. Previously only P_var / P_tuple / P_wild were handled
           (the interp accepted every pattern) — a backend parity gap
           surfaced by the mere-blog dogfood. *)
+       llvm_tail_pos := __in_tail;
        emit_expr env { e with Ast.node = Ast.Match (value, [(pat, None, body)]) })
   (* v0.1.172: a name the user bound is the user's, not the builtin's.
      Every arm below this one dispatches on a builtin name without asking

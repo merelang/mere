@@ -1005,31 +1005,40 @@ let rec pvars_in_pattern p =
     pvars_in_pattern a + pvars_in_pattern b + 2
   | Ast.P_record (_, fields) -> List.fold_left (fun n (_, q) -> n + pvars_in_pattern q) 0 fields
 
-let rec count_lets (e : Ast.expr) : int =
+(* v0.1.618: the slots a body needs AT ONCE. A binding's slot is handed back
+   when its scope ends (`compile_expr` restores `slot_ctr` on the way out, and a
+   match arm starts from the same base as the one before it), so siblings share
+   slots and the frame is sized by the deepest nesting, not by the count of
+   every binding in the body. Fewer slots means fewer callee-saved registers
+   the prologue saves and the epilogue restores. (It replaces `count_lets`,
+   which summed every binding in the body.) The assertion after each body
+   checks this walk and the slot_ctr walk agree. *)
+let rec max_lets (e : Ast.expr) : int =
   match e.node with
-  | Ast.Let (p, a, b) -> pvars_in_pattern p + count_lets a + count_lets b
-  | Ast.Let_rec (bs, b) -> List.length bs + count_lets b   (* fn bodies lift to lambdas *)
-  | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) -> count_lets a + count_lets b
-  | Ast.Neg a | Ast.Annot (a, _) -> count_lets a
-  | Ast.If (a, b, c) -> count_lets a + count_lets b + count_lets c
-  | Ast.App (a, b) -> count_lets a + count_lets b
-  | Ast.Tuple elems -> List.fold_left (fun n el -> n + count_lets el) 0 elems
-  | Ast.Constr (_, Some a) -> count_lets a
-  | Ast.Record_lit (_, fields) -> List.fold_left (fun n (_, e) -> n + count_lets e) 0 fields
-  | Ast.Field_get (e, _) -> count_lets e
+  | Ast.Let (p, a, b) -> max (max_lets a) (pvars_in_pattern p + max_lets b)
+  | Ast.Let_rec (bs, b) -> List.length bs + max_lets b   (* fn bodies lift to lambdas *)
+  | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) -> max (max_lets a) (max_lets b)
+  | Ast.Neg a | Ast.Annot (a, _) -> max_lets a
+  | Ast.If (a, b, c) -> max (max_lets a) (max (max_lets b) (max_lets c))
+  | Ast.App (a, b) -> max (max_lets a) (max_lets b)
+  | Ast.Tuple elems -> List.fold_left (fun n el -> max n (max_lets el)) 0 elems
+  | Ast.Constr (_, Some a) -> max_lets a
+  | Ast.Record_lit (_, fields) -> List.fold_left (fun n (_, e) -> max n (max_lets e)) 0 fields
+  | Ast.Field_get (e, _) -> max_lets e
   | Ast.Record_update (base, ups) ->
-    List.fold_left (fun n (_, e) -> n + count_lets e) (count_lets base) ups
+    List.fold_left (fun n (_, e) -> max n (max_lets e)) (max_lets base) ups
   | Ast.Match (scrut, arms) ->
     (* +1 for the scrutinee stash slot, +1 for the stack pointer as it stood when
        the arm's pattern started (a container pattern parks its pointer on the
-       stack and a mismatch jumps out without unparking it), plus each arm's
-       pattern bindings *)
-    count_lets scrut + 2
-    + List.fold_left (fun n (pat, guard, body) ->
-        n + pvars_in_pattern pat + count_lets body
-        + (match guard with Some g -> count_lets g | None -> 0)) 0 arms
-  | Ast.Region_block (_, b) -> count_lets b
-  | Ast.Region_loop (_, _, b) -> count_lets b
+       stack and a mismatch jumps out without unparking it), plus the bindings
+       of the arm that needs the most *)
+    max (max_lets scrut)
+      (2 + List.fold_left (fun n (pat, guard, body) ->
+             max n (pvars_in_pattern pat
+                    + max (max_lets body)
+                        (match guard with Some g -> max_lets g | None -> 0))) 0 arms)
+  | Ast.Region_block (_, b) -> max_lets b
+  | Ast.Region_loop (_, _, b) -> max_lets b
   | _ -> 0
 
 let is_top name = Hashtbl.mem tops name
@@ -1181,6 +1190,9 @@ let nregs = Array.length sregs
 
 (* per-function frame shape, set by emit_function *)
 let cur_nsaved = ref 0        (* how many s-registers this function uses *)
+(* v0.1.618: the top-level function being compiled and the label just after its
+   prologue, where a self tail call re-enters (see `compile_app`) *)
+let cur_self : (string * string) option ref = ref None
 let cur_noverflow = ref 0     (* how many bindings spilled to memory *)
 
 type loc = Reg of int | Mem of int   (* Mem i = fp-relative word slot i *)
@@ -1195,6 +1207,13 @@ let is_small n = n >= -2048 && n <= 2047
 
 (* binding_ctr tracks the next binding index within the function *)
 let slot_ctr = ref 0
+(* the most slots in use at once in the function being compiled (v0.1.618) *)
+let slot_hwm = ref 0
+let new_slot () =
+  let i = !slot_ctr in
+  incr slot_ctr;
+  if !slot_ctr > !slot_hwm then slot_hwm := !slot_ctr;
+  i
 
 (* If e is a variable that currently lives in a register, that register —
    used to read an operand in place without emitting any code. *)
@@ -1626,6 +1645,13 @@ let vgen (n : int) (node : vnode) (vd0 : int) : unit =
   gen node vd0
 
 let rec compile_expr (env : env) (e : Ast.expr) : unit =
+  (* v0.1.618: the bindings an expression makes are out of scope once it has
+     been compiled, so their slots go back for its siblings to reuse *)
+  let slot_base = !slot_ctr in
+  compile_node env e;
+  slot_ctr := slot_base
+
+and compile_node (env : env) (e : Ast.expr) : unit =
   (* every subexpression starts out non-tail; the cases below whose value is
      this expression's value put `saved_tail` back before recursing *)
   let saved_tail = !tail_pos in
@@ -1749,7 +1775,7 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     compile_expr ((name, - r) :: env) body
   | Ast.Let ({ pnode = Ast.P_var name; _ }, rhs, body) ->
     compile_expr env rhs;
-    let idx = !slot_ctr in incr slot_ctr;
+    let idx = new_slot () in
     (match loc_of idx with
      | Reg r -> emit_word (enc_i 0 a0 0 r 0x13)                      (* mv  sX, a0 *)
      | Mem slot -> base_store fp a0 (slot_off slot));                (* sw  a0, slot(fp) *)
@@ -1832,7 +1858,7 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
     (* local recursive closure. Bind f to its own closure BEFORE filling the
        captures, so the body's self-reference (a normal capture of f) reads
        the block pointer we just allocated. *)
-    let fidx = !slot_ctr in incr slot_ctr;
+    let fidx = new_slot () in
     let env_f = (f, fidx) :: env in
     let fnexpr_fvs =
       dedup (free_vars_of { e with node = Ast.Fun (param, None, fbody) })
@@ -1858,7 +1884,7 @@ let rec compile_expr (env : env) (e : Ast.expr) : unit =
        a member that calls another reads that one's block pointer. *)
     let members = List.map (fun (f, _, (v : Ast.expr)) ->
       match v.node with
-      | Ast.Fun (param, _, fbody) -> let idx = !slot_ctr in incr slot_ctr; (f, idx, param, fbody, v)
+      | Ast.Fun (param, _, fbody) -> let idx = new_slot () in (f, idx, param, fbody, v)
       | _ -> assert false) bindings in
     let env_rec = List.fold_left (fun acc (f, idx, _, _, _) -> (f, idx) :: acc) env members in
     let filled = List.map (fun (_, idx, param, fbody, (v : Ast.expr)) ->
@@ -2269,7 +2295,15 @@ and compile_app env e =
         for j = 0 to 7 do compile_expr env argv.(j); push a0 done;
         for j = 7 downto 0 do pop (a0 + j) done
       end;
-      if tail then begin
+      if tail && (match !cur_self with Some (g, _) -> g = "u_" ^ f | None -> false) then begin
+        (* v0.1.618: a self tail call is a loop. The frame is already the right
+           shape, so skip the teardown and the prologue and jump back to where
+           the arguments are copied into their slots; the saved registers stay
+           saved. sp is put back to the frame's base in case the body left
+           anything parked on the stack. *)
+        emit_word (enc_i 0 fp 0 sp 0x13);                      (* mv sp, fp *)
+        emit (Jal (zero, snd (Option.get !cur_self)))
+      end else if tail then begin
         emit_frame_teardown ();
         emit (Jal (zero, "u_" ^ f))          (* the callee returns to our caller *)
       end else begin
@@ -3312,7 +3346,7 @@ and compile_indirect ?(tail = false) env head args =
 
 and compile_match env scrut arms ~tail =
   compile_expr env scrut;                          (* a0 = scrutinee *)
-  let sidx = !slot_ctr in incr slot_ctr;
+  let sidx = new_slot () in
   store_a0_to sidx;                                (* stash it (survives arm bodies) *)
   (* Where the stack stood before any pattern ran. `P_tuple` / `P_record` park
      the container pointer on it and unpark it only on the way out the bottom, so
@@ -3321,12 +3355,14 @@ and compile_match env scrut arms ~tail =
      same stack, so the extra word was popped as one of them and the call ran with
      a pointer where a number belonged. `f (n - 1) (match ...)` recursed with n
      set to a heap address, and the loop ran until the heap met the stack. *)
-  let spidx = !slot_ctr in incr slot_ctr;
+  let spidx = new_slot () in
   emit_word (enc_i 0 sp 0 a0 0x13);                (* mv a0, sp *)
   store_a0_to spidx;
   let l_end = fresh_label ".mend" in
+  let arm_base = !slot_ctr in
   List.iter (fun (pat, guard, body) ->
     let l_next = fresh_label ".marm" in
+    slot_ctr := arm_base;                          (* the last arm's bindings are dead *)
     load_to_a0 sidx;                               (* reload scrutinee into a0 *)
     let env' = compile_pattern_bind env pat l_next in
     (match guard with
@@ -3378,7 +3414,7 @@ and bind_pattern env pat l_fail =
       "internal: a `\"lit\" <> rest` pattern reached codegen (the prefix desugar did not run)"))
   | Ast.P_wild | Ast.P_unit -> env
   | Ast.P_var name ->
-    let idx = !slot_ctr in incr slot_ctr; store_a0_to idx; (name, idx) :: env
+    let idx = new_slot () in store_a0_to idx; (name, idx) :: env
   | Ast.P_int n -> li t0 n; emit (Branch (1, a0, t0, l_fail)); env
   | Ast.P_bool b -> li t0 (if b then 1 else 0); emit (Branch (1, a0, t0, l_fail)); env
   | Ast.P_str s ->
@@ -3394,7 +3430,7 @@ and bind_pattern env pat l_fail =
   | Ast.P_as (inner, name) ->
     (* bind the whole value to `name`, then also match the inner pattern *)
     push a0;
-    let idx = !slot_ctr in incr slot_ctr; store_a0_to idx;
+    let idx = new_slot () in store_a0_to idx;
     let env = (name, idx) :: env in
     emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) a0 0x03);              (* peek: a0 = the value *)
     let env = bind_pattern env inner l_fail in
@@ -3447,9 +3483,9 @@ and bind_pattern env pat l_fail =
         "RV32I: an or-pattern that binds a variable is not supported yet -- the \
          alternatives would have to bind into the same slot, and slots are \
          handed out while the pattern is walked";
-    let vidx = !slot_ctr in incr slot_ctr;
+    let vidx = new_slot () in
     store_a0_to vidx;                              (* keep the scrutinee *)
-    let spidx = !slot_ctr in incr slot_ctr;
+    let spidx = new_slot () in
     emit_word (enc_i 0 sp 0 a0 0x13);              (* mv a0, sp *)
     store_a0_to spidx;
     let l_b = fresh_label ".orAlt" in
@@ -3499,7 +3535,7 @@ let emit_epilogue (_ : int * int * int * int * int) =
 (* a top-level function: args arrive in a0.. (direct convention) *)
 let emit_function ~label ~params ~body =
   let nparams = List.length params in
-  let total = nparams + count_lets body in
+  let total = nparams + max_lets body in
   emit (Label label);
   dbg_line := -1;
   emit (Meta (Printf.sprintf "F %s fsz=%d ra=%d fp=%d params=%d line=%d"
@@ -3507,6 +3543,9 @@ let emit_function ~label ~params ~body =
                 nparams (dbg_user_line body.Ast.loc)));
   let fr = emit_prologue total in
   let (_, _, _, _, fsz) = fr in
+  let self_label = fresh_label ".self" in
+  emit (Label self_label);
+  cur_self := Some (label, self_label);
   List.iteri (fun i _ ->
     (* args 0..7 arrive in a0..a7; args 8+ on the incoming stack, now at
        fp + fsz + (i-8)*4 (the prologue subtracted fsz from sp) *)
@@ -3519,31 +3558,32 @@ let emit_function ~label ~params ~body =
       else base_load fp r (fsz + (i - 8) * wsz ())                  (* lw sX, stackarg *)
     | Mem slot -> src_into_t0 (); base_store fp t0 (slot_off slot)
   ) params;
-  slot_ctr := nparams;
+  slot_ctr := nparams; slot_hwm := nparams;
   tail_pos := true;                       (* the body's value is the function's *)
   compile_expr (List.mapi (fun i p -> (p, i)) params) body;
   tail_pos := false;
-  (* The frame reserved `total` binding slots from count_lets; the body handed
-     out `!slot_ctr`. They MUST agree: a binding whose index exceeds `total`
+  cur_self := None;
+  (* The frame reserved `total` binding slots from max_lets; the body handed
+     out up to `!slot_hwm` at once. They MUST agree: a binding whose index exceeds `total`
      lands at an fp offset past the reserved frame -- below this function's own
-     sp -- where a called function's frame writes over it. count_lets and the
+     sp -- where a called function's frame writes over it. max_lets and the
      slot_ctr walk are two traversals of the same tree, and a node counted by
      one but not the other is exactly this silent corruption. It hid until 64
      bits, where mere-ruby's gc_collect reserved 2 slots and used 17 (region
      bodies were not counted), and the overflow happened to land on a live
      binding. This check makes the two walks provably agree at every compile. *)
-  if !slot_ctr > total then
+  if !slot_hwm > total then
     failwith (Printf.sprintf
-      "RV32I internal: %s reserved %d frame slots but used %d -- count_lets \
+      "RV32I internal: %s reserved %d frame slots but used %d -- max_lets \
        undercounts a node the slot_ctr walk visits, a backend bug that sizes \
-       the frame too small" label total !slot_ctr);
+       the frame too small" label total !slot_hwm);
   emit_epilogue fr
 
 (* a lifted lambda: closure env ptr in a0, the (single) argument in a1.
    Bindings are captures (indices 0..k-1) then the param (index k). *)
 let emit_lambda ~label ~captures ~param ~body =
   let k = List.length captures in
-  let total = k + 1 + count_lets body in
+  let total = k + 1 + max_lets body in
   emit (Label label);
   dbg_line := -1;
   emit (Meta (Printf.sprintf "F %s fsz=%d ra=%d fp=%d params=1 line=%d"
@@ -3561,39 +3601,39 @@ let emit_lambda ~label ~captures ~param ~body =
   (match loc_of k with
    | Reg r -> emit_word (enc_i 0 a1 0 r 0x13)                      (* mv sX, a1 *)
    | Mem slot -> base_store fp a1 (slot_off slot));
-  slot_ctr := k + 1;
+  slot_ctr := k + 1; slot_hwm := k + 1;
   let env = List.mapi (fun i c -> (c, i)) captures @ [(param, k)] in
   tail_pos := true;
   compile_expr env body;
   tail_pos := false;
-  (* The frame reserved `total` binding slots from count_lets; the body handed
-     out `!slot_ctr`. They MUST agree: a binding whose index exceeds `total`
+  (* The frame reserved `total` binding slots from max_lets; the body handed
+     out up to `!slot_hwm` at once. They MUST agree: a binding whose index exceeds `total`
      lands at an fp offset past the reserved frame -- below this function's own
-     sp -- where a called function's frame writes over it. count_lets and the
+     sp -- where a called function's frame writes over it. max_lets and the
      slot_ctr walk are two traversals of the same tree, and a node counted by
      one but not the other is exactly this silent corruption. It hid until 64
      bits, where mere-ruby's gc_collect reserved 2 slots and used 17 (region
      bodies were not counted), and the overflow happened to land on a live
      binding. This check makes the two walks provably agree at every compile. *)
-  if !slot_ctr > total then
+  if !slot_hwm > total then
     failwith (Printf.sprintf
-      "RV32I internal: %s reserved %d frame slots but used %d -- count_lets \
+      "RV32I internal: %s reserved %d frame slots but used %d -- max_lets \
        undercounts a node the slot_ctr walk visits, a backend bug that sizes \
-       the frame too small" label total !slot_ctr);
+       the frame too small" label total !slot_hwm);
   emit_epilogue fr
 
 (* __main: initialise the top-level value bindings (in order, into the
    globals region), then run the program's main expression *)
 let emit_main ?bare_entry main_body =
   let total =
-    List.fold_left (fun n (_, e) -> n + count_lets e) (count_lets main_body) !globals in
+    List.fold_left (fun n (_, e) -> max n (max_lets e)) (max_lets main_body) !globals in
   emit (Label "__main");
   dbg_line := -1;
   emit (Meta (Printf.sprintf "F __main fsz=%d ra=%d fp=%d params=0 line=%d"
                 ((total + 2) * wsz ()) ((total + 1) * wsz ()) (total * wsz ())
                 (dbg_user_line main_body.Ast.loc)));
   let fr = emit_prologue total in
-  slot_ctr := 0;
+  slot_ctr := 0; slot_hwm := 0;
   List.iter (fun (nameopt, init) ->
     compile_expr [] init;
     match nameopt with
@@ -3603,6 +3643,9 @@ let emit_main ?bare_entry main_body =
   tail_pos := true;                       (* a tail call here returns to _start *)
   compile_expr [] main_body;
   tail_pos := false;
+  if !slot_hwm > total then
+    failwith (Printf.sprintf
+      "RV32I internal: __main reserved %d frame slots but used %d" total !slot_hwm);
   (* --bare: build the machine capability and hand it to the program's `main`.
      Constructed here rather than exposed as a builtin on purpose — a function
      that mints one would make every signature meaningless. *)
