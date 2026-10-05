@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.615 — 2026-10-05
+
+_On the C backend a builtin's arguments run left to right under gcc as well: `vec_set v (f 0) (f 1)` ran `f 1` first there. v0.1.614's CI went red on it._
+
+C leaves the order of a call's arguments unspecified, and gcc evaluates them
+right to left. The backend had already decided this for user calls (every
+argument is bound to a `__da` temporary) and, in v0.1.450, for operators; a
+builtin or extern application was still written straight into a C call. So
+`vec_set v (f 0) (f 1)`, `map_set m (g "k") (g "v")` and `substring s (f 1)
+(f 4)` ran their arguments backwards when the emitted C was built with gcc, and
+in order with clang -- which is what `parity.sh` builds with, so the parity
+suite could not see it. `rv_exec_check` builds its C reference with `cc`, gcc on
+the CI runner, and v0.1.614's new `container_arenas` (a random walk with two
+draws from one generator in one `vec_set`) printed another checksum there than
+on RISC-V.
+
+Now an application whose head is a builtin or an extern, with two or more
+arguments that can have effects, binds those arguments to `let`s in order and
+applies the builtin to the variables (a closure literal counts as effect-free,
+so a builtin arm that inlines one still sees it). `test/parity/builtin_arg_order.mere`
+prints each argument as it runs; v0.1.614's C built with gcc printed
+`f1 f0 gv gk f4 f1 ...` for it, the interpreter's order is `f0 f1 gk gv f1 f4 ...`.
+
 ## v0.1.614 — 2026-10-05
 
 _RISC-V containers keep their contents the way C's do: in arenas a store copies into, that a compaction frees and a recycle winds back. mere-ruby's corpus 165 and 285, which ran out of 256 MB on RV64, finish in 165 MB and 139 MB._
