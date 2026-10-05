@@ -1665,6 +1665,65 @@ let rec bin_may_effect (e : Ast.expr) : bool =
   | Ast.Neg a | Ast.Annot (a, _) | Ast.Field_get (a, _) -> bin_may_effect a
   | _ -> true
 
+(* v0.1.615: a BUILTIN's (or an extern's) arguments are in the interpreter's
+   order too. A user call binds every argument to a `__da` temporary first, and
+   v0.1.450 sequenced operators; a builtin application is written straight into
+   a C call -- `mere_vec_set(v, f(0), f(1))` -- and gcc evaluates C arguments
+   right to left, so `vec_set v (f 0) (f 1)` and `map_set m (f 2) (f 3)` ran f 1
+   before f 0 there and not under clang (parity builds with clang, which is why
+   it took a gate that builds with `cc` to see it). When two or more arguments
+   can have effects, they are bound to `let`s in order and the builtin is
+   applied to the variables. A closure literal counts as effect-free: making
+   it runs nothing, and the builtin arms that inline a literal keep seeing one. *)
+let builtin_arg_may_effect (x : Ast.expr) : bool =
+  match x.Ast.node with
+  | Ast.Fun _ -> false
+  | _ -> bin_may_effect x
+
+let builtin_spine (e : Ast.expr) : (string * Ast.expr list) option =
+  let rec go (x : Ast.expr) acc =
+    match x.Ast.node with
+    | Ast.App (f, a) -> go f (a :: acc)
+    | Ast.Var n -> Some (n, acc)
+    | _ -> None in
+  match e.Ast.node with
+  | Ast.App _ -> go e []
+  | _ -> None
+
+let builtin_wants_sequencing (e : Ast.expr) : bool =
+  match builtin_spine e with
+  | Some (n, args) when List.length args >= 2 && not (user_shadows n) ->
+    List.length (List.filter builtin_arg_may_effect args) >= 2
+  | _ -> false
+
+let builtin_seq_ctr = ref 0
+let sequence_builtin_args (e : Ast.expr) : Ast.expr =
+  match builtin_spine e with
+  | None -> e
+  | Some (_, args) ->
+    let binds = ref [] in
+    let args' = List.map (fun (a : Ast.expr) ->
+      if builtin_arg_may_effect a then begin
+        incr builtin_seq_ctr;
+        let v = Printf.sprintf "__ord%d" !builtin_seq_ctr in
+        binds := (v, a) :: !binds;
+        { a with Ast.node = Ast.Var v }
+      end else a) args in
+    (* rebuild the spine with the same node types, innermost application first *)
+    let rec rebuild (x : Ast.expr) (rest : Ast.expr list) =
+      match x.Ast.node, rest with
+      | Ast.App (f, _), _ ->
+        let (f', rest') = rebuild f rest in
+        (match rest' with
+         | a :: more -> ({ x with Ast.node = Ast.App (f', a) }, more)
+         | [] -> (x, []))
+      | _ -> (x, rest) in
+    let (call, _) = rebuild e args' in
+    List.fold_left (fun body (v, a) ->
+      { e with Ast.node =
+          Ast.Let ({ Ast.ploc = a.Ast.loc; pnode = Ast.P_var v }, a, body) })
+      call !binds
+
 (* v0.1.594: collected from the outside in, so a chain of n links costs n and
    not n^2 (each link appended to the list of the ones below it) *)
 let bin_spine (e : Ast.expr)
@@ -2751,6 +2810,9 @@ let rec emit_expr (e : Ast.expr) : string =
       Printf.sprintf
         "({ %s* __env = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); __env->__r = __lang_current_region; __env->__copy = __mcopy_env_%s; %s (%s){.env = __env, .fn = %s%s}; })"
         env_name env_name env_name env_name inits cstruct adapter_name fn2_init
+  | Ast.App _ when builtin_wants_sequencing e ->
+    c_tail_pos := __in_tail;
+    emit_expr (sequence_builtin_args e)
   | Ast.App (f, arg) ->
     (* Phase 32.6 (C1 FFI multi-arg): if the head of a curried App chain is an
        extern fn, collect all arguments and convert to a direct C call. 1-arg

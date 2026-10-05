@@ -1,0 +1,20 @@
+// A builtin's arguments run left to right, as every other application's do.
+// The C backend wrote a builtin application straight into a C call, and C
+// leaves the order of a call's arguments unspecified: gcc ran them right to
+// left, so `vec_set v (f 0) (f 1)` printed f1 before f0 there (clang, which
+// parity.sh builds with, happened to agree with the interpreter). Fixed in
+// v0.1.615; rv_exec_check builds its C reference with `cc`, which is gcc on
+// the CI runner, and that is where it showed.
+//
+// Execution mode: interp + C + LLVM + Wasm (parity)
+let f = fn (x: int) -> let _ = print ("f" ++ str_of_int x) in x;
+let g = fn (s: str) -> let _ = print ("g" ++ s) in s;
+let v = vec_new ();
+let _ = vec_push v 0;
+let _ = vec_push v 0;
+let _ = vec_set v (f 0) (f 1);
+let m = map_new ();
+let _ = map_set m (g "k") (g "v");
+let _ = print (substring (g "abcdef") (f 1) (f 4));
+let _ = print (str_of_int (vec_get v (f 1)) ++ " " ++ map_get m (g "k"));
+print (str_repeat (g "x") (f 3))
