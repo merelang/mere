@@ -5625,6 +5625,177 @@ let debug_map (prog : item list) : string =
 
 (* --- entry point --------------------------------------------------------- *)
 
+(* --- v0.1.617: a peephole pass over the emitted words -----------------------
+   The emitter is a stack machine: an operand that has to survive the next
+   one's evaluation is pushed (`addi sp, sp, -w; sd r, 0(sp)`) and popped
+   (`ld r', 0(sp); addi sp, sp, w`). Measured on mere-ruby (RV64, every
+   instruction counted) those four instructions were 24% of everything run.
+   When the code between a push and its pop is straight-line -- no label, no
+   jump, no branch, no call, no ecall -- and touches neither sp nor a spare
+   temporary, the pair becomes `mv t, r` / `mv r', t`: the value waits in the
+   register instead of the stack. Nothing between could have read the stack
+   slot (it does not touch sp), and nothing could have run elsewhere and come
+   back (no control flow). Registers are read off the instruction fields
+   without decoding the format, so an immediate that happens to look like sp or
+   the spare register only costs a missed rewrite. Repeated until nothing
+   changes, so pairs nested inside each other go too, each with its own spare
+   (t6, t5, t4 -- the runtime routines clobber those, and no call is inside).
+   It runs on the item list before layout, so the binary, the listing and the
+   debug map are all of the rewritten code. *)
+let peephole (prog : item list) : item list =
+  let w = wsz () in
+  let push_addi = enc_i (0 - w) sp 0 sp 0x13 in
+  let pop_addi = enc_i w sp 0 sp 0x13 in
+  let is_push_sd x = x land 0x7f = 0x23 && (x lsr 12) land 7 = stf3 ()
+                     && (x lsr 15) land 31 = sp && ((x lsr 7) land 31) = 0 && (x lsr 25) = 0 in
+  let push_src x = (x lsr 20) land 31 in
+  let is_pop_ld x = x land 0x7f = 0x03 && (x lsr 12) land 7 = ldf3 ()
+                    && (x lsr 15) land 31 = sp && (x lsr 20) = 0 in
+  let pop_dst x = (x lsr 7) land 31 in
+  let mv rd rs = enc_i 0 rs 0 rd 0x13 in
+  let regs_of x = [ (x lsr 7) land 31; (x lsr 15) land 31; (x lsr 20) land 31 ] in
+  let spares = [ 31; 30; 29 ] in
+  let arr = Array.of_list prog in
+  let n = Array.length arr in
+  let dead = Array.make n false in
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    let i = ref 0 in
+    while !i < n - 1 do
+      (match arr.(!i), arr.(!i + 1) with
+       | Word a, Word b when not dead.(!i) && a = push_addi && is_push_sd b ->
+         let src = push_src b in
+         (* scan the middle; collect the registers it names *)
+         let used = Hashtbl.create 8 in
+         let rec scan j =
+           if j >= n - 1 then None
+           else if dead.(j) then scan (j + 1)
+           else match arr.(j) with
+             | Meta _ -> scan (j + 1)
+             | Word x when is_pop_ld x ->
+               (* the pop must be followed by its addi (skipping dead / meta) *)
+               let rec next k = if k >= n then None
+                 else if dead.(k) then next (k + 1)
+                 else match arr.(k) with Meta _ -> next (k + 1) | it -> Some (k, it) in
+               (match next (j + 1) with
+                | Some (k, Word y) when y = pop_addi -> Some (j, k, pop_dst x)
+                | _ -> None)
+             | Word x ->
+               let op = x land 0x7f in
+               if op = 0x73 || op = 0x67 || op = 0x6f || op = 0x63 then None
+               else if List.mem sp (regs_of x) then None
+               else (List.iter (fun r -> Hashtbl.replace used r ()) (regs_of x); scan (j + 1))
+             | LoadAddr (rd, _) ->
+               if rd = sp then None else (Hashtbl.replace used rd (); scan (j + 1))
+             | Label _ | Jal _ | Branch _ | Bytes _ -> None in
+         (match scan (!i + 2) with
+          | Some (j, k, dst) ->
+            (match List.find_opt (fun t -> not (Hashtbl.mem used t) && t <> src) spares with
+             | Some t ->
+               arr.(!i) <- Word (mv t src); dead.(!i + 1) <- true;
+               arr.(j) <- Word (mv dst t); dead.(k) <- true;
+               changed := true
+             | None -> ())
+          | None -> ())
+       | _ -> ());
+      incr i
+    done
+  done;
+  let out = ref [] in
+  Array.iteri (fun i it -> if not dead.(i) then out := it :: !out) arr;
+  List.rev !out
+
+(* v0.1.617: copy propagation and dead moves, inside straight-line runs.
+   After the push/pop rewrite the commonest leftover is a value walked through
+   registers: `mv a0, s1; mv t6, a0; mv a0, s2; mv a1, a0; mv a0, t6` is
+   `mv a1, s2; mv a0, s1`. Within a run of words with no label, jump, branch,
+   call, ecall or anything unusual between them:
+     - an instruction reading a register that currently holds a copy of another
+       (made by `mv`) reads the original instead -- while neither has been
+       written since;
+     - a `mv` whose destination is written again before anything reads it is
+       dropped.
+   Only the argument, temporary and saved registers take part (never sp, fp,
+   gp, ra or zero), and a register's last value is assumed to be needed when
+   the run ends, so nothing outside the run can see a difference. The register
+   fields are read by format: R (0x33/0x3b) reads rs1 and rs2, I (0x13/0x1b,
+   loads 0x03) reads rs1, S (0x23) reads rs1 and rs2 and writes nothing, U
+   (lui/auipc) reads nothing; every other opcode ends the run. *)
+let copyprop (prog : item list) : item list =
+  let fmt x = match x land 0x7f with
+    | 0x33 | 0x3b -> `R | 0x13 | 0x1b | 0x03 -> `I | 0x23 -> `S | 0x37 | 0x17 -> `U
+    | _ -> `Bar in
+  let rd_of x = (x lsr 7) land 31 and rs1_of x = (x lsr 15) land 31 and rs2_of x = (x lsr 20) land 31 in
+  let set_rs1 x r = (x land (lnot (31 lsl 15))) lor (r lsl 15) in
+  let set_rs2 x r = (x land (lnot (31 lsl 20))) lor (r lsl 20) in
+  let is_mv x = x land 0x7f = 0x13 && (x lsr 12) land 7 = 0 && (x lsr 20) = 0 in
+  (* a0..a7 (10-17), t0..t2 (5-7), t3..t6 (28-31), s1 (9), s2..s11 (18-27) *)
+  let tracked r = (r >= 5 && r <= 7) || r = 9 || (r >= 10 && r <= 31) in
+  let reads x = match fmt x with
+    | `R | `S -> [rs1_of x; rs2_of x] | `I -> [rs1_of x] | `U -> [] | `Bar -> [] in
+  let writes x = match fmt x with
+    | `R | `I | `U -> let r = rd_of x in if r = 0 then None else Some r
+    | `S | `Bar -> None in
+  let arr = Array.of_list prog in
+  let n = Array.length arr in
+  let dead = Array.make n false in
+  let barrier i = match arr.(i) with
+    | Word x -> fmt x = `Bar
+    | Meta _ -> false
+    | LoadAddr _ -> false
+    | Label _ | Jal _ | Branch _ | Bytes _ -> true in
+  let i = ref 0 in
+  while !i < n do
+    (* a run [!i, j) *)
+    let j = ref !i in
+    while !j < n && not (barrier !j) do incr j done;
+    (* copy propagation over the run *)
+    let copy = Array.make 32 (-1) in
+    let kill r = copy.(r) <- -1; Array.iteri (fun k v -> if v = r then copy.(k) <- -1) copy in
+    for k = !i to !j - 1 do
+      match arr.(k) with
+      | Word x ->
+        let x' =
+          match fmt x with
+          | `R | `S ->
+            let x1 = let r = rs1_of x in if tracked r && copy.(r) >= 0 then set_rs1 x copy.(r) else x in
+            let r2 = rs2_of x1 in if tracked r2 && copy.(r2) >= 0 then set_rs2 x1 copy.(r2) else x1
+          | `I -> let r = rs1_of x in if tracked r && copy.(r) >= 0 then set_rs1 x copy.(r) else x
+          | _ -> x in
+        arr.(k) <- Word x';
+        (match writes x' with Some r -> kill r | None -> ());
+        if is_mv x' then begin
+          let d = rd_of x' and s0 = rs1_of x' in
+          if tracked d && tracked s0 && d <> s0 then copy.(d) <- s0
+        end
+      | LoadAddr (rd, _) -> kill rd
+      | _ -> ()
+    done;
+    (* dead moves: written again before any read, within the run *)
+    for k = !i to !j - 1 do
+      match arr.(k) with
+      | Word x when is_mv x && tracked (rd_of x) ->
+        let d = rd_of x in
+        let rec look m =
+          if m >= !j then false
+          else if dead.(m) then look (m + 1)
+          else match arr.(m) with
+            | Word y ->
+              if List.mem d (reads y) then false
+              else if writes y = Some d then true
+              else look (m + 1)
+            | LoadAddr (rd, _) -> if rd = d then true else look (m + 1)
+            | _ -> look (m + 1) in
+        if rd_of x = rs1_of x || look (k + 1) then dead.(k) <- true
+      | _ -> ()
+    done;
+    i := (if !j = !i then !i + 1 else !j)
+  done;
+  let out = ref [] in
+  Array.iteri (fun k it -> if not dead.(k) then out := it :: !out) arr;
+  List.rev !out
+
 (* build the symbolic item list for a program (shared by emit_program /
    emit_listing) *)
 let build_items (prog : Ast.program) (full : Ast.expr) : item list =
@@ -5768,7 +5939,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   if !divzero_used then emit_divzero_stubs ();
   (* string literals collected during compilation, placed after the code *)
   List.iter (fun (label, bytes) -> emit (Label label); emit (Bytes bytes)) !string_data;
-  List.rev !items
+  copyprop (peephole (List.rev !items))
 
 (* Emit, measure, decide the layout and the jump width, and emit again until both
    stop changing. Two knobs feed each other: wide jumps make the code bigger, and
