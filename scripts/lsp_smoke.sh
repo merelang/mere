@@ -63,6 +63,13 @@ send() {
   send '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"'"$URI"'","languageId":"mere","version":1,"text":"let a = fn x -> x +;\nlet b = fn (q: -> q;\nlet c = match with | _ -> 1;\n"}}}'
   # edited into something that parses but does not type-check
   send '{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"'"$URI"'","version":2},"contentChanges":[{"text":"let f = fn (n: int) -> n + 1;\nlet _ = print_int (f \"x\");\n"}]}}'
+  # A request between the two changes, so that each is handled on its own.
+  # v0.1.576 handles an unbroken run of didChanges for one document as its last
+  # one, and every message here is piped at once: whether the second change
+  # had already arrived when the first was handled was a race, and a slow
+  # runner saw two publishes instead of three (CI on v0.1.619). A request
+  # breaks the run -- it is answered against the text it was asked about.
+  send '{"jsonrpc":"2.0","id":3,"method":"textDocument/documentSymbol","params":{"textDocument":{"uri":"'"$URI"'"}}}'
   # and then into something correct
   send '{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"'"$URI"'","version":3},"contentChanges":[{"text":"let f = fn (n: int) -> n + 1;\nlet _ = print_int (f 41);\n"}]}}'
   send '{"jsonrpc":"2.0","id":2,"method":"shutdown","params":null}'
@@ -88,8 +95,8 @@ expect() {
   fi
 }
 
-# Every message is framed, and the three publishes plus two responses are five.
-expect "one Content-Length header per message" 'Content-Length:' 5
+# Every message is framed, and the three publishes plus three responses are six.
+expect "one Content-Length header per message" 'Content-Length:' 6
 expect "initialize answers with the server's name" '"serverInfo"' 1
 expect "three publishDiagnostics, one per document state" 'publishDiagnostics' 3
 expect "the broken file reports all three syntax errors" '"parse error[^"]*".*"parse error[^"]*".*"parse error' 1

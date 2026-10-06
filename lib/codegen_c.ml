@@ -5244,7 +5244,9 @@ and compile_pattern (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
   | Ast.P_bool b ->
     (Printf.sprintf "((%s) == %d)" v_c (if b then 1 else 0), "")
   | Ast.P_str s ->
-    (Printf.sprintf "(strcmp((%s), %s) == 0)" v_c (Ast.escape_string s), "")
+    (* v0.1.620: by length, as `==` compares -- `strcmp` stopped at the first
+       NUL, so "a\u0000c" matched the arm `"a"` and "\u0000" matched `""` *)
+    (Printf.sprintf "(__lang_str_cmp((%s), (__sl_%d.s)) == 0)" v_c (str_literal_id s), "")
   | Ast.P_unit -> ("1", "")
   | Ast.P_constr (raw_cname, sub_opt) ->
     (* Phase 41 + 42: qualified ctor pattern (`| M.Foo -> ...`).
@@ -6589,7 +6591,8 @@ let emit_eq_fn (tag : string) (t : Ast.ty) : string =
   let header = Printf.sprintf "static int eq_%s(%s a, %s b)" tag cty cty in
   match Ast.walk t with
   | Ast.TyInt | Ast.TyBool -> header ^ " { return a == b; }"
-  | Ast.TyStr -> header ^ " { return strcmp(a, b) == 0; }"
+  (* v0.1.620: by length, as `==` compares (strcmp stopped at a NUL) *)
+  | Ast.TyStr -> header ^ " { return __lang_str_cmp(a, b) == 0; }"
   | Ast.TyUnit -> header ^ " { (void)a; (void)b; return 1; }"
   | Ast.TyArrow _ -> header ^ " { (void)a; (void)b; return 0; }"
   | Ast.TyTuple ts ->
@@ -6649,7 +6652,7 @@ let emit_cmp_fn (tag : string) (t : Ast.ty) : string =
     header ^ " { return (a > b) - (a < b); }"
   | Ast.TyFloat ->
     header ^ " { return (a > b) - (a < b); }"
-  | Ast.TyStr -> header ^ " { return strcmp(a, b); }"
+  | Ast.TyStr -> header ^ " { return __lang_str_cmp(a, b); }"
   | Ast.TyUnit -> header ^ " { (void)a; (void)b; return 0; }"
   | Ast.TyArrow _ -> header ^ " { (void)a; (void)b; return 0; }"
   | Ast.TyTuple ts ->
@@ -10775,7 +10778,8 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
   let rec key_eq_for k a b =
     match Ast.walk k with
     | Ast.TyInt | Ast.TyBool -> Printf.sprintf "(%s) == (%s)" a b
-    | Ast.TyStr -> Printf.sprintf "strcmp((%s), (%s)) == 0" a b
+    (* v0.1.620: by length -- with strcmp, "a" and "a\u0000b" were one key *)
+    | Ast.TyStr -> Printf.sprintf "__lang_str_cmp((%s), (%s)) == 0" a b
     | Ast.TyTuple ts ->
       let parts = List.mapi (fun i t ->
         key_eq_for t

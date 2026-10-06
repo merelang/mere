@@ -4605,9 +4605,10 @@ let () =
   assert_c "codegen: P_int compiles to equality"
     (codegen "match 3 with | 0 -> 100 | _ -> 200")
     "(__scrut) == 0";
-  assert_c "codegen: P_str compiles to strcmp"
+  (* v0.1.620: by length, as `==` compares -- strcmp stopped at a NUL *)
+  assert_c "codegen: P_str compares by length"
     (codegen "match \"hi\" with | \"a\" -> 1 | _ -> 2")
-    "strcmp((__scrut), \"a\")";
+    "__lang_str_cmp((__scrut), (__sl_";
   assert_c "codegen: P_bool true compiles to == 1"
     (codegen "match true with | true -> 1 | false -> 0")
     "(__scrut) == 1";
@@ -5630,9 +5631,10 @@ let () =
   assert_llvm "llvm: P_int via icmp eq"
     (llvm "match 3 with | 0 -> 1 | 3 -> 2 | _ -> 9")
     "= icmp eq i64 ";
-  assert_llvm "llvm: P_str via strcmp"
+  (* v0.1.620: by length, as `==` compares -- strcmp stopped at a NUL *)
+  assert_llvm "llvm: P_str via __lang_str_eq"
     (llvm "match \"hello\" with | \"hi\" -> 1 | \"hello\" -> 2 | _ -> 9")
-    "= call i32 @strcmp(ptr ";
+    "= call i1 @__lang_str_eq(ptr ";
   assert_llvm "llvm: P_bool via icmp eq i1"
     (llvm "match true with | false -> 0 | true -> 1")
     "= icmp eq i1 ";
@@ -15249,6 +15251,15 @@ let () =
   rv_contains "rv32i: a self tail call reuses the frame"
     "let rec loop = fn i -> if i >= 10 then i else loop (i + 1);\n\
      let _ = print_int (loop 0);" "j .self";
+  (* v0.1.620: a comparison with a literal is inline -- a length check and, for
+     a literal that fits a word, one masked word -- and `char_at` hands back an
+     entry of the one-byte string table instead of allocating *)
+  rv_not_contains "rv32i: str_eq with a short literal makes no call"
+    "let f = fn (s: str) -> str_eq s \"abc\" || s == \"d\";\n\
+     let _ = print_bool (f \"abc\");" "jal ra, __str_eq";
+  rv_contains "rv32i: char_at reads the one-byte string table"
+    "let f = fn (s: str) -> char_at s 1;\n\
+     let _ = print (f \"xyz\");" "la a0, __rv_chr_tab";
   rv_contains "rv32i: a non-tail call is still a call"
     "let rec fact = fn n -> if n <= 1 then 1 else n * fact (n - 1);\n\
      let _ = print_int (fact 5);" "jal ra, u_fact";

@@ -3930,10 +3930,9 @@ let emit_eq_fn (tag : string) (t : Ast.ty) : string =
      emit_instr (Printf.sprintf "  %s = fcmp oeq double %%a, %%b" r);
      emit_instr (Printf.sprintf "  ret i1 %s" r)
    | Ast.TyStr ->
-     let c = fresh_reg () in
-     emit_instr (Printf.sprintf "  %s = call i32 @strcmp(ptr %%a, ptr %%b)" c);
+     (* v0.1.620: by length (strcmp stopped at a NUL inside the value) *)
      let r = fresh_reg () in
-     emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, 0" r c);
+     emit_instr (Printf.sprintf "  %s = call i1 @__lang_str_eq(ptr %%a, ptr %%b)" r);
      emit_instr (Printf.sprintf "  ret i1 %s" r)
    | Ast.TyArrow _ -> emit_instr "  ret i1 0"
    | Ast.TyTuple ts ->
@@ -4181,8 +4180,9 @@ let emit_cmp_fn (tag : string) (t : Ast.ty) : string =
      emit_instr (Printf.sprintf "  %s = fcmp olt double %%a, %%b" lt);
      emit_threeway gt lt
    | Ast.TyStr ->
+     (* v0.1.620: bytes then length, as `<` orders (strcmp stopped at a NUL) *)
      let c = fresh_reg () in
-     emit_instr (Printf.sprintf "  %s = call i32 @strcmp(ptr %%a, ptr %%b)" c);
+     emit_instr (Printf.sprintf "  %s = call i32 @__lang_str_compare(ptr %%a, ptr %%b)" c);
      let r = fresh_reg () in
      emit_instr (Printf.sprintf "  %s = sext i32 %s to i64" r c);
      emit_instr (Printf.sprintf "  ret i64 %s" r)
@@ -7876,11 +7876,11 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         emit_instr (Printf.sprintf "  %s = icmp eq i1 %s, %d" r v_reg (if b then 1 else 0));
         (r, [], [])
       | Ast.P_str s ->
+        (* v0.1.620: by length, as `==` compares -- strcmp stopped at the first
+           NUL, so "a\u0000c" matched the arm `"a"` and "\u0000" matched `""` *)
         let label = fresh_str_global s in
-        let cmp = fresh_reg () in
-        emit_instr (Printf.sprintf "  %s = call i32 @strcmp(ptr %s, ptr %s)" cmp v_reg label);
         let r = fresh_reg () in
-        emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, 0" r cmp);
+        emit_instr (Printf.sprintf "  %s = call i1 @__lang_str_eq(ptr %s, ptr %s)" r v_reg label);
         (r, [], [])
       | Ast.P_as (inner, n) ->
         let (c, bs, tys) = compile_pat inner v_reg v_ty fail_label in
@@ -11902,10 +11902,9 @@ let emit_map_key_eq_helper_llvm (k_ty : Ast.ty) : string =
           emit (Printf.sprintf "  %s = icmp eq %s %s, %s" r t a b);
           r
         | Ast.TyStr ->
-          let cmp_r = fresh () in
-          emit (Printf.sprintf "  %s = call i32 @strcmp(ptr %s, ptr %s)" cmp_r a b);
+          (* v0.1.620: by length -- with strcmp, "a" and "a\u0000b" were one key *)
           let r = fresh () in
-          emit (Printf.sprintf "  %s = icmp eq i32 %s, 0" r cmp_r);
+          emit (Printf.sprintf "  %s = call i1 @__lang_str_eq(ptr %s, ptr %s)" r a b);
           r
         | Ast.TyTuple ts ->
           let tup_struct = tuple_struct_name ts in
