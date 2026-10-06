@@ -4,6 +4,43 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.625 — 2026-10-07
+
+_A signal a program wants to hear about: `proc_sig_catch` installs a handler that only marks it, `proc_sig_take` takes the marks where the program can act on them, and `proc_sig_ignore` is `SIG_IGN`. For mere-ruby, whose `trap` answered only `Process.kill` to itself and died of a `SIGUSR1` sent from outside._
+
+mere-ruby's `Signal.trap` wrote the handler into a table and installed nothing,
+so a signal from another process took the default action: `trap(:USR1) { ... }`
+and then `kill -USR1` from outside ended it (exit 158), where ruby runs the
+handler on its main thread. CRuby's test_process waits for a child ruby to
+print from a trap while it sits in `system`; the child died, its `cat` kept
+the pipe, and the whole file hung (mere-ruby note 290).
+
+A handler may do almost nothing, and an interpreter's handler code is anything
+but nothing. So the handler marks the signal (a `sig_atomic_t` per number and
+one that says some mark is up) and returns; the program asks at a point of its
+own -- an interpreter at a statement boundary -- and does there what the
+handler could not.
+
+- `proc_sig_catch sig keep` -- `SA_RESTART`, so a blocking call resumes and the
+  mark waits for the next ask. `keep = 1` is ruby's rule for the signals it
+  handles by default: an ignored disposition inherited from the parent (nohup's
+  `SIGHUP`) is put back and kept. `0` installed, `1` kept, `-1` refused
+  (`EINVAL` for a number out of range, in `proc_last_errno`).
+- `proc_sig_take ()` -- the lowest marked signal, its mark taken down; `0` when
+  none. Two arrivals before a take are one mark, as two pending signals are
+  one in the kernel.
+- `proc_sig_ignore sig` -- `SIG_IGN`, inherited across `exec(2)`, which is what
+  ruby's `trap(sig, "IGNORE")` gives a child.
+
+C only, like the rest of the `proc_sig_*` family; the other backends refuse
+the extern by name. `scripts/procsig_check.sh` grows from 22 rows to 50: the
+marking handler from the default (a mark from `raise`, from another process,
+two arrivals as one, the lower number first, a child starting with the
+default, an unknown number refused) and under an inherited `SIG_IGN` for
+`SIGHUP` (`keep = 1` kept, `keep = 0` catches). Two poisons (a take that
+leaves the mark up, a keep that is not honoured) each fail it. Run once on
+the CI image (Linux x86-64, gcc -O0 and -O2, dash): 50/50.
+
 ## v0.1.624 — 2026-10-06
 
 _RISC-V gives back what a compaction frees while coroutines exist, keeping only blocks a stopped stack can reach -- C's pins. mere-ruby's real Fibers (its collector runs on a coroutine of its own) now run corpus 165 and 213 on RV64. And `sleep_ms` exists there._

@@ -1,6 +1,7 @@
 #!/bin/sh
 # scripts/procsig_check.sh — proc_sig_noop / proc_sig_default / proc_sig_raise
-# and proc_out_errno, each in the scene it is for.
+# and proc_out_errno, and (v0.1.625) proc_sig_catch / proc_sig_take /
+# proc_sig_ignore, each in the scene it is for.
 #
 # WHY THESE ARE A RUNTIME AND NOT AN `extern`. signal(2) and sigaction(2) move
 # a disposition through a function pointer and a struct, which no extern can
@@ -53,6 +54,13 @@ echo "inherited exit $?" >> "$TMP/got"
 dflt sh "$ROOT/scripts/bounded.sh" 30 "$P" closed 2>> "$TMP/got" | true
 dflt sh "$ROOT/scripts/bounded.sh" 30 "$P" dies 2>> "$TMP/got"
 echo "dies exit $?" >> "$TMP/got"
+# v0.1.625: the marking handler, from the default (HUP and TERM put back, as
+# PIPE is above) and under an inherited SIG_IGN for HUP (`trap '' HUP`)
+dfl2() { perl -e '$SIG{HUP} = "DEFAULT"; $SIG{TERM} = "DEFAULT"; exec @ARGV' "$@"; }
+dfl2 sh "$ROOT/scripts/bounded.sh" 30 "$P" catch 2>> "$TMP/got"
+echo "catch exit $?" >> "$TMP/got"
+( trap '' HUP; sh "$ROOT/scripts/bounded.sh" 30 "$P" keep ) 2>> "$TMP/got"
+echo "keep exit $?" >> "$TMP/got"
 
 # One line per check, compared AS A WHOLE: a row that stops being printed is a
 # failure too, and grep would not see it.
@@ -79,6 +87,34 @@ asking clears it ok
 print_bytes refusal is EPIPE ok
 default restored ok
 dies exit 141
+catch installs ok
+nothing marked yet ok
+raise under the marking handler ok
+survived the marked signal ok
+the mark is taken ok
+and is gone ok
+two arrivals one mark ok
+no second mark ok
+catch a second ok
+lowest first ok
+then the other ok
+then none ok
+a signal from another process ok
+is marked ok
+a child has the default ok
+catch unknown refused ok
+catch unknown is EINVAL ok
+ignore installs ok
+raise while ignored ok
+nothing marked when ignored ok
+a child inherits the ignore ok
+catch exit 0
+inherited ignore kept ok
+raise while kept ignored ok
+kept ignore marks nothing ok
+keep 0 catches it anyway ok
+now it is marked ok
+keep exit 0
 W
 
 n=$(wc -l < "$TMP/want" | tr -d ' ')

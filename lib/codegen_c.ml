@@ -7137,7 +7137,12 @@ let native_ffi_names =
     "file_flock";
     (* v0.1.589: a signal's disposition (a function pointer and a struct), and
        the errno of a refused write to stdout, which the runtime used to drop *)
-    "proc_sig_noop"; "proc_sig_default"; "proc_sig_raise"; "proc_out_errno" ]
+    "proc_sig_noop"; "proc_sig_default"; "proc_sig_raise"; "proc_out_errno";
+    (* v0.1.625: a signal a program wants to HEAR about -- the handler only
+       marks it, and the program asks at a point of its own choosing (an
+       interpreter's statement boundary), which is the only safe place to do
+       anything about it; and SIG_IGN, for a program that says so *)
+    "proc_sig_catch"; "proc_sig_take"; "proc_sig_ignore" ]
 
 (* TLS externs. Not implemented natively yet (needs libssl FFI). Stubbed so
    a native build LINKS and plaintext connections work; referenced by the
@@ -8694,6 +8699,70 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
              "  int e = __lang_out_errno;";
              "  __lang_out_errno = 0;";
              "  return (long long)e;";
+             "}";
+             "";
+             "/* v0.1.625: a signal the program wants to HEAR about. The handler does";
+             "   the one thing a handler may: it marks the signal (a sig_atomic_t per";
+             "   number, and one that says some mark is up). The program asks for the";
+             "   marks where it can act on them -- an interpreter at a statement";
+             "   boundary, a server between requests -- and runs whatever it likes";
+             "   there, which the handler could not.";
+             "     proc_sig_catch sig keep   install the marking handler (SA_RESTART:";
+             "                               a blocking call resumes, the mark waits).";
+             "                               keep = 1 is ruby's rule for the signals";
+             "                               it handles by default: an IGNORED";
+             "                               disposition inherited from the parent";
+             "                               (nohup's SIGHUP) is put back and kept.";
+             "                               0 installed, 1 kept, -1 refused.";
+             "     proc_sig_take ()          the lowest marked signal, its mark taken";
+             "                               down; 0 when none is marked. One call per";
+             "                               mark: two arrivals before a take are one.";
+             "     proc_sig_ignore sig       SIG_IGN, which a child inherits across";
+             "                               exec(2), as ruby's trap(sig, \"IGNORE\").";
+             "                               0 or -1. */";
+             "#ifndef NSIG";
+             "#define NSIG 65";
+             "#endif";
+             "static volatile sig_atomic_t __proc_sig_marks[NSIG];";
+             "static volatile sig_atomic_t __proc_sig_any = 0;";
+             "static void __proc_sig_mark(int s) {";
+             "  if (s > 0 && s < NSIG) { __proc_sig_marks[s] = 1; __proc_sig_any = 1; }";
+             "}";
+             "static long long proc_sig_catch(long long sig, long long keep) {";
+             "  struct sigaction sa, old;";
+             "  if (sig <= 0 || sig >= NSIG) { __proc_errno = EINVAL; return -1; }";
+             "  memset(&sa, 0, sizeof sa);";
+             "  sa.sa_handler = __proc_sig_mark;";
+             "  sigemptyset(&sa.sa_mask);";
+             "  sa.sa_flags = SA_RESTART;";
+             "  if (sigaction((int)sig, &sa, &old) != 0) { __proc_errno = errno; return -1; }";
+             "  __proc_errno = 0;";
+             "  if (keep && old.sa_handler == SIG_IGN) {";
+             "    sigaction((int)sig, &old, NULL);";
+             "    return 1;";
+             "  }";
+             "  return 0;";
+             "}";
+             "static long long proc_sig_take(void) {";
+             "  if (!__proc_sig_any) return 0;";
+             "  __proc_sig_any = 0;";
+             "  int found = 0;";
+             "  for (int s = 1; s < NSIG; s++) {";
+             "    if (__proc_sig_marks[s]) {";
+             "      if (!found) { __proc_sig_marks[s] = 0; found = s; }";
+             "      else { __proc_sig_any = 1; break; }";
+             "    }";
+             "  }";
+             "  return (long long)found;";
+             "}";
+             "static long long proc_sig_ignore(long long sig) {";
+             "  struct sigaction sa;";
+             "  memset(&sa, 0, sizeof sa);";
+             "  sa.sa_handler = SIG_IGN;";
+             "  sigemptyset(&sa.sa_mask);";
+             "  if (sigaction((int)sig, &sa, NULL) != 0) { __proc_errno = errno; return -1; }";
+             "  __proc_errno = 0;";
+             "  return 0;";
              "}" ]
        else "");
       (if audio then
@@ -14752,7 +14821,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         "proc_rlimit_resource"; "proc_rlimit_names"; "proc_rlim_const";
         "proc_getpriority"; "proc_setpriority"; "proc_last_errno";
         "file_flock"; "proc_sig_noop"; "proc_sig_default"; "proc_sig_raise";
-        "proc_out_errno" ];
+        "proc_out_errno"; "proc_sig_catch"; "proc_sig_take"; "proc_sig_ignore" ];
   strbuf_used := false;
   bytebuf_used := false;
   bytes_used := false;

@@ -14,6 +14,10 @@ extern fn proc_sig_default: int -> int;
 extern fn proc_sig_raise: int -> int;
 extern fn proc_out_errno: unit -> int;
 extern fn proc_last_errno: unit -> int;
+extern fn proc_sig_catch: int -> int -> int;
+extern fn proc_sig_take: unit -> int;
+extern fn proc_sig_ignore: int -> int;
+extern fn getpid: unit -> int;
 
 let say = fn (label: str) -> fn (got: int) -> fn (want: int) ->
   if got == want then print_err (label ++ " ok")
@@ -67,11 +71,58 @@ let dies = fn (u: unit) ->
   let _ = proc_sig_raise 13 in
   print_err "still alive FAIL";
 
+// proc_sig_catch / proc_sig_take / proc_sig_ignore (v0.1.625), with SIGHUP (1)
+// and SIGTERM (15), whose numbers are the same on every host the gate runs on
+let catch = fn (u: unit) ->
+  let _ = say "catch installs" (proc_sig_catch 15 0) 0 in
+  let _ = say "nothing marked yet" (proc_sig_take ()) 0 in
+  let _ = say "raise under the marking handler" (proc_sig_raise 15) 0 in
+  let _ = print_err "survived the marked signal ok" in
+  let _ = say "the mark is taken" (proc_sig_take ()) 15 in
+  let _ = say "and is gone" (proc_sig_take ()) 0 in
+  // two arrivals before a take are one mark
+  let _ = proc_sig_raise 15 in
+  let _ = proc_sig_raise 15 in
+  let _ = say "two arrivals one mark" (proc_sig_take ()) 15 in
+  let _ = say "no second mark" (proc_sig_take ()) 0 in
+  // two signals: the lower number first, then the other
+  let _ = say "catch a second" (proc_sig_catch 1 0) 0 in
+  let _ = proc_sig_raise 15 in
+  let _ = proc_sig_raise 1 in
+  let _ = say "lowest first" (proc_sig_take ()) 1 in
+  let _ = say "then the other" (proc_sig_take ()) 15 in
+  let _ = say "then none" (proc_sig_take ()) 0 in
+  // from ANOTHER process, which is the point: a shell child signals us
+  let pid = getpid () in
+  let _ = say "a signal from another process" (run ("kill -TERM " ++ str_of_int pid)) 0 in
+  let _ = say "is marked" (proc_sig_take ()) 15 in
+  // a child starts with the default (the handler does not survive exec)
+  let _ = say "a child has the default" (run "kill -TERM $$; exit 0") 143 in
+  let _ = say "catch unknown refused" (proc_sig_catch 9999 0) (0 - 1) in
+  let _ = say "catch unknown is EINVAL" (proc_last_errno ()) 22 in
+  // ignored: survives, marks nothing, and a child inherits it
+  let _ = say "ignore installs" (proc_sig_ignore 15) 0 in
+  let _ = say "raise while ignored" (proc_sig_raise 15) 0 in
+  let _ = say "nothing marked when ignored" (proc_sig_take ()) 0 in
+  say "a child inherits the ignore" (run "kill -TERM $$; exit 0") 0;
+
+// SIGHUP ignored by the parent (the gate runs this under `trap '' HUP`, as
+// nohup does): keep = 1 leaves it ignored, keep = 0 catches it anyway
+let keep = fn (u: unit) ->
+  let _ = say "inherited ignore kept" (proc_sig_catch 1 1) 1 in
+  let _ = say "raise while kept ignored" (proc_sig_raise 1) 0 in
+  let _ = say "kept ignore marks nothing" (proc_sig_take ()) 0 in
+  let _ = say "keep 0 catches it anyway" (proc_sig_catch 1 0) 0 in
+  let _ = proc_sig_raise 1 in
+  say "now it is marked" (proc_sig_take ()) 1;
+
 let main = fn (u: unit) ->
   if str_eq mode "fresh" then fresh ()
   else if str_eq mode "inherited" then inherited ()
   else if str_eq mode "closed" then closed ()
   else if str_eq mode "dies" then dies ()
+  else if str_eq mode "catch" then catch ()
+  else if str_eq mode "keep" then keep ()
   else print_err ("unknown mode " ++ mode);
 
 main ()
