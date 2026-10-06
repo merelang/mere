@@ -4,6 +4,35 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.619 — 2026-10-06
+
+_On the C backend a channel message no longer corrupts the heap's block lists. Since v0.1.549 `examples/concurrent_loops.mere` summed 1..100 to a garbage number about once in two thousand runs._
+
+v0.1.549 put every live region block on one of two lists, so that a conservative
+scan of a suspended coroutine can ask whether an address may be read: the default
+region's blocks on a shared list behind a lock, every other region's on its
+thread's own list ("Map, Vec and region borrows are not Send, so a region belongs
+to its thread"). A channel message is the exception: the sender builds it in a
+fresh region and the RECEIVER frees that region. Its blocks went on the sender's
+list, and the receiver's unlink edited the receiver's list instead -- it set its
+own head to the sender's next block, and left the sender's head on a block it had
+just freed. Two ways that went wrong:
+
+- two threads racing on the lists (`concurrent_loops`: wrong total about once in
+  2,000 runs alone, 5 in 4,000 under load; ThreadSanitizer names `__lang_blk_link`
+  against `__lang_blk_unlink`);
+- deterministically, when a thread sends a batch, waits for the receiver some other
+  way (a `join` is not a message) and then builds another message: its link writes
+  into the freed block.
+
+A region now says whether another thread frees it (`xthread`, set for channel
+messages), and its blocks go on the shared, locked list. Only the C backend keeps
+these lists. `test/uaf/channel_xthread.mere` is the second shape, run by
+`region_uaf_check` under AddressSanitizer (heap-use-after-free on every run before
+the fix; its poison puts the region back on the maker's list). That gate now sets
+`ASAN_OPTIONS=use_sigaltstack=0`: a spawned thread's alternate signal stack is the
+runtime's own (Q-178), and ASan on macOS tried to unmap it when the thread ended.
+
 ## v0.1.618 — 2026-10-06
 
 _RISC-V frames are sized by the bindings live at once rather than by every binding in the body, and a self tail call loops back past the prologue instead of rebuilding the frame. mere-ruby's corpus 165 on RV64 runs in another 5% fewer instructions; from v0.1.615 it is 47% fewer in all._

@@ -9897,7 +9897,7 @@ let region_runtime_helpers =
       "  struct __lang_region_block* prev;";
       "  size_t pad;  /* the block's capacity (the header keeps the data 16-aligned) */";
       "  unsigned long ep;   /* __lang_region_epoch when it was allocated */";
-      "  size_t dflt;   /* on the default region's list (see __lang_blk_link) */";
+      "  size_t dflt;   /* on the shared, locked list (see __lang_blk_link) */";
       "  struct __lang_region_s* owner;   /* whose chain it is on: its bump block ends at owner->top */";
       "  struct __lang_region_block* gprev;";
       "  struct __lang_region_block* gnext;";
@@ -9930,6 +9930,10 @@ let region_runtime_helpers =
          v0.1.557 did -- sent a write to an escaped container into whichever block
          took the struct next, and freed it with that block. *)
       "  struct __lang_region_s* fwd;";
+      (* v0.1.619: made on one thread and freed on another -- a channel message.
+         Its blocks go on the shared, locked list rather than the maker's
+         thread-local one (see __lang_blk_link). *)
+      "  int xthread;";
       "} __lang_region;";
       "static __lang_region __lang_default_region;";
       "";
@@ -9939,7 +9943,13 @@ let region_runtime_helpers =
       "   its thread (Map, Vec, StrBuf, ListBuf and region borrows are not Send),";
       "   and the default region is shared, so its blocks have a list of their own";
       "   with its own lock. Every block is made, grown and freed through the three";
-      "   helpers below, which is what keeps the lists true. */";
+      "   helpers below, which is what keeps the lists true.";
+      "   v0.1.619: so does a region that one thread makes and another frees -- a";
+      "   channel message, built by the sender and released by the receiver. On the";
+      "   sender's thread-local list, the receiver's unlink rewrote ITS OWN list's";
+      "   head and left the block on the sender's after freeing it; the sender's";
+      "   next link then wrote into freed memory (examples/concurrent_loops summed";
+      "   to a garbage total about once in two thousand runs). */";
       "static _Thread_local __lang_region_block* __lang_blk_tl = NULL;";
       "static __lang_region_block* __lang_blk_dl = NULL;";
       "static pthread_mutex_t __lang_blk_dl_lock = PTHREAD_MUTEX_INITIALIZER;";
@@ -9947,7 +9957,7 @@ let region_runtime_helpers =
       "static _Thread_local unsigned long __lang_blk_tl_gen = 1;";
       "static unsigned long __lang_blk_dl_gen = 1;";
       "static void __lang_blk_link(__lang_region* r, __lang_region_block* b) {";
-      "  b->dflt = (r == &__lang_default_region);";
+      "  b->dflt = (r == &__lang_default_region || r->xthread);";
       "  b->owner = r;";
       "  b->gprev = NULL;";
       "  if (b->dflt) {";
@@ -10059,15 +10069,17 @@ let region_runtime_helpers =
       "  return 1;";
       "}";
       "";
-      "static void __lang_region_init(__lang_region* r, size_t cap) {";
+      "static void __lang_region_init_x(__lang_region* r, size_t cap, int xthread) {";
       "  r->blocks = NULL;";
       "  r->alloc_total = 0;";
       "  r->site = 0;";
       "  r->seq = 0;";
       "  r->keep = NULL;";
       "  r->fwd = NULL;";
+      "  r->xthread = xthread;";
       "  __lang_region_add_block(r, cap);";
       "}";
+      "static void __lang_region_init(__lang_region* r, size_t cap) { __lang_region_init_x(r, cap, 0); }";
       "/* where an allocation through r really goes (see `fwd`) */";
       "static inline __lang_region* __lang_region_live(__lang_region* r) {";
       "  while (r && r->fwd) r = r->fwd;";
@@ -14382,7 +14394,7 @@ let emit_channel_runtime_for ?(senders = false) (elem_ty : Ast.ty) : string =
       "";
       Printf.sprintf "static int %s_send(%s* ch, %s v) {" s s cty;
       "  __lang_region* mr = (__lang_region*)malloc(sizeof(__lang_region));";
-      "  __lang_region_init(mr, 256);";
+      "  __lang_region_init_x(mr, 256, 1);   /* the receiver frees it */";
       Printf.sprintf "  v = __mcopy_%s(mr, v);" tag;
       "  pthread_mutex_lock(&ch->m);";
       (* v0.1.47: sending on a closed channel is a programming error. v0.1.590:

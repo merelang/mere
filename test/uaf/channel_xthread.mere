@@ -1,0 +1,30 @@
+// Channel messages cross threads: each one is built in a region the sender
+// makes and the receiver frees (v0.1.619). On v0.1.549-618 those regions'
+// blocks went on the MAKER's thread-local block list, and the receiver
+// unlinked them from its OWN list. The sender's list head was left on the
+// last message it sent; once the worker had freed that message, the next
+// message the main thread built linked itself in front of freed memory and
+// wrote into it. concurrent_loops only went wrong when the two threads
+// raced on the lists; this shape -- send a batch, `join` (which is not a
+// message), send again -- does it on every run, and
+// scripts/region_uaf_check.sh runs it under AddressSanitizer.
+let rec pump = fn ch -> fn n ->
+  if n < 1 then channel_send ch ""
+  else let _ = channel_send ch (str_repeat "m" (n % 37 + 1)) in pump ch (n - 1);
+
+let rec drain = fn ch -> fn acc ->
+  let s = channel_recv ch in
+  if str_len s == 0 then acc else drain ch (acc + str_len s);
+
+let total =
+  let ch = channel_new () in
+  let out = channel_new () in
+  let h = spawn (fn u -> channel_send out (drain ch 0)) in
+  let _ = pump ch 500 in
+  let _ = join h in
+  // the first message main builds after the worker freed its last one
+  let again = channel_new () in
+  let _ = channel_send again "after the join" in
+  str_len (channel_recv again) * 100000 + channel_recv out;
+
+print_int total
