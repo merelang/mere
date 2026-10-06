@@ -284,7 +284,7 @@ const wasmPath = process.argv[2];
   // other host.
   let langBump = null;  // set after instantiate
   let mainInstance = null;  // v0.1.600: spawn copies its top-level values
-  const { bumpAlloc, writeStr, writeBytes, readCStr, readStrBytes } = makeMarshal({
+  const { bumpAlloc, writeStr, writeStrBytes, writeBytes, readCStr, readStrBytes } = makeMarshal({
     getMemory: () => memory,
     getBump: () => langBump,
   });
@@ -401,6 +401,28 @@ const wasmPath = process.argv[2];
     // A caller's `if file_exists p` took the wrong branch and nothing said why.
     file_exists: (pathPtr) => {
       try { fs.statSync(readCStr(pathPtr)); return 1; } catch (e) { return 0; }
+    },
+    // v0.1.630: mkdir(2), the names in a directory (bytes, NUL after each,
+    // "." and ".." left out), and the environment as `env -0` frames it
+    dir_create: (pathPtr, perm) => {
+      try { fs.mkdirSync(readCStr(pathPtr), { mode: perm < 0 ? 0o777 : perm }); return 0; }
+      catch (e) { return -1; }
+    },
+    dir_entries: (pathPtr) => {
+      try {
+        const names = fs.readdirSync(readCStr(pathPtr), { encoding: "buffer" });
+        const parts = [];
+        for (const n of names) { parts.push(n); parts.push(Buffer.from([0])); }
+        return writeStrBytes(Buffer.concat(parts));
+      } catch (e) { return writeStrBytes(Buffer.alloc(0)); }
+    },
+    dir_remove: (pathPtr) => {
+      try { fs.rmdirSync(readCStr(pathPtr)); return 0; } catch (e) { return -1; }
+    },
+    env_pairs: () => {
+      const parts = [];
+      for (const [k, v] of Object.entries(process.env)) parts.push(Buffer.from(k + "=" + v + "\0", "utf8"));
+      return writeStrBytes(Buffer.concat(parts));
     },
     // v0.1.622: unlink, as the native backends do -- a directory is refused
     file_delete: (pathPtr) => {

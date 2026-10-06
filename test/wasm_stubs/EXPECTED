@@ -5,6 +5,10 @@ run host
 env_var host
 file_exists host
 file_delete host
+dir_create host
+dir_entries host
+dir_remove host
+env_pairs host
 args host
 read_file host
 file_size host

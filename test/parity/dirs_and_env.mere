@@ -1,0 +1,31 @@
+// A directory made, read and removed, and the environment, on every backend
+// (v0.1.630) -- without a shell, which a RISC-V binary on memu does not have.
+// The names come back in the directory's own order, so they are checked by
+// membership, not position. The name is drawn: parity and rv_exec may run
+// this at once in one directory.
+let d = "mere_parity_dirs_" ++ str_of_int (random_int 1000000000);
+let nul = chr 0;
+let made = dir_create d (0 - 1);
+let again = dir_create d (0 - 1);
+let _ = write_file (d ++ "/b.txt") "b";
+let sub = dir_create (d ++ "/sub") (0 - 1);
+let names = dir_entries d;
+let has = fn (n: str) -> str_contains names (n ++ nul);
+let _ = print_int made;
+let _ = print_int again;
+let _ = print_int sub;
+let _ = print_int (str_len names);
+let _ = print (if has "b.txt" && has "sub" then "both listed" else "missing a name");
+let _ = print (if str_contains names ("." ++ nul) then "dot listed" else "no dot");
+let _ = print_int (str_len (dir_entries (d ++ "/nope")));
+let _ = print_int (str_len (dir_entries (d ++ "/sub")));
+let _ = print_int (dir_remove d);
+let _ = file_delete (d ++ "/b.txt");
+let _ = print_int (dir_remove (d ++ "/sub"));
+let _ = print_int (dir_remove d);
+let _ = print_int (dir_remove d);
+let env = env_pairs ();
+let _ = print (if str_len env > 0 && str_contains env "=" then "environment" else "no environment");
+print (match env_var "PATH" with
+       | Some p -> (if str_contains env ("PATH=" ++ p ++ nul) then "PATH agrees" else "PATH differs")
+       | None -> "no PATH")

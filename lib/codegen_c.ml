@@ -688,6 +688,7 @@ let uses_audio = ref false  (* v0.1.314: audio_* -> SDL2 audio, push model *)
 let uses_filestat = ref false  (* v0.1.509: file_* -> stat(2) and friends *)
 let uses_fdio = ref false      (* v0.1.522: fd_* -> open(2) and friends *)
 let uses_proclimit = ref false (* v0.1.550: proc_* / file_flock -> rlimit, priority, flock *)
+let uses_dirs = ref false      (* v0.1.630: dir_create / dir_entries / env_pairs *)
 let uses_file_io = ref false  (* v0.1.59: file_open / file_read_line / file_close *)
 let uses_int_of_str = ref false  (* v0.1.60: validating int parse *)
 let uses_write_file_bytes = ref false
@@ -3289,6 +3290,7 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var ("__rv_argc" | "__rv_argstr" | "__rv_word"
                | "__rv_clock" | "__rv_urandom32" | "__rv_xlen" | "__rv_str_hash"
                | "__rv_open_rd" | "__rv_read_all" | "__rv_access" | "__rv_unlink"
+               | "__rv_syscall" | "__rv_cstr" | "__rv_addr" | "__rv_envblk"
                | "__rv_open_wr" | "__rv_write_all" | "__rv_substring_raw") ->
        unsupported e.Ast.loc
          "__rv_argc / __rv_argstr read the RV32I argument block, which a hosted \
@@ -3298,7 +3300,10 @@ let rec emit_expr (e : Ast.expr) : string =
           __rv_open_rd / __rv_read_all / __rv_access / __rv_unlink / __rv_open_wr / \
           __rv_write_all are that backend's raw openat/read/write/faccessat/unlinkat — \
           call `read_file`, `write_file`, `read_stdin`, `file_exists` or `file_delete` — and \
-          __rv_substring_raw is the slice behind its prelude's `substring`"
+          __rv_substring_raw is the slice behind its prelude's `substring`; \
+          __rv_syscall / __rv_cstr / __rv_addr / __rv_envblk are its raw ecall, path, \
+          address and environment block -- call `dir_create`, `dir_entries`, \
+          `dir_remove`, `env_pairs` or `env_var`"
      (* Raw physical memory is RV32I bare-metal only. Without this arm the
         raw_* names fell through to the closure path and emitted a call to an
         undefined `mu_raw_poke8` plus an unknown `Raw` C type, so the refusal
@@ -3697,6 +3702,19 @@ let rec emit_expr (e : Ast.expr) : string =
           anything that is not one of the two words. A claim in a comment is
           not a check. *)
        Printf.sprintf "__lang_bool_of_str(%s)" (emit_expr arg)
+     | Ast.App ({ node = Ast.Var "dir_create"; _ }, path_e) when not (user_shadows "dir_create") ->
+       (* v0.1.630: mkdir(2), see the typer *)
+       uses_dirs := true;
+       Printf.sprintf "__lang_dir_create(%s, %s)" (emit_expr path_e) (emit_expr arg)
+     | Ast.Var "dir_entries" when not (user_shadows "dir_entries") ->
+       uses_dirs := true;
+       Printf.sprintf "__lang_dir_entries(%s)" (emit_expr arg)
+     | Ast.Var "dir_remove" when not (user_shadows "dir_remove") ->
+       uses_dirs := true;
+       Printf.sprintf "__lang_dir_remove(%s)" (emit_expr arg)
+     | Ast.Var "env_pairs" when not (user_shadows "env_pairs") ->
+       uses_dirs := true;
+       Printf.sprintf "(%s, __lang_env_pairs())" (emit_expr arg)
      | Ast.App ({ node = Ast.Var "write_file"; _ }, path_e) ->
        (* Phase 24.4: write_file path content — curried. *)
        Printf.sprintf "__lang_write_file(%s, %s)"
@@ -14815,6 +14833,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   (* v0.1.550: declaring any proc_* limit/priority extern, or file_flock, pulls
      in <sys/resource.h> and <sys/file.h>. The same cost model again: two
      headers, no library, no build-line change. *)
+  uses_dirs := false;
   uses_proclimit :=
     List.exists (Hashtbl.mem extern_fn_decls)
       [ "proc_getrlimit"; "proc_rlimit_field"; "proc_setrlimit";
@@ -16482,6 +16501,60 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "}";
       "";
       str_concat_helper;
+      (* v0.1.630: dir_create / dir_entries / env_pairs. The errno goes to
+         proc_last_errno's slot when the program can read it (any proc_*
+         extern declared), and nowhere otherwise. *)
+      (if not !uses_dirs then "" else
+       let keep =
+         if !uses_proclimit && Hashtbl.fold (fun n _ acc -> acc || is_native_ffi n) extern_fn_decls false
+         then "__proc_errno = (e)" else "(void)(e)" in
+       String.concat "\n"
+         [ "#include <dirent.h>";
+           "#include <sys/stat.h>";
+           "#include <errno.h>";
+           "#define __LANG_DIR_KEEP(e) " ^ keep;
+           "static long long __lang_dir_create(const char* path, long long perm) {";
+           "  int r = mkdir(path, (mode_t)(perm < 0 ? 0777 : perm));";
+           "  __LANG_DIR_KEEP(r == 0 ? 0 : errno);";
+           "  return r == 0 ? 0 : -1;";
+           "}";
+           "static long long __lang_dir_remove(const char* path) {";
+           "  int r = rmdir(path);";
+           "  __LANG_DIR_KEEP(r == 0 ? 0 : errno);";
+           "  return r == 0 ? 0 : -1;";
+           "}";
+           "static const char* __lang_dir_entries(const char* path) {";
+           "  DIR* d = opendir(path);";
+           "  if (!d) { __LANG_DIR_KEEP(errno); return __lang_str_alloc(__lang_current_region, 0); }";
+           "  size_t cap = 256, n = 0;";
+           "  char* tmp = (char*)malloc(cap);";
+           "  struct dirent* e;";
+           "  errno = 0;";
+           "  while ((e = readdir(d)) != NULL) {";
+           "    const char* nm = e->d_name;";
+           "    if (nm[0] == '.' && (nm[1] == 0 || (nm[1] == '.' && nm[2] == 0))) continue;";
+           "    size_t l = strlen(nm);";
+           "    while (n + l + 1 > cap) { cap *= 2; tmp = (char*)realloc(tmp, cap); }";
+           "    memcpy(tmp + n, nm, l); tmp[n + l] = 0; n += l + 1;";
+           "    errno = 0;";
+           "  }";
+           "  int err = errno;";
+           "  closedir(d);";
+           "  __LANG_DIR_KEEP(err);";
+           "  char* buf = __lang_str_alloc(__lang_current_region, n);";
+           "  if (n > 0) memcpy(buf, tmp, n);";
+           "  free(tmp);";
+           "  return buf;";
+           "}";
+           "extern char** environ;";
+           "static const char* __lang_env_pairs(void) {";
+           "  size_t n = 0;";
+           "  for (char** e = environ; e && *e; e++) n += strlen(*e) + 1;";
+           "  char* buf = __lang_str_alloc(__lang_current_region, n);";
+           "  size_t at = 0;";
+           "  for (char** e = environ; e && *e; e++) { size_t l = strlen(*e); memcpy(buf + at, *e, l); buf[at + l] = 0; at += l + 1; }";
+           "  return buf;";
+           "}" ]);
       "" ]
     (* Forward decls of all named struct types — these let closure
        typedefs (function pointers returning struct values by name)

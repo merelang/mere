@@ -6341,6 +6341,34 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i32 @__lang_write_file_bytes(ptr %s, ptr %s)" r pv vv);
     "0"  (* write_file_bytes : ... -> unit *)
+  (* v0.1.630: dir_create is mkdir(2); env_pairs walks environ. dir_entries
+     would read a `struct dirent`, whose layout is the platform's (d_name sits
+     at a different offset on macOS and on Linux) and which IR cannot name, so
+     it is refused here, by name, as list_dir is. *)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "dir_create"; _ }, path_e); _ }, perm_e)
+    when not (user_shadows_llvm env "dir_create") ->
+    Hashtbl.replace host_misc_used_llvm "dir_create" ();
+    let pv = emit_expr env path_e in
+    let mv = emit_expr env perm_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_dir_create(ptr %s, i64 %s)" r pv mv);
+    r
+  | Ast.App ({ node = Ast.Var "dir_remove"; _ }, path_e) when not (user_shadows_llvm env "dir_remove") ->
+    Hashtbl.replace host_misc_used_llvm "dir_remove" ();
+    let pv = emit_expr env path_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_dir_remove(ptr %s)" r pv);
+    r
+  | Ast.App ({ node = Ast.Var "env_pairs"; _ }, u_e) when not (user_shadows_llvm env "env_pairs") ->
+    Hashtbl.replace host_misc_used_llvm "env_pairs" ();
+    ignore (emit_expr env u_e);
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_env_pairs()" r);
+    r
+  | Ast.App ({ node = Ast.Var "dir_entries"; _ }, _path_e) when not (user_shadows_llvm env "dir_entries") ->
+    unsupported e.Ast.loc
+      "dir_entries is unsupported in LLVM codegen: it reads a struct dirent, whose \
+       layout is the platform's (use -c, which has it)"
   | Ast.App ({ node = Ast.Var "list_dir"; _ }, _path_e) ->
     unsupported e.Ast.loc
       "list_dir is unsupported in LLVM codegen (Phase 44 MVP scope = interp + C only)"
@@ -15402,7 +15430,73 @@ let host_misc_runtime_llvm (declared : string -> bool) : string list =
   let used k = Hashtbl.mem host_misc_used_llvm k in
   let decl name line = if declared name then [] else [line] in
   if Hashtbl.length host_misc_used_llvm = 0 then [] else
-  (if used "file_delete" then
+  (if used "dir_create" then
+     decl "mkdir" "declare i32 @mkdir(ptr, i32)"
+     @ [ "define i64 @__lang_dir_create(ptr %path, i64 %perm) {";
+         "entry:";
+         "  %neg = icmp slt i64 %perm, 0";
+         "  %p64 = select i1 %neg, i64 511, i64 %perm";
+         "  %p32 = trunc i64 %p64 to i32";
+         "  %r = call i32 @mkdir(ptr %path, i32 %p32)";
+         "  %ok = icmp eq i32 %r, 0";
+         "  %v = select i1 %ok, i64 0, i64 -1";
+         "  ret i64 %v";
+         "}" ]
+   else [])
+  @ (if used "dir_remove" then
+     decl "rmdir" "declare i32 @rmdir(ptr)"
+     @ [ "define i64 @__lang_dir_remove(ptr %path) {";
+         "entry:";
+         "  %r = call i32 @rmdir(ptr %path)";
+         "  %ok = icmp eq i32 %r, 0";
+         "  %v = select i1 %ok, i64 0, i64 -1";
+         "  ret i64 %v";
+         "}" ]
+   else [])
+  @ (if used "env_pairs" then
+     decl "environ" "@environ = external global ptr"
+     @ [ "define ptr @__lang_env_pairs() {";
+         "entry:";
+         "  %env = load ptr, ptr @environ";
+         "  br label %count";
+         "count:";
+         "  %i = phi i64 [ 0, %entry ], [ %i2, %cbody ]";
+         "  %n = phi i64 [ 0, %entry ], [ %n2, %cbody ]";
+         "  %pp = getelementptr ptr, ptr %env, i64 %i";
+         "  %p = load ptr, ptr %pp";
+         "  %nul = icmp eq ptr %p, null";
+         "  br i1 %nul, label %alloc, label %cbody";
+         "cbody:";
+         "  %l = call i64 @strlen(ptr %p)";
+         "  %l1 = add i64 %l, 1";
+         "  %n2 = add i64 %n, %l1";
+         "  %i2 = add i64 %i, 1";
+         "  br label %count";
+         "alloc:";
+         "  %buf = call ptr @__lang_str_alloc(i64 %n)";
+         "  br label %copy";
+         "copy:";
+         "  %j = phi i64 [ 0, %alloc ], [ %j2, %body ]";
+         "  %at = phi i64 [ 0, %alloc ], [ %at2, %body ]";
+         "  %qq = getelementptr ptr, ptr %env, i64 %j";
+         "  %q = load ptr, ptr %qq";
+         "  %qnul = icmp eq ptr %q, null";
+         "  br i1 %qnul, label %done, label %body";
+         "body:";
+         "  %ql = call i64 @strlen(ptr %q)";
+         "  %dst = getelementptr i8, ptr %buf, i64 %at";
+         "  call void @llvm.memcpy.p0.p0.i64(ptr %dst, ptr %q, i64 %ql, i1 false)";
+         "  %z = getelementptr i8, ptr %dst, i64 %ql";
+         "  store i8 0, ptr %z";
+         "  %ql1 = add i64 %ql, 1";
+         "  %at2 = add i64 %at, %ql1";
+         "  %j2 = add i64 %j, 1";
+         "  br label %copy";
+         "done:";
+         "  ret ptr %buf";
+         "}" ]
+   else [])
+  @ (if used "file_delete" then
      decl "unlink" "declare i32 @unlink(ptr)"
      @ [ "define i1 @__lang_file_delete(ptr %path) {";
          "entry:";

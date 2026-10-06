@@ -540,14 +540,19 @@ let libm_sigs : (string * string) list =
     [ "atan"; "asin"; "acos"; "sinh"; "cosh"; "tanh"; "asinh"; "acosh"; "atanh";
       "cbrt"; "log2"; "log10"; "log1p"; "expm1"; "erf"; "erfc"; "tgamma"; "lgamma" ]
   @ [ ("hypot", "ff>f"); ("fmod", "ff>f"); ("ldexp", "fi>f") ]
+  (* v0.1.630: and the C runtime's own externs the RISC-V prelude answers the
+     same way (its `__libm_<name>`): the errno a dir_create / dir_entries left *)
+  @ [ ("proc_last_errno", "u>i") ]
 let libm_bound : (string, unit) Hashtbl.t = Hashtbl.create 16
 let rec libm_sig_of (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyArrow (a, r) ->
-    let c = (match Ast.walk a with Ast.TyFloat -> "f" | Ast.TyInt -> "i" | _ -> "?") in
+    let c = (match Ast.walk a with
+             | Ast.TyFloat -> "f" | Ast.TyInt -> "i" | Ast.TyUnit -> "u" | _ -> "?") in
     (match Ast.walk r with
      | Ast.TyArrow _ -> c ^ libm_sig_of r
      | Ast.TyFloat -> c ^ ">f"
+     | Ast.TyInt -> c ^ ">i"
      | _ -> c ^ ">?")
   | _ -> "?"
 let libm_arity name =
@@ -3434,6 +3439,42 @@ and compile_app env e =
     li a2 0;                                             (* flags: not AT_REMOVEDIR *)
     li a7 35;                                            (* unlinkat *)
     emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall -> a0 = 0 | -errno *)
+  (* v0.1.630: the prelude's directory and environment builtins. __rv_syscall
+     nr a b c d is the Linux-numbered ecall with up to four arguments (the
+     answer in a0, a negative errno on failure); __rv_cstr is a str's bytes with
+     a NUL after them, for a path; __rv_addr is a str's own address, for a
+     buffer the host writes into (the prelude reads it back with char_at);
+     __rv_envblk is the environment block the host left above the argument
+     block (magic "ENVP", the length, then K=V\0...), as a str, or "" when
+     there is none. *)
+  | Ast.Var "__rv_syscall" when List.length args = 5 ->
+    if !bare then
+      err e.loc "RV32I --bare: there is no host to make a system call to";
+    List.iter (fun a -> compile_expr env a; push a0) args;
+    pop 13; pop 12; pop 11; pop a0;
+    pop 17;
+    emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall -> a0 *)
+  | Ast.Var "__rv_cstr" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit (Jal (ra, "__rv_pathz"))
+  | Ast.Var "__rv_addr" when List.length args = 1 ->
+    compile_expr env (List.hd args)
+  | Ast.Var "__rv_envblk" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    let w = wsz () in
+    let l_none = fresh_label ".envNone" and l_done = fresh_label ".envDone" in
+    let label = "str__envnone" in
+    if not (List.mem_assoc label !string_data) then
+      string_data := (label, mk_str_block "") :: !string_data;
+    li t0 (argv_base () + 0x3000);
+    emit_word (enc_i 0 t0 (ldf3 ()) t1 0x03);
+    li t2 0x50564E45;                                    (* "ENVP" *)
+    emit (Branch (1, t1, t2, l_none));
+    emit_word (enc_i w t0 0 a0 0x13);                    (* the block after the magic *)
+    emit (Jal (zero, l_done));
+    emit (Label l_none);
+    emit (LoadAddr (a0, label));
+    emit (Label l_done)
   (* v0.1.623: coroutines, as calls into the prelude's runtime (rvcoro_). Only
      a full application; a coroutine builtin passed as a value is refused below. *)
   | Ast.Var ("coro_root" | "__coro_new_raw" | "__coro_msg" | "coro_switch" as f)

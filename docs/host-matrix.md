@@ -25,6 +25,7 @@ machine rather than a host.
 | builtin | C | LLVM | Wasm | RV32I |
 |---|:--:|:--:|:--:|:--:|
 | `__rv_access` | refused | refused | refused | yes |
+| `__rv_addr` | refused | refused | refused | yes |
 | `__rv_alloc_keep` | refused | refused | refused | yes |
 | `__rv_argc` | refused | refused | refused | yes |
 | `__rv_argstr` | refused | refused | refused | yes |
@@ -34,7 +35,9 @@ machine rather than a host.
 | `__rv_clock` | refused | refused | refused | yes |
 | `__rv_co_hi` | refused | refused | refused | yes |
 | `__rv_co_lo` | refused | refused | refused | yes |
+| `__rv_cstr` | refused | refused | refused | yes |
 | `__rv_cswap` | refused | refused | refused | refused |
+| `__rv_envblk` | refused | refused | refused | yes |
 | `__rv_gp` | refused | refused | refused | yes |
 | `__rv_heap_lo` | refused | refused | refused | yes |
 | `__rv_hwm_raise` | refused | refused | refused | yes |
@@ -51,6 +54,7 @@ machine rather than a host.
 | `__rv_stack_top` | refused | refused | refused | yes |
 | `__rv_str_hash` | unattributed | refused | refused | yes |
 | `__rv_substring_raw` | refused | refused | refused | yes |
+| `__rv_syscall` | refused | refused | refused | yes |
 | `__rv_unlink` | refused | refused | refused | yes |
 | `__rv_urandom32` | refused | refused | refused | yes |
 | `__rv_write_all` | refused | refused | refused | yes |
@@ -91,9 +95,13 @@ machine rather than a host.
 | `cube` | yes | yes | yes | yes |
 | `decr` | yes | yes | yes | yes |
 | `detach` | yes | yes | yes | unattributed |
+| `dir_create` | yes | yes | yes | yes |
+| `dir_entries` | yes | refused | yes | yes |
+| `dir_remove` | yes | yes | yes | yes |
 | `divmod` | yes | yes | yes | yes |
 | `e` | yes | yes | yes | yes |
-| `env_var` | yes | yes | yes | refused |
+| `env_pairs` | yes | yes | yes | yes |
+| `env_var` | yes | yes | yes | yes |
 | `even` | yes | yes | yes | yes |
 | `exit` | yes | yes | yes | yes |
 | `exp` | yes | yes | yes | yes |

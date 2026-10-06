@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.630 — 2026-10-07
+
+_A directory made, read and removed, and the whole environment, without a shell, on every backend: `dir_create`, `dir_entries`, `dir_remove`, `env_pairs`. RISC-V gets them through Linux-numbered syscalls memu now answers, and gets `env_var` too._
+
+mere-ruby made a directory by running `mkdir`, listed one by running `ls`, and
+read its environment by running `env -0`. A RISC-V binary on memu has no shell,
+so `Dir.mkdir`, `Dir#children`, `Dir.mktmpdir` and `ENV` failed there (corpus
+117, 210, 239, 254, 255 and 54 on RV64), and on C each of them was a process.
+Mere's own `list_dir` and `mkdir_p` were interpreter-only.
+
+- `dir_create : str -> int -> int` -- mkdir(2); perm `-1` is `0777`, the umask
+  applies. `0`, or `-1`.
+- `dir_entries : str -> str` -- the names but `.` and `..`, a NUL after each, in
+  the directory's order, as bytes. `""` for an empty directory and for a
+  refusal; on C and RISC-V `proc_last_errno` tells them apart (`0` on success).
+  Refused by name on LLVM, which would have to read the platform's
+  `struct dirent`.
+- `dir_remove : str -> int` -- rmdir(2).
+- `env_pairs : unit -> str` -- the environment as `env -0` frames it.
+- On C and RISC-V the three directory calls keep their errno for
+  `proc_last_errno`; on RISC-V an `extern fn proc_last_errno: unit -> int` is
+  answered by the prelude, as the libm names are.
+- RISC-V: `mkdirat`, `openat` with `O_DIRECTORY` and `getdents64`, `unlinkat`
+  with `AT_REMOVEDIR`, through a raw syscall primitive in the prelude; the
+  environment is a block the host leaves above the argument block (magic
+  `ENVP`), which `env_pairs` and now `env_var` read. memu answers all of it
+  (its d2-630 change, which needs this compiler to build).
+
+`test/parity/dirs_and_env.mere` on every backend (LLVM refuses it cleanly) and,
+through rv_exec, on RV64 and RV32; wasm_stub_check probes the four imports;
+rv_prelude_check compiles the new prelude names; the host matrix is
+regenerated.
+
 ## v0.1.629 — 2026-10-07
 
 _On RISC-V, `coro_scan_ints` follows a stopped stack's values through every region block open on it, not only the innermost: mere-ruby's collector, run in the middle of `(1..N).map { ... }`, swept most of the list the map was building._
