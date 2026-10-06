@@ -1,0 +1,62 @@
+// Local functions called with all their arguments (v0.1.628). On RISC-V such a
+// call used to apply the closure one argument at a time, allocating a closure
+// per stage: the first line here made some 380 MB of them, and rv_exec runs
+// this at 32 MB. A local function of 2..7 parameters now has a direct entry
+// the call jumps to. The rest is the cases that entry must not get wrong.
+
+// a self-recursive local function, called four million times with all three
+// arguments (and calling itself in tail position)
+let outer = fn (k: int) ->
+  let base = k * 3 in
+  let rec go = fn (i: int) -> fn (acc: int) -> fn (step: int) ->
+    if i == 0 then acc else go (i - 1) (acc + step + base) step in
+  go 1000 0 1;
+let rec loop = fn (n: int) -> fn (s: int) -> if n == 0 then s else loop (n - 1) (s + outer n % 997);
+
+// a later binding of the same name is another function
+let shadow = fn (u: int) ->
+  let go = fn (a: int) -> fn (b: int) -> a * b in
+  let r1 = go 3 4 in
+  let go = fn (a: int) -> fn (b: int) -> a - b in
+  r1 * 100 + go 10 4;
+
+// a group whose members call each other
+let parity = fn (n: int) ->
+  let rec ev = fn (k: int) -> fn (acc: int) -> if k == 0 then acc else od (k - 1) (acc + 1)
+  and od = fn (k: int) -> fn (acc: int) -> if k == 0 then 0 - acc else ev (k - 1) (acc + 2) in
+  ev n 0;
+
+// more arguments than parameters: the result is applied to the rest
+let over = fn (x: int) ->
+  let mk = fn (a: int) -> fn (b: int) -> fn (c: int) -> a + b + c in
+  let add2 = fn (a: int) -> fn (b: int) -> (fn (c: int) -> a * 100 + b * 10 + c) in
+  add2 x 2 3 + mk 1 2 3;
+
+// fewer: the closure, as before
+let partial = fn (x: int) ->
+  let f3 = fn (a: int) -> fn (b: int) -> fn (c: int) -> a * b + c in
+  let g = f3 x in
+  let h = g 2 in
+  h 1 + g 3 4;
+
+// captured by a lambda and called inside it, and passed as a value
+let captured = fn (x: int) ->
+  let add = fn (a: int) -> fn (b: int) -> a + b in
+  let k = fn (y: int) -> add x y in
+  let apply2 = fn (f: int -> int -> int) -> f 20 22 in
+  k 5 * 1000 + apply2 add;
+
+// a parameter that shadows the function's name inside a lambda
+let param_shadow = fn (x: int) ->
+  let sub = fn (a: int) -> fn (b: int) -> a - b in
+  let f = fn (sub: int -> int -> int) -> sub 1 2 in
+  f (fn (a: int) -> fn (b: int) -> a + b) * 10 + sub 9 4;
+
+let _ = print_int (loop 4000 0);
+let _ = print_int (shadow 0);
+let _ = print_int (parity 7);
+let _ = print_int (parity 8);
+let _ = print_int (over 1);
+let _ = print_int (partial 5);
+let _ = print_int (captured 7);
+print_int (param_shadow 0)

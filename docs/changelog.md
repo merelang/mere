@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.628 — 2026-10-07
+
+_On RISC-V a local function called with all its arguments jumps to a direct entry instead of building a closure per argument: mere-ruby's `Integer.sqrt` of an 8000-bit square allocated 300 MB doing that, and runs now._
+
+A local `let rec f = fn a -> fn b -> fn c -> ...` (or `let f = fn ...`) was a
+closure and nothing else on RISC-V, so `f x y z` applied it one argument at a
+time: two closures allocated per call, each later stage capturing everything
+the earlier ones had, and the last running the body. mere-ruby's long division
+calls such helpers per limb (`msub i carry borrow`), and corpus 274's
+`Integer.sqrt(x * x)` for a 4000-bit `x` allocated some 300 MB in one statement
+and ran out of the machine. C has given inner functions an uncurried twin since
+v0.1.52 and runs the whole interpreter there in 53 MB.
+
+- A local function of 2 to 7 parameters gets a direct entry: its closure in
+  a0 (the captures are read from it), the arguments in a1..aN, the innermost
+  body compiled with all of them bound. A self tail call jumps back past the
+  prologue, as a top-level function's does.
+- A call that gives it at least all its arguments jumps there; more are
+  applied to the result one at a time. The closure is still made, and a
+  partial application or a call through a value goes through it as before.
+- A call takes the entry only when the name still resolves to the binding
+  that has it, so a later binding of the same name -- a `let`, a parameter --
+  is never mistaken for it. Members of a `let rec ... and` group call each
+  other directly; a lambda that captures such a function calls it directly
+  too.
+
+`memu` measured it: an allocation profile (`aprof`, charging each rise of gp to
+the instruction that made it) put 61% of the 274 statement's bytes in two
+closure stages of one local function. With this, 274 matches on RV64 (corpus
+`Integer.sqrt` in 6 s); mere-ruby's RV64 image grows 3.6% (11.5 to 12.0 MB).
+
+`test/parity/local_direct_calls.mere` covers the shapes above and makes four
+million saturated calls; rv_exec runs it at 32 MB, where v0.1.627 runs out of
+memory on both widths.
+
 ## v0.1.627 — 2026-10-07
 
 _On RISC-V each coroutine allocates in a heap of its own, so a program that switches inside its region blocks reclaims them as C does; and the stopped-stack walk under pins and `coro_scan_ints` no longer writes below its table on RV32, nor scans every retired block for every word it reads._
