@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.631 — 2026-10-07
+
+_RISC-V answers the C runtime's `getpid`, `access`, `rmdir`, `file_stat`, `file_lstat` and `file_stat_field` externs through the host, as it answers the libm names: mere-ruby's `Dir.mktmpdir` (which names its directory with the pid) and `File.executable?` no longer fail there._
+
+mere-ruby declares these as `extern fn` with the C runtime's contracts, and on
+RISC-V every extern was refused at its first call: `Dir.mktmpdir` stopped on
+`getpid() function is unimplemented on this machine` (corpus 239, 254, 255),
+and `File.executable?("/bin/sh")` was approximated from "the path exists"
+(137). Now a declaration with the C type is bound to the prelude, as v0.1.609
+binds the libm functions:
+
+- `getpid` -- the `getpid` syscall.
+- `access path mode` -- `faccessat`, the mode the host's to judge; `0` or `-1`.
+- `rmdir` -- `dir_remove`.
+- `file_stat` / `file_lstat` -- `newfstatat` (with `AT_SYMLINK_NOFOLLOW` for
+  lstat) into one 128-byte snapshot laid out as Linux's riscv64 `struct stat`,
+  on both widths; `file_stat_field` reads it by the C runtime's numbering, and
+  `-1` after a failed stat, as on C.
+
+memu answers `getpid`, `faccessat` with its mode and `newfstatat` from the
+host's own (its d2-630 branch). `test/rv/host_externs.mere` -- these, and
+`proc_last_errno` after the directory calls -- is compared line for line with
+the C backend on both widths in rv_exec_check.
+
 ## v0.1.630 — 2026-10-07
 
 _A directory made, read and removed, and the whole environment, without a shell, on every backend: `dir_create`, `dir_entries`, `dir_remove`, `env_pairs`. RISC-V gets them through Linux-numbered syscalls memu now answers, and gets `env_var` too._

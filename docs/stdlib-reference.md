@@ -585,6 +585,17 @@ refused. Because they are correctly rounded, these can differ in the last bit fr
 host libm that is not — macOS's is a ulp away on 3% to 49% of points for most of them.
 `test/float/rv_libm_ext.mere` holds them to the correctly rounded values.
 
+The same binding answers a handful of the C runtime's own externs on RISC-V, each
+with its C contract and type (v0.1.630–631): `proc_last_errno : unit -> int` (after
+`dir_create` / `dir_entries` / `dir_remove`), `getpid : unit -> int`,
+`access : str -> int -> int` (the mode is the host's to judge), `rmdir : str -> int`,
+and `file_stat` / `file_lstat : str -> int` with `file_stat_field : int -> int`, one
+snapshot read by field number (0 dev, 1 ino, 2 mode, 3 nlink, 4 uid, 5 gid, 6 rdev,
+7 size, 8 atime, 9 mtime, 10 ctime, 11 blksize, 12 blocks). They go through
+Linux-numbered syscalls (`getpid`, `faccessat`, `unlinkat`, `newfstatat` into the
+riscv64 `struct stat` layout on both widths), which memu answers.
+`test/rv/host_externs.mere` holds them to the C backend's answers in rv_exec_check.
+
 **★ Integer `/` and `%` by zero raise** (v0.1.247): `division by zero` and
 `modulo by zero`, catchable with `try_or`, on the interpreter and the C, LLVM and
 Wasm backends. It cost a branch per division to make that true, and it was worth it

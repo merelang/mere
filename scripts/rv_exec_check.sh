@@ -354,6 +354,36 @@ else
 fi
 echo "rv_exec: $rfpass passed, $rffail failed for read_file (both widths, and --bare still refuses)"
 
+# host_externs (v0.1.630-631): the C runtime's own externs that RISC-V answers
+# through the host -- getpid, access with its mode, rmdir, stat into one
+# snapshot, proc_last_errno after a directory call -- line for line against C.
+# In "$TMP", as the file gates above are, so both sides name the same files.
+name=host_externs
+hxpass=0; hxfail=0
+if "$MERE" -c "$ROOT/test/rv/host_externs.mere" > "$TMP/ref.c" 2>/dev/null \
+   && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
+  ( cd "$TMP" && ulimit -t 60; ./ref ) > "$TMP/i.out" 2>&1
+  for width in 32 64; do
+    if [ "$width" = 64 ]; then flag=-rv64; emu="$RVRUN64"; else flag=-rv; emu="$RVRUN"; fi
+    if ! "$MERE" $flag --ram 16 "$ROOT/test/rv/host_externs.mere" > "$TMP/prog.bin" 2>"$TMP/rverr"; then
+      printf '  FAIL  %s:%s did not build\n' "$name" "$width"; head -2 "$TMP/rverr"; hxfail=$((hxfail+1)); rc=1; continue
+    fi
+    if [ -z "$emu" ]; then hxpass=$((hxpass+1)); continue; fi
+    ( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' "$emu" 16 2>/dev/null ) | grep -a -v '^rvrun' > "$TMP/r.out"
+    if diff -q "$TMP/i.out" "$TMP/r.out" >/dev/null; then
+      printf '  ok    %s:%s (getpid, access, rmdir, stat, errno)\n' "$name" "$width"
+      hxpass=$((hxpass+1))
+    else
+      printf '  FAIL  %s:%s (RV%s disagrees with the C backend)\n' "$name" "$width" "$width"
+      diff -a "$TMP/i.out" "$TMP/r.out" | head -8 | sed 's/^/    /'
+      hxfail=$((hxfail+1)); rc=1
+    fi
+  done
+else
+  printf '  FAIL  %s: the C reference did not build\n' "$name"; hxfail=$((hxfail+1)); rc=1
+fi
+echo "rv_exec: $hxpass passed, $hxfail failed for the host externs (both widths)"
+
 # host_write_file: the write half, same contract. stdin is piped from a fixture
 # THE HARNESS WRITES, and the same bytes go to both sides -- read_stdin drains
 # whatever it is given, so feeding the two sides differently would report a

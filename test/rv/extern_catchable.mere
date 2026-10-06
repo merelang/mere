@@ -6,11 +6,12 @@
 // It was NOT true until the backend's compile-time-message abort was routed
 // through the same unwind `fail` uses -- before that, wrapping the call changed
 // nothing, because the abort exited the process from inside the handler's reach.
-// mere-ruby sets `$$` from `getpid` at startup, which is exactly this shape.
-extern fn getpid: unit -> int;
+// mere-ruby set `$$` from `getpid` at startup, which was exactly this shape --
+// until v0.1.631 answered getpid here; getppid still has no host behind it.
+extern fn getppid: unit -> int;
 extern fn some_absent_thing: int -> int;
 
-let pid_or = fn (d: int) -> try_or (fn (u: unit) -> getpid ()) d;
+let pid_or = fn (d: int) -> try_or (fn (u: unit) -> getppid ()) d;
 
 // The catcher's own bindings have to survive, same as any other unwind.
 let go = fn (u: unit) ->
