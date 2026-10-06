@@ -338,27 +338,33 @@ let run_action ?(rv = false) ?(quiet = false) ?base_dir action label source =
       try Mere.Pipeline.syntax_errors ?base_dir ~search_paths:!search_paths source
       with _ -> []
     in
+    (* These positions came from parsing the user's source on its own, so they
+       are already the lines they wrote — no prelude to subtract. Read through
+       `locate` on an -rv path they were moved again, into the prelude: two
+       syntax errors, or two `import`s that resolve nowhere (an import is
+       resolved before the glue), were shown as `<rv-prelude>:3:1` with the
+       prelude's line 3 under them -- the type-error path's v0.1.604 bug, here.
+       A lone error took the first parse's own position, which was right, and
+       now takes this one, which is the same line. *)
+    let block (file, l, m) =
+      match file with
+      (* An error from an imported file is rendered against that file, whose
+         lines its position actually refers to. *)
+      | Some f ->
+        render ~source:(try read_file f with _ -> "") ~filename:f l
+          "parse error" m
+      | None ->
+        let (src, name, l) = if rv then (source, label, l) else locate l in
+        render ~source:src ~filename:name l "parse error" m
+    in
     match all with
     (* Nothing more to say than the parse already did — including the case where
        the user's file is fine and the error is in a prelude glued in front of
        it, which the re-parse of that file alone cannot see. *)
-    | [] | [_] -> report loc "parse error" msg
+    | [] -> report loc "parse error" msg
+    | [one] -> prerr_endline (block one); exit 1
     | _ ->
-      (* These positions came from parsing the user's source on its own, so they
-         are already the lines they wrote — no prelude to subtract. *)
-      let blocks =
-        List.map (fun (file, l, m) ->
-          (* An error from an imported file is rendered against that file, whose
-             lines its position actually refers to. *)
-          match file with
-          | Some f ->
-            render ~source:(try read_file f with _ -> "") ~filename:f l
-              "parse error" m
-          | None ->
-            let (src, name, l) = locate l in
-            render ~source:src ~filename:name l "parse error" m) all
-      in
-      prerr_endline (String.concat "\n\n" blocks);
+      prerr_endline (String.concat "\n\n" (List.map block all));
       Printf.eprintf "\n%d syntax errors\n" (List.length all);
       exit 1
   in

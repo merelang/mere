@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.626 — 2026-10-07
+
+_On `-rv` / `-rv64`, two syntax errors -- or two `import`s that resolve nowhere -- are reported at the program's own lines again, not at the RISC-V prelude's._
+
+`mere -rv64` of a tree whose `.mere_modules` had not been installed answered
+
+```
+parse error: import: cannot resolve path `mgz/inflate.mere` ...
+    --> <rv-prelude>:312:1
+```
+
+with the prelude's line 312 printed under it; `-c` said `main.mere:312:1`. When
+the parse fails, the report parses the program again on its own, with recovery,
+to list every error. Those positions are the file's own lines -- no prelude is
+in front of it, and an `import` is resolved before the prelude is glued on --
+but on the RISC-V paths they were read as if they counted from the top of the
+prelude, and moved into it. v0.1.604 fixed the same thing for type errors; the
+parse's report kept it. A lone error was right, because it was reported at the
+first parse's position, which does count from the prelude; it now takes the
+re-parse's, which is the same line.
+
+`scripts/rv_prelude_check.sh` compiles three programs (two syntax errors, one
+unresolvable import, two of them) with `-c` and `-rv` and requires the same
+`-->` lines; against v0.1.625 the first and the third fail.
+
 ## v0.1.625 — 2026-10-07
 
 _A signal a program wants to hear about: `proc_sig_catch` installs a handler that only marks it, `proc_sig_take` takes the marks where the program can act on them, and `proc_sig_ignore` is `SIG_IGN`. For mere-ruby, whose `trap` answered only `Process.kill` to itself and died of a `SIGUSR1` sent from outside._
