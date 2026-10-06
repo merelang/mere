@@ -1,0 +1,30 @@
+// Long lists carried out of a `region` block (v0.1.621, Q-201). Leaving the
+// block deep-copies the value, and on LLVM and Wasm that copy recursed once per
+// element: a list of 100,000 overflowed the stack on both. A constructor whose
+// payload ends in the type itself is now walked as a loop along that field.
+// Ints, strs, a list whose element is a tuple (its other field is copied on the
+// way), and a tree whose LAST field is the recursive one (walked along the
+// right) while the left one is a short subtree copied as before. Expected
+// output is scripts/deep_list_check.sh's (the interpreter's own recursion
+// depth stops short of these lengths).
+type tree = Leaf | Node of tree * int * tree;
+let rec build = fn (n: int) -> fn (acc: int list) -> if n == 0 then acc else build (n - 1) (Cons (n, acc));
+let rec strs = fn (n: int) -> fn (acc: str list) -> if n == 0 then acc else strs (n - 1) (Cons ("s" ++ str_of_int (n % 10), acc));
+let rec pairs = fn (n: int) -> fn (acc: (int * str) list) -> if n == 0 then acc else pairs (n - 1) (Cons ((n, str_of_int (n % 7)), acc));
+let rec spine = fn (n: int) -> fn (acc: tree) -> if n == 0 then acc else spine (n - 1) (Node (Node (Leaf, n, Leaf), n, acc));
+let rec sum = fn (xs: int list) -> fn (a: int) -> match xs with Nil -> a | Cons (x, t) -> sum t (a + x);
+let rec slen = fn (xs: str list) -> fn (a: int) -> match xs with Nil -> a | Cons (s, t) -> slen t (a + str_len s);
+let rec psum = fn (xs: (int * str) list) -> fn (a: int) -> match xs with Nil -> a | Cons ((k, s), t) -> psum t (a + k + str_len s);
+let rec tsum = fn (t: tree) -> fn (a: int) -> match t with
+  | Leaf -> a
+  | Node (l, x, r) -> tsum r (a + x + (match l with Node (_, y, _) -> y | Leaf -> 0));
+let n = 300000;
+let xs = region R { build n Nil };
+let _ = print_int (sum xs 0);
+let ss = region R { strs n Nil };
+let _ = print_int (slen ss 0);
+let ps = region R { pairs n Nil };
+let _ = print_int (psum ps 0);
+// a third as many tree nodes: Wasm's fixed 64 MiB holds the tree twice over
+let tr = region R { spine (n / 3) Leaf };
+print_int (tsum tr 0)

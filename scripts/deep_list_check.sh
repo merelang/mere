@@ -15,8 +15,13 @@
 # --poison builds the program with the copier made recursive again (the loop's
 # `continue` turned back into a call) and requires it to fail.
 #
-# The LLVM copier still recurses -- a 10M-element list carried out of a region
-# overflows there -- and Wasm's is not measured (open).
+# v0.1.621 (Q-201): LLVM's and Wasm's copiers recursed too, and there a list of
+# 100,000 carried out of a `region` block overflowed the stack. They walk the
+# spine the same way now. test/deep_list/region_out_long_list.mere carries four
+# long values out of region blocks (ints, strs, a list of tuples, a tree along
+# its last field) and runs on C, LLVM and Wasm; its --poison turns each
+# backend's loop back into a call to itself. (LLVM and Wasm have no
+# `region R loop`, so the first program stays C's.)
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -53,6 +58,51 @@ if [ "${1:-}" = "--poison" ]; then
       echo "  ok    poison  the recursive copier fails: $(echo "$pgot" | head -1)"
     fi
   fi
+fi
+
+
+# --- carried out of a region block: C, LLVM, Wasm --------------------------
+want2="45000150000
+600000
+45000450000
+10000100000"
+RO=test/deep_list/region_out_long_list.mere
+run_c() { $CC -O1 -w "$1" -o "$TMP/ro" -lm && (ulimit -s 8192 2>/dev/null; "$TMP/ro" 2>&1 || true); }
+run_ll() { $CC -O0 -w "$1" -o "$TMP/rol" -lm && (ulimit -s 8192 2>/dev/null; "$TMP/rol" 2>&1 || true); }
+run_w() { wat2wasm --enable-tail-call --enable-threads "$1" -o "$TMP/ro.wasm" && (node scripts/run_wasm.js "$TMP/ro.wasm" 2>&1 || true); }
+# the spine step made a call to the function itself again, per backend
+poison_ll() {
+  perl -0pe 's{(define \S+ \@(__mcopy_\w+)\(.*?\n\})}{ my ($b, $f) = ($1, $2);
+    $b =~ s/  store ptr (%t\d+), ptr %slotp\n  (%t(\d+)) = extractvalue (%\S+) (%t\d+), (\d+)\n  store ptr \2, ptr %curp\n  br label %mc_loop/  $2 = extractvalue $4 $5, $6\n  %pz$3 = call ptr \@$f(ptr %r, ptr $2)\n  store ptr %pz$3, ptr $1\n  br label %mc_done/g; $b }gse' "$1"
+}
+poison_w() {
+  perl -0pe 's{(\(func \$(__mcopy_\w+) (?:(?!\(func ).)*?\(i64\.extend_i32_u \(local\.get \$head\)\)\))}{ my ($b, $f) = ($1, $2);
+    $b =~ s/\(local\.set \$slot \(i32\.add \(local\.get \$tp\) \(i32\.const (\d+)\)\)\)\n(\s*)\(local\.set \$v \(i64\.load offset=\d+ \(local\.get \$ts\)\)\)\n\s*\(br \$lp\)/(i64.store offset=$1 (local.get \$tp) (call \$$f (i64.load offset=$1 (local.get \$ts))))\n$2(br \$done)/g; $b }gse' "$1"
+}
+check_leg() {  # name, emit flag, ext, runner, poisoner
+  name=$1; flag=$2; ext=$3; runner=$4; poisoner=$5
+  "$MERE" "$flag" "$RO" > "$TMP/ro.$ext"
+  got2="$($runner "$TMP/ro.$ext")"
+  if [ "$got2" = "$want2" ]; then echo "  ok    $name   $(echo "$got2" | tr '\n' ' ')"
+  else echo "  FAIL  $name   got: $(echo "$got2" | tr '\n' ' ' | cut -c1-100)"; fail=1; fi
+  if [ "${POISON:-}" = 1 ] && [ -n "$poisoner" ]; then
+    $poisoner "$TMP/ro.$ext" > "$TMP/rop.$ext"
+    if cmp -s "$TMP/ro.$ext" "$TMP/rop.$ext"; then
+      echo "  FAIL  poison $name  the spine loop was not found to undo"; fail=1
+    else
+      pgot2="$($runner "$TMP/rop.$ext")"
+      if [ "$pgot2" = "$want2" ]; then echo "  FAIL  poison $name  the recursive copier still passed"; fail=1
+      else echo "  ok    poison $name  the recursive copier fails: $(echo "$pgot2" | head -1 | cut -c1-60)"; fi
+    fi
+  fi
+}
+[ "${1:-}" = "--poison" ] && POISON=1
+check_leg c -c c run_c ""
+check_leg llvm -ll ll run_ll poison_ll
+if command -v wat2wasm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  check_leg wasm -w wat run_w poison_w
+else
+  echo "  SKIP  wasm   (wat2wasm / node not found)"
 fi
 
 [ $fail -eq 0 ] && echo "deep_list_check: ok" || { echo "deep_list_check: FAILED"; exit 1; }

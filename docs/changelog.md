@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.621 — 2026-10-06
+
+_On LLVM and Wasm a long list carried out of a `region` block no longer overflows the stack (Q-201): the copy walks the list's spine as a loop, as C's has since v0.1.605._
+
+Leaving a `region` block deep-copies the value into the enclosing region. For a
+recursive variant the copier called itself once per node -- `@__mcopy_<tag>` on
+LLVM, `$__mcopy_<tag>` on Wasm -- so a list's length was the copy's recursion
+depth. Measured: 10,000 and 30,000 elements copied, 100,000 overflowed on both
+backends (Q-201 had put the limit at ten million, measured only on LLVM; Wasm had
+not been measured). C has walked the spine since v0.1.605, for the same reason.
+
+Both now do what C does: a constructor whose payload is a tuple ENDING in the
+type itself (a list's `Cons`, a tree's last child) copies its other fields, leaves
+the last one open, and goes round again with the old last field; each new node is
+stored into the slot the previous one left. Every other constructor is copied as
+before and ends the walk. LLVM keeps the walk's position in two `alloca`s, Wasm in
+locals.
+
+`scripts/deep_list_check.sh` gains `test/deep_list/region_out_long_list.mere`:
+300,000-element int, str and tuple lists and a 100,000-node tree carried out of
+region blocks, on C, LLVM and Wasm (its expected output is in the script: the
+interpreter's own recursion depth stops short of these lengths). Its `--poison`
+turns each backend's loop back into a call to itself, and each then overflows.
+v0.1.620 overflowed on LLVM and on Wasm with the same program.
+
 ## v0.1.620 — 2026-10-06
 
 _On RISC-V a comparison with a string literal is inline, and `char_at` / `chr` allocate nothing. mere-ruby's start-up on RV64 takes 10.6% fewer instructions. The new test also found C and LLVM comparing strings with `strcmp` in four places, which stops at a NUL inside the value._

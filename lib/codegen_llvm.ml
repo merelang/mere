@@ -4077,7 +4077,26 @@ let emit_mcopy_fn (tag : string) (t : Ast.ty) : string =
      let node_ty = "%" ^ mono ^ "_node" in
      let vtag = variant_tag_reg mono recursive "%v" in
      if recursive then begin
-       (* one node, then the payload of whichever constructor this is *)
+       (* v0.1.621 (Q-201): a loop, not a recursion, along the spine. A
+          constructor whose payload is a tuple ENDING in this same type -- a
+          list's Cons -- copies its other fields, leaves the last one for the
+          next node, and goes round again with the old last field: the copy
+          used to call itself once per element, and a list of 100,000 carried
+          out of a `region` block overflowed the stack. Every other
+          constructor is copied as before and ends the walk. Each new node is
+          stored into the slot the previous one left open (the first into
+          %head). The same shape as the C backend's (v0.1.605). *)
+       emit_instr "  %head = alloca ptr";
+       emit_instr "  %curp = alloca ptr";
+       emit_instr "  %slotp = alloca ptr";
+       emit_instr "  store ptr %v, ptr %curp";
+       emit_instr "  store ptr %head, ptr %slotp";
+       emit_instr "  br label %mc_loop";
+       emit_label "mc_loop";
+       let cur = fresh_reg () and slot = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = load ptr, ptr %%curp" cur);
+       emit_instr (Printf.sprintf "  %s = load ptr, ptr %%slotp" slot);
+       let vtag = variant_tag_reg mono recursive cur in
        let szp = fresh_reg () and sz = fresh_reg () and d = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr null, i32 1" szp node_ty);
        emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" sz szp);
@@ -4085,6 +4104,19 @@ let emit_mcopy_fn (tag : string) (t : Ast.ty) : string =
        let tp = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 0" tp node_ty d);
        emit_instr (Printf.sprintf "  store i32 %s, ptr %s" vtag tp);
+       emit_instr (Printf.sprintf "  store ptr %s, ptr %s" d slot);
+       let box_of ptyp value =
+         (* the payload lives in a box the node points at *)
+         let bsp = fresh_reg () and bs = fresh_reg () and bx = fresh_reg () in
+         emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr null, i32 1"
+                       bsp (llvm_ty_of ptyp));
+         emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" bs bsp);
+         emit_instr (Printf.sprintf "  %s = call ptr @__lang_region_alloc(ptr %%r, i64 %s)" bx bs);
+         emit_instr (Printf.sprintf "  store %s %s, ptr %s" (llvm_ty_of ptyp) value bx);
+         let dp = fresh_reg () in
+         emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 1" dp node_ty d);
+         emit_instr (Printf.sprintf "  store ptr %s, ptr %s" bx dp);
+         bx in
        List.iteri (fun ctor_tag (_, arg_opt) ->
          match arg_opt with
          | None -> ()
@@ -4094,22 +4126,43 @@ let emit_mcopy_fn (tag : string) (t : Ast.ty) : string =
            emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, %d" c vtag ctor_tag);
            emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" c arm next);
            emit_label arm;
-           let pv = variant_payload_reg mono recursive "%v" ptyp in
-           let cp = copy_field ptyp pv in
-           (* the payload lives in a box the node points at, so the copy needs
-              a box of its own in the destination region *)
-           let bsp = fresh_reg () and bs = fresh_reg () and bx = fresh_reg () in
-           emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr null, i32 1"
-                         bsp (llvm_ty_of ptyp));
-           emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" bs bsp);
-           emit_instr (Printf.sprintf "  %s = call ptr @__lang_region_alloc(ptr %%r, i64 %s)" bx bs);
-           emit_instr (Printf.sprintf "  store %s %s, ptr %s" (llvm_ty_of ptyp) cp bx);
-           let dp = fresh_reg () in
-           emit_instr (Printf.sprintf "  %s = getelementptr %s, ptr %s, i32 0, i32 1" dp node_ty d);
-           emit_instr (Printf.sprintf "  store ptr %s, ptr %s" bx dp);
-           emit_instr (Printf.sprintf "  ret ptr %s" d);
+           let pv = variant_payload_reg mono recursive cur ptyp in
+           (match Ast.walk ptyp with
+            | Ast.TyTuple ts when ts <> [] && ty_tag (List.nth ts (List.length ts - 1)) = tag ->
+              let tname = tuple_struct_name ts in
+              let last = List.length ts - 1 in
+              let acc = ref "undef" in
+              List.iteri (fun k et ->
+                let nx = fresh_reg () in
+                if k = last then
+                  emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, ptr null, %d"
+                                nx tname !acc k)
+                else begin
+                  let f = fresh_reg () in
+                  emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, %d" f tname pv k);
+                  let cf = copy_field et f in
+                  emit_instr (Printf.sprintf "  %s = insertvalue %%%s %s, %s %s, %d"
+                                nx tname !acc (llvm_ty_of et) cf k)
+                end;
+                acc := nx) ts;
+              let bx = box_of ptyp !acc in
+              let nslot = fresh_reg () and nxt = fresh_reg () in
+              emit_instr (Printf.sprintf "  %s = getelementptr %%%s, ptr %s, i32 0, i32 %d"
+                            nslot tname bx last);
+              emit_instr (Printf.sprintf "  store ptr %s, ptr %%slotp" nslot);
+              emit_instr (Printf.sprintf "  %s = extractvalue %%%s %s, %d" nxt tname pv last);
+              emit_instr (Printf.sprintf "  store ptr %s, ptr %%curp" nxt);
+              emit_instr "  br label %mc_loop"
+            | _ ->
+              let cp = copy_field ptyp pv in
+              ignore (box_of ptyp cp);
+              emit_instr "  br label %mc_done");
            emit_label next) variants;
-       emit_instr (Printf.sprintf "  ret ptr %s" d)
+       emit_instr "  br label %mc_done";
+       emit_label "mc_done";
+       let res = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = load ptr, ptr %%head" res);
+       emit_instr (Printf.sprintf "  ret ptr %s" res)
      end else begin
        let acc = ref (Printf.sprintf "insertvalue %%%s undef, i32 %s, 0" mono vtag) in
        let a0 = fresh_reg () in
