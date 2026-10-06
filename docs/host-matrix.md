@@ -28,6 +28,7 @@ machine rather than a host.
 | `__rv_alloc_keep` | refused | refused | refused | yes |
 | `__rv_argc` | refused | refused | refused | yes |
 | `__rv_argstr` | refused | refused | refused | yes |
+| `__rv_blk_free` | refused | refused | refused | yes |
 | `__rv_boot_addr` | refused | refused | refused | refused |
 | `__rv_call1` | refused | refused | refused | yes |
 | `__rv_clock` | refused | refused | refused | yes |
@@ -181,7 +182,7 @@ machine rather than a host.
 | `run` | yes | refused | yes | stub |
 | `sign` | yes | yes | yes | yes |
 | `sin` | yes | yes | yes | yes |
-| `sleep_ms` | yes | yes | refused | refused |
+| `sleep_ms` | yes | yes | refused | yes |
 | `spawn` | yes | yes | yes | refused |
 | `sqrt` | yes | yes | yes | yes |
 | `square` | yes | yes | yes | yes |

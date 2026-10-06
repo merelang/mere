@@ -4,6 +4,48 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.624 — 2026-10-06
+
+_RISC-V gives back what a compaction frees while coroutines exist, keeping only blocks a stopped stack can reach -- C's pins. mere-ruby's real Fibers (its collector runs on a coroutine of its own) now run corpus 165 and 213 on RV64. And `sleep_ms` exists there._
+
+v0.1.623 reused no arena block while any coroutine existed. mere-ruby collects on
+a coroutine of its own, so every collection's frees were kept for good, and with
+its Fiber layer on RV (`m_fiber_coro` in place of the one that runs a fiber to
+completion) corpus 165 ran out of memory in its first collection. Now:
+
+- A block handed back while coroutines exist waits on a retired list. After a
+  compaction builtin, or at a region block's exit, once a megabyte has been
+  retired since the last time, the prelude's `rvcoro_release` walks every
+  stopped stack -- the walk `coro_scan_ints` makes, three hops and the stack's
+  own region values -- and gives back the blocks none of them reaches; the rest
+  wait for the next time (not counted again, so a stack that pins a megabyte
+  does not make every block exit a release).
+- The walk allocates nothing: a Map and a Vec per walk were garbage inside
+  mere-ruby's collector. Its visited set is an open-addressing table kept across
+  walks (stamped, so nothing is cleared) and its work list a reused array.
+- A stack's "own region values" run from its innermost open block's mark to
+  where the heap stood when it stopped -- not to the heap's current top, which
+  for mere-ruby's main stack, stopped while the collector ran, took in all of the
+  collector's tables. A release's walk is capped (65,536 addresses); one that
+  reaches the cap keeps every block, as before.
+- `coro_scan_ints` calls `f` after its walk, as C does: called from inside it,
+  mere-ruby's collector code exited region blocks, whose release started a second
+  walk over the first one's state.
+- `sleep_ms` waits on the clock (there is no sleep to ask the emulator for);
+  mere-ruby's Fiber scheduler sleeps.
+
+Measured with mere-ruby `528bdd6` on RV64 at 256 MB, its Fiber layer in place:
+corpus 213, 220, 231, 233 and 237 agree with ruby (they did not with the layer
+that runs a fiber to completion), and 165 still does (34 s → 44 s). 214, 219 and
+235 switch fibers every few statements and still run out of memory: every switch
+raises the high-water mark, so on one bump heap shared by every stack no region
+block's rollback reaches past it. Giving each stack an allocation area of its
+own is the next step.
+
+`compact_reuse` now churns past a megabyte so that the release runs, and
+`coro_check` poisons it (RV 9: the release gives back a block a stopped stack
+reaches -- the held string is overwritten).
+
 ## v0.1.623 — 2026-10-06
 
 _RISC-V has coroutines: `coro_new`, `coro_new_sized`, `coro_transfer`, `coro_switch`, `coro_exit`, `coro_root` and `coro_scan_ints`, on both widths. Every coroutine runs in one region of RAM and a switch copies stacks in and out of it, so ten thousand suspended coroutines fit in a few megabytes._

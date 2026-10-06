@@ -1194,9 +1194,11 @@ coroutine may reach, and every function entry
 checks the running stack's floor (an overflow is named like any other). A program
 without coroutines is laid out and checked as before. The runtime is the RV
 prelude's, in Mere. A region block's rollback cannot reach past a switch (each
-switch raises the high-water mark), and while any coroutine exists a compaction
-reuses no arena block -- coarser than C's pins, which free what no stopped stack
-reaches.
+switch raises the high-water mark), and what a compaction frees while coroutines
+exist waits until a walk of every stopped stack shows nothing reaches it (v0.1.624;
+C's pins, checked a megabyte at a time). On one bump heap shared by every stack, a
+program that switches every few statements reclaims little: no rollback reaches
+past a switch.
 
 On C, a store compacted (`map_compact`, `vec_compact`, `map_recycle`) while a
 coroutine is suspended keeps any arena that coroutine's stack still points

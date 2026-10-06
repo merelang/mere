@@ -764,7 +764,7 @@ let globals_base () = !load_base + !code_span
    "the buffer the print helpers build digits in", and putting unrelated state
    there would make the description untrue. Top-level value bindings start one
    word further up; the heap starts after those, as before. *)
-let runtime_words = 64
+let runtime_words = 72
 let fail_frame_addr () = globals_base ()
 (* v0.1.613: three more runtime words for region reclamation (see the
    Region_block arm): how many region blocks are open, the innermost one's
@@ -792,7 +792,7 @@ let rt_free_off k = (7 + k) * wsz ()
    finished one waiting to be reaped, how many exist). *)
 let rtw_floor = 32 and rtw_rootsp = 33 and rtw_lastsp = 34 and rtw_fromkind = 35
 and rtw_frombuf = 36 and rtw_tobuf = 37 and rtw_tosp = 38 and rtw_tofloor = 39
-and rtw_live = 47
+and rtw_live = 47 and rtw_retired = 49 and rtw_retired_bytes = 62
 let rtw_addr k = globals_base () + k * wsz ()
 let arena_classes = 24
 (* the smallest arena block. 1 KB, not C's 4 KB seed: mere-ruby gives every
@@ -1756,6 +1756,22 @@ let emit_chr_tab_entry (byte_reg : int) (dst : int) =
   emit (LoadAddr (dst, "__rv_chr_tab"));
   emit_word (enc_r 0 byte_reg dst 0 dst 0x33)                        (* add dst, dst, byte *)
 
+(* v0.1.624: after a compaction or a region block's exit in a program with
+   coroutines, once a megabyte of blocks waits on the retired list, the prelude
+   decides which may be reused (see __blk_put). a0, the result, is kept. *)
+let emit_coro_release (e : Ast.expr) =
+  if !coro_mode && not (in_rv_prelude e.Ast.loc) then begin
+    let l = fresh_label ".noRel" in
+    li t0 (rtw_addr rtw_retired_bytes);
+    emit_word (enc_i 0 t0 (ldf3 ()) t0 0x03);
+    li t1 0x100000;
+    emit (Branch (6, t0, t1, l));                         (* bltu bytes, 1MB *)
+    push a0;
+    emit (Jal (ra, "u_rvcoro_release"));
+    pop a0;
+    emit (Label l)
+  end
+
 let rec compile_expr (env : env) (e : Ast.expr) : unit =
   (* v0.1.618: the bindings an expression makes are out of scope once it has
      been compiled, so their slots go back for its siblings to reuse *)
@@ -2118,7 +2134,12 @@ and compile_node (env : env) (e : Ast.expr) : unit =
         emit (Jal (ra, copier));                                  (* a0 = copy 2 *)
         emit (Label l_done);
         emit_word (enc_i (5 * w) sp 0 sp 0x13)
-      end
+      end;
+      (* v0.1.624: a region block's exit is the other place retired blocks are
+         given back (see emit_coro_release): blocks are freed on paths no
+         compaction builtin follows, and mere-ruby's collector, which runs on a
+         coroutine of its own, exits blocks constantly *)
+      emit_coro_release e
     end
   | Ast.Float_lit f ->
     let b = Int64.bits_of_float f in
@@ -3248,6 +3269,11 @@ and compile_app env e =
     err e.loc (Printf.sprintf
       "RV32I: `%s` is unsupported outside the coroutine runtime: it is that \
        runtime's own, and this program makes no coroutine and switches to none" f)
+  | Ast.Var "__rv_blk_free" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    (* outside coroutine mode __blk_put frees at once, and has no second entry *)
+    emit (Jal (ra, if !coro_mode then "__blk_put_now" else "__blk_put"));
+    li a0 0
   | Ast.Var "__rv_cswap" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit (Jal (ra, "__rv_cswap"));
@@ -3432,10 +3458,12 @@ and compile_app env e =
           | _ -> (Ast.TyInt, Ast.TyInt))
       | None -> (Ast.TyInt, Ast.TyInt) in
     let (kt, vt) = if in_rv_prelude e.Ast.loc then (Ast.TyInt, Ast.TyInt) else (kt, vt) in
-    emit (Jal (ra, request_store "__mcompact_" (Ast.TyTuple [kt; vt])))
+    emit (Jal (ra, request_store "__mcompact_" (Ast.TyTuple [kt; vt])));
+    emit_coro_release e
   | Ast.Var "map_recycle" when List.length args = 1 ->
     compile_expr env (List.hd args);
-    emit (Jal (ra, "__mrecycle"))
+    emit (Jal (ra, "__mrecycle"));
+    emit_coro_release e
   | Ast.Var "map_bytes" when List.length args = 1 ->
     (* its arena's capacity (the keys Vec holds the Map's arena), 0 while none *)
     compile_expr env (List.hd args);
@@ -3450,7 +3478,8 @@ and compile_app env e =
     compile_expr env (List.hd args);
     let et = match vec_elem_ty (List.hd args).Ast.ty with Some t -> t | None -> Ast.TyInt in
     emit (Jal (ra, request_store "__vcompact_"
-                     (if in_rv_prelude e.Ast.loc then Ast.TyInt else et)))
+                     (if in_rv_prelude e.Ast.loc then Ast.TyInt else et)));
+    emit_coro_release e
   | Ast.Var "map_iter" when List.length args = 2 ->
     call_top env (if map_keyed_by_word args then "rvmap_iter_i" else "rvmap_iter") args
   | Ast.Var "show" when List.length args = 1 ->
@@ -5243,14 +5272,22 @@ let emit_arena () =
   (* __blk_put(a0 = block): onto the free list of its class. Leaf; t0..t3. *)
   emit (Label "__blk_put");
   if !coro_mode then begin
-    (* v0.1.623: while any coroutine exists a block is not reused -- a
-       suspended stack may still point into it (the C backend scans stopped
-       stacks and keeps what they reach; this keeps everything) *)
+    (* v0.1.624: while any coroutine exists a block is not reused at once -- a
+       suspended stack may still point into it. It waits on the retired list
+       (and its size is counted); the prelude's rvcoro_release, run after a
+       compaction once a megabyte has waited, gives back the ones no suspended
+       stack reaches, as the C backend's pins do *)
     li t0 (rtw_addr rtw_live);
     ld t1 0 t0;
     emit (Branch (0, t1, zero, ".bpGo"));
+    li t0 (rtw_addr rtw_retired);
+    ld t1 0 t0; sd t1 0 a0; sd a0 0 t0;
+    li t0 (rtw_addr rtw_retired_bytes);
+    ld t1 0 t0; ld t2 w a0; add t1 t1 t2; sd t1 0 t0;
     ret ();
-    emit (Label ".bpGo")
+    emit (Label ".bpGo");
+    (* a second label at __blk_put's own address would not be in the listing *)
+    emit (Label "__blk_put_now")
   end;
   ld t1 w a0; li t2 0; li t3 arena_min_block;
   emit (Label ".bpSz");
@@ -6278,7 +6315,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
      that switches or transfers (to the main stack, if nothing else) *)
   coro_mode := Hashtbl.mem reachable "rvcoro_new_sized" || Hashtbl.mem reachable "__cswitch";
   (* __rv_coro_boot calls it, and nothing in the source names it *)
-  if !coro_mode then visit "rvcoro_boot";
+  if !coro_mode then (visit "rvcoro_boot"; visit "rvcoro_release");
   if !coro_mode && coro_co_lo () - globals_base () < !ram_bytes / 8 then
     raise (Codegen_error (Loc.dummy, Printf.sprintf
       "RV32I: the coroutines' stack region (%d KB) and the main stack (%d KB) leave \

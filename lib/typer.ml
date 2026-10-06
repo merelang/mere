@@ -3107,6 +3107,7 @@ let initial_env : env =
     ("__rv_stack_top", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
     ("__rv_gp", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
     ("__rv_spill", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit)));
+    ("__rv_blk_free", mono (Ast.TyArrow (Ast.TyInt, Ast.TyUnit)));
     ("__rv_open_wr", mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
     ("__rv_write_all", mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyStr, Ast.TyInt))));
     ("__rv_substring_raw", mono (Ast.TyArrow (Ast.TyStr,

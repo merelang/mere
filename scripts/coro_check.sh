@@ -350,10 +350,12 @@ if [ "$MODE" = "--poison" ]; then
   rv_poison "RV 4 (no finished check)" 's/^  else (let st = __cget s 0 in if st == 3 || st == 4 then 0 - 1 else s);$/  else s;/' finished
   rv_poison "RV 5 (no hand-over check)" 's/^  if ns < 0 || ns == me then fail/  if ns < 0 then fail/' self_handoff
   rv_poison "RV 6 (blocks reused while a coroutine exists)" 's/^    let _ = __rv_rtw_set 47 (__rv_rtw 47 + 1) in$/    let _ = () in/' compact_reuse
+  # v0.1.624: the release gives back only what no stopped stack reaches
+  rv_poison "RV 9 (the release gives back a block a stopped stack reaches)" 's/^          let _ = (if vec_get pinned i == 0 then __rv_blk_free b$/          let _ = (if true then __rv_blk_free b/' compact_reuse
   # The saved registers are spilled before a scan of the running stack, but the
   # scan itself saves every register it uses on its own frame, so today the
   # spill is a backstop no fixture can tell apart; no poison is claimed for it.
-  rv_poison "RV 8 (own region blocks not followed to the end)" 's/ && (d < 3 || v >= own) / \&\& d < 3 /' scan
+  rv_poison "RV 8 (own region blocks not followed to the end)" 's/ \&\& (d < 3 || (v >= own \&\& v < own_hi))$/ \&\& d < 3/' scan
   if [ "$pfail" = 0 ] && [ "$fail" = 0 ]; then echo "coro --poison: ok (the gate can go red)"; else echo "coro --poison: FAILED"; pfail=1; fi
   exit "$pfail"
 fi
