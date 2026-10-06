@@ -402,6 +402,10 @@ const wasmPath = process.argv[2];
     file_exists: (pathPtr) => {
       try { fs.statSync(readCStr(pathPtr)); return 1; } catch (e) { return 0; }
     },
+    // v0.1.622: unlink, as the native backends do -- a directory is refused
+    file_delete: (pathPtr) => {
+      try { fs.unlinkSync(readCStr(pathPtr)); return 1; } catch (e) { return 0; }
+    },
     file_close: (handle) => {
       const fd = openFiles[handle];
       if (fd !== undefined) {

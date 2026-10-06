@@ -4,6 +4,7 @@
 run host
 env_var host
 file_exists host
+file_delete host
 args host
 read_file host
 file_size host

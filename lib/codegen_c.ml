@@ -3288,16 +3288,16 @@ let rec emit_expr (e : Ast.expr) : string =
         works everywhere. *)
      | Ast.Var ("__rv_argc" | "__rv_argstr" | "__rv_word"
                | "__rv_clock" | "__rv_urandom32" | "__rv_xlen" | "__rv_str_hash"
-               | "__rv_open_rd" | "__rv_read_all" | "__rv_access"
+               | "__rv_open_rd" | "__rv_read_all" | "__rv_access" | "__rv_unlink"
                | "__rv_open_wr" | "__rv_write_all" | "__rv_substring_raw") ->
        unsupported e.Ast.loc
          "__rv_argc / __rv_argstr read the RV32I argument block, which a hosted \
           process does not have — call `args`, which works on every backend; \
           __rv_clock / __rv_urandom32 / __rv_xlen are that backend's clock, \
           entropy and word width — call `time`, `random_int`, or nothing; \
-          __rv_open_rd / __rv_read_all / __rv_access / __rv_open_wr / \
-          __rv_write_all are that backend's raw openat/read/write/faccessat — \
-          call `read_file`, `write_file`, `read_stdin` or `file_exists` — and \
+          __rv_open_rd / __rv_read_all / __rv_access / __rv_unlink / __rv_open_wr / \
+          __rv_write_all are that backend's raw openat/read/write/faccessat/unlinkat — \
+          call `read_file`, `write_file`, `read_stdin`, `file_exists` or `file_delete` — and \
           __rv_substring_raw is the slice behind its prelude's `substring`"
      (* Raw physical memory is RV32I bare-metal only. Without this arm the
         raw_* names fell through to the closure path and emitted a call to an
@@ -3870,6 +3870,8 @@ let rec emit_expr (e : Ast.expr) : string =
        (* v0.1.15 (mk dogfood P3): whether a path exists (guards file_mtime,
           which raises on a missing path). *)
        Printf.sprintf "__lang_file_exists(%s)" (emit_expr arg)
+     | Ast.Var "file_delete" when not (user_shadows "file_delete") ->
+       Printf.sprintf "__lang_file_delete(%s)" (emit_expr arg)
      | Ast.Var "env_var" when not (user_shadows "env_var") ->
        (* v0.1.337: a NATIVE binary could not read its environment. Only the
           Wasm component backend had this, so `mere -c` -- the single-binary
@@ -9733,6 +9735,10 @@ let str_concat_helper =
       "static int __lang_file_exists(const char* path) {";
       "  struct stat st;";
       "  return stat(path, &st) == 0;";
+      "}";
+      (* v0.1.622: file_delete -- unlink, so a directory is refused *)
+      "static int __lang_file_delete(const char* path) {";
+      "  return unlink(path) == 0;";
       "}";
       "static int __lang_sleep_ms(long long ms) {";
       "  if (ms <= 0) return 0;";

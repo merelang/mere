@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.622 — 2026-10-06
+
+_`file_delete : str -> bool` removes a file, on all five backends. Mere had no way to: a program ran `rm -f`, and a RISC-V binary on memu has no shell to run it with._
+
+mere-ruby's `File.delete` is `rm -f` behind `run`. On RISC-V there is no process to
+start, so the eight corpus programs that end by cleaning up their temporary files
+stopped there, after everything else they printed had come to agree (mere-ruby
+`528bdd6` had just moved `File.realpath` and friends off the shell).
+
+`file_delete p` is unlink: `true` when this call removed the file, `false` for a
+path that is not there, for a directory (unlink refuses one on every host; this
+is not rmdir), and for a refusal. It answers yes or no rather than an errno,
+because the LLVM backend has no portable way to read `errno` (`__error` on
+Darwin, `__errno_location` on glibc, and a weak reference to the other one does
+not link); a caller that needs the reason asks `file_exists` or the stat devices
+after a `false`.
+
+- interpreter: `Unix.unlink`; C and LLVM: `unlink(2)`; Wasm: the host's
+  `file_delete` import (`scripts/run_wasm.js`: `fs.unlinkSync`), as `file_exists`
+  goes through the host.
+- RISC-V: `__rv_unlink` is `unlinkat(AT_FDCWD, path, 0)`, syscall 35, the Linux
+  number, like the `openat` / `faccessat` the hosted target already uses, and the
+  prelude's `file_delete` is `__rv_unlink p == 0`. memu answers it (memu needs
+  this Mere or later to build, since it answers with `file_delete`).
+
+`test/parity/file_delete.mere` writes a file, removes it, removes it again,
+removes a path that was never there and tries a directory: `true true false false
+false false true` on the interpreter, C, LLVM, Wasm, RV64 and RV32. The name is
+random so that parity and rv_exec running it at once do not share a file.
+
 ## v0.1.621 — 2026-10-06
 
 _On LLVM and Wasm a long list carried out of a `region` block no longer overflows the stack (Q-201): the copy walks the list's spine as a loop, as C's has since v0.1.605._

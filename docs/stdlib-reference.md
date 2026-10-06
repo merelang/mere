@@ -78,6 +78,7 @@ instantiation with a missing-import error rather than a wrong answer.
 | `write_file_bytes` ⚡ | `str -> Vec[R, int] -> unit` | Write an int vec as raw bytes (each element 0..255) — the write half of the binary path; PPM P6 etc. interp + C only (v0.1.44, Mandelbrot probe) |
 | `read_lines` ⚡ ★ | `str -> str list` | Read line by line, returns `str list` (Phase 19.6; depends on prelude) |
 | `file_exists` | `str -> bool` | Whether path exists (Phase 19.6; on C native since v0.1.15) |
+| `file_delete` | `str -> bool` | Remove a file (unlink); `true` when this call removed it, `false` for a missing path, a directory, or a refusal. No errno: ask `file_exists` afterwards for the reason. All five backends; RISC-V through `unlinkat` (v0.1.622) |
 | `file_mtime` | `str -> float` | Modification time in seconds; raises if the path is missing (interp + C native) |
 | `file_size` | `str -> int` | File size in bytes (stat); binary-safe length where `str_len` (strlen) stops at a NUL. interp + C native (v0.1.21) |
 | `file_openrw` | `str -> File` | Open a read/write handle, creating the file if absent and **not** truncating it. The handle for everything below (v0.1.115, mbtree dogfood) |
@@ -1523,7 +1524,7 @@ abs args assert atan2 bit_and bit_not bit_or bit_shl bit_shr bit_xor
 bool_of_str ceil char_at chr clamp
 cos cube decr divmod e env_var even exit exp f_abs f_add
 f_div f_ge f_gt f_le f_lt f_max f_min f_mul f_neg f_pow
-f_sub fail file_exists float_of_int float_of_str floor
+f_sub fail file_delete file_exists float_of_int float_of_str floor
 fst gcd incr int_max int_min int_of_float int_of_str
 is_alpha is_digit is_space iter_n lcm log max min mk_logger
 mk_metrics not odd ord pi pow print print_bool

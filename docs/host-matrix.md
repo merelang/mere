@@ -33,6 +33,7 @@ machine rather than a host.
 | `__rv_read_all` | refused | refused | refused | yes |
 | `__rv_str_hash` | unattributed | refused | refused | yes |
 | `__rv_substring_raw` | refused | refused | refused | yes |
+| `__rv_unlink` | refused | refused | refused | yes |
 | `__rv_urandom32` | refused | refused | refused | yes |
 | `__rv_write_all` | refused | refused | refused | yes |
 | `__rv_xlen` | refused | refused | refused | yes |
@@ -97,6 +98,7 @@ machine rather than a host.
 | `f_pow` | yes | yes | yes | yes |
 | `f_sub` | yes | yes | yes | yes |
 | `fail` | yes | yes | yes | yes |
+| `file_delete` | yes | yes | yes | yes |
 | `file_exists` | yes | yes | yes | yes |
 | `file_mtime` | yes | refused | refused | refused |
 | `file_open` | yes | refused | refused | refused |
