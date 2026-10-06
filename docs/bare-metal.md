@@ -23,6 +23,7 @@ matching device side lives: a UART, a CLINT, CSRs and traps.
 | Flag | Meaning |
 |---|---|
 | `--ram <MB>` | The RAM the binary expects, 4–256, default 8. The stack starts at the top of it, so an emulator must be sized to match |
+| `--coro-stack <MB>` | v0.1.623: in a program with coroutines, the region every coroutine runs in (its stack is copied in while it runs); default a sixteenth of RAM. The main stack is another sixteenth, and the heap stops below both |
 | `--bare` | No host. The program's top-level `main` is handed the machine as a `Raw`; the print builtins are refused |
 | `--load-base <addr>` | Load somewhere other than address 0, 4KB-aligned. Everything absolute in the binary shifts with it |
 

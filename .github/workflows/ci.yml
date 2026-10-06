@@ -1136,14 +1136,6 @@ jobs:
           sh scripts/threads_alloc_check.sh
           sh scripts/threads_alloc_check.sh --poison
 
-      # Same-thread coroutines. A switch carries the four pieces of state that
-      # belong to a stack (region, open blocks, try_or, stack bounds); the
-      # poison drops each, and the env copy and two checks, from the emitted C
-      # and from the emitted IR. --poison runs the fixtures and refusals first.
-      - name: coro_check (same-thread coroutines, interpreter, C and LLVM)
-        if: ${{ !cancelled() }}
-        run: sh scripts/coro_check.sh --poison
-
       - name: spawn_stack_check (a spawned thread gets the requested stack)
         if: ${{ !cancelled() }}
         run: |
@@ -1406,6 +1398,16 @@ jobs:
       - name: os_check (the kernel, the shell and a user process, on memu)
         if: ${{ !cancelled() }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/os_check.sh
+
+      # Same-thread coroutines. A switch carries the four pieces of state that
+      # belong to a stack (region, open blocks, try_or, stack bounds); the
+      # poison drops each, and the env copy and two checks, from the emitted C
+      # and from the emitted IR. --poison runs the fixtures and refusals first.
+      # v0.1.623: here, after the clones, so that RISC-V's column (both widths,
+      # on memu, with poisons over the prelude) runs too.
+      - name: coro_check (same-thread coroutines, interpreter, C, LLVM and RISC-V)
+        if: ${{ !cancelled() }}
+        run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/coro_check.sh --poison
 
       # ⚠ THIS GATE WAS IN NO WORKFLOW. rv_exec_check is the differential
       # between the RISC-V backend and the C backend on the hosted side -- the

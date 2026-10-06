@@ -115,7 +115,7 @@ for p in "$ROOT"/test/parity/*.mere; do
   expected_diff=no
   for k in $KNOWN_DIFF; do [ "$k" = "$name" ] && expected_diff=yes; done
   if diff -q "$TMP/i.out" "$TMP/r.out" >/dev/null; then agree=yes
-  elif diff -q "$TMP/i.trim" "$TMP/r.out" >/dev/null; then agree=yes; echoed=$((echoed+1))
+  elif [ -s "$TMP/r.out" ] && diff -q "$TMP/i.trim" "$TMP/r.out" >/dev/null; then agree=yes; echoed=$((echoed+1))
   else agree=no; fi
   if [ "$agree" = yes ] && [ "$expected_diff" = yes ]; then
     printf '  FAIL  %s is in KNOWN_DIFF but now agrees — remove it from the list\n' "$name"
@@ -249,7 +249,11 @@ if [ -n "$RVRUN64" ]; then
     sed '$d' "$TMP/i.out" > "$TMP/i.trim"
     expected_diff=no
     for k in $KNOWN_DIFF64; do [ "$k" = "$name" ] && expected_diff=yes; done
-    if diff -q "$TMP/i.out" "$TMP/r.out" >/dev/null || diff -q "$TMP/i.trim" "$TMP/r.out" >/dev/null
+    # v0.1.623: the trimmed comparison (C's final value dropped) only when the
+    # RV run printed something -- an EMPTY run used to agree with any one-line
+    # program, and region_growth trapping with no output passed for agreement
+    if diff -q "$TMP/i.out" "$TMP/r.out" >/dev/null \
+       || { [ -s "$TMP/r.out" ] && diff -q "$TMP/i.trim" "$TMP/r.out" >/dev/null; }
     then agree=yes; else agree=no; fi
     if [ "$agree" = yes ] && [ "$expected_diff" = yes ]; then
       printf '  FAIL  %s@64 is in KNOWN_DIFF64 but now agrees — remove it\n' "$name"

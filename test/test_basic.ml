@@ -15260,6 +15260,15 @@ let () =
   rv_contains "rv32i: char_at reads the one-byte string table"
     "let f = fn (s: str) -> char_at s 1;\n\
      let _ = print (f \"xyz\");" "la a0, __rv_chr_tab";
+  (* v0.1.623: a program with coroutines gets the stack switch and a floor
+     check at every entry; one without them is laid out as before *)
+  rv_contains "rv32i: a program with coroutines has the stack switch"
+    "let root = coro_root ();\n\
+     let c = coro_new (fn me -> fn (u: unit) -> coro_exit root ());\n\
+     let _ = coro_switch c;" "__rv_cswap:";
+  rv_not_contains "rv32i: a program without coroutines has no floor check"
+    "let f = fn (n: int) -> n + 1;\n\
+     let _ = print_int (f 1);" "__stkovf";
   rv_contains "rv32i: a non-tail call is still a call"
     "let rec fact = fn n -> if n <= 1 then 1 else n * fact (n - 1);\n\
      let _ = print_int (fact 5);" "jal ra, u_fact";

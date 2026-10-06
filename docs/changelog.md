@@ -4,6 +4,78 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.623 — 2026-10-06
+
+_RISC-V has coroutines: `coro_new`, `coro_new_sized`, `coro_transfer`, `coro_switch`, `coro_exit`, `coro_root` and `coro_scan_ints`, on both widths. Every coroutine runs in one region of RAM and a switch copies stacks in and out of it, so ten thousand suspended coroutines fit in a few megabytes._
+
+The RV backend refused coroutines by name: "the bare-metal runtime has one stack
+and nowhere to map another". It still has no virtual memory, so a stack per
+coroutine would be a fixed reservation of real RAM -- and `test/coro/many.mere`
+keeps ten thousand suspended while `sized_reuse` recurses twenty thousand deep in
+one. So the stacks are COPIED instead:
+
+- Every coroutine runs with its stack ending at the same address, in a region of
+  its own. `__rv_cswap` saves ra, s0 and s1..s11 on the stack being left, writes
+  that stack's live part out to a buffer kept with the coroutine, writes the one
+  being entered back to the same addresses, and restores. Nothing that points
+  into a stack (a saved fp, a try_or record) ever moves. The main stack is not
+  copied. A coroutine that has never run holds a seeded frame whose return
+  address is `__rv_coro_boot`.
+- The rest of the runtime is the RV prelude's, in Mere (`rvcoro_`): a table of
+  records with a free list, generational handles (a stale handle to a reused slot
+  is told apart, as C's are), the checks and messages the C backend gives
+  (finished, not the running coroutine, a body that hands over to itself), and
+  what each stack carries across a switch -- its try_or record, its region depth
+  and block marks. It is written on a few new internal primitives (raw words,
+  the runtime's words, the switch, the layout).
+- **Layout.** A program that makes or switches to a coroutine gives a sixteenth
+  of RAM (at least 256 KiB) to the main stack and the region below it to the
+  coroutines -- a sixteenth too, or `--coro-stack <MB>` (refused if the heap
+  would be left less than an eighth). An eighth each was the first choice;
+  mere-ruby's corpus 213 needed the heap back. The heap's limit is kept in `tp`, which this backend did
+  not use, so the allocation check is still one instruction; every function entry
+  checks the running stack's floor (`coro_new_sized` sets how far below the
+  region's top a coroutine may reach) and an overflow prints the C backend's
+  "stack overflow (recursion too deep)". A program without coroutines is laid
+  out, and checks, exactly as before.
+- **Regions and arenas.** Every allocation comes from one bump pointer, so a
+  region block the main stack opened before a switch could roll back what a
+  coroutine allocated after it: each switch raises the high-water mark, past
+  which no rollback goes. While any coroutine exists, an arena block handed back
+  by a compaction is not reused -- coarser than C, which keeps exactly what a
+  stopped stack reaches.
+- `coro_scan_ints` reads a stopped coroutine's buffer (or, for the running one,
+  its stack after spilling the saved registers) and follows the pointers in it as
+  C does: three hops, without a limit above the stack's innermost open block's
+  mark. (The outermost first: mere-ruby keeps a block open for its whole run,
+  and with one bump pointer the whole heap counted as "its own" and was walked
+  -- corpus 165 ran out of memory in its collector's scan.)
+
+`scripts/coro_check.sh` runs its fixtures on memu at both widths (when `MEMU` is
+set; RV's failure message has no `fail: ` prefix, and the output is compared,
+since memu exits 0 whatever the guest's exit said), with six RV poisons that edit
+the prelude (`mere --rv-prelude` prints it; `MERE_RV_PRELUDE_FILE` substitutes
+one). Two fixtures are new, for things the existing ones did not exercise:
+`region_cross` (the main stack's region closed after a coroutine allocated in
+it -- red without the switch's high-water mark) and `compact_reuse` (a map
+compacted and its blocks taken by others while a coroutine holds a value from it
+-- red when blocks are reused). Both run on C and the interpreter too.
+
+**The stack growing into the heap is caught too** (every RV program, one
+instruction per call). An allocation checks gp against sp, but a call made after
+the heap had come close was not checked: its frame landed on heap data. Moving the
+heap up by the coroutine runtime's words made `test/parity/region_growth.mere` at
+32 MB on RV64 trap in the float helpers instead of reporting the exhaustion
+(memu's `trace` stopped at a prologue with sp below gp). Each prologue now checks
+`sp` against `gp` (a program with coroutines checks its stack's floor instead;
+a `--bare` program, whose trap handler may run with another process's gp, does
+not);
+mere-ruby's corpus 165 run ten times takes 0.6% more instructions. And
+`rv_exec_check` no longer counts an RV run that printed NOTHING as agreeing: it
+compares once more with C's last line dropped (for a final value only a
+compiled-in main prints), and an empty run matched any one-line program -- which
+is how region_growth's trap passed for "now agrees" there.
+
 ## v0.1.622 — 2026-10-06
 
 _`file_delete : str -> bool` removes a file, on all five backends. Mere had no way to: a program ran `rm -f`, and a RISC-V binary on memu has no shell to run it with._

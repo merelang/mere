@@ -3088,6 +3088,25 @@ let initial_env : env =
     ("__rv_read_all", mono (Ast.TyArrow (Ast.TyInt, Ast.TyStr)));
     ("__rv_access", mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
     ("__rv_unlink", mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
+    (* v0.1.623: what the RV prelude's coroutine runtime is written with --
+       raw words, the runtime's words, the stack switch and the layout *)
+    ("__rv_peek", mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
+    ("__rv_poke", mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyUnit))));
+    ("__rv_rtw", mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
+    ("__rv_rtw_set", mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyUnit))));
+    ("__rv_sp", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
+    ("__rv_alloc_keep", mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
+    ("__rv_hwm_raise", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit)));
+    ("__rv_cswap", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit)));
+    ("__rv_call1", mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
+    ("__rv_boot_addr", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
+    ("__rv_co_hi", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
+    ("__rv_co_lo", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
+    ("__rv_main_lo", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
+    ("__rv_heap_lo", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
+    ("__rv_stack_top", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
+    ("__rv_gp", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));
+    ("__rv_spill", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit)));
     ("__rv_open_wr", mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
     ("__rv_write_all", mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyStr, Ast.TyInt))));
     ("__rv_substring_raw", mono (Ast.TyArrow (Ast.TyStr,

@@ -20,7 +20,7 @@ rc=0
 # RISC-V backend binds libm-named externs to): hand-written too, so read with it
 NAMES=$(cat "$ROOT/lib/rv_prelude.ml" "$ROOT/lib/rv_libm.ml" \
         | sed -n 's/^let \(rec \)\{0,1\}\([a-z_][a-z_0-9]*\) *=.*/\2/p' \
-        | grep -v '^contents$')
+        | grep -v '^contents$' | grep -v '^builtin_contents$')
 COUNT=$(printf '%s\n' $NAMES | wc -l | tr -d ' ')
 
 # Probes, by shape. A name with no probe is reported: the point of the gate is
@@ -28,6 +28,13 @@ COUNT=$(printf '%s\n' $NAMES | wc -l | tr -d ' ')
 probe_for() {
   case "$1" in
     not) echo 'let _ = print_int (if not false then 1 else 0);' ;;
+    # v0.1.623: the coroutine runtime, every entry at once
+    rvcoro_*) echo 'let root = coro_root ();
+let c = coro_new (fn me -> fn (n: int) -> let _ = print_int n in coro_exit root ());
+let _ = coro_transfer c 1 root;
+let _ = coro_scan_ints root 0 1 (fn (x: int) -> ());
+let d = coro_new_sized 65536 (fn me -> fn (u: unit) -> coro_exit root ());
+let _ = coro_switch d;' ;;
     is_digit|is_alpha|is_space) echo "let _ = print_int (if $1 \"5\" then 1 else 0);" ;;
     str_starts_with|str_ends_with|str_contains) echo "let _ = print_int (if $1 \"abc\" \"a\" then 1 else 0);" ;;
     str_index_of) echo 'let _ = print_int (str_index_of "abc" "b");' ;;

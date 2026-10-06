@@ -66,7 +66,9 @@ transfer|icl|int: 1 12 23, float: 3.75;bool: true then false, coro: hopped;after
 notme|icl|coro_transfer: the third argument must be the running coroutine|1
 sized|icl|5050;45000150000;partial|0
 sized_overflow|cl|stack overflow (recursion too deep)|1
-sized_reuse|icl|small;200010000;done|0'
+sized_reuse|icl|small;200010000;done|0
+region_cross|icl|kept;32|0
+compact_reuse|ic|held;0|0'
 
 # The interpreter prints a failure with its position and a code frame; the
 # compiled program prints the message alone. The comparison is on the message.
@@ -173,10 +175,10 @@ let _ = coro_transfer c 1 root;
 let _ = coro_transfer c true root;
 0' 'expected `int`, got `bool`'
 refuse "Wasm names it" -w 'coro_switch (coro_root ())' 'is not available on Wasm'
-refuse "RV32I names it" -rv 'coro_switch (coro_root ())' 'is unsupported on this target'
-refuse "RV64 names it" -rv64 'coro_switch (coro_root ())' 'is unsupported on this target'
+# v0.1.623: RISC-V has coroutines (the section below); as a VALUE a builtin is
+# still refused there, with the reason
+refuse "RV64 names one passed as a value" -rv64 'let f = coro_switch in f (coro_root ())' 'is unsupported here as a value'
 refuse "Wasm names coro_scan_ints" -w 'coro_scan_ints (coro_root ()) 0 1 (fn (n: int) -> ())' 'is not available on Wasm'
-refuse "RV32I names coro_scan_ints" -rv 'coro_scan_ints (coro_root ()) 0 1 (fn (n: int) -> ())' 'is unsupported on this target'
 
 # and what must NOT be refused: a block's VALUE is copied out with the env
 printf '%s\n' 'let root = coro_root ();
@@ -188,6 +190,72 @@ if "$CC" -w -o "$T/ok" "$T/ok.c" -lm -lpthread 2>/dev/null && [ "$("$T/ok")" = "
   printf '  ok    %s\n' "allowed: a body capturing a block's str (copied with the env)"
 else
   printf '  FAIL  %s\n' "a body capturing a block's str: $got"; fail=1
+fi
+
+# --- RISC-V (v0.1.623) ------------------------------------------------------
+# On the Mere-written CPU, both widths, when MEMU names a memu checkout (as
+# rv_exec_check does). The runtime is the RV prelude's rvcoro_ functions over
+# __rv_cswap, which copies each coroutine's stack in and out of one region; the
+# per-stack words it carries are the try_or record, the region depth and the
+# two block marks. RV's own spellings: a failure prints its message alone
+# (no `fail: `), and `scan_high` (a 2^48 literal) and `sized` (a sum past 2^31)
+# are RV64 only. The OUTPUT is compared, not the exit status: memu exits 0
+# whatever the guest's exit call said.
+# fixture | r both widths, q RV64 only | expected | (exit, as on C; not compared)
+RV_CASES='region|r|B: my string survived;4106|0
+fail|r|from the coroutine|1
+nested|r|main caught: -1;B caught: 5;main: done|0
+unwind|r|B: region R2 survived main'"'"'s unwind;4096|0
+env|r|env: intact;8192|0
+finished|r|B: ran;switch to a finished coroutine: refused|0
+self_handoff|r|coro: a finished coroutine must hand over to another live coroutine|1
+many|r|10000|0
+pingpong|r|1000000|0
+compact|r|held: intact;700|0
+scan|r|all found, bound kept;running: found;57573|0
+scan_high|q|found, again found, small left out;7;12|0
+transfer|r|int: 1 12 23, float: 3.75;bool: true then false, coro: hopped;after the end: 0|0
+notme|r|coro_transfer: the third argument must be the running coroutine|1
+sized|q|5050;45000150000;partial|0
+sized_overflow|r|stack overflow (recursion too deep)|1
+sized_reuse|r|small;200010000;done|0
+million|r|1000000|0
+region_cross|r|kept;32|0
+compact_reuse|r|held;0|0'
+RV_LIMIT="${RV_LIMIT:-300}"
+have_rv=0
+if [ -n "${MEMU:-}" ] && [ -f "$MEMU/riscv-runc/rv64i_run.mere" ]; then
+  mkdir -p "$T/rv"
+  if "$MERE" -c "$MEMU/riscv-runc/rv64i_run.mere" > "$T/rv/r64.c" 2>/dev/null \
+     && "$CC" -O2 -w -o "$T/rv/rvrun64" "$T/rv/r64.c" -lm 2>/dev/null \
+     && "$MERE" -c "$MEMU/riscv-runc/rv32i_run.mere" > "$T/rv/r32.c" 2>/dev/null \
+     && "$CC" -O2 -w -o "$T/rv/rvrun32" "$T/rv/r32.c" -lm 2>/dev/null; then have_rv=1
+  else printf '  FAIL  %s\n' "RISC-V: the emulator under MEMU=$MEMU did not build"; fail=1; fi
+fi
+run_rv() {  # $1 = fixture, $2 = 32|64 -> "output|exit" (MERE_RV_PRELUDE_FILE passes through)
+  flag=-rv64; [ "$2" = 32 ] && flag=-rv
+  # `sized` asks for a 64 MB stack and recurses 300,000 deep in it
+  extra=""; [ "$1" = sized ] && extra="--coro-stack 64"
+  # shellcheck disable=SC2086
+  if ! "$MERE" "$flag" --ram 256 $extra "$FX/$1.mere" > "$T/rv/prog.bin" 2>"$T/rv/emit.err"; then
+    printf 'EMITFAIL %s|x' "$(grep -v '^warning\|^ *-->\|^ *|\|^ *[0-9]* |\|^ *= \|^$' "$T/rv/emit.err" | head -1)"; return
+  fi
+  ( cd "$T/rv" && perl -e 'alarm shift; exec @ARGV' "$RV_LIMIT" ./rvrun"$2" 256 > out 2>&1 ); rc=$?
+  [ "$rc" = 142 ] && { echo "TIMEOUT|142"; return; }
+  printf '%s' "$(grep -av '^rvrun' "$T/rv/out" | norm)"
+}
+if [ "$have_rv" = 1 ]; then
+  printf '%s\n' "$RV_CASES" > "$T/rvcases"
+  while IFS='|' read -r f b w rc; do
+    for width in 64 32; do
+      [ "$b" = q ] && [ "$width" = 32 ] && continue
+      got=$(run_rv "$f" "$width")
+      if [ "$got" = "$w" ]; then printf '  ok    %s\n' "RV$width $f"
+      else printf '  FAIL  %s\n' "RV$width $f: got [$got] wanted [$w]"; fail=1; fi
+    done
+  done < "$T/rvcases"
+else
+  printf '  SKIP  %s\n' "RISC-V (set MEMU to a memu checkout)"
 fi
 
 if [ "$MODE" = "--poison" ]; then
@@ -256,6 +324,36 @@ if [ "$MODE" = "--poison" ]; then
   poison_rss c "C 8 (the saved state is never freed)" 's/ free(z->x); z->x = NULL; __lang_coro_drop_slot(z); free(z); }$/ __lang_coro_drop_slot(z); }/'
   poison_rss ll "LLVM 8 (the saved state is never freed)" '/^  call void @free(ptr %zx)$/d'
   poison_rss ll "LLVM 14 (a finished coroutine's record is never freed)" '/^  call void @free(ptr %z)$/d'
+  # v0.1.623: RISC-V. The runtime is prelude text, so the poison edits what
+  # `mere --rv-prelude` prints and the fixture is built with it (RV64).
+  rv_poison() {  # $1 = label, $2 = sed expression, $3... = fixtures that must go red
+    label="$1"; ex="$2"; shift 2
+    [ "$have_rv" = 1 ] || { printf '  SKIP  %s\n' "POISON $label (no MEMU)"; return; }
+    "$MERE" --rv-prelude > "$T/rv/prelude.mere"
+    sed "$ex" "$T/rv/prelude.mere" > "$T/rv/poisoned.mere"
+    if cmp -s "$T/rv/prelude.mere" "$T/rv/poisoned.mere"; then
+      printf '  FAIL  %s\n' "POISON $label: the prelude no longer has the shape this poison removes"; pfail=1; return
+    fi
+    for f in "$@"; do
+      want=$(printf '%s\n' "$RV_CASES" | while IFS='|' read -r g b w rc; do [ "$g" = "$f" ] && printf '%s' "$w"; done)
+      got=$(MERE_RV_PRELUDE_FILE="$T/rv/poisoned.mere" run_rv "$f" 64)
+      if [ "$got" != "$want" ]; then printf '  ok    %s\n' "POISON $label: $f goes red ([$got])"
+      else printf '  FAIL  %s\n' "POISON $label: $f still green -- the fixture does not measure it"; pfail=1; fi
+    done
+  }
+  rv_poison "RV 1 (the try_or record not carried)" 's/^  let _ = __rv_rtw_set 0 (__cget me 8) in$/  let _ = () in/' nested
+  # The region depth and block marks are carried too, but leaving them shared
+  # only makes protection more conservative (every open and close nests, so a
+  # shared count is never 0 while some stack has a block open): no fixture can
+  # go red without it, and none is claimed to.
+  rv_poison "RV 3 (the high-water mark not raised at a switch)" 's/^    let _ = __rv_hwm_raise () in$/    let _ = () in/' region_cross
+  rv_poison "RV 4 (no finished check)" 's/^  else (let st = __cget s 0 in if st == 3 || st == 4 then 0 - 1 else s);$/  else s;/' finished
+  rv_poison "RV 5 (no hand-over check)" 's/^  if ns < 0 || ns == me then fail/  if ns < 0 then fail/' self_handoff
+  rv_poison "RV 6 (blocks reused while a coroutine exists)" 's/^    let _ = __rv_rtw_set 47 (__rv_rtw 47 + 1) in$/    let _ = () in/' compact_reuse
+  # The saved registers are spilled before a scan of the running stack, but the
+  # scan itself saves every register it uses on its own frame, so today the
+  # spill is a backstop no fixture can tell apart; no poison is claimed for it.
+  rv_poison "RV 8 (own region blocks not followed to the end)" 's/ && (d < 3 || v >= own) / \&\& d < 3 /' scan
   if [ "$pfail" = 0 ] && [ "$fail" = 0 ]; then echo "coro --poison: ok (the gate can go red)"; else echo "coro --poison: FAILED"; pfail=1; fi
   exit "$pfail"
 fi

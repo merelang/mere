@@ -13,7 +13,7 @@
    output stays byte-identical to the interpreter. `substring s a b` is
    end-exclusive (b is the stop index). *)
 
-let contents = {mere|
+let builtin_contents = {mere|
 // --- integer builtins this backend never had -----------------------------
 // These are not scaffolding: they are the definitions, in Mere, on top of
 // primitives codegen_riscv already emits. They were on the refused list only
@@ -1636,7 +1636,244 @@ let __fp_trig_reduce = fn (x: float) ->
 let str_of_float = fn (x: float) ->
   if __rv_xlen () == 64 then __d64_str_of_float x
   else __sf_dec_of_sf (__sf_sf_of_float x);
+
+// --- coroutines (v0.1.623) -------------------------------------------------
+// The runtime the C backend writes in C, written in Mere on raw words: a table
+// of records, one per coroutine (slot 0 is the main stack), a free list of
+// slots, and __rv_cswap to move between stacks. Every coroutine runs in the
+// same region, its stack copied in when it is entered and out when it is left
+// (see __rv_cswap), so a suspended coroutine costs the words its stack holds.
+// A handle is gen * 65536 + slot: a handle to a finished coroutine whose slot
+// was reused is told apart from the new one, as the C backend's generations do.
+// Record words: 0 state (0 new, 1 running, 2 suspended, 3 finished, 4 free),
+// 1 gen, 2 sp, 3 buffer, 4 its capacity in words, 5 floor, 6 body closure,
+// 7 message, 8..11 the stack's own runtime words (try_or record, region depth,
+// block mark, outermost block mark), 12 the next free slot + 1.
+// Runtime words: 34 the sp just left, 35..39 the switch's parameters, 40 the
+// table, 41 its capacity, 42 slots in use, 43 free list (slot + 1), 44 running,
+// 45 previous, 46 finished and waiting to be reaped (slot + 1), 47 how many
+// coroutines exist, 48 set once the table is made.
+let __cw = fn (u: unit) -> if __rv_xlen () == 64 then 8 else 4;
+let __crec = fn (s: int) -> __rv_peek (__rv_rtw 40 + s * __cw ());
+let __cget = fn (s: int) -> fn (k: int) -> __rv_peek (__crec s + k * __cw ());
+let __cset = fn (s: int) -> fn (k: int) -> fn (v: int) -> __rv_poke (__crec s + k * __cw ()) v;
+let rec __czero = fn (a: int) -> fn (n: int) ->
+  if n == 0 then () else (let _ = __rv_poke a 0 in __czero (a + __cw ()) (n - 1));
+let __cnew_rec = fn (s: int) ->
+  let r = __rv_alloc_keep 16 in
+  let _ = __czero r 16 in
+  __rv_poke (__rv_rtw 40 + s * __cw ()) r;
+let __cinit = fn (u: unit) ->
+  if __rv_rtw 48 != 0 then () else
+  let _ = __rv_rtw_set 40 (__rv_alloc_keep 64) in
+  let _ = __rv_rtw_set 41 64 in
+  let _ = __rv_rtw_set 42 1 in
+  let _ = __rv_rtw_set 43 0 in
+  let _ = __cnew_rec 0 in
+  let _ = __cset 0 0 1 in
+  let _ = __cset 0 1 1 in
+  let _ = __cset 0 5 (__rv_main_lo ()) in
+  let _ = __rv_rtw_set 44 0 in
+  __rv_rtw_set 48 1;
+let __chandle = fn (s: int) -> __cget s 1 * 65536 + s;
+// the slot of a live coroutine's handle, or -1
+let __cslot = fn (h: int) ->
+  let s = h % 65536 in
+  if h <= 0 || s >= __rv_rtw 42 then 0 - 1
+  else if __cget s 1 != h / 65536 then 0 - 1
+  else (let st = __cget s 0 in if st == 3 || st == 4 then 0 - 1 else s);
+let rvcoro_root = fn (u: unit) -> let _ = __cinit () in __chandle 0;
+let rec __ccopy = fn (dst: int) -> fn (src: int) -> fn (n: int) ->
+  if n == 0 then ()
+  else (let _ = __rv_poke dst (__rv_peek src) in __ccopy (dst + __cw ()) (src + __cw ()) (n - 1));
+// a slot for a new coroutine: a reaped one, or the next, the table doubled
+let __ctake = fn (u: unit) ->
+  let f = __rv_rtw 43 in
+  if f != 0 then (let s = f - 1 in let _ = __rv_rtw_set 43 (__cget s 12) in s)
+  else
+    let n = __rv_rtw 42 in
+    let cap = __rv_rtw 41 in
+    let _ = (if n < cap then () else
+             (let nt = __rv_alloc_keep (cap * 2) in
+              let _ = __ccopy nt (__rv_rtw 40) cap in
+              let _ = __rv_rtw_set 40 nt in
+              __rv_rtw_set 41 (cap * 2))) in
+    let _ = __rv_rtw_set 42 (n + 1) in
+    let _ = __cnew_rec n in
+    n;
+let rvcoro_new_sized = fn (size: int) -> fn (f: int) ->
+  let _ = __cinit () in
+  if size <= 0 then fail "coro_new_sized: a stack size must be between 1 byte and 1 GiB"
+  else if size > 1073741824 then fail "coro_new_sized: a stack bigger than 1 GiB"
+  else
+    let s = __ctake () in
+    let w = __cw () in
+    let hi = __rv_co_hi () in
+    let lo = __rv_co_lo () in
+    let _ = (if __cget s 4 >= 64 then () else
+             (let _ = __cset s 3 (__rv_alloc_keep 64) in __cset s 4 64)) in
+    let buf = __cget s 3 in
+    // the frame __rv_cswap pops: ra = __rv_coro_boot, every saved register 0
+    let _ = __czero buf 14 in
+    let _ = __rv_poke buf (__rv_boot_addr ()) in
+    let _ = __cset s 0 0 in
+    let _ = __cset s 1 (__cget s 1 % 32767 + 1) in
+    let _ = __cset s 2 (hi - 14 * w) in
+    let _ = __cset s 5 (if hi - size < lo then lo else hi - size) in
+    let _ = __cset s 6 f in
+    let _ = __cset s 7 0 in
+    let _ = __czero (__crec s + 8 * w) 5 in
+    let _ = __rv_rtw_set 47 (__rv_rtw 47 + 1) in
+    // the body's closure, and whatever it captured, outlive any region block
+    let _ = __rv_hwm_raise () in
+    __chandle s;
+let rvcoro_new = fn (f: int) -> rvcoro_new_sized (__rv_co_hi () - __rv_co_lo ()) f;
+// on the stack just entered: the stack left gets its sp, this one its runtime
+// words back, and a coroutine that finished on the way here is reaped
+let __carrived = fn (u: unit) ->
+  let me = __rv_rtw 44 in
+  let p = __rv_rtw 45 in
+  let _ = (if p == 0 then () else __cset p 2 (__rv_rtw 34)) in
+  let _ = __rv_rtw_set 0 (__cget me 8) in
+  let _ = __rv_rtw_set 1 (__cget me 9) in
+  let _ = __rv_rtw_set 2 (__cget me 10) in
+  let _ = __rv_rtw_set 4 (__cget me 11) in
+  let z = __rv_rtw 46 in
+  let _ = (if z == 0 then () else
+           (let zs = z - 1 in
+            let _ = __cset zs 0 4 in
+            let _ = __cset zs 12 (__rv_rtw 43) in
+            let _ = __rv_rtw_set 43 z in
+            let _ = __rv_rtw_set 46 0 in
+            __rv_rtw_set 47 (__rv_rtw 47 - 1))) in
+  __cget me 7;
+let __cswitch = fn (to: int) -> fn (v: int) -> fn (setmsg: bool) ->
+  let from = __rv_rtw 44 in
+  if to == from then v
+  else
+    let _ = (if setmsg then __cset to 7 v else ()) in
+    let _ = __cset from 8 (__rv_rtw 0) in
+    let _ = __cset from 9 (__rv_rtw 1) in
+    let _ = __cset from 10 (__rv_rtw 2) in
+    let _ = __cset from 11 (__rv_rtw 4) in
+    let w = __cw () in
+    let fin = __cget from 0 == 3 in
+    // room to copy this stack out, with what the switch itself pushes
+    let _ = (if from == 0 || fin then () else
+             (let need = (__rv_co_hi () - __rv_sp ()) / w + 64 in
+              if __cget from 4 >= need then ()
+              else (let _ = __cset from 3 (__rv_alloc_keep (need * 2)) in __cset from 4 (need * 2)))) in
+    let _ = __rv_rtw_set 35 (if from == 0 then 0 else if fin then 2 else 1) in
+    let _ = __rv_rtw_set 36 (__cget from 3) in
+    let _ = __rv_rtw_set 37 (if to == 0 then 0 else __cget to 3) in
+    let _ = __rv_rtw_set 38 (__cget to 2) in
+    let _ = __rv_rtw_set 39 (__cget to 5) in
+    let _ = (if fin then () else __cset from 0 2) in
+    let _ = __cset to 0 1 in
+    let _ = __rv_rtw_set 45 from in
+    let _ = __rv_rtw_set 44 to in
+    // nothing allocated before this switch is rolled back by a region block
+    // that closes on another stack
+    let _ = __rv_hwm_raise () in
+    let _ = __rv_cswap () in
+    __carrived ();
+// a coroutine's first return lands in __rv_coro_boot, which calls this
+let rvcoro_boot = fn (u: unit) ->
+  let me = __rv_rtw 44 in
+  let _ = __carrived () in
+  let next = __rv_call1 (__cget me 6) (__chandle me) in
+  let ns = __cslot next in
+  if ns < 0 || ns == me then fail "coro: a finished coroutine must hand over to another live coroutine"
+  else
+    let _ = __cset me 0 3 in
+    let _ = __rv_rtw_set 46 (me + 1) in
+    let _ = __cswitch ns 0 false in
+    0;
+let rvcoro_msg = fn (c: int) ->
+  let s = __cslot c in
+  if s < 0 || s != __rv_rtw 44 then fail "coro: a message is read by the coroutine it was sent to"
+  else __cget s 7;
+let rvcoro_switch = fn (c: int) ->
+  let _ = __cinit () in
+  let s = __cslot c in
+  if s < 0 then fail "coro_switch: that coroutine has finished"
+  else (let _ = __cswitch s 0 true in ());
+let rvcoro_transfer = fn (c: int) -> fn (v: int) -> fn (me: int) ->
+  let _ = __cinit () in
+  if __cslot me != __rv_rtw 44 then fail "coro_transfer: the third argument must be the running coroutine"
+  else
+    let s = __cslot c in
+    if s < 0 then fail "coro_transfer: that coroutine has finished"
+    else __cswitch s v true;
+// coro_scan_ints: every word in [lo, hi) the coroutine's stack can still
+// reach, reported to f -- conservatively: a number that is not a handle may be
+// reported, a held one may not be missed. The stack's words are read (a stopped
+// coroutine's from its buffer; the running one's from sp up, with the saved
+// registers spilled first, since a caller's value may be in one), and a word
+// that points into the heap is followed: the 16 words from it are read in turn,
+// up to three hops -- and without a limit at or above the stack's innermost
+// open region block's mark, which is where that block's values are (the C
+// backend's contract: unlimited inside the coroutine's own regions). Not the
+// outermost block's mark: every allocation shares one bump pointer here, and a
+// program that keeps a block open for its whole run (mere-ruby does) would have
+// the whole heap counted as its own and walked.
+let rvcoro_scan_ints = fn (c: int) -> fn (lo: int) -> fn (hi: int) -> fn (f: int -> unit) ->
+  let _ = __cinit () in
+  let s = __cslot c in
+  if s < 0 then () else
+  let w = __cw () in
+  let me = __rv_rtw 44 in
+  let hlo = __rv_heap_lo () in
+  let ghi = __rv_gp () in
+  let own = (if s == me then (if __rv_rtw 1 > 0 then __rv_rtw 2 else ghi)
+             else (if __cget s 9 > 0 then __cget s 10 else ghi)) in
+  let seen = map_new () in
+  let work = vec_new () in
+  let look = fn (v: int) -> fn (d: int) ->
+    let _ = (if lo <= v && v < hi then f v else ()) in
+    if v >= hlo && v < ghi && v % w == 0 && (d < 3 || v >= own) && (if map_has seen v then false else true)
+    then (let _ = map_set seen v 1 in let _ = vec_push work v in vec_push work (d + 1))
+    else () in
+  let rec words = fn (a: int) -> fn (n: int) -> fn (d: int) ->
+    if n == 0 then () else (let _ = look (__rv_peek a) d in words (a + w) (n - 1) d) in
+  let _ = (if s == me then
+             (let _ = __rv_spill () in
+              let rec regs = fn (k: int) -> if k == 62 then () else (let _ = look (__rv_rtw k) 0 in regs (k + 1)) in
+              let _ = regs 50 in
+              let top = if s == 0 then __rv_stack_top () else __rv_co_hi () in
+              let sp = __rv_sp () in
+              words sp ((top - sp) / w) 0)
+           else if s == 0 then
+             (let sp = __rv_rtw 33 in words sp ((__rv_stack_top () - sp) / w) 0)
+           else words (__cget s 3) ((__rv_co_hi () - __cget s 2) / w) 0) in
+  // breadth first: the work list is read front to back while it grows
+  let rec drain = fn (i: int) ->
+    if i >= vec_len work then ()
+    else
+      let p = vec_get work i in
+      let d = vec_get work (i + 1) in
+      let n = (if p + 16 * w > ghi then (ghi - p) / w else 16) in
+      let _ = words p n d in
+      drain (i + 2) in
+  drain 0;
+let rvcoro_exit = fn (c: int) -> fn (v: int) ->
+  let s = __cslot c in
+  let _ = (if s < 0 then () else __cset s 7 v) in
+  c;
 |mere} ^ Rv_libm.contents
+
+(* v0.1.623: the text glued ahead of an -rv program. MERE_RV_PRELUDE_FILE names
+   another one to use instead -- a gate that has to show its fixtures go red
+   without a piece of the prelude's runtime (scripts/coro_check.sh --poison)
+   edits the text that `mere --rv-prelude` prints and points this at it. *)
+let contents =
+  match Sys.getenv_opt "MERE_RV_PRELUDE_FILE" with
+  | Some f when f <> "" ->
+    let ic = open_in_bin f in
+    let n = in_channel_length ic in
+    let t = really_input_string ic n in
+    close_in ic; t
+  | _ -> builtin_contents
 
 (* Lines the prelude occupies once it is glued ahead of the user source, so a
    position in the concatenation can be turned back into the line the person
