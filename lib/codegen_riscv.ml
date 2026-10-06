@@ -352,6 +352,44 @@ let v_mv_x_s rd vs2 = emit_word (enc_opv 16 1 vs2 0 2 rd)          (* vmv.x.s rd
    by the Fun case, drained (and possibly extended) by build_items. *)
 let lambdas : (string * string list * string * Ast.expr) list ref = ref []
 
+(* v0.1.628: A LOCAL FUNCTION CALLED WITH ALL ITS ARGUMENTS. A local
+   `let rec f = fn a -> fn b -> fn c -> ...` was a closure and nothing else, so
+   `f x y z` applied it one argument at a time: two closures allocated per call
+   (each later stage capturing everything the earlier ones had), the last one
+   running the body. mere-ruby's long division calls such helpers per limb, and
+   `Integer.sqrt` of an 8000-bit square allocated 300 MB doing it -- C, whose
+   inner functions have had an uncurried twin since v0.1.52, needs 53 MB for
+   the whole interpreter. So a local function of 2 to 7 parameters also gets a
+   DIRECT entry: its closure in a0 (for the captures), every argument in
+   a1..aN, and the innermost body compiled once more with all of them bound. A
+   call that gives it all its arguments jumps there; a self tail call is a jump
+   back past the prologue, as for a top-level function. The closure is still
+   made -- the function may be passed, or partly applied -- and a call through
+   it is unchanged.
+   `directs` is the worklist of entries (label, captures, params, body);
+   `direct_scope` names the local functions that have one where code is being
+   compiled -- name -> (its binding index, the entry, its arity) -- and a call
+   takes the entry only when the name still resolves to that binding, so a
+   shadowing binding of the same name is never mistaken for it; `direct_caps`
+   carries the ones a lifted lambda or entry captures into its own body. *)
+let directs : (string * string list * string list * Ast.expr) list ref = ref []
+let direct_scope : (string * (int * string * int)) list ref = ref []
+let direct_caps : (string, (string * string * int) list) Hashtbl.t = Hashtbl.create 64
+let direct_arity_max = 7
+let direct_caps_of (fvs : string list) (env : (string * int) list) =
+  List.filter_map (fun name ->
+    match List.assoc_opt name !direct_scope with
+    | Some (idx, dl, n) when List.assoc_opt name env = Some idx -> Some (name, dl, n)
+    | _ -> None) fvs
+(* inside a lifted body whose captures are numbered 0..k-1 *)
+let direct_scope_for (label : string) (captures : string list) =
+  let caps = try Hashtbl.find direct_caps label with Not_found -> [] in
+  List.filter_map (fun (name, dl, n) ->
+    let rec index i = function
+      | [] -> None
+      | c :: rest -> if c = name then Some i else index (i + 1) rest in
+    match index 0 captures with Some i -> Some (name, (i, dl, n)) | None -> None) caps
+
 (* Top-level functions used as a VALUE. A closure here is `[code_ptr][captured..]`
    and a top-level function captures nothing, so its closure is one word -- but the
    pointer in it cannot be the function itself: a closure is called with the
@@ -411,6 +449,24 @@ let rec collect_fun (e : Ast.expr) =
   match e.node with
   | Ast.Fun (p, _, body) -> let (ps, b) = collect_fun body in (p :: ps, b)
   | _ -> ([], e)
+
+(* v0.1.628: give the local function f (binding idx, closure label, captures
+   fvs) a direct entry when it takes 2..7 arguments, and put it in scope; the
+   captures the entry's body sees are filled in by direct_finish once every
+   function of a `let rec ... and` group is in scope *)
+let register_direct f idx label fvs (fun_e : Ast.expr) : string option =
+  let (ps, inner) = collect_fun fun_e in
+  let n = List.length ps in
+  if n >= 2 && n <= direct_arity_max then begin
+    let dl = label ^ "_d" in
+    direct_scope := (f, (idx, dl, n)) :: !direct_scope;
+    directs := (dl, fvs, ps, inner) :: !directs;
+    Some dl
+  end else None
+let direct_finish dlo fvs env =
+  match dlo with
+  | Some dl -> Hashtbl.replace direct_caps dl (direct_caps_of fvs env)
+  | None -> ()
 
 (* free-ish var occurrences, used only to compute reachable top-level fns.
    Over-approximation is fine: reachability filters against the tops map. *)
@@ -1993,7 +2049,17 @@ and compile_node (env : env) (e : Ast.expr) : unit =
      | Reg r -> emit_word (enc_i 0 a0 0 r 0x13)                      (* mv  sX, a0 *)
      | Mem slot -> base_store fp a0 (slot_off slot));                (* sw  a0, slot(fp) *)
     tail_pos := saved_tail;
-    compile_expr ((name, idx) :: env) body
+    (* v0.1.628: a local `let f = fn a -> fn b -> ...` gets a direct entry too;
+       its captures are the closure's, counted as the Fun case counts them *)
+    (match rhs.Ast.node with
+     | Ast.Fun _ ->
+       let saved_scope = !direct_scope in
+       let fvs = dedup (free_vars_of rhs) |> List.filter (fun n -> List.mem_assoc n env) in
+       let dlo = register_direct name idx (fresh_label "__lam_") fvs rhs in
+       direct_finish dlo fvs env;
+       compile_expr ((name, idx) :: env) body;
+       direct_scope := saved_scope
+     | _ -> compile_expr ((name, idx) :: env) body)
   | Ast.Let ({ pnode = Ast.P_wild; _ }, rhs, body) ->
     compile_expr env rhs;
     tail_pos := saved_tail;
@@ -2060,6 +2126,7 @@ and compile_node (env : env) (e : Ast.expr) : unit =
     let fvs = dedup (free_vars_of e) |> List.filter (fun n -> List.mem_assoc n env) in
     let label = fresh_label "__lam_" in
     lambdas := (label, fvs, param, body) :: !lambdas;
+    Hashtbl.replace direct_caps label (direct_caps_of fvs env);
     let k = List.length fvs in
     List.iter (fun name -> load_to_a0 (List.assoc name env); push a0) fvs;
     alloc_words t1 (k + 1);                                         (* [code][cap...] *)
@@ -2078,6 +2145,11 @@ and compile_node (env : env) (e : Ast.expr) : unit =
       |> List.filter (fun n -> List.mem_assoc n env_f) in
     let label = fresh_label "__lam_" in
     lambdas := (label, fnexpr_fvs, param, fbody) :: !lambdas;
+    let saved_scope = !direct_scope in
+    let dlo = register_direct f fidx label fnexpr_fvs
+                { e with node = Ast.Fun (param, None, fbody) } in
+    direct_finish dlo fnexpr_fvs env_f;
+    Hashtbl.replace direct_caps label (direct_caps_of fnexpr_fvs env_f);
     let k = List.length fnexpr_fvs in
     alloc_words t1 (k + 1);                                         (* [code][cap...] *)
     emit (LoadAddr (t0, label)); emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);  (* store code ptr *)
@@ -2087,7 +2159,8 @@ and compile_node (env : env) (e : Ast.expr) : unit =
       emit_word (enc_s ((i + 1) * wsz ()) a0 t1 (stf3 ()) 0x23)
     ) fnexpr_fvs;
     tail_pos := saved_tail;
-    compile_expr env_f body
+    compile_expr env_f body;
+    direct_scope := saved_scope
   | Ast.Let_rec (bindings, body)
     when List.for_all (fun (_, _, (v : Ast.expr)) ->
            match v.node with Ast.Fun _ -> true | _ -> false) bindings ->
@@ -2100,16 +2173,25 @@ and compile_node (env : env) (e : Ast.expr) : unit =
       | Ast.Fun (param, _, fbody) -> let idx = new_slot () in (f, idx, param, fbody, v)
       | _ -> assert false) bindings in
     let env_rec = List.fold_left (fun acc (f, idx, _, _, _) -> (f, idx) :: acc) env members in
-    let filled = List.map (fun (_, idx, param, fbody, (v : Ast.expr)) ->
+    let saved_scope = !direct_scope in
+    (* every member's entry first, so each can call the others directly *)
+    let labelled = List.map (fun (f, idx, param, fbody, (v : Ast.expr)) ->
       let fvs =
         dedup (free_vars_of { v with node = Ast.Fun (param, None, fbody) })
         |> List.filter (fun n -> List.mem_assoc n env_rec) in
       let label = fresh_label "__lam_" in
+      (f, idx, param, fbody, v, fvs, label)) members in
+    let dls = List.map (fun (f, idx, param, fbody, (v : Ast.expr), fvs, label) ->
+      (register_direct f idx label fvs { v with node = Ast.Fun (param, None, fbody) }, fvs))
+      labelled in
+    List.iter (fun (dlo, fvs) -> direct_finish dlo fvs env_rec) dls;
+    let filled = List.map (fun (_, idx, param, fbody, _, fvs, label) ->
       lambdas := (label, fvs, param, fbody) :: !lambdas;
+      Hashtbl.replace direct_caps label (direct_caps_of fvs env_rec);
       alloc_words t1 (List.length fvs + 1);                          (* [code][cap...] *)
       emit (LoadAddr (t0, label)); emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);
       emit_word (enc_i 0 t1 0 a0 0x13); store_a0_to idx;            (* bind the member *)
-      (idx, fvs)) members in
+      (idx, fvs)) labelled in
     List.iter (fun (idx, fvs) ->
       load_to_a0 idx;
       emit_word (enc_i 0 a0 0 t1 0x13);                             (* mv t1, a0 *)
@@ -2118,7 +2200,8 @@ and compile_node (env : env) (e : Ast.expr) : unit =
         emit_word (enc_s ((i + 1) * wsz ()) a0 t1 (stf3 ()) 0x23)
       ) fvs) filled;
     tail_pos := saved_tail;
-    compile_expr env_rec body
+    compile_expr env_rec body;
+    direct_scope := saved_scope
   | Ast.Let_rec _ ->
     err e.loc "RV32I: a local `let rec` binds functions only (`let rec f = fn ...`)"
   | Ast.Str_lit s ->
@@ -2544,7 +2627,10 @@ and compile_app env e =
   (* A user binding always wins over a same-named builtin. Check locals /
      globals / top-level functions BEFORE the builtin names below. *)
   | Ast.Var f when List.mem_assoc f env || Hashtbl.mem globals_map f ->
-    compile_indirect ~tail:tail_here env head args
+    (match List.assoc_opt f !direct_scope with
+     | Some (idx, dl, n) when List.assoc_opt f env = Some idx && List.length args >= n ->
+       compile_direct ~tail:tail_here env head dl n args
+     | _ -> compile_indirect ~tail:tail_here env head args)
   | Ast.Var f when is_top f ->
     let arity = List.length (fst (Hashtbl.find tops f)) in
     let k = List.length args in
@@ -3723,6 +3809,40 @@ and compile_eta env head arity args =
   emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);              (* sw t0, 0(t1) *)
   emit_word (enc_i 0 t1 0 a0 0x13)                                (* mv a0, t1 *)
 
+(* v0.1.628: a call that gives a local function (see `directs`) all its
+   arguments: the closure in a0, the arguments in a1..aN, a jump to its direct
+   entry. Arguments past its arity are applied to the result one at a time. *)
+and compile_direct ~tail env head dl n args =
+  let sat = List.filteri (fun i _ -> i < n) args
+  and extra = List.filteri (fun i _ -> i >= n) args in
+  compile_expr env head;                               (* a0 = the closure *)
+  push a0;
+  List.iter (fun arg -> compile_expr env arg; push a0) sat;
+  for i = n downto 1 do pop (a0 + i) done;
+  pop a0;
+  let exact = extra = [] in
+  if tail && exact && (match !cur_self with Some (g, _) -> g = dl | None -> false) then begin
+    emit_word (enc_i 0 fp 0 sp 0x13);                  (* mv sp, fp *)
+    emit (Jal (zero, snd (Option.get !cur_self)))
+  end else if tail && exact then begin
+    emit_frame_teardown ();
+    emit (Jal (zero, dl))
+  end else begin
+    emit (Jal (ra, dl));
+    let last = List.length extra - 1 in
+    List.iteri (fun i arg ->
+      push a0;
+      compile_expr env arg;
+      emit_word (enc_i 0 a0 0 a1 0x13);
+      pop a0;
+      emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t1 0x03);
+      if tail && i = last then begin
+        emit_frame_teardown ();
+        emit_word (enc_i 0 t1 0 zero 0x67)
+      end else
+        emit_word (enc_i 0 t1 0 ra 0x67)) extra
+  end
+
 and compile_indirect ?(tail = false) env head args =
   compile_expr env head;                               (* a0 = closure *)
   let last = List.length args - 1 in
@@ -3958,6 +4078,7 @@ let emit_function ~label ~params ~body =
   let self_label = fresh_label ".self" in
   emit (Label self_label);
   cur_self := Some (label, self_label);
+  direct_scope := [];
   List.iteri (fun i _ ->
     (* args 0..7 arrive in a0..a7; args 8+ on the incoming stack, now at
        fp + fsz + (i-8)*4 (the prologue subtracted fsz from sp) *)
@@ -3993,6 +4114,47 @@ let emit_function ~label ~params ~body =
 
 (* a lifted lambda: closure env ptr in a0, the (single) argument in a1.
    Bindings are captures (indices 0..k-1) then the param (index k). *)
+(* v0.1.628: a local function's direct entry (see `directs`): its closure in a0,
+   its N arguments in a1..aN. Bindings are the closure's captures (0..k-1),
+   then the arguments (k..k+N-1); a self tail call re-enters after the
+   prologue, where the captures are read again from a0 and the arguments
+   taken from a1..aN. *)
+let emit_direct ~label ~captures ~params ~body =
+  let k = List.length captures in
+  let n = List.length params in
+  let total = k + n + max_lets body in
+  emit (Label label);
+  dbg_line := -1;
+  emit (Meta (Printf.sprintf "F %s fsz=%d ra=%d fp=%d params=%d line=%d"
+                label ((total + 2) * wsz ()) ((total + 1) * wsz ()) (total * wsz ())
+                (n + 1) (dbg_user_line body.Ast.loc)));
+  let fr = emit_prologue total in
+  let self_label = fresh_label ".self" in
+  emit (Label self_label);
+  cur_self := Some (label, self_label);
+  List.iteri (fun i _ ->
+    emit_word (enc_i ((i + 1) * wsz ()) a0 (ldf3 ()) t0 0x03);
+    match loc_of i with
+    | Reg r -> emit_word (enc_i 0 t0 0 r 0x13)
+    | Mem slot -> base_store fp t0 (slot_off slot)
+  ) captures;
+  List.iteri (fun j _ ->
+    match loc_of (k + j) with
+    | Reg r -> emit_word (enc_i 0 (a0 + 1 + j) 0 r 0x13)
+    | Mem slot -> base_store fp (a0 + 1 + j) (slot_off slot)
+  ) params;
+  slot_ctr := k + n; slot_hwm := k + n;
+  let env = List.mapi (fun i c -> (c, i)) captures @ List.mapi (fun j p -> (p, k + j)) params in
+  direct_scope := direct_scope_for label captures;
+  tail_pos := true;
+  compile_expr env body;
+  tail_pos := false;
+  cur_self := None;
+  if !slot_hwm > total then
+    failwith (Printf.sprintf
+      "RV32I internal: %s reserved %d frame slots but used %d" label total !slot_hwm);
+  emit_epilogue fr
+
 let emit_lambda ~label ~captures ~param ~body =
   let k = List.length captures in
   let total = k + 1 + max_lets body in
@@ -4015,6 +4177,7 @@ let emit_lambda ~label ~captures ~param ~body =
    | Mem slot -> base_store fp a1 (slot_off slot));
   slot_ctr := k + 1; slot_hwm := k + 1;
   let env = List.mapi (fun i c -> (c, i)) captures @ [(param, k)] in
+  direct_scope := direct_scope_for label captures;
   tail_pos := true;
   compile_expr env body;
   tail_pos := false;
@@ -4040,6 +4203,7 @@ let emit_main ?bare_entry main_body =
   let total =
     List.fold_left (fun n (_, e) -> max n (max_lets e)) (max_lets main_body) !globals in
   emit (Label "__main");
+  direct_scope := [];
   dbg_line := -1;
   emit (Meta (Printf.sprintf "F __main fsz=%d ra=%d fp=%d params=0 line=%d"
                 ((total + 2) * wsz ()) ((total + 1) * wsz ()) (total * wsz ())
@@ -6617,7 +6781,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   chr_tab_used := false;
   coro_mode := false;
   divzero_used := false;
-  lambdas := [];
+  lambdas := []; directs := []; direct_scope := []; Hashtbl.reset direct_caps;
   Hashtbl.reset adapters;
   globals := [];
   eq_pending := [];
@@ -6737,12 +6901,16 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   ) tops;
   (* drain the lambda worklist — emitting a lambda may enqueue more *)
   let rec drain () =
-    match !lambdas with
-    | [] -> ()
-    | (label, captures, param, body) :: rest ->
+    match !lambdas, !directs with
+    | (label, captures, param, body) :: rest, _ ->
       lambdas := rest;
       emit_lambda ~label ~captures ~param ~body;
       drain ()
+    | [], (label, captures, params, body) :: rest ->
+      directs := rest;
+      emit_direct ~label ~captures ~params ~body;
+      drain ()
+    | [], [] -> ()
   in
   drain ();
   (* the adapters: one move and a tail jump each, for every top-level function
