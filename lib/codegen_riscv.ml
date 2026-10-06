@@ -266,12 +266,57 @@ let pop rd =
 let coro_mode = ref false
 let tp = 4
 let emit_oom_check () =
-  if !coro_mode then emit (Branch (7, gp, tp, "__oom"))      (* bgeu gp, tp -> __oom *)
+  (* v0.1.627: with coroutines the room was made before the bump (see
+     emit_heap_reserve), and this is the net under it: gp past tp is a site
+     that bumped without reserving *)
+  if !coro_mode then emit (Branch (6, tp, gp, "__oom"))      (* bltu tp, gp -> __oom *)
   else emit (Branch (7, gp, sp, "__oom"))                     (* bgeu gp, sp -> __oom *)
+
+(* v0.1.627: A STACK'S OWN HEAP. With coroutines, every stack used to bump the
+   one gp, so each switch had to raise the high-water mark -- a block closing on
+   one stack could otherwise roll back over another's data -- and a program
+   that switched in the middle of its blocks reclaimed nothing (a hundred
+   coroutines and main, each making garbage in a block across a switch, ran
+   out of 256 MB where C needs 5.5). Now each coroutine allocates in a chain
+   of its own blocks and the switch carries gp and tp; the main stack keeps the
+   heap it always had, up to where blocks are carved (rtw_carve).
+   A coroutine's block can fill in the middle of an allocation, and an
+   allocation's registers are spoken for by then, so with coroutines the room
+   is asked for BEFORE the bump: tmp = gp + size (+ extra), and if that is past
+   tp, __heap_more (t6 = the bytes) moves gp and tp to a block with room. It
+   keeps every register but those two, so the site goes on as if nothing
+   happened. On the main stack __heap_more is out of memory, as before. tmp
+   must be a register the site is about to overwrite. *)
+type heap_size = Rsz of int | Isz of int
+let emit_heap_reserve ?(extra = 0) ~tmp size =
+  if !coro_mode then begin
+    let w = wsz () in
+    let ok = fresh_label ".hres" in
+    (match size with
+     | Isz n -> li tmp (n + extra); emit_word (enc_r 0 tmp gp 0 tmp 0x33)
+     | Rsz r ->
+       emit_word (enc_r 0 r gp 0 tmp 0x33);
+       if extra <> 0 then emit_word (enc_i extra tmp 0 tmp 0x13));
+    emit (Branch (7, tp, tmp, ok));                            (* bgeu tp, gp+size -> room *)
+    emit_word (enc_i (-2 * w) sp 0 sp 0x13);
+    emit_word (enc_s 0 ra sp (stf3 ()) 0x23);
+    emit_word (enc_s w t6 sp (stf3 ()) 0x23);
+    (match size with
+     | Isz n -> li t6 (n + extra)
+     | Rsz r ->
+       if r <> t6 then emit_word (enc_i 0 r 0 t6 0x13);
+       if extra <> 0 then emit_word (enc_i extra t6 0 t6 0x13));
+    emit (Jal (ra, "__heap_more"));
+    emit_word (enc_i w sp (ldf3 ()) t6 0x03);
+    emit_word (enc_i 0 sp (ldf3 ()) ra 0x03);
+    emit_word (enc_i (2 * w) sp 0 sp 0x13);
+    emit (Label ok)
+  end
 
 (* bump-allocate n words, leaving the block pointer in rd. The caller must
    not make any call between this and its field stores (rd/gp are volatile). *)
 let alloc_words rd n =
+  emit_heap_reserve ~tmp:rd (Isz (n * wsz ()));
   emit_word (enc_i 0 gp 0 rd 0x13);                    (* mv   rd, gp *)
   emit_word (enc_i (n * wsz ()) gp 0 gp 0x13);         (* addi gp, gp, n*w *)
   emit_oom_check ()
@@ -764,7 +809,7 @@ let globals_base () = !load_base + !code_span
    "the buffer the print helpers build digits in", and putting unrelated state
    there would make the description untrue. Top-level value bindings start one
    word further up; the heap starts after those, as before. *)
-let runtime_words = 72
+let runtime_words = 80
 let fail_frame_addr () = globals_base ()
 (* v0.1.613: three more runtime words for region reclamation (see the
    Region_block arm): how many region blocks are open, the innermost one's
@@ -793,6 +838,22 @@ let rt_free_off k = (7 + k) * wsz ()
 let rtw_floor = 32 and rtw_rootsp = 33 and rtw_lastsp = 34 and rtw_fromkind = 35
 and rtw_frombuf = 36 and rtw_tobuf = 37 and rtw_tosp = 38 and rtw_tofloor = 39
 and rtw_live = 47 and rtw_retired = 49 and rtw_retired_bytes = 62
+(* v0.1.627: every coroutine allocates in a heap of its own (see __heap_more).
+   CARVE is where the next block is cut from, downwards from coro_co_lo, and the
+   main stack's heap limit; BLO is the running stack's current block's first
+   data word (the main stack's: the heap's start); FROMREC / TOREC are the
+   switch's two records, for __rv_cswap; CHAIN is the running stack's newest
+   block (its blocks are linked through their first word) and FIRST its oldest;
+   REALTP holds tp while a copy runs inside an arena; DEFER the blocks a region
+   block's exit has rolled back past, given back once its result is copied. *)
+let rtw_carve = 72 and rtw_blo = 73 and rtw_fromrec = 74 and rtw_torec = 75
+and rtw_chain = 76 and rtw_first = 77 and rtw_realtp = 78 and rtw_defer = 79
+(* the record words the switch keeps a stack's heap in: gp, tp, the high-water
+   mark, BLO, CHAIN, FIRST (13 was "gp when it last stopped" since v0.1.624) *)
+let crec_gp = 13 and crec_tp = 14 and crec_hwm = 15 and crec_blo = 16
+and crec_chain = 17 and crec_first = 18
+(* a coroutine's first block, and the size past which the next is not doubled *)
+let coro_heap_first = 4096 and coro_heap_double_max = 0x100000
 let rtw_addr k = globals_base () + k * wsz ()
 let arena_classes = 24
 (* the smallest arena block. 1 KB, not C's 4 KB seed: mere-ruby gives every
@@ -867,6 +928,30 @@ let emit_store_value (ty : Ast.ty) =
 let emit_protect () =
   let l_skip = fresh_label ".prot" in
   let l_do = fresh_label ".protDo" in
+  if !coro_mode then begin
+    (* v0.1.627: on a stack whose heap is a chain of blocks (see the
+       Region_block arm), only a block whose mark is in the current block can
+       roll back, and only over that block: a container outside
+       [max(mark, hwm), gp) there is older than what it is given, and the
+       mark goes to gp. An innermost mark in another block rolls nothing back. *)
+    li t0 (rt_depth_addr ());
+    emit_word (enc_i rt_depth_off t0 (ldf3 ()) t1 0x03);
+    emit (Branch (0, t1, zero, l_skip));                       (* no block open *)
+    emit_word (enc_i (rt_bmark_off ()) t0 (ldf3 ()) t2 0x03); (* block mark *)
+    li t3 (rtw_addr rtw_blo);
+    emit_word (enc_i 0 t3 (ldf3 ()) t3 0x03);                  (* this block's start *)
+    emit (Branch (6, t2, t3, l_skip));                         (* the mark is in another *)
+    emit (Branch (6, gp, t2, l_skip));                         (*   block: nothing rolls back *)
+    emit (Branch (6, a0, t2, l_do));                           (* bltu c, mark *)
+    emit (Branch (7, a0, gp, l_do));                           (* bgeu c, gp *)
+    emit_word (enc_i (rt_hwm_off ()) t0 (ldf3 ()) t1 0x03);   (* hwm *)
+    emit (Branch (6, t1, t3, l_skip));                         (* hwm in another block *)
+    emit (Branch (6, gp, t1, l_skip));
+    emit (Branch (7, a0, t1, l_skip));                         (* bgeu c, hwm -> skip *)
+    emit (Label l_do);
+    emit_word (enc_s (rt_hwm_off ()) gp t0 (stf3 ()) 0x23);   (* hwm = gp *)
+    emit (Label l_skip)
+  end else begin
   li t0 (rt_depth_addr ());
   emit_word (enc_i rt_depth_off t0 (ldf3 ()) t1 0x03);        (* depth *)
   emit (Branch (0, t1, zero, l_skip));                         (* no block open *)
@@ -879,6 +964,7 @@ let emit_protect () =
   emit (Branch (7, t3, gp, l_skip));                           (* only ever raised *)
   emit_word (enc_s (rt_hwm_off ()) gp t0 (stf3 ()) 0x23);     (* hwm = gp *)
   emit (Label l_skip)
+  end
 
 (* v0.1.614: protect a store into a Vec (a0) -- unless the Vec lives in an arena,
    whose contents are copies outside every region block. *)
@@ -2088,6 +2174,38 @@ and compile_node (env : env) (e : Ast.expr) : unit =
         emit_word (enc_i mark_at sp (ldf3 ()) t1 0x03);           (* t1 = mark *)
         li t0 (rt_depth_addr ());
         emit_word (enc_i (rt_hwm_off ()) t0 (ldf3 ()) t2 0x03);  (* t2 = hwm *)
+        if !coro_mode then begin
+          (* v0.1.627: a stack's heap is a chain of blocks, and addresses in two
+             of them say nothing about which came first. A block whose mark is
+             in this stack's current block rolls back as before -- with the
+             high-water mark counted only if it is in that block too (one in an
+             older block is below the mark). A mark in another block -- this
+             block's allocations ran past the end of one -- keeps everything:
+             what it allocated stays, as every allocation did before the
+             blocks had marks, and the blocks double, so that happens a few
+             times in a stack's life. *)
+          let l_keep = fresh_label ".rgnKeepAll" and l_set = fresh_label ".rgnSet" in
+          let l_cross = fresh_label ".rgnCross" in
+          li t3 (rtw_addr rtw_blo);
+          emit_word (enc_i 0 t3 (ldf3 ()) t3 0x03);              (* t3 = this block's start *)
+          emit (Branch (6, t1, t3, l_cross));                    (* bltu mark, start *)
+          emit (Branch (6, gp, t1, l_cross));                    (* bltu gp, mark *)
+          emit (Branch (6, t2, t3, l_set));                      (* hwm in another block *)
+          emit (Branch (6, gp, t2, l_set));
+          emit (Branch (6, t2, t1, l_set));                      (* bltu hwm, mark -> mark *)
+          emit_word (enc_i 0 t2 0 t1 0x13);                      (* t1 = hwm *)
+          emit (Label l_set);
+          emit_word (enc_i 0 t1 0 gp 0x13);                      (* gp = max(mark, hwm) *)
+          emit (Jal (zero, l_keep));
+          (* the mark is in an older block: back along the chain (see
+             __rgn_cross); the blocks past it wait in rtw_defer *)
+          emit (Label l_cross);
+          push ra;
+          emit (Jal (ra, "__rgn_cross"));
+          pop ra;
+          li t0 (rt_depth_addr ());
+          emit (Label l_keep)
+        end else begin
         (* never past this block's own gp: see emit_protect *)
         let lc = fresh_label ".rgnClamp" in
         emit (Branch (6, t2, gp, lc));                            (* bltu hwm, gp -> keep hwm *)
@@ -2097,7 +2215,8 @@ and compile_node (env : env) (e : Ast.expr) : unit =
         emit (Branch (6, t2, t1, l));                             (* bltu hwm, mark -> keep mark *)
         emit_word (enc_i 0 t2 0 t1 0x13);                         (* t1 = hwm *)
         emit (Label l);
-        emit_word (enc_i 0 t1 0 gp 0x13);                         (* gp = max(mark, hwm) *)
+        emit_word (enc_i 0 t1 0 gp 0x13)                          (* gp = max(mark, hwm) *)
+        end;
         emit_word (enc_i outer_at sp (ldf3 ()) t3 0x03);
         emit_word (enc_s (rt_bmark_off ()) t3 t0 (stf3 ()) 0x23);
         emit_word (enc_i rt_depth_off t0 (ldf3 ()) t3 0x03);
@@ -2123,6 +2242,14 @@ and compile_node (env : env) (e : Ast.expr) : unit =
         emit_word (enc_i w sp (ldf3 ()) t4 0x03);                 (* c1e *)
         emit_word (enc_r 0x20 t3 t4 0 t5 0x33);                   (* t5 = c1e - c1s *)
         emit_word (enc_r 0 t5 gp 0 t5 0x33);                      (* t5 = gp + size *)
+        if !coro_mode then begin
+          (* v0.1.627: copy 1 in another block than gp's (the rollback went
+             back along the chain) is never in the way: copy *)
+          li t6 (rtw_addr rtw_blo);
+          emit_word (enc_i 0 t6 (ldf3 ()) t6 0x03);
+          emit (Branch (6, t3, t6, l_copy));
+          emit (Branch (7, t3, tp, l_copy))
+        end;
         emit (Branch (7, t3, t5, l_copy));                        (* bgeu c1s, gp+size -> copy *)
         emit (Branch (7, gp, t4, l_copy));                        (* bgeu gp, c1e -> copy *)
         emit (Label l_keep);
@@ -2134,6 +2261,18 @@ and compile_node (env : env) (e : Ast.expr) : unit =
         emit (Jal (ra, copier));                                  (* a0 = copy 2 *)
         emit (Label l_done);
         emit_word (enc_i (5 * w) sp 0 sp 0x13)
+      end;
+      if !coro_mode then begin
+        (* v0.1.627: the blocks the rollback went back past, now that the
+           result is out of them *)
+        let l = fresh_label ".rgnNoDefer" in
+        li t0 (rtw_addr rtw_defer);
+        emit_word (enc_i 0 t0 (ldf3 ()) t0 0x03);
+        emit (Branch (0, t0, zero, l));
+        push ra;
+        emit (Jal (ra, "__rgn_defer_free"));
+        pop ra;
+        emit (Label l)
       end;
       (* v0.1.624: a region block's exit is the other place retired blocks are
          given back (see emit_coro_release): blocks are freed on paths no
@@ -3254,6 +3393,7 @@ and compile_app env e =
        past them *)
     compile_expr env (List.hd args);
     emit_word (enc_i (if wsz () = 8 then 3 else 2) a0 1 a0 0x13);
+    emit_heap_reserve ~tmp:t1 (Rsz a0);
     emit_word (enc_i 0 gp 0 t1 0x13);
     emit_word (enc_r 0 a0 gp 0 gp 0x33);
     emit_oom_check ();
@@ -3949,10 +4089,14 @@ let emit_start () =
     (* v0.1.623: the heap's limit, and the main stack's floor *)
     li tp (coro_co_lo ());
     li t1 (coro_main_lo ());
-    emit_word (enc_s (rtw_floor * wsz ()) t1 t0 (stf3 ()) 0x23)
+    emit_word (enc_s (rtw_floor * wsz ()) t1 t0 (stf3 ()) 0x23);
+    (* v0.1.627: blocks are cut from the heap's top down, and the main stack's
+       heap is one block from its start *)
+    emit_word (enc_s (rtw_carve * wsz ()) tp t0 (stf3 ()) 0x23)
   end;
   (* heap top starts just above the runtime word and the globals region *)
   li gp (globals_base () + (runtime_words + Hashtbl.length globals_map) * wsz ());
+  if !coro_mode then emit_word (enc_s (rtw_blo * wsz ()) gp t0 (stf3 ()) 0x23);
   (* Q-110: mstatus.VS = Initial. A real machine (QEMU) traps every vector
      instruction while the extension is Off; memu keeps no such state and the
      write is harmless there, and on a core without V the bits are WARL zero. *)
@@ -4018,6 +4162,7 @@ let emit_str_concat () =
   emit_word (enc_i (wsz () - 1) t2 0 t4 0x13);                     (* addi t4, t2, 3 *)
   emit_word (enc_i (0 - wsz ()) t4 7 t4 0x13);                  (* andi t4, t4, -4 — round4(total) *)
   emit_word (enc_i (wsz ()) t4 0 t4 0x13);                     (* addi t4, t4, 4  — + len word *)
+  emit_heap_reserve ~tmp:t3 (Rsz t4);
   emit_word (enc_i 0 gp 0 t3 0x13);                     (* mv t3, gp     — result ptr *)
   emit_word (enc_r 0 t4 t3 0 gp 0x33);                  (* add gp, t3, t4  — bump first *)
   emit_oom_check ();
@@ -4102,6 +4247,7 @@ let emit_rv_slurp () =
   emit (Label "__rv_slurp");
   emit_word (enc_i (0 - 2 * wsz ()) sp 0 sp 0x13);       (* addi sp, sp, -2w *)
   emit_word (enc_s (0 * wsz ()) a0 sp (stf3 ()) 0x23);   (* [sp+0] = fd *)
+  emit_heap_reserve ~tmp:t3 (Isz (wsz ()));
   emit_word (enc_i 0 gp 0 t3 0x13);                      (* t3 = block base *)
   emit_word (enc_s (wsz ()) t3 sp (stf3 ()) 0x23);       (* [sp+w] = base *)
   emit_word (enc_i (wsz ()) gp 0 gp 0x13);               (* reserve the len cell *)
@@ -4113,6 +4259,43 @@ let emit_rv_slurp () =
      small positive offset and the room check would have passed on a lie. *)
   li t5 rv_read_chunk;
   emit_word (enc_r 0 t5 gp 0 t4 0x33);                   (* t4 = gp + CHUNK *)
+  if !coro_mode then begin
+    (* v0.1.627: the room is tp, and on a coroutine a full block is not the end:
+       a block with room for what was read and a chunk more is taken, and what
+       was read moves to it (it was compared against sp before, which with
+       coroutines is not where the heap ends) *)
+    let w = wsz () in
+    emit (Branch (7, tp, t4, ".sl_room"));               (* bgeu tp, gp+CHUNK *)
+    emit_word (enc_i w sp (ldf3 ()) t3 0x03);            (* t3 = base *)
+    emit_word (enc_r 0x20 t3 gp 0 t4 0x33);              (* t4 = bytes so far *)
+    emit_word (enc_i (-2 * w) sp 0 sp 0x13);
+    emit_word (enc_s 0 ra sp (stf3 ()) 0x23);
+    emit_word (enc_s w t6 sp (stf3 ()) 0x23);
+    emit_word (enc_r 0 t5 t4 0 t6 0x33);
+    emit_word (enc_i w t6 0 t6 0x13);                    (* t6 = so far + CHUNK + w *)
+    emit (Jal (ra, "__heap_more"));
+    emit_word (enc_i w sp (ldf3 ()) t6 0x03);
+    emit_word (enc_i 0 sp (ldf3 ()) ra 0x03);
+    emit_word (enc_i (2 * w) sp 0 sp 0x13);
+    emit_word (enc_i w sp (ldf3 ()) t3 0x03);            (* t3 = the old base *)
+    emit_word (enc_i 0 gp 0 t0 0x13);                    (* t0 = the new one *)
+    emit_word (enc_i (w - 1) t4 0 t1 0x13);
+    emit_word (enc_i (0 - w) t1 7 t1 0x13);
+    emit_word (enc_r 0 t3 t1 0 t1 0x33);                 (* t1 = the old end, in words *)
+    emit_word (enc_i 0 t0 0 t2 0x13);
+    emit (Label ".sl_mv");
+    emit (Branch (7, t3, t1, ".sl_mvd"));
+    emit_word (enc_i 0 t3 (ldf3 ()) t5 0x03);
+    emit_word (enc_s 0 t5 t2 (stf3 ()) 0x23);
+    emit_word (enc_i w t3 0 t3 0x13);
+    emit_word (enc_i w t2 0 t2 0x13);
+    emit (Jal (zero, ".sl_mv"));
+    emit (Label ".sl_mvd");
+    emit_word (enc_s w t0 sp (stf3 ()) 0x23);            (* the base is the new one *)
+    emit_word (enc_r 0 t4 t0 0 gp 0x33);                 (* gp = after what was read *)
+    emit (Jal (zero, ".sl_loop"));
+    emit (Label ".sl_room")
+  end else
   emit (Branch (7, t4, sp, "__oom"));                    (* bgeu t4, sp -> oom *)
   emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) a0 0x03);   (* a0 = fd *)
   emit_word (enc_i 0 gp 0 a1 0x13);                      (* a1 = buf = heap top *)
@@ -4436,6 +4619,7 @@ let emit_bytes_slice () =
   emit_word (enc_i (wsz () - 1) a2 0 t4 0x13);               (* round n up to a word *)
   emit_word (enc_i (0 - wsz ()) t4 7 t4 0x13);
   emit_word (enc_i (wsz ()) t4 0 t4 0x13);                   (* + the len word *)
+  emit_heap_reserve ~tmp:t3 (Rsz t4);
   emit_word (enc_i 0 gp 0 t3 0x13);                          (* t3 = result *)
   emit_word (enc_r 0 t4 t3 0 gp 0x33);                       (* bump *)
   emit_oom_check ();
@@ -4468,6 +4652,7 @@ let emit_bytes_of_hex () =
   emit_word (enc_i (wsz () - 1) a2 0 t4 0x13);
   emit_word (enc_i (0 - wsz ()) t4 7 t4 0x13);
   emit_word (enc_i (wsz ()) t4 0 t4 0x13);
+  emit_heap_reserve ~tmp:t3 (Rsz t4);
   emit_word (enc_i 0 gp 0 t3 0x13);                          (* t3 = result *)
   emit_word (enc_r 0 t4 t3 0 gp 0x33);
   emit_oom_check ();
@@ -4516,6 +4701,7 @@ let emit_hex_of_bytes () =
   emit_word (enc_i (wsz () - 1) a2 0 t4 0x13);               (* round 2n up to a word, + len word *)
   emit_word (enc_i (0 - wsz ()) t4 7 t4 0x13);
   emit_word (enc_i (wsz ()) t4 0 t4 0x13);
+  emit_heap_reserve ~tmp:t3 (Rsz t4);
   emit_word (enc_i 0 gp 0 t3 0x13);                          (* t3 = result *)
   emit_word (enc_r 0 t4 t3 0 gp 0x33);
   emit_oom_check ();
@@ -4616,6 +4802,7 @@ let emit_str_of_int () =
   emit_word (enc_i (wsz () - 1) t1 0 t4 0x13);                     (* round4(len)+4 *)
   emit_word (enc_i (0 - wsz ()) t4 7 t4 0x13);
   emit_word (enc_i (wsz ()) t4 0 t4 0x13);
+  emit_heap_reserve ~tmp:t3 (Rsz t4);
   emit_word (enc_i 0 gp 0 t3 0x13);                     (* t3 = result = gp *)
   emit_word (enc_r 0 t4 t3 0 gp 0x33);                  (* bump first *)
   emit_oom_check ();
@@ -4655,6 +4842,7 @@ let emit_substring () =
   emit_word (enc_i (wsz () - 1) a2 0 t1 0x13);                     (* round4(len)+4 *)
   emit_word (enc_i (0 - wsz ()) t1 7 t1 0x13);
   emit_word (enc_i (wsz ()) t1 0 t1 0x13);
+  emit_heap_reserve ~tmp:t0 (Rsz t1);
   emit_word (enc_i 0 gp 0 t0 0x13);                     (* t0 = result = gp *)
   emit_word (enc_r 0 t1 t0 0 gp 0x33);                  (* bump first *)
   emit_oom_check ();
@@ -4688,6 +4876,7 @@ let emit_substring () =
    [len][bytes] block (the buffer stays usable); __strbuf_len reads the cell. *)
 let emit_strbuf () =
   emit (Label "__strbuf_new");                     (* a0 ignored *)
+  emit_heap_reserve ~tmp:t0 (Isz (16 + 3 * wsz ()));
   emit_word (enc_i 0 gp 0 t0 0x13);                (* databuf = gp *)
   emit_word (enc_i 16 gp 0 gp 0x13);               (* bump 16 BYTES (initial cap) *)
   emit_word (enc_i 0 gp 0 t1 0x13);                (* cell = gp *)
@@ -4712,6 +4901,7 @@ let emit_strbuf () =
   emit_word (enc_i 1 t4 1 t4 0x13);                (* slli t4, t4, 1 *)
   emit (Branch (4, t4, t3, ".sb_grow"));           (* blt newcap, need -> again *)
   emit_word (enc_s (wsz ()) t4 a0 (stf3 ()) 0x23);                    (* cell.cap = newcap *)
+  emit_heap_reserve ~extra:(wsz ()) ~tmp:t5 (Rsz t4);
   emit_word (enc_i 0 gp 0 t5 0x13);                (* newbuf = gp *)
   emit_word (enc_r 0 t4 gp 0 gp 0x33);             (* gp += newcap bytes *)
   emit_word (enc_i (wsz () - 1) gp 0 gp 0x13);     (* round the heap back up *)
@@ -4756,6 +4946,7 @@ let emit_strbuf () =
   emit_word (enc_i (wsz () - 1) t0 0 t4 0x13);     (* round len up to words *)
   emit_word (enc_i (0 - wsz ()) t4 7 t4 0x13);
   emit_word (enc_i (wsz ()) t4 0 t4 0x13);         (* + the len header *)
+  emit_heap_reserve ~tmp:t5 (Rsz t4);
   emit_word (enc_i 0 gp 0 t5 0x13);                (* block = gp *)
   emit_word (enc_r 0 t4 gp 0 gp 0x33);
   emit_oom_check ();
@@ -4788,6 +4979,7 @@ let emit_vec () =
      through the stale capacity into the cell's own length field. A value and a
      size can wear the same literal, and only one of them scales. *)
   emit_word (enc_i 4 zero 0 t2 0x13);                     (* cap = 4 CELLS *)
+  emit_heap_reserve ~tmp:t0 (Isz (8 * wsz ()));
   emit_word (enc_i 0 gp 0 t0 0x13);                (* databuf = gp *)
   emit_word (enc_i (4 * wsz ()) gp 0 gp 0x13);     (* bump 4 cells *)
   emit_word (enc_i 0 gp 0 t1 0x13);                (* cell = gp *)
@@ -4809,6 +5001,7 @@ let emit_vec () =
   emit_word (enc_i (wshift ()) t3 1 t4 0x13);      (* slli t4, newcap, w = bytes *)
   emit_word (enc_i (3 * wsz ()) a0 (ldf3 ()) t5 0x03);                (* the arena *)
   emit (Branch (1, t5, zero, ".vp_arena"));
+  emit_heap_reserve ~tmp:t5 (Rsz t4);
   emit_word (enc_i 0 gp 0 t5 0x13);                (* newbuf = gp *)
   emit_word (enc_r 0 t4 gp 0 gp 0x33);             (* gp += bytes *)
   emit_oom_check ();
@@ -4917,6 +5110,14 @@ let emit_coro_rt () =
   addi sp sp (0 - frame);
   List.iteri (fun i r -> sd r (i * w) sp) saved;
   li t0 (globals_base ());
+  (* v0.1.627: the stack left keeps its heap -- gp, tp and the runtime words
+     that describe it -- in its record, and the one entered gets its own *)
+  let heap_words = [ (3, crec_hwm); (rtw_blo, crec_blo); (rtw_chain, crec_chain);
+                     (rtw_first, crec_first) ] in
+  ld t1 (rtw_fromrec * w) t0;
+  sd gp (crec_gp * w) t1;
+  sd tp (crec_tp * w) t1;
+  List.iter (fun (k, f) -> ld t2 (k * w) t0; sd t2 (f * w) t1) heap_words;
   ld t1 (rtw_fromkind * w) t0;
   emit (Branch (0, t1, zero, ".csRoot"));
   addi t2 t1 (-2);
@@ -4956,9 +5157,129 @@ let emit_coro_rt () =
   li t1 (coro_main_lo ());
   sd t1 (rtw_floor * w) t0;
   emit (Label ".csPop");
+  ld t1 (rtw_torec * w) t0;
+  ld gp (crec_gp * w) t1;
+  ld tp (crec_tp * w) t1;
+  List.iter (fun (k, f) -> ld t2 (f * w) t1; sd t2 (k * w) t0) heap_words;
+  (* the main stack's heap ends where blocks have been cut down to by now *)
+  ld t2 (rtw_tobuf * w) t0;
+  (let l = fresh_label ".csCo" in
+   emit (Branch (1, t2, zero, l));
+   ld tp (rtw_carve * w) t0;
+   emit (Label l));
   List.iteri (fun i r -> ld r (i * w) sp) saved;
   addi sp sp frame;
   emit_word (enc_i 0 ra 0 zero 0x67);                       (* ret *)
+  (* v0.1.627: __heap_more(t6 = bytes wanted): the running coroutine's next
+     block, with room for them -- twice the current one up to a megabyte,
+     never less than coro_heap_first -- linked onto its chain, and gp / tp
+     moved there. Keeps every register but gp and tp (see emit_heap_reserve).
+     The main stack has no next block: its heap ends where blocks are cut. *)
+  (* v0.1.627: __rgn_cross(t1 = a region block's mark, t2 = the high-water
+     mark): the block's exit when its mark is not in the running coroutine's
+     current block. Back along the chain (newest first) to the first block that
+     holds the high-water mark or the mark -- the higher of the two when one
+     holds both -- and gp there; the blocks passed go on rtw_defer, to be given
+     back once the block's result has been copied out of them. A mark in no
+     block of the chain (the stack's heap was empty when the block opened)
+     keeps everything, as before -- except a mark of 0, a block opened before
+     the stack's first block. Keeps a0, a1, ra. *)
+  emit (Label "__rgn_cross");
+  addi sp sp (0 - 4 * w);
+  sd ra 0 sp; sd a0 w sp; sd 11 (2 * w) sp;
+  li t0 (rtw_addr rtw_chain); ld t3 0 t0;
+  emit (Label ".rcFind");
+  emit (Branch (0, t3, zero, ".rcNone0"));
+  addi t4 t3 (2 * w);
+  ld t5 w t3; emit_word (enc_r 0 t5 t3 0 t5 0x33);         (* [t4, t5] the block's data *)
+  emit (Branch (6, t2, t4, ".rcNotH"));
+  emit (Branch (6, t5, t2, ".rcNotH"));
+  mv t6 t2;                                                (* the high-water mark is here *)
+  emit (Branch (6, t1, t4, ".rcFound"));
+  emit (Branch (6, t5, t1, ".rcFound"));
+  emit (Branch (7, t6, t1, ".rcFound"));                   (* and the mark too: the higher *)
+  mv t6 t1;
+  emit (Jal (zero, ".rcFound"));
+  emit (Label ".rcNotH");
+  emit (Branch (6, t1, t4, ".rcNotM"));
+  emit (Branch (6, t5, t1, ".rcNotM"));
+  mv t6 t1;
+  emit (Jal (zero, ".rcFound"));
+  emit (Label ".rcNotM");
+  ld t3 0 t3;
+  emit (Jal (zero, ".rcFind"));
+  (* a mark of 0: the block opened before the coroutine had a block at all
+     (mere-ruby's collector opens one first thing), so everything since is
+     its own -- back to the start of the first block *)
+  emit (Label ".rcNone0");
+  emit (Branch (1, t1, zero, ".rcNone"));
+  li t0 (rtw_addr rtw_first); ld t3 0 t0;
+  emit (Branch (0, t3, zero, ".rcNone"));
+  addi t6 t3 (2 * w);
+  emit (Jal (zero, ".rcFound"));
+  emit (Label ".rcFound");                                 (* t3 = the block, t6 = gp *)
+  li t0 (rtw_addr rtw_chain); ld a0 0 t0;
+  emit (Label ".rcMove");
+  emit (Branch (0, a0, t3, ".rcMoved"));
+  ld 11 0 a0;
+  li t4 (rtw_addr rtw_defer); ld t5 0 t4; sd t5 0 a0; sd a0 0 t4;
+  mv a0 11;
+  emit (Jal (zero, ".rcMove"));
+  emit (Label ".rcMoved");
+  li t0 (rtw_addr rtw_chain); sd t3 0 t0;
+  mv gp t6;
+  ld t5 w t3; emit_word (enc_r 0 t5 t3 0 tp 0x33);
+  addi t5 t3 (2 * w);
+  li t0 (rtw_addr rtw_blo); sd t5 0 t0;
+  emit (Label ".rcNone");
+  ld 11 (2 * w) sp; ld a0 w sp; ld ra 0 sp;
+  addi sp sp (4 * w);
+  emit_word (enc_i 0 ra 0 zero 0x67);
+  (* __rgn_defer_free: every block on rtw_defer back to the free lists. Keeps
+     a0, a1, ra. *)
+  emit (Label "__rgn_defer_free");
+  addi sp sp (0 - 4 * w);
+  sd ra 0 sp; sd a0 w sp; sd 11 (2 * w) sp;
+  li t0 (rtw_addr rtw_defer); ld a0 0 t0; sd zero 0 t0;
+  emit (Label ".dfLoop");
+  emit (Branch (0, a0, zero, ".dfDone"));
+  ld 11 0 a0;
+  emit (Jal (ra, "__blk_put_now"));
+  mv a0 11;
+  emit (Jal (zero, ".dfLoop"));
+  emit (Label ".dfDone");
+  ld 11 (2 * w) sp; ld a0 w sp; ld ra 0 sp;
+  addi sp sp (4 * w);
+  emit_word (enc_i 0 ra 0 zero 0x67);
+  emit (Label "__heap_more");
+  let keep = [ ra; a0; 11; t0; t1; t2; t3; t4; t5 ] in
+  addi sp sp (0 - 10 * w);
+  List.iteri (fun i r -> sd r (i * w) sp) keep;
+  li t0 (rtw_addr 44); ld t0 0 t0;
+  emit (Branch (0, t0, zero, "__oom"));
+  li t1 (rtw_addr rtw_blo); ld t1 0 t1;
+  emit_word (enc_r 0x20 t1 tp 0 t2 0x33);                  (* t2 = this block's room *)
+  emit_word (enc_i 1 t2 1 t2 0x13);                        (* twice it *)
+  li t3 coro_heap_double_max;
+  (let l = fresh_label ".hmCap" in emit (Branch (7, t3, t2, l)); mv t2 t3; emit (Label l));
+  addi t3 t6 (2 * w);
+  (let l = fresh_label ".hmNeed" in emit (Branch (7, t2, t3, l)); mv t2 t3; emit (Label l));
+  li t3 coro_heap_first;
+  (let l = fresh_label ".hmFirst" in emit (Branch (7, t2, t3, l)); mv t2 t3; emit (Label l));
+  mv a0 t2;
+  emit (Jal (ra, "__blk_get"));                            (* a0 = a block, its size at word 1 *)
+  li t0 (rtw_addr rtw_chain);
+  ld t1 0 t0; sd t1 0 a0; sd a0 0 t0;                      (* the newest *)
+  li t0 (rtw_addr rtw_first);
+  ld t1 0 t0;
+  (let l = fresh_label ".hmHas" in emit (Branch (1, t1, zero, l)); sd a0 0 t0; emit (Label l));
+  ld t1 w a0;
+  emit_word (enc_r 0 t1 a0 0 tp 0x33);                     (* tp = its end *)
+  addi gp a0 (2 * w);                                      (* gp = past [next][size] *)
+  li t0 (rtw_addr rtw_blo); sd gp 0 t0;
+  List.iteri (fun i r -> ld r (i * w) sp) keep;
+  addi sp sp (10 * w);
+  emit_word (enc_i 0 ra 0 zero 0x67);
   (* a coroutine's first return lands here; rvcoro_boot never returns *)
   emit (Label "__rv_coro_boot");
   emit (Jal (ra, "u_rvcoro_boot"));
@@ -5248,8 +5569,33 @@ let emit_arena () =
   li t3 0x100000;
   (let l = fresh_label ".bgBig" in
    emit (Branch (6, t1, t3, l)); addi t3 t1 0; emit (Label l));    (* t3 = max(size, 1 MB) *)
-  addi a0 gp 0; add gp gp t3;
-  emit_oom_check ();
+  if !coro_mode then begin
+    (* v0.1.627: from the top of the heap down, not from gp: gp is the running
+       stack's own heap, a coroutine's block or the main stack's, and a block
+       for everyone cut from it would sit inside that stack's region blocks.
+       Above the main stack's gp, which it may not pass, and the main stack's
+       heap ends where the cutting reached (its tp). *)
+    li a1 (rtw_addr rtw_carve);
+    ld t6 0 a1;
+    emit (Branch (6, t6, t3, "__oom"));                  (* bltu carve, chunk *)
+    emit_word (enc_r 0x20 t3 t6 0 a0 0x33);              (* a0 = carve - chunk *)
+    li t4 (rtw_addr 44); ld t4 0 t4;                     (* the running stack *)
+    emit (Branch (1, t4, zero, ".bgMainAway"));
+    addi t5 gp 0;
+    emit (Jal (zero, ".bgFloor"));
+    emit (Label ".bgMainAway");
+    li t5 (rtw_addr 40); ld t5 0 t5; ld t5 0 t5;         (* record 0 *)
+    ld t5 (crec_gp * w) t5;                              (* the main stack's gp *)
+    emit (Label ".bgFloor");
+    emit (Branch (6, a0, t5, "__oom"));
+    sd a0 0 a1;
+    emit (Branch (1, t4, zero, ".bgCut"));
+    addi tp a0 0;
+    emit (Label ".bgCut")
+  end else begin
+    addi a0 gp 0; add gp gp t3;
+    emit_oom_check ()
+  end;
   sd t1 w a0;
   addi t4 t1 0;                                          (* t4 = piece size *)
   addi t5 t2 0;                                          (* t5 = its class *)
@@ -5262,6 +5608,7 @@ let emit_arena () =
   slli t4 t4 1; addi t5 t5 1;
   emit (Jal (zero, ".bgRest"));
   emit (Label ".bgRestD");
+  if !coro_mode then emit (Jal (zero, ".bgRet"));        (* not cut from gp *)
   ld t2 rt_depth_off t0;                                 (* an open block keeps it *)
   emit (Branch (0, t2, zero, ".bgRet"));
   ld t3 (rt_hwm_off ()) t0;
@@ -5497,6 +5844,25 @@ let emit_arena () =
   li t0 (rt_depth_addr ());
   ld t1 rt_depth_off t0;
   emit (Branch (0, t1, zero, ".hpRet"));
+  if !coro_mode then begin
+    (* v0.1.627: only what is in the current block can be rolled back (see the
+       Region_block arm); the outermost mark counts when it is in it too *)
+    li t2 (rtw_addr rtw_blo); ld t2 0 t2;
+    emit (Branch (6, a0, t2, ".hpRet"));                 (* in an older block *)
+    emit (Branch (7, a0, gp, ".hpRet"));                 (* or another one *)
+    ld t1 (rt_base_off ()) t0;
+    emit (Branch (6, t1, t2, ".hpHwm"));
+    emit (Branch (6, gp, t1, ".hpHwm"));
+    emit (Branch (6, a0, t1, ".hpRet"));                 (* older than every block *)
+    emit (Label ".hpHwm");
+    ld t1 (rt_hwm_off ()) t0;
+    emit (Branch (6, t1, t2, ".hpRaise"));               (* hwm in another block *)
+    emit (Branch (6, gp, t1, ".hpRaise"));
+    emit (Branch (6, a0, t1, ".hpRet"));                 (* already kept *)
+    emit (Label ".hpRaise");
+    sd gp (rt_hwm_off ()) t0;
+    emit (Jal (zero, ".hpRet"))
+  end;
   ld t1 (rt_base_off ()) t0;
   emit (Branch (6, a0, t1, ".hpRet"));                   (* older than every block *)
   emit (Branch (7, a0, gp, ".hpRet"));
@@ -5686,6 +6052,18 @@ let emit_acopy_helper (tag : string) (ty : Ast.ty) =
   emit_word (enc_i 0 sp (ldf3 ()) t1 0x03);          (* n, saved below *)
   emit_word (enc_r 0 t1 a0 0 t1 0x33);
   emit_word (enc_s 0 t1 sp (stf3 ()) 0x23);          (* where the copy must end *)
+  (* v0.1.627: and tp with it, so the copier's room checks are against the
+     arena's piece rather than the heap gp came from *)
+  let restore_tp () =
+    if !coro_mode then begin
+      li t0 (rtw_addr rtw_realtp);
+      emit_word (enc_i 0 t0 (ldf3 ()) tp 0x03)
+    end in
+  if !coro_mode then begin
+    li t0 (rtw_addr rtw_realtp);
+    emit_word (enc_s 0 tp t0 (stf3 ()) 0x23);
+    emit_word (enc_i 0 t1 0 tp 0x13)
+  end;
   emit_word (enc_i (2 * w) sp (ldf3 ()) a0 0x03);
   emit (Jal (ra, request_rcopy ty));
   (* the size and the copier are two descriptions of one walk: if they ever
@@ -5695,8 +6073,10 @@ let emit_acopy_helper (tag : string) (ty : Ast.ty) =
    emit (Branch (0, gp, t1, l));
    li t0 (rt_depth_addr ());
    emit_word (enc_i (rt_realgp_off ()) t0 (ldf3 ()) gp 0x03);
+   restore_tp ();
    emit_abort ("internal: an arena copy of " ^ tag ^ " overran its size");
    emit (Label l));
+  restore_tp ();
   li t0 (rt_depth_addr ());
   emit_word (enc_i (rt_realgp_off ()) t0 (ldf3 ()) gp 0x03);
   emit_word (enc_i (3 * w) sp (ldf3 ()) ra 0x03);
@@ -5850,6 +6230,7 @@ let emit_copy_str () =
   emit_word (enc_i (wsz () - 1) t0 0 t1 0x13);
   emit_word (enc_i (0 - wsz ()) t1 7 t1 0x13);
   emit_word (enc_i (wsz ()) t1 0 t1 0x13);                       (* bytes incl. header *)
+  emit_heap_reserve ~tmp:t2 (Rsz t1);
   emit_word (enc_i 0 gp 0 t2 0x13);                              (* dst = gp *)
   emit_word (enc_r 0 t1 gp 0 gp 0x33);
   emit_oom_check ();

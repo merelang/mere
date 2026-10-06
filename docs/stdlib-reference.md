@@ -1196,12 +1196,20 @@ coroutines', `coro_new_sized`'s size is how far below that region's top a
 coroutine may reach, and every function entry
 checks the running stack's floor (an overflow is named like any other). A program
 without coroutines is laid out and checked as before. The runtime is the RV
-prelude's, in Mere. A region block's rollback cannot reach past a switch (each
-switch raises the high-water mark), and what a compaction frees while coroutines
-exist waits until a walk of every stopped stack shows nothing reaches it (v0.1.624;
-C's pins, checked a megabyte at a time). On one bump heap shared by every stack, a
-program that switches every few statements reclaims little: no rollback reaches
-past a switch.
+prelude's, in Mere. Each coroutine allocates in a heap of its own (v0.1.627): a
+chain of blocks, the first 4 KiB, each next one twice the last up to a megabyte,
+cut from the top of the heap down; the main stack keeps the heap below them. A
+switch carries gp and tp, so a region block that closes on one stack never rolls
+back over another's data, and a program that switches inside its blocks
+reclaims them as C does (until v0.1.626 every stack bumped one heap and each
+switch raised the high-water mark, so such a program reclaimed nothing). A block
+whose allocations ran past the end of one of the coroutine's blocks keeps what
+it made -- as every block did before -- and since the blocks double that happens
+a few times in a coroutine's life. A coroutine that ends having kept nothing
+gives its blocks back; one that kept something (a closure it left in a map) keeps
+them, as C keeps what a coroutine made in the heap. What a compaction frees while
+coroutines exist waits until a walk of every stopped stack shows nothing reaches
+it (v0.1.624; C's pins, checked a megabyte at a time).
 
 On C, a store compacted (`map_compact`, `vec_compact`, `map_recycle`) while a
 coroutine is suspended keeps any arena that coroutine's stack still points

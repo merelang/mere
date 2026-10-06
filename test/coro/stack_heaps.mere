@@ -1,0 +1,45 @@
+// Every stack makes garbage in a region block that stays open across a switch:
+// main opens one, switches to a coroutine, and closes it when the coroutine
+// switches back; each coroutine does the same with its own. A hundred
+// coroutines and a thousand rounds make some 600 MB of it on RV64, none of
+// which outlives its block. On C every block is the stack's own and is given
+// back when it closes. On RISC-V, where every stack once bumped the one heap,
+// a switch had to keep everything allocated before it -- the next block to
+// close might be another stack's, under this one's data -- and the program ran
+// out of a 256 MB machine. Each stack now allocates in a heap of its own.
+type ilist = INil | ICons of int * ilist;
+let rec build = fn n -> if n == 0 then INil else ICons (n, build (n - 1));
+let rec total = fn lst -> match lst with | INil -> 0 | ICons (h, t) -> h + total t;
+let root = coro_root ();
+let rec work = fn (i: int) -> fn (acc: int) ->
+  if i == 0 then acc
+  else
+    let n = region W {
+      let t = build 100 in
+      let _ = coro_switch root in
+      total t
+    } in
+    work (i - 1) (acc + n);
+let made = vec_new ();
+let rec mk = fn (k: int) ->
+  if k == 0 then ()
+  else
+    (let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (let _ = work 1000 0 in root) ()) in
+     let _ = vec_push made c in
+     mk (k - 1));
+let _ = mk 100;
+let rec rounds = fn (r: int) -> fn (acc: int) ->
+  if r == 0 then acc
+  else
+    let rec each = fn (k: int) -> fn (a: int) ->
+      if k == vec_len made then a
+      else
+        (let n = region M {
+           let t = build 100 in
+           let _ = coro_switch (vec_get made k) in
+           total t
+         } in
+         each (k + 1) (a + n))
+    in
+    rounds (r - 1) (each 0 acc);
+print_int (rounds 1000 0)

@@ -1,0 +1,23 @@
+// A coroutine that opens a region block before it has allocated anything --
+// mere-ruby's collector, run on a coroutine of its own, starts that way -- and
+// fills several blocks inside it. On RISC-V (v0.1.627) a coroutine allocates in
+// blocks of its own, and has none until it first allocates, so the block's
+// mark is in none of them: its exit goes back to the start of the first block,
+// and the coroutine ends having kept nothing, so its blocks are given back.
+// Four thousand of them make well over 256 MB; nothing of it outlives its block.
+type ilist = INil | ICons of int * ilist;
+let rec build = fn n -> if n == 0 then INil else ICons (n, build (n - 1));
+let rec total = fn lst -> match lst with | INil -> 0 | ICons (h, t) -> h + total t;
+let root = coro_root ();
+let res = map_new ();
+let _ = map_set res 0 0;
+let rec drive = fn (k: int) -> fn (acc: int) ->
+  if k == 0 then acc
+  else
+    (let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
+               let n = region G { total (build 5000) } in
+               let _ = map_set res 0 n in
+               root) ()) in
+     let _ = coro_switch c in
+     drive (k - 1) (if map_get res 0 == 12502500 then acc + 1 else acc));
+print_int (drive 4000 0)
