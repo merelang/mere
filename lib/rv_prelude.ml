@@ -1911,11 +1911,20 @@ let __cwalk = fn (s: int) -> fn (budget: int) -> fn (visit: int -> unit) ->
   // coroutines' stack region, not below the running stack's gp
   let ghi = __rv_co_lo () in
   let own_hi = (if s == me then __rv_gp () else __cget s 13) in
-  // from the innermost open block's mark, when it is in the stack's current
-  // block (a mark in an older one rolls nothing back: see the Region_block arm)
+  // From the mark of a block open on the stack, when it is in the stack's
+  // current block (older blocks of the chain are followed by __cw_older). A
+  // walk with no budget -- coro_scan_ints, which a collector roots a stopped
+  // stack with -- goes from the OUTERMOST open block, as C's walk counts every
+  // region open on the stack as its own: from the innermost only, a list built
+  // in an outer block while an inner one was open on top (mere-ruby's
+  // `(1..N).map { ... }`, collected in the middle) was followed three hops and
+  // the rest of it swept (v0.1.629). The release's walk, which has a budget and
+  // keeps everything when it reaches it, still starts at the innermost: from
+  // the outermost, mere-ruby's block open for its whole run made most of the
+  // heap the main stack's own (v0.1.624).
   let blo = (if s == me then __rv_rtw 73 else __cget s 16) in
-  let mark = (if s == me then (if __rv_rtw 1 > 0 then __rv_rtw 2 else own_hi)
-              else (if __cget s 9 > 0 then __cget s 10 else own_hi)) in
+  let mark = (if s == me then (if __rv_rtw 1 > 0 then (if budget == 0 then __rv_rtw 4 else __rv_rtw 2) else own_hi)
+              else (if __cget s 9 > 0 then (if budget == 0 then __cget s 11 else __cget s 10) else own_hi)) in
   let in_head = mark >= blo && mark <= own_hi in
   let own = (if in_head then mark else blo) in
   let older = (if in_head then 0 else __rv_peek (if s == me then __rv_rtw 76 else __cget s 17)) in

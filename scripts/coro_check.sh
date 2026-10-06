@@ -71,7 +71,8 @@ region_cross|icl|kept;32|0
 compact_reuse|ic|held;0|0
 stack_heaps|icl|505000000|0
 finished_keeps|icl|kept|0
-first_block|icl|4000|0'
+first_block|icl|4000|0
+scan_outer|icl|all found;200880;0|0'
 
 # The interpreter prints a failure with its position and a code frame; the
 # compiled program prints the message alone. The comparison is on the message.
@@ -227,7 +228,8 @@ region_cross|r|kept;32|0
 compact_reuse|r|held;0|0
 stack_heaps|r|505000000|0
 finished_keeps|r|kept|0
-first_block|r|4000|0'
+first_block|r|4000|0
+scan_outer|r|all found;200880;0|0'
 RV_LIMIT="${RV_LIMIT:-300}"
 have_rv=0
 if [ -n "${MEMU:-}" ] && [ -f "$MEMU/riscv-runc/rv64i_run.mere" ]; then
@@ -373,6 +375,9 @@ if [ "$MODE" = "--poison" ]; then
   # v0.1.627: a block opened before the coroutine's heap ran into a new block
   # has its values in the older one too
   rv_poison "RV 11 (own region values in an older block not followed)" 's/ || (older != 0 \&\& __cw_older older mark v))$/)/' scan
+  # v0.1.629: a scan with no budget follows a stopped stack's values through
+  # every block open on it, not only the innermost
+  rv_poison "RV 12 (a scan follows only the innermost block)" 's/(if budget == 0 then __cget s 11 else __cget s 10)/__cget s 10/' scan_outer
   # v0.1.627: a finished coroutine's blocks go back only if it kept nothing
   rv_poison "RV 10 (a finished coroutine's blocks given back though it kept something)" 's/^  if first != 0 \&\& __cget s 17 == first \&\& __cget s 13 == first + 2 \* w then$/  if first != 0 then/' finished_keeps
   if [ "$pfail" = 0 ] && [ "$fail" = 0 ]; then echo "coro --poison: ok (the gate can go red)"; else echo "coro --poison: FAILED"; pfail=1; fi

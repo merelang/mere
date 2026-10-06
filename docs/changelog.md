@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.629 — 2026-10-07
+
+_On RISC-V, `coro_scan_ints` follows a stopped stack's values through every region block open on it, not only the innermost: mere-ruby's collector, run in the middle of `(1..N).map { ... }`, swept most of the list the map was building._
+
+With mere-ruby's Fibers on coroutines (its RV64 build since 8bbc19d),
+`junk = (1..3000).map { |i| [Box.new(i)] }; GC.start` failed with
+`map_get: key not found` -- the collection the map set off in its middle had
+swept arrays the map was still holding (C: correct). The list being built lives
+only in the map's locals, so the scan of the stopped stack is all that roots
+it, and the scan follows pointers without limit only inside the stack's own
+regions, three hops elsewhere. Since v0.1.624 RISC-V counted only the innermost
+open block as the stack's own -- from the outermost, mere-ruby's block open for
+its whole run made most of the heap the main stack's, and the release's walk
+read it at every compaction -- and the map's list was built in an outer block
+while the block body's own was open on top: the scan reached its first cells.
+C counts every region open on the stack.
+
+A walk with no budget (`coro_scan_ints`) now starts from the outermost open
+block's mark; the release's walk, which has a budget and keeps everything when
+it reaches it, still starts from the innermost. mere-ruby on RV64: corpus 235
+matches (21 s), 165 and 213 as before.
+
+`test/coro/scan_outer.mere` (a coroutine stopped in an inner block, holding a
+list built in an outer one) on every backend and both RISC-V widths; the RV 12
+poison (the scan from the innermost block only) makes it report `missing`.
+
 ## v0.1.628 — 2026-10-07
 
 _On RISC-V a local function called with all its arguments jumps to a direct entry instead of building a closure per argument: mere-ruby's `Integer.sqrt` of an 8000-bit square allocated 300 MB doing that, and runs now._

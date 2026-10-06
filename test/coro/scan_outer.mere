@@ -1,0 +1,39 @@
+// A coroutine stops inside an inner region block while it holds a list it
+// built in an OUTER one -- mere-ruby's `(1..N).map { ... }`, collected in the
+// middle: the list being built is in the map's locals, and the block's body
+// runs in a region of its own. coro_scan_ints must report every handle in the
+// list. RISC-V followed a stopped stack's pointers without limit only inside
+// its innermost block (v0.1.624, to keep the release's walk short), and three
+// hops elsewhere, so it reported the first few and mere-ruby's collector swept
+// the rest (v0.1.629: a scan with no budget goes from the outermost block).
+// Each cell has a 300-byte string between it and the next, so a cell is never
+// in the 16 words read after the one before it: found means followed.
+type H = | H of int;
+let rec spaced = fn (n: int) -> fn (k: int) ->
+  if k == 0 then []
+  else (let rest = spaced (n + 1) (k - 1) in
+        let _ = str_len (str_repeat "j" 300) in
+        Cons (H n, rest));
+let rec sum = fn (ys: H list) -> match ys with | [] -> 0 | Cons (H n, t) -> n + sum t;
+let root = coro_root ();
+let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
+  let total = region O {
+    let xs = spaced 5000 40 in
+    let inner = region I {
+      let t = str_repeat "i" 100 in
+      let _ = coro_switch root in
+      str_len t
+    } in
+    sum xs + inner
+  } in
+  let _ = print_int total in
+  root) ());
+let _ = coro_switch c;
+let got = map_new ();
+let _ = coro_scan_ints c 0 6000 (fn (n: int) -> map_set got n 1);
+let rec check = fn (n: int) -> fn (hi: int) ->
+  if n > hi then "" else (if map_has got n then check (n + 1) hi else "missing " ++ str_of_int n ++ " ");
+let verdict = check 5000 5039;
+let _ = print (if verdict == "" then "all found" else verdict);
+let _ = coro_switch c;
+print_int 0
