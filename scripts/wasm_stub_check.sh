@@ -66,8 +66,8 @@ if [ "${1:-}" = "--poison" ]; then
     fi
   }
   run_poison "a builtin drops out of NAMES" \
-    "probed 13 builtins, expected 14" \
-    WASM_STUB_NAMES="run env_var file_exists args read_file file_size read_file_bytes read_stdin file_openrw write_file_bytes print_err print_no_nl print_bytes"
+    "probed 14 builtins, expected 15" \
+    WASM_STUB_NAMES="run env_var file_exists file_delete args read_file file_size read_file_bytes read_stdin file_openrw write_file_bytes print_err print_no_nl print_bytes"
   run_poison "the host-surface grep stops matching" \
     "the host surface came back as" \
     SURFACE_FLOOR=99
@@ -107,6 +107,9 @@ probe() {
     # with the value itself -- which is what the question is about anyway.
     env_var)         echo 'match env_var "MERE_STUB_PROBE" with Some v -> v | None -> "unset"' ;;
     file_exists)     echo 'if file_exists "/etc/hosts" then "yes" else "no"' ;;
+    # v0.1.622: removed once, then gone -- both answers, so a stub that says
+    # `false` (or `true`) every time differs from the host
+    file_delete)     echo "let _ = write_file \"$tmp/fdel.txt\" \"x\" in let a = file_delete \"$tmp/fdel.txt\" in let b = file_delete \"$tmp/fdel.txt\" in (if a then \"y\" else \"n\") ++ (if b then \"y\" else \"n\")" ;;
     # A pointer is not an answer: `args ()` prints an address on C. Its length is.
     args)            echo 'show (list_len (args ()))' ;;
     # `show` on both sides: C prints a bool as 1 and Wasm prints it as true, so
@@ -134,7 +137,7 @@ probe() {
   esac
 }
 
-NAMES="${WASM_STUB_NAMES-run env_var file_exists args read_file file_size read_file_bytes read_line read_stdin file_openrw write_file_bytes print_err print_no_nl print_bytes}"
+NAMES="${WASM_STUB_NAMES-run env_var file_exists file_delete args read_file file_size read_file_bytes read_line read_stdin file_openrw write_file_bytes print_err print_no_nl print_bytes}"
 
 # Both backends read the same bytes. Without this, `read_line` answers "" on C
 # too -- the gate would compare two empty strings and call the stub a host.
@@ -177,7 +180,7 @@ for b in $NAMES; do
   checked=$((checked + 1))
 done
 
-NAME_FLOOR=${NAME_FLOOR-14}
+NAME_FLOOR=${NAME_FLOOR-15}
 [ "$checked" -ge "$NAME_FLOOR" ] || { echo "wasm_stub: FAIL — probed $checked builtins, expected $NAME_FLOOR"; exit 1; }
 
 # THE DENOMINATOR. "10 builtins probed, 0 stubs" says nothing about the

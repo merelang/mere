@@ -6355,6 +6355,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let mv = emit_expr env ms_e in
     emit_instr (Printf.sprintf "  call void @__lang_sleep_ms(i64 %s)" mv);
     "0"
+  | Ast.App ({ node = Ast.Var "file_delete"; _ }, path_e) when not (user_shadows_llvm env "file_delete") ->
+    Hashtbl.replace host_misc_used_llvm "file_delete" ();
+    let pv = emit_expr env path_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i1 @__lang_file_delete(ptr %s)" r pv);
+    r
   | Ast.App ({ node = Ast.Var "file_exists"; _ }, path_e) when not (user_shadows_llvm env "file_exists") ->
     Hashtbl.replace host_misc_used_llvm "file_exists" ();
     let pv = emit_expr env path_e in
@@ -15396,7 +15402,16 @@ let host_misc_runtime_llvm (declared : string -> bool) : string list =
   let used k = Hashtbl.mem host_misc_used_llvm k in
   let decl name line = if declared name then [] else [line] in
   if Hashtbl.length host_misc_used_llvm = 0 then [] else
-  (if used "file_exists" then
+  (if used "file_delete" then
+     decl "unlink" "declare i32 @unlink(ptr)"
+     @ [ "define i1 @__lang_file_delete(ptr %path) {";
+         "entry:";
+         "  %r = call i32 @unlink(ptr %path)";
+         "  %ok = icmp eq i32 %r, 0";
+         "  ret i1 %ok";
+         "}" ]
+   else [])
+  @ (if used "file_exists" then
      decl "access" "declare i32 @access(ptr, i32)"
      @ [ "define i1 @__lang_file_exists(ptr %path) {";
          "entry:";

@@ -99,6 +99,7 @@ let read_file = fn (p: str) ->
   if fd < 0 then fail ("read_file: cannot open " ++ p ++ " (errno " ++ str_of_int (0 - fd) ++ ")")
   else __rv_read_all fd;
 let file_exists = fn (p: str) -> __rv_access p == 0;
+let file_delete = fn (p: str) -> __rv_unlink p == 0;
 
 // write_file: openat(O_WRONLY|O_CREAT|O_TRUNC) + a short-write-safe loop +
 // close, all Linux-numbered -- the same reasoning as read_file above, and the

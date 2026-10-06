@@ -39,6 +39,7 @@ probe_for() {
     read_file) echo 'let _ = print (read_file "x");' ;;
     read_bytes) echo 'let _ = print_int (bytes_len (read_bytes "x"));' ;;
     file_exists) echo 'let _ = print_int (if file_exists "x" then 1 else 0);' ;;
+    file_delete) echo 'let _ = print_int (if file_delete "x" then 1 else 0);' ;;
     time) echo 'let _ = print_int (float_bits_hi (time ()));' ;;
     random_int) echo 'let _ = print_int (random_int 10);' ;;
     write_file) echo 'let _ = write_file "a" "b";' ;;

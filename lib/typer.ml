@@ -3087,6 +3087,7 @@ let initial_env : env =
     ("__rv_open_rd", mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
     ("__rv_read_all", mono (Ast.TyArrow (Ast.TyInt, Ast.TyStr)));
     ("__rv_access", mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
+    ("__rv_unlink", mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
     ("__rv_open_wr", mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
     ("__rv_write_all", mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyStr, Ast.TyInt))));
     ("__rv_substring_raw", mono (Ast.TyArrow (Ast.TyStr,
@@ -3153,6 +3154,14 @@ let initial_env : env =
     ("sleep_ms",
        mono (Ast.TyArrow (Ast.TyInt, Ast.TyUnit)));
     ("file_exists",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyBool)));
+    (* v0.1.622: remove a file (unlink): true when it is gone because of this
+       call. No errno: the LLVM backend cannot read one portably, and a caller
+       that needs the reason can ask file_exists / the stat devices after a
+       false. A directory is not removed (unlink refuses one on every host).
+       Before this a program removed a file by running `rm -f`, which a RISC-V
+       binary on memu has no shell for. *)
+    ("file_delete",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyBool)));
     ("env_var",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("option", [Ast.TyStr]))));

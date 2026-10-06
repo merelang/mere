@@ -1,0 +1,20 @@
+// file_delete removes a file and says whether it did (v0.1.622). Before it a
+// program removed a file by running `rm -f`, and a RISC-V binary on memu has no
+// shell (mere-ruby's File.delete). A file is removed once; removing it again,
+// or a path that was never there, answers false; a directory is refused (it is
+// unlink, not rmdir) and is still there afterwards.
+//
+// The name is random so that two gates running this at once (parity and
+// rv_exec) do not delete each other's file; it is never printed.
+//
+// Execution mode: interp + C + LLVM + Wasm (parity)
+let p = "/tmp/mere_file_delete_" ++ str_of_int (random_int 1000000000) ++ ".txt";
+let _ = write_file p "gone soon";
+let _ = print_bool (file_exists p);
+let _ = print_bool (file_delete p);
+let _ = print_bool (file_exists p);
+let _ = print_bool (file_delete p);
+let _ = print_bool (file_delete (p ++ ".never"));
+let d = "/tmp";
+let _ = print_bool (file_delete d);
+print_bool (file_exists d)

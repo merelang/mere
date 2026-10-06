@@ -969,6 +969,13 @@ let builtin_file_exists =
     | V_str path -> V_bool (Sys.file_exists path)
     | _ -> failwith "file_exists: expected str")
 
+(* v0.1.622: unlink; false for a missing file, a directory, or a refusal *)
+let builtin_file_delete =
+  V_builtin ("file_delete", fun v ->
+    match v with
+    | V_str path -> (try Unix.unlink path; V_bool true with Unix.Unix_error _ -> V_bool false)
+    | _ -> failwith "file_delete: expected str")
+
 (* Phase 44: fs primitives for the docs site SSG *)
 let builtin_list_dir =
   V_builtin ("list_dir", fun v ->
@@ -4130,6 +4137,7 @@ let initial_env : env =
     ("__rv_open_rd", ref (rv_only "__rv_open_rd"));
     ("__rv_read_all", ref (rv_only "__rv_read_all"));
     ("__rv_access", ref (rv_only "__rv_access"));
+    ("__rv_unlink", ref (rv_only "__rv_unlink"));
     ("__rv_open_wr", ref (rv_only "__rv_open_wr"));
     ("__rv_write_all", ref (rv_only "__rv_write_all"));
     ("__rv_substring_raw", ref (rv_only "__rv_substring_raw"));
@@ -4174,6 +4182,7 @@ let initial_env : env =
     ("file_mtime", ref builtin_file_mtime);
     ("sleep_ms", ref builtin_sleep_ms);
     ("file_exists", ref builtin_file_exists);
+    ("file_delete", ref builtin_file_delete);
     ("env_var", ref builtin_env_var);
     ("args", ref builtin_args);
     ("print_int", ref builtin_print_int);

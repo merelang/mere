@@ -3135,6 +3135,19 @@ and compile_app env e =
     li a3 0;                                             (* flags *)
     li a7 48;                                            (* faccessat *)
     emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall -> a0 = 0 | -errno *)
+  (* v0.1.622: file_delete's syscall. unlinkat with flags 0 removes a file and
+     refuses a directory, as unlink does on the native backends. *)
+  | Ast.Var "__rv_unlink" when List.length args = 1 ->
+    if !bare then
+      err e.loc
+        "RV32I --bare: there is no host filesystem to remove a file from";
+    compile_expr env (List.hd args);                     (* a0 = path str *)
+    emit (Jal (ra, "__rv_pathz"));
+    emit_word (enc_i 0 a0 0 a1 0x13);                    (* a1 = path *)
+    li a0 (-100);                                        (* AT_FDCWD *)
+    li a2 0;                                             (* flags: not AT_REMOVEDIR *)
+    li a7 35;                                            (* unlinkat *)
+    emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall -> a0 = 0 | -errno *)
   | Ast.Var "__rv_str_hash" when List.length args = 1 ->
     compile_expr env (List.hd args); emit (Jal (ra, "__rv_str_hash"))
   | Ast.Var "__rv_xlen" when List.length args = 1 ->
