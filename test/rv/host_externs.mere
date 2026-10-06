@@ -1,0 +1,33 @@
+// The C runtime's externs RISC-V answers through the host (v0.1.630-631):
+// getpid, access with its mode, rmdir, stat / lstat into one snapshot that
+// file_stat_field reads, and proc_last_errno after the directory calls.
+// rv_exec compares every line with the C backend's, on both widths.
+extern fn getpid: unit -> int;
+extern fn access: str -> int -> int;
+extern fn rmdir: str -> int;
+extern fn file_stat: str -> int;
+extern fn file_lstat: str -> int;
+extern fn file_stat_field: int -> int;
+extern fn proc_last_errno: unit -> int;
+let _ = print_int (if getpid () > 0 then 1 else 0);
+let _ = write_file "rv_stat.txt" "hello";
+let _ = print_int (file_stat "rv_stat.txt");
+let _ = print_int (file_stat_field 7);
+let _ = print_int (file_stat_field 2 / 4096);
+let _ = print_int (if file_stat_field 9 > 1600000000 then 1 else 0);
+let _ = print_int (if file_stat_field 1 > 0 then 1 else 0);
+let _ = print_int (file_stat "rv_stat_absent");
+let _ = print_int (file_stat_field 7);
+let _ = print_int (access "rv_stat.txt" 1);
+let _ = print_int (access "rv_stat.txt" 4);
+let _ = print_int (access "rv_stat_absent" 0);
+let _ = print_int (dir_create "rv_stat_d" (0 - 1));
+let _ = print_int (proc_last_errno ());
+let _ = print_int (dir_create "rv_stat_d" (0 - 1));
+let _ = print_int (if proc_last_errno () > 0 then 1 else 0);
+let _ = print_int (file_stat "rv_stat_d");
+let _ = print_int (file_stat_field 2 / 4096);
+let _ = print_int (rmdir "rv_stat_d");
+let _ = print_int (rmdir "rv_stat_d");
+let _ = file_delete "rv_stat.txt";
+print_int (file_lstat "rv_stat.txt")

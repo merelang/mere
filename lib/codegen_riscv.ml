@@ -542,13 +542,19 @@ let libm_sigs : (string * string) list =
   @ [ ("hypot", "ff>f"); ("fmod", "ff>f"); ("ldexp", "fi>f") ]
   (* v0.1.630: and the C runtime's own externs the RISC-V prelude answers the
      same way (its `__libm_<name>`): the errno a dir_create / dir_entries left *)
-  @ [ ("proc_last_errno", "u>i") ]
+  @ [ ("proc_last_errno", "u>i");
+      (* v0.1.631: the rest of what mere-ruby asks a host for about files and
+         itself, each with the C runtime's own contract (file_stat keeps one
+         snapshot that file_stat_field reads) *)
+      ("getpid", "u>i"); ("access", "si>i"); ("rmdir", "s>i");
+      ("file_stat", "s>i"); ("file_lstat", "s>i"); ("file_stat_field", "i>i") ]
 let libm_bound : (string, unit) Hashtbl.t = Hashtbl.create 16
 let rec libm_sig_of (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyArrow (a, r) ->
     let c = (match Ast.walk a with
-             | Ast.TyFloat -> "f" | Ast.TyInt -> "i" | Ast.TyUnit -> "u" | _ -> "?") in
+             | Ast.TyFloat -> "f" | Ast.TyInt -> "i" | Ast.TyUnit -> "u" | Ast.TyStr -> "s"
+             | _ -> "?") in
     (match Ast.walk r with
      | Ast.TyArrow _ -> c ^ libm_sig_of r
      | Ast.TyFloat -> c ^ ">f"

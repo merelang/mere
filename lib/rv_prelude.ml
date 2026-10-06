@@ -255,6 +255,43 @@ let env_var = fn (k: str) ->
       else find (j + 1) in
   find 0;
 let __libm_proc_last_errno = fn (u: unit) -> __rv_rtw 63;
+// v0.1.631: getpid, access (with its mode), rmdir, and stat / lstat into one
+// snapshot -- 128 bytes as Linux's riscv64 struct stat lays them out, which
+// the host fills on both widths, and a word after them saying whether the
+// last call succeeded -- that file_stat_field reads, as the C runtime does.
+// Fields: 0 dev 1 ino 2 mode 3 nlink 4 uid 5 gid 6 rdev 7 size 8 atime
+// 9 mtime 10 ctime 11 blksize 12 blocks (the C runtime's numbering).
+let __libm_getpid = fn (u: unit) -> __rv_syscall 172 0 0 0 0;
+let __libm_access = fn (p: str) -> fn (mode: int) ->
+  if __rv_syscall 48 (0 - 100) (__rv_cstr p) mode 0 < 0 then 0 - 1 else 0;
+let __libm_rmdir = fn (p: str) -> dir_remove p;
+let __rv_stat_buf = str_repeat " " 136;
+let __rv_stat_at = fn (u: unit) -> __rv_addr __rv_stat_buf + (if __rv_xlen () == 64 then 8 else 4);
+let __rv_stat = fn (p: str) -> fn (flags: int) ->
+  let r = __rv_syscall 79 (0 - 100) (__rv_cstr p) (__rv_stat_at ()) flags in
+  let _ = __rv_poke (__rv_stat_at () + 128) (if r < 0 then 0 else 1) in
+  if r < 0 then 0 - 1 else 0;
+let __libm_file_stat = fn (p: str) -> __rv_stat p 0;
+let __libm_file_lstat = fn (p: str) -> __rv_stat p 256;          // AT_SYMLINK_NOFOLLOW
+let __libm_file_stat_field = fn (k: int) ->
+  let rec le = fn (off: int) -> fn (n: int) -> fn (acc: int) ->
+    if n == 0 then acc
+    else le off (n - 1) (acc * 256 + ord (char_at __rv_stat_buf (off + n - 1))) in
+  if __rv_peek (__rv_stat_at () + 128) == 0 then 0 - 1
+  else if k == 0 then le 0 8 0
+  else if k == 1 then le 8 8 0
+  else if k == 2 then le 16 4 0
+  else if k == 3 then le 20 4 0
+  else if k == 4 then le 24 4 0
+  else if k == 5 then le 28 4 0
+  else if k == 6 then le 32 8 0
+  else if k == 7 then le 48 8 0
+  else if k == 8 then le 72 8 0
+  else if k == 9 then le 88 8 0
+  else if k == 10 then le 104 8 0
+  else if k == 11 then le 56 4 0
+  else if k == 12 then le 64 8 0
+  else 0 - 1;
 let str_rev = fn s ->
   let b = strbuf_new () in
   let rec go = fn (i: int) -> if i < 0 then () else let _ = strbuf_push b (char_at s i) in go (i - 1) in
