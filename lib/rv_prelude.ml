@@ -1648,7 +1648,8 @@ let str_of_float = fn (x: float) ->
 // Record words: 0 state (0 new, 1 running, 2 suspended, 3 finished, 4 free),
 // 1 gen, 2 sp, 3 buffer, 4 its capacity in words, 5 floor, 6 body closure,
 // 7 message, 8..11 the stack's own runtime words (try_or record, region depth,
-// block mark, outermost block mark), 12 the next free slot + 1.
+// block mark, outermost block mark), 12 the next free slot + 1, 13 gp when it
+// last stopped.
 // Runtime words: 34 the sp just left, 35..39 the switch's parameters, 40 the
 // table, 41 its capacity, 42 slots in use, 43 free list (slot + 1), 44 running,
 // 45 previous, 46 finished and waiting to be reaped (slot + 1), 47 how many
@@ -1756,6 +1757,8 @@ let __cswitch = fn (to: int) -> fn (v: int) -> fn (setmsg: bool) ->
     let _ = __cset from 9 (__rv_rtw 1) in
     let _ = __cset from 10 (__rv_rtw 2) in
     let _ = __cset from 11 (__rv_rtw 4) in
+    // where the heap stood when this stack stopped (see __cwalk)
+    let _ = __cset from 13 (__rv_gp ()) in
     let w = __cw () in
     let fin = __cget from 0 == 3 in
     // room to copy this stack out, with what the switch itself pushes
@@ -1805,34 +1808,95 @@ let rvcoro_transfer = fn (c: int) -> fn (v: int) -> fn (me: int) ->
     let s = __cslot c in
     if s < 0 then fail "coro_transfer: that coroutine has finished"
     else __cswitch s v true;
-// coro_scan_ints: every word in [lo, hi) the coroutine's stack can still
-// reach, reported to f -- conservatively: a number that is not a handle may be
-// reported, a held one may not be missed. The stack's words are read (a stopped
-// coroutine's from its buffer; the running one's from sp up, with the saved
-// registers spilled first, since a caller's value may be in one), and a word
-// that points into the heap is followed: the 16 words from it are read in turn,
-// up to three hops -- and without a limit at or above the stack's innermost
-// open region block's mark, which is where that block's values are (the C
-// backend's contract: unlimited inside the coroutine's own regions). Not the
-// outermost block's mark: every allocation shares one bump pointer here, and a
-// program that keeps a block open for its whole run (mere-ruby does) would have
-// the whole heap counted as its own and walked.
-let rvcoro_scan_ints = fn (c: int) -> fn (lo: int) -> fn (hi: int) -> fn (f: int -> unit) ->
-  let _ = __cinit () in
-  let s = __cslot c in
-  if s < 0 then () else
+// The walk under coro_scan_ints and the release of retired blocks: every word
+// stack s can reach, handed to visit. The stack's words are read (a stopped
+// coroutine's from its buffer, a stopped main stack from its saved sp up, the
+// running one's from sp up with the saved registers spilled first, since a
+// caller's value may be in one), and a word that points into the heap is
+// followed: the 16 words from it are read in turn, up to three hops -- and
+// without a limit inside the stack's own region values: from its innermost open
+// block's mark up to where the heap stood when it stopped (the C backend's
+// contract: unlimited inside the coroutine's own regions). Not from the
+// outermost block's mark, and not up to the heap's current top: every
+// allocation shares one bump pointer here, and mere-ruby keeps a block open for
+// its whole run and collects on a coroutine of its own while its main stack
+// waits -- either way most of the heap counted as "its own" and was walked.
+// The walk allocates nothing per call (a Map and a Vec per walk were garbage
+// no region block reclaimed, inside mere-ruby's collector): its visited set is
+// an open-addressing table of [address, stamp] pairs kept across walks
+// (runtime words 64 table, 65 capacity in pairs, 66 the stamp -- a pair with
+// another walk's stamp is empty, so nothing is cleared) and its work list a
+// reused array (67, 68 capacity in words; 69, 70 this walk's counts). Both
+// grow and never shrink. `budget` caps the addresses followed (0: no cap), and
+// the answer is false when the walk stopped at the cap.
+let __cw_buf = fn (k: int) -> fn (ck: int) -> fn (want: int) ->
+  // the buffer in runtime word k (capacity in ck), at least `want` words
+  if __rv_rtw ck >= want then __rv_rtw k
+  else (let n = if want < 1024 then 1024 else want * 2 in
+        let b = __rv_alloc_keep n in
+        let _ = __ccopy b (__rv_rtw k) (__rv_rtw ck) in
+        let _ = __rv_rtw_set k b in
+        let _ = __rv_rtw_set ck n in
+        b);
+// true when v was not yet in this walk's set (and is now)
+let __cw_add = fn (v: int) ->
+  let w = __cw () in
+  let cap = __rv_rtw 65 in
+  let tbl = __rv_rtw 64 in
+  let st = __rv_rtw 66 in
+  let rec probe = fn (i: int) ->
+    let a = tbl + (i % cap) * 2 * w in
+    if __rv_peek (a + w) != st then (let _ = __rv_poke a v in let _ = __rv_poke (a + w) st in true)
+    else if __rv_peek a == v then false
+    else probe (i + 1) in
+  probe ((v / w) * 40503 % cap);
+// a table twice the size, this walk's entries moved over
+let __cw_rehash = fn (u: unit) ->
+  let w = __cw () in
+  let oldt = __rv_rtw 64 in
+  let oldc = __rv_rtw 65 in
+  let st = __rv_rtw 66 in
+  let nc = oldc * 2 in
+  let nt = __rv_alloc_keep (nc * 2) in
+  let _ = __czero nt (nc * 2) in
+  let _ = __rv_rtw_set 64 nt in
+  let _ = __rv_rtw_set 65 nc in
+  let rec mv = fn (i: int) ->
+    if i == oldc then ()
+    else (let a = oldt + i * 2 * w in
+          let _ = (if __rv_peek (a + w) == st then (let _ = __cw_add (__rv_peek a) in ()) else ()) in
+          mv (i + 1)) in
+  mv 0;
+let __cwalk = fn (s: int) -> fn (budget: int) -> fn (visit: int -> unit) ->
   let w = __cw () in
   let me = __rv_rtw 44 in
   let hlo = __rv_heap_lo () in
   let ghi = __rv_gp () in
   let own = (if s == me then (if __rv_rtw 1 > 0 then __rv_rtw 2 else ghi)
              else (if __cget s 9 > 0 then __cget s 10 else ghi)) in
-  let seen = map_new () in
-  let work = vec_new () in
+  let own_hi = (if s == me then ghi else __cget s 13) in
+  let _ = (if __rv_rtw 65 > 0 then () else
+           (let t = __rv_alloc_keep 8192 in
+            let _ = __czero t 8192 in
+            let _ = __rv_rtw_set 64 t in
+            __rv_rtw_set 65 4096)) in
+  let _ = __rv_rtw_set 66 (__rv_rtw 66 + 1) in
+  let _ = __rv_rtw_set 69 0 in
+  let _ = __rv_rtw_set 70 0 in
   let look = fn (v: int) -> fn (d: int) ->
-    let _ = (if lo <= v && v < hi then f v else ()) in
-    if v >= hlo && v < ghi && v % w == 0 && (d < 3 || v >= own) && (if map_has seen v then false else true)
-    then (let _ = map_set seen v 1 in let _ = vec_push work v in vec_push work (d + 1))
+    let top = __rv_rtw 69 in
+    let seen = __rv_rtw 70 in
+    let _ = visit v in
+    if v >= hlo && v < ghi && v % w == 0 && (d < 3 || (v >= own && v < own_hi))
+       && (budget == 0 || seen < budget) then
+      (let _ = (if seen * 2 >= __rv_rtw 65 then __cw_rehash () else ()) in
+       if __cw_add v then
+         (let b = __cw_buf 67 68 (top + 2) in
+          let _ = __rv_poke (b + top * w) v in
+          let _ = __rv_poke (b + (top + 1) * w) (d + 1) in
+          let _ = __rv_rtw_set 69 (top + 2) in
+          __rv_rtw_set 70 (seen + 1))
+       else ())
     else () in
   let rec words = fn (a: int) -> fn (n: int) -> fn (d: int) ->
     if n == 0 then () else (let _ = look (__rv_peek a) d in words (a + w) (n - 1) d) in
@@ -1848,14 +1912,97 @@ let rvcoro_scan_ints = fn (c: int) -> fn (lo: int) -> fn (hi: int) -> fn (f: int
            else words (__cget s 3) ((__rv_co_hi () - __cget s 2) / w) 0) in
   // breadth first: the work list is read front to back while it grows
   let rec drain = fn (i: int) ->
-    if i >= vec_len work then ()
+    if i >= __rv_rtw 69 then ()
     else
-      let p = vec_get work i in
-      let d = vec_get work (i + 1) in
+      let b = __rv_rtw 67 in
+      let p = __rv_peek (b + i * w) in
+      let d = __rv_peek (b + (i + 1) * w) in
       let n = (if p + 16 * w > ghi then (ghi - p) / w else 16) in
       let _ = words p n d in
       drain (i + 2) in
-  drain 0;
+  let _ = drain 0 in
+  budget == 0 || __rv_rtw 70 < budget;
+// coro_scan_ints: every word in [lo, hi) the coroutine's stack can still
+// reach, reported to f -- conservatively: a number that is not a handle may be
+// reported, a held one may not be missed. f is called after the whole walk, as
+// on C, so it may allocate: called from inside the walk, it ran mere-ruby's
+// collector code, whose region blocks ran a release, whose walk reset this
+// one's state halfway through (word 71 is set while a walk runs, and a
+// release does not start then).
+let rvcoro_scan_ints = fn (c: int) -> fn (lo: int) -> fn (hi: int) -> fn (f: int -> unit) ->
+  let _ = __cinit () in
+  let s = __cslot c in
+  if s < 0 then () else
+  let found = vec_new () in
+  let _ = __rv_rtw_set 71 1 in
+  let _ = __cwalk s 0 (fn (v: int) -> if lo <= v && v < hi then vec_push found v else ()) in
+  let _ = __rv_rtw_set 71 0 in
+  let rec give = fn (i: int) -> if i == vec_len found then () else (let _ = f (vec_get found i) in give (i + 1)) in
+  give 0;
+// v0.1.624: blocks a compaction handed back while coroutines exist wait on the
+// retired list (word 49, chained through their first word; word 62 counts the
+// bytes retired since the last release). Once a megabyte waits -- checked after a compaction and at a
+// region block's exit -- the ones no stopped stack can reach (the walk above,
+// every stack but the running one) go back to the free lists, the rest wait
+// for the next time. A walk that reaches its cap has not seen everything, and
+// then every block is kept: mere-ruby's main stack, stopped while its
+// collector runs on a coroutine, reaches most of the heap, and gets nothing
+// back until it is running again, as if no release had run.
+let rvcoro_release = fn (u: unit) ->
+  if __rv_rtw 71 != 0 then () else
+  let _ = __rv_rtw_set 71 1 in
+  let w = __cw () in
+  let starts = vec_new () in
+  let ends = vec_new () in
+  let rec take = fn (b: int) ->
+    if b == 0 then ()
+    else (let nx = __rv_peek b in
+          let _ = vec_push starts b in
+          let _ = vec_push ends (b + __rv_peek (b + w)) in
+          take nx) in
+  let _ = take (__rv_rtw 49) in
+  let _ = __rv_rtw_set 49 0 in
+  let _ = __rv_rtw_set 62 0 in
+  let n = vec_len starts in
+  let pinned = vec_new () in
+  let rec zero = fn (i: int) -> if i == n then () else (let _ = vec_push pinned 0 in zero (i + 1)) in
+  let _ = zero 0 in
+  let rec pin_all = fn (i: int) -> if i == n then () else (let _ = vec_set pinned i 1 in pin_all (i + 1)) in
+  let mark = fn (v: int) ->
+    let rec find = fn (i: int) ->
+      if i == n then ()
+      else if v >= vec_get starts i && v < vec_get ends i then vec_set pinned i 1
+      else find (i + 1) in
+    find 0 in
+  let me = __rv_rtw 44 in
+  let rec each = fn (s: int) ->
+    if s >= __rv_rtw 42 then ()
+    else (let _ = (if s != me && __cget s 0 == 2
+                   then (if __cwalk s 65536 mark then () else pin_all 0)
+                   else ()) in
+          each (s + 1)) in
+  let _ = (if __rv_rtw 47 > 0 then each 0 else ()) in
+  let rec back = fn (i: int) ->
+    if i == n then ()
+    else (let b = vec_get starts i in
+          // a pinned block waits again, but is not counted again: word 62 is
+          // what was retired since the last release, so the next one comes
+          // after another megabyte (counted, a stack that pins a megabyte ran
+          // a release -- and its allocations -- at every block exit)
+          let _ = (if vec_get pinned i == 0 then __rv_blk_free b
+                   else (let _ = __rv_poke b (__rv_rtw 49) in
+                         __rv_rtw_set 49 b)) in
+          back (i + 1)) in
+  let _ = back 0 in
+  __rv_rtw_set 71 0;
+// sleep_ms: there is no sleep to ask the emulator for, so this waits on the
+// clock (v0.1.624; mere-ruby's Fiber scheduler sleeps)
+let sleep_ms = fn (ms: int) ->
+  if ms <= 0 then () else
+  let t0 = time () in
+  let lim = float_of_int ms / 1000.0 in
+  let rec spin = fn (u: unit) -> if time () - t0 >= lim then () else spin () in
+  spin ();
 let rvcoro_exit = fn (c: int) -> fn (v: int) ->
   let s = __cslot c in
   let _ = (if s < 0 then () else __cset s 7 v) in

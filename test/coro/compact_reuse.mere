@@ -2,7 +2,9 @@
 // in an arena of its own; the map is compacted, which hands its old blocks
 // back, and other maps then take blocks of that size (v0.1.623). The string
 // must still read the same. The C backend scans the stopped stack and keeps
-// the arena it points into; RISC-V reuses no block while any coroutine exists.
+// the arena it points into; so does RISC-V (v0.1.624): blocks handed back while
+// coroutines exist wait, and once a megabyte waits -- this churn hands back
+// several -- the ones no stopped stack reaches are reused and the rest kept.
 let root = coro_root ();
 let m = map_new ();
 let _ = map_compact m;
@@ -15,13 +17,16 @@ let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
   root) ());
 let _ = coro_switch c;
 let _ = map_compact m;
-let rec churn = fn (i: int) ->
+// big maps first, so that more than a megabyte waits and the release runs;
+// then small ones, which take blocks the size of the one the string is in
+let rec churn = fn (len: int) -> fn (i: int) ->
   if i == 0 then 0
   else (let t = map_new () in
         let _ = map_compact t in
-        let _ = map_set t "x" (str_repeat "w" 200) in
+        let _ = map_set t "x" (str_repeat "w" len) in
         let _ = map_compact t in
-        churn (i - 1));
-let _ = churn 50;
+        churn len (i - 1));
+let _ = churn 20000 60;
+let _ = churn 200 200;
 let _ = coro_switch c;
 print_int (map_len m)

@@ -28,6 +28,7 @@ COUNT=$(printf '%s\n' $NAMES | wc -l | tr -d ' ')
 probe_for() {
   case "$1" in
     not) echo 'let _ = print_int (if not false then 1 else 0);' ;;
+    sleep_ms) echo 'let _ = sleep_ms 1;' ;;
     # v0.1.623: the coroutine runtime, every entry at once
     rvcoro_*) echo 'let root = coro_root ();
 let c = coro_new (fn me -> fn (n: int) -> let _ = print_int n in coro_exit root ());
