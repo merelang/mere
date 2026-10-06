@@ -311,6 +311,24 @@ if grep -q 'rv-prelude' "$TMP/twoerr" || [ "$(grep -c 'two.mere:[23]:9' "$TMP/tw
   rc=1
 fi
 
+# v0.1.626: the parse's report had the same bug. Two syntax errors, or two
+# `import`s that resolve nowhere (imports are resolved before the prelude is
+# glued in front), were shown as `<rv-prelude>:N` with a prelude line under
+# them. Each case is compared with what -c says about the same file; the lone
+# import was right before and is kept, since the lone case changed path.
+printf 'let a = 1;\nlet b = (a +;\nlet c = (b +;\n' > "$TMP/twosyn.mere"
+printf 'let a = 1;\nlet b = 2;\nimport "nowhere/x.mere";\n' > "$TMP/oneimp.mere"
+printf 'let a = 1;\nimport "nowhere/x.mere";\nimport "nowhere/y.mere";\n' > "$TMP/twoimp.mere"
+for f in twosyn oneimp twoimp; do
+  "$MERE" -c "$TMP/$f.mere" 2>&1 >/dev/null | grep -- '-->' > "$TMP/$f.c"
+  "$MERE" -rv "$TMP/$f.mere" 2>&1 >/dev/null | grep -- '-->' > "$TMP/$f.rv"
+  if [ ! -s "$TMP/$f.c" ] || grep -q 'rv-prelude' "$TMP/$f.rv" || ! cmp -s "$TMP/$f.c" "$TMP/$f.rv"; then
+    echo "FAIL rv_prelude: $f.mere's parse errors are placed elsewhere under -rv than under -c"
+    paste "$TMP/$f.c" "$TMP/$f.rv" | head -3
+    rc=1
+  fi
+done
+
 # The count is the names written in lib/rv_prelude.ml and lib/rv_libm.ml. The prelude ALSO carries
 # contrib/softfloat, spliced in from the generated lib/rv_softfloat.ml, and those
 # names are not in this list -- scripts/softfloat_check.sh compiles all of them
