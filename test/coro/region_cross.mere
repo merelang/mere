@@ -1,0 +1,24 @@
+// A region block the main stack opened BEFORE a switch and closes after it,
+// with a coroutine having made and kept a string in between (v0.1.623). On
+// RISC-V every stack allocates from one bump pointer, so the block's rollback
+// would take the coroutine's string with it -- unless every switch raises the
+// high-water mark, past which a rollback does not go. The coroutine switches
+// once first, so that growing its stack's buffer (which raises the mark too)
+// has happened before the part that matters.
+let root = coro_root ();
+let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
+  let _ = coro_switch root in
+  let s = str_repeat "k" 64 in
+  let _ = coro_switch root in
+  let _ = print (if s == str_repeat "k" 64 then "kept" else "lost") in
+  root) ());
+let _ = coro_switch c;
+let n = region R {
+  let _ = coro_switch c in
+  str_len (str_repeat "m" 32)
+};
+// reuse what a rollback would have handed back
+let rec churn = fn (i: int) -> if i == 0 then 0 else (let _ = str_len (str_repeat "z" 64) in churn (i - 1));
+let _ = churn 200;
+let _ = coro_switch c;
+print_int n

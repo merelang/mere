@@ -1180,6 +1180,24 @@ overflow is named like any other. C switches with a few lines of assembly
 LLVM IR is not specific to a machine, so there the switch is `_setjmp` /
 `_longjmp` between existing stacks and `llvm.stackrestore` onto a new one.
 
+RISC-V (v0.1.623, both widths) has no virtual memory to reserve a stack in, so
+its coroutines share one region and COPY: every coroutine runs with its stack
+ending at the same address, and a switch writes the stack being left out to a
+buffer of its own and the one being entered back to the same addresses (nothing
+that points into a stack ever moves). A suspended coroutine costs the words its
+stack holds -- ten thousand suspended ones fit in a few megabytes -- and a switch
+costs a copy of the two stacks' live parts. A program that makes or switches to a
+coroutine is laid out differently: a sixteenth of RAM (at least 256 KiB) is the
+main stack, the region below it (a sixteenth too, or `--coro-stack <MB>`) is the
+coroutines', `coro_new_sized`'s size is how far below that region's top a
+coroutine may reach, and every function entry
+checks the running stack's floor (an overflow is named like any other). A program
+without coroutines is laid out and checked as before. The runtime is the RV
+prelude's, in Mere. A region block's rollback cannot reach past a switch (each
+switch raises the high-water mark), and while any coroutine exists a compaction
+reuses no arena block -- coarser than C's pins, which free what no stopped stack
+reaches.
+
 On C, a store compacted (`map_compact`, `vec_compact`, `map_recycle`) while a
 coroutine is suspended keeps any arena that coroutine's stack still points
 into, and frees it at a later compaction (v0.1.547). "Points into" is what the
@@ -1233,7 +1251,11 @@ entries.
 Backends: C reads the stack. The interpreter and LLVM hand over every integer
 in the range -- the superset the contract allows, because neither keeps a list
 of live blocks to read against (an interpreter's suspended body is an OCaml
-continuation). Wasm and RV refuse it by name, as they refuse coroutines.
+continuation). RISC-V (v0.1.623) reads the stack, as C does -- a stopped
+coroutine's from the buffer its stack was copied to, the running one's after
+spilling the saved registers -- and follows the same hops, without a limit
+above the innermost open region block's mark (every allocation shares one bump
+pointer, so "its own regions" is that block); it keeps no findings between asks. Wasm refuses it by name, as it refuses coroutines.
 
 One difference: on LLVM a coroutine made **inside** a `region R { }` block
 (lexically, or by a function called from one) fails by name. LLVM closures

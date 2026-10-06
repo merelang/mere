@@ -45,6 +45,8 @@ let usage () =
   print_endline "        -rv/-rvs/-rvg accept these in any order:";
   print_endline "        `--ram <MB>` (default 8): the RAM the binary expects —";
   print_endline "        the stack starts at the top of it";
+  print_endline "        `--coro-stack <MB>`: the region coroutines run in (default";
+  print_endline "        a sixteenth of RAM; deep recursion inside a coroutine wants more)";
   print_endline "        `--load-base <addr>`: load somewhere other than 0";
   print_endline "        (QEMU virt wants 0x80000000 — see docs/bare-metal.md)";
   print_endline "        `--bare`: no host syscalls; the program's top-level";
@@ -684,6 +686,18 @@ let set_riscv_ram mb =
   end;
   Mere.Codegen_riscv.ram_bytes := n * 1024 * 1024
 
+(* v0.1.623: `--coro-stack <MB>`, the region every coroutine runs in on RISC-V
+   (a coroutine's stack is copied into it while it runs). The default is a
+   sixteenth of RAM; a program whose coroutines recurse deep asks for more, and
+   the heap gets less. Checked against --ram when the layout is made. *)
+let set_riscv_coro_stack mb =
+  let n = try int_of_string mb with _ -> 0 in
+  if n < 1 then begin
+    Printf.eprintf "error: --coro-stack takes a size in MB, at least 1 (got `%s`)\n" mb;
+    exit 1
+  end;
+  Mere.Codegen_riscv.coro_stack_bytes := n * 1024 * 1024
+
 let compile_to_riscv ?base_dir source =
   refuse_stack_request "RV32IM" "The image's stack is laid out by the linker script.";
   let open Mere in
@@ -723,6 +737,7 @@ let rv_flags mode args =
   let rec go = function
     | "--bare" :: rest -> Mere.Codegen_riscv.bare := true; go rest
     | "--ram" :: mb :: rest -> set_riscv_ram mb; go rest
+    | "--coro-stack" :: mb :: rest -> set_riscv_coro_stack mb; go rest
     | "--load-base" :: b :: rest -> set_riscv_load_base b; go rest
     | [path] when String.length path > 0 && path.[0] <> '-' -> Some path
     | _ -> None
@@ -844,6 +859,7 @@ let () =
   | [_] -> usage ()
   | [_; "-h"] | [_; "--help"] -> usage ()
   | [_; "-v"] | [_; "--version"] -> version ()
+  | [_; "--rv-prelude"] -> print_string Mere.Rv_prelude.builtin_contents
   (* One line per name in the typer's initial environment, `name<TAB>type`.
      scripts/host_matrix.sh used to carry a hand-written list of builtins to probe,
      which is how fifteen names that no compiled backend implements went unnoticed:

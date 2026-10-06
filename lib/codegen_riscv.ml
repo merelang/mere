@@ -258,7 +258,16 @@ let pop rd =
    whatever it allocates, and the function returns into the middle of a
    string. Check after every bump — one not-taken branch — so exhaustion is
    reported instead of corrupting the program. *)
-let emit_oom_check () = emit (Branch (7, gp, sp, "__oom"))   (* bgeu gp, sp -> __oom *)
+(* v0.1.623: a program that makes a coroutine runs with a fixed layout (see
+   coro_main_lo): its coroutines execute in a region of their own between the
+   heap and the main stack, so the heap's limit is no longer the stack pointer
+   of whichever stack is running. It is kept in tp, which this backend did not
+   use, and the check is the same one instruction. *)
+let coro_mode = ref false
+let tp = 4
+let emit_oom_check () =
+  if !coro_mode then emit (Branch (7, gp, tp, "__oom"))      (* bgeu gp, tp -> __oom *)
+  else emit (Branch (7, gp, sp, "__oom"))                     (* bgeu gp, sp -> __oom *)
 
 (* bump-allocate n words, leaving the block pointer in rd. The caller must
    not make any call between this and its field stores (rd/gp are volatile). *)
@@ -474,6 +483,16 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
      | "map_clear" -> "rvmap_clear" :: v :: acc
      | "map_compact" -> "rvmap_compact" :: v :: acc
      | "map_iter" -> (if map_word_keyed e then "rvmap_iter_i" else "rvmap_iter") :: v :: acc
+     (* v0.1.623: coroutines are the prelude's rvcoro_ functions; rvcoro_boot is
+        entered by __rv_coro_boot, so nothing in the source names it *)
+     | "__coro_new_raw" -> "rvcoro_new" :: "rvcoro_new_sized" :: "rvcoro_boot" :: v :: acc
+     | "__coro_new_sized_raw" -> "rvcoro_new_sized" :: "rvcoro_boot" :: v :: acc
+     | "coro_root" -> "rvcoro_root" :: v :: acc
+     | "__coro_msg" -> "rvcoro_msg" :: v :: acc
+     | "coro_transfer" -> "rvcoro_transfer" :: v :: acc
+     | "coro_switch" -> "rvcoro_switch" :: v :: acc
+     | "coro_exit" -> "rvcoro_exit" :: v :: acc
+     | "coro_scan_ints" -> "rvcoro_scan_ints" :: v :: acc
      | _ -> v :: acc)
   | Ast.Int_lit _ | Ast.Bool_lit _ | Ast.Unit_lit
   | Ast.Str_lit _ | Ast.Float_lit _ -> acc
@@ -745,7 +764,7 @@ let globals_base () = !load_base + !code_span
    "the buffer the print helpers build digits in", and putting unrelated state
    there would make the description untrue. Top-level value bindings start one
    word further up; the heap starts after those, as before. *)
-let runtime_words = 32
+let runtime_words = 64
 let fail_frame_addr () = globals_base ()
 (* v0.1.613: three more runtime words for region reclamation (see the
    Region_block arm): how many region blocks are open, the innermost one's
@@ -765,6 +784,16 @@ let rt_aflag_off () = 4 * wsz ()
 let rt_realgp_off () = 5 * wsz ()
 let rt_default_off () = 6 * wsz ()          (* word 7: the default arena, or 0 *)
 let rt_free_off k = (7 + k) * wsz ()
+(* v0.1.623: the coroutine runtime's words, numbered from globals_base (word 0 is
+   the try_or record). FLOOR is the running stack's lowest address, which every
+   prologue checks in a program with coroutines; the switch parameters are
+   written by the prelude's __cswitch and read by __rv_cswap; the rest are the
+   prelude's own (its record table, the running and previous coroutine, the
+   finished one waiting to be reaped, how many exist). *)
+let rtw_floor = 32 and rtw_rootsp = 33 and rtw_lastsp = 34 and rtw_fromkind = 35
+and rtw_frombuf = 36 and rtw_tobuf = 37 and rtw_tosp = 38 and rtw_tofloor = 39
+and rtw_live = 47
+let rtw_addr k = globals_base () + k * wsz ()
 let arena_classes = 24
 (* the smallest arena block. 1 KB, not C's 4 KB seed: mere-ruby gives every
    call frame a Map in an arena of its own, about 300 bytes of it used, and
@@ -891,6 +920,18 @@ let mmio_len = 0x10000
 let bare = ref false
 let reserved_top = 0x20000                         (* 128KB: scratch + fb + keys *)
 let stack_top () = !load_base + !ram_bytes - reserved_top
+(* v0.1.623: with coroutines, a sixteenth of RAM is the main stack (from the top
+   down to coro_main_lo) and the region below it (a sixteenth too, or what
+   `--coro-stack` says) is where every coroutine runs
+   -- each one's stack is copied in when it is switched to and out when it is
+   switched away from, so a coroutine costs what its stack holds, not a fixed
+   reservation. The heap stops at coro_co_lo. *)
+let coro_stack_bytes = ref 0                      (* --coro-stack; 0: a sixteenth of RAM *)
+let coro_part () = max 0x40000 (!ram_bytes / 16)
+let coro_main_lo () = stack_top () - coro_part ()
+let coro_co_hi () = coro_main_lo ()
+let coro_co_lo () =
+  coro_co_hi () - (if !coro_stack_bytes > 0 then !coro_stack_bytes else coro_part ())
 (* the trap trampoline's register save area (x1..x31) and the one word holding
    the registered handler closure. Both sit in the reserved region above the
    stack, so no program allocation can land on them. *)
@@ -1769,12 +1810,11 @@ and compile_node (env : env) (e : Ast.expr) : unit =
             end
           end
           else if List.mem v Typer.coro_builtins then
-            (* named, with the reason: the bare-metal runtime has one stack
-               and no allocator for another, so "not yet" would be a promise *)
+            (* v0.1.623: applied in full, each is a call into the prelude's
+               runtime (compile_app); as a value it is not *)
             err e.loc (Printf.sprintf
-              "RV32I: `%s` is unsupported on this target: a coroutine is a \
-               second stack the runtime switches to, and the bare-metal runtime \
-               has one stack and nowhere to map another. Coroutines are interp + C + LLVM"
+              "RV32I: `%s` is unsupported here as a value -- apply it to all of \
+               its arguments (a coroutine builtin is a call into the runtime)"
                (Typer.coro_source_name v))
           else if List.mem_assoc v Typer.initial_env then
             (* The shape of the failure, not just the fact of it. This branch
@@ -3148,6 +3188,99 @@ and compile_app env e =
     li a2 0;                                             (* flags: not AT_REMOVEDIR *)
     li a7 35;                                            (* unlinkat *)
     emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall -> a0 = 0 | -errno *)
+  (* v0.1.623: coroutines, as calls into the prelude's runtime (rvcoro_). Only
+     a full application; a coroutine builtin passed as a value is refused below. *)
+  | Ast.Var ("coro_root" | "__coro_new_raw" | "__coro_msg" | "coro_switch" as f)
+    when List.length args = 1 ->
+    call_top env (match f with
+        | "coro_root" -> "rvcoro_root" | "__coro_new_raw" -> "rvcoro_new"
+        | "__coro_msg" -> "rvcoro_msg" | _ -> "rvcoro_switch") args
+  | Ast.Var ("__coro_new_sized_raw" | "coro_exit" as f) when List.length args = 2 ->
+    call_top env (if f = "coro_exit" then "rvcoro_exit" else "rvcoro_new_sized") args
+  | Ast.Var "coro_transfer" when List.length args = 3 ->
+    call_top env "rvcoro_transfer" args
+  | Ast.Var "coro_scan_ints" when List.length args = 4 ->
+    call_top env "rvcoro_scan_ints" args
+  | Ast.Var "__rv_peek" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i 0 a0 (ldf3 ()) a0 0x03)
+  | Ast.Var "__rv_poke" when List.length args = 2 ->
+    compile_expr env (List.hd args); push a0;
+    compile_expr env (List.nth args 1);
+    pop t0;
+    emit_word (enc_s 0 a0 t0 (stf3 ()) 0x23);
+    li a0 0
+  | Ast.Var "__rv_rtw" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i (if wsz () = 8 then 3 else 2) a0 1 a0 0x13);   (* slli *)
+    li t0 (globals_base ());
+    emit_word (enc_r 0 t0 a0 0 a0 0x33);
+    emit_word (enc_i 0 a0 (ldf3 ()) a0 0x03)
+  | Ast.Var "__rv_rtw_set" when List.length args = 2 ->
+    compile_expr env (List.hd args); push a0;
+    compile_expr env (List.nth args 1);
+    pop t1;
+    emit_word (enc_i (if wsz () = 8 then 3 else 2) t1 1 t1 0x13);
+    li t0 (globals_base ());
+    emit_word (enc_r 0 t0 t1 0 t1 0x33);
+    emit_word (enc_s 0 a0 t1 (stf3 ()) 0x23);
+    li a0 0
+  | Ast.Var "__rv_sp" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i 0 sp 0 a0 0x13)
+  | Ast.Var "__rv_alloc_keep" when List.length args = 1 ->
+    (* n words from gp that no region block will roll back: the mark is raised
+       past them *)
+    compile_expr env (List.hd args);
+    emit_word (enc_i (if wsz () = 8 then 3 else 2) a0 1 a0 0x13);
+    emit_word (enc_i 0 gp 0 t1 0x13);
+    emit_word (enc_r 0 a0 gp 0 gp 0x33);
+    emit_oom_check ();
+    li t0 (rt_depth_addr ());
+    emit_word (enc_s (rt_hwm_off ()) gp t0 (stf3 ()) 0x23);
+    emit_word (enc_i 0 t1 0 a0 0x13)
+  | Ast.Var "__rv_hwm_raise" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    li t0 (rt_depth_addr ());
+    emit_word (enc_s (rt_hwm_off ()) gp t0 (stf3 ()) 0x23);
+    li a0 0
+  | Ast.Var ("__rv_cswap" | "__rv_boot_addr" as f) when not !coro_mode ->
+    err e.loc (Printf.sprintf
+      "RV32I: `%s` is unsupported outside the coroutine runtime: it is that \
+       runtime's own, and this program makes no coroutine and switches to none" f)
+  | Ast.Var "__rv_cswap" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit (Jal (ra, "__rv_cswap"));
+    li a0 0
+  | Ast.Var "__rv_call1" when List.length args = 2 ->
+    (* a closure held as a word, applied to a word *)
+    compile_expr env (List.hd args); push a0;
+    compile_expr env (List.nth args 1);
+    emit_word (enc_i 0 a0 0 a1 0x13);
+    pop a0;
+    emit_word (enc_i 0 a0 (ldf3 ()) t1 0x03);
+    emit_word (enc_i 0 t1 0 ra 0x67)
+  | Ast.Var ("__rv_boot_addr" | "__rv_co_hi" | "__rv_co_lo" | "__rv_main_lo"
+            | "__rv_heap_lo" | "__rv_stack_top" | "__rv_gp" as f)
+    when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    (match f with
+     | "__rv_boot_addr" -> emit (LoadAddr (a0, "__rv_coro_boot"))
+     | "__rv_co_hi" -> li a0 (coro_co_hi ())
+     | "__rv_co_lo" -> li a0 (coro_co_lo ())
+     | "__rv_heap_lo" -> li a0 (globals_base () + (runtime_words + Hashtbl.length globals_map) * wsz ())
+     | "__rv_stack_top" -> li a0 (stack_top ())
+     | "__rv_gp" -> emit_word (enc_i 0 gp 0 a0 0x13)
+     | _ -> li a0 (coro_main_lo ()))
+  (* v0.1.623: s0 and s1..s11 into runtime words 50..61, for a scan of the
+     running stack: a value a caller keeps in a saved register is on no stack
+     until something saves it *)
+  | Ast.Var "__rv_spill" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    li t0 (rtw_addr 50);
+    List.iteri (fun i r -> emit_word (enc_s (i * wsz ()) r t0 (stf3 ()) 0x23))
+      [ fp; 9; 18; 19; 20; 21; 22; 23; 24; 25; 26; 27 ];
+    li a0 0
   | Ast.Var "__rv_str_hash" when List.length args = 1 ->
     compile_expr env (List.hd args); emit (Jal (ra, "__rv_str_hash"))
   | Ast.Var "__rv_xlen" when List.length args = 1 ->
@@ -3609,6 +3742,23 @@ let emit_prologue total =
   let ra_slot = fp_slot + 1 in
   let fsz = (ra_slot + 1) * wsz () in
   base_addi sp sp (-fsz);                               (* addi sp, sp, -fsz *)
+  if !coro_mode then begin
+    (* v0.1.623: each stack has a floor, and a program with coroutines checks
+       it on every entry -- the region below a coroutine's stack is another
+       stack or the heap, and nothing here traps a write past it *)
+    li t0 (rtw_addr rtw_floor);
+    emit_word (enc_i 0 t0 (ldf3 ()) t0 0x03);
+    emit (Branch (6, sp, t0, "__stkovf"))                 (* bltu sp, floor *)
+  end else if not !bare then
+    (* v0.1.623: the stack growing into the heap. An allocation checks gp
+       against sp, but a call made after the heap has come close went
+       unchecked: the frame landed on live heap data, and region_growth at
+       32 MB on RV64 trapped in the float helpers instead of naming the
+       exhaustion (memu's `trace` found sp below gp at a prologue). Not under
+       --bare: a kernel's trap handler runs on its own stack with the
+       interrupted process's gp still in place (examples/riscv_bare_user.mere),
+       and a bare program owns its memory map. *)
+    emit (Branch (6, sp, gp, "__oom"));                   (* bltu sp, gp *)
   base_store sp ra (ra_slot * wsz ());                  (* sw   ra, ra_slot(sp) *)
   base_store sp fp (fp_slot * wsz ());                  (* sw   fp, fp_slot(sp) *)
   for k = 0 to nsaved - 1 do
@@ -3766,6 +3916,12 @@ let emit_start () =
   for i = 1 to runtime_words - 1 do
     emit_word (enc_s (i * wsz ()) zero t0 (stf3 ()) 0x23)
   done;
+  if !coro_mode then begin
+    (* v0.1.623: the heap's limit, and the main stack's floor *)
+    li tp (coro_co_lo ());
+    li t1 (coro_main_lo ());
+    emit_word (enc_s (rtw_floor * wsz ()) t1 t0 (stf3 ()) 0x23)
+  end;
   (* heap top starts just above the runtime word and the globals region *)
   li gp (globals_base () + (runtime_words + Hashtbl.length globals_map) * wsz ());
   (* Q-110: mstatus.VS = Initial. A real machine (QEMU) traps every vector
@@ -4700,6 +4856,98 @@ let emit_oom () =
   emit_word (enc_i 3 zero 0 a0 0x13);
   emit_word (enc_i 0 zero 0 zero 0x73)                  (* ecall exit(3) *)
 
+(* --- v0.1.623: coroutines -----------------------------------------------------
+   The runtime is the prelude's rvcoro_ functions; these are the three pieces it cannot
+   write in Mere.
+
+   __rv_cswap switches stacks. Every coroutine runs in the same region, with its
+   stack ending at coro_co_hi, so a switch COPIES: the stack being left is
+   written out to its record's buffer, the one being entered is written back to
+   the same addresses, and nothing that points into a stack (a saved fp, a
+   try_or record) ever moves. The main stack is not copied; its sp is kept in a
+   word. The parameters are words the prelude has just written: FROMKIND (0 the
+   main stack, 1 a coroutine to save, 2 a finished one to drop), FROMBUF, TOBUF
+   (0: back to the main stack), TOSP, TOFLOOR. ra, s0 and s1..s11 are saved on
+   the stack being left, as a call would leave them; the stack being entered
+   holds its own, and a coroutine that has never run holds a seeded frame whose
+   ra is __rv_coro_boot. The copy in runs with nothing on any stack: the frame
+   it overwrites is the one it has just saved.
+
+   __stkovf is where a prologue goes when sp is below the running stack's floor:
+   the message the C backend prints for a stack overflow, and exit 1. *)
+let emit_coro_rt () =
+  let w = wsz () in
+  let ld rd off rs = emit_word (enc_i off rs (ldf3 ()) rd 0x03) in
+  let sd src off base = emit_word (enc_s off src base (stf3 ()) 0x23) in
+  let addi rd rs imm = emit_word (enc_i imm rs 0 rd 0x13) in
+  let mv rd rs = addi rd rs 0 in
+  let t3 = 28 and t4 = 29 and t5 = 30 in
+  let saved = [ ra; fp; 9; 18; 19; 20; 21; 22; 23; 24; 25; 26; 27 ] in
+  let frame = 14 * w in
+  emit (Label "__rv_cswap");
+  addi sp sp (0 - frame);
+  List.iteri (fun i r -> sd r (i * w) sp) saved;
+  li t0 (globals_base ());
+  ld t1 (rtw_fromkind * w) t0;
+  emit (Branch (0, t1, zero, ".csRoot"));
+  addi t2 t1 (-2);
+  emit (Branch (0, t2, zero, ".csTo"));                    (* a finished one: dropped *)
+  ld t1 (rtw_frombuf * w) t0;
+  li t2 (coro_co_hi ());
+  mv t3 sp;
+  emit (Label ".csOut");
+  emit (Branch (7, t3, t2, ".csOutDone"));                 (* bgeu cursor, co_hi *)
+  ld t4 0 t3; sd t4 0 t1;
+  addi t3 t3 w; addi t1 t1 w;
+  emit (Jal (zero, ".csOut"));
+  emit (Label ".csOutDone");
+  sd sp (rtw_lastsp * w) t0;
+  emit (Jal (zero, ".csTo"));
+  emit (Label ".csRoot");
+  sd sp (rtw_rootsp * w) t0;
+  sd sp (rtw_lastsp * w) t0;
+  emit (Label ".csTo");
+  ld t1 (rtw_tobuf * w) t0;
+  emit (Branch (0, t1, zero, ".csToRoot"));
+  ld t2 (rtw_tosp * w) t0;
+  li t3 (coro_co_hi ());
+  mv t4 t2;
+  emit (Label ".csIn");
+  emit (Branch (7, t4, t3, ".csInDone"));
+  ld t5 0 t1; sd t5 0 t4;
+  addi t1 t1 w; addi t4 t4 w;
+  emit (Jal (zero, ".csIn"));
+  emit (Label ".csInDone");
+  mv sp t2;
+  ld t1 (rtw_tofloor * w) t0;
+  sd t1 (rtw_floor * w) t0;
+  emit (Jal (zero, ".csPop"));
+  emit (Label ".csToRoot");
+  ld sp (rtw_rootsp * w) t0;
+  li t1 (coro_main_lo ());
+  sd t1 (rtw_floor * w) t0;
+  emit (Label ".csPop");
+  List.iteri (fun i r -> ld r (i * w) sp) saved;
+  addi sp sp frame;
+  emit_word (enc_i 0 ra 0 zero 0x67);                       (* ret *)
+  (* a coroutine's first return lands here; rvcoro_boot never returns *)
+  emit (Label "__rv_coro_boot");
+  emit (Jal (ra, "u_rvcoro_boot"));
+  emit_abort "coro: a coroutine's body returned into nothing";
+  emit (Label "__stkovf");
+  emit_word (enc_i 0x305 zero 1 zero 0x73);                (* csrrw x0, mtvec, x0 *)
+  let label = "str__stkovf" in
+  string_data := (label, mk_str_block "stack overflow (recursion too deep)\n") :: !string_data;
+  emit (LoadAddr (t0, label));
+  emit_word (enc_i 0 t0 (ldf3 ()) a2 0x03);
+  emit_word (enc_i w t0 0 a1 0x13);
+  emit_word (enc_i 2 zero 0 a0 0x13);                      (* fd 2 *)
+  emit_word (enc_i 64 zero 0 a7 0x13);
+  emit_word (enc_i 0 zero 0 zero 0x73);
+  emit_word (enc_i 93 zero 0 a7 0x13);
+  emit_word (enc_i 1 zero 0 a0 0x13);
+  emit_word (enc_i 0 zero 0 zero 0x73)                      (* exit(1) *)
+
 (* --- the trap trampoline ------------------------------------------------
    A trap handler cannot be an ordinary function: it is entered with every
    register live and it leaves with `mret`, not `ret`. The language does not
@@ -4994,6 +5242,16 @@ let emit_arena () =
   ret ();
   (* __blk_put(a0 = block): onto the free list of its class. Leaf; t0..t3. *)
   emit (Label "__blk_put");
+  if !coro_mode then begin
+    (* v0.1.623: while any coroutine exists a block is not reused -- a
+       suspended stack may still point into it (the C backend scans stopped
+       stacks and keeps what they reach; this keeps everything) *)
+    li t0 (rtw_addr rtw_live);
+    ld t1 0 t0;
+    emit (Branch (0, t1, zero, ".bpGo"));
+    ret ();
+    emit (Label ".bpGo")
+  end;
   ld t1 w a0; li t2 0; li t3 arena_min_block;
   emit (Label ".bpSz");
   emit (Branch (7, t3, t1, ".bpHave"));
@@ -5939,6 +6197,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   lbl_counter := 0;
   string_data := [];
   chr_tab_used := false;
+  coro_mode := false;
   divzero_used := false;
   lambdas := [];
   Hashtbl.reset adapters;
@@ -6015,6 +6274,17 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   List.iter (fun (_, init) -> List.iter visit (vars_in init [])) !globals;
   (match bare_entry with Some n -> visit n | None -> ());
   try_msg_used := Hashtbl.mem reachable "try_or_msg";
+  (* any program that can switch stacks: one that makes a coroutine, or one
+     that switches or transfers (to the main stack, if nothing else) *)
+  coro_mode := Hashtbl.mem reachable "rvcoro_new_sized" || Hashtbl.mem reachable "__cswitch";
+  (* __rv_coro_boot calls it, and nothing in the source names it *)
+  if !coro_mode then visit "rvcoro_boot";
+  if !coro_mode && coro_co_lo () - globals_base () < !ram_bytes / 8 then
+    raise (Codegen_error (Loc.dummy, Printf.sprintf
+      "RV32I: the coroutines' stack region (%d KB) and the main stack (%d KB) leave \
+       less than an eighth of the %d MB of RAM for the heap -- a smaller \
+       --coro-stack, or a larger --ram"
+      ((coro_co_hi () - coro_co_lo ()) / 1024) (coro_part () / 1024) (!ram_bytes / 1048576)));
   prelude_file := (match Hashtbl.find_opt tops "rvmap_new" with
                    | Some (_, body) -> Some body.Ast.loc.Loc.file | None -> None);
   (* layout: _start, runtime, main, reachable fns, then string rodata *)
@@ -6037,6 +6307,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   emit_vec ();
   emit_arena ();
   emit_map_rt ();
+  if !coro_mode then emit_coro_rt ();
   emit_pat_fail ();
   emit_oom ();
   emit_raw_fault ();

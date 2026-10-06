@@ -31,3 +31,20 @@ __coro_msg         internal: the read of what was sent to a coroutine, in the bo
 __coro_new_sized_raw internal: what `coro_new_sized` is rewritten into before type-checking
 __chan_recv_pair   internal: what `channel_recv_opt` is rewritten into on LLVM and Wasm -- the receive as a (got, value) pair
 __chan_recv_pair_timeout internal: the same for `channel_recv_timeout`
+__rv_alloc_keep    internal: the RV prelude's coroutine runtime (v0.1.623)
+__rv_boot_addr     internal: the RV prelude's coroutine runtime (v0.1.623)
+__rv_call1         internal: the RV prelude's coroutine runtime (v0.1.623)
+__rv_co_hi         internal: the RV prelude's coroutine runtime (v0.1.623)
+__rv_co_lo         internal: the RV prelude's coroutine runtime (v0.1.623)
+__rv_cswap         internal: the RV prelude's coroutine runtime (v0.1.623)
+__rv_gp            internal: the RV prelude's coroutine runtime (v0.1.623)
+__rv_heap_lo       internal: the RV prelude's coroutine runtime (v0.1.623)
+__rv_hwm_raise     internal: the RV prelude's coroutine runtime (v0.1.623)
+__rv_main_lo       internal: the RV prelude's coroutine runtime (v0.1.623)
+__rv_peek          internal: the RV prelude's coroutine runtime (v0.1.623)
+__rv_poke          internal: the RV prelude's coroutine runtime (v0.1.623)
+__rv_rtw           internal: the RV prelude's coroutine runtime (v0.1.623)
+__rv_rtw_set       internal: the RV prelude's coroutine runtime (v0.1.623)
+__rv_sp            internal: the RV prelude's coroutine runtime (v0.1.623)
+__rv_spill         internal: the RV prelude's coroutine runtime (v0.1.623)
+__rv_stack_top     internal: the RV prelude's coroutine runtime (v0.1.623)
