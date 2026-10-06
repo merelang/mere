@@ -4,6 +4,67 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.627 — 2026-10-07
+
+_On RISC-V each coroutine allocates in a heap of its own, so a program that switches inside its region blocks reclaims them as C does; and the stopped-stack walk under pins and `coro_scan_ints` no longer writes below its table on RV32, nor scans every retired block for every word it reads._
+
+Until now every stack bumped the one heap pointer, so each switch raised the
+high-water mark -- a region block closing on one stack could otherwise roll
+back over data another had made since -- and a program that switched in the
+middle of its blocks reclaimed nothing. `test/coro/stack_heaps.mere`, a hundred
+coroutines and main each making garbage in a block across a switch (about
+600 MB of it), runs on C in 5.5 MB and ran out of a 256 MB RISC-V machine.
+
+- A coroutine's heap is a chain of blocks: the first 4 KiB, each next one twice
+  the last up to a megabyte, taken when an allocation does not fit
+  (`__heap_more`). With coroutines the room is asked for before the bump, so
+  every allocation site keeps its registers; the old check after the bump stays
+  as a net. Blocks are cut from the top of the heap down (arenas too), and the
+  main stack keeps the heap below them.
+- The switch keeps gp, tp, the high-water mark and the chain in each stack's
+  record, and raises nothing.
+- A region block whose mark is in the current block rolls back as before. One
+  whose allocations ran into later blocks goes back along the chain to the
+  block holding its mark (or the high-water mark, if that is newer), and the
+  blocks passed are given back once its result is copied out. A block opened
+  before the coroutine had any block -- mere-ruby's collector, run on a
+  coroutine of its own, opens one first thing -- goes back to the start of the
+  first; without that, every collection kept everything it allocated.
+- Protect and `__hprot` look only at the current block.
+- A coroutine that ends having kept nothing gives its blocks back. One that
+  kept something -- a closure left in a map is stored, not copied -- keeps
+  them, as C keeps what a coroutine made in the heap.
+- The walk (624) counts as heap everything below the coroutines' stack region,
+  and follows a stopped stack's own region values into the older blocks of its
+  chain.
+
+Found on the way, both in v0.1.624's walk: the visited set's slot was
+`(v / w) * 40503 % cap`, which on RV32 overflows and comes out negative, so the
+walk wrote below its table -- onto a coroutine's record, once blocks sat near
+the top of memory (`scan` on RV32 then found its coroutine "finished"); the
+slot is now masked. And the release looked up each word a walk read by
+scanning every retired block: mere-ruby's collections retire thousands while
+its fibers are stopped, and one release ran for twenty billion instructions
+(corpus 235). The blocks are now sorted once and each word found by halving.
+
+mere-ruby on RV64 with its Fibers on coroutines: 165, 213, 220, 231, 233 and 237
+match as before (213 in 19 s, was 66). 214 and 219 need more than C's own
+316 MB / 980 MB peak and do not fit 256 MB; 235 (69 MB on C) still runs out --
+one of its collections allocates far more here than on C, which is the next
+thing to measure.
+
+`coro_check`'s RV 9 poison (624) now empties the blocks it gives back before
+freeing them: with blocks cut from the top down, the churn in `compact_reuse`
+no longer happened to reuse the one block the held string is in, and the
+poison stayed green with the walk still right.
+
+`scripts/coro_check.sh` runs `stack_heaps`, `finished_keeps` and `first_block`
+on every backend and both RISC-V widths; its RV poisons now include the heap
+saved into the wrong record (`region_cross`, `stack_heaps`), a finished
+coroutine's blocks given back although it kept something (`finished_keeps`)
+and the older blocks not walked (`scan`). `first_block` was checked red by
+hand without the mark-0 path (it runs out of memory on both widths).
+
 ## v0.1.626 — 2026-10-07
 
 _On `-rv` / `-rv64`, two syntax errors -- or two `import`s that resolve nowhere -- are reported at the program's own lines again, not at the RISC-V prelude's._

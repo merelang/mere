@@ -1,0 +1,25 @@
+// A coroutine that finishes after making something outside every region block
+// of its own and leaving it where the main stack can reach it: a closure, and
+// the string it holds, in a Map made at the top level (a closure stored into a
+// container is stored, not copied). Nothing rolls that back -- on C it is in
+// the heap; on RISC-V (v0.1.627), where a coroutine allocates in blocks of its
+// own, it is in those blocks, and they are given back when the coroutine ends
+// only if it kept nothing in them. Then other coroutines take blocks, and the
+// closure must still answer the same.
+let root = coro_root ();
+let m = map_new ();
+let rec spin = fn (k: int) ->
+  if k == 0 then 0
+  else
+    (let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
+               let _ = str_len (str_repeat "z" 900) in root) ()) in
+     let _ = coro_switch c in
+     spin (k - 1));
+let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
+          let s = str_repeat "k" 64 in
+          let _ = map_set m 0 (fn (u: unit) -> s) in
+          root) ());
+let _ = coro_switch c;
+let _ = spin 50;
+let g = map_get m 0;
+print (if g () == str_repeat "k" 64 then "kept" else "lost")

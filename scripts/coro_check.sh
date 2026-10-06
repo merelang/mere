@@ -68,7 +68,10 @@ sized|icl|5050;45000150000;partial|0
 sized_overflow|cl|stack overflow (recursion too deep)|1
 sized_reuse|icl|small;200010000;done|0
 region_cross|icl|kept;32|0
-compact_reuse|ic|held;0|0'
+compact_reuse|ic|held;0|0
+stack_heaps|icl|505000000|0
+finished_keeps|icl|kept|0
+first_block|icl|4000|0'
 
 # The interpreter prints a failure with its position and a code frame; the
 # compiled program prints the message alone. The comparison is on the message.
@@ -221,7 +224,10 @@ sized_overflow|r|stack overflow (recursion too deep)|1
 sized_reuse|r|small;200010000;done|0
 million|r|1000000|0
 region_cross|r|kept;32|0
-compact_reuse|r|held;0|0'
+compact_reuse|r|held;0|0
+stack_heaps|r|505000000|0
+finished_keeps|r|kept|0
+first_block|r|4000|0'
 RV_LIMIT="${RV_LIMIT:-300}"
 have_rv=0
 if [ -n "${MEMU:-}" ] && [ -f "$MEMU/riscv-runc/rv64i_run.mere" ]; then
@@ -346,16 +352,29 @@ if [ "$MODE" = "--poison" ]; then
   # only makes protection more conservative (every open and close nests, so a
   # shared count is never 0 while some stack has a block open): no fixture can
   # go red without it, and none is claimed to.
-  rv_poison "RV 3 (the high-water mark not raised at a switch)" 's/^    let _ = __rv_hwm_raise () in$/    let _ = () in/' region_cross
+  # v0.1.627: a stack's heap is its own, kept in its record across a switch.
+  # Saved into the record of the stack entered, every stack bumps the one heap
+  # again, and without 623's high-water mark at each switch a block that
+  # closes on main rolls back over the coroutine's string.
+  rv_poison "RV 3 (the stack left's heap not kept as its own)" 's/^    let _ = __rv_rtw_set 74 (__crec from) in$/    let _ = __rv_rtw_set 74 (__crec to) in/' region_cross stack_heaps
   rv_poison "RV 4 (no finished check)" 's/^  else (let st = __cget s 0 in if st == 3 || st == 4 then 0 - 1 else s);$/  else s;/' finished
   rv_poison "RV 5 (no hand-over check)" 's/^  if ns < 0 || ns == me then fail/  if ns < 0 then fail/' self_handoff
   rv_poison "RV 6 (blocks reused while a coroutine exists)" 's/^    let _ = __rv_rtw_set 47 (__rv_rtw 47 + 1) in$/    let _ = () in/' compact_reuse
   # v0.1.624: the release gives back only what no stopped stack reaches
-  rv_poison "RV 9 (the release gives back a block a stopped stack reaches)" 's/^          let _ = (if vec_get pinned i == 0 then __rv_blk_free b$/          let _ = (if true then __rv_blk_free b/' compact_reuse
+  # (v0.1.627: and empties it first. Blocks are cut from the top of the heap
+  # down now, the churn no longer happened to reuse the one block the string
+  # is in, and the poison stayed green with the walk still right; emptied, the
+  # block reads wrong whether or not it is reused.)
+  rv_poison "RV 9 (the release gives back a block a stopped stack reaches)" 's/^          let _ = (if vec_get pinned i == 0 then __rv_blk_free b$/          let _ = __czero (b + 2 * __cw ()) ((vec_get ends i - b) \/ __cw () - 2) in let _ = (if true then __rv_blk_free b/' compact_reuse
   # The saved registers are spilled before a scan of the running stack, but the
   # scan itself saves every register it uses on its own frame, so today the
   # spill is a backstop no fixture can tell apart; no poison is claimed for it.
-  rv_poison "RV 8 (own region blocks not followed to the end)" 's/ \&\& (d < 3 || (v >= own \&\& v < own_hi))$/ \&\& d < 3/' scan
+  rv_poison "RV 8 (own region blocks not followed to the end)" 's/^       \&\& (d < 3 || (v >= own \&\& v < own_hi) || (older != 0 \&\& __cw_older older mark v))$/       \&\& d < 3/' scan
+  # v0.1.627: a block opened before the coroutine's heap ran into a new block
+  # has its values in the older one too
+  rv_poison "RV 11 (own region values in an older block not followed)" 's/ || (older != 0 \&\& __cw_older older mark v))$/)/' scan
+  # v0.1.627: a finished coroutine's blocks go back only if it kept nothing
+  rv_poison "RV 10 (a finished coroutine's blocks given back though it kept something)" 's/^  if first != 0 \&\& __cget s 17 == first \&\& __cget s 13 == first + 2 \* w then$/  if first != 0 then/' finished_keeps
   if [ "$pfail" = 0 ] && [ "$fail" = 0 ]; then echo "coro --poison: ok (the gate can go red)"; else echo "coro --poison: FAILED"; pfail=1; fi
   exit "$pfail"
 fi

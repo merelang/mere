@@ -1648,8 +1648,11 @@ let str_of_float = fn (x: float) ->
 // Record words: 0 state (0 new, 1 running, 2 suspended, 3 finished, 4 free),
 // 1 gen, 2 sp, 3 buffer, 4 its capacity in words, 5 floor, 6 body closure,
 // 7 message, 8..11 the stack's own runtime words (try_or record, region depth,
-// block mark, outermost block mark), 12 the next free slot + 1, 13 gp when it
-// last stopped.
+// block mark, outermost block mark), 12 the next free slot + 1, 13..18 its
+// heap (v0.1.627, kept by __rv_cswap): gp, tp, the high-water mark, the
+// current block's start, the newest and the oldest block of its chain. A
+// coroutine allocates in blocks of its own (see __heap_more); the main stack
+// in the heap below where blocks are cut.
 // Runtime words: 34 the sp just left, 35..39 the switch's parameters, 40 the
 // table, 41 its capacity, 42 slots in use, 43 free list (slot + 1), 44 running,
 // 45 previous, 46 finished and waiting to be reaped (slot + 1), 47 how many
@@ -1661,8 +1664,8 @@ let __cset = fn (s: int) -> fn (k: int) -> fn (v: int) -> __rv_poke (__crec s + 
 let rec __czero = fn (a: int) -> fn (n: int) ->
   if n == 0 then () else (let _ = __rv_poke a 0 in __czero (a + __cw ()) (n - 1));
 let __cnew_rec = fn (s: int) ->
-  let r = __rv_alloc_keep 16 in
-  let _ = __czero r 16 in
+  let r = __rv_alloc_keep 24 in
+  let _ = __czero r 24 in
   __rv_poke (__rv_rtw 40 + s * __cw ()) r;
 let __cinit = fn (u: unit) ->
   if __rv_rtw 48 != 0 then () else
@@ -1723,12 +1726,26 @@ let rvcoro_new_sized = fn (size: int) -> fn (f: int) ->
     let _ = __cset s 5 (if hi - size < lo then lo else hi - size) in
     let _ = __cset s 6 f in
     let _ = __cset s 7 0 in
-    let _ = __czero (__crec s + 8 * w) 5 in
+    // its runtime words and an empty heap: the first allocation takes a block
+    let _ = __czero (__crec s + 8 * w) 11 in
     let _ = __rv_rtw_set 47 (__rv_rtw 47 + 1) in
     // the body's closure, and whatever it captured, outlive any region block
     let _ = __rv_hwm_raise () in
     __chandle s;
 let rvcoro_new = fn (f: int) -> rvcoro_new_sized (__rv_co_hi () - __rv_co_lo ()) f;
+// v0.1.627: a finished coroutine's blocks go back when it kept nothing in
+// them -- its heap ended where its one block's data starts. Anything it did
+// keep may be pointed at from elsewhere (a value made outside every region
+// block is never rolled back, here as on C), and then the blocks stay.
+let __cfree_heap = fn (s: int) ->
+  let w = __cw () in
+  let first = __cget s 18 in
+  if first != 0 && __cget s 17 == first && __cget s 13 == first + 2 * w then
+    (let _ = __rv_blk_free first in
+     let _ = __cset s 17 0 in
+     let _ = __cset s 18 0 in
+     __cset s 13 0)
+  else ();
 // on the stack just entered: the stack left gets its sp, this one its runtime
 // words back, and a coroutine that finished on the way here is reaped
 let __carrived = fn (u: unit) ->
@@ -1742,6 +1759,7 @@ let __carrived = fn (u: unit) ->
   let z = __rv_rtw 46 in
   let _ = (if z == 0 then () else
            (let zs = z - 1 in
+            let _ = __cfree_heap zs in
             let _ = __cset zs 0 4 in
             let _ = __cset zs 12 (__rv_rtw 43) in
             let _ = __rv_rtw_set 43 z in
@@ -1757,8 +1775,6 @@ let __cswitch = fn (to: int) -> fn (v: int) -> fn (setmsg: bool) ->
     let _ = __cset from 9 (__rv_rtw 1) in
     let _ = __cset from 10 (__rv_rtw 2) in
     let _ = __cset from 11 (__rv_rtw 4) in
-    // where the heap stood when this stack stopped (see __cwalk)
-    let _ = __cset from 13 (__rv_gp ()) in
     let w = __cw () in
     let fin = __cget from 0 == 3 in
     // room to copy this stack out, with what the switch itself pushes
@@ -1775,9 +1791,12 @@ let __cswitch = fn (to: int) -> fn (v: int) -> fn (setmsg: bool) ->
     let _ = __cset to 0 1 in
     let _ = __rv_rtw_set 45 from in
     let _ = __rv_rtw_set 44 to in
-    // nothing allocated before this switch is rolled back by a region block
-    // that closes on another stack
-    let _ = __rv_hwm_raise () in
+    // the two records, whose heaps __rv_cswap exchanges (v0.1.627: before,
+    // every stack bumped one heap and this raised the high-water mark, so no
+    // block that closed on another stack rolled back over this one's data --
+    // and in a program that switched inside its blocks, no block rolled back)
+    let _ = __rv_rtw_set 74 (__crec from) in
+    let _ = __rv_rtw_set 75 (__crec to) in
     let _ = __rv_cswap () in
     __carrived ();
 // a coroutine's first return lands in __rv_coro_boot, which calls this
@@ -1844,12 +1863,16 @@ let __cw_add = fn (v: int) ->
   let cap = __rv_rtw 65 in
   let tbl = __rv_rtw 64 in
   let st = __rv_rtw 66 in
+  // the capacity is a power of two, and the slot is masked, not taken `%`:
+  // on RV32 the product overflows, a negative `%` is negative, and the walk
+  // wrote below its own table (v0.1.627 put blocks near the top of memory,
+  // where every address does it; the record below the table was a coroutine's)
   let rec probe = fn (i: int) ->
-    let a = tbl + (i % cap) * 2 * w in
+    let a = tbl + bit_and i (cap - 1) * 2 * w in
     if __rv_peek (a + w) != st then (let _ = __rv_poke a v in let _ = __rv_poke (a + w) st in true)
     else if __rv_peek a == v then false
     else probe (i + 1) in
-  probe ((v / w) * 40503 % cap);
+  probe ((v / w) * 40503);
 // a table twice the size, this walk's entries moved over
 let __cw_rehash = fn (u: unit) ->
   let w = __cw () in
@@ -1867,14 +1890,35 @@ let __cw_rehash = fn (u: unit) ->
           let _ = (if __rv_peek (a + w) == st then (let _ = __cw_add (__rv_peek a) in ()) else ()) in
           mv (i + 1)) in
   mv 0;
+// v0.1.627: v in a stopped stack's region values when its innermost block's
+// mark is in an older block of its chain than the newest: every block from
+// the one after the newest back to the one holding the mark (from the mark)
+let rec __cw_older = fn (b: int) -> fn (mark: int) -> fn (v: int) ->
+  if b == 0 then false
+  else
+    let w = __cw () in
+    let lo = b + 2 * w in
+    let hi = b + __rv_peek (b + w) in
+    if mark >= lo && mark <= hi then v >= mark && v < hi
+    else if v >= lo && v < hi then true
+    else __cw_older (__rv_peek b) mark v;
 let __cwalk = fn (s: int) -> fn (budget: int) -> fn (visit: int -> unit) ->
   let w = __cw () in
   let me = __rv_rtw 44 in
   let hlo = __rv_heap_lo () in
-  let ghi = __rv_gp () in
-  let own = (if s == me then (if __rv_rtw 1 > 0 then __rv_rtw 2 else ghi)
-             else (if __cget s 9 > 0 then __cget s 10 else ghi)) in
-  let own_hi = (if s == me then ghi else __cget s 13) in
+  // v0.1.627: blocks are cut from the heap's top down (arenas, and every
+  // coroutine's own heap), so a pointer into the heap is anything below the
+  // coroutines' stack region, not below the running stack's gp
+  let ghi = __rv_co_lo () in
+  let own_hi = (if s == me then __rv_gp () else __cget s 13) in
+  // from the innermost open block's mark, when it is in the stack's current
+  // block (a mark in an older one rolls nothing back: see the Region_block arm)
+  let blo = (if s == me then __rv_rtw 73 else __cget s 16) in
+  let mark = (if s == me then (if __rv_rtw 1 > 0 then __rv_rtw 2 else own_hi)
+              else (if __cget s 9 > 0 then __cget s 10 else own_hi)) in
+  let in_head = mark >= blo && mark <= own_hi in
+  let own = (if in_head then mark else blo) in
+  let older = (if in_head then 0 else __rv_peek (if s == me then __rv_rtw 76 else __cget s 17)) in
   let _ = (if __rv_rtw 65 > 0 then () else
            (let t = __rv_alloc_keep 8192 in
             let _ = __czero t 8192 in
@@ -1887,7 +1931,8 @@ let __cwalk = fn (s: int) -> fn (budget: int) -> fn (visit: int -> unit) ->
     let top = __rv_rtw 69 in
     let seen = __rv_rtw 70 in
     let _ = visit v in
-    if v >= hlo && v < ghi && v % w == 0 && (d < 3 || (v >= own && v < own_hi))
+    if v >= hlo && v < ghi && v % w == 0
+       && (d < 3 || (v >= own && v < own_hi) || (older != 0 && __cw_older older mark v))
        && (budget == 0 || seen < budget) then
       (let _ = (if seen * 2 >= __rv_rtw 65 then __cw_rehash () else ()) in
        if __cw_add v then
@@ -1968,12 +2013,40 @@ let rvcoro_release = fn (u: unit) ->
   let rec zero = fn (i: int) -> if i == n then () else (let _ = vec_push pinned 0 in zero (i + 1)) in
   let _ = zero 0 in
   let rec pin_all = fn (i: int) -> if i == n then () else (let _ = vec_set pinned i 1 in pin_all (i + 1)) in
+  // v0.1.627: the blocks by address, and each word the walks read looked up by
+  // halving. It was a scan of every retired block per word read -- a walk reads
+  // up to a million words, and mere-ruby's collections retire thousands of
+  // blocks while its fibers are stopped: one release ran for billions of
+  // instructions while the heap ran out (corpus 235). Blocks never overlap, so
+  // sorted by start they are sorted by end too.
+  let swap = fn (i: int) -> fn (j: int) ->
+    let si = vec_get starts i in
+    let ei = vec_get ends i in
+    let _ = vec_set starts i (vec_get starts j) in
+    let _ = vec_set ends i (vec_get ends j) in
+    let _ = vec_set starts j si in
+    vec_set ends j ei in
+  let rec sift = fn (i: int) -> fn (m: int) ->
+    let l = 2 * i + 1 in
+    if l >= m then ()
+    else
+      (let c = (if l + 1 < m && vec_get starts (l + 1) > vec_get starts l then l + 1 else l) in
+       if vec_get starts c > vec_get starts i then (let _ = swap i c in sift c m) else ()) in
+  let rec heapify = fn (i: int) -> if i < 0 then () else (let _ = sift i n in heapify (i - 1)) in
+  let _ = heapify (n / 2 - 1) in
+  let rec unheap = fn (m: int) ->
+    if m <= 1 then () else (let _ = swap 0 (m - 1) in let _ = sift 0 (m - 1) in unheap (m - 1)) in
+  let _ = unheap n in
+  let lo_all = (if n == 0 then 0 else vec_get starts 0) in
+  let hi_all = (if n == 0 then 0 else vec_get ends (n - 1)) in
   let mark = fn (v: int) ->
-    let rec find = fn (i: int) ->
-      if i == n then ()
-      else if v >= vec_get starts i && v < vec_get ends i then vec_set pinned i 1
-      else find (i + 1) in
-    find 0 in
+    if v < lo_all || v >= hi_all then ()
+    else
+      (let rec half = fn (lo: int) -> fn (hi: int) ->
+         if hi - lo <= 1 then (if v < vec_get ends lo then vec_set pinned lo 1 else ())
+         else (let mid = (lo + hi) / 2 in
+               if vec_get starts mid <= v then half mid hi else half lo mid) in
+       half 0 n) in
   let me = __rv_rtw 44 in
   let rec each = fn (s: int) ->
     if s >= __rv_rtw 42 then ()
