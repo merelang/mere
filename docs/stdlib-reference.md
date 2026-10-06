@@ -347,6 +347,9 @@ errno slot (`proc_last_errno`).
 | `proc_sig_default` | `int -> int` | Back to `SIG_DFL`. `0`, or `-1` |
 | `proc_sig_raise` | `int -> int` | `raise(3)` the signal at this thread. `0`, or `-1` |
 | `proc_out_errno` | `unit -> int` | The errno of the last write `print_no_nl` or `print_bytes` could not make, `0` if none since the last ask. **Asking clears it** |
+| `proc_sig_catch` | `int -> int -> int` | (v0.1.625) `proc_sig_catch sig keep`: install a handler that only **marks** the signal; the program takes the marks where it can act on them. `SA_RESTART`, so a blocking call resumes and the mark waits. `keep = 1` is ruby's rule for the signals it handles by default: an inherited `SIG_IGN` (nohup's `SIGHUP`) is put back and kept. `0` installed, `1` kept, `-1` refused |
+| `proc_sig_take` | `unit -> int` | (v0.1.625) The lowest marked signal, its mark taken down; `0` when none is marked. Two arrivals before a take are one mark |
+| `proc_sig_ignore` | `int -> int` | (v0.1.625) `SIG_IGN`, which a child inherits across `exec(2)` — ruby's `trap(sig, "IGNORE")`. `0`, or `-1` |
 
 The pair a program that writes to pipes wants: `proc_sig_noop 13` (SIGPIPE does
 not end it, and its children are not left ignoring it), then
