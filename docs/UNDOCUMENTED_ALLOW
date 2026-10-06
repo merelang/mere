@@ -23,6 +23,10 @@ __rv_open_rd       internal: what `read_file` opens with on -rv (openat O_RDONLY
 __rv_read_all      internal: what `read_file` / `read_stdin` read with on -rv
 __rv_access        internal: what `file_exists` asks on -rv (faccessat)
 __rv_unlink        internal: what `file_delete` asks on -rv (unlinkat)
+__rv_syscall       internal: the -rv prelude's Linux-numbered ecall (dir_create, dir_entries, dir_remove)
+__rv_cstr          internal: a str with a NUL after it, for a path, on -rv
+__rv_addr          internal: a str's own address, for a buffer the host fills, on -rv
+__rv_envblk        internal: the environment block the host leaves on -rv (env_pairs, env_var)
 __rv_open_wr       internal: what `write_file` opens with on -rv (openat O_WRONLY)
 __rv_write_all     internal: what `write_file` writes with on -rv
 __rv_substring_raw internal: the unchecked substring behind `substring`'s bounds refusal on -rv

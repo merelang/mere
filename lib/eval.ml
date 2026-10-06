@@ -976,6 +976,45 @@ let builtin_file_delete =
     | V_str path -> (try Unix.unlink path; V_bool true with Unix.Unix_error _ -> V_bool false)
     | _ -> failwith "file_delete: expected str")
 
+(* v0.1.630: see the typer's entry *)
+let builtin_dir_create =
+  V_builtin ("dir_create", fun v ->
+    match v with
+    | V_str path -> V_builtin ("dir_create", fun p ->
+        match p with
+        | V_int perm ->
+          (try Unix.mkdir path (if perm < 0 then 0o777 else perm); V_int 0
+           with Unix.Unix_error _ -> V_int (-1))
+        | _ -> failwith "dir_create: expected int")
+    | _ -> failwith "dir_create: expected str")
+let builtin_dir_entries =
+  V_builtin ("dir_entries", fun v ->
+    match v with
+    | V_str path ->
+      (try
+         let d = Unix.opendir path in
+         let b = Buffer.create 256 in
+         (try
+            while true do
+              let n = Unix.readdir d in
+              if n <> "." && n <> ".." then (Buffer.add_string b n; Buffer.add_char b '\000')
+            done
+          with End_of_file -> ());
+         Unix.closedir d;
+         V_str (Buffer.contents b)
+       with Unix.Unix_error _ -> V_str "")
+    | _ -> failwith "dir_entries: expected str")
+let builtin_dir_remove =
+  V_builtin ("dir_remove", fun v ->
+    match v with
+    | V_str path -> (try Unix.rmdir path; V_int 0 with Unix.Unix_error _ -> V_int (-1))
+    | _ -> failwith "dir_remove: expected str")
+let builtin_env_pairs =
+  V_builtin ("env_pairs", fun _ ->
+    let b = Buffer.create 1024 in
+    Array.iter (fun kv -> Buffer.add_string b kv; Buffer.add_char b '\000') (Unix.environment ());
+    V_str (Buffer.contents b))
+
 (* Phase 44: fs primitives for the docs site SSG *)
 let builtin_list_dir =
   V_builtin ("list_dir", fun v ->
@@ -4138,6 +4177,10 @@ let initial_env : env =
     ("__rv_read_all", ref (rv_only "__rv_read_all"));
     ("__rv_access", ref (rv_only "__rv_access"));
     ("__rv_unlink", ref (rv_only "__rv_unlink"));
+    ("__rv_syscall", ref (rv_only "__rv_syscall"));
+    ("__rv_cstr", ref (rv_only "__rv_cstr"));
+    ("__rv_addr", ref (rv_only "__rv_addr"));
+    ("__rv_envblk", ref (rv_only "__rv_envblk"));
     ("__rv_open_wr", ref (rv_only "__rv_open_wr"));
     ("__rv_write_all", ref (rv_only "__rv_write_all"));
     ("__rv_substring_raw", ref (rv_only "__rv_substring_raw"));
@@ -4178,6 +4221,10 @@ let initial_env : env =
     ("write_file", ref builtin_write_file);
     ("read_lines", ref builtin_read_lines);
     ("list_dir", ref builtin_list_dir);
+    ("dir_create", ref builtin_dir_create);
+    ("dir_entries", ref builtin_dir_entries);
+    ("dir_remove", ref builtin_dir_remove);
+    ("env_pairs", ref builtin_env_pairs);
     ("mkdir_p", ref builtin_mkdir_p);
     ("file_mtime", ref builtin_file_mtime);
     ("sleep_ms", ref builtin_sleep_ms);

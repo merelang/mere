@@ -101,6 +101,7 @@ let read_file = fn (p: str) ->
 let file_exists = fn (p: str) -> __rv_access p == 0;
 let file_delete = fn (p: str) -> __rv_unlink p == 0;
 
+
 // write_file: openat(O_WRONLY|O_CREAT|O_TRUNC) + a short-write-safe loop +
 // close, all Linux-numbered -- the same reasoning as read_file above, and the
 // same catchability: mere-ruby turns this fail into Errno::EACCES/ENOENT.
@@ -202,6 +203,58 @@ let str_repeat = fn s -> fn n ->
   let _ = go n in
   strbuf_to_str b;
 
+
+// v0.1.630: a directory made and read, and the environment, through the host
+// (Linux-numbered: mkdirat, openat with O_DIRECTORY, getdents64, close). The
+// errno of the last dir_create / dir_entries is runtime word 63, which an
+// `extern fn proc_last_errno` reads here as it reads the C runtime's slot.
+let dir_create = fn (p: str) -> fn (perm: int) ->
+  let r = __rv_syscall 34 (0 - 100) (__rv_cstr p) (if perm < 0 then 511 else perm) 0 in
+  let _ = __rv_rtw_set 63 (if r < 0 then 0 - r else 0) in
+  if r < 0 then 0 - 1 else 0;
+// linux_dirent64 in a 4 KB buffer that is a str's own bytes (the host writes
+// them, char_at reads them): reclen at +16, the name from +19 to its NUL
+let dir_entries = fn (p: str) ->
+  let fd = __rv_syscall 56 (0 - 100) (__rv_cstr p) 65536 0 in
+  if fd < 0 then (let _ = __rv_rtw_set 63 (0 - fd) in "")
+  else
+    let buf = str_repeat " " 4096 in
+    let data = __rv_addr buf + (if __rv_xlen () == 64 then 8 else 4) in
+    let sb = strbuf_new () in
+    let rec name_end = fn (i: int) -> if ord (char_at buf i) == 0 then i else name_end (i + 1) in
+    let rec walk = fn (off: int) -> fn (n: int) ->
+      if off >= n then ()
+      else
+        let reclen = ord (char_at buf (off + 16)) + 256 * ord (char_at buf (off + 17)) in
+        let nm = substring buf (off + 19) (name_end (off + 19)) in
+        let _ = (if nm == "." || nm == ".." then ()
+                 else (let _ = strbuf_push sb nm in strbuf_push sb (chr 0))) in
+        walk (off + reclen) n in
+    let rec chunks = fn (u: unit) ->
+      let n = __rv_syscall 61 fd data 4096 0 in
+      if n <= 0 then n else (let _ = walk 0 n in chunks ()) in
+    let r = chunks () in
+    let _ = __rv_syscall 57 fd 0 0 0 in
+    let _ = __rv_rtw_set 63 (if r < 0 then 0 - r else 0) in
+    strbuf_to_str sb;
+let dir_remove = fn (p: str) ->
+  let r = __rv_syscall 35 (0 - 100) (__rv_cstr p) 512 0 in          // AT_REMOVEDIR
+  let _ = __rv_rtw_set 63 (if r < 0 then 0 - r else 0) in
+  if r < 0 then 0 - 1 else 0;
+let env_pairs = fn (u: unit) -> __rv_envblk ();
+let env_var = fn (k: str) ->
+  let e = __rv_envblk () in
+  let want = k ++ "=" in
+  let rec find = fn (i: int) ->
+    if i >= str_len e then None
+    else
+      let rec stop = fn (j: int) -> if j >= str_len e || ord (char_at e j) == 0 then j else stop (j + 1) in
+      let j = stop i in
+      let kv = substring e i j in
+      if str_starts_with kv want then Some (substring kv (str_len want) (str_len kv))
+      else find (j + 1) in
+  find 0;
+let __libm_proc_last_errno = fn (u: unit) -> __rv_rtw 63;
 let str_rev = fn s ->
   let b = strbuf_new () in
   let rec go = fn (i: int) -> if i < 0 then () else let _ = strbuf_push b (char_at s i) in go (i - 1) in

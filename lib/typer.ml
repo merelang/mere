@@ -3088,6 +3088,13 @@ let initial_env : env =
     ("__rv_read_all", mono (Ast.TyArrow (Ast.TyInt, Ast.TyStr)));
     ("__rv_access", mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
     ("__rv_unlink", mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
+    (* v0.1.630: the RISC-V prelude's raw syscall, NUL-terminated path, str
+       address and environment block (codegen_riscv) *)
+    ("__rv_syscall", mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt,
+                             Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyInt)))))));
+    ("__rv_cstr", mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
+    ("__rv_addr", mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
+    ("__rv_envblk", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     (* v0.1.623: what the RV prelude's coroutine runtime is written with --
        raw words, the runtime's words, the stack switch and the layout *)
     ("__rv_peek", mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
@@ -3183,6 +3190,24 @@ let initial_env : env =
        binary on memu has no shell for. *)
     ("file_delete",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyBool)));
+    (* v0.1.630: a directory, made and read without a shell, on every backend
+       (mere-ruby ran `mkdir` and `ls` for Dir.mkdir and Dir#children, and a
+       RISC-V binary on memu has no shell). dir_create path perm is mkdir(2):
+       perm -1 is 0777, and the kernel takes the umask off it; 0, or -1.
+       dir_entries path: the names in it but "." and "..", each followed by a
+       NUL, in the order the directory gives them (bytes as they are); "" when
+       empty or refused. env_pairs: the environment as `env -0` writes it,
+       K=V and a NUL each. On C and RISC-V the errno of dir_create /
+       dir_entries is kept for proc_last_errno (0 when they succeed). *)
+    ("dir_create",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
+    ("dir_entries",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyStr)));
+    (* rmdir(2): an empty directory; 0, or -1 (errno kept as above) *)
+    ("dir_remove",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
+    ("env_pairs",
+       mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     ("env_var",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("option", [Ast.TyStr]))));
     ("args",

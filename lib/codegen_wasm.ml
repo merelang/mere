@@ -463,6 +463,7 @@ let wasm_args_host_used = ref false
 let wasm_run_host_used = ref false
 let wasm_env_host_used = ref false
 let wasm_fdelete_host_used = ref false  (* v0.1.622: file_delete through the host *)
+let wasm_dirs_host_used = ref false     (* v0.1.630: dir_create / dir_entries / env_pairs *)
 let wasm_fexists_host_used = ref false  (* args() on a plain host: emit $__lang_args_host + arg_count/arg_get imports *)
 (* v0.1.528 (Q-085): read_stdin/read_line on a PLAIN host go through the host,
    the way run/getenv/file_exists started to in v0.1.350. They used to answer
@@ -3567,6 +3568,37 @@ and emit_expr (e : Ast.expr) : unit =
      exit). Constant stubs for the builtins — no host import needed. Guarded
      against a user rebinding the name, like the concurrency builtins above.
      `getenv` is a user `extern` and resolves through the host import object. *)
+  (* v0.1.630: through the host, which answers a str for the two that read *)
+  | Ast.App ({ node = Ast.App ({ node = Ast.Var "dir_create"; _ }, path_e); _ }, perm_e)
+    when not (user_shadows_wasm "dir_create") ->
+    wasm_dirs_host_used := true;
+    emit_expr path_e;
+    emit_instr "i32.wrap_i64";
+    emit_expr perm_e;
+    emit_instr "i32.wrap_i64";
+    emit_instr "call $dir_create_h";
+    emit_instr "i64.extend_i32_s"
+  | Ast.App ({ node = Ast.Var "dir_entries"; _ }, path_e)
+    when not (user_shadows_wasm "dir_entries") ->
+    wasm_dirs_host_used := true;
+    emit_expr path_e;
+    emit_instr "i32.wrap_i64";
+    emit_instr "call $dir_entries_h";
+    emit_instr "i64.extend_i32_s"
+  | Ast.App ({ node = Ast.Var "dir_remove"; _ }, path_e)
+    when not (user_shadows_wasm "dir_remove") ->
+    wasm_dirs_host_used := true;
+    emit_expr path_e;
+    emit_instr "i32.wrap_i64";
+    emit_instr "call $dir_remove_h";
+    emit_instr "i64.extend_i32_s"
+  | Ast.App ({ node = Ast.Var "env_pairs"; _ }, u_e)
+    when not (user_shadows_wasm "env_pairs") ->
+    wasm_dirs_host_used := true;
+    emit_expr u_e;
+    emit_instr "drop";
+    emit_instr "call $env_pairs_h";
+    emit_instr "i64.extend_i32_s"
   | Ast.App ({ node = Ast.Var "file_delete"; _ }, path_e)
     when not (user_shadows_wasm "file_delete") ->
     (* v0.1.622: through the host, as file_exists is *)
@@ -10977,6 +11009,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   wasm_env_host_used := false;
   wasm_fexists_host_used := false;
   wasm_fdelete_host_used := false;
+  wasm_dirs_host_used := false;
   wasm_stdin_host_used := false;
   wasm_exit_used := false;
   wasm_socket_ffi := false;
@@ -11889,6 +11922,12 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     else "")
     ^ (if !wasm_fdelete_host_used then
       "  (import \"env\" \"file_delete\" (func $file_delete_h (param i32) (result i32)))\n"
+    else "")
+    ^ (if !wasm_dirs_host_used then
+      "  (import \"env\" \"dir_create\" (func $dir_create_h (param i32 i32) (result i32)))\n\
+      \  (import \"env\" \"dir_entries\" (func $dir_entries_h (param i32) (result i32)))\n\
+      \  (import \"env\" \"dir_remove\" (func $dir_remove_h (param i32) (result i32)))\n\
+      \  (import \"env\" \"env_pairs\" (func $env_pairs_h (result i32)))\n"
     else "")
     ^ (if !wasm_stdin_host_used then
       "  (import \"env\" \"read_stdin\" (func $read_stdin_h (result i32)))\n\

@@ -79,6 +79,10 @@ instantiation with a missing-import error rather than a wrong answer.
 | `read_lines` ⚡ ★ | `str -> str list` | Read line by line, returns `str list` (Phase 19.6; depends on prelude) |
 | `file_exists` | `str -> bool` | Whether path exists (Phase 19.6; on C native since v0.1.15) |
 | `file_delete` | `str -> bool` | Remove a file (unlink); `true` when this call removed it, `false` for a missing path, a directory, or a refusal. No errno: ask `file_exists` afterwards for the reason. All five backends; RISC-V through `unlinkat` (v0.1.622) |
+| `dir_create` | `str -> int -> int` | `dir_create path perm`: mkdir(2). `perm` `-1` is `0777`; as with mkdir(2) the kernel takes the umask off it. `0`, or `-1`. All five backends; RISC-V through `mkdirat` (v0.1.630) |
+| `dir_entries` | `str -> str` | The names in a directory but `.` and `..`, each followed by a NUL, in the directory's own order and as the bytes they are. `""` for an empty directory **and** for a refusal -- on C and RISC-V `proc_last_errno` tells them apart (it is set to `0` when this succeeds). Interpreter, C, Wasm, RISC-V (`getdents64`); refused on LLVM, which would have to read a `struct dirent` whose layout is the platform's (v0.1.630) |
+| `dir_remove` | `str -> int` | rmdir(2): an empty directory. `0`, or `-1`. All five backends; RISC-V through `unlinkat` with `AT_REMOVEDIR` (v0.1.630) |
+| `env_pairs` | `unit -> str` | The whole environment as `env -0` writes it: `K=V` and a NUL after each. All five backends; RISC-V reads the block the host leaves above the argument block, where `env_var` now looks too (v0.1.630) |
 | `file_mtime` | `str -> float` | Modification time in seconds; raises if the path is missing (interp + C native) |
 | `file_size` | `str -> int` | File size in bytes (stat); binary-safe length where `str_len` (strlen) stops at a NUL. interp + C native (v0.1.21) |
 | `file_openrw` | `str -> File` | Open a read/write handle, creating the file if absent and **not** truncating it. The handle for everything below (v0.1.115, mbtree dogfood) |
@@ -306,7 +310,7 @@ of **`-1` is `RLIM_INFINITY`** in both directions, the priority selector is
 | `proc_getpriority` | `int -> int -> int` | `which who`. The priority — **which may be `-1`**, so failure is only in `proc_last_errno` |
 | `proc_setpriority` | `int -> int -> int -> int` | `which who prio`. `0`, or `-1` |
 | `file_flock` | `int -> int -> int` | `fd op`. `0` done, **`1` refused** because another open holds the lock and the non-blocking bit was set, `-1` any other failure. A bit outside the four is `EINVAL` |
-| `proc_last_errno` | `unit -> int` | The errno the last of these calls left, `0` when it succeeded |
+| `proc_last_errno` | `unit -> int` | The errno the last of these calls left, `0` when it succeeded -- and of `dir_create`, `dir_entries` and `dir_remove` (v0.1.630). On RISC-V the declaration is answered by the prelude, as the libm names are, for those three |
 
 **Why errno is kept here when `file_*` does not keep it** (and `fd_*` did not
 until v0.1.555, when it got `fd_last_errno`). `file_*` answers

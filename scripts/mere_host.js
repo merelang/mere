@@ -66,6 +66,19 @@ function makeMarshal({ getMemory, getBump, bumpAlloc: injectedAlloc }) {
     return start + 4;
   };
 
+  // Raw bytes -> Mere str (v0.1.630: a directory's names are bytes, not
+  // necessarily UTF-8). Returns a pointer to byte0, as writeStr does.
+  const writeStrBytes = (buf) => {
+    const start = bumpAlloc(4 + buf.length + 1);
+    if (!start) return 0;
+    const memory = getMemory();
+    new DataView(memory.buffer).setInt32(start, buf.length, true);
+    const mem = new Uint8Array(memory.buffer);
+    mem.set(buf, start + 4);
+    mem[start + 4 + buf.length] = 0;
+    return start + 4;
+  };
+
   // Raw bytes -> mere_bytes buffer. Returns a pointer to the header, which
   // is what the Wasm-side bytes bridge expects.
   const writeBytes = (buf) => {
@@ -122,7 +135,7 @@ function makeMarshal({ getMemory, getBump, bumpAlloc: injectedAlloc }) {
     return start + 4;
   };
 
-  return { bumpAlloc, writeStr, writeBytes, readCStr, readStrBytes, readBytes, copyToStr };
+  return { bumpAlloc, writeStr, writeStrBytes, writeBytes, readCStr, readStrBytes, readBytes, copyToStr };
 }
 
 // Dispatch a Mere closure value. `getTable` returns the exported
