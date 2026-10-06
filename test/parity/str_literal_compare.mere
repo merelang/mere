@@ -1,0 +1,85 @@
+// Comparing a string with a literal (v0.1.620: inline on RISC-V, no call).
+// The lengths straddle a word at both widths (0, 1, 3, 4, 5, 7, 8, 9 and a
+// long one), the bytes include NUL, a high byte and a multi-byte character,
+// and a string that differs only past the literal's length, only in its last
+// byte, or only in a byte the word mask would cut off. `char_at` and `chr`
+// hand back shared one-byte strings there; those must compare, concatenate
+// and survive being stored like any other string.
+//
+// The NUL rows also found that C and LLVM matched a string PATTERN with strcmp,
+// which stops at the first NUL -- "a\u0000c" took the arm `"a"` -- and compared
+// a Map's str keys, a tuple's str fields and an ordering the same way (v0.1.620
+// fixes all of them; `==` itself was already by length).
+//
+// Execution mode: interp + C + LLVM + Wasm (parity)
+let lits = ["", "a", "abc", "abcd", "abcde", "abcdefg", "abcdefgh", "abcdefghi",
+            "a long literal, longer than any word"];
+
+let probes = ["", "a", "b", "ab", "abc", "abd", "abcd", "abce", "abcde", "abcdf",
+              "abcdefg", "abcdefh", "abcdefgh", "abcdefgi", "abcdefghi", "abcdefghj",
+              "abcdefghij", "a long literal, longer than any word",
+              "a long literal, longer than any wore", "\u0000", "a\u0000c", "abc\u0000",
+              "\u00e9", "\u3042"];
+
+let check = fn (p: str) ->
+  // every literal, each spelled in place so it is a literal at the comparison
+  let bits =
+    (if str_eq p "" then 1 else 0)
+    + (if p == "a" then 2 else 0)
+    + (if str_eq "abc" p then 4 else 0)
+    + (if p == "abcd" then 8 else 0)
+    + (if p != "abcde" then 0 else 16)
+    + (if str_eq p "abcdefg" then 32 else 0)
+    + (if "abcdefgh" == p then 64 else 0)
+    + (if str_eq p "abcdefghi" then 128 else 0)
+    + (if p == "a long literal, longer than any word" then 256 else 0)
+    + (if p == "a\u0000c" then 512 else 0)
+    + (if str_eq p "\u00e9" then 1024 else 0)
+    + (if p == "\u3042" then 2048 else 0)
+    + (if p == "abc\u0000" then 4096 else 0) in
+  let pat = (match p with
+    | "" -> "empty"
+    | "a" -> "one"
+    | "abcd" -> "four"
+    | "abcdefgh" -> "eight"
+    | "abcdefghi" -> "nine"
+    | "\u3042" -> "kana"
+    | _ -> "other") in
+  str_of_int bits ++ " " ++ pat;
+
+let rec each = fn (xs: str list) ->
+  match xs with
+  | Nil -> ()
+  | Cons (p, rest) -> let _ = print (check p) in each rest;
+
+let _ = each probes;
+let _ = print_int (list_len lits);
+
+// one-byte strings from char_at and chr
+let s = "x;\n\u0000z";
+let rec scan = fn (i: int) -> fn (acc: str) ->
+  if i >= str_len s then acc
+  else
+    let c = char_at s i in
+    let tag = if c == "\n" then "NL" else if c == ";" then "SEMI" else if str_eq c "\u0000" then "NUL" else c in
+    scan (i + 1) (acc ++ tag ++ ",");
+let _ = print (scan 0 "");
+let v = vec_new ();
+let _ = vec_push v (chr 65);
+let _ = vec_push v (char_at "QB" 1);
+let _ = vec_push v (chr 0);
+let m = map_new ();
+let _ = map_set m (chr 66) "found by a chr key";
+let _ = print (map_get m (vec_get v 1));
+let _ = print_int (str_len (vec_get v 2));
+let _ = print (vec_get v 0 ++ vec_get v 1 ++ str_of_int (ord (vec_get v 2)));
+let _ = print_bool (chr 97 == "a" && char_at "za" 1 == chr 97 && chr 97 != "b");
+
+// NUL inside a value, where a structure or a Map compares it
+let nm = map_new ();
+let _ = map_set nm "a" 1;
+let _ = map_set nm "a\u0000b" 2;
+let _ = print_int (map_len nm * 10 + map_get nm "a\u0000b");
+let _ = print_bool (("a\u0000b", 1) == ("a", 1));
+let _ = print_bool ("a" < "a\u0000" && "a\u0000" < "a\u0000\u0000");
+print_int (str_compare "a\u0000b" "a")

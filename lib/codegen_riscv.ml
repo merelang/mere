@@ -1644,6 +1644,77 @@ let vgen (n : int) (node : vnode) (vd0 : int) : unit =
   v_setvl_e8 ();
   gen node vd0
 
+(* v0.1.620: `x == "lit"` without a call. The scrutinee is in a0 and the result
+   (1 or 0) goes there. The literal's length is known here, so a string of
+   another length is refused by one load and one branch; for a literal that
+   fits in a word, the first data word is loaded, masked to the literal's
+   length, and compared with the literal's bytes. That read stays in bounds:
+   every string is a word of length and its bytes rounded up to whole words
+   (literals are padded the same way, `mk_str_block`), and it only happens once
+   the lengths are known equal. A longer literal still calls `__str_eq`, after
+   the length check. Counted on mere-ruby's RV64 start-up, 4.6M of its 5.2M
+   string comparisons were against a literal (`let c = char_at s i in ...
+   str_eq c "x"`), and each one was about 18 instructions through the call.
+   Uses t0 and t1 (and a1 and ra for a long literal). *)
+let emit_str_eq_lit (lit : string) =
+  let n = String.length lit and w = wsz () in
+  emit_word (enc_i 0 a0 (ldf3 ()) t0 0x03);                          (* t0 = len *)
+  if n = 0 then emit_word (enc_i 1 t0 3 a0 0x13)                     (* sltiu a0, t0, 1 *)
+  else begin
+    let l_no = fresh_label ".sqn" and l_end = fresh_label ".sqe" in
+    li t1 n;
+    emit (Branch (1, t0, t1, l_no));                                  (* bne -> not equal *)
+    if n <= w then begin
+      emit_word (enc_i w a0 (ldf3 ()) t0 0x03);                       (* t0 = first data word *)
+      if n < w then begin
+        let sh = !xlen - 8 * n in
+        emit_word (enc_i sh t0 1 t0 0x13);                            (* slli: keep n bytes *)
+        emit_word (enc_i sh t0 5 t0 0x13)                             (* srli *)
+      end;
+      if n <= 3 then begin
+        let v = ref 0 in
+        String.iteri (fun i c -> v := !v lor (Char.code c lsl (8 * i))) lit;
+        li t1 !v
+      end else begin
+        (* a wider word may not fit an OCaml int; read it from the literal *)
+        let label = fresh_label "str_" in
+        string_data := (label, mk_str_block lit) :: !string_data;
+        emit (LoadAddr (t1, label));
+        emit_word (enc_i w t1 (ldf3 ()) t1 0x03)
+      end;
+      emit_word (enc_r 0 t1 t0 4 t0 0x33);                           (* xor t0, t0, t1 *)
+      emit_word (enc_i 1 t0 3 a0 0x13)                                (* sltiu a0, t0, 1 *)
+    end else begin
+      let label = fresh_label "str_" in
+      string_data := (label, mk_str_block lit) :: !string_data;
+      emit (LoadAddr (a1, label));
+      emit (Jal (ra, "__str_eq"))
+    end;
+    emit (Jal (zero, l_end));
+    emit (Label l_no);
+    emit_word (enc_i 0 zero 0 a0 0x13);                               (* li a0, 0 *)
+    emit (Label l_end)
+  end
+
+(* v0.1.620: the 256 one-byte strings, as data. `char_at` and `chr` return an
+   entry instead of allocating two words per character (mere-ruby's lexer asks
+   for every character of the ~8000 lines of ruby it parses at start-up). A
+   string is never written through, and a literal is already a str that lives
+   in data, so nothing can tell an entry from a fresh copy. Each entry is two
+   words, [1][the byte], so entry k is at k * 2 * wsz. Emitted only when used. *)
+let chr_tab_used = ref false
+let emit_chr_tab_entry (byte_reg : int) (dst : int) =
+  (* dst = &__rv_chr_tab[byte_reg]; byte_reg is clobbered *)
+  if not !chr_tab_used then begin
+    chr_tab_used := true;
+    let b = Buffer.create (256 * 2 * wsz ()) in
+    for k = 0 to 255 do Buffer.add_string b (mk_str_block (String.make 1 (Char.chr k))) done;
+    string_data := ("__rv_chr_tab", Buffer.contents b) :: !string_data
+  end;
+  emit_word (enc_i (if wsz () = 8 then 4 else 3) byte_reg 1 byte_reg 0x13);  (* slli: * 2w *)
+  emit (LoadAddr (dst, "__rv_chr_tab"));
+  emit_word (enc_r 0 byte_reg dst 0 dst 0x33)                        (* add dst, dst, byte *)
+
 let rec compile_expr (env : env) (e : Ast.expr) : unit =
   (* v0.1.618: the bindings an expression makes are out of scope once it has
      been compiled, so their slots go back for its siblings to reuse *)
@@ -2089,6 +2160,16 @@ and compile_cmp env op l r =
      landed while the comparison it exists to fix stayed a word compare. *)
   let lty = match l.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit in
   (* string comparison: compare content, not pointers *)
+  let lit_of (x : Ast.expr) = match x.node with Ast.Str_lit s -> Some s | _ -> None in
+  if lty = Ast.TyStr && (op = Ast.Eq || op = Ast.Ne)
+     && (lit_of l <> None || lit_of r <> None) then begin
+    (* v0.1.620: against a literal, inline -- see emit_str_eq_lit *)
+    let (x, lit) = match lit_of r, lit_of l with
+      | Some s, _ -> (l, s) | None, Some s -> (r, s) | None, None -> assert false in
+    compile_expr env x;
+    emit_str_eq_lit lit;
+    if op = Ast.Ne then emit_word (enc_i 1 a0 4 a0 0x13)               (* xori a0, 1 *)
+  end else
   if lty = Ast.TyStr then begin
     compile_expr env l; push a0;
     compile_expr env r; emit_word (enc_i 0 a0 0 a1 0x13); pop a0;   (* a0=l, a1=r *)
@@ -3250,11 +3331,8 @@ and compile_app env e =
     emit (Branch (6, a0, t0, l_ok));                     (* bltu a0, 256 -> ok *)
     emit_abort "chr: out of byte range [0, 255]";
     emit (Label l_ok);
-    emit_word (enc_i 0 a0 0 t2 0x13);                    (* mv t2, a0 *)
-    alloc_words t0 2;
-    li t1 1; emit_word (enc_s (0 * wsz ()) t1 t0 (stf3 ()) 0x23);           (* sw len=1 *)
-    emit_word (enc_s (wsz ()) t2 t0 0 0x23);                    (* sb byte, 4(t0) *)
-    emit_word (enc_i 0 t0 0 a0 0x13)                     (* mv a0, t0 *)
+    emit_word (enc_i 0 a0 0 t0 0x13);                    (* mv t0, a0 *)
+    emit_chr_tab_entry t0 a0                             (* v0.1.620: no allocation *)
   | Ast.Var "char_at" when List.length args = 2 ->
     compile_expr env (List.nth args 0); push a0;
     compile_expr env (List.nth args 1);
@@ -3266,10 +3344,16 @@ and compile_app env e =
      emit (Label l));
     emit_word (enc_r 0 a1 a0 0 t0 0x33);                 (* add t0, s, i *)
     emit_word (enc_i (wsz ()) t0 4 t0 0x03);                    (* lbu t0, 4(t0) *)
-    alloc_words t1 2;
-    li t2 1; emit_word (enc_s (0 * wsz ()) t2 t1 (stf3 ()) 0x23);           (* sw len=1 *)
-    emit_word (enc_s (wsz ()) t0 t1 0 0x23);                    (* sb byte *)
-    emit_word (enc_i 0 t1 0 a0 0x13)                     (* mv a0, t1 *)
+    emit_chr_tab_entry t0 a0                             (* v0.1.620: no allocation *)
+  | Ast.Var "str_eq" when List.length args = 2
+    && List.exists (fun (a : Ast.expr) -> match a.node with Ast.Str_lit _ -> true | _ -> false) args ->
+    (* v0.1.620: against a literal, inline (a literal has no effect to order) *)
+    let (x, lit) = match (List.nth args 0).node, (List.nth args 1).node with
+      | _, Ast.Str_lit s -> (List.nth args 0, s)
+      | Ast.Str_lit s, _ -> (List.nth args 1, s)
+      | _ -> assert false in
+    compile_expr env x;
+    emit_str_eq_lit lit
   | Ast.Var "str_eq" when List.length args = 2 ->
     compile_expr env (List.nth args 0); push a0;
     compile_expr env (List.nth args 1);
@@ -3418,13 +3502,9 @@ and bind_pattern env pat l_fail =
   | Ast.P_int n -> li t0 n; emit (Branch (1, a0, t0, l_fail)); env
   | Ast.P_bool b -> li t0 (if b then 1 else 0); emit (Branch (1, a0, t0, l_fail)); env
   | Ast.P_str s ->
-    (* compare the scrutinee (a0) against the literal; mismatch -> l_fail *)
-    push a0;
-    let label = fresh_label "str_" in
-    string_data := (label, mk_str_block s) :: !string_data;
-    emit (LoadAddr (a1, label));                   (* a1 = literal *)
-    pop a0;                                         (* a0 = scrutinee *)
-    emit (Jal (ra, "__str_eq"));                    (* a0 = 1 if equal *)
+    (* compare the scrutinee (a0) against the literal; mismatch -> l_fail
+       (v0.1.620: inline, see emit_str_eq_lit) *)
+    emit_str_eq_lit s;
     emit (Branch (0, a0, zero, l_fail));            (* beq a0, x0 -> fail *)
     env
   | Ast.P_as (inner, name) ->
@@ -5845,6 +5925,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   items := [];
   lbl_counter := 0;
   string_data := [];
+  chr_tab_used := false;
   divzero_used := false;
   lambdas := [];
   Hashtbl.reset adapters;

@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.620 — 2026-10-06
+
+_On RISC-V a comparison with a string literal is inline, and `char_at` / `chr` allocate nothing. mere-ruby's start-up on RV64 takes 10.6% fewer instructions. The new test also found C and LLVM comparing strings with `strcmp` in four places, which stops at a NUL inside the value._
+
+**RISC-V.** Counted over mere-ruby's start-up on RV64 (390M instructions, about
+4 s on memu, almost all of it lexing and parsing the ~8000 lines of ruby it
+keeps as its core prelude), 4.6M of the 5.2M string comparisons were against a
+literal -- `let c = char_at s i in ... str_eq c "x"` -- at about 18 instructions
+each through `__str_eq`. `str_eq x "lit"`, `x == "lit"` / `!=` and a `"lit"`
+pattern now compare in place: the length against the literal's (a string of
+another length costs one load and one branch), then, for a literal that fits a
+word, the first data word masked to that length against the literal's bytes. The
+read is in bounds because every string is its length word and its bytes rounded
+up to whole words, and it happens only once the lengths agree. A longer literal
+checks the length inline and calls `__str_eq` only when it matches.
+
+`char_at` and `chr` allocated two words for every character. They now return an
+entry of a table of the 256 one-byte strings, kept in data like a literal (a
+string is never written through, so nothing can tell an entry from a fresh copy).
+
+Measured: start-up 390M → 349M instructions; mere-ruby's corpus 165 run ten
+times 858M → 806M, output unchanged; the binary 1.7% larger.
+
+**C and LLVM: a NUL inside a string.** `test/parity/str_literal_compare.mere`
+compares strings of lengths 0 to 9 (both sides of a word at both widths) and
+strings with NUL, high and multi-byte characters. On C and LLVM the `match` arm
+`"a"` took `"a\u0000c"` and `""` took `"\u0000"`: a string pattern was compared
+with `strcmp`, which stops at the first NUL. `==` had been by length since
+v0.1.264; the same `strcmp` remained in
+
+- C: a string pattern, a str field in structural equality (`eq_*`), a str in a
+  structural ordering, a Map's str keys (so `"a"` and `"a\u0000b"` were one key);
+- LLVM: the same four.
+
+All now compare by length (`__lang_str_cmp` in C, `@__lang_str_eq` /
+`@__lang_str_compare` in LLVM). The test has rows for each.
+
+**`lsp_smoke` no longer races.** v0.1.619's CI went red on it: two publishes
+where three were expected. Since v0.1.576 the server handles an unbroken run of
+didChanges for one document as its last one, and the gate pipes every message at
+once, so whether the second change had already arrived when the first was
+handled depended on how fast the server started. Starting it a second late
+reproduces the failure every time. A request now sits between the two changes,
+which breaks the run whatever the timing.
+
 ## v0.1.619 — 2026-10-06
 
 _On the C backend a channel message no longer corrupts the heap's block lists. Since v0.1.549 `examples/concurrent_loops.mere` summed 1..100 to a garbage number about once in two thousand runs._
