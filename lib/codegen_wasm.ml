@@ -6555,6 +6555,64 @@ let emit_copy_fn_wasm (tag : string) (t : Ast.ty) : string =
                \      (else %s))"
                ctag (ty_tag pty) (payload_dispatch rest))
     in
+    (* v0.1.621 (Q-201): a constructor whose payload is a tuple ENDING in this
+       same type -- a list's Cons -- is walked as a loop along that last slot,
+       not by recursion: the copy called itself once per element, and a list of
+       100,000 carried out of a `region` block overflowed the stack. Its other
+       slots are copied, the last one is left for the next node, and the walk
+       goes round with the old last slot. Each new node is stored into the slot
+       the previous one left open ($slot; 0 means the result itself). Every
+       other constructor is copied as before and ends the walk. The same shape
+       as the C backend's (v0.1.605). *)
+    let spines =
+      List.filter_map (fun (cname, arg_opt) ->
+        match arg_opt with
+        | Some pty ->
+          (match Ast.walk (subst_params mapping pty) with
+           | Ast.TyTuple ts when ts <> [] && ty_tag (List.nth ts (List.length ts - 1)) = tag ->
+             let ctag = match Hashtbl.find_opt variant_tags cname with Some t -> t | None -> 0 in
+             Some (ctag, ts)
+           | _ -> None)
+        | None -> None) vs in
+    if has_payload && spines <> [] then begin
+      let spine_arm (ctag, ts) =
+        let n = List.length ts and last = List.length ts - 1 in
+        let copies =
+          List.concat (List.mapi (fun i ft ->
+            if i = last then []
+            else [Printf.sprintf "          (i64.store offset=%d (local.get $tp) %s)" (i * 8)
+                    (field_copy (Printf.sprintf "(i64.load offset=%d (local.get $ts))" (i * 8)) ft)])
+            ts) in
+        Printf.sprintf
+          "      (if (i64.eq (local.get $t) (i64.const %d))\n\
+          \        (then\n\
+          \          (local.set $ts (i32.wrap_i64 (i64.load offset=8 (local.get $src))))\n\
+          \          (local.set $tp (global.get $__lang_bump))\n\
+          \          (global.set $__lang_bump (i32.add (local.get $tp) (i32.const %d)))\n\
+          %s\n\
+          \          (i64.store offset=8 (local.get $p) (i64.extend_i32_u (local.get $tp)))\n\
+          \          (local.set $slot (i32.add (local.get $tp) (i32.const %d)))\n\
+          \          (local.set $v (i64.load offset=%d (local.get $ts)))\n\
+          \          (br $lp)))"
+          ctag (n * 8) (String.concat "\n" copies) (last * 8) (last * 8) in
+      Printf.sprintf
+        "%s\n    (local $p i32) (local $src i32) (local $t i64) (local $head i32) (local $slot i32) (local $ts i32) (local $tp i32)\n\
+        \    (local.set $slot (i32.const 0))\n\
+        \    (block $done (loop $lp\n\
+        \      (local.set $src (i32.wrap_i64 (local.get $v)))\n\
+        \      (local.set $t (i64.load offset=0 (local.get $src)))\n\
+        \      (local.set $p (global.get $__lang_bump))\n\
+        \      (global.set $__lang_bump (i32.add (local.get $p) (i32.const 16)))\n\
+        \      (i64.store offset=0 (local.get $p) (local.get $t))\n\
+        \      (if (i32.eqz (local.get $slot))\n\
+        \        (then (local.set $head (local.get $p)))\n\
+        \        (else (i64.store (local.get $slot) (i64.extend_i32_u (local.get $p)))))\n\
+        %s\n\
+        \      (i64.store offset=8 (local.get $p) %s)\n\
+        \      (br $done)))\n\
+        \    (i64.extend_i32_u (local.get $head)))"
+        header (String.concat "\n" (List.map spine_arm spines)) (payload_dispatch vs)
+    end else
     if has_payload then
       Printf.sprintf
         "%s\n    (local $p i32) (local $src i32) (local $t i64)\n    (local.set $src (i32.wrap_i64 (local.get $v)))\n    (local.set $t (i64.load offset=0 (local.get $src)))\n    (local.set $p (global.get $__lang_bump))\n    (global.set $__lang_bump (i32.add (local.get $p) (i32.const 16)))\n    (i64.store offset=0 (local.get $p) (local.get $t))\n    (i64.store offset=8 (local.get $p) %s)\n    (i64.extend_i32_u (local.get $p)))"
