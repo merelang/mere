@@ -21,7 +21,13 @@
 #                        not about the block the map's struct lives in
 #
 # plus coro_env_from_block, which was right already (v0.1.558) and is here so
-# that it stays right.
+# that it stays right, and
+#
+#   channel_xthread      (v0.1.619, C) a channel message's region is made by the
+#                        sender and freed by the receiver, and its blocks sat on
+#                        the sender's thread-local list (v0.1.549): the receiver
+#                        unlinked them from its own, and the sender's next
+#                        message wrote into the freed one
 #
 # So this gate RUNS each program, after making the block's memory be reused (the
 # churn in each program), on the interpreter -- which has no arenas and is the
@@ -45,6 +51,10 @@ MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 CC="${CC:-clang}"; command -v "$CC" >/dev/null 2>&1 || CC=cc
 command -v "$CC" >/dev/null 2>&1 || { echo "region_uaf: no C compiler" >&2; exit 2; }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+# A spawned thread gets an alternate signal stack of the runtime's own (Q-178);
+# ASan on macOS would try to unmap it as if it were ASan's when the thread ends.
+# Leaks are not what this gate asks about (a channel is never freed).
+ASAN_OPTIONS="${ASAN_OPTIONS:-use_sigaltstack=0:detect_leaks=0}"; export ASAN_OPTIONS
 FX="$ROOT/test/uaf"
 MODE="${1:-}"
 fail=0
@@ -58,7 +68,8 @@ coro_env_from_block|c
 recycled_escape|c
 recycle_dedicated|ca
 coro_pin_reach|ca
-coro_pin_resumed|ca'
+coro_pin_resumed|ca
+channel_xthread|ca'
 
 run_bin() { perl -e 'alarm 20; exec @ARGV' "$1" 2>&1; }
 
@@ -107,7 +118,8 @@ channel_from_block|ll|the message is sent as the pointer|s/= call ptr @__mcopy_s
 recycled_escape|c|only the moved storage is kept, not where the struct lives|s/ __lang_region_keep(v->home, r); / /
 recycle_dedicated|c|a recycle claims 4 KB on the block it kept|s/^    r->cap = b->pad;$/    r->cap = 4096;/
 coro_pin_reach|c|the pin reads the stack and not what it points at|s/^  __lang_pin_reach(c);$//
-coro_pin_resumed|c|a retired arena is tried while its pinner runs|s/if (o.by\[j\] == curh) keep = 1;//'
+coro_pin_resumed|c|a retired arena is tried while its pinner runs|s/if (o.by\[j\] == curh) keep = 1;//
+channel_xthread|c|a message region goes on the list of the thread that made it|s/__lang_region_init_x(mr, 256, 1)/__lang_region_init_x(mr, 256, 0)/'
   printf '%s\n' "$POISONS" | while IFS='|' read -r f be what expr; do
     want=$("$MERE" "$FX/$f.mere" 2>&1)
     flags=$(printf '%s\n' "$CASES" | grep "^$f|" | cut -d'|' -f2)
