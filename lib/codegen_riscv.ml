@@ -1603,6 +1603,15 @@ let emit_fail_from_a0 () =
   li a0 2;
   emit_word (enc_i 64 zero 0 a7 0x13);                   (* li a7, 64 *)
   emit_word (enc_i 0 zero 0 zero 0x73);                  (* ecall (write) *)
+  (* v0.1.637: and the newline the other backends end it with *)
+  li t0 (scratch_base ());
+  emit_word (enc_i 10 zero 0 t1 0x13);                   (* li t1, '\n' *)
+  emit_word (enc_s 0 t1 t0 0 0x23);                      (* sb t1, 0(t0) *)
+  emit_word (enc_i 0 t0 0 a1 0x13);                      (* mv a1, t0 *)
+  emit_word (enc_i 1 zero 0 a2 0x13);                    (* li a2, 1 *)
+  li a0 2;
+  emit_word (enc_i 64 zero 0 a7 0x13);                   (* li a7, 64 *)
+  emit_word (enc_i 0 zero 0 zero 0x73);                  (* ecall (write) *)
   emit_word (enc_i 93 zero 0 a7 0x13);                   (* li a7, 93 *)
   emit_word (enc_i 1 zero 0 a0 0x13);                    (* li a0, 1 *)
   emit_word (enc_i 0 zero 0 zero 0x73)                   (* ecall (exit) *)
@@ -1623,6 +1632,22 @@ let emit_abort msg =
   string_data := (label, mk_str_block (target_msg msg)) :: !string_data;
   emit (LoadAddr (a0, label));
   emit_fail_from_a0 ()
+
+(* v0.1.637: a refusal that says WHICH index and how long, as the other
+   backends' do ("vec_get: index 5 out of bounds (len = 1)"). The message is
+   built by the prelude's rvoob from up to three registers, kind k picking the
+   wording; it fails like any other, so a try_or still catches it. On --bare
+   there is no prelude to build it, and the fixed text stays. *)
+let emit_abort_n k (fixed : string) (regs : int list) =
+  (* no prelude (--bare, or a caller that compiles without one): the fixed text *)
+  if !bare || not (Hashtbl.mem tops "rvoob") then emit_abort fixed
+  else begin
+    let regs = regs @ List.init (3 - List.length regs) (fun _ -> zero) in
+    List.iter push regs;
+    pop 13; pop 12; pop 11;                              (* a3, a2, a1 *)
+    li a0 k;
+    emit (Jal (ra, "u_rvoob"))
+  end
 
 
 (* the callee of a rewritten float operator, carrying the operator's location so
@@ -1805,7 +1830,7 @@ let vgen (n : int) (node : vnode) (vd0 : int) : unit =
       li t1 16;
       (let l = fresh_label ".vfok" in
        emit (Branch (7, t0, t1, l));                                        (* bgeu len, 16 -> ok *)
-       emit_abort "u8x16_from_bytes: bytes [0, +16) out of bounds";
+       emit_abort_n 6 "u8x16_from_bytes: bytes [0, +16) out of bounds" [zero; t0];
        emit (Label l));
       emit_word (enc_i (wsz ()) a0 0 t2 0x13);                             (* t2 = &bytes[0] *)
       v_load vd t2
@@ -1816,11 +1841,11 @@ let vgen (n : int) (node : vnode) (vd0 : int) : unit =
          emit_word (enc_i 16 a1 0 t1 0x13);                                (* t1 = i + 16 *)
          let l = fresh_label ".vlok" in
          emit (Branch (7, t0, t1, l));                                      (* bgeu len, i+16 -> ok *)
-         emit_abort "u8x16_load: bytes [i, +16) out of bounds";
+         emit_abort_n 7 "u8x16_load: bytes [i, +16) out of bounds" [a1; t0];
          emit (Label l);
          let l2 = fresh_label ".vlok2" in
          emit (Branch (5, a1, zero, l2));                                   (* bge i, 0 -> ok *)
-         emit_abort "u8x16_load: bytes [i, +16) out of bounds";
+         emit_abort_n 7 "u8x16_load: bytes [i, +16) out of bounds" [a1; t0];
          emit (Label l2)
        end);
       emit_word (enc_r 0 a1 a0 0 t2 0x33);                                 (* t2 = bytes + i *)
@@ -2679,7 +2704,7 @@ and compile_simd_root env op args =
       li t2 16;
       (let l = fresh_label ".vxok" in
        emit (Branch (6, a1, t2, l));                                     (* bltu lane, 16 -> ok *)
-       emit_abort "u8x16_extract: lane out of range (lanes = 16)";
+       emit_abort_n 5 "u8x16_extract: lane out of range (lanes = 16)" [a1];
        emit (Label l));
       opiv_vx 15 2 1 a1;                                                 (* vslidedown.vx v2, v1, lane *)
       v_mv_x_s a0 2;
@@ -2836,7 +2861,7 @@ and compile_app env e =
        uncaught message is printed untagged, as before.) *)
     let msg = List.hd args in
     let msg =
-      if !try_msg_used && not (in_rv_prelude e.Ast.loc) then
+      if not (in_rv_prelude e.Ast.loc) then
         { msg with Ast.node = Ast.Bin (Ast.Concat, { msg with Ast.node = Ast.Str_lit "fail: "; Ast.ty = Some Ast.TyStr }, msg);
                    Ast.ty = Some Ast.TyStr }
       else msg in
@@ -3112,7 +3137,7 @@ and compile_app env e =
     emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t2 0x03);                     (* len *)
     (let l = fresh_label ".vgok" in
      emit (Branch (6, a1, t2, l));                           (* bltu i, len -> ok *)
-     emit_abort "vec_get: index out of bounds";
+     emit_abort_n 0 "vec_get: index out of bounds" [a1; t2];
      emit (Label l));
     emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t0 0x03);                        (* dataptr *)
     emit_word (enc_i (wshift ()) a1 1 t1 0x13);              (* slli t1, i, w *)
@@ -3138,7 +3163,7 @@ and compile_app env e =
     emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t2 0x03);                     (* len *)
     (let l = fresh_label ".vsok" in
      emit (Branch (6, a1, t2, l));                           (* bltu i, len -> ok *)
-     emit_abort "vec_set: index out of bounds";
+     emit_abort_n 1 "vec_set: index out of bounds" [a1; t2];
      emit (Label l));
     emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t0 0x03);                        (* dataptr *)
     emit_word (enc_i (wshift ()) a1 1 t1 0x13);              (* slli t1, i, w *)
@@ -3864,7 +3889,7 @@ and compile_app env e =
     let l_ok = fresh_label ".chr_ok" in
     li t0 256;
     emit (Branch (6, a0, t0, l_ok));                     (* bltu a0, 256 -> ok *)
-    emit_abort "chr: out of byte range [0, 255]";
+    emit_abort_n 3 "chr: out of byte range [0, 255]" [a0];
     emit (Label l_ok);
     emit_word (enc_i 0 a0 0 t0 0x13);                    (* mv t0, a0 *)
     emit_chr_tab_entry t0 a0                             (* v0.1.620: no allocation *)
@@ -3875,7 +3900,7 @@ and compile_app env e =
     emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t1 0x03);                 (* len *)
     (let l = fresh_label ".caok" in
      emit (Branch (6, a1, t1, l));                       (* bltu i, len -> ok *)
-     emit_abort "char_at: index out of range";
+     emit_abort_n 2 "char_at: index out of range" [a1; t1];
      emit (Label l));
     emit_word (enc_r 0 a1 a0 0 t0 0x33);                 (* add t0, s, i *)
     emit_word (enc_i (wsz ()) t0 4 t0 0x03);                    (* lbu t0, 4(t0) *)
@@ -4938,7 +4963,7 @@ let emit_bytes_slice () =
   emit_word (enc_i 0 t3 0 a0 0x13);
   emit_word (enc_i 0 ra 0 zero 0x67);
   emit (Label ".bs_bad");
-  emit_abort "bytes_slice: range invalid for these bytes"
+  emit_abort "bytes_slice: range out of bounds"
 
 (* __bytes_of_hex(a0=str) -> a0 = a fresh block of len/2 bytes. Q-110. Two hex
    digits (either case) per byte; an odd length or a non-digit is a failure. Leaf. *)
@@ -5135,7 +5160,7 @@ let emit_substring () =
    emit (Branch (4, t2, a2, bad));                       (* len < end -> bad *)
    emit (Branch (5, a2, a1, ok));                        (* end >= start -> ok *)
    emit (Label bad);
-   emit_abort "substring: range out of bounds";
+   emit_abort_n 4 "substring: range out of bounds" [a1; a2; t2];
    emit (Label ok));
   emit_word (enc_r 0x20 a1 a2 0 a2 0x33);               (* sub a2, a2, a1 — len = end - start *)
   emit_word (enc_i (wsz () - 1) a2 0 t1 0x13);                     (* round4(len)+4 *)
@@ -5342,7 +5367,7 @@ let emit_vec () =
   emit (Label "__vec_set_rt");
   emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t2 0x03);                (* len *)
   emit (Branch (6, a1, t2, ".vsr_ok"));
-  emit_abort "vec_set: index out of bounds";
+  emit_abort_n 1 "vec_set: index out of bounds" [a1; t2];
   emit (Label ".vsr_ok");
   emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t0 0x03);
   emit_word (enc_i (wshift ()) a1 1 t1 0x13);
@@ -7055,6 +7080,9 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   coro_mode := Hashtbl.mem reachable "rvcoro_new_sized" || Hashtbl.mem reachable "__cswitch";
   (* __rv_coro_boot calls it, and nothing in the source names it *)
   if !coro_mode then (visit "rvcoro_boot"; visit "rvcoro_release");
+  (* v0.1.637: the bounds checks -- some in runtime routines every program has
+     (__substring) -- build their message with it *)
+  if not !bare then visit "rvoob";
   if !coro_mode && coro_co_lo () - globals_base () < !ram_bytes / 8 then
     raise (Codegen_error (Loc.dummy, Printf.sprintf
       "RV32I: the coroutines' stack region (%d KB) and the main stack (%d KB) leave \

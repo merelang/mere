@@ -1,0 +1,2 @@
+let d = str_len (read_file "/dev/null");
+print_int (7 / d)

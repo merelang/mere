@@ -1425,6 +1425,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/rv_exec_check.sh
 
+      # v0.1.637 (Q-200): a failing program fails the same way on RISC-V --
+      # stdout, stderr and the exit status each against C -- with a poison
+      # that folds the streams back together, the shape before.
+      - name: rv_failure (a failure on RISC-V is the C backend's failure)
+        if: ${{ !cancelled() }}
+        run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/rv_failure_check.sh
+      - name: rv_failure --poison (the streams folded together go red)
+        if: ${{ !cancelled() }}
+        run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/rv_failure_check.sh --poison
+
       # A RISC-V region rolls back (v0.1.613): 100 trees that need ~130 MB
       # unreclaimed must run in 16 MB on the Mere-written CPU.
       - name: region_reclaim RV64 (a RISC-V region block returns memory)

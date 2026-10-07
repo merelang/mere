@@ -4,6 +4,35 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.637 — 2026-10-07
+
+_A failing program fails the same way on RISC-V as everywhere else: the message on stderr, worded as the C runtime words it (with the index and the length), and exit status 1._
+
+On the Mere-written CPU an uncaught `fail "boom"` printed `boom` on stdout
+and the emulator ended 0; `vec_get v 5` on a one-element vector said "index
+out of bounds" with neither number. Three causes, all fixed:
+
+- **memu** printed every write to fds 1 and 2 on its own stdout, and ended 0
+  whatever the guest's `exit` asked for. A write to fd 2 now goes to the
+  host's stderr, and the emulator ends with the guest's status (its d2-637
+  change). A halt for any other reason still ends 0.
+- **The tag.** v0.1.599 tagged a user `fail` with `fail: ` only in a program
+  that used `try_or_msg`, to leave every other program's bytes as they were;
+  now every one is tagged, as on the other backends, and the uncaught message
+  ends with a newline.
+- **The wording.** `vec_get`, `vec_set`, `char_at`, `chr`, `substring` and the
+  `u8x16` loads build their message in the prelude's `rvoob` from the index,
+  the length and the bounds, as the C runtime does; `bytes_slice` takes the C
+  wording. On `--bare` there is no prelude, and the fixed text stays.
+
+`scripts/rv_failure_check.sh` (new, in CI) runs nine failing (or catching)
+programs from `test/rv/fail` on C, RV64 and RV32 and compares stdout, stderr
+and the exit status separately; its poison folds the RISC-V stderr back into
+stdout, and all 18 go red. rv_exec_check now captures the emulator's stderr
+too, where the guest's failures are. And `coro_check --poison` waits 30 s, not
+300, for the one poison that goes red by never finishing (the fixture finishes
+in under a second): a third of that gate's time.
+
 ## v0.1.636 — 2026-10-07
 
 _`utf8_len` and the rest of mere-ruby's file calls on RISC-V (`symlink`, `link`, `rename`, `fchdir`, `chroot`, `file_umask`, `file_flock`, `file_readlink`, `file_utime`); and coro_check's poisons scribble what is freed, so a region released too early reads as garbage on every run._

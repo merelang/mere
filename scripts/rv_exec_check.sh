@@ -104,7 +104,7 @@ for p in "$ROOT"/test/parity/*.mere; do
     refused=$((refused+1)); refused_names="$refused_names $name"; continue
   fi
   if [ -z "$RVRUN" ]; then pass=$((pass+1)); continue; fi
-  ( cd "$TMP" && perl -e 'alarm 480; exec @ARGV' ./rvrun 32 2>/dev/null ) | grep -a -v '^rvrun: ' > "$TMP/r.out"
+  ( cd "$TMP" && perl -e 'alarm 480; exec @ARGV' ./rvrun 32 2>&1 ) | grep -a -v '^rvrun: ' > "$TMP/r.out"
   # The reference prints the program's own final value -- unless that value is
   # unit, which since v0.1.494 prints nothing -- and an RV32I binary never
   # does, so an output that matches except for that last line is the ONE
@@ -142,7 +142,7 @@ if "$MERE" -c "$ROOT/test/rv/region_map_escape.mere" > "$TMP/ref.c" 2>/dev/null 
   ( ulimit -t 60; "$TMP/ref" ) > "$TMP/i.out" 2>&1
   if [ -z "$RVRUN" ]; then pass=$((pass+1))
   else
-    ( cd "$TMP" && perl -e 'alarm 60; exec @ARGV' ./rvrun 8 2>/dev/null ) | grep -a -v '^rvrun: ' > "$TMP/r.out"
+    ( cd "$TMP" && perl -e 'alarm 60; exec @ARGV' ./rvrun 8 2>&1 ) | grep -a -v '^rvrun: ' > "$TMP/r.out"
     if diff -q "$TMP/i.out" "$TMP/r.out" >/dev/null; then
       printf '  ok    %s (a region does not reclaim a live map cell)\n' "$name"; pass=$((pass+1))
     else
@@ -169,7 +169,7 @@ name=host_services
 if "$MERE" -rv "$ROOT/test/rv/host_services.mere" > "$TMP/prog.bin" 2>"$TMP/rverr"; then
   if [ -z "$RVRUN" ]; then pass=$((pass+1))
   else
-    ( cd "$TMP" && perl -e 'alarm 60; exec @ARGV' ./rvrun 8 2>/dev/null ) | grep -a -v '^rvrun: ' > "$TMP/r.out"
+    ( cd "$TMP" && perl -e 'alarm 60; exec @ARGV' ./rvrun 8 2>&1 ) | grep -a -v '^rvrun: ' > "$TMP/r.out"
     if grep -q FAIL "$TMP/r.out" || ! grep -q "^ok" "$TMP/r.out"; then
       printf '  FAIL  %s\n' "$name"; head -6 "$TMP/r.out" | sed 's/^/    /'
       fail=$((fail+1)); rc=1
@@ -245,7 +245,7 @@ if [ -n "$RVRUN64" ]; then
     if ! "$MERE" -rv64 --ram 32 "$p" > "$TMP/prog.bin" 2>/dev/null; then
       refused64=$((refused64+1)); refused64_names="$refused64_names $name"; continue
     fi
-    ( cd "$TMP" && perl -e 'alarm 480; exec @ARGV' ./rvrun64 32 2>/dev/null ) | grep -a -v '^rvrun' > "$TMP/r.out"
+    ( cd "$TMP" && perl -e 'alarm 480; exec @ARGV' ./rvrun64 32 2>&1 ) | grep -a -v '^rvrun' > "$TMP/r.out"
     sed '$d' "$TMP/i.out" > "$TMP/i.trim"
     expected_diff=no
     for k in $KNOWN_DIFF64; do [ "$k" = "$name" ] && expected_diff=yes; done
@@ -319,7 +319,7 @@ if "$MERE" -c "$ROOT/test/rv/host_read_file.mere" > "$TMP/ref.c" 2>/dev/null \
       printf '  FAIL  %s:%s did not build\n' "$name" "$width"; head -2 "$TMP/rverr"; rffail=$((rffail+1)); rc=1; continue
     fi
     if [ -z "$emu" ]; then rfpass=$((rfpass+1)); continue; fi
-    ( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' "$emu" 16 2>/dev/null ) | grep -a -v '^rvrun' > "$TMP/r.out"
+    ( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' "$emu" 16 2>&1 ) | grep -a -v '^rvrun' > "$TMP/r.out"
     if diff -q "$TMP/i.out" "$TMP/r.out" >/dev/null; then
       printf '  ok    %s:%s (a script on disk, NULs, empty, past one chunk, and a catchable miss)\n' "$name" "$width"
       rfpass=$((rfpass+1))
@@ -369,7 +369,7 @@ if "$MERE" -c "$ROOT/test/rv/host_externs.mere" > "$TMP/ref.c" 2>/dev/null \
       printf '  FAIL  %s:%s did not build\n' "$name" "$width"; head -2 "$TMP/rverr"; hxfail=$((hxfail+1)); rc=1; continue
     fi
     if [ -z "$emu" ]; then hxpass=$((hxpass+1)); continue; fi
-    ( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' "$emu" 16 2>/dev/null ) | grep -a -v '^rvrun' > "$TMP/r.out"
+    ( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' "$emu" 16 2>&1 ) | grep -a -v '^rvrun' > "$TMP/r.out"
     if diff -q "$TMP/i.out" "$TMP/r.out" >/dev/null; then
       printf '  ok    %s:%s (getpid, access, rmdir, stat, chdir, links, rename, utime, umask, flock, errno)\n' "$name" "$width"
       hxpass=$((hxpass+1))
@@ -401,7 +401,7 @@ for name in host_fds host_pipe; do
         printf '  FAIL  %s:%s did not build\n' "$name" "$width"; head -2 "$TMP/rverr"; fdfail=$((fdfail+1)); rc=1; continue
       fi
       if [ -z "$emu" ]; then fdpass=$((fdpass+1)); continue; fi
-      ( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' "$emu" 16 2>/dev/null ) | grep -a -v '^rvrun' > "$TMP/r.out"
+      ( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' "$emu" 16 2>&1 ) | grep -a -v '^rvrun' > "$TMP/r.out"
       if diff -q "$TMP/i.out" "$TMP/r.out" >/dev/null; then
         printf '  ok    %s:%s\n' "$name" "$width"
         fdpass=$((fdpass+1))
@@ -435,7 +435,7 @@ if "$MERE" -c "$ROOT/test/rv/host_write_file.mere" > "$TMP/ref.c" 2>/dev/null \
       printf '  FAIL  %s:%s did not build\n' "$name" "$width"; head -2 "$TMP/rverr"; wffail=$((wffail+1)); rc=1; continue
     fi
     if [ -z "$emu" ]; then wfpass=$((wfpass+1)); continue; fi
-    ( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' "$emu" 16 < rv_stdin_fixture 2>/dev/null ) | grep -a -v '^rvrun' > "$TMP/r.out"
+    ( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' "$emu" 16 < rv_stdin_fixture 2>&1 ) | grep -a -v '^rvrun' > "$TMP/r.out"
     if diff -q "$TMP/i.out" "$TMP/r.out" >/dev/null; then
       printf '  ok    %s:%s (roundtrip, truncate, NULs, empty, past one chunk, a catchable miss, stdin)\n' "$name" "$width"
       wfpass=$((wfpass+1))
