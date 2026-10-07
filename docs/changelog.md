@@ -4,6 +4,44 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.641 — 2026-10-07
+
+_Sockets, readiness sets and resource limits on RISC-V, answered by memu's host device: `tcp_listen_at`, `tcp_connect`, `tcp_accept`, `sock_*`, `udp_*`, the `io_poll_*` family, `proc_*rlimit*` and `proc_*priority`._
+
+These take an address and a port as text, a readiness set as a handle, a
+resource as a name -- shapes no Linux system call has. They are the C
+runtime's own functions, so memu calls them for the guest: the prelude makes
+calls numbered 1000 and up, which no Linux kernel has (on one, or on QEMU, the
+program is refused, as it was), and memu answers each with the host's. A str
+goes in as the guest's NUL-terminated bytes and comes back written into the
+guest's buffer; a datagram's bytes cross the C runtime's arena; every
+descriptor the host hands back is the host's, so the guest reads and writes it
+as it does a file since v0.1.634. After each call the guest asks for the host's
+errno (the fd family's or the proc family's), so `fd_last_errno` and
+`proc_last_errno` answer as on C, and a result such as `-2` for a name that
+does not resolve is passed on as it was.
+
+libc's `shutdown` and `socket` (which a program declares itself) go through
+Linux's calls 210 and 198, with Linux's numbers; memu makes the host's
+(`AF_INET6` is 10 on Linux, 30 on macOS).
+
+**The guest's errno is Linux's.** memu put the host's errno into Linux's
+numbers for four values; it now covers every number that differs (the socket
+family's above all: `ECONNREFUSED` is 61 on macOS and 111 on Linux) -- and only
+on a host that is not Linux, told apart by `/proc/self`. Translating on a
+Linux host had turned its `EDEADLK` (35) into `EAGAIN`. A program that names
+errno by number on RISC-V reads Linux's.
+
+memu's d2-641 is the device (needs this compiler). `test/rv/host_net.mere`
+(both widths in rv_exec) listens on loopback, connects, sends both ways, waits
+on a readiness set, uses a socket pair and reads a resource limit, line for
+line against C (also with gcc on Linux).
+
+`region_uaf_check --poison` now runs its poisoned programs with the
+allocator's scribbling, as `coro_check --poison` has since v0.1.636: "ll
+channel_from_block" stayed green on 1 run of 61, when the freed block had not
+been handed out again.
+
 ## v0.1.640 — 2026-10-07
 
 _The file builtins on RISC-V: `File` (`file_open`, `file_openrw`, `file_close`, `file_fsync`, `file_read_line`), positioned reads and writes of a Vec or of bytes, `read_file_bytes` / `write_file_bytes` / `write_bytes`, `read_line` / `read_lines`, `file_size`, `file_mtime`, `list_dir` and `mkdir_p`._

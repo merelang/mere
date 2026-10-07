@@ -1,0 +1,70 @@
+// Sockets, readiness and resource limits on RISC-V (v0.1.641): the C runtime's
+// own calls, which memu answers from the host. A listener on loopback (port 0,
+// so the kernel picks), its address, a client connected to it, bytes across
+// both ways through fd_write / fd_read, a readiness set that sees them, a
+// socket pair, and a resource limit read back. rv_exec compares every line with
+// the C backend's. (No errno is printed: the guest's are Linux's numbers, the
+// C reference's the host's.)
+extern fn tcp_listen_at: str -> int -> int -> int;
+extern fn tcp_connect: str -> int -> int;
+extern fn tcp_accept: int -> int;
+extern fn tcp_close: int -> unit;
+extern fn sock_local_addr: int -> str;
+extern fn sock_pair: int -> int;
+extern fn io_poll_new: int -> int;
+extern fn io_poll_add: int -> int -> int -> int;
+extern fn io_poll_wait: int -> int -> int;
+extern fn io_poll_get: int -> int -> int;
+extern fn proc_rlimit_resource: str -> int;
+extern fn proc_getrlimit: str -> int;
+extern fn proc_rlimit_field: int -> int;
+extern fn fd_write: int -> int -> int -> int;
+extern fn fd_read: int -> int -> int -> int;
+extern fn fd_close: int -> int;
+extern fn socket: int -> int -> int -> int;
+extern fn shutdown: int -> int -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_copy_str: int -> int -> str -> int;
+extern fn mem_to_str: int -> int -> str;
+let buf = mem_alloc 128;
+let srv = tcp_listen_at "127.0.0.1" 0 8;
+let _ = print_int (if srv > 2 then 1 else 0);
+let addr = sock_local_addr srv;
+// "inet <port> <address>"
+let _ = print (if str_starts_with addr "inet " && str_ends_with addr " 127.0.0.1" then "inet, loopback" else "elsewhere: " ++ addr);
+let port = int_of_str (substring addr 5 (str_last_index_of addr " "));
+let _ = print_int (if port > 0 then 1 else 0);
+let cli = tcp_connect "127.0.0.1" port;
+let con = tcp_accept srv;
+let _ = print_int (if cli > 2 && con > 2 then 1 else 0);
+let _ = print_int (fd_write cli buf (mem_copy_str buf 0 "ping"));
+let ps = io_poll_new 0;
+let _ = print_int (io_poll_add ps con 1);
+let _ = print_int (io_poll_wait ps 2000);
+let _ = print_int (if io_poll_get ps 0 == con * 8 + 1 then 1 else 0);
+let n = fd_read con buf 64;
+let _ = print (mem_to_str buf n);
+let _ = print_int (fd_write con buf (mem_copy_str buf 0 "pong!"));
+let m = fd_read cli buf 64;
+let _ = print (mem_to_str buf m);
+let _ = print_int (shutdown cli 1);
+let _ = print_int (fd_read con buf 64);
+let _ = tcp_close cli;
+let _ = print_int (fd_read con buf 64);
+let _ = tcp_close con;
+let _ = tcp_close srv;
+let p = sock_pair 1;
+let a = p / 1048576;
+let b = p % 1048576;
+let _ = print_int (fd_write a buf (mem_copy_str buf 0 "pair"));
+let k = fd_read b buf 64;
+let _ = print (mem_to_str buf k);
+let _ = fd_close a;
+let _ = fd_close b;
+// AF_INET (2, on every platform), SOCK_STREAM
+let s4 = socket 2 1 0;
+let _ = print_int (if s4 > 2 then 1 else 0);
+let _ = fd_close s4;
+let _ = print_int (if proc_rlimit_resource "NOFILE" >= 0 then 1 else 0);
+let _ = print_int (proc_getrlimit "NOFILE");
+print_int (if proc_rlimit_field 0 > 0 then 1 else 0)

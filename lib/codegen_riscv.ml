@@ -562,6 +562,17 @@ let libm_sigs : (string * string) list =
       ("mem_copy_str", "iis>i"); ("mem_to_str", "ii>s");
       (* and a signal's disposition, which a pipe's writer sets *)
       ("proc_sig_noop", "i>i"); ("proc_sig_default", "i>i");
+      (* v0.1.641: sockets, readiness, resource limits (memu's host device) *)
+      ("tcp_listen_at", "sii>i"); ("tcp_listen", "i>i"); ("tcp_accept", "i>i");
+      ("tcp_connect", "si>i"); ("tcp_close", "i>u"); ("tcp_set_timeout", "ii>i");
+      ("sock_bind", "isi>i"); ("sock_local_addr", "i>s"); ("sock_peer_addr", "i>s");
+      ("sock_pair", "i>i"); ("udp_open", "si>i"); ("udp_send", "iii>i"); ("udp_recv", "iii>i");
+      ("io_poll_new", "i>i"); ("io_poll_add", "iii>i"); ("io_poll_del", "ii>i");
+      ("io_poll_wait", "ii>i"); ("io_poll_get", "ii>i");
+      ("proc_getrlimit", "s>i"); ("proc_setrlimit", "sii>i"); ("proc_rlimit_field", "i>i");
+      ("proc_rlimit_resource", "s>i"); ("proc_rlimit_names", "u>s"); ("proc_rlim_const", "s>s");
+      ("proc_getpriority", "ii>i"); ("proc_setpriority", "iii>i");
+      ("shutdown", "ii>i"); ("socket", "iii>i");
       (* v0.1.636: the rest of the file calls mere-ruby makes *)
       ("symlink", "ss>i"); ("link", "ss>i"); ("rename", "ss>i"); ("fchdir", "i>i");
       ("chroot", "s>i"); ("file_umask", "i>i"); ("file_flock", "ii>i");
@@ -578,6 +589,7 @@ let rec libm_sig_of (t : Ast.ty) : string =
      | Ast.TyFloat -> c ^ ">f"
      | Ast.TyInt -> c ^ ">i"
      | Ast.TyStr -> c ^ ">s"
+     | Ast.TyUnit -> c ^ ">u"
      | _ -> c ^ ">?")
   | _ -> "?"
 let libm_arity name =
