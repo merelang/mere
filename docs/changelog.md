@@ -4,6 +4,33 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.639 — 2026-10-07
+
+_`show` at every type on RISC-V -- floats, strs, bools, unit, tuples, records, variants, lists and Vecs, not only ints -- and `vec_to_list`. The parity programs `-rv64` refuses at compile time go from 57 to 46._
+
+`show` was the single largest reason RISC-V refused a program (18 of 57).
+Each type a program shows now gets a generated `__show_<type>`, queued like the
+structural-equality helpers, writing what the interpreter's `to_string`
+writes: an int in decimal, a float as `str_of_float` (the same text C prints),
+a str quoted with `\"`, `\\`, `\n`, `\r` and `\t` escaped (the prelude's
+`rvshow_str`), `true` / `false`, `()`, `(a, b)`, `Name { f = v, g = w }`, a
+constructor's name with its payload after a space, a list as `[a, b]`, and a
+Vec as `Vec[a, b]`. A type with a part it cannot write (a Map, bytes, a
+closure, a SIMD value) is refused at the `show`, naming the type.
+
+`test/parity/show_all_types.mere` (new) shows each kind on every backend and
+through rv_exec on both RISC-V widths.
+
+Two programs that now compile on RISC-V showed two old bugs:
+
+- **`li` of a large constant on RV64.** The compiler's int is OCaml's 63 bits,
+  and the chunked load computed `v - lo` before shifting it: for 2^62 - 1 the
+  subtraction wrapped, and the literal was built as -(2^62 + 1) (int_width's
+  largest literal printed with its sign flipped). It shifts first now.
+- **`int_of_str`'s refusal** said `int_of_str: bad digit` and took a sign with
+  no digits after it for 0; it now refuses both with the C runtime's words,
+  the string quoted (failure_caught).
+
 ## v0.1.638 — 2026-10-07
 
 _RISC-V gets the small builtins it lacked -- `not`, `len`, `vec_sort`, `vec_iter`, `vec_fold`, `str_count`, `str_last_index_of`, `utf8_chars`, `bool_of_str`, `print_bool`, `int_max`, `int_min`, `random_float` -- a builtin can be passed as a value, and `ord` refuses a string that is not one character. The parity programs `-rv64` refuses at compile time go from 73 to 57._

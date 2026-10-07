@@ -238,7 +238,11 @@ let rec li rd v =
     if lo <> 0 then emit_word (enc_i lo rd 0 rd 0x13)  (* addi rd, rd, lo *)
   end else begin
     let lo = ((v land 0xFFF) lxor 0x800) - 0x800 in    (* low 12, as addi sees them *)
-    let hi = (v - lo) asr 12 in
+    (* v0.1.639: (v - lo) asr 12, without the subtraction -- this compiler's
+       int is OCaml's 63 bits, and for v = 2^62 - 1 (lo = -1) v - lo wrapped
+       to the most negative int: `li` built -(2^62 + 1), and int_width's
+       largest literal printed with its sign flipped on RV64 *)
+    let hi = (v asr 12) + (if lo < 0 then 1 else 0) in
     li rd hi;
     emit_word (enc_i 12 rd 1 rd 0x13);                 (* slli rd, rd, 12 *)
     if lo <> 0 then emit_word (enc_i lo rd 0 rd 0x13)  (* addi rd, rd, lo *)
@@ -609,6 +613,8 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
      | "map_len" -> (if map_word_keyed e then "rvmap_len_i" else "rvmap_len") :: v :: acc
      (* v0.1.638: len of a Map or a list is a prelude call *)
      | "len" -> "rvmap_len_i" :: "rvmap_len" :: "rvlist_len" :: v :: acc
+     (* v0.1.639: a str or a float inside what is shown *)
+     | "show" -> "rvshow_str" :: "str_of_float" :: v :: acc
      | "map_clear" -> "rvmap_clear" :: v :: acc
      | "map_compact" -> "rvmap_compact" :: v :: acc
      | "map_iter" -> (if map_word_keyed e then "rvmap_iter_i" else "rvmap_iter") :: v :: acc
@@ -726,6 +732,8 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyArrow _ -> "fn"
   | Ast.TyRef (_, _, t) -> "r" ^ ty_tag t
 
+let rec zip_tyenv ps args =
+  match ps, args with p :: ps', a :: args' -> (p, a) :: zip_tyenv ps' args' | _ -> []
 let rec subst_ty (env : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
   match resolve_ty t with
   | Ast.TyParam p -> (match List.assoc_opt p env with Some t' -> t' | None -> Ast.TyParam p)
@@ -739,6 +747,17 @@ let rec subst_ty (env : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
    helper's label, queuing it once. *)
 let eq_pending : (string * Ast.ty) list ref = ref []
 let eq_requested : (string, unit) Hashtbl.t = Hashtbl.create 32
+(* v0.1.639: `show` at a type is a generated `__show_<tag>` (a0 = the value ->
+   a0 = its text), queued like the structural-eq helpers *)
+let show_pending : (string * Ast.ty) list ref = ref []
+let show_requested : (string, unit) Hashtbl.t = Hashtbl.create 16
+let request_show_tag (t : Ast.ty) : string =
+  let tag = ty_tag t in
+  if not (Hashtbl.mem show_requested tag) then begin
+    Hashtbl.replace show_requested tag ();
+    show_pending := (tag, t) :: !show_pending
+  end;
+  "__show_" ^ tag
 let request_eq (t : Ast.ty) : string =
   let tag = ty_tag t in
   if not (Hashtbl.mem eq_requested tag) then begin
@@ -3898,7 +3917,33 @@ and compile_app env e =
     let arg = List.hd args in
     (match (match arg.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit) with
      | Ast.TyInt -> compile_expr env arg; emit (Jal (ra, "__str_of_int"))
-     | _ -> err e.loc "RV32I: `show` is only supported on int values")
+     | t ->
+       (* v0.1.639: every type made of the ones __show_ writes *)
+       let seen = Hashtbl.create 8 in
+       let rec ok t =
+         match resolve_ty t with
+         | Ast.TyInt | Ast.TyFloat | Ast.TyStr | Ast.TyUnit | Ast.TyBool -> true
+         | Ast.TyTuple ts -> List.for_all ok ts
+         | Ast.TyCon ("list", [et]) -> ok et
+         | Ast.TyCon ("Vec", [_; et]) -> ok et
+         | Ast.TyCon (n, args) when Hashtbl.mem type_records n || Hashtbl.mem type_variants n ->
+           let key = ty_tag t in
+           if Hashtbl.mem seen key then true
+           else begin
+             Hashtbl.replace seen key ();
+             if Hashtbl.mem type_records n then
+               (let (params, fields) = Hashtbl.find type_records n in
+                let senv = zip_tyenv params args in
+                List.for_all (fun (_, fty) -> ok (subst_ty senv fty)) fields)
+             else
+               (let (params, variants) = Hashtbl.find type_variants n in
+                let senv = zip_tyenv params args in
+                List.for_all (fun (_, p) -> match p with None -> true | Some pt -> ok (subst_ty senv pt)) variants)
+           end
+         | _ -> false in
+       if not (ok t) then
+         err e.loc (Printf.sprintf "RV32I: `show` of a %s -- this backend writes ints, floats, strs, bools, unit, tuples, records, variants, lists and Vecs" (Formatter.fmt_ty t));
+       compile_expr env arg; emit (Jal (ra, request_show_tag t)))
   (* v0.1.638: `not` is xori with 1 (a branch on it is turned round in
      branch_if instead) *)
   | Ast.Var "not" when List.length args = 1 ->
@@ -5797,8 +5842,6 @@ let emit_pat_fail () =
   emit_word (enc_i 0 zero 0 zero 0x73)                  (* ecall exit(2) *)
 
 (* --- structural equality helpers (__eq_<tag>) ---------------------------- *)
-let rec zip_tyenv ps args =
-  match ps, args with p :: ps', a :: args' -> (p, a) :: zip_tyenv ps' args' | _ -> []
 
 (* compare aggregate fields (each an (offset, field type)); x in a0, y in a1.
    Non-leaf: parks x/y/ra on the stack and short-circuits on the first
@@ -5852,6 +5895,110 @@ let emit_variant_eq senv (variants : (string * Ast.ty option) list) =
   emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) ra 0x03);
   emit_word (enc_i (wsz ()) sp 0 sp 0x13);
   emit_word (enc_i 0 ra 0 zero 0x67)                    (* ret *)
+
+(* v0.1.639: the text `show` gives a value, as the interpreter's to_string
+   writes it: an int in decimal, a float as str_of_float, a str quoted and
+   escaped, `true`/`false`, `()`, `(a, b)`, `Name { f = v, g = w }`, a
+   constructor's name and its payload after a space, a list as `[a, b]`, a Vec
+   as `Vec[a, b]`. The frame is [ra][x][acc][i]: x the value, acc the text so
+   far, i a cursor; every piece is appended with __str_concat. *)
+let emit_show_helper (tag, ty) =
+  let w = wsz () in
+  let ld rd off base = emit_word (enc_i off base (ldf3 ()) rd 0x03) in
+  let sd src off base = emit_word (enc_s off src base (stf3 ()) 0x23) in
+  let ret () = emit_word (enc_i 0 ra 0 zero 0x67) in
+  let lit r str =
+    let label = fresh_label "str_" in
+    string_data := (label, mk_str_block str) :: !string_data;
+    emit (LoadAddr (r, label)) in
+  let enter () = emit_word (enc_i (0 - 4 * w) sp 0 sp 0x13); sd ra 0 sp; sd a0 w sp in
+  let leave () = ld a0 (2 * w) sp; ld ra 0 sp; emit_word (enc_i (4 * w) sp 0 sp 0x13); ret () in
+  let start str = lit a0 str; sd a0 (2 * w) sp in
+  let app_lit str = ld a0 (2 * w) sp; lit a1 str; emit (Jal (ra, "__str_concat")); sd a0 (2 * w) sp in
+  (* load_value puts the piece's value in a0 *)
+  let app_val load_value t =
+    load_value (); emit (Jal (ra, request_show_tag t));
+    emit_word (enc_i 0 a0 0 a1 0x13);                                     (* mv a1, a0 *)
+    ld a0 (2 * w) sp; emit (Jal (ra, "__str_concat")); sd a0 (2 * w) sp in
+  let field_of i () = ld t0 w sp; ld a0 (i * w) t0 in
+  emit (Label ("__show_" ^ tag));
+  match resolve_ty ty with
+  | Ast.TyInt -> emit (Jal (zero, "__str_of_int"))
+  | Ast.TyFloat -> emit (Jal (zero, "u_str_of_float"))
+  | Ast.TyStr -> emit (Jal (zero, "u_rvshow_str"))
+  | Ast.TyUnit -> lit a0 "()"; ret ()
+  | Ast.TyBool ->
+    let l = fresh_label ".shf" in
+    emit (Branch (0, a0, zero, l)); lit a0 "true"; ret ();
+    emit (Label l); lit a0 "false"; ret ()
+  | Ast.TyTuple ts ->
+    enter (); start "(";
+    List.iteri (fun i t -> if i > 0 then app_lit ", "; app_val (field_of i) t) ts;
+    app_lit ")"; leave ()
+  | Ast.TyCon (n, args) when Hashtbl.mem type_records n ->
+    let (params, fields) = Hashtbl.find type_records n in
+    let senv = zip_tyenv params args in
+    enter (); start (n ^ " { ");
+    List.iteri (fun i (f, fty) ->
+      if i > 0 then app_lit ", ";
+      app_lit (f ^ " = ");
+      app_val (field_of i) (subst_ty senv fty)) fields;
+    app_lit " }"; leave ()
+  | Ast.TyCon ("list", [et]) ->
+    (* Cons is [1][payload], the payload a pair [head][tail]; Nil is tag 0 *)
+    let l_loop = fresh_label ".shl" and l_end = fresh_label ".she" and l_first = fresh_label ".shs" in
+    enter (); start "[";
+    li t0 1; sd t0 (3 * w) sp;                                            (* first *)
+    emit (Label l_loop);
+    ld t0 w sp; ld t1 0 t0;
+    emit (Branch (0, t1, zero, l_end));                                   (* Nil -> done *)
+    ld t1 (3 * w) sp;
+    emit (Branch (1, t1, zero, l_first));
+    app_lit ", ";
+    emit (Label l_first);
+    sd zero (3 * w) sp;
+    app_val (fun () -> ld t0 w sp; ld t0 w t0; ld a0 0 t0) et;          (* head *)
+    ld t0 w sp; ld t0 w t0; ld t0 w t0; sd t0 w sp;                       (* x = tail *)
+    emit (Jal (zero, l_loop));
+    emit (Label l_end);
+    app_lit "]"; leave ()
+  | Ast.TyCon (n, args) when Hashtbl.mem type_variants n ->
+    let (params, variants) = Hashtbl.find type_variants n in
+    let senv = zip_tyenv params args in
+    enter ();
+    ld t1 0 a0;                                      (* every constructor is a block: [tag] or [tag][payload] *)
+    List.iteri (fun k (ctor, payload) ->
+      let l_next = fresh_label ".shv" in
+      li t2 k; emit (Branch (1, t1, t2, l_next));
+      (match payload with
+       | None -> start ctor
+       | Some pty ->
+         start (ctor ^ " ");
+         app_val (field_of 1) (subst_ty senv pty));
+      leave ();
+      emit (Label l_next)) variants;
+    start "?"; leave ()
+  | Ast.TyCon ("Vec", [_; et]) ->
+    (* [len][cap][data]...: the elements are words at data *)
+    let l_loop = fresh_label ".svl" and l_end = fresh_label ".sve" and l_first = fresh_label ".svs" in
+    enter (); start "Vec[";
+    sd zero (3 * w) sp;
+    emit (Label l_loop);
+    ld t0 w sp; ld t1 0 t0; ld t2 (3 * w) sp;
+    emit (Branch (7, t2, t1, l_end));                                     (* i >= len -> done *)
+    emit (Branch (0, t2, zero, l_first));
+    app_lit ", ";
+    emit (Label l_first);
+    app_val (fun () ->
+      ld t0 w sp; ld t1 (2 * w) t0; ld t2 (3 * w) sp;
+      emit_word (enc_i (wshift ()) t2 1 t2 0x13);                         (* slli t2, i, log2 w *)
+      emit_word (enc_r 0 t2 t1 0 t1 0x33);                                (* add t1, data, t2 *)
+      ld a0 0 t1) et;
+    ld t2 (3 * w) sp; emit_word (enc_i 1 t2 0 t2 0x13); sd t2 (3 * w) sp;
+    emit (Jal (zero, l_loop));
+    emit (Label l_end);
+    app_lit "]"; leave ()
+  | _ -> lit a0 "?"; ret ()
 
 let emit_eq_helper (tag, ty) =
   emit (Label ("__eq_" ^ tag));
@@ -7062,7 +7209,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   lambdas := []; directs := []; Hashtbl.reset eta_builtin_of_label; cur_eta_builtin := None; direct_scope := []; Hashtbl.reset direct_caps;
   Hashtbl.reset adapters;
   globals := [];
-  eq_pending := [];
+  eq_pending := []; show_pending := []; Hashtbl.reset show_requested;
   rcopy_pending := [];
   Hashtbl.reset rcopy_requested;
   store_pending := [];
@@ -7216,6 +7363,10 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
      recursive types; eq_requested dedups so it terminates) *)
   let rec drain_eq () =
     match !eq_pending, !rcopy_pending, !store_pending with
+    | [], [], [] when !show_pending <> [] ->
+      (match !show_pending with
+       | h :: rest -> show_pending := rest; emit_show_helper h; drain_eq ()
+       | [] -> ())
     | [], [], [] -> ()
     | h :: rest, _, _ -> eq_pending := rest; emit_eq_helper h; drain_eq ()
     | [], h :: rest, _ -> rcopy_pending := rest; emit_rcopy_helper h; drain_eq ()

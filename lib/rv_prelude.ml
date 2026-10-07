@@ -393,6 +393,29 @@ let bool_of_str = fn (s: str) ->
   else if s == "false" then false
   else fail ("bool_of_str: \"" ++ s ++ "\" is not 'true' or 'false'");
 let random_float = fn (u: unit) -> float_of_int (random_int 1073741824) / 1073741824.0;
+// v0.1.639: a str as `show` writes it -- quoted, with \" \\ \n \r \t escaped
+let rvshow_str = fn (s: str) ->
+  let sb = strbuf_new () in
+  let _ = strbuf_push sb "\"" in
+  let b = bytes_of_str s in
+  let rec go = fn (i: int) ->
+    if i >= str_len s then ()
+    else
+      (let c = __bytes_get_unchecked b i in
+       let _ = strbuf_push sb (if c == 34 then "\\\""
+                               else if c == 92 then "\\\\"
+                               else if c == 10 then "\\n"
+                               else if c == 13 then "\\r"
+                               else if c == 9 then "\\t"
+                               else chr c) in
+       go (i + 1)) in
+  let _ = go 0 in
+  let _ = strbuf_push sb "\"" in
+  strbuf_to_str sb;
+// v0.1.639: a Vec's elements as a list, first to last
+let vec_to_list = fn v ->
+  let rec go = fn (i: int) -> fn acc -> if i < 0 then acc else go (i - 1) (Cons (vec_get v i, acc)) in
+  go (vec_len v - 1) Nil;
 // len of a list: its Cons cells
 let rvlist_len = fn l ->
   let rec go = fn l -> fn (n: int) -> match l with | Nil -> n | Cons (_, t) -> go t (n + 1) in
@@ -671,10 +694,13 @@ let str_unescape = fn s ->
       else go (i + 1) (acc ++ c) in
   go 0 "";
 
+// v0.1.639: refused with the C runtime's words (the string, quoted), and a
+// sign with no digits after it is refused too
 let int_of_str = fn s ->
+  let bad = fn (u: unit) -> fail ("int_of_str: \"" ++ s ++ "\" is not a valid int") in
   let t = str_trim s in
   let n = str_len t in
-  if n == 0 then fail "int_of_str: empty"
+  if n == 0 then bad ()
   else
     let neg = str_eq (char_at t 0) "-" in
     let sgn = neg || str_eq (char_at t 0) "+" in
@@ -683,9 +709,9 @@ let int_of_str = fn s ->
       if i >= n then acc
       else (let c = ord (char_at t i) in
             if c >= 48 && c <= 57 then go (i + 1) (acc * 10 + (c - 48))
-            else fail "int_of_str: bad digit") in
-    let v = go start 0 in
-    if neg then 0 - v else v;
+            else bad ()) in
+    if start >= n then bad ()
+    else (let v = go start 0 in if neg then 0 - v else v);
 
 // --- Map: a hash table (v0.1.611) ---------------------------------------------
 // It was an assoc list: map_set PREPENDED even over an existing key (the list
