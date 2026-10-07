@@ -1434,6 +1434,14 @@ jobs:
       - name: rv_failure --poison (the streams folded together go red)
         if: ${{ !cancelled() }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/rv_failure_check.sh --poison
+      # v0.1.642: sys_os / sys_arch answer for each backend's ABI (the host's on
+      # interp, C and LLVM; wasi on Wasm; linux on RISC-V)
+      - name: sys_info (sys_os / sys_arch on every backend)
+        if: ${{ !cancelled() }}
+        run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/sys_info_check.sh
+      - name: sys_info --poison (a C program asked about another machine goes red)
+        if: ${{ !cancelled() }}
+        run: sh scripts/sys_info_check.sh --poison
 
       # A RISC-V region rolls back (v0.1.613): 100 trees that need ~130 MB
       # unreclaimed must run in 16 MB on the Mere-written CPU.

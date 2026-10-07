@@ -219,6 +219,8 @@ machine rather than a host.
 | `strbuf_new` | yes | yes | yes | yes |
 | `substring` | yes | yes | yes | yes |
 | `sum_range` | yes | yes | yes | yes |
+| `sys_arch` | yes | yes | yes | yes |
+| `sys_os` | yes | yes | yes | yes |
 | `tan` | yes | yes | yes | yes |
 | `time` | yes | yes | yes | yes |
 | `to_lower` | yes | yes | yes | yes |
