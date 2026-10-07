@@ -616,7 +616,11 @@ v0.1.640 answers the file builtins themselves on RISC-V over those descriptors:
 `file_open`, `file_openrw`, `file_close`, `file_fsync`, `file_read_line`,
 `file_pread` / `file_pwrite` (and their `_bytes` forms), `read_file_bytes`,
 `write_file_bytes`, `write_bytes`, `read_line`, `read_lines`, `file_size`,
-`file_mtime`, `list_dir` and `mkdir_p`, each with the C backend's contract. memu hands the guest the host's
+`file_mtime`, `list_dir` and `mkdir_p`, each with the C backend's contract.
+v0.1.641 answers the socket, readiness and resource-limit externs (`tcp_*`,
+`sock_*`, `udp_*`, `io_poll_*`, `proc_*rlimit*`, `proc_*priority`) through
+memu's host device: calls the emulator answers with the host's C runtime and
+a Linux kernel does not have. memu hands the guest the host's
 own descriptors, so a write is in the file before the close and a pipe is a pipe.
 The errno is Linux's (`EAGAIN` is 11 here, 35 on a macOS host).
 `test/rv/host_fds.mere` (both widths) and `test/rv/host_pipe.mere` (RV64) hold them

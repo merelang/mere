@@ -72,6 +72,12 @@ coro_pin_resumed|ca
 channel_xthread|ca'
 
 run_bin() { perl -e 'alarm 20; exec @ARGV' "$1" 2>&1; }
+# v0.1.641: a poisoned program runs with the allocator scribbling what is freed
+# (macOS MallocScribble, glibc MALLOC_PERTURB_), so a use after free reads
+# garbage whether or not the block was handed out again -- "ll
+# channel_from_block" stayed green on 1 run of 61 when it was not. Any line the
+# allocator prints about it is not the program's.
+run_poisoned() { env MallocScribble=1 MALLOC_PERTURB_=85 perl -e 'alarm 20; exec @ARGV' "$1" 2>&1 | grep -v 'malloc: enabling scribbling'; }
 
 build() {  # $1 = program, $2 = c|ll, [$3 = sed expression] -> $T/bin, or prints why not
   "$MERE" "-$2" "$FX/$1.mere" > "$T/g.$2" 2>"$T/emit.err" || { echo "EMITFAIL $(head -1 "$T/emit.err")"; return 1; }
@@ -124,7 +130,7 @@ channel_xthread|c|a message region goes on the list of the thread that made it|s
     want=$("$MERE" "$FX/$f.mere" 2>&1)
     flags=$(printf '%s\n' "$CASES" | grep "^$f|" | cut -d'|' -f2)
     if ! why=$(build "$f" "$be" "$expr" "$flags"); then printf '  FAIL  %s\n' "POISON $be $f ($what): $why"; echo x >> "$T/pfailed"; continue; fi
-    got=$(run_bin "$T/bin")
+    got=$(run_poisoned "$T/bin")
     if [ "$got" != "$want" ]; then printf '  ok    %s\n' "POISON $be $f ($what): goes red"
     else printf '  FAIL  %s\n' "POISON $be $f ($what): still green -- the program does not witness the fix"; echo x >> "$T/pfailed"; fi
   done

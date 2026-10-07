@@ -392,7 +392,7 @@ echo "rv_exec: $hxpass passed, $hxfail failed for the host externs (both widths)
 # packs a pipe's two descriptors into one int). memu hands the guest the
 # host's own descriptors, so a write is in the file before the close, as on C.
 fdpass=0; fdfail=0
-for name in host_fds host_pipe host_files; do
+for name in host_fds host_pipe host_files host_net; do
   if "$MERE" -c "$ROOT/test/rv/$name.mere" > "$TMP/ref.c" 2>/dev/null \
      && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
     ( cd "$TMP" && ulimit -t 60; ./ref ) > "$TMP/i.out" 2>&1

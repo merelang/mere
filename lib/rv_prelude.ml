@@ -573,6 +573,63 @@ let mkdir_p = fn (p: str) ->
     else if i == n || __bytes_get_unchecked b i == 47 then (let _ = mk (substring p 0 i) in go (i + 1))
     else go (i + 1) in
   if n == 0 then () else go 1;
+// v0.1.641: sockets, readiness and resource limits -- the C runtime's own
+// calls, answered by memu's host device (calls 1000 and up, which a Linux
+// kernel does not have: there the program is refused, as it was). A
+// descriptor the host hands back is the host's, as since v0.1.634. After each
+// call the host's errno is asked for (1098 for the fd family's, 1099 for the
+// proc family's), so what the call returned -- -2 for a name that does not
+// resolve -- is passed on as it was.
+let __rv_hc_fd = fn (k: int) -> fn (a: int) -> fn (b: int) -> fn (c: int) ->
+  let r = __rv_syscall k a b c 0 in
+  let _ = __rv_rtw_set 80 (__rv_syscall 1098 0 0 0 0) in
+  r;
+let __rv_hc_proc = fn (k: int) -> fn (a: int) -> fn (b: int) -> fn (c: int) ->
+  let r = __rv_syscall k a b c 0 in
+  let _ = __rv_rtw_set 63 (__rv_syscall 1099 0 0 0 0) in
+  r;
+// a str the host writes into a buffer: its length comes back
+let __rv_hc_str = fn (k: int) -> fn (a: int) -> fn (arg_is_str: str) ->
+  let buf = str_repeat " " 4096 in
+  let at = __rv_addr buf + __rv_w () in
+  let n = if str_len arg_is_str > 0 then __rv_syscall k (__rv_cstr arg_is_str) at 4096 0
+          else __rv_syscall k a at 4096 0 in
+  if n <= 0 then "" else substring buf 0 (if n > 4096 then 4096 else n);
+let __libm_tcp_listen_at = fn (h: str) -> fn (port: int) -> fn (backlog: int) -> __rv_hc_fd 1000 (__rv_cstr h) port backlog;
+let __libm_tcp_listen = fn (port: int) -> __rv_hc_fd 1001 port 0 0;
+let __libm_tcp_accept = fn (fd: int) -> __rv_hc_fd 1002 fd 0 0;
+let __libm_tcp_connect = fn (h: str) -> fn (port: int) -> __rv_hc_fd 1003 (__rv_cstr h) port 0;
+let __libm_tcp_close = fn (fd: int) -> let _ = __rv_hc_fd 1004 fd 0 0 in ();
+let __libm_tcp_set_timeout = fn (fd: int) -> fn (ms: int) -> __rv_hc_fd 1005 fd ms 0;
+let __libm_sock_bind = fn (fd: int) -> fn (h: str) -> fn (port: int) -> __rv_hc_fd 1006 fd (__rv_cstr h) port;
+let __libm_sock_local_addr = fn (fd: int) -> __rv_hc_str 1007 fd "";
+let __libm_sock_peer_addr = fn (fd: int) -> __rv_hc_str 1008 fd "";
+let __libm_sock_pair = fn (t: int) -> __rv_hc_fd 1009 t 0 0;
+let __libm_udp_open = fn (h: str) -> fn (port: int) -> __rv_hc_fd 1010 (__rv_cstr h) port 0;
+let __libm_udp_send = fn (fd: int) -> fn (p: int) -> fn (len: int) -> __rv_hc_fd 1011 fd (__rv_mem_at p) len;
+let __libm_udp_recv = fn (fd: int) -> fn (p: int) -> fn (cap: int) -> __rv_hc_fd 1012 fd (__rv_mem_at p) cap;
+let __libm_io_poll_new = fn (d: int) -> __rv_hc_fd 1013 d 0 0;
+let __libm_io_poll_add = fn (s: int) -> fn (fd: int) -> fn (i: int) -> __rv_hc_fd 1014 s fd i;
+let __libm_io_poll_del = fn (s: int) -> fn (fd: int) -> __rv_hc_fd 1015 s fd 0;
+let __libm_io_poll_wait = fn (s: int) -> fn (ms: int) -> __rv_hc_fd 1016 s ms 0;
+let __libm_io_poll_get = fn (s: int) -> fn (i: int) -> __rv_hc_fd 1017 s i 0;
+let __libm_proc_getrlimit = fn (n: str) -> __rv_hc_proc 1020 (__rv_cstr n) 0 0;
+let __libm_proc_setrlimit = fn (n: str) -> fn (cur: int) -> fn (mx: int) -> __rv_hc_proc 1021 (__rv_cstr n) cur mx;
+let __libm_proc_rlimit_field = fn (w: int) -> __rv_hc_proc 1022 w 0 0;
+let __libm_proc_rlimit_resource = fn (n: str) -> __rv_hc_proc 1023 (__rv_cstr n) 0 0;
+let __libm_proc_rlimit_names = fn (u: unit) -> __rv_hc_str 1024 0 "";
+let __libm_proc_rlim_const = fn (n: str) -> __rv_hc_str 1025 0 n;
+let __libm_proc_getpriority = fn (w: int) -> fn (who: int) -> __rv_hc_proc 1026 w who 0;
+let __libm_proc_setpriority = fn (w: int) -> fn (who: int) -> fn (pr: int) -> __rv_hc_proc 1027 w who pr;
+// libc's shutdown(2): Linux's call 210, whose `how` (0 read, 1 write, 2 both)
+// is every platform's; 0, or -1
+let __libm_shutdown = fn (fd: int) -> fn (how: int) -> __rv_p0 (__rv_syscall 210 fd how 0 0);
+// libc's socket(2): Linux's call 198 with Linux's numbers (AF_INET6 is 10);
+// memu makes the host's. The descriptor, or -1
+let __libm_socket = fn (d: int) -> fn (t: int) -> fn (p: int) ->
+  let r = __rv_syscall 198 d t p 0 in
+  let _ = __rv_rtw_set 63 (if r < 0 then 0 - r else 0) in
+  if r < 0 then 0 - 1 else r;
 // len of a list: its Cons cells
 let rvlist_len = fn l ->
   let rec go = fn l -> fn (n: int) -> match l with | Nil -> n | Cons (_, t) -> go t (n + 1) in
