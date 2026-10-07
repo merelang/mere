@@ -1,0 +1,29 @@
+// show at every type RISC-V writes (v0.1.639): ints, floats, a str with each
+// escape, bools, unit, a tuple, an enum, constructors with and without a
+// payload, a record, lists (nested and empty), options of options, a result,
+// and a recursive tree -- the interpreter's to_string, on every backend (a Vec too
+// on RISC-V; LLVM and Wasm do not show one).
+type color = Red | Green | Blue;
+type shape = Circle of float | Rect of int * int | Empty;
+type point = { x: int, y: int };
+type 'a tree = Leaf | Node of 'a tree * 'a * 'a tree;
+let _ = print (show 42);
+let _ = print (show (0 - 7));
+let _ = print (show 2.5);
+let _ = print (show true);
+let _ = print (show ());
+let _ = print (show "a\"b\\c\nd\te");
+let _ = print (show (1, "x", false));
+let _ = print (show Green);
+let _ = print (show (Circle 1.5));
+let _ = print (show (Rect (2, 3)));
+let _ = print (show Empty);
+let _ = print (show (point { x = 1, y = 2 }));
+let _ = print (show (Cons (1, Cons (2, Cons (3, Nil)))));
+let _ = print (show (Nil : int list));
+let _ = print (show (Some (Some 4)));
+let _ = print (show (None : int option));
+let _ = print (show (Ok 1 : (int, str) result));
+let _ = print (show [(1, "a"), (2, "b")]);
+let _ = print (show (Node (Leaf, 5, Node (Leaf, 6, Leaf))));
+print (show [[1, 2], [], [3]])

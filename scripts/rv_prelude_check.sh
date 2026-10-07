@@ -28,6 +28,11 @@ COUNT=$(printf '%s\n' $NAMES | wc -l | tr -d ' ')
 probe_for() {
   case "$1" in
     not) echo 'let _ = print_int (if not false then 1 else 0);' ;;
+    # v0.1.639
+    rvshow_str) echo 'let _ = print (show "a");' ;;
+    vec_to_list) echo 'let v = vec_new ();
+let _ = vec_push v 1;
+let _ = print_int (list_len (vec_to_list v));' ;;
     # v0.1.638
     print_bool) echo 'let _ = print_bool true;' ;;
     int_min|int_max) echo "let _ = print_int $1;" ;;
