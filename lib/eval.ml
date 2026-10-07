@@ -1009,6 +1009,8 @@ let builtin_dir_remove =
     match v with
     | V_str path -> (try Unix.rmdir path; V_int 0 with Unix.Unix_error _ -> V_int (-1))
     | _ -> failwith "dir_remove: expected str")
+let builtin_sys_os = V_builtin ("sys_os", fun _ -> V_str (Sysinfo.host_os ()))
+let builtin_sys_arch = V_builtin ("sys_arch", fun _ -> V_str (Sysinfo.host_arch ()))
 let builtin_proc_cwd =
   V_builtin ("proc_cwd", fun _ -> V_str (try Sys.getcwd () with Sys_error _ -> ""))
 let builtin_env_pairs =
@@ -4227,6 +4229,8 @@ let initial_env : env =
     ("dir_entries", ref builtin_dir_entries);
     ("dir_remove", ref builtin_dir_remove);
     ("proc_cwd", ref builtin_proc_cwd);
+    ("sys_os", ref builtin_sys_os);
+    ("sys_arch", ref builtin_sys_arch);
     ("env_pairs", ref builtin_env_pairs);
     ("mkdir_p", ref builtin_mkdir_p);
     ("file_mtime", ref builtin_file_mtime);

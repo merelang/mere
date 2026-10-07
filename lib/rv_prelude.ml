@@ -791,6 +791,9 @@ let __libm_file_utime = fn (p: str) -> fn (at: int) -> fn (mt: int) ->
   let _ = __rv_poke (b + 2 * w) mt in
   let _ = __rv_poke (b + 3 * w) 0 in
   __rv_p0 (__rv_syscall 88 (0 - 100) (__rv_cstr p) b 0);
+// v0.1.642: a RISC-V program is a Linux program (its calls are Linux's)
+let sys_os = fn (u: unit) -> "linux";
+let sys_arch = fn (u: unit) -> if __rv_xlen () == 64 then "riscv64" else "riscv32";
 // getcwd: the syscall answers the length with its NUL, or a negative errno
 let proc_cwd = fn (u: unit) ->
   let buf = str_repeat " " 4096 in

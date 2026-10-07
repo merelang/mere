@@ -28,6 +28,8 @@ COUNT=$(printf '%s\n' $NAMES | wc -l | tr -d ' ')
 probe_for() {
   case "$1" in
     not) echo 'let _ = print_int (if not false then 1 else 0);' ;;
+    # v0.1.642
+    sys_os|sys_arch) echo "let _ = print ($1 ());" ;;
     # v0.1.640: every file builtin, in one program each (they need not run)
     file_open|file_openrw) echo "let f = $1 \"x\";
 let _ = file_close f;" ;;

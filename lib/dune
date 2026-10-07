@@ -9,4 +9,4 @@
  (action
   (with-stdout-to
    platform_config.ml
-   (echo "let system = \"%{ocaml-config:system}\"\n"))))
+   (echo "let system = \"%{ocaml-config:system}\"\nlet architecture = \"%{ocaml-config:architecture}\"\n"))))

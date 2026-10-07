@@ -3218,6 +3218,15 @@ let initial_env : env =
        be had *)
     ("proc_cwd",
        mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
+    (* v0.1.642: the ABI the program runs under -- the os ("darwin", "linux",
+       "wasi", "windows", "unknown") and the cpu ("arm64", "x86_64",
+       "riscv64", "riscv32", "wasm32", ...). C answers for the machine the
+       emitted C is compiled for, LLVM and the interpreter for the one this
+       compiler was built on, Wasm "wasi" / "wasm32", RISC-V "linux" and its
+       width. A program that names errno or socket constants by number asks
+       which table to use. *)
+    ("sys_os", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
+    ("sys_arch", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     ("env_var",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("option", [Ast.TyStr]))));
     ("args",

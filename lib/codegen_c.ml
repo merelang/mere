@@ -3712,6 +3712,9 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "dir_remove" when not (user_shadows "dir_remove") ->
        uses_dirs := true;
        Printf.sprintf "__lang_dir_remove(%s)" (emit_expr arg)
+     | Ast.Var ("sys_os" | "sys_arch" as n) when not (user_shadows n) ->
+       uses_dirs := true;
+       Printf.sprintf "(%s, __lang_%s())" (emit_expr arg) n
      | Ast.Var "proc_cwd" when not (user_shadows "proc_cwd") ->
        uses_dirs := true;
        Printf.sprintf "(%s, __lang_proc_cwd())" (emit_expr arg)
@@ -16570,6 +16573,41 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
            "  return buf;";
            "}";
            "/* v0.1.633: getcwd(3), the physical path; \"\" when it cannot be had */";
+           (* v0.1.642: what the machine this C is compiled for says it is *)
+           "static const char* __lang_cstr_to_str(const char* c) {";
+           "  size_t l = strlen(c);";
+           "  char* s = __lang_str_alloc(__lang_current_region, l);";
+           "  memcpy(s, c, l);";
+           "  return s;";
+           "}";
+           "static const char* __lang_sys_os(void) {";
+           "#if defined(__APPLE__)";
+           "  return __lang_cstr_to_str(\"darwin\");";
+           "#elif defined(__linux__)";
+           "  return __lang_cstr_to_str(\"linux\");";
+           "#elif defined(_WIN32)";
+           "  return __lang_cstr_to_str(\"windows\");";
+           "#elif defined(__FreeBSD__)";
+           "  return __lang_cstr_to_str(\"freebsd\");";
+           "#else";
+           "  return __lang_cstr_to_str(\"unknown\");";
+           "#endif";
+           "}";
+           "static const char* __lang_sys_arch(void) {";
+           "#if defined(__aarch64__) || defined(__arm64__)";
+           "  return __lang_cstr_to_str(\"arm64\");";
+           "#elif defined(__x86_64__)";
+           "  return __lang_cstr_to_str(\"x86_64\");";
+           "#elif defined(__riscv) && __riscv_xlen == 64";
+           "  return __lang_cstr_to_str(\"riscv64\");";
+           "#elif defined(__riscv)";
+           "  return __lang_cstr_to_str(\"riscv32\");";
+           "#elif defined(__i386__)";
+           "  return __lang_cstr_to_str(\"x86\");";
+           "#else";
+           "  return __lang_cstr_to_str(\"unknown\");";
+           "#endif";
+           "}";
            "static const char* __lang_proc_cwd(void) {";
            "  char b[4096];";
            "  if (!getcwd(b, sizeof b)) return __lang_str_alloc(__lang_current_region, 0);";

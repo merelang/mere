@@ -3592,6 +3592,12 @@ and emit_expr (e : Ast.expr) : unit =
     emit_instr "i32.wrap_i64";
     emit_instr "call $dir_remove_h";
     emit_instr "i64.extend_i32_s"
+  (* v0.1.642: WASI's, whatever runs it *)
+  | Ast.App ({ node = Ast.Var ("sys_os" | "sys_arch" as n); _ }, u_e)
+    when not (user_shadows_wasm n) ->
+    emit_expr u_e;
+    emit_instr "drop";
+    emit_expr { e with Ast.node = Ast.Str_lit (if n = "sys_os" then "wasi" else "wasm32") }
   | Ast.App ({ node = Ast.Var "proc_cwd"; _ }, u_e)
     when not (user_shadows_wasm "proc_cwd") ->
     wasm_dirs_host_used := true;

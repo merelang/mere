@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.642 — 2026-10-07
+
+_`sys_os` and `sys_arch`: the OS and CPU whose ABI a program runs under, on every backend._
+
+mere-ruby's errno and socket-constant tables were macOS's, fixed, and so was
+its `RUBY_PLATFORM`; on RISC-V -- a Linux program since v0.1.641 says its errno
+is Linux's -- and on a Linux host, the numbers were read with the wrong
+table. A program cannot choose a table without asking whose numbers it is
+given, so: `sys_os : unit -> str` (`"darwin"`, `"linux"`, `"windows"`,
+`"freebsd"`, `"wasi"`, `"unknown"`) and `sys_arch : unit -> str` (`"arm64"`,
+aarch64 included, `"x86_64"`, `"riscv64"`, `"riscv32"`, `"wasm32"`, ...).
+
+- **C** answers for the machine the emitted C is compiled for, through its
+  preprocessor (`__APPLE__`, `__linux__`, `__aarch64__`, `__x86_64__`,
+  `__riscv_xlen`), so C compiled on Linux says `linux`.
+- **The interpreter and LLVM** answer for the machine this compiler was built
+  on (`ocaml-config:system` and `:architecture`, beside the signal numbers'
+  `system` since v0.1.538).
+- **Wasm** answers `wasi` / `wasm32`, and **RISC-V** `linux` and its width.
+
+`scripts/sys_info_check.sh` (new, in CI) holds each backend to its answer --
+the host's from `uname` for the interpreter, C and LLVM -- and its poison
+points C's preprocessor at another machine.
+
 ## v0.1.641 — 2026-10-07
 
 _Sockets, readiness sets and resource limits on RISC-V, answered by memu's host device: `tcp_listen_at`, `tcp_connect`, `tcp_accept`, `sock_*`, `udp_*`, the `io_poll_*` family, `proc_*rlimit*` and `proc_*priority`._

@@ -6359,6 +6359,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i64 @__lang_dir_remove(ptr %s)" r pv);
     r
+  (* v0.1.642: the machine this compiler was built for, as a literal *)
+  | Ast.App ({ node = Ast.Var ("sys_os" | "sys_arch" as n); _ }, u_e) when not (user_shadows_llvm env n) ->
+    ignore (emit_expr env u_e);
+    emit_expr env { e with Ast.node = Ast.Str_lit (if n = "sys_os" then Sysinfo.host_os () else Sysinfo.host_arch ()) }
   | Ast.App ({ node = Ast.Var "proc_cwd"; _ }, u_e) when not (user_shadows_llvm env "proc_cwd") ->
     Hashtbl.replace host_misc_used_llvm "proc_cwd" ();
     ignore (emit_expr env u_e);
