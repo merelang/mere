@@ -4,6 +4,48 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.634 — 2026-10-07
+
+_RISC-V answers the C runtime's descriptors (`fd_open` / `fd_read` / `fd_write` / `fd_seek` / `fd_dup` / `fd_pipe` and the rest), its byte arena (`mem_*`) and SIGPIPE's disposition; memu hands the guest the host's own descriptors. And every write the RISC-V backend emits now names its descriptor._
+
+mere-ruby's `File`, `IO.pipe`, `IO.new` and `Tempfile` are built on the C
+runtime's `fd_*` externs, and on RISC-V they were refused: corpus 66 and 140
+stopped at `fd_open`, and 238 and 280 at a pipe or at `File#sync` (memu kept a
+file's writes in a buffer until the close, so a read before the close saw
+nothing).
+
+- **The guest.** The prelude binds `fd_open`, `fd_read`, `fd_write`, `fd_close`,
+  `fd_seek`, `fd_dup`, `fd_sync`, `fd_isatty`, `fd_pipe` (RV64), `fd_last_errno`,
+  `io_set_nonblocking`, libc's `dup2` and `fsync`, and `mem_alloc` /
+  `mem_set_u8` / `mem_get_u8` / `mem_copy_str` / `mem_to_str`, each with the C
+  contract: a mode string as fopen takes it, -1 and the errno kept for
+  `fd_last_errno`, the arena a bump of offsets. They go through Linux-numbered
+  syscalls (`openat`, `read`, `write`, `lseek`, `dup`, `dup3`, `fsync`,
+  `ioctl(TCGETS)`, `pipe2`, `fcntl`); two new primitives load and store a byte.
+- **SIGPIPE.** A pipe's writer asks for `proc_sig_noop 13` (ruby catches
+  SIGPIPE and does nothing, so a write to a closed pipe is `EPIPE`); 238 and
+  280 stopped there. `proc_sig_noop` / `proc_sig_default` go through
+  `rt_sigaction` with `SIG_IGN` / `SIG_DFL`, and memu moves the host's own --
+  the emulator is the process the pipe would kill.
+- **The descriptor of a write.** `print`, `print_no_nl`, `print_int` and the
+  failure path issued `write` with whatever `a0` held -- the string, the
+  integer, the count of the previous write. memu printed every write that was
+  not to a file it had opened, so nothing showed it; once memu passed writes to
+  the host's descriptors, `print_int 5` wrote to descriptor 5. Each now loads 1
+  (a failure 2, as on the other backends), which is also what QEMU's Linux
+  needs.
+
+memu's d2-634 change answers those syscalls with the host's descriptors and
+`rt_sigaction` with the host's disposition (a
+write goes to the host only on a descriptor the host handed out, so a program
+built by an older compiler still prints), numbers directory snapshots from
+1000, and sign-extends RV32's seek offset. It needs this compiler to build.
+
+`test/rv/host_fds.mere` (both widths: every mode, seek from each end, dup and
+dup2, a write read back before the close, the errno of each failure) and
+`test/rv/host_pipe.mere` (RV64: bytes through a pipe, an empty non-blocking
+read, end of file after the writer closes) against C, in rv_exec_check.
+
 ## v0.1.633 — 2026-10-07
 
 _`proc_cwd` (getcwd(3)) on every backend; RISC-V answers `chdir` and `file_chmod`; and `read_stdin` / `read_line` / `read_key` wait on a non-blocking stdin instead of taking `EAGAIN` for the end of the input._

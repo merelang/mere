@@ -45,7 +45,9 @@ machine rather than a host.
 | `__rv_open_rd` | refused | refused | refused | yes |
 | `__rv_open_wr` | refused | refused | refused | yes |
 | `__rv_peek` | refused | refused | refused | yes |
+| `__rv_peekb` | refused | refused | refused | yes |
 | `__rv_poke` | refused | refused | refused | yes |
+| `__rv_pokeb` | refused | refused | refused | yes |
 | `__rv_read_all` | refused | refused | refused | yes |
 | `__rv_rtw` | refused | refused | refused | yes |
 | `__rv_rtw_set` | refused | refused | refused | yes |

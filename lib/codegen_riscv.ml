@@ -549,7 +549,15 @@ let libm_sigs : (string * string) list =
       ("getpid", "u>i"); ("access", "si>i"); ("rmdir", "s>i");
       ("file_stat", "s>i"); ("file_lstat", "s>i"); ("file_stat_field", "i>i");
       (* v0.1.633: and where the process is, and a file's mode *)
-      ("chdir", "s>i"); ("file_chmod", "si>i") ]
+      ("chdir", "s>i"); ("file_chmod", "si>i");
+      (* v0.1.634: descriptors, and the byte arena their bytes cross through *)
+      ("fd_open", "ssi>i"); ("fd_read", "iii>i"); ("fd_write", "iii>i"); ("fd_close", "i>i");
+      ("fd_seek", "iii>i"); ("fd_dup", "i>i"); ("fd_isatty", "i>i"); ("fd_pipe", "u>i");
+      ("fd_last_errno", "u>i"); ("dup2", "ii>i"); ("fsync", "i>i"); ("fd_sync", "i>i"); ("io_set_nonblocking", "i>i");
+      ("mem_alloc", "i>i"); ("mem_set_u8", "iii>i"); ("mem_get_u8", "ii>i");
+      ("mem_copy_str", "iis>i"); ("mem_to_str", "ii>s");
+      (* and a signal's disposition, which a pipe's writer sets *)
+      ("proc_sig_noop", "i>i"); ("proc_sig_default", "i>i") ]
 let libm_bound : (string, unit) Hashtbl.t = Hashtbl.create 16
 let rec libm_sig_of (t : Ast.ty) : string =
   match Ast.walk t with
@@ -561,6 +569,7 @@ let rec libm_sig_of (t : Ast.ty) : string =
      | Ast.TyArrow _ -> c ^ libm_sig_of r
      | Ast.TyFloat -> c ^ ">f"
      | Ast.TyInt -> c ^ ">i"
+     | Ast.TyStr -> c ^ ">s"
      | _ -> c ^ ">?")
   | _ -> "?"
 let libm_arity name =
@@ -876,7 +885,7 @@ let globals_base () = !load_base + !code_span
    "the buffer the print helpers build digits in", and putting unrelated state
    there would make the description untrue. Top-level value bindings start one
    word further up; the heap starts after those, as before. *)
-let runtime_words = 80
+let runtime_words = 81
 let fail_frame_addr () = globals_base ()
 (* v0.1.613: three more runtime words for region reclamation (see the
    Region_block arm): how many region blocks are open, the innermost one's
@@ -915,6 +924,8 @@ and rtw_live = 47 and rtw_retired = 49 and rtw_retired_bytes = 62
    block's exit has rolled back past, given back once its result is copied. *)
 let rtw_carve = 72 and rtw_blo = 73 and rtw_fromrec = 74 and rtw_torec = 75
 and rtw_chain = 76 and rtw_first = 77 and rtw_realtp = 78 and rtw_defer = 79
+(* v0.1.634: the errno fd_last_errno answers, kept by the prelude's fd_* *)
+and rtw_fd_errno = 80
 (* the record words the switch keeps a stack's heap in: gp, tp, the high-water
    mark, BLO, CHAIN, FIRST (13 was "gp when it last stopped" since v0.1.624) *)
 let crec_gp = 13 and crec_tp = 14 and crec_hwm = 15 and crec_blo = 16
@@ -1582,6 +1593,10 @@ let emit_fail_from_a0 () =
   emit (Label l_abort);
   emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a2 0x03);                      (* lw a2, 0(a0) — len *)
   emit_word (enc_i (wsz ()) a0 0 a1 0x13);               (* addi a1, a0, w *)
+  (* v0.1.634: and the descriptor. a0 still held the message, which the
+     emulator never looked at until it began handing the host's descriptors
+     to the guest; a failure is stderr's, as on the other backends *)
+  li a0 2;
   emit_word (enc_i 64 zero 0 a7 0x13);                   (* li a7, 64 *)
   emit_word (enc_i 0 zero 0 zero 0x73);                  (* ecall (write) *)
   emit_word (enc_i 93 zero 0 a7 0x13);                   (* li a7, 93 *)
@@ -2717,6 +2732,8 @@ and compile_app env e =
     compile_expr env (List.hd args);                     (* a0 = string ptr *)
     emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a2 0x03);                    (* lw   a2, 0(a0)  — len *)
     emit_word (enc_i (wsz ()) a0 0 a1 0x13);             (* addi a1, a0, w — bytes *)
+    (* v0.1.634: fd 1, said each time -- a0 held the string, then the count *)
+    li a0 1;
     emit_word (enc_i 64 zero 0 a7 0x13);                 (* li   a7, 64 *)
     emit_word (enc_i 0 zero 0 zero 0x73);                (* ecall (write string) *)
     li t0 (scratch_base ());                              (* t0 = print scratch *)
@@ -2724,6 +2741,7 @@ and compile_app env e =
     emit_word (enc_s 0 t1 t0 0 0x23);                    (* sb   t1, 0(t0) *)
     emit_word (enc_i 0 t0 0 a1 0x13);                    (* mv   a1, t0 *)
     emit_word (enc_i 1 zero 0 a2 0x13);                  (* li   a2, 1 *)
+    li a0 1;
     emit_word (enc_i 64 zero 0 a7 0x13);                 (* li   a7, 64 *)
     emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall (write '\n') *)
   (* The two halves of the block a float is. These are real, not scaffolding:
@@ -2917,6 +2935,7 @@ and compile_app env e =
     compile_expr env (List.hd args);
     emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a2 0x03);                    (* lw a2, 0(a0) — len *)
     emit_word (enc_i (wsz ()) a0 0 a1 0x13);                    (* addi a1, a0, 4 *)
+    li a0 1;                                             (* fd = stdout (v0.1.634) *)
     emit_word (enc_i 64 zero 0 a7 0x13);
     emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall *)
   | Ast.Var "str_of_int" when List.length args = 1 ->
@@ -3497,6 +3516,16 @@ and compile_app env e =
   | Ast.Var "__rv_peek" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i 0 a0 (ldf3 ()) a0 0x03)
+  (* v0.1.634: a byte, for the prelude's byte arena, the mem_ functions *)
+  | Ast.Var "__rv_peekb" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i 0 a0 4 a0 0x03)                           (* lbu a0, 0(a0) *)
+  | Ast.Var "__rv_pokeb" when List.length args = 2 ->
+    compile_expr env (List.hd args); push a0;
+    compile_expr env (List.nth args 1);
+    pop t0;
+    emit_word (enc_s 0 a0 t0 0 0x23);                          (* sb a0, 0(t0) *)
+    li a0 0
   | Ast.Var "__rv_poke" when List.length args = 2 ->
     compile_expr env (List.hd args); push a0;
     compile_expr env (List.nth args 1);
@@ -4359,6 +4388,7 @@ let emit_print_int () =
   li t0 (scratch_base ());
   emit_word (enc_i 63 t0 0 t0 0x13);                    (* addi t0, t0, 63 — END *)
   emit_word (enc_r 0x20 t2 t0 0 a2 0x33);               (* sub a2, t0, t2  — len = END - cursor *)
+  li a0 1;                                              (* fd = stdout (v0.1.634) *)
   emit_word (enc_i 64 zero 0 a7 0x13);                  (* addi a7, x0, 64 — write syscall *)
   emit_word (enc_i 0 zero 0 zero 0x73);                 (* ecall *)
   emit_word (enc_i 0 ra 0 zero 0x67)                    (* jalr x0, ra, 0 (ret) *)

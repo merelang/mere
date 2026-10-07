@@ -3099,6 +3099,8 @@ let initial_env : env =
        raw words, the runtime's words, the stack switch and the layout *)
     ("__rv_peek", mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
     ("__rv_poke", mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyUnit))));
+    ("__rv_peekb", mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
+    ("__rv_pokeb", mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyUnit))));
     ("__rv_rtw", mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
     ("__rv_rtw_set", mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyUnit))));
     ("__rv_sp", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyInt)));

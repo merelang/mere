@@ -384,6 +384,39 @@ else
 fi
 echo "rv_exec: $hxpass passed, $hxfail failed for the host externs (both widths)"
 
+# host_fds (v0.1.634): the C runtime's descriptors -- fd_open with each mode,
+# read/write through the byte arena, seek with each whence, dup and dup2,
+# isatty, O_NONBLOCK, fd_last_errno -- and host_pipe, RV64 only (the C runtime
+# packs a pipe's two descriptors into one int). memu hands the guest the
+# host's own descriptors, so a write is in the file before the close, as on C.
+fdpass=0; fdfail=0
+for name in host_fds host_pipe; do
+  if "$MERE" -c "$ROOT/test/rv/$name.mere" > "$TMP/ref.c" 2>/dev/null \
+     && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
+    ( cd "$TMP" && ulimit -t 60; ./ref ) > "$TMP/i.out" 2>&1
+    if [ "$name" = host_pipe ]; then widths=64; else widths="32 64"; fi
+    for width in $widths; do
+      if [ "$width" = 64 ]; then flag=-rv64; emu="$RVRUN64"; else flag=-rv; emu="$RVRUN"; fi
+      if ! "$MERE" $flag --ram 16 "$ROOT/test/rv/$name.mere" > "$TMP/prog.bin" 2>"$TMP/rverr"; then
+        printf '  FAIL  %s:%s did not build\n' "$name" "$width"; head -2 "$TMP/rverr"; fdfail=$((fdfail+1)); rc=1; continue
+      fi
+      if [ -z "$emu" ]; then fdpass=$((fdpass+1)); continue; fi
+      ( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' "$emu" 16 2>/dev/null ) | grep -a -v '^rvrun' > "$TMP/r.out"
+      if diff -q "$TMP/i.out" "$TMP/r.out" >/dev/null; then
+        printf '  ok    %s:%s\n' "$name" "$width"
+        fdpass=$((fdpass+1))
+      else
+        printf '  FAIL  %s:%s (RV%s disagrees with the C backend)\n' "$name" "$width" "$width"
+        diff -a "$TMP/i.out" "$TMP/r.out" | head -8 | sed 's/^/    /'
+        fdfail=$((fdfail+1)); rc=1
+      fi
+    done
+  else
+    printf '  FAIL  %s: the C reference did not build\n' "$name"; fdfail=$((fdfail+1)); rc=1
+  fi
+done
+echo "rv_exec: $fdpass passed, $fdfail failed for the descriptors"
+
 # host_write_file: the write half, same contract. stdin is piped from a fixture
 # THE HARNESS WRITES, and the same bytes go to both sides -- read_stdin drains
 # whatever it is given, so feeding the two sides differently would report a

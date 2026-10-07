@@ -269,6 +269,118 @@ let __libm_rmdir = fn (p: str) -> dir_remove p;
 let __libm_chdir = fn (p: str) -> if __rv_syscall 49 (__rv_cstr p) 0 0 0 < 0 then 0 - 1 else 0;
 let __libm_file_chmod = fn (p: str) -> fn (mode: int) ->
   if __rv_syscall 53 (0 - 100) (__rv_cstr p) mode 0 < 0 then 0 - 1 else 0;
+// v0.1.634: the C runtime's descriptors (fd_*, and libc's dup2 and fsync,
+// io_set_nonblocking) and the byte arena their bytes cross through (mem_*),
+// each with the C contract: -1 and the errno kept for fd_last_errno (runtime
+// word 80), a mode as fopen takes it, the arena a bump of offsets from 8. The
+// arena is 4 MB, taken the first time one is asked for. Through Linux-numbered
+// syscalls, which memu answers with the host's own descriptors.
+let __rv_fd_keep = fn (r: int) ->
+  let _ = __rv_rtw_set 80 (if r < 0 then 0 - r else 0) in
+  if r < 0 then 0 - 1 else r;
+let __rv_fd_refuse = fn (e: int) -> let _ = __rv_rtw_set 80 e in 0 - 1;
+let __rv_mem = vec_new ();
+let __rv_mem_cap = 4194304;
+let __rv_mem_at = fn (p: int) ->
+  let _ = (if vec_len __rv_mem > 0 then ()
+           else (let b = __rv_alloc_keep (__rv_mem_cap / (if __rv_xlen () == 64 then 8 else 4)) in
+                 let _ = vec_push __rv_mem b in
+                 vec_push __rv_mem 8)) in
+  vec_get __rv_mem 0 + p;
+let __libm_mem_alloc = fn (n: int) ->
+  let _ = __rv_mem_at 0 in
+  let p = vec_get __rv_mem 1 in
+  let k = if n <= 0 then 1 else n in
+  if p + k > __rv_mem_cap then fail "mem_alloc: byte arena exhausted (the arena is a bump allocator with no free)"
+  else (let _ = vec_set __rv_mem 1 (p + k) in p);
+let __libm_mem_set_u8 = fn (p: int) -> fn (off: int) -> fn (b: int) ->
+  let _ = __rv_pokeb (__rv_mem_at (p + off)) (bit_and b 255) in 0;
+let __libm_mem_get_u8 = fn (p: int) -> fn (off: int) -> __rv_peekb (__rv_mem_at (p + off));
+let __libm_mem_copy_str = fn (dst: int) -> fn (off: int) -> fn (s: str) ->
+  let rec go = fn (i: int) ->
+    if i >= str_len s || ord (char_at s i) == 0 then i
+    else (let _ = __rv_pokeb (__rv_mem_at (dst + off + i)) (ord (char_at s i)) in go (i + 1)) in
+  go 0;
+let __libm_mem_to_str = fn (p: int) -> fn (len: int) ->
+  let sb = strbuf_new () in
+  let rec go = fn (i: int) ->
+    if i >= len then () else (let _ = strbuf_push sb (chr (__rv_peekb (__rv_mem_at (p + i)))) in go (i + 1)) in
+  let _ = go 0 in
+  strbuf_to_str sb;
+// a mode as fopen takes it -> Linux open flags (O_CREAT 64, O_TRUNC 512,
+// O_APPEND 1024), -1 for one it does not know
+let __rv_open_flags = fn (mode: str) ->
+  let plus = str_contains mode "+" in
+  let c = if str_len mode > 0 then char_at mode 0 else "" in
+  if c == "r" then (if plus then 2 else 0)
+  else if c == "w" then (if plus then 2 else 1) + 64 + 512
+  else if c == "a" then (if plus then 2 else 1) + 64 + 1024
+  else 0 - 1;
+let __libm_fd_open = fn (p: str) -> fn (mode: str) -> fn (perm: int) ->
+  let fl = __rv_open_flags mode in
+  if fl < 0 then __rv_fd_refuse 22
+  else __rv_fd_keep (__rv_syscall 56 (0 - 100) (__rv_cstr p) fl (if perm < 0 then 438 else perm));
+let __libm_fd_read = fn (fd: int) -> fn (off: int) -> fn (cap: int) ->
+  if fd < 0 then __rv_fd_refuse 9 else if cap <= 0 then __rv_fd_refuse 22
+  else __rv_fd_keep (__rv_syscall 63 fd (__rv_mem_at off) cap 0);
+let __libm_fd_write = fn (fd: int) -> fn (off: int) -> fn (len: int) ->
+  if fd < 0 then __rv_fd_refuse 9 else if len < 0 then __rv_fd_refuse 22
+  else __rv_fd_keep (__rv_syscall 64 fd (__rv_mem_at off) len 0);
+let __libm_fd_close = fn (fd: int) ->
+  if fd < 0 then __rv_fd_refuse 9 else (let r = __rv_fd_keep (__rv_syscall 57 fd 0 0 0) in if r < 0 then r else 0);
+let __libm_fd_seek = fn (fd: int) -> fn (off: int) -> fn (whence: int) ->
+  if fd < 0 then __rv_fd_refuse 9 else if whence < 0 || whence > 2 then __rv_fd_refuse 22
+  else __rv_fd_keep (__rv_syscall 62 fd off whence 0);
+let __libm_fd_dup = fn (fd: int) -> if fd < 0 then __rv_fd_refuse 9 else __rv_fd_keep (__rv_syscall 23 fd 0 0 0);
+let __libm_dup2 = fn (a: int) -> fn (b: int) -> __rv_fd_keep (__rv_syscall 24 a b 0 0);
+let __libm_fsync = fn (fd: int) -> (let r = __rv_fd_keep (__rv_syscall 82 fd 0 0 0) in if r < 0 then r else 0);
+let __libm_fd_sync = fn (fd: int) -> if fd < 0 then __rv_fd_refuse 9 else __libm_fsync fd;
+// isatty is TCGETS answering; 0 says why (ENOTTY or EBADF)
+let __rv_tty_buf = str_repeat " " 64;
+let __libm_fd_isatty = fn (fd: int) ->
+  if fd < 0 then (let _ = __rv_fd_refuse 9 in 0)
+  else
+    (let r = __rv_syscall 29 fd 21505 (__rv_addr __rv_tty_buf + (if __rv_xlen () == 64 then 8 else 4)) 0 in
+     let _ = __rv_rtw_set 80 (if r < 0 then 0 - r else 0) in
+     if r < 0 then 0 else 1);
+// pipe2: the two descriptors packed as the C runtime packs them, read end in
+// the high 32 bits (RV64; a 32-bit int has no room for both)
+let __libm_fd_pipe = fn (u: unit) ->
+  if __rv_xlen () != 64 then __rv_fd_refuse 38
+  else
+    (let buf = str_repeat " " 8 in
+     let at = __rv_addr buf + 8 in
+     let r = __rv_syscall 59 at 0 0 0 in
+     if r < 0 then __rv_fd_refuse (0 - r)
+     else
+       (let rd = bit_and (__rv_peek at) 4294967295 in
+        let wr = bit_and (bit_shr (__rv_peek at) 32) 4294967295 in
+        let _ = __rv_rtw_set 80 0 in
+        bit_or (bit_shl rd 32) wr));
+let __libm_fd_last_errno = fn (u: unit) -> __rv_rtw 80;
+// O_NONBLOCK (Linux's 2048) through fcntl F_GETFL / F_SETFL
+let __libm_io_set_nonblocking = fn (fd: int) ->
+  let fl = __rv_syscall 25 fd 3 0 0 in
+  if fl < 0 then __rv_fd_keep fl
+  else (let r = __rv_fd_keep (__rv_syscall 25 fd 4 (bit_or fl 2048) 0) in if r < 0 then r else 0);
+// v0.1.634: a signal's disposition, proc_sig_noop and proc_sig_default,
+// through rt_sigaction with the handler word SIG_IGN (1) or SIG_DFL (0) --
+// a guest has no handler to run, and ignoring is what "catch it and do
+// nothing" comes to. memu moves the host's own, so a write to a closed pipe
+// is EPIPE and not the emulator's death. 0, or -1 with proc_last_errno.
+let __rv_sigact = str_repeat " " 40;
+let __rv_sig_set = fn (sig: int) -> fn (h: int) ->
+  let w = if __rv_xlen () == 64 then 8 else 4 in
+  let at = __rv_addr __rv_sigact + w in
+  let _ = __rv_poke at h in
+  let _ = __rv_poke (at + w) 0 in
+  let _ = __rv_poke (at + 2 * w) 0 in
+  let _ = __rv_poke (at + 3 * w) 0 in
+  let r = __rv_syscall 134 sig at 0 8 in
+  let _ = __rv_rtw_set 63 (if r < 0 then 0 - r else 0) in
+  if r < 0 then 0 - 1 else 0;
+let __libm_proc_sig_noop = fn (sig: int) -> __rv_sig_set sig 1;
+let __libm_proc_sig_default = fn (sig: int) -> __rv_sig_set sig 0;
 // getcwd: the syscall answers the length with its NUL, or a negative errno
 let proc_cwd = fn (u: unit) ->
   let buf = str_repeat " " 4096 in
