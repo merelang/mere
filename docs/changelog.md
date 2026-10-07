@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.636 — 2026-10-07
+
+_`utf8_len` and the rest of mere-ruby's file calls on RISC-V (`symlink`, `link`, `rename`, `fchdir`, `chroot`, `file_umask`, `file_flock`, `file_readlink`, `file_utime`); and coro_check's poisons scribble what is freed, so a region released too early reads as garbage on every run._
+
+mere-ruby asks `utf8_len s == str_len s` to know a string is all one-byte
+characters, and RISC-V refused the builtin, so mere-ruby stopped compiling for
+it. The prelude now has it, with the walk the interpreter and the C runtime
+use: forward by the lead byte's span, an invalid byte one unit, a span past the
+end stopping at the end. `test/parity/utf8_len_edges.mere` prints it beside
+`str_len` for ASCII, two-, three- and four-byte characters, a stray
+continuation byte and truncated or invalid lead bytes, on every backend.
+
+With `fd_*` answered (v0.1.634), corpus 239 got as far as `File.symlink`. The
+prelude now binds `symlink`, `link`, `rename`, `fchdir`, `chroot`,
+`file_umask`, `file_flock`, `file_readlink` and `file_utime` with their C
+contracts, through `symlinkat`, `linkat`, `renameat2`, `fchdir`, `chroot`,
+`umask`, `flock`, `readlinkat` and `utimensat`. Two of those take two paths,
+and `__rv_cstr` has one buffer, so the first path gets its own NUL-terminated
+copy. Three take a fifth argument (flags), so `__rv_syscall` now zeroes `a4`
+and `a5` instead of passing whatever was left there. memu's d2-636 change
+answers them from the host. `test/rv/host_externs.mere` adds each, on both
+widths, against C (also with gcc on Linux).
+
+`coro_check.sh --poison` stayed green for "LLVM 1" (the current region not
+carried across a switch) on 2 runs of 63: the fixture shows the bug only when
+the block its region released is handed out again for the next region, and
+macOS's allocator does not always do that. The poisoned programs now run with
+the allocator's own scribbling (`MallocScribble`, glibc's `MALLOC_PERTURB_`),
+so freed memory is overwritten whether or not it is reused.
+
 ## v0.1.635 — 2026-10-07
 
 _On RISC-V an `if`'s condition is compiled as the branch it is used for: an integer comparison is one branch on its two registers, `&&` and `||` become chains of them. mere-ruby's startup runs 4.6% fewer instructions._

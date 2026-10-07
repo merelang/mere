@@ -381,6 +381,67 @@ let __rv_sig_set = fn (sig: int) -> fn (h: int) ->
   if r < 0 then 0 - 1 else 0;
 let __libm_proc_sig_noop = fn (sig: int) -> __rv_sig_set sig 1;
 let __libm_proc_sig_default = fn (sig: int) -> __rv_sig_set sig 0;
+// v0.1.636: utf8_len, the interpreter's and the C runtime's walk -- forward
+// by the lead byte's span, an invalid byte one unit, a span past the end
+// stopping at the end. (mere-ruby asks `utf8_len s == str_len s` for "all
+// one-byte".)
+let utf8_len = fn (s: str) ->
+  let b = bytes_of_str s in
+  let n = str_len s in
+  let rec go = fn (i: int) -> fn (c: int) ->
+    if i >= n then c
+    else
+      (let x = __bytes_get_unchecked b i in
+       let l = if x < 128 then 1
+               else if x >= 192 && x <= 223 then 2
+               else if x >= 224 && x <= 239 then 3
+               else if x >= 240 && x <= 247 then 4
+               else 1 in
+       go (i + l) (c + 1)) in
+  go 0 0;
+// v0.1.636: the rest of the file calls mere-ruby makes, each with its C
+// contract -- 0 (or a length, or the old mask), and -1 with proc_last_errno.
+// A call with two paths gives the second its own NUL-terminated copy: __rv_cstr
+// has one buffer, and the first path is still in it.
+let __rv_cz = fn (s: str) -> __rv_addr (s ++ chr 0) + (if __rv_xlen () == 64 then 8 else 4);
+let __rv_p0 = fn (r: int) ->
+  let _ = __rv_rtw_set 63 (if r < 0 then 0 - r else 0) in
+  if r < 0 then 0 - 1 else 0;
+let __libm_symlink = fn (t: str) -> fn (l: str) ->
+  __rv_p0 (__rv_syscall 36 (__rv_cz t) (0 - 100) (__rv_cstr l) 0);
+let __libm_link = fn (a: str) -> fn (b: str) ->
+  __rv_p0 (__rv_syscall 37 (0 - 100) (__rv_cz a) (0 - 100) (__rv_cstr b));
+let __libm_rename = fn (a: str) -> fn (b: str) ->
+  __rv_p0 (__rv_syscall 276 (0 - 100) (__rv_cz a) (0 - 100) (__rv_cstr b));
+let __libm_fchdir = fn (fd: int) -> __rv_p0 (__rv_syscall 50 fd 0 0 0);
+let __libm_chroot = fn (p: str) -> __rv_p0 (__rv_syscall 51 (__rv_cstr p) 0 0 0);
+let __libm_file_umask = fn (m: int) -> __rv_syscall 166 m 0 0 0;
+// flock: the C runtime's bits are Linux's (1 SH, 2 EX, 4 NB, 8 UN); 1 when a
+// non-blocking lock would have to wait
+let __libm_file_flock = fn (fd: int) -> fn (op: int) ->
+  if fd < 0 then (let _ = __rv_rtw_set 63 9 in 0 - 1)
+  else if bit_and op (0 - 16) != 0 then (let _ = __rv_rtw_set 63 22 in 0 - 1)
+  else
+    (let r = __rv_syscall 32 fd op 0 0 in
+     let _ = __rv_rtw_set 63 (if r < 0 then 0 - r else 0) in
+     if r == 0 then 0 else if r == 0 - 11 && bit_and op 4 != 0 then 1 else 0 - 1);
+// readlink into the byte arena, answering the length
+let __libm_file_readlink = fn (p: str) -> fn (off: int) -> fn (cap: int) ->
+  if cap <= 0 || off < 0 then 0 - 1
+  else
+    (let r = __rv_syscall 78 (0 - 100) (__rv_cstr p) (__rv_mem_at off) cap in
+     let _ = __rv_rtw_set 63 (if r < 0 then 0 - r else 0) in
+     if r < 0 then 0 - 1 else r);
+// utimensat with two times in whole seconds, each a {sec, nsec} pair of words
+let __rv_times = str_repeat " " 32;
+let __libm_file_utime = fn (p: str) -> fn (at: int) -> fn (mt: int) ->
+  let w = if __rv_xlen () == 64 then 8 else 4 in
+  let b = __rv_addr __rv_times + w in
+  let _ = __rv_poke b at in
+  let _ = __rv_poke (b + w) 0 in
+  let _ = __rv_poke (b + 2 * w) mt in
+  let _ = __rv_poke (b + 3 * w) 0 in
+  __rv_p0 (__rv_syscall 88 (0 - 100) (__rv_cstr p) b 0);
 // getcwd: the syscall answers the length with its NUL, or a negative errno
 let proc_cwd = fn (u: unit) ->
   let buf = str_repeat " " 4096 in

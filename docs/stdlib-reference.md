@@ -606,7 +606,12 @@ v0.1.634 adds the C runtime's descriptors and the byte arena their bytes cross:
 high), `fd_last_errno : unit -> int`, `io_set_nonblocking`, libc's `dup2` and
 `fsync`, and `mem_alloc` / `mem_set_u8` / `mem_get_u8` / `mem_copy_str` /
 `mem_to_str` over a 4 MB arena taken on first use, and `proc_sig_noop` /
-`proc_sig_default` (through `rt_sigaction`, as `SIG_IGN` / `SIG_DFL`). memu hands the guest the host's
+`proc_sig_default` (through `rt_sigaction`, as `SIG_IGN` / `SIG_DFL`).
+v0.1.636 adds the rest of the file calls: libc's `symlink`, `link`, `rename`
+(`str -> str -> int`), `fchdir`, `chroot`, and the C runtime's `file_umask`,
+`file_flock : int -> int -> int` (1 when a non-blocking lock would wait),
+`file_readlink : str -> int -> int -> int` (into the arena, answering the length)
+and `file_utime : str -> int -> int -> int` (whole seconds). memu hands the guest the host's
 own descriptors, so a write is in the file before the close and a pipe is a pipe.
 The errno is Linux's (`EAGAIN` is 11 here, 35 on a macOS host).
 `test/rv/host_fds.mere` (both widths) and `test/rv/host_pipe.mere` (RV64) hold them

@@ -371,7 +371,7 @@ if "$MERE" -c "$ROOT/test/rv/host_externs.mere" > "$TMP/ref.c" 2>/dev/null \
     if [ -z "$emu" ]; then hxpass=$((hxpass+1)); continue; fi
     ( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' "$emu" 16 2>/dev/null ) | grep -a -v '^rvrun' > "$TMP/r.out"
     if diff -q "$TMP/i.out" "$TMP/r.out" >/dev/null; then
-      printf '  ok    %s:%s (getpid, access, rmdir, stat, errno)\n' "$name" "$width"
+      printf '  ok    %s:%s (getpid, access, rmdir, stat, chdir, links, rename, utime, umask, flock, errno)\n' "$name" "$width"
       hxpass=$((hxpass+1))
     else
       printf '  FAIL  %s:%s (RV%s disagrees with the C backend)\n' "$name" "$width" "$width"

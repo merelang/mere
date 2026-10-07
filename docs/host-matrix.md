@@ -227,7 +227,7 @@ machine rather than a host.
 | `tty_restore` | yes | refused | refused | refused |
 | `u8x16_splat` | yes | yes | yes | yes |
 | `utf8_chars` | yes | yes | yes | refused |
-| `utf8_len` | yes | yes | yes | refused |
+| `utf8_len` | yes | yes | yes | yes |
 | `vec_new` | yes | yes | yes | yes |
 | `write_bytes` | yes | yes | yes | refused |
 | `write_file` | yes | yes | yes | yes |

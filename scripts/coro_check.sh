@@ -77,7 +77,7 @@ scan_outer|icl|all found;200880;0|0'
 # The interpreter prints a failure with its position and a code frame; the
 # compiled program prints the message alone. The comparison is on the message.
 norm() {
-  sed -e 's/^eval error: //' -e 's/^[^ ]*\.mere: eval error: //' | grep -v '^ *-->\|^ *|\|^ *[0-9]* |\|^$' | head -3 | tr '\n' ';' | sed 's/;$//'
+  sed -e 's/^eval error: //' -e 's/^[^ ]*\.mere: eval error: //' | grep -v '^ *-->\|^ *|\|^ *[0-9]* |\|^$\|malloc: enabling scribbling' | head -3 | tr '\n' ';' | sed 's/;$//'
 }
 
 run_bounded() {  # $@ = command -> "output|exit"
@@ -276,7 +276,12 @@ if [ "$MODE" = "--poison" ]; then
         printf '  FAIL  %s\n' "POISON $label: $f: $why -- the runtime no longer has the shape this poison removes"
         pfail=1; continue
       fi
-      got=$(run_bounded "$T/bin")
+      # v0.1.636: freed memory is scribbled (macOS MallocScribble, glibc
+      # MALLOC_PERTURB_), so a block released too early reads as garbage
+      # whether or not the allocator happens to hand it out again. Without
+      # it, LLVM 1 stayed green on 2 runs of 63: the released block had not
+      # been reused for the next region.
+      got=$(run_bounded env MallocScribble=1 MALLOC_PERTURB_=85 "$T/bin")
       w=$(want_of "$f" "$letter")
       if [ "$got" = "$w" ]; then
         printf '  FAIL  %s\n' "POISON $label: $f still green without it"
