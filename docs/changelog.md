@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.635 — 2026-10-07
+
+_On RISC-V an `if`'s condition is compiled as the branch it is used for: an integer comparison is one branch on its two registers, `&&` and `||` become chains of them. mere-ruby's startup runs 4.6% fewer instructions._
+
+The condition used to be a value first: `a < b` made 0 or 1 in `a0` (`slt`,
+then `xori` for `>=`; `sub` and `sltiu` for `==`), `a && b` jumped over an
+`li a0, 0`, and only then did `beqz` decide. Now `branch_if` jumps on the
+comparison itself (`blt` / `bge` / `beq` / `bne`, against `x0` for a 0), sends
+`&&` and `||` straight to the arm they decide, and turns
+`if x then false else true` round into x's own branch. Anything else -- a call,
+a string or float comparison, an enum's tag -- is still its value and a
+`beqz`.
+
+mere-ruby on RV64 (dev292, an empty script): 311,706 → 297,254 thousand
+instructions; the image 12.33 → 12.17 MB. `test/parity/cond_branches.mere`
+reaches both arms of every shape on all backends.
+
 ## v0.1.634 — 2026-10-07
 
 _RISC-V answers the C runtime's descriptors (`fd_open` / `fd_read` / `fd_write` / `fd_seek` / `fd_dup` / `fd_pipe` and the rest), its byte arena (`mem_*`) and SIGPIPE's disposition; memu hands the guest the host's own descriptors. And every write the RISC-V backend emits now names its descriptor._
