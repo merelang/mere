@@ -1,0 +1,14 @@
+// utf8_len on every backend (v0.1.636, RISC-V's from the prelude): forward by
+// the lead byte's span, an invalid byte one unit, a span past the end stopping
+// at the end -- printed beside str_len, so a byte count passed off as a
+// character count shows.
+let show = fn (s: str) -> print (str_of_int (utf8_len s) ++ " " ++ str_of_int (str_len s));
+let _ = show "";
+let _ = show "abc";
+let _ = show "りんご";
+let _ = show "aé😀z";
+let _ = show ("A" ++ chr 128);
+let _ = show (chr 240 ++ "a");
+let _ = show (chr 226 ++ chr 130);
+let _ = show (chr 255 ++ chr 192 ++ "x");
+print_int (if utf8_len "hello" == str_len "hello" then 1 else 0)

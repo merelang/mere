@@ -59,8 +59,9 @@ ALLOW="rv_exec_check.sh exhaustive_check.sh parity.sh live_soundness_check.sh fa
 
 # Comment lines are excluded, or this file's own explanation is a violation of
 # it -- the removal pattern hitting its own documentation.
+# TT_DIR is where to look; the poison points it at a copy.
 scan() { # <pattern> -> "file:line: text" for every non-comment, non-self hit
-  grep -rn -- "$1" "$ROOT/scripts" 2>/dev/null \
+  grep -rn -- "$1" "${TT_DIR:-$ROOT/scripts}" 2>/dev/null \
     | grep -v "/$SELF:" \
     | awk -F: '{ line=$0; sub(/^[^:]*:[0-9]*:/, "", line)
                  sub(/^[ \t]+/, "", line)
@@ -77,11 +78,16 @@ poison="${1:-}"
 if [ "$poison" = "--poison" ]; then
   # Two poisons, one per rule, each in a file that is NOT on the allowlist --
   # a gate whose allowlist swallowed everything would pass a single poison.
-  p="$ROOT/scripts/.trailing_trim_poison.sh"
+  # ⚠ In a COPY of scripts/ (v0.1.636). They used to be planted in the tree
+  #   itself, and mgate runs this check and its poison side by side: the plain
+  #   run found the poison's file and went red (once, on 0.1.635's gate).
+  T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+  cp "$ROOT"/scripts/*.sh "$T"/
+  p="$T/.trailing_trim_poison.sh"
   printf '#!/bin/sh\n( "$MERE" x ) | sed %s > out\n' "'\$d'" > "$p"
-  bad1=0; sh "$0" >/dev/null 2>&1 || bad1=1
+  bad1=0; TT_DIR="$T" sh "$0" >/dev/null 2>&1 || bad1=1
   printf '#!/bin/sh\n"$MERE" x | grep -v %s > out\n' "'^()\$'" > "$p"
-  bad2=0; sh "$0" >/dev/null 2>&1 || bad2=1
+  bad2=0; TT_DIR="$T" sh "$0" >/dev/null 2>&1 || bad2=1
   rm -f "$p"
   if [ "$bad1" = 1 ] && [ "$bad2" = 1 ]; then
     echo "trailing_trim: poison ok — both a trim and a () filter are caught"

@@ -557,7 +557,11 @@ let libm_sigs : (string * string) list =
       ("mem_alloc", "i>i"); ("mem_set_u8", "iii>i"); ("mem_get_u8", "ii>i");
       ("mem_copy_str", "iis>i"); ("mem_to_str", "ii>s");
       (* and a signal's disposition, which a pipe's writer sets *)
-      ("proc_sig_noop", "i>i"); ("proc_sig_default", "i>i") ]
+      ("proc_sig_noop", "i>i"); ("proc_sig_default", "i>i");
+      (* v0.1.636: the rest of the file calls mere-ruby makes *)
+      ("symlink", "ss>i"); ("link", "ss>i"); ("rename", "ss>i"); ("fchdir", "i>i");
+      ("chroot", "s>i"); ("file_umask", "i>i"); ("file_flock", "ii>i");
+      ("file_readlink", "sii>i"); ("file_utime", "sii>i") ]
 let libm_bound : (string, unit) Hashtbl.t = Hashtbl.create 16
 let rec libm_sig_of (t : Ast.ty) : string =
   match Ast.walk t with
@@ -3528,6 +3532,10 @@ and compile_app env e =
     List.iter (fun a -> compile_expr env a; push a0) args;
     pop 13; pop 12; pop 11; pop a0;
     pop 17;
+    (* v0.1.636: a4 and a5 are 0, not whatever was left there -- linkat's,
+       renameat2's and utimensat's flags *)
+    emit_word (enc_i 0 zero 0 14 0x13);                  (* li a4, 0 *)
+    emit_word (enc_i 0 zero 0 15 0x13);                  (* li a5, 0 *)
     emit_word (enc_i 0 zero 0 zero 0x73)                 (* ecall -> a0 *)
   | Ast.Var "__rv_cstr" when List.length args = 1 ->
     compile_expr env (List.hd args);

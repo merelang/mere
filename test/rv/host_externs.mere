@@ -1,7 +1,8 @@
 // The C runtime's externs RISC-V answers through the host (v0.1.630-633):
 // getpid, access with its mode, rmdir, stat / lstat into one snapshot that
 // file_stat_field reads, proc_last_errno after the directory calls, and
-// (v0.1.633) chdir, file_chmod and proc_cwd.
+// (v0.1.633) chdir, file_chmod and proc_cwd, and (v0.1.636) symlink, readlink,
+// link, rename, utime, umask, flock, fchdir and a chroot that cannot succeed.
 // rv_exec compares every line with the C backend's, on both widths.
 extern fn getpid: unit -> int;
 extern fn access: str -> int -> int;
@@ -12,6 +13,19 @@ extern fn file_stat_field: int -> int;
 extern fn proc_last_errno: unit -> int;
 extern fn chdir: str -> int;
 extern fn file_chmod: str -> int -> int;
+extern fn symlink: str -> str -> int;
+extern fn link: str -> str -> int;
+extern fn rename: str -> str -> int;
+extern fn fchdir: int -> int;
+extern fn chroot: str -> int;
+extern fn file_umask: int -> int;
+extern fn file_flock: int -> int -> int;
+extern fn file_readlink: str -> int -> int -> int;
+extern fn file_utime: str -> int -> int -> int;
+extern fn fd_open: str -> str -> int -> int;
+extern fn fd_close: int -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_to_str: int -> int -> str;
 let _ = print_int (if getpid () > 0 then 1 else 0);
 let _ = write_file "rv_stat.txt" "hello";
 let _ = print_int (file_stat "rv_stat.txt");
@@ -49,5 +63,43 @@ let _ = print_int (if file_exists "rv_cwd_d/inner.txt" then 1 else 0);
 let _ = file_delete "rv_cwd_d/inner.txt";
 let _ = print_int (dir_remove "rv_cwd_d");
 let _ = print_int (chdir "rv_cwd_absent");
+let _ = print_int (symlink "rv_stat.txt" "rv_ln");
+let _ = print_int (symlink "rv_stat.txt" "rv_ln");
+let _ = print_int (file_lstat "rv_ln");
+let _ = print_int (file_stat_field 7);
+let lbuf = mem_alloc 256;
+let ln = file_readlink "rv_ln" lbuf 256;
+let _ = print_int ln;
+let _ = print (mem_to_str lbuf ln);
+let _ = print_int (file_readlink "rv_stat.txt" lbuf 256);
+let _ = print_int (link "rv_stat.txt" "rv_hard");
+let _ = file_stat "rv_stat.txt";
+let _ = print_int (file_stat_field 3);
+let _ = print_int (rename "rv_hard" "rv_hard2");
+let _ = print_int (if file_exists "rv_hard2" && (if file_exists "rv_hard" then false else true) then 1 else 0);
+let _ = print_int (rename "rv_hard" "rv_hard3");
+let _ = print_int (file_utime "rv_stat.txt" 1000000000 1200000000);
+let _ = file_stat "rv_stat.txt";
+let _ = print_int (file_stat_field 8);
+let _ = print_int (file_stat_field 9);
+let _ = print_int (file_utime "rv_stat_absent" 1 2);
+let um = file_umask 18;
+let _ = print_int (file_umask um);
+let _ = print_int (file_umask um);
+let lf = fd_open "rv_stat.txt" "r" 0;
+let _ = print_int (file_flock lf 2);
+let _ = print_int (file_flock lf 8);
+let _ = print_int (file_flock lf 16);
+let _ = print_int (fd_close lf);
+let _ = print_int (dir_create "rv_fch_d" (0 - 1));
+let dfd = fd_open "rv_fch_d" "r" 0;
+let _ = print_int (fchdir dfd);
+let _ = print_int (if str_ends_with (proc_cwd ()) "/rv_fch_d" then 1 else 0);
+let _ = print_int (chdir "..");
+let _ = print_int (fd_close dfd);
+let _ = print_int (dir_remove "rv_fch_d");
+let _ = print_int (chroot "rv_chroot_absent");
+let _ = file_delete "rv_ln";
+let _ = file_delete "rv_hard2";
 let _ = file_delete "rv_stat.txt";
 print_int (file_lstat "rv_stat.txt")
