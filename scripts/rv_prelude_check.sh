@@ -328,7 +328,7 @@ fi
 # to be refused at compile time, and this gate asserted that -- correctly, until
 # the behaviour changed underneath it and it said so. Refusing refuses the whole
 # program for a call it may never make.
-printf 'extern fn getppid: unit -> int;\nlet _ = print_int (getppid ());\n' > "$TMP/ex.mere"
+printf 'extern fn gethostid: unit -> int;\nlet _ = print_int (gethostid ());\n' > "$TMP/ex.mere"
 if "$MERE" -rv "$TMP/ex.mere" > "$TMP/ex.bin" 2>"$TMP/exerr"; then
   if grep -a -q 'has no C library to link against' "$TMP/ex.bin"; then :; else
     echo "FAIL rv_prelude: an extern call compiled without the message that names why it will stop"
@@ -340,14 +340,14 @@ else
   rc=1
 fi
 # A program that DECLARES one and never calls it must run.
-printf 'extern fn getppid: unit -> int;\nlet _ = print "ok";\n' > "$TMP/exd.mere"
+printf 'extern fn gethostid: unit -> int;\nlet _ = print "ok";\n' > "$TMP/exd.mere"
 if "$MERE" -rv "$TMP/exd.mere" >/dev/null 2>&1; then :; else
   echo "FAIL rv_prelude: declaring an extern without calling it stops the program"
   rc=1
 fi
 # But an extern used as a VALUE is still refused: higher-order is unsupported
 # here, so there is nothing to abort inside.
-printf 'extern fn getppid: unit -> int;\nlet f = getppid;\nlet _ = print_int (f ());\n' > "$TMP/exv.mere"
+printf 'extern fn gethostid: unit -> int;\nlet f = gethostid;\nlet _ = print_int (f ());\n' > "$TMP/exv.mere"
 if "$MERE" -rv "$TMP/exv.mere" >/dev/null 2>"$TMP/exverr"; then
   echo "FAIL rv_prelude: an extern as a value compiled, and nothing can lower that"
   rc=1

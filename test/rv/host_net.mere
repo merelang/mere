@@ -23,6 +23,10 @@ extern fn fd_read: int -> int -> int -> int;
 extern fn fd_close: int -> int;
 extern fn socket: int -> int -> int -> int;
 extern fn shutdown: int -> int -> int;
+extern fn listen: int -> int -> int;
+extern fn getppid: unit -> int;
+extern fn getpgid: int -> int;
+extern fn getsid: int -> int;
 extern fn mem_alloc: int -> int;
 extern fn mem_copy_str: int -> int -> str -> int;
 extern fn mem_to_str: int -> int -> str;
@@ -64,6 +68,12 @@ let _ = fd_close b;
 // AF_INET (2, on every platform), SOCK_STREAM
 let s4 = socket 2 1 0;
 let _ = print_int (if s4 > 2 then 1 else 0);
+let _ = print_int (listen s4 5);
+// v0.1.643: whose they are differs between the two runs (the C program's
+// parent is a shell, the emulator's a timer); that there is one does not
+let _ = print_int (if getppid () >= 1 then 1 else 0);
+let _ = print_int (if getpgid 0 > 0 then 1 else 0);
+let _ = print_int (if getsid 0 > 0 then 1 else 0);
 let _ = fd_close s4;
 let _ = print_int (if proc_rlimit_resource "NOFILE" >= 0 then 1 else 0);
 let _ = print_int (proc_getrlimit "NOFILE");

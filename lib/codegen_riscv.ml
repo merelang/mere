@@ -573,6 +573,8 @@ let libm_sigs : (string * string) list =
       ("proc_rlimit_resource", "s>i"); ("proc_rlimit_names", "u>s"); ("proc_rlim_const", "s>s");
       ("proc_getpriority", "ii>i"); ("proc_setpriority", "iii>i");
       ("shutdown", "ii>i"); ("socket", "iii>i");
+      (* v0.1.643: and the rest of the libc calls mere-ruby declares *)
+      ("listen", "ii>i"); ("getppid", "u>i"); ("getpgid", "i>i"); ("getsid", "i>i"); ("setsid", "u>i");
       (* v0.1.636: the rest of the file calls mere-ruby makes *)
       ("symlink", "ss>i"); ("link", "ss>i"); ("rename", "ss>i"); ("fchdir", "i>i");
       ("chroot", "s>i"); ("file_umask", "i>i"); ("file_flock", "ii>i");

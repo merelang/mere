@@ -4,6 +4,21 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.643 — 2026-10-08
+
+_The rest of the libc calls mere-ruby declares, on RISC-V: `listen`, `getppid`, `getpgid`, `getsid` and `setsid`._
+
+With 0.1.642's tables, mere-ruby's RV64 corpus came to 254 of 279, and the
+one RISC-V gap left in it was `TCPServer#listen`: mere-ruby declares libc's
+`listen` itself, beside `socket` and `shutdown`, and 0.1.641 bound only those
+two. These five go through Linux's calls 201, 173, 155, 156 and 157, which
+memu answers with the host's (its d2-643 change). The tests that needed an
+extern with no host behind it use `gethostid` now, since `getppid` has one.
+
+`test/rv/host_net.mere` listens on a socket made with `socket`, and checks the
+parent, the process group and the session are there (whose they are differs
+between the C run and the emulator's), on both widths, also with gcc on Linux.
+
 ## v0.1.642 — 2026-10-07
 
 _`sys_os` and `sys_arch`: the OS and CPU whose ABI a program runs under, on every backend._
