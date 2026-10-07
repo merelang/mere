@@ -381,6 +381,20 @@ let __rv_sig_set = fn (sig: int) -> fn (h: int) ->
   if r < 0 then 0 - 1 else 0;
 let __libm_proc_sig_noop = fn (sig: int) -> __rv_sig_set sig 1;
 let __libm_proc_sig_default = fn (sig: int) -> __rv_sig_set sig 0;
+// v0.1.637: the bounds refusals, worded as the C runtime words them, with the
+// index and the length. Codegen calls this from the failing branch (kind k,
+// then up to three numbers); the prelude's fail carries no tag, as a builtin's
+// does not.
+let rvoob = fn (k: int) -> fn (a: int) -> fn (b: int) -> fn (c: int) ->
+  let n = fn (x: int) -> str_of_int x in
+  fail (if k == 0 then "vec_get: index " ++ n a ++ " out of bounds (len = " ++ n b ++ ")"
+        else if k == 1 then "vec_set: index " ++ n a ++ " out of bounds (len = " ++ n b ++ ")"
+        else if k == 2 then "char_at: index " ++ n a ++ " out of range (len=" ++ n b ++ ")"
+        else if k == 3 then "chr: " ++ n a ++ " out of byte range [0, 255]"
+        else if k == 4 then "substring: range [" ++ n a ++ ", " ++ n b ++ ") invalid for str of length " ++ n c
+        else if k == 5 then "u8x16_extract: lane " ++ n a ++ " out of range (lanes = 16)"
+        else if k == 6 then "u8x16_from_bytes: bytes [0, +16) out of bounds (len = " ++ n b ++ ")"
+        else "u8x16_load: bytes [" ++ n a ++ ", +16) out of bounds (len = " ++ n b ++ ")");
 // v0.1.636: utf8_len, the interpreter's and the C runtime's walk -- forward
 // by the lead byte's span, an invalid byte one unit, a span past the end
 // stopping at the end. (mere-ruby asks `utf8_len s == str_len s` for "all

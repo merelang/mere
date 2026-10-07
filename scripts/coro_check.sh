@@ -201,13 +201,12 @@ fi
 # rv_exec_check does). The runtime is the RV prelude's rvcoro_ functions over
 # __rv_cswap, which copies each coroutine's stack in and out of one region; the
 # per-stack words it carries are the try_or record, the region depth and the
-# two block marks. RV's own spellings: a failure prints its message alone
-# (no `fail: `), and `scan_high` (a 2^48 literal) and `sized` (a sum past 2^31)
-# are RV64 only. The OUTPUT is compared, not the exit status: memu exits 0
-# whatever the guest's exit call said.
+# two block marks. `scan_high` (a 2^48 literal) and `sized` (a sum past 2^31)
+# are RV64 only. A failure reads as on C since v0.1.637 (`fail: ` and all).
+# The OUTPUT is compared (stdout and stderr together), not the exit status.
 # fixture | r both widths, q RV64 only | expected | (exit, as on C; not compared)
 RV_CASES='region|r|B: my string survived;4106|0
-fail|r|from the coroutine|1
+fail|r|fail: from the coroutine|1
 nested|r|main caught: -1;B caught: 5;main: done|0
 unwind|r|B: region R2 survived main'"'"'s unwind;4096|0
 env|r|env: intact;8192|0
@@ -248,7 +247,7 @@ run_rv() {  # $1 = fixture, $2 = 32|64 -> "output|exit" (MERE_RV_PRELUDE_FILE pa
   if ! "$MERE" "$flag" --ram 256 $extra "$FX/$1.mere" > "$T/rv/prog.bin" 2>"$T/rv/emit.err"; then
     printf 'EMITFAIL %s|x' "$(grep -v '^warning\|^ *-->\|^ *|\|^ *[0-9]* |\|^ *= \|^$' "$T/rv/emit.err" | head -1)"; return
   fi
-  ( cd "$T/rv" && perl -e 'alarm shift; exec @ARGV' "$RV_LIMIT" ./rvrun"$2" 256 > out 2>&1 ); rc=$?
+  ( cd "$T/rv" && perl -e 'alarm shift; exec @ARGV' "${RV_LIMIT_NOW:-$RV_LIMIT}" ./rvrun"$2" 256 > out 2>&1 ); rc=$?
   [ "$rc" = 142 ] && { echo "TIMEOUT|142"; return; }
   printf '%s' "$(grep -av '^rvrun' "$T/rv/out" | norm)"
 }
@@ -364,7 +363,12 @@ if [ "$MODE" = "--poison" ]; then
   # again, and without 623's high-water mark at each switch a block that
   # closes on main rolls back over the coroutine's string.
   rv_poison "RV 3 (the stack left's heap not kept as its own)" 's/^    let _ = __rv_rtw_set 74 (__crec from) in$/    let _ = __rv_rtw_set 74 (__crec to) in/' region_cross stack_heaps
+  # v0.1.637: this one goes red by never finishing, and the fixture finishes
+  # in a second or two -- waiting out the whole RV_LIMIT (300 s) for it was a
+  # third of this gate's time
+  RV_LIMIT_NOW=30
   rv_poison "RV 4 (no finished check)" 's/^  else (let st = __cget s 0 in if st == 3 || st == 4 then 0 - 1 else s);$/  else s;/' finished
+  RV_LIMIT_NOW=
   rv_poison "RV 5 (no hand-over check)" 's/^  if ns < 0 || ns == me then fail/  if ns < 0 then fail/' self_handoff
   rv_poison "RV 6 (blocks reused while a coroutine exists)" 's/^    let _ = __rv_rtw_set 47 (__rv_rtw 47 + 1) in$/    let _ = () in/' compact_reuse
   # v0.1.624: the release gives back only what no stopped stack reaches

@@ -54,6 +54,7 @@ let _ = coro_switch d;' ;;
     env_pairs) echo 'let _ = print (env_pairs ());' ;;
     proc_cwd) echo 'let _ = print (proc_cwd ());' ;;
     utf8_len) echo 'let _ = print_int (utf8_len "aé");' ;;
+    rvoob) echo 'let _ = print_int (try_or (fn (u: unit) -> rvoob 0 5 1 0) 7);' ;;
     env_var) echo 'let _ = print (match env_var "x" with | Some v -> v | None -> "-");' ;;
     __libm_proc_last_errno) echo 'let _ = print_int (__libm_proc_last_errno ());' ;;
     time) echo 'let _ = print_int (float_bits_hi (time ()));' ;;

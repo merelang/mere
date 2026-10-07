@@ -1,0 +1,5 @@
+let v = vec_new ();
+let _ = print (try_or_msg (fn (u: unit) -> str_of_int (vec_get v 2)) (fn (m: str) -> "caught: " ++ m));
+let _ = print (try_or_msg (fn (u: unit) -> fail "mine") (fn (m: str) -> "caught: " ++ m));
+let _ = print_err "a warning";
+print "after"
