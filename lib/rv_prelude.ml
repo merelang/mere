@@ -381,6 +381,103 @@ let __rv_sig_set = fn (sig: int) -> fn (h: int) ->
   if r < 0 then 0 - 1 else 0;
 let __libm_proc_sig_noop = fn (sig: int) -> __rv_sig_set sig 1;
 let __libm_proc_sig_default = fn (sig: int) -> __rv_sig_set sig 0;
+// v0.1.638: small builtins RISC-V lacked, each as the C runtime answers it.
+let print_bool = fn (b: bool) -> print (if b then "true" else "false");
+// the native int's ends: 2^(xlen-1) and one below it (wrapping), so no
+// literal wider than the machine is written
+let int_min = bit_shl 1 (__rv_xlen () - 1);
+let int_max = int_min - 1;
+// exactly "true" or "false" (the C runtime does not trim; the interpreter does)
+let bool_of_str = fn (s: str) ->
+  if s == "true" then true
+  else if s == "false" then false
+  else fail ("bool_of_str: \"" ++ s ++ "\" is not 'true' or 'false'");
+let random_float = fn (u: unit) -> float_of_int (random_int 1073741824) / 1073741824.0;
+// len of a list: its Cons cells
+let rvlist_len = fn l ->
+  let rec go = fn l -> fn (n: int) -> match l with | Nil -> n | Cons (_, t) -> go t (n + 1) in
+  go l 0;
+// does needle n sit in h at i (byte for byte)
+let __rv_at = fn (h: str) -> fn (i: int) -> fn (n: str) ->
+  let hb = bytes_of_str h in
+  let nb = bytes_of_str n in
+  let k = str_len n in
+  let rec go = fn (j: int) ->
+    if j >= k then true
+    else if __bytes_get_unchecked hb (i + j) != __bytes_get_unchecked nb j then false
+    else go (j + 1) in
+  go 0;
+// non-overlapping occurrences; an empty needle occurs 0 times
+let str_count = fn (h: str) -> fn (n: str) ->
+  let hl = str_len h in
+  let nl = str_len n in
+  let rec go = fn (i: int) -> fn (c: int) ->
+    if i + nl > hl then c
+    else if __rv_at h i n then go (i + nl) (c + 1)
+    else go (i + 1) c in
+  if nl == 0 then 0 else go 0 0;
+// the last place n starts in h; an empty needle is at the end
+let str_last_index_of = fn (h: str) -> fn (n: str) ->
+  let hl = str_len h in
+  let nl = str_len n in
+  let rec go = fn (i: int) -> if i < 0 then 0 - 1 else if __rv_at h i n then i else go (i - 1) in
+  if nl == 0 then hl else if nl > hl then 0 - 1 else go (hl - nl);
+// the codepoints as one-character strs, split as utf8_len counts them
+let utf8_chars = fn (s: str) ->
+  let b = bytes_of_str s in
+  let n = str_len s in
+  let rec go = fn (i: int) -> fn (acc: str list) ->
+    if i >= n then list_rev acc
+    else
+      (let x = __bytes_get_unchecked b i in
+       let l0 = if x < 128 then 1
+                else if x >= 192 && x <= 223 then 2
+                else if x >= 224 && x <= 239 then 3
+                else if x >= 240 && x <= 247 then 4
+                else 1 in
+       let l = if i + l0 > n then n - i else l0 in
+       go (i + l) (Cons (substring s i (i + l), acc))) in
+  go 0 Nil;
+// vec_iter and vec_fold over the Vec's length as it is at each step (the C
+// runtime reads it every time round, so an f that pushes is seen)
+let vec_iter = fn v -> fn f ->
+  let rec go = fn (i: int) -> if i >= vec_len v then () else (let _ = f (vec_get v i) in go (i + 1)) in
+  go 0;
+let vec_fold = fn v -> fn init -> fn f ->
+  let rec go = fn (i: int) -> fn acc -> if i >= vec_len v then acc else go (i + 1) (f acc (vec_get v i)) in
+  go 0 init;
+// vec_sort: the bottom-up stable merge sort every backend runs, comparing
+// cmp(right, left) < 0 in the same order -- a comparator may count its calls
+// (test/parity/vec_sort_stable.mere does)
+let vec_sort = fn v -> fn cmp ->
+  let n = vec_len v in
+  if n <= 1 then ()
+  else
+    (let a = vec_new () in
+     let b = vec_new () in
+     let rec fill = fn (i: int) ->
+       if i >= n then () else (let _ = vec_push a (vec_get v i) in let _ = vec_push b (vec_get v i) in fill (i + 1)) in
+     let _ = fill 0 in
+     let rec pass = fn (w: int) -> fn src -> fn dst ->
+       if w >= n then src
+       else
+         (let rec run = fn (lo: int) ->
+            if lo >= n then ()
+            else
+              (let mid = if lo + w > n then n else lo + w in
+               let hi = if lo + 2 * w > n then n else lo + 2 * w in
+               let rec merge = fn (k: int) -> fn (i: int) -> fn (j: int) ->
+                 if k >= hi then ()
+                 else if i >= mid || (j < hi && cmp (vec_get src j) (vec_get src i) < 0) then
+                   (let _ = vec_set dst k (vec_get src j) in merge (k + 1) i (j + 1))
+                 else (let _ = vec_set dst k (vec_get src i) in merge (k + 1) (i + 1) j) in
+               let _ = merge lo lo mid in
+               run (lo + 2 * w)) in
+          let _ = run 0 in
+          pass (w * 2) dst src) in
+     let res = pass 1 a b in
+     let rec back = fn (i: int) -> if i >= n then () else (let _ = vec_set v i (vec_get res i) in back (i + 1)) in
+     back 0);
 // v0.1.637: the bounds refusals, worded as the C runtime words them, with the
 // index and the length. Codegen calls this from the failing branch (kind k,
 // then up to three numbers); the prelude's fail carries no tag, as a builtin's
@@ -394,6 +491,7 @@ let rvoob = fn (k: int) -> fn (a: int) -> fn (b: int) -> fn (c: int) ->
         else if k == 4 then "substring: range [" ++ n a ++ ", " ++ n b ++ ") invalid for str of length " ++ n c
         else if k == 5 then "u8x16_extract: lane " ++ n a ++ " out of range (lanes = 16)"
         else if k == 6 then "u8x16_from_bytes: bytes [0, +16) out of bounds (len = " ++ n b ++ ")"
+        else if k == 8 then "ord: expected single-char str, got length " ++ n a
         else "u8x16_load: bytes [" ++ n a ++ ", +16) out of bounds (len = " ++ n b ++ ")");
 // v0.1.636: utf8_len, the interpreter's and the C runtime's walk -- forward
 // by the lead byte's span, an invalid byte one unit, a span past the end

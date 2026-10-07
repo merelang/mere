@@ -71,7 +71,7 @@ machine rather than a host.
 | `bit_shl` | yes | yes | yes | yes |
 | `bit_shr` | yes | yes | yes | yes |
 | `bit_xor` | yes | yes | yes | yes |
-| `bool_of_str` | yes | yes | yes | refused |
+| `bool_of_str` | yes | yes | yes | yes |
 | `bytebuf_new` | yes | yes | yes | refused |
 | `bytes_of_hex` | yes | yes | yes | yes |
 | `bytes_of_str` | yes | yes | yes | yes |
@@ -147,8 +147,8 @@ machine rather than a host.
 | `fma` | yes | yes | yes | refused |
 | `gcd` | yes | yes | yes | yes |
 | `incr` | yes | yes | yes | yes |
-| `int_max` | refused | refused | refused | refused |
-| `int_min` | refused | refused | refused | refused |
+| `int_max` | refused | refused | refused | yes |
+| `int_min` | refused | refused | refused | yes |
 | `int_of_float` | yes | yes | yes | yes |
 | `int_of_str` | yes | yes | yes | yes |
 | `is_alpha` | yes | yes | yes | yes |
@@ -156,7 +156,7 @@ machine rather than a host.
 | `is_space` | yes | yes | yes | yes |
 | `join` | yes | yes | yes | unattributed |
 | `lb_new` | yes | yes | yes | refused |
-| `lcm` | yes | yes | yes | unattributed |
+| `lcm` | yes | yes | yes | yes |
 | `list_dir` | yes | refused | refused | refused |
 | `log` | yes | yes | yes | yes |
 | `map_new` | yes | yes | yes | yes |
@@ -180,7 +180,7 @@ machine rather than a host.
 | `print_int` | yes | yes | yes | yes |
 | `print_no_nl` | yes | yes | yes | yes |
 | `proc_cwd` | yes | yes | yes | yes |
-| `random_float` | refused | refused | refused | refused |
+| `random_float` | refused | refused | refused | yes |
 | `random_int` | yes | yes | yes | yes |
 | `read_bytes` | yes | yes | yes | yes |
 | `read_file` | yes | yes | yes | yes |
@@ -200,11 +200,11 @@ machine rather than a host.
 | `stdin_byte` | yes | refused | refused | refused |
 | `str_compare` | yes | yes | yes | yes |
 | `str_contains` | yes | yes | yes | yes |
-| `str_count` | yes | yes | yes | refused |
+| `str_count` | yes | yes | yes | yes |
 | `str_ends_with` | yes | yes | yes | yes |
 | `str_eq` | yes | yes | yes | yes |
 | `str_index_of` | yes | yes | yes | yes |
-| `str_last_index_of` | yes | yes | yes | refused |
+| `str_last_index_of` | yes | yes | yes | yes |
 | `str_len` | yes | yes | yes | yes |
 | `str_of_float` | yes | yes | yes | yes |
 | `str_of_int` | yes | yes | yes | yes |
@@ -226,7 +226,7 @@ machine rather than a host.
 | `tty_raw` | yes | refused | refused | refused |
 | `tty_restore` | yes | refused | refused | refused |
 | `u8x16_splat` | yes | yes | yes | yes |
-| `utf8_chars` | yes | yes | yes | refused |
+| `utf8_chars` | yes | yes | yes | yes |
 | `utf8_len` | yes | yes | yes | yes |
 | `vec_new` | yes | yes | yes | yes |
 | `write_bytes` | yes | yes | yes | refused |

@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.638 — 2026-10-07
+
+_RISC-V gets the small builtins it lacked -- `not`, `len`, `vec_sort`, `vec_iter`, `vec_fold`, `str_count`, `str_last_index_of`, `utf8_chars`, `bool_of_str`, `print_bool`, `int_max`, `int_min`, `random_float` -- a builtin can be passed as a value, and `ord` refuses a string that is not one character. The parity programs `-rv64` refuses at compile time go from 73 to 57._
+
+- **The prelude's names were renamed away from the stdlib's.** RISC-V's prelude
+  is glued onto the front of the file, and the stdlib prelude sits in front of
+  that. The pass that versions a redefined top-level name counted every builtin
+  as a first binding, so the RV prelude's `abs` became `abs__v2` and the
+  stdlib's `lcm`, which calls `abs`, still meant the builtin -- which this
+  target does not have. `not` and `abs` were in the RV prelude all along and
+  refused anyway. A glued prelude's names now keep themselves, as the stdlib
+  prelude's do.
+- **New in the prelude**, each as the C runtime answers it: `vec_sort` (the
+  bottom-up stable merge sort every backend runs, comparisons in the same
+  order), `vec_iter` and `vec_fold` (the length re-read each time round),
+  `str_count` (non-overlapping), `str_last_index_of`, `utf8_chars`,
+  `bool_of_str` (exactly `true` or `false`, as C), `print_bool`, `int_max` and
+  `int_min` (the native int's ends), `random_float`, and `len` of a list.
+- **In codegen:** `not` is `xori`, and a branch on it is turned round; `len`
+  is the length its argument's type has (str, bytes, Vec, Map, StrBuf, list,
+  tuple); a builtin used as a value is a closure that applies it; `ord` checks
+  for one character and fails with the C runtime's message (prop_str, now
+  compiled here, asks).
+- A refusal names the target as RISC-V rather than RV32I.
+
+rv_exec runs 18 more parity programs on RV64 (172) and 14 more on RV32 (163),
+all agreeing with C; host_matrix's RV column gains seven `yes`.
+`test/rv/host_externs.mere` no longer prints the access time `file_utime`
+set: whatever else reads a new file (a scanner, on the machine this was
+measured on) moves it, on either side of the comparison.
+
 ## v0.1.637 — 2026-10-07
 
 _A failing program fails the same way on RISC-V as everywhere else: the message on stderr, worded as the C runtime words it (with the index and the length), and exit status 1._

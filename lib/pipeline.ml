@@ -759,8 +759,37 @@ let parse_program ?(prelude = true) ?(keep_sugar = false) ?base_dir ?(search_pat
       | Ast.Top_let_rec bs -> List.map (fun (n, _, _) -> n) bs
       | _ -> []) prelude_decls
   in
+  (* v0.1.638: and the same for a prelude a driver GLUED onto the front of the
+     file (-rv's: `abs`, `utf8_chars`, `vec_sort`, ... are Mere functions there).
+     Counted as a first shadow, its `abs` became `abs__v2`, and the stdlib
+     prelude's `lcm` -- which sits in front of it and calls `abs` -- still meant
+     the builtin, which that target does not have: the program was refused for a
+     function the backend had. Its names keep themselves, as the stdlib
+     prelude's do. *)
+  let glued_bound =
+    if !Loc.glued_lines <= 0 then [] else begin
+      let loc_of d = match d with
+        | Ast.Top_let (p, _) -> Some p.Ast.ploc
+        | Ast.Top_let_rec ((_, l, _) :: _) -> Some l
+        | _ -> None in
+      let file0 = List.find_map (fun d -> Option.map (fun l -> l.Loc.file) (loc_of d)) user_prog.Ast.decls in
+      let rec take acc = function
+        | [] -> acc
+        | d :: rest ->
+          (match loc_of d with
+           | Some l when l.Loc.line <= !Loc.glued_lines && Some l.Loc.file = file0 ->
+             let ns = match d with
+               | Ast.Top_let ({ Ast.pnode = Ast.P_var n; _ }, _) -> [n]
+               | Ast.Top_let_rec bs -> List.map (fun (n, _, _) -> n) bs
+               | _ -> [] in
+             take (ns @ acc) rest
+           | Some _ -> acc
+           | None -> take acc rest) in
+      take [] user_prog.Ast.decls
+    end
+  in
   let shadowable =
-    List.filter (fun n -> not (List.mem n prelude_bound))
+    List.filter (fun n -> not (List.mem n prelude_bound) && not (List.mem n glued_bound))
       (List.map fst Typer.initial_env)
   in
   (* Q-108: the builtins whose arguments include a function are the ones that can
