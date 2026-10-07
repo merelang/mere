@@ -2045,8 +2045,7 @@ and compile_node (env : env) (e : Ast.expr) : unit =
   | Ast.If (c, t, e2) ->
     let l_else = fresh_label ".else" in
     let l_end = fresh_label ".endif" in
-    compile_expr env c;
-    emit (Branch (0, a0, zero, l_else));                             (* beq a0, x0, else *)
+    branch_if env c false l_else;
     tail_pos := saved_tail;
     compile_expr env t;
     emit (Jal (zero, l_end));                                        (* j end *)
@@ -2600,6 +2599,57 @@ and compile_logic env op l r =
      emit (Jal (zero, l_end));
      emit (Label l_true); li a0 1;
      emit (Label l_end))
+
+(* v0.1.635: a condition compiled as the branch it is used for. `branch_if env
+   c want l` jumps to l when c is `want` and falls through otherwise. An
+   integer comparison is one branch on its two registers (against 0, on x0),
+   && and || become chains of them, and `if x then false else true` is x's
+   branch turned round -- where the condition used to make 0 or 1 in a0
+   (sub+sltiu, slt+xori, a jump over `li a0, 1`) and then test it with
+   beqz. Anything else is still that: its value, and a branch on it. *)
+and branch_if env (c : Ast.expr) (want : bool) (l : string) =
+  let int_like (x : Ast.expr) = match x.Ast.ty with
+    | Some t -> (match resolve_ty t with Ast.TyInt | Ast.TyBool -> true | _ -> false)
+    | None -> false in
+  let is_zero (x : Ast.expr) = match x.Ast.node with Ast.Int_lit 0 -> true | _ -> false in
+  let operands a b k =
+    if is_zero b then
+      (match simple_reg env a with Some r -> k r zero | None -> compile_expr env a; k a0 zero)
+    else if is_zero a then
+      (match simple_reg env b with Some r -> k zero r | None -> compile_expr env b; k zero a0)
+    else with_operands env a b k in
+  match c.Ast.node with
+  | Ast.Bool_lit b -> if b = want then emit (Jal (zero, l))
+  | Ast.Cmp (op, a, b) when int_like a ->
+    let op = if want then op else
+        (match op with
+         | Ast.Eq -> Ast.Ne | Ast.Ne -> Ast.Eq | Ast.Lt -> Ast.Ge
+         | Ast.Ge -> Ast.Lt | Ast.Gt -> Ast.Le | Ast.Le -> Ast.Gt) in
+    operands a b (fun ra rb ->
+      match op with
+      | Ast.Eq -> emit (Branch (0, ra, rb, l))                       (* beq *)
+      | Ast.Ne -> emit (Branch (1, ra, rb, l))                       (* bne *)
+      | Ast.Lt -> emit (Branch (4, ra, rb, l))                       (* blt *)
+      | Ast.Ge -> emit (Branch (5, ra, rb, l))                       (* bge *)
+      | Ast.Gt -> emit (Branch (4, rb, ra, l))                       (* blt, swapped *)
+      | Ast.Le -> emit (Branch (5, rb, ra, l)))                      (* bge, swapped *)
+  | Ast.Logic (Ast.And, a, b) ->
+    if want then begin
+      let skip = fresh_label ".cskip" in
+      branch_if env a false skip; branch_if env b true l; emit (Label skip)
+    end else begin branch_if env a false l; branch_if env b false l end
+  | Ast.Logic (Ast.Or, a, b) ->
+    if want then begin branch_if env a true l; branch_if env b true l end
+    else begin
+      let skip = fresh_label ".cskip" in
+      branch_if env a true skip; branch_if env b false l; emit (Label skip)
+    end
+  | Ast.If (x, { Ast.node = Ast.Bool_lit false; _ }, { Ast.node = Ast.Bool_lit true; _ })
+    when xlen_test x = None ->
+    branch_if env x (not want) l
+  | _ ->
+    compile_expr env c;
+    emit (Branch ((if want then 1 else 0), a0, zero, l))             (* bnez / beqz *)
 
 (* phase 1 then phase 2 for a vector plan: the result is in v1; returns the
    number of words pushed, to be released with vrelease *)

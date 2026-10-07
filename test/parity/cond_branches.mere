@@ -1,0 +1,18 @@
+// Conditions as the branches they are used for (v0.1.635): comparisons on
+// either side of 0, && and || nested both ways, a condition turned round with
+// `if x then false else true`, literal conditions, and a comparison of two
+// comparisons (a value, not a branch). Every shape reaches both arms.
+let rec go = fn (i: int) -> fn (acc: int) ->
+  if i > 40 then acc
+  else
+    let a = if i < 10 && i != 3 then 1 else 0 in
+    let b = if i >= 30 || i == 0 then 10 else 0 in
+    let c = if (if i % 2 == 0 then false else true) then 100 else 0 in
+    let d = if 0 < i && i <= 5 then 1000 else 0 in
+    let e = if i == 0 || (i > 20 && i < 25) then 10000 else 0 in
+    let f = if true && i >= 0 then 0 else 7 in
+    let g = if (i < 5) == (i < 3) then 100000 else 0 in
+    let h = if (if i > 7 || i < 2 then false else true) && i != 5 then 3 else 0 in
+    let k = if 0 == i % 7 || false then 5 else 0 in
+    go (i + 1) (acc * 3 % 100003 + a + b + c + d + e + f + g + h + k)
+in print_int (go 0 0)
