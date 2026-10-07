@@ -1,0 +1,58 @@
+// The C runtime's file builtins on RISC-V (v0.1.640), over the descriptors:
+// a File opened read-write (made when absent), positioned writes and reads of
+// a Vec and of bytes, fsync, lines read back one at a time, the bytes of a
+// whole file both ways, read_lines, file_size and file_mtime, mkdir_p, and the
+// refusals a byte out of range and a missing file give. rv_exec compares every
+// line with the C backend's, on both widths.
+let show_v = fn v -> vec_fold v "" (fn (a: str) -> fn (x: int) -> a ++ " " ++ str_of_int x);
+let f = file_openrw "rv_files.bin";
+let w = vec_new ();
+let _ = vec_push w 72;
+let _ = vec_push w 105;
+let _ = vec_push w 10;
+let _ = print_int (file_pwrite f 0 w);
+let _ = print_int (file_pwrite_bytes f 3 (bytes_of_str "line two\nend"));
+let _ = file_fsync f;
+let _ = print (show_v (file_pread f 1 4));
+let _ = print (str_of_bytes (file_pread_bytes f 3 8));
+let _ = print_int (vec_len (file_pread f 100 4));
+let _ = print_int (vec_len (file_pread f (0 - 1) 4));
+let bad = vec_new ();
+let _ = vec_push bad 65;
+let _ = vec_push bad 300;
+let _ = print (try_or (fn (u: unit) -> str_of_int (file_pwrite f 20 bad)) "refused");
+let _ = file_close f;
+let g = file_open "rv_files.bin";
+let rec lines = fn (n: int) ->
+  match file_read_line g with
+  | None -> n
+  | Some l -> let _ = print ("[" ++ l ++ "]") in lines (n + 1);
+let _ = print_int (lines 0);
+let _ = file_close g;
+let _ = print_int (file_size "rv_files.bin");
+let _ = print_int (if file_mtime "rv_files.bin" > 1600000000.0 then 1 else 0);
+let _ = print (try_or (fn (u: unit) -> str_of_int (file_size "rv_files_absent")) "no such file");
+let _ = print (try_or (fn (u: unit) -> let _ = file_open "rv_files_absent" in "opened") "not opened");
+let _ = write_file_bytes "rv_files2.bin" w;
+let _ = print (show_v (read_file_bytes "rv_files2.bin"));
+let _ = print (try_or (fn (u: unit) -> let _ = write_file_bytes "rv_files3.bin" bad in "written") "refused");
+let _ = print_int (str_len (read_file "rv_files3.bin"));
+let _ = write_bytes "rv_files4.txt" (bytes_of_str "a\nbb\n\nccc\n");
+let _ = print_int (list_len (read_lines "rv_files4.txt"));
+let _ = list_iter (read_lines "rv_files4.txt") (fn (l: str) -> print ("<" ++ l ++ ">"));
+let _ = mkdir_p "rv_files_d/a/b";
+let _ = mkdir_p "rv_files_d/a/b";
+let _ = print_int (if file_exists "rv_files_d/a/b" then 1 else 0);
+let _ = write_file "rv_files_d/zeta.txt" "z";
+let _ = write_file "rv_files_d/Alpha.txt" "a";
+let _ = list_iter (list_dir "rv_files_d") (fn (n: str) -> print ("dir: " ++ n));
+let _ = print (try_or (fn (u: unit) -> show (list_len (list_dir "rv_files_absent_d"))) "no such dir");
+let _ = file_delete "rv_files_d/zeta.txt";
+let _ = file_delete "rv_files_d/Alpha.txt";
+let _ = dir_remove "rv_files_d/a/b";
+let _ = dir_remove "rv_files_d/a";
+let _ = dir_remove "rv_files_d";
+let _ = file_delete "rv_files.bin";
+let _ = file_delete "rv_files2.bin";
+let _ = file_delete "rv_files3.bin";
+print_int (if file_delete "rv_files4.txt" then 1 else 0)

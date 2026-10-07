@@ -3098,6 +3098,9 @@ let initial_env : env =
     (* v0.1.623: what the RV prelude's coroutine runtime is written with --
        raw words, the runtime's words, the stack switch and the layout *)
     ("__rv_peek", mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
+    (* v0.1.640: the RV prelude's File is a descriptor; these say so to the typer *)
+    ("__rv_file_of_fd", mono (Ast.TyArrow (Ast.TyInt, Ast.TyCon ("File", []))));
+    ("__rv_fd_of_file", mono (Ast.TyArrow (Ast.TyCon ("File", []), Ast.TyInt)));
     ("__rv_poke", mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyUnit))));
     ("__rv_peekb", mono (Ast.TyArrow (Ast.TyInt, Ast.TyInt)));
     ("__rv_pokeb", mono (Ast.TyArrow (Ast.TyInt, Ast.TyArrow (Ast.TyInt, Ast.TyUnit))));

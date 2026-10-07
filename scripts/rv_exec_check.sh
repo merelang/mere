@@ -384,13 +384,15 @@ else
 fi
 echo "rv_exec: $hxpass passed, $hxfail failed for the host externs (both widths)"
 
+# host_files (v0.1.640): the file builtins over those descriptors -- File,
+# positioned reads and writes, lines, whole files as bytes, mkdir_p -- both widths.
 # host_fds (v0.1.634): the C runtime's descriptors -- fd_open with each mode,
 # read/write through the byte arena, seek with each whence, dup and dup2,
 # isatty, O_NONBLOCK, fd_last_errno -- and host_pipe, RV64 only (the C runtime
 # packs a pipe's two descriptors into one int). memu hands the guest the
 # host's own descriptors, so a write is in the file before the close, as on C.
 fdpass=0; fdfail=0
-for name in host_fds host_pipe; do
+for name in host_fds host_pipe host_files; do
   if "$MERE" -c "$ROOT/test/rv/$name.mere" > "$TMP/ref.c" 2>/dev/null \
      && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
     ( cd "$TMP" && ulimit -t 60; ./ref ) > "$TMP/i.out" 2>&1

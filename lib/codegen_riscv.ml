@@ -3640,6 +3640,9 @@ and compile_app env e =
     call_top env "rvcoro_transfer" args
   | Ast.Var "coro_scan_ints" when List.length args = 4 ->
     call_top env "rvcoro_scan_ints" args
+  (* v0.1.640: a File is its descriptor -- both directions are the word itself *)
+  | Ast.Var ("__rv_file_of_fd" | "__rv_fd_of_file") when List.length args = 1 ->
+    compile_expr env (List.hd args)
   | Ast.Var "__rv_peek" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i 0 a0 (ldf3 ()) a0 0x03)
