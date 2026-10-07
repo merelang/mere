@@ -624,6 +624,16 @@ let __libm_proc_setpriority = fn (w: int) -> fn (who: int) -> fn (pr: int) -> __
 // libc's shutdown(2): Linux's call 210, whose `how` (0 read, 1 write, 2 both)
 // is every platform's; 0, or -1
 let __libm_shutdown = fn (fd: int) -> fn (how: int) -> __rv_p0 (__rv_syscall 210 fd how 0 0);
+// v0.1.643: libc's listen(2), getppid(2), getpgid(2), getsid(2), setsid(2):
+// Linux's calls 201, 173, 155, 156, 157, which memu answers with the host's
+let __libm_listen = fn (fd: int) -> fn (backlog: int) -> __rv_p0 (__rv_syscall 201 fd backlog 0 0);
+let __rv_px = fn (r: int) ->
+  let _ = __rv_rtw_set 63 (if r < 0 then 0 - r else 0) in
+  if r < 0 then 0 - 1 else r;
+let __libm_getppid = fn (u: unit) -> __rv_px (__rv_syscall 173 0 0 0 0);
+let __libm_getpgid = fn (p: int) -> __rv_px (__rv_syscall 155 p 0 0 0);
+let __libm_getsid = fn (p: int) -> __rv_px (__rv_syscall 156 p 0 0 0);
+let __libm_setsid = fn (u: unit) -> __rv_px (__rv_syscall 157 0 0 0 0);
 // libc's socket(2): Linux's call 198 with Linux's numbers (AF_INET6 is 10);
 // memu makes the host's. The descriptor, or -1
 let __libm_socket = fn (d: int) -> fn (t: int) -> fn (p: int) ->

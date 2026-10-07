@@ -8,7 +8,7 @@
 // message said "RV32I:" (mere-ruby on RV64 reported `fd_pipe` that way). The
 // first word of a refusal is printed, so the 32- and 64-bit runs differ in
 // exactly that word.
-extern fn getppid: unit -> int;
+extern fn gethostid: unit -> int;
 
 let first_word = fn (s: str) ->
   let rec go = fn (i: int) ->
@@ -19,5 +19,5 @@ let first_word = fn (s: str) ->
 
 let _ = print_bytes (bytes_of_str ("a" ++ chr 0 ++ "b"));
 let _ = print "";
-let _ = print (try_or_msg (fn (u: unit) -> str_of_int (getppid ())) (fn (m: str) -> first_word m));
+let _ = print (try_or_msg (fn (u: unit) -> str_of_int (gethostid ())) (fn (m: str) -> first_word m));
 print (try_or_msg (fn (u: unit) -> str_of_int (run "true")) (fn (m: str) -> first_word m))
