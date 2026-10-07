@@ -860,12 +860,10 @@ let load_base = ref 0
    address: `LoadAddr` is eight bytes whatever it loads, and a `li` of any global
    address is two instructions at every base above 4 KB. The second pass asserts
    the size did not move rather than trusting that argument. *)
-(* Whether jumps are the two-instruction wide form. J-type reaches +/-1MB, so a
-   program with more than that much code cannot use it -- and until v0.1.383 it
-   did anyway, masked to 21 bits. `auipc` + `jalr` reaches +/-2GB. It costs four
-   bytes per jump, so only the programs that need it pay: the pass that measures
-   the code decides, and a program that fit before is byte-identical. *)
-let far_jumps = ref false
+(* Jump widths: J-type reaches +/-1MB, `auipc` + `jalr` +/-2GB. Until v0.1.632
+   one flag chose for the whole program (from v0.1.383; before that a far jump
+   was masked to 21 bits); now each jump and branch is as long as its own
+   distance needs (see item_sizes). *)
 
 let code_span = ref 0x200000
 let globals_base () = !load_base + !code_span
@@ -6464,25 +6462,77 @@ let emit_copy_str () =
    assembler's address pass, the encoder, the listing and the debug map -- and
    three of them said `Jal` was 4 bytes after the wide form arrived. A rule
    written in four places becomes four values; this is the one place. *)
-let item_size = function
+(* v0.1.632: EACH JUMP AS LONG AS ITS OWN DISTANCE. Until now one flag decided
+   for the whole program: past 512 KB of code every `Jal` was `auipc`+`jalr`
+   and every `Branch` three instructions, and below it every `Branch` was two
+   (the B-type was never used: it reaches only 4 KB). mere-ruby is 13.5 MB, and
+   in its startup the second halves of those long forms were about 15% of the
+   instructions run. Now each one starts short -- a `Branch` a B-type (4
+   bytes), a `Jal` a J-type (4) -- and is lengthened only when its target is out
+   of reach: a `Branch` to the inverted branch over a J-type (8) or over
+   `auipc`+`jalr` (12), a `Jal` to `auipc`+`jalr` (8). Lengthening only grows
+   the code, so repeating until nothing grows terminates. The four passes that
+   need sizes (addresses, encoding, the listing, the debug map) read the one
+   table this computes. *)
+let fits_b off = off land 1 = 0 && off >= -4096 && off <= 4094
+let fits_j off = off land 1 = 0 && off >= -1048576 && off <= 1048574
+let base_size = function
   | Label _ | Meta _ -> 0
-  | Word _ -> 4
-  | Jal _ -> if !far_jumps then 8 else 4
-  | Branch _ -> if !far_jumps then 12 else 8
+  | Word _ | Jal _ | Branch _ -> 4
   | LoadAddr _ -> 8
   | Bytes b -> String.length b
+let layout_memo : (item list * int array) option ref = ref None
+let item_sizes (prog : item list) : int array =
+  match !layout_memo with
+  | Some (p, sz) when p == prog -> sz
+  | _ ->
+    let items = Array.of_list prog in
+    let n = Array.length items in
+    let size = Array.map base_size items in
+    let pos = Array.make (n + 1) 0 in
+    let labels : (string, int) Hashtbl.t = Hashtbl.create 4096 in
+    let rec grow () =
+      Hashtbl.reset labels;
+      let a = ref 0 in
+      for i = 0 to n - 1 do
+        pos.(i) <- !a;
+        (match items.(i) with Label nm -> Hashtbl.replace labels nm !a | _ -> ());
+        a := !a + size.(i)
+      done;
+      let changed = ref false in
+      for i = 0 to n - 1 do
+        let need =
+          match items.(i) with
+          | Jal (_, nm) ->
+            (match Hashtbl.find_opt labels nm with
+             | Some t -> if fits_j (t - pos.(i)) then 4 else 8
+             | None -> 4)
+          | Branch (_, _, _, nm) ->
+            (match Hashtbl.find_opt labels nm with
+             | Some t ->
+               if fits_b (t - pos.(i)) then 4
+               else if fits_j (t - pos.(i) - 4) then 8 else 12
+             | None -> 4)
+          | _ -> size.(i) in
+        if need > size.(i) then (size.(i) <- need; changed := true)
+      done;
+      if !changed then grow () in
+    grow ();
+    layout_memo := Some (prog, size);
+    size
 
 let code_size (prog : item list) : int =
-  List.fold_left (fun n it -> n + item_size it) 0 prog
+  Array.fold_left ( + ) 0 (item_sizes prog)
 
 let assemble (prog : item list) : string =
+  let sizes = item_sizes prog in
   (* pass 1: label -> byte address *)
   let labels : (string, int) Hashtbl.t = Hashtbl.create 64 in
   let addr = ref 0 in
-  List.iter (fun it ->
+  List.iteri (fun i it ->
     match it with
     | Label name -> Hashtbl.replace labels name !addr
-    | it -> addr := !addr + item_size it
+    | _ -> addr := !addr + sizes.(i)
   ) prog;
   let target name here =
     match Hashtbl.find_opt labels name with
@@ -6503,12 +6553,12 @@ let assemble (prog : item list) : string =
     Buffer.add_char buf (Char.chr ((w lsr 24) land 0xFF))
   in
   let here = ref 0 in
-  List.iter (fun it ->
+  List.iteri (fun i it ->
     match it with
     | Label _ | Meta _ -> ()
     | Word w -> put_word (w land 0xFFFFFFFF); here := !here + 4
     | Jal (rd, name) ->
-      if !far_jumps then begin
+      if sizes.(i) = 8 then begin
         (* auipc s11, hi ; jalr rd, lo(s11). s11 is held back from the
            named-binding pool for this: there is no otherwise-free register --
            the first attempt used x31 because grepping for `t6` found nothing,
@@ -6525,10 +6575,14 @@ let assemble (prog : item list) : string =
         put_word (enc_j (target name !here) rd 0x6F); here := !here + 4
       end
     | Branch (f3, rs1, rs2, name) ->
-      (* Invert the condition and jump over the jump: a bare B-type is only ±4KB
-         and silently truncates. The jump it skips is J-type at ±1MB, or the wide
-         pair when the program is bigger than that. *)
-      if !far_jumps then begin
+      (* A B-type when the target is within its 4 KB (v0.1.632); otherwise
+         invert the condition and jump over the jump -- a bare B-type out of
+         reach would silently truncate. The jump it skips is J-type at ±1MB, or
+         the wide pair past that. *)
+      if sizes.(i) = 4 then begin
+        put_word (enc_b (target name !here) rs2 rs1 f3 0x63);
+        here := !here + 4
+      end else if sizes.(i) = 12 then begin
         put_word (enc_b 12 rs2 rs1 (f3 lxor 1) 0x63);       (* b<!cond> +12 *)
         let off = target name (!here + 4) in
         let hi = (off + 0x800) asr 12 in
@@ -6568,17 +6622,15 @@ let assemble (prog : item list) : string =
 
 (* --- assembly listing: a human-readable view of the emitted code --------- *)
 let listing (prog : item list) : string =
+  let sizes = item_sizes prog in
   let labels : (string, int) Hashtbl.t = Hashtbl.create 64 in
   let addr = ref 0 in
-  List.iter (fun it -> match it with
+  List.iteri (fun i it -> match it with
     | Label name -> Hashtbl.replace labels name !addr
-    | Meta _ -> ()
-    | Word _ | Jal _ -> addr := !addr + 4
-    | Branch _ | LoadAddr _ -> addr := !addr + 8
-    | Bytes b -> addr := !addr + String.length b) prog;
+    | _ -> addr := !addr + sizes.(i)) prog;
   let buf = Buffer.create 4096 in
   let here = ref 0 in
-  List.iter (fun it ->
+  List.iteri (fun i it ->
     match it with
     | Label name -> Buffer.add_string buf (Printf.sprintf "%s:\n" name)
     | Meta _ -> ()
@@ -6593,19 +6645,23 @@ let listing (prog : item list) : string =
       (* encoded only when it IS a J-type: in a wide layout the jump may be past
          J-type's reach, and the listing refused a program the binary built *)
       Buffer.add_string buf
-        (if !far_jumps
+        (if sizes.(i) = 8
          then Printf.sprintf "  %6x:  (auipc+jalr)  %s  (wide)\n" !here mn
          else Printf.sprintf "  %6x:  %08x  %s\n" !here (enc_j off rd 0x6F) mn);
-      here := !here + item_size it
+      here := !here + sizes.(i)
     | Branch (f3, rs1, rs2, name) ->
       let m = [| "beq"; "bne"; "?"; "?"; "blt"; "bge"; "bltu"; "bgeu" |].(f3) in
       let mn =
         if rs2 = 0 && f3 = 0 then Printf.sprintf "beqz %s, %s" (Riscv_disasm.r rs1) name
         else if rs2 = 0 && f3 = 1 then Printf.sprintf "bnez %s, %s" (Riscv_disasm.r rs1) name
         else Printf.sprintf "%s %s, %s, %s" m (Riscv_disasm.r rs1) (Riscv_disasm.r rs2) name in
-      Buffer.add_string buf (Printf.sprintf "  %6x:  (br+jal)  %s  (%s)\n" !here mn
-                               (if !far_jumps then "wide" else "long-range"));
-      here := !here + item_size it
+      let off = (try Hashtbl.find labels name with Not_found -> !here) - !here in
+      Buffer.add_string buf
+        (if sizes.(i) = 4
+         then Printf.sprintf "  %6x:  %08x  %s\n" !here (enc_b off rs2 rs1 f3 0x63) mn
+         else Printf.sprintf "  %6x:  (br+jal)  %s  (%s)\n" !here mn
+                (if sizes.(i) = 12 then "wide" else "long-range"));
+      here := !here + sizes.(i)
     | LoadAddr (rd, name) ->
       Buffer.add_string buf (Printf.sprintf "  %6x:  (la)      la %s, %s\n" !here (Riscv_disasm.r rd) name);
       here := !here + 8
@@ -6634,15 +6690,16 @@ let debug_map (prog : item list) : string =
   Buffer.add_string buf
     (Printf.sprintf "# mere-rv32 debug map v1 load_base=%d ram=%d\n"
        !load_base !ram_bytes);
+  let sizes = item_sizes prog in
   let addr = ref 0 in
-  List.iter (fun it ->
+  List.iteri (fun i it ->
     match it with
     | Label name ->
       Buffer.add_string buf (Printf.sprintf "S %d %s\n" (!load_base + !addr) name)
     | Meta text ->
       Buffer.add_string buf (Printf.sprintf "%c %d %s\n" text.[0] (!load_base + !addr)
                                (String.sub text 2 (String.length text - 2)))
-    | it -> addr := !addr + item_size it
+    | _ -> addr := !addr + sizes.(i)
   ) prog;
   Buffer.contents buf
 
@@ -7014,26 +7071,21 @@ let prepare_main (prog : Ast.program) : Ast.expr =
 
 let build_items_sized (prog : Ast.program) : item list =
   let full = prepare_main prog in
-  far_jumps := false;
   code_span := 0x200000;
   let rec settle round items =
+    (* each jump's length is the assembler's (item_sizes); what is left to
+       settle here is where the globals start, after the code *)
     let size = code_size items in
-    (* J-type reaches 1 MB; decide at half of it so the four bytes per jump that
-       the wide form adds cannot carry a program over the edge afterwards *)
-    let want_far = size > 0x80000 in
     (* a megabyte of rounding and a megabyte of room, so a small edit does not
        move the base *)
     let want_span = let w = ((size / 0x100000) + 2) * 0x100000 in
                     if w > 0x200000 then w else 0x200000 in
-    if want_far = !far_jumps && want_span = !code_span then items
+    if want_span = !code_span then items
     else if round >= 4 then
       failwith (Printf.sprintf
         "codegen_riscv: the layout did not settle in %d rounds (size=%d, \
-         far_jumps %b -> %b, span %d -> %d). Wide jumps grow the code and the \
-         code moves the globals; if those two chase each other the thresholds \
-         are too close together." round size !far_jumps want_far !code_span want_span)
+         span %d -> %d)." round size !code_span want_span)
     else begin
-      far_jumps := want_far;
       code_span := want_span;
       settle (round + 1) (build_items prog full)
     end

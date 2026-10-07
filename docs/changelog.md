@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.632 — 2026-10-07
+
+_On RISC-V each branch and jump is as long as its own distance needs: a branch is one instruction when its target is within 4 KB, a jump one within 1 MB. mere-ruby's startup runs 15% fewer instructions and its image is 9% smaller._
+
+One flag used to decide for the whole program: past 512 KB of code every jump
+was `auipc`+`jalr` and every conditional branch three instructions (an inverted
+branch over the pair), and below it every branch was two -- the one-instruction
+B-type was never used, because it reaches only 4 KB and a bare one out of range
+silently truncates. mere-ruby is 13.5 MB of RV64. Its startup (an empty `.rb`)
+matched against the listing: 9.8% of the instructions run were the tails of long
+branches and 11.4% were `auipc`+`jalr` pairs, half of which a J-type needs.
+
+Now every `Branch` starts as a B-type and every `Jal` as a J-type, and only the
+ones whose target is out of reach are lengthened -- a branch to the inverted
+branch over a J-type, then over `auipc`+`jalr`; a jump to `auipc`+`jalr` --
+repeating until nothing grows (lengthening only grows the code, so it stops).
+The address pass, the encoder, the listing and the debug map read the one size
+table; nothing else encodes a branch.
+
+mere-ruby on RV64: startup 364M -> 311M instructions (-14.6%), image 13.5 ->
+12.3 MB; corpus 165, 213, 235, 274 and 117 match as before, each a little
+faster. `scripts/rv_listing_check.sh`'s generated program now has 6000
+functions (over 2 MB), each also calling the one halfway round, so that the
+wide form it exists to check is still taken -- with the old rule every call in
+it was wide; now only the far ones are.
+
 ## v0.1.631 — 2026-10-07
 
 _RISC-V answers the C runtime's `getpid`, `access`, `rmdir`, `file_stat`, `file_lstat` and `file_stat_field` externs through the host, as it answers the libm names: mere-ruby's `Dir.mktmpdir` (which names its directory with the pid) and `File.executable?` no longer fail there._

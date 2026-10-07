@@ -65,16 +65,18 @@ for f in "$ROOT"/test/parity/*.mere; do
   check_one -rv "$f"; check_one -rv64 "$f"
 done
 
-# wide layout: each function calls the next one (on a branch never taken), so
-# reachability keeps all 3000 of them -- over 1 MB of code, every jump wide and
-# the far ones past J-type's reach
+# wide layout: each function calls the next one and the one halfway round (on
+# a branch never taken), so reachability keeps all 6000 of them -- over 2 MB of
+# code, and the halfway calls past J-type's reach. (Until v0.1.632 one flag made
+# every jump wide past 512 KB; now each is as long as its own distance, so the
+# far ones have to be far.)
 W="$TMP/wide.mere"
 awk 'BEGIN {
-  n = 3000
+  n = 6000
   for (i = 0; i < n; i++) {
     printf "let rec f%d = fn (x: int) -> let a = x * %d + 1 in let b = a / 3 + x in let c = (if b > %d then b - a else a + b) in\n", i, i + 3, i
     printf "  let d = c * c - a in let e = (if d %% 2 == 0 then d / 2 else d * 3 + 1) in\n"
-    if (i + 1 < n) printf "  e + a + b + c + (if x < 0 - 1000000000 then f%d (x + 1) else 0);\n", i + 1
+    if (i + 1 < n) printf "  e + a + b + c + (if x < 0 - 1000000000 then f%d (x + 1) + f%d x else 0);\n", i + 1, (i + n / 2) % n
     else printf "  e + a + b + c;\n"
   }
   printf "print (str_of_int (f0 7))\n"
