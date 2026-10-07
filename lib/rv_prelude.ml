@@ -416,6 +416,163 @@ let rvshow_str = fn (s: str) ->
 let vec_to_list = fn v ->
   let rec go = fn (i: int) -> fn acc -> if i < 0 then acc else go (i - 1) (Cons (vec_get v i, acc)) in
   go (vec_len v - 1) Nil;
+// v0.1.640: the C runtime's files, over the descriptors 634 answers. A File
+// is the descriptor; each call keeps the C runtime's contract -- what it
+// returns at the end, and how it fails (a catchable fail naming the path, or,
+// where C prints and exits, the same).
+let __rv_w = fn (u: unit) -> if __rv_xlen () == 64 then 8 else 4;
+let __rv_die = fn (msg: str) -> let _ = print_err msg in exit 1;
+let file_open = fn (p: str) ->
+  let fd = __rv_syscall 56 (0 - 100) (__rv_cstr p) 0 0 in
+  if fd < 0 then fail p else __rv_file_of_fd fd;
+// read-write, made if absent (fopen "r+b", then "w+b")
+let file_openrw = fn (p: str) ->
+  let fd = __rv_syscall 56 (0 - 100) (__rv_cstr p) 2 0 in
+  let fd2 = if fd >= 0 then fd else __rv_syscall 56 (0 - 100) (__rv_cstr p) (2 + 64 + 512) 438 in
+  if fd2 < 0 then fail p else __rv_file_of_fd fd2;
+let file_close = fn (f: File) -> let _ = __rv_syscall 57 (__rv_fd_of_file f) 0 0 0 in ();
+let file_fsync = fn (f: File) -> let _ = __rv_syscall 82 (__rv_fd_of_file f) 0 0 0 in ();
+// one line without its newline; None only at the end with nothing read
+let file_read_line = fn (f: File) ->
+  let fd = __rv_fd_of_file f in
+  let one = str_repeat " " 1 in
+  let at = __rv_addr one + __rv_w () in
+  let sb = strbuf_new () in
+  let rec go = fn (n: int) ->
+    if __rv_syscall 63 fd at 1 0 <= 0 then (if n == 0 then None else Some (strbuf_to_str sb))
+    else
+      (let c = __rv_peekb at in
+       if c == 10 then Some (strbuf_to_str sb)
+       else (let _ = strbuf_push sb (chr c) in go (n + 1))) in
+  go 0;
+// read up to len bytes at off (fewer at the end of the file) into buf's bytes
+let __rv_pread = fn (fd: int) -> fn (off: int) -> fn (len: int) -> fn (at: int) ->
+  if off < 0 || len <= 0 then 0
+  else if __rv_syscall 62 fd off 0 0 < 0 then 0
+  else
+    (let rec go = fn (got: int) ->
+       if got >= len then got
+       else (let r = __rv_syscall 63 fd (at + got) (len - got) 0 in if r <= 0 then got else go (got + r)) in
+     go 0);
+let file_pread = fn (f: File) -> fn (off: int) -> fn (len: int) ->
+  let v = vec_new () in
+  let buf = str_repeat " " (if len > 0 then len else 1) in
+  let at = __rv_addr buf + __rv_w () in
+  let n = __rv_pread (__rv_fd_of_file f) off len at in
+  let rec fill = fn (i: int) -> if i >= n then v else (let _ = vec_push v (__rv_peekb (at + i)) in fill (i + 1)) in
+  fill 0;
+let file_pread_bytes = fn (f: File) -> fn (off: int) -> fn (len: int) ->
+  let buf = str_repeat " " (if len > 0 then len else 1) in
+  let at = __rv_addr buf + __rv_w () in
+  let n = __rv_pread (__rv_fd_of_file f) off len at in
+  bytes_of_str (substring buf 0 n);
+// write all of len bytes at at; the count written
+let __rv_write_at = fn (fd: int) -> fn (at: int) -> fn (len: int) ->
+  let rec go = fn (put: int) ->
+    if put >= len then put
+    else (let r = __rv_syscall 64 fd (at + put) (len - put) 0 in if r <= 0 then put else go (put + r)) in
+  go 0;
+// the Vec's bytes as a str, failing at the first that is not one (whose name
+// says which builtin asked); the bytes before it are in pre
+let __rv_vec_bytes = fn (who: str) -> fn v -> fn pre ->
+  let rec go = fn (i: int) ->
+    if i >= vec_len v then ()
+    else
+      (let b = vec_get v i in
+       if b < 0 || b > 255 then fail (who ++ ": byte value " ++ str_of_int b ++ " out of range 0..255")
+       else (let _ = strbuf_push pre (chr b) in go (i + 1))) in
+  go 0;
+let file_pwrite = fn (f: File) -> fn (off: int) -> fn v ->
+  let fd = __rv_fd_of_file f in
+  if off < 0 then 0
+  else if __rv_syscall 62 fd off 0 0 < 0 then 0
+  else
+    (let sb = strbuf_new () in
+     let _ = try_or (fn (u: unit) -> __rv_vec_bytes "file_pwrite" v sb) () in
+     let s = strbuf_to_str sb in
+     let _ = __rv_write_at fd (__rv_addr s + __rv_w ()) (str_len s) in
+     let _ = (if str_len s < vec_len v then __rv_vec_bytes "file_pwrite" v (strbuf_new ()) else ()) in
+     vec_len v);
+let file_pwrite_bytes = fn (f: File) -> fn (off: int) -> fn (b: bytes) ->
+  let fd = __rv_fd_of_file f in
+  if off < 0 then 0
+  else if __rv_syscall 62 fd off 0 0 < 0 then 0
+  else (let s = str_of_bytes b in __rv_write_at fd (__rv_addr s + __rv_w ()) (str_len s));
+let read_file_bytes = fn (p: str) ->
+  let fd = __rv_syscall 56 (0 - 100) (__rv_cstr p) 0 0 in
+  if fd < 0 then __rv_die ("read_file_bytes: cannot open " ++ p)
+  else
+    (let _ = __rv_syscall 57 fd 0 0 0 in
+     let s = read_file p in
+     let v = vec_new () in
+     let b = bytes_of_str s in
+     let rec fill = fn (i: int) -> if i >= str_len s then v else (let _ = vec_push v (__bytes_get_unchecked b i) in fill (i + 1)) in
+     fill 0);
+let write_file_bytes = fn (p: str) -> fn v ->
+  let fd = __rv_syscall 56 (0 - 100) (__rv_cstr p) (1 + 64 + 512) 438 in
+  if fd < 0 then __rv_die ("write_file_bytes: cannot open " ++ p)
+  else
+    (let sb = strbuf_new () in
+     let ok = try_or (fn (u: unit) -> let _ = __rv_vec_bytes "write_file_bytes" v sb in true) false in
+     let s = strbuf_to_str sb in
+     let _ = __rv_write_at fd (__rv_addr s + __rv_w ()) (str_len s) in
+     let _ = __rv_syscall 57 fd 0 0 0 in
+     if ok then () else __rv_vec_bytes "write_file_bytes" v (strbuf_new ()));
+let write_bytes = fn (p: str) -> fn (b: bytes) ->
+  let fd = __rv_syscall 56 (0 - 100) (__rv_cstr p) (1 + 64 + 512) 438 in
+  if fd < 0 then __rv_die ("write_bytes: " ++ p)
+  else
+    (let s = str_of_bytes b in
+     let _ = __rv_write_at fd (__rv_addr s + __rv_w ()) (str_len s) in
+     let _ = __rv_syscall 57 fd 0 0 0 in
+     ());
+// one stdin line without its newline; "" at the end
+let read_line = fn (u: unit) ->
+  let one = str_repeat " " 1 in
+  let at = __rv_addr one + __rv_w () in
+  let sb = strbuf_new () in
+  let rec go = fn (u: unit) ->
+    if __rv_syscall 63 0 at 1 0 <= 0 then strbuf_to_str sb
+    else (let c = __rv_peekb at in if c == 10 then strbuf_to_str sb else (let _ = strbuf_push sb (chr c) in go ())) in
+  go ();
+// the file's lines, one trailing newline dropped
+let read_lines = fn (p: str) ->
+  let s = read_file p in
+  let n0 = str_len s in
+  let n = if n0 > 0 && ord (char_at s (n0 - 1)) == 10 then n0 - 1 else n0 in
+  let b = bytes_of_str s in
+  let rec go = fn (i: int) -> fn (end_: int) -> fn acc ->
+    if i < 0 then Cons (substring s 0 end_, acc)
+    else if __bytes_get_unchecked b i == 10 then go (i - 1) i (Cons (substring s (i + 1) end_, acc))
+    else go (i - 1) end_ acc in
+  if n0 == 0 then Nil else go (n - 1) n Nil;
+let file_size = fn (p: str) -> if __libm_file_stat p < 0 then fail p else __libm_file_stat_field 7;
+let file_mtime = fn (p: str) -> if __libm_file_stat p < 0 then fail p else float_of_int (__libm_file_stat_field 9);
+// the names, sorted as strcmp sorts them
+let list_dir = fn (p: str) ->
+  let s = dir_entries p in
+  if str_len s == 0 && __rv_rtw 63 != 0 then fail p
+  else
+    (let v = vec_new () in
+     let b = bytes_of_str s in
+     let rec split = fn (i: int) -> fn (st: int) ->
+       if i >= str_len s then ()
+       else if __bytes_get_unchecked b i == 0 then (let _ = vec_push v (substring s st i) in split (i + 1) (i + 1))
+       else split (i + 1) st in
+     let _ = split 0 0 in
+     let _ = vec_sort v (fn (x: str) -> fn (y: str) -> if x < y then 0 - 1 else if x == y then 0 else 1) in
+     vec_to_list v);
+// mkdir -p: every prefix that ends at a slash, then the whole; an existing one is fine
+let mkdir_p = fn (p: str) ->
+  let n = str_len p in
+  let b = bytes_of_str p in
+  let mk = fn (q: str) ->
+    if dir_create q 493 < 0 && __rv_rtw 63 != 17 then fail p else () in
+  let rec go = fn (i: int) ->
+    if i > n then ()
+    else if i == n || __bytes_get_unchecked b i == 47 then (let _ = mk (substring p 0 i) in go (i + 1))
+    else go (i + 1) in
+  if n == 0 then () else go 1;
 // len of a list: its Cons cells
 let rvlist_len = fn l ->
   let rec go = fn l -> fn (n: int) -> match l with | Nil -> n | Cons (_, t) -> go t (n + 1) in

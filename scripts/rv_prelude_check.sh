@@ -28,6 +28,33 @@ COUNT=$(printf '%s\n' $NAMES | wc -l | tr -d ' ')
 probe_for() {
   case "$1" in
     not) echo 'let _ = print_int (if not false then 1 else 0);' ;;
+    # v0.1.640: every file builtin, in one program each (they need not run)
+    file_open|file_openrw) echo "let f = $1 \"x\";
+let _ = file_close f;" ;;
+    file_close|file_fsync) echo "let f = file_openrw \"x\";
+let _ = $1 f;" ;;
+    file_read_line) echo 'let f = file_open "x";
+let _ = print (match file_read_line f with | Some l -> l | None -> "-");' ;;
+    file_pread) echo 'let f = file_open "x";
+let _ = print_int (vec_len (file_pread f 0 4));' ;;
+    file_pread_bytes) echo 'let f = file_open "x";
+let _ = print_int (bytes_len (file_pread_bytes f 0 4));' ;;
+    file_pwrite) echo 'let f = file_openrw "x";
+let v = vec_new ();
+let _ = vec_push v 1;
+let _ = print_int (file_pwrite f 0 v);' ;;
+    file_pwrite_bytes) echo 'let f = file_openrw "x";
+let _ = print_int (file_pwrite_bytes f 0 (bytes_of_str "a"));' ;;
+    read_file_bytes) echo 'let _ = print_int (vec_len (read_file_bytes "x"));' ;;
+    write_file_bytes) echo 'let v = vec_new ();
+let _ = write_file_bytes "x" v;' ;;
+    write_bytes) echo 'let _ = write_bytes "x" (bytes_of_str "a");' ;;
+    read_line) echo 'let _ = print (read_line ());' ;;
+    read_lines) echo 'let _ = print_int (list_len (read_lines "x"));' ;;
+    file_size) echo 'let _ = print_int (file_size "x");' ;;
+    file_mtime) echo 'let _ = print_int (if file_mtime "x" > 0.0 then 1 else 0);' ;;
+    list_dir) echo 'let _ = print_int (list_len (list_dir "x"));' ;;
+    mkdir_p) echo 'let _ = mkdir_p "x/y";' ;;
     # v0.1.639
     rvshow_str) echo 'let _ = print (show "a");' ;;
     vec_to_list) echo 'let v = vec_new ();

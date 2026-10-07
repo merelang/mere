@@ -4,6 +4,26 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.640 — 2026-10-07
+
+_The file builtins on RISC-V: `File` (`file_open`, `file_openrw`, `file_close`, `file_fsync`, `file_read_line`), positioned reads and writes of a Vec or of bytes, `read_file_bytes` / `write_file_bytes` / `write_bytes`, `read_line` / `read_lines`, `file_size`, `file_mtime`, `list_dir` and `mkdir_p`._
+
+v0.1.634 gave RISC-V the host's descriptors; these are the C runtime's file
+builtins written over them in the prelude, each keeping the C contract: what
+it returns at the end of a file (`None`, `""`, a shorter read), what it does
+with an offset or a length out of range (an empty answer, a count of 0), and
+how it fails -- a catchable fail naming the path where C has one, the byte
+range's message (`file_pwrite: byte value 300 out of range 0..255`, after the
+bytes before it are written, as C's fputc loop leaves them), and a message on
+stderr and exit 1 where C prints and exits (`read_file_bytes: cannot open`).
+A `File` is its descriptor: two internal primitives say so to the typer.
+`list_dir` sorts as C's `qsort(strcmp)` does.
+
+`test/rv/host_files.mere` (new, both widths in rv_exec) writes, reads back,
+seeks past the end, refuses a byte out of range, reads lines, round-trips a
+whole file, lists a directory and makes a nested one, line for line against
+C (also with gcc on Linux). host_matrix's RV column gains 19 `yes`.
+
 ## v0.1.639 — 2026-10-07
 
 _`show` at every type on RISC-V -- floats, strs, bools, unit, tuples, records, variants, lists and Vecs, not only ints -- and `vec_to_list`. The parity programs `-rv64` refuses at compile time go from 57 to 46._
