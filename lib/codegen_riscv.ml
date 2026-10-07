@@ -547,7 +547,9 @@ let libm_sigs : (string * string) list =
          itself, each with the C runtime's own contract (file_stat keeps one
          snapshot that file_stat_field reads) *)
       ("getpid", "u>i"); ("access", "si>i"); ("rmdir", "s>i");
-      ("file_stat", "s>i"); ("file_lstat", "s>i"); ("file_stat_field", "i>i") ]
+      ("file_stat", "s>i"); ("file_lstat", "s>i"); ("file_stat_field", "i>i");
+      (* v0.1.633: and where the process is, and a file's mode *)
+      ("chdir", "s>i"); ("file_chmod", "si>i") ]
 let libm_bound : (string, unit) Hashtbl.t = Hashtbl.create 16
 let rec libm_sig_of (t : Ast.ty) : string =
   match Ast.walk t with

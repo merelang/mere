@@ -4,6 +4,40 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.633 — 2026-10-07
+
+_`proc_cwd` (getcwd(3)) on every backend; RISC-V answers `chdir` and `file_chmod`; and `read_stdin` / `read_line` / `read_key` wait on a non-blocking stdin instead of taking `EAGAIN` for the end of the input._
+
+Three things mere-ruby asked a shell for, or got wrong without one:
+
+- **Where the process is.** Once mere-ruby read `ENV` straight from the
+  environment (v0.1.630), `PWD` kept whatever the parent had left there, and
+  `Dir.pwd` asked `pwd -P`. `proc_cwd : unit -> str` is getcwd(3), the physical
+  path -- interpreter, C, LLVM, Wasm (the host's), and RISC-V through the
+  `getcwd` syscall.
+- **`chdir` and `file_chmod` on RISC-V.** Both are the C runtime's externs
+  (mere-ruby's `Dir.chdir` and `File.chmod`); a declaration with the C type is
+  now answered through `chdir` and `fchmodat`, as v0.1.631 answers `getpid` and
+  `stat`. corpus 239 stopped at `Dir.chdir` on RV64.
+- **A non-blocking stdin.** ruby's `IO.pipe` makes both ends `O_NONBLOCK`, and a
+  child that reads its script from such a pipe asks before the parent has
+  written: `read(2)` says `EAGAIN`, and the C runtime's readers took that for
+  the end -- the child got `""` and ended, and the parent's write met a closed
+  pipe. They now `poll` for the descriptor to become readable and read again;
+  the Wasm host sleeps a moment and asks again. memu reads through the same C
+  runtime, so a RISC-V guest's stdin waits too.
+
+memu answers `getcwd`, `chdir` and `fchmodat` from the host's (its d2-633
+change, which needs this compiler to build).
+
+`test/parity/proc_cwd.mere` on every backend and, through rv_exec, RV64 and
+RV32; `test/rv/host_externs.mere` adds chdir (into a directory, a relative
+write, back, `proc_cwd` before and after) and file_chmod, line for line against
+C; `scripts/stdin_nonblock_check.sh` (new, in CI) runs a C and a Wasm child on a
+non-blocking pipe the parent writes only after the child says it is up, and the
+C program with the wait taken out must read nothing (it does, on macOS and on
+Linux with gcc).
+
 ## v0.1.632 — 2026-10-07
 
 _On RISC-V each branch and jump is as long as its own distance needs: a branch is one instruction when its target is within 4 KB, a jump one within 1 MB. mere-ruby's startup runs 15% fewer instructions and its image is 9% smaller._

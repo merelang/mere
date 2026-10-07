@@ -3208,6 +3208,11 @@ let initial_env : env =
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyInt)));
     ("env_pairs",
        mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
+    (* v0.1.633: getcwd(3) -- where the process is, the physical path (the
+       environment's PWD is whatever the parent left there); "" if it cannot
+       be had *)
+    ("proc_cwd",
+       mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     ("env_var",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyCon ("option", [Ast.TyStr]))));
     ("args",

@@ -265,6 +265,15 @@ let __libm_getpid = fn (u: unit) -> __rv_syscall 172 0 0 0 0;
 let __libm_access = fn (p: str) -> fn (mode: int) ->
   if __rv_syscall 48 (0 - 100) (__rv_cstr p) mode 0 < 0 then 0 - 1 else 0;
 let __libm_rmdir = fn (p: str) -> dir_remove p;
+// v0.1.633: chdir, and fchmodat for file_chmod (0, or -1 as the C runtime's)
+let __libm_chdir = fn (p: str) -> if __rv_syscall 49 (__rv_cstr p) 0 0 0 < 0 then 0 - 1 else 0;
+let __libm_file_chmod = fn (p: str) -> fn (mode: int) ->
+  if __rv_syscall 53 (0 - 100) (__rv_cstr p) mode 0 < 0 then 0 - 1 else 0;
+// getcwd: the syscall answers the length with its NUL, or a negative errno
+let proc_cwd = fn (u: unit) ->
+  let buf = str_repeat " " 4096 in
+  let r = __rv_syscall 17 (__rv_addr buf + (if __rv_xlen () == 64 then 8 else 4)) 4096 0 0 in
+  if r <= 0 then "" else substring buf 0 (r - 1);
 let __rv_stat_buf = str_repeat " " 136;
 let __rv_stat_at = fn (u: unit) -> __rv_addr __rv_stat_buf + (if __rv_xlen () == 64 then 8 else 4);
 let __rv_stat = fn (p: str) -> fn (flags: int) ->

@@ -66,8 +66,8 @@ if [ "${1:-}" = "--poison" ]; then
     fi
   }
   run_poison "a builtin drops out of NAMES" \
-    "probed 18 builtins, expected 19" \
-    WASM_STUB_NAMES="run env_var file_exists file_delete dir_create dir_entries dir_remove env_pairs args read_file file_size read_file_bytes read_stdin file_openrw write_file_bytes print_err print_no_nl print_bytes"
+    "probed 19 builtins, expected 20" \
+    WASM_STUB_NAMES="run env_var file_exists file_delete dir_create dir_entries dir_remove env_pairs proc_cwd args read_file file_size read_file_bytes read_stdin file_openrw write_file_bytes print_err print_no_nl print_bytes"
   run_poison "the host-surface grep stops matching" \
     "the host surface came back as" \
     SURFACE_FLOOR=99
@@ -117,6 +117,8 @@ probe() {
     dir_entries)     echo "let _ = dir_create \"$tmp/dep\" (0 - 1) in let _ = write_file \"$tmp/dep/f\" \"x\" in let e = dir_entries \"$tmp/dep\" in let _ = file_delete \"$tmp/dep/f\" in let _ = dir_remove \"$tmp/dep\" in str_of_int (str_len e)" ;;
     dir_remove)      echo "let _ = dir_create \"$tmp/drp\" (0 - 1) in let a = dir_remove \"$tmp/drp\" in let b = dir_remove \"$tmp/drp\" in str_of_int a ++ str_of_int b" ;;
     env_pairs)       echo 'if str_contains (env_pairs ()) "MERE_STUB_PROBE=set_by_the_gate" then "yes" else "no"' ;;
+    # v0.1.633: the gate's own directory, which a stub would not know
+    proc_cwd)        echo "if file_exists (proc_cwd () ++ \"/scripts/wasm_stub_check.sh\") then \"here\" else \"elsewhere\"" ;;
     # A pointer is not an answer: `args ()` prints an address on C. Its length is.
     args)            echo 'show (list_len (args ()))' ;;
     # `show` on both sides: C prints a bool as 1 and Wasm prints it as true, so
@@ -144,7 +146,7 @@ probe() {
   esac
 }
 
-NAMES="${WASM_STUB_NAMES-run env_var file_exists file_delete dir_create dir_entries dir_remove env_pairs args read_file file_size read_file_bytes read_line read_stdin file_openrw write_file_bytes print_err print_no_nl print_bytes}"
+NAMES="${WASM_STUB_NAMES-run env_var file_exists file_delete dir_create dir_entries dir_remove env_pairs proc_cwd args read_file file_size read_file_bytes read_line read_stdin file_openrw write_file_bytes print_err print_no_nl print_bytes}"
 
 # Both backends read the same bytes. Without this, `read_line` answers "" on C
 # too -- the gate would compare two empty strings and call the stub a host.
@@ -187,7 +189,7 @@ for b in $NAMES; do
   checked=$((checked + 1))
 done
 
-NAME_FLOOR=${NAME_FLOOR-19}
+NAME_FLOOR=${NAME_FLOOR-20}
 [ "$checked" -ge "$NAME_FLOOR" ] || { echo "wasm_stub: FAIL — probed $checked builtins, expected $NAME_FLOOR"; exit 1; }
 
 # THE DENOMINATOR. "10 builtins probed, 0 stubs" says nothing about the

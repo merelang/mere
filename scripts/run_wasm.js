@@ -419,6 +419,11 @@ const wasmPath = process.argv[2];
     dir_remove: (pathPtr) => {
       try { fs.rmdirSync(readCStr(pathPtr)); return 0; } catch (e) { return -1; }
     },
+    // v0.1.633: getcwd(3), the physical path
+    proc_cwd: () => {
+      try { return writeStrBytes(Buffer.from(fs.realpathSync(process.cwd()), "utf8")); }
+      catch (e) { return writeStrBytes(Buffer.alloc(0)); }
+    },
     env_pairs: () => {
       const parts = [];
       for (const [k, v] of Object.entries(process.env)) parts.push(Buffer.from(k + "=" + v + "\0", "utf8"));
