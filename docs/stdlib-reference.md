@@ -598,6 +598,20 @@ Linux-numbered syscalls (`getpid`, `faccessat`, `unlinkat`, `newfstatat` into th
 riscv64 `struct stat` layout on both widths), which memu answers.
 `test/rv/host_externs.mere` holds them to the C backend's answers in rv_exec_check.
 
+v0.1.634 adds the C runtime's descriptors and the byte arena their bytes cross:
+`fd_open : str -> str -> int -> int` (a mode as fopen takes it), `fd_read` /
+`fd_write : int -> int -> int -> int` (descriptor, arena offset, count),
+`fd_close`, `fd_seek` (whence 0/1/2), `fd_dup`, `fd_sync`, `fd_isatty`,
+`fd_pipe : unit -> int` (RV64 only: both descriptors packed into one int, read end
+high), `fd_last_errno : unit -> int`, `io_set_nonblocking`, libc's `dup2` and
+`fsync`, and `mem_alloc` / `mem_set_u8` / `mem_get_u8` / `mem_copy_str` /
+`mem_to_str` over a 4 MB arena taken on first use, and `proc_sig_noop` /
+`proc_sig_default` (through `rt_sigaction`, as `SIG_IGN` / `SIG_DFL`). memu hands the guest the host's
+own descriptors, so a write is in the file before the close and a pipe is a pipe.
+The errno is Linux's (`EAGAIN` is 11 here, 35 on a macOS host).
+`test/rv/host_fds.mere` (both widths) and `test/rv/host_pipe.mere` (RV64) hold them
+to the C backend's answers.
+
 **★ Integer `/` and `%` by zero raise** (v0.1.247): `division by zero` and
 `modulo by zero`, catchable with `try_or`, on the interpreter and the C, LLVM and
 Wasm backends. It cost a branch per division to make that true, and it was worth it

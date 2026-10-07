@@ -1,0 +1,96 @@
+// The C runtime's descriptors on RISC-V (v0.1.634): fd_open with each mode,
+// fd_write and fd_read through the byte arena (mem_*), fd_seek with each
+// whence, fd_sync, fd_dup and dup2, fd_isatty, a pipe, O_NONBLOCK, and the
+// errno fd_last_errno keeps. What the guest reads back it wrote itself, so
+// every line is a fact both sides must agree on; rv_exec compares them with
+// the C backend's, on both widths (the pipe only on RV64 -- a 32-bit int has
+// no room for the two descriptors the C runtime packs into one).
+extern fn fd_open: str -> str -> int -> int;
+extern fn fd_read: int -> int -> int -> int;
+extern fn fd_write: int -> int -> int -> int;
+extern fn fd_close: int -> int;
+extern fn fd_seek: int -> int -> int -> int;
+extern fn fd_dup: int -> int;
+extern fn fd_sync: int -> int;
+extern fn fd_isatty: int -> int;
+extern fn fd_pipe: unit -> int;
+extern fn fd_last_errno: unit -> int;
+extern fn dup2: int -> int -> int;
+extern fn fsync: int -> int;
+extern fn io_set_nonblocking: int -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_set_u8: int -> int -> int -> int;
+extern fn mem_get_u8: int -> int -> int;
+extern fn mem_copy_str: int -> int -> str -> int;
+extern fn mem_to_str: int -> int -> str;
+let buf = mem_alloc 256;
+let wr = fn (fd: int) -> fn (s: str) -> let n = mem_copy_str buf 0 s in fd_write fd buf n;
+let rd = fn (fd: int) -> fn (cap: int) ->
+  let n = fd_read fd buf cap in if n < 0 then "<" ++ str_of_int n ++ ">" else mem_to_str buf n;
+// the arena: bytes in, bytes out, and a 0 in the middle
+let _ = mem_set_u8 buf 10 65;
+let _ = mem_set_u8 buf 11 300;
+let _ = print_int (mem_get_u8 buf 10);
+let _ = print_int (mem_get_u8 buf 11);
+let _ = print (if mem_to_str buf 0 == "" then "empty" else "not empty");
+// "w" creates and truncates; a write is in the file before the close
+let f1 = fd_open "rv_fds.txt" "w" 420;
+let _ = print_int (if f1 > 2 then 1 else 0);
+let _ = print_int (wr f1 "hello, ");
+let _ = print_int (wr f1 "world\n");
+let _ = print_int (fd_sync f1);
+let _ = print_int (fsync f1);
+let _ = print (read_file "rv_fds.txt");
+let _ = print_int (fd_close f1);
+let _ = print_int (fd_close f1);
+let _ = print_int (if fd_last_errno () == 9 then 1 else 0);
+// "r": read, seek from each end, read again
+let f2 = fd_open "rv_fds.txt" "r" 0;
+let _ = print (rd f2 5);
+let _ = print_int (fd_seek f2 0 1);
+let _ = print_int (fd_seek f2 2 1);
+let _ = print (rd f2 5);
+let _ = print_int (fd_seek f2 (0 - 3) 2);
+let _ = print (rd f2 100);
+let _ = print (rd f2 100);
+let _ = print_int (wr f2 "no");
+let _ = print_int (if fd_last_errno () == 9 then 1 else 0);
+// dup shares the offset; dup2 onto a chosen number
+let d = fd_dup f2;
+let _ = print_int (if d > f2 then 1 else 0);
+let _ = print_int (fd_seek d 0 0);
+let _ = print_int (fd_seek f2 0 1);
+let _ = print_int (dup2 f2 20);
+let _ = print (rd 20 4);
+let _ = print_int (fd_close 20);
+let _ = print_int (fd_close d);
+let _ = print_int (fd_close f2);
+// "a" appends wherever the offset is; "r+" overwrites in place
+let f3 = fd_open "rv_fds.txt" "a" 420;
+let _ = print_int (wr f3 "more\n");
+let _ = print_int (fd_close f3);
+let f4 = fd_open "rv_fds.txt" "r+" 0;
+let _ = print_int (wr f4 "HELLO");
+let _ = print_int (fd_seek f4 0 0);
+let _ = print (rd f4 100);
+let _ = print_int (fd_close f4);
+// "w+" truncates and reads back what it wrote
+let f5 = fd_open "rv_fds.txt" "w+" 420;
+let _ = print_int (wr f5 "abc");
+let _ = print_int (fd_seek f5 1 0);
+let _ = print (rd f5 10);
+let _ = print_int (fd_isatty f5);
+let _ = print_int (fd_last_errno ());
+let _ = print_int (io_set_nonblocking f5);
+let _ = print_int (fd_close f5);
+// what fails, and why
+let _ = print_int (fd_open "rv_fds_absent/x" "r" 0);
+let _ = print_int (fd_last_errno ());
+let _ = print_int (fd_open "rv_fds.txt" "q" 0);
+let _ = print_int (fd_last_errno ());
+let _ = print_int (fd_seek 77 0 0);
+let _ = print_int (fd_last_errno ());
+let _ = print_int (fd_isatty (0 - 1));
+let _ = print_int (fd_last_errno ());
+let _ = file_delete "rv_fds.txt";
+print_int (fd_open "rv_fds.txt" "r" 0)

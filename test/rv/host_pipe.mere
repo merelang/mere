@@ -1,0 +1,30 @@
+// A pipe on RISC-V (v0.1.634, RV64 only: the C runtime packs both descriptors
+// into one int, read end in the high half, and a 32-bit int has no room).
+// Bytes through it both ways, a read of an empty non-blocking pipe, the end
+// after the writer closes, and a pipe's descriptor not being a terminal.
+// rv_exec compares every line with the C backend's.
+extern fn fd_pipe: unit -> int;
+extern fn fd_read: int -> int -> int -> int;
+extern fn fd_write: int -> int -> int -> int;
+extern fn fd_close: int -> int;
+extern fn fd_isatty: int -> int;
+extern fn fd_last_errno: unit -> int;
+extern fn io_set_nonblocking: int -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_copy_str: int -> int -> str -> int;
+extern fn mem_to_str: int -> int -> str;
+let buf = mem_alloc 64;
+let p = fd_pipe ();
+let r = bit_shr p 32;
+let w = bit_and p 4294967295;
+let _ = print_int (if r > 2 && w > 2 && r != w then 1 else 0);
+let _ = print_int (fd_write w buf (mem_copy_str buf 0 "through the pipe"));
+let n = fd_read r buf 64;
+let _ = print (mem_to_str buf n);
+let _ = print_int (io_set_nonblocking r);
+let _ = print_int (fd_read r buf 64);
+let _ = print_int (if fd_last_errno () > 0 then 1 else 0);
+let _ = print_int (fd_isatty r);
+let _ = print_int (fd_close w);
+let _ = print_int (fd_read r buf 64);
+print_int (fd_close r)
