@@ -82,6 +82,7 @@ instantiation with a missing-import error rather than a wrong answer.
 | `dir_create` | `str -> int -> int` | `dir_create path perm`: mkdir(2). `perm` `-1` is `0777`; as with mkdir(2) the kernel takes the umask off it. `0`, or `-1`. All five backends; RISC-V through `mkdirat` (v0.1.630) |
 | `dir_entries` | `str -> str` | The names in a directory but `.` and `..`, each followed by a NUL, in the directory's own order and as the bytes they are. `""` for an empty directory **and** for a refusal -- on C and RISC-V `proc_last_errno` tells them apart (it is set to `0` when this succeeds). Interpreter, C, Wasm, RISC-V (`getdents64`); refused on LLVM, which would have to read a `struct dirent` whose layout is the platform's (v0.1.630) |
 | `dir_remove` | `str -> int` | rmdir(2): an empty directory. `0`, or `-1`. All five backends; RISC-V through `unlinkat` with `AT_REMOVEDIR` (v0.1.630) |
+| `proc_cwd` | `unit -> str` | getcwd(3): where the process is, the physical path (the environment's `PWD` is whatever the parent left there). `""` if it cannot be had. All five backends; RISC-V through the `getcwd` syscall (v0.1.633) |
 | `env_pairs` | `unit -> str` | The whole environment as `env -0` writes it: `K=V` and a NUL after each. All five backends; RISC-V reads the block the host leaves above the argument block, where `env_var` now looks too (v0.1.630) |
 | `file_mtime` | `str -> float` | Modification time in seconds; raises if the path is missing (interp + C native) |
 | `file_size` | `str -> int` | File size in bytes (stat); binary-safe length where `str_len` (strlen) stops at a NUL. interp + C native (v0.1.21) |
@@ -589,6 +590,7 @@ The same binding answers a handful of the C runtime's own externs on RISC-V, eac
 with its C contract and type (v0.1.630–631): `proc_last_errno : unit -> int` (after
 `dir_create` / `dir_entries` / `dir_remove`), `getpid : unit -> int`,
 `access : str -> int -> int` (the mode is the host's to judge), `rmdir : str -> int`,
+`chdir : str -> int` and `file_chmod : str -> int -> int` (v0.1.633),
 and `file_stat` / `file_lstat : str -> int` with `file_stat_field : int -> int`, one
 snapshot read by field number (0 dev, 1 ino, 2 mode, 3 nlink, 4 uid, 5 gid, 6 rdev,
 7 size, 8 atime, 9 mtime, 10 ctime, 11 blksize, 12 blocks). They go through
@@ -1674,7 +1676,7 @@ satisfy it and hide the very row it was describing.
 |---|---|---|
 | `file_open` | `str -> File` | open for reading; `file_openrw` is the read/write one |
 | `file_read_line` | `File -> str option` | `None` at end of file |
-| `read_stdin` | `unit -> str` | the whole of stdin |
+| `read_stdin` | `unit -> str` | the whole of stdin. A stdin the parent made non-blocking and has not written to yet is waited for, not taken for the end (v0.1.633: `read_stdin` and `read_line` on C and the Wasm host, `read_key` on C) |
 | `list_dir` | `str -> str list` | entries, order unspecified |
 | `mkdir_p` | `str -> unit` | creates parents, succeeds if it exists |
 | `channel_new` | `unit -> Channel[T]` | see "Channel receive: which of the three blocks" above |

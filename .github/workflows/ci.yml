@@ -877,6 +877,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/procsig_check.sh
 
+      # v0.1.633: a stdin the parent made non-blocking and writes to late --
+      # read_stdin waits instead of taking EAGAIN for the end (C and Wasm)
+      - name: stdin_nonblock_check (read_stdin on a non-blocking pipe waits for the late write)
+        if: ${{ !cancelled() }}
+        run: sh scripts/stdin_nonblock_check.sh
+
       # v0.1.555: a listener on a chosen address, bind(2) on a socket, the
       # address a socket has, and the errno the fd_* family keeps. The errno
       # numbers differ exactly here (EADDRINUSE 48 vs 98, ECONNRESET 54 vs

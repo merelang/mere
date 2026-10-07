@@ -3712,6 +3712,9 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "dir_remove" when not (user_shadows "dir_remove") ->
        uses_dirs := true;
        Printf.sprintf "__lang_dir_remove(%s)" (emit_expr arg)
+     | Ast.Var "proc_cwd" when not (user_shadows "proc_cwd") ->
+       uses_dirs := true;
+       Printf.sprintf "(%s, __lang_proc_cwd())" (emit_expr arg)
      | Ast.Var "env_pairs" when not (user_shadows "env_pairs") ->
        uses_dirs := true;
        Printf.sprintf "(%s, __lang_env_pairs())" (emit_expr arg)
@@ -9645,13 +9648,29 @@ let str_concat_helper =
       "  fclose(f);";
       "  return buf;";
       "}";
+      (* v0.1.633: a stdin the parent made non-blocking (ruby's IO.pipe does
+         that to both ends) answers EAGAIN before anything is written, and
+         that is not the end of the input: wait for it to be readable and read
+         again. Before, a child reading its script from such a pipe got "" and
+         ended at once, and the parent's write met a closed pipe. *)
+      "#include <poll.h>";
+      "#include <errno.h>";
+      "static int __lang_stdin_again(int err) {";
+      "  if (err != EAGAIN && err != EWOULDBLOCK) return 0;";
+      "  struct pollfd p; p.fd = 0; p.events = POLLIN; p.revents = 0;";
+      "  (void)poll(&p, 1, -1);";
+      "  return 1;";
+      "}";
       "static const char* __lang_read_stdin(void) {";
       "  size_t cap = 4096, n = 0;";
       "  char* tmp = (char*)malloc(cap);";
-      "  size_t r;";
-      "  while ((r = fread(tmp + n, 1, cap - n, stdin)) > 0) {";
+      "  for (;;) {";
+      "    size_t r = fread(tmp + n, 1, cap - n, stdin);";
       "    n += r;";
       "    if (n == cap) { cap *= 2; tmp = (char*)realloc(tmp, cap); }";
+      "    if (r > 0) continue;";
+      "    if (ferror(stdin) && __lang_stdin_again(errno)) { clearerr(stdin); continue; }";
+      "    break;";
       "  }";
       "  char* buf = __lang_str_alloc(__lang_current_region, n);";
       "  memcpy(buf, tmp, n); buf[n] = '\\0';";
@@ -9666,7 +9685,10 @@ let str_concat_helper =
       "  size_t cap = 256, n = 0;";
       "  char* tmp = (char*)malloc(cap);";
       "  int c;";
-      "  while ((c = fgetc(stdin)) != EOF && c != '\\n') {";
+      "  for (;;) {";
+      "    c = fgetc(stdin);";
+      "    if (c == EOF && ferror(stdin) && __lang_stdin_again(errno)) { clearerr(stdin); continue; }";
+      "    if (c == EOF || c == '\\n') break;";
       "    if (n + 1 == cap) { cap *= 2; tmp = (char*)realloc(tmp, cap); }";
       "    tmp[n++] = (char)c;";
       "  }";
@@ -9781,7 +9803,8 @@ let str_concat_helper =
       "}";
       "static const char* __lang_read_key(void) {";
       "  char c;";
-      "  ssize_t n = read(0, &c, 1);";
+      "  ssize_t n;";
+      "  do { n = read(0, &c, 1); } while (n < 0 && (errno == EINTR || __lang_stdin_again(errno)));";
       "  if (n <= 0) return __lang_str_alloc(__lang_current_region, 0);";
       "  char* s = __lang_str_alloc(__lang_current_region, 1);";
       "  s[0] = c;";
@@ -16545,6 +16568,15 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
            "  if (n > 0) memcpy(buf, tmp, n);";
            "  free(tmp);";
            "  return buf;";
+           "}";
+           "/* v0.1.633: getcwd(3), the physical path; \"\" when it cannot be had */";
+           "static const char* __lang_proc_cwd(void) {";
+           "  char b[4096];";
+           "  if (!getcwd(b, sizeof b)) return __lang_str_alloc(__lang_current_region, 0);";
+           "  size_t l = strlen(b);";
+           "  char* s = __lang_str_alloc(__lang_current_region, l);";
+           "  memcpy(s, b, l);";
+           "  return s;";
            "}";
            "extern char** environ;";
            "static const char* __lang_env_pairs(void) {";

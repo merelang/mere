@@ -9,6 +9,7 @@ dir_create host
 dir_entries host
 dir_remove host
 env_pairs host
+proc_cwd host
 args host
 read_file host
 file_size host

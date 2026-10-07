@@ -3592,6 +3592,13 @@ and emit_expr (e : Ast.expr) : unit =
     emit_instr "i32.wrap_i64";
     emit_instr "call $dir_remove_h";
     emit_instr "i64.extend_i32_s"
+  | Ast.App ({ node = Ast.Var "proc_cwd"; _ }, u_e)
+    when not (user_shadows_wasm "proc_cwd") ->
+    wasm_dirs_host_used := true;
+    emit_expr u_e;
+    emit_instr "drop";
+    emit_instr "call $proc_cwd_h";
+    emit_instr "i64.extend_i32_s"
   | Ast.App ({ node = Ast.Var "env_pairs"; _ }, u_e)
     when not (user_shadows_wasm "env_pairs") ->
     wasm_dirs_host_used := true;
@@ -11927,7 +11934,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       "  (import \"env\" \"dir_create\" (func $dir_create_h (param i32 i32) (result i32)))\n\
       \  (import \"env\" \"dir_entries\" (func $dir_entries_h (param i32) (result i32)))\n\
       \  (import \"env\" \"dir_remove\" (func $dir_remove_h (param i32) (result i32)))\n\
-      \  (import \"env\" \"env_pairs\" (func $env_pairs_h (result i32)))\n"
+      \  (import \"env\" \"env_pairs\" (func $env_pairs_h (result i32)))\n\
+      \  (import \"env\" \"proc_cwd\" (func $proc_cwd_h (result i32)))\n"
     else "")
     ^ (if !wasm_stdin_host_used then
       "  (import \"env\" \"read_stdin\" (func $read_stdin_h (result i32)))\n\

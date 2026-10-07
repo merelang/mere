@@ -177,6 +177,7 @@ machine rather than a host.
 | `print_err` | yes | yes | yes | yes |
 | `print_int` | yes | yes | yes | yes |
 | `print_no_nl` | yes | yes | yes | yes |
+| `proc_cwd` | yes | yes | yes | yes |
 | `random_float` | refused | refused | refused | refused |
 | `random_int` | yes | yes | yes | yes |
 | `read_bytes` | yes | yes | yes | yes |

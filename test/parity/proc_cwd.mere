@@ -1,0 +1,13 @@
+// Where the process is (v0.1.633): getcwd(3), the physical path, on every
+// backend. The path itself differs from run to run, so what is printed is
+// what it must satisfy: absolute, and naming the directory a file just
+// written by a relative path is in. The file's name is drawn: parity and
+// rv_exec may run this at once in one directory.
+let name = "mere_parity_cwd_" ++ str_of_int (random_int 1000000000) ++ ".txt";
+let _ = write_file name "here";
+let cwd = proc_cwd ();
+let _ = print (if str_starts_with cwd "/" then "absolute" else "relative: " ++ cwd);
+let _ = print (if file_exists (cwd ++ "/" ++ name) then "the file is there" else "the file is elsewhere");
+let _ = print (if str_ends_with cwd "/" then "trailing slash" else "no trailing slash");
+let _ = file_delete name;
+print_int (if proc_cwd () == cwd then 1 else 0)

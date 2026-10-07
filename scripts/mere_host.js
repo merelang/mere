@@ -193,13 +193,19 @@ function makeStdin() {
   const pull = () => {
     if (eof) return false;
     let n = 0;
-    try {
-      n = fs.readSync(0, chunk, 0, chunk.length, null);
-    } catch (e) {
-      // EOF is how some platforms report the end of a pipe; EAGAIN is a
-      // non-blocking tty with nothing in it, which is also "no input now".
-      if (e.code === "EOF" || e.code === "EAGAIN") n = 0;
-      else throw e;
+    for (;;) {
+      try {
+        n = fs.readSync(0, chunk, 0, chunk.length, null);
+        break;
+      } catch (e) {
+        // EOF is how some platforms report the end of a pipe. EAGAIN is a
+        // non-blocking stdin with nothing in it YET -- a parent's pipe it has
+        // not written to -- and not the end (v0.1.633, as the C runtime now
+        // waits): sleep a moment and ask again.
+        if (e.code === "EOF") { n = 0; break; }
+        if (e.code === "EAGAIN") { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5); continue; }
+        throw e;
+      }
     }
     if (n === 0) { buf += decoder.end(); eof = true; return false; }
     buf += decoder.write(chunk.subarray(0, n));

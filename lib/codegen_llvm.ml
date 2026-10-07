@@ -6359,6 +6359,12 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i64 @__lang_dir_remove(ptr %s)" r pv);
     r
+  | Ast.App ({ node = Ast.Var "proc_cwd"; _ }, u_e) when not (user_shadows_llvm env "proc_cwd") ->
+    Hashtbl.replace host_misc_used_llvm "proc_cwd" ();
+    ignore (emit_expr env u_e);
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_proc_cwd()" r);
+    r
   | Ast.App ({ node = Ast.Var "env_pairs"; _ }, u_e) when not (user_shadows_llvm env "env_pairs") ->
     Hashtbl.replace host_misc_used_llvm "env_pairs" ();
     ignore (emit_expr env u_e);
@@ -15451,6 +15457,24 @@ let host_misc_runtime_llvm (declared : string -> bool) : string list =
          "  %ok = icmp eq i32 %r, 0";
          "  %v = select i1 %ok, i64 0, i64 -1";
          "  ret i64 %v";
+         "}" ]
+   else [])
+  @ (if used "proc_cwd" then
+     decl "getcwd" "declare ptr @getcwd(ptr, i64)"
+     @ [ "define ptr @__lang_proc_cwd() {";
+         "entry:";
+         "  %b = alloca [4096 x i8]";
+         "  %r = call ptr @getcwd(ptr %b, i64 4096)";
+         "  %nul = icmp eq ptr %r, null";
+         "  br i1 %nul, label %none, label %some";
+         "none:";
+         "  %e = call ptr @__lang_str_alloc(i64 0)";
+         "  ret ptr %e";
+         "some:";
+         "  %l = call i64 @strlen(ptr %b)";
+         "  %s = call ptr @__lang_str_alloc(i64 %l)";
+         "  call void @llvm.memcpy.p0.p0.i64(ptr %s, ptr %b, i64 %l, i1 false)";
+         "  ret ptr %s";
          "}" ]
    else [])
   @ (if used "env_pairs" then
