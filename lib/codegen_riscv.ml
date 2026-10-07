@@ -607,6 +607,8 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
      | "map_has" -> (if map_word_keyed e then "rvmap_has_i" else "rvmap_has") :: v :: acc
      | "map_delete" -> (if map_word_keyed e then "rvmap_delete_i" else "rvmap_delete") :: v :: acc
      | "map_len" -> (if map_word_keyed e then "rvmap_len_i" else "rvmap_len") :: v :: acc
+     (* v0.1.638: len of a Map or a list is a prelude call *)
+     | "len" -> "rvmap_len_i" :: "rvmap_len" :: "rvlist_len" :: v :: acc
      | "map_clear" -> "rvmap_clear" :: v :: acc
      | "map_compact" -> "rvmap_compact" :: v :: acc
      | "map_iter" -> (if map_word_keyed e then "rvmap_iter_i" else "rvmap_iter") :: v :: acc
@@ -1559,6 +1561,11 @@ let emit_binop op rd rs1 rs2 loc =
    so a program without one emits what it always did. *)
 let try_msg_used = ref false
 
+(* v0.1.638: the closures made for a builtin used as a value, by label, and the
+   builtin whose closure body is being emitted *)
+let eta_builtin_of_label : (string, string) Hashtbl.t = Hashtbl.create 8
+let cur_eta_builtin : string option ref = ref None
+
 (* Is this position in the prelude glued in front of the program? Its `fail`s
    stand in for builtins' failures (map_get, random_int, ...), whose messages
    carry no `fail: ` tag on any backend. The prelude is the first
@@ -2029,6 +2036,23 @@ and compile_node (env : env) (e : Ast.expr) : unit =
               "RV32I: `%s` is unsupported here as a value -- apply it to all of \
                its arguments (a coroutine builtin is a call into the runtime)"
                (Typer.coro_source_name v))
+          else if List.mem_assoc v Typer.initial_env
+               && !cur_eta_builtin <> Some v
+               && (let rec arrows t = match resolve_ty t with
+                     | Ast.TyArrow (_, b) -> 1 + arrows b | _ -> 0 in
+                   (match e.Ast.ty with Some t -> arrows t | None -> 0) > 0) then begin
+            (* v0.1.638: a builtin passed as a VALUE (`vec_iter v print_int`) is
+               a closure that applies it -- the applied form is the one this
+               backend lowers. If the closure's own body comes back here for the
+               same name, the applied form is missing too, and the refusal
+               below says so. *)
+            let rec arrows t = match resolve_ty t with
+              | Ast.TyArrow (_, b) -> 1 + arrows b | _ -> 0 in
+            compile_eta env e (arrows (Option.get e.Ast.ty)) [];
+            (match !lambdas with
+             | (label, _, _, _) :: _ -> Hashtbl.replace eta_builtin_of_label label v
+             | [] -> ())
+          end
           else if List.mem_assoc v Typer.initial_env then
             (* The shape of the failure, not just the fact of it. This branch
                used to say "unbound variable" for a name the language HAS --
@@ -2038,7 +2062,7 @@ and compile_node (env : env) (e : Ast.expr) : unit =
                from the typer's environment rather than kept as a second list
                here, because a second list drifts from the first. *)
             err e.loc (Printf.sprintf
-              "RV32I: `%s` has no RV32I lowering yet (host builtin)" v)
+              "RV32I: `%s` has no RISC-V lowering yet (host builtin)" v)
           else if Hashtbl.mem libm_bound v then
             compile_expr env { e with Ast.node = Ast.Var ("__libm_" ^ v) }
           else if Hashtbl.mem externs v then
@@ -2676,6 +2700,7 @@ and branch_if env (c : Ast.expr) (want : bool) (l : string) =
   | Ast.If (x, { Ast.node = Ast.Bool_lit false; _ }, { Ast.node = Ast.Bool_lit true; _ })
     when xlen_test x = None ->
     branch_if env x (not want) l
+  | Ast.App ({ Ast.node = Ast.Var "not"; _ }, x) -> branch_if env x (not want) l
   | _ ->
     compile_expr env c;
     emit (Branch ((if want then 1 else 0), a0, zero, l))             (* bnez / beqz *)
@@ -3034,7 +3059,7 @@ and compile_app env e =
      region check, and this backend's lists and regions are its own block
      layout. A clean refusal here, not an "unbound variable". *)
   | Ast.Var ("lb_new" | "lb_push" | "lb_to_list") ->
-    err e.loc "RV32I: no RV32I lowering for lb_new / lb_push / lb_to_list (ListBuf) yet -- \
+    err e.loc "RV32I: no RISC-V lowering for lb_new / lb_push / lb_to_list (ListBuf) yet -- \
                build the list with an accumulator and list_rev"
   | Ast.Var "vec_new" when List.length args = 1 ->
     compile_expr env (List.hd args); emit (Jal (ra, "__vec_new"));
@@ -3874,8 +3899,34 @@ and compile_app env e =
     (match (match arg.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit) with
      | Ast.TyInt -> compile_expr env arg; emit (Jal (ra, "__str_of_int"))
      | _ -> err e.loc "RV32I: `show` is only supported on int values")
+  (* v0.1.638: `not` is xori with 1 (a branch on it is turned round in
+     branch_if instead) *)
+  | Ast.Var "not" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i 1 a0 4 a0 0x13)                     (* xori a0, a0, 1 *)
+  (* v0.1.638: `len` is the length its argument's type has *)
+  | Ast.Var "len" when List.length args = 1 ->
+    let a = List.hd args in
+    let via n = compile_expr env { e with Ast.node = Ast.App ({ a with Ast.node = Ast.Var n; Ast.ty = None }, a);
+                                          Ast.ty = Some Ast.TyInt } in
+    (match (match a.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit) with
+     | Ast.TyStr -> via "str_len"
+     | Ast.TyBytes -> via "bytes_len"
+     | Ast.TyCon ("Vec", _) -> via "vec_len"
+     | Ast.TyCon ("Map", _) -> via "map_len"
+     | Ast.TyCon ("StrBuf", _) -> via "strbuf_len"
+     | Ast.TyCon ("list", _) -> call_top env "rvlist_len" args
+     | Ast.TyTuple ts -> compile_expr env a; li a0 (List.length ts)
+     | t -> err e.loc (Printf.sprintf "RV32I: `len` of a %s -- this backend measures a str, bytes, Vec, Map, StrBuf, list or tuple" (Formatter.fmt_ty t)))
   | Ast.Var "ord" when List.length args = 1 ->
     compile_expr env (List.hd args);
+    (* v0.1.638: one character, or the C runtime's refusal (prop_str asks) *)
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                  (* len *)
+    li t1 1;
+    (let l = fresh_label ".ordok" in
+     emit (Branch (0, t0, t1, l));                                         (* beq len, 1 -> ok *)
+     emit_abort_n 8 "ord: expected single-char str" [t0];
+     emit (Label l));
     emit_word (enc_i (wsz ()) a0 4 a0 0x03)                     (* lbu a0, 4(a0) — first byte *)
   | Ast.Var "chr" when List.length args = 1 ->
     compile_expr env (List.hd args);                     (* a0 = byte value *)
@@ -3942,6 +3993,14 @@ and compile_app env e =
     emit_word (enc_i 0 a0 0 a2 0x13);                    (* a2 = len *)
     pop a1; pop a0;                                      (* a1 = start, a0 = s *)
     emit (Jal (ra, "__substring"))
+  (* v0.1.638: a builtin APPLIED that nothing above lowers is refused here, at
+     its own call -- not turned into a closure (the value form) whose body
+     would refuse it later, after the calls that follow it, naming the wrong
+     one first *)
+  | Ast.Var f when List.mem_assoc f Typer.initial_env && not (is_top f)
+                   && not (Hashtbl.mem libm_bound f) && not (Hashtbl.mem externs f)
+                   && not (List.mem f Typer.coro_builtins) ->
+    err head.loc (Printf.sprintf "RV32I: `%s` has no RISC-V lowering yet (host builtin)" f)
   | _ -> compile_indirect ~tail:tail_here env head args
 
 (* call a known top-level function (an rv-prelude helper) directly: evaluate
@@ -7000,7 +7059,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   chr_tab_used := false;
   coro_mode := false;
   divzero_used := false;
-  lambdas := []; directs := []; direct_scope := []; Hashtbl.reset direct_caps;
+  lambdas := []; directs := []; Hashtbl.reset eta_builtin_of_label; cur_eta_builtin := None; direct_scope := []; Hashtbl.reset direct_caps;
   Hashtbl.reset adapters;
   globals := [];
   eq_pending := [];
@@ -7126,7 +7185,18 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
     match !lambdas, !directs with
     | (label, captures, param, body) :: rest, _ ->
       lambdas := rest;
+      cur_eta_builtin := Hashtbl.find_opt eta_builtin_of_label label;
       emit_lambda ~label ~captures ~param ~body;
+      (* a curried builtin's closure makes the next one in its body: those are
+         the same builtin's, and marked so *)
+      (match !cur_eta_builtin with
+       | Some v ->
+         let rec mark l = if l == rest then () else match l with
+           | (lb, _, _, _) :: tl -> Hashtbl.replace eta_builtin_of_label lb v; mark tl
+           | [] -> () in
+         mark !lambdas
+       | None -> ());
+      cur_eta_builtin := None;
       drain ()
     | [], (label, captures, params, body) :: rest ->
       directs := rest;

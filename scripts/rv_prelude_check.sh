@@ -28,6 +28,24 @@ COUNT=$(printf '%s\n' $NAMES | wc -l | tr -d ' ')
 probe_for() {
   case "$1" in
     not) echo 'let _ = print_int (if not false then 1 else 0);' ;;
+    # v0.1.638
+    print_bool) echo 'let _ = print_bool true;' ;;
+    int_min|int_max) echo "let _ = print_int $1;" ;;
+    bool_of_str) echo 'let _ = print_int (if bool_of_str "true" then 1 else 0);' ;;
+    random_float) echo 'let _ = print_int (if random_float () < 1.0 then 1 else 0);' ;;
+    rvlist_len) echo 'let _ = print_int (len (Cons (1, Nil)));' ;;
+    str_count|str_last_index_of) echo "let _ = print_int ($1 \"abab\" \"ab\");" ;;
+    utf8_chars) echo 'let _ = print_int (list_len (utf8_chars "ab"));' ;;
+    vec_iter) echo 'let v = vec_new ();
+let _ = vec_push v 1;
+let _ = vec_iter v (fn (x: int) -> print_int x);' ;;
+    vec_fold) echo 'let v = vec_new ();
+let _ = vec_push v 1;
+let _ = print_int (vec_fold v 0 (fn (a: int) -> fn (x: int) -> a + x));' ;;
+    vec_sort) echo 'let v = vec_new ();
+let _ = vec_push v 2;
+let _ = vec_push v 1;
+let _ = vec_sort v (fn (a: int) -> fn (b: int) -> a - b);' ;;
     sleep_ms) echo 'let _ = sleep_ms 1;' ;;
     # v0.1.623: the coroutine runtime, every entry at once
     rvcoro_*) echo 'let root = coro_root ();

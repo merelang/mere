@@ -245,7 +245,7 @@ classify() {  # classify <flag> <file> <subject>
     # would be the matrix lying in the flattering direction about a backend,
     # and calling it yes would be lying in the other one.
     echo bare
-  elif head -1 "$TMP/err" | grep -qE 'no (LLVM|Wasm|RV32I) lowering|unsupported'; then
+  elif head -1 "$TMP/err" | grep -qE 'no (LLVM|Wasm|RV32I|RISC-V) lowering|unsupported'; then
     # `refused` has to be the SUBJECT's refusal. The probe for `file_pread` opened
     # its handle with `file_open`, which LLVM and Wasm refuse -- so for as long as
     # that row existed it reported file_open's refusal under file_pread's name, and

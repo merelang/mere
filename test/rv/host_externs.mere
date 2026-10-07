@@ -80,7 +80,8 @@ let _ = print_int (if file_exists "rv_hard2" && (if file_exists "rv_hard" then f
 let _ = print_int (rename "rv_hard" "rv_hard3");
 let _ = print_int (file_utime "rv_stat.txt" 1000000000 1200000000);
 let _ = file_stat "rv_stat.txt";
-let _ = print_int (file_stat_field 8);
+// the modification time only: the access time is moved by whatever else reads a
+// new file (a scanner did, on the machine this was written on)
 let _ = print_int (file_stat_field 9);
 let _ = print_int (file_utime "rv_stat_absent" 1 2);
 let um = file_umask 18;
