@@ -2299,6 +2299,12 @@ let builtin_map_compact =
   V_builtin ("map_compact", fun _ -> V_unit)
 let builtin_vec_compact =
   V_builtin ("vec_compact", fun _ -> V_unit)
+(* v0.1.644: vec_recycle empties the vec; the arena half is C's alone. *)
+let builtin_vec_recycle =
+  V_builtin ("vec_recycle", fun v ->
+    match v with
+    | V_vec arr -> own "Vec" "vec_recycle" arr.vc_owner; arr.vc_data <- [||]; arr.vc_len <- 0; V_unit
+    | _ -> failwith "vec_recycle: expected Vec")
 
 let builtin_map_delete =
   V_builtin ("map_delete", fun v ->
@@ -4416,6 +4422,7 @@ let initial_env : env =
     ("map_bytes",      ref builtin_map_bytes);
     ("vec_bytes",      ref builtin_vec_bytes);
     ("vec_compact",    ref builtin_vec_compact);
+    ("vec_recycle",    ref builtin_vec_recycle);
     ("len",            ref builtin_len);
   ]
 

@@ -1258,7 +1258,7 @@ them, as C keeps what a coroutine made in the heap. What a compaction frees whil
 coroutines exist waits until a walk of every stopped stack shows nothing reaches
 it (v0.1.624; C's pins, checked a megabyte at a time).
 
-On C, a store compacted (`map_compact`, `vec_compact`, `map_recycle`) while a
+On C, a store compacted (`map_compact`, `vec_compact`, `map_recycle`, `vec_recycle`) while a
 coroutine is suspended keeps any arena that coroutine's stack still points
 into, and frees it at a later compaction (v0.1.547). "Points into" is what the
 stack REACHES (v0.1.589): its own words, and the pointers inside the nodes they
@@ -1687,6 +1687,7 @@ satisfy it and hide the very row it was describing.
 | `vec_reverse` | `Vec[R, T] -> unit` | **in place**, returns unit |
 | `vec_bytes` | `Vec[R, T] -> int` | bytes this Vec currently holds — a measurement, not a capacity |
 | `vec_compact` | `Vec[R, T] -> unit` | shrink the buffer to the live length (v0.1.294-300 reclamation arc) |
+| `vec_recycle` | `Vec[R, T] -> unit` | empty it, and on C wind its own arena back to the oldest block (an unowned Vec gets one of 256 bytes) — `map_recycle`'s twin, for a pool of Vecs. Every block is asked about a suspended stack's pin, so an element a suspended coroutine holds survives; one held on the running stack does not, so call it where nothing in flight holds an element (v0.1.644) |
 
 **`Map`** (`map_new` / `get` / `set` / `has` / `len` / `delete` / `iter` are covered in language-reference and the tutorial):
 

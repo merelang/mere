@@ -69,6 +69,7 @@ recycled_escape|c
 recycle_dedicated|ca
 coro_pin_reach|ca
 coro_pin_resumed|ca
+vec_recycle_pin|ca
 channel_xthread|ca'
 
 run_bin() { perl -e 'alarm 20; exec @ARGV' "$1" 2>&1; }
@@ -125,6 +126,7 @@ recycled_escape|c|only the moved storage is kept, not where the struct lives|s/ 
 recycle_dedicated|c|a recycle claims 4 KB on the block it kept|s/^    r->cap = b->pad;$/    r->cap = 4096;/
 coro_pin_reach|c|the pin reads the stack and not what it points at|s/^  __lang_pin_reach(c);$//
 coro_pin_resumed|c|a retired arena is tried while its pinner runs|s/if (o.by\[j\] == curh) keep = 1;//
+vec_recycle_pin|c|vec_recycle asks the pin about the growth only, as map_recycle does|s/__lang_region_pinned(v->region, 0)) {/__lang_region_pinned(v->region, 1) \&\& v->region->blocks->prev) {/
 channel_xthread|c|a message region goes on the list of the thread that made it|s/__lang_region_init_x(mr, 256, 1)/__lang_region_init_x(mr, 256, 0)/'
   printf '%s\n' "$POISONS" | while IFS='|' read -r f be what expr; do
     want=$("$MERE" "$FX/$f.mere" 2>&1)

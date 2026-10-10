@@ -4258,6 +4258,9 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "vec_compact" ->
        let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
        Printf.sprintf "mere_vec_%s_compact(%s)" elem_tag (emit_expr arg)
+     | Ast.Var "vec_recycle" ->
+       let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
+       Printf.sprintf "mere_vec_%s_recycle(%s)" elem_tag (emit_expr arg)
      | Ast.Var "vec_bytes" ->
        let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
        Printf.sprintf "mere_vec_%s_bytes(%s)" elem_tag (emit_expr arg)
@@ -13093,6 +13096,51 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  v->cap = ncap;";
       "  v->owns_region = 1;";
       "  if (owned) __lang_region_retire(old);";
+      "  return 0;";
+      "}";
+      "";
+      (* v0.1.644: the Vec twin of map_recycle -- empty it and hand the private
+         arena's growth back, keeping the oldest block; an unowned vec is
+         promoted. A vec taken from a pool and recycled when it is dropped
+         reuses one warm block instead of leaving its slots in the region it
+         was made in.
+         Two differences from map_recycle, both for a pool of many small
+         queues (mere-ruby's, one per Array and Hash). The seed is 256 bytes,
+         not 4 KB: 60,000 recycled queues of three elements held 300 MB at
+         4 KB each. And EVERY block is asked about a pin, the kept one too:
+         map_recycle asks about the growth only (a frame pool recycles at
+         every return and cannot pay for more), so an element a suspended
+         stack holds in the oldest block was written over by the next push.
+         This is meant to be called in a batch, off the stack whose
+         expressions may hold an element -- what a running stack holds no
+         pin can see. *)
+      Printf.sprintf "static int %s_recycle(%s* v) {" struct_name struct_name;
+      "  __LANG_OWNED(v, \"Vec\", \"vec_recycle\");";
+      "  if (v->owns_region && __lang_region_pinned && __lang_region_pinned(v->region, 0)) {";
+      "    __lang_region* old = v->region;";
+      "    __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
+      "    if (!fresh) __lang_fail_impl(\"out of memory\");";
+      "    __lang_region_init(fresh, 256);";
+      "    v->region = fresh;";
+      "    __lang_region_retire(old);";
+      "  } else if (v->owns_region) {";
+      "    __lang_region* r = v->region;";
+      "    __lang_region_block* b = r->blocks;";
+      "    while (b->prev) { __lang_region_block* p = b->prev; __lang_blk_free(b); b = p; }";
+      "    r->blocks = b;";
+      "    r->base = (char*)(b + 1);";
+      "    r->top = r->base;";
+      "    r->cap = b->pad;  /* see map_recycle */";
+      "  } else {";
+      "    __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
+      "    if (!fresh) __lang_fail_impl(\"out of memory\");";
+      "    __lang_region_init(fresh, 256);";
+      "    v->region = fresh;";
+      "    v->owns_region = 1;";
+      "  }";
+      Printf.sprintf "  v->data = (%s*)__lang_region_alloc(v->region, sizeof(%s) * 4);" c_elem c_elem;
+      "  v->cap = 4;";
+      "  v->len = 0;";
       "  return 0;";
       "}";
       "";

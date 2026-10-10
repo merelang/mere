@@ -4,6 +4,43 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.644 — 2026-10-11
+
+_`vec_recycle : Vec[R, T] -> unit`: empty a Vec and give its arena back, the Vec twin of `map_recycle`._
+
+A Vec made inside a function and kept in a global table lives in the shared
+default region, and so does every element pushed into it; dropping it from the
+table returns nothing. A Map had a way out since v0.1.300 -- `map_recycle`
+gives it an arena of its own and winds that back to one warm block, so a pool
+of maps reuses its memory -- and a Vec had none: `vec_compact` copies the live
+elements out, it does not empty. mere-ruby keeps a push queue per Array and an
+insert queue per Hash in Vecs like that, and each one it dropped stayed.
+
+`vec_recycle v` sets the length to 0. On C it also frees the arena's growth and
+keeps the oldest block (a Vec with no arena of its own is promoted to one). It
+is not `map_recycle` with another name in two ways, both for a pool of many
+small Vecs:
+
+- the arena it gives a Vec starts at 256 bytes, not 4 KB. With 4 KB, 60,000
+  recycled queues of three elements held 300 MB;
+- it asks every suspended stack about EVERY block, the one it keeps too, and
+  moves to a fresh arena (retiring the old) when one points in. `map_recycle`
+  asks only about the growth it frees, because a frame pool recycles at every
+  return and cannot pay for more; an element a suspended stack held in the
+  kept block was written over by the next push.
+
+What a RUNNING stack holds, no pin can see: call it where nothing in flight
+holds an element (mere-ruby calls it during a collection, which runs on a
+coroutine of its own). The interpreter, Wasm and RISC-V empty the Vec. LLVM
+refuses it at emit, as it does the other container calls.
+
+`test/parity/vec_recycle.mere` recycles a Vec of strings, pushes into it
+again, and passes one Vec of ints through five rounds of a pool, each round
+filled past its first block. `test/uaf/vec_recycle_pin.mere` (in
+`region_uaf_check.sh`, with ASan) holds a string from a one-block Vec in a
+suspended coroutine while the root recycles the Vec and pushes into it; its
+poison asks about the growth only, and the string comes back written over.
+
 ## v0.1.643 — 2026-10-08
 
 _The rest of the libc calls mere-ruby declares, on RISC-V: `listen`, `getppid`, `getpgid`, `getsid` and `setsid`._
