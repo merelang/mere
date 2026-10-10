@@ -3919,6 +3919,11 @@ and compile_app env e =
     (* v0.1.614: its own arena's capacity, 0 while it has none -- C's answer *)
     compile_expr env (List.hd args);
     emit (Jal (ra, "__vec_bytes"))
+  | Ast.Var "vec_recycle" when List.length args = 1 ->
+    (* v0.1.644: emptied; the arena stays as it is (C winds it back) *)
+    compile_expr env (List.hd args);
+    emit_word (enc_s 0 zero a0 (stf3 ()) 0x23);                                 (* sw zero, 0(vec) — len *)
+    li a0 0
   | Ast.Var "vec_compact" when List.length args = 1 ->
     (* v0.1.614: into an arena of its own (see emit_vcompact_helper) *)
     compile_expr env (List.hd args);

@@ -1,0 +1,24 @@
+// v0.1.644: an element a suspended coroutine holds, in the block a recycle
+// KEEPS. map_recycle asks the pin only about the blocks it frees (the growth),
+// because a frame pool recycles at every return; a Vec with one block was
+// wound back in place under the pointer and the next push wrote over it.
+// vec_recycle asks about every block: the held string's arena is retired,
+// and the Vec carries on in a fresh one. (Written over, not freed: the gate
+// sees this one through the answer, not through ASan.)
+let root = coro_root ();
+let v = vec_new ();
+let _ = vec_push v "seed";
+// an arena of its own -- one 256-byte block -- and the string goes into it
+let _ = vec_recycle v;
+let _ = vec_push v (str_repeat "v" 40 ++ "1");
+let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
+  let held = vec_get v 0 in
+  let _ = coro_switch root in
+  let _ = print (if held == str_repeat "v" 40 ++ "1" then "held: intact" else "held: lost") in
+  root) ());
+let _ = coro_switch c;
+let _ = vec_recycle v;
+let _ = vec_push v (str_repeat "Z" 40 ++ "9");
+let _ = vec_push v (str_repeat "Z" 40 ++ "8");
+let _ = coro_switch c;
+print_int (vec_len v)

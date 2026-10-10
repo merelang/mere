@@ -4145,6 +4145,14 @@ and emit_expr (e : Ast.expr) : unit =
     emit_expr arg;
     emit_instr "drop";
     emit_instr "i64.const 0"
+  | Ast.App ({ node = Ast.Var "vec_recycle"; _ }, arg) ->
+    (* v0.1.644: semantically "make it empty"; no per-container arenas here *)
+    vec_used := true;
+    emit_expr arg;
+    emit_instr "i32.wrap_i64";
+    emit_instr "i32.const 0";
+    emit_instr "i32.store offset=4";
+    emit_instr "i64.const 0"  (* unit *)
   | Ast.App ({ node = Ast.Var ("map_compact" | "vec_compact"); _ }, arg) ->
     (* v0.1.297: compaction is an optimization with no observable behaviour;
        this backend's bump heap has no per-container arenas to swap, so the

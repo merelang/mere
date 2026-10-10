@@ -1325,7 +1325,7 @@ let inner_direct_enabled = Sys.getenv_opt "MERE_NO_INNER_DIRECT" = None
 let range_version_log = ref (Sys.getenv_opt "MERE_RANGE_VERSION_LOG" <> None)
 let range_versioned : string list ref = ref []
 
-let rv_len_changing = [ "vec_push"; "vec_compact"; "vec_to_owned"; "owned_vec_to_vec"; "lb_push" ]
+let rv_len_changing = [ "vec_push"; "vec_compact"; "vec_recycle"; "vec_to_owned"; "owned_vec_to_vec"; "lb_push" ]
 
 let rec rv_bound_names (e : expr) : string list =
   let here =

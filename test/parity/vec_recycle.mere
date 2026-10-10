@@ -1,0 +1,43 @@
+// `vec_recycle v` (v0.1.644) is "make it empty" plus give-the-arena-back --
+// map_recycle's Vec twin. The EMPTY half is what every backend keeps; the
+// arena half is the C backend's (the vec's own arena is wound back to its
+// oldest block, an unowned vec is promoted to one of its own).
+//
+// The pool case is the one that matters: a vec dropped by one owner is
+// recycled and handed to another, which trusts it to be empty and pushes
+// into it again -- past its first block, so the wind-back frees growth.
+let v = vec_new ();
+let _ = vec_push v "alpha";
+let _ = vec_push v "beta";
+let _ = print ("before: len=" ++ str_of_int (vec_len v));
+let _ = vec_recycle v;
+let _ = print ("after: len=" ++ str_of_int (vec_len v));
+let _ = vec_push v "gamma";
+let _ = print ("reused: len=" ++ str_of_int (vec_len v) ++ " v[0]=" ++ vec_get v 0);
+let _ = vec_recycle v;
+let _ = vec_recycle v;
+let _ = print ("double recycle: len=" ++ str_of_int (vec_len v));
+// a pool of int vecs: each round takes the vec, fills it past one block,
+// checks what it holds, and recycles it for the next round
+let pool = vec_new ();
+let _ = vec_push pool (vec_new ());
+let rec fill = fn (w) -> fn (i: int) -> fn (n: int) -> if i >= n then () else (let _ = vec_push w (i * 3) in fill w (i + 1) n);
+let rec sum = fn (w) -> fn (i: int) -> fn (acc: int) -> if i >= vec_len w then acc else sum w (i + 1) (acc + vec_get w i);
+let rec round = fn (r: int) ->
+  if r >= 5 then ()
+  else (
+    let w = vec_get pool 0 in
+    let n = 100 + r * 700 in
+    let _ = fill w 0 n in
+    let _ = print ("round " ++ str_of_int r ++ ": len=" ++ str_of_int (vec_len w) ++ " sum=" ++ str_of_int (sum w 0 0)) in
+    let _ = vec_recycle w in
+    round (r + 1));
+let _ = round 0;
+let _ = print ("pool vec after rounds: len=" ++ str_of_int (vec_len (vec_get pool 0)));
+// strings pushed after a recycle are the new ones, not the old slots
+let s = vec_new ();
+let rec fill_s = fn (i: int) -> fn (n: int) -> fn (tag: str) -> if i >= n then () else (let _ = vec_push s (tag ++ str_of_int i) in fill_s (i + 1) n tag);
+let _ = fill_s 0 400 "old";
+let _ = vec_recycle s;
+let _ = fill_s 0 3 "new";
+let _ = print ("strs: " ++ vec_get s 0 ++ " " ++ vec_get s 1 ++ " " ++ vec_get s 2 ++ " len=" ++ str_of_int (vec_len s));

@@ -2922,6 +2922,19 @@ let vec_compact_scheme =
       Ast.TyCon ("Vec", [_vec_compact_region; _vec_compact_t]),
       Ast.TyUnit) }
 
+(* v0.1.644: vec_recycle — `Vec[R, T] -> unit`, map_recycle's Vec twin: the
+   vec is emptied (length 0) and, on C, its own arena is wound back to the
+   seed block. Semantically "make it empty". *)
+let _vec_recycle_region = fresh_var ()
+let _vec_recycle_t = fresh_var ()
+let vec_recycle_scheme =
+  let rid = match _vec_recycle_region with Ast.TyVar v -> v.id | _ -> assert false in
+  let tid = match _vec_recycle_t with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [rid; tid];
+    body = Ast.TyArrow (
+      Ast.TyCon ("Vec", [_vec_recycle_region; _vec_recycle_t]),
+      Ast.TyUnit) }
+
 (* Phase 19.2: map_iter — call (K -> V -> unit) on each entry. *)
 let _map_iter_region = fresh_var ()
 let _map_iter_k = fresh_var ()
@@ -3461,6 +3474,7 @@ let initial_env : env =
     ("map_bytes",      map_bytes_scheme);
     ("vec_bytes",      vec_bytes_scheme);
     ("vec_compact",    vec_compact_scheme);
+    ("vec_recycle",    vec_recycle_scheme);
     ("map_iter",       map_iter_scheme);
     ("vec_push",   vec_push_scheme);
     ("vec_get",    vec_get_scheme);
