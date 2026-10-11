@@ -1,0 +1,11 @@
+// A hosted RV64 program with more than 256 MB (v0.1.650), built with
+// `--ram 272`: its stack starts just under 272 MB, and this recursion, deep
+// enough to need some 16 MB of it, runs down through 0x10000000 -- where the
+// devices are, which RAM covers for a hosted program (memu looks in RAM
+// first). Every frame's value must come back as it was put there. rv_exec
+// compares with C, and the same build with `--ram 256` is refused at -rv /
+// --bare.
+let rec deep = fn (n: int) -> if n == 0 then 0 else (n % 7) + deep (n - 1);
+let _ = print_int (deep 1000000);
+let rec deep2 = fn (n: int) -> fn (k: int) -> if n == 0 then k else (let r = deep2 (n - 1) (k + n % 3) in r + n % 5);
+print_int (deep2 1000000 0)

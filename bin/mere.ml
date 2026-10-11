@@ -680,17 +680,33 @@ let rv_source source =
    the top of it and the heap grows up from 2MB, so this is the knob for a
    program whose live heap outgrows the 8MB default. The emulator running the
    binary has to be sized to match. *)
+(* v0.1.650: a hosted RV64 program may have up to 1 GB. The ceiling of 256 MB
+   kept RAM below the device MMIO region (0x10000000), so a device address never
+   moves when the RAM size does -- which a --bare program needs, and an RV32 one
+   keeps. A hosted program reaches no device (its I/O is ecalls), and memu
+   looks in RAM before the devices, so RAM may cover them. 1 GB because memu's
+   RAM is a byte buffer whose size is a C int. Checked once every switch is
+   read: --bare may come after --ram. *)
+let riscv_ram_arg = ref ""
+let hosted_rv64_max_mb = 1024
 let set_riscv_ram mb =
   let n = try int_of_string mb with _ -> 0 in
-  (* the ceiling keeps RAM below the device MMIO region, so a device address
-     never moves when the RAM size does *)
-  let max_mb = Mere.Codegen_riscv.mmio_base / (1024 * 1024) in
-  if n < 4 || n > max_mb then begin
-    Printf.eprintf
-      "error: --ram takes a size in MB, from 4 to %d (got `%s`)\n" max_mb mb;
-    exit 1
-  end;
+  riscv_ram_arg := mb;
   Mere.Codegen_riscv.ram_bytes := n * 1024 * 1024
+let check_riscv_ram () =
+  if !riscv_ram_arg <> "" then begin
+    let n = !Mere.Codegen_riscv.ram_bytes / (1024 * 1024) in
+    let device_mb = Mere.Codegen_riscv.mmio_base / (1024 * 1024) in
+    let hosted64 = !Mere.Codegen_riscv.xlen = 64 && not !Mere.Codegen_riscv.bare in
+    let max_mb = if hosted64 then hosted_rv64_max_mb else device_mb in
+    if n < 4 || n > max_mb then begin
+      Printf.eprintf
+        "error: --ram takes a size in MB, from 4 to %d (got `%s`)%s\n" max_mb !riscv_ram_arg
+        (if hosted64 || n <= device_mb then ""
+         else Printf.sprintf " -- above %d MB only for a hosted -rv64 program (RAM would cover the devices)" device_mb);
+      exit 1
+    end
+  end
 
 (* v0.1.623: `--coro-stack <MB>`, the region every coroutine runs in on RISC-V
    (a coroutine's stack is copied into it while it runs). The default is a
@@ -751,6 +767,7 @@ let rv_flags mode args =
   match go args with
   | None -> None
   | Some path ->
+    check_riscv_ram ();
     let base_dir = Filename.dirname path in
     let action =
       match mode with
