@@ -684,11 +684,11 @@ let rv_source source =
    kept RAM below the device MMIO region (0x10000000), so a device address never
    moves when the RAM size does -- which a --bare program needs, and an RV32 one
    keeps. A hosted program reaches no device (its I/O is ecalls), and memu
-   looks in RAM before the devices, so RAM may cover them. 1 GB because memu's
-   RAM is a byte buffer whose size is a C int. Checked once every switch is
+   looks in RAM before the devices, so RAM may cover them. 2047 MB (v0.1.652;
+   1 GB in 0.1.650) because memu's RAM is a byte buffer whose size is a C int. Checked once every switch is
    read: --bare may come after --ram. *)
 let riscv_ram_arg = ref ""
-let hosted_rv64_max_mb = 1024
+let hosted_rv64_max_mb = 2047
 let set_riscv_ram mb =
   let n = try int_of_string mb with _ -> 0 in
   riscv_ram_arg := mb;

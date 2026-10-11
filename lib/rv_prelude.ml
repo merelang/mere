@@ -2536,21 +2536,22 @@ let __cw_buf = fn (k: int) -> fn (ck: int) -> fn (want: int) ->
         let _ = __rv_rtw_set ck n in
         b);
 // true when v was not yet in this walk's set (and is now)
+// the capacity is a power of two, and the slot is masked, not taken `%`:
+// on RV32 the product overflows, a negative `%` is negative, and the walk
+// wrote below its own table (v0.1.627 put blocks near the top of memory,
+// where every address does it; the record below the table was a coroutine's)
+// v0.1.652: the probe is a function of its own. As a `let rec` inside
+// __cw_add it was a closure made for every address a walk added -- garbage
+// nothing reclaimed, in a release that mere-ruby's collector runs after every
+// compaction with thousands of fibers stopped (corpus 214)
+let rec __cw_probe = fn (tbl: int) -> fn (cap: int) -> fn (st: int) -> fn (w: int) -> fn (v: int) -> fn (i: int) ->
+  let a = tbl + bit_and i (cap - 1) * 2 * w in
+  if __rv_peek (a + w) != st then (let _ = __rv_poke a v in let _ = __rv_poke (a + w) st in true)
+  else if __rv_peek a == v then false
+  else __cw_probe tbl cap st w v (i + 1);
 let __cw_add = fn (v: int) ->
   let w = __cw () in
-  let cap = __rv_rtw 65 in
-  let tbl = __rv_rtw 64 in
-  let st = __rv_rtw 66 in
-  // the capacity is a power of two, and the slot is masked, not taken `%`:
-  // on RV32 the product overflows, a negative `%` is negative, and the walk
-  // wrote below its own table (v0.1.627 put blocks near the top of memory,
-  // where every address does it; the record below the table was a coroutine's)
-  let rec probe = fn (i: int) ->
-    let a = tbl + bit_and i (cap - 1) * 2 * w in
-    if __rv_peek (a + w) != st then (let _ = __rv_poke a v in let _ = __rv_poke (a + w) st in true)
-    else if __rv_peek a == v then false
-    else probe (i + 1) in
-  probe ((v / w) * 40503);
+  __cw_probe (__rv_rtw 64) (__rv_rtw 65) (__rv_rtw 66) w v ((v / w) * 40503);
 // a table twice the size, this walk's entries moved over
 let __cw_rehash = fn (u: unit) ->
   let w = __cw () in
@@ -2680,6 +2681,14 @@ let rvcoro_scan_ints = fn (c: int) -> fn (lo: int) -> fn (hi: int) -> fn (f: int
 // then every block is kept: mere-ruby's main stack, stopped while its
 // collector runs on a coroutine, reaches most of the heap, and gets nothing
 // back until it is running again, as if no release had run.
+// the retired block holding v, by halving (see rvcoro_release): a function of
+// its own, not a `let rec` inside the per-word callback -- that made a closure
+// for every word a walk read (v0.1.652)
+let rec __crel_half = fn (starts: int Vec) -> fn (ends: int Vec) -> fn (pinned: int Vec) -> fn (v: int) -> fn (lo: int) -> fn (hi: int) ->
+  if hi - lo <= 1 then (if v < vec_get ends lo then vec_set pinned lo 1 else ())
+  else (let mid = (lo + hi) / 2 in
+        if vec_get starts mid <= v then __crel_half starts ends pinned v mid hi
+        else __crel_half starts ends pinned v lo mid);
 let rvcoro_release = fn (u: unit) ->
   if __rv_rtw 71 != 0 then () else
   let _ = __rv_rtw_set 71 1 in
@@ -2728,12 +2737,7 @@ let rvcoro_release = fn (u: unit) ->
   let hi_all = (if n == 0 then 0 else vec_get ends (n - 1)) in
   let mark = fn (v: int) ->
     if v < lo_all || v >= hi_all then ()
-    else
-      (let rec half = fn (lo: int) -> fn (hi: int) ->
-         if hi - lo <= 1 then (if v < vec_get ends lo then vec_set pinned lo 1 else ())
-         else (let mid = (lo + hi) / 2 in
-               if vec_get starts mid <= v then half mid hi else half lo mid) in
-       half 0 n) in
+    else __crel_half starts ends pinned v 0 n in
   let me = __rv_rtw 44 in
   let rec each = fn (s: int) ->
     if s >= __rv_rtw 42 then ()

@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.652 — 2026-10-12
+
+_On RISC-V, the release of retired blocks makes nothing per word it reads; a hosted RV64 program may have up to 2047 MB._
+
+After a compaction (or a region block's exit) in a program with coroutines,
+once a megabyte of blocks waits, `rvcoro_release` walks every stopped
+coroutine's stack to find which retired blocks something still points into.
+Two of its per-word steps were each a `let rec` inside a callback: the probe
+that adds an address to the walk's visited set (in `__cw_add`) and the halving
+that finds the retired block holding a word (in the release's `mark`). Each made
+a closure for every address added and every word looked up, and RISC-V reclaims
+none of that. mere-ruby's collector compacts a few dozen tables per collection
+and releases after each; with thousands of Fibers stopped (corpus 214: Enumerators
+stepped once and dropped), one collection grew the heap by 140 to 170 MB per
+compaction and ran out of a gigabyte before it finished. Both are functions of
+their own now (`__cw_probe`, `__crel_half`).
+
+Measured on mere-ruby, with its Fibers on coroutines on both sides: 2000 stepped
+and dropped Enumerators took 495 MB of RISC-V pages (C, the same coroutine tree:
+252 MB) and take 345; 3000 took 572 and take 414 (C: 352); corpus 214 used to run
+out of 2 GB and now peaks at 751 MB of pages, where C's coroutine build peaks at
+777 MB. It needs more than the 1 GB a hosted program could have, so the ceiling
+is 2047 MB (memu's RAM is a byte buffer whose size is a C int); with it, 214
+matches ruby (in about 21 minutes).
+
+`test/coro/release_walk.mere` (new, in `coro_check` on the interpreter, C and
+both RISC-V widths, the RISC-V runs in 32 MB) stops two hundred coroutines deep
+in a recursion and compacts a Map sixty times; it uses 10 MB, and the poisons
+RV 13 (the probe as a closure again) and RV 14 (the halving) each run it out of
+32 MB.
+
 ## v0.1.651 — 2026-10-11
 
 _v0.1.648's "doubled" is counted from the first time a pin refused, not from the last compaction._

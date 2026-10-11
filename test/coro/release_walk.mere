@@ -1,0 +1,39 @@
+// The release of retired blocks walks every stopped coroutine's stack. Two
+// stopped hundred coroutines, each deep in a recursion with a list on its
+// stack, and a Map filled and compacted over and over by main: every
+// compaction retires its old arena, and once a megabyte waits the release
+// walks all the stopped stacks. Until v0.1.652 the walk made a closure for
+// every address it added to its visited set and for every word it looked up
+// among the retired blocks (a `let rec` inside the per-word callbacks), and
+// RISC-V reclaims none of that: a program with many stopped coroutines ran
+// out inside its compactions (mere-ruby's corpus 214, inside one collection).
+type ilist = INil | ICons of int * ilist;
+let rec build = fn n -> if n == 0 then INil else ICons (n, build (n - 1));
+let rec total = fn lst -> match lst with | INil -> 0 | ICons (h, t) -> h + total t;
+let root = coro_root ();
+let rec deep = fn (d: int) -> fn (l: ilist) ->
+  if d == 0 then (let _ = coro_switch root in total l)
+  else 1 + deep (d - 1) l;
+// the Map's first arena is made before the coroutines, so it lies above their
+// blocks (blocks are cut from the top down) and the retired arenas span them:
+// every list cell a stopped stack points at is looked up among the retired
+// blocks
+let m = map_new ();
+let rec fill = fn (i: int) -> fn (r: int) -> if i == 0 then () else (let _ = map_set m i (i + r) in fill (i - 1) r);
+let _ = fill 30000 0;
+let _ = map_compact m;
+let made = vec_new ();
+let rec mk = fn (k: int) ->
+  if k == 0 then ()
+  else
+    (let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (let _ = deep 150 (build 400) in root) ()) in
+     let _ = vec_push made c in
+     let _ = coro_switch c in
+     mk (k - 1));
+let _ = mk 200;
+let rec rounds = fn (r: int) -> fn (acc: int) ->
+  if r == 0 then acc
+  else (let _ = fill 30000 r in
+        let _ = map_compact m in
+        rounds (r - 1) (acc + map_get m 7));
+print_int (rounds 60 0)
