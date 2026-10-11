@@ -4,6 +4,25 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.651 — 2026-10-11
+
+_v0.1.648's "doubled" is counted from the first time a pin refused, not from the last compaction._
+
+v0.1.648 let `map_compact` / `vec_compact` go ahead under a pin once the arena
+had more than doubled since its last compaction. A store last compacted while it
+was nearly empty -- mere-ruby's `str_store`, at start-up, with 32 bytes in it --
+then met its first true pin past 1 MB and was copied under it: 14 MB written
+beside the 14 MB the pin kept. CRuby's `test_symbol_fstr_memory_leak` went from
+a growth of 1.69 to 1.76 against its limit of 1.71.
+
+A compaction now clears `cbase`. A pin that refuses while it is clear records
+the arena's size then, and only an arena more than twice that (plus 1 MB) is
+compacted under a pin. Measured on mere-ruby, -O1: the symbol test is 1.69 again
+(0.1.647: 1.69, 0.1.648: 1.76); the stale-word case of 648 peaks at 295 MB
+(647: 1,078 MB, 648: 266 MB); two thousand suspended fibers allocating and
+yielding, 40 rounds, take 3.13 s and 719 MB (647: 3.77 s / 714 MB, 648:
+3.97 s / 733 MB).
+
 ## v0.1.650 — 2026-10-11
 
 _A hosted RV64 program may have up to a gigabyte of RAM (`--ram 1024`), and memu keeps RAM as one host byte per guest byte._
