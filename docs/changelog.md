@@ -4,6 +4,33 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.648 — 2026-10-11
+
+_`map_compact` / `vec_compact` compact under a pin once the arena has more than doubled since it was last compacted._
+
+Since v0.1.589 a compaction does nothing while a suspended stack points into
+the container's arena: the copy beside an arena that cannot be given back yet
+was the bytes twice, and a program with two thousand suspended fibers went to
+90 s and 6.5 GB that way. But the pin is conservative, and one word that only
+looks like a pointer stops every later compaction of that container, while it
+keeps growing. mere-ruby found one: after a backtick inside a method, a slot the
+call left on the root's stack held an address the allocator later gave to
+`hash_store`'s arena. Each collection found it "pinned", skipped it, and set its
+next threshold from the size it had reached: 33, 134, 537 MB. A loop of
+million 9-key literals peaked at 1.1 GB instead of 200 MB, and 21 of CRuby's
+`assert_no_memory_leak` tests failed on it.
+
+The arena now remembers its `alloc_total` right after a compaction moved a
+container into it (`cbase`). When it has more than doubled since (plus 1 MB),
+the compaction goes ahead under the pin and retires the old arena, as v0.1.547
+did. A true pin then costs one copy per doubling, and a false one costs the one
+arena it points into. The fiber benchmark of 589 (2,000 suspended fibers
+allocating and yielding, 40 rounds) is 3.77 s / 714 MB on 0.1.647 and
+3.97 s / 733 MB here; the backtick case is 1,078 MB on 0.1.647 and 266 MB here.
+
+`coro_check.sh --poison`'s C 9 names the new line, so it still takes the check
+out.
+
 ## v0.1.647 — 2026-10-11
 
 _A RISC-V process can end by a signal: `proc_sig_raise`, `proc_sig_catch`, `proc_sig_take`, `proc_sig_ignore` and `proc_out_errno` through memu's host device._
