@@ -1,0 +1,48 @@
+// Signals on RISC-V (v0.1.647): the C runtime's catch / take / ignore / raise
+// and proc_out_errno, through memu's host device. The program starts itself
+// again as a child (the interpreter found as mere-ruby finds it: on C the
+// program itself, on RISC-V memu) to see the ways a process ends: by a
+// signal it raises on itself, by SIGPIPE when it writes to a closed pipe with
+// the default disposition, and with EPIPE from proc_out_errno when SIGPIPE is
+// ignored -- what mere-ruby turns into Errno::EPIPE. A signal sent to this
+// process (the shell's parent) is caught and taken, or ignored. Only signals
+// whose numbers are the same on Linux and macOS, so rv_exec compares every
+// line with the C backend's. (proc_out_errno is print_no_nl's on C -- `print`
+// goes through stdio -- and mere-ruby writes with print_no_nl, so that is what
+// the child writes with.)
+extern fn proc_sig_catch: int -> int -> int;
+extern fn proc_sig_take: unit -> int;
+extern fn proc_sig_ignore: int -> int;
+extern fn proc_sig_raise: int -> int;
+extern fn proc_sig_default: int -> int;
+extern fn proc_sig_noop: int -> int;
+extern fn proc_out_errno: unit -> int;
+let find_me = "exe=$(readlink /proc/$PPID/exe 2>/dev/null); [ -n \"$exe\" ] || exe=$(lsof -p $PPID -a -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1); ";
+// the status of a child whose stdout is a pipe the reader closes after 1 byte
+let piped = fn (mode: str) ->
+  run (find_me ++ "\{ \"$exe\" " ++ mode ++ "; echo $? > rv_sig_st; } | head -c 1 > /dev/null; exit $(cat rv_sig_st)");
+let rec spam = fn (n: int) ->
+  if n > 200000 then 0
+  else (let _ = print_no_nl "ok\n" in let e = proc_out_errno () in if e != 0 then e else spam (n + 1));
+let _ = (match args () with
+  | Cons (mode, _) ->
+    if mode == "raise-term" then
+      (let _ = proc_sig_default 15 in let _ = proc_sig_raise 15 in print "not reached")
+    else if mode == "pipe-default" then (let _ = spam 0 in print "not reached")
+    else if mode == "pipe-ignored" then
+      (let _ = proc_sig_noop 13 in exit (spam 0))
+    else print ("unexpected " ++ mode)
+  | Nil ->
+    (let _ = print_int (proc_sig_catch 1 0) in
+     let _ = print_int (run "kill -s HUP $PPID") in
+     let _ = print_int (proc_sig_take ()) in
+     let _ = print_int (proc_sig_take ()) in
+     let _ = print_int (proc_sig_ignore 2) in
+     let _ = print_int (run "kill -s INT $PPID") in
+     let _ = print "survived INT" in
+     let _ = print_int (run (find_me ++ "exec 2>/dev/null; \"$exe\" raise-term")) in
+     let _ = print_int (piped "pipe-default") in
+     let _ = print_int (piped "pipe-ignored") in
+     let _ = file_delete "rv_sig_st" in
+     print "end"));
+()
