@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.649 — 2026-10-11
+
+_On RISC-V with coroutines, a container grown inside a region block whose mark is in an older heap block keeps its new buffer; and `pow(x, -0.5)` is rounded once._
+
+**A region block that had run into a new heap block gave a grown container's
+buffer back.** On a coroutine's stack the heap is a chain of blocks (v0.1.627),
+and a region block whose allocations ran past the end of one goes back along
+the chain to its mark when it closes, giving the newer blocks back. A store
+into a container older than the block raises the high-water mark to gp so that
+what the store just allocated is kept -- but `emit_protect` skipped a block
+whose mark was in another block of the chain ("rolls nothing back"). A Vec made
+in an outer block (on gp: a block's containers have no arena) and grown inside
+an inner one that had needed a new heap block lost its new buffer when the
+inner block closed, and the next allocation wrote over it. mere-ruby's method
+table died this way under a Fiber that made enough to need a second block:
+corpus 213 halted on a trap inside `__rv_mslot_w`, the index read back as
+pointers (memu's `watch` showed `__rcopy_*`, a region's result being copied
+out, writing over the index). Now a container made in the current block --
+after the mark -- goes with the block, and any other raises the high-water mark
+into the current block, where `__rgn_cross` stops. `__hprot` already did this.
+`test/coro/region_chain_grow.mere` (new, in `coro_check` on every backend and
+both RISC-V widths) builds that shape; 647 answers garbage on RV64 and RV32,
+this the C backend's 206509500.
+
+**`pow(x, -0.5)` on RISC-V** was `1.0 / sqrt x`, rounded twice, and a unit off
+in the last place for about a quarter of all x: `(-8) ** -0.5` printed
+0.35355339059327373 where ruby has 0.3535533905932738 (corpus 105). The root is
+now carried as head + tail (`__fp_two_prod` squares it exactly), the quotient
+gets one correction from its exact residual and the sum is rounded once; an x
+outside [2^-960, 2^960] is scaled by 2^-+1000 first. 3011 x, the ends of the
+range among them, all match the correctly rounded value on RV64.
 ## v0.1.648 — 2026-10-11
 
 _`map_compact` / `vec_compact` compact under a pin once the arena has more than doubled since it was last compacted._

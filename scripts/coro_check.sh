@@ -72,6 +72,7 @@ compact_reuse|ic|held;0|0
 stack_heaps|icl|505000000|0
 finished_keeps|icl|kept|0
 first_block|icl|4000|0
+region_chain_grow|icl|206509500|0
 scan_outer|icl|all found;200880;0|0'
 
 # The interpreter prints a failure with its position and a code frame; the
@@ -228,6 +229,7 @@ compact_reuse|r|held;0|0
 stack_heaps|r|505000000|0
 finished_keeps|r|kept|0
 first_block|r|4000|0
+region_chain_grow|r|206509500|0
 scan_outer|r|all found;200880;0|0'
 RV_LIMIT="${RV_LIMIT:-300}"
 have_rv=0

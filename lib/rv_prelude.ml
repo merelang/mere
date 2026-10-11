@@ -2208,7 +2208,30 @@ let rec f_pow = fn (x: float) -> fn (y: float) ->
     // print 3.0, and exp(0.5 log 9) is a couple of ulps shy of it. libm's pow
     // answers the same bits for these (a correctly rounded pow agrees with a
     // correctly rounded sqrt wherever they overlap).
-    else if y == 0.0 - 0.5 then 1.0 / sqrt x
+    // v0.1.649: and y = -0.5 is rounded ONCE. 1.0 / sqrt x rounds twice (the
+    // root, then the quotient) and was a unit off in the last place for about
+    // a quarter of all x -- (-8) ** -0.5 printed 0.35355339059327373 where
+    // ruby (and the correctly rounded value) has 0.3535533905932738. The root
+    // is carried as head + tail (two_prod squares it exactly), the quotient
+    // gets one correction step from its exact residual, and the sum is
+    // rounded at the end: right for every one of 200,000 random x checked
+    // against exact arithmetic.
+    else if y == 0.0 - 0.5 then
+      // two_prod splits its operands and overflows near the ends of the
+      // range, so an x outside [2^-960, 2^960] is first scaled by 2^-+1000
+      // (exact: even, and every double times it stays normal) and the answer
+      // back by 2^+-500. (2^1024 is not a double.)
+      (let big = __fp_pow2i 960 in
+       let (xs, back) = (if x > big then (x / __fp_pow2i 1000, 1.0 / __fp_pow2i 500)
+                         else if x < 1.0 / big then (x * __fp_pow2i 1000, __fp_pow2i 500)
+                         else (x, 1.0)) in
+       let s = sqrt xs in
+       let (p, pe) = __fp_two_prod s s in
+       let sl = ((xs - p) - pe) / (2.0 * s) in
+       let q = 1.0 / s in
+       let (p2, pe2) = __fp_two_prod q s in
+       let e = (1.0 - p2) - pe2 in
+       (q + q * (e - sl * q)) * back)
     else if __fp_is_int_f y && f_abs y <= 32.0 then
       // small integer exponent: binary exponentiation, carried as HEAD+TAIL
       // pairs and rounded once at the end. Plain doubles rounded at every
