@@ -1268,8 +1268,9 @@ again while one of the coroutines that pinned it is the one running. And since
 an arena under a pin cannot be given back anyway, `map_compact` and
 `vec_compact` leave such a container where it is rather than copying it beside
 the old arena (a recycle still moves, because it must empty the map) -- until
-the arena has more than doubled since it was last compacted (v0.1.648): then
-the compaction goes ahead and the old arena is retired. The pin is
+the arena has more than doubled since a pin first refused to compact it
+(v0.1.648, v0.1.651): then the compaction goes ahead and the old arena is
+retired. The pin is
 conservative, and a word that only looks like a pointer would otherwise stop
 every compaction of a growing store for good. (LLVM has no compaction
 builtins.)
