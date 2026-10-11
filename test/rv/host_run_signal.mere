@@ -1,0 +1,8 @@
+// run's 128 + signal on RISC-V (v0.1.645) is in Linux's numbers, whatever the
+// host: SIGUSR1 is 10, SIGUSR2 12 and SIGBUS 7 on Linux, 30, 31 and 10 on
+// macOS. memu puts the host's number into Linux's. The expectation is written
+// out in rv_exec (C on macOS answers in macOS's numbers, so it cannot be the
+// reference here).
+let _ = print_int (run "kill -s USR1 $$");
+let _ = print_int (run "kill -s USR2 $$");
+print_int (run "kill -s BUS $$")

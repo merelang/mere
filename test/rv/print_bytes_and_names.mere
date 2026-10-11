@@ -20,4 +20,5 @@ let first_word = fn (s: str) ->
 let _ = print_bytes (bytes_of_str ("a" ++ chr 0 ++ "b"));
 let _ = print "";
 let _ = print (try_or_msg (fn (u: unit) -> str_of_int (gethostid ())) (fn (m: str) -> first_word m));
-print (try_or_msg (fn (u: unit) -> str_of_int (run "true")) (fn (m: str) -> first_word m))
+// the stub's own refusal (run was its last user; answered since v0.1.645)
+print (try_or_msg (fn (u: unit) -> str_of_int (__h_todo "probe" : int)) (fn (m: str) -> first_word m))

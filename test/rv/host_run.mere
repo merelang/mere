@@ -1,0 +1,20 @@
+// run on RISC-V (v0.1.645): `/bin/sh -c`, the host's, through memu's host
+// device. Output order around the child, exit statuses, a command that is not
+// there, children killed by a signal whose number is the same everywhere, the
+// environment and the working directory the child inherits, and a run inside
+// a run. rv_exec compares every line with the C backend's. (Signals whose
+// numbers differ between Linux and macOS are in host_run_signal.mere.)
+let _ = print "before";
+let _ = print_int (run "echo child");
+let _ = print "after";
+let _ = print_int (run "exit 3");
+let _ = print_int (run "no_such_command_rv_run 2>/dev/null");
+let _ = print_int (run "kill -s KILL $$");
+let _ = print_int (run "kill -s TERM $$");
+let _ = print_int (run "kill -s INT $$");
+let _ = print_int (run "test -n \"$HOME\"");
+let _ = print_int (run "pwd > rv_run_pwd.txt");
+let _ = print (if str_trim (read_file "rv_run_pwd.txt") == proc_cwd () then "same cwd" else "other cwd");
+let _ = file_delete "rv_run_pwd.txt";
+let _ = print_int (run "sh -c 'exit 4'");
+print_int (run "printf 'a\\nb\\n'")

@@ -191,7 +191,7 @@ machine rather than a host.
 | `read_lines` | yes | refused | refused | yes |
 | `read_stdin` | yes | refused | yes | yes |
 | `round` | yes | yes | yes | yes |
-| `run` | yes | refused | yes | stub |
+| `run` | yes | refused | yes | yes |
 | `sign` | yes | yes | yes | yes |
 | `sin` | yes | yes | yes | yes |
 | `sleep_ms` | yes | yes | refused | yes |

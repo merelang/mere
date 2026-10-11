@@ -79,7 +79,6 @@ let substring = fn (s: str) -> fn (a: int) -> fn (b: int) ->
 let __h_todo = fn (n: str) ->
   fail ((if __rv_xlen () == 64 then "RV64I: " else "RV32I: ") ++ n
         ++ " needs a host service this target does not provide (a hosted run answers a fixed set of Linux calls; --bare answers none)");
-let run = fn (c: str) -> (__h_todo "run" : int);
 
 // read_file / file_exists ARE answered here, through openat/read/close and
 // faccessat -- the same Linux-numbered ecall mechanism `print` and `exit`
@@ -634,6 +633,13 @@ let __libm_getppid = fn (u: unit) -> __rv_px (__rv_syscall 173 0 0 0 0);
 let __libm_getpgid = fn (p: int) -> __rv_px (__rv_syscall 155 p 0 0 0);
 let __libm_getsid = fn (p: int) -> __rv_px (__rv_syscall 156 p 0 0 0);
 let __libm_setsid = fn (u: unit) -> __rv_px (__rv_syscall 157 0 0 0 0);
+// v0.1.645: run -- `/bin/sh -c cmd` with the standard streams inherited,
+// its exit status, or 128 + the signal that killed it (Linux's number). The
+// C runtime's own function, so memu's host device answers it (call 1030), as
+// it does the socket calls: the shell and what it starts are the host's,
+// and the child Ruby reaches this CPU again through memu (RbConfig.ruby
+// names it). Under --bare __rv_syscall refuses, so run still does.
+let run = fn (c: str) -> __rv_syscall 1030 (__rv_cstr c) 0 0 0;
 // libc's socket(2): Linux's call 198 with Linux's numbers (AF_INET6 is 10);
 // memu makes the host's. The descriptor, or -1
 let __libm_socket = fn (d: int) -> fn (t: int) -> fn (p: int) ->
