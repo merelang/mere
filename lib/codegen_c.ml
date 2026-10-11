@@ -10037,6 +10037,10 @@ let region_runtime_helpers =
       "  size_t cap;               /* current block capacity */";
       "  __lang_region_block* blocks;  /* chain of every block, for free */";
       "  size_t alloc_total;       /* cumulative bytes handed out (v0.1.307) */";
+      (* v0.1.648: alloc_total right after the last compaction moved a
+         container's storage here (map_compact / vec_compact): the measure of
+         "this arena has more than doubled since", which a pin does not stop *)
+      "  size_t cbase;";
       (* Q-065: which source construct this arena is serving, for the meter.
          A static string (a `region R` name, or a runtime-owned arena's label)
          or NULL for the default region and for an arena already charged. *)
@@ -10197,6 +10201,7 @@ let region_runtime_helpers =
       "static void __lang_region_init_x(__lang_region* r, size_t cap, int xthread) {";
       "  r->blocks = NULL;";
       "  r->alloc_total = 0;";
+      "  r->cbase = 0;";
       "  r->site = 0;";
       "  r->seq = 0;";
       "  r->keep = NULL;";
@@ -11179,8 +11184,17 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          stores at every collection: 6.9 s and 1.1 GB became 90 s and 6.5 GB
          once the pin followed pointers into nodes. Leaving the map where it is
          gives back nothing either, and costs nothing; a later compaction, when
-         no stack points there, does what this one could not. *)
-      "  if (m->owns_region && __lang_region_pinned && __lang_region_pinned(m->region, 0)) return 0;";
+         no stack points there, does what this one could not.
+         v0.1.648: ...UNLESS THE ARENA HAS MORE THAN DOUBLED since it was last
+         compacted (cbase: its alloc_total right after). The pin is conservative,
+         and one word that only looks like a pointer -- a stale slot a call left
+         on the root's stack, at an address the allocator later handed to this
+         arena -- stopped every compaction of it for good: mere-ruby's hash_store
+         after one backtick inside a method went 33 -> 134 -> 537 MB, and a
+         loop of 9-key literals peaked at 1.1 GB instead of 200 MB. Compacting on
+         doubling keeps the copies to one per doubling for a true pin, and a
+         false one costs the one retired arena it points into. *)
+      "  if (m->owns_region && m->region->alloc_total <= 2 * m->region->cbase + 1048576 && __lang_region_pinned && __lang_region_pinned(m->region, 0)) return 0;";
       "  __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "  if (!fresh) __lang_fail_impl(\"out of memory\");";
       "  __lang_region_init(fresh, 4096);";
@@ -11218,6 +11232,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  m->idx_cap = 0;";
       Printf.sprintf "  %s_reindex(m, nic);" struct_name;
       "  m->owns_region = 1;";
+      "  fresh->cbase = fresh->alloc_total;  /* v0.1.648: see above */";
       "  if (owned) __lang_region_retire(old);";
       "  return 0;";
       "}";
@@ -13082,7 +13097,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
          in the arena; the generation swap is what returns them. *)
       Printf.sprintf "static int %s_compact(%s* v) {" struct_name struct_name;
       "  __LANG_OWNED(v, \"Vec\", \"vec_compact\");";
-      "  if (v->owns_region && __lang_region_pinned && __lang_region_pinned(v->region, 0)) return 0;  /* v0.1.589: see map_compact */";
+      "  if (v->owns_region && v->region->alloc_total <= 2 * v->region->cbase + 1048576 && __lang_region_pinned && __lang_region_pinned(v->region, 0)) return 0;  /* v0.1.589, v0.1.648: see map_compact */";
       "  __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "  if (!fresh) __lang_fail_impl(\"out of memory\");";
       "  __lang_region_init(fresh, 4096);";
@@ -13095,6 +13110,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  v->data = nd;";
       "  v->cap = ncap;";
       "  v->owns_region = 1;";
+      "  fresh->cbase = fresh->alloc_total;  /* v0.1.648: see map_compact */";
       "  if (owned) __lang_region_retire(old);";
       "  return 0;";
       "}";
