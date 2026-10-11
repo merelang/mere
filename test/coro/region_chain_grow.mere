@@ -1,0 +1,32 @@
+// A Vec made in an outer region block lives on gp (it has no arena: a block's
+// containers go with the block), and grows wherever gp is. Inside a coroutine,
+// an inner block that has allocated past the end of the coroutine's first heap
+// block (build 2000) grows it there -- in a newer block of the chain -- and the
+// inner block's exit goes back along the chain to its mark, giving the newer
+// block back. Unless the store into the outer Vec raised the high-water mark,
+// its new buffer went with it, and the next allocation (build 20000) wrote over
+// it. emit_protect skipped a mark in another block ("rolls nothing back") until
+// v0.1.649; mere-ruby's method table died this way under a Fiber (corpus 213).
+type ilist = INil | ICons of int * ilist;
+let rec build = fn n -> if n == 0 then INil else ICons (n, build (n - 1));
+let rec total = fn lst -> match lst with | INil -> 0 | ICons (h, t) -> h + total t;
+let rec fill = fn v -> fn (i: int) -> if i >= 3000 then () else (let _ = vec_push v i in fill v (i + 1));
+let rec sum = fn v -> fn (i: int) -> fn (acc: int) -> if i >= vec_len v then acc else sum v (i + 1) (acc + vec_get v i);
+let root = coro_root ();
+let out = map_new ();
+let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
+  let r = region W {
+    let outer = vec_new () in
+    let _ = vec_push outer 0 in
+    let n = region R {
+      let t = build 2000 in
+      let _ = fill outer 1 in
+      total t
+    } in
+    let junk = build 20000 in
+    n + sum outer 0 0 + total junk
+  } in
+  let _ = map_set out 0 r in
+  root) ());
+let _ = coro_switch c;
+print_int (map_get out 0)

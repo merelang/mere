@@ -1050,24 +1050,40 @@ let emit_protect () =
   let l_do = fresh_label ".protDo" in
   if !coro_mode then begin
     (* v0.1.627: on a stack whose heap is a chain of blocks (see the
-       Region_block arm), only a block whose mark is in the current block can
-       roll back, and only over that block: a container outside
-       [max(mark, hwm), gp) there is older than what it is given, and the
-       mark goes to gp. An innermost mark in another block rolls nothing back. *)
+       Region_block arm), a block whose mark is in the current block rolls
+       back over that block only: a container outside [max(mark, hwm), gp)
+       there is older than what it is given, and the mark goes to gp.
+       v0.1.648 (649): a block whose mark is in an OLDER block of the chain
+       rolls back too -- __rgn_cross goes back along the chain to the block
+       holding the mark (or the high-water mark, if that is newer) and gives
+       the blocks it passes back. This said "rolls nothing back" and skipped:
+       a Vec made in an outer block (on gp, no arena) and grown inside an
+       inner one that had run into a new block lost its new buffer when the
+       inner one closed, and the next allocation wrote over it -- mere-ruby's
+       method table, after a Fiber made enough to need a second block (corpus
+       213). Then a container made in this block (after the mark) goes with
+       the block; any other is older, and the high-water mark goes to gp, in
+       this block, where __rgn_cross stops. *)
+    let l_other = fresh_label ".protOther" in
     li t0 (rt_depth_addr ());
     emit_word (enc_i rt_depth_off t0 (ldf3 ()) t1 0x03);
     emit (Branch (0, t1, zero, l_skip));                       (* no block open *)
     emit_word (enc_i (rt_bmark_off ()) t0 (ldf3 ()) t2 0x03); (* block mark *)
     li t3 (rtw_addr rtw_blo);
     emit_word (enc_i 0 t3 (ldf3 ()) t3 0x03);                  (* this block's start *)
-    emit (Branch (6, t2, t3, l_skip));                         (* the mark is in another *)
-    emit (Branch (6, gp, t2, l_skip));                         (*   block: nothing rolls back *)
+    emit (Branch (6, t2, t3, l_other));                        (* the mark is in another *)
+    emit (Branch (6, gp, t2, l_other));                        (*   block of the chain *)
     emit (Branch (6, a0, t2, l_do));                           (* bltu c, mark *)
     emit (Branch (7, a0, gp, l_do));                           (* bgeu c, gp *)
     emit_word (enc_i (rt_hwm_off ()) t0 (ldf3 ()) t1 0x03);   (* hwm *)
     emit (Branch (6, t1, t3, l_skip));                         (* hwm in another block *)
     emit (Branch (6, gp, t1, l_skip));
     emit (Branch (7, a0, t1, l_skip));                         (* bgeu c, hwm -> skip *)
+    emit (Jal (zero, l_do));
+    emit (Label l_other);
+    emit (Branch (6, a0, t3, l_do));                           (* c below this block *)
+    emit (Branch (7, a0, gp, l_do));                           (* or past gp: older *)
+    emit (Jal (zero, l_skip));                                 (* made in this block *)
     emit (Label l_do);
     emit_word (enc_s (rt_hwm_off ()) gp t0 (stf3 ()) 0x23);   (* hwm = gp *)
     emit (Label l_skip)
