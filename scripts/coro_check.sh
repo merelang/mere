@@ -73,6 +73,7 @@ stack_heaps|icl|505000000|0
 finished_keeps|icl|kept|0
 first_block|icl|4000|0
 region_chain_grow|icl|206509500|0
+release_walk|ic|2250|0
 scan_outer|icl|all found;200880;0|0'
 
 # The interpreter prints a failure with its position and a code frame; the
@@ -230,6 +231,7 @@ stack_heaps|r|505000000|0
 finished_keeps|r|kept|0
 first_block|r|4000|0
 region_chain_grow|r|206509500|0
+release_walk|r|2250|0
 scan_outer|r|all found;200880;0|0'
 RV_LIMIT="${RV_LIMIT:-300}"
 have_rv=0
@@ -245,11 +247,14 @@ run_rv() {  # $1 = fixture, $2 = 32|64 -> "output|exit" (MERE_RV_PRELUDE_FILE pa
   flag=-rv64; [ "$2" = 32 ] && flag=-rv
   # `sized` asks for a 64 MB stack and recurses 300,000 deep in it
   extra=""; [ "$1" = sized ] && extra="--coro-stack 64"
+  # v0.1.652: release_walk runs in 32 MB, where the walk's garbage per word
+  # read runs out and 10 MB of its own does not
+  ram=256; [ "$1" = release_walk ] && ram=32
   # shellcheck disable=SC2086
-  if ! "$MERE" "$flag" --ram 256 $extra "$FX/$1.mere" > "$T/rv/prog.bin" 2>"$T/rv/emit.err"; then
+  if ! "$MERE" "$flag" --ram "$ram" $extra "$FX/$1.mere" > "$T/rv/prog.bin" 2>"$T/rv/emit.err"; then
     printf 'EMITFAIL %s|x' "$(grep -v '^warning\|^ *-->\|^ *|\|^ *[0-9]* |\|^ *= \|^$' "$T/rv/emit.err" | head -1)"; return
   fi
-  ( cd "$T/rv" && perl -e 'alarm shift; exec @ARGV' "${RV_LIMIT_NOW:-$RV_LIMIT}" ./rvrun"$2" 256 > out 2>&1 ); rc=$?
+  ( cd "$T/rv" && perl -e 'alarm shift; exec @ARGV' "${RV_LIMIT_NOW:-$RV_LIMIT}" ./rvrun"$2" "$ram" > out 2>&1 ); rc=$?
   [ "$rc" = 142 ] && { echo "TIMEOUT|142"; return; }
   printf '%s' "$(grep -av '^rvrun' "$T/rv/out" | norm)"
 }
@@ -389,6 +394,11 @@ if [ "$MODE" = "--poison" ]; then
   rv_poison "RV 11 (own region values in an older block not followed)" 's/ || (older != 0 \&\& __cw_older older mark v))$/)/' scan
   # v0.1.629: a scan with no budget follows a stopped stack's values through
   # every block open on it, not only the innermost
+  # v0.1.652: the release's walk makes nothing per word it reads -- a closure
+  # per address added to the visited set, or per word looked up among the
+  # retired blocks, ran a 32 MB machine out with two hundred stopped stacks
+  rv_poison "RV 13 (a closure per address the walk adds)" 's/^  __cw_probe (__rv_rtw 64) (__rv_rtw 65) (__rv_rtw 66) w v ((v \/ w) \* 40503);$/  let tbl = __rv_rtw 64 in let cap = __rv_rtw 65 in let st = __rv_rtw 66 in let rec probe = fn (i: int) -> (let a = tbl + bit_and i (cap - 1) * 2 * w in if __rv_peek (a + w) != st then (let _ = __rv_poke a v in let _ = __rv_poke (a + w) st in true) else if __rv_peek a == v then false else probe (i + 1)) in probe ((v \/ w) * 40503);/' release_walk
+  rv_poison "RV 14 (a closure per word looked up among the retired blocks)" 's/^    else __crel_half starts ends pinned v 0 n in$/    else (let rec half = fn (lo: int) -> fn (hi: int) -> if hi - lo <= 1 then (if v < vec_get ends lo then vec_set pinned lo 1 else ()) else (let mid = (lo + hi) \/ 2 in if vec_get starts mid <= v then half mid hi else half lo mid) in half 0 n) in/' release_walk
   rv_poison "RV 12 (a scan follows only the innermost block)" 's/(if budget == 0 then __cget s 11 else __cget s 10)/__cget s 10/' scan_outer
   # v0.1.627: a finished coroutine's blocks go back only if it kept nothing
   rv_poison "RV 10 (a finished coroutine's blocks given back though it kept something)" 's/^  if first != 0 \&\& __cget s 17 == first \&\& __cget s 13 == first + 2 \* w then$/  if first != 0 then/' finished_keeps
