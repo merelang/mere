@@ -4,6 +4,35 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.650 — 2026-10-11
+
+_A hosted RV64 program may have up to a gigabyte of RAM (`--ram 1024`), and memu keeps RAM as one host byte per guest byte._
+
+`--ram` stopped at 256 MB to keep RAM below the device MMIO window at
+0x10000000, so a device address never moves with the RAM size. A `--bare`
+program drives those devices, and an RV32 one keeps the ceiling; a hosted RV64
+program reaches no device -- its I/O is ecalls -- and memu looks in RAM before
+the devices, so its RAM may cover them. It may now ask for up to 1024 MB.
+`--ram` is checked once every switch is read (`--bare` may come after it), and a
+refusal above 256 MB says why.
+
+memu (its d2-650 change) kept RAM as a Vec of words, eight host bytes for each
+guest byte: a 256 MB guest took 2.2 GB of the host, and a gigabyte would have
+taken eight. It is a `ByteBuf` now -- only `ldb`, `stb`, `in_ram` and the
+allocation touched the representation -- at the same speed (mere-ruby's start:
+3.47 s before, 3.44 s after) and in 386 MB instead of 2187 MB. 1024 because
+the buffer's size is a C int.
+
+mere-ruby's corpus 219 (collecting under 1100 suspended Fibers; 245 MB on C)
+ran out of 256 MB on RV64 and matches with `--ram 1024`. 214 (753 MB on C)
+still does not fit in two gigabytes: RISC-V reclaims less than C there, which
+is a question of its own.
+
+`test/rv/big_ram.mere` (new, in rv_exec) is built with `--ram 272`: its
+recursion runs the stack down through 0x10000000 (memu's `watch` sees the
+stores land there) and every frame's value comes back as on C, also with gcc
+on Linux; `-rv --ram 272` and `-rv64 --bare --ram 272` stay refused.
+
 ## v0.1.649 — 2026-10-11
 
 _On RISC-V with coroutines, a container grown inside a region block whose mark is in an older heap block keeps its new buffer; and `pow(x, -0.5)` is rounded once._
@@ -35,6 +64,7 @@ now carried as head + tail (`__fp_two_prod` squares it exactly), the quotient
 gets one correction from its exact residual and the sum is rounded once; an x
 outside [2^-960, 2^960] is scaled by 2^-+1000 first. 3011 x, the ends of the
 range among them, all match the correctly rounded value on RV64.
+
 ## v0.1.648 — 2026-10-11
 
 _`map_compact` / `vec_compact` compact under a pin once the arena has more than doubled since it was last compacted._

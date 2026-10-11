@@ -454,6 +454,29 @@ end"
   else printf '  FAIL  %s:%s\n' "$name" "$width"; printf '%s\n' "$got" | head -8 | sed 's/^/    got: /'; rc=1; fi
 done
 
+# big_ram (v0.1.650): a hosted RV64 program may have more than 256 MB. Built
+# with --ram 272, its stack starts just under 272 MB and the recursion runs it
+# down through 0x10000000, where the devices are and which RAM covers for a
+# hosted program. The C reference gets a stack big enough for the same depth.
+# The same size stays refused for -rv and for --bare (RAM would cover the
+# devices a bare program drives).
+name=big_ram
+case "$(uname -s)" in Darwin) BIGSTACK="-Wl,-stack_size,0x10000000" ;; *) BIGSTACK="" ;; esac
+if [ -n "$RVRUN64" ] && "$MERE" -c "$ROOT/test/rv/$name.mere" > "$TMP/ref.c" 2>/dev/null \
+   && $CC -O1 -w $BIGSTACK -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
+  exp=$( cd "$TMP" && { ulimit -s unlimited 2>/dev/null || ulimit -s 262144 2>/dev/null; ./ref 2>&1; } )
+  if "$MERE" -rv64 --ram 272 "$ROOT/test/rv/$name.mere" > "$TMP/prog.bin" 2>"$TMP/rverr"; then
+    got=$( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' "$RVRUN64" 272 2>&1 | grep -a -v '^rvrun' )
+    if [ "$got" = "$exp" ]; then printf '  ok    %s (RV64, 272 MB, the stack through the device window)\n' "$name"
+    else printf '  FAIL  %s\n    expected: %s\n    got:      %s\n' "$name" "$(echo $exp)" "$(echo $got)"; rc=1; fi
+  else printf '  FAIL  %s: -rv64 --ram 272 refused\n' "$name"; head -2 "$TMP/rverr"; rc=1; fi
+  for refused in "-rv --ram 272" "-rv64 --bare --ram 272"; do
+    if "$MERE" $refused "$ROOT/test/rv/$name.mere" > /dev/null 2>&1; then
+      printf '  FAIL  %s: `%s` accepted -- RAM would cover the devices\n' "$name" "$refused"; rc=1
+    else printf '  ok    %s: `%s` still refused\n' "$name" "$refused"; fi
+  done
+fi
+
 # host_run_signal (v0.1.645): run's 128 + signal is in Linux's numbers on
 # RISC-V whatever the host -- memu translates a BSD-numbered host's. C on
 # macOS answers in macOS's numbers, so the expectation is written out here
