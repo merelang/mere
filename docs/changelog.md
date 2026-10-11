@@ -4,6 +4,38 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.646 — 2026-10-11
+
+_A RISC-V program that starts itself again runs on the same CPU: memu can be started as the program's interpreter._
+
+mere-ruby starts a child Ruby with `RbConfig.ruby`, which names its own
+executable -- through `/proc/<pid>/exe`, else `lsof`. On the emulator that is
+memu, and memu was started as `rvrun64 <RAM MB> -- args`, so `rvrun64
+script.rb` read the script's name as a RAM size. memu's d2-646 change: when
+the first argument is not a number, memu takes the RAM size and the program
+the first memu left in the environment (`MEMU_RAM`, and `MEMU_PROG` made
+absolute, so a child started from another directory finds it), every argument
+is the guest's, and none arms one of memu's instruments (a script argument
+named `trace` or `prof` is the program's). The two variables are left out of
+every guest's environment block, so a program listing its `ENV` sees what it
+would under ruby. And every descriptor memu is started with, from 3 up, is
+marked as the host's: a child Ruby writing to the pipe its parent handed it
+(`spawn(..., w => w)`, `IO.new(fd)`) had its bytes go to stdout, because a
+fresh memu knew only the descriptors it had opened itself. Nothing changes in the compiler: the child goes through
+`run` (v0.1.645), the host's shell execs memu, and the child Ruby is on the
+RISC-V CPU again.
+
+`test/rv/host_run_self.mere` (new, both widths in rv_exec, with a written
+expectation -- on C the interpreter is the program itself) starts itself
+four times: with arguments, from `/`, with an argument named `trace`, and
+with a descriptor (5) its shell opened for it to write to; each child must say
+`riscv64` (`riscv32`) and must not see `MEMU_PROG`, and what the last writes
+must reach the file. mere-ruby's corpus 276 (a child Ruby) now matches on
+RV64.
+Checked on macOS (lsof) and on Linux (`/proc`). Under Rosetta, an amd64
+Linux container on an arm64 Mac, `/proc/<pid>/exe` names Rosetta rather than
+memu -- not something a native machine sees.
+
 ## v0.1.645 — 2026-10-11
 
 _`run` on RISC-V: `/bin/sh -c`, the host's, through memu's host device; a child killed by a signal answers 128 + Linux's number for it._

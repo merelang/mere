@@ -419,6 +419,41 @@ for name in host_fds host_pipe host_files host_net host_run; do
 done
 echo "rv_exec: $fdpass passed, $fdfail failed for the descriptors"
 
+# host_run_self (v0.1.646): a program that starts itself again, as
+# mere-ruby's RbConfig.ruby does -- the interpreter found through
+# /proc/<pid>/exe or lsof is memu, and memu started with a script's arguments
+# runs the same program on the same CPU. From another directory too, an
+# argument named `trace` stays the program's, memu's own MEMU_* variables
+# stay out of the program's ENV, and a descriptor the parent's shell opened
+# is the child's (a memu without that writes it to stdout). On C the interpreter is the program itself,
+# so the expectation is written here.
+name=host_run_self
+for width in 32 64; do
+  if [ "$width" = 64 ]; then flag=-rv64; emu="$RVRUN64"; arch=riscv64; else flag=-rv; emu="$RVRUN"; arch=riscv32; fi
+  [ -n "$emu" ] || continue
+  exp="parent
+child $arch x y
+end
+0
+child $arch from-root
+end
+0
+child $arch trace
+end
+0
+12
+end
+0
+through fd 5
+end"
+  if ! "$MERE" $flag --ram 16 "$ROOT/test/rv/$name.mere" > "$TMP/prog.bin" 2>"$TMP/rverr"; then
+    printf '  FAIL  %s:%s did not build\n' "$name" "$width"; head -2 "$TMP/rverr"; rc=1; continue
+  fi
+  got=$( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' "$emu" 16 2>&1 | grep -a -v '^rvrun' )
+  if [ "$got" = "$exp" ]; then printf '  ok    %s:%s (the child is this program on this CPU)\n' "$name" "$width"
+  else printf '  FAIL  %s:%s\n' "$name" "$width"; printf '%s\n' "$got" | head -8 | sed 's/^/    got: /'; rc=1; fi
+done
+
 # host_run_signal (v0.1.645): run's 128 + signal is in Linux's numbers on
 # RISC-V whatever the host -- memu translates a BSD-numbered host's. C on
 # macOS answers in macOS's numbers, so the expectation is written out here

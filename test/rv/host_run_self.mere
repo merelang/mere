@@ -1,0 +1,36 @@
+// A program that starts itself again on RISC-V (v0.1.646): what mere-ruby's
+// RbConfig.ruby does. The interpreter is found as mere-ruby finds it --
+// /proc/<pid>/exe, else lsof -- and it is memu; run with a script's
+// arguments instead of a RAM size, memu takes the RAM and the program the
+// first memu left in the environment. The child must be this program on this
+// CPU (sys_arch), from another directory too, an argument named like one of
+// memu's instruments (`trace`) must be the program's, and the variables memu
+// leaves for it (MEMU_RAM, MEMU_PROG) must not be in its environment. A
+// descriptor the parent's shell opened (5) is the child's to write to. RISC-V only: on C
+// the interpreter is the program itself, so rv_exec writes the expectation.
+extern fn fd_write: int -> int -> int -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_copy_str: int -> int -> str -> int;
+let rec show_args = fn (l: str list) ->
+  match l with
+  | Nil -> ""
+  | Cons (a, rest) -> " " ++ a ++ show_args rest;
+let find_me = "exe=$(readlink /proc/$PPID/exe 2>/dev/null); [ -n \"$exe\" ] || exe=$(lsof -p $PPID -a -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1); ";
+let main_args = args ();
+let _ = (match main_args with
+  | Cons (first, rest) ->
+    if first == "child" then print ("child " ++ sys_arch () ++ show_args rest
+                                    ++ (match env_var "MEMU_PROG" with Some _ -> " (sees MEMU_PROG)" | None -> ""))
+    else if first == "child-fd" then
+      (let buf = mem_alloc 64 in
+       print_int (fd_write 5 buf (mem_copy_str buf 0 "through fd 5")))
+    else print ("unexpected " ++ first)
+  | Nil ->
+    (let _ = print "parent" in
+     let _ = print_int (run (find_me ++ "\"$exe\" child x y")) in
+     let _ = print_int (run (find_me ++ "cd / && \"$exe\" child from-root")) in
+     let _ = print_int (run (find_me ++ "\"$exe\" child trace")) in
+     let _ = print_int (run (find_me ++ "\"$exe\" child-fd 5>rv_self_fd.txt")) in
+     let _ = print (read_file "rv_self_fd.txt") in
+     let _ = file_delete "rv_self_fd.txt" in ()));
+print "end"
