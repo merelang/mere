@@ -633,6 +633,18 @@ let __libm_getppid = fn (u: unit) -> __rv_px (__rv_syscall 173 0 0 0 0);
 let __libm_getpgid = fn (p: int) -> __rv_px (__rv_syscall 155 p 0 0 0);
 let __libm_getsid = fn (p: int) -> __rv_px (__rv_syscall 156 p 0 0 0);
 let __libm_setsid = fn (u: unit) -> __rv_px (__rv_syscall 157 0 0 0 0);
+// v0.1.647: the rest of the C runtime's signal calls, through memu's host
+// device in Linux's numbers (memu translates for a BSD-numbered host).
+// raise of a signal whose disposition is the default ends the process with
+// it, so the parent sees a child killed by that signal; catch and take are
+// the C runtime's mark-and-poll (memu is the process the signal reaches);
+// proc_out_errno is why the last write to stdout failed -- EPIPE on a closed
+// pipe -- read and cleared, as on C.
+let __libm_proc_sig_raise = fn (sig: int) -> __rv_hc_proc 1031 sig 0 0;
+let __libm_proc_sig_catch = fn (sig: int) -> fn (keep: int) -> __rv_hc_proc 1032 sig keep 0;
+let __libm_proc_sig_take = fn (u: unit) -> __rv_syscall 1033 0 0 0 0;
+let __libm_proc_sig_ignore = fn (sig: int) -> __rv_hc_proc 1034 sig 0 0;
+let __libm_proc_out_errno = fn (u: unit) -> __rv_syscall 1035 0 0 0 0;
 // v0.1.645: run -- `/bin/sh -c cmd` with the standard streams inherited,
 // its exit status, or 128 + the signal that killed it (Linux's number). The
 // C runtime's own function, so memu's host device answers it (call 1030), as

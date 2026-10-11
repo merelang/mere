@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.647 — 2026-10-11
+
+_A RISC-V process can end by a signal: `proc_sig_raise`, `proc_sig_catch`, `proc_sig_take`, `proc_sig_ignore` and `proc_out_errno` through memu's host device._
+
+mere-ruby's corpus 284 (signals, pipes and the status a child leaves) needs a
+child Ruby to die the way a ruby process dies. On RISC-V it could not:
+
+- `proc_sig_raise`, with which mere-ruby ends itself by an unrescued
+  `SignalException` or `Process.kill(:TERM, $$)`, was not there, nor were
+  `catch`, `take` (a trap's mark and poll) and `ignore`. They are the C
+  runtime's, so memu calls them for the guest (calls 1031-1034) with the
+  signal translated (v0.1.645's table); a signal taken comes back in Linux's
+  number. memu is the process a signal reaches, so a raise whose disposition
+  is the default ends the emulator with it and the parent sees that signal.
+- A write to stdout that the host refused was a write that happened: memu
+  wrote the guest's stdout with `print_no_nl` and answered the length. With
+  SIGPIPE ignored, as mere-ruby has it, `loop { puts :ok }` under a closed pipe
+  never raised `Errno::EPIPE` and ran until the harness killed it. memu now
+  answers the host's errno (in Linux's number) and keeps it for
+  `proc_out_errno` (call 1035), read and cleared as on C. With SIGPIPE at its
+  default, the host kills memu with SIGPIPE, as Linux kills the process.
+
+One difference stays: on C, `proc_out_errno` is `print_no_nl`'s (`print`
+goes through stdio and keeps no errno); memu sees one write to descriptor 1
+either way, so on RISC-V a refused `print` is kept too. mere-ruby writes with
+`print_no_nl`.
+
+`test/rv/host_signals.mere` (new, both widths in rv_exec against C, also with
+gcc on Linux) catches and takes HUP, ignores INT, and starts itself as a child
+three times to see it end by `raise` of TERM (143), by SIGPIPE at the default
+(141), and with EPIPE from `proc_out_errno` when SIGPIPE is ignored (32).
+mere-ruby's corpus 145, 222, 276 and 284 match on RV64 with 645-647.
+
 ## v0.1.646 — 2026-10-11
 
 _A RISC-V program that starts itself again runs on the same CPU: memu can be started as the program's interpreter._

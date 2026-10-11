@@ -562,6 +562,9 @@ let libm_sigs : (string * string) list =
       ("mem_copy_str", "iis>i"); ("mem_to_str", "ii>s");
       (* and a signal's disposition, which a pipe's writer sets *)
       ("proc_sig_noop", "i>i"); ("proc_sig_default", "i>i");
+      (* v0.1.647: the rest of the signal calls, and print's last errno *)
+      ("proc_sig_raise", "i>i"); ("proc_sig_catch", "ii>i"); ("proc_sig_take", "u>i");
+      ("proc_sig_ignore", "i>i"); ("proc_out_errno", "u>i");
       (* v0.1.641: sockets, readiness, resource limits (memu's host device) *)
       ("tcp_listen_at", "sii>i"); ("tcp_listen", "i>i"); ("tcp_accept", "i>i");
       ("tcp_connect", "si>i"); ("tcp_close", "i>u"); ("tcp_set_timeout", "ii>i");
