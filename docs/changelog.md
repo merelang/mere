@@ -4,6 +4,43 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.645 — 2026-10-11
+
+_`run` on RISC-V: `/bin/sh -c`, the host's, through memu's host device; a child killed by a signal answers 128 + Linux's number for it._
+
+`run` was the last stub on RISC-V. Every child process mere-ruby starts --
+`spawn`, `system`, the backtick, `Process.wait`, `IO.popen` -- is written in
+its Ruby prelude on top of this one builtin, so it was also every child
+process mere-ruby could not start on the emulator (corpus 145, 222, 276, 284).
+
+It is the C runtime's own function (`posix_spawn` of `/bin/sh` and a
+`waitpid`), as `tcp_listen_at` is, so memu answers it the way it answers the
+socket calls since v0.1.641: call 1030, and memu runs the host's `run`. The
+shell and what it starts are the host's; a child Ruby comes back to this CPU
+through memu itself, which `RbConfig.ruby` names (v0.1.646). Linux's
+clone/execve/wait4 were weighed and left for when there is a real `fork` to
+serve (note 304 in the project notes): mere-ruby's `Kernel#fork` raises on
+every backend, and no Linux kernel but memu runs these binaries.
+
+The status is the C runtime's -- the exit code, or 128 + the signal -- with
+the signal in **Linux's** numbers whatever the host: the guest's tables are
+Linux's (`sys_os` says `linux`), and on macOS SIGUSR1, SIGUSR2, SIGBUS,
+SIGCHLD, SIGSTOP and the job-control signals have other numbers. memu now
+translates both ways, and also translates the signal a guest sets the
+disposition of (`rt_sigaction`, v0.1.634), which went to the host untranslated.
+Nothing is translated on a Linux host. Under `--bare`, `run` is refused (there
+is no host to make a system call to). With `run` answered, no RV stub is left;
+rv_prelude_check and `test/rv/print_bytes_and_names.mere` call the stub
+mechanism directly to keep its `RV32I:` prefix.
+
+`test/rv/host_run.mere` (new) holds the order of the output around the child,
+exit statuses, a missing command (127), children killed by KILL, TERM and INT,
+the environment and working directory the child inherits and a `run` inside a
+`run` to the C backend, line for line on both widths, also with gcc on Linux.
+`test/rv/host_run_signal.mere` holds USR1, USR2 and BUS to 138, 140 and 135 on
+both widths and both hosts (an untranslated memu on macOS says 158 159 138).
+host_matrix's RV column says `yes` for `run`.
+
 ## v0.1.644 — 2026-10-11
 
 _`vec_recycle : Vec[R, T] -> unit`: empty a Vec and give its arena back, the Vec twin of `map_recycle`._

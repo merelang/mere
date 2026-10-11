@@ -392,7 +392,7 @@ echo "rv_exec: $hxpass passed, $hxfail failed for the host externs (both widths)
 # packs a pipe's two descriptors into one int). memu hands the guest the
 # host's own descriptors, so a write is in the file before the close, as on C.
 fdpass=0; fdfail=0
-for name in host_fds host_pipe host_files host_net; do
+for name in host_fds host_pipe host_files host_net host_run; do
   if "$MERE" -c "$ROOT/test/rv/$name.mere" > "$TMP/ref.c" 2>/dev/null \
      && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
     ( cd "$TMP" && ulimit -t 60; ./ref ) > "$TMP/i.out" 2>&1
@@ -418,6 +418,26 @@ for name in host_fds host_pipe host_files host_net; do
   fi
 done
 echo "rv_exec: $fdpass passed, $fdfail failed for the descriptors"
+
+# host_run_signal (v0.1.645): run's 128 + signal is in Linux's numbers on
+# RISC-V whatever the host -- memu translates a BSD-numbered host's. C on
+# macOS answers in macOS's numbers, so the expectation is written out here
+# (SIGUSR1 10, SIGUSR2 12, SIGBUS 7). An untranslated memu on macOS says
+# 158 159 138 and goes red.
+name=host_run_signal
+exp="138
+140
+135"
+for width in 32 64; do
+  if [ "$width" = 64 ]; then flag=-rv64; emu="$RVRUN64"; else flag=-rv; emu="$RVRUN"; fi
+  [ -n "$emu" ] || continue
+  if ! "$MERE" $flag --ram 16 "$ROOT/test/rv/$name.mere" > "$TMP/prog.bin" 2>"$TMP/rverr"; then
+    printf '  FAIL  %s:%s did not build\n' "$name" "$width"; head -2 "$TMP/rverr"; rc=1; continue
+  fi
+  got=$( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' "$emu" 16 2>&1 | grep -a -v '^rvrun' )
+  if [ "$got" = "$exp" ]; then printf '  ok    %s:%s (128 + Linux signal numbers)\n' "$name" "$width"
+  else printf '  FAIL  %s:%s\n    expected: %s\n    got:      %s\n' "$name" "$width" "$(echo $exp)" "$(echo $got)"; rc=1; fi
+done
 
 # host_write_file: the write half, same contract. stdin is piped from a fixture
 # THE HARNESS WRITES, and the same bytes go to both sides -- read_stdin drains

@@ -289,11 +289,12 @@ if grep -a -q 'RV32I: sqrt' "$TMP/op2.bin"; then
   echo "FAIL rv_prelude: sqrt carries a shim message again -- it is supposed to be computed"
   rc=1
 fi
-# The host-service family still HAS a stub -- `run`, permanently (there is no
-# shell on the other side of an ecall) -- and its message must keep the
-# `RV32I:` prefix host_matrix.sh keys on. It happened once that a reworded
-# shim sentence flipped nine matrix cells silently.
-printf 'let _ = print_int (run "true");\n' > "$TMP/op3.mere"
+# The host-service stub, __h_todo, must keep the `RV32I:` prefix
+# host_matrix.sh keys on. It happened once that a reworded shim sentence
+# flipped nine matrix cells silently. Its last user was `run`, answered by
+# memu's host device since v0.1.645; the stub stays for the next service a
+# host cannot give, so it is called directly here.
+printf 'let _ = print_int (__h_todo "probe" : int);\n' > "$TMP/op3.mere"
 "$MERE" -rv "$TMP/op3.mere" > "$TMP/op3.bin" 2>/dev/null
 if grep -a -q 'RV32I:' "$TMP/op3.bin"; then :; else
   echo "FAIL rv_prelude: the host shim's message lost the \`RV32I:\` prefix"
