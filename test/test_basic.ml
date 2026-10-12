@@ -9712,9 +9712,12 @@ let () =
            argument. Two, not one, because the parser rewrites `echo` into
            `echo_at "<where>"` and a front end that does not do that rewrite
            still needs `echo` to be a name.)
+        + v0.1.663 (read_lines on LLVM / Wasm): 3 (__rl_back / __rl_go /
+           __read_lines_of -- the C runtime's splitter, for the two backends
+           that read a file but had none)
         *)
      string_of_int (List.length prog.Ast.decls))
-    "89";
+    "92";
 
   (* Phase 39.A' #4: list_sort_by / list_sort prelude helpers *)
   check "list_sort_by: ascending int sort"

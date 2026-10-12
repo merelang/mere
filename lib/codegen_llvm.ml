@@ -34,9 +34,9 @@ let host_builtins_without_llvm_lowering =
        was written, and fell straight through to "unbound variable" — the exact hole
        the list exists to close, reopened by a later feature. *)
     (* read_bytes / write_bytes were here until v0.1.585 *)
-    "read_line"; "read_stdin"; "read_key";
+    (* read_line / read_stdin / read_lines were here until v0.1.663 *)
+    "read_key";
     "tty_raw"; "tty_restore";
-    "read_lines";
     "run";
     (* file_exists / random_int were here until v0.1.598 *)
     "random_float" ]
@@ -1122,6 +1122,7 @@ let env_var_used_llvm = ref false
    see host_misc_runtime_llvm *)
 let host_misc_used_llvm : (string, unit) Hashtbl.t = Hashtbl.create 4
 let file_io_used_llvm = ref false
+let stdin_used_llvm = ref false (* v0.1.663: read_line / read_stdin *)
 (* v0.1.163: positioned file I/O (file_openrw / file_size / file_pread /
    file_pwrite / file_fsync / file_close), the group a paged or
    append-only store is built on. *)
@@ -6841,6 +6842,14 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
      the deleted, in insertion order -- and recycle empties. vec_recycle is the
      length set to 0; map_recycle writes a fresh map's struct over the old one,
      so the handle the program holds is the same map, empty. *)
+  (* v0.1.663: stdin (stdin_runtime_llvm) *)
+  | Ast.App ({ node = Ast.Var ("read_line" | "read_stdin" as op); _ }, arg) ->
+    ignore (emit_expr env arg);
+    stdin_used_llvm := true;
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @%s()" r
+                  (if op = "read_line" then "__lang_read_line_stdin" else "__lang_read_stdin_all"));
+    r
   | Ast.App ({ node = Ast.Var "vec_recycle"; _ }, arg) ->
     let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
     let av = emit_expr env arg in
@@ -15813,6 +15822,85 @@ let env_var_runtime_llvm =
       "  ret %option_str %b1";
       "}" ]
 
+(* v0.1.663: read_line / read_stdin, through read(2) on descriptor 0. Not
+   stdio's `stdin`: that is a different symbol on macOS (__stdinp) and Linux,
+   which IR without headers cannot name. read_line takes one byte at a time, so
+   it never reads past its newline and a read_stdin after it gets exactly the
+   rest -- the answer C's one buffered FILE gives. The newline is not part of
+   the line; at the end of input the line is what was read, "" if nothing. *)
+let stdin_runtime_llvm =
+  String.concat "\n"
+    [ "declare i64 @read(i32, ptr, i64)";
+      "define ptr @__lang_read_line_stdin() {";
+      "entry:";
+      "  %b0 = call ptr @malloc(i64 64)";
+      "  br label %loop";
+      "loop:";
+      "  %buf = phi ptr [ %b0, %entry ], [ %buf2, %cont ]";
+      "  %len = phi i64 [ 0, %entry ], [ %len1, %cont ]";
+      "  %cap = phi i64 [ 64, %entry ], [ %cap2, %cont ]";
+      "  %full = icmp eq i64 %len, %cap";
+      "  br i1 %full, label %grow, label %rd";
+      "grow:";
+      "  %ncap = mul i64 %cap, 2";
+      "  %nb = call ptr @realloc(ptr %buf, i64 %ncap)";
+      "  br label %rd";
+      "rd:";
+      "  %buf2 = phi ptr [ %buf, %loop ], [ %nb, %grow ]";
+      "  %cap2 = phi i64 [ %cap, %loop ], [ %ncap, %grow ]";
+      "  %p = getelementptr i8, ptr %buf2, i64 %len";
+      "  %n = call i64 @read(i32 0, ptr %p, i64 1)";
+      "  %eof = icmp slt i64 %n, 1";
+      "  br i1 %eof, label %done, label %chk";
+      "chk:";
+      "  %ch = load i8, ptr %p";
+      "  %nl = icmp eq i8 %ch, 10";
+      "  br i1 %nl, label %done, label %cont";
+      "cont:";
+      "  %len1 = add i64 %len, 1";
+      "  br label %loop";
+      "done:";
+      "  %s = call ptr @__lang_str_alloc(i64 %len)";
+      "  %_m = call ptr @memcpy(ptr %s, ptr %buf2, i64 %len)";
+      "  %e = getelementptr i8, ptr %s, i64 %len";
+      "  store i8 0, ptr %e";
+      "  call void @free(ptr %buf2)";
+      "  ret ptr %s";
+      "}";
+      "define ptr @__lang_read_stdin_all() {";
+      "entry:";
+      "  %b0 = call ptr @malloc(i64 4096)";
+      "  br label %loop";
+      "loop:";
+      "  %buf = phi ptr [ %b0, %entry ], [ %buf2, %cont ]";
+      "  %len = phi i64 [ 0, %entry ], [ %len1, %cont ]";
+      "  %cap = phi i64 [ 4096, %entry ], [ %cap2, %cont ]";
+      "  %full = icmp eq i64 %len, %cap";
+      "  br i1 %full, label %grow, label %rd";
+      "grow:";
+      "  %ncap = mul i64 %cap, 2";
+      "  %nb = call ptr @realloc(ptr %buf, i64 %ncap)";
+      "  br label %rd";
+      "rd:";
+      "  %buf2 = phi ptr [ %buf, %loop ], [ %nb, %grow ]";
+      "  %cap2 = phi i64 [ %cap, %loop ], [ %ncap, %grow ]";
+      "  %p = getelementptr i8, ptr %buf2, i64 %len";
+      "  %room = sub i64 %cap2, %len";
+      "  %n = call i64 @read(i32 0, ptr %p, i64 %room)";
+      "  %eof = icmp slt i64 %n, 1";
+      "  br i1 %eof, label %done, label %cont";
+      "cont:";
+      "  %len1 = add i64 %len, %n";
+      "  br label %loop";
+      "done:";
+      "  %s = call ptr @__lang_str_alloc(i64 %len)";
+      "  %_m = call ptr @memcpy(ptr %s, ptr %buf2, i64 %len)";
+      "  %e = getelementptr i8, ptr %s, i64 %len";
+      "  store i8 0, ptr %e";
+      "  call void @free(ptr %buf2)";
+      "  ret ptr %s";
+      "}" ]
+
 let file_io_runtime_llvm =
   String.concat "\n"
     [ "declare ptr @fopen(ptr, ptr)";
@@ -16728,7 +16816,27 @@ let channel_runtime_llvm =
       "  ret i32 0";
       "}" ]
 
+(* v0.1.663: `read_lines p` is `__read_lines_of (read_file p)` here (the
+   stdlib prelude's splitter, with the C runtime's rule). Rewritten before
+   anything decides which prelude functions are reachable. *)
+let rewrite_read_lines (prog : Ast.program) : Ast.program =
+  let rec go e = Trait_elab.map_expr subst e
+  and subst (e : Ast.expr) : Ast.expr option =
+    match e.Ast.node with
+    | Ast.App ({ Ast.node = Ast.Var "read_lines"; _ }, p) ->
+      let mk node ty = { Ast.loc = e.Ast.loc; ty = Some ty; node } in
+      let lst = Ast.TyCon ("list", [Ast.TyStr]) in
+      let rf = mk (Ast.App (mk (Ast.Var "read_file") (Ast.TyArrow (Ast.TyStr, Ast.TyStr)), go p)) Ast.TyStr in
+      Some (mk (Ast.App (mk (Ast.Var "__read_lines_of") (Ast.TyArrow (Ast.TyStr, lst)), rf)) lst)
+    | _ -> None in
+  { Ast.main = go prog.Ast.main;
+    decls = List.map (fun d -> match d with
+        | Ast.Top_let (pat, v) -> Ast.Top_let (pat, go v)
+        | Ast.Top_let_rec bs -> Ast.Top_let_rec (List.map (fun (n, l, v) -> (n, l, go v)) bs)
+        | other -> other) prog.Ast.decls }
+
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
+  let prog = rewrite_read_lines prog in
   (* Q-127: SETTLE EVERY UNDECIDED CONTAINER REGION BEFORE ANYTHING READS ONE.
      A slot can hold a variable up to here, so that a call site inside a `region` block
      can decide it; what is left means nobody did, and it becomes `__heap`.
@@ -16801,6 +16909,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   str_join_used_llvm := false;
   str_count_used_llvm := false;
   file_io_used_llvm := false;
+  stdin_used_llvm := false;
   file_pio_used_llvm := false;
   file_pread_bytes_used_llvm := false;
   args_used_llvm := false;
@@ -17564,6 +17673,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !str_join_used_llvm then [str_join_runtime_llvm; ""] else [])
     @ (if !file_io_used_llvm || !uses_read_file_bytes_llvm || !uses_write_file_bytes_llvm
        then [file_io_runtime_llvm; ""] else [])
+    @ (if !stdin_used_llvm then [stdin_runtime_llvm; ""] else [])
     @ (if !uses_read_file_bytes_llvm || !uses_write_file_bytes_llvm
        then [file_bytes_runtime_llvm; ""] else [])
     @ (if !file_pio_used_llvm then [file_pio_runtime_llvm; ""] else [])

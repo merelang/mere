@@ -11089,7 +11089,27 @@ let prune_dead_fail_checks (wat : string) : string =
   done;
   Buffer.contents buf
 
+(* v0.1.663: `read_lines p` is `__read_lines_of (read_file p)` here (the
+   stdlib prelude's splitter, with the C runtime's rule). Rewritten before
+   anything decides which prelude functions are reachable. *)
+let rewrite_read_lines (prog : Ast.program) : Ast.program =
+  let rec go e = Trait_elab.map_expr subst e
+  and subst (e : Ast.expr) : Ast.expr option =
+    match e.Ast.node with
+    | Ast.App ({ Ast.node = Ast.Var "read_lines"; _ }, p) ->
+      let mk node ty = { Ast.loc = e.Ast.loc; ty = Some ty; node } in
+      let lst = Ast.TyCon ("list", [Ast.TyStr]) in
+      let rf = mk (Ast.App (mk (Ast.Var "read_file") (Ast.TyArrow (Ast.TyStr, Ast.TyStr)), go p)) Ast.TyStr in
+      Some (mk (Ast.App (mk (Ast.Var "__read_lines_of") (Ast.TyArrow (Ast.TyStr, lst)), rf)) lst)
+    | _ -> None in
+  { Ast.main = go prog.Ast.main;
+    decls = List.map (fun d -> match d with
+        | Ast.Top_let (pat, v) -> Ast.Top_let (pat, go v)
+        | Ast.Top_let_rec bs -> Ast.Top_let_rec (List.map (fun (n, l, v) -> (n, l, go v)) bs)
+        | other -> other) prog.Ast.decls }
+
 let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program) : string =
+  let prog = rewrite_read_lines prog in
   (* Q-127: SETTLE EVERY UNDECIDED CONTAINER REGION BEFORE ANYTHING READS ONE.
      A slot can hold a variable up to here, so that a call site inside a `region` block
      can decide it; what is left means nobody did, and it becomes `__heap`.
