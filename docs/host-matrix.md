@@ -86,12 +86,12 @@ machine rather than a host.
 | `char_at` | yes | yes | yes | yes |
 | `chr` | yes | yes | yes | yes |
 | `clamp` | yes | yes | yes | yes |
-| `coro_exit` | yes | yes | refused | refused |
+| `coro_exit` | yes | yes | refused | yes |
 | `coro_new` | yes | yes | refused | yes |
 | `coro_new_sized` | yes | yes | refused | yes |
 | `coro_root` | yes | yes | refused | yes |
 | `coro_switch` | yes | yes | refused | yes |
-| `coro_transfer` | yes | yes | refused | refused |
+| `coro_transfer` | yes | yes | refused | yes |
 | `cos` | yes | yes | yes | yes |
 | `csr_read` | bare | refused | refused | bare |
 | `csr_write` | bare | refused | refused | bare |

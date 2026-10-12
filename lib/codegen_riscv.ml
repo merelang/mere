@@ -2197,13 +2197,10 @@ and compile_node (env : env) (e : Ast.expr) : unit =
             emit_word (enc_i 0 t1 0 a0 0x13)                        (* mv a0, t1 *)
             end
           end
-          else if List.mem v Typer.coro_builtins then
-            (* v0.1.623: applied in full, each is a call into the prelude's
-               runtime (compile_app); as a value it is not *)
-            err e.loc (Printf.sprintf
-              "RV32I: `%s` is unsupported here as a value -- apply it to all of \
-               its arguments (a coroutine builtin is a call into the runtime)"
-               (Typer.coro_source_name v))
+          (* v0.1.665: a coroutine builtin passed as a value is the closure
+             below, as any builtin is: applied in full it is a call into the
+             prelude's runtime, and a closure that applies it is one more frame
+             on the same stack. It was refused from v0.1.623 on. *)
           else if List.mem_assoc v Typer.initial_env
                && !cur_eta_builtin <> Some v
                && (let rec arrows t = match resolve_ty t with

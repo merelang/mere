@@ -617,14 +617,21 @@ let fn_closure2_table_idx : (string, int) Hashtbl.t = Hashtbl.create 4
    application. `f x` and `f x y` are calls; `vec_sort v cmp` is a value. *)
 let fns_used_as_values : (string, unit) Hashtbl.t = Hashtbl.create 16
 
-let collect_fns_used_as_values (root : Ast.expr) (bodies : Ast.expr list) : unit =
+let collect_fns_used_as_values ?(instance = fun (_ : string) (_ : Ast.ty option) -> None)
+    (root : Ast.expr) (bodies : Ast.expr list) : unit =
   Hashtbl.reset fns_used_as_values;
   let rec walk (e : Ast.expr) =
     match e.Ast.node with
     (* The head of an application is a call, not a value -- and so is the head
        of the head, which is how `f a b` stays a call all the way down. *)
     | Ast.App (f, a) -> walk_head f; walk a
-    | Ast.Var n -> Hashtbl.replace fns_used_as_values n ()
+    (* v0.1.665: a polymorphic fn used at several types exists only as its
+       instances; the one this use's type names is the one handed out *)
+    | Ast.Var n ->
+      Hashtbl.replace fns_used_as_values n ();
+      (match instance n e.Ast.ty with
+       | Some m -> Hashtbl.replace fns_used_as_values m ()
+       | None -> ())
     | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
     | Ast.Unit_lit -> ()
     | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) -> walk a; walk b
@@ -2441,6 +2448,16 @@ and emit_expr (e : Ast.expr) : unit =
        else if List.mem name host_builtins_without_wasm_lowering then
          unsupported e.Ast.loc
            (name ^ " has no Wasm lowering yet (host builtin; scope = interp + C)")
+       else if Monomorph.is_multi !multi_inst_fns_wasm name
+               && (match e.Ast.ty with
+                   | Some t -> mangled_inst_name_wasm name t <> name
+                   | None -> false) then
+         (* v0.1.665: the use site's type names the instance: `apply ident 41`
+            wants `ident` at int -> int, and that copy exists. It is handed out
+            as any top-level function is. *)
+         (match e.Ast.ty with
+          | Some t -> emit_expr { e with Ast.node = Ast.Var (mangled_inst_name_wasm name t) }
+          | None -> assert false)
        else if Monomorph.is_multi !multi_inst_fns_wasm name then
          (* v0.1.173: the name IS bound — it is a polymorphic fn used at more
             than one type, so it exists only as mangled per-instantiation
@@ -11564,7 +11581,11 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   (* Q-139: which fns are ever used as VALUES -- see fns_used_as_values. Only
      those get a `_closure` adapter, and only that adapter roots the curried
      body in the elem table. Run before the adapters are decided. *)
-  collect_fns_used_as_values main_expr (List.map (fun (f : fn_decl) -> f.body) fns);
+  collect_fns_used_as_values
+    ~instance:(fun n t -> match t with
+        | Some t when Monomorph.is_multi !multi_inst_fns_wasm n -> Some (mangled_inst_name_wasm n t)
+        | _ -> None)
+    main_expr (List.map (fun (f : fn_decl) -> f.body) fns);
   let top_adapters =
     List.concat_map (fun f ->
       if not (Hashtbl.mem fns_used_as_values f.name) then [] else begin

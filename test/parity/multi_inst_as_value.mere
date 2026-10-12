@@ -18,10 +18,10 @@
 // path as well, which turned it into 19 undeclared identifiers in
 // mere-ruby while parity and the OCaml suite stayed green.
 //
-// Wasm reports UNSUP here, which is the documented kind of refusal: it
-// emits per-instantiation copies too and has no single function to hand
-// out as a value, and it now says so instead of claiming the name is
-// unbound.
+// Wasm reported UNSUP here until v0.1.665: it emits per-instantiation copies
+// too and had no single function to hand out as a value. The use site's type
+// names the instance (`apply ident 41` wants ident at int -> int), so that
+// copy is the one handed out now.
 
 let ident = fn (x) -> x;
 
