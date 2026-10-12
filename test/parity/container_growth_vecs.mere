@@ -1,0 +1,86 @@
+// v0.1.661: container growth across the sizes where storage doubles (0, 1, 3-5,
+// 7-9, 15-17, 31-33, 63-65, 100, 1000). The corpus built only small containers,
+// and the growth path of Wasm's compound-key Map wrote values over key pointers
+// past 4 entries for as long as nothing grew one (fixed in v0.1.657). The
+// checksum stays below 2^31 so a 32-bit int answers the same.
+type pt = { px: int, py: str };
+type sh = Dot | Box of int * str;
+let sizes = [0, 1, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100, 1000];
+let rec iter = fn (xs: int list) -> fn (f: int -> unit) -> match xs with Nil -> () | Cons (h, t) -> let _ = f h in iter t f;
+let mix = fn (a: int) -> fn (b: int) -> (a * 31 + b) % 65521;
+let rec vsum = fn (v: int Vec) -> fn (i: int) -> fn (acc: int) -> if i >= vec_len v then acc else vsum v (i + 1) (mix acc (vec_get v i));
+let vint = fn (n: int) ->
+  let v = vec_new () in
+  let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v (i * 3) in fill (i + 1) in
+  let _ = fill 0 in
+  let rec upd = fn (i: int) -> if i >= n then () else let _ = vec_set v i (i + 7) in upd (i + 4) in
+  let _ = upd 0 in
+  let _ = vec_compact v in
+  str_of_int (vec_len v) ++ "/" ++ str_of_int (vsum v 0 0);
+let vstr = fn (n: int) ->
+  let v = vec_new () in
+  let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v ("s" ++ str_of_int i) in fill (i + 1) in
+  let _ = fill 0 in
+  let rec upd = fn (i: int) -> if i >= n then () else let _ = vec_set v i ("u" ++ str_of_int (i * i)) in upd (i + 4) in
+  let _ = upd 0 in
+  let rec sum = fn (i: int) -> fn (acc: int) -> if i >= vec_len v then acc else sum (i + 1) (mix acc (str_len (vec_get v i) + (if i % 2 == 0 then 1 else 0))) in
+  let joined = if n > 0 then vec_get v (n - 1) else "-" in
+  str_of_int (sum 0 0) ++ "/" ++ joined;
+let vflt = fn (n: int) ->
+  let v = vec_new () in
+  let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v (float_of_int i / 4.0) in fill (i + 1) in
+  let _ = fill 0 in
+  let rec sum = fn (i: int) -> fn (acc: float) -> if i >= vec_len v then acc else sum (i + 1) (acc + vec_get v i) in
+  str_of_float (sum 0 0.0);
+let vrec = fn (n: int) ->
+  let v = vec_new () in
+  let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v (pt { px = i, py = str_of_int (i % 9) }) in fill (i + 1) in
+  let _ = fill 0 in
+  let rec sum = fn (i: int) -> fn (acc: int) -> if i >= vec_len v then acc else sum (i + 1) (mix acc ((vec_get v i).px + str_len (vec_get v i).py)) in
+  str_of_int (sum 0 0);
+let vvar = fn (n: int) ->
+  let v = vec_new () in
+  let rec fill = fn (i: int) -> if i == n then () else let _ = vec_push v (if i % 3 == 0 then Dot else Box (i, str_of_int i)) in fill (i + 1) in
+  let _ = fill 0 in
+  let rec sum = fn (i: int) -> fn (acc: int) -> if i >= vec_len v then acc else
+    sum (i + 1) (mix acc (match vec_get v i with Dot -> 1 | Box (a, s) -> a + str_len s)) in
+  str_of_int (sum 0 0);
+let vvec = fn (n: int) ->
+  let outer = vec_new () in
+  let rec fill = fn (i: int) -> if i == n then () else
+    let inner = vec_new () in
+    let rec g = fn (j: int) -> if j > i % 6 then () else let _ = vec_push inner (i + j) in g (j + 1) in
+    let _ = g 0 in
+    let _ = vec_push outer inner in fill (i + 1) in
+  let _ = fill 0 in
+  let rec sum = fn (i: int) -> fn (acc: int) -> if i >= vec_len outer then acc else sum (i + 1) (mix acc (vsum (vec_get outer i) 0 0)) in
+  str_of_int (sum 0 0);
+let sbuf = fn (n: int) ->
+  let b = strbuf_new () in
+  let rec fill = fn (i: int) -> if i == n then () else let _ = strbuf_push b (str_of_int (i % 10)) in fill (i + 1) in
+  let _ = fill 0 in
+  let s = strbuf_to_str b in
+  str_of_int (strbuf_len b) ++ "/" ++ (if n > 2 then substring s (n - 3) n else s);
+let bbuf = fn (n: int) ->
+  let b = bytebuf_new 0 in
+  let rec fill = fn (i: int) -> if i == n then () else let _ = bytebuf_push b (i * 37) in fill (i + 1) in
+  let _ = fill 0 in
+  let rec sum = fn (i: int) -> fn (acc: int) -> if i >= bytebuf_len b then acc else sum (i + 1) (mix acc (bytebuf_get b i)) in
+  str_of_int (bytebuf_len b) ++ "/" ++ str_of_int (sum 0 0);
+let lbuf = fn (n: int) ->
+  let b = lb_new () in
+  let rec fill = fn (i: int) -> if i == n then () else let _ = lb_push b (i * 5) in fill (i + 1) in
+  let _ = fill 0 in
+  let rec sum = fn (xs: int list) -> fn (acc: int) -> match xs with Nil -> acc | Cons (h, t) -> sum t (mix acc h) in
+  str_of_int (sum (lb_to_list b) 0);
+let ovec = fn (n: int) ->
+  let o = owned_vec_new () in
+  let rec fill = fn (i: int) -> if i == n then () else let _ = owned_vec_push o ("o" ++ str_of_int i) in fill (i + 1) in
+  let _ = fill 0 in
+  let v = owned_vec_to_vec o in
+  let rec sum = fn (i: int) -> fn (acc: int) -> if i >= vec_len v then acc else sum (i + 1) (mix acc (str_len (vec_get v i))) in
+  str_of_int (owned_vec_len o) ++ "/" ++ str_of_int (sum 0 0);
+let _ = iter sizes (fn (n: int) ->
+  print (str_of_int n ++ ": int " ++ vint n ++ " str " ++ vstr n ++ " flt " ++ vflt n ++ " rec " ++ vrec n
+         ++ " var " ++ vvar n ++ " vv " ++ vvec n ++ " sb " ++ sbuf n ++ " bb " ++ bbuf n ++ " lb " ++ lbuf n ++ " ov " ++ ovec n));
+print "done"

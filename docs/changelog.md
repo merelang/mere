@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.661 — 2026-10-12
+
+_LLVM: `vec_recycle`, `map_recycle`, `map_clear`, `vec_compact` and `map_compact`. Also two parity programs that grow every container past each doubling._
+
+- These were refused on LLVM, which left 6 parity programs unchecked there.
+  This backend gives a container no arena of its own (C and RISC-V do, since
+  v0.1.614), so there is nothing to pack. Compact keeps every value where it is:
+  a Map's dense arrays already skip the deleted entries, in insertion order.
+  Recycle empties: `vec_recycle` sets the length to 0, and `map_recycle` /
+  `map_clear` write a fresh map's struct over the old one, so the handle the
+  program holds is the same map, empty. container_arenas, map_compound_compact,
+  map_random_ops, map_recycle_clears and vec_recycle are checked on LLVM now.
+  map_compact prints arena capacities (`vec_bytes` / `map_bytes`), which this
+  backend does not have.
+- `container_growth_maps` / `container_growth_vecs` (new parity programs) cover
+  0, 1, 3–5, 7–9, 15–17, 31–33, 63–65, 100 and 1000 entries. The Maps are keyed
+  by int, str, tuple, record and variant, with set, update, delete and iterate.
+  The Vecs hold int, str, float, record, variant and Vec, with push, set and
+  compact; StrBuf, ByteBuf, ListBuf and OwnedVec are covered too. The corpus had
+  built only small containers, and Wasm's compound-key Map broke past 4 entries
+  for as long as nothing grew one (v0.1.657). All six targets agree; the
+  checksum stays below 2^31, so RV32 answers the same.
+
+LLVM leaves 13 of 234 parity programs unchecked now (18 of 232 before).
+
 ## v0.1.660 — 2026-10-12
 
 _`proc_spawn`, `proc_waitpid` and `proc_wait_status`: posix_spawn with file actions and waitpid, as C-runtime externs. They run on C, and on RISC-V through memu's host device. The numbering is Linux's on every host._

@@ -6808,6 +6808,31 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  %s = load i32, ptr %s" o p);
     emit_instr (Printf.sprintf "  %s = call i1 @__lang_owner_ok(i32 %s)" r o);
     r
+  (* v0.1.661: the container upkeep calls. This backend gives a container no
+     arena of its own (C and RISC-V do, v0.1.614), so there is nothing to pack:
+     compact keeps every value where it is -- a Map's dense arrays already skip
+     the deleted, in insertion order -- and recycle empties. vec_recycle is the
+     length set to 0; map_recycle writes a fresh map's struct over the old one,
+     so the handle the program holds is the same map, empty. *)
+  | Ast.App ({ node = Ast.Var "vec_recycle"; _ }, arg) ->
+    let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
+    let av = emit_expr env arg in
+    let lp = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = getelementptr %%mere_vec_%s, ptr %s, i32 0, i32 1" lp elem_tag av);
+    emit_instr (Printf.sprintf "  store i32 0, ptr %s" lp);
+    "0"
+  | Ast.App ({ node = Ast.Var ("vec_compact" | "map_compact"); _ }, arg) ->
+    ignore (emit_expr env arg);
+    "0"
+  | Ast.App ({ node = Ast.Var ("map_recycle" | "map_clear"); _ }, arg) ->
+    let (k_tag, v_tag) = map_kv_tags_of arg.Ast.ty arg.Ast.loc in
+    let av = emit_expr env arg in
+    let fr = fresh_reg () and szp = fresh_reg () and sz = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @mere_map_%s_%s_new(ptr @__lang_default_region)" fr k_tag v_tag);
+    emit_instr (Printf.sprintf "  %s = getelementptr %%mere_map_%s_%s, ptr null, i32 1" szp k_tag v_tag);
+    emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" sz szp);
+    emit_instr (Printf.sprintf "  call ptr @memcpy(ptr %s, ptr %s, i64 %s)" av fr sz);
+    "0"
   | Ast.App ({ node = Ast.Var "vec_len"; _ }, arg) ->
     let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
     let av = emit_expr env arg in
