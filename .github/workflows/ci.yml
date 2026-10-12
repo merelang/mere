@@ -1434,6 +1434,12 @@ jobs:
       - name: rv_failure --poison (the streams folded together go red)
         if: ${{ !cancelled() }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/rv_failure_check.sh --poison
+      # v0.1.659: region_uaf_check's RISC-V leg -- what escaped a block by a
+      # route the types do not see, read after the block's memory was reused,
+      # at both widths. Its first run found ownedvec_store wrong since v0.1.653.
+      - name: region_uaf --rv-only (RISC-V reads an escaped value after its block is reused)
+        if: ${{ !cancelled() }}
+        run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/region_uaf_check.sh --rv-only
       # v0.1.642: sys_os / sys_arch answer for each backend's ABI (the host's on
       # interp, C and LLVM; wasi on Wasm; linux on RISC-V)
       - name: sys_info (sys_os / sys_arch on every backend)

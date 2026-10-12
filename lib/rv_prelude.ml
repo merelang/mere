@@ -2492,6 +2492,174 @@ let __rvu16_hex = fn (v: u8x16) -> __rvu16_hx v 0 "";
 let rvu16_show = fn (v: u8x16) -> "u8x16[" ++ __rvu16_hex v ++ "]";
 let rvu16_json = fn (v: u8x16) -> "\"" ++ __rvu16_hex v ++ "\"";
 
+// ---- v0.1.659: threads and channels, as green threads on the coroutines ----
+// One OS thread here, so a Mere thread is a coroutine and the scheduler is
+// this code: `spawn` makes a coroutine and puts it on the ready queue (the
+// spawner carries on, as it does with a real thread), and a thread runs until
+// it blocks -- join, a receive on an empty channel -- or ends. Blocking puts
+// the thread on the waiting list and switches to the next ready one; anything
+// that could unblock someone (a send, a close, a thread ending, a sender
+// registered) moves every waiter back to the ready queue, and each looks again.
+// The rules are the interpreter's and C's (eval.ml, v0.1.586-601): a failed
+// thread says `mere: thread N failed: <why>` on stderr when it fails, `join`
+// raises the failure again, and a channel whose registered senders have all
+// finished stops a receive as a closed one does. Nobody ready and somebody
+// waiting with a timeout: the timeout has passed for it. Nobody ready at all:
+// every thread is blocked for good, which C would hang on; here it is said.
+// A value travels as its word: whatever a sender allocated stays where it is.
+let __th_co = vec_new ();      // tid -> its coroutine (tid 0: the root, the main thread)
+let __th_st = vec_new ();      // tid -> 0 running or ready or waiting, 1 finished, 2 failed
+let __th_why = vec_new ();     // tid -> how it failed
+let __th_cur = vec_new ();     // [the running tid]
+let __th_rq = vec_new ();      // the ready queue, from __th_rq_h
+let __th_rq_h = vec_new ();    // [its head]
+let __th_wt = vec_new ();      // the waiting tids
+let __th_tmo = vec_new ();     // tid -> 1 while it waits with a timeout, 2 once that has passed
+let __th_seq = vec_new ();     // [the last id handed out, par_map's included]
+let __th_init = fn (u: unit) ->
+  if vec_len __th_co > 0 then ()
+  else
+    let _ = vec_push __th_co (coro_root ()) in
+    let _ = vec_push __th_st 0 in
+    let _ = vec_push __th_why "" in
+    let _ = vec_push __th_tmo 0 in
+    let _ = vec_push __th_cur 0 in
+    let _ = vec_push __th_rq_h 0 in
+    vec_push __th_seq 0;
+let __th_me = fn (u: unit) -> if vec_len __th_cur == 0 then 0 else vec_get __th_cur 0;
+let __th_ready = fn (tid: int) -> vec_push __th_rq tid;
+// every waiter back on the ready queue, to look again
+let rec __th_wake_all = fn (i: int) ->
+  if i >= vec_len __th_wt then vec_recycle __th_wt
+  else let _ = __th_ready (vec_get __th_wt i) in __th_wake_all (i + 1);
+let __th_wake = fn (u: unit) -> if vec_len __th_wt == 0 then () else __th_wake_all 0;
+// the timed waiters, when nothing else can run: their time is up
+let rec __th_time_up = fn (i: int) -> fn (n: int) ->
+  if i >= vec_len __th_wt then n
+  else
+    let t = vec_get __th_wt i in
+    if vec_get __th_tmo t == 1 then let _ = vec_set __th_tmo t 2 in __th_time_up (i + 1) (n + 1)
+    else __th_time_up (i + 1) n;
+// the next thread to run, off the ready queue
+let rec __th_pick = fn (u: unit) ->
+  let h = vec_get __th_rq_h 0 in
+  if h < vec_len __th_rq then
+    let t = vec_get __th_rq h in
+    let _ = (if h + 1 == vec_len __th_rq then (let _ = vec_recycle __th_rq in vec_set __th_rq_h 0 0)
+             else vec_set __th_rq_h 0 (h + 1)) in
+    t
+  else if __th_time_up 0 0 > 0 then let _ = __th_wake_all 0 in __th_pick ()
+  else
+    let _ = print_err "mere: every thread is blocked (a deadlock): nothing can wake them" in
+    exit 1;
+// the running thread waits: it is woken by an event and looks again
+let __th_block = fn (u: unit) ->
+  let me = __th_me () in
+  let _ = vec_push __th_wt me in
+  let next = __th_pick () in
+  if next == me then ()
+  else let _ = vec_set __th_cur 0 next in coro_switch (vec_get __th_co next);
+let __th_new_id = fn (u: unit) -> let n = vec_get __th_seq 0 + 1 in let _ = vec_set __th_seq 0 n in n;
+// a thread's body, its failure caught at the edge of its stack
+let __th_body = fn (tid: int) -> fn (f: unit -> unit) ->
+  let r = try_or_msg (fn (u: unit) -> let _ = f () in "") (fn (m: str) -> "!" ++ m) in
+  let _ = (if r == "" then vec_set __th_st tid 1
+           else
+             let why = __rv_substring_raw r 1 (str_len r) in
+             let _ = vec_set __th_why tid why in
+             let _ = vec_set __th_st tid 2 in
+             print_err ("mere: thread " ++ str_of_int tid ++ " failed: " ++ why)) in
+  let _ = __th_wake () in
+  let next = __th_pick () in
+  let _ = vec_set __th_cur 0 next in
+  vec_get __th_co next;
+let rvth_spawn = fn (f: unit -> unit) ->
+  let _ = __th_init () in
+  let tid = __th_new_id () in
+  let _ = vec_push __th_st 0 in
+  let _ = vec_push __th_why "" in
+  let _ = vec_push __th_tmo 0 in
+  let co = coro_new (fn me -> fn (u: unit) -> coro_exit (__th_body tid f) ()) in
+  let _ = vec_push __th_co co in
+  let _ = __th_ready tid in
+  tid;
+let rec rvth_join = fn (h: int) ->
+  let s = vec_get __th_st h in
+  if s == 0 then let _ = __th_block () in rvth_join h
+  else if s == 2 then fail (vec_get __th_why h)
+  else ();
+let rvth_detach = fn (h: int) -> ();
+// par_map runs the calls one after another; they take thread ids as C's do
+let rec __th_map = fn (xs: int list) -> fn (f: int -> int) -> fn (n: int) ->
+  match xs with
+  | Nil -> let _ = vec_set __th_seq 0 (vec_get __th_seq 0 + n) in Nil
+  | Cons (h, t) -> Cons (f h, __th_map t f (n + 1));
+let rvth_par_map = fn (f: int -> int) -> fn (xs: int list) ->
+  let _ = __th_init () in
+  __th_map xs f 0;
+
+type rvchan = { chq: int Vec, chh: int Vec, chc: int Vec, chs: int Vec };
+let rvch_new = fn (u: unit) ->
+  let h = vec_new () in let _ = vec_push h 0 in
+  let c = vec_new () in let _ = vec_push c 0 in
+  rvchan { chq = vec_new (), chh = h, chc = c, chs = vec_new () };
+let __ch_len = fn (ch: rvchan) -> vec_len ch.chq - vec_get ch.chh 0;
+let __ch_pop = fn (ch: rvchan) ->
+  let h = vec_get ch.chh 0 in
+  let v = vec_get ch.chq h in
+  let _ = (if h + 1 == vec_len ch.chq then (let _ = vec_recycle ch.chq in vec_set ch.chh 0 0)
+           else vec_set ch.chh 0 (h + 1)) in
+  v;
+// 0: its senders are not all done (or it has none); 1: all finished; 2: all
+// done and one failed -- the first registered that did
+let rec __ch_senders = fn (ch: rvchan) -> fn (i: int) -> fn (failed: int) ->
+  if i >= vec_len ch.chs then (if failed > 0 then 2 else 1)
+  else
+    let s = vec_get __th_st (vec_get ch.chs i) in
+    if s == 0 then 0
+    else __ch_senders ch (i + 1) (if failed == 0 && s == 2 then vec_get ch.chs i else failed);
+let __ch_ended = fn (ch: rvchan) ->
+  vec_get ch.chc 0 == 1 || (vec_len ch.chs > 0 && __ch_senders ch 0 0 > 0);
+let rec __ch_first_failed = fn (ch: rvchan) -> fn (i: int) ->
+  if i >= vec_len ch.chs then 0
+  else if vec_get __th_st (vec_get ch.chs i) == 2 then vec_get ch.chs i
+  else __ch_first_failed ch (i + 1);
+let __ch_end_msg = fn (ch: rvchan) ->
+  if vec_get ch.chc 0 == 1 then "channel_recv: channel is closed and empty"
+  else
+    let f = __ch_first_failed ch 0 in
+    if f > 0 then "channel_recv: sender thread " ++ str_of_int f ++ " failed: " ++ vec_get __th_why f
+    else "channel_recv: every sender has finished and the channel is empty";
+let rvch_send = fn (ch: rvchan) -> fn (v: int) ->
+  if vec_get ch.chc 0 == 1 then fail "channel_send: channel is closed"
+  else let _ = vec_push ch.chq v in __th_wake ();
+let rec rvch_recv = fn (ch: rvchan) ->
+  if __ch_len ch > 0 then __ch_pop ch
+  else if __ch_ended ch then fail (__ch_end_msg ch)
+  else let _ = __th_init () in let _ = __th_block () in rvch_recv ch;
+let rec rvch_recv_opt = fn (ch: rvchan) ->
+  if __ch_len ch > 0 then Some (__ch_pop ch)
+  else if __ch_ended ch then None
+  else let _ = __th_init () in let _ = __th_block () in rvch_recv_opt ch;
+let rec __ch_recv_t = fn (ch: rvchan) -> fn (me: int) ->
+  if __ch_len ch > 0 then let _ = vec_set __th_tmo me 0 in Some (__ch_pop ch)
+  else if __ch_ended ch || vec_get __th_tmo me == 2 then let _ = vec_set __th_tmo me 0 in None
+  else let _ = __th_block () in __ch_recv_t ch me;
+let rvch_recv_timeout = fn (ch: rvchan) -> fn (ms: int) ->
+  if __ch_len ch > 0 then Some (__ch_pop ch)
+  else if __ch_ended ch || ms <= 0 then None
+  else
+    let _ = __th_init () in
+    let me = __th_me () in
+    let _ = vec_set __th_tmo me 1 in
+    __ch_recv_t ch me;
+let rvch_close = fn (ch: rvchan) -> let _ = vec_set ch.chc 0 1 in __th_wake ();
+let rec __ch_has = fn (v: int Vec) -> fn (x: int) -> fn (i: int) ->
+  if i >= vec_len v then false else if vec_get v i == x then true else __ch_has v x (i + 1);
+let rvch_sender = fn (ch: rvchan) -> fn (h: int) ->
+  let _ = (if __ch_has ch.chs h 0 then () else vec_push ch.chs h) in
+  __th_wake ();
+
 // double-double: a pair (h, l) whose sum carries ~106 bits, |l| <= ulp(h)/2.
 // v0.1.609 builds the libm on these (lib/rv_libm.ml); they are the textbook
 // Dekker / Knuth constructions, and every one is a few float operations.

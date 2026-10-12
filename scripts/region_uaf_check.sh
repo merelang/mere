@@ -43,7 +43,7 @@
 # on macOS, and CI red for six versions. It now fills the struct with 0xAA..
 # before the free (a poison written `perl:` is run by perl, which can add a line).
 #
-# Usage: sh scripts/region_uaf_check.sh [--poison]
+# Usage: sh scripts/region_uaf_check.sh [--poison | --rv-only]   (MEMU=<memu checkout> for RISC-V)
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
@@ -59,18 +59,18 @@ FX="$ROOT/test/uaf"
 MODE="${1:-}"
 fail=0
 
-# program | backends (c C, l LLVM)
-CASES='kept_then_written|cl
-spawn_env_in_block|c
-ownedvec_store|cl
-channel_from_block|cl
-coro_env_from_block|c
-recycled_escape|c
-recycle_dedicated|ca
-coro_pin_reach|ca
-coro_pin_resumed|ca
-vec_recycle_pin|ca
-channel_xthread|ca'
+# program | backends (c C, l LLVM, r RISC-V at both widths when MEMU is set)
+CASES='kept_then_written|clr
+spawn_env_in_block|cr
+ownedvec_store|clr
+channel_from_block|clr
+coro_env_from_block|cr
+recycled_escape|cr
+recycle_dedicated|car
+coro_pin_reach|car
+coro_pin_resumed|car
+vec_recycle_pin|car
+channel_xthread|car'
 
 run_bin() { perl -e 'alarm 20; exec @ARGV' "$1" 2>&1; }
 # v0.1.641: a poisoned program runs with the allocator scribbling what is freed
@@ -98,7 +98,9 @@ build() {  # $1 = program, $2 = c|ll, [$3 = sed expression] -> $T/bin, or prints
   "$CC" -w $san -x "$lang" -o "$T/bin" "$T/g.$2" -lm -lpthread 2>"$T/cc.err" || { echo "CCFAIL $(head -1 "$T/cc.err")"; return 1; }
 }
 
-printf '%s\n' "$CASES" | while IFS='|' read -r f b; do
+# --rv-only: just the RISC-V leg (CI runs it in the job that has the memu clone)
+[ "$MODE" = --rv-only ] && [ -z "${MEMU:-}" ] && { echo "region_uaf --rv-only: set MEMU=<memu checkout>"; exit 2; }
+[ "$MODE" = --rv-only ] || printf '%s\n' "$CASES" | while IFS='|' read -r f b; do
   want=$("$MERE" "$FX/$f.mere" 2>&1)
   case "$want" in
     *ZZZZ*|"") printf '  FAIL  %s\n' "interp $f: the answer itself looks wrong: $want"; echo x >> "$T/failed"; continue ;;
@@ -113,6 +115,38 @@ printf '%s\n' "$CASES" | while IFS='|' read -r f b; do
   done
 done
 [ -f "$T/failed" ] && fail=1
+
+# v0.1.659: RISC-V. Its regions roll gp back (v0.1.613), so a value a block's
+# rollback takes is reused by the churn as on the other backends. The leg came
+# with threads and channels on RISC-V, and its first run found ownedvec_store
+# wrong at both widths: since v0.1.653 owned_vec_push stored the str as it was,
+# into an OwnedVec whose arena stores are not protected (they are meant to be
+# copies). Its poison is not a sed over emitted text -- the image is machine
+# code -- and was done by hand: with emit_vprotect off, channel_from_block goes
+# red at both widths.
+rvnote=""
+if [ -n "${MEMU:-}" ] && [ -f "$MEMU/riscv-runc/rv64i_run.mere" ]; then
+  for w in 64 32; do
+    "$MERE" -c "$MEMU/riscv-runc/rv${w}i_run.mere" > "$T/rv$w.c" 2>/dev/null \
+      && "$CC" -O2 -w -o "$T/rvrun$w" "$T/rv$w.c" 2>/dev/null \
+      || { echo "  FAIL  the RV$w emulator did not build"; fail=1; }
+  done
+  printf '%s\n' "$CASES" | while IFS='|' read -r f b; do
+    case "$b" in *r*) ;; *) continue ;; esac
+    want=$("$MERE" "$FX/$f.mere" 2>&1)
+    for w in 64 32; do
+      if [ "$w" = 64 ]; then flag=-rv64; else flag=-rv; fi
+      if ! "$MERE" $flag --ram 32 "$FX/$f.mere" > "$T/prog.bin" 2>"$T/emit.err"; then
+        printf '  FAIL  %s\n' "RV$w $f: $(head -1 "$T/emit.err")"; echo x >> "$T/rvfailed"; continue
+      fi
+      got=$(cd "$T" && perl -e 'alarm 120; exec @ARGV' ./rvrun$w 32 2>&1 | grep -a -v '^rvrun')
+      if [ "$got" = "$want" ]; then printf '  ok    %s\n' "RV$w $f"
+      else printf '  FAIL  %s\n' "RV$w $f: got [$(echo "$got" | head -1 | LC_ALL=C cut -c1-40)] wanted [$(echo "$want" | head -1 | cut -c1-40)]"; echo x >> "$T/rvfailed"; fi
+    done
+  done
+  [ -f "$T/rvfailed" ] && fail=1
+  rvnote=" (RV64 and RV32 too)"
+fi
 
 if [ "$MODE" = --poison ]; then
   # program | backend | what the poison undoes | sed expression
@@ -140,4 +174,4 @@ channel_xthread|c|a message region goes on the list of the thread that made it|s
 fi
 
 if [ "$fail" != 0 ]; then echo "region_uaf: FAILED"; exit 1; fi
-if [ "$MODE" = --poison ]; then echo "region_uaf --poison: ok (the gate can go red)"; else echo "region_uaf: ok"; fi
+if [ "$MODE" = --poison ]; then echo "region_uaf --poison: ok (the gate can go red)$rvnote"; else echo "region_uaf: ok$rvnote"; fi
