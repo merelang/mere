@@ -1,0 +1,6 @@
+// v0.1.656: a lane out of range fails as C's does (f64x2 is a box of lanes on RISC-V)
+let v = f64x2_make 1.0 2.0;
+let _ = print (str_of_float (f64x2_extract v 1));
+let n = vec_new ();
+let _ = vec_push n 1.5;
+print (str_of_float (f64x2_reduce_add (f64x2_load n 0)))

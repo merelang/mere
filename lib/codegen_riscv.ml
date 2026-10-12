@@ -613,6 +613,22 @@ let xlen_test (c : Ast.expr) : bool option =
              { node = Ast.Int_lit n; _ }) -> Some (n = !xlen)
   | _ -> None
 
+(* v0.1.656: the f64x2 / f32x4 builtins are the prelude's rvf2_ / rvf4_
+   functions (name, arity) -- the lanes are boxes of floats on this target *)
+let rv_lane_fns =
+  [ ("f64x2_make", ("rvf2_make", 2)); ("f64x2_splat", ("rvf2_splat", 1));
+    ("f64x2_add", ("rvf2_add", 2)); ("f64x2_sub", ("rvf2_sub", 2));
+    ("f64x2_mul", ("rvf2_mul", 2)); ("f64x2_div", ("rvf2_div", 2));
+    ("f64x2_fma", ("rvf2_fma", 3)); ("f64x2_reduce_add", ("rvf2_reduce_add", 1));
+    ("f64x2_extract", ("rvf2_extract", 2)); ("f64x2_load", ("rvf2_load", 2));
+    ("f64x2_store", ("rvf2_store", 3));
+    (* where the C-side bounds proof dropped the check: the same box, checked
+       anyway (it is two compares against a call) *)
+    ("__f64x2_load_unchecked", ("rvf2_load", 2)); ("__f64x2_store_unchecked", ("rvf2_store", 3));
+    ("f32x4_make", ("rvf4_make", 4)); ("f32x4_splat", ("rvf4_splat", 1));
+    ("f32x4_add", ("rvf4_add", 2)); ("f32x4_sub", ("rvf4_sub", 2));
+    ("f32x4_mul", ("rvf4_mul", 2)); ("f32x4_div", ("rvf4_div", 2));
+    ("f32x4_reduce_add", ("rvf4_reduce_add", 1)); ("f32x4_extract", ("rvf4_extract", 2)) ]
 let rec vars_in (e : Ast.expr) (acc : string list) : string list =
   match e.node with
   | Ast.Var v ->
@@ -643,6 +659,13 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
        :: "__oj_key0" :: "__oj_field" :: "__oj_int" :: "__oj_float" :: v :: acc
      (* v0.1.655: the capability constructors *)
      | "mk_logger" -> "__rv_mk_logger" :: v :: acc
+     (* v0.1.656: a lane builtin is its prelude function; whatever made a lane
+        value also keeps the lane type's show and to_json *)
+     | _ when List.mem_assoc v rv_lane_fns ->
+       let (target, _) = List.assoc v rv_lane_fns in
+       let ty = if String.sub target 0 4 = "rvf2" then "rvf2" else "rvf4" in
+       target :: (ty ^ "_show") :: (ty ^ "_json") :: v :: acc
+     | _ when String.length v > 6 && String.sub v 0 6 = "u8x16_" -> "rvu16_show" :: "rvu16_json" :: v :: acc
      | "mk_metrics" -> "__rv_mk_metrics" :: v :: acc
      (* v0.1.653: ByteBuf, ListBuf, OwnedVec and the bytes bridge *)
      | "bytebuf_new" -> "rvbb_new" :: v :: acc
@@ -755,14 +778,10 @@ let rec ty_tag (t : Ast.ty) : string =
   | Ast.TyInt -> "int" | Ast.TyBool -> "bool" | Ast.TyStr -> "str"
   | Ast.TyUnit -> "unit" | Ast.TyFloat -> "float" | Ast.TyBytes -> "bytes"
   | Ast.TySimd Ast.U8x16 -> "u8x16"   (* Q-110: a pointer to a 16-byte box; the lanes live in RVV registers only inside an operation *)
-  | Ast.TySimd Ast.F32x4 ->
-    (* Same reason as f64x2 below: RVV's f32 element width would need a float
-       unit this target does not have. contrib/softfloat is a library, not a
-       lane. *)
-    err Loc.dummy "RV32I: the SIMD type f32x4 is not supported (this target has no floating-point unit)"
-  | Ast.TySimd Ast.F64x2 ->
-    (* no float unit here (floats are softfloat), so two-lane doubles stay refused by name *)
-    err Loc.dummy "RV32I: the SIMD type f64x2 is not supported (this target has no floating-point unit)"
+  (* v0.1.656: no float unit here, so no vector one: f64x2 and f32x4 are the
+     prelude's boxes of lanes (rvf2 / rvf4), made and used by its functions *)
+  | Ast.TySimd Ast.F32x4 -> "f32x4"
+  | Ast.TySimd Ast.F64x2 -> "f64x2"
   | Ast.TyTuple ts -> "t" ^ String.concat "_" (List.map ty_tag ts) ^ "_"
   | Ast.TyCon (n, []) -> n
   | Ast.TyCon (n, args) -> n ^ "_" ^ String.concat "_" (List.map ty_tag args) ^ "_"
@@ -803,6 +822,7 @@ let request_show_tag (t : Ast.ty) : string =
 let rec json_like ~decode seen t =
   match resolve_ty t with
   | Ast.TyInt | Ast.TyFloat | Ast.TyStr | Ast.TyUnit | Ast.TyBool -> true
+  | Ast.TySimd _ when not decode -> true
   | Ast.TyTuple ts -> List.for_all (json_like ~decode seen) ts
   | Ast.TyCon (("list" | "option"), [et]) -> json_like ~decode seen et
   | Ast.TyCon ("Vec", [_; et]) when not decode -> json_like ~decode seen et
@@ -2574,8 +2594,12 @@ and compile_node (env : env) (e : Ast.expr) : unit =
     end
   | Ast.Float_lit f ->
     let b = Int64.bits_of_float f in
-    let hi = signed32 (Int64.to_int (Int64.shift_right_logical b 32)) in
-    let lo = signed32 (Int64.to_int (Int64.logand b 0xFFFFFFFFL)) in
+    (* v0.1.656: on RV64 the halves are stored as the arithmetic stores them
+       (__f64_float masks each to 32 bits), not sign-extended: a literal's
+       float_bits_lo 0.1 was -1717986918 where C says 2576980378 *)
+    let half v = if !xlen = 64 then v else signed32 v in
+    let hi = half (Int64.to_int (Int64.shift_right_logical b 32)) in
+    let lo = half (Int64.to_int (Int64.logand b 0xFFFFFFFFL)) in
     alloc_words t1 2;
     li t0 hi; emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);          (* sw hi, 0(t1) *)
     li t0 lo; emit_word (enc_s (wsz ()) t0 t1 (stf3 ()) 0x23);          (* sw lo, 4(t1) *)
@@ -3203,6 +3227,9 @@ and compile_app env e =
      used by the prelude's rvbb_ / rvlb_ / rvov_ (as map_new is rvmap_new); a
      __heap one goes into the default arena like a Vec *)
   (* v0.1.655: Logger / Metrics are the prelude's records of the same shape *)
+  | Ast.Var op when List.mem_assoc op rv_lane_fns
+                    && List.length args = snd (List.assoc op rv_lane_fns) ->
+    call_top env (fst (List.assoc op rv_lane_fns)) args
   | Ast.Var ("mk_logger" | "mk_metrics" as op) when List.length args = 1 ->
     call_top env (if op = "mk_logger" then "__rv_mk_logger" else "__rv_mk_metrics") args
   | Ast.Var ("bytebuf_new" | "lb_new" | "owned_vec_new" as op) when List.length args = 1 ->
@@ -4085,7 +4112,7 @@ and compile_app env e =
        let seen = Hashtbl.create 8 in
        let rec ok t =
          match resolve_ty t with
-         | Ast.TyInt | Ast.TyFloat | Ast.TyStr | Ast.TyUnit | Ast.TyBool -> true
+         | Ast.TyInt | Ast.TyFloat | Ast.TyStr | Ast.TyUnit | Ast.TyBool | Ast.TySimd _ -> true
          | Ast.TyTuple ts -> List.for_all ok ts
          | Ast.TyCon ("list", [et]) -> ok et
          | Ast.TyCon ("Vec", [_; et]) -> ok et
@@ -6115,6 +6142,9 @@ let emit_show_helper (tag, ty) =
   emit (Label ("__show_" ^ tag));
   match resolve_ty ty with
   | Ast.TyInt -> emit (Jal (zero, "__str_of_int"))
+  | Ast.TySimd Ast.F64x2 -> emit (Jal (zero, "u_rvf2_show"))
+  | Ast.TySimd Ast.F32x4 -> emit (Jal (zero, "u_rvf4_show"))
+  | Ast.TySimd Ast.U8x16 -> emit (Jal (zero, "u_rvu16_show"))
   | Ast.TyFloat -> emit (Jal (zero, "u_str_of_float"))
   | Ast.TyStr -> emit (Jal (zero, "u_rvshow_str"))
   | Ast.TyUnit -> lit a0 "()"; ret ()
@@ -6217,6 +6247,9 @@ let emit_json_helper (tag, ty) =
   emit (Label ("__tojson_" ^ tag));
   match resolve_ty ty with
   | Ast.TyInt -> emit (Jal (zero, "__str_of_int"))
+  | Ast.TySimd Ast.F64x2 -> emit (Jal (zero, "u_rvf2_json"))
+  | Ast.TySimd Ast.F32x4 -> emit (Jal (zero, "u_rvf4_json"))
+  | Ast.TySimd Ast.U8x16 -> emit (Jal (zero, "u_rvu16_json"))
   | Ast.TyFloat -> emit (Jal (zero, "u_str_of_float"))
   | Ast.TyStr -> emit (Jal (zero, "u_rvshow_str"))
   | Ast.TyUnit -> lit a0 "null"; ret ()

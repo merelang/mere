@@ -4,6 +4,51 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.656 — 2026-10-12
+
+_On RISC-V: `f64x2` and `f32x4`, `fma`, the float32 conversions and `u8x16_first_true`. Also a fix: an RV64 float literal's low half was stored sign-extended._
+
+- **The lane types.** There is no float unit on this target, so there is no
+  vector one either, and `f64x2` / `f32x4` were refused as types. Now they are
+  the prelude's boxes of lanes (`rvf2`, `rvf4`), and the builtins lower to prelude
+  functions from one table (`rv_lane_fns`). That covers make, splat, the four
+  operations, `fma`, extract, `reduce_add`, load and store, plus the
+  bounds-proven `_unchecked` forms. An `f32x4` lane holds a float32 as its
+  double. It is rounded on the way in and after every operation, which gives the
+  float32 answer because a double has more than twice float32's precision.
+  `reduce_add` adds left to right at lane precision. `show` and `to_json` write
+  `f64x2(a, b)` / `[a, b]` as C does, and `u8x16[hex]` / `"hex"`. A lane out of
+  range fails with C's text (test/rv/fail/f64x2_lane).
+- **`f32_bits` / `float_of_f32_bits`.** These work on the halves' bit fields:
+  round to nearest even, subnormals, an overflow to infinity, a NaN kept quiet
+  with its top payload bits. They were held to C's `(float)` conversion on 7,517
+  doubles at both widths: random values across float32's range, exact ties and
+  their neighbours (normal and subnormal), and the special values.
+- **`fma`.** RV32's int is 32 bits, so this cannot be the Wasm backend's integer
+  fma. It is done in doubles (Boldo and Melquiond, "Emulation of FMA and
+  correctly rounded sums: proved algorithms using rounding to odd"). The product
+  is exact as a head and a tail (`__fp_two_prod`), and c is added to the head
+  exactly. The two tails are added rounded to odd, and the one rounding to
+  nearest is the last addition. The proof assumes nothing underflows, so the
+  operands are scaled first (a and b to [1, 2), c by the same power of two). A
+  subnormal answer is rounded at its fixed place by adding 2^52 times that place
+  and using the same correctly rounded three-term sum. `scripts/fma_check.sh`
+  used to assert that RISC-V refused `fma`. With MEMU set, it now runs the six
+  families on RV64 against fma(3), bit for bit; all six match, including the
+  ties a single sticky bit decides. A sample of 4,886 of those inputs also
+  matches on RV32.
+- **`u8x16_first_true`**: the lowest lane that is not zero, or -1.
+- **A float literal's halves on RV64.** The literal stored each 32-bit half
+  sign-extended, while the arithmetic (`__f64_float`) masks them. So
+  `float_bits_lo 0.1` was -1717986918 on RV64 where C says 2576980378, and the
+  parity program `float_bits` would have shown it the day it compiled here.
+
+`-rv64` refuses 11 parity programs now (19 before). rv_exec runs 218 on RV64 and
+198 on RV32, all agreeing with C. `float_bits` and `simd_f32x4` join RV32's
+known differences because they print bit patterns past 2^31. `fma` and
+`mat4xvec4` are refused by `-rv` for a literal past a 32-bit int. What is left is
+channels (7), `region R loop` (3) and a Map keyed by a tuple (1).
+
 ## v0.1.655 — 2026-10-12
 
 _On RISC-V: `<` / `<=` / `>` / `>=` on tuples, records, variants and lists by value; `mk_logger` / `mk_metrics`; and the instance of a function whose result is thrown away._
