@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.654 — 2026-10-12
+
+_`to_json`, `of_json`, `of_json_opt` and the `_like` forms on RISC-V._
+
+Eight parity programs were refused at compile time for these. `to_json` at a
+type is a generated `__tojson_<tag>`, `show`'s walk (v0.1.639) with JSON's
+spellings: arrays and objects with no spaces, a record without its name, an
+option as `null` or its value, a nullary constructor as its name in quotes and
+any other as `{"Name":payload}`, a str escaped as the interpreter escapes it.
+
+`of_json` is the C runtime's design, line for line: the prelude parses the
+document into a tree (`__oj_parse`: whitespace, strings with the same escapes
+and the same UTF-8 check, numbers as their lexeme, the duplicate-key and
+trailing-separator refusals, what follows the document ignored), and a
+generated `__ofj_<tag>` decodes a node -- an int, float, str or bool read from
+the node whatever its kind (strtoll / strtod), a tuple from an array of its
+arity, a record's fields by name (one missing is an error), a list from an
+array, an option from `null` or its value, a variant from its name or a
+one-key object. An error does not unwind: the first is kept, every step after
+it stops, and the generated decoders ask `__oj_failed` after each call; then
+`of_json` prints `of_json: <message>` on stderr and exits 1, as C does, and
+`of_json_opt` answers `None`. `of_json_like` / `of_json_opt_like` take the
+target from the result's type and drop the witness, as C.
+
+The eight programs agree with C on RV64 (`of_json_composite` differs on RV32 by
+a number past 2^31). `test/rv/fail/of_json.mere` (new, in rv_failure_check)
+holds the refusal's stdout, stderr and exit status to C's.
+
 ## v0.1.653 — 2026-10-12
 
 _ByteBuf, ListBuf, OwnedVec and the bytes <-> Vec bridge on RISC-V; `str_repeat` of a negative count and `float_of_str` of inf / nan as the C runtime has them._

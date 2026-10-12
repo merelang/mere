@@ -635,6 +635,12 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
      | "map_clear" -> "rvmap_clear" :: v :: acc
      | "map_compact" -> "rvmap_compact" :: v :: acc
      | "map_iter" -> (if map_word_keyed e then "rvmap_iter_i" else "rvmap_iter") :: v :: acc
+     (* v0.1.654: JSON: the prelude's escaping and float text, and its parser *)
+     | "to_json" -> "rvshow_str" :: "str_of_float" :: v :: acc
+     | "of_json" | "of_json_opt" | "of_json_like" | "of_json_opt_like" ->
+       "__oj_parse" :: "__oj_end" :: "__oj_end_opt" :: "__oj_failed" :: "__oj_fail"
+       :: "__oj_kind" :: "__oj_bool" :: "__oj_str" :: "__oj_len" :: "__oj_item"
+       :: "__oj_key0" :: "__oj_field" :: "__oj_int" :: "__oj_float" :: v :: acc
      (* v0.1.653: ByteBuf, ListBuf, OwnedVec and the bytes bridge *)
      | "bytebuf_new" -> "rvbb_new" :: v :: acc
      | "bytebuf_len" -> "rvbb_len" :: v :: acc
@@ -788,6 +794,52 @@ let request_show_tag (t : Ast.ty) : string =
     show_pending := (tag, t) :: !show_pending
   end;
   "__show_" ^ tag
+(* v0.1.654: to_json and of_json at a type are generated helpers too:
+   `__tojson_<tag>` (a0 = the value -> a0 = its JSON) and `__ofj_<tag>` (a0 = a
+   node of the prelude's parse tree -> a0 = the value) *)
+let rec json_like ~decode seen t =
+  match resolve_ty t with
+  | Ast.TyInt | Ast.TyFloat | Ast.TyStr | Ast.TyUnit | Ast.TyBool -> true
+  | Ast.TyTuple ts -> List.for_all (json_like ~decode seen) ts
+  | Ast.TyCon (("list" | "option"), [et]) -> json_like ~decode seen et
+  | Ast.TyCon ("Vec", [_; et]) when not decode -> json_like ~decode seen et
+  | Ast.TyCon (n, args) when Hashtbl.mem type_records n || Hashtbl.mem type_variants n ->
+    let key = ty_tag t in
+    if Hashtbl.mem seen key then true
+    else begin
+      Hashtbl.replace seen key ();
+      if Hashtbl.mem type_records n then
+        (let (params, fields) = Hashtbl.find type_records n in
+         let senv = zip_tyenv params args in
+         List.for_all (fun (_, fty) -> json_like ~decode seen (subst_ty senv fty)) fields)
+      else
+        (let (params, variants) = Hashtbl.find type_variants n in
+         let senv = zip_tyenv params args in
+         List.for_all (fun (_, p) -> match p with None -> true | Some pt -> json_like ~decode seen (subst_ty senv pt)) variants)
+    end
+  | _ -> false
+let json_ok t = json_like ~decode:false (Hashtbl.create 8) t
+let ofj_ok t = json_like ~decode:true (Hashtbl.create 8) t
+let ctor_tag name = match Hashtbl.find_opt variant_tags (Ast.canonical_ctor name) with Some t -> t | None -> 0
+
+let json_pending : (string * Ast.ty) list ref = ref []
+let json_requested : (string, unit) Hashtbl.t = Hashtbl.create 16
+let request_json_tag (t : Ast.ty) : string =
+  let tag = ty_tag t in
+  if not (Hashtbl.mem json_requested tag) then begin
+    Hashtbl.replace json_requested tag ();
+    json_pending := (tag, t) :: !json_pending
+  end;
+  "__tojson_" ^ tag
+let ofj_pending : (string * Ast.ty) list ref = ref []
+let ofj_requested : (string, unit) Hashtbl.t = Hashtbl.create 16
+let request_ofj_tag (t : Ast.ty) : string =
+  let tag = ty_tag t in
+  if not (Hashtbl.mem ofj_requested tag) then begin
+    Hashtbl.replace ofj_requested tag ();
+    ofj_pending := (tag, t) :: !ofj_pending
+  end;
+  "__ofj_" ^ tag
 let request_eq (t : Ast.ty) : string =
   let tag = ty_tag t in
   if not (Hashtbl.mem eq_requested tag) then begin
@@ -4028,6 +4080,34 @@ and compile_app env e =
        if not (ok t) then
          err e.loc (Printf.sprintf "RV32I: `show` of a %s -- this backend writes ints, floats, strs, bools, unit, tuples, records, variants, lists and Vecs" (Formatter.fmt_ty t));
        compile_expr env arg; emit (Jal (ra, request_show_tag t)))
+  (* v0.1.654: to_json / of_json / of_json_opt *)
+  | Ast.Var "to_json" when List.length args = 1 ->
+    let arg = List.hd args in
+    let t = match arg.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit in
+    if not (json_ok t) then
+      err e.loc (Printf.sprintf "RV32I: `to_json` of a %s -- this backend writes ints, floats, strs, bools, unit, tuples, records, variants, options, lists and Vecs" (Formatter.fmt_ty t));
+    compile_expr env arg; emit (Jal (ra, request_json_tag t))
+  | Ast.Var ("of_json" | "of_json_opt" | "of_json_like" | "of_json_opt_like" as op0)
+    when List.length args = (if op0 = "of_json" || op0 = "of_json_opt" then 1 else 2) ->
+    (* the _like forms take the target from a witness, evaluated and dropped:
+       the type is the result's, as C reads it *)
+    let op = if op0 = "of_json_like" then "of_json" else if op0 = "of_json_opt_like" then "of_json_opt" else op0 in
+    let args = if op0 = op then args else (compile_expr env (List.hd args); List.tl args) in
+    let res = match e.Ast.ty with Some t -> resolve_ty t | None -> Ast.TyUnit in
+    let target = if op = "of_json" then res
+      else (match res with Ast.TyCon ("option", [t]) -> resolve_ty t
+                           | _ -> err e.loc "RV32I: of_json_opt: result type is not an option") in
+    (match target with
+     | Ast.TyVar _ ->
+       err e.loc (Printf.sprintf "RV32I: unsupported: %s: cannot infer target type (add an annotation, e.g. `(%s s : T%s)`)"
+                    op op (if op = "of_json" then "" else " option"))
+     | _ -> ());
+    if not (ofj_ok target) then
+      err e.loc (Printf.sprintf "RV32I: unsupported: `%s` into a %s -- this backend decodes ints, floats, strs, bools, unit, tuples, records, variants, options and lists" op (Formatter.fmt_ty target));
+    compile_expr env (List.hd args);
+    emit (Jal (ra, "u___oj_parse"));
+    emit (Jal (ra, request_ofj_tag target));
+    emit (Jal (ra, if op = "of_json" then "u___oj_end" else "u___oj_end_opt"))
   (* v0.1.638: `not` is xori with 1 (a branch on it is turned round in
      branch_if instead) *)
   | Ast.Var "not" when List.length args = 1 ->
@@ -6084,6 +6164,249 @@ let emit_show_helper (tag, ty) =
     app_lit "]"; leave ()
   | _ -> lit a0 "?"; ret ()
 
+(* v0.1.654: the types to_json writes and of_json reads here *)
+(* __tojson_<tag>(a0 = the value) -> a0 = its JSON, as the interpreter and the
+   C runtime write it: arrays and objects without spaces, a record without its
+   name, an option as null or its value, a nullary constructor as its name in
+   quotes and any other as {"Name":payload}. Frame as __show_'s. *)
+let emit_json_helper (tag, ty) =
+  let w = wsz () in
+  let ld rd off base = emit_word (enc_i off base (ldf3 ()) rd 0x03) in
+  let sd src off base = emit_word (enc_s off src base (stf3 ()) 0x23) in
+  let ret () = emit_word (enc_i 0 ra 0 zero 0x67) in
+  let lit r str =
+    let label = fresh_label "str_" in
+    string_data := (label, mk_str_block str) :: !string_data;
+    emit (LoadAddr (r, label)) in
+  let enter () = emit_word (enc_i (0 - 4 * w) sp 0 sp 0x13); sd ra 0 sp; sd a0 w sp in
+  let leave () = ld a0 (2 * w) sp; ld ra 0 sp; emit_word (enc_i (4 * w) sp 0 sp 0x13); ret () in
+  let start str = lit a0 str; sd a0 (2 * w) sp in
+  let app_lit str = ld a0 (2 * w) sp; lit a1 str; emit (Jal (ra, "__str_concat")); sd a0 (2 * w) sp in
+  let app_val load_value t =
+    load_value (); emit (Jal (ra, request_json_tag t));
+    emit_word (enc_i 0 a0 0 a1 0x13);
+    ld a0 (2 * w) sp; emit (Jal (ra, "__str_concat")); sd a0 (2 * w) sp in
+  let field_of i () = ld t0 w sp; ld a0 (i * w) t0 in
+  emit (Label ("__tojson_" ^ tag));
+  match resolve_ty ty with
+  | Ast.TyInt -> emit (Jal (zero, "__str_of_int"))
+  | Ast.TyFloat -> emit (Jal (zero, "u_str_of_float"))
+  | Ast.TyStr -> emit (Jal (zero, "u_rvshow_str"))
+  | Ast.TyUnit -> lit a0 "null"; ret ()
+  | Ast.TyBool ->
+    let l = fresh_label ".tjf" in
+    emit (Branch (0, a0, zero, l)); lit a0 "true"; ret ();
+    emit (Label l); lit a0 "false"; ret ()
+  | Ast.TyTuple ts ->
+    enter (); start "[";
+    List.iteri (fun i t -> if i > 0 then app_lit ","; app_val (field_of i) t) ts;
+    app_lit "]"; leave ()
+  | Ast.TyCon (n, args) when Hashtbl.mem type_records n ->
+    let (params, fields) = Hashtbl.find type_records n in
+    let senv = zip_tyenv params args in
+    enter (); start "{";
+    List.iteri (fun i (f, fty) ->
+      if i > 0 then app_lit ",";
+      app_lit (Ast.escape_string f ^ ":");
+      app_val (field_of i) (subst_ty senv fty)) fields;
+    app_lit "}"; leave ()
+  | Ast.TyCon ("option", [et]) ->
+    let l_none = fresh_label ".tjn" in
+    ld t1 0 a0; li t2 (ctor_tag "None");
+    emit (Branch (0, t1, t2, l_none));
+    ld a0 w a0; emit (Jal (zero, request_json_tag et));            (* Some x: x's JSON *)
+    emit (Label l_none); lit a0 "null"; ret ()
+  | Ast.TyCon ("list", [et]) ->
+    let l_loop = fresh_label ".tjl" and l_end = fresh_label ".tje" and l_first = fresh_label ".tjs" in
+    enter (); start "[";
+    li t0 1; sd t0 (3 * w) sp;
+    emit (Label l_loop);
+    ld t0 w sp; ld t1 0 t0;
+    emit (Branch (0, t1, zero, l_end));
+    ld t1 (3 * w) sp;
+    emit (Branch (1, t1, zero, l_first));
+    app_lit ",";
+    emit (Label l_first);
+    sd zero (3 * w) sp;
+    app_val (fun () -> ld t0 w sp; ld t0 w t0; ld a0 0 t0) et;
+    ld t0 w sp; ld t0 w t0; ld t0 w t0; sd t0 w sp;
+    emit (Jal (zero, l_loop));
+    emit (Label l_end);
+    app_lit "]"; leave ()
+  | Ast.TyCon (n, args) when Hashtbl.mem type_variants n ->
+    let (params, variants) = Hashtbl.find type_variants n in
+    let senv = zip_tyenv params args in
+    enter ();
+    ld t1 0 a0;
+    List.iteri (fun k (ctor, payload) ->
+      let l_next = fresh_label ".tjv" in
+      li t2 k; emit (Branch (1, t1, t2, l_next));
+      (match payload with
+       | None -> start (Ast.escape_string ctor)
+       | Some pty ->
+         start ("{" ^ Ast.escape_string ctor ^ ":");
+         app_val (field_of 1) (subst_ty senv pty);
+         app_lit "}");
+      leave ();
+      emit (Label l_next)) variants;
+    start "null"; leave ()
+  | Ast.TyCon ("Vec", [_; et]) ->
+    let l_loop = fresh_label ".tjvl" and l_end = fresh_label ".tjve" and l_first = fresh_label ".tjvs" in
+    enter (); start "[";
+    sd zero (3 * w) sp;
+    emit (Label l_loop);
+    ld t0 w sp; ld t1 0 t0; ld t2 (3 * w) sp;
+    emit (Branch (7, t2, t1, l_end));
+    emit (Branch (0, t2, zero, l_first));
+    app_lit ",";
+    emit (Label l_first);
+    app_val (fun () ->
+      ld t0 w sp; ld t1 (2 * w) t0; ld t2 (3 * w) sp;
+      emit_word (enc_i (wshift ()) t2 1 t2 0x13);
+      emit_word (enc_r 0 t2 t1 0 t1 0x33);
+      ld a0 0 t1) et;
+    ld t2 (3 * w) sp; emit_word (enc_i 1 t2 0 t2 0x13); sd t2 (3 * w) sp;
+    emit (Jal (zero, l_loop));
+    emit (Label l_end);
+    app_lit "]"; leave ()
+  | _ -> lit a0 "null"; ret ()
+
+(* __ofj_<tag>(a0 = a parse-tree node) -> a0 = the value, as the C runtime's
+   __ojnode_<tag> decodes it: an int / float / str / bool read from the node
+   whatever its kind, a tuple from an array of exactly its arity, a record's
+   fields by name (one missing is an error, an option's too), a list from an
+   array, an option from null or the value, a variant from its name in a
+   string or a one-key object. An error is the prelude's (__oj_fail): kept, and
+   after every call into a part this asks __oj_failed and answers 0 at once.
+   Frame: [ra][node][i][acc][parts...]. *)
+let emit_ofj_helper (tag, ty) =
+  let w = wsz () in
+  let ld rd off base = emit_word (enc_i off base (ldf3 ()) rd 0x03) in
+  let sd src off base = emit_word (enc_s off src base (stf3 ()) 0x23) in
+  let ret () = emit_word (enc_i 0 ra 0 zero 0x67) in
+  let lit r str =
+    let label = fresh_label "str_" in
+    string_data := (label, mk_str_block str) :: !string_data;
+    emit (LoadAddr (r, label)) in
+  emit (Label ("__ofj_" ^ tag));
+  let frame nparts = (4 + nparts) * w in
+  let with_frame nparts body =
+    let fsz = frame nparts in
+    let l_bail = fresh_label ".ojb" in
+    emit_word (enc_i (0 - fsz) sp 0 sp 0x13); sd ra 0 sp; sd a0 w sp;
+    let leave_with_a0 () = ld ra 0 sp; emit_word (enc_i fsz sp 0 sp 0x13); ret () in
+    (* after a call: stop if the decode has failed *)
+    let check () =
+      emit (Jal (ra, "u___oj_failed"));
+      emit (Branch (1, a0, zero, l_bail)) in
+    let fail msg = lit a0 msg; emit (Jal (ra, "u___oj_fail")); emit (Jal (zero, l_bail)) in
+    body ~check ~fail ~leave_with_a0;
+    emit (Label l_bail); li a0 0; leave_with_a0 () in
+  (* decode the part a loader leaves in a0 (a node) into slot k (or a0 only) *)
+  let part load t k ~check =
+    load (); emit (Jal (ra, request_ofj_tag t)); sd a0 ((4 + k) * w) sp; check () in
+  let block_of_slots n first =
+    alloc_words t1 n;
+    for i = 0 to n - 1 do ld t0 ((4 + first + i) * w) sp; sd t0 (i * w) t1 done;
+    emit_word (enc_i 0 t1 0 a0 0x13) in
+  match resolve_ty ty with
+  | Ast.TyInt -> emit (Jal (zero, "u___oj_int"))
+  | Ast.TyFloat -> emit (Jal (zero, "u___oj_float"))
+  | Ast.TyStr -> emit (Jal (zero, "u___oj_str"))
+  | Ast.TyBool -> emit (Jal (zero, "u___oj_bool"))
+  | Ast.TyUnit -> li a0 0; ret ()
+  | Ast.TyTuple ts ->
+    let n = List.length ts in
+    with_frame n (fun ~check ~fail ~leave_with_a0 ->
+      let l_ok = fresh_label ".ojt" and l_bad = fresh_label ".ojtb" in
+      ld a0 w sp; emit (Jal (ra, "u___oj_kind")); li t2 4; emit (Branch (1, a0, t2, l_bad));
+      ld a0 w sp; emit (Jal (ra, "u___oj_len")); li t2 n; emit (Branch (0, a0, t2, l_ok));
+      emit (Label l_bad); fail (Printf.sprintf "expected a %d-element array" n);
+      emit (Label l_ok);
+      List.iteri (fun i t ->
+        part (fun () -> ld a0 w sp; li a1 i; emit (Jal (ra, "u___oj_item"))) t i ~check) ts;
+      block_of_slots n 0; leave_with_a0 ())
+  | Ast.TyCon (rn, args) when Hashtbl.mem type_records rn ->
+    let (params, fields) = Hashtbl.find type_records rn in
+    let senv = zip_tyenv params args in
+    let n = List.length fields in
+    with_frame n (fun ~check ~fail:_ ~leave_with_a0 ->
+      List.iteri (fun i (f, fty) ->
+        (* the field's node: an error (not an object, no such key) is kept *)
+        ld a0 w sp; lit a1 f; emit (Jal (ra, "u___oj_field")); sd a0 (2 * w) sp; check ();
+        part (fun () -> ld a0 (2 * w) sp) (subst_ty senv fty) i ~check) fields;
+      block_of_slots n 0; leave_with_a0 ())
+  | Ast.TyCon ("list", [et]) ->
+    with_frame 1 (fun ~check ~fail ~leave_with_a0 ->
+      let l_ok = fresh_label ".ojl" and l_loop = fresh_label ".ojll" and l_done = fresh_label ".ojld" in
+      ld a0 w sp; emit (Jal (ra, "u___oj_kind")); li t2 4; emit (Branch (0, a0, t2, l_ok));
+      fail "expected a JSON array";
+      emit (Label l_ok);
+      (* acc = Nil; i = len - 1 *)
+      alloc_words t1 1; li t0 (ctor_tag "Nil"); sd t0 0 t1; sd t1 (3 * w) sp;
+      ld a0 w sp; emit (Jal (ra, "u___oj_len")); emit_word (enc_i (-1) a0 0 a0 0x13); sd a0 (2 * w) sp;
+      emit (Label l_loop);
+      ld t2 (2 * w) sp; emit (Branch (4, t2, zero, l_done));          (* i < 0 -> done *)
+      part (fun () -> ld a0 w sp; ld a1 (2 * w) sp; emit (Jal (ra, "u___oj_item"))) et 0 ~check;
+      (* Cons: [tag][pair], the pair [head][tail] *)
+      alloc_words t1 2; ld t0 (4 * w) sp; sd t0 0 t1; ld t0 (3 * w) sp; sd t0 w t1;
+      emit_word (enc_i 0 t1 0 t3 0x13);
+      alloc_words t1 2; li t0 (ctor_tag "Cons"); sd t0 0 t1; sd t3 w t1;
+      sd t1 (3 * w) sp;
+      ld t2 (2 * w) sp; emit_word (enc_i (-1) t2 0 t2 0x13); sd t2 (2 * w) sp;
+      emit (Jal (zero, l_loop));
+      emit (Label l_done);
+      ld a0 (3 * w) sp; leave_with_a0 ())
+  | Ast.TyCon ("option", [et]) ->
+    with_frame 1 (fun ~check ~fail:_ ~leave_with_a0 ->
+      let l_some = fresh_label ".ojs" in
+      ld a0 w sp; emit (Jal (ra, "u___oj_kind")); emit (Branch (1, a0, zero, l_some));
+      alloc_words t1 1; li t0 (ctor_tag "None"); sd t0 0 t1; emit_word (enc_i 0 t1 0 a0 0x13);
+      leave_with_a0 ();
+      emit (Label l_some);
+      part (fun () -> ld a0 w sp) et 0 ~check;
+      alloc_words t1 2; li t0 (ctor_tag "Some"); sd t0 0 t1; ld t0 (4 * w) sp; sd t0 w t1;
+      emit_word (enc_i 0 t1 0 a0 0x13); leave_with_a0 ())
+  | Ast.TyCon (vn, args) when Hashtbl.mem type_variants vn ->
+    let (params, variants) = Hashtbl.find type_variants vn in
+    let senv = zip_tyenv params args in
+    with_frame 1 (fun ~check ~fail ~leave_with_a0 ->
+      let l_obj = fresh_label ".ojvo" and l_end = fresh_label ".ojve" in
+      (* a string: a nullary constructor by its name *)
+      ld a0 w sp; emit (Jal (ra, "u___oj_kind")); li t2 3; emit (Branch (1, a0, t2, l_obj));
+      ld a0 w sp; emit (Jal (ra, "u___oj_str")); sd a0 (2 * w) sp;
+      List.iter (fun (ctor, payload) ->
+        match payload with
+        | Some _ -> ()
+        | None ->
+          let l_next = fresh_label ".ojvn" in
+          ld a0 (2 * w) sp; lit a1 ctor; emit (Jal (ra, "__str_eq"));
+          emit (Branch (0, a0, zero, l_next));
+          alloc_words t1 1; li t0 (ctor_tag ctor); sd t0 0 t1; emit_word (enc_i 0 t1 0 a0 0x13);
+          leave_with_a0 ();
+          emit (Label l_next)) variants;
+      emit (Label l_obj);
+      (* a one-key object: a constructor with a payload *)
+      ld a0 w sp; emit (Jal (ra, "u___oj_kind")); li t2 5; emit (Branch (1, a0, t2, l_end));
+      ld a0 w sp; emit (Jal (ra, "u___oj_len")); li t2 1; emit (Branch (1, a0, t2, l_end));
+      ld a0 w sp; emit (Jal (ra, "u___oj_key0")); sd a0 (2 * w) sp;
+      ld a0 w sp; li a1 0; emit (Jal (ra, "u___oj_item")); sd a0 (3 * w) sp;
+      List.iter (fun (ctor, payload) ->
+        match payload with
+        | None -> ()
+        | Some pty ->
+          let l_next = fresh_label ".ojvp" in
+          ld a0 (2 * w) sp; lit a1 ctor; emit (Jal (ra, "__str_eq"));
+          emit (Branch (0, a0, zero, l_next));
+          part (fun () -> ld a0 (3 * w) sp) (subst_ty senv pty) 0 ~check;
+          alloc_words t1 2; li t0 (ctor_tag ctor); sd t0 0 t1; ld t0 (4 * w) sp; sd t0 w t1;
+          emit_word (enc_i 0 t1 0 a0 0x13); leave_with_a0 ();
+          emit (Label l_next)) variants;
+      emit (Label l_end);
+      fail ("cannot decode variant " ^ vn))
+  | _ ->
+    with_frame 0 (fun ~check:_ ~fail ~leave_with_a0:_ -> fail "unsupported of_json target")
+
 let emit_eq_helper (tag, ty) =
   emit (Label ("__eq_" ^ tag));
   match resolve_ty ty with
@@ -7294,6 +7617,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   Hashtbl.reset adapters;
   globals := [];
   eq_pending := []; show_pending := []; Hashtbl.reset show_requested;
+  json_pending := []; Hashtbl.reset json_requested; ofj_pending := []; Hashtbl.reset ofj_requested;
   rcopy_pending := [];
   Hashtbl.reset rcopy_requested;
   store_pending := [];
@@ -7450,6 +7774,14 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
     | [], [], [] when !show_pending <> [] ->
       (match !show_pending with
        | h :: rest -> show_pending := rest; emit_show_helper h; drain_eq ()
+       | [] -> ())
+    | [], [], [] when !json_pending <> [] ->
+      (match !json_pending with
+       | h :: rest -> json_pending := rest; emit_json_helper h; drain_eq ()
+       | [] -> ())
+    | [], [], [] when !ofj_pending <> [] ->
+      (match !ofj_pending with
+       | h :: rest -> ofj_pending := rest; emit_ofj_helper h; drain_eq ()
        | [] -> ())
     | [], [], [] -> ()
     | h :: rest, _, _ -> eq_pending := rest; emit_eq_helper h; drain_eq ()

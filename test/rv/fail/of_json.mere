@@ -1,0 +1,6 @@
+// of_json into a record with a field the document lacks: the C runtime prints
+// `of_json: missing object field` on stderr and exits 1 (v0.1.654 on RISC-V)
+type pt = { x: int, y: int };
+let _ = print "before";
+let p = (of_json "\{\"x\": 1}" : pt);
+print_int p.y
