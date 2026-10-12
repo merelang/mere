@@ -196,7 +196,10 @@ let str_contains = fn h -> fn n -> str_index_of h n >= 0;
 // and O(n^2) in total allocation -- a 200KB str_repeat allocated ~2GB of dead
 // intermediates on a bump allocator that never frees, which is how
 // str_edges@64 ran out of a 128MB machine.
+// v0.1.653: a negative count is refused, as the C runtime refuses it (it
+// was the empty string here)
 let str_repeat = fn s -> fn n ->
+  if n < 0 then fail ("str_repeat: negative count " ++ str_of_int n) else
   let b = strbuf_new () in
   let rec go = fn (i: int) -> if i <= 0 then () else let _ = strbuf_push b s in go (i - 1) in
   let _ = go n in
@@ -758,6 +761,56 @@ let rvoob = fn (k: int) -> fn (a: int) -> fn (b: int) -> fn (c: int) ->
         else if k == 6 then "u8x16_from_bytes: bytes [0, +16) out of bounds (len = " ++ n b ++ ")"
         else if k == 8 then "ord: expected single-char str, got length " ++ n a
         else "u8x16_load: bytes [" ++ n a ++ ", +16) out of bounds (len = " ++ n b ++ ")");
+// v0.1.653: ByteBuf, ListBuf and OwnedVec on RISC-V. Each is a Vec here --
+// codegen lowers the builtins to these, as it lowers map_new to rvmap_new, so
+// a program keeps the builtins' types -- with the C runtime's refusals word
+// for word. A ByteBuf holds one byte per word.
+let rvbb_new = fn (n: int) ->
+  let v = (vec_new () : int Vec) in
+  let rec z = fn (i: int) -> if i >= n then () else (let _ = vec_push v 0 in z (i + 1)) in
+  let _ = z 0 in
+  v;
+let rvbb_len = fn (v: int Vec) -> vec_len v;
+let rvbb_get = fn (v: int Vec) -> fn (i: int) ->
+  if i < 0 || i >= vec_len v
+  then fail ("bytebuf_get: index " ++ str_of_int i ++ " out of bounds (len = " ++ str_of_int (vec_len v) ++ ")")
+  else vec_get v i;
+let rvbb_set = fn (v: int Vec) -> fn (i: int) -> fn (x: int) ->
+  if i < 0 || i >= vec_len v
+  then fail ("bytebuf_set: index " ++ str_of_int i ++ " out of bounds (len = " ++ str_of_int (vec_len v) ++ ")")
+  else vec_set v i (bit_and x 255);
+let rvbb_push = fn (v: int Vec) -> fn (x: int) -> vec_push v (bit_and x 255);
+// a Vec's bytes as a `bytes` (the str layout), each element masked to a byte
+let rvbb_to_bytes = fn (v: int Vec) ->
+  let sb = strbuf_new () in
+  let rec go = fn (i: int) -> if i >= vec_len v then () else (let _ = strbuf_push sb (chr (bit_and (vec_get v i) 255)) in go (i + 1)) in
+  let _ = go 0 in
+  bytes_of_str (strbuf_to_str sb);
+let rvbb_of_bytes = fn (b: bytes) ->
+  let v = (vec_new () : int Vec) in
+  let rec go = fn (i: int) -> if i >= bytes_len b then () else (let _ = vec_push v (bytes_get b i) in go (i + 1)) in
+  let _ = go 0 in
+  v;
+// ListBuf: element 0 is the frozen flag, the elements follow; the list is made
+// when it is asked for, in the order pushed
+let rvlb_new = fn (u: unit) -> let v = (vec_new () : int Vec) in let _ = vec_push v 0 in v;
+let rvlb_push = fn (v: int Vec) -> fn (x: int) ->
+  if vec_get v 0 == 1 then fail "lb_push: the builder was already turned into a list by lb_to_list"
+  else vec_push v x;
+let rvlb_to_list = fn (v: int Vec) ->
+  let _ = vec_set v 0 1 in
+  let rec go = fn (i: int) -> fn (acc: int list) -> if i < 1 then acc else go (i - 1) (Cons (vec_get v i, acc)) in
+  go (vec_len v - 1) Nil;
+// OwnedVec: a Vec; the conversions copy, as C's do
+let rvov_get = fn (v: int Vec) -> fn (i: int) ->
+  if i < 0 || i >= vec_len v
+  then fail ("owned_vec_get: index " ++ str_of_int i ++ " out of bounds (len = " ++ str_of_int (vec_len v) ++ ")")
+  else vec_get v i;
+let rvov_copy = fn (v: int Vec) ->
+  let w = (vec_new () : int Vec) in
+  let rec go = fn (i: int) -> if i >= vec_len v then () else (let _ = vec_push w (vec_get v i) in go (i + 1)) in
+  let _ = go 0 in
+  w;
 // v0.1.636: utf8_len, the interpreter's and the C runtime's walk -- forward
 // by the lead byte's span, an invalid byte one unit, a span past the end
 // stopping at the end. (mere-ruby asks `utf8_len s == str_len s` for "all
@@ -1918,8 +1971,23 @@ let __d64_parse = fn (s: str) -> fn (old: str -> float) ->
           let q = div 57 0 in
           sgn (pos (__f64_pack 0 q (1078 - j + k) (if vec_get dd 0 == 0 then 0 else 1)));
 
+// v0.1.653: strtod's words for the specials, in any case and with a sign --
+// inf, infinity, nan -- which the C runtime takes and this refused
+let __rv_ieq = fn (a: str) -> fn (lit: str) ->
+  str_len a == str_len lit
+  && (let rec go = fn (i: int) ->
+        if i >= str_len a then true
+        else (let c = ord (char_at a i) in
+              let l = if c >= 65 && c <= 90 then c + 32 else c in
+              l == ord (char_at lit i) && go (i + 1)) in
+      go 0);
 let float_of_str = fn (s: str) ->
-  if __rv_xlen () == 64 then __d64_parse s (fn (t: str) -> __sf_float_of_sf (__sf_sf_of_dec t))
+  let t = str_trim s in
+  let neg = str_len t > 0 && char_at t 0 == "-" in
+  let body = if str_len t > 0 && (char_at t 0 == "-" || char_at t 0 == "+") then substring t 1 (str_len t) else t in
+  if __rv_ieq body "inf" || __rv_ieq body "infinity" then (if neg then 0.0 - 1.0 / 0.0 else 1.0 / 0.0)
+  else if __rv_ieq body "nan" then 0.0 / 0.0
+  else if __rv_xlen () == 64 then __d64_parse s (fn (t: str) -> __sf_float_of_sf (__sf_sf_of_dec t))
   else __sf_float_of_sf (__sf_sf_of_dec s);
 
 // --- the float library, computed here -----------------------------------
