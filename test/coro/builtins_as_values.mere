@@ -1,0 +1,16 @@
+// coroutine builtins as values (v0.1.665): exit, switch and transfer passed
+// around, each a closure over the applied form
+let root = coro_root ();
+let out = map_new ();
+let ex = coro_exit;
+let sw = coro_switch;
+let tr = coro_transfer;
+let c = coro_new (fn me -> fn (u: unit) ->
+  let _ = map_set out 0 42 in
+  let _ = tr root () me in
+  let _ = map_set out 1 7 in
+  ex root ());
+let _ = sw c;
+let _ = print_int (map_get out 0);
+let _ = sw c;
+print_int (map_get out 1)

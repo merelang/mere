@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.664 — 2026-10-12
+
+_Wasm hands out one instance of a polymorphic function as a value; RISC-V passes the coroutine builtins as values._
+
+- **Wasm: `apply ident 41`.** A polymorphic function used at several types
+  exists only as its per-type copies, so passing it as a value was refused ("no
+  single value form"). The use site's type names the instance (`ident` at
+  `int -> int`). The value collector now records that copy, so it gets a closure
+  adapter, and the value is that copy, handed out like any top-level function.
+  `multi_inst_as_value` is checked on Wasm now.
+- **RISC-V: `let tr = coro_transfer`.** The coroutine builtins were refused as
+  values from v0.1.623 on. Now each is a closure over the applied form, as any
+  builtin passed as a value is; a closure that applies one is one more frame on
+  the same stack. coro_check runs `builtins_as_values` (exit, switch and
+  transfer passed around) on the interpreter, C, LLVM and RV64/RV32, and its old
+  refusal assertion is gone. In the host matrix, `coro_exit` and
+  `coro_transfer` are `yes` on RISC-V.
+
+Wasm leaves 1 of 235 parity programs unchecked now (`coro_pingpong`: core Wasm
+cannot switch stacks).
+
 ## v0.1.663 — 2026-10-12
 
 _`read_lines` on LLVM and Wasm, and `read_line` / `read_stdin` on LLVM._

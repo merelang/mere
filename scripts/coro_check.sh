@@ -74,6 +74,7 @@ finished_keeps|icl|kept|0
 first_block|icl|4000|0
 region_chain_grow|icl|206509500|0
 region_loop_chain|ic|22700|0
+builtins_as_values|icl|42;7|0
 release_walk|ic|2250|0
 scan_outer|icl|all found;200880;0|0'
 
@@ -182,9 +183,10 @@ let _ = coro_transfer c 1 root;
 let _ = coro_transfer c true root;
 0' 'expected `int`, got `bool`'
 refuse "Wasm names it" -w 'coro_switch (coro_root ())' 'is not available on Wasm'
-# v0.1.623: RISC-V has coroutines (the section below); as a VALUE a builtin is
-# still refused there, with the reason
-refuse "RV64 names one passed as a value" -rv64 'let f = coro_switch in f (coro_root ())' 'is unsupported here as a value'
+# v0.1.623: RISC-V has coroutines (the section below). As a VALUE a builtin was
+# refused there until v0.1.665; now it is a closure over the applied form, as
+# any builtin passed as a value is, and builtins_as_values runs it (exit, switch
+# and transfer passed around) on every backend that has coroutines.
 refuse "Wasm names coro_scan_ints" -w 'coro_scan_ints (coro_root ()) 0 1 (fn (n: int) -> ())' 'is not available on Wasm'
 
 # and what must NOT be refused: a block's VALUE is copied out with the env
@@ -233,6 +235,7 @@ finished_keeps|r|kept|0
 first_block|r|4000|0
 region_chain_grow|r|206509500|0
 region_loop_chain|r|22700|0
+builtins_as_values|r|42;7|0
 release_walk|r|2250|0
 scan_outer|r|all found;200880;0|0'
 RV_LIMIT="${RV_LIMIT:-300}"
