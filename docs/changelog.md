@@ -4,6 +4,24 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.667 — 2026-10-12
+
+_LLVM: releasing a region drops that region from the active stack, wherever it is, not the top. v0.1.662's region loop on LLVM aborted on Linux when a `fail` left it._
+
+LLVM's `__lang_region_block_release` popped the top of the active-region stack
+whichever region it released. That was right while every release was LIFO. A
+region loop is not LIFO: it acquires the next iteration's block before releasing
+this one, because the carry is copied between them. So the pop took the new
+block's entry and left the freed block's. A `fail` caught outside the loop then
+unwound through that entry and freed the block again. glibc aborted on it (exit
+134, CI's parity `region_fail_unwind`), and macOS let it pass, which is why the
+gates, which run on macOS, were green. The release now searches for its region
+and closes the gap, which is what the C runtime's `__lang_region_active_drop`
+does. The five region-loop programs (`region_loop_carry`,
+`shared_nullary_regions`, `fn_over_carry`, `region_fail_unwind` and
+`loop_carry`) agree with the interpreter on Linux (the `mere-ci-ubuntu`
+container) as well as on macOS.
+
 ## v0.1.666 — 2026-10-12
 
 _RISC-V: a child that memu spawns can be memu itself again. memu now passes it `MEMU_RAM` / `MEMU_PROG` (memu c627b01), and `host_spawn` no longer counts those two._
