@@ -2299,6 +2299,199 @@ let __fp_two_sum = fn (x: float) -> fn (y: float) ->
   let s = x + y in
   let bb = s - x in
   (s, (x - (s - bb)) + (y - bb));
+// ---- v0.1.656: float32, fma, and the f64x2 / f32x4 lanes ----------------
+// f32_bits is the double narrowed to float32, as its bits: round to nearest
+// even, a subnormal where the value is below float32's normals, an infinity
+// where it is above (not a wrapped number), a NaN kept quiet with its top
+// payload bits -- what C's (float) conversion does. All of it in the halves'
+// fields, so RV32 runs the same code (a sign bit there is a negative int, as
+// it is for float_bits_hi).
+let f32_bits = fn (d: float) ->
+  let hi = float_bits_hi d in
+  let lo = float_bits_lo d in
+  let sbit = bit_shl (bit_and (bit_shr hi 31) 1) 31 in
+  let e = bit_and (bit_shr hi 20) 2047 in
+  let m23 = bit_or (bit_shl (bit_and hi 1048575) 3) (bit_and (bit_shr lo 29) 7) in
+  let rem = bit_and lo (bit_shl 1 29 - 1) in
+  if e == 2047 then
+    (if bit_and hi 1048575 == 0 && lo == 0 then bit_or sbit (bit_shl 255 23)
+     else bit_or sbit (bit_or (bit_shl 511 22) (bit_and m23 (bit_shl 1 22 - 1))))
+  else if e == 0 then sbit
+  else
+    let be = e - 896 in
+    if be >= 255 then bit_or sbit (bit_shl 255 23)
+    else if be >= 1 then
+      let half = bit_shl 1 28 in
+      let up = if rem > half || (rem == half && bit_and m23 1 == 1) then 1 else 0 in
+      bit_or sbit (bit_shl be 23 + m23 + up)
+    else
+      let s = 1 - be in
+      if s > 24 then sbit
+      else
+        let t = bit_or (bit_shl 1 23) m23 in
+        let q = bit_shr t s in
+        let low = bit_and t (bit_shl 1 s - 1) in
+        let half = bit_shl 1 (s - 1) in
+        let up = if low > half || (low == half && (rem != 0 || bit_and q 1 == 1)) then 1 else 0 in
+        bit_or sbit (q + up);
+// and back, exactly: every float32 is a double
+let float_of_f32_bits = fn (b: int) ->
+  let sbit = bit_shl (bit_and (bit_shr b 31) 1) 31 in
+  let be = bit_and (bit_shr b 23) 255 in
+  let m = bit_and b (bit_shl 1 23 - 1) in
+  let lo = bit_shl (bit_and m 7) 29 in
+  if be == 255 then float_of_bits (bit_or sbit (bit_or (bit_shl 2047 20) (bit_shr m 3))) lo
+  else if be == 0 then
+    (if m == 0 then float_of_bits sbit 0
+     else let v = float_of_int m * __fp_pow2i (0 - 149) in
+          if sbit == 0 then v else __fneg v)
+  else float_of_bits (bit_or sbit (bit_or (bit_shl (be + 896) 20) (bit_shr m 3))) lo;
+let __f32r = fn (x: float) -> float_of_f32_bits (f32_bits x);
+
+// fma: a*b+c rounded once. No integer wider than the target's word is needed
+// (RV32's int is 32 bits), so it is done in doubles, Boldo and Melquiond's way
+// ("Emulation of FMA and correctly rounded sums: proved algorithms using
+// rounding to odd", 2008): the product is exact as a head and a tail
+// (__fp_two_prod), c is added to the head exactly (__fp_two_sum), the two
+// tails are added ROUNDED TO ODD -- which keeps, in its last bit, whether
+// anything was lost -- and the one rounding to nearest is the last addition.
+// That proof assumes nothing underflows or overflows, so the three operands
+// are scaled first: a and b to [1, 2), c by the same power of two, and the
+// answer back at the end. Where the answer is a subnormal its rounding is at a
+// fixed place (2^-1074), not at 53 bits, and the end is different: the same
+// correctly rounded sum is formed with 2^52 times that place added, which
+// puts the last kept bit exactly there.
+let __fma_exp = fn (x: float) -> bit_and (bit_shr (float_bits_hi x) 20) 2047;
+// x's significand in [1, 2), with x's sign
+let __fma_mant = fn (x: float) ->
+  float_of_bits (bit_or (bit_and (float_bits_hi x) (bit_or (bit_shl 1 31) 1048575)) (bit_shl 1023 20))
+                (float_bits_lo x);
+let __fma_e2 = fn (x: float) ->
+  let be = __fma_exp x in
+  if be == 0 then __fma_exp (x * __fp_pow2i 54) - 1023 - 54 else be - 1023;
+let __fma_m2 = fn (x: float) ->
+  if __fma_exp x == 0 then __fma_mant (x * __fp_pow2i 54) else __fma_mant x;
+// x * 2^k, exact while what it makes is normal
+let rec __fma_scale = fn (x: float) -> fn (k: int) ->
+  if k > 1000 then __fma_scale (x * __fp_pow2i 1000) (k - 1000)
+  else if k < 0 - 1000 then __fma_scale (x * __fp_pow2i (0 - 1000)) (k + 1000)
+  else x * __fp_pow2i k;
+// x + y rounded to odd: the nearest sum when it is exact or odd, otherwise
+// its other neighbour, which is odd
+let __fma_ro = fn (x: float) -> fn (y: float) ->
+  let (s, e) = __fp_two_sum x y in
+  if e == 0.0 then s
+  else
+    let lo = float_bits_lo s in
+    if bit_and lo 1 == 1 then s
+    else if (e > 0.0) == (s > 0.0) then float_of_bits (float_bits_hi s) (lo + 1)
+    else if lo == 0 then
+      float_of_bits (float_bits_hi s - 1) (if __rv_xlen () == 64 then bit_shl 1 32 - 1 else 0 - 1)
+    else float_of_bits (float_bits_hi s) (lo - 1);
+// the correctly rounded x + y + z, the same construction
+let __fma_sum3 = fn (x: float) -> fn (y: float) -> fn (z: float) ->
+  let (uh, ul) = __fp_two_sum y z in
+  let (th, tl) = __fp_two_sum x uh in
+  th + __fma_ro tl ul;
+let fma = fn (a: float) -> fn (b: float) -> fn (c: float) ->
+  let ea = __fma_exp a in
+  let eb = __fma_exp b in
+  if ea == 2047 || eb == 2047 || a == 0.0 || b == 0.0 then a * b + c
+  else if __fma_exp c == 2047 then c
+  else if c == 0.0 then a * b
+  else
+    let k = __fma_e2 a + __fma_e2 b in
+    let d = __fma_e2 c - k in
+    // c this far above the product: the product is under a quarter of c's
+    // last place, and c is the answer
+    if d > 108 then c
+    else
+      // c this far below: it can only break a tie, and any value of its sign
+      // below the product's last place (2^-104 here) breaks it the same way
+      let c2 = if d < 0 - 110 then (if c > 0.0 then __fp_pow2i (0 - 110) else 0.0 - __fp_pow2i (0 - 110))
+               else __fma_m2 c * __fp_pow2i d in
+      let (uh, ul) = __fp_two_prod (__fma_m2 a) (__fma_m2 b) in
+      let (th, tl) = __fp_two_sum c2 uh in
+      let v = __fma_ro tl ul in
+      let r = th + v in
+      if r == 0.0 then 0.0
+      else if __fma_exp r - 1023 + k >= 0 - 1022 then __fma_scale r k
+      else if k < 0 - 2045 then (if r > 0.0 then 0.0 else __fneg 0.0)
+      else
+        let big = if r > 0.0 then __fp_pow2i (0 - 1022 - k) else 0.0 - __fp_pow2i (0 - 1022 - k) in
+        let n = __fma_sum3 big th v - big in
+        // n is a whole number of 2^-1074 / 2^k: scale it in two exact steps
+        (n * __fp_pow2i (k + 1074 - 537)) * __fp_pow2i (0 - 537);
+
+// f64x2 and f32x4 are boxes of lanes here (no float unit, so no vector one);
+// codegen lowers the builtins to these. An f32x4 lane holds a float32 as its
+// double: rounded going in and after every operation, which is the float32
+// answer because a double has more than twice float32's precision.
+type rvf2 = { f2a: float, f2b: float };
+type rvf4 = { f4a: float, f4b: float, f4c: float, f4d: float };
+let rvf2_make = fn (a: float) -> fn (b: float) -> rvf2 { f2a = a, f2b = b };
+let rvf2_splat = fn (a: float) -> rvf2 { f2a = a, f2b = a };
+let rvf2_add = fn (x: rvf2) -> fn (y: rvf2) -> rvf2 { f2a = x.f2a + y.f2a, f2b = x.f2b + y.f2b };
+let rvf2_sub = fn (x: rvf2) -> fn (y: rvf2) -> rvf2 { f2a = x.f2a - y.f2a, f2b = x.f2b - y.f2b };
+let rvf2_mul = fn (x: rvf2) -> fn (y: rvf2) -> rvf2 { f2a = x.f2a * y.f2a, f2b = x.f2b * y.f2b };
+let rvf2_div = fn (x: rvf2) -> fn (y: rvf2) -> rvf2 { f2a = x.f2a / y.f2a, f2b = x.f2b / y.f2b };
+let rvf2_fma = fn (x: rvf2) -> fn (y: rvf2) -> fn (z: rvf2) ->
+  rvf2 { f2a = fma x.f2a y.f2a z.f2a, f2b = fma x.f2b y.f2b z.f2b };
+let rvf2_reduce_add = fn (x: rvf2) -> x.f2a + x.f2b;
+let rvf2_extract = fn (x: rvf2) -> fn (i: int) ->
+  if i == 0 then x.f2a else if i == 1 then x.f2b
+  else fail ("f64x2_extract: lane " ++ str_of_int i ++ " out of range (lanes = 2)");
+let rvf2_load = fn (v: float Vec) -> fn (i: int) ->
+  if i < 0 || i + 2 > vec_len v
+  then fail ("f64x2_load: lanes [" ++ str_of_int i ++ ", +2) out of bounds (len = " ++ str_of_int (vec_len v) ++ ")")
+  else rvf2 { f2a = vec_get v i, f2b = vec_get v (i + 1) };
+let rvf2_store = fn (v: float Vec) -> fn (i: int) -> fn (x: rvf2) ->
+  if i < 0 || i + 2 > vec_len v
+  then fail ("f64x2_store: lanes [" ++ str_of_int i ++ ", +2) out of bounds (len = " ++ str_of_int (vec_len v) ++ ")")
+  else let _ = vec_set v i x.f2a in vec_set v (i + 1) x.f2b;
+let rvf2_show = fn (x: rvf2) -> "f64x2(" ++ str_of_float x.f2a ++ ", " ++ str_of_float x.f2b ++ ")";
+let rvf2_json = fn (x: rvf2) -> "[" ++ str_of_float x.f2a ++ ", " ++ str_of_float x.f2b ++ "]";
+let rvf4_make = fn (a: float) -> fn (b: float) -> fn (c: float) -> fn (d: float) ->
+  rvf4 { f4a = __f32r a, f4b = __f32r b, f4c = __f32r c, f4d = __f32r d };
+let rvf4_splat = fn (a: float) -> let r = __f32r a in rvf4 { f4a = r, f4b = r, f4c = r, f4d = r };
+let rvf4_add = fn (x: rvf4) -> fn (y: rvf4) ->
+  rvf4 { f4a = __f32r (x.f4a + y.f4a), f4b = __f32r (x.f4b + y.f4b),
+         f4c = __f32r (x.f4c + y.f4c), f4d = __f32r (x.f4d + y.f4d) };
+let rvf4_sub = fn (x: rvf4) -> fn (y: rvf4) ->
+  rvf4 { f4a = __f32r (x.f4a - y.f4a), f4b = __f32r (x.f4b - y.f4b),
+         f4c = __f32r (x.f4c - y.f4c), f4d = __f32r (x.f4d - y.f4d) };
+let rvf4_mul = fn (x: rvf4) -> fn (y: rvf4) ->
+  rvf4 { f4a = __f32r (x.f4a * y.f4a), f4b = __f32r (x.f4b * y.f4b),
+         f4c = __f32r (x.f4c * y.f4c), f4d = __f32r (x.f4d * y.f4d) };
+let rvf4_div = fn (x: rvf4) -> fn (y: rvf4) ->
+  rvf4 { f4a = __f32r (x.f4a / y.f4a), f4b = __f32r (x.f4b / y.f4b),
+         f4c = __f32r (x.f4c / y.f4c), f4d = __f32r (x.f4d / y.f4d) };
+// left to right at lane precision
+let rvf4_reduce_add = fn (x: rvf4) -> __f32r (__f32r (__f32r (x.f4a + x.f4b) + x.f4c) + x.f4d);
+let rvf4_extract = fn (x: rvf4) -> fn (i: int) ->
+  if i == 0 then x.f4a else if i == 1 then x.f4b else if i == 2 then x.f4c else if i == 3 then x.f4d
+  else fail ("f32x4_extract: lane " ++ str_of_int i ++ " out of range (lanes = 4)");
+let rvf4_show = fn (x: rvf4) ->
+  "f32x4(" ++ str_of_float x.f4a ++ ", " ++ str_of_float x.f4b ++ ", "
+  ++ str_of_float x.f4c ++ ", " ++ str_of_float x.f4d ++ ")";
+let rvf4_json = fn (x: rvf4) ->
+  "[" ++ str_of_float x.f4a ++ ", " ++ str_of_float x.f4b ++ ", "
+  ++ str_of_float x.f4c ++ ", " ++ str_of_float x.f4d ++ "]";
+// u8x16: the lowest lane that is not zero, or -1; and its text
+// (top-level loops: a local `let rec` would make a closure on every call)
+let rec __rvu16_ft = fn (v: u8x16) -> fn (i: int) ->
+  if i == 16 then 0 - 1 else if u8x16_extract v i != 0 then i else __rvu16_ft v (i + 1);
+let u8x16_first_true = fn (v: u8x16) -> __rvu16_ft v 0;
+let rec __rvu16_hx = fn (v: u8x16) -> fn (i: int) -> fn (acc: str) ->
+  if i == 16 then acc
+  else let b = u8x16_extract v i in
+       let digits = "0123456789abcdef" in
+       __rvu16_hx v (i + 1) (acc ++ __rv_substring_raw digits (bit_shr b 4) (bit_shr b 4 + 1)
+                                 ++ __rv_substring_raw digits (bit_and b 15) (bit_and b 15 + 1));
+let __rvu16_hex = fn (v: u8x16) -> __rvu16_hx v 0 "";
+let rvu16_show = fn (v: u8x16) -> "u8x16[" ++ __rvu16_hex v ++ "]";
+let rvu16_json = fn (v: u8x16) -> "\"" ++ __rvu16_hex v ++ "\"";
+
 // double-double: a pair (h, l) whose sum carries ~106 bits, |l| <= ulp(h)/2.
 // v0.1.609 builds the libm on these (lib/rv_libm.ml); they are the textbook
 // Dekker / Knuth constructions, and every one is a few float operations.

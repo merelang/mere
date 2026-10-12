@@ -16593,8 +16593,12 @@ let () =
     (if has_word (rv_bin "print_int 1") 0x3002A073 then "csrrs" else "none") "csrrs";
   rv_err_contains "v0.1.426: bytes compile for RV32I (of_hex, get, len, slice, concat)"
     "let b = bytes_concat (bytes_of_hex \"0a0b\") (bytes_slice (bytes_of_str \"xyz\") 1 2);\nprint_int (bytes_len b * 1000 + bytes_get b 2)" "(compiled without error)";
-  rv_err_contains "v0.1.426: f64x2 is refused by name on RV32I"
-    "let x = f64x2_extract (f64x2_splat 1.0) 0;\nprint_int 1" "f64x2";
+  (* refused by name until v0.1.656, which made f64x2 / f32x4 the prelude's
+     boxes of lanes on this target: the builtin lowers to the prelude's
+     rvf2_splat, which this harness does not link (no prelude here) -- so the
+     answer is that label, not a refusal *)
+  rv_err_contains "v0.1.656: f64x2 lowers to the prelude's lane box on RV32I"
+    "let x = f64x2_extract (f64x2_splat 1.0) 0;\nprint_int 1" "u_rvf2_splat";
 
   (* v0.1.427 (Q-108): a soundness hole in range-check versioning, and the
      `i + c` exit forms. The exit branch runs with the index outside the guarded

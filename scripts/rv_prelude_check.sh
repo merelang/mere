@@ -46,6 +46,24 @@ let _ = print_int (list_len (lb_to_list b));' ;;
     rvov_get|rvov_copy) echo 'let o = owned_vec_new ();
 let _ = owned_vec_push o 4;
 let _ = print_int (owned_vec_get o 0 + vec_len (owned_vec_to_vec o));' ;;
+    # v0.1.656: float32, fma, and the lane boxes the f64x2 / f32x4 builtins lower to
+    f32_bits|float_of_f32_bits) echo 'let _ = print_int (f32_bits (float_of_f32_bits 1069547520));' ;;
+    fma) echo 'let _ = print (str_of_float (fma 0.1 10.0 (0.0 - 1.0)));' ;;
+    rvf2_*) echo 'let n = vec_new ();
+let _ = vec_push n 1.0;
+let _ = vec_push n 2.0;
+let a = f64x2_add (f64x2_make 1.0 2.0) (f64x2_splat 0.5);
+let b = f64x2_div (f64x2_mul (f64x2_sub a (f64x2_load n 0)) a) (f64x2_fma a a a);
+let _ = f64x2_store n 0 b;
+let _ = print (show b ++ to_json b);
+let _ = print (str_of_float (f64x2_reduce_add b + f64x2_extract b 1));' ;;
+    rvf4_*) echo 'let a = f32x4_add (f32x4_make 1.0 2.0 3.0 4.0) (f32x4_splat 0.1);
+let b = f32x4_div (f32x4_mul (f32x4_sub a a) a) a;
+let _ = print (show b ++ to_json b);
+let _ = print (str_of_float (f32x4_reduce_add b + f32x4_extract b 3));' ;;
+    u8x16_first_true|rvu16_show|rvu16_json) echo 'let v = u8x16_splat 3;
+let _ = print_int (u8x16_first_true v);
+let _ = print (show v ++ to_json v);' ;;
     # v0.1.642
     sys_os|sys_arch) echo "let _ = print ($1 ());" ;;
     # v0.1.640: every file builtin, in one program each (they need not run)

@@ -65,7 +65,11 @@ rc=0; pass=0; fail=0
 # int_width_boundary does. Both agree at 64 bits.
 # of_json_composite joined in v0.1.654 (JSON on RISC-V): it decodes
 # -9007199254740993, past a 32-bit int.
-KNOWN_DIFF="float_edges region_growth int_width_boundary bytes_file_roundtrip raster of_json_composite"
+# float_bits and simd_f32x4 joined in v0.1.656 (float32 and the lanes on
+# RISC-V): they print IEEE-754 halves and float32 patterns, and every one with
+# the top bit set is past a 32-bit int (2147483648 is -2147483648 here). The
+# conversions themselves were held to C on 7,517 doubles at both widths.
+KNOWN_DIFF="float_edges region_growth int_width_boundary bytes_file_roundtrip raster of_json_composite float_bits simd_f32x4"
 # float_edges/str_edges             64-bit values; this backend's int is 32 bits
 #   (coll_edges and nul_in_str sat here too, on the strength of a 60-second
 #    alarm that was really a measurement of how slow decimal printing is on an

@@ -21,11 +21,18 @@
 # a backend that quietly computed the unfused expression would pass.
 #
 # ALSO: the emitted Wasm must contain $__lang_fma (the software path is the
-# one being measured, not something that happened to agree), and the RISC-V
-# backends must refuse the name -- they have no double-precision unit and the
-# software floats there have no room for a 106-bit product.
+# one being measured, not something that happened to agree).
 #
-# Usage: sh scripts/fma_check.sh
+# RISC-V (v0.1.656): fma is the prelude's, in doubles -- the product exact as
+# a head and a tail, the tails added rounded to odd, one rounding to nearest
+# (Boldo and Melquiond), after scaling the operands so nothing underflows, and
+# a fixed-place rounding where the answer is subnormal. Until 656 this gate
+# asserted that RISC-V REFUSED fma. With MEMU set, the RV64 leg runs the same
+# six families on memu (the RV32 backend cannot take this file: its int is 32
+# bits and the generator needs 2^31). There is no collector on RISC-V, so the
+# guest gets 1024 MB, and the leg takes about a minute and a half.
+#
+# Usage: sh scripts/fma_check.sh   (MEMU=<memu checkout> for the RV64 leg)
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="$ROOT/_build/default/bin/mere.exe"
@@ -103,13 +110,17 @@ if cmp -s "$TMP/poison" "$TMP/want"; then
 fi
 npois=$(diff "$TMP/poison" "$TMP/want" | grep -c '^<')
 
-# RISC-V refuses by name
-printf 'print (show (fma 2.0 3.0 1.0))\n' > "$TMP/rv.mere"
-if "$MERE" -rv "$TMP/rv.mere" > "$TMP/rv.bin" 2>"$TMP/rv.err"; then
-  fail "the RV32IM backend accepted fma"
-else
-  grep -q 'fma' "$TMP/rv.err" || fail "the RV32IM refusal does not name fma: $(head -1 "$TMP/rv.err")"
+rvnote="no MEMU, RV64 not run"
+if [ -n "${MEMU:-}" ]; then
+  if "$MERE" -c "$MEMU/riscv-runc/rv64i_run.mere" > "$TMP/rvrun64.c" 2>"$TMP/err" \
+     && "$CC" -O2 -w -o "$TMP/rvrun64" "$TMP/rvrun64.c"; then
+    if "$MERE" -rv64 --ram 1024 "$P" > "$TMP/prog.bin" 2>"$TMP/err"; then
+      ( cd "$TMP" && ./rvrun64 1024 2>&1 ) | grep -a -v '^rvrun' > "$TMP/rv64"
+      compare RV64 "$TMP/rv64" && legs="$legs RV64"
+      rvnote="RV64 on memu"
+    else fail "mere -rv64 refused: $(head -1 "$TMP/err")"; fi
+  else fail "the RV64 emulator did not build"; fi
 fi
 
 [ "$fails" -eq 0 ] || exit 1
-echo "fma_check: ok (6 families match fma(3) on$legs; the unfused poison differs in $npois of 6; RV refuses)"
+echo "fma_check: ok (6 families match fma(3) on$legs; the unfused poison differs in $npois of 6; $rvnote)"

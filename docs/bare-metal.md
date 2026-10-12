@@ -425,8 +425,16 @@ str block layout. The machine has to have the V extension: memu's
 `riscv-runc` cores do (`rvv_check.py` holds them against QEMU with
 `-cpu rv32,v=true,vlen=128`), and `_start` turns `mstatus.VS` on. A core
 without V executes the same binary up to the first vector instruction and
-traps there as illegal, which is the honest failure. `f64x2` is refused at
-compile time: there is no floating-point unit to put the lanes in.
+traps there as illegal, which is the honest failure.
+
+`f64x2` and `f32x4` have no vector registers here, because there is no
+floating-point unit to put the lanes in. Since v0.1.656 they are the prelude's
+boxes of lanes (`rvf2` / `rvf4`), and their builtins lower to prelude functions.
+An `f32x4` lane holds a float32 as its double, rounded on the way in and after
+every operation. `fma` is the prelude's too, done in doubles: the product is kept
+exact as a head and a tail, the tails are added rounded to odd (Boldo and
+Melquiond), and the operands are scaled first. `scripts/fma_check.sh` holds it
+to fma(3) bit for bit on RV64.
 
 ### Register residency (v0.1.430)
 
