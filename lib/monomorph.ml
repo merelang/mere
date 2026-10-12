@@ -1680,7 +1680,7 @@ let specialize_toplevel (root : Ast.expr) : Ast.expr =
   let root = duplicate_multi_use_local_fns root in
   specialize_single_use_local_fns root;
   let skels, _residual = lift_fn_skels root in
-  let decls, insts = resolve_fn_types skels root in
+  let decls, insts = resolve_fn_types ~recover_erased:true skels root in
   if Hashtbl.length insts.arrows = 0 then root
   else begin
     let skel_names : (string, unit) Hashtbl.t = Hashtbl.create 16 in

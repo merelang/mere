@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.655 — 2026-10-12
+
+_On RISC-V: `<` / `<=` / `>` / `>=` on tuples, records, variants and lists by value; `mk_logger` / `mk_metrics`; and the instance of a function whose result is thrown away._
+
+- **Structural ordering.** `==` on a compound value had a generated
+  `__eq_<tag>`; ordering had nothing and was refused, since as a word the
+  value is its heap pointer. A generated `__cmp_<tag>` compares fields in
+  order, a constructor by its tag and then its payload, a list element by
+  element with the shorter first, a str with `__str_cmp`, a float with the
+  softfloat `<` (parity: `struct_eq_cmp`).
+- **`mk_logger` / `mk_metrics`.** The prelude makes records of the same
+  fields (`__rvlogger`, `__rvmetrics`) that print as the interpreter and C do
+  (`app [INFO] hello`, `[METRIC] latency=42`); codegen lowers the builtins to
+  them and lays the builtin `Logger` / `Metrics` out the same way.
+- **A function whose result is free.** `boom : str -> 'a` ends in `fail`;
+  called as `let _ = boom "thrown" in 0`, the call names the instance with the
+  result erased to int (`boom__str__int`), which nothing made on this target,
+  so the program was refused as an unbound variable. RISC-V's monomorphizer now
+  recovers erased instances as C's and Wasm's do (`recover_erased`).
+
+`-rv64` refuses 19 parity programs now (22 before, 41 at v0.1.652); rv_exec runs
+210 on RV64 and 194 on RV32, all agreeing with C. What is left: channels (7,
+threads), the SIMD types with `fma` and the float32 conversions (7), `region R
+loop` (3), and a Map keyed by a tuple or a constructor (1). Also: 653's OwnedVec
+on RISC-V made `test/escape/ROUTES` list `ownedvec_store` as readable by `-rv`.
+
 ## v0.1.654 — 2026-10-12
 
 _`to_json`, `of_json`, `of_json_opt` and the `_like` forms on RISC-V._
