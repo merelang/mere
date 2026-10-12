@@ -655,6 +655,16 @@ let __libm_proc_out_errno = fn (u: unit) -> __rv_syscall 1035 0 0 0 0;
 // and the child Ruby reaches this CPU again through memu (RbConfig.ruby
 // names it). Under --bare __rv_syscall refuses, so run still does.
 let run = fn (c: str) -> __rv_syscall 1030 (__rv_cstr c) 0 0 0;
+// v0.1.660: proc_spawn / proc_waitpid / proc_wait_status, the C runtime's
+// contract (Linux's numbers throughout, which is this guest's anyway). memu
+// runs them with the host's posix_spawn: the six arguments go in two calls
+// (1036 path, argv, envp; 1037 actions, group, directory -- and the spawn),
+// each str as its block's address, so argv's and envp's NULs survive.
+let __libm_proc_spawn = fn (path: str) -> fn (argv: str) -> fn (envp: str) -> fn (acts: str) -> fn (pg: int) -> fn (dir: str) ->
+  let _ = __rv_syscall 1036 (__rv_addr path) (__rv_addr argv) (__rv_addr envp) 0 in
+  __rv_syscall 1037 (__rv_addr acts) pg (__rv_addr dir) 0;
+let __libm_proc_waitpid = fn (pid: int) -> fn (flags: int) -> __rv_syscall 1038 pid flags 0 0;
+let __libm_proc_wait_status = fn (u: unit) -> __rv_syscall 1039 0 0 0 0;
 // libc's socket(2): Linux's call 198 with Linux's numbers (AF_INET6 is 10);
 // memu makes the host's. The descriptor, or -1
 let __libm_socket = fn (d: int) -> fn (t: int) -> fn (p: int) ->

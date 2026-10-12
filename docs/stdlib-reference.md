@@ -315,6 +315,22 @@ of **`-1` is `RLIM_INFINITY`** in both directions, the priority selector is
 | `file_flock` | `int -> int -> int` | `fd op`. `0` done, **`1` refused** because another open holds the lock and the non-blocking bit was set, `-1` any other failure. A bit outside the four is `EINVAL` |
 | `proc_last_errno` | `unit -> int` | The errno the last of these calls left, `0` when it succeeded -- and of `dir_create`, `dir_entries` and `dir_remove` (v0.1.630). On RISC-V the declaration is answered by the prelude, as the libm names are, for those three |
 
+### Spawning without a shell (v0.1.660)
+
+`proc_spawn` is posix_spawn with file actions, for a caller that must not put a
+shell between itself and the child (mere-ruby's `spawn`: the child's parent
+pid, `SHLVL` and descriptors above 10 are its own then). Unlike the calls
+above, the contract is **Linux's numbering on every host**, because the RISC-V
+backend (a Linux guest) answers it too: open flags go in as Linux's `O_*`, a
+failure comes out as `-errno` in Linux's numbers, and a wait status is Linux's
+word. C, and RISC-V through memu's host device (which spawns on the host).
+
+| name | type | notes |
+|---|---|---|
+| `proc_spawn` | `str -> str -> str -> str -> int -> str -> int` | `path argv envp actions pgroup chdir`. `path` is absolute (no `PATH` search). `argv` and `envp` are their elements with `chr 0` **between** them: argv `""` is one empty argument, envp `""` the empty environment (the parent's is never inherited). `actions` are `chr 1` between actions, `chr 2` between an action's fields, applied in order: `d fd newfd` (dup2), `c fd` (close), `o fd flags mode path` (open; flags are Linux's `O_RDONLY`/`WRONLY`/`RDWR`, `CREAT`, `EXCL`, `NOCTTY`, `TRUNC`, `APPEND`, `NONBLOCK`, `CLOEXEC` in decimal, anything else is `-22`). `pgroup` `-1` leaves it, `0` makes a new group, `n > 0` joins `n`. `chdir` `""` is none; it is applied **after** the actions, so a relative open path is the parent's; where the platform has no `addchdir_np` it is `-38`. SIGPIPE, SIGINT, SIGQUIT, SIGTERM and SIGHUP are reset to their defaults and the signal mask is emptied. The child's pid, or `-errno` |
+| `proc_waitpid` | `int -> int -> int` | `pid flags`; `pid` `-1` is any child, `< -1` a group; flags `1` WNOHANG, `2` WUNTRACED (others `-22`). The pid taken, `0` (WNOHANG, none ready), or `-errno` (`-10` ECHILD) |
+| `proc_wait_status` | `unit -> int` | The status the last `proc_waitpid` took, as Linux words it: an exit is `code << 8`, a signal its number (`+ 0x80` with a core), a stop `(sig << 8) \| 0x7f`. Per thread |
+
 **Why errno is kept here when `file_*` does not keep it** (and `fd_*` did not
 until v0.1.555, when it got `fd_last_errno`). `file_*` answers
 `-1` and leaves errno alone. `getpriority` answers `-1` for a process whose
