@@ -94,8 +94,14 @@ let prelude_type_count = ref 0
    tell. *)
 let prelude_file = Prelude_stdlib.file_name
 
+(* v0.1.665: Mere source a backend needs only for some programs (LLVM's JSON
+   parser, for one that calls of_json), added after the stdlib prelude for the
+   next parse and positioned as prelude, so nothing treats it as the user's. *)
+let extra_prelude : string list ref = ref []
+
 let parse_prelude () : Ast.top_decl list =
-  let tokens = Lexer.tokenize ~file:prelude_file Prelude_stdlib.contents in
+  let tokens = Lexer.tokenize ~file:prelude_file
+      (String.concat "\n" (Prelude_stdlib.contents :: !extra_prelude)) in
   let prog = Parser.parse_program tokens in
   prog.Ast.decls
 
