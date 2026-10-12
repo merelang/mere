@@ -163,8 +163,8 @@ machine rather than a host.
 | `map_new` | yes | yes | yes | yes |
 | `max` | yes | yes | yes | yes |
 | `min` | yes | yes | yes | yes |
-| `mk_logger` | yes | yes | yes | refused |
-| `mk_metrics` | yes | yes | yes | refused |
+| `mk_logger` | yes | yes | yes | yes |
+| `mk_metrics` | yes | yes | yes | yes |
 | `mkdir_p` | yes | refused | refused | yes |
 | `not` | yes | yes | yes | yes |
 | `odd` | yes | yes | yes | yes |

@@ -247,15 +247,14 @@ elif grep -q 'Map key of type' "$TMP/mkerr"; then :; else
   head -2 "$TMP/mkerr"
   rc=1
 fi
-# Ordering on a compound value: `==` has a generated structural helper, `<` does
-# not, so it would compare the two heap pointers -- and since operands are
-# allocated left then right, `a < b` came out true whichever way it was written.
-printf 'type p = P of int;\nlet _ = print_bool (P 1 < P 2);\n' > "$TMP/ord.mere"
-if "$MERE" -rv "$TMP/ord.mere" > /dev/null 2>"$TMP/orderr"; then
-  echo "FAIL rv_prelude: ordering on a compound value was accepted (it compares pointers)"
-  rc=1
-elif grep -q 'would compare heap pointers' "$TMP/orderr"; then :; else
-  echo "FAIL rv_prelude: compound ordering was refused for the wrong reason"
+# Ordering on a compound value (v0.1.655): a generated structural __cmp_<tag>,
+# as `==` has its __eq_<tag>. It was refused here -- as a word the value is its
+# heap pointer, and since operands are allocated left then right, `a < b` came
+# out true whichever way it was written. That it orders by value is
+# struct_eq_cmp's, in rv_exec on both widths; this holds that it compiles.
+printf 'type p = P of int;\nlet _ = print_bool (P 2 < P 1);\n' > "$TMP/ord.mere"
+if ! "$MERE" -rv "$TMP/ord.mere" > /dev/null 2>"$TMP/orderr"; then
+  echo "FAIL rv_prelude: ordering on a compound value was refused"
   head -2 "$TMP/orderr"
   rc=1
 fi

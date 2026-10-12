@@ -641,6 +641,9 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
        "__oj_parse" :: "__oj_end" :: "__oj_end_opt" :: "__oj_failed" :: "__oj_fail"
        :: "__oj_kind" :: "__oj_bool" :: "__oj_str" :: "__oj_len" :: "__oj_item"
        :: "__oj_key0" :: "__oj_field" :: "__oj_int" :: "__oj_float" :: v :: acc
+     (* v0.1.655: the capability constructors *)
+     | "mk_logger" -> "__rv_mk_logger" :: v :: acc
+     | "mk_metrics" -> "__rv_mk_metrics" :: v :: acc
      (* v0.1.653: ByteBuf, ListBuf, OwnedVec and the bytes bridge *)
      | "bytebuf_new" -> "rvbb_new" :: v :: acc
      | "bytebuf_len" -> "rvbb_len" :: v :: acc
@@ -840,6 +843,17 @@ let request_ofj_tag (t : Ast.ty) : string =
     ofj_pending := (tag, t) :: !ofj_pending
   end;
   "__ofj_" ^ tag
+(* v0.1.655: structural ordering, `__cmp_<tag>` (a0 = x, a1 = y -> a0 < 0,
+   0 or > 0), queued like `__eq_` *)
+let cmp_pending : (string * Ast.ty) list ref = ref []
+let cmp_requested : (string, unit) Hashtbl.t = Hashtbl.create 16
+let request_cmp (t : Ast.ty) : string =
+  let tag = ty_tag t in
+  if not (Hashtbl.mem cmp_requested tag) then begin
+    Hashtbl.replace cmp_requested tag ();
+    cmp_pending := (tag, t) :: !cmp_pending
+  end;
+  "__cmp_" ^ tag
 let request_eq (t : Ast.ty) : string =
   let tag = ty_tag t in
   if not (Hashtbl.mem eq_requested tag) then begin
@@ -2697,6 +2711,25 @@ and compile_cmp env op l r =
        emit_word (enc_r 0 t1 t0 2 a0 0x33);                         (* a0 = t0 < t1 *)
        emit_word (enc_i 1 a0 4 a0 0x13))
   end
+  (* v0.1.655: `<`/`<=`/`>`/`>=` on a tuple, record, variant or list compare by
+     value -- fields in order, a constructor by its tag and then its payload, a
+     list element by element with the shorter first -- via __cmp_<tag>. It was
+     refused: as a word the value is its heap pointer. *)
+  else if (op = Ast.Lt || op = Ast.Le || op = Ast.Gt || op = Ast.Ge) &&
+          (match lty with
+           | Ast.TyTuple _ | Ast.TyCon ("list", _) -> true
+           | Ast.TyCon (n, _) -> Hashtbl.mem type_records n || Hashtbl.mem type_variants n
+           | _ -> false) then begin
+    compile_expr env l; push a0;
+    compile_expr env r; emit_word (enc_i 0 a0 0 a1 0x13); pop a0;
+    emit (Jal (ra, request_cmp lty));                              (* a0 = <0 / 0 / >0 *)
+    (match op with
+     | Ast.Lt -> emit_word (enc_i 0 a0 2 a0 0x13)                  (* slti a0, a0, 0 *)
+     | Ast.Le -> emit_word (enc_i 1 a0 2 a0 0x13)                  (* slti a0, a0, 1 *)
+     | Ast.Gt -> emit_word (enc_r 0 a0 zero 2 a0 0x33)             (* slt a0, x0, a0 *)
+     | _ -> emit_word (enc_i 0 a0 2 a0 0x13);                      (* a0 >= 0 *)
+            emit_word (enc_i 1 a0 4 a0 0x13))
+  end
   (* structural `==`/`!=` on a compound value (tuple / record / payload-carrying
      variant): compare by value via a generated per-type __eq_<tag> helper *)
   else if (op = Ast.Eq || op = Ast.Ne) &&
@@ -2719,15 +2752,6 @@ and compile_cmp env op l r =
         so `<` on one answered from allocation order. `==` on those already went
         to a generated structural helper above; ordering has no such helper, so it
         is refused rather than answered wrongly. *)
-     | (Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge), t
-       when (match t with
-             | Ast.TyTuple _ -> true
-             | Ast.TyCon (n, _) -> Hashtbl.mem type_records n || Hashtbl.mem type_variants n
-             | _ -> false) ->
-       err l.loc (Printf.sprintf
-         "RV32I: `<`/`<=`/`>`/`>=` on `%s` would compare heap pointers, not \
-          values -- this backend has a structural `==` for compound types but no \
-          structural ordering yet" (Formatter.fmt_ty t))
      | _ -> ());
   (* `x < k` / `x <= k` with a small literal fold into slti *)
   match op, r.node with
@@ -3178,6 +3202,9 @@ and compile_app env e =
   (* v0.1.653: ByteBuf, ListBuf and OwnedVec are Vecs on this target, made and
      used by the prelude's rvbb_ / rvlb_ / rvov_ (as map_new is rvmap_new); a
      __heap one goes into the default arena like a Vec *)
+  (* v0.1.655: Logger / Metrics are the prelude's records of the same shape *)
+  | Ast.Var ("mk_logger" | "mk_metrics" as op) when List.length args = 1 ->
+    call_top env (if op = "mk_logger" then "__rv_mk_logger" else "__rv_mk_metrics") args
   | Ast.Var ("bytebuf_new" | "lb_new" | "owned_vec_new" as op) when List.length args = 1 ->
     let target = match op with "bytebuf_new" -> "rvbb_new" | "lb_new" -> "rvlb_new"
                                | _ -> "vec_new" in
@@ -6407,6 +6434,94 @@ let emit_ofj_helper (tag, ty) =
   | _ ->
     with_frame 0 (fun ~check:_ ~fail ~leave_with_a0:_ -> fail "unsupported of_json target")
 
+(* v0.1.655: __cmp_<tag>(a0 = x, a1 = y) -> a0 < 0, 0 or > 0. Frame [ra][x][y]. *)
+let emit_cmp_helper (tag, ty) =
+  let w = wsz () in
+  let ld rd off base = emit_word (enc_i off base (ldf3 ()) rd 0x03) in
+  let sd src off base = emit_word (enc_s off src base (stf3 ()) 0x23) in
+  let ret () = emit_word (enc_i 0 ra 0 zero 0x67) in
+  let words () =                                   (* a0 = (x > y) - (x < y), signed *)
+    emit_word (enc_r 0 a1 a0 2 t0 0x33);          (* slt t0, a0, a1 *)
+    emit_word (enc_r 0 a0 a1 2 t1 0x33);          (* slt t1, a1, a0 *)
+    emit_word (enc_r 0x20 t0 t1 0 a0 0x33);       (* sub a0, t1, t0 *)
+    ret () in
+  let enter () = emit_word (enc_i (0 - 3 * w) sp 0 sp 0x13); sd ra 0 sp; sd a0 w sp; sd a1 (2 * w) sp in
+  let leave () = ld ra 0 sp; emit_word (enc_i (3 * w) sp 0 sp 0x13); ret () in
+  emit (Label ("__cmp_" ^ tag));
+  match resolve_ty ty with
+  | Ast.TyInt | Ast.TyBool | Ast.TyUnit -> words ()
+  | Ast.TyStr | Ast.TyBytes -> emit (Jal (zero, "__str_cmp"))
+  | Ast.TyFloat ->
+    let l_lt = fresh_label ".cfl" and l_gt = fresh_label ".cfg" in
+    enter ();
+    emit (Jal (ra, "u___flt")); emit (Branch (1, a0, zero, l_lt));
+    ld a0 (2 * w) sp; ld a1 w sp; emit (Jal (ra, "u___flt")); emit (Branch (1, a0, zero, l_gt));
+    li a0 0; leave ();
+    emit (Label l_lt); li a0 (-1); leave ();
+    emit (Label l_gt); li a0 1; leave ()
+  | (Ast.TyTuple _ | Ast.TyCon _) as t
+    when (match t with
+          | Ast.TyTuple _ -> true
+          | Ast.TyCon (n, _) -> Hashtbl.mem type_records n
+          | _ -> false) ->
+    let fields = match t with
+      | Ast.TyTuple ts -> ts
+      | Ast.TyCon (n, args) ->
+        let (params, fs) = Hashtbl.find type_records n in
+        let senv = zip_tyenv params args in
+        List.map (fun (_, ft) -> subst_ty senv ft) fs
+      | _ -> [] in
+    let l_out = fresh_label ".cmo" in
+    enter ();
+    List.iteri (fun i ft ->
+      ld t0 w sp; ld a0 (i * w) t0; ld t0 (2 * w) sp; ld a1 (i * w) t0;
+      emit (Jal (ra, request_cmp ft));
+      emit (Branch (1, a0, zero, l_out))) fields;
+    li a0 0;
+    emit (Label l_out); leave ()
+  | Ast.TyCon ("list", [et]) ->
+    let l_loop = fresh_label ".cml" and l_xnil = fresh_label ".cmxn" and l_out = fresh_label ".cmlo" in
+    enter ();
+    emit (Label l_loop);
+    ld t0 w sp; ld t0 0 t0; ld t1 (2 * w) sp; ld t1 0 t1;
+    emit (Branch (0, t0, zero, l_xnil));                          (* x is Nil *)
+    li a0 1; emit (Branch (0, t1, zero, l_out));                  (* y Nil, x not: x > y *)
+    ld t0 w sp; ld t0 w t0; ld a0 0 t0; ld t1 (2 * w) sp; ld t1 w t1; ld a1 0 t1;
+    emit (Jal (ra, request_cmp et));
+    emit (Branch (1, a0, zero, l_out));
+    ld t0 w sp; ld t0 w t0; ld t0 w t0; sd t0 w sp;
+    ld t1 (2 * w) sp; ld t1 w t1; ld t1 w t1; sd t1 (2 * w) sp;
+    emit (Jal (zero, l_loop));
+    emit (Label l_xnil);
+    li a0 0; emit (Branch (0, t1, zero, l_out));                  (* both Nil *)
+    li a0 (-1);
+    emit (Label l_out); leave ()
+  | Ast.TyCon (n, args) when Hashtbl.mem type_variants n ->
+    let (params, variants) = Hashtbl.find type_variants n in
+    let senv = zip_tyenv params args in
+    let l_out = fresh_label ".cmv" and l_same = fresh_label ".cmvs" in
+    enter ();
+    ld t0 0 a0; ld t1 0 a1;
+    emit (Branch (0, t0, t1, l_same));
+    emit_word (enc_r 0 t1 t0 2 t2 0x33);                           (* slt t2, t0, t1 *)
+    emit_word (enc_r 0 t0 t1 2 t3 0x33);                           (* slt t3, t1, t0 *)
+    emit_word (enc_r 0x20 t2 t3 0 a0 0x33);                        (* a0 = t3 - t2 *)
+    emit (Jal (zero, l_out));
+    emit (Label l_same);
+    List.iteri (fun k (_c, payload) ->
+      match payload with
+      | None -> ()
+      | Some pty ->
+        let l_nk = fresh_label ".cmvk" in
+        li t2 k; emit (Branch (1, t0, t2, l_nk));
+        ld a0 w a0; ld a1 w a1;
+        emit (Jal (ra, request_cmp (subst_ty senv pty)));
+        emit (Jal (zero, l_out));
+        emit (Label l_nk)) variants;
+    li a0 0;
+    emit (Label l_out); leave ()
+  | _ -> words ()
+
 let emit_eq_helper (tag, ty) =
   emit (Label ("__eq_" ^ tag));
   match resolve_ty ty with
@@ -7618,6 +7733,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   globals := [];
   eq_pending := []; show_pending := []; Hashtbl.reset show_requested;
   json_pending := []; Hashtbl.reset json_requested; ofj_pending := []; Hashtbl.reset ofj_requested;
+  cmp_pending := []; Hashtbl.reset cmp_requested;
   rcopy_pending := [];
   Hashtbl.reset rcopy_requested;
   store_pending := [];
@@ -7627,6 +7743,10 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   Hashtbl.reset tops;
   Hashtbl.reset variant_tags;
   Hashtbl.reset record_fields;
+  (* v0.1.655: the builtin capability records, laid out as the prelude's
+     __rvlogger / __rvmetrics that mk_logger / mk_metrics make *)
+  Hashtbl.replace record_fields "Logger" ["info"; "warn"; "error"];
+  Hashtbl.replace record_fields "Metrics" ["inc"; "record"];
   Hashtbl.reset type_variants;
   Hashtbl.reset type_records;
   Hashtbl.reset externs;
@@ -7774,6 +7894,10 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
     | [], [], [] when !show_pending <> [] ->
       (match !show_pending with
        | h :: rest -> show_pending := rest; emit_show_helper h; drain_eq ()
+       | [] -> ())
+    | [], [], [] when !cmp_pending <> [] ->
+      (match !cmp_pending with
+       | h :: rest -> cmp_pending := rest; emit_cmp_helper h; drain_eq ()
        | [] -> ())
     | [], [], [] when !json_pending <> [] ->
       (match !json_pending with

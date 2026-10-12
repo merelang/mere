@@ -1002,6 +1002,19 @@ let __oj_end = fn (v: int) ->
   if __oj_failed () == 1 then (let _ = print_err ("of_json: " ++ vec_get __oj_msgs 0) in let _ = exit 1 in v)
   else v;
 let __oj_end_opt = fn (v: int) -> if __oj_failed () == 1 then (None : int option) else Some v;
+// v0.1.655: the capabilities mk_logger and mk_metrics, records of closures
+// that print as the interpreter and the C runtime print. A program keeps the
+// builtins' types (Logger, Metrics): codegen lowers the two to these, whose
+// records have the same fields in the same order.
+type __rvlogger = { info: str -> unit, warn: str -> unit, error: str -> unit };
+type __rvmetrics = { inc: str -> unit, record: str -> int -> unit };
+let __rv_mk_logger = fn (p: str) ->
+  __rvlogger { info = fn (m: str) -> print (p ++ " [INFO] " ++ m),
+               warn = fn (m: str) -> print (p ++ " [WARN] " ++ m),
+               error = fn (m: str) -> print (p ++ " [ERROR] " ++ m) };
+let __rv_mk_metrics = fn (u: unit) ->
+  __rvmetrics { inc = fn (n: str) -> print ("[METRIC] inc " ++ n),
+                record = fn (n: str) -> fn (v: int) -> print ("[METRIC] " ++ n ++ "=" ++ str_of_int v) };
 // v0.1.636: utf8_len, the interpreter's and the C runtime's walk -- forward
 // by the lead byte's span, an invalid byte one unit, a span past the end
 // stopping at the end. (mere-ruby asks `utf8_len s == str_len s` for "all
