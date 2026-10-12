@@ -632,7 +632,14 @@ let compile_to_c ?base_dir source =
 
 let compile_to_llvm ?base_dir source =
   let open Mere in
+  (* v0.1.665: of_json's parser, for a program that may decode JSON (the
+     decoders themselves are generated in codegen_llvm) *)
+  let has s sub =
+    let n = String.length s and m = String.length sub in
+    let rec go i = i + m <= n && (String.sub s i m = sub || go (i + 1)) in go 0 in
+  if has source "of_json" then Pipeline.extra_prelude := [Json_prelude.llvm_contents];
   let (prog, main_ty) = infer_program ?base_dir source in
+  Pipeline.extra_prelude := [];
   Codegen_llvm.emit_program ~main_ty prog
 
 (* `-wg`: the table that a source map is built from. See scripts/wasm_sourcemap.js,

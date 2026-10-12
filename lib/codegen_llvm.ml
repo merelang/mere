@@ -16835,8 +16835,179 @@ let rewrite_read_lines (prog : Ast.program) : Ast.program =
         | Ast.Top_let_rec bs -> Ast.Top_let_rec (List.map (fun (n, l, v) -> (n, l, go v)) bs)
         | other -> other) prog.Ast.decls }
 
+(* v0.1.665: of_json / of_json_opt / of_json_like / of_json_opt_like. The
+   program carries the JSON parser (Json_prelude, added by the driver to a
+   program that calls of_json); what it lacks are the decoders, one per target
+   type, which are generated here as typed top-level functions
+   `__ofj_<tag> : __ojn -> T option` -- the shape of RISC-V's machine-code
+   ones (v0.1.654) and of the C runtime's, with None for a failed decode, so
+   that no value of T has to be invented. `of_json s` is then
+   `__ojx_get (__ofj_T (__oj_parse s))`, which prints the parser's first error
+   and exits 1 as C does; of_json_opt is `__ojx_opt (...)`, None on an error. *)
+let rewrite_of_json (prog : Ast.program) : Ast.program =
+  let decls = ref [] and made = Hashtbl.create 8 in
+  let loc0 = Loc.dummy in
+  let mk ?(loc = loc0) node ty = { Ast.loc; ty = Some ty; node } in
+  let pat p = { Ast.ploc = loc0; pnode = p } in
+  let ojn = Ast.TyCon ("__ojn", []) in
+  let arrow ts r = List.fold_right (fun a b -> Ast.TyArrow (a, b)) ts r in
+  let opt t = Ast.TyCon ("option", [t]) in
+  let var n t = mk (Ast.Var n) t in
+  let app f fty args rty =
+    let rec build acc aty = function
+      | [] -> acc
+      | x :: more ->
+        let rest = match Ast.walk aty with Ast.TyArrow (_, r) -> r | _ -> rty in
+        build (mk (Ast.App (acc, x)) rest) rest more in
+    build (var f fty) fty args in
+  let call f ats rt args = app f (arrow ats rt) args rt in
+  let int_ k = mk (Ast.Int_lit k) Ast.TyInt in
+  let str_ s = mk (Ast.Str_lit s) Ast.TyStr in
+  let unit_ = mk Ast.Unit_lit Ast.TyUnit in
+  let none t = mk (Ast.Constr ("None", None)) (opt t) in
+  let some x t = mk (Ast.Constr ("Some", Some x)) (opt t) in
+  let cmp op a b = mk (Ast.Cmp (op, a, b)) Ast.TyBool in
+  let and_ a b = mk (Ast.Logic (Ast.And, a, b)) Ast.TyBool in
+  let or_ a b = mk (Ast.Logic (Ast.Or, a, b)) Ast.TyBool in
+  let if_ c a b t = mk (Ast.If (c, a, b)) t in
+  let fail_none msg t =
+    mk (Ast.Let (pat Ast.P_wild, call "__oj_fail" [Ast.TyStr] Ast.TyInt [str_ msg], none t)) (opt t) in
+  let kind n = call "__oj_kind" [ojn] Ast.TyInt [n] in
+  let len n = call "__oj_len" [ojn] Ast.TyInt [n] in
+  let item n i = call "__oj_item" [ojn; Ast.TyInt] ojn [n; i] in
+  (* match d with None -> None | Some x -> k x, at result type `rt option` *)
+  let bind d dt x k rt =
+    mk (Ast.Match (d, [ (pat (Ast.P_constr ("None", None)), None, none rt);
+                         (pat (Ast.P_constr ("Some", Some (pat (Ast.P_var x)))), None, k (var x dt)) ]))
+      (opt rt) in
+  let counter = ref 0 in
+  let fresh b = incr counter; Printf.sprintf "__ofjv_%s%d" b !counter in
+  let fn_ name params rt body =
+    let rec wrap = function
+      | [] -> body
+      | (p, pt) :: more ->
+        let inner = wrap more in
+        mk (Ast.Fun (p, Some pt, inner)) (arrow (pt :: List.map snd more) rt) in
+    decls := Ast.Top_let_rec [(name, loc0, wrap params)] :: !decls in
+  let rec dec (t : Ast.ty) : string =
+    let t = Ast.walk t in
+    let name = "__ofj_" ^ ty_tag t in
+    if not (Hashtbl.mem made name) then begin
+      Hashtbl.replace made name ();
+      let n = var "__ojn_n" ojn in
+      let body =
+        match t with
+        | Ast.TyInt -> some (call "__oj_int" [ojn] Ast.TyInt [n]) t
+        | Ast.TyFloat -> some (call "__oj_float" [ojn] Ast.TyFloat [n]) t
+        | Ast.TyStr -> some (call "__oj_str" [ojn] Ast.TyStr [n]) t
+        | Ast.TyBool -> some (cmp Ast.Eq (call "__oj_bool" [ojn] Ast.TyInt [n]) (int_ 1)) t
+        | Ast.TyUnit -> some unit_ t
+        | Ast.TyTuple ts ->
+          let k = List.length ts in
+          let xs = List.map (fun _ -> fresh "t") ts in
+          let rec chain i = function
+            | [] -> some (mk (Ast.Tuple (List.map2 (fun x ty -> var x ty) xs ts)) t) t
+            | ty :: more ->
+              bind (call (dec ty) [ojn] (opt ty) [item n (int_ i)]) ty (List.nth xs i)
+                (fun _ -> chain (i + 1) more) t in
+          if_ (or_ (cmp Ast.Ne (kind n) (int_ 4)) (cmp Ast.Ne (len n) (int_ k)))
+            (fail_none (Printf.sprintf "expected a %d-element array" k) t)
+            (chain 0 ts) (opt t)
+        | Ast.TyCon ("list", [et]) ->
+          let et = Ast.walk et in
+          let lt = Ast.TyCon ("list", [et]) in
+          let loop = "__ofjl_" ^ ty_tag et in
+          let i = var "__ojn_i" Ast.TyInt and acc = var "__ojn_acc" lt in
+          let x = fresh "l" in
+          let step =
+            bind (call (dec et) [ojn] (opt et) [item n i]) et x
+              (fun xv -> call loop [ojn; Ast.TyInt; lt] (opt lt)
+                  [n; mk (Ast.Bin (Ast.Sub, i, int_ 1)) Ast.TyInt;
+                   mk (Ast.Constr ("Cons", Some (mk (Ast.Tuple [xv; acc]) (Ast.TyTuple [et; lt])))) lt]) lt in
+          fn_ loop [("__ojn_n", ojn); ("__ojn_i", Ast.TyInt); ("__ojn_acc", lt)] (opt lt)
+            (if_ (cmp Ast.Lt i (int_ 0)) (some acc lt) step (opt lt));
+          if_ (cmp Ast.Ne (kind n) (int_ 4)) (fail_none "expected a JSON array" lt)
+            (call loop [ojn; Ast.TyInt; lt] (opt lt)
+               [n; mk (Ast.Bin (Ast.Sub, len n, int_ 1)) Ast.TyInt; mk (Ast.Constr ("Nil", None)) lt]) (opt lt)
+        | Ast.TyCon ("option", [et]) ->
+          let et = Ast.walk et in
+          let x = fresh "o" in
+          if_ (cmp Ast.Eq (kind n) (int_ 0)) (some (none et) t)
+            (bind (call (dec et) [ojn] (opt et) [n]) et x (fun xv -> some (some xv et) t) t) (opt t)
+        | _ when record_fields_of t <> None ->
+          let (_, fields) = Option.get (record_fields_of t) in
+          let rname = match t with Ast.TyCon (rn, _) -> rn | _ -> "" in
+          let xs = List.map (fun _ -> fresh "r") fields in
+          let rec chain i = function
+            | [] ->
+              some (mk (Ast.Record_lit (rname, List.map2 (fun (f, ft) x -> (f, var x ft)) fields xs)) t) t
+            | (f, ft) :: more ->
+              bind (call (dec ft) [ojn] (opt ft)
+                      [call "__oj_field" [ojn; Ast.TyStr] ojn [n; str_ f]])
+                ft (List.nth xs i) (fun _ -> chain (i + 1) more) t in
+          chain 0 fields
+        | _ when variant_shape_of t <> None ->
+          let (vn, _, _, variants) = Option.get (variant_shape_of t) in
+          let s = call "__oj_str" [ojn] Ast.TyStr [n] in
+          let rec arms = function
+            | [] -> fail_none ("cannot decode variant " ^ vn) t
+            | (c, None) :: more ->
+              if_ (and_ (cmp Ast.Eq (kind n) (int_ 3)) (cmp Ast.Eq s (str_ c)))
+                (some (mk (Ast.Constr (c, None)) t) t) (arms more) (opt t)
+            | (c, Some pt) :: more ->
+              let x = fresh "v" in
+              if_ (and_ (cmp Ast.Eq (kind n) (int_ 5))
+                     (and_ (cmp Ast.Eq (len n) (int_ 1))
+                        (cmp Ast.Eq (call "__oj_key0" [ojn] Ast.TyStr [n]) (str_ c))))
+                (bind (call (dec pt) [ojn] (opt pt) [item n (int_ 0)]) pt x
+                   (fun xv -> some (mk (Ast.Constr (c, Some xv)) t) t) t)
+                (arms more) (opt t) in
+          (* nullary constructors first, as the C runtime and RISC-V try them *)
+          arms (List.filter (fun (_, p) -> p = None) variants
+                @ List.filter (fun (_, p) -> p <> None) variants)
+        | _ -> fail_none "unsupported of_json target" t in
+      fn_ name [("__ojn_n", ojn)] (opt t) body
+    end;
+    name in
+  let go_ref = ref (fun (e : Ast.expr) -> e) in
+  let subst (e : Ast.expr) : Ast.expr option =
+    let (head, args) =
+      let rec flat e acc = match e.Ast.node with
+        | Ast.App (f, a) -> flat f (a :: acc) | _ -> (e, acc) in
+      flat e [] in
+    match head.Ast.node, args with
+    | Ast.Var ("of_json" | "of_json_opt" | "of_json_like" | "of_json_opt_like" as op0), _
+      when List.length args = (if op0 = "of_json" || op0 = "of_json_opt" then 1 else 2) ->
+      let opt_form = op0 = "of_json_opt" || op0 = "of_json_opt_like" in
+      let res = match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit in
+      let target = if opt_form then (match res with Ast.TyCon ("option", [t]) -> Ast.walk t | t -> t) else res in
+      if not (ty_is_concrete target) then None
+      else begin
+        let src = List.nth args (List.length args - 1) in
+        let src = !go_ref src in
+        let d = call (dec target) [ojn] (opt target)
+            [call "__oj_parse" [Ast.TyStr] ojn [src]] in
+        let fin = if opt_form then call "__ojx_opt" [opt target] (opt target) [d]
+          else call "__ojx_get" [opt target] target [d] in
+        let fin = { fin with Ast.loc = e.Ast.loc } in
+        (* a _like form's witness is evaluated and dropped *)
+        Some (if List.length args = 2 then
+                mk ~loc:e.Ast.loc (Ast.Let (pat Ast.P_wild, List.hd args, fin)) res
+              else fin)
+      end
+    | _ -> None in
+  let go e = Trait_elab.map_expr subst e in
+  go_ref := go;
+  let main = go prog.Ast.main in
+  let decls0 = List.map (fun d -> match d with
+      | Ast.Top_let (p, v) -> Ast.Top_let (p, go v)
+      | Ast.Top_let_rec bs -> Ast.Top_let_rec (List.map (fun (n, l, v) -> (n, l, go v)) bs)
+      | other -> other) prog.Ast.decls in
+  { Ast.main; decls = decls0 @ List.rev !decls }
+
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let prog = rewrite_read_lines prog in
+  let prog = rewrite_of_json prog in
   (* Q-127: SETTLE EVERY UNDECIDED CONTAINER REGION BEFORE ANYTHING READS ONE.
      A slot can hold a variable up to here, so that a call site inside a `region` block
      can decide it; what is left means nobody did, and it becomes `__heap`.

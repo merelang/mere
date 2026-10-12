@@ -18,9 +18,12 @@ rc=0
 
 # lib/rv_libm.ml is the prelude's tail (sin, cos, tan, atan2 and the libm the
 # RISC-V backend binds libm-named externs to): hand-written too, so read with it
-NAMES=$(cat "$ROOT/lib/rv_prelude.ml" "$ROOT/lib/rv_libm.ml" \
+# lib/json_prelude.ml (v0.1.665): of_json's parser, spliced into the prelude and
+# shared with the LLVM backend
+NAMES=$(cat "$ROOT/lib/rv_prelude.ml" "$ROOT/lib/rv_libm.ml" "$ROOT/lib/json_prelude.ml" \
         | sed -n 's/^let \(rec \)\{0,1\}\([a-z_][a-z_0-9]*\) *=.*/\2/p' \
-        | grep -v '^contents$' | grep -v '^builtin_contents$')
+        | grep -v '^contents$' | grep -v '^builtin_contents$' \
+        | grep -v '^core$' | grep -v '^llvm_glue$' | grep -v '^llvm_contents$')
 COUNT=$(printf '%s\n' $NAMES | wc -l | tr -d ' ')
 
 # Probes, by shape. A name with no probe is reported: the point of the gate is

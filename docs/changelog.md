@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.665 — 2026-10-12
+
+_`of_json`, `of_json_opt` and the `_like` forms on LLVM. The parser is RISC-V's, now shared as `lib/json_prelude.ml`, and the decoders are generated as typed Mere._
+
+- **The parser** is the one RISC-V decodes with (v0.1.654), which follows the C
+  runtime's parser line for line. It moved out of the RISC-V prelude into
+  `lib/json_prelude.ml`; RISC-V splices it in as before, so its prelude text is
+  unchanged. On LLVM the driver adds it, through `Pipeline.extra_prelude`, to a
+  program whose source mentions `of_json`, so a program that does not decode
+  JSON does not carry it. The declarations are positioned as prelude.
+- **The decoders** are typed top-level functions generated per target type,
+  `__ofj_<tag> : __ojn -> T option`, with a loop helper per list type. They have
+  the shape of RISC-V's machine-code decoders and of the C runtime's: an array
+  of exactly k items for a tuple, a field by name for a record, a nullary
+  constructor as its name in quotes, and a constructor with a payload as a
+  one-key object. A failed decode is None, so no value of T has to be invented.
+  `of_json s` becomes `__ojx_get (__ofj_T (__oj_parse s))`, which prints the
+  parser's first error (`of_json: duplicate object key`, `of_json: cannot decode
+  variant c`, ...) and exits 1 as C does. `of_json_opt` answers None, and a
+  `_like` form evaluates its witness and drops it. Against C on decodes and
+  failures alike, LLVM gives the same stdout, stderr and exit status,
+  including C's leniency (a string where an int is expected decodes as 0).
+- json_duplicate_key, json_invalid_utf8, of_json_composite, of_json_field_only
+  and of_json_variant_tag are checked on LLVM now. schema_reflect is not: its
+  `of_json_opt_like` sits in a polymorphic library function, whose target type
+  exists only once an instance is made, after this rewrite has run.
+- `rv_prelude_check` reads `lib/json_prelude.ml` with the prelude (583 names).
+
+LLVM leaves 3 of 235 parity programs unchecked now (`dirs_and_env`,
+`map_compact`, `schema_reflect`), and Wasm 1.
+
 ## v0.1.664 — 2026-10-12
 
 _Wasm hands out one instance of a polymorphic function as a value; RISC-V passes the coroutine builtins as values._
