@@ -252,16 +252,25 @@ fi
 # refusal that was quietly deleted would turn back into a wrong answer with no
 # test going red.
 #
-# A Map key that is not a string: the prelude's Map is an assoc list comparing
-# keys with `str_eq`, so a one-word constructor block is compared by reading its
-# tag as a length. `map_get c Green` answered "key not found" for a key that was
-# there.
+# A Map key that is not a string or a word. The prelude's Map compares keys
+# with `str_eq` (or `==`), so a one-word constructor block was compared by
+# reading its tag as a length: `map_get c Green` answered "key not found" for a
+# key that was there. It was refused by name from then until v0.1.657, which
+# rewrites such a Map into one keyed by `show k`. That needs one text per value,
+# so a key with a float inside (C's == makes 0.0 and -0.0 one key, show makes
+# them two) must still be REFUSED, and a constructor key must compile.
 printf 'type c = Red | Green;\nlet m = map_new ();\nlet _ = map_set m Green 1;\nlet _ = print_int (map_get m Green);\n' > "$TMP/mk.mere"
-if "$MERE" -rv "$TMP/mk.mere" > /dev/null 2>"$TMP/mkerr"; then
-  echo "FAIL rv_prelude: a non-str Map key was accepted (it is compared with str_eq)"
+if ! "$MERE" -rv "$TMP/mk.mere" > /dev/null 2>"$TMP/mkerr"; then
+  echo "FAIL rv_prelude: a constructor Map key was refused (v0.1.657 rewrites it to a str key)"
+  head -2 "$TMP/mkerr"
+  rc=1
+fi
+printf 'let m = map_new ();\nlet _ = map_set m (1.5, 2) 1;\nlet _ = print_int (map_len m);\n' > "$TMP/mkf.mere"
+if "$MERE" -rv "$TMP/mkf.mere" > /dev/null 2>"$TMP/mkerr"; then
+  echo "FAIL rv_prelude: a Map key with a float inside was accepted (show would make 0.0 and -0.0 two keys)"
   rc=1
 elif grep -q 'Map key of type' "$TMP/mkerr"; then :; else
-  echo "FAIL rv_prelude: a non-str Map key was refused for the wrong reason"
+  echo "FAIL rv_prelude: a Map key with a float inside was refused for the wrong reason"
   head -2 "$TMP/mkerr"
   rc=1
 fi

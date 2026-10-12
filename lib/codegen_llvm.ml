@@ -11981,9 +11981,28 @@ let emit_map_key_hash_helper_llvm (k_ty : Ast.ty) : string =
 
 (* Phase 15.14: per-K equality helper for Map. Supports int / bool / str /
    tuple (recursive). Emitted once per K type, shared across (K, V) pairs. *)
+(* v0.1.657: a tuple / record / variant key compares with the structural
+   @eq_<tag> that `==` uses (registered in eq_types before those are emitted).
+   The walk below assumed one payload type shared by every constructor ("LLVM
+   MVP"); a variant like `Pt | Seg of int | Tag of str * int` keeps a pointer
+   in that slot, and its key compare was `icmp eq i64` on a ptr -- IR that did
+   not assemble (test/parity/map_compound_iter). *)
+let map_key_compound_llvm (t : Ast.ty) : bool =
+  match Ast.walk t with
+  | Ast.TyTuple _ -> true
+  | _ -> record_fields_of t <> None || variant_shape_of t <> None
+
 let emit_map_key_eq_helper_llvm (k_ty : Ast.ty) : string =
   let k_tag = ty_tag k_ty in
   let c_k = llvm_ty_of k_ty in
+  if map_key_compound_llvm k_ty then
+    String.concat "\n"
+      [ Printf.sprintf "define i1 @mere_map_key_eq_%s(%s %%a, %s %%b) {" k_tag c_k c_k;
+        "entry:";
+        Printf.sprintf "  %%r = call i1 @eq_%s(%s %%a, %s %%b)" k_tag c_k c_k;
+        "  ret i1 %r";
+        "}" ]
+  else
   let reg_counter = ref 0 in
   let fresh () = incr reg_counter; Printf.sprintf "%%r%d" !reg_counter in
   let lines = ref [] in
@@ -17036,6 +17055,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   (* v0.1.110: structural eq_/cmp_ functions. No forward `declare`s needed —
      LLVM IR lets a `call` reference a `define` that appears later in the
      module, and a `declare` + `define` of the same symbol is a redefinition. *)
+  let eq_emitted = Hashtbl.copy eq_types in
   let eq_cmp_fn_defs =
     Hashtbl.fold (fun tag t acc -> emit_eq_fn tag t :: acc) eq_types []
     @ Hashtbl.fold (fun tag t acc -> emit_cmp_fn tag t :: acc) cmp_types []
@@ -17241,6 +17261,17 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         Hashtbl.add seen k_tag ();
         emit_map_key_eq_helper_llvm k_ty :: acc
       end) map_instances []
+  in
+  (* v0.1.657: the @eq_<tag> a compound key's helper calls, and the ones it
+     calls in turn -- those `==` did not already emit (map_instances is filled
+     after eq_types was folded into definitions above) *)
+  let map_key_eq_helpers =
+    let extra = Hashtbl.create 4 in
+    Hashtbl.iter (fun _ (k_ty, _) ->
+      if map_key_compound_llvm k_ty then add_struct_deep_type extra k_ty) map_instances;
+    map_key_eq_helpers
+    @ Hashtbl.fold (fun tag t acc ->
+        if Hashtbl.mem eq_emitted tag then acc else emit_eq_fn tag t :: acc) extra []
   in
   (* Per-K structural hash helper for index-safe keys (O(1) map runtime). *)
   let map_key_hash_helpers =

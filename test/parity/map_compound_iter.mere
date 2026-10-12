@@ -1,0 +1,32 @@
+// v0.1.657: a Map keyed by a constructor, a record with a quoted str, and a
+// tuple through a function -- iterated, updated, deleted. On RISC-V such a Map
+// is a str-keyed one of `show k` holding (k, v); the order and the keys
+// map_iter hands back are what this pins, on every backend. Writing it found
+// two more: Wasm's compound-key Map grew its arrays at 4 bytes per 8-byte slot
+// (values over key pointers past 4 entries: out of memory), and LLVM compared
+// a variant key's payload as an i64 when a constructor carries a str (IR that
+// did not assemble).
+type shape = Pt | Seg of int | Tag of str * int;
+type key = { kx: int, kname: str };
+let m = map_new ();
+let _ = map_set m (Tag ("a b", 1)) 10;
+let _ = map_set m (Seg 3) 20;
+let _ = map_set m Pt 30;
+let _ = map_set m (Tag ("a", 11)) 40;
+let _ = map_set m (Seg 3) 21;
+let _ = map_iter m (fn (k: shape) -> fn (v: int) -> print (show k ++ " -> " ++ str_of_int v));
+let _ = map_delete m (Seg 3);
+let _ = print (str_of_int (map_len m) ++ " " ++ (if map_has m (Seg 3) then "y" else "n"));
+let r = map_new ();
+let _ = map_set r (key { kx = 1, kname = "q\"x" }) "one";
+let _ = map_set r (key { kx = 2, kname = "q" }) "two";
+let _ = print (map_get r (key { kx = 1, kname = "q\"x" }));
+let count = fn mm -> fn (k: (int * str)) ->
+  let c = if map_has mm k then map_get mm k else 0 in
+  map_set mm k (c + 1);
+let t = map_new ();
+let rec loop = fn (i: int) -> if i == 50 then () else let _ = count t (i % 3, str_of_int (i % 2)) in loop (i + 1);
+let _ = loop 0;
+let _ = map_iter t (fn (k: (int * str)) -> fn (v: int) -> print (str_of_int (fst k) ++ "/" ++ snd k ++ "=" ++ str_of_int v));
+let _ = print (str_of_int (map_len t));
+print (str_of_int (map_get t (1, "1")))

@@ -4,6 +4,40 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.657 — 2026-10-12
+
+_On RISC-V: a Map keyed by a tuple, a record or a constructor. Writing its test found a Wasm and an LLVM bug in the same place._
+
+- **Compound keys on RISC-V.** This backend's Map has two kinds of key, a word
+  and a str, and a third kind would be a third copy of every operation. So the
+  program is rewritten before it is laid out (`rewrite_compound_maps`). Such a
+  Map becomes a str-keyed one whose key is `show k` and whose value is the pair
+  `(k, v)`, so that `map_iter` hands back the key the program put in, and
+  `map_get` is `snd` of the pair. `show` gives one text per value only where no
+  float is inside, so only keys made of ints, bools, strs and unit (in tuples,
+  records, constructors, lists, options) are rewritten. A key with a float is
+  still refused by name: C's `==` makes 0.0 and -0.0 one key, while `show`
+  makes them two. A missing key fails as C's does
+  (test/rv/fail/map_get_compound).
+- **Wasm: the compound-key Map grew its arrays at 4 bytes a slot.** The slots
+  are 8 bytes (i64). After the first growth (past 4 entries) the new keys'
+  second half was the new values' first half, and a `map_set` wrote values over
+  key pointers. Six `(int, str)` keys set twice ran out of memory at the 11th
+  `map_set`. The corpus never had a compound-key Map with more than 3 entries.
+- **LLVM: a variant key compared its payload as one i64.** The key-equality
+  helper assumed every constructor shares one payload type ("LLVM MVP"). For
+  `Pt | Seg of int | Tag of str * int` that slot is a pointer, and the IR did
+  not assemble. A tuple, record or variant key now calls the structural
+  `@eq_<tag>` that `==` uses. Those helpers are emitted next to the key helpers
+  when `==` did not already need them, because the Map instances are known only
+  after `eq_types` was folded into definitions.
+- New parity programs: `map_compound_iter` (a constructor key, a record key with
+  a quoted str, and a tuple key through a polymorphic function, which are
+  iterated, updated and deleted) and `map_compound_compact` (compaction; LLVM
+  has no `map_compact`).
+
+`-rv64` refuses 10 parity programs now (11 before).
+
 ## v0.1.656 — 2026-10-12
 
 _On RISC-V: `f64x2` and `f32x4`, `fma`, the float32 conversions and `u8x16_first_true`. Also a fix: an RV64 float literal's low half was stored sign-extended._

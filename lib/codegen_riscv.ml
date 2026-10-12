@@ -1813,7 +1813,12 @@ let emit_abort_n k (fixed : string) (regs : int list) =
 let float_fn (e : Ast.expr) (name : string) : Ast.expr =
   { e with Ast.node = Ast.Var name; Ast.ty = None }
 
-(* The rv-prelude's Map is an assoc list that compares keys with `str_eq`, so a
+(* v0.1.657: a tuple / record / constructor / list / option key made of ints,
+   bools, strs and unit no longer reaches here -- rewrite_compound_maps made it a
+   str key (`show k`). What is still refused is a key with a float inside (C's
+   == says 0.0 and -0.0 are one key; show says two) and a type with no text.
+
+   The rv-prelude's Map is an assoc list that compares keys with `str_eq`, so a
    key that is not a string is compared by reading its first word as a length and
    its bytes as characters. For a nullary constructor -- a one-word [tag] block --
    that walks off the end of the block, and `map_get c Green` answered "key not
@@ -7754,6 +7759,119 @@ let copyprop (prog : item list) : item list =
 
 (* build the symbolic item list for a program (shared by emit_program /
    emit_listing) *)
+(* v0.1.657: a Map keyed by a tuple, a record or a constructor. This backend's
+   Map has two kinds of key, a word and a str; a third kind would be a third
+   copy of every operation. So the program is rewritten instead, before
+   anything is laid out: such a Map is a str-keyed one whose key is `show k`
+   (one text per value for these types: strs inside are quoted and escaped)
+   and whose value is the pair (k, v), so that map_iter hands back the key the
+   program put in. map_get is `snd` of the pair. The rewrite runs after the
+   type tables are filled (it asks them what a key is) and before frames are
+   sized (the `let`s it adds need slots). *)
+(* Only where `show` is one text per value: ints, bools, strs and unit inside
+   tuples, records, constructors, lists and options. A float anywhere inside is
+   left out (0.0 and -0.0 are one key to C's structural ==, two texts to show),
+   so such a key is still refused by name in check_map_key. *)
+let compound_key_ty (t : Ast.ty) =
+  let seen = Hashtbl.create 8 in
+  let rec leaf_ok t =
+    match resolve_ty t with
+    | Ast.TyInt | Ast.TyBool | Ast.TyStr | Ast.TyUnit -> true
+    | Ast.TyTuple ts -> List.for_all leaf_ok ts
+    | Ast.TyCon (("list" | "option"), [et]) -> leaf_ok et
+    | Ast.TyCon (n, args) when Hashtbl.mem type_records n || Hashtbl.mem type_variants n ->
+      let key = ty_tag t in
+      if Hashtbl.mem seen key then true
+      else begin
+        Hashtbl.replace seen key ();
+        if Hashtbl.mem type_records n then
+          (let (params, fields) = Hashtbl.find type_records n in
+           let senv = zip_tyenv params args in
+           List.for_all (fun (_, fty) -> leaf_ok (subst_ty senv fty)) fields)
+        else
+          (let (params, variants) = Hashtbl.find type_variants n in
+           let senv = zip_tyenv params args in
+           List.for_all (fun (_, p) -> match p with None -> true | Some pt -> leaf_ok (subst_ty senv pt)) variants)
+      end
+    | _ -> false in
+  match resolve_ty t with
+  | Ast.TyTuple _ | Ast.TyCon (("list" | "option"), _) -> leaf_ok t
+  | Ast.TyCon (n, _) when Hashtbl.mem type_variants n || Hashtbl.mem type_records n -> leaf_ok t
+  | _ -> false
+let map_kv (t : Ast.ty option) =
+  match t with
+  | Some t ->
+    (match resolve_ty t with
+     | Ast.TyCon ("Map", ts) when List.length ts >= 2 ->
+       let n = List.length ts in
+       Some (ts, List.nth ts (n - 2), List.nth ts (n - 1))
+     | _ -> None)
+  | None -> None
+let rewrite_compound_maps (full : Ast.expr) : Ast.expr =
+  let counter = ref 0 in
+  let fresh base = incr counter; Printf.sprintf "__mck%s_%d" base !counter in
+  let rec subst (e : Ast.expr) : Ast.expr option =
+    match e.Ast.node with
+    | Ast.App _ ->
+      let (head, args) = flatten_app e in
+      (match head.Ast.node, args with
+       | Ast.Var ("map_set" | "map_get" | "map_has" | "map_delete" | "map_iter"
+                  | "map_len" | "map_clear" | "map_compact" | "map_recycle" | "map_bytes" as op),
+         m :: rest ->
+         (match map_kv m.Ast.ty with
+          | Some (ts, k_ty, v_ty) when compound_key_ty k_ty ->
+            let go = Trait_elab.map_expr subst in
+            let mk node ty = { Ast.loc = e.Ast.loc; ty = Some ty; node } in
+            let s_ty = Ast.TyStr and p_ty = Ast.TyTuple [k_ty; v_ty] in
+            let n = List.length ts in
+            let m_ty = Ast.TyCon ("Map", List.filteri (fun i _ -> i < n - 2) ts @ [s_ty; p_ty]) in
+            let app f fty xs rty =
+              (* curried: the head's type is the whole arrow, each App its rest *)
+              let rec build acc aty = function
+                | [] -> acc
+                | x :: more ->
+                  let rest_ty = match resolve_ty aty with Ast.TyArrow (_, r) -> r | _ -> rty in
+                  build (mk (Ast.App (acc, x)) rest_ty) rest_ty more in
+              build (mk (Ast.Var f) fty) fty xs in
+            let arrow ts r = List.fold_right (fun a b -> Ast.TyArrow (a, b)) ts r in
+            let m' = { (go m) with Ast.ty = Some m_ty } in
+            let show_of x = app "show" (Ast.TyArrow (k_ty, s_ty)) [x] s_ty in
+            let let_ name v body = mk (Ast.Let ({ Ast.ploc = e.Ast.loc; pnode = Ast.P_var name }, v, body)) (match body.Ast.ty with Some t -> t | None -> Ast.TyUnit) in
+            let var name ty = mk (Ast.Var name) ty in
+            let res_ty = match e.Ast.ty with Some t -> t | None -> Ast.TyUnit in
+            (match op, rest with
+             | "map_set", [k; v] ->
+               let mn = fresh "m" and kn = fresh "k" in
+               let body = app "map_set" (arrow [m_ty; s_ty; p_ty] res_ty)
+                   [var mn m_ty; show_of (var kn k_ty); mk (Ast.Tuple [var kn k_ty; go v]) p_ty] res_ty in
+               Some (let_ mn m' (let_ kn (go k) body))
+             | "map_get", [k] ->
+               let got = app "map_get" (arrow [m_ty; s_ty] p_ty) [m'; show_of (go k)] p_ty in
+               Some (app "snd" (Ast.TyArrow (p_ty, v_ty)) [got] v_ty)
+             | ("map_has" | "map_delete"), [k] ->
+               Some (app op (arrow [m_ty; s_ty] res_ty) [m'; show_of (go k)] res_ty)
+             | "map_iter", [f] ->
+               let fn_ = fresh "f" and sn = fresh "s" and pn = fresh "p" in
+               let f_ty = match f.Ast.ty with Some t -> t | None -> arrow [k_ty; v_ty] Ast.TyUnit in
+               let r_ty = match resolve_ty f_ty with
+                 | Ast.TyArrow (_, b) -> (match resolve_ty b with Ast.TyArrow (_, r) -> r | _ -> Ast.TyUnit)
+                 | _ -> Ast.TyUnit in
+               let pv = var pn p_ty in
+               let call = app fn_ f_ty [app "fst" (Ast.TyArrow (p_ty, k_ty)) [pv] k_ty;
+                                       app "snd" (Ast.TyArrow (p_ty, v_ty)) [pv] v_ty] r_ty in
+               let inner = mk (Ast.Fun (pn, Some p_ty, call)) (Ast.TyArrow (p_ty, r_ty)) in
+               let cb_ty = arrow [s_ty; p_ty] r_ty in
+               let cb = mk (Ast.Fun (sn, Some s_ty, inner)) cb_ty in
+               let mn = fresh "m" in
+               Some (let_ mn m' (let_ fn_ (go f)
+                       (app "map_iter" (arrow [m_ty; cb_ty] res_ty) [var mn m_ty; cb] res_ty)))
+             | _, [] -> Some (app op (Ast.TyArrow (m_ty, res_ty)) [m'] res_ty)
+             | _ -> None)
+          | _ -> None)
+       | _ -> None)
+    | _ -> None in
+  Trait_elab.map_expr subst full
+
 let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   items := [];
   lbl_counter := 0;
@@ -7802,6 +7920,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
        | _ -> ())
     | _ -> ()
   ) prog.Ast.decls;
+  let full = rewrite_compound_maps full in
   let main_body = split_tops full in
   (* reachability: which top-level fns does the program actually use? *)
   let reachable : (string, unit) Hashtbl.t = Hashtbl.create 64 in

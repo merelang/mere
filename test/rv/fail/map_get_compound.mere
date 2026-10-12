@@ -1,0 +1,5 @@
+// v0.1.657: a Map keyed by a tuple is a str-keyed Map of `show k` on RISC-V;
+// a missing key fails as C's does
+let m = map_new ();
+let _ = map_set m (1, 2) 3;
+print_int (map_get m (2, 1))
