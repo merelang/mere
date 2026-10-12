@@ -868,6 +868,11 @@ let set_inner_lifts_for_host_wasm (host : string) : unit =
    iterations) doesn't grow the JS stack. Requires wat2wasm's
    `--enable-tail-call` (or an equivalent V8 default). *)
 let wasm_tail_pos = ref false
+(* v0.1.662: a region loop runs each iteration as the region block arm, with
+   the block's mark forced to the loop's (see Region_loop); the arm takes it
+   and clears it, so a block nested in the body starts at the bump as before *)
+let forced_block_mark : int option ref = ref None
+let rloop_counter = ref 0
 
 (* True only while emit_expr is walking the top-level `let a = … in
    let b = … in … 0` spine of the main body. This is the ONE context
@@ -936,6 +941,20 @@ let of_json_opt_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
    (Wasm `i32.eq` on a compound value compares linear-memory offsets, not
    contents). Keyed by ty_tag. *)
 let eq_types : (string, Ast.ty) Hashtbl.t = Hashtbl.create 8
+
+(* v0.1.662: a type that never resolved, at the type it was BUILT at: its
+   variables are int, as construction defaults them. `region A { Nil }` and
+   `Nil == Nil` reached a helper named after a bare 'a, which no type has
+   (test/parity/shared_nullary_regions; refused whole until region loops
+   compiled here) *)
+let rec default_ty_int (t : Ast.ty) : Ast.ty =
+  match Ast.walk t with
+  | Ast.TyVar _ | Ast.TyParam _ -> Ast.TyInt
+  | Ast.TyTuple ts -> Ast.TyTuple (List.map default_ty_int ts)
+  | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map default_ty_int args)
+  | Ast.TyArrow (x, y) -> Ast.TyArrow (default_ty_int x, default_ty_int y)
+  | Ast.TyRef (m, r, i) -> Ast.TyRef (m, r, default_ty_int i)
+  | other -> other
 
 let needs_struct_eq (t : Ast.ty) : bool =
   match Ast.walk t with
@@ -1288,11 +1307,11 @@ let collect_show_types (root : Ast.expr) (fns : fn_decl list) : unit =
         | None -> ())
      | Ast.Cmp ((Ast.Eq | Ast.Ne), a, _) ->
        (match a.Ast.ty with
-        | Some t when needs_struct_eq t -> add_type_into eq_types t
+        | Some t when needs_struct_eq t -> add_type_into eq_types (default_ty_int t)
         | _ -> ())
      | Ast.Cmp ((Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge), a, _) ->
        (match a.Ast.ty with
-        | Some t when needs_struct_cmp t -> add_type_into cmp_types t
+        | Some t when needs_struct_cmp t -> add_type_into cmp_types (default_ty_int t)
         | _ -> ())
      | Ast.App ({ node = Ast.Var "mk_metrics"; _ }, _) ->
        (* Phase 16.3: metrics.record uses show_int internally to format
@@ -2504,7 +2523,7 @@ and emit_expr (e : Ast.expr) : unit =
   | Ast.Cmp (op, a, b) ->
     (* Phase 26.1: TyStr eq/ne via $__lang_streq; ordering (< <= > >=) via
        $__lang_str_compare (3-way, -1/0/1) compared to 0. *)
-    let a_ty = match a.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt in
+    let a_ty = match a.Ast.ty with Some t -> default_ty_int (Ast.walk t) | None -> Ast.TyInt in
     (match a_ty, op with
      | Ast.TyStr, Ast.Eq ->
        (* runtime helpers speak the i64 value model: streq returns an
@@ -4822,10 +4841,83 @@ and emit_expr (e : Ast.expr) : unit =
     ) elems;
     emit_instr (Printf.sprintf "local.get %d" base_slot);
     emit_instr "i64.extend_i32_u"
-  | Ast.Region_loop (_, _, _) ->
-    unsupported e.Ast.loc
-      "region loop (the Wasm bump rollback is LIFO; the loop's carry must \
-       survive the swap)"
+  | Ast.Region_loop (name, x, body) ->
+    (* v0.1.662: `region R loop x { body }`. Each iteration is the region block
+       arm below, run with its mark forced to M0, the bump where the loop
+       began: the body's result -- the region_flow value -- is copied out above
+       the iteration's garbage, the bump goes back to max(M0, high-water mark),
+       and the value is copied down to M0. That rollback takes the previous
+       carry too (the last thing at M0, and read by now), so the loop runs in
+       one carry and one iteration's garbage -- RISC-V's scheme (v0.1.658).
+       x is a local: None, then a Some box made just past the copy. A carry the
+       block cannot copy out (a container, a closure) is a plain loop that
+       gives nothing back, which is the block's own rule for such a value. *)
+    let flow_ty = match body.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit in
+    let c_ty = match flow_ty with
+      | Ast.TyCon ("region_flow", [c; _]) -> Ast.walk c
+      | _ -> unsupported e.Ast.loc "region loop: the body is not a region_flow" in
+    let opt_ty = Ast.TyCon ("option", [c_ty]) in
+    let rec has_arrow t = match Ast.walk t with
+      | Ast.TyArrow _ -> true
+      | Ast.TyTuple ts -> List.exists has_arrow ts
+      | Ast.TyCon (_, args) -> List.exists has_arrow args
+      | _ -> false in
+    let rec has_container t = match Ast.walk t with
+      | Ast.TyCon (("Vec" | "OwnedVec" | "Map" | "StrBuf" | "ByteBuf" | "Channel" | "ThreadHandle"), _) -> true
+      | Ast.TyRef _ -> true
+      | Ast.TyTuple ts -> List.exists has_container ts
+      | Ast.TyCon (_, args) -> List.exists has_container args
+      | _ -> false in
+    let reclaim = not (has_arrow flow_ty || has_container flow_ty) in
+    let mk node ty = { Ast.loc = e.Ast.loc; ty = Some ty; node } in
+    let tag_of c = match Hashtbl.find_opt variant_tags c with
+      | Some t -> t | None -> unsupported e.Ast.loc ("region loop: no tag for " ^ c) in
+    let saved_tail = !wasm_tail_pos in
+    wasm_tail_pos := false;
+    incr rloop_counter;
+    let l_exit = Printf.sprintf "$rloop_exit_%d" !rloop_counter
+    and l_top = Printf.sprintf "$rloop_top_%d" !rloop_counter in
+    let m0 = fresh_local_i32 () in
+    emit_instr "global.get $__lang_bump";
+    emit_instr (Printf.sprintf "local.set %d" m0);
+    let x_slot = fresh_local () and f_slot = fresh_local ()
+    and p_slot = fresh_local () and res_slot = fresh_local () in
+    emit_expr (mk (Ast.Constr ("None", None)) opt_ty);
+    emit_instr (Printf.sprintf "local.set %d" x_slot);
+    emit_instr (Printf.sprintf "block %s" l_exit);
+    emit_instr (Printf.sprintf "loop %s" l_top);
+    let prev_locals = !locals in
+    locals := (x, x_slot) :: prev_locals;
+    if reclaim then begin
+      forced_block_mark := Some m0;
+      emit_expr (mk (Ast.Region_block (name, body)) flow_ty)
+    end else emit_expr body;
+    wasm_tail_pos := false;
+    emit_instr (Printf.sprintf "local.set %d" f_slot);
+    (* the payload, whichever constructor it is under *)
+    emit_instr (Printf.sprintf "local.get %d" f_slot);
+    emit_instr "i32.wrap_i64";
+    emit_instr "i64.load offset=8";
+    emit_instr (Printf.sprintf "local.set %d" p_slot);
+    emit_instr (Printf.sprintf "local.get %d" f_slot);
+    emit_instr "i32.wrap_i64";
+    emit_instr "i64.load offset=0";
+    emit_instr (Printf.sprintf "i64.const %d" (tag_of "Continue"));
+    emit_instr "i64.eq";
+    emit_instr "if";
+    locals := ("__rloop_carry", p_slot) :: !locals;
+    emit_expr (mk (Ast.Constr ("Some", Some (mk (Ast.Var "__rloop_carry") c_ty))) opt_ty);
+    emit_instr (Printf.sprintf "local.set %d" x_slot);
+    emit_instr (Printf.sprintf "br %s" l_top);
+    emit_instr "end";
+    locals := prev_locals;
+    emit_instr (Printf.sprintf "local.get %d" p_slot);
+    emit_instr (Printf.sprintf "local.set %d" res_slot);
+    emit_instr (Printf.sprintf "br %s" l_exit);
+    emit_instr "end";
+    emit_instr "end";
+    emit_instr (Printf.sprintf "local.get %d" res_slot);
+    wasm_tail_pos := saved_tail
   | Ast.Region_block (_, body) ->
     (* v0.1.37: regions RECLAIM again — the safe version of the
        save / restore that Phase 16.4 removed as unsound. Three parts
@@ -4846,6 +4938,10 @@ and emit_expr (e : Ast.expr) : unit =
        runs indefinitely. *)
     let result_ty =
       match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit in
+    (* v0.1.662: a result whose type never resolved (`region A { Nil }`) is
+       copied at the type it was built at -- its variables defaulted to int,
+       as construction defaults them; there is no copier for a bare 'a *)
+    let result_ty = default_ty_int result_ty in
     let rec ty_has_arrow t =
       match Ast.walk t with
       | Ast.TyArrow _ -> true
@@ -4983,7 +5079,12 @@ and emit_expr (e : Ast.expr) : unit =
        container that predates it from one it made -- see `$__lang_protect`. *)
     let mark_slot = fresh_local_i32 () in
     let outer_mark_slot = fresh_local_i32 () in
-    emit_instr "global.get $__lang_bump";
+    (match !forced_block_mark with
+     | Some m0 ->
+       (* v0.1.662: a region loop's iteration: the loop's mark (see Region_loop) *)
+       forced_block_mark := None;
+       emit_instr (Printf.sprintf "local.get %d" m0)
+     | None -> emit_instr "global.get $__lang_bump");
     emit_instr (Printf.sprintf "local.set %d" mark_slot);
     emit_instr "global.get $__lang_block_mark";
     emit_instr (Printf.sprintf "local.set %d" outer_mark_slot);

@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.662 — 2026-10-12
+
+_`region R loop` on LLVM and Wasm, reclaiming as they go. The parity programs this let them read found an older bug on both: an empty list returned from a region block._
+
+- **LLVM.** The loop runs as C runs it: each iteration in a block of its own.
+  On `Continue c` the carry is copied (`@__mcopy_C`) into the next iteration's
+  block and this one is released; on `Done d`, d is copied out. x and the
+  iteration's region are phis at the loop head. A container carry has identity
+  and no deep copy here, so it keeps one block for the whole loop.
+- **Wasm.** Each iteration is the region block arm, run with its mark forced to
+  M0, the bump where the loop began. The carry is copied out above the garbage,
+  the bump goes back to max(M0, high-water mark), and the carry is copied down
+  to M0. That rollback also takes the previous carry, which is RISC-V's scheme
+  (v0.1.658). A carry the block cannot copy out is a plain loop.
+- **region_reclaim_check** runs `loop_carry` at 300,000 and at 3,000,000
+  iterations. C and LLVM stay flat, and Wasm completes 3,000,000 inside its
+  fixed 64 MiB (unreclaimed it would take about 300 MB).
+- **`region A { Nil }` on LLVM and Wasm.** A result whose type never resolved
+  was taken to be a shared static nullary node, so nothing was copied. On LLVM
+  it is a `list_int_node` allocated in the block (construction defaults the
+  variable to int), and the block's reuse overwrote it: "no matching arm in
+  match". Wasm had no copier for a bare `'a` at all, and `Nil == Nil` failed the
+  same way. Both backends now copy and compare such a value at the defaulted
+  type, which is how it was built. `shared_nullary_regions` showed it; both
+  backends had refused that program whole until now.
+- `test/escape/ROUTES`: `fn_over_carry` is readable on LLVM and Wasm.
+
+LLVM leaves 10 of 234 parity programs unchecked now, and Wasm 3 (13 and 6
+before).
+
 ## v0.1.661 — 2026-10-12
 
 _LLVM: `vec_recycle`, `map_recycle`, `map_clear`, `vec_compact` and `map_compact`. Also two parity programs that grow every container past each doubling._
