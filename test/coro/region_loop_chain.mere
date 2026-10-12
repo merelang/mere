@@ -1,0 +1,24 @@
+// v0.1.658: a `region R loop` inside a coroutine, whose heap is a chain of
+// blocks (v0.1.627). Each iteration builds a list past the end of the
+// coroutine's first heap block and hands a short list on; the loop's mark stays
+// in the first block for every iteration, so each rollback goes back along the
+// chain, and the carry it copies down must be the one the body made.
+type ilist = INil | ICons of int * ilist;
+let rec build = fn n -> if n == 0 then INil else ICons (n, build (n - 1));
+let rec total = fn lst -> match lst with | INil -> 0 | ICons (h, t) -> h + total t;
+let root = coro_root ();
+let out = map_new ();
+let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
+  let r = region R loop x {
+    match x with
+    | None -> Continue (0, INil)
+    | Some (i, keep) ->
+      let big = build (3000 + i) in
+      let t = total big in
+      if i >= 40 then Done (i + total keep)
+      else Continue (i + 1, ICons (t % 1000, keep))
+  } in
+  let _ = map_set out 0 r in
+  root) ());
+let _ = coro_switch c;
+print_int (map_get out 0)

@@ -378,6 +378,21 @@ if [ -n "${MEMU:-}" ] && [ -f "$MEMU/riscv-runc/rv64i_run.mere" ]; then
     else
       echo "FAIL region_reclaim/RV64: -rv64 refused arena_churn.mere"; fail=1
     fi
+    # v0.1.658: `region R loop` -- the carry is copied down to the loop's mark
+    # each time round, so 300,000 iterations (60 MB if nothing came back) fit
+    # in 8 MB. Before 658 the loop was refused here; a first version that
+    # recursed instead ran out of memory at 2 million.
+    LCSRC="$ROOT/test/regionreclaim/loop_carry.mere"
+    if "$MERE" -rv64 --ram 8 "$LCSRC" > "$TMP/prog.bin" 2>/dev/null; then
+      a_l="$( cd "$TMP" && perl -e 'alarm 600; exec @ARGV' ./rvrun64 8 2>&1 | grep -v '^rvrun' | head -1 )"
+      if [ "$a_l" != "300020" ]; then
+        echo "FAIL region_reclaim/RV64: loop_carry got '$a_l', expected 300020 -- 300,000 iterations of a region loop did not fit in 8 MB: the loop stopped handing its carry over"
+        fail=1
+      fi
+      checked=$((checked + 1)); rv_note="$rv_note, and a region loop of 300,000 iterations in 8 MB"
+    else
+      echo "FAIL region_reclaim/RV64: -rv64 refused loop_carry.mere"; fail=1
+    fi
   else
     echo "FAIL region_reclaim/RV64: could not build the emulator or the program"; fail=1
   fi

@@ -101,7 +101,7 @@ closure_out          SAFE   ACCEPT    ACCEPT      rv          -
 closure_captures_container SAFE ACCEPT ACCEPT  rv          Q-188
 scalar_out           SAFE   ACCEPT    ACCEPT      -           -
 recursive_type       SAFE   ACCEPT    ACCEPT      -           -
-fn_over_carry        SAFE   ACCEPT    ACCEPT      ll,w,rv     -
+fn_over_carry        SAFE   ACCEPT    ACCEPT      ll,w        -
 callee_alloc_chain   SAFE   ACCEPT    ACCEPT      -           Q-132
 callee_built_into_vec GATED  REJECT    REJECT      -           Q-127
 kept_then_written    SAFE   ACCEPT    ACCEPT      -           Q-190
