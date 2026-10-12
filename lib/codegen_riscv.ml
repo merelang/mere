@@ -635,6 +635,19 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
      | "map_clear" -> "rvmap_clear" :: v :: acc
      | "map_compact" -> "rvmap_compact" :: v :: acc
      | "map_iter" -> (if map_word_keyed e then "rvmap_iter_i" else "rvmap_iter") :: v :: acc
+     (* v0.1.653: ByteBuf, ListBuf, OwnedVec and the bytes bridge *)
+     | "bytebuf_new" -> "rvbb_new" :: v :: acc
+     | "bytebuf_len" -> "rvbb_len" :: v :: acc
+     | "bytebuf_get" -> "rvbb_get" :: v :: acc
+     | "bytebuf_set" -> "rvbb_set" :: v :: acc
+     | "bytebuf_push" -> "rvbb_push" :: v :: acc
+     | "bytes_of_bytebuf" | "bytes_of_vec" -> "rvbb_to_bytes" :: v :: acc
+     | "bytebuf_of_bytes" | "vec_of_bytes" -> "rvbb_of_bytes" :: v :: acc
+     | "lb_new" -> "rvlb_new" :: v :: acc
+     | "lb_push" -> "rvlb_push" :: v :: acc
+     | "lb_to_list" -> "rvlb_to_list" :: v :: acc
+     | "owned_vec_get" -> "rvov_get" :: v :: acc
+     | "owned_vec_to_vec" | "vec_to_owned" -> "rvov_copy" :: v :: acc
      (* v0.1.623: coroutines are the prelude's rvcoro_ functions; rvcoro_boot is
         entered by __rv_coro_boot, so nothing in the source names it *)
      | "__coro_new_raw" -> "rvcoro_new" :: "rvcoro_new_sized" :: "rvcoro_boot" :: v :: acc
@@ -3110,9 +3123,39 @@ and compile_app env e =
   (* Q-106: the in-order list builder is a cons-cell splice with a runtime
      region check, and this backend's lists and regions are its own block
      layout. A clean refusal here, not an "unbound variable". *)
-  | Ast.Var ("lb_new" | "lb_push" | "lb_to_list") ->
-    err e.loc "RV32I: no RISC-V lowering for lb_new / lb_push / lb_to_list (ListBuf) yet -- \
-               build the list with an accumulator and list_rev"
+  (* v0.1.653: ByteBuf, ListBuf and OwnedVec are Vecs on this target, made and
+     used by the prelude's rvbb_ / rvlb_ / rvov_ (as map_new is rvmap_new); a
+     __heap one goes into the default arena like a Vec *)
+  | Ast.Var ("bytebuf_new" | "lb_new" | "owned_vec_new" as op) when List.length args = 1 ->
+    let target = match op with "bytebuf_new" -> "rvbb_new" | "lb_new" -> "rvlb_new"
+                               | _ -> "vec_new" in
+    if target = "vec_new" then (compile_expr env (List.hd args); emit (Jal (ra, "__vec_new")))
+    else call_top env target args;
+    if heap_container e.Ast.ty && not (in_rv_prelude e.Ast.loc) then emit (Jal (ra, "__vheap"))
+  | Ast.Var ("bytebuf_len" | "bytebuf_get" | "bytebuf_set" | "bytebuf_push"
+             | "bytes_of_bytebuf" | "bytes_of_vec" | "lb_push" | "lb_to_list"
+             | "owned_vec_get" | "owned_vec_to_vec" as op)
+    when List.length args = (match op with
+                             | "bytebuf_len" | "bytes_of_bytebuf" | "bytes_of_vec"
+                             | "lb_to_list" | "owned_vec_to_vec" -> 1
+                             | "bytebuf_set" -> 3 | _ -> 2) ->
+    call_top env (match op with
+                  | "bytebuf_len" -> "rvbb_len" | "bytebuf_get" -> "rvbb_get"
+                  | "bytebuf_set" -> "rvbb_set" | "bytebuf_push" -> "rvbb_push"
+                  | "bytes_of_bytebuf" | "bytes_of_vec" -> "rvbb_to_bytes"
+                  | "lb_push" -> "rvlb_push" | "lb_to_list" -> "rvlb_to_list"
+                  | "owned_vec_get" -> "rvov_get" | _ -> "rvov_copy") args
+  | Ast.Var ("bytebuf_of_bytes" | "vec_of_bytes" | "vec_to_owned" as op) when List.length args = 1 ->
+    call_top env (if op = "vec_to_owned" then "rvov_copy" else "rvbb_of_bytes") args;
+    if heap_container e.Ast.ty && not (in_rv_prelude e.Ast.loc) then emit (Jal (ra, "__vheap"))
+  | Ast.Var ("owned_vec_push" as _op) when List.length args = 2 ->
+    compile_expr env (List.nth args 0); push a0;
+    compile_expr env (List.nth args 1);
+    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;
+    emit (Jal (ra, "__vec_push"))
+  | Ast.Var "owned_vec_len" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)
   | Ast.Var "vec_new" when List.length args = 1 ->
     compile_expr env (List.hd args); emit (Jal (ra, "__vec_new"));
     (* v0.1.614: a __heap Vec stores into the default arena (emit_arena) *)

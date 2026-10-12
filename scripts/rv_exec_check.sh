@@ -59,7 +59,11 @@ rc=0; pass=0; fail=0
 # 1152921504606846976 on the C backend and 0 here. ⚠ It was added to the parity
 # suite for a different question, turned this gate red, and nothing said so --
 # rv_exec_check was in no workflow at all.
-KNOWN_DIFF="float_edges region_growth int_width_boundary"
+# bytes_file_roundtrip and raster joined in v0.1.653, when ByteBuf reached
+# RISC-V and they compiled here at all: a checksum `acc * 31 % 1000000007` and
+# an RGBA word `r << 24 | ...` pass 2^31, so on a 32-bit int they wrap, as
+# int_width_boundary does. Both agree at 64 bits.
+KNOWN_DIFF="float_edges region_growth int_width_boundary bytes_file_roundtrip raster"
 # float_edges/str_edges             64-bit values; this backend's int is 32 bits
 #   (coll_edges and nul_in_str sat here too, on the strength of a 60-second
 #    alarm that was really a measurement of how slow decimal printing is on an
@@ -470,10 +474,11 @@ if [ -n "$RVRUN64" ] && "$MERE" -c "$ROOT/test/rv/$name.mere" > "$TMP/ref.c" 2>/
     if [ "$got" = "$exp" ]; then printf '  ok    %s (RV64, 272 MB, the stack through the device window)\n' "$name"
     else printf '  FAIL  %s\n    expected: %s\n    got:      %s\n' "$name" "$(echo $exp)" "$(echo $got)"; rc=1; fi
   else printf '  FAIL  %s: -rv64 --ram 272 refused\n' "$name"; head -2 "$TMP/rverr"; rc=1; fi
-  for refused in "-rv --ram 272" "-rv64 --bare --ram 272"; do
-    if "$MERE" $refused "$ROOT/test/rv/$name.mere" > /dev/null 2>&1; then
-      printf '  FAIL  %s: `%s` accepted -- RAM would cover the devices\n' "$name" "$refused"; rc=1
-    else printf '  ok    %s: `%s` still refused\n' "$name" "$refused"; fi
+  # (not `refused`: that name counts the corpus refused at compile time below)
+  for rflags in "-rv --ram 272" "-rv64 --bare --ram 272"; do
+    if "$MERE" $rflags "$ROOT/test/rv/$name.mere" > /dev/null 2>&1; then
+      printf '  FAIL  %s: `%s` accepted -- RAM would cover the devices\n' "$name" "$rflags"; rc=1
+    else printf '  ok    %s: `%s` still refused\n' "$name" "$rflags"; fi
   done
 fi
 

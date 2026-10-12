@@ -73,7 +73,7 @@ machine rather than a host.
 | `bit_shr` | yes | yes | yes | yes |
 | `bit_xor` | yes | yes | yes | yes |
 | `bool_of_str` | yes | yes | yes | yes |
-| `bytebuf_new` | yes | yes | yes | refused |
+| `bytebuf_new` | yes | yes | yes | yes |
 | `bytes_of_hex` | yes | yes | yes | yes |
 | `bytes_of_str` | yes | yes | yes | yes |
 | `ceil` | yes | yes | yes | yes |
@@ -156,7 +156,7 @@ machine rather than a host.
 | `is_digit` | yes | yes | yes | yes |
 | `is_space` | yes | yes | yes | yes |
 | `join` | yes | yes | yes | unattributed |
-| `lb_new` | yes | yes | yes | refused |
+| `lb_new` | yes | yes | yes | yes |
 | `lcm` | yes | yes | yes | yes |
 | `list_dir` | yes | refused | refused | yes |
 | `log` | yes | yes | yes | yes |
@@ -171,7 +171,7 @@ machine rather than a host.
 | `of_json` | refused | refused | unattributed | refused |
 | `of_json_opt` | refused | refused | unattributed | refused |
 | `ord` | yes | yes | yes | yes |
-| `owned_vec_new` | yes | yes | yes | refused |
+| `owned_vec_new` | yes | yes | yes | yes |
 | `pi` | yes | yes | yes | yes |
 | `pow` | yes | yes | yes | yes |
 | `print` | yes | yes | yes | yes |

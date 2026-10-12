@@ -106,7 +106,7 @@ callee_alloc_chain   SAFE   ACCEPT    ACCEPT      -           Q-132
 callee_built_into_vec GATED  REJECT    REJECT      -           Q-127
 kept_then_written    SAFE   ACCEPT    ACCEPT      -           Q-190
 spawn_env_in_block   SAFE   ACCEPT    ACCEPT      ll,w,rv     Q-191
-ownedvec_store       SAFE   ACCEPT    ACCEPT      rv          Q-192
+ownedvec_store       SAFE   ACCEPT    ACCEPT      -           Q-192
 channel_from_block   SAFE   ACCEPT    ACCEPT      w,rv        -
 bytebuf_out          GATED  REJECT    REJECT      -           -
 recycled_escape      SAFE   ACCEPT    ACCEPT      ll          Q-195

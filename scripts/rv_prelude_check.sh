@@ -28,6 +28,24 @@ COUNT=$(printf '%s\n' $NAMES | wc -l | tr -d ' ')
 probe_for() {
   case "$1" in
     not) echo 'let _ = print_int (if not false then 1 else 0);' ;;
+    # v0.1.653: reached through the builtins codegen lowers to them
+    rvbb_new|rvbb_len) echo 'let b = bytebuf_new 3;
+let _ = print_int (bytebuf_len b);' ;;
+    rvbb_get|rvbb_set) echo 'let b = bytebuf_new 3;
+let _ = bytebuf_set b 1 300;
+let _ = print_int (bytebuf_get b 1);' ;;
+    rvbb_push) echo 'let b = bytebuf_new 0;
+let _ = bytebuf_push b 7;' ;;
+    rvbb_to_bytes) echo 'let b = bytebuf_new 2;
+let _ = print_int (bytes_len (bytes_of_bytebuf b));' ;;
+    rvbb_of_bytes) echo 'let v = vec_of_bytes (bytes_of_str "ab");
+let _ = print_int (vec_len v);' ;;
+    rvlb_new|rvlb_push|rvlb_to_list) echo 'let b = lb_new ();
+let _ = lb_push b 1;
+let _ = print_int (list_len (lb_to_list b));' ;;
+    rvov_get|rvov_copy) echo 'let o = owned_vec_new ();
+let _ = owned_vec_push o 4;
+let _ = print_int (owned_vec_get o 0 + vec_len (owned_vec_to_vec o));' ;;
     # v0.1.642
     sys_os|sys_arch) echo "let _ = print ($1 ());" ;;
     # v0.1.640: every file builtin, in one program each (they need not run)

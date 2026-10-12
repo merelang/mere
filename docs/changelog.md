@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.653 — 2026-10-12
+
+_ByteBuf, ListBuf, OwnedVec and the bytes <-> Vec bridge on RISC-V; `str_repeat` of a negative count and `float_of_str` of inf / nan as the C runtime has them._
+
+Of Mere's parity programs, `-rv64` refused 41 at compile time. Sixteen
+builtins were missing outright: the whole ByteBuf family (`bytebuf_new`,
+`_len`, `_get`, `_set`, `_push`, `bytebuf_of_bytes`, `bytes_of_bytebuf`),
+`bytes_of_vec` / `vec_of_bytes`, ListBuf (`lb_new`, `lb_push`, `lb_to_list`,
+refused by name) and OwnedVec (`owned_vec_new`, `_push`, `_get`, `_len`,
+`owned_vec_to_vec`, `vec_to_owned`). Each is a Vec on this target, made and
+used by the prelude's `rvbb_` / `rvlb_` / `rvov_` functions that codegen lowers
+the builtins to -- as `map_new` is `rvmap_new` -- so a program keeps the
+builtins' types, and a `__heap` one goes into the default arena as a Vec does.
+The refusals are the C runtime's, word for word (`bytebuf_get: index 9 out of
+bounds (len = 3)`; `lb_push: the builder was already turned into a list by
+lb_to_list`, catchable); a ByteBuf masks to a byte; the OwnedVec conversions
+copy, as C's do. A ByteBuf holds a byte per word here.
+
+Two refusals the newly compiled `refusals` program showed: `str_repeat` with a
+negative count gave the empty string where C fails (`str_repeat: negative
+count -1`), and `float_of_str "-INF"` (and `inf`, `infinity`, `nan`, any case,
+with a sign -- strtod's words) was refused where C answers.
+
+`-rv64` refuses 30 parity programs now (41 before); rv_exec runs 199 on RV64
+and 184 on RV32, all agreeing with C. `bytes_file_roundtrip` and `raster` join
+RV32's known differences (a checksum and an RGBA word pass 2^31). Also: the
+`big_ram` block of rv_exec (v0.1.650) named its loop variable `refused`, which
+is the count the RV32 summary prints; it printed the last flags instead.
+`fma` and the float32 conversions wait for the SIMD types they are tested with.
+
 ## v0.1.652 — 2026-10-12
 
 _On RISC-V, the release of retired blocks makes nothing per word it reads; a hosted RV64 program may have up to 2047 MB._
