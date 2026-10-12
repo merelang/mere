@@ -8,10 +8,17 @@ extern fn proc_wait_status: unit -> int;
 let z = chr 0;
 let one = chr 1;
 let two = chr 2;
-// 1. an empty environment: env prints nothing
-let p1 = proc_spawn "/usr/bin/env" "env" "" "" (0 - 1) "";
+// 1. an empty environment: env prints nothing -- but its own MEMU_RAM /
+//    MEMU_PROG, which memu adds for a child that may be memu itself (memu
+//    c627b01, v0.1.666); those lines are dropped here, so the answer is the
+//    same with that memu and without it
+let p1 = proc_spawn "/usr/bin/env" "env" "" ("o" ++ two ++ "1" ++ two ++ "577" ++ two ++ "420" ++ two ++ "spawn_env.txt") (0 - 1) "";
+let rec non_memu = fn (ls: str list) -> fn (n: int) -> match ls with
+  | Nil -> n
+  | Cons (l, t) -> non_memu t (if str_starts_with l "MEMU_" then n else n + 1);
 let _ = print ("env pid>0 " ++ (if p1 > 0 then "yes" else str_of_int p1));
 let w1 = proc_waitpid p1 0;
+let _ = print ("env lines " ++ str_of_int (non_memu (str_split (read_file "spawn_env.txt") "\n") 0));
 let _ = print ("waited " ++ (if w1 == p1 then "it" else str_of_int w1) ++ " status " ++ str_of_int (proc_wait_status ()));
 // 2. a given environment, stderr onto stdout, exit 3
 let p2 = proc_spawn "/bin/sh" ("sh" ++ z ++ "-c" ++ z ++ "echo $FOO; echo err 1>&2; exit 3") ("FOO=bar" ++ z ++ "X=1") ("d" ++ two ++ "1" ++ two ++ "2") (0 - 1) "";

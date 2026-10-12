@@ -4,6 +4,25 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.666 — 2026-10-12
+
+_RISC-V: a child that memu spawns can be memu itself again. memu now passes it `MEMU_RAM` / `MEMU_PROG` (memu c627b01), and `host_spawn` no longer counts those two._
+
+Found by mere-ruby's RV64 corpus (288 → 284 with its `spawn` on `proc_spawn`).
+mere-ruby builds a child's environment from the guest's ENV, and memu keeps
+`MEMU_RAM` / `MEMU_PROG` out of that (`env_drop_memu`): they are the emulator's.
+So `RbConfig.ruby`, which is memu, started without them. It came up as a fresh
+memu on a relative `prog.bin` with 256 MB ("read_file_bytes: cannot open
+prog.bin", or a trap with no handler). The old `run` (call 1030) went through
+the shell and inherited them. memu c627b01 adds the two to a spawned child's
+environment when the guest's does not name them, for every child, since memu
+cannot tell which one is itself. This is the one thing a child of a RISC-V
+program sees that a child of a native program would not.
+
+`test/rv/host_spawn.mere` therefore no longer prints `env`'s output under an
+empty environment. It counts the lines that are not `MEMU_`, which is 0 with
+either memu.
+
 ## v0.1.665 — 2026-10-12
 
 _`of_json`, `of_json_opt` and the `_like` forms on LLVM. The parser is RISC-V's, now shared as `lib/json_prelude.ml`, and the decoders are generated as typed Mere._
