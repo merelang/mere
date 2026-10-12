@@ -227,6 +227,14 @@ fi
 # test's heap into the stack. StrBuf is a real byte buffer now and the
 # splitter finds from an offset instead of copying the tail per piece.
 KNOWN_DIFF64="region_growth"
+# float_bits joined on an x86-64 host in v0.1.659, the version after RISC-V
+# began to compile it (656): it prints the bits of `inf - inf`, and that NaN is
+# the machine's. x86-64's default NaN has the sign bit set (0xfff80000 in the
+# high half), arm64's and RISC-V's canonical NaN does not (0x7ff80000) -- so
+# RV64 agrees with C on an arm64 host and not on CI's x86-64, and the freshness
+# check would fail one of the two if the entry did not depend on the host. 656
+# was gated on arm64 and went red in CI.
+case "$(uname -m)" in x86_64|amd64) KNOWN_DIFF64="$KNOWN_DIFF64 float_bits" ;; esac
 # region_growth            wants more RAM than the sweep gives it (no reclaim)
 # str_edges                the prelude's string builders are concat-quadratic and
 #                          strbuf is concat-backed: 200k chars = GBs of dead heap.

@@ -77,12 +77,12 @@ machine rather than a host.
 | `bytes_of_hex` | yes | yes | yes | yes |
 | `bytes_of_str` | yes | yes | yes | yes |
 | `ceil` | yes | yes | yes | yes |
-| `channel_close` | yes | yes | yes | unattributed |
-| `channel_new` | yes | yes | yes | refused |
-| `channel_recv` | yes | yes | yes | unattributed |
-| `channel_recv_opt` | yes | yes | yes | unattributed |
-| `channel_recv_timeout` | yes | yes | yes | unattributed |
-| `channel_send` | yes | yes | yes | unattributed |
+| `channel_close` | yes | yes | yes | yes |
+| `channel_new` | yes | yes | yes | yes |
+| `channel_recv` | yes | yes | yes | yes |
+| `channel_recv_opt` | yes | yes | yes | yes |
+| `channel_recv_timeout` | yes | yes | yes | yes |
+| `channel_send` | yes | yes | yes | yes |
 | `char_at` | yes | yes | yes | yes |
 | `chr` | yes | yes | yes | yes |
 | `clamp` | yes | yes | yes | yes |
@@ -97,7 +97,7 @@ machine rather than a host.
 | `csr_write` | bare | refused | refused | bare |
 | `cube` | yes | yes | yes | yes |
 | `decr` | yes | yes | yes | yes |
-| `detach` | yes | yes | yes | unattributed |
+| `detach` | yes | yes | yes | yes |
 | `dir_create` | yes | yes | yes | yes |
 | `dir_entries` | yes | refused | yes | yes |
 | `dir_remove` | yes | yes | yes | yes |
@@ -155,7 +155,7 @@ machine rather than a host.
 | `is_alpha` | yes | yes | yes | yes |
 | `is_digit` | yes | yes | yes | yes |
 | `is_space` | yes | yes | yes | yes |
-| `join` | yes | yes | yes | unattributed |
+| `join` | yes | yes | yes | yes |
 | `lb_new` | yes | yes | yes | yes |
 | `lcm` | yes | yes | yes | yes |
 | `list_dir` | yes | refused | refused | yes |
@@ -195,7 +195,7 @@ machine rather than a host.
 | `sign` | yes | yes | yes | yes |
 | `sin` | yes | yes | yes | yes |
 | `sleep_ms` | yes | yes | refused | yes |
-| `spawn` | yes | yes | yes | refused |
+| `spawn` | yes | yes | yes | yes |
 | `sqrt` | yes | yes | yes | yes |
 | `square` | yes | yes | yes | yes |
 | `stdin_byte` | yes | refused | refused | refused |

@@ -64,6 +64,18 @@ let _ = print (str_of_float (f32x4_reduce_add b + f32x4_extract b 3));' ;;
     u8x16_first_true|rvu16_show|rvu16_json) echo 'let v = u8x16_splat 3;
 let _ = print_int (u8x16_first_true v);
 let _ = print (show v ++ to_json v);' ;;
+    # v0.1.659: the green threads and channels the thread builtins lower to
+    rvth_*|rvch_*) echo 'let ch = channel_new ();
+let h = spawn (fn (u: unit) -> channel_send ch 1);
+let w = spawn (fn (u: unit) -> ());
+let _ = channel_sender ch h;
+let _ = print_int (channel_recv ch);
+let _ = join h;
+let _ = detach w;
+let _ = print_int (list_len (par_map (fn (x: int) -> x) [1, 2]));
+let _ = channel_close ch;
+let _ = print (match channel_recv_opt ch with Some _ -> "s" | None -> "n");
+let _ = print (match channel_recv_timeout ch 1 with Some _ -> "s" | None -> "n");' ;;
     # v0.1.642
     sys_os|sys_arch) echo "let _ = print ($1 ());" ;;
     # v0.1.640: every file builtin, in one program each (they need not run)

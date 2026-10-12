@@ -629,6 +629,15 @@ let rv_lane_fns =
     ("f32x4_add", ("rvf4_add", 2)); ("f32x4_sub", ("rvf4_sub", 2));
     ("f32x4_mul", ("rvf4_mul", 2)); ("f32x4_div", ("rvf4_div", 2));
     ("f32x4_reduce_add", ("rvf4_reduce_add", 1)); ("f32x4_extract", ("rvf4_extract", 2)) ]
+(* v0.1.659: threads and channels are the prelude's green threads (rvth_ /
+   rvch_), on its coroutines; the builtins lower to them (name, arity) *)
+let rv_thread_fns =
+  [ ("spawn", ("rvth_spawn", 1)); ("join", ("rvth_join", 1)); ("detach", ("rvth_detach", 1));
+    ("par_map", ("rvth_par_map", 2));
+    ("channel_new", ("rvch_new", 1)); ("channel_send", ("rvch_send", 2));
+    ("channel_recv", ("rvch_recv", 1)); ("channel_recv_opt", ("rvch_recv_opt", 1));
+    ("channel_recv_timeout", ("rvch_recv_timeout", 2)); ("channel_close", ("rvch_close", 1));
+    ("channel_sender", ("rvch_sender", 2)) ]
 let rec vars_in (e : Ast.expr) (acc : string list) : string list =
   match e.node with
   | Ast.Var v ->
@@ -666,6 +675,7 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
        let ty = if String.sub target 0 4 = "rvf2" then "rvf2" else "rvf4" in
        target :: (ty ^ "_show") :: (ty ^ "_json") :: v :: acc
      | _ when String.length v > 6 && String.sub v 0 6 = "u8x16_" -> "rvu16_show" :: "rvu16_json" :: v :: acc
+     | _ when List.mem_assoc v rv_thread_fns -> fst (List.assoc v rv_thread_fns) :: v :: acc
      | "mk_metrics" -> "__rv_mk_metrics" :: v :: acc
      (* v0.1.653: ByteBuf, ListBuf, OwnedVec and the bytes bridge *)
      | "bytebuf_new" -> "rvbb_new" :: v :: acc
@@ -3309,6 +3319,9 @@ and compile_app env e =
   | Ast.Var op when List.mem_assoc op rv_lane_fns
                     && List.length args = snd (List.assoc op rv_lane_fns) ->
     call_top env (fst (List.assoc op rv_lane_fns)) args
+  | Ast.Var op when List.mem_assoc op rv_thread_fns
+                    && List.length args = snd (List.assoc op rv_thread_fns) ->
+    call_top env (fst (List.assoc op rv_thread_fns)) args
   | Ast.Var ("mk_logger" | "mk_metrics" as op) when List.length args = 1 ->
     call_top env (if op = "mk_logger" then "__rv_mk_logger" else "__rv_mk_metrics") args
   | Ast.Var ("bytebuf_new" | "lb_new" | "owned_vec_new" as op) when List.length args = 1 ->
@@ -3333,11 +3346,6 @@ and compile_app env e =
   | Ast.Var ("bytebuf_of_bytes" | "vec_of_bytes" | "vec_to_owned" as op) when List.length args = 1 ->
     call_top env (if op = "vec_to_owned" then "rvov_copy" else "rvbb_of_bytes") args;
     if heap_container e.Ast.ty && not (in_rv_prelude e.Ast.loc) then emit (Jal (ra, "__vheap"))
-  | Ast.Var ("owned_vec_push" as _op) when List.length args = 2 ->
-    compile_expr env (List.nth args 0); push a0;
-    compile_expr env (List.nth args 1);
-    emit_word (enc_i 0 a0 0 a1 0x13); pop a0;
-    emit (Jal (ra, "__vec_push"))
   | Ast.Var "owned_vec_len" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)
@@ -3345,7 +3353,12 @@ and compile_app env e =
     compile_expr env (List.hd args); emit (Jal (ra, "__vec_new"));
     (* v0.1.614: a __heap Vec stores into the default arena (emit_arena) *)
     if heap_container e.Ast.ty && not (in_rv_prelude e.Ast.loc) then emit (Jal (ra, "__vheap"))
-  | Ast.Var "vec_push" when List.length args = 2 ->
+  (* v0.1.659: owned_vec_push too. Since 653 it called __vec_push with the
+     value as it was; an OwnedVec has an arena, whose stores are not protected
+     because they are copies -- and this one was not, so a str pushed from
+     inside a block was read after the block was reused (test/uaf/ownedvec_store,
+     region_uaf_check's RV leg). C copies it into the default region (Q-192). *)
+  | Ast.Var ("vec_push" | "owned_vec_push") when List.length args = 2 ->
     compile_expr env (List.nth args 0); push a0;
     compile_expr env (List.nth args 1);
     emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0=vec, a1=x *)

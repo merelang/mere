@@ -4,6 +4,45 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.659 — 2026-10-12
+
+_Threads and channels on RISC-V, as green threads on its coroutines. With them, `-rv64` compiles the whole parity corpus. Also a fix: since v0.1.653, `owned_vec_push` on RISC-V stored a str as it was._
+
+- **Threads.** There is one hart and one OS thread, so a Mere thread is a
+  coroutine and the scheduler is prelude code (`rvth_*`, `rvch_*`; the builtins
+  lower to them from one table, `rv_thread_fns`). `spawn` puts the thread on a
+  ready queue and returns, as it does with a real thread. A thread runs until it
+  blocks (`join`, or a receive on an empty channel) or ends. Blocking puts it on
+  the waiting list and switches to the next ready thread. Anything that could
+  unblock someone (a send, a close, a thread ending, a sender registered) moves
+  every waiter back to the ready queue, and each looks again. The rules are the
+  interpreter's and C's (v0.1.586–601). A failed thread says `mere: thread N
+  failed: <why>` on stderr when it fails, and `join` raises the failure again
+  (test/rv/fail/thread_join, which matches C's stdout, stderr and exit status at
+  both widths). A channel whose registered senders have all finished stops a
+  receive as a closed one does. `par_map` runs its calls in turn, and they take
+  thread numbers as C's workers do.
+- **Time does not pass while a thread can run.** `channel_recv_timeout` times out
+  when nothing else is ready. If nothing is ready and nobody waits with a
+  timeout, every thread is blocked for good: C would hang, and this prints
+  `mere: every thread is blocked (a deadlock)` and exits 1.
+- **3,000 spawn/join pairs fit in 32 MB**, and a 50,000-deep recursion runs
+  inside a thread.
+- **A value crosses a channel as its word.** A str sent from inside a block is
+  kept by the high-water mark the queue's store raises. With that protection
+  turned off, `channel_from_block` reads the churn's bytes at both widths.
+- **region_uaf_check has a RISC-V leg** (`--rv-only`, in CI's memu job). It runs
+  each route that escapes a block by a way the types do not see, after the
+  block's memory is reused, at both widths. Its first run found
+  **`ownedvec_store` wrong since v0.1.653**: `owned_vec_push` called
+  `__vec_push` with the value as it was. An OwnedVec has an arena, and a store
+  into an arena is not protected because it is meant to be a copy. It is now the
+  typed store `vec_push` uses (C copies it into the default region, Q-192).
+- `test/escape/ROUTES`: `spawn_env_in_block` and `channel_from_block` are
+  readable by `-rv`.
+
+`-rv64` refuses no parity program now (7 before; 41 at v0.1.652).
+
 ## v0.1.658 — 2026-10-12
 
 _`region R loop` on RISC-V, and it reclaims: the loop runs in the space of one carry and one iteration's garbage._

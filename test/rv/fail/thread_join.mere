@@ -1,0 +1,12 @@
+// v0.1.659: threads on RISC-V are green threads on its coroutines. A failed
+// thread says so on stderr when it fails, join raises it again (caught and
+// uncaught), and par_map's workers take thread numbers as C's do.
+let _ = print (try_or_msg (fn (u: unit) -> let _ = fail "boom" in "x") (fn (m: str) -> m));
+let h = spawn (fn (u: unit) -> let _ = fail "bad" in ());
+let _ = print (try_or_msg (fn (u: unit) -> let _ = join h in "joined") (fn (m: str) -> "caught: " ++ m));
+let h2 = spawn (fn (u: unit) -> let _ = print "child" in ());
+let _ = join h2;
+let r = par_map (fn (x: int) -> x * x) [1, 2, 3];
+let _ = print (str_of_int (list_fold r 0 (fn (a: int) -> fn (b: int) -> a + b)));
+let h3 = spawn (fn (u: unit) -> let _ = fail "late" in ());
+join h3

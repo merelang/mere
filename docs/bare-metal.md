@@ -417,6 +417,30 @@ emitting.
 - [codegen.md](codegen.md) — how the C / LLVM / Wasm backends are built, for
   contrast: this one emits machine code directly
 
+## Threads and channels (v0.1.659)
+
+A hosted RISC-V program has one hart and one OS thread, so `spawn` cannot start
+a second one. A Mere thread here is a coroutine, and the scheduler is prelude code
+(`rvth_*`, `rvch_*`). `spawn` puts the new thread on a ready queue and returns, as
+it does with a real thread. A thread runs until it blocks (`join`, or a receive on
+an empty channel) or ends. A blocked thread goes on a waiting list. Anything that
+could unblock someone (a send, a close, a thread ending, a sender registered)
+moves every waiter back to the ready queue, and each one looks again. The
+observable rules are the interpreter's and C's:
+
+- a failed thread says `mere: thread N failed: <why>` on stderr when it fails;
+- `join` raises that failure again;
+- once a channel's registered senders (`channel_sender`) have all finished, a
+  receive stops as it does on a closed channel;
+- thread numbers count `par_map`'s workers. `par_map` runs its calls one after
+  another.
+
+Time does not pass while a thread can run. A `channel_recv_timeout` times out
+when nothing else is ready. When nothing is ready and nobody waits with a timeout,
+every thread is blocked for good, and the program says so and exits 1 (C would
+hang). A value crosses a channel as its word, and whatever the sender allocated
+stays where it is.
+
 ## Vector extension (Q-110, v0.1.426)
 
 `mere -rv` / `-rv64` lower the language's `u8x16` type to RVV 1.0 with VLEN 128,
