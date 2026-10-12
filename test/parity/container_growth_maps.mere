@@ -1,0 +1,63 @@
+// v0.1.661: container growth across the sizes where storage doubles (0, 1, 3-5,
+// 7-9, 15-17, 31-33, 63-65, 100, 1000). The corpus built only small containers,
+// and the growth path of Wasm's compound-key Map wrote values over key pointers
+// past 4 entries for as long as nothing grew one (fixed in v0.1.657). The
+// checksum stays below 2^31 so a 32-bit int answers the same.
+type color = Red | Green | Blue | Shade of int;
+type pt = { px: int, py: str };
+let sizes = [0, 1, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100, 1000];
+let rec iter = fn (xs: int list) -> fn (f: int -> unit) -> match xs with Nil -> () | Cons (h, t) -> let _ = f h in iter t f;
+let mix = fn (a: int) -> fn (b: int) -> (a * 31 + b) % 65521;
+let run_int = fn (n: int) ->
+  let m = map_new () in
+  let rec fill = fn (i: int) -> if i == n then () else let _ = map_set m (i * 7) i in fill (i + 1) in
+  let _ = fill 0 in
+  let rec upd = fn (i: int) -> if i >= n then () else let _ = map_set m (i * 7) (i + 1000) in upd (i + 3) in
+  let _ = upd 0 in
+  let rec del = fn (i: int) -> if i >= n then () else let _ = map_delete m (i * 7) in del (i + 5) in
+  let _ = del 1 in
+  let acc = vec_new () in let _ = vec_push acc 0 in
+  let _ = map_iter m (fn (k: int) -> fn (v: int) -> vec_set acc 0 (mix (vec_get acc 0) (k + v))) in
+  str_of_int (map_len m) ++ "/" ++ str_of_int (vec_get acc 0);
+let run_str = fn (n: int) ->
+  let m = map_new () in
+  let rec fill = fn (i: int) -> if i == n then () else let _ = map_set m ("k" ++ str_of_int i) i in fill (i + 1) in
+  let _ = fill 0 in
+  let rec upd = fn (i: int) -> if i >= n then () else let _ = map_set m ("k" ++ str_of_int i) (i + 1000) in upd (i + 3) in
+  let _ = upd 0 in
+  let rec del = fn (i: int) -> if i >= n then () else let _ = map_delete m ("k" ++ str_of_int i) in del (i + 5) in
+  let _ = del 1 in
+  let acc = vec_new () in let _ = vec_push acc 0 in
+  let _ = map_iter m (fn (k: str) -> fn (v: int) -> vec_set acc 0 (mix (vec_get acc 0) (str_len k + v))) in
+  str_of_int (map_len m) ++ "/" ++ str_of_int (vec_get acc 0) ++ "/" ++ (if map_has m "k2" then "y" else "n");
+let run_tup = fn (n: int) ->
+  let m = map_new () in
+  let rec fill = fn (i: int) -> if i == n then () else let _ = map_set m (i % 13, str_of_int i) i in fill (i + 1) in
+  let _ = fill 0 in
+  let rec upd = fn (i: int) -> if i >= n then () else let _ = map_set m (i % 13, str_of_int i) (i + 1000) in upd (i + 3) in
+  let _ = upd 0 in
+  let rec del = fn (i: int) -> if i >= n then () else let _ = map_delete m (i % 13, str_of_int i) in del (i + 5) in
+  let _ = del 1 in
+  let acc = vec_new () in let _ = vec_push acc 0 in
+  let _ = map_iter m (fn (k: (int * str)) -> fn (v: int) -> vec_set acc 0 (mix (vec_get acc 0) (fst k + str_len (snd k) + v))) in
+  str_of_int (map_len m) ++ "/" ++ str_of_int (vec_get acc 0);
+let run_rec = fn (n: int) ->
+  let m = map_new () in
+  let rec fill = fn (i: int) -> if i == n then () else let _ = map_set m (pt { px = i, py = "p" ++ str_of_int (i % 5) }) i in fill (i + 1) in
+  let _ = fill 0 in
+  let rec del = fn (i: int) -> if i >= n then () else let _ = map_delete m (pt { px = i, py = "p" ++ str_of_int (i % 5) }) in del (i + 4) in
+  let _ = del 2 in
+  let acc = vec_new () in let _ = vec_push acc 0 in
+  let _ = map_iter m (fn (k: pt) -> fn (v: int) -> vec_set acc 0 (mix (vec_get acc 0) (k.px + v))) in
+  str_of_int (map_len m) ++ "/" ++ str_of_int (vec_get acc 0);
+let run_var = fn (n: int) ->
+  let m = map_new () in
+  let key = fn (i: int) -> if i % 4 == 0 then Red else if i % 4 == 1 then Green else if i % 4 == 2 then Blue else Shade i in
+  let rec fill = fn (i: int) -> if i == n then () else let _ = map_set m (key i) i in fill (i + 1) in
+  let _ = fill 0 in
+  let acc = vec_new () in let _ = vec_push acc 0 in
+  let _ = map_iter m (fn (k: color) -> fn (v: int) -> vec_set acc 0 (mix (vec_get acc 0) v)) in
+  str_of_int (map_len m) ++ "/" ++ str_of_int (vec_get acc 0);
+let _ = iter sizes (fn (n: int) ->
+  print (str_of_int n ++ ": int " ++ run_int n ++ " str " ++ run_str n ++ " tup " ++ run_tup n ++ " rec " ++ run_rec n ++ " var " ++ run_var n));
+print "done"

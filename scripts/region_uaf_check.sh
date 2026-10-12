@@ -65,7 +65,7 @@ spawn_env_in_block|cr
 ownedvec_store|clr
 channel_from_block|clr
 coro_env_from_block|cr
-recycled_escape|cr
+recycled_escape|clr
 recycle_dedicated|car
 coro_pin_reach|car
 coro_pin_resumed|car
