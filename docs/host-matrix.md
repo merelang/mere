@@ -187,9 +187,9 @@ machine rather than a host.
 | `read_file` | yes | yes | yes | yes |
 | `read_file_bytes` | yes | yes | yes | yes |
 | `read_key` | yes | refused | refused | refused |
-| `read_line` | yes | refused | yes | yes |
-| `read_lines` | yes | refused | refused | yes |
-| `read_stdin` | yes | refused | yes | yes |
+| `read_line` | yes | yes | yes | yes |
+| `read_lines` | yes | yes | yes | yes |
+| `read_stdin` | yes | yes | yes | yes |
 | `round` | yes | yes | yes | yes |
 | `run` | yes | refused | yes | yes |
 | `sign` | yes | yes | yes | yes |

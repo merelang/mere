@@ -605,4 +605,20 @@ let flip = fn f -> fn a -> fn b -> f b a;
 let echo_at = fn (where: str) -> fn x ->
   let _ = print_err (where ++ ": " ++ show x) in x;
 let echo = fn x -> let _ = print_err (show x) in x;
+
+// v0.1.663: `read_lines` on the backends that read a file but had no splitter
+// of their own (LLVM, Wasm lower `read_lines p` to `__read_lines_of
+// (read_file p)`). The C runtime's rule: one trailing newline is dropped, a
+// blank line is an empty string, and an empty file is no lines. Built from the
+// end, so the list comes out in order without a reverse.
+let rec __rl_back = fn (s: str) -> fn (st: int) ->
+  if st > 0 && char_at s (st - 1) != "\n" then __rl_back s (st - 1) else st;
+let rec __rl_go = fn (s: str) -> fn (i: int) -> fn (acc: str list) ->
+  let st = __rl_back s i in
+  let acc2 = Cons (substring s st i, acc) in
+  if st == 0 then acc2 else __rl_go s (st - 1) acc2;
+let __read_lines_of = fn (s: str) ->
+  let n = str_len s in
+  if n == 0 then Nil
+  else __rl_go s (if char_at s (n - 1) == "\n" then n - 1 else n) Nil;
 |}

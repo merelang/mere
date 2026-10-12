@@ -1,0 +1,15 @@
+// v0.1.663: read_lines at its edges -- an empty file, only newlines, a trailing
+// newline or not, a blank line first -- on every backend now that LLVM and Wasm
+// split read_file with the stdlib prelude's __read_lines_of (the C rule).
+let t = fn (body: str) ->
+  let _ = write_file "/tmp/mere_rl_edge.txt" body in
+  let ls = read_lines "/tmp/mere_rl_edge.txt" in
+  print (str_of_int (len ls) ++ " [" ++ str_join "|" ls ++ "]");
+let _ = t "";
+let _ = t "\n";
+let _ = t "\n\n";
+let _ = t "a";
+let _ = t "a\n";
+let _ = t "a\n\n";
+let _ = t "\na";
+print "ok"

@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.663 — 2026-10-12
+
+_`read_lines` on LLVM and Wasm, and `read_line` / `read_stdin` on LLVM._
+
+- **`read_lines`** is `__read_lines_of (read_file p)` on the two backends that
+  read a file but had no line splitter. `__read_lines_of` is a new function in
+  the stdlib prelude written to the C runtime's rule: one trailing newline is
+  dropped, a blank line is an empty string, and an empty file is no lines. It
+  builds the list from the end, so nothing is reversed. The rewrite happens
+  before anything decides which prelude functions are reachable.
+  `read_lines_edges` (new parity program) covers an empty file, only newlines,
+  a trailing newline or not, and a blank line first.
+- **`read_line` / `read_stdin` on LLVM** use read(2) on descriptor 0, not
+  stdio's `stdin`, which is a different symbol on macOS (`__stdinp`) and on
+  Linux, and IR has no headers to say which. A line is read one byte at a time,
+  so it never reads past its newline, and a `read_stdin` after it gets exactly
+  the rest, as C's one buffered FILE does. `scripts/llvm_stdin_check.sh` (in
+  CI) feeds four inputs and compares with C. Its poison, a line that keeps its
+  newline, turns 2 of the 4 red.
+
+LLVM leaves 8 of 235 parity programs unchecked now, and Wasm 2. The LLVM ones
+are `dirs_and_env` (`dir_entries` would read the platform's `struct dirent`),
+`map_compact` (arena sizes), and the 6 that decode JSON; the Wasm ones are
+`coro_pingpong` and `multi_inst_as_value`.
+
 ## v0.1.662 — 2026-10-12
 
 _`region R loop` on LLVM and Wasm, reclaiming as they go. The parity programs this let them read found an older bug on both: an empty list returned from a region block._

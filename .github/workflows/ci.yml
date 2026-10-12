@@ -475,6 +475,13 @@ jobs:
       - name: wasm_stub poison (the gate can still go red)
         if: ${{ !cancelled() }}
         run: sh scripts/wasm_stub_check.sh --poison
+      # v0.1.663: read_line / read_stdin on LLVM, fed real bytes, against C
+      - name: llvm_stdin (read_line and read_stdin on LLVM agree with C)
+        if: ${{ !cancelled() }}
+        run: sh scripts/llvm_stdin_check.sh
+      - name: llvm_stdin --poison (a line that keeps its newline goes red)
+        if: ${{ !cancelled() }}
+        run: sh scripts/llvm_stdin_check.sh --poison
 
       - name: type_query_imports (-t resolves an import like the build does)
         if: ${{ !cancelled() }}
