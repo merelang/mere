@@ -4,6 +4,40 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.660 — 2026-10-12
+
+_`proc_spawn`, `proc_waitpid` and `proc_wait_status`: posix_spawn with file actions and waitpid, as C-runtime externs. They run on C, and on RISC-V through memu's host device. The numbering is Linux's on every host._
+
+mere-ruby's `spawn` went through `/bin/sh`, so the child's parent pid, `SHLVL`
+and descriptors above 10 were the shell's, and most of its remaining
+`test_process` failures came from that. The API is mere-ruby's and was agreed
+with it (docs/stdlib-reference.md, "Spawning without a shell"):
+
+- `proc_spawn path argv envp actions pgroup chdir`. `argv` and `envp` have
+  `chr 0` between their elements. The file actions are `chr 1` between actions
+  and `chr 2` between fields: `d` dup2, `c` close, `o` open with Linux's `O_*`
+  flags. Then come a process group and a directory; `chdir` is applied after
+  the actions, and is `-ENOSYS` where `addchdir_np` is missing. The defaults of
+  SIGPIPE, SIGINT, SIGQUIT, SIGTERM and SIGHUP come back, and the signal mask is
+  emptied. The answer is the pid, or `-errno`.
+- `proc_waitpid pid flags` (WNOHANG 1, WUNTRACED 2), and `proc_wait_status` for
+  the status it took, in Linux's form (`code << 8`, the signal, `0x80` for a
+  core, `(sig << 8) | 0x7f`).
+- **One numbering everywhere.** RISC-V is a Linux guest, so the contract is
+  Linux's: on a macOS host the C runtime translates errno and signal numbers to
+  Linux's and the open flags from Linux's. The calls above it in the reference
+  answer in the platform's numbers; these do not.
+- **RISC-V**: the six arguments go to memu in two host calls (1036: path, argv
+  and envp; 1037: the actions, the group and the directory, then the spawn). A
+  str crosses as its block, so argv's NULs survive. 1038 is waitpid and 1039 the
+  status. memu answers through this C runtime's own `proc_spawn` (memu `d2-660`).
+  On RV32 a register is 32 bits, so the group and waitpid's arguments are
+  sign-extended there.
+- `test/rv/host_spawn.mere` covers an empty and a given environment, dup2 and
+  open as actions, a new process group, chdir, a missing program, WNOHANG, a
+  signal's status, a refused open flag and ECHILD. rv_exec_check compares it
+  line for line with C at both widths.
+
 ## v0.1.659 — 2026-10-12
 
 _Threads and channels on RISC-V, as green threads on its coroutines. With them, `-rv64` compiles the whole parity corpus. Also a fix: since v0.1.653, `owned_vec_push` on RISC-V stored a str as it was._

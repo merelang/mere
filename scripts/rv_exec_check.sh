@@ -402,6 +402,36 @@ else
 fi
 echo "rv_exec: $hxpass passed, $hxfail failed for the host externs (both widths)"
 
+# host_spawn (v0.1.660): proc_spawn / proc_waitpid / proc_wait_status, which
+# memu runs with the host's posix_spawn -- an empty and a given environment,
+# dup2 / open as file actions, a new process group, chdir, a missing program,
+# WNOHANG, a signal's status, a refused open flag, ECHILD -- against C.
+name=host_spawn
+hspass=0; hsfail=0
+if "$MERE" -c "$ROOT/test/rv/host_spawn.mere" > "$TMP/ref.c" 2>/dev/null \
+   && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
+  ( cd "$TMP" && rm -f spawn_out.txt && ulimit -t 60; ./ref ) > "$TMP/i.out" 2>&1
+  for width in 32 64; do
+    if [ "$width" = 64 ]; then flag=-rv64; emu="$RVRUN64"; else flag=-rv; emu="$RVRUN"; fi
+    if ! "$MERE" $flag --ram 16 "$ROOT/test/rv/host_spawn.mere" > "$TMP/prog.bin" 2>"$TMP/rverr"; then
+      printf '  FAIL  %s:%s did not build\n' "$name" "$width"; head -2 "$TMP/rverr"; hsfail=$((hsfail+1)); rc=1; continue
+    fi
+    if [ -z "$emu" ]; then hspass=$((hspass+1)); continue; fi
+    ( cd "$TMP" && rm -f spawn_out.txt && perl -e 'alarm 120; exec @ARGV' "$emu" 16 2>&1 ) | grep -a -v '^rvrun' > "$TMP/r.out"
+    if diff -q "$TMP/i.out" "$TMP/r.out" >/dev/null; then
+      printf '  ok    %s:%s (environments, file actions, group, chdir, waitpid and its status)\n' "$name" "$width"
+      hspass=$((hspass+1))
+    else
+      printf '  FAIL  %s:%s (RV%s disagrees with the C backend)\n' "$name" "$width" "$width"
+      diff -a "$TMP/i.out" "$TMP/r.out" | head -8 | sed 's/^/    /'
+      hsfail=$((hsfail+1)); rc=1
+    fi
+  done
+else
+  printf '  FAIL  %s: the C reference did not build\n' "$name"; hsfail=$((hsfail+1)); rc=1
+fi
+echo "rv_exec: $hspass passed, $hsfail failed for proc_spawn (both widths)"
+
 # host_files (v0.1.640): the file builtins over those descriptors -- File,
 # positioned reads and writes, lines, whole files as bytes, mkdir_p -- both widths.
 # host_fds (v0.1.634): the C runtime's descriptors -- fd_open with each mode,

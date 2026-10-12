@@ -1,0 +1,37 @@
+// v0.1.660: proc_spawn / proc_waitpid / proc_wait_status -- posix_spawn with
+// file actions, waitpid, and the status in Linux's form -- line for line
+// against the C backend at both widths (rv_exec_check). No pid is printed:
+// RISC-V asks memu, which spawns on the host, so the numbers differ.
+extern fn proc_spawn: str -> str -> str -> str -> int -> str -> int;
+extern fn proc_waitpid: int -> int -> int;
+extern fn proc_wait_status: unit -> int;
+let z = chr 0;
+let one = chr 1;
+let two = chr 2;
+// 1. an empty environment: env prints nothing
+let p1 = proc_spawn "/usr/bin/env" "env" "" "" (0 - 1) "";
+let _ = print ("env pid>0 " ++ (if p1 > 0 then "yes" else str_of_int p1));
+let w1 = proc_waitpid p1 0;
+let _ = print ("waited " ++ (if w1 == p1 then "it" else str_of_int w1) ++ " status " ++ str_of_int (proc_wait_status ()));
+// 2. a given environment, stderr onto stdout, exit 3
+let p2 = proc_spawn "/bin/sh" ("sh" ++ z ++ "-c" ++ z ++ "echo $FOO; echo err 1>&2; exit 3") ("FOO=bar" ++ z ++ "X=1") ("d" ++ two ++ "1" ++ two ++ "2") (0 - 1) "";
+let _ = proc_waitpid p2 0;
+let _ = print ("exit3 status " ++ str_of_int (proc_wait_status ()));
+// 3. a new process group: the child's pgid is its pid
+let p3 = proc_spawn "/bin/sh" ("sh" ++ z ++ "-c" ++ z ++ "[ \"$(ps -o pgid= -p $$ | tr -d ' ')\" = \"$$\" ] && echo own-group") "" "" 0 "";
+let _ = proc_waitpid p3 0;
+// 4. no such file
+let _ = print ("enoent " ++ str_of_int (proc_spawn "/no/such/prog" "x" "" "" (0 - 1) ""));
+// 5. WNOHANG with a child that sleeps, then a signal death
+let p5 = proc_spawn "/bin/sleep" ("sleep" ++ z ++ "1") "" "" (0 - 1) "";
+let _ = print ("wnohang " ++ str_of_int (proc_waitpid p5 1));
+let _ = proc_waitpid p5 0;
+let p6 = proc_spawn "/bin/sh" ("sh" ++ z ++ "-c" ++ z ++ "kill -TERM $$") "" "" (0 - 1) "";
+let _ = proc_waitpid p6 0;
+let _ = print ("sigterm status " ++ str_of_int (proc_wait_status ()));
+// 6. open a file for stdout, chdir, argv0 empty
+let p7 = proc_spawn "/bin/sh" ("" ++ z ++ "-c" ++ z ++ "pwd; echo hi") "" ("o" ++ two ++ "1" ++ two ++ "577" ++ two ++ "420" ++ two ++ "spawn_out.txt") (0 - 1) "/tmp";
+let _ = proc_waitpid p7 0;
+let _ = print ("file " ++ read_file "spawn_out.txt");
+let _ = print ("bad flag " ++ str_of_int (proc_spawn "/bin/true" "true" "" ("o" ++ two ++ "1" ++ two ++ "1052672" ++ two ++ "0" ++ two ++ "/tmp/x") (0 - 1) ""));
+print ("echild " ++ str_of_int (proc_waitpid (0 - 1) 0))
