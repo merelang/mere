@@ -3216,7 +3216,25 @@ let rec ty_has_arrow t =
   | Ast.TyCon (_, args) -> List.exists ty_has_arrow args
   | _ -> false
 
+(* v0.1.662: a type that never resolved, at the type it was BUILT at. The
+   comment above said such a value can only be a shared static nullary node;
+   on this backend it is not -- `region A { Nil }` allocated a list_int_node in
+   the block (the element type defaulted to int, as construction defaults it),
+   handed the pointer out uncopied, and the block's reuse overwrote it ("no
+   matching arm in match", test/parity/shared_nullary_regions, which this
+   backend refused whole until its region loop compiled). So it is copied at the
+   defaulted type, which is the representation it has. *)
+let rec default_ty_int (t : Ast.ty) : Ast.ty =
+  match Ast.walk t with
+  | Ast.TyVar _ | Ast.TyParam _ -> Ast.TyInt
+  | Ast.TyTuple ts -> Ast.TyTuple (List.map default_ty_int ts)
+  | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map default_ty_int args)
+  | Ast.TyArrow (a, b) -> Ast.TyArrow (default_ty_int a, default_ty_int b)
+  | Ast.TyRef (m, r, inner) -> Ast.TyRef (m, r, default_ty_int inner)
+  | other -> other
+
 let region_result_plan (t : Ast.ty) : region_result_plan =
+  let t = if ty_is_concrete t then t else default_ty_int t in
   if ty_has_container t then
     Refuse "a region block cannot return a Map / Vec / OwnedVec / StrBuf — the \
             container's storage is reclaimed with the block. Return a plain \
@@ -3271,6 +3289,7 @@ let region_capture_name (cn : string) : string option =
   else None
 
 let add_copy_type t =
+  let t = if ty_is_concrete t then t else default_ty_int t in
   match region_result_plan t with
   | Copy -> add_struct_deep_type copy_types t
   | Refuse _ | NoCopy -> ()
@@ -3334,6 +3353,14 @@ let collect_eq_cmp_types (root : Ast.expr) (fns : fn_decl list) : unit =
         the expression bodies that use them. *)
      | Ast.Region_block (_, _) ->
        (match e.Ast.ty with Some t -> add_copy_type t | None -> ())
+     (* v0.1.662: a region loop copies its carry into the next block and its
+        Done value out *)
+     | Ast.Region_loop (_, _, b) ->
+       (match b.Ast.ty with
+        | Some t -> (match Ast.walk t with
+            | Ast.TyCon ("region_flow", [c; d]) -> add_copy_type c; add_copy_type d
+            | _ -> ())
+        | None -> ())
      (* v0.1.564 (Q-192): owned_vec_push copies what it stores *)
      | Ast.App ({ node = Ast.App ({ node = Ast.Var ("owned_vec_push" | "channel_send"); _ }, _); _ }, x) ->
        (match x.Ast.ty with Some t -> add_copy_type t | None -> ())
@@ -8419,8 +8446,118 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                     r1 cstruct r0 adapter_name);
       with_fn2 r1
     end
-  | Ast.Region_loop (_, _, _) ->
-    unsupported e.Ast.loc "region loop"
+  | Ast.Region_loop (name, x, body) ->
+    (* v0.1.662: `region R loop x { body }`, as the C backend runs it: each
+       iteration in a block of its own; on Continue c the carry is copied
+       (@__mcopy_C) into the NEXT iteration's block and this one is released;
+       on Done d, d is copied out to the region that was current when the loop
+       began. x and the iteration's region are phis at the loop head. A carry
+       that cannot be copied -- a container: it has identity, and this backend
+       has no deep copy for one -- keeps ONE block for the whole loop, released
+       at Done; the values are the same, the loop just does not give memory
+       back as it goes. *)
+    let flow_ty = match body.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit in
+    let (c_ty, d_ty) = match flow_ty with
+      | Ast.TyCon ("region_flow", [c; d]) ->
+        let dflt t = let t = Ast.walk t in if ty_is_concrete t then t else default_ty_int t in
+        (dflt c, dflt d)
+      | _ -> unsupported e.Ast.loc "region loop: the body is not a region_flow" in
+    let opt_ty = Ast.TyCon ("option", [c_ty]) in
+    let d_plan = region_result_plan d_ty in
+    (match d_plan with Refuse msg -> unsupported e.Ast.loc msg | _ -> ());
+    let per_iter = (match region_result_plan c_ty with Copy | NoCopy -> true | Refuse _ -> false) in
+    let c_copies = (match region_result_plan c_ty with Copy -> true | _ -> false) in
+    let (_, fmono, frec, fvariants) = match variant_shape_of flow_ty with
+      | Some s -> s | None -> unsupported e.Ast.loc "region loop: region_flow has no shape" in
+    let cont_tag =
+      let rec find i = function
+        | [] -> 0 | (cn, _) :: _ when cn = "Continue" -> i | _ :: r -> find (i + 1) r in
+      find 0 fvariants in
+    let mk node ty = { Ast.loc = e.Ast.loc; ty = Some ty; node } in
+    let saved_cur = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load ptr, ptr @__lang_current_region" saved_cur);
+    let r0 = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_region_block_acquire()" r0);
+    let d0 = fresh_reg () and d1 = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load i32, ptr @__lang_region_depth" d0);
+    emit_instr (Printf.sprintf "  %s = add i32 %s, 1" d1 d0);
+    emit_instr (Printf.sprintf "  store i32 %s, ptr @__lang_region_depth" d1);
+    emit_instr (Printf.sprintf "  store ptr %s, ptr @__lang_current_region" r0);
+    let none_v = emit_expr env (mk (Ast.Constr ("None", None)) opt_ty) in
+    let l_pre = fresh_label "rloop_pre_" and l_head = fresh_label "rloop_head_" in
+    let l_cont = fresh_label "rloop_cont_" and l_cont_end = fresh_label "rloop_next_" in
+    let l_done = fresh_label "rloop_done_" in
+    emit_instr (Printf.sprintf "  br label %%%s" l_pre);
+    emit_label l_pre;
+    emit_instr (Printf.sprintf "  br label %%%s" l_head);
+    emit_label l_head;
+    let xv = fresh_reg () and rv = fresh_reg () in
+    let opt_lty = llvm_ty_of opt_ty in
+    (* the phis' second operands are named now and defined in the Continue arm *)
+    let some_v = fresh_reg () and rnext = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = phi %s [ %s, %%%s ], [ %s, %%%s ]"
+                  xv opt_lty none_v l_pre some_v l_cont_end);
+    emit_instr (Printf.sprintf "  %s = phi ptr [ %s, %%%s ], [ %s, %%%s ]"
+                  rv r0 l_pre rnext l_cont_end);
+    emit_instr (Printf.sprintf "  store ptr %s, ptr @__lang_current_region" rv);
+    let saved_regions = !current_regions in
+    current_regions := (name, rv) :: saved_regions;
+    let saved_vt = !current_var_types in
+    current_var_types := (x, opt_ty) :: saved_vt;
+    let fv = emit_expr ((x, xv) :: env) body in
+    current_var_types := saved_vt;
+    current_regions := saved_regions;
+    let tag = variant_tag_reg fmono frec fv in
+    let is_cont = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, %d" is_cont tag cont_tag);
+    emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" is_cont l_cont l_done);
+    (* Continue c: into the next block (or the same one), x = Some c *)
+    emit_label l_cont;
+    let c = variant_payload_reg fmono frec fv c_ty in
+    let next_r =
+      if per_iter then begin
+        let nr = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = call ptr @__lang_region_block_acquire()" nr);
+        emit_instr (Printf.sprintf "  store ptr %s, ptr @__lang_current_region" nr);
+        nr
+      end else rv in
+    let c2 =
+      if per_iter && c_copies then begin
+        let o = fresh_reg () and lt = llvm_ty_of c_ty in
+        emit_instr (Printf.sprintf "  %s = call %s @__mcopy_%s(ptr %s, %s %s)"
+                      o lt (ty_tag c_ty) next_r lt c);
+        o
+      end else c in
+    let tmp = "__rloop_carry" in
+    let some_built = emit_expr ((tmp, c2) :: env)
+        (mk (Ast.Constr ("Some", Some (mk (Ast.Var tmp) c_ty))) opt_ty) in
+    if per_iter then
+      emit_instr (Printf.sprintf "  call void @__lang_region_block_release(ptr %s)" rv);
+    (* name the phi operands: copies of what was just built *)
+    emit_instr (Printf.sprintf "  %s = select i1 true, %s %s, %s %s"
+                  some_v opt_lty some_built opt_lty some_built);
+    emit_instr (Printf.sprintf "  %s = select i1 true, ptr %s, ptr %s" rnext next_r next_r);
+    emit_instr (Printf.sprintf "  br label %%%s" l_cont_end);
+    emit_label l_cont_end;
+    emit_instr (Printf.sprintf "  br label %%%s" l_head);
+    (* Done d: out to the region that was current when the loop began *)
+    emit_label l_done;
+    let d = variant_payload_reg fmono frec fv d_ty in
+    emit_instr (Printf.sprintf "  store ptr %s, ptr @__lang_current_region" saved_cur);
+    let out =
+      match d_plan with
+      | Copy ->
+        let o = fresh_reg () and lt = llvm_ty_of d_ty in
+        emit_instr (Printf.sprintf "  %s = call %s @__mcopy_%s(ptr %s, %s %s)"
+                      o lt (ty_tag d_ty) saved_cur lt d);
+        o
+      | NoCopy | Refuse _ -> d in
+    let d2 = fresh_reg () and d3 = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load i32, ptr @__lang_region_depth" d2);
+    emit_instr (Printf.sprintf "  %s = sub i32 %s, 1" d3 d2);
+    emit_instr (Printf.sprintf "  store i32 %s, ptr @__lang_region_depth" d3);
+    emit_instr (Printf.sprintf "  call void @__lang_region_block_release(ptr %s)" rv);
+    out
   | Ast.Region_block (name, body) ->
     (* Allocate a fresh region locally, run body within it, free at exit.
        The region's SSA ptr is pushed onto current_regions so Ref / view
@@ -8433,6 +8570,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        here for the same reason. *)
     let result_ty =
       match e.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyUnit in
+    let result_ty = if ty_is_concrete result_ty then result_ty else default_ty_int result_ty in
     let plan = region_result_plan result_ty in
     (match plan with Refuse msg -> unsupported e.Ast.loc msg | _ -> ());
     (* Q-171: from the heap and onto the active stack, not an `alloca`. A

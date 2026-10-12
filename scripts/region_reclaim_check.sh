@@ -170,6 +170,46 @@ if command -v wat2wasm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   fi
 fi
 
+# ---- region loops (v0.1.662): LLVM and Wasm hand the carry over too --------
+# test/regionreclaim/loop_carry at 300,000 and at 3,000,000 iterations (~200
+# bytes each): C and LLVM stay flat, and Wasm completes 3,000,000 in its fixed
+# 64 MiB, which unreclaimed would take ~300 MB. Both loops were refused before
+# 662; RISC-V's (658) is checked below.
+LSRC="$ROOT/test/regionreclaim/loop_carry.mere"
+sed 's/i >= 300000/i >= 3000000/' "$LSRC" > "$TMP/loop_big.mere"
+for be in c ll; do
+  ok=1
+  for sz in small big; do
+    if [ "$sz" = small ]; then src="$LSRC"; else src="$TMP/loop_big.mere"; fi
+    if [ "$be" = c ]; then
+      "$MERE" -c "$src" > "$TMP/lp.c" 2>/dev/null && $CC -O2 -w "$TMP/lp.c" -o "$TMP/lp_$sz" 2>/dev/null || ok=0
+    else
+      "$MERE" -ll "$src" > "$TMP/lp.ll" 2>/dev/null && $CC -O2 -w "$TMP/lp.ll" -o "$TMP/lp_$sz" 2>/dev/null || ok=0
+    fi
+  done
+  if [ "$ok" = 0 ]; then echo "FAIL region_reclaim/$be: the region loop did not build"; fail=1; continue; fi
+  lp_s="$(peak "$TMP/lp_small")"; lp_b="$(peak "$TMP/lp_big")"
+  lp_a="$(answer "$TMP/lp_big")"
+  if [ "$lp_a" != "3000020" ]; then
+    echo "FAIL region_reclaim/$be: the region loop answered '$lp_a', expected 3000020"; fail=1
+  elif [ -z "$lp_s" ] || [ -z "$lp_b" ] || [ "$(( lp_b * 10 ))" -gt "$(( lp_s * 20 ))" ]; then
+    echo "FAIL region_reclaim/$be: region loop peak went $lp_s -> $lp_b for 300,000 -> 3,000,000 iterations -- the carry is not handed over"; fail=1
+  fi
+  checked=$((checked + 1))
+done
+if command -v wat2wasm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  if "$MERE" -w "$TMP/loop_big.mere" > "$TMP/lw.wat" 2>/dev/null &&
+     wat2wasm --enable-tail-call "$TMP/lw.wat" -o "$TMP/lw.wasm" 2>/dev/null; then
+    lw="$(node "$ROOT/scripts/run_wasm.js" "$TMP/lw.wasm" 2>/dev/null | head -1)"
+    if [ "$lw" != "3000020" ]; then
+      echo "FAIL region_reclaim/Wasm: the region loop got '$lw', expected 3000020 -- 3,000,000 iterations unreclaimed do not fit 64 MiB"; fail=1
+    fi
+    checked=$((checked + 1))
+  else
+    echo "FAIL region_reclaim/Wasm: the region loop did not build"; fail=1
+  fi
+fi
+
 # ---- perbigvec: one LARGE value per iteration, both sides of the trade ----
 #
 # pertree asks whether a block reclaims. This asks whether it reclaims in the
