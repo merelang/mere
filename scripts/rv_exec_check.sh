@@ -63,7 +63,9 @@ rc=0; pass=0; fail=0
 # RISC-V and they compiled here at all: a checksum `acc * 31 % 1000000007` and
 # an RGBA word `r << 24 | ...` pass 2^31, so on a 32-bit int they wrap, as
 # int_width_boundary does. Both agree at 64 bits.
-KNOWN_DIFF="float_edges region_growth int_width_boundary bytes_file_roundtrip raster"
+# of_json_composite joined in v0.1.654 (JSON on RISC-V): it decodes
+# -9007199254740993, past a 32-bit int.
+KNOWN_DIFF="float_edges region_growth int_width_boundary bytes_file_roundtrip raster of_json_composite"
 # float_edges/str_edges             64-bit values; this backend's int is 32 bits
 #   (coll_edges and nul_in_str sat here too, on the strength of a 60-second
 #    alarm that was really a measurement of how slow decimal printing is on an
