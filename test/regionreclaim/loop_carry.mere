@@ -1,0 +1,14 @@
+// v0.1.658: `region R loop` on RISC-V keeps one carry and one iteration's
+// garbage: the carry is copied down to the loop's mark each time round and the
+// rollback takes the old one with the garbage. 300,000 iterations of ~200
+// bytes is 60 MB if nothing came back; region_reclaim_check runs it in 8 MB.
+let pad = "--------------------------------------------------------------------------------" in
+let n = region R loop x {
+  match x with
+  | None -> Continue (0, "")
+  | Some (i, s) ->
+    let t = s ++ str_of_int i ++ pad in
+    if i >= 300000 then Done (i + str_len s)
+    else Continue (i + 1, substring t 0 (if str_len t > 20 then 20 else str_len t))
+} in
+print (str_of_int n)

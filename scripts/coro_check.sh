@@ -73,6 +73,7 @@ stack_heaps|icl|505000000|0
 finished_keeps|icl|kept|0
 first_block|icl|4000|0
 region_chain_grow|icl|206509500|0
+region_loop_chain|ic|22700|0
 release_walk|ic|2250|0
 scan_outer|icl|all found;200880;0|0'
 
@@ -231,6 +232,7 @@ stack_heaps|r|505000000|0
 finished_keeps|r|kept|0
 first_block|r|4000|0
 region_chain_grow|r|206509500|0
+region_loop_chain|r|22700|0
 release_walk|r|2250|0
 scan_outer|r|all found;200880;0|0'
 RV_LIMIT="${RV_LIMIT:-300}"

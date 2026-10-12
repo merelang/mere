@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.658 — 2026-10-12
+
+_`region R loop` on RISC-V, and it reclaims: the loop runs in the space of one carry and one iteration's garbage._
+
+The loop was refused here: "the bump rollback here is LIFO, and the loop's carry
+must survive the rollback". It can survive if the rollback happens after the
+carry is copied out. A loop is now the region block with its mark M0 kept for
+every iteration (`compile_region`, which the block shares). Each iteration
+copies the body's result (the `region_flow` value) out above its garbage, rolls
+gp back to max(M0, high-water mark), and copies the value down to M0. That
+rollback also takes the previous carry, which was the last thing at M0, and the
+body has finished reading it. This is the hand-over-hand C does with two
+arenas. `x` is a slot: None on entry, then a `Some c` box made just past the
+copy, so the next rollback takes that back too. A carry this backend cannot copy
+by value (a Map, a Vec) is the block's case where nothing rolls back, and the
+loop is then a plain loop.
+
+- A first version desugared the loop into a self-recursive function over a
+  `region R { }` block. It printed the right answers and ran out of memory at 2
+  million iterations in 32 MB: every copied-out carry and every `Some` box
+  stayed. Now 2 million fit, and region_reclaim_check holds 300,000 iterations
+  (60 MB if nothing came back) to 8 MB (test/regionreclaim/loop_carry).
+- Inside a coroutine the heap is a chain of blocks. The loop's mark stays in the
+  first block while iterations run past it, so each rollback goes back along
+  the chain. coro_check runs that at both widths (test/coro/region_loop_chain).
+- `test/escape/ROUTES`: `fn_over_carry` is readable by `-rv` now.
+
+`-rv64` refuses 7 parity programs now (10 before). All 7 are channels, which
+need threads.
+
 ## v0.1.657 — 2026-10-12
 
 _On RISC-V: a Map keyed by a tuple, a record or a constructor. Writing its test found a Wasm and an LLVM bug in the same place._

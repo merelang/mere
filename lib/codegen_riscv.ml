@@ -1400,7 +1400,7 @@ let rec max_lets (e : Ast.expr) : int =
                     + max (max_lets body)
                         (match guard with Some g -> max_lets g | None -> 0))) 0 arms)
   | Ast.Region_block (_, b) -> max_lets b
-  | Ast.Region_loop (_, _, b) -> max_lets b
+  | Ast.Region_loop (_, _, b) -> 1 + max_lets b    (* v0.1.658: x's slot *)
   | _ -> 0
 
 let is_top name = Hashtbl.mem tops name
@@ -2442,161 +2442,9 @@ and compile_node (env : env) (e : Ast.expr) : unit =
     let label = fresh_label "str_" in
     string_data := (label, mk_str_block s) :: !string_data;
     emit (LoadAddr (a0, label))                                     (* a0 = &block *)
-  | Ast.Region_loop (_, _, _) ->
-    err e.loc "RV32I: `region R loop` is not supported yet -- the bump rollback \
-               here is LIFO, and the loop's carry must survive the rollback"
-  | Ast.Region_block (_, body) ->
-    (* v0.1.613: A REGION ROLLS BACK AGAIN, behind a high-water mark.
-       Until now a region reclaimed nothing here. It once rolled gp back to
-       where the block began, and that was unsound: an older container written
-       inside the block -- a `map_set` on a map that lives outside it -- had
-       its new parts allocated inside the block's range, the rollback freed
-       them, and the next allocation overwrote what the map still pointed at
-       (mere-ruby's constant table, four million instructions in).
-       Now every container store goes through emit_protect: a store into a
-       container older than the block (or below the high-water mark) raises the
-       mark to gp, and the block rolls back only to max(its mark, the high-water
-       mark). That is the Wasm backend's scheme (Q-132), with the hole both had
-       closed -- see emit_protect. The result is copied out first: once just above the
-       block's garbage, then -- after the rollback -- down to where the block's
-       range now ends, unless the two would overlap (then the first copy stays,
-       and gp is left after it). A result that cannot be copied by value (a
-       closure, a container, ...) keeps the old behaviour: the block runs and
-       nothing is rolled back.
-       A failure that leaves the block never reaches the rollback: try_or puts
-       the depth and block mark back, and the block's allocations are kept.
-       The rollback is to max(mark, min(high-water mark, gp)): see emit_protect
-       for why it is clamped to gp. *)
-    let kind = match e.Ast.ty with Some t -> rcopy_kind t | None -> RNone in
-    if kind = RNone then compile_expr env body
-    else begin
-      li t0 (rt_depth_addr ());
-      push gp;                                                    (* mark *)
-      emit_word (enc_i (rt_bmark_off ()) t0 (ldf3 ()) t1 0x03);
-      push t1;                                                    (* the outer block mark *)
-      li t0 (rt_depth_addr ());
-      emit_word (enc_s (rt_bmark_off ()) gp t0 (stf3 ()) 0x23);  (* block mark = mark *)
-      emit_word (enc_i rt_depth_off t0 (ldf3 ()) t1 0x03);
-      (let l = fresh_label ".rgnOuter" in                         (* v0.1.614: the outermost *)
-       emit (Branch (1, t1, zero, l));                            (* block's mark, for __hprot *)
-       emit_word (enc_s (rt_base_off ()) gp t0 (stf3 ()) 0x23);
-       emit (Label l));
-      emit_word (enc_i 1 t1 0 t1 0x13);
-      emit_word (enc_s rt_depth_off t1 t0 (stf3 ()) 0x23);       (* depth + 1 *)
-      compile_expr env body;                                      (* a0 = result *)
-      let w = wsz () in
-      (* the rollback: gp = max(mark, hwm); then the outer block mark back, depth - 1.
-         `mark_at` is the mark's offset from sp at that point. *)
-      let release mark_at outer_at =
-        emit_word (enc_i mark_at sp (ldf3 ()) t1 0x03);           (* t1 = mark *)
-        li t0 (rt_depth_addr ());
-        emit_word (enc_i (rt_hwm_off ()) t0 (ldf3 ()) t2 0x03);  (* t2 = hwm *)
-        if !coro_mode then begin
-          (* v0.1.627: a stack's heap is a chain of blocks, and addresses in two
-             of them say nothing about which came first. A block whose mark is
-             in this stack's current block rolls back as before -- with the
-             high-water mark counted only if it is in that block too (one in an
-             older block is below the mark). A mark in another block -- this
-             block's allocations ran past the end of one -- keeps everything:
-             what it allocated stays, as every allocation did before the
-             blocks had marks, and the blocks double, so that happens a few
-             times in a stack's life. *)
-          let l_keep = fresh_label ".rgnKeepAll" and l_set = fresh_label ".rgnSet" in
-          let l_cross = fresh_label ".rgnCross" in
-          li t3 (rtw_addr rtw_blo);
-          emit_word (enc_i 0 t3 (ldf3 ()) t3 0x03);              (* t3 = this block's start *)
-          emit (Branch (6, t1, t3, l_cross));                    (* bltu mark, start *)
-          emit (Branch (6, gp, t1, l_cross));                    (* bltu gp, mark *)
-          emit (Branch (6, t2, t3, l_set));                      (* hwm in another block *)
-          emit (Branch (6, gp, t2, l_set));
-          emit (Branch (6, t2, t1, l_set));                      (* bltu hwm, mark -> mark *)
-          emit_word (enc_i 0 t2 0 t1 0x13);                      (* t1 = hwm *)
-          emit (Label l_set);
-          emit_word (enc_i 0 t1 0 gp 0x13);                      (* gp = max(mark, hwm) *)
-          emit (Jal (zero, l_keep));
-          (* the mark is in an older block: back along the chain (see
-             __rgn_cross); the blocks past it wait in rtw_defer *)
-          emit (Label l_cross);
-          push ra;
-          emit (Jal (ra, "__rgn_cross"));
-          pop ra;
-          li t0 (rt_depth_addr ());
-          emit (Label l_keep)
-        end else begin
-        (* never past this block's own gp: see emit_protect *)
-        let lc = fresh_label ".rgnClamp" in
-        emit (Branch (6, t2, gp, lc));                            (* bltu hwm, gp -> keep hwm *)
-        emit_word (enc_i 0 gp 0 t2 0x13);                         (* t2 = gp *)
-        emit (Label lc);
-        let l = fresh_label ".rgnRel" in
-        emit (Branch (6, t2, t1, l));                             (* bltu hwm, mark -> keep mark *)
-        emit_word (enc_i 0 t2 0 t1 0x13);                         (* t1 = hwm *)
-        emit (Label l);
-        emit_word (enc_i 0 t1 0 gp 0x13)                          (* gp = max(mark, hwm) *)
-        end;
-        emit_word (enc_i outer_at sp (ldf3 ()) t3 0x03);
-        emit_word (enc_s (rt_bmark_off ()) t3 t0 (stf3 ()) 0x23);
-        emit_word (enc_i rt_depth_off t0 (ldf3 ()) t3 0x03);
-        emit_word (enc_i (-1) t3 0 t3 0x13);
-        emit_word (enc_s rt_depth_off t3 t0 (stf3 ()) 0x23) in
-      if kind = RWord then begin
-        push a0;                                                  (* [mark 2w][outer w][r 0] *)
-        release (2 * w) w;
-        pop a0;
-        emit_word (enc_i (2 * w) sp 0 sp 0x13)
-      end else begin
-        let copier = request_rcopy (match e.Ast.ty with Some t -> t | None -> Ast.TyUnit) in
-        push gp;                                                  (* c1s *)
-        emit (Jal (ra, copier));                                  (* a0 = copy 1 *)
-        push gp;                                                  (* c1e *)
-        push a0;                                                  (* [mark 4w][outer 3w][c1s 2w][c1e w][c1 0] *)
-        release (4 * w) (3 * w);
-        (* copy 2 unless it would run into copy 1: it fits below it, or gp is past it *)
-        let l_copy = fresh_label ".rgnCp2" in
-        let l_keep = fresh_label ".rgnKeep" in
-        let l_done = fresh_label ".rgnDone" in
-        emit_word (enc_i (2 * w) sp (ldf3 ()) t3 0x03);           (* c1s *)
-        emit_word (enc_i w sp (ldf3 ()) t4 0x03);                 (* c1e *)
-        emit_word (enc_r 0x20 t3 t4 0 t5 0x33);                   (* t5 = c1e - c1s *)
-        emit_word (enc_r 0 t5 gp 0 t5 0x33);                      (* t5 = gp + size *)
-        if !coro_mode then begin
-          (* v0.1.627: copy 1 in another block than gp's (the rollback went
-             back along the chain) is never in the way: copy *)
-          li t6 (rtw_addr rtw_blo);
-          emit_word (enc_i 0 t6 (ldf3 ()) t6 0x03);
-          emit (Branch (6, t3, t6, l_copy));
-          emit (Branch (7, t3, tp, l_copy))
-        end;
-        emit (Branch (7, t3, t5, l_copy));                        (* bgeu c1s, gp+size -> copy *)
-        emit (Branch (7, gp, t4, l_copy));                        (* bgeu gp, c1e -> copy *)
-        emit (Label l_keep);
-        emit_word (enc_i 0 t4 0 gp 0x13);                         (* gp = c1e: copy 1 stays *)
-        emit_word (enc_i 0 sp (ldf3 ()) a0 0x03);                 (* a0 = copy 1 *)
-        emit (Jal (zero, l_done));
-        emit (Label l_copy);
-        emit_word (enc_i 0 sp (ldf3 ()) a0 0x03);
-        emit (Jal (ra, copier));                                  (* a0 = copy 2 *)
-        emit (Label l_done);
-        emit_word (enc_i (5 * w) sp 0 sp 0x13)
-      end;
-      if !coro_mode then begin
-        (* v0.1.627: the blocks the rollback went back past, now that the
-           result is out of them *)
-        let l = fresh_label ".rgnNoDefer" in
-        li t0 (rtw_addr rtw_defer);
-        emit_word (enc_i 0 t0 (ldf3 ()) t0 0x03);
-        emit (Branch (0, t0, zero, l));
-        push ra;
-        emit (Jal (ra, "__rgn_defer_free"));
-        pop ra;
-        emit (Label l)
-      end;
-      (* v0.1.624: a region block's exit is the other place retired blocks are
-         given back (see emit_coro_release): blocks are freed on paths no
-         compaction builtin follows, and mere-ruby's collector, which runs on a
-         coroutine of its own, exits blocks constantly *)
-      emit_coro_release e
-    end
+  (* v0.1.658: see compile_region *)
+  | Ast.Region_loop (_, x, body) -> compile_region env e body (Some x)
+  | Ast.Region_block (_, body) -> compile_region env e body None
   | Ast.Float_lit f ->
     let b = Int64.bits_of_float f in
     (* v0.1.656: on RV64 the halves are stored as the arithmetic stores them
@@ -2883,6 +2731,232 @@ and compile_simd_tree env (node : vnode) : int =
   let n = List.length leaves in
   vgen n node 1;
   n
+(* v0.1.658: `region R { body }` and `region R loop x { body }`.
+   A loop is the block with its mark M0 kept for every iteration: the body's
+   result -- the region_flow value -- is copied out above the iteration's
+   garbage, gp goes back to max(M0, high-water mark), and the value is copied
+   down to M0. That rollback takes the PREVIOUS carry too (it was the last
+   thing at M0, and the body has finished reading it), so the loop runs in the
+   space of one carry and one iteration's garbage: the hand-over-hand that C
+   does with two arenas. A carry this backend cannot copy by value (a Map, a
+   Vec) is the block's RNone case: nothing rolls back and the loop is a loop. *)
+and compile_region env (e : Ast.expr) (body : Ast.expr) (loop : string option) =
+    (* v0.1.613: A REGION ROLLS BACK AGAIN, behind a high-water mark.
+       Until now a region reclaimed nothing here. It once rolled gp back to
+       where the block began, and that was unsound: an older container written
+       inside the block -- a `map_set` on a map that lives outside it -- had
+       its new parts allocated inside the block's range, the rollback freed
+       them, and the next allocation overwrote what the map still pointed at
+       (mere-ruby's constant table, four million instructions in).
+       Now every container store goes through emit_protect: a store into a
+       container older than the block (or below the high-water mark) raises the
+       mark to gp, and the block rolls back only to max(its mark, the high-water
+       mark). That is the Wasm backend's scheme (Q-132), with the hole both had
+       closed -- see emit_protect. The result is copied out first: once just above the
+       block's garbage, then -- after the rollback -- down to where the block's
+       range now ends, unless the two would overlap (then the first copy stays,
+       and gp is left after it). A result that cannot be copied by value (a
+       closure, a container, ...) keeps the old behaviour: the block runs and
+       nothing is rolled back.
+       A failure that leaves the block never reaches the rollback: try_or puts
+       the depth and block mark back, and the block's allocations are kept.
+       The rollback is to max(mark, min(high-water mark, gp)): see emit_protect
+       for why it is clamped to gp. *)
+    let res_ty = match loop with
+      | Some _ -> (match body.Ast.ty with Some t -> t | None -> Ast.TyUnit)
+      | None -> (match e.Ast.ty with Some t -> t | None -> Ast.TyUnit) in
+    let kind = match loop, e.Ast.ty with
+      | None, None -> RNone
+      | _ -> rcopy_kind res_ty in
+    let w = wsz () in
+    (* the loop's x: a slot, None on entry; on Continue c it is Some c, a box
+       made just past the carry's copy so the next iteration's rollback takes
+       it back too *)
+    let x_slot = match loop with Some _ -> Some (new_slot ()) | None -> None in
+    let store_x r = match x_slot with
+      | Some idx -> (match loc_of idx with
+                     | Reg rr -> emit_word (enc_i 0 r 0 rr 0x13)
+                     | Mem slot -> base_store fp r (slot_off slot))
+      | None -> () in
+    let body_env = match loop, x_slot with
+      | Some x, Some idx -> (x, idx) :: env
+      | _ -> env in
+    let init_x () =
+      if loop <> None then begin
+        alloc_words t1 1; li t0 (ctor_tag "None"); emit_word (enc_s 0 t0 t1 (stf3 ()) 0x23);
+        store_x t1
+      end in
+    (* a0 = the region_flow value: Continue c -> x = Some c, back to l_top;
+       Done d -> a0 = d, fall through *)
+    let flow_step l_top =
+      let l_done = fresh_label ".rlDone" in
+      emit_word (enc_i 0 a0 (ldf3 ()) t0 0x03);
+      li t1 (ctor_tag "Continue");
+      emit (Branch (1, t0, t1, l_done));
+      emit_word (enc_i w a0 (ldf3 ()) t0 0x03);
+      push t0;
+      alloc_words t1 2;
+      li t0 (ctor_tag "Some"); emit_word (enc_s 0 t0 t1 (stf3 ()) 0x23);
+      pop t0; emit_word (enc_s w t0 t1 (stf3 ()) 0x23);
+      store_x t1;
+      emit (Jal (zero, l_top));
+      emit (Label l_done);
+      emit_word (enc_i w a0 (ldf3 ()) a0 0x03) in
+    if kind = RNone then begin
+      (* nothing rolls back: a block runs as plain code, a loop is a loop *)
+      match loop with
+      | None -> compile_expr env body
+      | Some _ ->
+        init_x ();
+        let l_top = fresh_label ".rlTop" in
+        emit (Label l_top);
+        compile_expr body_env body;
+        flow_step l_top
+    end else begin
+      li t0 (rt_depth_addr ());
+      push gp;                                                    (* mark *)
+      emit_word (enc_i (rt_bmark_off ()) t0 (ldf3 ()) t1 0x03);
+      push t1;                                                    (* the outer block mark *)
+      li t0 (rt_depth_addr ());
+      emit_word (enc_s (rt_bmark_off ()) gp t0 (stf3 ()) 0x23);  (* block mark = mark *)
+      emit_word (enc_i rt_depth_off t0 (ldf3 ()) t1 0x03);
+      (let l = fresh_label ".rgnOuter" in                         (* v0.1.614: the outermost *)
+       emit (Branch (1, t1, zero, l));                            (* block's mark, for __hprot *)
+       emit_word (enc_s (rt_base_off ()) gp t0 (stf3 ()) 0x23);
+       emit (Label l));
+      emit_word (enc_i 1 t1 0 t1 0x13);
+      emit_word (enc_s rt_depth_off t1 t0 (stf3 ()) 0x23);       (* depth + 1 *)
+      init_x ();
+      let l_top = fresh_label ".rlTop" in
+      if loop <> None then emit (Label l_top);
+      compile_expr body_env body;                                 (* a0 = result *)
+      (* the rollback: gp = max(mark, hwm); then the outer block mark back, depth - 1.
+         `mark_at` is the mark's offset from sp at that point. *)
+      let rec release mark_at outer_at =
+        emit_word (enc_i mark_at sp (ldf3 ()) t1 0x03);           (* t1 = mark *)
+        li t0 (rt_depth_addr ());
+        emit_word (enc_i (rt_hwm_off ()) t0 (ldf3 ()) t2 0x03);  (* t2 = hwm *)
+        if !coro_mode then begin
+          (* v0.1.627: a stack's heap is a chain of blocks, and addresses in two
+             of them say nothing about which came first. A block whose mark is
+             in this stack's current block rolls back as before -- with the
+             high-water mark counted only if it is in that block too (one in an
+             older block is below the mark). A mark in another block -- this
+             block's allocations ran past the end of one -- keeps everything:
+             what it allocated stays, as every allocation did before the
+             blocks had marks, and the blocks double, so that happens a few
+             times in a stack's life. *)
+          let l_keep = fresh_label ".rgnKeepAll" and l_set = fresh_label ".rgnSet" in
+          let l_cross = fresh_label ".rgnCross" in
+          li t3 (rtw_addr rtw_blo);
+          emit_word (enc_i 0 t3 (ldf3 ()) t3 0x03);              (* t3 = this block's start *)
+          emit (Branch (6, t1, t3, l_cross));                    (* bltu mark, start *)
+          emit (Branch (6, gp, t1, l_cross));                    (* bltu gp, mark *)
+          emit (Branch (6, t2, t3, l_set));                      (* hwm in another block *)
+          emit (Branch (6, gp, t2, l_set));
+          emit (Branch (6, t2, t1, l_set));                      (* bltu hwm, mark -> mark *)
+          emit_word (enc_i 0 t2 0 t1 0x13);                      (* t1 = hwm *)
+          emit (Label l_set);
+          emit_word (enc_i 0 t1 0 gp 0x13);                      (* gp = max(mark, hwm) *)
+          emit (Jal (zero, l_keep));
+          (* the mark is in an older block: back along the chain (see
+             __rgn_cross); the blocks past it wait in rtw_defer *)
+          emit (Label l_cross);
+          push ra;
+          emit (Jal (ra, "__rgn_cross"));
+          pop ra;
+          li t0 (rt_depth_addr ());
+          emit (Label l_keep)
+        end else begin
+        (* never past this block's own gp: see emit_protect *)
+        let lc = fresh_label ".rgnClamp" in
+        emit (Branch (6, t2, gp, lc));                            (* bltu hwm, gp -> keep hwm *)
+        emit_word (enc_i 0 gp 0 t2 0x13);                         (* t2 = gp *)
+        emit (Label lc);
+        let l = fresh_label ".rgnRel" in
+        emit (Branch (6, t2, t1, l));                             (* bltu hwm, mark -> keep mark *)
+        emit_word (enc_i 0 t2 0 t1 0x13);                         (* t1 = hwm *)
+        emit (Label l);
+        emit_word (enc_i 0 t1 0 gp 0x13)                          (* gp = max(mark, hwm) *)
+        end;
+        (* a loop keeps its mark and depth until Done *)
+        if loop = None then leave outer_at
+      (* the outer block mark back, depth - 1 (gp is not touched) *)
+      and leave outer_at =
+        li t0 (rt_depth_addr ());
+        emit_word (enc_i outer_at sp (ldf3 ()) t3 0x03);
+        emit_word (enc_s (rt_bmark_off ()) t3 t0 (stf3 ()) 0x23);
+        emit_word (enc_i rt_depth_off t0 (ldf3 ()) t3 0x03);
+        emit_word (enc_i (-1) t3 0 t3 0x13);
+        emit_word (enc_s rt_depth_off t3 t0 (stf3 ()) 0x23) in
+      if kind = RWord then begin
+        push a0;                                                  (* [mark 2w][outer w][r 0] *)
+        release (2 * w) w;
+        pop a0;
+        if loop = None then emit_word (enc_i (2 * w) sp 0 sp 0x13)
+      end else begin
+        let copier = request_rcopy res_ty in                   (* a loop's is region_flow[C, D] *)
+        push gp;                                                  (* c1s *)
+        emit (Jal (ra, copier));                                  (* a0 = copy 1 *)
+        push gp;                                                  (* c1e *)
+        push a0;                                                  (* [mark 4w][outer 3w][c1s 2w][c1e w][c1 0] *)
+        release (4 * w) (3 * w);
+        (* copy 2 unless it would run into copy 1: it fits below it, or gp is past it *)
+        let l_copy = fresh_label ".rgnCp2" in
+        let l_keep = fresh_label ".rgnKeep" in
+        let l_done = fresh_label ".rgnDone" in
+        emit_word (enc_i (2 * w) sp (ldf3 ()) t3 0x03);           (* c1s *)
+        emit_word (enc_i w sp (ldf3 ()) t4 0x03);                 (* c1e *)
+        emit_word (enc_r 0x20 t3 t4 0 t5 0x33);                   (* t5 = c1e - c1s *)
+        emit_word (enc_r 0 t5 gp 0 t5 0x33);                      (* t5 = gp + size *)
+        if !coro_mode then begin
+          (* v0.1.627: copy 1 in another block than gp's (the rollback went
+             back along the chain) is never in the way: copy *)
+          li t6 (rtw_addr rtw_blo);
+          emit_word (enc_i 0 t6 (ldf3 ()) t6 0x03);
+          emit (Branch (6, t3, t6, l_copy));
+          emit (Branch (7, t3, tp, l_copy))
+        end;
+        emit (Branch (7, t3, t5, l_copy));                        (* bgeu c1s, gp+size -> copy *)
+        emit (Branch (7, gp, t4, l_copy));                        (* bgeu gp, c1e -> copy *)
+        emit (Label l_keep);
+        emit_word (enc_i 0 t4 0 gp 0x13);                         (* gp = c1e: copy 1 stays *)
+        emit_word (enc_i 0 sp (ldf3 ()) a0 0x03);                 (* a0 = copy 1 *)
+        emit (Jal (zero, l_done));
+        emit (Label l_copy);
+        emit_word (enc_i 0 sp (ldf3 ()) a0 0x03);
+        emit (Jal (ra, copier));                                  (* a0 = copy 2 *)
+        emit (Label l_done);
+        emit_word (enc_i ((if loop = None then 5 else 3) * w) sp 0 sp 0x13)
+      end;
+      if !coro_mode then begin
+        (* v0.1.627: the blocks the rollback went back past, now that the
+           result is out of them *)
+        let l = fresh_label ".rgnNoDefer" in
+        li t0 (rtw_addr rtw_defer);
+        emit_word (enc_i 0 t0 (ldf3 ()) t0 0x03);
+        emit (Branch (0, t0, zero, l));
+        push ra;
+        emit (Jal (ra, "__rgn_defer_free"));
+        pop ra;
+        emit (Label l)
+      end;
+      (* v0.1.624: a region block's exit is the other place retired blocks are
+         given back (see emit_coro_release): blocks are freed on paths no
+         compaction builtin follows, and mere-ruby's collector, which runs on a
+         coroutine of its own, exits blocks constantly *)
+      emit_coro_release e;
+      (* v0.1.658: a loop's iteration ends here, its carry copied down to the
+         loop's mark M0 (the old carry and the garbage rolled back under it);
+         Continue goes round again with the same mark, Done leaves the block *)
+      if loop <> None then begin
+        flow_step l_top;
+        push a0;                                                  (* [M0 2w][outer w][d 0] *)
+        leave w;
+        pop a0;
+        emit_word (enc_i (2 * w) sp 0 sp 0x13)
+      end
+    end
 and compile_simd_root env op args =
   if List.mem_assoc op rv_simd_result_ops then begin
     let n = compile_simd_tree env (vplan_op env 7 op args) in
