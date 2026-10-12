@@ -9473,14 +9473,19 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
     (if (i32.eq (local.get $len) (local.get $cap))
       (then
         (local.set $cap (i32.mul (local.get $cap) (i32.const 2)))
+        ;; v0.1.657: 8 bytes a slot (an i64), as the first arrays have. This
+        ;; was 4, so the new keys' second half WAS the new values' first half,
+        ;; and a Map with a compound key and more than 4 entries wrote values
+        ;; over key pointers (out of memory at the 11th map_set of six
+        ;; (int, str) keys; test/parity/map_compound_iter).
         (local.set $new_keys (global.get $__lang_bump))
         (global.set $__lang_bump
           (i32.add (local.get $new_keys)
-                   (i32.mul (local.get $cap) (i32.const 4))))
+                   (i32.mul (local.get $cap) (i32.const 8))))
         (local.set $new_values (global.get $__lang_bump))
         (global.set $__lang_bump
           (i32.add (local.get $new_values)
-                   (i32.mul (local.get $cap) (i32.const 4))))
+                   (i32.mul (local.get $cap) (i32.const 8))))
         (local.set $i (i32.const 0))
         (block $cp_end
           (loop $cp_lp

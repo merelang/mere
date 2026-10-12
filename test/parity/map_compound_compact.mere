@@ -1,0 +1,14 @@
+// v0.1.657: compacting a Map keyed by a tuple. On RISC-V it is a str-keyed Map
+// of `show k` holding (k, v), so the compaction copies a str and a pair; the
+// keys and values must come back whole. (map_compact has no LLVM lowering.)
+let t = map_new ();
+let rec fill = fn (i: int) ->
+  if i == 40 then ()
+  else let _ = map_set t (i % 7, str_of_int (i % 3)) i in fill (i + 1);
+let _ = fill 0;
+let _ = map_delete t (0, "0");
+let _ = map_compact t;
+let _ = map_set t (9, "x") 99;
+let _ = map_iter t (fn (k: (int * str)) -> fn (v: int) ->
+  print (str_of_int (fst k) ++ "/" ++ snd k ++ " " ++ str_of_int v));
+print (str_of_int (map_len t) ++ " " ++ str_of_int (map_get t (6, "2")))
