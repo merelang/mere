@@ -489,6 +489,13 @@ jobs:
       - name: llvm_ffi --poison (an int answer zero-extended goes red)
         if: ${{ !cancelled() }}
         run: sh scripts/llvm_ffi_check.sh --poison
+      # v0.1.671: read_key and the terminal builtins on Wasm, under a pty, against C
+      - name: wasm_tty (the Node host leaves the terminal as C does)
+        if: ${{ !cancelled() }}
+        run: sh scripts/wasm_tty_check.sh
+      - name: wasm_tty --poison (a raw mode that keeps IEXTEN goes red)
+        if: ${{ !cancelled() }}
+        run: sh scripts/wasm_tty_check.sh --poison
 
       - name: type_query_imports (-t resolves an import like the build does)
         if: ${{ !cancelled() }}

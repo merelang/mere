@@ -21,3 +21,9 @@ write_file_bytes host
 print_err host
 print_no_nl host
 print_bytes host
+list_dir host
+mkdir_p host
+file_mtime host
+file_open host
+sleep_ms host
+read_key host

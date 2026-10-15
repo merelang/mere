@@ -89,3 +89,4 @@ llvm:strbuf_runtime              mere_strbuf_new           llvm       test/parit
 llvm:bytebuf_runtime             mere_bytebuf_new          llvm       test/parity/bytebuf_edges.mere
 llvm:rw_bytes_runtime            __lang_read_bytes         llvm       test/parity/bytes_file_roundtrip.mere
 llvm:ffi_exports                 mere_rt_str_alloc         ffi        test/llvmffi/native_probe.mere
+wasm_lines_host_used             __lang_file_read_line_host wasm      test/parity/host_fs_process.mere

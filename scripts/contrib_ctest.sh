@@ -71,7 +71,9 @@ done
 #           deeper than the interpreter's stack allows and the native binary
 #           completes. There is no output to diff against, and the native side
 #           is the one that works.
-KNOWN_WASM="stream/stream"
+# stream/stream left this list in v0.1.671, when the Wasm backend learned
+# file_open / file_read_line and it began to emit (the gate said so).
+KNOWN_WASM=""
 KNOWN_INTERP="site/build"
 
 TMP=$(mktemp -d)

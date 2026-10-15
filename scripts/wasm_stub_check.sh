@@ -143,10 +143,23 @@ probe() {
     read_line)       echo 'read_line ()' ;;
     read_stdin)      echo 'read_stdin ()' ;;
     file_openrw)     echo "let f = file_openrw \"$tmp/openrw.bin\" in let n = file_pwrite_bytes f 0 (bytes_of_str \"hi\") in let b = file_pread_bytes f 0 2 in let _ = file_close f in str_of_int n ++ str_of_bytes b" ;;
+    # v0.1.671: list_dir, mkdir_p, file_mtime, file_open / file_read_line and
+    # sleep_ms through the host. Each makes what it reads and takes it away.
+    list_dir)        echo "let _ = dir_create \"$tmp/ldp\" (0 - 1) in let _ = write_file \"$tmp/ldp/z\" \"x\" in let _ = write_file \"$tmp/ldp/a\" \"y\" in let l = list_dir \"$tmp/ldp\" in let _ = file_delete \"$tmp/ldp/z\" in let _ = file_delete \"$tmp/ldp/a\" in let _ = dir_remove \"$tmp/ldp\" in str_join \",\" l" ;;
+    mkdir_p)         echo "let _ = mkdir_p \"$tmp/mkp/x/y\" in let a = file_exists \"$tmp/mkp/x/y\" in let _ = dir_remove \"$tmp/mkp/x/y\" in let _ = dir_remove \"$tmp/mkp/x\" in let _ = dir_remove \"$tmp/mkp\" in if a then \"made\" else \"not made\"" ;;
+    file_mtime)      echo 'if file_mtime "/etc/hosts" > 1000.0 then "set" else "zero"' ;;
+    file_open)       echo 'let f = file_open "/etc/hosts" in let l = file_read_line f in let _ = file_close f in match l with Some s -> str_of_int (str_len s) | None -> "none"' ;;
+    # a delay is not in stdout, so the probe reads it off two files' mtimes:
+    # 1.1 s apart, their whole seconds differ by at least one; a stub's do not
+    # one byte, and a second: the gate feeds stdin, and a stub answers "".
+    # (tty_mode / tty_restore come in with it, one import group; off a terminal
+    # they do nothing -- scripts/wasm_tty_check.sh runs them under a pty.)
+    read_key)        echo 'let a = read_key () in let b = read_key () in a ++ "|" ++ b' ;;
+    sleep_ms)        echo "let _ = write_file \"$tmp/sl1\" \"a\" in let _ = sleep_ms 1100 in let _ = write_file \"$tmp/sl2\" \"b\" in if file_mtime \"$tmp/sl2\" - file_mtime \"$tmp/sl1\" >= 1.0 then \"slept\" else \"did not\"" ;;
   esac
 }
 
-NAMES="${WASM_STUB_NAMES-run env_var file_exists file_delete dir_create dir_entries dir_remove env_pairs proc_cwd args read_file file_size read_file_bytes read_line read_stdin file_openrw write_file_bytes print_err print_no_nl print_bytes}"
+NAMES="${WASM_STUB_NAMES-run env_var file_exists file_delete dir_create dir_entries dir_remove env_pairs proc_cwd args read_file file_size read_file_bytes read_line read_stdin file_openrw write_file_bytes print_err print_no_nl print_bytes list_dir mkdir_p file_mtime file_open sleep_ms read_key}"
 
 # Both backends read the same bytes. Without this, `read_line` answers "" on C
 # too -- the gate would compare two empty strings and call the stub a host.

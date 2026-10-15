@@ -7694,12 +7694,15 @@ let () =
         let l = file_read_line f in \
         let _ = file_close f in match l with None -> 0 | Some s -> str_len s")
     "__lang_file_read_line";
-  check_raises_containing
-    "v0.1.59: file_open is a pointed error on Wasm"
-    "unsupported in Wasm codegen"
-    (fun () ->
-      let _ = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
-        "let f = file_open \"x\" in let _ = file_close f in 0") in ());
+  (* v0.1.671: it lowers through the host now (it was a pointed refusal) *)
+  check "v0.1.671: file_open on Wasm goes through the host's file_open_r"
+    (let w = Codegen_wasm.emit_program ~main_ty:Ast.TyInt (typed_prog
+        "let f = file_open \"x\" in let _ = file_close f in 0") in
+     let has needle =
+       let n = String.length w and k = String.length needle in
+       let rec go i = i + k <= n && (String.sub w i k = needle || go (i + 1)) in go 0 in
+     if has "call $file_open_r_h" then "ok" else "no")
+    "ok";
 
   (* v0.1.58 (T-4 census): the record-update-on-polymorphic-param error
      now points at the one-annotation workaround, mirroring the v0.1.50

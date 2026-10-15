@@ -94,7 +94,7 @@ let host_builtins_without_wasm_lowering =
        (`par_map` is handled at the tail instead: it is desugared before codegen, so
        this name never reaches here.)
        v0.1.585 (Q-016): read_bytes / write_bytes lower now, and left the list. *)
-    "read_key"; "tty_raw"; "tty_restore";
+    (* read_key / tty_raw / tty_restore were here until v0.1.671 *)
     "read_lines"; "file_pread";
     "random_float" ]
 
@@ -464,6 +464,10 @@ let wasm_run_host_used = ref false
 let wasm_env_host_used = ref false
 let wasm_fdelete_host_used = ref false  (* v0.1.622: file_delete through the host *)
 let wasm_dirs_host_used = ref false     (* v0.1.630: dir_create / dir_entries / env_pairs *)
+let wasm_fs2_host_used = ref false      (* v0.1.671: list_dir / mkdir_p / file_mtime *)
+let wasm_sleep_host_used = ref false    (* v0.1.671: sleep_ms *)
+let wasm_lines_host_used = ref false    (* v0.1.671: file_open / file_read_line *)
+let wasm_tty_host_used = ref false      (* v0.1.671: tty_raw / tty_restore / read_key *)
 let wasm_fexists_host_used = ref false  (* args() on a plain host: emit $__lang_args_host + arg_count/arg_get imports *)
 (* v0.1.528 (Q-085): read_stdin/read_line on a PLAIN host go through the host,
    the way run/getenv/file_exists started to in v0.1.350. They used to answer
@@ -3085,14 +3089,40 @@ and emit_expr (e : Ast.expr) : unit =
     file_pio_used := true;
     emit_expr ch_e;
     emit_instr (Printf.sprintf "call $%s" fio)
-  | Ast.App ({ node = Ast.Var ("file_open" | "file_read_line" as fio); _ }, _)
-    when not (List.mem_assoc fio !locals
-              || Hashtbl.mem toplevel_fn_names fio
-              || Hashtbl.mem inner_lifts_wasm fio) ->
-    (* v0.1.59: streaming line input stays interp + C — it needs a decoder
-       and a buffered cursor the host would have to own per handle. *)
-    unsupported e.Ast.loc
-      (fio ^ " is unsupported in Wasm codegen (v0.1.59 scope = interp + C)")
+  (* v0.1.671: streaming line input through the host, which owns the handle
+     (the table file_openrw uses, so file_close closes either) and a cursor
+     per handle -- the C runtime's fopen "r" and getline *)
+  | Ast.App ({ node = Ast.Var "file_open"; _ }, path_e)
+    when not (List.mem_assoc "file_open" !locals
+              || Hashtbl.mem toplevel_fn_names "file_open"
+              || Hashtbl.mem inner_lifts_wasm "file_open") ->
+    wasm_lines_host_used := true;
+    let lp = fresh_local () and lh = fresh_local_i32 () in
+    emit_expr path_e;
+    emit_instr (Printf.sprintf "local.set %d" lp);
+    emit_instr (Printf.sprintf "local.get %d" lp);
+    emit_instr "i32.wrap_i64";
+    emit_instr "call $file_open_r_h";
+    emit_instr (Printf.sprintf "local.tee %d" lh);
+    emit_instr "i32.const 0";
+    emit_instr "i32.lt_s";
+    emit_instr "if";
+    emit_instr (Printf.sprintf "local.get %d" lp);
+    emit_instr "call $__lang_fail";
+    emit_instr "drop";
+    emit_instr "i32.const 0";
+    emit_instr (Printf.sprintf "local.set %d" lh);
+    emit_instr "end";
+    emit_instr (Printf.sprintf "local.get %d" lh);
+    emit_instr "i64.extend_i32_u"
+  | Ast.App ({ node = Ast.Var "file_read_line"; _ }, h_e)
+    when not (List.mem_assoc "file_read_line" !locals
+              || Hashtbl.mem toplevel_fn_names "file_read_line"
+              || Hashtbl.mem inner_lifts_wasm "file_read_line") ->
+    wasm_lines_host_used := true;
+    emit_expr h_e;
+    emit_instr "i32.wrap_i64";
+    emit_instr "call $__lang_file_read_line_host"
   (* v0.1.600: channel_close, and the receives that may come back empty --
      rewritten into `__chan_recv_pair` before emission (Ast.rewrite_channel_ops),
      which builds the (got, value) tuple: the host writes the value into the
@@ -3844,18 +3874,112 @@ and emit_expr (e : Ast.expr) : unit =
     emit_expr path_e;
     emit_expr vec_e;
     emit_instr "call $__lang_write_file_bytes_v"
-  | Ast.App ({ node = Ast.Var "list_dir"; _ }, _path_e) ->
-    unsupported e.Ast.loc
-      "list_dir is unsupported in Wasm codegen (Phase 44 MVP scope = interp + C only)"
-  | Ast.App ({ node = Ast.Var "mkdir_p"; _ }, _path_e) ->
-    unsupported e.Ast.loc
-      "mkdir_p is unsupported in Wasm codegen (Phase 44 MVP scope = interp + C only)"
-  | Ast.App ({ node = Ast.Var "file_mtime"; _ }, _) ->
-    unsupported e.Ast.loc
-      "file_mtime is unsupported in Wasm codegen (Phase 44.6 MVP = interp + C only)"
-  | Ast.App ({ node = Ast.Var "sleep_ms"; _ }, _) ->
-    unsupported e.Ast.loc
-      "sleep_ms is unsupported in Wasm codegen (Phase 44.6 MVP = interp + C only)"
+  (* v0.1.671: list_dir, mkdir_p, file_mtime and sleep_ms through the host, as
+     dir_entries and run have been (v0.1.630 / v0.1.350). The answers are the
+     C runtime's: list_dir is the host's read of the directory (strict: a
+     directory that does not open fails with its path) sorted and split by the
+     stdlib prelude's __list_dir_of, as on LLVM; mkdir_p takes every prefix that
+     ends at a slash and then the whole, and only an existing one is fine;
+     file_mtime is whole seconds; sleep_ms blocks the thread for that long. *)
+  | Ast.App ({ node = Ast.Var "list_dir"; _ }, path_e)
+    when not (user_shadows_wasm "list_dir") ->
+    let lst = Ast.TyCon ("list", [Ast.TyStr]) in
+    let mk node ty = { Ast.loc = e.Ast.loc; ty = Some ty; node } in
+    let raw = mk (Ast.App (mk (Ast.Var "__dir_read_strict") (Ast.TyArrow (Ast.TyStr, Ast.TyStr)), path_e)) Ast.TyStr in
+    emit_expr (mk (Ast.App (mk (Ast.Var "__list_dir_of") (Ast.TyArrow (Ast.TyStr, lst)), raw)) lst)
+  | Ast.App ({ node = Ast.Var "__dir_read_strict"; _ }, path_e) ->
+    wasm_fs2_host_used := true;
+    let lp = fresh_local () and lr = fresh_local_i32 () in
+    emit_expr path_e;
+    emit_instr (Printf.sprintf "local.set %d" lp);
+    emit_instr (Printf.sprintf "local.get %d" lp);
+    emit_instr "i32.wrap_i64";
+    emit_instr "call $dir_read_h";
+    emit_instr (Printf.sprintf "local.tee %d" lr);
+    emit_instr "i32.eqz";
+    emit_instr "if (result i64)";
+    emit_instr (Printf.sprintf "local.get %d" lp);
+    emit_instr "call $__lang_fail";
+    emit_instr "drop";
+    emit_expr { e with Ast.node = Ast.Str_lit ""; ty = Some Ast.TyStr };
+    emit_instr "else";
+    emit_instr (Printf.sprintf "local.get %d" lr);
+    emit_instr "i64.extend_i32_u";
+    emit_instr "end"
+  | Ast.App ({ node = Ast.Var "mkdir_p"; _ }, path_e)
+    when not (user_shadows_wasm "mkdir_p") ->
+    wasm_fs2_host_used := true;
+    let lp = fresh_local () in
+    emit_expr path_e;
+    emit_instr (Printf.sprintf "local.set %d" lp);
+    emit_instr (Printf.sprintf "local.get %d" lp);
+    emit_instr "i32.wrap_i64";
+    emit_instr "call $mkdir_p_h";
+    emit_instr "i32.const 0";
+    emit_instr "i32.lt_s";
+    emit_instr "if";
+    emit_instr (Printf.sprintf "local.get %d" lp);
+    emit_instr "call $__lang_fail";
+    emit_instr "drop";
+    emit_instr "end";
+    emit_instr "i64.const 0"
+  | Ast.App ({ node = Ast.Var "file_mtime"; _ }, path_e)
+    when not (user_shadows_wasm "file_mtime") ->
+    (* the host answers -1 for a path that does not stat *)
+    wasm_fs2_host_used := true;
+    let lp = fresh_local () and lf = fresh_local_f64 () in
+    emit_expr path_e;
+    emit_instr (Printf.sprintf "local.set %d" lp);
+    emit_instr (Printf.sprintf "local.get %d" lp);
+    emit_instr "i32.wrap_i64";
+    emit_instr "call $file_mtime_h";
+    emit_instr (Printf.sprintf "local.tee %d" lf);
+    emit_instr "f64.const -1";
+    emit_instr "f64.eq";
+    emit_instr "if";
+    emit_instr (Printf.sprintf "local.get %d" lp);
+    emit_instr "call $__lang_fail";
+    emit_instr "drop";
+    emit_instr "f64.const 0";
+    emit_instr (Printf.sprintf "local.set %d" lf);
+    emit_instr "end";
+    emit_instr (Printf.sprintf "local.get %d" lf);
+    emit_float_alloc_from_f64_on_stack ()
+  (* v0.1.671: the terminal, through the host -- which sets the same termios
+     flags the C runtime's tty_raw / tty_no_signal_keys clear (stty on the
+     stdin it inherits), saves the terminal at the first change and puts it
+     back; nothing off a terminal. read_key is one byte, blocking, "" at the end. *)
+  | Ast.App ({ node = Ast.Var ("tty_raw" | "tty_no_signal_keys" as n); _ }, u_e)
+    when not (user_shadows_wasm n) ->
+    wasm_tty_host_used := true;
+    emit_expr u_e;
+    emit_instr "drop";
+    emit_instr (Printf.sprintf "i32.const %d" (if n = "tty_raw" then 0 else 1));
+    emit_instr "call $tty_mode_h";
+    emit_instr "drop";
+    emit_instr "i64.const 0"
+  | Ast.App ({ node = Ast.Var "tty_restore"; _ }, u_e)
+    when not (user_shadows_wasm "tty_restore") ->
+    wasm_tty_host_used := true;
+    emit_expr u_e;
+    emit_instr "drop";
+    emit_instr "call $tty_restore_h";
+    emit_instr "drop";
+    emit_instr "i64.const 0"
+  | Ast.App ({ node = Ast.Var "read_key"; _ }, u_e)
+    when not (user_shadows_wasm "read_key") ->
+    wasm_tty_host_used := true;
+    emit_expr u_e;
+    emit_instr "drop";
+    emit_instr "call $read_key_h";
+    emit_instr "i64.extend_i32_u"
+  | Ast.App ({ node = Ast.Var "sleep_ms"; _ }, ms_e)
+    when not (user_shadows_wasm "sleep_ms") ->
+    wasm_sleep_host_used := true;
+    emit_expr ms_e;
+    emit_instr "i32.wrap_i64";
+    emit_instr "call $sleep_ms_h";
+    emit_instr "i64.const 0"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "write_file"; _ }, path_e); _ }, content_e) ->
     file_io_used := true;
     emit_expr path_e;
@@ -11190,6 +11314,10 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   wasm_fexists_host_used := false;
   wasm_fdelete_host_used := false;
   wasm_dirs_host_used := false;
+  wasm_fs2_host_used := false;
+  wasm_sleep_host_used := false;
+  wasm_lines_host_used := false;
+  wasm_tty_host_used := false;
   wasm_stdin_host_used := false;
   wasm_exit_used := false;
   wasm_socket_ffi := false;
@@ -11505,6 +11633,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         let pfx = name ^ "__" in
         List.iter (fun f ->
           if String.starts_with ~prefix:pfx f.name then visit f.name) fns;
+        (* v0.1.671: a builtin this backend lowers to a prelude function *)
+        if name = "list_dir" then visit "__list_dir_of";
         match Hashtbl.find_opt by_name name with
         | Some f -> List.iter visit (occurring_names f.body [])
         | None -> ()
@@ -12111,6 +12241,23 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     ^ (if !wasm_fdelete_host_used then
       "  (import \"env\" \"file_delete\" (func $file_delete_h (param i32) (result i32)))\n"
     else "")
+    ^ (if !wasm_fs2_host_used then
+      "  (import \"env\" \"dir_read\" (func $dir_read_h (param i32) (result i32)))\n\
+      \  (import \"env\" \"mkdir_p\" (func $mkdir_p_h (param i32) (result i32)))\n\
+      \  (import \"env\" \"file_mtime\" (func $file_mtime_h (param i32) (result f64)))\n"
+    else "")
+    ^ (if !wasm_lines_host_used then
+      "  (import \"env\" \"file_open_r\" (func $file_open_r_h (param i32) (result i32)))\n\
+      \  (import \"env\" \"file_read_line\" (func $file_read_line_h (param i32) (result i32)))\n"
+    else "")
+    ^ (if !wasm_tty_host_used then
+      "  (import \"env\" \"tty_mode\" (func $tty_mode_h (param i32) (result i32)))\n\
+      \  (import \"env\" \"tty_restore\" (func $tty_restore_h (result i32)))\n\
+      \  (import \"env\" \"read_key\" (func $read_key_h (result i32)))\n"
+    else "")
+    ^ (if !wasm_sleep_host_used then
+      "  (import \"env\" \"sleep_ms\" (func $sleep_ms_h (param i32)))\n"
+    else "")
     ^ (if !wasm_dirs_host_used then
       "  (import \"env\" \"dir_create\" (func $dir_create_h (param i32 i32) (result i32)))\n\
       \  (import \"env\" \"dir_entries\" (func $dir_entries_h (param i32) (result i32)))\n\
@@ -12448,6 +12595,29 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       \      (else\n\
       \        (local.set $cell (global.get $__lang_bump))\n\
       \        (global.set $__lang_bump (i32.add (local.get $cell) (i32.const 16)))\n\
+      \        (i64.store offset=0 (local.get $cell) (i64.const %d))\n\
+      \        (i64.store offset=8 (local.get $cell) (i64.extend_i32_s (local.get $p)))\n\
+      \        (i64.extend_i32_s (local.get $cell)))))\n"
+      none_t some_t
+  in
+
+  (* v0.1.671: file_read_line's answer -- 0 from the host is None, a str is
+     Some -- built the way __lang_env_var_host builds env_var's *)
+  let lines_host_section =
+    if not !wasm_lines_host_used then "" else
+    let some_t = (try Hashtbl.find variant_tags "Some" with Not_found -> 1) in
+    let none_t = (try Hashtbl.find variant_tags "None" with Not_found -> 0) in
+    Printf.sprintf
+      "  (func $__lang_file_read_line_host (param $h i32) (result i64)\n\
+      \    (local $p i32) (local $cell i32)\n\
+      \    (local.set $p (call $file_read_line_h (local.get $h)))\n\
+      \    (local.set $cell (global.get $__lang_bump))\n\
+      \    (global.set $__lang_bump (i32.add (local.get $cell) (i32.const 16)))\n\
+      \    (if (result i64) (i32.eqz (local.get $p))\n\
+      \      (then\n\
+      \        (i64.store offset=0 (local.get $cell) (i64.const %d))\n\
+      \        (i64.extend_i32_s (local.get $cell)))\n\
+      \      (else\n\
       \        (i64.store offset=0 (local.get $cell) (i64.const %d))\n\
       \        (i64.store offset=8 (local.get $cell) (i64.extend_i32_s (local.get $p)))\n\
       \        (i64.extend_i32_s (local.get $cell)))))\n"
@@ -13578,7 +13748,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     list_str_runtime_section
     vec_runtime_section
     vec_higher_order_section strbuf_section map_key_eq_section map_runtime_section
-    (args_host_section ^ env_host_section ^ stdin_host_section ^ fma_section ^ f64x2_fma_section ^ vec_to_list_section ^ lb_section) list_len_section
+    (args_host_section ^ env_host_section ^ lines_host_section ^ stdin_host_section ^ fma_section ^ f64x2_fma_section ^ vec_to_list_section ^ lb_section) list_len_section
     fn_section component_section local_decl indented_body
   |> prune_dead_fail_checks
 

@@ -86,7 +86,7 @@ instantiation with a missing-import error rather than a wrong answer.
 | `sys_os` | `unit -> str` | The OS whose ABI the program runs under: `"darwin"`, `"linux"`, `"windows"`, `"freebsd"`, `"wasi"` or `"unknown"`. C answers for the machine the emitted C is compiled for (its preprocessor), the interpreter and LLVM for the one this compiler was built on, Wasm `"wasi"`, RISC-V `"linux"` -- a program that names errno or socket constants by number asks it whose numbers they are (v0.1.642) |
 | `sys_arch` | `unit -> str` | The CPU, in the same way: `"arm64"` (aarch64 too), `"x86_64"`, `"riscv64"`, `"riscv32"`, `"wasm32"`, ... (v0.1.642) |
 | `env_pairs` | `unit -> str` | The whole environment as `env -0` writes it: `K=V` and a NUL after each. All five backends; RISC-V reads the block the host leaves above the argument block, where `env_var` now looks too (v0.1.630) |
-| `file_mtime` | `str -> float` | Modification time in seconds; raises if the path is missing (interp + C native; LLVM since v0.1.669, RISC-V since v0.1.640) |
+| `file_mtime` | `str -> float` | Modification time in seconds; raises if the path is missing (interp + C native; LLVM since v0.1.669, RISC-V since v0.1.640, Wasm through the host since v0.1.671) |
 | `file_size` | `str -> int` | File size in bytes (stat); binary-safe length where `str_len` (strlen) stops at a NUL. interp + C native (v0.1.21) |
 | `file_openrw` | `str -> File` | Open a read/write handle, creating the file if absent and **not** truncating it. The handle for everything below (v0.1.115, mbtree dogfood) |
 | `file_pread` | `File -> int -> int -> Vec[R, int]` | Read at most `len` bytes starting at an offset; a read past the end comes back short rather than padded |
@@ -98,9 +98,9 @@ instantiation with a missing-import error rather than a wrong answer.
 | `env_var` ★ | `str -> str option` | Fetch env var; `None` if unset (Phase 19.6; depends on prelude) |
 | `args` ★ | `unit -> str list` | The program's own args (after the script path / binary name); consistent interp ↔ native since v0.1.12. On `-rv` there is no host to ask: the loader leaves the arguments in RAM and this reads them, so a program given none — or run by a loader that leaves the block alone — sees an empty list rather than an error |
 | `run` | `str -> int` | Run a command line via the shell, inherit stdio, return its exit code, or 128 + the signal that killed it (interp + C native; v0.1.13; LLVM through posix_spawn since v0.1.669). RISC-V through memu's host device: the host's `/bin/sh`, and the signal in Linux's numbers whatever the host (v0.1.645); refused under `--bare` |
-| `stdin_byte` | `unit -> int` | One byte from stdin **without blocking**; -1 when nothing is ready. `read_key` blocks, which a device emulator polling a line-status register cannot afford (interp + C native; LLVM since v0.1.669) |
-| `tty_raw` | `unit -> unit` | Put stdin in raw mode: no echo, no line buffering, **no software flow control**. A no-op off a tty (interp + C native; v0.1.18; LLVM since v0.1.669, with the `struct termios` measured for the host) |
-| `tty_no_signal_keys` | `unit -> unit` | Also deliver Ctrl-C / Ctrl-Z / Ctrl-\ as bytes instead of signals — see below (interp + C native; v0.1.476; LLVM since v0.1.669) |
+| `stdin_byte` | `unit -> int` | One byte from stdin **without blocking**; -1 when nothing is ready. `read_key` blocks, which a device emulator polling a line-status register cannot afford (interp + C native; LLVM since v0.1.669; refused on Wasm, whose host cannot read stdin without blocking) |
+| `tty_raw` | `unit -> unit` | Put stdin in raw mode: no echo, no line buffering, **no software flow control**. A no-op off a tty (interp + C native; v0.1.18; LLVM since v0.1.669, with the `struct termios` measured for the host; Wasm since v0.1.671, the Node host running `stty` with the same flags -- not `setRawMode`, which takes Ctrl-C away too) |
+| `tty_no_signal_keys` | `unit -> unit` | Also deliver Ctrl-C / Ctrl-Z / Ctrl-\ as bytes instead of signals — see below (interp + C native; v0.1.476; LLVM since v0.1.669; Wasm since v0.1.671) |
 | `tty_restore` | `unit -> unit` | Put back the termios the first `tty_raw` saved |
 | `read_key` | `unit -> str` | One byte, blocking; `""` at end of input |
 
