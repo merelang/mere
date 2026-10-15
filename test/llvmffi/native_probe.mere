@@ -1,0 +1,87 @@
+// v0.1.670: the externs the compiler implements itself, called from an LLVM
+// program linked against `mere --ffi-c` (scripts/llvm_ffi_check.sh compares
+// this with the C backend's run of the same file). Every line is a value the
+// probe can predict, or one the C run prints the same: a negative int coming
+// back as negative is the one a bare `declare i64` of an `int` function gets
+// wrong, so several of them are here on purpose.
+
+extern fn mem_alloc: int -> int;
+extern fn mem_set_u8: int -> int -> int -> unit;
+extern fn mem_get_u8: int -> int -> int;
+extern fn mem_copy_str: int -> int -> str -> int;
+extern fn mem_to_str: int -> int -> str;
+extern fn mem_set_u32be : int -> int -> int -> unit;
+extern fn mem_get_u32be : int -> int -> int;
+extern fn mem_to_bytes: int -> int -> bytes;
+extern fn mem_copy_bytes: int -> int -> bytes -> int;
+extern fn sock_pair: int -> int;
+extern fn tcp_write: int -> int -> int -> int;
+extern fn tcp_read: int -> int -> int -> int;
+extern fn tcp_close: int -> unit;
+extern fn now_ms: unit -> int;
+extern fn unix_time: unit -> int;
+extern fn sha256_hex: str -> str;
+extern fn sha256_of_hex: str -> str;
+extern fn base64_encode_hex: str -> str;
+extern fn base64_decode_to_hex: str -> str;
+extern fn hex_xor: str -> str -> str;
+extern fn gen_request_id: unit -> str;
+extern fn random_b64: int -> str;
+extern fn io_poll_new: int -> int;
+extern fn io_poll_add: int -> int -> int -> int;
+extern fn io_poll_wait: int -> int -> int;
+extern fn io_poll_get: int -> int -> int;
+extern fn fd_open: str -> str -> int -> int;
+extern fn fd_last_errno: unit -> int;
+
+let say = fn (what: str) -> fn (v: str) -> print (what ++ " " ++ v);
+
+// the byte arena
+let p = mem_alloc 64;
+let _ = mem_set_u8 p 3 200;
+let _ = say "u8" (str_of_int (mem_get_u8 p 3));
+let _ = mem_set_u32be p 8 4000000000;
+let _ = say "u32be" (str_of_int (mem_get_u32be p 8));
+let n = mem_copy_str p 16 "hello arena";
+let _ = say "copy_str" (str_of_int n ++ " " ++ mem_to_str (p + 16) (n - 16));
+let b = mem_to_bytes (p + 16) 5;
+let _ = say "to_bytes" (str_of_int (bytes_len b) ++ " " ++ str_of_bytes b);
+let _ = say "copy_bytes" (str_of_int (mem_copy_bytes p 40 (bytes_of_str "xyz")) ++ " " ++ mem_to_str (p + 40) 3);
+
+// a socket pair through the arena, and readiness
+let pr = sock_pair 1;
+let a = pr / 1048576;
+let c = pr - a * 1048576;
+let _ = say "pair" (if a > 0 && c > 0 then "ok" else "failed " ++ str_of_int pr);
+let _ = say "pair of an unknown type" (str_of_int (sock_pair 9));
+let w = mem_copy_str p 0 "ping" - 0;
+let _ = say "write" (str_of_int (tcp_write a p w));
+let poll = io_poll_new 0;
+let _ = io_poll_add poll c 1;
+let ready = io_poll_wait poll 1000;
+let _ = say "ready" (str_of_int ready ++ " fd-match " ++ (if io_poll_get poll 0 / 8 == c then "yes" else "no"));
+let r = tcp_read c (p + 32) 16;
+let _ = say "read" (str_of_int r ++ " " ++ mem_to_str (p + 32) r);
+let _ = tcp_close a;
+let _ = say "read after close" (str_of_int (tcp_read c (p + 32) 16));
+let _ = tcp_close c;
+let _ = say "read closed fd" (if tcp_read c (p + 32) 16 < 0 then "negative" else "not negative");
+
+// a refusal comes back as a negative int, and its errno is kept
+let bad = fd_open "/nonexistent/mere/llvm/ffi" "r" 0;
+let _ = say "fd_open missing" (str_of_int bad);
+let _ = say "errno is ENOENT" (if fd_last_errno () == 2 then "yes" else "no " ++ str_of_int (fd_last_errno ()));
+
+// clocks
+let t0 = now_ms ();
+let _ = say "now_ms" (if t0 >= 0 then "ok" else "negative");
+let _ = say "unix_time" (if unix_time () > 1700000000 then "ok" else "wrong");
+
+// the crypto helpers (hex across the boundary)
+let _ = say "sha256" (sha256_hex "abc");
+let _ = say "sha256_of_hex" (sha256_of_hex "616263");
+let _ = say "b64" (base64_encode_hex "68656c6c6f");
+let _ = say "b64 back" (base64_decode_to_hex "aGVsbG8=");
+let _ = say "xor" (hex_xor "0f0f" "ffff");
+let _ = say "request id" (str_of_int (str_len (gen_request_id ())));
+say "random_b64" (str_of_int (str_len (random_b64 12)))

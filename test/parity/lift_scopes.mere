@@ -1,0 +1,43 @@
+// v0.1.670: three things mere-ruby met first on the LLVM backend, each in how
+// an inner `let f = fn ...` is lifted out of the function it is written in.
+//
+// 1. An inner fn used as a VALUE that reads a top-level value: the value path
+//    asked only the locals for its captures ("cannot resolve capture").
+// 2. An inner fn two lifts deep reading a local that shares a top-level fn's
+//    name: the walk reset the enclosing frame's locals one level down, so the
+//    local was taken for the top-level fn ("fn-as-value on non-arrow type").
+//    The C backend had fixed both shapes of this; LLVM had not, and Wasm, which
+//    forgot the same names, called the top-level fn and never returned.
+// 3. A capture spelled like an SSA temporary (`t9`): its parameter was declared
+//    under its safe name and read under the raw one, a temporary defined later.
+
+let table = map_new ();
+let tally = fn (a: str) -> fn (b: int) ->
+  let mk = fn (nm: str) ->
+    if map_has table nm then map_get table nm
+    else (let _ = map_set table nm (str_len nm + b) in map_get table nm) in
+  list_sum (list_map (Cons ("x", Cons ("yy", Cons (a, Nil)))) mk);
+
+let jb = fn (x: int) -> x + 1;
+let join_all = fn (a: str) -> fn (b: int) ->
+  let jb = strbuf_new () in
+  let app = fn (piece: str) -> fn (pe: str) ->
+    (let put = fn (e: str) -> (let _ = strbuf_push jb piece in e) in
+     put pe) in
+  let _ = app "x" "y" in
+  let _ = app a "z" in
+  strbuf_to_str jb ++ str_of_int b;
+
+let find = fn (t9: str) -> fn (n: int) ->
+  let rec app = fn (ys: int list) ->
+    match ys with
+    | Nil -> t9
+    | Cons (h, rest) -> if h == n then t9 ++ "!" else app rest in
+  let g = app in
+  g (Cons (1, Cons (2, Nil)));
+
+let _ = print_int (tally "zzz" 10);
+let _ = print_int (tally "zzz" 20);
+let _ = print_int (jb 41);
+let _ = print (join_all "abc" 3);
+print (find "x" 2 ++ find "y" 5)

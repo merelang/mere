@@ -23,6 +23,10 @@
 #   4. `component` rows name a program built with `-w --component`, the only
 #      way three of these sections can be reached. Running them is
 #      scripts/component_parity.sh's job; this checks they are emitted.
+#      `ffi` rows (v0.1.670) are the same arrangement for `mere -ll` programs
+#      that declare the externs the compiler implements: the parity reference
+#      (the interpreter) has no such externs, so scripts/llvm_ffi_check.sh runs
+#      them against the C backend instead.
 #   5. `none` rows must still be unreachable. If a parity program starts
 #      emitting one, the row says something untrue and the gate asks for a
 #      mode rather than passing quietly.
@@ -78,7 +82,7 @@ while read -r key marker mode prog; do
   case "$key" in ''|\#*) continue ;; esac
   rows=$((rows + 1))
   case "$mode" in
-    wasm|c|llvm|component)
+    wasm|c|llvm|component|ffi)
       if [ ! -f "$ROOT/$prog" ]; then
         echo "FAIL section_coverage[$key]: row names $prog, which does not exist"
         fails=$((fails + 1)); continue
@@ -87,13 +91,13 @@ while read -r key marker mode prog; do
         component) sh "$ROOT/scripts/bounded.sh" "$BOUND" "$MERE" -w --component "$ROOT/$prog" > "$TMP/named" 2>/dev/null ;;
         wasm)      sh "$ROOT/scripts/bounded.sh" "$BOUND" "$MERE" -w  "$ROOT/$prog" > "$TMP/named" 2>/dev/null ;;
         c)         sh "$ROOT/scripts/bounded.sh" "$BOUND" "$MERE" -c  "$ROOT/$prog" > "$TMP/named" 2>/dev/null ;;
-        llvm)      sh "$ROOT/scripts/bounded.sh" "$BOUND" "$MERE" -ll "$ROOT/$prog" > "$TMP/named" 2>/dev/null ;;
+        llvm|ffi)  sh "$ROOT/scripts/bounded.sh" "$BOUND" "$MERE" -ll "$ROOT/$prog" > "$TMP/named" 2>/dev/null ;;
       esac
       grep -q "$marker" "$TMP/named" || {
         echo "FAIL section_coverage[$key]: $prog does not emit \`$marker\` under mode $mode"
         fails=$((fails + 1)); }
       # The three modes the corpus itself compiles in must also be reached by it.
-      if [ "$mode" != component ]; then
+      if [ "$mode" != component ] && [ "$mode" != ffi ]; then
         if ! grep -l "$marker" "$TMP/$mode."* >/dev/null 2>&1; then
           echo "FAIL section_coverage[$key]: mode $mode and no parity program emits \`$marker\`"
           fails=$((fails + 1))
@@ -107,7 +111,7 @@ while read -r key marker mode prog; do
         fi
       done ;;
     *)
-      echo "FAIL section_coverage[$key]: unknown mode \`$mode\` (want wasm, c, llvm, component or none)"
+      echo "FAIL section_coverage[$key]: unknown mode \`$mode\` (want wasm, c, llvm, component, ffi or none)"
       fails=$((fails + 1)) ;;
   esac
 done < "$TABLE"
@@ -118,4 +122,5 @@ if [ "$fails" -gt 0 ]; then
 fi
 comp=$(awk '$1 !~ /^#/ && NF && $3 == "component"' "$TABLE" | wc -l | tr -d ' ')
 none=$(awk '$1 !~ /^#/ && NF && $3 == "none"' "$TABLE" | wc -l | tr -d ' ')
-echo "PASS section_coverage: $rows sections ($comp component-only, $none unreachable); parity compiled wasm=$emitted_wasm c=$emitted_c llvm=$emitted_llvm"
+ffi=$(awk '$1 !~ /^#/ && NF && $3 == "ffi"' "$TABLE" | wc -l | tr -d ' ')
+echo "PASS section_coverage: $rows sections ($comp component-only, $ffi ffi-only, $none unreachable); parity compiled wasm=$emitted_wasm c=$emitted_c llvm=$emitted_llvm"

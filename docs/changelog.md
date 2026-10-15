@@ -4,6 +4,72 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.670 — 2026-10-15
+
+_LLVM: the externs the compiler implements itself link through `mere --ffi-c`, a user's externs cross the C boundary the C backend draws, and four lifting bugs mere-ruby met on the way. mere-ruby builds on LLVM and runs._
+
+**`mere --ffi-c <file>`.** The C backend implements about a hundred `extern
+fn` names itself: the byte arena, sockets, readiness, `fd_*`, the `file_*`
+metadata, `proc_*`, the crypto helpers and TLS. A C program that declares one
+links on its own. The LLVM backend had none of them, so such a program
+emitted and then failed to link. Eight of the nineteen downstream programs
+stopped there, mere-ruby among them. This is not a second implementation in
+IR. `--ffi-c` prints the same C runtime, and clang links it beside the IR:
+`clang prog.ll prog_ffi.c`. What that C needs from its own runtime is a
+string or a block in the current region. The string layout is the same on
+both backends, so a shim routes those calls to two entry points the LLVM
+program exports (`mere_rt_str_alloc`, `mere_rt_alloc`). The runtime's
+functions take C's types, so each is renamed while the text is read. A
+wrapper with the extern's name then calls it with Mere's types and
+sign-extends an `int` answer. The `http_*` server externs are refused by
+name: they run each request in the C runtime's own region. The flags that
+pick the runtime's optional parts are one function now (`native_ffi_flags`),
+shared with the C backend; mkv, mhttpd, mengd, mbrowse and mreg emit
+byte-identical C.
+
+**A user's externs** (and libc's, which mere-ruby calls two dozen of) were
+declared with Mere's types. A C `int` result therefore read as 64 bits, so
+-5 came back as 4294967291 from a function whose 32-bit result leaves the
+upper half zero. A returned C string was read with a length header it does
+not have. The C backend has drawn that boundary since v0.1.41: `int` is C's
+`int`, and a returned `str` is copied. LLVM now does the same.
+`print_no_nl` and `print_bytes` go through `__lang_write_all` as C's do: the
+whole string, EINTR retried, and a refusal kept for `proc_out_errno`. They
+were a single `write`.
+
+**Lifting.** Four bugs, all met first by mere-ruby:
+
+- An inner fn used as a value that reads a top-level value had its capture
+  looked up only among the locals.
+- Walking an inner fn's body forgot the enclosing frame's locals. A local
+  sharing a top-level fn's name was taken for that fn, and on Wasm it called
+  the fn and never returned. The C backend had fixed this long ago, along
+  with forgetting a curried parameter and leaking a `let rec`'s names; LLVM
+  and Wasm now carry the same fixes.
+- A capture spelled like an SSA temporary (`t9`) was declared under its safe
+  name and read under the raw one.
+- `map_bytes` / `vec_bytes` were refused. They now answer 0, as the
+  interpreter and Wasm do: there are no per-container arenas here.
+
+**The result.** On LLVM, mere-ruby (205 MB of IR) links in 20 s at `-O0`
+and runs Ruby. mkv, mraft, mhttpd, mk, mrog and mtar link too; mhttpd serves
+50 concurrent requests, and mtar's list and extract agree with its C build.
+
+`--decls` printed a top-level name's type from whichever binding of that name
+the typer inferred last. `lift_scopes.mere` has a top-level `jb : int -> int`
+and a local `jb` that is a StrBuf, so the declaration came out as
+`StrBuf['a]` and the program no longer type-checked with it pasted back
+(decls_roundtrip went red). The schemes of top-level bindings, those
+generalized at level 0, are now kept apart (`Typer.top_level_schemes`).
+
+`scripts/llvm_ffi_check.sh` (new, in CI) runs `test/llvmffi/native_probe.mere`
+(23 lines) on C and on LLVM. It runs the fdio, filestat, proclimit and
+procsig probes as LLVM through `scripts/build_native.sh` (`MERE_BACKEND=llvm`),
+each with its own transcript. It also runs a user's `-O2` C shim. Its poison
+zero-extends the `int` answers and goes red on both. `test/parity/lift_scopes.mere`
+holds the lifting cases and agrees on all six targets. `section_coverage` has
+an `ffi` mode for the exported entry points.
+
 ## v0.1.669 — 2026-10-15
 
 _LLVM: `list_dir`, `dir_entries`, `mkdir_p`, `file_mtime`, `run`, `file_open` / `file_read_line`, `read_key`, `stdin_byte` and the terminal builtins. They were refused because each reads or writes a struct whose layout is the platform's. The layout now comes from the machine the compiler was built for, measured._

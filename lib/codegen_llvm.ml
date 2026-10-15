@@ -2462,7 +2462,13 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list)
       (match pat.Ast.pnode, value.Ast.node with
        | Ast.P_var n, Ast.Fun (p, _, fn_body) ->
          let fn_body = lift_one host_param host_locals n p fn_body value.Ast.loc value.Ast.ty in
-         walk p [] fn_body;
+         (* v0.1.670: `host_param :: host_locals`, not `[]` -- the C backend's fix
+            (see walk_in_fn there). A name in scope because of the enclosing frame
+            has to stay capturable one lift down; reset, a frame-local that shares
+            a top-level fn's name was taken for that fn. mere-ruby's `put`, two
+            lifts deep, reads the local StrBuf `jb`, and mere-ruby has a top-level
+            `jb`: "fn-as-value on non-arrow type". *)
+         walk p (host_param :: host_locals) fn_body;
          walk host_param (n :: host_locals) body
        | _ ->
          walk host_param host_locals value;
@@ -2477,12 +2483,20 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list)
           raise (Codegen_error (value.Ast.loc,
             "inner let-rec binding must be a single-arg fn"))) bindings
       in
+      let known_before = !known in
       known := rec_names @ !known;
       List.iter (fun (n, p, fb, loc, vty) ->
         let _ = lift_one host_param host_locals n p fb loc vty in ()) fn_specs;
-      List.iter (fun (_, p, fb, _, _) -> walk p [] fb) fn_specs;
-      walk host_param (rec_names @ host_locals) body
-    | Ast.Fun (_, _, b) -> walk host_param host_locals b
+      List.iter (fun (_, p, fb, _, _) -> walk p (host_param :: host_locals) fb) fn_specs;
+      walk host_param (rec_names @ host_locals) body;
+      (* v0.1.670: a `let rec`'s names are in scope for its bindings and its
+         body and nowhere else (the C backend's mpng fix): left in `known`, a
+         later function's parameter of the same name was not captured *)
+      known := known_before
+    (* v0.1.670: the parameter of a curried arrow is a local too (the C
+       backend's fix): it was dropped, so a nested lift reading a parameter that
+       shares a top-level or builtin name captured nothing *)
+    | Ast.Fun (q, _, b) -> walk host_param (q :: host_locals) b
     | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
     | Ast.Unit_lit | Ast.Var _ -> ()
     | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
@@ -4842,6 +4856,15 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                let cv =
                  match List.assoc_opt cn env with
                  | Some r -> r
+                 (* v0.1.670: a top-level value it reads, loaded as the direct
+                    call loads it (Phase 36). The value path asked only the
+                    locals and refused: mere-ruby's `mk_enc`, which reads the
+                    global `enc_objs`, is passed as a function. *)
+                 | None when Hashtbl.mem top_globals_llvm cn ->
+                   let r = fresh_reg () in
+                   emit_instr (Printf.sprintf "  %s = load %s, ptr @%s"
+                                 r (llvm_ty_of cty) (mu cn));
+                   r
                  | None ->
                    (match region_capture_name cn with
                     | Some r -> region_ptr_for r
@@ -5301,6 +5324,15 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | _ -> []
     in
     let ptys = params (Hashtbl.find extern_fn_decls_llvm name) in
+    (* v0.1.670: the C boundary the C backend draws (c_extern_prototype,
+       v0.1.41): an `int` crosses as C's 32-bit `int`, and a `str` comes back
+       as a bare C string. This backend declared both as Mere has them, so a
+       libc `int` answer of -1 read as 4294967295 (arm64 and x86-64 both
+       zero-extend a 32-bit result) and a returned `char*` was read with a
+       length header it does not have. mere-ruby calls access, rename, listen
+       and two dozen more that way. The externs the compiler implements are
+       the exception: their runtime (`--ffi-c`) takes Mere's types. *)
+    let c_abi = not (Codegen_c.is_native_ffi name) in
     let arg_ll_list =
       List.concat (List.mapi (fun i a ->
         match a.Ast.node, List.nth_opt ptys i with
@@ -5312,6 +5344,11 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
             match a.Ast.ty with
             | Some t -> Ast.walk t | None -> Ast.TyInt
           in
+          if c_abi && t = Ast.TyInt then begin
+            let n = fresh_reg () in
+            emit_instr (Printf.sprintf "  %s = trunc i64 %s to i32" n v);
+            [Printf.sprintf "i32 %s" n]
+          end else
           [Printf.sprintf "%s %s" (llvm_ty_of t) v]) args)
     in
     let arg_ll = String.concat ", " arg_ll_list in
@@ -5319,6 +5356,16 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
      | Ast.TyUnit ->
        emit_instr (Printf.sprintf "  call void @%s(%s)" name arg_ll);
        "0"
+     | Ast.TyInt when c_abi ->
+       let n = fresh_reg () and r = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = call i32 @%s(%s)" n name arg_ll);
+       emit_instr (Printf.sprintf "  %s = sext i32 %s to i64" r n);
+       r
+     | Ast.TyStr when c_abi ->
+       let n = fresh_reg () and r = fresh_reg () in
+       emit_instr (Printf.sprintf "  %s = call ptr @%s(%s)" n name arg_ll);
+       emit_instr (Printf.sprintf "  %s = call ptr @__lang_str_of_cstr(ptr %s)" r n);
+       r
      | _ ->
        let r = fresh_reg () in
        emit_instr (Printf.sprintf "  %s = call %s @%s(%s)"
@@ -5353,11 +5400,10 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     "0"
   | Ast.App ({ node = Ast.Var "print_no_nl"; _ }, arg) ->
     let av = emit_expr env arg in
-    emit_instr "  call i32 @fflush(ptr null)";
     let l = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i64 @__lang_str_size(ptr %s)" l av);
-    let w = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i64 @write(i32 1, ptr %s, i64 %s)" w av l);
+    (* v0.1.670: the whole string, as C's __lang_write_all writes it *)
+    emit_instr (Printf.sprintf "  call void @__lang_write_all(i32 1, ptr %s, i64 %s)" av l);
     "0"
   (* print_bytes: `fwrite` with the length, which is the whole reason `bytes`
      exists as a type. `puts` would stop at the first zero byte, and did — see the
@@ -6426,6 +6472,13 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @__lang_env_pairs()" r);
     r
+  (* v0.1.670: no per-container arenas on this backend (v0.1.661's recycle and
+     compact are their meaning only), so 0, the interpreter's and Wasm's answer:
+     a footprint trigger keyed on it never fires. It was refused, and mere-ruby
+     asks it at startup. *)
+  | Ast.App ({ node = Ast.Var ("map_bytes" | "vec_bytes" as n); _ }, arg) when not (user_shadows_llvm env n) ->
+    ignore (emit_expr env arg);
+    "0"
   (* v0.1.669: the host builtins this backend refused because each reads or
      writes a struct whose layout is the platform's (dirent, stat, termios). The
      layout is chosen the way `sys_os` is answered: for the machine this
@@ -9477,8 +9530,13 @@ let emit_lifted_fn_llvm (lf : lifted_fn_llvm) : string =
   current_expected_ty := Some lf.l_return_ty;
   current_host_fn_llvm := lf.l_host;
   emit_instr "entry:";
+  (* v0.1.670: a capture's register is its safe name, as its parameter is
+     declared (line 9544's `llvm_safe_local n`). The env said "%" ^ n, so a
+     capture spelled like a temporary -- mere-ruby's `t9` -- was read as %t9, a
+     temporary defined later: "instruction forward referenced with type". The
+     direct twin (emit_lifted_fn_direct_llvm) already used the safe name. *)
   let env =
-    List.map (fun (n, _) -> (n, "%" ^ n)) lf.l_captures
+    List.map (fun (n, _) -> (n, "%" ^ llvm_safe_local n)) lf.l_captures
     @ [(lf.l_param, "%" ^ llvm_safe_local lf.l_param)]
   in
   (* Q-131: a captured region is in scope here under its own SSA name, so
@@ -13456,7 +13514,7 @@ let bytes_runtime_llvm =
       "entry:";
       "  %len = load i64, ptr %b";
       "  %data = getelementptr i8, ptr %b, i64 8";
-      "  call i64 @write(i32 1, ptr %data, i64 %len)";
+      "  call void @__lang_write_all(i32 1, ptr %data, i64 %len)";
       "  ret i64 0";
       "}";
       (* Q-109 (2c): sixteen bytes as one <16 x i8>; the data sits after the i64 length *)
@@ -15735,6 +15793,82 @@ let file_pio_runtime_llvm =
    ms <= 0, and a uniform int in [0, n) from `rand`, seeded once from
    time ^ pid, failing on n <= 0 the way the interpreter does. A libc function
    the program also declares as an `extern` is declared once. *)
+(* v0.1.670: where errno lives, by name: a function answering its address *)
+let host_errno_fn_llvm () =
+  match Sysinfo.host_os () with
+  | "darwin" | "freebsd" -> "__error"
+  | _ -> "__errno_location"
+
+(* v0.1.670: the C runtime's __lang_write_all (v0.1.480 / v0.1.589), which
+   print_no_nl and print_bytes go through. They were one write(2) here: a short
+   write on a pipe lost the tail, EINTR lost the whole string, and a refusal was
+   dropped -- which the C backend keeps, once, for proc_out_errno (mere-ruby's
+   `loop { puts :ok }` under a closed pipe raises EPIPE by it). The refusal is
+   kept in mere_rt_out_errno, which a program's native runtime (`--ffi-c`)
+   reads; the name is exported for that reason. *)
+let write_all_runtime_llvm () =
+  let ef = host_errno_fn_llvm () in
+  String.concat "\n"
+    [ "@mere_rt_out_errno = thread_local global i32 0";
+      Printf.sprintf "declare ptr @%s()" ef;
+      "define void @__lang_write_all(i32 %fd, ptr %p0, i64 %n0) {";
+      "entry:";
+      "  %pp = alloca ptr";
+      "  %np = alloca i64";
+      "  store ptr %p0, ptr %pp";
+      "  store i64 %n0, ptr %np";
+      "  %fl = call i32 @fflush(ptr null)";
+      "  br label %loop";
+      "loop:";
+      "  %n = load i64, ptr %np";
+      "  %done = icmp eq i64 %n, 0";
+      "  br i1 %done, label %out, label %w";
+      "w:";
+      "  %p = load ptr, ptr %pp";
+      "  %r = call i64 @write(i32 %fd, ptr %p, i64 %n)";
+      "  %pos = icmp sgt i64 %r, 0";
+      "  br i1 %pos, label %adv, label %err";
+      "adv:";
+      "  %p2 = getelementptr i8, ptr %p, i64 %r";
+      "  store ptr %p2, ptr %pp";
+      "  %n2 = sub i64 %n, %r";
+      "  store i64 %n2, ptr %np";
+      "  br label %loop";
+      "err:";
+      "  %neg = icmp slt i64 %r, 0";
+      "  br i1 %neg, label %why, label %out";
+      "why:";
+      Printf.sprintf "  %%ep = call ptr @%s()" ef;
+      "  %e = load i32, ptr %ep";
+      "  %intr = icmp eq i32 %e, 4";
+      "  br i1 %intr, label %loop, label %keep";
+      "keep:";
+      "  store i32 %e, ptr @mere_rt_out_errno";
+      "  br label %out";
+      "out:";
+      "  ret void";
+      "}" ]
+
+(* v0.1.670: what a program's native runtime (`mere --ffi-c`, the C backend's
+   runtime compiled beside this IR) calls back into: a string, and any block,
+   in the current region. Emitted when the program declares an extern that
+   runtime implements. *)
+let native_ffi_used_llvm = ref false
+let ffi_exports_llvm =
+  String.concat "\n"
+    [ "; This program's native externs are the C backend's runtime, which";
+      "; `mere --ffi-c <file.mere>` prints: clang prog.ll prog_ffi.c";
+      "define ptr @mere_rt_str_alloc(i64 %n) {";
+      "entry:";
+      "  %p = call ptr @__lang_str_alloc(i64 %n)";
+      "  ret ptr %p";
+      "}";
+      "define ptr @mere_rt_alloc(i64 %n) {";
+      "entry:";
+      "  %p = call ptr @__lang_alloc(i64 %n)";
+      "  ret ptr %p";
+      "}" ]
+
 (* v0.1.669: the layouts and numbers a host builtin needs from libc's headers,
    which IR cannot include. Chosen for the machine this compiler was built for,
    as `sys_os` is answered (v0.1.642), and MEASURED -- offsetof / sizeof / the
@@ -17810,6 +17944,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       Hashtbl.replace extern_fn_decls_llvm name (Ast.walk ty)
     | _ -> ()
   ) prog.decls;
+  native_ffi_used_llvm :=
+    Hashtbl.fold (fun n _ acc -> acc || Codegen_c.is_native_ffi n) extern_fn_decls_llvm false;
   (* Lift top-level fn bindings; the remainder is the actual main body. *)
   (* v0.1.166: a region variable no `region` block ever constrained is the
      default heap region, and the typer is content to leave it open — the
@@ -18432,6 +18568,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !env_var_used_llvm then [env_var_runtime_llvm; ""] else [])
     @ (match host_misc_runtime_llvm (Hashtbl.mem extern_fn_decls_llvm) with
        | [] -> [] | l -> l @ [""])
+    @ [write_all_runtime_llvm (); ""]
+    @ (if !native_ffi_used_llvm then [ffi_exports_llvm; ""] else [])
     @ (match host_struct_runtime_llvm (Hashtbl.mem host_misc_used_llvm)
                (fun name line -> if Hashtbl.mem extern_fn_decls_llvm name then [] else [line]) with
        | [] -> [] | l -> l @ [""])
@@ -18472,12 +18610,15 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
              | _ -> [], Ast.walk t
            in
            let args, ret = flatten ty in
+           (* v0.1.670: C's `int` at the boundary, as the call site passes it *)
+           let c_abi = not (Codegen_c.is_native_ffi name) in
+           let at t = if c_abi && t = Ast.TyInt then "i32" else llvm_ty_of t in
            let ll_ret = match ret with
              | Ast.TyUnit -> "void"
-             | t -> llvm_ty_of t
+             | t -> at t
            in
            let real_args = List.filter (fun t -> t <> Ast.TyUnit) args in
-           let ll_args = String.concat ", " (List.map llvm_ty_of real_args) in
+           let ll_args = String.concat ", " (List.map at real_args) in
            Printf.sprintf "declare %s @%s(%s)" ll_ret name ll_args :: acc)
            extern_fn_decls_llvm []
        in

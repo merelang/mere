@@ -482,6 +482,13 @@ jobs:
       - name: llvm_stdin --poison (a line that keeps its newline goes red)
         if: ${{ !cancelled() }}
         run: sh scripts/llvm_stdin_check.sh --poison
+      # v0.1.670: the externs the compiler implements, on LLVM through `mere --ffi-c`
+      - name: llvm_ffi (the native runtime linked beside LLVM IR answers as C's)
+        if: ${{ !cancelled() }}
+        run: sh scripts/llvm_ffi_check.sh
+      - name: llvm_ffi --poison (an int answer zero-extended goes red)
+        if: ${{ !cancelled() }}
+        run: sh scripts/llvm_ffi_check.sh --poison
 
       - name: type_query_imports (-t resolves an import like the build does)
         if: ${{ !cancelled() }}

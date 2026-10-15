@@ -1,0 +1,10 @@
+// v0.1.670: a user's extern fns on the LLVM backend cross the boundary the C
+// backend draws -- `int` is C's 32-bit int, and a returned `str` is a bare C
+// string the program copies (scripts/llvm_ffi_check.sh links test/llvmffi/
+// user_shim.c beside it).
+extern fn mere_ffi_neg: int -> int;
+extern fn mere_ffi_greet: str -> str;
+let _ = print_int (mere_ffi_neg 5);
+let _ = print_int (mere_ffi_neg (0 - 2147483647));
+let _ = print (mere_ffi_greet "x" ++ "!");
+print_int (str_len (mere_ffi_greet "abc"))

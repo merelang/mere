@@ -84,7 +84,11 @@ let usage () =
   print_endline "                        constructors, plus the package's declared";
   print_endline "                        `mere` floor. For diffing an API between";
   print_endline "                        versions.";
-  print_endline "  mere --ffi-header <file.mere> the C header for this file's `extern fn`";
+  print_endline "  mere --ffi-c <file.mere>      the C the compiler itself supplies for this
+                        file's `extern fn`s (sockets, the byte arena,
+                        fd_*, proc_*, ...), for its LLVM IR to link
+                        against: clang prog.ll prog_ffi.c
+  mere --ffi-header <file.mere> the C header for this file's `extern fn`";
   print_endline "                        declarations: the prototypes and the structs";
   print_endline "                        they carry. Include it from the C side rather";
   print_endline "                        than writing the layout out again. (`--header`";
@@ -1175,6 +1179,17 @@ let () =
          let open Mere in
          let (prog, _main_ty) = infer_program ~base_dir:base s in
          Codegen_c.emit_c_header prog))
+      path source
+  (* v0.1.670: the native runtime behind a program's externs, for its LLVM IR
+     to link against (Codegen_c.emit_ffi_companion) *)
+  | [_; "--ffi-c"; path] ->
+    let source = read_file path in
+    let base = Filename.dirname path in
+    run_action ~base_dir:base
+      (says (fun s ->
+         let open Mere in
+         let (prog, _main_ty) = infer_program ~base_dir:base s in
+         Codegen_c.emit_ffi_companion prog))
       path source
   | [_; "--decls"; path] ->
     let source = read_file path in

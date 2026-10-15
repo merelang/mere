@@ -7308,6 +7308,56 @@ let is_native_ffi name =
   || List.mem name native_http_names
   || List.mem name native_util_names
 
+(* Which optional parts of the native runtime a program's externs pull in.
+   v0.1.670: a function of the declared names, shared by the C backend and the
+   LLVM companion (emit_ffi_companion), so the two cannot pick different parts. *)
+type native_ffi_flags = {
+  ff_tls : bool; ff_midi : bool; ff_window : bool; ff_audio : bool;
+  ff_filestat : bool; ff_fdio : bool; ff_proclimit : bool }
+
+let native_ffi_flags (has : string -> bool) : native_ffi_flags =
+  (* v0.1.91: a program that declares tcp_starttls / tcp_starttls_verified as an
+     extern gets the real OpenSSL-backed TLS runtime (and its SSL-aware
+     tcp_read/write/close); everyone else keeps the plaintext path and needs no
+     OpenSSL at build time. *)
+  let ff_tls =
+    has "tcp_starttls" || has "tcp_starttls_verified" || has "tls_server_init"
+    || has "tcp_accept_tls" || has "http_serve_tls" in
+  (* v0.1.128: declaring a midi_* extern pulls in the PortMidi runtime (and
+     asks the clang line for -lportmidi); everyone else needs no portmidi. *)
+  let ff_midi = has "midi_open_input" || has "midi_read" || has "midi_init" in
+  (* v0.1.249: declaring a win_* extern pulls in the SDL2 runtime and asks the
+     clang line for `sdl2-config --cflags --libs`; everyone else needs no SDL. *)
+  let ff_window = has "win_open" || has "win_blit" || has "win_poll" in
+  (* v0.1.314: declaring an audio_* extern pulls in the SDL2 audio runtime
+     (same build line as win_*: `sdl2-config --cflags --libs`). *)
+  let ff_audio = has "audio_open" || has "audio_queue" in
+  (* v0.1.509: declaring any file_* metadata extern pulls in <sys/stat.h> and
+     <utime.h>. No library and no build-line change -- unlike win_*/audio_*,
+     this costs two headers. *)
+  let ff_filestat =
+    List.exists has
+      [ "file_stat"; "file_lstat"; "file_stat_field"; "file_chmod"; "file_chown";
+        "file_truncate"; "file_umask"; "file_mkfifo"; "file_utime"; "file_readlink" ] in
+  (* v0.1.522: declaring any fd_* extern pulls in <fcntl.h>. Same cost model
+     as file_*: one header, no library and no build-line change. *)
+  let ff_fdio =
+    List.exists has
+      [ "fd_open"; "fd_read"; "fd_write"; "fd_close"; "fd_seek"; "fd_dup";
+        "fd_sync"; "fd_isatty"; "fd_pipe" ] in
+  (* v0.1.550: declaring any proc_* limit/priority extern, or file_flock, pulls
+     in <sys/resource.h> and <sys/file.h>. The same cost model again: two
+     headers, no library, no build-line change. *)
+  let ff_proclimit =
+    List.exists has
+      [ "proc_getrlimit"; "proc_rlimit_field"; "proc_setrlimit";
+        "proc_rlimit_resource"; "proc_rlimit_names"; "proc_rlim_const";
+        "proc_getpriority"; "proc_setpriority"; "proc_last_errno";
+        "file_flock"; "proc_sig_noop"; "proc_sig_default"; "proc_sig_raise";
+        "proc_out_errno"; "proc_sig_catch"; "proc_sig_take"; "proc_sig_ignore";
+        "proc_spawn"; "proc_waitpid"; "proc_wait_status" ] in
+  { ff_tls; ff_midi; ff_window; ff_audio; ff_filestat; ff_fdio; ff_proclimit }
+
 let () = is_native_ffi_fwd := is_native_ffi
 
 let native_http_runtime ~tls =
@@ -11591,6 +11641,24 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
    this used to be a top-level constant, evaluated at module-initialisation time —
    before any program has been parsed — so the lookup would have been false for
    every program that ever declared them. *)
+(* v0.1.670: named, because the LLVM backend's companion (emit_ffi_companion)
+   carries the same two functions *)
+let arena_bytes_lines =
+  [ "/* mem_to_bytes / mem_copy_bytes: mem_to_str's two directions, for bytes.";
+    "   mem_to_str stops at the first zero byte, which every binary protocol";
+    "   contains, so a reader had to go arena -> hex -> bytes and a writer had to";
+    "   call mem_set_u8 once per byte. */";
+    "static mere_bytes* mem_to_bytes(int p, int len) {";
+    "  if (len < 0) len = 0;";
+    "  mere_bytes* b = __lang_bytes_alloc((long long)len);";
+    "  memcpy(b->data, __mem + p, (size_t)len);";
+    "  return b;";
+    "}";
+    "static int mem_copy_bytes(int dst, int off, mere_bytes* v) {";
+    "  memcpy(__mem + dst + off, v->data, (size_t)v->len);";
+    "  return (int)v->len;";
+    "}" ]
+
 let bytes_runtime ~arena =
   String.concat "\n"
     ([ "struct mere_bytes { long long len; unsigned char data[]; };";
@@ -11628,21 +11696,7 @@ let bytes_runtime ~arena =
            runtime broke every program that uses `bytes` WITHOUT the arena — which
            is most of them, and `proto_parity` said so immediately.
        So: here, and only when the extern was declared. *)
-    @ (if arena then
-      [ "/* mem_to_bytes / mem_copy_bytes: mem_to_str's two directions, for bytes.";
-        "   mem_to_str stops at the first zero byte, which every binary protocol";
-        "   contains, so a reader had to go arena -> hex -> bytes and a writer had to";
-        "   call mem_set_u8 once per byte. */";
-        "static mere_bytes* mem_to_bytes(int p, int len) {";
-        "  if (len < 0) len = 0;";
-        "  mere_bytes* b = __lang_bytes_alloc((long long)len);";
-        "  memcpy(b->data, __mem + p, (size_t)len);";
-        "  return b;";
-        "}";
-        "static int mem_copy_bytes(int dst, int off, mere_bytes* v) {";
-        "  memcpy(__mem + dst + off, v->data, (size_t)v->len);";
-        "  return (int)v->len;";
-        "}" ] else [])
+    @ (if arena then arena_bytes_lines else [])
     @ [
       (* v0.1.587 (Q-117): A VIEW, NOT A COPY, WHEN IT CAN BE ONE. A str and a
          bytes have the same layout -- an 8-byte length, then the data -- and
@@ -11724,6 +11778,160 @@ let bytes_runtime ~arena =
 (* bytes <-> Vec[int] bridge. Emitted only when the bridge is used (so it can
    safely reference mere_vec_int), and injected after both the vec_int runtime
    and bytes_runtime. Each vec element must be 0..255. *)
+
+(* v0.1.670: THE NATIVE RUNTIME AS A COMPANION FOR THE LLVM BACKEND.
+
+   This backend implements about a hundred `extern fn` names itself (the lists
+   above: the byte arena and the sockets, readiness, fd_*, file_* metadata,
+   proc_*, the crypto helpers, the TLS and window runtimes), so a C program that
+   declares one links on its own. The LLVM backend had none of it: a program
+   that declared `tcp_read` emitted, and clang said "undefined symbol". mere-ruby
+   and eleven other downstream programs stopped there.
+
+   Not a second implementation in IR. The SAME C, handed to the same clang
+   beside the IR: `mere --ffi-c prog.mere > prog_ffi.c; clang prog.ll prog_ffi.c`.
+   What the C needs from its own runtime is small -- a string allocated in the
+   current region, its size, a copy of a C string, a bytes block -- and the
+   strings have the same layout on both backends (an 8-byte length, the bytes,
+   a NUL), so a shim in front of the runtime text routes those to the two
+   entry points the LLVM program exports (mere_rt_str_alloc / mere_rt_alloc).
+
+   The runtime's functions are `static` and take C's types (int, pointers); the
+   LLVM program calls each extern with Mere's (i64, ptr, double). So every
+   runtime name is renamed with a macro while the runtime text is read, and a
+   wrapper with the extern's own name and Mere's types calls it: an int result
+   comes back sign-extended, which a bare `declare i64` of an `int` function
+   does not promise (a -1 would read as 4294967295).
+
+   The http_* externs are not here: they drive the C runtime's per-request
+   region, which is the C backend's region, not this one's. *)
+let ffi_companion_c_ty (n : string) (t : Ast.ty) : string option =
+  match Ast.walk t with
+  | Ast.TyInt -> Some "long long"
+  | Ast.TyStr -> Some "const char*"
+  | Ast.TyFloat -> Some "double"
+  | Ast.TyBool -> Some "_Bool"
+  | Ast.TyUnit -> None
+  | Ast.TyBytes -> Some "mere_bytes*"
+  | t ->
+    raise (Codegen_error (Loc.dummy,
+      Printf.sprintf "--ffi-c: extern `%s` takes or answers a %s, which the LLVM backend's \
+                      calls do not pass the way the C runtime takes it" n (Ast.pp_ty t)))
+
+let emit_ffi_companion (prog : Ast.program) : string =
+  let seen = Hashtbl.create 16 in
+  let externs =
+    List.filter_map (function
+        | Ast.Top_extern (n, ty) when not (Hashtbl.mem seen n) ->
+          Hashtbl.add seen n (); Some (n, Ast.walk ty)
+        | _ -> None) prog.Ast.decls in
+  let natives = List.filter (fun (n, _) -> is_native_ffi n) externs in
+  List.iter (fun (n, _) ->
+      if List.mem n native_http_names && n <> "unix_time" then
+        raise (Codegen_error (Loc.dummy,
+          Printf.sprintf "--ffi-c: `%s` is the C backend's HTTP server, which runs each \
+                          request in a region of that backend's runtime; use -c" n)))
+    natives;
+  if natives = [] then
+    "/* mere --ffi-c: this program declares none of the externs the compiler\n\
+    \   implements, so there is nothing to link beside its LLVM IR. */\n"
+  else begin
+    let has n = List.mem_assoc n natives in
+    let f = native_ffi_flags has in
+    let arena = has "mem_to_bytes" || has "mem_copy_bytes" in
+    let all_names =
+      native_ffi_names @ native_ffi_stub_names @ native_util_names in
+    let rename = List.map (fun n -> Printf.sprintf "#define %s __mrt_%s" n n) all_names in
+    let unrename = List.map (fun n -> Printf.sprintf "#undef %s" n) all_names in
+    let wrapper (n, ty) =
+      (* the one http_* name that is not the server: a clock (contrib/http's
+         access log; mengd) *)
+      if n = "unix_time" then "long long unix_time(void) { return (long long)time(NULL); }" else
+      let rec split t = match Ast.walk t with
+        | Ast.TyArrow (a, r) -> let (ps, rr) = split r in (Ast.walk a :: ps, rr)
+        | t -> ([], t) in
+      let (ps, ret) = split ty in
+      let real = List.filter (fun t -> t <> Ast.TyUnit) ps in
+      let params = List.mapi (fun i t ->
+          match ffi_companion_c_ty n t with
+          | Some c -> Printf.sprintf "%s a%d" c i
+          | None -> "") real in
+      let args_real = List.mapi (fun i _ -> Printf.sprintf "a%d" i) real in
+      (* the runtime takes the unit parameter as an int when its arity says so *)
+      let args =
+        match native_ffi_declared_arity n with
+        | Some k when k = List.length ps && k <> List.length real ->
+          let i = ref 0 in
+          List.map (fun t -> if t = Ast.TyUnit then "0"
+                     else (let a = Printf.sprintf "a%d" !i in incr i; a)) ps
+        | _ -> args_real in
+      let call = Printf.sprintf "__mrt_%s(%s)" n (String.concat ", " args) in
+      let plist = if params = [] then "void" else String.concat ", " params in
+      match ffi_companion_c_ty n ret with
+      | None -> Printf.sprintf "void %s(%s) { (void)%s; }" n plist call
+      | Some c -> Printf.sprintf "%s %s(%s) { return (%s)%s; }" c n plist c call in
+    String.concat "\n"
+      ([ "/* Generated by `mere --ffi-c`: the native runtime behind this program's";
+         "   extern fns, for its LLVM IR to link against:";
+         "     mere -ll prog.mere > prog.ll && mere --ffi-c prog.mere > prog_ffi.c";
+         "     clang prog.ll prog_ffi.c";
+         "   (the C backend emits the same runtime inside the program). */";
+         "#define _GNU_SOURCE";
+         "#include <stdio.h>";
+         "#include <stdlib.h>";
+         "#include <string.h>";
+         "#include <stddef.h>";
+         "#include <stdint.h>";
+         "#include <unistd.h>";
+         "#include <errno.h>";
+         "#include <pthread.h>";
+         "#include <signal.h>";
+         "#include <time.h>";
+         "#include <sys/types.h>";
+         "#include <sys/time.h>";
+         "#include <sys/socket.h>";
+         "#include <sys/stat.h>";
+         "#include <sys/wait.h>";
+         "#include <sys/resource.h>";
+         "#include <sys/file.h>";
+         "#include <sys/un.h>";
+         "#include <netinet/in.h>";
+         "#include <netinet/tcp.h>";
+         "#include <arpa/inet.h>";
+         "#include <netdb.h>";
+         "#include <poll.h>";
+         "#include <fcntl.h>";
+         "#include <spawn.h>";
+         "#include <utime.h>";
+         "#include <dirent.h>";
+         "";
+         "/* what the runtime text needs from the C backend's own runtime */";
+         "typedef struct __lang_region __lang_region;";
+         "struct mere_bytes { long long len; unsigned char data[]; };";
+         "typedef struct mere_bytes mere_bytes;";
+         "extern char* mere_rt_str_alloc(long long len);  /* the LLVM program's: in its current region */";
+         "extern void* mere_rt_alloc(long long n);";
+         "extern _Thread_local int mere_rt_out_errno;      /* the errno of its last failed write to stdout */";
+         "#define __lang_current_region ((__lang_region*)0)";
+         "#define __lang_default_region (*(__lang_region*)0)";
+         "#define __lang_out_errno mere_rt_out_errno";
+         "static char* __lang_str_alloc(__lang_region* r, size_t len) { (void)r; return mere_rt_str_alloc((long long)len); }";
+         "static size_t __lang_str_size(const char* s) { return ((const size_t*)(const void*)s)[-1]; }";
+         "static const char* __lang_str_of_cstr(const char* s) { size_t n = strlen(s); char* d = __lang_str_alloc(0, n); memcpy(d, s, n); return d; }";
+         "static const char* __lang_str_dup_n(const char* s, size_t n) { char* d = __lang_str_alloc(0, n); memcpy(d, s, n); return d; }";
+         "static void* __lang_region_alloc(__lang_region* r, size_t n) { (void)r; return mere_rt_alloc((long long)n); }";
+         "static mere_bytes* __lang_bytes_alloc(long long len) { mere_bytes* b = (mere_bytes*)mere_rt_alloc((long long)sizeof(mere_bytes) + len); b->len = len; return b; }";
+         "" ]
+       @ rename
+       @ [ native_ffi_runtime ~tls:f.ff_tls ~midi:f.ff_midi ~window:f.ff_window
+             ~audio:f.ff_audio ~filestat:f.ff_filestat ~fdio:f.ff_fdio
+             ~proclimit:f.ff_proclimit ]
+       @ (if arena then arena_bytes_lines else [])
+       @ unrename
+       @ [ ""; "/* the externs this program declared, with the types its calls pass */" ]
+       @ List.map wrapper natives
+       @ [ "" ])
+  end
 let bytes_vec_bridge_runtime =
   String.concat "\n"
     [ "static mere_bytes* __lang_bytes_of_vec(mere_vec_int* v) {";
@@ -15062,67 +15270,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      OpenSSL at build time. *)
   env_var_used := false;
   uses_coro := false;
-  uses_tls :=
-    Hashtbl.mem extern_fn_decls "tcp_starttls"
-    || Hashtbl.mem extern_fn_decls "tcp_starttls_verified"
-    || Hashtbl.mem extern_fn_decls "tls_server_init"
-    || Hashtbl.mem extern_fn_decls "tcp_accept_tls"
-    || Hashtbl.mem extern_fn_decls "http_serve_tls";
-  (* v0.1.128: declaring a midi_* extern pulls in the PortMidi runtime (and
-     asks the clang line for -lportmidi); everyone else needs no portmidi. *)
-  uses_midi :=
-    Hashtbl.mem extern_fn_decls "midi_open_input"
-    || Hashtbl.mem extern_fn_decls "midi_read"
-    || Hashtbl.mem extern_fn_decls "midi_init";
-  (* v0.1.249: declaring a win_* extern pulls in the SDL2 runtime and asks the
-     clang line for `sdl2-config --cflags --libs`; everyone else needs no SDL. *)
-  uses_window :=
-    Hashtbl.mem extern_fn_decls "win_open"
-    || Hashtbl.mem extern_fn_decls "win_blit"
-    || Hashtbl.mem extern_fn_decls "win_poll";
-  (* v0.1.314: declaring an audio_* extern pulls in the SDL2 audio runtime
-     (same build line as win_*: `sdl2-config --cflags --libs`). *)
-  uses_audio :=
-    Hashtbl.mem extern_fn_decls "audio_open"
-    || Hashtbl.mem extern_fn_decls "audio_queue";
-  (* v0.1.509: declaring any file_* metadata extern pulls in <sys/stat.h> and
-     <utime.h>. No library and no build-line change -- unlike win_*/audio_*,
-     this costs two headers. *)
-  uses_filestat :=
-    Hashtbl.mem extern_fn_decls "file_stat"
-    || Hashtbl.mem extern_fn_decls "file_lstat"
-    || Hashtbl.mem extern_fn_decls "file_stat_field"
-    || Hashtbl.mem extern_fn_decls "file_chmod"
-    || Hashtbl.mem extern_fn_decls "file_chown"
-    || Hashtbl.mem extern_fn_decls "file_truncate"
-    || Hashtbl.mem extern_fn_decls "file_umask"
-    || Hashtbl.mem extern_fn_decls "file_mkfifo"
-    || Hashtbl.mem extern_fn_decls "file_utime"
-    || Hashtbl.mem extern_fn_decls "file_readlink";
-  (* v0.1.522: declaring any fd_* extern pulls in <fcntl.h>. Same cost model
-     as file_*: one header, no library and no build-line change. *)
-  uses_fdio :=
-    Hashtbl.mem extern_fn_decls "fd_open"
-    || Hashtbl.mem extern_fn_decls "fd_read"
-    || Hashtbl.mem extern_fn_decls "fd_write"
-    || Hashtbl.mem extern_fn_decls "fd_close"
-    || Hashtbl.mem extern_fn_decls "fd_seek"
-    || Hashtbl.mem extern_fn_decls "fd_dup"
-    || Hashtbl.mem extern_fn_decls "fd_sync"
-    || Hashtbl.mem extern_fn_decls "fd_isatty"
-    || Hashtbl.mem extern_fn_decls "fd_pipe";
-  (* v0.1.550: declaring any proc_* limit/priority extern, or file_flock, pulls
-     in <sys/resource.h> and <sys/file.h>. The same cost model again: two
-     headers, no library, no build-line change. *)
+  (let f = native_ffi_flags (Hashtbl.mem extern_fn_decls) in
+   uses_tls := f.ff_tls; uses_midi := f.ff_midi; uses_window := f.ff_window;
+   uses_audio := f.ff_audio; uses_filestat := f.ff_filestat; uses_fdio := f.ff_fdio;
+   uses_proclimit := f.ff_proclimit);
   uses_dirs := false;
-  uses_proclimit :=
-    List.exists (Hashtbl.mem extern_fn_decls)
-      [ "proc_getrlimit"; "proc_rlimit_field"; "proc_setrlimit";
-        "proc_rlimit_resource"; "proc_rlimit_names"; "proc_rlim_const";
-        "proc_getpriority"; "proc_setpriority"; "proc_last_errno";
-        "file_flock"; "proc_sig_noop"; "proc_sig_default"; "proc_sig_raise";
-        "proc_out_errno"; "proc_sig_catch"; "proc_sig_take"; "proc_sig_ignore";
-        "proc_spawn"; "proc_waitpid"; "proc_wait_status" ];
   strbuf_used := false;
   bytebuf_used := false;
   bytes_used := false;

@@ -32,10 +32,10 @@ command -v "$CC" >/dev/null 2>&1 || { echo "procsig_check: no C compiler" >&2; e
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-"$MERE" -c "$ROOT/test/procsig/procsig_probe.mere" > "$TMP/p.c" 2>"$TMP/p.err" \
-  || { echo "FAIL procsig: mere -c refused the probe"; cat "$TMP/p.err"; exit 1; }
-"$CC" -O1 -w "$TMP/p.c" -o "$TMP/p" 2>"$TMP/cc.err" \
-  || { echo "FAIL procsig: C compile failed"; cat "$TMP/cc.err"; exit 1; }
+# v0.1.670: MERE_BACKEND=llvm builds it as LLVM IR linked against `mere --ffi-c`
+# (scripts/llvm_ffi_check.sh); the transcript below is the same either way.
+MERE="$MERE" CC="$CC" sh "$ROOT/scripts/build_native.sh" "$ROOT/test/procsig/procsig_probe.mere" "$TMP/p" 2>"$TMP/cc.err" \
+  || { echo "FAIL procsig: the probe did not build (${MERE_BACKEND:-c})"; cat "$TMP/cc.err"; exit 1; }
 P="$TMP/p"
 
 # THE "NOTHING INHERITED" SCENES PUT THE DEFAULT BACK FIRST. A CI runner starts
