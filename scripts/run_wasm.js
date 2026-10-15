@@ -292,6 +292,10 @@ const wasmPath = process.argv[2];
   // Open file descriptors for positioned I/O, indexed by the handle value
   // Mere sees. Slot 0 is reserved as a null sentinel.
   const openFiles = [undefined];
+  // v0.1.671: what file_read_line has read past a handle's last line
+  const lineBufs = [];
+  // v0.1.671: the terminal as it was before the first tty_raw (`stty -g`)
+  let ttySaved = null;
 
   const env = {
     puts: (ptr) => {
@@ -418,6 +422,108 @@ const wasmPath = process.argv[2];
     },
     dir_remove: (pathPtr) => {
       try { fs.rmdirSync(readCStr(pathPtr)); return 0; } catch (e) { return -1; }
+    },
+    // v0.1.671: file_open / file_read_line, as the C runtime's fopen "r" and
+    // getline: a handle in the same table as file_openrw's (file_close closes
+    // either), -1 for a file that does not open; a line without its newline,
+    // the last one without one too, and 0 (None) only at the end
+    file_open_r: (pathPtr) => {
+      try {
+        openFiles.push(fs.openSync(readCStr(pathPtr), "r"));
+        lineBufs[openFiles.length - 1] = Buffer.alloc(0);
+        return openFiles.length - 1;
+      } catch (e) { return -1; }
+    },
+    file_read_line: (handle) => {
+      const fd = openFiles[handle];
+      if (fd === undefined) return 0;
+      let buf = lineBufs[handle] || Buffer.alloc(0);
+      for (;;) {
+        const nl = buf.indexOf(10);
+        if (nl >= 0) {
+          lineBufs[handle] = buf.subarray(nl + 1);
+          return writeStrBytes(Buffer.from(buf.subarray(0, nl)));
+        }
+        const chunk = Buffer.alloc(65536);
+        let n = 0;
+        try { n = fs.readSync(fd, chunk, 0, chunk.length, null); } catch (e) { n = 0; }
+        if (n === 0) {
+          lineBufs[handle] = Buffer.alloc(0);
+          return buf.length === 0 ? 0 : writeStrBytes(Buffer.from(buf));
+        }
+        buf = Buffer.concat([buf, chunk.subarray(0, n)]);
+      }
+    },
+    // v0.1.671: list_dir's read -- dir_entries' answer, but 0 (no string)
+    // for a directory that does not open, which the program fails on with
+    // the path as the C runtime's opendir check does
+    dir_read: (pathPtr) => {
+      try {
+        const names = fs.readdirSync(readCStr(pathPtr), { encoding: "buffer" });
+        const parts = [];
+        for (const n of names) { parts.push(n); parts.push(Buffer.from([0])); }
+        return writeStrBytes(Buffer.concat(parts));
+      } catch (e) { return 0; }
+    },
+    // v0.1.671: the C runtime's mkdir -p -- every prefix that ends at a slash,
+    // then the whole path; EEXIST is fine at each step (a file included, as
+    // there), anything else is -1
+    mkdir_p: (pathPtr) => {
+      const p = readCStr(pathPtr);
+      for (let i = 1; i <= p.length; i++) {
+        if (i === p.length || p[i] === "/") {
+          try { fs.mkdirSync(p.slice(0, i), { mode: 0o755 }); }
+          catch (e) { if (e.code !== "EEXIST") return -1; }
+        }
+      }
+      return 0;
+    },
+    // v0.1.671: whole seconds, as the C runtime's (double)st.st_mtime; -1
+    // for a path that does not stat
+    file_mtime: (pathPtr) => {
+      try { return Math.floor(fs.statSync(readCStr(pathPtr)).mtimeMs / 1000); } catch (e) { return -1; }
+    },
+    // v0.1.671: the terminal. stty on the stdin this process inherited sets
+    // exactly the flags the C runtime's tty_raw clears (ICANON ECHO IEXTEN
+    // IXON IXOFF, VMIN 1 VTIME 0) or tty_no_signal_keys does (ISIG) -- Node's
+    // own setRawMode is cfmakeraw, which takes Ctrl-C away too. The terminal
+    // as it was is saved at the first change and put back by tty_restore.
+    // Nothing happens off a terminal, as there.
+    tty_mode: (nosig) => {
+      if (!require("tty").isatty(0)) return 0;
+      const cp = require("child_process");
+      if (ttySaved === null) {
+        const r = cp.spawnSync("stty", ["-g"], { stdio: ["inherit", "pipe", "inherit"] });
+        if (r.status === 0) ttySaved = r.stdout.toString().trim();
+      }
+      const args = nosig ? ["-isig"]
+        : ["-icanon", "-echo", "-iexten", "-ixon", "-ixoff", "min", "1", "time", "0"];
+      cp.spawnSync("stty", args, { stdio: "inherit" });
+      return 0;
+    },
+    tty_restore: () => {
+      if (ttySaved !== null && require("tty").isatty(0))
+        require("child_process").spawnSync("stty", [ttySaved], { stdio: "inherit" });
+      return 0;
+    },
+    // one byte, blocking; "" at the end. A stdin someone made non-blocking
+    // waits for input (EAGAIN), as the C runtime's __lang_stdin_again does.
+    read_key: () => {
+      const b = Buffer.alloc(1);
+      for (;;) {
+        try {
+          const n = fs.readSync(0, b, 0, 1, null);
+          return writeStrBytes(n <= 0 ? Buffer.alloc(0) : Buffer.from(b));
+        } catch (e) {
+          if (e.code === "EAGAIN") { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5); continue; }
+          if (e.code === "EINTR") continue;
+          return writeStrBytes(Buffer.alloc(0));
+        }
+      }
+    },
+    // v0.1.671: block the thread, as usleep does; nothing for ms <= 0
+    sleep_ms: (ms) => {
+      if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
     },
     // v0.1.633: getcwd(3), the physical path
     proc_cwd: () => {
@@ -580,14 +686,15 @@ const wasmPath = process.argv[2];
       process.env[name] = value;
       return 0;
     },
+    // v0.1.671: the C runtime's answer -- the exit code, or 128 plus the
+    // signal that ended it, or -1 when it could not be started. This said
+    // `e.status || 1`, so a command killed by a signal (status null) read 1.
     system: (cmdPtr) => {
       const cmd = readCStr(cmdPtr);
-      try {
-        require("child_process").execSync(cmd, { stdio: "inherit" });
-        return 0;
-      } catch (e) {
-        return e.status || 1;
-      }
+      const r = require("child_process").spawnSync("/bin/sh", ["-c", cmd], { stdio: "inherit" });
+      if (r.error) return -1;
+      if (r.signal) return 128 + (require("os").constants.signals[r.signal] || 0);
+      return r.status;
     },
     // arg_count / arg_get — user-facing CLI args (everything after the
     // .wasm path on the command line). Same as `argv[1:]` in a normal

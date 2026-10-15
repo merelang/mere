@@ -4,6 +4,47 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.671 — 2026-10-15
+
+_Wasm: `list_dir`, `mkdir_p`, `file_mtime`, `sleep_ms`, `file_open` / `file_read_line`, `read_key` and the terminal builtins, through the Node host. `run` of a command a signal ended answers 128 plus the signal, as on C._
+
+These were the first refusal for six of the downstream programs on Wasm:
+mraft and mvm (`sleep_ms`), mk (`file_mtime`), mengd (`list_dir`), and
+mtar and mreg (`mkdir_p`). All six emit now, which makes 14 of 19. The
+answers are the C runtime's:
+
+- `list_dir` is the host's read of the directory, and a directory that does
+  not open fails with its path. The sort and the split are the stdlib
+  prelude's `__list_dir_of`, as on LLVM since v0.1.669; the pruner keeps it
+  when a program says `list_dir`.
+- `mkdir_p` creates each prefix ending at a slash, then the whole path. EEXIST
+  is fine at every step, a file included, as there.
+- `file_mtime` returns whole seconds.
+- `sleep_ms` blocks the thread (`Atomics.wait`).
+- `file_open` / `file_read_line` keep the handle in the table `file_openrw`
+  uses, so `file_close` closes either. They drop the newline, keep a last
+  line without one, and return None only at the end.
+- The terminal goes through `stty` on the stdin the host inherited, with the
+  flags C's `tty_raw` and `tty_no_signal_keys` clear. Node's `setRawMode` is
+  cfmakeraw, which would also take Ctrl-C away. `read_key` reads one byte,
+  blocking.
+- `stdin_byte` stays refused: this host cannot ask stdin without waiting.
+
+The host's `system` (behind `run`) answered `e.status || 1`, so a command
+killed by a signal read 1. It now returns 128 plus the signal, or -1 when the
+command could not start, as the C runtime does.
+
+`test/parity/host_fs_process.mere` agrees on Wasm now as well. So does
+`contrib/stream`, which reads its input with `file_read_line`.
+`contrib_ctest` had it pinned as a Wasm emission failure, and it noticed the
+pin was stale; the pin is gone.
+`scripts/wasm_stub_check.sh` probes the new host imports: `read_key` from the
+fed stdin, and the terminal pair that comes in with it. The sleep is
+read off two files' mtimes 1.1 s apart, because a delay is not in stdout.
+`scripts/wasm_tty_check.sh` (new, in CI) runs `read_key` from a pipe and the
+terminal builtins under a pseudo-terminal against C. Its poison, a raw mode
+that keeps IEXTEN, goes red.
+
 ## v0.1.670 — 2026-10-15
 
 _LLVM: the externs the compiler implements itself link through `mere --ffi-c`, a user's externs cross the C boundary the C backend draws, and four lifting bugs mere-ruby met on the way. mere-ruby builds on LLVM and runs._
