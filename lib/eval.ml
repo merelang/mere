@@ -3653,8 +3653,12 @@ let builtin_file_open =
   V_builtin ("file_open", fun v ->
     match v with
     | V_str path ->
+      (* v0.1.669: a failure the program can catch, as read_file's is and as
+         the C runtime's is -- `failwith` was an OCaml exception that try_or
+         did not see, so a missing file ended the interpreter where C and LLVM
+         handed try_or its default (found by host_fs_process) *)
       (try V_file (open_in path)
-       with Sys_error msg -> failwith ("file_open: " ^ msg))
+       with Sys_error msg -> raise (Eval_error (Loc.dummy, "file_open: " ^ msg)))
     | _ -> failwith "file_open: expected str")
 
 let builtin_file_read_line =

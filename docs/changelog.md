@@ -4,6 +4,56 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.669 — 2026-10-15
+
+_LLVM: `list_dir`, `dir_entries`, `mkdir_p`, `file_mtime`, `run`, `file_open` / `file_read_line`, `read_key`, `stdin_byte` and the terminal builtins. They were refused because each reads or writes a struct whose layout is the platform's. The layout now comes from the machine the compiler was built for, measured._
+
+These builtins were the first refusal for seven of the nineteen downstream
+programs: mk, mrog, mere-ruby, medit2, mengd, mtar and mreg. LLVM IR cannot
+include `<dirent.h>` or `<termios.h>`, so this backend refused anything that
+reads `struct dirent`, `struct stat` or `struct termios`. It already answers
+`sys_os` for the machine the compiler was built for (v0.1.642). The layouts are
+now chosen the same way, from a table (`host_abi_llvm`) whose numbers were
+printed by a C program, not read off the headers. That program ran on macOS
+arm64 and in both CI images (Linux arm64 and x86_64). Reading the headers would
+have been wrong on the first try: `st_mtim` is at offset 88 on Linux arm64,
+not at 72 as the generic layout suggests. A host outside the table gets a
+refusal that names it.
+
+Each answer is the C runtime's:
+
+- `list_dir` sorts with strcmp, leaves out `.` and `..`, and fails with the
+  path when the directory does not open. The reading is IR; the split and
+  the sort are the stdlib prelude's `__list_dir_of`.
+- `dir_entries` returns `""` for a directory that does not open.
+- `mkdir_p` creates each prefix ending at a slash, then the whole path. EEXIST
+  is fine; any other error fails with the path.
+- `file_mtime` returns the mtime's seconds as a float.
+- `run` uses posix_spawn of `/bin/sh -c`. It returns the exit code, 128 plus
+  the signal, or -1.
+- `file_read_line` reads with getline. It drops the newline and returns None
+  only at the end.
+- `read_key` retries EINTR and waits out a non-blocking stdin.
+- `stdin_byte` polls for zero time.
+- `tty_raw`, `tty_no_signal_keys` and `tty_restore` use the same masks as C.
+
+The interpreter's `file_open` on a missing file raised an OCaml exception that
+`try_or` did not catch. It now fails as `read_file` does, so the default is
+returned there too.
+
+`test/parity/host_fs_process.mere` (new) agrees on the interpreter, C, LLVM,
+RV32 and RV64; Wasm still refuses `list_dir`. `scripts/llvm_stdin_check.sh`
+now also feeds `read_key` and `stdin_byte` from a pipe. It runs the terminal
+builtins under a pseudo-terminal and compares what `stty -g` reads back after
+each with what the C runtime's leave. Its poison (a raw mode that leaves VMIN
+alone) goes red. `check_cmd_check`'s standing example of a refusal only the
+flag form can see is `coro_pingpong.mere` now (Wasm). `dirs_and_env.mere`
+stopped being one when LLVM accepted it.
+
+Each runtime piece declares the libc functions it calls. Two pieces in one
+program (`read_key` beside `read_line`) declared `read` twice. The module now
+keeps one `declare` per name.
+
 ## v0.1.668 — 2026-10-15
 
 _LLVM: three walls mbrowse and mere-blog hit first on this backend. `show` of a channel, file, thread or coroutine now prints what the interpreter prints, on every backend._

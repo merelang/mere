@@ -1,0 +1,48 @@
+// v0.1.669: the host builtins the LLVM backend refused because each reads or
+// writes a struct whose layout is the platform's -- list_dir and dir_entries
+// (struct dirent), file_mtime (struct stat), mkdir_p, run (posix_spawn and the
+// wait status) and file_open / file_read_line. The terminal builtins are
+// checked under a pseudo-terminal by scripts/llvm_stdin_check.sh instead: here
+// stdin is not a terminal and they do nothing.
+// Each answer is the C runtime's: the names sorted as strcmp sorts them and
+// without `.` / `..`, a missing directory or file failing with its path, a
+// directory that exists being fine for mkdir_p, the exit code or 128 plus the
+// signal, the newline dropped from a line and a last line without one kept.
+
+let root = "/tmp/mere-parity-host-fs";
+let _ = run ("rm -rf " ++ root);
+let _ = mkdir_p (root ++ "/a/b/c");
+let _ = mkdir_p (root ++ "/a/b/c");
+let _ = mkdir_p (root ++ "/a/b/");
+let _ = write_file (root ++ "/a/zeta.txt") "one\ntwo\n\nlast";
+let _ = write_file (root ++ "/a/Alpha.txt") "";
+let _ = write_file (root ++ "/a/.hidden") "x";
+let _ = write_file (root ++ "/a/b/c/only") "1\n";
+let _ = print (show (list_dir (root ++ "/a")));
+let _ = print (show (list_dir (root ++ "/a/b/c")));
+let _ = print (show (list_dir (root ++ "/a/b")));
+let _ = print (try_or (fn () -> show (list_dir (root ++ "/missing"))) "list_dir missing: refused");
+let _ = print (try_or (fn () -> let _ = mkdir_p (root ++ "/a/zeta.txt/x") in "made") "mkdir_p under a file: refused");
+let _ = print (str_of_int (str_len (dir_entries (root ++ "/missing"))));
+let _ = print (str_of_int (str_len (dir_entries (root ++ "/a/b/c"))));
+let _ = print (if file_mtime (root ++ "/a/zeta.txt") > 1000000000.0 then "mtime: recent" else "mtime: wrong");
+let _ = print (try_or (fn () -> str_of_float (file_mtime (root ++ "/nope"))) "file_mtime missing: refused");
+
+let f = file_open (root ++ "/a/zeta.txt");
+let rec lines = fn (n: int) ->
+  match file_read_line f with
+  | Some l -> let _ = print (str_of_int n ++ ": [" ++ l ++ "]") in lines (n + 1)
+  | None -> n;
+let _ = print (str_of_int (lines 0) ++ " lines");
+let _ = file_close f;
+let g = file_open (root ++ "/a/Alpha.txt");
+let _ = print (match file_read_line g with | Some l -> "empty file: [" ++ l ++ "]" | None -> "empty file: no lines");
+let _ = file_close g;
+let _ = print (try_or (fn () -> let h = file_open (root ++ "/nope") in let _ = file_close h in "opened") "file_open missing: refused");
+
+let _ = print (str_of_int (run "exit 3"));
+let _ = print (str_of_int (run "true"));
+let _ = print (str_of_int (run "kill -TERM $$"));
+let _ = print (str_of_int (run ("test -d " ++ root ++ "/a/b/c")));
+let _ = run ("rm -rf " ++ root);
+print "done"
