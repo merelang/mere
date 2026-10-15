@@ -35,9 +35,7 @@ let host_builtins_without_llvm_lowering =
        the list exists to close, reopened by a later feature. *)
     (* read_bytes / write_bytes were here until v0.1.585 *)
     (* read_line / read_stdin / read_lines were here until v0.1.663 *)
-    "read_key";
-    "tty_raw"; "tty_restore";
-    "run";
+    (* read_key / tty_raw / tty_restore / run were here until v0.1.669 *)
     (* file_exists / random_int were here until v0.1.598 *)
     "random_float" ]
 
@@ -5712,12 +5710,24 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i64 @__lang_%s(i64 %s)" r fio f);
     r
-  | Ast.App ({ node = Ast.Var ("file_open" | "file_read_line"
-                              as fio); _ }, _) ->
-    (* v0.1.59: streaming line input stays interp + C — it needs a decoder
-       and a buffered cursor the runtime would have to own per handle. *)
-    unsupported e.Ast.loc
-      (fio ^ " is unsupported in LLVM codegen (scope = interp + C)")
+  (* v0.1.669: streaming line input, as the C runtime has it since v0.1.59: a
+     FILE* (this backend's File, as file_openrw's is), and getline into a buffer
+     each thread keeps -- the newline dropped, a last line without one returned,
+     None only at the end *)
+  | Ast.App ({ node = Ast.Var "file_open"; _ }, path_e) when not (user_shadows_llvm env "file_open") ->
+    file_io_used_llvm := true; file_pio_used_llvm := true;
+    Hashtbl.replace host_misc_used_llvm "file_lines" ();
+    let pv = emit_expr env path_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_file_open(ptr %s)" r pv);
+    r
+  | Ast.App ({ node = Ast.Var "file_read_line"; _ }, h_e) when not (user_shadows_llvm env "file_read_line") ->
+    file_io_used_llvm := true; file_pio_used_llvm := true;
+    Hashtbl.replace host_misc_used_llvm "file_lines" ();
+    let hv = emit_expr env h_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call %%option_str @__lang_file_read_line(i64 %s)" r hv);
+    r
   (* v0.1.600: channel_close, and the two receives that answer an option --
      rewritten before emission into `__chan_recv_pair` (see
      rewrite_channel_ops), which hands back (got, value) as a tuple *)
@@ -6416,19 +6426,65 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     let r = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call ptr @__lang_env_pairs()" r);
     r
-  | Ast.App ({ node = Ast.Var "dir_entries"; _ }, _path_e) when not (user_shadows_llvm env "dir_entries") ->
-    unsupported e.Ast.loc
-      "dir_entries is unsupported in LLVM codegen: it reads a struct dirent, whose \
-       layout is the platform's (use -c, which has it)"
-  | Ast.App ({ node = Ast.Var "list_dir"; _ }, _path_e) ->
-    unsupported e.Ast.loc
-      "list_dir is unsupported in LLVM codegen (Phase 44 MVP scope = interp + C only)"
-  | Ast.App ({ node = Ast.Var "mkdir_p"; _ }, _path_e) ->
-    unsupported e.Ast.loc
-      "mkdir_p is unsupported in LLVM codegen (Phase 44 MVP scope = interp + C only)"
-  | Ast.App ({ node = Ast.Var "file_mtime"; _ }, _) ->
-    unsupported e.Ast.loc
-      "file_mtime is unsupported in LLVM codegen (Phase 44.6 MVP = interp + C only)"
+  (* v0.1.669: the host builtins this backend refused because each reads or
+     writes a struct whose layout is the platform's (dirent, stat, termios). The
+     layout is chosen the way `sys_os` is answered: for the machine this
+     compiler was built for (host_abi_llvm, measured on macOS and on Linux
+     arm64 / x86_64, note 350). The answers are the C runtime's, call for call. *)
+  | Ast.App ({ node = Ast.Var "dir_entries"; _ }, path_e) when not (user_shadows_llvm env "dir_entries") ->
+    Hashtbl.replace host_misc_used_llvm "dir_read" ();
+    let pv = emit_expr env path_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_dir_read(ptr %s, i1 false)" r pv);
+    r
+  (* the names sorted and split by the stdlib prelude's __list_dir_of; a
+     directory that does not open fails with its path, as C's opendir check does *)
+  | Ast.App ({ node = Ast.Var "list_dir"; _ }, path_e) when not (user_shadows_llvm env "list_dir") ->
+    Hashtbl.replace host_misc_used_llvm "dir_read" ();
+    let pv = emit_expr env path_e in
+    let raw = fresh_reg () and r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_dir_read(ptr %s, i1 true)" raw pv);
+    emit_instr (Printf.sprintf "  %s = call ptr @mu___list_dir_of(ptr %s)" r raw);
+    r
+  | Ast.App ({ node = Ast.Var "mkdir_p"; _ }, path_e) when not (user_shadows_llvm env "mkdir_p") ->
+    Hashtbl.replace host_misc_used_llvm "mkdir_p" ();
+    let pv = emit_expr env path_e in
+    emit_instr (Printf.sprintf "  call i64 @__lang_mkdir_p(ptr %s)" pv);
+    "0"
+  | Ast.App ({ node = Ast.Var "file_mtime"; _ }, path_e) when not (user_shadows_llvm env "file_mtime") ->
+    Hashtbl.replace host_misc_used_llvm "file_mtime" ();
+    let pv = emit_expr env path_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call double @__lang_file_mtime(ptr %s)" r pv);
+    r
+  | Ast.App ({ node = Ast.Var "run"; _ }, cmd_e) when not (user_shadows_llvm env "run") ->
+    Hashtbl.replace host_misc_used_llvm "run" ();
+    let cv = emit_expr env cmd_e in
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_run(ptr %s)" r cv);
+    r
+  | Ast.App ({ node = Ast.Var ("tty_raw" | "tty_no_signal_keys" as n); _ }, u_e) when not (user_shadows_llvm env n) ->
+    Hashtbl.replace host_misc_used_llvm "tty" ();
+    ignore (emit_expr env u_e);
+    emit_instr (Printf.sprintf "  call i64 @__lang_tty_mode(i32 %d)" (if n = "tty_raw" then 0 else 1));
+    "0"
+  | Ast.App ({ node = Ast.Var "tty_restore"; _ }, u_e) when not (user_shadows_llvm env "tty_restore") ->
+    Hashtbl.replace host_misc_used_llvm "tty" ();
+    ignore (emit_expr env u_e);
+    emit_instr "  call i64 @__lang_tty_restore()";
+    "0"
+  | Ast.App ({ node = Ast.Var "read_key"; _ }, u_e) when not (user_shadows_llvm env "read_key") ->
+    Hashtbl.replace host_misc_used_llvm "read_key" ();
+    ignore (emit_expr env u_e);
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call ptr @__lang_read_key()" r);
+    r
+  | Ast.App ({ node = Ast.Var "stdin_byte"; _ }, u_e) when not (user_shadows_llvm env "stdin_byte") ->
+    Hashtbl.replace host_misc_used_llvm "stdin_byte" ();
+    ignore (emit_expr env u_e);
+    let r = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 @__lang_stdin_byte()" r);
+    r
   | Ast.App ({ node = Ast.Var "sleep_ms"; _ }, ms_e) when not (user_shadows_llvm env "sleep_ms") ->
     Hashtbl.replace host_misc_used_llvm "sleep_ms" ();
     let mv = emit_expr env ms_e in
@@ -15679,6 +15735,481 @@ let file_pio_runtime_llvm =
    ms <= 0, and a uniform int in [0, n) from `rand`, seeded once from
    time ^ pid, failing on n <= 0 the way the interpreter does. A libc function
    the program also declares as an `extern` is declared once. *)
+(* v0.1.669: the layouts and numbers a host builtin needs from libc's headers,
+   which IR cannot include. Chosen for the machine this compiler was built for,
+   as `sys_os` is answered (v0.1.642), and MEASURED -- offsetof / sizeof / the
+   macros, printed by a C program on macOS arm64 and in the CI images (Linux
+   arm64 and x86_64), note 350. A guess was wrong on the first try: stat's
+   st_mtim is at 88 on Linux arm64 too, not at 72 as the generic layout reads.
+   A host outside these refuses by name rather than reading the wrong bytes. *)
+type host_abi_llvm = {
+  ha_dirent_name : int;     (* offsetof(struct dirent, d_name) *)
+  ha_stat_mtime : int;      (* the seconds of the mtime, a 64-bit word *)
+  ha_errno_fn : string;     (* the function that answers errno's address *)
+  ha_inode64 : bool;        (* macOS x86_64: opendir/readdir/stat$INODE64 *)
+  ha_tio_size : int;
+  ha_tio_flag : string;     (* tcflag_t: unsigned long on macOS, unsigned int on Linux *)
+  ha_tio_iflag : int; ha_tio_lflag : int; ha_tio_cc : int;
+  ha_vmin : int; ha_vtime : int;
+  ha_icanon : int; ha_echo : int; ha_iexten : int; ha_isig : int;
+  ha_ixon : int; ha_ixoff : int;
+  ha_eagain : int;
+  ha_nfds : string;         (* nfds_t *)
+}
+
+let host_abi_llvm () : host_abi_llvm =
+  match Sysinfo.host_os () with
+  | "darwin" ->
+    { ha_dirent_name = 21; ha_stat_mtime = 48; ha_errno_fn = "__error";
+      ha_inode64 = Sysinfo.host_arch () = "x86_64";
+      ha_tio_size = 72; ha_tio_flag = "i64";
+      ha_tio_iflag = 0; ha_tio_lflag = 24; ha_tio_cc = 32;
+      ha_vmin = 16; ha_vtime = 17;
+      ha_icanon = 0x100; ha_echo = 0x8; ha_iexten = 0x400; ha_isig = 0x80;
+      ha_ixon = 0x200; ha_ixoff = 0x400;
+      ha_eagain = 35; ha_nfds = "i32" }
+  | "linux" ->
+    { ha_dirent_name = 19; ha_stat_mtime = 88; ha_errno_fn = "__errno_location";
+      ha_inode64 = false;
+      ha_tio_size = 60; ha_tio_flag = "i32";
+      ha_tio_iflag = 0; ha_tio_lflag = 12; ha_tio_cc = 17;
+      ha_vmin = 6; ha_vtime = 5;
+      ha_icanon = 0x2; ha_echo = 0x8; ha_iexten = 0x8000; ha_isig = 0x1;
+      ha_ixon = 0x400; ha_ixoff = 0x1000;
+      ha_eagain = 11; ha_nfds = "i64" }
+  | os ->
+    raise (Codegen_error (Loc.dummy,
+      Printf.sprintf "unsupported (llvm codegen): this program reads a directory, a file's \
+                      times or the terminal, whose layouts this backend knows for darwin \
+                      and linux; the compiler was built for %s (use -c, which takes the \
+                      layouts from the platform's headers)" os))
+
+(* the five runtime pieces of v0.1.669, emitted only when used *)
+let host_struct_runtime_llvm (used : string -> bool) (decl : string -> string -> string list) : string list =
+  if not (used "dir_read" || used "mkdir_p" || used "file_mtime" || used "run"
+          || used "tty" || used "read_key" || used "stdin_byte" || used "file_lines")
+  then [] else
+  let a = host_abi_llvm () in
+  let sym n = if a.ha_inode64 then "\"" ^ n ^ "$INODE64\"" else n in
+  let errno_decl = decl a.ha_errno_fn (Printf.sprintf "declare ptr @%s()" a.ha_errno_fn) in
+  (if used "dir_read" then
+     decl "opendir" (Printf.sprintf "declare ptr @%s(ptr)" (sym "opendir"))
+     @ decl "readdir" (Printf.sprintf "declare ptr @%s(ptr)" (sym "readdir"))
+     @ decl "closedir" "declare i32 @closedir(ptr)"
+     @ [ (* dir_entries: "" for a directory that does not open; list_dir (strict)
+            fails with the path. Each name is followed by a NUL. *)
+         "define ptr @__lang_dir_read(ptr %path, i1 %strict) {";
+         "entry:";
+         "  %tmpp = alloca ptr";
+         "  %capp = alloca i64";
+         "  %np = alloca i64";
+         Printf.sprintf "  %%d = call ptr @%s(ptr %%path)" (sym "opendir");
+         "  %nul = icmp eq ptr %d, null";
+         "  br i1 %nul, label %fail, label %start";
+         "fail:";
+         "  br i1 %strict, label %die, label %empty";
+         "die:";
+         "  call void @__lang_fail_impl(ptr %path)";
+         "  unreachable";
+         "empty:";
+         "  %e = call ptr @__lang_str_alloc(i64 0)";
+         "  ret ptr %e";
+         "start:";
+         "  %b0 = call ptr @malloc(i64 256)";
+         "  store ptr %b0, ptr %tmpp";
+         "  store i64 256, ptr %capp";
+         "  store i64 0, ptr %np";
+         "  br label %loop";
+         "loop:";
+         Printf.sprintf "  %%ent = call ptr @%s(ptr %%d)" (sym "readdir");
+         "  %end = icmp eq ptr %ent, null";
+         "  br i1 %end, label %done, label %check";
+         "check:";
+         Printf.sprintf "  %%nm = getelementptr i8, ptr %%ent, i64 %d" a.ha_dirent_name;
+         "  %c0 = load i8, ptr %nm";
+         "  %dot0 = icmp eq i8 %c0, 46";
+         "  br i1 %dot0, label %dot1, label %take";
+         "dot1:";
+         "  %p1 = getelementptr i8, ptr %nm, i64 1";
+         "  %c1 = load i8, ptr %p1";
+         "  %z1 = icmp eq i8 %c1, 0";
+         "  br i1 %z1, label %loop, label %dot2";
+         "dot2:";
+         "  %dd = icmp eq i8 %c1, 46";
+         "  br i1 %dd, label %dot3, label %take";
+         "dot3:";
+         "  %p2 = getelementptr i8, ptr %nm, i64 2";
+         "  %c2 = load i8, ptr %p2";
+         "  %z2 = icmp eq i8 %c2, 0";
+         "  br i1 %z2, label %loop, label %take";
+         "take:";
+         "  %l = call i64 @strlen(ptr %nm)";
+         "  %n = load i64, ptr %np";
+         "  %need0 = add i64 %n, %l";
+         "  %need = add i64 %need0, 1";
+         "  br label %grow";
+         "grow:";
+         "  %cap = load i64, ptr %capp";
+         "  %small = icmp ugt i64 %need, %cap";
+         "  br i1 %small, label %regrow, label %copy";
+         "regrow:";
+         "  %cap2 = mul i64 %cap, 2";
+         "  store i64 %cap2, ptr %capp";
+         "  %t = load ptr, ptr %tmpp";
+         "  %t2 = call ptr @realloc(ptr %t, i64 %cap2)";
+         "  store ptr %t2, ptr %tmpp";
+         "  br label %grow";
+         "copy:";
+         "  %tb = load ptr, ptr %tmpp";
+         "  %dst = getelementptr i8, ptr %tb, i64 %n";
+         "  call void @llvm.memcpy.p0.p0.i64(ptr %dst, ptr %nm, i64 %l, i1 false)";
+         "  %zp = getelementptr i8, ptr %dst, i64 %l";
+         "  store i8 0, ptr %zp";
+         "  store i64 %need, ptr %np";
+         "  br label %loop";
+         "done:";
+         "  %cl = call i32 @closedir(ptr %d)";
+         "  %nf = load i64, ptr %np";
+         "  %buf = call ptr @__lang_str_alloc(i64 %nf)";
+         "  %tf = load ptr, ptr %tmpp";
+         "  call void @llvm.memcpy.p0.p0.i64(ptr %buf, ptr %tf, i64 %nf, i1 false)";
+         "  %bend = getelementptr i8, ptr %buf, i64 %nf";
+         "  store i8 0, ptr %bend";
+         "  call void @free(ptr %tf)";
+         "  ret ptr %buf";
+         "}" ]
+   else [])
+  @ (if used "mkdir_p" then
+     decl "mkdir" "declare i32 @mkdir(ptr, i32)" @ errno_decl
+     @ [ (* every prefix ending at a slash, then the whole path; an existing one
+            (EEXIST, 17 on every host here) is fine, anything else fails with
+            the path -- the C runtime's loop *)
+         "define i64 @__lang_mkdir_p(ptr %path) {";
+         "entry:";
+         "  %n = call i64 @__lang_str_size(ptr %path)";
+         "  %z = icmp eq i64 %n, 0";
+         "  br i1 %z, label %out, label %go";
+         "go:";
+         "  %n1 = add i64 %n, 1";
+         "  %buf = call ptr @malloc(i64 %n1)";
+         "  call void @llvm.memcpy.p0.p0.i64(ptr %buf, ptr %path, i64 %n1, i1 false)";
+         "  br label %loop";
+         "loop:";
+         "  %i = phi i64 [ 1, %go ], [ %i2, %next ]";
+         "  %past = icmp ugt i64 %i, %n";
+         "  br i1 %past, label %done, label %body";
+         "body:";
+         "  %pc = getelementptr i8, ptr %buf, i64 %i";
+         "  %c = load i8, ptr %pc";
+         "  %slash = icmp eq i8 %c, 47";
+         "  %endc = icmp eq i8 %c, 0";
+         "  %cut = or i1 %slash, %endc";
+         "  br i1 %cut, label %mk, label %next";
+         "mk:";
+         "  store i8 0, ptr %pc";
+         "  %r = call i32 @mkdir(ptr %buf, i32 493)";
+         "  %bad = icmp ne i32 %r, 0";
+         "  br i1 %bad, label %why, label %restore";
+         "why:";
+         Printf.sprintf "  %%ep = call ptr @%s()" a.ha_errno_fn;
+         "  %en = load i32, ptr %ep";
+         "  %exists = icmp eq i32 %en, 17";
+         "  br i1 %exists, label %restore, label %die";
+         "die:";
+         "  call void @free(ptr %buf)";
+         "  call void @__lang_fail_impl(ptr %path)";
+         "  unreachable";
+         "restore:";
+         "  store i8 %c, ptr %pc";
+         "  br label %next";
+         "next:";
+         "  %i2 = add i64 %i, 1";
+         "  br label %loop";
+         "done:";
+         "  call void @free(ptr %buf)";
+         "  br label %out";
+         "out:";
+         "  ret i64 0";
+         "}" ]
+   else [])
+  @ (if used "file_mtime" then
+     decl "stat" (Printf.sprintf "declare i32 @%s(ptr, ptr)" (sym "stat"))
+     @ [ "define double @__lang_file_mtime(ptr %path) {";
+         "entry:";
+         "  %st = alloca [256 x i8], align 16";
+         Printf.sprintf "  %%r = call i32 @%s(ptr %%path, ptr %%st)" (sym "stat");
+         "  %bad = icmp ne i32 %r, 0";
+         "  br i1 %bad, label %die, label %ok";
+         "die:";
+         "  call void @__lang_fail_impl(ptr %path)";
+         "  unreachable";
+         "ok:";
+         Printf.sprintf "  %%p = getelementptr i8, ptr %%st, i64 %d" a.ha_stat_mtime;
+         "  %sec = load i64, ptr %p";
+         "  %f = sitofp i64 %sec to double";
+         "  ret double %f";
+         "}" ]
+   else [])
+  @ (if used "run" then
+     decl "posix_spawn" "declare i32 @posix_spawn(ptr, ptr, ptr, ptr, ptr, ptr)"
+     @ decl "waitpid" "declare i32 @waitpid(i32, ptr, i32)"
+     @ decl "environ" "@environ = external global ptr"
+     @ [ (* posix_spawn of /bin/sh -c, not system(): macOS serializes system()
+            behind a lock (the C runtime's v0.1.16). The exit code, or 128 plus
+            the signal that ended it, or -1 when it could not be started. *)
+         "@.lang_run_binsh = private constant [8 x i8] c\"/bin/sh\\00\"";
+         "@.lang_run_sh = private constant [3 x i8] c\"sh\\00\"";
+         "@.lang_run_c = private constant [3 x i8] c\"-c\\00\"";
+         "define i64 @__lang_run(ptr %cmd) {";
+         "entry:";
+         "  %pid = alloca i32";
+         "  %st = alloca i32";
+         "  %argv = alloca [4 x ptr]";
+         "  %a0 = getelementptr [4 x ptr], ptr %argv, i64 0, i64 0";
+         "  store ptr @.lang_run_sh, ptr %a0";
+         "  %a1 = getelementptr [4 x ptr], ptr %argv, i64 0, i64 1";
+         "  store ptr @.lang_run_c, ptr %a1";
+         "  %a2 = getelementptr [4 x ptr], ptr %argv, i64 0, i64 2";
+         "  store ptr %cmd, ptr %a2";
+         "  %a3 = getelementptr [4 x ptr], ptr %argv, i64 0, i64 3";
+         "  store ptr null, ptr %a3";
+         "  %env = load ptr, ptr @environ";
+         "  %r = call i32 @posix_spawn(ptr %pid, ptr @.lang_run_binsh, ptr null, ptr null, ptr %argv, ptr %env)";
+         "  %bad = icmp ne i32 %r, 0";
+         "  br i1 %bad, label %fail, label %wait";
+         "fail:";
+         "  ret i64 -1";
+         "wait:";
+         "  %p = load i32, ptr %pid";
+         "  %w = call i32 @waitpid(i32 %p, ptr %st, i32 0)";
+         "  %wbad = icmp slt i32 %w, 0";
+         "  br i1 %wbad, label %fail, label %decode";
+         "decode:";
+         "  %s = load i32, ptr %st";
+         "  %sig = and i32 %s, 127";
+         "  %exited = icmp eq i32 %sig, 0";
+         "  br i1 %exited, label %ex, label %sg";
+         "ex:";
+         "  %c = lshr i32 %s, 8";
+         "  %c2 = and i32 %c, 255";
+         "  %c64 = zext i32 %c2 to i64";
+         "  ret i64 %c64";
+         "sg:";
+         "  %stopped = icmp eq i32 %sig, 127";
+         "  br i1 %stopped, label %fail, label %killed";
+         "killed:";
+         "  %k = add i32 %sig, 128";
+         "  %k64 = zext i32 %k to i64";
+         "  ret i64 %k64";
+         "}" ]
+   else [])
+  @ (if used "tty" then
+     let mask m = Printf.sprintf "%d" (lnot m) in
+     let ft = a.ha_tio_flag in
+     decl "isatty" "declare i32 @isatty(i32)"
+     @ decl "tcgetattr" "declare i32 @tcgetattr(i32, ptr)"
+     @ decl "tcsetattr" "declare i32 @tcsetattr(i32, i32, ptr)"
+     @ [ (* the C runtime's v0.1.18 / v0.1.476 masks: raw clears ICANON, ECHO,
+            IEXTEN, IXON and IXOFF and reads one byte at a time; the signal keys
+            are a separate trade (ISIG). The first change saves the terminal as
+            it was, and tty_restore puts that back. *)
+         Printf.sprintf "@__lang_tio_saved = internal global [%d x i8] zeroinitializer, align 8" a.ha_tio_size;
+         "@__lang_tio_have = internal global i32 0";
+         "define i64 @__lang_tty_mode(i32 %nosig) {";
+         "entry:";
+         Printf.sprintf "  %%tio = alloca [%d x i8], align 8" a.ha_tio_size;
+         "  %tty = call i32 @isatty(i32 0)";
+         "  %no = icmp eq i32 %tty, 0";
+         "  br i1 %no, label %out, label %get";
+         "get:";
+         "  %g = call i32 @tcgetattr(i32 0, ptr %tio)";
+         "  %gbad = icmp ne i32 %g, 0";
+         "  br i1 %gbad, label %out, label %save";
+         "save:";
+         "  %have = load i32, ptr @__lang_tio_have";
+         "  %first = icmp eq i32 %have, 0";
+         "  br i1 %first, label %keep, label %edit";
+         "keep:";
+         Printf.sprintf "  call void @llvm.memcpy.p0.p0.i64(ptr @__lang_tio_saved, ptr %%tio, i64 %d, i1 false)" a.ha_tio_size;
+         "  store i32 1, ptr @__lang_tio_have";
+         "  br label %edit";
+         "edit:";
+         Printf.sprintf "  %%lp = getelementptr i8, ptr %%tio, i64 %d" a.ha_tio_lflag;
+         Printf.sprintf "  %%l = load %s, ptr %%lp" ft;
+         "  %ns = icmp ne i32 %nosig, 0";
+         "  br i1 %ns, label %sig, label %raw";
+         "raw:";
+         Printf.sprintf "  %%l2 = and %s %%l, %s" ft (mask (a.ha_icanon lor a.ha_echo lor a.ha_iexten));
+         Printf.sprintf "  store %s %%l2, ptr %%lp" ft;
+         Printf.sprintf "  %%ip = getelementptr i8, ptr %%tio, i64 %d" a.ha_tio_iflag;
+         Printf.sprintf "  %%i = load %s, ptr %%ip" ft;
+         Printf.sprintf "  %%i2 = and %s %%i, %s" ft (mask (a.ha_ixon lor a.ha_ixoff));
+         Printf.sprintf "  store %s %%i2, ptr %%ip" ft;
+         Printf.sprintf "  %%vmin = getelementptr i8, ptr %%tio, i64 %d" (a.ha_tio_cc + a.ha_vmin);
+         "  store i8 1, ptr %vmin";
+         Printf.sprintf "  %%vtime = getelementptr i8, ptr %%tio, i64 %d" (a.ha_tio_cc + a.ha_vtime);
+         "  store i8 0, ptr %vtime";
+         "  br label %set";
+         "sig:";
+         Printf.sprintf "  %%l3 = and %s %%l, %s" ft (mask a.ha_isig);
+         Printf.sprintf "  store %s %%l3, ptr %%lp" ft;
+         "  br label %set";
+         "set:";
+         "  %s = call i32 @tcsetattr(i32 0, i32 0, ptr %tio)";
+         "  br label %out";
+         "out:";
+         "  ret i64 0";
+         "}";
+         "define i64 @__lang_tty_restore() {";
+         "entry:";
+         "  %have = load i32, ptr @__lang_tio_have";
+         "  %h = icmp ne i32 %have, 0";
+         "  br i1 %h, label %chk, label %out";
+         "chk:";
+         "  %tty = call i32 @isatty(i32 0)";
+         "  %t = icmp ne i32 %tty, 0";
+         "  br i1 %t, label %set, label %out";
+         "set:";
+         "  %s = call i32 @tcsetattr(i32 0, i32 0, ptr @__lang_tio_saved)";
+         "  br label %out";
+         "out:";
+         "  ret i64 0";
+         "}" ]
+   else [])
+  @ (if used "read_key" || used "stdin_byte" then
+     decl "read" "declare i64 @read(i32, ptr, i64)"
+     @ decl "poll" (Printf.sprintf "declare i32 @poll(ptr, %s, i32)" a.ha_nfds)
+     @ errno_decl
+     @ [ (* struct pollfd is { int fd; short events; short revents } on every
+            host here, and POLLIN is 1 *)
+         "define void @__lang_poll_stdin(ptr %pfd, i32 %ms) {";
+         "entry:";
+         "  store i32 0, ptr %pfd";
+         "  %ev = getelementptr i8, ptr %pfd, i64 4";
+         "  store i16 1, ptr %ev";
+         "  %rv = getelementptr i8, ptr %pfd, i64 6";
+         "  store i16 0, ptr %rv";
+         "  ret void";
+         "}" ]
+   else [])
+  @ (if used "read_key" then
+     [ (* one byte, blocking; "" at the end. EINTR is retried, and a stdin
+          someone made non-blocking waits for input (the C runtime's
+          __lang_stdin_again) instead of reading as the end *)
+       "define ptr @__lang_read_key() {";
+       "entry:";
+       "  %c = alloca i8";
+       "  %pfd = alloca [8 x i8], align 4";
+       "  br label %again";
+       "again:";
+       "  %n = call i64 @read(i32 0, ptr %c, i64 1)";
+       "  %neg = icmp slt i64 %n, 0";
+       "  br i1 %neg, label %err, label %got";
+       "err:";
+       Printf.sprintf "  %%ep = call ptr @%s()" a.ha_errno_fn;
+       "  %e = load i32, ptr %ep";
+       "  %intr = icmp eq i32 %e, 4";
+       "  br i1 %intr, label %again, label %eagain";
+       "eagain:";
+       Printf.sprintf "  %%ag = icmp eq i32 %%e, %d" a.ha_eagain;
+       "  br i1 %ag, label %wait, label %empty";
+       "wait:";
+       "  call void @__lang_poll_stdin(ptr %pfd, i32 -1)";
+       Printf.sprintf "  %%pr = call i32 @poll(ptr %%pfd, %s 1, i32 -1)" a.ha_nfds;
+       "  br label %again";
+       "got:";
+       "  %z = icmp eq i64 %n, 0";
+       "  br i1 %z, label %empty, label %one";
+       "empty:";
+       "  %e0 = call ptr @__lang_str_alloc(i64 0)";
+       "  ret ptr %e0";
+       "one:";
+       "  %s = call ptr @__lang_str_alloc(i64 1)";
+       "  %b = load i8, ptr %c";
+       "  store i8 %b, ptr %s";
+       "  %s1 = getelementptr i8, ptr %s, i64 1";
+       "  store i8 0, ptr %s1";
+       "  ret ptr %s";
+       "}" ]
+   else [])
+  @ (if used "stdin_byte" then
+     [ (* a byte if one is waiting, else -1 at once (poll with no wait, where
+          the C runtime selects with a zero timeout: the same answer) *)
+       "define i64 @__lang_stdin_byte() {";
+       "entry:";
+       "  %c = alloca i8";
+       "  %pfd = alloca [8 x i8], align 4";
+       "  call void @__lang_poll_stdin(ptr %pfd, i32 0)";
+       Printf.sprintf "  %%r = call i32 @poll(ptr %%pfd, %s 1, i32 0)" a.ha_nfds;
+       "  %none = icmp sle i32 %r, 0";
+       "  br i1 %none, label %no, label %rd";
+       "rd:";
+       "  %n = call i64 @read(i32 0, ptr %c, i64 1)";
+       "  %bad = icmp sle i64 %n, 0";
+       "  br i1 %bad, label %no, label %yes";
+       "yes:";
+       "  %b = load i8, ptr %c";
+       "  %v = zext i8 %b to i64";
+       "  ret i64 %v";
+       "no:";
+       "  ret i64 -1";
+       "}" ]
+   else [])
+  @ (if used "file_lines" then
+     decl "getline" "declare i64 @getline(ptr, ptr, ptr)"
+     @ [ "@.lang_fopen_r = private constant [2 x i8] c\"r\\00\"";
+         "@__lang_gl_buf = internal thread_local global ptr null";
+         "@__lang_gl_cap = internal thread_local global i64 0";
+         "define i64 @__lang_file_open(ptr %path) {";
+         "entry:";
+         "  %f = call ptr @fopen(ptr %path, ptr @.lang_fopen_r)";
+         "  %nul = icmp eq ptr %f, null";
+         "  br i1 %nul, label %die, label %ok";
+         "die:";
+         "  call void @__lang_fail_impl(ptr %path)";
+         "  unreachable";
+         "ok:";
+         "  %h = ptrtoint ptr %f to i64";
+         "  ret i64 %h";
+         "}";
+         "define %option_str @__lang_file_read_line(i64 %h) {";
+         "entry:";
+         "  %f = inttoptr i64 %h to ptr";
+         "  %n = call i64 @getline(ptr @__lang_gl_buf, ptr @__lang_gl_cap, ptr %f)";
+         "  %eof = icmp slt i64 %n, 0";
+         "  br i1 %eof, label %none, label %line";
+         "none:";
+         "  %b0 = insertvalue %option_str undef, i32 0, 0";
+         "  %b1 = insertvalue %option_str %b0, ptr null, 1";
+         "  ret %option_str %b1";
+         "line:";
+         "  %buf = load ptr, ptr @__lang_gl_buf";
+         "  %pos = icmp sgt i64 %n, 0";
+         "  br i1 %pos, label %last, label %take";
+         "last:";
+         "  %li = sub i64 %n, 1";
+         "  %lp = getelementptr i8, ptr %buf, i64 %li";
+         "  %lc = load i8, ptr %lp";
+         "  %nl = icmp eq i8 %lc, 10";
+         "  %m0 = select i1 %nl, i64 %li, i64 %n";
+         "  br label %take";
+         "take:";
+         "  %m = phi i64 [ %n, %line ], [ %m0, %last ]";
+         "  %s = call ptr @__lang_str_alloc(i64 %m)";
+         "  call void @llvm.memcpy.p0.p0.i64(ptr %s, ptr %buf, i64 %m, i1 false)";
+         "  %se = getelementptr i8, ptr %s, i64 %m";
+         "  store i8 0, ptr %se";
+         (* the payload slot holds a pointer to the value (see __lang_env_var) *)
+         "  %box_sz_p = getelementptr ptr, ptr null, i32 1";
+         "  %box_sz = ptrtoint ptr %box_sz_p to i64";
+         "  %box = call ptr @__lang_alloc(i64 %box_sz)";
+         "  store ptr %s, ptr %box";
+         "  %a0 = insertvalue %option_str undef, i32 1, 0";
+         "  %a1 = insertvalue %option_str %a0, ptr %box, 1";
+         "  ret %option_str %a1";
+         "}" ]
+   else [])
+
 let host_misc_runtime_llvm (declared : string -> bool) : string list =
   let used k = Hashtbl.mem host_misc_used_llvm k in
   let decl name line = if declared name then [] else [line] in
@@ -17901,6 +18432,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !env_var_used_llvm then [env_var_runtime_llvm; ""] else [])
     @ (match host_misc_runtime_llvm (Hashtbl.mem extern_fn_decls_llvm) with
        | [] -> [] | l -> l @ [""])
+    @ (match host_struct_runtime_llvm (Hashtbl.mem host_misc_used_llvm)
+               (fun name line -> if Hashtbl.mem extern_fn_decls_llvm name then [] else [line]) with
+       | [] -> [] | l -> l @ [""])
     @ (if !str_split_used_llvm then [str_split_runtime_llvm; ""] else [])
     @ (if !str_join_used_llvm then [str_join_runtime_llvm; ""] else [])
     @ (if !file_io_used_llvm || !uses_read_file_bytes_llvm || !uses_write_file_bytes_llvm
@@ -18184,5 +18718,30 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   let vector_align line =
     if (has "= load <" line || has "  store <" line) && not (has ", align " line)
     then line ^ ", align 8" else line in
+  (* v0.1.669: one `declare` per name. Each runtime piece declares the libc
+     functions it calls (read, poll, mkdir, environ ...), and two pieces in one
+     program -- read_key beside read_line -- declared `read` twice, which clang
+     refuses as a redefinition. The first is kept; they agree, being libc's. *)
+  let declared_names = Hashtbl.create 64 in
+  let decl_name line =
+    let n = String.length line in
+    let starts p = String.length p <= n && String.sub line 0 (String.length p) = p in
+    if starts "declare " then
+      (match String.index_opt line '@' with
+       | Some i ->
+         let j = ref (i + 1) in
+         if !j < n && line.[!j] = '"' then begin
+           incr j; while !j < n && line.[!j] <> '"' do incr j done; incr j end
+         else
+           while !j < n && line.[!j] <> '(' && line.[!j] <> ' ' do incr j done;
+         Some (String.sub line i (!j - i))
+       | None -> None)
+    else if starts "@environ = external global" then Some "@environ"
+    else None in
+  let keep line =
+    match decl_name line with
+    | Some nm when Hashtbl.mem declared_names nm -> false
+    | Some nm -> Hashtbl.add declared_names nm (); true
+    | None -> true in
   String.concat "\n" parts
-  |> String.split_on_char '\n' |> List.map vector_align |> String.concat "\n"
+  |> String.split_on_char '\n' |> List.filter keep |> List.map vector_align |> String.concat "\n"

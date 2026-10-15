@@ -80,13 +80,13 @@ instantiation with a missing-import error rather than a wrong answer.
 | `file_exists` | `str -> bool` | Whether path exists (Phase 19.6; on C native since v0.1.15) |
 | `file_delete` | `str -> bool` | Remove a file (unlink); `true` when this call removed it, `false` for a missing path, a directory, or a refusal. No errno: ask `file_exists` afterwards for the reason. All five backends; RISC-V through `unlinkat` (v0.1.622) |
 | `dir_create` | `str -> int -> int` | `dir_create path perm`: mkdir(2). `perm` `-1` is `0777`; as with mkdir(2) the kernel takes the umask off it. `0`, or `-1`. All five backends; RISC-V through `mkdirat` (v0.1.630) |
-| `dir_entries` | `str -> str` | The names in a directory but `.` and `..`, each followed by a NUL, in the directory's own order and as the bytes they are. `""` for an empty directory **and** for a refusal -- on C and RISC-V `proc_last_errno` tells them apart (it is set to `0` when this succeeds). Interpreter, C, Wasm, RISC-V (`getdents64`); refused on LLVM, which would have to read a `struct dirent` whose layout is the platform's (v0.1.630) |
+| `dir_entries` | `str -> str` | The names in a directory but `.` and `..`, each followed by a NUL, in the directory's own order and as the bytes they are. `""` for an empty directory **and** for a refusal -- on C and RISC-V `proc_last_errno` tells them apart (it is set to `0` when this succeeds). Interpreter, C, Wasm, RISC-V (`getdents64`) (v0.1.630), and LLVM, which reads the `struct dirent` at the offset measured for the machine the compiler was built for (v0.1.669) |
 | `dir_remove` | `str -> int` | rmdir(2): an empty directory. `0`, or `-1`. All five backends; RISC-V through `unlinkat` with `AT_REMOVEDIR` (v0.1.630) |
 | `proc_cwd` | `unit -> str` | getcwd(3): where the process is, the physical path (the environment's `PWD` is whatever the parent left there). `""` if it cannot be had. All five backends; RISC-V through the `getcwd` syscall (v0.1.633) |
 | `sys_os` | `unit -> str` | The OS whose ABI the program runs under: `"darwin"`, `"linux"`, `"windows"`, `"freebsd"`, `"wasi"` or `"unknown"`. C answers for the machine the emitted C is compiled for (its preprocessor), the interpreter and LLVM for the one this compiler was built on, Wasm `"wasi"`, RISC-V `"linux"` -- a program that names errno or socket constants by number asks it whose numbers they are (v0.1.642) |
 | `sys_arch` | `unit -> str` | The CPU, in the same way: `"arm64"` (aarch64 too), `"x86_64"`, `"riscv64"`, `"riscv32"`, `"wasm32"`, ... (v0.1.642) |
 | `env_pairs` | `unit -> str` | The whole environment as `env -0` writes it: `K=V` and a NUL after each. All five backends; RISC-V reads the block the host leaves above the argument block, where `env_var` now looks too (v0.1.630) |
-| `file_mtime` | `str -> float` | Modification time in seconds; raises if the path is missing (interp + C native) |
+| `file_mtime` | `str -> float` | Modification time in seconds; raises if the path is missing (interp + C native; LLVM since v0.1.669, RISC-V since v0.1.640) |
 | `file_size` | `str -> int` | File size in bytes (stat); binary-safe length where `str_len` (strlen) stops at a NUL. interp + C native (v0.1.21) |
 | `file_openrw` | `str -> File` | Open a read/write handle, creating the file if absent and **not** truncating it. The handle for everything below (v0.1.115, mbtree dogfood) |
 | `file_pread` | `File -> int -> int -> Vec[R, int]` | Read at most `len` bytes starting at an offset; a read past the end comes back short rather than padded |
@@ -97,10 +97,10 @@ instantiation with a missing-import error rather than a wrong answer.
 | `file_close` | `File -> unit` | Close the handle |
 | `env_var` ★ | `str -> str option` | Fetch env var; `None` if unset (Phase 19.6; depends on prelude) |
 | `args` ★ | `unit -> str list` | The program's own args (after the script path / binary name); consistent interp ↔ native since v0.1.12. On `-rv` there is no host to ask: the loader leaves the arguments in RAM and this reads them, so a program given none — or run by a loader that leaves the block alone — sees an empty list rather than an error |
-| `run` | `str -> int` | Run a command line via the shell, inherit stdio, return its exit code, or 128 + the signal that killed it (interp + C native; v0.1.13). RISC-V through memu's host device: the host's `/bin/sh`, and the signal in Linux's numbers whatever the host (v0.1.645); refused under `--bare` |
-| `stdin_byte` | `unit -> int` | One byte from stdin **without blocking**; -1 when nothing is ready. `read_key` blocks, which a device emulator polling a line-status register cannot afford (interp + C native) |
-| `tty_raw` | `unit -> unit` | Put stdin in raw mode: no echo, no line buffering, **no software flow control**. A no-op off a tty (interp + C native; v0.1.18) |
-| `tty_no_signal_keys` | `unit -> unit` | Also deliver Ctrl-C / Ctrl-Z / Ctrl-\ as bytes instead of signals — see below (interp + C native; v0.1.476) |
+| `run` | `str -> int` | Run a command line via the shell, inherit stdio, return its exit code, or 128 + the signal that killed it (interp + C native; v0.1.13; LLVM through posix_spawn since v0.1.669). RISC-V through memu's host device: the host's `/bin/sh`, and the signal in Linux's numbers whatever the host (v0.1.645); refused under `--bare` |
+| `stdin_byte` | `unit -> int` | One byte from stdin **without blocking**; -1 when nothing is ready. `read_key` blocks, which a device emulator polling a line-status register cannot afford (interp + C native; LLVM since v0.1.669) |
+| `tty_raw` | `unit -> unit` | Put stdin in raw mode: no echo, no line buffering, **no software flow control**. A no-op off a tty (interp + C native; v0.1.18; LLVM since v0.1.669, with the `struct termios` measured for the host) |
+| `tty_no_signal_keys` | `unit -> unit` | Also deliver Ctrl-C / Ctrl-Z / Ctrl-\ as bytes instead of signals — see below (interp + C native; v0.1.476; LLVM since v0.1.669) |
 | `tty_restore` | `unit -> unit` | Put back the termios the first `tty_raw` saved |
 | `read_key` | `unit -> str` | One byte, blocking; `""` at end of input |
 

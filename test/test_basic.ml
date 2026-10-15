@@ -9715,9 +9715,11 @@ let () =
         + v0.1.663 (read_lines on LLVM / Wasm): 3 (__rl_back / __rl_go /
            __read_lines_of -- the C runtime's splitter, for the two backends
            that read a file but had none)
+        + v0.1.669 (list_dir on LLVM): 3 (__ld_back / __ld_go / __list_dir_of
+           -- the C runtime's sort of a directory read, NUL-separated names)
         *)
      string_of_int (List.length prog.Ast.decls))
-    "92";
+    "95";
 
   (* Phase 39.A' #4: list_sort_by / list_sort prelude helpers *)
   check "list_sort_by: ascending int sort"

@@ -36,11 +36,12 @@
 #      put in a loop, and the exit status is the whole interface.
 #
 #   F. A per-backend refusal that the bare form CANNOT see is seen by the flag
-#      (`test/parity/dirs_and_env.mere`: bare check accepts, `-ll` refuses
-#      `dir_entries`; it was bytebuf_edges.mere until ByteBuf reached both,
-#      v0.1.585, and read_lines.mere until v0.1.663 lowered read_lines on LLVM
-#      and Wasm). Without this, C could be satisfied vacuously by a corpus in
-#      which no backend ever refuses anything.
+#      (`test/parity/coro_pingpong.mere`: bare check accepts, `-w` refuses the
+#      coroutine, which core Wasm cannot switch stacks for; it was
+#      bytebuf_edges.mere until ByteBuf reached both, v0.1.585, read_lines.mere
+#      until v0.1.663 lowered read_lines on LLVM and Wasm, and dirs_and_env.mere
+#      until v0.1.669 lowered dir_entries on LLVM). Without this, C could be
+#      satisfied vacuously by a corpus in which no backend ever refuses anything.
 #
 #   G. Usage errors: no path, and more arguments than it takes.
 #
@@ -169,7 +170,7 @@ fi
 # Not "some file somewhere disagrees" -- a named one, so C cannot pass by the
 # corpus having no such row at all.
 
-bb=test/parity/dirs_and_env.mere
+bb=test/parity/coro_pingpong.mere
 if [ ! -f "$bb" ]; then
   echo "FAIL F: $bb is gone — the standing example of a per-backend refusal"
   fail=1
@@ -180,7 +181,7 @@ else
   checked=$((checked + 3))
   if [ "$f_bare" != 0 ]; then
     echo "FAIL F: bare 'check' refused $bb (exit $f_bare) — it type-checks; the"
-    echo "        refusal belongs to the LLVM emitter."
+    echo "        refusal belongs to the Wasm emitter."
     fail=1
   fi
   if [ "$f_ll" = 0 ] && [ "$f_w" = 0 ]; then

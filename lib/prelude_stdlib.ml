@@ -621,4 +621,16 @@ let __read_lines_of = fn (s: str) ->
   let n = str_len s in
   if n == 0 then Nil
   else __rl_go s (if char_at s (n - 1) == "\n" then n - 1 else n) Nil;
+
+// v0.1.669: `list_dir` on the backends whose runtime reads a directory into
+// one string, each name followed by a NUL (LLVM lowers `list_dir p` to this
+// over that string). The C runtime's rule: `.` and `..` left out (the reader
+// does that), sorted as strcmp sorts. Built from the end, like the lines above.
+let rec __ld_back = fn (s: str) -> fn (st: int) ->
+  if st > 0 && ord (char_at s (st - 1)) != 0 then __ld_back s (st - 1) else st;
+let rec __ld_go = fn (s: str) -> fn (e: int) -> fn (acc: str list) ->
+  if e < 0 then acc
+  else (let st = __ld_back s e in __ld_go s (st - 1) (Cons (substring s st e, acc)));
+let __list_dir_of = fn (s: str) ->
+  list_sort_by (fn (a: str) -> fn (b: str) -> a < b) (__ld_go s (str_len s - 1) Nil);
 |}
