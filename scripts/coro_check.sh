@@ -234,6 +234,7 @@ stack_heaps|r|505000000|0
 finished_keeps|r|kept|0
 first_block|r|4000|0
 region_chain_grow|r|206509500|0
+region_copy_straddle|q|copies that straddled two blocks, wrong afterwards: 0|0
 region_loop_chain|r|22700|0
 builtins_as_values|r|42;7|0
 release_walk|r|2250|0

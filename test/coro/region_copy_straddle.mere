@@ -1,0 +1,57 @@
+// RV64 only: it reads the coroutine heap's block bounds (__rv_rtw 73, the
+// running stack's current block; the block's size is the word before it).
+//
+// A region block's result is copied out above the block's garbage (copy 1),
+// the block rolls back, and the result is copied again below unless copy 1 is
+// out of the way. Inside a coroutine the heap is a chain of blocks, and the
+// rollback goes back along it to the block holding the high-water mark or the
+// mark. Here the block opens in one heap block, runs into the next (X), raises
+// the high-water mark there, and fills X to `slack` bytes from its end -- so
+// for some slack copy 1 begins in X and runs on into the block after (B). The
+// rollback goes back to X and gives B back. Until v0.1.672 the "copy again?"
+// test looked only at where copy 1 BEGAN (in X, so "this block"), compared
+// addresses in two blocks for overlap, and kept copy 1: gp was left inside B,
+// B went back to the free lists, and the next allocations of B's size class
+// wrote over the result. mere-ruby's corpus 213 read nil out of a recursion
+// in a Fiber, or lost the exception in flight, depending on where its blocks
+// happened to end.
+type r = RS of str * str;
+let big = str_repeat "q" 40000;
+let root = coro_root ();
+let out = map_new ();
+let room = fn (u: unit) ->
+  let blo = __rv_rtw 73 in
+  (blo - 16) + __rv_peek (blo - 8) - __rv_gp ();
+let check = fn (slack: int) ->
+  let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
+    let ok = region W {
+      let keep = vec_new () in
+      let _ = vec_push keep "first" in
+      let got = region R {
+        // out of the block the region opened in
+        let j1 = substring big 0 (room () + 64) in
+        let _ = str_len j1 in
+        // the high-water mark, raised in the newer block
+        let _ = vec_push keep (substring big 0 8) in
+        // fill it to `slack` bytes from its end
+        let fill = room () - slack - 32 in
+        let j2 = substring big 0 (if fill > 0 then fill else 0) in
+        let _ = str_len j2 in
+        RS (substring big 0 300, substring big 1 301)
+      } in
+      // allocate over whatever was given back, in pieces small enough to land
+      // in the block the rollback freed
+      let scrub = vec_new () in
+      let rec more = fn (i: int) -> if i == 40 then () else (let _ = vec_push scrub (substring big 2 702) in more (i + 1)) in
+      let _ = more 0 in
+      (match got with RS (a, b) -> str_eq a (substring big 0 300) && str_eq b (substring big 1 301))
+    } in
+    let _ = map_set out 0 (if ok then 1 else 0) in
+    root) ()) in
+  let _ = coro_switch c in
+  map_get out 0 == 1;
+let rec slide = fn (s: int) -> fn (bad: int) ->
+  if s > 800 then bad
+  else (let ok = check s in
+        slide (s + 8) (if ok then bad else bad + 1));
+print ("copies that straddled two blocks, wrong afterwards: " ++ str_of_int (slide 0 0))

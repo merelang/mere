@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.672 — 2026-10-15
+
+_RISC-V: a region block's result whose copy ran from one heap block of a coroutine into the next is copied again, not kept in the block the rollback gives back._
+
+**The copy-out across two blocks.** A region block's result is copied out
+above the block's garbage (copy 1), the block rolls back, and the result is
+copied again below unless copy 1 is out of the way. Inside a coroutine the
+heap is a chain of blocks (v0.1.627), and the rollback goes back along the
+chain to the block that holds the high-water mark or the block's mark,
+putting the blocks after it on `rtw_defer` to be given back once the result
+is out. When copy 1 itself ran past the end of the block it began in, the
+rest of it (and gp) went on in the next block of the chain, and the rollback
+put that block on `rtw_defer`. The "copy again?" test looked only at where
+copy 1 began: in the block the rollback went back to, so "this block". Its
+overlap test then compared an address in one block with an address in
+another, and the keep path set gp to copy 1's end inside the block about to
+be given back. The next allocations of that block's size class wrote over
+the result. The test now also asks where copy 1 ended, and a copy 1 that
+ended outside the current block is copied again. Two branches.
+
+mere-ruby found it on RV64. Its corpus 213 (Fibers) read `nil` out of a
+`1 + depth(n - 1)` recursion inside a Fiber, or lost the exception in flight,
+depending on where its blocks happened to end. A build of the same program
+that changed nothing but the code's length moved the failure, or hid it.
+An assertion that gp is inside the running block after every region exit
+found it, and kept finding it with compaction, the release of retired blocks
+and the reuse of coroutine slots each turned off.
+
+`test/coro/region_copy_straddle.mere` (new, RV64 only: it reads the
+coroutine heap's block bounds) slides a block's garbage so that some copy 1
+straddles, then allocates over what was given back. It is in `coro_check`'s
+RV rows and in `region_reclaim_check --rv-only`; without the two branches it
+dies with "no matching arm in match".
+
+---
 ## v0.1.671 — 2026-10-15
 
 _Wasm: `list_dir`, `mkdir_p`, `file_mtime`, `sleep_ms`, `file_open` / `file_read_line`, `read_key` and the terminal builtins, through the Node host. `run` of a command a signal ended answers 128 plus the signal, as on C._

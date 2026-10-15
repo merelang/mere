@@ -433,6 +433,20 @@ if [ -n "${MEMU:-}" ] && [ -f "$MEMU/riscv-runc/rv64i_run.mere" ]; then
     else
       echo "FAIL region_reclaim/RV64: -rv64 refused loop_carry.mere"; fail=1
     fi
+    # v0.1.672: a block's result whose copy runs from one heap block of a
+    # coroutine into the next, which the rollback gives back -- the result is
+    # copied again, not kept there with gp after it
+    RCSRC="$ROOT/test/coro/region_copy_straddle.mere"
+    if "$MERE" -rv64 --ram 256 "$RCSRC" > "$TMP/prog.bin" 2>/dev/null; then
+      a_s="$( cd "$TMP" && perl -e 'alarm 600; exec @ARGV' ./rvrun64 256 2>&1 | grep -v '^rvrun' | head -1 )"
+      if [ "$a_s" != "copies that straddled two blocks, wrong afterwards: 0" ]; then
+        echo "FAIL region_reclaim/RV64: region_copy_straddle got '$a_s' -- a region block's result copied across two heap blocks of a coroutine was kept in the block the rollback gave back"
+        fail=1
+      fi
+      checked=$((checked + 1)); rv_note="$rv_note, and a result copied across two heap blocks of a coroutine"
+    else
+      echo "FAIL region_reclaim/RV64: -rv64 refused region_copy_straddle.mere"; fail=1
+    fi
   else
     echo "FAIL region_reclaim/RV64: could not build the emulator or the program"; fail=1
   fi

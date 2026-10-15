@@ -2924,7 +2924,20 @@ and compile_region env (e : Ast.expr) (body : Ast.expr) (loop : string option) =
           li t6 (rtw_addr rtw_blo);
           emit_word (enc_i 0 t6 (ldf3 ()) t6 0x03);
           emit (Branch (6, t3, t6, l_copy));
-          emit (Branch (7, t3, tp, l_copy))
+          emit (Branch (7, t3, tp, l_copy));
+          (* v0.1.672: ...and so is a copy 1 that ENDED in another block. The
+             copy ran past the end of the block it began in and went on, gp
+             with it, in the next block of the chain; the rollback has gone
+             back along the chain to the high-water mark's block and put that
+             next block on rtw_defer. Where copy 1 BEGAN said "this block",
+             the overlap test below compared addresses in two blocks, and the
+             keep path left gp = c1e inside a block about to be given back:
+             the next allocations of its size class wrote over the result
+             (test/coro/region_copy_straddle.mere; mere-ruby's corpus 213 read
+             nil out of a recursion in a Fiber, or lost the exception in
+             flight, depending on where its blocks happened to end). *)
+          emit (Branch (6, t4, t6, l_copy));
+          emit (Branch (6, tp, t4, l_copy))
         end;
         emit (Branch (7, t3, t5, l_copy));                        (* bgeu c1s, gp+size -> copy *)
         emit (Branch (7, gp, t4, l_copy));                        (* bgeu gp, c1e -> copy *)
