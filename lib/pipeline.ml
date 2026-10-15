@@ -2004,7 +2004,11 @@ let decls_entries ?base_dir ?(search_paths = []) s : decl_entry list =
   let entries = ref [] in
   List.iter (fun decl ->
     List.iter (fun (n, line, own) ->
-      match Hashtbl.find_opt Typer.top_schemes n with
+      (* v0.1.670: the top-level binding's scheme, not whichever binding of the
+         name was inferred last (see Typer.top_level_schemes) *)
+      match (match Hashtbl.find_opt Typer.top_level_schemes n with
+             | Some sch -> Some sch
+             | None -> Hashtbl.find_opt Typer.top_schemes n) with
       | Some sch ->
         let src = Ast.toplevel_source_name n in
         let dup = (try Hashtbl.find src_count src with Not_found -> 1) > 1 in

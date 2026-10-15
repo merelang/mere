@@ -39,10 +39,10 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP" /tmp/mere_filestat_probe /tmp/mere_filestat_probe_link /tmp/mere_filestat_probe_fifo' EXIT
 rm -f /tmp/mere_filestat_probe_link /tmp/mere_filestat_probe_fifo
 
-"$MERE" -c "$ROOT/test/filestat/filestat_probe.mere" > "$TMP/p.c" 2>"$TMP/p.err" \
-  || { echo "FAIL filestat: mere -c refused the probe"; cat "$TMP/p.err"; exit 1; }
-"$CC" -O1 -w "$TMP/p.c" -o "$TMP/p" 2>"$TMP/cc.err" \
-  || { echo "FAIL filestat: C compile failed"; cat "$TMP/cc.err"; exit 1; }
+# v0.1.670: MERE_BACKEND=llvm builds it as LLVM IR linked against `mere --ffi-c`
+# (scripts/llvm_ffi_check.sh); the transcript below is the same either way.
+MERE="$MERE" CC="$CC" sh "$ROOT/scripts/build_native.sh" "$ROOT/test/filestat/filestat_probe.mere" "$TMP/p" 2>"$TMP/cc.err" \
+  || { echo "FAIL filestat: the probe did not build (${MERE_BACKEND:-c})"; cat "$TMP/cc.err"; exit 1; }
 
 sh "$ROOT/scripts/bounded.sh" 30 "$TMP/p" > "$TMP/got" 2>&1
 rc=$?

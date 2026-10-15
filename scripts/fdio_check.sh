@@ -44,10 +44,10 @@ PROBE_FILE=/tmp/mere_fdio_probe
 trap 'rm -rf "$TMP" "$PROBE_FILE"' EXIT
 rm -f "$PROBE_FILE"
 
-"$MERE" -c "$ROOT/test/fdio/fdio_probe.mere" > "$TMP/p.c" 2>"$TMP/p.err" \
-  || { echo "FAIL fdio: mere -c refused the probe"; cat "$TMP/p.err"; exit 1; }
-"$CC" -O1 -w "$TMP/p.c" -o "$TMP/p" 2>"$TMP/cc.err" \
-  || { echo "FAIL fdio: C compile failed"; cat "$TMP/cc.err"; exit 1; }
+# v0.1.670: MERE_BACKEND=llvm builds it as LLVM IR linked against `mere --ffi-c`
+# (scripts/llvm_ffi_check.sh); the transcript below is the same either way.
+MERE="$MERE" CC="$CC" sh "$ROOT/scripts/build_native.sh" "$ROOT/test/fdio/fdio_probe.mere" "$TMP/p" 2>"$TMP/cc.err" \
+  || { echo "FAIL fdio: the probe did not build (${MERE_BACKEND:-c})"; cat "$TMP/cc.err"; exit 1; }
 
 rm -f "$PROBE_FILE"
 sh "$ROOT/scripts/bounded.sh" 30 "$TMP/p" > "$TMP/got" 2>&1

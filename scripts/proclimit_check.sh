@@ -43,10 +43,10 @@ command -v "$CC" >/dev/null 2>&1 || { echo "proclimit_check: no C compiler" >&2;
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP" /tmp/mere_proclimit_probe' EXIT
 
-"$MERE" -c "$ROOT/test/proclimit/proclimit_probe.mere" > "$TMP/p.c" 2>"$TMP/p.err" \
-  || { echo "FAIL proclimit: mere -c refused the probe"; cat "$TMP/p.err"; exit 1; }
-"$CC" -O1 -w "$TMP/p.c" -o "$TMP/p" 2>"$TMP/cc.err" \
-  || { echo "FAIL proclimit: C compile failed"; cat "$TMP/cc.err"; exit 1; }
+# v0.1.670: MERE_BACKEND=llvm builds it as LLVM IR linked against `mere --ffi-c`
+# (scripts/llvm_ffi_check.sh); the transcript below is the same either way.
+MERE="$MERE" CC="$CC" sh "$ROOT/scripts/build_native.sh" "$ROOT/test/proclimit/proclimit_probe.mere" "$TMP/p" 2>"$TMP/cc.err" \
+  || { echo "FAIL proclimit: the probe did not build (${MERE_BACKEND:-c})"; cat "$TMP/cc.err"; exit 1; }
 
 sh "$ROOT/scripts/bounded.sh" 30 "$TMP/p" > "$TMP/got" 2>&1
 rc=$?

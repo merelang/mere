@@ -617,12 +617,23 @@ let is_region_param_name (n : string) : bool =
    site has that name: `Monomorph.instance_of` is handed it before it mangles anything. *)
 let top_schemes : (string, scheme) Hashtbl.t = Hashtbl.create 64
 
+(* v0.1.670: the schemes of the bindings made at the TOP LEVEL only. `top_schemes`
+   is keyed by source name and an inner `let f` overwrites an outer `f` there --
+   harmless for the region parameters it exists for (see the Let case), wrong for
+   `--decls`, which printed a top-level `jb : int -> int` as `StrBuf['a]` because
+   a function further down binds a local `jb` (test/parity/lift_scopes.mere,
+   caught by decls_roundtrip). A binding generalized at level 0 is a top-level
+   one: a local `let` is generalized inside its enclosing value's level. *)
+let top_level_schemes : (string, scheme) Hashtbl.t = Hashtbl.create 64
+
 let record_top_scheme (name : string) (sch : scheme) : unit =
-  Hashtbl.replace top_schemes name sch
+  Hashtbl.replace top_schemes name sch;
+  if !cur_level = 0 then Hashtbl.replace top_level_schemes name sch
 
 (* Per program, for the reason `reset_region_params` is. Called from there -- it is
    defined above this, so the two halves of one reset are wired together here. *)
-let () = reset_region_params_extra := (fun () -> Hashtbl.reset top_schemes)
+let () = reset_region_params_extra := (fun () ->
+  Hashtbl.reset top_schemes; Hashtbl.reset top_level_schemes)
 
 (* The region parameters of a top-level function, in the order both ends walk its type:
    parameters left to right, then the result. Neither the declaration nor the call site

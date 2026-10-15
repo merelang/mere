@@ -10839,7 +10839,8 @@ let () =
          else scan (i + 1)
        in scan 0
      in
-     if has "declare i64 @getpid()" && has "call i64 @getpid(" then "ok" else "no")
+     (* v0.1.670: C's `int` at the boundary, widened after the call *)
+     if has "declare i32 @getpid()" && has "call i32 @getpid(" && has "sext i32" then "ok" else "no")
     "ok";
   (* The declaration drops a unit parameter by type; the call dropped only a
      literal `()`, so a unit-typed VARIABLE was passed as an `i64` to a
@@ -10857,7 +10858,7 @@ let () =
          else scan (i + 1)
        in scan 0
      in
-     if has "call i64 @getpid()" && not (has "call i64 @getpid(i64") then "ok" else "no")
+     if has "call i32 @getpid()" && not (has "call i32 @getpid(i") then "ok" else "no")
     "ok";
   check "§32.6: multi-arg curried extern interp (setenv + getenv roundtrip)"
     (Pipeline.process

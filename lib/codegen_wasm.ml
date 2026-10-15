@@ -1618,7 +1618,12 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list)
       (match pat.Ast.pnode, value.Ast.node with
        | Ast.P_var n, Ast.Fun (p, _, fn_body) ->
          let fn_body = lift_one host_param host_locals n p fn_body in
-         walk p [p] fn_body;
+         (* v0.1.670: the enclosing frame's names stay shadowing one lift down
+            (the C backend's fix, made in LLVM the same day). `[p]` forgot them,
+            so an inner fn two lifts deep that read a local sharing a top-level
+            fn's name called the top-level fn: lift_scopes.mere's `jb` -- the
+            StrBuf a closure appends to, and a top-level `jb` -- looped. *)
+         walk p (p :: host_param :: host_locals) fn_body;
          walk host_param (n :: host_locals) body
        | _ ->
          walk host_param host_locals value;
@@ -1632,11 +1637,15 @@ let lift_inner_fns_wasm (toplevel_names : string list) (fns : fn_decl list)
           raise (Codegen_error (value.Ast.loc,
             "inner let-rec binding must be a single-arg fn"))) bindings
       in
+      let known_before = !known in
       known := rec_names @ !known;
       List.iter (fun (n, p, fb) ->
         let _ = lift_one host_param host_locals n p fb in ()) fn_specs;
-      List.iter (fun (_, p, fb) -> walk p [p] fb) fn_specs;
-      walk host_param (rec_names @ host_locals) body
+      List.iter (fun (_, p, fb) -> walk p (p :: host_param :: host_locals) fb) fn_specs;
+      walk host_param (rec_names @ host_locals) body;
+      (* v0.1.670: in scope for its bindings and its body only (the C backend's
+         mpng fix) *)
+      known := known_before
     (* a nested lambda's parameter is a binder too: `fn s -> fn count -> ...`
        used to lose `count`, so an inner fn under it captured nothing and
        resolved the name to whatever global happened to share it *)
