@@ -4,6 +4,46 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.668 — 2026-10-15
+
+_LLVM: three walls mbrowse and mere-blog hit first on this backend. `show` of a channel, file, thread or coroutine now prints what the interpreter prints, on every backend._
+
+The question was which of the nineteen downstream programs in
+`test/downstream/REPOS` the LLVM and Wasm backends can take. Before this
+version, LLVM emitted 11 and Wasm 8. Two of LLVM's refusals were backend bugs,
+not missing builtins:
+
+- **A lambda in a two-argument function could not see that function's inner
+  `let f = fn ...`** (mbrowse: `unbound variable: tag_of`). The uncurried twin
+  (v0.1.491) cleared the host name while its body was emitted. A lambda queued
+  there was emitted later with no host's lifts in view. The twin now names its
+  host, as the curried definition always did.
+- **A variant carrying a `Channel`** (mere-blog's `LDump of Channel[str]`,
+  sent with `channel_send`, which copies) was walked into as if `Channel` were
+  a variant, giving ``unknown variant type `Channel` ``. The walk asked
+  `Typer.types`, which also holds the builtin handles. Only a name with
+  constructors is walked into now; a handle is a leaf, and the copy passes it
+  through.
+
+Then a third: **a lambda written in the program's body was queued under no host
+at all**, so a `let rec` inside it was refused as "let rec inside an
+expression". `spawn (fn _ -> let rec loop = ... in loop 0)` at the top of a
+program is the common shape. LLVM and Wasm both had it, and the C backend did
+not.
+
+`show` of a value holding a channel printed `<channel>` in the interpreter,
+`<unknown>` in C and `()` in LLVM; Wasm and RISC-V refused it. All of them now
+print `<channel>`, `<file>`, `<thread>` or `<coro>`, as the interpreter does.
+`test/parity/host_scope_lambdas.mere` holds all four cases and agrees on the
+interpreter, C, LLVM, Wasm, RV32 and RV64.
+
+The third fix also let LLVM read `test/escape/spawn_env_in_block.mere`, so
+the ROUTES row that listed LLVM as unreadable went stale (escape_check went
+red). The route is a thread given a closure whose environment lives in a
+block. `region_uaf_check` now runs that program on LLVM after churn as well.
+Its poison drops the `__lang_region_keep_above` that keeps the environment,
+and goes red.
+
 ## v0.1.667 — 2026-10-12
 
 _LLVM: releasing a region drops that region from the active stack, wherever it is, not the top. v0.1.662's region loop on LLVM aborted on Linux when a `fail` left it._

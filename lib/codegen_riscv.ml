@@ -4207,6 +4207,8 @@ and compile_app env e =
          | Ast.TyTuple ts -> List.for_all ok ts
          | Ast.TyCon ("list", [et]) -> ok et
          | Ast.TyCon ("Vec", [_; et]) -> ok et
+         (* v0.1.668: a handle shows as the interpreter shows it *)
+         | Ast.TyCon (("Channel" | "File" | "ThreadHandle" | "Coro"), _) -> true
          | Ast.TyCon (n, args) when Hashtbl.mem type_records n || Hashtbl.mem type_variants n ->
            let key = ty_tag t in
            if Hashtbl.mem seen key then true
@@ -6239,6 +6241,10 @@ let emit_show_helper (tag, ty) =
   | Ast.TyFloat -> emit (Jal (zero, "u_str_of_float"))
   | Ast.TyStr -> emit (Jal (zero, "u_rvshow_str"))
   | Ast.TyUnit -> lit a0 "()"; ret ()
+  | Ast.TyCon (("Channel" | "File" | "ThreadHandle" | "Coro") as h, _) ->
+    lit a0 (match h with
+        | "Channel" -> "<channel>" | "File" -> "<file>"
+        | "ThreadHandle" -> "<thread>" | _ -> "<coro>"); ret ()
   | Ast.TyBool ->
     let l = fresh_label ".shf" in
     emit (Branch (0, a0, zero, l)); lit a0 "true"; ret ();

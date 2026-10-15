@@ -6140,6 +6140,13 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
          { char* __buf; asprintf(&__buf, \"%%s]\", __acc); return __lang_str_take_cstr(__buf); }\n\
        }"
       header elem_show elem_show
+  (* v0.1.668: a handle shows as the interpreter shows it, not as a variant
+     with no constructors ("<unknown>") *)
+  | Ast.TyCon (("Channel" | "File" | "ThreadHandle" | "Coro") as h, _) ->
+    let shown = match h with
+      | "Channel" -> "<channel>" | "File" -> "<file>"
+      | "ThreadHandle" -> "<thread>" | _ -> "<coro>" in
+    Printf.sprintf "%s { (void)v; return __lang_str_of_cstr(\"%s\"); }" header shown
   | Ast.TyCon (name, args) ->
     (* Variant — either monomorphic or polymorphic instance. Find its
        variants via polymorphic_variants or by scanning constructors. *)
