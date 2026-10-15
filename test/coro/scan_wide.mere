@@ -1,0 +1,22 @@
+// v0.1.674: a program that numbers its handles high -- mere-ruby's start at
+// handle_base, well above anything else a stack holds -- asks a range of 2^40
+// integers. The LLVM backend answered coro_scan_ints with every integer in the
+// range, the superset the contract allows, and that walk did not finish
+// (mere-ruby's GC.start never returned). Read off the stack, the answer is the
+// one handle the stopped coroutine holds, at once.
+let base = 1099511627776;
+let root = coro_root ();
+let side = map_new ();
+let _ = map_set side 0 (base + 7);
+let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
+  let h = map_get side 0 in
+  let _ = map_delete side 0 in
+  let _ = coro_switch root in
+  let _ = print_int (h - base) in
+  root) ());
+let _ = coro_switch c;
+let got = map_new ();
+let _ = coro_scan_ints c base (base + base) (fn (n: int) -> map_set got (n - base) 1);
+let _ = print (if map_has got 7 then "wide: found" else "wide: missing");
+let _ = coro_switch c;
+print "done"
