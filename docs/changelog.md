@@ -4,6 +4,44 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.674 — 2026-10-15
+
+_LLVM: `coro_scan_ints` reads the stack and what it reaches, as the C runtime does, instead of handing back every integer in the range. mere-ruby on LLVM collects with fibers suspended, and its 286 corpus programs agree with its C build._
+
+`coro_scan_ints c lo hi f` is how a program that numbers its own handles finds
+the ones a stopped coroutine still holds in C variables. The contract lets the
+answer be a superset. LLVM used that: it called f on every integer in
+`[lo, hi)`. mere-ruby numbers its handles from `handle_base`, high above
+anything else a stack holds, so its range is enormous and the walk never
+finished. `GC.start` never returned, and twelve corpus programs with it.
+
+Now the walk is the C runtime's:
+
+- It reads the stack's own words: a stopped coroutine's from where it stopped
+  (the switch now records that, `x 16`), and the running one's from this call
+  up, after `_setjmp` has spilled the registers onto it.
+- It reads a stopped coroutine's saved registers too.
+- It follows every word that points into a live block, 16 words from each:
+  as far as the pointers go inside the coroutine's own regions (those open on
+  its stack), and at most three hops into any other.
+- Every number in the range it meets is handed to f once.
+
+A word inside no live block is never dereferenced. This backend had no list
+of live blocks to judge that by, so a region now registers each block it
+adds (a node, pointed at from the header's spare word), unregisters it when
+it frees it, and re-owns it when a region adopts it. That happens only in a
+program that calls `coro_scan_ints`; in any other the three hooks are empty.
+
+mere-ruby built with this compiler, C against LLVM: 286 of 286 corpus
+programs agree on stdout, stderr and exit status. That was 260 at v0.1.671
+and 274 at v0.1.673.
+
+`test/coro/scan_wide.mere` (new) asks a range of 2^40 integers. It finishes
+at once on C, LLVM and RISC-V; LLVM before this version did not finish. The
+interpreter still enumerates, because it cannot look into a continuation, and
+is not run on this case. `coro_check`'s LLVM poison 16, a scan that follows no
+pointer, makes `scan.mere` miss the handles a hop away.
+
 ## v0.1.673 — 2026-10-15
 
 _LLVM: a coroutine made inside a region block keeps the blocks its body's env may point into, as `spawn` does. It was refused, and mere-ruby makes each Ruby Thread's coroutine inside a block._

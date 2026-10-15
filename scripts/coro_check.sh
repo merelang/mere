@@ -61,6 +61,7 @@ overflow|cl|stack overflow (recursion too deep)|1
 deep/deep|cl|2000001000000;main: back|0
 compact|ic|held: intact;700|0
 scan|icl|all found, bound kept;running: found;57573|0
+scan_wide|cl|wide: found;7;done|0
 scan_high|cl|found, again found, small left out;7;12|0
 transfer|icl|int: 1 12 23, float: 3.75;bool: true then false, coro: hopped;after the end: 0|0
 notme|icl|coro_transfer: the third argument must be the running coroutine|1
@@ -206,8 +207,8 @@ fi
 # rv_exec_check does). The runtime is the RV prelude's rvcoro_ functions over
 # __rv_cswap, which copies each coroutine's stack in and out of one region; the
 # per-stack words it carries are the try_or record, the region depth and the
-# two block marks. `scan_high` (a 2^48 literal) and `sized` (a sum past 2^31)
-# are RV64 only. A failure reads as on C since v0.1.637 (`fail: ` and all).
+# two block marks. `scan_high` (a 2^48 literal), `scan_wide` (a 2^40 one) and
+# `sized` (a sum past 2^31) are RV64 only. A failure reads as on C since v0.1.637 (`fail: ` and all).
 # The OUTPUT is compared (stdout and stderr together), not the exit status.
 # fixture | r both widths, q RV64 only | expected | (exit, as on C; not compared)
 RV_CASES='region|r|B: my string survived;4106|0
@@ -221,6 +222,7 @@ many|r|10000|0
 pingpong|r|1000000|0
 compact|r|held: intact;700|0
 scan|r|all found, bound kept;running: found;57573|0
+scan_wide|q|wide: found;7;done|0
 scan_high|q|found, again found, small left out;7;12|0
 transfer|r|int: 1 12 23, float: 3.75;bool: true then false, coro: hopped;after the end: 0|0
 notme|r|coro_transfer: the third argument must be the running coroutine|1
@@ -330,7 +332,10 @@ if [ "$MODE" = "--poison" ]; then
   poison ll "LLVM 2 (live-block stack not carried)" '/^  store ptr %ta, ptr @__lang_region_active$/d' unwind
   poison ll "LLVM 3 (try_or jmpbuf not carried)" '/^  store i32 %tjs, ptr @__lang_fail_jmpbuf_set$/d' fail nested
   poison ll "LLVM 4 (stack bounds not carried)" '/^  store i64 %tlo, ptr @__lang_stack_lo$/d; /^  store i64 %thi, ptr @__lang_stack_hi$/d' overflow
-  # v0.1.672: a block's coroutine keeps the blocks (it was refused before)
+  # v0.1.674: the scan follows no pointer -- only the stack's own words. The
+  # handles scan.mere's coroutine took out of tables are a hop or more away.
+  poison ll "LLVM 16 (the scan does not follow pointers)" 's/^  call void @__lang_scan_words(ptr %st, i64 %wav, i64 %wev, i32 %wh32)$//' scan
+  # v0.1.673: a block's coroutine keeps the blocks (it was refused before)
   poison ll "LLVM 5 (a block's coroutine does not keep the block)" 's/^  br i1 %inblock, label %keep, label %alloc$/  br label %alloc/' block_capture
   # v0.1.565: a finished coroutine is a handle that no longer resolves
   poison ll "LLVM 6 (no finished check)" 's/^  br i1 %gone, label %finished, label %go$/  br label %go/' finished
