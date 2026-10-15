@@ -1,0 +1,13 @@
+// v0.1.672: a coroutine made inside a block captures a str the block made.
+// The C backend copies the env, and with it the str, out of the block; LLVM
+// has no env copier and keeps the block instead (it refused until v0.1.672,
+// and mere-ruby makes each Ruby Thread's coroutine inside one). Either way the
+// body reads the str after the block is gone and Z has run.
+let root = coro_root ();
+let c = region R {
+  let s = str_repeat "k" 64 in
+  coro_new (fn _me -> fn (_u: unit) -> coro_exit (
+    let _ = print (if s == str_repeat "k" 64 then "captured: intact" else "captured: lost") in root) ()) };
+let z = region Z { str_len (str_repeat "Z" 8192) };
+let _ = coro_switch c;
+print_int z

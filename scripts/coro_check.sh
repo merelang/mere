@@ -51,8 +51,8 @@ CASES='region|icl|B: my string survived;4106|0
 fail|icl|fail: from the coroutine|1
 nested|icl|main caught: -1;B caught: 5;main: done|0
 unwind|icl|B: region R2 survived main'"'"'s unwind;4096|0
-env|ic|env: intact;8192|0
-env|l|coro_new: inside a region block -- on LLVM the body'"'"'s env would be released with the block (the C backend copies it out)|1
+env|icl|env: intact;8192|0
+block_capture|icl|captured: intact;8192|0
 finished|icl|B: ran;switch to a finished coroutine: refused|0
 self_handoff|icl|coro: a finished coroutine must hand over to another live coroutine|1
 many|icl|10000|0
@@ -330,7 +330,8 @@ if [ "$MODE" = "--poison" ]; then
   poison ll "LLVM 2 (live-block stack not carried)" '/^  store ptr %ta, ptr @__lang_region_active$/d' unwind
   poison ll "LLVM 3 (try_or jmpbuf not carried)" '/^  store i32 %tjs, ptr @__lang_fail_jmpbuf_set$/d' fail nested
   poison ll "LLVM 4 (stack bounds not carried)" '/^  store i64 %tlo, ptr @__lang_stack_lo$/d; /^  store i64 %thi, ptr @__lang_stack_hi$/d' overflow
-  poison ll "LLVM 5 (a block's coroutine not refused)" 's/^  br i1 %inblock, label %refuse, label %alloc$/  br label %alloc/' env
+  # v0.1.672: a block's coroutine keeps the blocks (it was refused before)
+  poison ll "LLVM 5 (a block's coroutine does not keep the block)" 's/^  br i1 %inblock, label %keep, label %alloc$/  br label %alloc/' block_capture
   # v0.1.565: a finished coroutine is a handle that no longer resolves
   poison ll "LLVM 6 (no finished check)" 's/^  br i1 %gone, label %finished, label %go$/  br label %go/' finished
   # v0.1.566: the pool keeps stacks apart by size

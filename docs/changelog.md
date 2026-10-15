@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.673 — 2026-10-15
+
+_LLVM: a coroutine made inside a region block keeps the blocks its body's env may point into, as `spawn` does. It was refused, and mere-ruby makes each Ruby Thread's coroutine inside a block._
+
+The first measurement of mere-ruby on this backend compared all 286 of its
+corpus programs, built with this compiler on C (`-O1`) and on LLVM (`-O1`,
+through `mere --ffi-c`): 260 agreed on stdout, stderr and exit status. 21 of
+the other 26 said `can't create Thread`. mere-ruby starts a Thread's root
+coroutine inside a block. LLVM's `coro_new` refused there because this backend
+has no env copier, which is what the C backend uses to move the env out. It
+now does what `spawn` has done since Q-191: it keeps every open block, so
+nothing the env reaches is reused. That is conservative and never unsafe.
+With it, 274 of 286 agree. The twelve left all collect with a fiber
+suspended or call `GC.start`. On LLVM, `coro_scan_ints` hands back every
+integer in the range asked for, the superset its contract allows, and
+mere-ruby's handle range makes that a walk that does not finish. That is the
+next version's.
+
+`test/coro/block_capture.mere` (new): a coroutine made in a block whose body
+reads a str the block made, after another block has run. It is in
+`coro_check` on the interpreter, C and LLVM. LLVM's poison 5, a block's
+coroutine that does not keep the block, now reads it as `captured: lost`.
+`env.mere` could not go red that way: what it captures was not made in the
+block.
+
 ## v0.1.672 — 2026-10-15
 
 _RISC-V: a region block's result whose copy ran from one heap block of a coroutine into the next is copied again, not kept in the block the rollback gives back._
@@ -39,6 +64,7 @@ RV rows and in `region_reclaim_check --rv-only`; without the two branches it
 dies with "no matching arm in match".
 
 ---
+
 ## v0.1.671 — 2026-10-15
 
 _Wasm: `list_dir`, `mkdir_p`, `file_mtime`, `sleep_ms`, `file_open` / `file_read_line`, `read_key` and the terminal builtins, through the Node host. `run` of a command a signal ended answers 128 plus the signal, as on C._

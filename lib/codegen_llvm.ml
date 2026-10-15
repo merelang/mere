@@ -97,7 +97,6 @@ let coro_runtime_llvm ~(stack_bytes : int) =
       "declare i32 @munmap(ptr, i64)";
       "@__lang_coro_m_size = private constant { i64, [62 x i8] } { i64 61, [62 x i8] c\"coro_new_sized: a stack size must be between 1 byte and 1 GiB\\00\" }";
       Printf.sprintf "@__lang_coro_stack_bytes = internal constant i64 %d" stack_bytes;
-      "@__lang_coro_m_new_block = private constant { i64, [121 x i8] } { i64 120, [121 x i8] c\"coro_new: inside a region block -- on LLVM the body's env would be released with the block (the C backend copies it out)\\00\" }";
       "@__lang_coro_m_nostack = private constant { i64, [35 x i8] } { i64 34, [35 x i8] c\"coro_new: the host refused a stack\\00\" }";
       "@__lang_coro_m_guard = private constant { i64, [38 x i8] } { i64 37, [38 x i8] c\"coro_new: cannot place the guard page\\00\" }";
       "@__lang_coro_m_other = private constant { i64, [54 x i8] } { i64 53, [54 x i8] c\"coro_switch: that coroutine belongs to another thread\\00\" }";
@@ -624,10 +623,15 @@ let coro_runtime_llvm ~(stack_bytes : int) =
       "  %root = call ptr @__lang_coro_enter_root()";
       "  %cr = load ptr, ptr @__lang_current_region";
       "  %inblock = icmp ne ptr %cr, @__lang_default_region";
-      "  br i1 %inblock, label %refuse, label %alloc";
-      "refuse:";
-      "  call void @__lang_fail_impl(ptr getelementptr inbounds ({ i64, [121 x i8] }, ptr @__lang_coro_m_new_block, i32 0, i32 1))";
-      "  unreachable";
+      (* v0.1.672: a coroutine made inside a block KEEPS the blocks its env may
+         point into, the way spawn's does (Q-191) -- this backend has no env
+         copier, which is what the C backend uses. It refused instead, and
+         mere-ruby makes a Ruby Thread's coroutine inside a block: 21 of its
+         286 corpus programs said "can't create Thread" on LLVM. *)
+      "  br i1 %inblock, label %keep, label %alloc";
+      "keep:";
+      "  call void @__lang_region_keep_above(ptr null)";
+      "  br label %alloc";
       "alloc:";
       "  %pg32 = call i32 @getpagesize()";
       "  %pg = sext i32 %pg32 to i64";
