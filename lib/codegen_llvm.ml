@@ -3126,7 +3126,7 @@ let rec add_struct_type (tbl : (string, Ast.ty) Hashtbl.t) (t : Ast.ty) : unit =
         List.iter (fun (_, arg_opt) ->
           match arg_opt with Some t -> add_struct_type tbl t | None -> ()) sv
       | Ast.TyCon ("Coro", _) -> ()  (* a builtin record, not a user variant *)
-      | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n ->
+      | Ast.TyCon (n, _) when Hashtbl.mem Exhaustive.type_variants n ->
         let vs = variant_shape n in
         List.iter (fun (_, arg_opt) ->
           match arg_opt with Some t -> add_struct_type tbl t | None -> ()) vs
@@ -3180,7 +3180,14 @@ let rec add_struct_deep_type ?(handles = false) (tbl : (string, Ast.ty) Hashtbl.
         List.iter (fun (_, arg_opt) ->
           match arg_opt with Some t -> go t | None -> ()) sv
       | Ast.TyCon ("Coro", _) -> ()  (* a builtin record, not a user variant *)
-      | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n ->
+      (* v0.1.668: a variant is a name with constructors, not any name the typer
+         knows. `Typer.types` also holds the builtin handles (Channel, ListBuf,
+         ThreadHandle, File), and a message type carrying a reply channel --
+         `Dump of Channel[str]`, sent with channel_send, which copies -- walked
+         into `Channel` and asked for its constructors: "unknown variant type
+         `Channel`", the first thing mere-blog met on this backend. A handle is
+         passed through by the copy (ty_needs_store_copy), so it is a leaf here. *)
+      | Ast.TyCon (n, _) when Hashtbl.mem Exhaustive.type_variants n ->
         List.iter (fun (_, arg_opt) ->
           match arg_opt with Some t -> go t | None -> ()) (variant_shape n)
       | _ -> ()
@@ -3786,7 +3793,7 @@ let emit_struct_fn ?(json = false) (tag : string) (t : Ast.ty) : string =
       in
       emit_instr (Printf.sprintf "  %s = phi ptr %s" r phi_parts);
       r
-    | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n ->
+    | Ast.TyCon (n, _) when Hashtbl.mem Exhaustive.type_variants n ->
       (* Mono variant. *)
       let vs = variant_shape n in
       let recursive = is_recursive_variant_name n in
@@ -3857,6 +3864,11 @@ let emit_struct_fn ?(json = false) (tag : string) (t : Ast.ty) : string =
       in
       emit_instr (Printf.sprintf "  %s = phi ptr %s" r phi_parts);
       r
+    (* v0.1.668: a handle shows as the interpreter shows it. It fell to the
+       fallback below and printed "()" (C printed "<unknown>"), which nothing
+       reached until a variant could carry one past add_struct_deep_type. *)
+    | Ast.TyCon (("Channel" | "File" | "ThreadHandle" | "Coro") as h, _) when not json ->
+      "@.s_handle_" ^ h
     | _ ->
       (if json then "@.s_json_null" else "@.s_unit")  (* unknown — fallback to "()" *)
   in
@@ -3904,7 +3916,8 @@ let variant_shape_of (t : Ast.ty) : (string * string * bool * (string * Ast.ty o
     let mono = mono_variant_name n args in
     Some (n, mono, is_recursive_variant_name mono, subst_variants params args variants)
   | Ast.TyCon ("Coro", _) -> None
-  | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n ->
+  (* v0.1.668: a name with constructors; see add_struct_deep_type *)
+  | Ast.TyCon (n, _) when Hashtbl.mem Exhaustive.type_variants n ->
     Some (n, n, is_recursive_variant_name n, variant_shape n)
   | _ -> None
 
@@ -9531,9 +9544,14 @@ let emit_direct_fn_llvm (name : string) (info : direct_fn_info_llvm) : string =
   let saved_exp = !current_expected_ty in
   let saved_host = !current_host_fn_llvm in
   instrs := [];
-  (* The twin is a top-level definition, not a lifted host's body, so the host
-     name is cleared the way emit_fn_def leaves it for a top-level fn. *)
-  current_host_fn_llvm := "";
+  (* The twin is the same top-level fn's body, so it is the same host: a lambda
+     queued in here is emitted later under the host it was queued with, and an
+     inner `let f = fn ...` it calls is found through that host's lifts. This
+     cleared the name until v0.1.668 -- "the way emit_fn_def leaves it", which
+     emit_fn_def does not do (it names the fn) -- so a lambda inside a two-argument
+     fn could not see the fn's own inner functions: `unbound variable: tag_of`,
+     the first thing mbrowse met on this backend. *)
+  current_host_fn_llvm := unmu name;
   current_var_types := info.dl_params;
   current_expected_ty := Some info.dl_ret;
   let env = List.map (fun (n, _) -> (n, "%" ^ llvm_safe_local n)) info.dl_params in
@@ -17420,6 +17438,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     mint_show_global "s_true" "true";
     mint_show_global "s_false" "false";
     mint_show_global "s_unit" "()";
+    mint_show_global "s_handle_Channel" "<channel>";
+    mint_show_global "s_handle_File" "<file>";
+    mint_show_global "s_handle_ThreadHandle" "<thread>";
+    mint_show_global "s_handle_Coro" "<coro>";
     mint_show_global "s_lbracket" "[";
     mint_show_global "s_rbracket" "]";
     mint_show_global "s_comma_space" ", ";
@@ -17468,7 +17490,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
             mint_show_global ("s_ctor_" ^ cname) cname
           end
         ) sv
-      | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n ->
+      | Ast.TyCon (n, _) when Hashtbl.mem Exhaustive.type_variants n ->
         let vs = variant_shape n in
         List.iter (fun (cname, _) ->
           if not (Hashtbl.mem registered_ctors cname) then begin
@@ -17519,7 +17541,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
         let (params, variants) = Hashtbl.find polymorphic_variants n in
         List.iter (fun (cname, _) -> mint_jctor cname)
           (subst_variants params args variants)
-      | Ast.TyCon (n, _) when Hashtbl.mem Typer.types n ->
+      | Ast.TyCon (n, _) when Hashtbl.mem Exhaustive.type_variants n ->
         List.iter (fun (cname, _) -> mint_jctor cname) (variant_shape n)
       | _ -> ()
     ) to_json_types
@@ -17598,6 +17620,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      Found by the fma parity case (Q-176), which binds a local `fma` and uses the
      builtin elsewhere in the same file. *)
   set_inner_lifts_for_host_llvm "$main";
+  (* v0.1.668: and a lambda written in main is queued under main's host, so its
+     body finds main's lifted `let rec`s when it is emitted. It was queued under
+     "" -- no host, no lifts -- and `spawn (fn _ -> let rec loop = ... in ...)`
+     at the top of a program was refused as "let rec inside an expression". *)
+  current_host_fn_llvm := "$main";
   emit_instr "entry:";
   emit_instr
     "  call void @__lang_region_init(ptr @__lang_default_region, i64 4194304)";

@@ -61,7 +61,7 @@ fail=0
 
 # program | backends (c C, l LLVM, r RISC-V at both widths when MEMU is set)
 CASES='kept_then_written|clr
-spawn_env_in_block|cr
+spawn_env_in_block|clr
 ownedvec_store|clr
 channel_from_block|clr
 coro_env_from_block|cr
@@ -153,6 +153,7 @@ if [ "$MODE" = --poison ]; then
   POISONS='kept_then_written|c|a kept struct is recycled again|s/    r->fwd = t;//
 kept_then_written|ll|a kept struct is freed again|perl:s/^  br i1 %none, label %freestruct, label %leave$/  br label %freestruct/; s/^freestruct:$/freestruct:\n  store [6 x i64] [i64 -6148914691236517206, i64 -6148914691236517206, i64 -6148914691236517206, i64 -6148914691236517206, i64 -6148914691236517206, i64 -6148914691236517206], ptr %r/
 spawn_env_in_block|c|the thread gets the env as it was|s/__se = __sh->__copy(&__lang_default_region, __se);/(void)0;/
+spawn_env_in_block|ll|what the env of the thread points into is not kept|s/^  call void @__lang_region_keep_above(ptr null)$//
 ownedvec_store|c|owned_vec_push stores the pointer|s/v->data\[v->len++\] = __mcopy_str(&__lang_default_region, x);/v->data[v->len++] = x;/
 ownedvec_store|ll|owned_vec_push stores the pointer|s/= call ptr @__mcopy_str(ptr @__lang_default_region, ptr \(%t[0-9]*\))/= getelementptr i8, ptr \1, i64 0/
 channel_from_block|ll|the message is sent as the pointer|s/= call ptr @__mcopy_str(ptr @__lang_default_region, ptr \(%t[0-9]*\))/= getelementptr i8, ptr \1, i64 0/

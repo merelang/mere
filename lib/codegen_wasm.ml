@@ -6076,6 +6076,13 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
       \        (br $lp)))\n\
       \    (call $__lang_str_concat (local.get $acc) (i64.const %d)))"
       tag lb comma (ty_tag elem_ty) rb
+  (* v0.1.668: a handle shows as the interpreter shows it *)
+  | Ast.TyCon (("Channel" | "File" | "ThreadHandle" | "Coro") as h, _) ->
+    let shown = match h with
+      | "Channel" -> "<channel>" | "File" -> "<file>"
+      | "ThreadHandle" -> "<thread>" | _ -> "<coro>" in
+    Printf.sprintf "  (func $show_%s (param $x i64) (result i64)\n    (i64.const %d))"
+      tag (intern_show_str shown)
   | Ast.TyCon (n, args) when Hashtbl.mem Typer.types n ->
     let vs =
       match Hashtbl.find_opt Exhaustive.type_variants n with
@@ -11663,6 +11670,10 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   ignore top_globals_list;
   (* main's own inner-lifted fns live under host "$main" (see lift_inner_fns_wasm). *)
   set_inner_lifts_for_host_wasm "$main";
+  (* v0.1.668: and a lambda written in main is queued under main's host, so a
+     `let rec` inside it finds its lift when the lambda's body is emitted -- the
+     LLVM backend had the same hole (`spawn (fn _ -> let rec loop = ...)`) *)
+  current_host_fn_wasm := "$main";
   wasm_in_top_level_body := true;
   emit_expr body_expr;
   wasm_in_top_level_body := false;

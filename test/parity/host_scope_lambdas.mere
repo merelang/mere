@@ -1,0 +1,46 @@
+// v0.1.668: three things mbrowse and mere-blog met first on the LLVM backend.
+//
+// 1. A two-argument fn has an uncurried twin, and a lambda written in that twin
+//    was queued under no host, so it could not see the fn's own inner `let f`:
+//    `unbound variable: tag_of`.
+// 2. A message type carrying a reply channel, sent with channel_send (which
+//    copies), walked into `Channel` as if it were a variant: "unknown variant
+//    type `Channel`". And `show` of a channel printed "()" on LLVM and
+//    "<unknown>" on C where the interpreter prints "<channel>".
+// 3. A lambda written in the program's body was queued under no host either, so
+//    a `let rec` inside it -- `spawn (fn _ -> let rec loop = ...)` -- was refused.
+
+let count_tags = fn (gs: (str * int) list) -> fn (bonus: int) ->
+  let tag_of = fn (g: (str * int)) -> let (t, n) = g in to_lower t ++ str_of_int (n + bonus) in
+  let heads = list_filter gs (fn (g: (str * int)) -> str_starts_with (tag_of g) "a") in
+  let has_b =
+    let rec go = fn (xs: (str * int) list) ->
+      match xs with
+      | Nil -> false
+      | Cons (g, more) -> if str_starts_with (tag_of g) "b" then true else go more in
+    go gs in
+  list_len heads * 10 + (if has_b then 1 else 0);
+
+type msg = | Add of int | Report of Channel[str];
+
+let inbox = channel_new ();
+
+let rec serve = fn (total: int) ->
+  match channel_recv inbox with
+  | Add n -> serve (total + n)
+  | Report reply -> channel_send reply ("total " ++ str_of_int total);
+
+let worker = spawn (fn (u: unit) -> serve 0);
+
+let ticker = spawn (fn (u: unit) ->
+  let rec tick = fn (n: int) -> if n == 0 then () else
+    let _ = channel_send inbox (Add n) in tick (n - 1) in
+  tick 4);
+
+let _ = print (str_of_int (count_tags (Cons (("A", 1), Cons (("b", 2), Cons (("a", 3), Nil)))) 0));
+let _ = join ticker;
+let reply = channel_new ();
+let _ = print (show (Report reply));
+let _ = channel_send inbox (Report reply);
+let _ = print (channel_recv reply);
+join worker
