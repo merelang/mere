@@ -1,0 +1,27 @@
+// v0.1.675: a small map that is mostly garbage is compacted even while a
+// suspended stack points into its arena. The copy is of the live entries
+// only; the old arena is retired, so what the stack holds is still there when
+// it resumes. (Before, the pin made the map wait until it had doubled: a
+// method frame's locals in mere-ruby -- a few keys rewritten in a loop --
+// grew by a copy per write until the method returned.)
+let root = coro_root ();
+let m = map_new ();
+let rec fill = fn (i: int) -> if i == 0 then 0 else (let _ = map_set m i (str_repeat "v" 64 ++ str_of_int i) in fill (i - 1));
+let _ = fill 8;
+// (the first compaction moves the map into an arena of its own)
+let _ = map_compact m;
+let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
+  let held = map_get m 3 in
+  let _ = coro_switch root in
+  let _ = print (if held == str_repeat "v" 64 ++ "3" then "held: intact" else "held: lost") in
+  root) ());
+let _ = coro_switch c;
+// the eight keys rewritten 20000 times: every old value is garbage now
+let rec over = fn (n: int) -> if n == 0 then 0 else (let _ = map_set m (n - (n / 8) * 8 + 1) (str_repeat "Z" 64) in over (n - 1));
+let _ = over 20000;
+let before = map_bytes m;
+let _ = map_compact m;
+let after = map_bytes m;
+let _ = print (if after * 4 < before then "shrunk: yes" else "shrunk: no");
+let _ = coro_switch c;
+print_int (map_len m)

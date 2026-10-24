@@ -1286,7 +1286,9 @@ an arena under a pin cannot be given back anyway, `map_compact` and
 the old arena (a recycle still moves, because it must empty the map) -- until
 the arena has more than doubled since a pin first refused to compact it
 (v0.1.648, v0.1.651): then the compaction goes ahead and the old arena is
-retired. The pin is
+retired. A map of at most 1024 live entries with 256 bytes of arena or more
+per live entry is compacted under a pin at once (v0.1.675): the copy is of
+the live entries only, and its old arena is retired the same way. The pin is
 conservative, and a word that only looks like a pointer would otherwise stop
 every compaction of a growing store for good. (LLVM has no compaction
 builtins.)

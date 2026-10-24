@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.675 — 2026-10-24
+
+_C: `map_compact` compacts a small map that is mostly garbage even while a suspended stack points into its arena. mere-ruby's method locals, rewritten in a loop, stop growing until the method returns._
+
+Since v0.1.589 a map whose arena a suspended stack points into is left where
+it is, and since v0.1.648/651 it is compacted only once its arena has doubled
+from the size at which a pin first refused. That rule protects a large store
+under a true pin from being copied at every collection. Two shapes waited for
+the doubling with nearly all of their bytes dead:
+
+- A method frame's locals in mere-ruby: a map of a handful of keys, written
+  in a loop, with a copy of the value per write. The running frame always
+  points into it, so it is always pinned when the collector runs off the
+  stack. `i += 1` three million times in a `while` held 134 MB until the
+  method returned.
+- The store a stale word pins (the case v0.1.648 met): a couple of hundred
+  live hashes in a 33 MB arena, after a child process left an old pointer
+  in a frame of the root stack.
+
+So a map of at most 1024 live entries, with 256 bytes or more of arena per
+live entry, is compacted under a pin straight away. The copy is of the live
+entries only, so it stays small; the old arena is retired like any other --
+kept while the pin holds, freed at a later compaction. A large store under a
+true pin keeps v0.1.651's rule.
+
+- `test/coro/compact_small.mere`: a coroutine holds a value read out of an
+  eight-key map and is suspended; the keys are rewritten 20,000 times and
+  the map compacted. The map shrinks (v0.1.674 left it as it was) and the
+  held value is intact when the coroutine resumes. In `scripts/coro_check.sh`
+  for C.
+
+---
+
 ## v0.1.674 — 2026-10-15
 
 _LLVM: `coro_scan_ints` reads the stack and what it reaches, as the C runtime does, instead of handing back every integer in the range. mere-ruby on LLVM collects with fibers suspended, and its 286 corpus programs agree with its C build._

@@ -11430,10 +11430,25 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          true pin it met -- 14 MB written beside the 14 MB the pin kept -- and
          CRuby's test_symbol_fstr_memory_leak went over its limit (1.69 ->
          1.76 of 1.71). A compaction clears cbase; a pin that refuses with it
-         clear records the size then, and only twice that goes ahead. *)
+         clear records the size then, and only twice that goes ahead.
+         v0.1.675: ...AND A SMALL MAP THAT IS MOSTLY GARBAGE IS COMPACTED UNDER
+         A PIN ANYWAY. The copy is made of the live entries only, so for a map
+         of a few entries it costs nothing, and the arena it leaves is retired
+         like any other: kept while the pin holds, freed at a later compaction.
+         Two shapes waited for the doubling with nearly all of their bytes
+         dead: a method frame's locals in mere-ruby (a handful of keys, one
+         copy of the value per write, and the running frame always points in)
+         -- `i += 1` three million times in a while held 134 MB until the
+         method returned -- and the store the stale word of v0.1.648 pinned,
+         a couple of hundred live hashes in a 33 MB arena. "Small" is at most
+         1024 live entries, and "mostly garbage" 256 bytes of arena per live
+         entry: the copy stays bounded, and a large store under a true pin
+         keeps v0.1.651's rule. *)
       "  if (m->owns_region && __lang_region_pinned && __lang_region_pinned(m->region, 0)) {";
+      "    if (!(m->live <= 1024 && (unsigned long)m->live * 256UL < (unsigned long)m->region->alloc_total)) {";
       "    if (m->region->cbase == 0) { m->region->cbase = m->region->alloc_total; return 0; }";
       "    if (m->region->alloc_total <= 2 * m->region->cbase + 1048576) return 0;";
+      "    }";
       "  }";
       "  __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "  if (!fresh) __lang_fail_impl(\"out of memory\");";

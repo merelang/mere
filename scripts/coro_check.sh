@@ -60,6 +60,7 @@ pingpong|icl|1000000|0
 overflow|cl|stack overflow (recursion too deep)|1
 deep/deep|cl|2000001000000;main: back|0
 compact|ic|held: intact;700|0
+compact_small|c|shrunk: yes;held: intact;8|0
 scan|icl|all found, bound kept;running: found;57573|0
 scan_wide|cl|wide: found;7;done|0
 scan_high|cl|found, again found, small left out;7;12|0
